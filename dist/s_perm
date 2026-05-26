@@ -1,0 +1,11 @@
+#!/bin/sh
+# dist/s_perm
+# Ensure every dist/s_* script is executable.
+# See M0_CLAIMS.md [T5].
+
+set -eu
+DIST_DIR=$(cd "$(dirname "$0")" && pwd)
+for f in "$DIST_DIR"/s_*; do
+	[ -f "$f" ] || continue
+	chmod +x "$f"
+done

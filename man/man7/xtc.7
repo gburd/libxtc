@@ -1,0 +1,113 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt XTC 7
+.Os
+.Sh NAME
+.Nm xtc
+.Nd high-performance asynchronous concurrency runtime for C
+.Sh DESCRIPTION
+.Nm
+is a layered C library that provides Tokio-style async tasks,
+BEAM-style processes / mailboxes / supervisors, and Seastar-style
+per-CPU shared-nothing reactors over a pluggable I/O substrate
+.Pq io_uring, epoll, kqueue, IOCP, poll .
+.Pp
+The eventual consumer is a threaded PostgreSQL.
+The library is also useful standalone for greenfield C servers that
+want predictable p99 latency on shared-nothing thread pools.
+.Sh ARCHITECTURE
+.Nm
+is organised in six layers, lowest first:
+.Bl -tag -width "L4 orc/" -compact
+.It L0 Pa os/
+Portable
+.Sy __os_*
+abstractions over the operating system: threads, processes, shared
+memory, atomics, time, file ops, signals, locale, etc.
+.It L1 Pa io/
+Pollable I/O abstraction.
+Exactly one backend is compiled in at configure time.
+.It L2 Pa evt/
+Event loop and scheduler: per-thread reactor, work-stealing deque,
+hierarchical timer wheel, fiber and Duff's-device coroutine substrates.
+.It L3 Pa ptc/
+Processes, threads, channels.
+Mailboxes with selective receive, links, monitors, channels of every
+kind, futures, sync primitives including RCU and the lock manager,
+the
+.Sy dispatch / reply
+sugar, and the
+.Sy async / await
+macros.
+Also: observability, the blocking-call contract, the hooks framework,
+configuration and logging.
+.It L4 Pa orc/
+Orchestration: supervisors,
+.Sy xtc_svr
+.Pq the gen_server analogue ,
+.Sy xtc_fsm ,
+.Sy xtc_app ,
+.Sy xtc_reg .
+.It L5 Pa pg/
+PostgreSQL adapter.
+Optional; built only when configured with PG support.
+.El
+.Pp
+Lower layers know nothing of upper layers.
+Each layer has its own internal header, its own subdirectory under
+.Pa src/ ,
+and its own test binary.
+.Sh DESIGN PRINCIPLES
+.Bl -bullet -compact
+.It
+Shared-nothing reactors by default.
+.It
+Configure-time backend selection.
+No vtable on the hot path.
+.It
+C11 dialect, matching PostgreSQL 18+.
+.It
+BDB / DBSQL conventions for naming, file layout, and build apparatus.
+.It
+Test-first claim-driven development:
+every claim in code or documentation has a test.
+.It
+Mechanical change as doctrine: structural changes go through
+.Pa dist/s_*
+generators rather than by hand.
+.It
+SemVer with explicit ABI promise; capability bits not version checks.
+See
+.Xr xtc-abi-stability 7 .
+.El
+.Sh BUILDING
+.Nm
+ships two parallel build systems with a common single-source-of-truth.
+See
+.Pa README.md
+or
+.Xr xtc-build 7
+for the up-to-date instructions.
+.Sh SEE ALSO
+.Xr xtc_version_string 3 ,
+.Xr xtc_version_components 3 ,
+.Xr xtc_strerror 3
+.Pp
+Long-form documentation:
+.Pa PLAN.md ,
+.Pa docs/ARCHITECTURE.md ,
+.Pa docs/abi-stability.md .
+.Sh STANDARDS
+.Nm
+requires a C11 conforming compiler and adheres to
+.Lk https://semver.org SemVer 2.0
+for versioning.
+.Sh HISTORY
+The xtc project began in 2026 as the runtime substrate for a
+threaded PostgreSQL.
+.Sh AUTHORS
+The xtc project.
+See
+.Pa AUTHORS
+in the source distribution.

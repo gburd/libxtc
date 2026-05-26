@@ -1,0 +1,149 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt XTC_ASYNC 3
+.Os
+.Sh NAME
+.Nm xtc_async ,
+.Nm xtc_await ,
+.Nm xtc_yield ,
+.Nm xtc_stack_size ,
+.Nm xtc_set_stack_size ,
+.Nm XTC_COOP_REGION ,
+.Nm XTC_PT_THREAD ,
+.Nm XTC_PT_BEGIN ,
+.Nm XTC_PT_END ,
+.Nm XTC_PT_YIELD ,
+.Nm XTC_PT_WAIT_UNTIL
+.Nd L2 stackful coroutines and protothreads
+.Sh SYNOPSIS
+.In xtc_async.h
+.Ft int
+.Fn xtc_async "xtc_loop_t *loop" "xtc_coro_fn fn" "void *arg" "xtc_task_t **out_task"
+.Ft int
+.Fn xtc_await "xtc_task_t *t" "intptr_t *result"
+.Ft void
+.Fn xtc_yield "void"
+.Ft size_t
+.Fn xtc_stack_size "void"
+.Ft int
+.Fn xtc_set_stack_size "size_t bytes"
+.Pp
+Macros:
+.Bd -literal -offset indent
+XTC_COOP_REGION { ... }
+
+XTC_PT_THREAD(name(args)) { XTC_PT_BEGIN(pt); ...; XTC_PT_END(pt); }
+XTC_PT_YIELD(pt)
+XTC_PT_WAIT_UNTIL(pt, condition)
+.Ed
+.Sh DESCRIPTION
+.Nm xtc_async
+spawns
+.Fa "fn(arg)"
+as a stackful coroutine attached to
+.Fa loop .
+The coroutine runs on its own stack (default 64\u00a0KiB; configurable
+via
+.Fn xtc_set_stack_size )
+guarded by an unmapped page so stack overflow surfaces as
+.Dv SIGSEGV
+rather than silent memory corruption.
+.Pp
+A coroutine may freely use stack-resident locals; they are preserved
+across
+.Fn xtc_yield
+and
+.Fn xtc_await .
+This is the headline contract that distinguishes fibers from
+protothreads.
+.Pp
+.Fn xtc_await
+blocks the caller until the awaited coroutine has returned, then
+writes the coroutine's
+.Vt intptr_t
+return value to
+.Fa *result .
+When called from the main thread, it drives the loop until the target
+completes; when called from inside another coroutine, it parks the
+caller and resumes it once the target is done.
+.Pp
+.Fn xtc_yield
+returns control to the loop.  The next loop step resumes the coroutine
+at the line after the call.
+.Sh COOPERATIVE REGIONS
+The
+.Dv XTC_COOP_REGION
+block marks a region that runs to completion without scheduler
+interleaving.  In M4 (single-thread, non-preemptive) it is a
+documentation marker.  In M5 (multi-loop) it sets a
+.Dq do not steal
+flag for the duration of the block.
+.Sh PROTOTHREADS
+For platforms without a fiber substrate, xtc ships a Duff's-device
+protothread implementation as a fallback.  The price is that
+protothread bodies cannot use stack-resident locals across yield
+points: lift them into a state struct or
+.Sy static
+variables.  This restriction is enforced by example, not by the
+compiler.
+.Pp
+A protothread function returns
+.Dv XTC_PT_DONE
+when it falls through
+.Dv XTC_PT_END
+and
+.Dv XTC_PT_YIELDED
+when it yields.  The caller drives the protothread by calling it
+repeatedly until it returns
+.Dv XTC_PT_DONE .
+.Sh STACK MANAGEMENT
+.Fn xtc_stack_size
+returns the default per-coroutine stack size in bytes.  
+.Fn xtc_set_stack_size
+overrides it for subsequent
+.Fn xtc_async
+calls; the value is rounded up to a page multiple, and a sub-16\u00a0KiB
+request returns
+.Dv XTC_E_INVAL .
+.Sh RETURN VALUES
+.Dv XTC_OK
+on success;
+.Dv XTC_E_INVAL
+on bad argument;
+.Dv XTC_E_NOMEM
+on stack-allocation failure;
+.Dv XTC_E_INTERNAL
+on platform failure
+.Pq getcontext / makecontext / mmap / mprotect .
+.Sh THREAD SAFETY
+M4 is single-thread.
+A coroutine spawned on a loop must run only on that loop's thread.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+static intptr_t multiply(void *arg) {
+        int v = *(int *)arg;
+        return (intptr_t)(v * 2);
+}
+
+int main(void) {
+        xtc_loop_t *loop;
+        xtc_task_t *t;
+        int v = 21;
+        intptr_t r;
+        xtc_loop_init(&loop);
+        xtc_async(loop, multiply, &v, &t);
+        xtc_await(t, &r);     /* r == 42 */
+        xtc_loop_fini(loop);
+        return 0;
+}
+.Ed
+.Sh SEE ALSO
+.Xr xtc_loop 3 ,
+.Xr xtc_io 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 0.0.1 (M4).
+The ucontext substrate is the M4 default; per-architecture fiber asm
+.Po Em make_fcontext / jump_fcontext Pc
+arrives in M4.5 for ~30\u00a0ns context switches.

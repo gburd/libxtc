@@ -1,0 +1,129 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt __OS_MUTEX 3
+.Os
+.Sh NAME
+.Nm __os_mutex_init ,
+.Nm __os_mutex_destroy ,
+.Nm __os_mutex_lock ,
+.Nm __os_mutex_trylock ,
+.Nm __os_mutex_unlock ,
+.Nm __os_rwlock_init ,
+.Nm __os_rwlock_destroy ,
+.Nm __os_rwlock_rdlock ,
+.Nm __os_rwlock_wrlock ,
+.Nm __os_rwlock_unlock ,
+.Nm __os_cond_init ,
+.Nm __os_cond_destroy ,
+.Nm __os_cond_wait ,
+.Nm __os_cond_signal ,
+.Nm __os_cond_broadcast ,
+.Nm __os_sem_init ,
+.Nm __os_sem_destroy ,
+.Nm __os_sem_post ,
+.Nm __os_sem_wait ,
+.Nm __os_sem_trywait
+.Nd portable mutexes, rwlocks, condition variables, and semaphores
+.Sh SYNOPSIS
+.In os_thread.h
+.Pp
+.Ft int
+.Fn __os_mutex_init "__os_mutex_t *m"
+.Ft int
+.Fn __os_mutex_destroy "__os_mutex_t *m"
+.Ft int
+.Fn __os_mutex_lock "__os_mutex_t *m"
+.Ft int
+.Fn __os_mutex_trylock "__os_mutex_t *m"
+.Ft int
+.Fn __os_mutex_unlock "__os_mutex_t *m"
+.Pp
+.Ft int
+.Fn __os_rwlock_init "__os_rwlock_t *r"
+.Ft int
+.Fn __os_rwlock_destroy "__os_rwlock_t *r"
+.Ft int
+.Fn __os_rwlock_rdlock "__os_rwlock_t *r"
+.Ft int
+.Fn __os_rwlock_wrlock "__os_rwlock_t *r"
+.Ft int
+.Fn __os_rwlock_unlock "__os_rwlock_t *r"
+.Pp
+.Ft int
+.Fn __os_cond_init "__os_cond_t *c"
+.Ft int
+.Fn __os_cond_destroy "__os_cond_t *c"
+.Ft int
+.Fn __os_cond_wait "__os_cond_t *c" "__os_mutex_t *m"
+.Ft int
+.Fn __os_cond_signal "__os_cond_t *c"
+.Ft int
+.Fn __os_cond_broadcast "__os_cond_t *c"
+.Pp
+.Ft int
+.Fn __os_sem_init "__os_sem_t *s" "unsigned initial"
+.Ft int
+.Fn __os_sem_destroy "__os_sem_t *s"
+.Ft int
+.Fn __os_sem_post "__os_sem_t *s"
+.Ft int
+.Fn __os_sem_wait "__os_sem_t *s"
+.Ft int
+.Fn __os_sem_trywait "__os_sem_t *s"
+.Sh DESCRIPTION
+The
+.Nm __os_mutex_* ,
+.Nm __os_rwlock_* ,
+.Nm __os_cond_* ,
+and
+.Nm __os_sem_*
+families are the BDB-style portable wrappers around pthread mutexes,
+rwlocks, condition variables, and POSIX semaphores.
+.Pp
+The handle types
+.Vt __os_mutex_t , Vt __os_rwlock_t , Vt __os_cond_t ,
+and
+.Vt __os_sem_t
+contain inline storage sized to comfortably hold the platform's
+underlying type, so no separate allocation is required at init time.
+.Pp
+.Fn __os_mutex_trylock
+returns
+.Dv XTC_E_AGAIN
+when the mutex is already held by another thread; the same convention
+applies to
+.Fn __os_sem_trywait .
+.Pp
+.Fn __os_cond_wait
+must be called with
+.Fa m
+held; on return
+.Fa m
+is held again.
+Spurious wakeups are possible per the underlying pthread contract;
+callers must re-check the predicate in a
+.Sy while
+loop.
+.Pp
+.Fn __os_sem_*
+implements an unnamed in-process semaphore.
+.Sh RETURN VALUES
+.Dv XTC_OK
+on success;
+.Dv XTC_E_INVAL
+on a NULL handle;
+.Dv XTC_E_AGAIN
+when a try-style lock is already held;
+.Dv XTC_E_INTERNAL
+on platform failure.
+.Sh THREAD SAFETY
+All operations are safe to call from any thread.
+A handle must be initialised before use and destroyed after the last
+operation completes.
+.Sh SEE ALSO
+.Xr __os_atomic 3 ,
+.Xr __os_thread 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 0.0.1 (M1).

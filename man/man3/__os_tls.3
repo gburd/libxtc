@@ -1,0 +1,72 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt __OS_TLS 3
+.Os
+.Sh NAME
+.Nm __os_tls_create ,
+.Nm __os_tls_destroy ,
+.Nm __os_tls_set ,
+.Nm __os_tls_get
+.Nd thread-local storage keys
+.Sh SYNOPSIS
+.In os_thread.h
+.Ft int
+.Fn __os_tls_create "__os_tls_key_t *key" "__os_tls_dtor dtor"
+.Ft int
+.Fn __os_tls_destroy "__os_tls_key_t key"
+.Ft int
+.Fn __os_tls_set "__os_tls_key_t key" "void *value"
+.Ft "void *"
+.Fn __os_tls_get "__os_tls_key_t key"
+.Sh DESCRIPTION
+TLS keys created by
+.Fn __os_tls_create
+provide thread-local storage for an arbitrary
+.Vt "void *" .
+Each thread sees its own value for a given key; threads that have
+never called
+.Fn __os_tls_set
+on a key observe a
+.Dv NULL
+value.
+.Pp
+If
+.Fa dtor
+is non-NULL, it is invoked at thread exit for every thread that has
+set a non-NULL value, with that value as the argument.
+The destructor is not invoked at
+.Fn __os_tls_destroy ;
+it runs only at thread exit.
+.Pp
+.Fn __os_tls_get
+returns the current thread's value
+.Po
+.Dv NULL
+if never set
+.Pc .
+.Pp
+.Fn __os_tls_destroy
+releases the key.
+After destruction the key must not be used.
+.Sh RETURN VALUES
+.Dv XTC_OK
+on success;
+.Dv XTC_E_INVAL
+on a NULL key pointer;
+.Dv XTC_E_INTERNAL
+on platform failure.
+.Pp
+.Fn __os_tls_get
+returns the value or
+.Dv NULL ;
+the function has no error indication besides
+.Dv NULL .
+.Sh THREAD SAFETY
+A key created on one thread may be used by every thread.
+The value-set / value-get pair is per-thread.
+.Sh SEE ALSO
+.Xr __os_thread 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 0.0.1 (M1).
