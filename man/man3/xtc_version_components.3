@@ -1,0 +1,64 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt XTC_VERSION_COMPONENTS 3
+.Os
+.Sh NAME
+.Nm xtc_version_components
+.Nd decompose the xtc library version into integer components
+.Sh SYNOPSIS
+.In xtc.h
+.Ft int
+.Fn xtc_version_components "int *major" "int *minor" "int *patch"
+.Sh DESCRIPTION
+The
+.Fn xtc_version_components
+function writes the SemVer
+.Em major ,
+.Em minor ,
+and
+.Em patch
+components of the library version into the integers pointed to by
+.Fa major ,
+.Fa minor ,
+and
+.Fa patch
+respectively.
+.Pp
+Every output component is a non-negative integer.
+The components agree with the leading numeric portion of the string
+returned by
+.Xr xtc_version_string 3 .
+.Sh RETURN VALUES
+On success the function returns
+.Dv XTC_OK
+.Pq 0 .
+.Pp
+If any of
+.Fa major ,
+.Fa minor ,
+or
+.Fa patch
+is
+.Dv NULL ,
+the function returns
+.Dv XTC_E_INVAL
+without modifying any output parameter.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+#include <stdio.h>
+#include <xtc.h>
+
+int main(void) {
+        int maj, min, pat;
+        if (xtc_version_components(&maj, &min, &pat) == XTC_OK)
+                printf("xtc %d.%d.%d\en", maj, min, pat);
+        return 0;
+}
+.Ed
+.Sh SEE ALSO
+.Xr xtc 7 ,
+.Xr xtc_version_string 3 ,
+.Xr xtc_strerror 3
+.Sh HISTORY
+First appeared in xtc 0.0.1.

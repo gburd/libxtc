@@ -1,0 +1,89 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt XTC-BUILD 7
+.Os
+.Sh NAME
+.Nm xtc-build
+.Nd how to build the xtc library and run its tests
+.Sh DESCRIPTION
+.Nm
+.Pq xtc
+ships two parallel build systems driven from a single source of
+truth.
+The autoconf path is the primary CI gate; the meson path is a
+co-equal alternative for developers who prefer it.
+.Pp
+Both paths enforce out-of-source builds.
+Configuring inside the source root or inside
+.Pa dist/
+is rejected with a clear error message.
+.Sh AUTOCONF PATH
+.Bd -literal -offset indent
+cd dist && autoreconf -i && cd ..
+mkdir -p build_unix && cd build_unix
+\&../dist/configure
+make
+make check
+.Ed
+.Pp
+.Cm make check
+runs every test in the current milestone's claims file.
+See
+.Pa M0_CLAIMS.md
+.Pq or its successor
+for the full matrix.
+.Sh MESON PATH
+.Bd -literal -offset indent
+meson setup build_meson
+meson compile -C build_meson
+meson test    -C build_meson
+.Ed
+.Sh REPRODUCIBLE TOOLCHAIN
+.Bd -literal -offset indent
+nix develop
+.Ed
+.Pp
+The Nix flake provisions autoconf, meson, ninja, GCC, clang, mandoc,
+shellcheck, valgrind, and the full sanitizer toolchain.
+.Sh DIST GENERATORS
+.Pa dist/s_*
+scripts produce derived files
+.Pq prototype headers, build files, lints .
+The full set is run by
+.Pa dist/s_all .
+Each generator's responsibilities are documented in
+.Pa PLAN.md
+.Sx 6.4
+and asserted by tests under
+.Pa test/dist/ .
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev XTC_BUILD_DIR
+Set by the test harness to the absolute path of the active build
+directory.
+.It Ev XTC_SRC_DIR
+Set by the test harness to the absolute path of the source root.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa dist/configure.ac
+Autoconf source.
+Run
+.Cm autoreconf -i
+in
+.Pa dist/
+to produce
+.Pa configure .
+.It Pa dist/meson.build
+Meson build entry point.
+.It Pa dist/Makefile.in
+Template for the autoconf-generated Makefile.
+.It Pa dist/version.in
+Single source of truth for the SemVer version.
+.El
+.Sh SEE ALSO
+.Xr xtc 7 ,
+.Xr xtc-abi-stability 7
+.Sh HISTORY
+First appeared in xtc 0.0.1.

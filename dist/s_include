@@ -1,0 +1,100 @@
+#!/bin/sh
+# dist/s_include
+# Build the per-subsystem prototype headers from PUBLIC: markers in C
+# source files.  The same idea as DBSQL/BDB.  See M0_CLAIMS.md [T2,T3].
+#
+# Inputs:
+#   src/<subsystem>/*.c        for each subsystem under src/
+#   (also src/*.c at top level → produces inc/xtc_ext.h)
+# Outputs:
+#   src/inc/<subsystem>_ext.h  for subsystem subdirs
+#   src/inc/xtc_ext.h          for top-level src/*.c
+#
+# Idempotent: rerunning produces byte-identical output.
+
+set -eu
+
+DIST_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$DIST_DIR/.." && pwd)
+SRC="$ROOT/src"
+INC="$SRC/inc"
+AWK_SCRIPT="$DIST_DIR/gen_inc.awk"
+
+if [ ! -f "$AWK_SCRIPT" ]; then
+	echo "s_include: missing $AWK_SCRIPT" >&2
+	exit 2
+fi
+
+emit_header() {
+	# $1: output path; $2: guard symbol; $3: body file
+	out=$1; guard=$2; body=$3
+	{
+		echo "/* DO NOT EDIT: automatically built by dist/s_include. */"
+		echo "/* See M0_CLAIMS.md [T2]. */"
+		echo
+		echo "#ifndef $guard"
+		echo "#define $guard"
+		echo
+		cat "$body"
+		echo
+		echo "#endif /* $guard */"
+	} > "$out"
+}
+
+process() {
+	# $1: subsystem name (or "" for top-level)
+	# $2: source dir
+	subsys=$1; sdir=$2
+	tmp=$(mktemp)
+	trap 'rm -f "$tmp"' EXIT
+
+	# Collect PUBLIC: prototypes from all C files in this dir.
+	for f in "$sdir"/*.c; do
+		[ -f "$f" ] || continue
+		awk -f "$AWK_SCRIPT" \
+		    -v i_pfile=/dev/stdout \
+		    "$f" >> "$tmp" 2>/dev/null || true
+	done
+
+	# Header file lives in src/inc/.
+	if [ -z "$subsys" ]; then
+		out="$INC/xtc_ext.h"
+		guard="XTC_EXT_H"
+	else
+		out="$INC/${subsys}_ext.h"
+		guard=$(echo "${subsys}_EXT_H" | tr '[:lower:]' '[:upper:]')
+	fi
+
+	if [ ! -s "$tmp" ]; then
+		# No PUBLIC: markers in this subsystem yet; skip cleanly.
+		rm -f "$tmp"
+		trap - EXIT
+		return 0
+	fi
+
+	# Sort + dedupe so duplicate prototypes from sibling .c files
+	# (e.g. backend variants of the same symbol) appear once.
+	tmp_sorted=$(mktemp)
+	LC_ALL=C sort -u "$tmp" > "$tmp_sorted"
+	mv "$tmp_sorted" "$tmp"
+
+	emit_header "$out" "$guard" "$tmp"
+	rm -f "$tmp"
+	trap - EXIT
+	echo "  wrote $(realpath --relative-to="$ROOT" "$out")"
+}
+
+# Top-level src/*.c → src/inc/xtc_ext.h.
+process "" "$SRC"
+
+# Subsystem dirs.
+for d in "$SRC"/*/; do
+	[ -d "$d" ] || continue
+	name=$(basename "$d")
+	case "$name" in
+		inc) ;;
+		*) process "$name" "$d" ;;
+	esac
+done
+
+echo "s_include: done."

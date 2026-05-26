@@ -1,0 +1,33 @@
+# xtc — Authors and contributors
+
+The xtc project began in 2026 as the runtime substrate for a
+threaded PostgreSQL.
+
+## Founding contributors
+
+- Greg Burd <greg@burd.me>
+
+## Acknowledgements
+
+xtc draws ideas from, and ports working code from, several other
+open-source projects.  Each port carries the upstream copyright
+notice in its source file header.
+
+- The lock manager (`src/ptc/lock/mgr.c`, `dd.c`) takes its lock
+  modes, conflict matrix, and deadlock-detection algorithms from
+  Berkeley DB (Oracle's BSD-licensed releases).
+- The LRLock and LWLock implementations port from
+  `~/ws/postgres/lrlck` (PostgreSQL Global Development Group).
+- The protothread / Duff's-device coroutine substrate vendors
+  Adam Dunkels' `pt.h` (Contiki-OS BSD license).
+- The munit test framework is vendored from
+  https://github.com/nemequ/munit (MIT license).
+- The fiber `make_fcontext` / `jump_fcontext` assembly is
+  re-implemented from the Boost.context originals.
+- The build apparatus follows the BDB / DBSQL conventions
+  authored over decades by Sleepycat Software, Oracle, and the
+  DBSQL team.
+
+For a full list of upstream sources, see [`PLAN.md`](../PLAN.md)
+section 13.1 and the file headers of the relevant `src/`
+modules as they land.
