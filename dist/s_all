@@ -1,0 +1,25 @@
+#!/bin/sh
+# dist/s_all
+# Run every dist/s_* generator in dependency order.
+# See M0_CLAIMS.md [T1].
+
+set -eu
+
+DIST_DIR=$(cd "$(dirname "$0")" && pwd)
+cd "$DIST_DIR"
+
+scripts="
+	s_perm
+	s_include
+"
+
+for s in $scripts; do
+	if [ -x "./$s" ]; then
+		echo "running $s ..."
+		"./$s"
+	else
+		echo "skipping $s (not present or not executable)"
+	fi
+done
+
+echo "s_all: done."

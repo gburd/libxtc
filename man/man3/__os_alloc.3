@@ -1,0 +1,139 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt __OS_ALLOC 3
+.Os
+.Sh NAME
+.Nm __os_malloc ,
+.Nm __os_calloc ,
+.Nm __os_realloc ,
+.Nm __os_free ,
+.Nm __os_strdup ,
+.Nm __os_aligned_alloc ,
+.Nm __os_alloc_set_hook ,
+.Nm __os_alloc_get_hook
+.Nd hookable allocator
+.Sh SYNOPSIS
+.In os_alloc.h
+.Ft int
+.Fn __os_malloc "size_t sz" "void **out"
+.Ft int
+.Fn __os_calloc "size_t n" "size_t sz" "void **out"
+.Ft int
+.Fn __os_realloc "void *p" "size_t sz" "void **out"
+.Ft void
+.Fn __os_free "void *p"
+.Ft int
+.Fn __os_strdup "const char *s" "char **out"
+.Ft int
+.Fn __os_aligned_alloc "size_t align" "size_t sz" "void **out"
+.Ft int
+.Fn __os_alloc_set_hook "const struct __os_alloc_hook *hook"
+.Ft int
+.Fn __os_alloc_get_hook "struct __os_alloc_hook *out"
+.Sh DESCRIPTION
+.Nm __os_*
+allocators are the BDB-style envelope around the platform allocator.
+Every function returns
+.Dv XTC_OK
+on success and a negative
+.Dv XTC_E_*
+on failure;
+.Fn __os_free
+has no failure mode.
+.Pp
+.Fn __os_malloc
+allocates at least
+.Fa sz
+bytes and writes the pointer to
+.Fa *out .
+A request for zero bytes is permitted and is allowed to return
+.Dv NULL ;
+the result is in any case safe to pass to
+.Fn __os_free .
+On out of memory returns
+.Dv XTC_E_NOMEM .
+A
+.Dv NULL
+.Fa out
+returns
+.Dv XTC_E_INVAL .
+.Pp
+.Fn __os_calloc
+allocates and zeros
+.Fa n No \(mu Fa sz
+bytes.
+If the multiplication would overflow
+.Vt size_t ,
+returns
+.Dv XTC_E_RANGE
+without allocating.
+.Pp
+.Fn __os_realloc
+behaves like
+.Fn __os_malloc
+when
+.Fa p
+is
+.Dv NULL .
+Otherwise it preserves the first
+.Em min(oldsz, newsz)
+bytes of the input.
+.Pp
+.Fn __os_free
+accepts
+.Dv NULL
+as a no-op.
+.Pp
+.Fn __os_strdup
+duplicates a NUL-terminated string.
+A
+.Dv NULL
+input returns
+.Dv XTC_E_INVAL .
+.Pp
+.Fn __os_aligned_alloc
+requires
+.Fa align
+to be a power of two and at least
+.Fn sizeof "void *" ;
+otherwise returns
+.Dv XTC_E_INVAL .
+On success
+.Po Va (uintptr_t)*out Pc Em % Fa align
+is zero.
+.Pp
+.Fn __os_alloc_set_hook
+swaps the allocator backend.
+The hook structure has five callbacks
+.Po Sy malloc , calloc , realloc , free , aligned Pc ,
+all of which must be non-NULL or the call returns
+.Dv XTC_E_INVAL .
+.Pp
+.Fn __os_alloc_get_hook
+copies the active hook into
+.Fa *out .
+.Sh RETURN VALUES
+On success,
+.Dv XTC_OK
+.Pq 0 .
+On error, a negative
+.Dv XTC_E_*
+code; the output parameter is unmodified.
+.Sh THREAD SAFETY
+All operations are safe to call from any thread.
+.Fn __os_alloc_set_hook
+is intended to be called once at process startup; concurrent swaps
+during live allocation are technically safe but ill-advised.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+void *p = NULL;
+if (__os_malloc(64, &p) != XTC_OK) abort();
+memset(p, 0, 64);
+__os_free(p);
+.Ed
+.Sh SEE ALSO
+.Xr __os_atomic 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 0.0.1 (M1).

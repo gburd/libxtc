@@ -1,0 +1,50 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt XTC_STRERROR 3
+.Os
+.Sh NAME
+.Nm xtc_strerror
+.Nd return a stable English description of an xtc error code
+.Sh SYNOPSIS
+.In xtc.h
+.Ft const char *
+.Fn xtc_strerror "int xtc_err"
+.Sh DESCRIPTION
+The
+.Fn xtc_strerror
+function returns a stable English description of the xtc error code
+.Fa xtc_err .
+.Pp
+Recognised values are
+.Dv XTC_OK
+and the
+.Dv XTC_E_*
+codes declared in
+.In xtc.h .
+For any code outside the recognised set the function returns the
+string
+.Dq unknown ;
+it never returns
+.Dv NULL .
+.Pp
+The returned pointer is to static storage and must not be freed.
+The exact text for each known code is part of the API contract for
+log-message stability and changes only on a major version bump.
+.Sh RETURN VALUES
+A non-NULL pointer to a NUL-terminated string.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+#include <stdio.h>
+#include <xtc.h>
+
+void log_rc(int rc) {
+        if (rc != XTC_OK)
+                fprintf(stderr, "xtc error: %s\en", xtc_strerror(rc));
+}
+.Ed
+.Sh SEE ALSO
+.Xr xtc 7 ,
+.Xr xtc_version_string 3
+.Sh HISTORY
+First appeared in xtc 0.0.1.

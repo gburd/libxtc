@@ -1,0 +1,48 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt XTC_VERSION_STRING 3
+.Os
+.Sh NAME
+.Nm xtc_version_string
+.Nd return the xtc library version as a SemVer string
+.Sh SYNOPSIS
+.In xtc.h
+.Ft const char *
+.Fn xtc_version_string "void"
+.Sh DESCRIPTION
+The
+.Fn xtc_version_string
+function returns the xtc library version as a NUL-terminated string in
+.Em SemVer 2.0
+format
+.Pq Dq major.minor.patch optionally followed by Dq -prerelease .
+The returned pointer is to static storage and must not be freed.
+.Pp
+The string always begins with the same numeric components reported by
+.Xr xtc_version_components 3 .
+This invariant is asserted by the M0 test suite
+.Pq see Pa M0_CLAIMS.md No section Bq C3 .
+.Sh RETURN VALUES
+A non-NULL pointer to a NUL-terminated string.
+The string contents are stable for the lifetime of the process and
+across all calls.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+#include <stdio.h>
+#include <xtc.h>
+
+int main(void) {
+        printf("xtc %s\en", xtc_version_string());
+        return 0;
+}
+.Ed
+.Sh SEE ALSO
+.Xr xtc 7 ,
+.Xr xtc_version_components 3 ,
+.Xr xtc_strerror 3
+.Sh STANDARDS
+The version string conforms to
+.Lk https://semver.org SemVer 2.0 .
+.Sh HISTORY
+First appeared in xtc 0.0.1.
