@@ -1,0 +1,74 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt __OS_TIME 3
+.Os
+.Sh NAME
+.Nm __os_clock_mono ,
+.Nm __os_clock_real ,
+.Nm __os_sleep_ns
+.Nd monotonic and wall clocks; nanosecond sleep
+.Sh SYNOPSIS
+.In os_time.h
+.Ft int
+.Fn __os_clock_mono "int64_t *out_ns"
+.Ft int
+.Fn __os_clock_real "int64_t *out_ns"
+.Ft int
+.Fn __os_sleep_ns "int64_t ns"
+.Sh DESCRIPTION
+.Fn __os_clock_mono
+returns a non-negative monotonic clock reading in nanoseconds.
+The epoch is platform-defined; only deltas are meaningful.
+Successive calls never return a value that decreases.
+.Pp
+.Fn __os_clock_real
+returns the wall-clock time in nanoseconds since the Unix epoch.
+.Pp
+.Fn __os_sleep_ns
+sleeps for at least
+.Fa ns
+nanoseconds.
+The actual sleep duration may exceed
+.Fa ns
+by an amount bounded by the scheduler's granularity.
+A negative
+.Fa ns
+returns
+.Dv XTC_E_INVAL
+without sleeping.
+.Sh RETURN VALUES
+.Dv XTC_OK
+on success;
+.Dv XTC_E_INVAL
+on a NULL output pointer;
+.Dv XTC_E_RANGE
+if the underlying time would overflow
+.Vt int64_t
+nanoseconds;
+.Dv XTC_E_INTERNAL
+on platform failure.
+.Sh CONSTANTS
+.Bl -tag -width XTC_NS_PER_SEC -compact
+.It Dv XTC_NS_PER_SEC
+1000000000.
+.It Dv XTC_NS_PER_MS
+1000000.
+.It Dv XTC_NS_PER_US
+1000.
+.El
+.Sh THREAD SAFETY
+All functions are safe to call concurrently from any thread.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+int64_t before, after;
+__os_clock_mono(&before);
+__os_sleep_ns(5 * XTC_NS_PER_MS);   /* sleep 5 ms */
+__os_clock_mono(&after);
+printf("slept %lld ns\en", (long long)(after - before));
+.Ed
+.Sh SEE ALSO
+.Xr __os_atomic 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 0.0.1 (M1).

@@ -1,0 +1,35 @@
+# Build artefacts
+build_unix/
+build_meson/
+build_*/
+
+# Autoconf-generated files in dist/ (configure is a committed product
+# in BDB tradition, but the cache and config-status helpers are not).
+dist/autom4te.cache/
+dist/aclocal.m4
+dist/config.status
+dist/config.log
+dist/Makefile
+
+# Editor / OS detritus
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.swp
+.DS_Store
+tags
+TAGS
+
+# Nix
+result
+result-*
+.direnv/
+.agent/
+
+
+# autoreconf backup files
+dist/configure~
+dist/xtc_config.h.in~
+*~

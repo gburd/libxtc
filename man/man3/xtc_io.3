@@ -1,0 +1,181 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt XTC_IO 3
+.Os
+.Sh NAME
+.Nm xtc_io_init ,
+.Nm xtc_io_fini ,
+.Nm xtc_io_backend_name ,
+.Nm xtc_io_reg_fd ,
+.Nm xtc_io_mod_fd ,
+.Nm xtc_io_del_fd ,
+.Nm xtc_io_poll ,
+.Nm xtc_io_wakeup
+.Nd L1 event-notification engine
+.Sh SYNOPSIS
+.In xtc_io.h
+.Ft int
+.Fn xtc_io_init "xtc_io_t **out"
+.Ft int
+.Fn xtc_io_fini "xtc_io_t *io"
+.Ft "const char *"
+.Fn xtc_io_backend_name "void"
+.Ft int
+.Fn xtc_io_reg_fd "xtc_io_t *io" "int fd" "uint32_t interest" "void *tag"
+.Ft int
+.Fn xtc_io_mod_fd "xtc_io_t *io" "int fd" "uint32_t interest" "void *tag"
+.Ft int
+.Fn xtc_io_del_fd "xtc_io_t *io" "int fd"
+.Ft int
+.Fn xtc_io_poll "xtc_io_t *io" "xtc_io_event_t *events" "int max" \
+                "int64_t timeout_ns" "int *n_out"
+.Ft int
+.Fn xtc_io_wakeup "xtc_io_t *io"
+.Sh DESCRIPTION
+.Nm xtc_io
+is the L1 readiness-notification engine.
+A single
+.Vt xtc_io_t
+instance manages a set of registered file descriptors plus an
+internal cross-thread wakeup pipe.
+.Pp
+Exactly one backend is compiled in per binary, picked at configure
+time:
+.Bl -tag -width "epoll" -compact
+.It Sy poll
+The portable POSIX
+.Xr poll 2
+backend; the floor xtc promises on every Tier 1 platform.
+.It Sy epoll
+The Linux
+.Xr epoll 7
+backend.
+.El
+.Pp
+.Fn xtc_io_backend_name
+returns the compiled-in backend's name as a static string.
+.Sh INTEREST AND EVENT FLAGS
+The
+.Fa interest
+mask passed to
+.Fn xtc_io_reg_fd Ns / Ns Fn xtc_io_mod_fd
+combines:
+.Bl -tag -width XTC_IO_WRITABLE -compact
+.It Dv XTC_IO_READABLE
+Notify when the fd is readable.
+.It Dv XTC_IO_WRITABLE
+Notify when the fd is writable.
+.El
+.Pp
+The
+.Va flags
+field of
+.Vt xtc_io_event_t
+returned from
+.Fn xtc_io_poll
+combines:
+.Bl -tag -width XTC_IO_WRITABLE -compact
+.It Dv XTC_IO_READABLE
+Bytes are available to read.
+.It Dv XTC_IO_WRITABLE
+Bytes can be written without blocking.
+.It Dv XTC_IO_HUP
+The peer closed the connection
+.Pq for sockets and pipes .
+.It Dv XTC_IO_ERR
+An error occurred on the descriptor.
+.It Dv XTC_IO_WAKEUP
+The synthetic wakeup event delivered by
+.Fn xtc_io_wakeup ;
+the event's
+.Va tag
+is
+.Dv NULL .
+.El
+.Sh REGISTRATION
+.Fn xtc_io_reg_fd
+registers a file descriptor with the engine.
+The
+.Fa interest
+mask must be non-zero;
+.Fa tag
+is an opaque pointer returned in events.
+A duplicate registration returns
+.Dv XTC_E_INVAL ;
+the caller must use
+.Fn xtc_io_mod_fd
+to change interest or tag on a registered fd.
+.Pp
+.Fn xtc_io_del_fd
+unregisters; subsequent operations on that fd return
+.Dv XTC_E_INVAL .
+.Sh POLL AND TIMEOUT
+.Fn xtc_io_poll
+fills up to
+.Fa max
+events into
+.Fa events
+and writes the count to
+.Fa *n_out .
+.Pp
+.Fa timeout_ns
+is interpreted as:
+.Bl -tag -width "negative" -compact
+.It Sy 0
+Non-blocking; return immediately.
+.It Sy positive
+Wait at most that many nanoseconds.
+.It Sy negative
+Wait indefinitely until at least one fd becomes ready or
+.Fn xtc_io_wakeup
+is called.
+.El
+.Sh CROSS-THREAD WAKEUP
+.Fn xtc_io_wakeup
+may be called from any thread.
+A blocked
+.Fn xtc_io_poll
+returns within bounded time; the wakeup is delivered as a single
+event with
+.Dv XTC_IO_WAKEUP
+flag and
+.Dv NULL
+.Va tag .
+Multiple wakeups before the next poll coalesce into one event.
+.Sh RETURN VALUES
+.Dv XTC_OK
+on success;
+.Dv XTC_E_INVAL
+on bad argument;
+.Dv XTC_E_INTERNAL
+on platform failure;
+.Dv XTC_E_NOMEM
+when the backend cannot allocate registration storage.
+.Sh THREAD SAFETY
+.Fn xtc_io_wakeup
+is safe to call from any thread.
+The other functions must be called from a single thread that owns the
+.Vt xtc_io_t
+instance
+.Pq the future Em event-loop thread .
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_io_t *io;
+xtc_io_event_t evs[16];
+int n;
+
+xtc_io_init(&io);
+xtc_io_reg_fd(io, sockfd, XTC_IO_READABLE, my_tag);
+xtc_io_poll(io, evs, 16, -1, &n);
+for (int i = 0; i < n; i++) {
+        if (evs[i].flags & XTC_IO_WAKEUP) handle_wakeup();
+        else                              handle(evs[i].tag, evs[i].flags);
+}
+.Ed
+.Sh SEE ALSO
+.Xr __os_thread 3 ,
+.Xr __os_atomic 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 0.0.1 (M2).

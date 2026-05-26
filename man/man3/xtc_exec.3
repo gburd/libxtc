@@ -1,0 +1,147 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt XTC_EXEC 3
+.Os
+.Sh NAME
+.Nm xtc_exec_init ,
+.Nm xtc_exec_fini ,
+.Nm xtc_exec_run ,
+.Nm xtc_exec_stop ,
+.Nm xtc_exec_n_loops ,
+.Nm xtc_exec_loop ,
+.Nm xtc_exec_loop_id ,
+.Nm xtc_exec_spawn ,
+.Nm xtc_exec_spawn_on ,
+.Nm xtc_exec_async ,
+.Nm xtc_exec_async_on
+.Nd L2 multi-loop work-stealing executor
+.Sh SYNOPSIS
+.In xtc_exec.h
+.Ft int
+.Fn xtc_exec_init "xtc_exec_t **out" "int n_loops"
+.Ft int
+.Fn xtc_exec_fini "xtc_exec_t *exec"
+.Ft int
+.Fn xtc_exec_run "xtc_exec_t *exec"
+.Ft int
+.Fn xtc_exec_stop "xtc_exec_t *exec"
+.Ft int
+.Fn xtc_exec_n_loops "xtc_exec_t *exec"
+.Ft "xtc_loop_t *"
+.Fn xtc_exec_loop "xtc_exec_t *exec" "int idx"
+.Ft int
+.Fn xtc_exec_loop_id "void"
+.Ft int
+.Fn xtc_exec_spawn "xtc_exec_t *exec" "xtc_task_fn fn" "void *user" "xtc_task_t **out"
+.Ft int
+.Fn xtc_exec_spawn_on "xtc_exec_t *exec" "int idx" "xtc_task_fn fn" "void *user" "xtc_task_t **out"
+.Ft int
+.Fn xtc_exec_async "xtc_exec_t *exec" "xtc_coro_fn fn" "void *arg" "xtc_task_t **out"
+.Ft int
+.Fn xtc_exec_async_on "xtc_exec_t *exec" "int idx" "xtc_coro_fn fn" "void *arg" "xtc_task_t **out"
+.Sh DESCRIPTION
+.Nm xtc_exec
+manages
+.Em N
+event loops, one per worker thread.  Each loop owns a Chase-Lev
+work-stealing deque as its run queue plus an MPSC inbox for cross-thread
+wakers and remote spawns.
+.Sh LIFECYCLE
+.Fn xtc_exec_init
+constructs an executor with
+.Fa n_loops
+loops; non-positive values default to a small reasonable count.
+.Fn xtc_exec_fini
+joins every worker, frees every loop.
+.Pp
+.Fn xtc_exec_run
+spawns
+.Fa n_loops
+worker threads (one per loop) and blocks on the calling thread until
+the executor reaches a quiescent state \u2014 every spawned task
+.Dv DONE ,
+every timer fired or cancelled, every inbox drained, every deque
+empty \u2014 or until
+.Fn xtc_exec_stop
+is called from any thread.
+.Pp
+Workers steal from peers when their own deque empties before going
+to
+.Xr xtc_io 3
+.Sy poll .
+M5 uses a random victim policy; NUMA-near steal ordering arrives in
+M5.5.
+.Sh SPAWN PLACEMENT
+.Fn xtc_exec_spawn
+puts the new task on a loop chosen by a round-robin counter.
+.Fn xtc_exec_spawn_on
+forces placement on the given loop.
+The coroutine variants
+.Fn xtc_exec_async
+and
+.Fn xtc_exec_async_on
+mirror the contract.
+.Pp
+Spawn calls are safe from any thread, including before
+.Fn xtc_exec_run :
+work queued in advance is processed when the workers start.  Spawns
+from a non-owner thread are routed through the target loop's inbox
+and surface on the loop's next step.
+.Sh CROSS-THREAD WAKERS
+A
+.Vt xtc_waker_t
+captured on one loop may be fired from any thread; cross-thread
+fires are routed through the target loop's inbox plus an
+.Fn xtc_io_wakeup
+ping that breaks the target out of
+.Xr xtc_io 3
+.Sy poll .
+The wake remains idempotent: many concurrent wakes collapse to at
+most one re-queue per yielded run.
+.Sh THREAD AFFINITY
+.Fn xtc_exec_loop_id
+returns the executor index of the loop the calling task is running
+on, or -1 from a thread that is not a worker.  Tests use this to
+verify spawn placement and steal behaviour.
+.Sh RETURN VALUES
+.Dv XTC_OK
+on success;
+.Dv XTC_E_INVAL
+on a bad argument;
+.Dv XTC_E_NOMEM
+on allocation failure;
+.Dv XTC_E_INTERNAL
+on platform failure.
+.Sh THREAD SAFETY
+All public functions are safe to call from any thread.
+A given task handle (out_task) returned from a spawn must be used only
+in ways consistent with the M3/M4 task contracts; in particular, a
+.Vt xtc_waker_t
+captured from one task may travel anywhere.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+static intptr_t hello(void *arg) {
+        printf("hello from loop %d\\n", xtc_exec_loop_id());
+        return 0;
+}
+
+int main(void) {
+        xtc_exec_t *e;
+        xtc_exec_init(&e, 4);
+        for (int i = 0; i < 4; i++)
+                xtc_exec_async(e, hello, NULL, NULL);
+        xtc_exec_run(e);
+        xtc_exec_fini(e);
+        return 0;
+}
+.Ed
+.Sh SEE ALSO
+.Xr xtc_loop 3 ,
+.Xr xtc_async 3 ,
+.Xr xtc_io 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 0.0.1 (M5).  M5.5 will add NUMA-aware steal
+ordering and configure-time auto-detect of CPU count via
+.Sy __os_ncpus .

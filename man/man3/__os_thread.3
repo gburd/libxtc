@@ -1,0 +1,94 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt __OS_THREAD 3
+.Os
+.Sh NAME
+.Nm __os_thread_create ,
+.Nm __os_thread_join ,
+.Nm __os_thread_detach ,
+.Nm __os_thread_self ,
+.Nm __os_thread_yield ,
+.Nm __os_thread_setname
+.Nd OS-thread primitives
+.Sh SYNOPSIS
+.In os_thread.h
+.Ft int
+.Fn __os_thread_create "__os_thread_t *thr" "__os_thread_fn fn" "void *arg"
+.Ft int
+.Fn __os_thread_join "__os_thread_t *thr" "void **retval"
+.Ft int
+.Fn __os_thread_detach "__os_thread_t *thr"
+.Ft int
+.Fn __os_thread_self "__os_thread_t *out"
+.Ft void
+.Fn __os_thread_yield "void"
+.Ft int
+.Fn __os_thread_setname "const char *name"
+.Sh DESCRIPTION
+The
+.Nm __os_thread_*
+family wraps the platform thread API
+.Pq pthreads on Unix; Win32 on Windows
+in xtc's
+.Vt int -returning
+out-parameter convention.
+.Pp
+.Fn __os_thread_create
+spawns a new thread that calls
+.Fa "fn" Ns Pq arg .
+The handle is written to
+.Fa *thr
+and is valid until
+.Fn __os_thread_join
+or
+.Fn __os_thread_detach
+is called.
+.Pp
+.Fn __os_thread_join
+blocks until the thread completes and recovers the value returned by
+.Fa fn
+into
+.Fa *retval
+.Po skipped if Fa retval No is Dv NULL Pc .
+After a successful join the handle is invalidated.
+.Pp
+.Fn __os_thread_detach
+releases the handle without waiting; the thread runs to completion
+independently.
+.Pp
+.Fn __os_thread_self
+returns a handle representing the calling thread.
+The caller is responsible for releasing the underlying state via
+.Xr __os_alloc 3
+.Po currently a Fn __os_free No on Va out->opaque Pc .
+This is a slightly-leaky API today and is scheduled to be replaced by
+a value-typed handle in M1.5.
+.Pp
+.Fn __os_thread_yield
+hints to the scheduler.
+It is always safe and always returns.
+.Pp
+.Fn __os_thread_setname
+labels the calling thread for debuggers and
+.Xr ps 1 .
+The implementation is best-effort; some platforms truncate to 15
+characters, others ignore the call entirely.
+.Sh RETURN VALUES
+.Dv XTC_OK
+on success;
+.Dv XTC_E_INVAL
+on a bad argument;
+.Dv XTC_E_INTERNAL
+when the underlying platform call fails.
+.Sh THREAD SAFETY
+All functions are safe to call from any thread.
+A given
+.Vt __os_thread_t
+handle must be acted on by exactly one thread at a time.
+.Sh SEE ALSO
+.Xr __os_mutex 3 ,
+.Xr __os_atomic 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 0.0.1 (M1).
