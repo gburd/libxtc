@@ -1,0 +1,91 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt XTC-ABI-STABILITY 7
+.Os
+.Sh NAME
+.Nm xtc-abi-stability
+.Nd ABI stability and deprecation policy for xtc
+.Sh DESCRIPTION
+.Nm
+is the operational summary of the xtc longevity contract.
+The full discussion is in
+.Pa PLAN.md
+section 18; the user-facing reference is
+.Pa docs/abi-stability.md .
+.Sh VERSIONING
+xtc uses
+.Lk https://semver.org SemVer 2.0
+with an explicit ABI promise:
+.Bl -tag -width "MINOR"
+.It Sy PATCH
+Bug fixes only.
+Same ABI, on-disk format, wire format, tracing-span shape.
+.It Sy MINOR
+Additive changes only.
+No symbol removed or renamed; no enum renumbered; no behaviour
+change for code compiled against the prior minor.
+.It Sy MAJOR
+Breaking changes allowed.
+Cadence is intentionally slow
+.Pq three to five years .
+The previous major receives at least 18 months of LTS.
+.El
+.Sh SYMBOL VERSIONING
+ABI stability is enforced mechanically by
+.Pa dist/s_abi
+on every release tag.
+.Bl -tag -width Ds -compact
+.It Linux glibc, Solaris, FreeBSD: Em .symver No directives.
+.It Windows: stable ordinals + Pa xtc.def .
+.It macOS: matched -current_version / -compatibility_version.
+.El
+.Sh CAPABILITY BITS
+Applications query capabilities, not version numbers:
+.Bd -literal -offset indent
+if (xtc_have_capability("io_uring")) { ... }
+.Ed
+.Pp
+Capabilities are declared in
+.Pa dist/capabilities.in .
+Adding one is a minor bump; removing one is a major bump.
+.Sh DEPRECATION LIFECYCLE
+Removal of any public API takes a minimum of five minor releases:
+.Bl -enum -compact
+.It
+Live.
+.It
+Soft-deprecated
+.Pq compiler note .
+.It
+Deprecated
+.Pq compiler warning + runtime log .
+.It
+Default-off
+.Pq build error without Sy XTC_ENABLE_DEPRECATED .
+.It
+Removed
+.Pq Sy #error No in header .
+.El
+.Sh COMPAT TEST SUITE
+.Pa test/compat/
+contains the worked examples from every prior 1.x release built
+against the current source.
+They must continue to compile and pass.
+.Sh TRACE-SHAPE STABILITY
+Span names are stable across minors.
+Renaming or removing attributes is a major change.
+.Pa test/trace_compat/
+diffs current span shape against the most recent release.
+.Sh ON-DISK FORMATS
+The flight-recorder dump, crash trace, stat snapshot, and admin
+socket protocol each carry a format-version byte.
+.Xr xtcdump 1
+reads every version we have ever shipped, forever.
+.Sh SEE ALSO
+.Xr xtc 7 ,
+.Xr xtc-build 7
+.Pp
+.Pa docs/abi-stability.md ,
+.Pa PLAN.md
+section 18.

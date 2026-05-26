@@ -1,0 +1,193 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt XTC_LOOP 3
+.Os
+.Sh NAME
+.Nm xtc_loop_init ,
+.Nm xtc_loop_fini ,
+.Nm xtc_loop_run ,
+.Nm xtc_loop_stop ,
+.Nm xtc_loop_res ,
+.Nm xtc_task_spawn ,
+.Nm xtc_task_waker ,
+.Nm xtc_task_park_on_timer ,
+.Nm xtc_task_park_on_fd ,
+.Nm xtc_waker_wake ,
+.Nm xtc_timer_set ,
+.Nm xtc_timer_cancel
+.Nd L2 single-thread event loop, tasks, wakers, timers
+.Sh SYNOPSIS
+.In xtc_loop.h
+.Ft int
+.Fn xtc_loop_init "xtc_loop_t **out"
+.Ft int
+.Fn xtc_loop_fini "xtc_loop_t *loop"
+.Ft int
+.Fn xtc_loop_run "xtc_loop_t *loop"
+.Ft int
+.Fn xtc_loop_stop "xtc_loop_t *loop"
+.Ft "struct xtc_res *"
+.Fn xtc_loop_res "xtc_loop_t *loop"
+.Ft int
+.Fn xtc_task_spawn "xtc_loop_t *loop" "xtc_task_fn fn" "void *user" "xtc_task_t **out_task"
+.Ft int
+.Fn xtc_task_waker "xtc_task_t *task" "xtc_waker_t *out"
+.Ft int
+.Fn xtc_task_park_on_timer "xtc_task_t *self" "int64_t delay_ns"
+.Ft int
+.Fn xtc_task_park_on_fd "xtc_task_t *self" "int fd" "uint32_t interest"
+.Ft int
+.Fn xtc_waker_wake "const xtc_waker_t *w"
+.Ft int
+.Fn xtc_timer_set "xtc_loop_t *loop" "int64_t delay_ns" \
+                   "xtc_timer_fn fn" "void *user" "xtc_timer_t **out"
+.Ft int
+.Fn xtc_timer_cancel "xtc_timer_t *timer"
+.Sh DESCRIPTION
+The L2 event loop drives a single OS thread.
+A loop owns one
+.Vt xtc_io_t ,
+a FIFO run queue of ready tasks, and a min-heap of pending timers.
+.Pp
+A task is a small struct carrying a function pointer, a state, and an
+opaque user pointer.
+The function is called by the loop whenever the task becomes
+runnable; its return value tells the loop what to do next:
+.Bl -tag -width XTC_TASK_PENDING -compact
+.It Dv XTC_TASK_DONE
+The task is finished and is reaped at
+.Fn xtc_loop_fini .
+.It Dv XTC_TASK_RESCHED
+Re-queue the task at the back of the run queue.
+.It Dv XTC_TASK_PENDING
+The task is waiting on a wakeup; do not run it again until either
+its waker fires or the timer / fd it parked on becomes ready.
+.El
+.Sh LIFECYCLE
+.Fn xtc_loop_init
+allocates a fresh loop with no spawned tasks.  Each loop owns a
+resource accountant
+.Pq Vt xtc_res_t
+with default caps; access it via
+.Fn xtc_loop_res .
+.Pp
+.Fn xtc_loop_run
+runs until every spawned task has returned
+.Dv XTC_TASK_DONE
+and every pending timer has fired or been cancelled.
+.Fn xtc_loop_stop
+flips a flag that causes the loop to return after the current task
+step completes.
+.Pp
+.Fn xtc_loop_fini
+frees every task ever spawned, every timer ever created (live or
+fired), the loop's
+.Vt xtc_io_t ,
+and the loop struct itself.
+.Sh TASKS
+.Fn xtc_task_spawn
+creates a new task in
+.Dv XTC_TASK_RESCHED
+state and enqueues it.
+The function pointer
+.Fa fn
+is invoked with the task handle and the
+.Fa user
+pointer the caller supplied at spawn.
+The handle written to
+.Fa *out_task
+is valid for the lifetime of the loop.
+.Sh WAKERS
+.Fn xtc_task_waker
+fills a
+.Vt xtc_waker_t
+that the caller may store and later use to re-queue the parked task
+via
+.Fn xtc_waker_wake .
+A waker may be fired any number of times: only the first transition
+from
+.Dv XTC_TASK_PENDING
+to
+.Dv XTC_TASK_RESCHED
+re-queues the task; subsequent wakes while the task is already
+scheduled or running are no-ops.
+A waker fired after the task has reached
+.Dv XTC_TASK_DONE
+is a safe no-op.
+.Pp
+M3 wakers are valid only on the owning thread.  Cross-thread wakeup
+arrives in M5.
+.Sh PARKING
+.Fn xtc_task_park_on_timer
+arranges for the task to be re-queued after at least
+.Fa delay_ns
+nanoseconds.
+.Pp
+.Fn xtc_task_park_on_fd
+registers the task with the loop's
+.Vt xtc_io_t
+for readiness on
+.Fa fd .
+When the fd becomes ready, the loop unregisters it and re-queues the
+task.
+.Pp
+A task may have at most one outstanding park (timer or fd) at a time.
+A second park while the first is in flight returns
+.Dv XTC_E_INVAL .
+After parking, the task fn must return
+.Dv XTC_TASK_PENDING .
+.Sh TIMERS
+.Fn xtc_timer_set
+schedules a callback to fire after at least
+.Fa delay_ns
+nanoseconds.
+The handle written to
+.Fa *out
+remains valid for the lifetime of the loop, including after the
+timer has fired
+.Pq see Fn xtc_timer_cancel .
+.Pp
+.Fn xtc_timer_cancel
+prevents a not-yet-fired timer from firing.
+A cancel after the timer has already fired is a safe no-op.
+.Sh RETURN VALUES
+.Dv XTC_OK
+on success;
+.Dv XTC_E_INVAL
+on a bad argument;
+.Dv XTC_E_NOMEM
+on allocation failure;
+.Dv XTC_E_INTERNAL
+on platform failure.
+.Sh THREAD SAFETY
+M3 is single-thread.
+A loop must be created, run, and finalised by the same OS thread.
+The cross-thread wakeup primitive baked into
+.Vt xtc_io_t
+exists but is not yet exposed at the loop / task level; that arrives
+with the multi-loop executor in M5.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+static int hello(xtc_task_t *self, void *u) {
+        (void)self; (void)u;
+        printf("hello\\n");
+        return XTC_TASK_DONE;
+}
+
+int main(void) {
+        xtc_loop_t *loop;
+        xtc_loop_init(&loop);
+        xtc_task_spawn(loop, hello, NULL, NULL);
+        xtc_loop_run(loop);
+        xtc_loop_fini(loop);
+        return 0;
+}
+.Ed
+.Sh SEE ALSO
+.Xr xtc_io 3 ,
+.Xr __os_thread 3 ,
+.Xr __os_time 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 0.0.1 (M3).

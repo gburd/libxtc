@@ -1,0 +1,723 @@
+# XTC Makefile.in — processed by configure into a Makefile.
+#
+# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Use of this source code is governed by the PostgreSQL License.
+
+srcdir		= @srcdir@
+abs_top_srcdir	= @abs_top_srcdir@
+builddir	= @builddir@
+abs_builddir	= @abs_builddir@
+prefix		= @prefix@
+exec_prefix	= @exec_prefix@
+libdir		= @libdir@
+includedir	= @includedir@
+mandir		= @mandir@
+
+CC		= @CC@
+CFLAGS		= @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread @XTC_URING_CFLAGS@
+CPPFLAGS	= @CPPFLAGS@ -I. -I$(srcdir)/../src/inc
+LDFLAGS		= @LDFLAGS@ -pthread
+LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@
+XTC_HEGEL_CFLAGS = @XTC_HEGEL_CFLAGS@
+XTC_HEGEL_LIBS	 = @XTC_HEGEL_LIBS@
+XTC_HEGEL_PBT	 = @XTC_HEGEL_PBT@
+XTC_HEGEL_SERVER_COMMAND = @XTC_HEGEL_SERVER_COMMAND@
+AR		= ar
+RANLIB		= @RANLIB@
+INSTALL		= @INSTALL@
+INSTALL_DATA	= @INSTALL_DATA@
+INSTALL_PROGRAM	= @INSTALL_PROGRAM@
+RM		= rm -f
+
+# -------------------------------------------------------------------------
+# M0 sources.
+# -------------------------------------------------------------------------
+LIB_SRCS	= \
+	$(srcdir)/../src/xtc_version.c \
+	$(srcdir)/../src/xtc_strerror.c \
+	$(srcdir)/../src/os/os_alloc.c \
+	$(srcdir)/../src/os/os_time.c \
+	$(srcdir)/../src/os/os_thread.c \
+	$(srcdir)/../src/os/os_tls.c \
+	$(srcdir)/../src/os/os_mutex.c \
+	$(srcdir)/../src/os/os_cpu.c \
+	$(srcdir)/../src/io/io_common.c \
+	$(srcdir)/../src/io/io_poll.c \
+	$(srcdir)/../src/io/io_epoll.c \
+	$(srcdir)/../src/io/io_uring.c \
+	$(srcdir)/../src/io/io_kqueue.c \
+	$(srcdir)/../src/io/io_iocp.c \
+	$(srcdir)/../src/io/io_solaris.c \
+	$(srcdir)/../src/io/io_aix.c \
+	$(srcdir)/../src/evt/loop.c \
+	$(srcdir)/../src/evt/task.c \
+	$(srcdir)/../src/evt/timer.c \
+	$(srcdir)/../src/evt/coro_uctx.c \
+	$(srcdir)/../src/evt/coro_winfiber.c \
+	$(srcdir)/../src/evt/exec.c \
+	$(srcdir)/../src/ptc/res.c \
+	$(srcdir)/../src/ptc/chan.c \
+	$(srcdir)/../src/ptc/proc.c \
+	$(srcdir)/../src/ptc/sync.c \
+	$(srcdir)/../src/ptc/log.c \
+	$(srcdir)/../src/ptc/cfg.c \
+	$(srcdir)/../src/ptc/inject.c \
+	$(srcdir)/../src/ptc/pdict.c \
+	$(srcdir)/../src/ptc/slab.c \
+	$(srcdir)/../src/ptc/mctx.c \
+	$(srcdir)/../src/ptc/rcu.c \
+	$(srcdir)/../src/orc/sup.c \
+	$(srcdir)/../src/orc/reg.c \
+	$(srcdir)/../src/orc/svr.c \
+	$(srcdir)/../src/orc/app.c \
+	$(srcdir)/../src/ptc/lock_lr.c \
+	$(srcdir)/../src/ptc/lock_mgr.c \
+	$(srcdir)/../src/os/asm/fctx_x86_64_sysv.S \
+	$(srcdir)/../src/os/asm/fctx_x86_64_ms_pe.S
+
+LIB_OBJS	= \
+	xtc_version.o \
+	xtc_strerror.o \
+	os_alloc.o \
+	os_time.o \
+	os_thread.o \
+	os_tls.o \
+	os_mutex.o \
+	os_cpu.o \
+	io_common.o \
+	io_poll.o \
+	io_epoll.o \
+	io_uring.o \
+	io_kqueue.o \
+	io_iocp.o \
+	io_solaris.o \
+	io_aix.o \
+	loop.o \
+	task.o \
+	timer.o \
+	coro_uctx.o \
+	coro_winfiber.o \
+	exec.o \
+	res.o \
+	chan.o \
+	proc.o \
+	sync.o \
+	log.o \
+	cfg.o \
+	inject.o \
+	pdict.o \
+	slab.o \
+	mctx.o \
+	rcu.o \
+	sup.o \
+	reg.o \
+	svr.o \
+	app.o \
+	lock_lr.o \
+	lock_mgr.o \
+	fctx_x86_64_sysv.o \
+	fctx_x86_64_ms_pe.o
+
+LIB_HDR_PUBLIC	= $(srcdir)/../src/inc/xtc.h
+STATIC_LIB	= libxtc.a
+
+# -------------------------------------------------------------------------
+# Tests (M0).  See M0_CLAIMS.md.
+# -------------------------------------------------------------------------
+TESTS_SH	= \
+	$(abs_top_srcdir)/../test/m0/test_oos_enforced.sh \
+	$(abs_top_srcdir)/../test/m0/test_distclean.sh \
+	$(abs_top_srcdir)/../test/m0/test_config_header.sh \
+	$(abs_top_srcdir)/../test/m0/test_symbols.sh \
+	$(abs_top_srcdir)/../test/m0/test_make_check.sh \
+	$(abs_top_srcdir)/../test/m0/test_readme_build.sh \
+	$(abs_top_srcdir)/../test/m0/test_docs_arch.sh \
+	$(abs_top_srcdir)/../test/m0/test_docs_abi.sh \
+	$(abs_top_srcdir)/../test/m0/test_man_coverage.sh \
+	$(abs_top_srcdir)/../test/m0/test_man_lint.sh \
+	$(abs_top_srcdir)/../test/m0/test_man_signatures.sh \
+	$(abs_top_srcdir)/../test/m1/test_m1_man_coverage.sh \
+	$(abs_top_srcdir)/../test/m2/test_m2_man.sh \
+	$(abs_top_srcdir)/../test/m3/test_m3_man.sh \
+	$(abs_top_srcdir)/../test/m4/test_m4_man.sh \
+	$(abs_top_srcdir)/../test/m5/test_m5_man.sh \
+	$(abs_top_srcdir)/../test/dist/test_s_all.sh \
+	$(abs_top_srcdir)/../test/dist/test_s_include.sh \
+	$(abs_top_srcdir)/../test/dist/test_s_include_idempotent.sh \
+	$(abs_top_srcdir)/../test/dist/test_s_include_inline_comment.sh \
+	$(abs_top_srcdir)/../test/dist/test_shellcheck.sh \
+	$(abs_top_srcdir)/../test/dist/test_s_perm.sh
+
+TESTS_C		= test_version test_header test_errors \
+		  test_atomic test_alloc test_time \
+		  test_thread test_tls test_mutex \
+		  test_io_lifecycle test_io_register test_io_events test_io_wakeup \
+		  test_loop test_task test_waker test_timer test_io_integration \
+		  test_async \
+		  test_fctx \
+		  test_exec test_cross_wake test_deque test_steal \
+		  test_chan test_chan_mpmc_bcast \
+		  test_proc \
+		  test_sync \
+		  test_sup \
+		  test_reg \
+		  test_svr \
+		  test_app \
+		  test_mctx \
+		  test_slab \
+		  test_rcu \
+		  test_lrlock \
+		  test_lockmgr \
+		  test_coverage_pump \
+		  test_otp_proc_lib \
+		  test_otp_gen_server \
+		  test_otp_gen_server_phase2 \
+		  test_otp_supervisor \
+		  test_observability
+
+TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_lrlock pbt_chan
+
+# -------------------------------------------------------------------------
+# Default goal.
+# -------------------------------------------------------------------------
+.PHONY: all check tests-c tests-sh tests-pbt clean distclean install uninstall
+
+all: $(STATIC_LIB)
+
+$(STATIC_LIB): $(LIB_OBJS)
+	$(AR) rcs $@ $(LIB_OBJS)
+	$(RANLIB) $@
+
+# Pattern rule for compiling sources from ../src/ into ./*.o.
+xtc_version.o: $(srcdir)/../src/xtc_version.c $(LIB_HDR_PUBLIC) xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/xtc_version.c
+
+xtc_strerror.o: $(srcdir)/../src/xtc_strerror.c $(LIB_HDR_PUBLIC) xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/xtc_strerror.c
+
+os_alloc.o: $(srcdir)/../src/os/os_alloc.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_alloc.c
+
+os_time.o: $(srcdir)/../src/os/os_time.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_time.c
+
+os_thread.o: $(srcdir)/../src/os/os_thread.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_thread.c
+
+os_tls.o: $(srcdir)/../src/os/os_tls.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_tls.c
+
+os_mutex.o: $(srcdir)/../src/os/os_mutex.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_mutex.c
+
+io_common.o: $(srcdir)/../src/io/io_common.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_common.c
+
+io_poll.o: $(srcdir)/../src/io/io_poll.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_poll.c
+
+io_epoll.o: $(srcdir)/../src/io/io_epoll.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_epoll.c
+
+io_uring.o: $(srcdir)/../src/io/io_uring.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_uring.c
+
+io_kqueue.o: $(srcdir)/../src/io/io_kqueue.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_kqueue.c
+
+io_iocp.o: $(srcdir)/../src/io/io_iocp.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_iocp.c
+
+io_solaris.o: $(srcdir)/../src/io/io_solaris.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_solaris.c
+
+io_aix.o: $(srcdir)/../src/io/io_aix.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_aix.c
+
+loop.o: $(srcdir)/../src/evt/loop.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/loop.c
+
+task.o: $(srcdir)/../src/evt/task.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/task.c
+
+timer.o: $(srcdir)/../src/evt/timer.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/timer.c
+
+coro_uctx.o: $(srcdir)/../src/evt/coro_uctx.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/coro_uctx.c
+
+coro_winfiber.o: $(srcdir)/../src/evt/coro_winfiber.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/coro_winfiber.c
+
+exec.o: $(srcdir)/../src/evt/exec.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/exec.c
+
+os_cpu.o: $(srcdir)/../src/os/os_cpu.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_cpu.c
+
+res.o: $(srcdir)/../src/ptc/res.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/res.c
+
+chan.o: $(srcdir)/../src/ptc/chan.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/chan.c
+
+proc.o: $(srcdir)/../src/ptc/proc.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/proc.c
+
+sync.o: $(srcdir)/../src/ptc/sync.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/sync.c
+
+log.o: $(srcdir)/../src/ptc/log.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/log.c
+
+cfg.o: $(srcdir)/../src/ptc/cfg.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/cfg.c
+
+inject.o: $(srcdir)/../src/ptc/inject.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/inject.c
+
+pdict.o: $(srcdir)/../src/ptc/pdict.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/pdict.c
+
+slab.o: $(srcdir)/../src/ptc/slab.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/slab.c
+
+mctx.o: $(srcdir)/../src/ptc/mctx.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/mctx.c
+
+rcu.o: $(srcdir)/../src/ptc/rcu.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/rcu.c
+
+sup.o: $(srcdir)/../src/orc/sup.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/sup.c
+
+reg.o: $(srcdir)/../src/orc/reg.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/reg.c
+
+svr.o: $(srcdir)/../src/orc/svr.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/svr.c
+
+app.o: $(srcdir)/../src/orc/app.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/app.c
+
+lock_lr.o: $(srcdir)/../src/ptc/lock_lr.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/lock_lr.c
+
+lock_mgr.o: $(srcdir)/../src/ptc/lock_mgr.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/lock_mgr.c
+
+fctx_x86_64_sysv.o: $(srcdir)/../src/os/asm/fctx_x86_64_sysv.S
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/asm/fctx_x86_64_sysv.S
+
+fctx_x86_64_ms_pe.o: $(srcdir)/../src/os/asm/fctx_x86_64_ms_pe.S
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/asm/fctx_x86_64_ms_pe.S
+
+bench_disk: $(srcdir)/../bench/bench_disk.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_disk.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+bench_net: $(srcdir)/../bench/bench_net.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_net.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+bench_uring_disk: $(srcdir)/../bench/bench_uring_disk.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_uring_disk.c $(LDFLAGS) $(LIBS)
+
+bench_million_tasks: $(srcdir)/../bench/bench_million_tasks.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_million_tasks.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# -------------------------------------------------------------------------
+# Examples — self-contained demos.
+# -------------------------------------------------------------------------
+examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo
+
+01_hello: $(srcdir)/../examples/01_hello_async.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../examples/01_hello_async.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+02_pingpong: $(srcdir)/../examples/02_proc_pingpong.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../examples/02_proc_pingpong.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+03_supervised_app: $(srcdir)/../examples/03_supervised_app.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../examples/03_supervised_app.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+04_lockmgr_demo: $(srcdir)/../examples/04_lockmgr_demo.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../examples/04_lockmgr_demo.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# -------------------------------------------------------------------------
+# Tests.
+# -------------------------------------------------------------------------
+check: tests-c tests-pbt tests-sh
+	@echo "== M0 test summary =="
+	@echo "All tests passed."
+
+tests-c: $(TESTS_C)
+	@for t in $(TESTS_C); do \
+		echo "running C test: $$t"; \
+		./$$t || exit 1; \
+	done
+
+tests-sh: $(STATIC_LIB)
+	@for t in $(TESTS_SH); do \
+		echo "running shell test: $$(basename $$t)"; \
+		XTC_BUILD_DIR=$(abs_builddir) \
+		XTC_SRC_DIR=$(abs_top_srcdir)/.. \
+		sh $$t || exit 1; \
+	done
+
+tests-pbt: $(TESTS_PBT)
+	@for t in $(TESTS_PBT); do \
+		echo "running PBT: $$t"; \
+		HEGEL_SERVER_COMMAND="$(XTC_HEGEL_SERVER_COMMAND)" \
+		./$$t || exit 1; \
+	done
+
+# Build C tests.  Each links against the static lib.
+test_version: $(srcdir)/../test/m0/test_version.c \
+		$(srcdir)/../test/m0/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-I$(srcdir)/../test/m0 \
+		-o $@ $(srcdir)/../test/m0/test_version.c \
+		$(srcdir)/../test/m0/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_header: $(srcdir)/../test/m0/test_header.c \
+		$(srcdir)/../test/m0/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-I$(srcdir)/../test/m0 \
+		-o $@ $(srcdir)/../test/m0/test_header.c \
+		$(srcdir)/../test/m0/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_errors: $(srcdir)/../test/m0/test_errors.c \
+		$(srcdir)/../test/m0/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-I$(srcdir)/../test/m0 \
+		-o $@ $(srcdir)/../test/m0/test_errors.c \
+		$(srcdir)/../test/m0/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M1 tests.
+test_atomic: $(srcdir)/../test/m1/test_atomic.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_atomic.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_alloc: $(srcdir)/../test/m1/test_alloc.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_alloc.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_time: $(srcdir)/../test/m1/test_time.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_time.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_thread: $(srcdir)/../test/m1/test_thread.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_thread.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_tls: $(srcdir)/../test/m1/test_tls.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_tls.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_mutex: $(srcdir)/../test/m1/test_mutex.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_mutex.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M2 tests.
+test_io_lifecycle: $(srcdir)/../test/m2/test_io_lifecycle.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
+		-o $@ $(srcdir)/../test/m2/test_io_lifecycle.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_io_register: $(srcdir)/../test/m2/test_io_register.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 -I$(srcdir)/../test/include \
+		-o $@ $(srcdir)/../test/m2/test_io_register.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_io_events: $(srcdir)/../test/m2/test_io_events.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 -I$(srcdir)/../test/include \
+		-o $@ $(srcdir)/../test/m2/test_io_events.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_io_wakeup: $(srcdir)/../test/m2/test_io_wakeup.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 -I$(srcdir)/../test/include \
+		-o $@ $(srcdir)/../test/m2/test_io_wakeup.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M3 tests.
+test_loop: $(srcdir)/../test/m3/test_loop.c \
+		$(srcdir)/../test/m3/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m3 \
+		-o $@ $(srcdir)/../test/m3/test_loop.c \
+		$(srcdir)/../test/m3/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_task: $(srcdir)/../test/m3/test_task.c \
+		$(srcdir)/../test/m3/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m3 \
+		-o $@ $(srcdir)/../test/m3/test_task.c \
+		$(srcdir)/../test/m3/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_waker: $(srcdir)/../test/m3/test_waker.c \
+		$(srcdir)/../test/m3/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m3 \
+		-o $@ $(srcdir)/../test/m3/test_waker.c \
+		$(srcdir)/../test/m3/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_timer: $(srcdir)/../test/m3/test_timer.c \
+		$(srcdir)/../test/m3/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m3 \
+		-o $@ $(srcdir)/../test/m3/test_timer.c \
+		$(srcdir)/../test/m3/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_io_integration: $(srcdir)/../test/m3/test_io_integration.c \
+		$(srcdir)/../test/m3/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m3 -I$(srcdir)/../test/include \
+		-o $@ $(srcdir)/../test/m3/test_io_integration.c \
+		$(srcdir)/../test/m3/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M4 tests.
+test_async: $(srcdir)/../test/m4/test_async.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m4 \
+		-o $@ $(srcdir)/../test/m4/test_async.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_fctx: $(srcdir)/../test/m4/test_fctx.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m4 \
+		-o $@ $(srcdir)/../test/m4/test_fctx.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M5 tests.
+test_exec: $(srcdir)/../test/m5/test_exec.c \
+		$(srcdir)/../test/m5/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m5 \
+		-o $@ $(srcdir)/../test/m5/test_exec.c \
+		$(srcdir)/../test/m5/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_cross_wake: $(srcdir)/../test/m5/test_cross_wake.c \
+		$(srcdir)/../test/m5/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m5 \
+		-o $@ $(srcdir)/../test/m5/test_cross_wake.c \
+		$(srcdir)/../test/m5/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_deque: $(srcdir)/../test/m5/test_deque.c \
+		$(srcdir)/../test/m5/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m5 \
+		-o $@ $(srcdir)/../test/m5/test_deque.c \
+		$(srcdir)/../test/m5/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_steal: $(srcdir)/../test/m5/test_steal.c \
+		$(srcdir)/../test/m5/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m5 \
+		-o $@ $(srcdir)/../test/m5/test_steal.c \
+		$(srcdir)/../test/m5/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M7 tests.
+test_chan: $(srcdir)/../test/m7/test_chan.c \
+		$(srcdir)/../test/m7/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m7 \
+		-o $@ $(srcdir)/../test/m7/test_chan.c \
+		$(srcdir)/../test/m7/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M8 tests.
+test_proc: $(srcdir)/../test/m8/test_proc.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
+		-o $@ $(srcdir)/../test/m8/test_proc.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M7.5 tests.
+test_chan_mpmc_bcast: $(srcdir)/../test/m7/test_chan_mpmc_bcast.c \
+		$(srcdir)/../test/m7/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m7 \
+		-o $@ $(srcdir)/../test/m7/test_chan_mpmc_bcast.c \
+		$(srcdir)/../test/m7/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M9 tests.
+test_sync: $(srcdir)/../test/m9/test_sync.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
+		-o $@ $(srcdir)/../test/m9/test_sync.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M10 tests.
+test_sup: $(srcdir)/../test/m10/test_sup.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_sup.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_reg: $(srcdir)/../test/m10/test_reg.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_reg.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_svr: $(srcdir)/../test/m10/test_svr.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_svr.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_app: $(srcdir)/../test/m10/test_app.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_app.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M11 tests.
+test_mctx: $(srcdir)/../test/m11/test_mctx.c \
+		$(srcdir)/../test/m11/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m11 \
+		-o $@ $(srcdir)/../test/m11/test_mctx.c \
+		$(srcdir)/../test/m11/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_slab: $(srcdir)/../test/m11/test_slab.c \
+		$(srcdir)/../test/m11/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m11 \
+		-o $@ $(srcdir)/../test/m11/test_slab.c \
+		$(srcdir)/../test/m11/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M13 tests.
+test_rcu: $(srcdir)/../test/m13/test_rcu.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
+		-o $@ $(srcdir)/../test/m13/test_rcu.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_lrlock: $(srcdir)/../test/m13/test_lrlock.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
+		-o $@ $(srcdir)/../test/m13/test_lrlock.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_lockmgr: $(srcdir)/../test/m13/test_lockmgr.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
+		-o $@ $(srcdir)/../test/m13/test_lockmgr.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_coverage_pump: $(srcdir)/../test/coverage/test_coverage_pump.c \
+		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/coverage \
+		-o $@ $(srcdir)/../test/coverage/test_coverage_pump.c \
+		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# OTP-port tests.
+test_otp_proc_lib: $(srcdir)/../test/otp/test_otp_proc_lib.c \
+		$(srcdir)/../test/otp/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/otp \
+		-o $@ $(srcdir)/../test/otp/test_otp_proc_lib.c \
+		$(srcdir)/../test/otp/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_otp_gen_server: $(srcdir)/../test/otp/test_otp_gen_server.c \
+		$(srcdir)/../test/otp/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/otp \
+		-o $@ $(srcdir)/../test/otp/test_otp_gen_server.c \
+		$(srcdir)/../test/otp/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_otp_gen_server_phase2: $(srcdir)/../test/otp/test_otp_gen_server_phase2.c \
+		$(srcdir)/../test/otp/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/otp \
+		-o $@ $(srcdir)/../test/otp/test_otp_gen_server_phase2.c \
+		$(srcdir)/../test/otp/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_otp_supervisor: $(srcdir)/../test/otp/test_otp_supervisor.c \
+		$(srcdir)/../test/otp/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/otp \
+		-o $@ $(srcdir)/../test/otp/test_otp_supervisor.c \
+		$(srcdir)/../test/otp/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_observability: $(srcdir)/../test/m12/test_observability.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
+		-o $@ $(srcdir)/../test/m12/test_observability.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# PBT tests.  Build against the optional hegel-c library when
+# --with-hegel was passed at configure time; otherwise the test
+# stubs print SKIP and return 0.
+PBT_CFLAGS	= $(CFLAGS) $(CPPFLAGS) $(XTC_HEGEL_CFLAGS) -I$(srcdir)/../test/pbt
+PBT_LIBS	= $(STATIC_LIB) $(XTC_HEGEL_LIBS) $(LDFLAGS) $(LIBS)
+
+pbt_atomic: $(srcdir)/../test/pbt/pbt_atomic.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_atomic.c $(PBT_LIBS)
+
+pbt_alloc: $(srcdir)/../test/pbt/pbt_alloc.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_alloc.c $(PBT_LIBS)
+
+pbt_timer: $(srcdir)/../test/pbt/pbt_timer.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_timer.c $(PBT_LIBS)
+
+pbt_run_queue: $(srcdir)/../test/pbt/pbt_run_queue.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_run_queue.c $(PBT_LIBS)
+
+pbt_async: $(srcdir)/../test/pbt/pbt_async.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_async.c $(PBT_LIBS)
+
+pbt_proc: $(srcdir)/../test/pbt/pbt_proc.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_proc.c $(PBT_LIBS)
+
+pbt_slab: $(srcdir)/../test/pbt/pbt_slab.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_slab.c $(PBT_LIBS)
+
+pbt_lrlock: $(srcdir)/../test/pbt/pbt_lrlock.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_lrlock.c $(PBT_LIBS)
+
+pbt_chan: $(srcdir)/../test/pbt/pbt_chan.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_chan.c $(PBT_LIBS)
+
+pbt_deque: $(srcdir)/../test/pbt/pbt_deque.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_deque.c $(PBT_LIBS)
+
+# -------------------------------------------------------------------------
+# Install.
+# -------------------------------------------------------------------------
+install: all
+	$(INSTALL) -d $(DESTDIR)$(libdir)
+	$(INSTALL) -d $(DESTDIR)$(includedir)
+	$(INSTALL) -d $(DESTDIR)$(mandir)/man3
+	$(INSTALL) -d $(DESTDIR)$(mandir)/man7
+	$(INSTALL_DATA) $(STATIC_LIB) $(DESTDIR)$(libdir)/$(STATIC_LIB)
+	$(INSTALL_DATA) $(LIB_HDR_PUBLIC) $(DESTDIR)$(includedir)/xtc.h
+	for m in $(srcdir)/../man/man3/*.3; do \
+		$(INSTALL_DATA) $$m $(DESTDIR)$(mandir)/man3/; \
+	done
+	for m in $(srcdir)/../man/man7/*.7; do \
+		$(INSTALL_DATA) $$m $(DESTDIR)$(mandir)/man7/; \
+	done
+
+# -------------------------------------------------------------------------
+# Cleanup.
+# -------------------------------------------------------------------------
+clean:
+	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT)
+
+distclean: clean
+	$(RM) Makefile xtc_config.h config.log config.status
+	$(RM) -r autom4te.cache

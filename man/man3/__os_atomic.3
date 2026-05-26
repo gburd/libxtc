@@ -1,0 +1,113 @@
+.\" Copyright (c) 2026, The XTC Project — All rights reserved.
+.\" Use of this source code is governed by the PostgreSQL License.
+.Dd May 25, 2026
+.Dt __OS_ATOMIC 3
+.Os
+.Sh NAME
+.Nm __os_atomic_load ,
+.Nm __os_atomic_store ,
+.Nm __os_atomic_cas ,
+.Nm __os_atomic_fetch_add ,
+.Nm __os_atomic_fence ,
+.Nm __os_pause
+.Nd inline atomic primitives
+.Sh SYNOPSIS
+.In os_atomic.h
+.Pp
+For each integer width
+.Em SUF
+in
+.Brq Sy i32 , Sy i64 , Sy u32 , Sy u64
+and a corresponding C type
+.Em T :
+.Pp
+.Ft T
+.Fn __os_atomic_load_ Ns Em SUF "const T *p"
+.Ft void
+.Fn __os_atomic_store_ Ns Em SUF "T *p" "T v"
+.Ft int
+.Fn __os_atomic_cas_ Ns Em SUF "T *p" "T *expect" "T desired"
+.Ft T
+.Fn __os_atomic_fetch_add_ Ns Em SUF "T *p" "T delta"
+.Pp
+Pointer variants:
+.Ft "void *"
+.Fn __os_atomic_load_ptr "void *const *p"
+.Ft void
+.Fn __os_atomic_store_ptr "void **p" "void *v"
+.Ft int
+.Fn __os_atomic_cas_ptr "void **p" "void **expect" "void *desired"
+.Pp
+.Ft void
+.Fn __os_atomic_fence "void"
+.Ft void
+.Fn __os_pause "void"
+.Sh DESCRIPTION
+The
+.Nm __os_atomic_*
+family provides sequentially-consistent atomic primitives over the
+five core integer widths and over pointers.
+The library deliberately does not expose relaxed orderings in M1; if
+weaker orderings are required they are added in a later milestone
+under a distinct namespace.
+.Pp
+.Fn __os_atomic_load_ Ns Em SUF
+returns the current value of
+.Fa *p .
+.Pp
+.Fn __os_atomic_store_ Ns Em SUF
+stores
+.Fa v
+into
+.Fa *p .
+.Pp
+.Fn __os_atomic_cas_ Ns Em SUF
+performs a strong compare-and-swap.
+On success it returns 1 and writes
+.Fa desired
+into
+.Fa *p .
+On failure it returns 0 and overwrites
+.Fa *expect
+with the actual current value of
+.Fa *p
+so the caller can retry without an extra load.
+.Pp
+.Fn __os_atomic_fetch_add_ Ns Em SUF
+atomically adds
+.Fa delta
+to
+.Fa *p
+and returns the previous value.
+.Pp
+.Fn __os_atomic_fence
+issues a sequentially-consistent fence.
+.Pp
+.Fn __os_pause
+is a CPU spin hint
+.Pq Em pause No on x86, Em yield No on aarch64 .
+It is not a yield to the scheduler.
+.Sh RETURN VALUES
+The CAS variants return 1 on success, 0 on failure.
+Other functions return the value of the operation as documented.
+.Sh THREAD SAFETY
+All operations are safe to call concurrently from any thread.
+The seq-cst memory order means a store on one thread is immediately
+visible to a load on every other thread.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+int64_t counter = 0;
+(void)__os_atomic_fetch_add_i64(&counter, 1);
+
+int32_t v = 100, expect = 100;
+if (__os_atomic_cas_i32(&v, &expect, 200)) {
+        /* succeeded; v is now 200 */
+} else {
+        /* expect now holds the actual value */
+}
+.Ed
+.Sh SEE ALSO
+.Xr __os_mutex 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 0.0.1 (M1).
