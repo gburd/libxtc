@@ -1,0 +1,24 @@
+#!/bin/sh
+#-
+# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Use of this source code is governed by the ISC License.
+#
+# bench/conformance/w1_spawn/tokio/bench
+#   Thin wrapper so run.sh can find a stable path regardless of Cargo
+#   target layout.  Delegates to the release binary produced by:
+#     cargo build --release
+#
+# If the binary is absent (Rust / Cargo not installed), the script
+# exits 1; run.sh will silently skip this (workload, runtime) pair.
+
+set -eu
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+BINARY="${SELF_DIR}/target/release/bench"
+
+if [ ! -x "$BINARY" ]; then
+    printf 'tokio bench binary not built; run: cd %s && cargo build --release\n' \
+        "$SELF_DIR" >&2
+    exit 1
+fi
+
+exec "$BINARY" "$@"
