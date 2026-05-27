@@ -68,6 +68,9 @@
 /* POSIX poll backend */
 #undef XTC_IO_BACKEND_POLL
 
+/* POSIX select(2) backend (fallback) */
+#undef XTC_IO_BACKEND_SELECT
+
 /* Solaris event ports backend (stub) */
 #undef XTC_IO_BACKEND_SOLARIS
 

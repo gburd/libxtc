@@ -51,7 +51,8 @@ test_backend_name(const MunitParameter p[], void *d)
 	    strcmp(name, "kqueue")  == 0 ||
 	    strcmp(name, "iocp")    == 0 ||
 	    strcmp(name, "solaris") == 0 ||
-	    strcmp(name, "aix")     == 0);
+	    strcmp(name, "aix")     == 0 ||
+	    strcmp(name, "select")  == 0);
 	return MUNIT_OK;
 }
 

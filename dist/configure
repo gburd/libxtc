@@ -4180,7 +4180,7 @@ case "$xtc_io_backend" in
     if test "$have_kqueue" != yes; then
       as_fn_error $? "--with-io-backend=kqueue requires <sys/event.h>" "$LINENO" 5
     fi ;;
-  poll|iocp|solaris|aix) ;;
+  poll|iocp|solaris|aix|select) ;;
   *) as_fn_error $? "invalid --with-io-backend=$xtc_io_backend" "$LINENO" 5 ;;
 esac
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $xtc_io_backend" >&5
@@ -4232,6 +4232,10 @@ printf "%s\n" "#define XTC_IO_BACKEND_SOLARIS 1" >>confdefs.h
   aix) :
 
 printf "%s\n" "#define XTC_IO_BACKEND_AIX 1" >>confdefs.h
+ ;; #(
+  select) :
+
+printf "%s\n" "#define XTC_IO_BACKEND_SELECT 1" >>confdefs.h
  ;; #(
   *) :
      ;;

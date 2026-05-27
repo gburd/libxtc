@@ -1,0 +1,70 @@
+#!/bin/sh
+# dist/s_cfg
+# Lint tool: every xtc_cfg_* registration in source code must have a
+# matching documentation entry in docs/cfg.md.  This is the M14 GUC
+# discipline lint for xtc_cfg.
+#
+# Approach:
+#   1. grep -rn 'xtc_cfg_register_*' src/ → set of (name, type)
+#   2. grep -nE '^\| `[a-z_.]+` \|' docs/cfg.md → documented names
+#   3. report:
+#      - registered names not in cfg.md         FAIL
+#      - documented names not in source         WARN (orphan doc)
+#
+# v1 of s_cfg only emits warnings for the second class; FAIL only on
+# undocumented xtc_cfg registrations.
+
+set -eu
+
+DIST_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$DIST_DIR/.." && pwd)
+SRC="$ROOT/src"
+DOCS="$ROOT/docs"
+CFG_DOC="$DOCS/cfg.md"
+
+violations=0
+
+emit_fail() { echo "  [s_cfg] FAIL: $1" >&2; violations=$((violations + 1)); }
+emit_warn() { echo "  [s_cfg] warn: $1" >&2; }
+
+# Extract registered names from source.  Each xtc_cfg_register_TYPE
+# call begins with the name as a literal string in the first arg.
+registered=$(grep -rnE 'xtc_cfg_register_(bool|int|int64|double|string|enum)\(' \
+	"$SRC" --include='*.c' 2>/dev/null \
+	| sed -nE 's/.*xtc_cfg_register_[a-z0-9]+\(\s*"([a-zA-Z0-9_.]+)".*/\1/p' \
+	| sort -u)
+
+if [ ! -f "$CFG_DOC" ]; then
+	# v1 tolerance: if docs/cfg.md doesn't exist yet, just list what
+	# would need documenting and exit OK.
+	if [ -n "$registered" ]; then
+		echo "  [s_cfg] note: docs/cfg.md does not exist; would document:"
+		echo "$registered" | sed 's/^/    - /'
+	fi
+	echo "  [s_cfg] OK (no docs/cfg.md to lint against)"
+	exit 0
+fi
+
+documented=$(grep -nE '^\| `[a-z0-9_.]+` \|' "$CFG_DOC" \
+	| sed -nE 's/.*\| `([a-z0-9_.]+)` \|.*/\1/p' \
+	| sort -u)
+
+# Find registered names not documented.
+for name in $registered; do
+	if ! printf '%s\n' "$documented" | grep -qx "$name"; then
+		emit_fail "registered \"$name\" missing from docs/cfg.md"
+	fi
+done
+
+# Find documented names not registered.
+for name in $documented; do
+	if ! printf '%s\n' "$registered" | grep -qx "$name"; then
+		emit_warn "documented \"$name\" has no xtc_cfg_register_* call"
+	fi
+done
+
+if [ "$violations" -gt 0 ]; then
+	echo "  [s_cfg] $violations violation(s)" >&2
+	exit 1
+fi
+echo "  [s_cfg] OK"
