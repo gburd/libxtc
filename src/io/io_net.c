@@ -21,6 +21,7 @@
 #include "xtc_net.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,9 +51,28 @@
 
 /* ----- nonblock / cloexec --------------------------------- */
 
+#if defined(_WIN32)
+/* Initialize Winsock on first call.  Idempotent. */
+static void
+__win_wsa_init(void)
+{
+	static _Atomic int done = 0;
+	int expect = 0;
+	if (atomic_compare_exchange_strong(&done, &expect, 1)) {
+		WSADATA wsa;
+		(void)WSAStartup(MAKEWORD(2, 2), &wsa);
+		/* No WSACleanup paired — process-wide one-shot. */
+	}
+}
+#  define WSA_INIT_ONCE() __win_wsa_init()
+#else
+#  define WSA_INIT_ONCE() ((void)0)
+#endif
+
 int
 xtc_net_setnonblock(int fd)
 {
+	WSA_INIT_ONCE();
 #if defined(_WIN32)
 	u_long mode = 1;
 	if (ioctlsocket(fd, FIONBIO, &mode) != 0) return XTC_E_INTERNAL;
@@ -173,6 +193,7 @@ xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
                const xtc_tcp_opts_t *opts, int *out_fd)
 {
 	int fd, rc;
+	WSA_INIT_ONCE();
 	if (out_fd == NULL || port <= 0 || port > 65535)
 		return XTC_E_INVAL;
 	if (fam != XTC_NET_INET) return XTC_E_NOSYS;   /* v1 INET only */
@@ -206,6 +227,7 @@ xtc_net_dial(xtc_net_family_t fam, const char *host, int port,
              const xtc_tcp_opts_t *opts, int *out_fd)
 {
 	int fd, rc;
+	WSA_INIT_ONCE();
 	if (out_fd == NULL || host == NULL || port <= 0 || port > 65535)
 		return XTC_E_INVAL;
 	if (fam != XTC_NET_INET) return XTC_E_NOSYS;
