@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
@@ -8,9 +8,10 @@
  *	Networking helpers built on top of POSIX sockets + a thin
  *	platform fallback for Windows (Winsock).  See xtc_net.h.
  *
- *	M19.1 v1: TCP listen/dial with knobs, UDS listen/dial,
- *	credential passing.  Accept-distribution scaling and DNS
- *	resolution are tracked for v2.
+ *	Supported families: XTC_NET_INET (IPv4), XTC_NET_INET6 (IPv6).
+ *	DNS resolution uses getaddrinfo for hostname lookup.
+ *	TCP listen/dial with tunable options, UDS listen/dial (Unix),
+ *	and credential passing (Linux SO_PEERCRED, BSD LOCAL_PEERCRED).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -41,6 +42,7 @@
 #  include <netinet/in.h>
 #  include <netinet/tcp.h>
 #  include <arpa/inet.h>
+#  include <netdb.h>
 #  include <fcntl.h>
 #  include <unistd.h>
 #endif
@@ -61,7 +63,7 @@ __win_wsa_init(void)
 	if (atomic_compare_exchange_strong(&done, &expect, 1)) {
 		WSADATA wsa;
 		(void)WSAStartup(MAKEWORD(2, 2), &wsa);
-		/* No WSACleanup paired — process-wide one-shot. */
+		/* No WSACleanup paired -- process-wide one-shot. */
 	}
 }
 #  define WSA_INIT_ONCE() __win_wsa_init()
@@ -173,32 +175,64 @@ xtc_net_apply_tcp_opts(int fd, const xtc_tcp_opts_t *opts)
 
 /* ----- TCP listen / dial ---------------------------------- */
 
+/* Resolve hostname/port to sockaddr using getaddrinfo.
+ * Returns the first matching address for the requested family.
+ * For listen, host=NULL binds to all interfaces. */
 static int
-__sockaddr_inet(const char *host, int port, struct sockaddr_in *out)
+__resolve_addr(xtc_net_family_t fam, const char *host, int port,
+               struct sockaddr_storage *out, socklen_t *outlen)
 {
-	memset(out, 0, sizeof *out);
-	out->sin_family = AF_INET;
-	out->sin_port = htons((uint16_t)port);
-	if (host == NULL || host[0] == '\0') {
-		out->sin_addr.s_addr = htonl(INADDR_ANY);
-	} else {
-		if (inet_pton(AF_INET, host, &out->sin_addr) != 1)
-			return XTC_E_INVAL;
+	struct addrinfo hints, *res, *rp;
+	char portbuf[8];
+	int rc;
+
+	memset(&hints, 0, sizeof hints);
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE;  /* for listen with NULL host */
+
+	if (fam == XTC_NET_INET)
+		hints.ai_family = AF_INET;
+	else if (fam == XTC_NET_INET6)
+		hints.ai_family = AF_INET6;
+	else
+		return XTC_E_INVAL;
+
+	snprintf(portbuf, sizeof portbuf, "%d", port);
+	rc = getaddrinfo(host, portbuf, &hints, &res);
+	if (rc != 0 || res == NULL)
+		return XTC_E_INVAL;
+
+	/* Use first result that matches. */
+	for (rp = res; rp != NULL; rp = rp->ai_next) {
+		if ((fam == XTC_NET_INET && rp->ai_family == AF_INET) ||
+		    (fam == XTC_NET_INET6 && rp->ai_family == AF_INET6)) {
+			memcpy(out, rp->ai_addr, rp->ai_addrlen);
+			*outlen = (socklen_t)rp->ai_addrlen;
+			freeaddrinfo(res);
+			return XTC_OK;
+		}
 	}
-	return XTC_OK;
+	freeaddrinfo(res);
+	return XTC_E_INVAL;
 }
 
 int
 xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
                const xtc_tcp_opts_t *opts, int *out_fd)
 {
-	int fd, rc;
+	int fd, rc, v;
+	struct sockaddr_storage sa;
+	socklen_t salen;
+	int af;
+
 	WSA_INIT_ONCE();
 	if (out_fd == NULL || port <= 0 || port > 65535)
 		return XTC_E_INVAL;
-	if (fam != XTC_NET_INET) return XTC_E_NOSYS;   /* v1 INET only */
+	if (fam != XTC_NET_INET && fam != XTC_NET_INET6)
+		return XTC_E_INVAL;
 
-	fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+	af = (fam == XTC_NET_INET6) ? AF_INET6 : AF_INET;
+	fd = (int)socket(af, SOCK_STREAM, 0);
 	if (fd < 0) return XTC_E_INTERNAL;
 
 	if ((rc = xtc_net_setnonblock(fd)) != XTC_OK) {
@@ -206,14 +240,17 @@ xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
 	}
 	(void)xtc_net_apply_tcp_opts(fd, opts);
 
-	{
-		struct sockaddr_in sa;
-		if ((rc = __sockaddr_inet(host, port, &sa)) != XTC_OK) {
-			(void)close(fd); return rc;
-		}
-		if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
-			(void)close(fd); return XTC_E_INTERNAL;
-		}
+	/* For IPv6 sockets, set IPV6_V6ONLY to avoid dual-stack issues. */
+	if (fam == XTC_NET_INET6) {
+		v = 1;
+		(void)setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v, sizeof v);
+	}
+
+	if ((rc = __resolve_addr(fam, host, port, &sa, &salen)) != XTC_OK) {
+		(void)close(fd); return rc;
+	}
+	if (bind(fd, (struct sockaddr *)&sa, salen) != 0) {
+		(void)close(fd); return XTC_E_INTERNAL;
 	}
 	if (listen(fd, 128) != 0) {
 		(void)close(fd); return XTC_E_INTERNAL;
@@ -227,34 +264,38 @@ xtc_net_dial(xtc_net_family_t fam, const char *host, int port,
              const xtc_tcp_opts_t *opts, int *out_fd)
 {
 	int fd, rc;
+	struct sockaddr_storage sa;
+	socklen_t salen;
+	int af;
+
 	WSA_INIT_ONCE();
 	if (out_fd == NULL || host == NULL || port <= 0 || port > 65535)
 		return XTC_E_INVAL;
-	if (fam != XTC_NET_INET) return XTC_E_NOSYS;
+	if (fam != XTC_NET_INET && fam != XTC_NET_INET6)
+		return XTC_E_INVAL;
 
-	fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+	if ((rc = __resolve_addr(fam, host, port, &sa, &salen)) != XTC_OK)
+		return rc;
+
+	af = (fam == XTC_NET_INET6) ? AF_INET6 : AF_INET;
+	fd = (int)socket(af, SOCK_STREAM, 0);
 	if (fd < 0) return XTC_E_INTERNAL;
 	if ((rc = xtc_net_setnonblock(fd)) != XTC_OK) {
 		(void)close(fd); return rc;
 	}
 	(void)xtc_net_apply_tcp_opts(fd, opts);
-	{
-		struct sockaddr_in sa;
-		if ((rc = __sockaddr_inet(host, port, &sa)) != XTC_OK) {
-			(void)close(fd); return rc;
-		}
-		if (connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+
+	if (connect(fd, (struct sockaddr *)&sa, salen) != 0) {
 #if defined(_WIN32)
-			int we = WSAGetLastError();
-			if (we != WSAEWOULDBLOCK && we != WSAEINPROGRESS) {
-				(void)close(fd); return XTC_E_INTERNAL;
-			}
-#else
-			if (errno != EINPROGRESS && errno != EAGAIN) {
-				(void)close(fd); return XTC_E_INTERNAL;
-			}
-#endif
+		int we = WSAGetLastError();
+		if (we != WSAEWOULDBLOCK && we != WSAEINPROGRESS) {
+			(void)close(fd); return XTC_E_INTERNAL;
 		}
+#else
+		if (errno != EINPROGRESS && errno != EAGAIN) {
+			(void)close(fd); return XTC_E_INTERNAL;
+		}
+#endif
 	}
 	*out_fd = fd;
 	return XTC_OK;
@@ -315,7 +356,7 @@ xtc_net_unix_dial(const char *path, int *out_fd)
 }
 
 /* Credential passing: send/recv helper.  Linux uses SCM_CREDENTIALS;
- * BSD/macOS use LOCAL_PEERCRED via getsockopt — simpler.  We expose a
+ * BSD/macOS use LOCAL_PEERCRED via getsockopt -- simpler.  We expose a
  * unified API: send routes plain bytes; recv extracts uid/gid from
  * the peer at the time of receipt. */
 
@@ -369,7 +410,7 @@ xtc_net_unix_recv_creds(int fd, void *buf, size_t buflen,
 	if (out_gid) *out_gid = 0;
 	return XTC_OK;
 }
-#else /* _WIN32 — UDS not yet supported on Windows */
+#else /* _WIN32 -- UDS not yet supported on Windows */
 int xtc_net_unix_listen(const char *p, int *o)
 { (void)p; (void)o; return XTC_E_NOSYS; }
 int xtc_net_unix_dial(const char *p, int *o)

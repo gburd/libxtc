@@ -18,18 +18,18 @@ make examples
 
 ## What each example proves
 
-**01** — the core async/await contract works end-to-end with a real
+**01** -- the core async/await contract works end-to-end with a real
 loop, single fiber, single yield.
 
-**02** — message passing across processes; the messaging API is
+**02** -- message passing across processes; the messaging API is
 sufficient to build request/reply RPC patterns; sender pid is encoded
 in the payload by user-space (no implicit reply-to).
 
-**03** — the M10/M10.5 supervisor stack composes: app owns loop +
+**03** -- the M10/M10.5 supervisor stack composes: app owns loop +
 registry + root sup; sup owns children with restart policy; an
 external watcher proc can request orderly shutdown via `xtc_app_stop`.
 
-**04** — the M13c lock manager detects real deadlocks
+**04** -- the M13c lock manager detects real deadlocks
 (circular wait), aborts a victim per policy, and surfaces stats.
 
 ## Building

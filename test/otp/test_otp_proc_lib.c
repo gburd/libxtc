@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/otp/test_otp_proc_lib.c — port of selected proc_lib_SUITE
+ * test/otp/test_otp_proc_lib.c -- port of selected proc_lib_SUITE
  * test cases from `lib/stdlib/test/proc_lib_SUITE.erl` (Erlang/OTP).
  *
  * proc_lib in OTP is the lower-level "spawn a properly-supervised
@@ -46,7 +46,7 @@
 #include "xtc_proc.h"
 #include "xtc_int.h"
 
-/* ----- proc_lib:spawn — basic ---------------------------------- */
+/* ----- proc_lib:spawn -- basic ---------------------------------- */
 
 static _Atomic int g_spawned_ran;
 
@@ -76,7 +76,7 @@ test_t_spawn(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-/* ----- proc_lib:spawn_link — abnormal exit propagates ----------- */
+/* ----- proc_lib:spawn_link -- abnormal exit propagates ----------- */
 
 static _Atomic int g_link_signal_seen;
 static _Atomic int g_link_signal_reason;
@@ -140,7 +140,7 @@ test_spawn_link_abnormal(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-/* ----- proc_lib:spawn_monitor — DOWN message ------------------- */
+/* ----- proc_lib:spawn_monitor -- DOWN message ------------------- */
 
 static _Atomic int g_monitor_down_seen;
 

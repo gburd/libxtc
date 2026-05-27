@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/conformance/include/hist.h
@@ -16,20 +16,20 @@
  *
  * Precision
  *   Each power-of-2 band is divided into 2^sub_bits sub-buckets.
- *   sub_bits=7 → 128 sub-buckets → ≤0.8% relative error (≈2 decimal sig-figs).
- *   sub_bits=4 → 16  sub-buckets → ≤6%   (≈1 decimal sig-fig).
- *   sub_bits=10 → 1024 sub-buckets → ≤0.1% (≈3 decimal sig-figs).
+ *   sub_bits=7 -> 128 sub-buckets -> <=0.8% relative error (~=2 decimal sig-figs).
+ *   sub_bits=4 -> 16  sub-buckets -> <=6%   (~=1 decimal sig-fig).
+ *   sub_bits=10 -> 1024 sub-buckets -> <=0.1% (~=3 decimal sig-figs).
  *
  * Range
- *   1 ns to HIST_MAX_NS (60 × 10^9 ns = 60 s).  Values outside this range
+ *   1 ns to HIST_MAX_NS (60 x 10^9 ns = 60 s).  Values outside this range
  *   are clamped; zero is treated as 1.
  *
  * Bucket layout
- *   Linear region  (band 0): indices [0, S)        — one count per nanosecond.
- *   Exponential band k≥1: indices [S·k, S·(k+1))  — each bucket spans 2^(k-1) ns.
+ *   Linear region  (band 0): indices [0, S)        -- one count per nanosecond.
+ *   Exponential band k>=1: indices [S*k, S*(k+1))  -- each bucket spans 2^(k-1) ns.
  *   where S = 2^sub_bits.
  *
- *   Total buckets = S × (K_max + 1), where K_max = msb(HIST_MAX_NS) − sub_bits + 1.
+ *   Total buckets = S x (K_max + 1), where K_max = msb(HIST_MAX_NS) - sub_bits + 1.
  *   For sub_bits=7: S=128, K_max=29, total=3840 buckets (30 KB at uint64_t).
  *
  * Headers required
@@ -69,7 +69,7 @@ typedef struct {
 } hist_t;
 
 /*
- * hist_init — allocate and initialise the histogram.
+ * hist_init -- allocate and initialise the histogram.
  *
  * sub_bits: number of sub-bucket bits; clamped to [1, 10].
  *   Use HIST_SUB_BITS_DEFAULT (7) for ~2 significant decimal digits.
@@ -79,36 +79,36 @@ typedef struct {
 int      hist_init(hist_t *h, uint32_t sub_bits);
 
 /*
- * hist_fini — free the bucket array and zero the struct.
+ * hist_fini -- free the bucket array and zero the struct.
  */
 void     hist_fini(hist_t *h);
 
 /*
- * hist_record — add one observation of value_ns nanoseconds.
+ * hist_record -- add one observation of value_ns nanoseconds.
  * 0 is treated as 1; values above HIST_MAX_NS are clamped.
  */
 void     hist_record(hist_t *h, uint64_t value_ns);
 
 /*
- * hist_percentile — return the value at the pct-th percentile.
+ * hist_percentile -- return the value at the pct-th percentile.
  * pct is in [0.0, 100.0].  Returns 0 if no observations recorded.
  */
 uint64_t hist_percentile(const hist_t *h, double pct);
 
 /*
- * hist_dump_csv — write non-empty buckets to fp as CSV.
+ * hist_dump_csv -- write non-empty buckets to fp as CSV.
  * Columns: lo_ns, hi_ns, count, cumulative_pct
  * Requires <stdio.h> to be included before this header.
  */
 void     hist_dump_csv(const hist_t *h, FILE *fp);
 
 /* -------------------------------------------------------------------------
- * Implementation — compiled only when HIST_IMPLEMENTATION is defined.
+ * Implementation -- compiled only when HIST_IMPLEMENTATION is defined.
  * ------------------------------------------------------------------------- */
 #ifdef HIST_IMPLEMENTATION
 
 /*
- * hist__msb — position of the most-significant set bit (0-indexed from LSB).
+ * hist__msb -- position of the most-significant set bit (0-indexed from LSB).
  * Requires v >= 1.
  */
 static uint32_t
@@ -126,10 +126,10 @@ hist__msb(uint64_t v)
 }
 
 /*
- * hist__bucket — map a clamped, non-zero value to its bucket index.
+ * hist__bucket -- map a clamped, non-zero value to its bucket index.
  *
  * Linear region (band 0): index = value        for value in [0, S).
- * Exponential band k≥1:  index = S*k + sub     for value in [S·2^(k-1), S·2^k).
+ * Exponential band k>=1:  index = S*k + sub     for value in [S*2^(k-1), S*2^k).
  *   where sub = (value >> (k-1)) - S.
  */
 static uint32_t
@@ -148,7 +148,7 @@ hist__bucket(const hist_t *h, uint64_t v)
 }
 
 /*
- * hist__bucket_lo — reconstruct the lower bound of the value range for idx.
+ * hist__bucket_lo -- reconstruct the lower bound of the value range for idx.
  */
 static uint64_t
 hist__bucket_lo(const hist_t *h, uint32_t idx)
@@ -166,7 +166,7 @@ hist__bucket_lo(const hist_t *h, uint32_t idx)
 }
 
 /*
- * hist__bucket_step — width (in ns) of bucket idx.
+ * hist__bucket_step -- width (in ns) of bucket idx.
  */
 static uint64_t
 hist__bucket_step(const hist_t *h, uint32_t idx)
@@ -193,8 +193,8 @@ hist_init(hist_t *h, uint32_t sub_bits)
 
     sub_count = 1u << sub_bits;
     /*
-     * Band k covers [S·2^(k-1), S·2^k).  We need the largest band K
-     * such that S·2^K > HIST_MAX_NS, i.e. K = msb(HIST_MAX_NS) - sub_bits + 1.
+     * Band k covers [S*2^(k-1), S*2^k).  We need the largest band K
+     * such that S*2^K > HIST_MAX_NS, i.e. K = msb(HIST_MAX_NS) - sub_bits + 1.
      */
     msb_max  = hist__msb(HIST_MAX_NS);      /* 35 for 60 000 000 000 */
     n_bands  = msb_max - sub_bits + 1u;     /* number of exponential bands */

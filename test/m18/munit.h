@@ -1,4 +1,4 @@
-/* µnit Testing Framework
+/* unit Testing Framework
  * Copyright (c) 2013-2017 Evan Nemerson <evan@nemerson.com>
  *
  * Permission is hereby granted, free of charge, to any person

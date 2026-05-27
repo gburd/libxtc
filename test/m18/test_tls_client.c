@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
@@ -36,7 +36,7 @@
 #include "xtc_tls.h"
 
 /* =========================================================================
- * OpenSSL-backend branch — full implementation.
+ * OpenSSL-backend branch -- full implementation.
  * ======================================================================= */
 #if defined(XTC_TLS_BACKEND_OPENSSL)
 
@@ -113,7 +113,7 @@ static const char TEST_KEY[] =
     "-----END PRIVATE KEY-----\n";
 
 /* -------------------------------------------------------------------------
- * Wrong CA — a different self-signed RSA-2048 cert.
+ * Wrong CA -- a different self-signed RSA-2048 cert.
  *
  * Generated with:
  *   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
@@ -334,7 +334,7 @@ done:
  * test_client_handshake_roundtrip:
  *
  *   Full loopback, no peer verification:
- *     - socketpair → non-blocking client fd + blocking server fd
+ *     - socketpair -> non-blocking client fd + blocking server fd
  *     - server thread: raw SSL_accept, read "hello" echo back
  *     - client: xtc_tls_ctx_create(CLIENT, ...) + xtc_tls_create
  *               + xtc_tls_handshake loop + xtc_tls_write + xtc_tls_read
@@ -418,12 +418,12 @@ test_client_handshake_roundtrip(const MunitParameter params[], void *data)
 /* -------------------------------------------------------------------------
  * test_client_verify_peer:
  *
- *   Sub-case A — Good CA:
+ *   Sub-case A -- Good CA:
  *     Client uses ca_file = TEST_CERT_PATH + verify_peer = 1.
  *     The server presents TEST_CERT (self-signed; it IS its own CA).
  *     Handshake must succeed; round-trip verifies data flow.
  *
- *   Sub-case B — Bad CA:
+ *   Sub-case B -- Bad CA:
  *     Client uses ca_file = WRONG_CA_PATH + verify_peer = 1.
  *     WRONG_CA does not sign TEST_CERT; OpenSSL sends a certificate
  *     alert.  xtc_tls_handshake must return XTC_E_INTERNAL.
@@ -446,7 +446,7 @@ test_client_verify_peer(const MunitParameter params[], void *data)
     (void)data;
 
     /* ==================================================================
-     * Sub-case A: good CA — handshake succeeds and data flows.
+     * Sub-case A: good CA -- handshake succeeds and data flows.
      * ================================================================== */
 
     memset(&opts, 0, sizeof(opts));
@@ -494,7 +494,7 @@ test_client_verify_peer(const MunitParameter params[], void *data)
     close(sv[1]);
 
     /* ==================================================================
-     * Sub-case B: bad CA — handshake must fail with XTC_E_INTERNAL.
+     * Sub-case B: bad CA -- handshake must fail with XTC_E_INTERNAL.
      * ================================================================== */
 
     memset(&opts, 0, sizeof(opts));
@@ -526,7 +526,7 @@ test_client_verify_peer(const MunitParameter params[], void *data)
     munit_assert_int(rc, ==, XTC_E_INTERNAL);
 
     /* Join server; it may have failed in SSL_accept (rc==2) because
-     * the client sent a certificate alert — that is expected here. */
+     * the client sent a certificate alert -- that is expected here. */
     pthread_join(tid, NULL);
     munit_assert_int(sa.rc, !=, 0);   /* server did NOT complete normally */
 
@@ -539,7 +539,7 @@ test_client_verify_peer(const MunitParameter params[], void *data)
 }
 
 /* =========================================================================
- * Suite setup / teardown — write/remove temp PEM files.
+ * Suite setup / teardown -- write/remove temp PEM files.
  * ======================================================================= */
 
 static void *
@@ -587,7 +587,7 @@ static const MunitSuite suite = {
     "/m18/tls_client", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE
 };
 
-#else  /* !XTC_TLS_BACKEND_OPENSSL — skip stubs */
+#else  /* !XTC_TLS_BACKEND_OPENSSL -- skip stubs */
 
 /*
  * TLS backend not compiled in.  Each test function returns MUNIT_SKIP

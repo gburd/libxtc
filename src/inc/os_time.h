@@ -1,10 +1,10 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/os_time.h
  *	Monotonic and wall-clock time, plus a sleep primitive.
- *	Times are nanoseconds in int64_t.  See M1_CLAIMS.md, Tm1–Tm4.
+ *	Times are nanoseconds in int64_t.  See M1_CLAIMS.md, Tm1-Tm4.
  */
 
 #ifndef XTC_OS_TIME_H

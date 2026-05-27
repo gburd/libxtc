@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * examples/03_supervised_app.c — OTP-style app: a root supervisor
+ * examples/03_supervised_app.c -- OTP-style app: a root supervisor
  * starts two children (a counter-server and a stats-printer); the
  * supervisor's one_for_all strategy ensures they are restarted
  * together if either crashes.

@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/dist/test_s_include_idempotent.sh — T3
+# test/dist/test_s_include_idempotent.sh -- T3
 set -eu
 : "${XTC_SRC_DIR:?}"
 

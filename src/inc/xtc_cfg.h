@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_cfg.h
- *	Typed runtime-configurable settings registry — the xtc
+ *	Typed runtime-configurable settings registry -- the xtc
  *	equivalent of PostgreSQL's GUC framework.  Each variable has:
  *	  - a name (string key)
  *	  - a type (int, int64, double, bool, string, enum)
@@ -25,9 +25,9 @@
  *	    of vars; M11.5 swaps in xtc_chash for thousands).
  *	  - Each var holds its declared type + current value via union.
  *
- *	v1 omits: per-session/per-database scoping (PG-specific),
- *	configuration-file parsing (postgresql.conf reader is M16
- *	work), SIGHUP-driven reload (signal integration is separate).
+ *	Not yet implemented: per-session/per-database scoping,
+ *	configuration-file parsing, SIGHUP-driven reload.
+ *	See docs/KNOWN_ISSUES.md for tracking.
  */
 
 #ifndef XTC_CFG_H

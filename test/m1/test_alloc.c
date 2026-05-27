@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m1/test_alloc.c — verifies M1_CLAIMS.md M1–M8.
+ * test/m1/test_alloc.c -- verifies M1_CLAIMS.md M1-M8.
  */
 
 #define _POSIX_C_SOURCE 200112L  /* posix_memalign */
@@ -128,7 +128,7 @@ test_aligned(const MunitParameter p[], void *d)
 	 * released via `_aligned_free`, NOT plain `free`.  xtc's hook
 	 * surface routes everything through a single free path; rather
 	 * than complicate the contract for one platform, we skip the
-	 * Windows aligned-alloc test — the underlying mechanism is
+	 * Windows aligned-alloc test -- the underlying mechanism is
 	 * exercised by the loop's stack-allocation path. */
 	return MUNIT_SKIP;
 #endif

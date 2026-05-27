@@ -1,11 +1,11 @@
 #!/usr/bin/env escript
 %%! -smp enable
 %%-
-%% Copyright (c) 2026, The XTC Project — All rights reserved.
+%% Copyright (c) 2026, The XTC Project
 %% Use of this source code is governed by the ISC License.
 %%
 %% bench/conformance/w6_tail/erlang/main.erl
-%%   W6: tail latency under backpressure — Erlang runtime.
+%%   W6: tail latency under backpressure -- Erlang runtime.
 %%
 %%   A bounded-queue server process accepts synchronous {call, ...} messages
 %%   from N generator processes.  Generators use a manual synchronous-call
@@ -17,7 +17,7 @@
 %%     1. Pre-check: generators read the server's message_queue_len before
 %%        sending; if it is already >= cap they reject immediately.
 %%     2. Timeout: if the pre-check passes but the server is slow to reply,
-%%        the caller times out after Timeout ms (default 5 ms) → rejection.
+%%        the caller times out after Timeout ms (default 5 ms) -> rejection.
 %%
 %%   Latency is measured server-side: TsRecv (when the server dequeues the
 %%   message) minus TsSend (embedded in the message by the caller).  This
@@ -150,7 +150,7 @@ gen_loop(Server, Cap, Remaining, Timeout, Parent, Admitted, Rejected) ->
                 gen_loop(Server, Cap, Remaining - 1, Timeout,
                          Parent, Admitted + 1, Rejected)
         after Timeout ->
-            %% Timed out: call took longer than Timeout ms → rejection.
+            %% Timed out: call took longer than Timeout ms -> rejection.
             gen_loop(Server, Cap, Remaining - 1, Timeout,
                      Parent, Admitted, Rejected + 1)
         end
@@ -178,7 +178,7 @@ collect_latencies(N, Acc) ->
     after 30000 ->
         %% Safety valve: if no {lat, _} arrives within 30 s, stop
         %% collecting to avoid a deadlock (can happen if a caller timed
-        %% out AFTER the server had started handling the call — the
+        %% out AFTER the server had started handling the call -- the
         %% server still sends {lat, _} and {reply, Ref, ok} to the
         %% caller, but the caller has moved on; the lat message arrives
         %% here later).  The after branch returns the partial list.

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/os/asm/fctx_x86_64_sysv.S
@@ -26,7 +26,7 @@
  *	(post-call rule), we choose a saved-sp with %16 == 0 instead
  *	of 8.  The same pop+ret instructions produce different
  *	post-ret alignments depending on the alignment of the
- *	loaded-from sp — which is exactly what we need.
+ *	loaded-from sp -- which is exactly what we need.
  *
  *	Layout of a saved context (offsets from the saved %rsp):
  *	  +0   rbx

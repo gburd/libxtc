@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m11/test_mctx.c — verifies M11 memory contexts.
+ * test/m11/test_mctx.c -- verifies M11 memory contexts.
  */
 
 #include <stdint.h>

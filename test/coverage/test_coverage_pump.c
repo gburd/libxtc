@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/coverage/test_coverage_pump.c — drives execution through
+ * test/coverage/test_coverage_pump.c -- drives execution through
  * the public-API surface that the audit flagged as untested.  One
  * test per uncovered function (or small cluster).  Goal: push
  * line coverage from ~80% to >90%.
@@ -210,7 +210,7 @@ linker_proc(void *arg)
 		return;
 	}
 	(void)xtc_unlink(target);   /* exercise unlink */
-	/* Re-link before the target dies (or after — either is fine). */
+	/* Re-link before the target dies (or after -- either is fine). */
 	rc = xtc_link(target);
 	if (rc != XTC_OK) {
 		atomic_fetch_add(&g_link_died_seen, 1);

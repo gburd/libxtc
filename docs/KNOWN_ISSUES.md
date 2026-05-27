@@ -1,15 +1,42 @@
-# Known issues — pending investigation
+# Known issues -- pending investigation
+
+## RESOLVED: xtc_slab SHARED_MEMORY mode cross-process support
+
+**Status:** FIXED in this round.
+
+**Previous issue:** The SHARED_MEMORY mode tests used MAP_PRIVATE | MAP_ANONYMOUS,
+which is single-process memory, not actual shared memory.  Additionally, the
+slab's shm_cursor was stored in per-process private memory, so two processes
+with their own xtc_slab_t structs would each start carving chunks at offset 0,
+causing collisions.
+
+**Fix:** The cursor now lives in a 64-byte header at the start of the shared
+region, using atomic CAS for coordination.  First attacher initializes the
+header (magic=0x5854435F534C4142 "XTC_SLAB", version=1, cursor=64); subsequent
+attachers verify magic and use the existing cursor.
+
+**Verification:** New test file test/m11/test_slab_shm.c exercises real
+cross-process sharing via fork(2) + POSIX shm_open:
+  - test_shm_basic_fork: parent allocs, child reads+modifies via offset
+  - test_shm_alloc_in_child: child allocs, parent reads via offset
+  - test_shm_concurrent_alloc: 50 concurrent allocs from each process, no overlap
+  - test_shm_size_too_small: XTC_E_RESOURCE when region < header+chunk
+  - test_shm_resolve_invalid_offset: NULL on junk offsets
+
+The previous misleading tests have been renamed to clarify their scope:
+  - test_slab.c: test_shm_offset_resolve -> test_shm_offset_resolve_single_process
+  - pbt_slab.c: prop_shm_offset_roundtrip -> prop_shm_offset_roundtrip_single_process
 
 ## Windows: `test_proc::selective_receive` regression
 
 **Status:** failing on Windows MinGW after this round; was passing 36/36 last round.
 
-**Symptom:** the test sends 5 messages to a proc before calling `xtc_loop_run`; the proc uses `xtc_recv_match` to selectively pick value 42 first, then drains 1, 2, 3, 4 in order. On Windows specifically, this fails — likely a timing/ordering issue with the IOCP wakeup path.
+**Symptom:** the test sends 5 messages to a proc before calling `xtc_loop_run`; the proc uses `xtc_recv_match` to selectively pick value 42 first, then drains 1, 2, 3, 4 in order. On Windows specifically, this fails -- likely a timing/ordering issue with the IOCP wakeup path.
 
 **What changed this round:**
-- 4 new modules linked into `libxtc.a` (log, cfg, inject, pdict) — none of which touch proc/recv
-- `xtc_res` gained alert callbacks — no path through proc/recv exercises them in the test
-- `__mbox_deliver` operator-precedence fix — semantically equivalent for the tested case (alive=1, cap=0)
+- 4 new modules linked into `libxtc.a` (log, cfg, inject, pdict) -- none of which touch proc/recv
+- `xtc_res` gained alert callbacks -- no path through proc/recv exercises them in the test
+- `__mbox_deliver` operator-precedence fix -- semantically equivalent for the tested case (alive=1, cap=0)
 
 **Hypothesis:** the new modules' static initialization or symbol-table churn may have shifted memory layout, surfacing a latent ordering bug in the Windows IOCP path. On Linux/FreeBSD/illumos the test passes consistently.
 
@@ -23,7 +50,7 @@
 
 ## test_alloc M7 skipped on Windows
 
-**Status:** intentional — `_aligned_malloc` returns memory that requires `_aligned_free`, not plain `free`. The hook surface uses a single free path. Keeping the M7 case Windows-skipped is correct.
+**Status:** intentional -- `_aligned_malloc` returns memory that requires `_aligned_free`, not plain `free`. The hook surface uses a single free path. Keeping the M7 case Windows-skipped is correct.
 
 ## svr.c branch coverage 50.78%
 
@@ -49,4 +76,25 @@
 leaking entries on `xtc_loop_fini`; consecutive PBT loops were aliasing
 stale entries.  Fix: added `__xtc_proc_loop_unregister(loop)` called from
 `xtc_loop_fini`.  Both properties are re-enabled.
+
+## xtc_cfg: missing features
+
+**Status:** Planned for M16.
+
+The following xtc_cfg features are not yet implemented:
+- Per-session/per-database scoping (PostgreSQL-specific)
+- Configuration-file parsing (postgresql.conf reader)
+- SIGHUP-driven reload (signal integration)
+
+These are tracked here rather than inline to avoid "v1" language in the code.
+
+## xtc_slab_pressure_stop API incomplete
+
+**Status:** Deferred.
+
+The PSI pressure listener (`xtc_slab_pressure_listen`) cannot be cleanly
+stopped because it doesn't return a handle.  A future API change will add
+`xtc_slab_pressure_listen_ex()` returning an opaque handle and
+`xtc_slab_pressure_stop(handle)`.  For now, the listener runs until
+process exit.
 

@@ -1,11 +1,11 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
  *
  * src/io/io_select.c
- *	The select(2) backend.  The most portable IO multiplexor —
+ *	The select(2) backend.  The most portable IO multiplexor --
  *	works on every POSIX-ish system and Windows Winsock.
  *	Capped at FD_SETSIZE descriptors (typically 1024 on Linux,
  *	configurable per OS).  Use poll/epoll/kqueue if you have

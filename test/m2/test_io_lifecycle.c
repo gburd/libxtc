@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m2/test_io_lifecycle.c — verifies M2_CLAIMS.md I1, I2, I3.
+ * test/m2/test_io_lifecycle.c -- verifies M2_CLAIMS.md I1, I2, I3.
  */
 
 #include <string.h>

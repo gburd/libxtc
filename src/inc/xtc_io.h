@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_io.h
@@ -23,7 +23,7 @@ typedef struct xtc_io xtc_io_t;
 
 /*
  * Event flag bits.  Stable across minor versions; new flags appear
- * at higher bit positions only (PLAN.md §18).
+ * at higher bit positions only (PLAN.md (S)18).
  */
 #define XTC_IO_READABLE  0x01u
 #define XTC_IO_WRITABLE  0x02u

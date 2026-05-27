@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m2/test_io_register.c — verifies M2_CLAIMS.md R1–R5.
+ * test/m2/test_io_register.c -- verifies M2_CLAIMS.md R1-R5.
  */
 
 #define _POSIX_C_SOURCE 200809L

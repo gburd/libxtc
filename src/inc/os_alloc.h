@@ -1,11 +1,11 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/os_alloc.h
  *	Hookable allocator abstraction.  Default backend is malloc(3);
  *	a vtable lets PG (or libumem, or jemalloc) substitute its own
- *	primitives.  See M1_CLAIMS.md, M1–M8.
+ *	primitives.  See M1_CLAIMS.md, M1-M8.
  */
 
 #ifndef XTC_OS_ALLOC_H

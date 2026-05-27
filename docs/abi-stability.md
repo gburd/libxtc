@@ -2,7 +2,7 @@
 
 This document is the **contract** xtc makes with its users about
 what changes between releases and what doesn't.  The full rationale
-is in [`../PLAN.md`](../PLAN.md) §18; this is the operational summary.
+is in [`../PLAN.md`](../PLAN.md) (S)18; this is the operational summary.
 
 ## SemVer with explicit ABI promise
 
@@ -18,7 +18,7 @@ Versioning is `MAJOR.MINOR.PATCH`:
   codes never change value.  New `xtc_cfg` knobs.  New lock modes
   never inserted in the middle of the enum.
 - **MAJOR** (`x.0.0`).  Breaking changes allowed.  Cadence is
-  intentionally slow — we target one major every three to five
+  intentionally slow -- we target one major every three to five
   years.  An LTS designation on the previous major is committed
   for at least 18 months past the new major's release.  A
   migration guide and an `xtc-migrate-1to2` tool ship with the
@@ -58,7 +58,7 @@ Capabilities are strings declared in `dist/capabilities.in` and
 compiled into the binary.  Adding a capability is a **minor** bump;
 removing one is a **major** bump.  Capabilities work even when xtc
 is loaded as a shared library and swapped under the application
-without a recompile — the precise scenario long-lived servers face.
+without a recompile -- the precise scenario long-lived servers face.
 
 ## Five-stage deprecation lifecycle
 
@@ -68,8 +68,8 @@ stage is one minor release at minimum.
 | Stage | Behaviour | Compiler / runtime signal |
 |---|---|---|
 | 1. Live | Documented, supported. | Nothing. |
-| 2. Soft-deprecated | Documented, supported. | `XTC_DEPRECATED_SOFT` attribute → compiler note.  Doc note. |
-| 3. Deprecated | Supported, discouraged. | `XTC_DEPRECATED` attribute → compiler warning.  `xtc_cfg.warn_deprecated` (default `true`) logs runtime use. |
+| 2. Soft-deprecated | Documented, supported. | `XTC_DEPRECATED_SOFT` attribute -> compiler note.  Doc note. |
+| 3. Deprecated | Supported, discouraged. | `XTC_DEPRECATED` attribute -> compiler warning.  `xtc_cfg.warn_deprecated` (default `true`) logs runtime use. |
 | 4. Default-off | Compiles only with `-DXTC_ENABLE_DEPRECATED`.  Runtime behaviour unchanged. | Build error without the flag. |
 | 5. Removed | Header `#error`'d; symbol absent. | Build error always.  Migration tool referenced in error text. |
 
@@ -77,7 +77,7 @@ Minimum total span: **five minor releases** (~two years at our
 intended cadence).  Documented on the wiki per API.  Every removed
 function has a documented replacement.
 
-## Compat test suite — the past keeps working
+## Compat test suite -- the past keeps working
 
 `test/compat/` contains compiled-and-runnable copies of every
 worked example from every prior 1.x release.  CI builds them
@@ -131,7 +131,7 @@ We commit (informally for now, formally once we hit 1.0):
 
 ## See also
 
-- [`../PLAN.md`](../PLAN.md) §18 — full longevity discussion.
-- [`adr/`](adr/) — architecture decision records.
-- [`../M0_CLAIMS.md`](../M0_CLAIMS.md) [D3] — the test that asserts
+- [`../PLAN.md`](../PLAN.md) (S)18 -- full longevity discussion.
+- [`adr/`](adr/) -- architecture decision records.
+- [`../M0_CLAIMS.md`](../M0_CLAIMS.md) [D3] -- the test that asserts
   this document covers SemVer + the five-stage deprecation cycle.
