@@ -33,3 +33,12 @@ result-*
 dist/configure~
 dist/xtc_config.h.in~
 *~
+
+# Bench compiled binaries
+bench/audit/false_sharing_mpsc
+bench/audit/false_sharing_proc
+bench/conformance/w*/tokio/target/
+
+# Redis example binary
+examples/05_redis/redis-server-xtc
+examples/05_redis/*.o
