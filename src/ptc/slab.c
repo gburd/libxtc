@@ -50,7 +50,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
+#if defined(_WIN32)
+#  include <malloc.h>   /* _aligned_malloc / _aligned_free */
+#  define MAP_FAILED ((void *)-1)
+#  define PROT_READ  0
+#  define PROT_WRITE 0
+#  define MAP_PRIVATE   0
+#  define MAP_ANONYMOUS 0
+static void *__win_chunk_alloc(size_t sz) { return malloc(sz); }
+static int   __win_chunk_free(void *p, size_t sz) { (void)sz; free(p); return 0; }
+#  define mmap(addr, sz, prot, flags, fd, off)  \
+     ((void)(addr),(void)(prot),(void)(flags),(void)(fd),(void)(off), \
+      __win_chunk_alloc(sz))
+#  define munmap(p, sz)  __win_chunk_free((p), (sz))
+#else
+#  include <sys/mman.h>
+#endif
 #include <unistd.h>
 #include <time.h>
 
@@ -257,6 +272,11 @@ __chunk_new(xtc_slab_t *s)
 				    (int64_t)total);
 			return NULL;
 		}
+#if defined(_WIN32)
+		/* mmap shim on Windows is plain malloc; zero for parity
+		 * with POSIX MAP_ANONYMOUS. */
+		memset(m, 0, total);
+#endif
 		base = m;
 	}
 
