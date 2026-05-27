@@ -1,0 +1,20 @@
+#!/bin/sh
+#-
+# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Use of this source code is governed by the ISC License.
+#
+# bench/conformance/w2_echo/erlang/bench
+#   Wrapper script for the W2 Erlang benchmark.
+#   Executes main.erl via escript, passing all arguments through.
+#   Silently exits non-zero if escript is not installed.
+
+set -eu
+
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+
+# Exit non-zero silently if escript is not available.
+if ! command -v escript >/dev/null 2>&1; then
+    exit 1
+fi
+
+exec escript "${SELF_DIR}/main.erl" "$@"
