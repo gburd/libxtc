@@ -12,6 +12,20 @@
  */
 
 #define _POSIX_C_SOURCE 200112L  /* posix_memalign */
+#if defined(_WIN32)
+#  include <malloc.h>
+#  include <errno.h>
+static int xtc_posix_memalign(void **out, size_t a, size_t s) {
+	void *p = _aligned_malloc(s, a);
+	if (p == NULL) return ENOMEM;
+	*out = p;
+	return 0;
+}
+/* On Windows, _aligned_malloc memory must be released via
+ * _aligned_free.  pbt_alloc's hooks call free() unconditionally so
+ * we accept the leak in the test rather than thread the free path. */
+#  define posix_memalign(out, a, s)  xtc_posix_memalign(out, a, s)
+#endif
 
 #include <stdint.h>
 #include <stdlib.h>

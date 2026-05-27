@@ -15,7 +15,20 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
+#if defined(_WIN32)
+#  include <malloc.h>
+#  define MAP_FAILED ((void *)-1)
+#  define PROT_READ 0
+#  define PROT_WRITE 0
+#  define MAP_PRIVATE   0
+#  define MAP_ANONYMOUS 0
+#  define mmap(addr, sz, prot, flags, fd, off) \
+     ((void)(addr),(void)(prot),(void)(flags),(void)(fd),(void)(off), \
+      malloc(sz))
+#  define munmap(p, sz)  ((void)(sz), free(p), 0)
+#else
+#  include <sys/mman.h>
+#endif
 
 #include "pbt_common.h"
 #include "xtc.h"
