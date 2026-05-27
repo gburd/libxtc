@@ -12,6 +12,7 @@
 
 #include "xtc_int.h"
 #include "io_int.h"
+#include "xtc_inject.h"
 
 #include <errno.h>
 
@@ -56,6 +57,10 @@ xtc_io_init(xtc_io_t **out)
 
 	if (out == NULL)
 		return XTC_E_INVAL;
+	if (xtc_inject_check("io.init.calloc_fail")) {
+		xtc_inject_trigger("io.init.calloc_fail");
+		return XTC_E_NOMEM;
+	}
 	if ((rc = __os_calloc(1, sizeof(*io), (void **)&io)) != XTC_OK)
 		return rc;
 
@@ -69,8 +74,21 @@ xtc_io_init(xtc_io_t **out)
 #else
 	{
 		int p[2];
+		int pipe_rc;
 		/* The wakeup self-pipe.  Reads on rfd, writes on wfd. */
-		if (pipe(p) != 0) {
+		if (xtc_inject_check("io.init.pipe_fail")) {
+			xtc_inject_trigger("io.init.pipe_fail");
+			pipe_rc = -1;
+		} else {
+			pipe_rc = pipe(p);
+		}
+		if (pipe_rc != 0) {
+			__os_free(io);
+			return XTC_E_INTERNAL;
+		}
+		if (xtc_inject_check("io.init.fcntl_fail")) {
+			xtc_inject_trigger("io.init.fcntl_fail");
+			(void)close(p[0]); (void)close(p[1]);
 			__os_free(io);
 			return XTC_E_INTERNAL;
 		}
@@ -85,7 +103,13 @@ xtc_io_init(xtc_io_t **out)
 	}
 #endif
 
-	if ((rc = __xtc_io_backend_init(io)) != XTC_OK) {
+	if (xtc_inject_check("io.init.backend_fail")) {
+		xtc_inject_trigger("io.init.backend_fail");
+		rc = XTC_E_INTERNAL;
+	} else {
+		rc = __xtc_io_backend_init(io);
+	}
+	if (rc != XTC_OK) {
 #if !defined(_WIN32)
 		(void)close(io->wakeup_rfd);
 		(void)close(io->wakeup_wfd);
