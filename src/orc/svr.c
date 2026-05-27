@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/orc/svr.c
@@ -14,7 +14,7 @@
  *	For a call:
  *	  byte 0:    'C'
  *	  bytes 1..8: reply-channel pointer (xtc_chan_oneshot_t *)
- *	             encoded as little-endian uint64 — used by reply().
+ *	             encoded as little-endian uint64 -- used by reply().
  *	  bytes 9..: user payload
  *
  *	For a cast:
@@ -48,7 +48,7 @@ struct xtc_svr {
 	_Atomic int           alive;
 };
 
-/* Reply slot — owned by the caller of xtc_svr_call.  Lives on the
+/* Reply slot -- owned by the caller of xtc_svr_call.  Lives on the
  * caller's stack (or heap); the server-side reply path accesses it
  * via the pointer encoded in the call message. */
 struct __svr_reply_slot {

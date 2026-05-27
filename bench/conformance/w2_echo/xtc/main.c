@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/conformance/w2_echo/xtc/main.c
- *   M17 W2 — TCP echo server, xtc runtime.
+ *   M17 W2 -- TCP echo server, xtc runtime.
  *
  *   Architecture:
  *     - Server thread: xtc_io_t (level-triggered epoll/poll) driving

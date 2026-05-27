@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/io/io_epoll.c
@@ -9,7 +9,7 @@
 
 #define _GNU_SOURCE
 
-#include "xtc_int.h"   /* pulls xtc_config.h — defines XTC_IO_BACKEND_* */
+#include "xtc_int.h"   /* pulls xtc_config.h -- defines XTC_IO_BACKEND_* */
 
 #if defined(XTC_IO_BACKEND_EPOLL)
 

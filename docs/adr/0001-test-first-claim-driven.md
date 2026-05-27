@@ -2,7 +2,7 @@
 
 - **Status:** Accepted (M0).
 - **Date:** 2026-05-25.
-- **Supersedes:** —
+- **Supersedes:** --
 
 ## Context
 

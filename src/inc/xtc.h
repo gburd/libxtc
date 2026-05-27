@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  *
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
@@ -61,7 +61,8 @@ typedef enum xtc_err {
 	XTC_E_AGAIN		= -5,	/* try again later */
 	XTC_E_INTERNAL		= -6,	/* invariant violation; bug */
 	XTC_E_RESOURCE		= -7,	/* resource cap reached (xtc_res) */
-	XTC_E_DEADLK		= -8	/* lock-manager: deadlock victim */
+	XTC_E_DEADLK		= -8,	/* lock-manager: deadlock victim */
+	XTC_E_VERSION		= -9	/* version mismatch (shm) */
 } xtc_err_t;
 
 /*

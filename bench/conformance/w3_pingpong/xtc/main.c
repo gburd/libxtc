@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/conformance/w3_pingpong/xtc/main.c
- *   W3: mailbox ping-pong benchmark — xtc runtime.
+ *   W3: mailbox ping-pong benchmark -- xtc runtime.
  *
  *   Two xtc processes (ping, pong) exchange a small message N times.
  *   ping drives the loop, measuring round-trip latency via
@@ -67,7 +67,7 @@ struct ping_args {
 };
 
 /* ------------------------------------------------------------------------- */
-/* now_ns — monotonic nanoseconds                                            */
+/* now_ns -- monotonic nanoseconds                                            */
 /* ------------------------------------------------------------------------- */
 
 static uint64_t
@@ -106,7 +106,7 @@ pong_fn(void *arg)
 		free(m);
 
 		if (req.n < 0)
-			return; /* stop sentinel — exit without reply */
+			return; /* stop sentinel -- exit without reply */
 
 		reply.from = xtc_self();
 		reply.n    = req.n + 1;
@@ -271,7 +271,7 @@ main(int argc, char **argv)
 
 	(void)xtc_loop_fini(loop);
 
-	/* M17 results line — exactly one line on stdout */
+	/* M17 results line -- exactly one line on stdout */
 	printf("workload=W3 runtime=xtc params=N=%ld"
 	       " elapsed_ns=%llu"
 	       " cpu_us=%llu"

@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/otp/test_otp_supervisor.c — port of selected supervisor_SUITE
+ * test/otp/test_otp_supervisor.c -- port of selected supervisor_SUITE
  * cases from `lib/stdlib/test/supervisor_SUITE.erl`.
  *
  * Maps to xtc_orc.h:
@@ -18,7 +18,7 @@
  * Tests omitted (BEAM-only):
  *   - hot code change
  *   - simple_global_supervisor (no global namespace)
- *   - tree (deeply nested supervisors — straightforward to add)
+ *   - tree (deeply nested supervisors -- straightforward to add)
  *   - hibernate
  *   - format_log_*
  *   - get_callback_module (no callback modules in C)
@@ -497,7 +497,7 @@ quick_exit_worker(void *arg)
 	(void)arg;
 	atomic_fetch_add(&g_quick_exit_count, 1);
 	/* Return immediately (which the supervisor sees as a normal
-	 * exit and — because policy is permanent — restarts). */
+	 * exit and -- because policy is permanent -- restarts). */
 }
 
 static MunitResult
@@ -545,7 +545,7 @@ slow_oneshot(void *arg)
 	atomic_fetch_add(&g_oneshot_starts, 1);
 	(void)xtc_recv(&m, &sz, 30LL * 1000 * 1000);
 	if (m) __os_free(m);
-	/* exit normally — supervisor will restart if permanent */
+	/* exit normally -- supervisor will restart if permanent */
 }
 
 static void

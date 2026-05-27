@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m11/test_slab.c — verifies M11.5 xtc_slab.
+ * test/m11/test_slab.c -- verifies M11.5 xtc_slab.
  */
 
 #include <pthread.h>
@@ -169,7 +169,7 @@ test_oom_fail(const MunitParameter p[], void *d)
 	munit_assert_not_null(o);
 	/* Drain remaining 15 slots in this chunk. */
 	{ int i; for (i = 1; i < 16; i++) (void)xtc_slab_alloc(s); }
-	/* Next alloc would need a new chunk → res.acquire fails → OOM. */
+	/* Next alloc would need a new chunk -> res.acquire fails -> OOM. */
 	o = xtc_slab_alloc(s);
 	munit_assert_null(o);
 	(void)xtc_slab_stat(s, &st);
@@ -252,10 +252,15 @@ test_audit(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-/* ----- Shared-memory mode + offset/resolve --------------------- */
+/* ----- Single-process shm mode + offset/resolve ----------------- */
+/*
+ * NOTE: This test uses MAP_PRIVATE | MAP_ANONYMOUS, which is NOT actual
+ * shared memory.  It only verifies offset/resolve work within a single
+ * process.  For real cross-process tests, see test_slab_shm.c.
+ */
 
 static MunitResult
-test_shm_offset_resolve(const MunitParameter p[], void *d)
+test_shm_offset_resolve_single_process(const MunitParameter p[], void *d)
 {
 	xtc_slab_t *s;
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
@@ -368,7 +373,7 @@ static MunitTest tests[] = {
 	{ "/reap",             test_reap,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/redzone",          test_redzone,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/audit",            test_audit,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-	{ "/shm_offset",       test_shm_offset_resolve, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/shm_offset_single_process", test_shm_offset_resolve_single_process, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent",       test_concurrent,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/backtrace",        test_backtrace,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/m0/test_docs_abi.sh — D3
+# test/m0/test_docs_abi.sh -- D3
 set -eu
 : "${XTC_SRC_DIR:?}"
 F="$XTC_SRC_DIR/docs/abi-stability.md"

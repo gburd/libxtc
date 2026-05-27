@@ -5,7 +5,7 @@
 #
 # Inputs:
 #   src/<subsystem>/*.c        for each subsystem under src/
-#   (also src/*.c at top level → produces inc/xtc_ext.h)
+#   (also src/*.c at top level -> produces inc/xtc_ext.h)
 # Outputs:
 #   src/inc/<subsystem>_ext.h  for subsystem subdirs
 #   src/inc/xtc_ext.h          for top-level src/*.c
@@ -84,7 +84,7 @@ process() {
 	echo "  wrote $(realpath --relative-to="$ROOT" "$out")"
 }
 
-# Top-level src/*.c → src/inc/xtc_ext.h.
+# Top-level src/*.c -> src/inc/xtc_ext.h.
 process "" "$SRC"
 
 # Subsystem dirs.

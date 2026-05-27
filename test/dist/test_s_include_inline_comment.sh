@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/dist/test_s_include_inline_comment.sh — T6
+# test/dist/test_s_include_inline_comment.sh -- T6
 # Verifies that one-line /* PUBLIC: int foo __P((void)); */ comments
 # produce a clean prototype (no trailing "*/" leak).
 

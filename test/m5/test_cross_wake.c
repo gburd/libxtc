@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m5/test_cross_wake.c — verifies M5_CLAIMS.md Cw1–Cw4.
+ * test/m5/test_cross_wake.c -- verifies M5_CLAIMS.md Cw1-Cw4.
  *
  * Pattern: a "parker" task on loop 0 registers a waker, returns
  * PENDING, and counts how many times its fn is re-invoked.  A
@@ -93,13 +93,13 @@ test_after_done(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 1, waker_fn,  &wa, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	/* Now both tasks DONE.  Fire the captured waker — must be safe. */
+	/* Now both tasks DONE.  Fire the captured waker -- must be safe. */
 	munit_assert_int(xtc_waker_wake(&s.parker_waker), ==, XTC_OK);
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	return MUNIT_OK;
 }
 
-/* [Cw4] concurrent wakes: many wakes from loop 1 → parker observes
+/* [Cw4] concurrent wakes: many wakes from loop 1 -> parker observes
  * at least one re-run, at most n_wakes + 1 (1 initial + n_wakes
  * idempotent collapses).  We bound max_runs to be small so the parker
  * exits as soon as it has run a couple of times; otherwise the

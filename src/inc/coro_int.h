@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/coro_int.h
@@ -50,7 +50,7 @@ struct xtc_coro {
 	struct xtc_coro *_parked_on;
 };
 
-/* Shared by loop.c — the currently-running coroutine on this loop.  */
+/* Shared by loop.c -- the currently-running coroutine on this loop.  */
 extern __thread struct xtc_coro *__xtc_current_coro;
 
 /* Forward declarations for the dispatch glue.  */

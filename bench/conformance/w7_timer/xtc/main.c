@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/conformance/w7_timer/xtc/main.c
- *   M17 W7 — timer wheel benchmark, xtc runtime.
+ *   M17 W7 -- timer wheel benchmark, xtc runtime.
  *
  *   Three phases:
  *     1. Schedule N timers at random offsets in [1 ms, 10 s].
@@ -69,7 +69,7 @@ mono_ns(void)
 /* ---------------------------------------------------------------------- */
 
 /*
- * rand64 — XOR-shift64 PRNG seeded from the global rand() state.
+ * rand64 -- XOR-shift64 PRNG seeded from the global rand() state.
  * Three rand() calls guarantee at least 45 bits of entropy (POSIX
  * RAND_MAX >= 32767) and typically 93 bits on Linux (RAND_MAX = 2^31-1).
  */
@@ -82,7 +82,7 @@ rand64(void)
 }
 
 /*
- * rand_delay_ns — uniform random delay in [lo_ns, hi_ns).
+ * rand_delay_ns -- uniform random delay in [lo_ns, hi_ns).
  */
 static int64_t
 rand_delay_ns(int64_t lo_ns, int64_t hi_ns)
@@ -207,7 +207,7 @@ main(int argc, char *argv[])
 	}
 
 	/* ================================================================== */
-	/* Phase 1 — Schedule N timers                                        */
+	/* Phase 1 -- Schedule N timers                                        */
 	/* ================================================================== */
 
 	t0 = mono_ns();
@@ -218,7 +218,7 @@ main(int argc, char *argv[])
 		/*
 		 * Uniform delay in [1 ms, 10 s].  Upper bound is
 		 * 10_001_000_000 (exclusive) so the max delay is
-		 * exactly 10_000_999_999 ns ≈ 10 s.
+		 * exactly 10_000_999_999 ns ~= 10 s.
 		 */
 		delay_ns = rand_delay_ns(INT64_C(1000000),
 		                         INT64_C(10001000000));
@@ -244,7 +244,7 @@ main(int argc, char *argv[])
 	elapsed_sched = (uint64_t)(t1 - t0);
 
 	/* ================================================================== */
-	/* Phase 2 — Cancel N/2 timers chosen at random                      */
+	/* Phase 2 -- Cancel N/2 timers chosen at random                      */
 	/* ================================================================== */
 
 	for (i = 0; i < N; i++)
@@ -274,7 +274,7 @@ main(int argc, char *argv[])
 	elapsed_cancel = (uint64_t)(t1 - t0);
 
 	/* ================================================================== */
-	/* Phase 3 — Run loop until all remaining timers fire                 */
+	/* Phase 3 -- Run loop until all remaining timers fire                 */
 	/* ================================================================== */
 
 	/*

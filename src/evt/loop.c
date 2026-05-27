@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/evt/loop.c
@@ -15,7 +15,7 @@
 #include <stdint.h>
 #include <unistd.h>
 
-/* Per-thread cursor — see loop_int.h. */
+/* Per-thread cursor -- see loop_int.h. */
 __thread xtc_loop_t *__xtc_current_loop = NULL;
 
 /* --- inbox ---------------------------------------------------------- */
@@ -189,7 +189,7 @@ xtc_loop_stop(xtc_loop_t *loop)
  * Owner-side enqueue.  When the loop is part of an executor (i.e.,
  * exposed for work stealing), push into the Chase-Lev deque so peers
  * can steal.  When the loop is standalone (M3 single-thread mode),
- * use the slow-path FIFO so spawn order is preserved — there is no
+ * use the slow-path FIFO so spawn order is preserved -- there is no
  * one to steal anyway.
  *
  * If the deque overflows, fall through to the FIFO.
@@ -205,7 +205,7 @@ __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t)
 			t->q_next = NULL;
 			return XTC_OK;
 		}
-		/* deque full — fall through to slow path */
+		/* deque full -- fall through to slow path */
 	}
 
 	t->q_next = NULL;
