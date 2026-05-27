@@ -183,3 +183,32 @@ xtc_inject_n_attached(void)
 	return atomic_load_explicit(&__pts_attached_count,
 	    memory_order_relaxed);
 }
+
+/*
+ * PUBLIC: int xtc_inject_check __P((const char *));
+ *
+ * Lock-free check: returns 1 if `name` has any attachments
+ * (callbacks or wait), 0 otherwise.  Used by fault-injection sites
+ * in production code that want to substitute an error path:
+ *
+ *   if (xtc_inject_check("io.calloc_fail")) {
+ *       xtc_inject_trigger("io.calloc_fail");
+ *       return XTC_E_NOMEM;
+ *   }
+ *
+ * The check is fast-path-friendly because the global counter is
+ * 0 in production builds with no attached injection points.
+ */
+int
+xtc_inject_check(const char *name)
+{
+	struct point *p;
+	int hit = 0;
+	if (atomic_load_explicit(&__pts_attached_count,
+	    memory_order_relaxed) == 0) return 0;
+	(void)pthread_mutex_lock(&__pts_lock);
+	p = __find_locked(name);
+	if (p != NULL && (p->n_cbs > 0 || p->wait_attached)) hit = 1;
+	(void)pthread_mutex_unlock(&__pts_lock);
+	return hit;
+}

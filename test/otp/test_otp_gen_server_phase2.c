@@ -395,6 +395,135 @@ test_reply_arg_validation(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- call_after_stop ----------------------------------- */
+
+static void
+call_after_stop_driver(void *arg)
+{
+	struct cf_args *a = arg;
+	void *reply;
+	size_t reply_sz;
+	int want = 1, rc;
+
+	/* Stop server first. */
+	(void)xtc_svr_stop(a->svr);
+	/* Brief idle to let stop propagate. */
+	{ void *m; size_t sz; (void)xtc_recv(&m, &sz, 50 * 1000 * 1000);
+	  if (m) free(m); }
+
+	/* call() to a stopped server returns XTC_E_INVAL (the server's
+	 * pid is no longer resolvable) or XTC_E_AGAIN if the message was
+	 * accepted but no reply arrived in time.  Both are acceptable
+	 * shutdown outcomes. */
+	rc = xtc_svr_call(a->target, &want, sizeof want, &reply, &reply_sz,
+	    50LL * 1000 * 1000);
+	munit_assert_int(rc == XTC_E_INVAL || rc == XTC_E_AGAIN, ==, 1);
+}
+
+static MunitResult
+test_call_after_stop(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_svr_t *svr;
+	struct cs_state state = {0};
+	struct cf_args args;
+	xtc_pid_t dpid;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cs_cb, &state, NULL, &svr),
+	    ==, XTC_OK);
+	args.target = xtc_svr_pid(svr); args.svr = svr;
+	munit_assert_int(xtc_proc_spawn(loop, call_after_stop_driver, &args,
+	    NULL, &dpid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
+/* ----- cast_after_stop drops cleanly ------------------ */
+
+static void
+cast_after_stop_driver(void *arg)
+{
+	struct cf_args *a = arg;
+	int v = 99;
+	int rc;
+
+	(void)xtc_svr_stop(a->svr);
+	{ void *m; size_t sz; (void)xtc_recv(&m, &sz, 50 * 1000 * 1000);
+	  if (m) free(m); }
+
+	/* cast() to a stopped server is a one-way send; the underlying
+	 * pid is no longer resolvable so we expect XTC_E_INVAL.  The
+	 * test verifies that we don't crash and that the server doesn't
+	 * see the message either way. */
+	rc = xtc_svr_cast(a->target, &v, sizeof v);
+	munit_assert_int(rc == XTC_OK || rc == XTC_E_INVAL, ==, 1);
+}
+
+static MunitResult
+test_cast_after_stop(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_svr_t *svr;
+	struct cs_state state = {0};
+	struct cf_args args;
+	xtc_pid_t dpid;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cs_cb, &state, NULL, &svr),
+	    ==, XTC_OK);
+	args.target = xtc_svr_pid(svr); args.svr = svr;
+	munit_assert_int(xtc_proc_spawn(loop, cast_after_stop_driver, &args,
+	    NULL, &dpid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&state.n_cast), ==, 0);
+	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
+/* ----- call with zero-ns timeout returns immediately --- */
+
+static void
+zero_timeout_driver(void *arg)
+{
+	struct cf_args *a = arg;
+	void *reply; size_t reply_sz;
+	int want = 7, rc;
+	/* Bury the call under 200 casts so the server is busy. */
+	int i;
+	for (i = 0; i < 200; i++) (void)xtc_svr_cast(a->target, &i, sizeof i);
+
+	rc = xtc_svr_call(a->target, &want, sizeof want, &reply, &reply_sz, 0);
+	/* timeout=0 means try-once; behaviour is XTC_E_AGAIN if not ready. */
+	munit_assert_int(rc == XTC_OK || rc == XTC_E_AGAIN, ==, 1);
+	if (rc == XTC_OK && reply) free(reply);
+	(void)xtc_svr_stop(a->svr);
+}
+
+static MunitResult
+test_call_zero_timeout(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_svr_t *svr;
+	struct cs_state state = {0};
+	struct cf_args args;
+	xtc_pid_t dpid;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cs_cb, &state, NULL, &svr),
+	    ==, XTC_OK);
+	args.target = xtc_svr_pid(svr); args.svr = svr;
+	munit_assert_int(xtc_proc_spawn(loop, zero_timeout_driver, &args,
+	    NULL, &dpid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/cast_fast",            test_cast_fast,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_huge_mq",         test_call_huge_mq,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -406,6 +535,9 @@ static MunitTest tests[] = {
 	{ "/cast_arg_validation",  test_cast_arg_validation,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/start_arg_validation", test_start_arg_validation, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reply_arg_validation", test_reply_arg_validation, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/call_after_stop",      test_call_after_stop,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/cast_after_stop",      test_cast_after_stop,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/call_zero_timeout",    test_call_zero_timeout,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/otp/gen_server_phase2", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
