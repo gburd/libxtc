@@ -1,11 +1,11 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/evt/timer.c
  *	Binary min-heap of pending timers.  Lazy deletion: a cancelled
  *	timer is left in the heap and skipped on extraction.
- *	See M3_CLAIMS.md, Tm5–Tm10.
+ *	See M3_CLAIMS.md, Tm5-Tm10.
  */
 
 #include "xtc_int.h"

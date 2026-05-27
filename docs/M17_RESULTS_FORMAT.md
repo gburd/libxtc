@@ -19,7 +19,7 @@ workload=<ID> runtime=<RT> params=<PARAMS> elapsed_ns=<N> cpu_us=<N> rss_kb=<N> 
 
 | Field        | Type    | Description                                              |
 |--------------|---------|----------------------------------------------------------|
-| `workload`   | string  | Workload identifier: `W1`–`W7` (uppercase).              |
+| `workload`   | string  | Workload identifier: `W1`-`W7` (uppercase).              |
 | `runtime`    | string  | Runtime name: `xtc`, `tokio`, or `erlang`.               |
 | `params`     | string  | Workload parameters in `KEY=VALUE` form, joined by `:`.  |
 | `elapsed_ns` | uint64  | Wall-clock time for the entire workload, nanoseconds.    |
@@ -99,9 +99,9 @@ binaries without arguments.
 
 ```
 w<N>_<name>/xtc/
-    main.c       — benchmark source
-    Makefile     — build rule; `make` produces ./bench
-    bench        — compiled binary (gitignored)
+    main.c       -- benchmark source
+    Makefile     -- build rule; `make` produces ./bench
+    bench        -- compiled binary (gitignored)
 ```
 
 `main.c` links against `libxtc.a` (the static library built in
@@ -112,10 +112,10 @@ w<N>_<name>/xtc/
 
 ```
 w<N>_<name>/tokio/
-    Cargo.toml   — package manifest; name = "bench"
+    Cargo.toml   -- package manifest; name = "bench"
     src/
-        main.rs  — benchmark source
-    bench        — symlink or wrapper script (produced by `cargo build --release`)
+        main.rs  -- benchmark source
+    bench        -- symlink or wrapper script (produced by `cargo build --release`)
 ```
 
 The binary is `target/release/bench`; the wrapper script `bench` invokes it
@@ -125,8 +125,8 @@ so that `run.sh` can find a stable path.
 
 ```
 w<N>_<name>/erlang/
-    main.erl     — escript source
-    bench        — executable wrapper: `#!/bin/sh\nescript "$(dirname $0)/main.erl" "$@"`
+    main.erl     -- escript source
+    bench        -- executable wrapper: `#!/bin/sh\nescript "$(dirname $0)/main.erl" "$@"`
 ```
 
 The `bench` wrapper calls `escript main.erl`, passing arguments through.
@@ -142,7 +142,7 @@ the stdlib).
 - **CPU time**: `getrusage(RUSAGE_SELF)` for `ru_utime + ru_stime` (C/Erlang),
   or read `/proc/self/stat` (Linux).
 - **RSS**: `getrusage(RUSAGE_SELF).ru_maxrss` (kibibytes on Linux,
-  bytes on macOS — normalise to KiB).
+  bytes on macOS -- normalise to KiB).
 - **Latency percentiles**: use `hist_percentile()` from `include/hist.h`
   for xtc benchmarks; any equivalent HDR-histogram library for Tokio and
   Erlang.
@@ -154,8 +154,8 @@ the stdlib).
 | Metric       | Pass threshold                          |
 |--------------|-----------------------------------------|
 | Throughput   | Within 50% of the best of the three runtimes |
-| p99 latency  | Within 2× the best                     |
-| Peak RSS     | Within 2× the best                     |
+| p99 latency  | Within 2x the best                     |
+| Peak RSS     | Within 2x the best                     |
 
 A failure on any criterion is published as a known gap and becomes a
 tracking issue; results are never suppressed.

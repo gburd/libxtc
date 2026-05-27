@@ -1,4 +1,4 @@
-# xtc — high-performance async/concurrency runtime for C
+# xtc -- high-performance async/concurrency runtime for C
 
 `xtc` is the foundational concurrency runtime for a future threaded
 PostgreSQL.  It is a layered C library that provides Tokio-style
@@ -7,7 +7,7 @@ style per-CPU shared-nothing reactors over a pluggable I/O substrate
 (io_uring / epoll / kqueue / IOCP / poll).
 
 The full design is in [PLAN.md](PLAN.md).  The current milestone
-(M0 — repo skeleton) is documented in [M0_CLAIMS.md](M0_CLAIMS.md);
+(M0 -- repo skeleton) is documented in [M0_CLAIMS.md](M0_CLAIMS.md);
 every claim there has a corresponding test.
 
 ## Status
@@ -30,7 +30,7 @@ dist/               build apparatus (BDB / DBSQL convention)
   xtc_config.h.in     template for the autoconf-generated config header
   version.in          single source of truth for the SemVer string
   s_all               run every code generator
-  s_include           PUBLIC: → prototype headers (M0_CLAIMS.md [T2])
+  s_include           PUBLIC: -> prototype headers (M0_CLAIMS.md [T2])
   s_perm              chmod +x every s_* (M0_CLAIMS.md [T5])
   gen_inc.awk         the awk used by s_include
   meson.build         meson build entry point
@@ -118,18 +118,18 @@ nix develop          # provides autoconf, meson, ninja, mandoc, etc.
 
 ## Documentation
 
-- **`PLAN.md`** — the full design (≈2600 lines, 21 sections).  Read
+- **`PLAN.md`** -- the full design (~=2600 lines, 21 sections).  Read
   this to understand intent.
-- **`docs/ARCHITECTURE.md`** — the layered architecture, condensed.
-- **`docs/API.md`** — public API reference (generated from headers
+- **`docs/ARCHITECTURE.md`** -- the layered architecture, condensed.
+- **`docs/API.md`** -- public API reference (generated from headers
   for the per-function detail; handwritten introduction).
-- **`docs/abi-stability.md`** — what we promise across versions, how
+- **`docs/abi-stability.md`** -- what we promise across versions, how
   we deprecate, what symbol versioning we use.
-- **`man/man3/*.3`** — Unix-style function reference (one page per
+- **`man/man3/*.3`** -- Unix-style function reference (one page per
   public function; required by [M0_CLAIMS.md](M0_CLAIMS.md) [D4]).
-- **`man/man7/xtc.7`** — overview man page; what to read first.
-- **`docs/adr/`** — architecture decision records, one per Q-decision
-  in `PLAN.md` §10.
+- **`man/man7/xtc.7`** -- overview man page; what to read first.
+- **`docs/adr/`** -- architecture decision records, one per Q-decision
+  in `PLAN.md` (S)10.
 
 ## Adding to the project
 
@@ -145,7 +145,7 @@ The discipline:
 5. **Run the full check**: `make check && (cd ../build_meson && meson test)`.
 
 This discipline is what we trade for the right to call this a
-foundation.  See [PLAN.md §18](PLAN.md) for the longevity contract.
+foundation.  See [PLAN.md (S)18](PLAN.md) for the longevity contract.
 
 ## License
 

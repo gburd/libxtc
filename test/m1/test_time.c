@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m1/test_time.c — verifies M1_CLAIMS.md Tm1–Tm4.
+ * test/m1/test_time.c -- verifies M1_CLAIMS.md Tm1-Tm4.
  */
 
 #include "munit.h"

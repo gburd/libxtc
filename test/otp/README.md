@@ -35,31 +35,31 @@ What the foundational tests verify against the Erlang reference:
 
 ### `proc_lib`
 
-* **`t_spawn`** — `spawn/3` returns a valid Pid; the spawned proc runs and exits normally.
-* **`spawn_link_abnormal`** — abnormal exit from a linked process delivers an EXIT signal to the linker (xtc's `xtc_link` + recv on 'E' envelopes).
-* **`spawn_monitor_down`** — monitor delivers a DOWN message on target death.
-* **`self_returns_pid`** — `self()` from inside a spawned proc returns a non-bottom Pid.
-* **`pingpong_50`** — 50 round-trip messages between two processes; encodes sender Pid in payload (xtc has no implicit reply-to).
-* **`recv_timeout`** — `receive ... after Timeout` maps to `xtc_recv` returning `XTC_E_AGAIN`.
-* **`selective_receive`** — out-of-order match: take 42 first, then drain 1, 2, 3, 4 in arrival order.  Save-queue semantics.
-* **`fanout_100`** — spawn 100 workers, send each a marker, every one runs.
+* **`t_spawn`** -- `spawn/3` returns a valid Pid; the spawned proc runs and exits normally.
+* **`spawn_link_abnormal`** -- abnormal exit from a linked process delivers an EXIT signal to the linker (xtc's `xtc_link` + recv on 'E' envelopes).
+* **`spawn_monitor_down`** -- monitor delivers a DOWN message on target death.
+* **`self_returns_pid`** -- `self()` from inside a spawned proc returns a non-bottom Pid.
+* **`pingpong_50`** -- 50 round-trip messages between two processes; encodes sender Pid in payload (xtc has no implicit reply-to).
+* **`recv_timeout`** -- `receive ... after Timeout` maps to `xtc_recv` returning `XTC_E_AGAIN`.
+* **`selective_receive`** -- out-of-order match: take 42 first, then drain 1, 2, 3, 4 in arrival order.  Save-queue semantics.
+* **`fanout_100`** -- spawn 100 workers, send each a marker, every one runs.
 
 ### `gen_server` (xtc_svr)
 
-* **`start_stop`** — `gen_server:start_link` calls `init`; `gen_server:stop` calls `terminate`.
-* **`call_cast_info`** — sync `call`, async `cast`, raw `info` messages all dispatch to the right callbacks.
-* **`stop_via_handle_call`** — returning `XTC_SVR_STOP` from a callback ends the server cleanly.
-* **`call_timeout`** — call returns `XTC_E_AGAIN` if the server doesn't reply in time.
+* **`start_stop`** -- `gen_server:start_link` calls `init`; `gen_server:stop` calls `terminate`.
+* **`call_cast_info`** -- sync `call`, async `cast`, raw `info` messages all dispatch to the right callbacks.
+* **`stop_via_handle_call`** -- returning `XTC_SVR_STOP` from a callback ends the server cleanly.
+* **`call_timeout`** -- call returns `XTC_E_AGAIN` if the server doesn't reply in time.
 
 ### `supervisor`
 
-* **`one_for_one_basic`** — A and B; A crashes twice, B unaffected; A restarted twice.
-* **`one_for_all`** — A crashes; B is also killed and restarted.
-* **`rest_for_one_strategy_accepts`** — strategy enum is honoured; cascade is tested in `test/m10/test_sup.c`.
-* **`permanent_restarts_on_normal`** — PERMANENT child is restarted even on normal exit.
-* **`temporary_no_restart`** — TEMPORARY child is never restarted (even after abnormal exit).
-* **`intensity_exceeded`** — flapping child triggers supervisor's own exit.
-* **`count_children`** — `xtc_sup_n_children` reports the right number.
+* **`one_for_one_basic`** -- A and B; A crashes twice, B unaffected; A restarted twice.
+* **`one_for_all`** -- A crashes; B is also killed and restarted.
+* **`rest_for_one_strategy_accepts`** -- strategy enum is honoured; cascade is tested in `test/m10/test_sup.c`.
+* **`permanent_restarts_on_normal`** -- PERMANENT child is restarted even on normal exit.
+* **`temporary_no_restart`** -- TEMPORARY child is never restarted (even after abnormal exit).
+* **`intensity_exceeded`** -- flapping child triggers supervisor's own exit.
+* **`count_children`** -- `xtc_sup_n_children` reports the right number.
 
 ## OTP semantics that map verbatim
 
@@ -90,7 +90,7 @@ To complete OTP parity, port the remaining cases:
   send_request_*).  Would push the gen_server module to ~95% match.
 * `supervisor`: ~25 more cases (significant children, code_change,
   scale_start_stop_many_children, hanging_restart_loop variants).
-* `gen_event` (not yet started): ~20 cases — but xtc has no
+* `gen_event` (not yet started): ~20 cases -- but xtc has no
   gen_event analogue; need to design `xtc_event` first.
 * `application_SUITE`: ~50 cases for app-lifecycle.  Xtc's `xtc_app`
   is simpler; many cases test BEAM lifecycle hooks we don't have.

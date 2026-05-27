@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
@@ -487,12 +487,12 @@ xtc_tls_wants_write(const xtc_tls_t *tls)
  *
  * Initiate or continue the bidirectional TLS close_notify shutdown.
  *
- *   rc == 1  bidirectional shutdown complete → XTC_OK
- *   rc == 0  our close_notify sent, peer's not yet received → XTC_OK
+ *   rc == 1  bidirectional shutdown complete -> XTC_OK
+ *   rc == 0  our close_notify sent, peer's not yet received -> XTC_OK
  *            (caller may call again to receive peer close_notify, but
  *             the fd can also be closed now without protocol error)
- *   rc < 0   WANT_READ / WANT_WRITE → XTC_E_AGAIN
- *            anything else          → XTC_E_INTERNAL
+ *   rc < 0   WANT_READ / WANT_WRITE -> XTC_E_AGAIN
+ *            anything else          -> XTC_E_INTERNAL
  * ----------------------------------------------------------------------- */
 
 int

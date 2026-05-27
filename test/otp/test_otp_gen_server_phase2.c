@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/otp/test_otp_gen_server_phase2.c — second batch of cases
+ * test/otp/test_otp_gen_server_phase2.c -- second batch of cases
  * ported from `lib/stdlib/test/gen_server_SUITE.erl`.  Targets the
  * `svr.c` coverage gap (67.68% line / 50.78% branch, per audit v3).
  *
@@ -344,10 +344,10 @@ test_call_arg_validation(const MunitParameter p[], void *d)
 	size_t reply_sz;
 	xtc_pid_t pid_none = {0,0,0};
 	(void)p; (void)d;
-	/* size > 0 with NULL data → INVAL. */
+	/* size > 0 with NULL data -> INVAL. */
 	munit_assert_int(xtc_svr_call(pid_none, NULL, 5, &reply, &reply_sz, 0),
 	    ==, XTC_E_INVAL);
-	/* NULL out_reply → INVAL. */
+	/* NULL out_reply -> INVAL. */
 	munit_assert_int(xtc_svr_call(pid_none, "x", 1, NULL, &reply_sz, 0),
 	    ==, XTC_E_INVAL);
 	munit_assert_int(xtc_svr_call(pid_none, "x", 1, &reply, NULL, 0),

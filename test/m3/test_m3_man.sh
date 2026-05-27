@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/m3/test_m3_man.sh — D9
+# test/m3/test_m3_man.sh -- D9
 # Verify the L2 event-loop man page exists and covers every public symbol.
 set -eu
 : "${XTC_SRC_DIR:?}"

@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m10/test_svr.c — verifies M10.5 gen_server (xtc_svr).
+ * test/m10/test_svr.c -- verifies M10.5 gen_server (xtc_svr).
  */
 
 #include <pthread.h>
@@ -75,7 +75,7 @@ driver_proc(void *arg)
 	(void)xtc_svr_cast(target, NULL, 0);
 	(void)xtc_svr_cast(target, NULL, 0);
 
-	/* Send a raw message — should hit handle_info. */
+	/* Send a raw message -- should hit handle_info. */
 	{ uint8_t raw[2] = { 'Z', 0 };
 	  (void)xtc_send(target, raw, sizeof raw); }
 

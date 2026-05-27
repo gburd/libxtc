@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/conformance/w4_mutex/tokio/src/main.rs
- *   W4: mutex contention benchmark — Tokio runtime.
+ *   W4: mutex contention benchmark -- Tokio runtime.
  *
  *   N tokio tasks contend for a shared u64 counter wrapped in an
  *   Arc<tokio::sync::Mutex<u64>>.  Each task runs a tight

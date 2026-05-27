@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
@@ -14,8 +14,8 @@
  *	regardless of the backend selected.
  *
  *	Two opaque types:
- *	  xtc_tls_ctx_t  — per-process context: loaded cert + key + CA bundle.
- *	  xtc_tls_t      — per-connection state machine.
+ *	  xtc_tls_ctx_t  -- per-process context: loaded cert + key + CA bundle.
+ *	  xtc_tls_t      -- per-connection state machine.
  *
  *	Usage pattern:
  *
@@ -71,7 +71,7 @@ extern "C" {
  * ----------------------------------------------------------------------- */
 
 /*
- * xtc_tls_ctx_t — per-process (or per-vhost) TLS context.
+ * xtc_tls_ctx_t -- per-process (or per-vhost) TLS context.
  *
  *   Holds the loaded certificate, private key, and CA bundle.  A
  *   single context may be shared by many concurrent connections of
@@ -81,7 +81,7 @@ extern "C" {
 typedef struct xtc_tls_ctx  xtc_tls_ctx_t;
 
 /*
- * xtc_tls_t — per-connection TLS state machine.
+ * xtc_tls_t -- per-connection TLS state machine.
  *
  *   Wraps an existing file descriptor.  The fd remains owned by the
  *   caller; xtc_tls_destroy does not close it.
@@ -109,7 +109,7 @@ typedef enum xtc_tls_role {
  * ----------------------------------------------------------------------- */
 
 /*
- * xtc_tls_opts_t — creation-time parameters for xtc_tls_ctx_create.
+ * xtc_tls_opts_t -- creation-time parameters for xtc_tls_ctx_create.
  *
  * All string pointers are borrowed for the duration of the
  * xtc_tls_ctx_create call only; the implementation copies any data
@@ -220,7 +220,7 @@ int  xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out);
 /*
  * xtc_tls_destroy --
  *	Release per-connection TLS state.  Does not close the underlying fd,
- *	does not send close_notify — call xtc_tls_shutdown first if a clean
+ *	does not send close_notify -- call xtc_tls_shutdown first if a clean
  *	shutdown is needed.
  *	tls may be NULL (no-op).
  */

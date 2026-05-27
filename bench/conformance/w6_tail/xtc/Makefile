@@ -1,5 +1,5 @@
 #-
-# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Copyright (c) 2026, The XTC Project
 # Use of this source code is governed by the ISC License.
 #
 # bench/conformance/w6_tail/xtc/Makefile
@@ -7,8 +7,8 @@
 #   runtime.
 #
 # Paths (override on the command line if the build tree is elsewhere):
-#   XTC_BUILD  — directory containing libxtc.a and the generated Makefile
-#   HIST_DIR   — directory containing hist.h and hist.c
+#   XTC_BUILD  -- directory containing libxtc.a and the generated Makefile
+#   HIST_DIR   -- directory containing hist.h and hist.c
 #
 # Usage:
 #   make                       # build ./bench with defaults
