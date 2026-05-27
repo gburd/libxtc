@@ -1,0 +1,11 @@
+#!/bin/sh
+#-
+# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Use of this source code is governed by the ISC License.
+#
+# bench/conformance/w6_tail/erlang/bench
+#   Wrapper that invokes the W6 Erlang benchmark via escript.
+#   run.sh discovers and invokes this script as the benchmark binary.
+#
+set -eu
+exec escript "$(dirname "$0")/main.erl" "$@"
