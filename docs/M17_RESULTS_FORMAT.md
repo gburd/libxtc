@@ -29,6 +29,7 @@ workload=<ID> runtime=<RT> params=<PARAMS> elapsed_ns=<N> cpu_us=<N> rss_kb=<N> 
 | `p95_ns`     | uint64  | 95th-percentile operation latency, nanoseconds.          |
 | `p99_ns`     | uint64  | 99th-percentile operation latency, nanoseconds.          |
 | `p999_ns`    | uint64  | 99.9th-percentile operation latency, nanoseconds.        |
+| `rejected`   | uint64  | Count of requests rejected due to backpressure (W6 only).  Zero for workloads that do not model resource caps. |
 
 ### Rules
 
@@ -38,7 +39,10 @@ workload=<ID> runtime=<RT> params=<PARAMS> elapsed_ns=<N> cpu_us=<N> rss_kb=<N> 
   parameters, e.g. `N=10000:threads=4`.
 - If a metric is not applicable, emit `0`.
 - Additional key=value tokens after `p999_ns` are allowed and ignored
-  by `run.sh`.
+  by `run.sh`.  Workload W6 appends `rejected=<N>` immediately after
+  `p999_ns` to report the count of requests that were turned away by
+  the backpressure mechanism.  Other workloads may omit this field or
+  emit `rejected=0`.
 - Lines starting with `#` are treated as comments and ignored.
 
 ### Example
