@@ -177,8 +177,8 @@ test_shm_basic_fork(const MunitParameter p[], void *d)
 	munit_assert_int64(off, !=, XTC_SLAB_OFF_NONE);
 
 	/* Store offset in shm for child to find.
-	 * Put it at byte 128 (well after the 64-byte header). */
-	offset_slot = (volatile xtc_slab_off_t *)((uint8_t *)shm_addr + 128);
+	 * Use bytes 32-39 in the header's reserved area (safe from slot data). */
+	offset_slot = (volatile xtc_slab_off_t *)((uint8_t *)shm_addr + 32);
 	*offset_slot = off;
 
 	/* Memory barrier to ensure writes visible to child. */
@@ -200,9 +200,9 @@ test_shm_basic_fork(const MunitParameter p[], void *d)
 		child_fd = attach_shm_region(shm_name, SHM_SIZE, &child_shm_addr);
 		if (child_fd < 0) _exit(1);
 
-		/* Read offset from shm. */
+		/* Read offset from shm header's reserved area. */
 		volatile xtc_slab_off_t *child_offset_slot =
-		    (volatile xtc_slab_off_t *)((uint8_t *)child_shm_addr + 128);
+		    (volatile xtc_slab_off_t *)((uint8_t *)child_shm_addr + 32);
 		atomic_thread_fence(memory_order_acquire);
 		child_off = *child_offset_slot;
 
@@ -276,9 +276,9 @@ test_shm_alloc_in_child(const MunitParameter p[], void *d)
 	shm_fd = create_shm_region(shm_name, SHM_SIZE, &shm_addr);
 	munit_assert_int(shm_fd, >=, 0);
 
-	/* Communication slots in shm. */
-	offset_slot = (volatile xtc_slab_off_t *)((uint8_t *)shm_addr + 128);
-	ready_flag = (volatile int *)((uint8_t *)shm_addr + 136);
+	/* Communication slots in shm header's reserved area. */
+	offset_slot = (volatile xtc_slab_off_t *)((uint8_t *)shm_addr + 32);
+	ready_flag = (volatile int *)((uint8_t *)shm_addr + 40);
 	*ready_flag = 0;
 
 	opts.name = "shm_child_alloc";
@@ -303,9 +303,9 @@ test_shm_alloc_in_child(const MunitParameter p[], void *d)
 		if (child_fd < 0) _exit(1);
 
 		volatile xtc_slab_off_t *child_offset_slot =
-		    (volatile xtc_slab_off_t *)((uint8_t *)child_shm_addr + 128);
+		    (volatile xtc_slab_off_t *)((uint8_t *)child_shm_addr + 32);
 		volatile int *child_ready =
-		    (volatile int *)((uint8_t *)child_shm_addr + 136);
+		    (volatile int *)((uint8_t *)child_shm_addr + 40);
 
 		child_opts.name = "shm_child_alloc_child";
 		child_opts.obj_size = sizeof(struct test_payload);
@@ -388,9 +388,11 @@ test_shm_concurrent_alloc(const MunitParameter p[], void *d)
 	shm_fd = create_shm_region(shm_name, SHM_SIZE, &shm_addr);
 	munit_assert_int(shm_fd, >=, 0);
 
-	/* Reserve space for child's offsets and count. */
-	child_count_slot = (volatile int *)((uint8_t *)shm_addr + 128);
-	child_offs_slot = (volatile xtc_slab_off_t *)((uint8_t *)shm_addr + 256);
+	/* Reserve space for child's count and offsets.
+	 * Use a separate area after header but before chunk data.
+	 * We'll use a dedicated communication page at the end of the region. */
+	child_count_slot = (volatile int *)((uint8_t *)shm_addr + SHM_SIZE - 4096);
+	child_offs_slot = (volatile xtc_slab_off_t *)((uint8_t *)shm_addr + SHM_SIZE - 4096 + 8);
 	*child_count_slot = 0;
 
 	opts.name = "shm_conc";
@@ -416,9 +418,9 @@ test_shm_concurrent_alloc(const MunitParameter p[], void *d)
 		if (child_fd < 0) _exit(1);
 
 		volatile int *c_count =
-		    (volatile int *)((uint8_t *)child_shm_addr + 128);
+		    (volatile int *)((uint8_t *)child_shm_addr + SHM_SIZE - 4096);
 		volatile xtc_slab_off_t *c_offs =
-		    (volatile xtc_slab_off_t *)((uint8_t *)child_shm_addr + 256);
+		    (volatile xtc_slab_off_t *)((uint8_t *)child_shm_addr + SHM_SIZE - 4096 + 8);
 
 		child_opts.name = "shm_conc_child";
 		child_opts.obj_size = sizeof(struct test_payload);
