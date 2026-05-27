@@ -42,6 +42,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/os/os_mutex.c \
 	$(srcdir)/../src/os/os_cpu.c \
 	$(srcdir)/../src/io/io_common.c \
+	$(srcdir)/../src/io/io_net.c \
 	$(srcdir)/../src/io/io_poll.c \
 	$(srcdir)/../src/io/io_epoll.c \
 	$(srcdir)/../src/io/io_uring.c \
@@ -49,6 +50,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/io/io_iocp.c \
 	$(srcdir)/../src/io/io_solaris.c \
 	$(srcdir)/../src/io/io_aix.c \
+	$(srcdir)/../src/io/io_select.c \
 	$(srcdir)/../src/evt/loop.c \
 	$(srcdir)/../src/evt/task.c \
 	$(srcdir)/../src/evt/timer.c \
@@ -86,6 +88,7 @@ LIB_OBJS	= \
 	os_mutex.o \
 	os_cpu.o \
 	io_common.o \
+	io_net.o \
 	io_poll.o \
 	io_epoll.o \
 	io_uring.o \
@@ -93,6 +96,7 @@ LIB_OBJS	= \
 	io_iocp.o \
 	io_solaris.o \
 	io_aix.o \
+	io_select.o \
 	loop.o \
 	task.o \
 	timer.o \
@@ -148,12 +152,14 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_include_idempotent.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_include_inline_comment.sh \
 	$(abs_top_srcdir)/../test/dist/test_shellcheck.sh \
-	$(abs_top_srcdir)/../test/dist/test_s_perm.sh
+	$(abs_top_srcdir)/../test/dist/test_s_perm.sh \
+	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
+	$(abs_top_srcdir)/../test/dist/test_s_cfg.sh
 
 TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
 		  test_thread test_tls test_mutex \
-		  test_io_lifecycle test_io_register test_io_events test_io_wakeup \
+		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_net \
 		  test_loop test_task test_waker test_timer test_io_integration \
 		  test_async \
 		  test_fctx \
@@ -216,6 +222,9 @@ os_mutex.o: $(srcdir)/../src/os/os_mutex.c xtc_config.h
 io_common.o: $(srcdir)/../src/io/io_common.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_common.c
 
+io_net.o: $(srcdir)/../src/io/io_net.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_net.c
+
 io_poll.o: $(srcdir)/../src/io/io_poll.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_poll.c
 
@@ -236,6 +245,9 @@ io_solaris.o: $(srcdir)/../src/io/io_solaris.c xtc_config.h
 
 io_aix.o: $(srcdir)/../src/io/io_aix.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_aix.c
+
+io_select.o: $(srcdir)/../src/io/io_select.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_select.c
 
 loop.o: $(srcdir)/../src/evt/loop.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/loop.c
@@ -478,6 +490,12 @@ test_io_fault_inject: $(srcdir)/../test/m2/test_io_fault_inject.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
 		-o $@ $(srcdir)/../test/m2/test_io_fault_inject.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_net: $(srcdir)/../test/m2/test_net.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
+		-o $@ $(srcdir)/../test/m2/test_net.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M3 tests.

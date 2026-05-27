@@ -832,7 +832,7 @@ xtc_slab_pressure_listen(const char *psi_path,
 
 	fd = open(path, O_RDWR);
 	if (fd < 0) return XTC_E_NOSYS;     /* PSI not available */
-	if (write(fd, trigger, strlen(trigger)) < 0) {
+	if (write(fd, trigger, strlen(trigger)) < 0) {  /* XTC_BLOCKING_OK: PSI register, one-shot at startup */
 		(void)close(fd);
 		return XTC_E_NOSYS;
 	}
