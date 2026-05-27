@@ -1,0 +1,29 @@
+#!/bin/sh
+#-
+# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Use of this source code is governed by the ISC License.
+#
+# bench/conformance/w2_echo/tokio/bench
+#   Wrapper script for the W2 Tokio benchmark.
+#   Builds via `cargo build --release` if the binary is absent.
+#   Silently exits non-zero if `cargo` is not installed.
+
+set -eu
+
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+BIN="${SELF_DIR}/target/release/bench"
+
+# Exit non-zero silently if cargo is not available.
+if ! command -v cargo >/dev/null 2>&1; then
+    exit 1
+fi
+
+# Build if binary does not exist or source is newer.
+if [ ! -x "${BIN}" ] || \
+   [ "${SELF_DIR}/src/main.rs" -nt "${BIN}" ] || \
+   [ "${SELF_DIR}/Cargo.toml" -nt "${BIN}" ]; then
+    cargo build --release --manifest-path="${SELF_DIR}/Cargo.toml" \
+        >/dev/null 2>&1
+fi
+
+exec "${BIN}" "$@"
