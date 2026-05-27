@@ -158,6 +158,9 @@ case "$host_os" in
   *mingw*|*cygwin*|*msys*)
     xtc_extra_libs="-lws2_32"
     ;;
+  *solaris*|*illumos*)
+    xtc_extra_libs="-lsocket -lnsl"
+    ;;
 esac
 AC_SUBST([XTC_PLATFORM_LIBS], [$xtc_extra_libs])
 
