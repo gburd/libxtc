@@ -1,0 +1,18 @@
+#!/bin/sh
+#-
+# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Use of this source code is governed by the ISC License.
+#
+# bench/conformance/w3_pingpong/tokio/bench
+#   Wrapper that builds (if needed) and runs the W3 Tokio benchmark.
+#   run.sh discovers and invokes this script as the benchmark binary.
+#
+set -eu
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+
+# Build with cargo if the release binary is missing or stale.
+if [ ! -x "$SELF_DIR/target/release/bench" ]; then
+    cargo build --release --manifest-path "$SELF_DIR/Cargo.toml" >&2
+fi
+
+exec "$SELF_DIR/target/release/bench" "$@"
