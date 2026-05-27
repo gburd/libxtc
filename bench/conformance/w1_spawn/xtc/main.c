@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/conformance/w1_spawn/xtc/main.c
- *   M17 W1 — spawn-N-await-all, xtc runtime.
+ *   M17 W1 -- spawn-N-await-all, xtc runtime.
  *
  *   Spawns N tasks via xtc_task_spawn; each task increments an atomic
  *   counter and returns XTC_TASK_DONE.  Measures wall-time elapsed,

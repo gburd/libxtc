@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/dist/test_s_include.sh — T2
+# test/dist/test_s_include.sh -- T2
 # Run s_include against a fixture and diff the output against expected.
 
 set -eu

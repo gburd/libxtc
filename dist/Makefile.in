@@ -1,6 +1,6 @@
-# XTC Makefile.in — processed by configure into a Makefile.
+# XTC Makefile.in -- processed by configure into a Makefile.
 #
-# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Copyright (c) 2026, The XTC Project
 # Use of this source code is governed by the ISC License.
 
 srcdir		= @srcdir@
@@ -183,6 +183,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_app \
 		  test_mctx \
 		  test_slab \
+		  test_slab_shm \
 		  test_rcu \
 		  test_lrlock \
 		  test_lwlock \
@@ -366,7 +367,7 @@ bench_million_tasks: $(srcdir)/../bench/bench_million_tasks.c $(STATIC_LIB)
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # -------------------------------------------------------------------------
-# Examples — self-contained demos.
+# Examples -- self-contained demos.
 # -------------------------------------------------------------------------
 examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo
 
@@ -649,6 +650,12 @@ test_slab: $(srcdir)/../test/m11/test_slab.c \
 		-o $@ $(srcdir)/../test/m11/test_slab.c \
 		$(srcdir)/../test/m11/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_slab_shm: $(srcdir)/../test/m11/test_slab_shm.c \
+		$(srcdir)/../test/m11/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m11 \
+		-o $@ $(srcdir)/../test/m11/test_slab_shm.c \
+		$(srcdir)/../test/m11/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS) -lrt
+
 # M13 tests.
 test_rcu: $(srcdir)/../test/m13/test_rcu.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
@@ -711,7 +718,7 @@ test_observability: $(srcdir)/../test/m12/test_observability.c \
 		-o $@ $(srcdir)/../test/m12/test_observability.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
-# M18 tests — TLS API surface.
+# M18 tests -- TLS API surface.
 test_tls_basic: $(srcdir)/../test/m18/test_tls_basic.c \
 		$(srcdir)/../test/m18/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m18 \

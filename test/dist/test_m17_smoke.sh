@@ -1,9 +1,9 @@
 #!/bin/sh
 #-
-# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Copyright (c) 2026, The XTC Project
 # Use of this source code is governed by the ISC License.
 #
-# test/dist/test_m17_smoke.sh — M17 smoke test
+# test/dist/test_m17_smoke.sh -- M17 smoke test
 #
 # Verify that bench/conformance/run.sh:
 #   1. Exits 0.
@@ -46,7 +46,7 @@ _row=0
 printf '%s\n' "$OUTPUT" | tail -n +2 | while IFS= read -r _line; do
     [ -n "$_line" ] || continue
     _row=$((_row + 1))
-    # Count commas: 9 commas → 10 fields.
+    # Count commas: 9 commas -> 10 fields.
     _commas=$(printf '%s' "$_line" | tr -cd ',' | wc -c)
     if [ "$_commas" -ne 9 ]; then
         printf '  [M17-smoke] FAIL: data row %d has %d commas (want 9): %s\n' \

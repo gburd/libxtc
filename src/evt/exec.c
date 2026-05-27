@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/evt/exec.c
@@ -97,7 +97,7 @@ __xtc_exec_worker(void *arg)
 			/*
 			 * No local work.  Step blocks on io_poll inside
 			 * step_once when there are timers/fds; otherwise
-			 * we have nothing to do — the loop is done.
+			 * we have nothing to do -- the loop is done.
 			 *
 			 * But other loops might still be producing wakers
 			 * for our parked tasks (cross-thread sends).  We

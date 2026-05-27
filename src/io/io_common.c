@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/io/io_common.c
@@ -69,7 +69,7 @@ xtc_io_init(xtc_io_t **out)
 
 #if defined(_WIN32)
 	/* Windows IOCP wakeup uses PostQueuedCompletionStatus directly
-	 * — no socket pair needed.  __xtc_io_register_wakeup is a no-op
+	 * -- no socket pair needed.  __xtc_io_register_wakeup is a no-op
 	 * but still called for symmetry. */
 #else
 	{

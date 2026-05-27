@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m3/test_task.c — verifies M3_CLAIMS.md Ts1–Ts6.
+ * test/m3/test_task.c -- verifies M3_CLAIMS.md Ts1-Ts6.
  */
 
 #include "munit.h"

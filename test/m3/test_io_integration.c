@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m3/test_io_integration.c — verifies M3_CLAIMS.md Io1–Io3.
+ * test/m3/test_io_integration.c -- verifies M3_CLAIMS.md Io1-Io3.
  */
 
 #define _POSIX_C_SOURCE 200809L

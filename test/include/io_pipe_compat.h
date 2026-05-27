@@ -1,17 +1,17 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * test/include/io_pipe_compat.h
  *	Cross-platform pipe-pair helper for the L1 I/O tests.
  *
- *	On POSIX:    pipe(2) — read end at fd[0], write end at fd[1].
+ *	On POSIX:    pipe(2) -- read end at fd[0], write end at fd[1].
  *	On Windows:  loopback TCP socketpair via WSA*.  Anonymous pipes
  *	             on Windows can't compose with IOCP (different
  *	             completion model than overlapped sockets); using
  *	             sockets keeps the readiness-based xtc_io contract
  *	             working in tests.  The "fd" returned is the SOCKET
- *	             cast to int — same convention the io_iocp backend
+ *	             cast to int -- same convention the io_iocp backend
  *	             uses internally.
  */
 

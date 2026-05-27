@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/bench_disk.c
@@ -61,7 +61,7 @@ struct slot {
 
 /*
  * Latency histogram: we keep all samples (millions) and sort at the
- * end for percentile reporting.  For ~10⁶ reads this is fine; bigger
+ * end for percentile reporting.  For ~10^6 reads this is fine; bigger
  * runs can switch to HdrHistogram.
  */
 struct latencies {

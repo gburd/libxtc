@@ -11,7 +11,7 @@ discover new gaps via the cross-platform CI matrix (see
 A representative slice of active animals (~75-100 distinct
 configurations at any given time):
 
-### Linux x86_64 — most common
+### Linux x86_64 -- most common
 - Debian stable + unstable, Ubuntu LTS, RHEL/Rocky/CentOS Stream,
   Fedora, Alpine (musl), Arch, openSUSE Tumbleweed.
 - Compilers: gcc 9-15, clang 14-19, occasionally icc.
@@ -49,11 +49,11 @@ configurations at any given time):
 
 | Tier | Platform | xtc status |
 |---|---|---|
-| ✓ verified | Linux x86_64 (epoll + io_uring), gcc 14 | 151/151 |
-| ✓ verified | FreeBSD 15 amd64 (kqueue), clang 19 | 151/151 |
-| ✓ verified | OpenIndiana SPARC (port_*), gcc 13 | full pass (test_fctx skipped on SPARC) |
-| ◧ partial  | Windows 11 / MinGW x64 (IOCP), gcc | 31-35/36 (round 3 fixes pending Windows verify) |
-| ◯ untested | macOS, OpenBSD, NetBSD, DragonFlyBSD, AIX, ppc64le, s390x, riscv64, aarch64-Linux | code structurally ready; need hosts |
+| [OK] verified | Linux x86_64 (epoll + io_uring), gcc 14 | 151/151 |
+| [OK] verified | FreeBSD 15 amd64 (kqueue), clang 19 | 151/151 |
+| [OK] verified | OpenIndiana SPARC (port_*), gcc 13 | full pass (test_fctx skipped on SPARC) |
+| [H] partial  | Windows 11 / MinGW x64 (IOCP), gcc | 31-35/36 (round 3 fixes pending Windows verify) |
+| (O) untested | macOS, OpenBSD, NetBSD, DragonFlyBSD, AIX, ppc64le, s390x, riscv64, aarch64-Linux | code structurally ready; need hosts |
 
 ## What we need to ensure no animal fails on merge
 
@@ -96,11 +96,11 @@ PG vendors xtc as either:
   but supported.
 
 For packaging:
-- [ ] `pkg-config` `xtc.pc` file (currently NOT shipped — add).
+- [ ] `pkg-config` `xtc.pc` file (currently NOT shipped -- add).
 - [ ] CMake config `xtc-config.cmake` for downstream finders (currently
-  NOT shipped — defer; pkg-config is sufficient).
+  NOT shipped -- defer; pkg-config is sufficient).
 - [ ] SemVer policy in `docs/abi-stability.md` (already shipped).
-- [ ] Symbol versioning via `libxtc.map` — currently NOT used because
+- [ ] Symbol versioning via `libxtc.map` -- currently NOT used because
   we ship a static lib only.  When we ship `libxtc.so`, add a version
   script.
 
@@ -108,7 +108,7 @@ For packaging:
 - [ ] Every test must complete in < 30s (current `make check` runs
   in ~4s on Linux floki); add a per-test timeout to munit harness.
 - [ ] No test depends on hostname, /proc, /sys, or `/tmp` being
-  writable.  (`test_oos_enforced.sh` currently uses `/tmp` — verify
+  writable.  (`test_oos_enforced.sh` currently uses `/tmp` -- verify
   it falls back to `$TMPDIR`.)
 - [ ] No test requires root.
 - [ ] No test connects to an external host or DNS.
@@ -119,7 +119,7 @@ For packaging:
 ### 6. Locale and encoding
 PG buildfarm runs with various LC_ALL / LANG settings.  xtc tests
 must not depend on locale.  Audit: search for `setlocale`, `strcoll`,
-`towlower` — none should be in src/.
+`towlower` -- none should be in src/.
 
 ### 7. Runtime feature detection
 - xtc auto-detects the L1 backend at configure time (epoll / kqueue /
@@ -159,7 +159,7 @@ buildfarm readiness:
 
 **Phase B** (after Phase A green for 2 weeks):
 - Add scheduled QEMU matrix run: aarch64-linux, ppc64le-linux,
-  s390x-linux, freebsd-15-amd64, openindiana-amd64 — using cached
+  s390x-linux, freebsd-15-amd64, openindiana-amd64 -- using cached
   S3 images.
 - Run nightly; alert on any red.
 
@@ -196,4 +196,4 @@ buildfarm readiness:
 - [ ] `pkg-config` `xtc.pc` shipped.
 - [ ] All ABI-stable APIs documented in `man3/`.
 - [ ] PLAN.md, ARCHITECTURE.md, M_PORT.md all match reality (verified
-  by the audit agent — documented in `docs/audit-log.md`).
+  by the audit agent -- documented in `docs/audit-log.md`).

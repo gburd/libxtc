@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m5/test_deque.c — verifies M5_CLAIMS.md Dq1–Dq5.
+ * test/m5/test_deque.c -- verifies M5_CLAIMS.md Dq1-Dq5.
  */
 
 #include <pthread.h>
@@ -95,7 +95,7 @@ dq4_thief(void *arg)
 	for (;;) {
 		void *p = xtc_deque_steal(c->q);
 		if (p == NULL) {
-			/* Try a few more spins before giving up — owner may
+			/* Try a few more spins before giving up -- owner may
 			 * still be producing. */
 			int i;
 			for (i = 0; i < 100; i++) {

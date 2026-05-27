@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m3/test_loop.c — verifies M3_CLAIMS.md Ev1–Ev5.
+ * test/m3/test_loop.c -- verifies M3_CLAIMS.md Ev1-Ev5.
  */
 
 #include "munit.h"

@@ -1,20 +1,20 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
  *
  * src/inc/xtc_lwlock.h
- *	Lightweight lock — multi-reader / single-writer lock with an
+ *	Lightweight lock -- multi-reader / single-writer lock with an
  *	atomic state word and an explicit wait queue.  Ported from
  *	postgres/lrlck/src/backend/storage/lmgr/lwlock.c, retaining the
  *	state-encoding scheme verbatim:
  *
- *	  bit 31:  LW_FLAG_HAS_WAITERS        — wakeups are pending
- *	  bit 30:  LW_FLAG_WAKE_IN_PROGRESS   — another thread is waking
- *	  bit 29:  LW_FLAG_QUEUE_LOCKED       — wait-queue spinlock
+ *	  bit 31:  LW_FLAG_HAS_WAITERS        -- wakeups are pending
+ *	  bit 30:  LW_FLAG_WAKE_IN_PROGRESS   -- another thread is waking
+ *	  bit 29:  LW_FLAG_QUEUE_LOCKED       -- wait-queue spinlock
  *	  bits 0..N-1: shared-holder count
- *	  bit N:   LW_VAL_EXCLUSIVE           — exclusive owner present
+ *	  bit N:   LW_VAL_EXCLUSIVE           -- exclusive owner present
  *
  *	N is configurable via XTC_LWLOCK_MAX_BACKENDS (default 4096).
  *
@@ -81,7 +81,7 @@ void  xtc_lwlock_destroy(xtc_lwlock_t *lock);
 /* Acquire blocks until the lock is held in `mode`.  Returns XTC_OK. */
 int   xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode);
 
-/* Conditional acquire — non-blocking.  Returns XTC_OK on success,
+/* Conditional acquire -- non-blocking.  Returns XTC_OK on success,
  * XTC_E_AGAIN if the lock would block. */
 int   xtc_lwlock_acquire_cond(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode);
 

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_slab.h
@@ -9,13 +9,13 @@
  *	mailbox envelopes, channel slots, RCU retired nodes, timer
  *	nodes).
  *
- *	Design (v1):
+ *	Design:
  *	  - Each cache owns one or more "chunks" (large mmap regions),
  *	    carved into per-object slots.  No per-object malloc.
  *	  - Chunks are sub-divided into "slabs" (default 64 KiB each)
  *	    tracked on free/partial/full lists.
- *	  - Each loop has a magazine — a small array of recently-freed
- *	    object pointers — for lock-free fast-path alloc/free.
+ *	  - Each loop has a magazine -- a small array of recently-freed
+ *	    object pointers -- for lock-free fast-path alloc/free.
  *	    On magazine miss, the cache mutex is taken and the magazine
  *	    is refilled from a partial slab.
  *	  - On magazine overflow (free), the magazine spills back to
@@ -27,28 +27,44 @@
  *	    the OS via munmap.
  *
  *	Two storage modes:
- *	  PROCESS_LOCAL — chunks via mmap MAP_ANONYMOUS; objects are
+ *	  PROCESS_LOCAL -- chunks via mmap MAP_ANONYMOUS; objects are
  *	    process-local pointers.
- *	  SHARED_MEMORY — chunks carved from a single user-supplied
+ *	  SHARED_MEMORY -- chunks carved from a single user-supplied
  *	    region (mmap MAP_SHARED of a tmpfs/posix-shm fd).  Object
- *	    handles are offsets (xtc_slab_off_t — BDB's roff_t
+ *	    handles are offsets (xtc_slab_off_t -- BDB's roff_t
  *	    equivalent) so a peer process mapping the same fd at a
  *	    different VA can resolve them.  Use xtc_slab_resolve() and
  *	    xtc_slab_offset() to convert.
  *
+ *	    Cross-process support: verified working.  Multiple processes
+ *	    can attach to the same shm region (via shm_open + mmap) and
+ *	    allocate concurrently without collision.  The region contains
+ *	    a 64-byte header at offset 0 with an atomic cursor that
+ *	    coordinates chunk allocation across processes.  First
+ *	    attacher initializes the header; subsequent attachers verify
+ *	    magic and use the existing cursor.
+ *
+ *	    Typical usage:
+ *	      1. Process A: shm_open + ftruncate + mmap(MAP_SHARED)
+ *	      2. Process A: xtc_slab_create with shm_base/shm_size
+ *	      3. Process B: shm_open + mmap(MAP_SHARED) same path
+ *	      4. Process B: xtc_slab_create with same shm_base/shm_size
+ *	      5. Either process can now alloc; the other can resolve
+ *	         the offset to access the object.
+ *
  *	Debug flags (M11.5a):
- *	  REDZONE   — 16-byte guard before+after each object; checked
+ *	  REDZONE   -- 16-byte guard before+after each object; checked
  *	              on free
- *	  AUDIT     — small ring of recent (alloc, free, who, when)
+ *	  AUDIT     -- small ring of recent (alloc, free, who, when)
  *	              events per cache for postmortem
- *	  BACKTRACE — capture backtrace on alloc; combine with AUDIT
+ *	  BACKTRACE -- capture backtrace on alloc; combine with AUDIT
  *	              to identify leakers (Linux only, requires
  *	              <execinfo.h>)
  *
  *	OOM policies:
- *	  FAIL    — return NULL, set XTC_E_RESOURCE in caller
- *	  BACKOFF — short usleep + retry once, then FAIL
- *	  ABORT   — call abort() (debug builds only; never in prod)
+ *	  FAIL    -- return NULL, set XTC_E_RESOURCE in caller
+ *	  BACKOFF -- short usleep + retry once, then FAIL
+ *	  ABORT   -- call abort() (debug builds only; never in prod)
  *
  *	Memory-pressure: callers can register `xtc_slab_pressure_listen`
  *	on Linux (/proc/pressure/memory PSI).  When pressure is high,
@@ -138,7 +154,7 @@ typedef struct xtc_slab_opts {
 
 typedef struct xtc_slab_stats {
 	uint64_t alloc_fast;        /* magazine hit */
-	uint64_t alloc_slow;        /* magazine miss → cache lock */
+	uint64_t alloc_slow;        /* magazine miss -> cache lock */
 	uint64_t free_fast;
 	uint64_t free_slow;
 	uint64_t n_inuse;
@@ -179,7 +195,7 @@ int   xtc_slab_reap(xtc_slab_t *slab);
 
 int   xtc_slab_stat(const xtc_slab_t *slab, xtc_slab_stats_t *out);
 
-/* Shared-memory helpers — convert between process-local pointer
+/* Shared-memory helpers -- convert between process-local pointer
  * and a stable offset.  In PROCESS_LOCAL mode these are still
  * meaningful but only valid within this process. */
 xtc_slab_off_t xtc_slab_offset(const xtc_slab_t *slab, const void *p);

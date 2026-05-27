@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m7/test_chan.c — verifies M7 channel APIs.
+ * test/m7/test_chan.c -- verifies M7 channel APIs.
  */
 
 #include <pthread.h>
@@ -50,7 +50,7 @@ test_mpsc_basic(const MunitParameter p[], void *d)
 		munit_assert_int(xtc_chan_mpsc_try_send(c, &items[i]),
 		    ==, XTC_OK);
 	}
-	/* Capacity is now 8 — next send must fail. */
+	/* Capacity is now 8 -- next send must fail. */
 	munit_assert_int(xtc_chan_mpsc_try_send(c, &items[0]),
 	    ==, XTC_E_AGAIN);
 	for (i = 0; i < 8; i++) {
@@ -62,7 +62,7 @@ test_mpsc_basic(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-/* mpsc N producers, 1 consumer — no message lost, no duplicates. */
+/* mpsc N producers, 1 consumer -- no message lost, no duplicates. */
 #define NP 8
 #define MSG_PER 1000
 struct mpsc_ctx { xtc_chan_mpsc_t *c; int id; };

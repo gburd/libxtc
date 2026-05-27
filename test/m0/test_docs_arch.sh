@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/m0/test_docs_arch.sh — D2
+# test/m0/test_docs_arch.sh -- D2
 set -eu
 : "${XTC_SRC_DIR:?}"
 F="$XTC_SRC_DIR/docs/ARCHITECTURE.md"

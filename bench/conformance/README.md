@@ -1,4 +1,4 @@
-# bench/conformance — Cross-Runtime Conformance Benchmarks
+# bench/conformance -- Cross-Runtime Conformance Benchmarks
 
 This directory contains the benchmark infrastructure and workload
 implementations for the **M17 conformance suite**: xtc vs Tokio vs Erlang.
@@ -27,28 +27,28 @@ python3 bench/conformance/plot.py < results.csv
 
 ```
 bench/conformance/
-    README.md          — this file
-    run.sh             — benchmark runner / CSV aggregator
-    plot.py            — visualisation script (matplotlib or text fallback)
+    README.md          -- this file
+    run.sh             -- benchmark runner / CSV aggregator
+    plot.py            -- visualisation script (matplotlib or text fallback)
     include/
-        hist.h         — HDR-style histogram, single-header C library
-        hist.c         — implementation translation unit for hist.h
-    w1_spawn/          — W1: spawn-N-await-all
-    w2_echo/           — W2: echo server, 1k clients
-    w3_pingpong/       — W3: mailbox ping-pong
-    w4_mutex/          — W4: mutex contention
-    w5_rwratio/        — W5: reader/writer ratio sweep
-    w6_tail/           — W6: tail latency under backpressure
-    w7_timer/          — W7: timer wheel accuracy
+        hist.h         -- HDR-style histogram, single-header C library
+        hist.c         -- implementation translation unit for hist.h
+    w1_spawn/          -- W1: spawn-N-await-all
+    w2_echo/           -- W2: echo server, 1k clients
+    w3_pingpong/       -- W3: mailbox ping-pong
+    w4_mutex/          -- W4: mutex contention
+    w5_rwratio/        -- W5: reader/writer ratio sweep
+    w6_tail/           -- W6: tail latency under backpressure
+    w7_timer/          -- W7: timer wheel accuracy
 ```
 
 Each workload directory contains one subdirectory per runtime:
 
 ```
 w<N>_<name>/
-    xtc/               — xtc implementation (C; main.c + Makefile)
-    tokio/             — Tokio implementation (Rust; Cargo.toml + src/main.rs)
-    erlang/            — Erlang implementation (escript; main.erl)
+    xtc/               -- xtc implementation (C; main.c + Makefile)
+    tokio/             -- Tokio implementation (Rust; Cargo.toml + src/main.rs)
+    erlang/            -- Erlang implementation (escript; main.erl)
 ```
 
 The compiled (or scripted) benchmark binary must be named **`bench`** inside
@@ -63,20 +63,20 @@ its runtime subdirectory.  `run.sh` discovers executables at
 2. Build to produce an executable named `bench` in that directory.
 3. The binary must write exactly one key=value line to stdout; see
    [docs/M17_RESULTS_FORMAT.md](../../docs/M17_RESULTS_FORMAT.md).
-4. Run `./bench/conformance/run.sh` — the new result appears automatically.
+4. Run `./bench/conformance/run.sh` -- the new result appears automatically.
 
 ---
 
-## hist.h — HDR histogram
+## hist.h -- HDR histogram
 
 `include/hist.h` provides a log-linear histogram for in-process latency
 capture.  Sub-bucket count and total bucket storage scale with precision:
 
 | sub_bits | sub-buckets | relative error | buckets (60 s range) |
 |----------|-------------|----------------|----------------------|
-| 4        | 16          | ≤ 6%           | 512                  |
-| 7        | 128         | ≤ 0.8%         | 3840                 |
-| 10       | 1024        | ≤ 0.1%         | 30 720               |
+| 4        | 16          | <= 6%           | 512                  |
+| 7        | 128         | <= 0.8%         | 3840                 |
+| 10       | 1024        | <= 0.1%         | 30 720               |
 
 ### Usage
 

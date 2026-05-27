@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
@@ -7,8 +7,8 @@
  * test/m18/test_tls_basic.c
  *	Smoke tests for the xtc_tls API surface (TLS-1 task).
  *
- *	These tests exercise the public API symbols — create/destroy
- *	lifecycle and the NOSYS stub contract — without requiring an
+ *	These tests exercise the public API symbols -- create/destroy
+ *	lifecycle and the NOSYS stub contract -- without requiring an
  *	actual TLS handshake.  When TLS support is not compiled in
  *	(--with-tls=none) every test skips cleanly.
  *

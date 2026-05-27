@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m3/test_timer.c — verifies M3_CLAIMS.md Tm5–Tm10.
+ * test/m3/test_timer.c -- verifies M3_CLAIMS.md Tm5-Tm10.
  */
 
 #include <stdint.h>

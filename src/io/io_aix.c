@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/io/io_aix.c
@@ -9,7 +9,7 @@
  *	pollset_destroy, pollset_query) is a registered-fd model similar
  *	to epoll: persistent registration, one descriptor poll, edge or
  *	level triggered.  Unlike illumos event ports, registrations are
- *	NOT one-shot — once added, an fd stays registered until
+ *	NOT one-shot -- once added, an fd stays registered until
  *	explicitly removed via pollset_ctl(PS_DELETE).
  *
  *	xtc_io contract mapping:
@@ -23,9 +23,9 @@
  *	us duplicate-detection for the M2 contract.
  *
  *	NOTE: This file builds on AIX (xlc or gcc-aix) but has not yet
- *	run on a live AIX host (no machine available at xtc dev time).
- *	The structural correctness was reviewed against IBM's pollset
- *	man pages.  First runtime test will surface anything subtle.
+ *	run on a live AIX host.  See docs/M_AIX_KVM.md for the plan to
+ *	obtain AIX testing infrastructure.  Structural correctness was
+ *	reviewed against IBM's pollset man pages.
  */
 
 #include "xtc_int.h"
@@ -41,7 +41,7 @@
 
 extern int __xtc_io_drain_wakeup(xtc_io_t *io);
 
-/* Side-table tracking — same shape as illumos and kqueue. */
+/* Side-table tracking -- same shape as illumos and kqueue. */
 struct __xtc_aix_reg {
 	int       fd;
 	uint32_t  interest;

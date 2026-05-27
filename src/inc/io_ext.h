@@ -7,10 +7,10 @@
 const char *xtc_io_backend_name __P((void));
 int  xtc_tls_create  __P((xtc_tls_ctx_t *, int, xtc_tls_t **));
 int  xtc_tls_ctx_create __P((xtc_tls_role_t, const xtc_tls_opts_t *, xtc_tls_ctx_t **));
-int  xtc_tls_handshake  __P((xtc_tls_t *));
+int  xtc_tls_handshake __P((xtc_tls_t *));
 int  xtc_tls_read  __P((xtc_tls_t *, void *, size_t, size_t *));
 int  xtc_tls_shutdown __P((xtc_tls_t *));
-int  xtc_tls_wants_read __P((const xtc_tls_t *));
+int  xtc_tls_wants_read  __P((const xtc_tls_t *));
 int  xtc_tls_wants_write __P((const xtc_tls_t *));
 int  xtc_tls_write __P((xtc_tls_t *, const void *, size_t, size_t *));
 int xtc_io_del_fd __P((xtc_io_t *, int));

@@ -1,12 +1,12 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/os_thread.h
  *	Thread, TLS, mutex, rwlock, cond, sem abstractions.
  *	The pthreads implementation lives in src/os/os_*.c; a Win32
  *	implementation lands later behind the same surface.
- *	See M1_CLAIMS.md, T1–T7, L1–L5, Mu1–Mu6.
+ *	See M1_CLAIMS.md, T1-T7, L1-L5, Mu1-Mu6.
  */
 
 #ifndef XTC_OS_THREAD_H
@@ -20,7 +20,7 @@
  * callers see only an opaque pointer plus a sentinel-zero state.
  *
  * We reserve a small in-line "state" struct rather than allocating
- * via __os_malloc — initialisation must work before the allocator
+ * via __os_malloc -- initialisation must work before the allocator
  * is initialised on some platforms.
  */
 struct __os_thread { void *opaque; };

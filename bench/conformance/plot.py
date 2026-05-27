@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Copyright (c) 2026, The XTC Project
 # Use of this source code is governed by the ISC License.
 #
 # bench/conformance/plot.py
@@ -11,10 +11,10 @@
 #   python3 bench/conformance/plot.py < results.csv
 #
 # Output (in priority order):
-#   1. results.html  — if matplotlib + mpld3 are available (interactive).
-#   2. bench/conformance/plots/*.png  — one PNG per workload if matplotlib
+#   1. results.html  -- if matplotlib + mpld3 are available (interactive).
+#   2. bench/conformance/plots/*.png  -- one PNG per workload if matplotlib
 #      is available but mpld3 is not.
-#   3. Tabular text summary to stdout — if matplotlib is not installed.
+#   3. Tabular text summary to stdout -- if matplotlib is not installed.
 #
 # Python 3.8+ standard library only; matplotlib/mpld3 are optional.
 #
@@ -115,7 +115,7 @@ def _ns_label(ns_val):
     if ns_val >= 1_000_000:
         return f"{ns_val/1e6:.2f} ms"
     if ns_val >= 1_000:
-        return f"{ns_val/1e3:.2f} µs"
+        return f"{ns_val/1e3:.2f} us"
     return f"{ns_val} ns"
 
 
@@ -163,7 +163,7 @@ def make_plots(groups, out_dir=None):
     """
     active = [wl for wl in WORKLOAD_ORDER if groups.get(wl)]
     if not active:
-        print("plot.py: no data — nothing to plot.", file=sys.stderr)
+        print("plot.py: no data -- nothing to plot.", file=sys.stderr)
         return None
 
     n = len(active)
@@ -175,7 +175,7 @@ def make_plots(groups, out_dir=None):
         ax_line = fig.add_subplot(gs[1, col])
         plot_workload(ax_bar, ax_line, wl_key, groups[wl_key])
 
-    fig.suptitle("XTC Conformance Benchmarks — xtc vs Tokio vs Erlang", fontsize=11)
+    fig.suptitle("XTC Conformance Benchmarks -- xtc vs Tokio vs Erlang", fontsize=11)
 
     if HAS_MPLD3:
         html = mpld3.fig_to_html(fig)
@@ -248,7 +248,7 @@ def main():
 
     if not HAS_MPL:
         print(
-            "plot.py: matplotlib not found — printing tabular summary.",
+            "plot.py: matplotlib not found -- printing tabular summary.",
             file=sys.stderr,
         )
         print_table(groups)

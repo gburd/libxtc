@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/m2/test_m2_man.sh — D8
+# test/m2/test_m2_man.sh -- D8
 # Verify the xtc_io man3 page mentions every public symbol and flag.
 set -eu
 : "${XTC_SRC_DIR:?}"

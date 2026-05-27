@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/m1/test_m1_man_coverage.sh — D7
+# test/m1/test_m1_man_coverage.sh -- D7
 # Every internal __os_<topic> module has a man3 page that mentions
 # every function declared in its header.
 
@@ -30,7 +30,7 @@ for mod in os_atomic os_alloc os_thread os_tls os_mutex os_time; do
 	# Pull every function name __os_<mod-suffix>_<...> from the header.
 	#
 	# For the os_atomic module the names use suffix-typed variants
-	# (__os_atomic_load_i32, etc.) — we only require the *base* name
+	# (__os_atomic_load_i32, etc.) -- we only require the *base* name
 	# (__os_atomic_load) be mentioned by the page.
 	case "$mod" in
 		os_atomic)

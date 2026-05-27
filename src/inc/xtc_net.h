@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
@@ -13,7 +13,7 @@
  *
  *	The socket family is identified by xtc_net_family_t; xtc owns
  *	the fd and exposes it for direct use with xtc_io_reg_fd /
- *	xtc_io_poll.  None of these calls block — caller-driven I/O
+ *	xtc_io_poll.  None of these calls block -- caller-driven I/O
  *	is the contract.
  */
 
@@ -82,7 +82,7 @@ int xtc_net_setnonblock(int fd);
 /* Close (always succeeds). */
 void xtc_net_close(int fd);
 
-/* Unix domain sockets — SOCK_STREAM. */
+/* Unix domain sockets -- SOCK_STREAM. */
 int xtc_net_unix_listen(const char *path, int *out_fd);
 int xtc_net_unix_dial  (const char *path, int *out_fd);
 

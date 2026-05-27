@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/evt/coro_winfiber.c
@@ -25,7 +25,7 @@
 #include <windows.h>
 #include <string.h>
 
-/* Per-thread cursor — the coroutine currently executing on this thread. */
+/* Per-thread cursor -- the coroutine currently executing on this thread. */
 __thread struct xtc_coro *__xtc_current_coro = NULL;
 
 /* Default stack size; configurable via xtc_set_stack_size(). */
@@ -47,7 +47,7 @@ xtc_set_stack_size(size_t bytes)
 
 /* Fiber entry: invoked the first time we SwitchToFiber into the
  * coroutine.  Runs the user function, marks done, and switches back
- * to the loop fiber.  Must NEVER return — Win32 will terminate the
+ * to the loop fiber.  Must NEVER return -- Win32 will terminate the
  * thread. */
 static VOID CALLBACK
 __coro_entry(LPVOID arg)

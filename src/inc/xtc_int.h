@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_int.h
@@ -11,7 +11,7 @@
 #define XTC_INT_H
 
 /*
- * Feature-test macros — must come before any system header.  We aim
+ * Feature-test macros -- must come before any system header.  We aim
  * for POSIX.1-2008 with BSD/illumos extensions enabled, since we
  * touch mmap flags, ucontext, pthread_setname_np, and a handful of
  * other extensions.
@@ -51,5 +51,34 @@
 #include "os_thread.h"
 #include "os_time.h"
 #include "os_cpu.h"
+
+/*
+ * Cache-line size.  Default 64 bytes; some ARM cores (Apple M1/M2,
+ * Cortex-X1) use 128-byte lines.  Override via -DXTC_CACHE_LINE=128
+ * on those platforms.
+ */
+#ifndef XTC_CACHE_LINE
+#  define XTC_CACHE_LINE  64
+#endif
+
+/*
+ * Branch prediction hints.  Use XTC_LIKELY for conditions that are
+ * almost always true on the hot path, XTC_UNLIKELY for error checks
+ * and slow-path fallbacks.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#  define XTC_LIKELY(x)   __builtin_expect(!!(x), 1)
+#  define XTC_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#  define XTC_LIKELY(x)   (x)
+#  define XTC_UNLIKELY(x) (x)
+#endif
+
+/*
+ * Cache-line padding helper.  Embeds explicit padding bytes to push
+ * the next field onto a new cache line.
+ */
+#define XTC_CACHELINE_PAD  \
+	char __pad_##__LINE__[XTC_CACHE_LINE]
 
 #endif /* XTC_INT_H */
