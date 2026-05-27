@@ -647,6 +647,8 @@ XTC_HEGEL_SERVER_COMMAND
 XTC_HEGEL_PBT
 XTC_HEGEL_LIBS
 XTC_HEGEL_CFLAGS
+XTC_TLS_LIBS
+XTC_TLS_BACKEND
 XTC_PLATFORM_LIBS
 XTC_URING_LIBS
 XTC_URING_CFLAGS
@@ -720,6 +722,7 @@ ac_user_opts='
 enable_option_checking
 with_io_backend
 with_liburing
+with_tls
 with_hegel
 with_hegel_server
 '
@@ -1356,6 +1359,8 @@ Optional Packages:
                           Pick the L1 I/O backend (default: auto).
   --with-liburing=PATH    Path to a liburing install (overrides pkg-config
                           search).
+  --with-tls=openssl|none|auto
+                          Select the TLS backend (default: auto).
   --with-hegel=PATH       Enable hegel-c property-based tests; PATH is the
                           hegel-c source root that contains
                           include/hegel/hegel.h and build/libhegel.{a,so}.
@@ -4243,6 +4248,189 @@ printf "%s\n" "#define XTC_IO_BACKEND_SELECT 1" >>confdefs.h
   *) :
      ;;
 esac
+
+# -------------------------------------------------------------------------
+# TLS backend selection.
+# -------------------------------------------------------------------------
+
+# Check whether --with-tls was given.
+if test ${with_tls+y}
+then :
+  withval=$with_tls; xtc_tls=$withval
+else case e in #(
+  e) xtc_tls=auto ;;
+esac
+fi
+
+
+xtc_tls_backend=none
+XTC_TLS_LIBS=
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for TLS backend" >&5
+printf %s "checking for TLS backend... " >&6; }
+case "$xtc_tls" in
+  auto)
+    # Try OpenSSL: need both the library and the header.
+    ac_save_LIBS=$LIBS
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for SSL_library_init in -lssl" >&5
+printf %s "checking for SSL_library_init in -lssl... " >&6; }
+if test ${ac_cv_lib_ssl_SSL_library_init+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) ac_check_lib_save_LIBS=$LIBS
+LIBS="-lssl  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char SSL_library_init (void);
+int
+main (void)
+{
+return SSL_library_init ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_lib_ssl_SSL_library_init=yes
+else case e in #(
+  e) ac_cv_lib_ssl_SSL_library_init=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_ssl_SSL_library_init" >&5
+printf "%s\n" "$ac_cv_lib_ssl_SSL_library_init" >&6; }
+if test "x$ac_cv_lib_ssl_SSL_library_init" = xyes
+then :
+  ac_have_ssl_lib=yes
+else case e in #(
+  e) ac_have_ssl_lib=no ;;
+esac
+fi
+
+    LIBS=$ac_save_LIBS
+    ac_fn_c_check_header_compile "$LINENO" "openssl/ssl.h" "ac_cv_header_openssl_ssl_h" "$ac_includes_default"
+if test "x$ac_cv_header_openssl_ssl_h" = xyes
+then :
+  ac_have_ssl_hdr=yes
+else case e in #(
+  e) ac_have_ssl_hdr=no ;;
+esac
+fi
+
+    if test "x$ac_have_ssl_lib" = xyes && test "x$ac_have_ssl_hdr" = xyes
+then :
+  xtc_tls_backend=openssl
+else case e in #(
+  e) xtc_tls_backend=none ;;
+esac
+fi
+    ;;
+  openssl)
+    # Explicit request — fail loudly if not present.
+    ac_save_LIBS=$LIBS
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for SSL_library_init in -lssl" >&5
+printf %s "checking for SSL_library_init in -lssl... " >&6; }
+if test ${ac_cv_lib_ssl_SSL_library_init+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) ac_check_lib_save_LIBS=$LIBS
+LIBS="-lssl  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char SSL_library_init (void);
+int
+main (void)
+{
+return SSL_library_init ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_lib_ssl_SSL_library_init=yes
+else case e in #(
+  e) ac_cv_lib_ssl_SSL_library_init=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_ssl_SSL_library_init" >&5
+printf "%s\n" "$ac_cv_lib_ssl_SSL_library_init" >&6; }
+if test "x$ac_cv_lib_ssl_SSL_library_init" = xyes
+then :
+  printf "%s\n" "#define HAVE_LIBSSL 1" >>confdefs.h
+
+  LIBS="-lssl $LIBS"
+
+else case e in #(
+  e) as_fn_error $? "--with-tls=openssl: libssl not found" "$LINENO" 5 ;;
+esac
+fi
+
+    LIBS=$ac_save_LIBS
+    ac_fn_c_check_header_compile "$LINENO" "openssl/ssl.h" "ac_cv_header_openssl_ssl_h" "$ac_includes_default"
+if test "x$ac_cv_header_openssl_ssl_h" = xyes
+then :
+
+else case e in #(
+  e) as_fn_error $? "--with-tls=openssl: openssl/ssl.h not found" "$LINENO" 5 ;;
+esac
+fi
+
+    xtc_tls_backend=openssl
+    ;;
+  none)
+    xtc_tls_backend=none
+    ;;
+  *)
+    as_fn_error $? "invalid --with-tls=$xtc_tls; use openssl, none, or auto" "$LINENO" 5
+    ;;
+esac
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $xtc_tls_backend" >&5
+printf "%s\n" "$xtc_tls_backend" >&6; }
+
+if test "x$xtc_tls_backend" = xopenssl
+then :
+
+printf "%s\n" "#define XTC_TLS_BACKEND_OPENSSL 1" >>confdefs.h
+
+   XTC_TLS_LIBS="-lssl -lcrypto"
+fi
+
+XTC_TLS_BACKEND=$xtc_tls_backend
+
+
 
 # -------------------------------------------------------------------------
 # Optional: hegel-c property-based testing.
