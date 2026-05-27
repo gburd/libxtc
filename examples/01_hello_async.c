@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * examples/01_hello_async.c — minimal coroutine: spawn an async
  * task, await its return value.

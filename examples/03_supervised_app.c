@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * examples/03_supervised_app.c — OTP-style app: a root supervisor
  * starts two children (a counter-server and a stats-printer); the

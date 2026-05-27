@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * test/m5/test_cross_wake.c — verifies M5_CLAIMS.md Cw1–Cw4.
  *

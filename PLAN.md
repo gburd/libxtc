@@ -779,7 +779,7 @@ enforced.  Same shape as BDB/DBSQL.
 xtc/
 ├── README.md
 ├── PLAN.md                           ← this document
-├── LICENSE                           ← PostgreSQL license (proposed)
+├── LICENSE                           ← ISC license (proposed)
 ├── dist/                             ← build apparatus
 │   ├── configure.ac
 │   ├── aclocal/                      ← .m4 probes (io_uring, kqueue, ucontext,
@@ -1097,7 +1097,7 @@ These remain for your sign-off.  Defaults given are my recommendation.
 | Q5 | Allocator | **Pluggable + per-task arena + slab caches + ownership domains** (libumem-shaped). |
 | Q6 | OTP scope | Yes: supervisor, svr, fsm, app, reg.  No (for now): distribution, hot reload, ETS. |
 | Q7 | Multi-process from L0 | **L0 has the primitives, L1–L4 don't use them in v1.** PG L5 is the only multi-process consumer. |
-| Q8 | License | **PostgreSQL license.** |
+| Q8 | License | **ISC license.** |
 | Q9 (new) | Configure-time vs runtime backend selection | **Configure-time only.** No vtable on hot path. |
 | Q10 (new) | Default loop count | **`__os_ncpus()`**, configurable down to 1 for the strict-degraded build. |
 | Q11 (new) | Coroutine stack size default | **64 KiB with guard page**, configurable per-spawn. |
@@ -3111,7 +3111,7 @@ for PG.
 3. Confirm the **platform matrix** in §3 — particularly whether
    AIX is Tier 2 or can drop to "best-effort".
 4. Confirm **C11** as the dialect.
-5. Confirm **PostgreSQL license**.
+5. Confirm **ISC license**.
 6. Confirm the **§12 strategy** for `async()/await()` — fiber as
    default, protothread fallback, explicit-thunk escape, with
    `dist/s_async` (§6.4) generating typed prototypes.

@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_reg.h
  *	Process registry: name -> xtc_pid_t lookup.  M10.5.

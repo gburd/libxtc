@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * test/otp/test_otp_proc_lib.c — port of selected proc_lib_SUITE
  * test cases from `lib/stdlib/test/proc_lib_SUITE.erl` (Erlang/OTP).

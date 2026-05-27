@@ -1,7 +1,7 @@
 project('xtc', 'c',
   version : run_command('cat', meson.project_source_root() / 'dist' / 'version.in',
                        check : true).stdout().strip(),
-  license : 'PostgreSQL',
+  license : 'ISC',
   default_options : [
     'c_std=c11',
     'warning_level=2',

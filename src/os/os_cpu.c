@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * src/os/os_cpu.c
  *	CPU and NUMA topology probes.  Linux uses /sys/devices/system/cpu
