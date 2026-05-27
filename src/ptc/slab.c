@@ -68,6 +68,10 @@ static int   __win_chunk_free(void *p, size_t sz) { (void)sz; free(p); return 0;
 #endif
 #include <unistd.h>
 #include <time.h>
+#if defined(__linux__) && defined(__GLIBC__)
+#  include <execinfo.h>
+#  define XTC_HAS_EXECINFO 1
+#endif
 
 /* ---- redzone magic ---- */
 #define XTC_RZ_MAGIC  0xA5A5A5A5A5A5A5A5ULL
@@ -75,11 +79,16 @@ static int   __win_chunk_free(void *p, size_t sz) { (void)sz; free(p); return 0;
 #define XTC_RZ_BACK   8
 
 /* ---- audit ring ---- */
-#define XTC_AUDIT_N   64
+#define XTC_AUDIT_N      64
+#define XTC_AUDIT_BTSZ   8
 struct audit_event {
 	void    *obj;
 	uint8_t  op;        /* 'A'=alloc, 'F'=free */
 	int64_t  ts_ns;
+	/* When XTC_SLAB_BACKTRACE is set, capture up to 8 frames
+	 * via backtrace() (Linux/glibc; no-op elsewhere). */
+	void    *bt[XTC_AUDIT_BTSZ];
+	int      bt_n;
 };
 
 /* ---- per-cache global registry (for reap_all + pressure) ---- */
@@ -182,11 +191,19 @@ static void
 __audit_record(xtc_slab_t *s, void *obj, uint8_t op)
 {
 	uint64_t pos;
+	struct audit_event *ev;
 	if (s->audit_ring == NULL) return;
 	pos = atomic_fetch_add_explicit(&s->audit_pos, 1, memory_order_relaxed);
-	s->audit_ring[pos % XTC_AUDIT_N].obj = obj;
-	s->audit_ring[pos % XTC_AUDIT_N].op = op;
-	s->audit_ring[pos % XTC_AUDIT_N].ts_ns = __now_ns_slab();
+	ev = &s->audit_ring[pos % XTC_AUDIT_N];
+	ev->obj = obj;
+	ev->op = op;
+	ev->ts_ns = __now_ns_slab();
+	ev->bt_n = 0;
+#if defined(XTC_HAS_EXECINFO)
+	if (s->opts.flags & XTC_SLAB_BACKTRACE) {
+		ev->bt_n = backtrace(ev->bt, XTC_AUDIT_BTSZ);
+	}
+#endif
 }
 
 /* ---- redzone helpers ---- */
@@ -729,6 +746,45 @@ xtc_slab_reap_all(void)
 		total += xtc_slab_reap(re->slab);
 	(void)pthread_mutex_unlock(&__reg_lock);
 	return total;
+}
+
+/* ---- reaper proc ----------------------------------------- */
+
+struct reaper_ctx {
+	int64_t interval_ns;
+};
+
+static void
+__reaper_main(void *arg)
+{
+	struct reaper_ctx *ctx = arg;
+	void *m;
+	size_t sz;
+	for (;;) {
+		/* Block on recv with the interval as timeout; on any
+		 * incoming message we reap and continue.  Caller can
+		 * stop the reaper via xtc_exit_pid. */
+		int rc = xtc_recv(&m, &sz, ctx->interval_ns);
+		(void)xtc_slab_reap_all();
+		if (rc == XTC_OK && m != NULL) __os_free(m);
+	}
+}
+
+int
+xtc_slab_reaper_spawn(xtc_loop_t *loop, int64_t interval_ns,
+                      xtc_pid_t *out_pid)
+{
+	struct reaper_ctx *ctx;
+	int rc;
+	xtc_pid_t pid;
+	if (loop == NULL || interval_ns <= 0) return XTC_E_INVAL;
+	rc = __os_calloc(1, sizeof *ctx, (void **)&ctx);
+	if (rc != XTC_OK) return rc;
+	ctx->interval_ns = interval_ns;
+	rc = xtc_proc_spawn(loop, __reaper_main, ctx, NULL, &pid);
+	if (rc != XTC_OK) { __os_free(ctx); return rc; }
+	if (out_pid) *out_pid = pid;
+	return XTC_OK;
 }
 
 /* ---- Linux PSI memory-pressure listener ---- */

@@ -63,6 +63,8 @@
 
 #include "xtc.h"
 #include "xtc_res.h"
+#include "xtc_proc.h"
+#include "xtc_loop.h"
 
 typedef struct xtc_slab xtc_slab_t;
 
@@ -196,5 +198,12 @@ int   xtc_slab_pressure_listen(const char *psi_path,
 /* Fan a reap across every cache currently registered.  Returns the
  * total number of objects reaped. */
 int   xtc_slab_reap_all(void);
+
+/* Spawn an xtc_proc that calls xtc_slab_reap_all() every
+ * `interval_ns` and logs the count via xtc_log.  The proc runs
+ * forever; supervise it or rely on loop teardown to kill it.
+ * Returns the proc's pid (XTC_PID_NONE on failure). */
+int   xtc_slab_reaper_spawn(xtc_loop_t *loop, int64_t interval_ns,
+                            xtc_pid_t *out_pid);
 
 #endif /* XTC_SLAB_H */

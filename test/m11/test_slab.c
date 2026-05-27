@@ -339,6 +339,27 @@ test_concurrent(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- Backtrace + reaper ------------------------------------- */
+
+static MunitResult
+test_backtrace(const MunitParameter p[], void *d)
+{
+	xtc_slab_t *s;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	void *o;
+	(void)p; (void)d;
+	opts.name = "bt"; opts.obj_size = 32;
+	opts.flags = XTC_SLAB_AUDIT | XTC_SLAB_BACKTRACE;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
+	o = xtc_slab_alloc(s);
+	munit_assert_not_null(o);
+	xtc_slab_free(s, o);
+	/* No public accessor for bt frames; we just verify the path
+	 * doesn't crash on Linux/glibc and is a no-op elsewhere. */
+	xtc_slab_destroy(s);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/basic_alloc_free", test_basic_alloc_free, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/magazine_fastpath", test_magazine_fastpath, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -349,6 +370,7 @@ static MunitTest tests[] = {
 	{ "/audit",            test_audit,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shm_offset",       test_shm_offset_resolve, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent",       test_concurrent,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/backtrace",        test_backtrace,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m11/slab", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

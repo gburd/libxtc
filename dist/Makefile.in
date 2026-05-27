@@ -71,6 +71,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/orc/svr.c \
 	$(srcdir)/../src/orc/app.c \
 	$(srcdir)/../src/ptc/lock_lr.c \
+	$(srcdir)/../src/ptc/lock_lw.c \
 	$(srcdir)/../src/ptc/lock_mgr.c \
 	$(srcdir)/../src/os/asm/fctx_x86_64_sysv.S \
 	$(srcdir)/../src/os/asm/fctx_x86_64_ms_pe.S
@@ -114,6 +115,7 @@ LIB_OBJS	= \
 	svr.o \
 	app.o \
 	lock_lr.o \
+	lock_lw.o \
 	lock_mgr.o \
 	fctx_x86_64_sysv.o \
 	fctx_x86_64_ms_pe.o
@@ -167,6 +169,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_slab \
 		  test_rcu \
 		  test_lrlock \
+		  test_lwlock \
 		  test_lockmgr \
 		  test_coverage_pump \
 		  test_otp_proc_lib \
@@ -175,7 +178,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_otp_supervisor \
 		  test_observability
 
-TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_lrlock pbt_chan
+TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_lrlock pbt_lwlock pbt_chan
 
 # -------------------------------------------------------------------------
 # Default goal.
@@ -302,6 +305,9 @@ app.o: $(srcdir)/../src/orc/app.c xtc_config.h
 
 lock_lr.o: $(srcdir)/../src/ptc/lock_lr.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/lock_lr.c
+
+lock_lw.o: $(srcdir)/../src/ptc/lock_lw.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/lock_lw.c
 
 lock_mgr.o: $(srcdir)/../src/ptc/lock_mgr.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/lock_mgr.c
@@ -468,6 +474,12 @@ test_io_wakeup: $(srcdir)/../test/m2/test_io_wakeup.c \
 		-o $@ $(srcdir)/../test/m2/test_io_wakeup.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_io_fault_inject: $(srcdir)/../test/m2/test_io_fault_inject.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
+		-o $@ $(srcdir)/../test/m2/test_io_fault_inject.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 # M3 tests.
 test_loop: $(srcdir)/../test/m3/test_loop.c \
 		$(srcdir)/../test/m3/munit.c $(STATIC_LIB)
@@ -616,6 +628,12 @@ test_lrlock: $(srcdir)/../test/m13/test_lrlock.c \
 		-o $@ $(srcdir)/../test/m13/test_lrlock.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_lwlock: $(srcdir)/../test/m13/test_lwlock.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
+		-o $@ $(srcdir)/../test/m13/test_lwlock.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_lockmgr: $(srcdir)/../test/m13/test_lockmgr.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
@@ -688,6 +706,9 @@ pbt_slab: $(srcdir)/../test/pbt/pbt_slab.c $(STATIC_LIB)
 
 pbt_lrlock: $(srcdir)/../test/pbt/pbt_lrlock.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_lrlock.c $(PBT_LIBS)
+
+pbt_lwlock: $(srcdir)/../test/pbt/pbt_lwlock.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_lwlock.c $(PBT_LIBS)
 
 pbt_chan: $(srcdir)/../test/pbt/pbt_chan.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_chan.c $(PBT_LIBS)
