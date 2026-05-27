@@ -17,11 +17,13 @@ CC		= @CC@
 CFLAGS		= @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread @XTC_URING_CFLAGS@
 CPPFLAGS	= @CPPFLAGS@ -I. -I$(srcdir)/../src/inc
 LDFLAGS		= @LDFLAGS@ -pthread
-LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@
+LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@ @XTC_TLS_LIBS@
 XTC_HEGEL_CFLAGS = @XTC_HEGEL_CFLAGS@
 XTC_HEGEL_LIBS	 = @XTC_HEGEL_LIBS@
 XTC_HEGEL_PBT	 = @XTC_HEGEL_PBT@
 XTC_HEGEL_SERVER_COMMAND = @XTC_HEGEL_SERVER_COMMAND@
+XTC_TLS_BACKEND	 = @XTC_TLS_BACKEND@
+XTC_TLS_LIBS	 = @XTC_TLS_LIBS@
 AR		= ar
 RANLIB		= @RANLIB@
 INSTALL		= @INSTALL@
@@ -32,6 +34,12 @@ RM		= rm -f
 # -------------------------------------------------------------------------
 # M0 sources.
 # -------------------------------------------------------------------------
+# Conditionally add the TLS backend source.
+# configure sets XTC_TLS_BACKEND to "openssl" or "none".
+# tls_openssl.c is always compiled: when XTC_TLS_BACKEND_OPENSSL is not
+# defined it compiles as NOSYS stubs, so the symbols are always present.
+TLS_OBJS = tls_openssl.o
+
 LIB_SRCS	= \
 	$(srcdir)/../src/xtc_version.c \
 	$(srcdir)/../src/xtc_strerror.c \
@@ -79,6 +87,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/os/asm/fctx_x86_64_ms_pe.S
 
 LIB_OBJS	= \
+	$(TLS_OBJS) \
 	xtc_version.o \
 	xtc_strerror.o \
 	os_alloc.o \
@@ -154,7 +163,8 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_shellcheck.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_perm.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
-	$(abs_top_srcdir)/../test/dist/test_s_cfg.sh
+	$(abs_top_srcdir)/../test/dist/test_s_cfg.sh \
+	$(abs_top_srcdir)/../test/dist/test_m17_smoke.sh
 
 TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
@@ -182,7 +192,8 @@ TESTS_C		= test_version test_header test_errors \
 		  test_otp_gen_server \
 		  test_otp_gen_server_phase2 \
 		  test_otp_supervisor \
-		  test_observability
+		  test_observability \
+		  test_tls_basic
 
 TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_lrlock pbt_lwlock pbt_chan
 
@@ -196,6 +207,9 @@ all: $(STATIC_LIB)
 $(STATIC_LIB): $(LIB_OBJS)
 	$(AR) rcs $@ $(LIB_OBJS)
 	$(RANLIB) $@
+
+tls_openssl.o: $(srcdir)/../src/io/tls_openssl.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_openssl.c
 
 # Pattern rule for compiling sources from ../src/ into ./*.o.
 xtc_version.o: $(srcdir)/../src/xtc_version.c $(LIB_HDR_PUBLIC) xtc_config.h
@@ -694,6 +708,13 @@ test_observability: $(srcdir)/../test/m12/test_observability.c \
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
 		-o $@ $(srcdir)/../test/m12/test_observability.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M18 tests — TLS API surface.
+test_tls_basic: $(srcdir)/../test/m18/test_tls_basic.c \
+		$(srcdir)/../test/m18/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m18 \
+		-o $@ $(srcdir)/../test/m18/test_tls_basic.c \
+		$(srcdir)/../test/m18/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # PBT tests.  Build against the optional hegel-c library when
 # --with-hegel was passed at configure time; otherwise the test
