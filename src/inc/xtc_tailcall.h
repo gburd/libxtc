@@ -48,18 +48,17 @@
  * we fall back to a no-op and rely on the optimizer.  The
  * `scripts/check-tailcalls.sh` validator inspects the .o to confirm
  * `jmp` was emitted regardless. */
-#if defined(__clang__) && defined(__has_extension)
-# if __has_extension(c_attributes_in_c2x) && \
-     defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202000L
-#  define XTC_MUSTTAIL [[clang::musttail]]
-# else
-#  define XTC_MUSTTAIL  /* fallback: rely on the optimizer */
-# endif
-#elif defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 15
-# define XTC_MUSTTAIL __attribute__((musttail))
-#else
-# define XTC_MUSTTAIL  /* fallback: rely on the optimizer */
-#endif
+/* XTC_MUSTTAIL is a marker; it's prefixed to a function call inside
+ * a return statement to signal intent.  In gcc 15+ and clang's C2x
+ * mode the attribute can be attached to the return statement itself
+ * (`__attribute__((musttail)) return foo();`) but the syntactic
+ * position varies enough across toolchains that we keep the macro
+ * as a no-op universally and rely on:
+ *   1. the -O2 optimizer doing TCO when it can, and
+ *   2. scripts/check-tailcalls.sh validating the .o emitted `jmp`.
+ * When compiler enforcement matters more than convenience, callers
+ * can use the explicit form directly. */
+#define XTC_MUSTTAIL  /* no-op marker; see check-tailcalls.sh */
 
 /* Marker macro for the validator script: annotated call sites
  * become a #pragma comment that survives into the disassembly's

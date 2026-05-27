@@ -118,11 +118,18 @@ AS_IF([test "x$xtc_with_liburing" != xno],
 AC_MSG_CHECKING([for L1 I/O backend])
 case "$xtc_io_backend" in
   auto)
-    if test "$have_uring" = yes; then xtc_io_backend=uring
-    elif test "$have_epoll" = yes; then xtc_io_backend=epoll
-    elif test "$have_kqueue" = yes; then xtc_io_backend=kqueue
-    else xtc_io_backend=poll
-    fi ;;
+    case "$host_os" in
+      *mingw*|*cygwin*|*msys*) xtc_io_backend=iocp ;;
+      *solaris*|*illumos*)     xtc_io_backend=solaris ;;
+      *aix*)                   xtc_io_backend=aix ;;
+      *)
+        if test "$have_uring" = yes; then xtc_io_backend=uring
+        elif test "$have_epoll" = yes; then xtc_io_backend=epoll
+        elif test "$have_kqueue" = yes; then xtc_io_backend=kqueue
+        else xtc_io_backend=poll
+        fi
+        ;;
+    esac ;;
   uring)
     if test "$have_uring" != yes; then
       AC_MSG_ERROR([--with-io-backend=uring requires liburing (try --with-liburing=PATH)])

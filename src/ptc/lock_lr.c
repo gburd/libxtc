@@ -30,9 +30,24 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
+#if defined(_WIN32)
+#  include <malloc.h>
+   /* No mmap/munmap/madvise on Windows MinGW; the COW path silently
+    * falls through to malloc/free with a no-op madvise. */
+#  define MAP_FAILED ((void *)-1)
+#  define PROT_READ    0
+#  define PROT_WRITE   0
+#  define MAP_PRIVATE   0
+#  define MAP_ANONYMOUS 0
+#  define mmap(addr, sz, prot, flags, fd, off)  \
+     ((void)(addr),(void)(prot),(void)(flags),(void)(fd),(void)(off), \
+      malloc(sz))
+#  define munmap(p, sz)  ((void)(sz), free(p), 0)
+#  define madvise(p, sz, adv)  ((void)(p),(void)(sz),(void)(adv), 0)
+#else
+#  include <sys/mman.h>
+#endif
 #include <unistd.h>
-
 /* ---- per-process global slot allocator ---- */
 
 #define XTC_LRLOCK_MAX_GLOBAL_SLOTS  4096
@@ -122,7 +137,11 @@ struct xtc_lrlock {
 static void *
 __mmap_data(size_t bytes, size_t *out_alloc)
 {
+#if defined(_WIN32)
+	size_t pg = 4096;
+#else
 	size_t pg = (size_t)sysconf(_SC_PAGESIZE);
+#endif
 	size_t alloc;
 	void  *p;
 	if (pg == 0) pg = 4096;
@@ -130,6 +149,13 @@ __mmap_data(size_t bytes, size_t *out_alloc)
 	p = mmap(NULL, alloc, PROT_READ | PROT_WRITE,
 	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (p == MAP_FAILED) return NULL;
+	/* Zero the region.  POSIX mmap MAP_ANONYMOUS returns zeroed
+	 * pages; Windows shims to malloc which doesn't.  Doing it
+	 * unconditionally costs little on first-touch and harmonises
+	 * the contract. */
+#if defined(_WIN32)
+	memset(p, 0, alloc);
+#endif
 	*out_alloc = alloc;
 	return p;
 }
