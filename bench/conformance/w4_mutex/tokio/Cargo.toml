@@ -1,0 +1,13 @@
+[package]
+name = "bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+hdrhistogram = "7"
+libc = "0.2"
