@@ -234,7 +234,14 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	}
 
 	if (opts->verify_peer) {
-		int mode = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+		/*
+		 * CLIENT: SSL_VERIFY_PEER makes the client verify the server
+		 * certificate.  SERVER mTLS adds FAIL_IF_NO_PEER_CERT to
+		 * require the client to present a certificate.
+		 */
+		int mode = SSL_VERIFY_PEER;
+		if (role == XTC_TLS_SERVER)
+			mode |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
 		SSL_CTX_set_verify(c->ssl_ctx, mode, NULL);
 	}
 
@@ -251,7 +258,23 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 		memcpy(copy, opts->alpn_protos, len);
 		c->alpn_protos     = copy;
 		c->alpn_protos_len = (unsigned int)len;
-		SSL_CTX_set_alpn_select_cb(c->ssl_ctx, alpn_select_cb, c);
+
+		if (role == XTC_TLS_SERVER) {
+			/* Server: pick protocol from client's advertised list. */
+			SSL_CTX_set_alpn_select_cb(c->ssl_ctx, alpn_select_cb, c);
+		} else {
+			/*
+			 * Client: offer the wire-form list to the server.
+			 * SSL_CTX_set_alpn_protos returns 0 on success
+			 * (atypical OpenSSL convention).
+			 */
+			if (SSL_CTX_set_alpn_protos(c->ssl_ctx, copy,
+			                            (unsigned int)len) != 0) {
+				SSL_CTX_free(c->ssl_ctx);
+				__os_free(c);
+				return XTC_E_INVAL;
+			}
+		}
 	}
 
 done:
@@ -307,12 +330,13 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 	}
 
 	/*
-	 * Prime the handshake direction.  For client role (TLS-3),
-	 * SSL_set_connect_state will be implemented here.  For now only
-	 * the server path is live.
+	 * Prime the handshake direction.  SSL_do_handshake consults the
+	 * state set here to know whether to act as client or server.
 	 */
 	if (ctx->role == XTC_TLS_SERVER)
 		SSL_set_accept_state(t->ssl);
+	else
+		SSL_set_connect_state(t->ssl);
 
 	*out = t;
 	return XTC_OK;
