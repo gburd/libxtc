@@ -175,6 +175,58 @@ AS_CASE([$xtc_io_backend],
   [select],  [AC_DEFINE([XTC_IO_BACKEND_SELECT],  1, [POSIX select(2) backend (fallback)])])
 
 # -------------------------------------------------------------------------
+# TLS backend selection.
+# -------------------------------------------------------------------------
+AC_ARG_WITH([tls],
+  [AS_HELP_STRING([--with-tls=openssl|none|auto],
+    [Select the TLS backend (default: auto).])],
+  [xtc_tls=$withval], [xtc_tls=auto])
+
+xtc_tls_backend=none
+XTC_TLS_LIBS=
+
+AC_MSG_CHECKING([for TLS backend])
+case "$xtc_tls" in
+  auto)
+    # Try OpenSSL: need both the library and the header.
+    ac_save_LIBS=$LIBS
+    AC_CHECK_LIB([ssl], [SSL_library_init],
+      [ac_have_ssl_lib=yes], [ac_have_ssl_lib=no])
+    LIBS=$ac_save_LIBS
+    AC_CHECK_HEADER([openssl/ssl.h],
+      [ac_have_ssl_hdr=yes], [ac_have_ssl_hdr=no])
+    AS_IF([test "x$ac_have_ssl_lib" = xyes && test "x$ac_have_ssl_hdr" = xyes],
+      [xtc_tls_backend=openssl],
+      [xtc_tls_backend=none])
+    ;;
+  openssl)
+    # Explicit request — fail loudly if not present.
+    ac_save_LIBS=$LIBS
+    AC_CHECK_LIB([ssl], [SSL_library_init], [],
+      [AC_MSG_ERROR([--with-tls=openssl: libssl not found])])
+    LIBS=$ac_save_LIBS
+    AC_CHECK_HEADER([openssl/ssl.h], [],
+      [AC_MSG_ERROR([--with-tls=openssl: openssl/ssl.h not found])])
+    xtc_tls_backend=openssl
+    ;;
+  none)
+    xtc_tls_backend=none
+    ;;
+  *)
+    AC_MSG_ERROR([invalid --with-tls=$xtc_tls; use openssl, none, or auto])
+    ;;
+esac
+AC_MSG_RESULT([$xtc_tls_backend])
+
+AS_IF([test "x$xtc_tls_backend" = xopenssl],
+  [AC_DEFINE([XTC_TLS_BACKEND_OPENSSL], 1,
+     [Define to 1 to use the OpenSSL TLS backend])
+   XTC_TLS_LIBS="-lssl -lcrypto"])
+
+AC_SUBST([XTC_TLS_BACKEND], [$xtc_tls_backend])
+AC_SUBST([XTC_TLS_LIBS])
+
+# -------------------------------------------------------------------------
 # Optional: hegel-c property-based testing.
 # When enabled, links the PBT suite against the local hegel-c library
 # and forwards HEGEL_SERVER_COMMAND through `make check` so the
