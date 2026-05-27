@@ -194,7 +194,8 @@ TESTS_C		= test_version test_header test_errors \
 		  test_otp_supervisor \
 		  test_observability \
 		  test_tls_basic \
-		  test_tls_server
+		  test_tls_server \
+		  test_tls_client
 
 TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_lrlock pbt_lwlock pbt_chan
 
@@ -721,6 +722,12 @@ test_tls_server: $(srcdir)/../test/m18/test_tls_server.c \
 		$(srcdir)/../test/m18/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m18 \
 		-o $@ $(srcdir)/../test/m18/test_tls_server.c \
+		$(srcdir)/../test/m18/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_tls_client: $(srcdir)/../test/m18/test_tls_client.c \
+		$(srcdir)/../test/m18/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m18 \
+		-o $@ $(srcdir)/../test/m18/test_tls_client.c \
 		$(srcdir)/../test/m18/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # PBT tests.  Build against the optional hegel-c library when
