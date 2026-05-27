@@ -60,8 +60,10 @@ struct __xtc_uring_fd {
 };
 #elif defined(XTC_IO_BACKEND_POLL)
 #include <poll.h>
+#elif defined(XTC_IO_BACKEND_SELECT)
+#include <sys/select.h>
 #else
-# error "M2 build expects XTC_IO_BACKEND_{POLL,EPOLL,URING,KQUEUE,IOCP,SOLARIS,AIX} to be defined"
+# error "M2 build expects XTC_IO_BACKEND_{POLL,EPOLL,URING,KQUEUE,IOCP,SOLARIS,AIX,SELECT} to be defined"
 #endif
 
 struct xtc_io {
@@ -96,6 +98,14 @@ struct xtc_io {
 	struct __xtc_uring_fd *fds;
 #elif defined(XTC_IO_BACKEND_POLL)
 	struct pollfd *pfds;
+	void         **tags;
+	int            n;
+	int            cap;
+#elif defined(XTC_IO_BACKEND_SELECT)
+	/* Parallel fd[], interest[], tag[] arrays.  fd_set is built
+	 * each poll() call from these.  Capped at FD_SETSIZE. */
+	int           *fds;
+	uint32_t      *interests;
 	void         **tags;
 	int            n;
 	int            cap;

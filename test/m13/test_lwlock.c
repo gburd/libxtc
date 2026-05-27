@@ -162,6 +162,12 @@ shared_thread(void *arg)
 				if (n <= cur_max) break;
 			} while (!atomic_compare_exchange_weak(
 			    &g_shared_max_concurrent, &cur_max, n));
+			/* Hold long enough that other threads are likely
+			 * to be in the section concurrently. */
+			{
+				volatile int spin = 200;
+				while (spin--) {}
+			}
 		}
 		atomic_fetch_sub(&g_shared_in_section, 1);
 		xtc_lwlock_release(&g_lk2);

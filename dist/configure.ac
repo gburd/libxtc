@@ -142,7 +142,7 @@ case "$xtc_io_backend" in
     if test "$have_kqueue" != yes; then
       AC_MSG_ERROR([--with-io-backend=kqueue requires <sys/event.h>])
     fi ;;
-  poll|iocp|solaris|aix) ;;
+  poll|iocp|solaris|aix|select) ;;
   *) AC_MSG_ERROR([invalid --with-io-backend=$xtc_io_backend]) ;;
 esac
 AC_MSG_RESULT([$xtc_io_backend])
@@ -168,7 +168,8 @@ AS_CASE([$xtc_io_backend],
   [kqueue],  [AC_DEFINE([XTC_IO_BACKEND_KQUEUE],  1, [BSD/macOS kqueue backend])],
   [iocp],    [AC_DEFINE([XTC_IO_BACKEND_IOCP],    1, [Windows IOCP backend (stub)])],
   [solaris], [AC_DEFINE([XTC_IO_BACKEND_SOLARIS], 1, [Solaris event ports backend (stub)])],
-  [aix],     [AC_DEFINE([XTC_IO_BACKEND_AIX],     1, [AIX pollset backend (stub)])])
+  [aix],     [AC_DEFINE([XTC_IO_BACKEND_AIX],     1, [AIX pollset backend (stub)])],
+  [select],  [AC_DEFINE([XTC_IO_BACKEND_SELECT],  1, [POSIX select(2) backend (fallback)])])
 
 # -------------------------------------------------------------------------
 # Optional: hegel-c property-based testing.

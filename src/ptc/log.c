@@ -231,7 +231,7 @@ xtc_log_drain(xtc_log_t *log)
 			(void)log->opts.sink(log->opts.sink_user, hdr->level,
 			    line, (size_t)line_len);
 		else if (log->opts.sink_fd >= 0)
-			(void)write(log->opts.sink_fd, line, (size_t)line_len);
+			(void)write(log->opts.sink_fd, line, (size_t)line_len);   /* XTC_BLOCKING_OK: log writer thread is dedicated */
 
 		(void)atomic_compare_exchange_strong_explicit(&log->head,
 		    &head, head + 1,
