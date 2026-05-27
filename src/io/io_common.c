@@ -227,6 +227,8 @@ xtc_io_backend_name(void)
 	return "solaris";
 #elif defined(XTC_IO_BACKEND_AIX)
 	return "aix";
+#elif defined(XTC_IO_BACKEND_SELECT)
+	return "select";
 #elif defined(XTC_IO_BACKEND_POLL)
 	return "poll";
 #else
