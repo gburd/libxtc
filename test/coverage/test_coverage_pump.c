@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * test/coverage/test_coverage_pump.c — drives execution through
  * the public-API surface that the audit flagged as untested.  One

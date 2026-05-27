@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * test/otp/test_otp_gen_server_phase2.c — second batch of cases
  * ported from `lib/stdlib/test/gen_server_SUITE.erl`.  Targets the

@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * src/os/asm/fctx_x86_64_sysv.S
  *	make_fcontext / jump_fcontext for x86-64 System V ABI.
