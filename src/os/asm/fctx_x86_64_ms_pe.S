@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/os/asm/fctx_x86_64_ms_pe.S
@@ -12,7 +12,7 @@
  *	natural push/pop/ret pattern (mirrors boost.context); resume
  *	alignment is selected by how saved_sp aligns.
  *
- *	Win64 ABI: at function entry, rsp ≡ 8 (mod 16) (post-CALL).
+ *	Win64 ABI: at function entry, rsp === 8 (mod 16) (post-CALL).
  *
  *	Frame layout (72 bytes), saved sp at offset +0:
  *	  +0    rbx
@@ -37,7 +37,7 @@
  *	    correct for entering `fn` for the first time.
  *
  *	Same asm, different starting alignment, different final
- *	alignment — exactly what we need for both call-paths.
+ *	alignment -- exactly what we need for both call-paths.
  */
 
 #if defined(_WIN32) && defined(__x86_64__)

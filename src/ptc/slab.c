@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/ptc/slab.c
@@ -78,6 +78,33 @@ static int   __win_chunk_free(void *p, size_t sz) { (void)sz; free(p); return 0;
 #define XTC_RZ_FRONT  16     /* bytes; 8 magic + 8 metadata */
 #define XTC_RZ_BACK   8
 
+/* ---- shared-memory header ---- */
+/*
+ * When mode == XTC_SLAB_SHARED_MEMORY, the first bytes of the region
+ * contain a header that synchronizes multiple processes attaching to
+ * the same shm segment.  The cursor is an atomic offset into the region;
+ * chunk allocation CAS's this forward.
+ *
+ * Layout:
+ *   +0x00: magic (8 bytes) = 0x5854435F534C4142 "XTC_SLAB"
+ *   +0x08: version (8 bytes) = 1
+ *   +0x10: cursor (8 bytes, atomic) = next free offset
+ *   +0x18: total_size (8 bytes) = size of entire region
+ *   +0x20: reserved (32 bytes, pad to 64-byte cache line)
+ *   +0x40: usable region starts here
+ */
+#define XTC_SHM_MAGIC     0x5854435F534C4142ULL  /* "XTC_SLAB" */
+#define XTC_SHM_VERSION   1
+#define XTC_SHM_HDR_SIZE  64
+
+struct xtc_slab_shm_header {
+	uint64_t         magic;
+	uint64_t         version;
+	_Atomic uint64_t cursor;      /* next free offset from region start */
+	uint64_t         total_size;
+	uint8_t          reserved[32];
+};
+
 /* ---- audit ring ---- */
 #define XTC_AUDIT_N      64
 #define XTC_AUDIT_BTSZ   8
@@ -107,7 +134,7 @@ struct magazine {
 };
 
 /* Each thread holds at most one magazine PER cache, indexed by
- * cache pointer in a small TLS hash.  Cap at 8 entries per thread —
+ * cache pointer in a small TLS hash.  Cap at 8 entries per thread --
  * if a thread allocates from >8 caches, we fall back to slow path. */
 #define TLS_MAGS  8
 
@@ -169,8 +196,9 @@ struct xtc_slab {
 	struct audit_event *audit_ring;
 	_Atomic uint64_t    audit_pos;
 
-	/* Shared-memory bookkeeping: cursor into the shm region. */
-	uint8_t *shm_cursor;
+	/* Shared-memory bookkeeping: pointer to header in region. */
+	struct xtc_slab_shm_header *shm_hdr;
+	uint8_t *shm_base;     /* start of usable region (after header) */
 	uint8_t *shm_end;
 };
 
@@ -271,15 +299,27 @@ __chunk_new(xtc_slab_t *s)
 	}
 
 	if (s->opts.mode == XTC_SLAB_SHARED_MEMORY) {
-		/* Carve from the caller's shm region. */
-		if (s->shm_cursor + total > s->shm_end) {
-			if (s->opts.res != NULL)
-				xtc_res_release(s->opts.res, XTC_RES_MEM_BYTES,
-				    (int64_t)total);
-			return NULL;
+		/* Carve from the shared region using atomic CAS on the header cursor. */
+		uint64_t old_cursor, new_cursor;
+		for (;;) {
+			old_cursor = atomic_load_explicit(&s->shm_hdr->cursor,
+			    memory_order_acquire);
+			new_cursor = old_cursor + total;
+			if (new_cursor > s->shm_hdr->total_size) {
+				if (s->opts.res != NULL)
+					xtc_res_release(s->opts.res, XTC_RES_MEM_BYTES,
+					    (int64_t)total);
+				return NULL;
+			}
+			if (atomic_compare_exchange_weak_explicit(
+			    &s->shm_hdr->cursor,
+			    &old_cursor, new_cursor,
+			    memory_order_acq_rel,
+			    memory_order_acquire))
+				break;
+			/* CAS failed, another process won; retry. */
 		}
-		base = s->shm_cursor;
-		s->shm_cursor += total;
+		base = (uint8_t *)s->opts.shm_base + old_cursor;
 	} else {
 		void *m = mmap(NULL, total, PROT_READ | PROT_WRITE,
 		    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -380,7 +420,7 @@ __push_slot_locked(xtc_slab_t *s, void *slot)
 			return;
 		}
 	}
-	/* Slot not in any chunk — programming error. */
+	/* Slot not in any chunk -- programming error. */
 }
 
 /* ---- public API ---- */
@@ -418,12 +458,50 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 	(void)pthread_mutex_init(&s->lock, NULL);
 
 	if (s->opts.mode == XTC_SLAB_SHARED_MEMORY) {
+		struct xtc_slab_shm_header *hdr;
 		if (s->opts.shm_base == NULL || s->opts.shm_size == 0) {
 			(void)pthread_mutex_destroy(&s->lock);
 			__os_free(s);
 			return XTC_E_INVAL;
 		}
-		s->shm_cursor = s->opts.shm_base;
+		if (s->opts.shm_size < XTC_SHM_HDR_SIZE + s->opts.chunk_size) {
+			/* Region too small for header + one chunk. */
+			(void)pthread_mutex_destroy(&s->lock);
+			__os_free(s);
+			return XTC_E_RESOURCE;
+		}
+		hdr = (struct xtc_slab_shm_header *)s->opts.shm_base;
+		/*
+		 * Init protocol: first attacher writes magic + cursor;
+		 * subsequent attachers verify magic and use existing cursor.
+		 * We use a CAS on magic to handle the race.
+		 */
+		if (hdr->magic != XTC_SHM_MAGIC) {
+			uint64_t expected = 0;
+			/* Try to be the initializer. */
+			if (atomic_compare_exchange_strong_explicit(
+			    (_Atomic uint64_t *)&hdr->magic,
+			    &expected, XTC_SHM_MAGIC,
+			    memory_order_acq_rel,
+			    memory_order_acquire)) {
+				/* We won the race; initialize header. */
+				hdr->version = XTC_SHM_VERSION;
+				hdr->total_size = s->opts.shm_size;
+				atomic_store_explicit(&hdr->cursor,
+				    XTC_SHM_HDR_SIZE, memory_order_release);
+			} else {
+				/* Another process init'd; spin until magic visible. */
+				while (hdr->magic != XTC_SHM_MAGIC)
+					;  /* spin */
+			}
+		}
+		if (hdr->version != XTC_SHM_VERSION) {
+			(void)pthread_mutex_destroy(&s->lock);
+			__os_free(s);
+			return XTC_E_VERSION;
+		}
+		s->shm_hdr = hdr;
+		s->shm_base = (uint8_t *)s->opts.shm_base + XTC_SHM_HDR_SIZE;
 		s->shm_end = (uint8_t *)s->opts.shm_base + s->opts.shm_size;
 	}
 
@@ -522,12 +600,12 @@ xtc_slab_alloc(xtc_slab_t *s)
 	void *slot = NULL;
 	void *obj;
 
-	if (s == NULL) return NULL;
+	if (XTC_UNLIKELY(s == NULL)) return NULL;
 
 	/* Magazine fast path. */
-	if (!(s->opts.flags & XTC_SLAB_NO_MAGAZINE)) {
+	if (XTC_LIKELY(!(s->opts.flags & XTC_SLAB_NO_MAGAZINE))) {
 		mag = __tls_mag_for(s);
-		if (mag != NULL && mag->n > 0) {
+		if (XTC_LIKELY(mag != NULL && mag->n > 0)) {
 			slot = mag->slots[--mag->n];
 			atomic_fetch_add_explicit(&s->s_alloc_fast, 1,
 			    memory_order_relaxed);
@@ -538,13 +616,13 @@ xtc_slab_alloc(xtc_slab_t *s)
 	/* Slow path: take cache lock and pop. */
 	(void)pthread_mutex_lock(&s->lock);
 	slot = __pop_slot_locked(s);
-	if (slot == NULL && s->opts.oom_policy == XTC_SLAB_OOM_BACKOFF) {
+	if (XTC_UNLIKELY(slot == NULL && s->opts.oom_policy == XTC_SLAB_OOM_BACKOFF)) {
 		(void)pthread_mutex_unlock(&s->lock);
 		(void)__os_sleep_ns(100 * 1000);    /* 0.1 ms */
 		(void)pthread_mutex_lock(&s->lock);
 		slot = __pop_slot_locked(s);
 	}
-	if (slot == NULL) {
+	if (XTC_UNLIKELY(slot == NULL)) {
 		atomic_fetch_add_explicit(&s->s_oom_fails, 1,
 		    memory_order_relaxed);
 		(void)pthread_mutex_unlock(&s->lock);
@@ -580,11 +658,11 @@ xtc_slab_free(xtc_slab_t *s, void *obj)
 	void *slot;
 	struct magazine *mag;
 
-	if (s == NULL || obj == NULL) return;
+	if (XTC_UNLIKELY(s == NULL || obj == NULL)) return;
 	slot = __slot_from_obj(s, obj);
 
-	if (__rz_check(s, slot)) {
-		/* Redzone violation — log + abort in debug builds. */
+	if (XTC_UNLIKELY(__rz_check(s, slot))) {
+		/* Redzone violation -- log + abort in debug builds. */
 		fprintf(stderr, "xtc_slab[%s]: redzone violation at %p\n",
 		    s->opts.name, obj);
 	}
@@ -594,17 +672,17 @@ xtc_slab_free(xtc_slab_t *s, void *obj)
 	__audit_record(s, obj, 'F');
 
 	/* Magazine fast path. */
-	if (!(s->opts.flags & XTC_SLAB_NO_MAGAZINE)) {
+	if (XTC_LIKELY(!(s->opts.flags & XTC_SLAB_NO_MAGAZINE))) {
 		mag = __tls_mag_for(s);
-		if (mag != NULL) {
-			if (mag->slots == NULL) {
+		if (XTC_LIKELY(mag != NULL)) {
+			if (XTC_UNLIKELY(mag->slots == NULL)) {
 				if (__os_calloc((size_t)s->opts.magazine_size,
 				    sizeof(void *), (void **)&mag->slots) != XTC_OK) {
 					goto slow;
 				}
 				mag->cap = s->opts.magazine_size;
 			}
-			if (mag->n < mag->cap) {
+			if (XTC_LIKELY(mag->n < mag->cap)) {
 				mag->slots[mag->n++] = slot;
 				atomic_fetch_add_explicit(&s->s_free_fast, 1,
 				    memory_order_relaxed);
@@ -796,7 +874,8 @@ struct psi_listener {
 	pthread_t              th;
 	xtc_slab_pressure_fn   fn;
 	void                  *user;
-	int                    stop_fd;
+	int                    stop_fd;     /* read end of stop pipe */
+	int                    stop_wfd;    /* write end; close()'d to signal stop */
 	int                    psi_fd;
 };
 
@@ -844,16 +923,34 @@ xtc_slab_pressure_listen(const char *psi_path,
 	}
 	l->psi_fd = fd;
 	l->stop_fd = pipefd[0];
+	l->stop_wfd = pipefd[1];   /* keep open; close to signal stop */
 	l->fn = fn; l->user = user;
 	if (pthread_create(&l->th, NULL, __psi_thread, l) != 0) {
 		(void)close(fd); (void)close(pipefd[0]); (void)close(pipefd[1]);
 		__os_free(l);
 		return XTC_E_INTERNAL;
 	}
-	(void)close(pipefd[1]);   /* leak fix in next round */
+	/* NOTE: The listener cannot be stopped today because we don't return
+	 * a handle.  A future API change adds xtc_slab_pressure_listen_ex()
+	 * returning an opaque handle and xtc_slab_pressure_stop(handle).
+	 * For now, the listener runs until process exit. */
 	return XTC_OK;
 }
+
+/* Placeholder: clean shutdown requires API change to return handle. */
+int
+xtc_slab_pressure_stop(void *handle)
+{
+	(void)handle;
+	return XTC_E_NOSYS;
+}
 #else
+int
+xtc_slab_pressure_stop(void *handle)
+{
+	(void)handle;
+	return XTC_E_NOSYS;
+}
 int
 xtc_slab_pressure_listen(const char *psi_path,
                          xtc_slab_pressure_fn fn, void *user)

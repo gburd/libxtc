@@ -1,10 +1,10 @@
 #!/usr/bin/env escript
 %%
-%% Copyright (c) 2026, The XTC Project — All rights reserved.
+%% Copyright (c) 2026, The XTC Project
 %% Use of this source code is governed by the ISC License.
 %%
 %% bench/conformance/w7_timer/erlang/main.erl
-%%   M17 W7 — timer wheel benchmark, Erlang/BEAM runtime.
+%%   M17 W7 -- timer wheel benchmark, Erlang/BEAM runtime.
 %%
 %%   Three phases:
 %%     1. Schedule N timers via erlang:start_timer/3 in [1 ms, 10 s].
@@ -39,13 +39,13 @@ main(Args) ->
     NFire0  = N - NCancel,   %% lower-bound; see cancel phase below
 
     %% ================================================================
-    %% Phase 1 — Schedule N timers
+    %% Phase 1 -- Schedule N timers
     %% ================================================================
     %%
     %% Each timer entry: {Ref, DeadlineNs, SchedLatNs}
-    %%   Ref        — cancel/fire handle
-    %%   DeadlineNs — erlang:monotonic_time(nanosecond) + delay
-    %%   SchedLatNs — wall time consumed by start_timer call
+    %%   Ref        -- cancel/fire handle
+    %%   DeadlineNs -- erlang:monotonic_time(nanosecond) + delay
+    %%   SchedLatNs -- wall time consumed by start_timer call
 
     T0Sched = erlang:monotonic_time(nanosecond),
     {Timers, SchedLats} = schedule_all(N),
@@ -53,12 +53,12 @@ main(Args) ->
     ElapsedSched = T1Sched - T0Sched,
 
     %% ================================================================
-    %% Phase 2 — Cancel N/2 at random
+    %% Phase 2 -- Cancel N/2 at random
     %% ================================================================
     %%
     %% Shuffle the timer list and split.  erlang:cancel_timer returns:
-    %%   integer  — ms remaining; timer cancelled successfully
-    %%   false    — already fired; message already in our mailbox
+    %%   integer  -- ms remaining; timer cancelled successfully
+    %%   false    -- already fired; message already in our mailbox
     %%
     %% Track NActuallyCancelled so Phase 3 knows how many messages
     %% to receive.
@@ -74,13 +74,13 @@ main(Args) ->
     NFireExpected = N - NActuallyCancelled,
 
     %% ================================================================
-    %% Phase 3 — Receive fire messages
+    %% Phase 3 -- Receive fire messages
     %% ================================================================
     %%
     %% Each message: {timeout, Ref, DeadlineNs}
     %% Fire latency  = max(0, Now - DeadlineNs)  (nanoseconds)
     %%
-    %% 35-second per-message safety timeout; normal completion is ≤10 s.
+    %% 35-second per-message safety timeout; normal completion is <=10 s.
 
     T0Fire = erlang:monotonic_time(nanosecond),
     FireLats = receive_fires(NFireExpected, []),
@@ -139,7 +139,7 @@ main(Args) ->
 %% Phase 1 helpers
 %% ---------------------------------------------------------------------------
 
-%% schedule_all/1 — schedule N timers; return {[{Ref,DeadlineNs}], [LatNs]}.
+%% schedule_all/1 -- schedule N timers; return {[{Ref,DeadlineNs}], [LatNs]}.
 %%
 %% erlang:start_timer(Time, Dest, Msg) requires Time in *milliseconds*
 %% as a non-negative integer.  We draw from [1, 10000] ms = [1 ms, 10 s].
@@ -165,7 +165,7 @@ schedule_loop(N, Timers, Lats) ->
 %% Phase 2 helpers
 %% ---------------------------------------------------------------------------
 
-%% cancel_all/1 — cancel each timer; return {[LatNs], NActuallyCancelled}.
+%% cancel_all/1 -- cancel each timer; return {[LatNs], NActuallyCancelled}.
 %%   NActuallyCancelled counts only refs where cancel_timer returned an
 %%   integer (message successfully removed from the timer wheel).
 
@@ -188,7 +188,7 @@ cancel_loop([{Ref, _DeadlineNs} | Rest], Lats, NCancelled) ->
 %% Phase 3 helpers
 %% ---------------------------------------------------------------------------
 
-%% receive_fires/2 — collect NExpected {timeout,_,DeadlineNs} messages.
+%% receive_fires/2 -- collect NExpected {timeout,_,DeadlineNs} messages.
 %% Any extra messages from cancel_timer returning false (timer already fired)
 %% are counted alongside the intentional fires.
 
@@ -202,12 +202,12 @@ receive_fires(N, Lats) ->
             receive_fires(N - 1, [Late | Lats])
     after 35000 ->
         %% Safety drain: should not trigger under normal operation
-        %% (all timers fire within ≤10 s).
+        %% (all timers fire within <=10 s).
         Lats
     end.
 
 %% ---------------------------------------------------------------------------
-%% Shuffle — sort by random key (O(N log N), idiomatic in Erlang)
+%% Shuffle -- sort by random key (O(N log N), idiomatic in Erlang)
 %% ---------------------------------------------------------------------------
 
 shuffle([]) -> [];
@@ -217,7 +217,7 @@ shuffle(List) ->
     [X || {_, X} <- Sorted].
 
 %% ---------------------------------------------------------------------------
-%% Percentile — sort-and-index, 0-based indexing clamped to bounds
+%% Percentile -- sort-and-index, 0-based indexing clamped to bounds
 %% ---------------------------------------------------------------------------
 
 percentile([], _Pct) ->

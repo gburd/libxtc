@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/conformance/w7_timer/tokio/src/main.rs
- *   M17 W7 — timer wheel benchmark, Tokio runtime.
+ *   M17 W7 -- timer wheel benchmark, Tokio runtime.
  *
  *   Three phases:
  *     1. Schedule N sleep_until tasks.  Record per-spawn latency
@@ -149,7 +149,7 @@ fn cpu_us() -> u64 {
             if fields.len() > 14 {
                 let utime: u64 = fields[13].parse().unwrap_or(0);
                 let stime: u64 = fields[14].parse().unwrap_or(0);
-                // assume HZ=100; 1 jiffy = 10 ms = 10000 µs
+                // assume HZ=100; 1 jiffy = 10 ms = 10000 us
                 return (utime + stime) * 10_000;
             }
         }
@@ -171,7 +171,7 @@ async fn main() {
     let mut rng = Rng::new();
 
     /* ================================================================== */
-    /* Phase 1 — Schedule: spawn N sleep_until tasks                      */
+    /* Phase 1 -- Schedule: spawn N sleep_until tasks                      */
     /* ================================================================== */
 
     let mut handles: Vec<tokio::task::JoinHandle<u64>> = Vec::with_capacity(n);
@@ -197,7 +197,7 @@ async fn main() {
         let handle = tokio::spawn(async move {
             tokio::time::sleep_until(tokio_deadline).await;
             /*
-             * Fire latency = actual wake time − scheduled deadline.
+             * Fire latency = actual wake time - scheduled deadline.
              * saturating_duration_since returns 0 if we woke early
              * (rare clock-read races).
              */
@@ -214,7 +214,7 @@ async fn main() {
     let elapsed_sched = t_sched0.elapsed().as_nanos() as u64;
 
     /* ================================================================== */
-    /* Phase 2 — Cancel N/2 handles via abort()                           */
+    /* Phase 2 -- Cancel N/2 handles via abort()                           */
     /* ================================================================== */
 
     let mut order: Vec<usize> = (0..n).collect();
@@ -235,7 +235,7 @@ async fn main() {
     let elapsed_cancel = t_cancel0.elapsed().as_nanos() as u64;
 
     /* ================================================================== */
-    /* Phase 3 — Await non-cancelled handles; collect fire latencies      */
+    /* Phase 3 -- Await non-cancelled handles; collect fire latencies      */
     /* ================================================================== */
 
     let t_fire0 = Instant::now();

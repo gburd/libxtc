@@ -1,11 +1,11 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_lrlock.h
  *	Left-Right concurrency primitive: wait-free reads, single-writer
  *	with cooperative replay.  Ported from PostgreSQL's lrlck branch
- *	(src/backend/storage/lmgr/lrlock.c) — see Pedro Ramalhete &
+ *	(src/backend/storage/lmgr/lrlock.c) -- see Pedro Ramalhete &
  *	Andreia Correia, "Left-Right: A Concurrency Control Technique
  *	with Wait-Free Population Oblivious Reads" (2014).
  *
@@ -39,14 +39,14 @@
  *	    pre-allocated).
  *	  + Deterministic reclamation (a single pointer swap).
  *	  + Cache-locality preserved across mutations.
- *	  - Two copies of the data; ~2× memory by default.
+ *	  - Two copies of the data; ~2x memory by default.
  *	  - Writes are slower (applied twice; replay must be
  *	    deterministic).
  *	  - Single writer.
  *
  *	xtc-specific extensions:
  *	  - XTC_LRLOCK_COW: lazy second-copy allocation + MADV_FREE
- *	    after publish.  Idle steady state ≈ 1× memory; first write
+ *	    after publish.  Idle steady state ~= 1x memory; first write
  *	    after idle pays an mmap+memcpy.  See docs/M_LRLOCK_COW.md.
  */
 
@@ -63,7 +63,7 @@ typedef struct xtc_lrlock xtc_lrlock_t;
 /* Apply a single operation to one copy.  Must be deterministic. */
 typedef void (*xtc_lrlock_apply_fn)(void *data, const void *op, size_t op_size);
 
-/* Synchronize destination from source — used during first publish
+/* Synchronize destination from source -- used during first publish
  * and during full-sync publishes. */
 typedef void (*xtc_lrlock_sync_fn)(void *dst, const void *src, size_t data_size);
 
@@ -75,8 +75,8 @@ typedef struct xtc_lrlock_opts {
 	size_t                data_size;
 	xtc_lrlock_apply_fn   apply_fn;
 	xtc_lrlock_sync_fn    sync_fn;
-	int                   max_readers;     /* slot count; 0 → 64 default */
-	size_t                oplog_capacity;  /* initial oplog bytes; 0 → 4096 */
+	int                   max_readers;     /* slot count; 0 -> 64 default */
+	size_t                oplog_capacity;  /* initial oplog bytes; 0 -> 4096 */
 	unsigned              flags;
 } xtc_lrlock_opts_t;
 

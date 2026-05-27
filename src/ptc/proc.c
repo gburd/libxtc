@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/ptc/proc.c
@@ -92,11 +92,31 @@ struct xtc_proc {
 	xtc_task_t *task;            /* the underlying task */
 	struct xtc_coro *coro;        /* the underlying fiber */
 
-	/* Mailbox (singly-linked FIFO of envelopes). */
-	pthread_mutex_t   mbox_lock;
+	/*
+	 * Mailbox (singly-linked FIFO of envelopes).
+	 *
+	 * False-sharing fix: the producer-side fields (mbox_lock,
+	 * mbox_tail) are written by senders on remote threads, while
+	 * the consumer-side fields (mbox_head, mbox_n) are written
+	 * by the owning proc.  We cache-line-separate them to avoid
+	 * cache-line ping-pong under concurrent send/recv.
+	 *
+	 * Layout:
+	 *   [consumer-side] mbox_head, mbox_n
+	 *   <64-byte pad>
+	 *   [producer-side] mbox_lock, mbox_tail, mbox_cap
+	 */
+	/* ---- consumer-side (owner writes) ---- */
 	struct envelope  *mbox_head;
-	struct envelope  *mbox_tail;
 	size_t            mbox_n;
+
+	char              __mbox_pad[XTC_CACHE_LINE
+	                            - sizeof(struct envelope *)
+	                            - sizeof(size_t)];
+
+	/* ---- producer-side (senders write) ---- */
+	pthread_mutex_t   mbox_lock;
+	struct envelope  *mbox_tail;
 	size_t            mbox_cap;
 
 	/* Selective-receive save queue (envelopes that the receiver
@@ -130,6 +150,15 @@ struct xtc_proc {
 	struct mon_entry  *monitors;     /* monitors WE created (we are watcher) */
 	struct mon_entry  *monitored_by; /* monitors others created on us */
 };
+
+/*
+ * Static assertion: mbox producer/consumer fields are cache-line separated.
+ * offsetof(mbox_lock) should be at least 64 bytes beyond offsetof(mbox_head).
+ */
+_Static_assert(
+    offsetof(struct xtc_proc, mbox_lock) - offsetof(struct xtc_proc, mbox_head)
+        >= XTC_CACHE_LINE,
+    "mbox producer/consumer fields must be cache-line separated");
 
 /*
  * Per-loop slot table.  A loop owns its own proc_slots array; we
@@ -321,7 +350,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 	int armed;
 	(void)pthread_mutex_lock(&p->mbox_lock);
 	/* Reject if proc is dead, or capped and full.
-	 * Note: precedence bug fix — the original used
+	 * Note: precedence bug fix -- the original used
 	 *   if (!alive || cap > 0 ? mbox_n >= cap : 0)
 	 * which parses as (!alive || cap>0) ? ... and produced
 	 * surprising behaviour on platforms where alive timing
@@ -379,11 +408,11 @@ xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	uint32_t gen;
 	int rc;
 
-	if (loop == NULL || fn == NULL) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(loop == NULL || fn == NULL)) return XTC_E_INVAL;
 
-	if ((tbl = __table_for(loop, 1)) == NULL) return XTC_E_NOMEM;
+	if (XTC_UNLIKELY((tbl = __table_for(loop, 1)) == NULL)) return XTC_E_NOMEM;
 
-	if ((rc = __os_calloc(1, sizeof *p, (void **)&p)) != XTC_OK)
+	if (XTC_UNLIKELY((rc = __os_calloc(1, sizeof *p, (void **)&p)) != XTC_OK))
 		return rc;
 	(void)pthread_mutex_init(&p->mbox_lock, NULL);
 	p->loop = loop;
@@ -484,14 +513,14 @@ xtc_send(xtc_pid_t to, const void *data, size_t size)
 	xtc_loop_t *target;
 	struct envelope *e;
 
-	if (size > 0 && data == NULL) return XTC_E_INVAL;
-	if (xtc_pid_is_none(to)) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(size > 0 && data == NULL)) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(xtc_pid_is_none(to))) return XTC_E_INVAL;
 
 	p = __resolve(to, &target);
-	if (p == NULL || !p->alive) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(p == NULL || !p->alive)) return XTC_E_INVAL;
 
 	e = malloc(sizeof *e + size);
-	if (e == NULL) return XTC_E_NOMEM;
+	if (XTC_UNLIKELY(e == NULL)) return XTC_E_NOMEM;
 	e->next = NULL;
 	e->from = xtc_self();
 	e->size = size;
@@ -517,9 +546,9 @@ xtc_exit_pid(xtc_pid_t target, int reason)
 {
 	struct xtc_proc *p;
 	int expected = 0, desired;
-	if (xtc_pid_is_none(target)) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(xtc_pid_is_none(target))) return XTC_E_INVAL;
 	p = __resolve(target, NULL);
-	if (p == NULL || !p->alive) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(p == NULL || !p->alive)) return XTC_E_INVAL;
 
 	/* Encode reason so 0 means "no kill pending".  Negative reasons
 	 * are clamped to -1 so the encoded value stays nonzero. */
@@ -693,7 +722,7 @@ xtc_recv(void **out, size_t *out_size, int64_t timeout_ns)
 {
 	/* Wrapper around __do_recv with the always-match predicate.
 	 * Annotated XTC_MUSTTAIL so the compiler emits a jmp, not a
-	 * call+ret — keeps the recv fast path single-frame. */
+	 * call+ret -- keeps the recv fast path single-frame. */
 	return XTC_MUSTTAIL __do_recv(__match_first, NULL, out, out_size,
 	    timeout_ns);
 }

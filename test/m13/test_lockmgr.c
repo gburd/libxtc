@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m13/test_lockmgr.c — verifies M13c lock manager.
+ * test/m13/test_lockmgr.c -- verifies M13c lock manager.
  */
 
 #include <pthread.h>
@@ -30,11 +30,11 @@ test_modes(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_lockmgr_id(m, &l1), ==, XTC_OK);
 	munit_assert_int(xtc_lockmgr_id(m, &l2), ==, XTC_OK);
 
-	/* l1 takes S, l2 also takes S — should both succeed. */
+	/* l1 takes S, l2 also takes S -- should both succeed. */
 	munit_assert_int(xtc_lock_get(m, l1, obj, 3, XTC_LOCK_S, 0), ==, XTC_OK);
 	munit_assert_int(xtc_lock_get(m, l2, obj, 3, XTC_LOCK_S, 0), ==, XTC_OK);
 
-	/* l1 wants X — should fail NOWAIT (l2 holds S). */
+	/* l1 wants X -- should fail NOWAIT (l2 holds S). */
 	munit_assert_int(xtc_lock_get(m, l1, obj, 3, XTC_LOCK_X, 0), ==, XTC_E_AGAIN);
 
 	munit_assert_int(xtc_lock_release_all(m, l1), >, 0);
@@ -42,7 +42,7 @@ test_modes(const MunitParameter p[], void *d)
 
 	/* Now l1 can take X. */
 	munit_assert_int(xtc_lock_get(m, l1, obj, 3, XTC_LOCK_X, 0), ==, XTC_OK);
-	/* l2 wants any S/IS/IX/X — all should fail NOWAIT. */
+	/* l2 wants any S/IS/IX/X -- all should fail NOWAIT. */
 	munit_assert_int(xtc_lock_get(m, l2, obj, 3, XTC_LOCK_S, 0), ==, XTC_E_AGAIN);
 	munit_assert_int(xtc_lock_get(m, l2, obj, 3, XTC_LOCK_IS, 0), ==, XTC_E_AGAIN);
 	munit_assert_int(xtc_lock_get(m, l2, obj, 3, XTC_LOCK_X, 0), ==, XTC_E_AGAIN);

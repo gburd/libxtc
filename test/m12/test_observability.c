@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m12/test_observability.c — verifies the four new
+ * test/m12/test_observability.c -- verifies the four new
  * observability modules: log, cfg, inject, pdict.
  */
 
@@ -182,7 +182,7 @@ test_inject_callback(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	atomic_store(&g_inject_fired, 0);
 
-	/* No attachment yet — trigger is a no-op. */
+	/* No attachment yet -- trigger is a no-op. */
 	xtc_inject_trigger("xtc.test.point1");
 	munit_assert_int(atomic_load(&g_inject_fired), ==, 0);
 
@@ -328,16 +328,16 @@ test_res_alert(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_res_set_alert_fn(&r, alert_cb, NULL), ==, XTC_OK);
 	atomic_store(&g_alert_count, 0);
 
-	/* Acquire 70 — under threshold, no fire. */
+	/* Acquire 70 -- under threshold, no fire. */
 	munit_assert_int(xtc_res_acquire(&r, XTC_RES_TASKS, 70), ==, XTC_OK);
 	munit_assert_int(atomic_load(&g_alert_count), ==, 0);
-	/* Push to 85 — fires once. */
+	/* Push to 85 -- fires once. */
 	munit_assert_int(xtc_res_acquire(&r, XTC_RES_TASKS, 15), ==, XTC_OK);
 	munit_assert_int(atomic_load(&g_alert_count), ==, 1);
 	/* Stay above; no re-fire. */
 	munit_assert_int(xtc_res_acquire(&r, XTC_RES_TASKS, 5), ==, XTC_OK);
 	munit_assert_int(atomic_load(&g_alert_count), ==, 1);
-	/* Drop below threshold and back up — re-arms and fires again. */
+	/* Drop below threshold and back up -- re-arms and fires again. */
 	xtc_res_release(&r, XTC_RES_TASKS, 30);
 	munit_assert_int(xtc_res_acquire(&r, XTC_RES_TASKS, 30), ==, XTC_OK);
 	munit_assert_int(atomic_load(&g_alert_count), ==, 2);

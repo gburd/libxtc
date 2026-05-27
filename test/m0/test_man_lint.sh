@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/m0/test_man_lint.sh — D5
+# test/m0/test_man_lint.sh -- D5
 # Lint every man page with mandoc.  Skipped if mandoc is missing.
 set -eu
 : "${XTC_SRC_DIR:?}"
@@ -13,7 +13,7 @@ for m in "$XTC_SRC_DIR"/man/man3/*.3 "$XTC_SRC_DIR"/man/man7/*.7; do
 	[ -f "$m" ] || continue
 	# Check only for ERROR-level lint issues; WARNINGs vary across
 	# mandoc versions (FreeBSD's mandoc is stricter than Linux's)
-	# and don't represent real defects — "unusual Xr order" and
+	# and don't represent real defects -- "unusual Xr order" and
 	# "new sentence, new line" are stylistic preferences.
 	if ! out=$(mandoc -T lint -W error "$m" 2>&1); then
 		echo "  [D5] FAIL: $m" >&2

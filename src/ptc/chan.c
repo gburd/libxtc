@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/ptc/chan.c
@@ -92,18 +92,35 @@ xtc_chan_oneshot_set_waker(xtc_chan_oneshot_t *c, const xtc_waker_t *w)
 	return XTC_OK;
 }
 
-/* ===== mpsc bounded =============================================== */
+/* ===== mpsc bounded ===============================================
+ *
+ * False-sharing fix: head (producers CAS) and tail (consumer writes)
+ * are on separate cache lines to avoid contention under load.
+ */
 
 struct xtc_chan_mpsc {
 	xtc_res_t *res;
 	size_t       cap;
 	_Atomic(void *) *slots;
-	_Atomic uint64_t  head;     /* next slot to write */
-	_Atomic uint64_t  tail;     /* next slot to read */
+
+	/* Producer-side: multiple senders CAS head. */
+	_Alignas(XTC_CACHE_LINE)
+	_Atomic uint64_t  head;
+
+	/* Consumer-side: single consumer advances tail. */
+	_Alignas(XTC_CACHE_LINE)
+	_Atomic uint64_t  tail;
+
 	_Atomic int       closed;
 	xtc_waker_t       waker;
 	_Atomic int       has_waker;
 };
+
+/* Verify head/tail are cache-line separated. */
+_Static_assert(
+    offsetof(struct xtc_chan_mpsc, tail) - offsetof(struct xtc_chan_mpsc, head)
+        >= XTC_CACHE_LINE,
+    "mpsc head/tail must be cache-line separated");
 
 int
 xtc_chan_mpsc_create(xtc_res_t *res, size_t capacity, xtc_chan_mpsc_t **out)
@@ -162,28 +179,28 @@ int
 xtc_chan_mpsc_try_send(xtc_chan_mpsc_t *c, void *msg)
 {
 	uint64_t head, tail;
-	if (c == NULL) return XTC_E_INVAL;
-	if (atomic_load_explicit(&c->closed, memory_order_acquire))
+	if (XTC_UNLIKELY(c == NULL)) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(atomic_load_explicit(&c->closed, memory_order_acquire)))
 		return XTC_E_INVAL;
-	if (msg == NULL) return XTC_E_INVAL;     /* NULL is the empty sentinel */
+	if (XTC_UNLIKELY(msg == NULL)) return XTC_E_INVAL;     /* NULL is the empty sentinel */
 
 	/* Charge a global slot first; release if we fail to enqueue. */
 	if (c->res != NULL) {
 		int rc = xtc_res_acquire(c->res, XTC_RES_CHAN_SLOTS, 1);
-		if (rc != XTC_OK) return rc;
+		if (XTC_UNLIKELY(rc != XTC_OK)) return rc;
 	}
 
 	for (;;) {
 		head = atomic_load_explicit(&c->head, memory_order_relaxed);
 		tail = atomic_load_explicit(&c->tail, memory_order_acquire);
-		if (head - tail >= c->cap) {
+		if (XTC_UNLIKELY(head - tail >= c->cap)) {
 			if (c->res != NULL)
 				xtc_res_release(c->res, XTC_RES_CHAN_SLOTS, 1);
 			return XTC_E_AGAIN;
 		}
-		if (atomic_compare_exchange_weak_explicit(
+		if (XTC_LIKELY(atomic_compare_exchange_weak_explicit(
 		        &c->head, &head, head + 1,
-		        memory_order_acq_rel, memory_order_relaxed))
+		        memory_order_acq_rel, memory_order_relaxed)))
 			break;
 	}
 	atomic_store_explicit(&c->slots[head & (c->cap - 1)], msg,
@@ -198,10 +215,10 @@ xtc_chan_mpsc_try_recv(xtc_chan_mpsc_t *c, void **out)
 {
 	uint64_t tail, head;
 	void *v;
-	if (c == NULL || out == NULL) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(c == NULL || out == NULL)) return XTC_E_INVAL;
 	tail = atomic_load_explicit(&c->tail, memory_order_relaxed);
 	head = atomic_load_explicit(&c->head, memory_order_acquire);
-	if (tail >= head) {
+	if (XTC_UNLIKELY(tail >= head)) {
 		if (atomic_load_explicit(&c->closed, memory_order_acquire))
 			return XTC_E_INVAL;
 		return XTC_E_AGAIN;
@@ -211,7 +228,7 @@ xtc_chan_mpsc_try_recv(xtc_chan_mpsc_t *c, void **out)
 	for (;;) {
 		v = atomic_load_explicit(&c->slots[tail & (c->cap - 1)],
 		    memory_order_acquire);
-		if (v != NULL) break;
+		if (XTC_LIKELY(v != NULL)) break;
 	}
 	atomic_store_explicit(&c->slots[tail & (c->cap - 1)], NULL,
 	    memory_order_relaxed);

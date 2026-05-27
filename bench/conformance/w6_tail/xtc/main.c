@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/conformance/w6_tail/xtc/main.c
- *   W6: tail latency under backpressure — xtc runtime.
+ *   W6: tail latency under backpressure -- xtc runtime.
  *
  *   N generator pthreads pump 4-byte messages onto a bounded
  *   xtc_chan_mpsc channel; one consumer pthread drains them.
@@ -13,7 +13,7 @@
  *   When a generator hits the cap, xtc_chan_mpsc_try_send returns
  *   XTC_E_RESOURCE (global slot cap exhausted) or XTC_E_AGAIN (ring
  *   buffer full); the generator records the rejection and continues
- *   immediately without blocking — no parking, no sleeping.  This is
+ *   immediately without blocking -- no parking, no sleeping.  This is
  *   xtc's distinguishing property: the cap fires explicitly via
  *   xtc_res rather than implicitly queuing forever.
  *
@@ -124,7 +124,7 @@ hwm_alert(xtc_res_kind_t k, int64_t used, int64_t cap, void *user)
 }
 
 /* -------------------------------------------------------------------------
- * now_ns — CLOCK_MONOTONIC in nanoseconds
+ * now_ns -- CLOCK_MONOTONIC in nanoseconds
  * ------------------------------------------------------------------------- */
 
 static uint64_t
@@ -138,7 +138,7 @@ now_ns(void)
 }
 
 /* -------------------------------------------------------------------------
- * ru_cpu_us — user+sys CPU time in microseconds
+ * ru_cpu_us -- user+sys CPU time in microseconds
  * ------------------------------------------------------------------------- */
 
 static uint64_t
@@ -153,7 +153,7 @@ ru_cpu_us(const struct rusage *ru)
  * Generator thread
  *   For each operation: allocate a message, timestamp it, try_send.
  *   On rejection (XTC_E_RESOURCE or XTC_E_AGAIN) increment local
- *   counter and free the message — no blocking, no waiting.
+ *   counter and free the message -- no blocking, no waiting.
  * ------------------------------------------------------------------------- */
 
 static void *

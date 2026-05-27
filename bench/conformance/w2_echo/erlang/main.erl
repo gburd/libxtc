@@ -1,10 +1,10 @@
 #!/usr/bin/env escript
 %%!-
-%% Copyright (c) 2026, The XTC Project — All rights reserved.
+%% Copyright (c) 2026, The XTC Project
 %% Use of this source code is governed by the ISC License.
 %%
 %% bench/conformance/w2_echo/erlang/main.erl
-%%   M17 W2 — TCP echo server, Erlang/BEAM runtime.
+%%   M17 W2 -- TCP echo server, Erlang/BEAM runtime.
 %%
 %%   Architecture:
 %%     - Server: gen_tcp:listen + accept loop, one echo process per conn.
@@ -84,7 +84,7 @@ main(Args) ->
     ).
 
 %% ============================================================
-%% Accept loop — spawns one echo process per connection.
+%% Accept loop -- spawns one echo process per connection.
 %% ============================================================
 
 accept_loop(LSock) ->
@@ -159,7 +159,7 @@ wait_clients(N) ->
     receive
         {done, _Pid} -> wait_clients(N - 1)
     after 60000 ->
-        ok  %% timeout — treat as done
+        ok  %% timeout -- treat as done
     end.
 
 %% ============================================================

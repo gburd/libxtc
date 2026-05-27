@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/dist/test_s_perm.sh — T5
+# test/dist/test_s_perm.sh -- T5
 set -eu
 : "${XTC_SRC_DIR:?}"
 "$XTC_SRC_DIR/dist/s_perm"

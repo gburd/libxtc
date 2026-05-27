@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_mctx.h
@@ -81,7 +81,7 @@ void   *xtc_mctx_calloc(xtc_mctx_t *m, size_t n, size_t size);
 /* Strdup into the context.  Lives until reset/destroy. */
 void   *xtc_mctx_strdup(xtc_mctx_t *m, const char *s);
 
-/* Free a single allocation early.  Optional — most code just lets
+/* Free a single allocation early.  Optional -- most code just lets
  * destroy/reset reclaim. */
 void    xtc_mctx_free(xtc_mctx_t *m, void *p);
 

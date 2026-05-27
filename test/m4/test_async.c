@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m4/test_async.c — verifies M4_CLAIMS.md C1–C9.
+ * test/m4/test_async.c -- verifies M4_CLAIMS.md C1-C9.
  */
 
 #include <stdint.h>

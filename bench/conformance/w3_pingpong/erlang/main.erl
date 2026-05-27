@@ -1,11 +1,11 @@
 #!/usr/bin/env escript
 %%!
 %%-
-%% Copyright (c) 2026, The XTC Project — All rights reserved.
+%% Copyright (c) 2026, The XTC Project
 %% Use of this source code is governed by the ISC License.
 %%
 %% bench/conformance/w3_pingpong/erlang/main.erl
-%%   W3: mailbox ping-pong benchmark — Erlang runtime.
+%%   W3: mailbox ping-pong benchmark -- Erlang runtime.
 %%
 %%   Two Erlang processes (ping, pong) exchange messages N times using
 %%   the built-in "!" send and "receive" primitives.  Per-round-trip

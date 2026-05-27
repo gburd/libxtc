@@ -34,7 +34,7 @@
 #define MUNIT_OUTPUT_FILE stdout
 #endif
 
-/* This is a bit more useful; it tells µnit how to format the seconds in
+/* This is a bit more useful; it tells unit how to format the seconds in
  * timed tests.  If your tests run for longer you might want to reduce
  * it, and if your computer is really fast and your tests are tiny you
  * can increase it. */
@@ -1768,7 +1768,7 @@ munit_test_runner_run_test(MunitTestRunner *runner, const MunitTest *test,
         continue;
 
       /* Nothing from CLI, is the enum NULL/empty?  We're not a
-       * fuzzer… */
+       * fuzzer... */
       if (pe->values == NULL || pe->values[0] == NULL)
         continue;
 
@@ -1919,7 +1919,7 @@ munit_print_help(int argc, char *const argv[MUNIT_ARRAY_PARAM(argc + 1)],
     " --help    Print this help message and exit.\n");
 #if defined(MUNIT_NL_LANGINFO)
   setlocale(LC_ALL, "");
-  fputs((strcasecmp("UTF-8", nl_langinfo(CODESET)) == 0) ? "µnit" : "munit",
+  fputs((strcasecmp("UTF-8", nl_langinfo(CODESET)) == 0) ? "unit" : "munit",
     stdout);
 #else
   puts("munit");

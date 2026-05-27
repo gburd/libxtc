@@ -1,12 +1,12 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * test/pbt/pbt_slab.c
  *	Property-based tests for M11.5 xtc_slab.
  *
  *	Properties:
- *	  S1: alloc N then free N → n_inuse == 0
+ *	  S1: alloc N then free N -> n_inuse == 0
  *	  S2: alloc fills slabs sequentially; free + re-alloc reuses
  *	  S3: redzone-mode catches buffer overruns deterministically
  *	  S4: shm-mode offset/resolve roundtrip is identity
@@ -96,10 +96,15 @@ prop_random_interleave(hegel_test_case *tc, void *u)
 	xtc_slab_destroy(s);
 }
 
-/* ----- S3: shm offset/resolve roundtrip ------------------ */
+/* ----- S3: shm offset/resolve roundtrip (single-process) ---- */
+/*
+ * NOTE: This test uses MAP_PRIVATE | MAP_ANONYMOUS, which is NOT actual
+ * shared memory.  It only verifies offset/resolve work within a single
+ * process.  For real cross-process tests, see test/m11/test_slab_shm.c.
+ */
 
 static void
-prop_shm_offset_roundtrip(hegel_test_case *tc, void *u)
+prop_shm_offset_roundtrip_single_process(hegel_test_case *tc, void *u)
 {
 	xtc_slab_t *s;
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
@@ -131,14 +136,14 @@ prop_shm_offset_roundtrip(hegel_test_case *tc, void *u)
 static const pbt_entry_t tests[] = {
 	{ "alloc_free_balance",   prop_alloc_free_balance,   30 },
 	{ "random_interleave",    prop_random_interleave,    30 },
-	{ "shm_offset_roundtrip", prop_shm_offset_roundtrip, 30 },
+	{ "shm_offset_roundtrip_single_process", prop_shm_offset_roundtrip_single_process, 30 },
 	{ NULL, NULL, 0 }
 };
 #else
 static const pbt_entry_t tests[] = {
 	{ "alloc_free_balance",   NULL, 0 },
 	{ "random_interleave",    NULL, 0 },
-	{ "shm_offset_roundtrip", NULL, 0 },
+	{ "shm_offset_roundtrip_single_process", NULL, 0 },
 	{ NULL, NULL, 0 }
 };
 #endif

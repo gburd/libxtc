@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/bench_million_tasks.c
@@ -122,7 +122,7 @@ main(int argc, char **argv)
 	 * mprotect splits mapping); /proc/sys/vm/max_map_count limits
 	 * how many tasks can coexist.  On Linux the default is 65530
 	 * (kernel < 6.0) or 1M (newer); we degrade gracefully when
-	 * hit — xtc_async returns a non-OK rc, no crash. */
+	 * hit -- xtc_async returns a non-OK rc, no crash. */
 	if (xtc_set_stack_size(16 * 1024) != XTC_OK) {
 		fprintf(stderr, "set_stack_size failed\n");
 		return 1;

@@ -1,6 +1,6 @@
 #!/bin/sh
 #-
-# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Copyright (c) 2026, The XTC Project
 # Use of this source code is governed by the ISC License.
 #
 # bench/conformance/run.sh
@@ -92,7 +92,7 @@ for _wdir in "$SELF_DIR"/w[0-9]_*/; do
 
         # Run; skip this pair if the binary exits non-zero.
         if ! "$_bin" >"$_tmpfile" 2>/dev/null; then
-            printf 'run.sh: %s exited non-zero — skipped\n' "$_bin" >&2
+            printf 'run.sh: %s exited non-zero -- skipped\n' "$_bin" >&2
             continue
         fi
 

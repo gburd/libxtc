@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/dist/test_shellcheck.sh — T4
+# test/dist/test_shellcheck.sh -- T4
 set -eu
 : "${XTC_SRC_DIR:?}"
 

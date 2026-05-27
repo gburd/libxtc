@@ -1,10 +1,10 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
  *
- * test/m13/test_lwlock.c — verifies M13b lightweight lock.
+ * test/m13/test_lwlock.c -- verifies M13b lightweight lock.
  */
 
 #include <pthread.h>
@@ -67,13 +67,13 @@ test_conditional(const MunitParameter p[], void *d)
 	xtc_lwlock_t lk;
 	(void)p; (void)d;
 	munit_assert_int(xtc_lwlock_init(&lk, 3), ==, XTC_OK);
-	/* Free → conditional EXCLUSIVE succeeds. */
+	/* Free -> conditional EXCLUSIVE succeeds. */
 	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LW_EXCLUSIVE),
 	    ==, XTC_OK);
-	/* Held EXCLUSIVE → another EXCLUSIVE conditional fails. */
+	/* Held EXCLUSIVE -> another EXCLUSIVE conditional fails. */
 	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LW_EXCLUSIVE),
 	    ==, XTC_E_AGAIN);
-	/* Held EXCLUSIVE → SHARED conditional fails. */
+	/* Held EXCLUSIVE -> SHARED conditional fails. */
 	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LW_SHARED),
 	    ==, XTC_E_AGAIN);
 	xtc_lwlock_release(&lk);
@@ -189,7 +189,7 @@ test_concurrent_shared(const MunitParameter p[], void *d)
 	for (i = 0; i < N_SHARED_THREADS; i++) pthread_join(th[i], NULL);
 	/* We should observe at least 2 concurrent shared holders during
 	 * the run; failing that, our shared path is serialising
-	 * unnecessarily.  On a fast CPU we typically see 4–8. */
+	 * unnecessarily.  On a fast CPU we typically see 4-8. */
 	munit_assert_int(atomic_load(&g_shared_max_concurrent), >=, 2);
 	xtc_lwlock_destroy(&g_lk2);
 	return MUNIT_OK;

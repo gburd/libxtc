@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_pdict.h
- *	Per-process dictionary — string-keyed kv store local to each
+ *	Per-process dictionary -- string-keyed kv store local to each
  *	xtc_proc.  Models Erlang's `put/2`, `get/1`, `erase/1`,
  *	`get_keys/0`.  Used for:
  *	  - per-proc tracing / debug names

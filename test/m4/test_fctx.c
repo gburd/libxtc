@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m4/test_fctx.c — exercise the standalone make_fcontext /
+ * test/m4/test_fctx.c -- exercise the standalone make_fcontext /
  *	jump_fcontext asm without involving the loop or coro layer.
  *	This isolates the alignment & save/restore correctness from
  *	the rest of the system; if this passes, M4.5 has a working

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_tailcall.h
@@ -44,7 +44,7 @@
  * Both clang's `[[clang::musttail]]` and gcc-15's
  * `__attribute__((musttail))` are accepted as statement attributes,
  * but only in compilers that parse C2x bracket attributes (clang)
- * or have GCC 15's extension.  In strict C11 mode — which xtc uses —
+ * or have GCC 15's extension.  In strict C11 mode -- which xtc uses --
  * we fall back to a no-op and rely on the optimizer.  The
  * `scripts/check-tailcalls.sh` validator inspects the .o to confirm
  * `jmp` was emitted regardless. */

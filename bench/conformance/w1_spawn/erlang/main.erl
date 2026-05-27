@@ -1,10 +1,10 @@
 #!/usr/bin/env escript
 %%
-%% Copyright (c) 2026, The XTC Project — All rights reserved.
+%% Copyright (c) 2026, The XTC Project
 %% Use of this source code is governed by the ISC License.
 %%
 %% bench/conformance/w1_spawn/erlang/main.erl
-%%   M17 W1 — spawn-N-await-all, Erlang/BEAM runtime.
+%%   M17 W1 -- spawn-N-await-all, Erlang/BEAM runtime.
 %%
 %%   Spawns N BEAM processes via spawn_monitor; each process does trivial
 %%   work (sends one message then exits).  Waits for all 'DOWN' monitors,
