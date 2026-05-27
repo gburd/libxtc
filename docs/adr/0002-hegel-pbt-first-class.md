@@ -2,18 +2,18 @@
 
 - **Status:** Accepted (M3 retrofit; carried forward from M4 onward).
 - **Date:** 2026-05-25.
-- **Supersedes:** —
+- **Supersedes:** --
 - **Related:** [`0001-test-first-claim-driven.md`](0001-test-first-claim-driven.md).
 
 ## Context
 
-`PLAN.md` §7.2 commits the project to property-based tests via
+`PLAN.md` (S)7.2 commits the project to property-based tests via
 [hegel-c](https://github.com/gburd/hegel-c) for every concurrency
 primitive: MPSC ordering, mailbox selective receive, deque
 linearizability, timer monotonicity, supervisor restart intensity,
 future combinators, allocator ownership, RCU, LRLock, and `xtc_cfg`.
 
-Through M0–M3 we wrote munit unit tests but no PBTs.  This ADR
+Through M0-M3 we wrote munit unit tests but no PBTs.  This ADR
 formalises the gap and the remediation.
 
 ## Decision
@@ -23,11 +23,11 @@ parallel to the munit suite.  The test tree adds:
 
 ```
 test/pbt/
-├── pbt_common.h        scaffolding + SKIP-mode stub
-├── pbt_atomic.c        M1 atomics
-├── pbt_alloc.c         M1 allocator
-├── pbt_timer.c         M3 timer subsystem
-└── pbt_run_queue.c     M3 task run queue
+|--- pbt_common.h        scaffolding + SKIP-mode stub
+|--- pbt_atomic.c        M1 atomics
+|--- pbt_alloc.c         M1 allocator
+|--- pbt_timer.c         M3 timer subsystem
+\--- pbt_run_queue.c     M3 task run queue
 ```
 
 Each milestone's `M*_CLAIMS.md` table now has explicit PBT-tagged
@@ -88,7 +88,7 @@ properties before they can ship.
 
 ### Negative
 
-- Bigger test runtime: 660 generated examples in M0–M3 take a few
+- Bigger test runtime: 660 generated examples in M0-M3 take a few
   seconds.  At the lock-manager scale (M13c) this will be minutes.
   Mitigation: split `make check` (fast path) from `make check-pbt`
   (slow path) once the suite gets heavy.
@@ -106,7 +106,7 @@ properties before they can ship.
 - [x] `pbt_common.h` SKIP-mode stub
 - [x] M1 atomics: 3 properties (`fetch_add_sum`, `cas_loop_sum`, `store_load_roundtrip`)
 - [x] M1 allocator: 3 properties (`malloc_writeable`, `realloc_preserves`, `hook_balanced`)
-- [x] M3 timer: 1 property (`random_timers` — fires once, in order, cancels respected)
+- [x] M3 timer: 1 property (`random_timers` -- fires once, in order, cancels respected)
 - [x] M3 run queue: 1 property (`each_task_runs_target_times`)
 - [x] All PBT binaries integrated into `make check` via `tests-pbt`
 - [x] Total: 8 hegel properties, 660 generated examples per run
@@ -116,7 +116,7 @@ their unit-test rows, per ADR-0001.
 
 ## Notes
 
-This is a retrofit: M0–M3 shipped without it.  The discipline
+This is a retrofit: M0-M3 shipped without it.  The discipline
 going forward is that **a milestone is not "complete" until every
 PBT-tagged claim has a passing hegel test**.  M4 onward observes
 this rule from the start.

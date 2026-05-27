@@ -1,11 +1,11 @@
-# AIX via KVM — buildfarm integration
+# AIX via KVM -- buildfarm integration
 
 This document describes how to run xtc CI builds on AIX without
 physical Power hardware, using AIX-on-x86-KVM-via-QEMU.
 
 ## Why
 
-xtc has Tier-2 platform support for AIX (per PLAN.md §3 and the
+xtc has Tier-2 platform support for AIX (per PLAN.md (S)3 and the
 existing `src/io/io_aix.c` pollset backend), code-complete but
 runtime-unverified.  A KVM-based AIX VM gives us a verification
 path until we can secure access to physical Power hardware.
@@ -19,7 +19,7 @@ path until we can secure access to physical Power hardware.
 
 ## Caveats
 
-- This is **CPU-emulated**, not native; expect ~5-10× slowdown vs
+- This is **CPU-emulated**, not native; expect ~5-10x slowdown vs
   Power hardware.  Acceptable for compile + test on a small CI
   workload; not acceptable for benchmarking.
 - AIX licensing: IBM offers a **30-day evaluation ISO** for AIX 7.3
@@ -137,14 +137,14 @@ verify when the AIX path comes online:
    AIX 7.x; matches the existing `io_aix.c`.  Expect no surprises.
 2. **`_Atomic`** support: AIX `xlc` doesn't ship it; we use gcc
    from the AIX Toolbox.  Configure already detects this.
-3. **`pthread_mutex_t` alignment** — AIX requires explicit alignment
+3. **`pthread_mutex_t` alignment** -- AIX requires explicit alignment
    for pthread structs in 64-bit mode.  The existing
    `_Alignas(long long)` shim in `xtc_int.h` (added for illumos)
    should already cover this.
 4. **`<execinfo.h>`** absent.  `XTC_SLAB_BACKTRACE` flag will fall
    through to no-op via the `__GLIBC__` gate.
 5. **`SO_PEERCRED`** absent.  AIX has `getpeereid(3)`; the xtc_net
-   credential path will return uid=0,gid=0 — acceptable degradation.
+   credential path will return uid=0,gid=0 -- acceptable degradation.
 6. **fctx assembler**: We have `fctx_x86_64_sysv.S` and
    `fctx_x86_64_ms_pe.S`.  AIX is PowerPC.  The KVM emulated AIX
    needs an `fctx_ppc64_elf_v2.S` port.  Out of scope for this
@@ -155,7 +155,7 @@ verify when the AIX path comes online:
 
 ## Cost / time
 
-- Install: 1× one-time, 4-8 hours on emulation.
+- Install: 1x one-time, 4-8 hours on emulation.
 - Per-CI run: ~10-15 minutes for build + check (vs 2 minutes on
   native x86_64) due to PowerPC TCG emulation.
 - Disk: ~40 GB image; snapshotted and reverted between CI runs.
@@ -164,9 +164,9 @@ verify when the AIX path comes online:
 
 If the emulation overhead is unacceptable, the alternative is:
 
-1. Code-complete check via review (already done — `io_aix.c` exists).
+1. Code-complete check via review (already done -- `io_aix.c` exists).
 2. Document `make check` as runtime-unverified on AIX in
-   docs/KNOWN_ISSUES.md and PLAN.md §3.
+   docs/KNOWN_ISSUES.md and PLAN.md (S)3.
 3. Wait for either an IBM partnership or an unused Power 8/9 box
    we can rack.
 

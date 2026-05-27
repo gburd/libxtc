@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/m0/test_man_signatures.sh — D6
+# test/m0/test_man_signatures.sh -- D6
 # Every function man page must mention every parameter name from xtc.h
 # and document the return contract.
 set -eu

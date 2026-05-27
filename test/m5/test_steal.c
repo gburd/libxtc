@@ -1,15 +1,15 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * test/m5/test_steal.c
  *	Asserts the work-stealing safety claims (M5 St2/St3):
- *	  St2 — no task is lost: every spawned task runs at least once.
- *	  St3 — no task is double-run: every spawned task runs at most
+ *	  St2 -- no task is lost: every spawned task runs at least once.
+ *	  St3 -- no task is double-run: every spawned task runs at most
  *	        once.
  *
  *	St1 ("steals actually happen when one loop is busy and others
- *	are idle") is timing-dependent — when stealing works perfectly
+ *	are idle") is timing-dependent -- when stealing works perfectly
  *	the work distributes; when stealing fails everything still
  *	completes correctly thanks to St2/St3.  The deterministic
  *	invariants St2/St3 are the real correctness claims.  St1 is

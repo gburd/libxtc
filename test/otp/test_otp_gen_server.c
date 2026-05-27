@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/otp/test_otp_gen_server.c — port of selected gen_server_SUITE
+ * test/otp/test_otp_gen_server.c -- port of selected gen_server_SUITE
  * test cases from `lib/stdlib/test/gen_server_SUITE.erl`.
  *
  * gen_server in OTP is the canonical request/reply server pattern.
@@ -135,7 +135,7 @@ test_start_stop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &counter_cb, &state, NULL, &svr),
 	    ==, XTC_OK);
-	/* init runs inside the server's proc — only after loop starts. */
+	/* init runs inside the server's proc -- only after loop starts. */
 	munit_assert_int(xtc_proc_spawn(loop, start_driver, svr, NULL, &driver),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
@@ -305,7 +305,7 @@ static int
 slow_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 {
 	(void)st; (void)req; (void)sz;
-	/* Don't reply — caller times out. */
+	/* Don't reply -- caller times out. */
 	(void)call;
 	return XTC_SVR_CONTINUE;
 }

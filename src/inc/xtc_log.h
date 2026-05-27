@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_log.h
@@ -17,7 +17,7 @@
  *	  - Thread-safe: writers and the consumer can be on different
  *	    OS threads; ring uses lock-free MPSC enqueue.
  *
- *	Sinks supported in v1:
+ *	Sinks supported:
  *	  - stderr/stdout (default)
  *	  - file descriptor (preopened by caller)
  *	  - custom callback (user-supplied function)

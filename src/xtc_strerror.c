@@ -1,12 +1,12 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  *
  * Use of this source code is governed by the ISC License.
  *
  * src/xtc_strerror.c
  *	Stable English descriptions of XTC_E_* codes.
  *	The text is part of the API contract for log-message
- *	stability (PLAN.md §18.7); changes follow the same
+ *	stability (PLAN.md (S)18.7); changes follow the same
  *	deprecation lifecycle as function signatures.
  */
 
@@ -30,6 +30,7 @@ xtc_strerror(int e)
 	case XTC_E_INTERNAL:	return "internal invariant violation";
 	case XTC_E_RESOURCE:	return "resource cap reached";
 	case XTC_E_DEADLK:	return "deadlock victim";
+	case XTC_E_VERSION:	return "version mismatch";
 	}
 	return "unknown";
 }

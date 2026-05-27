@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/m0/test_distclean.sh — B5
+# test/m0/test_distclean.sh -- B5
 #
 # Verifies that `make distclean` removes every file produced by
 # configure and make.  Runs in an isolated clone so it doesn't
