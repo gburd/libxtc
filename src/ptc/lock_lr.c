@@ -222,10 +222,10 @@ __wait_for_readers(xtc_lrlock_t *lr)
 			if ((last & 1u) == 0) continue;        /* idle in snapshot */
 			cur = atomic_load_explicit(&lr->epochs[i].epoch,
 			    memory_order_acquire);
-			if (cur == last) { all_done = 0; break; }
+			if (XTC_UNLIKELY(cur == last)) { all_done = 0; break; }
 		}
-		if (all_done) return;
-		if (spin < XTC_LRLOCK_SPIN_LIMIT) {
+		if (XTC_LIKELY(all_done)) return;
+		if (XTC_LIKELY(spin < XTC_LRLOCK_SPIN_LIMIT)) {
 			spin++;
 #if defined(__x86_64__) || defined(__i386__)
 			__asm__ __volatile__ ("pause");
