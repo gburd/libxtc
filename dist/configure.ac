@@ -190,8 +190,8 @@ case "$xtc_tls" in
   auto)
     # Try OpenSSL: need both the library and the header.
     ac_save_LIBS=$LIBS
-    AC_CHECK_LIB([ssl], [SSL_library_init],
-      [ac_have_ssl_lib=yes], [ac_have_ssl_lib=no])
+    AC_CHECK_LIB([ssl], [SSL_CTX_new],
+      [ac_have_ssl_lib=yes], [ac_have_ssl_lib=no], [-lcrypto])
     LIBS=$ac_save_LIBS
     AC_CHECK_HEADER([openssl/ssl.h],
       [ac_have_ssl_hdr=yes], [ac_have_ssl_hdr=no])
@@ -202,8 +202,8 @@ case "$xtc_tls" in
   openssl)
     # Explicit request — fail loudly if not present.
     ac_save_LIBS=$LIBS
-    AC_CHECK_LIB([ssl], [SSL_library_init], [],
-      [AC_MSG_ERROR([--with-tls=openssl: libssl not found])])
+    AC_CHECK_LIB([ssl], [SSL_CTX_new], [],
+      [AC_MSG_ERROR([--with-tls=openssl: libssl not found])], [-lcrypto])
     LIBS=$ac_save_LIBS
     AC_CHECK_HEADER([openssl/ssl.h], [],
       [AC_MSG_ERROR([--with-tls=openssl: openssl/ssl.h not found])])

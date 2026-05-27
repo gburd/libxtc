@@ -4272,14 +4272,14 @@ case "$xtc_tls" in
   auto)
     # Try OpenSSL: need both the library and the header.
     ac_save_LIBS=$LIBS
-    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for SSL_library_init in -lssl" >&5
-printf %s "checking for SSL_library_init in -lssl... " >&6; }
-if test ${ac_cv_lib_ssl_SSL_library_init+y}
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for SSL_CTX_new in -lssl" >&5
+printf %s "checking for SSL_CTX_new in -lssl... " >&6; }
+if test ${ac_cv_lib_ssl_SSL_CTX_new+y}
 then :
   printf %s "(cached) " >&6
 else case e in #(
   e) ac_check_lib_save_LIBS=$LIBS
-LIBS="-lssl  $LIBS"
+LIBS="-lssl -lcrypto $LIBS"
 cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
@@ -4292,20 +4292,20 @@ cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 #ifdef __cplusplus
 extern "C"
 #endif
-char SSL_library_init (void);
+char SSL_CTX_new (void);
 int
 main (void)
 {
-return SSL_library_init ();
+return SSL_CTX_new ();
   ;
   return 0;
 }
 _ACEOF
 if ac_fn_c_try_link "$LINENO"
 then :
-  ac_cv_lib_ssl_SSL_library_init=yes
+  ac_cv_lib_ssl_SSL_CTX_new=yes
 else case e in #(
-  e) ac_cv_lib_ssl_SSL_library_init=no ;;
+  e) ac_cv_lib_ssl_SSL_CTX_new=no ;;
 esac
 fi
 rm -f core conftest.err conftest.$ac_objext conftest.beam \
@@ -4313,9 +4313,9 @@ rm -f core conftest.err conftest.$ac_objext conftest.beam \
 LIBS=$ac_check_lib_save_LIBS ;;
 esac
 fi
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_ssl_SSL_library_init" >&5
-printf "%s\n" "$ac_cv_lib_ssl_SSL_library_init" >&6; }
-if test "x$ac_cv_lib_ssl_SSL_library_init" = xyes
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_ssl_SSL_CTX_new" >&5
+printf "%s\n" "$ac_cv_lib_ssl_SSL_CTX_new" >&6; }
+if test "x$ac_cv_lib_ssl_SSL_CTX_new" = xyes
 then :
   ac_have_ssl_lib=yes
 else case e in #(
@@ -4344,14 +4344,14 @@ fi
   openssl)
     # Explicit request — fail loudly if not present.
     ac_save_LIBS=$LIBS
-    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for SSL_library_init in -lssl" >&5
-printf %s "checking for SSL_library_init in -lssl... " >&6; }
-if test ${ac_cv_lib_ssl_SSL_library_init+y}
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for SSL_CTX_new in -lssl" >&5
+printf %s "checking for SSL_CTX_new in -lssl... " >&6; }
+if test ${ac_cv_lib_ssl_SSL_CTX_new+y}
 then :
   printf %s "(cached) " >&6
 else case e in #(
   e) ac_check_lib_save_LIBS=$LIBS
-LIBS="-lssl  $LIBS"
+LIBS="-lssl -lcrypto $LIBS"
 cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
@@ -4364,20 +4364,20 @@ cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 #ifdef __cplusplus
 extern "C"
 #endif
-char SSL_library_init (void);
+char SSL_CTX_new (void);
 int
 main (void)
 {
-return SSL_library_init ();
+return SSL_CTX_new ();
   ;
   return 0;
 }
 _ACEOF
 if ac_fn_c_try_link "$LINENO"
 then :
-  ac_cv_lib_ssl_SSL_library_init=yes
+  ac_cv_lib_ssl_SSL_CTX_new=yes
 else case e in #(
-  e) ac_cv_lib_ssl_SSL_library_init=no ;;
+  e) ac_cv_lib_ssl_SSL_CTX_new=no ;;
 esac
 fi
 rm -f core conftest.err conftest.$ac_objext conftest.beam \
@@ -4385,9 +4385,9 @@ rm -f core conftest.err conftest.$ac_objext conftest.beam \
 LIBS=$ac_check_lib_save_LIBS ;;
 esac
 fi
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_ssl_SSL_library_init" >&5
-printf "%s\n" "$ac_cv_lib_ssl_SSL_library_init" >&6; }
-if test "x$ac_cv_lib_ssl_SSL_library_init" = xyes
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_ssl_SSL_CTX_new" >&5
+printf "%s\n" "$ac_cv_lib_ssl_SSL_CTX_new" >&6; }
+if test "x$ac_cv_lib_ssl_SSL_CTX_new" = xyes
 then :
   printf "%s\n" "#define HAVE_LIBSSL 1" >>confdefs.h
 
