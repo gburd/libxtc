@@ -732,8 +732,9 @@ int
 xtc_recv_match(xtc_match_fn fn, void *u, void **out, size_t *out_size,
                int64_t timeout_ns)
 {
-	if (fn == NULL) return XTC_E_INVAL;
-	return __do_recv(fn, u, out, out_size, timeout_ns);
+	if (XTC_UNLIKELY(fn == NULL)) return XTC_E_INVAL;
+	/* XTC_MUSTTAIL: delegate to __do_recv as a tail call. */
+	return XTC_MUSTTAIL __do_recv(fn, u, out, out_size, timeout_ns);
 }
 
 /* ---------- exit / link / monitor ---------- */
