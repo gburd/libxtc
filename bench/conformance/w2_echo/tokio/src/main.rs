@@ -1,12 +1,12 @@
-// Copyright (c) 2026, The XTC Project — All rights reserved.
+// Copyright (c) 2026, The XTC Project
 // Use of this source code is governed by the ISC License.
 //
 // bench/conformance/w2_echo/tokio/src/main.rs
-//   M17 W2 — TCP echo server, Tokio runtime.
+//   M17 W2 -- TCP echo server, Tokio runtime.
 //
 //   The server runs a tokio::net::TcpListener::accept loop, spawning a
 //   task per accepted connection that echoes data back.  Clients are also
-//   spawned as Tokio tasks (not OS threads) — they use
+//   spawned as Tokio tasks (not OS threads) -- they use
 //   tokio::net::TcpStream::connect + write_all + read_exact.
 //
 //   Latency: per-RTT, recorded in an HDRHistogram.

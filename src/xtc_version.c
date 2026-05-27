@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  *
  * Use of this source code is governed by the ISC License.
  *
@@ -18,7 +18,7 @@
  * The library version is the single point of truth for the
  * three SemVer integer components and the full string.  The
  * macros come from xtc_config.h (autoconf) or meson_config.h
- * (meson) — both produced by the build system from
+ * (meson) -- both produced by the build system from
  * dist/version.in.
  *
  * PUBLIC: const char *xtc_version_string __P((void));

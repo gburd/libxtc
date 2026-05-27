@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/m0/test_man_coverage.sh — D4
+# test/m0/test_man_coverage.sh -- D4
 # Every public function declared in xtc.h must have a man3 page.
 set -eu
 : "${XTC_SRC_DIR:?}"

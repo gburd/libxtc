@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_svr.h
@@ -77,9 +77,9 @@ xtc_pid_t xtc_svr_pid(const xtc_svr_t *svr);
 
 /* Synchronous call: send `req`, wait for reply, copy reply into a
  * heap-allocated buffer that the caller must xtc_free.  Returns:
- *   XTC_OK          — *out_reply / *out_size populated
- *   XTC_E_AGAIN     — timeout
- *   XTC_E_INVAL     — bad pid / not a server
+ *   XTC_OK          -- *out_reply / *out_size populated
+ *   XTC_E_AGAIN     -- timeout
+ *   XTC_E_INVAL     -- bad pid / not a server
  */
 int xtc_svr_call(xtc_pid_t target,
                  const void *req, size_t req_size,

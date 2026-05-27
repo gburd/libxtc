@@ -5,8 +5,8 @@
 # discipline lint for xtc_cfg.
 #
 # Approach:
-#   1. grep -rn 'xtc_cfg_register_*' src/ → set of (name, type)
-#   2. grep -nE '^\| `[a-z_.]+` \|' docs/cfg.md → documented names
+#   1. grep -rn 'xtc_cfg_register_*' src/ -> set of (name, type)
+#   2. grep -nE '^\| `[a-z_.]+` \|' docs/cfg.md -> documented names
 #   3. report:
 #      - registered names not in cfg.md         FAIL
 #      - documented names not in source         WARN (orphan doc)

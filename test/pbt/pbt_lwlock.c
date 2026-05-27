@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
@@ -101,7 +101,7 @@ prop_conditional_consistent(hegel_test_case *tc, void *u)
 			if (xtc_lwlock_acquire_cond(&lk, XTC_LW_SHARED) == XTC_OK)
 				held_count++;
 		} else if (op == 1) {
-			/* Conditional exclusive — only succeeds if nothing held. */
+			/* Conditional exclusive -- only succeeds if nothing held. */
 			int rc = xtc_lwlock_acquire_cond(&lk, XTC_LW_EXCLUSIVE);
 			if (rc == XTC_OK) {
 				held_count++;

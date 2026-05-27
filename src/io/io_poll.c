@@ -1,17 +1,17 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/io/io_poll.c
  *	The poll(2) backend.  Portable to every Tier 1 platform; the
- *	floor we promise (PLAN.md §3.6).  Maintains a parallel
+ *	floor we promise (PLAN.md (S)3.6).  Maintains a parallel
  *	(pollfd[], tag[]) so the public API can return user tags even
  *	though poll(2) itself does not store user data per fd.
  */
 
 #define _POSIX_C_SOURCE 200809L
 
-#include "xtc_int.h"   /* pulls xtc_config.h — defines XTC_IO_BACKEND_* */
+#include "xtc_int.h"   /* pulls xtc_config.h -- defines XTC_IO_BACKEND_* */
 
 #if defined(XTC_IO_BACKEND_POLL)
 

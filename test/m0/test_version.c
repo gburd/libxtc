@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * test/m0/test_version.c
@@ -16,7 +16,7 @@
 
 /*
  * Hand-rolled SemVer 2.0 matcher.  We deliberately do not link
- * regex(3) here — the contract is so simple that pulling in a
+ * regex(3) here -- the contract is so simple that pulling in a
  * dependency would be wasteful, and we want this test to compile
  * with a maximally minimal toolchain.
  */

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_inject.h
@@ -12,7 +12,7 @@
  *	Three operations on a named point at runtime:
  *	  ATTACH   bind a callback (or "wait" semantics) to the name
  *	  DETACH   remove
- *	  TRIGGER  hit the point — the macro INJECTION_POINT(name) in
+ *	  TRIGGER  hit the point -- the macro INJECTION_POINT(name) in
  *	           production code calls into this
  *
  *	When TRIGGER fires:
@@ -64,7 +64,7 @@ int  xtc_inject_attach_wait(const char *name);
 /* Detach all attachments for a name. */
 int  xtc_inject_detach(const char *name);
 
-/* Trigger from production code.  Internal — usually called via the
+/* Trigger from production code.  Internal -- usually called via the
  * INJECTION_POINT() macro below, which compiles to a no-op when
  * XTC_INJECT_DISABLE is set. */
 void xtc_inject_trigger(const char *name);

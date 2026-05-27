@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m8/test_proc.c — verifies M8 process + mailbox + selective receive.
+ * test/m8/test_proc.c -- verifies M8 process + mailbox + selective receive.
  */
 
 #include <stdint.h>
