@@ -1,0 +1,21 @@
+#!/bin/sh
+#-
+# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Use of this source code is governed by the ISC License.
+#
+# bench/conformance/w4_mutex/erlang/bench
+#   Thin wrapper so run.sh can find a stable path.  Delegates to
+#   escript main.erl, passing all arguments through.
+#
+# If escript is not on PATH (Erlang/OTP not installed), exits 1;
+# run.sh will silently skip this (workload, runtime) pair.
+
+set -eu
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+
+if ! command -v escript >/dev/null 2>&1; then
+    printf 'escript not found; install Erlang/OTP 24+\n' >&2
+    exit 1
+fi
+
+exec escript "${SELF_DIR}/main.erl" "$@"
