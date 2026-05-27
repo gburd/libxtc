@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * test/pbt/pbt_run_queue.c
  *	Property-based test for the L2 task run queue (M3).

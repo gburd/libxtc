@@ -1,7 +1,7 @@
 # XTC — Process this file with autoconf to produce a configure script.
 #
 # Copyright (c) 2026, The XTC Project — All rights reserved.
-# Use of this source code is governed by the PostgreSQL License.
+# Use of this source code is governed by the ISC License.
 
 AC_INIT([xtc],
 	m4_esyscmd_s([cat ../dist/version.in 2>/dev/null || echo 0.0.0]),

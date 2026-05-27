@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * bench/bench_million_tasks.c
  *	Spawn N tasks (default 1,000,000), let each do a tiny piece

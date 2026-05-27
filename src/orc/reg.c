@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * src/orc/reg.c
  *	Process registry implementation.  M10.5: simple linear table
