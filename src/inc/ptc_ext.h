@@ -6,6 +6,7 @@
 
 int xtc_exit_pid __P((xtc_pid_t, int));
 int xtc_exit_self __P((int));
+int xtc_inject_check __P((const char *));
 int xtc_link __P((xtc_pid_t));
 int xtc_monitor __P((xtc_pid_t, uint64_t *));
 int xtc_proc_spawn __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));

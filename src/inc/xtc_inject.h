@@ -50,6 +50,7 @@ typedef void (*xtc_inject_fn)(const char *name, void *user);
  * PUBLIC: void xtc_inject_trigger __P((const char *));
  * PUBLIC: int  xtc_inject_wakeup __P((const char *));
  * PUBLIC: int  xtc_inject_n_attached __P((void));
+ * PUBLIC: int  xtc_inject_check __P((const char *));
  */
 
 /* Attach a callback.  Multiple attaches accumulate (up to 4 per
@@ -73,6 +74,11 @@ int  xtc_inject_wakeup(const char *name);
 
 /* Diagnostics: how many names currently have attachments. */
 int  xtc_inject_n_attached(void);
+
+/* Lock-free check: 1 if `name` has any attachments, 0 otherwise.
+ * Hot-path-friendly: when no inject points are attached anywhere,
+ * this returns 0 immediately via an atomic load. */
+int  xtc_inject_check(const char *name);
 
 /* The macro production code uses.  In PG-style this is INJECTION_POINT;
  * we use XTC_INJECTION_POINT so caller code reading a stack trace
