@@ -1,0 +1,77 @@
+#!/bin/sh
+# dist/s_async
+# Lint tool: catch *unintentional* uses of blocking syscalls in
+# non-primitive xtc code.  Acceptable locations:
+#   - src/os/                      (the OS-substrate layer is allowed
+#                                   to call kernel directly)
+#   - src/io/                      (IO backends are by definition
+#                                   syscall-shaped)
+#   - src/ptc/sync.c               (the async-mutex/condvar/sem etc.
+#                                   primitives ARE pthread wrappers)
+#   - src/ptc/lock_lr.c, lock_lw.c,
+#     lock_mgr.c                   (lock-primitive implementations)
+#   - src/ptc/inject.c             (injection-point wait semantics)
+#   - src/ptc/proc.c               (proc/loop coordination)
+# Anything else flagged here is suspect.
+#
+# Bypasses:
+#   - line contains XTC_BLOCKING_OK
+#   - the previous 5 lines mention XTC_BLOCKING_REGION
+#
+# Returns non-zero on any unjustified blocking call.
+
+set -eu
+
+DIST_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$DIST_DIR/.." && pwd)
+SRC="$ROOT/src"
+
+ALLOWLIST_RE='/(os|io)/|/(ptc/(sync|lock_lr|lock_lw|lock_mgr|inject|proc))\.c'
+
+BLOCKING_CALLS='read write recv send accept connect sleep usleep nanosleep flock fcntl getaddrinfo gethostbyname pthread_cond_wait pthread_cond_timedwait pthread_join wait waitpid'
+
+VIOL_FILE=$(mktemp)
+trap 'rm -f "$VIOL_FILE"' EXIT
+
+for sym in $BLOCKING_CALLS; do
+	# Match `<sym>(` not preceded by an identifier character.
+	grep -rnE "(^|[^A-Za-z0-9_])${sym}\\(" \
+		"$SRC" --include='*.c' 2>/dev/null \
+		| grep -vE "$ALLOWLIST_RE" \
+		| while IFS= read -r line; do
+			# Skip commented-out lines.
+			rest=${line#*:}
+			rest=${rest#*:}
+			case "$rest" in
+				*//*|*\/\**|*\**) ;;
+				*) ;;
+			esac
+			if printf '%s' "$line" | grep -qE '^\s*//|^\s*\*|^\s*/\*'; then
+				continue
+			fi
+			# Skip XTC_BLOCKING_OK on this line.
+			if printf '%s' "$line" | grep -q 'XTC_BLOCKING_OK'; then
+				continue
+			fi
+			# Check 5 lines back for XTC_BLOCKING_REGION.
+			file=${line%%:*}
+			rest=${line#*:}
+			lineno=${rest%%:*}
+			start=$((lineno > 5 ? lineno - 5 : 1))
+			window=$(sed -n "${start},${lineno}p" "$file" 2>/dev/null || true)
+			if printf '%s' "$window" | grep -q 'XTC_BLOCKING_REGION'; then
+				continue
+			fi
+			echo "$file:$lineno: $sym() outside XTC_BLOCKING_REGION (hint: wrap, or move into src/os/)" >> "$VIOL_FILE"
+		done
+done
+
+if [ -s "$VIOL_FILE" ]; then
+	while IFS= read -r v; do
+		echo "  [s_async] $v" >&2
+	done < "$VIOL_FILE"
+	n=$(wc -l < "$VIOL_FILE" | awk '{print $1}')
+	echo "  [s_async] $n violation(s)" >&2
+	exit 1
+fi
+echo "  [s_async] OK"
