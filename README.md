@@ -22,7 +22,7 @@ in place.  Real concurrency primitives land in M1+.
 PLAN.md             design plan (all 21 sections)
 M0_CLAIMS.md        the claims of milestone M0 and the tests for them
 README.md           you are here
-LICENSE             PostgreSQL license
+LICENSE             ISC license
 
 dist/               build apparatus (BDB / DBSQL convention)
   configure.ac        autoconf source (run autoreconf -i to produce configure)
@@ -149,4 +149,4 @@ foundation.  See [PLAN.md §18](PLAN.md) for the longevity contract.
 
 ## License
 
-PostgreSQL license.  See [LICENSE](LICENSE).
+ISC license.  See [LICENSE](LICENSE).

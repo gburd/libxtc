@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_orc.h
  *	L4 orchestration: supervisor.  M10 ships ONE_FOR_ONE strategy

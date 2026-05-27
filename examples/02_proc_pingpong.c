@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * examples/02_proc_pingpong.c — Erlang-style processes: ping sends
  * a counter to pong, pong replies with counter+1; bounce 100 times.

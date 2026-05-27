@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * examples/04_lockmgr_demo.c — heavyweight lock manager: two
  * "transactions" both want X locks on overlapping objects; the

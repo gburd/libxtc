@@ -1,7 +1,7 @@
 # XTC Makefile.in — processed by configure into a Makefile.
 #
 # Copyright (c) 2026, The XTC Project — All rights reserved.
-# Use of this source code is governed by the PostgreSQL License.
+# Use of this source code is governed by the ISC License.
 
 srcdir		= @srcdir@
 abs_top_srcdir	= @abs_top_srcdir@
