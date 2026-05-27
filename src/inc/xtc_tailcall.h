@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project — All rights reserved.
- * Use of this source code is governed by the PostgreSQL License.
+ * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_tailcall.h
  *	Mark functions/call-sites as MUST-be-tail-called.  GCC and
