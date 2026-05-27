@@ -2,7 +2,7 @@
 
 This document outlines a strategy for automated cross-platform testing
 in advance of submission to the PostgreSQL hackers list.  Manual
-SSH-into-host runs (Linux ✓, FreeBSD ✓, illumos ✓, Windows ✓) get us
+SSH-into-host runs (Linux [OK], FreeBSD [OK], illumos [OK], Windows [OK]) get us
 through development; for a project that wants to land on the PG
 build farm, we need something more systematic.
 
@@ -18,16 +18,16 @@ running the matrix is "press a button" not "burn a weekend".
 The active animals at https://buildfarm.postgresql.org/ run roughly:
 
 * **Linux**: Debian, Ubuntu, RHEL/CentOS/Rocky, Fedora, Alpine, Arch,
-  SUSE — across glibc + musl, gcc + clang, on x86_64, aarch64, ppc64le,
+  SUSE -- across glibc + musl, gcc + clang, on x86_64, aarch64, ppc64le,
   s390x, riscv64, and a handful of more exotic arches.
-* **BSD**: FreeBSD 13/14/15, OpenBSD 7.x, NetBSD 10.x, DragonFlyBSD —
+* **BSD**: FreeBSD 13/14/15, OpenBSD 7.x, NetBSD 10.x, DragonFlyBSD --
   on amd64 + aarch64.
 * **macOS**: 12, 13, 14, 15 on x86_64 and arm64.
-* **illumos**: OmniOS, OpenIndiana, SmartOS — amd64 and SPARC.
-* **Windows**: 10, 11, Server 2019/2022 — MSVC, MinGW, sometimes
+* **illumos**: OmniOS, OpenIndiana, SmartOS -- amd64 and SPARC.
+* **Windows**: 10, 11, Server 2019/2022 -- MSVC, MinGW, sometimes
   Cygwin.
-* **AIX**: 7.x — power7+, power8, power9.
-* **Solaris**: 11.4 — SPARC + amd64.
+* **AIX**: 7.x -- power7+, power8, power9.
+* **Solaris**: 11.4 -- SPARC + amd64.
 
 That's about 35-40 distinct build environments.  We won't match all
 of them on day one, but we want a clear path.
@@ -35,12 +35,12 @@ of them on day one, but we want a clear path.
 ## Approach: hierarchical caching
 
 ```
-Tier 0 — local dev:           Linux + the three remote SSH hosts I have
-Tier 1 — pre-commit hook:     Docker on the dev box, ~30 sec budget
-Tier 2 — pre-push gate:       GitHub-Actions free runners, ~5 min budget
-Tier 3 — full matrix:         self-hosted on EC2 / Hetzner with
+Tier 0 -- local dev:           Linux + the three remote SSH hosts I have
+Tier 1 -- pre-commit hook:     Docker on the dev box, ~30 sec budget
+Tier 2 -- pre-push gate:       GitHub-Actions free runners, ~5 min budget
+Tier 3 -- full matrix:         self-hosted on EC2 / Hetzner with
                               S3-cached images, ~60 min budget
-Tier 4 — buildfarm submission: handed to PG buildfarm post-merge
+Tier 4 -- buildfarm submission: handed to PG buildfarm post-merge
 ```
 
 Each tier subsumes the previous in coverage; the budget gates how often
@@ -62,7 +62,7 @@ for d in $(ls dist/ci/docker); do
 done
 ```
 
-That covers ~6 Linux distros × ~30s each = ~3 min before the dev
+That covers ~6 Linux distros x ~30s each = ~3 min before the dev
 notices, on a hot Docker cache.  Cold cache the first time is bigger
 but those layers cache in `~/.docker`.
 
@@ -77,12 +77,12 @@ each runner.  Total wall time: 4-7 minutes per push.  This is the
 "PR can't merge if red" gate.
 
 A second GHA workflow on `schedule:` runs the deeper matrix once a
-day on cron — Tier 3 (below) but sourced from S3 caches, so nightly
+day on cron -- Tier 3 (below) but sourced from S3 caches, so nightly
 cost is bounded.
 
 ## Tier 3: self-hosted EC2 + S3-cached images
 
-This is what you asked about — caching OS images in S3 to amortize
+This is what you asked about -- caching OS images in S3 to amortize
 acquisition cost across the project lifetime.
 
 ### Why S3 caching matters
@@ -145,19 +145,19 @@ QEMU + S3 is a good fit because:
   image once, and per-CI-run we just stack a copy-on-write overlay
   locally.
 * Total runtime: image-fetch (~2 min) + boot (~30 sec) + tests
-  (~3 min) + teardown (~10 sec) ≈ 6 min per platform.  10 platforms
+  (~3 min) + teardown (~10 sec) ~= 6 min per platform.  10 platforms
   in parallel on a beefy host = 6-8 min wall time for the whole
   matrix.
 
 ### EC2 cost model (illustrative)
 
-Run the matrix once daily as a scheduled GHA → self-hosted runner job:
+Run the matrix once daily as a scheduled GHA -> self-hosted runner job:
 
 * Spin up `c7i.4xlarge` spot (16 vCPU, 32 GB RAM): ~$0.30/hr spot.
 * Run the matrix in 8 minutes, shut down.
-* 30 days × 8 minutes = 4 hours/month × $0.30 = $1.20/month compute.
-* S3 storage: ~50 GB images × $0.023/GB-month = $1.15/month.
-* S3 transfers: same-region EC2 → S3 is free; egress is ~$0.09/GB
+* 30 days x 8 minutes = 4 hours/month x $0.30 = $1.20/month compute.
+* S3 storage: ~50 GB images x $0.023/GB-month = $1.15/month.
+* S3 transfers: same-region EC2 -> S3 is free; egress is ~$0.09/GB
   (we don't egress in normal CI, only when seeding a new image).
 * Total: under $5/month for daily full-matrix CI.
 
@@ -185,9 +185,9 @@ For each platform:
   Linux distros, FreeBSD, OpenBSD, NetBSD, DragonFlyBSD.
 * Build-and-host (one-time setup, then keep forever):
   illumos OpenIndiana, illumos OmniOS, AIX 7.3 (gcc-aix preinstalled),
-  Solaris 11.4 (if licensing permits — Oracle is fussy here).
+  Solaris 11.4 (if licensing permits -- Oracle is fussy here).
 * GHA-native (don't put in S3):
-  macOS 13/14/15, Windows Server 2022 — GHA already provides these
+  macOS 13/14/15, Windows Server 2022 -- GHA already provides these
   for free, so we use Tier-2 GHA for them rather than paying for our
   own VMs.
 
@@ -254,5 +254,5 @@ When we submit to PostgreSQL, we should be able to say:
 >  EC2 runner that boots cached QEMU images from S3.  AIX support is
 >  code-complete but awaits a host."
 
-That's a concrete, defensible answer — and the cost is roughly the
+That's a concrete, defensible answer -- and the cost is roughly the
 price of two cups of coffee per month.

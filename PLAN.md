@@ -1,23 +1,23 @@
-# XTC — Design Plan (Revision 4)
+# XTC -- Design Plan (Revision 4)
 
 **Status:** Draft for review.  Nothing in here is implemented yet.
-Revision 4 adds the full lock subsystem (§13) — LRLock from
+Revision 4 adds the full lock subsystem ((S)13) -- LRLock from
 `~/ws/postgres/lrlck`, LWLock from the same, BDB-style lock manager
 + deadlock detector with all victim policies from `~/ws/libdb`,
 incremental waits-for graph from `~/ws/noxu`, BDB nine-mode lock
 lattice with intent locks and a promotion ladder, resource caps,
-tiered testing/benchmarking/scalability/exhaustion plan — plus a
-worked SQL-query traversal end-to-end through the runtime (§14) so
+tiered testing/benchmarking/scalability/exhaustion plan -- plus a
+worked SQL-query traversal end-to-end through the runtime ((S)14) so
 you can see every primitive at work in one place.
 
 Revision 3 incorporated the PostgreSQL multithreading working-group
-roadmap (v20 foundation, v21 cutover) — every item on that list has a
-first-class xtc primitive — plus: rename `ev` → `evt`, `xtc_ans` →
+roadmap (v20 foundation, v21 cutover) -- every item on that list has a
+first-class xtc primitive -- plus: rename `ev` -> `evt`, `xtc_ans` ->
 `xtc_svr`, the `dist/s_async` prototype-generation tool, explicit
 `xtc_yield()` for opt-in cooperative scheduling, RCU and LRLock
 additions, a function-call GUC-shaped config API, per-loop logging,
 and libc thread-safety wrappers (uselocale, strerror_r, getopt_long,
-dlerror, getenv/setenv).  See §14 for the explicit mapping from the
+dlerror, getenv/setenv).  See (S)14 for the explicit mapping from the
 PG threading workplan to xtc primitives.
 
 Revision 2 introduced: layer renames, the corrected execution model
@@ -25,7 +25,7 @@ Revision 2 introduced: layer renames, the corrected execution model
 the broadened platform matrix matching PostgreSQL 18/19, configure-time-
 only backend selection, libumem-inspired memory ownership, coroutine
 support via Duff's device, and the answer to the `async()/await()`
-syntax question (see §12).
+syntax question (see (S)12).
 
 `xtc` is a C library that provides Tokio-style asynchronous concurrency
 for C, drawing from Seastar (per-CPU shared-nothing reactors) and from
@@ -53,7 +53,7 @@ The ultimate consumer is a threaded PostgreSQL.
 2. **Shared-nothing by default, shared-cautiously where required.**
    One event loop per OS thread (Seastar shape).  Each task is owned
    by exactly one event loop.  Cross-loop communication is via
-   explicit channels, mailboxes, or shared-buffer handles — never
+   explicit channels, mailboxes, or shared-buffer handles -- never
    raw shared mutable state.
 3. **High speed, low overhead, predictable p99.**  Bounded queues,
    fixed allocation pools per loop, hierarchical timer wheels, no GC,
@@ -64,12 +64,12 @@ The ultimate consumer is a threaded PostgreSQL.
    cooperatively *capable*.**  Tasks run preemptively under the event
    loop's scheduler (the loop is free to switch tasks at any await
    point and, when fibers are in use, between fiber switches).  Code
-   that wants strict cooperative semantics — no scheduler interleaving
-   between explicit yields — uses `xtc_yield()` and the
+   that wants strict cooperative semantics -- no scheduler interleaving
+   between explicit yields -- uses `xtc_yield()` and the
    `XTC_COOP_REGION { ... }` block.  We provide `dispatch + wait`,
    `send + receive`, `future/promise` continuations, **and** a
    `async()`/`await()` macro pair built on stackful fibers (default) or
-   Duff's-device coroutines (constrained environments).  See §12.
+   Duff's-device coroutines (constrained environments).  See (S)12.
 5. **No hidden state in hot paths.**  Errors are returned explicitly
    (BDB/DBSQL convention: `int` return, out-params for results).
    `errno` and Win32 `GetLastError` are wrapped at L0 boundaries; the
@@ -81,11 +81,11 @@ The ultimate consumer is a threaded PostgreSQL.
 7. **Configure-time selection of backends, never runtime.**  Whether
    we use io_uring vs epoll vs kqueue vs IOCP vs poll, whether we
    use threads vs protothread-only, whether we have NUMA support
-   — all decided at `./configure` / `meson setup` time, baked into
+   -- all decided at `./configure` / `meson setup` time, baked into
    the binary as `XTC_HAVE_*` macros.  No vtables on the hot path.
    No surprise behaviour shifts between hosts.
 8. **Graceful degradation.**  On the most constrained platform we
-   support, xtc must still work — single OS thread, `poll(2)` only,
+   support, xtc must still work -- single OS thread, `poll(2)` only,
    green threads via Duff's-device protothreads (the model from
    `~/ws/pt`).  All higher-layer APIs (mailboxes, supervisors,
    `dispatch`/`reply`) keep working; only the parallelism vanishes.
@@ -113,14 +113,14 @@ Concretely:
   with a Tokio-style work-stealing escape valve when a reactor is
   idle and has no local work.  Stealing is opt-in and **off** in
   the strict-Seastar build (`--disable-work-stealing`).
-- **Task abstraction**: closest to a BEAM process — identity (PID),
+- **Task abstraction**: closest to a BEAM process -- identity (PID),
   mailbox, links, monitors, optional supervisor.  Internally
   scheduled cooperatively as a Tokio-like state machine.
-- **Channel taxonomy**: Tokio's — `oneshot`, `mpsc`, `mpmc`,
+- **Channel taxonomy**: Tokio's -- `oneshot`, `mpsc`, `mpmc`,
   `broadcast`, `watch`.
 - **wterl `async_nif.h`** is the closest existing C art for the
   dispatch ergonomics: a request goes in, a worker picks it up, a
-  reply comes back.  We modernize the queue with a Chase–Lev / ST3
+  reply comes back.  We modernize the queue with a Chase-Lev / ST3
   work-stealing deque.
 
 ---
@@ -132,35 +132,35 @@ its own subdirectory, its own internal header, and its own munit +
 hegel test binary.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ L5  pg/   PostgreSQL adapter (subsumes src/backend/storage/aio,     │
-│           latch, signal/CFI, MemoryContext, GUC bridge)             │
-├─────────────────────────────────────────────────────────────────────┤
-│ L4  orc/  "Orchestration": supervisors, xtc_svr (gen_server),       │
-│           xtc_fsm (gen_statem), xtc_app, xtc_reg                    │
-├─────────────────────────────────────────────────────────────────────┤
-│ L3  ptc/  "Processes / Threads / Channels": PIDs, mailboxes (with   │
-│           selective receive), links, monitors, channels, futures,   │
-│           sync primitives (incl. RCU, LRLock), dispatch()/reply(),  │
-│           async()/await(), xtc_yield(), xtc_log, xtc_cfg            │
-├─────────────────────────────────────────────────────────────────────┤
-│ L2  evt/  Event loop: per-thread reactor, run queues, work-         │
-│           stealing deque, task lifecycle, wakers, timer wheel,      │
-│           coroutine substrate (fiber + Duff's-device)               │
-├─────────────────────────────────────────────────────────────────────┤
-│ L1  io/   Pollable I/O abstraction: epoll/kqueue/IOCP/io_uring/     │
-│           poll wrapper, async file/socket/timer registration        │
-├─────────────────────────────────────────────────────────────────────┤
-│ L0  os/   __os_*: threads, processes, shm, mmap, mutex, atomics,    │
-│           time, file ops, signals, errno→xtc_err mapping, allocator │
-│           hook, TLS, CPU/NUMA topology, dynamic loading, RNG        │
-└─────────────────────────────────────────────────────────────────────┘
++---------------------------------------------------------------------+
+| L5  pg/   PostgreSQL adapter (subsumes src/backend/storage/aio,     |
+|           latch, signal/CFI, MemoryContext, GUC bridge)             |
+|----------------------------------------------------------------------|
+| L4  orc/  "Orchestration": supervisors, xtc_svr (gen_server),       |
+|           xtc_fsm (gen_statem), xtc_app, xtc_reg                    |
+|----------------------------------------------------------------------|
+| L3  ptc/  "Processes / Threads / Channels": PIDs, mailboxes (with   |
+|           selective receive), links, monitors, channels, futures,   |
+|           sync primitives (incl. RCU, LRLock), dispatch()/reply(),  |
+|           async()/await(), xtc_yield(), xtc_log, xtc_cfg            |
+|----------------------------------------------------------------------|
+| L2  evt/  Event loop: per-thread reactor, run queues, work-         |
+|           stealing deque, task lifecycle, wakers, timer wheel,      |
+|           coroutine substrate (fiber + Duff's-device)               |
+|----------------------------------------------------------------------|
+| L1  io/   Pollable I/O abstraction: epoll/kqueue/IOCP/io_uring/     |
+|           poll wrapper, async file/socket/timer registration        |
+|----------------------------------------------------------------------|
+| L0  os/   __os_*: threads, processes, shm, mmap, mutex, atomics,    |
+|           time, file ops, signals, errno->xtc_err mapping, allocator |
+|           hook, TLS, CPU/NUMA topology, dynamic loading, RNG        |
+\----------------------------------------------------------------------+
 ```
 
-Renames vs Revision 1: `rt/` → `evt/`, `proc/` → `ptc/`, `otp/` → `orc/`.
-Revision 3 renames: `xtc_ans` → `xtc_svr` (generic server).
+Renames vs Revision 1: `rt/` -> `evt/`, `proc/` -> `ptc/`, `otp/` -> `orc/`.
+Revision 3 renames: `xtc_ans` -> `xtc_svr` (generic server).
 
-### 2.1 L0 — `os/` (the `__os_*` layer)
+### 2.1 L0 -- `os/` (the `__os_*` layer)
 
 Pure portability shim, modeled on BDB/DBSQL's `src/os/` and `os_ext.h`.
 Functional groups, one `os_*.c` file per:
@@ -183,16 +183,16 @@ Functional groups, one `os_*.c` file per:
 | `os_cpu.c` | `__os_ncpus`, `__os_cpu_affinity_set/get`, `__os_numa_node`, `__os_numa_distance`, `__os_cacheline_size` |
 | `os_rand.c` | `__os_rand_bytes` |
 | `os_errno.c` | `__os_get_errno`, `__os_set_errno`, `__os_strerror_r`, `__os_err_to_xtc`, Win32 `GetLastError` translation |
-| `os_globals.c` | Cross-platform wrapper for shared globals and function-local statics — see §4.3 |
-| `os_locale.c` | `__os_uselocale`, `__os_newlocale`, `__os_freelocale` — replaces the bare `setlocale()` PG must escape from |
-| `os_env.c` | `__os_getenv`, `__os_setenv` — guarded; the only place a thread can read the environment safely |
-| `os_dl.c` | `__os_dlerror_r` — thread-safe `dlerror()` replacement |
-| `os_getopt.c` | `__os_getopt_long` — thread-safe `getopt_long` replacement |
+| `os_globals.c` | Cross-platform wrapper for shared globals and function-local statics -- see (S)4.3 |
+| `os_locale.c` | `__os_uselocale`, `__os_newlocale`, `__os_freelocale` -- replaces the bare `setlocale()` PG must escape from |
+| `os_env.c` | `__os_getenv`, `__os_setenv` -- guarded; the only place a thread can read the environment safely |
+| `os_dl.c` | `__os_dlerror_r` -- thread-safe `dlerror()` replacement |
+| `os_getopt.c` | `__os_getopt_long` -- thread-safe `getopt_long` replacement |
 
 Every `__os_*` returns `int` (0 on success, negative `XTC_E_*` on
 failure), out-params for results.  The public-internal header is
 `src/inc/os_ext.h`, generated by `dist/s_include` from `PUBLIC:`
-markers — exactly the DBSQL pattern.
+markers -- exactly the DBSQL pattern.
 
 **libc coverage:** glibc, musl, MSVC's UCRT, Solaris/illumos libc,
 AIX libc, *BSD libc, macOS libc, MinGW.  Every `os_*.c` has a
@@ -221,19 +221,19 @@ in L0 by design:
 A `dist/s_signals` lint verifies no source file outside
 `os_signal.c` calls `signal()`, `kill()`, `sigaction()`, etc.
 
-### 2.2 L1 — `io/` (the polling/notification engine, "mio")
+### 2.2 L1 -- `io/` (the polling/notification engine, "mio")
 
 Pluggable I/O backends behind a single API.  **Configure-time
-selection only** — exactly one backend is compiled in for a given
+selection only** -- exactly one backend is compiled in for a given
 binary (or, more precisely, the highest-priority backend probed
 positive at configure time becomes `XTC_IO_DEFAULT`, and the
 second-highest is compiled as a `XTC_IO_FALLBACK` for runtime
-*environment* checks like "io_uring disabled by seccomp" — but this
+*environment* checks like "io_uring disabled by seccomp" -- but this
 is still *no runtime backend selection by user code*).
 
 | File | Backend | Notes |
 |---|---|---|
-| `io_uring.c` | Linux io_uring | Preferred when liburing present and kernel ≥ 5.19; subsumes PG's `method_io_uring.c` |
+| `io_uring.c` | Linux io_uring | Preferred when liburing present and kernel >= 5.19; subsumes PG's `method_io_uring.c` |
 | `io_epoll.c` | Linux epoll + eventfd | Default Linux fallback |
 | `io_kqueue.c` | *BSD, macOS, DragonFlyBSD | Native timers + signal events |
 | `io_iocp.c` | Windows IOCP | Completion-based (different shape; see vtable) |
@@ -263,30 +263,30 @@ preprocess time so the compiler inlines the chosen backend's
 functions directly.  No runtime branch on a function pointer for
 `reg_fd`/`poll`/etc. on the steady-state path.
 
-### 2.3 L2 — `evt/` (event loop / scheduler)
+### 2.3 L2 -- `evt/` (event loop / scheduler)
 
 Heart of the runtime.  One **event loop** per OS thread; loops are
 collected into an **executor**.
 
 Key types:
 
-- `xtc_task` — a state-machine continuation.  Function pointer +
+- `xtc_task` -- a state-machine continuation.  Function pointer +
   state word + small inline context + waker.  Modeled on Tokio's
   `Harness`.
-- `xtc_waker` — `(loop*, task_id)` capable of being signaled from
+- `xtc_waker` -- `(loop*, task_id)` capable of being signaled from
   any thread; signaling re-queues the task on its owning loop.
-- `xtc_loop` — owns: an `xtc_io`, a local LIFO slot, a local FIFO
-  run queue, a Chase–Lev / ST3 work-stealing **deque**, a
+- `xtc_loop` -- owns: an `xtc_io`, a local LIFO slot, a local FIFO
+  run queue, a Chase-Lev / ST3 work-stealing **deque**, a
   hierarchical timer wheel, a remote-submission MPSC inbox.
-- `xtc_exec` — owns N loops, the global injector queue, the
+- `xtc_exec` -- owns N loops, the global injector queue, the
   park/unpark coordinator, the shutdown gate.
 
 Scheduling rules (Tokio / Go inspired):
 
-1. Next-task order: LIFO slot → local FIFO → global injector
-   (every 61st tick) → steal from another loop's deque (NUMA-near
-   first) → block on `xtc_io.poll()`.
-2. **Hierarchical timer wheel** (6 levels × 64 slots, Linux-style)
+1. Next-task order: LIFO slot -> local FIFO -> global injector
+   (every 61st tick) -> steal from another loop's deque (NUMA-near
+   first) -> block on `xtc_io.poll()`.
+2. **Hierarchical timer wheel** (6 levels x 64 slots, Linux-style)
    drives all timeouts.  No per-task heap; O(1) insert and tick.
 3. A task that yields to I/O parks itself by registering its waker
    with the I/O backend; the backend's `poll()` returns ready tags
@@ -298,7 +298,7 @@ Scheduling rules (Tokio / Go inspired):
    steal ordering (only steal from same-NUMA-node loops first).
 
 Tasks are reference-counted with bit-stealing on the state word
-(running/scheduled/complete/cancelled/joinable/notified) — Tokio's
+(running/scheduled/complete/cancelled/joinable/notified) -- Tokio's
 trick.
 
 #### 2.3.1 Coroutine substrate
@@ -306,32 +306,32 @@ trick.
 L2 also provides three coroutine flavours, each available
 independently at configure time:
 
-1. **`evt_fiber.c`** — stackful fibers via `boost.context`-style asm
+1. **`evt_fiber.c`** -- stackful fibers via `boost.context`-style asm
    (we ship the small per-arch `make_fcontext`/`jump_fcontext`
    under `src/os/asm/`).  Used for `async()`/`await()` macros.
    Stack size configurable; default 64 KiB with guard page.
-2. **`evt_pt.c`** — Duff's-device protothreads, vendored from
+2. **`evt_pt.c`** -- Duff's-device protothreads, vendored from
    `~/ws/pt`.  Used on platforms with no fiber asm support and
    for the strict-degraded build.  Locals must be lifted into the
    task struct (the protothread tax).
-3. **`evt_ucontext.c`** — fallback using POSIX `ucontext.h` for
+3. **`evt_ucontext.c`** -- fallback using POSIX `ucontext.h` for
    any architecture our fiber asm doesn't yet cover.  Slow, but
    universal on Unix.
 
-Configure decides which is `XTC_COROUTINE_DEFAULT`.  See §12 for
+Configure decides which is `XTC_COROUTINE_DEFAULT`.  See (S)12 for
 the precise relationship between coroutines and `async()/await()`.
 
 #### 2.3.2 Yielding (cooperative opt-in)
 
 The scheduler is free to interrupt a task at any await point.  Code
-that wants strict cooperative semantics — "do not let any other task
-run in this region" — uses one of:
+that wants strict cooperative semantics -- "do not let any other task
+run in this region" -- uses one of:
 
 ```c
-/* Single yield point — explicitly invite a reschedule */
+/* Single yield point -- explicitly invite a reschedule */
 xtc_yield();
 
-/* Fenced region — no preemption between Begin and End even if the
+/* Fenced region -- no preemption between Begin and End even if the
    scheduler would otherwise pick a higher-priority task.  Cheap:
    sets a per-task flag the loop checks at task-boundary points. */
 XTC_COOP_REGION {
@@ -341,11 +341,11 @@ XTC_COOP_REGION {
 
 `xtc_yield()` is the BEAM `erlang:yield()` analogue: a manual
 reduction-counter trip to give other tasks a turn.  It is *not* the
-default model — most code is event-driven and yields naturally at
+default model -- most code is event-driven and yields naturally at
 `await`.  But for tight CPU-bound loops inside a task that should
 still cooperate, it is the right primitive.
 
-### 2.4 L3 — `ptc/` (Processes / Threads / Channels)
+### 2.4 L3 -- `ptc/` (Processes / Threads / Channels)
 
 Where the C programmer lives.  Three intertwined abstractions:
 
@@ -397,24 +397,24 @@ so successive receives don't re-scan from the head.
 
 #### 2.4.4 Synchronization
 
-- `xtc_mutex`, `xtc_rwlock` — async, fair, parking.
-- `xtc_semaphore` — counting; backpressure currency.
-- `xtc_notify` — Tokio `Notify` (one-shot wake of any waiter).
-- `xtc_barrier` — N-task rendezvous.
-- `xtc_gate` — Seastar `gate`: tracks outstanding ops for drain.
-- `xtc_abort_source` / `xtc_abort_token` — Seastar structured
+- `xtc_mutex`, `xtc_rwlock` -- async, fair, parking.
+- `xtc_semaphore` -- counting; backpressure currency.
+- `xtc_notify` -- Tokio `Notify` (one-shot wake of any waiter).
+- `xtc_barrier` -- N-task rendezvous.
+- `xtc_gate` -- Seastar `gate`: tracks outstanding ops for drain.
+- `xtc_abort_source` / `xtc_abort_token` -- Seastar structured
   cancellation; replaces ad-hoc "stop" booleans.
-- `xtc_rcu` — read-copy-update for read-mostly graph data; matches
+- `xtc_rcu` -- read-copy-update for read-mostly graph data; matches
   the PG `pg_rcu.h` proposal (relcache/syscache invalidation as the
   first user).  Epoch-based reclamation; readers are wait-free.
-- `xtc_lrlock` — left-right lock per Greg Burd's RFC: wait-free
+- `xtc_lrlock` -- left-right lock per Greg Burd's RFC: wait-free
   reads via two-copy publish/swap.  Designed for ProcArray-style
   snapshot, replication-slot xmin array, buffer-mapping hash table.
   Writer side uses an inner `xtc_mutex` (per the RFC's revision
   to use LWLock-style instead of spinlock); oplog is pre-allocated
   at construction; drain-wait uses `xtc_notify` with proper wait
   events.
-- `xtc_lwlock` — partition-friendly counting lock, the LWLock
+- `xtc_lwlock` -- partition-friendly counting lock, the LWLock
   analogue.  Tranches and partition arrays are first-class.
   Re-benchmarked specifically under threaded-mode contention
   before promoting any PG subsystem onto it.
@@ -428,7 +428,7 @@ requirement that `errcontext` go per-thread).  Pluggable sinks:
 stderr, file, syslog, journald, Windows event log, PG `elog`
 bridge.
 
-#### 2.4.6 Configuration (`xtc_cfg` — function-call GUC API)
+#### 2.4.6 Configuration (`xtc_cfg` -- function-call GUC API)
 
 A function-call config API designed for the threaded-PG
 "GUC table = address of a global" replacement:
@@ -445,14 +445,14 @@ xtc_cfg_set_int64("work_mem", new_value, XTC_CFG_SOURCE_SESSION);
 
 Type-dispatched backing store (matching the PG plan):
 
-- **Booleans** → `sparsemap` (we already have one in `~/ws/sparsemap`).
-- **Integers / enums** → indexed array keyed by registered ID.
-- **Strings** → hash table; values owned by per-loop arena.
-- **Doubles** → indexed array, atomic 64-bit load/store.
+- **Booleans** -> `sparsemap` (we already have one in `~/ws/sparsemap`).
+- **Integers / enums** -> indexed array keyed by registered ID.
+- **Strings** -> hash table; values owned by per-loop arena.
+- **Doubles** -> indexed array, atomic 64-bit load/store.
 
 Hot-path readers (`xtc_cfg_get_int64("work_mem")` in an inner
 planner loop) compile to a single load via a per-call-site cached
-ID — see §6.4 for the prototype-generation tool that emits the IDs.
+ID -- see (S)6.4 for the prototype-generation tool that emits the IDs.
 
 Sources are typed (`SOURCE_DEFAULT`, `SOURCE_FILE`, `SOURCE_SESSION`,
 `SOURCE_OVERRIDE`) so PG's GUC source-precedence semantics survive
@@ -465,7 +465,7 @@ sugar:
 
 ```c
 dispatch(my_op, args, {
-    /* worker body — runs on whichever loop picks this up */
+    /* worker body -- runs on whichever loop picks this up */
     int r = do_work(args);
     reply(0, r);
 });
@@ -475,12 +475,12 @@ int rc = xtc_call(my_op, &args, &result, timeout_ns);
 
 Under the hood `dispatch()` declares a one-shot process whose
 mailbox is replaced by a `xtc_oneshot`; `xtc_call` is
-`xtc_future_wait`.  See §12 for how `dispatch()` and
+`xtc_future_wait`.  See (S)12 for how `dispatch()` and
 `async()`/`await()` relate.
 
-### 2.5 L4 — `orc/` (orchestration)
+### 2.5 L4 -- `orc/` (orchestration)
 
-OTP's actually-novel contribution — supervised process trees with
+OTP's actually-novel contribution -- supervised process trees with
 declared restart strategies.
 
 | Symbol | Erlang/OTP analogue | Purpose |
@@ -489,7 +489,7 @@ declared restart strategies.
 | `xtc_svr` | `gen_server` ("generic **s**er**v**e**r**") | Callback module pattern for stateful services |
 | `xtc_fsm` | `gen_statem` ("finite **s**tate **m**achine") | State-machine variant |
 | `xtc_app`  | `application` | Root supervisor + lifecycle hooks |
-| `xtc_reg`  | process registry | Name → PID lookup |
+| `xtc_reg`  | process registry | Name -> PID lookup |
 
 Strategies: `one_for_one`, `one_for_all`, `rest_for_one`,
 `simple_one_for_one`.  Restart intensity = max-restarts-per-window
@@ -502,18 +502,18 @@ before the supervisor itself exits up the tree.
 `xtc_reg` is a per-executor concurrent hash table with epoch-based
 reclamation, so steady-state `whereis` is lock-free.
 
-### 2.6 L5 — `pg/` (PostgreSQL adapter)
+### 2.6 L5 -- `pg/` (PostgreSQL adapter)
 
 The end-game.  This layer **subsumes** several PG subsystems:
 
 | PG subsystem | xtc replacement |
 |---|---|
-| `src/backend/storage/aio/` (whole tree) | `xtc_io` + `xtc_future` per-IO; `pgaio_io_acquire` → `xtc_io_acquire`; `PgAioWaitRef` → `xtc_future_t *`; `method_io_uring.c`, `method_worker.c`, `method_sync.c` → already covered by L1 |
+| `src/backend/storage/aio/` (whole tree) | `xtc_io` + `xtc_future` per-IO; `pgaio_io_acquire` -> `xtc_io_acquire`; `PgAioWaitRef` -> `xtc_future_t *`; `method_io_uring.c`, `method_worker.c`, `method_sync.c` -> already covered by L1 |
 | `src/backend/storage/ipc/latch.c` | `xtc_notify` |
 | `CHECK_FOR_INTERRUPTS()` | abort-token check at every `await` point |
-| `MemoryContext` / palloc | `xtc_alloc` ownership domains (see §5) |
+| `MemoryContext` / palloc | `xtc_alloc` ownership domains (see (S)5) |
 | `src/backend/storage/ipc/shm_mq.c` | `xtc_chan_*` over shared-buffer handles |
-| `src/backend/storage/ipc/procsignal.c` | `xtc_signal` → mailbox messages |
+| `src/backend/storage/ipc/procsignal.c` | `xtc_signal` -> mailbox messages |
 | `src/backend/postmaster/`'s ad-hoc fork-and-exec | `xtc_proc_spawn` (threaded) + opt-in `xtc_proc_fork_spawn` |
 | Startup / GUC tunables | Bridge to `xtc_cfg_*` |
 
@@ -522,7 +522,7 @@ event loop.  Cross-process messaging reuses PG's existing
 shared-memory channels under the same `xtc_send` API; the dispatch
 implementation is selected at process boundary.
 
-L5 is the *only* PG-specific code; L0–L4 are general-purpose.
+L5 is the *only* PG-specific code; L0-L4 are general-purpose.
 
 ---
 
@@ -557,9 +557,9 @@ the build automatically uses the protothread coroutine model.
 
 ### 3.3 Compilers
 
-- gcc ≥ 11
-- clang ≥ 13
-- MSVC ≥ 2019 (cl.exe + clang-cl)
+- gcc >= 11
+- clang >= 13
+- MSVC >= 2019 (cl.exe + clang-cl)
 - IBM XLC / OpenXLC (AIX)
 - Sun/Oracle Studio cc (Solaris)
 - Intel ICC (best-effort)
@@ -591,21 +591,21 @@ PR; the rest run nightly.
 Build-time decision tree (executed by `dist/configure` and `s_meson`):
 
 ```
-1. Have C11 atomics + threads?       no → bail with clear error
-2. Have a fiber asm for this arch?   yes → XTC_COROUTINE = fiber
-                                     no  → step 3
-3. Have working ucontext.h?          yes → XTC_COROUTINE = ucontext
-                                     no  → step 4
+1. Have C11 atomics + threads?       no -> bail with clear error
+2. Have a fiber asm for this arch?   yes -> XTC_COROUTINE = fiber
+                                     no  -> step 3
+3. Have working ucontext.h?          yes -> XTC_COROUTINE = ucontext
+                                     no  -> step 4
 4. Always available                       XTC_COROUTINE = pt (Duff)
-5. Have io_uring?                    yes → XTC_IO = uring
-6. Have epoll?                       yes → XTC_IO = epoll
-7. Have kqueue?                      yes → XTC_IO = kqueue
-8. Have IOCP?                        yes → XTC_IO = iocp
-9. Have Solaris event ports?         yes → XTC_IO = solaris
-10. Have AIX pollset?                yes → XTC_IO = aix
+5. Have io_uring?                    yes -> XTC_IO = uring
+6. Have epoll?                       yes -> XTC_IO = epoll
+7. Have kqueue?                      yes -> XTC_IO = kqueue
+8. Have IOCP?                        yes -> XTC_IO = iocp
+9. Have Solaris event ports?         yes -> XTC_IO = solaris
+10. Have AIX pollset?                yes -> XTC_IO = aix
 11. Always available                       XTC_IO = poll
-12. Have pthreads or Win32 threads?  yes → XTC_THREADS = on
-                                     no  → XTC_THREADS = off
+12. Have pthreads or Win32 threads?  yes -> XTC_THREADS = on
+                                     no  -> XTC_THREADS = off
                                            (single-loop, pt-coroutines only)
 ```
 
@@ -619,12 +619,12 @@ parallelism is gone.  This is the floor we promise.
 
 Memory management combines three ideas:
 
-1. **PG-style memory contexts** — hierarchical scopes, "free the
+1. **PG-style memory contexts** -- hierarchical scopes, "free the
    whole subtree" semantics.  Already a model PG developers know.
-2. **libumem slabs** — per-CPU magazines, object caches with
+2. **libumem slabs** -- per-CPU magazines, object caches with
    constructor/destructor callbacks, debug auditing
    (`UMEM_DEBUG=audit,contents,guards`), per-thread caches (PTC).
-3. **Ownership domains** — every allocation has an *owner*: a task,
+3. **Ownership domains** -- every allocation has an *owner*: a task,
    a process, a context, or a shared-buffer handle.  Cross-domain
    transfers are explicit (`xtc_buf_transfer(&buf, new_owner)`),
    like Rust's move but enforced at runtime by an ownership tag in
@@ -648,7 +648,7 @@ xtc_cache_t *c = xtc_cache_create(
 xtc_task *t = xtc_cache_alloc(c);
 xtc_cache_free(c, t);
 
-/* Ownership transfer — explicit, debuggable */
+/* Ownership transfer -- explicit, debuggable */
 xtc_buf_t *b = xtc_buf_alloc(ctx_a, 4096);
 xtc_buf_transfer(b, ctx_b);   /* now owned by ctx_b; ctx_a can't free */
 ```
@@ -675,23 +675,23 @@ This is genuinely tricky in a multi-threaded model and we will
 provide a *stylized* mechanism rather than letting people scatter
 `static` keywords:
 
-- `XTC_GLOBAL(type, name)` — declares a per-process global.
+- `XTC_GLOBAL(type, name)` -- declares a per-process global.
   Internally a TLS pointer to a heap-allocated cell, initialized
   on first access via a one-shot.  Visible to all loops.
   *Caller is responsible for synchronization*; we provide
   `XTC_GLOBAL_RWLOCK` and `XTC_GLOBAL_ATOMIC` variants.
-- `XTC_PERLOOP(type, name)` — per-event-loop shadow of a global.
+- `XTC_PERLOOP(type, name)` -- per-event-loop shadow of a global.
   Identical syntax, but each loop sees its own copy.  This is the
   Seastar-style "shard local" pattern; eliminates synchronization
   for loop-local caches/counters.
-- `XTC_FN_STATIC(type, name, init)` — function-local static
+- `XTC_FN_STATIC(type, name, init)` -- function-local static
   alternative.  Declares a one-shot-initialized static keyed by
   `(__FILE__, __LINE__)`.  Pure replacement for `static T name = init;`
   inside a function, but uses an explicit initialization
   primitive (so init is observably ordered with respect to the
   C11 memory model) and integrates with `xtc_app` shutdown.
-- `XTC_PERLOOP_FN_STATIC(...)` — same but per-loop.
-- `XTC_TLS(type, name)` — bare per-thread storage when neither
+- `XTC_PERLOOP_FN_STATIC(...)` -- same but per-loop.
+- `XTC_TLS(type, name)` -- bare per-thread storage when neither
   per-loop nor per-process is the right scope.  Wraps
   `_Thread_local` / `__declspec(thread)` / `pthread_key_t` per
   platform.
@@ -723,17 +723,17 @@ allocator.
 
 Three distinct mechanisms, kept distinct:
 
-1. **Cooperative cancellation** — `xtc_abort_source` raises a flag;
+1. **Cooperative cancellation** -- `xtc_abort_source` raises a flag;
    tasks observe it at `await` points (and at every
-   `XTC_CHECK_CANCEL()` macro inside dispatch handlers — the xtc
+   `XTC_CHECK_CANCEL()` macro inside dispatch handlers -- the xtc
    analogue of `CHECK_FOR_INTERRUPTS()`) and unwind cleanly with
    `XTC_E_CANCELLED`.
-2. **Errors** — every public function returns `int` (`0` or
+2. **Errors** -- every public function returns `int` (`0` or
    `XTC_E_*`).  No `errno` reliance.  Error code table in
    `inc/xtc_err.h`.  L0 `__os_errno.c` translates errno/Win32
    `GetLastError` into stable `XTC_E_*` codes; the conversion
    table is the single source of truth.
-3. **Process faults** — a process can `xtc_exit(reason)` or be
+3. **Process faults** -- a process can `xtc_exit(reason)` or be
    killed by a `SIGSEGV`-class fault caught via a per-loop
    handler running on a `sigaltstack`.  Linked processes get
    `{'EXIT', pid, reason}` envelopes; monitors get
@@ -743,7 +743,7 @@ Three distinct mechanisms, kept distinct:
 We do **not** use C++ exceptions, longjmp-from-signal-handler, or
 pthread cancellation.  We *do* use `setjmp/longjmp` inside a
 single loop thread for the "let it crash" path of supervised
-processes — bounded and well-defined.
+processes -- bounded and well-defined.
 
 ### 5.1 Signals
 
@@ -777,118 +777,118 @@ enforced.  Same shape as BDB/DBSQL.
 
 ```
 xtc/
-├── README.md
-├── PLAN.md                           ← this document
-├── LICENSE                           ← ISC license (proposed)
-├── dist/                             ← build apparatus
-│   ├── configure.ac
-│   ├── aclocal/                      ← .m4 probes (io_uring, kqueue, ucontext,
-│   │                                   numa, atomics, fiber-asm-arch, libc-family)
-│   ├── config.guess, config.sub, install-sh, ltmain.sh
-│   ├── Makefile.in
-│   ├── xtc.pc.in
-│   ├── meson.build.in                ← rendered by s_meson
-│   ├── meson_options.txt.in
-│   ├── srcfiles.in                   ← single source of truth for file list
-│   ├── pubdef.in                     ← public API symbols
-│   ├── platforms.in                  ← platform-config matrix
-│   ├── s_all                         ← runs all generators
-│   ├── s_config                      ← regen autoconf (autoreconf -i)
-│   ├── s_meson                       ← regen meson.build from srcfiles.in
-│   ├── s_include                     ← regen src/inc/*_ext.h
-│   ├── s_async                       ← scan xtc_async() calls, gen prototypes (§6.4)
-│   ├── s_cfg                         ← scan xtc_cfg_get/set, gen ID table (§6.4)
-│   ├── s_globals                     ← lint: forbid bare static/_Thread_local
-│   ├── s_signals                     ← lint: forbid raw signal/kill outside os_signal.c
-│   ├── s_perm
-│   ├── s_symlink
-│   ├── s_tags
-│   ├── s_test                        ← regen test driver lists
-│   ├── gen_inc.awk
-│   └── RELEASE
-├── build_unix/                       ← user-created
-├── build_meson/                      ← user-created
-├── src/
-│   ├── inc/
-│   │   ├── xtc.h                     ← public umbrella
-│   │   ├── xtc_int.h                 ← internal umbrella
-│   │   ├── xtc_err.h
-│   │   ├── xtc_async.h               ← async()/await() macros (see §12)
-│   │   ├── xtc_async_decls.h         ← GENERATED by dist/s_async (see §6.4)
-│   │   ├── xtc_cfg_ids.h             ← GENERATED by dist/s_cfg
-│   │   ├── os_ext.h, io_ext.h, evt_ext.h, ptc_ext.h, orc_ext.h
-│   │   ├── queue.h, hash.h, list.h   ← BSD intrusive containers (vendored)
-│   │   └── pt.h, lc.h                ← protothreads (vendored from ../pt)
-│   ├── os/
-│   │   ├── os_alloc.c, os_atomic.c, os_thread.c, os_tls.c,
-│   │   │   os_mutex.c, os_proc.c, os_shm.c, os_dyn.c, os_time.c,
-│   │   │   os_file.c, os_dir.c, os_net.c, os_signal.c, os_cpu.c,
-│   │   │   os_rand.c, os_errno.c, os_globals.c
-│   │   └── asm/                      ← fiber make/jump per arch
-│   │       ├── fctx_x86_64_sysv.S, fctx_x86_64_ms.asm,
-│   │       │   fctx_aarch64.S, fctx_arm_eabi.S,
-│   │       │   fctx_ppc64le.S, fctx_s390x.S, fctx_riscv64.S, ...
-│   ├── io/
-│   │   ├── io.c, io_uring.c, io_epoll.c, io_kqueue.c,
-│   │   │   io_iocp.c, io_solaris.c, io_aix.c, io_poll.c, io_select.c
-│   ├── evt/
-│   │   ├── evt_task.c, evt_waker.c, evt_deque.c, evt_loop.c,
-│   │   │   evt_exec.c, evt_timer.c, evt_park.c, evt_yield.c,
-│   │   │   evt_fiber.c, evt_pt.c, evt_ucontext.c
-│   ├── ptc/
-│   │   ├── proc.c, proc_mailbox.c, proc_recv.c, proc_link.c,
-│   │   │   proc_monitor.c,
-│   │   │   chan_oneshot.c, chan_mpsc.c, chan_mpmc.c,
-│   │   │   chan_broadcast.c, chan_watch.c,
-│   │   │   sync_mutex.c, sync_rwlock.c, sync_sem.c,
-│   │   │   sync_notify.c, sync_barrier.c,
-│   │   │   sync_rcu.c,
-│   │   │   gate.c, abort.c,
-│   │   │   future.c, future_combinators.c,
-│   │   │   dispatch.c,               ← dispatch()/reply() macro support
-│   │   │   log.c, cfg.c
-│   │   └── lock/                     ← §13: full lock subsystem
-│   │       ├── lr.c                  ← xtc_lrlock_*  (from lrlck)
-│   │       ├── lw.c                  ← xtc_lwlock_*  (from lrlck)
-│   │       ├── mgr.c                 ← xtc_lock_mgr_* (from libdb + noxu)
-│   │       ├── mgr_alloc.c           ← slab caches, pre-allocated reservoirs
-│   │       ├── mgr_list.c            ← per-locker holding lists
-│   │       ├── mgr_method.c          ← pluggable lock methods (mode tables)
-│   │       ├── conflict.h            ← the 9×9 matrix
-│   │       ├── dd.c                  ← deadlock detector (incremental + periodic)
-│   │       ├── dd_policy.c           ← victim selection policies
-│   │       ├── timer.c               ← lock-wait timeouts
-│   │       ├── failchk.c             ← dead-locker GC after a crash
-│   │       ├── stat.c                ← per-locker / per-shard counters
-│   │       └── vec.c                 ← atomic-batch "lock vector"
-│   ├── orc/
-│   │   ├── supervisor.c, svr.c, fsm.c, app.c, reg.c
-│   └── pg/                           ← optional, --with-postgres
-│       ├── pg_aio.c                  ← subsumes src/backend/storage/aio
-│       ├── pg_latch.c
-│       ├── pg_palloc.c
-│       ├── pg_signal.c
-│       └── pg_backend.c
-├── test/
-│   ├── munit.c, munit.h
-│   ├── common.c, common.h
-│   ├── test_os.c, test_io.c, test_evt.c, test_ptc.c, test_orc.c
-│   ├── hegel/
-│   │   ├── pbt_deque.c, pbt_mpsc.c, pbt_timer.c,
-│   │   │   pbt_supervisor.c, pbt_recv.c, pbt_alloc_ownership.c,
-│   │   │   pbt_rcu.c, pbt_lrlock.c, pbt_cfg.c
-│   ├── soak/
-│   │   ├── soak_chan.c, soak_loop.c
-│   └── ex/
-│       ├── ex_async_await.c          ← the §12 example
-│       ├── ex_pingpong.c
-│       └── ex_supervisor.c
-└── docs/
-    ├── architecture.md
-    ├── porting.md
-    ├── pg-integration.md
-    ├── async-await.md                ← deep-dive on §12
-    └── platforms.md                  ← per-platform notes
+|--- README.md
+|--- PLAN.md                           <- this document
+|--- LICENSE                           <- ISC license (proposed)
+|--- dist/                             <- build apparatus
+|   |--- configure.ac
+|   |--- aclocal/                      <- .m4 probes (io_uring, kqueue, ucontext,
+|   |                                   numa, atomics, fiber-asm-arch, libc-family)
+|   |--- config.guess, config.sub, install-sh, ltmain.sh
+|   |--- Makefile.in
+|   |--- xtc.pc.in
+|   |--- meson.build.in                <- rendered by s_meson
+|   |--- meson_options.txt.in
+|   |--- srcfiles.in                   <- single source of truth for file list
+|   |--- pubdef.in                     <- public API symbols
+|   |--- platforms.in                  <- platform-config matrix
+|   |--- s_all                         <- runs all generators
+|   |--- s_config                      <- regen autoconf (autoreconf -i)
+|   |--- s_meson                       <- regen meson.build from srcfiles.in
+|   |--- s_include                     <- regen src/inc/*_ext.h
+|   |--- s_async                       <- scan xtc_async() calls, gen prototypes ((S)6.4)
+|   |--- s_cfg                         <- scan xtc_cfg_get/set, gen ID table ((S)6.4)
+|   |--- s_globals                     <- lint: forbid bare static/_Thread_local
+|   |--- s_signals                     <- lint: forbid raw signal/kill outside os_signal.c
+|   |--- s_perm
+|   |--- s_symlink
+|   |--- s_tags
+|   |--- s_test                        <- regen test driver lists
+|   |--- gen_inc.awk
+|   \--- RELEASE
+|--- build_unix/                       <- user-created
+|--- build_meson/                      <- user-created
+|--- src/
+|   |--- inc/
+|   |   |--- xtc.h                     <- public umbrella
+|   |   |--- xtc_int.h                 <- internal umbrella
+|   |   |--- xtc_err.h
+|   |   |--- xtc_async.h               <- async()/await() macros (see (S)12)
+|   |   |--- xtc_async_decls.h         <- GENERATED by dist/s_async (see (S)6.4)
+|   |   |--- xtc_cfg_ids.h             <- GENERATED by dist/s_cfg
+|   |   |--- os_ext.h, io_ext.h, evt_ext.h, ptc_ext.h, orc_ext.h
+|   |   |--- queue.h, hash.h, list.h   <- BSD intrusive containers (vendored)
+|   |   \--- pt.h, lc.h                <- protothreads (vendored from ../pt)
+|   |--- os/
+|   |   |--- os_alloc.c, os_atomic.c, os_thread.c, os_tls.c,
+|   |   |   os_mutex.c, os_proc.c, os_shm.c, os_dyn.c, os_time.c,
+|   |   |   os_file.c, os_dir.c, os_net.c, os_signal.c, os_cpu.c,
+|   |   |   os_rand.c, os_errno.c, os_globals.c
+|   |   \--- asm/                      <- fiber make/jump per arch
+|   |       |--- fctx_x86_64_sysv.S, fctx_x86_64_ms.asm,
+|   |       |   fctx_aarch64.S, fctx_arm_eabi.S,
+|   |       |   fctx_ppc64le.S, fctx_s390x.S, fctx_riscv64.S, ...
+|   |--- io/
+|   |   |--- io.c, io_uring.c, io_epoll.c, io_kqueue.c,
+|   |   |   io_iocp.c, io_solaris.c, io_aix.c, io_poll.c, io_select.c
+|   |--- evt/
+|   |   |--- evt_task.c, evt_waker.c, evt_deque.c, evt_loop.c,
+|   |   |   evt_exec.c, evt_timer.c, evt_park.c, evt_yield.c,
+|   |   |   evt_fiber.c, evt_pt.c, evt_ucontext.c
+|   |--- ptc/
+|   |   |--- proc.c, proc_mailbox.c, proc_recv.c, proc_link.c,
+|   |   |   proc_monitor.c,
+|   |   |   chan_oneshot.c, chan_mpsc.c, chan_mpmc.c,
+|   |   |   chan_broadcast.c, chan_watch.c,
+|   |   |   sync_mutex.c, sync_rwlock.c, sync_sem.c,
+|   |   |   sync_notify.c, sync_barrier.c,
+|   |   |   sync_rcu.c,
+|   |   |   gate.c, abort.c,
+|   |   |   future.c, future_combinators.c,
+|   |   |   dispatch.c,               <- dispatch()/reply() macro support
+|   |   |   log.c, cfg.c
+|   |   \--- lock/                     <- (S)13: full lock subsystem
+|   |       |--- lr.c                  <- xtc_lrlock_*  (from lrlck)
+|   |       |--- lw.c                  <- xtc_lwlock_*  (from lrlck)
+|   |       |--- mgr.c                 <- xtc_lock_mgr_* (from libdb + noxu)
+|   |       |--- mgr_alloc.c           <- slab caches, pre-allocated reservoirs
+|   |       |--- mgr_list.c            <- per-locker holding lists
+|   |       |--- mgr_method.c          <- pluggable lock methods (mode tables)
+|   |       |--- conflict.h            <- the 9x9 matrix
+|   |       |--- dd.c                  <- deadlock detector (incremental + periodic)
+|   |       |--- dd_policy.c           <- victim selection policies
+|   |       |--- timer.c               <- lock-wait timeouts
+|   |       |--- failchk.c             <- dead-locker GC after a crash
+|   |       |--- stat.c                <- per-locker / per-shard counters
+|   |       \--- vec.c                 <- atomic-batch "lock vector"
+|   |--- orc/
+|   |   |--- supervisor.c, svr.c, fsm.c, app.c, reg.c
+|   \--- pg/                           <- optional, --with-postgres
+|       |--- pg_aio.c                  <- subsumes src/backend/storage/aio
+|       |--- pg_latch.c
+|       |--- pg_palloc.c
+|       |--- pg_signal.c
+|       \--- pg_backend.c
+|--- test/
+|   |--- munit.c, munit.h
+|   |--- common.c, common.h
+|   |--- test_os.c, test_io.c, test_evt.c, test_ptc.c, test_orc.c
+|   |--- hegel/
+|   |   |--- pbt_deque.c, pbt_mpsc.c, pbt_timer.c,
+|   |   |   pbt_supervisor.c, pbt_recv.c, pbt_alloc_ownership.c,
+|   |   |   pbt_rcu.c, pbt_lrlock.c, pbt_cfg.c
+|   |--- soak/
+|   |   |--- soak_chan.c, soak_loop.c
+|   \--- ex/
+|       |--- ex_async_await.c          <- the (S)12 example
+|       |--- ex_pingpong.c
+|       \--- ex_supervisor.c
+\--- docs/
+    |--- architecture.md
+    |--- porting.md
+    |--- pg-integration.md
+    |--- async-await.md                <- deep-dive on (S)12
+    \--- platforms.md                  <- per-platform notes
 ```
 
 ### 6.2 Autoconf (BDB/DBSQL style)
@@ -919,13 +919,13 @@ Same options surface as configure; `dist/srcfiles.in` is the
 single source of truth, both build files are regenerated from it
 by `dist/s_*` scripts.  CI runs both for every PR.
 
-### 6.4  `dist/s_async` — prototype generation for `xtc_async()`
+### 6.4  `dist/s_async` -- prototype generation for `xtc_async()`
 
 (Answers your "could we have a tool that finds calls to `xtc_async()`
-and creates function prototypes" idea.  Yes — and it pays off in
+and creates function prototypes" idea.  Yes -- and it pays off in
 two more places besides type-checking.)
 
-**Problem.**  In Strategy C of §12 (the always-portable explicit-thunk
+**Problem.**  In Strategy C of (S)12 (the always-portable explicit-thunk
 form) we want:
 
 ```c
@@ -933,7 +933,7 @@ t = xtc_async(bar, ARGS(int, a));
 c = xtc_await_int(t);
 ```
 
-But `xtc_async` is variadic — the compiler can't tell that `bar`
+But `xtc_async` is variadic -- the compiler can't tell that `bar`
 actually takes `int` and returns `int`, so passing the wrong types
 in `ARGS(...)` blows up at runtime, not at compile time.
 
@@ -964,7 +964,7 @@ in `ARGS(...)` blows up at runtime, not at compile time.
 
 4. Rewrites `xtc_async(bar, ARGS(int, a))` (via a `#define
    xtc_async(F, ...) __xtc_async_call_##F(__VA_ARGS__)`) so the
-   compiler sees a real call to `__xtc_async_call_bar(a)` — type
+   compiler sees a real call to `__xtc_async_call_bar(a)` -- type
    errors surface at compile time, including wrong arity.
 
 **Side benefits.**  The same scan emits:
@@ -972,7 +972,7 @@ in `ARGS(...)` blows up at runtime, not at compile time.
 - A registry `xtc_async_registry.c` with `(name, fn, arg_size,
   ret_size)` so `xtc_async_by_name("bar", ...)` can dispatch by
   string for tracing/RPC scenarios.
-- `xtc_async_decls.gv` — a callgraph in graphviz of who calls what
+- `xtc_async_decls.gv` -- a callgraph in graphviz of who calls what
   asynchronously, useful for documentation and dependency review.
 - A duplicate-detection pass: if two TUs declare different
   prototypes for the same name we fail the build.
@@ -987,7 +987,7 @@ at build time, not at startup or first use.
 
 The parsing in both tools is the same kind of half-AST regex
 pass DBSQL's existing `s_include` and `gen_inc.awk` use.  No
-C parser dependency — just bash + awk + a tiny `dist/cscan.awk`.
+C parser dependency -- just bash + awk + a tiny `dist/cscan.awk`.
 
 ---
 
@@ -1003,7 +1003,7 @@ One `test_<layer>.c` per layer.  Same `__diag` /
 Per-primitive PBTs under `test/hegel/`:
 
 - **MPSC**: send-order preserved; no message lost; for N producers
-  and M each, receiver sees N×M.
+  and M each, receiver sees NxM.
 - **Mailbox**: selective receive preserves skipped-message order;
   saved messages delivered in original arrival order when match
   predicate becomes true.
@@ -1011,7 +1011,7 @@ Per-primitive PBTs under `test/hegel/`:
   multiset returned == multiset pushed; no double-take; no loss.
 - **Timer wheel**: a timer set for `t_now + d` never fires before
   `t_now + d`; cancellation observable.
-- **Supervisor**: ≤ N restarts per W seconds → supervisor exits.
+- **Supervisor**: <= N restarts per W seconds -> supervisor exits.
 - **Future combinators**: `when_all`/`when_any`/timeout semantics.
 - **Allocator ownership**: every allocation freed by exactly its
   owner (or transferred); no double-free; no leak across
@@ -1019,7 +1019,7 @@ Per-primitive PBTs under `test/hegel/`:
 
 ### 7.3 Soak / stress
 
-`make soak` — long-running workloads under
+`make soak` -- long-running workloads under
 ASan/UBSan/TSan/Valgrind/Helgrind.  Required green for tags.
 
 ### 7.4 Cross-runtime conformance
@@ -1039,7 +1039,7 @@ OpenBSD, DragonFlyBSD).
 ## 8. Naming and style
 
 - Files: `<layer>_<topic>.c`, lowercase snake_case.
-- Public API: `xtc_<noun>_<verb>` — e.g. `xtc_chan_send`,
+- Public API: `xtc_<noun>_<verb>` -- e.g. `xtc_chan_send`,
   `xtc_proc_spawn`, `xtc_future_await`.
 - Internal cross-file: `__xtc_<topic>_<verb>` (double underscore).
 - OS layer: `__os_*`, never `xtc_os_*`.
@@ -1048,7 +1048,7 @@ OpenBSD, DragonFlyBSD).
 - Errors: `XTC_E_*`.
 - Macros: `XTC_<TOPIC>_<NAME>`.
 - Lowercase-keyword macros (the new exceptions): `dispatch`,
-  `reply`, `async`, `await` — these are the user-facing
+  `reply`, `async`, `await` -- these are the user-facing
   ergonomics; everything else stays `XTC_*`.
 - `PUBLIC:` markers parsed by `dist/s_include`, exactly like DBSQL.
 - C11.  No GNU extensions in headers; in `.c` files extensions
@@ -1065,7 +1065,7 @@ OpenBSD, DragonFlyBSD).
 | **M1** | L0 `os/` | All `__os_*` groups including `os_globals.c`; munit + hegel for `os_atomic`. |
 | **M2** | L1 minimal | `io_poll` + `io_epoll` backends; cross-thread wakeup. |
 | **M3** | L2 single-loop | Single-thread event loop, run queue, timer wheel, `xtc_task_spawn` of state-machine tasks. |
-| **M4** | L2 coroutines | `evt_pt` (Duff's-device) + `evt_fiber` (asm) + `async()`/`await()` macros (§12) + `xtc_yield()` + `XTC_COOP_REGION`. |
+| **M4** | L2 coroutines | `evt_pt` (Duff's-device) + `evt_fiber` (asm) + `async()`/`await()` macros ((S)12) + `xtc_yield()` + `XTC_COOP_REGION`. |
 | **M5** | L2 multi-loop | ST3 work-stealing deque, executor with N loops, cross-loop wake.  PBT for deque. |
 | **M6** | L1 io_uring + kqueue + iocp | All major I/O backends. |
 | **M7** | L3 channels + futures | All channel types; future/promise + combinators. |
@@ -1076,7 +1076,7 @@ OpenBSD, DragonFlyBSD).
 | **M12** | Shared globals | `XTC_GLOBAL`/`XTC_PERLOOP`/`XTC_FN_STATIC`/`XTC_TLS` macros + `dist/s_globals` + `dist/s_signals` lints. |
 | **M13a** | RCU primitive | `xtc_rcu` epoch-based reclamation; PBT for read-side wait-freedom; basic benchmarks. |
 | **M13b** | LRLock + LWLock | Port from `~/ws/postgres/lrlck` to xtc style; PBT (lin-checker); micro/macro benchmarks vs `xtc_rwlock`. |
-| **M13c** | Lock manager | Port from `~/ws/libdb` + `~/ws/noxu`; 9-mode matrix, intent locks, promotion, sharded tables, incremental + periodic deadlock detector with all victim policies, resource caps from §13.5; full §13.8 test/bench/scale/exhaust suite. |
+| **M13c** | Lock manager | Port from `~/ws/libdb` + `~/ws/noxu`; 9-mode matrix, intent locks, promotion, sharded tables, incremental + periodic deadlock detector with all victim policies, resource caps from (S)13.5; full (S)13.8 test/bench/scale/exhaust suite. |
 | **M14** | `xtc_cfg` + `xtc_log` + `dist/s_async` + `dist/s_cfg` | Function-call config API, per-loop logging, prototype-generation tools. |
 | **M15** | L1 Solaris + AIX + select | Tier-2 platform completeness. |
 | **M16** | L5 PG adapter | Subsumes `src/backend/storage/aio`; latch/signal/CFI/MemoryContext bridges; example threaded backend. |
@@ -1096,7 +1096,7 @@ These remain for your sign-off.  Defaults given are my recommendation.
 | Q4 | Cancellation propagation | **`xtc_abort_source` (cooperative) + `xtc_exit` (kill).** No implicit structured concurrency. |
 | Q5 | Allocator | **Pluggable + per-task arena + slab caches + ownership domains** (libumem-shaped). |
 | Q6 | OTP scope | Yes: supervisor, svr, fsm, app, reg.  No (for now): distribution, hot reload, ETS. |
-| Q7 | Multi-process from L0 | **L0 has the primitives, L1–L4 don't use them in v1.** PG L5 is the only multi-process consumer. |
+| Q7 | Multi-process from L0 | **L0 has the primitives, L1-L4 don't use them in v1.** PG L5 is the only multi-process consumer. |
 | Q8 | License | **ISC license.** |
 | Q9 (new) | Configure-time vs runtime backend selection | **Configure-time only.** No vtable on hot path. |
 | Q10 (new) | Default loop count | **`__os_ncpus()`**, configurable down to 1 for the strict-degraded build. |
@@ -1122,7 +1122,7 @@ These remain for your sign-off.  Defaults given are my recommendation.
    `make_fcontext`/`jump_fcontext` round-trip on every arch.
 4. **MSVC + C11 atomics edge cases.**  Mitigation: `__os_atomic`
    shim hides the compiler.
-5. **Selective receive O(N²) trap.**  BEAM's save-queue + scan-mark
+5. **Selective receive O(N^2) trap.**  BEAM's save-queue + scan-mark
    trick; implement on day 1.
 6. **Two build systems drifting.**  `dist/srcfiles.in` is the SoT;
    CI runs both.
@@ -1133,7 +1133,7 @@ These remain for your sign-off.  Defaults given are my recommendation.
    propose replacing the underlying `method_*.c`.
 8. **Threaded PG is a multi-year upstream effort.**  Mitigation:
    xtc must be useful standalone for greenfield C servers.  But also:
-   the v20→v21 PG roadmap (§14) is concrete and short enough that
+   the v20->v21 PG roadmap ((S)14) is concrete and short enough that
    xtc *as-designed* matches every primitive on that list.  We
    should pitch xtc not as a research project but as the toolbox
    v20 is going to need anyway.
@@ -1151,7 +1151,7 @@ These remain for your sign-off.  Defaults given are my recommendation.
 
 ---
 
-## 12.  `async()` / `await()` in C — yes, with caveats
+## 12.  `async()` / `await()` in C -- yes, with caveats
 
 The user asked: can we get to this?
 
@@ -1195,7 +1195,7 @@ handle.  In C without compiler help, you cannot pass an
 We will offer **all three**, selected at configure time and
 documented as such.
 
-### 12.1 Strategy A — fiber-based (default, fully portable to the literal syntax)
+### 12.1 Strategy A -- fiber-based (default, fully portable to the literal syntax)
 
 `async(EXPR)` is a macro that:
 
@@ -1210,7 +1210,7 @@ documented as such.
 /*
  * Sketch of src/inc/xtc_async.h
  *
- * Requires: stackful fiber substrate (evt_fiber.c) — available on
+ * Requires: stackful fiber substrate (evt_fiber.c) -- available on
  * every arch we ship asm for, plus the ucontext fallback.  Works
  * with gcc, clang, MSVC.
  */
@@ -1265,14 +1265,14 @@ the inner one completes).
 - Works for any C expression `EXPR`, not just function calls:
   `async(a*b + c[d])`, `async(big_compute(p, q, &out))`, etc.
 - Local-variable capture is by value, copied at the moment of
-  `async()` — exactly what a Rust `move ||` closure does.  No
+  `async()` -- exactly what a Rust `move ||` closure does.  No
   surprise mutation.
 - Cost: one fiber stack (cached/recycled), one heap copy of the
-  captured frame (typically 0–64 bytes), one fiber switch on
+  captured frame (typically 0-64 bytes), one fiber switch on
   await.  Fiber switches are ~30 ns on modern x86-64 with our
   ASM; significantly cheaper than a syscall.
 - The enclosing function `foo()` itself does NOT need to be
-  declared specially — `await()` works because `foo` is *also*
+  declared specially -- `await()` works because `foo` is *also*
   running on a fiber (every xtc task is).  This is the key
   property that makes the syntax look like Tokio: there is no
   `async fn foo` keyword; **every entry point into xtc is
@@ -1294,10 +1294,10 @@ the inner one completes).
   literal form; `async(F, ...)` is the portable form; both
   return `xtc_task_t *`.
 
-### 12.2 Strategy B — protothread-based (graceful-degradation mode)
+### 12.2 Strategy B -- protothread-based (graceful-degradation mode)
 
 When the build has only Duff's-device coroutines (no fiber asm,
-no ucontext — embedded, or constrained illumos/AIX), `async()`
+no ucontext -- embedded, or constrained illumos/AIX), `async()`
 and `await()` still work, but with the protothread tax: locals
 in the *enclosing* function must be in a state struct, and the
 function must be wrapped:
@@ -1309,7 +1309,7 @@ XTC_TASK(int, foo, (int a, char *b))   /* wraps as a protothread */
     XTC_BEGIN();
 
     XTC_LOCAL(t) = async(bar, a);
-    /* ... do something else (no syscalls — must be cooperative) ... */
+    /* ... do something else (no syscalls -- must be cooperative) ... */
     XTC_LOCAL(c) = await_int(XTC_LOCAL(t));
 
     XTC_RETURN(XTC_LOCAL(c));
@@ -1318,11 +1318,11 @@ XTC_TASK(int, foo, (int a, char *b))   /* wraps as a protothread */
 ```
 
 Same logical behaviour, uglier syntax.  This is the floor of
-graceful degradation — the *literal* `async(bar(a))` syntax is
+graceful degradation -- the *literal* `async(bar(a))` syntax is
 not achievable here without a fiber, because Duff's device
 cannot resume across a yield without lifting locals.
 
-### 12.3 Strategy C — explicit thunk (always portable, always cheap)
+### 12.3 Strategy C -- explicit thunk (always portable, always cheap)
 
 This is a forever-fallback for programmers who can't or don't
 want fibers and don't want the protothread macros either:
@@ -1349,7 +1349,7 @@ signature.  Zero magic.  Slightly more typing.  Always works.
 ### 12.4 Recommendation
 
 - The **default** build on every Tier 1 platform supports
-  `async(bar(a))` literally — fiber-based, GCC/Clang/MSVC.
+  `async(bar(a))` literally -- fiber-based, GCC/Clang/MSVC.
 - The **constrained** build (no fiber asm, no ucontext) requires
   the protothread `XTC_TASK` macros or the explicit-thunk form.
 - Our *examples and docs* always show the literal-syntax form
@@ -1378,46 +1378,46 @@ three have all of.
 
 | Code we pull in | From | Becomes |
 |---|---|---|
-| LRLock implementation (`lrlock.c`/`lrlock.h`, ~1.2k LoC) | `~/ws/postgres/lrlck/src/{backend/storage/lmgr,include/storage}/lrlock.{c,h}` | `src/ptc/lock/lr.c` + `src/inc/lock_lr.h` — `xtc_lrlock_*` |
-| LWLock implementation (`lwlock.c`/`lwlock.h`/`lwlocklist.h`, ~2.1k LoC) | `~/ws/postgres/lrlck/src/{backend/storage/lmgr,include/storage}/lwlock*.{c,h}` | `src/ptc/lock/lw.c` + `src/inc/lock_lw.h` — `xtc_lwlock_*` |
-| Lock-mode + intent-lock matrix (NG/READ/WRITE/IREAD/IWRITE/IWR/READ_UNCOMMITTED/WWRITE, conflict matrix, lockers, lock-list management) | `~/ws/libdb/src/lock/{lock,lock_alloc,lock_id,lock_list,lock_method,lock_region,lock_util}.c` (~5k LoC) | `src/ptc/lock/mgr.c` + `src/inc/lock_mgr.h` — `xtc_lock_mgr_*` |
-| Deadlock detection: build waits-for graph, find cycle, victim policies (DEFAULT/EXPIRE/MAXLOCKS/MAXWRITE/MINLOCKS/MINWRITE/OLDEST/RANDOM/YOUNGEST), abort + rollback signal | `~/ws/libdb/src/lock/lock_deadlock.c` (~1k LoC) | `src/ptc/lock/dd.c` — `xtc_lock_dd_*` |
+| LRLock implementation (`lrlock.c`/`lrlock.h`, ~1.2k LoC) | `~/ws/postgres/lrlck/src/{backend/storage/lmgr,include/storage}/lrlock.{c,h}` | `src/ptc/lock/lr.c` + `src/inc/lock_lr.h` -- `xtc_lrlock_*` |
+| LWLock implementation (`lwlock.c`/`lwlock.h`/`lwlocklist.h`, ~2.1k LoC) | `~/ws/postgres/lrlck/src/{backend/storage/lmgr,include/storage}/lwlock*.{c,h}` | `src/ptc/lock/lw.c` + `src/inc/lock_lw.h` -- `xtc_lwlock_*` |
+| Lock-mode + intent-lock matrix (NG/READ/WRITE/IREAD/IWRITE/IWR/READ_UNCOMMITTED/WWRITE, conflict matrix, lockers, lock-list management) | `~/ws/libdb/src/lock/{lock,lock_alloc,lock_id,lock_list,lock_method,lock_region,lock_util}.c` (~5k LoC) | `src/ptc/lock/mgr.c` + `src/inc/lock_mgr.h` -- `xtc_lock_mgr_*` |
+| Deadlock detection: build waits-for graph, find cycle, victim policies (DEFAULT/EXPIRE/MAXLOCKS/MAXWRITE/MINLOCKS/MINWRITE/OLDEST/RANDOM/YOUNGEST), abort + rollback signal | `~/ws/libdb/src/lock/lock_deadlock.c` (~1k LoC) | `src/ptc/lock/dd.c` -- `xtc_lock_dd_*` |
 | Lock timer / expiry / fail-check | `~/ws/libdb/src/lock/{lock_timer,lock_failchk}.c` | `src/ptc/lock/timer.c`, `src/ptc/lock/failchk.c` |
-| Sharded lock tables, **incremental** waits-for graph (O(1) cycle check on the wait path), thread-locker share groups, configurable `lock_timeout_ms`, statistics | `~/ws/noxu/crates/noxu-txn/src/{lock_manager,deadlock_detector,lock_info}.rs` (~2k LoC, Rust → ported to C) | merged into `src/ptc/lock/mgr.c` and `src/ptc/lock/dd.c` |
+| Sharded lock tables, **incremental** waits-for graph (O(1) cycle check on the wait path), thread-locker share groups, configurable `lock_timeout_ms`, statistics | `~/ws/noxu/crates/noxu-txn/src/{lock_manager,deadlock_detector,lock_info}.rs` (~2k LoC, Rust -> ported to C) | merged into `src/ptc/lock/mgr.c` and `src/ptc/lock/dd.c` |
 
 Nothing is copy-pasted as-is.  Each source is **rewritten to xtc
 conventions** (`__xtc_*` / `xtc_*` naming, `int` returns with
 out-params, `XTC_E_*` errors, `__os_*` for syscalls, BDB-style
 file/function comment block, `PUBLIC:` markers parsed by
-`dist/s_include`).  The algorithms are unchanged — we are buying
+`dist/s_include`).  The algorithms are unchanged -- we are buying
 the correctness work, not the prose.  Each port carries the
 upstream copyright notice in the file header.
 
 ### 13.2 Layered API
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│ Lock manager (`xtc_lock_mgr`):                                      │
-│   - sharded hash table of lock objects (key → lock)                │
-│   - lockers (xtc_locker_t = an xtc_proc + transaction ID)          │
-│   - 9-mode conflict matrix (BDB)                                   │
-│   - intent locks + promotion                                       │
-│   - per-locker timeouts                                            │
-│   - deadlock detector callbacks                                    │
-│   - resource caps (§13.5)                                          │
-├──────────────────────────────────────────────────────────────────┤
-│ Deadlock detector (`xtc_lock_dd`):                                  │
-│   - incremental waits-for graph maintained on the wait path        │
-│   - on-demand cycle scan with multiple victim policies             │
-│   - victim notification via xtc_send (kill envelope)               │
-├──────────────────────────────────────────────────────────────────┤
-│ Latches: low-level cooperative locks the lock manager itself uses  │
-│   - `xtc_mutex` (parking)        - `xtc_rwlock` (parking, fair)    │
-│   - `xtc_lwlock` (LWLock-shape)  - `xtc_lrlock` (left-right)       │
-│   - `xtc_spinlock` (debug-only; bare CPU spin under TSan)          │
-├──────────────────────────────────────────────────────────────────┤
-│ Atomic primitives (`__os_atomic_*`): C11 atomics + futex/Wait      │
-└──────────────────────────────────────────────────────────────────┘
++------------------------------------------------------------------+
+| Lock manager (`xtc_lock_mgr`):                                      |
+|   - sharded hash table of lock objects (key -> lock)                |
+|   - lockers (xtc_locker_t = an xtc_proc + transaction ID)          |
+|   - 9-mode conflict matrix (BDB)                                   |
+|   - intent locks + promotion                                       |
+|   - per-locker timeouts                                            |
+|   - deadlock detector callbacks                                    |
+|   - resource caps ((S)13.5)                                          |
+|-------------------------------------------------------------------|
+| Deadlock detector (`xtc_lock_dd`):                                  |
+|   - incremental waits-for graph maintained on the wait path        |
+|   - on-demand cycle scan with multiple victim policies             |
+|   - victim notification via xtc_send (kill envelope)               |
+|-------------------------------------------------------------------|
+| Latches: low-level cooperative locks the lock manager itself uses  |
+|   - `xtc_mutex` (parking)        - `xtc_rwlock` (parking, fair)    |
+|   - `xtc_lwlock` (LWLock-shape)  - `xtc_lrlock` (left-right)       |
+|   - `xtc_spinlock` (debug-only; bare CPU spin under TSan)          |
+|-------------------------------------------------------------------|
+| Atomic primitives (`__os_atomic_*`): C11 atomics + futex/Wait      |
+\-------------------------------------------------------------------+
 ```
 
 The sync primitives (`sync_mutex.c` etc.) stay above the lock
@@ -1443,7 +1443,7 @@ complete lock matrix in the open-source database tradition.
 | 7 | `XTC_LOCK_RU` | Read-uncommitted (degree-1 isolation) |
 | 8 | `XTC_LOCK_WW` | Was-written (degraded retain) |
 
-The conflict matrix is a 9×9 byte table compiled into
+The conflict matrix is a 9x9 byte table compiled into
 `src/ptc/lock/conflict.h`, with a unit test that verifies the
 IW/IR/IWR rows against the canonical Gray/Lorie/Putzolu/Traiger
 paper.
@@ -1464,19 +1464,19 @@ a stronger mode (`XTC_LOCK_W`) on the same object goes through a
    unless the detector explicitly models the locker's existing
    holdings.
 3. If a cycle is found, the upgrade caller is the natural
-   victim (smallest "abort cost" — it is already holding a
+   victim (smallest "abort cost" -- it is already holding a
    lock so its abort is cheap to roll back).
 4. Upgrade requests do not deadlock-with-self: a locker can
    upgrade its own lock without going through the detector.
 
-The promotion ladder is fixed: `R` → `IW`/`IWR` → `W`.  Other
+The promotion ladder is fixed: `R` -> `IW`/`IWR` -> `W`.  Other
 transitions return `XTC_E_LOCK_BAD_PROMOTE`.
 
 ### 13.5 Resource governance
 
 Three exhaustion vectors get explicit caps and reservoirs.
 Nothing in the lock manager allocates from the heap on the
-wait path — every datum is pre-allocated at
+wait path -- every datum is pre-allocated at
 `xtc_lock_mgr_init` time.
 
 | Resource | Cap knob | Mechanism | What happens at the cap |
@@ -1486,7 +1486,7 @@ wait path — every datum is pre-allocated at
 | Lock-list cells per locker | `max_objects` | Slab cache | Same |
 | Waiter notify pairs | `max_waiters` | Pool, recycled | Same |
 | Wait queue depth per object | `max_wait_depth` | Bounded queue with backpressure | New waiters return `XTC_E_LOCK_TOOBUSY` immediately; lock manager has *not* gone into the wait state |
-| Stack per `xtc_proc` fiber | `proc_stack_size` (64 KiB) + guard page | Guard-page fault → `sigaltstack` handler | Supervisor restarts the offending proc, no others affected |
+| Stack per `xtc_proc` fiber | `proc_stack_size` (64 KiB) + guard page | Guard-page fault -> `sigaltstack` handler | Supervisor restarts the offending proc, no others affected |
 | CPU per task | `task_reductions` | Reduction counter; preempts at await/yield | Task moves to back of run queue (BEAM model) |
 | Memory per `xtc_proc` | `proc_alloc_cap` | Per-proc arena ceiling | `xtc_palloc` returns `XTC_E_NOMEM`; trips `XTC_CHECK_CANCEL()` |
 | Memory per executor | `executor_alloc_cap` | Sum-of-procs ceiling | Spawns return `XTC_E_RESOURCE`; supervisor backpressure |
@@ -1503,11 +1503,11 @@ effect immediately by enlarging slab caches; caps that
 
 We implement *both* the BDB on-demand detector and the Noxu
 incremental detector and let configuration pick which is
-active.  They are not redundant — they have different cost
+active.  They are not redundant -- they have different cost
 profiles:
 
 - **Incremental (`XTC_DD_INCREMENTAL`, default).**  When a
-  locker enters the wait path, an edge `(waiter → owner)`
+  locker enters the wait path, an edge `(waiter -> owner)`
   is added to a process-wide `xtc_lock_dd_graph` (a small
   `xtc_lrlock`-protected map).  Before sleeping, the
   detector performs a depth-first cycle search starting
@@ -1539,7 +1539,7 @@ selection policy**.  Full BDB menu plus two new ones:
 | Max-write | `XTC_DD_MAXWRITE` | Locker holding most write locks |
 | Min-locks | `XTC_DD_MINLOCKS` | Locker holding fewest locks (cheapest rollback) |
 | Min-write | `XTC_DD_MINWRITE` | Locker holding fewest write locks |
-| Oldest | `XTC_DD_OLDEST` | Oldest transaction (highest seniority survives — PG/Oracle convention) |
+| Oldest | `XTC_DD_OLDEST` | Oldest transaction (highest seniority survives -- PG/Oracle convention) |
 | Random | `XTC_DD_RANDOM` | Random victim (good for testing fairness) |
 | Youngest | `XTC_DD_YOUNGEST` | Newest transaction (least invested) |
 | **Lowest-priority** | `XTC_DD_LOWPRIO` | Locker with smallest `xtc_proc.priority` (xtc-new) |
@@ -1551,7 +1551,7 @@ the **head** of its mailbox (jumps the queue).  The locker
 observes this at its next `await`/`xtc_yield`/`XTC_CHECK_CANCEL()`
 and unwinds with `XTC_E_DEADLOCK`.  All locks held by that
 locker are released as part of `xtc_proc` cleanup.  No
-longjmp-from-inside-the-detector — the detector only signals;
+longjmp-from-inside-the-detector -- the detector only signals;
 the victim chooses *when* to die at a known-safe point.
 
 Retry policy is the caller's: most users wrap an entire
@@ -1588,7 +1588,7 @@ int  xtc_lock_get_async(xtc_locker_t *, ..., xtc_future_t **out); /* awaitable *
 int  xtc_lock_put      (xtc_locker_t *, xtc_lock_h_t);
 int  xtc_lock_promote  (xtc_locker_t *, xtc_lock_h_t, xtc_lock_mode_t);
 int  xtc_lock_vec      (xtc_locker_t *, const xtc_lock_req_t *, int n);
-                       /* atomic batch acquire — BDB-style "lock vector" */
+                       /* atomic batch acquire -- BDB-style "lock vector" */
 
 /* --- Deadlock detector --- */
 int  xtc_lock_dd_set_policy(xtc_lock_mgr_t *, xtc_dd_policy_t);
@@ -1599,19 +1599,19 @@ int  xtc_lock_dd_get_graph (xtc_lock_mgr_t *, xtc_dd_graph_t *out);
 `xtc_lock_get_async` is the loop-friendly variant: returns a
 `xtc_future_t` so a request can be `await`ed without parking
 the fiber on a kernel primitive.  This is the version PG-on-xtc
-will use — it lets thousands of waiters coexist on a few OS
+will use -- it lets thousands of waiters coexist on a few OS
 threads.
 
 ### 13.8 Testing & benchmarking strategy
 
-*The standalone testing strategy (§7) covers basic primitives.
+*The standalone testing strategy ((S)7) covers basic primitives.
 Locks need a more aggressive program because they are the
 hottest code in any database.*
 
 #### 13.8.1 Correctness testing
 
 - **Unit (munit).**  Per-mode acquire/release; conflict-matrix
-  table-driven test (every cell of the 9×9 matrix verified);
+  table-driven test (every cell of the 9x9 matrix verified);
   promotion ladder; intent-lock semantics.
 - **Property-based (hegel).**  Per-primitive invariants:
   - `pbt_lr.c`: writers never see a stale read; epoch counter
@@ -1627,17 +1627,17 @@ hottest code in any database.*
     every promotion that shouldn't, doesn't.
 - **Linearizability harness (vendored, ~300 LoC).**  Lin-checker
   for `xtc_lwlock` and `xtc_lrlock`: enumerates short
-  interleavings (3 threads × 6 ops) and verifies a valid
+  interleavings (3 threads x 6 ops) and verifies a valid
   linearization exists in the conflict matrix.
 - **Sanitizers.**  Every test runs under TSan, ASan, UBSan,
   Helgrind, DRD.  TSan-clean is a release-blocker.
 - **Loom-style model checker (optional, `--with-loom`).**  Tiny
-  C port of Rust's `loom` for the wait-free LRLock read path —
+  C port of Rust's `loom` for the wait-free LRLock read path --
   exhaustive interleaving search up to N=4 threads.  Only way
   to *prove* the wait-free path is correct under all memory
   orderings.
 - **Conformance.**  Same bank-account-transfer 2PL stress run
-  against xtc, BDB, vanilla pthread, and noxu Rust LM — all
+  against xtc, BDB, vanilla pthread, and noxu Rust LM -- all
   four must produce identical commit/abort histograms
   (modulo randomized victim policies).
 
@@ -1648,11 +1648,11 @@ plus latency histograms (HdrHistogram-shaped):
 
 | Bench | What it measures |
 |---|---|
-| `bm_read_only` | LRLock vs LWLock-shared vs `xtc_rwlock` read scalability, 1…256 threads |
+| `bm_read_only` | LRLock vs LWLock-shared vs `xtc_rwlock` read scalability, 1...256 threads |
 | `bm_write_only` | Single-writer throughput, contention p50/p95/p99/p999 |
 | `bm_read_write_mix` | 80/20, 95/5, 99/1 read/write mixes |
-| `bm_promotion_storm` | All threads upgrade R→W concurrently |
-| `bm_deadlock_storm` | Constructed cycles at increasing rate — detector latency p99 |
+| `bm_promotion_storm` | All threads upgrade R->W concurrently |
+| `bm_deadlock_storm` | Constructed cycles at increasing rate -- detector latency p99 |
 | `bm_proc_array` | The PG ProcArray-snapshot scenario from the LRLock RFC |
 
 Results auto-published to `docs/bench/`.  CI fails the build if
@@ -1663,10 +1663,10 @@ on Linux x86-64 glibc.
 
 Under `bench/lock/micro/`, with cycle-count targets:
 
-- `µ_acquire_uncontended` — LRLock read ≤ 6 ns; LWLock shared ≤ 12 ns; mgr fast path ≤ 80 ns.
-- `µ_cas_pingpong` — baseline two-thread CAS cost.
-- `µ_dd_cycle_check` — incremental detector at graph sizes 8 / 64 / 512 / 4096.  Linear in cycle length.
-- `µ_promote_cas` — fastest possible R→W promotion (no contention).
+- `u_acquire_uncontended` -- LRLock read <= 6 ns; LWLock shared <= 12 ns; mgr fast path <= 80 ns.
+- `u_cas_pingpong` -- baseline two-thread CAS cost.
+- `u_dd_cycle_check` -- incremental detector at graph sizes 8 / 64 / 512 / 4096.  Linear in cycle length.
+- `u_promote_cas` -- fastest possible R->W promotion (no contention).
 
 #### 13.8.4 Scalability testing
 
@@ -1679,7 +1679,7 @@ Under `bench/lock/micro/`, with cycle-count targets:
   per-NUMA-node and across nodes; cross-node contention
   curves.
 - **CPU-budget sweep.**  Under cgroup CPU limits at 50%, 75%,
-  100% — we want graceful degradation, not cliffs.
+  100% -- we want graceful degradation, not cliffs.
 - **Cache-line behavior.**  `perf c2c` runs as part of CI on
   the contention benches; false-sharing regressions fail
   the build.
@@ -1708,15 +1708,15 @@ under TSan and Helgrind.  Required green for any tag.
 ### 13.9 Where this lands in milestones
 
 The original M13 ("RCU + LRLock + LWLock") splits into three
-milestones — see the revised table in §9.
+milestones -- see the revised table in (S)9.
 
 ---
 
-## 14. SQL query traversal — a worked example
+## 14. SQL query traversal -- a worked example
 
 The pitch is concrete only when we trace what actually happens.
 Below we follow one ordinary OLTP query end-to-end through xtc.
-This is hypothetical — the PG adapter is M16 — but every step is
+This is hypothetical -- the PG adapter is M16 -- but every step is
 backed by a primitive already designed.
 
 ### 14.1 The query
@@ -1747,7 +1747,7 @@ Assume:
   io_uring reads).
 - `customers` and `recent_logins` are smaller (in shared
   buffers, mostly).
-- This is one session out of ≈ 8 000 active sessions.
+- This is one session out of ~= 8 000 active sessions.
 - The xtc executor has 32 reactors pinned to 32 cores.
 
 ### 14.2 Connection-level: the session is an `xtc_proc`
@@ -1798,7 +1798,7 @@ and is released atomically on COMMIT or ROLLBACK.
 ### 14.4 Parse / plan / execute: where the async actually starts
 
 The SELECT is parsed and planned.  Planning is mostly CPU-bound
-and in-memory — no awaits.  When planning needs the syscache (e.g.
+and in-memory -- no awaits.  When planning needs the syscache (e.g.
 to look up `customers` and `orders` metadata), we hit the first
 interesting xtc primitive: **`xtc_rcu`**.
 
@@ -1855,7 +1855,7 @@ Under the hood:
 - The stream maintains a sliding window of `prefetch_depth`
   outstanding io_uring SQEs.
 - Each `xtc_io_stream_next` is `await`-only when the window is
-  drained — most calls return immediately because the next
+  drained -- most calls return immediately because the next
   buffer is already complete.
 - On a 32-reactor box, eight other sessions on the same reactor
   can be making the same calls; their fibers interleave
@@ -1863,7 +1863,7 @@ Under the hood:
   context switch: just fiber switches at ~30 ns each.
 - If io_uring is unavailable (configure-time), the same code
   compiles unchanged but `xtc_io_submit` posts to a worker pool
-  that does blocking pread — the PG `method_worker.c` shape,
+  that does blocking pread -- the PG `method_worker.c` shape,
   running as ordinary `xtc_proc`s.
 
 ### 14.6 Locking the rows we're going to read
@@ -1893,7 +1893,7 @@ victim receives a mailbox kill envelope and unwinds at its next
 acquires.  If we *are* the victim, `await` returns
 `XTC_E_DEADLOCK` and the txn-runner retries the whole transaction.
 
-Aggregation, sort, limit — all CPU.  `xtc_yield()` is sprinkled at
+Aggregation, sort, limit -- all CPU.  `xtc_yield()` is sprinkled at
 reduction-counter checkpoints inside the executor so a long
 aggregation cooperates with other backends on the same reactor.
 
@@ -1910,7 +1910,7 @@ int64_t *ids; size_t nids;
 await_into(t_subq, &ids, &nids);   /* await with out-params */
 ```
 
-With fiber-mode `async()` (§12.1) this looks just like the
+With fiber-mode `async()` ((S)12.1) this looks just like the
 user's sketch: a value we kick off, do other work, then await.
 The subquery runs as its own fiber on the same reactor; the
 executor never blocks on it.
@@ -1927,7 +1927,7 @@ rc = xtc_lock_promote(bk->locker, h, XTC_LOCK_W);
 
 The promotion may deadlock with another backend that also holds R
 and wants to promote.  The detector catches this immediately on
-the wait edge insertion (§13.6).
+the wait edge insertion ((S)13.6).
 
 WAL writes use `xtc_io_uring`'s linked SQE feature (or its
 emulation on epoll/IOCP): one SQE for the WAL write, a linked SQE
@@ -1971,13 +1971,13 @@ Three scenarios show how the orchestration layer earns its keep.
    `{'EXIT', backend_pid, segv}` message, applies its
    `simple_one_for_one` strategy, and a new clean `xtc_proc`
    accepts the next connection.  No other session affected
-   because no global state was corrupted — every per-session
+   because no global state was corrupted -- every per-session
    datum lived inside the dead proc's arena.
 2. **A reactor's I/O backend stalls** (e.g. an io_uring CQE storm
    we can't drain in time).  Other reactors steal tasks from its
    run queue (Tokio shape).  If the stall exceeds
    `dd_suspicious_ms` the deadlock detector triggers a periodic
-   sweep — it won't be a deadlock, but the sweep surfaces the slow
+   sweep -- it won't be a deadlock, but the sweep surfaces the slow
    reactor in `xtc_log` for ops to see.
 3. **The whole executor wedges.**  The two-process supervisor at
    the very top notices the executor heartbeat stop, kills the
@@ -1990,7 +1990,7 @@ For the same SQL query:
 
 | Aspect | Process-per-backend PG | xtc-on-PG |
 |---|---|---|
-| Cost of a session | one fork, private memory map, ~1 MB resident | one `xtc_proc` (fiber + small struct), ~64 KiB resident |
+| Cost of a session | one fork, private memory map, ~1 MB resident | one `xtc_proc` (fiber + small struct), ~64 KiB resident |
 | Cost of an `await` | not applicable (block in syscall) | ~30 ns fiber switch |
 | Sessions per box at p99 SLA | hundreds | tens of thousands (target) |
 | Where session state lives | scattered global variables | one `xtc_proc` user-data struct |
@@ -2003,7 +2003,7 @@ For the same SQL query:
 | Deadlock detection | PG heavyweight LM, periodic | incremental (ns-scale) + periodic safety net |
 | Cancellation | `CHECK_FOR_INTERRUPTS()` peppered in code | `XTC_CHECK_CANCEL()` at every await + abort-source for fast-track |
 | Crash recovery | postmaster forks a new backend | `xtc_supervisor` restarts the proc |
-| Memory cleanup on crash | `MemoryContextDelete(TopMemoryContext)` | proc arena drop — same idea, smaller blast radius |
+| Memory cleanup on crash | `MemoryContextDelete(TopMemoryContext)` | proc arena drop -- same idea, smaller blast radius |
 
 ---
 
@@ -2055,13 +2055,13 @@ to keep traces only for slow or error queries.
 
 **Pluggable exporters**, configure-time picked:
 
-- `xtc_export_otlp` — OTLP/gRPC or OTLP/HTTP to any
+- `xtc_export_otlp` -- OTLP/gRPC or OTLP/HTTP to any
   OpenTelemetry collector.
-- `xtc_export_jaeger` — native Jaeger Thrift.
-- `xtc_export_zipkin` — Zipkin v2 JSON.
-- `xtc_export_log` — spans serialized to `xtc_log` for
+- `xtc_export_jaeger` -- native Jaeger Thrift.
+- `xtc_export_zipkin` -- Zipkin v2 JSON.
+- `xtc_export_log` -- spans serialized to `xtc_log` for
   development.
-- `xtc_export_null` — spans built and discarded (still useful
+- `xtc_export_null` -- spans built and discarded (still useful
   for the per-task histograms in 15.2 because span timings feed
   them).
 
@@ -2070,8 +2070,8 @@ to keep traces only for slow or error queries.
 Every task class has a name (`xtc_proc_opts_t.name`).  The
 runtime maintains an HdrHistogram per `(task_class, span_name)`
 pair, recording wall-clock duration of every span.  The
-resolution is microseconds, range 1 µs … 1 hour, three
-significant digits — ~2 KB per histogram, recycled to a slab.
+resolution is microseconds, range 1 us ... 1 hour, three
+significant digits -- ~2 KB per histogram, recycled to a slab.
 
 Queryable live:
 
@@ -2091,7 +2091,7 @@ Exposed by:
   `$XTC_RUNTIME_DIR/stat.sock` so `xtcadmin stat` works without
   network access.
 
-### 15.3 `xtc_stat_*` — the live introspection table
+### 15.3 `xtc_stat_*` -- the live introspection table
 
 This is the `pg_stat_activity` analogue.  A single function:
 
@@ -2120,7 +2120,7 @@ The snapshot is a *consistent point-in-time view* assembled by
 broadcasting a `STAT_DUMP_REQ` to every loop, awaiting all
 responses, and merging.  Latency is bounded by the slowest
 loop's poll cycle (sub-millisecond in steady state).  Read
-cannot stall a loop — each loop fills its slice from local
+cannot stall a loop -- each loop fills its slice from local
 state without a global lock.
 
 A companion command-line tool `xtcadmin` understands the snapshot
@@ -2132,7 +2132,7 @@ product.
 ### 15.4 Flight recorder
 
 Each loop maintains an always-on ring buffer of the last
-`flight_recorder_events` events (default 64 Ki):
+`flight_recorder_events` events (default 64 Ki):
 
 - Task scheduled / unscheduled / completed.
 - I/O submission and completion.
@@ -2143,8 +2143,8 @@ Each loop maintains an always-on ring buffer of the last
 - Allocation > `flight_alloc_threshold`.
 
 Events are 32 bytes each (timestamp + event class + tagged
-union).  ~2 MiB per loop at default size.  In a core dump or
-live `xtc_stat_dump(…, .flight_recorder = true)`, the recorder
+union).  ~2 MiB per loop at default size.  In a core dump or
+live `xtc_stat_dump(..., .flight_recorder = true)`, the recorder
 is the single most useful artefact for postmortem.
 
 A crash dumper (registered as a SIGSEGV/SIGBUS/SIGFPE last-
@@ -2171,11 +2171,11 @@ Probe points (selected):
 - `xtc:::sup_restart(supervisor_pid, child_pid, reason)`
 
 Probes are zero-cost when no consumer is attached (compiled to
-NOPs via libstapsdt / SystemTap).  Required-on for Tier 1 builds.
+NOPs via libstapsdt / SystemTap).  Required-on for Tier 1 builds.
 
 ### 15.6 Logging (`xtc_log`) revisited
 
-§2.4.5 already specified `xtc_log` as a per-loop ring buffer with
+(S)2.4.5 already specified `xtc_log` as a per-loop ring buffer with
 a single drain task and a per-task `errcontext` chain.  Two
 upgrades for production use:
 
@@ -2186,7 +2186,7 @@ upgrades for production use:
   trace/span ID.  In Grafana / Jaeger / your-tool-here you can
   jump from a span to its log lines and back.
 
-Log levels: `DEBUG5` … `DEBUG1`, `INFO`, `NOTICE`, `WARNING`,
+Log levels: `DEBUG5` ... `DEBUG1`, `INFO`, `NOTICE`, `WARNING`,
 `ERROR`, `FATAL`, `PANIC` (matches PG `elog`/`ereport`
 severity).  Per-module levels at runtime via `xtc_cfg`.
 
@@ -2194,18 +2194,18 @@ severity).  Per-module levels at runtime via `xtc_cfg`.
 
 ```
 src/ptc/obs/
-├── trace.c, trace_ctx.c           ← spans + W3C context
-├── export_otlp.c, export_jaeger.c, export_zipkin.c,
-│   export_log.c, export_null.c, export_prom.c
-├── lat.c                          ← per-task HdrHistograms
-├── stat.c                         ← live snapshot
-├── flight.c                       ← flight recorder
-├── probes.h                       ← USDT probe declarations
-└── admin.c                        ← unix-socket admin endpoint
+|--- trace.c, trace_ctx.c           <- spans + W3C context
+|--- export_otlp.c, export_jaeger.c, export_zipkin.c,
+|   export_log.c, export_null.c, export_prom.c
+|--- lat.c                          <- per-task HdrHistograms
+|--- stat.c                         <- live snapshot
+|--- flight.c                       <- flight recorder
+|--- probes.h                       <- USDT probe declarations
+\--- admin.c                        <- unix-socket admin endpoint
 
-src/inc/xtc_obs.h                  ← public API
-bin/xtcadmin/                      ← CLI
-bin/xtcdump/                       ← crash-dump pretty-printer
+src/inc/xtc_obs.h                  <- public API
+bin/xtcadmin/                      <- CLI
+bin/xtcdump/                       <- crash-dump pretty-printer
 ```
 
 Observability is a first-class subsystem on the same footing as
@@ -2221,7 +2221,7 @@ exporters + admin tools).
 The most dangerous bug in any reactor system is a task that
 blocks the reactor.  One `getaddrinfo()`, one `pthread_mutex_lock`
 on a heavily-contended pthread mutex, one `read()` from an NFS
-mount that hangs — and every other task on that reactor stalls.
+mount that hangs -- and every other task on that reactor stalls.
 In process-per-backend PG this never matters; one slow backend
 doesn't affect the others.  In threaded PG it is *the* failure
 mode.
@@ -2249,9 +2249,9 @@ This is enforced three ways:
 2. **Annotation.**  Functions known to block carry
    `XTC_BLOCKING` in their declaration; the lint understands
    this and demands an escape block at every call site.
-3. **Runtime detection** — the reactor-stall detector (16.4).
+3. **Runtime detection** -- the reactor-stall detector (16.4).
 
-### 16.2 `xtc_block_in_place` — in-place escape
+### 16.2 `xtc_block_in_place` -- in-place escape
 
 For short blocking sections inside a task that's mostly
 cooperative:
@@ -2273,10 +2273,10 @@ original reactor (or another, by least-loaded policy).  The
 original reactor continues running other tasks while the block
 is in flight.  Cost: two fiber switches plus a context-handoff;
 on the order of microseconds.  The block must not call any
-`xtc_*` API itself except `xtc_log` and `xtc_alloc_*` — this is
+`xtc_*` API itself except `xtc_log` and `xtc_alloc_*` -- this is
 linted.
 
-### 16.3 `xtc_spawn_blocking` — dedicated blocking task
+### 16.3 `xtc_spawn_blocking` -- dedicated blocking task
 
 For longer-running blocking work (compression of a large blob,
 parsing of a multi-MB SQL string, calling into an FDW that does
@@ -2297,7 +2297,7 @@ special coordination.
 
 A distinct pool of OS threads (default `min(__os_ncpus() * 2,
 128)`, configurable via `blocking_pool_size`).  Threads are
-real pthreads with full kernel scheduling — unlike reactor
+real pthreads with full kernel scheduling -- unlike reactor
 threads they may block, hold pthread mutexes, do synchronous
 syscalls.
 
@@ -2338,17 +2338,17 @@ This is what catches the bugs the lint missed.  In production
 the alert ("reactor stall") is a P1 page; the log line names
 the culprit.
 
-### 16.6 `xtc_compat_pthread.h` — transparent compat for legacy code
+### 16.6 `xtc_compat_pthread.h` -- transparent compat for legacy code
 
 An opt-in header that `#define`s pthread primitives to xtc-aware
 shims:
 
-- `pthread_mutex_lock(m)` → try-fast-path; if blocked, switch
+- `pthread_mutex_lock(m)` -> try-fast-path; if blocked, switch
   to the blocking pool, lock, switch back.
-- `pthread_cond_wait(c, m)` → same; the wait is on the blocking
+- `pthread_cond_wait(c, m)` -> same; the wait is on the blocking
   pool with the reactor freed.
-- `usleep(us)` → `xtc_sleep_us(us)` (timer-wheel based).
-- `read/write/recv/send/...` on a fd we recognize → route
+- `usleep(us)` -> `xtc_sleep_us(us)` (timer-wheel based).
+- `read/write/recv/send/...` on a fd we recognize -> route
   through `xtc_io_submit` instead of blocking.
 
 Including this header in legacy code (a contrib module, an
@@ -2365,14 +2365,14 @@ bases.  It deserves its own `docs/compat-pthread.md`.
 
 ```
 src/ptc/block/
-├── in_place.c                    ← XTC_BLOCK_IN_PLACE
-├── spawn_blocking.c              ← xtc_spawn_blocking
-├── pool.c                        ← blocking pool worker threads
-├── stall.c                       ← reactor-stall detector
-└── compat_pthread.c              ← the shim implementation
+|--- in_place.c                    <- XTC_BLOCK_IN_PLACE
+|--- spawn_blocking.c              <- xtc_spawn_blocking
+|--- pool.c                        <- blocking pool worker threads
+|--- stall.c                       <- reactor-stall detector
+\--- compat_pthread.c              <- the shim implementation
 
 src/inc/xtc_block.h, xtc_compat_pthread.h
-dist/s_blocking                   ← the lint
+dist/s_blocking                   <- the lint
 ```
 
 Lands in **M5** (basic stall detector with the multi-loop
@@ -2396,7 +2396,7 @@ crash takes everything down.
 
 We replace it with a typed, versioned, threadsafe hook framework
 that is *the* mechanism by which the runtime is extended over
-time — see also §18 (Longevity) for why this matters for
+time -- see also (S)18 (Longevity) for why this matters for
 change management.
 
 ### 17.1 Concept
@@ -2406,15 +2406,15 @@ signature, a defined ordering policy, and a defined termination
 policy.  Extensions register handlers; the runtime calls the
 chain.  Examples (for L5 PG):
 
-- `pg.executor.run` — called per query, decorate-style (each
+- `pg.executor.run` -- called per query, decorate-style (each
   handler may modify the running state, all are called).
-- `pg.client.auth` — called per connection, stop-on-first
+- `pg.client.auth` -- called per connection, stop-on-first
   (first handler that returns `XTC_AUTH_OK` or `XTC_AUTH_DENY`
   decides).
-- `pg.utility.run` — called per `ProcessUtility`, replace-style
+- `pg.utility.run` -- called per `ProcessUtility`, replace-style
   (a handler may consume the call, stopping the chain).
-- `pg.planner.optimize` — decorate-style.
-- `xtc.proc.spawn` — called when any `xtc_proc` is spawned;
+- `pg.planner.optimize` -- decorate-style.
+- `xtc.proc.spawn` -- called when any `xtc_proc` is spawned;
   observe-only (handlers cannot modify, used by tracing).
 
 Extensions use the same machinery for their own internal hooks.
@@ -2449,21 +2449,21 @@ int xtc_hook_list(xtc_hook_h_t hk, xtc_hook_info_t **handlers, int *n);
 
 Policies:
 
-- `XTC_HOOK_DECORATE` — all handlers run, in priority order; each
+- `XTC_HOOK_DECORATE` -- all handlers run, in priority order; each
   may mutate `args` and `result`.
-- `XTC_HOOK_REPLACE` — handlers run until one returns
+- `XTC_HOOK_REPLACE` -- handlers run until one returns
   `XTC_HOOK_CONSUMED`; the rest are skipped.
-- `XTC_HOOK_OBSERVE` — all handlers run; mutations to `args`
+- `XTC_HOOK_OBSERVE` -- all handlers run; mutations to `args`
   /`result` are dropped by the framework (defensive copy in
   debug builds).
-- `XTC_HOOK_FIRST_OK` — handlers run until one returns
+- `XTC_HOOK_FIRST_OK` -- handlers run until one returns
   `XTC_OK`; result is that handler's result.
 
 ### 17.3 Hook chains use RCU
 
 The handler list is an `xtc_rcu`-protected array.  Calls are
 wait-free; registration/unregistration costs an epoch.  This
-is a primary consumer of `xtc_rcu` (§2.4.4 / M13a) and one of
+is a primary consumer of `xtc_rcu` ((S)2.4.4 / M13a) and one of
 the reasons RCU is mandatory rather than optional.
 
 ### 17.4 Crash isolation
@@ -2472,9 +2472,9 @@ Handler invocation is wrapped in:
 
 - An `xtc_abort_source` so a misbehaving handler can be
   cancelled if the call exceeds `hook_handler_timeout_ms`
-  (default 5 s).
+  (default 5 s).
 - A `setjmp`/`longjmp` perimeter for `XTC_HOOK_OBSERVE`
-  handlers — a `longjmp` out of an observe handler is caught
+  handlers -- a `longjmp` out of an observe handler is caught
   and turned into a logged error rather than corrupting the
   caller.
 - A try/catch for `SIGSEGV` etc. when `--with-handler-fault-
@@ -2490,7 +2490,7 @@ Handler invocation is wrapped in:
 Each hook signature is versioned:
 
 ```c
-/* xtc/inc/hooks/pg_executor_run.h — generated */
+/* xtc/inc/hooks/pg_executor_run.h -- generated */
 #define PG_EXECUTOR_RUN_HOOK_NAME    "pg.executor.run"
 #define PG_EXECUTOR_RUN_HOOK_SIG_V1  { ... arg/return shapes ... }
 #define PG_EXECUTOR_RUN_HOOK_SIG_V2  { ... v2 with extra field ... }
@@ -2505,7 +2505,7 @@ static const xtc_hook_sig_set_t pg_executor_run_supported = {
 An extension built against v1 still registers cleanly against
 a runtime that supports v2; the framework presents the v1 view
 to the handler, fills in defaults for the new fields.  When the
-runtime drops v1 (per the deprecation policy in §18) the
+runtime drops v1 (per the deprecation policy in (S)18) the
 extension fails to register with a clear error pointing at the
 rebuild instructions.
 
@@ -2536,7 +2536,7 @@ L5 adapter:
    compatibility shim until they are migrated.
 
 This is one of the two killer features of L5 (the other being
-the AIO subsumption from §2.6).  It lets us deliver the
+the AIO subsumption from (S)2.6).  It lets us deliver the
 hardening (priority, ordering, isolation, accounting) *without*
 breaking every existing extension on day one.
 
@@ -2544,15 +2544,15 @@ breaking every existing extension on day one.
 
 ```
 src/ptc/hook/
-├── hook.c                        ← define / register / call / unregister
-├── hook_chain.c                  ← RCU-protected handler arrays
-├── hook_isolate.c                ← timeout + abort-source + fault catch
-├── hook_version.c                ← signature negotiation
-└── hook_account.c                ← per-extension accounting
+|--- hook.c                        <- define / register / call / unregister
+|--- hook_chain.c                  <- RCU-protected handler arrays
+|--- hook_isolate.c                <- timeout + abort-source + fault catch
+|--- hook_version.c                <- signature negotiation
+\--- hook_account.c                <- per-extension accounting
 
 src/inc/xtc_hook.h
-src/inc/hooks/                    ← typed signature headers, generated
-dist/s_hooks                      ← generates hooks/*.h from *.in declarations
+src/inc/hooks/                    <- typed signature headers, generated
+dist/s_hooks                      <- generates hooks/*.h from *.in declarations
 ```
 
 Lands in **M9** (basic API + decorate/replace/observe policies)
@@ -2587,7 +2587,7 @@ Versioning is `MAJOR.MINOR.PATCH`:
   knobs.  New lock modes never inserted in the middle of the
   enum.
 - **MAJOR** (`x.0.0`).  Breaking changes allowed.  Cadence is
-  intentionally slow — we target one major every 3–5 years.
+  intentionally slow -- we target one major every 3-5 years.
   An LTS designation on the previous major is committed for
   at least 18 months past the new major's release.  Migration
   guide and `xtc-migrate-1to2` tool ship with the major.
@@ -2632,7 +2632,7 @@ Why capabilities and not feature macros?  Macros are
 compile-time and assume the library you ship against is the
 library you run against.  Capabilities work even when xtc is a
 shared library swapped under the application without a
-recompile — the precise scenario for long-lived servers.
+recompile -- the precise scenario for long-lived servers.
 
 ### 18.3 Mechanical change as doctrine
 
@@ -2648,10 +2648,10 @@ up to eleven.  The full set of generators:
 | `dist/s_hooks`   | `hooks/*.h` typed signature headers | Hooks are versioned, can't be redefined silently |
 | `dist/s_globals` | Lint: forbid bare `static`/`_Thread_local` outside `os/` | No new shared globals slip in |
 | `dist/s_signals` | Lint: forbid raw signal API outside `os_signal.c` | Signal discipline is enforced |
-| `dist/s_blocking`| Lint: forbid raw blocking syscalls outside `os/`+`compat/` | The blocking-call contract (§16) is enforced |
+| `dist/s_blocking`| Lint: forbid raw blocking syscalls outside `os/`+`compat/` | The blocking-call contract ((S)16) is enforced |
 | `dist/s_noalloc` | Lint: forbid allocations in `XTC_NOALLOC` files | Hot path stays allocation-free |
 | `dist/s_meson`   | `meson.build` from `srcfiles.in` | Build files can't diverge between autoconf and meson |
-| `dist/s_abi`     | `xtc.symver` from `pubdef.in`; ABI diff at release | ABI promise (§18.1) is mechanically enforced |
+| `dist/s_abi`     | `xtc.symver` from `pubdef.in`; ABI diff at release | ABI promise ((S)18.1) is mechanically enforced |
 | `dist/s_doc`     | Reference docs from source | Docs can't drift from code |
 | `dist/s_migrate` | Migration scripts when a major bumps | Rewrites in user code are scripted |
 | `dist/s_tags`    | ctags/etags | Editor navigation works |
@@ -2668,18 +2668,18 @@ event loop.
 
 Four **ratchet files** in `dist/ratchets/`:
 
-- **`globals.txt`** — the set of legacy bare `static`/
+- **`globals.txt`** -- the set of legacy bare `static`/
   `_Thread_local` declarations grandfathered in.  Lints fail if
   any new ones appear; PRs that *remove* lines are encouraged.
   Goal: file size monotonically decreases to zero.
-- **`coverage.json`** — line and branch coverage per file.
+- **`coverage.json`** -- line and branch coverage per file.
   CI fails if a file's coverage drops below the recorded
   number.  The recorded number is updated only when a PR
   *raises* coverage.
-- **`p99.json`** — per-bench p99 latency.  CI fails if any
+- **`p99.json`** -- per-bench p99 latency.  CI fails if any
   bench regresses by more than `regression_budget` (default
   5%).  Recorded numbers update on tagged releases only.
-- **`alloc.txt`** — the maximum allocations per task in each
+- **`alloc.txt`** -- the maximum allocations per task in each
   worked-example test.  Ratchet down only.
 
 These files are committed.  They are *the* mechanism that
@@ -2695,8 +2695,8 @@ stage is one minor release at minimum:
 | Stage | Behaviour | Compiler/runtime signal |
 |---|---|---|
 | 1. Live | Documented, supported. | Nothing. |
-| 2. Soft-deprecated | Documented, supported. | `XTC_DEPRECATED_SOFT` attribute → compiler note. Doc note. |
-| 3. Deprecated | Supported, discouraged. | `XTC_DEPRECATED` attribute → compiler warning.  `xtc_cfg.warn_deprecated` (default `true`) logs runtime use. |
+| 2. Soft-deprecated | Documented, supported. | `XTC_DEPRECATED_SOFT` attribute -> compiler note. Doc note. |
+| 3. Deprecated | Supported, discouraged. | `XTC_DEPRECATED` attribute -> compiler warning.  `xtc_cfg.warn_deprecated` (default `true`) logs runtime use. |
 | 4. Default-off | Compiles only with `-DXTC_ENABLE_DEPRECATED`.  Runtime behaviour unchanged. | Build error without the flag. |
 | 5. Removed | Header `#error`'d; symbol absent. | Build error always.  Migration tool referenced in error text. |
 
@@ -2704,7 +2704,7 @@ Minimum total span: 5 minor releases (~2 years at our intended
 cadence).  Documented on the wiki per API.  Every removed
 function has a documented replacement.
 
-### 18.6 Compat test suite — the past keeps working
+### 18.6 Compat test suite -- the past keeps working
 
 `test/compat/` contains compiled-and-runnable copies of every
 worked example from every prior 1.x release.  CI builds them
@@ -2755,11 +2755,11 @@ format version we ever shipped, forever.  No flag day.
 - Every public function's doc comment carries an
   `XTC_AVAILABLE_SINCE: 1.x` tag.  `s_doc` builds a
   "what's new in 1.x" page automatically.
-- ADRs (`docs/adr/`) capture every Q-decision (Q1–Q16 of
-  §10 plus future ones).  Format: rationale, alternatives,
+- ADRs (`docs/adr/`) capture every Q-decision (Q1-Q16 of
+  (S)10 plus future ones).  Format: rationale, alternatives,
   consequences, status.  Immutable once accepted; superseded
   by a new ADR that links back.
-- Every removal in stage 5 (§18.5) has its ADR updated to
+- Every removal in stage 5 ((S)18.5) has its ADR updated to
   status `Superseded`.
 
 ### 18.10 Long-term support and the maintainer model
@@ -2780,19 +2780,19 @@ dependency is a liability.
 
 ```
 dist/
-├── ratchets/
-│   ├── globals.txt, coverage.json, p99.json, alloc.txt
-├── capabilities.in
-├── pubdef.in                    ← single source of API symbols
-├── s_abi, s_doc, s_migrate, ...
+|--- ratchets/
+|   |--- globals.txt, coverage.json, p99.json, alloc.txt
+|--- capabilities.in
+|--- pubdef.in                    <- single source of API symbols
+|--- s_abi, s_doc, s_migrate, ...
 docs/
-├── adr/                         ← architecture decision records
-├── deprecation.md
-├── abi-stability.md
-└── compat-pthread.md
+|--- adr/                         <- architecture decision records
+|--- deprecation.md
+|--- abi-stability.md
+\--- compat-pthread.md
 test/
-├── compat/                      ← frozen examples per release
-└── trace_compat/                ← span-shape diff tests
+|--- compat/                      <- frozen examples per release
+\--- trace_compat/                <- span-shape diff tests
 ```
 
 The machinery lands gradually, but the *commitments* are
@@ -2805,7 +2805,7 @@ before the first release.
 ## 19. Known gaps and roadmap
 
 Things the design has identified but not fully specified.
-Each has a target milestone; none blocks M0–M3.  This list
+Each has a target milestone; none blocks M0-M3.  This list
 lives in the plan rather than the issue tracker because the
 gaps are *architectural*: how we close them affects the
 shape of the surrounding code.
@@ -2863,7 +2863,7 @@ lands with M3 because every later milestone's tests benefit.
 - Per-test activation: "fail allocation N at site X with
   probability p".
 - Latency injection: "delay every io_uring CQE by U(0, 100
-  µs)".
+  us)".
 - Drop injection: "drop every Nth message on channel C".
 
 Enabled by configure flag `--enable-fault-injection`; compiled
@@ -2932,7 +2932,7 @@ are children spawned by `xtc_proc_spawn` with shared
 `xtc_alloc_ctx` for tuple-store handoff.  Tuple queues are
 `xtc_chan_mpsc`.  Crash of a worker is observed via monitor;
 leader cancels the rest via `xtc_abort_source`.  This warrants
-its own §14-style worked example in `docs/parallel-query.md`
+its own (S)14-style worked example in `docs/parallel-query.md`
 at M16.
 
 ### 19.11 `pgstat` / activity monitoring (M16)
@@ -2952,7 +2952,7 @@ implementation.  M16.
 ### 19.13 Foreign data wrappers (M16)
 
 The canonical "makes blocking C calls into other databases"
-case.  FDWs *must* live in the blocking pool (§16) or yield
+case.  FDWs *must* live in the blocking pool ((S)16) or yield
 through a documented async API.  An `xtc_fdw_t` interface that
 makes the choice explicit in the FDW author's contract.  M16.
 
@@ -2989,7 +2989,7 @@ toolchain supports it.  M14.
 
 ### 19.18 Hash tables and other concurrent data structures (M13a/b)
 
-- RCU-protected concurrent hash table (`xtc_chash`) —
+- RCU-protected concurrent hash table (`xtc_chash`) --
   primary RCU consumer.  M13a.
 - Concurrent skiplist (`xtc_cskip`, vendoring `~/ws/skiplist`).
   M13b.
@@ -3053,10 +3053,10 @@ annotated: `evt_loop.c`, `evt_deque.c`, `evt_timer.c`,
 
 ---
 
-## 20. PostgreSQL multithreading roadmap → xtc primitive map
+## 20. PostgreSQL multithreading roadmap -> xtc primitive map
 
 This is the single most important section of the document for the
-pitch.  Every item from the v20→v21 PG threading workplan has a
+pitch.  Every item from the v20->v21 PG threading workplan has a
 first-class xtc primitive ready (or planned).  The column on the
 right is what xtc offers; the column in the middle is what the PG
 workplan calls for.
@@ -3064,34 +3064,34 @@ workplan calls for.
 | PG workplan item | What it asks for | xtc primitive |
 |---|---|---|
 | Thread per backend / socket / session | Per-connection async dispatch on a fixed thread pool | `xtc_proc_spawn` per connection; one process per session, mailbox-driven |
-| `multithreading` GUC (on/off, runtime) | Build that supports both modes; switch at startup | `xtc_app` config flag (configure-time) + per-session adapter (runtime); see §2.6 |
+| `multithreading` GUC (on/off, runtime) | Build that supports both modes; switch at startup | `xtc_app` config flag (configure-time) + per-session adapter (runtime); see (S)2.6 |
 | Cutover to threaded-only by v21 | Underpinning that is *production* by v20 | xtc M16 (PG adapter) targets v20 dev cycle; M13a/b/c (RCU + LRLock + lock manager) lands the new primitives in time |
-| Heikki's TLS branch | Find globals via `__thread` annotations as verification harness | `XTC_TLS(type, name)` (§4.3); used as the verification harness, then converted to `XTC_PERLOOP` or moved into `xtc_proc` state |
+| Heikki's TLS branch | Find globals via `__thread` annotations as verification harness | `XTC_TLS(type, name)` ((S)4.3); used as the verification harness, then converted to `XTC_PERLOOP` or moved into `xtc_proc` state |
 | Session struct (long-term) | One struct holding all per-session state | `xtc_proc` already *is* the session struct: per-process arena, mailbox, name in `xtc_reg`.  Each PG subsystem's globals become fields on the `xtc_proc` user-data struct. |
-| Function-static memory audit | Find/redact every `static T x = init;` in a function | `XTC_FN_STATIC` macro (§4.3) + `dist/s_globals` lint forbidding bare `static`/`_Thread_local` outside `os/` |
-| Interrupt / signals / timers rewrite | Replace ad-hoc signals, get to latch-based interrupt model | §5.1: signals → mailbox messages, `xtc_notify` is the latch, hierarchical timer wheel in `evt/` for all timers; `dist/s_signals` lint forbids raw signal use |
-| Thread primitives abstraction (`port/pg_threads.h`) | Thin wrapper over C11/pthreads/Win32 for create/join/mutex/cond | L0 `os_thread.c` + `os_mutex.c` + `os_tls.c` — *exactly* this |
-| GUCs: function-call API replacing `&global` | `GetGUC<Type>`/`SetGUC<Type>` with type-dispatched store | `xtc_cfg` (§2.4.6): bool→sparsemap, int/enum→indexed array, string→hash; IDs cached at compile time by `dist/s_cfg` |
-| LWLock review for threaded mode | Tranche IDs and partition arrays survive threaded contention | `xtc_lwlock` (§13); re-benchmarked in M13b/c under threaded-mode contention before promoting |
-| RCU primitive (`pg_rcu.h`) | Read-mostly graph data, relcache/syscache | `xtc_rcu` (§2.4.4), epoch-based reclamation, wait-free readers |
-| LRLock primitive | Wait-free reads via two-copy publish/swap | `xtc_lrlock` (§2.4.4), per the RFC: writer uses inner `xtc_mutex` (not spinlock), oplog pre-allocated, drain-wait via `xtc_notify` |
+| Function-static memory audit | Find/redact every `static T x = init;` in a function | `XTC_FN_STATIC` macro ((S)4.3) + `dist/s_globals` lint forbidding bare `static`/`_Thread_local` outside `os/` |
+| Interrupt / signals / timers rewrite | Replace ad-hoc signals, get to latch-based interrupt model | (S)5.1: signals -> mailbox messages, `xtc_notify` is the latch, hierarchical timer wheel in `evt/` for all timers; `dist/s_signals` lint forbids raw signal use |
+| Thread primitives abstraction (`port/pg_threads.h`) | Thin wrapper over C11/pthreads/Win32 for create/join/mutex/cond | L0 `os_thread.c` + `os_mutex.c` + `os_tls.c` -- *exactly* this |
+| GUCs: function-call API replacing `&global` | `GetGUC<Type>`/`SetGUC<Type>` with type-dispatched store | `xtc_cfg` ((S)2.4.6): bool->sparsemap, int/enum->indexed array, string->hash; IDs cached at compile time by `dist/s_cfg` |
+| LWLock review for threaded mode | Tranche IDs and partition arrays survive threaded contention | `xtc_lwlock` ((S)13); re-benchmarked in M13b/c under threaded-mode contention before promoting |
+| RCU primitive (`pg_rcu.h`) | Read-mostly graph data, relcache/syscache | `xtc_rcu` ((S)2.4.4), epoch-based reclamation, wait-free readers |
+| LRLock primitive | Wait-free reads via two-copy publish/swap | `xtc_lrlock` ((S)2.4.4), per the RFC: writer uses inner `xtc_mutex` (not spinlock), oplog pre-allocated, drain-wait via `xtc_notify` |
 | Memory: thread-exit cleanup hook | Per-thread `proc_exit` equivalent; on fault, supervisor restarts | `xtc_proc` cleanup runs on normal exit; faults bubble up to `xtc_supervisor` which restarts per strategy.  *Exactly* the requested model. |
-| palloc / contexts review | Memory contexts that work in threaded mode | `xtc_alloc_ctx` (§4) wraps palloc inside a PG backend, falls back to `__os_malloc` outside |
-| Logging (`/var/log`) thread-safe | `errcontext` per-thread, no torn lines | `xtc_log` (§2.4.5): per-loop ring buffer, single drain task, per-task `errcontext` chain |
+| palloc / contexts review | Memory contexts that work in threaded mode | `xtc_alloc_ctx` ((S)4) wraps palloc inside a PG backend, falls back to `__os_malloc` outside |
+| Logging (`/var/log`) thread-safe | `errcontext` per-thread, no torn lines | `xtc_log` ((S)2.4.5): per-loop ring buffer, single drain task, per-task `errcontext` chain |
 | Proc number / thread id | 32-bit thread id + backwards-compat pid column | `xtc_pid_t` is already 32-bit `(loop_id << 24) \| local_id`; trivial to expose as both `pid` and `tid` |
 | `RegisterBackgroundThread()` API | Parallel to `RegisterBackgroundWorker` for in-tree users | `xtc_proc_spawn` with options is *the* worker API; `xtc_supervisor` is `RegisterBackgroundThread` for restartable workers |
 | Two-process supervisor | Thin parent restarts the multithreaded child on crash | Map: parent = `xtc_app` host process; child = a single `xtc_supervisor` rooted on the executor.  Connection acceptance moves into the child as an `xtc_proc`. |
-| `setlocale` → `uselocale` | Thread-safe locale handling | `os_locale.c` (`__os_uselocale`); bare `setlocale` lint-forbidden |
+| `setlocale` -> `uselocale` | Thread-safe locale handling | `os_locale.c` (`__os_uselocale`); bare `setlocale` lint-forbidden |
 | `strerror_r` | Thread-safe errno strings | `os_errno.c` (`__os_strerror_r`); bare `strerror` lint-forbidden |
 | `getopt_long` replacement | Re-entrant CLI parsing | `os_getopt.c` (`__os_getopt_long`) |
 | `dlerror` review | Thread-safe dynamic-load error path | `os_dl.c` (`__os_dlerror_r`) |
 | `getenv`/`setenv` audit | No racy environment writes | `os_env.c`: read-only after `xtc_app_start()`, lint-enforced |
 | `PG_THREADSAFE_EXTENSION` macro | Self-declaration of thread safety | `XTC_THREADSAFE_MODULE` macro on the L5 boundary; `_PG_thread_init`/`_PG_thread_fini` map to `xtc_proc` per-spawn hooks |
-| `xtc_supervisor` (§2.5) | `xtc_lock_dd_*` victim signal goes via `xtc_send`; supervisors handle the abort-and-retry envelope just like any other crash |
-| Tooling: lints for new globals / statics / signals / sync | CI hard-fail on regressions | `dist/s_globals`, `dist/s_signals`, `dist/s_async`, `dist/s_cfg` — all in §6.4 / §6.1 |
-| Buildfarm threaded animals | Linux x86_64, Linux aarch64, macOS, threaded mode | xtc CI matrix in §3.5 — Linux x86_64 glibc, Linux aarch64 musl, FreeBSD amd64, Windows MSVC, macOS arm64 gating; full PG-buildfarm mirror nightly |
-| TSan in CI from CF1 | Threaded mode TSan-clean | `--enable-sanitize=thread` build profile; gating on every PR per §6.2 |
-| LTO build profile | Link-time optimization | `--enable-lto` / `-Db_lto=true`; in §6.4 toolchain matrix |
+| `xtc_supervisor` ((S)2.5) | `xtc_lock_dd_*` victim signal goes via `xtc_send`; supervisors handle the abort-and-retry envelope just like any other crash |
+| Tooling: lints for new globals / statics / signals / sync | CI hard-fail on regressions | `dist/s_globals`, `dist/s_signals`, `dist/s_async`, `dist/s_cfg` -- all in (S)6.4 / (S)6.1 |
+| Buildfarm threaded animals | Linux x86_64, Linux aarch64, macOS, threaded mode | xtc CI matrix in (S)3.5 -- Linux x86_64 glibc, Linux aarch64 musl, FreeBSD amd64, Windows MSVC, macOS arm64 gating; full PG-buildfarm mirror nightly |
+| TSan in CI from CF1 | Threaded mode TSan-clean | `--enable-sanitize=thread` build profile; gating on every PR per (S)6.2 |
+| LTO build profile | Link-time optimization | `--enable-lto` / `-Db_lto=true`; in (S)6.4 toolchain matrix |
 | `THREADING.md` for core contributors | One doc on annotations, lints, GUC API, latches | `docs/threading.md` (xtc's; suitable to be lifted into `src/backend/THREADING.md`) |
 | Migration guide for extension authors | Wiki page + blog post | `docs/extensions.md` covers the L5 boundary contract |
 
@@ -3104,23 +3104,23 @@ for PG.
 
 ## 21. What I want from you before we start coding
 
-1. Sign off (or push back) on **Q1–Q16** in §10.  Defaults given.
+1. Sign off (or push back) on **Q1-Q16** in (S)10.  Defaults given.
 2. Confirm the **layer renames** (`evt`, `ptc`, `orc`) and the
    sub-renames (`xtc_svr`, `xtc_fsm`, `xtc_app`, `xtc_reg`,
    lowercase `dispatch`/`reply`/`async`/`await`/`xtc_yield`).
-3. Confirm the **platform matrix** in §3 — particularly whether
+3. Confirm the **platform matrix** in (S)3 -- particularly whether
    AIX is Tier 2 or can drop to "best-effort".
 4. Confirm **C11** as the dialect.
 5. Confirm **ISC license**.
-6. Confirm the **§12 strategy** for `async()/await()` — fiber as
+6. Confirm the **(S)12 strategy** for `async()/await()` -- fiber as
    default, protothread fallback, explicit-thunk escape, with
-   `dist/s_async` (§6.4) generating typed prototypes.
-7. Confirm the **milestone order** — particularly that M13a/b/c
+   `dist/s_async` ((S)6.4) generating typed prototypes.
+7. Confirm the **milestone order** -- particularly that M13a/b/c
    (RCU / LRLock / LWLock / lock manager benchmarking under
    threaded contention) lands *before* M16 (PG adapter) so we
    don't bake in a primitive that loses to the alternative
    under real PG-shaped contention.
-8. Confirm the **§20 mapping** — that we are explicitly framing xtc
+8. Confirm the **(S)20 mapping** -- that we are explicitly framing xtc
    as the toolbox the PG v20/v21 threading effort is going to need,
    and that any gap in the table is a redesign trigger for xtc.
 9. Anything missing?  Other PG subsystems on the threading plan I
@@ -3137,4 +3137,4 @@ Once those are settled I'll create:
 - a `make check && meson test` that runs and passes against
   a stub library on Linux/macOS/Windows CI,
 
-…and we iterate from there.
+...and we iterate from there.

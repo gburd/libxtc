@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/m4/test_m4_man.sh — D10
+# test/m4/test_m4_man.sh -- D10
 set -eu
 : "${XTC_SRC_DIR:?}"
 

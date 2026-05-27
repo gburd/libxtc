@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/conformance/w1_spawn/tokio/src/main.rs
- *   M17 W1 — spawn-N-await-all, Tokio runtime.
+ *   M17 W1 -- spawn-N-await-all, Tokio runtime.
  *
  *   Spawns N tokio tasks; each task does trivial work (increments an
  *   atomic counter).  Waits for all tasks via join_all, then emits one
@@ -86,7 +86,7 @@ fn cpu_us() -> u64 {
             if fields.len() > 14 {
                 let utime: u64 = fields[13].parse().unwrap_or(0);
                 let stime: u64 = fields[14].parse().unwrap_or(0);
-                // jiffies → microseconds (assume HZ=100 → 10 ms per jiffy)
+                // jiffies -> microseconds (assume HZ=100 -> 10 ms per jiffy)
                 let hz: u64 = 100;
                 return (utime + stime) * 1_000_000 / hz;
             }

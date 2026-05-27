@@ -1,10 +1,10 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
  *
- * test/m2/test_net.c — verifies M19.1 networking helpers.
+ * test/m2/test_net.c -- verifies M19.1 networking helpers.
  */
 
 #include <pthread.h>
@@ -146,7 +146,7 @@ test_uds_listen_dial(const MunitParameter p[], void *d)
 		munit_assert_size(got, ==, 5);
 		munit_assert_int(memcmp(rxbuf, "hello", 5), ==, 0);
 		/* uid should match our own (Linux/BSD only); on stub
-		 * platforms it's 0 — both are acceptable. */
+		 * platforms it's 0 -- both are acceptable. */
 		(void)uid; (void)gid;
 	}
 

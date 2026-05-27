@@ -1,6 +1,6 @@
-# XTC — Process this file with autoconf to produce a configure script.
+# XTC -- Process this file with autoconf to produce a configure script.
 #
-# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Copyright (c) 2026, The XTC Project
 # Use of this source code is governed by the ISC License.
 
 AC_INIT([xtc],
@@ -200,7 +200,7 @@ case "$xtc_tls" in
       [xtc_tls_backend=none])
     ;;
   openssl)
-    # Explicit request — fail loudly if not present.
+    # Explicit request -- fail loudly if not present.
     ac_save_LIBS=$LIBS
     AC_CHECK_LIB([ssl], [SSL_CTX_new], [],
       [AC_MSG_ERROR([--with-tls=openssl: libssl not found])], [-lcrypto])

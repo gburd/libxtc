@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/conformance/w4_mutex/xtc/main.c
- *   W4: mutex contention benchmark — xtc runtime.
+ *   W4: mutex contention benchmark -- xtc runtime.
  *
  *   N pthreads contend for a shared counter protected by one of three
  *   primitives: xtc_amutex (async-parking mutex from xtc_sync),
@@ -23,7 +23,7 @@
  *   ./bench                              # all three prims, threads=8, ops=100000
  *   ./bench --prim=lwlock                # single primitive, one output line
  *   ./bench --threads=4 --ops=10000 --prim=lwlock
- *   ./bench --sweep=1                    # threads=1,2,4,8,16,32 × all prims
+ *   ./bench --sweep=1                    # threads=1,2,4,8,16,32 x all prims
  *   ./bench --sweep=1 --prim=osmutex     # sweep for one primitive only
  */
 
@@ -106,7 +106,7 @@ hist_merge(hist_t *dst, const hist_t *src)
 }
 
 /* -------------------------------------------------------------------------
- * Lock abstraction — wraps the three xtc primitives behind a uniform API
+ * Lock abstraction -- wraps the three xtc primitives behind a uniform API
  * ------------------------------------------------------------------------- */
 
 typedef struct {
@@ -252,7 +252,7 @@ worker_fn(void *arg_)
 }
 
 /* -------------------------------------------------------------------------
- * run_bench — run one (prim, threads, ops) tuple and emit one M17 line
+ * run_bench -- run one (prim, threads, ops) tuple and emit one M17 line
  * ------------------------------------------------------------------------- */
 
 static void

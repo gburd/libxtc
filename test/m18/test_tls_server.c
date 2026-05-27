@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
@@ -30,7 +30,7 @@
 #include "xtc_tls.h"
 
 /* =========================================================================
- * OpenSSL-backend branch — full implementation.
+ * OpenSSL-backend branch -- full implementation.
  * ======================================================================= */
 #if defined(XTC_TLS_BACKEND_OPENSSL)
 
@@ -317,7 +317,7 @@ test_server_ctx_create_destroy(const MunitParameter params[], void *data)
 /* -------------------------------------------------------------------------
  * test_server_handshake_roundtrip:
  *   Full loopback:
- *     - socketpair → non-blocking server fd + blocking client fd
+ *     - socketpair -> non-blocking server fd + blocking client fd
  *     - client thread: SSL_connect, read "hello", echo back
  *     - server: xtc_tls_handshake loop, write "hello", read echo
  *     - assert echo == "hello"
@@ -384,7 +384,7 @@ test_server_handshake_roundtrip(const MunitParameter params[], void *data)
     munit_assert_memory_equal(CLIENT_MSG_LEN, rbuf, "hello");
 
     /* ---- server: graceful shutdown ---- */
-    /* Call once to send close_notify; do not loop — peer may not have
+    /* Call once to send close_notify; do not loop -- peer may not have
      * sent theirs yet, and the test does not need the full bidir close. */
     (void)xtc_tls_shutdown(tls);
 
@@ -496,7 +496,7 @@ test_server_bad_cert_path(const MunitParameter params[], void *data)
 }
 
 /* =========================================================================
- * Suite setup / teardown — write/remove temp PEM files.
+ * Suite setup / teardown -- write/remove temp PEM files.
  * ======================================================================= */
 
 static void *
@@ -544,7 +544,7 @@ static const MunitSuite suite = {
     "/m18/tls_server", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE
 };
 
-#else  /* !XTC_TLS_BACKEND_OPENSSL — skip stubs */
+#else  /* !XTC_TLS_BACKEND_OPENSSL -- skip stubs */
 
 /*
  * TLS backend not compiled in.  Each test function returns MUNIT_SKIP

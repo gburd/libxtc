@@ -1,8 +1,8 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m13/test_rcu.c — verifies M13a epoch reclamation.
+ * test/m13/test_rcu.c -- verifies M13a epoch reclamation.
  */
 
 #include <pthread.h>

@@ -1,11 +1,11 @@
-# macOS via KVM (osx-kvm) — buildfarm integration
+# macOS via KVM (osx-kvm) -- buildfarm integration
 
 This document describes how to run an xtc CI build on macOS without a
 physical Mac, using the OSX-KVM project on a Linux/AMD64 host.
 
 ## Why
 
-xtc has Tier-1 platform support for macOS (per PLAN.md §3), but no
+xtc has Tier-1 platform support for macOS (per PLAN.md (S)3), but no
 physical Mac in the current buildfarm.  KVM virtualization gives us
 a host-agnostic CI path until we can dedicate a Mac mini.
 
@@ -22,7 +22,7 @@ A Linux host with:
 
 - KVM (`/dev/kvm` exists), QEMU 8+, and a CPU that supports SSE 4.2
   + AVX2 (Haswell or newer Intel; modern AMD CPUs lack some macOS-
-  required SSE extensions and need extra coaxing — Intel preferred).
+  required SSE extensions and need extra coaxing -- Intel preferred).
 - ~80 GB free disk (macOS image + work disks).
 - 8+ GB RAM the VM can claim.
 - Network: NAT bridge or `virbr0` for outbound.
@@ -35,7 +35,7 @@ git clone --depth 1 https://github.com/kholia/OSX-KVM.git
 cd OSX-KVM
 # 1. Pick a macOS version (Sonoma 14 / Sequoia 15 are current).
 ./fetch-macOS-v2.py     # interactive: choose Sonoma
-./create-image.sh       # writes BaseSystem.img → mac_hdd_ng.img
+./create-image.sh       # writes BaseSystem.img -> mac_hdd_ng.img
 
 # 2. Adjust OpenCore-Boot.sh for your host:
 #    - CPUID set; many modern Intel CPUs already pass.
@@ -51,7 +51,7 @@ cd OSX-KVM
 
 # 4. Subsequent boots:
 ./OpenCore-Boot.sh &     # boots headless if VNC viewer unused
-ssh -p 2222 user@localhost   # default port-forward 2222→22
+ssh -p 2222 user@localhost   # default port-forward 2222->22
 ```
 
 ## xtc-specific provisioning
@@ -120,12 +120,12 @@ done
 When the macOS path is wired up, expect these adjustments (informed
 by what we already saw on FreeBSD/illumos):
 
-1. **`<sys/mman.h>`** present — slab.c and lock_lr.c are fine.
-2. **`<execinfo.h>`** present — `XTC_HAS_EXECINFO` detection should
+1. **`<sys/mman.h>`** present -- slab.c and lock_lr.c are fine.
+2. **`<execinfo.h>`** present -- `XTC_HAS_EXECINFO` detection should
    probably be widened from `__GLIBC__` to "glibc OR Darwin" in
    `src/ptc/slab.c`.  Trivial follow-up.
 3. **`SO_REUSEPORT`** present.  **`SO_PEERCRED`** absent; `LOCAL_PEERCRED`
-   present — the existing `_BSD_VISIBLE` branch in `xtc_net_unix_recv_creds`
+   present -- the existing `_BSD_VISIBLE` branch in `xtc_net_unix_recv_creds`
    handles it.
 4. **kqueue** is the auto-detected backend; verify the existing
    `io_kqueue.c` round-3 dedup logic still passes on macOS. Our
@@ -135,7 +135,7 @@ by what we already saw on FreeBSD/illumos):
    `XTC_MUSTTAIL` no-op fallback already covers this.
 6. **fctx assembler**: `fctx_x86_64_sysv.S` works on Intel macs.
    For Apple Silicon (M1/M2 in a hypothetical bare-metal Mac mini),
-   we'll need an `fctx_aarch64_aapcs.S` port — out of scope for KVM
+   we'll need an `fctx_aarch64_aapcs.S` port -- out of scope for KVM
    since KVM macOS only runs on Intel.
 
 ## Cost / time

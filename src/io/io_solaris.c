@@ -1,11 +1,11 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/io/io_solaris.c
  *	Solaris / illumos event-ports backend.
  *
- *	port_associate semantics: each association is one-shot — once
+ *	port_associate semantics: each association is one-shot -- once
  *	an event fires, the registration is automatically dropped, and
  *	must be re-armed if the caller wants to keep watching.  We
  *	carry the per-fd interest mask + tag in a small side table
@@ -190,7 +190,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		if (rc < 0) {
 			if (errno == EINTR) continue;
 			/* On illumos, ETIME with got > 0 means partial delivery
-			 * — keep what we got and return.  ETIME with got == 0
+			 * -- keep what we got and return.  ETIME with got == 0
 			 * is a normal poll timeout. */
 			if (errno == ETIME) {
 				if (got == 0) { *n_out = 0; return XTC_OK; }

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/ptc/lock_mgr.c
@@ -1054,7 +1054,7 @@ xtc_lockmgr_check_deadlocks(xtc_lockmgr_t *m, int *n_aborted)
 		if (cycle_in < 0) break;
 		victim = __dd_pick_victim(m, st, cycle_in, parent);
 		if (victim < 0) {
-			/* EXPIRE policy with no expired victim — break out. */
+			/* EXPIRE policy with no expired victim -- break out. */
 			st->nodes[cycle_in].out_first = -1;
 			continue;
 		}

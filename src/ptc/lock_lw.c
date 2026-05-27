@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
@@ -11,21 +11,21 @@
  *	Differences from PG:
  *	  - The wait queue is a pthread_cond rather than PG's proclist of
  *	    PGPROC latches.  pthread_cond_broadcast wakes all waiters and
- *	    they re-CAS — equivalent to PG's wake_one-then-retry pattern
+ *	    they re-CAS -- equivalent to PG's wake_one-then-retry pattern
  *	    after we've released the lock, just less precise.  Acceptable
  *	    for the xtc workload mix; LWLock is not a heavy-contention
  *	    primitive in xtc (use lockmgr or lrlock for those).
  *	  - LW_FLAG_WAKE_IN_PROGRESS / LW_FLAG_QUEUE_LOCKED are kept for
  *	    state-encoding parity but only one of them is used (queue
  *	    serialisation lives in the pthread_mutex).
- *	  - No global held-LWLocks list (held_lwlocks[]) — xtc has no
+ *	  - No global held-LWLocks list (held_lwlocks[]) -- xtc has no
  *	    transaction-error backstop equivalent to PG's
  *	    LWLockReleaseAll, and the lockmgr has its own deadlock
  *	    detection.  Held-by-me checks use a TLS slot bitmap.
  *	  - No tranches as a name registry; the `tranche` field is
  *	    user-tag only.
  *
- *	Reference: PG's lwlock.c §"State management".
+ *	Reference: PG's lwlock.c (S)"State management".
  */
 
 #include "xtc_int.h"
@@ -116,11 +116,11 @@ __try_attempt(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 
 		if (mode == XTC_LW_EXCLUSIVE) {
 			if ((old_state & LW_LOCK_MASK) != 0)
-				return 0;        /* held shared or exclusive — block */
+				return 0;        /* held shared or exclusive -- block */
 			desired = old_state + LW_VAL_EXCLUSIVE;
 		} else {
 			if ((old_state & LW_VAL_EXCLUSIVE) != 0)
-				return 0;        /* held exclusive — block */
+				return 0;        /* held exclusive -- block */
 			desired = old_state + LW_VAL_SHARED;
 		}
 
@@ -246,7 +246,7 @@ xtc_lwlock_release(xtc_lwlock_t *lock)
 		if (lock->n_waiters > 0) {
 			(void)pthread_cond_broadcast(&lock->wait_cv);
 		} else {
-			/* Clear the HAS_WAITERS flag — no one is queued. */
+			/* Clear the HAS_WAITERS flag -- no one is queued. */
 			uint32_t s = atomic_load_explicit(&lock->state,
 			    memory_order_relaxed);
 			while ((s & LW_FLAG_HAS_WAITERS) != 0) {

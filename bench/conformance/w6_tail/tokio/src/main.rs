@@ -1,13 +1,13 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * bench/conformance/w6_tail/tokio/src/main.rs
- *   W6: tail latency under backpressure — Tokio runtime.
+ *   W6: tail latency under backpressure -- Tokio runtime.
  *
  *   N generator tasks each try to acquire an OwnedSemaphorePermit from a
  *   Semaphore(cap) using try_acquire_owned() (non-blocking).  If the cap
- *   is exhausted the task records a rejection and immediately continues —
+ *   is exhausted the task records a rejection and immediately continues --
  *   no waiting.  If the permit is obtained the task bundles it with a
  *   send-timestamp into a Msg and pushes it onto an unbounded MPSC channel
  *   to the consumer task.  The consumer receives each Msg, records the
@@ -143,7 +143,7 @@ async fn main() {
         while let Some(msg) = rx.recv().await {
             let lat_ns = msg.ts.elapsed().as_nanos() as u64;
             hist.record(lat_ns).unwrap_or(());
-            /* msg dropped here: _permit released → Semaphore slot freed */
+            /* msg dropped here: _permit released -> Semaphore slot freed */
         }
 
         hist
@@ -175,7 +175,7 @@ async fn main() {
                     Err(_) => {
                         /*
                          * TryAcquireError::NoPermits: cap is exhausted.
-                         * Record rejection and continue — no blocking.
+                         * Record rejection and continue -- no blocking.
                          *
                          * Yield to the Tokio scheduler so the consumer
                          * task gets CPU time to drain messages and release
@@ -189,7 +189,7 @@ async fn main() {
                 }
             }
             /* tx_clone dropped here; when last generator finishes all
-             * clones are gone, rx.recv() returns None → consumer exits */
+             * clones are gone, rx.recv() returns None -> consumer exits */
         }));
     }
 

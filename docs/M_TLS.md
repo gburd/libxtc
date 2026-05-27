@@ -1,4 +1,4 @@
-# M_TLS — Transport Layer Security design
+# M_TLS -- Transport Layer Security design
 
 **Status:** research; not yet implemented.  This document describes
 the proposed `xtc_tls_t` API, the configure-time backend pluggability,
@@ -64,7 +64,7 @@ int  xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n
 int  xtc_tls_wants_read (const xtc_tls_t *tls);
 int  xtc_tls_wants_write(const xtc_tls_t *tls);
 
-/* Graceful shutdown — sends close_notify; may need multiple calls. */
+/* Graceful shutdown -- sends close_notify; may need multiple calls. */
 int  xtc_tls_shutdown(xtc_tls_t *tls);
 ```
 
@@ -72,7 +72,7 @@ int  xtc_tls_shutdown(xtc_tls_t *tls);
 
 `configure --with-tls=BACKEND` picks the backend at compile time.
 Default: `auto`, which tries OpenSSL first, BoringSSL, then disables
-TLS if neither is available.  No runtime selection — same discipline
+TLS if neither is available.  No runtime selection -- same discipline
 as `xtc_io` backends.
 
 ```sh
@@ -102,7 +102,7 @@ typedef struct xtc_tls_vtable {
 } xtc_tls_vtable_t;
 ```
 
-This vtable is **not** runtime-dispatched on the hot path — it's
+This vtable is **not** runtime-dispatched on the hot path -- it's
 selected at configure time, exactly like `XTC_IO_BACKEND_*`.  The
 preprocessor inlines the right impl.
 
@@ -147,20 +147,20 @@ OpenSSL allocates internally via `OPENSSL_malloc`.  We:
 
 ## Open questions
 
-1. **Vendoring** — do we vendor BoringSSL or require system?
+1. **Vendoring** -- do we vendor BoringSSL or require system?
    Recommendation: system-only for v1; vendoring adds 100 MB to
    the source tree.
 
-2. **mTLS** — verify_peer + client cert workflow is in scope; we
+2. **mTLS** -- verify_peer + client cert workflow is in scope; we
    need a `xtc_tls_set_client_cert(tls, cert, key)` for client
    role.  (Optional in v1.)
 
-3. **SNI / ALPN** — both must work in v1; modern HTTP/2 / gRPC
+3. **SNI / ALPN** -- both must work in v1; modern HTTP/2 / gRPC
    demands them.
 
-4. **TLS 1.3 0-RTT** — out of scope for v1; revisit if needed.
+4. **TLS 1.3 0-RTT** -- out of scope for v1; revisit if needed.
 
-5. **Session resumption tickets** — out of scope for v1.
+5. **Session resumption tickets** -- out of scope for v1.
 
 ## Effort estimate
 
@@ -183,7 +183,7 @@ Adding 4 more backends doubles that.
 When greenlit:
 
 1. Ship `xtc_tls.h` + OpenSSL backend only.
-2. Add 1 example: `examples/05_tls_echo.c` — a TLS echo server +
+2. Add 1 example: `examples/05_tls_echo.c` -- a TLS echo server +
    client.  ~150 lines each.
 3. Tag a v0.3.0 once landed.
 

@@ -3,7 +3,7 @@ name = "bench"
 version = "0.1.0"
 edition = "2021"
 
-# ISC License — see LICENSE in the repository root.
+# ISC License -- see LICENSE in the repository root.
 
 [[bin]]
 name = "bench"

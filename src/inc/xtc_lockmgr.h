@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_lockmgr.h
@@ -12,7 +12,7 @@
  *	callers can supply their own (e.g. a 5-mode subset, or the BDB
  *	"CDB" 5-mode for concurrent data store, or the PG 8-mode set).
  *
- *	Default 9×9 conflict matrix (1 = conflict, 0 = compatible),
+ *	Default 9x9 conflict matrix (1 = conflict, 0 = compatible),
  *	verbatim from libdb's `db_riw_conflicts`:
  *
  *	         NL   S   X   WT  IX  IS  IWR RU  WW
@@ -27,15 +27,15 @@
  *	    WW    0   1   1   0   1   1   1   0   1   (was-written)
  *
  *	Mode encyclopedia:
- *	  NL  — no lock granted (placeholder)
- *	  S   — shared / read
- *	  X   — exclusive / write
- *	  WT  — wait placeholder; not granted, doesn't block
- *	  IX  — intent exclusive (will lock children with X)
- *	  IS  — intent shared
- *	  IWR — intent read+write (combo, used by index access)
- *	  RU  — read-uncommitted (degree-1 isolation; sees dirty writes)
- *	  WW  — was-written (released X but txn not committed; blocks
+ *	  NL  -- no lock granted (placeholder)
+ *	  S   -- shared / read
+ *	  X   -- exclusive / write
+ *	  WT  -- wait placeholder; not granted, doesn't block
+ *	  IX  -- intent exclusive (will lock children with X)
+ *	  IS  -- intent shared
+ *	  IWR -- intent read+write (combo, used by index access)
+ *	  RU  -- read-uncommitted (degree-1 isolation; sees dirty writes)
+ *	  WW  -- was-written (released X but txn not committed; blocks
  *	        new readers but not other ex-writers in the same view)
  *
  *	Deadlock detection runs periodically by default; callers can

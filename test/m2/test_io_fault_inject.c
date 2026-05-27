@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.

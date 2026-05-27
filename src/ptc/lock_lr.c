@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/ptc/lock_lr.c
@@ -13,7 +13,7 @@
  *	    can MADV_FREE pages back to the OS in COW mode.
  *	  - SeqCst fence on the read path uses C11 atomic_thread_fence.
  *	  - No shared-memory init-in-place variant (xtc has no shmem
- *	    request system yet — coming in M16 for the PG adapter).
+ *	    request system yet -- coming in M16 for the PG adapter).
  *	  - XTC_LRLOCK_COW: data[1] is allocated lazily on first
  *	    write_begin, and posix_madvise(MADV_FREE) is called on the
  *	    stale copy after publish so the OS can reclaim its pages.
@@ -72,9 +72,11 @@ __slot_for(xtc_lrlock_t *lr)
 	return __my_global_slot;
 }
 
-/* ---- cache-line padded epoch entry ---- */
-
-#define XTC_CACHE_LINE  64
+/* ---- cache-line padded epoch entry ----
+ * Use the central XTC_CACHE_LINE definition from xtc_int.h.
+ * This ensures each reader's epoch counter is on its own cache
+ * line, avoiding false sharing between concurrent readers.
+ */
 
 typedef union epoch_entry {
 	struct {
@@ -83,6 +85,10 @@ typedef union epoch_entry {
 	};
 	char pad[XTC_CACHE_LINE];
 } epoch_entry_t;
+
+/* Compile-time check: epoch_entry_t must be exactly one cache line. */
+_Static_assert(sizeof(epoch_entry_t) == XTC_CACHE_LINE,
+    "epoch_entry_t must be cache-line sized");
 
 /* ---- oplog header per entry ---- */
 
@@ -393,7 +399,7 @@ xtc_lrlock_read_begin(xtc_lrlock_t *lr)
 	/* Step 2: bump our epoch to odd. */
 	(void)atomic_fetch_add_explicit(&lr->epochs[slot].epoch, 1u,
 	    memory_order_acq_rel);
-	/* Step 3: SeqCst fence — guarantees writer sees our odd epoch
+	/* Step 3: SeqCst fence -- guarantees writer sees our odd epoch
 	 * before we observe the current read_idx. */
 	atomic_thread_fence(memory_order_seq_cst);
 	/* Step 4: load read_idx. */
@@ -478,7 +484,7 @@ __publish_common(xtc_lrlock_t *lr, int force_full_sync)
 		 * the very first swap, so apply_op'd state is replayed on
 		 * top of a known-good base.  In force_full_sync mode the
 		 * caller is treating the write copy as authoritative, so
-		 * we skip this step — the post-swap sync below will copy
+		 * we skip this step -- the post-swap sync below will copy
 		 * the writer's state to the now-stale buffer. */
 		old_idx = (int)atomic_load_explicit(&lr->read_idx,
 		    memory_order_relaxed);

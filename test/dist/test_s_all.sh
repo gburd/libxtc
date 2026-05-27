@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/dist/test_s_all.sh — T1
+# test/dist/test_s_all.sh -- T1
 set -eu
 : "${XTC_SRC_DIR:?}"
 cd "$XTC_SRC_DIR"

@@ -9,7 +9,7 @@ Updated end of M_PORT round 4.
 | **Linux x86_64** (epoll/uring/gcc14) | clean, no warnings | **151 / 151** munit + 11 PBT + 22 shell |
 | **FreeBSD 15 amd64** (kqueue/clang19) | clean, no warnings | full test suite tracked across rounds |
 | **OpenIndiana SPARC** (poll *and* port_*/gcc13) | clean | 132/132 with native event-port backend (full parity) |
-| **Windows 11 ARM64 / MinGW-W64 x64** (IOCP/gcc) | clean | 31/36 — test_fctx now passes (Win64 fcontext asm working); 4 io_* tests blocked on IOCP CRT-fd-vs-HANDLE mismatch (round 3 work); 1 test_proc subtest needs separate fix |
+| **Windows 11 ARM64 / MinGW-W64 x64** (IOCP/gcc) | clean | 31/36 -- test_fctx now passes (Win64 fcontext asm working); 4 io_* tests blocked on IOCP CRT-fd-vs-HANDLE mismatch (round 3 work); 1 test_proc subtest needs separate fix |
 | **AIX** (pollset/xlc or gcc-aix) | code-complete, untested | `src/io/io_aix.c` implements `pollset_create`/`pollset_ctl`/`pollset_poll`; awaits AIX host for runtime verification |
 
 ## Linux (control)
@@ -50,22 +50,22 @@ port backend.  Full parity with Linux/FreeBSD.
 Round 1 of the Windows port shipped an end-to-end working IOCP backend.
 Substantial new code:
 
-* `src/evt/coro_winfiber.c` — Win32 fiber substrate (CreateFiberEx /
+* `src/evt/coro_winfiber.c` -- Win32 fiber substrate (CreateFiberEx /
   SwitchToFiber / ConvertThreadToFiber).  Mirror of `coro_uctx.c`.
-* `src/io/io_iocp.c` — real IOCP backend.  Wakeup uses
+* `src/io/io_iocp.c` -- real IOCP backend.  Wakeup uses
   `PostQueuedCompletionStatus` with completion-key `XTC_IOCP_KEY_WAKEUP`.
   User fds use `WSAEventSelect` + `WaitForMultipleObjects` for
   readiness emulation (round 2 will swap this for AFD/
   `NtDeviceIoControlFile` for native-IOCP performance).
-* `src/io/io_common.c` — Windows path drops the socket-pair self-pipe
+* `src/io/io_common.c` -- Windows path drops the socket-pair self-pipe
   entirely (IOCP wakeup is the post-completion).
-* `src/os/os_alloc.c` — Windows routes ALL allocations through
+* `src/os/os_alloc.c` -- Windows routes ALL allocations through
   `_aligned_malloc` / `_aligned_realloc` / `_aligned_free` (alignment
   16) so the hook surface remains symmetric.
-* `src/os/os_cpu.c` — Windows uses `GetSystemInfo`.
-* `dist/configure.ac` — adds `-lws2_32` to LIBS on `*-mingw*`/
+* `src/os/os_cpu.c` -- Windows uses `GetSystemInfo`.
+* `dist/configure.ac` -- adds `-lws2_32` to LIBS on `*-mingw*`/
   `*-cygwin*`/`*-msys*`.
-* `src/os/asm/fctx_x86_64_sysv.S` — guarded with `#if !defined(_WIN32)`
+* `src/os/asm/fctx_x86_64_sysv.S` -- guarded with `#if !defined(_WIN32)`
   so the SysV asm stubs out (Win64 ABI is incompatible).
 
 **Results: 30/35 tests passing.**  All pure-C and locked-primitive tests
@@ -100,9 +100,9 @@ switch.  The **default** fiber path (Win32 fibers) is fully working.
 
 ## Future port matrix items
 
-* AIX `pollset_*` — same pattern as illumos's `port_*`, simpler
+* AIX `pollset_*` -- same pattern as illumos's `port_*`, simpler
   semantics.  ~150 LOC.
-* macOS — should mostly work via kqueue + Mach-O fcontext asm
+* macOS -- should mostly work via kqueue + Mach-O fcontext asm
   variant.
 * CMake-on-Windows alternative configure path so MSYS2-pacman or
   Strawberry Perl users without autoconf can build.

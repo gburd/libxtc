@@ -1,5 +1,5 @@
 #!/bin/sh
-# test/dist/test_s_cfg.sh — verify dist/s_cfg passes (or notes
+# test/dist/test_s_cfg.sh -- verify dist/s_cfg passes (or notes
 # absence of docs/cfg.md).
 set -eu
 

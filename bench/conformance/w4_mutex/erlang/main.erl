@@ -1,16 +1,16 @@
 #!/usr/bin/env escript
 %%!
 %%-
-%% Copyright (c) 2026, The XTC Project — All rights reserved.
+%% Copyright (c) 2026, The XTC Project
 %% Use of this source code is governed by the ISC License.
 %%
 %% bench/conformance/w4_mutex/erlang/main.erl
-%%   W4: mutex contention benchmark — Erlang runtime.
+%%   W4: mutex contention benchmark -- Erlang runtime.
 %%
 %%   Erlang has no first-class mutex.  The idiomatic serialization
 %%   mechanism is a single-process actor: all writers send a message to
 %%   a coordinator process which processes them one at a time (increment
-%%   and reply) — this is Erlang's natural mutex substitute.
+%%   and reply) -- this is Erlang's natural mutex substitute.
 %%
 %%   N worker processes each run a tight loop: send {incr, self()} to
 %%   the coordinator, wait for {ack}, repeat ops/N times.  Per-round-
@@ -87,7 +87,7 @@ main(Args) ->
          P50, P95, P99, P999]).
 
 %% -------------------------------------------------------------------------
-%% coordinator — the Erlang "mutex"
+%% coordinator -- the Erlang "mutex"
 %%   Signals readiness, then serialises all {incr, From} requests.
 %%   Responds to {get_count, From} without incrementing.
 %%   Exits cleanly on 'stop'.
@@ -110,7 +110,7 @@ coordinator_loop(Counter) ->
     end.
 
 %% -------------------------------------------------------------------------
-%% worker — one writer process
+%% worker -- one writer process
 %%   Sends PerWorker increments to the coordinator, sampling 1-in-1000
 %%   for latency, then sends {done, Latencies} to Parent.
 %% -------------------------------------------------------------------------
@@ -140,7 +140,7 @@ worker_loop(Coord, Remaining, SampleN, Acc) ->
     worker_loop(Coord, Remaining - 1, SampleN + 1, NewAcc).
 
 %% -------------------------------------------------------------------------
-%% collect_workers — receive N {done, Latencies} messages from workers
+%% collect_workers -- receive N {done, Latencies} messages from workers
 %% -------------------------------------------------------------------------
 
 collect_workers(0, Acc) ->
@@ -152,7 +152,7 @@ collect_workers(N, Acc) ->
     end.
 
 %% -------------------------------------------------------------------------
-%% nth_pct — pct-th percentile from a sorted list
+%% nth_pct -- pct-th percentile from a sorted list
 %% -------------------------------------------------------------------------
 
 nth_pct(_Sorted, 0, _Pct) ->
@@ -163,7 +163,7 @@ nth_pct(Sorted, Len, Pct) ->
     lists:nth(Idx, Sorted).
 
 %% -------------------------------------------------------------------------
-%% rss_kb — peak RSS in KiB from /proc/self/status (Linux); 0 if unavailable
+%% rss_kb -- peak RSS in KiB from /proc/self/status (Linux); 0 if unavailable
 %% -------------------------------------------------------------------------
 
 rss_kb() ->

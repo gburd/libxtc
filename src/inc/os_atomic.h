@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/os_atomic.h
@@ -7,7 +7,7 @@
  *	by default; no relaxed orderings exposed in M1.
  *
  *	Variants are provided for int32_t, int64_t, uint32_t, uint64_t,
- *	and void*.  See M1_CLAIMS.md, A1–A8.
+ *	and void*.  See M1_CLAIMS.md, A1-A8.
  */
 
 #ifndef XTC_OS_ATOMIC_H

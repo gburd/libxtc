@@ -1,4 +1,4 @@
-# M17 — Conformance benchmarks vs Tokio + Erlang
+# M17 -- Conformance benchmarks vs Tokio + Erlang
 
 **Status:** research; not yet implemented.  This document outlines
 the conformance + benchmark plan so we can publish credible
@@ -7,8 +7,8 @@ production-ready.
 
 ## Goal
 
-Demonstrate that xtc's primitives match — within a constant factor
-— the behaviour and performance of equivalent Tokio (async Rust)
+Demonstrate that xtc's primitives match -- within a constant factor
+-- the behaviour and performance of equivalent Tokio (async Rust)
 and Erlang (BEAM) idioms, on a small set of canonical workloads.
 
 If we cannot show parity, we surface where the gap is and decide
@@ -22,7 +22,7 @@ whether to close it or document the trade-off.
 | W2 | echo server, 1k clients, 10k req/sec | network throughput |
 | W3 | mailbox ping-pong (N=1M messages) | actor latency |
 | W4 | mutex contention (N writers) | sync primitive cost |
-| W5 | reader/writer ratio sweep (1:1 → 100:1) | rwlock vs lrlock |
+| W5 | reader/writer ratio sweep (1:1 -> 100:1) | rwlock vs lrlock |
 | W6 | tail latency under backpressure (M19.4 res) | p99/p999 |
 | W7 | timer wheel (N=100k pending timers) | scheduler accuracy |
 
@@ -79,19 +79,19 @@ yet; M19.4 candidate).
 
 For each (workload, primitive) pair we check:
 
-1. **Correctness** — output values match a reference oracle.
-2. **Throughput** — within 50% of the best of the three runtimes.
-3. **Tail latency** — p99 within 2× the best.
-4. **Memory** — peak RSS within 2× the best.
+1. **Correctness** -- output values match a reference oracle.
+2. **Throughput** -- within 50% of the best of the three runtimes.
+3. **Tail latency** -- p99 within 2x the best.
+4. **Memory** -- peak RSS within 2x the best.
 
 A failure on any of these flags an architectural concern and
 becomes a tracking issue.  We do **not** hide failing benchmarks;
-we publish them as "xtc currently 4× slower than Tokio on W3".
+we publish them as "xtc currently 4x slower than Tokio on W3".
 
 ## Tooling
 
 ```sh
-# benches/conformance/run.sh runs all 21 (= 7 workloads × 3 runtimes)
+# benches/conformance/run.sh runs all 21 (= 7 workloads x 3 runtimes)
 # binaries and produces a CSV.
 
 ./benches/conformance/run.sh > results.csv
@@ -103,7 +103,7 @@ rolling artifact so we can track progress over time.
 
 ## Open questions
 
-1. **Erlang ping-pong overhead** — Erlang processes are ~300 bytes;
+1. **Erlang ping-pong overhead** -- Erlang processes are ~300 bytes;
    xtc procs are ~512 bytes (with mailbox + monitor lists).  Is the
    gap acceptable?  Need a memory-shrink pass on `struct xtc_proc`
    if not.
@@ -113,7 +113,7 @@ rolling artifact so we can track progress over time.
    benchmark task creation sequentially or via a contention
    harness?  (Both, if budget allows.)
 
-3. **Fair benchmarking** — Tokio uses an MPSC channel for
+3. **Fair benchmarking** -- Tokio uses an MPSC channel for
    backpressure; Erlang uses bounded mailboxes; xtc uses
    `xtc_chan_mpsc` + `xtc_res`.  Each runtime's idiom is
    different; we should compare "what each runtime would write"
@@ -127,7 +127,7 @@ rolling artifact so we can track progress over time.
 | 7 Tokio benchmarks | ~1500 | 5 |
 | 7 Erlang benchmarks | ~1000 | 3 |
 | run.sh + plot.py | ~300 | 2 |
-| First-run analysis | — | 5 |
+| First-run analysis | -- | 5 |
 
 Total: ~20 person-days (~1 month) for a credible first-pass
 publication.

@@ -1,10 +1,10 @@
 /*-
- * Copyright (c) 2026, The XTC Project — All rights reserved.
+ * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
  * src/evt/task.c
  *	Task spawn / waker / park-on-{timer,fd}.
- *	See M3_CLAIMS.md, Ts1–Ts6, Wk1–Wk4, Io1–Io3.
+ *	See M3_CLAIMS.md, Ts1-Ts6, Wk1-Wk4, Io1-Io3.
  */
 
 #include "xtc_int.h"
@@ -198,7 +198,7 @@ xtc_task_park_on_fd(xtc_task_t *self, int fd, uint32_t interest)
 
 /*
  * Called by loop.c when an io event arrives.  The tag is either NULL
- * (XTC_IO_WAKEUP — ignored in M3) or a task pointer registered by
+ * (XTC_IO_WAKEUP -- ignored in M3) or a task pointer registered by
  * xtc_task_park_on_fd.
  */
 int

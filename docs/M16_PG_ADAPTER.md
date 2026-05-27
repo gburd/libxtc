@@ -1,4 +1,4 @@
-# M16 — PostgreSQL adapter (design sketch)
+# M16 -- PostgreSQL adapter (design sketch)
 
 **Status:** research; not yet implemented.  This document defines the
 contract between xtc and a future threaded PostgreSQL backend, the
@@ -36,7 +36,7 @@ This unlocks:
 
 ## Phasing
 
-### M16.1 — backend-as-proc bringup
+### M16.1 -- backend-as-proc bringup
 Smallest unit of progress: convert `BackendStartup` to spawn an
 `xtc_proc` instead of `fork()`.  PG's main loop runs as the proc's
 entry function.  `MyLatch` becomes a `xtc_notify`.
@@ -50,7 +50,7 @@ from anywhere".  Deferred-signal handling already exists in PG's
 **Deliverable:** an example `pg_minimal_backend.c` in `examples/`
 that talks to a PostgreSQL master and runs one query.
 
-### M16.2 — async I/O integration
+### M16.2 -- async I/O integration
 PG 16+ ships `src/backend/storage/aio` with Andres's reactor design.
 Replace its internals with `xtc_io` (backend-pluggable: epoll on
 Linux, io_uring opt-in, kqueue on BSDs).  The PG-facing API stays:
@@ -61,13 +61,13 @@ break by dispatching across a multi-loop executor.  Mitigation:
 each PG backend is pinned to one `xtc_loop` for the life of the
 backend (matches the historical fork-per-backend model).
 
-### M16.3 — memory + locks
+### M16.3 -- memory + locks
 PG's `MemoryContext` API maps cleanly onto `xtc_mctx`:
 
-- `MemoryContextCreate` → `xtc_mctx_create_child`
-- `palloc(sz)` → `xtc_mctx_alloc(curr, sz)`
-- `pfree(p)` → `xtc_mctx_free(p)`
-- `MemoryContextDelete(ctx)` → `xtc_mctx_destroy(ctx)`
+- `MemoryContextCreate` -> `xtc_mctx_create_child`
+- `palloc(sz)` -> `xtc_mctx_alloc(curr, sz)`
+- `pfree(p)` -> `xtc_mctx_free(p)`
+- `MemoryContextDelete(ctx)` -> `xtc_mctx_destroy(ctx)`
 
 The lock primitives map directly (the M13 ports were always aimed at
 this slot).
@@ -75,41 +75,41 @@ this slot).
 **Risk:** PG's "the current memory context" thread-locality.  Today
 each backend has one current context; under threads we have to make
 it `__thread` and push/pop on `xtc_proc` switch.  This is the
-migration's biggest invasive change — touches every `palloc()` call
+migration's biggest invasive change -- touches every `palloc()` call
 site implicitly via the `CurrentMemoryContext` macro.
 
-### M16.4 — process exit + supervision
+### M16.4 -- process exit + supervision
 PG's `proc_exit` chains atexit-registered callbacks.  Map to
 `xtc_proc`'s exit-handler chain.  `xtc_supervisor` takes the role of
 the postmaster: it owns child specs (each PG backend), restart
 strategy is `XTC_RESTART_TRANSIENT` (PG keeps a backend alive until
 it normally exits or crashes; on crash we don't restart).
 
-### M16.5 — observability + config
+### M16.5 -- observability + config
 - `GUC_*` macros wrap `xtc_cfg_register_*` calls.
 - `pg_stat_*` views read from `xtc_cfg`/`xtc_log`.
-- Wait events → `xtc_log` events tagged with the wait class.
+- Wait events -> `xtc_log` events tagged with the wait class.
 
 ## What we don't replace (deliberately)
 
-- **WAL writer / checkpointer / autovacuum** — these are still
+- **WAL writer / checkpointer / autovacuum** -- these are still
   separate processes, not threads.  They communicate with backends
   via the shared-memory queues (which xtc doesn't own).  Keeping
   them on the PG side avoids an enormous patch surface.
 
-- **Shared memory** — PG owns DSM (`dynamic_shared_memory`); xtc's
+- **Shared memory** -- PG owns DSM (`dynamic_shared_memory`); xtc's
   `xtc_slab` shared-memory mode uses the same `mmap` primitives but
   without the segment-tracking hash.  M16 just teaches PG how to
   call `xtc_slab_create_ex` on top of an already-allocated DSM
   region.
 
-- **Plan execution / parser** — these are pure CPU code; they don't
+- **Plan execution / parser** -- these are pure CPU code; they don't
   touch xtc.
 
 ## Compatibility surface
 
 xtc must commit to a stable C ABI for the public symbols listed in
-PLAN.md §18.  M16 freezes the M13 lock API (already done) and adds
+PLAN.md (S)18.  M16 freezes the M13 lock API (already done) and adds
 no new public symbols beyond a small `pg_xtc_glue.h` header that
 lives in the PG tree, not in xtc's.
 
@@ -117,12 +117,12 @@ lives in the PG tree, not in xtc's.
 
 A new `test/m16/` directory will hold integration tests:
 
-- `test_backend_smoke.c` — spawn one `xtc_proc` "backend" that talks
+- `test_backend_smoke.c` -- spawn one `xtc_proc` "backend" that talks
   to a real PG instance.
-- `test_lwlock_pg_parity.c` — exercise xtc_lwlock with PG's
+- `test_lwlock_pg_parity.c` -- exercise xtc_lwlock with PG's
   test_lwlock workload (replay the lrlck test_lwlock test cases via
   xtc).
-- `bench_threads_vs_forks.c` — compare backend-startup latency.
+- `bench_threads_vs_forks.c` -- compare backend-startup latency.
 
 ## Open questions
 
