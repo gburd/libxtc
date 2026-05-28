@@ -171,7 +171,7 @@ TESTS_SH	= \
 TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
 		  test_thread test_tls test_mutex \
-		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_net \
+		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_net test_net_udp \
 		  test_loop test_task test_waker test_timer test_io_integration \
 		  test_async \
 		  test_fctx \
@@ -521,6 +521,12 @@ test_net: $(srcdir)/../test/m2/test_net.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
 		-o $@ $(srcdir)/../test/m2/test_net.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_net_udp: $(srcdir)/../test/m2/test_net_udp.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
+		-o $@ $(srcdir)/../test/m2/test_net_udp.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M3 tests.
