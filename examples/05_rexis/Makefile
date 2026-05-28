@@ -45,7 +45,10 @@ TARGET = rexis-server-xtc
 
 .PHONY: all clean test
 
-all: $(TARGET)
+all: $(TARGET) test_bitcask
+
+test_bitcask: test_bitcask.c bitcask.c bitcask.h
+	$(CC) $(CFLAGS) -o $@ test_bitcask.c bitcask.c -lpthread
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
@@ -63,6 +66,7 @@ expire.o: expire.c db.h
 metrics.o: metrics.c db.h
 
 clean:
+	rm -f $(OBJS) $(TARGET) test_bitcask
 	rm -f $(OBJS) $(TARGET)
 
 # Basic sanity test: start server, ping, stop
