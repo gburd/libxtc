@@ -210,8 +210,20 @@ listener_proc(void *arg)
 			}
 		}
 
-		(void)xtc_recv(&msg, &msg_len, 1LL * 1000 * 1000);
-		if (msg) __os_free(msg);
+		/* Wait for the next connection arrival.  Wakes exactly when
+		 * the listen fd is readable, so idle CPU is zero. */
+		{
+			uint32_t revents = 0;
+			(void)xtc_proc_wait_fd(srv->listen_fd,
+			    XTC_IO_READABLE,
+			    100LL * 1000 * 1000,  /* 100ms cap to re-check shutdown */
+			    &revents);
+			if (revents & XTC_WAIT_MAILBOX) {
+				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
+					if (msg) __os_free(msg);
+				}
+			}
+		}
 	}
 }
 

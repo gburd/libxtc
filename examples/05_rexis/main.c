@@ -225,15 +225,24 @@ listener_proc(void *arg)
 			}
 		}
 
-		/* Brief idle until next accept attempt.  This is a busy-poll
-		 * pattern that costs ~10 wakeups/sec; not ideal.  See
-		 * README.md "Gaps in xtc" item 8: there is no async-accept
-		 * primitive that integrates xtc_io readiness with xtc_proc
-		 * yet.  Once xtc_proc grows xtc_proc_wait_fd or similar,
-		 * this can wake exactly when the listen fd is readable. */
-		(void)xtc_recv(&msg, &msg_len, 100LL * 1000 * 1000);  /* 100 ms */
-		if (msg)
-			__os_free(msg);
+		/* Wait for the next connection to arrive (or for shutdown
+		 * via the kill flag).  Wakes exactly on listen-fd readiness;
+		 * idle CPU is effectively zero. */
+		{
+			uint32_t revents = 0;
+			(void)xtc_proc_wait_fd(srv->listen_fd,
+			    XTC_IO_READABLE,
+			    100LL * 1000 * 1000,  /* 100ms timeout to re-check shutdown flag */
+			    &revents);
+			/* If the wakeup was a mailbox message, drain it (kept
+			 * for compatibility with mailbox-driven control). */
+			if (revents & XTC_WAIT_MAILBOX) {
+				void *msg; size_t msg_len;
+				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
+					if (msg) __os_free(msg);
+				}
+			}
+		}
 	}
 }
 
