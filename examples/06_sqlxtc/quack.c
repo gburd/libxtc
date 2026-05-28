@@ -201,6 +201,27 @@ quack_emit_row_double(quack_buf_t *b, int i, double v)
 		rc |= buf_putcstr(b, "null");
 	} else {
 		k = snprintf(tmp, sizeof tmp, "%.17g", v);
+		/* %.17g strips trailing zeros, turning 4.0 into 4.
+		 * Preserve float type information for JSON consumers
+		 * by appending ".0" when the rendering has no decimal
+		 * point or exponent. */
+		if (k > 0 && k < (int)sizeof tmp) {
+			int has_dot_or_exp = 0;
+			int j;
+			for (j = 0; j < k; j++) {
+				char c = tmp[j];
+				if (c == '.' || c == 'e' || c == 'E' ||
+				    c == 'n' || c == 'i') {
+					has_dot_or_exp = 1;
+					break;
+				}
+			}
+			if (!has_dot_or_exp && k + 2 < (int)sizeof tmp) {
+				tmp[k++] = '.';
+				tmp[k++] = '0';
+				tmp[k]   = '\0';
+			}
+		}
 		rc |= quack_append_raw(b, tmp, (size_t)k);
 	}
 	return rc < 0 ? -1 : 0;
