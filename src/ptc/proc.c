@@ -124,6 +124,15 @@ struct xtc_proc {
 	struct envelope  *save_head;
 	struct envelope  *save_tail;
 
+	/* BEAM recv-mark optimization for selective receive.  When the
+	 * caller invokes xtc_recv_match repeatedly with the same
+	 * (match_fn, user) pair, we remember which save_queue entries
+	 * have already been tested against that predicate so we don't
+	 * re-walk them.  Cleared whenever the predicate changes. */
+	xtc_match_fn      last_match_fn;
+	void             *last_match_user;
+	struct envelope  *recv_mark;       /* skip up to and including this entry */
+
 	/* Receive coordination. */
 	xtc_waker_t       recv_waker;
 	int               waker_armed;
@@ -618,10 +627,27 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 		deadline = now + timeout_ns;
 	}
 
+	/* BEAM recv-mark: if the predicate has changed since the last
+	 * call, invalidate the mark and re-test the whole save queue.
+	 * If unchanged, we'll skip past `recv_mark` on the walk below. */
+	if (self->last_match_fn != match || self->last_match_user != u) {
+		self->last_match_fn = match;
+		self->last_match_user = u;
+		self->recv_mark = NULL;
+	}
+
 	for (;;) {
-		/* Walk save queue first. */
+		struct envelope *skip_until = self->recv_mark;
+		int past_mark = (skip_until == NULL);
+		/* Walk save queue first.  Skip entries up to and including
+		 * recv_mark (already tested with this predicate). */
 		link = &self->save_head;
 		while ((e = *link) != NULL) {
+			if (!past_mark) {
+				if (e == skip_until) past_mark = 1;
+				link = &e->next;
+				continue;
+			}
 			if (match(e->data, e->size, u)) {
 				/* Unlink. */
 				*link = e->next;
@@ -655,6 +681,11 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			(void)pthread_mutex_lock(&self->mbox_lock);
 		}
 		(void)pthread_mutex_unlock(&self->mbox_lock);
+
+		/* Update recv_mark: everything in save_queue has now been
+		 * tested against this predicate.  Next call with the same
+		 * predicate will skip past this point in the queue. */
+		self->recv_mark = self->save_tail;
 
 		/* Nothing to deliver.  Check timeout. */
 		if (timeout_ns == 0) return XTC_E_AGAIN;
