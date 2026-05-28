@@ -1,4 +1,4 @@
-# examples/05_redis -- Redis-compatible server built on xtc
+# examples/05_rexis -- rexis (Redis-protocol-compatible) server built on xtc
 
 A drop-in replacement for a meaningful subset of `redis-server`, implemented
 in ~2,000 lines of C using xtc primitives.  Demonstrates how to build a
@@ -8,14 +8,14 @@ production-shaped network service with hard resource budgets.
 
 ```sh
 # Build (assumes libxtc.a in ../../build_unix/)
-cd examples/05_redis
+cd examples/05_rexis
 make
 
 # Run with default settings (port 6379, no caps)
-./redis-server-xtc
+./rexis-server-xtc
 
 # Run with hard caps for the P99-conference demo
-./redis-server-xtc \
+./rexis-server-xtc \
     --port=16379 \
     --cores=2 \
     --max-memory=$((100*1024*1024)) \
@@ -64,7 +64,7 @@ hold under stress:
 | `--max-clients=N` | Concurrent connections | Listener checks count before spawning per-conn proc |
 | `--max-iops=N` | Commands/sec | Token bucket refilled every second; excess commands rejected with `OVER_LIMIT` |
 
-Verified by `test/m99/test_redis_budgets.c` (5 scenarios).  RSS stays
+Verified by `test/m99/test_rexis_budgets.c` (5 scenarios).  RSS stays
 within `--max-memory` plus a small constant overhead even under
 SET-until-OOM stress.
 
@@ -134,19 +134,19 @@ In `test/m99/`:
 | Test | Cases | Coverage |
 |---|---|---|
 | `test_resp_parser.c` | 33 | RESP2/RESP3 framing, malformed input |
-| `test_redis_loopback.c` | 12 | End-to-end command round-trips |
-| `test_redis_budgets.c` | 5 | All five `--max-*` caps under stress |
-| `test_redis_pbt.c` | 5 | hegel-c properties (atomicity, idempotence, FIFO) |
+| `test_rexis_loopback.c` | 12 | End-to-end command round-trips |
+| `test_rexis_budgets.c` | 5 | All five `--max-*` caps under stress |
+| `test_rexis_pbt.c` | 5 | hegel-c properties (atomicity, idempotence, FIFO) |
 
 Run via `cd test/m99 && make check`.  Loopback and budget tests
-spawn a real `redis-server-xtc` binary.
+spawn a real `rexis-server-xtc` binary.
 
 ## Bench
 
-In `bench/redis_compat/`:
+In `bench/rexis_compat/`:
 
 ```sh
-cd bench/redis_compat
+cd bench/rexis_compat
 make
 ./bench --host=127.0.0.1 --port=16379 --pipeline=1 --requests=100000
 ```
@@ -214,7 +214,7 @@ Each is an opportunity for a new xtc primitive:
 Honest microbenchmarks on a single client, no pipelining, on this
 host (Linux x86_64, AMD EPYC):
 
-| Metric | redis-server (7.x) | redis-server-xtc |
+| Metric | redis-server (7.x) | rexis-server-xtc |
 |---|---|---|
 | GET ops/sec | ~115,000 | ~85,000 |
 | SET ops/sec | ~110,000 | ~78,000 |

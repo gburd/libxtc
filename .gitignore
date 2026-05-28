@@ -45,6 +45,6 @@ bench/audit/false_sharing_mpsc
 bench/audit/false_sharing_proc
 bench/conformance/w*/tokio/target/
 
-# Redis example binary
-examples/05_redis/redis-server-xtc
-examples/05_redis/*.o
+# rexis (Redis-protocol-compatible) example binary
+examples/05_rexis/rexis-server-xtc
+examples/05_rexis/*.o

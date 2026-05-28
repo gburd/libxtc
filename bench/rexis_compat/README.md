@@ -1,4 +1,4 @@
-# Redis-Compatible Server Benchmark
+# rexis (Redis-protocol-compatible) Server Benchmark
 
 Simple TCP benchmark client for measuring GET/SET throughput and latency.
 
@@ -11,7 +11,7 @@ make
 ## Usage
 
 ```bash
-# Basic benchmark against xtc-redis
+# Basic benchmark against rexis
 ./bench --host localhost --port 6379 --clients 10 --requests 10000
 
 # Compare with real Redis (must be running on port 6379)
@@ -38,12 +38,12 @@ make
 Results are printed in M17 conformance format:
 
 ```
-bench.xtc_redis.ops_per_sec=12345.67
-bench.xtc_redis.p50_us=45.23
-bench.xtc_redis.p99_us=123.45
-bench.xtc_redis.p999_us=456.78
-bench.xtc_redis.completed=10000
-bench.xtc_redis.errors=0
+bench.xtc_rexis.ops_per_sec=12345.67
+bench.xtc_rexis.p50_us=45.23
+bench.xtc_rexis.p99_us=123.45
+bench.xtc_rexis.p999_us=456.78
+bench.xtc_rexis.completed=10000
+bench.xtc_rexis.errors=0
 ```
 
 ## Workload
