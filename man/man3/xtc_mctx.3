@@ -1,0 +1,56 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_MCTX 3
+.Os
+.Sh NAME
+.Nm xtc_mctx_create ,
+.Nm xtc_mctx_destroy ,
+.Nm xtc_mctx_alloc ,
+.Nm xtc_mctx_free ,
+.Nm xtc_mctx_reset
+.Nd hierarchical memory contexts with cleanup callbacks
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_mctx.h
+.Ft int
+.Fn xtc_mctx_create "xtc_mctx_t *parent" "const char *name" "xtc_mctx_t **out"
+.Ft void
+.Fn xtc_mctx_destroy "xtc_mctx_t *ctx"
+.Ft "void *"
+.Fn xtc_mctx_alloc "xtc_mctx_t *ctx" "size_t size"
+.Ft void
+.Fn xtc_mctx_reset "xtc_mctx_t *ctx"
+.Sh DESCRIPTION
+.Nm xtc_mctx
+is a hierarchical memory context, modeled on PostgreSQL's
+.Vt MemoryContext .
+Allocations belong to a context; destroying the context bulk-frees
+everything in it
+.Pq plus all child contexts recursively .
+Useful for request-scoped memory: create a context per request,
+allocate freely, destroy at the end without tracking individual
+frees.
+.Pp
+Each context can register cleanup callbacks fired on destroy
+.Pq before the bulk-free
+to release non-memory resources.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_mctx_t *root, *req;
+xtc_mctx_create(NULL, "root", &root);
+xtc_mctx_create(root, "request-42", &req);
+
+/* Allocate request-scoped objects. */
+char *buf = xtc_mctx_alloc(req, 4096);
+struct widget *w = xtc_mctx_alloc(req, sizeof *w);
+
+/* Done; bulk-free everything in req. */
+xtc_mctx_destroy(req);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_slab 3 ,
+.Xr xtc_res 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

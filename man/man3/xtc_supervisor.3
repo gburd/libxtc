@@ -1,0 +1,97 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_SUPERVISOR 3
+.Os
+.Sh NAME
+.Nm xtc_sup_start ,
+.Nm xtc_sup_stop ,
+.Nm xtc_sup_join ,
+.Nm xtc_sup_alive ,
+.Nm xtc_sup_n_children ,
+.Nm xtc_sup_n_restarts
+.Nd OTP-style supervisor trees
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_orc.h
+.Ft int
+.Fn xtc_sup_start "xtc_loop_t *loop" "const xtc_sup_opts_t *opts" "const xtc_child_spec_t *children" "int n_children" "xtc_supervisor_t **out_sup"
+.Ft int
+.Fn xtc_sup_stop "xtc_supervisor_t *sup"
+.Ft int
+.Fn xtc_sup_join "xtc_supervisor_t *sup" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_sup_alive "const xtc_supervisor_t *sup"
+.Ft int
+.Fn xtc_sup_n_children "const xtc_supervisor_t *sup"
+.Ft int
+.Fn xtc_sup_n_restarts "const xtc_supervisor_t *sup"
+.Sh DESCRIPTION
+.Nm xtc_supervisor
+is an OTP-style supervisor: it owns a set of child specs, spawns
+them, observes failures, and restarts them per the configured
+strategy.  Failures isolate to children; the supervisor's own
+liveness is independent of any single child.
+.Pp
+.Sy Strategies
+control which children get restarted on a child crash:
+.Bl -tag -width "simple_one_for_one" -offset indent
+.It Dv XTC_SUP_ONE_FOR_ONE
+Only the crashed child restarts.
+.It Dv XTC_SUP_ONE_FOR_ALL
+All children restart.
+.It Dv XTC_SUP_REST_FOR_ONE
+The crashed child and all started after it
+.Pq right siblings
+restart, in order.
+.It Dv XTC_SUP_SIMPLE_ONE_FOR_ONE
+Children spawned dynamically; not all known up front.
+.El
+.Pp
+.Sy Restart policies
+per child:
+.Bl -tag -width "XTC_RESTART_TRANSIENT" -offset indent
+.It Dv XTC_RESTART_PERMANENT
+Always restart on exit
+.Pq normal or crash .
+.It Dv XTC_RESTART_TRANSIENT
+Restart on abnormal exit only.
+.It Dv XTC_RESTART_TEMPORARY
+Never restart; one-shot.
+.El
+.Pp
+.Sy Restart intensity:
+.Va opts.max_restarts
+restarts within
+.Va opts.period_ns
+exhausts the supervisor; it gives up and exits.  Default:
+1 in 5 seconds.
+.Pp
+.Fn xtc_sup_start
+spawns the supervisor and its initial children.  Returns
+.Dv XTC_OK
+with
+.Fa *out_sup
+set, or
+.Dv XTC_E_INVAL
+on bad args
+.Pq notably Fa n_children Em <= 0 ;
+empty supervisors not supported, see
+.Pa examples/06_sqlxtc/main.c
+for a one-listener-child workaround .
+.Pp
+.Fn xtc_sup_stop
+asynchronously requests shutdown.  Children get
+.Sq EXIT
+signals; the supervisor exits when all are done.
+.Fn xtc_sup_join
+waits up to
+.Fa timeout_ns
+for the supervisor to exit.
+.Sh SEE ALSO
+.Xr xtc_app 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_svr 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.
