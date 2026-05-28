@@ -774,6 +774,69 @@ xtc_recv_match(xtc_match_fn fn, void *u, void **out, size_t *out_size,
 	return XTC_MUSTTAIL __do_recv(fn, u, out, out_size, timeout_ns);
 }
 
+/* Predicate context for xtc_recv_correlate. */
+struct corr_ctx {
+	const unsigned char *corr;
+	size_t               corr_size;
+};
+
+static int
+__corr_match(const void *data, size_t size, void *u)
+{
+	struct corr_ctx *c = u;
+	if (c == NULL || size < c->corr_size) return 0;
+	return memcmp(data, c->corr, c->corr_size) == 0;
+}
+
+/* PUBLIC: int xtc_recv_correlate __P((const void *, size_t, int, xtc_msg_t *, int *, int64_t)); */
+int
+xtc_recv_correlate(const void *corr_value, size_t corr_size,
+                   int n_expected, xtc_msg_t *out_msgs,
+                   int *out_n, int64_t timeout_ns)
+{
+	struct corr_ctx ctx;
+	int64_t deadline = -1;
+	int collected = 0;
+	int rc;
+
+	if (corr_value == NULL || corr_size == 0 ||
+	    n_expected <= 0 || out_msgs == NULL || out_n == NULL)
+		return XTC_E_INVAL;
+
+	ctx.corr = (const unsigned char *)corr_value;
+	ctx.corr_size = corr_size;
+	*out_n = 0;
+
+	if (timeout_ns >= 0) {
+		int64_t now;
+		(void)__os_clock_mono(&now);
+		deadline = now + timeout_ns;
+	}
+
+	while (collected < n_expected) {
+		int64_t per_call_to = -1;
+		if (deadline >= 0) {
+			int64_t now;
+			(void)__os_clock_mono(&now);
+			if (now >= deadline) break;
+			per_call_to = deadline - now;
+		}
+		rc = __do_recv(__corr_match, &ctx,
+		    &out_msgs[collected].data,
+		    &out_msgs[collected].size,
+		    per_call_to);
+		if (rc == XTC_OK) {
+			collected++;
+		} else {
+			/* AGAIN (timeout) or other error: stop. */
+			break;
+		}
+	}
+
+	*out_n = collected;
+	return (collected == n_expected) ? XTC_OK : XTC_E_AGAIN;
+}
+
 /* PUBLIC: int xtc_proc_wait_fd __P((int, uint32_t, int64_t, uint32_t *)); */
 int
 xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,

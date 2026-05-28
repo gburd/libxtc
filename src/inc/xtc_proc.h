@@ -79,6 +79,7 @@ typedef struct xtc_proc_opts {
  * PUBLIC: int       xtc_send __P((xtc_pid_t, const void *, size_t));
  * PUBLIC: int       xtc_recv __P((void **, size_t *, int64_t));
  * PUBLIC: int       xtc_recv_match __P((xtc_match_fn, void *, void **, size_t *, int64_t));
+ * PUBLIC: int       xtc_recv_correlate __P((const void *, size_t, int, xtc_msg_t *, int *, int64_t));
  * PUBLIC: int       xtc_proc_wait_fd __P((int, uint32_t, int64_t, uint32_t *));
  * PUBLIC: int       xtc_exit_self __P((int));
  * PUBLIC: int       xtc_exit_pid __P((xtc_pid_t, int));
@@ -132,6 +133,35 @@ int       xtc_recv(void **out, size_t *out_size, int64_t timeout_ns);
 int       xtc_recv_match(xtc_match_fn match_fn, void *user_data,
                           void **out, size_t *out_size,
                           int64_t timeout_ns);
+
+/*
+ * Receive `n_expected` messages whose leading `corr_size` bytes
+ * match `corr_value`.  The first `n_expected` matching messages
+ * are delivered as an array via `out_msgs[]`; non-matching
+ * messages stay in the mailbox / save queue for subsequent
+ * receives.  Returns XTC_OK on full collection; XTC_E_AGAIN if
+ * the timeout fires before n_expected matches arrive (in which
+ * case `*out_n` is the number actually collected; out_msgs[0..*out_n]
+ * are still owned by the caller and must be freed).
+ *
+ * This is the canonical helper for fork-join and request-reply
+ * patterns: pick a correlation id, send N children a request
+ * containing that id, wait for N replies whose first corr_size
+ * bytes equal the id.  Avoids manual save-queue management.
+ *
+ * Each delivered message conforms to the same ownership contract
+ * as xtc_recv: the caller owns the buffer and must free() it.
+ */
+typedef struct xtc_msg {
+	void   *data;
+	size_t  size;
+} xtc_msg_t;
+
+int       xtc_recv_correlate(const void *corr_value, size_t corr_size,
+                              int n_expected,
+                              xtc_msg_t *out_msgs,
+                              int *out_n,
+                              int64_t timeout_ns);
 
 /*
  * Wait until ANY of the following becomes true:
