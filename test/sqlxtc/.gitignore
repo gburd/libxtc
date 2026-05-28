@@ -1,0 +1,3 @@
+test_quack
+*.o
+test_sql_parse
