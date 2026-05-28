@@ -1,0 +1,173 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_NET 3
+.Os
+.Sh NAME
+.Nm xtc_net_listen ,
+.Nm xtc_net_dial ,
+.Nm xtc_net_apply_tcp_opts ,
+.Nm xtc_net_setnonblock ,
+.Nm xtc_net_close ,
+.Nm xtc_net_unix_listen ,
+.Nm xtc_net_unix_dial ,
+.Nm xtc_net_unix_send_creds ,
+.Nm xtc_net_unix_recv_creds
+.Nd networking helpers
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_net.h
+.Ft int
+.Fn xtc_net_listen "xtc_net_family_t fam" "const char *host" "int port" "const xtc_tcp_opts_t *opts" "int *out_fd"
+.Ft int
+.Fn xtc_net_dial "xtc_net_family_t fam" "const char *host" "int port" "const xtc_tcp_opts_t *opts" "int *out_fd"
+.Ft int
+.Fn xtc_net_apply_tcp_opts "int fd" "const xtc_tcp_opts_t *opts"
+.Ft int
+.Fn xtc_net_setnonblock "int fd"
+.Ft void
+.Fn xtc_net_close "int fd"
+.Ft int
+.Fn xtc_net_unix_listen "const char *path" "int *out_fd"
+.Ft int
+.Fn xtc_net_unix_dial "const char *path" "int *out_fd"
+.Ft int
+.Fn xtc_net_unix_send_creds "int fd" "const void *buf" "size_t buflen"
+.Ft int
+.Fn xtc_net_unix_recv_creds "int fd" "void *buf" "size_t buflen" "uint32_t *out_uid" "uint32_t *out_gid" "size_t *out_n"
+.Sh DESCRIPTION
+.Nm xtc_net
+provides convenience wrappers around the standard networking
+syscalls.  The actual I/O multiplexing happens through
+.Xr xtc_io 3
+and
+.Xr xtc_proc_wait_fd 3 ;
+these helpers handle socket creation, address resolution, knob
+setting, and credential passing.
+.Pp
+.Sy TCP knobs
+controlled by
+.Vt xtc_tcp_opts_t
+include:
+.Bl -tag -width "user_timeout_ms" -offset indent
+.It Fa nodelay
+.Dv TCP_NODELAY :
+disable Nagle's algorithm.  Default 1.
+.It Fa reuseaddr
+.Dv SO_REUSEADDR .
+.It Fa reuseport
+.Dv SO_REUSEPORT
+on Linux/BSD; no-op elsewhere.
+.It Fa keepalive
+.Dv SO_KEEPALIVE
+plus optional
+.Fa keepidle_s ,
+.Fa keepintvl_s ,
+.Fa keepcnt
+on Linux.
+.It Fa user_timeout_ms
+.Dv TCP_USER_TIMEOUT
+on Linux.
+.El
+.Pp
+.Fn xtc_net_listen
+opens a non-blocking listening socket bound to
+.Fa host : Ns Fa port .
+.Fa fam
+selects address family
+.Po Dv XTC_NET_INET ,
+.Dv XTC_NET_INET6 ,
+or
+.Dv XTC_NET_UNIX Pc .
+The fd is non-blocking with
+.Dv FD_CLOEXEC ;
+caller can register it with
+.Xr xtc_io_reg_fd 3
+or pass to
+.Xr xtc_proc_wait_fd 3 .
+.Pp
+.Fn xtc_net_dial
+opens a non-blocking TCP connection.  The connect is in flight
+when the call returns; caller polls for
+.Dv XTC_IO_WRITABLE
+to detect completion.
+.Pp
+.Fn xtc_net_apply_tcp_opts
+applies the knobs to an already-open socket.  Useful for sockets
+returned by
+.Xr accept 2 .
+.Pp
+.Fn xtc_net_setnonblock
+sets
+.Dv O_NONBLOCK + Dv FD_CLOEXEC
+on a fd
+.Pq POSIX path or
+.Dv FIONBIO
+.Pq Windows path .
+.Pp
+.Sy Unix domain sockets:
+.Fn xtc_net_unix_listen
+and
+.Fn xtc_net_unix_dial
+open
+.Dv AF_UNIX
+.Dv SOCK_STREAM
+sockets at the given filesystem path.  Listeners auto-unlink the
+path on bind failure.
+.Pp
+.Sy Credential passing
+on Unix sockets:
+.Fn xtc_net_unix_send_creds
+sends a buffer; the receiver, via
+.Fn xtc_net_unix_recv_creds ,
+gets the buffer plus the sender's UID and GID using
+.Dv SO_PEERCRED
+.Pq Linux
+or
+.Dv LOCAL_PEERCRED
+.Pq BSD .
+On platforms where neither is available, UID/GID return as 0
+without error.
+.Sh PLATFORM-SPECIFIC NOTES
+.Bl -tag -width "Windows" -offset indent
+.It Linux
+.Dv SO_PEERCRED ,
+io_uring + epoll backends.
+.It FreeBSD/macOS
+.Dv LOCAL_PEERCRED ,
+kqueue backend.
+.It illumos
+.Dv SO_PEERCRED
+emulated via
+.Dv getpeerucred 3C ;
+event ports backend.
+.It Windows
+Winsock2; UDS not supported.  TCP only.
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+opts.keepalive = 1;
+opts.keepidle_s = 60;
+
+int listen_fd;
+xtc_net_listen(XTC_NET_INET, "0.0.0.0", 8080, &opts, &listen_fd);
+
+for (;;) {
+    uint32_t revents;
+    int conn_fd;
+    xtc_proc_wait_fd(listen_fd, XTC_IO_READABLE, -1, &revents);
+    conn_fd = accept(listen_fd, NULL, NULL);
+    if (conn_fd < 0) continue;
+    xtc_net_setnonblock(conn_fd);
+    xtc_net_apply_tcp_opts(conn_fd, &opts);
+    /* spawn a per-conn xtc_proc... */
+}
+.Ed
+.Sh SEE ALSO
+.Xr xtc_io 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_tls 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

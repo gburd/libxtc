@@ -1,0 +1,105 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_RES 3
+.Os
+.Sh NAME
+.Nm xtc_res_init ,
+.Nm xtc_res_fini ,
+.Nm xtc_res_acquire ,
+.Nm xtc_res_release ,
+.Nm xtc_res_used ,
+.Nm xtc_res_cap ,
+.Nm xtc_res_set_alert ,
+.Nm xtc_res_set_alert_fn
+.Nd resource accountant with hard caps and high-water alerts
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_res.h
+.Ft int
+.Fn xtc_res_init "xtc_res_t *res" "const xtc_res_caps_t *caps"
+.Ft void
+.Fn xtc_res_fini "xtc_res_t *res"
+.Ft int
+.Fn xtc_res_acquire "xtc_res_t *res" "xtc_res_kind_t kind" "int64_t amount"
+.Ft void
+.Fn xtc_res_release "xtc_res_t *res" "xtc_res_kind_t kind" "int64_t amount"
+.Ft int64_t
+.Fn xtc_res_used "const xtc_res_t *res" "xtc_res_kind_t kind"
+.Ft int64_t
+.Fn xtc_res_cap "const xtc_res_t *res" "xtc_res_kind_t kind"
+.Ft int
+.Fn xtc_res_set_alert "xtc_res_t *res" "xtc_res_kind_t kind" "int64_t threshold"
+.Ft int
+.Fn xtc_res_set_alert_fn "xtc_res_t *res" "xtc_res_alert_fn fn" "void *user"
+.Sh DESCRIPTION
+.Nm xtc_res
+tracks resource consumption against operator-configured hard caps.
+Tracked kinds:
+.Bl -tag -width "XTC_RES_MEM_BYTES" -compact -offset indent
+.It Dv XTC_RES_MEM_BYTES
+Bytes of allocated memory.
+.It Dv XTC_RES_TASKS
+In-flight tasks
+.Pq xtc_proc + xtc_task .
+.It Dv XTC_RES_FDS
+Open file descriptors.
+.It Dv XTC_RES_NET_BYTES
+Network throughput
+.Pq for rate limiting .
+.It Dv XTC_RES_DISK_BYTES
+Disk I/O byte count.
+.It Dv XTC_RES_INFLIGHT_INBOX_MSGS
+Cross-loop inbox queue length.
+.El
+.Pp
+Each kind has an optional cap.
+.Fn xtc_res_acquire
+returns
+.Dv XTC_E_RESOURCE
+if the request would exceed the cap;
+.Fn xtc_res_release
+gives capacity back.  Both are atomic; thread-safe under
+concurrent calls.
+.Pp
+.Sy Alert callbacks :
+when usage crosses
+.Fa threshold
+upward, the alert fn fires.  When usage drops back below the
+threshold, the alert re-arms.  This avoids alert floods while
+ensuring each crossing fires.
+.Pp
+This is the centerpiece of xtc's
+.Sq predictable behaviour under stress
+discipline: every resource that grows under load
+.Po memory, FDs, in-flight requests Pc
+must be charged to a res accountant so the cap holds.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_res_t res;
+xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+caps.mem_bytes = 100 * 1024 * 1024;       /* 100 MiB */
+caps.tasks     = 10000;
+caps.fds       = 4096;
+
+xtc_res_init(&res, &caps);
+
+/* Charge memory before allocating. */
+if (xtc_res_acquire(&res, XTC_RES_MEM_BYTES, sz) != XTC_OK)
+    return XTC_E_RESOURCE;
+ptr = malloc(sz);
+if (!ptr) {
+    xtc_res_release(&res, XTC_RES_MEM_BYTES, sz);
+    return XTC_E_NOMEM;
+}
+
+/* When done: */
+free(ptr);
+xtc_res_release(&res, XTC_RES_MEM_BYTES, sz);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_slab 3 ,
+.Xr xtc_log 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

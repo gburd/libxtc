@@ -1,0 +1,68 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_RCU 3
+.Os
+.Sh NAME
+.Nm xtc_rcu_init ,
+.Nm xtc_rcu_fini ,
+.Nm xtc_rcu_read_lock ,
+.Nm xtc_rcu_read_unlock ,
+.Nm xtc_rcu_retire ,
+.Nm xtc_rcu_synchronize
+.Nd epoch-based read-copy-update
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_rcu.h
+.Ft int
+.Fn xtc_rcu_init "void"
+.Ft void
+.Fn xtc_rcu_fini "void"
+.Ft void
+.Fn xtc_rcu_read_lock "void"
+.Ft void
+.Fn xtc_rcu_read_unlock "void"
+.Ft void
+.Fn xtc_rcu_retire "void *p" "xtc_rcu_free_fn fn"
+.Ft void
+.Fn xtc_rcu_synchronize "void"
+.Sh DESCRIPTION
+.Nm xtc_rcu
+is an epoch-based read-copy-update primitive for read-mostly data
+structures with deferred reclamation.  Readers operate
+.Em wait-free
+inside critical sections delimited by
+.Fn xtc_rcu_read_lock
+and
+.Fn xtc_rcu_read_unlock .
+Writers atomically swap pointers to new state and call
+.Fn xtc_rcu_retire
+to free the old state once all readers that may have observed it
+have exited their critical sections.
+.Pp
+.Fn xtc_rcu_synchronize
+blocks until all currently-active readers have exited.  Used by
+writers that want to free old state synchronously rather than via
+the deferred-retire path.
+.Pp
+The implementation tracks per-thread epoch counters in a
+TLS-registered linked list.  Retired records bucket by epoch;
+records two epochs old are guaranteed safe to free.
+.Sh CHOOSING vs. xtc_lrlock
+Both give wait-free reads.  Trade-offs:
+.Bl -tag -width "xtc_lrlock" -offset indent
+.It Vt xtc_rcu
+Pointer-swap; arbitrary structure shape; deferred reclamation.
+Best when the structure is small or rare-write.
+.It Vt xtc_lrlock
+Two-copy + replay; suits structures where the data is updated in
+place
+.Pq buffer pools, page caches .
+Memory is 2x; reclamation is immediate via the publish-drain.
+.El
+.Sh SEE ALSO
+.Xr xtc_lrlock 3 ,
+.Xr xtc_lwlock 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

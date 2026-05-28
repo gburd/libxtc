@@ -1,0 +1,170 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_SLAB 3
+.Os
+.Sh NAME
+.Nm xtc_slab_create ,
+.Nm xtc_slab_destroy ,
+.Nm xtc_slab_alloc ,
+.Nm xtc_slab_free ,
+.Nm xtc_slab_reap ,
+.Nm xtc_slab_stat ,
+.Nm xtc_slab_offset ,
+.Nm xtc_slab_resolve ,
+.Nm xtc_slab_pressure_listen ,
+.Nm xtc_slab_reaper_spawn
+.Nd slab + magazine allocator
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_slab.h
+.Ft int
+.Fn xtc_slab_create "const xtc_slab_opts_t *opts" "xtc_slab_t **out"
+.Ft void
+.Fn xtc_slab_destroy "xtc_slab_t *slab"
+.Ft "void *"
+.Fn xtc_slab_alloc "xtc_slab_t *slab"
+.Ft void
+.Fn xtc_slab_free "xtc_slab_t *slab" "void *obj"
+.Ft int
+.Fn xtc_slab_reap "xtc_slab_t *slab"
+.Ft int
+.Fn xtc_slab_stat "const xtc_slab_t *slab" "xtc_slab_stats_t *out"
+.Ft xtc_slab_off_t
+.Fn xtc_slab_offset "const xtc_slab_t *slab" "const void *p"
+.Ft "void *"
+.Fn xtc_slab_resolve "const xtc_slab_t *slab" "xtc_slab_off_t off"
+.Ft int
+.Fn xtc_slab_pressure_listen "const char *psi_path" "xtc_slab_pressure_fn fn" "void *user"
+.Ft int
+.Fn xtc_slab_reaper_spawn "xtc_loop_t *loop" "int64_t interval_ns" "xtc_pid_t *out_pid"
+.Sh DESCRIPTION
+.Nm xtc_slab
+is a libumem-style slab allocator with per-loop magazines.  Every
+fixed-size hot-path allocation in xtc routes through it
+.Pq lockmgr lock entries, proc link/monitor entries, RCU retired
+.Pq nodes, timer nodes ;
+applications can use it directly for any pool of same-sized
+objects.
+.Pp
+A
+.Vt slab
+is a cache of objects of a single size.  Objects are carved from
+.Va chunks
+.Pq mmap'd regions, default 64 KiB ;
+each chunk holds many slots.  Free objects are linked through
+their first
+.Va sizeof(void *)
+bytes.
+.Pp
+.Sy Magazines :
+each thread keeps a small per-cache cache
+.Pq default 16 slots
+of recently-freed objects.  Allocs hit the magazine
+.Pq lock-free, no atomics ;
+on miss the cache lock is taken and the magazine is refilled
+from a partial chunk.  Frees push to the magazine; when full,
+the magazine spills back to the cache under lock.
+.Pp
+.Sy Constructor / destructor :
+optional callbacks run once per object lifetime.  Constructor on
+the first time an object is pulled from a slot; destructor at
+cache destroy or chunk reap.
+.Pp
+.Sy Storage modes:
+.Bl -tag -width "XTC_SLAB_PROCESS_LOCAL" -offset indent
+.It Dv XTC_SLAB_PROCESS_LOCAL
+Default.  Chunks via
+.Xr mmap 2
+.Dv MAP_ANONYMOUS .
+.It Dv XTC_SLAB_SHARED_MEMORY
+Caller passes an mmap'd
+.Dv MAP_SHARED
+fd; the slab carves chunks from that region.  Object handles are
+.Vt xtc_slab_off_t
+offsets that two processes can resolve to local pointers using
+.Fn xtc_slab_resolve .
+The shared header at the start of the region holds an atomic
+cursor so concurrent processes don't collide on chunk allocation.
+.El
+.Pp
+.Sy Debug flags :
+.Bl -tag -width "XTC_SLAB_BACKTRACE" -compact -offset indent
+.It Dv XTC_SLAB_REDZONE
+8-byte magic before+after every object; checked on free.
+.It Dv XTC_SLAB_AUDIT
+64-event ring of recent (alloc, free) events.
+.It Dv XTC_SLAB_BACKTRACE
+Backtrace each event
+.Pq Linux/glibc only .
+.It Dv XTC_SLAB_NO_MAGAZINE
+Always go through the cache lock.  For diagnostic use.
+.El
+.Pp
+.Sy OOM policies
+control behaviour when no chunk can be allocated:
+.Bl -tag -width "XTC_SLAB_OOM_BACKOFF" -compact -offset indent
+.It Dv XTC_SLAB_OOM_FAIL
+Return NULL.  Default.
+.It Dv XTC_SLAB_OOM_BACKOFF
+Brief usleep + retry once, then NULL.
+.It Dv XTC_SLAB_OOM_ABORT
+.Fn abort
+.Pq debug builds .
+.El
+.Pp
+.Fn xtc_slab_create
+allocates a cache.
+.Fa opts
+is required and must set
+.Fa opts->name
+and
+.Fa opts->obj_size .
+.Pp
+.Fn xtc_slab_alloc
+returns a fresh object pointer or NULL on OOM.
+.Fn xtc_slab_free
+returns it to the cache.
+.Pp
+.Fn xtc_slab_reap
+drops magazines and returns empty chunks to the OS.  Useful under
+memory pressure.
+.Pp
+.Fn xtc_slab_pressure_listen
+attaches a callback that fires when Linux PSI memory pressure is
+detected.  When triggered, all registered slab caches are reaped.
+Returns
+.Dv XTC_E_NOSYS
+on platforms without PSI.
+.Pp
+.Fn xtc_slab_reaper_spawn
+spawns an
+.Xr xtc_proc 3
+that periodically calls
+.Fn xtc_slab_reap_all
+.Pq returns total objects reaped .
+.Sh EXAMPLES
+.Bd -literal -offset indent
+struct widget { int id; char name[32]; };
+
+xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+opts.name = "widgets";
+opts.obj_size = sizeof(struct widget);
+opts.flags = XTC_SLAB_REDZONE | XTC_SLAB_AUDIT;
+
+xtc_slab_t *slab;
+xtc_slab_create(&opts, &slab);
+
+struct widget *w = xtc_slab_alloc(slab);
+w->id = 42;
+strcpy(w->name, "answer");
+
+xtc_slab_free(slab, w);
+xtc_slab_destroy(slab);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_mctx 3 ,
+.Xr xtc_res 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Modeled on libumem.  Appeared in xtc 0.1.

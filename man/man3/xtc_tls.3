@@ -1,0 +1,93 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_TLS 3
+.Os
+.Sh NAME
+.Nm xtc_tls_ctx_create ,
+.Nm xtc_tls_ctx_destroy ,
+.Nm xtc_tls_create ,
+.Nm xtc_tls_destroy ,
+.Nm xtc_tls_handshake ,
+.Nm xtc_tls_read ,
+.Nm xtc_tls_write ,
+.Nm xtc_tls_shutdown ,
+.Nm xtc_tls_wants_read ,
+.Nm xtc_tls_wants_write
+.Nd TLS over async sockets
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_tls.h
+.Sh DESCRIPTION
+.Nm xtc_tls
+provides TLS 1.2 / 1.3 over xtc_io sockets.  The implementation
+selects a backend at configure time
+.Pq Sq --with-tls=openssl|none|auto ;
+in v0.x only OpenSSL is implemented.
+.Pp
+.Sy Per-connection state machine :
+.Bl -tag -width "wants_write" -offset indent
+.It Vt xtc_tls_ctx_t
+Per-process state: cert, key, CA bundle, version range, ALPN
+profile.  Created once via
+.Fn xtc_tls_ctx_create
+with role
+.Pq Dv XTC_TLS_SERVER or Dv XTC_TLS_CLIENT
+plus opts.
+.It Vt xtc_tls_t
+Per-connection state.  Wraps a single fd.  Created via
+.Fn xtc_tls_create "ctx" "fd" "&out" .
+.El
+.Pp
+.Sy Non-blocking handshake :
+.Bd -literal -offset indent
+xtc_tls_create(ctx, fd, &tls);
+for (;;) {
+    int rc = xtc_tls_handshake(tls);
+    if (rc == XTC_OK) break;
+    if (rc != XTC_E_AGAIN) abort();
+    uint32_t want = xtc_tls_wants_read(tls)
+                  ? XTC_IO_READABLE : XTC_IO_WRITABLE;
+    xtc_proc_wait_fd(fd, want, -1, &revents);
+}
+.Ed
+.Pp
+.Fn xtc_tls_read
+and
+.Fn xtc_tls_write
+follow the same pattern: return
+.Dv XTC_OK
+on progress,
+.Dv XTC_E_AGAIN
+when the fd needs more poll iterations.
+.Pp
+.Fn xtc_tls_shutdown
+performs the bidirectional close-notify dance; same WANT_*
+translation.
+.Sh OPTIONS
+.Vt xtc_tls_opts_t
+fields:
+.Bl -tag -width "verify_peer" -offset indent
+.It Va cert_file , key_file
+PEM paths for server-side certificate.
+.It Va ca_file
+PEM CA bundle for verifying the peer.
+.It Va verify_peer
+.Dv 1
+to require + validate the peer's cert.
+.It Va alpn_protos
+ALPN wire-form list.
+.It Va min_version , max_version
+.Dv XTC_TLS_VER_12
+or
+.Dv XTC_TLS_VER_13 .
+.El
+.Sh SEE ALSO
+.Xr xtc_io 3 ,
+.Xr xtc_net 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.  See
+.Pa docs/M_TLS.md
+for backend pluggability planning.

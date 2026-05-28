@@ -1,0 +1,81 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_APP 3
+.Os
+.Sh NAME
+.Nm xtc_app_create ,
+.Nm xtc_app_destroy ,
+.Nm xtc_app_start ,
+.Nm xtc_app_run ,
+.Nm xtc_app_stop ,
+.Nm xtc_app_loop ,
+.Nm xtc_app_registry
+.Nd OTP-style application container
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_app.h
+.Ft int
+.Fn xtc_app_create "const xtc_app_opts_t *opts" "xtc_app_t **out"
+.Ft void
+.Fn xtc_app_destroy "xtc_app_t *app"
+.Ft int
+.Fn xtc_app_start "xtc_app_t *app" "const xtc_child_spec_t *children" "int n_children"
+.Ft int
+.Fn xtc_app_run "xtc_app_t *app"
+.Ft int
+.Fn xtc_app_stop "xtc_app_t *app"
+.Ft "xtc_loop_t *"
+.Fn xtc_app_loop "const xtc_app_t *app"
+.Ft "xtc_reg_t *"
+.Fn xtc_app_registry "const xtc_app_t *app"
+.Sh DESCRIPTION
+.Nm xtc_app
+is the L4 application container -- a root supervisor plus a
+process registry plus lifecycle plumbing.  Models OTP's
+.Sq application
+concept.
+.Pp
+An app owns:
+.Bl -bullet -compact -offset indent
+.It
+A loop
+.Pq created if not supplied .
+.It
+A root supervisor with the configured children.
+.It
+A process registry where children can find each other by name
+.Pq see Xr xtc_reg 3 .
+.El
+.Pp
+Typical usage:
+.Bd -literal -offset indent
+xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+opts.name = "my_service";
+opts.sup.strategy = XTC_SUP_ONE_FOR_ONE;
+
+xtc_app_t *app;
+xtc_app_create(&opts, &app);
+
+xtc_child_spec_t kids[] = {
+    { .name = "listener",  .fn = listener_proc, .arg = NULL,
+      .policy = XTC_RESTART_PERMANENT },
+    { .name = "metrics",   .fn = metrics_proc,  .arg = NULL,
+      .policy = XTC_RESTART_TRANSIENT },
+};
+xtc_app_start(app, kids, 2);
+xtc_app_run(app);              /* blocks until app stops */
+xtc_app_destroy(app);
+.Ed
+.Pp
+The current implementation is single-loop; multi-loop apps spawn
+.Xr xtc_exec 3
+directly.  Future revisions may grow N-loop apps for thread-per-
+core scaling.
+.Sh SEE ALSO
+.Xr xtc_supervisor 3 ,
+.Xr xtc_reg 3 ,
+.Xr xtc_loop 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

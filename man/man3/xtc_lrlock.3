@@ -1,0 +1,166 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_LRLOCK 3
+.Os
+.Sh NAME
+.Nm xtc_lrlock_create ,
+.Nm xtc_lrlock_create_ex ,
+.Nm xtc_lrlock_destroy ,
+.Nm xtc_lrlock_read_begin ,
+.Nm xtc_lrlock_read_end ,
+.Nm xtc_lrlock_write_begin ,
+.Nm xtc_lrlock_apply_op ,
+.Nm xtc_lrlock_publish ,
+.Nm xtc_lrlock_publish_full_sync ,
+.Nm xtc_lrlock_write_end
+.Nd left-right lock with wait-free reads
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_lrlock.h
+.Ft int
+.Fn xtc_lrlock_create "size_t data_size" "xtc_lrlock_apply_fn apply_fn" "xtc_lrlock_sync_fn sync_fn" "const char *name" "xtc_lrlock_t **out"
+.Ft int
+.Fn xtc_lrlock_create_ex "const xtc_lrlock_opts_t *opts" "xtc_lrlock_t **out"
+.Ft void
+.Fn xtc_lrlock_destroy "xtc_lrlock_t *lr"
+.Ft "const void *"
+.Fn xtc_lrlock_read_begin "xtc_lrlock_t *lr"
+.Ft void
+.Fn xtc_lrlock_read_end "xtc_lrlock_t *lr"
+.Ft "void *"
+.Fn xtc_lrlock_write_begin "xtc_lrlock_t *lr"
+.Ft void
+.Fn xtc_lrlock_apply_op "xtc_lrlock_t *lr" "const void *op" "size_t op_size"
+.Ft void
+.Fn xtc_lrlock_publish "xtc_lrlock_t *lr"
+.Ft void
+.Fn xtc_lrlock_publish_full_sync "xtc_lrlock_t *lr"
+.Ft void
+.Fn xtc_lrlock_write_end "xtc_lrlock_t *lr"
+.Sh DESCRIPTION
+.Nm xtc_lrlock
+is a wait-free-read concurrency primitive that maintains two
+copies of the protected state and atomically swaps which copy is
+current on each writer publish.  Readers never block; writers
+serialise.  Ported from the PostgreSQL lrlck branch.
+.Pp
+Two copies of the user data live side by side.  An atomic
+.Vt read_idx
+identifies which copy is currently the read copy.
+.Pp
+.Sy Reader path :
+.Bl -enum -compact -offset indent
+.It
+Set this thread's bit in the active-readers bitmask.
+.It
+Bump this thread's epoch counter to odd.
+.It
+Sequentially-consistent fence.
+.It
+Atomic-acquire-load the current
+.Vt read_idx .
+.It
+Read
+.Vt data\^\& [ read_idx ] .
+.It
+Bump epoch back to even.  Clear bitmask bit.
+.El
+No CAS, no spin, no system call.
+.Pp
+.Sy Writer path :
+.Bl -enum -compact -offset indent
+.It
+Take writer mutex
+.Pq one writer at a time .
+.It
+Mutate the inactive copy via
+.Fn xtc_lrlock_apply_op
+or by writing to the buffer returned by
+.Fn xtc_lrlock_write_begin .
+.It
+.Fn xtc_lrlock_publish :
+swap
+.Vt read_idx ,
+fence, snapshot epoch counters, wait until each previously-active
+reader has departed, then re-apply the operations to the now-stale
+copy so both sides are in sync.
+.It
+.Fn xtc_lrlock_write_end
+releases the writer mutex.
+.El
+.Pp
+.Fn xtc_lrlock_create
+opens a lock with default options
+.Pq 64 reader slots, 4 KiB oplog .
+.Fn xtc_lrlock_create_ex
+takes
+.Vt xtc_lrlock_opts_t
+explicitly, exposing knobs for max readers, oplog capacity, and
+flags
+.Pq notably Dv XTC_LRLOCK_COW
+which lazily allocates the second copy and
+.Xr madvise 2 's
+it back to the OS after each publish in COW mode .
+.Pp
+.Fn xtc_lrlock_apply_op
+records a deterministic operation and applies it immediately to
+the writer's copy.  On
+.Fn xtc_lrlock_publish ,
+the same op is replayed on the now-stale copy.  Operations must
+be deterministic
+.Pq same op + same starting state -> same end state .
+For non-deterministic mutations, use
+.Fn xtc_lrlock_publish_full_sync
+which copies the entire data block instead of replaying ops.
+.Sh CHOOSING vs. xtc_lwlock
+Use
+.Nm xtc_lrlock
+when reads dominate (>50:1 R/W) and must never block.  Memory
+cost is 2x the data size unless
+.Dv XTC_LRLOCK_COW
+is enabled.  See
+.Xr xtc_lwlock 3
+for short-critical-section reader/writer semantics with one copy.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+struct config { int max_clients; int log_level; };
+struct op_set_max { int new_max; };
+
+static void apply_set_max(void *data, const void *op, size_t sz) {
+    ((struct config *)data)->max_clients =
+        ((const struct op_set_max *)op)->new_max;
+    (void)sz;
+}
+static void copy_config(void *dst, const void *src, size_t sz) {
+    memcpy(dst, src, sz);
+}
+
+xtc_lrlock_t *cfg_lock;
+xtc_lrlock_create(sizeof(struct config), apply_set_max, copy_config,
+                  "config", &cfg_lock);
+
+/* Reader -- wait-free. */
+const struct config *c = xtc_lrlock_read_begin(cfg_lock);
+int n = c->max_clients;
+xtc_lrlock_read_end(cfg_lock);
+
+/* Writer -- serialised. */
+xtc_lrlock_write_begin(cfg_lock);
+struct op_set_max op = { .new_max = 100 };
+xtc_lrlock_apply_op(cfg_lock, &op, sizeof op);
+xtc_lrlock_publish(cfg_lock);
+xtc_lrlock_write_end(cfg_lock);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_lwlock 3 ,
+.Xr xtc_lockmgr 3 ,
+.Xr xtc_rcu 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Ported from PostgreSQL's lrlck branch.  Appeared in xtc 0.1.
+.Sh SEE ALSO
+Pedro Ramalhete and Andreia Correia,
+.Sq Left-Right: A Concurrency Control Technique with Wait-Free
+.Sq Population Oblivious Reads
+.Pq 2014 .

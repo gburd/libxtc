@@ -1,0 +1,213 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_PROC 3
+.Os
+.Sh NAME
+.Nm xtc_proc_spawn ,
+.Nm xtc_self ,
+.Nm xtc_send ,
+.Nm xtc_recv ,
+.Nm xtc_recv_match ,
+.Nm xtc_recv_correlate ,
+.Nm xtc_proc_wait_fd ,
+.Nm xtc_exit_self ,
+.Nm xtc_exit_pid ,
+.Nm xtc_link ,
+.Nm xtc_unlink ,
+.Nm xtc_monitor
+.Nd BEAM-style lightweight processes with mailboxes
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_proc.h
+.Ft int
+.Fn xtc_proc_spawn "xtc_loop_t *loop" "xtc_proc_fn fn" "void *arg" "const xtc_proc_opts_t *opts" "xtc_pid_t *out_pid"
+.Ft xtc_pid_t
+.Fn xtc_self "void"
+.Ft int
+.Fn xtc_send "xtc_pid_t target" "const void *data" "size_t size"
+.Ft int
+.Fn xtc_recv "void **out" "size_t *out_size" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_recv_match "xtc_match_fn match_fn" "void *user_data" "void **out" "size_t *out_size" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_recv_correlate "const void *corr_value" "size_t corr_size" "int n_expected" "xtc_msg_t *out_msgs" "int *out_n" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_proc_wait_fd "int fd" "uint32_t interest" "int64_t timeout_ns" "uint32_t *out_revents"
+.Ft int
+.Fn xtc_exit_self "int reason"
+.Ft int
+.Fn xtc_exit_pid "xtc_pid_t pid" "int reason"
+.Ft int
+.Fn xtc_link "xtc_pid_t other"
+.Ft int
+.Fn xtc_unlink "xtc_pid_t other"
+.Ft int
+.Fn xtc_monitor "xtc_pid_t target" "uint64_t *out_ref"
+.Sh DESCRIPTION
+xtc processes are BEAM-style lightweight actors: each has an
+identity
+.Pq Vt xtc_pid_t ,
+a private mailbox, and a stack-backed coroutine that runs
+co-operatively inside an
+.Xr xtc_loop 3 .
+Communication is by message passing.  Failures are isolated by
+.Xr xtc_supervisor 3
+or by manual link/monitor.
+.Pp
+.Fn xtc_proc_spawn
+creates a new process running
+.Fa fn ( arg ) .
+The process runs on
+.Fa loop
+co-operatively with all other procs and tasks on that loop.
+.Fa opts
+is optional and may set the mailbox capacity, initial stack size,
+or per-proc resource accountant.
+.Pp
+.Fn xtc_self
+returns the calling process's pid, or
+.Dv XTC_PID_NONE
+if called outside a process context.
+.Pp
+.Fn xtc_send
+appends an envelope holding a copy of
+.Fa data\^\& [ 0 .. size )
+to the mailbox of
+.Fa target .
+Returns
+.Dv XTC_OK
+on success,
+.Dv XTC_E_INVAL
+if the target is dead, or
+.Dv XTC_E_AGAIN
+if the target's mailbox is full and bounded.
+Sending is asynchronous: the send returns immediately whether or
+not the receiver is currently scheduled.
+.Pp
+.Fn xtc_recv
+delivers the next message from the calling proc's mailbox in
+arrival order.  If the mailbox is empty,
+.Fa timeout_ns
+controls behaviour:
+.Bl -tag -width "timeout_ns < 0" -offset indent
+.It Fa timeout_ns < 0
+Block forever.
+.It Fa timeout_ns == 0
+Return
+.Dv XTC_E_AGAIN
+immediately if no message is queued.
+.It Fa timeout_ns > 0
+Block up to that many nanoseconds, then return
+.Dv XTC_E_AGAIN
+on timeout.
+.El
+The delivered buffer is owned by the caller and must be
+.Xr free 3 'd
+when no longer needed.
+.Pp
+.Fn xtc_recv_match
+performs selective receive: the callback
+.Fa match_fn
+is invoked for each envelope in arrival order; the first one for
+which it returns 1 is delivered.  Non-matching envelopes are
+parked in a save queue and re-checked on the next call only if
+the predicate has changed (BEAM-style recv-mark optimisation).
+.Pp
+.Fn xtc_recv_correlate
+collects
+.Fa n_expected
+messages whose first
+.Fa corr_size
+bytes match
+.Fa corr_value .
+Useful for fork-join patterns where the parent assigns each
+child a correlation id and waits for replies tagged with that id.
+The collected messages are written to
+.Fa out_msgs ;
+.Fa *out_n
+is set to the count actually delivered (which may be less than
+.Fa n_expected
+if the timeout fires first).
+.Pp
+.Fn xtc_proc_wait_fd
+blocks until any of:
+.Bl -bullet -compact -offset indent
+.It
+.Fa fd
+becomes ready in any
+.Fa interest
+direction
+.Pq Dv XTC_IO_READABLE | XTC_IO_WRITABLE | XTC_IO_HUP | XTC_IO_ERR ,
+.It
+a message arrives in the calling proc's mailbox
+.Pq Dv XTC_WAIT_MAILBOX
+.It
+the timeout elapses
+.Pq Dv XTC_WAIT_TIMEOUT
+.It
+the proc is killed via
+.Fn xtc_exit_pid .
+.El
+.Fa *out_revents
+receives a bitmask of which conditions fired.  This is the
+canonical way to write an idle-CPU-zero server: the proc sleeps
+until something real happens.
+.Pp
+.Fn xtc_exit_self
+terminates the calling process; cleanup runs and any links /
+monitors fire.
+.Pp
+.Fn xtc_exit_pid
+terminates another process by pid.  Asynchronous; the target
+notices on its next yield or
+.Fn xtc_recv
+parking point.
+.Pp
+.Fn xtc_link
+creates a bidirectional link.  If either end exits with a
+non-normal reason, the other receives an
+.Sq EXIT
+signal in its mailbox.
+.Fn xtc_unlink
+removes the link.
+.Pp
+.Fn xtc_monitor
+creates a unidirectional monitor.  The watcher receives a
+.Sq DOWN
+message
+.Po Vt {kind='D', ref, pid, reason} Pc
+when the monitored process exits.
+.Sh RETURN VALUES
+All entry points return
+.Dv XTC_OK
+on success.  Negative values are stable
+.Dv XTC_E_*
+codes; see
+.Xr xtc_strerror 3 .
+.Sh EXAMPLES
+A request-reply pattern with selective receive and timeouts:
+.Bd -literal -offset indent
+static void server(void *arg) {
+    void *msg; size_t sz;
+    for (;;) {
+        if (xtc_recv(&msg, &sz, 5000LL * 1000 * 1000) != XTC_OK)
+            continue;
+        /* ... handle msg, reply via xtc_send to msg->reply_to ... */
+        free(msg);
+    }
+}
+
+xtc_pid_t pid;
+xtc_proc_spawn(loop, server, NULL, NULL, &pid);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_chan 3 ,
+.Xr xtc_loop 3 ,
+.Xr xtc_supervisor 3 ,
+.Xr xtc_svr 3 ,
+.Xr xtc_strerror 3 ,
+.Xr xtc 7
+.Sh HISTORY
+.Nm
+appeared in xtc 0.1.
