@@ -2,11 +2,11 @@
 # Copyright (c) 2026, The XTC Project -- All rights reserved.
 # Use of this source code is governed by the ISC License.
 #
-# examples/05_redis/Makefile
-#	Builds the Redis-compatible server.
+# examples/05_rexis/Makefile
+#	Builds the rexis (Redis-protocol-compatible) server.
 #
 # Usage:
-#   make                         # builds ./redis-server-xtc
+#   make                         # builds ./rexis-server-xtc
 #   make clean
 #   make test                    # run basic sanity test
 #   XTC_BUILD=/path/to/build make   # override build dir
@@ -41,7 +41,7 @@ LDFLAGS  = $(XTC_LDFLAGS) $(XTC_BUILD)/libxtc.a -pthread $(LIBURING_LDFLAGS)
 
 SRCS = main.c proto.c db.c cmd.c conn.c expire.c metrics.c
 OBJS = $(SRCS:.c=.o)
-TARGET = redis-server-xtc
+TARGET = rexis-server-xtc
 
 .PHONY: all clean test
 

@@ -2,7 +2,7 @@
  * Copyright (c) 2026, The XTC Project -- All rights reserved.
  * Use of this source code is governed by the ISC License.
  *
- * test/m99/test_redis_budgets.c
+ * test/m99/test_rexis_budgets.c
  *	Budget enforcement tests: prove that resource limits hold under stress.
  *	The centerpiece for the P99 conference talk.
  */
@@ -41,7 +41,7 @@ start_server(int port, const char *extra_args[], int n_extra)
 	if (pid == 0) {
 		/* Child: exec the server */
 		char *args[32] = {
-			"../../examples/05_redis/redis-server-xtc",
+			"../../examples/05_rexis/rexis-server-xtc",
 			"-p", port_str,
 			NULL
 		};
@@ -52,7 +52,7 @@ start_server(int port, const char *extra_args[], int n_extra)
 		args[argc] = NULL;
 
 		execv(args[0], args);
-		args[0] = "./examples/05_redis/redis-server-xtc";
+		args[0] = "./examples/05_rexis/rexis-server-xtc";
 		execv(args[0], args);
 		_exit(1);
 	}
@@ -443,7 +443,7 @@ static MunitTest tests[] = {
 };
 
 static const MunitSuite suite = {
-	"/m99/redis_budgets", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE
+	"/m99/rexis_budgets", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE
 };
 
 int main(int argc, char *argv[])

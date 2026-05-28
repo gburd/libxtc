@@ -2,7 +2,7 @@
  * Copyright (c) 2026, The XTC Project -- All rights reserved.
  * Use of this source code is governed by the ISC License.
  *
- * examples/05_redis/expire.c
+ * examples/05_rexis/expire.c
  *	Timer-driven key expiration proc.
  */
 
@@ -62,7 +62,7 @@ expire_spawn(xtc_loop_t *loop, db_t *db, xtc_pid_t *out_pid)
 		return XTC_E_NOMEM;
 
 	st->db = db;
-	opts.name = "redis-expire";
+	opts.name = "rexis-expire";
 
 	return xtc_proc_spawn(loop, expire_proc, st, &opts, out_pid);
 }

@@ -2,12 +2,12 @@
  * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * examples/05_redis/cmd.h
+ * examples/05_rexis/cmd.h
  *	Command dispatch table and handlers.
  */
 
-#ifndef REDIS_CMD_H
-#define REDIS_CMD_H
+#ifndef REXIS_CMD_H
+#define REXIS_CMD_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -61,4 +61,4 @@ int cmd_count(void);
 /* Get command table for COMMAND */
 const cmd_entry_t *cmd_table(int *count);
 
-#endif /* REDIS_CMD_H */
+#endif /* REXIS_CMD_H */

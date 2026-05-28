@@ -2,7 +2,7 @@
  * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * examples/05_redis/proto.c
+ * examples/05_rexis/proto.c
  *	RESP2/RESP3 protocol parser and response builder.
  *	~300 LOC, no external dependencies.
  */

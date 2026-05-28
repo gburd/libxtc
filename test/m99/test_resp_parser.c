@@ -10,7 +10,7 @@
 #include <stdio.h>
 
 #include "munit.h"
-#include "../../examples/05_redis/proto.h"
+#include "../../examples/05_rexis/proto.h"
 
 /* Test case structure */
 typedef struct {

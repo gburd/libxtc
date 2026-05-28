@@ -2,7 +2,7 @@
 # Copyright (c) 2026, The XTC Project -- All rights reserved.
 # Use of this source code is governed by the ISC License.
 #
-# bench/redis_compat/Makefile
+# bench/rexis_compat/Makefile
 
 CC      = cc
 CFLAGS  = -O3 -std=c11 -Wall -Wextra -D_GNU_SOURCE

@@ -2,7 +2,7 @@
  * Copyright (c) 2026, The XTC Project -- All rights reserved.
  * Use of this source code is governed by the ISC License.
  *
- * examples/05_redis/conn.c
+ * examples/05_rexis/conn.c
  *	Per-connection xtc_proc implementation.
  */
 
@@ -142,7 +142,7 @@ conn_process_commands(conn_state_t *st)
 		if (rc == RESP_NEED_MORE)
 			break;
 
-		XTC_INJECTION_POINT("redis:parse_fail");
+		XTC_INJECTION_POINT("rexis:parse_fail");
 
 		if (rc != RESP_OK) {
 			/* Protocol error - send error and close */
@@ -165,9 +165,9 @@ conn_process_commands(conn_state_t *st)
 		ctx.iops_tokens = st->iops_tokens;
 		ctx.iops_cap = st->iops_cap;
 
-		XTC_INJECTION_POINT("redis:before_cmd");
+		XTC_INJECTION_POINT("rexis:before_cmd");
 		(void)cmd_execute(&ctx);
-		XTC_INJECTION_POINT("redis:after_cmd");
+		XTC_INJECTION_POINT("rexis:after_cmd");
 
 		st->write_len += out.len;
 
@@ -292,7 +292,7 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	st->quit = 0;
 	st->closed = 0;
 
-	proc_opts.name = "redis-conn";
+	proc_opts.name = "rexis-conn";
 
 	return xtc_proc_spawn(loop, conn_proc, st, &proc_opts, out_pid);
 }

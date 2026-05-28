@@ -2,7 +2,7 @@
  * Copyright (c) 2026, The XTC Project -- All rights reserved.
  * Use of this source code is governed by the ISC License.
  *
- * examples/05_redis/metrics.c
+ * examples/05_rexis/metrics.c
  *	Periodic resource stats logging.
  */
 
@@ -70,7 +70,7 @@ metrics_spawn(xtc_loop_t *loop, db_t *db, xtc_res_t *res,
 	st->db = db;
 	st->res = res;
 	st->conn_count = conn_count;
-	opts.name = "redis-metrics";
+	opts.name = "rexis-metrics";
 
 	return xtc_proc_spawn(loop, metrics_proc, st, &opts, out_pid);
 }
