@@ -225,23 +225,37 @@ conn_proc(void *arg)
 		if (st->quit || st->closed)
 			break;
 
-		/* Wait for I/O with timeout.  Per-connection busy-poll;
-		 * see README.md "Gaps in xtc" item 8: needs async-fd
-		 * readiness in xtc_proc to drop this. */
-		(void)xtc_recv(&msg, &msg_len, 50LL * 1000 * 1000);  /* 50 ms */
-		if (msg)
-			__os_free(msg);
+		/* Wait for the next inbound chunk (or for shutdown).  This
+		 * wakes exactly on fd readiness or mailbox traffic, not on
+		 * a polling timer. */
+		{
+			uint32_t revents = 0;
+			(void)xtc_proc_wait_fd(st->fd,
+			    XTC_IO_READABLE | XTC_IO_HUP | XTC_IO_ERR,
+			    1000LL * 1000 * 1000,  /* 1s timeout to re-check quit flag */
+			    &revents);
+			if (revents & XTC_WAIT_MAILBOX) {
+				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
+					if (msg) __os_free(msg);
+				}
+			}
+		}
 	}
 
-	/* Final flush */
+	/* Final flush -- drain the write buffer to the wire before
+	 * closing.  Wait for actual writability rather than poll.  This
+	 * is the technique requested by the user: an asynchronous I/O
+	 * completion wait, not a sleep + retry. */
 	while (st->write_len > st->write_pos && !st->closed) {
 		conn_try_write(st);
 		if (st->write_len > st->write_pos) {
-			/* Brief wait for writability */
-			void *m;
-			size_t s;
-			(void)xtc_recv(&m, &s, 5 * 1000 * 1000);
-			if (m) __os_free(m);
+			uint32_t revents = 0;
+			int rc = xtc_proc_wait_fd(st->fd,
+			    XTC_IO_WRITABLE | XTC_IO_HUP | XTC_IO_ERR,
+			    100LL * 1000 * 1000,  /* 100ms cap on shutdown */
+			    &revents);
+			if (rc != XTC_OK || (revents & (XTC_IO_HUP | XTC_IO_ERR)))
+				break;
 		}
 	}
 

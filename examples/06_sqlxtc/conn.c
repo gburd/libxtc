@@ -257,11 +257,22 @@ conn_proc(void *arg)
 
 		if (st->quit && st->wbuf.len == st->wpos) break;
 
-		/* Tight poll while there's work; idle backoff to 5 ms.
-		 * Without xtc_proc_wait_fd we have to poll; pick a low
-		 * timeout so QPS is bounded by SQLite, not the poll rate. */
-		(void)xtc_recv(&msg, &msg_len, 1LL * 1000 * 1000);
-		if (msg) __os_free(msg);
+		/* Wait for inbound bytes (or the quit/shutdown signal).
+		 * Wakes exactly on fd readiness; no busy-poll. */
+		{
+			uint32_t revents = 0;
+			uint32_t want = XTC_IO_READABLE | XTC_IO_HUP | XTC_IO_ERR;
+			if (st->wbuf.len > st->wpos)
+				want |= XTC_IO_WRITABLE;
+			(void)xtc_proc_wait_fd(st->fd, want,
+			    1000LL * 1000 * 1000,
+			    &revents);
+			if (revents & XTC_WAIT_MAILBOX) {
+				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
+					if (msg) __os_free(msg);
+				}
+			}
+		}
 	}
 
 	/* Final flush. */
