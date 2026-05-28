@@ -101,14 +101,14 @@ That's a one-process actor system in 25 lines.
 
 ## Where it shines
 
-`examples/05_redis/` is a working Redis-protocol server in ~2,000 LOC.
+`examples/05_rexis/` is a working Redis-protocol server in ~2,000 LOC.
 It uses every major xtc subsystem and stays inside hard `--max-memory`,
 `--max-keys`, `--max-clients`, `--max-iops`, and `--cores` caps under
 load.  Run it with:
 
 ```sh
-cd examples/05_redis && make
-./redis-server-xtc -p 6379 --max-memory=$((100*1024*1024)) --max-clients=10000
+cd examples/05_rexis && make
+./rexis-server-xtc -p 6379 --max-memory=$((100*1024*1024)) --max-clients=10000
 ```
 
 Then talk to it with `redis-cli` like any Redis server.
@@ -121,7 +121,7 @@ Other examples in `examples/`:
 | `02_proc_pingpong/` | Two BEAM processes bouncing messages |
 | `03_supervised_app/` | Crash a worker, watch the supervisor restart it |
 | `04_lockmgr_demo/` | The 9-mode transactional lock manager |
-| `05_redis/` | Networked, budgeted, multi-command Redis-compat server |
+| `05_rexis/` | Networked, budgeted, multi-command Redis-compat server |
 
 ## Built on three traditions
 

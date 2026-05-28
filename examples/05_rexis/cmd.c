@@ -2,7 +2,7 @@
  * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * examples/05_redis/cmd.c
+ * examples/05_rexis/cmd.c
  *	Command dispatch table and handlers.
  */
 
@@ -616,7 +616,7 @@ cmd_cluster(cmd_ctx_t *ctx)
 	    strcasecmp_n(ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
 	                 "NODES", 5) == 0) {
 		/* Return single node info */
-		const char *info = "xtcredis0000000000000000000000000000000000 "
+		const char *info = "xtcrexis0000000000000000000000000000000000 "
 		                   "127.0.0.1:6379@16379 myself,master - 0 0 1 "
 		                   "connected 0-16383\n";
 		resp_write_bulk(ctx->out, info, strlen(info));

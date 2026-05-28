@@ -15,7 +15,7 @@ make examples
 | `02_proc_pingpong.c` | Erlang-style processes: `xtc_proc_spawn`, `xtc_send`, `xtc_recv`. Bounce a counter 100 rounds. |
 | `03_supervised_app.c` | OTP application: `xtc_app` with a root supervisor (`one_for_all`), two workers, restart-on-crash. |
 | `04_lockmgr_demo.c` | Heavyweight lock manager: deadlock between two transactions; detector aborts the youngest. |
-| `05_redis/` | **Flagship demo**: Redis-compatible server with hard resource budgets. ~2000 LOC. |
+| `05_rexis/` | **Flagship demo**: Redis-compatible server with hard resource budgets. ~2000 LOC. |
 
 ## What each example proves
 
@@ -39,7 +39,7 @@ enforced via `xtc_res`. Demonstrates the full xtc API surface:
 `xtc_loop`, `xtc_proc`, `xtc_lrlock`, `xtc_slab`, `xtc_res`,
 `xtc_log`, `xtc_cfg`, `xtc_app`, `xtc_supervisor`, and `xtc_inject`.
 Supports ~35 Redis commands including strings, lists, and hashes.
-See `examples/05_redis/README.md` for details.
+See `examples/05_rexis/README.md` for details.
 
 ## Building
 
@@ -47,7 +47,7 @@ The Makefile target `examples` is built by:
 
 ```
 make 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo
-cd 05_redis && make
+cd 05_rexis && make
 ```
 
 Each binary links statically against `libxtc.a` and pthread.
