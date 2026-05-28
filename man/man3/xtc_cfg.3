@@ -1,0 +1,83 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_CFG 3
+.Os
+.Sh NAME
+.Nm xtc_cfg_register_bool ,
+.Nm xtc_cfg_register_int ,
+.Nm xtc_cfg_register_int64 ,
+.Nm xtc_cfg_register_double ,
+.Nm xtc_cfg_register_string ,
+.Nm xtc_cfg_register_enum ,
+.Nm xtc_cfg_set ,
+.Nm xtc_cfg_get
+.Nd typed runtime configuration registry
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_cfg.h
+.Ft int
+.Fn xtc_cfg_register_bool "const char *name" "int *out_var" "int default_v" "const char *help"
+.Ft int
+.Fn xtc_cfg_register_int "const char *name" "int *out_var" "int default_v" "int min" "int max" "const char *help"
+.Ft int
+.Fn xtc_cfg_register_int64 "const char *name" "int64_t *out_var" "int64_t default_v" "int64_t min" "int64_t max" "const char *help"
+.Ft int
+.Fn xtc_cfg_register_double "const char *name" "double *out_var" "double default_v" "double min" "double max" "const char *help"
+.Ft int
+.Fn xtc_cfg_register_string "const char *name" "char *buf" "size_t buflen" "const char *default_v" "const char *help"
+.Ft int
+.Fn xtc_cfg_set "const char *name" "const char *value"
+.Sh DESCRIPTION
+.Nm xtc_cfg
+is a typed runtime configuration registry, modeled on PostgreSQL's
+GUC system.  Modules register named knobs at startup; operators
+set them by name; values get bound to live variables and validated
+against type and bounds.
+.Pp
+Supported types:
+.Dv bool , int , int64 , double , string , enum .
+Each
+.Fn xtc_cfg_register_*
+takes:
+.Bl -bullet -compact -offset indent
+.It
+A canonical name
+.Pq dot-separated, e.g. Sq rexis.max_clients .
+.It
+A backing storage pointer.  When the cfg value changes, the
+storage is updated atomically.
+.It
+A default and bounds
+.Pq for numeric types .
+.It
+A help string used in
+.Sq cfg dump
+output.
+.El
+.Pp
+.Fn xtc_cfg_set
+parses the string value to the registered type, validates against
+bounds, and updates the backing variable.  An optional on-change
+callback fires.
+.Pp
+.Fn xtc_cfg_get
+.Pq via type-specific overloads
+reads the current value.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+static int g_max_clients = 1000;
+
+xtc_cfg_register_int("rexis.max_clients", &g_max_clients,
+                      1000, 1, 100000,
+                      "Maximum concurrent client connections");
+
+/* Operator runtime change: */
+xtc_cfg_set("rexis.max_clients", "5000");
+.Ed
+.Sh SEE ALSO
+.Xr xtc_log 3 ,
+.Xr xtc_stats 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

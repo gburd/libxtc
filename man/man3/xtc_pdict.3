@@ -1,0 +1,67 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_PDICT 3
+.Os
+.Sh NAME
+.Nm xtc_pdict_put ,
+.Nm xtc_pdict_get ,
+.Nm xtc_pdict_erase
+.Nd Erlang-style per-process dictionary
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_pdict.h
+.Ft int
+.Fn xtc_pdict_put "const char *key" "void *value" "xtc_pdict_dtor_fn dtor"
+.Ft "void *"
+.Fn xtc_pdict_get "const char *key"
+.Ft int
+.Fn xtc_pdict_erase "const char *key"
+.Sh DESCRIPTION
+.Nm xtc_pdict
+is a per-process dictionary similar to Erlang's
+.Sq put/get/erase .
+Each
+.Xr xtc_proc 3
+has its own private key-value store; entries are auto-cleaned
+when the proc exits, optionally invoking a destructor on each
+value.
+.Pp
+The store lives in a side-table keyed by pid rather than embedded
+in the proc struct, so adding a pdict entry doesn't affect the
+in-struct fast path.
+.Pp
+.Fn xtc_pdict_put
+binds
+.Fa key
+to
+.Fa value
+in the calling proc's dictionary.  If
+.Fa dtor
+is non-NULL, it's invoked with the prior value
+.Pq if any
+when the entry is replaced or erased, and on every entry when the
+proc exits.
+.Pp
+.Fn xtc_pdict_get
+returns the current value or NULL.
+.Pp
+.Fn xtc_pdict_erase
+removes the entry, invoking the dtor if registered.
+.Sh EXAMPLES
+.Bd -literat -offset indent
+static void my_dtor(void *p) { free(p); }
+
+/* Stash a per-request scratch buffer in the dict. */
+char *buf = malloc(4096);
+xtc_pdict_put("scratch", buf, my_dtor);
+
+/* Later in the same proc... */
+char *b = xtc_pdict_get("scratch");
+.Ed
+.Sh SEE ALSO
+.Xr xtc_proc 3 ,
+.Xr xtc_mctx 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

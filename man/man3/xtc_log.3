@@ -1,0 +1,75 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_LOG 3
+.Os
+.Sh NAME
+.Nm xtc_log_create ,
+.Nm xtc_log_destroy ,
+.Nm xtc_log_write ,
+.Nm xtc_log_drain ,
+.Nm XTC_LOG_DEBUG_F ,
+.Nm XTC_LOG_INFO_F ,
+.Nm XTC_LOG_WARN_F ,
+.Nm XTC_LOG_ERROR_F
+.Nd async ring-buffer logger
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_log.h
+.Ft int
+.Fn xtc_log_create "const xtc_log_opts_t *opts" "xtc_log_t **out"
+.Ft void
+.Fn xtc_log_destroy "xtc_log_t *log"
+.Ft int
+.Fn xtc_log_write "xtc_log_t *log" "xtc_log_level_t level" "const char *fmt" "..."
+.Ft int
+.Fn xtc_log_drain "xtc_log_t *log"
+.Sh DESCRIPTION
+.Nm xtc_log
+is a predictable-latency logger: callers append records to an
+in-memory ring buffer; a sink consumer drains the ring on a timer
+or explicit flush.  Producers never block; if the ring is full,
+the oldest record is dropped silently.
+.Pp
+Levels:
+.Dv XTC_LOG_DEBUG ,
+.Dv XTC_LOG_INFO ,
+.Dv XTC_LOG_WARN ,
+.Dv XTC_LOG_ERROR .
+A configurable global level filter elides cheaper records before
+formatting.
+.Pp
+.Sy Sinks
+.Pq Va opts.sink_fd
+or
+.Va opts.sink_fn :
+records are written to either a file descriptor (stdout, syslog
+fd, etc.) or a user callback.
+.Pp
+The
+.Fn XTC_LOG_*_F
+macros are convenience wrappers that look up a process-default
+.Vt xtc_log_t
+and call
+.Fn xtc_log_write
+with the right level.
+.Pp
+.Fn xtc_log_drain
+forces an immediate flush; called from the metrics proc on a
+timer or at process exit.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_log_t *log;
+xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+opts.sink_fd = STDOUT_FILENO;
+opts.min_level = XTC_LOG_INFO;
+
+xtc_log_create(&opts, &log);
+XTC_LOG_INFO_F("server started on port %d", port);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_cfg 3 ,
+.Xr xtc_stats 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

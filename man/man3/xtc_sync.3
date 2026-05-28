@@ -1,0 +1,99 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_SYNC 3
+.Os
+.Sh NAME
+.Nm xtc_amutex ,
+.Nm xtc_rwlock ,
+.Nm xtc_notify ,
+.Nm xtc_sem ,
+.Nm xtc_barrier ,
+.Nm xtc_gate ,
+.Nm xtc_abort_source
+.Nd async synchronisation primitives
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_sync.h
+.Sh DESCRIPTION
+.Nm xtc_sync
+provides async-aware synchronisation primitives that integrate
+with
+.Xr xtc_loop 3
+scheduling: blocked acquires park the calling fiber rather than
+blocking the OS thread.
+.Pp
+.Bl -tag -width "abort_source" -offset indent
+.It Vt xtc_amutex
+Async mutex.  Blocked acquires park the fiber.  Use for critical
+sections held across
+.Xr xtc_recv 3
+or other async I/O.  Compare with
+.Xr xtc_lwlock 3
+which uses pthread mutex underneath
+.Pq blocks the OS thread .
+.It Vt xtc_rwlock
+Async reader-writer lock.  Multi-reader / single-writer.  Same
+fiber-parking semantics as
+.Vt xtc_amutex .
+.It Vt xtc_notify
+A 0-or-1 latch.  Producers
+.Fn xtc_notify_signal ;
+consumers
+.Fn xtc_notify_wait
+until signalled.  Useful for one-shot ready signals.
+.It Vt xtc_sem
+Counting semaphore.
+.Fn xtc_sem_acquire / xtc_sem_release
+on a per-instance counter.
+.It Vt xtc_barrier
+Synchronisation point: N participants
+.Fn xtc_barrier_wait
+until all have arrived; then all proceed.
+.It Vt xtc_gate
+A 0-or-1 latch with re-arm.  Like a notify but the barrier can be
+closed and re-opened.
+.It Vt xtc_abort_source
+Cancellation token.  Initiator
+.Fn xtc_abort
+to signal cancellation; participants check
+.Fn xtc_abort_check
+periodically.  Used to wire timeout / shutdown into long-running
+operations cooperatively.
+.El
+.Pp
+All primitives are thread-safe.  All blocked-acquire paths park
+the calling fiber via
+.Xr xtc_proc_wait_fd 3
+or directly into the loop's wait queue, so the OS thread is free
+to run other work.
+.Sh CHOOSING
+.Bl -bullet -compact -offset indent
+.It
+For database-style transactional locking with deadlock detection:
+.Xr xtc_lockmgr 3 .
+.It
+For short critical sections inside one xtc_loop:
+.Xr xtc_lwlock 3 .
+.It
+For read-mostly state with wait-free readers:
+.Xr xtc_lrlock 3
+or
+.Xr xtc_rcu 3 .
+.It
+For "wait until N producers have all signalled":
+.Vt xtc_barrier
+or
+.Vt xtc_sem .
+.It
+For cancellation propagation:
+.Vt xtc_abort_source .
+.El
+.Sh SEE ALSO
+.Xr xtc_lwlock 3 ,
+.Xr xtc_lrlock 3 ,
+.Xr xtc_lockmgr 3 ,
+.Xr xtc_rcu 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

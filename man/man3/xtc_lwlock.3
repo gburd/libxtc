@@ -1,0 +1,136 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_LWLOCK 3
+.Os
+.Sh NAME
+.Nm xtc_lwlock_init ,
+.Nm xtc_lwlock_destroy ,
+.Nm xtc_lwlock_acquire ,
+.Nm xtc_lwlock_acquire_cond ,
+.Nm xtc_lwlock_release ,
+.Nm xtc_lwlock_held_by_me
+.Nd lightweight lock with shared / exclusive modes
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_lwlock.h
+.Ft int
+.Fn xtc_lwlock_init "xtc_lwlock_t *lock" "uint16_t tranche"
+.Ft void
+.Fn xtc_lwlock_destroy "xtc_lwlock_t *lock"
+.Ft int
+.Fn xtc_lwlock_acquire "xtc_lwlock_t *lock" "xtc_lwlock_mode_t mode"
+.Ft int
+.Fn xtc_lwlock_acquire_cond "xtc_lwlock_t *lock" "xtc_lwlock_mode_t mode"
+.Ft void
+.Fn xtc_lwlock_release "xtc_lwlock_t *lock"
+.Ft int
+.Fn xtc_lwlock_held_by_me "const xtc_lwlock_t *lock"
+.Sh DESCRIPTION
+.Nm xtc_lwlock
+is a lightweight lock with shared (reader) and exclusive (writer)
+modes.  Single atomic on the fast path; pthread_mutex / cond on
+the contended path.  Ported from PostgreSQL's
+.Pa src/backend/storage/lmgr/lwlock.c .
+.Pp
+The lock state is encoded in one
+.Vt _Atomic uint32_t :
+the high three bits hold the
+.Dv LW_FLAG_HAS_WAITERS ,
+.Dv LW_FLAG_WAKE_IN_PROGRESS ,
+and
+.Dv LW_FLAG_QUEUE_LOCKED
+flags; the low bits hold either the shared-holder count or the
+.Dv LW_VAL_EXCLUSIVE
+sentinel.  An uncontended acquire is one CAS.
+.Pp
+.Fn xtc_lwlock_init
+initialises the lock in place.
+.Fa tranche
+is a user tag for diagnostics (groups locks by purpose so
+profilers can attribute contention).
+.Pp
+.Fn xtc_lwlock_acquire
+blocks until the calling thread holds the lock in
+.Fa mode :
+.Bl -tag -width "XTC_LW_EXCLUSIVE" -offset indent
+.It Dv XTC_LW_SHARED
+Multiple threads can hold the lock concurrently in shared mode.
+Excluded by an exclusive holder.
+.It Dv XTC_LW_EXCLUSIVE
+Only one thread holds the lock; excludes all readers.
+.El
+.Pp
+.Fn xtc_lwlock_acquire_cond
+is the non-blocking variant: returns
+.Dv XTC_OK
+if the acquire succeeded immediately,
+.Dv XTC_E_AGAIN
+otherwise.
+.Pp
+.Fn xtc_lwlock_release
+drops the lock in whichever mode the calling thread acquired it.
+The mode is tracked in a per-thread held-list so the caller does
+not need to pass it back.
+.Pp
+.Fn xtc_lwlock_held_by_me
+returns 1 if the calling thread currently holds
+.Fa lock
+in any mode, 0 otherwise.  Useful in assertions and in code that
+needs to call a function that might or might not already hold a
+particular lock.
+.Sh CHOOSING BETWEEN LOCKS
+xtc ships several locks; pick by workload:
+.Bl -tag -width "xtc_lockmgr" -offset indent
+.It Vt xtc_lwlock
+General-purpose reader/writer.  Best for short critical sections
+with mixed reader/writer ratio.  This page.
+.It Vt xtc_lrlock
+Wait-free reads via two-copy publish.  Best for read-heavy
+workloads (read:write ratio > 50:1) where reads must never
+block.  See
+.Xr xtc_lrlock 3 .
+.It Vt xtc_lockmgr
+Transactional locking with deadlock detection, multiple modes,
+victim selection.  Best for database-style workloads with
+named lockable objects.  See
+.Xr xtc_lockmgr 3 .
+.It Vt xtc_amutex
+Async-aware mutex; integrates with the loop scheduler.  Use for
+critical sections that span async I/O.  See
+.Xr xtc_sync 3 .
+.El
+.Sh RETURN VALUES
+.Fn xtc_lwlock_init ,
+.Fn xtc_lwlock_acquire ,
+and
+.Fn xtc_lwlock_acquire_cond
+return
+.Dv XTC_OK
+on success or a negative
+.Dv XTC_E_*
+code.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_lwlock_t lk;
+xtc_lwlock_init(&lk, /* tranche */ 1);
+
+/* hot path: reader */
+xtc_lwlock_acquire(&lk, XTC_LW_SHARED);
+read_state();
+xtc_lwlock_release(&lk);
+
+/* mutator */
+xtc_lwlock_acquire(&lk, XTC_LW_EXCLUSIVE);
+update_state();
+xtc_lwlock_release(&lk);
+
+xtc_lwlock_destroy(&lk);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_lrlock 3 ,
+.Xr xtc_lockmgr 3 ,
+.Xr xtc_sync 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Ported from PostgreSQL's lrlck branch.  Appeared in xtc 0.1.
