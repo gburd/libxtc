@@ -119,3 +119,20 @@ The big-picture proof: **a real SQL-over-network server, in 1.6 K
 lines of sqlxtc-side code (ex. SQLite + Lime), running 200 clients
 concurrently against a single SQLite handle through xtc_lwlock and
 not exceeding any configured budget.**
+
+## Run at 2026-05-27T22:18:19-04:00
+
+Config: --cores=4 --max-memory=1073741824 --max-clients=108
+
+| metric        | value                                      |
+|---------------|--------------------------------------------|
+| clients       | 100                                 |
+| queries/cli   | 500                                 |
+| total queries | 50000                                     |
+| elapsed       | 15.7369s                                |
+| qps           | 3177                                       |
+| cpu peak      | 12.9% (cap: 400%)            |
+| rss peak      | 98.8 MiB (cap: 1024 MiB) |
+| threads       | 1                              |
+| errors        | 0                                    |
+| rejected      | 0                                  |
