@@ -53,3 +53,6 @@ examples/05_rexis/*.o
 # rexis example build outputs
 examples/05_rexis/*.o
 examples/05_rexis/rexis-server-xtc
+
+# rexis bitcask test binary
+examples/05_rexis/test_bitcask
