@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/sql_parse.c
+ * examples/06_sqlxtc/sql_parse.c
  *	Phase 1: keyword-based SQL classifier (no Lime yet).
  *	Phase 2: drives the Lime-generated parser in sql_parse_gen.c
  *	via sql_parse_lime() (compiled in when SQLXTC_HAVE_LIME=1).

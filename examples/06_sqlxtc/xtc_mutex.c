@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/xtc_mutex.c
+ * examples/06_sqlxtc/xtc_mutex.c
  *	SQLite mutex methods backed by xtc_lwlock.
  *
  *	SQLite distinguishes "fast" and "recursive" mutex types plus a

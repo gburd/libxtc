@@ -79,6 +79,7 @@ typedef struct xtc_proc_opts {
  * PUBLIC: int       xtc_send __P((xtc_pid_t, const void *, size_t));
  * PUBLIC: int       xtc_recv __P((void **, size_t *, int64_t));
  * PUBLIC: int       xtc_recv_match __P((xtc_match_fn, void *, void **, size_t *, int64_t));
+ * PUBLIC: int       xtc_proc_wait_fd __P((int, uint32_t, int64_t, uint32_t *));
  * PUBLIC: int       xtc_exit_self __P((int));
  * PUBLIC: int       xtc_exit_pid __P((xtc_pid_t, int));
  * PUBLIC: int       xtc_link __P((xtc_pid_t));
@@ -131,6 +132,33 @@ int       xtc_recv(void **out, size_t *out_size, int64_t timeout_ns);
 int       xtc_recv_match(xtc_match_fn match_fn, void *user_data,
                           void **out, size_t *out_size,
                           int64_t timeout_ns);
+
+/*
+ * Wait until ANY of the following becomes true:
+ *   - the given fd has any of `interest` bits set
+ *     (XTC_IO_READABLE / WRITABLE / ERR / HUP),
+ *   - a message arrives in the calling proc's mailbox,
+ *   - the timeout elapses (only if `timeout_ns >= 0`),
+ *   - the proc is killed (xtc_exit_pid raises the exit as usual).
+ *
+ * Returns:
+ *   XTC_OK       on a non-timeout wakeup.  *out_revents has the
+ *                XTC_IO_* bits that fired plus XTC_WAIT_MAILBOX if
+ *                a message is queued.  Multiple bits can be set if
+ *                more than one source raced to wake.
+ *   XTC_E_AGAIN  timeout fired with nothing else.  *out_revents has
+ *                XTC_WAIT_TIMEOUT.
+ *   XTC_E_INVAL  bad args (NULL out_revents, fd<0, etc.) or called
+ *                from outside a process.
+ *
+ * The fd is auto-unregistered before return; the mailbox is left
+ * untouched (caller still calls xtc_recv to actually drain).
+ */
+#define XTC_WAIT_MAILBOX  0x10000u   /* in out_revents only */
+#define XTC_WAIT_TIMEOUT  0x20000u   /* in out_revents only */
+
+int       xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
+                            uint32_t *out_revents);
 
 /* Explicit exit from inside a process; reason is delivered via
  * EXIT/DOWN signals to linked / monitoring procs. */

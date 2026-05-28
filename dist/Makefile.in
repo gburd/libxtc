@@ -176,6 +176,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_exec test_cross_wake test_deque test_steal \
 		  test_chan test_chan_mpmc_bcast \
 		  test_proc \
+		  test_proc_wait_fd \
 		  test_sync \
 		  test_sup \
 		  test_reg \
@@ -596,6 +597,12 @@ test_proc: $(srcdir)/../test/m8/test_proc.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
 		-o $@ $(srcdir)/../test/m8/test_proc.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_proc_wait_fd: $(srcdir)/../test/m8/test_proc_wait_fd.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
+		-o $@ $(srcdir)/../test/m8/test_proc_wait_fd.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M7.5 tests.

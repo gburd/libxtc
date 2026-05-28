@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/quack.c
+ * examples/06_sqlxtc/quack.c
  *	Hand-rolled JSON parser/encoder for the Quack wire protocol.
  *	~400 LOC, no external deps.  Handles only the fixed set of
  *	objects the protocol uses; unknown shapes are rejected.

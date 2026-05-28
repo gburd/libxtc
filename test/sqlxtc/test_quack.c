@@ -6,7 +6,7 @@
  *
  * test/sqlxtc/test_quack.c
  *	Quack JSON parser + encoder unit tests.  Standalone, no munit
- *	dependency: built and run by examples/sqlxtc/Makefile.
+ *	dependency: built and run by examples/06_sqlxtc/Makefile.
  *
  *	20+ cases.  Reports pass count to stdout; exit 1 on any failure.
  */
@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../examples/sqlxtc/quack.h"
+#include "../../examples/06_sqlxtc/quack.h"
 
 static int n_pass = 0;
 static int n_fail = 0;

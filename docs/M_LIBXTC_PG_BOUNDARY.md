@@ -69,15 +69,15 @@ crossing the line.  The buffer cache is not.
 
 ## What sqlxtc demonstrates about the boundary
 
-`examples/sqlxtc` is a working stress test of the boundary:
+`examples/06_sqlxtc` is a working stress test of the boundary:
 
 * Every xtc primitive sqlxtc uses (xtc_proc, xtc_lwlock, xtc_lrlock,
   xtc_res, xtc_app, xtc_log, xtc_net, xtc_slab) is generic.  None of
   them know what SQLite is or what SQL is.
 * sqlxtc's database-specific code (the SQLite amalgamation, the Lime
   SQL grammar, the Quack wire protocol) lives **entirely** in
-  `examples/sqlxtc/`.  The libxtc tree is unchanged.
-* The mutex implementation in `examples/sqlxtc/xtc_mutex.c` is the
+  `examples/06_sqlxtc/`.  The libxtc tree is unchanged.
+* The mutex implementation in `examples/06_sqlxtc/xtc_mutex.c` is the
   inverse of what a future PG adapter would do: SQLite's mutex
   interface gets backed by xtc_lwlock.  In a PG adapter, PG's
   `LWLock` API gets backed by `xtc_lwlock`.  Same primitive, two
@@ -113,7 +113,7 @@ in the middle through a thin adapter.
 ## Anti-patterns (things we will NOT do)
 
 * **Don't** put SQLite-specific code anywhere outside
-  `examples/sqlxtc/`.
+  `examples/06_sqlxtc/`.
 * **Don't** put PG-specific code anywhere outside the (future)
   `pg/` tree of the adapter.
 * **Don't** add a `xtc_query()` primitive -- that's a database

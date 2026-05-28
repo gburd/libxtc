@@ -21,7 +21,7 @@ interoperable with DuckDB.
 # build libxtc
 cd ../..
 mkdir -p build_unix && cd build_unix && ../dist/configure && make
-cd ../examples/sqlxtc
+cd ../examples/06_sqlxtc
 
 # build sqlxtc-server (sqlite3.o is built once; ~30 sec)
 make
@@ -108,15 +108,6 @@ bash ../../test/sqlxtc/test_sqlxtc_budgets.sh      # cap enforcement (Phase 4)
 bash ../../bench/sqlxtc/saturate.sh 200 1000       # saturation bench
 ```
 
-## Phases delivered
-
-* Phase 0 -- scaffolding, vendored SQLite amalgamation, Lime submodule.
-* Phase 1 -- Quack parser/encoder, per-conn xtc_proc, db_exec round-trip.
-* Phase 2 -- Lime-generated SQL pre-parser; round-trip canonicalisation.
-* Phase 3 -- xtc_lwlock-backed sqlite3_mutex_methods + serialized mode.
-* Phase 4 -- resource budgets; saturation bench.
-* Phase 5 -- libxtc / PostgreSQL boundary doc (`docs/M_LIBXTC_PG_BOUNDARY.md`).
-
 ## Performance
 
 See `../../bench/sqlxtc/RESULTS.md`.  TL;DR on a 4-core run with
@@ -126,39 +117,6 @@ See `../../bench/sqlxtc/RESULTS.md`.  TL;DR on a 4-core run with
 * RSS plateaus below the configured cap.
 * Reads (SELECT) saturate the SQLite serialised mutex; writes throttle
   through the shared lock.
-
-## Gaps in xtc surfaced
-
-Implementing sqlxtc surfaced several missing primitives we worked
-around but should ideally exist:
-
-1. **`xtc_proc_wait_fd`** -- the listener and per-connection procs
-   busy-poll with `xtc_recv` 50 ms timeouts because xtc_proc cannot
-   suspend on fd readiness.  This is the single biggest missing piece;
-   it costs ~10-20 wakeups/sec/conn at idle.
-
-2. **Recursive xtc_lwlock** -- `xMutexAlloc(SQLITE_MUTEX_RECURSIVE)`
-   needs counting on top of xtc_lwlock.  We wrap it with an
-   owner-tid + counter.  A first-class recursive mode in xtc_lwlock
-   (or `xtc_amutex`) would simplify this.
-
-3. **SQLite VFS over xtc_io** -- a full `sqlite3_vfs` that does async
-   reads/writes via xtc_io would let SQLite never block the loop on
-   disk I/O.  Not implemented; SQLite uses the default unix VFS.
-
-4. **`SQLITE_CONFIG_MALLOC` integration** -- SQLite has a hookable
-   allocator (`sqlite3_mem_methods`) that we could route through
-   xtc_res so every SQLite allocation is charged to the budget.  Not
-   implemented; we charge only sqlxtc's own allocations today, leaving
-   the SQLite arena off-budget.
-
-5. **ATTACH DATABASE per-DB resource scoping** -- `xtc_res_t` is a
-   single global accountant.  A per-attached-DB budget would let
-   operators give different SLAs to different tenants.
-
-6. **Per-connection prepared statement cache** -- we re-prepare every
-   SQL on every call.  A cache (LRU on the SQL text) would amortise
-   parse+plan cost.  Belongs on the sqlxtc side, not in libxtc.
 
 ## License
 

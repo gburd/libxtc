@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/conn.c
+ * examples/06_sqlxtc/conn.c
  *	Per-connection xtc_proc implementation.  Read newline-delimited
  *	JSON, parse via Quack, dispatch to db_exec, stream the result
  *	back as Quack.
