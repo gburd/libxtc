@@ -14,6 +14,11 @@
 #include "cmd.h"
 #include "xtc_int.h"
 
+/* Local helper: xtc __os_clock_mono uses out-param style. */
+static inline int64_t xtc_now_ns(void) {
+	int64_t t; (void)__os_clock_mono(&t); return t;
+}
+
 /* Case-insensitive compare */
 static int
 strcasecmp_n(const char *a, size_t alen, const char *b, size_t blen)
@@ -108,11 +113,11 @@ cmd_set(cmd_ctx_t *ctx)
 
 		if (strcasecmp_n(opt, olen, "EX", 2) == 0 && i + 1 < ctx->argc) {
 			i++;
-			expire_ns = __os_clock_mono() +
+			expire_ns = xtc_now_ns() +
 			    atoll(ctx->argv[i].u.str.data) * 1000000000LL;
 		} else if (strcasecmp_n(opt, olen, "PX", 2) == 0 && i + 1 < ctx->argc) {
 			i++;
-			expire_ns = __os_clock_mono() +
+			expire_ns = xtc_now_ns() +
 			    atoll(ctx->argv[i].u.str.data) * 1000000LL;
 		}
 		/* NX/XX ignored for simplicity */
@@ -243,7 +248,7 @@ cmd_expire(cmd_ctx_t *ctx)
 	int64_t secs, expire_ns;
 
 	secs = atoll(ctx->argv[2].u.str.data);
-	expire_ns = __os_clock_mono() + secs * 1000000000LL;
+	expire_ns = xtc_now_ns() + secs * 1000000000LL;
 
 	db_write_begin(ctx->db);
 	if (db_expire(ctx->db, ctx->argv[1].u.str.data,

@@ -13,6 +13,11 @@
 #include "xtc_log.h"
 #include "xtc_int.h"
 
+/* Local helper: xtc __os_clock_mono uses out-param style. */
+static inline int64_t xtc_now_ns(void) {
+	int64_t t; (void)__os_clock_mono(&t); return t;
+}
+
 #define EXPIRE_INTERVAL_NS  (100 * 1000 * 1000)  /* 100 ms */
 #define EXPIRE_SCAN_LIMIT   100                  /* keys per scan */
 
@@ -28,7 +33,7 @@ expire_proc(void *arg)
 	size_t msg_len;
 
 	for (;;) {
-		int64_t now = __os_clock_mono();
+		int64_t now = xtc_now_ns();
 		int removed;
 
 		/* Yield for interval */
@@ -53,8 +58,7 @@ expire_spawn(xtc_loop_t *loop, db_t *db, xtc_pid_t *out_pid)
 	expire_state_t *st;
 	xtc_proc_opts_t opts = { 0 };
 
-	st = __os_malloc(sizeof(*st));
-	if (!st)
+	if (__os_malloc(sizeof(*st), (void **)&st) != XTC_OK || !st)
 		return XTC_E_NOMEM;
 
 	st->db = db;
