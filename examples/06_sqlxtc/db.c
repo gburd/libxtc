@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/db.c
+ * examples/06_sqlxtc/db.c
  *	SQLite handle management + result streaming.
  */
 

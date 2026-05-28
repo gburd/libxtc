@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/sql_parse_lime.h
+ * examples/06_sqlxtc/sql_parse_lime.h
  *	Internal header shared between the Lime grammar (sql_parse.lime),
  *	the tokenizer (sql_parse_lex.c) and the driver (sql_parse_drv.c).
  *	The Lime-generated file includes this; do not move types around

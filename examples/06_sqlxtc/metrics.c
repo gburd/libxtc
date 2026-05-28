@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/metrics.c
+ * examples/06_sqlxtc/metrics.c
  *	Periodic xtc_res snapshot logger.
  */
 

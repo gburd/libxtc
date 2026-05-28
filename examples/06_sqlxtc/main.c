@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/main.c
+ * examples/06_sqlxtc/main.c
  *	sqlxtc-server entry point.  Wires up xtc_app, xtc_res, the
  *	listener xtc_proc, the SQLite mutex methods, and per-connection
  *	procs.
