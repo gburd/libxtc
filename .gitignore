@@ -11,6 +11,12 @@ dist/config.status
 dist/config.log
 dist/Makefile
 
+# Core dumps
+core
+core.*
+*.core
+vgcore.*
+
 # Editor / OS detritus
 *.o
 *.a
