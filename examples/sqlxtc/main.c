@@ -210,7 +210,7 @@ listener_proc(void *arg)
 			}
 		}
 
-		(void)xtc_recv(&msg, &msg_len, 50LL * 1000 * 1000);
+		(void)xtc_recv(&msg, &msg_len, 1LL * 1000 * 1000);
 		if (msg) __os_free(msg);
 	}
 }
