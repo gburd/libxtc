@@ -110,13 +110,28 @@ bash ../../bench/sqlxtc/saturate.sh 200 1000       # saturation bench
 
 ## Performance
 
-See `../../bench/sqlxtc/RESULTS.md`.  TL;DR on a 4-core run with
-`--cores=4 --max-memory=1GiB --max-clients=200`:
+See `../../bench/sqlxtc/RESULTS.md` for raw numbers.  Current state
+is single-loop, single-sqlite3-handle, SQLITE_CONFIG_SERIALIZED.
+Under concurrent client load:
 
-* All 4 pinned cores reach ~100% CPU under the load.
-* RSS plateaus below the configured cap.
-* Reads (SELECT) saturate the SQLite serialised mutex; writes throttle
-  through the shared lock.
+* The xtc loop and the listener / connection procs distribute work
+  across fibers cleanly; idle CPU is 0%.
+* All connections speak to one shared sqlite3 handle through xtc_lwlock
+  serving as SQLite's mutex layer.  This means SQL execution itself
+  serializes -- the design demonstrates the wire protocol and the xtc
+  primitive integration but does not yet scale across cores.
+* Driving the existing saturation bench yields ~3000 qps for mixed
+  SELECT/INSERT workloads on a memory-resident DB with one CPU core
+  fully utilised.
+
+Real multi-core scaling requires breaking SQLite's monolithic mutex
+into fine-grained per-page / per-table locks.  That work is planned
+in five phases (subsystem-as-server, then xtc_lrlock buffer pool,
+then fine-grained btree locks, then async VFS) -- documented in
+[`../../docs/M_SQLXTC_HARDFORK.md`](../../docs/M_SQLXTC_HARDFORK.md).
+Until that lands, sqlxtc is a single-core SQLite server with an xtc-
+shaped network frontend.  The eventual hard-fork is the project's
+payoff.
 
 ## License
 
