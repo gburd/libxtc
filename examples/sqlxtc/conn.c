@@ -257,7 +257,10 @@ conn_proc(void *arg)
 
 		if (st->quit && st->wbuf.len == st->wpos) break;
 
-		(void)xtc_recv(&msg, &msg_len, 50LL * 1000 * 1000);
+		/* Tight poll while there's work; idle backoff to 5 ms.
+		 * Without xtc_proc_wait_fd we have to poll; pick a low
+		 * timeout so QPS is bounded by SQLite, not the poll rate. */
+		(void)xtc_recv(&msg, &msg_len, 1LL * 1000 * 1000);
 		if (msg) __os_free(msg);
 	}
 
