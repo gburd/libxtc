@@ -136,3 +136,20 @@ Config: --cores=4 --max-memory=1073741824 --max-clients=108
 | threads       | 1                              |
 | errors        | 0                                    |
 | rejected      | 0                                  |
+
+## Run at 2026-05-28T12:04:04-04:00
+
+Config: --cores=4 --max-memory=1073741824 --max-clients=58
+
+| metric        | value                                      |
+|---------------|--------------------------------------------|
+| clients       | 50                                 |
+| queries/cli   | 200                                 |
+| total queries | 10000                                     |
+| elapsed       | 3.26576s                                |
+| qps           | 3062                                       |
+| cpu peak      | 4.4% (cap: 400%)            |
+| rss peak      | 5.3 MiB (cap: 1024 MiB) |
+| threads       | 1                              |
+| errors        | 0                                    |
+| rejected      | 0                                  |
