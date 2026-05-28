@@ -73,6 +73,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/cfg.c \
 	$(srcdir)/../src/ptc/inject.c \
 	$(srcdir)/../src/ptc/pdict.c \
+	$(srcdir)/../src/ptc/stats.c \
 	$(srcdir)/../src/ptc/slab.c \
 	$(srcdir)/../src/ptc/mctx.c \
 	$(srcdir)/../src/ptc/rcu.c \
@@ -120,6 +121,7 @@ LIB_OBJS	= \
 	cfg.o \
 	inject.o \
 	pdict.o \
+	stats.o \
 	slab.o \
 	mctx.o \
 	rcu.o \
@@ -195,6 +197,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_otp_gen_server_phase2 \
 		  test_otp_supervisor \
 		  test_observability \
+		  test_stats \
 		  test_tls_basic \
 		  test_tls_server \
 		  test_tls_client
@@ -311,6 +314,9 @@ inject.o: $(srcdir)/../src/ptc/inject.c xtc_config.h
 
 pdict.o: $(srcdir)/../src/ptc/pdict.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/pdict.c
+
+stats.o: $(srcdir)/../src/ptc/stats.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/stats.c
 
 slab.o: $(srcdir)/../src/ptc/slab.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/slab.c
@@ -723,6 +729,12 @@ test_observability: $(srcdir)/../test/m12/test_observability.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
 		-o $@ $(srcdir)/../test/m12/test_observability.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_stats: $(srcdir)/../test/m12/test_stats.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
+		-o $@ $(srcdir)/../test/m12/test_stats.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M18 tests -- TLS API surface.
