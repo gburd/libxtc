@@ -420,3 +420,163 @@ int xtc_net_unix_send_creds(int fd, const void *b, size_t l)
 int xtc_net_unix_recv_creds(int fd, void *b, size_t l, uint32_t *u, uint32_t *g, size_t *n)
 { (void)fd; (void)b; (void)l; (void)u; (void)g; (void)n; return XTC_E_NOSYS; }
 #endif
+
+/* ---- UDP -------------------------------------------------------- */
+
+int
+xtc_net_udp_socket(xtc_net_family_t fam, const char *host, int port,
+                   int *out_fd)
+{
+	int fd, rc;
+	int af;
+	WSA_INIT_ONCE();
+	if (out_fd == NULL) return XTC_E_INVAL;
+
+	switch (fam) {
+	case XTC_NET_INET:  af = AF_INET;  break;
+	case XTC_NET_INET6: af = AF_INET6; break;
+	default:            return XTC_E_NOSYS;
+	}
+	fd = (int)socket(af, SOCK_DGRAM, 0);
+	if (fd < 0) return XTC_E_INTERNAL;
+	if ((rc = xtc_net_setnonblock(fd)) != XTC_OK) {
+		(void)close(fd); return rc;
+	}
+	if (host != NULL || port != 0) {
+		struct sockaddr_storage ss;
+		socklen_t slen = 0;
+		memset(&ss, 0, sizeof ss);
+		if (af == AF_INET) {
+			struct sockaddr_in *sa = (struct sockaddr_in *)&ss;
+			sa->sin_family = AF_INET;
+			sa->sin_port = htons((uint16_t)port);
+			if (host == NULL || host[0] == '\0' ||
+			    strcmp(host, "0.0.0.0") == 0)
+				sa->sin_addr.s_addr = htonl(INADDR_ANY);
+			else if (inet_pton(AF_INET, host, &sa->sin_addr) != 1) {
+				(void)close(fd); return XTC_E_INVAL;
+			}
+			slen = sizeof *sa;
+		} else {
+			struct sockaddr_in6 *sa = (struct sockaddr_in6 *)&ss;
+			sa->sin6_family = AF_INET6;
+			sa->sin6_port = htons((uint16_t)port);
+			if (host == NULL || host[0] == '\0' ||
+			    strcmp(host, "::") == 0)
+				sa->sin6_addr = in6addr_any;
+			else if (inet_pton(AF_INET6, host, &sa->sin6_addr) != 1) {
+				(void)close(fd); return XTC_E_INVAL;
+			}
+			slen = sizeof *sa;
+		}
+		if (bind(fd, (struct sockaddr *)&ss, slen) != 0) {
+			(void)close(fd); return XTC_E_INTERNAL;
+		}
+	}
+	*out_fd = fd;
+	return XTC_OK;
+}
+
+int
+xtc_net_udp_sendto(int fd, const void *buf, size_t len,
+                   const char *host, int port)
+{
+	struct addrinfo hints, *res = NULL;
+	char portbuf[16];
+	int rc;
+	ssize_t n;
+	if (buf == NULL || host == NULL) return XTC_E_INVAL;
+	memset(&hints, 0, sizeof hints);
+	hints.ai_socktype = SOCK_DGRAM;
+	hints.ai_family   = AF_UNSPEC;
+	snprintf(portbuf, sizeof portbuf, "%d", port);
+	rc = getaddrinfo(host, portbuf, &hints, &res);
+	if (rc != 0 || res == NULL) return XTC_E_INVAL;
+	n = sendto(fd, buf, len, 0, res->ai_addr, res->ai_addrlen);
+	freeaddrinfo(res);
+	if (n < 0) {
+#if defined(_WIN32)
+		int we = WSAGetLastError();
+		if (we == WSAEWOULDBLOCK) return XTC_E_AGAIN;
+#else
+		if (errno == EAGAIN || errno == EWOULDBLOCK) return XTC_E_AGAIN;
+#endif
+		return XTC_E_INTERNAL;
+	}
+	return ((size_t)n == len) ? XTC_OK : XTC_E_AGAIN;
+}
+
+int
+xtc_net_udp_recvfrom(int fd, void *buf, size_t buflen,
+                     char *out_host, size_t out_host_size,
+                     int *out_port, size_t *out_n)
+{
+	struct sockaddr_storage ss;
+	socklen_t slen = sizeof ss;
+	ssize_t n;
+	if (buf == NULL || out_n == NULL) return XTC_E_INVAL;
+	n = recvfrom(fd, buf, buflen, 0, (struct sockaddr *)&ss, &slen);
+	if (n < 0) {
+#if defined(_WIN32)
+		int we = WSAGetLastError();
+		if (we == WSAEWOULDBLOCK) return XTC_E_AGAIN;
+#else
+		if (errno == EAGAIN || errno == EWOULDBLOCK) return XTC_E_AGAIN;
+#endif
+		return XTC_E_INTERNAL;
+	}
+	*out_n = (size_t)n;
+	if (out_host != NULL && out_host_size > 0) {
+		out_host[0] = '\0';
+		if (ss.ss_family == AF_INET) {
+			struct sockaddr_in *sa = (struct sockaddr_in *)&ss;
+			(void)inet_ntop(AF_INET, &sa->sin_addr, out_host,
+			    (socklen_t)out_host_size);
+			if (out_port) *out_port = ntohs(sa->sin_port);
+		} else if (ss.ss_family == AF_INET6) {
+			struct sockaddr_in6 *sa = (struct sockaddr_in6 *)&ss;
+			(void)inet_ntop(AF_INET6, &sa->sin6_addr, out_host,
+			    (socklen_t)out_host_size);
+			if (out_port) *out_port = ntohs(sa->sin6_port);
+		}
+	}
+	return XTC_OK;
+}
+
+/* ---- DNS -------------------------------------------------------- */
+
+int
+xtc_dns_resolve(const char *hostname, int port,
+                xtc_net_family_t fam,
+                char *out_addr, size_t out_addr_size)
+{
+	struct addrinfo hints, *res = NULL;
+	char portbuf[16];
+	int rc;
+	int af;
+	if (hostname == NULL || out_addr == NULL || out_addr_size == 0)
+		return XTC_E_INVAL;
+	switch (fam) {
+	case XTC_NET_INET:  af = AF_INET;  break;
+	case XTC_NET_INET6: af = AF_INET6; break;
+	default:            af = AF_UNSPEC; break;
+	}
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family   = af;
+	hints.ai_socktype = SOCK_STREAM;
+	snprintf(portbuf, sizeof portbuf, "%d", port);
+	rc = getaddrinfo(hostname, portbuf, &hints, &res);
+	if (rc != 0 || res == NULL) return XTC_E_INVAL;
+	out_addr[0] = '\0';
+	if (res->ai_family == AF_INET) {
+		struct sockaddr_in *sa = (struct sockaddr_in *)res->ai_addr;
+		(void)inet_ntop(AF_INET, &sa->sin_addr, out_addr,
+		    (socklen_t)out_addr_size);
+	} else if (res->ai_family == AF_INET6) {
+		struct sockaddr_in6 *sa = (struct sockaddr_in6 *)res->ai_addr;
+		(void)inet_ntop(AF_INET6, &sa->sin6_addr, out_addr,
+		    (socklen_t)out_addr_size);
+	}
+	freeaddrinfo(res);
+	return XTC_OK;
+}

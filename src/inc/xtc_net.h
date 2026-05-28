@@ -60,6 +60,12 @@ typedef struct xtc_tcp_opts {
  * PUBLIC: int xtc_net_unix_dial __P((const char *, int *));
  * PUBLIC: int xtc_net_unix_send_creds __P((int, const void *, size_t));
  * PUBLIC: int xtc_net_unix_recv_creds __P((int, void *, size_t, uint32_t *, uint32_t *, size_t *));
+ *
+ * PUBLIC: int xtc_net_udp_socket __P((xtc_net_family_t, const char *, int, int *));
+ * PUBLIC: int xtc_net_udp_sendto __P((int, const void *, size_t, const char *, int));
+ * PUBLIC: int xtc_net_udp_recvfrom __P((int, void *, size_t, char *, size_t, int *, size_t *));
+ *
+ * PUBLIC: int xtc_dns_resolve __P((const char *, int, xtc_net_family_t, char *, size_t));
  */
 
 /* TCP listen socket.  `host` may be NULL/"" for any-address.  Returns
@@ -93,5 +99,40 @@ int xtc_net_unix_send_creds(int fd, const void *buf, size_t buflen);
 int xtc_net_unix_recv_creds(int fd, void *buf, size_t buflen,
                             uint32_t *out_uid, uint32_t *out_gid,
                             size_t *out_n);
+
+/* ---- UDP ----------------------------------------------------- */
+
+/* Open a UDP datagram socket bound to (host, port).  host=NULL
+ * means INADDR_ANY / in6addr_any.  port=0 means kernel-assigned.
+ * Returns the fd in non-blocking + cloexec mode. */
+int xtc_net_udp_socket(xtc_net_family_t fam, const char *host,
+                       int port, int *out_fd);
+
+/* Send a single datagram to host:port.  Returns XTC_OK on full
+ * send, XTC_E_AGAIN if the kernel buffer is full (caller should
+ * poll for writability). */
+int xtc_net_udp_sendto(int fd, const void *buf, size_t len,
+                       const char *host, int port);
+
+/* Receive a single datagram.  out_host/out_host_size receive the
+ * peer's address as a printable string.  out_port and out_n are
+ * filled in.  Returns XTC_OK or XTC_E_AGAIN. */
+int xtc_net_udp_recvfrom(int fd, void *buf, size_t buflen,
+                         char *out_host, size_t out_host_size,
+                         int *out_port, size_t *out_n);
+
+/* ---- DNS resolution ------------------------------------------
+ *
+ * xtc_dns_resolve resolves a hostname to a printable address
+ * string.  The current implementation uses getaddrinfo(3) on a
+ * blocking thread; the calling proc / fiber blocks during the
+ * lookup.  For genuine async resolution -- and to avoid blocking
+ * the loop -- run the call from a dedicated lookup proc whose
+ * thread is allowed to block.  A future revision will integrate
+ * a c-ares-style fully async resolver.
+ */
+int xtc_dns_resolve(const char *hostname, int port,
+                    xtc_net_family_t fam,
+                    char *out_addr, size_t out_addr_size);
 
 #endif /* XTC_NET_H */
