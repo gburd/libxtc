@@ -113,6 +113,22 @@ cd examples/05_redis && make
 
 Then talk to it with `redis-cli` like any Redis server.
 
+`examples/sqlxtc/` is a networked, threaded, async **SQLite** server in
+about 2,300 LOC of new code (excluding the vendored 250 K-line SQLite
+amalgamation).  It speaks a tiny line-JSON protocol called Quack,
+parses incoming SQL with a Lime-generated grammar, and serialises
+through a single shared sqlite3 handle whose mutex methods are backed
+by `xtc_lwlock`.  A 200-client / 200,000-query saturation run holds
+below a 1 GiB memory cap with zero errors and zero rejections.
+
+```sh
+cd examples/sqlxtc && make
+./sqlxtc-server -p 15432 -d :memory:
+```
+
+See `examples/sqlxtc/README.md` for architecture and
+`bench/sqlxtc/RESULTS.md` for the saturation numbers.
+
 Other examples in `examples/`:
 
 | Example | What it shows |
@@ -122,6 +138,7 @@ Other examples in `examples/`:
 | `03_supervised_app/` | Crash a worker, watch the supervisor restart it |
 | `04_lockmgr_demo/` | The 9-mode transactional lock manager |
 | `05_redis/` | Networked, budgeted, multi-command Redis-compat server |
+| `sqlxtc/`   | Networked, budgeted SQLite via Quack JSON + Lime SQL parser |
 
 ## Built on three traditions
 
