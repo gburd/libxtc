@@ -82,6 +82,8 @@ sql_parse(const char *sql, size_t len, sql_info_t *info)
 		info->readonly = 1;
 	} else if ((n = sp_keyword(p, end, "INSERT")) != 0) {
 		info->kind = SQL_KIND_INSERT;
+	} else if ((n = sp_keyword(p, end, "REPLACE")) != 0) {
+		info->kind = SQL_KIND_INSERT;     /* REPLACE is INSERT-shaped */
 	} else if ((n = sp_keyword(p, end, "UPDATE")) != 0) {
 		info->kind = SQL_KIND_UPDATE;
 	} else if ((n = sp_keyword(p, end, "DELETE")) != 0) {

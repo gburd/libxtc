@@ -1,0 +1,476 @@
+/*
+** sql_parse.lime -- SQL grammar for sqlxtc, in Lime format.
+**
+** Covers a useful subset of SQLite's SQL: SELECT, INSERT, UPDATE,
+** DELETE, CREATE TABLE / INDEX / VIEW, DROP, PRAGMA, BEGIN / COMMIT /
+** ROLLBACK, ATTACH / DETACH DATABASE, EXPLAIN.
+**
+** The grammar is intentionally permissive: any expression position
+** accepts a flat sequence of tokens (with balanced parens) so we don't
+** need a full SQLite expression grammar to validate the high-level
+** shape.  This is enough for routing (SELECT vs DML), validation (we
+** reject obviously malformed shapes), and early error reporting.
+**
+** The output is fed via sql_parse_lime() to set sql_info_t fields.
+** When the grammar accepts, it sets pstate->kind and pstate->readonly.
+** When syntax_error fires we leave pstate->kind = SQL_KIND_UNKNOWN
+** so the caller can still defer to SQLite's parser for the real
+** message (we want to surface SQLite errors verbatim).
+**
+** SQLite's own parse.y was consulted as a structural reference;
+** SQLite is public domain.  This grammar shares only the high-level
+** shape.
+*/
+
+%include {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include "sql_parse.h"
+#include "sql_parse_lime.h"
+}
+
+%token_type {sql_token_t}
+%extra_argument {sql_parse_state_t *pstate}
+%name SqlParse
+
+%syntax_error {
+    (void)yymajor;
+    (void)yyminor;
+    pstate->error = 1;
+    if (!pstate->err_msg) pstate->err_msg = "syntax error";
+}
+
+%parse_failure {
+    pstate->error = 1;
+    if (!pstate->err_msg) pstate->err_msg = "parse failure";
+}
+
+%start_symbol input
+
+/* ===== tokens ===== */
+
+%token TK_SELECT.   %token TK_FROM.    %token TK_WHERE.   %token TK_GROUP.
+%token TK_BY.       %token TK_HAVING.  %token TK_ORDER.   %token TK_LIMIT.
+%token TK_OFFSET.   %token TK_ASC.     %token TK_DESC.    %token TK_DISTINCT.
+%token TK_ALL.      %token TK_UNION.   %token TK_INTERSECT.%token TK_EXCEPT.
+%token TK_INSERT.   %token TK_INTO.    %token TK_VALUES.  %token TK_DEFAULT.
+%token TK_REPLACE.
+%token TK_UPDATE.   %token TK_SET.     %token TK_DELETE.
+%token TK_CREATE.   %token TK_TABLE.   %token TK_INDEX.   %token TK_VIEW.
+%token TK_TRIGGER.  %token TK_TEMP.    %token TK_TEMPORARY.
+%token TK_DROP.     %token TK_IF.      %token TK_NOT.     %token TK_EXISTS.
+%token TK_PRAGMA.   %token TK_BEGIN.   %token TK_COMMIT.  %token TK_END.
+%token TK_ROLLBACK. %token TK_TRANSACTION.
+%token TK_ATTACH.   %token TK_DETACH.  %token TK_DATABASE.
+%token TK_AS.       %token TK_AND.     %token TK_OR.      %token TK_NULL.
+%token TK_TRUE.     %token TK_FALSE.   %token TK_PRIMARY. %token TK_KEY.
+%token TK_UNIQUE.   %token TK_FOREIGN. %token TK_REFERENCES. %token TK_CHECK.
+%token TK_AUTOINCR.
+%token TK_ON.       %token TK_USING.   %token TK_IN.      %token TK_LIKE.
+%token TK_BETWEEN.  %token TK_IS.      %token TK_CASE.    %token TK_WHEN.
+%token TK_THEN.     %token TK_ELSE.    %token TK_EXPLAIN. %token TK_QUERY.
+%token TK_PLAN.     %token TK_WITH.    %token TK_RECURSIVE. %token TK_TO.
+%token TK_JOIN.     %token TK_INNER.   %token TK_OUTER.   %token TK_LEFT.
+%token TK_RIGHT.    %token TK_FULL.    %token TK_CROSS.   %token TK_NATURAL.
+
+%token TK_LP.       %token TK_RP.      %token TK_COMMA.   %token TK_SEMI.
+%token TK_DOT.      %token TK_STAR.    %token TK_PLUS.    %token TK_MINUS.
+%token TK_SLASH.    %token TK_PERCENT. %token TK_EQ.      %token TK_NE.
+%token TK_LT.       %token TK_LE.      %token TK_GT.      %token TK_GE.
+%token TK_CONCAT.   %token TK_AMP.     %token TK_PIPE.    %token TK_QMARK.
+%token TK_TILDE.
+
+%token TK_ID.       %token TK_NUMBER.  %token TK_STRING.  %token TK_BLOB.
+
+/* ===== top level ===== */
+
+input ::= stmt_list maybe_semi.
+input ::= stmt_list TK_SEMI stmt_list maybe_semi.
+
+maybe_semi ::= .
+maybe_semi ::= TK_SEMI.
+
+stmt_list ::= stmt.
+stmt_list ::= stmt_list TK_SEMI stmt.
+
+stmt ::= select_stmt.
+stmt ::= insert_stmt.
+stmt ::= update_stmt.
+stmt ::= delete_stmt.
+stmt ::= create_stmt.
+stmt ::= drop_stmt.
+stmt ::= pragma_stmt.
+stmt ::= begin_stmt.
+stmt ::= commit_stmt.
+stmt ::= rollback_stmt.
+stmt ::= attach_stmt.
+stmt ::= detach_stmt.
+stmt ::= explain_stmt.
+
+/* ===== SELECT ===== */
+
+select_stmt ::= maybe_with TK_SELECT distinct_opt sel_list
+                from_opt where_opt group_opt order_opt limit_opt
+                set_op_tail. {
+    pstate->kind = SQL_KIND_SELECT;
+    pstate->readonly = 1;
+}
+
+maybe_with ::= .
+maybe_with ::= TK_WITH cte_list.
+maybe_with ::= TK_WITH TK_RECURSIVE cte_list.
+
+cte_list ::= cte.
+cte_list ::= cte_list TK_COMMA cte.
+
+cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP.
+cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP.
+
+distinct_opt ::= .
+distinct_opt ::= TK_DISTINCT.
+distinct_opt ::= TK_ALL.
+
+sel_list ::= sel_item.
+sel_list ::= sel_list TK_COMMA sel_item.
+
+sel_item ::= TK_STAR.
+sel_item ::= TK_ID TK_DOT TK_STAR.
+sel_item ::= expr.
+sel_item ::= expr TK_AS TK_ID.
+sel_item ::= expr TK_ID.
+
+from_opt ::= .
+from_opt ::= TK_FROM table_list.
+
+table_list ::= table_ref.
+table_list ::= table_list TK_COMMA table_ref.
+table_list ::= table_list join_op table_ref join_constraint.
+
+join_op ::= TK_JOIN.
+join_op ::= TK_INNER TK_JOIN.
+join_op ::= TK_LEFT TK_JOIN.
+join_op ::= TK_LEFT TK_OUTER TK_JOIN.
+join_op ::= TK_RIGHT TK_JOIN.
+join_op ::= TK_RIGHT TK_OUTER TK_JOIN.
+join_op ::= TK_FULL TK_JOIN.
+join_op ::= TK_FULL TK_OUTER TK_JOIN.
+join_op ::= TK_CROSS TK_JOIN.
+join_op ::= TK_NATURAL TK_JOIN.
+join_op ::= TK_NATURAL TK_LEFT TK_JOIN.
+
+join_constraint ::= .
+join_constraint ::= TK_ON expr.
+join_constraint ::= TK_USING TK_LP id_list TK_RP.
+
+table_ref ::= TK_ID.
+table_ref ::= TK_ID TK_DOT TK_ID.
+table_ref ::= TK_ID TK_AS TK_ID.
+table_ref ::= TK_ID TK_ID.
+table_ref ::= TK_LP select_stmt TK_RP.
+table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID.
+
+where_opt ::= .
+where_opt ::= TK_WHERE expr.
+
+group_opt ::= .
+group_opt ::= TK_GROUP TK_BY expr_list.
+group_opt ::= TK_GROUP TK_BY expr_list TK_HAVING expr.
+
+order_opt ::= .
+order_opt ::= TK_ORDER TK_BY order_list.
+
+order_list ::= order_item.
+order_list ::= order_list TK_COMMA order_item.
+
+order_item ::= expr.
+order_item ::= expr TK_ASC.
+order_item ::= expr TK_DESC.
+
+limit_opt ::= .
+limit_opt ::= TK_LIMIT expr.
+limit_opt ::= TK_LIMIT expr TK_OFFSET expr.
+limit_opt ::= TK_LIMIT expr TK_COMMA expr.
+
+set_op_tail ::= .
+set_op_tail ::= TK_UNION select_stmt.
+set_op_tail ::= TK_UNION TK_ALL select_stmt.
+set_op_tail ::= TK_INTERSECT select_stmt.
+set_op_tail ::= TK_EXCEPT select_stmt.
+
+/* ===== INSERT ===== */
+
+insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_VALUES values_list. {
+    pstate->kind = SQL_KIND_INSERT;
+    pstate->readonly = 0;
+}
+insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES. {
+    pstate->kind = SQL_KIND_INSERT;
+    pstate->readonly = 0;
+}
+insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt. {
+    pstate->kind = SQL_KIND_INSERT;
+    pstate->readonly = 0;
+}
+insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols TK_VALUES values_list. {
+    pstate->kind = SQL_KIND_INSERT;
+    pstate->readonly = 0;
+}
+
+qname ::= TK_ID.
+qname ::= TK_ID TK_DOT TK_ID.
+
+insert_cols ::= .
+insert_cols ::= TK_LP id_list TK_RP.
+
+values_list ::= TK_LP expr_list TK_RP.
+values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP.
+
+/* ===== UPDATE ===== */
+
+update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt. {
+    pstate->kind = SQL_KIND_UPDATE;
+    pstate->readonly = 0;
+}
+
+assign_list ::= assign.
+assign_list ::= assign_list TK_COMMA assign.
+
+assign ::= TK_ID TK_EQ expr.
+
+/* ===== DELETE ===== */
+
+delete_stmt ::= TK_DELETE TK_FROM qname where_opt. {
+    pstate->kind = SQL_KIND_DELETE;
+    pstate->readonly = 0;
+}
+
+/* ===== CREATE ===== */
+
+create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname
+                TK_LP coldef_list table_extras TK_RP. {
+    pstate->kind = SQL_KIND_CREATE;
+    pstate->readonly = 0;
+}
+create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname
+                TK_AS select_stmt. {
+    pstate->kind = SQL_KIND_CREATE;
+    pstate->readonly = 0;
+}
+create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname
+                TK_ON TK_ID TK_LP id_list TK_RP. {
+    pstate->kind = SQL_KIND_CREATE;
+    pstate->readonly = 0;
+}
+create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname
+                TK_AS select_stmt. {
+    pstate->kind = SQL_KIND_CREATE;
+    pstate->readonly = 0;
+}
+
+temp_opt ::= .
+temp_opt ::= TK_TEMP.
+temp_opt ::= TK_TEMPORARY.
+
+unique_opt ::= .
+unique_opt ::= TK_UNIQUE.
+
+if_not_exists ::= .
+if_not_exists ::= TK_IF TK_NOT TK_EXISTS.
+
+coldef_list ::= coldef.
+coldef_list ::= coldef_list TK_COMMA coldef.
+
+coldef ::= TK_ID type_opt col_constraints.
+
+type_opt ::= .
+type_opt ::= TK_ID.
+type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP.
+type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP.
+
+col_constraints ::= .
+col_constraints ::= col_constraints col_constraint.
+
+col_constraint ::= TK_PRIMARY TK_KEY.
+col_constraint ::= TK_PRIMARY TK_KEY TK_ASC.
+col_constraint ::= TK_PRIMARY TK_KEY TK_DESC.
+col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR.
+col_constraint ::= TK_NOT TK_NULL.
+col_constraint ::= TK_UNIQUE.
+col_constraint ::= TK_DEFAULT expr_atom.
+col_constraint ::= TK_CHECK TK_LP expr TK_RP.
+col_constraint ::= TK_REFERENCES qname.
+col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP.
+
+table_extras ::= .
+table_extras ::= table_extras TK_COMMA table_extra.
+
+table_extra ::= TK_PRIMARY TK_KEY TK_LP id_list TK_RP.
+table_extra ::= TK_UNIQUE TK_LP id_list TK_RP.
+table_extra ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname.
+table_extra ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname TK_LP id_list TK_RP.
+table_extra ::= TK_CHECK TK_LP expr TK_RP.
+
+/* ===== DROP ===== */
+
+drop_stmt ::= TK_DROP TK_TABLE if_exists qname. {
+    pstate->kind = SQL_KIND_DROP;
+    pstate->readonly = 0;
+}
+drop_stmt ::= TK_DROP TK_INDEX if_exists qname. {
+    pstate->kind = SQL_KIND_DROP;
+    pstate->readonly = 0;
+}
+drop_stmt ::= TK_DROP TK_VIEW if_exists qname. {
+    pstate->kind = SQL_KIND_DROP;
+    pstate->readonly = 0;
+}
+drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname. {
+    pstate->kind = SQL_KIND_DROP;
+    pstate->readonly = 0;
+}
+
+if_exists ::= .
+if_exists ::= TK_IF TK_EXISTS.
+
+/* ===== PRAGMA ===== */
+
+pragma_stmt ::= TK_PRAGMA qname. {
+    pstate->kind = SQL_KIND_PRAGMA;
+    pstate->readonly = 1;
+}
+pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom. {
+    pstate->kind = SQL_KIND_PRAGMA;
+    pstate->readonly = 0;
+}
+pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP. {
+    pstate->kind = SQL_KIND_PRAGMA;
+    pstate->readonly = 0;
+}
+
+/* ===== TX ===== */
+
+begin_stmt ::= TK_BEGIN. {
+    pstate->kind = SQL_KIND_BEGIN; pstate->readonly = 0;
+}
+begin_stmt ::= TK_BEGIN TK_TRANSACTION. {
+    pstate->kind = SQL_KIND_BEGIN; pstate->readonly = 0;
+}
+begin_stmt ::= TK_BEGIN TK_ID. {
+    pstate->kind = SQL_KIND_BEGIN; pstate->readonly = 0;
+}
+begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION. {
+    pstate->kind = SQL_KIND_BEGIN; pstate->readonly = 0;
+}
+
+commit_stmt ::= TK_COMMIT. {
+    pstate->kind = SQL_KIND_COMMIT; pstate->readonly = 0;
+}
+commit_stmt ::= TK_COMMIT TK_TRANSACTION. {
+    pstate->kind = SQL_KIND_COMMIT; pstate->readonly = 0;
+}
+commit_stmt ::= TK_END. {
+    pstate->kind = SQL_KIND_COMMIT; pstate->readonly = 0;
+}
+commit_stmt ::= TK_END TK_TRANSACTION. {
+    pstate->kind = SQL_KIND_COMMIT; pstate->readonly = 0;
+}
+
+rollback_stmt ::= TK_ROLLBACK. {
+    pstate->kind = SQL_KIND_ROLLBACK; pstate->readonly = 0;
+}
+rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION. {
+    pstate->kind = SQL_KIND_ROLLBACK; pstate->readonly = 0;
+}
+
+attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID. {
+    pstate->kind = SQL_KIND_ATTACH; pstate->readonly = 0;
+}
+attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID. {
+    pstate->kind = SQL_KIND_ATTACH; pstate->readonly = 0;
+}
+
+detach_stmt ::= TK_DETACH TK_ID. {
+    pstate->kind = SQL_KIND_DETACH; pstate->readonly = 0;
+}
+detach_stmt ::= TK_DETACH TK_DATABASE TK_ID. {
+    pstate->kind = SQL_KIND_DETACH; pstate->readonly = 0;
+}
+
+explain_stmt ::= TK_EXPLAIN stmt. {
+    pstate->kind = SQL_KIND_EXPLAIN; pstate->readonly = 1;
+}
+explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt. {
+    pstate->kind = SQL_KIND_EXPLAIN; pstate->readonly = 1;
+}
+
+/* ===== expressions ===== */
+
+%left TK_OR.
+%left TK_AND.
+%right TK_NOT.
+%left TK_EQ TK_NE TK_LT TK_LE TK_GT TK_GE TK_IS TK_LIKE TK_IN.
+%left TK_PLUS TK_MINUS TK_CONCAT.
+%left TK_STAR TK_SLASH TK_PERCENT TK_AMP TK_PIPE.
+%right TK_TILDE.
+
+id_list ::= TK_ID.
+id_list ::= id_list TK_COMMA TK_ID.
+
+expr_list ::= expr.
+expr_list ::= expr_list TK_COMMA expr.
+
+expr ::= expr_atom.
+expr ::= TK_LP expr TK_RP.
+expr ::= TK_LP select_stmt TK_RP.
+expr ::= TK_NOT expr.
+expr ::= TK_MINUS expr.
+expr ::= TK_PLUS expr.
+expr ::= TK_TILDE expr.
+expr ::= expr TK_OR expr.
+expr ::= expr TK_AND expr.
+expr ::= expr TK_EQ expr.
+expr ::= expr TK_NE expr.
+expr ::= expr TK_LT expr.
+expr ::= expr TK_LE expr.
+expr ::= expr TK_GT expr.
+expr ::= expr TK_GE expr.
+expr ::= expr TK_PLUS expr.
+expr ::= expr TK_MINUS expr.
+expr ::= expr TK_STAR expr.
+expr ::= expr TK_SLASH expr.
+expr ::= expr TK_PERCENT expr.
+expr ::= expr TK_CONCAT expr.
+expr ::= expr TK_AMP expr.
+expr ::= expr TK_PIPE expr.
+expr ::= expr TK_LIKE expr.
+expr ::= expr TK_IS TK_NULL.
+expr ::= expr TK_IS TK_NOT TK_NULL.
+expr ::= expr TK_IS expr.
+expr ::= expr TK_IN TK_LP expr_list TK_RP.
+expr ::= expr TK_IN TK_LP select_stmt TK_RP.
+expr ::= expr TK_BETWEEN expr TK_AND expr.
+expr ::= TK_CASE expr_atom case_arms case_else TK_END.
+expr ::= TK_CASE case_arms case_else TK_END.
+expr ::= TK_ID TK_LP TK_RP.
+expr ::= TK_ID TK_LP TK_STAR TK_RP.
+expr ::= TK_ID TK_LP expr_list TK_RP.
+expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP.
+
+case_arms ::= TK_WHEN expr TK_THEN expr.
+case_arms ::= case_arms TK_WHEN expr TK_THEN expr.
+
+case_else ::= .
+case_else ::= TK_ELSE expr.
+
+expr_atom ::= TK_NUMBER.
+expr_atom ::= TK_STRING.
+expr_atom ::= TK_BLOB.
+expr_atom ::= TK_NULL.
+expr_atom ::= TK_TRUE.
+expr_atom ::= TK_FALSE.
+expr_atom ::= TK_QMARK.
+expr_atom ::= TK_ID.
+expr_atom ::= TK_ID TK_DOT TK_ID.
+expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID.
