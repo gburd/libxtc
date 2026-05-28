@@ -69,7 +69,7 @@ OBJS = $(SRCS:.c=.o)
 # Lime-generated parser (Phase 2).  Compiled in if the file exists.
 LIME_OBJ :=
 ifneq ($(wildcard sql_parse_gen.c),)
-LIME_OBJ := sql_parse_gen.o
+LIME_OBJ := sql_parse_gen.o sql_parse_drv.o
 CFLAGS  += -DSQLXTC_HAVE_LIME=1
 endif
 
@@ -98,13 +98,15 @@ lime/bin/lime:
 	    echo "lime/ submodule missing; skipping" 1>&2; \
 	fi
 
-# Generate sql_parse_gen.c (and .h) from sql_parse.lime via Lime.
-sql_parse_gen.c sql_parse_gen.h: sql_parse.lime lime/bin/lime
-	./lime/bin/lime -Tlime/limpar.c sql_parse.lime
-	@mv -f sql_parse.c sql_parse_gen.c 2>/dev/null || true
-	@mv -f sql_parse.h sql_parse_gen.h 2>/dev/null || true
-	@if [ -f sql_parse_lime.c ]; then mv -f sql_parse_lime.c sql_parse_gen.c; fi
-	@if [ -f sql_parse_lime.h ]; then mv -f sql_parse_lime.h sql_parse_gen.h; fi
+# Generate sql_parse_gen.c (and .h) from sql_grammar.lime via Lime.
+# Lime names outputs after the input basename; we rename to *_gen.*
+# so they don't collide with the hand-written sql_parse.[ch].
+sql_parse_gen.c sql_parse_gen.h: sql_grammar.lime lime/bin/lime
+	-./lime/bin/lime -T./lime/limpar.c sql_grammar.lime
+	@test -f sql_grammar.c || { echo "lime failed to produce sql_grammar.c"; exit 1; }
+	@mv -f sql_grammar.c sql_parse_gen.c
+	@mv -f sql_grammar.h sql_parse_gen.h
+	@rm -f sql_grammar.out
 
 sql_parse: sql_parse_gen.c
 
@@ -116,18 +118,19 @@ conn.o: conn.c conn.h db.h quack.h sql_parse.h
 xtc_mutex.o: xtc_mutex.c
 metrics.o: metrics.c
 sql_parse.o: sql_parse.c sql_parse.h
+sql_parse_drv.o: sql_parse_drv.c sql_parse.h sql_parse_lime.h sql_parse_gen.h
 
 clean:
 	rm -f $(OBJS) $(TARGET)
-	rm -f sql_parse_gen.o
+	rm -f sql_parse_gen.o sql_parse_drv.o
 	rm -f /tmp/sqlxtc-bench.db /tmp/sqlxtc-bench.db-*
 
 distclean: clean
 	rm -f sqlite/sqlite3.o
 	-$(MAKE) -C lime clean 2>/dev/null || true
-	rm -f sql_parse_gen.c sql_parse_gen.h sql_parse_gen.out
+	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack
+test: $(TARGET) test-quack test-sql-parse
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 test-quack: ../../test/sqlxtc/test_quack
@@ -136,4 +139,11 @@ test-quack: ../../test/sqlxtc/test_quack
 ../../test/sqlxtc/test_quack: ../../test/sqlxtc/test_quack.c quack.o
 	$(CC) $(CFLAGS) -o $@ $< quack.o
 
-.PHONY: test-quack
+test-sql-parse: ../../test/sqlxtc/test_sql_parse
+	../../test/sqlxtc/test_sql_parse
+
+../../test/sqlxtc/test_sql_parse: ../../test/sqlxtc/test_sql_parse.c \
+        sql_parse.o $(LIME_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< sql_parse.o $(LIME_OBJ)
+
+.PHONY: test-quack test-sql-parse
