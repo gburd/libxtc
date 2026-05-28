@@ -1,24 +1,31 @@
 #!/bin/sh
 #-
-# Copyright (c) 2026, The XTC Project — All rights reserved.
+# Copyright (c) 2026, The XTC Project
 # Use of this source code is governed by the ISC License.
 #
 # bench/conformance/w4_mutex/tokio/bench
 #   Thin wrapper so run.sh can find a stable path regardless of Cargo
-#   target layout.  Delegates to the release binary produced by:
-#     cargo build --release
+#   target layout.  Runs BOTH the tokio::sync::Mutex bench (async
+#   mutex; what an operator who doesn't know better would pick) and
+#   the parking_lot::Mutex bench (raw OS mutex; the *fair*
+#   comparison against xtc_lwlock and __os_mutex).
 #
-# If the binary is absent (Rust / Cargo not installed), the script
-# exits 1; run.sh will silently skip this (workload, runtime) pair.
+#   If the binaries are absent (Rust / Cargo not installed), the
+#   script exits 1; run.sh will silently skip this (workload, runtime)
+#   pair.
 
 set -eu
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
-BINARY="${SELF_DIR}/target/release/bench"
 
-if [ ! -x "$BINARY" ]; then
-    printf 'tokio bench binary not built; run: cd %s && cargo build --release\n' \
+ASYNC_BIN="${SELF_DIR}/target/release/bench"
+PL_BIN="${SELF_DIR}/target/release/bench_pl"
+
+if [ ! -x "$ASYNC_BIN" ] || [ ! -x "$PL_BIN" ]; then
+    printf 'tokio bench binaries not built; run: cd %s && cargo build --release\n' \
         "$SELF_DIR" >&2
     exit 1
 fi
 
-exec "$BINARY" "$@"
+# Run both; the harness expects one line per (workload, runtime).
+"$ASYNC_BIN" "$@"
+"$PL_BIN" "$@"
