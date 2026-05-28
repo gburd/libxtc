@@ -2,13 +2,13 @@
  * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * examples/05_redis/conn.h
+ * examples/05_rexis/conn.h
  *	Per-connection xtc_proc; reads RESP commands, dispatches to
  *	handlers, writes responses.
  */
 
-#ifndef REDIS_CONN_H
-#define REDIS_CONN_H
+#ifndef REXIS_CONN_H
+#define REXIS_CONN_H
 
 #include <stdint.h>
 
@@ -45,4 +45,4 @@ typedef struct conn_opts {
  * will close it on exit.  Returns XTC_OK on success. */
 int conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid);
 
-#endif /* REDIS_CONN_H */
+#endif /* REXIS_CONN_H */

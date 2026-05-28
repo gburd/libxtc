@@ -2,7 +2,7 @@
  * Copyright (c) 2026, The XTC Project -- All rights reserved.
  * Use of this source code is governed by the ISC License.
  *
- * test/m99/test_redis_loopback.c
+ * test/m99/test_rexis_loopback.c
  *	Loopback tests: spawn server, send commands via TCP, verify responses.
  */
 
@@ -42,14 +42,14 @@ start_server(int port)
 	if (pid == 0) {
 		/* Child: exec the server */
 		char *args[] = {
-			"../../examples/05_redis/redis-server-xtc",
+			"../../examples/05_rexis/rexis-server-xtc",
 			"-p", port_str,
 			"--max-clients=100",
 			NULL
 		};
 		execv(args[0], args);
 		/* If exec fails, try relative to build dir */
-		args[0] = "./examples/05_redis/redis-server-xtc";
+		args[0] = "./examples/05_rexis/rexis-server-xtc";
 		execv(args[0], args);
 		_exit(1);
 	}
@@ -508,7 +508,7 @@ static MunitTest tests[] = {
 };
 
 static const MunitSuite suite = {
-	"/m99/redis_loopback", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE
+	"/m99/rexis_loopback", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE
 };
 
 int main(int argc, char *argv[])
