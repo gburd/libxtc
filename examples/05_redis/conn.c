@@ -61,8 +61,9 @@ conn_try_read(conn_state_t *st)
 		char *new_buf;
 		if (new_cap > st->max_read_buf)
 			return -1;
-		new_buf = __os_realloc(st->read_buf, new_cap);
-		if (!new_buf)
+		new_buf = NULL;
+		if (__os_realloc(st->read_buf, new_cap, (void **)&new_buf) != XTC_OK ||
+		    !new_buf)
 			return -1;
 		st->read_buf = new_buf;
 		st->read_cap = new_cap;
@@ -224,8 +225,10 @@ conn_proc(void *arg)
 		if (st->quit || st->closed)
 			break;
 
-		/* Wait for I/O with timeout (for periodic checks) */
-		(void)xtc_recv(&msg, &msg_len, 10 * 1000 * 1000);  /* 10 ms */
+		/* Wait for I/O with timeout.  Per-connection busy-poll;
+		 * see README.md "Gaps in xtc" item 8: needs async-fd
+		 * readiness in xtc_proc to drop this. */
+		(void)xtc_recv(&msg, &msg_len, 50LL * 1000 * 1000);  /* 50 ms */
 		if (msg)
 			__os_free(msg);
 	}
@@ -255,8 +258,7 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	conn_state_t *st;
 	xtc_proc_opts_t proc_opts = { 0 };
 
-	st = __os_calloc(1, sizeof(*st));
-	if (!st)
+	if (__os_calloc(1, sizeof(*st), (void **)&st) != XTC_OK || !st)
 		return XTC_E_NOMEM;
 
 	st->fd = opts->fd;
@@ -264,8 +266,8 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	st->res = opts->res;
 
 	st->read_cap = DEFAULT_READ_BUF;
-	st->read_buf = __os_malloc(st->read_cap);
-	if (!st->read_buf) {
+	if (__os_malloc(st->read_cap, (void **)&st->read_buf) != XTC_OK ||
+	    !st->read_buf) {
 		__os_free(st);
 		return XTC_E_NOMEM;
 	}
@@ -274,8 +276,8 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	                   (1024 * 1024);
 
 	st->write_cap = DEFAULT_WRITE_BUF;
-	st->write_buf = __os_malloc(st->write_cap);
-	if (!st->write_buf) {
+	if (__os_malloc(st->write_cap, (void **)&st->write_buf) != XTC_OK ||
+	    !st->write_buf) {
 		__os_free(st->read_buf);
 		__os_free(st);
 		return XTC_E_NOMEM;

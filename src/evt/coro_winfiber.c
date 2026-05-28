@@ -135,6 +135,12 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 		c->_parked_on = NULL;
 		return XTC_TASK_PENDING;
 	}
+	/* Parked on a timer or fd via xtc_task_park_on_*?  Stay parked.
+	 * See coro_uctx.c for the rationale. */
+	if (c->self != NULL &&
+	    (c->self->park_timer != NULL || c->self->park_fd >= 0)) {
+		return XTC_TASK_PENDING;
+	}
 	return XTC_TASK_RESCHED;
 }
 

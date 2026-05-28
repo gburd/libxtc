@@ -1,152 +1,225 @@
-# xtc -- high-performance async/concurrency runtime for C
+# xtc
 
-`xtc` is the foundational concurrency runtime for a future threaded
-PostgreSQL.  It is a layered C library that provides Tokio-style
-async tasks, BEAM-style processes/mailboxes/supervisors, and Seastar-
-style per-CPU shared-nothing reactors over a pluggable I/O substrate
-(io_uring / epoll / kqueue / IOCP / poll).
+**A concurrency runtime for serious C programs.**
 
-The full design is in [PLAN.md](PLAN.md).  The current milestone
-(M0 -- repo skeleton) is documented in [M0_CLAIMS.md](M0_CLAIMS.md);
-every claim there has a corresponding test.
-
-## Status
-
-**Pre-1.0, M0.**  The build system, the public-header skeleton, the
-documentation discipline, and the `dist/s_*` generator framework are
-in place.  Real concurrency primitives land in M1+.
-
-## Project layout
+xtc gives C the same asynchronous, fault-tolerant, predictable-latency
+foundation that Tokio gives Rust, that the BEAM gives Erlang, and that
+Seastar gives C++.  It is a single library you can link against to write
+network servers, databases, queues, schedulers, and any other long-lived
+service that needs to handle thousands of connections, recover from
+faults, and stay inside a fixed resource budget on commodity hardware.
 
 ```
-PLAN.md             design plan (all 21 sections)
-M0_CLAIMS.md        the claims of milestone M0 and the tests for them
-README.md           you are here
-LICENSE             ISC license
-
-dist/               build apparatus (BDB / DBSQL convention)
-  configure.ac        autoconf source (run autoreconf -i to produce configure)
-  Makefile.in         template for the autoconf build's Makefile
-  xtc_config.h.in     template for the autoconf-generated config header
-  version.in          single source of truth for the SemVer string
-  s_all               run every code generator
-  s_include           PUBLIC: -> prototype headers (M0_CLAIMS.md [T2])
-  s_perm              chmod +x every s_* (M0_CLAIMS.md [T5])
-  gen_inc.awk         the awk used by s_include
-  meson.build         meson build entry point
-  meson_options.txt
-
-src/                library source
-  inc/                public + internal headers
-    xtc.h             single public header (M0_CLAIMS.md [C4])
-  xtc_version.c       xtc_version_string + xtc_version_components
-  xtc_strerror.c      xtc_strerror
-
-test/               test suite
-  m0/                 munit + shell tests for M0 claims
-  m1/                 munit + shell tests for M1 (L0 os/) claims
-  m2/                 munit + shell tests for M2 (L1 io/) claims
-  m3/                 munit + shell tests for M3 (L2 evt/) claims
-  pbt/                hegel-c property-based tests across all layers
-  dist/               tests for the dist/s_* generators
-
-man/                man pages (mdoc/man-style)
-  man3/               function-level pages
-  man7/               overview pages
-
-docs/               long-form documentation
-  ARCHITECTURE.md     layered architecture overview
-  API.md              public API reference (generated section + handwritten)
-  abi-stability.md    SemVer + symbol-versioning + deprecation policy
-  adr/                architecture decision records
++-------------------------------------------------------+
+|                    your program                       |
++-------------------------------------------------------+
+|  orchestration:  supervisor  app  registry  gen_server|
++-------------------------------------------------------+
+|  primitives:  proc  channel  lwlock  lrlock  lockmgr  |
+|               rcu   slab     mctx    res     log      |
++-------------------------------------------------------+
+|  event runtime:  loop  task  timer  fiber  executor   |
++-------------------------------------------------------+
+|  I/O substrate:  io_uring  epoll  kqueue  IOCP  poll  |
++-------------------------------------------------------+
+|  OS substrate:  alloc atomic time thread tls mutex    |
++-------------------------------------------------------+
 ```
 
-## Build
+## Why you might want this
 
-### Autoconf path (Tier 1, primary)
+* **You are writing a server in C** and you want async I/O without
+  building it from scratch.  xtc gives you a backend-pluggable event
+  loop (io_uring, epoll, kqueue, IOCP, poll, select) under a uniform
+  API, with non-blocking task scheduling and fiber-based coroutines.
 
-<!-- M0_CLAIMS:B1_BEGIN -->
+* **You need fault tolerance.**  xtc has Erlang-style processes with
+  links and monitors, supervisors with the four canonical strategies
+  (`one_for_one`, `one_for_all`, `rest_for_one`, `simple_one_for_one`),
+  and a `gen_server`-shaped server abstraction.  Crashes are caught
+  and restarted by a tree, not by your shell script.
+
+* **You care about tail latency.**  xtc has resource accountants
+  (`xtc_res`) with high-water alert callbacks so you can hold
+  bounded RSS, file descriptors, in-flight tasks, and bandwidth
+  under stress.  Backpressure is built in; OOM-spirals are not.
+
+* **You want to write code once and have it run on Linux, FreeBSD,
+  illumos, macOS, and Windows.**  All five are supported with the
+  same source.  Tier-1 platforms (Linux + FreeBSD + illumos + Windows)
+  are CI-tested every commit.
+
+* **You want to stay close to the metal.**  No GC, no STW pauses, no
+  hidden allocations on the hot path.  Memory comes from
+  cache-line-padded slab caches with optional shared-memory mode
+  (a BDB-style `roff_t` pointer-into-region works across processes).
+  Reads on the read-mostly primitive (`xtc_lrlock`) are wait-free.
+
+## A 30-second taste
+
+```c
+#include <xtc.h>
+#include <xtc_loop.h>
+#include <xtc_proc.h>
+
+static void
+worker(void *arg)
+{
+    xtc_pid_t parent = *(xtc_pid_t *)arg;
+    xtc_send(parent, "hello", 5);
+}
+
+int
+main(void)
+{
+    xtc_loop_t *loop;
+    xtc_pid_t   self, child;
+    void       *msg; size_t sz;
+
+    xtc_loop_init(&loop);
+    self = xtc_self();
+
+    xtc_proc_spawn(loop, worker, &self, NULL, &child);
+
+    /* Wait for "hello" with a 1-second timeout. */
+    if (xtc_recv(&msg, &sz, 1000LL * 1000 * 1000) == XTC_OK) {
+        printf("got %zu bytes from worker\n", sz);
+        free(msg);
+    }
+    xtc_loop_run(loop);
+    xtc_loop_fini(loop);
+    return 0;
+}
+```
+
+Compile:
+```sh
+cc my.c -lxtc -lpthread -o my
+```
+
+That's a one-process actor system in 25 lines.
+
+## Where it shines
+
+`examples/05_redis/` is a working Redis-protocol server in ~2,000 LOC.
+It uses every major xtc subsystem and stays inside hard `--max-memory`,
+`--max-keys`, `--max-clients`, `--max-iops`, and `--cores` caps under
+load.  Run it with:
+
+```sh
+cd examples/05_redis && make
+./redis-server-xtc -p 6379 --max-memory=$((100*1024*1024)) --max-clients=10000
+```
+
+Then talk to it with `redis-cli` like any Redis server.
+
+Other examples in `examples/`:
+
+| Example | What it shows |
+|---|---|
+| `01_hello_async/` | A single async task with a timer |
+| `02_proc_pingpong/` | Two BEAM processes bouncing messages |
+| `03_supervised_app/` | Crash a worker, watch the supervisor restart it |
+| `04_lockmgr_demo/` | The 9-mode transactional lock manager |
+| `05_redis/` | Networked, budgeted, multi-command Redis-compat server |
+
+## Built on three traditions
+
+xtc owes a lot to three runtimes that came before:
+
+* **Tokio (Rust)** -- the work-stealing executor model, futures,
+  channels, and the principle that single-threaded primitives are
+  faster than locks when you can get away with them.
+* **The BEAM (Erlang/Elixir)** -- processes, mailboxes, selective
+  receive, links, monitors, supervisors, and the philosophy that
+  "let it crash" is a feature when the supervisor tree is well-designed.
+* **Seastar (C++)** -- thread-per-core, share-nothing reactors,
+  cache-line awareness, and the discipline that the runtime must
+  not allocate on the hot path.
+
+Where these conflict, xtc picks the choice that's most idiomatic in C
+and explains why in `PLAN.md`.  Read that file when you want to
+understand the *why*; read the man pages and headers when you want
+the *what*.
+
+## Status and stability
+
+xtc is **pre-1.0**.  The public API surface is stable in shape but
+specific signatures may shift before v1.0.  The semver / deprecation
+policy is documented in `docs/abi-stability.md`.
+
+What's working today:
+
+| Layer | Status |
+|---|---|
+| L0 OS substrate | Done.  Linux, FreeBSD, illumos, macOS-ready, AIX (untested), Windows MinGW. |
+| L1 I/O | Done.  io_uring, epoll, kqueue, IOCP, poll, select, illumos port_*, AIX pollset (untested). |
+| L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written x86_64 fcontext (~7.6 ns/swap). |
+| L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
+| L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
+| L5 PG adapter | Designed (`docs/M16_PG_ADAPTER.md`); not yet implemented. |
+| TLS | OpenSSL backend done; LibreSSL/GnuTLS/wolfSSL/Mbed TLS designed (`docs/M_TLS.md`). |
+
+Test coverage today: **264 munit + 23 hegel-c property tests on Linux**,
+matching numbers on FreeBSD and illumos, full check suite green on
+Windows MinGW.
+
+Honest gaps and known issues live in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
+The full milestone roadmap is in [PLAN.md](PLAN.md).
+
+## Building
+
+xtc is BSD-style C11.  No external deps beyond libc, pthreads, and
+optionally `liburing`/`OpenSSL`.
+
 ```sh
 cd dist && autoreconf -i && cd ..
 mkdir -p build_unix && cd build_unix
-../dist/configure
-make
-```
-<!-- M0_CLAIMS:B1_END -->
-
-Then `make check` runs the test suite (see [M0_CLAIMS.md](M0_CLAIMS.md)).
-
-### Meson path (Tier 1, parallel)
-
-<!-- M0_CLAIMS:B2_BEGIN -->
-```sh
-meson setup build_meson
-meson compile -C build_meson
-```
-<!-- M0_CLAIMS:B2_END -->
-
-Then `meson test -C build_meson` runs the suite.
-
-Both paths are tested in CI.  See [M0_CLAIMS.md](M0_CLAIMS.md) [B1, B2].
-
-### Property-based tests (hegel-c, optional)
-
-Property-based tests live under `test/pbt/`.  They link against the
-[hegel-c](https://github.com/gburd/hegel-c) library and assert
-generative properties (linearizability, ordering invariants,
-allocator balance, etc.).  Configure with `--with-hegel`:
-
-```sh
-../dist/configure --with-hegel=/path/to/hegel-c \
-                  --with-hegel-server=/path/to/hegel-wrapper
-make check          # runs munit + PBT + shell tests
+../dist/configure                      # autodetects io backend + tls
+make -j$(nproc)
+make check                              # 264 tests
+sudo make install                       # libxtc.a + headers + man pages
 ```
 
-Without `--with-hegel`, the PBT binaries print SKIP and the rest of
-`make check` runs unchanged.  See [docs/adr/0002-hegel-pbt-first-class.md](docs/adr/0002-hegel-pbt-first-class.md).
+Configure flags worth knowing:
 
-### Out-of-source is required
+| Flag | What it does |
+|---|---|
+| `--with-io-backend=AUTO` | Pick io_uring, epoll, kqueue, IOCP, poll, select; defaults are sensible per-OS |
+| `--with-tls=openssl|none|auto` | Build TLS support (OpenSSL only today) |
+| `--with-liburing=PATH` | Use a specific liburing install |
+| `--with-hegel=PATH` | Enable property-based tests via the hegel-c framework |
 
-Configuring inside the source root or inside `dist/` is rejected with
-a clear error.  See [M0_CLAIMS.md](M0_CLAIMS.md) [B3, B6].
-
-### Reproducible build environment (Nix)
-
-```sh
-nix develop          # provides autoconf, meson, ninja, mandoc, etc.
-```
+A meson build is also provided (`meson.build`), with the same
+options and behaviour.
 
 ## Documentation
 
-- **`PLAN.md`** -- the full design (~=2600 lines, 21 sections).  Read
-  this to understand intent.
-- **`docs/ARCHITECTURE.md`** -- the layered architecture, condensed.
-- **`docs/API.md`** -- public API reference (generated from headers
-  for the per-function detail; handwritten introduction).
-- **`docs/abi-stability.md`** -- what we promise across versions, how
-  we deprecate, what symbol versioning we use.
-- **`man/man3/*.3`** -- Unix-style function reference (one page per
-  public function; required by [M0_CLAIMS.md](M0_CLAIMS.md) [D4]).
-- **`man/man7/xtc.7`** -- overview man page; what to read first.
-- **`docs/adr/`** -- architecture decision records, one per Q-decision
-  in `PLAN.md` (S)10.
-
-## Adding to the project
-
-The discipline:
-
-1. **State the claim** in the appropriate `M*_CLAIMS.md` (or open a
-   new one for a new milestone).
-2. **Write the test** before the implementation.  See `test/m0/` for
-   the established style.
-3. **Implement** until the test passes.
-4. **Update documentation** (man page, API.md, ARCHITECTURE.md as
-   relevant) in the same commit.
-5. **Run the full check**: `make check && (cd ../build_meson && meson test)`.
-
-This discipline is what we trade for the right to call this a
-foundation.  See [PLAN.md (S)18](PLAN.md) for the longevity contract.
+* `examples/` -- start here.  Five working programs from "hello async" to "Redis-compat server with budgets".
+* `docs/getting-started.md` -- step-by-step beginner walkthrough.  TODO: the document currently lives only as fragments inside the examples; a unified guide is in flight.
+* `man/man3/` and `man/man7/` -- per-API reference.  Coverage is partial; see `docs/MAN_TODO.md` for the gap list.
+* `PLAN.md` -- the full design rationale.  Long but exhaustive.
+* `docs/ARCHITECTURE.md` -- the layer diagram, the principles, the why.
+* `docs/abi-stability.md` -- semver and deprecation policy.
+* `docs/KNOWN_ISSUES.md` -- everything I know about that's not perfect.
 
 ## License
 
-ISC license.  See [LICENSE](LICENSE).
+ISC.  See [LICENSE](LICENSE).
+
+## Contributing
+
+Issues and patches welcome.  Code style is BSD KNF as encoded in
+`.clang-format`.  All contributions must be ASCII-only in source,
+docs, comments, and commit messages.  Run `dist/s_async` and
+`dist/s_cfg` lints before submitting.  Property-based tests
+(via hegel-c) are encouraged for any new primitive.
+
+## Inspiration
+
+* Tokio: <https://tokio.rs>
+* The BEAM book: <https://blog.stenmans.org/theBeamBook/>
+* Seastar: <http://seastar.io>
+* PostgreSQL's pluggable buffer manager / aio work
+* libumem, BDB, DBSQL -- where the BDB/DBSQL build conventions come from
+* The lrlck PostgreSQL branch -- where xtc_lrlock and xtc_lwlock come from
