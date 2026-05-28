@@ -13,6 +13,11 @@
 #include "db.h"
 #include "xtc_int.h"
 
+/* Local helper: xtc __os_clock_mono uses out-param style. */
+static inline int64_t xtc_now_ns(void) {
+	int64_t t; (void)__os_clock_mono(&t); return t;
+}
+
 /* FNV-1a hash */
 static uint64_t
 fnv1a(const char *data, size_t len)
@@ -53,7 +58,9 @@ db_malloc(db_t *db, db_table_t *tbl, size_t sz)
 		                    (int64_t)sz) != XTC_OK)
 			return NULL;
 	}
-	p = __os_malloc(sz);
+	p = NULL;
+	if (__os_malloc(sz, &p) != XTC_OK || p == NULL)
+		p = NULL;
 	if (p)
 		tbl->mem_used += sz;
 	else if (db->opts.res)
@@ -180,8 +187,7 @@ db_create(const db_opts_t *opts, db_t **out)
 	if (!out)
 		return XTC_E_INVAL;
 
-	db = __os_calloc(1, sizeof(*db));
-	if (!db)
+	if (__os_calloc(1, sizeof(*db), (void **)&db) != XTC_OK || !db)
 		return XTC_E_NOMEM;
 
 	db->opts = opts ? *opts : (db_opts_t)DB_OPTS_DEFAULT;
@@ -204,8 +210,8 @@ db_create(const db_opts_t *opts, db_t **out)
 	tbl->n_keys = 0;
 	tbl->mem_used = 0;
 	bucket_bytes = tbl->n_buckets * sizeof(db_entry_t *);
-	tbl->buckets = __os_calloc(tbl->n_buckets, sizeof(db_entry_t *));
-	if (!tbl->buckets) {
+	if (__os_calloc(tbl->n_buckets, sizeof(db_entry_t *),
+	                (void **)&tbl->buckets) != XTC_OK || !tbl->buckets) {
 		xtc_lrlock_write_end(db->lr);
 		xtc_lrlock_destroy(db->lr);
 		__os_free(db);
@@ -219,8 +225,8 @@ db_create(const db_opts_t *opts, db_t **out)
 	tbl = xtc_lrlock_write_begin(db->lr);
 	/* After full_sync the read copy has buckets = NULL; we need to
 	 * allocate separately for the now-write copy. */
-	tbl->buckets = __os_calloc(tbl->n_buckets, sizeof(db_entry_t *));
-	if (!tbl->buckets) {
+	if (__os_calloc(tbl->n_buckets, sizeof(db_entry_t *),
+	                (void **)&tbl->buckets) != XTC_OK || !tbl->buckets) {
 		xtc_lrlock_write_end(db->lr);
 		/* Clean up the other copy's buckets */
 		xtc_lrlock_destroy(db->lr);
@@ -301,7 +307,7 @@ db_get(db_t *db, const char *key, size_t key_len,
 	if (!e || e->type != DB_VAL_STRING)
 		return -1;
 	if (e->expire_at_ns > 0) {
-		int64_t now = __os_clock_mono();
+		int64_t now = xtc_now_ns();
 		if (now >= e->expire_at_ns)
 			return -1;
 	}
@@ -316,7 +322,7 @@ db_exists(db_t *db, const char *key, size_t key_len)
 	const db_entry_t *e = db_lookup(db, key, key_len);
 	if (!e)
 		return 0;
-	if (e->expire_at_ns > 0 && __os_clock_mono() >= e->expire_at_ns)
+	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
 		return 0;
 	return 1;
 }
@@ -331,7 +337,7 @@ db_ttl(db_t *db, const char *key, size_t key_len)
 		return -2;
 	if (e->expire_at_ns == 0)
 		return -1;
-	now = __os_clock_mono();
+	now = xtc_now_ns();
 	if (now >= e->expire_at_ns)
 		return -2;
 	return (int)((e->expire_at_ns - now) / (1000LL * 1000 * 1000));
@@ -343,7 +349,7 @@ db_llen(db_t *db, const char *key, size_t key_len)
 	const db_entry_t *e = db_lookup(db, key, key_len);
 	if (!e || e->type != DB_VAL_LIST)
 		return 0;
-	if (e->expire_at_ns > 0 && __os_clock_mono() >= e->expire_at_ns)
+	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
 		return 0;
 	return e->val.list.count;
 }
@@ -359,7 +365,7 @@ db_lrange(db_t *db, const char *key, size_t key_len,
 
 	if (!e || e->type != DB_VAL_LIST)
 		return 0;
-	if (e->expire_at_ns > 0 && __os_clock_mono() >= e->expire_at_ns)
+	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
 		return 0;
 
 	count = (int)e->val.list.count;
@@ -392,7 +398,7 @@ db_hget(db_t *db, const char *key, size_t key_len,
 
 	if (!e || e->type != DB_VAL_HASH)
 		return -1;
-	if (e->expire_at_ns > 0 && __os_clock_mono() >= e->expire_at_ns)
+	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
 		return -1;
 
 	for (f = e->val.hash.head; f; f = f->next) {
@@ -412,7 +418,7 @@ db_hlen(db_t *db, const char *key, size_t key_len)
 	const db_entry_t *e = db_lookup(db, key, key_len);
 	if (!e || e->type != DB_VAL_HASH)
 		return 0;
-	if (e->expire_at_ns > 0 && __os_clock_mono() >= e->expire_at_ns)
+	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
 		return 0;
 	return e->val.hash.count;
 }
@@ -427,7 +433,7 @@ db_hkeys(db_t *db, const char *key, size_t key_len,
 
 	if (!e || e->type != DB_VAL_HASH)
 		return 0;
-	if (e->expire_at_ns > 0 && __os_clock_mono() >= e->expire_at_ns)
+	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
 		return 0;
 
 	for (f = e->val.hash.head; f && i < out_cap; f = f->next, i++) {
@@ -447,7 +453,7 @@ db_hvals(db_t *db, const char *key, size_t key_len,
 
 	if (!e || e->type != DB_VAL_HASH)
 		return 0;
-	if (e->expire_at_ns > 0 && __os_clock_mono() >= e->expire_at_ns)
+	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
 		return 0;
 
 	for (f = e->val.hash.head; f && i < out_cap; f = f->next, i++) {
@@ -468,7 +474,7 @@ db_hgetall(db_t *db, const char *key, size_t key_len,
 
 	if (!e || e->type != DB_VAL_HASH)
 		return 0;
-	if (e->expire_at_ns > 0 && __os_clock_mono() >= e->expire_at_ns)
+	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
 		return 0;
 
 	for (f = e->val.hash.head; f && i < out_cap; f = f->next, i++) {
@@ -510,7 +516,7 @@ db_keys(db_t *db, const char *pattern, size_t pattern_len,
         const char **out_keys, size_t *out_lens, int out_cap)
 {
 	const db_table_t *tbl = xtc_lrlock_read_data(db->lr);
-	int64_t now = __os_clock_mono();
+	int64_t now = xtc_now_ns();
 	int count = 0;
 	size_t i;
 

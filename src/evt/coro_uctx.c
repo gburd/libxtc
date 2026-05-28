@@ -117,6 +117,16 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 		c->_parked_on = NULL;
 		return XTC_TASK_PENDING;
 	}
+	/* Parked on a timer or fd via xtc_task_park_on_*?  Stay parked
+	 * until the timer fires or the fd is ready -- a waker will
+	 * re-enqueue us.  Without this check, xtc_recv with a timeout
+	 * would busy-spin: every yield re-queues the task, and the loop
+	 * never sleeps in xtc_io_poll because the runqueue is
+	 * non-empty. */
+	if (c->self != NULL &&
+	    (c->self->park_timer != NULL || c->self->park_fd >= 0)) {
+		return XTC_TASK_PENDING;
+	}
 	/* Plain yield; re-queue at the back of the run queue. */
 	return XTC_TASK_RESCHED;
 }
