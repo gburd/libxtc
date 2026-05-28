@@ -76,8 +76,20 @@ typedef enum xtc_lock_victim_policy {
 	XTC_LOCK_VICTIM_MAX_LOCKS = 5,
 	XTC_LOCK_VICTIM_MIN_WRITE = 6,
 	XTC_LOCK_VICTIM_MAX_WRITE = 7,
-	XTC_LOCK_VICTIM_EXPIRE    = 8     /* only victims with expired timeouts */
+	XTC_LOCK_VICTIM_EXPIRE    = 8,    /* only victims with expired timeouts */
+	XTC_LOCK_VICTIM_CUSTOM    = 9     /* opts.victim_pick_fn supplies the choice */
 } xtc_lock_victim_policy_t;
+
+/* Custom victim-picker.  Called when victim policy is
+ * XTC_LOCK_VICTIM_CUSTOM and the deadlock detector finds a cycle.
+ * The implementation receives the locker IDs participating in the
+ * cycle (length n_candidates >= 2) and must return an index in
+ * [0, n_candidates).  May call into xtc_proc / xtc_send / xtc_recv
+ * during the choice -- e.g. to consult an external decision oracle
+ * or a randomness producer.  Must not block indefinitely. */
+typedef int (*xtc_lock_victim_pick_fn)(const uint64_t *candidate_lockers,
+                                       int n_candidates,
+                                       void *user);
 
 typedef enum xtc_lock_detect_mode {
 	XTC_LOCK_DETECT_PERIODIC  = 0,    /* background thread runs every period_ns */
@@ -91,6 +103,11 @@ typedef struct xtc_lockmgr_opts {
 	xtc_lock_victim_policy_t victim;
 	xtc_lock_detect_mode_t   detect_mode;
 
+	/* Custom victim picker.  Used only when victim ==
+	 * XTC_LOCK_VICTIM_CUSTOM.  May be NULL otherwise. */
+	xtc_lock_victim_pick_fn  victim_pick_fn;
+	void                    *victim_pick_user;
+
 	/* Optional custom conflict matrix.  If NULL, the 9-mode RIW
 	 * default above is used.  If non-NULL, must be n_modes*n_modes
 	 * bytes (row-major, [held*n_modes + requested]). */
@@ -103,6 +120,8 @@ typedef struct xtc_lockmgr_opts {
 	.detect_interval_ns = 100LL * 1000 * 1000, \
 	.victim             = XTC_LOCK_VICTIM_DEFAULT, \
 	.detect_mode        = XTC_LOCK_DETECT_PERIODIC, \
+	.victim_pick_fn     = NULL, \
+	.victim_pick_user   = NULL, \
 	.conflicts          = NULL, \
 	.n_modes            = 0 \
 }
