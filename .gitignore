@@ -48,3 +48,8 @@ bench/conformance/w*/tokio/target/
 # rexis (Redis-protocol-compatible) example binary
 examples/05_rexis/rexis-server-xtc
 examples/05_rexis/*.o
+
+
+# rexis example build outputs
+examples/05_rexis/*.o
+examples/05_rexis/rexis-server-xtc
