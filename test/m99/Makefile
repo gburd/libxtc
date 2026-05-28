@@ -7,12 +7,12 @@
 
 XTC_BUILD ?= ../../build_unix
 XTC_INC   ?= ../../src/inc
-REDIS_DIR ?= ../../examples/05_redis
+REXIS_DIR ?= ../../examples/05_rexis
 
 CC       = cc
 CFLAGS   = -O2 -g -std=c11 -Wall -Wextra -Wpedantic \
            -D_GNU_SOURCE \
-           -I$(XTC_INC) -I$(REDIS_DIR) -I.
+           -I$(XTC_INC) -I$(REXIS_DIR) -I.
 
 # Extract liburing flags
 LIBURING_INC := $(shell \
@@ -35,9 +35,9 @@ CFLAGS  += $(LIBURING_INC)
 LDFLAGS  = $(XTC_LDFLAGS) $(XTC_BUILD)/libxtc.a -pthread $(LIBURING_LDFLAGS)
 
 # Proto object file from redis example
-PROTO_OBJ = $(REDIS_DIR)/proto.o
+PROTO_OBJ = $(REXIS_DIR)/proto.o
 
-TESTS = test_resp_parser test_redis_loopback test_redis_budgets test_redis_pbt
+TESTS = test_resp_parser test_rexis_loopback test_rexis_budgets test_rexis_pbt
 
 .PHONY: all clean check
 
@@ -46,13 +46,13 @@ all: $(TESTS)
 test_resp_parser: test_resp_parser.o munit.o $(PROTO_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_redis_loopback: test_redis_loopback.o munit.o
+test_rexis_loopback: test_rexis_loopback.o munit.o
 	$(CC) $(CFLAGS) -o $@ $^ -lpthread
 
-test_redis_budgets: test_redis_budgets.o munit.o
+test_rexis_budgets: test_rexis_budgets.o munit.o
 	$(CC) $(CFLAGS) -o $@ $^ -lpthread
 
-test_redis_pbt: test_redis_pbt.o munit.o
+test_rexis_pbt: test_rexis_pbt.o munit.o
 	$(CC) $(CFLAGS) -o $@ $^ -lpthread
 
 %.o: %.c
@@ -60,7 +60,7 @@ test_redis_pbt: test_redis_pbt.o munit.o
 
 # Build proto.o if needed
 $(PROTO_OBJ):
-	$(MAKE) -C $(REDIS_DIR) proto.o
+	$(MAKE) -C $(REXIS_DIR) proto.o
 
 clean:
 	rm -f *.o $(TESTS)
@@ -68,16 +68,16 @@ clean:
 # Run all tests (requires server to be built first)
 check: all
 	@echo "=== Building Redis server ==="
-	$(MAKE) -C $(REDIS_DIR)
+	$(MAKE) -C $(REXIS_DIR)
 	@echo ""
 	@echo "=== Running RESP parser tests ==="
 	./test_resp_parser
 	@echo ""
 	@echo "=== Running loopback tests ==="
-	./test_redis_loopback || echo "(some tests may fail if server not found)"
+	./test_rexis_loopback || echo "(some tests may fail if server not found)"
 	@echo ""
 	@echo "=== Running budget tests ==="
-	./test_redis_budgets || echo "(some tests may fail if server not found)"
+	./test_rexis_budgets || echo "(some tests may fail if server not found)"
 	@echo ""
 	@echo "=== Running PBT tests ==="
-	./test_redis_pbt || echo "(some tests may fail if server not found)"
+	./test_rexis_pbt || echo "(some tests may fail if server not found)"
