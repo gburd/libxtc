@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/conn.h
+ * examples/06_sqlxtc/conn.h
  *	Per-connection xtc_proc.  Reads newline-delimited JSON, parses
  *	into Quack messages, dispatches to db_exec, streams JSON
  *	results back.

@@ -50,6 +50,14 @@ struct xtc_task {
 	xtc_timer_t *park_timer;
 	int          park_fd;       /* -1 when not parked on fd */
 
+	/* Wakeup-cause flags, set by the dispatcher / timer callback /
+	 * mbox_deliver when the task is unparked.  Sampled and cleared
+	 * by the parker on resume (e.g. xtc_proc_wait_fd).  Encodes
+	 * XTC_IO_* flags from the dispatched event plus the synthetic
+	 * XTC_WAIT_MAILBOX (set by __mbox_deliver) and XTC_WAIT_TIMEOUT
+	 * (set by the timer callback). */
+	uint32_t     wake_revents;
+
 	/* Linked into loop->all_tasks for cleanup at loop_fini. */
 	struct xtc_task *all_next;
 };

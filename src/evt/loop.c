@@ -281,6 +281,7 @@ __xtc_loop_step(xtc_loop_t *loop)
 			if (due->cb != NULL) due->cb(due->user);
 			if (due->waiter != NULL) {
 				xtc_waker_t w = { loop, due->waiter };
+				due->waiter->wake_revents |= XTC_WAIT_TIMEOUT;
 				(void)xtc_waker_wake(&w);
 				due->waiter->park_timer = NULL;
 			}
