@@ -4,7 +4,7 @@ set -u
 
 PORT=${PORT:-15435}
 DIR=$(dirname "$0")
-SVR_BIN=$DIR/../../examples/sqlxtc/sqlxtc-server
+SVR_BIN=$DIR/../../examples/06_sqlxtc/sqlxtc-server
 LOGFILE=/tmp/sqlxtc-budget.log
 DBFILE=/tmp/sqlxtc-budget.db
 

@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/sql_parse_drv.c
+ * examples/06_sqlxtc/sql_parse_drv.c
  *	Tokenizer + driver for the Lime-generated SQL parser.
  *	Compiled in only when sql_parse_gen.c is present (Phase 2).
  *	Exposes:

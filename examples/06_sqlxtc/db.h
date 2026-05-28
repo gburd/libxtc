@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/db.h
+ * examples/06_sqlxtc/db.h
  *	SQLite handle management.  In Phase 1 each connection has its
  *	own sqlite3*; in Phase 3 a single shared sqlite3* is used with
  *	the xtc_lwlock-backed mutex methods.

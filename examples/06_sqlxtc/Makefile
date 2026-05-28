@@ -2,7 +2,7 @@
 # Copyright (c) 2026, The XTC Project -- All rights reserved.
 # Use of this source code is governed by the ISC License.
 #
-# examples/sqlxtc/Makefile -- builds sqlxtc-server.
+# examples/06_sqlxtc/Makefile -- builds sqlxtc-server.
 #
 # Targets:
 #   make            build sqlxtc-server (sqlite3.o is built once, ~30s)

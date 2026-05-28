@@ -12,7 +12,7 @@ N_QUERIES=${2:-1000}
 PORT=${3:-15436}
 
 DIR=$(dirname "$(readlink -f "$0")")
-SVR=$DIR/../../examples/sqlxtc/sqlxtc-server
+SVR=$DIR/../../examples/06_sqlxtc/sqlxtc-server
 DBFILE=/tmp/sqlxtc-bench.db
 LOGFILE=/tmp/sqlxtc-bench.log
 PIDFILE=/tmp/sqlxtc-bench.pid

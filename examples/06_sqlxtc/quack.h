@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/quack.h
+ * examples/06_sqlxtc/quack.h
  *	The sqlxtc wire protocol (Quack): line-delimited JSON.  See
  *	PROTOCOL.md for the spec.  This header exposes a hand-rolled
  *	JSON encoder/decoder limited to the small set of fields the

@@ -45,6 +45,7 @@ xtc_task_spawn(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 	t->q_next = NULL;
 	t->park_timer = NULL;
 	t->park_fd = -1;
+	t->wake_revents = 0;
 
 	if (out_task) *out_task = t;
 
@@ -213,6 +214,8 @@ __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev)
 		return XTC_OK;
 
 	t = (xtc_task_t *)ev->tag;
+	/* Record the io flags so the parker knows what fired. */
+	t->wake_revents |= ev->flags;
 	/* Drop our fd registration before waking; the task may register
 	 * a fresh one when it runs. */
 	if (t->park_fd >= 0) {

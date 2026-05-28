@@ -9,14 +9,14 @@
  *	the Lime-generated grammar parser.
  *
  *	30+ cases.  Builds against the sqlxtc objects in
- *	examples/sqlxtc/.
+ *	examples/06_sqlxtc/.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../examples/sqlxtc/sql_parse.h"
+#include "../../examples/06_sqlxtc/sql_parse.h"
 
 static int n_pass = 0;
 static int n_fail = 0;

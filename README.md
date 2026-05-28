@@ -172,14 +172,24 @@ The full milestone roadmap is in [PLAN.md](PLAN.md).
 xtc is BSD-style C11.  No external deps beyond libc, pthreads, and
 optionally `liburing`/`OpenSSL`.
 
+<!-- M0_CLAIMS:B1_BEGIN -->
 ```sh
 cd dist && autoreconf -i && cd ..
 mkdir -p build_unix && cd build_unix
 ../dist/configure                      # autodetects io backend + tls
 make -j$(nproc)
-make check                              # 264 tests
+make check                              # full test suite
 sudo make install                       # libxtc.a + headers + man pages
 ```
+<!-- M0_CLAIMS:B1_END -->
+
+<!-- M0_CLAIMS:B2_BEGIN -->
+```sh
+meson setup build_meson
+meson compile -C build_meson
+meson test -C build_meson
+```
+<!-- M0_CLAIMS:B2_END -->
 
 Configure flags worth knowing:
 

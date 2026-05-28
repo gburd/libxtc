@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/sqlxtc/sql_parse.h
+ * examples/06_sqlxtc/sql_parse.h
  *	Lime-driven SQL pre-parser.  Used to validate and route a
  *	statement before handing it to SQLite.
  */

@@ -363,7 +363,13 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 	__mbox_push_locked(p, e);
 	armed = p->waker_armed;
 	(void)pthread_mutex_unlock(&p->mbox_lock);
-	if (armed) (void)xtc_waker_wake(&p->recv_waker);
+	if (armed) {
+		/* Record the wake cause so xtc_proc_wait_fd / etc. can
+		 * tell why we resumed. */
+		if (p->task != NULL)
+			p->task->wake_revents |= XTC_WAIT_MAILBOX;
+		(void)xtc_waker_wake(&p->recv_waker);
+	}
 	return XTC_OK;
 }
 
@@ -735,6 +741,136 @@ xtc_recv_match(xtc_match_fn fn, void *u, void **out, size_t *out_size,
 	if (XTC_UNLIKELY(fn == NULL)) return XTC_E_INVAL;
 	/* XTC_MUSTTAIL: delegate to __do_recv as a tail call. */
 	return XTC_MUSTTAIL __do_recv(fn, u, out, out_size, timeout_ns);
+}
+
+/* PUBLIC: int xtc_proc_wait_fd __P((int, uint32_t, int64_t, uint32_t *)); */
+int
+xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
+                 uint32_t *out_revents)
+{
+	struct xtc_proc *self = __current_proc;
+	uint32_t revents;
+	int had_timer = 0;
+	int had_fd = 0;
+
+	if (out_revents == NULL || fd < 0 || interest == 0) return XTC_E_INVAL;
+	if (self == NULL) return XTC_E_INVAL;
+
+	*out_revents = 0;
+
+	/* Check kill-pending up front (same convention as xtc_recv). */
+	{
+		int kp = atomic_load_explicit(&self->kill_pending,
+		    memory_order_acquire);
+		if (kp != 0) xtc_exit_self(kp - 1);
+	}
+
+	/* Fast path: if a message is already queued or the fd is already
+	 * ready, just return without yielding.  We can answer the mailbox
+	 * question without an actual recv call by peeking the queue. */
+	(void)pthread_mutex_lock(&self->mbox_lock);
+	if (self->mbox_n > 0 || self->save_head != NULL) {
+		*out_revents |= XTC_WAIT_MAILBOX;
+	}
+	(void)pthread_mutex_unlock(&self->mbox_lock);
+	if (*out_revents & XTC_WAIT_MAILBOX) return XTC_OK;
+
+	/* Slow path: arm the recv waker, register the fd, optionally
+	 * arm a timeout timer, then yield.  We bypass
+	 * xtc_task_park_on_fd / _on_timer because those wrappers reject
+	 * having both set; for wait_fd we need fd + timer + waker
+	 * simultaneously. */
+	self->task->wake_revents = 0;
+
+	if (xtc_io_reg_fd(self->task->loop->io, fd, interest,
+	    self->task) != XTC_OK)
+		return XTC_E_INTERNAL;
+	self->task->park_fd = fd;
+	had_fd = 1;
+
+	if (timeout_ns >= 0) {
+		/* Inline timer registration matching xtc_task_park_on_timer
+		 * but without the mutual-exclusion check. */
+		xtc_timer_t *t = NULL;
+		int64_t now_ns = 0;
+		int trc = __os_calloc(1, sizeof(*t), (void **)&t);
+		if (trc != XTC_OK || t == NULL ||
+		    __os_clock_mono(&now_ns) != XTC_OK) {
+			if (t) __os_free(t);
+			(void)xtc_io_del_fd(self->task->loop->io, fd);
+			self->task->park_fd = -1;
+			return XTC_E_INTERNAL;
+		}
+		t->deadline_ns = now_ns + timeout_ns;
+		t->cb = NULL;
+		t->user = NULL;
+		t->waiter = self->task;
+		t->heap_idx = -1;
+		t->cancelled = 0;
+		t->fired = 0;
+		t->loop = self->task->loop;
+		if (__xtc_timer_heap_push(self->task->loop, t) != XTC_OK) {
+			__os_free(t);
+			(void)xtc_io_del_fd(self->task->loop->io, fd);
+			self->task->park_fd = -1;
+			return XTC_E_INTERNAL;
+		}
+		t->all_next = self->task->loop->all_timers;
+		self->task->loop->all_timers = t;
+		self->task->park_timer = t;
+		had_timer = 1;
+	}
+
+	(void)xtc_task_waker(self->task, &self->recv_waker);
+	(void)pthread_mutex_lock(&self->mbox_lock);
+	self->waker_armed = 1;
+	(void)pthread_mutex_unlock(&self->mbox_lock);
+
+	xtc_yield();
+	/* Restore __current_proc -- another fiber may have clobbered it. */
+	__current_proc = self;
+
+	(void)pthread_mutex_lock(&self->mbox_lock);
+	self->waker_armed = 0;
+	(void)pthread_mutex_unlock(&self->mbox_lock);
+
+	/* Re-check kill-pending after yielding back. */
+	{
+		int kp = atomic_load_explicit(&self->kill_pending,
+		    memory_order_acquire);
+		if (kp != 0) xtc_exit_self(kp - 1);
+	}
+
+	/* Sample wake_revents.  The dispatcher / mbox_deliver / timer cb
+	 * have set the bits we care about. */
+	revents = self->task->wake_revents;
+	self->task->wake_revents = 0;
+
+	/* Cleanup: unregister fd if still parked, cancel timer. */
+	(void)had_fd;   /* unused but documents intent */
+	if (self->task->park_fd >= 0) {
+		(void)xtc_io_del_fd(self->task->loop->io, self->task->park_fd);
+		self->task->park_fd = -1;
+	}
+	if (had_timer && self->task->park_timer != NULL) {
+		(void)xtc_timer_cancel(self->task->park_timer);
+		self->task->park_timer = NULL;
+	}
+
+	/* Check the mailbox again -- a message may have arrived without
+	 * tripping the waker race-window. */
+	(void)pthread_mutex_lock(&self->mbox_lock);
+	if (self->mbox_n > 0 || self->save_head != NULL) {
+		revents |= XTC_WAIT_MAILBOX;
+	}
+	(void)pthread_mutex_unlock(&self->mbox_lock);
+
+	*out_revents = revents;
+
+	/* Decide return code: if only timeout fired, return XTC_E_AGAIN. */
+	if ((revents & ~(uint32_t)XTC_WAIT_TIMEOUT) == 0 && timeout_ns >= 0)
+		return XTC_E_AGAIN;
+	return XTC_OK;
 }
 
 /* ---------- exit / link / monitor ---------- */
