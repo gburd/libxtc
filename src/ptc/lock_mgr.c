@@ -974,8 +974,34 @@ __dd_pick_victim(xtc_lockmgr_t *m, struct dd_state *st,
                  int cycle_in, const int *parent)
 {
 	int u = cycle_in, victim = u;
-	int64_t best_score = __dd_score(m, &st->nodes[u]);
+	int64_t best_score;
 	int seen_any = 0;
+
+	/* Custom-picker mode: collect candidates around the cycle, then
+	 * delegate.  We pass locker IDs (the user-visible identifier) so
+	 * the callback can render decisions in stable terms. */
+	if (m->opts.victim == XTC_LOCK_VICTIM_CUSTOM &&
+	    m->opts.victim_pick_fn != NULL) {
+		uint64_t cand[64];
+		int n = 0;
+		u = cycle_in;
+		for (;;) {
+			if (n < (int)(sizeof cand / sizeof cand[0]))
+				cand[n++] = (uint64_t)u;
+			if (parent[u] < 0) break;
+			u = parent[u];
+			if (u == cycle_in) break;
+		}
+		if (n > 0) {
+			int pick = m->opts.victim_pick_fn(cand, n,
+			    m->opts.victim_pick_user);
+			if (pick >= 0 && pick < n)
+				return (int)cand[pick];
+		}
+		/* Fall through to default scoring on empty / bad pick. */
+	}
+
+	best_score = __dd_score(m, &st->nodes[u]);
 	for (;;) {
 		int64_t s = __dd_score(m, &st->nodes[u]);
 		if (m->opts.victim == XTC_LOCK_VICTIM_EXPIRE) {
