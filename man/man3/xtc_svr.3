@@ -1,0 +1,112 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_SVR 3
+.Os
+.Sh NAME
+.Nm xtc_svr_start ,
+.Nm xtc_svr_stop ,
+.Nm xtc_svr_join ,
+.Nm xtc_svr_call ,
+.Nm xtc_svr_cast ,
+.Nm xtc_svr_reply ,
+.Nm xtc_svr_pid
+.Nd gen_server-style request/reply server abstraction
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_orc.h
+.Ft int
+.Fn xtc_svr_start "xtc_loop_t *loop" "const xtc_svr_callbacks_t *cb" "void *state" "const xtc_svr_opts_t *opts" "xtc_svr_t **out"
+.Ft int
+.Fn xtc_svr_stop "xtc_svr_t *s"
+.Ft int
+.Fn xtc_svr_join "xtc_svr_t *s" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_svr_call "xtc_pid_t target" "const void *req" "size_t req_size" "void **out_reply" "size_t *out_size" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_svr_cast "xtc_pid_t target" "const void *msg" "size_t size"
+.Ft int
+.Fn xtc_svr_reply "xtc_svr_call_t *call" "const void *reply" "size_t size"
+.Ft xtc_pid_t
+.Fn xtc_svr_pid "const xtc_svr_t *s"
+.Sh DESCRIPTION
+.Nm xtc_svr
+is the gen_server analog: a long-lived process that handles
+synchronous calls and asynchronous casts via user-supplied
+callbacks.  Models the OTP gen_server pattern.
+.Pp
+.Sy Callbacks
+.Pq Vt xtc_svr_callbacks_t :
+.Bl -tag -width "handle_call" -offset indent
+.It Va init
+Called once at server start.  Returns
+.Dv XTC_OK
+to proceed or any
+.Dv XTC_E_*
+to abort startup.
+.It Va handle_call
+Invoked on synchronous request from a client.  Must call
+.Fn xtc_svr_reply
+to satisfy the caller.  Return
+.Dv XTC_SVR_CONTINUE
+or
+.Dv XTC_SVR_STOP .
+.It Va handle_cast
+Asynchronous (no-reply) message.
+.It Va handle_info
+Raw mailbox message
+.Pq sent via Xr xtc_send 3 ,
+not call/cast .
+.It Va terminate
+Called on graceful shutdown; cleanup hook.
+.El
+.Pp
+.Fn xtc_svr_call
+sends a request and blocks until reply or timeout.  In-process
+callers
+.Pq from another xtc_proc
+route via tag-and-pid through the caller's mailbox; external
+threads use slot-and-notify.  Both paths return the same way.
+.Pp
+.Fn xtc_svr_cast
+fires-and-forgets a message.  Returns immediately.
+.Pp
+.Fn xtc_svr_reply
+sent from inside
+.Va handle_call
+to satisfy the calling client.  Must be called exactly once per
+call.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+struct kv_state { /* ... */ };
+
+static int my_init(void *st) { /* ... */ return XTC_OK; }
+
+static int
+my_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
+{
+    struct kv_state *s = st;
+    /* ... compute reply ... */
+    xtc_svr_reply(call, reply_buf, reply_sz);
+    return XTC_SVR_CONTINUE;
+}
+
+xtc_svr_callbacks_t cb = {
+    .init = my_init, .handle_call = my_call, /* ... */
+};
+xtc_svr_t *s;
+xtc_svr_start(loop, &cb, &state, NULL, &s);
+
+/* ... */
+
+void *reply; size_t reply_sz;
+xtc_svr_call(xtc_svr_pid(s), req, req_sz, &reply, &reply_sz,
+             5000LL * 1000 * 1000);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_supervisor 3 ,
+.Xr xtc_app 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

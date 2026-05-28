@@ -1,0 +1,155 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_STATS 3
+.Os
+.Sh NAME
+.Nm xtc_counter_create ,
+.Nm xtc_counter_inc ,
+.Nm xtc_counter_add ,
+.Nm xtc_counter_read ,
+.Nm xtc_gauge_create ,
+.Nm xtc_gauge_set ,
+.Nm xtc_gauge_add ,
+.Nm xtc_gauge_read ,
+.Nm xtc_hist_create ,
+.Nm xtc_hist_record ,
+.Nm xtc_hist_quantile ,
+.Nm xtc_hist_count ,
+.Nm xtc_metrics_iterate ,
+.Nm xtc_metrics_dump_prometheus
+.Nd runtime statistics: counters, gauges, histograms
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_stats.h
+.Ft int
+.Fn xtc_counter_create "const char *name" "xtc_counter_t **out"
+.Ft void
+.Fn xtc_counter_inc "xtc_counter_t *c"
+.Ft void
+.Fn xtc_counter_add "xtc_counter_t *c" "int64_t delta"
+.Ft uint64_t
+.Fn xtc_counter_read "const xtc_counter_t *c"
+.Ft int
+.Fn xtc_gauge_create "const char *name" "xtc_gauge_t **out"
+.Ft void
+.Fn xtc_gauge_set "xtc_gauge_t *g" "int64_t v"
+.Ft int64_t
+.Fn xtc_gauge_read "const xtc_gauge_t *g"
+.Ft int
+.Fn xtc_hist_create "const char *name" "xtc_hist_t **out"
+.Ft void
+.Fn xtc_hist_record "xtc_hist_t *h" "int64_t value_ns"
+.Ft int64_t
+.Fn xtc_hist_quantile "const xtc_hist_t *h" "double q"
+.Ft int
+.Fn xtc_metrics_iterate "xtc_metric_visit_fn fn" "void *user"
+.Ft int
+.Fn xtc_metrics_dump_prometheus "int fd"
+.Sh DESCRIPTION
+.Nm xtc_stats
+is the runtime telemetry layer.  Three metric kinds:
+.Bl -tag -width "histogram" -offset indent
+.It counter
+Monotonic non-negative count
+.Po requests served, errors observed Pc .
+.It gauge
+Current value, can move up or down
+.Po active connections, queue depth Pc .
+.It histogram
+Distribution; supports quantile queries
+.Pq p50, p99, p999 .
+For latency tracking.
+.El
+.Pp
+.Sy Concurrency safety :
+.Bl -bullet -compact -offset indent
+.It
+Counters are
+.Em per-CPU sharded :
+.Fn xtc_counter_inc
+hits one cache-line-isolated atomic on the calling CPU.  No
+cross-CPU coherence traffic on the hot path.  Reads sum all
+shards.
+.It
+Gauges are a single
+.Vt _Atomic int64_t .
+For low-frequency-update gauges this is fine; high-frequency
+gauges should be modeled as a counter pair instead.
+.It
+Histograms are per-CPU sharded
+.Pq one log-linear bucket array per CPU ;
+.Fn xtc_hist_record
+hits one shard's atomic counter.
+.Fn xtc_hist_quantile
+merges shards under no lock
+.Pq relaxed atomic loads .
+.El
+.Pp
+.Sy Observability discipline :
+the implementation is designed not to obscure observability tools.
+Updating a counter compiles to one CPU-shard
+.Vt sched_getcpu
+.Pq cached in TLS
+plus one
+.Vt atomic_fetch_add ;
+under
+.Xr perf-stat 1
+this shows up as the program's CPU pattern, not as overhead in
+the telemetry layer.
+.Pp
+.Fn xtc_counter_create ,
+.Fn xtc_gauge_create ,
+.Fn xtc_hist_create
+register the metric in a global registry keyed by
+.Fa name
+.Pq up to 64 chars .
+The registry supports walking via
+.Fn xtc_metrics_iterate
+or dumping in Prometheus exposition format via
+.Fn xtc_metrics_dump_prometheus
+to a file descriptor.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_counter_t *requests;
+xtc_hist_t    *latency;
+
+xtc_counter_create("rexis.requests", &requests);
+xtc_hist_create  ("rexis.req_latency_ns", &latency);
+
+/* Hot path: */
+int64_t t0 = now_ns();
+handle_request();
+xtc_counter_inc(requests);
+xtc_hist_record(latency, now_ns() - t0);
+
+/* Periodic dump (e.g. via xtc_timer): */
+xtc_metrics_dump_prometheus(scrape_fd);
+.Ed
+.Sh PROMETHEUS OUTPUT
+.Fn xtc_metrics_dump_prometheus
+emits, for each metric:
+.Bd -literal -offset indent
+# TYPE rexis.requests counter
+rexis.requests 12345
+# TYPE rexis.queue_depth gauge
+rexis.queue_depth 42
+# TYPE rexis.req_latency_ns histogram
+rexis.req_latency_ns_count 12345
+rexis.req_latency_ns_p50 1500
+rexis.req_latency_ns_p99 9800
+rexis.req_latency_ns_p999 24000
+.Ed
+.Pp
+A trivial scrape server reads
+.Fa fd
+and forwards to HTTP.  See
+.Pa examples/05_rexis/metrics.c
+for an example dump-on-timer pattern.
+.Sh SEE ALSO
+.Xr xtc_log 3 ,
+.Xr xtc_cfg 3 ,
+.Xr xtc 7 ,
+.Xr perf-stat 1
+.Sh HISTORY
+Appeared in xtc 0.1.

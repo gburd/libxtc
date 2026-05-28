@@ -1,0 +1,58 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_REG 3
+.Os
+.Sh NAME
+.Nm xtc_reg_create ,
+.Nm xtc_reg_destroy ,
+.Nm xtc_reg_register ,
+.Nm xtc_reg_unregister ,
+.Nm xtc_reg_lookup
+.Nd named process registry
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_reg.h
+.Ft int
+.Fn xtc_reg_create "xtc_reg_t **out"
+.Ft void
+.Fn xtc_reg_destroy "xtc_reg_t *r"
+.Ft int
+.Fn xtc_reg_register "xtc_reg_t *r" "const char *name" "xtc_pid_t pid"
+.Ft int
+.Fn xtc_reg_unregister "xtc_reg_t *r" "const char *name"
+.Ft int
+.Fn xtc_reg_lookup "xtc_reg_t *r" "const char *name" "xtc_pid_t *out"
+.Sh DESCRIPTION
+.Nm xtc_reg
+is a name-to-pid registry.  Modeled on Erlang's
+.Sq register/2
+process registration.  Lets a process find a peer by canonical
+name without sharing pid pointers ahead of time.
+.Pp
+Names are short strings
+.Pq up to 64 bytes ;
+re-registering the same name with a different pid replaces the
+prior binding atomically.
+.Pp
+xtc_app owns a registry per app
+.Pq Xr xtc_app_registry 3 .
+Multiple registries are permitted for sharded namespaces.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_reg_t *r = xtc_app_registry(app);
+xtc_pid_t pid;
+
+/* Bind a name to my process. */
+xtc_reg_register(r, "metrics_proc", xtc_self());
+
+/* From elsewhere: */
+if (xtc_reg_lookup(r, "metrics_proc", &pid) == XTC_OK)
+    xtc_send(pid, msg, sz);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_app 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

@@ -1,0 +1,191 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_LOCKMGR 3
+.Os
+.Sh NAME
+.Nm xtc_lockmgr_create ,
+.Nm xtc_lockmgr_destroy ,
+.Nm xtc_lockmgr_id ,
+.Nm xtc_lockmgr_id_free ,
+.Nm xtc_lock_get ,
+.Nm xtc_lock_put ,
+.Nm xtc_lock_vec ,
+.Nm xtc_lockmgr_check_deadlocks ,
+.Nm xtc_lockmgr_stat ,
+.Nm xtc_lockmgr_failchk
+.Nd transactional lock manager with deadlock detection
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_lockmgr.h
+.Ft int
+.Fn xtc_lockmgr_create "const xtc_lockmgr_opts_t *opts" "xtc_lockmgr_t **out"
+.Ft void
+.Fn xtc_lockmgr_destroy "xtc_lockmgr_t *m"
+.Ft int
+.Fn xtc_lockmgr_id "xtc_lockmgr_t *m" "xtc_locker_t *out"
+.Ft int
+.Fn xtc_lockmgr_id_free "xtc_lockmgr_t *m" "xtc_locker_t locker"
+.Ft int
+.Fn xtc_lock_get "xtc_lockmgr_t *m" "xtc_locker_t locker" "const void *key" "size_t key_size" "xtc_lock_mode_t mode" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_lock_put "xtc_lockmgr_t *m" "xtc_locker_t locker" "const void *key" "size_t key_size"
+.Ft int
+.Fn xtc_lock_vec "xtc_lockmgr_t *m" "xtc_locker_t locker" "const xtc_lock_req_t *reqs" "int n_reqs" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_lockmgr_check_deadlocks "xtc_lockmgr_t *m" "int *n_aborted"
+.Ft int
+.Fn xtc_lockmgr_stat "xtc_lockmgr_t *m" "xtc_lockmgr_stat_t *out"
+.Ft int
+.Fn xtc_lockmgr_failchk "xtc_lockmgr_t *m"
+.Sh DESCRIPTION
+.Nm xtc_lockmgr
+is a transactional lock manager modeled on Berkeley DB's
+.Pa lock_*.c
+subsystem.  It provides:
+.Bl -bullet -compact -offset indent
+.It
+Named lockable objects identified by arbitrary
+.Pq Fa key , key_size
+byte strings.
+.It
+Nine lock modes via the BDB
+.Sq read-intent-write
+matrix
+.Po Dv XTC_LOCK_NL , XTC_LOCK_S , XTC_LOCK_X , XTC_LOCK_WAIT ,
+XTC_LOCK_IS , XTC_LOCK_IX , XTC_LOCK_IWR , XTC_LOCK_RU ,
+XTC_LOCK_WW Pc ,
+or a caller-supplied conflict matrix.
+.It
+Deadlock detection in two flavours:
+.Dv XTC_LOCK_DETECT_PERIODIC
+runs a background thread; the
+.Dv XTC_LOCK_DETECT_ON_BLOCK
+mode runs synchronously every time a
+requestor would block.
+.It
+Eight victim policies
+.Po Dv XTC_LOCK_VICTIM_RANDOM , OLDEST , YOUNGEST , MIN_LOCKS ,
+MAX_LOCKS , MIN_WRITE , MAX_WRITE , EXPIRE Pc
+plus
+.Dv XTC_LOCK_VICTIM_CUSTOM
+which delegates to a caller-supplied callback.
+.It
+Compound atomic acquires via
+.Fn xtc_lock_vec
+.Po N requests succeed-or-rollback Pc .
+.It
+Per-locker timeouts and statistics.
+.El
+.Pp
+.Fn xtc_lockmgr_create
+opens a lock manager with the given options.  Options control
+partition count
+.Pq for hash sharding ,
+detector mode and interval, victim policy, and the conflict
+matrix.
+.Pp
+.Fn xtc_lockmgr_id
+allocates a locker handle (think transaction id).  Hold one per
+in-flight transaction; passing it to
+.Fn xtc_lock_get
+identifies which transaction is asking.
+.Pp
+.Fn xtc_lock_get
+acquires
+.Fa mode
+on the named object.  Returns:
+.Bl -tag -width "XTC_E_DEADLK" -offset indent
+.It Dv XTC_OK
+The lock is held by
+.Fa locker .
+.It Dv XTC_E_AGAIN
+The
+.Fa timeout_ns
+elapsed without acquiring.
+.It Dv XTC_E_DEADLK
+The deadlock detector chose
+.Fa locker
+as a victim; the call rolls back any partial state.
+.It Dv XTC_E_INVAL
+Bad arguments or unknown
+.Fa locker .
+.El
+.Pp
+.Fn xtc_lock_put
+releases the named lock.  Order of release does not matter; the
+lockmgr tracks per-locker held lists.
+.Pp
+.Fn xtc_lock_vec
+performs an atomic compound acquire.  Either all requested
+locks are granted, or none are
+.Pq if any single grant would block or be rejected ;
+no partial state is left.
+.Pp
+.Fn xtc_lockmgr_check_deadlocks
+runs the cycle-detection algorithm synchronously and aborts any
+victims it finds.  Useful in
+.Dv XTC_LOCK_DETECT_NONE
+mode where the caller drives detection.
+.Pp
+.Fn xtc_lockmgr_stat
+fills
+.Fa out
+with current counts: held, waiting, total acquires, total
+releases, deadlocks found, victims aborted, etc.  No locks held
+during the snapshot
+.Pq counters are atomic .
+.Pp
+.Fn xtc_lockmgr_failchk
+sweeps for crashed lockers
+.Pq those whose owning thread has exited without releasing
+and reclaims their locks.
+.Sh CHOOSING vs. xtc_lwlock / xtc_lrlock
+Use
+.Nm xtc_lockmgr
+when:
+.Bl -bullet -compact -offset indent
+.It
+Locks are named by user-supplied keys
+.Po e.g. table name, page id Pc
+rather than living in a fixed location.
+.It
+You need multiple lock modes beyond shared / exclusive
+.Pq intent locks for hierarchical locking .
+.It
+You want deadlock detection out of the box.
+.It
+Compound acquires must be atomic.
+.El
+For everything else, prefer
+.Xr xtc_lwlock 3
+or
+.Xr xtc_lrlock 3 .
+.Sh CUSTOM VICTIM PICKER
+Setting
+.Va opts.victim
+to
+.Dv XTC_LOCK_VICTIM_CUSTOM
+and providing
+.Va opts.victim_pick_fn
+delegates the choice to user code:
+.Bd -literal -offset indent
+typedef int (*xtc_lock_victim_pick_fn)(
+    const uint64_t *candidate_lockers, int n_candidates,
+    void *user);
+.Ed
+.Pp
+The callback receives the locker IDs in the cycle and returns an
+index in
+.Bq 0 , n_candidates .
+See
+.Pa examples/04_lockmgr_demo.c
+for a deck-shuffled randomised picker.
+.Sh SEE ALSO
+.Xr xtc_lwlock 3 ,
+.Xr xtc_lrlock 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Modeled on Berkeley DB's
+.Pa lock_*.c
+subsystem.  Appeared in xtc 0.1.

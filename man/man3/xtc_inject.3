@@ -1,0 +1,98 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_INJECT 3
+.Os
+.Sh NAME
+.Nm xtc_inject_attach ,
+.Nm xtc_inject_attach_wait ,
+.Nm xtc_inject_detach ,
+.Nm xtc_inject_trigger ,
+.Nm xtc_inject_check ,
+.Nm xtc_inject_wakeup ,
+.Nm XTC_INJECTION_POINT
+.Nd fault-injection points
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_inject.h
+.Ft int
+.Fn xtc_inject_attach "const char *name" "xtc_inject_fn fn" "void *user"
+.Ft int
+.Fn xtc_inject_attach_wait "const char *name"
+.Ft int
+.Fn xtc_inject_detach "const char *name"
+.Ft void
+.Fn xtc_inject_trigger "const char *name"
+.Ft int
+.Fn xtc_inject_check "const char *name"
+.Ft int
+.Fn xtc_inject_wakeup "const char *name"
+.Sh DESCRIPTION
+.Nm xtc_inject
+is a fault-injection framework modeled on PostgreSQL's
+.Pa src/include/utils/injection_point.h .
+Production code sprinkles
+.Fn XTC_INJECTION_POINT name
+calls at interesting locations
+.Pq error paths, race windows, slow paths .
+Tests can attach a callback or
+.Sq wait
+semantics to a named point at runtime; when the point fires, the
+callback runs (or the trigger blocks until
+.Fn xtc_inject_wakeup
+is called from the test).
+.Pp
+.Sy Three operations :
+.Bl -tag -width "TRIGGER" -offset indent
+.It Sy ATTACH
+Bind a callback (or "wait" semantics) to the name.  Up to 4
+attachments per name.
+.It Sy DETACH
+Remove all attachments for a name.
+.It Sy TRIGGER
+Fire the point.  No-op if nothing attached
+.Pq production fast path .
+.El
+.Pp
+.Fn xtc_inject_check
+is a lock-free probe: returns 1 if the name has any attachments,
+0 otherwise.  Production code uses this to substitute an error
+path:
+.Bd -literal -offset indent
+if (xtc_inject_check("io.calloc_fail")) {
+    xtc_inject_trigger("io.calloc_fail");
+    return XTC_E_NOMEM;
+}
+.Ed
+.Pp
+The hot-path cost when nothing is attached is one atomic load
+.Pq the global Sq attached_count .
+.Pp
+.Sy Compile-time gating :
+defining
+.Dv XTC_INJECT_DISABLE
+elides all
+.Fn XTC_INJECTION_POINT
+calls to a no-op.  Production builds may opt out entirely; debug
+and test builds keep the framework live.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+/* In production code: */
+int xtc_io_init(xtc_io_t **out) {
+    XTC_INJECTION_POINT("io.init.calloc_fail");
+    if (xtc_inject_check("io.init.calloc_fail"))
+        return XTC_E_NOMEM;
+    /* ... real code ... */
+}
+
+/* In a test: */
+xtc_inject_attach("io.init.calloc_fail", my_callback, NULL);
+int rc = xtc_io_init(&io);
+munit_assert_int(rc, ==, XTC_E_NOMEM);
+xtc_inject_detach("io.init.calloc_fail");
+.Ed
+.Sh SEE ALSO
+.Xr xtc_log 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.

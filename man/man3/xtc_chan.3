@@ -1,0 +1,109 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd May 28, 2026
+.Dt XTC_CHAN 3
+.Os
+.Sh NAME
+.Nm xtc_chan_oneshot ,
+.Nm xtc_chan_mpsc ,
+.Nm xtc_chan_mpmc ,
+.Nm xtc_chan_watch ,
+.Nm xtc_chan_broadcast
+.Nd typed channels for cross-task message passing
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_chan.h
+.Ft int
+.Fn xtc_chan_oneshot_create "xtc_res_t *res" "xtc_chan_oneshot_t **out"
+.Ft int
+.Fn xtc_chan_oneshot_send "xtc_chan_oneshot_t *c" "void *msg"
+.Ft int
+.Fn xtc_chan_oneshot_try_recv "xtc_chan_oneshot_t *c" "void **out"
+.Ft int
+.Fn xtc_chan_mpsc_create "xtc_res_t *res" "size_t capacity" "xtc_chan_mpsc_t **out"
+.Ft int
+.Fn xtc_chan_mpsc_try_send "xtc_chan_mpsc_t *c" "void *msg"
+.Ft int
+.Fn xtc_chan_mpsc_try_recv "xtc_chan_mpsc_t *c" "void **out"
+.Ft int
+.Fn xtc_chan_mpmc_create "xtc_res_t *res" "size_t capacity" "xtc_chan_mpmc_t **out"
+.Ft int
+.Fn xtc_chan_watch_create "xtc_res_t *res" "void *initial" "xtc_chan_watch_t **out"
+.Ft int
+.Fn xtc_chan_broadcast_create "xtc_res_t *res" "size_t capacity" "xtc_chan_broadcast_t **out"
+.Sh DESCRIPTION
+.Nm xtc_chan
+provides typed channel primitives for cross-task / cross-process /
+cross-thread message passing.  Each channel kind has different
+fan-in / fan-out semantics:
+.Bl -tag -width "broadcast" -offset indent
+.It oneshot
+A single message; one sender, one receiver.  Used for request /
+reply patterns, one-shot futures.
+.It mpsc
+Multiple producers, single consumer.  Bounded ring buffer.  Lock-
+free producer side using sequence-number CAS; consumer needs no
+synchronisation.
+.It mpmc
+Multiple producers, multiple consumers.  Bounded ring buffer
+serialising both sides via per-slot sequence numbers
+.Pq Vyukov-style queue .
+.It watch
+Single-producer, multi-consumer of latest-value-only state.
+Useful for config that may change while readers want the current
+view.
+.It broadcast
+Multi-producer, multi-consumer fan-out.  Each subscribed
+consumer sees every message.  Per-consumer lag tracking; slow
+consumers see their queue fill and may drop.
+.El
+.Pp
+All channels are heap-allocated and reference-managed via the
+optional
+.Vt xtc_res_t
+accountant; passing one charges memory against the cap.
+.Pp
+.Sy Ownership :
+the sender transfers ownership of the message buffer to the
+receiver.  After
+.Fn xtc_chan_*_send
+returns
+.Dv XTC_OK ,
+the sender must not free or further mutate the buffer.  The
+receiver is responsible for freeing.
+.Sh INTEGRATION WITH xtc_proc
+For BEAM-style mailboxes use
+.Xr xtc_proc 3
+directly: every process has its own mailbox without any explicit
+channel allocation.  Channels are for fan-in / fan-out patterns
+that don't fit the per-proc-mailbox model:
+.Bl -bullet -compact -offset indent
+.It
+A pool of N workers consuming from one MPSC queue.
+.It
+N producers feeding M consumers via MPMC.
+.It
+Config-change broadcasts via watch channels.
+.El
+.Sh EXAMPLES
+MPSC work queue:
+.Bd -literal -offset indent
+xtc_chan_mpsc_t *q;
+xtc_chan_mpsc_create(NULL, /* cap */ 1024, &q);
+
+/* producer */
+xtc_chan_mpsc_try_send(q, work_item);
+
+/* consumer */
+void *item;
+if (xtc_chan_mpsc_try_recv(q, &item) == XTC_OK) {
+    handle(item);
+    free(item);
+}
+.Ed
+.Sh SEE ALSO
+.Xr xtc_proc 3 ,
+.Xr xtc_res 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.
