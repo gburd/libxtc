@@ -2,8 +2,8 @@
  * Copyright (c) 2026, The XTC Project -- All rights reserved.
  * Use of this source code is governed by the ISC License.
  *
- * examples/05_redis/main.c
- *	Redis-compatible server entry point.
+ * examples/05_rexis/main.c
+ *	rexis (Redis-protocol-compatible) server entry point.
  *
  *	Resource budgets enforced via xtc_res:
  *	  --cores=N        pin to N cores via sched_setaffinity
@@ -270,7 +270,7 @@ usage(const char *prog)
 	fprintf(stderr,
 	    "Usage: %s [options]\n"
 	    "\n"
-	    "Redis-compatible server with hard resource budgets.\n"
+	    "rexis (Redis-protocol-compatible) server with hard resource budgets.\n"
 	    "\n"
 	    "Options:\n"
 	    "  -h, --host=ADDR       Bind address (default: 0.0.0.0)\n"
@@ -382,7 +382,7 @@ main(int argc, char **argv)
 	}
 	xtc_log_set_default(log);
 
-	XTC_LOG_INFO_F("xtc-redis starting on %s:%d", cfg.host, cfg.port);
+	XTC_LOG_INFO_F("xtc-rexis starting on %s:%d", cfg.host, cfg.port);
 	if (cfg.max_memory > 0)
 		XTC_LOG_INFO_F("  max_memory: %lld bytes", (long long)cfg.max_memory);
 	if (cfg.max_keys > 0)
@@ -437,7 +437,7 @@ main(int argc, char **argv)
 	setup_signals();
 
 	/* Create app */
-	app_opts.name = "xtc-redis";
+	app_opts.name = "xtc-rexis";
 	app_opts.sup.strategy = XTC_SUP_ONE_FOR_ONE;
 	app_opts.sup.max_restarts = 10;
 	app_opts.sup.period_ns = 60LL * 1000 * 1000 * 1000;

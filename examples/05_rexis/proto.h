@@ -2,13 +2,13 @@
  * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * examples/05_redis/proto.h
+ * examples/05_rexis/proto.h
  *	RESP2/RESP3 protocol parser and response builder.
  *	No external dependencies; xtc + libc only.
  */
 
-#ifndef REDIS_PROTO_H
-#define REDIS_PROTO_H
+#ifndef REXIS_PROTO_H
+#define REXIS_PROTO_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -146,4 +146,4 @@ int resp_write_queued(resp_buf_t *b);
 /* Check remaining capacity */
 size_t resp_buf_avail(const resp_buf_t *b);
 
-#endif /* REDIS_PROTO_H */
+#endif /* REXIS_PROTO_H */

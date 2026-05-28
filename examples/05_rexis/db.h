@@ -2,13 +2,13 @@
  * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * examples/05_redis/db.h
+ * examples/05_rexis/db.h
  *	Key-value database with xtc_lrlock protection.
  *	Supports string, list, and hash value types.
  */
 
-#ifndef REDIS_DB_H
-#define REDIS_DB_H
+#ifndef REXIS_DB_H
+#define REXIS_DB_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -206,4 +206,4 @@ void db_flushdb(db_t *db);
 /* Expire keys that have passed their TTL.  Returns count removed. */
 int db_expire_stale(db_t *db, int64_t now_ns, int max_scan);
 
-#endif /* REDIS_DB_H */
+#endif /* REXIS_DB_H */

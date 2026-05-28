@@ -2,7 +2,7 @@
  * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * examples/05_redis/db.c
+ * examples/05_rexis/db.c
  *	Key-value database with xtc_lrlock protection.
  */
 
@@ -194,7 +194,7 @@ db_create(const db_opts_t *opts, db_t **out)
 	if (db->opts.n_buckets == 0)
 		db->opts.n_buckets = 65536;
 
-	lr_opts.name = "redis_db";
+	lr_opts.name = "rexis_db";
 	lr_opts.data_size = sizeof(db_table_t);
 	lr_opts.apply_fn = db_apply_op;
 	lr_opts.sync_fn = db_sync;

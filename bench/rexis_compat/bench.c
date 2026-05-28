@@ -2,7 +2,7 @@
  * Copyright (c) 2026, The XTC Project -- All rights reserved.
  * Use of this source code is governed by the ISC License.
  *
- * bench/redis_compat/bench.c
+ * bench/rexis_compat/bench.c
  *	Simple TCP client benchmark for the Redis-compatible server.
  *	Measures GET/SET ops/sec and latency percentiles.
  *
@@ -332,8 +332,8 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Run benchmark against xtc-redis */
-	run_bench("xtc_redis", g_cfg.host, g_cfg.port);
+	/* Run benchmark against xtc-rexis */
+	run_bench("xtc_rexis", g_cfg.host, g_cfg.port);
 
 	/* Optionally compare with real Redis */
 	if (g_cfg.compare) {
