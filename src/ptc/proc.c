@@ -534,6 +534,12 @@ xtc_send(xtc_pid_t to, const void *data, size_t size)
 	p = __resolve(to, &target);
 	if (XTC_UNLIKELY(p == NULL || !p->alive)) return XTC_E_INVAL;
 
+	/* Guard against size_t overflow in the envelope allocation:
+	 * a size near SIZE_MAX would wrap sizeof *e + size to a small
+	 * value, malloc would succeed, and the memcpy below would
+	 * overflow the heap.  Reject before allocating. */
+	if (XTC_UNLIKELY(size > SIZE_MAX - sizeof *e)) return XTC_E_INVAL;
+
 	e = malloc(sizeof *e + size);
 	if (XTC_UNLIKELY(e == NULL)) return XTC_E_NOMEM;
 	e->next = NULL;
