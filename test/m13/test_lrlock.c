@@ -372,6 +372,84 @@ test_lrlock_oplog_grow(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- thread-churn slot reclamation (regression) -------------
+ *
+ * Before slot reclamation, each new thread consumed one of the
+ * 4096 global reader slots permanently.  A process that recycled
+ * more than 4096 reader threads exhausted the pool; thereafter
+ * read_begin could not announce an epoch and a COW writer could
+ * MADV_FREE a buffer out from under a still-reading thread.  This
+ * test churns far more than 4096 short-lived reader threads through
+ * one lock; with reclamation every read stays consistent and no
+ * read_begin returns NULL.
+ */
+
+static xtc_lrlock_t  *g_churn_lr;
+static _Atomic int    g_churn_null_begin;
+static _Atomic int    g_churn_inconsistent;
+
+static void *
+churn_reader(void *arg)
+{
+	(void)arg;
+	{
+		const struct dict *r = xtc_lrlock_read_begin(g_churn_lr);
+		if (r == NULL) {
+			atomic_fetch_add(&g_churn_null_begin, 1);
+		} else {
+			int i;
+			for (i = 0; i < r->n; i++)
+				if (r->items[i].value <= 0)
+					atomic_fetch_add(&g_churn_inconsistent, 1);
+			xtc_lrlock_read_end(g_churn_lr);
+		}
+	}
+	return NULL;
+}
+
+static MunitResult
+test_lrlock_thread_churn(const MunitParameter p[], void *d)
+{
+	struct op_set s;
+	int round;
+	(void)p; (void)d;
+
+	atomic_store(&g_churn_null_begin, 0);
+	atomic_store(&g_churn_inconsistent, 0);
+	munit_assert_int(xtc_lrlock_create(sizeof(struct dict), apply_set,
+	    sync_dict, "churn", &g_churn_lr), ==, XTC_OK);
+
+	/* Seed one positive-valued item so the reader invariant
+	 * (every value > 0) is meaningful. */
+	{
+		struct dict *wr = xtc_lrlock_write_begin(g_churn_lr);
+		(void)wr;
+		s.key = 1; s.value = 42;
+		xtc_lrlock_apply_op(g_churn_lr, &s, sizeof s);
+		xtc_lrlock_publish(g_churn_lr);
+		xtc_lrlock_write_end(g_churn_lr);
+	}
+
+	/* 5000 short-lived reader threads, well past the 4096 slot cap,
+	 * spawned and joined in small batches.  Without reclamation the
+	 * 4097th read_begin would return NULL. */
+	for (round = 0; round < 5000 / 8; round++) {
+		pthread_t t[8];
+		int i;
+		for (i = 0; i < 8; i++)
+			munit_assert_int(pthread_create(&t[i], NULL,
+			    churn_reader, NULL), ==, 0);
+		for (i = 0; i < 8; i++)
+			pthread_join(t[i], NULL);
+	}
+
+	munit_assert_int(atomic_load(&g_churn_null_begin), ==, 0);
+	munit_assert_int(atomic_load(&g_churn_inconsistent), ==, 0);
+
+	xtc_lrlock_destroy(g_churn_lr);
+	return MUNIT_OK;
+}
+
 /* ---- max_readers via opts ---------------------------------- */
 
 static MunitResult
@@ -403,6 +481,7 @@ static MunitTest tests[] = {
 	{ "/lrlock_cow_concurrent", test_lrlock_cow_concurrent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lrlock_oplog_grow", test_lrlock_oplog_grow, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lrlock_max_readers", test_lrlock_max_readers, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/lrlock_thread_churn", test_lrlock_thread_churn, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m13/lrlock", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
