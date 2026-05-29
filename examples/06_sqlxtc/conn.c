@@ -10,7 +10,9 @@
  *	back as Quack.
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -25,6 +27,19 @@
 #include "xtc_int.h"
 #include "xtc_io.h"
 #include "xtc_log.h"
+#include "xtc_stats.h"
+
+/* Query instrumentation; defined in metrics.c.  NULL-checked
+ * before use so the connection path runs even if registration
+ * failed. */
+extern xtc_counter_t *sqlxtc_stat_query_total;
+extern xtc_counter_t *sqlxtc_stat_query_errors;
+extern xtc_hist_t    *sqlxtc_stat_query_latency;
+
+/* Local helper: __os_clock_mono uses an out-param. */
+static inline int64_t xtc_now_ns(void) {
+	int64_t t; (void)__os_clock_mono(&t); return t;
+}
 
 #define SQLXTC_VERSION "0.1"
 
@@ -141,16 +156,30 @@ handle_query(conn_state_t *st, const quack_msg_t *msg)
 
 	if (db_handle_get(st->db, &h, &owned) != XTC_OK) {
 		quack_emit_err(&st->wbuf, "no db handle");
+		if (sqlxtc_stat_query_errors != NULL)
+			xtc_counter_inc(sqlxtc_stat_query_errors);
 		free(normalized);
 		return;
 	}
 
-	if (db_exec(h, sql_to_exec, msg->limit, &st->wbuf, &rows, &err) < 0) {
-		if (err) {
-			quack_emit_err(&st->wbuf, err);
-			free(err);
-		} else {
-			quack_emit_err(&st->wbuf, "exec failed");
+	{
+		int64_t t0 = xtc_now_ns();
+		int exec_rc = db_exec(h, sql_to_exec, msg->limit,
+		    &st->wbuf, &rows, &err);
+		if (sqlxtc_stat_query_total != NULL)
+			xtc_counter_inc(sqlxtc_stat_query_total);
+		if (sqlxtc_stat_query_latency != NULL)
+			xtc_hist_record(sqlxtc_stat_query_latency,
+			    xtc_now_ns() - t0);
+		if (exec_rc < 0) {
+			if (sqlxtc_stat_query_errors != NULL)
+				xtc_counter_inc(sqlxtc_stat_query_errors);
+			if (err) {
+				quack_emit_err(&st->wbuf, err);
+				free(err);
+			} else {
+				quack_emit_err(&st->wbuf, "exec failed");
+			}
 		}
 	}
 
