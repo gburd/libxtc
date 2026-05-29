@@ -1,7 +1,3 @@
----
-title: "M_LIBXTC_PG_BOUNDARY: where libxtc ends and Postgres begins"
----
-
 # M_LIBXTC_PG_BOUNDARY: where libxtc ends and Postgres begins
 
 ## Thesis

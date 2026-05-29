@@ -65,3 +65,7 @@ test/m99/test_rexis_loopback
 test/m99/test_rexis_budgets
 test/m99/test_rexis_pbt
 test/m99/*.o
+
+# Doxygen-generated documentation site
+docs/api/
+doxygen-warnings.txt
