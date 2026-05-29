@@ -1,7 +1,3 @@
----
-title: "Known issues -- pending investigation"
----
-
 # Known issues -- pending investigation
 
 ## RESOLVED: xtc_slab SHARED_MEMORY mode cross-process support

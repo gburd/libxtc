@@ -1,7 +1,3 @@
----
-title: "ABI Stability and Deprecation Policy"
----
-
 # ABI Stability and Deprecation Policy
 
 This document is the **contract** xtc makes with its users about

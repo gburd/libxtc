@@ -1,46 +1,67 @@
-# Build and deploy the libxtc documentation tree to GitHub Pages.
-#
-# Triggers on every push to main that touches docs/.  Builds the
-# Jekyll site from docs/ using the standard GitHub Pages workflow
-# and publishes to the gh-pages environment.
+name: Build Docs
 
-name: pages
+# Validates that the Doxygen documentation build succeeds on every
+# push.  It does NOT deploy: the canonical site is hosted on Codeberg
+# Pages (.forgejo/workflows/pages.yml).  GitHub is a read-only mirror.
+#
+# To enable GitHub Pages too: enable Pages in repo settings
+# (Source: GitHub Actions), grant this workflow `pages: write` and
+# `id-token: write`, and add a deploy job:
+#
+#   deploy:
+#     needs: build
+#     runs-on: ubuntu-latest
+#     environment:
+#       name: github-pages
+#       url: ${{ steps.deployment.outputs.page_url }}
+#     steps:
+#       - id: deployment
+#         uses: actions/deploy-pages@v4
+#
+# Without Pages enabled in settings, deploy-pages returns 404 and
+# fails the run, which is why deploy is left out by default.
 
 on:
   push:
     branches: [main]
     paths:
-      - "docs/**"
-      - ".github/workflows/pages.yml"
+      - 'src/inc/**'
+      - 'docs/**'
+      - 'README.md'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/jekyll-build-pages@v1
-        with:
-          source: ./docs
-          destination: ./_site
-      - uses: actions/upload-pages-artifact@v3
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Install doxygen
+        run: sudo apt-get update && sudo apt-get install -y doxygen
+
+      - name: Generate API docs
+        working-directory: docs
+        run: doxygen Doxyfile 2>../doxygen-warnings.txt
+
+      - name: Report doxygen warning count
+        run: |
+          count=$(wc -l < doxygen-warnings.txt)
+          echo "::notice::Doxygen produced ${count} warning lines"
+          if [ "${count}" -gt 0 ]; then
+            echo "First 20:"
+            head -20 doxygen-warnings.txt
+          fi
+
+      - name: Verify site contents
+        run: |
+          test -s docs/api/html/index.html
+          grep -q -i 'xtc' docs/api/html/index.html
+          echo "Doxygen site built ($(find docs/api/html -type f | wc -l) files)"
