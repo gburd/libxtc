@@ -17,6 +17,7 @@ make examples
 | `04_lockmgr_demo.c` | Heavyweight lock manager: deadlock between two transactions; detector aborts the youngest. |
 | `05_rexis/` | **Redis-compatible server** with hard resource budgets.  Drop-in for redis-cli. |
 | `06_sqlxtc/` | **Networked SQLite** with the Quack JSON protocol.  Multi-client; uses xtc throughout. |
+| `07_kaka/` | **Kafka-shaped log broker** (Phase 0 scaffold): partitioned append-only logs with credit-based backpressure.  See its README for the design. |
 
 ## What each example proves
 
