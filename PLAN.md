@@ -3161,7 +3161,7 @@ Tier 0 is done; the rest are tracked here.
 | A4 real build/test CI (not just pages) | done | .github + .forgejo ci.yml: gcc+clang make check, plus ASan+UBSan jobs |
 | A5 reconcile README platform claim with reality | TODO | Linux/FreeBSD/Windows verified; macOS/illumos in progress |
 | A6 hot-path allocation claim vs xtc_send malloc | done | per-thread envelope slab pool for payloads <=256B; malloc fallback above; README claim updated; ASan-clean |
-| A7 regression tests | partial | lrlock churn done; ASan/UBSan in CI now catch leak/UAF/UB classes; idle-CPU + sup restart-intensity still TODO |
+| A7 regression tests | done | idle-CPU + sup restart-intensity already covered; added work-steal fairness test (found+fixed two real stealer bugs); lrlock churn; ASan/UBSan in CI |
 | A8 thread xtc_abort_source through xtc_svr_call | TODO | cancellation must reach every await point |
 | A9 Bitcask compaction/merge | TODO | or relabel Bitcask explicitly as a demo |
 | A10 re-audit M17 conformance for fair comparisons | partial | W4 parking_lot done; rest TODO |
