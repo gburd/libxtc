@@ -56,3 +56,4 @@ examples/05_rexis/rexis-server-xtc
 
 # rexis bitcask test binary
 examples/05_rexis/test_bitcask
+examples/05_rexis/test_db_persist

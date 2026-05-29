@@ -39,9 +39,12 @@ typedef struct db_table {
 	db_entry_t **buckets;
 } db_table_t;
 
+#include "bitcask.h"
+
 struct db {
 	xtc_lrlock_t *lr;
 	db_opts_t     opts;
+	bitcask_t    *bc;          /* persistence; NULL if disabled */
 };
 
 /* ----- Memory tracking ----- */
@@ -174,6 +177,44 @@ db_sync(void *dst, const void *src, size_t sz)
 	memcpy(dst, src, sz);
 }
 
+/* ----- Persistence (Bitcask) ----- */
+
+/* Forward decl: db_set without a persistence write-back, used
+ * during replay. */
+static int db_set_inmem(db_t *, const char *, size_t,
+                        const char *, size_t);
+
+struct __replay_ctx {
+	db_t      *db;
+	bitcask_t *bc;
+};
+
+static int
+__replay_one(const void *key, size_t key_len, void *user)
+{
+	struct __replay_ctx *ctx = user;
+	size_t  vsz = 0;
+	char   *val = NULL;
+	int     rc;
+
+	if (bitcask_size(ctx->bc, key, key_len, &vsz) != 0)
+		return 0;
+	val = malloc(vsz + 1);
+	if (val == NULL) return 1;
+	rc = bitcask_get(ctx->bc, key, key_len, val, vsz, &vsz);
+	if (rc != 0) { free(val); return 1; }
+	(void)db_set_inmem(ctx->db, key, key_len, val, vsz);
+	free(val);
+	return 0;
+}
+
+static void
+db_persist_replay(db_t *db)
+{
+	struct __replay_ctx ctx = { db, db->bc };
+	(void)bitcask_iterate(db->bc, __replay_one, &ctx);
+}
+
 /* ----- Public API ----- */
 
 int
@@ -238,6 +279,20 @@ db_create(const db_opts_t *opts, db_t **out)
 
 	xtc_lrlock_mark_ready(db->lr);
 
+	/* Open Bitcask for persistence if configured. */
+	if (db->opts.persist_dir != NULL) {
+		if (bitcask_open(db->opts.persist_dir, &db->bc) != 0) {
+			xtc_lrlock_destroy(db->lr);
+			__os_free(db);
+			return XTC_E_INTERNAL;
+		}
+		/* Replay live keys from the bitcask into the in-memory
+		 * table.  We use bitcask_iterate to visit each key; for
+		 * each, we read the value and call db_set without writing
+		 * back to bitcask. */
+		db_persist_replay(db);
+	}
+
 	*out = db;
 	return XTC_OK;
 }
@@ -267,6 +322,7 @@ db_destroy(db_t *db)
 	xtc_lrlock_write_end(db->lr);
 
 	xtc_lrlock_destroy(db->lr);
+	if (db->bc != NULL) bitcask_close(db->bc);
 	__os_free(db);
 }
 
@@ -570,6 +626,69 @@ db_set(db_t *db, const char *key, size_t key_len,
 	return db_set_ex(db, key, key_len, val, val_len, 0);
 }
 
+static int
+db_set_inmem(db_t *db, const char *key, size_t key_len,
+             const char *val, size_t val_len)
+{
+	db_table_t *tbl = db_write_table(db);
+	uint64_t h = fnv1a(key, key_len);
+	db_entry_t *e;
+	char *val_copy;
+	size_t idx;
+
+	if (key_len > DB_MAX_KEY_LEN)
+		return -1;
+
+	e = entry_find(tbl, key, key_len, h);
+	if (e) {
+		/* Replace existing */
+		entry_free_value(db, tbl, e);
+		val_copy = db_malloc(db, tbl, val_len + 1);
+		if (!val_copy)
+			return -1;
+		memcpy(val_copy, val, val_len);
+		val_copy[val_len] = '\0';
+		e->type = DB_VAL_STRING;
+		e->val.str.data = val_copy;
+		e->val.str.len = val_len;
+		e->expire_at_ns = 0;
+		return 0;
+	}
+
+	/* Check key limit */
+	if (db->opts.max_keys > 0 && tbl->n_keys >= db->opts.max_keys)
+		return -1;
+
+	/* New entry */
+	e = db_malloc(db, tbl, entry_size(key_len));
+	if (!e)
+		return -1;
+
+	val_copy = db_malloc(db, tbl, val_len + 1);
+	if (!val_copy) {
+		db_free(db, tbl, e, entry_size(key_len));
+		return -1;
+	}
+
+	memcpy(val_copy, val, val_len);
+	val_copy[val_len] = '\0';
+	memcpy(e->key, key, key_len);
+	e->key[key_len] = '\0';
+	e->key_len = key_len;
+	e->hash = h;
+	e->type = DB_VAL_STRING;
+	e->expire_at_ns = 0;
+	e->val.str.data = val_copy;
+	e->val.str.len = val_len;
+
+	idx = h % tbl->n_buckets;
+	e->next = tbl->buckets[idx];
+	tbl->buckets[idx] = e;
+	tbl->n_keys++;
+
+	return 0;
+}
+
 int
 db_set_ex(db_t *db, const char *key, size_t key_len,
           const char *val, size_t val_len, int64_t expire_ns)
@@ -596,7 +715,7 @@ db_set_ex(db_t *db, const char *key, size_t key_len,
 		e->val.str.data = val_copy;
 		e->val.str.len = val_len;
 		e->expire_at_ns = expire_ns;
-		return 0;
+		goto persist;
 	}
 
 	/* Check key limit */
@@ -630,6 +749,13 @@ db_set_ex(db_t *db, const char *key, size_t key_len,
 	tbl->buckets[idx] = e;
 	tbl->n_keys++;
 
+persist:
+	/* Persist to bitcask if enabled.  TTLs are not persisted in v1
+	 * (the entry comes back without expire_at_ns after a restart);
+	 * documented in db.h. */
+	if (db->bc != NULL && expire_ns == 0) {
+		(void)bitcask_put(db->bc, key, key_len, val, val_len);
+	}
 	return 0;
 }
 
@@ -643,6 +769,10 @@ db_del(db_t *db, const char *key, size_t key_len)
 	if (!e)
 		return 0;
 	entry_remove(db, tbl, e);
+
+	if (db->bc != NULL) {
+		(void)bitcask_del(db->bc, key, key_len);
+	}
 	return 1;
 }
 
