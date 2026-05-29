@@ -34,6 +34,8 @@
 #include "xtc_proc.h"
 #include "xtc_res.h"
 
+#include "broker.h"
+
 typedef struct broker_cfg {
 	const char *host;
 	int         port;
@@ -98,9 +100,13 @@ listener_proc(void *arg)
 				continue;
 			break;
 		}
-		/* Phase 0: accept and close.  Phase 1 spawns a conn proc. */
+		/* Spawn a connection proc to service the socket; it parks
+		 * on the fd via xtc_proc_wait_fd, so idle connections cost
+		 * no CPU, and closes the fd on exit. */
 		atomic_fetch_add(&b->conn_count, 1);
-		(void)close(fd);
+		xtc_net_setnonblock(fd);
+		if (broker_spawn_conn(b->loop, fd) != 0)
+			(void)close(fd);
 	}
 }
 
@@ -201,6 +207,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 	b->loop = xtc_app_loop(b->app);
+	broker_set_loop(b->loop);
 
 	memset(kids, 0, sizeof kids);
 	kids[0].name = "listener";
