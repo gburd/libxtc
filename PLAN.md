@@ -3168,6 +3168,22 @@ Tier 0 is done; the rest are tracked here.
 | A11 document mailbox-full XTC_E_AGAIN contract | TODO | senders MUST handle it |
 | A12 per-shard API (xtc_shard_id) | TODO | for shared-nothing consumers |
 
+### sqlxtc next phase (examples/06_sqlxtc)
+
+Design in `docs/M_SQLXTC_GREENFIELD.md` (clean-slate) and
+`docs/M_SQLXTC_HARDFORK.md` (forking the existing engine).
+
+| Step | Status | Scope |
+|------|--------|-------|
+| session-as-proc + pure parser | done | one xtc_proc per connection; Lime pre-parse |
+| SQLite mutex via xtc_lwlock | done | serialized engine behind one lwlock |
+| page cache behind xtc_lrlock | TODO | custom sqlite3_pcache_methods2; no fork needed; proves read concurrency |
+| async VFS via xtc_io | TODO | custom sqlite3_vfs; no fork needed |
+| pager as a proc | TODO | explicit single WAL-writer owner |
+| fine-grained btree locks via xtc_lockmgr | TODO | requires forking the btree (see hard-fork doc) |
+
+---
+
 ### kaka example (examples/07_kaka)
 
 Kafka-shaped log broker; design in `examples/07_kaka/README.md`.
