@@ -203,11 +203,13 @@ __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t)
 		return XTC_OK;        /* already in slow-path FIFO */
 
 	if (loop->exec != NULL) {
-		if (xtc_deque_push(&loop->deque, t) == XTC_OK) {
+		if (!t->pinned &&
+		    xtc_deque_push(&loop->deque, t) == XTC_OK) {
 			t->q_next = NULL;
 			return XTC_OK;
 		}
-		/* deque full -- fall through to slow path */
+		/* pinned, or deque full -- fall through to the owner-only
+		 * FIFO, which is never work-stolen. */
 	}
 
 	t->q_next = NULL;
@@ -250,6 +252,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 	/* 1. Run queue. */
 	if ((t = __queue_pop(loop)) != NULL) {
 		int verdict;
+		atomic_fetch_add_explicit(&loop->n_tasks_run, 1,
+		    memory_order_relaxed);
 		t->state = XTC_TS_RUNNING;
 		verdict = t->fn(t, t->user);
 		switch (verdict) {
@@ -314,6 +318,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 			extern void *__xtc_exec_try_steal(xtc_loop_t *me);
 			xtc_task_t *stolen = __xtc_exec_try_steal(loop);
 			if (stolen != NULL) {
+				atomic_fetch_add_explicit(&loop->n_steals, 1,
+				    memory_order_relaxed);
 				stolen->q_next = NULL;
 				(void)__xtc_loop_enqueue(loop, stolen);
 				return XTC_OK;
@@ -389,6 +395,8 @@ __xtc_loop_step_once(xtc_loop_t *loop)
 			extern void *__xtc_exec_try_steal(xtc_loop_t *me);
 			xtc_task_t *stolen = __xtc_exec_try_steal(loop);
 			if (stolen != NULL) {
+				atomic_fetch_add_explicit(&loop->n_steals, 1,
+				    memory_order_relaxed);
 				stolen->q_next = NULL;
 				(void)__xtc_loop_enqueue(loop, stolen);
 			} else {

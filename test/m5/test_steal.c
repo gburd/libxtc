@@ -73,7 +73,10 @@ test_no_loss_no_double_run(const MunitParameter p[], void *d)
 
 	for (i = 0; i < ST_N_TASKS; i++) {
 		xtc_task_t *t;
-		munit_assert_int(xtc_exec_spawn_on(e, 0,
+		/* Unpinned raw tasks on loop 0's stealable deque, so the
+		 * no-loss / no-double-run invariants are tested under
+		 * actual work stealing (xtc_exec_spawn_on now pins). */
+		munit_assert_int(xtc_task_spawn(xtc_exec_loop(e, 0),
 		    worker, (void *)(intptr_t)i, &t),
 		    ==, XTC_OK);
 	}
@@ -133,7 +136,9 @@ test_steals_happen(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_init(&e, ST_N_LOOPS), ==, XTC_OK);
 	for (i = 0; i < ST_N_TASKS; i++) {
 		xtc_task_t *t;
-		munit_assert_int(xtc_exec_spawn_on(e, 0,
+		/* Unpinned raw tasks piled on loop 0 so idle peers must
+		 * steal to distribute them. */
+		munit_assert_int(xtc_task_spawn(xtc_exec_loop(e, 0),
 		    fair_worker, (void *)(intptr_t)i, &t), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
@@ -151,6 +156,23 @@ test_steals_happen(const MunitParameter p[], void *d)
 	}
 	/* Broken stealing -> everything runs on loop 0 -> n_distinct==1. */
 	munit_assert_int(n_distinct, >=, 2);
+
+	/* The per-loop work stats should corroborate: at least one loop
+	 * other than 0 recorded steals, and the tasks_run counts cover
+	 * the whole batch. */
+	{
+		xtc_loop_stats_t ls;
+		uint64_t total_run = 0, total_steals = 0;
+		int k;
+		for (k = 0; k < ST_N_LOOPS; k++) {
+			munit_assert_int(xtc_exec_loop_stats(e, k, &ls),
+			    ==, XTC_OK);
+			total_run += ls.tasks_run;
+			total_steals += ls.steals;
+		}
+		munit_assert_uint64(total_run, >=, (uint64_t)ST_N_TASKS);
+		munit_assert_uint64(total_steals, >=, 1);
+	}
 
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	return MUNIT_OK;

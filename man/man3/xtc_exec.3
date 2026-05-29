@@ -10,6 +10,7 @@
 .Nm xtc_exec_stop ,
 .Nm xtc_exec_n_loops ,
 .Nm xtc_exec_loop ,
+.Nm xtc_exec_loop_stats ,
 .Nm xtc_exec_loop_id ,
 .Nm xtc_exec_spawn ,
 .Nm xtc_exec_spawn_on ,
@@ -30,6 +31,8 @@
 .Fn xtc_exec_n_loops "xtc_exec_t *exec"
 .Ft "xtc_loop_t *"
 .Fn xtc_exec_loop "xtc_exec_t *exec" "int idx"
+.Ft int
+.Fn xtc_exec_loop_stats "xtc_exec_t *exec" "int idx" "xtc_loop_stats_t *out"
 .Ft int
 .Fn xtc_exec_loop_id "void"
 .Ft int
@@ -104,6 +107,25 @@ most one re-queue per yielded run.
 returns the executor index of the loop the calling task is running
 on, or -1 from a thread that is not a worker.  Tests use this to
 verify spawn placement and steal behaviour.
+.Pp
+.Fn xtc_exec_loop_stats
+fills
+.Fa out
+with loop
+.Fa idx Ns 's
+work counters:
+.Va tasks_run
+(task steps executed on that loop) and
+.Va steals
+(tasks that loop stole from a peer).
+The values are lock-free snapshots, for load-balance and
+tail-latency diagnosis.
+Note that explicitly placed work
+.Pq Fn xtc_exec_spawn_on
+and processes are pinned to their loop and are never stolen; only
+the unpinned general task pool
+.Pq Fn xtc_exec_spawn
+migrates.
 .Sh RETURN VALUES
 .Dv XTC_OK
 on success;
