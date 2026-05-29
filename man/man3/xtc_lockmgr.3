@@ -52,9 +52,8 @@ byte strings.
 Nine lock modes via the BDB
 .Sq read-intent-write
 matrix
-.Po Dv XTC_LOCK_NL , XTC_LOCK_S , XTC_LOCK_X , XTC_LOCK_WAIT ,
-XTC_LOCK_IS , XTC_LOCK_IX , XTC_LOCK_IWR , XTC_LOCK_RU ,
-XTC_LOCK_WW Pc ,
+(XTC_LOCK_NL, XTC_LOCK_S, XTC_LOCK_X, XTC_LOCK_WAIT,
+XTC_LOCK_IS, XTC_LOCK_IX, XTC_LOCK_IWR, XTC_LOCK_RU, XTC_LOCK_WW),
 or a caller-supplied conflict matrix.
 .It
 Deadlock detection in two flavours:
@@ -65,8 +64,8 @@ mode runs synchronously every time a
 requestor would block.
 .It
 Eight victim policies
-.Po Dv XTC_LOCK_VICTIM_RANDOM , OLDEST , YOUNGEST , MIN_LOCKS ,
-MAX_LOCKS , MIN_WRITE , MAX_WRITE , EXPIRE Pc
+(XTC_LOCK_VICTIM_RANDOM, OLDEST, YOUNGEST, MIN_LOCKS,
+MAX_LOCKS, MIN_WRITE, MAX_WRITE, EXPIRE)
 plus
 .Dv XTC_LOCK_VICTIM_CUSTOM
 which delegates to a caller-supplied callback.
