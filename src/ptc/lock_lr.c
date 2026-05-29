@@ -48,26 +48,89 @@
 #  include <sys/mman.h>
 #endif
 #include <unistd.h>
-/* ---- per-process global slot allocator ---- */
+/* ---- per-process global slot allocator ----
+ *
+ * Reader slots are a finite per-process resource (cap
+ * XTC_LRLOCK_MAX_GLOBAL_SLOTS).  Each thread that ever opens an
+ * lrlock read acquires one slot, cached in a __thread variable.
+ *
+ * Slots MUST be reclaimed on thread exit, or a process that recycles
+ * worker threads exhausts the counter; once exhausted, __slot_for
+ * returns -1, read_begin can no longer announce an epoch, and a
+ * reader that still dereferences the buffer races the COW writer's
+ * MADV_FREE -- a use-after-free.  To prevent that, a pthread_key
+ * destructor returns the slot to a free list on thread exit, and
+ * __slot_for prefers the free list before bumping the counter.
+ *
+ * The free list is guarded by a mutex.  Slot acquire/release happens
+ * at most once per thread lifetime, so this is not a hot path and the
+ * mutex cost is irrelevant.
+ */
 
 #define XTC_LRLOCK_MAX_GLOBAL_SLOTS  4096
 
-static _Atomic int  __global_slot_counter = 0;
-static __thread int __my_global_slot = -1;
+static _Atomic int     __global_slot_counter = 0;
+static __thread int    __my_global_slot = -1;
+
+static pthread_mutex_t __slot_free_lock = PTHREAD_MUTEX_INITIALIZER;
+static int             __slot_free_list[XTC_LRLOCK_MAX_GLOBAL_SLOTS];
+static int             __slot_free_n = 0;
+
+static pthread_key_t   __slot_key;
+static pthread_once_t  __slot_key_once = PTHREAD_ONCE_INIT;
+
+static void
+__slot_release(void *unused)
+{
+	(void)unused;
+	if (__my_global_slot < 0) return;
+	(void)pthread_mutex_lock(&__slot_free_lock);
+	if (__slot_free_n < XTC_LRLOCK_MAX_GLOBAL_SLOTS)
+		__slot_free_list[__slot_free_n++] = __my_global_slot;
+	(void)pthread_mutex_unlock(&__slot_free_lock);
+	__my_global_slot = -1;
+}
+
+static void
+__slot_key_init(void)
+{
+	(void)pthread_key_create(&__slot_key, __slot_release);
+}
 
 static int
 __slot_for(xtc_lrlock_t *lr)
 {
 	(void)lr;
 	if (__my_global_slot < 0) {
-		int s = atomic_fetch_add_explicit(&__global_slot_counter, 1,
-		    memory_order_relaxed);
-		if (s >= XTC_LRLOCK_MAX_GLOBAL_SLOTS) {
-			/* Hard cap.  Caller must have spawned more threads than
-			 * any one lock's max_readers can accommodate. */
-			return -1;
+		int s = -1;
+		(void)pthread_once(&__slot_key_once, __slot_key_init);
+
+		/* Prefer a reclaimed slot. */
+		(void)pthread_mutex_lock(&__slot_free_lock);
+		if (__slot_free_n > 0)
+			s = __slot_free_list[--__slot_free_n];
+		(void)pthread_mutex_unlock(&__slot_free_lock);
+
+		if (s < 0) {
+			s = atomic_fetch_add_explicit(&__global_slot_counter, 1,
+			    memory_order_relaxed);
+			if (s >= XTC_LRLOCK_MAX_GLOBAL_SLOTS) {
+				/* Hard cap: more concurrently-live reader
+				 * threads than the process supports.  Undo
+				 * the bump so the counter does not run away,
+				 * and fail closed -- callers must treat a
+				 * negative slot as "cannot read safely". */
+				(void)atomic_fetch_sub_explicit(
+				    &__global_slot_counter, 1,
+				    memory_order_relaxed);
+				return -1;
+			}
 		}
+		/* Register for thread-exit reclamation (value is a
+		 * non-NULL sentinel; the destructor reads the __thread
+		 * slot directly). */
 		__my_global_slot = s;
+		(void)pthread_setspecific(__slot_key, (void *)1);
 	}
 	return __my_global_slot;
 }

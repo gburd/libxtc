@@ -230,6 +230,12 @@ xtc_svr_call(xtc_pid_t target, const void *req, size_t req_size,
              void **out_reply, size_t *out_size, int64_t timeout_ns)
 {
 	if (req_size > 0 && req == NULL) return XTC_E_INVAL;
+	/* Guard against size_t overflow in the framed-message size.
+	 * Every path below computes msg_size = header + req_size; a
+	 * req_size near SIZE_MAX would wrap to a small allocation and
+	 * the subsequent memcpy would overflow the heap.  The largest
+	 * header used below is 14 bytes; reject with margin. */
+	if (req_size > SIZE_MAX - 64) return XTC_E_INVAL;
 	if (out_reply == NULL || out_size == NULL) return XTC_E_INVAL;
 
 	/* Route based on whether we're a proc or a plain thread.  In-proc
@@ -320,6 +326,8 @@ xtc_svr_cast(xtc_pid_t target, const void *msg, size_t size)
 	uint8_t *buf;
 	int rc;
 	if (size > 0 && msg == NULL) return XTC_E_INVAL;
+	/* Overflow guard: size + 1 must not wrap (see xtc_svr_call). */
+	if (size > SIZE_MAX - 1) return XTC_E_INVAL;
 	buf = malloc(size + 1);
 	if (buf == NULL) return XTC_E_NOMEM;
 	buf[0] = 'X';
