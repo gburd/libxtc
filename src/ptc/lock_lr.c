@@ -201,7 +201,7 @@ __snapshot_epochs(xtc_lrlock_t *lr)
 		memset(&lr->last_seen_epochs[base], 0, (size_t)nbits * sizeof(uint32_t));
 		word = atomic_load_explicit(&lr->active_mask[w], memory_order_acquire);
 		while (word != 0) {
-			int bit = __builtin_ctzll(word);
+			int bit = XTC_CTZLL(word);
 			int i   = base + bit;
 			lr->last_seen_epochs[i] = atomic_load_explicit(
 			    &lr->epochs[i].epoch, memory_order_acquire);

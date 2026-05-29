@@ -3102,7 +3102,55 @@ for PG.
 
 ---
 
-## 21. What I want from you before we start coding
+## 21. Active build-matrix work items
+
+The build-and-test matrix as it stands today.  Items marked `WIP`
+are in progress; `BLOCKED` items list their gating dependency.
+
+### Operating systems
+
+| OS              | Status      | Notes |
+|-----------------|-------------|-------|
+| Linux glibc     | full pass   | Reference target.  279 munit + 23 PBT + 22 shell |
+| Linux musl      | OS layer    | libxtc.a builds; coro_uctx absent (musl drops ucontext); needs coro_fctx.c substrate |
+| FreeBSD 15      | full pass   | Verified through M13c (last full run; re-verify after recent changes) |
+| illumos         | partial     | OpenSSL link drift in last attempt; pin to `--with-tls=none` to retest |
+| macOS           | not yet     | Awaiting host; KVM runbook in `docs/M_MACOS_KVM.md` |
+| AIX             | not yet     | Awaiting host; KVM runbook in `docs/M_AIX_KVM.md` |
+
+### Windows toolchains (santorini host)
+
+Full writeup in `docs/M_WINDOWS_MATRIX.md`.
+
+| Toolchain       | Status      | Pass count        | Gating |
+|-----------------|-------------|-------------------|--------|
+| MinGW64 gcc 16.1.0 | full pass | ~233 munit / 50 binaries | -- |
+| Clang64 22.1.4  | partial     | 48/48 of binaries that link; 3 don't compile (POSIX-only) | Port test_net_udp / test_proc_wait_fd / test_slab_shm to Win32 |
+| MSVC cl 14.44   | BLOCKED     | --                | Asm port: fctx_x86_64_*.S -> MASM equivalents (~1-2 days); meson.build expansion to all source files; clang-cl as a stepping-stone driver works through the same path |
+
+### TLS backends
+
+Full writeup in `docs/M_TLS_MATRIX.md`.
+
+| Backend            | Status      | Notes |
+|--------------------|-------------|-------|
+| OpenSSL 3.0.10     | full pass   | 16/16 |
+| LibreSSL 4.2.1     | partial     | Builds clean against OpenSSL backend; tls_basic + tls_server pass (14/16); tls_client handshake fails -- LibreSSL 4.x cipher policy interaction in non-blocking poll loop, deferred |
+| GnuTLS / mbedTLS / wolfSSL | not yet | Each requires a separate `tls_<backend>.c` (~1 person-day each) |
+
+### libc matrix
+
+Full writeup in `docs/M_LIBC_MATRIX.md`.
+
+| libc       | Status      |
+|------------|-------------|
+| glibc 2.40 | full pass   |
+| musl 1.2.5 | OS layer; needs coro_fctx.c |
+| MSVC UCRT  | rolled into Windows matrix above |
+
+---
+
+## 22. What I want from you before we start coding
 
 1. Sign off (or push back) on **Q1-Q16** in (S)10.  Defaults given.
 2. Confirm the **layer renames** (`evt`, `ptc`, `orc`) and the
