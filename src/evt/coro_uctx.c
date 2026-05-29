@@ -19,8 +19,18 @@
 #include "xtc_int.h"
 
 /* Windows uses a separate fiber implementation in src/evt/coro_winfiber.c.
- * This file is the POSIX (ucontext-based) substrate. */
-#if defined(_WIN32)
+ * This file is the POSIX (ucontext-based) substrate.
+ *
+ * On musl libc, swapcontext / getcontext / makecontext are deliberately
+ * omitted (the musl maintainers consider the ucontext API obsolete).
+ * On such systems XTC_HAVE_UCONTEXT is left undefined by configure and
+ * this translation unit becomes empty.  A future commit will provide a
+ * coro_fctx.c substrate built on the make_fcontext / jump_fcontext
+ * assembly that already ships with xtc; until that lands, builds
+ * targeting musl must either accept that higher-layer tests don't link
+ * (the OS layer alone still builds and tests cleanly) or use a glibc
+ * toolchain. */
+#if defined(_WIN32) || !defined(XTC_HAVE_UCONTEXT)
 typedef int __xtc_coro_uctx_unused;
 #else
 

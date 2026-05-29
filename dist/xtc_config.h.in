@@ -56,6 +56,9 @@
 /* hegel-c property tests enabled */
 #undef XTC_HAVE_HEGEL
 
+/* Define to 1 if swapcontext / getcontext / makecontext are available */
+#undef XTC_HAVE_UCONTEXT
+
 /* AIX pollset backend (stub) */
 #undef XTC_IO_BACKEND_AIX
 
@@ -80,7 +83,7 @@
 /* Linux io_uring backend */
 #undef XTC_IO_BACKEND_URING
 
-/* Define to 1 to use the OpenSSL TLS backend */
+/* Define to 1 to use the OpenSSL/LibreSSL TLS backend */
 #undef XTC_TLS_BACKEND_OPENSSL
 
 /* SemVer major */
