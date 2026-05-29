@@ -3148,6 +3148,39 @@ Full writeup in `docs/M_LIBC_MATRIX.md`.
 | musl 1.2.5 | OS layer; needs coro_fctx.c |
 | MSVC UCRT  | rolled into Windows matrix above |
 
+### Critical-review action items
+
+From `docs/M_CRITICAL_REVIEW.md` (deep review against project claims).
+Tier 0 is done; the rest are tracked here.
+
+| Item | Status | Note |
+|------|--------|------|
+| A1 lrlock slot-exhaustion UAF | done | pthread_key reclamation + free list; lrlock_thread_churn regression test |
+| A2 send-path integer overflow guards | done | xtc_send / xtc_svr_call / xtc_svr_cast / xtc_mctx_alloc |
+| A3 standing security sweep | done | test/security/test_alloc_overflow_sweep.sh in make check |
+| A4 real build/test CI (not just pages) | TODO | model on lime ci.yml; until then soften README CI claim |
+| A5 reconcile README platform claim with reality | TODO | Linux/FreeBSD/Windows verified; macOS/illumos in progress |
+| A6 hot-path allocation claim vs xtc_send malloc | TODO | add small-message envelope pool, or soften the claim |
+| A7 regression tests (idle-CPU, sup restart-intensity, work-steal fairness) | partial | lrlock churn done; others TODO |
+| A8 thread xtc_abort_source through xtc_svr_call | TODO | cancellation must reach every await point |
+| A9 Bitcask compaction/merge | TODO | or relabel Bitcask explicitly as a demo |
+| A10 re-audit M17 conformance for fair comparisons | partial | W4 parking_lot done; rest TODO |
+| A11 document mailbox-full XTC_E_AGAIN contract | TODO | senders MUST handle it |
+| A12 per-shard API (xtc_shard_id) | TODO | for shared-nothing consumers |
+
+### kaka example (examples/07_kaka)
+
+Kafka-shaped log broker; design in `examples/07_kaka/README.md`.
+
+| Phase | Status | Scope |
+|-------|--------|-------|
+| 0 scaffold | done | app + supervised listener, accept/close, idle-park via xtc_proc_wait_fd |
+| 1 protocol + in-memory partition | TODO | framing codec + PRODUCE/FETCH/METADATA, one partition proc |
+| 2 segmented persistence | TODO | Bitcask-framed segments + offset index + recovery |
+| 3 credit-based backpressure | TODO | producer credits, park-on-exhaustion, bounded broker RSS |
+| 4 consumer groups | TODO | xtc_lockmgr group state + Bitcask offset commits |
+| 5 observability + budgets + docs | TODO | xtc_stats, xtc_res, metrics test |
+
 ---
 
 ## 22. What I want from you before we start coding
