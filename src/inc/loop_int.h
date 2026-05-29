@@ -60,6 +60,14 @@ struct xtc_task {
 
 	/* Linked into loop->all_tasks for cleanup at loop_fini. */
 	struct xtc_task *all_next;
+
+	/* Optional cleanup hook invoked by xtc_loop_fini before the task
+	 * struct is freed.  The coroutine layer sets this to release the
+	 * fiber stack + coro struct that wrap a task; plain tasks leave
+	 * it NULL.  Keeps task lifetime owned by the loop while letting
+	 * higher layers reclaim what they attached. */
+	void       (*cleanup)(void *cleanup_arg);
+	void        *cleanup_arg;
 };
 
 /*

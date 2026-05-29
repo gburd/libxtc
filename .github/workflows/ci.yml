@@ -1,0 +1,80 @@
+name: CI
+
+# Mirror of the Codeberg CI for the GitHub mirror.  Builds libxtc and
+# runs the full test suite across gcc + clang plus ASan/UBSan.  See
+# .forgejo/workflows/ci.yml for the canonical version and the notes
+# on why autotools (not meson) is the path under test.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ${{ matrix.compiler }} make autoconf automake \
+            pkg-config libssl-dev liburing-dev gawk
+
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+
+      - name: Configure
+        run: |
+          mkdir -p build_ci
+          cd build_ci
+          CC=${{ matrix.compiler }} ../dist/configure --with-tls=auto
+
+      - name: Build
+        run: make -C build_ci -j"$(nproc)"
+
+      - name: Test
+        run: make -C build_ci check
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make autoconf pkg-config libssl-dev liburing-dev gawk
+
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+
+      - name: Configure with ${{ matrix.sanitizer }} sanitizer
+        run: |
+          mkdir -p build_san
+          cd build_san
+          CFLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g -O1" \
+          LDFLAGS="-fsanitize=${{ matrix.sanitizer }}" \
+            ../dist/configure --with-tls=auto
+
+      - name: Build
+        run: make -C build_san -j"$(nproc)"
+
+      - name: Test under sanitizer
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: make -C build_san check
