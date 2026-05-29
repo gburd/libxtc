@@ -96,7 +96,7 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 		__os_free(c);
 		return XTC_E_INTERNAL;
 	}
-	if ((rc = xtc_task_spawn(loop, __xtc_coro_step, c, &t)) != XTC_OK) {
+	if ((rc = __xtc_task_spawn_ex(loop, __xtc_coro_step, c, 1, &t)) != XTC_OK) {
 		__coro_destroy(c);
 		return rc;
 	}

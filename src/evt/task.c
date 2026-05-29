@@ -17,8 +17,8 @@
  * PUBLIC: int xtc_task_spawn __P((xtc_loop_t *, xtc_task_fn, void *, xtc_task_t **));
  */
 int
-xtc_task_spawn(xtc_loop_t *loop, xtc_task_fn fn, void *user,
-               xtc_task_t **out_task)
+__xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
+                    int pinned, xtc_task_t **out_task)
 {
 	xtc_task_t *t;
 	int rc;
@@ -41,6 +41,7 @@ xtc_task_spawn(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 	t->fn = fn;
 	t->user = user;
 	t->loop = loop;
+	t->pinned = pinned;
 	t->state = XTC_TS_SCHEDULED;
 	t->q_next = NULL;
 	t->park_timer = NULL;
@@ -82,6 +83,14 @@ xtc_task_spawn(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 	}
 	(void)xtc_io_wakeup(loop->io);
 	return XTC_OK;
+}
+
+int
+xtc_task_spawn(xtc_loop_t *loop, xtc_task_fn fn, void *user,
+               xtc_task_t **out_task)
+{
+	/* Public entry: unpinned (stealable in executor mode). */
+	return __xtc_task_spawn_ex(loop, fn, user, 0, out_task);
 }
 
 /*

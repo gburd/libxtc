@@ -63,6 +63,27 @@ int  xtc_exec_loop_id(void);
 xtc_loop_t *xtc_exec_loop(xtc_exec_t *exec, int idx);
 
 /*
+ * Per-loop work statistics, for observability and load-balance
+ * diagnosis (e.g. confirming work stealing is distributing under a
+ * tail-latency-sensitive workload).
+ *
+ *   tasks_run -- task steps executed on this loop
+ *   steals    -- tasks this loop successfully stole from a peer
+ *
+ * Reads are lock-free snapshots of relaxed atomics; exactness across
+ * a concurrently running executor is not guaranteed.
+ */
+typedef struct xtc_loop_stats {
+	uint64_t tasks_run;
+	uint64_t steals;
+} xtc_loop_stats_t;
+
+/*
+ * PUBLIC: int  xtc_exec_loop_stats __P((xtc_exec_t *, int, xtc_loop_stats_t *));
+ */
+int  xtc_exec_loop_stats(xtc_exec_t *exec, int idx, xtc_loop_stats_t *out);
+
+/*
  * Spawns.  These are the multi-loop equivalents of xtc_task_spawn /
  * xtc_async; they may be called from any thread.
  */
