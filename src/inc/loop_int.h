@@ -176,7 +176,7 @@ int  __xtc_inbox_drain(xtc_loop_t *loop);  /* owner-only; drains into local queu
 
 /* Per-thread cursor: which loop the calling thread is running.
  * NULL on threads that aren't loop owners. */
-extern __thread xtc_loop_t *__xtc_current_loop;
+extern XTC_THREAD_LOCAL xtc_loop_t *__xtc_current_loop;
 
 /* Forward declaration for back-pointer in xtc_loop. */
 struct xtc_exec;

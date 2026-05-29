@@ -187,7 +187,7 @@ struct xtc_proc_table {
 };
 
 /* Each loop carries one of these (lazy-allocated on first proc spawn). */
-static __thread struct xtc_proc *__current_proc = NULL;
+static XTC_THREAD_LOCAL struct xtc_proc *__current_proc = NULL;
 
 /*
  * The table lives in a side struct hung off xtc_loop->user_data... but
@@ -1069,11 +1069,12 @@ __notify_links_and_monitors(struct xtc_proc *p)
 {
 	struct link_entry *le, *next_le;
 	struct mon_entry  *me, *next_me;
+	XTC_PACK_PUSH
 	struct {
 		uint8_t kind;
 		int     reason;
 		xtc_pid_t pid;
-	} __attribute__((packed)) exit_signal = {
+	} XTC_PACKED exit_signal = {
 		.kind = 'E', .reason = p->exit_reason, .pid = p->pid
 	};
 	struct {
@@ -1081,7 +1082,8 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		uint64_t ref;
 		xtc_pid_t pid;
 		int     reason;
-	} __attribute__((packed)) down_signal;
+	} XTC_PACKED down_signal;
+	XTC_PACK_POP
 
 	for (le = p->links; le != NULL; le = next_le) {
 		next_le = le->next;
