@@ -85,6 +85,17 @@ if the target's mailbox is full and bounded.
 Sending is asynchronous: the send returns immediately whether or
 not the receiver is currently scheduled.
 .Pp
+Mailboxes are bounded by
+.Fa mailbox_cap
+(default 4096) so that a fast sender cannot drive the receiver
+out of memory.
+A caller that ignores an
+.Dv XTC_E_AGAIN
+return silently loses the message.
+Senders therefore MUST handle it: retry later, shed and account the
+load, apply end-to-end flow control, or treat it as fatal on a
+must-deliver path.
+.Pp
 .Fn xtc_recv
 delivers the next message from the calling proc's mailbox in
 arrival order.  If the mailbox is empty,
