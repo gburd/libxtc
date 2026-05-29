@@ -309,6 +309,21 @@ xtc_exec_loop(xtc_exec_t *e, int idx)
 	return e->loops[idx];
 }
 
+/* PUBLIC: int xtc_exec_loop_stats __P((xtc_exec_t *, int, xtc_loop_stats_t *)); */
+int
+xtc_exec_loop_stats(xtc_exec_t *e, int idx, xtc_loop_stats_t *out)
+{
+	xtc_loop_t *l;
+	if (e == NULL || out == NULL || idx < 0 || idx >= e->n_loops)
+		return XTC_E_INVAL;
+	l = e->loops[idx];
+	out->tasks_run = atomic_load_explicit(&l->n_tasks_run,
+	    memory_order_relaxed);
+	out->steals = atomic_load_explicit(&l->n_steals,
+	    memory_order_relaxed);
+	return XTC_OK;
+}
+
 /* --- spawn/async helpers ------------------------------------------- */
 
 static int
@@ -335,7 +350,7 @@ xtc_exec_spawn_on(xtc_exec_t *e, int idx, xtc_task_fn fn, void *user,
 {
 	if (e == NULL) return XTC_E_INVAL;
 	if (idx < 0 || idx >= e->n_loops) return XTC_E_INVAL;
-	return xtc_task_spawn(e->loops[idx], fn, user, out);
+	return __xtc_task_spawn_ex(e->loops[idx], fn, user, 1, out);
 }
 
 /* PUBLIC: int xtc_exec_async __P((xtc_exec_t *, xtc_coro_fn, void *, xtc_task_t **)); */

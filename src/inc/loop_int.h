@@ -42,6 +42,12 @@ struct xtc_task {
 	void        *user;
 	xtc_loop_t  *loop;
 	int          state;
+	/* Pinned tasks run only on their home loop -- they go on the
+	 * owner-only FIFO, never the stealable deque.  Used for explicit
+	 * placement (xtc_exec_spawn_on) and for processes, which keep a
+	 * shard-style affinity to one loop.  Unpinned tasks (the general
+	 * pool) go on the Chase-Lev deque and may be work-stolen. */
+	int          pinned;
 	/* Run-queue intrusive next pointer. */
 	struct xtc_task *q_next;
 
@@ -142,6 +148,14 @@ struct xtc_loop {
 	 * can update it without lock. */
 	_Atomic int n_alive;
 
+	/* Per-loop work statistics (executor observability).  tasks_run
+	 * counts task steps executed on this loop; steals counts tasks
+	 * this loop successfully stole from a peer.  Relaxed atomics:
+	 * read-mostly counters, exactness across a concurrent read is
+	 * not required. */
+	_Atomic uint64_t n_tasks_run;
+	_Atomic uint64_t n_steals;
+
 	int stop_requested;
 
 	/* Cross-thread inbox: wakers and remote spawns deposit here;
@@ -166,6 +180,10 @@ struct xtc_loop {
 
 /* Internal helpers shared between loop.c, task.c, timer.c. */
 int  __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t);
+/* Spawn with explicit pinned-ness: pinned tasks stay on `loop` (FIFO,
+ * never work-stolen); unpinned tasks may migrate via the deque. */
+int  __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
+                         int pinned, xtc_task_t **out_task);
 int  __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t);
 xtc_timer_t *__xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns);
 int64_t      __xtc_timer_heap_next_deadline(xtc_loop_t *loop);

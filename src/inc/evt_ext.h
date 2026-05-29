@@ -11,6 +11,7 @@ int xtc_exec_async_on __P((xtc_exec_t *, int, xtc_coro_fn, void *, xtc_task_t **
 int xtc_exec_fini __P((xtc_exec_t *));
 int xtc_exec_init __P((xtc_exec_t **, int));
 int xtc_exec_loop_id __P((void));
+int xtc_exec_loop_stats __P((xtc_exec_t *, int, xtc_loop_stats_t *));
 int xtc_exec_n_loops __P((xtc_exec_t *));
 int xtc_exec_run __P((xtc_exec_t *));
 int xtc_exec_spawn __P((xtc_exec_t *, xtc_task_fn, void *, xtc_task_t **));
