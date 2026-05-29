@@ -67,6 +67,7 @@ typedef struct server_cfg {
 	int64_t     max_iops;
 	int64_t     max_net_mbps;
 	int         verbose;
+	const char *persist_dir;
 } server_cfg_t;
 
 #define SERVER_CFG_DEFAULT { \
@@ -78,7 +79,8 @@ typedef struct server_cfg {
 	.max_clients = 10000, \
 	.max_iops = 0, \
 	.max_net_mbps = 0, \
-	.verbose = 0 \
+	.verbose = 0, \
+	.persist_dir = NULL \
 }
 
 /* ----- Server state ----- */
@@ -289,6 +291,7 @@ usage(const char *prog)
 	    "  -k, --max-keys=N      Key count cap (0 = unlimited)\n"
 	    "  -n, --max-clients=N   Max connections (default: 10000)\n"
 	    "  -i, --max-iops=N      Rate limit commands/sec (0 = unlimited)\n"
+	    "      --persist=DIR     Enable Bitcask persistence in DIR (string SET/DEL only)\n"
 	    "  -v, --verbose         Verbose logging\n"
 	    "  --help                Show this help\n"
 	    "\n"
@@ -313,6 +316,7 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		{ "max-keys",    required_argument, NULL, 'k' },
 		{ "max-clients", required_argument, NULL, 'n' },
 		{ "max-iops",    required_argument, NULL, 'i' },
+		{ "persist",     required_argument, NULL, 'P' },
 		{ "verbose",     no_argument,       NULL, 'v' },
 		{ "help",        no_argument,       NULL, '?' },
 		{ NULL, 0, NULL, 0 }
@@ -321,7 +325,7 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 
 	*cfg = (server_cfg_t)SERVER_CFG_DEFAULT;
 
-	while ((c = getopt_long(argc, argv, "h:p:c:m:k:n:i:v", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "h:p:c:m:k:n:i:P:v", longopts, NULL)) != -1) {
 		switch (c) {
 		case 'h':
 			cfg->host = optarg;
@@ -343,6 +347,9 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 			break;
 		case 'i':
 			cfg->max_iops = atoll(optarg);
+			break;
+		case 'P':
+			cfg->persist_dir = optarg;
 			break;
 		case 'v':
 			cfg->verbose = 1;
@@ -425,9 +432,14 @@ main(int argc, char **argv)
 	db_opts.max_keys = cfg.max_keys;
 	db_opts.max_mem_bytes = cfg.max_memory;
 	db_opts.res = srv->res;
+	db_opts.persist_dir = cfg.persist_dir;
 	if (db_create(&db_opts, &srv->db) != XTC_OK) {
 		fprintf(stderr, "failed to create database\n");
 		return 1;
+	}
+	if (cfg.persist_dir != NULL) {
+		fprintf(stderr, "rexis: persistence enabled at %s\n",
+		    cfg.persist_dir);
 	}
 
 	/* Setup listening socket */

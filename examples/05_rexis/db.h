@@ -76,13 +76,19 @@ typedef struct db_opts {
 	size_t       max_keys;         /* 0 = unlimited */
 	int64_t      max_mem_bytes;    /* 0 = unlimited */
 	xtc_res_t   *res;              /* optional resource accountant */
+	const char  *persist_dir;      /* if non-NULL, enable Bitcask
+	                                * persistence in this directory.
+	                                * v1: only string SET/DEL are
+	                                * logged.  Other types remain
+	                                * memory-only. */
 } db_opts_t;
 
 #define DB_OPTS_DEFAULT { \
 	.n_buckets     = 65536, \
 	.max_keys      = 0, \
 	.max_mem_bytes = 0, \
-	.res           = NULL \
+	.res           = NULL, \
+	.persist_dir   = NULL \
 }
 
 /* Operation codes for xtc_lrlock apply_op */
