@@ -13,6 +13,14 @@
 
 #include "cmd.h"
 #include "xtc_int.h"
+#include "xtc_stats.h"
+
+/* Per-command instrumentation.  Defined in metrics.c, set NULL if
+ * stats registration failed; cmd_execute null-checks before use so
+ * the example also runs in environments without a registry. */
+extern xtc_counter_t *rexis_stat_cmd_total;
+extern xtc_counter_t *rexis_stat_unknown_cmd;
+extern xtc_hist_t    *rexis_stat_cmd_latency;
 
 /* Local helper: xtc __os_clock_mono uses out-param style. */
 static inline int64_t xtc_now_ns(void) {
@@ -570,9 +578,19 @@ cmd_info(cmd_ctx_t *ctx)
 	char buf[2048];
 	int n;
 	size_t keys, mem;
+	long long cmd_total = 0, cmd_p50 = 0, cmd_p99 = 0;
 
 	keys = db_key_count(ctx->db);
 	mem = db_mem_used(ctx->db);
+
+	/* Pull command stats from the xtc_stats objects metrics.c owns.
+	 * These are the same counters cmd_execute records into. */
+	if (rexis_stat_cmd_total != NULL)
+		cmd_total = (long long)xtc_counter_read(rexis_stat_cmd_total);
+	if (rexis_stat_cmd_latency != NULL) {
+		cmd_p50 = (long long)xtc_hist_quantile(rexis_stat_cmd_latency, 0.50);
+		cmd_p99 = (long long)xtc_hist_quantile(rexis_stat_cmd_latency, 0.99);
+	}
 
 	n = snprintf(buf, sizeof buf,
 	    "# Server\r\n"
@@ -581,9 +599,13 @@ cmd_info(cmd_ctx_t *ctx)
 	    "# Clients\r\n"
 	    "# Memory\r\n"
 	    "used_memory:%zu\r\n"
+	    "# Commandstats\r\n"
+	    "cmd_total:%lld\r\n"
+	    "cmd_latency_p50_ns:%lld\r\n"
+	    "cmd_latency_p99_ns:%lld\r\n"
 	    "# Keyspace\r\n"
 	    "db0:keys=%zu,expires=0\r\n",
-	    mem, keys);
+	    mem, cmd_total, cmd_p50, cmd_p99, keys);
 
 	(void)ctx;
 	resp_write_bulk(ctx->out, buf, (size_t)n);
@@ -700,6 +722,8 @@ cmd_execute(cmd_ctx_t *ctx)
 	const cmd_entry_t *e;
 	const char *name;
 	size_t len;
+	int64_t t0;
+	int rc;
 
 	if (ctx->argc < 1) {
 		resp_write_error(ctx->out, "empty command");
@@ -714,6 +738,8 @@ cmd_execute(cmd_ctx_t *ctx)
 		char err[128];
 		snprintf(err, sizeof err, "unknown command '%.64s'", name);
 		resp_write_error(ctx->out, err);
+		if (rexis_stat_unknown_cmd != NULL)
+			xtc_counter_inc(rexis_stat_unknown_cmd);
 		return -1;
 	}
 
@@ -726,7 +752,13 @@ cmd_execute(cmd_ctx_t *ctx)
 		return -1;
 	}
 
-	return e->handler(ctx);
+	t0 = xtc_now_ns();
+	rc = e->handler(ctx);
+	if (rexis_stat_cmd_total != NULL)
+		xtc_counter_inc(rexis_stat_cmd_total);
+	if (rexis_stat_cmd_latency != NULL)
+		xtc_hist_record(rexis_stat_cmd_latency, xtc_now_ns() - t0);
+	return rc;
 }
 
 int
