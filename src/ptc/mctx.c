@@ -195,6 +195,8 @@ xtc_mctx_alloc(xtc_mctx_t *m, size_t size)
 {
 	struct chunk *c;
 	if (m == NULL) return NULL;
+	/* Overflow guard: CHUNK_HDR_SIZE + size must not wrap. */
+	if (size > SIZE_MAX - CHUNK_HDR_SIZE) return NULL;
 	c = malloc(CHUNK_HDR_SIZE + size);
 	if (c == NULL) return NULL;
 	c->owner = m;
