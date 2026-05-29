@@ -43,12 +43,26 @@ struct mon_entry  { struct mon_entry *next; uint64_t ref; xtc_pid_t target; xtc_
 /* M11.5b: pools for link_entry / mon_entry (fixed-size, hot path). */
 static xtc_slab_t      *__link_slab     = NULL;
 static xtc_slab_t      *__mon_slab      = NULL;
+static xtc_slab_t      *__env_slab      = NULL;
 static pthread_mutex_t  __proc_slab_init_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * Small-message envelope pool.  Message passing is the actor hot
+ * path; allocating every envelope with malloc puts an allocator
+ * round-trip on every send.  Envelopes whose payload fits in
+ * ENV_POOL_PAYLOAD bytes are served from a fixed-size slab instead
+ * (one magazine pop on the fast path, no global allocator call);
+ * larger payloads fall back to malloc.  The discriminator on free is
+ * the envelope's own size field -- a pooled envelope always has
+ * size <= ENV_POOL_PAYLOAD -- so no per-envelope flag is needed.
+ */
+#define ENV_POOL_PAYLOAD  256
 
 static void
 __proc_slabs_ensure(void)
 {
-	if (__link_slab != NULL && __mon_slab != NULL) return;
+	if (__link_slab != NULL && __mon_slab != NULL && __env_slab != NULL)
+		return;
 	(void)pthread_mutex_lock(&__proc_slab_init_lock);
 	if (__link_slab == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
@@ -60,7 +74,38 @@ __proc_slabs_ensure(void)
 		o.name = "proc.mon"; o.obj_size = sizeof(struct mon_entry);
 		(void)xtc_slab_create(&o, &__mon_slab);
 	}
+	if (__env_slab == NULL) {
+		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		o.name = "proc.env";
+		o.obj_size = sizeof(struct envelope) + ENV_POOL_PAYLOAD;
+		(void)xtc_slab_create(&o, &__env_slab);
+	}
 	(void)pthread_mutex_unlock(&__proc_slab_init_lock);
+}
+
+/* Allocate an envelope for a `size`-byte payload, from the pool when
+ * it fits, else from malloc. */
+static struct envelope *
+__env_alloc(size_t size)
+{
+	if (size <= ENV_POOL_PAYLOAD) {
+		__proc_slabs_ensure();
+		if (XTC_LIKELY(__env_slab != NULL))
+			return xtc_slab_alloc(__env_slab);
+	}
+	return malloc(sizeof(struct envelope) + size);
+}
+
+/* Free an envelope, routing by its payload size (the same predicate
+ * __env_alloc used). */
+static void
+__env_free(struct envelope *e)
+{
+	if (e == NULL) return;
+	if (e->size <= ENV_POOL_PAYLOAD && __env_slab != NULL)
+		xtc_slab_free(__env_slab, e);
+	else
+		free(e);
 }
 
 static struct link_entry *
@@ -366,7 +411,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 	 * differed.  Explicit parens. */
 	if (!p->alive || (p->mbox_cap > 0 && p->mbox_n >= p->mbox_cap)) {
 		(void)pthread_mutex_unlock(&p->mbox_lock);
-		__os_free(e);
+		__env_free(e);
 		return XTC_E_AGAIN;
 	}
 	__mbox_push_locked(p, e);
@@ -545,7 +590,7 @@ xtc_send(xtc_pid_t to, const void *data, size_t size)
 	 * overflow the heap.  Reject before allocating. */
 	if (XTC_UNLIKELY(size > SIZE_MAX - sizeof *e)) return XTC_E_INVAL;
 
-	e = malloc(sizeof *e + size);
+	e = __env_alloc(size);
 	if (XTC_UNLIKELY(e == NULL)) return XTC_E_NOMEM;
 	e->next = NULL;
 	e->from = xtc_self();
@@ -759,7 +804,7 @@ deliver:
 		}
 		*out = buf;
 		*out_size = e->size;
-		__os_free(e);
+		__env_free(e);
 	}
 	return XTC_OK;
 }
@@ -1118,10 +1163,10 @@ __notify_links_and_monitors(struct xtc_proc *p)
 	{
 		struct envelope *e, *n;
 		(void)pthread_mutex_lock(&p->mbox_lock);
-		for (e = p->mbox_head; e != NULL; e = n) { n = e->next; __os_free(e); }
+		for (e = p->mbox_head; e != NULL; e = n) { n = e->next; __env_free(e); }
 		p->mbox_head = p->mbox_tail = NULL;
 		(void)pthread_mutex_unlock(&p->mbox_lock);
-		for (e = p->save_head; e != NULL; e = n) { n = e->next; __os_free(e); }
+		for (e = p->save_head; e != NULL; e = n) { n = e->next; __env_free(e); }
 		p->save_head = p->save_tail = NULL;
 	}
 

@@ -53,10 +53,12 @@ faults, and stay inside a fixed resource budget on commodity hardware.
   host.  See `docs/M_WINDOWS_MATRIX.md`, `docs/M_LIBC_MATRIX.md`,
   and PLAN.md for the current per-platform status.
 
-* **You want to stay close to the metal.**  No GC, no STW pauses, no
-  hidden allocations on the hot path.  Memory comes from
-  cache-line-padded slab caches with optional shared-memory mode
-  (a BDB-style `roff_t` pointer-into-region works across processes).
+* **You want to stay close to the metal.**  No GC, no STW pauses.
+  Memory comes from cache-line-padded slab caches with optional
+  shared-memory mode (a BDB-style `roff_t` pointer-into-region works
+  across processes).  Small messages (payload up to 256 bytes) are
+  served from a per-thread envelope pool, so the common send path
+  takes no allocator round-trip; larger messages fall back to malloc.
   Reads on the read-mostly primitive (`xtc_lrlock`) are wait-free.
 
 ## A 30-second taste
