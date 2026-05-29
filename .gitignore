@@ -80,3 +80,7 @@ build_unix/test_inject_races
 
 # LSP compile database (generated)
 compile_commands.json
+
+# Generated amalgamation
+/amalgamation/
+build_unix/amalgamation/

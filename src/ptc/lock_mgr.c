@@ -154,7 +154,7 @@ __is_write_mode(xtc_lock_mode_t mode)
 }
 
 static int64_t
-__now_ns(void)
+__lockmgr_now_ns(void)
 {
 	int64_t v = 0;
 	(void)__os_clock_mono(&v);
@@ -213,7 +213,7 @@ xtc_lockmgr_id(xtc_lockmgr_t *m, xtc_locker_t *out)
 	if ((rc = __os_calloc(1, sizeof *r, (void **)&r)) != XTC_OK) return rc;
 	r->id = atomic_fetch_add_explicit(&m->next_locker, 1,
 	    memory_order_relaxed) + 1;
-	r->ctime_ns = __now_ns();
+	r->ctime_ns = __lockmgr_now_ns();
 	r->timeout_ns = -1;
 	r->deadline_ns = -1;
 	b = (int)(r->id & 0xff);
@@ -1035,7 +1035,7 @@ xtc_lockmgr_check_deadlocks(xtc_lockmgr_t *m, int *n_aborted)
 	int  *parent;
 	int  i, cycle_in, victim;
 	int  rc, n_killed = 0;
-	int64_t now = __now_ns();
+	int64_t now = __lockmgr_now_ns();
 
 	if (m == NULL) return XTC_E_INVAL;
 	if ((rc = __os_calloc(1, sizeof *st, (void **)&st)) != XTC_OK) return rc;

@@ -62,7 +62,7 @@ struct xtc_log {
 static _Atomic uintptr_t __default_logger;
 
 static int64_t
-__now_ns(void)
+__log_now_ns(void)
 {
 	int64_t ns = 0;
 	(void)__os_clock_mono(&ns);
@@ -178,7 +178,7 @@ xtc_log_vwrite(xtc_log_t *log, xtc_log_level_t lvl,
 	body = (char *)(slot + sizeof *hdr);
 
 	hdr->level = lvl;
-	hdr->ts_ns = __now_ns();
+	hdr->ts_ns = __log_now_ns();
 	n = vsnprintf(body, (size_t)log->opts.record_max, fmt, ap);
 	if (n < 0) n = 0;
 	if (n >= log->opts.record_max) n = log->opts.record_max - 1;
