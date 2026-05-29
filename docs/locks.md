@@ -1,7 +1,3 @@
----
-title: "Locks and synchronization in libxtc"
----
-
 # Locks and synchronization in libxtc
 
 This reference documents every locking and synchronization

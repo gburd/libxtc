@@ -1,7 +1,3 @@
----
-title: "Multi-headed receive patterns: should xtc adopt them?"
----
-
 # Multi-headed receive patterns: should xtc adopt them?
 
 This is a research note evaluating whether xtc_recv should support
