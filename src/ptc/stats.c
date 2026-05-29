@@ -274,7 +274,7 @@ __hist_bucket(int64_t value_ns)
 	if (v >= (1ULL << XTC_HIST_BASE_BITS)) v = (1ULL << XTC_HIST_BASE_BITS) - 1;
 	/* Find highest set bit. */
 #if defined(__GNUC__) || defined(__clang__)
-	base = 63 - __builtin_clzll(v);
+	base = 63 - XTC_CLZLL(v);
 #else
 	base = 0; { uint64_t x = v; while (x >>= 1) base++; }
 #endif
