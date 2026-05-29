@@ -169,7 +169,8 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_cfg.sh \
 	$(abs_top_srcdir)/../test/dist/test_m17_smoke.sh \
-	$(abs_top_srcdir)/../test/security/test_alloc_overflow_sweep.sh
+	$(abs_top_srcdir)/../test/security/test_alloc_overflow_sweep.sh \
+	$(abs_top_srcdir)/../test/dist/test_amalgamation.sh
 
 TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
@@ -212,7 +213,7 @@ TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt
 # -------------------------------------------------------------------------
 # Default goal.
 # -------------------------------------------------------------------------
-.PHONY: all check tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands
+.PHONY: all check tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation
 
 all: $(STATIC_LIB) compile_commands.json
 
@@ -222,6 +223,15 @@ all: $(STATIC_LIB) compile_commands.json
 # in the build directory; symlink it to the source root if your editor
 # expects it there:  ln -sf build_unix/compile_commands.json .
 compile-commands: compile_commands.json
+
+# Single-file amalgamation (xtc.c + xtc.h), SQLite-style.  Generated
+# from the tracked sources + git metadata by dist/mkamalgamation.py.
+# Override the qualifier (e.g. rc1) with: make amalgamation AMALG_QUALIFIER=rc1
+AMALG_QUALIFIER =
+amalgamation:
+	@python3 $(srcdir)/mkamalgamation.py --root $(srcdir)/.. \
+		--out $(abs_builddir)/amalgamation \
+		--qualifier "$(AMALG_QUALIFIER)"
 compile_commands.json: Makefile
 	@echo 'generating compile_commands.json'
 	@printf '[\n' > $@

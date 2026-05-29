@@ -42,7 +42,7 @@ static struct cfg_var *__cfg_head;
 static int             __cfg_count;
 
 static struct cfg_var *
-__find_locked(const char *name)
+__cfg_find_locked(const char *name)
 {
 	struct cfg_var *v;
 	for (v = __cfg_head; v != NULL; v = v->next)
@@ -99,7 +99,7 @@ xtc_cfg_register(const xtc_cfg_spec_t *spec)
 	}
 
 	(void)pthread_mutex_lock(&__cfg_lock);
-	if (__find_locked(spec->name) != NULL) {
+	if (__cfg_find_locked(spec->name) != NULL) {
 		(void)pthread_mutex_unlock(&__cfg_lock);
 		__os_free(v->name); __os_free(v->desc);
 		if (v->cur.v_string) __os_free(v->cur.v_string);
@@ -141,7 +141,7 @@ int xtc_cfg_get_##name_suffix(const char *name, type *out) { \
 	struct cfg_var *v; int rc = XTC_E_INVAL; \
 	if (name == NULL || out == NULL) return XTC_E_INVAL; \
 	(void)pthread_mutex_lock(&__cfg_lock); \
-	v = __find_locked(name); \
+	v = __cfg_find_locked(name); \
 	if (v && v->kind == K) { *out = v->cur.field; rc = XTC_OK; } \
 	(void)pthread_mutex_unlock(&__cfg_lock); \
 	return rc; \
@@ -160,7 +160,7 @@ xtc_cfg_get_string(const char *name, const char **out)
 	int rc = XTC_E_INVAL;
 	if (name == NULL || out == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&__cfg_lock);
-	v = __find_locked(name);
+	v = __cfg_find_locked(name);
 	if (v && v->kind == XTC_CFG_STRING) {
 		*out = v->cur.v_string;
 		rc = XTC_OK;
@@ -176,7 +176,7 @@ int xtc_cfg_set_##name_suffix(const char *name, ctype v) { \
 	xtc_cfg_changed_fn cb = NULL; void *cb_u = NULL; \
 	if (name == NULL) return XTC_E_INVAL; \
 	(void)pthread_mutex_lock(&__cfg_lock); \
-	cv = __find_locked(name); \
+	cv = __cfg_find_locked(name); \
 	if (cv && cv->kind == K) { \
 		if (!bounds_check) { rc = XTC_E_RANGE; goto done; } \
 		if (cv->validator && cv->validator(&new_v, cv->cb_user) != XTC_OK) { \
@@ -213,7 +213,7 @@ xtc_cfg_set_string(const char *name, const char *v)
 	if (name == NULL || v == NULL) return XTC_E_INVAL;
 	if ((rc = __os_strdup(v, &new_copy)) != XTC_OK) return rc;
 	(void)pthread_mutex_lock(&__cfg_lock);
-	cv = __find_locked(name);
+	cv = __cfg_find_locked(name);
 	if (cv && cv->kind == XTC_CFG_STRING) {
 		if (cv->validator && cv->validator(new_copy, cv->cb_user) != XTC_OK) {
 			rc = XTC_E_INVAL;
@@ -252,7 +252,7 @@ xtc_cfg_kind(const char *name, xtc_cfg_kind_t *out)
 	int rc = XTC_E_INVAL;
 	if (name == NULL || out == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&__cfg_lock);
-	v = __find_locked(name);
+	v = __cfg_find_locked(name);
 	if (v != NULL) { *out = v->kind; rc = XTC_OK; }
 	(void)pthread_mutex_unlock(&__cfg_lock);
 	return rc;
