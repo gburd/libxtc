@@ -16,7 +16,7 @@
 #include <unistd.h>
 
 /* Per-thread cursor -- see loop_int.h. */
-__thread xtc_loop_t *__xtc_current_loop = NULL;
+XTC_THREAD_LOCAL xtc_loop_t *__xtc_current_loop = NULL;
 
 /* --- inbox ---------------------------------------------------------- */
 

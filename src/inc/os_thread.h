@@ -16,6 +16,21 @@
 #include <stdint.h>
 
 /*
+ * Thread-local storage-class specifier.  GCC and clang spell it
+ * __thread; MSVC spells it __declspec(thread); C11 has _Thread_local.
+ * XTC_THREAD_LOCAL is the portable spelling used throughout the
+ * source.  (Defined here because both xtc_int.h and loop_int.h
+ * include this header.)
+ */
+#if defined(_MSC_VER)
+#  define XTC_THREAD_LOCAL  __declspec(thread)
+#elif defined(__GNUC__) || defined(__clang__)
+#  define XTC_THREAD_LOCAL  __thread
+#else
+#  define XTC_THREAD_LOCAL  _Thread_local
+#endif
+
+/*
  * Opaque handles.  The full struct lives in the implementation file;
  * callers see only an opaque pointer plus a sentinel-zero state.
  *

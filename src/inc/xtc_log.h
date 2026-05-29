@@ -97,9 +97,14 @@ xtc_log_t *xtc_log_default(void);
 
 /* Append a record to the ring.  Non-blocking; if the ring is full
  * the oldest record is dropped and a counter is bumped. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define XTC_LOG_PRINTF_FMT __attribute__((format(printf, 3, 4)))
+#else
+#  define XTC_LOG_PRINTF_FMT   /* MSVC: no prototype format attribute */
+#endif
 void xtc_log_write(xtc_log_t *log, xtc_log_level_t lvl,
                    const char *fmt, ...)
-    __attribute__((format(printf, 3, 4)));
+    XTC_LOG_PRINTF_FMT;
 void xtc_log_vwrite(xtc_log_t *log, xtc_log_level_t lvl,
                     const char *fmt, va_list ap);
 

@@ -70,7 +70,7 @@
 #define XTC_LRLOCK_MAX_GLOBAL_SLOTS  4096
 
 static _Atomic int     __global_slot_counter = 0;
-static __thread int    __my_global_slot = -1;
+static XTC_THREAD_LOCAL int    __my_global_slot = -1;
 
 static pthread_mutex_t __slot_free_lock = PTHREAD_MUTEX_INITIALIZER;
 static int             __slot_free_list[XTC_LRLOCK_MAX_GLOBAL_SLOTS];
