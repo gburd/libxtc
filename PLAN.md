@@ -3126,7 +3126,7 @@ Full writeup in `docs/M_WINDOWS_MATRIX.md`.
 |-----------------|-------------|-------------------|--------|
 | MinGW64 gcc 16.1.0 | full pass | ~233 munit / 50 binaries | -- |
 | Clang64 22.1.4  | partial     | 48/48 of binaries that link; 3 don't compile (POSIX-only) | Port test_net_udp / test_proc_wait_fd / test_slab_shm to Win32 |
-| MSVC cl 14.44   | BLOCKED     | --                | Asm port: fctx_x86_64_*.S -> MASM equivalents (~1-2 days); meson.build expansion to all source files; clang-cl as a stepping-stone driver works through the same path |
+| MSVC cl 14.50   | builds + smoke | xtc.lib (45 objs) + 5/5 smoke | Full munit suite for MSVC pending (harness VLA-param macro); see docs/M_WINDOWS_MATRIX.md |
 
 ### TLS backends
 

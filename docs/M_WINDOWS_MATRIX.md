@@ -10,7 +10,7 @@ build host (Windows 11 ARM64, x86_64 emulation layer).
 |-------------|---------------|:------:|:-----------:|:----------:|-------|
 | MinGW64 gcc | 16.1.0        | OK     | 50          | 233/233    | Default Windows path; full coverage |
 | Clang64     | 22.1.4        | OK     | 50          | 48/48      | LLVM clang with MinGW runtime; 3 POSIX-only tests don't compile |
-| MSVC cl.exe | 14.44.35207   | -      | -           | -          | Build system port required; see below |
+| MSVC cl.exe | 14.50.35717   | OK     | smoke       | 5/5        | xtc.lib (45 objs incl. ml64 fcontext); standalone smoke test |
 
 ## MinGW64 (msys2 mingw64)
 
@@ -53,43 +53,40 @@ reason as MinGW64).  Tracking the three Windows ports in
 
 ## MSVC cl.exe
 
-`C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.44.35207`
-ships a working cl.exe (HostArm64 + Hostx64 toolchains, x64 / x86 /
-arm64 targets).  Native MSVC cannot yet build xtc.  The blockers
-are:
+`C:\\Program Files\\Microsoft Visual Studio\\18\\Community` provides
+cl.exe 14.50 and ml64.exe.  libxtc builds with the Microsoft
+toolchain via `dist\\build_msvc.bat`, run inside an x64 Native Tools
+environment (or after calling `vcvars64.bat`):
 
-  * **Assembly syntax.**  `src/os/asm/fctx_x86_64_*.S` use GNU
-    assembler (GAS) syntax; MSVC expects MASM (.asm) syntax through
-    ml64.exe.  The fcontext primitives need translation.
+    set XTC_SRC=C:\\scratch\\xtc
+    call "...\\VC\\Auxiliary\\Build\\vcvars64.bat"
+    C:\\scratch\\xtc\\dist\\build_msvc.bat
 
-  * **Build system.**  The autoconf path uses MinGW-style flags
-    (`-fPIC -pthread -std=c11 ...`) that cl.exe doesn't accept.
-    The meson path is currently a stub that builds only the
-    public-API translation units; the M3+ event loop, M7+
-    channels, and M8+ processes aren't compiled there.
+This assembles `fctx_x86_64_ms_pe.asm` with ml64, compiles every
+`src/` translation unit with cl (`/std:c11 /experimental:c11atomics`),
+archives `xtc.lib` (45 objects), and builds `test\\msvc\\smoke.c`.
+The smoke test passes: version, strerror, the Win32 clocks, a slab
+alloc/free round-trip, and an lwlock acquire/release.
 
-`clang-cl.exe` (LLVM's MSVC-compatible driver, installed at
-`C:\Program Files\LLVM\bin\clang-cl.exe`) accepts the GCC
-intrinsics that the source uses (`__builtin_expect`,
-`__builtin_ctzll`, `__builtin_clzll` -- already wrapped via
-`XTC_LIKELY` / `XTC_CTZLL` / `XTC_CLZLL` macros) but still hits the
-asm-syntax blocker.
+What made the MSVC build work:
 
-### Path to MSVC support
+  * The GAS context-switch asm was ported to MASM
+    (`fctx_x86_64_ms_pe.asm`).
+  * `__thread` was replaced by the portable `XTC_THREAD_LOCAL`
+    (`__declspec(thread)` on MSVC).
+  * `__attribute__((format))` and `__attribute__((packed))` were
+    wrapped in portable macros (`XTC_PRINTF_FMT`, `XTC_PACK_*`).
+  * MSVC lacks winpthreads, so `src/inc/compat/` provides Win32
+    shims for the pthread / semaphore / sched / unistd / sys.time
+    surface the code uses, plus a hand-authored `xtc_config.h`.
+  * `os_time.c` gained a Win32 branch (QueryPerformanceCounter /
+    GetSystemTimePreciseAsFileTime).
 
-The work is straightforward but boxed:
-
-  1. Port `fctx_x86_64_sysv.S` and `fctx_x86_64_ms_pe.S` to MASM
-     equivalents (`fctx_x86_64_sysv.asm`, `fctx_x86_64_ms_pe.asm`).
-     Each is ~100 lines of standard register save / restore.
-  2. Extend `meson.build` to enumerate every translation unit
-     under `src/{os,io,evt,ptc,orc}/` and link against the
-     produced .obj from ml64.exe.
-  3. Add MSVC-specific cflags (`/W3 /std:c11 /experimental:c11atomics`).
-  4. Run the test suite and adjust as MSVC-specific issues
-     surface.
-
-Estimate: 1-2 days of focused work.  Tracked in PLAN.md.
+The munit harness is not used for the MSVC test because its
+`MUNIT_ARRAY_PARAM(argc + 1)` expands to a VLA array parameter that
+cl rejects; the standalone smoke test covers the Win32-specific
+paths instead.  Wiring the full munit suite for MSVC (a
+harness-only fix) is the remaining MSVC work.
 
 ## Reproducing on santorini
 
