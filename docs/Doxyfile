@@ -34,6 +34,7 @@ INPUT                  = ../README.md \
                          ./M_LRLOCK_COW.md \
                          ./M_MULTI_HEAD_RECV.md \
                          ./M_SQLXTC_HARDFORK.md \
+                         ./M_SQLXTC_GREENFIELD.md \
                          ./M_LIBXTC_PG_BOUNDARY.md \
                          ./M_WINDOWS_MATRIX.md \
                          ./M_TLS_MATRIX.md \
