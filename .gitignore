@@ -77,3 +77,6 @@ examples/07_kaka/test_frame
 examples/07_kaka/test_partition
 examples/07_kaka/test_broker
 build_unix/test_inject_races
+
+# LSP compile database (generated)
+compile_commands.json
