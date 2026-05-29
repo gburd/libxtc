@@ -1,0 +1,39 @@
+# Site configuration for libxtc documentation.
+#
+# Renders by Jekyll on GitHub Pages, and by Forgejo Actions
+# on Codeberg Pages.  The same input directory feeds both.
+
+title: libxtc
+description: Async concurrency for C, in the Tokio + Seastar + BEAM tradition
+url: ""
+
+theme: jekyll-theme-cayman
+
+# Markdown processor.
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: false
+  syntax_highlighter: rouge
+
+# Default permalink layout: keep filenames stable for cross-references.
+permalink: pretty
+
+# Files to exclude from the rendered site.
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - "*.bak"
+  - vendor/
+  - node_modules/
+  - "M_*KVM.md"             # internal runbooks
+  - "M*_CLAIMS.md"          # internal claims sheets
+  - PUBLISHING.md           # internal site-author notes
+  - MAN_TODO.md             # internal man-page TODO list
+  - "M16_*.md"              # internal milestone notes
+  - "M17_*.md"
+  - "M4.5_*.md"
+  - M_BUILDFARM.md
+  - M_CI.md
+  - M_PORT.md
+  - M_TLS.md                # superseded by M_TLS_MATRIX.md

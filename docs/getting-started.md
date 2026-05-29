@@ -1,3 +1,7 @@
+---
+title: "Getting started with xtc"
+---
+
 # Getting started with xtc
 
 This guide takes you from "just cloned the repo" to "I have an

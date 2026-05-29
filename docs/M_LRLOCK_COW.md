@@ -1,3 +1,7 @@
+---
+title: "LRLock copy-on-write -- design note"
+---
+
 /*-
  * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.

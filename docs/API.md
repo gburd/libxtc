@@ -1,3 +1,7 @@
+---
+title: "Public API Reference"
+---
+
 # Public API Reference
 
 This document is the reference for every public xtc symbol.  The
