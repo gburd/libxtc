@@ -202,7 +202,8 @@ TESTS_C		= test_version test_header test_errors \
 		  test_stats \
 		  test_tls_basic \
 		  test_tls_server \
-		  test_tls_client
+		  test_tls_client \
+		  test_inject_races
 
 TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_lrlock pbt_lwlock pbt_chan
 
@@ -597,6 +598,12 @@ test_steal: $(srcdir)/../test/m5/test_steal.c \
 		$(srcdir)/../test/m5/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m5 \
 		-o $@ $(srcdir)/../test/m5/test_steal.c \
+		$(srcdir)/../test/m5/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_inject_races: $(srcdir)/../test/concurrency/test_inject_races.c \
+		$(srcdir)/../test/m5/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m5 \
+		-o $@ $(srcdir)/../test/concurrency/test_inject_races.c \
 		$(srcdir)/../test/m5/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M7 tests.

@@ -10,6 +10,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_inject.h"
 #include "xtc_proc.h"
 #include "xtc_loop.h"
 #include "xtc_async.h"
@@ -414,6 +415,11 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 		__env_free(e);
 		return XTC_E_AGAIN;
 	}
+	/* Race window: the alive/capacity check passed but the envelope
+	 * is not yet linked.  A test pauses a sender here, exits or
+	 * fills the target, then releases to confirm the delivery still
+	 * observes a consistent mailbox state under the lock. */
+	XTC_INJECTION_POINT("proc.mbox.pre_push");
 	__mbox_push_locked(p, e);
 	armed = p->waker_armed;
 	(void)pthread_mutex_unlock(&p->mbox_lock);
