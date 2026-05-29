@@ -49,6 +49,31 @@ jobs:
       - name: Test
         run: make -C build_ci check
 
+  coro-fctx:
+    # Force the fcontext coroutine substrate (the musl path) on a
+    # glibc runner so it is exercised on every commit without needing
+    # a musl toolchain.
+    runs-on: codeberg-medium
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf pkg-config libssl-dev liburing-dev gawk
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure (force fcontext)
+        run: |
+          mkdir -p build_fctx
+          cd build_fctx
+          CPPFLAGS=-DXTC_CORO_FORCE_FCTX ../dist/configure --with-tls=auto
+      - name: Build
+        run: make -C build_fctx -j"$(nproc)"
+      - name: Test
+        run: make -C build_fctx check
+
   sanitizers:
     runs-on: codeberg-medium
     strategy:
