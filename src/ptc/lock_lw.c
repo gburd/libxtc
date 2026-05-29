@@ -29,6 +29,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_inject.h"
 #include "xtc_lwlock.h"
 
 #include <stdatomic.h>
@@ -124,6 +125,13 @@ __try_attempt(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 			desired = old_state + LW_VAL_SHARED;
 		}
 
+		/* Race window: we have computed `desired` from `expected`
+		 * but not yet attempted the CAS.  A test pauses one
+		 * acquirer here, lets another acquirer mutate state, then
+		 * releases: the weak CAS observes the change, fails, and we
+		 * retry from the new state -- exercising the contended
+		 * retry path deterministically. */
+		XTC_INJECTION_POINT("lwlock.acquire.pre_cas");
 		if (atomic_compare_exchange_weak_explicit(&lock->state,
 		    &expected, desired,
 		    memory_order_acquire, memory_order_relaxed)) {
