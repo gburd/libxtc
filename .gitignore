@@ -69,3 +69,7 @@ test/m99/*.o
 # Doxygen-generated documentation site
 docs/api/
 doxygen-warnings.txt
+
+# kaka example
+examples/07_kaka/kaka-broker
+examples/07_kaka/*.o
