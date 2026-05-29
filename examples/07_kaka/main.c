@@ -208,6 +208,7 @@ main(int argc, char **argv)
 	}
 	b->loop = xtc_app_loop(b->app);
 	broker_set_loop(b->loop);
+	broker_set_log_dir(cfg.log_dir);
 
 	memset(kids, 0, sizeof kids);
 	kids[0].name = "listener";
@@ -220,7 +221,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	XTC_LOG_INFO_F("kaka (Phase 0) listening on %s:%d, log dir %s",
+	XTC_LOG_INFO_F("kaka listening on %s:%d, log dir %s (persistent)",
 	    cfg.host, cfg.port, cfg.log_dir);
 	if (log != NULL)
 		xtc_log_drain(log);
