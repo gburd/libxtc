@@ -166,7 +166,8 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_perm.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_cfg.sh \
-	$(abs_top_srcdir)/../test/dist/test_m17_smoke.sh
+	$(abs_top_srcdir)/../test/dist/test_m17_smoke.sh \
+	$(abs_top_srcdir)/../test/security/test_alloc_overflow_sweep.sh
 
 TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
