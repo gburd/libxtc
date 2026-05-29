@@ -64,9 +64,9 @@ static _Atomic uintptr_t __default_logger;
 static int64_t
 __now_ns(void)
 {
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+	int64_t ns = 0;
+	(void)__os_clock_mono(&ns);
+	return ns;
 }
 
 static const char *

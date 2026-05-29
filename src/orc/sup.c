@@ -51,12 +51,14 @@ struct xtc_supervisor {
 };
 
 /* The DOWN signal envelope shape we emit in xtc_proc_exit cleanup. */
+XTC_PACK_PUSH
 struct down_signal {
 	uint8_t  kind;
 	uint64_t ref;
 	xtc_pid_t pid;
 	int      reason;
-} __attribute__((packed));
+} XTC_PACKED;
+XTC_PACK_POP
 
 static int
 __match_down(const void *data, size_t size, void *u)

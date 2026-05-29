@@ -143,7 +143,7 @@ struct tls_mag {
 	struct magazine  mag;
 };
 
-static __thread struct tls_mag __tls_mags[TLS_MAGS];
+static XTC_THREAD_LOCAL struct tls_mag __tls_mags[TLS_MAGS];
 
 static struct magazine *
 __tls_mag_for(xtc_slab_t *cache)
@@ -207,9 +207,9 @@ struct xtc_slab {
 static int64_t
 __now_ns_slab(void)
 {
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+	int64_t ns = 0;
+	(void)__os_clock_mono(&ns);
+	return ns;
 }
 
 static size_t

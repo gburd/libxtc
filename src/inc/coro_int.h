@@ -51,7 +51,7 @@ struct xtc_coro {
 };
 
 /* Shared by loop.c -- the currently-running coroutine on this loop.  */
-extern __thread struct xtc_coro *__xtc_current_coro;
+extern XTC_THREAD_LOCAL struct xtc_coro *__xtc_current_coro;
 
 /* Forward declarations for the dispatch glue.  */
 int  __xtc_coro_step(xtc_task_t *self, void *user);

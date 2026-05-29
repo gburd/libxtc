@@ -49,7 +49,7 @@ struct rcu_state {
 };
 
 static struct rcu_state __rcu = { 0, PTHREAD_MUTEX_INITIALIZER, NULL, {0}, 0 };
-static __thread struct rcu_tls *__rcu_self = NULL;
+static XTC_THREAD_LOCAL struct rcu_tls *__rcu_self = NULL;
 
 /* M11.5b: pools for rcu_tls registry entries and retired records. */
 static xtc_slab_t   *__rcu_tls_slab     = NULL;
