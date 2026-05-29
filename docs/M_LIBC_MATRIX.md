@@ -1,7 +1,3 @@
----
-title: "libc matrix"
----
-
 # libc matrix
 
 xtc is C11.  The OS layer (m0/m1) is portable across libc

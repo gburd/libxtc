@@ -1,7 +1,3 @@
----
-title: "Architecture"
----
-
 # Architecture
 
 This document is the short reference for the xtc layering.  The

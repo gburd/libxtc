@@ -1,60 +1,60 @@
 # Documentation publishing
 
-The `docs/` tree is rendered by Jekyll and published to:
+The `docs/` tree is rendered by Doxygen and published to:
 
-  * GitHub Pages: <https://gregburd.github.io/libxtc/> (when the
-    repo is mirrored to GitHub).  Built and deployed by
-    `.github/workflows/pages.yml` on every push to main that
-    touches `docs/`.
-  * Codeberg Pages: <https://gregburd.codeberg.page/libxtc/>
-    (when configured).  Built by `.forgejo/workflows/pages.yml`,
-    which pushes rendered HTML to the `pages` branch; Codeberg
-    Pages serves that branch.
+  * Codeberg Pages (canonical):
+    <https://gregburd.codeberg.page/libxtc/>.  Built and deployed
+    by `.forgejo/workflows/pages.yml` on every push to main that
+    touches `docs/`, `src/inc/`, or `README.md`.  The workflow runs
+    Doxygen, stages the HTML, and deploys with the
+    `codeberg.org/git-pages/action@v2` action.
+
+  * GitHub Pages (optional mirror):
+    `.github/workflows/pages.yml` validates that the Doxygen build
+    succeeds on every push but does not deploy by default.  To turn
+    on GitHub Pages, follow the commented instructions at the top of
+    that workflow.
+
+The setup mirrors the lime project's: the repository README is the
+Doxygen main page, the user-facing markdown guides under `docs/` are
+additional pages, and the public headers under `src/inc/` provide
+the API reference.
 
 ## Local preview
 
     cd docs
-    bundle install                          # one-time, if Gemfile present
-    jekyll serve                            # http://localhost:4000
+    doxygen Doxyfile
+    xdg-open api/html/index.html        # or: python3 -m http.server -d api/html
 
-If `jekyll` is not installed:
+The generated `docs/api/` tree and `doxygen-warnings.txt` are
+gitignored; only the inputs (markdown, headers, Doxyfile) are
+tracked.
 
-    gem install --user-install jekyll \
-                kramdown-parser-gfm \
-                rouge \
-                jekyll-theme-cayman
+## What gets published
 
-## Codeberg setup
+`docs/Doxyfile` lists the inputs explicitly in `INPUT`.  User-facing
+guides are included; internal material (claims sheets, KVM runbooks,
+milestone notes, the man-page TODO) is intentionally omitted.  The
+internal-only header `src/inc/xtc_int.h` is excluded from API
+extraction.
 
-The first deploy requires:
+When adding a new user-facing guide:
 
-  1. A repository secret named `PAGES_PUSH_TOKEN` containing a
-     personal access token with `repository:write` scope on this
-     repo.
-  2. Enabling Pages in repo settings (Settings -> Pages) with
-     branch set to `pages`.
+  1. Write it as `docs/<name>.md` with a leading `# Heading`.
+  2. Add the path to the `INPUT` list in `docs/Doxyfile`.
+  3. Cross-link other guides with relative `.md` paths
+     (`[architecture](ARCHITECTURE.md)`); Doxygen rewrites these to
+     the generated page.
 
-The Forgejo Actions workflow runs in a Docker container based on
-`ruby:3.3`, installs Jekyll, builds the site, and force-pushes to
-the `pages` branch.  Codeberg Pages picks the branch up and serves
-the rendered HTML.
+## Warning backlog
 
-## Authoring conventions
+The Doxyfile sets `WARN_AS_ERROR = NO` because the public headers do
+not yet carry full Doxygen doc comments; the build currently emits
+~260 undocumented-symbol warnings.  The workflows surface the count
+in CI logs.  When the headers are fully documented, flip
+`WARN_AS_ERROR` to `YES` so doc-rot fails the build.
 
-Every page in `docs/` is rendered.  Files matching the patterns
-in `_config.yml`'s `exclude` list (internal claims sheets, KVM
-runbooks) are kept private to the source tree.
+## Voice
 
-For new top-level pages:
-
-  * Use `.md` (kramdown / GFM).
-  * Add a YAML front-matter block at the top with at least a
-    `title:` field.
-  * Cross-link with relative paths and the `.html` extension that
-    Jekyll produces, not the `.md` extension that the source tree
-    uses.  For example, `[architecture](ARCHITECTURE.html)`, not
-    `[architecture](ARCHITECTURE.md)`.
-
-For consistency, the documentation voice is concise, declarative,
-and free of marketing language.  See `AGENTS.md` for the style
-rules in detail.
+The documentation voice is concise, declarative, and free of
+marketing language.  See `AGENTS.md` for the style rules.
