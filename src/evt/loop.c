@@ -255,10 +255,17 @@ __xtc_loop_step(xtc_loop_t *loop)
 		switch (verdict) {
 		case XTC_TASK_DONE:
 			t->state = XTC_TS_DONE;
-			atomic_fetch_sub_explicit(&loop->n_alive, 1,
+			/* Decrement the HOME loop's alive count (where spawn
+			 * incremented it), not the loop currently running the
+			 * task.  Under work stealing the two differ; keying on
+			 * t->loop keeps each loop's n_alive correct so the
+			 * executor's idle detection terminates.  Same for the
+			 * resource release, which was acquired against the home
+			 * loop's accountant. */
+			atomic_fetch_sub_explicit(&t->loop->n_alive, 1,
 			    memory_order_relaxed);
-			if (loop->res != NULL)
-				xtc_res_release(loop->res, XTC_RES_TASKS, 1);
+			if (t->loop->res != NULL)
+				xtc_res_release(t->loop->res, XTC_RES_TASKS, 1);
 			break;
 		case XTC_TASK_RESCHED:
 			t->state = XTC_TS_SCHEDULED;
@@ -366,7 +373,31 @@ __xtc_loop_step_once(xtc_loop_t *loop)
 	int has_tasks  =
 	    atomic_load_explicit(&loop->n_alive, memory_order_relaxed) > 0;
 	int has_timers = __xtc_timer_heap_next_deadline(loop) >= 0;
-	if (!has_tasks && !has_timers) return 0;
+	if (!has_tasks && !has_timers) {
+		/*
+		 * No local work.  If this loop is part of an executor, a
+		 * peer may have stealable work -- attempt a steal before
+		 * reporting idle.  Without this an idle worker (its own
+		 * n_alive == 0) returns immediately and never steals, so
+		 * all work piles on the loop the tasks were spawned on.
+		 * On a successful steal we enqueue locally and fall through
+		 * to step (to run it); otherwise we are genuinely idle and
+		 * return 0 so the worker does its bounded poll + stop-flag
+		 * check rather than blocking in step.
+		 */
+		if (loop->exec != NULL) {
+			extern void *__xtc_exec_try_steal(xtc_loop_t *me);
+			xtc_task_t *stolen = __xtc_exec_try_steal(loop);
+			if (stolen != NULL) {
+				stolen->q_next = NULL;
+				(void)__xtc_loop_enqueue(loop, stolen);
+			} else {
+				return 0;
+			}
+		} else {
+			return 0;
+		}
+	}
 	rc = __xtc_loop_step(loop);
 	return rc < 0 ? rc : 1;
 }

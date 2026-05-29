@@ -23,6 +23,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
@@ -40,6 +41,10 @@
 
 static _Atomic int  st_run_count[ST_N_TASKS];
 static _Atomic int  st_done_count;
+
+/* For the fairness test: each worker records the loop it ran on so
+ * the test can count how many distinct loops participated. */
+static _Atomic(void *) st_ran_on[ST_N_TASKS];
 
 static int
 worker(xtc_task_t *self, void *arg)
@@ -92,8 +97,69 @@ test_no_loss_no_double_run(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* St1 -- steals actually happen.  All tasks are spawned on loop 0;
+ * each does enough work (0.2 ms) that the idle loops have time to
+ * steal.  We record which loop each task ran on and assert that at
+ * least two distinct loops participated.  If stealing were broken,
+ * loop 0 would run all of them and only one loop would appear --
+ * which fails the test.  The lower bound (>= 2) is deliberately weak
+ * so the test is robust to scheduler timing; it proves migration
+ * occurs without asserting an exact balance. */
+static int
+fair_worker(xtc_task_t *self, void *arg)
+{
+	int task_id = (int)(intptr_t)arg;
+	struct timespec ts = { 0, 200 * 1000 };  /* 0.2 ms each */
+	(void)self;
+	(void)nanosleep(&ts, NULL);
+	atomic_store_explicit(&st_ran_on[task_id],
+	    (void *)__xtc_current_loop, memory_order_relaxed);
+	atomic_fetch_add_explicit(&st_done_count, 1, memory_order_relaxed);
+	return XTC_TASK_DONE;
+}
+
+static MunitResult
+test_steals_happen(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	int i, n_distinct = 0;
+	void *seen[ST_N_LOOPS];
+	(void)p; (void)d;
+
+	for (i = 0; i < ST_N_TASKS; i++)
+		atomic_store(&st_ran_on[i], NULL);
+	atomic_store(&st_done_count, 0);
+
+	munit_assert_int(xtc_exec_init(&e, ST_N_LOOPS), ==, XTC_OK);
+	for (i = 0; i < ST_N_TASKS; i++) {
+		xtc_task_t *t;
+		munit_assert_int(xtc_exec_spawn_on(e, 0,
+		    fair_worker, (void *)(intptr_t)i, &t), ==, XTC_OK);
+	}
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	munit_assert_int(atomic_load(&st_done_count), ==, ST_N_TASKS);
+
+	/* Count distinct loops that ran a task. */
+	for (i = 0; i < ST_N_TASKS; i++) {
+		void *l = atomic_load(&st_ran_on[i]);
+		int j, found = 0;
+		if (l == NULL) continue;
+		for (j = 0; j < n_distinct; j++)
+			if (seen[j] == l) { found = 1; break; }
+		if (!found && n_distinct < ST_N_LOOPS)
+			seen[n_distinct++] = l;
+	}
+	/* Broken stealing -> everything runs on loop 0 -> n_distinct==1. */
+	munit_assert_int(n_distinct, >=, 2);
+
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/St2_St3_no_loss_no_double_run", test_no_loss_no_double_run,
+	  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/St1_steals_happen_fairness", test_steals_happen,
 	  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
