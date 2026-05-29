@@ -11,7 +11,7 @@
 
 #if defined(_WIN32)
 # include <windows.h>
-#else
+#elif defined(XTC_HAVE_UCONTEXT) && !defined(XTC_CORO_FORCE_FCTX)
 # include <ucontext.h>
 #endif
 
@@ -26,9 +26,17 @@ struct xtc_coro {
 #if defined(_WIN32)
 	LPVOID       fiber;         /* the coroutine's own Win32 fiber */
 	LPVOID       loop_fiber;    /* return-to-loop fiber pointer */
-#else
+#elif defined(XTC_HAVE_UCONTEXT) && !defined(XTC_CORO_FORCE_FCTX)
 	ucontext_t   ctx;          /* the coroutine's own machine state */
 	ucontext_t   loop_ctx;     /* return-to-loop context (set on resume) */
+#else
+	/* fcontext substrate (coro_fctx.c): a single saved stack pointer.
+	 * On make_fcontext it is the fresh entry point; each yield/await
+	 * overwrites it with the coroutine's current resume point.  The
+	 * scheduler's return point is a per-thread cursor in coro_fctx.c,
+	 * not stored here, because coroutines always return to the
+	 * scheduler, never directly to one another. */
+	void        *fctx;
 #endif
 	void        *stack;
 	size_t       stack_sz;

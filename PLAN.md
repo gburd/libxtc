@@ -3112,7 +3112,7 @@ are in progress; `BLOCKED` items list their gating dependency.
 | OS              | Status      | Notes |
 |-----------------|-------------|-------|
 | Linux glibc     | full pass   | Reference target.  279 munit + 23 PBT + 22 shell |
-| Linux musl      | OS layer    | libxtc.a builds; coro_uctx absent (musl drops ucontext); needs coro_fctx.c substrate |
+| Linux musl      | full stack  | coro_fctx.c (fcontext substrate) covers the missing ucontext; coroutine suites run + pass |
 | FreeBSD 15      | full pass   | Verified through M13c (last full run; re-verify after recent changes) |
 | illumos         | partial     | OpenSSL link drift in last attempt; pin to `--with-tls=none` to retest |
 | macOS           | not yet     | Awaiting host; KVM runbook in `docs/M_MACOS_KVM.md` |
@@ -3145,7 +3145,7 @@ Full writeup in `docs/M_LIBC_MATRIX.md`.
 | libc       | Status      |
 |------------|-------------|
 | glibc 2.40 | full pass   |
-| musl 1.2.5 | OS layer; needs coro_fctx.c |
+| musl 1.2.5 | full stack via coro_fctx.c (fcontext substrate) |
 | MSVC UCRT  | rolled into Windows matrix above |
 
 ### Critical-review action items

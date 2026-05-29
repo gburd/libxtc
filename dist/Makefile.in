@@ -63,6 +63,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/evt/task.c \
 	$(srcdir)/../src/evt/timer.c \
 	$(srcdir)/../src/evt/coro_uctx.c \
+	$(srcdir)/../src/evt/coro_fctx.c \
 	$(srcdir)/../src/evt/coro_winfiber.c \
 	$(srcdir)/../src/evt/exec.c \
 	$(srcdir)/../src/ptc/res.c \
@@ -111,6 +112,7 @@ LIB_OBJS	= \
 	task.o \
 	timer.o \
 	coro_uctx.o \
+	coro_fctx.o \
 	coro_winfiber.o \
 	exec.o \
 	res.o \
@@ -304,6 +306,9 @@ timer.o: $(srcdir)/../src/evt/timer.c xtc_config.h
 
 coro_uctx.o: $(srcdir)/../src/evt/coro_uctx.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/coro_uctx.c
+
+coro_fctx.o: $(srcdir)/../src/evt/coro_fctx.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/coro_fctx.c
 
 coro_winfiber.o: $(srcdir)/../src/evt/coro_winfiber.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/coro_winfiber.c
