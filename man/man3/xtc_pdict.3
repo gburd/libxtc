@@ -49,7 +49,7 @@ returns the current value or NULL.
 .Fn xtc_pdict_erase
 removes the entry, invoking the dtor if registered.
 .Sh EXAMPLES
-.Bd -literat -offset indent
+.Bd -literal -offset indent
 static void my_dtor(void *p) { free(p); }
 
 /* Stash a per-request scratch buffer in the dict. */
