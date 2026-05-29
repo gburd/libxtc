@@ -75,12 +75,24 @@
 static int
 generate_cert(const char *cert_path, const char *key_path, const char *cn)
 {
-    char cmd[512];
+    char cmd[1024];
+    char cnf_path[256];
+    FILE *cnf_fp;
+    snprintf(cnf_path, sizeof(cnf_path), "%s.cnf", cert_path);
+    cnf_fp = fopen(cnf_path, "w");
+    if (cnf_fp != NULL) {
+        fprintf(cnf_fp,
+            "[req]\nprompt = no\ndistinguished_name = dn\n"
+            "[dn]\nCN = %s\n", cn);
+        fclose(cnf_fp);
+    }
     snprintf(cmd, sizeof(cmd),
              "openssl req -x509 -newkey rsa:2048 -nodes -days 1 "
-             "-keyout %s -out %s -subj /CN=%s 2>/dev/null",
-             key_path, cert_path, cn);
-    return system(cmd);
+             "-config %s -keyout %s -out %s -subj /CN=%s 2>/dev/null",
+             cnf_path, key_path, cert_path, cn);
+    int rc = system(cmd);
+    (void)unlink(cnf_path);
+    return rc;
 }
 
 /* Generate a self-signed cert (key discarded) for use as a wrong CA. */
