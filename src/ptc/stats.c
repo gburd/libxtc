@@ -65,7 +65,7 @@ __ncpus(void)
 	return n;
 }
 
-static __thread int __cached_cpu = -1;
+static XTC_THREAD_LOCAL int __cached_cpu = -1;
 
 static int
 __current_cpu(int n_cpus)
