@@ -30,7 +30,7 @@
  * targeting musl must either accept that higher-layer tests don't link
  * (the OS layer alone still builds and tests cleanly) or use a glibc
  * toolchain. */
-#if defined(_WIN32) || !defined(XTC_HAVE_UCONTEXT)
+#if defined(_WIN32) || !defined(XTC_HAVE_UCONTEXT) || defined(XTC_CORO_FORCE_FCTX)
 typedef int __xtc_coro_uctx_unused;
 #else
 

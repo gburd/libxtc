@@ -24,47 +24,52 @@ pass on Linux x86_64.
 ## musl
 
 `musl-gcc` and the musl runtime build libxtc.a end-to-end with no
-warnings on `-Wall -Wextra -Wpedantic`.  The OS layer (`__os_alloc`,
-`__os_atomic`, `__os_mutex`, `__os_thread`, `__os_time`, `__os_tls`)
-links and tests cleanly:
+warnings on `-Wall -Wextra -Wpedantic`, and the full stack -- OS
+layer through coroutines, processes, supervisors, and gen_server --
+links and runs.
 
-    test_alloc   8/8
-    test_atomic  7/7
-    test_mutex   6/6
-    test_thread  6/6
-    test_time    3/3
-    test_tls     3/3
-    -- 33/33
+The OS layer (`__os_alloc`, `__os_atomic`, `__os_mutex`,
+`__os_thread`, `__os_time`, `__os_tls`) passes 33/33.  The
+coroutine-dependent suites (async, proc, proc_wait_fd, sync, sup,
+svr, gen_server, supervisor, exec, steal, channels, the locks, slab)
+all pass as well.  The only tests that do not build on musl are the
+two that use POSIX/Linux-specific surface unrelated to the runtime
+(test_net_udp, test_slab_shm) and the TLS handshake tests (built
+only with a TLS backend).
 
-Higher-layer link fails:
+### How musl is supported: the fcontext substrate
 
-    coro_uctx.c: undefined reference to swapcontext / getcontext /
-                 makecontext
-
-This is by design on musl's part.  The musl maintainers consider
-the System-V ucontext API obsolete and bug-prone (see musl FAQ),
-and they don't ship implementations.  Glibc, FreeBSD, OpenBSD, and
-illumos all do.
-
-xtc detects this in configure.ac:
+musl deliberately omits the System-V ucontext API (swapcontext /
+getcontext / makecontext); the musl maintainers consider it obsolete
+and bug-prone.  Glibc, FreeBSD, OpenBSD, and illumos all ship it.
+configure.ac probes for it:
 
     AC_CHECK_FUNC([swapcontext],
       [AC_DEFINE([XTC_HAVE_UCONTEXT], 1, ...)],
       [...])
 
-When the symbol is absent, `coro_uctx.c` becomes a no-op
-translation unit (preserving `libxtc.a`'s portability) but the
-M3+ event-loop code that drives coroutines doesn't have a
-substrate to call into, so M4-and-up tests don't link.
+The coroutine substrate has two interchangeable implementations,
+selected at compile time, presenting an identical surface
+(`xtc_async`, `__xtc_coro_step`, `xtc_await`, `xtc_yield`,
+`xtc_stack_size`):
 
-### Resolving musl
+  * `src/evt/coro_uctx.c` -- the ucontext implementation, used when
+    `XTC_HAVE_UCONTEXT` is defined (glibc, the BSDs, illumos).
+  * `src/evt/coro_fctx.c` -- built on the hand-written
+    `make_fcontext` / `jump_fcontext` assembly in
+    `src/os/asm/fctx_x86_64_sysv.S`, used when ucontext is absent
+    (musl).  A coroutine's resume point is a single saved stack
+    pointer; the scheduler's return point is a per-thread cursor.
 
-xtc already has `make_fcontext` / `jump_fcontext` assembly in
-`src/os/asm/fctx_x86_64_sysv.S` (and a Windows variant).  The
-work to enable musl is to add `src/evt/coro_fctx.c`: a coroutine
-substrate that maps the same xtc_task_t -> fiber surface that
-`coro_uctx.c` currently provides, but built on the assembly
-primitives instead of ucontext.
+Exactly one of the two compiles to live code; the other becomes an
+empty translation unit.  Both are always in the source list, so no
+build-system branching is needed beyond the configure probe.
+
+The fcontext path can be forced on a glibc host with
+`-DXTC_CORO_FORCE_FCTX`, which is how it is exercised under
+AddressSanitizer without a musl toolchain: the full 283-assertion
+suite passes and is ASan/UBSan clean on the forced fcontext build,
+matching the ucontext build exactly.
 
 Estimated effort: 1-2 days.  Tracked in
 [PLAN.md](../PLAN.md) under the libc-matrix work item.  Not
