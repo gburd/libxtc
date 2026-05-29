@@ -210,9 +210,29 @@ TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt
 # -------------------------------------------------------------------------
 # Default goal.
 # -------------------------------------------------------------------------
-.PHONY: all check tests-c tests-sh tests-pbt clean distclean install uninstall
+.PHONY: all check tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands
 
-all: $(STATIC_LIB)
+all: $(STATIC_LIB) compile_commands.json
+
+# compile_commands.json for LSP / clang-tooling.  One entry per
+# library translation unit, using the exact CFLAGS/CPPFLAGS the build
+# uses.  Regenerated whenever the Makefile changes.  LSPs look for it
+# in the build directory; symlink it to the source root if your editor
+# expects it there:  ln -sf build_unix/compile_commands.json .
+compile-commands: compile_commands.json
+compile_commands.json: Makefile
+	@echo 'generating compile_commands.json'
+	@printf '[\n' > $@
+	@first=1; \
+	for s in $(filter %.c,$(LIB_SRCS)); do \
+		abs=`cd "\`dirname $$s\`" && pwd`/`basename $$s`; \
+		cmd="$(CC) $(CFLAGS) $(CPPFLAGS) -c -o `basename $$s .c`.o $$abs"; \
+		cmd=`printf '%s' "$$cmd" | sed -e 's/\\\\/\\\\\\\\/g' -e 's/"/\\\\"/g'`; \
+		if [ $$first -eq 0 ]; then printf ',\n' >> $@; fi; first=0; \
+		printf '  {"directory": "%s", "file": "%s", "command": "%s"}' \
+			"$(abs_builddir)" "$$abs" "$$cmd" >> $@; \
+	done; \
+	printf '\n]\n' >> $@
 
 $(STATIC_LIB): $(LIB_OBJS)
 	$(AR) rcs $@ $(LIB_OBJS)
@@ -837,7 +857,7 @@ install: all
 # Cleanup.
 # -------------------------------------------------------------------------
 clean:
-	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT)
+	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
 
 distclean: clean
 	$(RM) Makefile xtc_config.h config.log config.status
