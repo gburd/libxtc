@@ -460,18 +460,53 @@ int
 bitcask_iterate(bitcask_t *bc, bitcask_iter_fn fn, void *user)
 {
 	int i;
+	size_t nkeys = 0, capacity = 0;
+	struct snap { uint8_t *key; size_t key_len; };
+	struct snap *snap = NULL;
+	int rc = 0;
+
 	if (bc == NULL || fn == NULL) return -1;
+
+	/* Phase 1: snapshot all (key, key_len) pairs while holding the
+	 * lock.  Releasing the lock before invoking user callbacks lets
+	 * those callbacks safely re-enter bitcask_get / bitcask_size /
+	 * bitcask_put without deadlocking on this mutex. */
 	pthread_mutex_lock(&bc->lock);
-	for (i = 0; i < IDX_BUCKETS; i++) {
-		struct idx_entry *e;
-		for (e = bc->buckets[i]; e != NULL; e = e->next) {
-			if (fn(e->key, e->key_len, user) != 0) {
-				pthread_mutex_unlock(&bc->lock);
-				return 0;
+	capacity = bc->n_keys;
+	if (capacity > 0) {
+		snap = calloc(capacity, sizeof *snap);
+		if (snap == NULL) {
+			pthread_mutex_unlock(&bc->lock);
+			return -1;
+		}
+		for (i = 0; i < IDX_BUCKETS && nkeys < capacity; i++) {
+			struct idx_entry *e;
+			for (e = bc->buckets[i]; e != NULL && nkeys < capacity;
+			     e = e->next) {
+				snap[nkeys].key = malloc(e->key_len);
+				if (snap[nkeys].key == NULL) {
+					size_t j;
+					for (j = 0; j < nkeys; j++)
+						free(snap[j].key);
+					free(snap);
+					pthread_mutex_unlock(&bc->lock);
+					return -1;
+				}
+				memcpy(snap[nkeys].key, e->key, e->key_len);
+				snap[nkeys].key_len = e->key_len;
+				nkeys++;
 			}
 		}
 	}
 	pthread_mutex_unlock(&bc->lock);
+
+	/* Phase 2: dispatch callbacks without holding the lock. */
+	for (i = 0; (size_t)i < nkeys; i++) {
+		if (rc == 0 && fn(snap[i].key, snap[i].key_len, user) != 0)
+			rc = 0; /* user requested early stop; not an error */
+		free(snap[i].key);
+	}
+	free(snap);
 	return 0;
 }
 
