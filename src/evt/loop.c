@@ -147,7 +147,9 @@ xtc_loop_fini(xtc_loop_t *loop)
 	__xtc_proc_loop_unregister(loop);
 
 	for (t = loop->all_tasks; t != NULL; t = next_t) {
-		next_t = t->all_next; __os_free(t);
+		next_t = t->all_next;
+		if (t->cleanup != NULL) t->cleanup(t->cleanup_arg);
+		__os_free(t);
 	}
 	for (tm = loop->all_timers; tm != NULL; tm = next_tm) {
 		next_tm = tm->all_next;
