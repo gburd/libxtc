@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 #include "partition.h"
 
@@ -99,12 +101,72 @@ test_growth(void)
 	printf("  ok   growth_past_capacity\n");
 }
 
+static void
+test_segmented_recovery(void)
+{
+	char dir[256];
+	plog_t *l;
+	kaka_record_t r, got;
+	char kbuf[16], vbuf[32];
+	int i;
+
+	snprintf(dir, sizeof dir, "/tmp/kaka-plog-test-%d", (int)getpid());
+	(void)mkdir(dir, 0700);
+
+	/* Phase 1: persistent log, append 3000 records (forces a few
+	 * segment rolls with a small threshold), close. */
+	ASSERT(plog_create_ex(dir, 64 * 1024 /* 64 KiB roll */, &l) == 0);
+	for (i = 0; i < 3000; i++) {
+		snprintf(kbuf, sizeof kbuf, "k%d", i);
+		snprintf(vbuf, sizeof vbuf, "value-%d", i);
+		r = mkrec(kbuf, vbuf);
+		ASSERT(plog_append(l, &r) == i);
+	}
+	ASSERT(plog_high_water(l) == 3000);
+	plog_destroy(l);
+
+	/* Phase 2: reopen; recovery must replay every record with the
+	 * same offsets and bytes. */
+	ASSERT(plog_create_ex(dir, 64 * 1024, &l) == 0);
+	ASSERT(plog_high_water(l) == 3000);
+	ASSERT(plog_count(l) == 3000);
+	for (i = 0; i < 3000; i += 137) {
+		snprintf(vbuf, sizeof vbuf, "value-%d", i);
+		ASSERT(plog_read(l, (uint64_t)i, &got) == 1);
+		ASSERT(got.value_len == strlen(vbuf));
+		ASSERT(memcmp(got.value, vbuf, got.value_len) == 0);
+	}
+
+	/* Append continues past the recovered high-water mark. */
+	r = mkrec("after", "restart");
+	ASSERT(plog_append(l, &r) == 3000);
+	ASSERT(plog_high_water(l) == 3001);
+	plog_destroy(l);
+
+	/* Phase 3: reopen once more; the post-restart append persisted. */
+	ASSERT(plog_create_ex(dir, 64 * 1024, &l) == 0);
+	ASSERT(plog_high_water(l) == 3001);
+	ASSERT(plog_read(l, 3000, &got) == 1);
+	ASSERT(got.value_len == 7 && memcmp(got.value, "restart", 7) == 0);
+	plog_destroy(l);
+
+	/* Clean up the segment files + dir. */
+	{
+		char cmd[320];
+		snprintf(cmd, sizeof cmd, "rm -f %s/*.log", dir);
+		if (system(cmd) != 0) { /* best effort cleanup */ }
+		(void)rmdir(dir);
+	}
+	printf("  ok   segmented_recovery (3000 records, rolls, restart)\n");
+}
+
 int
 main(void)
 {
 	test_append_offsets();
 	test_read_by_offset();
 	test_growth();
+	test_segmented_recovery();
 	printf("All kaka partition tests passed.\n");
 	return 0;
 }
