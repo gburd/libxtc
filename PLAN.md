@@ -3175,7 +3175,7 @@ Kafka-shaped log broker; design in `examples/07_kaka/README.md`.
 | Phase | Status | Scope |
 |-------|--------|-------|
 | 0 scaffold | done | app + supervised listener, accept/close, idle-park via xtc_proc_wait_fd |
-| 1 protocol + in-memory partition | TODO | framing codec + PRODUCE/FETCH/METADATA, one partition proc |
+| 1 protocol + in-memory partition | done | frame codec (6 tests) + partition log (3) + partition/conn procs + in-process PRODUCE/FETCH self-test (1) |
 | 2 segmented persistence | TODO | Bitcask-framed segments + offset index + recovery |
 | 3 credit-based backpressure | TODO | producer credits, park-on-exhaustion, bounded broker RSS |
 | 4 consumer groups | TODO | xtc_lockmgr group state + Bitcask offset commits |

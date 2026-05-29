@@ -39,13 +39,22 @@ LIBS := $(shell \
 CFLAGS  += $(LIBURING_INC)
 LDFLAGS  = -pthread $(XTC_BUILD)/libxtc.a $(XTC_LDFLAGS) $(LIBS)
 
-SRCS    = main.c
+SRCS    = main.c frame.c partition.c broker.c
 OBJS    = $(SRCS:.c=.o)
 TARGET  = kaka-broker
 
-.PHONY: all clean
+.PHONY: all clean test
 
-all: $(TARGET)
+all: $(TARGET) test_frame test_partition test_broker
+
+test_frame: test_frame.c frame.c frame.h
+	$(CC) $(CFLAGS) -o $@ test_frame.c frame.c
+
+test_partition: test_partition.c partition.c frame.h partition.h
+	$(CC) $(CFLAGS) -o $@ test_partition.c partition.c
+
+test_broker: test_broker.c broker.c frame.c partition.c broker.h
+	$(CC) $(CFLAGS) -o $@ test_broker.c broker.c frame.c partition.c $(LDFLAGS)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
@@ -54,4 +63,4 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) test_frame test_partition test_broker
