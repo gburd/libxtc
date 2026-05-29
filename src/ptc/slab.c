@@ -145,6 +145,51 @@ struct tls_mag {
 
 static XTC_THREAD_LOCAL struct tls_mag __tls_mags[TLS_MAGS];
 
+/*
+ * Thread-exit reclamation for per-thread magazines.  Each thread
+ * that frees into a slab lazily allocates a magazine slots buffer
+ * (see xtc_slab_free); without a thread-exit hook those buffers leak
+ * when a worker thread ends, which accumulates under thread churn
+ * (and trips LeakSanitizer in CI).  A pthread_key destructor frees
+ * the exiting thread's slots buffers.  We only free the buffers --
+ * the pooled objects they reference belong to slab chunks that are
+ * released wholesale by xtc_slab_destroy, so there is no object leak
+ * and the destructor never touches a possibly-already-destroyed
+ * cache.
+ */
+static pthread_key_t  __slab_tls_key;
+static pthread_once_t __slab_tls_once = PTHREAD_ONCE_INIT;
+
+static void
+__slab_tls_cleanup(void *unused)
+{
+	int i;
+	(void)unused;
+	for (i = 0; i < TLS_MAGS; i++) {
+		if (__tls_mags[i].mag.slots != NULL) {
+			__os_free(__tls_mags[i].mag.slots);
+			__tls_mags[i].mag.slots = NULL;
+		}
+		__tls_mags[i].cache = NULL;
+	}
+}
+
+static void
+__slab_tls_key_init(void)
+{
+	(void)pthread_key_create(&__slab_tls_key, __slab_tls_cleanup);
+}
+
+/* Arm the thread-exit destructor for the calling thread.  Cheap and
+ * idempotent: pthread_once guards the key, and setspecific to a
+ * non-NULL sentinel makes the destructor fire on thread exit. */
+static void
+__slab_tls_arm(void)
+{
+	(void)pthread_once(&__slab_tls_once, __slab_tls_key_init);
+	(void)pthread_setspecific(__slab_tls_key, (void *)1);
+}
+
 static struct magazine *
 __tls_mag_for(xtc_slab_t *cache)
 {
@@ -681,6 +726,9 @@ xtc_slab_free(xtc_slab_t *s, void *obj)
 					goto slow;
 				}
 				mag->cap = s->opts.magazine_size;
+				/* First magazine buffer on this thread: arm the
+				 * thread-exit destructor that frees it. */
+				__slab_tls_arm();
 			}
 			if (XTC_LIKELY(mag->n < mag->cap)) {
 				mag->slots[mag->n++] = slot;

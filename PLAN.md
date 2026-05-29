@@ -3158,10 +3158,10 @@ Tier 0 is done; the rest are tracked here.
 | A1 lrlock slot-exhaustion UAF | done | pthread_key reclamation + free list; lrlock_thread_churn regression test |
 | A2 send-path integer overflow guards | done | xtc_send / xtc_svr_call / xtc_svr_cast / xtc_mctx_alloc |
 | A3 standing security sweep | done | test/security/test_alloc_overflow_sweep.sh in make check |
-| A4 real build/test CI (not just pages) | TODO | model on lime ci.yml; until then soften README CI claim |
+| A4 real build/test CI (not just pages) | done | .github + .forgejo ci.yml: gcc+clang make check, plus ASan+UBSan jobs |
 | A5 reconcile README platform claim with reality | TODO | Linux/FreeBSD/Windows verified; macOS/illumos in progress |
 | A6 hot-path allocation claim vs xtc_send malloc | TODO | add small-message envelope pool, or soften the claim |
-| A7 regression tests (idle-CPU, sup restart-intensity, work-steal fairness) | partial | lrlock churn done; others TODO |
+| A7 regression tests | partial | lrlock churn done; ASan/UBSan in CI now catch leak/UAF/UB classes; idle-CPU + sup restart-intensity still TODO |
 | A8 thread xtc_abort_source through xtc_svr_call | TODO | cancellation must reach every await point |
 | A9 Bitcask compaction/merge | TODO | or relabel Bitcask explicitly as a demo |
 | A10 re-audit M17 conformance for fair comparisons | partial | W4 parking_lot done; rest TODO |

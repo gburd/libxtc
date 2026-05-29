@@ -1,0 +1,87 @@
+name: CI
+
+# Build libxtc and run the full test suite (make check: munit + PBT +
+# shell tests) on every push and pull request.  This is the workflow
+# that backs the README's "CI-tested every commit" statement; until
+# it existed that claim was aspirational.
+#
+# The autotools path is the canonical build; meson is a secondary
+# stub and is not exercised here.  hegel-c property tests need a local
+# hegel server and are configured out in CI (the PBT sources still
+# compile; the generative runs are a developer-local step).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: codeberg-medium
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ${{ matrix.compiler }} make autoconf automake \
+            pkg-config libssl-dev liburing-dev gawk
+
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+
+      - name: Configure
+        run: |
+          mkdir -p build_ci
+          cd build_ci
+          CC=${{ matrix.compiler }} ../dist/configure --with-tls=auto
+
+      - name: Build
+        run: make -C build_ci -j"$(nproc)"
+
+      - name: Test
+        run: make -C build_ci check
+
+  sanitizers:
+    runs-on: codeberg-medium
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make autoconf pkg-config libssl-dev liburing-dev gawk
+
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+
+      - name: Configure with ${{ matrix.sanitizer }} sanitizer
+        run: |
+          mkdir -p build_san
+          cd build_san
+          CFLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g -O1" \
+          LDFLAGS="-fsanitize=${{ matrix.sanitizer }}" \
+            ../dist/configure --with-tls=auto
+
+      - name: Build
+        run: make -C build_san -j"$(nproc)"
+
+      - name: Test under sanitizer
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: make -C build_san check

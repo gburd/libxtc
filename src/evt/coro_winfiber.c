@@ -67,6 +67,14 @@ __coro_destroy(struct xtc_coro *c)
 	__os_free(c);
 }
 
+/* Task cleanup trampoline: xtc_loop_fini calls this for each coro
+ * task so the fiber + coro struct are released with the loop. */
+static void
+__coro_task_cleanup(void *coro)
+{
+	__coro_destroy((struct xtc_coro *)coro);
+}
+
 /*
  * PUBLIC: int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
  */
@@ -93,6 +101,10 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 		return rc;
 	}
 	c->self = t;
+	/* Release the fiber + coro struct when the loop tears the task
+	 * down at fini. */
+	t->cleanup = __coro_task_cleanup;
+	t->cleanup_arg = c;
 	if (out_task) *out_task = t;
 	return XTC_OK;
 }
