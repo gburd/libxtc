@@ -39,16 +39,19 @@ XTC_LDFLAGS := $(shell \
 CFLAGS  += $(LIBURING_INC)
 LDFLAGS  = $(XTC_LDFLAGS) $(XTC_BUILD)/libxtc.a -pthread $(LIBURING_LDFLAGS)
 
-SRCS = main.c proto.c db.c cmd.c conn.c expire.c metrics.c
+SRCS = main.c proto.c db.c cmd.c conn.c expire.c metrics.c bitcask.c
 OBJS = $(SRCS:.c=.o)
 TARGET = rexis-server-xtc
 
 .PHONY: all clean test
 
-all: $(TARGET) test_bitcask
+all: $(TARGET) test_bitcask test_db_persist
 
 test_bitcask: test_bitcask.c bitcask.c bitcask.h
 	$(CC) $(CFLAGS) -o $@ test_bitcask.c bitcask.c -lpthread
+
+test_db_persist: test_db_persist.c db.c bitcask.c db.h bitcask.h
+	$(CC) $(CFLAGS) -o $@ test_db_persist.c db.c proto.c expire.c bitcask.c $(LDFLAGS)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
@@ -59,15 +62,14 @@ $(TARGET): $(OBJS)
 # Dependencies
 main.o: main.c proto.h db.h cmd.h conn.h
 proto.o: proto.c proto.h
-db.o: db.c db.h
+db.o: db.c db.h bitcask.h
 cmd.o: cmd.c cmd.h proto.h db.h
 conn.o: conn.c conn.h proto.h cmd.h db.h
 expire.o: expire.c db.h
 metrics.o: metrics.c db.h
 
 clean:
-	rm -f $(OBJS) $(TARGET) test_bitcask
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) test_bitcask test_db_persist
 
 # Basic sanity test: start server, ping, stop
 test: $(TARGET)
