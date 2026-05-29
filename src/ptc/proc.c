@@ -403,10 +403,15 @@ __proc_entry(void *arg)
 	}
 
 	p->alive = 0;
+	/* __notify_links_and_monitors frees p (releases the slot,
+	 * destroys the mailbox lock, frees the struct), so snapshot the
+	 * exit reason before the call -- reading p->exit_reason after it
+	 * is a use-after-free. */
+	reason = p->exit_reason;
 	__notify_links_and_monitors(p);
 
 	__current_proc = NULL;
-	return p->exit_reason;
+	return reason;
 }
 
 /*

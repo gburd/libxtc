@@ -687,19 +687,25 @@ xtc_lock_release_all(xtc_lockmgr_t *m, xtc_locker_t locker)
 		for (o = p->table; o != NULL; o = no) {
 			struct lock_entry *e, *ne;
 			no = o->next;
-			for (e = o->granted; e != NULL; e = ne) {
-				ne = e->next;
-				if (e->locker == locker) {
-					__release_entry_locked(m, p, o, e);
-					rel++;
-				}
-			}
+			/* Abort this locker's waiters first.  This only sets
+			 * the aborted flag and signals; it does not free o.
+			 * The granted-release loop runs last because its final
+			 * __release_entry_locked may free o via __obj_maybe_free
+			 * -- so nothing may touch o afterward.  (Same ordering
+			 * the deadlock-victim path uses.) */
 			for (e = o->waiting; e != NULL; e = ne) {
 				ne = e->next;
 				if (e->locker == locker) {
 					atomic_store_explicit(&e->aborted, 1,
 					    memory_order_release);
 					(void)pthread_cond_signal(&e->cv);
+				}
+			}
+			for (e = o->granted; e != NULL; e = ne) {
+				ne = e->next;
+				if (e->locker == locker) {
+					__release_entry_locked(m, p, o, e);
+					rel++;
 				}
 			}
 		}
