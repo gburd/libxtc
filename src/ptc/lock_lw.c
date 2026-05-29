@@ -58,8 +58,8 @@ struct held_entry {
 	xtc_lwlock_mode_t   mode;
 };
 
-static __thread struct held_entry __held[XTC_LWLOCK_TLS_SLOTS];
-static __thread int               __n_held = 0;
+static XTC_THREAD_LOCAL struct held_entry __held[XTC_LWLOCK_TLS_SLOTS];
+static XTC_THREAD_LOCAL int               __n_held = 0;
 
 static int
 __held_push(const xtc_lwlock_t *l, xtc_lwlock_mode_t m)

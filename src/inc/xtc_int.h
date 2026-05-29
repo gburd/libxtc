@@ -108,4 +108,39 @@
 #define XTC_CACHELINE_PAD  \
 	char __pad_##__LINE__[XTC_CACHE_LINE]
 
+/*
+ * printf-format checking.  GCC and clang accept the format attribute;
+ * MSVC has no equivalent that attaches to a prototype, so it expands
+ * to nothing there (MSVC's /analyze provides its own checking).
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#  define XTC_PRINTF_FMT(fmt_idx, va_idx) \
+      __attribute__((format(printf, fmt_idx, va_idx)))
+#else
+#  define XTC_PRINTF_FMT(fmt_idx, va_idx)
+#endif
+
+/*
+ * Struct packing.  GCC and clang use a trailing
+ * __attribute__((packed)); MSVC uses #pragma pack around the
+ * declaration.  Wrap a packed struct as:
+ *
+ *     XTC_PACK_PUSH
+ *     struct foo { ... } XTC_PACKED;
+ *     XTC_PACK_POP
+ *
+ * The XTC_PACKED suffix carries the attribute on GCC/clang and is
+ * empty on MSVC; the PUSH/POP carry the pragma on MSVC and are empty
+ * on GCC/clang.  Using both makes one source form work everywhere.
+ */
+#if defined(_MSC_VER)
+#  define XTC_PACK_PUSH  __pragma(pack(push, 1))
+#  define XTC_PACK_POP   __pragma(pack(pop))
+#  define XTC_PACKED
+#else
+#  define XTC_PACK_PUSH
+#  define XTC_PACK_POP
+#  define XTC_PACKED  __attribute__((packed))
+#endif
+
 #endif /* XTC_INT_H */

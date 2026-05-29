@@ -51,7 +51,7 @@ typedef int __xtc_coro_uctx_unused;
 #endif
 
 /* Per-thread cursor -- the coroutine currently executing on this thread. */
-__thread struct xtc_coro *__xtc_current_coro = NULL;
+XTC_THREAD_LOCAL struct xtc_coro *__xtc_current_coro = NULL;
 
 /* Default stack size; configurable via xtc_set_stack_size(). */
 static size_t __xtc_stack_size = 64 * 1024;
