@@ -136,6 +136,16 @@ xtc_inject_trigger(const char *name)
 
 	if (name == NULL) return;
 
+	/* Lock-free fast path: when nothing is attached anywhere (the
+	 * production case, and the common case in tests too), a planted
+	 * injection point costs a single relaxed atomic load and no
+	 * mutex.  This keeps XTC_INJECTION_POINT cheap enough to plant
+	 * in warm concurrency paths; for release builds it is elided
+	 * entirely by XTC_INJECT_DISABLE. */
+	if (atomic_load_explicit(&__pts_attached_count,
+	    memory_order_acquire) == 0)
+		return;
+
 	(void)pthread_mutex_lock(&__pts_lock);
 	p = __find_locked(name);
 	if (p == NULL || (p->n_cbs == 0 && !p->wait_attached)) {
