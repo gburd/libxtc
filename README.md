@@ -44,10 +44,14 @@ faults, and stay inside a fixed resource budget on commodity hardware.
   bounded RSS, file descriptors, in-flight tasks, and bandwidth
   under stress.  Backpressure is built in; OOM-spirals are not.
 
-* **You want to write code once and have it run on Linux, FreeBSD,
-  illumos, macOS, and Windows.**  All five are supported with the
-  same source.  Tier-1 platforms (Linux + FreeBSD + illumos + Windows)
-  are CI-tested every commit.
+* **You want portable source.**  The same source builds on Linux,
+  FreeBSD, illumos, and Windows.  Linux is exercised on every commit
+  by CI (gcc and clang, plus AddressSanitizer and UBSan).  FreeBSD
+  and Windows (MinGW, Clang64, and MSVC) are verified manually;
+  illumos builds with `--with-tls=none` and is being brought back to
+  a full pass; macOS and AIX have OS-layer ports awaiting a test
+  host.  See `docs/M_WINDOWS_MATRIX.md`, `docs/M_LIBC_MATRIX.md`,
+  and PLAN.md for the current per-platform status.
 
 * **You want to stay close to the metal.**  No GC, no STW pauses, no
   hidden allocations on the hot path.  Memory comes from
@@ -152,17 +156,20 @@ What's working today:
 
 | Layer | Status |
 |---|---|
-| L0 OS substrate | Done.  Linux, FreeBSD, illumos, macOS-ready, AIX (untested), Windows MinGW. |
+| L0 OS substrate | Done.  Linux, FreeBSD, illumos, Windows (MinGW, Clang64, MSVC); macOS + AIX OS-layer ports await a test host. |
 | L1 I/O | Done.  io_uring, epoll, kqueue, IOCP, poll, select, illumos port_*, AIX pollset (untested). |
 | L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written x86_64 fcontext (~7.6 ns/swap). |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
 | L5 PG adapter | Designed (`docs/M16_PG_ADAPTER.md`); not yet implemented. |
-| TLS | OpenSSL backend done; LibreSSL/GnuTLS/wolfSSL/Mbed TLS designed (`docs/M_TLS.md`). |
+| TLS | OpenSSL backend done (also builds + mostly passes on LibreSSL, see `docs/M_TLS_MATRIX.md`); GnuTLS/wolfSSL/Mbed TLS designed (`docs/M_TLS.md`). |
 
-Test coverage today: **264 munit + 23 hegel-c property tests on Linux**,
-matching numbers on FreeBSD and illumos, full check suite green on
-Windows MinGW.
+Test coverage today: **280 munit + 23 hegel-c property tests on
+Linux**, clean under AddressSanitizer and UBSan in CI.  FreeBSD and
+illumos have been verified at matching numbers in prior runs (a
+re-verify against the current tree is pending); Windows passes ~233
+munit under MinGW and 48/48 of the buildable binaries under Clang64,
+with an MSVC smoke build of the static library.
 
 Honest gaps and known issues live in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 The full milestone roadmap is in [PLAN.md](PLAN.md).

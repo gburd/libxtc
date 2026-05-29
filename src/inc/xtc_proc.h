@@ -109,6 +109,22 @@ xtc_pid_t xtc_self(void);
  *   XTC_E_INVAL       NULL data with non-zero size, or stale/unknown pid
  *   XTC_E_AGAIN       target mailbox at capacity
  *   XTC_E_RESOURCE    global slot cap (XTC_RES_CHAN_SLOTS) hit
+ *
+ * BACKPRESSURE CONTRACT -- read this.  Mailboxes are bounded (the
+ * cap is xtc_proc_opts_t.mailbox_cap, default 4096).  This is
+ * deliberate: an unbounded mailbox is how an actor system OOMs when
+ * a fast sender outruns a slow receiver (the classic BEAM failure).
+ * The price is that send can fail with XTC_E_AGAIN when the target
+ * is full, and a dropped XTC_E_AGAIN is a SILENT MESSAGE LOSS.
+ *
+ * Senders MUST check the return value and decide a policy:
+ *   - retry later (re-arm on a timer, or yield and resend),
+ *   - shed load (drop the message and account it),
+ *   - apply end-to-end flow control (e.g. stop reading the upstream
+ *     socket until the target drains -- see examples/07_kaka for a
+ *     credit-based scheme), or
+ *   - treat it as fatal for a must-deliver path.
+ * Ignoring the return is a bug, not a shortcut.
  */
 int       xtc_send(xtc_pid_t to, const void *data, size_t size);
 
