@@ -164,4 +164,23 @@ judge.
 
 ## Status
 
-Phase 0 scaffold only.  Subsequent phases are tracked in PLAN.md.
+Phase 1 complete: the framing codec, the in-memory partition log, and
+the broker's partition/connection procs are implemented and tested.
+
+  * `frame.c` -- wire codec; `test_frame` (6 checks) round-trips
+    every frame and request/response type.
+  * `partition.c` -- in-memory ordered log; `test_partition` (3
+    checks) covers append/offset assignment, read-by-offset, and
+    growth past the initial capacity.
+  * `broker.c` -- partition_proc (one xtc_proc per topic/partition,
+    single-owner ordering) and conn_proc (socket parked via
+    xtc_proc_wait_fd).  `test_broker` drives a full PRODUCE -> FETCH
+    round-trip in-process through a real xtc loop (no socket), so it
+    runs under `make test` without a daemon.
+
+The networked end-to-end path (a TCP client against the running
+broker) is built but exercised manually; the in-process self-test is
+the automated correctness gate for the proc-messaging layer.
+
+Phases 2-5 (segmented persistence, credit-based backpressure,
+consumer groups, observability) are tracked in PLAN.md.

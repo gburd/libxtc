@@ -73,3 +73,6 @@ doxygen-warnings.txt
 # kaka example
 examples/07_kaka/kaka-broker
 examples/07_kaka/*.o
+examples/07_kaka/test_frame
+examples/07_kaka/test_partition
+examples/07_kaka/test_broker
