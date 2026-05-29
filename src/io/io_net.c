@@ -240,10 +240,13 @@ xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
 	}
 	(void)xtc_net_apply_tcp_opts(fd, opts);
 
-	/* For IPv6 sockets, set IPV6_V6ONLY to avoid dual-stack issues. */
+	/* For IPv6 sockets, set IPV6_V6ONLY to avoid dual-stack issues.
+	 * Cast to const char * for portability: Winsock requires a char *
+	 * argument, BSD/Linux accept void *. */
 	if (fam == XTC_NET_INET6) {
 		v = 1;
-		(void)setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v, sizeof v);
+		(void)setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY,
+		    (const char *)&v, sizeof v);
 	}
 
 	if ((rc = __resolve_addr(fam, host, port, &sa, &salen)) != XTC_OK) {

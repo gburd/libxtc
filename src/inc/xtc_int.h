@@ -75,6 +75,33 @@
 #endif
 
 /*
+ * Bit-scan helpers.  GCC and clang provide __builtin_ctzll /
+ * __builtin_clzll directly; MSVC provides _BitScanForward64 /
+ * _BitScanReverse64 with different signatures.  Wrap both so call
+ * sites in the rest of the source need not branch on toolchain.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#  define XTC_CTZLL(v) __builtin_ctzll(v)
+#  define XTC_CLZLL(v) __builtin_clzll(v)
+#elif defined(_MSC_VER)
+#  include <intrin.h>
+   static inline int xtc__ctzll(unsigned long long v) {
+       unsigned long idx;
+       _BitScanForward64(&idx, v);
+       return (int)idx;
+   }
+   static inline int xtc__clzll(unsigned long long v) {
+       unsigned long idx;
+       _BitScanReverse64(&idx, v);
+       return 63 - (int)idx;
+   }
+#  define XTC_CTZLL(v) xtc__ctzll(v)
+#  define XTC_CLZLL(v) xtc__clzll(v)
+#else
+#  error "need bit-scan intrinsics for this toolchain"
+#endif
+
+/*
  * Cache-line padding helper.  Embeds explicit padding bytes to push
  * the next field onto a new cache line.
  */
