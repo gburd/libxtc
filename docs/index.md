@@ -44,6 +44,9 @@ Lower-level material organized by topic:
     what to use instead.
   * [SQLite hard-fork plan](M_SQLXTC_HARDFORK.md) -- staged plan
     for breaking SQLite's monolithic mutex.
+  * [SQLite reimagined on libxtc](M_SQLXTC_GREENFIELD.md) -- a
+    clean-slate design: how a server-class SQL engine would be built
+    if its authors had started with libxtc.
   * [libxtc / PostgreSQL boundary](M_LIBXTC_PG_BOUNDARY.md) --
     layering rules for the eventual PG adapter.
 
