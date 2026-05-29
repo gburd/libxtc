@@ -22,6 +22,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_inject.h"
 #include "xtc_lrlock.h"
 
 #include <pthread.h>
@@ -465,6 +466,12 @@ xtc_lrlock_read_begin(xtc_lrlock_t *lr)
 	/* Step 3: SeqCst fence -- guarantees writer sees our odd epoch
 	 * before we observe the current read_idx. */
 	atomic_thread_fence(memory_order_seq_cst);
+	/* Race window: our epoch is announced (odd) but we have not yet
+	 * loaded read_idx.  A concurrent publish must observe our odd
+	 * epoch and drain-wait for us.  A test pauses a reader here,
+	 * runs a publish, then releases and asserts the reader still
+	 * sees a consistent buffer. */
+	XTC_INJECTION_POINT("lrlock.read.post_announce");
 	/* Step 4: load read_idx. */
 	idx = atomic_load_explicit(&lr->read_idx, memory_order_acquire);
 	lr->epochs[slot].enters = 1;
@@ -566,6 +573,14 @@ __publish_common(xtc_lrlock_t *lr, int force_full_sync)
 	(void)atomic_exchange_explicit(&lr->read_idx, (uint32_t)new_idx,
 	    memory_order_acq_rel);
 	atomic_thread_fence(memory_order_seq_cst);
+
+	/* Race window: read_idx now points at the new buffer, but a
+	 * reader that loaded the old index before the swap is still on
+	 * data[old_idx].  __wait_for_readers below must drain those
+	 * readers before this buffer is reused.  A test can pause the
+	 * writer here, start a reader on the old buffer, then release
+	 * and assert the drain waited. */
+	XTC_INJECTION_POINT("lrlock.publish.post_swap");
 
 	__snapshot_epochs(lr);
 	__wait_for_readers(lr);
