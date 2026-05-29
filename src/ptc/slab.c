@@ -119,12 +119,12 @@ struct audit_event {
 };
 
 /* ---- per-cache global registry (for reap_all + pressure) ---- */
-struct registry_entry {
+struct slab_registry_entry {
 	xtc_slab_t           *slab;
-	struct registry_entry *next;
+	struct slab_registry_entry *next;
 };
-static pthread_mutex_t  __reg_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct registry_entry *__registry;
+static pthread_mutex_t  __slab_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct slab_registry_entry *__registry;
 
 /* ---- per-loop magazine (TLS) ---- */
 struct magazine {
@@ -206,10 +206,10 @@ __tls_mag_for(xtc_slab_t *cache)
 
 /* ---- chunks and slabs ---- */
 
-struct chunk {
+struct slab_chunk {
 	void           *base;        /* chunk start (== this struct in PL mode) */
 	size_t          size;        /* chunk byte size */
-	struct chunk   *next;
+	struct slab_chunk   *next;
 	int             n_inuse;
 	int             n_total;
 	void           *free_head;   /* singly linked through obj's first 8B */
@@ -222,7 +222,7 @@ struct xtc_slab {
 	int              objs_per_chunk;
 
 	pthread_mutex_t  lock;          /* protects chunk lists + stats */
-	struct chunk    *chunks;
+	struct slab_chunk    *chunks;
 	int              n_chunks;
 
 	/* Stats (atomic for lock-free read). */
@@ -327,10 +327,10 @@ __rz_check(xtc_slab_t *s, void *slot)
 
 /* ---- chunk management ---- */
 
-static struct chunk *
+static struct slab_chunk *
 __chunk_new(xtc_slab_t *s)
 {
-	struct chunk *c;
+	struct slab_chunk *c;
 	uint8_t *base;
 	int      i;
 	size_t   total = s->opts.chunk_size;
@@ -419,7 +419,7 @@ __chunk_new(xtc_slab_t *s)
 }
 
 static void
-__chunk_release(xtc_slab_t *s, struct chunk *c)
+__chunk_release(xtc_slab_t *s, struct slab_chunk *c)
 {
 	if (c->owns_mmap) (void)munmap(c->base, c->size);
 	if (s->opts.res != NULL)
@@ -433,7 +433,7 @@ __chunk_release(xtc_slab_t *s, struct chunk *c)
 static void *
 __pop_slot_locked(xtc_slab_t *s)
 {
-	struct chunk *c;
+	struct slab_chunk *c;
 	void *slot;
 	for (c = s->chunks; c != NULL; c = c->next) {
 		if (c->free_head != NULL) {
@@ -455,7 +455,7 @@ __pop_slot_locked(xtc_slab_t *s)
 static void
 __push_slot_locked(xtc_slab_t *s, void *slot)
 {
-	struct chunk *c;
+	struct slab_chunk *c;
 	for (c = s->chunks; c != NULL; c = c->next) {
 		if ((uint8_t *)slot >= (uint8_t *)c->base &&
 		    (uint8_t *)slot <  (uint8_t *)c->base + c->size) {
@@ -557,14 +557,14 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 
 	/* Register globally for reap_all / pressure broadcasts. */
 	{
-		struct registry_entry *re = NULL;
+		struct slab_registry_entry *re = NULL;
 		(void)__os_calloc(1, sizeof *re, (void **)&re);
 		if (re != NULL) {
-			(void)pthread_mutex_lock(&__reg_lock);
+			(void)pthread_mutex_lock(&__slab_reg_lock);
 			re->slab = s;
 			re->next = __registry;
 			__registry = re;
-			(void)pthread_mutex_unlock(&__reg_lock);
+			(void)pthread_mutex_unlock(&__slab_reg_lock);
 		}
 	}
 
@@ -575,7 +575,7 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 void
 xtc_slab_destroy(xtc_slab_t *s)
 {
-	struct chunk *c, *next;
+	struct slab_chunk *c, *next;
 	int i;
 	if (s == NULL) return;
 
@@ -623,8 +623,8 @@ xtc_slab_destroy(xtc_slab_t *s)
 
 	/* Unlink from global registry. */
 	{
-		struct registry_entry *re, **link;
-		(void)pthread_mutex_lock(&__reg_lock);
+		struct slab_registry_entry *re, **link;
+		(void)pthread_mutex_lock(&__slab_reg_lock);
 		for (link = &__registry; (re = *link) != NULL; link = &re->next) {
 			if (re->slab == s) {
 				*link = re->next;
@@ -632,7 +632,7 @@ xtc_slab_destroy(xtc_slab_t *s)
 				break;
 			}
 		}
-		(void)pthread_mutex_unlock(&__reg_lock);
+		(void)pthread_mutex_unlock(&__slab_reg_lock);
 	}
 
 	__os_free(s);
@@ -751,7 +751,7 @@ int
 xtc_slab_reap(xtc_slab_t *s)
 {
 	int reaped = 0, i;
-	struct chunk *c, **link, *next;
+	struct slab_chunk *c, **link, *next;
 	if (s == NULL) return 0;
 
 	/* Drain magazines associated with this thread. */
@@ -827,7 +827,7 @@ xtc_slab_offset(const xtc_slab_t *s, const void *p)
 	/* Process-local: use chunk-relative addressing.  Walk chunks
 	 * to find the host; offset = chunk_index * chunk_size + slot_off. */
 	{
-		struct chunk *c; int idx = 0;
+		struct slab_chunk *c; int idx = 0;
 		for (c = s->chunks; c != NULL; c = c->next, idx++) {
 			if ((const uint8_t *)p >= (const uint8_t *)c->base &&
 			    (const uint8_t *)p <  (const uint8_t *)c->base +
@@ -853,7 +853,7 @@ xtc_slab_resolve(const xtc_slab_t *s, xtc_slab_off_t off)
 	{
 		int target_idx = (int)(off / (int64_t)s->opts.chunk_size);
 		int64_t in_chunk = off % (int64_t)s->opts.chunk_size;
-		struct chunk *c; int idx = 0;
+		struct slab_chunk *c; int idx = 0;
 		for (c = s->chunks; c != NULL; c = c->next, idx++) {
 			if (idx == target_idx)
 				return (uint8_t *)c->base + in_chunk;
@@ -866,11 +866,11 @@ int
 xtc_slab_reap_all(void)
 {
 	int total = 0;
-	struct registry_entry *re;
-	(void)pthread_mutex_lock(&__reg_lock);
+	struct slab_registry_entry *re;
+	(void)pthread_mutex_lock(&__slab_reg_lock);
 	for (re = __registry; re != NULL; re = re->next)
 		total += xtc_slab_reap(re->slab);
-	(void)pthread_mutex_unlock(&__reg_lock);
+	(void)pthread_mutex_unlock(&__slab_reg_lock);
 	return total;
 }
 

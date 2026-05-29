@@ -43,7 +43,7 @@ static pthread_mutex_t __pd_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct pdict_table_entry *__pd_head;
 
 static struct pdict_table_entry *
-__find_locked(xtc_pid_t pid)
+__pdict_find_locked(xtc_pid_t pid)
 {
 	struct pdict_table_entry *te;
 	for (te = __pd_head; te != NULL; te = te->next)
@@ -52,9 +52,9 @@ __find_locked(xtc_pid_t pid)
 }
 
 static struct pdict_table_entry *
-__get_or_create_locked(xtc_pid_t pid)
+__pdict_get_or_create_locked(xtc_pid_t pid)
 {
-	struct pdict_table_entry *te = __find_locked(pid);
+	struct pdict_table_entry *te = __pdict_find_locked(pid);
 	if (te != NULL) return te;
 	if (__os_calloc(1, sizeof *te, (void **)&te) != XTC_OK) return NULL;
 	te->pid = pid;
@@ -87,7 +87,7 @@ xtc_pdict_put_with_dtor(const char *key, void *value, xtc_pdict_dtor_fn dtor)
 	if (xtc_pid_is_none(self)) return XTC_E_INVAL;
 
 	(void)pthread_mutex_lock(&__pd_lock);
-	te = __get_or_create_locked(self);
+	te = __pdict_get_or_create_locked(self);
 	if (te == NULL) goto out;
 
 	/* Replace if key already exists. */
@@ -133,7 +133,7 @@ xtc_pdict_get(const char *key, void **value)
 	if (xtc_pid_is_none(self)) return XTC_E_INVAL;
 
 	(void)pthread_mutex_lock(&__pd_lock);
-	te = __find_locked(self);
+	te = __pdict_find_locked(self);
 	if (te) {
 		for (e = te->head; e != NULL; e = e->next) {
 			if (strcmp(e->key, key) == 0) {
@@ -158,7 +158,7 @@ xtc_pdict_erase(const char *key)
 	if (xtc_pid_is_none(self)) return XTC_E_INVAL;
 
 	(void)pthread_mutex_lock(&__pd_lock);
-	te = __find_locked(self);
+	te = __pdict_find_locked(self);
 	if (te) {
 		for (link = &te->head; (e = *link) != NULL; link = &e->next) {
 			if (strcmp(e->key, key) == 0) {
@@ -184,7 +184,7 @@ xtc_pdict_count(void)
 	int n = 0;
 	if (xtc_pid_is_none(self)) return 0;
 	(void)pthread_mutex_lock(&__pd_lock);
-	te = __find_locked(self);
+	te = __pdict_find_locked(self);
 	if (te) n = te->n;
 	(void)pthread_mutex_unlock(&__pd_lock);
 	return n;
@@ -198,7 +198,7 @@ xtc_pdict_clear(void)
 	struct pdict_entry *e, *next;
 	if (xtc_pid_is_none(self)) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&__pd_lock);
-	te = __find_locked(self);
+	te = __pdict_find_locked(self);
 	if (te) {
 		for (e = te->head; e != NULL; e = next) {
 			next = e->next;

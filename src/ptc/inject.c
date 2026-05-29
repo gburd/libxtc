@@ -40,7 +40,7 @@ static int             __pts_n;
 static _Atomic int     __pts_attached_count;
 
 static struct point *
-__find_locked(const char *name)
+__inject_find_locked(const char *name)
 {
 	int i;
 	for (i = 0; i < __pts_n; i++)
@@ -50,9 +50,9 @@ __find_locked(const char *name)
 }
 
 static struct point *
-__get_or_create_locked(const char *name)
+__inject_get_or_create_locked(const char *name)
 {
-	struct point *p = __find_locked(name);
+	struct point *p = __inject_find_locked(name);
 	if (p != NULL) return p;
 	if (__pts_n >= XTC_INJECT_MAX_NAMES) return NULL;
 	if (__os_calloc(1, sizeof *p, (void **)&p) != XTC_OK) return NULL;
@@ -70,7 +70,7 @@ xtc_inject_attach(const char *name, xtc_inject_fn fn, void *user)
 	int rc = XTC_OK;
 	if (name == NULL || fn == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&__pts_lock);
-	p = __get_or_create_locked(name);
+	p = __inject_get_or_create_locked(name);
 	if (p == NULL) { rc = XTC_E_RESOURCE; goto out; }
 	if (p->n_cbs >= XTC_INJECT_MAX_PER) { rc = XTC_E_RESOURCE; goto out; }
 	p->cbs[p->n_cbs].fn   = fn;
@@ -90,7 +90,7 @@ xtc_inject_attach_wait(const char *name)
 	int rc = XTC_OK;
 	if (name == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&__pts_lock);
-	p = __get_or_create_locked(name);
+	p = __inject_get_or_create_locked(name);
 	if (p == NULL) { rc = XTC_E_RESOURCE; goto out; }
 	if (p->wait_attached) goto out;     /* idempotent */
 	p->wait_attached = 1;
@@ -110,7 +110,7 @@ xtc_inject_detach(const char *name)
 	int i;
 	if (name == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&__pts_lock);
-	p = __find_locked(name);
+	p = __inject_find_locked(name);
 	if (p != NULL) {
 		int sub = p->n_cbs + (p->wait_attached ? 1 : 0);
 		p->n_cbs = 0;
@@ -147,7 +147,7 @@ xtc_inject_trigger(const char *name)
 		return;
 
 	(void)pthread_mutex_lock(&__pts_lock);
-	p = __find_locked(name);
+	p = __inject_find_locked(name);
 	if (p == NULL || (p->n_cbs == 0 && !p->wait_attached)) {
 		(void)pthread_mutex_unlock(&__pts_lock);
 		return;
@@ -177,7 +177,7 @@ xtc_inject_wakeup(const char *name)
 	int rc = XTC_E_INVAL;
 	if (name == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&__pts_lock);
-	p = __find_locked(name);
+	p = __inject_find_locked(name);
 	if (p != NULL && p->wait_attached) {
 		p->wait_release = 1;
 		(void)pthread_cond_broadcast(&p->cv);
@@ -217,7 +217,7 @@ xtc_inject_check(const char *name)
 	if (atomic_load_explicit(&__pts_attached_count,
 	    memory_order_relaxed) == 0) return 0;
 	(void)pthread_mutex_lock(&__pts_lock);
-	p = __find_locked(name);
+	p = __inject_find_locked(name);
 	if (p != NULL && (p->n_cbs > 0 || p->wait_attached)) hit = 1;
 	(void)pthread_mutex_unlock(&__pts_lock);
 	return hit;

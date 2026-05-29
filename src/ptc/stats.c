@@ -83,35 +83,35 @@ __current_cpu(int n_cpus)
 
 /* ---- registry ---- */
 
-struct registry_entry {
+struct stats_registry_entry {
 	const void          *handle;
 	xtc_metric_kind_t    kind;
 	char                 name[XTC_STATS_NAME_MAX];
-	struct registry_entry *next;
+	struct stats_registry_entry *next;
 };
 
-static pthread_mutex_t __reg_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct registry_entry *__reg_head;
+static pthread_mutex_t __stats_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct stats_registry_entry *__reg_head;
 
 static void
 __reg_add(const void *handle, xtc_metric_kind_t kind, const char *name)
 {
-	struct registry_entry *e;
+	struct stats_registry_entry *e;
 	if (__os_calloc(1, sizeof *e, (void **)&e) != XTC_OK) return;
 	e->handle = handle;
 	e->kind = kind;
 	strncpy(e->name, name, XTC_STATS_NAME_MAX - 1);
-	(void)pthread_mutex_lock(&__reg_lock);
+	(void)pthread_mutex_lock(&__stats_reg_lock);
 	e->next = __reg_head;
 	__reg_head = e;
-	(void)pthread_mutex_unlock(&__reg_lock);
+	(void)pthread_mutex_unlock(&__stats_reg_lock);
 }
 
 static void
 __reg_remove(const void *handle)
 {
-	struct registry_entry **link, *e;
-	(void)pthread_mutex_lock(&__reg_lock);
+	struct stats_registry_entry **link, *e;
+	(void)pthread_mutex_lock(&__stats_reg_lock);
 	for (link = &__reg_head; (e = *link) != NULL; link = &e->next) {
 		if (e->handle == handle) {
 			*link = e->next;
@@ -119,7 +119,7 @@ __reg_remove(const void *handle)
 			break;
 		}
 	}
-	(void)pthread_mutex_unlock(&__reg_lock);
+	(void)pthread_mutex_unlock(&__stats_reg_lock);
 }
 
 /* ---- counter ---- */
@@ -383,15 +383,15 @@ xtc_hist_quantile(const xtc_hist_t *h, double q)
 int
 xtc_metrics_iterate(xtc_metric_visit_fn fn, void *user)
 {
-	struct registry_entry *e;
+	struct stats_registry_entry *e;
 	int n = 0;
 	if (fn == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&__reg_lock);
+	(void)pthread_mutex_lock(&__stats_reg_lock);
 	for (e = __reg_head; e != NULL; e = e->next) {
 		if (fn(e->name, e->kind, e->handle, user) != 0) break;
 		n++;
 	}
-	(void)pthread_mutex_unlock(&__reg_lock);
+	(void)pthread_mutex_unlock(&__stats_reg_lock);
 	return n;
 }
 
