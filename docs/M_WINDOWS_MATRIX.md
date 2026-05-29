@@ -1,3 +1,7 @@
+---
+title: "Windows build matrix"
+---
+
 # Windows build matrix
 
 xtc supports multiple Windows toolchains.  This document records

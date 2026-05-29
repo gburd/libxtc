@@ -1,3 +1,7 @@
+---
+title: "BEAM / OTP recurring production issues -- and how libxtc relates"
+---
+
 # BEAM / OTP recurring production issues -- and how libxtc relates
 
 xtc draws heavily from the BEAM (Erlang/Elixir) runtime and the OTP

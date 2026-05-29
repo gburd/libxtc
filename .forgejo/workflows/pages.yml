@@ -1,0 +1,56 @@
+# Build the libxtc documentation tree and push to the pages branch
+# so Codeberg Pages serves it.
+#
+# Triggers on every push to main that touches docs/.  The job
+# builds the Jekyll site, then force-pushes the rendered output to
+# branch `pages`, which Codeberg Pages picks up.
+#
+# Configuration on Codeberg side: enable Pages and select the
+# `pages` branch as the source.
+
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".forgejo/workflows/pages.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: docker
+    container:
+      image: ruby:3.3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Jekyll and theme
+        run: |
+          gem install --no-document bundler jekyll jekyll-theme-cayman \
+            kramdown-parser-gfm rouge
+      - name: Build site
+        run: |
+          cd docs
+          jekyll build --destination ../_site
+      - name: Push to pages branch
+        env:
+          PUSH_TOKEN: ${{ secrets.PAGES_PUSH_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          set -eu
+          cd _site
+          git init
+          git config user.name "$ACTOR"
+          git config user.email "$ACTOR@users.noreply.codeberg.org"
+          git checkout -b pages
+          git add .
+          git commit -m "Build site from $(echo $GITHUB_SHA | head -c 12)"
+          # Tokenized URL for push.  PAGES_PUSH_TOKEN must be a
+          # repository secret with write access to this repo.
+          AUTHED_URL=$(echo "$REPO_URL" | sed "s,://,://${ACTOR}:${PUSH_TOKEN}@,")
+          git push --force "$AUTHED_URL" pages:pages

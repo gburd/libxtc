@@ -1,3 +1,7 @@
+---
+title: "sqlxtc -- breaking SQLite into concurrent xtc_procs"
+---
+
 # sqlxtc -- breaking SQLite into concurrent xtc_procs
 
 This document is the architectural plan for hard-forking SQLite to run
