@@ -1359,7 +1359,7 @@ Optional Packages:
                           Pick the L1 I/O backend (default: auto).
   --with-liburing=PATH    Path to a liburing install (overrides pkg-config
                           search).
-  --with-tls=openssl|none|auto
+  --with-tls=openssl|libressl|none|auto
                           Select the TLS backend (default: auto).
   --with-hegel=PATH       Enable hegel-c property-based tests; PATH is the
                           hegel-c source root that contains
@@ -4270,7 +4270,9 @@ XTC_TLS_LIBS=
 printf %s "checking for TLS backend... " >&6; }
 case "$xtc_tls" in
   auto)
-    # Try OpenSSL: need both the library and the header.
+    # Try OpenSSL (or its API-compatible drop-in: LibreSSL).  Both
+    # ship libssl.so + libcrypto.so + openssl/ssl.h, so the same
+    # detection works for either.
     ac_save_LIBS=$LIBS
     { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for SSL_CTX_new in -lssl" >&5
 printf %s "checking for SSL_CTX_new in -lssl... " >&6; }
@@ -4341,8 +4343,10 @@ else case e in #(
 esac
 fi
     ;;
-  openssl)
-    # Explicit request -- fail loudly if not present.
+  openssl|libressl)
+    # Explicit request -- fail loudly if not present.  The two share
+    # an ABI; we keep both names so users can document which they
+    # actually built against.
     ac_save_LIBS=$LIBS
     { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for SSL_CTX_new in -lssl" >&5
 printf %s "checking for SSL_CTX_new in -lssl... " >&6; }
@@ -4394,7 +4398,7 @@ then :
   LIBS="-lssl $LIBS"
 
 else case e in #(
-  e) as_fn_error $? "--with-tls=openssl: libssl not found" "$LINENO" 5 ;;
+  e) as_fn_error $? "--with-tls=$xtc_tls: libssl not found" "$LINENO" 5 ;;
 esac
 fi
 
@@ -4404,17 +4408,24 @@ if test "x$ac_cv_header_openssl_ssl_h" = xyes
 then :
 
 else case e in #(
-  e) as_fn_error $? "--with-tls=openssl: openssl/ssl.h not found" "$LINENO" 5 ;;
+  e) as_fn_error $? "--with-tls=$xtc_tls: openssl/ssl.h not found" "$LINENO" 5 ;;
 esac
 fi
 
     xtc_tls_backend=openssl
+    if test "x$xtc_tls" = xlibressl
+then :
+  xtc_tls_flavor=libressl
+else case e in #(
+  e) xtc_tls_flavor=openssl ;;
+esac
+fi
     ;;
   none)
     xtc_tls_backend=none
     ;;
   *)
-    as_fn_error $? "invalid --with-tls=$xtc_tls; use openssl, none, or auto" "$LINENO" 5
+    as_fn_error $? "invalid --with-tls=$xtc_tls; use openssl, libressl, none, or auto" "$LINENO" 5
     ;;
 esac
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $xtc_tls_backend" >&5

@@ -178,7 +178,7 @@ AS_CASE([$xtc_io_backend],
 # TLS backend selection.
 # -------------------------------------------------------------------------
 AC_ARG_WITH([tls],
-  [AS_HELP_STRING([--with-tls=openssl|none|auto],
+  [AS_HELP_STRING([--with-tls=openssl|libressl|none|auto],
     [Select the TLS backend (default: auto).])],
   [xtc_tls=$withval], [xtc_tls=auto])
 
@@ -188,7 +188,9 @@ XTC_TLS_LIBS=
 AC_MSG_CHECKING([for TLS backend])
 case "$xtc_tls" in
   auto)
-    # Try OpenSSL: need both the library and the header.
+    # Try OpenSSL (or its API-compatible drop-in: LibreSSL).  Both
+    # ship libssl.so + libcrypto.so + openssl/ssl.h, so the same
+    # detection works for either.
     ac_save_LIBS=$LIBS
     AC_CHECK_LIB([ssl], [SSL_CTX_new],
       [ac_have_ssl_lib=yes], [ac_have_ssl_lib=no], [-lcrypto])
@@ -199,28 +201,32 @@ case "$xtc_tls" in
       [xtc_tls_backend=openssl],
       [xtc_tls_backend=none])
     ;;
-  openssl)
-    # Explicit request -- fail loudly if not present.
+  openssl|libressl)
+    # Explicit request -- fail loudly if not present.  The two share
+    # an ABI; we keep both names so users can document which they
+    # actually built against.
     ac_save_LIBS=$LIBS
     AC_CHECK_LIB([ssl], [SSL_CTX_new], [],
-      [AC_MSG_ERROR([--with-tls=openssl: libssl not found])], [-lcrypto])
+      [AC_MSG_ERROR([--with-tls=$xtc_tls: libssl not found])], [-lcrypto])
     LIBS=$ac_save_LIBS
     AC_CHECK_HEADER([openssl/ssl.h], [],
-      [AC_MSG_ERROR([--with-tls=openssl: openssl/ssl.h not found])])
+      [AC_MSG_ERROR([--with-tls=$xtc_tls: openssl/ssl.h not found])])
     xtc_tls_backend=openssl
+    AS_IF([test "x$xtc_tls" = xlibressl],
+      [xtc_tls_flavor=libressl], [xtc_tls_flavor=openssl])
     ;;
   none)
     xtc_tls_backend=none
     ;;
   *)
-    AC_MSG_ERROR([invalid --with-tls=$xtc_tls; use openssl, none, or auto])
+    AC_MSG_ERROR([invalid --with-tls=$xtc_tls; use openssl, libressl, none, or auto])
     ;;
 esac
 AC_MSG_RESULT([$xtc_tls_backend])
 
 AS_IF([test "x$xtc_tls_backend" = xopenssl],
   [AC_DEFINE([XTC_TLS_BACKEND_OPENSSL], 1,
-     [Define to 1 to use the OpenSSL TLS backend])
+     [Define to 1 to use the OpenSSL/LibreSSL TLS backend])
    XTC_TLS_LIBS="-lssl -lcrypto"])
 
 AC_SUBST([XTC_TLS_BACKEND], [$xtc_tls_backend])
