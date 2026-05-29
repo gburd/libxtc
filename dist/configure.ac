@@ -89,6 +89,16 @@ uring_cflags=
 uring_libs=
 AC_CHECK_HEADER([sys/epoll.h], [have_epoll=yes], [have_epoll=no])
 AC_CHECK_HEADER([sys/event.h], [have_kqueue=yes], [have_kqueue=no])
+
+# musl libc deliberately omits the ucontext.h API (swapcontext et al.)
+# which the default coroutine substrate uses.  Detect this so the
+# build can fail loudly with a useful message rather than blowing
+# up at link time.
+AC_CHECK_FUNC([swapcontext],
+  [AC_DEFINE([XTC_HAVE_UCONTEXT], 1,
+     [Define to 1 if swapcontext / getcontext / makecontext are available])
+   xtc_have_ucontext=yes],
+  [xtc_have_ucontext=no])
 AS_IF([test "x$xtc_with_liburing" != xno],
   [AS_IF([test "x$xtc_with_liburing" = xauto],
      [# Try pkg-config first; it knows about Nix-style split outputs.
