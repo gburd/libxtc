@@ -48,6 +48,20 @@ typedef struct plog plog_t;
 
 /* Create/destroy an in-memory log starting at base offset 0. */
 int   plog_create(plog_t **out);
+
+/*
+ * Create a log backed by segmented, CRC-framed files in `dir`
+ * (Phase 2).  Records are appended to a segment that rolls to a new
+ * file once it exceeds `seg_roll_bytes` (0 selects a 1 MiB default);
+ * segment files are named <20-digit-base-offset>.log, Kafka-style.
+ * On open, existing segments in `dir` are scanned and replayed so
+ * the log resumes at its previous high-water mark.  `dir` must
+ * already exist.  Passing dir == NULL is equivalent to plog_create
+ * (pure in-memory).  Reads remain O(1) in memory; the segments give
+ * durability and crash recovery.
+ */
+int   plog_create_ex(const char *dir, size_t seg_roll_bytes, plog_t **out);
+
 void  plog_destroy(plog_t *log);
 
 /* Append one record; returns the offset assigned (>= 0) or -1 on OOM.

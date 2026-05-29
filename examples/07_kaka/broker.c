@@ -34,10 +34,12 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 
 #include "xtc.h"
 #include "xtc_int.h"
@@ -94,6 +96,7 @@ struct part_arg {            /* passed to a freshly spawned partition */
 static struct part_entry  g_parts[MAX_PARTITIONS];
 static pthread_mutex_t     g_parts_lock = PTHREAD_MUTEX_INITIALIZER;
 static xtc_loop_t         *g_loop;
+static char                g_log_dir[256];   /* empty = in-memory */
 
 /* ---- partition proc ---- */
 
@@ -105,7 +108,21 @@ partition_proc(void *arg)
 	void *msg;
 	size_t msg_len;
 
-	if (plog_create(&log) != 0) {
+	if (g_log_dir[0] != '\0') {
+		/* Durable: <log_dir>/<topic>-<partition>/ with segmented
+		 * files; recovery replays on (re)start. */
+		char pdir[512];
+		snprintf(pdir, sizeof pdir, "%s/%s-%u",
+		    g_log_dir, pa->topic, pa->partition);
+		(void)mkdir(g_log_dir, 0755);
+		(void)mkdir(pdir, 0755);
+		if (plog_create_ex(pdir, 0, &log) != 0) {
+			XTC_LOG_ERROR_F("partition %s/%u: log open failed",
+			    pa->topic, pa->partition);
+			free(pa);
+			return;
+		}
+	} else if (plog_create(&log) != 0) {
 		XTC_LOG_ERROR_F("partition %s/%u: log create failed",
 		    pa->topic, pa->partition);
 		free(pa);
@@ -402,6 +419,15 @@ void
 broker_set_loop(xtc_loop_t *loop)
 {
 	g_loop = loop;
+}
+
+void
+broker_set_log_dir(const char *dir)
+{
+	if (dir != NULL && dir[0] != '\0')
+		snprintf(g_log_dir, sizeof g_log_dir, "%s", dir);
+	else
+		g_log_dir[0] = '\0';
 }
 
 int

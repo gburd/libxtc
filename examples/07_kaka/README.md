@@ -164,7 +164,7 @@ judge.
 
 ## Status
 
-Phase 1 complete: the framing codec, the in-memory partition log, and
+Phases 1-2 complete: the framing codec, the in-memory partition log, and
 the broker's partition/connection procs are implemented and tested.
 
   * `frame.c` -- wire codec; `test_frame` (6 checks) round-trips
@@ -182,5 +182,13 @@ The networked end-to-end path (a TCP client against the running
 broker) is built but exercised manually; the in-process self-test is
 the automated correctness gate for the proc-messaging layer.
 
-Phases 2-5 (segmented persistence, credit-based backpressure,
-consumer groups, observability) are tracked in PLAN.md.
+Phase 2 (segmented persistence) is done: partition.c gains
+plog_create_ex, which writes each append to a CRC-framed segment
+file that rolls at a size threshold and is scanned + replayed on
+restart.  The broker persists each partition under
+<log_dir>/<topic>-<partition>/ when started with --dir.  A
+standalone test produces 3000 records across several segment rolls
+and verifies they survive two restarts.
+
+Phases 3-5 (credit-based backpressure, consumer groups, full
+observability) are tracked in PLAN.md.

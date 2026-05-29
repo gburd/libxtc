@@ -16,6 +16,12 @@
  * startup before any connection is accepted. */
 void broker_set_loop(xtc_loop_t *loop);
 
+/* Set the broker's log directory.  When set (non-NULL), each
+ * partition durably persists its log under <dir>/<topic>-<partition>/
+ * via segmented files; when NULL, partitions are in-memory only.
+ * Call once at startup before any connection is accepted. */
+void broker_set_log_dir(const char *dir);
+
 /* Spawn a connection proc to service an accepted socket fd.  The proc
  * owns the fd and closes it on exit. */
 int  broker_spawn_conn(xtc_loop_t *loop, int fd);
