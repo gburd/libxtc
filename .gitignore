@@ -58,3 +58,10 @@ examples/05_rexis/rexis-server-xtc
 examples/05_rexis/test_bitcask
 examples/05_rexis/test_db_persist
 examples/05_rexis/test_metrics
+
+# m99 example test binaries and objects
+test/m99/test_resp_parser
+test/m99/test_rexis_loopback
+test/m99/test_rexis_budgets
+test/m99/test_rexis_pbt
+test/m99/*.o
