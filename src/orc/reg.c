@@ -50,7 +50,7 @@ xtc_reg_destroy(xtc_reg_t *r)
 }
 
 static int
-__find_locked(struct xtc_reg *r, const char *name)
+__reg_find_locked(struct xtc_reg *r, const char *name)
 {
 	int i;
 	for (i = 0; i < r->n; i++)
@@ -76,7 +76,7 @@ xtc_reg_register(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 	int rc = XTC_OK;
 	if (r == NULL || name == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&r->lock);
-	if (__find_locked(r, name) >= 0) { rc = XTC_E_INVAL; goto out; }
+	if (__reg_find_locked(r, name) >= 0) { rc = XTC_E_INVAL; goto out; }
 	if (r->n >= r->cap) {
 		if ((rc = __grow_locked(r)) != XTC_OK) goto out;
 	}
@@ -95,7 +95,7 @@ xtc_reg_unregister(xtc_reg_t *r, const char *name)
 	int idx;
 	if (r == NULL || name == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&r->lock);
-	idx = __find_locked(r, name);
+	idx = __reg_find_locked(r, name);
 	if (idx >= 0) {
 		__os_free(r->items[idx].name);
 		r->n--;
@@ -113,7 +113,7 @@ xtc_reg_whereis(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid)
 	int idx;
 	if (r == NULL || name == NULL || out_pid == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&r->lock);
-	idx = __find_locked(r, name);
+	idx = __reg_find_locked(r, name);
 	if (idx >= 0) {
 		*out_pid = r->items[idx].pid;
 		rc = XTC_OK;

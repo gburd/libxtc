@@ -22,17 +22,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct chunk {
-	struct chunk *prev;
-	struct chunk *next;
+struct mctx_chunk {
+	struct mctx_chunk *prev;
+	struct mctx_chunk *next;
 	xtc_mctx_t   *owner;
 	size_t        size;
 	/* user payload follows */
 };
 
-#define CHUNK_HDR_SIZE   (sizeof(struct chunk))
+#define CHUNK_HDR_SIZE   (sizeof(struct mctx_chunk))
 #define CHUNK_TO_PTR(c)  ((void *)((char *)(c) + CHUNK_HDR_SIZE))
-#define PTR_TO_CHUNK(p)  ((struct chunk *)((char *)(p) - CHUNK_HDR_SIZE))
+#define PTR_TO_CHUNK(p)  ((struct mctx_chunk *)((char *)(p) - CHUNK_HDR_SIZE))
 
 struct cleanup_entry {
 	xtc_mctx_cleanup_fn fn;
@@ -51,7 +51,7 @@ struct xtc_mctx {
 	xtc_mctx_t      *prev_sibling;
 	xtc_mctx_t      *next_sibling;
 
-	struct chunk        *first_chunk;
+	struct mctx_chunk        *first_chunk;
 	struct cleanup_entry *cleanups;
 
 	size_t           n_chunks;
@@ -125,7 +125,7 @@ static void
 __free_chunks_and_cleanups(xtc_mctx_t *m)
 {
 	struct cleanup_entry *ce;
-	struct chunk *c, *next;
+	struct mctx_chunk *c, *next;
 
 	while ((ce = m->cleanups) != NULL) {
 		m->cleanups = ce->next;
@@ -193,7 +193,7 @@ xtc_mctx_reset(xtc_mctx_t *m)
 void *
 xtc_mctx_alloc(xtc_mctx_t *m, size_t size)
 {
-	struct chunk *c;
+	struct mctx_chunk *c;
 	if (m == NULL) return NULL;
 	/* Overflow guard: CHUNK_HDR_SIZE + size must not wrap. */
 	if (size > SIZE_MAX - CHUNK_HDR_SIZE) return NULL;
@@ -240,7 +240,7 @@ xtc_mctx_strdup(xtc_mctx_t *m, const char *s)
 void
 xtc_mctx_free(xtc_mctx_t *m, void *p)
 {
-	struct chunk *c;
+	struct mctx_chunk *c;
 	if (p == NULL) return;
 	c = PTR_TO_CHUNK(p);
 	if (m == NULL) m = c->owner;
