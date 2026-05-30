@@ -363,7 +363,7 @@ Of the twelve recurring BEAM/OTP issues:
 
 | # | issue | already-handled in libxtc | gap | mitigation tracked |
 |---|---|---|---|---|
-| 1 | Mailbox overflow | partial -- bounded mboxes exist | watermark + stats hooks | yes |
+| 1 | Mailbox overflow | done -- bounded mboxes + watermark callback + xtc_proc_mailbox_stats | -- | yes |
 | 2 | Selective receive O(N x M) | no -- naive walk | recv-mark | yes |
 | 3 | GC pauses | yes -- no GC | manual reclaim discipline doc | yes |
 | 4 | Schedulers stuck on long compute | no | xtc_yield_check + blocking-pool | yes |
@@ -401,7 +401,10 @@ weeks at the current pace.  None individually risky.
 Listing them as concrete agenda items:
 
 1. `xtc_proc_opts_t.mailbox_watermark_pct` + watermark callback (issue 1)
-2. `xtc_proc_mailbox_stats(pid, &out)` (issue 1)
+   -- DONE: rising-edge callback fired when the mailbox depth first
+   reaches the configured percent of cap.
+2. `xtc_proc_mailbox_stats(pid, &out)` (issue 1) -- DONE: depth, peak,
+   cap, recv_total, drop_total; safe from any thread.
 3. Selective receive: recv-mark optimization (issue 2)
 4. Memory-ownership guide doc (issue 3)
 5. `xtc_alloc_audit_t` debug allocation tracker (issue 3)
