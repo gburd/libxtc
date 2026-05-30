@@ -179,6 +179,23 @@ page_init_bufs(struct xtc_pcache *c, struct pcache_pg *p)
 	p->page.pExtra = (char *)p->page.pBuf + c->sz_page;
 }
 
+/* Prepare a page (recycled or freshly allocated) to be returned for a
+ * NEW key.  Zeroing pExtra is essential: SQLite stores its PgHdr
+ * there and decides a fetched page is already valid -- skipping the
+ * read from disk -- when PgHdr->pPage is non-NULL.  A recycled page
+ * still carries the previous occupant's PgHdr, so without this zero
+ * SQLite would trust stale bytes for the new page number and corrupt
+ * the b-tree.  (A fresh slab page only happens to work because new
+ * mmap memory is zero.) */
+static void
+page_claim(struct xtc_pcache *c, struct pcache_pg *p, unsigned key)
+{
+	p->key = key;
+	p->pinned = 1;
+	if (c->sz_extra > 0)
+		memset(p->page.pExtra, 0, (size_t)c->sz_extra);
+}
+
 /* ---- sqlite3_pcache_methods2 ---- */
 
 static int
@@ -264,16 +281,18 @@ xp_fetch(sqlite3_pcache *pc, unsigned key, int create_flag)
 	if (create_flag == 0)
 		return NULL;
 
-	/* Recycle an unpinned page when the purgeable cache is at its
-	 * suggested size and SQLite says allocation is merely
-	 * convenient (createFlag == 1). */
+	/* Recycle an unpinned page when the purgeable cache is at (or
+	 * over) its size and an unpinned victim exists.  This is the
+	 * pcache's own job: keep itself near max_pages.  It applies
+	 * whatever the createFlag -- the flag governs whether to fall
+	 * back to a fresh allocation when no victim is available, not
+	 * whether to reuse one. */
 	if (c->purgeable && c->npage >= c->max_pages &&
-	    create_flag == 1 && c->lru_tail != NULL) {
+	    c->lru_tail != NULL) {
 		p = c->lru_tail;
 		lru_remove(c, p);
 		hash_remove(c, p);
-		p->key = key;
-		p->pinned = 1;
+		page_claim(c, p, key);
 		hash_insert(c, p);
 		xtc_counter_inc(g_c_recycle);
 		return &p->page;
@@ -288,8 +307,8 @@ xp_fetch(sqlite3_pcache *pc, unsigned key, int create_flag)
 		p = c->lru_tail;
 		lru_remove(c, p);
 		hash_remove(c, p);
-		p->key = key;
-		p->pinned = 1;
+		page_init_bufs(c, p);
+		page_claim(c, p, key);
 		hash_insert(c, p);
 		xtc_counter_inc(g_c_recycle);
 		return &p->page;
@@ -297,8 +316,7 @@ xp_fetch(sqlite3_pcache *pc, unsigned key, int create_flag)
 
 	memset(p, 0, c->data_off);
 	page_init_bufs(c, p);
-	p->key = key;
-	p->pinned = 1;
+	page_claim(c, p, key);
 	if (c->npage + 1 > c->nbucket)
 		(void)hash_grow(c);
 	hash_insert(c, p);
