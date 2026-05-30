@@ -26,7 +26,7 @@ DIST_DIR=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$DIST_DIR/.." && pwd)
 SRC="$ROOT/src"
 
-ALLOWLIST_RE='/(os|io)/|/(ptc/(sync|lock_lr|lock_lw|lock_mgr|inject|proc))\.c'
+ALLOWLIST_RE='/(os|io)/|/(ptc/(sync|blocking|lock_lr|lock_lw|lock_mgr|inject|proc))\.c'
 
 BLOCKING_CALLS='read write recv send accept connect sleep usleep nanosleep flock fcntl getaddrinfo gethostbyname pthread_cond_wait pthread_cond_timedwait pthread_join wait waitpid'
 
