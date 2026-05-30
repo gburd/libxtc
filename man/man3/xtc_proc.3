@@ -68,6 +68,15 @@ co-operatively with all other procs and tasks on that loop.
 is optional and may set the mailbox capacity, initial stack size,
 or per-proc resource accountant.
 .Pp
+A process is pinned to
+.Fa loop
+for its lifetime: it runs only on that loop and is never migrated by
+work-stealing.  This affinity is guaranteed and requires no opt-in --
+only raw
+.Xr xtc_exec 3
+tasks are stealable.  Embedders that pin a worker to one loop (e.g. a
+PostgreSQL backend per loop) can rely on it.
+.Pp
 .Fn xtc_self
 returns the calling process's pid, or
 .Dv XTC_PID_NONE

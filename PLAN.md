@@ -3168,6 +3168,27 @@ Tier 0 is done; the rest are tracked here.
 | A11 document mailbox-full XTC_E_AGAIN contract | TODO | senders MUST handle it |
 | A12 per-shard API (xtc_shard_id) | TODO | for shared-nothing consumers |
 
+### PostgreSQL-on-xtc API requests (R1-R6)
+
+From the PG threading F5/F7 integration spikes (`xtc-requests.txt`);
+full triage and API sketches in `docs/M_PG_REQUESTS.md`.  All stay on
+the runtime side of the boundary -- none make xtc learn SQL/WAL/fmgr.
+
+| Req | Item | Status | Lands |
+|-----|------|--------|-------|
+| R1 | per-fiber fault capture + single-fiber unwind (contain vs escalate) | accept; new primitive (`xtc_fault_guard_install`, `xtc_proc_recovery_arm`, `xtc_proc_critical_enter/leave`) | M10.6 (new); gates M16 Phase 4 |
+| R2 | length-framed transport helper (`xtc_net_send_frame`/`recv_frame`) | accept; thin loop-integrated codec on xtc_net | io/net; rebase kaka/sqlxtc onto it |
+| R3 | supervised OS-process child (`xtc_osproc_spawn`) under xtc_supervisor | accept supervision unification; marshalling stays in PG glue | M10.7 (new); F7 |
+| R4 | supervisor strategies (SIMPLE_OFO, REST_FOR_ONE, ONE_FOR_ALL) | confirmed; already reserved as XTC_E_NOSYS; do SIMPLE_OFO first (session pool) | M10.5 (existing) |
+| R5 | per-proc loop affinity (pinned, never stolen) | confirmed already true: procs spawn pinned via xtc_async; documenting in xtc_proc.3 | done (confirm) |
+| R6 | freeze the lock + glue ABI before PG Phase 1 | accept; name the exact lock structs on the (S)18 stable-symbol list | abi-stability.md, M16_PG_ADAPTER.md |
+
+Build order: R1 (gating, smallest design, biggest payoff) -> R4
+SIMPLE_OFO -> R2 framing -> R3 osproc.  R1 and R3 get a design review
+with the requester before their API freezes.
+
+---
+
 ### sqlxtc next phase (examples/06_sqlxtc)
 
 Design in `docs/M_SQLXTC_GREENFIELD.md` (clean-slate) and
