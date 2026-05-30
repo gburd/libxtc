@@ -18,7 +18,7 @@
 #include <unistd.h>
 
 #include "sqlite/sqlite3.h"
-#include "pcache_xtc.h"
+#include "sqlxtc_pcache.h"
 
 static int g_rows;
 
@@ -33,7 +33,7 @@ count_cb(void *u, int n, char **v, char **names)
 
 /* Bounded-memory test: a file-backed database with a small page cache
  * scanned over a working set far larger than the cache.  SQLite
- * unpins pages as the scan advances, so the slab pcache recycles them
+ * unpins pages as the scan advances, so the sqlxtc slab pcache recycles them
  * -- live pages stay near the cache size instead of growing to the
  * whole database.  Returns 0 on pass. */
 static int
@@ -43,7 +43,7 @@ eviction_test(void)
 	char *err = NULL;
 	char path[] = "/tmp/sqlxtc-pcache-evict-XXXXXX";
 	int fd, i, fails = 0;
-	xtc_pcache_stats_t a, b;
+	sqlxtc_pcache_stats_t a, b;
 	uint64_t peak_live;
 
 	fd = mkstemp(path);
@@ -75,20 +75,20 @@ eviction_test(void)
 
 	/* Reopen with a cold cache and a small cache_size (50 pages), then
 	 * scan every leaf page.  The working set far exceeds the cache,
-	 * so the slab pcache must recycle unpinned pages and keep its
+	 * so the sqlxtc slab pcache must recycle unpinned pages and keep its
 	 * resident set bounded. */
 	if (sqlite3_open(path, &db) != SQLITE_OK) {
 		unlink(path); return 1;
 	}
 	(void)sqlite3_exec(db, "PRAGMA cache_size=50;", 0, 0, 0);
 
-	xtc_pcache_get_stats(&a);
+	sqlxtc_pcache_get_stats(&a);
 	g_rows = -1;
 	/* sum(length(b)) forces reading every row's payload -> every
 	 * leaf page, defeating any count(*) shortcut. */
 	(void)sqlite3_exec(db, "SELECT count(*) FROM "
 	    "(SELECT a FROM t WHERE length(b) > 0);", count_cb, 0, 0);
-	xtc_pcache_get_stats(&b);
+	sqlxtc_pcache_get_stats(&b);
 	peak_live = b.live_pages;
 
 	sqlite3_close(db);
@@ -110,7 +110,7 @@ eviction_test(void)
 		    (unsigned long long)peak_live);
 		fails++;
 	} else {
-		printf("  ok   slab pcache bounds memory under pressure "
+		printf("  ok   sqlxtc slab pcache bounds memory under pressure "
 		       "(%llu recycles, resident <= %llu pages)\n",
 		       (unsigned long long)(b.recycle - a.recycle),
 		       (unsigned long long)peak_live);
@@ -143,7 +143,7 @@ vacuum_test(void)
 	char *err = NULL;
 	char path[] = "/tmp/sqlxtc-pcache-vac-XXXXXX";
 	int fd, i, fails = 0;
-	xtc_pcache_stats_t a, b;
+	sqlxtc_pcache_stats_t a, b;
 
 	fd = mkstemp(path);
 	if (fd < 0) { perror("mkstemp"); return 1; }
@@ -176,7 +176,7 @@ vacuum_test(void)
 		return 1;
 	}
 
-	xtc_pcache_get_stats(&a);
+	sqlxtc_pcache_get_stats(&a);
 	/* VACUUM rebuilds the file: pages are renumbered (xRekey) and the
 	 * file is truncated (xTruncate). */
 	if (sqlite3_exec(db, "VACUUM;", 0, 0, &err) != SQLITE_OK) {
@@ -184,7 +184,7 @@ vacuum_test(void)
 		sqlite3_free(err); sqlite3_close(db); unlink(path);
 		return 1;
 	}
-	xtc_pcache_get_stats(&b);
+	sqlxtc_pcache_get_stats(&b);
 
 	g_integ_ok = 0;
 	(void)sqlite3_exec(db, "PRAGMA integrity_check;", integ_cb, 0, 0);
@@ -204,7 +204,7 @@ vacuum_test(void)
 		fails++;
 	}
 	if (fails == 0)
-		printf("  ok   VACUUM round-trips through slab pcache "
+		printf("  ok   VACUUM round-trips through sqlxtc slab pcache "
 		       "(xRekey/xTruncate; integrity ok, 1000 rows, "
 		       "%llu allocs during rebuild)\n",
 		       (unsigned long long)(b.slab_alloc - a.slab_alloc));
@@ -217,15 +217,15 @@ main(void)
 	sqlite3 *db = NULL;
 	char *err = NULL;
 	int rc, i, fails = 0;
-	xtc_pcache_stats_t s0, s1;
+	sqlxtc_pcache_stats_t s0, s1;
 
 	/* Must install the pcache before the first handle / init. */
-	if (xtc_pcache_register() != SQLITE_OK) {
-		fprintf(stderr, "FAIL: xtc_pcache_register\n");
+	if (sqlxtc_pcache_register() != SQLITE_OK) {
+		fprintf(stderr, "FAIL: sqlxtc_pcache_register\n");
 		return 2;
 	}
 
-	xtc_pcache_get_stats(&s0);
+	sqlxtc_pcache_get_stats(&s0);
 
 	rc = sqlite3_open(":memory:", &db);
 	if (rc != SQLITE_OK) {
@@ -271,13 +271,13 @@ main(void)
 	}
 
 	sqlite3_close(db);
-	xtc_pcache_get_stats(&s1);
+	sqlxtc_pcache_get_stats(&s1);
 
 	if (g_rows != 5000) {
 		fprintf(stderr, "FAIL: count(*)=%d expected 5000\n", g_rows);
 		fails++;
 	} else {
-		printf("  ok   workload round-trips via slab pcache (%d rows)\n",
+		printf("  ok   workload round-trips via sqlxtc slab pcache (%d rows)\n",
 		    g_rows);
 	}
 
@@ -315,7 +315,7 @@ main(void)
 	/* xRekey + xTruncate via VACUUM. */
 	fails += vacuum_test();
 
-	printf("%s\n", fails == 0 ? "All xtc pcache tests passed."
+	printf("%s\n", fails == 0 ? "All sqlxtc pcache tests passed."
 	                          : "xtc pcache test FAILED.");
 	return fails == 0 ? 0 : 1;
 }
