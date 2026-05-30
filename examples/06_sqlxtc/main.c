@@ -39,8 +39,8 @@
 #include "db.h"
 #include "sqlite/sqlite3.h"
 
-extern const sqlite3_mutex_methods *xtc_sqlite_mutex_methods(void);
-#include "pcache_xtc.h"
+extern const sqlite3_mutex_methods *sqlxtc_mutex_methods(void);
+#include "sqlxtc_pcache.h"
 extern int metrics_spawn(xtc_loop_t *loop, xtc_res_t *res,
                          _Atomic int *conn_count,
                          _Atomic int64_t *queries_total,
@@ -343,7 +343,7 @@ main(int argc, char **argv)
 	/* SQLite global config: install xtc_lwlock-backed mutex methods
 	 * and serialized threading mode BEFORE any sqlite3_open. */
 	rc = sqlite3_config(SQLITE_CONFIG_MUTEX,
-	                    xtc_sqlite_mutex_methods());
+	                    sqlxtc_mutex_methods());
 	if (rc != SQLITE_OK) {
 		fprintf(stderr,
 		        "sqlite3_config(MUTEX) failed: %d\n", rc);
@@ -356,8 +356,8 @@ main(int argc, char **argv)
 	}
 	/* Route SQLite's page cache through an xtc_slab (one object-size
 	 * class per cache).  Must precede sqlite3_initialize(). */
-	if (xtc_pcache_register() != SQLITE_OK)
-		fprintf(stderr, "xtc_pcache_register failed; "
+	if (sqlxtc_pcache_register() != SQLITE_OK)
+		fprintf(stderr, "sqlxtc_pcache_register failed; "
 		        "using the default page cache\n");
 	(void)sqlite3_initialize();
 

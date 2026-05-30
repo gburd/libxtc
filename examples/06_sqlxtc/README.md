@@ -79,25 +79,32 @@ listen_fd ----------> listener_proc ----xtc_proc-----> conn_proc(fd)
                                     |  serialised mode|
                                     +-----------------+
                                               ^
-                                  xtc_lwlock-backed mutex methods
-                                  (xtc_mutex.c)
+                                  xtc_amutex-backed mutex methods
+                                  (sqlxtc_mutex.c)
 ```
 
 * `main.c` -- arg parsing, app/supervisor bringup, listener spawn.
 * `conn.c` -- per-connection xtc_proc; reads lines, dispatches.
 * `quack.c` -- hand-rolled JSON encoder/decoder for our small protocol.
 * `db.c` -- sqlite3 handle management; result streaming via Quack.
-* `xtc_mutex.c` -- sqlite3_mutex_methods backed by xtc_lwlock.
-* `xtc_vfs.c` -- an `"xtc"` sqlite3_vfs (shim over the platform
+* `sqlxtc_mutex.c` -- sqlite3_mutex_methods backed by xtc_amutex (the
+  parking mutex).  Many connection processes share one serialized
+  handle on a single loop, so a contender must PARK (yield the loop)
+  rather than block the OS thread -- otherwise a backend that parks
+  mid-statement (the VFS offload below) would wedge every peer.
+  Recursion is tracked by FIBER identity (the proc), not thread id.
+* `sqlxtc_vfs.c` -- a `"sqlxtc"` sqlite3_vfs (shim over the platform
   default).  Every byte of database I/O flows through it: per-file
   state is allocated with the xtc allocator, and reads, writes, and
   syncs are counted and timed with xtc_stats (the `sqlxtc.vfs.*`
-  counters and latency histograms appear on the metrics line).  Path
+  counters and latency histograms appear on the metrics line).
+  Reads, writes, and fsyncs are offloaded via `xtc_blocking_run`, so
+  the reactor thread never stalls on disk: the calling process parks
+  while a pool thread does the syscall and the loop keeps serving
+  peers (off a loop it falls back to a synchronous call).  Path
   operations and the byte-range file locks delegate to the base VFS so
-  locking stays POSIX-correct.  This is the single instrumented choke
-  point for all page traffic and the seam where an async,
-  xtc_io-backed pager plugs in next.
-* `pcache_xtc.c` -- an xtc_slab-backed sqlite3_pcache_methods2.  Every
+  locking stays POSIX-correct.
+* `sqlxtc_pcache.c` -- an xtc_slab-backed sqlite3_pcache_methods2.  Every
   page in one SQLite cache is the same size, so a per-cache xtc_slab
   supplies the page bodies with no fragmentation and O(1) alloc/free;
   a chained hash table indexes resident pages and an LRU list of
