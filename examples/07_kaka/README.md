@@ -200,5 +200,14 @@ drives it in-process: a 4-credit producer streams 200 records, the
 observed peak in-flight never exceeds 4, and every record lands in
 order.
 
-Phases 4-5 (consumer groups, full observability) are tracked in
-PLAN.md.
+Phase 4 (consumer-group offset coordination) is done: a single
+coordinator proc owns every group's committed offsets.  Because
+exactly one process touches that state, the offset table needs no
+lock -- commits and fetches are serialized by the coordinator's
+mailbox, the same single-owner pattern the partition proc uses for
+log ordering.  group_selftest drives it in-process: commit/fetch
+round-trips, last-write-wins on re-commit, and isolation across both
+groups and partitions.  Durable offset commits (via the segmented
+plog) are the natural follow-on.
+
+Phase 5 (full observability and budgets) is tracked in PLAN.md.
