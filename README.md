@@ -44,14 +44,16 @@ faults, and stay inside a fixed resource budget on commodity hardware.
   bounded RSS, file descriptors, in-flight tasks, and bandwidth
   under stress.  Backpressure is built in; OOM-spirals are not.
 
-* **You want portable source.**  The same source builds on Linux,
-  FreeBSD, illumos, and Windows.  Linux is exercised on every commit
-  by CI (gcc and clang, plus AddressSanitizer and UBSan).  FreeBSD
-  and Windows (MinGW, Clang64, and MSVC) are verified manually;
-  illumos builds with `--with-tls=none` and is being brought back to
-  a full pass; macOS and AIX have OS-layer ports awaiting a test
-  host.  See `docs/M_WINDOWS_MATRIX.md`, `docs/M_LIBC_MATRIX.md`,
-  and PLAN.md for the current per-platform status.
+* **You want portable source.**  The same source builds and passes
+  its tests on Linux (glibc and musl), FreeBSD, illumos, and Windows.
+  Linux is exercised on every commit by CI (gcc and clang, plus
+  AddressSanitizer, UBSan, and the forced-fcontext substrate that
+  musl uses).  FreeBSD 15 (clang, kqueue) and illumos (SunOS 5.11,
+  gcc, the solaris port backend) are verified against the current
+  tree -- 283/283 and a clean C suite respectively.  Windows builds
+  with all three of MinGW, Clang64, and MSVC.  macOS and AIX have
+  OS-layer ports awaiting a test host.  See `docs/M_WINDOWS_MATRIX.md`,
+  `docs/M_LIBC_MATRIX.md`, and PLAN.md for the per-platform status.
 
 * **You want to stay close to the metal.**  No GC, no STW pauses.
   Memory comes from cache-line-padded slab caches with optional
