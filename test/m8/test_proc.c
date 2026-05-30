@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -224,11 +225,79 @@ test_monitor(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Infinite-wait recv must PARK (not busy-reschedule): a waiter blocks
+ * on xtc_recv(timeout = -1) while a sender, after parking ~120 ms on
+ * a timer, sends one message.  The whole run consumes far less CPU
+ * than its wall-clock duration -- a busy-loop would burn a core for
+ * the full 120 ms. */
+struct inf_state { xtc_pid_t waiter; int got; };
+
+static void
+inf_waiter(void *arg)
+{
+	struct inf_state *s = arg;
+	void *m = NULL; size_t n = 0;
+	if (xtc_recv(&m, &n, -1) == XTC_OK) {
+		s->got = 1;
+		if (m) __os_free(m);
+	}
+}
+
+static void
+inf_sender(void *arg)
+{
+	struct inf_state *s = arg;
+	void *m = NULL; size_t n = 0;
+	int v = 1;
+	/* Park ~120 ms on a timer via a finite recv that will time out. */
+	(void)xtc_recv(&m, &n, 120LL * 1000 * 1000);
+	if (m) __os_free(m);
+	(void)xtc_send(s->waiter, &v, sizeof v);
+}
+
+static MunitResult
+test_recv_inf_parks(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	struct inf_state s = { XTC_PID_NONE, 0 };
+	xtc_pid_t sp;
+	struct timespec c0, c1, w0, w1;
+	double cpu, wall;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "inf-waiter";
+	munit_assert_int(xtc_proc_spawn(loop, inf_waiter, &s, &opts,
+	    &s.waiter), ==, XTC_OK);
+	opts.name = "inf-sender";
+	munit_assert_int(xtc_proc_spawn(loop, inf_sender, &s, &opts, &sp),
+	    ==, XTC_OK);
+
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c0);
+	clock_gettime(CLOCK_MONOTONIC, &w0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	clock_gettime(CLOCK_MONOTONIC, &w1);
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c1);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	cpu  = (c1.tv_sec - c0.tv_sec) + (c1.tv_nsec - c0.tv_nsec) / 1e9;
+	wall = (w1.tv_sec - w0.tv_sec) + (w1.tv_nsec - w0.tv_nsec) / 1e9;
+
+	munit_assert_int(s.got, ==, 1);           /* message delivered */
+	munit_assert_double(wall, >, 0.10);        /* we really waited */
+	/* Parked: CPU is a small fraction of the wait.  A busy-loop would
+	 * make cpu ~= wall.  Generous bound so a loaded CI runner passes. */
+	munit_assert_double(cpu, <, 0.040);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/selective_receive", test_selective_receive,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/monitor",           test_monitor,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/recv_inf_parks",    test_recv_inf_parks,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/proc", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

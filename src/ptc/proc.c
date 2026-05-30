@@ -786,6 +786,13 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			(void)__os_clock_mono(&now);
 			if (now >= deadline) return XTC_E_AGAIN;
 			(void)xtc_task_park_on_timer(self->task, deadline - now);
+		} else {
+			/* Infinite wait: park until a sender's waker
+			 * re-enqueues us, rather than busy-rescheduling and
+			 * burning a core (and starving same-loop peers).
+			 * waker_armed is set above under mbox_lock, so a
+			 * delivery cannot be lost against this park. */
+			self->task->park_requested = 1;
 		}
 		xtc_yield();
 		/*
