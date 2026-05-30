@@ -173,6 +173,27 @@ value:
      async step -- submitting the read to `xtc_io` and parking the
      calling fiber until completion -- plugs into this same `xv_read`
      choke point.
+
+     *Foundation landed:* `xtc_blocking` (a worker pool that runs a
+     blocking call and parks the calling process via a pipe +
+     `xtc_proc_wait_fd`) is the mechanism `xv_read`/`xv_write`/`xv_sync`
+     will use to offload file I/O without stalling the loop.  But
+     wiring it into the *shared-handle* server is not yet safe: a
+     process that parks mid-statement while holding SQLite's mutex
+     (today an `xtc_lwlock`, which `pthread_cond_wait`s -- it blocks
+     the OS thread, not the fiber) would wedge the loop the instant a
+     second connection's process tries to take that mutex.  The
+     parked process can only be woken on that same loop thread, which
+     is now blocked: deadlock.  Two deadlock-free routes:
+       * a fiber-yielding lock (park the *task*, not the thread --
+         the `xtc_amutex` "M11+" TODO), so a process holding the lock
+         can park and the loop keeps running; or
+       * per-connection SQLite handles (the existing `--no-shared`
+         mode): independent handles share no in-process mutex, and
+         the VFS xLock byte-range locks coordinate them, so a parked
+         I/O never blocks another connection.
+     The offload is correct today for any single SQLite user; the
+     server-wide wiring waits on one of those two.
   3. **Pager as a proc.**  Route durability through a single pager
      proc so the WAL writer is an explicit owner.
   4. **Fine-grained locks via `xtc_lockmgr`** -- the deep step that
