@@ -190,5 +190,15 @@ restart.  The broker persists each partition under
 standalone test produces 3000 records across several segment rolls
 and verifies they survive two restarts.
 
-Phases 3-5 (credit-based backpressure, consumer groups, full
-observability) are tracked in PLAN.md.
+Phase 3 (credit-based backpressure) is done: a producer is granted a
+fixed credit budget and keeps at most that many PRODUCE requests
+outstanding to a partition at once; each reply returns one credit.
+The bounded partition mailbox is the hard backstop, and the credit
+window keeps the producer from ever reaching it -- end-to-end flow
+control that bounds broker memory under a flood.  broker_credit_selftest
+drives it in-process: a 4-credit producer streams 200 records, the
+observed peak in-flight never exceeds 4, and every record lands in
+order.
+
+Phases 4-5 (consumer groups, full observability) are tracked in
+PLAN.md.
