@@ -36,7 +36,7 @@
 #include <string.h>
 
 static int __recv_reply_for_tag(uint32_t tag, void **out, size_t *out_size,
-                                int64_t timeout_ns);
+                                int64_t timeout_ns, xtc_abort_token_t *tok);
 
 struct xtc_svr {
 	xtc_loop_t           *loop;
@@ -225,9 +225,19 @@ xtc_svr_pid(const xtc_svr_t *s)
 
 /* ----- client side ----------------------------------------------- */
 
-int
-xtc_svr_call(xtc_pid_t target, const void *req, size_t req_size,
-             void **out_reply, size_t *out_size, int64_t timeout_ns)
+/*
+ * Internal call implementation shared by xtc_svr_call (tok == NULL)
+ * and xtc_svr_call_abortable (tok != NULL).  When a token is present
+ * the reply wait is sliced so the token is polled while waiting, and
+ * the call returns XTC_E_ABORTED if the token fires before the reply
+ * arrives.  Cancellation only stops the CALLER waiting; the server's
+ * handler keeps running -- a late reply is discarded (the caller is
+ * typically being torn down on cancel).
+ */
+static int
+__svr_call(xtc_pid_t target, const void *req, size_t req_size,
+           void **out_reply, size_t *out_size, int64_t timeout_ns,
+           xtc_abort_token_t *tok)
 {
 	if (req_size > 0 && req == NULL) return XTC_E_INVAL;
 	/* Guard against size_t overflow in the framed-message size.
@@ -263,7 +273,8 @@ xtc_svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		free(buf);
 		if (rc != XTC_OK) return rc;
 
-		return __recv_reply_for_tag(tag, out_reply, out_size, timeout_ns);
+		return __recv_reply_for_tag(tag, out_reply, out_size,
+		    timeout_ns, tok);
 	} else {
 		struct __svr_reply_slot slot;
 		uint8_t  *buf;
@@ -302,7 +313,28 @@ xtc_svr_call(xtc_pid_t target, const void *req, size_t req_size,
 			return rc;
 		}
 
-		rc = xtc_notify_wait(slot.done, timeout_ns);
+		if (tok == NULL) {
+			rc = xtc_notify_wait(slot.done, timeout_ns);
+		} else {
+			/* Slice the wait so the abort token is polled. */
+			int64_t left = timeout_ns;
+			const int64_t slice = 25LL * 1000 * 1000;   /* 25ms */
+			for (;;) {
+				int64_t w;
+				if (xtc_abort_token_is_aborted(tok)) {
+					rc = XTC_E_ABORTED;
+					break;
+				}
+				w = (timeout_ns < 0) ? slice :
+				    (left < slice ? left : slice);
+				rc = xtc_notify_wait(slot.done, w);
+				if (rc == XTC_OK) break;       /* reply arrived */
+				if (timeout_ns >= 0) {
+					left -= w;
+					if (left <= 0) break;  /* timed out */
+				}
+			}
+		}
 		(void)pthread_mutex_lock(&slot.lock);
 		if (rc == XTC_OK) {
 			rc = slot.rc;
@@ -318,6 +350,25 @@ xtc_svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		(void)pthread_mutex_destroy(&slot.lock);
 		return rc;
 	}
+}
+
+/* PUBLIC: int xtc_svr_call __P((xtc_pid_t, const void *, size_t, void **, size_t *, int64_t)); */
+int
+xtc_svr_call(xtc_pid_t target, const void *req, size_t req_size,
+             void **out_reply, size_t *out_size, int64_t timeout_ns)
+{
+	return __svr_call(target, req, req_size, out_reply, out_size,
+	    timeout_ns, NULL);
+}
+
+/* PUBLIC: int xtc_svr_call_abortable __P((xtc_pid_t, const void *, size_t, void **, size_t *, int64_t, xtc_abort_token_t *)); */
+int
+xtc_svr_call_abortable(xtc_pid_t target, const void *req, size_t req_size,
+                       void **out_reply, size_t *out_size,
+                       int64_t timeout_ns, xtc_abort_token_t *tok)
+{
+	return __svr_call(target, req, req_size, out_reply, out_size,
+	    timeout_ns, tok);
 }
 
 int
@@ -388,12 +439,33 @@ __match_reply_tag(const void *data, size_t size, void *u)
 
 static int
 __recv_reply_for_tag(uint32_t tag, void **out, size_t *out_size,
-                     int64_t timeout_ns)
+                     int64_t timeout_ns, xtc_abort_token_t *tok)
 {
 	struct __tag_match m = { tag };
 	void  *msg = NULL;
 	size_t size = 0;
-	int    rc = xtc_recv_match(__match_reply_tag, &m, &msg, &size, timeout_ns);
+	int    rc;
+
+	if (tok == NULL) {
+		rc = xtc_recv_match(__match_reply_tag, &m, &msg, &size,
+		    timeout_ns);
+	} else {
+		/* Slice the receive so the abort token is polled between
+		 * mailbox waits; XTC_E_ABORTED if it fires first. */
+		int64_t left = timeout_ns;
+		const int64_t slice = 25LL * 1000 * 1000;   /* 25ms */
+		for (;;) {
+			int64_t w;
+			if (xtc_abort_token_is_aborted(tok)) return XTC_E_ABORTED;
+			w = (timeout_ns < 0) ? slice : (left < slice ? left : slice);
+			rc = xtc_recv_match(__match_reply_tag, &m, &msg, &size, w);
+			if (rc != XTC_E_AGAIN) break;          /* matched or error */
+			if (timeout_ns >= 0) {
+				left -= w;
+				if (left <= 0) break;          /* timed out */
+			}
+		}
+	}
 	if (rc != XTC_OK) return rc;
 	if (size < 4) { __os_free(msg); return XTC_E_INVAL; }
 	/* Strip the 4-byte tag prefix. */
