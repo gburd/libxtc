@@ -27,6 +27,21 @@ The previous misleading tests have been renamed to clarify their scope:
   - test_slab.c: test_shm_offset_resolve -> test_shm_offset_resolve_single_process
   - pbt_slab.c: prop_shm_offset_roundtrip -> prop_shm_offset_roundtrip_single_process
 
+## RESOLVED: Windows fault containment (SEH) + fiber teardown double-free
+
+**Status:** resolved.  `xtc_fault_guard_install` was a no-op on Windows;
+it now installs a Vectored Exception Handler that contains a
+fiber-attributable hardware fault by restoring the CONTEXT captured at
+`xtc_proc_recovery_arm()` (via `EXCEPTION_CONTINUE_EXECUTION` -- no
+stack unwinding, which is what makes it safe on a fiber stack; a
+`longjmp` driven from a VEH reliably corrupted the CRT heap).
+Validated on the MSVC build host: the smoke test triggers a real
+access violation, the VEH contains it, and the process recovers.
+While wiring this up, a pre-existing Windows double-free was found and
+fixed in `coro_winfiber.c` (the done branch destroyed the coro
+eagerly *and* via the task cleanup at `loop_fini`), which had made any
+loop+process tear down with heap corruption on Windows.
+
 ## Windows: `test_proc::selective_receive` regression
 
 **Status:** failing on Windows MinGW after this round; was passing 36/36 last round.
