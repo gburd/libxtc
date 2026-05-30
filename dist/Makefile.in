@@ -735,7 +735,7 @@ test_slab_shm: $(srcdir)/../test/m11/test_slab_shm.c \
 		$(srcdir)/../test/m11/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m11 \
 		-o $@ $(srcdir)/../test/m11/test_slab_shm.c \
-		$(srcdir)/../test/m11/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS) -lrt
+		$(srcdir)/../test/m11/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M13 tests.
 test_rcu: $(srcdir)/../test/m13/test_rcu.c \
