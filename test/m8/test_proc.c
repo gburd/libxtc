@@ -9,6 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -457,6 +460,168 @@ test_save_queue_cap(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* R1 fault containment: a REAL SIGSEGV inside one proc must unwind
+ * only that proc -- the sibling/monitor survives and observes DOWN
+ * with the fault reason.  This is the F5 crash-containment spike made
+ * real (an actual wild-pointer write, not a modelled trigger). */
+#define FLT_REASON 42
+
+struct flt_state {
+	int saw_down;
+	int reason;
+	int cleanup_ran;
+};
+
+static void
+flt_faulter(void *arg)
+{
+	struct flt_state *s = arg;
+	void *m = NULL; size_t n = 0;
+	int sig = xtc_proc_recovery_arm();
+	if (sig != 0) {
+		/* Recovered from the contained fault: clean up and exit,
+		 * which delivers DOWN(reason) to the monitor. */
+		s->cleanup_ran = 1;
+		(void)xtc_exit_self(FLT_REASON);
+		return;
+	}
+	/* Normal path: wait for the monitor to be established, then
+	 * dereference a wild pointer -> genuine SIGSEGV. */
+	if (xtc_recv(&m, &n, 2LL * 1000 * 1000 * 1000) == XTC_OK && m)
+		__os_free(m);
+	{
+		/* Route the address through a volatile so the compiler
+		 * cannot prove it out of bounds (-Warray-bounds) -- it is a
+		 * deliberate wild write. */
+		volatile uintptr_t addr = 0x10;
+		*(volatile int *)addr = 1;     /* boom */
+	}
+}
+
+static void
+flt_watcher(void *arg)
+{
+	struct flt_state *s = arg;
+	void *msg = NULL; size_t sz = 0;
+	xtc_pid_t target;
+	uint64_t ref;
+	struct {
+		uint8_t kind; uint64_t r; xtc_pid_t pid; int reason;
+	} __attribute__((packed)) *down;
+	int go = 1;
+
+	if (xtc_recv(&msg, &sz, 1000LL * 1000 * 1000) != XTC_OK) return;
+	memcpy(&target, msg, sizeof target);
+	__os_free(msg);
+	if (xtc_monitor(target, &ref) != XTC_OK) return;
+	/* Monitor established: tell the faulter to proceed. */
+	(void)xtc_send(target, &go, sizeof go);
+	/* Await DOWN. */
+	if (xtc_recv(&msg, &sz, 5LL * 1000 * 1000 * 1000) != XTC_OK) return;
+	if (sz >= sizeof *down) {
+		down = msg;
+		if (down->kind == 'D') {
+			s->saw_down = 1;
+			s->reason = down->reason;
+		}
+	}
+	__os_free(msg);
+}
+
+static MunitResult
+test_fault_contain(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct flt_state s = { 0, 0, 0 };
+	xtc_pid_t faulter, watcher;
+	(void)p; (void)d;
+
+#if defined(__SANITIZE_ADDRESS__)
+	return MUNIT_SKIP;   /* ASan owns SIGSEGV; cannot test our handler */
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;
+#  endif
+#endif
+
+	munit_assert_int(xtc_fault_guard_install(), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, flt_watcher, &s, NULL,
+	    &watcher), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, flt_faulter, &s, NULL,
+	    &faulter), ==, XTC_OK);
+	munit_assert_int(xtc_send(watcher, &faulter, sizeof faulter),
+	    ==, XTC_OK);
+	/* If containment failed, the loop thread takes a SIGSEGV here and
+	 * the test crashes -- exactly the regression we are guarding. */
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	munit_assert_int(s.cleanup_ran, ==, 1);   /* faulter recovered */
+	munit_assert_int(s.saw_down, ==, 1);       /* sibling observed it */
+	munit_assert_int(s.reason, ==, FLT_REASON);
+	return MUNIT_OK;
+}
+
+/* Escalate path: a fault INSIDE a critical section must NOT be
+ * contained -- shared state may be torn -- so it takes the whole
+ * process down.  Verified in a forked child: the child arms a
+ * recovery frame, enters a critical section, then faults; the parent
+ * confirms the child died by SIGSEGV rather than recovering. */
+static void
+esc_faulter(void *arg)
+{
+	(void)arg;
+	if (xtc_proc_recovery_arm() != 0)
+		_exit(99);     /* contained -- WRONG inside a critical section */
+	xtc_proc_critical_enter();
+	{
+		volatile uintptr_t addr = 0x10;
+		*(volatile int *)addr = 1;    /* fault in crit -> escalate */
+	}
+	_exit(98);         /* survived the fault -- also wrong */
+}
+
+static MunitResult
+test_fault_escalate(const MunitParameter p[], void *d)
+{
+	pid_t pid;
+	int st;
+	(void)p; (void)d;
+
+#if defined(__SANITIZE_ADDRESS__)
+	return MUNIT_SKIP;
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;
+#  endif
+#endif
+
+	pid = fork();
+	munit_assert_int(pid, >=, 0);
+	if (pid == 0) {
+		/* Child: a single-loop process that faults in a critical
+		 * section.  Containment is armed but must be overridden. */
+		xtc_loop_t *loop = NULL;
+		xtc_proc_opts_t opts = { 0 };
+		xtc_pid_t fp;
+		(void)xtc_fault_guard_install();
+		if (xtc_loop_init(&loop) != XTC_OK) _exit(97);
+		opts.name = "esc";
+		if (xtc_proc_spawn(loop, esc_faulter, NULL, &opts, &fp)
+		    != XTC_OK) _exit(96);
+		(void)xtc_loop_run(loop);
+		_exit(0);     /* loop returned normally -> fault was contained */
+	}
+	munit_assert_int(waitpid(pid, &st, 0), ==, pid);
+	/* The child must have been killed by the fault signal, proving
+	 * the critical-section fault escalated instead of being
+	 * contained. */
+	munit_assert_true(WIFSIGNALED(st));
+	munit_assert_true(WTERMSIG(st) == SIGSEGV || WTERMSIG(st) == SIGBUS);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -465,6 +630,8 @@ static MunitTest tests[] = {
 	{ "/recv_inf_parks",    test_recv_inf_parks,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mailbox_stats",     test_mailbox_stats,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/save_queue_cap",    test_save_queue_cap,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fault_contain",     test_fault_contain,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fault_escalate",    test_fault_escalate,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/proc", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

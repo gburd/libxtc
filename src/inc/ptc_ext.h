@@ -6,6 +6,7 @@
 
 int xtc_exit_pid __P((xtc_pid_t, int));
 int xtc_exit_self __P((int));
+int xtc_fault_guard_install __P((void));
 int xtc_inject_check __P((const char *));
 int xtc_link __P((xtc_pid_t));
 int xtc_monitor __P((xtc_pid_t, uint64_t *));
@@ -26,6 +27,9 @@ int64_t xtc_res_rejects __P((const xtc_res_t *, xtc_res_kind_t));
 int64_t xtc_res_used __P((const xtc_res_t *, xtc_res_kind_t));
 void  __xtc_proc_ctx_restore __P((void *));
 void *__xtc_proc_ctx_save __P((void));
+void xtc_proc_critical_enter __P((void));
+void xtc_proc_critical_leave __P((void));
+void xtc_proc_recovery_disarm __P((void));
 void xtc_res_release __P((xtc_res_t *, xtc_res_kind_t, int64_t));
 void xtc_res_set_cap __P((xtc_res_t *, xtc_res_kind_t, int64_t));
 xtc_pid_t xtc_self __P((void));
