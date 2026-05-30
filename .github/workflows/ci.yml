@@ -140,3 +140,42 @@ jobs:
           make XTC_BUILD=../../build_ci test-quack test-vfs test-pcache
           make XTC_BUILD=../../build_ci amalg
           make XTC_BUILD=../../build_ci test-vfs-amalg test-pcache-amalg
+
+  macos:
+    # macOS runtime coverage: kqueue I/O backend + ucontext coroutine
+    # substrate (the x86-64 fcontext .S files self-gate to empty on
+    # macOS / Apple Silicon).  Runs the C (munit) suite; the shell
+    # tests are GNU-tooling-sensitive and are covered on Linux.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install autoconf automake pkg-config gawk openssl@3
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure
+        run: |
+          mkdir -p build_ci && cd build_ci
+          PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig" \
+            ../dist/configure --with-tls=auto
+      - name: Build
+        run: make -C build_ci -j3
+      - name: Test (C / munit suite)
+        run: make -C build_ci tests-c
+
+  windows-msvc:
+    # Windows / MSVC: builds xtc.lib from src (cl + ml64 for the
+    # MASM fcontext port) and runs the smoke test.  The full munit
+    # harness uses GCC-isms cl rejects, so the smoke test stands in
+    # (see dist/build_msvc.bat / test/msvc/smoke.c).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up MSVC (cl, ml64, lib on PATH)
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Build xtc.lib + smoke, run smoke
+        shell: cmd
+        run: |
+          set XTC_SRC=%CD%
+          call dist\build_msvc.bat
