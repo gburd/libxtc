@@ -207,7 +207,10 @@ lock -- commits and fetches are serialized by the coordinator's
 mailbox, the same single-owner pattern the partition proc uses for
 log ordering.  group_selftest drives it in-process: commit/fetch
 round-trips, last-write-wins on re-commit, and isolation across both
-groups and partitions.  Durable offset commits (via the segmented
-plog) are the natural follow-on.
+groups and partitions.  Offsets are also durable: passing a directory
+to group_coordinator_spawn_ex persists each commit to a segmented
+plog and replays it on startup, so a restarted coordinator recovers
+the committed positions (group_persist_selftest verifies this across
+two coordinator lifetimes, including last-write-wins).
 
 Phase 5 (full observability and budgets) is tracked in PLAN.md.
