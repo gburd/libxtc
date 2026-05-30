@@ -15,6 +15,7 @@
 #include "xtc_sync.h"
 #include "xtc_proc.h"
 #include "loop_int.h"
+#include "coro_int.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -259,12 +260,35 @@ xtc_abort_token_reason(const xtc_abort_token_t *t)
 	return atomic_load_explicit(&t->src->reason, memory_order_relaxed);
 }
 
-/* ----- amutex (parking mutex) ----------------------------------- */
+/* ----- amutex (parking mutex) -----------------------------------
+ *
+ * Contended waiters that are running inside a coroutine / process
+ * park the fiber (yield to the loop) instead of blocking the OS
+ * thread, so a process can hold the lock across its own park (e.g.
+ * a blocking-pool offload) without wedging the loop the moment
+ * another process on that loop contends.  Off a loop (cur == NULL)
+ * the caller blocks on a condvar, as before.
+ *
+ * Fiber waiters use a FIFO queue with direct hand-off: unlock grants
+ * the lock to the head waiter (held stays 1) and wakes it, so there
+ * is no thundering herd and ordering is fair.  Thread waiters share
+ * the same `held` flag via the condvar.  When both kinds wait, unlock
+ * prefers a fiber waiter; a later release with no fiber waiters wakes
+ * a thread waiter.
+ */
+
+struct amutex_waiter {
+	xtc_waker_t           waker;
+	struct amutex_waiter *next;
+	int                   granted;   /* set by unlock's hand-off */
+};
 
 struct xtc_amutex {
-	pthread_mutex_t lock;
-	pthread_cond_t  cv;
-	int             held;
+	pthread_mutex_t       lock;
+	pthread_cond_t        cv;        /* thread (non-fiber) waiters */
+	int                   held;
+	struct amutex_waiter *wq_head;   /* fiber waiters, FIFO */
+	struct amutex_waiter *wq_tail;
 };
 
 int
@@ -300,17 +324,28 @@ xtc_amutex_try_lock(xtc_amutex_t *m)
 	return rc;
 }
 
-int
-xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
+/* Unlink w from the fiber wait queue if still present. */
+static void
+__amutex_wq_remove(xtc_amutex_t *m, struct amutex_waiter *w)
+{
+	struct amutex_waiter *p = m->wq_head, *prev = NULL;
+	while (p != NULL) {
+		if (p == w) {
+			if (prev != NULL) prev->next = p->next;
+			else m->wq_head = p->next;
+			if (m->wq_tail == p) m->wq_tail = prev;
+			return;
+		}
+		prev = p;
+		p = p->next;
+	}
+}
+
+/* Thread-waiter (off-loop) slow path: classic condvar wait. */
+static int
+__amutex_lock_thread(xtc_amutex_t *m, int64_t timeout_ns)
 {
 	int rc = XTC_OK;
-	if (m == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&m->lock);
-	if (timeout_ns == 0) {
-		if (m->held) { rc = XTC_E_AGAIN; goto out; }
-		m->held = 1;
-		goto out;
-	}
 	if (timeout_ns < 0) {
 		while (m->held) (void)pthread_cond_wait(&m->cv, &m->lock);
 		m->held = 1;
@@ -324,23 +359,113 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 		while (m->held) {
 			int e = pthread_cond_timedwait(&m->cv, &m->lock, &ts);
 			if (e == 0) continue;
-			rc = XTC_E_AGAIN; goto out;
+			return XTC_E_AGAIN;
 		}
 		m->held = 1;
 	}
-out:
-	(void)pthread_mutex_unlock(&m->lock);
 	return rc;
+}
+
+int
+xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
+{
+	xtc_task_t *cur;
+	struct amutex_waiter w;
+	void *proc_ctx;
+	int64_t deadline = -1;
+
+	if (m == NULL) return XTC_E_INVAL;
+
+	(void)pthread_mutex_lock(&m->lock);
+	if (!m->held) {
+		m->held = 1;
+		(void)pthread_mutex_unlock(&m->lock);
+		return XTC_OK;
+	}
+	if (timeout_ns == 0) {
+		(void)pthread_mutex_unlock(&m->lock);
+		return XTC_E_AGAIN;
+	}
+
+	cur = __xtc_current_task();
+	if (cur == NULL) {
+		/* Not on a loop: block the thread on the condvar. */
+		int rc = __amutex_lock_thread(m, timeout_ns);
+		(void)pthread_mutex_unlock(&m->lock);
+		return rc;
+	}
+
+	/* Fiber waiter: enqueue and park. */
+	(void)xtc_task_waker(cur, &w.waker);
+	w.granted = 0;
+	w.next = NULL;
+	if (m->wq_tail != NULL) m->wq_tail->next = &w;
+	else m->wq_head = &w;
+	m->wq_tail = &w;
+	(void)pthread_mutex_unlock(&m->lock);
+
+	if (timeout_ns > 0) {
+		int64_t now;
+		(void)__os_clock_mono(&now);
+		deadline = now + timeout_ns;
+	}
+
+	for (;;) {
+		int64_t now;
+		/* Re-arm the wakeup cause each iteration: a timer for the
+		 * timeout, otherwise a plain voluntary park. */
+		if (deadline >= 0) {
+			(void)__os_clock_mono(&now);
+			if (now >= deadline) {
+				(void)pthread_mutex_lock(&m->lock);
+				if (w.granted) {
+					(void)pthread_mutex_unlock(&m->lock);
+					return XTC_OK;   /* raced with grant */
+				}
+				__amutex_wq_remove(m, &w);
+				(void)pthread_mutex_unlock(&m->lock);
+				return XTC_E_AGAIN;
+			}
+			(void)xtc_task_park_on_timer(cur, deadline - now);
+		} else {
+			cur->park_requested = 1;
+		}
+
+		proc_ctx = __xtc_proc_ctx_save();
+		xtc_yield();
+		__xtc_proc_ctx_restore(proc_ctx);
+
+		(void)pthread_mutex_lock(&m->lock);
+		if (w.granted) {
+			(void)pthread_mutex_unlock(&m->lock);
+			return XTC_OK;
+		}
+		(void)pthread_mutex_unlock(&m->lock);
+		/* Spurious / timer wake without grant: loop and re-park. */
+	}
 }
 
 int
 xtc_amutex_unlock(xtc_amutex_t *m)
 {
+	struct amutex_waiter *w = NULL;
 	if (m == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&m->lock);
-	m->held = 0;
-	(void)pthread_cond_signal(&m->cv);
+	if (m->wq_head != NULL) {
+		/* Hand off to the head fiber waiter: keep held == 1. */
+		w = m->wq_head;
+		m->wq_head = w->next;
+		if (m->wq_head == NULL) m->wq_tail = NULL;
+		w->granted = 1;
+		w->next = NULL;
+	} else {
+		/* No fiber waiter: release and wake a thread waiter. */
+		m->held = 0;
+		(void)pthread_cond_signal(&m->cv);
+	}
 	(void)pthread_mutex_unlock(&m->lock);
+	if (w != NULL)
+		(void)xtc_waker_wake(&w->waker);
 	return XTC_OK;
 }
 

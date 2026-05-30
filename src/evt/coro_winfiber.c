@@ -153,6 +153,10 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	    (c->self->park_timer != NULL || c->self->park_fd >= 0)) {
 		return XTC_TASK_PENDING;
 	}
+	if (c->self != NULL && c->self->park_requested) {
+		c->self->park_requested = 0;
+		return XTC_TASK_PENDING;
+	}
 	return XTC_TASK_RESCHED;
 }
 
@@ -198,6 +202,12 @@ xtc_yield(void)
 	struct xtc_coro *c = __xtc_current_coro;
 	if (c == NULL) return;
 	(void)SwitchToFiber(c->loop_fiber);
+}
+
+xtc_task_t *
+__xtc_current_task(void)
+{
+	return __xtc_current_coro != NULL ? __xtc_current_coro->self : NULL;
 }
 
 #endif /* _WIN32 */

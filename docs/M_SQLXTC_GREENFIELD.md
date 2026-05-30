@@ -194,6 +194,17 @@ value:
          I/O never blocks another connection.
      The offload is correct today for any single SQLite user; the
      server-wide wiring waits on one of those two.
+
+     *Update:* `xtc_amutex` now yields the fiber when contended (it
+     parks the calling process and hands the lock off on unlock,
+     rather than `pthread_cond_wait`ing the OS thread).  That removes
+     the first blocker: with SQLite's mutex backed by `xtc_amutex`, a
+     process can park mid-statement (on a `xtc_blocking` offload)
+     while holding the lock, and a second connection that contends
+     parks instead of wedging the loop -- the loop stays live to wake
+     the holder.  The remaining work is to back sqlxtc's
+     `sqlite3_mutex` with `xtc_amutex` (today it uses `xtc_lwlock`)
+     and then route `xv_read`/`xv_write`/`xv_sync` through the pool.
   3. **Pager as a proc.**  Route durability through a single pager
      proc so the WAL writer is an explicit owner.
   4. **Fine-grained locks via `xtc_lockmgr`** -- the deep step that

@@ -55,6 +55,11 @@ struct xtc_task {
 	 * while the task is in PARKED state. */
 	xtc_timer_t *park_timer;
 	int          park_fd;       /* -1 when not parked on fd */
+	/* Voluntary park: when set by a primitive (e.g. xtc_amutex) just
+	 * before yielding, the coro step returns PENDING instead of
+	 * RESCHED, so the task sleeps until a waker re-enqueues it rather
+	 * than busy-spinning.  Read-and-cleared by the step. */
+	int          park_requested;
 
 	/* Wakeup-cause flags, set by the dispatcher / timer callback /
 	 * mbox_deliver when the task is unparked.  Sampled and cleared
