@@ -30,6 +30,7 @@
 #include "xtc_chan.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "xtc_sync.h"
 
 /* Result codes for handle_call / handle_cast / handle_info: the
  * callback may either keep running (XTC_SVR_CONTINUE) or request
@@ -61,6 +62,7 @@ typedef struct xtc_svr_opts {
  * PUBLIC: xtc_pid_t xtc_svr_pid __P((const xtc_svr_t *));
  *
  * PUBLIC: int       xtc_svr_call __P((xtc_pid_t, const void *, size_t, void **, size_t *, int64_t));
+ * PUBLIC: int       xtc_svr_call_abortable __P((xtc_pid_t, const void *, size_t, void **, size_t *, int64_t, xtc_abort_token_t *));
  * PUBLIC: int       xtc_svr_cast __P((xtc_pid_t, const void *, size_t));
  * PUBLIC: int       xtc_svr_reply __P((xtc_svr_call_t *, const void *, size_t));
  */
@@ -85,6 +87,18 @@ int xtc_svr_call(xtc_pid_t target,
                  const void *req, size_t req_size,
                  void **out_reply, size_t *out_size,
                  int64_t timeout_ns);
+
+/* Like xtc_svr_call, but cancellable: while waiting for the reply the
+ * abort token is polled, and the call returns XTC_E_ABORTED if it
+ * fires first.  Fire the token's source (xtc_abort_source_fire) from
+ * a timeout or a cancel-request path -- the cooperative cancellation
+ * primitive (e.g. a statement timeout delivering a cancel at the next
+ * wait point).  Cancellation stops only the caller's wait; the
+ * server keeps processing and a late reply is discarded. */
+int xtc_svr_call_abortable(xtc_pid_t target,
+                           const void *req, size_t req_size,
+                           void **out_reply, size_t *out_size,
+                           int64_t timeout_ns, xtc_abort_token_t *tok);
 
 /* Fire-and-forget: send `msg` to the server.  Server's handle_cast
  * (if non-NULL) will see it; if NULL, falls through to handle_info. */
