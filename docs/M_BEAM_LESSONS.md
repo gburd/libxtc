@@ -406,7 +406,10 @@ Listing them as concrete agenda items:
 4. Memory-ownership guide doc (issue 3)
 5. `xtc_alloc_audit_t` debug allocation tracker (issue 3)
 6. `XTC_YIELD_CHECK` macro + scheduler-side flag (issue 4)
-7. `xtc_blocking_pool_run` worker pool (issue 4)
+7. `xtc_blocking_pool_run` worker pool (issue 4) -- DONE, shipped as
+   `xtc_blocking_run` (src/ptc/blocking.c): a worker pool runs the
+   blocking call and parks the calling process via a pipe +
+   xtc_proc_wait_fd; synchronous fallback off a loop.
 8. `xtc_sup_opts_t.backoff_initial_ns` + circuit breaker option (issue 7)
 9. `xtc_lockmgr` integration toggle for `xtc_lwlock` (issue 11)
 10. `xtc_abort_source` first-class wiring through `xtc_svr_call` etc. (issue 12)

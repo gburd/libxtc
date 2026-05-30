@@ -12,10 +12,15 @@
  *	synchronously.
  */
 
+#define _GNU_SOURCE
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <time.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -148,6 +153,70 @@ test_concurrent(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- offloading real file I/O from a proc (the async-VFS pattern) ---- */
+struct pread_ctx {
+	int    fd;
+	char   buf[512];
+	int    n;
+	off_t  off;
+};
+
+static int
+pread_fn(void *arg)
+{
+	struct pread_ctx *c = arg;
+	ssize_t r = pread(c->fd, c->buf, (size_t)c->n, c->off);
+	return (int)r;
+}
+
+static _Atomic int g_file_ok;
+
+static void
+file_proc(void *arg)
+{
+	struct pread_ctx ctx;
+	int out = -1;
+	int fd = (int)(intptr_t)arg;
+	ctx.fd = fd;
+	ctx.n = 512;
+	ctx.off = 0;
+	memset(ctx.buf, 0, sizeof ctx.buf);
+	/* Offload the read to the pool; the loop runs others meanwhile. */
+	(void)xtc_blocking_run(pread_fn, &ctx, &out);
+	if (out == 512 && ctx.buf[0] == 'Z' && ctx.buf[511] == 'Z')
+		atomic_store(&g_file_ok, 1);
+}
+
+static MunitResult
+test_file_offload(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	char path[] = "/tmp/xtc-blk-file-XXXXXX";
+	char pattern[512];
+	int fd;
+	(void)p; (void)d;
+
+	atomic_store(&g_file_ok, 0);
+	fd = mkstemp(path);
+	munit_assert_int(fd, >=, 0);
+	memset(pattern, 'Z', sizeof pattern);
+	munit_assert_int((int)write(fd, pattern, sizeof pattern), ==, 512);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "file";
+	munit_assert_int(xtc_proc_spawn(loop, file_proc,
+	    (void *)(intptr_t)fd, &opts, &pid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	(void)close(fd);
+	(void)unlink(path);
+	munit_assert_int(atomic_load(&g_file_ok), ==, 1);
+	return MUNIT_OK;
+}
+
 /* ---- clean shutdown (and restart) ---- */
 static MunitResult
 test_shutdown(const MunitParameter p[], void *d)
@@ -167,6 +236,7 @@ static MunitTest tests[] = {
 	{ "/fallback",   test_fallback,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/liveness",   test_in_proc_liveness, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent", test_concurrent,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/file_offload", test_file_offload,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shutdown",   test_shutdown,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
