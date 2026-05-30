@@ -35,6 +35,7 @@
 #include "xtc_res.h"
 
 #include "broker.h"
+#include "metrics.h"
 
 typedef struct broker_cfg {
 	const char *host;
@@ -209,6 +210,13 @@ main(int argc, char **argv)
 	b->loop = xtc_app_loop(b->app);
 	broker_set_loop(b->loop);
 	broker_set_log_dir(cfg.log_dir);
+
+	/* Observability + memory budget: stored record payload is capped
+	 * at cfg.max_memory (0 = unbounded); PRODUCE past the cap is
+	 * rejected so a producer flood cannot grow the broker without
+	 * limit. */
+	kaka_metrics_init();
+	kaka_metrics_set_mem_cap(cfg.max_memory);
 
 	memset(kids, 0, sizeof kids);
 	kids[0].name = "listener";
