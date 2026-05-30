@@ -51,6 +51,7 @@
 #include "broker.h"
 #include "frame.h"
 #include "partition.h"
+#include "metrics.h"
 
 /* ---- conn <-> partition control messages ---- */
 
@@ -153,15 +154,38 @@ partition_proc(void *arg)
 			kaka_record_t r;
 			int64_t base = -1, off;
 			int got;
+			int64_t t0 = 0;
+			uint32_t n_ok = 0, n_rej = 0;
+			size_t bytes = 0;
+			(void)__os_clock_mono(&t0);
 			while ((got = kaka_produce_next_record(&req.produce,
 			    &r)) == 1) {
+				int64_t need = (int64_t)r.key_len + r.value_len;
+				/* Bounded broker memory: reject the record
+				 * if it would exceed the budget. */
+				if (kaka_mem_acquire(need) != 0) {
+					n_rej++;
+					continue;
+				}
 				off = plog_append(log, &r);
-				if (off < 0) break;
+				if (off < 0) {
+					kaka_mem_release(need);
+					break;
+				}
 				if (base < 0) base = off;
+				n_ok++;
+				bytes += (size_t)need;
 			}
-			rep.ok = (base >= 0 || req.produce.n_records == 0);
+			rep.ok = (base >= 0 || (req.produce.n_records == 0 &&
+			    n_rej == 0));
 			rep.base_offset = (base >= 0) ? (uint64_t)base : 0;
 			rep.hwm = plog_high_water(log);
+			{
+				int64_t t1 = 0;
+				(void)__os_clock_mono(&t1);
+				kaka_metrics_produce(n_ok, bytes,
+				    t0 ? t1 - t0 : -1, n_rej);
+			}
 		} else if (req.op == REQ_FETCH) {
 			/* Build a RECORDS body up to max_bytes. */
 			size_t cap = req.max_bytes ? req.max_bytes : 65536;
@@ -169,6 +193,8 @@ partition_proc(void *arg)
 			uint64_t off = req.offset;
 			uint32_t n = 0;
 			size_t used = 17;     /* header reserved (5 + 12) */
+			int64_t t0 = 0;
+			(void)__os_clock_mono(&t0);
 			if (buf != NULL) {
 				kaka_record_t r;
 				while (off < plog_high_water(log)) {
@@ -190,6 +216,12 @@ partition_proc(void *arg)
 				rep.records_len = used;
 			}
 			rep.hwm = plog_high_water(log);
+			{
+				int64_t t1 = 0;
+				(void)__os_clock_mono(&t1);
+				kaka_metrics_fetch(n, used,
+				    t0 ? t1 - t0 : -1);
+			}
 		}
 
 		(void)xtc_send(req.reply, &rep, sizeof rep);
@@ -684,4 +716,157 @@ broker_credit_selftest(int *max_in_flight, uint64_t *hwm)
 	if (max_in_flight) *max_in_flight = st.max_in_flight;
 	if (hwm) *hwm = st.hwm;
 	return st.result;
+}
+
+/* ---- observability + budget self-test (Phase 5) ----
+ *
+ * Drives PRODUCE/FETCH through a partition proc and checks that the
+ * xtc_stats counters and latency histograms moved, then sets a tiny
+ * xtc_res memory budget and floods produces to confirm the broker
+ * rejects records past the cap and its stored bytes stay bounded.
+ * In-process, no socket.
+ */
+
+struct metrics_state {
+	int        result;
+	xtc_pid_t  part;
+	int        n_produce;     /* single-record PRODUCE requests to send */
+	int        do_fetch;
+};
+
+/* Send one single-record PRODUCE (value = 4 bytes) and await the reply.
+ * Returns 1 if the record was accepted, 0 if rejected, -1 on error. */
+static int
+metrics_produce_one(xtc_pid_t part, uint32_t seq)
+{
+	uint8_t body[64];
+	uint8_t *p = body;
+	struct part_req req;
+	struct part_reply rep;
+	void *msg; size_t mlen;
+
+	kaka_put_u16(p, 1); p += 2; *p++ = 't';
+	kaka_put_u32(p, 0); p += 4;              /* partition 0 */
+	kaka_put_u32(p, 1); p += 4;              /* 1 record */
+	kaka_put_u32(p, 0); p += 4;              /* key_len 0 */
+	kaka_put_u32(p, 4); p += 4;              /* val_len 4 */
+	kaka_put_u32(p, seq); p += 4;
+
+	memset(&req, 0, sizeof req);
+	req.op = REQ_PRODUCE;
+	req.reply = xtc_self();
+	req.tag = seq;
+	if (kaka_decode_produce(body, (size_t)(p - body), &req.produce) != 0)
+		return -1;
+	if (xtc_send(part, &req, sizeof req) != XTC_OK)
+		return -1;
+	if (xtc_recv(&msg, &mlen, 2000LL * 1000000) != XTC_OK || msg == NULL)
+		return -1;
+	memcpy(&rep, msg, sizeof rep);
+	__os_free(msg);
+	return rep.ok ? 1 : 0;
+}
+
+static void
+metrics_client(void *arg)
+{
+	struct metrics_state *st = arg;
+	struct part_req req;
+	struct part_reply rep;
+	void *msg; size_t mlen;
+	int i;
+
+	for (i = 0; i < st->n_produce; i++) {
+		if (metrics_produce_one(st->part, (uint32_t)i) < 0) {
+			st->result = 1; goto done;
+		}
+	}
+
+	if (st->do_fetch) {
+		memset(&req, 0, sizeof req);
+		req.op = REQ_FETCH; req.reply = xtc_self(); req.tag = 1000;
+		req.offset = 0; req.max_bytes = 65536;
+		if (xtc_send(st->part, &req, sizeof req) != XTC_OK) {
+			st->result = 2; goto done;
+		}
+		if (xtc_recv(&msg, &mlen, 2000LL * 1000000) != XTC_OK ||
+		    msg == NULL) { st->result = 3; goto done; }
+		memcpy(&rep, msg, sizeof rep);
+		if (rep.records != NULL) free(rep.records);
+		__os_free(msg);
+	}
+	st->result = 0;
+done:
+	memset(&req, 0, sizeof req);
+	req.op = REQ_SHUTDOWN; req.reply = xtc_self(); req.tag = 999;
+	if (xtc_send(st->part, &req, sizeof req) == XTC_OK) {
+		if (xtc_recv(&msg, &mlen, 1000LL * 1000000) == XTC_OK && msg)
+			__os_free(msg);
+	}
+}
+
+static int
+metrics_run(int n_produce, int do_fetch)
+{
+	xtc_loop_t *loop = NULL;
+	struct metrics_state st;
+	struct part_arg *pa;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t part, client;
+
+	memset(&st, 0, sizeof st);
+	st.n_produce = n_produce;
+	st.do_fetch = do_fetch;
+	if (xtc_loop_init(&loop) != XTC_OK) return -1;
+	pa = calloc(1, sizeof *pa);
+	if (pa == NULL) return -1;
+	pa->topic[0] = 't'; pa->topic[1] = '\0'; pa->partition = 0;
+	opts.name = "metrics-partition";
+	if (xtc_proc_spawn(loop, partition_proc, pa, &opts, &part) != XTC_OK) {
+		free(pa); return -1;
+	}
+	st.part = part;
+	opts.name = "metrics-client";
+	if (xtc_proc_spawn(loop, metrics_client, &st, &opts, &client) != XTC_OK)
+		return -1;
+	if (xtc_loop_run(loop) != XTC_OK) return -1;
+	return st.result;
+}
+
+int
+broker_metrics_selftest(void)
+{
+	kaka_metrics_t m0, m1, m2;
+
+	kaka_metrics_init();
+	kaka_metrics_mem_reset();
+	kaka_metrics_set_mem_cap(0);          /* unbounded for phase A */
+
+	/* Phase A: observability.  Produce 5 single-record batches and
+	 * one fetch; the counters and latency histograms must move. */
+	kaka_metrics_get(&m0);
+	if (metrics_run(5, 1) != 0)
+		return 1;
+	kaka_metrics_get(&m1);
+	if (m1.produce_requests - m0.produce_requests != 5) return 2;
+	if (m1.produce_records  - m0.produce_records  != 5) return 3;
+	if (m1.produce_bytes    - m0.produce_bytes    != 20) return 4; /* 5*4 */
+	if (m1.fetch_requests   - m0.fetch_requests   != 1) return 5;
+	if (m1.fetch_records    - m0.fetch_records    != 5) return 6;
+	if (m1.produce_p50_us < 0 || m1.fetch_p50_us < 0) return 7;
+
+	/* Phase B: budget.  Reset the budget, cap it at 12 bytes (3
+	 * records of 4 bytes each), then try to produce 10 records.
+	 * At most 3 should be accepted; the rest rejected; stored bytes
+	 * stay <= cap. */
+	kaka_metrics_mem_reset();
+	kaka_metrics_set_mem_cap(12);
+	if (metrics_run(10, 0) != 0)
+		return 8;
+	kaka_metrics_get(&m2);
+	if (m2.produce_rejected - m1.produce_rejected == 0) return 9;
+	if (m2.mem_used > 12) return 10;
+	if (m2.mem_used != 12) return 11;     /* exactly 3 records fit */
+
+	return 0;
 }

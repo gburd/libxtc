@@ -3177,8 +3177,10 @@ Design in `docs/M_SQLXTC_GREENFIELD.md` (clean-slate) and
 |------|--------|-------|
 | session-as-proc + pure parser | done | one xtc_proc per connection; Lime pre-parse |
 | SQLite mutex via xtc_lwlock | done | serialized engine behind one lwlock |
-| page cache behind xtc_lrlock | TODO | custom sqlite3_pcache_methods2; no fork needed; proves read concurrency |
-| async VFS via xtc_io | TODO | custom sqlite3_vfs; no fork needed |
+| page cache via xtc_slab | done | custom sqlite3_pcache_methods2; per-cache slab (one object-size class); hit/miss/recycle stats; ASan-clean; lib + amalgamation tests |
+| page cache behind xtc_lrlock | TODO | COW page table for read concurrency; builds on the slab resident set; gated on leaving SQLITE_CONFIG_SERIALIZED |
+| instrumented VFS (sync) | done | custom sqlite3_vfs shim; all I/O via xtc_stats + __os_*; WAL shm path exercised; lib + amalgamation tests |
+| async VFS via xtc_io | TODO | submit reads to the loop, park the fiber until completion; plugs into the VFS xRead choke point |
 | pager as a proc | TODO | explicit single WAL-writer owner |
 | fine-grained btree locks via xtc_lockmgr | TODO | requires forking the btree (see hard-fork doc) |
 
@@ -3195,7 +3197,7 @@ Kafka-shaped log broker; design in `examples/07_kaka/README.md`.
 | 2 segmented persistence | done | CRC-framed segment files, roll at threshold, scan-recovery; plog_create_ex; 3000-record restart test |
 | 3 credit-based backpressure | done | per-producer credit window; reply = credit return; in-process test: budget 4, 200 records, peak in-flight=4, all land |
 | 4 consumer groups | done | single-owner coordinator proc owns all committed offsets (lock-free); commit/fetch protocol; durable via segmented plog with replay on restart; in-process tests: last-write-wins, group/partition isolation, restart recovery |
-| 5 observability + budgets + docs | TODO | xtc_stats, xtc_res, metrics test |
+| 5 observability + budgets | done | xtc_stats counters + produce/fetch latency histograms in the partition proc; xtc_res memory budget rejects records past the cap; in-process metrics test (counters move; 12-byte cap admits exactly 3 records, rest rejected) |
 
 ---
 
