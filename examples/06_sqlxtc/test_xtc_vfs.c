@@ -32,6 +32,86 @@ sum_cb(void *unused, int ncol, char **vals, char **names)
 	return 0;
 }
 
+static char g_mode[16];
+
+static int
+mode_cb(void *unused, int ncol, char **vals, char **names)
+{
+	(void)unused; (void)names;
+	if (ncol >= 1 && vals[0] != NULL) {
+		strncpy(g_mode, vals[0], sizeof g_mode - 1);
+		g_mode[sizeof g_mode - 1] = '\0';
+	}
+	return 0;
+}
+
+/* Exercise WAL mode through the xtc VFS: this drives the shared-memory
+ * methods (xShmMap / xShmLock / xShmBarrier / xShmUnmap) that the
+ * rollback-journal workload above never touches.  Returns 0 on pass. */
+static int
+wal_test(void)
+{
+	sqlite3 *db = NULL;
+	char *err = NULL;
+	char path[] = "/tmp/sqlxtc-vfs-wal-XXXXXX";
+	int fd, rc, i, fails = 0;
+
+	fd = mkstemp(path);
+	if (fd < 0) { perror("mkstemp"); return 1; }
+	close(fd);
+	unlink(path);
+
+	rc = sqlite3_open_v2(path, &db,
+	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "xtc");
+	if (rc != SQLITE_OK) {
+		fprintf(stderr, "FAIL(wal): open: %s\n", sqlite3_errmsg(db));
+		unlink(path);
+		return 1;
+	}
+
+	g_mode[0] = '\0';
+	rc = sqlite3_exec(db, "PRAGMA journal_mode=WAL;", mode_cb, 0, &err);
+	if (rc != SQLITE_OK) {
+		fprintf(stderr, "FAIL(wal): set WAL: %s\n", err);
+		sqlite3_free(err); sqlite3_close(db); unlink(path); return 1;
+	}
+
+	(void)sqlite3_exec(db,
+	    "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);", 0, 0, 0);
+	(void)sqlite3_exec(db, "BEGIN;", 0, 0, 0);
+	for (i = 1; i <= 300; i++) {
+		char sql[96];
+		snprintf(sql, sizeof sql,
+		    "INSERT INTO t(a,b) VALUES(%d,'wal-%d');", i, i);
+		if (sqlite3_exec(db, sql, 0, 0, &err) != SQLITE_OK) {
+			fprintf(stderr, "FAIL(wal): insert: %s\n", err);
+			sqlite3_free(err); fails++; break;
+		}
+	}
+	(void)sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+
+	g_sum = -1;
+	(void)sqlite3_exec(db, "SELECT sum(a) FROM t;", sum_cb, 0, 0);
+	sqlite3_close(db);
+
+	if (strcmp(g_mode, "wal") != 0) {
+		fprintf(stderr, "FAIL(wal): journal_mode=%s, expected wal\n",
+		    g_mode);
+		fails++;
+	} else if (g_sum != 45150) {  /* sum(1..300) */
+		fprintf(stderr, "FAIL(wal): sum=%d expected 45150\n", g_sum);
+		fails++;
+	} else {
+		printf("  ok   WAL works through xtc vfs "
+		       "(shm methods exercised, sum=%d)\n", g_sum);
+	}
+
+	unlink(path);
+	{ char p2[300]; snprintf(p2, sizeof p2, "%s-wal", path); unlink(p2);
+	  snprintf(p2, sizeof p2, "%s-shm", path); unlink(p2); }
+	return fails;
+}
+
 int
 main(void)
 {
@@ -132,6 +212,10 @@ main(void)
 	    (unsigned long long)s1.syncs, s1.read_p50_us, s1.write_p50_us);
 
 	unlink(path);
+
+	/* WAL mode: exercises the VFS shared-memory forwarding. */
+	fails += wal_test();
+
 	printf("%s\n", fails == 0 ? "All xtc vfs tests passed."
 	                          : "xtc vfs test FAILED.");
 	return fails == 0 ? 0 : 1;
