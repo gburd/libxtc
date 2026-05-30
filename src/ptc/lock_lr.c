@@ -81,13 +81,19 @@ static pthread_key_t   __slot_key;
 static pthread_once_t  __slot_key_once = PTHREAD_ONCE_INIT;
 
 static void
-__slot_release(void *unused)
+__slot_release(void *value)
 {
-	(void)unused;
-	if (__my_global_slot < 0) return;
+	/* The slot comes from the pthread_setspecific value, NOT the
+	 * thread-local __my_global_slot: on macOS the C11 thread_local
+	 * storage is torn down before this pthread_key destructor runs,
+	 * so reading __my_global_slot here reclaims a stale value (slots
+	 * never return -> reader-slot exhaustion).  The value is slot+1
+	 * (so 0 means "unset"); decode it. */
+	int slot = (int)(intptr_t)value - 1;
+	if (slot < 0) return;
 	(void)pthread_mutex_lock(&__slot_free_lock);
 	if (__slot_free_n < XTC_LRLOCK_MAX_GLOBAL_SLOTS)
-		__slot_free_list[__slot_free_n++] = __my_global_slot;
+		__slot_free_list[__slot_free_n++] = slot;
 	(void)pthread_mutex_unlock(&__slot_free_lock);
 	__my_global_slot = -1;
 }
@@ -127,11 +133,13 @@ __slot_for(xtc_lrlock_t *lr)
 				return -1;
 			}
 		}
-		/* Register for thread-exit reclamation (value is a
-		 * non-NULL sentinel; the destructor reads the __thread
-		 * slot directly). */
+		/* Register for thread-exit reclamation.  Encode slot+1 as
+		 * the thread-specific value so the destructor recovers it
+		 * without depending on the thread_local still being live
+		 * (macOS tears thread_locals down first). */
 		__my_global_slot = s;
-		(void)pthread_setspecific(__slot_key, (void *)1);
+		(void)pthread_setspecific(__slot_key,
+		    (void *)(intptr_t)(s + 1));
 	}
 	return __my_global_slot;
 }
