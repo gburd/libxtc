@@ -3180,7 +3180,7 @@ Design in `docs/M_SQLXTC_GREENFIELD.md` (clean-slate) and
 | page cache via xtc_slab | done | custom sqlite3_pcache_methods2; per-cache slab (one object-size class); bounded by cache_size with LRU recycling (resident set stays at the cap under a larger working set); hit/miss/recycle stats; ASan-clean; lib + amalgamation tests |
 | page cache behind xtc_lrlock | TODO | COW page table for read concurrency; builds on the slab resident set; gated on leaving SQLITE_CONFIG_SERIALIZED |
 | instrumented VFS (sync) | done | custom sqlite3_vfs shim; all I/O via xtc_stats + __os_*; WAL shm path exercised; lib + amalgamation tests |
-| async VFS via xtc_io | TODO | submit reads to the loop, park the fiber until completion; plugs into the VFS xRead choke point |
+| async VFS via xtc_io | partial | xtc_blocking pool landed (offload file I/O, park the calling process) -- the mechanism xv_read/xv_write/xv_sync will use; server-wide wiring waits on a fiber-yielding lock or per-connection handles (deadlock analysis in greenfield doc) |
 | pager as a proc | TODO | explicit single WAL-writer owner |
 | fine-grained btree locks via xtc_lockmgr | TODO | requires forking the btree (see hard-fork doc) |
 
