@@ -146,6 +146,6 @@ jobs:
       - name: sqlxtc in-process tests + amalgamation
         working-directory: examples/06_sqlxtc
         run: |
-          make XTC_BUILD=../../build_ci test-quack test-vfs test-pcache
+          make XTC_BUILD=../../build_ci test-quack test-vfs test-pcache test-concurrency
           make XTC_BUILD=../../build_ci amalg
           make XTC_BUILD=../../build_ci test-vfs-amalg test-pcache-amalg
