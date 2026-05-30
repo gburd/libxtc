@@ -15,7 +15,8 @@
 .Nm xtc_exit_pid ,
 .Nm xtc_link ,
 .Nm xtc_unlink ,
-.Nm xtc_monitor
+.Nm xtc_monitor ,
+.Nm xtc_proc_mailbox_stats
 .Nd BEAM-style lightweight processes with mailboxes
 .Sh SYNOPSIS
 .In xtc.h
@@ -44,6 +45,8 @@
 .Fn xtc_unlink "xtc_pid_t other"
 .Ft int
 .Fn xtc_monitor "xtc_pid_t target" "uint64_t *out_ref"
+.Ft int
+.Fn xtc_proc_mailbox_stats "xtc_pid_t pid" "xtc_mailbox_stats_t *out"
 .Sh DESCRIPTION
 xtc processes are BEAM-style lightweight actors: each has an
 identity
@@ -189,6 +192,35 @@ creates a unidirectional monitor.  The watcher receives a
 message
 .Po Vt {kind='D', ref, pid, reason} Pc
 when the monitored process exits.
+.Pp
+.Fn xtc_proc_mailbox_stats
+snapshots a process's mailbox into
+.Fa out :
+the current
+.Va depth ,
+the high-water
+.Va peak ,
+the
+.Va cap ,
+and lifetime
+.Va recv_total
+and
+.Va drop_total
+counts (messages accepted and rejected).  It is safe to call from any
+thread and is the basis for an overload / head-of-line-buildup scrape.
+.Pp
+A process can also be given a mailbox watermark via
+.Va xtc_proc_opts_t.mailbox_watermark_pct
+(1..100; 0 disables) plus
+.Va mailbox_watermark_fn
+and
+.Va mailbox_watermark_user .
+When an accepted message first brings the depth to that percent of the
+cap, the callback fires once on the rising edge -- so an application
+can shed load before the hard cap rejects with
+.Dv XTC_E_AGAIN .
+The callback runs on the sender's thread outside the mailbox lock and
+must not block.
 .Sh RETURN VALUES
 All entry points return
 .Dv XTC_OK

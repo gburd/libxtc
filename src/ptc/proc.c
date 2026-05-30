@@ -165,6 +165,23 @@ struct xtc_proc {
 	struct envelope  *mbox_tail;
 	size_t            mbox_cap;
 
+	/* Mailbox statistics (all under mbox_lock): peak depth ever
+	 * reached, total messages accepted, total rejected (mailbox full
+	 * or proc dead).  For xtc_proc_mailbox_stats / overload scrapes. */
+	size_t            mbox_peak;
+	uint64_t          mbox_recv_total;
+	uint64_t          mbox_drop_total;
+
+	/* Watermark hook: when an accepted message pushes the depth to or
+	 * past mbox_wm_lvl (computed from a percent of cap at spawn), the
+	 * callback fires once on the rising edge so the app can shed load
+	 * before the hard cap.  mbox_wm_fired latches until depth falls
+	 * back below the level. */
+	size_t            mbox_wm_lvl;     /* 0 = disabled */
+	int               mbox_wm_fired;
+	void            (*mbox_wm_fn)(xtc_pid_t, size_t, size_t, void *);
+	void             *mbox_wm_user;
+
 	/* Selective-receive save queue (envelopes that the receiver
 	 * already inspected and rejected). */
 	struct envelope  *save_head;
@@ -386,6 +403,8 @@ __mbox_push_locked(struct xtc_proc *p, struct envelope *e)
 	if (p->mbox_tail == NULL) p->mbox_head = p->mbox_tail = e;
 	else { p->mbox_tail->next = e; p->mbox_tail = e; }
 	p->mbox_n++;
+	if (p->mbox_n > p->mbox_peak) p->mbox_peak = p->mbox_n;
+	p->mbox_recv_total++;
 }
 
 static struct envelope *
@@ -396,6 +415,10 @@ __mbox_pop_locked(struct xtc_proc *p)
 	p->mbox_head = e->next;
 	if (p->mbox_head == NULL) p->mbox_tail = NULL;
 	p->mbox_n--;
+	/* Drop the watermark latch once the backlog drains below the
+	 * level, so a later refill fires the callback again. */
+	if (p->mbox_wm_lvl > 0 && p->mbox_n < p->mbox_wm_lvl)
+		p->mbox_wm_fired = 0;
 	return e;
 }
 
@@ -403,6 +426,8 @@ static int
 __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 {
 	int armed;
+	int wm_fire = 0;
+	size_t wm_depth = 0, wm_cap = 0;
 	(void)pthread_mutex_lock(&p->mbox_lock);
 	/* Reject if proc is dead, or capped and full.
 	 * Note: precedence bug fix -- the original used
@@ -411,6 +436,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 	 * surprising behaviour on platforms where alive timing
 	 * differed.  Explicit parens. */
 	if (!p->alive || (p->mbox_cap > 0 && p->mbox_n >= p->mbox_cap)) {
+		p->mbox_drop_total++;
 		(void)pthread_mutex_unlock(&p->mbox_lock);
 		__env_free(e);
 		return XTC_E_AGAIN;
@@ -421,8 +447,20 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 	 * observes a consistent mailbox state under the lock. */
 	XTC_INJECTION_POINT("proc.mbox.pre_push");
 	__mbox_push_locked(p, e);
+	/* Watermark rising edge: fire once when the depth first reaches
+	 * the level; capture under the lock, invoke after releasing it
+	 * (the callback must be free to call back into proc APIs). */
+	if (p->mbox_wm_lvl > 0 && !p->mbox_wm_fired &&
+	    p->mbox_n >= p->mbox_wm_lvl) {
+		p->mbox_wm_fired = 1;
+		wm_fire = (p->mbox_wm_fn != NULL);
+		wm_depth = p->mbox_n;
+		wm_cap = p->mbox_cap;
+	}
 	armed = p->waker_armed;
 	(void)pthread_mutex_unlock(&p->mbox_lock);
+	if (wm_fire)
+		p->mbox_wm_fn(p->pid, wm_depth, wm_cap, p->mbox_wm_user);
 	if (armed) {
 		/* Record the wake cause so xtc_proc_wait_fd / etc. can
 		 * tell why we resumed. */
@@ -492,6 +530,16 @@ xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	p->alive = 1;
 	p->mbox_cap = (opts != NULL && opts->mailbox_cap > 0)
 	    ? opts->mailbox_cap : 4096;
+	/* Watermark level: a percent of cap (rounded down), clamped so a
+	 * positive percent yields at least 1.  0 percent disables it. */
+	if (opts != NULL && opts->mailbox_watermark_pct > 0 &&
+	    opts->mailbox_watermark_pct <= 100) {
+		p->mbox_wm_lvl = (p->mbox_cap * (size_t)
+		    opts->mailbox_watermark_pct) / 100;
+		if (p->mbox_wm_lvl == 0) p->mbox_wm_lvl = 1;
+		p->mbox_wm_fn = opts->mailbox_watermark_fn;
+		p->mbox_wm_user = opts->mailbox_watermark_user;
+	}
 
 	if ((rc = __table_alloc_slot(tbl, p, &local, &gen)) != XTC_OK) {
 		(void)pthread_mutex_destroy(&p->mbox_lock);
@@ -544,6 +592,27 @@ void
 __xtc_proc_ctx_restore(void *ctx)
 {
 	__current_proc = (struct xtc_proc *)ctx;
+}
+
+/* PUBLIC: int xtc_proc_mailbox_stats __P((xtc_pid_t, xtc_mailbox_stats_t *)); */
+static struct xtc_proc *__resolve(xtc_pid_t pid, xtc_loop_t **out);
+int
+xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out)
+{
+	struct xtc_proc *p;
+	if (out == NULL || xtc_pid_is_none(pid))
+		return XTC_E_INVAL;
+	p = __resolve(pid, NULL);
+	if (p == NULL)
+		return XTC_E_INVAL;
+	(void)pthread_mutex_lock(&p->mbox_lock);
+	out->depth = p->mbox_n;
+	out->peak = p->mbox_peak;
+	out->cap = p->mbox_cap;
+	out->recv_total = p->mbox_recv_total;
+	out->drop_total = p->mbox_drop_total;
+	(void)pthread_mutex_unlock(&p->mbox_lock);
+	return XTC_OK;
 }
 
 /* ---------- send ---------- */
