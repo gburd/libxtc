@@ -128,6 +128,7 @@ clean:
 	rm -f test_xtc_vfs test_xtc_vfs_amalg test_xtc_vfs.o
 	rm -f test_pcache_xtc test_pcache_xtc_amalg test_pcache_xtc.o
 	rm -f test_concurrency test_concurrency.o
+	rm -f test_vfs_loop test_vfs_loop.o
 	rm -rf $(AMALG_DIR)
 	rm -f sql_parse_gen.o sql_parse_drv.o
 	rm -f /tmp/sqlxtc-bench.db /tmp/sqlxtc-bench.db-*
@@ -137,7 +138,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-pcache test-concurrency
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -184,6 +185,13 @@ test_xtc_vfs: test_xtc_vfs.c xtc_vfs.o sqlite/sqlite3.o
 
 test-vfs: test_xtc_vfs
 	./test_xtc_vfs
+
+# ---- xtc VFS on-loop blocking-offload test (in-process, no daemon) ----
+test_vfs_loop: test_vfs_loop.c xtc_vfs.o sqlite/sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_vfs_loop.c xtc_vfs.o sqlite/sqlite3.o $(LDFLAGS)
+
+test-vfs-loop: test_vfs_loop
+	./test_vfs_loop
 
 test_xtc_vfs_amalg: test_xtc_vfs.c xtc_vfs.amalg.o sqlite/sqlite3.o \
         $(AMALG_DIR)/xtc.o
