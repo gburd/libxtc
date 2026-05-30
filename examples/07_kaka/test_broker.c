@@ -42,6 +42,20 @@ main(void)
 		}
 	}
 
+	/* Observability + memory budget (Phase 5). */
+	{
+		int mrc = broker_metrics_selftest();
+		if (mrc == 0) {
+			printf("  ok   broker_metrics_selftest "
+			       "(stats counters + latency hist move, "
+			       "xtc_res cap bounds stored records)\n");
+		} else {
+			fprintf(stderr, "FAIL: metrics selftest step %d\n",
+			    mrc);
+			rc = rc ? rc : 200;
+		}
+	}
+
 	printf("%s\n", rc == 0 ? "All kaka broker tests passed."
 	                       : "kaka broker test FAILED.");
 	return rc == 0 ? 0 : 1;

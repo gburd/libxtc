@@ -33,4 +33,9 @@ int  broker_selftest(void);
  * reports the observed peak in-flight count and the final high-water. */
 int  broker_credit_selftest(int *max_in_flight, uint64_t *hwm);
 
+/* In-process observability + memory-budget self-test.  Returns 0 on
+ * pass.  Asserts xtc_stats counters/histograms move and that an
+ * xtc_res memory cap bounds stored records (rejecting the overflow). */
+int  broker_metrics_selftest(void);
+
 #endif /* KAKA_BROKER_H */
