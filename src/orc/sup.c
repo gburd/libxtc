@@ -58,17 +58,23 @@ struct down_signal {
 	xtc_pid_t pid;
 	int      reason;
 } XTC_PACKED;
-XTC_PACK_POP
 
-static int
-__match_down(const void *data, size_t size, void *u)
-{
-	const struct down_signal *d;
-	(void)u;
-	if (size < sizeof *d) return 0;
-	d = data;
-	return d->kind == 'D';
-}
+/* Control message: add a dynamic child (SIMPLE_ONE_FOR_ONE).  Sent to
+ * the supervisor proc so the spawn + monitor are owned by it.  Same
+ * address space, so the spec (incl. fn/arg pointers) is copied by
+ * value; the caller must keep spec.name alive for the child's life. */
+struct add_child_msg {
+	uint8_t          kind;       /* 'A' */
+	xtc_pid_t        reply;
+	uint32_t         tag;
+	xtc_child_spec_t spec;
+};
+struct add_child_reply {
+	uint32_t  tag;
+	int       ok;
+	xtc_pid_t pid;
+};
+XTC_PACK_POP
 
 static int
 __should_restart(struct xtc_supervisor *sup, const struct child *c, int reason)
@@ -121,6 +127,45 @@ __spawn_child(struct xtc_supervisor *sup, struct child *c)
 	c->alive = 1;
 	rc = xtc_monitor(c->pid, &c->monitor_ref);
 	return rc;
+}
+
+/* Handle an ADD_CHILD control message inside the supervisor proc, so
+ * the spawn + monitor are owned by it (the recv loop reaps the DOWN).
+ * Grows the children array, spawns, and replies with the new pid. */
+static void
+__handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
+{
+	struct add_child_reply rep;
+	void *nc = NULL;
+	int idx, rc;
+
+	memset(&rep, 0, sizeof rep);
+	rep.tag = a->tag;
+	(void)pthread_mutex_lock(&sup->lock);
+	if (__os_realloc(sup->children,
+	    (size_t)(sup->n_children + 1) * sizeof(struct child), &nc)
+	    != XTC_OK) {
+		(void)pthread_mutex_unlock(&sup->lock);
+		rep.ok = 0;
+		(void)xtc_send(a->reply, &rep, sizeof rep);
+		return;
+	}
+	sup->children = nc;
+	idx = sup->n_children;
+	memset(&sup->children[idx], 0, sizeof(struct child));
+	sup->children[idx].spec = a->spec;
+	rc = __spawn_child(sup, &sup->children[idx]);
+	if (rc != XTC_OK) {
+		(void)pthread_mutex_unlock(&sup->lock);
+		rep.ok = 0;
+		(void)xtc_send(a->reply, &rep, sizeof rep);
+		return;
+	}
+	sup->n_children++;
+	rep.ok = 1;
+	rep.pid = sup->children[idx].pid;
+	(void)pthread_mutex_unlock(&sup->lock);
+	(void)xtc_send(a->reply, &rep, sizeof rep);
 }
 
 /* Kill a still-alive sibling; we only mark it as not-alive once we
@@ -212,12 +257,30 @@ __sup_entry(void *arg)
 		struct down_signal d;
 		int idx;
 		int64_t now;
+		uint8_t kind;
 
-		rc = xtc_recv_match(__match_down, NULL, &msg, &sz,
-		    100LL * 1000 * 1000);
+		/* Receive ANY message (not a selective match): DOWN signals
+		 * AND ADD_CHILD control messages share this mailbox, and a
+		 * selective match would pile the others into the (capped)
+		 * save queue. */
+		rc = xtc_recv(&msg, &sz, 100LL * 1000 * 1000);
 		if (rc == XTC_E_AGAIN) continue;
 		if (rc != XTC_OK) break;
-		if (sz < sizeof d) { __os_free(msg); continue; }
+		if (sz < 1) { __os_free(msg); continue; }
+		kind = *(const uint8_t *)msg;
+
+		if (kind == 'A') {
+			struct add_child_msg a;
+			if (sz >= sizeof a) {
+				memcpy(&a, msg, sizeof a);
+				__os_free(msg);
+				__handle_add_child(sup, &a);
+			} else {
+				__os_free(msg);
+			}
+			continue;
+		}
+		if (kind != 'D' || sz < sizeof d) { __os_free(msg); continue; }
 		memcpy(&d, msg, sizeof d);
 		__os_free(msg);
 
@@ -296,7 +359,8 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 	xtc_pid_t pid;
 	int i;
 
-	if (loop == NULL || children == NULL || n_children <= 0 || out_sup == NULL)
+	if (loop == NULL || out_sup == NULL || n_children < 0 ||
+	    (n_children > 0 && children == NULL))
 		return XTC_E_INVAL;
 
 	if ((rc = __os_calloc(1, sizeof *sup, (void **)&sup)) != XTC_OK)
@@ -317,8 +381,10 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 	if ((rc = __os_calloc((size_t)sup->rr_cap, sizeof *sup->recent_restarts,
 	    (void **)&sup->recent_restarts)) != XTC_OK) goto fail0;
 
-	if ((rc = __os_calloc((size_t)n_children, sizeof *sup->children,
-	    (void **)&sup->children)) != XTC_OK) goto fail1;
+	if (n_children > 0) {
+		if ((rc = __os_calloc((size_t)n_children, sizeof *sup->children,
+		    (void **)&sup->children)) != XTC_OK) goto fail1;
+	}
 	sup->n_children = n_children;
 	for (i = 0; i < n_children; i++) sup->children[i].spec = children[i];
 
@@ -353,6 +419,45 @@ fail0:	(void)pthread_mutex_destroy(&sup->lock);
  * thread, preventing the supervisor from reaching its exit cleanup
  * to fire the notify.  Splitting stop and join is the correct shape.
  */
+/* PUBLIC: int xtc_sup_add_child __P((xtc_supervisor_t *, const xtc_child_spec_t *, xtc_pid_t *)); */
+int
+xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
+                  xtc_pid_t *out_pid)
+{
+	static _Atomic uint32_t tagctr;
+	struct add_child_msg a;
+	struct add_child_reply rep;
+	void *msg; size_t sz;
+
+	if (sup == NULL || spec == NULL) return XTC_E_INVAL;
+	if (!atomic_load_explicit(&sup->alive, memory_order_acquire))
+		return XTC_E_INVAL;
+	if (xtc_pid_is_none(xtc_self()))
+		return XTC_E_INVAL;     /* must run inside a proc (awaits reply) */
+
+	memset(&a, 0, sizeof a);
+	a.kind = 'A';
+	a.reply = xtc_self();
+	a.tag = atomic_fetch_add_explicit(&tagctr, 1, memory_order_relaxed) + 1;
+	a.spec = *spec;
+	if (xtc_send(sup->sup_pid, &a, sizeof a) != XTC_OK)
+		return XTC_E_INTERNAL;
+
+	for (;;) {
+		if (xtc_recv(&msg, &sz, 5LL * 1000 * 1000 * 1000) != XTC_OK)
+			return XTC_E_AGAIN;
+		if (sz >= sizeof rep) {
+			memcpy(&rep, msg, sizeof rep);
+			__os_free(msg);
+			if (rep.tag != a.tag) continue;   /* not our reply */
+			if (!rep.ok) return XTC_E_NOMEM;
+			if (out_pid != NULL) *out_pid = rep.pid;
+			return XTC_OK;
+		}
+		__os_free(msg);
+	}
+}
+
 int
 xtc_sup_stop(xtc_supervisor_t *sup)
 {
