@@ -118,6 +118,99 @@ eviction_test(void)
 	return fails;
 }
 
+/* VACUUM stress: exercises the pcache methods the other tests do not
+ * touch -- xRekey (pages renumbered as VACUUM compacts the file) and
+ * xTruncate (the cache shrinks with the file).  Build a table, delete
+ * most rows to scatter free pages, VACUUM under a small cache so the
+ * rebuild also recycles, and assert the database stays correct
+ * (integrity_check ok, surviving rows count right).  Returns 0 on
+ * pass. */
+static int g_integ_ok;
+
+static int
+integ_cb(void *u, int n, char **v, char **names)
+{
+	(void)u; (void)n; (void)names;
+	if (v[0] != NULL && strcmp(v[0], "ok") == 0)
+		g_integ_ok = 1;
+	return 0;
+}
+
+static int
+vacuum_test(void)
+{
+	sqlite3 *db = NULL;
+	char *err = NULL;
+	char path[] = "/tmp/sqlxtc-pcache-vac-XXXXXX";
+	int fd, i, fails = 0;
+	xtc_pcache_stats_t a, b;
+
+	fd = mkstemp(path);
+	if (fd < 0) { perror("mkstemp"); return 1; }
+	close(fd); unlink(path);
+
+	if (sqlite3_open(path, &db) != SQLITE_OK) {
+		unlink(path); return 1;
+	}
+	(void)sqlite3_exec(db, "PRAGMA cache_size=40;", 0, 0, 0);
+	(void)sqlite3_exec(db,
+	    "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);", 0, 0, 0);
+	(void)sqlite3_exec(db, "BEGIN;", 0, 0, 0);
+	for (i = 1; i <= 6000; i++) {
+		char sql[160];
+		snprintf(sql, sizeof sql,
+		    "INSERT INTO t(a,b) VALUES(%d,"
+		    "'padding-padding-padding-padding-padding-%d');", i, i);
+		if (sqlite3_exec(db, sql, 0, 0, &err) != SQLITE_OK) {
+			fprintf(stderr, "FAIL(vacuum): insert: %s\n", err);
+			sqlite3_free(err); sqlite3_close(db); unlink(path);
+			return 1;
+		}
+	}
+	(void)sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+	/* Delete ~5/6 of the rows to scatter free pages through the file. */
+	if (sqlite3_exec(db, "DELETE FROM t WHERE a % 6 <> 0;", 0, 0, &err)
+	    != SQLITE_OK) {
+		fprintf(stderr, "FAIL(vacuum): delete: %s\n", err);
+		sqlite3_free(err); sqlite3_close(db); unlink(path);
+		return 1;
+	}
+
+	xtc_pcache_get_stats(&a);
+	/* VACUUM rebuilds the file: pages are renumbered (xRekey) and the
+	 * file is truncated (xTruncate). */
+	if (sqlite3_exec(db, "VACUUM;", 0, 0, &err) != SQLITE_OK) {
+		fprintf(stderr, "FAIL(vacuum): VACUUM: %s\n", err);
+		sqlite3_free(err); sqlite3_close(db); unlink(path);
+		return 1;
+	}
+	xtc_pcache_get_stats(&b);
+
+	g_integ_ok = 0;
+	(void)sqlite3_exec(db, "PRAGMA integrity_check;", integ_cb, 0, 0);
+	g_rows = -1;
+	(void)sqlite3_exec(db, "SELECT count(*) FROM t;", count_cb, 0, 0);
+
+	sqlite3_close(db);
+	unlink(path);
+
+	if (!g_integ_ok) {
+		fprintf(stderr, "FAIL(vacuum): integrity_check not ok\n");
+		fails++;
+	}
+	if (g_rows != 1000) {            /* 6000/6 survive */
+		fprintf(stderr, "FAIL(vacuum): count=%d expected 1000\n",
+		    g_rows);
+		fails++;
+	}
+	if (fails == 0)
+		printf("  ok   VACUUM round-trips through slab pcache "
+		       "(xRekey/xTruncate; integrity ok, 1000 rows, "
+		       "%llu allocs during rebuild)\n",
+		       (unsigned long long)(b.slab_alloc - a.slab_alloc));
+	return fails;
+}
+
 int
 main(void)
 {
@@ -218,6 +311,9 @@ main(void)
 
 	/* Bounded memory under a working set larger than the cache. */
 	fails += eviction_test();
+
+	/* xRekey + xTruncate via VACUUM. */
+	fails += vacuum_test();
 
 	printf("%s\n", fails == 0 ? "All xtc pcache tests passed."
 	                          : "xtc pcache test FAILED.");
