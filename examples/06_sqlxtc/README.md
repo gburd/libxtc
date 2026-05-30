@@ -101,7 +101,8 @@ listen_fd ----------> listener_proc ----xtc_proc-----> conn_proc(fd)
   page in one SQLite cache is the same size, so a per-cache xtc_slab
   supplies the page bodies with no fragmentation and O(1) alloc/free;
   a chained hash table indexes resident pages and an LRU list of
-  unpinned pages feeds recycling.  Hit/miss/recycle and live-page
+  unpinned pages feeds recycling, so the resident set stays bounded
+  by SQLite's cache_size even when the working set is far larger.  Hit/miss/recycle and live-page
   counts go to xtc_stats (`sqlxtc.pcache.*`, also on the metrics
   line).  Both the VFS (I/O seam) and the pcache (memory seam) are
   supported SQLite extension points, so they route SQLite's internals
