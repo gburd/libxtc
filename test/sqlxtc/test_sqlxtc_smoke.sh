@@ -6,7 +6,7 @@ set -u
 
 PORT=${PORT:-15433}
 DIR=$(dirname "$0")
-SVR_BIN=$DIR/../../examples/06_sqlxtc/sqlxtc-server
+SVR_BIN=${SQLXTC_SERVER:-$DIR/../../examples/06_sqlxtc/sqlxtc-server}
 PIDFILE=/tmp/sqlxtc-smoke.pid
 LOGFILE=/tmp/sqlxtc-smoke.log
 
