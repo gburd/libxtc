@@ -523,6 +523,29 @@ xtc_self(void)
 	return __current_proc != NULL ? __current_proc->pid : XTC_PID_NONE;
 }
 
+/*
+ * Save / restore the current-proc TLS across a yield performed by a
+ * lower-level primitive (e.g. xtc_amutex parking the fiber).  When a
+ * proc yields, the scheduler may run other procs that overwrite
+ * __current_proc; on resume the primitive restores it so the proc
+ * still sees itself.  Opaque void* so the sync layer need not know
+ * the proc struct.
+ *
+ * PUBLIC: void *__xtc_proc_ctx_save __P((void));
+ * PUBLIC: void  __xtc_proc_ctx_restore __P((void *));
+ */
+void *
+__xtc_proc_ctx_save(void)
+{
+	return __current_proc;
+}
+
+void
+__xtc_proc_ctx_restore(void *ctx)
+{
+	__current_proc = (struct xtc_proc *)ctx;
+}
+
 /* ---------- send ---------- */
 
 static struct xtc_proc *

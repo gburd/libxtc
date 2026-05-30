@@ -64,4 +64,9 @@ extern XTC_THREAD_LOCAL struct xtc_coro *__xtc_current_coro;
 /* Forward declarations for the dispatch glue.  */
 int  __xtc_coro_step(xtc_task_t *self, void *user);
 
+/* The task wrapping the currently-running coroutine on this thread,
+ * or NULL when not running inside a coroutine.  Lets lower-level
+ * primitives (e.g. xtc_amutex) find the current task to park it. */
+xtc_task_t *__xtc_current_task(void);
+
 #endif /* XTC_CORO_INT_H */

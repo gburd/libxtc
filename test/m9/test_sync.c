@@ -9,10 +9,14 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_sync.h"
+#include "xtc_loop.h"
+#include "xtc_proc.h"
+#include "xtc_blocking.h"
 #include "os_time.h"
 
 /* notify: stored signal, drains on first wait. */
@@ -216,6 +220,75 @@ test_gate(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* amutex fiber path: procs hold the lock across a real park (a
+ * blocking-pool offload) while others contend.  If the lock blocked
+ * the OS thread, the first holder's park would wedge the loop the
+ * moment a second proc contended -- deadlock.  With fiber yielding,
+ * waiters park and the holder is still woken, so all complete and
+ * mutual exclusion holds. */
+static xtc_amutex_t *g_am;
+static _Atomic int   g_in_cs;
+static _Atomic int   g_overlap;
+static _Atomic int   g_cs_count;
+
+static int
+cs_sleep(void *a)
+{
+	struct timespec ts = { 0, 8 * 1000 * 1000 };  /* 8 ms */
+	(void)a;
+	(void)nanosleep(&ts, NULL);
+	return 0;
+}
+
+static void
+cs_proc(void *arg)
+{
+	int iters = (int)(intptr_t)arg;
+	int i, r;
+	for (i = 0; i < iters; i++) {
+		(void)xtc_amutex_lock(g_am, -1);
+		if (atomic_fetch_add(&g_in_cs, 1) + 1 > 1)
+			atomic_store(&g_overlap, 1);
+		/* Hold the lock across a park: the deadlock scenario. */
+		(void)xtc_blocking_run(cs_sleep, NULL, &r);
+		atomic_fetch_sub(&g_in_cs, 1);
+		atomic_fetch_add(&g_cs_count, 1);
+		(void)xtc_amutex_unlock(g_am);
+	}
+}
+
+static MunitResult
+test_amutex_fiber(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	int i;
+	(void)p; (void)d;
+
+	atomic_store(&g_in_cs, 0);
+	atomic_store(&g_overlap, 0);
+	atomic_store(&g_cs_count, 0);
+	munit_assert_int(xtc_amutex_create(&g_am), ==, XTC_OK);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	for (i = 0; i < 3; i++) {
+		opts.name = "cs";
+		munit_assert_int(xtc_proc_spawn(loop, cs_proc,
+		    (void *)(intptr_t)3, &opts, &pid), ==, XTC_OK);
+	}
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_amutex_destroy(g_am);
+	g_am = NULL;
+	xtc_blocking_shutdown();
+
+	/* 3 procs * 3 iterations, all serialized, none overlapping. */
+	munit_assert_int(atomic_load(&g_cs_count), ==, 9);
+	munit_assert_int(atomic_load(&g_overlap), ==, 0);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/notify_stored",       test_notify_stored,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/notify_cross_thread", test_notify_cross_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -223,6 +296,7 @@ static MunitTest tests[] = {
 	{ "/abort_source",        test_abort_source,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/amutex_basic",        test_amutex_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/amutex_mutex",        test_amutex_mutex,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/amutex_fiber",        test_amutex_fiber,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/rwlock_basic",        test_rwlock_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/barrier",             test_barrier,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/gate",                test_gate,                NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

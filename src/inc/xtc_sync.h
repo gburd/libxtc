@@ -114,10 +114,14 @@ int  xtc_abort_token_reason(const xtc_abort_token_t *t);
 typedef struct xtc_amutex xtc_amutex_t;
 
 /*
- * Async parking mutex.  When contended, waiters yield (cooperative);
- * when free, lock is fast.  M9.5 implementation parks the calling
- * thread on a pthread condvar; M11+ will park the calling task on a
- * waker for proc-aware fairness.
+ * Async parking mutex.  When free, the lock is a fast uncontended
+ * flag.  When contended, a caller running inside a process /
+ * coroutine parks the fiber (yields to its loop) rather than blocking
+ * the OS thread, so a process can hold the lock across its own park
+ * (e.g. a blocking-pool offload) without wedging the loop when
+ * another process on that loop contends.  Fiber waiters form a FIFO
+ * queue with direct hand-off (fair, no thundering herd); a caller
+ * that is not on a loop blocks on a condvar as a fallback.
  *
  * PUBLIC: int  xtc_amutex_create __P((xtc_amutex_t **));
  * PUBLIC: void xtc_amutex_destroy __P((xtc_amutex_t *));
