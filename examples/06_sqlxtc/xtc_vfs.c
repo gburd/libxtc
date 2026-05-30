@@ -30,6 +30,46 @@
 
 #include "xtc_int.h"        /* __os_malloc/__os_free, __os_clock_mono */
 #include "xtc_stats.h"
+#include "xtc_blocking.h"   /* offload blocking disk I/O off the loop */
+
+/* ---- blocking-I/O offload helpers ----
+ *
+ * The reactor thread must not stall on a disk read/write/fsync.  Each
+ * blocking base-VFS call is packaged into a closure and run via
+ * xtc_blocking_run, which parks the calling process on a loop (a pool
+ * thread does the syscall, contending processes keep running) and
+ * falls back to a synchronous call off a loop (startup, the
+ * standalone tests).  buf and the arg struct live on the parked
+ * fiber's stack, which persists across the park. */
+struct io_rw_args {
+	sqlite3_file *real;
+	void         *buf;
+	int           n;
+	sqlite3_int64 off;
+};
+struct io_sync_args {
+	sqlite3_file *real;
+	int           flags;
+};
+
+static int
+io_read_fn(void *a)
+{
+	struct io_rw_args *r = a;
+	return r->real->pMethods->xRead(r->real, r->buf, r->n, r->off);
+}
+static int
+io_write_fn(void *a)
+{
+	struct io_rw_args *r = a;
+	return r->real->pMethods->xWrite(r->real, r->buf, r->n, r->off);
+}
+static int
+io_sync_fn(void *a)
+{
+	struct io_sync_args *s = a;
+	return s->real->pMethods->xSync(s->real, s->flags);
+}
 
 /* ---- per-file shim object ---- */
 struct xtc_file {
@@ -76,8 +116,12 @@ static int
 xv_read(sqlite3_file *pf, void *buf, int n, sqlite3_int64 off)
 {
 	struct xtc_file *p = (struct xtc_file *)pf;
+	struct io_rw_args a = { p->real, buf, n, off };
 	int64_t t0 = xtc_vfs_now_ns();
-	int rc = p->real->pMethods->xRead(p->real, buf, n, off);
+	int rc;
+
+	if (xtc_blocking_run(io_read_fn, &a, &rc) != XTC_OK)
+		rc = io_read_fn(&a);        /* offload unavailable: do it inline */
 
 	xtc_counter_inc(g_c_reads);
 	if (rc == SQLITE_OK)
@@ -90,8 +134,12 @@ static int
 xv_write(sqlite3_file *pf, const void *buf, int n, sqlite3_int64 off)
 {
 	struct xtc_file *p = (struct xtc_file *)pf;
+	struct io_rw_args a = { p->real, (void *)buf, n, off };
 	int64_t t0 = xtc_vfs_now_ns();
-	int rc = p->real->pMethods->xWrite(p->real, buf, n, off);
+	int rc;
+
+	if (xtc_blocking_run(io_write_fn, &a, &rc) != XTC_OK)
+		rc = io_write_fn(&a);
 
 	xtc_counter_inc(g_c_writes);
 	if (rc == SQLITE_OK)
@@ -111,8 +159,12 @@ static int
 xv_sync(sqlite3_file *pf, int flags)
 {
 	struct xtc_file *p = (struct xtc_file *)pf;
+	struct io_sync_args a = { p->real, flags };
+	int rc;
 	xtc_counter_inc(g_c_syncs);
-	return p->real->pMethods->xSync(p->real, flags);
+	if (xtc_blocking_run(io_sync_fn, &a, &rc) != XTC_OK)
+		rc = io_sync_fn(&a);
+	return rc;
 }
 
 static int
