@@ -25,7 +25,7 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
-#include "sqlxtc_vfs.h"
+#include "vfs.h"
 
 static _Atomic int g_worker_done;
 static _Atomic int g_heartbeats;
@@ -99,8 +99,8 @@ main(void)
 	char path[] = "/tmp/sqlxtc-vfs-loop-XXXXXX";
 	int fd;
 
-	if (sqlxtc_vfs_register(0) != SQLITE_OK) {
-		fprintf(stderr, "FAIL: sqlxtc_vfs_register\n"); return 1;
+	if (vfs_register(0) != SQLITE_OK) {
+		fprintf(stderr, "FAIL: vfs_register\n"); return 1;
 	}
 	fd = mkstemp(path);
 	if (fd < 0) { perror("mkstemp"); return 1; }

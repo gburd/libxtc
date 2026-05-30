@@ -19,7 +19,7 @@
 #include <unistd.h>
 
 #include "sqlite/sqlite3.h"
-#include "sqlxtc_vfs.h"
+#include "vfs.h"
 
 static int g_sum;
 
@@ -119,7 +119,7 @@ main(void)
 	char *err = NULL;
 	char path[] = "/tmp/sqlxtc-vfs-test-XXXXXX";
 	int fd, rc, i, fails = 0;
-	sqlxtc_vfs_stats_t s0, s1;
+	vfs_stats_t s0, s1;
 
 	/* Unique temp path; remove the placeholder so SQLite creates it. */
 	fd = mkstemp(path);
@@ -127,12 +127,12 @@ main(void)
 	close(fd);
 	unlink(path);
 
-	if (sqlxtc_vfs_register(0) != SQLITE_OK) {
-		fprintf(stderr, "FAIL: sqlxtc_vfs_register\n");
+	if (vfs_register(0) != SQLITE_OK) {
+		fprintf(stderr, "FAIL: vfs_register\n");
 		return 2;
 	}
 
-	sqlxtc_vfs_get_stats(&s0);
+	vfs_get_stats(&s0);
 
 	rc = sqlite3_open_v2(path, &db,
 	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "sqlxtc");
@@ -175,7 +175,7 @@ main(void)
 	}
 
 	sqlite3_close(db);
-	sqlxtc_vfs_get_stats(&s1);
+	vfs_get_stats(&s1);
 
 	/* sum(1..500) == 125250: the data round-tripped through the VFS. */
 	if (g_sum != 125250) {
