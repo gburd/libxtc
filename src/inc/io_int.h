@@ -56,6 +56,7 @@ struct __xtc_uring_fd {
 	uint32_t   interest;
 	void      *tag;
 	int        is_wakeup;     /* 1 for the internal wakeup pipe */
+	int        dead;          /* deleted; awaiting terminal CQE before free */
 	struct __xtc_uring_fd *next;  /* free-list / fd-list linkage */
 };
 #elif defined(XTC_IO_BACKEND_POLL)
@@ -96,6 +97,7 @@ struct xtc_io {
 #elif defined(XTC_IO_BACKEND_URING)
 	struct io_uring  ring;
 	struct __xtc_uring_fd *fds;
+	struct __xtc_uring_fd *zombies;  /* deleted fds awaiting terminal CQE */
 #elif defined(XTC_IO_BACKEND_POLL)
 	struct pollfd *pfds;
 	void         **tags;

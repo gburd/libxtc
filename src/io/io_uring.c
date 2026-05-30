@@ -114,6 +114,7 @@ __xtc_io_backend_init(xtc_io_t *io)
 		return XTC_E_INTERNAL;
 	}
 	io->fds = NULL;
+	io->zombies = NULL;
 	return XTC_OK;
 }
 
@@ -126,6 +127,14 @@ __xtc_io_backend_fini(xtc_io_t *io)
 		__os_free(p);
 	}
 	io->fds = NULL;
+	/* Free any zombies whose terminal CQE never arrived (e.g. a
+	 * multishot that auto-disarmed); the ring is being torn down so
+	 * no CQE can reference them after this. */
+	for (p = io->zombies; p != NULL; p = n) {
+		n = p->next;
+		__os_free(p);
+	}
+	io->zombies = NULL;
 	io_uring_queue_exit(&io->ring);
 }
 
@@ -211,7 +220,17 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 	for (pp = &io->fds; *pp != NULL; pp = &(*pp)->next) {
 		if (*pp == uf) { *pp = uf->next; break; }
 	}
-	__os_free(uf);
+	/*
+	 * Do not free uf here: the multishot poll submitted with
+	 * user_data == uf may still have CQEs in flight (an already-ready
+	 * notification, plus the -ECANCELED terminal CQE the poll_remove
+	 * triggers).  Freeing now and then draining those CQEs is a
+	 * use-after-free.  Move uf to the zombie list and free it when
+	 * its terminal (non-MORE) CQE is drained in xtc_io_poll.
+	 */
+	uf->dead = 1;
+	uf->next = io->zombies;
+	io->zombies = uf;
 	return XTC_OK;
 }
 
@@ -256,6 +275,27 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			if (io_uring_peek_cqe(&io->ring, &cqe) != 0) break;
 		}
 		uf = (struct __xtc_uring_fd *)io_uring_cqe_get_data(cqe);
+		if (uf != NULL && uf->dead) {
+			/* Registration was deleted.  Do not dispatch to it.
+			 * Once its multishot poll delivers the terminal CQE
+			 * (no IORING_CQE_F_MORE -- e.g. the -ECANCELED from
+			 * poll_remove), no further CQE can reference uf, so it
+			 * is safe to free. */
+			if (!(cqe->flags & IORING_CQE_F_MORE)) {
+				struct __xtc_uring_fd **pp;
+				for (pp = &io->zombies; *pp != NULL;
+				    pp = &(*pp)->next) {
+					if (*pp == uf) {
+						*pp = uf->next;
+						break;
+					}
+				}
+				__os_free(uf);
+			}
+			io_uring_cqe_seen(&io->ring, cqe);
+			cqe = NULL;
+			continue;
+		}
 		if (uf != NULL) {
 			if (uf->is_wakeup) {
 				if (!wakeup_emitted) {
