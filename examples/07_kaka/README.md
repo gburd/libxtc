@@ -213,4 +213,13 @@ plog and replays it on startup, so a restarted coordinator recovers
 the committed positions (group_persist_selftest verifies this across
 two coordinator lifetimes, including last-write-wins).
 
-Phase 5 (full observability and budgets) is tracked in PLAN.md.
+Phase 5 (observability and budgets) is done.  The partition proc
+records xtc_stats counters (produce/fetch request, record, and byte
+totals; rejected records) and per-request latency histograms.  A
+broker memory budget, an xtc_res cap on stored record payload (the
+-m/--max-memory flag), bounds the broker under a producer flood:
+PRODUCE past the cap is rejected rather than letting an unbounded
+producer grow the broker without limit.  broker_metrics_selftest
+drives both in-process -- the counters and histograms move on a
+produce/fetch workload, and a 12-byte cap admits exactly three
+4-byte records and rejects the rest.
