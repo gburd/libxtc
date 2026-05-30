@@ -12,7 +12,9 @@
 .Nm xtc_net_unix_listen ,
 .Nm xtc_net_unix_dial ,
 .Nm xtc_net_unix_send_creds ,
-.Nm xtc_net_unix_recv_creds
+.Nm xtc_net_unix_recv_creds ,
+.Nm xtc_net_send_frame ,
+.Nm xtc_net_recv_frame
 .Nd networking helpers
 .Sh SYNOPSIS
 .In xtc.h
@@ -35,6 +37,10 @@
 .Fn xtc_net_unix_send_creds "int fd" "const void *buf" "size_t buflen"
 .Ft int
 .Fn xtc_net_unix_recv_creds "int fd" "void *buf" "size_t buflen" "uint32_t *out_uid" "uint32_t *out_gid" "size_t *out_n"
+.Ft int
+.Fn xtc_net_send_frame "int fd" "const void *buf" "size_t len"
+.Ft int
+.Fn xtc_net_recv_frame "int fd" "void **out" "size_t *out_len" "size_t max_len" "int64_t timeout_ns"
 .Sh DESCRIPTION
 .Nm xtc_net
 provides convenience wrappers around the standard networking
@@ -42,6 +48,31 @@ syscalls.  The actual I/O multiplexing happens through
 .Xr xtc_io 3
 and
 .Xr xtc_proc_wait_fd 3 ;
+.Pp
+.Fn xtc_net_send_frame
+and
+.Fn xtc_net_recv_frame
+exchange a 4-byte big-endian length prefix followed by the payload.
+On a non-blocking fd they yield the calling fiber on partial I/O
+instead of blocking the loop, so many connections share one loop; off
+a loop they fall back to
+.Xr poll 2 .
+.Fn xtc_net_recv_frame
+allocates the frame (free it with
+.Fn __os_free ) ,
+and rejects a claimed length above
+.Fa max_len
+(0 = no cap) with
+.Dv XTC_E_RANGE
+so a peer cannot force an unbounded allocation; it returns
+.Dv XTC_E_AGAIN
+on timeout and
+.Dv XTC_E_INVAL
+if the peer closed mid-frame.  A zero-length frame yields
+.Dv XTC_OK
+with
+.Fa *out
+set to NULL.
 these helpers handle socket creation, address resolution, knob
 setting, and credential passing.
 .Pp
