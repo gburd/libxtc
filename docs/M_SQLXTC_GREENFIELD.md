@@ -133,6 +133,28 @@ value:
      an `xtc_lrlock` page table.  This is a supported SQLite
      extension point, so it needs no fork -- the single highest-value
      step, and the one that proves the read-concurrency claim.
+
+     *Done (slab-backed form):* `pcache_xtc.c` registers a custom
+     `sqlite3_pcache_methods2` whose page bodies come from a per-cache
+     `xtc_slab`.  Every page in one SQLite cache is the same size
+     (header + szPage + szExtra), which is exactly a single
+     object-size class -- no fragmentation, O(1) alloc/free.  A
+     chained hash table maps the page key to its resident page and an
+     LRU list of unpinned pages feeds recycling.  Hit/miss/recycle and
+     live-page counts go to `xtc_stats` (`sqlxtc.pcache.*`).
+     `test_pcache_xtc` drives a 5000-row insert + repeated scans on an
+     in-memory database (whose storage *is* the page cache) and
+     asserts the slab served the pages (66 allocations), lookups hit
+     (10251 hits / 66 misses), and every page is reclaimed on close
+     (no leak) -- ASan/UBSan clean, against both `libxtc.a` and the
+     amalgamation.  The pcache methods always run under SQLite's
+     mutex, so the implementation needs no internal locking.
+
+     The `xtc_lrlock` page table -- the COW snapshot that lets readers
+     traverse a stable page set while a writer publishes a new one --
+     is the refinement that unlocks read concurrency, and is premature
+     only until sqlxtc leaves SQLITE_CONFIG_SERIALIZED.  The slab
+     pcache is the resident-set substrate it builds on.
   2. **Async VFS via `xtc_io`.**  Implement `sqlite3_vfs` over
      `xtc_io` so page reads submit to the loop and the session awaits
      completion.  Also a supported extension point.
@@ -166,6 +188,7 @@ read-concurrency and async-I/O claims on a real SQL workload.
 
 Design note.  The sqlxtc example implements the session-as-proc and
 parser-as-pure-function pieces today, plus the instrumented `"xtc"`
-VFS (step 2 in synchronous form); the page-cache-on-lrlock and the
-async read-submission refinement of the VFS are the proposed next
-phase, tracked in PLAN.md.
+VFS (step 2 in synchronous form) and the slab-backed page cache (step
+1 in its resident-set form); the lrlock-COW page table and the async
+read-submission refinement of the VFS are the proposed next phase,
+tracked in PLAN.md.
