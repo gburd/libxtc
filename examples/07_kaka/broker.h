@@ -29,4 +29,8 @@ int  broker_spawn_conn(xtc_loop_t *loop, int fd);
 /* In-process PRODUCE/FETCH self-test; returns 0 on pass. */
 int  broker_selftest(void);
 
+/* In-process credit-based-backpressure self-test.  Returns 0 on pass;
+ * reports the observed peak in-flight count and the final high-water. */
+int  broker_credit_selftest(int *max_in_flight, uint64_t *hwm);
+
 #endif /* KAKA_BROKER_H */
