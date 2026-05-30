@@ -15,6 +15,22 @@
 #include <string.h>
 
 #include "xtc_int.h"
+#include "xtc_vfs.h"
+
+/* Open a SQLite handle on db->path.  File-backed databases go through
+ * the xtc VFS (instrumented I/O); :memory: and "" do no file I/O so
+ * the VFS name is irrelevant and we leave it default. */
+static int
+sqlxtc_open(const char *path, sqlite3 **out)
+{
+	int memlike = (path == NULL || path[0] == '\0' ||
+	    strcmp(path, ":memory:") == 0);
+	if (!memlike)
+		(void)xtc_vfs_register(0);
+	return sqlite3_open_v2(path, out,
+	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+	    memlike ? NULL : "xtc");
+}
 
 int
 db_create(const db_opts_t *opts, db_t **out)
@@ -30,7 +46,7 @@ db_create(const db_opts_t *opts, db_t **out)
 	db->res = opts->res;
 
 	if (db->shared) {
-		rc = sqlite3_open(db->path, &db->sdb);
+		rc = sqlxtc_open(db->path, &db->sdb);
 		if (rc != SQLITE_OK) {
 			fprintf(stderr, "sqlite3_open(%s): %s\n",
 			        db->path, sqlite3_errmsg(db->sdb));
@@ -81,7 +97,7 @@ db_handle_get(db_t *db, sqlite3 **out, int *out_owned)
 	}
 	{
 		sqlite3 *h = NULL;
-		int rc = sqlite3_open(db->path, &h);
+		int rc = sqlxtc_open(db->path, &h);
 		if (rc != SQLITE_OK) {
 			if (h) sqlite3_close(h);
 			return XTC_E_INVAL;

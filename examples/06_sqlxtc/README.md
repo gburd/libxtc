@@ -30,6 +30,15 @@ make
 The first make compiles the bundled SQLite amalgamation (`sqlite/sqlite3.c`,
 9 MB, 250 K LOC).  Later builds reuse the object file.
 
+To build sqlxtc against the single-file xtc amalgamation instead of
+`libxtc.a` -- which exercises the amalgamation as a real, broad
+consumer -- run `make amalg`.  It generates `amalg/xtc.c` + `xtc.h`,
+compiles the xtc object, and links `sqlxtc-server-amalg` against it
+(no libxtc.a, no liburing: the amalgamation auto-selects the epoll
+backend).  The sqlxtc sources are compiled `-Iamalg/include`, where
+forwarding stub headers resolve every `#include "xtc_*.h"` to the
+single `xtc.h`.
+
 ## Run
 
 ```sh
@@ -79,6 +88,15 @@ listen_fd ----------> listener_proc ----xtc_proc-----> conn_proc(fd)
 * `quack.c` -- hand-rolled JSON encoder/decoder for our small protocol.
 * `db.c` -- sqlite3 handle management; result streaming via Quack.
 * `xtc_mutex.c` -- sqlite3_mutex_methods backed by xtc_lwlock.
+* `xtc_vfs.c` -- an `"xtc"` sqlite3_vfs (shim over the platform
+  default).  Every byte of database I/O flows through it: per-file
+  state is allocated with the xtc allocator, and reads, writes, and
+  syncs are counted and timed with xtc_stats (the `sqlxtc.vfs.*`
+  counters and latency histograms appear on the metrics line).  Path
+  operations and the byte-range file locks delegate to the base VFS so
+  locking stays POSIX-correct.  This is the single instrumented choke
+  point for all page traffic and the seam where an async,
+  xtc_io-backed pager plugs in next.
 * `sql_parse.c` -- pre-parser; classifies kind + readonly.  Phase 2 wires
   in a Lime-generated AST parser via `sql_parse_gen.c`.
 * `sql_parse.lime` -- Lime grammar for the SQL subset we accept.
@@ -101,7 +119,10 @@ sqlxtc-server [options]
 ## Testing
 
 ```sh
-make test                              # unit tests (25 cases) + smoke
+make test                              # unit tests + in-process VFS test + smoke
+make test-vfs                          # xtc VFS test against libxtc.a
+make test-vfs-amalg                    # xtc VFS test against the amalgamation
+make amalg                             # build sqlxtc against the single-file xtc
 bash ../../test/sqlxtc/test_sqlxtc_smoke.sh        # end-to-end JSON
 bash ../../test/sqlxtc/test_sqlxtc_concurrent.sh   # 100 clients (Phase 3)
 bash ../../test/sqlxtc/test_sqlxtc_budgets.sh      # cap enforcement (Phase 4)

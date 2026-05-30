@@ -136,6 +136,21 @@ value:
   2. **Async VFS via `xtc_io`.**  Implement `sqlite3_vfs` over
      `xtc_io` so page reads submit to the loop and the session awaits
      completion.  Also a supported extension point.
+
+     *Done (synchronous instrumented form):* `xtc_vfs.c` registers an
+     `"xtc"` VFS, a shim over the platform default.  Every byte of
+     database I/O flows through it -- per-file state is allocated with
+     the xtc allocator, and reads, writes, and syncs are counted and
+     timed with `xtc_stats` (the `sqlxtc.vfs.*` counters and latency
+     histograms, surfaced on the periodic metrics line).  Path ops and
+     the byte-range file locks delegate to the base VFS so locking
+     stays POSIX-correct.  `db.c` opens file-backed databases through
+     it; `test_xtc_vfs` drives a 500-row create/insert/select in
+     process (no daemon) and asserts the I/O actually went through the
+     VFS, against both `libxtc.a` and the amalgamation.  The remaining
+     async step -- submitting the read to `xtc_io` and parking the
+     calling fiber until completion -- plugs into this same `xv_read`
+     choke point.
   3. **Pager as a proc.**  Route durability through a single pager
      proc so the WAL writer is an explicit owner.
   4. **Fine-grained locks via `xtc_lockmgr`** -- the deep step that
@@ -150,5 +165,7 @@ read-concurrency and async-I/O claims on a real SQL workload.
 ## Status
 
 Design note.  The sqlxtc example implements the session-as-proc and
-parser-as-pure-function pieces today; the page-cache-on-lrlock and
-async-VFS steps are the proposed next phase, tracked in PLAN.md.
+parser-as-pure-function pieces today, plus the instrumented `"xtc"`
+VFS (step 2 in synchronous form); the page-cache-on-lrlock and the
+async read-submission refinement of the VFS are the proposed next
+phase, tracked in PLAN.md.
