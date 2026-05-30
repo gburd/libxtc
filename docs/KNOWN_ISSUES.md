@@ -66,9 +66,15 @@ The previous misleading tests have been renamed to clarify their scope:
 
 **Status:** code-complete, awaiting host. No way to verify without one.
 
-## macOS untested
+## RESOLVED: macOS now in CI
 
-**Status:** awaiting host setup.
+The `macos` GitHub Actions job (macos-latest, Apple Silicon) builds and
+runs the full C munit suite every commit -- kqueue backend, ucontext
+substrate, GCD dispatch semaphores.  Standing it up fixed six real
+portability bugs (Darwin feature macro, rwlock storage size, unnamed
+semaphores, _SC_NPROCESSORS_ONLN, hardcoded -lrt, lrlock slot
+reclamation teardown order).
+
 
 ## `pbt_proc::send_recv_roundtrip` and `pbt_proc::fifo_order` flake under `make check`
 
