@@ -3194,7 +3194,7 @@ Kafka-shaped log broker; design in `examples/07_kaka/README.md`.
 | 1 protocol + in-memory partition | done | frame codec (6 tests) + partition log (3) + partition/conn procs + in-process PRODUCE/FETCH self-test (1) |
 | 2 segmented persistence | done | CRC-framed segment files, roll at threshold, scan-recovery; plog_create_ex; 3000-record restart test |
 | 3 credit-based backpressure | done | per-producer credit window; reply = credit return; in-process test: budget 4, 200 records, peak in-flight=4, all land |
-| 4 consumer groups | TODO | xtc_lockmgr group state + Bitcask offset commits |
+| 4 consumer groups | done | single-owner coordinator proc owns all committed offsets (lock-free); commit/fetch protocol; in-process test: last-write-wins + group/partition isolation |
 | 5 observability + budgets + docs | TODO | xtc_stats, xtc_res, metrics test |
 
 ---
