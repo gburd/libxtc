@@ -89,3 +89,7 @@ build_unix/amalgamation/
 examples/06_sqlxtc/amalg/
 examples/06_sqlxtc/*.amalg.o
 examples/06_sqlxtc/sqlxtc-server-amalg
+examples/06_sqlxtc/test_xtc_vfs
+examples/06_sqlxtc/test_xtc_vfs_amalg
+examples/06_sqlxtc/xtc_vfs.o
+examples/06_sqlxtc/test_xtc_vfs.o
