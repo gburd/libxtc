@@ -93,3 +93,7 @@ examples/06_sqlxtc/test_xtc_vfs
 examples/06_sqlxtc/test_xtc_vfs_amalg
 examples/06_sqlxtc/xtc_vfs.o
 examples/06_sqlxtc/test_xtc_vfs.o
+examples/06_sqlxtc/test_pcache_xtc
+examples/06_sqlxtc/test_pcache_xtc_amalg
+examples/06_sqlxtc/pcache_xtc.o
+examples/06_sqlxtc/test_pcache_xtc.o

@@ -97,6 +97,15 @@ listen_fd ----------> listener_proc ----xtc_proc-----> conn_proc(fd)
   locking stays POSIX-correct.  This is the single instrumented choke
   point for all page traffic and the seam where an async,
   xtc_io-backed pager plugs in next.
+* `pcache_xtc.c` -- an xtc_slab-backed sqlite3_pcache_methods2.  Every
+  page in one SQLite cache is the same size, so a per-cache xtc_slab
+  supplies the page bodies with no fragmentation and O(1) alloc/free;
+  a chained hash table indexes resident pages and an LRU list of
+  unpinned pages feeds recycling.  Hit/miss/recycle and live-page
+  counts go to xtc_stats (`sqlxtc.pcache.*`, also on the metrics
+  line).  Both the VFS (I/O seam) and the pcache (memory seam) are
+  supported SQLite extension points, so they route SQLite's internals
+  through xtc primitives without forking SQLite.
 * `sql_parse.c` -- pre-parser; classifies kind + readonly.  Phase 2 wires
   in a Lime-generated AST parser via `sql_parse_gen.c`.
 * `sql_parse.lime` -- Lime grammar for the SQL subset we accept.
@@ -119,9 +128,11 @@ sqlxtc-server [options]
 ## Testing
 
 ```sh
-make test                              # unit tests + in-process VFS test + smoke
+make test                              # unit tests + in-process VFS+pcache tests + smoke
 make test-vfs                          # xtc VFS test against libxtc.a
 make test-vfs-amalg                    # xtc VFS test against the amalgamation
+make test-pcache                       # xtc slab page-cache test
+make test-pcache-amalg                 # ... against the amalgamation
 make amalg                             # build sqlxtc against the single-file xtc
 bash ../../test/sqlxtc/test_sqlxtc_smoke.sh        # end-to-end JSON
 bash ../../test/sqlxtc/test_sqlxtc_concurrent.sh   # 100 clients (Phase 3)
