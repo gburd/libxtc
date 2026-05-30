@@ -76,6 +76,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/pdict.c \
 	$(srcdir)/../src/ptc/stats.c \
 	$(srcdir)/../src/ptc/slab.c \
+	$(srcdir)/../src/ptc/blocking.c \
 	$(srcdir)/../src/ptc/mctx.c \
 	$(srcdir)/../src/ptc/rcu.c \
 	$(srcdir)/../src/orc/sup.c \
@@ -125,6 +126,7 @@ LIB_OBJS	= \
 	pdict.o \
 	stats.o \
 	slab.o \
+	blocking.o \
 	mctx.o \
 	rcu.o \
 	sup.o \
@@ -185,6 +187,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_proc_wait_fd \
 		  test_recv_correlate \
 		  test_sync \
+		  test_blocking \
 		  test_sup \
 		  test_reg \
 		  test_svr \
@@ -358,6 +361,9 @@ stats.o: $(srcdir)/../src/ptc/stats.c xtc_config.h
 
 slab.o: $(srcdir)/../src/ptc/slab.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/slab.c
+
+blocking.o: $(srcdir)/../src/ptc/blocking.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/blocking.c
 
 mctx.o: $(srcdir)/../src/ptc/mctx.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/mctx.c
@@ -679,6 +685,12 @@ test_sync: $(srcdir)/../test/m9/test_sync.c \
 		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
 		-o $@ $(srcdir)/../test/m9/test_sync.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_blocking: $(srcdir)/../test/m9/test_blocking.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
+		-o $@ $(srcdir)/../test/m9/test_blocking.c \
 		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M10 tests.
