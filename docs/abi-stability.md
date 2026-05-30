@@ -43,6 +43,30 @@ ABI stability is enforced mechanically by symbol versioning:
 - A changed function signature on a non-major bump fails the release.
 - A new symbol on a patch bump fails the release.
 
+## Frozen surfaces (consumer commitments)
+
+Some surfaces are committed frozen ahead of a consumer's release so a
+libxtc point release cannot break them.  These are checked by name on
+every release tag, not just diffed:
+
+- **The lock layer (frozen for the PostgreSQL adapter, Phase 1).**
+  PostgreSQL backs its LWLock / LockManager with these behind
+  unchanged PG APIs, so an ABI wobble is expensive.  Frozen as of
+  0.4.0, before PG Phase 1 ships:
+    - `xtc_lwlock_t` and `xtc_lwlock_mode_t`, and the `xtc_lwlock_*`
+      entry points in `xtc_lwlock.h`.
+    - `xtc_lrlock_t` and the `xtc_lrlock_*` entry points in
+      `xtc_lrlock.h`.
+    - `xtc_lockmgr_t`, `xtc_locker_t`, `xtc_lock_mode_t`,
+      `xtc_lockmgr_opts_t`, `xtc_lockmgr_stat_t`, `xtc_lock_req_t`,
+      and the `xtc_lockmgr_*` / `xtc_lock_*` entry points in
+      `xtc_lockmgr.h`.
+  Both the function signatures AND the layout of these option/stats
+  structs are under the SemVer guarantee above: no change on a
+  non-major bump.  New optional fields, if ever needed, go through
+  the five-stage deprecation cycle (a new struct / a versioned
+  `_ex` entry point), never an in-place layout change.
+
 ## Capability bits, not version checks
 
 Applications never hard-code SemVer numbers in their code.  They ask

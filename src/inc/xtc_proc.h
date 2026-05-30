@@ -316,6 +316,31 @@ void      xtc_proc_recovery_disarm(void);
 void      xtc_proc_critical_enter(void);
 void      xtc_proc_critical_leave(void);
 
+/* Register a callback to run when the calling process exits -- on a
+ * normal return OR a contained-fault recovery (after
+ * xtc_proc_recovery_arm -> xtc_exit_self).  Callbacks run LIFO,
+ * outside signal context, with the proc still current, BEFORE its
+ * monitors observe DOWN.  This is where an embedder guarantees a
+ * faulted session releases what it held -- e.g. register
+ * xtc_lock_release_all so no lock-manager lock outlives the proc, or
+ * a memory-context reset.  Up to a small fixed number per proc;
+ * returns XTC_E_RESOURCE past the limit, XTC_E_INVAL off a proc. */
+int       xtc_proc_at_exit(void (*fn)(void *), void *arg);
+
+/* A memory context scoped to the calling process: created lazily on
+ * first call, destroyed automatically on proc exit (a backstop so a
+ * faulted session's allocations are reclaimed even if its recovery
+ * block itself faults).  Returns NULL off a proc.  See xtc_mctx.h. */
+struct xtc_mctx *xtc_proc_mctx(void);
+
+/* Decode a DOWN signal (delivered to a monitor when its target exits)
+ * into the target pid and exit reason, without hand-rolling the
+ * on-wire layout.  The DOWN/EXIT signals are sent packed; a mismatched
+ * (unpacked) mirror struct misreads `reason`.  Returns XTC_OK if msg
+ * is a DOWN, XTC_E_INVAL otherwise.  out_pid / out_reason may be NULL. */
+int       xtc_down_decode(const void *msg, size_t len,
+                          xtc_pid_t *out_pid, int *out_reason);
+
 /* Internal: save / restore the current-proc context across a yield
  * done by a lower-level primitive (e.g. xtc_amutex parking the
  * fiber), so the proc still sees itself on resume.  Opaque to the

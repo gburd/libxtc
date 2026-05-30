@@ -20,6 +20,7 @@
 #include "xtc_tailcall.h"
 #include "xtc_slab.h"
 #include "xtc_slab.h"
+#include "xtc_mctx.h"
 #include <stdio.h>
 #include <pthread.h>
 #include <setjmp.h>
@@ -225,6 +226,16 @@ struct xtc_proc {
 	int         recovery_armed;
 	int         crit_depth;
 	int         fault_sig;
+
+	/* Per-proc at-exit callbacks, run LIFO on the exit path -- both a
+	 * normal return and a contained-fault recovery (xtc_exit_self).
+	 * Where an embedder reclaims resources a faulted session held
+	 * (lock-manager release-all, fd close, memory-context reset) so
+	 * they never outlive the proc.  Runs outside signal context. */
+#define XTC_PROC_MAX_ATEXIT 8
+	struct { void (*fn)(void *); void *arg; } at_exit[XTC_PROC_MAX_ATEXIT];
+	int           n_at_exit;
+	struct xtc_mctx *proc_mctx;   /* lazily created by xtc_proc_mctx() */
 
 	/* Asynchronous kill (cross-process exit signal).  Set by
 	 * xtc_exit_pid; checked at every yield/recv parking point.
@@ -496,6 +507,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 
 /* Forward decls. */
 static void __notify_links_and_monitors(struct xtc_proc *p);
+static void __run_proc_at_exit(struct xtc_proc *p);
 
 static intptr_t
 __proc_entry(void *arg)
@@ -513,6 +525,13 @@ __proc_entry(void *arg)
 	}
 
 	p->alive = 0;
+	/* Run the proc's at-exit callbacks (release locks, reset memory,
+	 * close fds) before anyone observes the exit.  __current_proc is
+	 * still this proc, and we are past the fault handler's longjmp,
+	 * so callbacks run as ordinary code.  Done before notifying
+	 * monitors so a replacement spawned in reaction sees no resource
+	 * (e.g. a lock) still held by the dead proc. */
+	__run_proc_at_exit(p);
 	/* __notify_links_and_monitors frees p (releases the slot,
 	 * destroys the mailbox lock, frees the struct), so snapshot the
 	 * exit reason before the call -- reading p->exit_reason after it
@@ -1300,6 +1319,77 @@ xtc_proc_critical_leave(void)
 {
 	if (__current_proc != NULL && __current_proc->crit_depth > 0)
 		__current_proc->crit_depth--;
+}
+
+/* ---------- per-proc at-exit hooks + proc-scoped memory ---------- */
+
+/* PUBLIC: int xtc_proc_at_exit __P((void (*)(void *), void *)); */
+int
+xtc_proc_at_exit(void (*fn)(void *), void *arg)
+{
+	struct xtc_proc *p = __current_proc;
+	if (p == NULL || fn == NULL)
+		return XTC_E_INVAL;
+	if (p->n_at_exit >= XTC_PROC_MAX_ATEXIT)
+		return XTC_E_RESOURCE;
+	p->at_exit[p->n_at_exit].fn = fn;
+	p->at_exit[p->n_at_exit].arg = arg;
+	p->n_at_exit++;
+	return XTC_OK;
+}
+
+/* Run a proc's at-exit callbacks (LIFO) and tear down its scoped
+ * memory context.  Called once on the exit path, with __current_proc
+ * still set and outside signal context. */
+static void
+__run_proc_at_exit(struct xtc_proc *p)
+{
+	int i;
+	for (i = p->n_at_exit - 1; i >= 0; i--)
+		p->at_exit[i].fn(p->at_exit[i].arg);
+	p->n_at_exit = 0;
+	if (p->proc_mctx != NULL) {
+		xtc_mctx_destroy(p->proc_mctx);
+		p->proc_mctx = NULL;
+	}
+}
+
+/* PUBLIC: struct xtc_mctx *xtc_proc_mctx __P((void)); */
+struct xtc_mctx *
+xtc_proc_mctx(void)
+{
+	struct xtc_proc *p = __current_proc;
+	if (p == NULL)
+		return NULL;
+	if (p->proc_mctx == NULL)
+		(void)xtc_mctx_create(NULL, "proc", 0, &p->proc_mctx);
+	return p->proc_mctx;
+}
+
+/* PUBLIC: int xtc_down_decode __P((const void *, size_t, xtc_pid_t *, int *)); */
+int
+xtc_down_decode(const void *msg, size_t len, xtc_pid_t *out_pid,
+                int *out_reason)
+{
+	/* Decode a DOWN signal without the caller hand-rolling the packed
+	 * layout (a footgun: an unpacked mirror struct misreads reason).
+	 * We read it through the same packed shape used to send it. */
+	XTC_PACK_PUSH
+	struct {
+		uint8_t   kind;
+		uint64_t  ref;
+		xtc_pid_t pid;
+		int       reason;
+	} XTC_PACKED d;
+	XTC_PACK_POP
+	if (msg == NULL || len < sizeof d)
+		return XTC_E_INVAL;
+	memcpy(&d, msg, sizeof d);
+	if (d.kind != 'D')
+		return XTC_E_INVAL;     /* not a DOWN message */
+	if (out_pid != NULL) *out_pid = d.pid;
+	if (out_reason != NULL) *out_reason = d.reason;
+	return XTC_OK;
 }
 
 /* PUBLIC: int xtc_link __P((xtc_pid_t)); */
