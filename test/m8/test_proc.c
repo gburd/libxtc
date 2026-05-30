@@ -292,12 +292,83 @@ test_recv_inf_parks(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Mailbox observability + watermark.  Sends accumulate in a small
+ * capped mailbox before the proc runs; the watermark callback fires
+ * on the rising edge, over-cap sends are rejected and counted, and
+ * xtc_proc_mailbox_stats reports depth / peak / totals. */
+static _Atomic int    g_wm_fires;
+static _Atomic size_t g_wm_depth;
+
+static void
+wm_cb(xtc_pid_t self, size_t depth, size_t cap, void *user)
+{
+	(void)self; (void)cap; (void)user;
+	atomic_fetch_add(&g_wm_fires, 1);
+	atomic_store(&g_wm_depth, depth);
+}
+
+static void
+drainer(void *arg)
+{
+	void *m; size_t n;
+	(void)arg;
+	/* Drain whatever is queued, then exit so the loop terminates. */
+	while (xtc_recv(&m, &n, 0) == XTC_OK) {
+		if (m) __os_free(m);
+	}
+}
+
+static MunitResult
+test_mailbox_stats(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	xtc_mailbox_stats_t st;
+	int i, v = 7;
+	(void)p; (void)d;
+
+	atomic_store(&g_wm_fires, 0);
+	atomic_store(&g_wm_depth, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "mbx";
+	opts.mailbox_cap = 8;
+	opts.mailbox_watermark_pct = 50;        /* level = 4 */
+	opts.mailbox_watermark_fn = wm_cb;
+	munit_assert_int(xtc_proc_spawn(loop, drainer, NULL, &opts, &pid),
+	    ==, XTC_OK);
+
+	/* Send 10 before the loop runs: 8 accepted, 2 rejected. */
+	for (i = 0; i < 10; i++) {
+		int rc = xtc_send(pid, &v, sizeof v);
+		if (i < 8) munit_assert_int(rc, ==, XTC_OK);
+		else       munit_assert_int(rc, ==, XTC_E_AGAIN);
+	}
+
+	munit_assert_int(xtc_proc_mailbox_stats(pid, &st), ==, XTC_OK);
+	munit_assert_size(st.depth, ==, 8);
+	munit_assert_size(st.peak, ==, 8);
+	munit_assert_size(st.cap, ==, 8);
+	munit_assert_uint64(st.recv_total, ==, 8);
+	munit_assert_uint64(st.drop_total, ==, 2);
+
+	/* Watermark fired once on the rising edge, at depth >= 4. */
+	munit_assert_int(atomic_load(&g_wm_fires), ==, 1);
+	munit_assert_size(atomic_load(&g_wm_depth), >=, 4);
+
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/selective_receive", test_selective_receive,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/monitor",           test_monitor,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recv_inf_parks",    test_recv_inf_parks,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/mailbox_stats",     test_mailbox_stats,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/proc", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

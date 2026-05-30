@@ -71,7 +71,26 @@ typedef struct xtc_proc_opts {
 	const char *name;          /* optional, for debug */
 	size_t      mailbox_cap;   /* 0 = default */
 	int         link_to;       /* if != 0, this is a pid index to link to */
+	/* Mailbox watermark: when an accepted message brings the depth to
+	 * this percent of mailbox_cap (1..100; 0 = disabled), the callback
+	 * fires once on the rising edge, so the app can shed load before
+	 * the hard cap rejects with XTC_E_AGAIN.  The callback runs on the
+	 * sender's thread, outside the mailbox lock; keep it cheap and do
+	 * not block. */
+	int         mailbox_watermark_pct;
+	void      (*mailbox_watermark_fn)(xtc_pid_t self, size_t depth,
+	                                  size_t cap, void *user);
+	void       *mailbox_watermark_user;
 } xtc_proc_opts_t;
+
+/* Mailbox statistics snapshot (see xtc_proc_mailbox_stats). */
+typedef struct xtc_mailbox_stats {
+	size_t   depth;        /* messages currently queued */
+	size_t   peak;         /* high-water depth ever reached */
+	size_t   cap;          /* mailbox capacity (0 = unbounded) */
+	uint64_t recv_total;   /* messages accepted over the proc's life */
+	uint64_t drop_total;   /* messages rejected (full / dead) */
+} xtc_mailbox_stats_t;
 
 /*
  * PUBLIC: int       xtc_proc_spawn __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));
@@ -219,6 +238,11 @@ int       xtc_unlink(xtc_pid_t other);
  * { uint8_t kind = 'D'; uint64_t ref; xtc_pid_t pid; int reason; }
  * when the monitored process exits. */
 int       xtc_monitor(xtc_pid_t target, uint64_t *out_ref);
+
+/* Snapshot a process's mailbox statistics into *out.  Returns XTC_OK,
+ * or XTC_E_INVAL if the pid is dead / unknown.  Safe to call from any
+ * thread. */
+int       xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out);
 
 /* Internal: save / restore the current-proc context across a yield
  * done by a lower-level primitive (e.g. xtc_amutex parking the
