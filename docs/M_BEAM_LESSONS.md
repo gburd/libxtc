@@ -401,11 +401,13 @@ weeks at the current pace.  None individually risky.
 Listing them as concrete agenda items:
 
 1. `xtc_proc_opts_t.mailbox_watermark_pct` + watermark callback (issue 1)
-   -- DONE: rising-edge callback fired when the mailbox depth first
-   reaches the configured percent of cap.
+   -- DONE: rising-edge callback when the mailbox depth first reaches
+   the configured percent of cap.
 2. `xtc_proc_mailbox_stats(pid, &out)` (issue 1) -- DONE: depth, peak,
    cap, recv_total, drop_total; safe from any thread.
-3. Selective receive: recv-mark optimization (issue 2)
+3. Selective receive: recv-mark optimization (issue 2) -- DONE: the
+   save-queue scan skips entries already tested against the current
+   predicate; the cap now bounds mailbox + save queue together.
 4. Memory-ownership guide doc (issue 3)
 5. `xtc_alloc_audit_t` debug allocation tracker (issue 3)
 6. `XTC_YIELD_CHECK` macro + scheduler-side flag (issue 4)
