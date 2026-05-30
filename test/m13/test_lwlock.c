@@ -147,6 +147,17 @@ static xtc_lwlock_t g_lk2;
 static _Atomic int  g_shared_max_concurrent;
 static _Atomic int  g_shared_in_section;
 
+static void
+__record_max(int n)
+{
+	int cur_max;
+	do {
+		cur_max = atomic_load(&g_shared_max_concurrent);
+		if (n <= cur_max) return;
+	} while (!atomic_compare_exchange_weak(
+	    &g_shared_max_concurrent, &cur_max, n));
+}
+
 static void *
 shared_thread(void *arg)
 {
@@ -156,17 +167,24 @@ shared_thread(void *arg)
 		(void)xtc_lwlock_acquire(&g_lk2, XTC_LW_SHARED);
 		{
 			int n = atomic_fetch_add(&g_shared_in_section, 1) + 1;
-			int cur_max;
-			do {
-				cur_max = atomic_load(&g_shared_max_concurrent);
-				if (n <= cur_max) break;
-			} while (!atomic_compare_exchange_weak(
-			    &g_shared_max_concurrent, &cur_max, n));
-			/* Hold long enough that other threads are likely
-			 * to be in the section concurrently. */
-			{
-				volatile int spin = 200;
-				while (spin--) {}
+			__record_max(n);
+			/*
+			 * Make concurrent holders provably overlap rather
+			 * than relying on a fixed spin to coincide with the
+			 * scheduler: until we have actually seen two threads
+			 * in the section at once, wait (bounded) for a peer
+			 * to join.  The bound prevents a hang if the shared
+			 * path were wrongly serialising, and we only pay it
+			 * during a brief warm-up (skipped once concurrency is
+			 * confirmed).
+			 */
+			if (i < 64 &&
+			    atomic_load(&g_shared_max_concurrent) < 2) {
+				long spin = 0;
+				while (atomic_load(&g_shared_in_section) < 2 &&
+				    spin < 2000000L)
+					spin++;
+				__record_max(atomic_load(&g_shared_in_section));
 			}
 		}
 		atomic_fetch_sub(&g_shared_in_section, 1);
