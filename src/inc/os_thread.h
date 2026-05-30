@@ -45,10 +45,12 @@ struct __os_thread { void *opaque; };
  * on some platforms (notably illumos / Solaris where uninitialized or
  * misaligned storage causes pthread_mutex_init to return EINVAL).
  * `_Alignas(long long)` gives us 8-byte alignment which covers every
- * known pthread implementation.
+ * known pthread implementation.  The rwlock buffer is 256 bytes:
+ * macOS's pthread_rwlock_t is ~200 (vs ~56 on glibc), so 128 was too
+ * small there.
  */
 struct __os_mutex  { _Alignas(long long) unsigned char storage[64];  };
-struct __os_rwlock { _Alignas(long long) unsigned char storage[128]; };
+struct __os_rwlock { _Alignas(long long) unsigned char storage[256]; };
 struct __os_cond   { _Alignas(long long) unsigned char storage[64];  };
 struct __os_sem    { _Alignas(long long) unsigned char storage[64];  };
 
