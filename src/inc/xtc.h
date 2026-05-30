@@ -62,7 +62,8 @@ typedef enum xtc_err {
 	XTC_E_INTERNAL		= -6,	/* invariant violation; bug */
 	XTC_E_RESOURCE		= -7,	/* resource cap reached (xtc_res) */
 	XTC_E_DEADLK		= -8,	/* lock-manager: deadlock victim */
-	XTC_E_VERSION		= -9	/* version mismatch (shm) */
+	XTC_E_VERSION		= -9,	/* version mismatch (shm) */
+	XTC_E_ABORTED		= -10	/* operation cancelled via abort token */
 } xtc_err_t;
 
 /*

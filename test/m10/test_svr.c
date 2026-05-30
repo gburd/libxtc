@@ -142,8 +142,89 @@ test_svr_basic(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- abortable call: a server that never replies, a token fired by
+ * a peer; the in-proc call must return XTC_E_ABORTED (cooperative
+ * cancellation -- the PG statement-timeout lever). ---- */
+static int
+blackhole_handle_call(void *st, const void *req, size_t size,
+                      xtc_svr_call_t *call)
+{
+	(void)st; (void)req; (void)size; (void)call;
+	return XTC_SVR_CONTINUE;            /* never replies */
+}
+
+struct abrt_args {
+	xtc_pid_t           target;
+	xtc_abort_source_t *src;
+	xtc_abort_token_t   tok;
+	_Atomic int         rc;
+};
+static xtc_svr_t *g_blackhole_svr;
+
+static void
+abrt_caller(void *arg)
+{
+	struct abrt_args *a = arg;
+	void *reply = NULL; size_t rsz = 0;
+	int rc = xtc_svr_call_abortable(a->target, NULL, 0, &reply, &rsz,
+	    5LL * 1000 * 1000 * 1000, &a->tok);
+	atomic_store_explicit(&a->rc, rc, memory_order_release);
+	if (reply) __os_free(reply);
+	(void)xtc_svr_stop(g_blackhole_svr);
+}
+static void
+abrt_canceller(void *arg)
+{
+	struct abrt_args *a = arg;
+	void *m = NULL; size_t n = 0;
+	(void)xtc_recv(&m, &n, 60LL * 1000 * 1000);   /* let caller park */
+	if (m) __os_free(m);
+	(void)xtc_abort_source_fire(a->src, 9);
+}
+
+static MunitResult
+test_svr_call_abortable(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_svr_t  *svr;
+	xtc_svr_callbacks_t cb = {
+		.init = NULL, .handle_call = blackhole_handle_call,
+		.handle_cast = NULL, .handle_info = NULL, .terminate = NULL
+	};
+	xtc_svr_opts_t opts = { .name = "blackhole", .mailbox_cap = 0 };
+	struct abrt_args a;
+	xtc_pid_t cpid, kpid;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cb, NULL, &opts, &svr),
+	    ==, XTC_OK);
+	g_blackhole_svr = svr;
+
+	memset(&a, 0, sizeof a);
+	a.target = xtc_svr_pid(svr);
+	munit_assert_int(xtc_abort_source_create(&a.src), ==, XTC_OK);
+	munit_assert_int(xtc_abort_source_token(a.src, &a.tok), ==, XTC_OK);
+	atomic_store_explicit(&a.rc, 0, memory_order_relaxed);
+
+	munit_assert_int(xtc_proc_spawn(loop, abrt_caller, &a, NULL, &cpid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, abrt_canceller, &a, NULL, &kpid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	munit_assert_int(atomic_load_explicit(&a.rc, memory_order_acquire),
+	    ==, XTC_E_ABORTED);
+
+	xtc_abort_source_destroy(a.src);
+	munit_assert_int(xtc_svr_join(svr, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/svr_basic", test_svr_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/call_abortable", test_svr_call_abortable, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/svr", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

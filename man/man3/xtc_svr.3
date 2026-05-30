@@ -8,6 +8,7 @@
 .Nm xtc_svr_stop ,
 .Nm xtc_svr_join ,
 .Nm xtc_svr_call ,
+.Nm xtc_svr_call_abortable ,
 .Nm xtc_svr_cast ,
 .Nm xtc_svr_reply ,
 .Nm xtc_svr_pid
@@ -23,6 +24,8 @@
 .Fn xtc_svr_join "xtc_svr_t *s" "int64_t timeout_ns"
 .Ft int
 .Fn xtc_svr_call "xtc_pid_t target" "const void *req" "size_t req_size" "void **out_reply" "size_t *out_size" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_svr_call_abortable "xtc_pid_t target" "const void *req" "size_t req_size" "void **out_reply" "size_t *out_size" "int64_t timeout_ns" "xtc_abort_token_t *tok"
 .Ft int
 .Fn xtc_svr_cast "xtc_pid_t target" "const void *msg" "size_t size"
 .Ft int
@@ -67,6 +70,20 @@ callers
 .Pq from another xtc_proc
 route via tag-and-pid through the caller's mailbox; external
 threads use slot-and-notify.  Both paths return the same way.
+.Pp
+.Fn xtc_svr_call_abortable
+is the same call with cooperative cancellation: while it waits for the
+reply it polls
+.Fa tok
+(see
+.Xr xtc_sync 3 ) ,
+and returns
+.Dv XTC_E_ABORTED
+if the token's source is fired before the reply arrives.  Fire the
+source from a statement timeout or a cancel-request path to deliver a
+cancel at the next wait point.  Cancellation stops only the caller's
+wait; the server keeps processing the request, and a late reply is
+discarded.
 .Pp
 .Fn xtc_svr_cast
 fires-and-forgets a message.  Returns immediately.
