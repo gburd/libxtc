@@ -56,8 +56,8 @@ test_partition: test_partition.c partition.c frame.h partition.h
 test_broker: test_broker.c broker.c frame.c partition.c broker.h
 	$(CC) $(CFLAGS) -o $@ test_broker.c broker.c frame.c partition.c $(LDFLAGS)
 
-test_group: test_group.c group.c group.h
-	$(CC) $(CFLAGS) -o $@ test_group.c group.c $(LDFLAGS)
+test_group: test_group.c group.c group.h partition.c frame.c
+	$(CC) $(CFLAGS) -o $@ test_group.c group.c partition.c frame.c $(LDFLAGS)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)

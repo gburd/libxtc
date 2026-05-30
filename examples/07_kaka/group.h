@@ -53,8 +53,20 @@ struct grp_reply {
 /* Spawn the coordinator proc on `loop`; returns its pid via *out. */
 int group_coordinator_spawn(xtc_loop_t *loop, xtc_pid_t *out);
 
+/* Like group_coordinator_spawn, but durably persists committed offsets
+ * under `dir` (a segmented plog) and replays them on startup.  Pass
+ * dir == NULL for an in-memory-only coordinator. */
+int group_coordinator_spawn_ex(xtc_loop_t *loop, const char *dir,
+    xtc_pid_t *out);
+
 /* In-process self-test: commit and fetch offsets across two groups
  * and assert isolation and last-write-wins.  Returns 0 on pass. */
 int group_selftest(void);
+
+/* In-process durability self-test: commit offsets under `dir`, let the
+ * coordinator exit, then spawn a fresh coordinator over the same dir
+ * and assert the offsets replayed (including last-write-wins).
+ * Returns 0 on pass. */
+int group_persist_selftest(const char *dir);
 
 #endif /* KAKA_GROUP_H */
