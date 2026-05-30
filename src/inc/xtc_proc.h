@@ -220,4 +220,11 @@ int       xtc_unlink(xtc_pid_t other);
  * when the monitored process exits. */
 int       xtc_monitor(xtc_pid_t target, uint64_t *out_ref);
 
+/* Internal: save / restore the current-proc context across a yield
+ * done by a lower-level primitive (e.g. xtc_amutex parking the
+ * fiber), so the proc still sees itself on resume.  Opaque to the
+ * caller. */
+void     *__xtc_proc_ctx_save(void);
+void      __xtc_proc_ctx_restore(void *ctx);
+
 #endif /* XTC_PROC_H */

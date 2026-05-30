@@ -137,6 +137,12 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	    (c->self->park_timer != NULL || c->self->park_fd >= 0)) {
 		return XTC_TASK_PENDING;
 	}
+	/* Voluntary park requested (xtc_amutex and friends): sleep until
+	 * a waker re-enqueues us instead of busy-rescheduling. */
+	if (c->self != NULL && c->self->park_requested) {
+		c->self->park_requested = 0;
+		return XTC_TASK_PENDING;
+	}
 	/* Plain yield; re-queue at the back of the run queue. */
 	return XTC_TASK_RESCHED;
 }
@@ -310,6 +316,12 @@ xtc_yield(void)
 	struct xtc_coro *c = __xtc_current_coro;
 	if (c == NULL) return;
 	(void)swapcontext(&c->ctx, &c->loop_ctx);
+}
+
+xtc_task_t *
+__xtc_current_task(void)
+{
+	return __xtc_current_coro != NULL ? __xtc_current_coro->self : NULL;
 }
 
 #endif /* !_WIN32 */
