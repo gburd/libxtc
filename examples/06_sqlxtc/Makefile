@@ -63,7 +63,7 @@ SQLITE_CFLAGS = -O2 -g -std=c11 -D_GNU_SOURCE \
     -Wno-unused-parameter \
     -Wno-implicit-fallthrough
 
-SRCS = main.c quack.c db.c conn.c xtc_mutex.c xtc_vfs.c metrics.c sql_parse.c
+SRCS = main.c quack.c db.c conn.c xtc_mutex.c xtc_vfs.c pcache_xtc.c metrics.c sql_parse.c
 OBJS = $(SRCS:.c=.o)
 
 # Lime-generated parser (Phase 2).  Compiled in if the file exists.
@@ -117,6 +117,7 @@ db.o: db.c db.h quack.h
 conn.o: conn.c conn.h db.h quack.h sql_parse.h
 xtc_mutex.o: xtc_mutex.c
 xtc_vfs.o: xtc_vfs.c xtc_vfs.h sqlite/sqlite3.h
+pcache_xtc.o: pcache_xtc.c pcache_xtc.h sqlite/sqlite3.h
 metrics.o: metrics.c
 sql_parse.o: sql_parse.c sql_parse.h
 sql_parse_drv.o: sql_parse_drv.c sql_parse.h sql_parse_lime.h sql_parse_gen.h
@@ -125,6 +126,7 @@ clean:
 	rm -f $(OBJS) $(TARGET)
 	rm -f $(AMALG_OBJS) sqlxtc-server-amalg
 	rm -f test_xtc_vfs test_xtc_vfs_amalg test_xtc_vfs.o
+	rm -f test_pcache_xtc test_pcache_xtc_amalg test_pcache_xtc.o
 	rm -rf $(AMALG_DIR)
 	rm -f sql_parse_gen.o sql_parse_drv.o
 	rm -f /tmp/sqlxtc-bench.db /tmp/sqlxtc-bench.db-*
@@ -134,7 +136,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs
+test: $(TARGET) test-quack test-sql-parse test-vfs test-pcache
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -189,6 +191,23 @@ test_xtc_vfs_amalg: test_xtc_vfs.c xtc_vfs.amalg.o sqlite/sqlite3.o \
 
 test-vfs-amalg: test_xtc_vfs_amalg
 	./test_xtc_vfs_amalg
+
+# ---- xtc page-cache test (in-process, no daemon) ----
+.PHONY: test-pcache test-pcache-amalg
+
+test_pcache_xtc: test_pcache_xtc.c pcache_xtc.o sqlite/sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_pcache_xtc.c pcache_xtc.o sqlite/sqlite3.o $(LDFLAGS)
+
+test-pcache: test_pcache_xtc
+	./test_pcache_xtc
+
+test_pcache_xtc_amalg: test_pcache_xtc.c pcache_xtc.amalg.o sqlite/sqlite3.o \
+        $(AMALG_DIR)/xtc.o
+	$(CC) $(AMALG_CFLAGS) -o $@ test_pcache_xtc.c pcache_xtc.amalg.o \
+		sqlite/sqlite3.o $(AMALG_DIR)/xtc.o -pthread -ldl -lm
+
+test-pcache-amalg: test_pcache_xtc_amalg
+	./test_pcache_xtc_amalg
 
 test-quack: ../../test/sqlxtc/test_quack
 	../../test/sqlxtc/test_quack

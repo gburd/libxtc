@@ -20,6 +20,7 @@
 #include "xtc_res.h"
 #include "xtc_stats.h"
 #include "xtc_vfs.h"
+#include "pcache_xtc.h"
 
 #define METRICS_INTERVAL_NS  (5LL * 1000 * 1000 * 1000)
 
@@ -72,11 +73,14 @@ metrics_proc(void *arg)
 			int64_t mem = st->res ?
 			    xtc_res_used(st->res, XTC_RES_MEM_BYTES) : 0;
 			xtc_vfs_stats_t vfs;
+			xtc_pcache_stats_t pc;
 			xtc_vfs_get_stats(&vfs);
+			xtc_pcache_get_stats(&pc);
 			XTC_LOG_INFO_F(
 			    "metrics: conns=%d queries=%lld errors=%lld "
 			    "q_p50_ns=%lld q_p99_ns=%lld mem=%lld "
-			    "vfs_r=%llu vfs_w=%llu vfs_rb=%llu vfs_wb=%llu",
+			    "vfs_r=%llu vfs_w=%llu vfs_rb=%llu vfs_wb=%llu "
+			    "pc_hit=%llu pc_miss=%llu pc_pages=%llu",
 			    atomic_load(st->conn_count),
 			    (long long)qs, (long long)errs,
 			    (long long)p50, (long long)p99,
@@ -84,7 +88,10 @@ metrics_proc(void *arg)
 			    (unsigned long long)vfs.reads,
 			    (unsigned long long)vfs.writes,
 			    (unsigned long long)vfs.bytes_read,
-			    (unsigned long long)vfs.bytes_written);
+			    (unsigned long long)vfs.bytes_written,
+			    (unsigned long long)pc.fetch_hit,
+			    (unsigned long long)pc.fetch_miss,
+			    (unsigned long long)pc.live_pages);
 		}
 	}
 }
