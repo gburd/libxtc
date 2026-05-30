@@ -68,6 +68,10 @@ AC_SEARCH_LIBS([pthread_create], [pthread], [],
   [AC_MSG_ERROR([xtc requires pthreads])])
 # librt for clock_gettime on older glibcs (no-op on modern ones).
 AC_SEARCH_LIBS([clock_gettime], [rt], [], [])
+# shm_open lives in librt on older glibc, libc on modern glibc / *BSD,
+# and libc on macOS (no librt at all).  Find it wherever it is so the
+# shm test does not hardcode -lrt.
+AC_SEARCH_LIBS([shm_open], [rt], [], [])
 
 # -------------------------------------------------------------------------
 # L1 I/O backend selection.
