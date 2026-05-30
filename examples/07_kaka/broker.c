@@ -557,3 +557,131 @@ broker_selftest(void)
 	if (xtc_loop_run(loop) != XTC_OK) return -1;
 	return st.result;
 }
+
+/* ---- credit-based backpressure self-test (Phase 3) ----
+ *
+ * Demonstrates end-to-end flow control with real procs and mailboxes,
+ * in-process (no socket).  A producer is granted a credit budget: it
+ * keeps at most `budget` PRODUCE requests outstanding to the partition
+ * at once.  Each reply returns one credit, freeing a slot for the next
+ * request.  The bounded partition mailbox is the hard backstop; the
+ * credit window keeps the producer from ever reaching it.  The test
+ * asserts the in-flight count never exceeds the budget and that every
+ * record is durably appended in order.
+ */
+
+#define CREDIT_BUDGET   4
+#define CREDIT_TOTAL    200
+
+struct credit_state {
+	int       result;
+	int       max_in_flight;     /* observed peak; must stay <= budget */
+	uint64_t  hwm;               /* partition high-water after the run */
+	xtc_pid_t part;
+};
+
+static void
+credit_producer(void *arg)
+{
+	struct credit_state *st = arg;
+	/* One single-record PRODUCE body per in-flight slot.  Reused
+	 * once its reply (credit) comes back. */
+	static uint8_t slot_buf[CREDIT_BUDGET][64];
+	int slot_busy[CREDIT_BUDGET];
+	int in_flight = 0, sent = 0, acked = 0;
+	int i;
+	void *msg; size_t mlen;
+
+	for (i = 0; i < CREDIT_BUDGET; i++) slot_busy[i] = 0;
+
+	/* Build a one-record PRODUCE body for record number `n` into buf. */
+	/* topic "t", partition 0, 1 record, key="", value=<n as 4 bytes>. */
+	for (;;) {
+		/* Fill every free credit slot, up to the budget, while
+		 * there is work left to send. */
+		while (in_flight < CREDIT_BUDGET && sent < CREDIT_TOTAL) {
+			int s = -1, k;
+			uint8_t *p;
+			struct part_req req;
+			for (k = 0; k < CREDIT_BUDGET; k++)
+				if (!slot_busy[k]) { s = k; break; }
+			if (s < 0) break;
+			p = slot_buf[s];
+			kaka_put_u16(p, 1); p += 2; *p++ = 't';
+			kaka_put_u32(p, 0); p += 4;          /* partition */
+			kaka_put_u32(p, 1); p += 4;          /* 1 record */
+			kaka_put_u32(p, 0); p += 4;          /* key_len 0 */
+			kaka_put_u32(p, 4); p += 4;          /* val_len 4 */
+			kaka_put_u32(p, (uint32_t)sent); p += 4;
+			memset(&req, 0, sizeof req);
+			req.op = REQ_PRODUCE;
+			req.reply = xtc_self();
+			req.tag = (uint32_t)s;               /* slot id in tag */
+			if (kaka_decode_produce(slot_buf[s],
+			    (size_t)(p - slot_buf[s]), &req.produce) != 0) {
+				st->result = 1; goto done;
+			}
+			if (xtc_send(st->part, &req, sizeof req) != XTC_OK) {
+				st->result = 2; goto done;
+			}
+			slot_busy[s] = 1;
+			in_flight++; sent++;
+			if (in_flight > st->max_in_flight)
+				st->max_in_flight = in_flight;
+		}
+		if (acked == CREDIT_TOTAL) break;
+
+		/* Block for a reply (a returned credit). */
+		if (xtc_recv(&msg, &mlen, 2000LL * 1000000) != XTC_OK ||
+		    msg == NULL) { st->result = 3; goto done; }
+		{
+			struct part_reply rep;
+			memcpy(&rep, msg, sizeof rep);
+			__os_free(msg);
+			if (!rep.ok) { st->result = 4; goto done; }
+			if (rep.tag < CREDIT_BUDGET) slot_busy[rep.tag] = 0;
+			in_flight--; acked++;
+			st->hwm = rep.hwm;
+		}
+	}
+done:
+	{
+		/* Shut the partition down so the loop can terminate. */
+		struct part_req req;
+		memset(&req, 0, sizeof req);
+		req.op = REQ_SHUTDOWN; req.reply = xtc_self(); req.tag = 999;
+		if (xtc_send(st->part, &req, sizeof req) == XTC_OK)
+			(void)xtc_recv(&msg, &mlen, 1000LL * 1000000),
+			    (msg ? __os_free(msg) : (void)0);
+	}
+}
+
+int
+broker_credit_selftest(int *max_in_flight, uint64_t *hwm)
+{
+	xtc_loop_t *loop = NULL;
+	struct credit_state st;
+	struct part_arg *pa;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t part, prod;
+
+	memset(&st, 0, sizeof st);
+	if (xtc_loop_init(&loop) != XTC_OK) return -1;
+
+	pa = calloc(1, sizeof *pa);
+	if (pa == NULL) return -1;
+	pa->topic[0] = 't'; pa->topic[1] = '\0'; pa->partition = 0;
+	opts.name = "credit-partition";
+	if (xtc_proc_spawn(loop, partition_proc, pa, &opts, &part) != XTC_OK) {
+		free(pa); return -1;
+	}
+	st.part = part;
+	opts.name = "credit-producer";
+	if (xtc_proc_spawn(loop, credit_producer, &st, &opts, &prod) != XTC_OK)
+		return -1;
+
+	if (xtc_loop_run(loop) != XTC_OK) return -1;
+	if (max_in_flight) *max_in_flight = st.max_in_flight;
+	if (hwm) *hwm = st.hwm;
+	return st.result;
+}
