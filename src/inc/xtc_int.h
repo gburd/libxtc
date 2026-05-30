@@ -22,6 +22,12 @@
 #ifndef _DEFAULT_SOURCE
 # define _DEFAULT_SOURCE 1
 #endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+/* Expose the Darwin/BSD extensions xtc uses: pthread_setname_np (1-arg),
+ * sysconf(_SC_NPROCESSORS_ONLN), and friends.  _XOPEN_SOURCE alone
+ * hides them on macOS. */
+# define _DARWIN_C_SOURCE 1
+#endif
 #if defined(__FreeBSD__) || defined(__DragonFly__) || \
     defined(__NetBSD__) || defined(__OpenBSD__)
 # ifndef __BSD_VISIBLE
