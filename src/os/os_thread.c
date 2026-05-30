@@ -6,7 +6,11 @@
  *	pthread implementation of the thread surface.
  */
 
-#define _GNU_SOURCE  /* for pthread_setname_np on glibc */
+#if defined(__linux__)
+#define _GNU_SOURCE  /* for the 2-arg pthread_setname_np on glibc */
+#elif defined(__APPLE__)
+#define _DARWIN_C_SOURCE  /* expose pthread_setname_np (1-arg) on macOS */
+#endif
 
 #include "xtc_int.h"
 

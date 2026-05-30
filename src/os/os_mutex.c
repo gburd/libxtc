@@ -20,6 +20,9 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <errno.h>
+#if defined(__APPLE__)
+#include <dispatch/dispatch.h>   /* unnamed POSIX sems are unsupported */
+#endif
 
 #include "os_thread.h"
 
@@ -30,8 +33,13 @@ typedef char __chk_rw_size[
     sizeof(pthread_rwlock_t) <= sizeof(((__os_rwlock_t *)0)->storage) ? 1 : -1];
 typedef char __chk_cv_size[
     sizeof(pthread_cond_t)   <= sizeof(((__os_cond_t   *)0)->storage) ? 1 : -1];
+#if defined(__APPLE__)
+typedef char __chk_sem_size[
+    sizeof(dispatch_semaphore_t) <= sizeof(((__os_sem_t *)0)->storage) ? 1 : -1];
+#else
 typedef char __chk_sem_size[
     sizeof(sem_t)            <= sizeof(((__os_sem_t    *)0)->storage) ? 1 : -1];
+#endif
 
 #define MU(p)  ((pthread_mutex_t  *)(void *)(p)->storage)
 #define RW(p)  ((pthread_rwlock_t *)(void *)(p)->storage)
@@ -129,6 +137,46 @@ int __os_cond_broadcast(__os_cond_t *c) {
 
 /* --- semaphore (unnamed, in-process) --- */
 
+#if defined(__APPLE__)
+
+/* macOS: unnamed POSIX semaphores (sem_init) are deprecated and fail
+ * with ENOSYS at runtime, so back __os_sem with a GCD dispatch
+ * semaphore (a single pointer kept in the opaque storage). */
+#define DSEM(p)  (*(dispatch_semaphore_t *)(void *)(p)->storage)
+
+/* PUBLIC: int __os_sem_init __P((__os_sem_t *, unsigned)); */
+int __os_sem_init(__os_sem_t *s, unsigned initial) {
+	if (s == NULL) return XTC_E_INVAL;
+	DSEM(s) = dispatch_semaphore_create((long)initial);
+	return DSEM(s) != NULL ? XTC_OK : XTC_E_INTERNAL;
+}
+/* PUBLIC: int __os_sem_destroy __P((__os_sem_t *)); */
+int __os_sem_destroy(__os_sem_t *s) {
+	if (s == NULL) return XTC_E_INVAL;
+	if (DSEM(s) != NULL) dispatch_release(DSEM(s));
+	return XTC_OK;
+}
+/* PUBLIC: int __os_sem_post __P((__os_sem_t *)); */
+int __os_sem_post(__os_sem_t *s) {
+	if (s == NULL) return XTC_E_INVAL;
+	(void)dispatch_semaphore_signal(DSEM(s));
+	return XTC_OK;
+}
+/* PUBLIC: int __os_sem_wait __P((__os_sem_t *)); */
+int __os_sem_wait(__os_sem_t *s) {
+	if (s == NULL) return XTC_E_INVAL;
+	(void)dispatch_semaphore_wait(DSEM(s), DISPATCH_TIME_FOREVER);
+	return XTC_OK;
+}
+/* PUBLIC: int __os_sem_trywait __P((__os_sem_t *)); */
+int __os_sem_trywait(__os_sem_t *s) {
+	if (s == NULL) return XTC_E_INVAL;
+	return dispatch_semaphore_wait(DSEM(s), DISPATCH_TIME_NOW) == 0
+	    ? XTC_OK : XTC_E_AGAIN;
+}
+
+#else  /* POSIX unnamed semaphores */
+
 /* PUBLIC: int __os_sem_init __P((__os_sem_t *, unsigned)); */
 int __os_sem_init(__os_sem_t *s, unsigned initial) {
 	if (s == NULL) return XTC_E_INVAL;
@@ -162,3 +210,5 @@ int __os_sem_trywait(__os_sem_t *s) {
 	if (e == EAGAIN) return XTC_E_AGAIN;
 	return XTC_E_INTERNAL;
 }
+
+#endif  /* __APPLE__ */
