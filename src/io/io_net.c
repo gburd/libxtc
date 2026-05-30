@@ -583,3 +583,144 @@ xtc_dns_resolve(const char *hostname, int port,
 	freeaddrinfo(res);
 	return XTC_OK;
 }
+
+/* ---- length-framed transport (R2) -------------------------------
+ *
+ * A 4-byte big-endian length prefix + payload, loop-aware: on a
+ * non-blocking fd these yield the calling fiber (via xtc_proc_wait_fd)
+ * instead of blocking the loop, so several connections share one loop
+ * cleanly.  recv_frame caps the claimed length so a peer cannot force
+ * an unbounded allocation.  Three consumers (the PG satellite bridge,
+ * kaka, sqlxtc) previously hand-rolled this.
+ *
+ * Layering note: these live in the net module for API discoverability
+ * but call up into the proc layer for the cooperative wait.  Off a
+ * loop they fall back to poll(2) (POSIX).
+ */
+#include "xtc_proc.h"
+#include "xtc_io.h"
+#include "os_time.h"
+#if !defined(_WIN32)
+#include <poll.h>
+#endif
+
+static int
+__net_wait_fd(int fd, uint32_t interest, int64_t deadline_ns)
+{
+	int64_t to = -1;
+	if (deadline_ns >= 0) {
+		int64_t now = 0;
+		(void)__os_clock_mono(&now);
+		to = deadline_ns - now;
+		if (to < 0) return -1;          /* timed out */
+	}
+	if (!xtc_pid_is_none(xtc_self())) {
+		uint32_t revents = 0;
+		return xtc_proc_wait_fd(fd, interest, to, &revents) == XTC_OK
+		    ? 0 : -1;
+	}
+#if !defined(_WIN32)
+	{
+		struct pollfd p;
+		int ms = (to < 0) ? -1 : (int)(to / 1000000);
+		int r;
+		p.fd = fd;
+		p.events = ((interest & XTC_IO_READABLE) ? POLLIN : 0) |
+		           ((interest & XTC_IO_WRITABLE) ? POLLOUT : 0);
+		do { r = poll(&p, 1, ms); } while (r < 0 && errno == EINTR);
+		return r > 0 ? 0 : -1;
+	}
+#else
+	return -1;   /* off-loop wait on a non-blocking fd: unsupported */
+#endif
+}
+
+/* PUBLIC: int xtc_net_send_frame __P((int, const void *, size_t)); */
+int
+xtc_net_send_frame(int fd, const void *buf, size_t len)
+{
+	uint8_t hdr[4];
+	const uint8_t *p = (const uint8_t *)buf;
+	size_t off;
+	if (fd < 0 || (len > 0 && buf == NULL) || len > 0xFFFFFFFFu)
+		return XTC_E_INVAL;
+	hdr[0] = (uint8_t)(len >> 24); hdr[1] = (uint8_t)(len >> 16);
+	hdr[2] = (uint8_t)(len >> 8);  hdr[3] = (uint8_t)(len);
+	for (off = 0; off < 4; ) {
+		ssize_t w = send(fd, (const char *)hdr + off, 4 - off, 0);
+		if (w > 0) { off += (size_t)w; continue; }
+		if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			if (__net_wait_fd(fd, XTC_IO_WRITABLE, -1) != 0)
+				return XTC_E_INTERNAL;
+			continue;
+		}
+		if (w < 0 && errno == EINTR) continue;
+		return XTC_E_INTERNAL;
+	}
+	for (off = 0; off < len; ) {
+		ssize_t w = send(fd, (const char *)p + off, len - off, 0);
+		if (w > 0) { off += (size_t)w; continue; }
+		if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			if (__net_wait_fd(fd, XTC_IO_WRITABLE, -1) != 0)
+				return XTC_E_INTERNAL;
+			continue;
+		}
+		if (w < 0 && errno == EINTR) continue;
+		return XTC_E_INTERNAL;
+	}
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_net_recv_frame __P((int, void **, size_t *, size_t, int64_t)); */
+int
+xtc_net_recv_frame(int fd, void **out, size_t *out_len, size_t max_len,
+                   int64_t timeout_ns)
+{
+	uint8_t hdr[4];
+	size_t off, len;
+	uint8_t *frame;
+	int64_t deadline = -1;
+	if (fd < 0 || out == NULL || out_len == NULL) return XTC_E_INVAL;
+	*out = NULL; *out_len = 0;
+	if (timeout_ns >= 0) {
+		int64_t now = 0;
+		(void)__os_clock_mono(&now);
+		deadline = now + timeout_ns;
+	}
+	for (off = 0; off < 4; ) {
+		ssize_t r = recv(fd, (char *)hdr + off, 4 - off, 0);
+		if (r > 0) { off += (size_t)r; continue; }
+		if (r == 0) return XTC_E_INVAL;        /* peer closed */
+		if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			if (__net_wait_fd(fd, XTC_IO_READABLE, deadline) != 0)
+				return XTC_E_AGAIN;
+			continue;
+		}
+		if (r < 0 && errno == EINTR) continue;
+		return XTC_E_INTERNAL;
+	}
+	len = ((size_t)hdr[0] << 24) | ((size_t)hdr[1] << 16) |
+	      ((size_t)hdr[2] << 8) | (size_t)hdr[3];
+	/* OOM guard: a peer must not be able to claim an unbounded frame. */
+	if (max_len > 0 && len > max_len) return XTC_E_RANGE;
+	if (len == 0) return XTC_OK;               /* valid empty frame */
+	if (__os_malloc(len, (void **)&frame) != XTC_OK) return XTC_E_NOMEM;
+	for (off = 0; off < len; ) {
+		ssize_t r = recv(fd, (char *)frame + off, len - off, 0);
+		if (r > 0) { off += (size_t)r; continue; }
+		if (r == 0) { __os_free(frame); return XTC_E_INVAL; }
+		if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			if (__net_wait_fd(fd, XTC_IO_READABLE, deadline) != 0) {
+				__os_free(frame);
+				return XTC_E_AGAIN;
+			}
+			continue;
+		}
+		if (r < 0 && errno == EINTR) continue;
+		__os_free(frame);
+		return XTC_E_INTERNAL;
+	}
+	*out = frame;
+	*out_len = len;
+	return XTC_OK;
+}
