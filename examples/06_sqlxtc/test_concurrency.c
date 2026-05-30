@@ -27,7 +27,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 
-extern const sqlite3_mutex_methods *sqlxtc_mutex_methods(void);
+extern const sqlite3_mutex_methods *mutex_methods(void);
 
 static sqlite3_mutex *g_m;
 static _Atomic int    g_seq;          /* monotonically issued tickets */
@@ -81,7 +81,7 @@ main(void)
 	xtc_pid_t a, b;
 	int rc;
 
-	rc = sqlite3_config(SQLITE_CONFIG_MUTEX, sqlxtc_mutex_methods());
+	rc = sqlite3_config(SQLITE_CONFIG_MUTEX, mutex_methods());
 	if (rc != SQLITE_OK) { fprintf(stderr, "config(MUTEX)=%d\n", rc); return 1; }
 	rc = sqlite3_config(SQLITE_CONFIG_SERIALIZED);
 	if (rc != SQLITE_OK) { fprintf(stderr, "config(SERIALIZED)=%d\n", rc); return 1; }

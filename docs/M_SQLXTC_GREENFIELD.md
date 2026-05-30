@@ -134,7 +134,7 @@ value:
      extension point, so it needs no fork -- the single highest-value
      step, and the one that proves the read-concurrency claim.
 
-     *Done (slab-backed form):* `sqlxtc_pcache.c` registers a custom
+     *Done (slab-backed form):* `pcache.c` registers a custom
      `sqlite3_pcache_methods2` whose page bodies come from a per-cache
      `xtc_slab`.  Every page in one SQLite cache is the same size
      (header + szPage + szExtra), which is exactly a single
@@ -159,7 +159,7 @@ value:
      `xtc_io` so page reads submit to the loop and the session awaits
      completion.  Also a supported extension point.
 
-     *Done (offloaded instrumented form):* `sqlxtc_vfs.c` registers a
+     *Done (offloaded instrumented form):* `vfs.c` registers a
      `"sqlxtc"` VFS, a shim over the platform default.  Every byte of
      database I/O flows through it -- per-file state is allocated with
      the xtc allocator, and reads, writes, and syncs are counted and
@@ -176,7 +176,7 @@ value:
      back to a synchronous call).  `test_vfs_loop` proves the loop
      stays live during a file-backed workload by ticking a heartbeat
      process throughout.  This is safe because the SQLite mutexes now
-     park instead of thread-blocking (`sqlxtc_mutex.c` over
+     park instead of thread-blocking (`mutex.c` over
      `xtc_amutex`), so a backend can hold the handle mutex across an
      offloaded read without wedging a contender.  The next step --
      submitting reads to `xtc_io` directly rather than a pool thread
@@ -213,7 +213,7 @@ value:
      the holder.
 
      *Done:* sqlxtc's `sqlite3_mutex` is now backed by `xtc_amutex`
-     (`sqlxtc_mutex.c`, recursion tracked by fiber identity), and
+     (`mutex.c`, recursion tracked by fiber identity), and
      `vfs_read`/`vfs_write`/`vfs_sync` are routed through
      `xtc_blocking_run`.  `test_concurrency` proves the parking
      contract (a holder parks while holding; a contender parks, not
