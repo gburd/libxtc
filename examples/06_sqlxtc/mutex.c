@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/06_sqlxtc/sqlxtc_mutex.c
+ * examples/06_sqlxtc/mutex.c
  *	SQLite mutex methods backed by xtc_amutex (the parking mutex).
  *
  *	sqlxtc runs many connection processes on one event loop, all
@@ -241,7 +241,7 @@ xMutexNotheld(sqlite3_mutex *m)
 	return !xMutexHeld(m);
 }
 
-static const sqlite3_mutex_methods sqlxtc_mutex_table = {
+static const sqlite3_mutex_methods mutex_table = {
 	xMutexInit,
 	xMutexEnd,
 	xMutexAlloc,
@@ -254,7 +254,7 @@ static const sqlite3_mutex_methods sqlxtc_mutex_table = {
 };
 
 const sqlite3_mutex_methods *
-sqlxtc_mutex_methods(void)
+mutex_methods(void)
 {
-	return &sqlxtc_mutex_table;
+	return &mutex_table;
 }
