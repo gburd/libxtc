@@ -246,6 +246,76 @@ int       xtc_monitor(xtc_pid_t target, uint64_t *out_ref);
  * thread. */
 int       xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out);
 
+/* ---- R1: per-fiber fault containment ----
+ *
+ * Turns a real synchronous fault (SIGSEGV / SIGBUS / SIGFPE / SIGILL)
+ * inside one coroutine into an unwind of only that process, leaving
+ * siblings on the same loop untouched -- the runtime support PG's
+ * "let it crash" session containment needs.
+ *
+ * POSIX only (sigaltstack + sigaction + siglongjmp).  On Windows the
+ * API is present and compiles, but containment is INACTIVE -- a fault
+ * keeps its process-wide disposition (the status quo); structured
+ * exception handling is the Windows mechanism and is not yet wired.
+ */
+#include <setjmp.h>
+
+#if defined(_WIN32)
+typedef jmp_buf xtc_recovery_buf_t;
+#else
+typedef sigjmp_buf xtc_recovery_buf_t;
+#endif
+
+/* Install the process-wide fault handler on an alternate signal stack.
+ * Idempotent for the handler; registers the alt stack for the calling
+ * thread (call once per loop thread).  Returns XTC_OK (a no-op that
+ * still returns XTC_OK on Windows, where containment is inactive). */
+int       xtc_fault_guard_install(void);
+
+/* Internal arm-slot for the xtc_proc_recovery_arm() macro. */
+xtc_recovery_buf_t *__xtc_proc_recovery_slot(void);
+
+/*
+ * Arm a recovery frame for the calling process, exactly like
+ * sigsetjmp: returns 0 on the normal path and the fault signal number
+ * when control returns here via a contained fault.  Use it as:
+ *
+ *     int sig = xtc_proc_recovery_arm();
+ *     if (sig != 0) {                 // recovered from a contained fault
+ *         ... release locks, reset the memory context, close fds ...
+ *         xtc_exit_self(reason);       // delivers DOWN to the supervisor
+ *     }
+ *     ... session work ...
+ *
+ * The frame is disarmed automatically when a fault fires it (so a
+ * fault during recovery escalates to process abort); re-arm or
+ * xtc_proc_recovery_disarm() as needed.  On Windows it is a plain
+ * setjmp that nothing longjmps, so it always returns 0.
+ *
+ * IMPORTANT: containment only unwinds the fiber's CALL STACK.  Any
+ * resources the proc held at fault time -- locks, fds, allocations,
+ * buffer pins -- are the recovery block's responsibility to release,
+ * exactly as a PostgreSQL backend's sigsetjmp handler aborts the
+ * transaction and releases LWLocks.  Hold those under an xtc_mctx you
+ * can reset, and release lock-manager locks with the lock manager's
+ * release-all; otherwise a contained fault leaks or, worse, leaves a
+ * lock held and wedges peers.
+ */
+#if defined(_WIN32)
+#define xtc_proc_recovery_arm() (setjmp(*__xtc_proc_recovery_slot()))
+#else
+#define xtc_proc_recovery_arm() (sigsetjmp(*__xtc_proc_recovery_slot(), 1))
+#endif
+
+/* Disarm the calling process's recovery frame. */
+void      xtc_proc_recovery_disarm(void);
+
+/* Critical section: while crit_depth > 0, a fault is NOT contained --
+ * it escalates to process abort, because shared state may be torn.
+ * Nestable.  Mirrors PG's START_CRIT_SECTION / END_CRIT_SECTION. */
+void      xtc_proc_critical_enter(void);
+void      xtc_proc_critical_leave(void);
+
 /* Internal: save / restore the current-proc context across a yield
  * done by a lower-level primitive (e.g. xtc_amutex parking the
  * fiber), so the proc still sees itself on resume.  Opaque to the

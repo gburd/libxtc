@@ -16,7 +16,10 @@
 .Nm xtc_link ,
 .Nm xtc_unlink ,
 .Nm xtc_monitor ,
-.Nm xtc_proc_mailbox_stats
+.Nm xtc_proc_mailbox_stats ,
+.Nm xtc_fault_guard_install ,
+.Nm xtc_proc_recovery_arm ,
+.Nm xtc_proc_critical_enter
 .Nd BEAM-style lightweight processes with mailboxes
 .Sh SYNOPSIS
 .In xtc.h
@@ -47,6 +50,16 @@
 .Fn xtc_monitor "xtc_pid_t target" "uint64_t *out_ref"
 .Ft int
 .Fn xtc_proc_mailbox_stats "xtc_pid_t pid" "xtc_mailbox_stats_t *out"
+.Ft int
+.Fn xtc_fault_guard_install "void"
+.Ft int
+.Fn xtc_proc_recovery_arm "void"
+.Ft void
+.Fn xtc_proc_recovery_disarm "void"
+.Ft void
+.Fn xtc_proc_critical_enter "void"
+.Ft void
+.Fn xtc_proc_critical_leave "void"
 .Sh DESCRIPTION
 xtc processes are BEAM-style lightweight actors: each has an
 identity
@@ -246,6 +259,36 @@ can shed load before the hard cap rejects with
 .Dv XTC_E_AGAIN .
 The callback runs on the sender's thread outside the mailbox lock and
 must not block.
+.Pp
+.Fn xtc_fault_guard_install
+installs a process-wide handler for the synchronous, fiber-directed
+faults
+.Dv SIGSEGV , SIGBUS , SIGFPE
+and
+.Dv SIGILL
+on an alternate signal stack.
+.Fn xtc_proc_recovery_arm
+arms a recovery frame for the calling process (used like
+.Xr sigsetjmp 3 :
+it returns 0 normally and the fault signal number when a contained
+fault returns control there).  On such a fault the handler identifies
+the faulting process -- it is the faulting thread's running process --
+and, if it armed a recovery frame and is not in a critical section,
+unwinds only that fiber back to the frame; siblings on the loop are
+untouched.  The recovered process releases its resources and calls
+.Fn xtc_exit_self ,
+so a supervisor observes the fault as a normal
+.Sq DOWN .
+.Fn xtc_proc_critical_enter
+and
+.Fn xtc_proc_critical_leave
+bracket a region in which a fault must NOT be contained -- shared
+state may be torn -- so it escalates to process abort, preserving the
+embedder's critical-section panic semantics.  The recovery frame only
+unwinds the call stack; locks, fds, allocations and other resources
+held at fault time are the recovery block's responsibility to
+release.  Containment is POSIX-only; on Windows the calls compile but
+a fault keeps its process-wide disposition.
 .Sh RETURN VALUES
 All entry points return
 .Dv XTC_OK

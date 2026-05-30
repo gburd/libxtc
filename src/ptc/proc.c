@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -213,6 +214,17 @@ struct xtc_proc {
 	jmp_buf     exit_jb;
 	int         exit_jb_set;
 	int         exit_reason;
+
+	/* R1 fault containment: a recovery frame the proc arms with
+	 * xtc_proc_recovery_arm().  A per-process SIGSEGV/SIGBUS handler,
+	 * on a fault in this proc's fiber (identified via __current_proc),
+	 * siglongjmps here -- but only outside a critical section
+	 * (crit_depth == 0); inside one the fault escalates to process
+	 * abort, preserving PG's critical-section PANIC semantics. */
+	xtc_recovery_buf_t recovery_buf;
+	int         recovery_armed;
+	int         crit_depth;
+	int         fault_sig;
 
 	/* Asynchronous kill (cross-process exit signal).  Set by
 	 * xtc_exit_pid; checked at every yield/recv parking point.
@@ -1156,6 +1168,138 @@ xtc_exit_self(int reason)
 	longjmp(self->exit_jb, reason + 1);
 	/* NOTREACHED */
 	return XTC_OK;
+}
+
+/* ---------- R1: per-fiber fault containment ---------- */
+
+static XTC_THREAD_LOCAL xtc_recovery_buf_t __recovery_dummy;
+
+#if !defined(_WIN32)
+static volatile sig_atomic_t __fault_guard_installed;
+
+/* The synchronous, thread-directed, fiber-attributable faults we can
+ * contain: a bad pointer, a misaligned/again bad access, an
+ * arithmetic trap (integer divide-by-zero), and an illegal
+ * instruction.  SIGABRT is deliberately excluded -- abort() is an
+ * intentional, usually-unrecoverable signal. */
+static const int __fault_signals[] = { SIGSEGV, SIGBUS, SIGFPE, SIGILL };
+
+/*
+ * Process-wide fault handler.  The faulting coroutine is the faulting
+ * thread's current proc (__current_proc is thread-local and set while
+ * a proc runs), so we identify it with no extra bookkeeping.  If that
+ * proc armed a recovery frame and is not inside a critical section we
+ * contain the fault by siglongjmp'ing back to the frame
+ * (async-signal-safe); the proc then runs its cleanup and
+ * xtc_exit_self, delivering DOWN to its monitors.  Otherwise the
+ * fault escalates: restore the default disposition and re-raise so
+ * the whole process dies (a torn critical section cannot be unwound).
+ */
+static void
+__xtc_fault_handler(int sig, siginfo_t *si, void *uctx)
+{
+	struct xtc_proc *p = __current_proc;
+	(void)si; (void)uctx;
+	if (p != NULL && p->recovery_armed && p->crit_depth == 0) {
+		/* One-shot: a fault during recovery/cleanup must escalate
+		 * rather than loop back here. */
+		p->recovery_armed = 0;
+		p->fault_sig = sig;
+		siglongjmp(p->recovery_buf, sig);
+		/* NOTREACHED */
+	}
+	/* Escalate to process abort with the default disposition. */
+	{
+		struct sigaction sa;
+		memset(&sa, 0, sizeof sa);
+		sa.sa_handler = SIG_DFL;
+		(void)sigemptyset(&sa.sa_mask);
+		(void)sigaction(sig, &sa, NULL);
+	}
+	(void)raise(sig);
+}
+#endif /* !_WIN32 */
+
+/* PUBLIC: int xtc_fault_guard_install __P((void)); */
+int
+xtc_fault_guard_install(void)
+{
+#if defined(_WIN32)
+	/* No-op: containment is inactive on Windows (SEH not yet wired).
+	 * Returns XTC_OK so embedder startup code need not special-case
+	 * the platform; faults keep their process-wide disposition. */
+	return XTC_OK;
+#else
+	struct sigaction sa;
+	stack_t ss;
+	size_t i;
+	/* 64 KiB is ample for a handler that only siglongjmps; a fixed
+	 * size avoids SIGSTKSZ (no longer a compile-time constant on
+	 * recent glibc).  Thread-local so each loop thread that installs
+	 * the guard gets its own stack. */
+	static XTC_THREAD_LOCAL char altstack[65536];
+
+	memset(&ss, 0, sizeof ss);
+	ss.ss_sp = altstack;
+	ss.ss_size = sizeof altstack;
+	ss.ss_flags = 0;
+	(void)sigaltstack(&ss, NULL);
+
+	if (__fault_guard_installed)
+		return XTC_OK;          /* process-wide sigaction: once */
+
+	memset(&sa, 0, sizeof sa);
+	sa.sa_sigaction = __xtc_fault_handler;
+	(void)sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+	for (i = 0; i < sizeof __fault_signals / sizeof __fault_signals[0];
+	    i++) {
+		if (sigaction(__fault_signals[i], &sa, NULL) != 0)
+			return XTC_E_INTERNAL;
+	}
+	__fault_guard_installed = 1;
+	return XTC_OK;
+#endif
+}
+
+/*
+ * Arm-slot helper for the xtc_proc_recovery_arm() macro: marks the
+ * calling proc's recovery frame armed and returns it, so the macro's
+ * sigsetjmp records the caller's frame.  Off a proc it returns a
+ * thread-local throwaway (the macro stays well-formed; nothing arms).
+ */
+xtc_recovery_buf_t *
+__xtc_proc_recovery_slot(void)
+{
+	struct xtc_proc *p = __current_proc;
+	if (p == NULL)
+		return &__recovery_dummy;
+	p->recovery_armed = 1;
+	return &p->recovery_buf;
+}
+
+/* PUBLIC: void xtc_proc_recovery_disarm __P((void)); */
+void
+xtc_proc_recovery_disarm(void)
+{
+	if (__current_proc != NULL)
+		__current_proc->recovery_armed = 0;
+}
+
+/* PUBLIC: void xtc_proc_critical_enter __P((void)); */
+void
+xtc_proc_critical_enter(void)
+{
+	if (__current_proc != NULL)
+		__current_proc->crit_depth++;
+}
+
+/* PUBLIC: void xtc_proc_critical_leave __P((void)); */
+void
+xtc_proc_critical_leave(void)
+{
+	if (__current_proc != NULL && __current_proc->crit_depth > 0)
+		__current_proc->crit_depth--;
 }
 
 /* PUBLIC: int xtc_link __P((xtc_pid_t)); */
