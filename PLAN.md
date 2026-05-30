@@ -3111,10 +3111,10 @@ are in progress; `BLOCKED` items list their gating dependency.
 
 | OS              | Status      | Notes |
 |-----------------|-------------|-------|
-| Linux glibc     | full pass   | Reference target.  279 munit + 23 PBT + 22 shell |
-| Linux musl      | full stack  | coro_fctx.c (fcontext substrate) covers the missing ucontext; coroutine suites run + pass |
-| FreeBSD 15      | full pass   | Verified through M13c (last full run; re-verify after recent changes) |
-| illumos         | partial     | OpenSSL link drift in last attempt; pin to `--with-tls=none` to retest |
+| Linux glibc     | full pass   | Reference target.  283 munit + 23 PBT + shell + ASan/UBSan in CI |
+| Linux musl      | full pass   | coro_fctx.c (fcontext substrate) covers the missing ucontext; full coroutine stack runs + passes |
+| FreeBSD 15      | full pass   | Re-verified against the current tree: 283/283 munit (clang 19, kqueue, ucontext, OpenSSL); two mdoc errors that FreeBSD mandoc caught were fixed |
+| illumos         | full pass   | Re-verified: 51/52 C suites pass, 0 fail (SunOS 5.11, gcc 13.4, solaris port backend, ucontext, OpenSSL); the earlier TLS-link drift is gone with --with-tls=auto |
 | macOS           | not yet     | Awaiting host; KVM runbook in `docs/M_MACOS_KVM.md` |
 | AIX             | not yet     | Awaiting host; KVM runbook in `docs/M_AIX_KVM.md` |
 
