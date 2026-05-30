@@ -19,7 +19,9 @@
 .Nm xtc_proc_mailbox_stats ,
 .Nm xtc_fault_guard_install ,
 .Nm xtc_proc_recovery_arm ,
-.Nm xtc_proc_critical_enter
+.Nm xtc_proc_critical_enter ,
+.Nm xtc_proc_at_exit ,
+.Nm xtc_down_decode
 .Nd BEAM-style lightweight processes with mailboxes
 .Sh SYNOPSIS
 .In xtc.h
@@ -60,6 +62,12 @@
 .Fn xtc_proc_critical_enter "void"
 .Ft void
 .Fn xtc_proc_critical_leave "void"
+.Ft int
+.Fn xtc_proc_at_exit "void (*fn)(void *)" "void *arg"
+.Ft struct xtc_mctx *
+.Fn xtc_proc_mctx "void"
+.Ft int
+.Fn xtc_down_decode "const void *msg" "size_t len" "xtc_pid_t *out_pid" "int *out_reason"
 .Sh DESCRIPTION
 xtc processes are BEAM-style lightweight actors: each has an
 identity
@@ -289,6 +297,28 @@ unwinds the call stack; locks, fds, allocations and other resources
 held at fault time are the recovery block's responsibility to
 release.  Containment is POSIX-only; on Windows the calls compile but
 a fault keeps its process-wide disposition.
+.Pp
+.Fn xtc_proc_at_exit
+registers a callback to run when the calling process exits -- on a
+normal return or a contained-fault recovery -- LIFO, outside signal
+context, and before the proc's monitors observe its
+.Sq DOWN .
+It is where an embedder guarantees a faulted session releases what it
+held: register the lock manager's release-all so no lock outlives the
+proc, close fds, or reset a memory context.
+.Fn xtc_proc_mctx
+returns a memory context scoped to the process, created on first use
+and destroyed automatically at exit -- a backstop so a session's
+allocations are reclaimed even if its recovery block faults.
+.Pp
+.Fn xtc_down_decode
+extracts the target pid and exit reason from a
+.Sq DOWN
+signal.  The DOWN and EXIT signals are sent PACKED; a consumer that
+casts the message to its own unpacked mirror struct misreads the
+fields (the
+.Va reason
+in particular).  Use this helper rather than hand-rolling the layout.
 .Sh RETURN VALUES
 All entry points return
 .Dv XTC_OK
