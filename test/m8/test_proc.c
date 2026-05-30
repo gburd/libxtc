@@ -362,6 +362,101 @@ test_mailbox_stats(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Save-queue cap: the mailbox bound must count the selective-receive
+ * save queue too, or a flood of non-matching messages drains into the
+ * unbounded save queue and defeats mailbox_cap.  A saver proc parks in
+ * a selective receive whose predicate never matches, so every message
+ * sent to it lands in its save queue; a flooder confirms that once
+ * depth+saved reaches cap, further sends are rejected. */
+static int
+never_match(const void *data, size_t size, void *user)
+{
+	(void)data; (void)size; (void)user;
+	return 0;
+}
+
+struct sqc_state {
+	xtc_pid_t saver;
+	int       accepted;     /* sends that returned XTC_OK */
+	int       rejected;     /* sends that returned XTC_E_AGAIN */
+	size_t    final_saved;
+	size_t    final_depth;
+};
+
+static void
+sqc_saver(void *arg)
+{
+	void *m = NULL; size_t n = 0;
+	(void)arg;
+	/* Never matches: pulls every delivered message into the save
+	 * queue, re-parking on each, until the timeout. */
+	(void)xtc_recv_match(never_match, NULL, &m, &n, 400LL * 1000 * 1000);
+}
+
+static void
+sqc_flooder(void *arg)
+{
+	struct sqc_state *s = arg;
+	xtc_mailbox_stats_t st;
+	int v = 1, i, spins;
+
+	/* Fill to cap (8): all accepted, then drained into the save
+	 * queue by the saver. */
+	for (i = 0; i < 8; i++) {
+		if (xtc_send(s->saver, &v, sizeof v) == XTC_OK) s->accepted++;
+		else s->rejected++;
+	}
+	/* Let the saver move them all from mailbox to save queue. */
+	for (spins = 0; spins < 200; spins++) {
+		void *m = NULL; size_t n = 0;
+		if (xtc_proc_mailbox_stats(s->saver, &st) == XTC_OK &&
+		    st.depth == 0 && st.saved == 8)
+			break;
+		(void)xtc_recv(&m, &n, 2LL * 1000 * 1000);   /* yield ~2ms */
+	}
+	/* Save queue now holds cap messages.  Further sends must be
+	 * rejected because the cap counts mailbox + save, not just the
+	 * (now empty) mailbox. */
+	for (i = 0; i < 4; i++) {
+		if (xtc_send(s->saver, &v, sizeof v) == XTC_OK) s->accepted++;
+		else s->rejected++;
+	}
+	(void)xtc_proc_mailbox_stats(s->saver, &st);
+	s->final_saved = st.saved;
+	s->final_depth = st.depth;
+}
+
+static MunitResult
+test_save_queue_cap(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	struct sqc_state s = { XTC_PID_NONE, 0, 0, 0, 0 };
+	xtc_pid_t fl;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "saver";
+	opts.mailbox_cap = 8;
+	munit_assert_int(xtc_proc_spawn(loop, sqc_saver, NULL, &opts,
+	    &s.saver), ==, XTC_OK);
+	opts.name = "flooder";
+	opts.mailbox_cap = 0;
+	munit_assert_int(xtc_proc_spawn(loop, sqc_flooder, &s, &opts, &fl),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	/* Exactly cap accepted across both bursts; the 4 over-cap sends
+	 * after the save queue filled were rejected. */
+	munit_assert_int(s.accepted, ==, 8);
+	munit_assert_int(s.rejected, ==, 4);
+	/* Total held never exceeded the cap. */
+	munit_assert_size(s.final_saved + s.final_depth, <=, 8);
+	munit_assert_size(s.final_saved, ==, 8);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -369,6 +464,7 @@ static MunitTest tests[] = {
 	{ "/monitor",           test_monitor,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recv_inf_parks",    test_recv_inf_parks,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mailbox_stats",     test_mailbox_stats,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/save_queue_cap",    test_save_queue_cap,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/proc", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

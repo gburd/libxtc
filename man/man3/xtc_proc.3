@@ -198,7 +198,9 @@ snapshots a process's mailbox into
 .Fa out :
 the current
 .Va depth ,
-the high-water
+the selective-receive
+.Va saved
+count, the high-water
 .Va peak ,
 the
 .Va cap ,
@@ -208,6 +210,20 @@ and
 .Va drop_total
 counts (messages accepted and rejected).  It is safe to call from any
 thread and is the basis for an overload / head-of-line-buildup scrape.
+.Pp
+The capacity bound applies to
+.Va depth No + Va saved ,
+not the mailbox alone: a selective receiver that moves non-matching
+messages aside still counts them, so a flood of non-matching traffic
+cannot grow a process without limit by draining the mailbox into the
+save queue.  A consequence is that a process selectively waiting for a
+message while its budget fills with non-matching ones will see further
+sends rejected with
+.Dv XTC_E_AGAIN
+(including the awaited one): the bound is a hard backpressure contract,
+so design selective waits with that in mind (prefer
+.Fn xtc_recv_correlate
+and bounded timeouts).
 .Pp
 A process can also be given a mailbox watermark via
 .Va xtc_proc_opts_t.mailbox_watermark_pct
