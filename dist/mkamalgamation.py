@@ -196,15 +196,27 @@ REMAP_PROLOGUE = """\
 
 
 def public_headers(incdir):
-    # Public API headers: xtc_*.h, excluding the internal umbrella
-    # (xtc_int.h) and the generated symbol-list stub (xtc_ext.h).
+    # Headers that make up the amalgamated xtc.h.  This is the full
+    # usable surface, not just the strict public API: a single-file
+    # vendoring exposes everything the library offers, and real
+    # consumers (e.g. the examples) legitimately use the internal
+    # helpers -- xtc_recv's own contract says callers free the
+    # delivered buffer with __os_free.  So we include xtc_int.h, which
+    # pulls the os_* helper headers (alloc/atomic/time/thread/cpu).
+    # The deep runtime internals (loop_int.h, coro_int.h, deque.h,
+    # io_int.h) stay in xtc.c only -- consumers treat xtc_loop_t and
+    # friends as opaque.
     names = sorted(n for n in os.listdir(incdir)
                    if n.startswith("xtc_") and n.endswith(".h")
                    and n not in ("xtc_int.h", "xtc_ext.h"))
-    # xtc.h (the umbrella) goes first if present.
     out = []
     if os.path.isfile(os.path.join(incdir, "xtc.h")):
         out.append("xtc.h")
+    # xtc_int.h after the umbrella but before the per-module headers,
+    # so its macros (XTC_THREAD_LOCAL, XTC_LIKELY, ...) and the os_*
+    # declarations are visible to everything that follows.
+    if os.path.isfile(os.path.join(incdir, "xtc_int.h")):
+        out.append("xtc_int.h")
     out.extend(names)
     return out
 
@@ -262,10 +274,11 @@ def main():
 
     # ---- xtc.c ----
     amc = Amalgamator(root)
-    # Pretend the public headers are already emitted: xtc.c includes
-    # xtc.h, so we must not re-inline them here.  Seed the emitted set.
-    for h in public_headers(incdir):
-        amc.emitted.add(os.path.basename(h))
+    # xtc.c includes xtc.h, so every header xtc.h already inlined must
+    # not be re-inlined here.  Seed amc's emitted set with the FULL set
+    # xtc.h emitted (amh.emitted), which includes the os_* helpers
+    # pulled transitively via xtc_int.h -- not just the root list.
+    amc.emitted |= amh.emitted
     cbody = []
     srcs = lib_sources(root)
     for s in srcs:
@@ -281,10 +294,34 @@ def main():
     with open(os.path.join(outdir, "xtc.c"), "w") as f:
         f.write("".join(cf))
 
+    # ---- forwarding stub headers ----
+    # So a consumer that #includes individual module headers
+    # (xtc_app.h, xtc_io.h, xtc_int.h, ...) builds unchanged against
+    # the amalgamation: each stub just pulls in the single xtc.h.
+    stub_dir = os.path.join(outdir, "include")
+    os.makedirs(stub_dir, exist_ok=True)
+    # Only stub the headers whose content xtc.h actually contains
+    # (amh.emitted -- the public API + xtc_int.h + the os_* helpers).
+    # The deep runtime internals (loop_int.h, coro_int.h, ...) are not
+    # in xtc.h, so we do not pretend to forward them.
+    stub_names = sorted(n for n in amh.emitted if n != "xtc.h")
+    for n in stub_names:
+        guard = "XTC_AMALG_STUB_" + re.sub(r"[^A-Za-z0-9]", "_", n).upper()
+        with open(os.path.join(stub_dir, n), "w") as f:
+            f.write("#ifndef %s\n#define %s\n"
+                    "/* Amalgamation forwarding stub: the real content\n"
+                    " * lives in the single-file xtc.h. */\n"
+                    "#include \"xtc.h\"\n"
+                    "#endif\n" % (guard, guard))
+    # xtc.h itself, copied into include/ too, so -Iinclude alone works.
+    import shutil
+    shutil.copy(os.path.join(outdir, "xtc.h"),
+                os.path.join(stub_dir, "xtc.h"))
+
     print("wrote %s/xtc.h and %s/xtc.c (version %s, commit %s)"
           % (outdir, outdir, vfull, vshort))
-    print("  sources: %d .c files; public headers: %d"
-          % (len(srcs), len(public_headers(incdir))))
+    print("  sources: %d .c files; public headers: %d; stub headers: %d"
+          % (len(srcs), len(public_headers(incdir)), len(stub_names)))
 
 
 if __name__ == "__main__":

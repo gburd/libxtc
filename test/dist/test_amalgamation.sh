@@ -39,13 +39,45 @@ cat > "$work/demo.c" <<'EOF'
 #include "xtc.h"
 #include <string.h>
 #include <stdlib.h>
+
+/* A process that receives one integer message, records it, and exits.
+ * Exercises the amalgamated runtime end to end: loop, coroutine
+ * substrate, process, mailbox, and __os_free (whose contract is part
+ * of the amalgamation's exposed surface). */
+static int g_got = 0;
+static void
+echo_proc(void *arg)
+{
+	void *msg = NULL;
+	size_t len = 0;
+	(void)arg;
+	if (xtc_recv(&msg, &len, 1000LL * 1000 * 1000) == XTC_OK && msg) {
+		if (len == sizeof(int)) g_got = *(int *)msg;
+		__os_free(msg);
+	}
+}
+
 int main(void) {
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t pid;
+	int payload = 4242;
+
 	if (strcmp(xtc_version_string(), XTC_VERSION_STRING) != 0) return 2;
 	if (!XTC_AMALGAMATION) return 3;
-	/* XTC_VERSION_COMMIT_SHORT must be a (possibly empty) string. */
 	(void)XTC_VERSION_COMMIT_SHORT;
 	(void)XTC_VERSION_COMMIT_LONG;
 	(void)XTC_VERSION_TAG;
+
+	/* Runtime: spawn a proc, send it a message, run the loop to
+	 * completion (loop_run returns once all procs exit -- no
+	 * indefinite blocking). */
+	if (xtc_loop_init(&loop) != XTC_OK) return 4;
+	if (xtc_proc_spawn(loop, echo_proc, NULL, NULL, &pid) != XTC_OK)
+		return 5;
+	if (xtc_send(pid, &payload, sizeof payload) != XTC_OK) return 6;
+	if (xtc_loop_run(loop) != XTC_OK) return 7;
+	if (xtc_loop_fini(loop) != XTC_OK) return 8;
+	if (g_got != 4242) return 9;     /* message delivered + handled */
 	return 0;
 }
 EOF
