@@ -3176,7 +3176,7 @@ the runtime side of the boundary -- none make xtc learn SQL/WAL/fmgr.
 
 | Req | Item | Status | Lands |
 |-----|------|--------|-------|
-| R1 | per-fiber fault capture + single-fiber unwind (contain vs escalate) | accept; new primitive (`xtc_fault_guard_install`, `xtc_proc_recovery_arm`, `xtc_proc_critical_enter/leave`) | M10.6 (new); gates M16 Phase 4 |
+| R1 | per-fiber fault capture + single-fiber unwind (contain vs escalate) | DONE (first cut): `xtc_fault_guard_install`/`xtc_proc_recovery_arm`/`xtc_proc_critical_enter/leave`; SIGSEGV/BUS/FPE/ILL; verified glibc+musl+MSVC+UBSan; SEH + lock-release-on-exit open | M10.6 |
 | R2 | length-framed transport helper (`xtc_net_send_frame`/`recv_frame`) | accept; thin loop-integrated codec on xtc_net | io/net; rebase kaka/sqlxtc onto it |
 | R3 | supervised OS-process child (`xtc_osproc_spawn`) under xtc_supervisor | accept supervision unification; marshalling stays in PG glue | M10.7 (new); F7 |
 | R4 | supervisor strategies (SIMPLE_OFO, REST_FOR_ONE, ONE_FOR_ALL) | confirmed; already reserved as XTC_E_NOSYS; do SIMPLE_OFO first (session pool) | M10.5 (existing) |
