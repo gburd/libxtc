@@ -1,6 +1,14 @@
 *.o
 *.d
 sqlxtc-server
+sqlxtc-server-amalg
+amalg/
+test_vfs
+test_vfs_loop
+test_vfs_amalg
+test_pcache
+test_pcache_amalg
+test_concurrency
 sql_parse_gen.c
 sql_parse_gen.h
 sql_parse_gen.out

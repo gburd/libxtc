@@ -4,10 +4,10 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/06_sqlxtc/xtc_vfs.h
+ * examples/06_sqlxtc/sqlxtc_vfs.h
  *	An xtc-native SQLite VFS.
  *
- *	A "shim" VFS named "xtc" that layers over the platform default
+ *	A "shim" VFS named "sqlxtc" that layers over the platform default
  *	VFS.  Path resolution, randomness, sleep, and the byte-range
  *	file locks delegate to the base VFS so behaviour stays exactly
  *	POSIX-correct.  Every byte of database I/O, however, flows
@@ -31,12 +31,12 @@
 #include <stdint.h>
 
 /*
- * Register the "xtc" VFS.  Idempotent: a second call is a no-op.
+ * Register the "sqlxtc" VFS.  Idempotent: a second call is a no-op.
  * If make_default is non-zero the xtc VFS becomes the default, so
  * sqlite3_open() uses it without an explicit vfs name.  Returns
  * SQLITE_OK on success.
  */
-int xtc_vfs_register(int make_default);
+int sqlxtc_vfs_register(int make_default);
 
 /* I/O statistics gathered by the xtc VFS, for the metrics path. */
 typedef struct {
@@ -49,9 +49,9 @@ typedef struct {
 	double   read_p99_us;
 	double   write_p50_us;
 	double   write_p99_us;
-} xtc_vfs_stats_t;
+} sqlxtc_vfs_stats_t;
 
 /* Snapshot the VFS I/O counters.  Safe to call from any thread. */
-void xtc_vfs_get_stats(xtc_vfs_stats_t *out);
+void sqlxtc_vfs_get_stats(sqlxtc_vfs_stats_t *out);
 
 #endif /* SQLXTC_XTC_VFS_H */

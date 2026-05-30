@@ -19,8 +19,8 @@
 #include "xtc_proc.h"
 #include "xtc_res.h"
 #include "xtc_stats.h"
-#include "xtc_vfs.h"
-#include "pcache_xtc.h"
+#include "sqlxtc_vfs.h"
+#include "sqlxtc_pcache.h"
 
 #define METRICS_INTERVAL_NS  (5LL * 1000 * 1000 * 1000)
 
@@ -72,10 +72,10 @@ metrics_proc(void *arg)
 			    xtc_hist_quantile(sqlxtc_stat_query_latency, 0.99) : 0;
 			int64_t mem = st->res ?
 			    xtc_res_used(st->res, XTC_RES_MEM_BYTES) : 0;
-			xtc_vfs_stats_t vfs;
-			xtc_pcache_stats_t pc;
-			xtc_vfs_get_stats(&vfs);
-			xtc_pcache_get_stats(&pc);
+			sqlxtc_vfs_stats_t vfs;
+			sqlxtc_pcache_stats_t pc;
+			sqlxtc_vfs_get_stats(&vfs);
+			sqlxtc_pcache_get_stats(&pc);
 			XTC_LOG_INFO_F(
 			    "metrics: conns=%d queries=%lld errors=%lld "
 			    "q_p50_ns=%lld q_p99_ns=%lld mem=%lld "

@@ -7,7 +7,7 @@
  * examples/06_sqlxtc/test_vfs_loop.c
  *	On-loop test of the xtc-native VFS with blocking I/O offload.
  *
- *	A worker process opens a file-backed database through the "xtc"
+ *	A worker process opens a file-backed database through the "sqlxtc"
  *	VFS and runs a write-heavy workload; every read/write/fsync is
  *	offloaded to the blocking pool, so the worker PARKS for the
  *	duration of each syscall instead of stalling the loop.  A
@@ -25,7 +25,7 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
-#include "xtc_vfs.h"
+#include "sqlxtc_vfs.h"
 
 static _Atomic int g_worker_done;
 static _Atomic int g_heartbeats;
@@ -49,7 +49,7 @@ worker_proc(void *arg)
 	int i, rc;
 
 	rc = sqlite3_open_v2(path, &db,
-	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "xtc");
+	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "sqlxtc");
 	if (rc != SQLITE_OK) goto done;
 
 	/* One transaction, many rows: forces xWrite + xSync at commit. */
@@ -99,8 +99,8 @@ main(void)
 	char path[] = "/tmp/sqlxtc-vfs-loop-XXXXXX";
 	int fd;
 
-	if (xtc_vfs_register(0) != SQLITE_OK) {
-		fprintf(stderr, "FAIL: xtc_vfs_register\n"); return 1;
+	if (sqlxtc_vfs_register(0) != SQLITE_OK) {
+		fprintf(stderr, "FAIL: sqlxtc_vfs_register\n"); return 1;
 	}
 	fd = mkstemp(path);
 	if (fd < 0) { perror("mkstemp"); return 1; }
@@ -136,6 +136,6 @@ main(void)
 	printf("  ok   loop stayed live during DB I/O (%d heartbeats while "
 	    "worker parked on offloaded reads/writes/fsync)\n",
 	    atomic_load(&g_heartbeats));
-	printf("All xtc VFS on-loop tests passed.\n");
+	printf("All sqlxtc VFS on-loop tests passed.\n");
 	return 0;
 }
