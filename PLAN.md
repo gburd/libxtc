@@ -3179,7 +3179,7 @@ SQL/WAL/fmgr.
 | R1 | per-fiber fault capture + single-fiber unwind (contain vs escalate) | DONE (first cut): `xtc_fault_guard_install`/`xtc_proc_recovery_arm`/`xtc_proc_critical_enter/leave`; SIGSEGV/BUS/FPE/ILL; verified glibc+musl+MSVC+UBSan; SEH + lock-release-on-exit open | M10.6 |
 | R2 | length-framed transport helper (`xtc_net_send_frame`/`recv_frame`) | DONE: 4-byte BE length + payload, loop-aware (yields via wait_fd) with poll fallback; max_len OOM guard (XTC_E_RANGE); test_net_frame | io/net |
 | R3 | supervised OS-process child (`xtc_osproc_spawn`) under xtc_supervisor | accept supervision unification; marshalling stays in PG glue | M10.7 (new); F7 |
-| R4 | supervisor strategies (SIMPLE_OFO, REST_FOR_ONE, ONE_FOR_ALL) | confirmed; already reserved as XTC_E_NOSYS; do SIMPLE_OFO first (session pool) | M10.5 (existing) |
+| R4 | supervisor strategies (SIMPLE_OFO, REST_FOR_ONE, ONE_FOR_ALL) | DONE: all four strategies implemented + tested; SIMPLE_ONE_FOR_ONE via new xtc_sup_add_child (0-child pool grows on demand, TEMPORARY children reclaimed); test_sup 5/5, ASan-clean | M10.5 |
 | R5 | per-proc loop affinity (pinned, never stolen) | confirmed already true: procs spawn pinned via xtc_async; documenting in xtc_proc.3 | done (confirm) |
 | R6 | freeze the lock + glue ABI before PG Phase 1 | accept; name the exact lock structs on the (S)18 stable-symbol list | abi-stability.md, M16_PG_ADAPTER.md |
 

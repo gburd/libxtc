@@ -8,6 +8,8 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdatomic.h>
+#include <string.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -291,11 +293,74 @@ test_intensity_exceeded(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* SIMPLE_ONE_FOR_ONE: a 0-child pool grows on demand via
+ * xtc_sup_add_child; TEMPORARY children are reclaimed (not restarted)
+ * when they exit -- the session-pool policy. */
+static _Atomic int g_sofo_ran;
+static void
+sofo_session(void *arg)
+{
+	(void)arg;
+	atomic_fetch_add(&g_sofo_ran, 1);   /* run once, then exit */
+}
+struct sofo_state { xtc_supervisor_t *sup; int added; };
+static void
+sofo_manager(void *arg)
+{
+	struct sofo_state *s = arg;
+	xtc_child_spec_t spec;
+	xtc_pid_t pid;
+	void *m; size_t n;
+	int i;
+	for (i = 0; i < 3; i++) {
+		memset(&spec, 0, sizeof spec);
+		spec.name = "session";
+		spec.fn = sofo_session;
+		spec.policy = XTC_RESTART_TEMPORARY;
+		if (xtc_sup_add_child(s->sup, &spec, &pid) == XTC_OK &&
+		    !xtc_pid_is_none(pid))
+			s->added++;
+	}
+	/* Yield so the spawned sessions run to completion. */
+	(void)xtc_recv(&m, &n, 200LL * 1000 * 1000);
+	(void)xtc_sup_stop(s->sup);
+}
+
+static MunitResult
+test_simple_one_for_one(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_supervisor_t *sup = NULL;
+	struct sofo_state st = { NULL, 0 };
+	xtc_proc_opts_t popts = { 0 };
+	xtc_pid_t mgr;
+	(void)p; (void)d;
+
+	atomic_store(&g_sofo_ran, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.strategy = XTC_SUP_SIMPLE_OFO;
+	/* Start with zero children -- the pool is filled dynamically. */
+	munit_assert_int(xtc_sup_start(loop, &opts, NULL, 0, &sup), ==, XTC_OK);
+	st.sup = sup;
+	popts.name = "mgr";
+	munit_assert_int(xtc_proc_spawn(loop, sofo_manager, &st, &popts, &mgr),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	munit_assert_int(st.added, ==, 3);            /* 3 spawned on demand */
+	munit_assert_int(atomic_load(&g_sofo_ran), ==, 3);  /* all ran */
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/one_for_all",           test_one_for_all,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/rest_for_one",          test_rest_for_one,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/intensity_exceeded",    test_intensity_exceeded,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/simple_one_for_one",    test_simple_one_for_one,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10/sup", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
