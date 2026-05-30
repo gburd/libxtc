@@ -26,6 +26,8 @@
 #include "xtc.h"
 #include "xtc_slab.h"
 #include "xtc_lwlock.h"
+#include "xtc_loop.h"
+#include "xtc_proc.h"
 #include "os_time.h"
 
 #define CHECK(cond) do { \
@@ -35,9 +37,29 @@
 	} \
 } while (0)
 
+/* Fault containment: a proc arms a recovery frame, then dereferences a
+ * wild pointer.  On Windows the access violation is caught by the
+ * Vectored Exception Handler installed by xtc_fault_guard_install,
+ * which longjmps back here so xtc_proc_recovery_arm returns nonzero --
+ * the proc recovers instead of the process crashing. */
+static volatile int s_fault_recovered;
+static void
+smoke_faulty_proc(void *arg)
+{
+	volatile int *wild = (volatile int *)0;
+	(void)arg;
+	if (xtc_proc_recovery_arm() != 0) {
+		s_fault_recovered = 1;          /* came back from the fault */
+		(void)xtc_exit_self(7);         /* clean contained-fault exit */
+		return;
+	}
+	*wild = 42;                             /* access violation */
+}
+
 int
 main(void)
 {
+	setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: survive a crash */
 	/* --- version --- */
 	{
 		const char *v = xtc_version_string();
@@ -92,6 +114,25 @@ main(void)
 		xtc_lwlock_release(&lw);
 		xtc_lwlock_destroy(&lw);
 		printf("  ok   lwlock acquire/release (X + S)\n");
+	}
+
+	/* --- fault containment (Windows SEH / VEH) --- */
+	{
+		xtc_loop_t *loop = NULL;
+		xtc_proc_opts_t po = { 0 };
+		xtc_pid_t pid;
+		s_fault_recovered = 0;
+		CHECK(xtc_fault_guard_install() == XTC_OK);
+		CHECK(xtc_loop_init(&loop) == XTC_OK);
+		po.name = "faulty";
+		CHECK(xtc_proc_spawn(loop, smoke_faulty_proc, NULL, &po, &pid)
+		    == XTC_OK);
+		/* If the VEH did not contain the fault, this process would
+		 * crash here instead of returning. */
+		CHECK(xtc_loop_run(loop) == XTC_OK);
+		CHECK(s_fault_recovered == 1);
+		(void)xtc_loop_fini(loop);
+		printf("  ok   fault contained (wild write recovered via SEH)\n");
 	}
 
 	printf("All MSVC smoke checks passed.\n");

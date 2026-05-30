@@ -223,9 +223,10 @@ struct xtc_proc {
 	 * (crit_depth == 0); inside one the fault escalates to process
 	 * abort, preserving PG's critical-section PANIC semantics. */
 	xtc_recovery_buf_t recovery_buf;
-	int         recovery_armed;
-	int         crit_depth;
-	int         fault_sig;
+	volatile sig_atomic_t recovery_armed;
+	volatile sig_atomic_t recovery_fired;   /* Windows: set by the VEH */
+	volatile sig_atomic_t crit_depth;
+	volatile sig_atomic_t fault_sig;
 
 	/* Per-proc at-exit callbacks, run LIFO on the exit path -- both a
 	 * normal return and a contained-fault recovery (xtc_exit_self).
@@ -1213,6 +1214,23 @@ static const int __fault_signals[] = { SIGSEGV, SIGBUS, SIGFPE, SIGILL };
  * xtc_exit_self, delivering DOWN to its monitors.  Otherwise the
  * fault escalates: restore the default disposition and re-raise so
  * the whole process dies (a torn critical section cannot be unwound).
+ *
+ * Async-signal-safety of the handler->siglongjmp window.  Every
+ * operation here is async-signal-safe (POSIX.1 "Signal Concepts"):
+ * reads of __current_proc (a thread-local pointer) and of the proc's
+ * recovery_armed / crit_depth flags; writes of recovery_armed (the
+ * one-shot clear) and fault_sig -- these flags are volatile
+ * sig_atomic_t, so each access is single and untearable, and the proc
+ * is the only other writer (a synchronous fault interrupts the proc's
+ * own instruction stream, so no second agent is mutating them at
+ * fault time); siglongjmp(), which is on the async-signal-safe list;
+ * and on the escalation path memset() (pure computation),
+ * sigemptyset(), sigaction(), and raise() -- all async-signal-safe.
+ * No heap, stdio, or locking is touched.  The proc's cleanup (at-exit
+ * hooks, lock release, xtc_exit_self) runs AFTER the siglongjmp, in
+ * normal context -- never in the handler.  SA_NODEFER keeps a fault
+ * that re-enters before the siglongjmp from looping: recovery_armed
+ * is already cleared, so it escalates.
  */
 static void
 __xtc_fault_handler(int sig, siginfo_t *si, void *uctx)
@@ -1239,14 +1257,82 @@ __xtc_fault_handler(int sig, siginfo_t *si, void *uctx)
 }
 #endif /* !_WIN32 */
 
+#if defined(_WIN32)
+#include <windows.h>
+static PVOID                 __veh_handle;
+static volatile sig_atomic_t __fault_guard_installed_win;
+
+/*
+ * Windows fault containment via a Vectored Exception Handler -- the
+ * SEH analogue of the POSIX signal path.  The VEH runs on the
+ * faulting thread before SEH dispatch, so __current_proc still names
+ * the faulting fiber.  For a synchronous, fiber-attributable hardware
+ * fault (the parity set of the POSIX SIGSEGV/SIGBUS/SIGFPE/SIGILL) we
+ * RESTORE the CONTEXT the proc captured at xtc_proc_recovery_arm()
+ * and return EXCEPTION_CONTINUE_EXECUTION: the OS reloads the thread
+ * registers and resumes at the capture point, where the arm helper
+ * sees recovery_fired set and reports the fault code.  This does no
+ * stack unwinding (unlike longjmp, which corrupts the CRT when driven
+ * from a VEH on a fiber stack).
+ *
+ * STACK_OVERFLOW is excluded (the guard page is gone; resuming is
+ * unsafe) and escalates, as does any fault with no armed frame or
+ * inside a critical section -- EXCEPTION_CONTINUE_SEARCH preserves the
+ * process's default crash disposition (PG's PANIC).
+ */
+static LONG CALLBACK
+__xtc_veh(EXCEPTION_POINTERS *ep)
+{
+	struct xtc_proc *p;
+	DWORD code;
+
+	if (ep == NULL || ep->ExceptionRecord == NULL ||
+	    ep->ContextRecord == NULL)
+		return EXCEPTION_CONTINUE_SEARCH;
+	code = ep->ExceptionRecord->ExceptionCode;
+	switch (code) {
+	case EXCEPTION_ACCESS_VIOLATION:
+	case EXCEPTION_DATATYPE_MISALIGNMENT:
+	case EXCEPTION_IN_PAGE_ERROR:
+	case EXCEPTION_INT_DIVIDE_BY_ZERO:
+	case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+	case EXCEPTION_ILLEGAL_INSTRUCTION:
+	case EXCEPTION_PRIV_INSTRUCTION:
+		break;
+	default:
+		return EXCEPTION_CONTINUE_SEARCH;   /* not a contained fault */
+	}
+
+	p = __current_proc;
+	if (p != NULL && p->recovery_armed && p->crit_depth == 0) {
+		p->recovery_armed = 0;          /* one-shot */
+		p->fault_sig = (int)code;
+		p->recovery_fired = 1;          /* arm helper reads this */
+		/* Resume at the captured arm point: no unwind, just a
+		 * register/stack-pointer reload by the kernel. */
+		*ep->ContextRecord = p->recovery_buf.ctx;
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+	return EXCEPTION_CONTINUE_SEARCH;       /* escalate */
+}
+#endif /* _WIN32 */
+
 /* PUBLIC: int xtc_fault_guard_install __P((void)); */
 int
 xtc_fault_guard_install(void)
 {
 #if defined(_WIN32)
-	/* No-op: containment is inactive on Windows (SEH not yet wired).
-	 * Returns XTC_OK so embedder startup code need not special-case
-	 * the platform; faults keep their process-wide disposition. */
+	/* Containment via a Vectored Exception Handler (SEH).  Process-
+	 * wide and installed once; no per-thread alt stack is needed
+	 * because the VEH runs on the faulting thread and longjmps from
+	 * there. */
+	if (__fault_guard_installed_win)
+		return XTC_OK;
+	__veh_handle = AddVectoredExceptionHandler(1 /* call first */,
+	    __xtc_veh);
+	if (__veh_handle == NULL)
+		return XTC_E_INTERNAL;
+	__fault_guard_installed_win = 1;
 	return XTC_OK;
 #else
 	struct sigaction sa;
@@ -1296,6 +1382,41 @@ __xtc_proc_recovery_slot(void)
 	p->recovery_armed = 1;
 	return &p->recovery_buf;
 }
+
+#if defined(_WIN32)
+/* Windows recovery-arm helpers driving the CONTEXT capture/restore.
+ * __xtc_recovery_prep arms and clears the fired flag; __xtc_recovery_ctx
+ * is the CONTEXT to RtlCaptureContext into; __xtc_recovery_result is 0
+ * on the arming pass and the fault code once the VEH restores the
+ * captured context (which resumes execution just after the capture). */
+void
+__xtc_recovery_prep(void)
+{
+	struct xtc_proc *p = __current_proc;
+	if (p == NULL)
+		return;
+	p->recovery_fired = 0;
+	p->recovery_armed = 1;
+}
+
+CONTEXT *
+__xtc_recovery_ctx(void)
+{
+	struct xtc_proc *p = __current_proc;
+	if (p == NULL)
+		return &__recovery_dummy.ctx;
+	return &p->recovery_buf.ctx;
+}
+
+int
+__xtc_recovery_result(void)
+{
+	struct xtc_proc *p = __current_proc;
+	if (p == NULL)
+		return 0;
+	return p->recovery_fired ? (int)p->fault_sig : 0;
+}
+#endif /* _WIN32 */
 
 /* PUBLIC: void xtc_proc_recovery_disarm __P((void)); */
 void

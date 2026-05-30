@@ -261,24 +261,47 @@ int       xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out);
 #include <setjmp.h>
 
 #if defined(_WIN32)
-typedef jmp_buf xtc_recovery_buf_t;
+#include <windows.h>
+/*
+ * Windows recovery uses CONTEXT capture/restore rather than
+ * setjmp/longjmp.  The fault is caught by a Vectored Exception Handler
+ * that restores this saved CONTEXT via EXCEPTION_CONTINUE_EXECUTION --
+ * the OS reloads the thread's registers and resumes at the capture
+ * point.  longjmp out of (or via) a VEH is unsafe: on a fiber stack it
+ * walks unwind tables that no longer match and corrupts the CRT; a
+ * context restore does no unwinding at all.
+ */
+typedef struct xtc_recovery_buf { CONTEXT ctx; } xtc_recovery_buf_t;
 #else
 typedef sigjmp_buf xtc_recovery_buf_t;
 #endif
 
-/* Install the process-wide fault handler on an alternate signal stack.
- * Idempotent for the handler; registers the alt stack for the calling
- * thread (call once per loop thread).  Returns XTC_OK (a no-op that
- * still returns XTC_OK on Windows, where containment is inactive). */
+/* Install the process-wide fault handler.  On POSIX it registers a
+ * SIGSEGV/SIGBUS/SIGFPE/SIGILL handler on an alternate signal stack
+ * (call once per loop thread for the alt stack; the handler is
+ * installed once).  On Windows it registers a Vectored Exception
+ * Handler.  Returns XTC_OK on success. */
 int       xtc_fault_guard_install(void);
 
-/* Internal arm-slot for the xtc_proc_recovery_arm() macro. */
+/* Internal arm-slot for the xtc_proc_recovery_arm() macro (POSIX). */
 xtc_recovery_buf_t *__xtc_proc_recovery_slot(void);
+
+#if defined(_WIN32)
+/* Windows recovery-arm helpers (used by the macro below).
+ * __xtc_recovery_prep arms the frame and clears the fired flag;
+ * __xtc_recovery_ctx returns the CONTEXT to capture into;
+ * __xtc_recovery_result returns 0 on the arming pass and the fault
+ * code when the VEH has restored the context. */
+void      __xtc_recovery_prep(void);
+CONTEXT  *__xtc_recovery_ctx(void);
+int       __xtc_recovery_result(void);
+#endif
 
 /*
  * Arm a recovery frame for the calling process, exactly like
  * sigsetjmp: returns 0 on the normal path and the fault signal number
- * when control returns here via a contained fault.  Use it as:
+ * (POSIX) or exception code (Windows) when control returns here via a
+ * contained fault.  Use it as:
  *
  *     int sig = xtc_proc_recovery_arm();
  *     if (sig != 0) {                 // recovered from a contained fault
@@ -289,8 +312,7 @@ xtc_recovery_buf_t *__xtc_proc_recovery_slot(void);
  *
  * The frame is disarmed automatically when a fault fires it (so a
  * fault during recovery escalates to process abort); re-arm or
- * xtc_proc_recovery_disarm() as needed.  On Windows it is a plain
- * setjmp that nothing longjmps, so it always returns 0.
+ * xtc_proc_recovery_disarm() as needed.
  *
  * IMPORTANT: containment only unwinds the fiber's CALL STACK.  Any
  * resources the proc held at fault time -- locks, fds, allocations,
@@ -302,7 +324,13 @@ xtc_recovery_buf_t *__xtc_proc_recovery_slot(void);
  * lock held and wedges peers.
  */
 #if defined(_WIN32)
-#define xtc_proc_recovery_arm() (setjmp(*__xtc_proc_recovery_slot()))
+/* Capture the proc fn's own frame inline (like setjmp), so the VEH can
+ * restore it; the comma expression returns 0 while arming and the
+ * fault code after a contained fault resumes execution here. */
+#define xtc_proc_recovery_arm() \
+	(__xtc_recovery_prep(), \
+	 RtlCaptureContext(__xtc_recovery_ctx()), \
+	 __xtc_recovery_result())
 #else
 #define xtc_proc_recovery_arm() (sigsetjmp(*__xtc_proc_recovery_slot(), 1))
 #endif
