@@ -135,4 +135,23 @@ int xtc_dns_resolve(const char *hostname, int port,
                     xtc_net_family_t fam,
                     char *out_addr, size_t out_addr_size);
 
+/* ---- length-framed transport --------------------------------
+ *
+ * A 4-byte big-endian length prefix + payload.  On a non-blocking fd
+ * these yield the calling fiber (via the loop) on partial I/O instead
+ * of blocking, so many connections share one loop; off a loop they
+ * fall back to poll(2).  Set the fd non-blocking (xtc_net_setnonblock)
+ * for the loop-friendly behaviour.
+ *
+ * xtc_net_recv_frame allocates the frame with the xtc allocator (free
+ * it with __os_free) and rejects a claimed length above max_len
+ * (max_len 0 = no cap) with XTC_E_RANGE -- so a peer cannot force an
+ * unbounded allocation.  Returns XTC_E_AGAIN on timeout, XTC_E_INVAL
+ * if the peer closed mid-frame.  A zero-length frame returns XTC_OK
+ * with *out == NULL.
+ */
+int xtc_net_send_frame(int fd, const void *buf, size_t len);
+int xtc_net_recv_frame(int fd, void **out, size_t *out_len,
+                       size_t max_len, int64_t timeout_ns);
+
 #endif /* XTC_NET_H */
