@@ -470,7 +470,18 @@ struct flt_state {
 	int saw_down;
 	int reason;
 	int cleanup_ran;
+	int atexit_ran;
 };
+
+/* Stands in for an embedder's lock-manager release-all: registered
+ * with xtc_proc_at_exit, it must run even when the proc dies via a
+ * contained fault, so a faulted session never leaves a lock held. */
+static void
+flt_release(void *arg)
+{
+	struct flt_state *s = arg;
+	s->atexit_ran = 1;
+}
 
 static void
 flt_faulter(void *arg)
@@ -485,8 +496,10 @@ flt_faulter(void *arg)
 		(void)xtc_exit_self(FLT_REASON);
 		return;
 	}
-	/* Normal path: wait for the monitor to be established, then
-	 * dereference a wild pointer -> genuine SIGSEGV. */
+	/* Normal path: register the resource-release hook (it must run on
+	 * the contained-fault exit), wait for the monitor to be
+	 * established, then dereference a wild pointer -> genuine SIGSEGV. */
+	(void)xtc_proc_at_exit(flt_release, s);
 	if (xtc_recv(&m, &n, 2LL * 1000 * 1000 * 1000) == XTC_OK && m)
 		__os_free(m);
 	{
@@ -503,12 +516,9 @@ flt_watcher(void *arg)
 {
 	struct flt_state *s = arg;
 	void *msg = NULL; size_t sz = 0;
-	xtc_pid_t target;
+	xtc_pid_t target, down_pid;
 	uint64_t ref;
-	struct {
-		uint8_t kind; uint64_t r; xtc_pid_t pid; int reason;
-	} __attribute__((packed)) *down;
-	int go = 1;
+	int go = 1, down_reason = 0;
 
 	if (xtc_recv(&msg, &sz, 1000LL * 1000 * 1000) != XTC_OK) return;
 	memcpy(&target, msg, sizeof target);
@@ -516,14 +526,12 @@ flt_watcher(void *arg)
 	if (xtc_monitor(target, &ref) != XTC_OK) return;
 	/* Monitor established: tell the faulter to proceed. */
 	(void)xtc_send(target, &go, sizeof go);
-	/* Await DOWN. */
+	/* Await DOWN; decode it with the library helper rather than a
+	 * hand-rolled packed struct. */
 	if (xtc_recv(&msg, &sz, 5LL * 1000 * 1000 * 1000) != XTC_OK) return;
-	if (sz >= sizeof *down) {
-		down = msg;
-		if (down->kind == 'D') {
-			s->saw_down = 1;
-			s->reason = down->reason;
-		}
+	if (xtc_down_decode(msg, sz, &down_pid, &down_reason) == XTC_OK) {
+		s->saw_down = 1;
+		s->reason = down_reason;
 	}
 	__os_free(msg);
 }
@@ -532,7 +540,7 @@ static MunitResult
 test_fault_contain(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	struct flt_state s = { 0, 0, 0 };
+	struct flt_state s = { 0, 0, 0, 0 };
 	xtc_pid_t faulter, watcher;
 	(void)p; (void)d;
 
@@ -558,6 +566,7 @@ test_fault_contain(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
 	munit_assert_int(s.cleanup_ran, ==, 1);   /* faulter recovered */
+	munit_assert_int(s.atexit_ran, ==, 1);     /* at-exit ran on fault */
 	munit_assert_int(s.saw_down, ==, 1);       /* sibling observed it */
 	munit_assert_int(s.reason, ==, FLT_REASON);
 	return MUNIT_OK;
@@ -622,6 +631,41 @@ test_fault_escalate(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* at-exit hooks run LIFO on a normal proc exit. */
+static _Atomic int g_atx_order;
+static _Atomic int g_atx_a, g_atx_b;
+static void atx_a(void *u) { (void)u; atomic_store(&g_atx_a, atomic_fetch_add(&g_atx_order, 1) + 1); }
+static void atx_b(void *u) { (void)u; atomic_store(&g_atx_b, atomic_fetch_add(&g_atx_order, 1) + 1); }
+static void atx_proc(void *arg)
+{
+	(void)arg;
+	munit_assert_int(xtc_proc_at_exit(atx_a, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_proc_at_exit(atx_b, NULL), ==, XTC_OK);
+	/* return -> normal exit -> hooks run */
+}
+
+static MunitResult
+test_proc_at_exit(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	(void)p; (void)d;
+	atomic_store(&g_atx_order, 0);
+	atomic_store(&g_atx_a, 0);
+	atomic_store(&g_atx_b, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "atx";
+	munit_assert_int(xtc_proc_spawn(loop, atx_proc, NULL, &opts, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	/* Both ran; LIFO -> b (registered second) ran first. */
+	munit_assert_int(atomic_load(&g_atx_b), ==, 1);
+	munit_assert_int(atomic_load(&g_atx_a), ==, 2);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -632,6 +676,7 @@ static MunitTest tests[] = {
 	{ "/save_queue_cap",    test_save_queue_cap,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fault_contain",     test_fault_contain,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fault_escalate",    test_fault_escalate,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/proc_at_exit",      test_proc_at_exit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/proc", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
