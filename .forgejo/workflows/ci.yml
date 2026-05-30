@@ -110,3 +110,42 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: make -C build_san check
+
+  examples:
+    # Build the examples and run their in-process tests (no daemons,
+    # so nothing hangs CI).  The examples exercise the public API
+    # broadly -- including the single-file amalgamation drop-in -- and
+    # would otherwise rot unnoticed since the library make check does
+    # not build them.
+    runs-on: codeberg-medium
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make autoconf pkg-config libssl-dev liburing-dev gawk python3
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Build libxtc
+        run: |
+          mkdir -p build_ci
+          cd build_ci
+          ../dist/configure --with-tls=auto
+          make -j"$(nproc)"
+      - name: kaka in-process tests
+        working-directory: examples/07_kaka
+        run: |
+          make XTC_BUILD=../../build_ci
+          ./test_frame
+          ./test_partition
+          ./test_broker
+          ./test_group
+      - name: sqlxtc in-process tests + amalgamation
+        working-directory: examples/06_sqlxtc
+        run: |
+          make XTC_BUILD=../../build_ci test-quack test-vfs test-pcache
+          make XTC_BUILD=../../build_ci amalg
+          make XTC_BUILD=../../build_ci test-vfs-amalg test-pcache-amalg
