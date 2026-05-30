@@ -48,7 +48,9 @@ faults, and stay inside a fixed resource budget on commodity hardware.
   its tests on Linux (glibc and musl), FreeBSD, illumos, and Windows.
   Linux is exercised on every commit by CI (gcc and clang, plus
   AddressSanitizer, UBSan, and the forced-fcontext substrate that
-  musl uses).  FreeBSD 15 (clang, kqueue) and illumos (SunOS 5.11,
+  musl uses), as are macOS (Apple Silicon, the kqueue backend +
+  ucontext substrate, full C munit suite) and Windows/MSVC (xtc.lib +
+  smoke test).  FreeBSD 15 (clang, kqueue) and illumos (SunOS 5.11,
   gcc, the solaris port backend) are verified against the current
   tree -- 283/283 and a clean C suite respectively.  Windows builds
   with all three of MinGW, Clang64, and MSVC.  macOS and AIX have
@@ -169,11 +171,13 @@ What's working today:
 | TLS | OpenSSL backend done (also builds + mostly passes on LibreSSL, see `docs/M_TLS_MATRIX.md`); GnuTLS/wolfSSL/Mbed TLS designed (`docs/M_TLS.md`). |
 
 Test coverage today: **280 munit + 23 hegel-c property tests on
-Linux**, clean under AddressSanitizer and UBSan in CI.  FreeBSD and
-illumos have been verified at matching numbers in prior runs (a
-re-verify against the current tree is pending); Windows passes ~233
-munit under MinGW and 48/48 of the buildable binaries under Clang64,
-with an MSVC smoke build of the static library.
+Linux**, clean under AddressSanitizer and UBSan in CI.  GitHub CI also
+runs the full C munit suite on **macOS** (Apple Silicon: kqueue +
+ucontext + GCD dispatch semaphores) and an **MSVC** xtc.lib + smoke
+build on **Windows** every commit.  FreeBSD and illumos have been
+verified at matching numbers in prior runs (a re-verify against the
+current tree is pending); Windows also passes ~233 munit under MinGW
+and 48/48 of the buildable binaries under Clang64.
 
 Honest gaps and known issues live in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 The full milestone roadmap is in [PLAN.md](PLAN.md).

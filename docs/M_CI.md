@@ -72,6 +72,18 @@ Free GHA runners cover Linux (ubuntu-24.04, ubuntu-22.04), macOS
 (macos-14, macos-15 on arm64; macos-13 on x86_64), and Windows
 (windows-2022 with MSVC + MinGW).  That's 5-6 environments for free.
 
+**Live as of 0.4.0** (`.github/workflows/ci.yml`): `build-and-test`
+(gcc, clang), `sanitizers` (address, undefined), `coro-fctx`
+(forced-fcontext / musl path), `examples`, **`macos`**
+(`macos-latest`, Apple Silicon -- kqueue + ucontext + GCD dispatch
+semaphores; runs the C munit suite), and **`windows-msvc`**
+(`windows-latest` -- `dist/build_msvc.bat` builds xtc.lib via cl +
+ml64 and runs the smoke test).  Adding the macOS job surfaced and
+fixed six real portability bugs (the Darwin feature macro, the
+rwlock storage size, unnamed-semaphore unsupport, `_SC_NPROCESSORS_ONLN`,
+hardcoded `-lrt`, and a thread_local-vs-pthread_key teardown-order
+bug in the lrlock slot reclaimer).
+
 The xtc workflow runs the same `./dist/configure && make check` on
 each runner.  Total wall time: 4-7 minutes per push.  This is the
 "PR can't merge if red" gate.
