@@ -85,9 +85,11 @@ typedef struct xtc_proc_opts {
 
 /* Mailbox statistics snapshot (see xtc_proc_mailbox_stats). */
 typedef struct xtc_mailbox_stats {
-	size_t   depth;        /* messages currently queued */
-	size_t   peak;         /* high-water depth ever reached */
-	size_t   cap;          /* mailbox capacity (0 = unbounded) */
+	size_t   depth;        /* messages currently in the mailbox */
+	size_t   saved;        /* messages held in the selective-receive
+	                        * save queue (inspected, not yet matched) */
+	size_t   peak;         /* high-water mailbox depth ever reached */
+	size_t   cap;          /* capacity bound on depth + saved (0 = none) */
 	uint64_t recv_total;   /* messages accepted over the proc's life */
 	uint64_t drop_total;   /* messages rejected (full / dead) */
 } xtc_mailbox_stats_t;

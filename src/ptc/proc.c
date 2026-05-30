@@ -183,9 +183,14 @@ struct xtc_proc {
 	void             *mbox_wm_user;
 
 	/* Selective-receive save queue (envelopes that the receiver
-	 * already inspected and rejected). */
+	 * already inspected and rejected).  mbox_saved counts them; it is
+	 * written by the owning proc during recv and read by senders
+	 * (under mbox_lock) so the admission cap bounds mailbox + save
+	 * queue together -- otherwise a flood of non-matching messages
+	 * drains into the unbounded save queue and defeats mailbox_cap. */
 	struct envelope  *save_head;
 	struct envelope  *save_tail;
+	_Atomic size_t    mbox_saved;
 
 	/* BEAM recv-mark optimization for selective receive.  When the
 	 * caller invokes xtc_recv_match repeatedly with the same
@@ -435,7 +440,11 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 	 * which parses as (!alive || cap>0) ? ... and produced
 	 * surprising behaviour on platforms where alive timing
 	 * differed.  Explicit parens. */
-	if (!p->alive || (p->mbox_cap > 0 && p->mbox_n >= p->mbox_cap)) {
+	if (!p->alive ||
+	    (p->mbox_cap > 0 &&
+	     (p->mbox_n +
+	      atomic_load_explicit(&p->mbox_saved, memory_order_relaxed))
+	     >= p->mbox_cap)) {
 		p->mbox_drop_total++;
 		(void)pthread_mutex_unlock(&p->mbox_lock);
 		__env_free(e);
@@ -607,6 +616,8 @@ xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out)
 		return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&p->mbox_lock);
 	out->depth = p->mbox_n;
+	out->saved = atomic_load_explicit(&p->mbox_saved,
+	    memory_order_relaxed);
 	out->peak = p->mbox_peak;
 	out->cap = p->mbox_cap;
 	out->recv_total = p->mbox_recv_total;
@@ -805,6 +816,8 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			if (match(e->data, e->size, u)) {
 				/* Unlink. */
 				*link = e->next;
+				atomic_fetch_sub_explicit(&self->mbox_saved, 1,
+				    memory_order_relaxed);
 				if (self->save_tail == e) {
 					/* Walk to recompute tail.  O(N) but
 					 * portable; the back-pointer trick using
@@ -832,6 +845,8 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			e->next = NULL;
 			if (self->save_tail == NULL) self->save_head = self->save_tail = e;
 			else { self->save_tail->next = e; self->save_tail = e; }
+			atomic_fetch_add_explicit(&self->mbox_saved, 1,
+			    memory_order_relaxed);
 			(void)pthread_mutex_lock(&self->mbox_lock);
 		}
 		(void)pthread_mutex_unlock(&self->mbox_lock);
@@ -903,6 +918,8 @@ deliver:
 				e->next = self->save_head;
 				self->save_head = e;
 				if (self->save_tail == NULL) self->save_tail = e;
+				atomic_fetch_add_explicit(&self->mbox_saved, 1,
+				    memory_order_relaxed);
 				return XTC_E_NOMEM;
 			}
 			memcpy(buf, e->data, e->size);
