@@ -96,6 +96,53 @@ Call in `suite_setup`, `unlink()` in `suite_teardown`.
 cd build_unix && make -j$(nproc) && make check
 ```
 
+## Continuous integration -- always check after pushing
+
+The repository lives on Codeberg (`origin`,
+`ssh://git@codeberg.org/gregburd/libxtc.git`) and is mirrored to
+GitHub (`gburd/libxtc`), where the Actions CI runs: gcc and clang
+`make check`, AddressSanitizer, UndefinedBehaviorSanitizer, and a
+forced-fcontext (musl coroutine path) job.
+
+**After every push -- and without exception after pushing a tagged
+release -- verify CI went green.**  CI can fail on something the
+local `make check` does not catch (a sanitizer not enabled locally,
+a different compiler, a backend the local build did not select).  A
+red pipeline that nobody looks at silently rots: this project once
+accumulated dozens of consecutive failing runs from one latent UBSan
+misalignment because pushes were not being checked.
+
+```sh
+# wait for the mirror to sync (~30-60s), then:
+gh run list --repo gburd/libxtc --limit 5
+# inspect a failure:
+gh run view <run-id> --repo gburd/libxtc --log-failed | \
+    grep -iE 'runtime error|FAIL|error:|Assertion'
+```
+
+Fix CI failures promptly and treat them as first-class -- the README
+claims the library is CI-tested under sanitizers, so the badge must
+be true.  The local sanitizer build that mirrors CI most closely:
+
+```sh
+B=$(mktemp -d)
+( cd "$B" && CFLAGS='-fsanitize=undefined -fno-omit-frame-pointer -g -O1' \
+    LDFLAGS='-fsanitize=undefined' /path/to/dist/configure --with-tls=auto && \
+    UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 make check )
+```
+
+## Allocation alignment
+
+Any struct with an over-aligned member (`_Alignas(XTC_CACHE_LINE)`,
+stricter than `max_align_t`) MUST be heap-allocated with
+`__os_aligned_alloc` and released with `__os_aligned_free` -- never
+`__os_calloc`/`__os_free`, which only guarantee `max_align_t` and
+trip UBSan's alignment check (and can fault on stricter targets or
+corrupt the heap on Windows).  This applies to the struct itself and
+to arrays whose element type is over-aligned (the array base must be
+aligned or element 0 is misaligned).  `aligned()` and `aligned_free()`
+are a matched pair in the allocator vtable.
+
 ## Code Style
 
 BSD KNF as encoded in `.clang-format`.  ASCII-only in source, docs,
