@@ -144,11 +144,16 @@ xtc_counter_create(const char *name, xtc_counter_t **out)
 	if ((rc = __os_calloc(1, sizeof *c, (void **)&c)) != XTC_OK) return rc;
 	strncpy(c->name, name, XTC_STATS_NAME_MAX - 1);
 	c->n_cpus = __ncpus();
-	if ((rc = __os_calloc(c->n_cpus, sizeof *c->shards,
+	/* counter_shard is _Alignas(XTC_CACHE_LINE); the array base must
+	 * be cache-line aligned or shard[0] is misaligned.  calloc only
+	 * guarantees max_align_t, so allocate aligned and zero. */
+	if ((rc = __os_aligned_alloc(XTC_CACHE_LINE,
+	    (size_t)c->n_cpus * sizeof *c->shards,
 	    (void **)&c->shards)) != XTC_OK) {
 		__os_free(c);
 		return rc;
 	}
+	memset(c->shards, 0, (size_t)c->n_cpus * sizeof *c->shards);
 	__reg_add(c, XTC_METRIC_COUNTER, c->name);
 	*out = c;
 	return XTC_OK;
@@ -159,7 +164,7 @@ xtc_counter_destroy(xtc_counter_t *c)
 {
 	if (c == NULL) return;
 	__reg_remove(c);
-	__os_free(c->shards);
+	__os_aligned_free(c->shards);
 	__os_free(c);
 }
 
@@ -311,11 +316,15 @@ xtc_hist_create(const char *name, xtc_hist_t **out)
 	if ((rc = __os_calloc(1, sizeof *h, (void **)&h)) != XTC_OK) return rc;
 	strncpy(h->name, name, XTC_STATS_NAME_MAX - 1);
 	h->n_cpus = __ncpus();
-	if ((rc = __os_calloc(h->n_cpus, sizeof *h->shards,
+	/* hist_shard is _Alignas(XTC_CACHE_LINE); same as the counter
+	 * shards, the array base must be cache-line aligned. */
+	if ((rc = __os_aligned_alloc(XTC_CACHE_LINE,
+	    (size_t)h->n_cpus * sizeof *h->shards,
 	    (void **)&h->shards)) != XTC_OK) {
 		__os_free(h);
 		return rc;
 	}
+	memset(h->shards, 0, (size_t)h->n_cpus * sizeof *h->shards);
 	__reg_add(h, XTC_METRIC_HIST, h->name);
 	*out = h;
 	return XTC_OK;
@@ -326,7 +335,7 @@ xtc_hist_destroy(xtc_hist_t *h)
 {
 	if (h == NULL) return;
 	__reg_remove(h);
-	__os_free(h->shards);
+	__os_aligned_free(h->shards);
 	__os_free(h);
 }
 
