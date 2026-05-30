@@ -66,6 +66,7 @@ typedef struct xtc_supervisor xtc_supervisor_t;
 
 /*
  * PUBLIC: int  xtc_sup_start __P((xtc_loop_t *, const xtc_sup_opts_t *, const xtc_child_spec_t *, int, xtc_supervisor_t **));
+ * PUBLIC: int  xtc_sup_add_child __P((xtc_supervisor_t *, const xtc_child_spec_t *, xtc_pid_t *));
  * PUBLIC: int  xtc_sup_stop __P((xtc_supervisor_t *));
  * PUBLIC: int  xtc_sup_n_children __P((const xtc_supervisor_t *));
  * PUBLIC: int  xtc_sup_n_restarts __P((const xtc_supervisor_t *));
@@ -89,6 +90,15 @@ int  xtc_sup_start(xtc_loop_t *loop,
  *
  * Safe to call from any thread, multiple times. */
 int  xtc_sup_stop(xtc_supervisor_t *sup);
+
+/* Dynamically add a child to a running supervisor (the
+ * SIMPLE_ONE_FOR_ONE pattern: a pool of identical children spawned on
+ * demand).  Routed through the supervisor proc so it owns the
+ * monitor; returns the new child's pid.  Must be called from within a
+ * proc (it awaits the supervisor's reply).  Keep spec->name alive for
+ * the child's lifetime. */
+int  xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
+                       xtc_pid_t *out_pid);
 
 /* Wait for the supervisor to actually exit, then free its handle.
  * Must be called from outside the supervisor's loop thread.
