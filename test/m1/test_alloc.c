@@ -187,6 +187,7 @@ test_hook(const MunitParameter p[], void *d)
 	my.realloc = hook_realloc;
 	my.free    = hook_free;
 	my.aligned = hook_aligned;
+	my.aligned_free = saved.aligned_free;
 
 	hook_calls = 0;
 	rc = __os_alloc_set_hook(&my);

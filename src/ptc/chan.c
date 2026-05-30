@@ -140,14 +140,20 @@ xtc_chan_mpsc_create(xtc_res_t *res, size_t capacity, xtc_chan_mpsc_t **out)
 		if ((rc = xtc_res_acquire(res, XTC_RES_CHANNELS, 1)) != XTC_OK)
 			return rc;
 	}
-	if ((rc = __os_calloc(1, sizeof *c, (void **)&c)) != XTC_OK) {
+	if ((rc = __os_aligned_alloc(XTC_CACHE_LINE, sizeof *c,
+	    (void **)&c)) != XTC_OK) {
 		if (res != NULL) xtc_res_release(res, XTC_RES_CHANNELS, 1);
 		return rc;
 	}
+	/* The struct has _Alignas(XTC_CACHE_LINE) members (head/tail on
+	 * separate cache lines), so it must be at least cache-line
+	 * aligned -- plain calloc only guarantees max_align_t.  Aligned
+	 * memory must be released with __os_aligned_free, not __os_free. */
+	memset(c, 0, sizeof *c);
 	if ((rc = __os_calloc(capacity, sizeof *c->slots,
 	    (void **)&c->slots)) != XTC_OK) {
 		if (res != NULL) xtc_res_release(res, XTC_RES_CHANNELS, 1);
-		__os_free(c);
+		__os_aligned_free(c);
 		return rc;
 	}
 	for (i = 0; i < capacity; i++)
@@ -172,7 +178,7 @@ xtc_chan_mpsc_destroy(xtc_chan_mpsc_t *c)
 		xtc_res_release(c->res, XTC_RES_CHANNELS, 1);
 	}
 	__os_free(c->slots);
-	__os_free(c);
+	__os_aligned_free(c);
 }
 
 int

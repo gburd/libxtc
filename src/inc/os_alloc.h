@@ -23,6 +23,12 @@
  *	realloc(p, sz)   -> like malloc; if p != NULL, contents are preserved.
  *	free(p)          -> p may be NULL.
  *	aligned(a, sz)   -> a is a power of two and >= sizeof(void *); NULL on OOM.
+ *	aligned_free(p)  -> frees memory from aligned(); p may be NULL.
+ *
+ * aligned() and aligned_free() are a matched pair: memory from
+ * aligned() MUST be released with aligned_free(), never free().  On
+ * some platforms (Windows _aligned_malloc) the two heaps are distinct
+ * and crossing them corrupts the heap.
  */
 struct __os_alloc_hook {
 	void *(*malloc)(size_t sz);
@@ -30,6 +36,7 @@ struct __os_alloc_hook {
 	void *(*realloc)(void *p, size_t sz);
 	void  (*free)(void *p);
 	void *(*aligned)(size_t align, size_t sz);
+	void  (*aligned_free)(void *p);
 };
 
 /*
@@ -42,6 +49,7 @@ struct __os_alloc_hook {
  * PUBLIC: void __os_free __P((void *));
  * PUBLIC: int  __os_strdup __P((const char *, char **));
  * PUBLIC: int  __os_aligned_alloc __P((size_t, size_t, void **));
+ * PUBLIC: void __os_aligned_free __P((void *));
  * PUBLIC: int  __os_alloc_set_hook __P((const struct __os_alloc_hook *));
  * PUBLIC: int  __os_alloc_get_hook __P((struct __os_alloc_hook *));
  */
@@ -51,6 +59,7 @@ int  __os_realloc(void *p, size_t sz, void **out);
 void __os_free(void *p);
 int  __os_strdup(const char *s, char **out);
 int  __os_aligned_alloc(size_t align, size_t sz, void **out);
+void __os_aligned_free(void *p);
 int  __os_alloc_set_hook(const struct __os_alloc_hook *hook);
 int  __os_alloc_get_hook(struct __os_alloc_hook *out);
 

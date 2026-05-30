@@ -62,12 +62,25 @@ __default_aligned(size_t align, size_t sz)
 	return p;
 }
 
+static void
+__default_aligned_free(void *p)
+{
+#if defined(_WIN32)
+	/* Memory from _aligned_malloc lives on a separate heap and
+	 * MUST NOT be passed to free(). */
+	_aligned_free(p);
+#else
+	free(p);
+#endif
+}
+
 static const struct __os_alloc_hook __default_hook = {
 	__default_malloc,
 	__default_calloc,
 	__default_realloc,
 	__default_free,
 	__default_aligned,
+	__default_aligned_free,
 };
 
 /*
@@ -184,6 +197,17 @@ __os_aligned_alloc(size_t align, size_t sz, void **out)
 		return XTC_E_NOMEM;
 	*out = p;
 	return XTC_OK;
+}
+
+/*
+ * PUBLIC: void __os_aligned_free __P((void *));
+ */
+void
+__os_aligned_free(void *p)
+{
+	if (p == NULL)
+		return;
+	__hook()->aligned_free(p);
 }
 
 /*
