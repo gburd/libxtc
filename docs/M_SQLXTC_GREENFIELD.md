@@ -134,7 +134,7 @@ value:
      extension point, so it needs no fork -- the single highest-value
      step, and the one that proves the read-concurrency claim.
 
-     *Done (slab-backed form):* `pcache_xtc.c` registers a custom
+     *Done (slab-backed form):* `sqlxtc_pcache.c` registers a custom
      `sqlite3_pcache_methods2` whose page bodies come from a per-cache
      `xtc_slab`.  Every page in one SQLite cache is the same size
      (header + szPage + szExtra), which is exactly a single
@@ -142,7 +142,7 @@ value:
      chained hash table maps the page key to its resident page and an
      LRU list of unpinned pages feeds recycling.  Hit/miss/recycle and
      live-page counts go to `xtc_stats` (`sqlxtc.pcache.*`).
-     `test_pcache_xtc` drives a 5000-row insert + repeated scans on an
+     `test_pcache` drives a 5000-row insert + repeated scans on an
      in-memory database (whose storage *is* the page cache) and
      asserts the slab served the pages (66 allocations), lookups hit
      (10251 hits / 66 misses), and every page is reclaimed on close
@@ -159,20 +159,28 @@ value:
      `xtc_io` so page reads submit to the loop and the session awaits
      completion.  Also a supported extension point.
 
-     *Done (synchronous instrumented form):* `xtc_vfs.c` registers an
-     `"xtc"` VFS, a shim over the platform default.  Every byte of
+     *Done (offloaded instrumented form):* `sqlxtc_vfs.c` registers a
+     `"sqlxtc"` VFS, a shim over the platform default.  Every byte of
      database I/O flows through it -- per-file state is allocated with
      the xtc allocator, and reads, writes, and syncs are counted and
      timed with `xtc_stats` (the `sqlxtc.vfs.*` counters and latency
      histograms, surfaced on the periodic metrics line).  Path ops and
      the byte-range file locks delegate to the base VFS so locking
      stays POSIX-correct.  `db.c` opens file-backed databases through
-     it; `test_xtc_vfs` drives a 500-row create/insert/select in
+     it; `test_vfs` drives a 500-row create/insert/select in
      process (no daemon) and asserts the I/O actually went through the
-     VFS, against both `libxtc.a` and the amalgamation.  The remaining
-     async step -- submitting the read to `xtc_io` and parking the
-     calling fiber until completion -- plugs into this same `xv_read`
-     choke point.
+     VFS, against both `libxtc.a` and the amalgamation.  Reads,
+     writes, and fsyncs are offloaded with `xtc_blocking_run`: on a
+     loop the calling process parks while a pool thread runs the
+     syscall, so the reactor keeps serving peers (off a loop it falls
+     back to a synchronous call).  `test_vfs_loop` proves the loop
+     stays live during a file-backed workload by ticking a heartbeat
+     process throughout.  This is safe because the SQLite mutexes now
+     park instead of thread-blocking (`sqlxtc_mutex.c` over
+     `xtc_amutex`), so a backend can hold the handle mutex across an
+     offloaded read without wedging a contender.  The next step --
+     submitting reads to `xtc_io` directly rather than a pool thread
+     -- plugs into this same `vfs_read` choke point.
 
      *Foundation landed:* `xtc_blocking` (a worker pool that runs a
      blocking call and parks the calling process via a pipe +
@@ -202,9 +210,16 @@ value:
      process can park mid-statement (on a `xtc_blocking` offload)
      while holding the lock, and a second connection that contends
      parks instead of wedging the loop -- the loop stays live to wake
-     the holder.  The remaining work is to back sqlxtc's
-     `sqlite3_mutex` with `xtc_amutex` (today it uses `xtc_lwlock`)
-     and then route `xv_read`/`xv_write`/`xv_sync` through the pool.
+     the holder.
+
+     *Done:* sqlxtc's `sqlite3_mutex` is now backed by `xtc_amutex`
+     (`sqlxtc_mutex.c`, recursion tracked by fiber identity), and
+     `vfs_read`/`vfs_write`/`vfs_sync` are routed through
+     `xtc_blocking_run`.  `test_concurrency` proves the parking
+     contract (a holder parks while holding; a contender parks, not
+     thread-blocks; the holder resumes and hands off), and
+     `test_vfs_loop` proves the loop keeps serving a heartbeat process
+     while a file-backed workload runs its offloaded I/O.
   3. **Pager as a proc.**  Route durability through a single pager
      proc so the WAL writer is an explicit owner.
   4. **Fine-grained locks via `xtc_lockmgr`** -- the deep step that
@@ -219,8 +234,9 @@ read-concurrency and async-I/O claims on a real SQL workload.
 ## Status
 
 Design note.  The sqlxtc example implements the session-as-proc and
-parser-as-pure-function pieces today, plus the instrumented `"xtc"`
-VFS (step 2 in synchronous form) and the slab-backed page cache (step
-1 in its resident-set form); the lrlock-COW page table and the async
+parser-as-pure-function pieces today, plus the instrumented `"sqlxtc"`
+VFS (step 2, with blocking I/O offloaded off the loop) and the
+slab-backed page cache (step 1 in its resident-set form); the
+lrlock-COW page table and the async
 read-submission refinement of the VFS are the proposed next phase,
 tracked in PLAN.md.

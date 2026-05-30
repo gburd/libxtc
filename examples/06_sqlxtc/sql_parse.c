@@ -18,7 +18,7 @@
 
 /* Skip whitespace and SQL line/block comments. */
 static void
-sp_skip_ws(const char **pp, const char *end)
+parse_skip_ws(const char **pp, const char *end)
 {
 	const char *p = *pp;
 	while (p < end) {
@@ -39,7 +39,7 @@ sp_skip_ws(const char **pp, const char *end)
 }
 
 static int
-sp_keyword(const char *p, const char *end, const char *kw)
+parse_keyword(const char *p, const char *end, const char *kw)
 {
 	size_t n = strlen(kw);
 	if ((size_t)(end - p) < n) return 0;
@@ -70,44 +70,44 @@ sql_parse(const char *sql, size_t len, sql_info_t *info)
 	info->kind = SQL_KIND_UNKNOWN;
 	info->readonly = 0;
 
-	sp_skip_ws(&p, end);
+	parse_skip_ws(&p, end);
 
-	if ((n = sp_keyword(p, end, "SELECT")) != 0) {
+	if ((n = parse_keyword(p, end, "SELECT")) != 0) {
 		info->kind = SQL_KIND_SELECT;
 		info->readonly = 1;
-	} else if ((n = sp_keyword(p, end, "WITH")) != 0) {
+	} else if ((n = parse_keyword(p, end, "WITH")) != 0) {
 		/* CTE -- treat as SELECT for routing; could be DML in
 		 * theory but the SELECT classifier covers the common case. */
 		info->kind = SQL_KIND_SELECT;
 		info->readonly = 1;
-	} else if ((n = sp_keyword(p, end, "INSERT")) != 0) {
+	} else if ((n = parse_keyword(p, end, "INSERT")) != 0) {
 		info->kind = SQL_KIND_INSERT;
-	} else if ((n = sp_keyword(p, end, "REPLACE")) != 0) {
+	} else if ((n = parse_keyword(p, end, "REPLACE")) != 0) {
 		info->kind = SQL_KIND_INSERT;     /* REPLACE is INSERT-shaped */
-	} else if ((n = sp_keyword(p, end, "UPDATE")) != 0) {
+	} else if ((n = parse_keyword(p, end, "UPDATE")) != 0) {
 		info->kind = SQL_KIND_UPDATE;
-	} else if ((n = sp_keyword(p, end, "DELETE")) != 0) {
+	} else if ((n = parse_keyword(p, end, "DELETE")) != 0) {
 		info->kind = SQL_KIND_DELETE;
-	} else if ((n = sp_keyword(p, end, "CREATE")) != 0) {
+	} else if ((n = parse_keyword(p, end, "CREATE")) != 0) {
 		info->kind = SQL_KIND_CREATE;
-	} else if ((n = sp_keyword(p, end, "DROP")) != 0) {
+	} else if ((n = parse_keyword(p, end, "DROP")) != 0) {
 		info->kind = SQL_KIND_DROP;
-	} else if ((n = sp_keyword(p, end, "PRAGMA")) != 0) {
+	} else if ((n = parse_keyword(p, end, "PRAGMA")) != 0) {
 		info->kind = SQL_KIND_PRAGMA;
 		info->readonly = 1;     /* approximation */
-	} else if ((n = sp_keyword(p, end, "BEGIN")) != 0) {
+	} else if ((n = parse_keyword(p, end, "BEGIN")) != 0) {
 		info->kind = SQL_KIND_BEGIN;
-	} else if ((n = sp_keyword(p, end, "COMMIT")) != 0) {
+	} else if ((n = parse_keyword(p, end, "COMMIT")) != 0) {
 		info->kind = SQL_KIND_COMMIT;
-	} else if ((n = sp_keyword(p, end, "END")) != 0) {
+	} else if ((n = parse_keyword(p, end, "END")) != 0) {
 		info->kind = SQL_KIND_COMMIT;     /* SQLite's END is COMMIT */
-	} else if ((n = sp_keyword(p, end, "ROLLBACK")) != 0) {
+	} else if ((n = parse_keyword(p, end, "ROLLBACK")) != 0) {
 		info->kind = SQL_KIND_ROLLBACK;
-	} else if ((n = sp_keyword(p, end, "ATTACH")) != 0) {
+	} else if ((n = parse_keyword(p, end, "ATTACH")) != 0) {
 		info->kind = SQL_KIND_ATTACH;
-	} else if ((n = sp_keyword(p, end, "DETACH")) != 0) {
+	} else if ((n = parse_keyword(p, end, "DETACH")) != 0) {
 		info->kind = SQL_KIND_DETACH;
-	} else if ((n = sp_keyword(p, end, "EXPLAIN")) != 0) {
+	} else if ((n = parse_keyword(p, end, "EXPLAIN")) != 0) {
 		info->kind = SQL_KIND_EXPLAIN;
 		info->readonly = 1;
 	} else if (p == end) {

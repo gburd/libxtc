@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: ISC
  *
- * examples/06_sqlxtc/pcache_xtc.h
+ * examples/06_sqlxtc/sqlxtc_pcache.h
  *	An xtc_slab-backed SQLite page cache.
  *
  *	Every page in one SQLite cache is the same size (szPage +
@@ -30,7 +30,7 @@
  * called before sqlite3_initialize() / the first database handle.
  * Idempotent.  Returns SQLITE_OK on success.
  */
-int xtc_pcache_register(void);
+int sqlxtc_pcache_register(void);
 
 /* Page-cache statistics, for the metrics path. */
 typedef struct {
@@ -39,8 +39,8 @@ typedef struct {
 	uint64_t slab_alloc;     /* fresh slab allocations */
 	uint64_t recycle;        /* unpinned pages reused for a new key */
 	uint64_t live_pages;     /* pages currently resident across caches */
-} xtc_pcache_stats_t;
+} sqlxtc_pcache_stats_t;
 
-void xtc_pcache_get_stats(xtc_pcache_stats_t *out);
+void sqlxtc_pcache_get_stats(sqlxtc_pcache_stats_t *out);
 
 #endif /* SQLXTC_PCACHE_XTC_H */

@@ -15,7 +15,7 @@
 #include <string.h>
 
 #include "xtc_int.h"
-#include "xtc_vfs.h"
+#include "sqlxtc_vfs.h"
 
 /* Open a SQLite handle on db->path.  File-backed databases go through
  * the xtc VFS (instrumented I/O); :memory: and "" do no file I/O so
@@ -26,10 +26,10 @@ sqlxtc_open(const char *path, sqlite3 **out)
 	int memlike = (path == NULL || path[0] == '\0' ||
 	    strcmp(path, ":memory:") == 0);
 	if (!memlike)
-		(void)xtc_vfs_register(0);
+		(void)sqlxtc_vfs_register(0);
 	return sqlite3_open_v2(path, out,
 	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
-	    memlike ? NULL : "xtc");
+	    memlike ? NULL : "sqlxtc");
 }
 
 int

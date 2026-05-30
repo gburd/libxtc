@@ -6,7 +6,7 @@
  *
  * test_xtc_vfs.c
  *	In-process test of the xtc-native SQLite VFS.  Registers the
- *	"xtc" VFS, opens a file-backed database through it, runs a
+ *	"sqlxtc" VFS, opens a file-backed database through it, runs a
  *	create / insert / select workload via SQLite's own C API (no
  *	network, no daemon), and asserts the VFS actually carried the
  *	I/O -- read and write counters and byte volumes are non-zero,
@@ -19,7 +19,7 @@
 #include <unistd.h>
 
 #include "sqlite/sqlite3.h"
-#include "xtc_vfs.h"
+#include "sqlxtc_vfs.h"
 
 static int g_sum;
 
@@ -62,7 +62,7 @@ wal_test(void)
 	unlink(path);
 
 	rc = sqlite3_open_v2(path, &db,
-	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "xtc");
+	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "sqlxtc");
 	if (rc != SQLITE_OK) {
 		fprintf(stderr, "FAIL(wal): open: %s\n", sqlite3_errmsg(db));
 		unlink(path);
@@ -102,7 +102,7 @@ wal_test(void)
 		fprintf(stderr, "FAIL(wal): sum=%d expected 45150\n", g_sum);
 		fails++;
 	} else {
-		printf("  ok   WAL works through xtc vfs "
+		printf("  ok   WAL works through the sqlxtc VFS "
 		       "(shm methods exercised, sum=%d)\n", g_sum);
 	}
 
@@ -119,7 +119,7 @@ main(void)
 	char *err = NULL;
 	char path[] = "/tmp/sqlxtc-vfs-test-XXXXXX";
 	int fd, rc, i, fails = 0;
-	xtc_vfs_stats_t s0, s1;
+	sqlxtc_vfs_stats_t s0, s1;
 
 	/* Unique temp path; remove the placeholder so SQLite creates it. */
 	fd = mkstemp(path);
@@ -127,15 +127,15 @@ main(void)
 	close(fd);
 	unlink(path);
 
-	if (xtc_vfs_register(0) != SQLITE_OK) {
-		fprintf(stderr, "FAIL: xtc_vfs_register\n");
+	if (sqlxtc_vfs_register(0) != SQLITE_OK) {
+		fprintf(stderr, "FAIL: sqlxtc_vfs_register\n");
 		return 2;
 	}
 
-	xtc_vfs_get_stats(&s0);
+	sqlxtc_vfs_get_stats(&s0);
 
 	rc = sqlite3_open_v2(path, &db,
-	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "xtc");
+	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "sqlxtc");
 	if (rc != SQLITE_OK) {
 		fprintf(stderr, "FAIL: open via xtc vfs: %s\n",
 		    sqlite3_errmsg(db));
@@ -175,14 +175,14 @@ main(void)
 	}
 
 	sqlite3_close(db);
-	xtc_vfs_get_stats(&s1);
+	sqlxtc_vfs_get_stats(&s1);
 
 	/* sum(1..500) == 125250: the data round-tripped through the VFS. */
 	if (g_sum != 125250) {
 		fprintf(stderr, "FAIL: sum(a)=%d expected 125250\n", g_sum);
 		fails++;
 	} else {
-		printf("  ok   data round-trips through xtc vfs (sum=%d)\n",
+		printf("  ok   data round-trips through the sqlxtc VFS (sum=%d)\n",
 		    g_sum);
 	}
 
@@ -216,7 +216,7 @@ main(void)
 	/* WAL mode: exercises the VFS shared-memory forwarding. */
 	fails += wal_test();
 
-	printf("%s\n", fails == 0 ? "All xtc vfs tests passed."
-	                          : "xtc vfs test FAILED.");
+	printf("%s\n", fails == 0 ? "All sqlxtc VFS tests passed."
+	                          : "sqlxtc VFS test FAILED.");
 	return fails == 0 ? 0 : 1;
 }
