@@ -3170,9 +3170,9 @@ Tier 0 is done; the rest are tracked here.
 
 ### PostgreSQL-on-xtc API requests (R1-R6)
 
-From the PG threading F5/F7 integration spikes (`xtc-requests.txt`);
-full triage and API sketches in `docs/M_PG_REQUESTS.md`.  All stay on
-the runtime side of the boundary -- none make xtc learn SQL/WAL/fmgr.
+From the PG threading F5/F7 integration spikes (`xtc-requests.txt`).
+All stay on the runtime side of the boundary -- none make xtc learn
+SQL/WAL/fmgr.
 
 | Req | Item | Status | Lands |
 |-----|------|--------|-------|
