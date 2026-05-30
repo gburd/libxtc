@@ -140,7 +140,12 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 			(void)xtc_waker_wake(&w);
 			c->waiter = NULL;
 		}
-		__coro_destroy(c);
+		/* Do NOT destroy here: the task's cleanup
+		 * (__coro_task_cleanup) releases the fiber + coro struct
+		 * once, at loop_fini.  Destroying eagerly here too left the
+		 * task's cleanup pointing at freed memory -> a double
+		 * DeleteFiber + double free (heap corruption at fini).
+		 * Mirrors the ucontext path. */
 		return XTC_TASK_DONE;
 	}
 	if (c->_parked_on != NULL) {
