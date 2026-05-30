@@ -122,6 +122,8 @@ sql_parse_drv.o: sql_parse_drv.c sql_parse.h sql_parse_lime.h sql_parse_gen.h
 
 clean:
 	rm -f $(OBJS) $(TARGET)
+	rm -f $(AMALG_OBJS) sqlxtc-server-amalg
+	rm -rf $(AMALG_DIR)
 	rm -f sql_parse_gen.o sql_parse_drv.o
 	rm -f /tmp/sqlxtc-bench.db /tmp/sqlxtc-bench.db-*
 
@@ -132,6 +134,40 @@ distclean: clean
 
 test: $(TARGET) test-quack test-sql-parse
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
+
+# ---- amalgamation build ----
+# Builds sqlxtc against the single-file xtc amalgamation instead of
+# libxtc.a, which exercises the amalgamation as a real, broad
+# consumer (app, io, log, lrlock, lwlock, proc, res, stats, net, plus
+# the __os_* helpers).  The sqlxtc sources are compiled in a separate
+# amalgamation mode (-Iamalg/include resolves the forwarding stubs to
+# the single xtc.h); SQLite is reused as-is.  No libxtc.a, no
+# liburing: the amalgamation auto-selects the epoll backend.
+AMALG_DIR    = amalg
+AMALG_CFLAGS = -O2 -g -std=c11 -Wall -Wextra -Wpedantic -D_GNU_SOURCE \
+               -I$(AMALG_DIR)/include -I.
+AMALG_OBJS   = $(SRCS:.c=.amalg.o)
+
+.PHONY: amalg amalg-test
+
+$(AMALG_DIR)/xtc.c:
+	python3 ../../dist/mkamalgamation.py --root ../.. --out $(AMALG_DIR)
+
+$(AMALG_DIR)/xtc.o: $(AMALG_DIR)/xtc.c
+	$(CC) $(AMALG_CFLAGS) -c -o $@ $(AMALG_DIR)/xtc.c
+
+%.amalg.o: %.c $(AMALG_DIR)/xtc.c
+	$(CC) $(AMALG_CFLAGS) -c -o $@ $<
+
+sqlxtc-server-amalg: $(AMALG_OBJS) sqlite/sqlite3.o $(AMALG_DIR)/xtc.o
+	$(CC) $(AMALG_CFLAGS) -o $@ $(AMALG_OBJS) sqlite/sqlite3.o \
+		$(AMALG_DIR)/xtc.o -pthread -ldl -lm
+
+amalg: sqlxtc-server-amalg
+
+amalg-test: sqlxtc-server-amalg
+	@SQLXTC_SERVER=$(CURDIR)/sqlxtc-server-amalg \
+		bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 test-quack: ../../test/sqlxtc/test_quack
 	../../test/sqlxtc/test_quack

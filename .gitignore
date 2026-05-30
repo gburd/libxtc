@@ -84,3 +84,8 @@ compile_commands.json
 # Generated amalgamation
 /amalgamation/
 build_unix/amalgamation/
+
+# sqlxtc amalgamation build artifacts
+examples/06_sqlxtc/amalg/
+examples/06_sqlxtc/*.amalg.o
+examples/06_sqlxtc/sqlxtc-server-amalg
