@@ -11,6 +11,9 @@
 #include "xtc_int.h"
 #include "loop_int.h"
 #include "xtc_slab.h"
+#include "coro_int.h"
+#include "xtc_async.h"
+#include "os_time.h"
 
 #include <stdint.h>
 #include <unistd.h>
@@ -254,6 +257,11 @@ __xtc_loop_step(xtc_loop_t *loop)
 		int verdict;
 		atomic_fetch_add_explicit(&loop->n_tasks_run, 1,
 		    memory_order_relaxed);
+		if (loop->yield_budget_ns > 0) {
+			int64_t s = 0;
+			(void)__os_clock_mono(&s);
+			t->run_start_ns = s;   /* start of this run quantum */
+		}
 		t->state = XTC_TS_RUNNING;
 		verdict = t->fn(t, t->user);
 		switch (verdict) {
@@ -408,4 +416,64 @@ __xtc_loop_step_once(xtc_loop_t *loop)
 	}
 	rc = __xtc_loop_step(loop);
 	return rc < 0 ? rc : 1;
+}
+
+/* ---- cooperative yield watchdog ---------------------------------- *
+ *
+ * A non-yielding compute loop monopolises its loop thread; xtc has no
+ * forcible preemption (the OS-process tier is the preemption lever).
+ * These let a long compute cooperate: set a per-loop time budget, then
+ * call xtc_yield_check() (or xtc_yield_if_due()) inside the loop and
+ * yield when it reports the quantum over budget.  This is also the
+ * queryable "over budget" signal an embedder wires to a cancellation
+ * token (fire xtc_abort_source on over-budget; see xtc_svr_call_abortable).
+ */
+
+/* PUBLIC: void xtc_yield_set_budget __P((xtc_loop_t *, int64_t)); */
+void
+xtc_yield_set_budget(xtc_loop_t *loop, int64_t budget_ns)
+{
+	if (loop != NULL)
+		loop->yield_budget_ns = budget_ns < 0 ? 0 : budget_ns;
+}
+
+/* PUBLIC: int xtc_yield_check __P((void)); */
+int
+xtc_yield_check(void)
+{
+	xtc_task_t *t = __xtc_current_task();
+	int64_t now = 0, budget;
+
+	if (t == NULL || t->loop == NULL)
+		return 0;                       /* off a loop: never due */
+	budget = t->loop->yield_budget_ns;
+	if (budget <= 0 || t->run_start_ns == 0)
+		return 0;                       /* watchdog disabled */
+	(void)__os_clock_mono(&now);
+	if (now - t->run_start_ns >= budget) {
+		atomic_fetch_add_explicit(&t->loop->n_yield_due, 1,
+		    memory_order_relaxed);
+		return 1;
+	}
+	return 0;
+}
+
+/* PUBLIC: int xtc_yield_if_due __P((void)); */
+int
+xtc_yield_if_due(void)
+{
+	if (xtc_yield_check()) {
+		xtc_yield();
+		return 1;
+	}
+	return 0;
+}
+
+/* PUBLIC: uint64_t xtc_yield_due_count __P((const xtc_loop_t *)); */
+uint64_t
+xtc_yield_due_count(const xtc_loop_t *loop)
+{
+	if (loop == NULL)
+		return 0;
+	return atomic_load_explicit(&loop->n_yield_due, memory_order_relaxed);
 }
