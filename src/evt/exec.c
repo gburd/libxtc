@@ -301,6 +301,29 @@ xtc_exec_loop_id(void)
 	return l == NULL ? -1 : l->exec_id;
 }
 
+/* PUBLIC: int xtc_shard_id __P((void)); */
+int
+xtc_shard_id(void)
+{
+	/* Seastar-style this_shard_id(): the 0-based index of the loop
+	 * the caller runs on, so shared-nothing consumers can index
+	 * per-core state with no synchronization.  A standalone loop is
+	 * shard 0 of 1; -1 only when not on any loop. */
+	xtc_loop_t *l = __xtc_current_loop;
+	if (l == NULL) return -1;
+	return l->exec_id < 0 ? 0 : l->exec_id;
+}
+
+/* PUBLIC: int xtc_shard_count __P((void)); */
+int
+xtc_shard_count(void)
+{
+	xtc_loop_t *l = __xtc_current_loop;
+	if (l == NULL) return 0;
+	if (l->exec != NULL) return l->exec->n_loops;
+	return 1;                        /* standalone loop == 1 shard */
+}
+
 /* PUBLIC: xtc_loop_t *xtc_exec_loop __P((xtc_exec_t *, int)); */
 xtc_loop_t *
 xtc_exec_loop(xtc_exec_t *e, int idx)
