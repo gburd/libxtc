@@ -11,6 +11,7 @@
 .Nm xtc_recv_match ,
 .Nm xtc_recv_correlate ,
 .Nm xtc_proc_wait_fd ,
+.Nm xtc_proc_sleep ,
 .Nm xtc_exit_self ,
 .Nm xtc_exit_pid ,
 .Nm xtc_link ,
@@ -40,6 +41,8 @@
 .Fn xtc_recv_correlate "const void *corr_value" "size_t corr_size" "int n_expected" "xtc_msg_t *out_msgs" "int *out_n" "int64_t timeout_ns"
 .Ft int
 .Fn xtc_proc_wait_fd "int fd" "uint32_t interest" "int64_t timeout_ns" "uint32_t *out_revents"
+.Ft int
+.Fn xtc_proc_sleep "int64_t ns"
 .Ft int
 .Fn xtc_exit_self "int reason"
 .Ft int
@@ -197,6 +200,16 @@ the proc is killed via
 receives a bitmask of which conditions fired.  This is the
 canonical way to write an idle-CPU-zero server: the proc sleeps
 until something real happens.
+.Pp
+.Fn xtc_proc_sleep
+parks the calling proc on a timer for at least
+.Fa ns
+nanoseconds.  The loop runs other work meanwhile -- it does not block
+the thread -- and, unlike a timed
+.Fn xtc_recv ,
+it does not touch the mailbox.  Returns
+.Dv XTC_E_INVAL
+if not called from a proc.
 .Pp
 .Fn xtc_exit_self
 terminates the calling process; cleanup runs and any links /
