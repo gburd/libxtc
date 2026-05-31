@@ -23,7 +23,7 @@
 
 typedef enum quack_msg_kind {
 	QUACK_MSG_NONE = 0,
-	QUACK_MSG_QUERY,        /* {"q":...,"limit":N} */
+	QUACK_MSG_QUERY,        /* {"q":...,"limit":N,"params":[...]} */
 	QUACK_MSG_PING,         /* {"ping":1} */
 	QUACK_MSG_QUIT,         /* {"quit":1} */
 	QUACK_MSG_UNKNOWN       /* well-formed JSON, unknown top-level key */
@@ -34,8 +34,23 @@ typedef struct quack_msg {
 	const char      *q;          /* QUERY: pointer into caller buffer */
 	size_t           q_len;
 	int64_t          limit;      /* QUERY: 0 if absent */
+	/* Bound parameters for a parameterized statement (?1, ?2, ...);
+	 * filled from an optional top-level "params" array.  Text values
+	 * point into the caller's buffer. */
+	struct quack_param {
+		int          type;       /* QUACK_P_* */
+		int64_t      ival;       /* QUACK_P_INT */
+		const char  *sval;       /* QUACK_P_TEXT (into caller buffer) */
+		size_t       slen;
+	}                params[32];
+	int              n_params;
 	const char      *err;        /* parse error message; NULL on OK */
 } quack_msg_t;
+
+#define QUACK_MAX_PARAMS 32
+#define QUACK_P_NULL  0
+#define QUACK_P_INT   1
+#define QUACK_P_TEXT  2
 
 /* Parse one line.  `line` need NOT be NUL-terminated; `len` is the
  * length up to but not including the terminating '\n' (which the

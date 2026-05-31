@@ -112,6 +112,14 @@ int
 db_exec(sx_db *h, const char *sql, int64_t limit,
         quack_buf_t *out_buf, int64_t *n_rows, char **err)
 {
+	return db_exec_params(h, sql, NULL, 0, limit, out_buf, n_rows, err);
+}
+
+int
+db_exec_params(sx_db *h, const char *sql,
+        const struct quack_param *params, int n_params, int64_t limit,
+        quack_buf_t *out_buf, int64_t *n_rows, char **err)
+{
 	sx_stmt *stmt = NULL;
 	int rc;
 	int ncols;
@@ -124,6 +132,30 @@ db_exec(sx_db *h, const char *sql, int64_t limit,
 		*err = strdup(msg ? msg : "prepare failed");
 		if (stmt) sx_finalize(stmt);
 		return -1;
+	}
+
+	/* Bind parameters (?1..?N) from the request, if any. */
+	if (n_params > 0) {
+		int pi;
+		for (pi = 0; pi < n_params; pi++) {
+			const struct quack_param *p = &params[pi];
+			int idx = pi + 1;
+			switch (p->type) {
+			case QUACK_P_INT:
+				rc = sx_bind_int64(stmt, idx, p->ival); break;
+			case QUACK_P_TEXT:
+				rc = sx_bind_text(stmt, idx, p->sval,
+				    (int)p->slen); break;
+			case QUACK_P_NULL:
+			default:
+				rc = sx_bind_null(stmt, idx); break;
+			}
+			if (rc != SX_OK) {
+				*err = strdup("bind failed");
+				sx_finalize(stmt);
+				return -1;
+			}
+		}
 	}
 
 	ncols = sx_column_count(stmt);
