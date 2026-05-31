@@ -271,6 +271,58 @@ test_writer_reader_race(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* #9: optional lock-order (WITNESS) tracker detects an inversion. */
+static int g_track_handler_hits;
+static void
+track_handler(uint16_t held, uint16_t acq, void *u)
+{
+	(void)held; (void)acq; (void)u;
+	g_track_handler_hits++;
+}
+static MunitResult
+test_lock_order_track(const MunitParameter p[], void *d)
+{
+	xtc_lwlock_t a, b;
+	(void)p; (void)d;
+	munit_assert_int(xtc_lwlock_init(&a, 100), ==, XTC_OK);   /* tranche 100 */
+	munit_assert_int(xtc_lwlock_init(&b, 200), ==, XTC_OK);   /* tranche 200 */
+
+	g_track_handler_hits = 0;
+	xtc_lwlock_track_reset();
+	xtc_lwlock_track_set_handler(track_handler, NULL);
+	xtc_lwlock_track_enable(1);
+
+	/* Establish order 100 -> 200. */
+	munit_assert_int(xtc_lwlock_acquire(&a, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&b, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	xtc_lwlock_release(&b);
+	xtc_lwlock_release(&a);
+	munit_assert_long(xtc_lwlock_track_violations(), ==, 0);
+
+	/* Now the inverse order 200 -> 100: an inversion. */
+	munit_assert_int(xtc_lwlock_acquire(&b, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&a, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	xtc_lwlock_release(&a);
+	xtc_lwlock_release(&b);
+	munit_assert_long(xtc_lwlock_track_violations(), >=, 1);
+	munit_assert_int(g_track_handler_hits, >=, 1);
+
+	/* Disabled: no new violations even on a fresh inversion. */
+	xtc_lwlock_track_enable(0);
+	xtc_lwlock_track_reset();
+	g_track_handler_hits = 0;
+	munit_assert_int(xtc_lwlock_acquire(&b, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&a, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	xtc_lwlock_release(&a);
+	xtc_lwlock_release(&b);
+	munit_assert_long(xtc_lwlock_track_violations(), ==, 0);
+
+	xtc_lwlock_track_set_handler(NULL, NULL);
+	xtc_lwlock_destroy(&a);
+	xtc_lwlock_destroy(&b);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/basic_exclusive",        test_basic_exclusive,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/basic_shared",           test_basic_shared,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -278,6 +330,7 @@ static MunitTest tests[] = {
 	{ "/writer_blocks_on_reader",test_writer_blocks_on_reader,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent_shared",      test_concurrent_shared,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/writer_reader_race",     test_writer_reader_race,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/lock_order_track",       test_lock_order_track,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m13/lwlock", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

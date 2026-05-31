@@ -62,9 +62,117 @@ struct held_entry {
 static XTC_THREAD_LOCAL struct held_entry __held[XTC_LWLOCK_TLS_SLOTS];
 static XTC_THREAD_LOCAL int               __n_held = 0;
 
+/* ----- optional lock-order (WITNESS) tracker -------------------------
+ *
+ * Off by default.  When enabled, every acquire records the order
+ * "tranche A was held when tranche B was acquired" in a global edge
+ * set; if the reverse order (B-before-A) was ever seen, that is a
+ * lock-order inversion -- the precursor of a two-lock deadlock the
+ * lwlock primitive itself cannot detect (unlike xtc_lockmgr).  Keyed
+ * by tranche (the lock class), since the frozen lwlock ABI has no
+ * room for per-lock bookkeeping.  Enable in test/staging; it has
+ * overhead and is not meant for production hot paths. */
+#define LW_TRACK_EDGES 8192u            /* power of two */
+static _Atomic int        __lw_track_on = 0;
+static _Atomic long       __lw_track_viol = 0;
+static pthread_mutex_t    __lw_track_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t           __lw_track_edge[LW_TRACK_EDGES];  /* 0 == empty */
+static xtc_lwlock_track_fn __lw_track_fn = NULL;
+static void              *__lw_track_user = NULL;
+
+static int
+__lw_edge_contains(uint32_t key)
+{
+	uint32_t i = (key * 2654435761u) & (LW_TRACK_EDGES - 1);
+	uint32_t probes = 0;
+	while (__lw_track_edge[i] != 0) {
+		if (__lw_track_edge[i] == key) return 1;
+		i = (i + 1) & (LW_TRACK_EDGES - 1);
+		if (++probes >= LW_TRACK_EDGES) break;
+	}
+	return 0;
+}
+
+static void
+__lw_edge_insert(uint32_t key)
+{
+	uint32_t i = (key * 2654435761u) & (LW_TRACK_EDGES - 1);
+	uint32_t probes = 0;
+	while (__lw_track_edge[i] != 0) {
+		if (__lw_track_edge[i] == key) return;
+		i = (i + 1) & (LW_TRACK_EDGES - 1);
+		if (++probes >= LW_TRACK_EDGES) return;   /* full: degrade */
+	}
+	__lw_track_edge[i] = key;
+}
+
+/* Record that every currently-held tranche precedes `acquired`; flag
+ * any reverse edge already observed as an inversion. */
+static void
+__lw_track_acquire(const xtc_lwlock_t *acquired)
+{
+	int i;
+	uint16_t b = acquired->tranche;
+
+	if (!atomic_load_explicit(&__lw_track_on, memory_order_relaxed))
+		return;
+	(void)pthread_mutex_lock(&__lw_track_mu);
+	for (i = 0; i < __n_held; i++) {
+		uint16_t a = __held[i].lock->tranche;
+		uint32_t fwd, rev;
+		if (a == b) continue;            /* same class: not tracked */
+		fwd = ((uint32_t)a << 16) | b;
+		rev = ((uint32_t)b << 16) | a;
+		if (__lw_edge_contains(rev)) {
+			atomic_fetch_add_explicit(&__lw_track_viol, 1,
+			    memory_order_relaxed);
+			if (__lw_track_fn != NULL)
+				__lw_track_fn(a, b, __lw_track_user);
+		}
+		__lw_edge_insert(fwd);
+	}
+	(void)pthread_mutex_unlock(&__lw_track_mu);
+}
+
+/* PUBLIC: void xtc_lwlock_track_enable __P((int)); */
+void
+xtc_lwlock_track_enable(int on)
+{
+	atomic_store_explicit(&__lw_track_on, on ? 1 : 0,
+	    memory_order_relaxed);
+}
+
+/* PUBLIC: long xtc_lwlock_track_violations __P((void)); */
+long
+xtc_lwlock_track_violations(void)
+{
+	return atomic_load_explicit(&__lw_track_viol, memory_order_relaxed);
+}
+
+/* PUBLIC: void xtc_lwlock_track_reset __P((void)); */
+void
+xtc_lwlock_track_reset(void)
+{
+	(void)pthread_mutex_lock(&__lw_track_mu);
+	memset(__lw_track_edge, 0, sizeof __lw_track_edge);
+	atomic_store_explicit(&__lw_track_viol, 0, memory_order_relaxed);
+	(void)pthread_mutex_unlock(&__lw_track_mu);
+}
+
+/* PUBLIC: void xtc_lwlock_track_set_handler __P((xtc_lwlock_track_fn, void *)); */
+void
+xtc_lwlock_track_set_handler(xtc_lwlock_track_fn fn, void *user)
+{
+	__lw_track_fn = fn;
+	__lw_track_user = user;
+}
+
 static int
 __held_push(const xtc_lwlock_t *l, xtc_lwlock_mode_t m)
 {
+	/* Record lock-order edges from the currently-held set BEFORE
+	 * pushing the new lock (the witness tracker; a no-op when off). */
+	__lw_track_acquire(l);
 	if (__n_held >= XTC_LWLOCK_TLS_SLOTS) return -1;
 	__held[__n_held].lock = l;
 	__held[__n_held].mode = m;
