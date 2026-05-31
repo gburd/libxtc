@@ -129,7 +129,7 @@ try_write(conn_state_t *st)
 static void
 handle_query(conn_state_t *st, const quack_msg_t *msg)
 {
-	sqlite3 *h;
+	sx_db *h;
 	int      owned;
 	int64_t  rows = 0;
 	char    *err = NULL;
