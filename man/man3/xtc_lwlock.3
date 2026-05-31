@@ -9,7 +9,11 @@
 .Nm xtc_lwlock_acquire ,
 .Nm xtc_lwlock_acquire_cond ,
 .Nm xtc_lwlock_release ,
-.Nm xtc_lwlock_held_by_me
+.Nm xtc_lwlock_held_by_me ,
+.Nm xtc_lwlock_track_enable ,
+.Nm xtc_lwlock_track_violations ,
+.Nm xtc_lwlock_track_reset ,
+.Nm xtc_lwlock_track_set_handler
 .Nd lightweight lock with shared / exclusive modes
 .Sh SYNOPSIS
 .In xtc.h
@@ -26,12 +30,37 @@
 .Fn xtc_lwlock_release "xtc_lwlock_t *lock"
 .Ft int
 .Fn xtc_lwlock_held_by_me "const xtc_lwlock_t *lock"
+.Ft void
+.Fn xtc_lwlock_track_enable "int on"
+.Ft long
+.Fn xtc_lwlock_track_violations "void"
+.Ft void
+.Fn xtc_lwlock_track_reset "void"
+.Ft void
+.Fn xtc_lwlock_track_set_handler "xtc_lwlock_track_fn fn" "void *user"
 .Sh DESCRIPTION
 .Nm xtc_lwlock
 is a lightweight lock with shared (reader) and exclusive (writer)
 modes.  Single atomic on the fast path; pthread_mutex / cond on
 the contended path.  Ported from PostgreSQL's
 .Pa src/backend/storage/lmgr/lwlock.c .
+.Pp
+The optional lock-order (WITNESS) tracker is off by default.
+.Fn xtc_lwlock_track_enable
+turns it on (and off); while on, each acquire records the order
+.Dq tranche A was held when tranche B was acquired ,
+keyed by the lock's tranche, and an acquisition that reverses a
+previously-seen order is a lock-order inversion -- the precursor of a
+two-lock deadlock the lwlock primitive cannot otherwise detect.
+.Fn xtc_lwlock_track_violations
+returns the running count;
+.Fn xtc_lwlock_track_set_handler
+registers a callback fired with
+.Pq held_tranche , acquired_tranche
+on each inversion; and
+.Fn xtc_lwlock_track_reset
+clears the edge set and counter.  The tracker has overhead and is
+intended for test and staging builds, not production hot paths.
 .Pp
 The lock state is encoded in one
 .Vt _Atomic uint32_t :
