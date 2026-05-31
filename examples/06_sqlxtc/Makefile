@@ -131,6 +131,7 @@ clean:
 	rm -f test_concurrency test_concurrency.o
 	rm -f test_parallel test_parallel.o
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o
+	rm -f test_bufmgr_mt
 	rm -f test_btnode
 	rm -f test_btree
 	rm -f test_vfs_loop test_vfs_loop.o
@@ -143,7 +144,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-parallel test-bufmgr test-btnode test-btree
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -237,6 +238,13 @@ test-bufmgr: test_bufmgr
 	./test_bufmgr
 
 bufmgr.o: bufmgr.c bufmgr.h
+
+# ---- buffer-manager multi-threaded stress test (executor; no daemon) ----
+test_bufmgr_mt: test_bufmgr_mt.c bufmgr.o
+	$(CC) $(CFLAGS) -o $@ test_bufmgr_mt.c bufmgr.o $(LDFLAGS)
+
+test-bufmgr-mt: test_bufmgr_mt
+	./test_bufmgr_mt
 
 # ---- B-tree node (prefix compression) unit test (standalone) ----
 test_btnode: test_btnode.c btnode.c btnode.h
