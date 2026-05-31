@@ -65,4 +65,10 @@ void db_handle_put(db_t *db, sx_db *h, int owned);
 int  db_exec(sx_db *h, const char *sql, int64_t limit,
              quack_buf_t *out_buf, int64_t *n_rows, char **err);
 
+/* Like db_exec but binds parameters (?1..?N) from a request's params
+ * array before stepping (see quack.h). */
+int  db_exec_params(sx_db *h, const char *sql,
+             const struct quack_param *params, int n_params, int64_t limit,
+             quack_buf_t *out_buf, int64_t *n_rows, char **err);
+
 #endif /* SQLXTC_DB_H */
