@@ -21,6 +21,7 @@
 #include "xtc_int.h"
 #include "xtc_blocking.h"
 #include "xtc_stats.h"
+#include "xtc_sync.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -57,7 +58,7 @@ struct bm_frame {
 	struct bm_frame  *hnext;      /* page-table hash chain (pid mode) */
 	void             *page;       /* page_size bytes (into the pool) */
 	struct bm_frame  *next_free;
-	pthread_rwlock_t  latch;      /* content latch (see bm_latch_*) */
+	xtc_arwlock_t    *latch;      /* content latch (fiber-yielding) */
 };
 
 struct bm {
@@ -349,7 +350,10 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	}
 	for (i = 0; i < bm->n_frames; i++) {
 		bm->frames[i].page = bm->pool + (size_t)i * bm->page_size;
-		(void)pthread_rwlock_init(&bm->frames[i].latch, NULL);
+		if ((rc = xtc_arwlock_create(&bm->frames[i].latch)) != XTC_OK) {
+			__os_aligned_free(bm->pool); __os_free(bm->frames);
+			close(bm->fd); __os_free(bm); return rc;
+		}
 		free_push(bm, &bm->frames[i]);
 	}
 	/* page table: next pow2 >= 2*n_frames */
@@ -375,7 +379,7 @@ bm_destroy(bm_t *bm)
 	if (bm->frames != NULL) {
 		uint32_t i;
 		for (i = 0; i < bm->n_frames; i++)
-			(void)pthread_rwlock_destroy(&bm->frames[i].latch);
+			xtc_arwlock_destroy(bm->frames[i].latch);
 	}
 	(void)pthread_mutex_destroy(&bm->free_mu);
 	(void)pthread_mutex_destroy(&bm->pid_mu);
@@ -573,9 +577,9 @@ bm_page(bm_frame_t *frame) { return frame ? frame->page : NULL; }
 bm_pid_t
 bm_frame_pid(const bm_frame_t *frame) { return frame ? frame->pid : BM_PID_NONE; }
 
-void bm_latch_shared(bm_frame_t *f)    { if (f) (void)pthread_rwlock_rdlock(&f->latch); }
-void bm_latch_exclusive(bm_frame_t *f) { if (f) (void)pthread_rwlock_wrlock(&f->latch); }
-void bm_unlatch(bm_frame_t *f)         { if (f) (void)pthread_rwlock_unlock(&f->latch); }
+void bm_latch_shared(bm_frame_t *f)    { if (f) (void)xtc_arwlock_rdlock(f->latch, -1); }
+void bm_latch_exclusive(bm_frame_t *f) { if (f) (void)xtc_arwlock_wrlock(f->latch, -1); }
+void bm_unlatch(bm_frame_t *f)         { if (f) (void)xtc_arwlock_unlock(f->latch); }
 
 /* ---- page-provider process ---- */
 struct pp_arg { bm_t *bm; int64_t interval; };
