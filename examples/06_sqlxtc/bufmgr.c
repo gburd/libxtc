@@ -600,14 +600,22 @@ pp_proc(void *arg)
 			if (st == BM_HOT &&
 			    atomic_load_explicit(&bm->free_n, memory_order_relaxed)
 			    < bm->cool_target) {
-				uint64_t cw;
-				if (has_resident_child(bm, f))
-					continue;       /* cool children first */
-				cw = atomic_load_explicit(f->parent, memory_order_acquire);
-				if (sw_is_hot(cw) && sw_frame(cw) == f &&
-				    atomic_compare_exchange_strong(f->parent, &cw, sw_cool(f))) {
-					atomic_store_explicit(&f->state, BM_COOL, memory_order_release);
-					atomic_fetch_add_explicit(&bm->s_cooled, 1, memory_order_relaxed);
+				if (f->via_pid) {
+					/* page-table mode: cool is a state flip. */
+					atomic_store_explicit(&f->state, BM_COOL,
+					    memory_order_release);
+					atomic_fetch_add_explicit(&bm->s_cooled, 1,
+					    memory_order_relaxed);
+				} else {
+					uint64_t cw;
+					if (has_resident_child(bm, f))
+						continue;   /* cool children first */
+					cw = atomic_load_explicit(f->parent, memory_order_acquire);
+					if (sw_is_hot(cw) && sw_frame(cw) == f &&
+					    atomic_compare_exchange_strong(f->parent, &cw, sw_cool(f))) {
+						atomic_store_explicit(&f->state, BM_COOL, memory_order_release);
+						atomic_fetch_add_explicit(&bm->s_cooled, 1, memory_order_relaxed);
+					}
 				}
 			} else if (st == BM_COOL &&
 			    atomic_load_explicit(&f->dirty, memory_order_acquire)) {
