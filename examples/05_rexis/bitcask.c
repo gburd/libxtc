@@ -131,6 +131,7 @@ __hash_key(const void *key, size_t len)
 struct bitcask {
 	pthread_mutex_t      lock;
 	int                  fd;
+	char                 dir[480];
 	uint64_t             write_offset;
 	struct idx_entry    *buckets[IDX_BUCKETS];
 	uint64_t             n_keys;
@@ -303,6 +304,7 @@ bitcask_open(const char *dir, bitcask_t **out)
 	bc = calloc(1, sizeof *bc);
 	if (bc == NULL) return -1;
 	pthread_mutex_init(&bc->lock, NULL);
+	snprintf(bc->dir, sizeof bc->dir, "%s", dir);
 	snprintf(path, sizeof path, "%s/bitcask.data", dir);
 	bc->fd = open(path, O_RDWR | O_CREAT, 0644);
 	if (bc->fd < 0) { free(bc); return -1; }
@@ -515,6 +517,104 @@ bitcask_sync(bitcask_t *bc)
 {
 	if (bc == NULL) return -1;
 	return fsync(bc->fd) == 0 ? 0 : -1;
+}
+
+/*
+ * Compaction (merge).  Rewrite the data file keeping only the live
+ * records -- the current index entries -- so superseded versions and
+ * deleted keys (the bytes_dead bytes) are reclaimed.  The live set is
+ * written to a temp file, fsync'd, then renamed over the data file;
+ * the in-memory index offsets are re-pointed into the new file as
+ * each record is written.  Holds the write lock for the whole pass
+ * (a single-file Bitcask cannot serve reads from the old file while
+ * the new one is being built); a multi-file variant would merge
+ * immutable segments in the background instead.
+ */
+int
+bitcask_compact(bitcask_t *bc)
+{
+	char tmp_path[512], data_path[512];
+	int tfd;
+	uint64_t new_off = 0;
+	uint32_t i;
+	int rc = -1;
+
+	if (bc == NULL) return -1;
+
+	snprintf(tmp_path, sizeof tmp_path, "%s/bitcask.compact", bc->dir);
+	snprintf(data_path, sizeof data_path, "%s/bitcask.data", bc->dir);
+
+	pthread_mutex_lock(&bc->lock);
+
+	tfd = open(tmp_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+	if (tfd < 0) goto out;
+
+	for (i = 0; i < IDX_BUCKETS; i++) {
+		struct idx_entry *e;
+		for (e = bc->buckets[i]; e != NULL; e = e->next) {
+			uint8_t hdr[HDR_SIZE], hdr_for_crc[HDR_SIZE - 4];
+			uint8_t *val = NULL;
+			uint32_t crc;
+			uint64_t rec_off = new_off;
+
+			if (e->val_len > 0) {
+				val = malloc(e->val_len);
+				if (val == NULL) goto fail;
+				if (pread(bc->fd, val, e->val_len,
+				    (off_t)e->offset) != (ssize_t)e->val_len) {
+					free(val); goto fail;
+				}
+			}
+
+			put_u64(hdr_for_crc + 0, e->timestamp);
+			put_u32(hdr_for_crc + 8, (uint32_t)e->key_len);
+			put_u32(hdr_for_crc + 12, e->val_len);
+			crc = crc32(hdr_for_crc, sizeof hdr_for_crc, 0);
+			crc = crc32(e->key, e->key_len, crc);
+			if (e->val_len > 0) crc = crc32(val, e->val_len, crc);
+			put_u32(hdr, crc);
+			memcpy(hdr + 4, hdr_for_crc, sizeof hdr_for_crc);
+
+			if (pwrite(tfd, hdr, HDR_SIZE, (off_t)rec_off) !=
+			    (ssize_t)HDR_SIZE) { free(val); goto fail; }
+			if (pwrite(tfd, e->key, e->key_len,
+			    (off_t)(rec_off + HDR_SIZE)) !=
+			    (ssize_t)e->key_len) { free(val); goto fail; }
+			if (e->val_len > 0 &&
+			    pwrite(tfd, val, e->val_len,
+			    (off_t)(rec_off + HDR_SIZE + e->key_len)) !=
+			    (ssize_t)e->val_len) { free(val); goto fail; }
+			free(val);
+
+			/* Re-point the index at the new file's value offset. */
+			e->offset = rec_off + HDR_SIZE + e->key_len;
+			new_off += (uint64_t)HDR_SIZE + e->key_len + e->val_len;
+		}
+	}
+
+	if (fsync(tfd) != 0) goto fail;
+	if (rename(tmp_path, data_path) != 0) goto fail;
+
+	/* Swap to the compacted file. */
+	(void)close(bc->fd);
+	bc->fd = tfd;
+	bc->write_offset = new_off;
+	bc->bytes_used = new_off;
+	bc->bytes_dead = 0;
+	rc = 0;
+	pthread_mutex_unlock(&bc->lock);
+	return rc;
+
+fail:
+	(void)close(tfd);
+	(void)unlink(tmp_path);
+	/* Index offsets may be partially re-pointed at the temp file; the
+	 * old data file is untouched and still authoritative, but the
+	 * in-memory offsets are now inconsistent, so the caller must
+	 * treat a failed compaction as fatal for this handle. */
+out:
+	pthread_mutex_unlock(&bc->lock);
+	return rc;
 }
 
 void
