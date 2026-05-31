@@ -9,14 +9,19 @@
  *	driving one tree on a multi-loop executor (one OS thread per
  *	loop), with the page-provider live and page I/O offloaded.
  *
- *	Writers own disjoint key ranges and insert them concurrently;
- *	they serialize on the tree's fiber-yielding writer lock (so a
- *	writer parked on I/O never wedges the loop and contending writers
- *	park instead of blocking).  Readers run lock-free lookups
- *	concurrently with the writers: a hit must carry the correct
- *	value, and a miss is confirmed under the writer lock.  After the
- *	writers finish, every key must be findable -- the gate against
- *	lost writes and the reader-vs-split false-miss.  No daemon.
+ *	Writers insert fully INTERLEAVED keys (writer w owns the keys
+ *	congruent to w modulo the writer count), so adjacent keys land in
+ *	the same leaves and several writers split the same nodes and the
+ *	same root concurrently -- the real test of fine-grained latch
+ *	coupling.  There is NO per-tree writer lock: writers proceed in
+ *	parallel, serializing only on the per-page latches they actually
+ *	collide on (and parking, not thread-blocking, when they do).
+ *	Readers run shared-coupling lookups concurrently: a hit must
+ *	carry the correct value, and -- because coupling never lets a
+ *	reader be split out from under -- a miss needs no re-confirm.
+ *	After the writers finish, every key must be findable: the gate
+ *	against lost writes, corrupted splits, and reader/writer races.
+ *	No daemon.
  */
 
 #include <stdatomic.h>
@@ -57,14 +62,19 @@ static void
 writer_proc(void *arg)
 {
 	long w = (long)arg;
-	int base = (int)w * KEYS_PER;
 	int i;
 	char k[24], v[32];
 
-	/* Insert this writer's disjoint range, shuffled. */
+	/*
+	 * Insert this writer's INTERLEAVED stride (idx == w mod N_WRITERS),
+	 * shuffled.  Adjacent global keys belong to different writers, so
+	 * writers collide on shared leaves and internal nodes and split
+	 * them concurrently -- exercising the latch coupling directly.
+	 */
 	for (i = 0; i < KEYS_PER; i++) {
-		int j = base + (int)(((uint64_t)i * 2654435761ull) % KEYS_PER);
-		mkkv(j, k, v);
+		int shuffled = (int)(((uint64_t)i * 2654435761ull) % KEYS_PER);
+		int idx = shuffled * N_WRITERS + (int)w;
+		mkkv(idx, k, v);
 		(void)bt_insert(g_bt, k, (uint16_t)strlen(k), v, (uint16_t)strlen(v));
 	}
 	atomic_fetch_sub(&g_writers_left, 1);
@@ -180,11 +190,12 @@ main(void)
 		return 1;
 	}
 
-	printf("  ok   %d writers + %d readers on %d OS threads: all %d keys "
-	    "present + correct after concurrent build (height=%llu splits=%llu)\n",
+	printf("  ok   %d parallel writers (interleaved keys, no writer lock) + "
+	    "%d readers on %d OS threads: all %d keys present + correct "
+	    "(height=%llu splits=%llu)\n",
 	    N_WRITERS, N_READERS, N_LOOPS, N_KEYS,
 	    (unsigned long long)ts.height, (unsigned long long)ts.splits);
-	printf("  ok   %ld concurrent lock-free reads, 0 wrong values; tree paged "
+	printf("  ok   %ld concurrent shared-coupling reads, 0 wrong values; tree paged "
 	    "through the pool (loads=%llu evicted=%llu flushed=%llu resident=%llu)\n",
 	    atomic_load(&g_read_hits), (unsigned long long)bs.loads,
 	    (unsigned long long)bs.evicted, (unsigned long long)bs.flushed,
