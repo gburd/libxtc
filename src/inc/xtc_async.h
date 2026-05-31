@@ -31,6 +31,10 @@ typedef intptr_t (*xtc_coro_fn)(void *arg);
  * PUBLIC: int      xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
  * PUBLIC: int      xtc_await __P((xtc_task_t *, intptr_t *));
  * PUBLIC: void     xtc_yield __P((void));
+ * PUBLIC: void     xtc_yield_set_budget __P((xtc_loop_t *, int64_t));
+ * PUBLIC: int      xtc_yield_check __P((void));
+ * PUBLIC: int      xtc_yield_if_due __P((void));
+ * PUBLIC: uint64_t xtc_yield_due_count __P((const xtc_loop_t *));
  * PUBLIC: size_t   xtc_stack_size __P((void));
  * PUBLIC: int      xtc_set_stack_size __P((size_t));
  */
@@ -60,6 +64,22 @@ int      xtc_await(xtc_task_t *t, intptr_t *result);
  *	loop step resumes at the line after the call.
  */
 void     xtc_yield(void);
+
+/*
+ * Cooperative yield watchdog.  xtc has no forcible preemption, so a
+ * long compute loop must cooperate.  Set a per-loop time budget with
+ * xtc_yield_set_budget (ns; 0 disables, the default), then in the
+ * compute loop call xtc_yield_if_due() -- it yields when the current
+ * run quantum has exceeded the budget.  xtc_yield_check() is the
+ * queryable form (1 == over budget) for embedders that want to react
+ * differently (e.g. fire an abort token -> xtc_svr_call_abortable).
+ * xtc_yield_due_count() reports how many times a task went over
+ * budget on the loop (telemetry).  All are no-ops / 0 off a loop.
+ */
+void     xtc_yield_set_budget(xtc_loop_t *loop, int64_t budget_ns);
+int      xtc_yield_check(void);
+int      xtc_yield_if_due(void);
+uint64_t xtc_yield_due_count(const xtc_loop_t *loop);
 
 /*
  * Default fiber stack size in bytes.  Configurable per process via
