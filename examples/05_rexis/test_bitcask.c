@@ -199,6 +199,72 @@ test_iterate_and_stats(void)
 }
 
 
+static void
+test_compaction(void)
+{
+	const char *dir = mkdir_temp();
+	bitcask_t *bc;
+	bitcask_stats_t st;
+	char key[32], buf[64];
+	size_t n;
+	int i;
+
+	ASSERT(bitcask_open(dir, &bc) == 0);
+
+	/* 200 keys, each overwritten 5x (lots of dead bytes), then a
+	 * quarter deleted. */
+	for (i = 0; i < 200; i++) {
+		int r;
+		snprintf(key, sizeof key, "key-%03d", i);
+		for (r = 0; r < 5; r++) {
+			char val[32];
+			snprintf(val, sizeof val, "val-%03d-rev-%d", i, r);
+			ASSERT(bitcask_put(bc, key, strlen(key),
+			    val, strlen(val)) == 0);
+		}
+	}
+	for (i = 0; i < 200; i += 4) {
+		snprintf(key, sizeof key, "key-%03d", i);
+		ASSERT(bitcask_del(bc, key, strlen(key)) == 0);
+	}
+
+	bitcask_stat(bc, &st);
+	ASSERT(st.bytes_dead > 0);          /* garbage accumulated */
+
+	ASSERT(bitcask_compact(bc) == 0);
+
+	bitcask_stat(bc, &st);
+	ASSERT(st.bytes_dead == 0);          /* reclaimed */
+
+	/* Every surviving key reads back its last revision; deleted keys
+	 * stay gone -- across compaction. */
+	for (i = 0; i < 200; i++) {
+		char want[32];
+		snprintf(key, sizeof key, "key-%03d", i);
+		snprintf(want, sizeof want, "val-%03d-rev-4", i);
+		if (i % 4 == 0) {
+			ASSERT(bitcask_get(bc, key, strlen(key), buf,
+			    sizeof buf, &n) != 0);   /* deleted */
+		} else {
+			ASSERT(bitcask_get(bc, key, strlen(key), buf,
+			    sizeof buf, &n) == 0);
+			ASSERT(n == strlen(want));
+			ASSERT(memcmp(buf, want, n) == 0);
+		}
+	}
+
+	/* The compacted file survives a reopen (recovery from the merged
+	 * data file). */
+	bitcask_close(bc);
+	ASSERT(bitcask_open(dir, &bc) == 0);
+	snprintf(key, sizeof key, "key-077");
+	ASSERT(bitcask_get(bc, key, strlen(key), buf, sizeof buf, &n) == 0);
+	ASSERT(memcmp(buf, "val-077-rev-4", n) == 0);
+	bitcask_close(bc);
+	rmrf(dir);
+	printf("  ok   compaction\n");
+}
+
 int
 main(void)
 {
@@ -208,6 +274,7 @@ main(void)
 	test_recovery();
 	test_recovery_with_deletes_and_overwrites();
 	test_iterate_and_stats();
+	test_compaction();
 	printf("All bitcask tests passed.\n");
 	return 0;
 }
