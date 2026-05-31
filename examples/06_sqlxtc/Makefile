@@ -130,6 +130,8 @@ clean:
 	rm -f test_pcache test_pcache_amalg test_pcache.o
 	rm -f test_concurrency test_concurrency.o
 	rm -f test_parallel test_parallel.o
+	rm -f test_bufmgr test_bufmgr.o bufmgr.o
+	rm -f test_btnode
 	rm -f test_vfs_loop test_vfs_loop.o
 	rm -rf $(AMALG_DIR)
 	rm -f sql_parse_gen.o sql_parse_drv.o
@@ -140,7 +142,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-parallel
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-parallel test-bufmgr test-btnode
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -225,6 +227,22 @@ test_parallel: test_parallel.c engine.o vfs.o sqlite/sqlite3.o
 
 test-parallel: test_parallel
 	./test_parallel
+
+# ---- LeanStore-style buffer manager test (in-process, no daemon) ----
+test_bufmgr: test_bufmgr.c bufmgr.o
+	$(CC) $(CFLAGS) -o $@ test_bufmgr.c bufmgr.o $(LDFLAGS)
+
+test-bufmgr: test_bufmgr
+	./test_bufmgr
+
+bufmgr.o: bufmgr.c bufmgr.h
+
+# ---- B-tree node (prefix compression) unit test (standalone) ----
+test_btnode: test_btnode.c btnode.c btnode.h
+	$(CC) $(CFLAGS) -o $@ test_btnode.c btnode.c
+
+test-btnode: test_btnode
+	./test_btnode
 
 test_pcache_amalg: test_pcache.c pcache.amalg.o sqlite/sqlite3.o \
         $(AMALG_DIR)/xtc.o

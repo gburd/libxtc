@@ -119,6 +119,27 @@ listen_fd ----------> listener_proc ----xtc_proc-----> conn_proc(fd)
 * `sql_parse.lime` -- Lime grammar for the SQL subset we accept.
 * `metrics.c` -- periodic xtc_res snapshot logger.
 
+## Native storage engine (foundation)
+
+A from-scratch, xtc-native storage engine is being built to replace
+SQLite's btree/pager/buffer-pool behind the same `sx_` facade.  See
+`../../docs/M_SQLXTC_STORAGE.md` for the full design.  Landed so far:
+
+* `bufmgr.c` -- a LeanStore-style buffer manager: pointer swizzling
+  (a Swip in the parent encodes HOT / COOL / EVICTED in its two top
+  bits, so resolving a resident page is a pointer load with no lookup
+  or lock) and a cooling-stage eviction algorithm.  A page-provider
+  process (an `xtc_proc`) proactively unswizzles cold frames to COOL
+  and writes the dirty ones out ahead of demand, so reclaiming a frame
+  is a cheap state flip; page I/O is offloaded so the loop never
+  stalls.  `test_bufmgr` cycles 200 pages through a 16-frame pool --
+  forcing swizzle -> cool -> write-out -> evict -> reload -- while the
+  provider runs concurrently, and verifies every page survives.
+* `btnode.c` -- a slotted B-tree node with prefix compression: the
+  common prefix of a page's fence keys is stored once and each slot
+  keeps only the key suffix plus a 4-byte head for fast comparison.
+  `test_btnode` covers search/insert/split/remove and prefix recompute.
+
 ## Limits and flags
 
 ```
