@@ -56,6 +56,11 @@ int  sx_shutdown(void);
  * mutex_methods()).  Call before sx_init. */
 int  sx_config_mutex(const void *methods);
 
+/* Install the xtc-allocator-backed memory methods (opaque table from
+ * mem_methods()).  Call before sx_init.  Routes every engine
+ * allocation through xtc's allocator. */
+int  sx_config_mem(const void *methods);
+
 /* Threading mode (call before sx_init).  sx_config_serialized is the
  * safe default -- the engine guards every handle, so a shared handle
  * and per-connection handles are both correct; the xtc_amutex methods

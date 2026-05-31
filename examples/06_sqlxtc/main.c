@@ -38,6 +38,7 @@
 #include "conn.h"
 #include "db.h"
 #include "engine.h"
+#include "mem.h"
 #include "mutex.h"
 #include "pcache.h"
 extern int metrics_spawn(xtc_loop_t *loop, xtc_res_t *res,
@@ -340,13 +341,19 @@ main(int argc, char **argv)
 	if (cfg.cores > 0) pin_to_cores(cfg.cores);
 
 	/* Engine global config: install the xtc_amutex-backed mutex
-	 * methods and the safe (serialized) threading mode BEFORE the
-	 * first open. */
+	 * methods, the xtc-allocator-backed memory methods, and the safe
+	 * (serialized) threading mode BEFORE the first open. */
 	rc = sx_config_mutex(mutex_methods());
 	if (rc != SX_OK) {
 		fprintf(stderr,
 		        "sx_config_mutex failed: %d\n", rc);
 		/* Continue with default mutex; not fatal. */
+	}
+	rc = sx_config_mem(mem_methods());
+	if (rc != SX_OK) {
+		fprintf(stderr,
+		        "sx_config_mem failed: %d\n", rc);
+		/* Continue with default allocator; not fatal. */
 	}
 	rc = sx_config_serialized();
 	if (rc != SX_OK) {

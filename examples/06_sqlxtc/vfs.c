@@ -24,7 +24,7 @@
  */
 
 #include "vfs.h"
-#include "sqlite/sqlite3.h"
+#include "sqlite3.h"
 
 #include <string.h>
 
