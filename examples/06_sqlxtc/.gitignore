@@ -17,3 +17,4 @@ sql_parse_gen.out
 test_parallel
 test_bufmgr
 test_btnode
+test_btree
