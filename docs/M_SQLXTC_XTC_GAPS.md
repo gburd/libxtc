@@ -13,6 +13,53 @@ sufficient.
 
 ---
 
+## Stage 2/3 -- share-nothing sharded store (test_shard.c)
+
+### GAP (gotcha): message payloads are delivered at arbitrary alignment
+
+`xtc_svr` hands `handle_call` a `req` pointer at `msg + header` (the
+header is 10 or 14 bytes), and `xtc_recv` hands back whatever the
+sender framed.  Casting that pointer to a struct with an over-aligned
+member (a `uint64_t`, 8-byte alignment) and reading the field is
+undefined -- UBSan flags "member access within misaligned address
+... requires 8 byte alignment".  Found immediately when a shard
+request carried a `uint64_t ts`.
+
+  * Worked around (correct contract): `memcpy` the payload into an
+    aligned local struct before reading it.  This is the portable
+    pattern and what the test now does.
+  * Possible library improvement: document the alignment contract on
+    `xtc_recv` / `handle_call` explicitly, or pad the framing so the
+    payload starts 8-aligned.  Low priority -- memcpy is the right
+    habit regardless.  TODO.
+
+### CONFIRMED OK: share-nothing sharding scales across cores
+
+Four shard servers (one `xtc_svr` each), one per loop on a 4-loop
+`xtc_exec`, plus a global timestamp-allocator server, with clients
+routing by key-hash.  Every key landed in its shard with the right
+value; the keys spread evenly (127/125/129/131); the allocator issued
+exactly N unique timestamps.  A shard's `handle_call` that PARKS
+mid-call (the allocator round-trip is a separate call) composes
+correctly with the dispatch loop.  Cross-loop `xtc_svr_call` routing,
+`xtc_exec`, and the singleton control-plane proc all work as intended,
+single-loop and multi-core, ASan + UBSan clean.
+
+### ARCHITECTURE LESSON: a global timestamp allocator is a logical, not arrival, order
+
+The test first wrongly asserted that each shard sees timestamps in
+non-decreasing order.  On a single loop that holds; on the 4-loop
+executor it failed -- and correctly so.  A global allocator gives a
+total LOGICAL order, but concurrent clients on different cores deliver
+their ops to a shard OUT of timestamp order (59-75 reorderings per run
+were observed -- itself the proof that the work ran in parallel).  A
+real MVCC engine must order versions by timestamp at the shard, never
+assume arrival order.  The test now measures the reordering as a
+concurrency signal instead of asserting a false invariant.  Not an
+xtc gap -- a design truth the multi-core path surfaced.
+
+---
+
 ## Stage 1 -- group-commit WAL writer (wal.c)
 
 ### GAP (FIXED): xtc_svr had no deferred reply (gen_server:reply/2)
