@@ -77,6 +77,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/stats.c \
 	$(srcdir)/../src/ptc/slab.c \
 	$(srcdir)/../src/ptc/blocking.c \
+	$(srcdir)/../src/ptc/alloc_audit.c \
 	$(srcdir)/../src/ptc/mctx.c \
 	$(srcdir)/../src/ptc/rcu.c \
 	$(srcdir)/../src/orc/sup.c \
@@ -127,6 +128,7 @@ LIB_OBJS	= \
 	stats.o \
 	slab.o \
 	blocking.o \
+	alloc_audit.o \
 	mctx.o \
 	rcu.o \
 	sup.o \
@@ -187,7 +189,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_proc_wait_fd \
 		  test_recv_correlate \
 		  test_sync \
-		  test_blocking \
+		  test_blocking test_alloc_audit \
 		  test_sup \
 		  test_reg \
 		  test_svr \
@@ -364,6 +366,9 @@ slab.o: $(srcdir)/../src/ptc/slab.c xtc_config.h
 
 blocking.o: $(srcdir)/../src/ptc/blocking.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/blocking.c
+
+alloc_audit.o: $(srcdir)/../src/ptc/alloc_audit.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/alloc_audit.c
 
 mctx.o: $(srcdir)/../src/ptc/mctx.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/mctx.c
@@ -697,6 +702,12 @@ test_blocking: $(srcdir)/../test/m9/test_blocking.c \
 		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
 		-o $@ $(srcdir)/../test/m9/test_blocking.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_alloc_audit: $(srcdir)/../test/m9/test_alloc_audit.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
+		-o $@ $(srcdir)/../test/m9/test_alloc_audit.c \
 		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M10 tests.

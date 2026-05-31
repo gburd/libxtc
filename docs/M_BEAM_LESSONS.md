@@ -409,7 +409,10 @@ Listing them as concrete agenda items:
    save-queue scan skips entries already tested against the current
    predicate; the cap now bounds mailbox + save queue together.
 4. Memory-ownership guide doc (issue 3)
-5. `xtc_alloc_audit_t` debug allocation tracker (issue 3)
+5. `xtc_alloc_audit_t` debug allocation tracker (issue 3) -- DONE:
+   xtc_alloc_audit_enable + xtc_alloc_audit_proc_leaks (src/ptc/alloc_audit.c)
+   wraps the allocator hook, attributes each live allocation to the
+   allocating process, reports per-proc leaks.
 6. `XTC_YIELD_CHECK` macro + scheduler-side flag (issue 4) -- DONE,
    shipped as `xtc_yield_check` / `xtc_yield_if_due` /
    `xtc_yield_set_budget` / `xtc_yield_due_count` (src/evt/loop.c): a
