@@ -10,6 +10,7 @@ test_pcache
 test_pcache_amalg
 test_concurrency
 test_mem
+test_wal
 sql_parse_gen.c
 sql_parse_gen.h
 sql_parse_gen.out

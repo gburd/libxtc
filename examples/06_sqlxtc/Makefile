@@ -131,6 +131,7 @@ clean:
 	rm -f test_pcache test_pcache_amalg test_pcache.o
 	rm -f test_concurrency test_concurrency.o
 	rm -f test_mem test_mem.o
+	rm -f test_wal test_wal.o wal.o
 	rm -f test_parallel test_parallel.o
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o
 	rm -f test_bufmgr_mt
@@ -148,7 +149,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-mem test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-mem test-wal test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -236,6 +237,17 @@ test_mem: test_mem.c mem.o mutex.o engine.o vfs.o sqlite3.o
 
 test-mem: test_mem
 	./test_mem
+
+# ---- group-commit WAL writer process (in-process, no daemon) ----
+# Many committer procs drive concurrent commits at one writer; proves
+# fsync coalescing, durable monotonic LSNs, and log replay -- on a
+# single loop and on a 4-loop executor.  Storage-engine stage 1
+# (docs/M_SQLXTC_SCALEOUT.md).
+test_wal: test_wal.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ test_wal.c wal.c $(LDFLAGS)
+
+test-wal: test_wal
+	./test_wal
 
 # ---- sx_ engine parallel-execution test (in-process, no daemon) ----
 test_parallel: test_parallel.c engine.o vfs.o sqlite3.o
