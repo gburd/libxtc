@@ -117,6 +117,23 @@ main(void)
 	CHECK(parse("{\"q\":\"x\",\"limit\":\"big\"}", &m) < 0,
 	      "limit_not_int");
 
+	/* 18b: bound parameters -- int, text, null */
+	CHECK(parse("{\"q\":\"INSERT INTO t VALUES(?1,?2,?3)\","
+	            "\"params\":[7,\"hello\",null]}", &m) == 0 &&
+	      m.kind == QUACK_MSG_QUERY && m.n_params == 3 &&
+	      m.params[0].type == QUACK_P_INT && m.params[0].ival == 7 &&
+	      m.params[1].type == QUACK_P_TEXT && m.params[1].slen == 5 &&
+	      memcmp(m.params[1].sval, "hello", 5) == 0 &&
+	      m.params[2].type == QUACK_P_NULL,
+	      "params_int_text_null");
+
+	/* 18c: empty params array */
+	CHECK(parse("{\"q\":\"SELECT 1\",\"params\":[]}", &m) == 0 &&
+	      m.n_params == 0, "params_empty");
+
+	/* 18d: params must be an array */
+	CHECK(parse("{\"q\":\"x\",\"params\":5}", &m) < 0, "params_not_array");
+
 	/* 19: trailing garbage after object is ignored (we only require
 	 * a valid object up front -- trailing content tolerated) */
 	{

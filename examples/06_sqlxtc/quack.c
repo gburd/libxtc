@@ -572,6 +572,68 @@ quack_parse(const char *line, size_t len, quack_msg_t *msg)
 				msg->err = "json: 'limit' must be int";
 				return -1;
 			}
+		} else if (kn == 6 && memcmp(kp, "params", 6) == 0) {
+			/* params: [ value, ... ] -- int / text / null. */
+			char pc;
+			if (jp_eat(&j, '[') < 0) {
+				msg->err = "json: 'params' must be array";
+				return -1;
+			}
+			jp_skip(&j);
+			if (jp_peek(&j, &pc) == 0 && pc == ']') {
+				j.pos++;        /* empty array */
+			} else for (;;) {
+				struct quack_param *prm;
+				if (msg->n_params >= QUACK_MAX_PARAMS) {
+					msg->err = "json: too many params";
+					return -1;
+				}
+				prm = &msg->params[msg->n_params];
+				jp_skip(&j);
+				if (jp_peek(&j, &pc) < 0) {
+					msg->err = "json: bad params"; return -1;
+				}
+				if (pc == '"') {
+					const char *sp; size_t sn, i2;
+					if (jp_string_span(&j, &sp, &sn) < 0) {
+						msg->err = "json: bad param string";
+						return -1;
+					}
+					for (i2 = 0; i2 < sn; i2++)
+						if (sp[i2] == '\\') {
+							msg->err = "json: escaped "
+							    "param strings unsupported";
+							return -1;
+						}
+					prm->type = QUACK_P_TEXT;
+					prm->sval = sp;
+					prm->slen = sn;
+				} else if (pc == 'n') {
+					if (jp_skip_value(&j) < 0) {
+						msg->err = "json: bad param"; return -1;
+					}
+					prm->type = QUACK_P_NULL;
+				} else if (pc == '-' || (pc >= '0' && pc <= '9')) {
+					if (jp_int(&j, &prm->ival) < 0) {
+						msg->err = "json: bad param int";
+						return -1;
+					}
+					prm->type = QUACK_P_INT;
+				} else {
+					msg->err = "json: unsupported param type";
+					return -1;
+				}
+				msg->n_params++;
+				jp_skip(&j);
+				if (j.pos < j.len && j.p[j.pos] == ',') {
+					j.pos++; continue;
+				}
+				if (jp_eat(&j, ']') < 0) {
+					msg->err = "json: expected ']'";
+					return -1;
+				}
+				break;
+			}
 		} else if (kn == 4 && memcmp(kp, "ping", 4) == 0) {
 			int64_t v;
 			if (jp_int(&j, &v) < 0) {

@@ -164,8 +164,9 @@ handle_query(conn_state_t *st, const quack_msg_t *msg)
 
 	{
 		int64_t t0 = xtc_now_ns();
-		int exec_rc = db_exec(h, sql_to_exec, msg->limit,
-		    &st->wbuf, &rows, &err);
+		int exec_rc = db_exec_params(h, sql_to_exec,
+		    msg->n_params > 0 ? msg->params : NULL, msg->n_params,
+		    msg->limit, &st->wbuf, &rows, &err);
 		if (sqlxtc_stat_query_total != NULL)
 			xtc_counter_inc(sqlxtc_stat_query_total);
 		if (sqlxtc_stat_query_latency != NULL)

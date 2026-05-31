@@ -23,12 +23,17 @@ Exactly one of these JSON keys is recognised per line:
 
     {"q":"SELECT 1+1"}
     {"q":"SELECT * FROM t","limit":1000}
+    {"q":"INSERT INTO t(id,name) VALUES(?1,?2)","params":[7,"ann"]}
     {"ping":1}
     {"quit":1}
 
 * `q`        SQL string.  No multi-statement; the first statement wins.
 * `limit`    Optional row cap; defaults to no limit.  Server-side limit
              applied after the SQL `LIMIT` clause if any.
+* `params`   Optional array bound to the statement's `?1..?N` markers,
+             in order.  Each element is an integer, a string, or null
+             (floats and booleans are not yet supported; escaped
+             string params are rejected).
 * `ping`     Heartbeat; replies with `pong`.
 * `quit`     Graceful shutdown; the server closes the socket without
              a reply.
