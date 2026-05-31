@@ -61,6 +61,16 @@ typedef struct bm_opts {
 	uint32_t    page_size;   /* bytes per page (e.g. 4096, 16384) */
 	uint32_t    n_frames;    /* resident pool size (frames) */
 	uint32_t    cool_pct;    /* target % of frames kept cool/free */
+
+	/* Tree support.  A parent page may not be cooled or evicted while
+	 * any of its children are resident (HOT or COOL), or a swizzled
+	 * child pointer would be written to disk as garbage.  If set, the
+	 * buffer manager calls this before cooling/evicting a frame; it
+	 * must return non-zero when the page has at least one resident
+	 * (non-EVICTED) child swip.  NULL means leaves only (no children),
+	 * which is the flat case. */
+	int       (*has_resident_child)(const void *page, void *user);
+	void       *cb_user;
 } bm_opts_t;
 
 #define BM_OPTS_DEFAULT \
@@ -81,6 +91,16 @@ int  bm_alloc(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame,
  * frame to make room).  Returns XTC_OK and *out_frame on success. */
 int  bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame);
 
+/* Page-id resolution path (for structures whose child pointers are
+ * stable page ids rather than in-page swizzled words -- e.g. the
+ * B-tree).  bm_alloc_pid allocates a fresh page and returns its id and
+ * a pinned frame; bm_fix_pid resolves a page id to a pinned frame via
+ * an internal page table, loading from disk on a miss.  Frames fixed
+ * this way are released with bm_unfix and evicted by the same
+ * cooling-stage machinery. */
+int  bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid);
+int  bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame);
+
 /* Release a frame fixed by bm_alloc/bm_fix.  mark_dirty != 0 records
  * that the page was modified (so it is written before eviction). */
 void bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty);
@@ -88,6 +108,16 @@ void bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty);
 /* The page bytes of a fixed frame, and its page id. */
 void    *bm_page(bm_frame_t *frame);
 bm_pid_t bm_frame_pid(const bm_frame_t *frame);
+
+/* Per-frame content latch, distinct from the pin (which guards against
+ * eviction).  A B-tree holds the pin across an operation and takes the
+ * content latch for the brief in-memory node mutation/search; eviction
+ * never takes the latch (it gates on the pin), and the latch is never
+ * held across page I/O.  bm_latch_shared allows concurrent readers;
+ * bm_latch_exclusive is a single writer. */
+void bm_latch_shared(bm_frame_t *frame);
+void bm_latch_exclusive(bm_frame_t *frame);
+void bm_unlatch(bm_frame_t *frame);
 
 /* Spawn the page-provider process on `loop`: it proactively cools and
  * flushes pages so free frames stay available.  Optional -- demand
