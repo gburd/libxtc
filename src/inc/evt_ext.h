@@ -28,8 +28,12 @@ int xtc_task_waker __P((xtc_task_t *, xtc_waker_t *));
 int xtc_timer_cancel __P((xtc_timer_t *));
 int xtc_timer_set __P((xtc_loop_t *, int64_t, xtc_timer_fn, void *, xtc_timer_t **));
 int xtc_waker_wake __P((const xtc_waker_t *));
+int xtc_yield_check __P((void));
+int xtc_yield_if_due __P((void));
 struct xtc_res *xtc_loop_res __P((xtc_loop_t *));
+uint64_t xtc_yield_due_count __P((const xtc_loop_t *));
 void xtc_yield __P((void));
+void xtc_yield_set_budget __P((xtc_loop_t *, int64_t));
 xtc_loop_t *xtc_exec_loop __P((xtc_exec_t *, int));
 
 #endif /* EVT_EXT_H */

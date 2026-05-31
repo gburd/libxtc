@@ -7,6 +7,10 @@
 .Nm xtc_async ,
 .Nm xtc_await ,
 .Nm xtc_yield ,
+.Nm xtc_yield_set_budget ,
+.Nm xtc_yield_check ,
+.Nm xtc_yield_if_due ,
+.Nm xtc_yield_due_count ,
 .Nm xtc_stack_size ,
 .Nm xtc_set_stack_size ,
 .Nm XTC_COOP_REGION ,
@@ -24,6 +28,14 @@
 .Fn xtc_await "xtc_task_t *t" "intptr_t *result"
 .Ft void
 .Fn xtc_yield "void"
+.Ft void
+.Fn xtc_yield_set_budget "xtc_loop_t *loop" "int64_t budget_ns"
+.Ft int
+.Fn xtc_yield_check "void"
+.Ft int
+.Fn xtc_yield_if_due "void"
+.Ft uint64_t
+.Fn xtc_yield_due_count "const xtc_loop_t *loop"
 .Ft size_t
 .Fn xtc_stack_size "void"
 .Ft int
@@ -71,6 +83,28 @@ caller and resumes it once the target is done.
 .Fn xtc_yield
 returns control to the loop.  The next loop step resumes the coroutine
 at the line after the call.
+.Pp
+xtc has no forcible preemption, so a long compute loop must yield to
+be fair to the rest of the loop.
+.Fn xtc_yield_set_budget
+arms a per-loop run-quantum time budget in nanoseconds (0, the
+default, disables it).  With a budget set,
+.Fn xtc_yield_check
+returns 1 once the current coroutine's quantum has run past the
+budget without yielding, and
+.Fn xtc_yield_if_due
+yields in that case (returning 1 if it did).  Sprinkle
+.Fn xtc_yield_if_due
+in a compute loop and a co-resident coroutine keeps making progress.
+.Fn xtc_yield_check
+is also the queryable "over budget" signal an embedder can wire to a
+cancellation token -- fire an
+.Vt xtc_abort_source
+when over budget and poll the token in
+.Xr xtc_svr_call_abortable 3 .
+.Fn xtc_yield_due_count
+reports how many times a coroutine went over budget on the loop
+(telemetry).  All four are no-ops returning 0 off a loop.
 .Sh COOPERATIVE REGIONS
 The
 .Dv XTC_COOP_REGION

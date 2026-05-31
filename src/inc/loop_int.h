@@ -42,6 +42,10 @@ struct xtc_task {
 	void        *user;
 	xtc_loop_t  *loop;
 	int          state;
+	/* Monotonic time (ns) this run quantum was dispatched, recorded
+	 * by the scheduler when loop->yield_budget_ns > 0.  xtc_yield_check
+	 * compares against it; 0 means not yet recorded this quantum. */
+	int64_t      run_start_ns;
 	/* Pinned tasks run only on their home loop -- they go on the
 	 * owner-only FIFO, never the stealable deque.  Used for explicit
 	 * placement (xtc_exec_spawn_on) and for processes, which keep a
@@ -160,6 +164,13 @@ struct xtc_loop {
 	 * not required. */
 	_Atomic uint64_t n_tasks_run;
 	_Atomic uint64_t n_steals;
+
+	/* Cooperative yield watchdog (opt-in).  When yield_budget_ns > 0
+	 * the scheduler records each quantum's start time on the task and
+	 * xtc_yield_check reports a task over budget; n_yield_due counts
+	 * over-budget reports (telemetry). */
+	int64_t          yield_budget_ns;
+	_Atomic uint64_t n_yield_due;
 
 	int stop_requested;
 

@@ -410,7 +410,13 @@ Listing them as concrete agenda items:
    predicate; the cap now bounds mailbox + save queue together.
 4. Memory-ownership guide doc (issue 3)
 5. `xtc_alloc_audit_t` debug allocation tracker (issue 3)
-6. `XTC_YIELD_CHECK` macro + scheduler-side flag (issue 4)
+6. `XTC_YIELD_CHECK` macro + scheduler-side flag (issue 4) -- DONE,
+   shipped as `xtc_yield_check` / `xtc_yield_if_due` /
+   `xtc_yield_set_budget` / `xtc_yield_due_count` (src/evt/loop.c): a
+   per-loop run-quantum time budget; a compute loop calls
+   `xtc_yield_if_due()` to cooperate, and `xtc_yield_check()` is the
+   queryable over-budget signal an embedder wires to a cancellation
+   token (fire `xtc_abort_source` -> poll in `xtc_svr_call_abortable`).
 7. `xtc_blocking_pool_run` worker pool (issue 4) -- DONE, shipped as
    `xtc_blocking_run` (src/ptc/blocking.c): a worker pool runs the
    blocking call and parks the calling process via a pipe +

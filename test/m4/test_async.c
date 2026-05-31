@@ -11,6 +11,7 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_async.h"
+#include "os_time.h"
 
 /* [C1, C2] basic spawn-and-await. */
 static intptr_t add_one(void *arg) {
@@ -216,6 +217,76 @@ test_pt_basic(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* yield watchdog: a coro over its per-loop time budget is reported by
+ * xtc_yield_check, and xtc_yield_if_due lets it cooperate so a peer
+ * coro on the same loop makes progress. */
+static int g_yc_over;          /* coro saw itself over budget */
+static int g_yc_ticks;         /* peer ran while the hog computed */
+static int g_yc_hog_done;
+
+static void
+busy_ns(int64_t ns)
+{
+	int64_t start = 0, now = 0;
+	(void)__os_clock_mono(&start);
+	do { (void)__os_clock_mono(&now); } while (now - start < ns);
+}
+
+static intptr_t
+yc_hog(void *arg)
+{
+	int i;
+	(void)arg;
+	/* ~24ms of compute in ~2ms slices, cooperating each slice. */
+	for (i = 0; i < 12; i++) {
+		busy_ns(3LL * 1000 * 1000);    /* 3ms > 2ms budget */
+		if (xtc_yield_check())
+			g_yc_over = 1;
+		(void)xtc_yield_if_due();
+	}
+	g_yc_hog_done = 1;
+	return 0;
+}
+
+static intptr_t
+yc_ticker(void *arg)
+{
+	(void)arg;
+	while (!g_yc_hog_done && g_yc_ticks < 1000) {
+		g_yc_ticks++;
+		xtc_yield();
+	}
+	return 0;
+}
+
+static MunitResult
+test_yield_watchdog(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_task_t *hog = NULL, *tick = NULL;
+	(void)p; (void)d;
+
+	g_yc_over = g_yc_ticks = g_yc_hog_done = 0;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	/* Budget set before the first dispatch so the hog's quanta are
+	 * timed from the start. */
+	xtc_yield_set_budget(loop, 2LL * 1000 * 1000);   /* 2ms */
+	munit_assert_int(xtc_async(loop, yc_hog, NULL, &hog), ==, XTC_OK);
+	munit_assert_int(xtc_async(loop, yc_ticker, NULL, &tick), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	munit_assert_int(g_yc_over, ==, 1);                 /* saw over-budget */
+	munit_assert_uint64(xtc_yield_due_count(loop), >, 0);
+	munit_assert_int(g_yc_ticks, >=, 2);                /* peer interleaved */
+	munit_assert_int(g_yc_hog_done, ==, 1);
+
+	/* Off a loop / no budget: never due. */
+	munit_assert_int(xtc_yield_check(), ==, 0);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/C1_C2_basic",       test_basic,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/C3_nested",         test_nested,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -224,6 +295,7 @@ static MunitTest tests[] = {
 	{ "/C9_many_coros",     test_many_coros,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/C7_coro_done",      test_coro_done,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/P1_pt_basic",       test_pt_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/yield_watchdog",    test_yield_watchdog,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m4/async", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
