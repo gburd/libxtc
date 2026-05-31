@@ -3166,7 +3166,7 @@ Tier 0 is done; the rest are tracked here.
 | A9 Bitcask compaction/merge | TODO | or relabel Bitcask explicitly as a demo |
 | A10 re-audit M17 conformance for fair comparisons | partial | W4 parking_lot done; rest TODO |
 | A11 document mailbox-full XTC_E_AGAIN contract | done | documented in xtc_proc.h / xtc_proc.3; cap now bounds mailbox + save queue |
-| A12 per-shard API (xtc_shard_id) | TODO | for shared-nothing consumers |
+| A12 per-shard API (xtc_shard_id) | DONE | xtc_shard_id/xtc_shard_count (Seastar this_shard_id); test_exec/A12_shard_id |
 
 ### PostgreSQL-on-xtc API requests (R1-R6)
 

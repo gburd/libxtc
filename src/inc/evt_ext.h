@@ -21,6 +21,8 @@ int xtc_loop_fini __P((xtc_loop_t *));
 int xtc_loop_init __P((xtc_loop_t **));
 int xtc_loop_run __P((xtc_loop_t *));
 int xtc_loop_stop __P((xtc_loop_t *));
+int xtc_shard_count __P((void));
+int xtc_shard_id __P((void));
 int xtc_task_park_on_fd __P((xtc_task_t *, int, uint32_t));
 int xtc_task_park_on_timer __P((xtc_task_t *, int64_t));
 int xtc_task_spawn __P((xtc_loop_t *, xtc_task_fn, void *, xtc_task_t **));

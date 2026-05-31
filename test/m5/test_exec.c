@@ -139,6 +139,48 @@ test_n_spawned_sum(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* A12: Seastar-style per-shard API. */
+static int g_shard_ran[32];            /* one slot per shard -- no contention */
+static int g_shard_count_seen;
+static int
+shard_probe(xtc_task_t *self, void *arg)
+{
+	int id = xtc_shard_id();
+	(void)self; (void)arg;
+	if (id >= 0 && id < 32)
+		__os_atomic_store_i32(&g_shard_ran[id], 1);
+	__os_atomic_store_i32(&g_shard_count_seen, xtc_shard_count());
+	return XTC_TASK_DONE;
+}
+
+static MunitResult
+test_shard_id(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e = NULL;
+	int i, n = 4;
+	(void)p; (void)d;
+
+	/* Off a loop: id -1, count 0. */
+	munit_assert_int(xtc_shard_id(), ==, -1);
+	munit_assert_int(xtc_shard_count(), ==, 0);
+
+	for (i = 0; i < 32; i++) __os_atomic_store_i32(&g_shard_ran[i], 0);
+	__os_atomic_store_i32(&g_shard_count_seen, 0);
+	munit_assert_int(xtc_exec_init(&e, n), ==, XTC_OK);
+	/* Pin one probe to each shard so every shard id is observed. */
+	for (i = 0; i < n; i++)
+		munit_assert_int(xtc_exec_spawn_on(e, i, shard_probe, NULL, NULL),
+		    ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+
+	/* Every shard 0..n-1 ran and reported the full count. */
+	for (i = 0; i < n; i++)
+		munit_assert_int(__os_atomic_load_i32(&g_shard_ran[i]), ==, 1);
+	munit_assert_int(__os_atomic_load_i32(&g_shard_count_seen), ==, n);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -146,6 +188,7 @@ static MunitTest tests[] = {
 	{ "/Sp1_spawn",               test_spawn,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Sp2_spawn_on",            test_spawn_on,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Sp3_n_spawned_sum",       test_n_spawned_sum,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/A12_shard_id",            test_shard_id,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/exec", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
