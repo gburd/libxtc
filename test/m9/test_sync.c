@@ -289,6 +289,98 @@ test_amutex_fiber(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* arwlock: mutual exclusion under concurrent fiber readers + writers,
+ * and the cooperative-safety property -- a writer parks while holding
+ * the exclusive latch and contenders park (not thread-block). */
+static xtc_arwlock_t *g_arw;
+static _Atomic int g_arw_value;        /* protected counter */
+static _Atomic int g_arw_inwrite;      /* writers currently inside crit */
+static _Atomic int g_arw_inread;       /* readers currently inside crit */
+static _Atomic int g_arw_excl_viol;    /* writer overlapped any peer */
+static _Atomic int g_arw_read_viol;    /* reader saw a torn/odd value */
+static _Atomic int g_arw_writes;
+
+static void
+arw_writer(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < 50; i++) {
+		(void)xtc_arwlock_wrlock(g_arw, -1);
+		if (atomic_fetch_add(&g_arw_inwrite, 1) != 0 ||
+		    atomic_load(&g_arw_inread) != 0)
+			atomic_store(&g_arw_excl_viol, 1);
+		/* Make the value briefly odd, then even -- a reader that sees
+		 * odd under a shared latch would prove exclusion broke.  Park
+		 * mid-critical-section to exercise holder-parks-while-latched. */
+		atomic_fetch_add(&g_arw_value, 1);          /* odd */
+		(void)xtc_proc_sleep(200LL * 1000);          /* 0.2ms park */
+		atomic_fetch_add(&g_arw_value, 1);          /* even */
+		atomic_fetch_sub(&g_arw_inwrite, 1);
+		atomic_fetch_add(&g_arw_writes, 1);
+		(void)xtc_arwlock_unlock(g_arw);
+		{ void *m=NULL; size_t n=0; (void)xtc_recv(&m,&n, 100LL*1000); if(m) m=NULL; }
+	}
+}
+static void
+arw_reader(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < 80; i++) {
+		int v;
+		(void)xtc_arwlock_rdlock(g_arw, -1);
+		atomic_fetch_add(&g_arw_inread, 1);
+		if (atomic_load(&g_arw_inwrite) != 0)
+			atomic_store(&g_arw_read_viol, 1);   /* writer overlapped */
+		v = atomic_load(&g_arw_value);
+		(void)xtc_proc_sleep(100LL * 1000);
+		if ((v & 1) != 0 || atomic_load(&g_arw_value) != v)
+			atomic_store(&g_arw_read_viol, 1);   /* torn / odd value */
+		atomic_fetch_sub(&g_arw_inread, 1);
+		(void)xtc_arwlock_unlock(g_arw);
+		{ void *m=NULL; size_t n=0; (void)xtc_recv(&m,&n, 100LL*1000); if(m) m=NULL; }
+	}
+}
+
+static MunitResult
+test_arwlock_fiber(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t o = { 0 };
+	xtc_pid_t pid;
+	int i;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_arwlock_create(&g_arw), ==, XTC_OK);
+	atomic_store(&g_arw_value, 0);
+	atomic_store(&g_arw_inwrite, 0); atomic_store(&g_arw_inread, 0);
+	atomic_store(&g_arw_excl_viol, 0); atomic_store(&g_arw_read_viol, 0);
+	atomic_store(&g_arw_writes, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	for (i = 0; i < 3; i++) {
+		o.name = "w";
+		munit_assert_int(xtc_proc_spawn(loop, arw_writer, NULL, &o, &pid), ==, XTC_OK);
+	}
+	for (i = 0; i < 4; i++) {
+		o.name = "r";
+		munit_assert_int(xtc_proc_spawn(loop, arw_reader, NULL, &o, &pid), ==, XTC_OK);
+	}
+	/* If the latch thread-blocked instead of parking, a writer parked
+	 * mid-critical-section would wedge the single loop and this never
+	 * returns. */
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	munit_assert_int(atomic_load(&g_arw_excl_viol), ==, 0);  /* exclusion held */
+	munit_assert_int(atomic_load(&g_arw_read_viol), ==, 0);  /* no torn reads */
+	munit_assert_int(atomic_load(&g_arw_writes), ==, 3 * 50);
+	munit_assert_int(atomic_load(&g_arw_value), ==, 2 * 3 * 50);
+	xtc_arwlock_destroy(g_arw);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/notify_stored",       test_notify_stored,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/notify_cross_thread", test_notify_cross_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -298,6 +390,7 @@ static MunitTest tests[] = {
 	{ "/amutex_mutex",        test_amutex_mutex,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/amutex_fiber",        test_amutex_fiber,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/rwlock_basic",        test_rwlock_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/arwlock_fiber",       test_arwlock_fiber,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/barrier",             test_barrier,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/gate",                test_gate,                NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
