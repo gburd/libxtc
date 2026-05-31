@@ -12,6 +12,8 @@
 .Nm xtc_exec_loop ,
 .Nm xtc_exec_loop_stats ,
 .Nm xtc_exec_loop_id ,
+.Nm xtc_shard_id ,
+.Nm xtc_shard_count ,
 .Nm xtc_exec_spawn ,
 .Nm xtc_exec_spawn_on ,
 .Nm xtc_exec_async ,
@@ -35,6 +37,10 @@
 .Fn xtc_exec_loop_stats "xtc_exec_t *exec" "int idx" "xtc_loop_stats_t *out"
 .Ft int
 .Fn xtc_exec_loop_id "void"
+.Ft int
+.Fn xtc_shard_id "void"
+.Ft int
+.Fn xtc_shard_count "void"
 .Ft int
 .Fn xtc_exec_spawn "xtc_exec_t *exec" "xtc_task_fn fn" "void *user" "xtc_task_t **out"
 .Ft int
@@ -107,6 +113,21 @@ most one re-queue per yielded run.
 returns the executor index of the loop the calling task is running
 on, or -1 from a thread that is not a worker.  Tests use this to
 verify spawn placement and steal behaviour.
+.Pp
+.Fn xtc_shard_id
+and
+.Fn xtc_shard_count
+are the Seastar-style per-shard API: the 0-based index of the loop
+the caller runs on, and the number of shards.  Unlike
+.Fn xtc_exec_loop_id
+they treat a standalone loop
+.Pq not under an executor
+as shard 0 of 1, so a shared-nothing consumer can always index
+per-core state with
+.Fn xtc_shard_id
+regardless of whether it runs under the executor or a single loop.
+Both return the off-loop sentinels (-1 and 0) only when the caller is
+not on any loop.
 .Pp
 .Fn xtc_exec_loop_stats
 fills
