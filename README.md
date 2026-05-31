@@ -147,6 +147,10 @@ xtc owes a lot to three runtimes that came before:
   cache-line awareness, and the discipline that the runtime must
   not allocate on the hot path.
 
+> You either start with BEAM or you build it over the years in your
+> stack and in your infra -- as detailed in "You Built an Erlang":
+> <https://vereis.com/posts/you_built_an_erlang>
+
 Where these conflict, xtc picks the choice that's most idiomatic in C
 and explains why in `PLAN.md`.  Read that file when you want to
 understand the *why*; read the man pages and headers when you want
