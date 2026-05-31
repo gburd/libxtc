@@ -15,3 +15,5 @@ sql_parse_gen.out
 /sqlite/*.o
 /build/
 test_parallel
+test_bufmgr
+test_btnode
