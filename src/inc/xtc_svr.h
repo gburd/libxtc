@@ -34,9 +34,12 @@
 
 /* Result codes for handle_call / handle_cast / handle_info: the
  * callback may either keep running (XTC_SVR_CONTINUE) or request
- * the server to stop (XTC_SVR_STOP). */
+ * the server to stop (XTC_SVR_STOP).  handle_call may also defer its
+ * reply (XTC_SVR_NOREPLY): it saved the call with xtc_svr_call_save
+ * and will xtc_svr_reply later. */
 #define XTC_SVR_CONTINUE   0
 #define XTC_SVR_STOP       1
+#define XTC_SVR_NOREPLY    2
 
 typedef struct xtc_svr     xtc_svr_t;
 typedef struct xtc_svr_call xtc_svr_call_t;
@@ -65,6 +68,7 @@ typedef struct xtc_svr_opts {
  * PUBLIC: int       xtc_svr_call_abortable __P((xtc_pid_t, const void *, size_t, void **, size_t *, int64_t, xtc_abort_token_t *));
  * PUBLIC: int       xtc_svr_cast __P((xtc_pid_t, const void *, size_t));
  * PUBLIC: int       xtc_svr_reply __P((xtc_svr_call_t *, const void *, size_t));
+ * PUBLIC: xtc_svr_call_t *xtc_svr_call_save __P((const xtc_svr_call_t *));
  */
 
 int       xtc_svr_start(xtc_loop_t *loop,
@@ -108,5 +112,24 @@ int xtc_svr_cast(xtc_pid_t target, const void *msg, size_t size);
  * Each call must be replied exactly once. */
 int xtc_svr_reply(xtc_svr_call_t *call,
                   const void *reply, size_t size);
+
+/*
+ * Deferred reply (gen_server:reply/2).  The xtc_svr_call_t passed to
+ * handle_call is valid only for the duration of that callback.  To
+ * reply LATER -- after a batch fills, after other shards answer, after
+ * a timer fires -- call xtc_svr_call_save() inside handle_call to get
+ * a heap-allocated handle that outlives the callback, stash it in the
+ * server state, return XTC_SVR_NOREPLY, and call xtc_svr_reply() on
+ * the saved handle from any later callback.  xtc_svr_reply frees a
+ * saved handle after sending.  Each saved handle must be replied
+ * exactly once.
+ *
+ * Safe for in-proc callers (the reply routes to the caller's mailbox
+ * by tag, so it is harmless even if the caller has gone).  For an
+ * off-proc caller the reply targets the caller's stack-resident reply
+ * slot, so the caller must remain blocked in xtc_svr_call (not time
+ * out) until the deferred reply is sent.
+ */
+xtc_svr_call_t *xtc_svr_call_save(const xtc_svr_call_t *call);
 
 #endif /* XTC_SVR_H */

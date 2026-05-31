@@ -64,6 +64,7 @@ struct xtc_svr_call {
 	struct __svr_reply_slot  *slot;        /* slot-based path */
 	xtc_pid_t                 reply_pid;   /* pid-based path  */
 	uint32_t                  reply_tag;
+	int                       heap;        /* 1 == heap copy from _save */
 };
 
 /* ----- entry ----------------------------------------------------- */
@@ -391,6 +392,8 @@ xtc_svr_cast(xtc_pid_t target, const void *msg, size_t size)
 int
 xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 {
+	int rc = XTC_E_INVAL;
+
 	if (call == NULL) return XTC_E_INVAL;
 
 	if (call->slot != NULL) {
@@ -407,13 +410,10 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 		slot->rc   = XTC_OK;
 		(void)xtc_notify_signal(slot->done);
 		(void)pthread_mutex_unlock(&slot->lock);
-		return XTC_OK;
-	}
-
-	if (!xtc_pid_is_none(call->reply_pid)) {
+		rc = XTC_OK;
+	} else if (!xtc_pid_is_none(call->reply_pid)) {
 		/* Encode reply for in-proc caller: tag (4 bytes) + payload. */
 		uint8_t *buf;
-		int rc;
 		size_t msg_size = 4 + size;
 		buf = malloc(msg_size);
 		if (buf == NULL) return XTC_E_NOMEM;
@@ -421,9 +421,26 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 		if (size > 0) memcpy(buf + 4, reply, size);
 		rc = xtc_send(call->reply_pid, buf, msg_size);
 		free(buf);
-		return rc;
 	}
-	return XTC_E_INVAL;
+
+	/* A handle from xtc_svr_call_save outlived its handle_call and is
+	 * owned by the caller; free it once replied. */
+	if (call->heap)
+		__os_free(call);
+	return rc;
+}
+
+/* PUBLIC: xtc_svr_call_t *xtc_svr_call_save __P((const xtc_svr_call_t *)); */
+xtc_svr_call_t *
+xtc_svr_call_save(const xtc_svr_call_t *call)
+{
+	struct xtc_svr_call *saved;
+
+	if (call == NULL) return NULL;
+	if (__os_malloc(sizeof *saved, (void **)&saved) != XTC_OK) return NULL;
+	*saved = *call;
+	saved->heap = 1;
+	return saved;
 }
 
 /* In-proc receive helper: walk our own mailbox for a reply matching

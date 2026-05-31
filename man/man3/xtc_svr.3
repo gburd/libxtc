@@ -11,6 +11,7 @@
 .Nm xtc_svr_call_abortable ,
 .Nm xtc_svr_cast ,
 .Nm xtc_svr_reply ,
+.Nm xtc_svr_call_save ,
 .Nm xtc_svr_pid
 .Nd gen_server-style request/reply server abstraction
 .Sh SYNOPSIS
@@ -30,6 +31,8 @@
 .Fn xtc_svr_cast "xtc_pid_t target" "const void *msg" "size_t size"
 .Ft int
 .Fn xtc_svr_reply "xtc_svr_call_t *call" "const void *reply" "size_t size"
+.Ft xtc_svr_call_t *
+.Fn xtc_svr_call_save "const xtc_svr_call_t *call"
 .Ft xtc_pid_t
 .Fn xtc_svr_pid "const xtc_svr_t *s"
 .Sh DESCRIPTION
@@ -93,6 +96,34 @@ sent from inside
 .Va handle_call
 to satisfy the calling client.  Must be called exactly once per
 call.
+.Pp
+.Fn xtc_svr_call_save
+enables a
+.Em deferred
+reply (the OTP
+.Fn gen_server:reply/2
+pattern).  The
+.Vt xtc_svr_call_t
+passed to
+.Va handle_call
+is valid only for that callback.  To reply later -- when a batch
+fills, when other shards answer, when a timer fires --
+call
+.Fn xtc_svr_call_save
+inside
+.Va handle_call
+to obtain a heap-allocated handle that outlives the callback, stash
+it in the server state, return
+.Dv XTC_SVR_NOREPLY ,
+and call
+.Fn xtc_svr_reply
+on the saved handle from any later callback.
+.Fn xtc_svr_reply
+frees a saved handle after sending.  This is safe for in-proc callers
+(the reply routes to the caller's mailbox by tag); an off-proc caller
+must remain blocked in
+.Fn xtc_svr_call
+until the deferred reply is sent.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 struct kv_state { /* ... */ };
