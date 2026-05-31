@@ -84,6 +84,13 @@ int   bitcask_iterate(bitcask_t *bc, bitcask_iter_fn fn, void *user);
 /* Force fsync of the data file.  Returns 0 on success. */
 int   bitcask_sync(bitcask_t *bc);
 
+/* Compaction / merge: rewrite the data file keeping only the live
+ * records, reclaiming the bytes_dead bytes left by overwrites and
+ * deletes.  Returns 0 on success.  A failed compaction leaves the
+ * handle inconsistent and should be treated as fatal for it.  Holds
+ * the write lock for the whole pass. */
+int   bitcask_compact(bitcask_t *bc);
+
 /* Stats snapshot. */
 void  bitcask_stat(bitcask_t *bc, bitcask_stats_t *out);
 
