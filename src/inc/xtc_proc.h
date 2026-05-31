@@ -102,6 +102,7 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int       xtc_recv_match __P((xtc_match_fn, void *, void **, size_t *, int64_t));
  * PUBLIC: int       xtc_recv_correlate __P((const void *, size_t, int, xtc_msg_t *, int *, int64_t));
  * PUBLIC: int       xtc_proc_wait_fd __P((int, uint32_t, int64_t, uint32_t *));
+ * PUBLIC: int       xtc_proc_sleep __P((int64_t));
  * PUBLIC: int       xtc_exit_self __P((int));
  * PUBLIC: int       xtc_exit_pid __P((xtc_pid_t, int));
  * PUBLIC: int       xtc_link __P((xtc_pid_t));
@@ -226,6 +227,12 @@ int       xtc_recv_correlate(const void *corr_value, size_t corr_size,
 
 int       xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
                             uint32_t *out_revents);
+
+/* Sleep the calling process for at least ns nanoseconds by parking it
+ * on a timer (the loop runs other work meanwhile -- it does not block
+ * the thread).  Unlike a timed xtc_recv it does not touch the mailbox.
+ * Returns XTC_E_INVAL if not called from a process. */
+int       xtc_proc_sleep(int64_t ns);
 
 /* Explicit exit from inside a process; reason is delivered via
  * EXIT/DOWN signals to linked / monitoring procs. */

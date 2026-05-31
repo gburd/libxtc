@@ -635,6 +635,39 @@ __xtc_proc_ctx_restore(void *ctx)
 	__current_proc = (struct xtc_proc *)ctx;
 }
 
+/* PUBLIC: int xtc_proc_sleep __P((int64_t)); */
+int
+xtc_proc_sleep(int64_t ns)
+{
+	struct xtc_proc *self = __current_proc;
+	int64_t deadline = 0, now = 0;
+
+	if (self == NULL)
+		return XTC_E_INVAL;        /* not on a proc */
+	if (ns <= 0)
+		return XTC_OK;
+	(void)__os_clock_mono(&deadline);
+	deadline += ns;
+	for (;;) {
+		void *ctx;
+		(void)__os_clock_mono(&now);
+		if (now >= deadline)
+			return XTC_OK;
+		(void)xtc_task_park_on_timer(self->task, deadline - now);
+		ctx = __xtc_proc_ctx_save();
+		xtc_yield();
+		__xtc_proc_ctx_restore(ctx);
+		__current_proc = self;
+		{
+			int kp = atomic_load_explicit(&self->kill_pending,
+			    memory_order_acquire);
+			if (kp != 0)
+				xtc_exit_self(kp - 1);
+		}
+		/* Spurious / early wake: loop until the deadline. */
+	}
+}
+
 /* PUBLIC: int xtc_proc_mailbox_stats __P((xtc_pid_t, xtc_mailbox_stats_t *)); */
 static struct xtc_proc *__resolve(xtc_pid_t pid, xtc_loop_t **out);
 int
