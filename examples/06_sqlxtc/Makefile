@@ -132,6 +132,7 @@ clean:
 	rm -f test_concurrency test_concurrency.o
 	rm -f test_mem test_mem.o
 	rm -f test_wal test_wal.o wal.o
+	rm -f test_shard test_shard.o
 	rm -f test_parallel test_parallel.o
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o
 	rm -f test_bufmgr_mt
@@ -149,7 +150,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-mem test-wal test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-mem test-wal test-shard test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -248,6 +249,16 @@ test_wal: test_wal.c wal.c wal.h
 
 test-wal: test_wal
 	./test_wal
+
+# ---- share-nothing sharded store + control plane (executor; no daemon) ----
+# N shard servers (one xtc_svr each, share-nothing) + a global
+# timestamp allocator; clients route by key-hash.  Scale-out stage 2/3
+# (docs/M_SQLXTC_SCALEOUT.md): single loop and 4-loop executor.
+test_shard: test_shard.c
+	$(CC) $(CFLAGS) -o $@ test_shard.c $(LDFLAGS)
+
+test-shard: test_shard
+	./test_shard
 
 # ---- sx_ engine parallel-execution test (in-process, no daemon) ----
 test_parallel: test_parallel.c engine.o vfs.o sqlite3.o
