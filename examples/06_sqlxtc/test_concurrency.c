@@ -27,7 +27,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 
-extern const sqlite3_mutex_methods *mutex_methods(void);
+#include "mutex.h"
 
 static sqlite3_mutex *g_m;
 static _Atomic int    g_seq;          /* monotonically issued tickets */
