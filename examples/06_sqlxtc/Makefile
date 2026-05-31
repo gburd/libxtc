@@ -134,6 +134,7 @@ clean:
 	rm -f test_bufmgr_mt
 	rm -f test_btnode
 	rm -f test_btree
+	rm -f test_btree_loop
 	rm -f test_vfs_loop test_vfs_loop.o
 	rm -rf $(AMALG_DIR)
 	rm -f sql_parse_gen.o sql_parse_drv.o
@@ -144,7 +145,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -259,6 +260,13 @@ test_btree: test_btree.c btree.c bufmgr.o btnode.c
 
 test-btree: test_btree
 	./test_btree
+
+# ---- B-tree on a loop with offloaded async I/O + live page-provider ----
+test_btree_loop: test_btree_loop.c btree.c bufmgr.o btnode.c
+	$(CC) $(CFLAGS) -o $@ test_btree_loop.c btree.c bufmgr.o btnode.c $(LDFLAGS)
+
+test-btree-loop: test_btree_loop
+	./test_btree_loop
 
 test_pcache_amalg: test_pcache.c pcache.amalg.o sqlite/sqlite3.o \
         $(AMALG_DIR)/xtc.o
