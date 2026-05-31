@@ -28,6 +28,8 @@ typedef struct xtc_exec xtc_exec_t;
  * PUBLIC: int  xtc_exec_stop __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_n_loops __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_loop_id __P((void));
+ * PUBLIC: int  xtc_shard_id __P((void));
+ * PUBLIC: int  xtc_shard_count __P((void));
  * PUBLIC: xtc_loop_t *xtc_exec_loop __P((xtc_exec_t *, int));
  *
  * PUBLIC: int  xtc_exec_spawn __P((xtc_exec_t *, xtc_task_fn, void *, xtc_task_t **));
@@ -58,6 +60,14 @@ int  xtc_exec_n_loops(xtc_exec_t *exec);
  * to verify cross-loop spawn placement and steals.
  */
 int  xtc_exec_loop_id(void);
+
+/* Seastar-style per-shard API.  xtc_shard_id() is the 0-based index of
+ * the loop the caller runs on (a standalone loop is shard 0 of 1; -1
+ * off a loop); xtc_shard_count() is the number of shards (1 for a
+ * standalone loop, 0 off a loop).  Index per-core state with these
+ * for a shared-nothing design. */
+int  xtc_shard_id(void);
+int  xtc_shard_count(void);
 
 /* Borrow a loop pointer (for tests; not generally needed). */
 xtc_loop_t *xtc_exec_loop(xtc_exec_t *exec, int idx);
