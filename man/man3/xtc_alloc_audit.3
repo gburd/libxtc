@@ -1,0 +1,67 @@
+.Dd May 31, 2026
+.Dt XTC_ALLOC_AUDIT 3
+.Os
+.Sh NAME
+.Nm xtc_alloc_audit_enable ,
+.Nm xtc_alloc_audit_stats ,
+.Nm xtc_alloc_audit_proc_leaks
+.Nd debug allocation auditor with per-process leak detection
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_alloc_audit.h
+.Ft int
+.Fn xtc_alloc_audit_enable "int on"
+.Ft void
+.Fn xtc_alloc_audit_stats "size_t *out_count" "size_t *out_bytes"
+.Ft void
+.Fn xtc_alloc_audit_proc_leaks "xtc_pid_t pid" "size_t *out_count" "size_t *out_bytes"
+.Sh DESCRIPTION
+The allocation auditor records every live allocation together with the
+process
+.Pq Fn xtc_self
+that made it, so a test can assert a process freed everything it
+allocated before it died.
+.Pp
+.Fn xtc_alloc_audit_enable
+with a non-zero argument wraps the current allocator hook
+.Pq Xr __os_alloc 3 :
+each allocation calls the previous (downstream) allocator and is
+recorded in a hash table keyed by pointer; each free or realloc
+removes or re-keys the record.  The table's own nodes are allocated
+through the downstream hook directly, so the auditor never audits
+itself.  A zero argument restores the previous hook and frees the
+table.  It returns
+.Dv XTC_OK ,
+or
+.Dv XTC_E_NOMEM
+if the table could not be allocated.
+.Pp
+.Fn xtc_alloc_audit_stats
+reports the total number of live (unfreed) allocations and their byte
+sum across all owners.
+.Pp
+.Fn xtc_alloc_audit_proc_leaks
+reports the live allocations still attributed to
+.Fa pid
+.Pq allocations made off a process are attributed to the none pid .
+This is the per-process leak check: call it from the process's
+.Xr xtc_proc_at_exit 3
+hook, or after the process is reaped, to confirm it leaked nothing.
+.Sh RETURN VALUES
+.Fn xtc_alloc_audit_enable
+returns
+.Dv XTC_OK
+on success or
+.Dv XTC_E_NOMEM .
+The query functions write through their non-NULL output pointers.
+.Sh PERFORMANCE
+The auditor serializes every allocation and free on a global mutex,
+so it is a debug and test tool, not for production hot paths.  It is
+off by default.
+.Sh SEE ALSO
+.Xr __os_alloc 3 ,
+.Xr xtc_proc 3
+.Sh AUTHORS
+The
+.Nm xtc
+project.

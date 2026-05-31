@@ -4,6 +4,7 @@
 #ifndef PTC_EXT_H
 #define PTC_EXT_H
 
+int xtc_alloc_audit_enable __P((int));
 int xtc_down_decode __P((const void *, size_t, xtc_pid_t *, int *));
 int xtc_exit_pid __P((xtc_pid_t, int));
 int xtc_exit_self __P((int));
@@ -31,6 +32,8 @@ long xtc_lwlock_track_violations __P((void));
 struct xtc_mctx *xtc_proc_mctx __P((void));
 void  __xtc_proc_ctx_restore __P((void *));
 void *__xtc_proc_ctx_save __P((void));
+void xtc_alloc_audit_proc_leaks __P((xtc_pid_t, size_t *, size_t *));
+void xtc_alloc_audit_stats __P((size_t *, size_t *));
 void xtc_lwlock_track_enable __P((int));
 void xtc_lwlock_track_reset __P((void));
 void xtc_lwlock_track_set_handler __P((xtc_lwlock_track_fn, void *));
