@@ -221,7 +221,7 @@ Tier 2 -- durability and depth:
       await point; add a test that a torn-down caller cancels its
       outstanding call without leaking a waiter (5).
 
-  A9. Give Bitcask a compaction/merge pass before it is presented as
+  A9. DONE -- Bitcask has a compaction/merge pass (bitcask_compact);
       reusable, or relabel it explicitly as a demo (3).
 
   A10. Re-audit the entire M17 conformance suite for fair comparisons
