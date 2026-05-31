@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "sqlite/sqlite3.h"
+#include "sqlite3.h"
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"

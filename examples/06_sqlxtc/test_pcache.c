@@ -17,7 +17,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "sqlite/sqlite3.h"
+#include "sqlite3.h"
 #include "pcache.h"
 
 static int g_rows;

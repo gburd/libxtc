@@ -63,7 +63,7 @@ SQLITE_CFLAGS = -O2 -g -std=c11 -D_GNU_SOURCE \
     -Wno-unused-parameter \
     -Wno-implicit-fallthrough
 
-SRCS = main.c quack.c db.c conn.c engine.c mutex.c vfs.c pcache.c metrics.c sql_parse.c
+SRCS = main.c quack.c db.c conn.c engine.c mutex.c mem.c vfs.c pcache.c metrics.c sql_parse.c
 OBJS = $(SRCS:.c=.o)
 
 # Lime-generated parser (Phase 2).  Compiled in if the file exists.
@@ -79,11 +79,11 @@ TARGET = sqlxtc-server
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS) sqlite/sqlite3.o $(LIME_OBJ)
-	$(CC) $(CFLAGS) -o $@ $(OBJS) sqlite/sqlite3.o $(LIME_OBJ) $(LDFLAGS)
+$(TARGET): $(OBJS) sqlite3.o $(LIME_OBJ)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) sqlite3.o $(LIME_OBJ) $(LDFLAGS)
 
 # SQLite amalgamation: build once, slow.
-sqlite/sqlite3.o: sqlite/sqlite3.c sqlite/sqlite3.h
+sqlite3.o: sqlite3.c sqlite3.h
 	$(CC) $(SQLITE_CFLAGS) -c -o $@ $<
 
 %.o: %.c
@@ -115,10 +115,11 @@ main.o: main.c conn.h db.h
 quack.o: quack.c quack.h
 db.o: db.c db.h quack.h engine.h
 conn.o: conn.c conn.h db.h quack.h sql_parse.h engine.h
-engine.o: engine.c engine.h vfs.h sqlite/sqlite3.h
+engine.o: engine.c engine.h vfs.h sqlite3.h
 mutex.o: mutex.c
-vfs.o: vfs.c vfs.h sqlite/sqlite3.h
-pcache.o: pcache.c pcache.h sqlite/sqlite3.h
+mem.o: mem.c mem.h sqlite3.h
+vfs.o: vfs.c vfs.h sqlite3.h
+pcache.o: pcache.c pcache.h sqlite3.h
 metrics.o: metrics.c
 sql_parse.o: sql_parse.c sql_parse.h
 sql_parse_drv.o: sql_parse_drv.c sql_parse.h sql_parse_lime.h sql_parse_gen.h
@@ -129,6 +130,7 @@ clean:
 	rm -f test_vfs test_vfs_amalg test_vfs.o
 	rm -f test_pcache test_pcache_amalg test_pcache.o
 	rm -f test_concurrency test_concurrency.o
+	rm -f test_mem test_mem.o
 	rm -f test_parallel test_parallel.o
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o
 	rm -f test_bufmgr_mt
@@ -142,11 +144,11 @@ clean:
 	rm -f /tmp/sqlxtc-bench.db /tmp/sqlxtc-bench.db-*
 
 distclean: clean
-	rm -f sqlite/sqlite3.o
+	rm -f sqlite3.o
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-mem test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -173,8 +175,8 @@ $(AMALG_DIR)/xtc.o: $(AMALG_DIR)/xtc.c
 %.amalg.o: %.c $(AMALG_DIR)/xtc.c
 	$(CC) $(AMALG_CFLAGS) -c -o $@ $<
 
-sqlxtc-server-amalg: $(AMALG_OBJS) sqlite/sqlite3.o $(AMALG_DIR)/xtc.o
-	$(CC) $(AMALG_CFLAGS) -o $@ $(AMALG_OBJS) sqlite/sqlite3.o \
+sqlxtc-server-amalg: $(AMALG_OBJS) sqlite3.o $(AMALG_DIR)/xtc.o
+	$(CC) $(AMALG_CFLAGS) -o $@ $(AMALG_OBJS) sqlite3.o \
 		$(AMALG_DIR)/xtc.o -pthread -ldl -lm
 
 amalg: sqlxtc-server-amalg
@@ -188,23 +190,23 @@ amalg-test: sqlxtc-server-amalg
 # the custom sqlite3_vfs is exercised in both link configurations.
 .PHONY: test-vfs test-vfs-amalg
 
-test_vfs: test_vfs.c vfs.o sqlite/sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_vfs.c vfs.o sqlite/sqlite3.o $(LDFLAGS)
+test_vfs: test_vfs.c vfs.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_vfs.c vfs.o sqlite3.o $(LDFLAGS)
 
 test-vfs: test_vfs
 	./test_vfs
 
 # ---- xtc VFS on-loop blocking-offload test (in-process, no daemon) ----
-test_vfs_loop: test_vfs_loop.c vfs.o sqlite/sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_vfs_loop.c vfs.o sqlite/sqlite3.o $(LDFLAGS)
+test_vfs_loop: test_vfs_loop.c vfs.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_vfs_loop.c vfs.o sqlite3.o $(LDFLAGS)
 
 test-vfs-loop: test_vfs_loop
 	./test_vfs_loop
 
-test_vfs_amalg: test_vfs.c vfs.amalg.o sqlite/sqlite3.o \
+test_vfs_amalg: test_vfs.c vfs.amalg.o sqlite3.o \
         $(AMALG_DIR)/xtc.o
 	$(CC) $(AMALG_CFLAGS) -o $@ test_vfs.c vfs.amalg.o \
-		sqlite/sqlite3.o $(AMALG_DIR)/xtc.o -pthread -ldl -lm
+		sqlite3.o $(AMALG_DIR)/xtc.o -pthread -ldl -lm
 
 test-vfs-amalg: test_vfs_amalg
 	./test_vfs_amalg
@@ -212,22 +214,32 @@ test-vfs-amalg: test_vfs_amalg
 # ---- xtc page-cache test (in-process, no daemon) ----
 .PHONY: test-pcache test-pcache-amalg
 
-test_pcache: test_pcache.c pcache.o sqlite/sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_pcache.c pcache.o sqlite/sqlite3.o $(LDFLAGS)
+test_pcache: test_pcache.c pcache.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_pcache.c pcache.o sqlite3.o $(LDFLAGS)
 
 test-pcache: test_pcache
 	./test_pcache
 
 # ---- xtc_amutex SQLite-mutex concurrency test (in-process, no daemon) ----
-test_concurrency: test_concurrency.c mutex.o sqlite/sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_concurrency.c mutex.o sqlite/sqlite3.o $(LDFLAGS)
+test_concurrency: test_concurrency.c mutex.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_concurrency.c mutex.o sqlite3.o $(LDFLAGS)
 
 test-concurrency: test_concurrency
 	./test_concurrency
 
+# ---- xtc-allocator SQLite-memory seam test (in-process, no daemon) ----
+# Installs the xtc allocator under an __os_alloc counting hook, then
+# drives a real SQL workload: proves the engine's allocations flow
+# through xtc (hook count > 0) and that the workload is correct.
+test_mem: test_mem.c mem.o mutex.o engine.o vfs.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_mem.c mem.o mutex.o engine.o vfs.o sqlite3.o $(LDFLAGS)
+
+test-mem: test_mem
+	./test_mem
+
 # ---- sx_ engine parallel-execution test (in-process, no daemon) ----
-test_parallel: test_parallel.c engine.o vfs.o sqlite/sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_parallel.c engine.o vfs.o sqlite/sqlite3.o $(LDFLAGS)
+test_parallel: test_parallel.c engine.o vfs.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_parallel.c engine.o vfs.o sqlite3.o $(LDFLAGS)
 
 test-parallel: test_parallel
 	./test_parallel
@@ -276,10 +288,10 @@ test_btree_mt: test_btree_mt.c btree.c bufmgr.o btnode.c
 test-btree-mt: test_btree_mt
 	./test_btree_mt
 
-test_pcache_amalg: test_pcache.c pcache.amalg.o sqlite/sqlite3.o \
+test_pcache_amalg: test_pcache.c pcache.amalg.o sqlite3.o \
         $(AMALG_DIR)/xtc.o
 	$(CC) $(AMALG_CFLAGS) -o $@ test_pcache.c pcache.amalg.o \
-		sqlite/sqlite3.o $(AMALG_DIR)/xtc.o -pthread -ldl -lm
+		sqlite3.o $(AMALG_DIR)/xtc.o -pthread -ldl -lm
 
 test-pcache-amalg: test_pcache_amalg
 	./test_pcache_amalg
