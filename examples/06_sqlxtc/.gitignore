@@ -21,3 +21,4 @@ test_btree
 test_bufmgr_mt
 test_btree_loop
 test_btree_loop
+test_btree_mt

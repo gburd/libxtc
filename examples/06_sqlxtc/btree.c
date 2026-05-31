@@ -107,6 +107,7 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include "xtc_sync.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -118,7 +119,7 @@ struct bt {
 	bm_t             *bm;
 	uint32_t          page_size;
 	_Atomic bm_pid_t  root_pid;
-	pthread_mutex_t   struct_mu;   /* serializes writers */
+	xtc_amutex_t     *struct_mu;   /* serializes writers (fiber-yielding) */
 
 	_Atomic uint64_t  st_inserts;
 	_Atomic uint64_t  st_lookups;
@@ -212,7 +213,7 @@ bt_open(bm_t *bm, bt_t **out)
 	if (bt == NULL)
 		return XTC_E_NOMEM;
 	bt->bm = bm;
-	(void)pthread_mutex_init(&bt->struct_mu, NULL);
+	if (xtc_amutex_create(&bt->struct_mu) != XTC_OK) { free(bt); return XTC_E_NOMEM; }
 
 	/*
 	 * The buffer manager exposes no page-size accessor and its
@@ -253,7 +254,7 @@ bt_open(bm_t *bm, bt_t **out)
 	return XTC_OK;
 
 fail:
-	(void)pthread_mutex_destroy(&bt->struct_mu);
+	if (bt->struct_mu) xtc_amutex_destroy(bt->struct_mu);
 	free(bt);
 	return rc;
 }
@@ -263,7 +264,7 @@ bt_close(bt_t *bt)
 {
 	if (bt == NULL)
 		return;
-	(void)pthread_mutex_destroy(&bt->struct_mu);
+	if (bt->struct_mu) xtc_amutex_destroy(bt->struct_mu);
 	free(bt);
 }
 
@@ -284,51 +285,31 @@ bt_close(bt_t *bt)
  * into pushup / *pushuplen.
  */
 static int
-split_internal(bt_t *bt, void *pp, bm_frame_t **rf_out, bm_pid_t *rpid_out,
-    uint8_t *pushup, uint16_t *pushuplen)
+split_internal(bt_t *bt, void *pp, void *rp, uint8_t *pushup, uint16_t *pushuplen)
 {
-	bm_t *bm = bt->bm;
-	bm_frame_t *rf;
-	bm_pid_t rpid;
-	void *rp;
 	int count = (int)btnode_count(pp);
 	int mid = count / 2;
 	int i;
 	uint8_t empty = 0;
-	int rc;
 
-	rc = bm_alloc_pid(bm, &rf, &rpid);
-	if (rc != XTC_OK)
-		return rc;
-	rp = bm_page(rf);
-	bm_latch_exclusive(rf);
 	btnode_init(rp, bt->page_size, 0);
 	btnode_set_fences(rp, NULL, 0, NULL, 0);
 
 	/* Read everything from pp before trimming it. */
 	if (btnode_full_key(pp, mid, pushup, BT_MAX_KEY, pushuplen) != 0 ||
-	    internal_insert(rp, &empty, 0, child_pid_at(pp, mid)) != 0) {
-		bm_unlatch(rf);
-		bm_unfix(bm, rf, 1);
+	    internal_insert(rp, &empty, 0, child_pid_at(pp, mid)) != 0)
 		return XTC_E_INTERNAL;
-	}
 	for (i = mid + 1; i < count; i++) {
 		uint8_t kb[BT_MAX_KEY];
 		uint16_t kl = 0;
 
 		if (btnode_full_key(pp, i, kb, sizeof kb, &kl) != 0 ||
-		    internal_insert(rp, kb, kl, child_pid_at(pp, i)) != 0) {
-			bm_unlatch(rf);
-			bm_unfix(bm, rf, 1);
+		    internal_insert(rp, kb, kl, child_pid_at(pp, i)) != 0)
 			return XTC_E_INTERNAL;
-		}
 	}
 	/* Drop slots mid..count-1 from pp (back to front keeps indices). */
 	for (i = count - 1; i >= mid; i--)
 		(void)btnode_remove(pp, i);
-
-	*rf_out = rf;
-	*rpid_out = rpid;
 	return XTC_OK;
 }
 
@@ -406,14 +387,29 @@ propagate_split(bt_t *bt, const bm_pid_t *path, int level,
 				uint8_t pushup[BT_MAX_KEY];
 				uint16_t pushuplen = 0;
 
-				rc = split_internal(bt, pp, &rf, &rpid, pushup,
-				    &pushuplen);
+				/* Allocate with pf UNLATCHED (the alloc may park on
+				 * eviction I/O; no content latch may be held across a
+				 * park).  struct_mu still excludes other writers; pf
+				 * stays pinned and is re-latched before mutation. */
+				bm_unlatch(pf);
+				rc = bm_alloc_pid(bm, &rf, &rpid);
 				if (rc != XTC_OK) {
+					bm_unfix(bm, pf, 0);
+					return rc;
+				}
+				bm_latch_exclusive(pf);
+				bm_latch_exclusive(rf);
+				pp = bm_page(pf);
+				rp = bm_page(rf);
+
+				rc = split_internal(bt, pp, rp, pushup, &pushuplen);
+				if (rc != XTC_OK) {
+					bm_unlatch(rf);
+					bm_unfix(bm, rf, 1);
 					bm_unlatch(pf);
 					bm_unfix(bm, pf, 1);
 					return rc;
 				}
-				rp = bm_page(rf);
 
 				/*
 				 * Place the pending (sep,right_pid): a separator
@@ -472,7 +468,7 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		return XTC_E_INVAL;
 
 	bm = bt->bm;
-	(void)pthread_mutex_lock(&bt->struct_mu);
+	(void)xtc_amutex_lock(bt->struct_mu, -1);
 
 	/* Descend to the target leaf, recording the pid path. */
 	pid = atomic_load(&bt->root_pid);
@@ -528,9 +524,22 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		uint8_t esep[BT_MAX_KEY];
 		uint16_t eseplen = 0;
 
+		/* Allocate the sibling with the leaf UNLATCHED: bm_alloc_pid
+		 * may evict + flush (an I/O park), and a content latch must
+		 * never be held across a park or the parked holder cannot
+		 * resume and the loop wedges.  struct_mu still excludes other
+		 * writers and the leaf stays pinned (resident); we re-latch it
+		 * before mutating.  A reader may shared-latch the (unmodified,
+		 * still-full) leaf in the gap -- harmless. */
+		bm_unlatch(f);
 		rc = bm_alloc_pid(bm, &rf, &rpid);
-		if (rc != XTC_OK)
+		if (rc != XTC_OK) {
+			bm_unfix(bm, f, 0);
+			f = NULL;
 			goto out;
+		}
+		bm_latch_exclusive(f);          /* re-acquire; leaf unchanged */
+		leaf = bm_page(f);
 		rp = bm_page(rf);
 		bm_latch_exclusive(rf);
 		btnode_init(rp, bt->page_size, btnode_is_leaf(leaf));
@@ -581,7 +590,76 @@ out:
 		bm_unlatch(f);
 		bm_unfix(bm, f, 0);
 	}
-	(void)pthread_mutex_unlock(&bt->struct_mu);
+	(void)xtc_amutex_unlock(bt->struct_mu);
+	return rc;
+}
+
+/*
+ * Non-coupling shared-latch descent to the leaf for `key`.  At each
+ * level the child page id is read under the node's shared latch, the
+ * node is then released, and only THEN is the child fixed -- no latch
+ * is ever held across a child fix, so a parked fix never wedges a
+ * cooperative loop.  Returns the leaf fixed + shared-latched in *out.
+ */
+static int
+descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
+{
+	bm_t *bm = bt->bm;
+	bm_pid_t pid;
+	bm_frame_t *f;
+	void *pg;
+	int rc;
+retry:
+	pid = atomic_load(&bt->root_pid);
+	rc = bm_fix_pid(bm, pid, &f);
+	if (rc != XTC_OK)
+		return rc;
+	bm_latch_shared(f);
+	if (pid != atomic_load(&bt->root_pid)) {   /* root grew under us */
+		bm_unlatch(f);
+		bm_unfix(bm, f, 0);
+		goto retry;
+	}
+	pg = bm_page(f);
+	while (!btnode_is_leaf(pg)) {
+		bm_pid_t child = child_for_key(pg, key, klen);
+		bm_unlatch(f);             /* release parent BEFORE fixing child */
+		bm_unfix(bm, f, 0);
+		rc = bm_fix_pid(bm, child, &f);
+		if (rc != XTC_OK)
+			return rc;
+		bm_latch_shared(f);
+		pg = bm_page(f);
+	}
+	*out = f;
+	return XTC_OK;
+}
+
+/* Search a shared-latched leaf for `key`, copy the value on a hit, and
+ * release the leaf.  Returns XTC_OK on a hit, XTC_E_NOTFOUND else. */
+static int
+leaf_get(bt_t *bt, bm_frame_t *f, const void *key, uint16_t klen,
+    void *buf, uint16_t cap, uint16_t *vlen)
+{
+	void *pg = bm_page(f);
+	int found = 0;
+	int s = btnode_search(pg, key, klen, &found);
+	const void *vp = NULL;
+	uint16_t vl = 0;
+	int rc = XTC_E_NOTFOUND;
+
+	if (found) {
+		(void)btnode_get(pg, s, NULL, NULL, &vp, &vl);
+		if (vlen != NULL)
+			*vlen = vl;
+		if (buf != NULL && cap > 0) {
+			uint16_t n = vl < cap ? vl : cap;
+			memcpy(buf, vp, n);
+		}
+		rc = XTC_OK;
+	}
+	bm_unlatch(f);
+	bm_unfix(bt->bm, f, 0);
 	return rc;
 }
 
@@ -589,70 +667,33 @@ int
 bt_lookup(bt_t *bt, const void *key, uint16_t klen, void *buf, uint16_t cap,
     uint16_t *vlen)
 {
-	bm_t *bm;
-	bm_pid_t pid;
-	bm_frame_t *f;
-	void *pg;
+	bm_frame_t *f = NULL;
 	int rc;
-	int found;
-	int s;
-	const void *vp = NULL;
-	uint16_t vl = 0;
 
 	if (bt == NULL || key == NULL)
 		return XTC_E_INVAL;
-	bm = bt->bm;
 	atomic_fetch_add(&bt->st_lookups, 1);
 
-retry:
-	pid = atomic_load(&bt->root_pid);
-	rc = bm_fix_pid(bm, pid, &f);
+	/* Fast path: lock-free non-coupling descent.  A hit is always real
+	 * -- concurrent splits move keys to a right sibling, never delete
+	 * them -- so only a miss needs confirming. */
+	rc = descend_shared(bt, key, klen, &f);
 	if (rc != XTC_OK)
 		return rc;
-	bm_latch_shared(f);
-	/* If the root changed between the load and the latch, restart. */
-	if (pid != atomic_load(&bt->root_pid)) {
-		bm_unlatch(f);
-		bm_unfix(bm, f, 0);
-		goto retry;
-	}
-	pg = bm_page(f);
+	rc = leaf_get(bt, f, key, klen, buf, cap, vlen);
+	if (rc == XTC_OK)
+		return XTC_OK;
 
-	while (!btnode_is_leaf(pg)) {
-		bm_pid_t child = child_for_key(pg, key, klen);
-		bm_frame_t *cf;
-
-		rc = bm_fix_pid(bm, child, &cf);
-		if (rc != XTC_OK) {
-			bm_unlatch(f);
-			bm_unfix(bm, f, 0);
-			return rc;
-		}
-		bm_latch_shared(cf);     /* couple: hold child before parent */
-		bm_unlatch(f);
-		bm_unfix(bm, f, 0);
-		f = cf;
-		pg = bm_page(f);
-	}
-
-	found = 0;
-	s = btnode_search(pg, key, klen, &found);
-	if (!found) {
-		bm_unlatch(f);
-		bm_unfix(bm, f, 0);
-		return XTC_E_NOTFOUND;
-	}
-	(void)btnode_get(pg, s, NULL, NULL, &vp, &vl);
-	if (vlen != NULL)
-		*vlen = vl;
-	if (buf != NULL && cap > 0) {
-		uint16_t n = vl < cap ? vl : cap;
-
-		memcpy(buf, vp, n);
-	}
-	bm_unlatch(f);
-	bm_unfix(bm, f, 0);
-	return XTC_OK;
+	/* Miss: a split may have moved the key out from under the descent.
+	 * Confirm under the writer lock, where no writer is mutating the
+	 * tree.  struct_mu is a fiber-yielding amutex, so this parks the
+	 * fiber rather than blocking the loop. */
+	(void)xtc_amutex_lock(bt->struct_mu, -1);
+	rc = descend_shared(bt, key, klen, &f);
+	if (rc == XTC_OK)
+		rc = leaf_get(bt, f, key, klen, buf, cap, vlen);
+	(void)xtc_amutex_unlock(bt->struct_mu);
+	return rc;
 }
 
 int
@@ -669,7 +710,7 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 	if (bt == NULL || key == NULL)
 		return XTC_E_INVAL;
 	bm = bt->bm;
-	(void)pthread_mutex_lock(&bt->struct_mu);
+	(void)xtc_amutex_lock(bt->struct_mu, -1);
 
 	pid = atomic_load(&bt->root_pid);
 	for (;;) {
@@ -710,7 +751,7 @@ out:
 		bm_unlatch(f);
 		bm_unfix(bm, f, 0);
 	}
-	(void)pthread_mutex_unlock(&bt->struct_mu);
+	(void)xtc_amutex_unlock(bt->struct_mu);
 	return rc;
 }
 

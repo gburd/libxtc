@@ -175,6 +175,14 @@ uint16_t btnode_prefix_len(const void *page);
 uint32_t btnode_right_sibling(const void *page);
 void btnode_set_right_sibling(void *page, uint32_t id);
 
+/* Compare `key` against this node's upper fence (the largest key the
+ * node is responsible for).  Returns <0 if key is at or below the
+ * fence (belongs here), >0 if key is strictly beyond it (a concurrent
+ * split moved it to the right sibling -- follow btnode_right_sibling).
+ * A node with a +infinity upper fence (the rightmost at its level)
+ * always returns <0.  This is the Lehman-Yao B-link follow test. */
+int btnode_beyond_hi_fence(const void *page, const void *key, uint16_t klen);
+
 #ifdef __cplusplus
 }
 #endif
