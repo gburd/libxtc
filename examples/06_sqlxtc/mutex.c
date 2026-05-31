@@ -35,7 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "sqlite/sqlite3.h"
+#include "sqlite3.h"
 #include "xtc.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"

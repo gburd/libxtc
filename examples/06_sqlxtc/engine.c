@@ -15,7 +15,7 @@
 #include "engine.h"
 #include "vfs.h"
 
-#include "sqlite/sqlite3.h"
+#include "sqlite3.h"
 #include "xtc_async.h"     /* xtc_yield -- the fiber-yielding busy handler */
 #include "xtc_proc.h"      /* xtc_proc_sleep -- park, do not spin */
 
@@ -50,6 +50,13 @@ sx_config_mutex(const void *methods)
 {
 	return sqlite3_config(SQLITE_CONFIG_MUTEX,
 	    (const sqlite3_mutex_methods *)methods);
+}
+
+int
+sx_config_mem(const void *methods)
+{
+	return sqlite3_config(SQLITE_CONFIG_MALLOC,
+	    (const sqlite3_mem_methods *)methods);
 }
 
 int

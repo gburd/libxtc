@@ -18,7 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "sqlite/sqlite3.h"
+#include "sqlite3.h"
 #include "vfs.h"
 
 static int g_sum;
