@@ -253,7 +253,7 @@ static const sqlite3_mutex_methods mutex_table = {
 	xMutexNotheld
 };
 
-const sqlite3_mutex_methods *
+const void *
 mutex_methods(void)
 {
 	return &mutex_table;
