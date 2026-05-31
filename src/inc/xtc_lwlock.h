@@ -73,6 +73,11 @@ typedef struct xtc_lwlock {
  *
  * PUBLIC: int  xtc_lwlock_held_by_me __P((const xtc_lwlock_t *));
  * PUBLIC: int  xtc_lwlock_held_by_me_in_mode __P((const xtc_lwlock_t *, xtc_lwlock_mode_t));
+ *
+ * PUBLIC: void xtc_lwlock_track_enable __P((int));
+ * PUBLIC: long xtc_lwlock_track_violations __P((void));
+ * PUBLIC: void xtc_lwlock_track_reset __P((void));
+ * PUBLIC: void xtc_lwlock_track_set_handler __P((xtc_lwlock_track_fn, void *));
  */
 
 int   xtc_lwlock_init(xtc_lwlock_t *lock, uint16_t tranche);
@@ -93,5 +98,22 @@ void  xtc_lwlock_release(xtc_lwlock_t *lock);
 int   xtc_lwlock_held_by_me(const xtc_lwlock_t *lock);
 int   xtc_lwlock_held_by_me_in_mode(const xtc_lwlock_t *lock,
                                     xtc_lwlock_mode_t mode);
+
+/*
+ * Optional lock-order (WITNESS) tracker.  Off by default; enable in
+ * test/staging to catch lock-order inversions among lwlocks (the
+ * deadlock precursor the lwlock primitive cannot detect on its own,
+ * unlike xtc_lockmgr).  Edges are keyed by tranche (the lock class):
+ * the handler, if set, fires with (held_tranche, acquired_tranche)
+ * each time an acquisition reverses a previously-seen order.
+ * xtc_lwlock_track_violations counts those; xtc_lwlock_track_reset
+ * clears the edge set + counter.
+ */
+typedef void (*xtc_lwlock_track_fn)(uint16_t held_tranche,
+                                    uint16_t acquired_tranche, void *user);
+void  xtc_lwlock_track_enable(int on);
+long  xtc_lwlock_track_violations(void);
+void  xtc_lwlock_track_reset(void);
+void  xtc_lwlock_track_set_handler(xtc_lwlock_track_fn fn, void *user);
 
 #endif /* XTC_LWLOCK_H */
