@@ -15,33 +15,48 @@ sufficient.
 
 ## Stage 1 -- group-commit WAL writer (wal.c)
 
-### GAP: xtc_svr has no deferred reply (gen_server:reply/2)
+### GAP (FIXED): xtc_svr had no deferred reply (gen_server:reply/2)
 
 `xtc_svr`'s `handle_call(state, req, size, xtc_svr_call_t *call)` gives
 a `call` handle that is **stack-scoped to that one dispatch** -- in
 `src/orc/svr.c` it is `struct xtc_svr_call call = {0};` on the
-dispatch loop's stack.  `xtc_svr_reply(call, ...)` therefore only works
-synchronously, from inside the callback.  There is no `XTC_SVR_NOREPLY`
-result and no way to stash the requester and reply later.
+dispatch loop's stack.  `xtc_svr_reply(call, ...)` therefore only
+worked synchronously, from inside the callback.  There was no
+`XTC_SVR_NOREPLY` result and no way to stash the requester and reply
+later.
 
 Group commit is exactly the pattern that needs this: receive many
 commit calls, defer all their replies, do ONE fsync, then reply to the
 whole batch.  In Erlang this is `{noreply, State}` + `gen_server:reply(From, R)`.
 
-  * Impact: any request/reply subsystem that batches, fans out, or
-    otherwise replies out-of-band cannot use `xtc_svr`.  That is a
-    large class for the scale-out plan (the WAL writer, the 2PC
-    coordinator, a query-result aggregator).
-  * Worked around: wal.c is built on raw `xtc_proc` send/recv -- the
-    committer `xtc_send`s its record and parks on an ack message; the
-    writer replies with `xtc_send` to each stored `reply_to` pid after
-    the batch fsync.  Robust, but it re-implements the call/reply
-    correlation that `xtc_svr` exists to provide.
-  * Proposed fix (library): make `xtc_svr_call_t` survive past
-    `handle_call` (heap-allocate the slot, or ref-count it), add an
-    `XTC_SVR_NOREPLY` return so the callback can defer, and allow
-    `xtc_svr_reply` to be called later from any context.  Additive to
-    the frozen ABI (a new constant + a lifetime change).  TODO.
+  * Fixed in the library: added `xtc_svr_call_save()` (returns a
+    heap-allocated copy of the call handle that outlives the
+    callback) and the `XTC_SVR_NOREPLY` result code.  `handle_call`
+    saves the handle, stashes it, returns `XTC_SVR_NOREPLY`, and a
+    later callback calls `xtc_svr_reply` on the saved handle (which
+    frees it).  Additive to the frozen ABI (the call struct is opaque;
+    a new field + a new function + a new constant).  Tested:
+    `test/m10/test_svr.c` /deferred_reply -- two in-proc callers'
+    replies are deferred past `handle_call` and answered together from
+    a later cast.  Full suite + ASan clean.
+  * Still worked around in wal.c: the WAL writer stays on raw
+    `xtc_proc` send/recv anyway, because group commit also needs a
+    sub-millisecond batch WINDOW and `xtc_svr`'s dispatch loop uses a
+    fixed 100ms recv poll (see the next entry) -- so even with
+    deferred reply, xtc_svr is not the right host for the tight WAL
+    batch.  Deferred reply IS the right tool for the 2PC coordinator
+    and other fan-out subsystems, which is why it was worth fixing.
+
+### GAP: xtc_svr dispatch loop has a fixed 100ms recv poll
+
+`__svr_entry` does `xtc_recv(&msg, &size, 100ms)` per iteration, so a
+server cannot implement a sub-millisecond timed batch window (group
+commit wants ~0.5ms).  A raw proc can (`xtc_recv` with an arbitrary
+computed timeout), which is why the WAL writer is a raw proc.
+
+  * Possible fix (library): let the server specify its idle poll
+    interval in `xtc_svr_opts_t`, or expose a timer callback.  Low
+    priority -- raw procs cover the tight-timer case today.  TODO.
 
 ### GAP: no XTC_E_IO error code
 

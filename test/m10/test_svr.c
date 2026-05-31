@@ -222,9 +222,109 @@ test_svr_call_abortable(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- deferred reply (xtc_svr_call_save + XTC_SVR_NOREPLY): a server
+ * that stashes calls and replies to the whole batch later, from a
+ * cast.  This is the gen_server:reply/2 pattern the group-commit WAL
+ * writer and the 2PC coordinator need. ---- */
+#define DEFER_MAGIC 0xBEEF
+struct defer_state {
+	xtc_svr_call_t *saved[4];
+	int             n;
+};
+static int
+defer_handle_call(void *st, const void *req, size_t size, xtc_svr_call_t *call)
+{
+	struct defer_state *s = st;
+	(void)req; (void)size;
+	/* Stash a heap-survivable handle and answer later. */
+	s->saved[s->n++] = xtc_svr_call_save(call);
+	return XTC_SVR_NOREPLY;
+}
+static int
+defer_handle_cast(void *st, const void *msg, size_t size)
+{
+	struct defer_state *s = st;
+	int v = DEFER_MAGIC, i;
+	(void)msg; (void)size;
+	/* Flush: reply to every deferred caller (frees each saved handle). */
+	for (i = 0; i < s->n; i++)
+		(void)xtc_svr_reply(s->saved[i], &v, sizeof v);
+	s->n = 0;
+	return XTC_SVR_CONTINUE;
+}
+
+struct defer_args { xtc_pid_t target; _Atomic int rc; _Atomic int val; };
+static xtc_svr_t *g_defer_svr;
+static _Atomic int g_defer_left;
+
+static void
+defer_caller(void *arg)
+{
+	struct defer_args *a = arg;
+	void *reply = NULL; size_t rsz = 0;
+	int rc = xtc_svr_call(a->target, NULL, 0, &reply, &rsz,
+	    5LL * 1000 * 1000 * 1000);
+	atomic_store_explicit(&a->rc, rc, memory_order_release);
+	if (rc == XTC_OK && rsz == sizeof(int))
+		atomic_store_explicit(&a->val, *(int *)reply, memory_order_release);
+	if (reply) __os_free(reply);
+	/* The last caller to get its deferred reply stops the server. */
+	if (atomic_fetch_sub(&g_defer_left, 1) == 1)
+		(void)xtc_svr_stop(g_defer_svr);
+}
+static void
+defer_flusher(void *arg)
+{
+	struct defer_args *a = arg;
+	(void)xtc_proc_sleep(10LL * 1000 * 1000);   /* let both calls register */
+	(void)xtc_svr_cast(a->target, "flush", 5);
+}
+
+static MunitResult
+test_svr_deferred_reply(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_svr_t  *svr;
+	xtc_svr_callbacks_t cb = {
+		.init = NULL, .handle_call = defer_handle_call,
+		.handle_cast = defer_handle_cast, .handle_info = NULL,
+		.terminate = NULL
+	};
+	xtc_svr_opts_t opts = { .name = "defer", .mailbox_cap = 0 };
+	struct defer_state state = {0};
+	struct defer_args a1, a2, fa;
+	xtc_pid_t p1, p2, pf;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cb, &state, &opts, &svr), ==, XTC_OK);
+	g_defer_svr = svr;
+	atomic_store(&g_defer_left, 2);
+
+	memset(&a1, 0, sizeof a1); memset(&a2, 0, sizeof a2); memset(&fa, 0, sizeof fa);
+	a1.target = a2.target = fa.target = xtc_svr_pid(svr);
+
+	munit_assert_int(xtc_proc_spawn(loop, defer_caller, &a1, NULL, &p1), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, defer_caller, &a2, NULL, &p2), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, defer_flusher, &fa, NULL, &pf), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* Both calls deferred past handle_call, then answered from the
+	 * cast: each caller got the magic reply. */
+	munit_assert_int(atomic_load(&a1.rc), ==, XTC_OK);
+	munit_assert_int(atomic_load(&a2.rc), ==, XTC_OK);
+	munit_assert_int(atomic_load(&a1.val), ==, DEFER_MAGIC);
+	munit_assert_int(atomic_load(&a2.val), ==, DEFER_MAGIC);
+
+	munit_assert_int(xtc_svr_join(svr, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/svr_basic", test_svr_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_abortable", test_svr_call_abortable, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/deferred_reply", test_svr_deferred_reply, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/svr", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
