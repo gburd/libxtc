@@ -469,6 +469,245 @@ xtc_amutex_unlock(xtc_amutex_t *m)
 	return XTC_OK;
 }
 
+/* ----- arwlock (parking reader/writer latch) --------------------
+ *
+ * A shared/exclusive latch whose contended waiters PARK the fiber
+ * (yield to the loop) rather than blocking the OS thread, so a holder
+ * may park on I/O (e.g. a buffer-manager page fetch) while latched
+ * without wedging the loop, and lock coupling can hold a parent latch
+ * across a child fix.  Off a loop (cur == NULL) waiters block on a
+ * condvar.
+ *
+ * Fiber waiters use a FIFO queue with direct hand-off: a release grants
+ * the latch to the head waiter(s) -- a run of consecutive shared
+ * waiters together, or one exclusive waiter -- and wakes them, so
+ * ordering is fair and writers do not starve.  New acquirers that find
+ * any waiter queued ahead of them queue too (FIFO), so a steady read
+ * stream cannot starve a waiting writer.  Off-loop (condvar) waiters
+ * re-check the grant condition themselves and yield to queued fiber
+ * waiters; under heavy fiber contention an off-loop waiter may wait
+ * (the documented tradeoff -- real contention here is between procs).
+ */
+#define ARW_SHARED 0
+#define ARW_EXCL   1
+
+struct arwlock_waiter {
+	xtc_waker_t            waker;
+	struct arwlock_waiter *next;
+	int                    mode;
+	int                    granted;
+};
+
+struct xtc_arwlock {
+	pthread_mutex_t        lock;
+	pthread_cond_t         cv;        /* off-loop waiters */
+	int                    readers;   /* active shared holders */
+	int                    writer;    /* 1 if exclusive held */
+	int                    cv_waiters;
+	struct arwlock_waiter *wq_head;   /* fiber waiters, FIFO */
+	struct arwlock_waiter *wq_tail;
+};
+
+int
+xtc_arwlock_create(xtc_arwlock_t **out)
+{
+	xtc_arwlock_t *r;
+	int rc;
+	if (out == NULL) return XTC_E_INVAL;
+	if ((rc = __os_calloc(1, sizeof *r, (void **)&r)) != XTC_OK) return rc;
+	(void)pthread_mutex_init(&r->lock, NULL);
+	(void)pthread_cond_init(&r->cv, NULL);
+	*out = r;
+	return XTC_OK;
+}
+
+void
+xtc_arwlock_destroy(xtc_arwlock_t *r)
+{
+	if (r == NULL) return;
+	(void)pthread_cond_destroy(&r->cv);
+	(void)pthread_mutex_destroy(&r->lock);
+	__os_free(r);
+}
+
+/* Can `mode` be granted right now, ignoring queue order? */
+static int
+__arw_compatible(xtc_arwlock_t *r, int mode)
+{
+	return mode == ARW_EXCL ? (!r->writer && r->readers == 0)
+	                        : (!r->writer);
+}
+
+/* Grant as many head fiber waiters as the current state allows; return
+ * the granted waiters (linked via ->next) to wake after unlocking.
+ * Wakes off-loop waiters too when no fiber waiter is queued ahead. */
+static struct arwlock_waiter *
+__arw_grant_locked(xtc_arwlock_t *r)
+{
+	struct arwlock_waiter *woke = NULL;
+	while (r->wq_head != NULL) {
+		struct arwlock_waiter *w = r->wq_head;
+		if (!__arw_compatible(r, w->mode))
+			break;
+		r->wq_head = w->next;
+		if (r->wq_head == NULL) r->wq_tail = NULL;
+		if (w->mode == ARW_EXCL) r->writer = 1; else r->readers++;
+		w->granted = 1;
+		w->next = woke;
+		woke = w;
+		if (w->mode == ARW_EXCL)
+			break;          /* exclusive: nothing after can join */
+	}
+	if (r->cv_waiters > 0 && r->wq_head == NULL)
+		(void)pthread_cond_broadcast(&r->cv);
+	return woke;
+}
+
+static void
+__arw_wq_remove(xtc_arwlock_t *r, struct arwlock_waiter *w)
+{
+	struct arwlock_waiter *p = r->wq_head, *prev = NULL;
+	while (p != NULL) {
+		if (p == w) {
+			if (prev != NULL) prev->next = p->next;
+			else r->wq_head = p->next;
+			if (r->wq_tail == p) r->wq_tail = prev;
+			return;
+		}
+		prev = p; p = p->next;
+	}
+}
+
+static int
+__arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
+{
+	xtc_task_t *cur;
+	struct arwlock_waiter w;
+	void *proc_ctx;
+	int64_t deadline = -1;
+
+	if (r == NULL) return XTC_E_INVAL;
+
+	(void)pthread_mutex_lock(&r->lock);
+	/* Fast path: compatible AND nobody queued ahead (FIFO fairness). */
+	if (r->wq_head == NULL && __arw_compatible(r, mode)) {
+		if (mode == ARW_EXCL) r->writer = 1; else r->readers++;
+		(void)pthread_mutex_unlock(&r->lock);
+		return XTC_OK;
+	}
+	if (timeout_ns == 0) {
+		(void)pthread_mutex_unlock(&r->lock);
+		return XTC_E_AGAIN;
+	}
+
+	cur = __xtc_current_task();
+	if (cur == NULL) {
+		/* Off-loop: condvar wait, yielding to any queued fiber waiter. */
+		int rc = XTC_OK;
+		r->cv_waiters++;
+		if (timeout_ns < 0) {
+			while (!(r->wq_head == NULL && __arw_compatible(r, mode)))
+				(void)pthread_cond_wait(&r->cv, &r->lock);
+		} else {
+			struct timespec ts;
+			int64_t now;
+			(void)__os_clock_real(&now);
+			now += timeout_ns;
+			ts.tv_sec = (time_t)(now / 1000000000LL);
+			ts.tv_nsec = (long)(now % 1000000000LL);
+			while (!(r->wq_head == NULL && __arw_compatible(r, mode))) {
+				if (pthread_cond_timedwait(&r->cv, &r->lock, &ts) != 0) {
+					rc = XTC_E_AGAIN; break;
+				}
+			}
+		}
+		if (rc == XTC_OK) {
+			if (mode == ARW_EXCL) r->writer = 1; else r->readers++;
+		}
+		r->cv_waiters--;
+		(void)pthread_mutex_unlock(&r->lock);
+		return rc;
+	}
+
+	/* Fiber waiter: enqueue and park until granted. */
+	(void)xtc_task_waker(cur, &w.waker);
+	w.mode = mode;
+	w.granted = 0;
+	w.next = NULL;
+	if (r->wq_tail != NULL) r->wq_tail->next = &w;
+	else r->wq_head = &w;
+	r->wq_tail = &w;
+	(void)pthread_mutex_unlock(&r->lock);
+
+	if (timeout_ns > 0) {
+		int64_t now;
+		(void)__os_clock_mono(&now);
+		deadline = now + timeout_ns;
+	}
+	for (;;) {
+		int64_t now;
+		if (deadline >= 0) {
+			(void)__os_clock_mono(&now);
+			if (now >= deadline) {
+				(void)pthread_mutex_lock(&r->lock);
+				if (w.granted) { (void)pthread_mutex_unlock(&r->lock); return XTC_OK; }
+				__arw_wq_remove(r, &w);
+				/* Removing us may unblock waiters behind us. */
+				{
+					struct arwlock_waiter *woke = __arw_grant_locked(r);
+					(void)pthread_mutex_unlock(&r->lock);
+					while (woke != NULL) {
+						struct arwlock_waiter *n = woke->next;
+						(void)xtc_waker_wake(&woke->waker);
+						woke = n;
+					}
+				}
+				return XTC_E_AGAIN;
+			}
+			(void)xtc_task_park_on_timer(cur, deadline - now);
+		} else {
+			cur->park_requested = 1;
+		}
+		proc_ctx = __xtc_proc_ctx_save();
+		xtc_yield();
+		__xtc_proc_ctx_restore(proc_ctx);
+
+		(void)pthread_mutex_lock(&r->lock);
+		if (w.granted) { (void)pthread_mutex_unlock(&r->lock); return XTC_OK; }
+		(void)pthread_mutex_unlock(&r->lock);
+	}
+}
+
+int
+xtc_arwlock_rdlock(xtc_arwlock_t *r, int64_t timeout_ns)
+{
+	return __arwlock_lock(r, ARW_SHARED, timeout_ns);
+}
+
+int
+xtc_arwlock_wrlock(xtc_arwlock_t *r, int64_t timeout_ns)
+{
+	return __arwlock_lock(r, ARW_EXCL, timeout_ns);
+}
+
+int
+xtc_arwlock_unlock(xtc_arwlock_t *r)
+{
+	struct arwlock_waiter *woke;
+	if (r == NULL) return XTC_E_INVAL;
+	(void)pthread_mutex_lock(&r->lock);
+	if (r->writer) r->writer = 0;
+	else if (r->readers > 0) r->readers--;
+	woke = __arw_grant_locked(r);
+	(void)pthread_mutex_unlock(&r->lock);
+	while (woke != NULL) {
+		struct arwlock_waiter *n = woke->next;
+		(void)xtc_waker_wake(&woke->waker);
+		woke = n;
+	}
+	return XTC_OK;
+}
+
 /* ----- rwlock (writer-priority) -------------------------------- */
 
 struct xtc_rwlock {

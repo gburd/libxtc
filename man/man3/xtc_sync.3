@@ -5,6 +5,7 @@
 .Os
 .Sh NAME
 .Nm xtc_amutex ,
+.Nm xtc_arwlock ,
 .Nm xtc_rwlock ,
 .Nm xtc_notify ,
 .Nm xtc_sem ,
@@ -32,10 +33,21 @@ or other async I/O.  Compare with
 .Xr xtc_lwlock 3
 which uses pthread mutex underneath
 .Pq blocks the OS thread .
+.It Vt xtc_arwlock
+Async reader-writer latch (shared / exclusive).  Blocked acquires park
+the fiber, exactly as
+.Vt xtc_amutex ,
+so a holder may park on I/O while latched and lock coupling may hold a
+parent latch across a child fix without wedging a cooperative loop.
+FIFO fairness keeps a read stream from starving a waiting writer.
+This is the reader-writer primitive a concurrent B-tree latches its
+pages with.
 .It Vt xtc_rwlock
-Async reader-writer lock.  Multi-reader / single-writer.  Same
-fiber-parking semantics as
-.Vt xtc_amutex .
+Reader-writer lock with writer priority, built on a pthread mutex and
+condition variable: a blocked acquire blocks the OS thread (it does
+NOT park the fiber).  Use
+.Vt xtc_arwlock
+instead on the hot path of an event loop.
 .It Vt xtc_notify
 A 0-or-1 latch.  Producers
 .Fn xtc_notify_signal ;
