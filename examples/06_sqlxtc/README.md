@@ -27,8 +27,11 @@ cd ../examples/06_sqlxtc
 make
 ```
 
-The first make compiles the bundled SQLite amalgamation (`sqlite/sqlite3.c`,
-9 MB, 250 K LOC).  Later builds reuse the object file.
+The first make compiles the bundled SQLite amalgamation (`sqlite3.c`,
+9 MB, 250 K LOC).  Later builds reuse the object file.  (The
+amalgamation lives directly in the example directory: sqlxtc is a
+fork of SQLite that progressively routes its substrate through xtc,
+not a pristine vendor drop -- see `DESIGN.md`.)
 
 To build sqlxtc against the single-file xtc amalgamation instead of
 `libxtc.a` -- which exercises the amalgamation as a real, broad
@@ -93,6 +96,13 @@ listen_fd ----------> listener_proc ----xtc_proc-----> conn_proc(fd)
   rather than block the OS thread -- otherwise a backend that parks
   mid-statement (the VFS offload below) would wedge every peer.
   Recursion is tracked by FIBER identity (the proc), not thread id.
+* `mem.c` -- sqlite3_mem_methods backed by xtc's allocator
+  (`__os_malloc` / `__os_realloc` / `__os_free`), installed before
+  init via `sx_config_mem`.  Every allocation the engine makes flows
+  through xtc's allocator, which is itself a hookable vtable, so a
+  host (the PostgreSQL-on-xtc port) that supplies its own primitives
+  captures SQLite's allocations too.  This is the memory shim the
+  hard-fork plan lists as redundant once xtc supplies the primitive.
 * `vfs.c` -- a `"sqlxtc"` sqlite3_vfs (shim over the platform
   default).  Every byte of database I/O flows through it: per-file
   state is allocated with the xtc allocator, and reads, writes, and
@@ -199,3 +209,13 @@ payoff.
 ISC, like the rest of libxtc.  The bundled SQLite amalgamation is
 public domain.  The bundled Lime parser generator is BSD-2-Clause
 (see `lime/LICENSE`).
+
+## Design
+
+`DESIGN.md` is the in-depth architecture document for this example:
+the process model, the Quack protocol, the `sx_` engine facade, the
+four xtc substrate seams (mutex / memory / page-cache / VFS), the
+native storage engine (buffer manager + B-link tree with parallel
+writers), and the two evolution paths (hard-fork vs greenfield) with
+current status.  The companion deep-dives live in `../../docs/`:
+`M_SQLXTC_HARDFORK.md`, `M_SQLXTC_GREENFIELD.md`, `M_SQLXTC_STORAGE.md`.
