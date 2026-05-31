@@ -18,3 +18,4 @@ test_parallel
 test_bufmgr
 test_btnode
 test_btree
+test_bufmgr_mt
