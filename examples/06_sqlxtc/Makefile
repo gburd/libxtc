@@ -63,7 +63,7 @@ SQLITE_CFLAGS = -O2 -g -std=c11 -D_GNU_SOURCE \
     -Wno-unused-parameter \
     -Wno-implicit-fallthrough
 
-SRCS = main.c quack.c db.c conn.c mutex.c vfs.c pcache.c metrics.c sql_parse.c
+SRCS = main.c quack.c db.c conn.c engine.c mutex.c vfs.c pcache.c metrics.c sql_parse.c
 OBJS = $(SRCS:.c=.o)
 
 # Lime-generated parser (Phase 2).  Compiled in if the file exists.
@@ -113,8 +113,9 @@ sql_parse: sql_parse_gen.c
 # Dependencies
 main.o: main.c conn.h db.h
 quack.o: quack.c quack.h
-db.o: db.c db.h quack.h
-conn.o: conn.c conn.h db.h quack.h sql_parse.h
+db.o: db.c db.h quack.h engine.h
+conn.o: conn.c conn.h db.h quack.h sql_parse.h engine.h
+engine.o: engine.c engine.h vfs.h sqlite/sqlite3.h
 mutex.o: mutex.c
 vfs.o: vfs.c vfs.h sqlite/sqlite3.h
 pcache.o: pcache.c pcache.h sqlite/sqlite3.h
@@ -128,6 +129,7 @@ clean:
 	rm -f test_vfs test_vfs_amalg test_vfs.o
 	rm -f test_pcache test_pcache_amalg test_pcache.o
 	rm -f test_concurrency test_concurrency.o
+	rm -f test_parallel test_parallel.o
 	rm -f test_vfs_loop test_vfs_loop.o
 	rm -rf $(AMALG_DIR)
 	rm -f sql_parse_gen.o sql_parse_drv.o
@@ -138,7 +140,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-parallel
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -216,6 +218,13 @@ test_concurrency: test_concurrency.c mutex.o sqlite/sqlite3.o
 
 test-concurrency: test_concurrency
 	./test_concurrency
+
+# ---- sx_ engine parallel-execution test (in-process, no daemon) ----
+test_parallel: test_parallel.c engine.o vfs.o sqlite/sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_parallel.c engine.o vfs.o sqlite/sqlite3.o $(LDFLAGS)
+
+test-parallel: test_parallel
+	./test_parallel
 
 test_pcache_amalg: test_pcache.c pcache.amalg.o sqlite/sqlite3.o \
         $(AMALG_DIR)/xtc.o

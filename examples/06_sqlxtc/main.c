@@ -37,9 +37,8 @@
 
 #include "conn.h"
 #include "db.h"
-#include "sqlite/sqlite3.h"
-
-extern const sqlite3_mutex_methods *mutex_methods(void);
+#include "engine.h"
+#include "mutex.h"
 #include "pcache.h"
 extern int metrics_spawn(xtc_loop_t *loop, xtc_res_t *res,
                          _Atomic int *conn_count,
@@ -261,7 +260,7 @@ usage(const char *prog)
 	    "  -n, --max-clients=N   max concurrent clients (default 1000)\n"
 	    "  -i, --max-iops=N      queries/sec cap (0 unlimited)\n"
 	    "  -D, --max-databases=N max ATTACHed dbs (default 16)\n"
-	    "      --no-shared       per-conn sqlite3 (Phase 1 mode)\n"
+	    "      --no-shared       per-conn handle (vs one shared handle)\n"
 	    "  -v, --verbose\n"
 	    "      --help\n",
 	    prog);
@@ -340,26 +339,26 @@ main(int argc, char **argv)
 	               cfg.host, cfg.port, cfg.db_path);
 	if (cfg.cores > 0) pin_to_cores(cfg.cores);
 
-	/* SQLite global config: install xtc_lwlock-backed mutex methods
-	 * and serialized threading mode BEFORE any sqlite3_open. */
-	rc = sqlite3_config(SQLITE_CONFIG_MUTEX,
-	                    mutex_methods());
-	if (rc != SQLITE_OK) {
+	/* Engine global config: install the xtc_amutex-backed mutex
+	 * methods and the safe (serialized) threading mode BEFORE the
+	 * first open. */
+	rc = sx_config_mutex(mutex_methods());
+	if (rc != SX_OK) {
 		fprintf(stderr,
-		        "sqlite3_config(MUTEX) failed: %d\n", rc);
+		        "sx_config_mutex failed: %d\n", rc);
 		/* Continue with default mutex; not fatal. */
 	}
-	rc = sqlite3_config(SQLITE_CONFIG_SERIALIZED);
-	if (rc != SQLITE_OK) {
+	rc = sx_config_serialized();
+	if (rc != SX_OK) {
 		fprintf(stderr,
-		        "sqlite3_config(SERIALIZED) failed: %d\n", rc);
+		        "sx_config_serialized failed: %d\n", rc);
 	}
-	/* Route SQLite's page cache through an xtc_slab (one object-size
-	 * class per cache).  Must precede sqlite3_initialize(). */
-	if (pcache_register() != SQLITE_OK)
+	/* Route the engine's page cache through an xtc_slab (one
+	 * object-size class per cache).  Must precede sx_init(). */
+	if (pcache_register() != SX_OK)
 		fprintf(stderr, "pcache_register failed; "
 		        "using the default page cache\n");
-	(void)sqlite3_initialize();
+	(void)sx_init();
 
 	/* xtc_res. */
 	srv->res = (xtc_res_t *)calloc(1, sizeof *srv->res);
@@ -424,6 +423,6 @@ main(int argc, char **argv)
 	xtc_app_destroy(srv->app);
 	free(srv->res);
 	xtc_log_destroy(log);
-	(void)sqlite3_shutdown();
+	(void)sx_shutdown();
 	return 0;
 }
