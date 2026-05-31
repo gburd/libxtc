@@ -422,7 +422,9 @@ Listing them as concrete agenda items:
    blocking call and parks the calling process via a pipe +
    xtc_proc_wait_fd; synchronous fallback off a loop.
 8. `xtc_sup_opts_t.backoff_initial_ns` + circuit breaker option (issue 7)
-9. `xtc_lockmgr` integration toggle for `xtc_lwlock` (issue 11)
+9. `xtc_lockmgr` integration toggle for `xtc_lwlock` (issue 11) -- DONE:
+   xtc_lwlock_track_enable + WITNESS lock-order tracker (src/ptc/lock_lw.c)
+   reports inversions among lwlocks; off by default.
 10. `xtc_abort_source` first-class wiring through `xtc_svr_call` etc. (issue 12)
 11. Always-on per-call counters (issue 10) -- depends on `xtc_stats` landing
 12. `xtc_proc_pin(pid)` hardening + PBT (issue 8)
