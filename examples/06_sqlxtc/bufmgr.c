@@ -52,9 +52,12 @@ struct bm_frame {
 	_Atomic int       io_busy;    /* a write is in flight */
 	_Atomic int       dirty;      /* page modified since last write */
 	bm_pid_t          pid;
-	bm_swip_t        *parent;     /* the Swip word that points here */
+	bm_swip_t        *parent;     /* the Swip word that points here (swip mode) */
+	int               via_pid;    /* 1: referenced through the page table */
+	struct bm_frame  *hnext;      /* page-table hash chain (pid mode) */
 	void             *page;       /* page_size bytes (into the pool) */
 	struct bm_frame  *next_free;
+	pthread_rwlock_t  latch;      /* content latch (see bm_latch_*) */
 };
 
 struct bm {
@@ -65,6 +68,9 @@ struct bm {
 	bm_frame_t       *frames;
 	unsigned char    *pool;        /* n_frames * page_size, aligned */
 
+	int             (*has_resident_child)(const void *page, void *user);
+	void             *cb_user;
+
 	pthread_mutex_t   free_mu;
 	bm_frame_t       *free_head;
 	_Atomic uint32_t  free_n;
@@ -73,6 +79,11 @@ struct bm {
 	bm_pid_t          next_pid;
 
 	_Atomic uint32_t  clock;       /* round-robin victim cursor */
+
+	/* page table (pid mode): pid -> resident frame */
+	pthread_mutex_t   ht_mu;
+	bm_frame_t      **buckets;
+	uint32_t          nbucket;
 
 	/* page-provider */
 	_Atomic int       pp_running;
@@ -148,9 +159,60 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 	return atomic_load_explicit(&f->dirty, memory_order_acquire) == 0;
 }
 
+/* A page with resident children must not be cooled or evicted. */
+static int
+has_resident_child(bm_t *bm, bm_frame_t *f)
+{
+	if (bm->has_resident_child == NULL)
+		return 0;
+	return bm->has_resident_child(f->page, bm->cb_user);
+}
+
+/* ---- page table (pid mode) ---- */
+static void
+ht_insert(bm_t *bm, bm_frame_t *f)
+{
+	uint32_t b = (uint32_t)(f->pid % bm->nbucket);
+	(void)pthread_mutex_lock(&bm->ht_mu);
+	f->hnext = bm->buckets[b];
+	bm->buckets[b] = f;
+	(void)pthread_mutex_unlock(&bm->ht_mu);
+}
+static void
+ht_remove(bm_t *bm, bm_frame_t *f)
+{
+	uint32_t b = (uint32_t)(f->pid % bm->nbucket);
+	bm_frame_t **pp;
+	(void)pthread_mutex_lock(&bm->ht_mu);
+	for (pp = &bm->buckets[b]; *pp != NULL; pp = &(*pp)->hnext)
+		if (*pp == f) { *pp = f->hnext; break; }
+	(void)pthread_mutex_unlock(&bm->ht_mu);
+}
+/* Look up pid; if resident, pin it and return the frame (caller holds
+ * the pin).  Returns NULL on a miss. */
+static bm_frame_t *
+ht_lookup_pin(bm_t *bm, bm_pid_t pid)
+{
+	uint32_t b = (uint32_t)(pid % bm->nbucket);
+	bm_frame_t *f;
+	(void)pthread_mutex_lock(&bm->ht_mu);
+	for (f = bm->buckets[b]; f != NULL; f = f->hnext) {
+		if (f->pid == pid && f->via_pid) {
+			atomic_fetch_add_explicit(&f->pin, 1, memory_order_acquire);
+			if (atomic_load_explicit(&f->state, memory_order_acquire) == BM_COOL)
+				atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
+			(void)pthread_mutex_unlock(&bm->ht_mu);
+			return f;
+		}
+	}
+	(void)pthread_mutex_unlock(&bm->ht_mu);
+	return NULL;
+}
+
 /* Try to drive one unpinned frame all the way to FREE.  Returns 1 if a
- * frame was reclaimed.  Coordinates with concurrent fixers via the CAS
- * on the parent Swip. */
+ * frame was reclaimed.  Swip-mode frames evict by CAS-ing the parent
+ * Swip to EVICTED; page-table (pid-mode) frames evict by removing the
+ * hash entry.  Dirty pages are written before eviction either way. */
 static int
 evict_one(bm_t *bm)
 {
@@ -163,6 +225,43 @@ evict_one(bm_t *bm)
 		uint8_t st = atomic_load_explicit(&f->state, memory_order_acquire);
 
 		if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
+			continue;
+
+		if (f->via_pid) {
+			/* page-table mode: cool is a state flip, no parent swip. */
+			if (st == BM_HOT) {
+				atomic_store_explicit(&f->state, BM_COOL, memory_order_release);
+				atomic_fetch_add_explicit(&bm->s_cooled, 1, memory_order_relaxed);
+				st = BM_COOL;
+			}
+			if (st != BM_COOL) continue;
+			if (atomic_load_explicit(&f->dirty, memory_order_acquire)) {
+				(void)flush_frame(bm, f);
+				continue;
+			}
+			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
+				continue;
+			if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
+				continue;
+			ht_remove(bm, f);
+			/* Re-check pin after unhooking: a concurrent fix_pin could
+			 * have grabbed it just before we removed it.  If so, it now
+			 * holds a frame no longer in the table; that is fine -- it
+			 * will be re-inserted on its next miss -- but we must not
+			 * free a pinned frame, so bail if pinned. */
+			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0) {
+				ht_insert(bm, f);
+				continue;
+			}
+			f->via_pid = 0;
+			atomic_fetch_sub_explicit(&bm->resident, 1, memory_order_relaxed);
+			atomic_fetch_add_explicit(&bm->s_evicted, 1, memory_order_relaxed);
+			free_push(bm, f);
+			return 1;
+		}
+
+		/* swip mode */
+		if ((st == BM_HOT || st == BM_COOL) && has_resident_child(bm, f))
 			continue;
 		if (st == BM_HOT) {
 			/* Cool it: unswizzle the parent HOT -> COOL. */
@@ -230,6 +329,8 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 		return rc;
 	bm->page_size = opts->page_size;
 	bm->n_frames = opts->n_frames;
+	bm->has_resident_child = opts->has_resident_child;
+	bm->cb_user = opts->cb_user;
 	bm->cool_target = opts->n_frames * (opts->cool_pct ? opts->cool_pct : 10)
 	    / 100u;
 	if (bm->cool_target < 1) bm->cool_target = 1;
@@ -248,7 +349,17 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	}
 	for (i = 0; i < bm->n_frames; i++) {
 		bm->frames[i].page = bm->pool + (size_t)i * bm->page_size;
+		(void)pthread_rwlock_init(&bm->frames[i].latch, NULL);
 		free_push(bm, &bm->frames[i]);
+	}
+	/* page table: next pow2 >= 2*n_frames */
+	bm->nbucket = 16;
+	while (bm->nbucket < bm->n_frames * 2u) bm->nbucket <<= 1;
+	(void)pthread_mutex_init(&bm->ht_mu, NULL);
+	if ((rc = __os_calloc(bm->nbucket, sizeof *bm->buckets,
+	    (void **)&bm->buckets)) != XTC_OK) {
+		__os_aligned_free(bm->pool); __os_free(bm->frames);
+		close(bm->fd); __os_free(bm); return rc;
 	}
 	bm->next_pid = 1;          /* pid 0 reserved as "none" */
 	*out = bm;
@@ -261,8 +372,15 @@ bm_destroy(bm_t *bm)
 	if (bm == NULL) return;
 	bm_provider_stop(bm);
 	if (bm->fd >= 0) close(bm->fd);
+	if (bm->frames != NULL) {
+		uint32_t i;
+		for (i = 0; i < bm->n_frames; i++)
+			(void)pthread_rwlock_destroy(&bm->frames[i].latch);
+	}
 	(void)pthread_mutex_destroy(&bm->free_mu);
 	(void)pthread_mutex_destroy(&bm->pid_mu);
+	(void)pthread_mutex_destroy(&bm->ht_mu);
+	__os_free(bm->buckets);
 	__os_aligned_free(bm->pool);
 	__os_free(bm->frames);
 	__os_free(bm);
@@ -372,11 +490,92 @@ bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty)
 	atomic_fetch_sub_explicit(&frame->pin, 1, memory_order_release);
 }
 
+int
+bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid)
+{
+	bm_frame_t *f;
+	if (bm == NULL || out_frame == NULL) return XTC_E_INVAL;
+	if ((f = get_free_frame(bm)) == NULL) return XTC_E_RESOURCE;
+	f->pid = next_pid(bm);
+	f->parent = NULL;
+	f->via_pid = 1;
+	atomic_store_explicit(&f->pin, 1, memory_order_relaxed);
+	atomic_store_explicit(&f->dirty, 1, memory_order_relaxed);
+	atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
+	memset(f->page, 0, bm->page_size);
+	atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
+	ht_insert(bm, f);
+	atomic_fetch_add_explicit(&bm->resident, 1, memory_order_relaxed);
+	if (out_pid) *out_pid = f->pid;
+	*out_frame = f;
+	return XTC_OK;
+}
+
+int
+bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
+{
+	bm_frame_t *f;
+	if (bm == NULL || out_frame == NULL || pid == BM_PID_NONE)
+		return XTC_E_INVAL;
+	for (;;) {
+		if ((f = ht_lookup_pin(bm, pid)) != NULL) {
+			atomic_fetch_add_explicit(&bm->s_hits, 1, memory_order_relaxed);
+			*out_frame = f;
+			return XTC_OK;
+		}
+		/* Miss: load into a free frame, then publish in the table.
+		 * A concurrent loader of the same pid is resolved by re-checking
+		 * the table after acquiring a frame. */
+		f = get_free_frame(bm);
+		if (f == NULL) return XTC_E_RESOURCE;
+		atomic_store_explicit(&f->state, BM_LOADED, memory_order_relaxed);
+		f->pid = pid;
+		f->parent = NULL;
+		f->via_pid = 1;
+		atomic_store_explicit(&f->dirty, 0, memory_order_relaxed);
+		atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
+		if (do_io(bm, f->page, pid, 0) != 0) { free_push(bm, f); return XTC_E_INTERNAL; }
+		/* Publish: under the table lock, re-check no one beat us. */
+		{
+			uint32_t b = (uint32_t)(pid % bm->nbucket);
+			bm_frame_t *e;
+			(void)pthread_mutex_lock(&bm->ht_mu);
+			for (e = bm->buckets[b]; e != NULL; e = e->hnext)
+				if (e->pid == pid && e->via_pid) break;
+			if (e != NULL) {
+				/* Lost the race; use the resident frame. */
+				atomic_fetch_add_explicit(&e->pin, 1, memory_order_acquire);
+				if (atomic_load_explicit(&e->state, memory_order_acquire) == BM_COOL)
+					atomic_store_explicit(&e->state, BM_HOT, memory_order_release);
+				(void)pthread_mutex_unlock(&bm->ht_mu);
+				f->via_pid = 0;
+				free_push(bm, f);
+				*out_frame = e;
+				atomic_fetch_add_explicit(&bm->s_hits, 1, memory_order_relaxed);
+				return XTC_OK;
+			}
+			f->hnext = bm->buckets[b];
+			bm->buckets[b] = f;
+			atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
+			atomic_store_explicit(&f->pin, 1, memory_order_release);
+			(void)pthread_mutex_unlock(&bm->ht_mu);
+		}
+		atomic_fetch_add_explicit(&bm->resident, 1, memory_order_relaxed);
+		atomic_fetch_add_explicit(&bm->s_loads, 1, memory_order_relaxed);
+		*out_frame = f;
+		return XTC_OK;
+	}
+}
+
 void *
 bm_page(bm_frame_t *frame) { return frame ? frame->page : NULL; }
 
 bm_pid_t
 bm_frame_pid(const bm_frame_t *frame) { return frame ? frame->pid : BM_PID_NONE; }
+
+void bm_latch_shared(bm_frame_t *f)    { if (f) (void)pthread_rwlock_rdlock(&f->latch); }
+void bm_latch_exclusive(bm_frame_t *f) { if (f) (void)pthread_rwlock_wrlock(&f->latch); }
+void bm_unlatch(bm_frame_t *f)         { if (f) (void)pthread_rwlock_unlock(&f->latch); }
 
 /* ---- page-provider process ---- */
 struct pp_arg { bm_t *bm; int64_t interval; };
@@ -401,7 +600,10 @@ pp_proc(void *arg)
 			if (st == BM_HOT &&
 			    atomic_load_explicit(&bm->free_n, memory_order_relaxed)
 			    < bm->cool_target) {
-				uint64_t cw = atomic_load_explicit(f->parent, memory_order_acquire);
+				uint64_t cw;
+				if (has_resident_child(bm, f))
+					continue;       /* cool children first */
+				cw = atomic_load_explicit(f->parent, memory_order_acquire);
 				if (sw_is_hot(cw) && sw_frame(cw) == f &&
 				    atomic_compare_exchange_strong(f->parent, &cw, sw_cool(f))) {
 					atomic_store_explicit(&f->state, BM_COOL, memory_order_release);
