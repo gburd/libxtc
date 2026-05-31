@@ -537,3 +537,15 @@ btnode_set_right_sibling(void *page, uint32_t id)
 {
 	HDR(page)->right_sibling = id;
 }
+
+int
+btnode_beyond_hi_fence(const void *page, const void *key, uint16_t klen)
+{
+	const struct btnode_hdr *h = CHDR(page);
+	const uint8_t *hf;
+
+	if (h->hi_fence_off == 0 || h->hi_fence_len == 0)
+		return 0;        /* +infinity: key always belongs here */
+	hf = (const uint8_t *)page + h->hi_fence_off;
+	return cmp_bytes(key, klen, hf, h->hi_fence_len) > 0 ? 1 : 0;
+}

@@ -504,33 +504,42 @@ test, no daemon; ASan/UBSan clean):
 
 ### 5.4 The remaining concurrency gap, precisely
 
-The pieces above are correct serially, and the buffer manager is
-thread-safe.  Running the B-tree under CONCURRENT writers on a
-cooperative loop is the next stage, and two specific hazards must be
-closed first -- both are instances of "a thread-blocking lock must not
-be held across an offloaded I/O park, or the parked holder cannot
-resume and the loop wedges":
+Update: the two hazards below are now CLOSED, and the B-tree runs
+under concurrent writers and readers on a cooperative loop (and a
+multi-loop executor).  The work:
 
-  1. `bt_insert` holds the per-tree writer mutex (and a leaf's
-     exclusive content latch) across `bm_alloc_pid`, which may park on
-     eviction writeback.  These must become fiber-yielding (an
-     `xtc_amutex` for the writer serialization) or, better, the split
-     must allocate the sibling frame BEFORE taking the leaf latch.
-  2. The descent deliberately does NOT lock-couple (it releases the
-     parent latch before fixing the child, which is what keeps it off
-     the latch-across-park hazard) -- but that means a lookup can race
-     a concurrent split and miss a key that moved to a right sibling.
-     The fix is the Lehman-Yao B-link follow: `btnode` already keeps a
-     `right_sibling` link (set on leaf split), so the reader, on not
-     finding a key that is greater than the node's high fence, follows
-     the right sibling.  This is Phase 3's concurrency completion.
+  * The per-tree writer lock is a fiber-yielding `xtc_amutex`, so a
+    writer that parks on I/O does not wedge the loop and contending
+    writers park rather than thread-block.  Writers serialize on it
+    (one structural modification at a time).
+  * No content latch is held across an I/O park: the split paths
+    allocate the sibling frame with the node UNLATCHED (the alloc may
+    park on eviction writeback), then re-latch to mutate.
+  * Reads are lock-free and non-coupling: the descent releases each
+    node's shared latch before fixing the child, so no latch is held
+    across a child fix.  A hit is always correct (a concurrent split
+    moves keys to a right sibling, never deletes them); a miss is
+    confirmed by one descent under the writer lock, where the tree is
+    stable.  This avoids the Lehman-Yao internal-level B-link follow,
+    whose interaction with per-node prefix compression (re-fencing a
+    node would re-encode its keys) made it the costlier option here.
+  * `test_btree_mt`: four writer processes (disjoint key ranges) and
+    four reader processes drive one tree on a four-loop executor (four
+    OS threads) with the page-provider live and I/O offloaded.  Every
+    key is present and correct after the concurrent build, thousands
+    of concurrent lock-free reads see zero wrong values, and the tree
+    pages through eviction throughout.  Deterministic across repeated
+    runs, ASan-clean.
 
-Until those land, the engine is used serially (one writer, the
-standalone tests) and the buffer manager concurrently; wiring the
-B-tree into the live multi-process server (KV-over-Quack or behind the
-`sx_` cursor API) is gated on closing them.  This is the same
-fiber-yielding-lock discipline already applied to the SQLite mutex
-(`sqlxtc_mutex` over `xtc_amutex`) and the VFS busy handler.
+What remains is PARALLEL writers: today writers serialize on the
+single `xtc_amutex`, which is the one-writer-many-readers model (as in
+WAL-mode SQLite).  Letting writers on disjoint subtrees proceed truly
+in parallel needs fine-grained latch coupling (crabbing) with
+fiber-yielding shared/exclusive page latches -- a primitive xtc does
+not yet have (xtc_lwlock is thread-blocking, xtc_amutex is exclusive
+only) -- or full optimistic descent with version validation and
+restart.  That is the next stage, tracked against `xtc_lockmgr`
+(Stage 4 of `M_SQLXTC_HARDFORK.md`).
 
 ## 6. Risks and honest limitations
 
