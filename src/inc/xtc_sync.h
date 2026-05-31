@@ -135,6 +135,33 @@ int  xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns);
 int  xtc_amutex_try_lock(xtc_amutex_t *m);
 int  xtc_amutex_unlock(xtc_amutex_t *m);
 
+/* ----- arwlock (parking reader/writer latch) --------------------- */
+
+typedef struct xtc_arwlock xtc_arwlock_t;
+
+/*
+ * Shared/exclusive latch whose contended waiters PARK the fiber
+ * (yield to the loop) rather than blocking the OS thread -- the
+ * reader/writer analogue of xtc_amutex.  A holder may park on I/O
+ * while latched, and lock coupling may hold a parent latch across a
+ * child fix, without wedging a cooperative loop.  Off a loop, waiters
+ * block on a condvar.  FIFO fairness: an acquirer that finds a waiter
+ * queued ahead queues too, so a read stream cannot starve a writer.
+ * timeout_ns: <0 wait forever, 0 try, >0 deadline (XTC_E_AGAIN on
+ * timeout).  Release with xtc_arwlock_unlock regardless of mode.
+ *
+ * PUBLIC: int  xtc_arwlock_create __P((xtc_arwlock_t **));
+ * PUBLIC: void xtc_arwlock_destroy __P((xtc_arwlock_t *));
+ * PUBLIC: int  xtc_arwlock_rdlock __P((xtc_arwlock_t *, int64_t));
+ * PUBLIC: int  xtc_arwlock_wrlock __P((xtc_arwlock_t *, int64_t));
+ * PUBLIC: int  xtc_arwlock_unlock __P((xtc_arwlock_t *));
+ */
+int  xtc_arwlock_create(xtc_arwlock_t **out);
+void xtc_arwlock_destroy(xtc_arwlock_t *r);
+int  xtc_arwlock_rdlock(xtc_arwlock_t *r, int64_t timeout_ns);
+int  xtc_arwlock_wrlock(xtc_arwlock_t *r, int64_t timeout_ns);
+int  xtc_arwlock_unlock(xtc_arwlock_t *r);
+
 /* ----- rwlock ----------------------------------------------------- */
 
 typedef struct xtc_rwlock xtc_rwlock_t;
