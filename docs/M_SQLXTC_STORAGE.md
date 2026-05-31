@@ -476,6 +476,62 @@ hard-fork plan retrofits SQLite's own btree under `xtc_lockmgr` and
 `xtc_lwlock` (its Stage 4), this plan replaces the btree outright; the
 two converge on the same primitives.
 
+### 5.3 Implementation status (what is built and tested)
+
+Landed and tested in `examples/06_sqlxtc/` (each with an in-process
+test, no daemon; ASan/UBSan clean):
+
+  * `bufmgr.c` -- Phase 1.  Swip swizzling (HOT/COOL/EVICTED), the
+    frame pool, the cooling-stage eviction with a page-provider
+    `xtc_proc` that proactively flushes dirty COOL pages ahead of
+    demand, the swizzle path (`bm_fix`) and the page-table path
+    (`bm_fix_pid`), per-frame content latches, and the child-aware
+    cooling invariant.  `test_bufmgr` cycles 200 pages through a
+    16-frame pool; `test_bufmgr_mt` drives it from a 4-thread
+    `xtc_exec` (16 workers + the provider) with 32000 verified reads
+    and zero mismatches -- the buffer manager is thread-safe.
+  * `btnode.c` -- Phase 2.  The prefix-compressed slotted node
+    (common fence prefix stored once, per-slot 4-byte head, split /
+    search / insert / remove).  `test_btnode`: 3834 checks.
+  * `btree.c` -- Phase 3 (serial core + async-I/O proven).  A
+    multi-level B-tree on the
+    page-table path: insert with split propagation, lookup, delete,
+    and a forward range cursor.  `test_btree`: 5000 keys built
+    shuffled through a 24-frame pool (far over memory, so the tree
+    pages through eviction), all looked up correct, a full ascending
+    cursor scan returns every key in order (proving the split
+    separators), plus binary keys -- 40890 checks.
+
+### 5.4 The remaining concurrency gap, precisely
+
+The pieces above are correct serially, and the buffer manager is
+thread-safe.  Running the B-tree under CONCURRENT writers on a
+cooperative loop is the next stage, and two specific hazards must be
+closed first -- both are instances of "a thread-blocking lock must not
+be held across an offloaded I/O park, or the parked holder cannot
+resume and the loop wedges":
+
+  1. `bt_insert` holds the per-tree writer mutex (and a leaf's
+     exclusive content latch) across `bm_alloc_pid`, which may park on
+     eviction writeback.  These must become fiber-yielding (an
+     `xtc_amutex` for the writer serialization) or, better, the split
+     must allocate the sibling frame BEFORE taking the leaf latch.
+  2. The descent deliberately does NOT lock-couple (it releases the
+     parent latch before fixing the child, which is what keeps it off
+     the latch-across-park hazard) -- but that means a lookup can race
+     a concurrent split and miss a key that moved to a right sibling.
+     The fix is the Lehman-Yao B-link follow: `btnode` already keeps a
+     `right_sibling` link (set on leaf split), so the reader, on not
+     finding a key that is greater than the node's high fence, follows
+     the right sibling.  This is Phase 3's concurrency completion.
+
+Until those land, the engine is used serially (one writer, the
+standalone tests) and the buffer manager concurrently; wiring the
+B-tree into the live multi-process server (KV-over-Quack or behind the
+`sx_` cursor API) is gated on closing them.  This is the same
+fiber-yielding-lock discipline already applied to the SQLite mutex
+(`sqlxtc_mutex` over `xtc_amutex`) and the VFS busy handler.
+
 ## 6. Risks and honest limitations
 
   * **Full MVCC is out of scope.**  The engine gives page-granular
