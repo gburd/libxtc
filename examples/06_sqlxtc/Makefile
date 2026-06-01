@@ -63,7 +63,7 @@ SQLITE_CFLAGS = -O2 -g -std=c11 -D_GNU_SOURCE \
     -Wno-unused-parameter \
     -Wno-implicit-fallthrough
 
-SRCS = main.c quack.c db.c conn.c engine.c mutex.c mem.c vfs.c pcache.c metrics.c sql_parse.c admin.c
+SRCS = main.c quack.c db.c conn.c engine.c mutex.c mem.c vfs.c pcache.c metrics.c sql_parse.c admin.c xstore.c bufmgr.c btree.c btnode.c
 OBJS = $(SRCS:.c=.o)
 
 # Lime-generated parser (Phase 2).  Compiled in if the file exists.
@@ -136,6 +136,7 @@ clean:
 	rm -f test_wal test_wal.o wal.o
 	rm -f test_shard test_shard.o
 	rm -f test_mvcc test_mvcc.o mvcc.o
+	rm -f test_xstore test_xstore.o xstore.o
 	rm -f test_parallel test_parallel.o
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o
 	rm -f test_bufmgr_mt
@@ -153,7 +154,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-shard test-mvcc test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-shard test-mvcc test-xstore test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -282,6 +283,16 @@ test_mvcc: test_mvcc.c mvcc.c mvcc.h
 
 test-mvcc: test_mvcc
 	./test_mvcc
+
+# ---- SQL on the libxtc-native storage via the xstore vtable ----
+# SQLite's VDBE runs SQL; rows live in our btree/bufmgr (larger than
+# RAM).  Off-loop and on-loop (VDBE parks on offloaded page I/O
+# mid-statement).  See docs/M_SQLXTC_MVCC_SQL.md.
+test_xstore: test_xstore.c xstore.c btree.c btnode.c bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_xstore.c xstore.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-xstore: test_xstore
+	./test_xstore
 
 # ---- sx_ engine parallel-execution test (in-process, no daemon) ----
 test_parallel: test_parallel.c engine.o vfs.o sqlite3.o

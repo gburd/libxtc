@@ -1,0 +1,195 @@
+/*-
+ * Copyright (c) 2026, The XTC Project -- All rights reserved.
+ * Use of this source code is governed by the ISC License.
+ *
+ * SPDX-License-Identifier: ISC
+ *
+ * examples/06_sqlxtc/test_xstore.c
+ *	SQL on the libxtc-native storage engine via the xstore virtual
+ *	table.  SQLite parses/plans/runs the VDBE; rows live in our
+ *	on-disk B-tree (bufmgr cooling pool).  The working set is sized
+ *	far larger than the buffer pool, so the test exercises eviction
+ *	and reload DURING SQL scans -- the larger-than-RAM proof.
+ *
+ *	No daemon; standalone (plain asserts + printf).  Runs the SQL off
+ *	a loop (the bufmgr does synchronous I/O off-loop) and again ON a
+ *	loop with the page-provider live (btree ops park on offloaded
+ *	page I/O in the middle of the VDBE -- the hardening path).
+ */
+
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include "sqlite3.h"
+#include "bufmgr.h"
+#include "btree.h"
+#include "xstore.h"
+#include "xtc.h"
+#include "xtc_loop.h"
+#include "xtc_proc.h"
+
+#define N_ROWS    4000
+#define ROW_BYTES 200
+#define PAGE_SZ   4096
+#define N_FRAMES  16           /* 64 KB pool vs ~840 KB of rows */
+
+static int g_fail;
+#define CK(c) do { if (!(c)) { fprintf(stderr,"FAIL %s:%d %s\n",__FILE__,__LINE__,#c); g_fail=1; } } while (0)
+
+/* Run the full SQL workload against a freshly-opened :memory: handle
+ * whose xstore table is backed by `bt`.  Returns 0 on success. */
+static int
+run_sql(bt_t *bt, const char *tag, bm_t *bm)
+{
+	sqlite3 *db = NULL;
+	sqlite3_stmt *st = NULL;
+	char blob[ROW_BYTES];
+	int i;
+	bm_stats_t bs;
+
+	memset(blob, 'x', sizeof blob);
+	CK(sqlite3_open(":memory:", &db) == SQLITE_OK);
+	CK(xstore_register(db, bt) == SQLITE_OK);
+	CK(sqlite3_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0)
+	    == SQLITE_OK);
+
+	/* INSERT N_ROWS rows -- far more bytes than the buffer pool. */
+	CK(sqlite3_prepare_v2(db, "INSERT INTO t(k,v) VALUES(?,?)", -1, &st, 0)
+	    == SQLITE_OK);
+	for (i = 1; i <= N_ROWS; i++) {
+		/* tag the first 8 bytes with the key so reads can verify. */
+		memcpy(blob, &i, sizeof i);
+		sqlite3_bind_int64(st, 1, i);
+		sqlite3_bind_blob(st, 2, blob, ROW_BYTES, SQLITE_STATIC);
+		CK(sqlite3_step(st) == SQLITE_DONE);
+		sqlite3_reset(st);
+	}
+	sqlite3_finalize(st); st = NULL;
+
+	/* Full scan: count(*) and sum(k) -- reads every row back through
+	 * the (over-subscribed) buffer pool. */
+	CK(sqlite3_prepare_v2(db, "SELECT count(*), sum(k) FROM t", -1, &st, 0)
+	    == SQLITE_OK);
+	CK(sqlite3_step(st) == SQLITE_ROW);
+	CK(sqlite3_column_int64(st, 0) == N_ROWS);
+	CK(sqlite3_column_int64(st, 1) == (int64_t)N_ROWS * (N_ROWS + 1) / 2);
+	sqlite3_finalize(st); st = NULL;
+
+	/* Point lookup: WHERE k = ? (uses xBestIndex eq path). */
+	CK(sqlite3_prepare_v2(db, "SELECT v FROM t WHERE k=?", -1, &st, 0)
+	    == SQLITE_OK);
+	sqlite3_bind_int64(st, 1, 1234);
+	CK(sqlite3_step(st) == SQLITE_ROW);
+	{
+		const void *p = sqlite3_column_blob(st, 0);
+		int n = sqlite3_column_bytes(st, 0), kk = 0;
+		CK(n == ROW_BYTES);
+		memcpy(&kk, p, sizeof kk);
+		CK(kk == 1234);                       /* correct row content */
+	}
+	sqlite3_finalize(st); st = NULL;
+
+	/* UPDATE then verify. */
+	CK(sqlite3_exec(db, "UPDATE t SET v=zeroblob(16) WHERE k=1234", 0, 0, 0)
+	    == SQLITE_OK);
+	CK(sqlite3_prepare_v2(db, "SELECT length(v) FROM t WHERE k=1234", -1, &st, 0)
+	    == SQLITE_OK);
+	CK(sqlite3_step(st) == SQLITE_ROW);
+	CK(sqlite3_column_int(st, 0) == 16);
+	sqlite3_finalize(st); st = NULL;
+
+	/* DELETE then verify the row is gone and the count dropped. */
+	CK(sqlite3_exec(db, "DELETE FROM t WHERE k=1234", 0, 0, 0) == SQLITE_OK);
+	CK(sqlite3_prepare_v2(db, "SELECT count(*) FROM t WHERE k=1234", -1, &st, 0)
+	    == SQLITE_OK);
+	CK(sqlite3_step(st) == SQLITE_ROW);
+	CK(sqlite3_column_int(st, 0) == 0);
+	sqlite3_finalize(st); st = NULL;
+
+	sqlite3_close(db);
+
+	bm_get_stats(bm, &bs);
+	if (g_fail)
+		return 1;
+	printf("  ok   [%s] %d rows of %dB through a %dKB pool: SQL "
+	    "count/sum/point/update/delete correct; pool paged "
+	    "(loads=%llu evicted=%llu flushed=%llu resident=%llu)\n",
+	    tag, N_ROWS, ROW_BYTES, (N_FRAMES * PAGE_SZ) / 1024,
+	    (unsigned long long)bs.loads, (unsigned long long)bs.evicted,
+	    (unsigned long long)bs.flushed, (unsigned long long)bs.resident);
+	if (bs.evicted == 0)
+		fprintf(stderr, "  WARN[%s]: no eviction -- working set fit in RAM?\n", tag);
+	return 0;
+}
+
+/* ---- off-loop ---- */
+static int
+scenario_offloop(void)
+{
+	bm_t *bm = NULL;
+	bt_t *bt = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-xstore-XXXXXX";
+	int fd, rc;
+
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = N_FRAMES; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	rc = run_sql(bt, "off-loop", bm);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	return rc;
+}
+
+/* ---- on-loop: SQL runs inside a proc; btree ops park on offloaded
+ * page I/O in the middle of the VDBE, with the page-provider live. ---- */
+static bt_t *g_bt;
+static bm_t *g_bm;
+static int   g_loop_rc;
+
+static void
+sql_proc(void *a)
+{
+	(void)a;
+	g_loop_rc = run_sql(g_bt, "on-loop", g_bm);
+	bm_provider_stop(g_bm);
+}
+
+static int
+scenario_onloop(void)
+{
+	xtc_loop_t *loop = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-xstore2-XXXXXX";
+	xtc_proc_opts_t po = { .name = "sql" };
+	xtc_pid_t pid;
+	int fd;
+
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = N_FRAMES; bo.cool_pct = 25;
+	g_fail = 0;
+	CK(bm_create(&bo, &g_bm) == XTC_OK);
+	CK(bt_open(g_bm, &g_bt) == XTC_OK);
+	CK(xtc_loop_init(&loop) == XTC_OK);
+	CK(bm_provider_spawn(g_bm, loop, 1LL * 1000 * 1000, NULL) == XTC_OK);
+	CK(xtc_proc_spawn(loop, sql_proc, NULL, &po, &pid) == XTC_OK);
+	CK(xtc_loop_run(loop) == XTC_OK);
+	CK(xtc_loop_fini(loop) == XTC_OK);
+	bt_close(g_bt); bm_destroy(g_bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	return g_loop_rc || g_fail;
+}
+
+int
+main(void)
+{
+	if (scenario_offloop() != 0) return 1;
+	if (scenario_onloop() != 0) return 1;
+	printf("All sqlxtc SQL-on-xstore tests passed.\n");
+	return 0;
+}
