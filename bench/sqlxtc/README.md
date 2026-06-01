@@ -16,15 +16,15 @@ This is a direct, honest proxy for the project's actual goal:
 
 **NOT measured yet, and why:**
 
-  * **A full SQL TPC-C vs SQLite comparison.**  The SQL layer
-    (`engine.c`) still runs on stock SQLite; the from-scratch MVCC +
-    B-tree engine is not yet wired underneath it (that integration --
-    reimplementing SQLite's internal `btree.h` API on our storage, or
-    a VDBE on it, and passing SQLite's test suite -- is a multi-quarter
-    program, tracked in `../../docs/M_SQLXTC_STAGE4.md` and the
-    greenfield/hardfork docs).  Until then, "sqlxtc-the-new-engine vs
-    SQLite" running SQL cannot be measured honestly, so we do not
-    fabricate it.
+  * **A full SQL TPC-C vs SQLite comparison.**  TPC-C end to end is
+    still future work, but the storage integration it depended on now
+    EXISTS: the from-scratch MVCC + B-tree engine runs SQL underneath
+    SQLite's VDBE through the `xstore` virtual table
+    (`examples/06_sqlxtc/xstore.c`).  `engine_ab.c` / `ENGINE_AB.md`
+    therefore DO measure SQL-on-our-engine vs SQLite directly, on a
+    larger-than-RAM point workload under an equal memory budget (see
+    below).  A full TPC-C transaction profile on top of that is the
+    remaining step.
   * **HammerDB TPROC-C/TPROC-H.**  HammerDB's drivers are Oracle, SQL
     Server, Db2, MySQL/MariaDB, and PostgreSQL.  It has **no SQLite
     driver and no custom-protocol (Quack) driver**, so it cannot drive
@@ -32,11 +32,12 @@ This is a direct, honest proxy for the project's actual goal:
     load generator that speaks both embedded-SQLite and the engine; the
     `mvcc_bench` here is the engine-side load generator.  A Quack
     HammerDB Tcl driver (to drive the networked server) is future work.
-  * **Larger-than-RAM working sets.**  The MVCC demonstrator is
-    in-memory (fixed version arrays).  Exceeding RAM requires the
-    storage integration above -- the on-disk B-tree + cooling buffer
-    pool (`bufmgr.c`) carrying the versioned data.  That is the same
-    pending integration.
+  * **Larger-than-RAM working sets.**  Done, for the SQL path: the
+    `xstore` virtual table carries versioned rows in the on-disk
+    B-tree + cooling buffer pool (`bufmgr.c`), so `engine_ab.c` runs a
+    working set far larger than the cache (24x in the recorded runs)
+    and both engines page to disk.  The standalone `mvcc_bench`
+    demonstrator remains in-memory.
 
 These are stated plainly so results are not over-claimed; the project's
 discipline (see `../../docs/M_SQLXTC_XTC_GAPS.md`) is honest, tested,
@@ -117,16 +118,21 @@ fish, so invoke bash explicitly).
 mvcc_bench.c   the YCSB-shaped load generator (links mvcc.c + libxtc)
 run.sh         matrix sweep -> results/<host>-<UTC>.jsonl
 stats.py       aggregate JSONL -> median + IQR table, scaling factors
+engine_ab.c    SQL-on-our-engine vs SQLite, larger-than-RAM, equal cache
+run_ab.sh      build + run the A/B matrix -> results/engine_ab-<host>.jsonl
+ENGINE_AB.md   the A/B method, results, and honest analysis
 results/        raw JSONL (floki, meh) -- committed for reproducibility
 PERF_IDEAS.md   collected performance-improvement ideas
 ```
 
 ## The path to the full comparison
 
-1. Wire the MVCC + B-tree engine under `engine.c` (replace SQLite's
-   storage) so sqlxtc runs SQL on the libxtc-native engine.
-2. Add larger-than-RAM workloads (buffer-pool cap << working set);
-   constrain SQLite to an equal cache.
+1. [DONE] Wire the MVCC + B-tree engine under SQL so sqlxtc runs SQL on
+   the libxtc-native engine -- the `xstore` virtual table
+   (`examples/06_sqlxtc/xstore.c`) does this.
+2. [DONE] Larger-than-RAM workloads with SQLite constrained to an equal
+   cache -- `engine_ab.c` / `ENGINE_AB.md` (24x working set/cache; reads
+   competitive, writes slower by the MVCC-without-GC margin).
 3. Add a Quack HammerDB Tcl driver (or a TPC-C load generator that
    speaks both Quack and embedded SQLite) so the networked path is
    measured alongside the embedded one.
