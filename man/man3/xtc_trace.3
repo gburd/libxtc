@@ -1,0 +1,247 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd June 1, 2026
+.Dt XTC_TRACE 3
+.Os
+.Sh NAME
+.Nm xtc_trace_enable ,
+.Nm xtc_trace_reset ,
+.Nm xtc_trace_dump ,
+.Nm xtc_hlc_now
+.Nd causal message tracing (libxtc's seq_trace)
+.Sh LIBRARY
+libxtc
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_trace.h
+.Vt typedef int (*xtc_trace_fn)(const xtc_trace_rec_t *rec, void *user);
+.Ft int
+.Fn xtc_trace_enable "int on"
+.Ft int
+.Fn xtc_trace_reset "void"
+.Ft int
+.Fn xtc_trace_dump "xtc_trace_fn cb" "void *user"
+.Ft uint64_t
+.Fn xtc_hlc_now "void"
+.Sh DESCRIPTION
+.Nm xtc_trace
+is libxtc's
+.Sy seq_trace :
+a bounded, opt-in ring of message-passing events -- each send and
+receive between procs -- stamped so that the causal order of one
+request can be reconstructed across procs and cores even when the
+wall-clock order in which the records arrived lies.
+It is the analog of Erlang's trace token that rides along message
+sends, letting you answer
+.Dq who sent this, and what caused that
+in a system where the answer is spread across many mailboxes.
+.Pp
+Every traced event is stamped with a hybrid logical clock
+.Pq Sy HLC :
+a 64-bit value whose high 48 bits are a monotonic physical-time
+component (microseconds) and whose low 16 bits are a logical counter.
+A single global clock ticks once per traced event, so a send's stamp
+is always strictly less than the stamp of the receive it causes.
+Sorting the records by HLC therefore yields a true happens-before
+order, not a thread-local arrival order: when two cores disagree about
+which message landed first, the HLC is the truth.
+.Pp
+The causal edge is made explicit, not merely implied by ordering: a
+.Dv XTC_TRACE_RECV
+record carries the originating send's HLC stamp in its
+.Va cause
+field.  Following
+.Va cause
+from a receive back to the matching send, and from that send's proc to
+the receive that triggered it, walks the chain of one request as it
+fans out across procs.
+.Pp
+Tracing is OFF by default.  When disabled it costs a single relaxed
+atomic load on the message hot path, so a production build that never
+enables it pays essentially nothing.  When enabled it serializes ring
+writes under a lock and overwrites the oldest records once the ring is
+full.  Enable it to debug a specific problem -- as you would reach for
+.Sy recon
+or
+.Sy dbg
+on the BEAM -- not as an always-on production tax.
+.Pp
+.Fn xtc_trace_enable
+turns tracing on when
+.Fa on
+is non-zero and off when it is zero.  It returns the previous state
+(non-zero if tracing was on), so a caller can save and restore it.
+.Pp
+.Fn xtc_trace_reset
+drops all buffered trace records, leaving the enable state unchanged.
+It returns
+.Dv XTC_OK .
+Call it before a workload to ensure the ring holds only the events of
+interest.
+.Pp
+.Fn xtc_trace_dump
+visits the buffered records in causal (HLC-ascending) order, invoking
+.Fa cb
+once per record with a pointer to the record and the caller's
+.Fa user
+pointer.  The callback returns
+.Dv 0
+to continue or any non-zero value to stop the walk early.  The
+callbacks run
+.Em after
+the internal trace lock is released, so a callback may freely call
+back into libxtc -- including
+.Fn xtc_send ,
+the inspection API, or
+.Fn xtc_trace_dump
+itself -- without risk of self-deadlock.  It returns the number of
+records visited, or a negative
+.Dv XTC_E_*
+code on error.
+.Pp
+.Fn xtc_hlc_now
+returns the current value of the global HLC.  It is intended for tests
+and for display; an application does not normally need it, since the
+stamps already ride in the trace records.
+.Pp
+A trace record is reported in:
+.Bd -literal -offset indent
+typedef struct xtc_trace_rec {
+        uint64_t  hlc;     /* this event's HLC stamp */
+        uint64_t  cause;   /* RECV: the originating send's HLC; else 0 */
+        int       kind;    /* enum xtc_trace_kind */
+        xtc_pid_t self;    /* the proc the event happened in */
+        xtc_pid_t peer;    /* the other proc (dest / source / child) */
+        uint32_t  detail;  /* SEND/RECV: payload bytes; EXIT: reason */
+} xtc_trace_rec_t;
+.Ed
+.Pp
+The fields are:
+.Bl -tag -width "cause" -offset indent
+.It Va hlc
+This event's HLC stamp.  Records sort by this value into causal order.
+.It Va cause
+For a
+.Dv XTC_TRACE_RECV
+record, the HLC stamp of the send that produced the received message;
+.Dv 0
+for every other kind.  This is the explicit causal edge.
+.It Va kind
+One of the
+.Vt enum xtc_trace_kind
+values below.
+.It Va self
+The proc in which the event happened: the sender for a send, the
+receiver for a receive, the parent for a spawn, the exiting proc for an
+exit.
+.It Va peer
+The other proc involved: the destination of a send, the source of a
+receive, or the spawned child.
+.It Va detail
+For a send or receive, the message payload size in bytes; for an exit,
+the exit reason.
+.El
+.Pp
+.Vt enum xtc_trace_kind
+names the event kinds:
+.Bl -tag -width XTC_TRACE_SPAWN -compact -offset indent
+.It Dv XTC_TRACE_SEND
+.Va self
+sent a message to
+.Va peer .
+.It Dv XTC_TRACE_RECV
+.Va self
+received a message from
+.Va peer ;
+.Va cause
+holds the originating send's stamp.
+.It Dv XTC_TRACE_SPAWN
+.Va self
+(the parent) spawned
+.Va peer
+(the child).
+.It Dv XTC_TRACE_EXIT
+.Va self
+exited;
+.Va detail
+holds the exit reason.
+.El
+.Pp
+The visit callback has the type
+.Bd -literal -offset indent
+typedef int (*xtc_trace_fn)(const xtc_trace_rec_t *rec, void *user);
+.Ed
+.Pp
+where
+.Fa rec
+points at one record (valid only for the duration of the call) and
+.Fa user
+is the pointer passed to
+.Fn xtc_trace_dump .
+.Pp
+The per-shard HLC used by the MVCC data path
+.Pq Pa docs/M_CAUSALITY.md
+is a separate, later use of the same clock idea; it is not the global
+trace clock described here.
+.Sh RETURN VALUES
+.Fn xtc_trace_enable
+returns the previous enable state: non-zero if tracing was already on,
+.Dv 0
+if it was off.
+.Pp
+.Fn xtc_trace_reset
+returns
+.Dv XTC_OK .
+.Pp
+.Fn xtc_trace_dump
+returns the number of records visited, or a negative
+.Dv XTC_E_*
+code on error.  See
+.Xr xtc_strerror 3 .
+.Pp
+.Fn xtc_hlc_now
+returns the current global HLC value.
+.Sh EXAMPLES
+Enable tracing, run a workload, and print the records in causal order:
+.Bd -literal -offset indent
+static int
+on_rec(const xtc_trace_rec_t *r, void *user)
+{
+        (void)user;
+        printf("HLC=%llu kind=%d self=%llu peer=%llu cause=%llu det=%u\\n",
+            (unsigned long long)r->hlc, r->kind,
+            (unsigned long long)r->self,
+            (unsigned long long)r->peer,
+            (unsigned long long)r->cause, r->detail);
+        return (0);                 /* 0 = keep going */
+}
+
+int was_on = xtc_trace_enable(1);   /* opt in */
+xtc_trace_reset();                  /* start from a clean ring */
+run_workload();                     /* exercise the procs in question */
+
+int n = xtc_trace_dump(on_rec, NULL);
+printf("%d trace records\\n", n);
+
+if (!was_on)
+        xtc_trace_enable(0);        /* stop paying for it */
+.Ed
+.Pp
+Reading the dump, a
+.Dv XTC_TRACE_RECV
+whose
+.Va cause
+equals the
+.Va hlc
+of an earlier
+.Dv XTC_TRACE_SEND
+is the same message; chaining those edges reconstructs a request's path
+across procs.
+.Sh SEE ALSO
+.Xr xtc_inspect 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_stats 3
+.Sh AUTHORS
+The
+.Nm xtc
+project.

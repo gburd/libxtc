@@ -32,6 +32,8 @@ Or in `~/.lldbinit`:
     xtc-proc  ADDR     one proc in detail
     xtc-mailbox ADDR   the queued envelopes (sender, size)
     xtc-self           the proc running on the selected thread
+    xtc-trace          the causal message trace, HLC-ordered (SEND/
+                       RECV/SPAWN/EXIT, with cause edges) -- seq_trace
 
 Build with `-g` (the default build does).  The tools work on a live
 process (run / attach / breakpoint) and on a core dump.  Run them while
