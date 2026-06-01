@@ -63,7 +63,7 @@ SQLITE_CFLAGS = -O2 -g -std=c11 -D_GNU_SOURCE \
     -Wno-unused-parameter \
     -Wno-implicit-fallthrough
 
-SRCS = main.c quack.c db.c conn.c engine.c mutex.c mem.c vfs.c pcache.c metrics.c sql_parse.c
+SRCS = main.c quack.c db.c conn.c engine.c mutex.c mem.c vfs.c pcache.c metrics.c sql_parse.c admin.c
 OBJS = $(SRCS:.c=.o)
 
 # Lime-generated parser (Phase 2).  Compiled in if the file exists.
@@ -114,7 +114,8 @@ sql_parse: sql_parse_gen.c
 main.o: main.c conn.h db.h
 quack.o: quack.c quack.h
 db.o: db.c db.h quack.h engine.h
-conn.o: conn.c conn.h db.h quack.h sql_parse.h engine.h
+conn.o: conn.c conn.h db.h quack.h sql_parse.h engine.h admin.h
+admin.o: admin.c admin.h quack.h
 engine.o: engine.c engine.h vfs.h sqlite3.h
 mutex.o: mutex.c
 mem.o: mem.c mem.h sqlite3.h
@@ -130,6 +131,7 @@ clean:
 	rm -f test_vfs test_vfs_amalg test_vfs.o
 	rm -f test_pcache test_pcache_amalg test_pcache.o
 	rm -f test_concurrency test_concurrency.o
+	rm -f test_admin test_admin.o admin.o
 	rm -f test_mem test_mem.o
 	rm -f test_wal test_wal.o wal.o
 	rm -f test_shard test_shard.o
@@ -150,7 +152,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-mem test-wal test-shard test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-shard test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -228,6 +230,15 @@ test_concurrency: test_concurrency.c mutex.o sqlite3.o
 
 test-concurrency: test_concurrency
 	./test_concurrency
+
+# ---- SHOW PROCESSES admin command test (in-process, no daemon) ----
+# Links only admin.o + quack.o against libxtc.a; no SQLite needed --
+# admin walks the live proc set via xtc_inspect_procs.
+test_admin: test_admin.c admin.o quack.o
+	$(CC) $(CFLAGS) -o $@ test_admin.c admin.o quack.o $(LDFLAGS)
+
+test-admin: test_admin
+	./test_admin
 
 # ---- xtc-allocator SQLite-memory seam test (in-process, no daemon) ----
 # Installs the xtc allocator under an __os_alloc counting hook, then

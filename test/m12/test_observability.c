@@ -22,6 +22,7 @@
 #include "xtc_cfg.h"
 #include "xtc_inject.h"
 #include "xtc_pdict.h"
+#include "xtc_inspect.h"
 #include "xtc_int.h"
 
 /* ----- Logger -------------------------------------------------- */
@@ -345,8 +346,111 @@ test_res_alert(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- live introspection (xtc_inspect) ----------------------- */
+#include "xtc_inspect.h"
+
+static _Atomic int g_insp_seen;        /* procs the callback saw */
+static _Atomic int g_insp_sleeper_mbox;/* mailbox depth seen on the sleeper */
+static _Atomic int g_insp_loop_procs;  /* procs counted via xtc_inspect_loops */
+static xtc_pid_t   g_insp_sleeper;
+
+static int
+insp_proc_cb(const xtc_proc_info_t *info, void *user)
+{
+	(void)user;
+	atomic_fetch_add(&g_insp_seen, 1);
+	if (xtc_pid_eq(info->pid, g_insp_sleeper))
+		atomic_store(&g_insp_sleeper_mbox, (int)info->mbox_len);
+	return 0;
+}
+
+static int
+insp_loop_cb(const xtc_loop_info_t *info, void *user)
+{
+	int *procs = user;
+	*procs += info->n_procs;
+	return 0;
+}
+
+static void
+insp_sleeper(void *a)
+{
+	(void)a;
+	(void)xtc_proc_sleep(300LL * 1000 * 1000);         /* park ~300ms */
+}
+
+static void
+insp_driver(void *a)
+{
+	(void)a;
+	const char *m = "x";
+	/* Queue messages at the (timer-parked) sleeper: they sit in its
+	 * mailbox undelivered, so inspect sees a non-zero depth. */
+	xtc_send(g_insp_sleeper, m, 2);
+	xtc_send(g_insp_sleeper, m, 2);
+	(void)xtc_proc_sleep(2LL * 1000 * 1000);           /* let sends land */
+	(void)xtc_inspect_procs(insp_proc_cb, NULL);
+	{
+		int lp = 0;
+		(void)xtc_inspect_loops(insp_loop_cb, &lp);
+		atomic_store(&g_insp_loop_procs, lp);
+	}
+	{
+		xtc_proc_info_t info;
+		int rc = xtc_proc_info(g_insp_sleeper, &info);
+		if (rc == XTC_OK && info.mbox_len == 2 &&
+		    info.run_state == XTC_PROC_PARKED)
+			atomic_fetch_add(&g_insp_seen, 1000);   /* sentinel: per-pid ok */
+	}
+	/* The sleeper wakes on its own (~300ms); no need to kill it. */
+}
+
+static MunitResult
+test_inspect_procs(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t o = { 0 };
+	xtc_pid_t dpid;
+	(void)p; (void)d;
+
+	atomic_store(&g_insp_seen, 0);
+	atomic_store(&g_insp_sleeper_mbox, -1);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	o.name = "sleeper";
+	munit_assert_int(xtc_proc_spawn(loop, insp_sleeper, NULL, &o,
+	    &g_insp_sleeper), ==, XTC_OK);
+	o.name = "driver";
+	munit_assert_int(xtc_proc_spawn(loop, insp_driver, NULL, &o, &dpid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* The driver enumerated at least the two procs, saw the sleeper's
+	 * mailbox at depth 2, and the per-pid lookup matched (sentinel). */
+	munit_assert_int(atomic_load(&g_insp_seen), >=, 1002);
+	munit_assert_int(atomic_load(&g_insp_sleeper_mbox), ==, 2);
+	munit_assert_int(atomic_load(&g_insp_loop_procs), >=, 2);
+
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
+/* Off-loop: xtc_proc_info for an unknown pid is NOTFOUND, not a crash. */
+static MunitResult
+test_inspect_notfound(const MunitParameter p[], void *d)
+{
+	xtc_proc_info_t info;
+	xtc_pid_t nobody = { 9, 9, 9 };
+	(void)p; (void)d;
+	munit_assert_int(xtc_proc_info(nobody, &info), ==, XTC_E_NOTFOUND);
+	munit_assert_int(xtc_proc_info(nobody, NULL), ==, XTC_E_INVAL);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/pdict/basic",          test_pdict_basic,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/inspect/procs",        test_inspect_procs,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/inspect/notfound",     test_inspect_notfound,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/basic",            test_log_basic,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/drop_on_full",     test_log_drop_on_full,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/int",              test_cfg_int,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

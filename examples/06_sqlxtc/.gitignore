@@ -9,6 +9,7 @@ test_vfs_amalg
 test_pcache
 test_pcache_amalg
 test_concurrency
+test_admin
 test_mem
 test_wal
 test_shard

@@ -75,9 +75,8 @@ typedef struct bt_stats {
 } bt_stats_t;
 void bt_get_stats(bt_t *bt, bt_stats_t *out);
 
-#ifndef XTC_E_NOTFOUND
-#define XTC_E_NOTFOUND (-11)   /* local: key absent (does not collide) */
-#endif
+/* XTC_E_NOTFOUND (key absent) now comes from the core <xtc.h> enum,
+ * pulled in via bufmgr.h. */
 
 #ifdef __cplusplus
 }
