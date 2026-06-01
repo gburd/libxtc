@@ -91,12 +91,13 @@ struct mv_slot {
 struct mv_shard {
 	struct mv_slot slot[MV_CAP];
 	uint64_t       hlc;
+	uint64_t       gc_horizon;   /* snapshots below this may have lost a version */
 };
 
 /* ---- wire messages (memcpy into aligned locals on receipt) ---- */
 enum { MV_READ = 'R', MV_STAT = 'Z' };         /* shard call */
 struct shreq { uint8_t op; uint32_t key; uint64_t snap; };
-struct shrep { int ok; uint32_t value; };
+struct shrep { int ok; int aborted; uint32_t value; };
 
 enum { MV_PREPARE = 'P', MV_COMMIT = 'C', MV_ABORT = 'A' };  /* shard cast */
 struct shcast {
@@ -182,13 +183,19 @@ shard_push_version(struct mv_slot *sl, uint64_t commit_ts, uint32_t value,
  * is the sole accessor of its chains (share-nothing).
  */
 static void
-shard_prune(struct mv_slot *sl, uint64_t low_water)
+shard_prune(struct mv_shard *s, struct mv_slot *sl, uint64_t low_water)
 {
 	int k;
 	for (k = 0; k < sl->nver; k++)
 		if (sl->ver[k].committed && sl->ver[k].commit_ts <= low_water) {
-			if (k + 1 < sl->nver)
-				sl->nver = k + 1;   /* drop older committed versions */
+			if (k + 1 < sl->nver) {
+				/* Versions older than ver[k] are being reclaimed;
+				 * a snapshot below ver[k].commit_ts can no longer
+				 * be served and must abort (long-lived reader). */
+				if (sl->ver[k].commit_ts > s->gc_horizon)
+					s->gc_horizon = sl->ver[k].commit_ts;
+				sl->nver = k + 1;
+			}
 			return;
 		}
 }
@@ -198,7 +205,7 @@ shard_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 {
 	struct mv_shard *s = st;
 	struct shreq r;
-	struct shrep rep = { 0, 0 };
+	struct shrep rep = { 0, 0, 0 };
 
 	if (sz >= sizeof r) {
 		memcpy(&r, req, sizeof r);
@@ -214,6 +221,12 @@ shard_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 						break;
 					}
 			}
+			/* Miss below the GC horizon: the snapshot is too old --
+			 * its version was reclaimed.  Signal abort, not absence,
+			 * so a long-lived reader restarts instead of seeing a
+			 * false miss. */
+			if (!rep.ok && r.snap < s->gc_horizon)
+				rep.aborted = 1;
 		} else if (r.op == MV_STAT) {
 			/* Total live versions in this shard (GC observability). */
 			int i; uint32_t total = 0;
@@ -263,7 +276,7 @@ shard_handle_cast(void *st, const void *msg, size_t sz)
 				    c.txn_id, 0);
 			/* Reclaim versions no live snapshot can see. */
 			if (sl != NULL)
-				shard_prune(sl, c.low_water);
+				shard_prune(s, sl, c.low_water);
 		}
 		v.op = MV_VOTE; v.txn_id = c.txn_id; v.yes = yes;
 		v.shard = xtc_self();
@@ -601,7 +614,7 @@ int
 mvcc_read(uint32_t key, uint64_t snap_ts, uint32_t *out)
 {
 	struct shreq rq = { MV_READ, key, snap_ts };
-	struct shrep rp = { 0, 0 };
+	struct shrep rp = { 0, 0, 0 };
 	void *r = NULL;
 	size_t n = 0;
 	int rc = xtc_svr_call(g_shard_pid[mvcc_shard_of(key)], &rq, sizeof rq,
@@ -611,6 +624,8 @@ mvcc_read(uint32_t key, uint64_t snap_ts, uint32_t *out)
 	free(r);
 	if (rc != XTC_OK)
 		return rc;
+	if (rp.aborted)
+		return XTC_E_ABORTED;          /* snapshot too old; restart */
 	if (!rp.ok)
 		return XTC_E_NOTFOUND;
 	if (out != NULL)
@@ -631,7 +646,7 @@ mvcc_total_versions(void)
 	int i, total = 0;
 	for (i = 0; i < g_n_shards; i++) {
 		struct shreq rq = { MV_STAT, 0, 0 };
-		struct shrep rp = { 0, 0 };
+		struct shrep rp = { 0, 0, 0 };
 		void *r = NULL;
 		size_t n = 0;
 		if (xtc_svr_call(g_shard_pid[i], &rq, sizeof rq, &r, &n,
