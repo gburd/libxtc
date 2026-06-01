@@ -13,6 +13,38 @@ sufficient.
 
 ---
 
+## SQL-on-our-storage integration (xstore.c)
+
+### FIXED: cross-loop lost-wakeup race (the big one)
+
+The `bench/sqlxtc` MVCC load generator immediately exposed a
+lost-wakeup race in `__do_recv`: the receiver armed its waker AFTER
+releasing the mailbox lock, so a cross-thread sender in that gap fired
+no waker and the receiver stalled to its timeout.  Benign on one loop
+(cooperative), fatal across loops -- it silently crippled all
+multi-loop message passing.  Fixed (arm under the lock that confirms
+the mailbox empty): 4-core read-heavy throughput 15.7 -> 402 kops/s
+(25x), max latency 4.29 s -> ~3 ms.  Correctness tests had not caught
+it; the benchmark did.  THE lesson: micro-benchmark the cross-loop
+path, not just correctness.
+
+### CONFIRMED OK: the VDBE parks mid-statement on cooperative I/O
+
+The scariest unknown about running SQLite's VDBE on our storage was
+whether a fiber could park in the MIDDLE of a SQL statement: a cursor
+scan or insert (`xstore` -> `btree` -> `bufmgr`) offloads page I/O and
+parks the fiber while deep inside `sqlite3_step`, suspending a C call
+chain of VDBE + virtual-table + B-tree frames on the coroutine stack.
+It works: `test_xstore` runs a full SQL workload (4000-row, 800 KB
+working set through a 64 KB pool, count/sum/point/update/delete) ON a
+loop with the page provider live -- the VDBE parks on offloaded I/O
+mid-statement, the coroutine stack save/restore carries the deep chain,
+and results are correct under heavy eviction.  No fiber-stack overflow,
+no corruption; ASan + UBSan clean.  This is the load-bearing
+validation for the whole SQL-on-libxtc model.
+
+---
+
 ## Stage 4 -- MVCC + cross-shard 2PC (mvcc.c)
 
 ### CONFIRMED OK: share-nothing makes version GC need no RCU/epoch
