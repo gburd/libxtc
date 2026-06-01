@@ -20,6 +20,7 @@
 #include "xtc_tailcall.h"
 #include "xtc_slab.h"
 #include "xtc_inspect.h"
+#include "xtc_trace.h"
 #include "xtc_slab.h"
 #include "xtc_mctx.h"
 #include <stdio.h>
@@ -36,6 +37,7 @@ struct envelope {
 	struct envelope *next;
 	xtc_pid_t        from;
 	size_t           size;
+	uint64_t         hlc;        /* sender's HLC stamp (causal tracing) */
 	unsigned char    data[];     /* flexible */
 };
 
@@ -110,6 +112,96 @@ __env_free(struct envelope *e)
 		xtc_slab_free(__env_slab, e);
 	else
 		free(e);
+}
+
+/* ---------- causal tracing + hybrid logical clock (xtc_trace.h) ---------- */
+
+#define XTC_TRACE_RING 8192u
+static _Atomic uint64_t __g_hlc;
+static _Atomic int      __trace_on;
+static pthread_mutex_t  __trace_lock = PTHREAD_MUTEX_INITIALIZER;
+static xtc_trace_rec_t  __trace_ring[XTC_TRACE_RING];
+static uint64_t         __trace_seq;        /* total records ever written */
+
+static uint64_t
+__phys_us(void)
+{
+	int64_t ns = 0;
+	(void)__os_clock_mono(&ns);
+	return (uint64_t)(ns / 1000);
+}
+
+/* HLC: high 48 bits physical microseconds, low 16 bits logical. */
+static uint64_t
+__hlc_tick(void)
+{
+	uint64_t prev, next, pt = __phys_us();
+	do {
+		uint64_t pphys, plog;
+		prev = atomic_load_explicit(&__g_hlc, memory_order_relaxed);
+		pphys = prev >> 16; plog = prev & 0xFFFF;
+		if (pt > pphys) {
+			next = pt << 16;
+		} else if (plog + 1 > 0xFFFF) {
+			next = (pphys + 1) << 16;
+		} else {
+			next = (pphys << 16) | (plog + 1);
+		}
+	} while (!atomic_compare_exchange_weak_explicit(&__g_hlc, &prev, next,
+	    memory_order_relaxed, memory_order_relaxed));
+	return next;
+}
+
+/* Advance the clock past a received stamp `m`; return the new stamp. */
+static uint64_t
+__hlc_update(uint64_t m)
+{
+	uint64_t prev, next, pt = __phys_us();
+	do {
+		uint64_t pphys = 0, plog = 0, mphys = m >> 16, mlog = m & 0xFFFF;
+		uint64_t nphys, nlog;
+		prev = atomic_load_explicit(&__g_hlc, memory_order_relaxed);
+		pphys = prev >> 16; plog = prev & 0xFFFF;
+		nphys = pphys;
+		if (mphys > nphys) nphys = mphys;
+		if (pt > nphys) nphys = pt;
+		if (nphys == pphys && nphys == mphys)
+			nlog = (plog > mlog ? plog : mlog) + 1;
+		else if (nphys == pphys)
+			nlog = plog + 1;
+		else if (nphys == mphys)
+			nlog = mlog + 1;
+		else
+			nlog = 0;
+		if (nlog > 0xFFFF) { nphys++; nlog = 0; }
+		next = (nphys << 16) | (nlog & 0xFFFF);
+	} while (!atomic_compare_exchange_weak_explicit(&__g_hlc, &prev, next,
+	    memory_order_relaxed, memory_order_relaxed));
+	return next;
+}
+
+static void
+__trace_record(int kind, xtc_pid_t self, xtc_pid_t peer, uint64_t hlc,
+    uint64_t cause, uint32_t detail)
+{
+	/* Hot-path guard: a single relaxed load when tracing is off. */
+	if (!atomic_load_explicit(&__trace_on, memory_order_relaxed))
+		return;
+	(void)pthread_mutex_lock(&__trace_lock);
+	if (atomic_load_explicit(&__trace_on, memory_order_relaxed)) {
+		xtc_trace_rec_t *r = &__trace_ring[__trace_seq % XTC_TRACE_RING];
+		r->hlc = hlc; r->cause = cause; r->kind = kind;
+		r->self = self; r->peer = peer; r->detail = detail;
+		__trace_seq++;
+	}
+	(void)pthread_mutex_unlock(&__trace_lock);
+}
+
+/* True iff tracing is currently enabled (hot-path predicate). */
+static int
+__trace_active(void)
+{
+	return atomic_load_explicit(&__trace_on, memory_order_relaxed) != 0;
 }
 
 static struct link_entry *
@@ -772,6 +864,17 @@ xtc_send(xtc_pid_t to, const void *data, size_t size)
 	e->size = size;
 	if (size > 0) memcpy(e->data, data, size);
 
+	/* Causal tracing: stamp the envelope with the sender's HLC and
+	 * record the send.  Off the hot path entirely when tracing is
+	 * disabled (one relaxed load); the stamp is then left 0. */
+	if (XTC_UNLIKELY(__trace_active())) {
+		e->hlc = __hlc_tick();
+		__trace_record(XTC_TRACE_SEND, e->from, to, e->hlc, 0,
+		    (uint32_t)size);
+	} else {
+		e->hlc = 0;
+	}
+
 	return __mbox_deliver(p, e);
 }
 
@@ -992,6 +1095,13 @@ deliver:
 		}
 		*out = buf;
 		*out_size = e->size;
+		/* Causal tracing: advance past the sender's stamp and record
+		 * the receive, linking back to the send via `cause`. */
+		if (XTC_UNLIKELY(__trace_active())) {
+			uint64_t rs = __hlc_update(e->hlc);
+			__trace_record(XTC_TRACE_RECV, self->pid, e->from, rs,
+			    e->hlc, (uint32_t)e->size);
+		}
 		__env_free(e);
 	}
 	return XTC_OK;
@@ -1855,4 +1965,69 @@ xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 	}
 	(void)pthread_mutex_unlock(&__lt_lock);
 	return found ? XTC_OK : XTC_E_NOTFOUND;
+}
+
+/* ---------- causal tracing public API (xtc_trace.h) ---------- */
+
+int
+xtc_trace_enable(int on)
+{
+	return atomic_exchange_explicit(&__trace_on, on ? 1 : 0,
+	    memory_order_relaxed);
+}
+
+int
+xtc_trace_reset(void)
+{
+	(void)pthread_mutex_lock(&__trace_lock);
+	__trace_seq = 0;
+	(void)pthread_mutex_unlock(&__trace_lock);
+	return XTC_OK;
+}
+
+uint64_t
+xtc_hlc_now(void)
+{
+	return atomic_load_explicit(&__g_hlc, memory_order_relaxed);
+}
+
+static int
+__trace_rec_cmp(const void *a, const void *b)
+{
+	uint64_t x = ((const xtc_trace_rec_t *)a)->hlc;
+	uint64_t y = ((const xtc_trace_rec_t *)b)->hlc;
+	return (x > y) - (x < y);
+}
+
+int
+xtc_trace_dump(xtc_trace_fn cb, void *user)
+{
+	xtc_trace_rec_t *snap = NULL;
+	uint64_t n, start, i;
+
+	if (cb == NULL)
+		return XTC_E_INVAL;
+
+	(void)pthread_mutex_lock(&__trace_lock);
+	n = __trace_seq < XTC_TRACE_RING ? __trace_seq : XTC_TRACE_RING;
+	if (n > 0) {
+		if (__os_malloc((size_t)n * sizeof *snap, (void **)&snap)
+		    != XTC_OK) {
+			(void)pthread_mutex_unlock(&__trace_lock);
+			return XTC_E_NOMEM;
+		}
+		start = __trace_seq - n;
+		for (i = 0; i < n; i++)
+			snap[i] = __trace_ring[(start + i) % XTC_TRACE_RING];
+	}
+	(void)pthread_mutex_unlock(&__trace_lock);
+
+	/* Present in causal (HLC-ascending) order. */
+	if (n > 1)
+		qsort(snap, (size_t)n, sizeof *snap, __trace_rec_cmp);
+	for (i = 0; i < n; i++)
+		if (cb(&snap[i], user) != 0)
+			break;
+	__os_free(snap);
+	return (int)n;
 }

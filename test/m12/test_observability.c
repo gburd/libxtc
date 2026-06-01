@@ -447,10 +447,80 @@ test_inspect_notfound(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- causal tracing (xtc_trace) ----------------------------- */
+#include "xtc_trace.h"
+
+static xtc_pid_t g_tr_b, g_tr_c;
+static void tr_c_proc(void *a){ void *m=NULL; size_t n=0; (void)a;
+	(void)xtc_recv(&m,&n, 500LL*1000*1000); free(m); }
+static void tr_b_proc(void *a){ void *m=NULL; size_t n=0; (void)a;
+	(void)xtc_recv(&m,&n, 500LL*1000*1000); free(m);
+	(void)xtc_send(g_tr_c, "m2", 3); }
+static void tr_a_proc(void *a){ (void)a; (void)xtc_send(g_tr_b, "m1", 3); }
+
+#define TR_MAX 256
+static xtc_trace_rec_t g_tr[TR_MAX];
+static int g_tr_n;
+static int tr_collect(const xtc_trace_rec_t *r, void *u){ (void)u;
+	if (g_tr_n < TR_MAX) g_tr[g_tr_n++] = *r;
+	return 0; }
+
+static MunitResult
+test_trace_causal(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t o = { 0 };
+	xtc_pid_t ap;
+	int dumped, i, j, sends = 0, recvs = 0, edges_ok = 0;
+	(void)p; (void)d;
+
+	g_tr_n = 0;
+	xtc_trace_reset();
+	(void)xtc_trace_enable(1);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	o.name = "C";
+	munit_assert_int(xtc_proc_spawn(loop, tr_c_proc, NULL, &o, &g_tr_c), ==, XTC_OK);
+	o.name = "B";
+	munit_assert_int(xtc_proc_spawn(loop, tr_b_proc, NULL, &o, &g_tr_b), ==, XTC_OK);
+	o.name = "A";
+	munit_assert_int(xtc_proc_spawn(loop, tr_a_proc, NULL, &o, &ap), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	dumped = xtc_trace_dump(tr_collect, NULL);
+	(void)xtc_trace_enable(0);
+
+	/* The chain A->B->C produced two sends and two receives. */
+	munit_assert_int(dumped, >=, 4);
+	for (i = 0; i < g_tr_n; i++) {
+		if (g_tr[i].kind == XTC_TRACE_SEND) sends++;
+		if (g_tr[i].kind == XTC_TRACE_RECV) {
+			recvs++;
+			/* Every receive links back to a real send. */
+			for (j = 0; j < g_tr_n; j++)
+				if (g_tr[j].kind == XTC_TRACE_SEND &&
+				    g_tr[j].hlc == g_tr[i].cause) {
+					edges_ok++;
+					break;
+				}
+		}
+	}
+	munit_assert_int(sends, >=, 2);
+	munit_assert_int(recvs, >=, 2);
+	munit_assert_int(edges_ok, ==, recvs);          /* no orphan receives */
+	/* Causal order: dump is HLC-ascending, so the last event's stamp
+	 * exceeds the first, and the clock advanced. */
+	munit_assert_true(g_tr[g_tr_n - 1].hlc > g_tr[0].hlc);
+	munit_assert_true(xtc_hlc_now() > 0);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/pdict/basic",          test_pdict_basic,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inspect/procs",        test_inspect_procs,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inspect/notfound",     test_inspect_notfound,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/trace/causal",         test_trace_causal,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/basic",            test_log_basic,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/drop_on_full",     test_log_drop_on_full,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/int",              test_cfg_int,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
