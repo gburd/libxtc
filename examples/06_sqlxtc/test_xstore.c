@@ -45,72 +45,72 @@ static int g_fail;
 static int
 run_sql(bt_t *bt, const char *tag, bm_t *bm)
 {
-	sqlite3 *db = NULL;
-	sqlite3_stmt *st = NULL;
+	xsql *db = NULL;
+	xsql_stmt *st = NULL;
 	char blob[ROW_BYTES];
 	int i;
 	bm_stats_t bs;
 
 	memset(blob, 'x', sizeof blob);
-	CK(sqlite3_open(":memory:", &db) == SQLITE_OK);
+	CK(xsql_open(":memory:", &db) == SQLITE_OK);
 	CK(xstore_register(db, bt) == SQLITE_OK);
-	CK(sqlite3_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0)
+	CK(xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0)
 	    == SQLITE_OK);
 
 	/* INSERT N_ROWS rows -- far more bytes than the buffer pool. */
-	CK(sqlite3_prepare_v2(db, "INSERT INTO t(k,v) VALUES(?,?)", -1, &st, 0)
+	CK(xsql_prepare_v2(db, "INSERT INTO t(k,v) VALUES(?,?)", -1, &st, 0)
 	    == SQLITE_OK);
 	for (i = 1; i <= N_ROWS; i++) {
 		/* tag the first 8 bytes with the key so reads can verify. */
 		memcpy(blob, &i, sizeof i);
-		sqlite3_bind_int64(st, 1, i);
-		sqlite3_bind_blob(st, 2, blob, ROW_BYTES, SQLITE_STATIC);
-		CK(sqlite3_step(st) == SQLITE_DONE);
-		sqlite3_reset(st);
+		xsql_bind_int64(st, 1, i);
+		xsql_bind_blob(st, 2, blob, ROW_BYTES, SQLITE_STATIC);
+		CK(xsql_step(st) == SQLITE_DONE);
+		xsql_reset(st);
 	}
-	sqlite3_finalize(st); st = NULL;
+	xsql_finalize(st); st = NULL;
 
 	/* Full scan: count(*) and sum(k) -- reads every row back through
 	 * the (over-subscribed) buffer pool. */
-	CK(sqlite3_prepare_v2(db, "SELECT count(*), sum(k) FROM t", -1, &st, 0)
+	CK(xsql_prepare_v2(db, "SELECT count(*), sum(k) FROM t", -1, &st, 0)
 	    == SQLITE_OK);
-	CK(sqlite3_step(st) == SQLITE_ROW);
-	CK(sqlite3_column_int64(st, 0) == N_ROWS);
-	CK(sqlite3_column_int64(st, 1) == (int64_t)N_ROWS * (N_ROWS + 1) / 2);
-	sqlite3_finalize(st); st = NULL;
+	CK(xsql_step(st) == SQLITE_ROW);
+	CK(xsql_column_int64(st, 0) == N_ROWS);
+	CK(xsql_column_int64(st, 1) == (int64_t)N_ROWS * (N_ROWS + 1) / 2);
+	xsql_finalize(st); st = NULL;
 
 	/* Point lookup: WHERE k = ? (uses xBestIndex eq path). */
-	CK(sqlite3_prepare_v2(db, "SELECT v FROM t WHERE k=?", -1, &st, 0)
+	CK(xsql_prepare_v2(db, "SELECT v FROM t WHERE k=?", -1, &st, 0)
 	    == SQLITE_OK);
-	sqlite3_bind_int64(st, 1, 1234);
-	CK(sqlite3_step(st) == SQLITE_ROW);
+	xsql_bind_int64(st, 1, 1234);
+	CK(xsql_step(st) == SQLITE_ROW);
 	{
-		const void *p = sqlite3_column_blob(st, 0);
-		int n = sqlite3_column_bytes(st, 0), kk = 0;
+		const void *p = xsql_column_blob(st, 0);
+		int n = xsql_column_bytes(st, 0), kk = 0;
 		CK(n == ROW_BYTES);
 		memcpy(&kk, p, sizeof kk);
 		CK(kk == 1234);                       /* correct row content */
 	}
-	sqlite3_finalize(st); st = NULL;
+	xsql_finalize(st); st = NULL;
 
 	/* UPDATE then verify. */
-	CK(sqlite3_exec(db, "UPDATE t SET v=zeroblob(16) WHERE k=1234", 0, 0, 0)
+	CK(xsql_exec(db, "UPDATE t SET v=zeroblob(16) WHERE k=1234", 0, 0, 0)
 	    == SQLITE_OK);
-	CK(sqlite3_prepare_v2(db, "SELECT length(v) FROM t WHERE k=1234", -1, &st, 0)
+	CK(xsql_prepare_v2(db, "SELECT length(v) FROM t WHERE k=1234", -1, &st, 0)
 	    == SQLITE_OK);
-	CK(sqlite3_step(st) == SQLITE_ROW);
-	CK(sqlite3_column_int(st, 0) == 16);
-	sqlite3_finalize(st); st = NULL;
+	CK(xsql_step(st) == SQLITE_ROW);
+	CK(xsql_column_int(st, 0) == 16);
+	xsql_finalize(st); st = NULL;
 
 	/* DELETE then verify the row is gone and the count dropped. */
-	CK(sqlite3_exec(db, "DELETE FROM t WHERE k=1234", 0, 0, 0) == SQLITE_OK);
-	CK(sqlite3_prepare_v2(db, "SELECT count(*) FROM t WHERE k=1234", -1, &st, 0)
+	CK(xsql_exec(db, "DELETE FROM t WHERE k=1234", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_prepare_v2(db, "SELECT count(*) FROM t WHERE k=1234", -1, &st, 0)
 	    == SQLITE_OK);
-	CK(sqlite3_step(st) == SQLITE_ROW);
-	CK(sqlite3_column_int(st, 0) == 0);
-	sqlite3_finalize(st); st = NULL;
+	CK(xsql_step(st) == SQLITE_ROW);
+	CK(xsql_column_int(st, 0) == 0);
+	xsql_finalize(st); st = NULL;
 
-	sqlite3_close(db);
+	xsql_close(db);
 
 	bm_get_stats(bm, &bs);
 	if (g_fail)
@@ -189,34 +189,34 @@ scenario_onloop(void)
  * see a newer committed write (PostgreSQL-style version visibility,
  * surfaced as a SQL AS-OF read via xstore_as_of). ---- */
 static int
-sel_v(sqlite3 *db, int64_t k, char *out, size_t cap)
+sel_v(xsql *db, int64_t k, char *out, size_t cap)
 {
-	sqlite3_stmt *st = NULL;
+	xsql_stmt *st = NULL;
 	int got = 0;
-	if (sqlite3_prepare_v2(db, "SELECT v FROM t WHERE k=?", -1, &st, 0)
+	if (xsql_prepare_v2(db, "SELECT v FROM t WHERE k=?", -1, &st, 0)
 	    != SQLITE_OK)
 		return -1;
-	sqlite3_bind_int64(st, 1, k);
-	if (sqlite3_step(st) == SQLITE_ROW) {
-		const unsigned char *t = sqlite3_column_text(st, 0);
-		size_t n = (size_t)sqlite3_column_bytes(st, 0);
+	xsql_bind_int64(st, 1, k);
+	if (xsql_step(st) == SQLITE_ROW) {
+		const unsigned char *t = xsql_column_text(st, 0);
+		size_t n = (size_t)xsql_column_bytes(st, 0);
 		if (n >= cap) n = cap - 1;
 		if (t) memcpy(out, t, n);
 		out[n] = '\0';
 		got = 1;
 	}
-	sqlite3_finalize(st);
+	xsql_finalize(st);
 	return got;
 }
 static void
-set_as_of(sqlite3 *db, int64_t ts)
+set_as_of(xsql *db, int64_t ts)
 {
-	sqlite3_stmt *st = NULL;
-	if (sqlite3_prepare_v2(db, "SELECT xstore_as_of(?)", -1, &st, 0)
+	xsql_stmt *st = NULL;
+	if (xsql_prepare_v2(db, "SELECT xstore_as_of(?)", -1, &st, 0)
 	    != SQLITE_OK) return;
-	sqlite3_bind_int64(st, 1, ts);
-	(void)sqlite3_step(st);
-	sqlite3_finalize(st);
+	xsql_bind_int64(st, 1, ts);
+	(void)xsql_step(st);
+	xsql_finalize(st);
 }
 
 static int
@@ -226,8 +226,8 @@ scenario_mvcc(void)
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	char path[] = "/tmp/sqlxtc-xstore3-XXXXXX";
-	sqlite3 *db = NULL;
-	sqlite3_stmt *st = NULL;
+	xsql *db = NULL;
+	xsql_stmt *st = NULL;
 	int64_t ts_mid = 0;
 	char b[32];
 	int fd;
@@ -237,19 +237,19 @@ scenario_mvcc(void)
 	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = 64; bo.cool_pct = 25;
 	CK(bm_create(&bo, &bm) == XTC_OK);
 	CK(bt_open(bm, &bt) == XTC_OK);
-	CK(sqlite3_open(":memory:", &db) == SQLITE_OK);
+	CK(xsql_open(":memory:", &db) == SQLITE_OK);
 	CK(xstore_register(db, bt) == SQLITE_OK);
-	CK(sqlite3_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0)
+	CK(xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0)
 	    == SQLITE_OK);
 
-	CK(sqlite3_exec(db, "INSERT INTO t(k,v) VALUES(1,'aaa');", 0, 0, 0)
+	CK(xsql_exec(db, "INSERT INTO t(k,v) VALUES(1,'aaa');", 0, 0, 0)
 	    == SQLITE_OK);
 	/* Capture a snapshot between the insert and the update. */
-	CK(sqlite3_prepare_v2(db, "SELECT xstore_now()", -1, &st, 0) == SQLITE_OK);
-	CK(sqlite3_step(st) == SQLITE_ROW);
-	ts_mid = sqlite3_column_int64(st, 0);
-	sqlite3_finalize(st); st = NULL;
-	CK(sqlite3_exec(db, "UPDATE t SET v='bbb' WHERE k=1;", 0, 0, 0)
+	CK(xsql_prepare_v2(db, "SELECT xstore_now()", -1, &st, 0) == SQLITE_OK);
+	CK(xsql_step(st) == SQLITE_ROW);
+	ts_mid = xsql_column_int64(st, 0);
+	xsql_finalize(st); st = NULL;
+	CK(xsql_exec(db, "UPDATE t SET v='bbb' WHERE k=1;", 0, 0, 0)
 	    == SQLITE_OK);
 
 	/* Latest snapshot sees the new value. */
@@ -262,12 +262,12 @@ scenario_mvcc(void)
 	/* Delete at latest; the old snapshot is unaffected (delete is in
 	 * its future). */
 	set_as_of(db, 0);
-	CK(sqlite3_exec(db, "DELETE FROM t WHERE k=1;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(db, "DELETE FROM t WHERE k=1;", 0, 0, 0) == SQLITE_OK);
 	CK(sel_v(db, 1, b, sizeof b) == 0);                  /* gone at latest */
 	set_as_of(db, ts_mid);
 	CK(sel_v(db, 1, b, sizeof b) == 1 && strcmp(b, "aaa") == 0);
 
-	sqlite3_close(db);
+	xsql_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);
 	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
@@ -284,8 +284,8 @@ scenario_txn(void)
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	char path[] = "/tmp/sqlxtc-xstore4-XXXXXX";
-	sqlite3 *db = NULL;
-	sqlite3_stmt *st = NULL;
+	xsql *db = NULL;
+	xsql_stmt *st = NULL;
 	int64_t ts_pre = 0, commit_ts = 0;
 	char b[32];
 	int fd;
@@ -295,30 +295,30 @@ scenario_txn(void)
 	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = 64; bo.cool_pct = 25;
 	CK(bm_create(&bo, &bm) == XTC_OK);
 	CK(bt_open(bm, &bt) == XTC_OK);
-	CK(sqlite3_open(":memory:", &db) == SQLITE_OK);
+	CK(xsql_open(":memory:", &db) == SQLITE_OK);
 	CK(xstore_register(db, bt) == SQLITE_OK);
-	CK(sqlite3_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0)
+	CK(xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0)
 	    == SQLITE_OK);
 
-	CK(sqlite3_prepare_v2(db, "SELECT xstore_now()", -1, &st, 0) == SQLITE_OK);
-	CK(sqlite3_step(st) == SQLITE_ROW);
-	ts_pre = sqlite3_column_int64(st, 0);
-	sqlite3_finalize(st); st = NULL;
+	CK(xsql_prepare_v2(db, "SELECT xstore_now()", -1, &st, 0) == SQLITE_OK);
+	CK(xsql_step(st) == SQLITE_ROW);
+	ts_pre = xsql_column_int64(st, 0);
+	xsql_finalize(st); st = NULL;
 
 	/* A two-row transaction.  Buffered, then committed atomically. */
-	CK(sqlite3_exec(db, "BEGIN;", 0, 0, 0) == SQLITE_OK);
-	CK(sqlite3_exec(db, "INSERT INTO t(k,v) VALUES(10,'x');", 0, 0, 0)
+	CK(xsql_exec(db, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(db, "INSERT INTO t(k,v) VALUES(10,'x');", 0, 0, 0)
 	    == SQLITE_OK);
-	CK(sqlite3_exec(db, "INSERT INTO t(k,v) VALUES(11,'y');", 0, 0, 0)
+	CK(xsql_exec(db, "INSERT INTO t(k,v) VALUES(11,'y');", 0, 0, 0)
 	    == SQLITE_OK);
 	/* Read-your-writes inside the open transaction. */
 	CK(sel_v(db, 10, b, sizeof b) == 1 && strcmp(b, "x") == 0);
-	CK(sqlite3_exec(db, "COMMIT;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(db, "COMMIT;", 0, 0, 0) == SQLITE_OK);
 
-	CK(sqlite3_prepare_v2(db, "SELECT xstore_now()", -1, &st, 0) == SQLITE_OK);
-	CK(sqlite3_step(st) == SQLITE_ROW);
-	commit_ts = sqlite3_column_int64(st, 0);
-	sqlite3_finalize(st); st = NULL;
+	CK(xsql_prepare_v2(db, "SELECT xstore_now()", -1, &st, 0) == SQLITE_OK);
+	CK(xsql_step(st) == SQLITE_ROW);
+	commit_ts = xsql_column_int64(st, 0);
+	xsql_finalize(st); st = NULL;
 
 	/* Both rows shared ONE commit timestamp (a single tick for the
 	 * whole transaction). */
@@ -333,13 +333,13 @@ scenario_txn(void)
 
 	/* Rollback discards the whole transaction. */
 	set_as_of(db, 0);
-	CK(sqlite3_exec(db, "BEGIN;", 0, 0, 0) == SQLITE_OK);
-	CK(sqlite3_exec(db, "INSERT INTO t(k,v) VALUES(12,'z');", 0, 0, 0)
+	CK(xsql_exec(db, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(db, "INSERT INTO t(k,v) VALUES(12,'z');", 0, 0, 0)
 	    == SQLITE_OK);
-	CK(sqlite3_exec(db, "ROLLBACK;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(db, "ROLLBACK;", 0, 0, 0) == SQLITE_OK);
 	CK(sel_v(db, 12, b, sizeof b) == 0);
 
-	sqlite3_close(db);
+	xsql_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);
 	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
@@ -352,9 +352,9 @@ scenario_txn(void)
 /* Two connections sharing one engine B-tree exhibit write-skew under
  * snapshot isolation; serializable validation aborts one of them. */
 static int
-commit_rc(sqlite3 *db)
+commit_rc(xsql *db)
 {
-	return sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+	return xsql_exec(db, "COMMIT;", 0, 0, 0);
 }
 
 static int
@@ -364,7 +364,7 @@ scenario_serializable(void)
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	char path[] = "/tmp/sqlxtc-xstore5-XXXXXX";
-	sqlite3 *d1 = NULL, *d2 = NULL;
+	xsql *d1 = NULL, *d2 = NULL;
 	char b[32];
 	int fd;
 
@@ -373,40 +373,40 @@ scenario_serializable(void)
 	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = 64; bo.cool_pct = 25;
 	CK(bm_create(&bo, &bm) == XTC_OK);
 	CK(bt_open(bm, &bt) == XTC_OK);
-	CK(sqlite3_open(":memory:", &d1) == SQLITE_OK);
-	CK(sqlite3_open(":memory:", &d2) == SQLITE_OK);
+	CK(xsql_open(":memory:", &d1) == SQLITE_OK);
+	CK(xsql_open(":memory:", &d2) == SQLITE_OK);
 	CK(xstore_register(d1, bt) == SQLITE_OK);
 	CK(xstore_register(d2, bt) == SQLITE_OK);
-	CK(sqlite3_exec(d1, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
-	CK(sqlite3_exec(d2, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
-	CK(sqlite3_exec(d1, "INSERT INTO t(k,v) VALUES(1,'0'),(2,'0');", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d1, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d2, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d1, "INSERT INTO t(k,v) VALUES(1,'0'),(2,'0');", 0, 0, 0) == SQLITE_OK);
 
 	/* Write-skew under snapshot isolation (default): each txn reads
 	 * both rows (sees 0,0) and writes a different one; both commit, so
 	 * the invariant 'at most one of x,y is 1' is violated. */
-	CK(sqlite3_exec(d1, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d1, "BEGIN;", 0, 0, 0) == SQLITE_OK);
 	CK(sel_v(d1, 1, b, sizeof b) == 1); CK(sel_v(d1, 2, b, sizeof b) == 1);
-	CK(sqlite3_exec(d2, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d2, "BEGIN;", 0, 0, 0) == SQLITE_OK);
 	CK(sel_v(d2, 1, b, sizeof b) == 1); CK(sel_v(d2, 2, b, sizeof b) == 1);
-	CK(sqlite3_exec(d1, "UPDATE t SET v='1' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
-	CK(sqlite3_exec(d2, "UPDATE t SET v='1' WHERE k=2;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d1, "UPDATE t SET v='1' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d2, "UPDATE t SET v='1' WHERE k=2;", 0, 0, 0) == SQLITE_OK);
 	CK(commit_rc(d1) == SQLITE_OK);
 	CK(commit_rc(d2) == SQLITE_OK);                 /* SI: BOTH commit */
 	CK(sel_v(d1, 1, b, sizeof b) == 1 && strcmp(b, "1") == 0);
 	CK(sel_v(d1, 2, b, sizeof b) == 1 && strcmp(b, "1") == 0);  /* anomaly present */
 
 	/* Reset to 0,0 and rerun under serializable: one txn must abort. */
-	CK(sqlite3_exec(d1, "UPDATE t SET v='0' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
-	CK(sqlite3_exec(d1, "UPDATE t SET v='0' WHERE k=2;", 0, 0, 0) == SQLITE_OK);
-	CK(sqlite3_exec(d1, "SELECT xstore_serializable(1);", 0, 0, 0) == SQLITE_OK);
-	CK(sqlite3_exec(d2, "SELECT xstore_serializable(1);", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d1, "UPDATE t SET v='0' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d1, "UPDATE t SET v='0' WHERE k=2;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d1, "SELECT xstore_serializable(1);", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d2, "SELECT xstore_serializable(1);", 0, 0, 0) == SQLITE_OK);
 
-	CK(sqlite3_exec(d1, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d1, "BEGIN;", 0, 0, 0) == SQLITE_OK);
 	CK(sel_v(d1, 1, b, sizeof b) == 1); CK(sel_v(d1, 2, b, sizeof b) == 1);
-	CK(sqlite3_exec(d2, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d2, "BEGIN;", 0, 0, 0) == SQLITE_OK);
 	CK(sel_v(d2, 1, b, sizeof b) == 1); CK(sel_v(d2, 2, b, sizeof b) == 1);
-	CK(sqlite3_exec(d1, "UPDATE t SET v='1' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
-	CK(sqlite3_exec(d2, "UPDATE t SET v='1' WHERE k=2;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d1, "UPDATE t SET v='1' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d2, "UPDATE t SET v='1' WHERE k=2;", 0, 0, 0) == SQLITE_OK);
 	{
 		int rc1 = commit_rc(d1);
 		int rc2 = commit_rc(d2);
@@ -416,7 +416,7 @@ scenario_serializable(void)
 		CK(rc2 == SQLITE_BUSY);
 	}
 
-	sqlite3_close(d1); sqlite3_close(d2);
+	xsql_close(d1); xsql_close(d2);
 	bt_close(bt); bm_destroy(bm); unlink(path);
 	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;

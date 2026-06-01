@@ -44,34 +44,34 @@ static void
 worker_proc(void *arg)
 {
 	const char *path = arg;
-	sqlite3 *db = NULL;
+	xsql *db = NULL;
 	char *err = NULL;
 	int i, rc;
 
-	rc = sqlite3_open_v2(path, &db,
+	rc = xsql_open_v2(path, &db,
 	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "sqlxtc");
 	if (rc != SQLITE_OK) goto done;
 
 	/* One transaction, many rows: forces xWrite + xSync at commit. */
-	(void)sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
-	if (sqlite3_exec(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);",
+	(void)xsql_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+	if (xsql_exec(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);",
 	    NULL, NULL, &err) != SQLITE_OK) goto done;
-	if (sqlite3_exec(db, "BEGIN;", NULL, NULL, &err) != SQLITE_OK) goto done;
+	if (xsql_exec(db, "BEGIN;", NULL, NULL, &err) != SQLITE_OK) goto done;
 	for (i = 0; i < 300; i++) {
 		char sql[96];
 		snprintf(sql, sizeof sql,
 		    "INSERT INTO t(v) VALUES('row-%d-padding-padding');", i);
-		if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK)
+		if (xsql_exec(db, sql, NULL, NULL, &err) != SQLITE_OK)
 			goto done;
 	}
-	if (sqlite3_exec(db, "COMMIT;", NULL, NULL, &err) != SQLITE_OK) goto done;
-	if (sqlite3_exec(db, "SELECT count(*) FROM t;", count_cb, NULL, &err)
+	if (xsql_exec(db, "COMMIT;", NULL, NULL, &err) != SQLITE_OK) goto done;
+	if (xsql_exec(db, "SELECT count(*) FROM t;", count_cb, NULL, &err)
 	    != SQLITE_OK) goto done;
 	g_worker_ok = 1;
 
 done:
-	if (err) sqlite3_free(err);
-	if (db) sqlite3_close(db);
+	if (err) xsql_free(err);
+	if (db) xsql_close(db);
 	atomic_store(&g_worker_done, 1);
 }
 

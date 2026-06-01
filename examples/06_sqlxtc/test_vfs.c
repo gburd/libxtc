@@ -51,7 +51,7 @@ mode_cb(void *unused, int ncol, char **vals, char **names)
 static int
 wal_test(void)
 {
-	sqlite3 *db = NULL;
+	xsql *db = NULL;
 	char *err = NULL;
 	char path[] = "/tmp/sqlxtc-vfs-wal-XXXXXX";
 	int fd, rc, i, fails = 0;
@@ -61,38 +61,38 @@ wal_test(void)
 	close(fd);
 	unlink(path);
 
-	rc = sqlite3_open_v2(path, &db,
+	rc = xsql_open_v2(path, &db,
 	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "sqlxtc");
 	if (rc != SQLITE_OK) {
-		fprintf(stderr, "FAIL(wal): open: %s\n", sqlite3_errmsg(db));
+		fprintf(stderr, "FAIL(wal): open: %s\n", xsql_errmsg(db));
 		unlink(path);
 		return 1;
 	}
 
 	g_mode[0] = '\0';
-	rc = sqlite3_exec(db, "PRAGMA journal_mode=WAL;", mode_cb, 0, &err);
+	rc = xsql_exec(db, "PRAGMA journal_mode=WAL;", mode_cb, 0, &err);
 	if (rc != SQLITE_OK) {
 		fprintf(stderr, "FAIL(wal): set WAL: %s\n", err);
-		sqlite3_free(err); sqlite3_close(db); unlink(path); return 1;
+		xsql_free(err); xsql_close(db); unlink(path); return 1;
 	}
 
-	(void)sqlite3_exec(db,
+	(void)xsql_exec(db,
 	    "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);", 0, 0, 0);
-	(void)sqlite3_exec(db, "BEGIN;", 0, 0, 0);
+	(void)xsql_exec(db, "BEGIN;", 0, 0, 0);
 	for (i = 1; i <= 300; i++) {
 		char sql[96];
 		snprintf(sql, sizeof sql,
 		    "INSERT INTO t(a,b) VALUES(%d,'wal-%d');", i, i);
-		if (sqlite3_exec(db, sql, 0, 0, &err) != SQLITE_OK) {
+		if (xsql_exec(db, sql, 0, 0, &err) != SQLITE_OK) {
 			fprintf(stderr, "FAIL(wal): insert: %s\n", err);
-			sqlite3_free(err); fails++; break;
+			xsql_free(err); fails++; break;
 		}
 	}
-	(void)sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+	(void)xsql_exec(db, "COMMIT;", 0, 0, 0);
 
 	g_sum = -1;
-	(void)sqlite3_exec(db, "SELECT sum(a) FROM t;", sum_cb, 0, 0);
-	sqlite3_close(db);
+	(void)xsql_exec(db, "SELECT sum(a) FROM t;", sum_cb, 0, 0);
+	xsql_close(db);
 
 	if (strcmp(g_mode, "wal") != 0) {
 		fprintf(stderr, "FAIL(wal): journal_mode=%s, expected wal\n",
@@ -115,7 +115,7 @@ wal_test(void)
 int
 main(void)
 {
-	sqlite3 *db = NULL;
+	xsql *db = NULL;
 	char *err = NULL;
 	char path[] = "/tmp/sqlxtc-vfs-test-XXXXXX";
 	int fd, rc, i, fails = 0;
@@ -134,23 +134,23 @@ main(void)
 
 	vfs_get_stats(&s0);
 
-	rc = sqlite3_open_v2(path, &db,
+	rc = xsql_open_v2(path, &db,
 	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "sqlxtc");
 	if (rc != SQLITE_OK) {
 		fprintf(stderr, "FAIL: open via xtc vfs: %s\n",
-		    sqlite3_errmsg(db));
+		    xsql_errmsg(db));
 		return 2;
 	}
 
 	/* Force real file I/O: rollback journal, normal sync. */
-	(void)sqlite3_exec(db, "PRAGMA journal_mode=DELETE;", 0, 0, 0);
-	(void)sqlite3_exec(db, "PRAGMA synchronous=FULL;", 0, 0, 0);
+	(void)xsql_exec(db, "PRAGMA journal_mode=DELETE;", 0, 0, 0);
+	(void)xsql_exec(db, "PRAGMA synchronous=FULL;", 0, 0, 0);
 
-	rc = sqlite3_exec(db,
+	rc = xsql_exec(db,
 	    "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);", 0, 0, &err);
 	if (rc != SQLITE_OK) {
 		fprintf(stderr, "FAIL: create: %s\n", err);
-		sqlite3_free(err);
+		xsql_free(err);
 		return 2;
 	}
 
@@ -158,23 +158,23 @@ main(void)
 		char sql[96];
 		snprintf(sql, sizeof sql,
 		    "INSERT INTO t(a,b) VALUES(%d,'row-%d');", i, i);
-		rc = sqlite3_exec(db, sql, 0, 0, &err);
+		rc = xsql_exec(db, sql, 0, 0, &err);
 		if (rc != SQLITE_OK) {
 			fprintf(stderr, "FAIL: insert %d: %s\n", i, err);
-			sqlite3_free(err);
+			xsql_free(err);
 			return 2;
 		}
 	}
 
 	g_sum = -1;
-	rc = sqlite3_exec(db, "SELECT sum(a) FROM t;", sum_cb, 0, &err);
+	rc = xsql_exec(db, "SELECT sum(a) FROM t;", sum_cb, 0, &err);
 	if (rc != SQLITE_OK) {
 		fprintf(stderr, "FAIL: select: %s\n", err);
-		sqlite3_free(err);
+		xsql_free(err);
 		return 2;
 	}
 
-	sqlite3_close(db);
+	xsql_close(db);
 	vfs_get_stats(&s1);
 
 	/* sum(1..500) == 125250: the data round-tripped through the VFS. */

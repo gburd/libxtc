@@ -39,7 +39,7 @@ count_cb(void *u, int n, char **v, char **names)
 static int
 eviction_test(void)
 {
-	sqlite3 *db = NULL;
+	xsql *db = NULL;
 	char *err = NULL;
 	char path[] = "/tmp/sqlxtc-pcache-evict-XXXXXX";
 	int fd, i, fails = 0;
@@ -50,48 +50,48 @@ eviction_test(void)
 	if (fd < 0) { perror("mkstemp"); return 1; }
 	close(fd); unlink(path);
 
-	if (sqlite3_open(path, &db) != SQLITE_OK) {
-		fprintf(stderr, "FAIL(evict): open: %s\n", sqlite3_errmsg(db));
+	if (xsql_open(path, &db) != SQLITE_OK) {
+		fprintf(stderr, "FAIL(evict): open: %s\n", xsql_errmsg(db));
 		unlink(path); return 1;
 	}
-	(void)sqlite3_exec(db, "PRAGMA journal_mode=DELETE;", 0, 0, 0);
-	(void)sqlite3_exec(db,
+	(void)xsql_exec(db, "PRAGMA journal_mode=DELETE;", 0, 0, 0);
+	(void)xsql_exec(db,
 	    "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);", 0, 0, 0);
 
-	(void)sqlite3_exec(db, "BEGIN;", 0, 0, 0);
+	(void)xsql_exec(db, "BEGIN;", 0, 0, 0);
 	for (i = 1; i <= 8000; i++) {
 		char sql[160];
 		snprintf(sql, sizeof sql,
 		    "INSERT INTO t(a,b) VALUES(%d,"
 		    "'padding-padding-padding-padding-padding-%d');", i, i);
-		if (sqlite3_exec(db, sql, 0, 0, &err) != SQLITE_OK) {
+		if (xsql_exec(db, sql, 0, 0, &err) != SQLITE_OK) {
 			fprintf(stderr, "FAIL(evict): insert: %s\n", err);
-			sqlite3_free(err); sqlite3_close(db); unlink(path);
+			xsql_free(err); xsql_close(db); unlink(path);
 			return 1;
 		}
 	}
-	(void)sqlite3_exec(db, "COMMIT;", 0, 0, 0);
-	sqlite3_close(db);
+	(void)xsql_exec(db, "COMMIT;", 0, 0, 0);
+	xsql_close(db);
 
 	/* Reopen with a cold cache and a small cache_size (50 pages), then
 	 * scan every leaf page.  The working set far exceeds the cache,
 	 * so the sqlxtc slab pcache must recycle unpinned pages and keep its
 	 * resident set bounded. */
-	if (sqlite3_open(path, &db) != SQLITE_OK) {
+	if (xsql_open(path, &db) != SQLITE_OK) {
 		unlink(path); return 1;
 	}
-	(void)sqlite3_exec(db, "PRAGMA cache_size=50;", 0, 0, 0);
+	(void)xsql_exec(db, "PRAGMA cache_size=50;", 0, 0, 0);
 
 	pcache_get_stats(&a);
 	g_rows = -1;
 	/* sum(length(b)) forces reading every row's payload -> every
 	 * leaf page, defeating any count(*) shortcut. */
-	(void)sqlite3_exec(db, "SELECT count(*) FROM "
+	(void)xsql_exec(db, "SELECT count(*) FROM "
 	    "(SELECT a FROM t WHERE length(b) > 0);", count_cb, 0, 0);
 	pcache_get_stats(&b);
 	peak_live = b.live_pages;
 
-	sqlite3_close(db);
+	xsql_close(db);
 	unlink(path);
 
 	if (g_rows != 8000) {
@@ -139,7 +139,7 @@ integ_cb(void *u, int n, char **v, char **names)
 static int
 vacuum_test(void)
 {
-	sqlite3 *db = NULL;
+	xsql *db = NULL;
 	char *err = NULL;
 	char path[] = "/tmp/sqlxtc-pcache-vac-XXXXXX";
 	int fd, i, fails = 0;
@@ -149,49 +149,49 @@ vacuum_test(void)
 	if (fd < 0) { perror("mkstemp"); return 1; }
 	close(fd); unlink(path);
 
-	if (sqlite3_open(path, &db) != SQLITE_OK) {
+	if (xsql_open(path, &db) != SQLITE_OK) {
 		unlink(path); return 1;
 	}
-	(void)sqlite3_exec(db, "PRAGMA cache_size=40;", 0, 0, 0);
-	(void)sqlite3_exec(db,
+	(void)xsql_exec(db, "PRAGMA cache_size=40;", 0, 0, 0);
+	(void)xsql_exec(db,
 	    "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);", 0, 0, 0);
-	(void)sqlite3_exec(db, "BEGIN;", 0, 0, 0);
+	(void)xsql_exec(db, "BEGIN;", 0, 0, 0);
 	for (i = 1; i <= 6000; i++) {
 		char sql[160];
 		snprintf(sql, sizeof sql,
 		    "INSERT INTO t(a,b) VALUES(%d,"
 		    "'padding-padding-padding-padding-padding-%d');", i, i);
-		if (sqlite3_exec(db, sql, 0, 0, &err) != SQLITE_OK) {
+		if (xsql_exec(db, sql, 0, 0, &err) != SQLITE_OK) {
 			fprintf(stderr, "FAIL(vacuum): insert: %s\n", err);
-			sqlite3_free(err); sqlite3_close(db); unlink(path);
+			xsql_free(err); xsql_close(db); unlink(path);
 			return 1;
 		}
 	}
-	(void)sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+	(void)xsql_exec(db, "COMMIT;", 0, 0, 0);
 	/* Delete ~5/6 of the rows to scatter free pages through the file. */
-	if (sqlite3_exec(db, "DELETE FROM t WHERE a % 6 <> 0;", 0, 0, &err)
+	if (xsql_exec(db, "DELETE FROM t WHERE a % 6 <> 0;", 0, 0, &err)
 	    != SQLITE_OK) {
 		fprintf(stderr, "FAIL(vacuum): delete: %s\n", err);
-		sqlite3_free(err); sqlite3_close(db); unlink(path);
+		xsql_free(err); xsql_close(db); unlink(path);
 		return 1;
 	}
 
 	pcache_get_stats(&a);
 	/* VACUUM rebuilds the file: pages are renumbered (xRekey) and the
 	 * file is truncated (xTruncate). */
-	if (sqlite3_exec(db, "VACUUM;", 0, 0, &err) != SQLITE_OK) {
+	if (xsql_exec(db, "VACUUM;", 0, 0, &err) != SQLITE_OK) {
 		fprintf(stderr, "FAIL(vacuum): VACUUM: %s\n", err);
-		sqlite3_free(err); sqlite3_close(db); unlink(path);
+		xsql_free(err); xsql_close(db); unlink(path);
 		return 1;
 	}
 	pcache_get_stats(&b);
 
 	g_integ_ok = 0;
-	(void)sqlite3_exec(db, "PRAGMA integrity_check;", integ_cb, 0, 0);
+	(void)xsql_exec(db, "PRAGMA integrity_check;", integ_cb, 0, 0);
 	g_rows = -1;
-	(void)sqlite3_exec(db, "SELECT count(*) FROM t;", count_cb, 0, 0);
+	(void)xsql_exec(db, "SELECT count(*) FROM t;", count_cb, 0, 0);
 
-	sqlite3_close(db);
+	xsql_close(db);
 	unlink(path);
 
 	if (!g_integ_ok) {
@@ -214,7 +214,7 @@ vacuum_test(void)
 int
 main(void)
 {
-	sqlite3 *db = NULL;
+	xsql *db = NULL;
 	char *err = NULL;
 	int rc, i, fails = 0;
 	pcache_stats_t s0, s1;
@@ -227,50 +227,50 @@ main(void)
 
 	pcache_get_stats(&s0);
 
-	rc = sqlite3_open(":memory:", &db);
+	rc = xsql_open(":memory:", &db);
 	if (rc != SQLITE_OK) {
 		fprintf(stderr, "FAIL: open :memory:: %s\n",
-		    sqlite3_errmsg(db));
+		    xsql_errmsg(db));
 		return 2;
 	}
 
-	rc = sqlite3_exec(db,
+	rc = xsql_exec(db,
 	    "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);", 0, 0, &err);
 	if (rc != SQLITE_OK) {
 		fprintf(stderr, "FAIL: create: %s\n", err);
-		sqlite3_free(err);
+		xsql_free(err);
 		return 2;
 	}
 
 	/* Enough rows to span many pages (each ~100 B value). */
-	(void)sqlite3_exec(db, "BEGIN;", 0, 0, 0);
+	(void)xsql_exec(db, "BEGIN;", 0, 0, 0);
 	for (i = 1; i <= 5000; i++) {
 		char sql[160];
 		snprintf(sql, sizeof sql,
 		    "INSERT INTO t(a,b) VALUES(%d,"
 		    "'payload-padding-padding-padding-padding-%d');", i, i);
-		rc = sqlite3_exec(db, sql, 0, 0, &err);
+		rc = xsql_exec(db, sql, 0, 0, &err);
 		if (rc != SQLITE_OK) {
 			fprintf(stderr, "FAIL: insert %d: %s\n", i, err);
-			sqlite3_free(err);
+			xsql_free(err);
 			return 2;
 		}
 	}
-	(void)sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+	(void)xsql_exec(db, "COMMIT;", 0, 0, 0);
 
 	/* Repeated scans should hit resident pages. */
 	for (i = 0; i < 5; i++) {
 		g_rows = -1;
-		rc = sqlite3_exec(db, "SELECT count(*) FROM t;",
+		rc = xsql_exec(db, "SELECT count(*) FROM t;",
 		    count_cb, 0, &err);
 		if (rc != SQLITE_OK) {
 			fprintf(stderr, "FAIL: count: %s\n", err);
-			sqlite3_free(err);
+			xsql_free(err);
 			return 2;
 		}
 	}
 
-	sqlite3_close(db);
+	xsql_close(db);
 	pcache_get_stats(&s1);
 
 	if (g_rows != 5000) {

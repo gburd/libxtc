@@ -7,46 +7,51 @@ explicit.
 
 ## What is named in xtc conventions (our code)
 
-Everything we write follows xtc conventions:
+Everything we write follows xtc conventions, and `sqlite3_` no longer
+appears in sqlxtc's own source:
 
   * The application layer (`main.c`, `conn.c`, `db.c`, `quack.c`,
-    `sql_parse.c`, `metrics.c`, `admin.c`) is 100% free of `sqlite3_`
-    -- it speaks only the `sx_` engine facade (`engine.h`).
+    `sql_parse.c`, `metrics.c`, `admin.c`) speaks only the `sx_`
+    engine facade (`engine.h`).
   * The from-scratch engine (`bufmgr.c`, `btnode.c`, `btree.c`,
     `mvcc.c`, `wal.c`, `xstore.c`) uses project naming throughout.
-  * The single SQLite boundary is the `sx_` facade plus the five
-    extension SEAMS (`vfs.c`, `pcache.c`, `mutex.c`, `mem.c`,
-    `xstore.c`).  Those seams must name `sqlite3_*` types and
-    functions because they IMPLEMENT SQLite's documented extension
-    interfaces -- they are callbacks SQLite itself invokes
-    (`sqlite3_module`, `sqlite3_vfs`, `sqlite3_mem_methods`, ...).
-    Their own symbols are xtc-conventioned; only the unavoidable
-    vendored-API calls remain.
+  * The five extension SEAMS (`vfs.c`, `pcache.c`, `mutex.c`, `mem.c`,
+    `xstore.c`) implement SQLite's callback interfaces, so they must
+    name the vendored engine's public API and types -- but they do so
+    under project-native `xsql_*` names, not `sqlite3_*`.  The rename
+    is mechanical and total over the API we use: `xsql.h` maps every
+    `sqlite3_<name>` identifier this example references to `xsql_<name>`
+    (and the bare `sqlite3` handle type to `xsql`).  It is
+    FORCE-INCLUDED (`-include xsql.h`) into both the vendored
+    `sqlite3.c` compile and the seam compiles, so a renamed definition
+    and every reference resolve to the same `xsql_` symbol.  The
+    `#define`s are token-precise, so they touch only the standalone
+    `sqlite3` handle and the `sqlite3_<name>` public identifiers --
+    never the vendored internals (`sqlite3VdbeExec`, ...) and never
+    string literals.
 
 ## What we do NOT rename, and why
 
   * **The vendored `sqlite3.c` / `sqlite3.h` internals** (`Vdbe`,
-    `Btree`, `Parse`, the ~thousands of internal symbols).  Renaming a
-    250k-line vendored amalgamation is high-risk churn (string
-    literals, the build, subtle cross-references) for no benefit:
-    those symbols are encapsulated behind the seams, and AGENTS.md
-    explicitly allows vendored source.  We are also *replacing* this
-    engine (the MVCC + B-tree work), so the symbols are transient.
+    `Btree`, `Parse`, the camel-cased `sqlite3Foo` symbols).  Renaming
+    a 250k-line vendored amalgamation is high-risk churn for no
+    benefit: those symbols are encapsulated, and we are *replacing*
+    this engine.  (The public `sqlite3_*` API IS renamed, but only at
+    the seam boundary via the token map above -- the amalgamation body
+    is untouched apart from that mechanical, force-included rename.)
 
   * **SQL-visible and file-format identifiers**: `sqlite_master` /
     `sqlite_schema`, `sqlite_sequence`, `sqlite_stat1..4`, the
     `"SQLite format 3\000"` header magic, `sqlite_version()`, PRAGMA
     names.  These are part of SQL SEMANTICS and the on-disk FILE
-    FORMAT.  Renaming them would break queries that reference the
-    schema tables, break `ANALYZE`, and make database files
-    unreadable.  They are not ours to rename.
+    FORMAT.  The `xsql.h` map is token-precise and never rewrites
+    string literals, so these are untouched and SQL / on-disk
+    compatibility is preserved.
 
-  * **The `sqlite3_*` public API the seams call.**  These could be
-    aliased to xtc names with a mapping header, but that is cosmetic
-    indirection over the one boundary that, by design, talks to the
-    vendored engine.  It is clearer to leave the boundary visible: a
-    `sqlite3_` call in this tree means "into the vendored engine,"
-    nothing else does.
+  * **The `"sqlite3.h"` include and the `sqlite3.c` filename.**  The
+    vendored file keeps its upstream name (it is a verbatim drop); the
+    seams include it as `"sqlite3.h"` and the symbol map does the
+    rest.
 
 ## The real morph is engine replacement
 
