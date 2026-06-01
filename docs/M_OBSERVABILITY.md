@@ -185,17 +185,52 @@ Built on the existing slot tables under their locks.  This is what an
 admin command ("SHOW PROCESSES" in sqlxtc) or a metrics scraper calls,
 and what the terminal observer (stage 5) renders.
 
-### Stage 3 -- an always-on trace ring + causal token
+### Stage 3 -- a causal trace ring + causal token (PARTIAL: SHIPPED)
 
-A per-loop lock-free ring buffer of fixed-size trace records
-(timestamp, causal stamp, kind, pid, peer, detail), with kinds
-SPAWN/EXIT/SEND/RECV/PARK/RESUME/LINK/MONITOR/LOCK.  Always on (a ring
-write is a few stores; cost is bounded and constant), dumpable via the
-debugger (`xtc-trace`) and the inspection API.  A **causal token**
-(the HLC/ITC stamp from `M_CAUSALITY.md`) rides in the message
-envelope so the trace reconstructs happens-before across procs and
-cores -- libxtc's `seq_trace`.  Filtering + rate limits follow
-`recon`'s rule: tracing must never be the outage.
+The first cut of libxtc's `seq_trace` is shipped (`src/inc/xtc_trace.h`,
+`xtc_trace(3)`): an opt-in, bounded ring of message-passing trace
+records, each stamped with a hybrid logical clock so the causal order
+of one request survives even when the wall-clock arrival order across
+cores does not.
+
+The HLC is a 64-bit stamp -- high 48 bits a monotonic microsecond
+component, low 16 bits a logical counter -- ticked once per traced
+event off a single global clock.  A send's stamp is therefore always
+strictly less than the stamp of the receive it causes, and a RECV
+record also carries the originating send's stamp in its `cause` field:
+the causal edge is explicit, not merely implied by ordering.  This HLC
+token rides in the message envelope, so following `cause` from a
+receive back to its send -- and on to the receive that triggered that
+send -- reconstructs happens-before across procs and cores.  This is
+the libxtc analog of Erlang's trace token.
+
+The surface is small:
+
+  * `xtc_trace_enable(on)` -- turn tracing on/off; returns the previous
+    state.
+  * `xtc_trace_reset()` -- drop the buffered records; returns `XTC_OK`.
+  * `xtc_trace_dump(cb, user)` -- visit the records in causal
+    (HLC-ascending) order; returns the count.  The callback runs after
+    the internal lock is released, so it may call back into libxtc.
+  * `xtc_hlc_now()` -- the current global HLC, for tests and display.
+
+Each record is `{hlc, cause, kind, self, peer, detail}`; the kinds
+SEND/RECV/SPAWN/EXIT are defined, and SEND/RECV are recorded today.
+The same ring is dumpable from the debugger via `xtc-trace`
+(HLC-ordered), so a stopped program or a core dump yields the same
+causal view.
+
+Tracing follows `recon`'s rule that introspection must never become the
+outage, so -- against the original "always on" sketch -- it is OFF by
+default: when disabled it costs a single relaxed atomic load on the
+message hot path, and you enable it to debug a specific problem rather
+than pay for it in production.
+
+Still future: replacing the one global, lock-serialized ring with
+per-loop lock-free rings (so enabled tracing scales without a shared
+write lock); recording the SPAWN/EXIT kinds (and eventually
+PARK/RESUME/LINK/MONITOR/LOCK); and filtering plus rate limits so a
+busy system can trace a scoped slice without flooding the ring.
 
 ### Stage 4 -- fault snapshot + MSVC/IDE polish
 
