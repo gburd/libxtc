@@ -13,6 +13,7 @@
 #     command script import /path/to/libxtc/tools/lldb/xtc_lldb.py
 #
 # Commands:  xtc-loops  xtc-procs  xtc-proc ADDR  xtc-mailbox ADDR  xtc-self
+#            xtc-trace
 #
 # Run it while STOPPED (a breakpoint or attach), so file-static symbols
 # (proc.c's __lt, __current_proc) resolve.  Build with -g.
@@ -20,6 +21,7 @@
 import lldb
 
 TASK_STATE = {0: "SCHEDULED", 1: "RUNNING", 2: "PARKED", 3: "DONE"}
+TRACE_KIND = {0: "SEND", 1: "RECV", 2: "SPAWN", 3: "EXIT"}
 
 
 def _eval(target, expr):
@@ -192,10 +194,53 @@ def xtc_self(debugger, command, result, internal_dict):
     xtc_proc(debugger, "0x%x" % _u(cur), result, internal_dict)
 
 
+def xtc_trace(debugger, command, result, internal_dict):
+    target = debugger.GetSelectedTarget()
+    seq = _eval(target, "__trace_seq")
+    if seq is None:
+        print("no trace ring (built -g? library linked?)", file=result)
+        return
+    hlc = _eval(target, "__g_hlc")
+    if hlc is not None:
+        print("HLC now: %d" % _u(hlc), file=result)
+    seq = _u(seq)
+    if seq == 0:
+        print("no trace events (is tracing enabled? "
+              "xtc_trace_enable(1))", file=result)
+        return
+    ring = _eval(target, "__trace_ring")
+    if ring is None:
+        print("no trace ring (built -g? library linked?)", file=result)
+        return
+    esz = ring.GetType().GetArrayElementType().GetByteSize()
+    cap = ring.GetType().GetByteSize() // esz if esz else 8192
+    n = seq if seq < cap else cap
+    start = seq - n
+    recs = []
+    for i in range(n):
+        r = ring.GetValueForExpressionPath("[%d]" % ((start + i) % cap))
+        recs.append((_u(r.GetChildMemberWithName("hlc")),
+                     _u(r.GetChildMemberWithName("cause")),
+                     r.GetChildMemberWithName("kind").GetValueAsSigned(),
+                     _pid_str(r.GetChildMemberWithName("self")),
+                     _pid_str(r.GetChildMemberWithName("peer")),
+                     _u(r.GetChildMemberWithName("detail"))))
+    recs.sort(key=lambda t: t[0])
+    print("%-20s %-5s %-12s %-12s %s"
+          % ("hlc", "kind", "self", "peer", "cause/detail"), file=result)
+    for hlcv, cause, kind, selfs, peers, detail in recs:
+        ks = TRACE_KIND.get(kind, "?%d" % kind)
+        cs = "  cause=%d" % cause if cause else ""
+        print("HLC%-17d %-5s self=%-11s peer=%-11s%s  detail=%d"
+              % (hlcv, ks, selfs, peers, cs, detail), file=result)
+    print("(%d events)" % n, file=result)
+
+
 def __lldb_init_module(debugger, internal_dict):
     for name, fn in (("xtc-loops", "xtc_loops"), ("xtc-procs", "xtc_procs"),
                      ("xtc-proc", "xtc_proc"), ("xtc-mailbox", "xtc_mailbox"),
-                     ("xtc-self", "xtc_self")):
+                     ("xtc-self", "xtc_self"), ("xtc-trace", "xtc_trace")):
         debugger.HandleCommand("command script add -f %s.%s %s"
                                % (__name__, fn, name))
-    print("xtc-lldb loaded: xtc-loops, xtc-procs, xtc-proc, xtc-mailbox, xtc-self")
+    print("xtc-lldb loaded: xtc-loops, xtc-procs, xtc-proc, xtc-mailbox, "
+          "xtc-self, xtc-trace")

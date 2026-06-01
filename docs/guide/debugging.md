@@ -100,6 +100,74 @@ rate-limits the producer to the consumer's pace), or shed load at a
 watermark.  In production, the same depth is visible without a debugger
 via the inspection API / `xtc_stats` counters.
 
+## Recipe: tracing what caused what (causal message trace)
+
+Symptom: a request misbehaves and the cause is spread across several
+procs -- you can see the symptom in one mailbox but not which message,
+from which proc, set it off.  This is the hardest class of bug in a
+message-passing system: "who sent this, and what caused that."
+
+libxtc's `seq_trace` answers it.  It is an opt-in, bounded ring of
+send/receive events, each stamped with a hybrid logical clock (HLC) so
+the causal order survives even when the wall-clock order the records
+arrived in lies.  It is OFF by default and costs a single relaxed
+atomic load on the message hot path when disabled, so you turn it on
+for a specific investigation and off again -- it is not an always-on
+tax.
+
+From inside the program, enable it, run the suspect workload, and dump
+the records in causal order (`xtc_trace(3)`):
+
+    int was_on = xtc_trace_enable(1);   /* opt in */
+    xtc_trace_reset();                  /* start from a clean ring */
+    run_suspect_workload();
+
+    static int on_rec(const xtc_trace_rec_t *r, void *u) {
+        (void)u;
+        printf("HLC=%llu kind=%d self=%llu peer=%llu cause=%llu\n",
+               (unsigned long long)r->hlc, r->kind,
+               (unsigned long long)r->self,
+               (unsigned long long)r->peer,
+               (unsigned long long)r->cause);
+        return 0;                       /* 0 = keep going */
+    }
+    xtc_trace_dump(on_rec, NULL);       /* visits in HLC-ascending order */
+    if (!was_on)
+        xtc_trace_enable(0);            /* stop paying for it */
+
+From a stopped program or a core dump, the same ring is in the
+debugger:
+
+    (gdb) xtc-trace
+    HLC now: 1700000042
+    hlc          kind  self         peer         cause/detail
+    HLC100       SEND  self=0x..a   peer=0x..b               detail=64
+    HLC205       RECV  self=0x..b   peer=0x..a   cause=100    detail=64
+    HLC206       SEND  self=0x..b   peer=0x..c               detail=16
+    HLC310       RECV  self=0x..c   peer=0x..b   cause=206    detail=16
+    (4 events)
+
+Read it by following the `cause` edges.  A RECV's `cause` is the HLC of
+the SEND that produced the message it received, so a RECV with
+`cause=100` is the delivery of the SEND stamped `HLC100`.  Chain them:
+proc A sends (HLC100), proc B receives it (cause=100) and in turn sends
+to C (HLC206), C receives that (cause=206).  That chain is the path of
+one request as it fanned out across A, B, and C -- the trail you could
+not see in any single mailbox.
+
+The HLC order is the truth.  A single global clock ticks once per
+traced event (its high 48 bits are microseconds, its low 16 a logical
+counter), so a send's stamp is always strictly less than the stamp of
+the receive it causes.  When two cores disagree about which message
+landed first -- because wall-clock arrival across threads is not a
+reliable order -- sort by HLC and the happens-before is restored.
+Both `xtc_trace_dump` and `xtc-trace` already present the records in
+HLC-ascending order for exactly this reason.
+
+The ring is bounded and overwrites its oldest records when full, so if
+the interesting events scroll off, narrow the window: `xtc_trace_reset`
+immediately before the action, and dump immediately after.
+
 ## Recipe: a leak
 
 libxtc can attribute live allocations to the proc that made them.  In
@@ -199,8 +267,10 @@ proc mutates those lists lock-free, so a cross-thread walk would race);
 for that you still need the debugger's `xtc-proc`, which runs against a
 stopped program.  See `xtc_inspect(3)`.
 
-The roadmap to a live `xtc-top` and an always-on trace ring (libxtc's
-`seq_trace`) is in `docs/M_OBSERVABILITY.md`.
+The causal message trace (libxtc's `seq_trace`) is shipped and opt-in;
+see the recipe above and `xtc_trace(3)`.  The roadmap to a live
+`xtc-top` and to per-loop lock-free trace rings is in
+`docs/M_OBSERVABILITY.md`.
 
 ## When you file a libxtc bug
 
