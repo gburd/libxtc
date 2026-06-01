@@ -22,7 +22,7 @@
 #define XTC_VERSION_MAJOR  0
 #define XTC_VERSION_MINOR  4
 #define XTC_VERSION_PATCH  0
-#define XTC_VERSION_STRING "0.4.0"
+#define XTC_VERSION_STRING "0.5.0"
 
 /* Completion-based I/O backend for Windows. */
 #define XTC_IO_BACKEND_IOCP 1
