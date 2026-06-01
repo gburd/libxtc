@@ -1004,9 +1004,33 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			link = &e->next;
 		}
 
+		/* Register the waker struct before the final drain so we can
+		 * arm it UNDER the same lock that confirms the mailbox empty. */
+		(void)xtc_task_waker(self->task, &self->recv_waker);
+
 		/* Pull from mailbox; for each, match or move to save. */
 		(void)pthread_mutex_lock(&self->mbox_lock);
-		while ((e = __mbox_pop_locked(self)) != NULL) {
+		for (;;) {
+			e = __mbox_pop_locked(self);
+			if (e == NULL) {
+				/*
+				 * Mailbox empty.  If we are about to park, arm the
+				 * waker HERE, under the same lock that confirmed
+				 * empty.  A sender delivering after this point takes
+				 * mbox_lock, sees waker_armed, and wakes us.  Arming
+				 * AFTER releasing the lock (as before) left a window
+				 * in which a cross-thread sender pushed a message and
+				 * saw waker_armed == 0, firing no waker -- the
+				 * receiver then parked on an already-delivered
+				 * message and stalled to its timeout.  Benign on a
+				 * single loop (no concurrent sender in the gap),
+				 * fatal to throughput across loops.
+				 */
+				if (timeout_ns != 0)
+					self->waker_armed = 1;
+				(void)pthread_mutex_unlock(&self->mbox_lock);
+				break;
+			}
 			(void)pthread_mutex_unlock(&self->mbox_lock);
 			if (match(e->data, e->size, u))
 				goto deliver;
@@ -1018,7 +1042,6 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			    memory_order_relaxed);
 			(void)pthread_mutex_lock(&self->mbox_lock);
 		}
-		(void)pthread_mutex_unlock(&self->mbox_lock);
 
 		/* Update recv_mark: everything in save_queue has now been
 		 * tested against this predicate.  Next call with the same
@@ -1027,12 +1050,6 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 
 		/* Nothing to deliver.  Check timeout. */
 		if (timeout_ns == 0) return XTC_E_AGAIN;
-
-		/* Park: register waker, yield, retry. */
-		(void)xtc_task_waker(self->task, &self->recv_waker);
-		(void)pthread_mutex_lock(&self->mbox_lock);
-		self->waker_armed = 1;
-		(void)pthread_mutex_unlock(&self->mbox_lock);
 
 		if (deadline >= 0) {
 			int64_t now;
