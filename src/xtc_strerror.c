@@ -32,6 +32,7 @@ xtc_strerror(int e)
 	case XTC_E_DEADLK:	return "deadlock victim";
 	case XTC_E_VERSION:	return "version mismatch";
 	case XTC_E_ABORTED:	return "operation aborted";
+	case XTC_E_NOTFOUND:	return "requested item does not exist";
 	}
 	return "unknown";
 }

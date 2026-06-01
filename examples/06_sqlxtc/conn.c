@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "admin.h"
 #include "conn.h"
 #include "quack.h"
 #include "sql_parse.h"
@@ -39,6 +40,24 @@ extern xtc_hist_t    *sqlxtc_stat_query_latency;
 /* Local helper: __os_clock_mono uses an out-param. */
 static inline int64_t xtc_now_ns(void) {
 	int64_t t; (void)__os_clock_mono(&t); return t;
+}
+
+/* Case-insensitive match of the SQL text -- trimmed of leading and
+ * trailing spaces -- against an admin keyword.  Used to intercept
+ * admin commands (e.g. "SHOW PROCESSES") before the SQL engine. */
+static int
+sql_text_is(const char *q, size_t n, const char *kw)
+{
+	size_t i = 0, j = n, k, klen = strlen(kw);
+	while (i < j && q[i] == ' ') i++;
+	while (j > i && q[j - 1] == ' ') j--;
+	if (j - i != klen) return 0;
+	for (k = 0; k < klen; k++) {
+		char c = q[i + k];
+		if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+		if (c != kw[k]) return 0;
+	}
+	return 1;
 }
 
 #define SQLXTC_VERSION "0.1"
@@ -220,6 +239,13 @@ process_lines(conn_state_t *st)
 			st->quit = 1;
 			break;
 		case QUACK_MSG_QUERY:
+			/* Admin command: SHOW PROCESSES bypasses the DB
+			 * query path entirely. */
+			if (sql_text_is(msg.q, msg.q_len,
+			                "SHOW PROCESSES")) {
+				admin_show_processes(&st->wbuf);
+				break;
+			}
 			/* Rate limit */
 			if (st->iops_cap > 0 && st->iops_tokens) {
 				int64_t t = __os_atomic_load_i64(st->iops_tokens);

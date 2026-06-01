@@ -19,6 +19,7 @@
 #include "coro_int.h"
 #include "xtc_tailcall.h"
 #include "xtc_slab.h"
+#include "xtc_inspect.h"
 #include "xtc_slab.h"
 #include "xtc_mctx.h"
 #include <stdio.h>
@@ -1687,4 +1688,171 @@ __notify_links_and_monitors(struct xtc_proc *p)
 	}
 	(void)pthread_mutex_destroy(&p->mbox_lock);
 	__os_free(p);
+}
+
+/* ---------- live introspection (xtc_inspect.h) ---------- */
+
+/*
+ * Fill *info from a proc.  Called with no lock held by the caller; we
+ * take the proc's mbox_lock for the mailbox counters (consistent with
+ * push/pop, which hold it).  The run state is sampled from the task
+ * without a lock -- a best-effort snapshot, as documented.  Link and
+ * monitor lists are deliberately not traversed (the owner mutates them
+ * lock-free; a cross-thread walk would race).
+ */
+static void
+__fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
+{
+	memset(info, 0, sizeof *info);
+	info->pid = p->pid;
+	info->alive = p->alive;
+	info->kill_pending =
+	    atomic_load_explicit(&p->kill_pending, memory_order_relaxed) ? 1 : 0;
+	if (p->task != NULL) {
+		int st = p->task->state;
+		info->run_state = st;
+		if (st == XTC_TS_PARKED) {
+			if (p->task->park_fd >= 0)
+				info->park_reason = XTC_PARK_FD;
+			else if (p->task->park_timer != NULL)
+				info->park_reason = XTC_PARK_TIMER;
+			else if (p->task->park_requested)
+				info->park_reason = XTC_PARK_MAILBOX;
+		}
+	}
+	(void)pthread_mutex_lock(&p->mbox_lock);
+	info->mbox_len = p->mbox_n;
+	info->mbox_peak = p->mbox_peak;
+	info->mbox_cap = p->mbox_cap;
+	info->mbox_recv_total = p->mbox_recv_total;
+	info->mbox_drop_total = p->mbox_drop_total;
+	(void)pthread_mutex_unlock(&p->mbox_lock);
+	info->mbox_saved =
+	    atomic_load_explicit(&p->mbox_saved, memory_order_relaxed);
+}
+
+int
+xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user)
+{
+	xtc_proc_info_t *buf = NULL;
+	size_t n = 0, cap = 0;
+	int i, rc = XTC_OK;
+
+	if (cb == NULL)
+		return XTC_E_INVAL;
+
+	/*
+	 * Hold __lt_lock for the whole collection: it serializes against
+	 * loop registration and table teardown (loop_fini), so no table
+	 * is freed mid-walk.  Under it we take each table's lock; a
+	 * non-NULL slot is a proc that has not reached __table_release
+	 * (which needs that same lock), hence not yet freed.  We copy
+	 * into a buffer and invoke the callback only AFTER every lock is
+	 * dropped, so the callback may call back into the proc/loop APIs.
+	 */
+	(void)pthread_mutex_lock(&__lt_lock);
+	for (i = 0; i < LOOP_TABLE_MAX; i++) {
+		struct xtc_proc_table *tbl = __lt[i].tbl;
+		size_t s;
+		if (__lt[i].loop == NULL || tbl == NULL)
+			continue;
+		(void)pthread_mutex_lock(&tbl->lock);
+		for (s = 0; s < tbl->cap; s++) {
+			struct xtc_proc *p = tbl->slots[s].proc;
+			if (p == NULL)
+				continue;
+			if (n == cap) {
+				size_t ncap = cap ? cap * 2 : 32;
+				xtc_proc_info_t *nb;
+				if (__os_realloc(buf, ncap * sizeof *nb,
+				    (void **)&nb) != XTC_OK) {
+					(void)pthread_mutex_unlock(&tbl->lock);
+					(void)pthread_mutex_unlock(&__lt_lock);
+					__os_free(buf);
+					return XTC_E_NOMEM;
+				}
+				buf = nb;
+				cap = ncap;
+			}
+			__fill_proc_info(p, &buf[n]);
+			n++;
+		}
+		(void)pthread_mutex_unlock(&tbl->lock);
+	}
+	(void)pthread_mutex_unlock(&__lt_lock);
+
+	for (i = 0; (size_t)i < n; i++)
+		if (cb(&buf[i], user) != 0)
+			break;
+	__os_free(buf);
+	(void)rc;
+	return (int)n;
+}
+
+int
+xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
+{
+	xtc_loop_info_t infos[LOOP_TABLE_MAX];
+	int n = 0, i;
+
+	if (cb == NULL)
+		return XTC_E_INVAL;
+
+	(void)pthread_mutex_lock(&__lt_lock);
+	for (i = 0; i < LOOP_TABLE_MAX; i++) {
+		struct xtc_proc_table *tbl = __lt[i].tbl;
+		xtc_loop_t *loop = __lt[i].loop;
+		size_t s, procs = 0;
+		if (loop == NULL || tbl == NULL)
+			continue;
+		(void)pthread_mutex_lock(&tbl->lock);
+		for (s = 0; s < tbl->cap; s++)
+			if (tbl->slots[s].proc != NULL)
+				procs++;
+		(void)pthread_mutex_unlock(&tbl->lock);
+		infos[n].loop_id = loop->exec_id < 0 ? 0 : loop->exec_id + 1;
+		infos[n].n_procs = (int)procs;
+		infos[n].n_alive =
+		    atomic_load_explicit(&loop->n_alive, memory_order_relaxed);
+		infos[n].tasks_run =
+		    atomic_load_explicit(&loop->n_tasks_run, memory_order_relaxed);
+		infos[n].steals =
+		    atomic_load_explicit(&loop->n_steals, memory_order_relaxed);
+		n++;
+	}
+	(void)pthread_mutex_unlock(&__lt_lock);
+
+	for (i = 0; i < n; i++)
+		if (cb(&infos[i], user) != 0)
+			break;
+	return n;
+}
+
+int
+xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
+{
+	int i, found = 0;
+
+	if (out == NULL)
+		return XTC_E_INVAL;
+
+	(void)pthread_mutex_lock(&__lt_lock);
+	for (i = 0; i < LOOP_TABLE_MAX && !found; i++) {
+		struct xtc_proc_table *tbl = __lt[i].tbl;
+		size_t s;
+		if (__lt[i].loop == NULL || tbl == NULL)
+			continue;
+		(void)pthread_mutex_lock(&tbl->lock);
+		for (s = 0; s < tbl->cap; s++) {
+			struct xtc_proc *p = tbl->slots[s].proc;
+			if (p != NULL && xtc_pid_eq(p->pid, pid)) {
+				__fill_proc_info(p, out);
+				found = 1;
+				break;
+			}
+		}
+		(void)pthread_mutex_unlock(&tbl->lock);
+	}
+	(void)pthread_mutex_unlock(&__lt_lock);
+	return found ? XTC_OK : XTC_E_NOTFOUND;
 }
