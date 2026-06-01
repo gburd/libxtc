@@ -15,6 +15,23 @@ sufficient.
 
 ## SQL-on-our-storage integration (xstore.c)
 
+### CONFIRMED + FIXED: a storage latch must not span the SQLite vtable boundary
+
+Adding MVCC versions exposed a self-deadlock.  SQLite runs
+`UPDATE/DELETE ... WHERE` by keeping its read cursor open and calling
+`xUpdate` BETWEEN `xNext` calls.  The first MVCC xstore cursor held a
+btree page shared latch across that boundary, so the `xUpdate`'s
+`bt_insert` (which wants the exclusive latch on the same page) blocked
+on the shared latch held by the same thread's open cursor -- a
+single-thread self-deadlock.  (The single-version code used `bt_lookup`
+for point reads, which holds no latch, so it never hit this.)  Fixed:
+the vtable cursor holds NO storage latch between calls -- each
+`xFilter`/`xNext` opens a short-lived btree cursor, copies the row out,
+and closes it, resuming by key.  The lesson generalizes: any storage
+engine under SQLite's VDBE must release its internal latches before
+returning to the VDBE, because the VDBE may write through an open read
+cursor.
+
 ### FIXED: cross-loop lost-wakeup race (the big one)
 
 The `bench/sqlxtc` MVCC load generator immediately exposed a

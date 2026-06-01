@@ -185,11 +185,104 @@ scenario_onloop(void)
 	return g_loop_rc || g_fail;
 }
 
+/* ---- MVCC snapshot visibility: a read at an old snapshot does not
+ * see a newer committed write (PostgreSQL-style version visibility,
+ * surfaced as a SQL AS-OF read via xstore_as_of). ---- */
+static int
+sel_v(sqlite3 *db, int64_t k, char *out, size_t cap)
+{
+	sqlite3_stmt *st = NULL;
+	int got = 0;
+	if (sqlite3_prepare_v2(db, "SELECT v FROM t WHERE k=?", -1, &st, 0)
+	    != SQLITE_OK)
+		return -1;
+	sqlite3_bind_int64(st, 1, k);
+	if (sqlite3_step(st) == SQLITE_ROW) {
+		const unsigned char *t = sqlite3_column_text(st, 0);
+		size_t n = (size_t)sqlite3_column_bytes(st, 0);
+		if (n >= cap) n = cap - 1;
+		if (t) memcpy(out, t, n);
+		out[n] = '\0';
+		got = 1;
+	}
+	sqlite3_finalize(st);
+	return got;
+}
+static void
+set_as_of(sqlite3 *db, int64_t ts)
+{
+	sqlite3_stmt *st = NULL;
+	if (sqlite3_prepare_v2(db, "SELECT xstore_as_of(?)", -1, &st, 0)
+	    != SQLITE_OK) return;
+	sqlite3_bind_int64(st, 1, ts);
+	(void)sqlite3_step(st);
+	sqlite3_finalize(st);
+}
+
+static int
+scenario_mvcc(void)
+{
+	bm_t *bm = NULL;
+	bt_t *bt = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-xstore3-XXXXXX";
+	sqlite3 *db = NULL;
+	sqlite3_stmt *st = NULL;
+	int64_t ts_mid = 0;
+	char b[32];
+	int fd;
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = 64; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(sqlite3_open(":memory:", &db) == SQLITE_OK);
+	CK(xstore_register(db, bt) == SQLITE_OK);
+	CK(sqlite3_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0)
+	    == SQLITE_OK);
+
+	CK(sqlite3_exec(db, "INSERT INTO t(k,v) VALUES(1,'aaa');", 0, 0, 0)
+	    == SQLITE_OK);
+	/* Capture a snapshot between the insert and the update. */
+	CK(sqlite3_prepare_v2(db, "SELECT xstore_now()", -1, &st, 0) == SQLITE_OK);
+	CK(sqlite3_step(st) == SQLITE_ROW);
+	ts_mid = sqlite3_column_int64(st, 0);
+	sqlite3_finalize(st); st = NULL;
+	CK(sqlite3_exec(db, "UPDATE t SET v='bbb' WHERE k=1;", 0, 0, 0)
+	    == SQLITE_OK);
+
+	/* Latest snapshot sees the new value. */
+	set_as_of(db, 0);
+	CK(sel_v(db, 1, b, sizeof b) == 1 && strcmp(b, "bbb") == 0);
+	/* The captured snapshot still sees the OLD value -- MVCC visibility. */
+	set_as_of(db, ts_mid);
+	CK(sel_v(db, 1, b, sizeof b) == 1 && strcmp(b, "aaa") == 0);
+
+	/* Delete at latest; the old snapshot is unaffected (delete is in
+	 * its future). */
+	set_as_of(db, 0);
+	CK(sqlite3_exec(db, "DELETE FROM t WHERE k=1;", 0, 0, 0) == SQLITE_OK);
+	CK(sel_v(db, 1, b, sizeof b) == 0);                  /* gone at latest */
+	set_as_of(db, ts_mid);
+	CK(sel_v(db, 1, b, sizeof b) == 1 && strcmp(b, "aaa") == 0);
+
+	sqlite3_close(db);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   MVCC snapshot visibility: an AS-OF read at an old "
+	    "snapshot sees the pre-update value; latest sees the new one; "
+	    "a delete is invisible to the old snapshot\n");
+	return 0;
+}
+
 int
 main(void)
 {
 	if (scenario_offloop() != 0) return 1;
 	if (scenario_onloop() != 0) return 1;
+	if (scenario_mvcc() != 0) return 1;
 	printf("All sqlxtc SQL-on-xstore tests passed.\n");
 	return 0;
 }
