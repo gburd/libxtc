@@ -33,7 +33,7 @@
 /*
  * Register the "sqlxtc" VFS.  Idempotent: a second call is a no-op.
  * If make_default is non-zero the xtc VFS becomes the default, so
- * sqlite3_open() uses it without an explicit vfs name.  Returns
+ * xsql_open() uses it without an explicit vfs name.  Returns
  * SQLITE_OK on success.
  */
 int vfs_register(int make_default);

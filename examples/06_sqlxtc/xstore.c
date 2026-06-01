@@ -170,16 +170,16 @@ dec_ts(const uint8_t *k)
 
 /* ---- vtab + cursor ---- */
 typedef struct xstore_vtab {
-	sqlite3_vtab base;
+	xsql_vtab base;
 	xstore_ctx_t *ctx;
-	sqlite3      *db;     /* for sqlite3_get_autocommit: detect explicit txn */
+	xsql      *db;     /* for xsql_get_autocommit: detect explicit txn */
 } xstore_vtab_t;
 
 /*
  * Enter the SQL transaction on first vtab access.  SQLite fires xBegin
  * at the first WRITE, not the first read, so reads before the first
  * write would otherwise miss the transaction (and the read set, and
- * the start snapshot).  sqlite3_get_autocommit() == 0 means an explicit
+ * the start snapshot).  xsql_get_autocommit() == 0 means an explicit
  * BEGIN..COMMIT is open; capture the snapshot and open the
  * buffer/read-set on the first access within it.  Autocommit
  * single-statement work leaves in_txn == 0 (immediate write, latest
@@ -189,7 +189,7 @@ static void
 xs_enter(xstore_vtab_t *v)
 {
 	xstore_ctx_t *cx = v->ctx;
-	if (!sqlite3_get_autocommit(v->db) && !cx->in_txn) {
+	if (!xsql_get_autocommit(v->db) && !cx->in_txn) {
 		cx->in_txn = 1;
 		cx->txn_snap = atomic_load_explicit(&g_xclock, memory_order_relaxed);
 		wbuf_clear(cx);
@@ -199,7 +199,7 @@ xs_enter(xstore_vtab_t *v)
 }
 
 typedef struct xstore_cursor {
-	sqlite3_vtab_cursor base;
+	xsql_vtab_cursor base;
 	bt_t        *bt;
 	xstore_ctx_t *ctx;
 	uint64_t     snap;          /* the read snapshot for this scan */
@@ -226,20 +226,20 @@ typedef struct xstore_cursor {
  * (see bench/sqlxtc/PERF_IDEAS.md).
  */
 
-static const sqlite3_module xstore_module;   /* fwd */
+static const xsql_module xstore_module;   /* fwd */
 
 static int
-xs_connect(sqlite3 *db, void *pAux, int argc, const char *const *argv,
-    sqlite3_vtab **ppv, char **pzErr)
+xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
+    xsql_vtab **ppv, char **pzErr)
 {
 	xstore_vtab_t *v;
 	int rc;
 	(void)argc; (void)argv; (void)pzErr;
 
-	rc = sqlite3_declare_vtab(db, "CREATE TABLE x(k INTEGER PRIMARY KEY, v)");
+	rc = xsql_declare_vtab(db, "CREATE TABLE x(k INTEGER PRIMARY KEY, v)");
 	if (rc != SQLITE_OK)
 		return rc;
-	v = sqlite3_malloc(sizeof *v);
+	v = xsql_malloc(sizeof *v);
 	if (v == NULL)
 		return SQLITE_NOMEM;
 	memset(v, 0, sizeof *v);
@@ -250,14 +250,14 @@ xs_connect(sqlite3 *db, void *pAux, int argc, const char *const *argv,
 }
 
 static int
-xs_disconnect(sqlite3_vtab *pv)
+xs_disconnect(xsql_vtab *pv)
 {
-	sqlite3_free(pv);
+	xsql_free(pv);
 	return SQLITE_OK;
 }
 
 static int
-xs_best_index(sqlite3_vtab *pv, sqlite3_index_info *info)
+xs_best_index(xsql_vtab *pv, xsql_index_info *info)
 {
 	int i;
 	(void)pv;
@@ -279,10 +279,10 @@ xs_best_index(sqlite3_vtab *pv, sqlite3_index_info *info)
 }
 
 static int
-xs_open(sqlite3_vtab *pv, sqlite3_vtab_cursor **ppc)
+xs_open(xsql_vtab *pv, xsql_vtab_cursor **ppc)
 {
 	xstore_vtab_t *v = (xstore_vtab_t *)pv;
-	xstore_cursor_t *c = sqlite3_malloc(sizeof *c);
+	xstore_cursor_t *c = xsql_malloc(sizeof *c);
 	if (c == NULL)
 		return SQLITE_NOMEM;
 	memset(c, 0, sizeof *c);
@@ -294,9 +294,9 @@ xs_open(sqlite3_vtab *pv, sqlite3_vtab_cursor **ppc)
 }
 
 static int
-xs_close(sqlite3_vtab_cursor *pc)
+xs_close(xsql_vtab_cursor *pc)
 {
-	sqlite3_free(pc);          /* no latch/cursor held between calls */
+	xsql_free(pc);          /* no latch/cursor held between calls */
 	return SQLITE_OK;
 }
 
@@ -357,8 +357,8 @@ xs_advance(xstore_cursor_t *c)
 }
 
 static int
-xs_filter(sqlite3_vtab_cursor *pc, int idxNum, const char *idxStr,
-    int argc, sqlite3_value **argv)
+xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
+    int argc, xsql_value **argv)
 {
 	xstore_cursor_t *c = (xstore_cursor_t *)pc;
 	xstore_vtab_t *v = (xstore_vtab_t *)pc->pVtab;
@@ -382,7 +382,7 @@ xs_filter(sqlite3_vtab_cursor *pc, int idxNum, const char *idxStr,
 		uint8_t startk[XS_VKLEN];
 		const void *k = NULL, *vv = NULL;
 		uint16_t klen = 0, vl = 0;
-		int64_t want = sqlite3_value_int64(argv[0]);
+		int64_t want = xsql_value_int64(argv[0]);
 		c->point = 1;
 		if (v->ctx->in_txn && v->ctx->serializable)
 			rset_add(v->ctx, want);   /* read set for serializable validation */
@@ -419,7 +419,7 @@ xs_filter(sqlite3_vtab_cursor *pc, int idxNum, const char *idxStr,
 }
 
 static int
-xs_next(sqlite3_vtab_cursor *pc)
+xs_next(xsql_vtab_cursor *pc)
 {
 	xstore_cursor_t *c = (xstore_cursor_t *)pc;
 	if (c->point) { c->eof = 1; return SQLITE_OK; }
@@ -428,24 +428,24 @@ xs_next(sqlite3_vtab_cursor *pc)
 }
 
 static int
-xs_eof(sqlite3_vtab_cursor *pc)
+xs_eof(xsql_vtab_cursor *pc)
 {
 	return ((xstore_cursor_t *)pc)->eof;
 }
 
 static int
-xs_column(sqlite3_vtab_cursor *pc, sqlite3_context *ctx, int i)
+xs_column(xsql_vtab_cursor *pc, xsql_context *ctx, int i)
 {
 	xstore_cursor_t *c = (xstore_cursor_t *)pc;
 	if (i == 0)
-		sqlite3_result_int64(ctx, c->rowid);
+		xsql_result_int64(ctx, c->rowid);
 	else
-		sqlite3_result_blob(ctx, c->val, c->vlen, SQLITE_TRANSIENT);
+		xsql_result_blob(ctx, c->val, c->vlen, SQLITE_TRANSIENT);
 	return SQLITE_OK;
 }
 
 static int
-xs_rowid(sqlite3_vtab_cursor *pc, sqlite3_int64 *pRowid)
+xs_rowid(xsql_vtab_cursor *pc, xsql_int64 *pRowid)
 {
 	*pRowid = ((xstore_cursor_t *)pc)->rowid;
 	return SQLITE_OK;
@@ -491,8 +491,8 @@ xs_newest_ts(bt_t *bt, int64_t rowid)
 }
 
 static int
-xs_update(sqlite3_vtab *pv, int argc, sqlite3_value **argv,
-    sqlite3_int64 *pRowid)
+xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
+    xsql_int64 *pRowid)
 {
 	xstore_vtab_t *v = (xstore_vtab_t *)pv;
 	xstore_ctx_t *cx = v->ctx;
@@ -506,21 +506,21 @@ xs_update(sqlite3_vtab *pv, int argc, sqlite3_value **argv,
 	 * here.  (Fallback: if no transaction is open, apply immediately.)
 	 */
 	if (argc == 1) {
-		int64_t rid = sqlite3_value_int64(argv[0]);   /* DELETE */
+		int64_t rid = xsql_value_int64(argv[0]);   /* DELETE */
 		if (cx->in_txn)
 			return wbuf_add(cx, rid, NULL, 0, 1);
 		return xs_put(cx->bt, rid, NULL, 0, 1);
 	}
 	{
-		int64_t rowid = (sqlite3_value_type(argv[1]) == SQLITE_NULL)
-		    ? sqlite3_value_int64(argv[2])
-		    : sqlite3_value_int64(argv[1]);
-		const void *blob = sqlite3_value_blob(argv[3]);
-		int n = sqlite3_value_bytes(argv[3]);
+		int64_t rowid = (xsql_value_type(argv[1]) == SQLITE_NULL)
+		    ? xsql_value_int64(argv[2])
+		    : xsql_value_int64(argv[1]);
+		const void *blob = xsql_value_blob(argv[3]);
+		int n = xsql_value_bytes(argv[3]);
 
 		/* An UPDATE that moves the rowid tombstones the old one. */
-		if (sqlite3_value_type(argv[0]) != SQLITE_NULL) {
-			int64_t oldid = sqlite3_value_int64(argv[0]);
+		if (xsql_value_type(argv[0]) != SQLITE_NULL) {
+			int64_t oldid = xsql_value_int64(argv[0]);
 			if (oldid != rowid) {
 				if (cx->in_txn) (void)wbuf_add(cx, oldid, NULL, 0, 1);
 				else (void)xs_put(cx->bt, oldid, NULL, 0, 1);
@@ -541,13 +541,13 @@ xs_update(sqlite3_vtab *pv, int argc, sqlite3_value **argv,
  * mvcc.c's stage-then-commit, applied to the B-tree-backed store.
  */
 static int
-xs_begin(sqlite3_vtab *pv)
+xs_begin(xsql_vtab *pv)
 {
 	xs_enter((xstore_vtab_t *)pv);
 	return SQLITE_OK;
 }
 static int
-xs_sync(sqlite3_vtab *pv)
+xs_sync(xsql_vtab *pv)
 {
 	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
 	if (!cx->in_txn || !cx->serializable)
@@ -577,7 +577,7 @@ xs_sync(sqlite3_vtab *pv)
 }
 
 static int
-xs_commit(sqlite3_vtab *pv)
+xs_commit(xsql_vtab *pv)
 {
 	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
 	uint64_t ts;
@@ -604,7 +604,7 @@ xs_commit(sqlite3_vtab *pv)
 	return rc;
 }
 static int
-xs_rollback(sqlite3_vtab *pv)
+xs_rollback(xsql_vtab *pv)
 {
 	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
 	wbuf_clear(cx);
@@ -615,35 +615,35 @@ xs_rollback(sqlite3_vtab *pv)
 /* SQL functions: xstore_now() -> current clock; xstore_as_of(ts) pins
  * this connection's read snapshot (0 = latest) and returns it. */
 static void
-fn_now(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+fn_now(xsql_context *ctx, int argc, xsql_value **argv)
 {
 	(void)argc; (void)argv;
-	sqlite3_result_int64(ctx,
-	    (sqlite3_int64)atomic_load_explicit(&g_xclock, memory_order_relaxed));
+	xsql_result_int64(ctx,
+	    (xsql_int64)atomic_load_explicit(&g_xclock, memory_order_relaxed));
 }
 static void
-fn_as_of(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+fn_as_of(xsql_context *ctx, int argc, xsql_value **argv)
 {
-	xstore_ctx_t *c = (xstore_ctx_t *)sqlite3_user_data(ctx);
-	int64_t ts = (argc >= 1) ? sqlite3_value_int64(argv[0]) : 0;
+	xstore_ctx_t *c = (xstore_ctx_t *)xsql_user_data(ctx);
+	int64_t ts = (argc >= 1) ? xsql_value_int64(argv[0]) : 0;
 	if (ts < 0) ts = 0;
 	atomic_store_explicit(&c->read_snap, (uint64_t)ts, memory_order_relaxed);
-	sqlite3_result_int64(ctx, ts);
+	xsql_result_int64(ctx, ts);
 }
 /* xstore_serializable(on): set this connection's isolation to
  * serializable (on != 0) or snapshot isolation (0).  Returns the new
  * setting.  Serializable validates the transaction's read set at
  * commit and aborts (SQLITE_BUSY) on a read-write conflict. */
 static void
-fn_serializable(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+fn_serializable(xsql_context *ctx, int argc, xsql_value **argv)
 {
-	xstore_ctx_t *c = (xstore_ctx_t *)sqlite3_user_data(ctx);
-	int on = (argc >= 1) ? (sqlite3_value_int(argv[0]) != 0) : 1;
+	xstore_ctx_t *c = (xstore_ctx_t *)xsql_user_data(ctx);
+	int on = (argc >= 1) ? (xsql_value_int(argv[0]) != 0) : 1;
 	c->serializable = on;
-	sqlite3_result_int(ctx, on);
+	xsql_result_int(ctx, on);
 }
 
-static const sqlite3_module xstore_module = {
+static const xsql_module xstore_module = {
 	.iVersion    = 1,
 	.xCreate     = xs_connect,
 	.xConnect    = xs_connect,
@@ -669,13 +669,13 @@ ctx_free(void *p)
 {
 	xstore_ctx_t *cx = p;
 	if (cx != NULL) { wbuf_clear(cx); free(cx->wbuf); free(cx->rset); }
-	sqlite3_free(p);
+	xsql_free(p);
 }
 
 int
-xstore_register(sqlite3 *db, bt_t *bt)
+xstore_register(xsql *db, bt_t *bt)
 {
-	xstore_ctx_t *ctx = sqlite3_malloc(sizeof *ctx);
+	xstore_ctx_t *ctx = xsql_malloc(sizeof *ctx);
 	int rc;
 	if (ctx == NULL)
 		return SQLITE_NOMEM;
@@ -689,14 +689,14 @@ xstore_register(sqlite3 *db, bt_t *bt)
 	ctx->rset = NULL;
 	ctx->rn = ctx->rcap = 0;
 	ctx->did_scan = 0;
-	rc = sqlite3_create_module_v2(db, "xstore", &xstore_module, ctx, ctx_free);
+	rc = xsql_create_module_v2(db, "xstore", &xstore_module, ctx, ctx_free);
 	if (rc != SQLITE_OK)
 		return rc;
-	(void)sqlite3_create_function(db, "xstore_now", 0,
+	(void)xsql_create_function(db, "xstore_now", 0,
 	    SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, fn_now, NULL, NULL);
-	(void)sqlite3_create_function(db, "xstore_as_of", 1, SQLITE_UTF8,
+	(void)xsql_create_function(db, "xstore_as_of", 1, SQLITE_UTF8,
 	    ctx, fn_as_of, NULL, NULL);
-	(void)sqlite3_create_function(db, "xstore_serializable", 1, SQLITE_UTF8,
+	(void)xsql_create_function(db, "xstore_serializable", 1, SQLITE_UTF8,
 	    ctx, fn_serializable, NULL, NULL);
 	return SQLITE_OK;
 }
