@@ -107,9 +107,18 @@ dangerous read-write structure, abort the pivot.
    value while latest sees the new one, and a delete is invisible to
    the old snapshot.  Surfaced and fixed the vtable-boundary latch
    self-deadlock (see `M_SQLXTC_XTC_GAPS.md`).
-3. Merge `mvcc.c`'s 2PC coordinator + HLC so multi-row SQL transactions
-   commit atomically at a single commit timestamp (today writes
-   autocommit per statement at a fresh timestamp).
+3. **(done)** Atomic multi-row SQL transactions: the `xstore` vtable
+   buffers a transaction's writes (via SQLite's xBegin/xUpdate/xCommit
+   hooks) and flushes them all at ONE commit timestamp, so the rows
+   share an xmin and a partial commit is never visible; xRollback
+   discards the buffer; reads inside the txn see their own buffered
+   writes (read-your-writes) and use the snapshot captured at xBegin
+   (repeatable read).  `test_xstore` proves a two-row txn commits at a
+   single timestamp, no snapshot sees a partial commit, and rollback
+   discards.  (This is mvcc.c's stage-then-commit applied to the
+   B-tree store; merging the cross-shard 2PC coordinator for
+   distributed transactions remains where multiple shards are
+   involved.)
 4. Add SSI (Cahill): rw-antidependency tracking + dangerous-structure
    abort for `SERIALIZABLE`; cite `predicate.c` lineage in the code.
 5. The larger-than-RAM + (later) HammerDB/Quack benchmark comparison

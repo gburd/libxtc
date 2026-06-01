@@ -277,12 +277,85 @@ scenario_mvcc(void)
 	return 0;
 }
 
+static int
+scenario_txn(void)
+{
+	bm_t *bm = NULL;
+	bt_t *bt = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-xstore4-XXXXXX";
+	sqlite3 *db = NULL;
+	sqlite3_stmt *st = NULL;
+	int64_t ts_pre = 0, commit_ts = 0;
+	char b[32];
+	int fd;
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = 64; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(sqlite3_open(":memory:", &db) == SQLITE_OK);
+	CK(xstore_register(db, bt) == SQLITE_OK);
+	CK(sqlite3_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0)
+	    == SQLITE_OK);
+
+	CK(sqlite3_prepare_v2(db, "SELECT xstore_now()", -1, &st, 0) == SQLITE_OK);
+	CK(sqlite3_step(st) == SQLITE_ROW);
+	ts_pre = sqlite3_column_int64(st, 0);
+	sqlite3_finalize(st); st = NULL;
+
+	/* A two-row transaction.  Buffered, then committed atomically. */
+	CK(sqlite3_exec(db, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(sqlite3_exec(db, "INSERT INTO t(k,v) VALUES(10,'x');", 0, 0, 0)
+	    == SQLITE_OK);
+	CK(sqlite3_exec(db, "INSERT INTO t(k,v) VALUES(11,'y');", 0, 0, 0)
+	    == SQLITE_OK);
+	/* Read-your-writes inside the open transaction. */
+	CK(sel_v(db, 10, b, sizeof b) == 1 && strcmp(b, "x") == 0);
+	CK(sqlite3_exec(db, "COMMIT;", 0, 0, 0) == SQLITE_OK);
+
+	CK(sqlite3_prepare_v2(db, "SELECT xstore_now()", -1, &st, 0) == SQLITE_OK);
+	CK(sqlite3_step(st) == SQLITE_ROW);
+	commit_ts = sqlite3_column_int64(st, 0);
+	sqlite3_finalize(st); st = NULL;
+
+	/* Both rows shared ONE commit timestamp (a single tick for the
+	 * whole transaction). */
+	CK(commit_ts == ts_pre + 1);
+
+	/* Atomicity: no snapshot sees exactly one of the two rows.  Just
+	 * before the commit timestamp -> neither; at it -> both. */
+	set_as_of(db, commit_ts - 1);
+	CK(sel_v(db, 10, b, sizeof b) == 0 && sel_v(db, 11, b, sizeof b) == 0);
+	set_as_of(db, commit_ts);
+	CK(sel_v(db, 10, b, sizeof b) == 1 && sel_v(db, 11, b, sizeof b) == 1);
+
+	/* Rollback discards the whole transaction. */
+	set_as_of(db, 0);
+	CK(sqlite3_exec(db, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(sqlite3_exec(db, "INSERT INTO t(k,v) VALUES(12,'z');", 0, 0, 0)
+	    == SQLITE_OK);
+	CK(sqlite3_exec(db, "ROLLBACK;", 0, 0, 0) == SQLITE_OK);
+	CK(sel_v(db, 12, b, sizeof b) == 0);
+
+	sqlite3_close(db);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   atomic multi-row transaction: two rows commit at one "
+	    "timestamp (read-your-writes inside the txn); no snapshot sees a "
+	    "partial commit; rollback discards\n");
+	return 0;
+}
+
 int
 main(void)
 {
 	if (scenario_offloop() != 0) return 1;
 	if (scenario_onloop() != 0) return 1;
 	if (scenario_mvcc() != 0) return 1;
+	if (scenario_txn() != 0) return 1;
 	printf("All sqlxtc SQL-on-xstore tests passed.\n");
 	return 0;
 }
