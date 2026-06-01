@@ -135,6 +135,7 @@ clean:
 	rm -f test_mem test_mem.o
 	rm -f test_wal test_wal.o wal.o
 	rm -f test_shard test_shard.o
+	rm -f test_mvcc test_mvcc.o mvcc.o
 	rm -f test_parallel test_parallel.o
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o
 	rm -f test_bufmgr_mt
@@ -152,7 +153,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-shard test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-shard test-mvcc test-parallel test-bufmgr test-bufmgr-mt test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -270,6 +271,17 @@ test_shard: test_shard.c
 
 test-shard: test_shard
 	./test_shard
+
+# ---- MVCC + cross-shard 2PC (executor; no daemon) ----
+# Snapshot-isolation versioned shards + a deferred-reply 2PC
+# coordinator + per-shard HLC.  Scale-out stage 4
+# (docs/M_SQLXTC_STAGE4.md): snapshot isolation, cross-shard
+# atomicity, and write-write conflict detection on a 4-loop executor.
+test_mvcc: test_mvcc.c mvcc.c mvcc.h
+	$(CC) $(CFLAGS) -o $@ test_mvcc.c mvcc.c $(LDFLAGS)
+
+test-mvcc: test_mvcc
+	./test_mvcc
 
 # ---- sx_ engine parallel-execution test (in-process, no daemon) ----
 test_parallel: test_parallel.c engine.o vfs.o sqlite3.o
