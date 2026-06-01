@@ -11,21 +11,31 @@ demonstrator, not the SQLite-backed engine: the goal is to exercise the
 hardest coordination on libxtc and prove the primitives, exactly as the
 earlier stages did.
 
-## Status: slices 1-4 SHIPPED (mvcc.c, test_mvcc.c)
+## Status: slices 1-5 SHIPPED (mvcc.c, test_mvcc.c)
 
 The versioned shards, the per-shard HLC, the deferred-reply 2PC
-coordinator, and write-write conflict detection are implemented and
-tested.  `test_mvcc` proves: (1) snapshot isolation -- a read at an old
-snapshot does not see a write committed after it; (2) cross-shard
-atomicity -- a two-key transaction spanning shards commits all-or-
-nothing through the coordinator; (3) concurrent conflict -- N clients
-committing one key at one snapshot resolve to exactly one commit, the
-rest aborting, on a single loop and on a 4-loop executor (12/12
-deterministic, ASan + UBSan clean).  Slice 5 (version GC) is partial:
-each key keeps a bounded version array (oldest dropped), which bounds
-memory; epoch-reclaimed GC against the oldest live snapshot is the
-remaining refinement.  Wiring it under the SQL engine is out of scope
-(see "Honest scope").
+coordinator, write-write conflict detection, and snapshot-aware version
+GC are implemented and tested.  `test_mvcc` proves: (1) snapshot
+isolation -- a read at an old snapshot does not see a write committed
+after it; (2) cross-shard atomicity -- a two-key transaction spanning
+shards commits all-or-nothing through the coordinator; (3) concurrent
+conflict -- N clients committing one key at one snapshot resolve to
+exactly one commit, the rest aborting, on a single loop and on a
+4-loop executor; (4) version GC -- a hot key's chain stays short as
+the low-water mark advances, while a LIVE old snapshot pins the
+version it can see (retained across a dozen newer commits, then
+reclaimable once released).  All deterministic, ASan + UBSan clean,
+no daemon.
+
+The GC (slice 5) needs no epoch/RCU machinery: each shard is the sole
+accessor of its own version chains (share-nothing), so reclamation is
+a single-threaded prune driven by one value -- the coordinator's
+low-water mark (the minimum live snapshot, shipped to shards in
+PREPARE).  A snapshot is pinned by mvcc_begin and released by
+mvcc_snapshot_release.  The remaining refinement is a hard bound on
+versions a single very-long-lived reader can pin (real engines abort
+such readers); the demonstrator keeps a generous per-key cap.
+Wiring it under the SQL engine is out of scope (see "Honest scope").
 
 ## What stage 4 reuses (already built)
 

@@ -212,10 +212,78 @@ run_conflict(int n_loops, int n_clients, const char *tag)
 	return 0;
 }
 
+/* Scenario 4 (slice 5): GC against the oldest live snapshot. */
+static void
+gc_driver(void *a)
+{
+	uint32_t v, K = 5000, K2 = 6000;
+	uint64_t s, pin;
+	mvcc_write_t w;
+	int i;
+	(void)a;
+
+	/* Hammer one key 40 times, releasing each snapshot.  The low-water
+	 * mark tracks the latest, so the version chain is GC'd down to a
+	 * couple of versions rather than growing without bound. */
+	for (i = 1; i <= 40; i++) {
+		s = mvcc_begin();
+		w.key = K; w.value = (uint32_t)i;
+		CK(mvcc_commit(s, &w, 1, NULL) == XTC_OK);
+		mvcc_snapshot_release(s);
+	}
+	CK(mvcc_total_versions() < 8);            /* GC reclaimed the old ones */
+	s = mvcc_begin();
+	CK(mvcc_read(K, s, &v) == XTC_OK && v == 40);
+	mvcc_snapshot_release(s);
+
+	/* A LIVE old snapshot pins the version it can see: even after many
+	 * newer commits, reading at the pinned snapshot still sees it. */
+	s = mvcc_begin();
+	w.key = K2; w.value = 100;
+	CK(mvcc_commit(s, &w, 1, NULL) == XTC_OK);
+	mvcc_snapshot_release(s);
+	pin = mvcc_begin();                       /* pins K2 == 100 */
+	CK(mvcc_read(K2, pin, &v) == XTC_OK && v == 100);
+	for (i = 0; i < 12; i++) {
+		uint64_t s2 = mvcc_begin();
+		w.key = K2; w.value = (uint32_t)(200 + i);
+		CK(mvcc_commit(s2, &w, 1, NULL) == XTC_OK);
+		mvcc_snapshot_release(s2);
+	}
+	CK(mvcc_read(K2, pin, &v) == XTC_OK && v == 100);   /* still retained */
+	mvcc_snapshot_release(pin);
+
+	mvcc_stop();
+}
+
+static int
+run_gc(void)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_loop_t *sl[N_SHARDS];
+	xtc_proc_opts_t o = { .name = "gc" };
+	xtc_pid_t pid;
+	int i;
+
+	atomic_store(&g_fail, 0);
+	assert(xtc_loop_init(&loop) == XTC_OK);
+	for (i = 0; i < N_SHARDS; i++) sl[i] = loop;
+	if (mvcc_start(sl, N_SHARDS, loop) != XTC_OK) return 1;
+	assert(xtc_proc_spawn(loop, gc_driver, NULL, &o, &pid) == XTC_OK);
+	assert(xtc_loop_run(loop) == XTC_OK);
+	mvcc_fini();
+	assert(xtc_loop_fini(loop) == XTC_OK);
+	if (atomic_load(&g_fail)) return 1;
+	printf("  ok   version GC against the oldest live snapshot: a hot key's "
+	    "chain stays short; a live snapshot pins its version\n");
+	return 0;
+}
+
 int
 main(void)
 {
 	if (run_correctness() != 0) return 1;
+	if (run_gc() != 0) return 1;
 	if (run_conflict(1, 6, "single-loop") != 0) return 1;
 	if (run_conflict(4, 8, "4-loop executor") != 0) return 1;
 	printf("All sqlxtc MVCC + 2PC tests passed.\n");

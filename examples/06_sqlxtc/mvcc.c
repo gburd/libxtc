@@ -74,7 +74,7 @@ hlc_observe(uint64_t *clk, uint64_t m)
 
 /* ---- shard: versioned key/value store ---- */
 #define MV_CAP     512        /* key slots per shard */
-#define MV_MAXVER  8          /* versions kept per key (newest first) */
+#define MV_MAXVER  32         /* versions kept per key (newest first) */
 
 struct mv_ver {
 	uint64_t commit_ts;
@@ -94,7 +94,7 @@ struct mv_shard {
 };
 
 /* ---- wire messages (memcpy into aligned locals on receipt) ---- */
-enum { MV_READ = 'R' };                       /* shard call */
+enum { MV_READ = 'R', MV_STAT = 'Z' };         /* shard call */
 struct shreq { uint8_t op; uint32_t key; uint64_t snap; };
 struct shrep { int ok; uint32_t value; };
 
@@ -106,10 +106,11 @@ struct shcast {
 	uint32_t  value;
 	uint64_t  snap;
 	uint64_t  commit_ts;
+	uint64_t  low_water;      /* GC horizon: oldest live snapshot */
 	xtc_pid_t coord;
 };
 
-enum { MV_BEGIN = 'B', MV_TXN = 'T' };        /* coordinator call */
+enum { MV_BEGIN = 'B', MV_TXN = 'T', MV_RELEASE = 'L' };  /* coordinator call/cast */
 struct coreq {
 	uint8_t      op;
 	uint64_t     snap;
@@ -120,6 +121,7 @@ struct corep { uint64_t snap; int committed; uint64_t commit_ts; };
 
 enum { MV_VOTE = 'V' };                        /* coordinator cast */
 struct covote { uint8_t op; uint64_t txn_id; int yes; xtc_pid_t shard; };
+struct corel  { uint8_t op; uint64_t ts; };    /* snapshot release (cast) */
 
 /* ---- module-global handles ---- */
 static xtc_svr_t *g_shard_svr[MVCC_MAX_SHARDS];
@@ -170,6 +172,27 @@ shard_push_version(struct mv_slot *sl, uint64_t commit_ts, uint32_t value,
 	sl->ver[0].committed = committed;
 }
 
+/*
+ * Garbage-collect a key's version chain against `low_water` (the oldest
+ * live snapshot).  Versions are newest-first, so the first committed
+ * version with commit_ts <= low_water is the newest one any live
+ * reader could see; every committed version older than it is invisible
+ * to all live snapshots and is dropped.  Staged (uncommitted) versions
+ * are newest and never pruned.  No epoch/RCU is needed: the shard proc
+ * is the sole accessor of its chains (share-nothing).
+ */
+static void
+shard_prune(struct mv_slot *sl, uint64_t low_water)
+{
+	int k;
+	for (k = 0; k < sl->nver; k++)
+		if (sl->ver[k].committed && sl->ver[k].commit_ts <= low_water) {
+			if (k + 1 < sl->nver)
+				sl->nver = k + 1;   /* drop older committed versions */
+			return;
+		}
+}
+
 static int
 shard_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 {
@@ -191,6 +214,14 @@ shard_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 						break;
 					}
 			}
+		} else if (r.op == MV_STAT) {
+			/* Total live versions in this shard (GC observability). */
+			int i; uint32_t total = 0;
+			for (i = 0; i < MV_CAP; i++)
+				if (s->slot[i].used)
+					total += (uint32_t)s->slot[i].nver;
+			rep.ok = 1;
+			rep.value = total;
 		}
 	}
 	(void)xtc_svr_reply(call, &rep, sizeof rep);
@@ -230,6 +261,9 @@ shard_handle_cast(void *st, const void *msg, size_t sz)
 			if (yes)
 				shard_push_version(sl, c.commit_ts, c.value,
 				    c.txn_id, 0);
+			/* Reclaim versions no live snapshot can see. */
+			if (sl != NULL)
+				shard_prune(sl, c.low_water);
 		}
 		v.op = MV_VOTE; v.txn_id = c.txn_id; v.yes = yes;
 		v.shard = xtc_self();
@@ -273,11 +307,48 @@ struct mv_txn {
 	int             n_shards;
 	xtc_pid_t       shards[MVCC_MAX_SHARDS];
 };
+#define MV_MAX_LIVE 256
 struct mv_coord {
 	uint64_t      hlc;
 	uint64_t      next_txn;
 	struct mv_txn txn[MV_MAX_TXN];
+	uint64_t      live[MV_MAX_LIVE];   /* outstanding read snapshots */
+	int           n_live;
 };
+
+/* The GC horizon: the oldest live snapshot, or the current clock if no
+ * snapshot is outstanding (then every committed version but the newest
+ * per key is reclaimable). */
+static uint64_t
+coord_low_water(struct mv_coord *c)
+{
+	uint64_t lw;
+	int i;
+	if (c->n_live == 0)
+		return c->hlc;
+	lw = c->live[0];
+	for (i = 1; i < c->n_live; i++)
+		if (c->live[i] < lw)
+			lw = c->live[i];
+	return lw;
+}
+
+static void
+coord_live_add(struct mv_coord *c, uint64_t ts)
+{
+	if (c->n_live < MV_MAX_LIVE)
+		c->live[c->n_live++] = ts;
+}
+static void
+coord_live_del(struct mv_coord *c, uint64_t ts)
+{
+	int i;
+	for (i = 0; i < c->n_live; i++)
+		if (c->live[i] == ts) {
+			c->live[i] = c->live[--c->n_live];
+			return;
+		}
+}
 
 static struct mv_txn *
 coord_txn_alloc(struct mv_coord *c)
@@ -351,6 +422,7 @@ coord_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 
 	if (r.op == MV_BEGIN) {
 		rep.snap = hlc_tick(&c->hlc);
+		coord_live_add(c, rep.snap);     /* pin versions until released */
 		(void)xtc_svr_reply(call, &rep, sizeof rep);
 		return XTC_SVR_CONTINUE;
 	}
@@ -384,6 +456,7 @@ coord_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 		p.op = MV_PREPARE; p.txn_id = t->txn_id;
 		p.key = r.w[i].key; p.value = r.w[i].value;
 		p.snap = r.snap; p.commit_ts = t->commit_ts;
+		p.low_water = coord_low_water(c);
 		p.coord = g_coord_pid;
 		(void)xtc_svr_cast(g_shard_pid[mvcc_shard_of(r.w[i].key)],
 		    &p, sizeof p);
@@ -398,6 +471,16 @@ coord_handle_cast(void *st, const void *msg, size_t sz)
 	struct covote v;
 	struct mv_txn *t;
 
+	if (sz < 1)
+		return XTC_SVR_CONTINUE;
+	if (((const uint8_t *)msg)[0] == MV_RELEASE) {
+		struct corel rel;
+		if (sz >= sizeof rel) {
+			memcpy(&rel, msg, sizeof rel);
+			coord_live_del(c, rel.ts);
+		}
+		return XTC_SVR_CONTINUE;
+	}
 	if (sz < sizeof v)
 		return XTC_SVR_CONTINUE;
 	memcpy(&v, msg, sizeof v);
@@ -533,6 +616,33 @@ mvcc_read(uint32_t key, uint64_t snap_ts, uint32_t *out)
 	if (out != NULL)
 		*out = rp.value;
 	return XTC_OK;
+}
+
+void
+mvcc_snapshot_release(uint64_t snap_ts)
+{
+	struct corel rel = { MV_RELEASE, snap_ts };
+	(void)xtc_svr_cast(g_coord_pid, &rel, sizeof rel);
+}
+
+int
+mvcc_total_versions(void)
+{
+	int i, total = 0;
+	for (i = 0; i < g_n_shards; i++) {
+		struct shreq rq = { MV_STAT, 0, 0 };
+		struct shrep rp = { 0, 0 };
+		void *r = NULL;
+		size_t n = 0;
+		if (xtc_svr_call(g_shard_pid[i], &rq, sizeof rq, &r, &n,
+		    5LL * 1000 * 1000 * 1000) == XTC_OK && r != NULL &&
+		    n >= sizeof rp) {
+			memcpy(&rp, r, sizeof rp);
+			total += (int)rp.value;
+		}
+		free(r);
+	}
+	return total;
 }
 
 int

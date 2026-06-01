@@ -71,6 +71,16 @@ uint64_t mvcc_begin(void);
  * XTC_E_NOTFOUND if no version is visible at that snapshot. */
 int  mvcc_read(uint32_t key, uint64_t snap_ts, uint32_t *out);
 
+/* Release a snapshot taken with mvcc_begin once no further reads will
+ * use it.  Until released, a snapshot pins every version it can see
+ * against garbage collection; releasing it lets the coordinator's
+ * low-water mark advance so shards can reclaim obsolete versions. */
+void mvcc_snapshot_release(uint64_t snap_ts);
+
+/* Total live versions held across all shards (observability: with GC
+ * working, a hot key's chain stays short instead of growing). */
+int  mvcc_total_versions(void);
+
 /*
  * Atomically commit `n` writes that were decided against snapshot
  * `snap_ts`.  Runs 2PC across the participant shards.  On success
