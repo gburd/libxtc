@@ -12,7 +12,7 @@
 #ifndef SQLXTC_XSTORE_H
 #define SQLXTC_XSTORE_H
 
-struct sqlite3;
+struct xsql;
 typedef struct bt bt_t;
 
 /* Register the "xstore" virtual-table module on `db`, backed by the
@@ -21,6 +21,6 @@ typedef struct bt bt_t;
  * creates a t(k INTEGER PRIMARY KEY, v) table whose rows live in `bt`
  * (the cooling buffer pool, larger-than-RAM capable) rather than in
  * SQLite's built-in B-tree. */
-int xstore_register(struct sqlite3 *db, bt_t *bt);
+int xstore_register(struct xsql *db, bt_t *bt);
 
 #endif /* SQLXTC_XSTORE_H */

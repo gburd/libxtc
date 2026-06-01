@@ -39,33 +39,33 @@ _Static_assert(SX_NULL == SQLITE_NULL, "SX_NULL");
 int
 sx_init(void)
 {
-	return sqlite3_initialize();
+	return xsql_initialize();
 }
 
 int
 sx_shutdown(void)
 {
-	return sqlite3_shutdown();
+	return xsql_shutdown();
 }
 
 int
 sx_config_mutex(const void *methods)
 {
-	return sqlite3_config(SQLITE_CONFIG_MUTEX,
-	    (const sqlite3_mutex_methods *)methods);
+	return xsql_config(SQLITE_CONFIG_MUTEX,
+	    (const xsql_mutex_methods *)methods);
 }
 
 int
 sx_config_mem(const void *methods)
 {
-	return sqlite3_config(SQLITE_CONFIG_MALLOC,
-	    (const sqlite3_mem_methods *)methods);
+	return xsql_config(SQLITE_CONFIG_MALLOC,
+	    (const xsql_mem_methods *)methods);
 }
 
 int
 sx_config_serialized(void)
 {
-	return sqlite3_config(SQLITE_CONFIG_SERIALIZED);
+	return xsql_config(SQLITE_CONFIG_SERIALIZED);
 }
 
 /*
@@ -103,7 +103,7 @@ static bt_t *g_xbt;
 int
 sx_open(const char *path, sx_db **out)
 {
-	sqlite3 *h = NULL;
+	xsql *h = NULL;
 	int memlike = (path == NULL || path[0] == '\0' ||
 	    strcmp(path, ":memory:") == 0);
 	int rc;
@@ -112,11 +112,11 @@ sx_open(const char *path, sx_db **out)
 	 * offloaded I/O); in-memory databases do no file I/O. */
 	if (!memlike)
 		(void)vfs_register(0);
-	rc = sqlite3_open_v2(path, &h,
+	rc = xsql_open_v2(path, &h,
 	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
 	    memlike ? NULL : "sqlxtc");
 	if (rc != SQLITE_OK) {
-		if (h) sqlite3_close(h);
+		if (h) xsql_close(h);
 		*out = NULL;
 		return rc;
 	}
@@ -126,9 +126,9 @@ sx_open(const char *path, sx_db **out)
 	 * retry rather than fail with SQLITE_BUSY; NORMAL sync is the
 	 * WAL-safe durability tradeoff.  (:memory: ignores journal_mode
 	 * but honours busy_timeout harmlessly.) */
-	(void)sqlite3_exec(h, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
-	(void)sqlite3_exec(h, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
-	sqlite3_busy_handler((sqlite3 *)h, sx_busy_handler, NULL);
+	(void)xsql_exec(h, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+	(void)xsql_exec(h, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
+	xsql_busy_handler((xsql *)h, sx_busy_handler, NULL);
 
 	/* If the libxtc-native storage engine is open, expose it to this
 	 * connection as the "xstore" virtual table.  SQL against an
@@ -137,7 +137,7 @@ sx_open(const char *path, sx_db **out)
 	 * The B-tree is concurrent (parallel-writer crabbing), so the
 	 * single shared instance is safe across connection procs. */
 	if (g_xbt != NULL)
-		(void)xstore_register((sqlite3 *)h, g_xbt);
+		(void)xstore_register((xsql *)h, g_xbt);
 
 	*out = (sx_db *)h;
 	return SQLITE_OK;
@@ -172,108 +172,108 @@ sx_storage_close(void)
 void
 sx_close(sx_db *h)
 {
-	(void)sqlite3_close((sqlite3 *)h);
+	(void)xsql_close((xsql *)h);
 }
 
 int
 sx_exec(sx_db *h, const char *sql, char **errmsg)
 {
-	return sqlite3_exec((sqlite3 *)h, sql, NULL, NULL, errmsg);
+	return xsql_exec((xsql *)h, sql, NULL, NULL, errmsg);
 }
 
 int
 sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
            const char **tail)
 {
-	return sqlite3_prepare_v2((sqlite3 *)h, sql, n_bytes,
-	    (sqlite3_stmt **)out, tail);
+	return xsql_prepare_v2((xsql *)h, sql, n_bytes,
+	    (xsql_stmt **)out, tail);
 }
 
-int   sx_step(sx_stmt *st)        { return sqlite3_step((sqlite3_stmt *)st); }
-int   sx_reset(sx_stmt *st)       { return sqlite3_reset((sqlite3_stmt *)st); }
-void  sx_finalize(sx_stmt *st)    { (void)sqlite3_finalize((sqlite3_stmt *)st); }
+int   sx_step(sx_stmt *st)        { return xsql_step((xsql_stmt *)st); }
+int   sx_reset(sx_stmt *st)       { return xsql_reset((xsql_stmt *)st); }
+void  sx_finalize(sx_stmt *st)    { (void)xsql_finalize((xsql_stmt *)st); }
 
 int
 sx_bind_count(sx_stmt *st)
 {
-	return sqlite3_bind_parameter_count((sqlite3_stmt *)st);
+	return xsql_bind_parameter_count((xsql_stmt *)st);
 }
 int
 sx_bind_int64(sx_stmt *st, int idx, int64_t v)
 {
-	return sqlite3_bind_int64((sqlite3_stmt *)st, idx, v);
+	return xsql_bind_int64((xsql_stmt *)st, idx, v);
 }
 int
 sx_bind_double(sx_stmt *st, int idx, double v)
 {
-	return sqlite3_bind_double((sqlite3_stmt *)st, idx, v);
+	return xsql_bind_double((xsql_stmt *)st, idx, v);
 }
 int
 sx_bind_text(sx_stmt *st, int idx, const char *s, int n)
 {
-	return sqlite3_bind_text((sqlite3_stmt *)st, idx, s, n,
+	return xsql_bind_text((xsql_stmt *)st, idx, s, n,
 	    SQLITE_TRANSIENT);
 }
 int
 sx_bind_blob(sx_stmt *st, int idx, const void *p, int n)
 {
-	return sqlite3_bind_blob((sqlite3_stmt *)st, idx, p, n,
+	return xsql_bind_blob((xsql_stmt *)st, idx, p, n,
 	    SQLITE_TRANSIENT);
 }
 int
 sx_bind_null(sx_stmt *st, int idx)
 {
-	return sqlite3_bind_null((sqlite3_stmt *)st, idx);
+	return xsql_bind_null((xsql_stmt *)st, idx);
 }
 
 int
 sx_column_count(sx_stmt *st)
 {
-	return sqlite3_column_count((sqlite3_stmt *)st);
+	return xsql_column_count((xsql_stmt *)st);
 }
 const char *
 sx_column_name(sx_stmt *st, int i)
 {
-	return sqlite3_column_name((sqlite3_stmt *)st, i);
+	return xsql_column_name((xsql_stmt *)st, i);
 }
 int
 sx_column_type(sx_stmt *st, int i)
 {
-	return sqlite3_column_type((sqlite3_stmt *)st, i);
+	return xsql_column_type((xsql_stmt *)st, i);
 }
 int64_t
 sx_column_int64(sx_stmt *st, int i)
 {
-	return sqlite3_column_int64((sqlite3_stmt *)st, i);
+	return xsql_column_int64((xsql_stmt *)st, i);
 }
 double
 sx_column_double(sx_stmt *st, int i)
 {
-	return sqlite3_column_double((sqlite3_stmt *)st, i);
+	return xsql_column_double((xsql_stmt *)st, i);
 }
 const char *
 sx_column_text(sx_stmt *st, int i)
 {
-	return (const char *)sqlite3_column_text((sqlite3_stmt *)st, i);
+	return (const char *)xsql_column_text((xsql_stmt *)st, i);
 }
 const void *
 sx_column_blob(sx_stmt *st, int i)
 {
-	return sqlite3_column_blob((sqlite3_stmt *)st, i);
+	return xsql_column_blob((xsql_stmt *)st, i);
 }
 int
 sx_column_bytes(sx_stmt *st, int i)
 {
-	return sqlite3_column_bytes((sqlite3_stmt *)st, i);
+	return xsql_column_bytes((xsql_stmt *)st, i);
 }
 
 const char *
 sx_errmsg(sx_db *h)
 {
-	return sqlite3_errmsg((sqlite3 *)h);
+	return xsql_errmsg((xsql *)h);
 }
 int64_t
 sx_changes(sx_db *h)
 {
-	return (int64_t)sqlite3_changes64((sqlite3 *)h);
+	return (int64_t)xsql_changes64((xsql *)h);
 }

@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/pcache_obj.c
- *	An xtc_slab-backed SQLite page cache (sqlite3_pcache_methods2).
+ *	An xtc_slab-backed SQLite page cache (xsql_pcache_methods2).
  *
  *	One xtc_slab per cache supplies the page objects; all pages in
  *	a cache share one object-size class (header + szPage + szExtra),
@@ -31,7 +31,7 @@
  *	[ pcache_pg | <align pad> | pBuf (szPage) | pExtra (szExtra) ]
  */
 struct pcache_pg {
-	sqlite3_pcache_page  page;       /* {pBuf, pExtra}; given to SQLite */
+	xsql_pcache_page  page;       /* {pBuf, pExtra}; given to SQLite */
 	unsigned             key;
 	int                  pinned;
 	int                  in_hash;
@@ -196,7 +196,7 @@ page_claim(struct pcache_obj *c, struct pcache_pg *p, unsigned key)
 		memset(p->page.pExtra, 0, (size_t)c->sz_extra);
 }
 
-/* ---- sqlite3_pcache_methods2 ---- */
+/* ---- xsql_pcache_methods2 ---- */
 
 static int
 pcache_init(void *arg)
@@ -211,7 +211,7 @@ pcache_shutdown(void *arg)
 	(void)arg;
 }
 
-static sqlite3_pcache *
+static xsql_pcache *
 pcache_create(int sz_page, int sz_extra, int purgeable)
 {
 	struct pcache_obj *c;
@@ -244,25 +244,25 @@ pcache_create(int sz_page, int sz_extra, int purgeable)
 		free(c);
 		return NULL;
 	}
-	return (sqlite3_pcache *)c;
+	return (xsql_pcache *)c;
 }
 
 static void
-pcache_cachesize(sqlite3_pcache *pc, int n)
+pcache_cachesize(xsql_pcache *pc, int n)
 {
 	struct pcache_obj *c = (struct pcache_obj *)pc;
 	c->max_pages = n > 0 ? n : 1;
 }
 
 static int
-pcache_pagecount(sqlite3_pcache *pc)
+pcache_pagecount(xsql_pcache *pc)
 {
 	struct pcache_obj *c = (struct pcache_obj *)pc;
 	return c->npage;
 }
 
-static sqlite3_pcache_page *
-pcache_fetch(sqlite3_pcache *pc, unsigned key, int create_flag)
+static xsql_pcache_page *
+pcache_fetch(xsql_pcache *pc, unsigned key, int create_flag)
 {
 	struct pcache_obj *c = (struct pcache_obj *)pc;
 	struct pcache_pg *p;
@@ -325,7 +325,7 @@ pcache_fetch(sqlite3_pcache *pc, unsigned key, int create_flag)
 }
 
 static void
-pcache_unpin(sqlite3_pcache *pc, sqlite3_pcache_page *pp, int discard)
+pcache_unpin(xsql_pcache *pc, xsql_pcache_page *pp, int discard)
 {
 	struct pcache_obj *c = (struct pcache_obj *)pc;
 	struct pcache_pg *p = (struct pcache_pg *)pp;
@@ -350,7 +350,7 @@ pcache_unpin(sqlite3_pcache *pc, sqlite3_pcache_page *pp, int discard)
 }
 
 static void
-pcache_rekey(sqlite3_pcache *pc, sqlite3_pcache_page *pp,
+pcache_rekey(xsql_pcache *pc, xsql_pcache_page *pp,
          unsigned old_key, unsigned new_key)
 {
 	struct pcache_obj *c = (struct pcache_obj *)pc;
@@ -364,7 +364,7 @@ pcache_rekey(sqlite3_pcache *pc, sqlite3_pcache_page *pp,
 }
 
 static void
-pcache_truncate(sqlite3_pcache *pc, unsigned limit)
+pcache_truncate(xsql_pcache *pc, unsigned limit)
 {
 	struct pcache_obj *c = (struct pcache_obj *)pc;
 	int i;
@@ -385,7 +385,7 @@ pcache_truncate(sqlite3_pcache *pc, unsigned limit)
 }
 
 static void
-pcache_destroy(sqlite3_pcache *pc)
+pcache_destroy(xsql_pcache *pc)
 {
 	struct pcache_obj *c = (struct pcache_obj *)pc;
 	int i;
@@ -402,7 +402,7 @@ pcache_destroy(sqlite3_pcache *pc)
 }
 
 static void
-pcache_shrink(sqlite3_pcache *pc)
+pcache_shrink(xsql_pcache *pc)
 {
 	struct pcache_obj *c = (struct pcache_obj *)pc;
 
@@ -414,7 +414,7 @@ pcache_shrink(sqlite3_pcache *pc)
 	}
 }
 
-static const sqlite3_pcache_methods2 pcache_methods = {
+static const xsql_pcache_methods2 pcache_methods = {
 	1,                  /* iVersion */
 	NULL,               /* pArg */
 	pcache_init,
@@ -442,7 +442,7 @@ pcache_register(void)
 	(void)xtc_counter_create("sqlxtc.pcache.recycle", &g_c_recycle);
 	(void)xtc_gauge_create("sqlxtc.pcache.live_pages", &g_g_live);
 
-	if (sqlite3_config(SQLITE_CONFIG_PCACHE2, &pcache_methods)
+	if (xsql_config(SQLITE_CONFIG_PCACHE2, &pcache_methods)
 	    != SQLITE_OK)
 		return SQLITE_ERROR;
 

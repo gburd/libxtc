@@ -41,6 +41,12 @@ XTC_LDFLAGS := $(shell \
 
 CFLAGS  += $(LIBURING_INC)
 
+# Vendored-SQL-engine symbol map (docs/M_SQLXTC_NAMING.md): force-include
+# xsql.h into every translation unit so the public sqlite3_* API the
+# seams use resolves to project-native xsql_* names.  Harmless in units
+# that touch no SQL.
+CFLAGS  += -include xsql.h
+
 LDFLAGS  = $(XTC_LDFLAGS) $(XTC_BUILD)/libxtc.a -pthread -ldl -lm \
            $(LIBURING_LDFLAGS)
 
@@ -48,6 +54,7 @@ LDFLAGS  = $(XTC_LDFLAGS) $(XTC_BUILD)/libxtc.a -pthread -ldl -lm \
 # size/perf knobs.  Keep this list consistent with sqlite3.h-aligned
 # defaults.
 SQLITE_CFLAGS = -O2 -g -std=c11 -D_GNU_SOURCE \
+    -include xsql.h \
     -DSQLITE_THREADSAFE=1 \
     -DSQLITE_DEFAULT_MEMSTATUS=0 \
     -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 \
@@ -167,6 +174,7 @@ test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache tes
 # liburing: the amalgamation auto-selects the epoll backend.
 AMALG_DIR    = amalg
 AMALG_CFLAGS = -O2 -g -std=c11 -Wall -Wextra -Wpedantic -D_GNU_SOURCE \
+               -include xsql.h \
                -I$(AMALG_DIR)/include -I.
 AMALG_OBJS   = $(SRCS:.c=.amalg.o)
 

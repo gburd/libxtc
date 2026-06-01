@@ -16,11 +16,11 @@
  *	The shim layout places our bookkeeping first, then the base
  *	VFS's file object inline:
  *
- *	    [ struct vfs_file | <base sqlite3_file, szOsFile bytes> ]
+ *	    [ struct vfs_file | <base xsql_file, szOsFile bytes> ]
  *
  *	szOsFile is sized to cover both, so SQLite allocates the whole
  *	thing in one shot and the base VFS sees a properly aligned
- *	sqlite3_file at the tail.
+ *	xsql_file at the tail.
  */
 
 #include "vfs.h"
@@ -42,13 +42,13 @@
  * standalone tests).  buf and the arg struct live on the parked
  * fiber's stack, which persists across the park. */
 struct io_rw_args {
-	sqlite3_file *real;
+	xsql_file *real;
 	void         *buf;
 	int           n;
-	sqlite3_int64 off;
+	xsql_int64 off;
 };
 struct io_sync_args {
-	sqlite3_file *real;
+	xsql_file *real;
 	int           flags;
 };
 
@@ -73,8 +73,8 @@ io_sync_fn(void *a)
 
 /* ---- per-file shim object ---- */
 struct vfs_file {
-	sqlite3_file   base;     /* methods table; must be first */
-	sqlite3_file  *real;     /* base VFS file, inline after this struct */
+	xsql_file   base;     /* methods table; must be first */
+	xsql_file  *real;     /* base VFS file, inline after this struct */
 };
 
 /* ---- instrumentation ---- */
@@ -86,7 +86,7 @@ static xtc_counter_t *g_c_syncs;
 static xtc_hist_t    *g_h_read_us;
 static xtc_hist_t    *g_h_write_us;
 
-static sqlite3_vfs   *g_base;          /* underlying default VFS */
+static xsql_vfs   *g_base;          /* underlying default VFS */
 static int            g_registered;    /* register-once guard */
 
 /* now() in nanoseconds; 0 if the clock is unavailable. */
@@ -101,7 +101,7 @@ vfs_now_ns(void)
 /* ---- io_methods: forward to the base file, instrument I/O ---- */
 
 static int
-vfs_close(sqlite3_file *pf)
+vfs_close(xsql_file *pf)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	int rc = SQLITE_OK;
@@ -113,7 +113,7 @@ vfs_close(sqlite3_file *pf)
 }
 
 static int
-vfs_read(sqlite3_file *pf, void *buf, int n, sqlite3_int64 off)
+vfs_read(xsql_file *pf, void *buf, int n, xsql_int64 off)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	struct io_rw_args a = { p->real, buf, n, off };
@@ -131,7 +131,7 @@ vfs_read(sqlite3_file *pf, void *buf, int n, sqlite3_int64 off)
 }
 
 static int
-vfs_write(sqlite3_file *pf, const void *buf, int n, sqlite3_int64 off)
+vfs_write(xsql_file *pf, const void *buf, int n, xsql_int64 off)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	struct io_rw_args a = { p->real, (void *)buf, n, off };
@@ -149,14 +149,14 @@ vfs_write(sqlite3_file *pf, const void *buf, int n, sqlite3_int64 off)
 }
 
 static int
-vfs_truncate(sqlite3_file *pf, sqlite3_int64 size)
+vfs_truncate(xsql_file *pf, xsql_int64 size)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	return p->real->pMethods->xTruncate(p->real, size);
 }
 
 static int
-vfs_sync(sqlite3_file *pf, int flags)
+vfs_sync(xsql_file *pf, int flags)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	struct io_sync_args a = { p->real, flags };
@@ -168,49 +168,49 @@ vfs_sync(sqlite3_file *pf, int flags)
 }
 
 static int
-vfs_file_size(sqlite3_file *pf, sqlite3_int64 *out)
+vfs_file_size(xsql_file *pf, xsql_int64 *out)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	return p->real->pMethods->xFileSize(p->real, out);
 }
 
 static int
-vfs_lock(sqlite3_file *pf, int level)
+vfs_lock(xsql_file *pf, int level)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	return p->real->pMethods->xLock(p->real, level);
 }
 
 static int
-vfs_unlock(sqlite3_file *pf, int level)
+vfs_unlock(xsql_file *pf, int level)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	return p->real->pMethods->xUnlock(p->real, level);
 }
 
 static int
-vfs_check_reserved_lock(sqlite3_file *pf, int *out)
+vfs_check_reserved_lock(xsql_file *pf, int *out)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	return p->real->pMethods->xCheckReservedLock(p->real, out);
 }
 
 static int
-vfs_file_control(sqlite3_file *pf, int op, void *arg)
+vfs_file_control(xsql_file *pf, int op, void *arg)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	return p->real->pMethods->xFileControl(p->real, op, arg);
 }
 
 static int
-vfs_sector_size(sqlite3_file *pf)
+vfs_sector_size(xsql_file *pf)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	return p->real->pMethods->xSectorSize(p->real);
 }
 
 static int
-vfs_device_characteristics(sqlite3_file *pf)
+vfs_device_characteristics(xsql_file *pf)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	return p->real->pMethods->xDeviceCharacteristics(p->real);
@@ -218,7 +218,7 @@ vfs_device_characteristics(sqlite3_file *pf)
 
 /* Shared-memory and memory-map methods (WAL): forward when present. */
 static int
-vfs_shm_map(sqlite3_file *pf, int pg, int sz, int ext, void volatile **pp)
+vfs_shm_map(xsql_file *pf, int pg, int sz, int ext, void volatile **pp)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	if (p->real->pMethods->iVersion < 2 ||
@@ -228,27 +228,27 @@ vfs_shm_map(sqlite3_file *pf, int pg, int sz, int ext, void volatile **pp)
 }
 
 static int
-vfs_shm_lock(sqlite3_file *pf, int off, int n, int flags)
+vfs_shm_lock(xsql_file *pf, int off, int n, int flags)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	return p->real->pMethods->xShmLock(p->real, off, n, flags);
 }
 
 static void
-vfs_shm_barrier(sqlite3_file *pf)
+vfs_shm_barrier(xsql_file *pf)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	p->real->pMethods->xShmBarrier(p->real);
 }
 
 static int
-vfs_shm_unmap(sqlite3_file *pf, int del)
+vfs_shm_unmap(xsql_file *pf, int del)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
 	return p->real->pMethods->xShmUnmap(p->real, del);
 }
 
-static const sqlite3_io_methods io_methods = {
+static const xsql_io_methods io_methods = {
 	2,                              /* iVersion (WAL shm methods) */
 	vfs_close,
 	vfs_read,
@@ -273,7 +273,7 @@ static const sqlite3_io_methods io_methods = {
 /* ---- VFS methods ---- */
 
 static int
-vfs_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *pf,
+vfs_open(xsql_vfs *vfs, const char *name, xsql_file *pf,
         int flags, int *out_flags)
 {
 	struct vfs_file *p = (struct vfs_file *)pf;
@@ -281,7 +281,7 @@ vfs_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *pf,
 
 	(void)vfs;
 	memset(p, 0, sizeof *p);
-	p->real = (sqlite3_file *)((char *)p + sizeof(struct vfs_file));
+	p->real = (xsql_file *)((char *)p + sizeof(struct vfs_file));
 	rc = g_base->xOpen(g_base, name, p->real, flags, out_flags);
 	if (rc != SQLITE_OK) {
 		p->base.pMethods = NULL;
@@ -294,76 +294,76 @@ vfs_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *pf,
 }
 
 static int
-vfs_delete(sqlite3_vfs *vfs, const char *name, int sync_dir)
+vfs_delete(xsql_vfs *vfs, const char *name, int sync_dir)
 {
 	(void)vfs;
 	return g_base->xDelete(g_base, name, sync_dir);
 }
 
 static int
-vfs_access(sqlite3_vfs *vfs, const char *name, int flags, int *out)
+vfs_access(xsql_vfs *vfs, const char *name, int flags, int *out)
 {
 	(void)vfs;
 	return g_base->xAccess(g_base, name, flags, out);
 }
 
 static int
-vfs_full_pathname(sqlite3_vfs *vfs, const char *name, int n, char *out)
+vfs_full_pathname(xsql_vfs *vfs, const char *name, int n, char *out)
 {
 	(void)vfs;
 	return g_base->xFullPathname(g_base, name, n, out);
 }
 
 static void *
-vfs_dlopen(sqlite3_vfs *vfs, const char *name)
+vfs_dlopen(xsql_vfs *vfs, const char *name)
 {
 	(void)vfs;
 	return g_base->xDlOpen ? g_base->xDlOpen(g_base, name) : NULL;
 }
 
 static void
-vfs_dlerror(sqlite3_vfs *vfs, int n, char *out)
+vfs_dlerror(xsql_vfs *vfs, int n, char *out)
 {
 	(void)vfs;
 	if (g_base->xDlError) g_base->xDlError(g_base, n, out);
 }
 
-static void (*vfs_dlsym(sqlite3_vfs *vfs, void *h, const char *sym))(void)
+static void (*vfs_dlsym(xsql_vfs *vfs, void *h, const char *sym))(void)
 {
 	(void)vfs;
 	return g_base->xDlSym ? g_base->xDlSym(g_base, h, sym) : NULL;
 }
 
 static void
-vfs_dlclose(sqlite3_vfs *vfs, void *h)
+vfs_dlclose(xsql_vfs *vfs, void *h)
 {
 	(void)vfs;
 	if (g_base->xDlClose) g_base->xDlClose(g_base, h);
 }
 
 static int
-vfs_randomness(sqlite3_vfs *vfs, int n, char *out)
+vfs_randomness(xsql_vfs *vfs, int n, char *out)
 {
 	(void)vfs;
 	return g_base->xRandomness(g_base, n, out);
 }
 
 static int
-vfs_sleep(sqlite3_vfs *vfs, int us)
+vfs_sleep(xsql_vfs *vfs, int us)
 {
 	(void)vfs;
 	return g_base->xSleep(g_base, us);
 }
 
 static int
-vfs_current_time(sqlite3_vfs *vfs, double *out)
+vfs_current_time(xsql_vfs *vfs, double *out)
 {
 	(void)vfs;
 	return g_base->xCurrentTime(g_base, out);
 }
 
 static int
-vfs_get_last_error(sqlite3_vfs *vfs, int n, char *out)
+vfs_get_last_error(xsql_vfs *vfs, int n, char *out)
 {
 	(void)vfs;
 	return g_base->xGetLastError ? g_base->xGetLastError(g_base, n, out)
@@ -371,7 +371,7 @@ vfs_get_last_error(sqlite3_vfs *vfs, int n, char *out)
 }
 
 static int
-vfs_current_time_int64(sqlite3_vfs *vfs, sqlite3_int64 *out)
+vfs_current_time_int64(xsql_vfs *vfs, xsql_int64 *out)
 {
 	(void)vfs;
 	if (g_base->iVersion >= 2 && g_base->xCurrentTimeInt64)
@@ -379,7 +379,7 @@ vfs_current_time_int64(sqlite3_vfs *vfs, sqlite3_int64 *out)
 	return SQLITE_ERROR;
 }
 
-static sqlite3_vfs g_vfs;     /* filled in by vfs_register */
+static xsql_vfs g_vfs;     /* filled in by vfs_register */
 
 int
 vfs_register(int make_default)
@@ -387,7 +387,7 @@ vfs_register(int make_default)
 	if (g_registered)
 		return SQLITE_OK;
 
-	g_base = sqlite3_vfs_find(NULL);
+	g_base = xsql_vfs_find(NULL);
 	if (g_base == NULL)
 		return SQLITE_ERROR;
 
@@ -421,7 +421,7 @@ vfs_register(int make_default)
 	g_vfs.xGetLastError = vfs_get_last_error;
 	g_vfs.xCurrentTimeInt64 = vfs_current_time_int64;
 
-	if (sqlite3_vfs_register(&g_vfs, make_default) != SQLITE_OK)
+	if (xsql_vfs_register(&g_vfs, make_default) != SQLITE_OK)
 		return SQLITE_ERROR;
 
 	g_registered = 1;

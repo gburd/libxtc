@@ -8,7 +8,7 @@
  *	SQLite mutex methods backed by xtc_amutex (the parking mutex).
  *
  *	sqlxtc runs many connection processes on one event loop, all
- *	sharing a single serialized sqlite3 handle.  A contending
+ *	sharing a single serialized xsql handle.  A contending
  *	process must therefore PARK (yield the loop) rather than block
  *	the OS thread -- otherwise a backend that parks mid-statement
  *	(e.g. while the VFS offloads a blocking read to the thread pool)
@@ -26,7 +26,7 @@
  *	instant one of them parks while holding the lock.
  *
  *	The methods are registered from main.c via
- *	sqlite3_config(SQLITE_CONFIG_MUTEX, ...).
+ *	xsql_config(SQLITE_CONFIG_MUTEX, ...).
  */
 
 #include <pthread.h>
@@ -87,7 +87,7 @@ owner_eq(const struct mutex_owner *a, const struct mutex_owner *b)
 }
 
 /* Wraps an xtc_amutex with optional recursive accounting. */
-struct sqlite3_mutex {
+struct xsql_mutex {
 	xtc_amutex_t      *am;
 	int                type;
 	int                recursive;     /* 1 if SQLITE_MUTEX_RECURSIVE */
@@ -100,7 +100,7 @@ struct sqlite3_mutex {
 /* Static mutex pool: SQLite expects identical pointers for repeated
  * xMutexAlloc(SQLITE_MUTEX_STATIC_*) calls. */
 #define STATIC_MUTEX_COUNT  16
-static sqlite3_mutex g_static_mutexes[STATIC_MUTEX_COUNT];
+static xsql_mutex g_static_mutexes[STATIC_MUTEX_COUNT];
 static _Atomic int   g_static_inited = 0;
 
 static void
@@ -136,17 +136,17 @@ xMutexEnd(void)
 	return SQLITE_OK;
 }
 
-static sqlite3_mutex *
+static xsql_mutex *
 xMutexAlloc(int type)
 {
-	sqlite3_mutex *m;
+	xsql_mutex *m;
 
 	if (type >= 2 && type < STATIC_MUTEX_COUNT) {
 		init_static_pool();
 		return &g_static_mutexes[type];
 	}
 
-	m = (sqlite3_mutex *)calloc(1, sizeof(*m));
+	m = (xsql_mutex *)calloc(1, sizeof(*m));
 	if (!m) return NULL;
 	m->type = type;
 	m->recursive = (type == SQLITE_MUTEX_RECURSIVE);
@@ -158,7 +158,7 @@ xMutexAlloc(int type)
 }
 
 static void
-xMutexFree(sqlite3_mutex *m)
+xMutexFree(xsql_mutex *m)
 {
 	if (!m) return;
 	if (m->type >= 2 && m->type < STATIC_MUTEX_COUNT) return;
@@ -167,7 +167,7 @@ xMutexFree(sqlite3_mutex *m)
 }
 
 static void
-xMutexEnter(sqlite3_mutex *m)
+xMutexEnter(xsql_mutex *m)
 {
 	if (!m) return;
 
@@ -187,7 +187,7 @@ xMutexEnter(sqlite3_mutex *m)
 }
 
 static int
-xMutexTry(sqlite3_mutex *m)
+xMutexTry(xsql_mutex *m)
 {
 	if (!m) return SQLITE_BUSY;
 
@@ -211,7 +211,7 @@ xMutexTry(sqlite3_mutex *m)
 }
 
 static void
-xMutexLeave(sqlite3_mutex *m)
+xMutexLeave(xsql_mutex *m)
 {
 	if (!m) return;
 	if (m->recursive) {
@@ -226,7 +226,7 @@ xMutexLeave(sqlite3_mutex *m)
 }
 
 static int
-xMutexHeld(sqlite3_mutex *m)
+xMutexHeld(xsql_mutex *m)
 {
 	struct mutex_owner self;
 	if (!m) return 1;
@@ -236,12 +236,12 @@ xMutexHeld(sqlite3_mutex *m)
 }
 
 static int
-xMutexNotheld(sqlite3_mutex *m)
+xMutexNotheld(xsql_mutex *m)
 {
 	return !xMutexHeld(m);
 }
 
-static const sqlite3_mutex_methods mutex_table = {
+static const xsql_mutex_methods mutex_table = {
 	xMutexInit,
 	xMutexEnd,
 	xMutexAlloc,

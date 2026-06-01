@@ -33,8 +33,8 @@ extern "C" {
 
 /* Opaque handles -- the same underlying structs the engine uses, named
  * so the application never references the vendored type names. */
-typedef struct sqlite3      sx_db;
-typedef struct sqlite3_stmt sx_stmt;
+typedef struct xsql      sx_db;
+typedef struct xsql_stmt sx_stmt;
 
 /* Result codes (values match the engine ABI; engine.c static-asserts). */
 #define SX_OK        0

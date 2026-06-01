@@ -29,7 +29,7 @@
 
 #include "mutex.h"
 
-static sqlite3_mutex *g_m;
+static xsql_mutex *g_m;
 static _Atomic int    g_seq;          /* monotonically issued tickets */
 static int            g_a_acquire = -1, g_a_release = -1, g_b_acquire = -1;
 static int            g_a_recursion_ok = 0;
@@ -42,11 +42,11 @@ holder_proc(void *arg)
 	void *m = NULL; size_t n = 0;
 	(void)arg;
 
-	sqlite3_mutex_enter(g_m);
+	xsql_mutex_enter(g_m);
 	g_a_acquire = atomic_fetch_add(&g_seq, 1);
 
-	sqlite3_mutex_enter(g_m);             /* recursive re-entry */
-	sqlite3_mutex_leave(g_m);
+	xsql_mutex_enter(g_m);             /* recursive re-entry */
+	xsql_mutex_leave(g_m);
 	g_a_recursion_ok = 1;                 /* survived recursion */
 
 	/* Hold across a park so the contender is forced to wait. */
@@ -54,7 +54,7 @@ holder_proc(void *arg)
 	if (m) m = NULL;
 
 	g_a_release = atomic_fetch_add(&g_seq, 1);
-	sqlite3_mutex_leave(g_m);
+	xsql_mutex_leave(g_m);
 }
 
 /* Contender: yields briefly so the holder grabs the lock first, then
@@ -68,9 +68,9 @@ contender_proc(void *arg)
 	(void)xtc_recv(&m, &n, 5LL * 1000 * 1000);
 	if (m) m = NULL;
 
-	sqlite3_mutex_enter(g_m);             /* parks until holder leaves */
+	xsql_mutex_enter(g_m);             /* parks until holder leaves */
 	g_b_acquire = atomic_fetch_add(&g_seq, 1);
-	sqlite3_mutex_leave(g_m);
+	xsql_mutex_leave(g_m);
 }
 
 int
@@ -81,15 +81,15 @@ main(void)
 	xtc_pid_t a, b;
 	int rc;
 
-	rc = sqlite3_config(SQLITE_CONFIG_MUTEX, mutex_methods());
+	rc = xsql_config(SQLITE_CONFIG_MUTEX, mutex_methods());
 	if (rc != SQLITE_OK) { fprintf(stderr, "config(MUTEX)=%d\n", rc); return 1; }
-	rc = sqlite3_config(SQLITE_CONFIG_SERIALIZED);
+	rc = xsql_config(SQLITE_CONFIG_SERIALIZED);
 	if (rc != SQLITE_OK) { fprintf(stderr, "config(SERIALIZED)=%d\n", rc); return 1; }
-	if ((rc = sqlite3_initialize()) != SQLITE_OK) {
-		fprintf(stderr, "sqlite3_initialize=%d\n", rc); return 1;
+	if ((rc = xsql_initialize()) != SQLITE_OK) {
+		fprintf(stderr, "xsql_initialize=%d\n", rc); return 1;
 	}
 
-	g_m = sqlite3_mutex_alloc(SQLITE_MUTEX_RECURSIVE);
+	g_m = xsql_mutex_alloc(SQLITE_MUTEX_RECURSIVE);
 	if (g_m == NULL) { fprintf(stderr, "mutex_alloc failed\n"); return 1; }
 
 	if (xtc_loop_init(&loop) != XTC_OK) { fprintf(stderr, "loop_init\n"); return 1; }
@@ -104,8 +104,8 @@ main(void)
 	if (xtc_loop_run(loop) != XTC_OK) { fprintf(stderr, "loop_run\n"); return 1; }
 	(void)xtc_loop_fini(loop);
 
-	sqlite3_mutex_free(g_m);
-	(void)sqlite3_shutdown();
+	xsql_mutex_free(g_m);
+	(void)xsql_shutdown();
 
 	if (!g_a_recursion_ok) {
 		fprintf(stderr, "FAIL: recursive enter/leave broke\n");
