@@ -11,6 +11,22 @@ demonstrator, not the SQLite-backed engine: the goal is to exercise the
 hardest coordination on libxtc and prove the primitives, exactly as the
 earlier stages did.
 
+## Status: slices 1-4 SHIPPED (mvcc.c, test_mvcc.c)
+
+The versioned shards, the per-shard HLC, the deferred-reply 2PC
+coordinator, and write-write conflict detection are implemented and
+tested.  `test_mvcc` proves: (1) snapshot isolation -- a read at an old
+snapshot does not see a write committed after it; (2) cross-shard
+atomicity -- a two-key transaction spanning shards commits all-or-
+nothing through the coordinator; (3) concurrent conflict -- N clients
+committing one key at one snapshot resolve to exactly one commit, the
+rest aborting, on a single loop and on a 4-loop executor (12/12
+deterministic, ASan + UBSan clean).  Slice 5 (version GC) is partial:
+each key keeps a bounded version array (oldest dropped), which bounds
+memory; epoch-reclaimed GC against the oldest live snapshot is the
+remaining refinement.  Wiring it under the SQL engine is out of scope
+(see "Honest scope").
+
 ## What stage 4 reuses (already built)
 
   * **The deferred-reply gen_server** (`xtc_svr_call_save` +
