@@ -11,7 +11,7 @@
  *	szExtra), which is exactly the workload a slab allocator is
  *	built for: a single object-size class, no fragmentation,
  *	O(1) alloc/free.  This registers a custom
- *	sqlite3_pcache_methods2 whose page bodies come from a per-cache
+ *	xsql_pcache_methods2 whose page bodies come from a per-cache
  *	xtc_slab, with a small chained hash table for lookup and an LRU
  *	list of unpinned pages for recycling.
  *
@@ -27,7 +27,7 @@
 
 /*
  * Install the xtc page cache as SQLite's default pcache.  Must be
- * called before sqlite3_initialize() / the first database handle.
+ * called before xsql_initialize() / the first database handle.
  * Idempotent.  Returns SQLITE_OK on success.
  */
 int pcache_register(void);

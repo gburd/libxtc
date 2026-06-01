@@ -12,7 +12,7 @@
  *	The proof: install an __os_alloc hook that counts every call the
  *	xtc allocator makes (and delegates to libc), then drive a real
  *	SQL workload (DDL + 200 inserts + an aggregate read) through the
- *	sx_ engine.  Because mem.c routes sqlite3_malloc/realloc/free to
+ *	sx_ engine.  Because mem.c routes xsql_malloc/realloc/free to
  *	__os_malloc/realloc/free, the engine's allocations land on the
  *	hook: the post-workload delta must be large, and every byte SQLite
  *	asked for must round-trip (the workload result must be correct).

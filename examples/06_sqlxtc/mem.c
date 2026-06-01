@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/mem.c
- *	An sqlite3_mem_methods implementation backed by xtc's allocator
+ *	An xsql_mem_methods implementation backed by xtc's allocator
  *	(__os_malloc / __os_realloc / __os_free).
  *
  *	This is one of the engine's "use xtc where possible" seams.  By
@@ -119,7 +119,7 @@ mem_shutdown(void *unused)
 	(void)unused;
 }
 
-static const sqlite3_mem_methods mem_table = {
+static const xsql_mem_methods mem_table = {
 	mem_malloc,
 	mem_free,
 	mem_realloc,
