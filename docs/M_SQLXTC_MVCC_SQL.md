@@ -97,11 +97,19 @@ dangerous read-write structure, abort the pivot.
 
 1. **(done)** SQL on the B-tree storage via `xstore` -- the storage
    swap, larger-than-RAM, on-loop validated.
-2. Back the version store with the B-tree keyed by
-   `(user_key, commit_ts)`; put `xmin`/`xmax` visibility on the
-   `xstore` read path so SQL reads honor a snapshot.
+2. **(done)** MVCC snapshot reads on the `xstore` path: versions keyed
+   by `(rowid, commit_ts)`, a read returns the newest non-tombstone
+   version with `commit_ts <= snapshot` (PostgreSQL
+   HeapTupleSatisfiesMVCC; newer versions stand in for `xmax`).  A
+   global logical commit clock supplies timestamps; `xstore_now()` and
+   `xstore_as_of(ts)` expose snapshot/AS-OF reads from SQL.
+   `test_xstore` proves a read at an old snapshot sees the pre-update
+   value while latest sees the new one, and a delete is invisible to
+   the old snapshot.  Surfaced and fixed the vtable-boundary latch
+   self-deadlock (see `M_SQLXTC_XTC_GAPS.md`).
 3. Merge `mvcc.c`'s 2PC coordinator + HLC so multi-row SQL transactions
-   commit atomically at a commit timestamp.
+   commit atomically at a single commit timestamp (today writes
+   autocommit per statement at a fresh timestamp).
 4. Add SSI (Cahill): rw-antidependency tracking + dangerous-structure
    abort for `SERIALIZABLE`; cite `predicate.c` lineage in the code.
 5. The larger-than-RAM + (later) HammerDB/Quack benchmark comparison
