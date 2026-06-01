@@ -136,8 +136,22 @@ dangerous read-write structure, abort the pivot.
    transaction is detected via `sqlite3_get_autocommit` so reads before
    the first write are captured (SQLite fires xBegin only at the first
    write).
-5. The larger-than-RAM + (later) HammerDB/Quack benchmark comparison
-   against SQLite under equal core/memory constraints.
+5. **(done)** The larger-than-RAM benchmark against SQLite under an
+   equal memory budget: `bench/sqlxtc/engine_ab.c` runs the same SQL
+   through the same VDBE, differing only in the storage engine
+   (`xstore` over our B-tree + cooling buffer pool, vs SQLite's own
+   B-tree + pager), with equal cache budgets and a working set 24x
+   larger than the cache so both page to disk.  Result (floki, median
+   of 3, see `bench/sqlxtc/ENGINE_AB.md`): xstore reads are competitive
+   -- within ~6% of SQLite read-only (608 vs 645 kops/s) and ~14% on
+   95/5 -- while the 50/50 mix is ~1.9x slower, the measured cost of
+   multi-version storage without GC on the SQL path.  The three write-
+   path items this quantifies (version GC under xstore, O(1) version
+   insert, asynchronous cooling-pool writeback to cut the eviction
+   tail) are the prioritized next work; the async-writeback item is
+   where xtc's cooperative I/O is positioned to beat a synchronous
+   pager on the tail.  (A full TPC-C profile and the HammerDB/Quack
+   networked comparison remain later work.)
 
 The citations above are carried in the source where each piece lands,
 so the provenance of the model is explicit in the code, not just here.
