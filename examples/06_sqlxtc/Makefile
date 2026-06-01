@@ -116,7 +116,7 @@ quack.o: quack.c quack.h
 db.o: db.c db.h quack.h engine.h
 conn.o: conn.c conn.h db.h quack.h sql_parse.h engine.h admin.h
 admin.o: admin.c admin.h quack.h
-engine.o: engine.c engine.h vfs.h sqlite3.h
+engine.o: engine.c engine.h vfs.h xstore.h btree.h bufmgr.h sqlite3.h
 mutex.o: mutex.c
 mem.o: mem.c mem.h sqlite3.h
 vfs.o: vfs.c vfs.h sqlite3.h
@@ -246,8 +246,8 @@ test-admin: test_admin
 # Installs the xtc allocator under an __os_alloc counting hook, then
 # drives a real SQL workload: proves the engine's allocations flow
 # through xtc (hook count > 0) and that the workload is correct.
-test_mem: test_mem.c mem.o mutex.o engine.o vfs.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_mem.c mem.o mutex.o engine.o vfs.o sqlite3.o $(LDFLAGS)
+test_mem: test_mem.c mem.o mutex.o engine.o vfs.o xstore.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_mem.c mem.o mutex.o engine.o vfs.o xstore.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-mem: test_mem
 	./test_mem
@@ -295,8 +295,8 @@ test-xstore: test_xstore
 	./test_xstore
 
 # ---- sx_ engine parallel-execution test (in-process, no daemon) ----
-test_parallel: test_parallel.c engine.o vfs.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_parallel.c engine.o vfs.o sqlite3.o $(LDFLAGS)
+test_parallel: test_parallel.c engine.o vfs.o xstore.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_parallel.c engine.o vfs.o xstore.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-parallel: test_parallel
 	./test_parallel
