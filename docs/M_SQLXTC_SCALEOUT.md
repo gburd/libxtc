@@ -91,7 +91,10 @@ Each stage is a working artifact and a focused dogfood.
      dogfood.
   5. **Supervise + crash-inject** the shards and the global procs.
 
-Stages 1-3 are "what's possible from A and C today" on the existing
+Stage 4 (MVCC + cross-shard transactions) has its own executable plan
+in `M_SQLXTC_STAGE4.md`.
+
+Stages 1-3 are "what is possible from A and C today" on the existing
 greenfield engine; stages 4-5 are the capstone.
 
 ## Honest scope
