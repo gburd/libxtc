@@ -20,6 +20,7 @@
 #     xtc-proc  ADDR|PID     detail one proc (struct xtc_proc *)
 #     xtc-mailbox ADDR       dump a proc's mailbox (queued envelopes)
 #     xtc-self               the proc running on the selected thread
+#     xtc-trace              dump the causal message trace (HLC-ordered)
 #     xtc-help               this help
 #
 # The proc enumeration walks proc.c's per-loop slot tables via the
@@ -28,6 +29,7 @@
 import gdb
 
 TASK_STATE = {0: "SCHEDULED", 1: "RUNNING", 2: "PARKED", 3: "DONE"}
+TRACE_KIND = {0: "SEND", 1: "RECV", 2: "SPAWN", 3: "EXIT"}
 
 
 def _sym(name):
@@ -234,6 +236,45 @@ class XtcSelf(gdb.Command):
         gdb.execute("xtc-proc 0x%x" % int(cur))
 
 
+class XtcTrace(gdb.Command):
+    """xtc-trace: dump the causal message trace ring (HLC-ordered)."""
+    def __init__(self):
+        super().__init__("xtc-trace", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        seq = _sym("__trace_seq")
+        if seq is None:
+            print("no trace ring (built -g? library linked?)")
+            return
+        hlc = _sym("__g_hlc")
+        if hlc is not None:
+            print("HLC now: %d" % int(hlc))
+        seq = int(seq)
+        if seq == 0:
+            print("no trace events (is tracing enabled? "
+                  "xtc_trace_enable(1))")
+            return
+        ring = _sym("__trace_ring")
+        if ring is None:
+            print("no trace ring (built -g? library linked?)")
+            return
+        cap = int(ring.type.range()[1]) + 1
+        n = seq if seq < cap else cap
+        start = seq - n
+        recs = [ring[(start + i) % cap] for i in range(n)]
+        recs.sort(key=lambda r: int(r["hlc"]))
+        print("%-20s %-5s %-12s %-12s %s"
+              % ("hlc", "kind", "self", "peer", "cause/detail"))
+        for r in recs:
+            kind = TRACE_KIND.get(int(r["kind"]), "?%d" % int(r["kind"]))
+            cause = int(r["cause"])
+            cs = "  cause=%d" % cause if cause else ""
+            print("HLC%-17d %-5s self=%-11s peer=%-11s%s  detail=%d"
+                  % (int(r["hlc"]), kind, _pid_str(r["self"]),
+                     _pid_str(r["peer"]), cs, int(r["detail"])))
+        print("(%d events)" % n)
+
+
 class XtcHelp(gdb.Command):
     """xtc-help: list xtc debugger commands."""
     def __init__(self):
@@ -242,7 +283,7 @@ class XtcHelp(gdb.Command):
     def invoke(self, arg, from_tty):
         print(__doc__ if __doc__ else "see tools/gdb/xtc-gdb.py header")
         print("  xtc-loops | xtc-procs [loop] | xtc-proc A | "
-              "xtc-mailbox A | xtc-self")
+              "xtc-mailbox A | xtc-self | xtc-trace")
 
 
 gdb.pretty_printers.append(_lookup_printer)
@@ -251,6 +292,7 @@ XtcProcs()
 XtcProc()
 XtcMailbox()
 XtcSelf()
+XtcTrace()
 XtcHelp()
 print("xtc-gdb loaded: xtc-loops, xtc-procs, xtc-proc, xtc-mailbox, "
-      "xtc-self, xtc-help")
+      "xtc-self, xtc-trace, xtc-help")
