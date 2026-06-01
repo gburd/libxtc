@@ -119,8 +119,23 @@ dangerous read-write structure, abort the pivot.
    B-tree store; merging the cross-shard 2PC coordinator for
    distributed transactions remains where multiple shards are
    involved.)
-4. Add SSI (Cahill): rw-antidependency tracking + dangerous-structure
-   abort for `SERIALIZABLE`; cite `predicate.c` lineage in the code.
+4. **(done)** Serializable isolation: the `xstore` transaction records
+   its read set (point reads; a full scan is a table-level read), and
+   xSync (2PC phase 1) validates it -- if any key the transaction read
+   was overwritten by a transaction that committed after its snapshot,
+   the commit fails with SQLITE_BUSY so the caller retries.  This
+   forbids write-skew, turning snapshot isolation into
+   serializability.  `xstore_serializable(on)` selects the level per
+   connection; `test_xstore` shows write-skew committing under SI (the
+   anomaly) and one of two concurrent transactions aborting under
+   serializable.  This is optimistic / Neumann-style precision
+   validation (SIGMOD 2015); it is a conservative cousin of Cahill
+   SSI's pivot detection (SIGMOD 2008, PostgreSQL 9.1 `predicate.c`),
+   which allows more concurrency by aborting only true dangerous
+   structures -- the refinement to adopt next.  The explicit
+   transaction is detected via `sqlite3_get_autocommit` so reads before
+   the first write are captured (SQLite fires xBegin only at the first
+   write).
 5. The larger-than-RAM + (later) HammerDB/Quack benchmark comparison
    against SQLite under equal core/memory constraints.
 

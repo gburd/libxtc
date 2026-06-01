@@ -349,6 +349,83 @@ scenario_txn(void)
 	return 0;
 }
 
+/* Two connections sharing one engine B-tree exhibit write-skew under
+ * snapshot isolation; serializable validation aborts one of them. */
+static int
+commit_rc(sqlite3 *db)
+{
+	return sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+}
+
+static int
+scenario_serializable(void)
+{
+	bm_t *bm = NULL;
+	bt_t *bt = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-xstore5-XXXXXX";
+	sqlite3 *d1 = NULL, *d2 = NULL;
+	char b[32];
+	int fd;
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = 64; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(sqlite3_open(":memory:", &d1) == SQLITE_OK);
+	CK(sqlite3_open(":memory:", &d2) == SQLITE_OK);
+	CK(xstore_register(d1, bt) == SQLITE_OK);
+	CK(xstore_register(d2, bt) == SQLITE_OK);
+	CK(sqlite3_exec(d1, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+	CK(sqlite3_exec(d2, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+	CK(sqlite3_exec(d1, "INSERT INTO t(k,v) VALUES(1,'0'),(2,'0');", 0, 0, 0) == SQLITE_OK);
+
+	/* Write-skew under snapshot isolation (default): each txn reads
+	 * both rows (sees 0,0) and writes a different one; both commit, so
+	 * the invariant 'at most one of x,y is 1' is violated. */
+	CK(sqlite3_exec(d1, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(sel_v(d1, 1, b, sizeof b) == 1); CK(sel_v(d1, 2, b, sizeof b) == 1);
+	CK(sqlite3_exec(d2, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(sel_v(d2, 1, b, sizeof b) == 1); CK(sel_v(d2, 2, b, sizeof b) == 1);
+	CK(sqlite3_exec(d1, "UPDATE t SET v='1' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
+	CK(sqlite3_exec(d2, "UPDATE t SET v='1' WHERE k=2;", 0, 0, 0) == SQLITE_OK);
+	CK(commit_rc(d1) == SQLITE_OK);
+	CK(commit_rc(d2) == SQLITE_OK);                 /* SI: BOTH commit */
+	CK(sel_v(d1, 1, b, sizeof b) == 1 && strcmp(b, "1") == 0);
+	CK(sel_v(d1, 2, b, sizeof b) == 1 && strcmp(b, "1") == 0);  /* anomaly present */
+
+	/* Reset to 0,0 and rerun under serializable: one txn must abort. */
+	CK(sqlite3_exec(d1, "UPDATE t SET v='0' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
+	CK(sqlite3_exec(d1, "UPDATE t SET v='0' WHERE k=2;", 0, 0, 0) == SQLITE_OK);
+	CK(sqlite3_exec(d1, "SELECT xstore_serializable(1);", 0, 0, 0) == SQLITE_OK);
+	CK(sqlite3_exec(d2, "SELECT xstore_serializable(1);", 0, 0, 0) == SQLITE_OK);
+
+	CK(sqlite3_exec(d1, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(sel_v(d1, 1, b, sizeof b) == 1); CK(sel_v(d1, 2, b, sizeof b) == 1);
+	CK(sqlite3_exec(d2, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(sel_v(d2, 1, b, sizeof b) == 1); CK(sel_v(d2, 2, b, sizeof b) == 1);
+	CK(sqlite3_exec(d1, "UPDATE t SET v='1' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
+	CK(sqlite3_exec(d2, "UPDATE t SET v='1' WHERE k=2;", 0, 0, 0) == SQLITE_OK);
+	{
+		int rc1 = commit_rc(d1);
+		int rc2 = commit_rc(d2);
+		/* d1 validates (no conflict yet) and commits; d2's read of k=1
+		 * was overwritten by d1 after d2's snapshot -> abort. */
+		CK(rc1 == SQLITE_OK);
+		CK(rc2 == SQLITE_BUSY);
+	}
+
+	sqlite3_close(d1); sqlite3_close(d2);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   serializable isolation: write-skew commits under SI "
+	    "(anomaly), but serializable validation aborts the second txn "
+	    "(SQLITE_BUSY) -- read-set conflict detected\n");
+	return 0;
+}
+
 int
 main(void)
 {
@@ -356,6 +433,7 @@ main(void)
 	if (scenario_onloop() != 0) return 1;
 	if (scenario_mvcc() != 0) return 1;
 	if (scenario_txn() != 0) return 1;
+	if (scenario_serializable() != 0) return 1;
 	printf("All sqlxtc SQL-on-xstore tests passed.\n");
 	return 0;
 }
