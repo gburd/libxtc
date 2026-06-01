@@ -47,6 +47,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "sqlite3.h"
 #include "btree.h"
@@ -70,6 +71,7 @@ typedef struct xs_wrec {
 /* Per-connection state, shared by the module and the SQL functions:
  * the engine storage, this connection's read snapshot, and the
  * in-flight transaction's buffered writes. */
+typedef struct ssi_txn ssi_txn_t;     /* SSI registry slot (defined below) */
 typedef struct xstore_ctx {
 	bt_t            *bt;
 	_Atomic uint64_t read_snap;   /* 0 == read latest committed */
@@ -81,6 +83,7 @@ typedef struct xstore_ctx {
 	int64_t         *rset;        /* rowids read in this txn (serializable) */
 	int              rn, rcap;
 	int              did_scan;    /* txn did a full scan (table-level read) */
+	ssi_txn_t       *ssi;         /* this txn's SSI registry slot (or NULL) */
 } xstore_ctx_t;
 
 static void
@@ -140,6 +143,164 @@ rset_add(xstore_ctx_t *c, int64_t rowid)
 	c->rset[c->rn++] = rowid;
 }
 
+/*
+ * Serializable Snapshot Isolation (Cahill et al., SIGMOD 2008; the
+ * model PostgreSQL 9.1+ uses in predicate.c).  The read-set check in
+ * xs_sync alone is conservative "precision validation" -- it aborts a
+ * transaction whenever something it read was overwritten, i.e. on any
+ * outgoing rw-antidependency.  SSI is more permissive: it aborts only
+ * a PIVOT -- a transaction with BOTH an incoming and an outgoing
+ * rw-antidependency -- because Fekete et al. (2005) proved every
+ * serialization-graph cycle under snapshot isolation contains such a
+ * pivot, so aborting all pivots breaks all cycles while letting
+ * read-mostly transactions (outgoing edge only) commit.
+ *
+ * The outgoing edge (something I read was overwritten by a committed
+ * transaction after my snapshot) is detected from the shared B-tree's
+ * version timestamps (xs_newest_ts), so it catches overwrites by any
+ * committer regardless of its isolation level.  The incoming edge
+ * (someone read what I am about to write) cannot be read from the
+ * B-tree -- reads leave no version -- so serializable transactions
+ * publish their read sets to this small in-memory registry, and a
+ * committing writer scans it for a concurrent reader of any rowid it
+ * writes.  Following PostgreSQL, the outgoing edge counts toward an
+ * abort only when its target has already COMMITTED (the pivot's
+ * out-neighbor commits first): so in a write-skew the first committer
+ * (whose out-neighbor is still active) commits and the second aborts.
+ */
+#define SSI_MAX 256
+enum { SSI_FREE = 0, SSI_ACTIVE, SSI_COMMITTED };
+struct ssi_txn {
+	int       state;
+	uint64_t  snap;        /* read snapshot */
+	uint64_t  commit_ts;   /* set when COMMITTED */
+	int       did_scan;    /* read the whole table (predicate = everything) */
+	int64_t  *reads;       /* rowids this txn read */
+	int       nreads, rcap;
+};
+
+static ssi_txn_t       g_ssi[SSI_MAX];
+static pthread_mutex_t g_ssi_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* Free committed slots no active transaction can still conflict with:
+ * a committed W is needed only while some active U started before W
+ * committed (U.snap < W.commit_ts).  Caller holds g_ssi_mu. */
+static void
+ssi_gc_locked(void)
+{
+	uint64_t min_active = ~(uint64_t)0;
+	int i;
+	for (i = 0; i < SSI_MAX; i++)
+		if (g_ssi[i].state == SSI_ACTIVE && g_ssi[i].snap < min_active)
+			min_active = g_ssi[i].snap;
+	for (i = 0; i < SSI_MAX; i++)
+		if (g_ssi[i].state == SSI_COMMITTED &&
+		    g_ssi[i].commit_ts <= min_active) {
+			free(g_ssi[i].reads);
+			g_ssi[i].reads = NULL;
+			g_ssi[i].nreads = g_ssi[i].rcap = 0;
+			g_ssi[i].state = SSI_FREE;
+		}
+}
+
+/* Begin tracking a serializable transaction.  Returns its slot, or
+ * NULL if the registry is full (the caller then falls back to
+ * precision validation, which is correct, just less permissive). */
+static ssi_txn_t *
+ssi_begin(uint64_t snap)
+{
+	ssi_txn_t *t = NULL;
+	int i;
+	pthread_mutex_lock(&g_ssi_mu);
+	ssi_gc_locked();
+	for (i = 0; i < SSI_MAX; i++)
+		if (g_ssi[i].state == SSI_FREE) {
+			t = &g_ssi[i];
+			t->state = SSI_ACTIVE;
+			t->snap = snap;
+			t->commit_ts = 0;
+			t->did_scan = 0;
+			t->nreads = 0;        /* keep any allocated rcap/reads */
+			break;
+		}
+	pthread_mutex_unlock(&g_ssi_mu);
+	return t;
+}
+
+static void
+ssi_record_read(ssi_txn_t *t, int64_t rowid)
+{
+	int i;
+	if (t == NULL) return;
+	pthread_mutex_lock(&g_ssi_mu);
+	for (i = 0; i < t->nreads; i++)
+		if (t->reads[i] == rowid) { pthread_mutex_unlock(&g_ssi_mu); return; }
+	if (t->nreads == t->rcap) {
+		int nc = t->rcap ? t->rcap * 2 : 16;
+		int64_t *nb = realloc(t->reads, (size_t)nc * sizeof *nb);
+		if (nb == NULL) { pthread_mutex_unlock(&g_ssi_mu); return; }
+		t->reads = nb; t->rcap = nc;
+	}
+	t->reads[t->nreads++] = rowid;
+	pthread_mutex_unlock(&g_ssi_mu);
+}
+
+static void
+ssi_record_scan(ssi_txn_t *t)
+{
+	if (t == NULL) return;
+	pthread_mutex_lock(&g_ssi_mu);
+	t->did_scan = 1;
+	pthread_mutex_unlock(&g_ssi_mu);
+}
+
+/* Does any OTHER serializable transaction, concurrent with `me`, have
+ * an incoming rw-edge to me -- i.e. did it read a rowid in my write
+ * set `wr[0..nwr)` (or scan the whole table)?  Returns 1 if so, or if
+ * `me` is NULL (registry full -> conservative). */
+static int
+ssi_in_conflict(ssi_txn_t *me, const int64_t *wr, int nwr)
+{
+	int i, j, k, in = 0;
+	if (me == NULL) return 1;
+	if (nwr == 0) return 0;
+	pthread_mutex_lock(&g_ssi_mu);
+	for (i = 0; i < SSI_MAX && !in; i++) {
+		ssi_txn_t *u = &g_ssi[i];
+		if (u == me || u->state == SSI_FREE) continue;
+		/* Concurrent: an active txn always overlaps me; a committed
+		 * one only if it committed after my snapshot (I didn't see
+		 * it).  My own commit is in the future, so it never saw me. */
+		if (u->state == SSI_COMMITTED && u->commit_ts <= me->snap) continue;
+		if (u->did_scan) { in = 1; break; }
+		for (j = 0; j < u->nreads && !in; j++)
+			for (k = 0; k < nwr; k++)
+				if (u->reads[j] == wr[k]) { in = 1; break; }
+	}
+	pthread_mutex_unlock(&g_ssi_mu);
+	return in;
+}
+
+static void
+ssi_commit(ssi_txn_t *t, uint64_t commit_ts)
+{
+	if (t == NULL) return;
+	pthread_mutex_lock(&g_ssi_mu);
+	t->state = SSI_COMMITTED;
+	t->commit_ts = commit_ts;
+	pthread_mutex_unlock(&g_ssi_mu);
+}
+
+static void
+ssi_abort(ssi_txn_t *t)
+{
+	if (t == NULL) return;
+	pthread_mutex_lock(&g_ssi_mu);
+	t->state = SSI_FREE;
+	t->nreads = 0;
+	pthread_mutex_unlock(&g_ssi_mu);
+}
+
 /* Order-preserving big-endian; the timestamp half is inverted so that,
  * within a rowid, higher commit_ts sorts first (newest version first). */
 static void
@@ -195,6 +356,7 @@ xs_enter(xstore_vtab_t *v)
 		wbuf_clear(cx);
 		cx->rn = 0;
 		cx->did_scan = 0;
+		cx->ssi = cx->serializable ? ssi_begin(cx->txn_snap) : NULL;
 	}
 }
 
@@ -384,8 +546,10 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 		uint16_t klen = 0, vl = 0;
 		int64_t want = xsql_value_int64(argv[0]);
 		c->point = 1;
-		if (v->ctx->in_txn && v->ctx->serializable)
+		if (v->ctx->in_txn && v->ctx->serializable) {
 			rset_add(v->ctx, want);   /* read set for serializable validation */
+			ssi_record_read(v->ctx->ssi, want);
+		}
 		if (v->ctx->in_txn) {
 			const xs_wrec_t *w = wbuf_find(v->ctx, want);
 			if (w != NULL) {
@@ -412,8 +576,10 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 		return SQLITE_OK;
 	}
 	c->point = 0;
-	if (v->ctx->in_txn && v->ctx->serializable)
+	if (v->ctx->in_txn && v->ctx->serializable) {
 		v->ctx->did_scan = 1;     /* a full read; conservative validation */
+		ssi_record_scan(v->ctx->ssi);
+	}
 	xs_advance(c);
 	return SQLITE_OK;
 }
@@ -550,30 +716,48 @@ static int
 xs_sync(xsql_vtab *pv)
 {
 	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
+	int i, out_edge = 0, in_edge;
+	int64_t *wr;
+	int nwr;
 	if (!cx->in_txn || !cx->serializable)
 		return SQLITE_OK;
 	/*
 	 * Serializable validation, in xSync (2PC phase 1) so a failure
 	 * rolls the transaction back -- xCommit (phase 2) is too late.
-	 * Optimistic / Neumann-style precision validation; a conservative
-	 * cousin of Cahill SSI's pivot detection (docs/M_SQLXTC_MVCC_SQL.md).
-	 * If any key this transaction read was overwritten by a
-	 * transaction that committed after our snapshot, our read is stale
-	 * and committing would not be serializable: fail so the caller
-	 * retries.  This is what forbids write-skew.
+	 * Cahill SSI pivot detection (docs/M_SQLXTC_MVCC_SQL.md): abort
+	 * only if this transaction has BOTH an outgoing and an incoming
+	 * rw-antidependency.  This commits read-mostly transactions that
+	 * the older precision validation (any overwritten read -> abort)
+	 * would have failed, while still forbidding write-skew.
+	 *
+	 * Outgoing edge: a key we read was overwritten by a transaction
+	 * that committed after our snapshot -- read straight from the
+	 * shared B-tree's version timestamps, so it sees every committer.
+	 * Counts toward an abort only because such a writer has, by
+	 * definition, already committed (the pivot's out-neighbor commits
+	 * first); in a write-skew this makes the second committer abort.
 	 */
-	{
-		int i;
-		for (i = 0; i < cx->rn; i++)
-			if (xs_newest_ts(cx->bt, cx->rset[i]) > cx->txn_snap)
-				return SQLITE_BUSY;        /* serialization failure */
-		/* A full-table read conflicts with any commit after our
-		 * snapshot (no predicate locking yet -- conservative). */
-		if (cx->did_scan &&
-		    atomic_load_explicit(&g_xclock, memory_order_relaxed) > cx->txn_snap)
-			return SQLITE_BUSY;
-	}
-	return SQLITE_OK;
+	for (i = 0; i < cx->rn; i++)
+		if (xs_newest_ts(cx->bt, cx->rset[i]) > cx->txn_snap) { out_edge = 1; break; }
+	if (cx->did_scan &&
+	    atomic_load_explicit(&g_xclock, memory_order_relaxed) > cx->txn_snap)
+		out_edge = 1;
+	if (!out_edge)
+		return SQLITE_OK;          /* no outgoing edge -> cannot be a pivot */
+	/*
+	 * Incoming edge: another concurrent serializable transaction read
+	 * a rowid we are about to write.  Reads leave no version in the
+	 * B-tree, so this is answered from the in-memory SSI registry,
+	 * scanned against our buffered write set.
+	 */
+	wr = malloc((size_t)(cx->wn ? cx->wn : 1) * sizeof *wr);
+	nwr = 0;
+	if (wr != NULL)
+		for (i = 0; i < cx->wn; i++)
+			wr[nwr++] = cx->wbuf[i].rowid;
+	in_edge = ssi_in_conflict(cx->ssi, wr, nwr);
+	free(wr);
+	return in_edge ? SQLITE_BUSY : SQLITE_OK;   /* pivot -> serialization failure */
 }
 
 static int
@@ -598,7 +782,14 @@ xs_commit(xsql_vtab *pv)
 			    (uint16_t)(1 + (w->deleted ? 0 : w->len))) != XTC_OK)
 				rc = SQLITE_ERROR;
 		}
+		ssi_commit(cx->ssi, ts);     /* publish commit_ts for SSI peers */
+	} else {
+		/* read-only: keep the read set visible to concurrent peers
+		 * until GC, stamped at the current clock. */
+		ssi_commit(cx->ssi,
+		    atomic_load_explicit(&g_xclock, memory_order_relaxed));
 	}
+	cx->ssi = NULL;
 	wbuf_clear(cx);
 	cx->in_txn = 0;
 	return rc;
@@ -607,6 +798,8 @@ static int
 xs_rollback(xsql_vtab *pv)
 {
 	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
+	ssi_abort(cx->ssi);
+	cx->ssi = NULL;
 	wbuf_clear(cx);
 	cx->in_txn = 0;
 	return SQLITE_OK;
@@ -668,7 +861,7 @@ static void
 ctx_free(void *p)
 {
 	xstore_ctx_t *cx = p;
-	if (cx != NULL) { wbuf_clear(cx); free(cx->wbuf); free(cx->rset); }
+	if (cx != NULL) { ssi_abort(cx->ssi); wbuf_clear(cx); free(cx->wbuf); free(cx->rset); }
 	xsql_free(p);
 }
 
@@ -689,6 +882,7 @@ xstore_register(xsql *db, bt_t *bt)
 	ctx->rset = NULL;
 	ctx->rn = ctx->rcap = 0;
 	ctx->did_scan = 0;
+	ctx->ssi = NULL;
 	rc = xsql_create_module_v2(db, "xstore", &xstore_module, ctx, ctx_free);
 	if (rc != SQLITE_OK)
 		return rc;
