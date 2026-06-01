@@ -77,6 +77,10 @@ typedef struct xstore_ctx {
 	uint64_t         txn_snap;    /* snapshot captured at xBegin */
 	xs_wrec_t       *wbuf;        /* buffered writes, applied atomically */
 	int              wn, wcap;
+	int              serializable; /* 1 == validate the read set on commit */
+	int64_t         *rset;        /* rowids read in this txn (serializable) */
+	int              rn, rcap;
+	int              did_scan;    /* txn did a full scan (table-level read) */
 } xstore_ctx_t;
 
 static void
@@ -120,6 +124,22 @@ wbuf_find(const xstore_ctx_t *c, int64_t rowid)
 	return NULL;
 }
 
+/* Record a rowid in the transaction's read set (serializable mode). */
+static void
+rset_add(xstore_ctx_t *c, int64_t rowid)
+{
+	int i;
+	for (i = 0; i < c->rn; i++)
+		if (c->rset[i] == rowid) return;   /* already recorded */
+	if (c->rn == c->rcap) {
+		int nc = c->rcap ? c->rcap * 2 : 16;
+		int64_t *nb = realloc(c->rset, (size_t)nc * sizeof *nb);
+		if (nb == NULL) return;            /* best-effort; a miss is safe-ish */
+		c->rset = nb; c->rcap = nc;
+	}
+	c->rset[c->rn++] = rowid;
+}
+
 /* Order-preserving big-endian; the timestamp half is inverted so that,
  * within a rowid, higher commit_ts sorts first (newest version first). */
 static void
@@ -152,7 +172,31 @@ dec_ts(const uint8_t *k)
 typedef struct xstore_vtab {
 	sqlite3_vtab base;
 	xstore_ctx_t *ctx;
+	sqlite3      *db;     /* for sqlite3_get_autocommit: detect explicit txn */
 } xstore_vtab_t;
+
+/*
+ * Enter the SQL transaction on first vtab access.  SQLite fires xBegin
+ * at the first WRITE, not the first read, so reads before the first
+ * write would otherwise miss the transaction (and the read set, and
+ * the start snapshot).  sqlite3_get_autocommit() == 0 means an explicit
+ * BEGIN..COMMIT is open; capture the snapshot and open the
+ * buffer/read-set on the first access within it.  Autocommit
+ * single-statement work leaves in_txn == 0 (immediate write, latest
+ * read).
+ */
+static void
+xs_enter(xstore_vtab_t *v)
+{
+	xstore_ctx_t *cx = v->ctx;
+	if (!sqlite3_get_autocommit(v->db) && !cx->in_txn) {
+		cx->in_txn = 1;
+		cx->txn_snap = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+		wbuf_clear(cx);
+		cx->rn = 0;
+		cx->did_scan = 0;
+	}
+}
 
 typedef struct xstore_cursor {
 	sqlite3_vtab_cursor base;
@@ -200,6 +244,7 @@ xs_connect(sqlite3 *db, void *pAux, int argc, const char *const *argv,
 		return SQLITE_NOMEM;
 	memset(v, 0, sizeof *v);
 	v->ctx = (xstore_ctx_t *)pAux;
+	v->db = db;
 	*ppv = &v->base;
 	return SQLITE_OK;
 }
@@ -320,6 +365,7 @@ xs_filter(sqlite3_vtab_cursor *pc, int idxNum, const char *idxStr,
 	uint64_t snap;
 	(void)idxStr;
 
+	xs_enter(v);
 	snap = atomic_load_explicit(&v->ctx->read_snap, memory_order_relaxed);
 	if (snap == 0)
 		snap = v->ctx->in_txn
@@ -338,6 +384,8 @@ xs_filter(sqlite3_vtab_cursor *pc, int idxNum, const char *idxStr,
 		uint16_t klen = 0, vl = 0;
 		int64_t want = sqlite3_value_int64(argv[0]);
 		c->point = 1;
+		if (v->ctx->in_txn && v->ctx->serializable)
+			rset_add(v->ctx, want);   /* read set for serializable validation */
 		if (v->ctx->in_txn) {
 			const xs_wrec_t *w = wbuf_find(v->ctx, want);
 			if (w != NULL) {
@@ -364,6 +412,8 @@ xs_filter(sqlite3_vtab_cursor *pc, int idxNum, const char *idxStr,
 		return SQLITE_OK;
 	}
 	c->point = 0;
+	if (v->ctx->in_txn && v->ctx->serializable)
+		v->ctx->did_scan = 1;     /* a full read; conservative validation */
 	xs_advance(c);
 	return SQLITE_OK;
 }
@@ -419,6 +469,27 @@ xs_put(bt_t *bt, int64_t rowid, const void *blob, int n, int deleted)
 	    == XTC_OK ? SQLITE_OK : SQLITE_ERROR;
 }
 
+/* The commit_ts of the newest committed version of `rowid`, or 0 if the
+ * rowid has no version.  Used by serializable validation to detect a
+ * concurrent write to a key this transaction read. */
+static uint64_t
+xs_newest_ts(bt_t *bt, int64_t rowid)
+{
+	bt_cursor_t *cur = NULL;
+	uint8_t startk[XS_VKLEN];
+	const void *k = NULL, *vv = NULL;
+	uint16_t klen = 0, vl = 0;
+	uint64_t ts = 0;
+	enc_vkey(rowid, ~(uint64_t)0, startk);   /* newest version sorts first */
+	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
+		return 0;
+	if (bt_cursor_next(cur, &k, &klen, &vv, &vl) == XTC_OK &&
+	    klen == XS_VKLEN && dec_rowid((const uint8_t *)k) == rowid)
+		ts = dec_ts((const uint8_t *)k);
+	bt_cursor_close(cur);
+	return ts;
+}
+
 static int
 xs_update(sqlite3_vtab *pv, int argc, sqlite3_value **argv,
     sqlite3_int64 *pRowid)
@@ -426,6 +497,7 @@ xs_update(sqlite3_vtab *pv, int argc, sqlite3_value **argv,
 	xstore_vtab_t *v = (xstore_vtab_t *)pv;
 	xstore_ctx_t *cx = v->ctx;
 
+	xs_enter(v);
 	/*
 	 * Buffer the write; xCommit flushes the whole transaction at ONE
 	 * commit timestamp (atomic multi-row commit).  SQLite wraps every
@@ -471,14 +543,38 @@ xs_update(sqlite3_vtab *pv, int argc, sqlite3_value **argv,
 static int
 xs_begin(sqlite3_vtab *pv)
 {
-	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
-	wbuf_clear(cx);
-	cx->txn_snap = atomic_load_explicit(&g_xclock, memory_order_relaxed);
-	cx->in_txn = 1;
+	xs_enter((xstore_vtab_t *)pv);
 	return SQLITE_OK;
 }
 static int
-xs_sync(sqlite3_vtab *pv) { (void)pv; return SQLITE_OK; }
+xs_sync(sqlite3_vtab *pv)
+{
+	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
+	if (!cx->in_txn || !cx->serializable)
+		return SQLITE_OK;
+	/*
+	 * Serializable validation, in xSync (2PC phase 1) so a failure
+	 * rolls the transaction back -- xCommit (phase 2) is too late.
+	 * Optimistic / Neumann-style precision validation; a conservative
+	 * cousin of Cahill SSI's pivot detection (docs/M_SQLXTC_MVCC_SQL.md).
+	 * If any key this transaction read was overwritten by a
+	 * transaction that committed after our snapshot, our read is stale
+	 * and committing would not be serializable: fail so the caller
+	 * retries.  This is what forbids write-skew.
+	 */
+	{
+		int i;
+		for (i = 0; i < cx->rn; i++)
+			if (xs_newest_ts(cx->bt, cx->rset[i]) > cx->txn_snap)
+				return SQLITE_BUSY;        /* serialization failure */
+		/* A full-table read conflicts with any commit after our
+		 * snapshot (no predicate locking yet -- conservative). */
+		if (cx->did_scan &&
+		    atomic_load_explicit(&g_xclock, memory_order_relaxed) > cx->txn_snap)
+			return SQLITE_BUSY;
+	}
+	return SQLITE_OK;
+}
 
 static int
 xs_commit(sqlite3_vtab *pv)
@@ -534,6 +630,18 @@ fn_as_of(sqlite3_context *ctx, int argc, sqlite3_value **argv)
 	atomic_store_explicit(&c->read_snap, (uint64_t)ts, memory_order_relaxed);
 	sqlite3_result_int64(ctx, ts);
 }
+/* xstore_serializable(on): set this connection's isolation to
+ * serializable (on != 0) or snapshot isolation (0).  Returns the new
+ * setting.  Serializable validates the transaction's read set at
+ * commit and aborts (SQLITE_BUSY) on a read-write conflict. */
+static void
+fn_serializable(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+{
+	xstore_ctx_t *c = (xstore_ctx_t *)sqlite3_user_data(ctx);
+	int on = (argc >= 1) ? (sqlite3_value_int(argv[0]) != 0) : 1;
+	c->serializable = on;
+	sqlite3_result_int(ctx, on);
+}
 
 static const sqlite3_module xstore_module = {
 	.iVersion    = 1,
@@ -560,8 +668,7 @@ static void
 ctx_free(void *p)
 {
 	xstore_ctx_t *cx = p;
-	if (cx != NULL) wbuf_clear(cx);
-	free(cx ? cx->wbuf : NULL);
+	if (cx != NULL) { wbuf_clear(cx); free(cx->wbuf); free(cx->rset); }
 	sqlite3_free(p);
 }
 
@@ -578,6 +685,10 @@ xstore_register(sqlite3 *db, bt_t *bt)
 	ctx->txn_snap = 0;
 	ctx->wbuf = NULL;
 	ctx->wn = ctx->wcap = 0;
+	ctx->serializable = 0;
+	ctx->rset = NULL;
+	ctx->rn = ctx->rcap = 0;
+	ctx->did_scan = 0;
 	rc = sqlite3_create_module_v2(db, "xstore", &xstore_module, ctx, ctx_free);
 	if (rc != SQLITE_OK)
 		return rc;
@@ -585,5 +696,7 @@ xstore_register(sqlite3 *db, bt_t *bt)
 	    SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, fn_now, NULL, NULL);
 	(void)sqlite3_create_function(db, "xstore_as_of", 1, SQLITE_UTF8,
 	    ctx, fn_as_of, NULL, NULL);
+	(void)sqlite3_create_function(db, "xstore_serializable", 1, SQLITE_UTF8,
+	    ctx, fn_serializable, NULL, NULL);
 	return SQLITE_OK;
 }
