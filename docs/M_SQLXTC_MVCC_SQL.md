@@ -119,23 +119,37 @@ dangerous read-write structure, abort the pivot.
    B-tree store; merging the cross-shard 2PC coordinator for
    distributed transactions remains where multiple shards are
    involved.)
-4. **(done)** Serializable isolation: the `xstore` transaction records
-   its read set (point reads; a full scan is a table-level read), and
-   xSync (2PC phase 1) validates it -- if any key the transaction read
-   was overwritten by a transaction that committed after its snapshot,
-   the commit fails with SQLITE_BUSY so the caller retries.  This
-   forbids write-skew, turning snapshot isolation into
-   serializability.  `xstore_serializable(on)` selects the level per
-   connection; `test_xstore` shows write-skew committing under SI (the
-   anomaly) and one of two concurrent transactions aborting under
-   serializable.  This is optimistic / Neumann-style precision
-   validation (SIGMOD 2015); it is a conservative cousin of Cahill
-   SSI's pivot detection (SIGMOD 2008, PostgreSQL 9.1 `predicate.c`),
-   which allows more concurrency by aborting only true dangerous
-   structures -- the refinement to adopt next.  The explicit
-   transaction is detected via `sqlite3_get_autocommit` so reads before
-   the first write are captured (SQLite fires xBegin only at the first
-   write).
+4. **(done)** Serializable isolation by Cahill SSI pivot detection.
+   A serializable `xstore` transaction validates at xSync (2PC phase
+   1, so a failure can still roll back) and aborts only if it is a
+   PIVOT -- a transaction with BOTH an outgoing and an incoming
+   rw-antidependency.  Fekete et al. (2005) proved every
+   serialization-graph cycle under snapshot isolation contains such a
+   pivot, so aborting all pivots breaks all cycles while letting
+   read-mostly transactions (outgoing edge only) commit -- strictly
+   more concurrency than the precision validation it replaces.  The
+   outgoing edge (a key we read was overwritten by a transaction that
+   committed after our snapshot) is read from the shared B-tree's
+   version timestamps, so it catches every committer; the incoming
+   edge (a concurrent transaction read a rowid we are about to write)
+   cannot be -- reads leave no version -- so serializable transactions
+   publish their read sets to a small in-memory SSI registry that a
+   committing writer scans against its write set.  Following PostgreSQL
+   `predicate.c`, the outgoing edge counts toward an abort only when
+   its target has already committed (the pivot's out-neighbor commits
+   first), so in a write-skew the first committer commits and the
+   second aborts.  `xstore_serializable(on)` selects the level per
+   connection.  `test_xstore` shows (a) write-skew committing under SI
+   (the anomaly) and one of two transactions aborting under
+   serializable, and (b) a read-mostly transaction with only an
+   outgoing edge committing under SSI where precision validation would
+   have aborted it -- with the result still serializable.  The
+   explicit transaction is detected via `sqlite3_get_autocommit` so
+   reads before the first write are captured (SQLite fires xBegin only
+   at the first write).  This is the model PostgreSQL 9.1+ uses
+   (Cahill, Rohm, Fekete, SIGMOD 2008); the remaining refinement is
+   finer-grained predicate locking (a full scan currently reads as
+   "the whole table" rather than a key range).
 5. **(done)** The larger-than-RAM benchmark against SQLite under an
    equal memory budget: `bench/sqlxtc/engine_ab.c` runs the same SQL
    through the same VDBE, differing only in the storage engine

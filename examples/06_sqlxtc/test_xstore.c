@@ -426,6 +426,68 @@ scenario_serializable(void)
 	return 0;
 }
 
+/* SSI commits a read-mostly transaction that the conservative
+ * precision validation would have aborted: an OUTGOING rw-edge alone
+ * is not a pivot.  A reader reads row 1, a concurrent committed writer
+ * overwrites row 1, and the reader then writes row 2 -- which no
+ * concurrent transaction has read.  Precision validation aborts on the
+ * stale read of row 1; pivot detection sees no incoming edge (nobody
+ * read row 2) and commits.  The outcome is serializable as [reader,
+ * writer]. */
+static int
+scenario_ssi_gain(void)
+{
+	bm_t *bm = NULL;
+	bt_t *bt = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-xstore6-XXXXXX";
+	xsql *dr = NULL, *dw = NULL;
+	char b[32];
+	int fd;
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = 64; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(xsql_open(":memory:", &dr) == SQLITE_OK);
+	CK(xsql_open(":memory:", &dw) == SQLITE_OK);
+	CK(xstore_register(dr, bt) == SQLITE_OK);
+	CK(xstore_register(dw, bt) == SQLITE_OK);
+	CK(xsql_exec(dr, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(dw, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(dr, "INSERT INTO t(k,v) VALUES(1,'0'),(2,'0');", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(dr, "SELECT xstore_serializable(1);", 0, 0, 0) == SQLITE_OK);
+
+	/* dr begins and reads ONLY row 1 (records a read of rowid 1). */
+	CK(xsql_exec(dr, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(sel_v(dr, 1, b, sizeof b) == 1 && strcmp(b, "0") == 0);
+
+	/* A concurrent writer overwrites row 1 and commits (autocommit). */
+	CK(xsql_exec(dw, "UPDATE t SET v='1' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
+
+	/* dr writes row 2 -- which NO concurrent transaction has read. */
+	CK(xsql_exec(dr, "UPDATE t SET v='9' WHERE k=2;", 0, 0, 0) == SQLITE_OK);
+
+	/* Precision validation would abort dr (its read of row 1 was
+	 * overwritten after its snapshot); SSI sees only an outgoing edge
+	 * and no incoming edge, so dr is not a pivot and commits. */
+	CK(commit_rc(dr) == SQLITE_OK);
+
+	/* Serializable as [dr, dw]: row 1 = writer's value, row 2 = dr's. */
+	CK(sel_v(dr, 1, b, sizeof b) == 1 && strcmp(b, "1") == 0);
+	CK(sel_v(dr, 2, b, sizeof b) == 1 && strcmp(b, "9") == 0);
+
+	xsql_close(dr); xsql_close(dw);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   SSI lets a read-mostly txn commit (outgoing rw-edge "
+	    "only): precision validation would abort it, pivot detection "
+	    "does not -- result is serializable\n");
+	return 0;
+}
+
 int
 main(void)
 {
@@ -434,6 +496,7 @@ main(void)
 	if (scenario_mvcc() != 0) return 1;
 	if (scenario_txn() != 0) return 1;
 	if (scenario_serializable() != 0) return 1;
+	if (scenario_ssi_gain() != 0) return 1;
 	printf("All sqlxtc SQL-on-xstore tests passed.\n");
 	return 0;
 }
