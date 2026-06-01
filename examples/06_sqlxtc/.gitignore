@@ -13,6 +13,7 @@ test_admin
 test_mem
 test_wal
 test_shard
+test_mvcc
 sql_parse_gen.c
 sql_parse_gen.h
 sql_parse_gen.out

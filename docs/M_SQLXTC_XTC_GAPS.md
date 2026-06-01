@@ -13,6 +13,41 @@ sufficient.
 
 ---
 
+## Stage 4 -- MVCC + cross-shard 2PC (mvcc.c)
+
+### CONFIRMED OK: deferred reply carries a real 2PC coordinator
+
+The gen_server deferred reply (xtc_svr_call_save + XTC_SVR_NOREPLY),
+added earlier when group commit surfaced the gap, is exactly what the
+2PC coordinator needs and it works in anger: handle_call(COMMIT) parks
+the client's call, fans PREPARE casts to the participant shards,
+handle_cast(VOTE) tallies the votes, and the saved call is answered
+(commit or abort) only when every vote is in.  Validated under
+concurrency (N clients racing one key, single loop and 4-loop
+executor); exactly one transaction commits, the rest abort.  The fix
+paid for itself one stage later -- the dogfood loop working as intended.
+
+### CONFIRMED OK: a per-shard scalar HLC suffices for snapshot isolation
+
+Each shard advances its own hybrid logical clock (no central
+allocator -- the chokepoint the stage-2/3 sharded test exposed), the
+coordinator picks a commit timestamp by ticking its clock past the
+snapshot, and a read at a snapshot returns the newest committed version
+at or before it.  Snapshot isolation and cross-shard atomic commit hold
+with just this -- no version vectors, no DVVSet (M_CAUSALITY.md was
+right: a single-owner sharded store never asks "did these conflict?",
+only "in what order?").
+
+### CONFIRMED OK: no new library primitive was needed for stage 4
+
+Notably, building MVCC + 2PC surfaced NO new libxtc gap.  The executor,
+share-nothing shard servers, deferred-reply gen_server, casts, and the
+proc model were sufficient.  Earlier dogfood stages had already
+extracted the missing pieces (xtc_arwlock, xtc_proc_sleep, deferred
+reply); by stage 4 the primitive set had caught up to the workload.
+
+---
+
 ## Stage 2/3 -- share-nothing sharded store (test_shard.c)
 
 ### GAP (gotcha): message payloads are delivered at arbitrary alignment
