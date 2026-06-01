@@ -15,6 +15,21 @@ sufficient.
 
 ## Stage 4 -- MVCC + cross-shard 2PC (mvcc.c)
 
+### CONFIRMED OK: share-nothing makes version GC need no RCU/epoch
+
+Slice 5's garbage collection of old versions is, in this design, a
+plain single-threaded prune: each shard owns its version chains and is
+their sole accessor (one proc, share-nothing), so there is no
+concurrent reader to protect against -- no epoch reclamation, no hazard
+pointers, no xtc_rcu.  The only coordination is one scalar: the
+coordinator's low-water mark (the minimum live snapshot), shipped to
+shards in PREPARE; a shard drops committed versions older than the
+newest one visible at the low-water mark.  RCU/epoch would be needed
+only if versions were shared-read across threads (the non-sharded
+design) -- another point for the share-nothing model.  A live snapshot
+(mvcc_begin, until mvcc_snapshot_release) holds the low-water mark down
+and pins the versions it can see, verified by test_mvcc.
+
 ### CONFIRMED OK: deferred reply carries a real 2PC coordinator
 
 The gen_server deferred reply (xtc_svr_call_save + XTC_SVR_NOREPLY),
