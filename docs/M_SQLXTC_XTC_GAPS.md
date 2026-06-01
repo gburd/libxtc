@@ -15,6 +15,21 @@ sufficient.
 
 ## SQL-on-our-storage integration (xstore.c)
 
+### CONFIRMED OK: step 5 (larger-than-RAM A/B) surfaced no new library gap
+
+The SQL-on-our-engine vs SQLite benchmark (`bench/sqlxtc/engine_ab.c`,
+24x larger-than-RAM, equal cache) measured reads competitive with
+SQLite and writes ~1.9x slower.  The slowdowns it quantifies are
+entirely in the EXAMPLE's storage engine, not libxtc: multi-version
+write amplification, no GC on the xstore SQL path, O(log n) version
+insert, and an eviction-stall tail (a synchronous dirty-page writeback
+on the critical path of a point op).  The fix for that tail --
+asynchronous cooling-pool writeback -- already has its primitive
+(`xtc_blocking_run` to offload the write while the loop keeps serving);
+xstore/bufmgr simply does not use it for writeback yet.  So the
+primitive set has again caught up: a real larger-than-RAM database
+workload found work to do in the example, none in the library.
+
 ### CONFIRMED + FIXED: a storage latch must not span the SQLite vtable boundary
 
 Adding MVCC versions exposed a self-deadlock.  SQLite runs
