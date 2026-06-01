@@ -12,9 +12,15 @@ For a programmer new to libxtc:
      each layer is responsible for.
   2. [Getting started](getting-started.md) -- build, smallest
      working program, walkthrough of the channel and process APIs.
-  3. [Locks and synchronization](locks.md) -- which primitive to
+  3. [Thinking in libxtc](guide/transitioning.md) -- the mental
+     shifts a C/C++/Rust programmer must make, and the anti-patterns
+     that bite if they do not.  Read this before writing real code.
+  4. [Locks and synchronization](locks.md) -- which primitive to
      reach for and when.
-  4. [API reference](API.md) -- the full public surface.
+  5. [Debugging and observing](guide/debugging.md) -- finding bugs
+     in the message-passing model with GDB/LLDB and the runtime's
+     introspection.
+  6. [API reference](API.md) -- the full public surface.
 
 For a programmer porting code in:
 
@@ -34,6 +40,20 @@ For an operator deploying libxtc:
 
 Lower-level material organized by topic:
 
+  * [Thinking in libxtc](guide/transitioning.md) -- mental-model
+    transition for C/C++/Rust programmers and the anti-patterns to
+    avoid.
+  * [Debugging and observing](guide/debugging.md) -- task-oriented
+    recipes with the GDB/LLDB tools (`tools/`) and the runtime
+    introspection APIs.
+  * [Observability plan](M_OBSERVABILITY.md) -- how BEAM systems are
+    observed and the staged plan to give libxtc the same, in native
+    debuggers.
+  * [Causality](M_CAUSALITY.md) -- version vectors vs dotted variants
+    vs hybrid logical clocks vs interval tree clocks, and what the
+    distributed sqlxtc actually needs.
+  * [SQLite scale-out](M_SQLXTC_SCALEOUT.md) -- the combined
+    sharding + proc-pipeline + durable-MVCC architecture.
   * [BEAM lessons](M_BEAM_LESSONS.md) -- production
     synchronization issues observed in the BEAM/OTP fleet, and
     libxtc's posture against each.
