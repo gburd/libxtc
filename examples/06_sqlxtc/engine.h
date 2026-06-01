@@ -52,6 +52,14 @@ typedef struct sqlite3_stmt sx_stmt;
 int  sx_init(void);
 int  sx_shutdown(void);
 
+/* Open the libxtc-native storage engine (an on-disk B-tree over the
+ * cooling buffer pool) at `path` with `n_frames` resident pages (0 =
+ * default).  Once open, every connection exposes it as the "xstore"
+ * virtual table: SQL against an xstore table runs on this engine,
+ * larger-than-RAM, instead of SQLite's built-in B-tree. */
+int  sx_storage_open(const char *path, unsigned int n_frames);
+void sx_storage_close(void);
+
 /* Install the xtc_amutex-backed mutex methods (opaque table from
  * mutex_methods()).  Call before sx_init. */
 int  sx_config_mutex(const void *methods);

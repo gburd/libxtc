@@ -14,6 +14,9 @@
 
 #include "engine.h"
 #include "vfs.h"
+#include "xstore.h"
+#include "btree.h"
+#include "bufmgr.h"
 
 #include "sqlite3.h"
 #include "xtc_async.h"     /* xtc_yield -- the fiber-yielding busy handler */
@@ -93,6 +96,10 @@ sx_busy_handler(void *arg, int n_prior)
 	return 1;                       /* retry */
 }
 
+/* ---- engine-native storage (xstore) lifecycle ---- */
+static bm_t *g_xbm;
+static bt_t *g_xbt;
+
 int
 sx_open(const char *path, sx_db **out)
 {
@@ -123,8 +130,43 @@ sx_open(const char *path, sx_db **out)
 	(void)sqlite3_exec(h, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
 	sqlite3_busy_handler((sqlite3 *)h, sx_busy_handler, NULL);
 
+	/* If the libxtc-native storage engine is open, expose it to this
+	 * connection as the "xstore" virtual table.  SQL against an
+	 * xstore table executes on our on-disk B-tree (cooling buffer
+	 * pool, larger-than-RAM) instead of SQLite's built-in B-tree.
+	 * The B-tree is concurrent (parallel-writer crabbing), so the
+	 * single shared instance is safe across connection procs. */
+	if (g_xbt != NULL)
+		(void)xstore_register((sqlite3 *)h, g_xbt);
+
 	*out = (sx_db *)h;
 	return SQLITE_OK;
+}
+
+int
+sx_storage_open(const char *path, unsigned int n_frames)
+{
+	bm_opts_t o = BM_OPTS_DEFAULT;
+	if (g_xbt != NULL)
+		return SX_OK;                 /* already open */
+	o.path = path;
+	if (n_frames > 0)
+		o.n_frames = n_frames;
+	if (bm_create(&o, &g_xbm) != XTC_OK)
+		return SQLITE_ERROR;
+	if (bt_open(g_xbm, &g_xbt) != XTC_OK) {
+		bm_destroy(g_xbm);
+		g_xbm = NULL;
+		return SQLITE_ERROR;
+	}
+	return SX_OK;
+}
+
+void
+sx_storage_close(void)
+{
+	if (g_xbt != NULL) { bt_close(g_xbt); g_xbt = NULL; }
+	if (g_xbm != NULL) { bm_destroy(g_xbm); g_xbm = NULL; }
 }
 
 void
