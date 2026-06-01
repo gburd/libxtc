@@ -168,11 +168,36 @@ post-mortem:
 
   * `xtc_stats` -- counters and latency histograms; dump them in
     Prometheus text form with `xtc_metrics_dump_prometheus(fd)`.
+  * `xtc_inspect` -- `xtc_inspect_procs(cb, user)` and
+    `xtc_proc_info(pid, &info)`: the in-process form of the debugger's
+    `xtc-procs`, snapshotting every live proc (or one by pid) without
+    a debugger attached.
   * `xtc_exec_loop_stats(exec, i, &st)` -- per-loop tasks_run / steals
     (scheduler utilization).
   * `xtc_reg` -- a name registry to enumerate well-known procs.
   * `xtc_pdict` -- a per-proc dictionary for ad-hoc state you want to
     read back.
+
+`xtc_inspect_procs` is the data behind a "SHOW PROCESSES" admin
+command: it walks the same per-loop slot tables `xtc-procs` does, takes
+a best-effort snapshot under their locks, then runs your callback after
+the locks are released (so the callback may call back into the proc and
+loop APIs).  Mailbox depth (`info.mbox_len`) is the vital sign, exactly
+as in the debugger view:
+
+    static int show(const xtc_proc_info_t *p, void *u) {
+        (void)u;
+        printf("pid=%llu mbox=%zu peak=%zu state=%d\n",
+               (unsigned long long)p->pid,
+               p->mbox_len, p->mbox_peak, p->run_state);
+        return 0;            /* 0 = keep going, nonzero = stop */
+    }
+    xtc_inspect_procs(show, NULL);
+
+Link/monitor topology is deliberately absent from the live snapshot (a
+proc mutates those lists lock-free, so a cross-thread walk would race);
+for that you still need the debugger's `xtc-proc`, which runs against a
+stopped program.  See `xtc_inspect(3)`.
 
 The roadmap to a live `xtc-top` and an always-on trace ring (libxtc's
 `seq_trace`) is in `docs/M_OBSERVABILITY.md`.

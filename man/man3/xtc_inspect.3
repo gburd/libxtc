@@ -1,0 +1,265 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd June 1, 2026
+.Dt XTC_INSPECT 3
+.Os
+.Sh NAME
+.Nm xtc_inspect_procs ,
+.Nm xtc_inspect_loops ,
+.Nm xtc_proc_info
+.Nd live process and loop introspection
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_inspect.h
+.Vt typedef int (*xtc_inspect_proc_fn)(const xtc_proc_info_t *info, void *user);
+.Vt typedef int (*xtc_inspect_loop_fn)(const xtc_loop_info_t *info, void *user);
+.Ft int
+.Fn xtc_inspect_procs "xtc_inspect_proc_fn cb" "void *user"
+.Ft int
+.Fn xtc_inspect_loops "xtc_inspect_loop_fn cb" "void *user"
+.Ft int
+.Fn xtc_proc_info "xtc_pid_t pid" "xtc_proc_info_t *out"
+.Sh DESCRIPTION
+.Nm xtc_inspect
+is the programmatic form of the debugger's
+.Ic xtc-procs
+and
+.Ic xtc-loops
+commands
+.Pq Xr xtc_proc 3 , Xr xtc_loop 3 ,
+callable from inside a running program rather than from a stopped one.
+It is the libxtc analog of Erlang's
+.Fn erlang:process_info
+plus the data
+.Sy observer
+renders: given the live runtime, enumerate every proc and loop and
+read each one's vital signs.  Its consumers are an admin command (a
+.Dq SHOW PROCESSES
+verb), a metrics scraper, or a terminal observer.
+.Pp
+Each call takes a best-effort snapshot under the per-loop slot locks.
+For the duration of the call the proc set is consistent: no proc is
+created or reaped out from under the walk.  The per-proc mailbox
+counters are read under the mailbox lock, so they are individually
+coherent.  The scheduler-owned run state is
+.Em sampled :
+it reflects an instant during the call and may change immediately
+after.  A snapshot is therefore a faithful point-in-time view, not a
+stop-the-world freeze.
+.Pp
+The enumeration callbacks run
+.Em after
+all internal locks are released.  A callback may freely call back into
+the proc and loop APIs
+.Pq including Fn xtc_send , Fn xtc_proc_info ,
+or another
+.Fn xtc_inspect_procs
+without risk of self-deadlock or lock-order inversion.  A callback
+returns
+.Dv 0
+to continue the walk and any non-zero value to stop early; the
+enumeration functions then return the number of items visited so far.
+.Pp
+.Fn xtc_inspect_procs
+invokes
+.Fa cb
+once per live proc, across all loops, passing a pointer to a
+populated
+.Vt xtc_proc_info_t
+and the caller's
+.Fa user
+pointer.  It returns the number of procs visited, or a negative
+.Dv XTC_E_*
+code on error.
+.Pp
+.Fn xtc_inspect_loops
+invokes
+.Fa cb
+once per registered loop, passing a
+.Vt xtc_loop_info_t .
+It returns the loop count, or a negative
+.Dv XTC_E_*
+code.
+.Pp
+.Fn xtc_proc_info
+snapshots a single proc, named by
+.Fa pid ,
+into
+.Fa *out .
+It is the
+.Fn erlang:process_info
+analog for one identity.
+.Pp
+A proc snapshot is reported in:
+.Bd -literal -offset indent
+typedef struct xtc_proc_info {
+        xtc_pid_t pid;
+        int       run_state;        /* enum xtc_proc_run_state */
+        int       park_reason;      /* enum xtc_proc_park */
+        int       alive;
+        int       kill_pending;
+        size_t    mbox_len;         /* current depth */
+        size_t    mbox_peak;        /* high-water mark */
+        size_t    mbox_cap;
+        size_t    mbox_saved;       /* selective-receive save queue */
+        uint64_t  mbox_recv_total;  /* messages ever accepted */
+        uint64_t  mbox_drop_total;  /* messages ever rejected */
+} xtc_proc_info_t;
+.Ed
+.Pp
+The fields are:
+.Bl -tag -width "mbox_recv_total" -offset indent
+.It Va pid
+The proc identity.
+.It Va run_state
+The sampled scheduler state, one of the
+.Vt enum xtc_proc_run_state
+values below.
+.It Va park_reason
+Why a
+.Dv XTC_PROC_PARKED
+proc is parked, one of the
+.Vt enum xtc_proc_park
+values below;
+.Dv XTC_PARK_NONE
+when the proc is not parked.
+.It Va alive
+Non-zero while the proc is live.
+.It Va kill_pending
+Non-zero if an asynchronous
+.Fn xtc_exit_pid
+has been delivered but not yet acted on.
+.It Va mbox_len
+The live mailbox depth.  This is the single most useful health
+signal in a message-passing system: a large or growing value is the
+most common pathology, the same vital sign the debugger's
+.Ic xtc-procs
+ranks on.
+.It Va mbox_peak
+The mailbox high-water mark; a peak far above
+.Va mbox_len
+records a burst the proc fell behind on.
+.It Va mbox_cap
+The mailbox capacity bound.
+.It Va mbox_saved
+The selective-receive save-queue depth
+.Pq Xr xtc_proc 3 .
+.It Va mbox_recv_total
+Lifetime count of messages accepted.
+.It Va mbox_drop_total
+Lifetime count of messages rejected because the mailbox was full or
+the proc was dead.
+.El
+.Pp
+.Vt enum xtc_proc_run_state
+mirrors the scheduler task state:
+.Bl -tag -width XTC_PROC_SCHEDULED -compact -offset indent
+.It Dv XTC_PROC_SCHEDULED
+Runnable, waiting for a turn on its loop.
+.It Dv XTC_PROC_RUNNING
+Currently executing on its loop's thread.
+.It Dv XTC_PROC_PARKED
+Blocked; see
+.Va park_reason .
+.It Dv XTC_PROC_DONE
+Finished, awaiting reap.
+.El
+.Pp
+.Vt enum xtc_proc_park
+records why a parked proc is waiting:
+.Bl -tag -width XTC_PARK_MAILBOX -compact -offset indent
+.It Dv XTC_PARK_NONE
+Not parked.
+.It Dv XTC_PARK_FD
+Waiting on a file descriptor
+.Pq Fn xtc_proc_wait_fd .
+.It Dv XTC_PARK_TIMER
+Waiting on a timer
+.Pq Fn xtc_proc_sleep
+or a timed
+.Fn xtc_recv .
+.It Dv XTC_PARK_MAILBOX
+Waiting for a message
+.Pq a blocking Fn xtc_recv .
+.El
+.Pp
+A loop snapshot is reported in:
+.Bd -literal -offset indent
+typedef struct xtc_loop_info {
+        int      loop_id;     /* 0 standalone, exec slot + 1 otherwise */
+        int      n_procs;     /* live procs homed on this loop */
+        int      n_alive;     /* live tasks (procs + plain tasks) */
+        uint64_t tasks_run;
+        uint64_t steals;
+} xtc_loop_info_t;
+.Ed
+.Pp
+.Va tasks_run
+and
+.Va steals
+are the scheduler-utilization view: how much work the loop has run and
+how much it took by work-stealing.
+.Pp
+Link and monitor topology is intentionally NOT exposed by the live
+API.  A proc mutates its own link and monitor lists without a lock, so
+walking them from another thread would race.  To inspect link/monitor
+topology use the debugger
+.Pq Ic xtc-proc ,
+which runs against a stopped program; the live API reports only the
+fields that are safe to read concurrently -- the mailbox counters,
+read under the mailbox lock, and the sampled run state.
+.Sh RETURN VALUES
+.Fn xtc_inspect_procs
+returns the number of procs visited;
+.Fn xtc_inspect_loops
+returns the number of loops visited.  Both return a negative
+.Dv XTC_E_*
+code on error.
+.Pp
+.Fn xtc_proc_info
+returns
+.Dv XTC_OK
+on success,
+.Dv XTC_E_NOTFOUND
+if no live proc has the given
+.Fa pid ,
+or
+.Dv XTC_E_INVAL
+if
+.Fa out
+is NULL.  See
+.Xr xtc_strerror 3 .
+.Sh EXAMPLES
+Rank live procs by mailbox depth, the way a
+.Dq SHOW PROCESSES
+admin command would:
+.Bd -literal -offset indent
+static int
+on_proc(const xtc_proc_info_t *p, void *user)
+{
+        (void)user;
+        if (p->mbox_len > 0)
+                printf("pid=%llu mbox=%zu peak=%zu state=%d\\n",
+                    (unsigned long long)p->pid,
+                    p->mbox_len, p->mbox_peak, p->run_state);
+        return (0);                 /* 0 = keep going */
+}
+
+int n = xtc_inspect_procs(on_proc, NULL);
+printf("%d live procs\\n", n);
+.Ed
+.Pp
+Snapshot one proc by pid:
+.Bd -literal -offset indent
+xtc_proc_info_t info;
+if (xtc_proc_info(pid, &info) == XTC_OK && info.mbox_len > info.mbox_cap / 2)
+        log_warn("proc %llu mailbox half full", (unsigned long long)pid);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_proc 3 ,
+.Xr xtc_reg 3 ,
+.Xr xtc_stats 3
+.Sh AUTHORS
+The
+.Nm xtc
+project.

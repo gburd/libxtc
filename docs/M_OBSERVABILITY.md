@@ -150,16 +150,36 @@ underneath, so the same scripts load via `.gdbinit` / launch.json
 NatVis file for the value pretty-printers plus a small JS/Python
 extension for the enumeration commands -- stage 4.
 
-### Stage 2 -- a live introspection API (no debugger needed)
+### Stage 2 -- a live introspection API (SHIPPED)
 
-A thread-safe `xtc_inspect_*` surface that snapshots the same data the
-debugger walks, callable from the program:
+A thread-safe `xtc_inspect_*` surface (`src/inc/xtc_inspect.h`,
+`xtc_inspect(3)`) snapshots the same data the debugger walks, callable
+from inside a running program -- the `process_info/2` + `observer`
+analog without a debugger attached:
 
-  * `xtc_inspect_procs(cb, user)` -- enumerate procs with a struct of
-    {pid, mbox_len, mbox_peak, state, links, monitors, name-from-reg}.
-  * `xtc_inspect_loops(cb, user)` -- per-loop scheduler stats.
+  * `xtc_inspect_procs(cb, user)` -- invoke `cb` once per live proc
+    (across all loops); returns the count, or a negative `XTC_E_*`.
+  * `xtc_inspect_loops(cb, user)` -- invoke `cb` once per loop with
+    `{loop_id, n_procs, n_alive, tasks_run, steals}`; returns the loop
+    count.
   * `xtc_proc_info(pid, xtc_proc_info_t *)` -- the `process_info/2`
-    analog for one pid.
+    analog for one pid (`XTC_OK` / `XTC_E_NOTFOUND` / `XTC_E_INVAL`).
+
+The per-proc struct carries `{pid, run_state, park_reason, alive,
+kill_pending, mbox_len, mbox_peak, mbox_cap, mbox_saved,
+mbox_recv_total, mbox_drop_total}` -- the mailbox depth (`mbox_len`) is
+the vital sign, plus a peak and a drop count BEAM does not keep.  Each
+call is a best-effort snapshot taken under the per-loop slot locks (the
+proc set is consistent for the call, the mailbox counters are read
+under the mailbox lock, the run state is sampled); the callbacks run
+*after* every internal lock is released, so they may call back into the
+proc/loop APIs.  Callbacks return 0 to continue or non-zero to stop
+early.
+
+Link/monitor topology is deliberately NOT in the live snapshot: a proc
+mutates its own link/monitor lists without a lock, so a cross-thread
+walk would race.  That topology stays a debugger-only view (stage 1,
+which runs against a stopped program).
 
 Built on the existing slot tables under their locks.  This is what an
 admin command ("SHOW PROCESSES" in sqlxtc) or a metrics scraper calls,
