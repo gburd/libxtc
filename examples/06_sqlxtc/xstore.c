@@ -59,12 +59,66 @@ static _Atomic uint64_t g_xclock = 1;
 #define XS_VKLEN     16        /* (rowid:8) + (inverted commit_ts:8) */
 #define XS_VMAX      4096       /* max row payload bytes (one page-ish) */
 
+/* A buffered write within an open transaction (see xs_begin/xs_commit). */
+typedef struct xs_wrec {
+	int64_t  rowid;
+	int      deleted;
+	uint16_t len;
+	uint8_t *data;        /* malloc'd; NULL for a delete */
+} xs_wrec_t;
+
 /* Per-connection state, shared by the module and the SQL functions:
- * the engine storage and this connection's read snapshot. */
+ * the engine storage, this connection's read snapshot, and the
+ * in-flight transaction's buffered writes. */
 typedef struct xstore_ctx {
 	bt_t            *bt;
 	_Atomic uint64_t read_snap;   /* 0 == read latest committed */
+	int              in_txn;      /* between xBegin and xCommit/xRollback */
+	uint64_t         txn_snap;    /* snapshot captured at xBegin */
+	xs_wrec_t       *wbuf;        /* buffered writes, applied atomically */
+	int              wn, wcap;
 } xstore_ctx_t;
+
+static void
+wbuf_clear(xstore_ctx_t *c)
+{
+	int i;
+	for (i = 0; i < c->wn; i++)
+		free(c->wbuf[i].data);
+	c->wn = 0;
+}
+static int
+wbuf_add(xstore_ctx_t *c, int64_t rowid, const void *blob, int n, int deleted)
+{
+	xs_wrec_t *w;
+	if (c->wn == c->wcap) {
+		int nc = c->wcap ? c->wcap * 2 : 16;
+		xs_wrec_t *nb = realloc(c->wbuf, (size_t)nc * sizeof *nb);
+		if (nb == NULL) return SQLITE_NOMEM;
+		c->wbuf = nb; c->wcap = nc;
+	}
+	w = &c->wbuf[c->wn];
+	w->rowid = rowid; w->deleted = deleted; w->len = 0; w->data = NULL;
+	if (!deleted && n > 0) {
+		if (n > XS_VMAX) n = XS_VMAX;
+		w->data = malloc((size_t)n);
+		if (w->data == NULL) return SQLITE_NOMEM;
+		memcpy(w->data, blob, (size_t)n);
+		w->len = (uint16_t)n;
+	}
+	c->wn++;
+	return SQLITE_OK;
+}
+/* Read-your-writes: the newest buffered write for `rowid`, or NULL. */
+static const xs_wrec_t *
+wbuf_find(const xstore_ctx_t *c, int64_t rowid)
+{
+	int i;
+	for (i = c->wn - 1; i >= 0; i--)
+		if (c->wbuf[i].rowid == rowid)
+			return &c->wbuf[i];
+	return NULL;
+}
 
 /* Order-preserving big-endian; the timestamp half is inverted so that,
  * within a rowid, higher commit_ts sorts first (newest version first). */
@@ -103,6 +157,7 @@ typedef struct xstore_vtab {
 typedef struct xstore_cursor {
 	sqlite3_vtab_cursor base;
 	bt_t        *bt;
+	xstore_ctx_t *ctx;
 	uint64_t     snap;          /* the read snapshot for this scan */
 	int          point;         /* 1 == point lookup (<= one row) */
 	int          eof;
@@ -187,6 +242,7 @@ xs_open(sqlite3_vtab *pv, sqlite3_vtab_cursor **ppc)
 		return SQLITE_NOMEM;
 	memset(c, 0, sizeof *c);
 	c->bt = v->ctx->bt;
+	c->ctx = v->ctx;
 	c->eof = 1;
 	*ppc = &c->base;
 	return SQLITE_OK;
@@ -266,21 +322,35 @@ xs_filter(sqlite3_vtab_cursor *pc, int idxNum, const char *idxStr,
 
 	snap = atomic_load_explicit(&v->ctx->read_snap, memory_order_relaxed);
 	if (snap == 0)
-		snap = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+		snap = v->ctx->in_txn
+		    ? v->ctx->txn_snap          /* repeatable snapshot for the txn */
+		    : atomic_load_explicit(&g_xclock, memory_order_relaxed);
 	c->snap = snap;
 	c->have_last = 0;
 	c->eof = 1;
 
 	if (idxNum == 1 && argc >= 1) {
-		/* Point lookup: open a short-lived cursor at the newest version
-		 * of the rowid with commit_ts <= snap, copy it out, and close
-		 * (release the latch) before returning to the VDBE. */
+		/* Point lookup.  Read-your-writes first: a write buffered in
+		 * this open transaction supersedes the committed version. */
 		bt_cursor_t *cur = NULL;
 		uint8_t startk[XS_VKLEN];
 		const void *k = NULL, *vv = NULL;
 		uint16_t klen = 0, vl = 0;
 		int64_t want = sqlite3_value_int64(argv[0]);
 		c->point = 1;
+		if (v->ctx->in_txn) {
+			const xs_wrec_t *w = wbuf_find(v->ctx, want);
+			if (w != NULL) {
+				if (!w->deleted) {
+					c->rowid = want;
+					c->vlen = w->len;
+					if (w->len) memcpy(c->val, w->data, w->len);
+					c->eof = 0;
+				}
+				return SQLITE_OK;       /* buffered write decides it */
+			}
+		}
+		/* Else the newest committed version at-or-before the snapshot. */
 		enc_vkey(want, snap, startk);
 		if (bt_cursor_open(c->bt, startk, XS_VKLEN, &cur) != XTC_OK)
 			return SQLITE_OK;
@@ -354,11 +424,20 @@ xs_update(sqlite3_vtab *pv, int argc, sqlite3_value **argv,
     sqlite3_int64 *pRowid)
 {
 	xstore_vtab_t *v = (xstore_vtab_t *)pv;
-	bt_t *bt = v->ctx->bt;
+	xstore_ctx_t *cx = v->ctx;
 
+	/*
+	 * Buffer the write; xCommit flushes the whole transaction at ONE
+	 * commit timestamp (atomic multi-row commit).  SQLite wraps every
+	 * write -- explicit BEGIN..COMMIT or an implicit single-statement
+	 * transaction -- in xBegin/xCommit, so a buffer is always open
+	 * here.  (Fallback: if no transaction is open, apply immediately.)
+	 */
 	if (argc == 1) {
-		/* DELETE -> write a tombstone version. */
-		return xs_put(bt, sqlite3_value_int64(argv[0]), NULL, 0, 1);
+		int64_t rid = sqlite3_value_int64(argv[0]);   /* DELETE */
+		if (cx->in_txn)
+			return wbuf_add(cx, rid, NULL, 0, 1);
+		return xs_put(cx->bt, rid, NULL, 0, 1);
 	}
 	{
 		int64_t rowid = (sqlite3_value_type(argv[1]) == SQLITE_NULL)
@@ -370,12 +449,71 @@ xs_update(sqlite3_vtab *pv, int argc, sqlite3_value **argv,
 		/* An UPDATE that moves the rowid tombstones the old one. */
 		if (sqlite3_value_type(argv[0]) != SQLITE_NULL) {
 			int64_t oldid = sqlite3_value_int64(argv[0]);
-			if (oldid != rowid)
-				(void)xs_put(bt, oldid, NULL, 0, 1);
+			if (oldid != rowid) {
+				if (cx->in_txn) (void)wbuf_add(cx, oldid, NULL, 0, 1);
+				else (void)xs_put(cx->bt, oldid, NULL, 0, 1);
+			}
 		}
 		if (pRowid != NULL) *pRowid = rowid;
-		return xs_put(bt, rowid, blob, n, 0);
+		if (cx->in_txn)
+			return wbuf_add(cx, rowid, blob, n, 0);
+		return xs_put(cx->bt, rowid, blob, n, 0);
 	}
+}
+
+/*
+ * Transaction hooks.  xBegin captures the read snapshot and opens the
+ * write buffer; xCommit assigns ONE commit timestamp and flushes every
+ * buffered write at it (so a multi-row transaction is atomic and all
+ * its rows share an xmin); xRollback discards the buffer.  This is
+ * mvcc.c's stage-then-commit, applied to the B-tree-backed store.
+ */
+static int
+xs_begin(sqlite3_vtab *pv)
+{
+	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
+	wbuf_clear(cx);
+	cx->txn_snap = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	cx->in_txn = 1;
+	return SQLITE_OK;
+}
+static int
+xs_sync(sqlite3_vtab *pv) { (void)pv; return SQLITE_OK; }
+
+static int
+xs_commit(sqlite3_vtab *pv)
+{
+	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
+	uint64_t ts;
+	int i, rc = SQLITE_OK;
+	if (!cx->in_txn)
+		return SQLITE_OK;
+	if (cx->wn > 0) {
+		ts = atomic_fetch_add_explicit(&g_xclock, 1,
+		    memory_order_relaxed) + 1;     /* one timestamp for the txn */
+		for (i = 0; i < cx->wn; i++) {
+			uint8_t key[XS_VKLEN];
+			uint8_t buf[1 + XS_VMAX];
+			xs_wrec_t *w = &cx->wbuf[i];
+			enc_vkey(w->rowid, ts, key);
+			buf[0] = w->deleted ? XS_F_DELETED : 0;
+			if (!w->deleted && w->len) memcpy(buf + 1, w->data, w->len);
+			if (bt_insert(cx->bt, key, XS_VKLEN, buf,
+			    (uint16_t)(1 + (w->deleted ? 0 : w->len))) != XTC_OK)
+				rc = SQLITE_ERROR;
+		}
+	}
+	wbuf_clear(cx);
+	cx->in_txn = 0;
+	return rc;
+}
+static int
+xs_rollback(sqlite3_vtab *pv)
+{
+	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
+	wbuf_clear(cx);
+	cx->in_txn = 0;
+	return SQLITE_OK;
 }
 
 /* SQL functions: xstore_now() -> current clock; xstore_as_of(ts) pins
@@ -398,7 +536,7 @@ fn_as_of(sqlite3_context *ctx, int argc, sqlite3_value **argv)
 }
 
 static const sqlite3_module xstore_module = {
-	.iVersion    = 0,
+	.iVersion    = 1,
 	.xCreate     = xs_connect,
 	.xConnect    = xs_connect,
 	.xBestIndex  = xs_best_index,
@@ -412,11 +550,18 @@ static const sqlite3_module xstore_module = {
 	.xColumn     = xs_column,
 	.xRowid      = xs_rowid,
 	.xUpdate     = xs_update,
+	.xBegin      = xs_begin,
+	.xSync       = xs_sync,
+	.xCommit     = xs_commit,
+	.xRollback   = xs_rollback,
 };
 
 static void
 ctx_free(void *p)
 {
+	xstore_ctx_t *cx = p;
+	if (cx != NULL) wbuf_clear(cx);
+	free(cx ? cx->wbuf : NULL);
 	sqlite3_free(p);
 }
 
@@ -429,6 +574,10 @@ xstore_register(sqlite3 *db, bt_t *bt)
 		return SQLITE_NOMEM;
 	ctx->bt = bt;
 	atomic_store(&ctx->read_snap, 0);
+	ctx->in_txn = 0;
+	ctx->txn_snap = 0;
+	ctx->wbuf = NULL;
+	ctx->wn = ctx->wcap = 0;
 	rc = sqlite3_create_module_v2(db, "xstore", &xstore_module, ctx, ctx_free);
 	if (rc != SQLITE_OK)
 		return rc;
