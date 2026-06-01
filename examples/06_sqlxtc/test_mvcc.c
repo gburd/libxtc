@@ -236,6 +236,14 @@ gc_driver(void *a)
 	CK(mvcc_read(K, s, &v) == XTC_OK && v == 40);
 	mvcc_snapshot_release(s);
 
+	/* Long-lived reader: a snapshot that has fallen behind the GC
+	 * horizon gets XTC_E_ABORTED on read (its version was reclaimed),
+	 * distinct from XTC_E_NOTFOUND for a key that never existed. */
+	CK(mvcc_read(K, 1 /* ancient snapshot */, &v) == XTC_E_ABORTED);
+	s = mvcc_begin();
+	CK(mvcc_read(888888 /* never written */, s, &v) == XTC_E_NOTFOUND);
+	mvcc_snapshot_release(s);
+
 	/* A LIVE old snapshot pins the version it can see: even after many
 	 * newer commits, reading at the pinned snapshot still sees it. */
 	s = mvcc_begin();
