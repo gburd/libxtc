@@ -648,6 +648,94 @@ scenario_autovacuum(void)
 	return 0;
 }
 
+/* Scan a bounded key range, stepping every row (drives the vtab range
+ * plan + records the SSI range predicate).  Returns the row count. */
+static int
+range_scan(xsql *db, int lo, int hi)
+{
+	xsql_stmt *st = NULL;
+	char sql[80];
+	int n = 0;
+	snprintf(sql, sizeof sql, "SELECT k FROM t WHERE k BETWEEN %d AND %d", lo, hi);
+	if (xsql_prepare_v2(db, sql, -1, &st, 0) != SQLITE_OK) return -1;
+	while (xsql_step(st) == SQLITE_ROW) n++;
+	xsql_finalize(st);
+	return n;
+}
+
+/* ---- Cahill predicate (range) locking: two serializable txns that
+ * scan DISJOINT key ranges and write outside each other's range have
+ * no rw-antidependency, so both commit -- where coarse whole-table
+ * predicate tracking would force one to abort.  A cross write-skew
+ * across the ranges is still caught. ---- */
+static int
+scenario_ssi_range(void)
+{
+	bm_t *bm = NULL; bt_t *bt = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-ssirng-XXXXXX";
+	xsql *d1 = NULL, *d2 = NULL;
+	int fd, i;
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = 64; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(xsql_open(":memory:", &d1) == SQLITE_OK);
+	CK(xsql_open(":memory:", &d2) == SQLITE_OK);
+	CK(xstore_register(d1, bt) == SQLITE_OK);
+	CK(xstore_register(d2, bt) == SQLITE_OK);
+	CK(xsql_exec(d1, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d2, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+	/* Seed [1,50] and [100,150]. */
+	for (i = 1; i <= 50; i++) {
+		char s[64]; snprintf(s, sizeof s, "INSERT INTO t(k,v) VALUES(%d,'0');", i);
+		CK(xsql_exec(d1, s, 0, 0, 0) == SQLITE_OK);
+	}
+	for (i = 100; i <= 150; i++) {
+		char s[64]; snprintf(s, sizeof s, "INSERT INTO t(k,v) VALUES(%d,'0');", i);
+		CK(xsql_exec(d1, s, 0, 0, 0) == SQLITE_OK);
+	}
+	CK(xsql_exec(d1, "SELECT xstore_serializable(1);", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d2, "SELECT xstore_serializable(1);", 0, 0, 0) == SQLITE_OK);
+
+	/* Part A -- disjoint predicates: T1 reads [1,50] writes k=300;
+	 * T2 reads [100,150] writes k=400.  Both commit. */
+	CK(xsql_exec(d1, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(range_scan(d1, 1, 50) == 50);
+	CK(xsql_exec(d2, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(range_scan(d2, 100, 150) == 51);
+	CK(xsql_exec(d1, "INSERT INTO t(k,v) VALUES(300,'a');", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d2, "INSERT INTO t(k,v) VALUES(400,'b');", 0, 0, 0) == SQLITE_OK);
+	CK(commit_rc(d1) == SQLITE_OK);
+	CK(commit_rc(d2) == SQLITE_OK);    /* disjoint ranges -> both commit */
+
+	/* Part B -- cross write-skew across the ranges: T1 reads [1,50]
+	 * writes k=120 (in T2's range); T2 reads [100,150] writes k=20
+	 * (in T1's range).  One must abort. */
+	CK(xsql_exec(d1, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(range_scan(d1, 1, 50) == 50);
+	CK(xsql_exec(d2, "BEGIN;", 0, 0, 0) == SQLITE_OK);
+	CK(range_scan(d2, 100, 150) == 51);
+	CK(xsql_exec(d1, "UPDATE t SET v='1' WHERE k=120;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d2, "UPDATE t SET v='1' WHERE k=20;", 0, 0, 0) == SQLITE_OK);
+	{
+		int rc1 = commit_rc(d1);
+		int rc2 = commit_rc(d2);
+		CK(rc1 == SQLITE_OK);
+		CK(rc2 == SQLITE_BUSY);    /* pivot: write lands in peer's read range */
+	}
+
+	xsql_close(d1); xsql_close(d2);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   SSI range locking: disjoint range scans + out-of-range "
+	    "writes both commit; cross write-skew across ranges aborts one\n");
+	return 0;
+}
+
 /* ---- O(1) scan: a full SELECT over the xstore vtab opens the btree
  * cursor ONCE and resumes it per row (latch released between rows for
  * the VDBE), instead of re-descending the tree on every xNext. ---- */
@@ -712,6 +800,7 @@ main(void)
 	if (scenario_ssi_gain() != 0) return 1;
 	if (scenario_gc() != 0) return 1;
 	if (scenario_autovacuum() != 0) return 1;
+	if (scenario_ssi_range() != 0) return 1;
 	if (scenario_o1_sql() != 0) return 1;
 	printf("All sqlxtc SQL-on-xstore tests passed.\n");
 	return 0;

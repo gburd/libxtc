@@ -182,9 +182,10 @@ struct ssi_txn {
 	int       state;
 	uint64_t  snap;        /* read snapshot */
 	uint64_t  commit_ts;   /* set when COMMITTED */
-	int       did_scan;    /* read the whole table (predicate = everything) */
-	int64_t  *reads;       /* rowids this txn read */
+	int64_t  *reads;       /* rowids this txn read (point predicates) */
 	int       nreads, rcap;
+	struct ssi_rng { int64_t lo, hi; } *rngs;  /* range predicates (scans) */
+	int       nrng, rngcap;
 };
 
 static ssi_txn_t       g_ssi[SSI_MAX];
@@ -207,6 +208,9 @@ ssi_gc_locked(void)
 			free(g_ssi[i].reads);
 			g_ssi[i].reads = NULL;
 			g_ssi[i].nreads = g_ssi[i].rcap = 0;
+			free(g_ssi[i].rngs);
+			g_ssi[i].rngs = NULL;
+			g_ssi[i].nrng = g_ssi[i].rngcap = 0;
 			g_ssi[i].state = SSI_FREE;
 		}
 }
@@ -227,8 +231,8 @@ ssi_begin(uint64_t snap)
 			t->state = SSI_ACTIVE;
 			t->snap = snap;
 			t->commit_ts = 0;
-			t->did_scan = 0;
 			t->nreads = 0;        /* keep any allocated rcap/reads */
+			t->nrng = 0;          /* keep any allocated rngcap/rngs */
 			break;
 		}
 	pthread_mutex_unlock(&g_ssi_mu);
@@ -253,12 +257,26 @@ ssi_record_read(ssi_txn_t *t, int64_t rowid)
 	pthread_mutex_unlock(&g_ssi_mu);
 }
 
+/* Record a RANGE predicate [lo, hi] this txn read (a scan).  A full
+ * table scan records [INT64_MIN, INT64_MAX]; a bounded scan its actual
+ * key bounds.  This is the Cahill/PostgreSQL predicate lock: a future
+ * writer's rowid creates an incoming rw-edge only if it falls inside a
+ * range some concurrent reader actually scanned -- not "any write vs
+ * any scan". */
 static void
-ssi_record_scan(ssi_txn_t *t)
+ssi_record_range(ssi_txn_t *t, int64_t lo, int64_t hi)
 {
-	if (t == NULL) return;
+	if (t == NULL || lo > hi) return;
 	pthread_mutex_lock(&g_ssi_mu);
-	t->did_scan = 1;
+	if (t->nrng == t->rngcap) {
+		int nc = t->rngcap ? t->rngcap * 2 : 8;
+		struct ssi_rng *nb = realloc(t->rngs, (size_t)nc * sizeof *nb);
+		if (nb == NULL) { pthread_mutex_unlock(&g_ssi_mu); return; }
+		t->rngs = nb; t->rngcap = nc;
+	}
+	t->rngs[t->nrng].lo = lo;
+	t->rngs[t->nrng].hi = hi;
+	t->nrng++;
 	pthread_mutex_unlock(&g_ssi_mu);
 }
 
@@ -280,10 +298,16 @@ ssi_in_conflict(ssi_txn_t *me, const int64_t *wr, int nwr)
 		 * one only if it committed after my snapshot (I didn't see
 		 * it).  My own commit is in the future, so it never saw me. */
 		if (u->state == SSI_COMMITTED && u->commit_ts <= me->snap) continue;
-		if (u->did_scan) { in = 1; break; }
-		for (j = 0; j < u->nreads && !in; j++)
-			for (k = 0; k < nwr; k++)
+		for (k = 0; k < nwr; k++) {
+			for (j = 0; j < u->nreads; j++)
 				if (u->reads[j] == wr[k]) { in = 1; break; }
+			if (in) break;
+			for (j = 0; j < u->nrng; j++)
+				if (wr[k] >= u->rngs[j].lo && wr[k] <= u->rngs[j].hi) {
+					in = 1; break;
+				}
+			if (in) break;
+		}
 	}
 	pthread_mutex_unlock(&g_ssi_mu);
 	return in;
@@ -306,6 +330,7 @@ ssi_abort(ssi_txn_t *t)
 	pthread_mutex_lock(&g_ssi_mu);
 	t->state = SSI_FREE;
 	t->nreads = 0;
+	t->nrng = 0;
 	pthread_mutex_unlock(&g_ssi_mu);
 }
 
@@ -447,6 +472,8 @@ typedef struct xstore_cursor {
 	uint64_t     snap;          /* the read snapshot for this scan */
 	int          point;         /* 1 == point lookup (<= one row) */
 	int          eof;
+	int64_t      lo, hi;         /* range scan bounds (rowid), if has_* */
+	int          has_lo, has_hi;
 	int          have_last;      /* last_key/last_rowid are valid */
 	uint8_t      last_key[XS_VKLEN]; /* resume point (key last consumed) */
 	int64_t      last_rowid;     /* rowid already resolved (scan dedup) */
@@ -502,22 +529,36 @@ xs_disconnect(xsql_vtab *pv)
 static int
 xs_best_index(xsql_vtab *pv, xsql_index_info *info)
 {
-	int i;
+	int i, idx = 0, argc = 0, eq = -1, lo = -1, hi = -1;
 	(void)pv;
 	for (i = 0; i < info->nConstraint; i++) {
-		if (info->aConstraint[i].usable &&
-		    info->aConstraint[i].iColumn == 0 &&
-		    info->aConstraint[i].op == SQLITE_INDEX_CONSTRAINT_EQ) {
-			info->aConstraintUsage[i].argvIndex = 1;
-			info->aConstraintUsage[i].omit = 1;
-			info->idxNum = 1;
-			info->estimatedCost = 1.0;
-			info->estimatedRows = 1;
-			return SQLITE_OK;
+		if (!info->aConstraint[i].usable || info->aConstraint[i].iColumn != 0)
+			continue;
+		switch (info->aConstraint[i].op) {
+		case SQLITE_INDEX_CONSTRAINT_EQ: eq = i; break;
+		case SQLITE_INDEX_CONSTRAINT_GT:
+		case SQLITE_INDEX_CONSTRAINT_GE: lo = i; break;
+		case SQLITE_INDEX_CONSTRAINT_LT:
+		case SQLITE_INDEX_CONSTRAINT_LE: hi = i; break;
+		default: break;
 		}
 	}
-	info->idxNum = 0;
-	info->estimatedCost = 1.0e6;
+	if (eq >= 0) {                          /* point lookup */
+		info->aConstraintUsage[eq].argvIndex = 1;
+		info->aConstraintUsage[eq].omit = 1;
+		info->idxNum = 1;
+		info->estimatedCost = 1.0;
+		info->estimatedRows = 1;
+		return SQLITE_OK;
+	}
+	/* Bounded range: pass the bounds to xFilter (idxNum bits 2/4), but
+	 * do NOT omit -- the bounds drive the scan seek/stop and the SSI
+	 * predicate; SQLite re-applies the exact (possibly exclusive)
+	 * comparison, so an inclusive scan superset is safe. */
+	if (lo >= 0) { info->aConstraintUsage[lo].argvIndex = ++argc; idx |= 2; }
+	if (hi >= 0) { info->aConstraintUsage[hi].argvIndex = ++argc; idx |= 4; }
+	info->idxNum = idx;
+	info->estimatedCost = idx ? 100.0 : 1.0e6;
 	return SQLITE_OK;
 }
 
@@ -570,8 +611,17 @@ static void
 xs_advance(xstore_cursor_t *c)
 {
 	if (c->btc == NULL) {
-		const uint8_t *start = c->have_last ? c->last_key : NULL;
-		uint16_t startlen = c->have_last ? XS_VKLEN : 0;
+		uint8_t startbuf[XS_VKLEN];
+		const uint8_t *start;
+		uint16_t startlen;
+		if (c->have_last) {
+			start = c->last_key; startlen = XS_VKLEN;
+		} else if (c->has_lo) {       /* seek to the start of the lo bound */
+			enc_vkey(c->lo, ~(uint64_t)0, startbuf);
+			start = startbuf; startlen = XS_VKLEN;
+		} else {
+			start = NULL; startlen = 0;
+		}
 		if (bt_cursor_open(c->bt, start, startlen, &c->btc) != XTC_OK) {
 			c->eof = 1;
 			return;
@@ -595,6 +645,10 @@ xs_advance(xstore_cursor_t *c)
 		kb = (const uint8_t *)k; vb = (const uint8_t *)vv;
 		rid = dec_rowid(kb);
 		ts = dec_ts(kb);
+		if (c->has_hi && rid > c->hi) {
+			c->eof = 1;             /* past the upper bound: range exhausted */
+			break;
+		}
 		if (c->have_last && rid == c->last_rowid)
 			continue;              /* the resume key, or an older version */
 		if (ts > c->snap)
@@ -673,9 +727,18 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 		return SQLITE_OK;
 	}
 	c->point = 0;
+	/* Range bounds from best_index (idxNum bit 2 = lo, bit 4 = hi). */
+	c->has_lo = c->has_hi = 0;
+	{
+		int ai = 0;
+		if ((idxNum & 2) && argc > ai) { c->lo = xsql_value_int64(argv[ai++]); c->has_lo = 1; }
+		if ((idxNum & 4) && argc > ai) { c->hi = xsql_value_int64(argv[ai++]); c->has_hi = 1; }
+	}
 	if (v->ctx->in_txn && v->ctx->serializable) {
-		v->ctx->did_scan = 1;     /* a full read; conservative validation */
-		ssi_record_scan(v->ctx->ssi);
+		int64_t rlo = c->has_lo ? c->lo : INT64_MIN;
+		int64_t rhi = c->has_hi ? c->hi : INT64_MAX;
+		v->ctx->did_scan = 1;     /* conservative outgoing edge */
+		ssi_record_range(v->ctx->ssi, rlo, rhi);  /* precise incoming predicate */
 	}
 	xs_advance(c);
 	return SQLITE_OK;
