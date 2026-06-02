@@ -144,6 +144,16 @@ int  bm_provider_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
                        xtc_pid_t *out_pid);
 void bm_provider_stop(bm_t *bm);
 
+/* Spawn the trickler process on `loop`: it writes dirty pages out ahead
+ * of eviction, choosing COOL (imminent-victim) pages first and, within
+ * each class, oldest-dirtied first, a bounded paced batch per pass.
+ * So reclaiming a frame is a cheap state flip rather than a synchronous
+ * write, and writeback is smoothed instead of bursting.  Optional.
+ * Stop it with bm_trickler_stop. */
+int  bm_trickler_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
+                       xtc_pid_t *out_pid);
+void bm_trickler_stop(bm_t *bm);
+
 /* Observability snapshot. */
 typedef struct bm_stats {
 	uint64_t hits;          /* fix resolved a HOT swip */
@@ -155,6 +165,7 @@ typedef struct bm_stats {
 	uint64_t resident;      /* frames currently HOT or COOL */
 	uint64_t free_frames;   /* frames on the free list */
 	uint64_t prefetched;    /* pages warmed by read-ahead */
+	uint64_t trickled;      /* dirty pages written ahead by the trickler */
 } bm_stats_t;
 void bm_get_stats(bm_t *bm, bm_stats_t *out);
 
