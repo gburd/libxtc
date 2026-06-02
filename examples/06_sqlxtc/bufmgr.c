@@ -66,6 +66,7 @@ struct bm {
 	uint32_t          page_size;
 	uint32_t          n_frames;
 	uint32_t          cool_target; /* keep this many frames free+cool */
+	int               scan_resist; /* probation + COOL-first eviction */
 	bm_frame_t       *frames;
 	unsigned char    *pool;        /* n_frames * page_size, aligned */
 
@@ -217,8 +218,18 @@ ht_lookup_pin(bm_t *bm, bm_pid_t pid)
 static int
 evict_one(bm_t *bm)
 {
-	uint32_t i, scanned = 0;
-	for (scanned = 0; scanned < bm->n_frames * 2u; scanned++) {
+	uint32_t i, scanned;
+	/*
+	 * Prefer to reclaim an already-COOL frame; cool a HOT frame only
+	 * when a full sweep finds no COOL victim (force_cool).  With
+	 * probationary admission a scan supplies plenty of COOL pages, so
+	 * the hot set is never cooled to make room for it.  Legacy policy
+	 * (scan_resist off) cools eagerly on the first sweep.
+	 */
+	int force_cool = !bm->scan_resist;
+
+	for (;;) {
+	  for (scanned = 0; scanned < bm->n_frames * 2u; scanned++) {
 		uint64_t w, repl;
 		i = atomic_fetch_add_explicit(&bm->clock, 1, memory_order_relaxed)
 		    % bm->n_frames;
@@ -231,6 +242,8 @@ evict_one(bm_t *bm)
 		if (f->via_pid) {
 			/* page-table mode: cool is a state flip, no parent swip. */
 			if (st == BM_HOT) {
+				if (!force_cool)
+					continue;            /* prefer COOL victims */
 				atomic_store_explicit(&f->state, BM_COOL, memory_order_release);
 				atomic_fetch_add_explicit(&bm->s_cooled, 1, memory_order_relaxed);
 				st = BM_COOL;
@@ -265,6 +278,8 @@ evict_one(bm_t *bm)
 		if ((st == BM_HOT || st == BM_COOL) && has_resident_child(bm, f))
 			continue;
 		if (st == BM_HOT) {
+			if (!force_cool)
+				continue;            /* prefer COOL victims */
 			/* Cool it: unswizzle the parent HOT -> COOL. */
 			w = atomic_load_explicit(f->parent, memory_order_acquire);
 			if (!sw_is_hot(w) || sw_frame(w) != f) continue;
@@ -294,8 +309,11 @@ evict_one(bm_t *bm)
 		atomic_fetch_add_explicit(&bm->s_evicted, 1, memory_order_relaxed);
 		free_push(bm, f);
 		return 1;
+	  }
+	  if (force_cool)
+		return 0;        /* a full sweep cooling freely still found nothing */
+	  force_cool = 1;   /* no COOL victim available; cool HOT and retry */
 	}
-	return 0;
 }
 
 static bm_frame_t *
@@ -335,6 +353,7 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	bm->cool_target = opts->n_frames * (opts->cool_pct ? opts->cool_pct : 10)
 	    / 100u;
 	if (bm->cool_target < 1) bm->cool_target = 1;
+	bm->scan_resist = opts->scan_resist ? 1 : 0;
 	(void)pthread_mutex_init(&bm->free_mu, NULL);
 	(void)pthread_mutex_init(&bm->pid_mu, NULL);
 
@@ -444,14 +463,17 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
 		}
 		if (sw_is_cool(w)) {
 			bm_frame_t *f = sw_frame(w);
-			/* Rescue: COOL -> HOT, then pin. */
+			/* Pin BEFORE swizzling, so the frame can never be evicted in
+			 * the window between publish and pin (the same optimistic
+			 * discipline as the HOT-hit path above). */
+			atomic_fetch_add_explicit(&f->pin, 1, memory_order_acquire);
 			if (atomic_compare_exchange_strong(slot, &w, sw_hot(f))) {
 				atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
-				atomic_fetch_add_explicit(&f->pin, 1, memory_order_acquire);
 				atomic_fetch_add_explicit(&bm->s_rescues, 1, memory_order_relaxed);
 				*out_frame = f;
 				return XTC_OK;
 			}
+			atomic_fetch_sub_explicit(&f->pin, 1, memory_order_release);
 			continue;               /* changed; retry */
 		}
 		/* EVICTED: load from disk into a free frame. */
@@ -469,15 +491,24 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
 				free_push(bm, f);
 				return XTC_E_INTERNAL;
 			}
-			if (atomic_compare_exchange_strong(slot, &expect, sw_hot(f))) {
-				atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
-				atomic_fetch_add_explicit(&f->pin, 1, memory_order_acquire);
+			/* Pin and set state BEFORE publishing the swip, so the frame
+			 * is never reachable-and-evictable with pin == 0.
+			 * Probationary admission (LeanStore cooling + 2Q): a
+			 * demand-loaded page enters COOL, so a single-touch scan
+			 * never promotes it to HOT; a second access rescues it
+			 * (COOL -> HOT) above. */
+			atomic_store_explicit(&f->state,
+			    bm->scan_resist ? BM_COOL : BM_HOT, memory_order_release);
+			atomic_fetch_add_explicit(&f->pin, 1, memory_order_acquire);
+			if (atomic_compare_exchange_strong(slot, &expect,
+			    bm->scan_resist ? sw_cool(f) : sw_hot(f))) {
 				atomic_fetch_add_explicit(&bm->resident, 1, memory_order_relaxed);
 				atomic_fetch_add_explicit(&bm->s_loads, 1, memory_order_relaxed);
 				*out_frame = f;
 				return XTC_OK;
 			}
-			/* Someone else resolved it; drop our frame and retry. */
+			/* Someone else resolved it; unpin, drop our frame, retry. */
+			atomic_fetch_sub_explicit(&f->pin, 1, memory_order_release);
 			free_push(bm, f);
 			continue;
 		}
@@ -560,7 +591,13 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 			}
 			f->hnext = bm->buckets[b];
 			bm->buckets[b] = f;
-			atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
+			/* Probationary admission: a demand-loaded page enters
+			 * COOL (LeanStore cooling stage / 2Q A1), promoted to
+			 * HOT only on a second access (ht_lookup_pin rescue).
+			 * A scan touches each page once, so its pages never
+			 * displace the hot working set. */
+			atomic_store_explicit(&f->state,
+			    bm->scan_resist ? BM_COOL : BM_HOT, memory_order_release);
 			atomic_store_explicit(&f->pin, 1, memory_order_release);
 			(void)pthread_mutex_unlock(&bm->ht_mu);
 		}
@@ -593,40 +630,54 @@ pp_proc(void *arg)
 	__os_free(pa);
 
 	while (atomic_load_explicit(&bm->pp_running, memory_order_acquire)) {
-		uint32_t i;
-		/* Proactive pass: cool hot frames and flush dirty cool ones so
-		 * reclaiming a frame later is a cheap state flip. */
+		uint32_t i, cool_clean = 0, need;
+		/* Pass 1: flush dirty COOL frames (so reclaiming them later is a
+		 * cheap state flip) and count the clean cool supply. */
 		for (i = 0; i < bm->n_frames; i++) {
 			bm_frame_t *f = &bm->frames[i];
 			uint8_t st = atomic_load_explicit(&f->state, memory_order_acquire);
 			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
 				continue;
-			if (st == BM_HOT &&
-			    atomic_load_explicit(&bm->free_n, memory_order_relaxed)
-			    < bm->cool_target) {
-				if (f->via_pid) {
-					/* page-table mode: cool is a state flip. */
-					atomic_store_explicit(&f->state, BM_COOL,
-					    memory_order_release);
-					atomic_fetch_add_explicit(&bm->s_cooled, 1,
-					    memory_order_relaxed);
-				} else {
-					uint64_t cw;
-					if (has_resident_child(bm, f))
-						continue;   /* cool children first */
-					cw = atomic_load_explicit(f->parent, memory_order_acquire);
-					if (sw_is_hot(cw) && sw_frame(cw) == f &&
-					    atomic_compare_exchange_strong(f->parent, &cw, sw_cool(f))) {
-						atomic_store_explicit(&f->state, BM_COOL, memory_order_release);
-						atomic_fetch_add_explicit(&bm->s_cooled, 1, memory_order_relaxed);
-					}
+			if (st != BM_COOL)
+				continue;
+			if (atomic_load_explicit(&f->dirty, memory_order_acquire))
+				(void)flush_frame(bm, f);   /* proactive write-out */
+			else
+				cool_clean++;
+		}
+		/* Pass 2: top the cool stage up toward the target by cooling
+		 * HOT frames -- but only the shortfall.  An abundant supply of
+		 * probationary/scan COOL pages keeps need == 0, so a scan does
+		 * not provoke cooling of the hot working set. */
+		need = cool_clean < bm->cool_target ? bm->cool_target - cool_clean : 0;
+		for (i = 0; i < bm->n_frames && need > 0; i++) {
+			bm_frame_t *f = &bm->frames[i];
+			uint8_t st = atomic_load_explicit(&f->state, memory_order_acquire);
+			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
+				continue;
+			if (st != BM_HOT)
+				continue;
+			if (f->via_pid) {
+				/* page-table mode: cool is a state flip. */
+				atomic_store_explicit(&f->state, BM_COOL,
+				    memory_order_release);
+				atomic_fetch_add_explicit(&bm->s_cooled, 1,
+				    memory_order_relaxed);
+				need--;
+			} else {
+				uint64_t cw;
+				if (has_resident_child(bm, f))
+					continue;   /* cool children first */
+				cw = atomic_load_explicit(f->parent, memory_order_acquire);
+				if (sw_is_hot(cw) && sw_frame(cw) == f &&
+				    atomic_compare_exchange_strong(f->parent, &cw, sw_cool(f))) {
+					atomic_store_explicit(&f->state, BM_COOL, memory_order_release);
+					atomic_fetch_add_explicit(&bm->s_cooled, 1, memory_order_relaxed);
+					need--;
 				}
-			} else if (st == BM_COOL &&
-			    atomic_load_explicit(&f->dirty, memory_order_acquire)) {
-				(void)flush_frame(bm, f);     /* proactive write-out */
 			}
 		}
-		/* Keep the free list above the cool target. */
+		/* Pass 3: keep the free list above the cool target. */
 		while (atomic_load_explicit(&bm->free_n, memory_order_relaxed)
 		    < bm->cool_target) {
 			if (!evict_one(bm)) break;

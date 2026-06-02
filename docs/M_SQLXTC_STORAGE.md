@@ -193,6 +193,70 @@ exclusive windows phase 1 and phase 3 require, and those do not yield;
 the I/O wait is on the async buffer, which parks the proc, not the
 loop.
 
+### 2.5 Scan resistance -- the cooling stage as a probationary FIFO
+
+A large sequential scan -- a `VACUUM`, an analytical table scan, a bulk
+load -- touches many pages exactly once.  A naive manager that admits
+every faulted page as HOT lets such a scan promote its pages over the
+working set and evict everything that was hot, so the OLTP traffic that
+resumes after (or runs alongside) the scan faults all of its pages back
+in.  This is the classic buffer-pool pollution problem.
+
+LeanStore deliberately keeps **no per-access bookkeeping** on the hot
+path -- a HOT (swizzled) hit is a bare pointer dereference, with no LRU
+list to update and no reference bit to set; that is the property that
+makes it scale.  So scan resistance cannot be bought with LRU-K or a
+CLOCK reference counter (those would put a write on every page hit).
+It has to come from the **cooling stage itself**, used as a
+probationary FIFO.  This is exactly the 2Q insight (Johnson and Shasha,
+"2Q: A Low Overhead High Performance Buffer Management Replacement
+Algorithm", VLDB 1994): a page seen once and a page seen repeatedly
+belong in different queues.
+
+The engine maps 2Q onto LeanStore's existing states with one rule, and
+no new hot-path work:
+
+  * **Probationary admission.**  A demand-LOADED page is admitted to
+    the COOL stage, not HOT (`scan_resist`, on by default).  A page
+    becomes HOT only on a SECOND access -- the rescue that the cooling
+    stage already performs (`bm_fix` COOL -> HOT, `ht_lookup_pin` COOL
+    -> HOT).  A scan touches each page once, so its pages stay COOL and
+    never enter the hot set.  Freshly ALLOCATED pages are still born
+    HOT: they are new, dirty, and certainly in use, not a scan
+    artifact.
+
+  * **COOL-first eviction.**  `evict_one` reclaims an already-COOL
+    frame in preference to cooling a HOT one; it cools a HOT frame only
+    when a full sweep finds no COOL victim (the `force_cool` retry,
+    which also guarantees progress).  The page provider cools HOT
+    frames only to refill the cool budget toward `cool_target`,
+    counting the clean COOL frames it already has.  So an abundant
+    supply of probationary scan pages becomes the eviction victims and
+    the hot working set is never cooled to make room for the scan.
+
+Together these make the scan recycle its own COOL pages while the hot
+set stays HOT and resident.  `test_scan_resist` demonstrates it
+directly: after warming a 16-page hot set and then scanning 3000 cold
+pages through a 32-frame pool, re-touching the hot set reloads **0 of
+16** pages with scan resistance on, versus **16 of 16** with it off.
+
+This is the right fix for a scan that runs *alongside* a hot workload
+(the OLTP-during-vacuum case): the hot set survives.  It is distinct
+from the *cost of the scan itself* -- a full-tree vacuum still has to
+read the whole larger-than-RAM tree from disk -- which is why version
+reclamation on the write path uses incremental, HOT-style inline
+pruning (`xstore_autovacuum`, section in docs/M_SQLXTC_MVCC_SQL.md and
+the benchmark in bench/sqlxtc/ENGINE_AB.md) rather than a periodic
+stop-the-world full scan.
+
+The correctness subtlety the change exposed: a page must be PINNED
+before its swip is published, or a frame admitted COOL is briefly
+reachable-and-evictable with `pin == 0` and a concurrent evictor can
+reclaim it under the loader.  `bm_fix` now pins before the publishing
+CAS in both the rescue and load paths (the same optimistic discipline
+the HOT-hit path already used); the page-table path was already safe
+via its post-`ht_remove` pin re-check.
+
 ## 3. The B-tree
 
 The on-disk index is a B-link tree (Lehman and Yao) with LeanStore's
