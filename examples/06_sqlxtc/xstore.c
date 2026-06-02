@@ -862,17 +862,17 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
  * vacuum.  Same keep rule as xs_gc, restricted to one rowid; same
  * collect-then-delete discipline (no latch across the cursor).
  */
-static void
+static int
 xs_prune_rowid(bt_t *bt, int64_t rowid, uint64_t horizon)
 {
 	bt_cursor_t *cur = NULL;
 	uint8_t startk[XS_VKLEN];
 	uint8_t dead[16][XS_VKLEN];
-	int ndead = 0, i, survivor_found = 0, first = 1;
+	int ndead = 0, i, survivor_found = 0, first = 1, reclaimed = 0;
 
 	enc_vkey(rowid, ~(uint64_t)0, startk);    /* newest version first */
 	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
-		return;
+		return 0;
 	for (;;) {
 		const void *k = NULL, *vv = NULL;
 		uint16_t klen = 0, vl = 0;
@@ -897,7 +897,39 @@ xs_prune_rowid(bt_t *bt, int64_t rowid, uint64_t horizon)
 	}
 	bt_cursor_close(cur);
 	for (i = 0; i < ndead; i++)
-		(void)bt_delete(bt, dead[i], XS_VKLEN);
+		if (bt_delete(bt, dead[i], XS_VKLEN) == XTC_OK) reclaimed++;
+	return reclaimed;
+}
+
+/*
+ * Adaptive autovacuum gate.  Pruning every write is pure overhead on a
+ * workload whose version chains are naturally short (each prune walks
+ * the chain and finds nothing).  This self-tunes: prune every write
+ * while prunes keep reclaiming versions (hot keys, long chains), but
+ * back off geometrically -- pruning only 1 in `interval` writes -- when
+ * a prune finds nothing, so a uniform workload pays almost no prune
+ * cost.  Global (the engine is one shared store); a couple of relaxed
+ * atomics, no per-rowid state. */
+#define XS_AV_MAX_INTERVAL 256
+static _Atomic int g_av_interval = 1;
+static _Atomic int g_av_countdown = 1;
+static _Atomic uint64_t g_av_prunes = 0;   /* prune passes actually run */
+static void
+xs_maybe_prune(bt_t *bt, int64_t rowid, uint64_t horizon)
+{
+	int reclaimed, iv;
+	if (atomic_fetch_sub_explicit(&g_av_countdown, 1, memory_order_relaxed) > 1)
+		return;                               /* not this write */
+	reclaimed = xs_prune_rowid(bt, rowid, horizon);
+	atomic_fetch_add_explicit(&g_av_prunes, 1, memory_order_relaxed);
+	if (reclaimed > 0) {
+		iv = 1;                               /* productive: prune every write */
+	} else {
+		iv = atomic_load_explicit(&g_av_interval, memory_order_relaxed) * 2;
+		if (iv > XS_AV_MAX_INTERVAL) iv = XS_AV_MAX_INTERVAL;
+	}
+	atomic_store_explicit(&g_av_interval, iv, memory_order_relaxed);
+	atomic_store_explicit(&g_av_countdown, iv, memory_order_relaxed);
 }
 
 /* Write a version, then (if this connection enabled autovacuum) prune
@@ -907,7 +939,7 @@ xs_put_pruned(xstore_ctx_t *cx, int64_t rowid, const void *blob, int n, int dele
 {
 	int rc = xs_put(cx->bt, rowid, blob, n, deleted);
 	if (rc == SQLITE_OK && cx->autovacuum)
-		xs_prune_rowid(cx->bt, rowid,
+		xs_maybe_prune(cx->bt, rowid,
 		    snap_horizon(atomic_load_explicit(&g_xclock, memory_order_relaxed)));
 	return rc;
 }
@@ -1083,7 +1115,7 @@ xs_commit(xsql_vtab *pv)
 			    (uint16_t)(1 + (w->deleted ? 0 : w->len))) != XTC_OK)
 				rc = SQLITE_ERROR;
 			else if (cx->autovacuum)
-				xs_prune_rowid(cx->bt, w->rowid, snap_horizon(ts));
+				xs_maybe_prune(cx->bt, w->rowid, snap_horizon(ts));
 		}
 		ssi_commit(cx->ssi, ts);     /* publish commit_ts for SSI peers */
 	} else {
@@ -1172,6 +1204,16 @@ fn_autovacuum(xsql_context *ctx, int argc, xsql_value **argv)
 	c->autovacuum = on;
 	xsql_result_int(ctx, on);
 }
+/* xstore_prune_count(): number of inline-prune passes adaptive
+ * autovacuum has actually run (vs the number of writes) -- lets a test
+ * see the backoff on a low-garbage workload. */
+static void
+fn_prune_count(xsql_context *ctx, int argc, xsql_value **argv)
+{
+	(void)argc; (void)argv;
+	xsql_result_int64(ctx,
+	    (xsql_int64)atomic_load_explicit(&g_av_prunes, memory_order_relaxed));
+}
 
 static const xsql_module xstore_module = {
 	.iVersion    = 1,
@@ -1236,6 +1278,8 @@ xstore_register(xsql *db, bt_t *bt)
 	    ctx, fn_gc, NULL, NULL);
 	(void)xsql_create_function(db, "xstore_autovacuum", 1, SQLITE_UTF8,
 	    ctx, fn_autovacuum, NULL, NULL);
+	(void)xsql_create_function(db, "xstore_prune_count", 0, SQLITE_UTF8,
+	    ctx, fn_prune_count, NULL, NULL);
 	return SQLITE_OK;
 }
 
