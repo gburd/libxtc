@@ -46,6 +46,7 @@ int __os_thread_setname __P((const char *));
 int __os_tls_create __P((__os_tls_key_t *, __os_tls_dtor));
 int __os_tls_destroy __P((__os_tls_key_t));
 int __os_tls_set __P((__os_tls_key_t, void *));
+size_t __os_msize __P((void *));
 void *__os_tls_get __P((__os_tls_key_t));
 void __os_aligned_free __P((void *));
 void __os_free __P((void *));
