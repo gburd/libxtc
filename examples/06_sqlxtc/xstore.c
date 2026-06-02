@@ -51,10 +51,16 @@
 
 #include "sqlite3.h"
 #include "btree.h"
+#include "wal.h"
 #include "xtc.h"
+#include "xtc_proc.h"
 
 /* Global logical commit clock for the shared engine B-tree. */
 static _Atomic uint64_t g_xclock = 1;
+
+/* Optional process-global write-ahead log (see xstore_set_wal). */
+static wal_t *g_xwal = NULL;
+void xstore_set_wal(struct wal *w) { g_xwal = (wal_t *)w; }
 
 #define XS_F_DELETED 0x01u     /* value[0] flag: this version is a tombstone */
 #define XS_VKLEN     16        /* (rowid:8) + (inverted commit_ts:8) */
@@ -693,6 +699,41 @@ xs_rowid(xsql_vtab_cursor *pc, xsql_int64 *pRowid)
 
 /* Write one version of `rowid`: a tombstone if deleted, else a copy of
  * `blob`, stamped with a fresh commit timestamp (autocommit). */
+/* Dispatch one WAL record to the log durably: group commit on a loop
+ * (parks the fiber on the writer's ack), synchronous append off a loop.
+ * No-op when no WAL is attached. */
+static void
+xs_wal_emit(const uint8_t *rec, size_t sz)
+{
+	uint64_t lsn = 0;
+	if (g_xwal == NULL)
+		return;
+	if (xtc_pid_is_none(xtc_self()))
+		(void)wal_commit_sync(g_xwal, rec, (uint32_t)sz, &lsn);
+	else
+		(void)wal_commit(g_xwal, rec, (uint32_t)sz, &lsn);
+}
+
+/* Log a single committed version (the autocommit single-statement
+ * path); same record layout as the multi-version xs_wal_log. */
+static void
+xs_wal_put(uint64_t ts, int64_t rowid, const void *val, int vlen, int deleted)
+{
+	uint8_t rec[12 + 11 + XS_VMAX];
+	uint8_t *p = rec;
+	uint32_t n = 1;
+	uint8_t flags = deleted ? XS_F_DELETED : 0;
+	uint16_t vl = (deleted || vlen < 0) ? 0
+	    : (uint16_t)(vlen > XS_VMAX ? XS_VMAX : vlen);
+	memcpy(p, &ts, 8); p += 8;
+	memcpy(p, &n, 4); p += 4;
+	memcpy(p, &rowid, 8); p += 8;
+	*p++ = flags;
+	memcpy(p, &vl, 2); p += 2;
+	if (vl) { memcpy(p, val, vl); p += vl; }
+	xs_wal_emit(rec, (size_t)(p - rec));
+}
+
 static int
 xs_put(bt_t *bt, int64_t rowid, const void *blob, int n, int deleted)
 {
@@ -702,6 +743,8 @@ xs_put(bt_t *bt, int64_t rowid, const void *blob, int n, int deleted)
 	    memory_order_relaxed) + 1;
 	if (n < 0) n = 0;
 	if (n > XS_VMAX) n = XS_VMAX;
+	if (g_xwal != NULL)
+		xs_wal_put(ts, rowid, blob, n, deleted);   /* durable BEFORE apply */
 	enc_vkey(rowid, ts, key);
 	buf[0] = deleted ? XS_F_DELETED : 0;
 	if (!deleted && n > 0) memcpy(buf + 1, blob, (size_t)n);
@@ -973,6 +1016,49 @@ xs_sync(xsql_vtab *pv)
 	return in_edge ? SQLITE_BUSY : SQLITE_OK;   /* pivot -> serialization failure */
 }
 
+/*
+ * Serialize the transaction's buffered versions into one WAL record and
+ * make it DURABLE before any of them touch the B-tree.  Record layout:
+ *
+ *	[u64 commit_ts][u32 n]  then n x { [i64 rowid][u8 flags][u16 vlen][vlen] }
+ *
+ * Logging before applying is what lets recovery be redo-only: a crash
+ * after this returns can redo the commit from the log (idempotent --
+ * version keys (rowid, ~commit_ts) are immutable), and a crash before
+ * it has not touched the B-tree, so there is nothing to undo.  On a
+ * loop the commit joins the group-commit batch (one fsync for many);
+ * off a loop it appends synchronously.
+ */
+static void
+xs_wal_log(xstore_ctx_t *cx, uint64_t ts)
+{
+	size_t sz = 12;
+	uint8_t *rec, *p;
+	uint32_t n;
+	int i;
+
+	for (i = 0; i < cx->wn; i++)
+		sz += 11 + (cx->wbuf[i].deleted ? 0 : cx->wbuf[i].len);
+	rec = malloc(sz);
+	if (rec == NULL)
+		return;                       /* best-effort; durability lost on OOM */
+	p = rec;
+	memcpy(p, &ts, 8); p += 8;
+	n = (uint32_t)cx->wn;
+	memcpy(p, &n, 4); p += 4;
+	for (i = 0; i < cx->wn; i++) {
+		xs_wrec_t *w = &cx->wbuf[i];
+		uint8_t flags = w->deleted ? XS_F_DELETED : 0;
+		uint16_t vlen = w->deleted ? 0 : w->len;
+		memcpy(p, &w->rowid, 8); p += 8;
+		*p++ = flags;
+		memcpy(p, &vlen, 2); p += 2;
+		if (vlen) { memcpy(p, w->data, vlen); p += vlen; }
+	}
+	xs_wal_emit(rec, (size_t)(p - rec));
+	free(rec);
+}
+
 static int
 xs_commit(xsql_vtab *pv)
 {
@@ -984,6 +1070,8 @@ xs_commit(xsql_vtab *pv)
 	if (cx->wn > 0) {
 		ts = atomic_fetch_add_explicit(&g_xclock, 1,
 		    memory_order_relaxed) + 1;     /* one timestamp for the txn */
+		if (g_xwal != NULL)
+			xs_wal_log(cx, ts);            /* durable BEFORE apply */
 		for (i = 0; i < cx->wn; i++) {
 			uint8_t key[XS_VKLEN];
 			uint8_t buf[1 + XS_VMAX];
@@ -1149,4 +1237,65 @@ xstore_register(xsql *db, bt_t *bt)
 	(void)xsql_create_function(db, "xstore_autovacuum", 1, SQLITE_UTF8,
 	    ctx, fn_autovacuum, NULL, NULL);
 	return SQLITE_OK;
+}
+
+/*
+ * Recovery: replay every committed transaction's versions from the log
+ * into the B-tree.  Redo only -- there is no uncommitted data on disk
+ * (the commit logs durably before touching the B-tree), and replay is
+ * idempotent because version keys (rowid, ~commit_ts) are immutable, so
+ * re-inserting one yields the identical entry.  Advances the commit
+ * clock past the highest recovered timestamp so new commits do not
+ * collide with recovered ones.
+ */
+struct xs_recover {
+	bt_t    *bt;
+	uint64_t max_ts;
+	uint64_t records;
+};
+static int
+xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
+{
+	struct xs_recover *r = user;
+	const uint8_t *p = rec;
+	const uint8_t *end = (const uint8_t *)rec + len;
+	uint64_t ts;
+	uint32_t n, i;
+	(void)lsn;
+
+	if (len < 12)
+		return 0;                     /* malformed: skip */
+	memcpy(&ts, p, 8); p += 8;
+	memcpy(&n, p, 4); p += 4;
+	for (i = 0; i < n; i++) {
+		int64_t rowid;
+		uint8_t flags;
+		uint16_t vlen;
+		uint8_t key[XS_VKLEN];
+		uint8_t buf[1 + XS_VMAX];
+
+		if (p + 11 > end) break;      /* torn record */
+		memcpy(&rowid, p, 8); p += 8;
+		flags = *p++;
+		memcpy(&vlen, p, 2); p += 2;
+		if (vlen > XS_VMAX || p + vlen > end) break;
+		enc_vkey(rowid, ts, key);
+		buf[0] = flags;
+		if (vlen) memcpy(buf + 1, p, vlen);
+		p += vlen;
+		(void)bt_insert(r->bt, key, XS_VKLEN, buf, (uint16_t)(1 + vlen));
+	}
+	if (ts > r->max_ts) r->max_ts = ts;
+	r->records++;
+	return 0;
+}
+
+int
+xstore_recover(bt_t *bt, const char *wal_path)
+{
+	struct xs_recover r = { bt, 0, 0 };
+	int rc = wal_scan(wal_path, xs_recover_cb, &r);
+	if (r.max_ts >= atomic_load_explicit(&g_xclock, memory_order_relaxed))
+		atomic_store_explicit(&g_xclock, r.max_ts + 1, memory_order_relaxed);
+	return rc;
 }

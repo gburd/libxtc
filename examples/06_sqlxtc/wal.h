@@ -66,7 +66,29 @@ xtc_pid_t wal_writer_pid(const wal_t *w);
  * *lsn, or an error.  Many callers calling concurrently coalesce into
  * one fsync.
  */
-int  wal_commit(wal_t *w, const void *record, uint16_t len, uint64_t *lsn);
+int  wal_commit(wal_t *w, const void *record, uint32_t len, uint64_t *lsn);
+
+/*
+ * Synchronous durable append, usable OFF a loop (no writer process):
+ * appends one record and fdatasyncs before returning, serialized by an
+ * internal mutex.  Same on-disk format as wal_commit, so wal_scan
+ * replays records written by either path.  Use when the committer is
+ * not running on an xtc loop; on a loop, prefer wal_commit (group
+ * commit).  Do not mix with a spawned writer on the same log.
+ */
+int  wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn);
+
+/*
+ * Replay: scan the log file at `path` in LSN order, invoking `cb` for
+ * each complete record.  A torn trailing record (a partial write at
+ * crash) is detected by a short read and ends the scan -- everything
+ * before it is intact.  Reads the raw file, so it runs at startup
+ * before any writer is spawned.  cb returns 0 to continue, non-zero to
+ * stop.
+ */
+typedef int (*wal_replay_cb)(uint64_t lsn, const void *rec, uint32_t len,
+    void *user);
+int  wal_scan(const char *path, wal_replay_cb cb, void *user);
 
 /* Ask the writer to flush any pending batch and exit.  Call once all
  * committers are done so the loop can drain. */
