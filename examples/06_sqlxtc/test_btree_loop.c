@@ -29,7 +29,7 @@
 #include "xtc_proc.h"
 
 #define N_KEYS    2000
-#define N_FRAMES  20
+#define N_FRAMES  8       /* << tree (~22 pages): force real paging */
 #define PAGE_SZ   4096
 
 static bm_t       *g_bm;

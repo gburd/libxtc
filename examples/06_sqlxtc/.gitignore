@@ -25,6 +25,7 @@ test_bufmgr
 test_btnode
 test_btree
 test_bufmgr_mt
+test_scan_resist
 test_btree_loop
 test_btree_loop
 test_btree_mt

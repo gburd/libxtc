@@ -62,6 +62,16 @@ typedef struct bm_opts {
 	uint32_t    n_frames;    /* resident pool size (frames) */
 	uint32_t    cool_pct;    /* target % of frames kept cool/free */
 
+	/* Scan resistance (LeanStore cooling + 2Q probation).  When set
+	 * (the default), a demand-LOADED page is admitted to the COOL
+	 * stage, not HOT: it becomes HOT only on a second access (rescue),
+	 * and eviction prefers COOL victims, cooling HOT pages only to
+	 * refill the cool budget.  So a scan -- which touches each page
+	 * once -- fills the cool stage and is evicted from it without ever
+	 * displacing the hot working set.  Clear it for the legacy policy
+	 * (admit HOT, cool-then-evict in one sweep). */
+	uint8_t     scan_resist;
+
 	/* Tree support.  A parent page may not be cooled or evicted while
 	 * any of its children are resident (HOT or COOL), or a swizzled
 	 * child pointer would be written to disk as garbage.  If set, the
@@ -74,7 +84,8 @@ typedef struct bm_opts {
 } bm_opts_t;
 
 #define BM_OPTS_DEFAULT \
-	{ .path = NULL, .page_size = 4096, .n_frames = 256, .cool_pct = 10 }
+	{ .path = NULL, .page_size = 4096, .n_frames = 256, .cool_pct = 10, \
+	  .scan_resist = 1 }
 
 /* Lifecycle. */
 int  bm_create(const bm_opts_t *opts, bm_t **out);
