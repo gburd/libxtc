@@ -134,6 +134,27 @@ struct bt {
 	_Atomic uint64_t  st_height;   /* number of levels (1 == root leaf) */
 };
 
+/* On-disk superblock (buffer-manager page 0), recording where the tree
+ * lives so a restart can find the root instead of building a fresh
+ * one.  Rewritten on create and whenever the root pid changes. */
+#define BT_SUPER_MAGIC 0x58425431u   /* "XBT1" */
+struct bt_super {
+	uint32_t magic;
+	uint32_t page_size;
+	uint64_t root_pid;
+	uint64_t height;
+};
+static void
+bt_write_super(bt_t *bt)
+{
+	struct bt_super s;
+	s.magic = BT_SUPER_MAGIC;
+	s.page_size = bt->page_size;
+	s.root_pid = (uint64_t)atomic_load(&bt->root_pid);
+	s.height = atomic_load(&bt->st_height);
+	(void)bm_write_super(bt->bm, &s, sizeof s);
+}
+
 struct bt_cursor {
 	bt_t          *bt;
 	bm_frame_t    *leaf;   /* current leaf: fixed + shared-latched, or NULL */
@@ -256,12 +277,48 @@ bt_open(bm_t *bm, bt_t **out)
 	atomic_store(&bt->st_height, 1);
 	bm_unfix(bm, rf, 1);
 
+	bt_write_super(bt);             /* persist where the root lives */
+
 	*out = bt;
 	return XTC_OK;
 
 fail:
 	free(bt);
 	return rc;
+}
+
+/*
+ * Reopen a B-tree from an existing store (the buffer manager must have
+ * been created with reopen != 0).  Reads the superblock to find the
+ * live root, page size, and height -- no fresh root is allocated.
+ * Returns XTC_E_INVAL if the superblock is absent or unrecognized.
+ */
+int
+bt_reopen(bm_t *bm, bt_t **out)
+{
+	bt_t *bt;
+	struct bt_super s;
+	int rc;
+
+	if (bm == NULL || out == NULL)
+		return XTC_E_INVAL;
+	bt = calloc(1, sizeof *bt);
+	if (bt == NULL)
+		return XTC_E_NOMEM;
+	bt->bm = bm;
+	if ((rc = bm_read_super(bm, &s, sizeof s)) != XTC_OK) {
+		free(bt);
+		return rc;
+	}
+	if (s.magic != BT_SUPER_MAGIC || s.page_size == 0) {
+		free(bt);
+		return XTC_E_INVAL;          /* not an xstore B-tree store */
+	}
+	bt->page_size = s.page_size;
+	atomic_store(&bt->root_pid, (bm_pid_t)s.root_pid);
+	atomic_store(&bt->st_height, s.height);
+	*out = bt;
+	return XTC_OK;
 }
 
 void
@@ -479,6 +536,7 @@ restart:
 			bm_unlatch(nf); bm_unfix(bm, nf, 1);
 			atomic_store(&bt->root_pid, npid);
 			atomic_fetch_add(&bt->st_height, 1);
+			bt_write_super(bt);     /* root pid changed: update superblock */
 			modified_from = 0;          /* whole path changed */
 		}
 	}
