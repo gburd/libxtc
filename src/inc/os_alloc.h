@@ -46,6 +46,7 @@ struct __os_alloc_hook {
  * PUBLIC: int  __os_malloc __P((size_t, void **));
  * PUBLIC: int  __os_calloc __P((size_t, size_t, void **));
  * PUBLIC: int  __os_realloc __P((void *, size_t, void **));
+ * PUBLIC: size_t __os_msize __P((void *));
  * PUBLIC: void __os_free __P((void *));
  * PUBLIC: int  __os_strdup __P((const char *, char **));
  * PUBLIC: int  __os_aligned_alloc __P((size_t, size_t, void **));
@@ -56,6 +57,7 @@ struct __os_alloc_hook {
 int  __os_malloc(size_t sz, void **out);
 int  __os_calloc(size_t n, size_t sz, void **out);
 int  __os_realloc(void *p, size_t sz, void **out);
+size_t __os_msize(void *p);
 void __os_free(void *p);
 int  __os_strdup(const char *s, char **out);
 int  __os_aligned_alloc(size_t align, size_t sz, void **out);

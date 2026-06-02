@@ -22,10 +22,13 @@
  *	the primitive (see docs/M_SQLXTC_HARDFORK.md).
  *
  *	SQLite requires xSize(p) to report the usable size of a prior
- *	allocation, which the xtc allocator does not track, so each block
- *	carries a small header that records its size.  The header is one
- *	cache-friendly 16-byte slot, which also keeps the pointer handed
- *	back to SQLite 16-byte aligned (SQLite needs 8).
+ *	allocation.  Each block carries a 16-byte header recording its
+ *	size; the recorded size is the allocator's ACTUAL usable size
+ *	(__os_msize, minus the header) when the backend reports it, so
+ *	SQLite may use the slack the allocator handed out -- falling back
+ *	to the requested size for a custom backend that cannot report it.
+ *	The 16-byte header also keeps the pointer handed back to SQLite
+ *	16-byte aligned (SQLite needs 8).
  */
 
 #include "mem.h"
@@ -44,6 +47,18 @@
  */
 #define MEM_HDR 16u
 
+/* Record the block's usable size in its header: the allocator's actual
+ * usable bytes (minus the header) when known, else the request. */
+static void
+mem_set_size(void *base, size_t requested)
+{
+	size_t usable = __os_msize(base);
+	size_t avail = (usable > MEM_HDR) ? usable - MEM_HDR : requested;
+	if (avail < requested)
+		avail = requested;
+	*(size_t *)base = avail;
+}
+
 static void *
 mem_malloc(int n)
 {
@@ -55,7 +70,7 @@ mem_malloc(int n)
 	sz = (size_t)n;
 	if (__os_malloc(sz + MEM_HDR, &base) != 0)
 		return NULL;
-	*(size_t *)base = sz;
+	mem_set_size(base, sz);
 	return (char *)base + MEM_HDR;
 }
 
@@ -83,7 +98,7 @@ mem_realloc(void *p, int n)
 	base = (char *)p - MEM_HDR;
 	if (__os_realloc(base, sz + MEM_HDR, &nb) != 0)
 		return NULL;
-	*(size_t *)nb = sz;
+	mem_set_size(nb, sz);
 	return (char *)nb + MEM_HDR;
 }
 
@@ -98,9 +113,9 @@ mem_size(void *p)
 static int
 mem_roundup(int n)
 {
-	/* Round to 8 bytes; SQLite asks for the size it will actually
-	 * get so it can pack structures.  We allocate exactly what is
-	 * requested, so reporting the 8-byte-rounded request is exact. */
+	/* SQLite asks how big an allocation it will actually get for `n`.
+	 * We hand back the allocator's usable size, which is at least the
+	 * 8-byte-rounded request, so reporting that lower bound is safe. */
 	if (n <= 0)
 		return 0;
 	return (n + 7) & ~7;
