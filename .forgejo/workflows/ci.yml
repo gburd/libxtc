@@ -9,6 +9,14 @@ name: CI
 # stub and is not exercised here.  hegel-c property tests need a local
 # hegel server and are configured out in CI (the PBT sources still
 # compile; the generative runs are a developer-local step).
+#
+# I/O backend: these jobs force --with-io-backend=epoll because the
+# Codeberg hosted runners execute in containers whose seccomp profile
+# blocks the io_uring_* syscalls, so the auto-selected uring backend
+# would fail io_uring_queue_init at runtime (the backend is chosen at
+# configure time, with no runtime fallback by design).  The GitHub
+# mirror runs on VMs that permit io_uring and exercises the uring
+# backend, so between the two CIs both Linux backends are covered.
 
 on:
   push:
@@ -41,7 +49,7 @@ jobs:
         run: |
           mkdir -p build_ci
           cd build_ci
-          CC=${{ matrix.compiler }} ../dist/configure --with-tls=auto
+          CC=${{ matrix.compiler }} ../dist/configure --with-tls=auto --with-io-backend=epoll
 
       - name: Build
         run: make -C build_ci -j"$(nproc)"
@@ -68,7 +76,7 @@ jobs:
         run: |
           mkdir -p build_fctx
           cd build_fctx
-          CPPFLAGS=-DXTC_CORO_FORCE_FCTX ../dist/configure --with-tls=auto
+          CPPFLAGS=-DXTC_CORO_FORCE_FCTX ../dist/configure --with-tls=auto --with-io-backend=epoll
       - name: Build
         run: make -C build_fctx -j"$(nproc)"
       - name: Test
@@ -100,7 +108,7 @@ jobs:
           cd build_san
           CFLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g -O1" \
           LDFLAGS="-fsanitize=${{ matrix.sanitizer }}" \
-            ../dist/configure --with-tls=auto
+            ../dist/configure --with-tls=auto --with-io-backend=epoll
 
       - name: Build
         run: make -C build_san -j"$(nproc)"
@@ -133,7 +141,7 @@ jobs:
         run: |
           mkdir -p build_ci
           cd build_ci
-          ../dist/configure --with-tls=auto
+          ../dist/configure --with-tls=auto --with-io-backend=epoll
           make -j"$(nproc)"
       - name: kaka in-process tests
         working-directory: examples/07_kaka
