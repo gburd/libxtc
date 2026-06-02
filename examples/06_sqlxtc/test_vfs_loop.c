@@ -52,19 +52,29 @@ worker_proc(void *arg)
 	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "sqlxtc");
 	if (rc != SQLITE_OK) goto done;
 
-	/* One transaction, many rows: forces xWrite + xSync at commit. */
+	/* Many small transactions, each forcing a real fsync at commit, so
+	 * the worker parks on offloaded I/O repeatedly and the loop has
+	 * many chances to run the heartbeat -- a robust liveness signal
+	 * that does not hinge on one commit's wall time (which varies by
+	 * I/O backend and disk speed). */
 	(void)xsql_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+	(void)xsql_exec(db, "PRAGMA synchronous=FULL;", NULL, NULL, NULL);
 	if (xsql_exec(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);",
 	    NULL, NULL, &err) != SQLITE_OK) goto done;
-	if (xsql_exec(db, "BEGIN;", NULL, NULL, &err) != SQLITE_OK) goto done;
-	for (i = 0; i < 300; i++) {
-		char sql[96];
-		snprintf(sql, sizeof sql,
-		    "INSERT INTO t(v) VALUES('row-%d-padding-padding');", i);
-		if (xsql_exec(db, sql, NULL, NULL, &err) != SQLITE_OK)
-			goto done;
+	for (i = 0; i < 30; i++) {
+		int j;
+		if (xsql_exec(db, "BEGIN;", NULL, NULL, &err) != SQLITE_OK) goto done;
+		for (j = 0; j < 20; j++) {
+			char sql[96];
+			snprintf(sql, sizeof sql,
+			    "INSERT INTO t(v) VALUES('row-%d-padding-padding');",
+			    i * 20 + j);
+			if (xsql_exec(db, sql, NULL, NULL, &err) != SQLITE_OK)
+				goto done;
+		}
+		if (xsql_exec(db, "COMMIT;", NULL, NULL, &err) != SQLITE_OK)
+			goto done;   /* xWrite + xSync (fsync) offloaded here */
 	}
-	if (xsql_exec(db, "COMMIT;", NULL, NULL, &err) != SQLITE_OK) goto done;
 	if (xsql_exec(db, "SELECT count(*) FROM t;", count_cb, NULL, &err)
 	    != SQLITE_OK) goto done;
 	g_worker_ok = 1;
@@ -121,7 +131,7 @@ main(void)
 	  snprintf(shm, sizeof shm, "%s-shm", path);
 	  unlink(wal); unlink(shm); }
 
-	if (!g_worker_ok || g_rows != 300) {
+	if (!g_worker_ok || g_rows != 600) {
 		fprintf(stderr, "FAIL: workload (ok=%d rows=%d)\n",
 		    g_worker_ok, g_rows);
 		return 1;
