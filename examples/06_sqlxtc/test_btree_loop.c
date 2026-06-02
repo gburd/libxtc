@@ -136,9 +136,11 @@ main(void)
 	    "I/O + live page-provider (height=%llu splits=%llu)\n",
 	    N_KEYS, (unsigned long long)ts.height, (unsigned long long)ts.splits);
 	printf("  ok   paged through the cooling buffer pool while parking on "
-	    "async I/O (loads=%llu evicted=%llu flushed=%llu resident=%llu)\n",
+	    "async I/O (loads=%llu evicted=%llu flushed=%llu resident=%llu "
+	    "prefetched=%llu)\n",
 	    (unsigned long long)bs.loads, (unsigned long long)bs.evicted,
-	    (unsigned long long)bs.flushed, (unsigned long long)bs.resident);
+	    (unsigned long long)bs.flushed, (unsigned long long)bs.resident,
+	    (unsigned long long)bs.prefetched);
 	printf("All sqlxtc B-tree on-loop tests passed.\n");
 	return 0;
 }

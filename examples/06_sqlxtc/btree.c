@@ -738,6 +738,12 @@ bt_cursor_open(bt_t *bt, const void *start, uint16_t klen, bt_cursor_t **out)
 		/* First slot with key >= start. */
 		c->slot = btnode_search(bm_page(leaf), start, klen, &found);
 	}
+	/* Read-ahead the next leaf so a forward scan stays a cache hit. */
+	{
+		uint32_t rs = btnode_right_sibling(bm_page(leaf));
+		if (rs != 0)
+			(void)bm_prefetch_pid(bt->bm, (bm_pid_t)rs);
+	}
 	*out = c;
 	return XTC_OK;
 }
@@ -803,6 +809,13 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
 			bm_latch_shared(nf);
 			c->leaf = nf;
 			c->slot = 0;
+			/* Read-ahead: warm the NEXT leaf while we scan this one,
+			 * so following the sibling chain stays a cache hit. */
+			{
+				uint32_t rs2 = btnode_right_sibling(bm_page(nf));
+				if (rs2 != 0)
+					(void)bm_prefetch_pid(bm, (bm_pid_t)rs2);
+			}
 		}
 	}
 }

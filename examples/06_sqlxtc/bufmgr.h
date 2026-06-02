@@ -112,6 +112,13 @@ int  bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame);
 int  bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid);
 int  bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame);
 
+/* Read-ahead: request that `pid` be warmed into the pool soon.  Returns
+ * immediately (never blocks on I/O); the page-provider drains the
+ * request in the background and loads the page (resident, probationary)
+ * so a subsequent bm_fix_pid is likely a hit.  Best-effort.  Requires a
+ * provider (bm_provider_spawn) to do the warming. */
+int  bm_prefetch_pid(bm_t *bm, bm_pid_t pid);
+
 /* Release a frame fixed by bm_alloc/bm_fix.  mark_dirty != 0 records
  * that the page was modified (so it is written before eviction). */
 void bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty);
@@ -147,6 +154,7 @@ typedef struct bm_stats {
 	uint64_t evicted;       /* frames reclaimed */
 	uint64_t resident;      /* frames currently HOT or COOL */
 	uint64_t free_frames;   /* frames on the free list */
+	uint64_t prefetched;    /* pages warmed by read-ahead */
 } bm_stats_t;
 void bm_get_stats(bm_t *bm, bm_stats_t *out);
 
