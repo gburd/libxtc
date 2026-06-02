@@ -47,6 +47,26 @@ mutating; fixed with a non-blocking try-shared-latch snapshot.  Both
 were found by the MT stress test + core-dump analysis under a
 load-17 box.
 
+### CONFIRMED + FIXED (example bug): background-proc stop must JOIN, not just signal
+
+Wiring the engine into the server (sx_storage_open/run/close) surfaced
+a third example-level lifecycle bug, found by ASan in the in-process
+server-storage test.  bm_provider_stop / bm_trickler_stop /
+wal_writer_stop only SIGNALLED their proc (a flag, or a STOP message)
+and returned; a caller that then freed the manager (bm_destroy,
+wal_close) raced the still-live proc, which read the freed struct on
+its next wakeup (heap-use-after-free in pp_proc).  The existing tests
+hid it because they only destroyed AFTER the loop had fully drained
+(the proc already gone); closing on a live loop -- as a server
+shutdown or restart does -- does not.  Fix: each proc publishes an
+`alive` flag cleared on exit, and stop parks (xtc_proc_sleep) until it
+clears -- on a loop the proc wakes from its interval and exits; off a
+loop it has already drained, so the wait is a no-op.  Not a library
+gap: this is the ordinary "signal then join" discipline, and xtc has
+the primitives for it (an atomic ack flag + a fiber park).  The lesson
+is that a cooperative stop is asynchronous and a free must wait for
+the acknowledged exit.
+
 ### CONFIRMED OK: step 5 (larger-than-RAM A/B) surfaced no new library gap
 
 The SQL-on-our-engine vs SQLite benchmark (`bench/sqlxtc/engine_ab.c`,
