@@ -85,6 +85,48 @@ Reproduce:
     the load numbers are not an apples-to-apples durability comparison
     and are reported only for completeness.
 
+## Version GC: where it helps, where it does not
+
+Multi-version storage accumulates dead versions; reclaiming them is the
+first write-path item.  Two approaches were measured.
+
+**Full-tree vacuum (`xstore_gc()`, `--gc-every N`) is wrong for
+larger-than-RAM.**  Scanning the whole 200k-row tree every N ops reads
+every page through the small cache, so the scan thrashes the buffer
+pool and costs more than the smaller tree saves: on the 50/50 mix it
+made throughput *worse* (about 34 vs 70 kops/s) and pushed the max
+latency past 50 ms.  A periodic stop-the-world vacuum does not belong
+on a memory-constrained engine.
+
+**Inline autovacuum (`xstore_autovacuum(1)`, `--autovacuum`) is the
+right shape but only pays off under skew.**  Following PostgreSQL HOT
+pruning, each write prunes just that rowid's dead versions -- touching
+only pages already hot from the write, no full scan.  Whether it helps
+depends entirely on the access pattern:
+
+| workload | xstore no-AV | xstore +AV | sqlite |
+|----------|------:|------:|------:|
+| uniform 200k keys, 50/50 | 188 | 165 | 355 |
+| **hot set 200 keys, 80% writes, 300k ops** | **170** | **216 (+27%)** | 368 |
+
+  * *Uniform* random over 200k keys updates each row at most once or
+    twice, so version chains are naturally short -- there is no bloat
+    to collect, and the per-write prune probe is pure overhead
+    (~12% slower).
+  * *Skewed* (a small hot set updated thousands of times) is exactly
+    where multi-version storage hurts: without GC the hot keys' chains
+    grow without bound and their working set spills the cache.  Inline
+    autovacuum keeps each hot chain at ~1 version, lifting throughput
+    **+27%** (170 -> 216 kops/s) and tightening p99 (30 -> 19 us).
+
+The honest conclusion: version GC is **workload-dependent**, so it is
+an opt-in policy (`xstore_autovacuum`), not a default.  The remaining
+refinement is adaptive -- prune a rowid only once its chain exceeds a
+threshold, so the skewed case keeps the win without the uniform-case
+overhead.  (SQLite, updating in place with no versions at all, remains
+faster on writes; closing that gap is the O(1)-version-insert and
+async-writeback work, not GC.)
+
 ## Bottom line
 
 The libxtc-native storage engine, larger than RAM and under an equal
