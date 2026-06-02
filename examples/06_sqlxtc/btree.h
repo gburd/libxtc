@@ -75,8 +75,25 @@ typedef struct bt_stats {
 	uint64_t lookups;
 	uint64_t splits;
 	uint64_t height;        /* number of levels (1 == root leaf) */
+	uint64_t descents;      /* full root->leaf cursor descents */
+	uint64_t resumes;       /* O(1) parked-cursor resumes (no descent) */
 } bt_stats_t;
 void bt_get_stats(bt_t *bt, bt_stats_t *out);
+
+/*
+ * Latch-releasing, position-revalidating cursor.  A caller that must
+ * not hold a page latch across an external boundary (the SQLite VDBE
+ * calls xUpdate between xNext calls) parks the cursor -- releasing its
+ * leaf latch and pin while remembering the leaf and the last key
+ * returned -- and later resumes it.  Resume re-fixes the SAME leaf and
+ * continues from just past the last key, an O(1) amortized scan step
+ * instead of an O(log n) re-descent.  Correct across concurrent splits:
+ * page ids are never reused and the tree never merges, so the parked
+ * leaf is always valid and the B-link right-sibling chain reaches any
+ * keys that moved right after the park.
+ */
+int  bt_cursor_park(bt_cursor_t *c);
+int  bt_cursor_resume(bt_cursor_t *c);
 
 /* XTC_E_NOTFOUND (key absent) now comes from the core <xtc.h> enum,
  * pulled in via bufmgr.h. */
