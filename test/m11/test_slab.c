@@ -5,6 +5,17 @@
  * test/m11/test_slab.c -- verifies M11.5 xtc_slab.
  */
 
+/*
+ * Expose MAP_ANONYMOUS (a BSD/SVID extension) from <sys/mman.h> under
+ * strict -std=c11: glibc gates it behind _DEFAULT_SOURCE, which the
+ * ISO C dialect does not set on its own.  Without this the test fails
+ * to COMPILE on a stock glibc toolchain (e.g. Debian), which is what
+ * the container-based CI runners use.  Must precede every include.
+ */
+#ifndef _DEFAULT_SOURCE
+#  define _DEFAULT_SOURCE 1
+#endif
+
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
