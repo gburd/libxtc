@@ -91,6 +91,13 @@ struct bm {
 	_Atomic int       pp_running;
 	xtc_pid_t         pp_pid;
 
+	/* prefetch ring: read-ahead requests, drained by the provider so a
+	 * scanning fiber never blocks on a prefetch (best-effort). */
+	pthread_mutex_t   pf_mu;
+	bm_pid_t          pf_ring[256];
+	uint32_t          pf_head, pf_tail;
+	_Atomic uint64_t  s_prefetched;
+
 	/* stats */
 	_Atomic uint64_t  s_hits, s_rescues, s_loads, s_cooled, s_flushed, s_evicted;
 	_Atomic uint64_t  resident;
@@ -379,6 +386,57 @@ get_free_frame(bm_t *bm)
 	}
 }
 
+/* ---- prefetch (read-ahead) ----
+ *
+ * bm_prefetch_pid enqueues a page id the caller expects to need soon;
+ * it returns immediately (never blocks on I/O), so a scanning fiber
+ * keeps working.  The page-provider drains the ring in the background
+ * and warms each page into the pool (resident COOL -- probationary, so
+ * a read-ahead that is never used is evicted from the cooling stage
+ * without displacing the hot set).  Best-effort: a full ring drops the
+ * request, and with no provider running the page simply faults in on
+ * demand. */
+#define PF_RING 256
+int
+bm_prefetch_pid(bm_t *bm, bm_pid_t pid)
+{
+	uint32_t next;
+	if (bm == NULL || pid == BM_PID_NONE)
+		return XTC_E_INVAL;
+	(void)pthread_mutex_lock(&bm->pf_mu);
+	next = (bm->pf_tail + 1) % PF_RING;
+	if (next != bm->pf_head) {
+		bm->pf_ring[bm->pf_tail] = pid;
+		bm->pf_tail = next;
+	}
+	(void)pthread_mutex_unlock(&bm->pf_mu);
+	return XTC_OK;
+}
+
+/* Warm up to `max` queued prefetch requests into the pool (provider). */
+static void
+pf_drain(bm_t *bm, int max)
+{
+	int i;
+	for (i = 0; i < max; i++) {
+		bm_pid_t pid;
+		bm_frame_t *f;
+		(void)pthread_mutex_lock(&bm->pf_mu);
+		if (bm->pf_head == bm->pf_tail) {
+			(void)pthread_mutex_unlock(&bm->pf_mu);
+			break;
+		}
+		pid = bm->pf_ring[bm->pf_head];
+		bm->pf_head = (bm->pf_head + 1) % PF_RING;
+		(void)pthread_mutex_unlock(&bm->pf_mu);
+		if (bm_fix_pid(bm, pid, &f) == XTC_OK) {
+			bm_unfix(bm, f, 0);     /* resident, ready for the real fix */
+			atomic_fetch_add_explicit(&bm->s_prefetched, 1,
+			    memory_order_relaxed);
+		}
+	}
+}
+
 /* ---- public API ---- */
 int
 bm_create(const bm_opts_t *opts, bm_t **out)
@@ -401,6 +459,7 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	if (bm->cool_target < 1) bm->cool_target = 1;
 	bm->scan_resist = opts->scan_resist ? 1 : 0;
 	(void)pthread_mutex_init(&bm->free_mu, NULL);
+	(void)pthread_mutex_init(&bm->pf_mu, NULL);
 	(void)pthread_mutex_init(&bm->pid_mu, NULL);
 
 	bm->fd = open(opts->path ? opts->path : "/tmp/sqlxtc-bm.tmp",
@@ -447,6 +506,7 @@ bm_destroy(bm_t *bm)
 			xtc_arwlock_destroy(bm->frames[i].latch);
 	}
 	(void)pthread_mutex_destroy(&bm->free_mu);
+	(void)pthread_mutex_destroy(&bm->pf_mu);
 	(void)pthread_mutex_destroy(&bm->pid_mu);
 	(void)pthread_mutex_destroy(&bm->ht_mu);
 	__os_free(bm->buckets);
@@ -681,6 +741,7 @@ pp_proc(void *arg)
 
 	while (atomic_load_explicit(&bm->pp_running, memory_order_acquire)) {
 		uint32_t i, cool_clean = 0, need;
+		pf_drain(bm, 32);     /* warm queued read-ahead pages first */
 		/* Pass 1: flush dirty COOL frames (so reclaiming them later is a
 		 * cheap state flip) and count the clean cool supply. */
 		for (i = 0; i < bm->n_frames; i++) {
@@ -775,4 +836,5 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->evicted = atomic_load_explicit(&bm->s_evicted, memory_order_relaxed);
 	out->resident = atomic_load_explicit(&bm->resident, memory_order_relaxed);
 	out->free_frames = atomic_load_explicit(&bm->free_n, memory_order_relaxed);
+	out->prefetched = atomic_load_explicit(&bm->s_prefetched, memory_order_relaxed);
 }
