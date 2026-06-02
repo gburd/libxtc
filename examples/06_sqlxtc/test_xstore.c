@@ -615,6 +615,29 @@ scenario_autovacuum(void)
 	leftover = eval_int(db, "SELECT xstore_gc();");
 	CK(leftover < K);     /* vs K*N == 500 without autovacuum */
 
+	/* Adaptive backoff: a UNIFORM phase -- M distinct new rowids, each
+	 * written once, nothing to reclaim -- must NOT prune on every write.
+	 * Count prune passes before/after and require far fewer than the
+	 * writes (geometric backoff to ~1/256). */
+	{
+		int64_t p0, p1;
+		int m, M = 1000;
+		p0 = eval_int(db, "SELECT xstore_prune_count();");
+		for (m = 0; m < M; m++) {
+			char sql[64];
+			snprintf(sql, sizeof sql,
+			    "INSERT INTO t(k,v) VALUES(%d,'u');", 100000 + m);
+			CK(xsql_exec(db, sql, 0, 0, 0) == SQLITE_OK);
+		}
+		p1 = eval_int(db, "SELECT xstore_prune_count();");
+		CK((p1 - p0) < M / 4);     /* backed off; not a prune per write */
+		CK(sel_v(db, 100000, b, sizeof b) == 1 && strcmp(b, "u") == 0);
+		CK(sel_v(db, 100000 + M - 1, b, sizeof b) == 1 && strcmp(b, "u") == 0);
+		printf("  ok   adaptive autovacuum: %d uniform writes (no garbage) "
+		    "triggered only %lld prune passes -- backed off\n",
+		    M, (long long)(p1 - p0));
+	}
+
 	xsql_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);
 	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
