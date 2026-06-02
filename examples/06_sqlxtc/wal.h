@@ -90,6 +90,15 @@ typedef int (*wal_replay_cb)(uint64_t lsn, const void *rec, uint32_t len,
     void *user);
 int  wal_scan(const char *path, wal_replay_cb cb, void *user);
 
+/*
+ * Truncate the log to empty: discard all records and reset the append
+ * offset (the LSN counter keeps advancing, so LSNs never repeat).
+ * Safe ONLY when the data the log describes is already durable on the
+ * data file (after bm_checkpoint) AND no commit is in flight -- a
+ * checkpoint quiesces commits, truncates, then resumes.  Returns XTC_OK.
+ */
+int  wal_truncate(wal_t *w);
+
 /* Ask the writer to flush any pending batch and exit.  Call once all
  * committers are done so the loop can drain. */
 int  wal_writer_stop(wal_t *w);
