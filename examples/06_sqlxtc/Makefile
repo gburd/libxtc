@@ -151,6 +151,7 @@ clean:
 	rm -f test_scan_resist
 	rm -f test_persist
 	rm -f test_cursor_resume
+	rm -f test_server_storage
 	rm -f test_btnode
 	rm -f test_btree
 	rm -f test_btree_loop
@@ -165,7 +166,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-shard test-mvcc test-xstore test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-shard test-mvcc test-xstore test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -356,6 +357,13 @@ test_cursor_resume: test_cursor_resume.c bufmgr.o btree.o btnode.o
 
 test-cursor-resume: test_cursor_resume
 	./test_cursor_resume
+
+# ---- server storage wiring + connection-per-proc (in-process) ----
+test_server_storage: test_server_storage.c engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_server_storage.c engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-server-storage: test_server_storage
+	./test_server_storage
 
 # ---- B-tree node (prefix compression) unit test (standalone) ----
 test_btnode: test_btnode.c btnode.c btnode.h

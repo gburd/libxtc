@@ -35,6 +35,7 @@ extern "C" {
  * so the application never references the vendored type names. */
 typedef struct xsql      sx_db;
 typedef struct xsql_stmt sx_stmt;
+struct xtc_loop;                 /* fwd: background storage procs run here */
 
 /* Result codes (values match the engine ABI; engine.c static-asserts). */
 #define SX_OK        0
@@ -54,10 +55,17 @@ int  sx_shutdown(void);
 
 /* Open the libxtc-native storage engine (an on-disk B-tree over the
  * cooling buffer pool) at `path` with `n_frames` resident pages (0 =
- * default).  Once open, every connection exposes it as the "xstore"
- * virtual table: SQL against an xstore table runs on this engine,
- * larger-than-RAM, instead of SQLite's built-in B-tree. */
+ * default).  Reopens an existing store from its superblock and replays
+ * its write-ahead log; otherwise creates a fresh one.  Once open,
+ * every connection exposes it as the "xstore" virtual table: SQL
+ * against an xstore table runs on this engine, larger-than-RAM and
+ * durable, instead of SQLite's built-in B-tree.  Needs no loop. */
 int  sx_storage_open(const char *path, unsigned int n_frames);
+/* Start the background storage procs (WAL group-commit writer, page
+ * provider, trickler) on `loop`.  Call after the loop exists. */
+int  sx_storage_run(struct xtc_loop *loop);
+/* Flush all dirty pages durable and truncate the log (a checkpoint). */
+int  sx_storage_checkpoint(void);
 void sx_storage_close(void);
 
 /* Install the xtc_amutex-backed mutex methods (opaque table from
