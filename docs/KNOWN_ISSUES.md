@@ -119,3 +119,43 @@ stopped because it doesn't return a handle.  A future API change will add
 `xtc_slab_pressure_stop(handle)`.  For now, the listener runs until
 process exit.
 
+
+## epoll backend: rare lost blocking-I/O-completion wakeup under heavy churn
+
+**Status:** Under investigation.  Reproducible; io_uring is unaffected.
+
+The buffer-manager multi-threaded stress test (`examples/06_sqlxtc`,
+`test_bufmgr_mt`) hangs intermittently when libxtc is built with the
+epoll I/O backend (`--with-io-backend=epoll`); the same test passes
+reliably under io_uring (130+ runs).  It is therefore run only on the
+io_uring CI (GitHub) and skipped on the epoll CI (Codeberg containers,
+whose seccomp profile blocks io_uring).
+
+Diagnosis (post-mortem core, non-instrumented timing):
+
+  - All executor loop threads are idle in `epoll_wait`, the blocking
+    thread-pool workers are idle on their condvar (so every submitted
+    disk I/O has COMPLETED and its wakeup byte was written), free
+    frames are available (`free_n == 8`), and there are zero data
+    mismatches -- yet `xtc_exec_run` never returns because one worker
+    proc (`g_workers_done == N_WORKERS - 1`) never finishes.
+
+  - The stuck worker is the buffer-manager EVICTOR: it reserved a
+    frame for eviction (`pin == -1`), parked in `xtc_proc_wait_fd` on
+    the offloaded flush write, and its completion wakeup was lost, so
+    the frame stays `EVICTING` forever.  The loss is rare (~1 in many
+    thousands of `xtc_blocking_run` calls) and timing-dependent, which
+    is why the heavy-churn stress test triggers it while the lighter
+    loop tests (test-vfs-loop, test-xstore, ...) do not.
+
+  - io_uring masks it: its completion path samples current readiness
+    rather than blocking indefinitely on a level/edge fd transition,
+    so a missed edge self-heals; epoll's `epoll_wait(timeout = -1)`
+    blocks forever.
+
+The lost wakeup is in the `xtc_blocking_run` + `xtc_proc_wait_fd` +
+epoll-dispatch interaction (a suspected fd-reuse / registration race in
+the per-call wakeup pipe).  Instrumented runs show park/woke pairs
+otherwise matched, so the window is narrow.  Fixing it likely wants a
+minimal isolated reproducer (many procs issuing concurrent
+`xtc_blocking_run` on an epoll executor) rather than the full bufmgr.
