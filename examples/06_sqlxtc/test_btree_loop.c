@@ -86,6 +86,7 @@ worker_proc(void *arg)
 
 	atomic_store(&g_result, ok ? 1 : -1);
 	bm_provider_stop(g_bm);
+	bm_trickler_stop(g_bm);
 }
 
 int
@@ -109,6 +110,7 @@ main(void)
 	atomic_store(&g_result, 0);
 	if (xtc_loop_init(&loop) != XTC_OK) return 1;
 	if (bm_provider_spawn(g_bm, loop, 1LL * 1000 * 1000, &pp) != XTC_OK) return 1;
+	if (bm_trickler_spawn(g_bm, loop, 1LL * 1000 * 1000, NULL) != XTC_OK) return 1;
 	opts.name = "bt-worker";
 	if (xtc_proc_spawn(loop, worker_proc, NULL, &opts, &w) != XTC_OK) return 1;
 	if (xtc_loop_run(loop) != XTC_OK) { fprintf(stderr, "loop_run\n"); return 1; }
@@ -137,10 +139,10 @@ main(void)
 	    N_KEYS, (unsigned long long)ts.height, (unsigned long long)ts.splits);
 	printf("  ok   paged through the cooling buffer pool while parking on "
 	    "async I/O (loads=%llu evicted=%llu flushed=%llu resident=%llu "
-	    "prefetched=%llu)\n",
+	    "prefetched=%llu trickled=%llu)\n",
 	    (unsigned long long)bs.loads, (unsigned long long)bs.evicted,
 	    (unsigned long long)bs.flushed, (unsigned long long)bs.resident,
-	    (unsigned long long)bs.prefetched);
+	    (unsigned long long)bs.prefetched, (unsigned long long)bs.trickled);
 	printf("All sqlxtc B-tree on-loop tests passed.\n");
 	return 0;
 }

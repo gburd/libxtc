@@ -52,6 +52,7 @@ struct bm_frame {
 	_Atomic int       pin;        /* >0: a worker holds it; do not evict */
 	_Atomic int       io_busy;    /* a write is in flight */
 	_Atomic int       dirty;      /* page modified since last write */
+	_Atomic uint64_t  dirty_seq;  /* order it was dirtied (recLSN proxy) */
 	bm_pid_t          pid;
 	bm_swip_t        *parent;     /* the Swip word that points here (swip mode) */
 	int               via_pid;    /* 1: referenced through the page table */
@@ -90,6 +91,12 @@ struct bm {
 	/* page-provider */
 	_Atomic int       pp_running;
 	xtc_pid_t         pp_pid;
+
+	/* trickler: paced, ordered dirty-page writeback */
+	_Atomic int       tr_running;
+	xtc_pid_t         tr_pid;
+	_Atomic uint64_t  dirty_clock;   /* stamps dirty_seq on clean->dirty */
+	_Atomic uint64_t  s_trickled;    /* pages written by the trickler */
 
 	/* prefetch ring: read-ahead requests, drained by the provider so a
 	 * scanning fiber never blocks on a prefetch (best-effort). */
@@ -186,23 +193,51 @@ free_pop(bm_t *bm)
 	return f;
 }
 
-/* Write a dirty COOL/WRITING frame out, off the loop.  Returns 1 if it
- * is clean afterward.  Holds no lock across the I/O. */
+/* Write a dirty page out, off the loop.  Returns 1 if it is clean
+ * afterward.  Snapshots the page under a NON-BLOCKING shared latch so
+ * it never writes a torn image while a writer mutates the page, and
+ * never blocks on the latch (so it cannot deadlock with the B-tree's
+ * latch coupling on the eviction path).  No latch is held across the
+ * I/O -- the consistent snapshot is. */
 static int
 flush_frame(bm_t *bm, bm_frame_t *f)
 {
 	int expect = 0;
+	void *snap;
+
 	if (!atomic_load_explicit(&f->dirty, memory_order_acquire))
 		return 1;
 	if (!atomic_compare_exchange_strong(&f->io_busy, &expect, 1))
 		return 0;                       /* another writer owns it */
-	(void)do_io(bm, f->page, f->pid, 1);
-	/* Only clear dirty if the page was not rescued + remodified. */
-	if (atomic_load_explicit(&f->state, memory_order_acquire) == BM_COOL)
-		atomic_store_explicit(&f->dirty, 0, memory_order_release);
+	/* Try-shared the content latch: excludes an exclusive writer
+	 * (torn-free) but never blocks (deadlock-free).  A writer holding
+	 * the page -> skip; it is flushed on a later pass. */
+	if (xtc_arwlock_rdlock(f->latch, 0) != XTC_OK) {
+		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
+		return 0;
+	}
+	if (!atomic_load_explicit(&f->dirty, memory_order_acquire)) {
+		xtc_arwlock_unlock(f->latch);
+		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
+		return 1;                       /* raced with another flush */
+	}
+	if (__os_calloc(1, bm->page_size, (void **)&snap) != XTC_OK) {
+		xtc_arwlock_unlock(f->latch);
+		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
+		return 0;
+	}
+	memcpy(snap, f->page, bm->page_size);
+	/* Clear dirty UNDER the latch: a later writer re-acquires the
+	 * exclusive latch and re-dirties on bm_unfix, so its change is not
+	 * lost -- the next flush captures it.  The snapshot we write is a
+	 * consistent image as of this point. */
+	atomic_store_explicit(&f->dirty, 0, memory_order_release);
+	xtc_arwlock_unlock(f->latch);
+	(void)do_io(bm, snap, f->pid, 1);
+	__os_free(snap);
 	atomic_store_explicit(&f->io_busy, 0, memory_order_release);
 	atomic_fetch_add_explicit(&bm->s_flushed, 1, memory_order_relaxed);
-	return atomic_load_explicit(&f->dirty, memory_order_acquire) == 0;
+	return 1;
 }
 
 /* A page with resident children must not be cooled or evicted. */
@@ -499,6 +534,7 @@ bm_destroy(bm_t *bm)
 {
 	if (bm == NULL) return;
 	bm_provider_stop(bm);
+	bm_trickler_stop(bm);
 	if (bm->fd >= 0) close(bm->fd);
 	if (bm->frames != NULL) {
 		uint32_t i;
@@ -623,10 +659,14 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
 void
 bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty)
 {
-	(void)bm;
 	if (frame == NULL) return;
-	if (mark_dirty)
-		atomic_store_explicit(&frame->dirty, 1, memory_order_release);
+	if (mark_dirty) {
+		/* Stamp the dirtying order on the clean -> dirty edge, so the
+		 * trickler can write oldest dirt first (a recLSN proxy). */
+		if (atomic_exchange_explicit(&frame->dirty, 1, memory_order_acq_rel) == 0)
+			frame->dirty_seq = atomic_fetch_add_explicit(&bm->dirty_clock,
+			    1, memory_order_relaxed);
+	}
 	atomic_fetch_sub_explicit(&frame->pin, 1, memory_order_release);
 }
 
@@ -817,6 +857,108 @@ bm_provider_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
 	return XTC_OK;
 }
 
+/* ---- trickler: paced, ordered dirty-page writeback ----
+ *
+ * A dedicated process that writes dirty pages out AHEAD of eviction so
+ * that reclaiming a frame is a cheap state flip, never a synchronous
+ * write on the fault path.  It uses the eviction algorithm's own view
+ * of the pool to choose WHAT and in WHICH ORDER:
+ *   1. COOL dirty pages first -- COOL is the cooling stage's "about to
+ *      be evicted" mark, so cleaning them directly unblocks eviction.
+ *   2. within each class, oldest-dirtied first (dirty_seq, a recLSN
+ *      proxy) -- the ARIES order that lets the log truncate sooner,
+ *      since the oldest dirty page pins the recovery start point.
+ * It writes only a bounded batch per pass and sleeps between (the
+ * "trickle"): writeback is smoothed over time instead of bursting, so
+ * it does not spike I/O latency for foreground operations.
+ *
+ * WAL safety: in the log-before-apply commit protocol a page is
+ * dirtied only after the commit that produced it is durable, so the
+ * write-ahead rule (log durable past the page's changes before the
+ * page is written) is already satisfied here; an explicit pageLSN
+ * gate belongs with the physiological-logging stage. */
+#define TR_BATCH 16
+struct tr_cand { bm_frame_t *f; uint8_t cool; uint64_t seq; };
+static int
+tr_cmp(const void *a, const void *b)
+{
+	const struct tr_cand *x = a, *y = b;
+	if (x->cool != y->cool) return (int)y->cool - (int)x->cool;  /* COOL first */
+	if (x->seq < y->seq) return -1;
+	if (x->seq > y->seq) return 1;
+	return 0;
+}
+struct tr_arg { bm_t *bm; int64_t interval; };
+static void
+tr_proc(void *arg)
+{
+	struct tr_arg *ta = arg;
+	bm_t *bm = ta->bm;
+	int64_t iv = ta->interval;
+	struct tr_cand *cand;
+	__os_free(ta);
+	if (__os_calloc(bm->n_frames, sizeof *cand, (void **)&cand) != XTC_OK)
+		return;
+	while (atomic_load_explicit(&bm->tr_running, memory_order_acquire)) {
+		uint32_t i;
+		int n = 0, w = 0;
+		for (i = 0; i < bm->n_frames; i++) {
+			bm_frame_t *f = &bm->frames[i];
+			uint8_t st;
+			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
+				continue;
+			if (!atomic_load_explicit(&f->dirty, memory_order_acquire))
+				continue;
+			if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
+				continue;
+			st = atomic_load_explicit(&f->state, memory_order_acquire);
+			if (st != BM_HOT && st != BM_COOL)
+				continue;
+			cand[n].f = f;
+			cand[n].cool = (st == BM_COOL);
+			cand[n].seq = atomic_load_explicit(&f->dirty_seq, memory_order_relaxed);
+			n++;
+		}
+		qsort(cand, (size_t)n, sizeof *cand, tr_cmp);
+		for (i = 0; i < (uint32_t)n && w < TR_BATCH; i++) {
+			if (flush_frame(bm, cand[i].f)) {
+				atomic_fetch_add_explicit(&bm->s_trickled, 1,
+				    memory_order_relaxed);
+				w++;
+			}
+		}
+		if (xtc_proc_sleep(iv) != XTC_OK)
+			break;
+	}
+	__os_free(cand);
+}
+
+int
+bm_trickler_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
+                  xtc_pid_t *out_pid)
+{
+	struct tr_arg *ta;
+	xtc_proc_opts_t opts = { 0 };
+	int rc;
+	if (bm == NULL || loop == NULL) return XTC_E_INVAL;
+	if ((rc = __os_calloc(1, sizeof *ta, (void **)&ta)) != XTC_OK) return rc;
+	ta->bm = bm;
+	ta->interval = interval_ns > 0 ? interval_ns : 2LL * 1000 * 1000;
+	atomic_store_explicit(&bm->tr_running, 1, memory_order_release);
+	opts.name = "bm-trickler";
+	rc = xtc_proc_spawn(loop, tr_proc, ta, &opts, &bm->tr_pid);
+	if (rc != XTC_OK) { atomic_store_explicit(&bm->tr_running, 0, memory_order_release); __os_free(ta); return rc; }
+	if (out_pid) *out_pid = bm->tr_pid;
+	return XTC_OK;
+}
+
+void
+bm_trickler_stop(bm_t *bm)
+{
+	if (bm == NULL) return;
+	atomic_store_explicit(&bm->tr_running, 0, memory_order_release);
+}
+
 void
 bm_provider_stop(bm_t *bm)
 {
@@ -837,4 +979,5 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->resident = atomic_load_explicit(&bm->resident, memory_order_relaxed);
 	out->free_frames = atomic_load_explicit(&bm->free_n, memory_order_relaxed);
 	out->prefetched = atomic_load_explicit(&bm->s_prefetched, memory_order_relaxed);
+	out->trickled = atomic_load_explicit(&bm->s_trickled, memory_order_relaxed);
 }
