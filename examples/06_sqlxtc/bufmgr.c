@@ -498,7 +498,7 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	(void)pthread_mutex_init(&bm->pid_mu, NULL);
 
 	bm->fd = open(opts->path ? opts->path : "/tmp/sqlxtc-bm.tmp",
-	    O_RDWR | O_CREAT | O_TRUNC, 0644);
+	    opts->reopen ? (O_RDWR | O_CREAT) : (O_RDWR | O_CREAT | O_TRUNC), 0644);
 	if (bm->fd < 0) { __os_free(bm); return XTC_E_INVAL; }
 
 	if ((rc = __os_calloc(bm->n_frames, sizeof *bm->frames,
@@ -524,7 +524,16 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 		__os_aligned_free(bm->pool); __os_free(bm->frames);
 		close(bm->fd); __os_free(bm); return rc;
 	}
-	bm->next_pid = 1;          /* pid 0 reserved as "none" */
+	bm->next_pid = 1;          /* pid 0 reserved as "none" / superblock */
+	if (opts->reopen) {
+		/* Resume page-id allocation past the file's existing pages
+		 * (page 0 is the superblock; data pages are 1..N-1). */
+		off_t end = lseek(bm->fd, 0, SEEK_END);
+		if (end > 0) {
+			bm_pid_t n = (bm_pid_t)(end / (off_t)bm->page_size);
+			if (n > bm->next_pid) bm->next_pid = n;
+		}
+	}
 	*out = bm;
 	return XTC_OK;
 }
@@ -980,4 +989,69 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->free_frames = atomic_load_explicit(&bm->free_n, memory_order_relaxed);
 	out->prefetched = atomic_load_explicit(&bm->s_prefetched, memory_order_relaxed);
 	out->trickled = atomic_load_explicit(&bm->s_trickled, memory_order_relaxed);
+}
+
+/* ---- persistence: superblock, sync, checkpoint ---- */
+
+int
+bm_write_super(bm_t *bm, const void *buf, size_t len)
+{
+	ssize_t n;
+	if (bm == NULL || buf == NULL || len > bm->page_size)
+		return XTC_E_INVAL;
+	n = pwrite(bm->fd, buf, len, 0);          /* page 0 == superblock */
+	return (n == (ssize_t)len) ? XTC_OK : XTC_E_INTERNAL;
+}
+
+int
+bm_read_super(bm_t *bm, void *buf, size_t len)
+{
+	ssize_t n;
+	if (bm == NULL || buf == NULL || len > bm->page_size)
+		return XTC_E_INVAL;
+	n = pread(bm->fd, buf, len, 0);
+	if (n < 0)
+		return XTC_E_INTERNAL;
+	if ((size_t)n < len)                       /* short/empty: zero-fill */
+		memset((char *)buf + n, 0, len - (size_t)n);
+	return XTC_OK;
+}
+
+/* fdatasync the backing file, offloaded so the loop is not blocked. */
+struct sync_io { int fd; };
+static int
+sync_io_fn(void *arg)
+{
+	struct sync_io *s = arg;
+	return fdatasync(s->fd) == 0 ? 0 : -1;
+}
+int
+bm_sync(bm_t *bm)
+{
+	struct sync_io s;
+	int rc;
+	if (bm == NULL) return XTC_E_INVAL;
+	s.fd = bm->fd;
+	if (xtc_blocking_run(sync_io_fn, &s, &rc) != XTC_OK)
+		rc = sync_io_fn(&s);
+	return rc == 0 ? XTC_OK : XTC_E_INTERNAL;
+}
+
+int
+bm_checkpoint(bm_t *bm)
+{
+	uint32_t i;
+	if (bm == NULL) return XTC_E_INVAL;
+	/* Write back every dirty page (flush_frame snapshots under a
+	 * try-shared latch, so this is torn-free even with writers), then
+	 * fdatasync.  Unpinned dirty pages are flushed now; a page pinned
+	 * by an active writer is left -- a quiesced checkpoint should run
+	 * with no writes in flight, which the WAL-truncation caller
+	 * arranges. */
+	for (i = 0; i < bm->n_frames; i++) {
+		bm_frame_t *f = &bm->frames[i];
+		if (atomic_load_explicit(&f->dirty, memory_order_acquire))
+			(void)flush_frame(bm, f);
+	}
+	return bm_sync(bm);
 }

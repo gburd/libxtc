@@ -149,6 +149,7 @@ clean:
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o
 	rm -f test_bufmgr_mt
 	rm -f test_scan_resist
+	rm -f test_persist
 	rm -f test_btnode
 	rm -f test_btree
 	rm -f test_btree_loop
@@ -163,7 +164,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-shard test-mvcc test-xstore test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-shard test-mvcc test-xstore test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-persist test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -340,6 +341,13 @@ test_scan_resist: test_scan_resist.c bufmgr.o
 
 test-scan-resist: test_scan_resist
 	./test_scan_resist
+
+# ---- persistence: superblock reopen + WAL truncation ----
+test_persist: test_persist.c bufmgr.o btree.o btnode.o wal.o
+	$(CC) $(CFLAGS) -o $@ test_persist.c bufmgr.o btree.o btnode.o wal.o $(LDFLAGS)
+
+test-persist: test_persist
+	./test_persist
 
 # ---- B-tree node (prefix compression) unit test (standalone) ----
 test_btnode: test_btnode.c btnode.c btnode.h

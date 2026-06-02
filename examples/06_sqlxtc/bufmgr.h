@@ -62,6 +62,12 @@ typedef struct bm_opts {
 	uint32_t    n_frames;    /* resident pool size (frames) */
 	uint32_t    cool_pct;    /* target % of frames kept cool/free */
 
+	/* Persistence.  reopen != 0 opens an EXISTING backing file without
+	 * truncating it (the page contents survive) and resumes page-id
+	 * allocation past the file's current pages -- the cold-restart
+	 * path.  Zero (the default) creates/truncates a fresh store. */
+	uint8_t     reopen;
+
 	/* Scan resistance (LeanStore cooling + 2Q probation).  When set
 	 * (the default), a demand-LOADED page is admitted to the COOL
 	 * stage, not HOT: it becomes HOT only on a second access (rescue),
@@ -85,7 +91,7 @@ typedef struct bm_opts {
 
 #define BM_OPTS_DEFAULT \
 	{ .path = NULL, .page_size = 4096, .n_frames = 256, .cool_pct = 10, \
-	  .scan_resist = 1 }
+	  .scan_resist = 1, .reopen = 0 }
 
 /* Lifecycle. */
 int  bm_create(const bm_opts_t *opts, bm_t **out);
@@ -153,6 +159,18 @@ void bm_provider_stop(bm_t *bm);
 int  bm_trickler_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
                        xtc_pid_t *out_pid);
 void bm_trickler_stop(bm_t *bm);
+
+/* Persistence.  The buffer manager reserves page 0 as a SUPERBLOCK slot
+ * (page-id allocation starts at 1), which a higher layer (the B-tree)
+ * uses to record its root.  bm_read_super / bm_write_super do a direct,
+ * synchronous read/write of up to page_size bytes at file offset 0.
+ * bm_sync fdatasyncs the backing file.  bm_checkpoint writes back every
+ * dirty page and fdatasyncs -- after it returns, the file durably
+ * reflects all committed data, so the WAL prefix may be truncated. */
+int  bm_read_super(bm_t *bm, void *buf, size_t len);
+int  bm_write_super(bm_t *bm, const void *buf, size_t len);
+int  bm_sync(bm_t *bm);
+int  bm_checkpoint(bm_t *bm);
 
 /* Observability snapshot. */
 typedef struct bm_stats {

@@ -426,6 +426,21 @@ wal_scan(const char *path, wal_replay_cb cb, void *user)
 }
 
 int
+wal_truncate(wal_t *w)
+{
+	if (w == NULL)
+		return XTC_E_INVAL;
+	(void)pthread_mutex_lock(&w->sync_mu);
+	if (ftruncate(w->fd, 0) != 0) {
+		(void)pthread_mutex_unlock(&w->sync_mu);
+		return XTC_E_INTERNAL;
+	}
+	w->off = 0;            /* next append at offset 0; next_lsn keeps rising */
+	(void)pthread_mutex_unlock(&w->sync_mu);
+	return XTC_OK;
+}
+
+int
 wal_writer_stop(wal_t *w)
 {
 	uint8_t kind = WAL_KIND_STOP;
