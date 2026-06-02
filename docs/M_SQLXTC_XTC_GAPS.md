@@ -15,6 +15,38 @@ sufficient.
 
 ## SQL-on-our-storage integration (xstore.c)
 
+### WAL + trickler + prefetch: one minor library gap (no async blocking submit)
+
+Wiring the group-commit WAL under commits, the trickler (ordered dirty
+writeback), and B-tree cursor read-ahead (see docs/M_SQLXTC_WAL.md)
+exercised the xtc primitives hard and surfaced exactly one small gap:
+`xtc_blocking_run` only runs a blocking call and WAITS for it -- there
+is no fire-and-forget submit.  True read-ahead wants to issue a page
+load and keep working, so prefetch is implemented as an enqueue drained
+by a background warmer (the page-provider) rather than a direct async
+submit.  Everything else fit: the group-commit writer is a plain
+`xtc_proc` with `xtc_recv` batching + offloaded fsync; the trickler and
+provider are `xtc_proc` + `xtc_proc_sleep`; and the torn-free flush uses
+`xtc_arwlock_rdlock(latch, 0)` as a non-blocking try-shared latch (the
+timeout-0 fast path), which was exactly the primitive needed to snapshot
+a page without blocking or deadlocking.  Potential library item: an
+async/fire-and-forget variant of `xtc_blocking_run` (or native io_uring
+read submission surfaced to consumers) for true prefetch overlap.
+
+### CONFIRMED + FIXED (example bug): the buffer manager's lock-free pin/evict race
+
+Not a library gap -- a bug in the EXAMPLE's bufmgr, recorded because it
+was subtle.  The "pin++ then re-check the swip" fix protocol races
+eviction across two atomics (the pin word and the swip), so a fixer
+could pin a frame an evictor concurrently freed.  Fixed by making pin
+acquisition and eviction reservation contend on the SINGLE pin word
+(`try_pin` CAS refusing pin<0; `try_reserve` CAS 0 -> -1).  A second
+example bug surfaced with the trickler: `flush_frame` wrote the page
+with no latch, so it could persist a torn image of a page a writer was
+mutating; fixed with a non-blocking try-shared-latch snapshot.  Both
+were found by the MT stress test + core-dump analysis under a
+load-17 box.
+
 ### CONFIRMED OK: step 5 (larger-than-RAM A/B) surfaced no new library gap
 
 The SQL-on-our-engine vs SQLite benchmark (`bench/sqlxtc/engine_ab.c`,
