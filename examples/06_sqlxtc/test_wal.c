@@ -57,7 +57,7 @@ committer_proc(void *arg)
 	for (i = 0; i < PER_COMMITTER; i++) {
 		uint64_t lsn = 0;
 		int n = snprintf(rec, sizeof rec, "txn-%03ld-%03d-payload", id, i);
-		if (wal_commit(g_wal, rec, (uint16_t)n, &lsn) == XTC_OK) {
+		if (wal_commit(g_wal, rec, (uint32_t)n, &lsn) == XTC_OK) {
 			atomic_fetch_add(&g_done, 1);
 			atomic_fetch_xor(&g_lsn_xor, lsn);
 			atomic_fetch_add(&g_lsn_sum, lsn);
@@ -70,35 +70,24 @@ committer_proc(void *arg)
 }
 
 /* Replay the log file: count records, verify LSNs are 1..N in order. */
+struct replay_acc { uint64_t expect; int count; int bad; };
+static int
+replay_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
+{
+	struct replay_acc *a = user;
+	(void)rec; (void)len;
+	if (lsn != a->expect) { a->bad = 1; return 1; }   /* out of order */
+	a->expect++;
+	a->count++;
+	return 0;
+}
 static int
 replay_check(const char *path)
 {
-	int fd = open(path, O_RDONLY);
-	uint64_t expect = 1;
-	int count = 0;
-	uint8_t hdr[10];
-
-	if (fd < 0)
+	struct replay_acc a = { 1, 0, 0 };
+	if (wal_scan(path, replay_cb, &a) != XTC_OK)
 		return -1;
-	for (;;) {
-		ssize_t r = read(fd, hdr, sizeof hdr);
-		uint64_t lsn;
-		uint16_t len;
-		uint8_t body[256];
-
-		if (r == 0)
-			break;                  /* EOF */
-		if (r != (ssize_t)sizeof hdr) { close(fd); return -1; }
-		memcpy(&lsn, hdr, 8);
-		memcpy(&len, hdr + 8, 2);
-		if (lsn != expect) { close(fd); return -2; }   /* out of order */
-		if (len > sizeof body) { close(fd); return -3; }
-		if (read(fd, body, len) != (ssize_t)len) { close(fd); return -1; }
-		expect++;
-		count++;
-	}
-	close(fd);
-	return count;
+	return a.bad ? -2 : a.count;
 }
 
 static int

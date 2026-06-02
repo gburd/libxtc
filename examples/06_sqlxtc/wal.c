@@ -28,6 +28,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,13 +39,13 @@
 #define WAL_KIND_COMMIT  'C'
 #define WAL_KIND_STOP    'S'
 
-#define WAL_REC_HDR      10u     /* on-disk per-record: u64 lsn + u16 len */
+#define WAL_REC_HDR      12u     /* on-disk per-record: u64 lsn + u32 len */
 
 struct wal_msg {                 /* committer -> writer */
 	uint8_t   kind;
 	xtc_pid_t reply_to;
 	uint64_t  txn_id;
-	uint16_t  len;
+	uint32_t  len;
 	uint8_t   data[];            /* len bytes */
 };
 
@@ -74,6 +75,8 @@ struct wal {
 	uint32_t           pcount;
 	uint64_t           next_lsn;
 	uint64_t           durable_lsn;
+
+	pthread_mutex_t    sync_mu;   /* serializes wal_commit_sync appends */
 
 	/* Stats. */
 	uint64_t s_commits;
@@ -139,6 +142,7 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 		free(w->bbuf); free(w->pend); close(w->fd); free(w);
 		return XTC_E_NOMEM;
 	}
+	(void)pthread_mutex_init(&w->sync_mu, NULL);
 	*out = w;
 	return XTC_OK;
 }
@@ -148,6 +152,7 @@ wal_close(wal_t *w)
 {
 	if (w == NULL)
 		return;
+	(void)pthread_mutex_destroy(&w->sync_mu);
 	if (w->fd >= 0)
 		close(w->fd);
 	free(w->bbuf);
@@ -157,7 +162,7 @@ wal_close(wal_t *w)
 
 /* Append one record to the current batch buffer (writer proc only). */
 static int
-batch_add(wal_t *w, const uint8_t *data, uint16_t len,
+batch_add(wal_t *w, const uint8_t *data, uint32_t len,
     xtc_pid_t reply_to, uint64_t txn_id)
 {
 	size_t need = WAL_REC_HDR + len;
@@ -176,7 +181,7 @@ batch_add(wal_t *w, const uint8_t *data, uint16_t len,
 	}
 	lsn = ++w->next_lsn;
 	memcpy(w->bbuf + w->blen, &lsn, 8);
-	memcpy(w->bbuf + w->blen + 8, &len, 2);
+	memcpy(w->bbuf + w->blen + 8, &len, 4);
 	memcpy(w->bbuf + w->blen + WAL_REC_HDR, data, len);
 	w->blen += need;
 	w->pend[w->pcount].reply_to = reply_to;
@@ -295,7 +300,7 @@ wal_writer_pid(const wal_t *w)
 }
 
 int
-wal_commit(wal_t *w, const void *record, uint16_t len, uint64_t *lsn)
+wal_commit(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 {
 	struct wal_msg *msg;
 	struct wal_ack *ack;
@@ -341,6 +346,83 @@ wal_commit(wal_t *w, const void *record, uint16_t len, uint64_t *lsn)
 		*lsn = ack->lsn;
 	free(am);
 	return XTC_OK;
+}
+
+int
+wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
+{
+	uint8_t hdr[WAL_REC_HDR];
+	uint64_t my_lsn;
+	size_t done;
+	int rc = XTC_OK;
+
+	if (w == NULL || (record == NULL && len != 0))
+		return XTC_E_INVAL;
+
+	(void)pthread_mutex_lock(&w->sync_mu);
+	my_lsn = ++w->next_lsn;
+	memcpy(hdr, &my_lsn, 8);
+	memcpy(hdr + 8, &len, 4);
+	/* header + payload at the current append offset */
+	if (pwrite(w->fd, hdr, WAL_REC_HDR, w->off) != (ssize_t)WAL_REC_HDR) {
+		rc = XTC_E_INTERNAL; goto out;
+	}
+	for (done = 0; done < len; ) {
+		ssize_t n = pwrite(w->fd, (const uint8_t *)record + done, len - done,
+		    w->off + (off_t)WAL_REC_HDR + (off_t)done);
+		if (n < 0) { if (errno == EINTR) continue; rc = XTC_E_INTERNAL; goto out; }
+		done += (size_t)n;
+	}
+	if (fdatasync(w->fd) != 0) { rc = XTC_E_INTERNAL; goto out; }
+	w->off += (off_t)WAL_REC_HDR + (off_t)len;
+	w->durable_lsn = my_lsn;
+	w->s_commits++;
+	w->s_batches++;
+	w->s_bytes += len;
+	if (lsn != NULL) *lsn = my_lsn;
+out:
+	(void)pthread_mutex_unlock(&w->sync_mu);
+	return rc;
+}
+
+int
+wal_scan(const char *path, wal_replay_cb cb, void *user)
+{
+	int fd;
+	off_t off = 0;
+	uint8_t *buf = NULL;
+	size_t bufcap = 0;
+	int rc = XTC_OK;
+
+	if (path == NULL || cb == NULL)
+		return XTC_E_INVAL;
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return XTC_OK;                /* no log yet: nothing to replay */
+	for (;;) {
+		uint8_t hdr[WAL_REC_HDR];
+		uint64_t lsn;
+		uint32_t len;
+		ssize_t n = pread(fd, hdr, WAL_REC_HDR, off);
+		if (n != (ssize_t)WAL_REC_HDR)
+			break;                   /* EOF or torn header: stop at the tail */
+		memcpy(&lsn, hdr, 8);
+		memcpy(&len, hdr + 8, 4);
+		if (len > bufcap) {
+			uint8_t *nb = realloc(buf, len);
+			if (nb == NULL) { rc = XTC_E_NOMEM; break; }
+			buf = nb; bufcap = len;
+		}
+		n = pread(fd, buf, len, off + (off_t)WAL_REC_HDR);
+		if (n != (ssize_t)len)
+			break;                   /* torn record body: stop (crash tail) */
+		if (cb(lsn, buf, len, user) != 0)
+			break;
+		off += (off_t)WAL_REC_HDR + (off_t)len;
+	}
+	free(buf);
+	close(fd);
+	return rc;
 }
 
 int
