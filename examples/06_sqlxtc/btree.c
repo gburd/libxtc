@@ -132,6 +132,8 @@ struct bt {
 	_Atomic uint64_t  st_lookups;
 	_Atomic uint64_t  st_splits;
 	_Atomic uint64_t  st_height;   /* number of levels (1 == root leaf) */
+	_Atomic uint64_t  st_descents; /* full root->leaf cursor descents */
+	_Atomic uint64_t  st_resumes;  /* parked-cursor O(1) resumes */
 };
 
 /* On-disk superblock (buffer-manager page 0), recording where the tree
@@ -160,6 +162,8 @@ struct bt_cursor {
 	bm_frame_t    *leaf;   /* current leaf: fixed + shared-latched, or NULL */
 	int            slot;   /* next slot to yield in the current leaf */
 	int            done;
+	bm_pid_t       parked_pid;  /* leaf pid remembered while parked */
+	int            parked;      /* 1 == latch released, resume re-fixes */
 	uint8_t        keybuf[BT_MAX_KEY];
 	uint16_t       keylen;
 };
@@ -730,6 +734,7 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 	void *pg;
 	int rc;
 
+	atomic_fetch_add(&bt->st_descents, 1);
 retry:
 	pid = atomic_load(&bt->root_pid);
 	rc = bm_fix_pid(bm, pid, &f);
@@ -878,6 +883,64 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
 	}
 }
 
+/*
+ * Park: release the leaf latch and pin but remember the leaf pid and
+ * the last key returned (already in c->keybuf).  After this the cursor
+ * holds no latch -- safe to hand control to code that may write the
+ * tree (the VDBE's xUpdate) on the same thread.
+ */
+int
+bt_cursor_park(bt_cursor_t *c)
+{
+	if (c == NULL)
+		return XTC_E_INVAL;
+	if (c->leaf != NULL) {
+		c->parked_pid = bm_frame_pid(c->leaf);
+		c->parked = 1;
+		bm_unlatch(c->leaf);
+		bm_unfix(c->bt->bm, c->leaf, 0);
+		c->leaf = NULL;
+	}
+	return XTC_OK;
+}
+
+/*
+ * Resume a parked cursor without re-descending the tree: re-fix the
+ * remembered leaf, shared-latch it, and position just past the last
+ * key returned.  If that leaf split while parked, keys that moved to
+ * the new right sibling are still reached by bt_cursor_next following
+ * the right-sibling chain.  O(1) amortized vs the O(log n) of a fresh
+ * bt_cursor_open.
+ */
+int
+bt_cursor_resume(bt_cursor_t *c)
+{
+	bm_t *bm;
+	bm_frame_t *nf = NULL;
+	void *pg;
+	int slot, found = 0;
+
+	if (c == NULL)
+		return XTC_E_INVAL;
+	if (!c->parked)
+		return XTC_OK;             /* nothing parked: leaf still held, or done */
+	c->parked = 0;
+	bm = c->bt->bm;
+	if (bm_fix_pid(bm, c->parked_pid, &nf) != XTC_OK) {
+		c->done = 1;
+		return XTC_E_INTERNAL;
+	}
+	bm_latch_shared(nf);
+	pg = bm_page(nf);
+	/* First slot with key >= the last key returned; skip it if present
+	 * (already yielded), else start at the first key greater than it. */
+	slot = btnode_search(pg, c->keybuf, c->keylen, &found);
+	c->leaf = nf;
+	c->slot = found ? slot + 1 : slot;
+	atomic_fetch_add(&c->bt->st_resumes, 1);
+	return XTC_OK;
+}
+
 void
 bt_cursor_close(bt_cursor_t *c)
 {
@@ -900,4 +963,6 @@ bt_get_stats(bt_t *bt, bt_stats_t *out)
 	out->lookups = atomic_load(&bt->st_lookups);
 	out->splits = atomic_load(&bt->st_splits);
 	out->height = atomic_load(&bt->st_height);
+	out->descents = atomic_load(&bt->st_descents);
+	out->resumes = atomic_load(&bt->st_resumes);
 }

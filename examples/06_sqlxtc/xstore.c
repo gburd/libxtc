@@ -453,6 +453,7 @@ typedef struct xstore_cursor {
 	int64_t      rowid;          /* current visible row */
 	uint8_t      val[XS_VMAX];
 	uint16_t     vlen;
+	bt_cursor_t *btc;            /* persistent scan cursor, parked between calls */
 } xstore_cursor_t;
 
 /*
@@ -538,6 +539,11 @@ xs_open(xsql_vtab *pv, xsql_vtab_cursor **ppc)
 static int
 xs_close(xsql_vtab_cursor *pc)
 {
+	xstore_cursor_t *c = (xstore_cursor_t *)pc;
+	if (c->btc != NULL) {           /* release any parked scan cursor */
+		bt_cursor_close(c->btc);
+		c->btc = NULL;
+	}
 	xsql_free(pc);          /* no latch/cursor held between calls */
 	return SQLITE_OK;
 }
@@ -552,18 +558,25 @@ xs_stash(xstore_cursor_t *c, int64_t rowid, const uint8_t *val, uint16_t vl)
 	if (c->vlen) memcpy(c->val, val + 1, c->vlen);
 }
 
-/* Advance a full scan to the next visible row, holding the btree latch
- * only for the duration of this call (open + scan + close).  Visible =
- * the newest non-tombstone version of each rowid with commit_ts <=
- * snap (PostgreSQL HeapTupleSatisfiesMVCC). */
+/* Advance a full scan to the next visible row.  The scan cursor is
+ * persistent: opened once with a full descent, then resumed in O(1)
+ * past the last key consumed.  The leaf latch is held only for the
+ * duration of this call -- the cursor is PARKED (latch released)
+ * before control returns to the VDBE, so an interleaved xUpdate cannot
+ * self-deadlock against a held content latch.  Visible = the newest
+ * non-tombstone version of each rowid with commit_ts <= snap
+ * (PostgreSQL HeapTupleSatisfiesMVCC). */
 static void
 xs_advance(xstore_cursor_t *c)
 {
-	bt_cursor_t *cur = NULL;
-	const uint8_t *start = c->have_last ? c->last_key : NULL;
-	uint16_t startlen = c->have_last ? XS_VKLEN : 0;
-
-	if (bt_cursor_open(c->bt, start, startlen, &cur) != XTC_OK) {
+	if (c->btc == NULL) {
+		const uint8_t *start = c->have_last ? c->last_key : NULL;
+		uint16_t startlen = c->have_last ? XS_VKLEN : 0;
+		if (bt_cursor_open(c->bt, start, startlen, &c->btc) != XTC_OK) {
+			c->eof = 1;
+			return;
+		}
+	} else if (bt_cursor_resume(c->btc) != XTC_OK) {
 		c->eof = 1;
 		return;
 	}
@@ -574,7 +587,7 @@ xs_advance(xstore_cursor_t *c)
 		int64_t rid;
 		uint64_t ts;
 
-		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
+		if (bt_cursor_next(c->btc, &k, &klen, &vv, &vl) != XTC_OK ||
 		    klen != XS_VKLEN) {
 			c->eof = 1;
 			break;
@@ -595,7 +608,7 @@ xs_advance(xstore_cursor_t *c)
 		c->eof = 0;
 		break;
 	}
-	bt_cursor_close(cur);
+	bt_cursor_park(c->btc);            /* release the latch before returning */
 }
 
 static int
@@ -607,6 +620,10 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 	uint64_t snap;
 	(void)idxStr;
 
+	if (c->btc != NULL) {           /* restart: drop any prior scan cursor */
+		bt_cursor_close(c->btc);
+		c->btc = NULL;
+	}
 	xs_enter(v);
 	snap = atomic_load_explicit(&v->ctx->read_snap, memory_order_relaxed);
 	if (snap == 0)

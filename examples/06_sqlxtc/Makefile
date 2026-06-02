@@ -150,6 +150,7 @@ clean:
 	rm -f test_bufmgr_mt
 	rm -f test_scan_resist
 	rm -f test_persist
+	rm -f test_cursor_resume
 	rm -f test_btnode
 	rm -f test_btree
 	rm -f test_btree_loop
@@ -164,7 +165,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-shard test-mvcc test-xstore test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-persist test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-shard test-mvcc test-xstore test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -348,6 +349,13 @@ test_persist: test_persist.c bufmgr.o btree.o btnode.o wal.o
 
 test-persist: test_persist
 	./test_persist
+
+# ---- latch-releasing, position-revalidating cursor (O(1) scans) ----
+test_cursor_resume: test_cursor_resume.c bufmgr.o btree.o btnode.o
+	$(CC) $(CFLAGS) -o $@ test_cursor_resume.c bufmgr.o btree.o btnode.o $(LDFLAGS)
+
+test-cursor-resume: test_cursor_resume
+	./test_cursor_resume
 
 # ---- B-tree node (prefix compression) unit test (standalone) ----
 test_btnode: test_btnode.c btnode.c btnode.h

@@ -648,6 +648,59 @@ scenario_autovacuum(void)
 	return 0;
 }
 
+/* ---- O(1) scan: a full SELECT over the xstore vtab opens the btree
+ * cursor ONCE and resumes it per row (latch released between rows for
+ * the VDBE), instead of re-descending the tree on every xNext. ---- */
+static int
+scenario_o1_sql(void)
+{
+	bm_t *bm = NULL; bt_t *bt = NULL; xsql *db = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-o1-XXXXXX";
+	bt_stats_t s0, s1;
+	xsql_stmt *st = NULL;
+	int fd, i, rows = 0;
+	const int NROW = 400;
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = N_FRAMES; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(xsql_open(":memory:", &db) == SQLITE_OK);
+	CK(xstore_register(db, bt) == SQLITE_OK);
+	CK(xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+	for (i = 1; i <= NROW; i++) {
+		char sql[64];
+		snprintf(sql, sizeof sql, "INSERT INTO t(k,v) VALUES(%d,'row');", i);
+		CK(xsql_exec(db, sql, 0, 0, 0) == SQLITE_OK);
+	}
+
+	/* Measure descents/resumes across the scan only. */
+	bt_get_stats(bt, &s0);
+	CK(xsql_prepare_v2(db, "SELECT k FROM t", -1, &st, 0) == SQLITE_OK);
+	while (xsql_step(st) == SQLITE_ROW) rows++;
+	xsql_finalize(st);
+	bt_get_stats(bt, &s1);
+
+	CK(rows == NROW);
+	/* One descent for the whole scan (cursor opened once); the old
+	 * re-open-per-row path cost NROW descents.  Allow a tiny slack for
+	 * planner probes, but it must be O(1), not O(rows). */
+	CK(s1.descents - s0.descents <= 4);
+	CK(s1.resumes - s0.resumes >= (uint64_t)(NROW - 4));
+
+	xsql_close(db);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   O(1) SQL scan: %d rows, %llu btree descents (not %d), "
+	    "%llu cursor resumes\n", NROW,
+	    (unsigned long long)(s1.descents - s0.descents), NROW,
+	    (unsigned long long)(s1.resumes - s0.resumes));
+	return 0;
+}
+
 int
 main(void)
 {
@@ -659,6 +712,7 @@ main(void)
 	if (scenario_ssi_gain() != 0) return 1;
 	if (scenario_gc() != 0) return 1;
 	if (scenario_autovacuum() != 0) return 1;
+	if (scenario_o1_sql() != 0) return 1;
 	printf("All sqlxtc SQL-on-xstore tests passed.\n");
 	return 0;
 }
