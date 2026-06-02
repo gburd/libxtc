@@ -218,6 +218,16 @@ set_as_of(xsql *db, int64_t ts)
 	(void)xsql_step(st);
 	xsql_finalize(st);
 }
+static int
+eval_int(xsql *db, const char *sql)
+{
+	xsql_stmt *st = NULL;
+	int v = -1;
+	if (xsql_prepare_v2(db, sql, -1, &st, 0) != SQLITE_OK) return -1;
+	if (xsql_step(st) == SQLITE_ROW) v = xsql_column_int(st, 0);
+	xsql_finalize(st);
+	return v;
+}
 
 static int
 scenario_mvcc(void)
@@ -488,6 +498,133 @@ scenario_ssi_gain(void)
 	return 0;
 }
 
+/* Version GC reclaims dead versions up to the snapshot horizon, leaves
+ * the live data intact, is idempotent, and a held snapshot pins its
+ * versions against the vacuum. */
+static int
+scenario_gc(void)
+{
+	bm_t *bm = NULL;
+	bt_t *bt = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-xstore7-XXXXXX";
+	xsql *d1 = NULL, *d2 = NULL;
+	char b[32], want[16];
+	const int K = 50, N = 10;
+	int fd, n, k, reclaimed;
+	int64_t ts0;
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = 64; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(xsql_open(":memory:", &d1) == SQLITE_OK);
+	CK(xsql_open(":memory:", &d2) == SQLITE_OK);
+	CK(xstore_register(d1, bt) == SQLITE_OK);
+	CK(xstore_register(d2, bt) == SQLITE_OK);
+	CK(xsql_exec(d1, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(d2, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+
+	/* K rows, then N rounds of updating every row -> K*(N+1) versions. */
+	for (k = 1; k <= K; k++) {
+		char sql[64];
+		snprintf(sql, sizeof sql, "INSERT INTO t(k,v) VALUES(%d,'v0');", k);
+		CK(xsql_exec(d1, sql, 0, 0, 0) == SQLITE_OK);
+	}
+	for (n = 1; n <= N; n++) {
+		char sql[48];
+		snprintf(sql, sizeof sql, "UPDATE t SET v='v%d';", n);
+		CK(xsql_exec(d1, sql, 0, 0, 0) == SQLITE_OK);
+	}
+
+	/* No live snapshot: GC keeps the newest version per row, reclaims
+	 * the other K*N. */
+	reclaimed = eval_int(d1, "SELECT xstore_gc();");
+	CK(reclaimed == K * N);
+	snprintf(want, sizeof want, "v%d", N);
+	for (k = 1; k <= K; k++)
+		CK(sel_v(d1, k, b, sizeof b) == 1 && strcmp(b, want) == 0);
+	CK(eval_int(d1, "SELECT xstore_gc();") == 0);   /* idempotent */
+
+	/* A held snapshot pins its versions: d2 reads as-of the current
+	 * clock, d1 overwrites row 1, GC runs -- d2 still sees the pinned
+	 * version; after d2 releases, GC reclaims it. */
+	ts0 = eval_int(d1, "SELECT xstore_now();");
+	set_as_of(d2, ts0);
+	CK(sel_v(d2, 1, b, sizeof b) == 1 && strcmp(b, want) == 0);
+	CK(xsql_exec(d1, "UPDATE t SET v='final' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
+	(void)eval_int(d1, "SELECT xstore_gc();");      /* horizon == ts0 pins it */
+	CK(sel_v(d2, 1, b, sizeof b) == 1 && strcmp(b, want) == 0);   /* pinned */
+	CK(sel_v(d1, 1, b, sizeof b) == 1 && strcmp(b, "final") == 0);/* latest */
+	set_as_of(d2, 0);
+	(void)eval_int(d1, "SELECT xstore_gc();");      /* pin released */
+	CK(sel_v(d1, 1, b, sizeof b) == 1 && strcmp(b, "final") == 0);
+
+	xsql_close(d1); xsql_close(d2);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   version GC: reclaimed %d dead versions (kept 1/row), "
+	    "data intact, idempotent; a held snapshot pinned its version "
+	    "against the vacuum\n", reclaimed);
+	return 0;
+}
+
+/* Inline autovacuum keeps version chains short on the write path with
+ * no full-tree scan: after the same churn as scenario_gc, a final
+ * xstore_gc() finds almost nothing left to reclaim. */
+static int
+scenario_autovacuum(void)
+{
+	bm_t *bm = NULL;
+	bt_t *bt = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-xstore8-XXXXXX";
+	xsql *db = NULL;
+	char b[32], want[16];
+	const int K = 50, N = 10;
+	int fd, n, k, leftover;
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = 64; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(xsql_open(":memory:", &db) == SQLITE_OK);
+	CK(xstore_register(db, bt) == SQLITE_OK);
+	CK(xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) == SQLITE_OK);
+	CK(eval_int(db, "SELECT xstore_autovacuum(1);") == 1);
+
+	for (k = 1; k <= K; k++) {
+		char sql[64];
+		snprintf(sql, sizeof sql, "INSERT INTO t(k,v) VALUES(%d,'v0');", k);
+		CK(xsql_exec(db, sql, 0, 0, 0) == SQLITE_OK);
+	}
+	for (n = 1; n <= N; n++) {
+		char sql[48];
+		snprintf(sql, sizeof sql, "UPDATE t SET v='v%d';", n);
+		CK(xsql_exec(db, sql, 0, 0, 0) == SQLITE_OK);
+	}
+
+	/* Data is correct, and inline pruning already removed the dead
+	 * versions: a full vacuum now reclaims (almost) nothing. */
+	snprintf(want, sizeof want, "v%d", N);
+	for (k = 1; k <= K; k++)
+		CK(sel_v(db, k, b, sizeof b) == 1 && strcmp(b, want) == 0);
+	leftover = eval_int(db, "SELECT xstore_gc();");
+	CK(leftover < K);     /* vs K*N == 500 without autovacuum */
+
+	xsql_close(db);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   inline autovacuum: %d versions churned per row pruned "
+	    "on the write path (no full scan); final vacuum reclaimed only "
+	    "%d (vs %d without)\n", N, leftover, K * N);
+	return 0;
+}
+
 int
 main(void)
 {
@@ -497,6 +634,8 @@ main(void)
 	if (scenario_txn() != 0) return 1;
 	if (scenario_serializable() != 0) return 1;
 	if (scenario_ssi_gain() != 0) return 1;
+	if (scenario_gc() != 0) return 1;
+	if (scenario_autovacuum() != 0) return 1;
 	printf("All sqlxtc SQL-on-xstore tests passed.\n");
 	return 0;
 }
