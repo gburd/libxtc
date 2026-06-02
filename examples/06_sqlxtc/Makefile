@@ -70,7 +70,7 @@ SQLITE_CFLAGS = -O2 -g -std=c11 -D_GNU_SOURCE \
     -Wno-unused-parameter \
     -Wno-implicit-fallthrough
 
-SRCS = main.c quack.c db.c conn.c engine.c mutex.c mem.c vfs.c pcache.c metrics.c sql_parse.c admin.c xstore.c bufmgr.c btree.c btnode.c
+SRCS = main.c quack.c db.c conn.c engine.c mutex.c mem.c vfs.c pcache.c metrics.c sql_parse.c admin.c xstore.c wal.c bufmgr.c btree.c btnode.c
 OBJS = $(SRCS:.c=.o)
 
 # Lime-generated parser (Phase 2).  Compiled in if the file exists.
@@ -141,6 +141,7 @@ clean:
 	rm -f test_admin test_admin.o admin.o
 	rm -f test_mem test_mem.o
 	rm -f test_wal test_wal.o wal.o
+	rm -f test_wal_recover
 	rm -f test_shard test_shard.o
 	rm -f test_mvcc test_mvcc.o mvcc.o
 	rm -f test_xstore test_xstore.o xstore.o
@@ -162,7 +163,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-shard test-mvcc test-xstore test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-shard test-mvcc test-xstore test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -255,8 +256,8 @@ test-admin: test_admin
 # Installs the xtc allocator under an __os_alloc counting hook, then
 # drives a real SQL workload: proves the engine's allocations flow
 # through xtc (hook count > 0) and that the workload is correct.
-test_mem: test_mem.c mem.o mutex.o engine.o vfs.o xstore.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_mem.c mem.o mutex.o engine.o vfs.o xstore.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_mem: test_mem.c mem.o mutex.o engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_mem.c mem.o mutex.o engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-mem: test_mem
 	./test_mem
@@ -271,6 +272,13 @@ test_wal: test_wal.c wal.c wal.h
 
 test-wal: test_wal
 	./test_wal
+
+# ---- WAL durability + crash recovery for the xstore SQL engine ----
+test_wal_recover: test_wal_recover.c xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_wal_recover.c xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-wal-recover: test_wal_recover
+	./test_wal_recover
 
 # ---- share-nothing sharded store + control plane (executor; no daemon) ----
 # N shard servers (one xtc_svr each, share-nothing) + a global
@@ -297,15 +305,15 @@ test-mvcc: test_mvcc
 # SQLite's VDBE runs SQL; rows live in our btree/bufmgr (larger than
 # RAM).  Off-loop and on-loop (VDBE parks on offloaded page I/O
 # mid-statement).  See docs/M_SQLXTC_MVCC_SQL.md.
-test_xstore: test_xstore.c xstore.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_xstore.c xstore.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+test_xstore: test_xstore.c xstore.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_xstore.c xstore.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-xstore: test_xstore
 	./test_xstore
 
 # ---- sx_ engine parallel-execution test (in-process, no daemon) ----
-test_parallel: test_parallel.c engine.o vfs.o xstore.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_parallel.c engine.o vfs.o xstore.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_parallel: test_parallel.c engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_parallel.c engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-parallel: test_parallel
 	./test_parallel
