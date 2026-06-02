@@ -26,7 +26,9 @@ frame stays EVICTING and the executor hangs.  io_uring masks it; epoll
 `epoll_wait(-1)` blocks forever.  Full diagnosis + repro in
 docs/KNOWN_ISSUES.md.  This is a real L2/L3 race in the
 `xtc_blocking_run` + `xtc_proc_wait_fd` + epoll-dispatch interaction
-(suspected fd-reuse / registration window in the per-call wakeup pipe),
+(in xtc_proc_wait_fd's epoll arm/park/dispatch -- a later session
+RULED OUT fd reuse (a persistent per-proc pipe still hangs) and built a
+pure reproducer, test/concurrency/repro_blocking_epoll.c),
 not an example bug -- the example just dogfooded it into the open.  It
 wants a focused fix against a minimal isolated reproducer (many procs
 issuing concurrent `xtc_blocking_run` on an epoll executor).
