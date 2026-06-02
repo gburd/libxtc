@@ -15,6 +15,13 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <malloc.h>            /* _msize */
+#elif defined(__APPLE__)
+#include <malloc/malloc.h>     /* malloc_size */
+#elif defined(__linux__)
+#include <malloc.h>            /* malloc_usable_size (glibc and musl) */
+#endif
 
 /*
  * Default backend.  Implemented as ordinary functions so they take
@@ -146,6 +153,36 @@ __os_realloc(void *p, size_t sz, void **out)
 		return XTC_E_NOMEM;
 	*out = q;
 	return XTC_OK;
+}
+
+/*
+ * PUBLIC: size_t __os_msize __P((void *));
+ *
+ * Usable byte count of a block from __os_malloc/__os_realloc -- the
+ * size actually available to the caller, which may exceed what was
+ * requested.  Returns 0 when the active backend cannot report it (any
+ * custom hook): only the default malloc(3) backend knows usable size,
+ * via the platform's primitive.  Callers treat 0 as "unknown" and fall
+ * back to the requested size.
+ */
+size_t
+__os_msize(void *p)
+{
+	if (p == NULL)
+		return 0;
+	/* Only the default backend's pointers are valid for the platform
+	 * usable-size primitives; a custom hook may use a foreign heap. */
+	if (__hook() != &__default_hook)
+		return 0;
+#if defined(_WIN32)
+	return _msize(p);
+#elif defined(__APPLE__)
+	return malloc_size(p);
+#elif defined(__linux__)
+	return malloc_usable_size(p);
+#else
+	return 0;
+#endif
 }
 
 /*
