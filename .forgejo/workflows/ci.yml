@@ -17,7 +17,7 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: codeberg-medium
+    runs-on: codeberg-small
     strategy:
       fail-fast: false
       matrix:
@@ -53,7 +53,7 @@ jobs:
     # Force the fcontext coroutine substrate (the musl path) on a
     # glibc runner so it is exercised on every commit without needing
     # a musl toolchain.
-    runs-on: codeberg-medium
+    runs-on: codeberg-small
     steps:
       - name: Install dependencies
         run: |
@@ -75,7 +75,7 @@ jobs:
         run: make -C build_fctx check
 
   sanitizers:
-    runs-on: codeberg-medium
+    runs-on: codeberg-small
     strategy:
       fail-fast: false
       matrix:
@@ -117,7 +117,7 @@ jobs:
     # broadly -- including the single-file amalgamation drop-in -- and
     # would otherwise rot unnoticed since the library make check does
     # not build them.
-    runs-on: codeberg-medium
+    runs-on: codeberg-small
     steps:
       - name: Install dependencies
         run: |
