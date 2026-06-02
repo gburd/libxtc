@@ -90,10 +90,12 @@ struct bm {
 
 	/* page-provider */
 	_Atomic int       pp_running;
+	_Atomic int       pp_alive;      /* proc is live; cleared on its exit */
 	xtc_pid_t         pp_pid;
 
 	/* trickler: paced, ordered dirty-page writeback */
 	_Atomic int       tr_running;
+	_Atomic int       tr_alive;      /* proc is live; cleared on its exit */
 	xtc_pid_t         tr_pid;
 	_Atomic uint64_t  dirty_clock;   /* stamps dirty_seq on clean->dirty */
 	_Atomic uint64_t  s_trickled;    /* pages written by the trickler */
@@ -845,6 +847,7 @@ pp_proc(void *arg)
 		if (xtc_proc_sleep(interval) != XTC_OK)
 			break;
 	}
+	atomic_store_explicit(&bm->pp_alive, 0, memory_order_release);
 }
 
 int
@@ -859,9 +862,10 @@ bm_provider_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
 	pa->bm = bm;
 	pa->interval = interval_ns > 0 ? interval_ns : 5LL * 1000 * 1000;
 	atomic_store_explicit(&bm->pp_running, 1, memory_order_release);
+	atomic_store_explicit(&bm->pp_alive, 1, memory_order_release);
 	opts.name = "bm-provider";
 	rc = xtc_proc_spawn(loop, pp_proc, pa, &opts, &bm->pp_pid);
-	if (rc != XTC_OK) { atomic_store_explicit(&bm->pp_running, 0, memory_order_release); __os_free(pa); return rc; }
+	if (rc != XTC_OK) { atomic_store_explicit(&bm->pp_running, 0, memory_order_release); atomic_store_explicit(&bm->pp_alive, 0, memory_order_release); __os_free(pa); return rc; }
 	if (out_pid) *out_pid = bm->pp_pid;
 	return XTC_OK;
 }
@@ -940,6 +944,7 @@ tr_proc(void *arg)
 			break;
 	}
 	__os_free(cand);
+	atomic_store_explicit(&bm->tr_alive, 0, memory_order_release);
 }
 
 int
@@ -954,9 +959,10 @@ bm_trickler_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
 	ta->bm = bm;
 	ta->interval = interval_ns > 0 ? interval_ns : 2LL * 1000 * 1000;
 	atomic_store_explicit(&bm->tr_running, 1, memory_order_release);
+	atomic_store_explicit(&bm->tr_alive, 1, memory_order_release);
 	opts.name = "bm-trickler";
 	rc = xtc_proc_spawn(loop, tr_proc, ta, &opts, &bm->tr_pid);
-	if (rc != XTC_OK) { atomic_store_explicit(&bm->tr_running, 0, memory_order_release); __os_free(ta); return rc; }
+	if (rc != XTC_OK) { atomic_store_explicit(&bm->tr_running, 0, memory_order_release); atomic_store_explicit(&bm->tr_alive, 0, memory_order_release); __os_free(ta); return rc; }
 	if (out_pid) *out_pid = bm->tr_pid;
 	return XTC_OK;
 }
@@ -964,15 +970,28 @@ bm_trickler_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
 void
 bm_trickler_stop(bm_t *bm)
 {
+	int i;
 	if (bm == NULL) return;
 	atomic_store_explicit(&bm->tr_running, 0, memory_order_release);
+	for (i = 0; i < 100000 &&
+	    atomic_load_explicit(&bm->tr_alive, memory_order_acquire); i++)
+		if (xtc_proc_sleep(200LL * 1000) != XTC_OK) break;
 }
 
 void
 bm_provider_stop(bm_t *bm)
 {
+	int i;
 	if (bm == NULL) return;
 	atomic_store_explicit(&bm->pp_running, 0, memory_order_release);
+	/* Wait for the proc to observe the flag and exit before a caller
+	 * (e.g. bm_destroy) frees the buffer manager out from under it.
+	 * On a loop, parking lets the proc wake from its interval sleep,
+	 * see the flag, and return.  Off a loop xtc_proc_sleep fails and
+	 * the proc has already drained, so we stop immediately. */
+	for (i = 0; i < 100000 &&
+	    atomic_load_explicit(&bm->pp_alive, memory_order_acquire); i++)
+		if (xtc_proc_sleep(200LL * 1000) != XTC_OK) break;
 }
 
 void

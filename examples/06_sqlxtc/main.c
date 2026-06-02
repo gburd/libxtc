@@ -55,6 +55,8 @@ typedef struct server_cfg {
 	int         max_clients;
 	int64_t     max_iops;
 	int         max_databases;
+	const char *storage_path;        /* libxtc-native engine file (NULL = off) */
+	unsigned int storage_frames;     /* xstore buffer-pool frames (0 = default) */
 	int         shared_handle;       /* 1 default; --no-shared turns off */
 	int         verbose;
 } server_cfg_t;
@@ -68,6 +70,8 @@ typedef struct server_cfg {
 	.max_clients = 1000,  \
 	.max_iops = 0,        \
 	.max_databases = 16,  \
+	.storage_path = NULL, \
+	.storage_frames = 0,  \
 	.shared_handle = 1,   \
 	.verbose = 0          \
 }
@@ -261,6 +265,8 @@ usage(const char *prog)
 	    "  -n, --max-clients=N   max concurrent clients (default 1000)\n"
 	    "  -i, --max-iops=N      queries/sec cap (0 unlimited)\n"
 	    "  -D, --max-databases=N max ATTACHed dbs (default 16)\n"
+	    "      --storage=PATH    libxtc-native durable engine file\n"
+	    "      --storage-frames=N  xstore buffer-pool pages (0=default)\n"
 	    "      --no-shared       per-conn handle (vs one shared handle)\n"
 	    "  -v, --verbose\n"
 	    "      --help\n",
@@ -270,7 +276,7 @@ usage(const char *prog)
 static int
 parse_args(int argc, char **argv, server_cfg_t *cfg)
 {
-	enum { OPT_NO_SHARED = 1000, OPT_HELP };
+	enum { OPT_NO_SHARED = 1000, OPT_HELP, OPT_STORAGE, OPT_STORAGE_FRAMES };
 	static struct option lo[] = {
 		{ "host", required_argument, NULL, 'h' },
 		{ "port", required_argument, NULL, 'p' },
@@ -280,6 +286,8 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		{ "max-clients", required_argument, NULL, 'n' },
 		{ "max-iops", required_argument, NULL, 'i' },
 		{ "max-databases", required_argument, NULL, 'D' },
+		{ "storage", required_argument, NULL, OPT_STORAGE },
+		{ "storage-frames", required_argument, NULL, OPT_STORAGE_FRAMES },
 		{ "no-shared", no_argument, NULL, OPT_NO_SHARED },
 		{ "verbose", no_argument, NULL, 'v' },
 		{ "help", no_argument, NULL, OPT_HELP },
@@ -298,6 +306,8 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		case 'n': cfg->max_clients = atoi(optarg); break;
 		case 'i': cfg->max_iops = atoll(optarg); break;
 		case 'D': cfg->max_databases = atoi(optarg); break;
+		case OPT_STORAGE: cfg->storage_path = optarg; break;
+		case OPT_STORAGE_FRAMES: cfg->storage_frames = (unsigned)atoi(optarg); break;
 		case 'v': cfg->verbose = 1; break;
 		case OPT_NO_SHARED: cfg->shared_handle = 0; break;
 		case OPT_HELP:
@@ -367,6 +377,20 @@ main(int argc, char **argv)
 		        "using the default page cache\n");
 	(void)sx_init();
 
+	/* libxtc-native durable storage engine.  Opened before the
+	 * database so the shared connection handle registers it; the
+	 * background procs (WAL writer, page provider, trickler) start
+	 * once the loop exists (after xtc_app_start). */
+	if (cfg.storage_path != NULL) {
+		rc = sx_storage_open(cfg.storage_path, cfg.storage_frames);
+		if (rc != SX_OK) {
+			fprintf(stderr, "sx_storage_open(%s) failed: %d\n",
+			        cfg.storage_path, rc);
+			return 1;
+		}
+		XTC_LOG_INFO_F("xstore engine open: %s", cfg.storage_path);
+	}
+
 	/* xtc_res. */
 	srv->res = (xtc_res_t *)calloc(1, sizeof *srv->res);
 	if (!srv->res) { fprintf(stderr, "oom\n"); return 1; }
@@ -414,6 +438,11 @@ main(int argc, char **argv)
 		fprintf(stderr, "app start failed\n"); return 1;
 	}
 
+	/* Now the loop exists: start the storage engine's background
+	 * procs (group-commit WAL writer, page provider, trickler). */
+	if (cfg.storage_path != NULL)
+		(void)sx_storage_run(srv->loop);
+
 	(void)metrics_spawn(srv->loop, srv->res, &srv->conn_count,
 	                    &srv->queries_total, &metrics_pid);
 
@@ -427,6 +456,8 @@ main(int argc, char **argv)
 	xtc_log_drain(log);
 	close(srv->listen_fd);
 	db_destroy(srv->db);
+	if (cfg.storage_path != NULL)
+		sx_storage_close();        /* checkpoint + stop procs + close */
 	xtc_app_destroy(srv->app);
 	free(srv->res);
 	xtc_log_destroy(log);
