@@ -153,9 +153,43 @@ Diagnosis (post-mortem core, non-instrumented timing):
     so a missed edge self-heals; epoll's `epoll_wait(timeout = -1)`
     blocks forever.
 
-The lost wakeup is in the `xtc_blocking_run` + `xtc_proc_wait_fd` +
-epoll-dispatch interaction (a suspected fd-reuse / registration race in
-the per-call wakeup pipe).  Instrumented runs show park/woke pairs
-otherwise matched, so the window is narrow.  Fixing it likely wants a
-minimal isolated reproducer (many procs issuing concurrent
-`xtc_blocking_run` on an epoll executor) rather than the full bufmgr.
+The lost wakeup is in `xtc_proc_wait_fd`'s epoll arm/park/dispatch
+path, hit through `xtc_blocking_run`.  A later session built the
+minimal isolated reproducer this asked for -- N procs issuing
+concurrent `xtc_blocking_run` on an N-loop epoll executor, no buffer
+manager -- and it hangs 8/8, so the bug is purely in the library
+primitive.  Findings from that session:
+
+  - **It is NOT fd reuse.**  An earlier hypothesis blamed reuse of the
+    per-call wakeup pipe's fd number.  Rewriting the wait to use a
+    PERSISTENT per-proc wakeup pipe (never reused across procs while a
+    registration is live) still hangs, ruling that out.  A bounded
+    50ms re-poll of every loop also does not recover the parked proc,
+    so at hang time the fd is effectively not delivering -- the lost
+    wakeup is in the arm/park/dispatch sequence, not the fd lifecycle.
+
+  - **A cross-thread waker fix trades the hang for a use-after-free.**
+    Waking the parked proc directly from the pool thread
+    (`xtc_waker_wake` on the proc's task) fixes the hang but ASan
+    reports a heap-use-after-free: the proc can return from
+    `xtc_blocking_run` and exit the instant its result is read, so a
+    cross-thread wake that references the proc/task races teardown.
+    A correct event-driven fix must wake via a kernel object the
+    worker only WRITES (a pipe/eventfd), never a proc pointer.
+
+  - **A timer-poll fix is memory-safe but exposes a separate bug.**
+    Having the submitter poll a completion flag via its own loop-local
+    timer (`xtc_proc_sleep`) is memory-safe (ASan clean) and fixes the
+    pure reproducer, but its added latency makes `test_bufmgr_mt`
+    deadlock on BOTH backends by exposing a latent buffer-manager
+    free-list race (a core showed `free_n == 762` for a 32-frame pool
+    -- a frame pushed to the free list more than once under concurrent
+    eviction).  That bufmgr race is a separate example-level bug,
+    normally hidden because a fast completion keeps the window shut.
+
+The right fix is most likely a direct repair of `xtc_proc_wait_fd`'s
+epoll wakeup (so the existing same-thread, memory-safe dispatch wake
+stops losing events), plus a separate fix for the bufmgr free-list
+race.  The reproducer (pure `xtc_blocking_run` on an epoll executor)
+should drive that work.  Until then `test_bufmgr_mt` runs only on the
+io_uring CI and is skipped on the epoll CI.
