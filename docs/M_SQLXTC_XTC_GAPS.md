@@ -15,6 +15,22 @@ sufficient.
 
 ## SQL-on-our-storage integration (xstore.c)
 
+### LIBRARY BUG (open): epoll lost blocking-I/O-completion wakeup
+
+The most significant library finding of the session, surfaced by
+running the example suite under the epoll backend in a container (the
+Codeberg CI):  under heavy buffer-pool eviction churn, a buffer-manager
+evictor proc parks in `xtc_proc_wait_fd` on its offloaded flush write
+and its completion wakeup is rarely (~1 in thousands) lost, so the
+frame stays EVICTING and the executor hangs.  io_uring masks it; epoll
+`epoll_wait(-1)` blocks forever.  Full diagnosis + repro in
+docs/KNOWN_ISSUES.md.  This is a real L2/L3 race in the
+`xtc_blocking_run` + `xtc_proc_wait_fd` + epoll-dispatch interaction
+(suspected fd-reuse / registration window in the per-call wakeup pipe),
+not an example bug -- the example just dogfooded it into the open.  It
+wants a focused fix against a minimal isolated reproducer (many procs
+issuing concurrent `xtc_blocking_run` on an epoll executor).
+
 ### WAL + trickler + prefetch: one minor library gap (no async blocking submit)
 
 Wiring the group-commit WAL under commits, the trickler (ordered dirty
