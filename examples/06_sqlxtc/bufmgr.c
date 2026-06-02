@@ -119,10 +119,47 @@ do_io(bm_t *bm, void *buf, bm_pid_t pid, int write)
 	return rc;
 }
 
+/* ---- pin protocol ----
+ *
+ * The pin count doubles as the eviction gate, so acquiring a pin and
+ * reserving a frame for eviction race on ONE atomic word (no separate
+ * pin and swip stores that could reorder past each other -- the
+ * store/load race that a plain "pin++ then re-check swip" has).  A
+ * fixer acquires only if pin >= 0 (CAS pin -> pin+1); the evictor
+ * reserves an unpinned frame with CAS(pin 0 -> -1), after which no
+ * fixer can pin it.  -1 means EVICTING; free_push resets it to 0. */
+static int
+try_pin(bm_frame_t *f)
+{
+	int p = atomic_load_explicit(&f->pin, memory_order_acquire);
+	for (;;) {
+		if (p < 0)
+			return 0;                 /* reserved for eviction */
+		if (atomic_compare_exchange_weak_explicit(&f->pin, &p, p + 1,
+		    memory_order_acquire, memory_order_acquire))
+			return 1;
+	}
+}
+static void
+unpin(bm_frame_t *f)
+{
+	atomic_fetch_sub_explicit(&f->pin, 1, memory_order_release);
+}
+/* Reserve an UNPINNED frame for eviction: pin 0 -> -1.  Returns 1 on
+ * success (caller now owns it exclusively), 0 if it is pinned. */
+static int
+try_reserve(bm_frame_t *f)
+{
+	int e = 0;
+	return atomic_compare_exchange_strong_explicit(&f->pin, &e, -1,
+	    memory_order_acquire, memory_order_relaxed);
+}
+
 /* ---- free list ---- */
 static void
 free_push(bm_t *bm, bm_frame_t *f)
 {
+	atomic_store_explicit(&f->pin, 0, memory_order_release);   /* clear any reservation */
 	atomic_store_explicit(&f->state, BM_FREE, memory_order_release);
 	(void)pthread_mutex_lock(&bm->free_mu);
 	f->next_free = bm->free_head;
@@ -200,7 +237,8 @@ ht_lookup_pin(bm_t *bm, bm_pid_t pid)
 	(void)pthread_mutex_lock(&bm->ht_mu);
 	for (f = bm->buckets[b]; f != NULL; f = f->hnext) {
 		if (f->pid == pid && f->via_pid) {
-			atomic_fetch_add_explicit(&f->pin, 1, memory_order_acquire);
+			if (!try_pin(f))
+				break;            /* reserved for eviction: treat as a miss */
 			if (atomic_load_explicit(&f->state, memory_order_acquire) == BM_COOL)
 				atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
 			(void)pthread_mutex_unlock(&bm->ht_mu);
@@ -253,24 +291,17 @@ evict_one(bm_t *bm)
 				(void)flush_frame(bm, f);
 				continue;
 			}
-			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
-				continue;
 			if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
 				continue;
+			if (!try_reserve(f))
+				continue;            /* pinned: a fixer holds it */
+			/* Reserved (pin == -1): no fixer can pin it now.  ht_remove
+			 * under the table lock excludes a concurrent ht_lookup_pin. */
 			ht_remove(bm, f);
-			/* Re-check pin after unhooking: a concurrent fix_pin could
-			 * have grabbed it just before we removed it.  If so, it now
-			 * holds a frame no longer in the table; that is fine -- it
-			 * will be re-inserted on its next miss -- but we must not
-			 * free a pinned frame, so bail if pinned. */
-			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0) {
-				ht_insert(bm, f);
-				continue;
-			}
 			f->via_pid = 0;
 			atomic_fetch_sub_explicit(&bm->resident, 1, memory_order_relaxed);
 			atomic_fetch_add_explicit(&bm->s_evicted, 1, memory_order_relaxed);
-			free_push(bm, f);
+			free_push(bm, f);            /* clears the reservation (pin = 0) */
 			return 1;
 		}
 
@@ -295,19 +326,24 @@ evict_one(bm_t *bm)
 			(void)flush_frame(bm, f);   /* proactive write-out */
 			continue;                   /* revisit to evict once clean */
 		}
-		if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
-			continue;
 		if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
 			continue;
-		/* Evict: parent COOL -> EVICTED. */
+		if (!try_reserve(f))
+			continue;                   /* pinned: a fixer holds it */
+		/* Evict: parent COOL -> EVICTED.  Reserved (pin == -1), so no
+		 * fixer can rescue it; release the reservation if the parent
+		 * changed under us. */
 		w = atomic_load_explicit(f->parent, memory_order_acquire);
-		if (!sw_is_cool(w) || sw_frame(w) != f) continue;
+		if (!sw_is_cool(w) || sw_frame(w) != f) {
+			atomic_store_explicit(&f->pin, 0, memory_order_release); continue;
+		}
 		repl = sw_evicted(f->pid);
-		if (!atomic_compare_exchange_strong(f->parent, &w, repl))
-			continue;               /* rescued under us */
+		if (!atomic_compare_exchange_strong(f->parent, &w, repl)) {
+			atomic_store_explicit(&f->pin, 0, memory_order_release); continue;
+		}
 		atomic_fetch_sub_explicit(&bm->resident, 1, memory_order_relaxed);
 		atomic_fetch_add_explicit(&bm->s_evicted, 1, memory_order_relaxed);
-		free_push(bm, f);
+		free_push(bm, f);                   /* clears the reservation */
 		return 1;
 	  }
 	  if (force_cool)
@@ -321,16 +357,26 @@ get_free_frame(bm_t *bm)
 {
 	bm_frame_t *f;
 	int tries;
-	for (tries = 0; tries < 10000; tries++) {
+	/*
+	 * A victim is unavailable only transiently: some fiber holds a pin,
+	 * or a dirty COOL page is still being written back.  Yield first
+	 * (cheap; lets a pin-holder run and unfix), then fall back to a
+	 * short park so a CPU-starved box does not burn a core spinning
+	 * while the writeback completes.  Eviction always eventually
+	 * succeeds (no fiber holds two pins, so there is no circular wait),
+	 * so we loop rather than fail -- callers treat a frame as a hard
+	 * requirement.
+	 */
+	for (tries = 0; ; tries++) {
 		if ((f = free_pop(bm)) != NULL)
 			return f;
-		if (!evict_one(bm)) {
-			/* Everything pinned right now; yield and retry. */
-			if (xtc_proc_sleep(200LL * 1000) != XTC_OK)
-				xtc_yield();
-		}
+		if (evict_one(bm))
+			continue;            /* made progress; take it next spin */
+		if (tries < 16)
+			xtc_yield();         /* fast: let a pin-holder release */
+		else if (xtc_proc_sleep(100LL * 1000) != XTC_OK)
+			xtc_yield();         /* off a loop: yield */
 	}
-	return NULL;
 }
 
 /* ---- public API ---- */
@@ -451,29 +497,28 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
 
 		if (sw_is_hot(w)) {
 			bm_frame_t *f = sw_frame(w);
-			atomic_fetch_add_explicit(&f->pin, 1, memory_order_acquire);
+			if (!try_pin(f))
+				continue;             /* reserved for eviction: retry */
 			/* Recheck: it may have been cooled/evicted meanwhile. */
 			if (atomic_load_explicit(slot, memory_order_acquire) == w) {
 				atomic_fetch_add_explicit(&bm->s_hits, 1, memory_order_relaxed);
 				*out_frame = f;
 				return XTC_OK;
 			}
-			atomic_fetch_sub_explicit(&f->pin, 1, memory_order_release);
+			unpin(f);
 			continue;
 		}
 		if (sw_is_cool(w)) {
 			bm_frame_t *f = sw_frame(w);
-			/* Pin BEFORE swizzling, so the frame can never be evicted in
-			 * the window between publish and pin (the same optimistic
-			 * discipline as the HOT-hit path above). */
-			atomic_fetch_add_explicit(&f->pin, 1, memory_order_acquire);
+			if (!try_pin(f))
+				continue;             /* reserved for eviction: retry */
 			if (atomic_compare_exchange_strong(slot, &w, sw_hot(f))) {
 				atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
 				atomic_fetch_add_explicit(&bm->s_rescues, 1, memory_order_relaxed);
 				*out_frame = f;
 				return XTC_OK;
 			}
-			atomic_fetch_sub_explicit(&f->pin, 1, memory_order_release);
+			unpin(f);
 			continue;               /* changed; retry */
 		}
 		/* EVICTED: load from disk into a free frame. */
@@ -491,24 +536,24 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
 				free_push(bm, f);
 				return XTC_E_INTERNAL;
 			}
-			/* Pin and set state BEFORE publishing the swip, so the frame
-			 * is never reachable-and-evictable with pin == 0.
-			 * Probationary admission (LeanStore cooling + 2Q): a
-			 * demand-loaded page enters COOL, so a single-touch scan
-			 * never promotes it to HOT; a second access rescues it
-			 * (COOL -> HOT) above. */
 			atomic_store_explicit(&f->state,
 			    bm->scan_resist ? BM_COOL : BM_HOT, memory_order_release);
-			atomic_fetch_add_explicit(&f->pin, 1, memory_order_acquire);
+			atomic_store_explicit(&f->pin, 1, memory_order_release);
 			if (atomic_compare_exchange_strong(slot, &expect,
 			    bm->scan_resist ? sw_cool(f) : sw_hot(f))) {
+				/* Probationary admission (LeanStore cooling + 2Q): a
+				 * demand-loaded page enters COOL, so a single-touch
+				 * scan never promotes it to HOT; a second access
+				 * rescues it (COOL -> HOT) above.  The frame is
+				 * exclusive until this CAS publishes the swip, so a
+				 * plain pin=1 is safe. */
 				atomic_fetch_add_explicit(&bm->resident, 1, memory_order_relaxed);
 				atomic_fetch_add_explicit(&bm->s_loads, 1, memory_order_relaxed);
 				*out_frame = f;
 				return XTC_OK;
 			}
 			/* Someone else resolved it; unpin, drop our frame, retry. */
-			atomic_fetch_sub_explicit(&f->pin, 1, memory_order_release);
+			atomic_store_explicit(&f->pin, 0, memory_order_release);
 			free_push(bm, f);
 			continue;
 		}
@@ -578,13 +623,18 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 			for (e = bm->buckets[b]; e != NULL; e = e->hnext)
 				if (e->pid == pid && e->via_pid) break;
 			if (e != NULL) {
-				/* Lost the race; use the resident frame. */
-				atomic_fetch_add_explicit(&e->pin, 1, memory_order_acquire);
-				if (atomic_load_explicit(&e->state, memory_order_acquire) == BM_COOL)
+				/* Lost the race; use the resident frame if we can pin it
+				 * (it may be reserved for eviction -- then retry as a
+				 * miss). */
+				int pinned = try_pin(e);
+				if (pinned &&
+				    atomic_load_explicit(&e->state, memory_order_acquire) == BM_COOL)
 					atomic_store_explicit(&e->state, BM_HOT, memory_order_release);
 				(void)pthread_mutex_unlock(&bm->ht_mu);
 				f->via_pid = 0;
 				free_push(bm, f);
+				if (!pinned)
+					continue;            /* being evicted: retry the lookup */
 				*out_frame = e;
 				atomic_fetch_add_explicit(&bm->s_hits, 1, memory_order_relaxed);
 				return XTC_OK;
