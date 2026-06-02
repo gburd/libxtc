@@ -32,3 +32,4 @@ test_btree_mt
 test_wal_recover
 test_persist
 test_cursor_resume
+test_server_storage

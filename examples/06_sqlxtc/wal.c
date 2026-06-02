@@ -29,6 +29,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,6 +67,7 @@ struct wal {
 	int64_t    window_ns;
 	uint32_t   max_batch;
 	xtc_pid_t  writer_pid;
+	_Atomic int writer_alive;    /* writer proc live; cleared on its exit */
 
 	/* Batch state -- touched only by the writer process. */
 	uint8_t           *bbuf;
@@ -272,6 +274,7 @@ wal_writer_proc(void *arg)
 		if (stop)
 			break;
 	}
+	atomic_store_explicit(&w->writer_alive, 0, memory_order_release);
 }
 
 int
@@ -284,9 +287,12 @@ wal_writer_spawn(wal_t *w, xtc_loop_t *loop, xtc_pid_t *pid)
 	if (w == NULL || loop == NULL)
 		return XTC_E_INVAL;
 	o.name = "wal";
+	atomic_store_explicit(&w->writer_alive, 1, memory_order_release);
 	rc = xtc_proc_spawn(loop, wal_writer_proc, w, &o, &p);
-	if (rc != XTC_OK)
+	if (rc != XTC_OK) {
+		atomic_store_explicit(&w->writer_alive, 0, memory_order_release);
 		return rc;
+	}
 	w->writer_pid = p;
 	if (pid != NULL)
 		*pid = p;
@@ -444,10 +450,17 @@ int
 wal_writer_stop(wal_t *w)
 {
 	uint8_t kind = WAL_KIND_STOP;
+	int rc, i;
 
 	if (w == NULL)
 		return XTC_E_INVAL;
-	return xtc_send(w->writer_pid, &kind, sizeof kind);
+	rc = xtc_send(w->writer_pid, &kind, sizeof kind);
+	/* Wait for the writer to drain its batch and exit before a caller
+	 * (wal_close) frees the log out from under it. */
+	for (i = 0; i < 100000 &&
+	    atomic_load_explicit(&w->writer_alive, memory_order_acquire); i++)
+		if (xtc_proc_sleep(200LL * 1000) != XTC_OK) break;
+	return rc;
 }
 
 void
