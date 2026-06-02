@@ -39,6 +39,9 @@ typedef struct bt_cursor bt_cursor_t;
 /* Create an empty tree (a single root leaf) on the buffer manager.
  * The tree's root page id lives in the handle for its lifetime. */
 int  bt_open(bm_t *bm, bt_t **out);
+/* Reopen an existing tree from its superblock (bm created with
+ * reopen != 0); finds the live root rather than building a fresh one. */
+int  bt_reopen(bm_t *bm, bt_t **out);
 void bt_close(bt_t *bt);
 
 /* Insert or replace key -> val.  Returns XTC_OK, or an error. */
