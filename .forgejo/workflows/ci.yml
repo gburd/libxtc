@@ -36,7 +36,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             ${{ matrix.compiler }} make autoconf automake \
-            pkg-config libssl-dev liburing-dev gawk
+            pkg-config libssl-dev liburing-dev gawk openssl
 
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
@@ -66,7 +66,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc make autoconf pkg-config libssl-dev liburing-dev gawk
+          sudo apt-get install -y gcc make autoconf automake pkg-config libssl-dev liburing-dev gawk openssl
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
       - name: Autoreconf
@@ -93,7 +93,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            gcc make autoconf pkg-config libssl-dev liburing-dev gawk
+            gcc make autoconf automake pkg-config libssl-dev liburing-dev gawk openssl
 
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
@@ -131,7 +131,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            gcc make autoconf pkg-config libssl-dev liburing-dev gawk python3
+            gcc make autoconf automake pkg-config libssl-dev liburing-dev gawk openssl python3
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
       - name: Autoreconf

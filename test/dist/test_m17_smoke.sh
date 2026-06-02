@@ -65,5 +65,10 @@ printf '%s\n' "$OUTPUT" | tail -n +2 | while IFS= read -r _line; do
     esac
 done
 
+# grep -c prints the count (0 when none) but EXITS 1 on a zero count;
+# under set -e capture it into a variable so the zero-count exit does
+# not abort the script and does not append a second "0" (which would
+# make the %d below see "0\n0" -- "not completely converted").
+_ndr=$(printf '%s\n' "$OUTPUT" | tail -n +2 | grep -c '[^[:space:]]') || _ndr=0
 printf '  [M17-smoke] OK: run.sh emits valid CSV (header + %d data row(s))\n' \
-    "$(printf '%s\n' "$OUTPUT" | tail -n +2 | grep -c '[^[:space:]]' 2>/dev/null || printf 0)"
+    "$_ndr"
