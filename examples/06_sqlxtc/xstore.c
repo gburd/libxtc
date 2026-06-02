@@ -84,6 +84,8 @@ typedef struct xstore_ctx {
 	int              rn, rcap;
 	int              did_scan;    /* txn did a full scan (table-level read) */
 	ssi_txn_t       *ssi;         /* this txn's SSI registry slot (or NULL) */
+	int              snap_slot;   /* GC snapshot-hold slot (-1 == none) */
+	int              autovacuum;  /* 1 == prune dead versions inline on write */
 } xstore_ctx_t;
 
 static void
@@ -301,6 +303,77 @@ ssi_abort(ssi_txn_t *t)
 	pthread_mutex_unlock(&g_ssi_mu);
 }
 
+/*
+ * Snapshot-hold registry, for the version-GC horizon.  A version is
+ * dead once NO live read snapshot can reach it: per rowid, every
+ * version older than the newest one at-or-before the oldest live
+ * snapshot is unreachable (a tombstone that is itself the newest such
+ * version, with nothing newer, is unreachable too).  This is the
+ * MVCC vacuum horizon -- PostgreSQL's OldestXmin / RecentGlobalXmin.
+ *
+ * Autocommit statement reads do not register: each reads at the
+ * current clock, so it sees at least the surviving newest version,
+ * which GC never removes.  Only LONG-LIVED snapshots pin the horizon:
+ * an open explicit transaction (txn_snap, held to commit) and an
+ * xstore_as_of() time-travel pin (read_snap).  An as_of pin set below
+ * the reclaimed horizon is best-effort (its versions may already be
+ * gone); explicit transactions always snapshot the current clock and
+ * are never below the horizon.
+ */
+#define SNAP_MAX 256
+static uint64_t        g_holds[SNAP_MAX];   /* 0 == free slot */
+static pthread_mutex_t g_snap_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_gc_horizon = 0;   /* newest reclaimed commit_ts */
+
+/* Set connection slot *slotp to pin `ts` (0 releases it). */
+static void
+snap_set(int *slotp, uint64_t ts)
+{
+	int i;
+	pthread_mutex_lock(&g_snap_mu);
+	if (ts == 0) {
+		if (*slotp >= 0) { g_holds[*slotp] = 0; *slotp = -1; }
+	} else {
+		if (*slotp < 0)
+			for (i = 0; i < SNAP_MAX; i++)
+				if (g_holds[i] == 0) { *slotp = i; break; }
+		if (*slotp >= 0) g_holds[*slotp] = ts;
+		/* registry full: leave unpinned -- horizon stays conservative
+		 * (g_xclock-bounded), so correctness holds; only an as_of pin
+		 * could then be GC'd early. */
+	}
+	pthread_mutex_unlock(&g_snap_mu);
+}
+
+/* The GC horizon: the oldest live pinned snapshot, or `now` if none. */
+static uint64_t
+snap_horizon(uint64_t now)
+{
+	uint64_t h = now;
+	int i;
+	pthread_mutex_lock(&g_snap_mu);
+	for (i = 0; i < SNAP_MAX; i++)
+		if (g_holds[i] != 0 && g_holds[i] < h) h = g_holds[i];
+	pthread_mutex_unlock(&g_snap_mu);
+	return h;
+}
+
+/* Republish this connection's effective GC pin: its open-transaction
+ * snapshot, else its as_of read snapshot, else none.  Called wherever
+ * those change. */
+static void
+xs_pin_recompute(xstore_ctx_t *cx)
+{
+	uint64_t pin = 0;
+	if (cx->in_txn)
+		pin = cx->txn_snap;
+	else {
+		uint64_t rs = atomic_load_explicit(&cx->read_snap, memory_order_relaxed);
+		if (rs != 0) pin = rs;
+	}
+	snap_set(&cx->snap_slot, pin);
+}
+
 /* Order-preserving big-endian; the timestamp half is inverted so that,
  * within a rowid, higher commit_ts sorts first (newest version first). */
 static void
@@ -357,6 +430,7 @@ xs_enter(xstore_vtab_t *v)
 		cx->rn = 0;
 		cx->did_scan = 0;
 		cx->ssi = cx->serializable ? ssi_begin(cx->txn_snap) : NULL;
+		xs_pin_recompute(cx);     /* pin txn_snap against version GC */
 	}
 }
 
@@ -656,6 +730,145 @@ xs_newest_ts(bt_t *bt, int64_t rowid)
 	return ts;
 }
 
+/*
+ * Version GC (MVCC vacuum).  Reclaims versions no live snapshot can
+ * reach: scanning in key order the cursor sees each rowid's versions
+ * newest-first (commit_ts descending), so for each rowid we keep every
+ * version newer than `horizon`, keep the first version at-or-before
+ * `horizon` (the survivor that snapshots at the horizon still need),
+ * and delete the rest.  A survivor that is a tombstone with nothing
+ * newer is itself unreachable and is dropped, so a deleted row
+ * eventually leaves no trace.
+ *
+ * Latches must not span the vtable/btree boundary, and bt_delete
+ * wants the exclusive latch a live cursor would hold, so this collects
+ * the dead keys under an open cursor, closes it, then deletes -- the
+ * same discipline the xstore cursor uses.  Deletes run in bounded
+ * batches so memory stays O(batch), not O(dead).  Concurrent inserts
+ * are safe: a committer writes at a timestamp above the horizon, which
+ * GC never touches.
+ */
+#define XS_GC_BATCH 512
+static int
+xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
+{
+	uint8_t resume[XS_VKLEN];
+	int have_resume = 0, reclaimed = 0, rc = XTC_OK;
+
+	for (;;) {
+		bt_cursor_t *cur = NULL;
+		uint8_t dead[XS_GC_BATCH][XS_VKLEN];
+		int ndead = 0, i;
+		int64_t prev_rowid = 0;
+		int in_group = 0, survivor_found = 0;
+		const uint8_t *start = have_resume ? resume : NULL;
+
+		if (bt_cursor_open(bt, start, have_resume ? XS_VKLEN : 0, &cur) != XTC_OK)
+			break;
+		for (;;) {
+			const void *k = NULL, *vv = NULL;
+			uint16_t klen = 0, vl = 0;
+			int64_t rid; uint64_t ts; int deleted, first_in_group;
+
+			if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
+			    klen != XS_VKLEN)
+				break;
+			/* Skip the resume key itself (already processed). */
+			if (have_resume && memcmp(k, resume, XS_VKLEN) == 0)
+				continue;
+			rid = dec_rowid((const uint8_t *)k);
+			ts = dec_ts((const uint8_t *)k);
+			deleted = (vl >= 1 && (((const uint8_t *)vv)[0] & XS_F_DELETED));
+			first_in_group = (!in_group || rid != prev_rowid);
+			if (first_in_group) {
+				prev_rowid = rid; in_group = 1; survivor_found = 0;
+			}
+			if (!survivor_found) {
+				if (ts <= horizon) {
+					survivor_found = 1;
+					if (deleted && first_in_group)
+						memcpy(dead[ndead++], k, XS_VKLEN);
+				}
+				/* else ts > horizon: keep (newer than horizon). */
+			} else {
+				memcpy(dead[ndead++], k, XS_VKLEN);   /* older than survivor */
+			}
+			if (ndead == XS_GC_BATCH) {
+				memcpy(resume, k, XS_VKLEN);
+				have_resume = 1;
+				break;
+			}
+		}
+		bt_cursor_close(cur);
+		for (i = 0; i < ndead; i++) {
+			if (bt_delete(bt, dead[i], XS_VKLEN) == XTC_OK) reclaimed++;
+		}
+		if (ndead < XS_GC_BATCH)
+			break;     /* scanned to the end */
+	}
+	if (out_reclaimed != NULL) *out_reclaimed = reclaimed;
+	return rc;
+}
+
+/*
+ * Opportunistic inline prune of ONE rowid's dead versions, up to the
+ * given horizon -- PostgreSQL's HOT-style pruning: triggered on the
+ * write that creates a new version, it touches only this rowid's
+ * version chain (a handful of entries, on pages already hot from the
+ * write), so it is incremental and cache-friendly, unlike a full-tree
+ * vacuum.  Same keep rule as xs_gc, restricted to one rowid; same
+ * collect-then-delete discipline (no latch across the cursor).
+ */
+static void
+xs_prune_rowid(bt_t *bt, int64_t rowid, uint64_t horizon)
+{
+	bt_cursor_t *cur = NULL;
+	uint8_t startk[XS_VKLEN];
+	uint8_t dead[16][XS_VKLEN];
+	int ndead = 0, i, survivor_found = 0, first = 1;
+
+	enc_vkey(rowid, ~(uint64_t)0, startk);    /* newest version first */
+	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
+		return;
+	for (;;) {
+		const void *k = NULL, *vv = NULL;
+		uint16_t klen = 0, vl = 0;
+		uint64_t ts; int deleted;
+
+		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
+		    klen != XS_VKLEN ||
+		    dec_rowid((const uint8_t *)k) != rowid)
+			break;                            /* past this rowid */
+		ts = dec_ts((const uint8_t *)k);
+		deleted = (vl >= 1 && (((const uint8_t *)vv)[0] & XS_F_DELETED));
+		if (!survivor_found) {
+			if (ts <= horizon) {
+				survivor_found = 1;
+				if (deleted && first) memcpy(dead[ndead++], k, XS_VKLEN);
+			}
+		} else {
+			memcpy(dead[ndead++], k, XS_VKLEN);
+		}
+		first = 0;
+		if (ndead == (int)(sizeof dead / sizeof dead[0])) break;
+	}
+	bt_cursor_close(cur);
+	for (i = 0; i < ndead; i++)
+		(void)bt_delete(bt, dead[i], XS_VKLEN);
+}
+
+/* Write a version, then (if this connection enabled autovacuum) prune
+ * the rowid's now-dead older versions up to the live-snapshot horizon. */
+static int
+xs_put_pruned(xstore_ctx_t *cx, int64_t rowid, const void *blob, int n, int deleted)
+{
+	int rc = xs_put(cx->bt, rowid, blob, n, deleted);
+	if (rc == SQLITE_OK && cx->autovacuum)
+		xs_prune_rowid(cx->bt, rowid,
+		    snap_horizon(atomic_load_explicit(&g_xclock, memory_order_relaxed)));
+	return rc;
+}
+
 static int
 xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
     xsql_int64 *pRowid)
@@ -675,7 +888,7 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 		int64_t rid = xsql_value_int64(argv[0]);   /* DELETE */
 		if (cx->in_txn)
 			return wbuf_add(cx, rid, NULL, 0, 1);
-		return xs_put(cx->bt, rid, NULL, 0, 1);
+		return xs_put_pruned(cx, rid, NULL, 0, 1);
 	}
 	{
 		int64_t rowid = (xsql_value_type(argv[1]) == SQLITE_NULL)
@@ -689,13 +902,13 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 			int64_t oldid = xsql_value_int64(argv[0]);
 			if (oldid != rowid) {
 				if (cx->in_txn) (void)wbuf_add(cx, oldid, NULL, 0, 1);
-				else (void)xs_put(cx->bt, oldid, NULL, 0, 1);
+				else (void)xs_put_pruned(cx, oldid, NULL, 0, 1);
 			}
 		}
 		if (pRowid != NULL) *pRowid = rowid;
 		if (cx->in_txn)
 			return wbuf_add(cx, rowid, blob, n, 0);
-		return xs_put(cx->bt, rowid, blob, n, 0);
+		return xs_put_pruned(cx, rowid, blob, n, 0);
 	}
 }
 
@@ -781,6 +994,8 @@ xs_commit(xsql_vtab *pv)
 			if (bt_insert(cx->bt, key, XS_VKLEN, buf,
 			    (uint16_t)(1 + (w->deleted ? 0 : w->len))) != XTC_OK)
 				rc = SQLITE_ERROR;
+			else if (cx->autovacuum)
+				xs_prune_rowid(cx->bt, w->rowid, snap_horizon(ts));
 		}
 		ssi_commit(cx->ssi, ts);     /* publish commit_ts for SSI peers */
 	} else {
@@ -792,6 +1007,7 @@ xs_commit(xsql_vtab *pv)
 	cx->ssi = NULL;
 	wbuf_clear(cx);
 	cx->in_txn = 0;
+	xs_pin_recompute(cx);     /* txn done: drop (or re-pin as_of) */
 	return rc;
 }
 static int
@@ -802,6 +1018,7 @@ xs_rollback(xsql_vtab *pv)
 	cx->ssi = NULL;
 	wbuf_clear(cx);
 	cx->in_txn = 0;
+	xs_pin_recompute(cx);
 	return SQLITE_OK;
 }
 
@@ -821,6 +1038,7 @@ fn_as_of(xsql_context *ctx, int argc, xsql_value **argv)
 	int64_t ts = (argc >= 1) ? xsql_value_int64(argv[0]) : 0;
 	if (ts < 0) ts = 0;
 	atomic_store_explicit(&c->read_snap, (uint64_t)ts, memory_order_relaxed);
+	xs_pin_recompute(c);      /* pin (or release) the as_of snapshot */
 	xsql_result_int64(ctx, ts);
 }
 /* xstore_serializable(on): set this connection's isolation to
@@ -833,6 +1051,37 @@ fn_serializable(xsql_context *ctx, int argc, xsql_value **argv)
 	xstore_ctx_t *c = (xstore_ctx_t *)xsql_user_data(ctx);
 	int on = (argc >= 1) ? (xsql_value_int(argv[0]) != 0) : 1;
 	c->serializable = on;
+	xsql_result_int(ctx, on);
+}
+/* xstore_gc(): vacuum dead versions up to the current GC horizon (the
+ * oldest live snapshot, or the clock if none).  Returns the number of
+ * versions reclaimed.  The horizon advances g_gc_horizon so an as_of
+ * read below it is known to be best-effort. */
+static void
+fn_gc(xsql_context *ctx, int argc, xsql_value **argv)
+{
+	xstore_ctx_t *c = (xstore_ctx_t *)xsql_user_data(ctx);
+	uint64_t now = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	uint64_t horizon = snap_horizon(now);
+	int reclaimed = 0;
+	(void)argc; (void)argv;
+	(void)xs_gc(c->bt, horizon, &reclaimed);
+	if (horizon > atomic_load_explicit(&g_gc_horizon, memory_order_relaxed))
+		atomic_store_explicit(&g_gc_horizon, horizon, memory_order_relaxed);
+	xsql_result_int(ctx, reclaimed);
+}
+
+/* xstore_autovacuum(on): when on (default off), each write prunes that
+ * rowid's dead versions inline (HOT-style), keeping version chains
+ * short on a write-heavy workload without a full-tree scan.  Off keeps
+ * all versions, so xstore_as_of() time travel can reach any historical
+ * snapshot; on bounds time travel to the live-snapshot horizon. */
+static void
+fn_autovacuum(xsql_context *ctx, int argc, xsql_value **argv)
+{
+	xstore_ctx_t *c = (xstore_ctx_t *)xsql_user_data(ctx);
+	int on = (argc >= 1) ? (xsql_value_int(argv[0]) != 0) : 1;
+	c->autovacuum = on;
 	xsql_result_int(ctx, on);
 }
 
@@ -861,7 +1110,8 @@ static void
 ctx_free(void *p)
 {
 	xstore_ctx_t *cx = p;
-	if (cx != NULL) { ssi_abort(cx->ssi); wbuf_clear(cx); free(cx->wbuf); free(cx->rset); }
+	if (cx != NULL) { ssi_abort(cx->ssi); snap_set(&cx->snap_slot, 0);
+	    wbuf_clear(cx); free(cx->wbuf); free(cx->rset); }
 	xsql_free(p);
 }
 
@@ -883,6 +1133,8 @@ xstore_register(xsql *db, bt_t *bt)
 	ctx->rn = ctx->rcap = 0;
 	ctx->did_scan = 0;
 	ctx->ssi = NULL;
+	ctx->snap_slot = -1;
+	ctx->autovacuum = 0;
 	rc = xsql_create_module_v2(db, "xstore", &xstore_module, ctx, ctx_free);
 	if (rc != SQLITE_OK)
 		return rc;
@@ -892,5 +1144,9 @@ xstore_register(xsql *db, bt_t *bt)
 	    ctx, fn_as_of, NULL, NULL);
 	(void)xsql_create_function(db, "xstore_serializable", 1, SQLITE_UTF8,
 	    ctx, fn_serializable, NULL, NULL);
+	(void)xsql_create_function(db, "xstore_gc", 0, SQLITE_UTF8,
+	    ctx, fn_gc, NULL, NULL);
+	(void)xsql_create_function(db, "xstore_autovacuum", 1, SQLITE_UTF8,
+	    ctx, fn_autovacuum, NULL, NULL);
 	return SQLITE_OK;
 }

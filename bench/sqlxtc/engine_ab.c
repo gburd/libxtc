@@ -51,6 +51,9 @@ static int      g_cache_kb = 4096;     /* 4 MB cache, both engines */
 static int      g_ops      = 200000;
 static int      g_read_pct = 95;
 static int      g_row      = 200;
+static int      g_gc_every = 0;        /* xstore: run xstore_gc() every N ops (0=off) */
+static int      g_autovac  = 0;        /* xstore: enable inline autovacuum */
+static int      g_hot      = 0;        /* hot-set size (0 = uniform random) */
 static const char *g_engine = "xstore";
 static const char *g_label  = "ab";
 
@@ -89,6 +92,9 @@ main(int argc, char **argv)
 		else if (!strcmp(argv[i], "--ops") && i + 1 < argc) g_ops = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--read-pct") && i + 1 < argc) g_read_pct = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--row-bytes") && i + 1 < argc) g_row = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--gc-every") && i + 1 < argc) g_gc_every = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--autovacuum")) g_autovac = 1;
+		else if (!strcmp(argv[i], "--hot") && i + 1 < argc) g_hot = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--label") && i + 1 < argc) g_label = argv[++i];
 	}
 	is_xstore = !strcmp(g_engine, "xstore");
@@ -112,6 +118,8 @@ main(int argc, char **argv)
 		if (xsql_open(":memory:", &db) != SQLITE_OK) return 1;
 		xstore_register(db, bt);
 		xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0);
+		if (g_autovac)
+			xsql_exec(db, "SELECT xstore_autovacuum(1);", 0, 0, 0);
 	} else {
 		char pragma[64];
 		fd = mkstemp(dbpath); if (fd < 0) return 1; close(fd);
@@ -147,7 +155,13 @@ main(int argc, char **argv)
 		int is_read;
 		uint64_t a, b;
 		rng = rng * 6364136223846793005ull + 1442695040888963407ull;
-		k = (uint32_t)((rng >> 33) % (uint32_t)g_rows) + 1;
+		/* Skewed access: with --hot N, 90%% of ops hit the first N keys
+		 * (a hot set updated over and over -> long version chains),
+		 * else uniform.  This is where version GC matters. */
+		if (g_hot > 0 && ((rng >> 40) % 100) < 90)
+			k = (uint32_t)((rng >> 33) % (uint32_t)g_hot) + 1;
+		else
+			k = (uint32_t)((rng >> 33) % (uint32_t)g_rows) + 1;
 		is_read = ((int)((rng >> 17) % 100) < g_read_pct);
 		a = now_ns();
 		if (is_read) {
@@ -162,6 +176,12 @@ main(int argc, char **argv)
 		}
 		b = now_ns();
 		lat[i] = (b - a) > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)(b - a);
+		/* Periodic MVCC vacuum (xstore only): keep dead versions from
+		 * accumulating under a write-heavy mix.  Not timed into the op
+		 * latency above -- it is the cost of the policy, reflected in
+		 * the run wall-clock / throughput. */
+		if (is_xstore && g_gc_every > 0 && (i + 1) % g_gc_every == 0)
+			xsql_exec(db, "SELECT xstore_gc();", 0, 0, 0);
 	}
 	t1 = now_ns();
 	xsql_finalize(sel); xsql_finalize(upd);
@@ -178,11 +198,13 @@ main(int argc, char **argv)
 #define PCT(p) ((double)lat[(size_t)((double)(p)/100.0*(double)(g_ops-1))]/1000.0)
 	printf("{\"label\":\"%s\",\"engine\":\"%s\",\"rows\":%d,\"row_bytes\":%d,"
 	    "\"cache_kb\":%d,\"working_set_kb\":%lld,\"read_pct\":%d,\"ops\":%d,"
+	    "\"gc_every\":%d,\"autovac\":%d,\"hot\":%d,"
 	    "\"load_s\":%.3f,\"load_kops\":%.1f,\"run_s\":%.3f,\"kops_per_sec\":%.1f,"
 	    "\"p50_us\":%.2f,\"p95_us\":%.2f,\"p99_us\":%.2f,\"p999_us\":%.2f,"
 	    "\"max_us\":%.2f}\n",
 	    g_label, g_engine, g_rows, g_row, g_cache_kb,
-	    (long long)((int64_t)g_rows * g_row / 1024), g_read_pct, g_ops,
+	    (long long)((int64_t)g_rows * g_row / 1024), g_read_pct, g_ops, g_gc_every,
+	    g_autovac, g_hot,
 	    load_s, (double)g_rows / load_s / 1000.0, run_s,
 	    (double)g_ops / run_s / 1000.0, PCT(50), PCT(95), PCT(99), PCT(99.9),
 	    (double)lat[g_ops - 1] / 1000.0);
