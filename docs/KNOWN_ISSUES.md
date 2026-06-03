@@ -63,6 +63,36 @@ loop+process tear down with heap corruption on Windows.
 3. Compare the IOCP wakeup integration after the fixes (round 3 IOCP poll now drains all signaled events; possibly some interaction).
 4. If unfixable in current shape, mark `test_proc::selective_receive` as Windows-skip until M16-era cleanup.
 
+## IOCP backend status (Windows)
+
+**Status:** backend functionally complete; remaining items are
+Windows-runtime-dependent and need an interactive santorini session.
+
+The IOCP backend (`src/io/io_iocp.c`) passes the full suite on the
+reference Windows toolchain (MinGW64: 233/233, see
+`docs/M_WINDOWS_MATRIX.md`).  Registration uses loopback sockets in the
+tests (`test/include/io_pipe_compat.h`), which compose with
+WSAEventSelect; anonymous CRT pipes do not, by design.  The open items
+are not library defects:
+
+  - **Clang64 POSIX-only test ports.**  `test_net_udp` used a bare
+    `nanosleep` (absent in the Clang64/MinGW runtime) -- now portable
+    (a `test_msleep` shim).  `test_proc_wait_fd` still uses `pipe(2)` +
+    `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` + pthreads; porting it to
+    the socket-pipe compat is straightforward but must be verified on
+    the host before landing (an unverifiable Windows edit risks a
+    silent Linux regression), so it is deferred to a santorini pass.
+  - **`test_proc::selective_receive` flake** (above): the cooperative
+    equivalent (`test/otp/test_otp_proc_lib.c`) passes on every
+    platform, so selective receive itself is correct; the flake is in
+    test_proc's exact IOCP-wakeup timing and needs the host to chase.
+  - **Round-2 AFD/NtDeviceIoControlFile fast path** is a performance
+    upgrade, not a correctness gap (round 1 is correct).
+
+Driving the santorini host non-interactively from CI/automation is not
+yet wired (it is configured for an interactive PowerShell session); the
+Windows matrix is run by hand via `dist/santorini-matrix.sh`.
+
 ## test_alloc M7 skipped on Windows
 
 **Status:** intentional -- `_aligned_malloc` returns memory that requires `_aligned_free`, not plain `free`. The hook surface uses a single free path. Keeping the M7 case Windows-skipped is correct.
