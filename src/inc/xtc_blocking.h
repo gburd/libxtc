@@ -40,6 +40,17 @@
 int xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result);
 
 /*
+ * Fire-and-forget variant: hand fn(arg) to the offload pool and return
+ * immediately, without waiting for or collecting the result.  Never
+ * parks, so it is callable from any context (e.g. prefetch/read-ahead).
+ * The caller owns arg's lifetime until fn runs (or has fn free it);
+ * there is no completion signal.
+ *
+ * PUBLIC: int  xtc_blocking_submit __P((int (*)(void *), void *));
+ */
+int xtc_blocking_submit(int (*fn)(void *), void *arg);
+
+/*
  * Set the pool size (worker threads).  Must be called before the
  * first xtc_blocking_run; later calls are ignored.  Default 4.
  *

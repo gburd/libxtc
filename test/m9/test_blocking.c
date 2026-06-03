@@ -232,8 +232,47 @@ test_shutdown(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- fire-and-forget submit ---- */
+static _Atomic int g_submit_ran;
+
+static int
+submit_marker_fn(void *arg)
+{
+	/* arg is a heap int the fn owns and frees -- exercises the
+	 * "fn owns arg" lifetime contract. */
+	int *p = arg;
+	atomic_fetch_add(&g_submit_ran, *p);
+	free(p);
+	return 0;
+}
+
+static MunitResult
+test_submit_fire_forget(const MunitParameter p[], void *d)
+{
+	int i, spins;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_blocking_submit(NULL, NULL), ==, XTC_E_INVAL);
+
+	atomic_store(&g_submit_ran, 0);
+	for (i = 0; i < 10; i++) {
+		int *v = malloc(sizeof *v);
+		munit_assert_not_null(v);
+		*v = 1;
+		munit_assert_int(xtc_blocking_submit(submit_marker_fn, v), ==, XTC_OK);
+	}
+	/* No completion signal: poll the counter until all 10 ran. */
+	for (spins = 0; spins < 5000 && atomic_load(&g_submit_ran) < 10; spins++) {
+		struct timespec ts = { 0, 1000000 };  /* 1ms */
+		(void)nanosleep(&ts, NULL);
+	}
+	munit_assert_int(atomic_load(&g_submit_ran), ==, 10);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/fallback",   test_fallback,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/submit",     test_submit_fire_forget, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/liveness",   test_in_proc_liveness, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent", test_concurrent,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/file_offload", test_file_offload,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

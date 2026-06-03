@@ -937,7 +937,7 @@ __psi_thread(void *arg)
 		pfds[1].fd = l->stop_fd;    pfds[1].events = POLLIN;
 		int rc = poll(pfds, 2, -1);
 		if (rc <= 0) continue;
-		if (pfds[1].revents & POLLIN) break;
+		if (pfds[1].revents & (POLLIN | POLLHUP)) break;
 		if (pfds[0].revents & POLLPRI) {
 			(void)xtc_slab_reap_all();
 			if (l->fn) l->fn(2, l->user);   /* level 2 = critical */
@@ -947,8 +947,9 @@ __psi_thread(void *arg)
 }
 
 int
-xtc_slab_pressure_listen(const char *psi_path,
-                         xtc_slab_pressure_fn fn, void *user)
+xtc_slab_pressure_listen_ex(const char *psi_path,
+                            xtc_slab_pressure_fn fn, void *user,
+                            xtc_slab_pressure_t **out)
 {
 	struct psi_listener *l;
 	int fd;
@@ -956,6 +957,9 @@ xtc_slab_pressure_listen(const char *psi_path,
 	const char *trigger = "some 150000 1000000\n";  /* 150ms in 1s */
 	int rc;
 	int pipefd[2];
+
+	if (out == NULL) return XTC_E_INVAL;
+	*out = NULL;
 
 	fd = open(path, O_RDWR);
 	if (fd < 0) return XTC_E_NOSYS;     /* PSI not available */
@@ -971,30 +975,57 @@ xtc_slab_pressure_listen(const char *psi_path,
 	}
 	l->psi_fd = fd;
 	l->stop_fd = pipefd[0];
-	l->stop_wfd = pipefd[1];   /* keep open; close to signal stop */
+	l->stop_wfd = pipefd[1];   /* write a byte + close to signal stop */
 	l->fn = fn; l->user = user;
 	if (pthread_create(&l->th, NULL, __psi_thread, l) != 0) {
 		(void)close(fd); (void)close(pipefd[0]); (void)close(pipefd[1]);
 		__os_free(l);
 		return XTC_E_INTERNAL;
 	}
-	/* NOTE: The listener cannot be stopped today because we don't return
-	 * a handle.  A future API change adds xtc_slab_pressure_listen_ex()
-	 * returning an opaque handle and xtc_slab_pressure_stop(handle).
-	 * For now, the listener runs until process exit. */
+	*out = l;
 	return XTC_OK;
 }
 
-/* Placeholder: clean shutdown requires API change to return handle. */
 int
-xtc_slab_pressure_stop(void *handle)
+xtc_slab_pressure_listen(const char *psi_path,
+                         xtc_slab_pressure_fn fn, void *user)
 {
-	(void)handle;
-	return XTC_E_NOSYS;
+	/* Fire-and-forget: the handle is intentionally discarded, so the
+	 * listener runs until process exit.  Use the _ex variant to keep a
+	 * handle and stop it later. */
+	xtc_slab_pressure_t *h = NULL;
+	int rc = xtc_slab_pressure_listen_ex(psi_path, fn, user, &h);
+	(void)h;
+	return rc;
+}
+
+int
+xtc_slab_pressure_stop(xtc_slab_pressure_t *h)
+{
+	if (h == NULL) return XTC_E_INVAL;
+	/* Write a byte AND close the write end: closing alone raises only
+	 * POLLHUP on the read end, but a written byte guarantees POLLIN, so
+	 * the poll loop wakes on either. */
+	{ char b = 1; ssize_t n = write(h->stop_wfd, &b, 1); (void)n; }  /* XTC_BLOCKING_OK: 1 byte to a pipe, never blocks */
+	(void)close(h->stop_wfd);
+	(void)pthread_join(h->th, NULL);  /* XTC_BLOCKING_OK: joining the listener thread on teardown, not on a loop */
+	(void)close(h->stop_fd);
+	(void)close(h->psi_fd);
+	__os_free(h);
+	return XTC_OK;
 }
 #else
 int
-xtc_slab_pressure_stop(void *handle)
+xtc_slab_pressure_listen_ex(const char *psi_path,
+                            xtc_slab_pressure_fn fn, void *user,
+                            xtc_slab_pressure_t **out)
+{
+	(void)psi_path; (void)fn; (void)user;
+	if (out) *out = NULL;
+	return XTC_E_NOSYS;
+}
+int
+xtc_slab_pressure_stop(xtc_slab_pressure_t *handle)
 {
 	(void)handle;
 	return XTC_E_NOSYS;
