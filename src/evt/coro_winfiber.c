@@ -193,7 +193,11 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 
 	target->waiter = me->self;
 	me->_parked_on = target;
-	(void)SwitchToFiber(me->loop_fiber);
+	{
+		void *pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
+		(void)SwitchToFiber(me->loop_fiber);
+		if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
+	}
 	if (result) *result = target->result;
 	return XTC_OK;
 }
@@ -205,8 +209,13 @@ void
 xtc_yield(void)
 {
 	struct xtc_coro *c = __xtc_current_coro;
+	void *pctx;
 	if (c == NULL) return;
+	/* Preserve the process layer's per-fiber TLS across the yield --
+	 * see the coro_fctx.c xtc_yield for the rationale. */
+	pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 	(void)SwitchToFiber(c->loop_fiber);
+	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 }
 
 xtc_task_t *
