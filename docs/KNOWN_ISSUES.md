@@ -208,6 +208,48 @@ so the bug is purely in the library primitive.  Findings:
        still-readable fd is mishandled, so the dispatch del_fd is
        load-bearing in a way not yet understood.
 
+    5. *Event carries the fired fd* (epoll stores the fd in
+       `data.u64`, a per-loop fd->tag map recovers the registrant, and
+       dispatch dels exactly `ev->fd` -- the fd that actually fired --
+       instead of a possibly-stale `t->park_fd`): implemented across
+       all backends, verified to NOT regress io_uring (make check +
+       reproducer + bufmgr_mt all green), but the epoll reproducer
+       still hangs 15/15.  So the wrong-fd-del was not the root cause;
+       reverted rather than ship inert complexity (a per-loop map).
+
+    6. *Non-blocking completion read + re-wait* (set the pipe read end
+       O_NONBLOCK and loop wait_fd until the byte is actually read, so
+       a wakeup with no byte yet cannot block the loop thread in
+       read()): contained to blocking.c, but the epoll reproducer
+       still hangs 15/15.  Reverted.
+
+Sharper diagnosis (instrumented, this is where it stands):
+
+  - A parked proc resumes from its wait_fd `xtc_yield()` with
+    `wake_revents == 0` AND `park_fd` still set -- i.e. it was
+    re-scheduled WITHOUT the fd dispatcher running (dispatch sets
+    wake_revents and clears park_fd before waking).  Such "spurious"
+    resumes are not rare: tens of thousands per run.  The committed
+    blocking_run then does a blocking read() on the not-yet-readable
+    pipe, wedging the loop thread so it stops polling -- a plausible
+    cascade into the hang -- but making that read non-blocking
+    (approach 6) did not fix it, so the spurious resume is not the
+    whole story.
+
+  - The spurious resumes are NOT cross-thread: an instrumented
+    `__xtc_inbox_push` counted ZERO `XTC_INB_WAKE` pushes for the
+    whole run, so no `xtc_waker_wake` cross-thread path fired.  The
+    only same-thread enqueue of a PARKED proc is the fd dispatcher,
+    which clears park_fd and sets wake_revents -- so a resume with
+    neither updated is self-contradictory under the current model and
+    indicates the park/dispatch bookkeeping is desynchronised from the
+    actual scheduler wakeup in a way the probes perturb rather than
+    pin.  Per-fd counters also show stuck fds with `del == reg` and
+    `deliv == 0/1` (the fd is unregistered, by the parker's own
+    cleanup on a spurious resume, before epoll ever delivers its
+    event), consistent with the "readable but not in any epoll"
+    post-mortem above.
+
 The bug needs a dedicated redesign rather than a point fix -- most
 likely a per-proc wakeup eventfd registered ONCE at spawn with
 EPOLLONESHOT re-arm (no per-wait registration churn, memory-safe, and
