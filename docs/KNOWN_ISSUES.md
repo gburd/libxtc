@@ -170,6 +170,45 @@ runs on the io_uring CI (GitHub) and is skipped on the epoll CI
 (Codeberg containers, whose seccomp blocks io_uring).  Investigation
 continues with the same trace method that pinned (A).
 
+### (A-residual) example bufmgr thrash livelock in test_bufmgr_mt
+
+After the (A) fix, test_bufmgr_mt still hangs ~5% on epoll (io_uring far
+less, and confounded by host load).  It was chased to ground and is NOT
+a libxtc primitive bug and NOT a reservation leak:
+
+  - Per-frame reserve/clear counters instrumented into evict_one show,
+    on a hung core, the stuck frame at pin == -1 with reserve count ==
+    clear count (e.g. 921 == 921).  The reservation is balanced -- the
+    pin == -1 is a snapshot of an evictor that has reserved the frame
+    for the 922nd time, mid-eviction.  So no reservation is leaked.
+
+  - It is a buffer-pool THRASH livelock in the example's from-scratch
+    buffer manager (examples/06_sqlxtc/bufmgr.c) under deliberately
+    brutal parameters: N_FRAMES = 32 but HOT_RANGE = 64 hot pages are
+    hammered by 16 workers (the test comment: "small resident pool ->
+    eviction churn", "forces the swizzle cycle").  A demand-loaded page
+    enters COOL (probationary) and is immediately evictable, so two
+    straggler workers churn one hot frame (load -> COOL -> evict ->
+    reload) and starve each other.  Earlier (before the (A) fix), this
+    was masked by, and compounded with, a separate loader-starvation:
+    the fixers busy-spin in bm_fix without yielding, so the loop thread
+    never returns to poll and parked loader completions are never
+    dispatched (a core showed 10 frames stuck BM_LOADED, pin == 1).
+
+  - Fix DIRECTION (validated to remove the epoll hang in isolation but
+    NOT yet landed): (1) bm_fix yields on a contended retry so the
+    loop regains control; (2) the loop services I/O even when tasks
+    keep rescheduling (a non-blocking poll interleaved with RESCHED) so
+    busy-yielding fixers cannot starve parked I/O; (3) a CLOCK
+    second-chance reference bit on frames so a recently touched COOL
+    page survives one eviction sweep (standard anti-thrash).  In a
+    clean run all three together took epoll test_bufmgr_mt to 60/60.
+    They were REVERTED because back-to-back A/B batches on a saturated
+    test host could not distinguish a real io_uring regression from
+    host load (the committed baseline itself dropped to 39/40 under the
+    same load).  Landing them needs a clean-box benchmark; until then
+    test_bufmgr_mt stays gated to the io_uring CI and skipped on epoll.
+
 ### (B) FIXED -- buffer-manager load/publish pin-ordering race
 
 While chasing the epoll hang, a genuine buffer-manager race was found
