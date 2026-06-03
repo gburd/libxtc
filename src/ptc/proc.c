@@ -653,6 +653,14 @@ xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 
 	if (XTC_UNLIKELY(loop == NULL || fn == NULL)) return XTC_E_INVAL;
 
+	/* Install the fiber-context preservation hooks so a yield/await
+	 * inside a proc keeps __current_proc pointing at this proc on
+	 * resume.  Idempotent: every spawn writes the same stable function
+	 * addresses.  Done here (not at a global init) because the proc
+	 * layer has no other mandatory entry point. */
+	__xtc_fiber_ctx_save = __xtc_proc_ctx_save;
+	__xtc_fiber_ctx_restore = __xtc_proc_ctx_restore;
+
 	if (XTC_UNLIKELY((tbl = __table_for(loop, 1)) == NULL)) return XTC_E_NOMEM;
 
 	if (XTC_UNLIKELY((rc = __os_calloc(1, sizeof *p, (void **)&p)) != XTC_OK))

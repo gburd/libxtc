@@ -301,7 +301,11 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 	 * PENDING instead of RESCHED.
 	 */
 	me->_parked_on = target;
-	(void)swapcontext(&me->ctx, &me->loop_ctx);
+	{
+		void *pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
+		(void)swapcontext(&me->ctx, &me->loop_ctx);
+		if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
+	}
 	/* When we return here, target->done must be true. */
 	if (result) *result = target->result;
 	return XTC_OK;
@@ -314,8 +318,13 @@ void
 xtc_yield(void)
 {
 	struct xtc_coro *c = __xtc_current_coro;
+	void *pctx;
 	if (c == NULL) return;
+	/* Preserve the process layer's per-fiber TLS across the yield --
+	 * see the coro_fctx.c xtc_yield for the rationale. */
+	pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 	(void)swapcontext(&c->ctx, &c->loop_ctx);
+	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 }
 
 xtc_task_t *
