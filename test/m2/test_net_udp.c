@@ -24,6 +24,19 @@
 #include <arpa/inet.h>
 #endif
 
+/* Portable 1ms-granularity sleep for the UDP receive retry loop.
+ * nanosleep is POSIX-only (absent under the Clang64/MinGW runtime). */
+#if defined(_WIN32)
+# include <windows.h>
+static void test_msleep(int ms) { Sleep((DWORD)ms); }
+#else
+static void test_msleep(int ms)
+{
+	struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+	(void)nanosleep(&ts, NULL);
+}
+#endif
+
 static MunitResult
 test_udp_send_recv(const MunitParameter p[], void *d)
 {
@@ -60,7 +73,7 @@ test_udp_send_recv(const MunitParameter p[], void *d)
 			if (rc != XTC_E_AGAIN) {
 				munit_errorf("recv unexpected rc=%d", rc);
 			}
-			{ struct timespec ts = { 0, 1000000 }; nanosleep(&ts, NULL); }
+			{ test_msleep(1); }
 		}
 	}
 	munit_assert_size(n, ==, 5);
