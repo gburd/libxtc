@@ -220,6 +220,20 @@ int  __xtc_inbox_drain(xtc_loop_t *loop);  /* owner-only; drains into local queu
  * NULL on threads that aren't loop owners. */
 extern XTC_THREAD_LOCAL xtc_loop_t *__xtc_current_loop;
 
+/*
+ * Fiber-context preservation hook.  The L3 process layer keeps a
+ * per-thread "current proc" pointer that must survive a yield (the
+ * scheduler runs other fibers in between, which overwrite it).  The
+ * L2 coro layer cannot depend on L3, so every yield/await jump saves
+ * the opaque context before jumping to the scheduler and restores it
+ * on resume through these hooks.  proc.c installs them on first
+ * spawn; while NULL (no process layer in use) the calls are no-ops.
+ * Set once to stable function addresses, so a plain pointer load is
+ * safe without synchronization.
+ */
+extern void *(*__xtc_fiber_ctx_save)(void);
+extern void  (*__xtc_fiber_ctx_restore)(void *);
+
 /* Forward declaration for back-pointer in xtc_loop. */
 struct xtc_exec;
 
