@@ -96,6 +96,10 @@ typedef void (*xtc_slab_dtor_fn)(void *obj, void *user);
  * 2=critical.  Caller may reap, drop caches, etc. */
 typedef void (*xtc_slab_pressure_fn)(int level, void *user);
 
+/* Opaque handle for a stoppable pressure listener (see
+ * xtc_slab_pressure_listen_ex / xtc_slab_pressure_stop). */
+typedef struct psi_listener xtc_slab_pressure_t;
+
 /* Storage mode. */
 typedef enum xtc_slab_mode {
 	XTC_SLAB_PROCESS_LOCAL = 0,
@@ -181,6 +185,8 @@ typedef struct xtc_slab_stats {
  * PUBLIC: void *xtc_slab_resolve __P((const xtc_slab_t *, xtc_slab_off_t));
  *
  * PUBLIC: int  xtc_slab_pressure_listen __P((const char *, xtc_slab_pressure_fn, void *));
+ * PUBLIC: int  xtc_slab_pressure_listen_ex __P((const char *, xtc_slab_pressure_fn, void *, xtc_slab_pressure_t **));
+ * PUBLIC: int  xtc_slab_pressure_stop __P((xtc_slab_pressure_t *));
  * PUBLIC: int  xtc_slab_reap_all __P((void));
  */
 
@@ -210,6 +216,21 @@ void          *xtc_slab_resolve(const xtc_slab_t *slab, xtc_slab_off_t off);
 int   xtc_slab_pressure_listen(const char *psi_path,
                                xtc_slab_pressure_fn fn,
                                void *user);
+
+/* Like xtc_slab_pressure_listen, but returns an opaque handle so the
+ * listener can be stopped (its background thread joined and its fds
+ * closed) with xtc_slab_pressure_stop.  On platforms without PSI,
+ * returns XTC_E_NOSYS and leaves *out NULL.  *out must be non-NULL. */
+int   xtc_slab_pressure_listen_ex(const char *psi_path,
+                                  xtc_slab_pressure_fn fn,
+                                  void *user,
+                                  xtc_slab_pressure_t **out);
+
+/* Stop a listener created by xtc_slab_pressure_listen_ex: signal its
+ * thread, join it, close its fds, and free the handle.  Idempotent on
+ * NULL (returns XTC_E_INVAL).  After this returns the handle is
+ * invalid. */
+int   xtc_slab_pressure_stop(xtc_slab_pressure_t *handle);
 
 /* Fan a reap across every cache currently registered.  Returns the
  * total number of objects reaped. */
