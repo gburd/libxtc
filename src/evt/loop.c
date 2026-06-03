@@ -21,6 +21,11 @@
 /* Per-thread cursor -- see loop_int.h. */
 XTC_THREAD_LOCAL xtc_loop_t *__xtc_current_loop = NULL;
 
+/* Fiber-context preservation hooks; installed by the process layer
+ * (proc.c) on first spawn.  NULL until then -- see loop_int.h. */
+void *(*__xtc_fiber_ctx_save)(void) = NULL;
+void  (*__xtc_fiber_ctx_restore)(void *) = NULL;
+
 /* --- inbox ---------------------------------------------------------- */
 
 int

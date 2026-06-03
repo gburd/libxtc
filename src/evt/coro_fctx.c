@@ -275,7 +275,11 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 	target->waiter = me->self;
 	me->self->q_next = NULL;
 	me->_parked_on = target;
-	(void)__xtc_jump_fcontext(&me->fctx, g_sched_fctx, NULL);
+	{
+		void *pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
+		(void)__xtc_jump_fcontext(&me->fctx, g_sched_fctx, NULL);
+		if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
+	}
 	/* Resumed: target->done is now true. */
 	if (result) *result = target->result;
 	return XTC_OK;
@@ -288,8 +292,15 @@ void
 xtc_yield(void)
 {
 	struct xtc_coro *c = __xtc_current_coro;
+	void *pctx;
 	if (c == NULL) return;
+	/* Preserve the process layer's per-fiber TLS across the yield:
+	 * the scheduler runs other fibers (which overwrite it) before we
+	 * resume.  Without this a proc resumes running as whatever proc
+	 * ran last, then registers I/O and parks the WRONG task. */
+	pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 	(void)__xtc_jump_fcontext(&c->fctx, g_sched_fctx, NULL);
+	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 }
 
 xtc_task_t *

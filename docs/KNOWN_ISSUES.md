@@ -122,8 +122,53 @@ process exit.
 
 ## epoll backend: rare lost blocking-I/O-completion wakeup under heavy churn
 
-**Status:** Open (the buffer-manager free-list race below it exposed, (B),
-is FIXED).  Reproducible on epoll; io_uring is unaffected.
+**Status:** Primary root cause FOUND and FIXED (see (A) below); a rarer,
+separate, epoll-only residual remains under investigation in the
+buffer-manager stress test.
+
+### (A) FIXED -- xtc_yield / xtc_await did not preserve __current_proc
+
+The primary lost-wakeup was not in the epoll backend at all.  It was a
+fiber-context bug: the per-thread "current proc" pointer
+(`__current_proc`, an L3 process-layer TLS) was not preserved across a
+yield.  When a proc calls `xtc_yield()` (or `xtc_await`) the scheduler
+runs OTHER procs in between -- each setting `__current_proc` to itself --
+and on resume the public yield primitives did NOT restore it.  Internal
+parks (`xtc_proc_wait_fd`, `xtc_proc_sleep`, `xtc_recv`, the amutex)
+each restored it by hand, but a plain `xtc_yield()` did not.  A proc
+that yielded therefore resumed running as whatever proc ran last; its
+next `xtc_blocking_run` -> `wait_fd` then registered the completion fd
+under the WRONG task and parked the WRONG task, so the real proc never
+woke.
+
+Minimal reproducer: ONE loop, TWO procs, three `xtc_blocking_run` calls
+each -- hangs 10/10 on epoll (a trace showed proc P1, after its
+worker's bare `xtc_yield()`, registering its pipe fd under proc P2's
+task tag and "P2" parking twice without waking).  io_uring masked it:
+its completion path re-samples readiness, so the misattributed park
+self-healed; epoll's `epoll_wait(-1)` blocked forever.
+
+Fix: preserve the process context across every coro yield via a hook
+(`__xtc_fiber_ctx_save` / `__xtc_fiber_ctx_restore`, installed by
+`xtc_proc_spawn`, no-op when no process layer is in use, so the L2 coro
+layer keeps no hard dependency on L3).  Applied to `xtc_yield` and
+`xtc_await` in all three coro substrates (fctx, ucontext, Win32 fiber).
+Verified: the pure reproducer goes 0 -> 20/20 on epoll (and the
+N-loop/N-proc one 0 -> 20/20); io_uring `make check` + ASan + UBSan +
+epoll `make check` all clean; io_uring `bufmgr_mt` 50/50.
+
+### (A-residual) OPEN -- rarer epoll-only hang in test_bufmgr_mt
+
+After the fix, the buffer-manager stress test (`test_bufmgr_mt`) still
+hangs about 3/60 on the epoll backend, while io_uring is 50/50 clean.
+The pure `xtc_blocking_run` reproducer is solid (20/20 on epoll), so
+this residual is NOT the `__current_proc` desync and not the basic
+blocking path; it is specific to the heavier buffer-manager flow (the
+evictor reserving a frame, `pin == -1`, then blocking on a flush write
+while `get_free_frame` spins).  It is therefore still gated: this test
+runs on the io_uring CI (GitHub) and is skipped on the epoll CI
+(Codeberg containers, whose seccomp blocks io_uring).  Investigation
+continues with the same trace method that pinned (A).
 
 ### (B) FIXED -- buffer-manager load/publish pin-ordering race
 
