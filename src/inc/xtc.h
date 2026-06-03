@@ -64,7 +64,8 @@ typedef enum xtc_err {
 	XTC_E_DEADLK		= -8,	/* lock-manager: deadlock victim */
 	XTC_E_VERSION		= -9,	/* version mismatch (shm) */
 	XTC_E_ABORTED		= -10,	/* operation cancelled via abort token */
-	XTC_E_NOTFOUND		= -11	/* requested item does not exist */
+	XTC_E_NOTFOUND		= -11,	/* requested item does not exist */
+	XTC_E_IO		= -12	/* I/O error (read/write/fsync failed) */
 } xtc_err_t;
 
 /*

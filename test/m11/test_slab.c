@@ -376,8 +376,35 @@ test_backtrace(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+static MunitResult
+test_pressure_listen_ex_stop(const MunitParameter p[], void *d)
+{
+	xtc_slab_pressure_t *h = NULL;
+	int rc;
+	(void)p; (void)d;
+
+	/* NULL out-pointer is rejected. */
+	munit_assert_int(xtc_slab_pressure_listen_ex(NULL, NULL, NULL, NULL),
+	    ==, XTC_E_INVAL);
+	/* Stopping a NULL handle is rejected, not a crash. */
+	munit_assert_int(xtc_slab_pressure_stop(NULL), ==, XTC_E_INVAL);
+
+	rc = xtc_slab_pressure_listen_ex(NULL, NULL, NULL, &h);
+	if (rc == XTC_E_NOSYS) {
+		/* No PSI on this platform/kernel/container -- nothing to stop. */
+		munit_assert_ptr_null(h);
+		return MUNIT_SKIP;
+	}
+	munit_assert_int(rc, ==, XTC_OK);
+	munit_assert_ptr_not_null(h);
+	/* Clean stop: joins the listener thread and frees the handle. */
+	munit_assert_int(xtc_slab_pressure_stop(h), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/basic_alloc_free", test_basic_alloc_free, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/pressure_listen_ex_stop", test_pressure_listen_ex_stop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/magazine_fastpath", test_magazine_fastpath, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/ctor_dtor",        test_ctor_dtor,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/oom_fail",         test_oom_fail,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

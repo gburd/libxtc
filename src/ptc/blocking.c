@@ -31,6 +31,7 @@ struct blk_work {
 	void            *arg;
 	_Atomic int      result;
 	int              wr_fd;        /* write end of the wakeup pipe */
+	int              detached;     /* 1: fire-and-forget; worker frees it */
 	struct blk_work *next;
 };
 
@@ -69,6 +70,13 @@ blk_worker(void *unused)
 
 		/* Run the user's blocking call on this pool thread. */
 		r = w->fn(w->arg);
+		if (w->detached) {
+			/* Fire-and-forget: the submitter never waits and does
+			 * not own w, so we free the heap work item here and
+			 * discard the result.  No wakeup pipe to write. */
+			__os_free(w);
+			continue;
+		}
 		fn_fd = w->wr_fd;
 		atomic_store_explicit(&w->result, r, memory_order_release);
 		/* Wake the parked process.  After this byte is readable the
@@ -154,6 +162,7 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	w.arg = arg;
 	atomic_store_explicit(&w.result, 0, memory_order_relaxed);
 	w.wr_fd = pfd[1];
+	w.detached = 0;        /* synchronous: the caller owns w and waits */
 	w.next = NULL;
 	if (g_tail != NULL)
 		g_tail->next = &w;
@@ -183,6 +192,50 @@ run_sync:
 		if (out_result != NULL)
 			*out_result = r;
 	}
+	return XTC_OK;
+}
+
+/*
+ * PUBLIC: int xtc_blocking_submit __P((int (*)(void *), void *));
+ *
+ * Fire-and-forget: hand `fn(arg)` to the offload pool and return
+ * immediately without waiting for, or collecting, its result.  Unlike
+ * xtc_blocking_run this never parks, so it is callable from any context
+ * (on or off a loop, or a bare thread) -- e.g. read-ahead/prefetch that
+ * must not block the caller.  The caller owns `arg`'s lifetime and must
+ * keep it valid until `fn` has run (or have `fn` free it); there is no
+ * completion signal.  Returns XTC_E_INVAL (fn NULL), XTC_E_NOMEM, or
+ * XTC_E_INTERNAL (pool could not start).
+ */
+int
+xtc_blocking_submit(int (*fn)(void *), void *arg)
+{
+	struct blk_work *w;
+	int rc;
+
+	if (fn == NULL)
+		return XTC_E_INVAL;
+	if ((rc = __os_calloc(1, sizeof *w, (void **)&w)) != XTC_OK)
+		return XTC_E_NOMEM;
+	w->fn = fn;
+	w->arg = arg;
+	w->wr_fd = -1;
+	w->detached = 1;
+	w->next = NULL;
+
+	(void)pthread_mutex_lock(&g_lock);
+	if (blk_start_locked() != 0) {
+		(void)pthread_mutex_unlock(&g_lock);
+		__os_free(w);
+		return XTC_E_INTERNAL;
+	}
+	if (g_tail != NULL)
+		g_tail->next = w;
+	else
+		g_head = w;
+	g_tail = w;
+	(void)pthread_cond_signal(&g_cv);
+	(void)pthread_mutex_unlock(&g_lock);
 	return XTC_OK;
 }
 
