@@ -99,12 +99,28 @@ generate_cert(const char *cert_path, const char *key_path, const char *cn)
 static int
 generate_wrong_ca(const char *cert_path, const char *cn)
 {
-    char cmd[512];
+    char cmd[1024];
+    char cnf_path[256];
+    FILE *cnf_fp;
+    /* Pass an explicit -config: LibreSSL's `openssl req` fatally tries
+     * to load the default etc/ssl/openssl.cnf otherwise, so the bare
+     * -subj form fails there (it works on OpenSSL).  Matches
+     * generate_cert above. */
+    snprintf(cnf_path, sizeof(cnf_path), "%s.cnf", cert_path);
+    cnf_fp = fopen(cnf_path, "w");
+    if (cnf_fp != NULL) {
+        fprintf(cnf_fp,
+            "[req]\nprompt = no\ndistinguished_name = dn\n"
+            "[dn]\nCN = %s\n", cn);
+        fclose(cnf_fp);
+    }
     snprintf(cmd, sizeof(cmd),
              "openssl req -x509 -newkey rsa:2048 -nodes -days 1 "
-             "-keyout /dev/null -out %s -subj /CN=%s 2>/dev/null",
-             cert_path, cn);
-    return system(cmd);
+             "-config %s -keyout /dev/null -out %s -subj /CN=%s 2>/dev/null",
+             cnf_path, cert_path, cn);
+    int rc = system(cmd);
+    (void)unlink(cnf_path);
+    return rc;
 }
 
 /* -------------------------------------------------------------------------

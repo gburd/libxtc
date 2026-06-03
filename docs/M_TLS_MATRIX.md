@@ -32,18 +32,20 @@ actually built against.
 | Backend          | Build | tls_basic (9) | tls_server (5) | tls_client (2) | Notes |
 |------------------|:-----:|:-------------:|:--------------:|:--------------:|-------|
 | OpenSSL  3.0.10  |  OK   |     9/9       |      5/5       |     2/2        | Linux Nix; default |
-| LibreSSL 4.2.1   |  OK   |     9/9       |      5/5       |     0/2        | Handshake fails on test_tls_client; investigation deferred |
+| LibreSSL 4.2.1   |  OK   |     9/9       |      5/5       |     2/2        | Linux Nix; fully qualified |
 
 LibreSSL builds the full backend cleanly (no source changes; same
-`libxtc.a` artefacts).  All context-creation, cert-loading,
-ALPN-config, and server-side handshake tests pass.  The two
-test_tls_client cases fail to complete the client-side handshake
-against a server thread that uses LibreSSL's own `TLS_server_method`
-+ `SSL_accept`.  A standalone reproducer using exactly the same
-LibreSSL symbols handshakes successfully, so the failure is in the
-xtc test harness's non-blocking poll loop interacting with
-LibreSSL 4.x's default cipher-suite policy, not in xtc itself.
-The investigation is left for a future LibreSSL-specific session.
+`libxtc.a` artefacts) and now passes every TLS test, client included.
+The earlier `test_tls_client` 0/2 was a test-harness defect, not an xtc
+or handshake bug: its `generate_wrong_ca` helper shelled out to
+`openssl req` WITHOUT an explicit `-config`, and LibreSSL's `openssl
+req` fatally tries to load the default `etc/ssl/openssl.cnf` (OpenSSL
+tolerates its absence).  That made `suite_setup` delete the good
+server cert+key and run the test certless, so the server's cert load
+failed and the client handshake timed out.  The fix mirrors
+`generate_cert`: write a tiny `[req]` cnf and pass `-config`
+(test_tls_server already did this).  All cert generation in the TLS
+tests is now backend-agnostic.
 
 GnuTLS, mbedTLS, and wolfSSL each present an entirely different
 API surface and would require a parallel `tls_<backend>.c` source
