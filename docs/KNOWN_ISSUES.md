@@ -122,7 +122,25 @@ process exit.
 
 ## epoll backend: rare lost blocking-I/O-completion wakeup under heavy churn
 
-**Status:** Under investigation.  Reproducible; io_uring is unaffected.
+**Status:** Open (the buffer-manager free-list race below it exposed, (B),
+is FIXED).  Reproducible on epoll; io_uring is unaffected.
+
+### (B) FIXED -- buffer-manager load/publish pin-ordering race
+
+While chasing the epoll hang, a genuine buffer-manager race was found
+and fixed (examples/06_sqlxtc/bufmgr.c).  In bm_fix's demand-load path
+the frame was published as BM_COOL and only THEN pinned
+(`state = COOL; pin = 1`).  In that window a concurrent evict_one --
+which acts on COOL frames -- could win `try_reserve` (CAS pin 0 -> -1),
+and the load's unconditional `pin = 1` store then clobbered the
+reservation, leaving the frame both published (in use) and pushed back
+onto the free list: a double-owned frame that corrupts the free list
+(`free_n` seen at 762 for a 32-frame pool) and livelocks get_free_frame.
+Fix: pin the frame BEFORE it is ever visible as COOL/HOT (own it from
+get_free_frame on), so eviction's try_reserve always fails on it.  Same
+reorder applied to bm_fix_pid.  Verified: io_uring make check + ASan +
+UBSan clean, bufmgr_mt 12/12.  This race is normally hidden when the
+offloaded load completes fast; it surfaces when completion is slow.
 
 The buffer-manager multi-threaded stress test (`examples/06_sqlxtc`,
 `test_bufmgr_mt`) hangs intermittently when libxtc is built with the
@@ -157,39 +175,44 @@ The lost wakeup is in `xtc_proc_wait_fd`'s epoll arm/park/dispatch
 path, hit through `xtc_blocking_run`.  A later session built the
 minimal isolated reproducer this asked for -- N procs issuing
 concurrent `xtc_blocking_run` on an N-loop epoll executor, no buffer
-manager -- and it hangs 8/8, so the bug is purely in the library
-primitive.  Findings from that session:
+manager (test/concurrency/repro_blocking_epoll.c) -- and it hangs 8/8,
+so the bug is purely in the library primitive.  Findings:
 
-  - **It is NOT fd reuse.**  An earlier hypothesis blamed reuse of the
-    per-call wakeup pipe's fd number.  Rewriting the wait to use a
-    PERSISTENT per-proc wakeup pipe (never reused across procs while a
-    registration is live) still hangs, ruling that out.  A bounded
-    50ms re-poll of every loop also does not recover the parked proc,
-    so at hang time the fd is effectively not delivering -- the lost
-    wakeup is in the arm/park/dispatch sequence, not the fd lifecycle.
+  - **It is NOT fd reuse.**  A persistent per-proc wakeup pipe (never
+    reused across procs while a registration is live) still hangs, and
+    a bounded 50ms re-poll of every loop does not recover the parked
+    proc.  Ground truth from a core: stuck procs are PARKED on fds
+    that are READABLE (the wake byte was written) yet are NOT in any
+    epoll instance -- the fd was unregistered while the proc was still
+    parked on it.  The only `del_fd` that can do this is dispatch's
+    `del_fd(t->park_fd)`.
 
-  - **A cross-thread waker fix trades the hang for a use-after-free.**
-    Waking the parked proc directly from the pool thread
-    (`xtc_waker_wake` on the proc's task) fixes the hang but ASan
-    reports a heap-use-after-free: the proc can return from
-    `xtc_blocking_run` and exit the instant its result is read, so a
-    cross-thread wake that references the proc/task races teardown.
-    A correct event-driven fix must wake via a kernel object the
-    worker only WRITES (a pipe/eventfd), never a proc pointer.
+  - **Approaches tried, and why each was rejected (none shipped):**
 
-  - **A timer-poll fix is memory-safe but exposes a separate bug.**
-    Having the submitter poll a completion flag via its own loop-local
-    timer (`xtc_proc_sleep`) is memory-safe (ASan clean) and fixes the
-    pure reproducer, but its added latency makes `test_bufmgr_mt`
-    deadlock on BOTH backends by exposing a latent buffer-manager
-    free-list race (a core showed `free_n == 762` for a 32-frame pool
-    -- a frame pushed to the free list more than once under concurrent
-    eviction).  That bufmgr race is a separate example-level bug,
-    normally hidden because a fast completion keeps the window shut.
+    1. *Cross-thread waker* (pool wakes the proc via xtc_waker_wake):
+       fixes the hang but ASan reports a heap-use-after-free -- the
+       proc can return from xtc_blocking_run and exit the instant its
+       result is read, racing a wake that holds its task pointer.
 
-The right fix is most likely a direct repair of `xtc_proc_wait_fd`'s
-epoll wakeup (so the existing same-thread, memory-safe dispatch wake
-stops losing events), plus a separate fix for the bufmgr free-list
-race.  The reproducer (pure `xtc_blocking_run` on an epoll executor)
-should drive that work.  Until then `test_bufmgr_mt` runs only on the
-io_uring CI and is skipped on the epoll CI.
+    2. *Timer-poll* (proc polls a done flag via xtc_proc_sleep):
+       memory-safe and fixes the pure reproducer, but its added
+       latency makes test_bufmgr_mt deadlock on BOTH backends (it
+       slows completion enough to provoke buffer-manager frame
+       exhaustion), i.e. it REGRESSES io_uring, which passes today.
+
+    3. *Persistent per-proc wakeup pipe*: still hangs (ruling out fd
+       reuse, as above).
+
+    4. *Remove del_fd from dispatch* (rely on the parker's cleanup +
+       run-before-poll): made the reproducer hang 12/12 -- the
+       still-readable fd is mishandled, so the dispatch del_fd is
+       load-bearing in a way not yet understood.
+
+The bug needs a dedicated redesign rather than a point fix -- most
+likely a per-proc wakeup eventfd registered ONCE at spawn with
+EPOLLONESHOT re-arm (no per-wait registration churn, memory-safe, and
+no cross-thread proc reference), or moving blocking-completion off the
+fd-park mechanism entirely.  Until then test_bufmgr_mt runs only on the
+io_uring CI and is skipped on the epoll CI, and xtc_blocking_run keeps
+its committed pipe + wait_fd path (fast on io_uring).  The reproducer
+and this write-up set up that focused effort.
