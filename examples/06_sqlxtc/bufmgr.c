@@ -634,26 +634,35 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
 			bm_frame_t *f = get_free_frame(bm);
 			uint64_t expect = w;
 			if (f == NULL) return XTC_E_RESOURCE;
+			/* Pin BEFORE the frame is ever visible as COOL/HOT.  We own
+			 * it exclusively (just took it off the free list), and a
+			 * non-zero pin makes eviction's try_reserve (CAS pin 0 -> -1)
+			 * fail, so a concurrent evict_one cannot reserve this frame
+			 * during the load+publish and race our pin store -- which
+			 * would otherwise double-own the frame (published AND back
+			 * on the free list) and corrupt the free list.  While it is
+			 * BM_LOADED below, eviction skips it by state anyway. */
+			atomic_store_explicit(&f->pin, 1, memory_order_release);
 			atomic_store_explicit(&f->state, BM_LOADED, memory_order_relaxed);
 			f->pid = pid;
 			f->parent = slot;
 			atomic_store_explicit(&f->dirty, 0, memory_order_relaxed);
 			atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
 			if (do_io(bm, f->page, pid, 0) != 0) {
+				atomic_store_explicit(&f->pin, 0, memory_order_release);
 				free_push(bm, f);
 				return XTC_E_INTERNAL;
 			}
 			atomic_store_explicit(&f->state,
 			    bm->scan_resist ? BM_COOL : BM_HOT, memory_order_release);
-			atomic_store_explicit(&f->pin, 1, memory_order_release);
 			if (atomic_compare_exchange_strong(slot, &expect,
 			    bm->scan_resist ? sw_cool(f) : sw_hot(f))) {
 				/* Probationary admission (LeanStore cooling + 2Q): a
 				 * demand-loaded page enters COOL, so a single-touch
 				 * scan never promotes it to HOT; a second access
-				 * rescues it (COOL -> HOT) above.  The frame is
-				 * exclusive until this CAS publishes the swip, so a
-				 * plain pin=1 is safe. */
+				 * rescues it (COOL -> HOT) above.  The frame has been
+				 * pinned since before it became COOL, so eviction
+				 * never raced it. */
 				atomic_fetch_add_explicit(&bm->resident, 1, memory_order_relaxed);
 				atomic_fetch_add_explicit(&bm->s_loads, 1, memory_order_relaxed);
 				*out_frame = f;
@@ -719,13 +728,14 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 		 * the table after acquiring a frame. */
 		f = get_free_frame(bm);
 		if (f == NULL) return XTC_E_RESOURCE;
+		atomic_store_explicit(&f->pin, 1, memory_order_release);
 		atomic_store_explicit(&f->state, BM_LOADED, memory_order_relaxed);
 		f->pid = pid;
 		f->parent = NULL;
 		f->via_pid = 1;
 		atomic_store_explicit(&f->dirty, 0, memory_order_relaxed);
 		atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
-		if (do_io(bm, f->page, pid, 0) != 0) { free_push(bm, f); return XTC_E_INTERNAL; }
+		if (do_io(bm, f->page, pid, 0) != 0) { atomic_store_explicit(&f->pin, 0, memory_order_release); free_push(bm, f); return XTC_E_INTERNAL; }
 		/* Publish: under the table lock, re-check no one beat us. */
 		{
 			uint32_t b = (uint32_t)(pid % bm->nbucket);
@@ -756,10 +766,13 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 			 * COOL (LeanStore cooling stage / 2Q A1), promoted to
 			 * HOT only on a second access (ht_lookup_pin rescue).
 			 * A scan touches each page once, so its pages never
-			 * displace the hot working set. */
+			 * displace the hot working set.  Pin BEFORE publishing
+			 * the COOL state so a concurrent evict_one (whose
+			 * try_reserve is not under ht_mu) cannot reserve and
+			 * race the pin store. */
+			atomic_store_explicit(&f->pin, 1, memory_order_release);
 			atomic_store_explicit(&f->state,
 			    bm->scan_resist ? BM_COOL : BM_HOT, memory_order_release);
-			atomic_store_explicit(&f->pin, 1, memory_order_release);
 			(void)pthread_mutex_unlock(&bm->ht_mu);
 		}
 		atomic_fetch_add_explicit(&bm->resident, 1, memory_order_relaxed);
