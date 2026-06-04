@@ -31,9 +31,14 @@ Exactly one of these JSON keys is recognised per line:
 * `limit`    Optional row cap; defaults to no limit.  Server-side limit
              applied after the SQL `LIMIT` clause if any.
 * `params`   Optional array bound to the statement's `?1..?N` markers,
-             in order.  Each element is an integer, a string, or null
-             (floats and booleans are not yet supported; escaped
-             string params are rejected).
+             in order.  Each element is one of:
+               - an integer            -> bound as INTEGER
+               - a number with `.`/`e`  -> bound as REAL (e.g. `3.5`, `-2e2`)
+               - a string              -> bound as TEXT (escaped string
+                                          params are rejected)
+               - null                  -> bound as NULL
+               - `{"hex":"deadbeef"}`   -> bound as BLOB (hex bytes)
+               - `{"b64":"aGk="}`       -> bound as BLOB (base64 bytes)
 * `ping`     Heartbeat; replies with `pong`.
 * `quit`     Graceful shutdown; the server closes the socket without
              a reply.
