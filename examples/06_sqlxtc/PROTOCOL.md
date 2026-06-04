@@ -27,7 +27,12 @@ Exactly one of these JSON keys is recognised per line:
     {"ping":1}
     {"quit":1}
 
-* `q`        SQL string.  No multi-statement; the first statement wins.
+* `q`        SQL string.  Several statements separated by `;` form a
+             batch: each runs in order, the final statement's rows are
+             streamed (earlier ones run for their side effects), and
+             `done.n` reports its row count or `changes()` for DML/DDL.
+             `params` may accompany only a single statement (a batch
+             with `params` is rejected -- the simple vs extended split).
 * `limit`    Optional row cap; defaults to no limit.  Server-side limit
              applied after the SQL `LIMIT` clause if any.
 * `params`   Optional array bound to the statement's `?1..?N` markers,
