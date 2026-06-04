@@ -12,6 +12,7 @@
 
 #include "xtc_int.h"
 #include "xtc_orc.h"
+#include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"
 
@@ -118,11 +119,21 @@ static int
 __spawn_child(struct xtc_supervisor *sup, struct child *c)
 {
 	xtc_proc_opts_t pop;
+	xtc_loop_t *target = sup->loop;
 	int rc;
 	memset(&pop, 0, sizeof pop);
 	pop.name = c->spec.name;
 	pop.mailbox_cap = c->spec.mailbox_cap;
-	rc = xtc_proc_spawn(sup->loop, c->spec.fn, c->spec.arg, &pop, &c->pid);
+	/* Multi-loop app: place the child on the requested executor loop
+	 * (clamped); the supervisor itself runs on loop 0 and monitors it
+	 * cross-loop, restarting it on the same loop on a DOWN. */
+	if (sup->opts.exec != NULL) {
+		int n = xtc_exec_n_loops(sup->opts.exec);
+		int idx = c->spec.loop;
+		if (idx < 0 || idx >= n) idx = 0;
+		target = xtc_exec_loop(sup->opts.exec, idx);
+	}
+	rc = xtc_proc_spawn(target, c->spec.fn, c->spec.arg, &pop, &c->pid);
 	if (rc != XTC_OK) return rc;
 	c->alive = 1;
 	rc = xtc_monitor(c->pid, &c->monitor_ref);
@@ -247,6 +258,8 @@ __sup_entry(void *arg)
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
 			atomic_store_explicit(&sup->alive, 0, memory_order_release);
 			(void)xtc_notify_signal(sup->stopped);
+			if (sup->opts.exec != NULL)
+				(void)xtc_exec_stop(sup->opts.exec);
 			return;
 		}
 	}
@@ -346,6 +359,12 @@ __sup_entry(void *arg)
 	}
 
 	(void)xtc_notify_signal(sup->stopped);
+	/* Root of a multi-loop app: stopping the supervisor stops the whole
+	 * application -- release the executor so xtc_exec_run (driving all
+	 * loops) returns.  This fires both on an intentional xtc_sup_stop
+	 * and on a restart-intensity giveup. */
+	if (sup->opts.exec != NULL)
+		(void)xtc_exec_stop(sup->opts.exec);
 }
 
 int

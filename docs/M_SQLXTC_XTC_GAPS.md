@@ -30,17 +30,25 @@ per connection, connections spawned round-robin over an N-loop executor
     read-heavy load scaled past the single-loop ceiling.  The
     multi-loop core is solid.
 
-  * **GAP: no supervised executor (xtc_app is single-loop).**
+  * **GAP (now FIXED in the library): no supervised executor.**
     `xtc_app` -- which carries the supervisor that restarts a crashed
-    listener -- creates exactly one loop; the multi-loop `xtc_exec`
-    has no built-in supervision.  Going parallel therefore meant
-    dropping the app/supervisor and spawning the listener directly
-    onto loop 0.  Per-fiber fault containment (R1) still isolates a
-    crashing connection, but a crashed listener is not auto-restarted.
-    The missing piece is an `xtc_app`-over-`xtc_exec` (a supervised
-    multi-loop application), or letting `xtc_app` own N loops and place
-    children across them.  Worked around in the example for now;
-    recorded as a library gap for robust parallel servers.
+    listener -- created exactly one loop; the multi-loop `xtc_exec`
+    had no built-in supervision, so going parallel meant dropping the
+    supervisor.  Fixed: `xtc_app_opts.n_loops > 1` now makes the app
+    own an `xtc_exec`; the root supervisor runs on loop 0, supervised
+    children carry an `xtc_child_spec.loop` placement index (the
+    supervisor spawns + cross-loop-monitors + restarts them on that
+    loop), and the supervisor owns the executor's stop lifecycle
+    (`xtc_sup_opts.exec`): stopping the supervisor -- intentionally or
+    on a restart-intensity giveup -- releases the executor so
+    `xtc_app_run` returns.  `xtc_app_exec()` exposes the executor so a
+    supervised child (the listener) can spawn work across loops.
+    sqlxtc's listener is back under supervision: a crash restarts it,
+    and SIGTERM flows listener -> xtc_app_stop -> supervisor stop ->
+    exec stop -> clean teardown.  Verified by test_app /app_multiloop
+    (placement on loops 0-3 + a cross-loop crash/restart) and the
+    parallel server (cross-connection sharing, 900 concurrent inserts,
+    clean shutdown).
 
   * **(Not a libxtc gap) SQLite shared-cache is compiled out.**  The
     sqlxtc build sets `-DSQLITE_OMIT_SHARED_CACHE`, so a

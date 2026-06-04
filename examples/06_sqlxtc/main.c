@@ -83,8 +83,9 @@ typedef struct server {
 	server_cfg_t  cfg;
 	db_t         *db;
 	xtc_res_t    *res;
+	xtc_app_t    *app;            /* supervised multi-loop application */
 	xtc_loop_t   *loop;            /* loop 0: listener, metrics, storage */
-	xtc_exec_t   *exec;           /* N worker loops */
+	xtc_exec_t   *exec;           /* N worker loops (NULL if single-loop) */
 	int           n_loops;
 	_Atomic unsigned next_loop;   /* round-robin cursor for conn placement */
 	int           listen_fd;
@@ -212,10 +213,14 @@ listener_proc(void *arg)
 				opts.iops_cap = srv->cfg.max_iops;
 			}
 
-			if (conn_spawn(xtc_exec_loop(srv->exec,
-			        (int)(atomic_fetch_add(&srv->next_loop, 1) %
-			              (unsigned)srv->n_loops)),
-			    &opts, &pid) == XTC_OK) {
+			/* Place the connection on a worker loop (round-robin
+			 * across the executor); single-loop mode uses loop 0. */
+			xtc_loop_t *cl = srv->loop;
+			if (srv->exec != NULL && srv->n_loops > 1)
+				cl = xtc_exec_loop(srv->exec,
+				    (int)(atomic_fetch_add(&srv->next_loop, 1) %
+				          (unsigned)srv->n_loops));
+			if (conn_spawn(cl, &opts, &pid) == XTC_OK) {
 				server_inc_conn(srv);
 			} else {
 				close(fd);
@@ -238,8 +243,11 @@ listener_proc(void *arg)
 		}
 	}
 
-	/* Shutdown observed: stop the executor so xtc_exec_run returns. */
-	(void)xtc_exec_stop(srv->exec);
+	/* Shutdown observed: stop the application (the root supervisor
+	 * exits and releases the executor, so xtc_app_run returns).  We are
+	 * a supervised child; the supervisor will not restart us once its
+	 * stop is requested. */
+	(void)xtc_app_stop(srv->app);
 }
 
 static void
@@ -437,26 +445,36 @@ main(int argc, char **argv)
 
 	setup_signals();
 
-	/* Multi-loop executor: loop 0 hosts the listener, metrics, and the
-	 * storage background procs; connections are spawned round-robin
-	 * across all loops so they execute SQL in parallel.  (--threads <= 0
-	 * auto-sizes to the CPU count.) */
-	if (xtc_exec_init(&srv->exec, cfg.threads) != XTC_OK) {
-		fprintf(stderr, "exec init failed\n"); return 1;
-	}
-	srv->n_loops = xtc_exec_n_loops(srv->exec);
-	srv->loop = xtc_exec_loop(srv->exec, 0);
-	atomic_init(&srv->next_loop, 0);
-
-	/* Spawn the listener on loop 0 (procs spawned before xtc_exec_run
-	 * are queued and run when the loops start). */
+	/* Supervised, optionally multi-loop application.  --threads > 1
+	 * makes xtc_app own an N-loop executor (loop 0 hosts the supervised
+	 * listener, metrics, and the storage procs; connections are spawned
+	 * round-robin across all loops so SQL runs in parallel).  --threads
+	 * <= 1 is a single supervised loop.  The root supervisor restarts
+	 * the listener if it crashes. */
 	{
-		xtc_proc_opts_t po = { 0 };
-		xtc_pid_t lpid;
-		po.name = "listener";
-		if (xtc_proc_spawn(srv->loop, listener_proc, srv, &po, &lpid)
-		    != XTC_OK) {
-			fprintf(stderr, "listener spawn failed\n"); return 1;
+		xtc_app_opts_t app_opts = XTC_APP_OPTS_DEFAULT;
+		xtc_child_spec_t kids[1];
+		app_opts.name = "sqlxtc";
+		app_opts.n_loops = cfg.threads > 1 ? cfg.threads : 1;
+		app_opts.sup.strategy = XTC_SUP_ONE_FOR_ONE;
+		app_opts.sup.max_restarts = 10;
+		app_opts.sup.period_ns = 60LL * 1000 * 1000 * 1000;
+		if (xtc_app_create(&app_opts, &srv->app) != XTC_OK) {
+			fprintf(stderr, "app create failed\n"); return 1;
+		}
+		srv->exec = xtc_app_exec(srv->app);   /* NULL when single-loop */
+		srv->n_loops = srv->exec ? xtc_exec_n_loops(srv->exec) : 1;
+		srv->loop = xtc_app_loop(srv->app);   /* loop 0 */
+		atomic_init(&srv->next_loop, 0);
+
+		memset(kids, 0, sizeof kids);
+		kids[0].name   = "listener";
+		kids[0].fn     = listener_proc;
+		kids[0].arg    = srv;
+		kids[0].loop   = 0;
+		kids[0].policy = XTC_RESTART_PERMANENT;
+		if (xtc_app_start(srv->app, kids, 1) != XTC_OK) {
+			fprintf(stderr, "app start failed\n"); return 1;
 		}
 	}
 
@@ -472,7 +490,7 @@ main(int argc, char **argv)
 	               srv->n_loops, cfg.max_clients, (long long)cfg.max_memory);
 	xtc_log_drain(log);
 
-	xtc_exec_run(srv->exec);   /* blocks until the listener calls exec_stop */
+	xtc_app_run(srv->app);   /* blocks until the supervisor stops the app */
 
 	XTC_LOG_INFO_F("sqlxtc shutting down");
 	xtc_log_drain(log);
@@ -480,7 +498,7 @@ main(int argc, char **argv)
 	db_destroy(srv->db);
 	if (cfg.storage_path != NULL)
 		sx_storage_close();        /* checkpoint + stop procs + close */
-	(void)xtc_exec_fini(srv->exec);
+	xtc_app_destroy(srv->app);   /* joins the supervisor + frees the exec */
 	free(srv->res);
 	xtc_log_destroy(log);
 	(void)sx_shutdown();

@@ -27,6 +27,7 @@
 
 #include "xtc.h"
 #include "xtc_loop.h"
+#include "xtc_exec.h"
 #include "xtc_orc.h"
 #include "xtc_reg.h"
 
@@ -35,12 +36,20 @@ typedef struct xtc_app xtc_app_t;
 typedef struct xtc_app_opts {
 	const char     *name;          /* optional, for logs */
 	xtc_loop_t     *loop;          /* optional; NULL = create one */
+	int             n_loops;       /* >1 = own an N-loop executor and run
+	                                * the root supervisor on loop 0 (the
+	                                * other loops host children placed via
+	                                * xtc_child_spec.loop, and any work the
+	                                * children spawn via xtc_app_exec); 0/1
+	                                * = single loop.  Ignored when `loop`
+	                                * is supplied. */
 	xtc_sup_opts_t  sup;           /* root-supervisor settings */
 } xtc_app_opts_t;
 
 #define XTC_APP_OPTS_DEFAULT { \
 	.name = NULL, \
 	.loop = NULL, \
+	.n_loops = 1, \
 	.sup  = XTC_SUP_OPTS_DEFAULT \
 }
 
@@ -51,6 +60,7 @@ typedef struct xtc_app_opts {
  * PUBLIC: int        xtc_app_run __P((xtc_app_t *));
  * PUBLIC: int        xtc_app_stop __P((xtc_app_t *));
  * PUBLIC: xtc_loop_t *xtc_app_loop __P((const xtc_app_t *));
+ * PUBLIC: xtc_exec_t *xtc_app_exec __P((const xtc_app_t *));
  * PUBLIC: xtc_reg_t  *xtc_app_registry __P((const xtc_app_t *));
  */
 
@@ -70,6 +80,12 @@ int        xtc_app_run(xtc_app_t *app);
 int        xtc_app_stop(xtc_app_t *app);
 
 xtc_loop_t *xtc_app_loop(const xtc_app_t *app);
+
+/* The executor backing a multi-loop app (n_loops > 1), or NULL for a
+ * single-loop app.  Children use it to spawn work across loops -- e.g.
+ * a listener spawning a proc per connection round-robin. */
+xtc_exec_t *xtc_app_exec(const xtc_app_t *app);
+
 xtc_reg_t  *xtc_app_registry(const xtc_app_t *app);
 
 #endif /* XTC_APP_H */
