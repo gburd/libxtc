@@ -41,6 +41,7 @@
 #define sqlite3_bind_text xsql_bind_text
 #define sqlite3_busy_handler xsql_busy_handler
 #define sqlite3_changes64 xsql_changes64
+#define sqlite3_clear_bindings xsql_clear_bindings
 #define sqlite3_close xsql_close
 #define sqlite3_column_blob xsql_column_blob
 #define sqlite3_column_bytes xsql_column_bytes

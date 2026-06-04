@@ -71,4 +71,17 @@ int  db_exec_params(sx_db *h, const char *sql,
              const struct quack_param *params, int n_params, int64_t limit,
              quack_buf_t *out_buf, int64_t *n_rows, char **err);
 
+/* Like db_exec_params, but caches the prepared statement in *pstmt for
+ * reuse across calls (reset + re-bind on a hit) -- the prepared-
+ * statement fast path for a repeated single-statement query.  The
+ * caller owns *pstmt: it must pass the SAME slot only for the SAME sql
+ * (finalize + NULL the slot when the text changes) and finalize it via
+ * sx_finalize before the handle closes.  Multi-statement or empty
+ * queries are not cached (the slot is finalized + NULLed and the call
+ * falls back to db_exec_params).  Requires a stable handle (shared
+ * mode); do not use with a per-call reopened handle. */
+int  db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
+             const struct quack_param *params, int n_params, int64_t limit,
+             quack_buf_t *out_buf, int64_t *n_rows, char **err);
+
 #endif /* SQLXTC_DB_H */
