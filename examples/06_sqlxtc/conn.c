@@ -90,6 +90,13 @@ typedef struct conn_state {
 
 	int        quit;
 	int        closed;
+
+	/* Prepared-statement cache (one slot): cached_stmt holds the
+	 * statement last prepared for cached_sql on a stable shared db
+	 * handle; reused (reset + re-bind) when the next query text matches.
+	 * Finalized when the text changes or the connection closes. */
+	char      *cached_sql;
+	sx_stmt   *cached_stmt;
 } conn_state_t;
 
 /* Forward declared in main.c */
@@ -183,9 +190,29 @@ handle_query(conn_state_t *st, const quack_msg_t *msg)
 
 	{
 		int64_t t0 = xtc_now_ns();
-		int exec_rc = db_exec_params(h, sql_to_exec,
-		    msg->n_params > 0 ? msg->params : NULL, msg->n_params,
-		    msg->limit, &st->wbuf, &rows, &err);
+		int exec_rc;
+		const struct quack_param *bp =
+		    msg->n_params > 0 ? msg->params : NULL;
+		if (owned == 0) {
+			/* Stable shared handle: use the per-connection prepared-
+			 * statement cache.  Refresh the slot when the text
+			 * changes. */
+			if (st->cached_sql == NULL ||
+			    strcmp(st->cached_sql, sql_to_exec) != 0) {
+				if (st->cached_stmt != NULL) {
+					sx_finalize(st->cached_stmt);
+					st->cached_stmt = NULL;
+				}
+				free(st->cached_sql);
+				st->cached_sql = strdup(sql_to_exec);
+			}
+			exec_rc = db_exec_cached(h, &st->cached_stmt, sql_to_exec,
+			    bp, msg->n_params, msg->limit, &st->wbuf, &rows, &err);
+		} else {
+			/* Per-call reopened handle: no stable statement to cache. */
+			exec_rc = db_exec_params(h, sql_to_exec, bp, msg->n_params,
+			    msg->limit, &st->wbuf, &rows, &err);
+		}
 		if (sqlxtc_stat_query_total != NULL)
 			xtc_counter_inc(sqlxtc_stat_query_total);
 		if (sqlxtc_stat_query_latency != NULL)
@@ -346,6 +373,12 @@ conn_proc(void *arg)
 	}
 
 	if (st->server) server_dec_conn(st->server);
+
+	/* Release the cached prepared statement (the shared handle that
+	 * owns it outlives this connection). */
+	if (st->cached_stmt != NULL)
+		sx_finalize(st->cached_stmt);
+	free(st->cached_sql);
 
 	close(st->fd);
 	free(st->rbuf);

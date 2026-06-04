@@ -381,3 +381,53 @@ db_exec_params(sx_db *h, const char *sql,
 	*n_rows = rows;
 	return 0;
 }
+
+int
+db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
+        const struct quack_param *params, int n_params, int64_t limit,
+        quack_buf_t *out_buf, int64_t *n_rows, char **err)
+{
+	int     ncols = 0;
+	int64_t rows = 0;
+	int     rc;
+
+	if (*pstmt == NULL) {
+		const char *tail = NULL;
+		rc = sx_prepare(h, sql, -1, pstmt, &tail);
+		if (rc != SX_OK) {
+			const char *msg = sx_errmsg(h);
+			*err = strdup(msg ? msg : "prepare failed");
+			if (*pstmt) { sx_finalize(*pstmt); *pstmt = NULL; }
+			return -1;
+		}
+		/* Empty or multi-statement: not cacheable -- finalize and
+		 * fall back to the general (looping) path. */
+		if (*pstmt == NULL || has_more_sql(tail)) {
+			if (*pstmt) { sx_finalize(*pstmt); *pstmt = NULL; }
+			return db_exec_params(h, sql, params, n_params, limit,
+			    out_buf, n_rows, err);
+		}
+	} else {
+		(void)sx_reset(*pstmt);
+		(void)sx_clear_bindings(*pstmt);
+	}
+
+	if (n_params > 0 && bind_params(*pstmt, params, n_params, err) != 0) {
+		sx_finalize(*pstmt); *pstmt = NULL;
+		return -1;
+	}
+	if (exec_stmt(h, *pstmt, limit, 1, out_buf, &ncols, &rows, err) != 0) {
+		sx_finalize(*pstmt); *pstmt = NULL;
+		return -1;
+	}
+	if (ncols == 0)
+		rows = sx_changes(h);
+	if (quack_emit_done(out_buf, rows) < 0) {
+		*err = strdup("oom");
+		sx_finalize(*pstmt); *pstmt = NULL;
+		return -1;
+	}
+	*n_rows = rows;
+	(void)sx_reset(*pstmt);   /* leave clean + ready for reuse */
+	return 0;
+}
