@@ -12,6 +12,9 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <stdio.h>
+#include <errno.h>
 
 struct cfg_var {
 	char           *name;
@@ -255,5 +258,184 @@ xtc_cfg_kind(const char *name, xtc_cfg_kind_t *out)
 	v = __cfg_find_locked(name);
 	if (v != NULL) { *out = v->kind; rc = XTC_OK; }
 	(void)pthread_mutex_unlock(&__cfg_lock);
+	return rc;
+}
+
+/* ---- config-file loading (postgresql.conf-style key = value) ---- */
+
+static char *__cfg_file;   /* last path loaded; for xtc_cfg_reload */
+
+static int
+__cfg_parse_bool(const char *s, int *out)
+{
+	if (strcasecmp(s, "on") == 0 || strcasecmp(s, "true") == 0 ||
+	    strcasecmp(s, "yes") == 0 || strcmp(s, "1") == 0) { *out = 1; return 0; }
+	if (strcasecmp(s, "off") == 0 || strcasecmp(s, "false") == 0 ||
+	    strcasecmp(s, "no") == 0 || strcmp(s, "0") == 0) { *out = 0; return 0; }
+	return -1;
+}
+
+/* Resolve an enum label (or numeric index) to its index for `name`. */
+static int
+__cfg_enum_index(const char *name, const char *sval, int *out)
+{
+	struct cfg_var *v;
+	int rc = XTC_E_NOTFOUND, i;
+	(void)pthread_mutex_lock(&__cfg_lock);
+	v = __cfg_find_locked(name);
+	if (v != NULL && v->kind == XTC_CFG_ENUM) {
+		rc = XTC_E_INVAL;
+		for (i = 0; i < v->n_enum_labels; i++) {
+			if (v->enum_labels[i] != NULL &&
+			    strcasecmp(v->enum_labels[i], sval) == 0) {
+				*out = i; rc = XTC_OK; break;
+			}
+		}
+	}
+	(void)pthread_mutex_unlock(&__cfg_lock);
+	return rc;
+}
+
+/* Apply one name = string-value pair, parsing per the registered kind.
+ * Returns XTC_OK, XTC_E_NOTFOUND (unknown name), or a set_* error. */
+static int
+__cfg_apply_string(const char *name, const char *sval)
+{
+	xtc_cfg_kind_t k;
+	if (xtc_cfg_kind(name, &k) != XTC_OK)
+		return XTC_E_NOTFOUND;
+	switch (k) {
+	case XTC_CFG_BOOL: {
+		int b;
+		if (__cfg_parse_bool(sval, &b) != 0) return XTC_E_INVAL;
+		return xtc_cfg_set_bool(name, b);
+	}
+	case XTC_CFG_INT: {
+		char *end; long v;
+		errno = 0; v = strtol(sval, &end, 0);
+		if (*sval == '\0' || *end != '\0' || errno != 0) return XTC_E_INVAL;
+		return xtc_cfg_set_int(name, (int)v);
+	}
+	case XTC_CFG_INT64: {
+		char *end; long long v;
+		errno = 0; v = strtoll(sval, &end, 0);
+		if (*sval == '\0' || *end != '\0' || errno != 0) return XTC_E_INVAL;
+		return xtc_cfg_set_int64(name, (int64_t)v);
+	}
+	case XTC_CFG_DOUBLE: {
+		char *end; double v;
+		errno = 0; v = strtod(sval, &end);
+		if (*sval == '\0' || *end != '\0') return XTC_E_INVAL;
+		return xtc_cfg_set_double(name, v);
+	}
+	case XTC_CFG_STRING:
+		return xtc_cfg_set_string(name, sval);
+	case XTC_CFG_ENUM: {
+		int idx;
+		int rc = __cfg_enum_index(name, sval, &idx);
+		if (rc != XTC_OK) {
+			/* Accept a numeric index too. */
+			char *end; long n = strtol(sval, &end, 10);
+			if (*sval == '\0' || *end != '\0') return rc;
+			idx = (int)n;
+		}
+		return xtc_cfg_set_enum(name, idx);
+	}
+	}
+	return XTC_E_INVAL;
+}
+
+static char *
+__cfg_trim(char *s)
+{
+	char *e;
+	while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+	if (*s == '\0') return s;
+	e = s + strlen(s) - 1;
+	while (e > s && (*e == ' ' || *e == '\t' || *e == '\r' || *e == '\n'))
+		*e-- = '\0';
+	return s;
+}
+
+/*
+ * PUBLIC: int  xtc_cfg_load_file __P((const char *));
+ *
+ * Read a postgresql.conf-style file: one `name = value` per line, `#`
+ * comments, optional single/double quotes around the value, blank
+ * lines ignored.  Each value is parsed per the variable's registered
+ * kind and applied via the matching xtc_cfg_set_*; bounds/validators
+ * still apply.  Unknown names and unparseable/rejected values are
+ * skipped (a reload must not abort on one bad line).  Returns the
+ * number of settings successfully applied (>= 0), or XTC_E_INVAL on a
+ * NULL path or XTC_E_IO if the file cannot be opened.  The path is
+ * remembered for xtc_cfg_reload.
+ */
+int
+xtc_cfg_load_file(const char *path)
+{
+	FILE *f;
+	char  line[2048];
+	int   applied = 0;
+	char *dup = NULL;
+
+	if (path == NULL) return XTC_E_INVAL;
+	f = fopen(path, "r");        /* XTC_BLOCKING_OK: config read, startup/SIGHUP */
+	if (f == NULL) return XTC_E_IO;
+
+	while (fgets(line, sizeof line, f) != NULL) {  /* XTC_BLOCKING_OK: config read */
+		char *p = __cfg_trim(line);
+		char *eq, *key, *val;
+		if (*p == '\0' || *p == '#') continue;
+		eq = strchr(p, '=');
+		if (eq == NULL) continue;       /* not a key = value line */
+		*eq = '\0';
+		key = __cfg_trim(p);
+		val = __cfg_trim(eq + 1);
+		if (*val == '\'' || *val == '"') {
+			char q = *val++;
+			char *close = strchr(val, q);
+			if (close != NULL) *close = '\0';
+		} else {
+			/* Strip an unquoted trailing `# comment`. */
+			char *h = strchr(val, '#');
+			if (h != NULL) { *h = '\0'; val = __cfg_trim(val); }
+		}
+		if (*key == '\0') continue;
+		if (__cfg_apply_string(key, val) == XTC_OK) applied++;
+	}
+	(void)fclose(f);            /* XTC_BLOCKING_OK: config read */
+
+	/* Remember the path so xtc_cfg_reload can re-read it. */
+	if (__os_strdup(path, &dup) == XTC_OK) {
+		(void)pthread_mutex_lock(&__cfg_lock);
+		if (__cfg_file != NULL) __os_free(__cfg_file);
+		__cfg_file = dup;
+		(void)pthread_mutex_unlock(&__cfg_lock);
+	}
+	return applied;
+}
+
+/*
+ * PUBLIC: int  xtc_cfg_reload __P((void));
+ *
+ * Re-read the file last passed to xtc_cfg_load_file, re-applying every
+ * value (on_change callbacks fire for any that changed).  Intended to
+ * back a SIGHUP handler -- but it calls stdio and may take the registry
+ * lock, so it is NOT async-signal-safe: set a flag in the signal
+ * handler and call xtc_cfg_reload from the event loop, not from the
+ * handler itself.  Returns the applied count, XTC_E_INVAL if no file
+ * has been loaded, or XTC_E_IO if the file cannot be reopened.
+ */
+int
+xtc_cfg_reload(void)
+{
+	char *path = NULL;
+	int rc;
+	(void)pthread_mutex_lock(&__cfg_lock);
+	if (__cfg_file != NULL) (void)__os_strdup(__cfg_file, &path);
+	(void)pthread_mutex_unlock(&__cfg_lock);
+	if (path == NULL) return XTC_E_INVAL;
+	rc = xtc_cfg_load_file(path);
+	__os_free(path);
 	return rc;
 }
