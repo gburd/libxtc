@@ -130,24 +130,27 @@ stale entries.  Fix: added `__xtc_proc_loop_unregister(loop)` called from
 
 ## xtc_cfg: missing features
 
-**Status:** Planned for M16.
+**Status:** Config-file parsing and reload DONE; per-session scoping
+remains M16.
 
-The following xtc_cfg features are not yet implemented:
-- Per-session/per-database scoping (PostgreSQL-specific)
-- Configuration-file parsing (postgresql.conf reader)
-- SIGHUP-driven reload (signal integration)
-
-These are tracked here rather than inline to avoid "v1" language in the code.
+- Configuration-file parsing (postgresql.conf reader): DONE --
+  `xtc_cfg_load_file()` reads `name = value` lines (comments, quotes,
+  per-kind parsing, bounds/validators), skipping unknown/bad lines.
+- SIGHUP-driven reload: DONE as a mechanism -- `xtc_cfg_reload()`
+  re-reads the last loaded file.  The app wires SIGHUP to it from the
+  event loop (the function is not async-signal-safe, by documentation).
+- Per-session/per-database scoping (PostgreSQL-specific): still M16 --
+  it needs a session/override-stack model that does not exist yet.
 
 ## xtc_slab_pressure_stop API incomplete
 
-**Status:** Deferred.
+**Status:** DONE.
 
-The PSI pressure listener (`xtc_slab_pressure_listen`) cannot be cleanly
-stopped because it doesn't return a handle.  A future API change will add
-`xtc_slab_pressure_listen_ex()` returning an opaque handle and
-`xtc_slab_pressure_stop(handle)`.  For now, the listener runs until
-process exit.
+Resolved: `xtc_slab_pressure_listen_ex()` returns an opaque
+`xtc_slab_pressure_t` handle and `xtc_slab_pressure_stop(handle)` joins
+the listener thread, closes its fds, and frees it.  Plain
+`xtc_slab_pressure_listen()` delegates to `_ex` and discards the handle
+(unchanged fire-and-forget behaviour).
 
 
 ## epoll backend: rare lost blocking-I/O-completion wakeup under heavy churn
