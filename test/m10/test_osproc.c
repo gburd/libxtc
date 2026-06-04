@@ -72,17 +72,23 @@ run_exec(char *const argv[], int *exitcode)
 static MunitResult
 test_exec_true_false(const MunitParameter p[], void *d)
 {
-	/* /bin/sh is guaranteed on every POSIX host; /bin/true and
-	 * /bin/false are not (macOS keeps them in /usr/bin), so drive the
-	 * exit code through sh -c instead. */
-	char *const t[] = { "/bin/sh", "-c", "exit 0", NULL };
-	char *const f[] = { "/bin/sh", "-c", "exit 1", NULL };
+	/* Launch a program that exits 0, and one that exits 1.  Prefer
+	 * /usr/bin/env (PATH-resolves the command, so it does not depend
+	 * on where true/false live -- /bin on Linux, /usr/bin on macOS);
+	 * fall back to /bin/sh -c, which every POSIX host provides.  (On
+	 * Windows xtc_osproc is XTC_E_NOSYS; a future Win32 port would
+	 * launch via cmd.exe /c.) */
+	char *const env_t[] = { "/usr/bin/env", "true",  NULL };
+	char *const env_f[] = { "/usr/bin/env", "false", NULL };
+	char *const sh_t[]  = { "/bin/sh", "-c", "exit 0", NULL };
+	char *const sh_f[]  = { "/bin/sh", "-c", "exit 1", NULL };
+	int have_env = (access("/usr/bin/env", X_OK) == 0);
 	int code = -1;
 	(void)p; (void)d;
 
-	munit_assert_int(run_exec(t, &code), ==, 0);
+	munit_assert_int(run_exec(have_env ? env_t : sh_t, &code), ==, 0);
 	munit_assert_int(code, ==, 0);
-	munit_assert_int(run_exec(f, &code), ==, 0);
+	munit_assert_int(run_exec(have_env ? env_f : sh_f, &code), ==, 0);
 	munit_assert_int(code, ==, 1);
 	return MUNIT_OK;
 }
