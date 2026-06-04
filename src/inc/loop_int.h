@@ -165,6 +165,13 @@ struct xtc_loop {
 	_Atomic uint64_t n_tasks_run;
 	_Atomic uint64_t n_steals;
 
+	/* I/O fairness: counts task runs since the last I/O poll.  When the
+	 * run queue never empties (busy-yielding fibers, e.g. a buffer
+	 * manager spinning on eviction), the loop would otherwise never
+	 * poll I/O and parked completions would starve.  Every
+	 * IO_FAIRNESS_QUANTUM runs the step does a non-blocking poll. */
+	unsigned int     runs_since_poll;
+
 	/* Cooperative yield watchdog (opt-in).  When yield_budget_ns > 0
 	 * the scheduler records each quantum's start time on the task and
 	 * xtc_yield_check reports a task over budget; n_yield_due counts

@@ -294,6 +294,31 @@ __xtc_loop_step(xtc_loop_t *loop)
 		default:
 			return XTC_E_INTERNAL;
 		}
+
+		/*
+		 * I/O fairness.  Step 1 returns right after running one task,
+		 * and the caller only polls I/O once the run queue drains.  A
+		 * busy run queue (fibers that keep rescheduling -- e.g. a
+		 * buffer manager spinning while an evictor is blocked on a
+		 * flush completion) would therefore never let the loop poll,
+		 * starving the very I/O completion that would break the spin.
+		 * Interleave a non-blocking poll every IO_FAIRNESS_QUANTUM
+		 * runs so parked completions are dispatched under load.
+		 */
+#define IO_FAIRNESS_QUANTUM 64u
+		if (++loop->runs_since_poll >= IO_FAIRNESS_QUANTUM &&
+		    (loop->q_head != NULL ||
+		     xtc_deque_len(&loop->deque) > 0)) {
+			xtc_io_event_t fevs[16];
+			int fn_out = 0, fi;
+			loop->runs_since_poll = 0;
+			if (xtc_io_poll(loop->io, fevs,
+			    (int)(sizeof fevs / sizeof fevs[0]), 0,
+			    &fn_out) == XTC_OK)
+				for (fi = 0; fi < fn_out; fi++)
+					(void)__xtc_loop_dispatch_event(loop,
+					    &fevs[fi]);
+		}
 		return XTC_OK;
 	}
 

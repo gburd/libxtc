@@ -190,57 +190,53 @@ Verified: the pure reproducer goes 0 -> 20/20 on epoll (and the
 N-loop/N-proc one 0 -> 20/20); io_uring `make check` + ASan + UBSan +
 epoll `make check` all clean; io_uring `bufmgr_mt` 50/50.
 
-### (A-residual) OPEN -- rarer epoll-only hang in test_bufmgr_mt
+### (A-residual) FIXED -- epoll-only hang in test_bufmgr_mt was a pin underflow
 
-After the fix, the buffer-manager stress test (`test_bufmgr_mt`) still
-hangs about 3/60 on the epoll backend, while io_uring is 50/50 clean.
-The pure `xtc_blocking_run` reproducer is solid (20/20 on epoll), so
-this residual is NOT the `__current_proc` desync and not the basic
-blocking path; it is specific to the heavier buffer-manager flow (the
-evictor reserving a frame, `pin == -1`, then blocking on a flush write
-while `get_free_frame` spins).  It is therefore still gated: this test
-runs on the io_uring CI (GitHub) and is skipped on the epoll CI
-(Codeberg containers, whose seccomp blocks io_uring).  Investigation
-continues with the same trace method that pinned (A).
+After the (A) fix, `test_bufmgr_mt` still hung about 3-7% on the epoll
+backend (io_uring far less, and confounded by host load).  The earlier
+read of this as a benign "thrash livelock" was WRONG: it was a real
+pin-accounting bug in the example's from-scratch buffer manager
+(examples/06_sqlxtc/bufmgr.c), traced to ground with armed abort probes
++ post-mortem cores and now fixed at root.
 
-### (A-residual) example bufmgr thrash livelock in test_bufmgr_mt
+Root cause (swip mode only): a fixer can hold a STALE swip word `w`
+pointing at a frame that has since been evicted, freed, and recycled by
+the demand-load path for a DIFFERENT slot.  The fixer does
+`try_pin(sw_frame(w))` and transiently bumps that recycled frame's pin
+(it fails its slot recheck a moment later and unpins -- net zero).  But
+the demand-load path claimed the frame with an UNCONDITIONAL
+`store(pin, 1)`, which clobbered the fixer's transient increment; the
+fixer's matching `unpin` then drove pin to -1.  A frame wedged at
+pin == -1 is indistinguishable from an eviction reservation, so every
+later fixer spins `try_pin` on it forever -- the hang.  (epoll merely
+lost the timing lottery more often; io_uring re-samples readiness and
+mostly masked it.)
 
-After the (A) fix, test_bufmgr_mt still hangs ~5% on epoll (io_uring far
-less, and confounded by host load).  It was chased to ground and is NOT
-a libxtc primitive bug and NOT a reservation leak:
+Fixes, all in bufmgr.c, verified epoll 80/80 + io_uring 30/30 + ASan
+12/12 + UBSan 8/8 clean, with the btree/xstore (pid-mode) tests green:
 
-  - Per-frame reserve/clear counters instrumented into evict_one show,
-    on a hung core, the stuck frame at pin == -1 with reserve count ==
-    clear count (e.g. 921 == 921).  The reservation is balanced -- the
-    pin == -1 is a snapshot of an evictor that has reserved the frame
-    for the 922nd time, mid-eviction.  So no reservation is leaked.
+  - The swip demand-load and swip alloc paths claim a recycled frame
+    with a CAS loop (`claim_frame`: spin CAS pin 0 -> 1, yielding),
+    NOT a blind store, so a fixer's transient stale pin is never
+    clobbered.  Scoped to swip mode only: pid-mode (`bm_fix_pid`, the
+    B-tree path) has no swip references, so no stale fixer exists; it
+    keeps the plain store (a CAS-wait there would deadlock against a
+    latch-coupling pin that cannot drain while the claimer spins).
+  - Eviction releases a reservation with CAS(-1 -> 0), never a blind
+    store, so it cannot clobber a concurrent loader's fresh pin; and it
+    re-validates `state == BM_COOL` after reserving (a stale COOL read
+    could otherwise reserve a frame already on the free list).
+  - `free_push` sets `state = FREE` before clearing pin, closing the
+    COOL+pin==0 window an eviction sweep could otherwise reserve in.
 
-  - It is a buffer-pool THRASH livelock in the example's from-scratch
-    buffer manager (examples/06_sqlxtc/bufmgr.c) under deliberately
-    brutal parameters: N_FRAMES = 32 but HOT_RANGE = 64 hot pages are
-    hammered by 16 workers (the test comment: "small resident pool ->
-    eviction churn", "forces the swizzle cycle").  A demand-loaded page
-    enters COOL (probationary) and is immediately evictable, so two
-    straggler workers churn one hot frame (load -> COOL -> evict ->
-    reload) and starve each other.  Earlier (before the (A) fix), this
-    was masked by, and compounded with, a separate loader-starvation:
-    the fixers busy-spin in bm_fix without yielding, so the loop thread
-    never returns to poll and parked loader completions are never
-    dispatched (a core showed 10 frames stuck BM_LOADED, pin == 1).
+Two general robustness improvements landed alongside (they reduce churn
+and were part of the original investigation, kept because they are
+correct on their own): `bm_fix` yields on a contended `try_pin` retry
+so the loop regains control, and a CLOCK second-chance reference bit on
+frames spares a recently touched COOL page one eviction sweep.
 
-  - Fix DIRECTION (validated to remove the epoll hang in isolation but
-    NOT yet landed): (1) bm_fix yields on a contended retry so the
-    loop regains control; (2) the loop services I/O even when tasks
-    keep rescheduling (a non-blocking poll interleaved with RESCHED) so
-    busy-yielding fixers cannot starve parked I/O; (3) a CLOCK
-    second-chance reference bit on frames so a recently touched COOL
-    page survives one eviction sweep (standard anti-thrash).  In a
-    clean run all three together took epoll test_bufmgr_mt to 60/60.
-    They were REVERTED because back-to-back A/B batches on a saturated
-    test host could not distinguish a real io_uring regression from
-    host load (the committed baseline itself dropped to 39/40 under the
-    same load).  Landing them needs a clean-box benchmark; until then
-    test_bufmgr_mt stays gated to the io_uring CI and skipped on epoll.
+test_bufmgr_mt is no longer gated: it runs on BOTH the io_uring CI
+(GitHub) and the epoll CI (Codeberg).
 
 ### (B) FIXED -- buffer-manager load/publish pin-ordering race
 
