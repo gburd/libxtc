@@ -10,6 +10,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -163,6 +164,80 @@ test_cfg_string(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_cfg_get_string("test.label", &s), ==, XTC_OK);
 	munit_assert_string_equal(s, "new");
 	munit_assert_int(xtc_cfg_unregister("test.label"), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* ----- Config-file loading + reload --------------------------- */
+
+static MunitResult
+test_cfg_load_file(const MunitParameter p[], void *d)
+{
+	xtc_cfg_spec_t spec = {0};
+	static const char *levels[] = { "quiet", "normal", "loud" };
+	char path[64];
+	int iv = 0, bv = 0, ev = 0;
+	const char *sv = NULL;
+	FILE *f;
+	(void)p; (void)d;
+
+	snprintf(path, sizeof path, "/tmp/xtc-cfg-test-%ld.conf",
+	    (long)getpid());
+
+	spec.name = "t.workers"; spec.kind = XTC_CFG_INT;
+	spec.dflt.d_int = 4; spec.min_int = 1; spec.max_int = 64;
+	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
+	memset(&spec, 0, sizeof spec);
+	spec.name = "t.tls"; spec.kind = XTC_CFG_BOOL; spec.dflt.d_bool = 0;
+	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
+	memset(&spec, 0, sizeof spec);
+	spec.name = "t.banner"; spec.kind = XTC_CFG_STRING; spec.dflt.d_string = "x";
+	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
+	memset(&spec, 0, sizeof spec);
+	spec.name = "t.level"; spec.kind = XTC_CFG_ENUM; spec.dflt.d_enum = 0;
+	spec.enum_labels = levels; spec.n_enum_labels = 3;
+	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
+
+	f = fopen(path, "w");
+	munit_assert_not_null(f);
+	fprintf(f,
+	    "# a comment line\n"
+	    "t.workers = 16\n"
+	    "t.tls = on\n"
+	    "t.banner = 'hi there'   # inline comment\n"
+	    "t.level = loud\n"
+	    "unknown.key = 5\n"        /* skipped */
+	    "\n");
+	fclose(f);
+
+	/* 4 known keys applied; unknown skipped. */
+	munit_assert_int(xtc_cfg_load_file(path), ==, 4);
+	munit_assert_int(xtc_cfg_get_int("t.workers", &iv), ==, XTC_OK);
+	munit_assert_int(iv, ==, 16);
+	munit_assert_int(xtc_cfg_get_bool("t.tls", &bv), ==, XTC_OK);
+	munit_assert_int(bv, ==, 1);
+	munit_assert_int(xtc_cfg_get_string("t.banner", &sv), ==, XTC_OK);
+	munit_assert_string_equal(sv, "hi there");
+	munit_assert_int(xtc_cfg_get_enum("t.level", &ev), ==, XTC_OK);
+	munit_assert_int(ev, ==, 2);   /* "loud" */
+
+	/* Edit + reload re-applies. */
+	f = fopen(path, "w");
+	munit_assert_not_null(f);
+	fprintf(f, "t.workers = 8\n");
+	fclose(f);
+	munit_assert_int(xtc_cfg_reload(), ==, 1);
+	munit_assert_int(xtc_cfg_get_int("t.workers", &iv), ==, XTC_OK);
+	munit_assert_int(iv, ==, 8);
+
+	/* Bad path is XTC_E_IO; NULL path is XTC_E_INVAL. */
+	munit_assert_int(xtc_cfg_load_file("/tmp/xtc-no-such-cfg.zzz"), ==, XTC_E_IO);
+	munit_assert_int(xtc_cfg_load_file(NULL), ==, XTC_E_INVAL);
+
+	(void)unlink(path);
+	(void)xtc_cfg_unregister("t.workers");
+	(void)xtc_cfg_unregister("t.tls");
+	(void)xtc_cfg_unregister("t.banner");
+	(void)xtc_cfg_unregister("t.level");
 	return MUNIT_OK;
 }
 
@@ -525,6 +600,7 @@ static MunitTest tests[] = {
 	{ "/log/drop_on_full",     test_log_drop_on_full,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/int",              test_cfg_int,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/string",           test_cfg_string,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/cfg/load_file",        test_cfg_load_file,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inject/callback",      test_inject_callback,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inject/wait",          test_inject_wait,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pdict/outside_proc",   test_pdict_outside_proc,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
