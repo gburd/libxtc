@@ -73,6 +73,19 @@ sx_config_serialized(void)
 }
 
 /*
+ * MULTITHREAD mode: the engine may be used by multiple threads, but a
+ * single connection handle is never used by two threads at once.  This
+ * is the connection-per-proc model -- each connection owns its handle
+ * and runs on one loop thread -- and avoids the per-call mutexing that
+ * SERIALIZED imposes.
+ */
+int
+sx_config_multithread(void)
+{
+	return xsql_config(SQLITE_CONFIG_MULTITHREAD);
+}
+
+/*
  * Busy handler: when a connection finds the database locked (another
  * connection holds the WAL write lock), do NOT sleep the OS thread --
  * that would wedge a cooperative loop, since the lock holder may be a
@@ -112,7 +125,8 @@ sx_open(const char *path, sx_db **out)
 {
 	xsql *h = NULL;
 	int memlike = (path == NULL || path[0] == '\0' ||
-	    strcmp(path, ":memory:") == 0);
+	    strcmp(path, ":memory:") == 0 ||
+	    strstr(path, "mode=memory") != NULL);   /* shared-cache :memory: URI */
 	int rc;
 
 	/* File-backed databases go through the xtc VFS (instrumented,
@@ -120,7 +134,7 @@ sx_open(const char *path, sx_db **out)
 	if (!memlike)
 		(void)vfs_register(0);
 	rc = xsql_open_v2(path, &h,
-	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI,
 	    memlike ? NULL : "sqlxtc");
 	if (rc != SQLITE_OK) {
 		if (h) xsql_close(h);

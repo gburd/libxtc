@@ -181,28 +181,34 @@ bash ../../bench/sqlxtc/saturate.sh 200 1000       # saturation bench
 
 ## Performance
 
-See `../../bench/sqlxtc/RESULTS.md` for raw numbers.  Current state
-is single-loop, single-sqlite3-handle, SQLITE_CONFIG_SERIALIZED.
-Under concurrent client load:
+See `../../bench/sqlxtc/RESULTS.md` for raw numbers.
 
-* The xtc loop and the listener / connection procs distribute work
-  across fibers cleanly; idle CPU is 0%.
-* All connections speak to one shared sqlite3 handle through xtc_lwlock
-  serving as SQLite's mutex layer.  This means SQL execution itself
-  serializes -- the design demonstrates the wire protocol and the xtc
-  primitive integration but does not yet scale across cores.
-* Driving the existing saturation bench yields ~3000 qps for mixed
-  SELECT/INSERT workloads on a memory-resident DB with one CPU core
-  fully utilised.
+By default the server runs single-loop with one shared SQLite handle in
+SQLITE_CONFIG_SERIALIZED (SQL execution serializes -- this demonstrates
+the wire protocol and the xtc primitive seams).  Passing `--threads N`
+(N > 1) switches to **connection-per-proc parallelism**:
 
-Real multi-core scaling requires breaking SQLite's monolithic mutex
-into fine-grained per-page / per-table locks.  That work is planned
-in five phases (subsystem-as-server, then xtc_lrlock buffer pool,
-then fine-grained btree locks, then async VFS) -- documented in
+* an N-loop executor (N OS threads); the listener accepts on loop 0 and
+  spawns each connection's proc round-robin across loops, so SQL runs
+  in parallel across cores;
+* each connection holds its own SQLite handle for its lifetime, in
+  SQLITE_CONFIG_MULTITHREAD (no per-call handle mutex), with the
+  prepared-statement cache active;
+* connections share data through the backing store: a file-backed
+  database in WAL mode (concurrent readers + one writer), the
+  process-global `--storage` xstore engine, or -- for the default
+  `:memory:` -- an ephemeral tmpfs-backed file in WAL mode (RAM speed,
+  removed on shutdown), since this build omits SQLite shared-cache.
+
+Read-heavy concurrent load scales past the single-loop ceiling (e.g.
+33k -> 54k q/s going 1 -> 4 connections, client-bound by the test
+driver).  Write throughput serializes at the WAL writer / B-tree latch
+rather than at a global handle mutex.
+
+The deeper, fully xtc-native path -- making the from-scratch storage
+engine the default backend -- is documented in
+[`../../docs/M_SQLXTC_STORAGE.md`](../../docs/M_SQLXTC_STORAGE.md) and
 [`../../docs/M_SQLXTC_HARDFORK.md`](../../docs/M_SQLXTC_HARDFORK.md).
-Until that lands, sqlxtc is a single-core SQLite server with an xtc-
-shaped network frontend.  The eventual hard-fork is the project's
-payoff.
 
 ## License
 

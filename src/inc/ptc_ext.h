@@ -4,7 +4,10 @@
 #ifndef PTC_EXT_H
 #define PTC_EXT_H
 
+int  xtc_cfg_load_file __P((const char *));
+int  xtc_cfg_reload __P((void));
 int xtc_alloc_audit_enable __P((int));
+int xtc_blocking_submit __P((int (*)(void *), void *));
 int xtc_down_decode __P((const void *, size_t, xtc_pid_t *, int *));
 int xtc_exit_pid __P((xtc_pid_t, int));
 int xtc_exit_self __P((int));

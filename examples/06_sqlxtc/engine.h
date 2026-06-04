@@ -82,6 +82,7 @@ int  sx_config_mem(const void *methods);
  * and per-connection handles are both correct; the xtc_amutex methods
  * make that guarding yield the fiber rather than block the loop. */
 int  sx_config_serialized(void);
+int  sx_config_multithread(void);
 
 /* Open a connection on `path` (":memory:" / "" for in-memory).  File-
  * backed databases go through the xtc VFS and get the concurrency
