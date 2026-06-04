@@ -1021,13 +1021,14 @@ xtc_slab_pressure_listen_ex(const char *psi_path,
                             xtc_slab_pressure_t **out)
 {
 	(void)psi_path; (void)fn; (void)user;
-	if (out) *out = NULL;
+	if (out == NULL) return XTC_E_INVAL;   /* arg contract before NOSYS */
+	*out = NULL;
 	return XTC_E_NOSYS;
 }
 int
 xtc_slab_pressure_stop(xtc_slab_pressure_t *handle)
 {
-	(void)handle;
+	if (handle == NULL) return XTC_E_INVAL;
 	return XTC_E_NOSYS;
 }
 int
