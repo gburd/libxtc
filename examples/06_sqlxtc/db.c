@@ -17,6 +17,73 @@
 
 #include "xtc_int.h"
 
+/* Decode a hex or base64 blob param into a freshly malloc'd buffer.
+ * Returns 0 and sets *out/*outn (caller frees *out), or -1 on a
+ * malformed encoding. */
+static int
+hexval(int c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+static int
+b64val(int c)
+{
+	if (c >= 'A' && c <= 'Z') return c - 'A';
+	if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+	if (c >= '0' && c <= '9') return c - '0' + 52;
+	if (c == '+') return 62;
+	if (c == '/') return 63;
+	return -1;
+}
+
+static int
+decode_blob(const struct quack_param *p, unsigned char **out, int *outn)
+{
+	*out = NULL; *outn = 0;
+	if (!p->blob_b64) {
+		/* hex */
+		size_t i, n;
+		unsigned char *b;
+		if ((p->slen & 1u) != 0) return -1;
+		n = p->slen / 2;
+		b = malloc(n ? n : 1);
+		if (b == NULL) return -1;
+		for (i = 0; i < n; i++) {
+			int hi = hexval((unsigned char)p->sval[2 * i]);
+			int lo = hexval((unsigned char)p->sval[2 * i + 1]);
+			if (hi < 0 || lo < 0) { free(b); return -1; }
+			b[i] = (unsigned char)((hi << 4) | lo);
+		}
+		*out = b; *outn = (int)n;
+		return 0;
+	} else {
+		/* base64 (no embedded whitespace; optional '=' padding) */
+		size_t i = 0, slen = p->slen;
+		unsigned char *b;
+		size_t bn = 0;
+		uint32_t acc = 0; int nbits = 0;
+		while (slen > 0 && p->sval[slen - 1] == '=') slen--;
+		b = malloc((slen / 4) * 3 + 3);
+		if (b == NULL) return -1;
+		for (i = 0; i < slen; i++) {
+			int v = b64val((unsigned char)p->sval[i]);
+			if (v < 0) { free(b); return -1; }
+			acc = (acc << 6) | (uint32_t)v;
+			nbits += 6;
+			if (nbits >= 8) {
+				nbits -= 8;
+				b[bn++] = (unsigned char)((acc >> nbits) & 0xff);
+			}
+		}
+		*out = b; *outn = (int)bn;
+		return 0;
+	}
+}
+
 static int
 is_memory(const char *path)
 {
@@ -143,9 +210,22 @@ db_exec_params(sx_db *h, const char *sql,
 			switch (p->type) {
 			case QUACK_P_INT:
 				rc = sx_bind_int64(stmt, idx, p->ival); break;
+			case QUACK_P_FLOAT:
+				rc = sx_bind_double(stmt, idx, p->dval); break;
 			case QUACK_P_TEXT:
 				rc = sx_bind_text(stmt, idx, p->sval,
 				    (int)p->slen); break;
+			case QUACK_P_BLOB: {
+				unsigned char *bb = NULL; int bn = 0;
+				if (decode_blob(p, &bb, &bn) != 0) {
+					*err = strdup("bad blob param");
+					sx_finalize(stmt);
+					return -1;
+				}
+				rc = sx_bind_blob(stmt, idx, bb, bn);
+				free(bb);
+				break;
+			}
 			case QUACK_P_NULL:
 			default:
 				rc = sx_bind_null(stmt, idx); break;

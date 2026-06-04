@@ -134,6 +134,30 @@ main(void)
 	/* 18d: params must be an array */
 	CHECK(parse("{\"q\":\"x\",\"params\":5}", &m) < 0, "params_not_array");
 
+	/* 18e: float param (number with a decimal/exponent) */
+	CHECK(parse("{\"q\":\"x\",\"params\":[3.5,-2e2,5]}", &m) == 0 &&
+	      m.n_params == 3 &&
+	      m.params[0].type == QUACK_P_FLOAT && m.params[0].dval == 3.5 &&
+	      m.params[1].type == QUACK_P_FLOAT && m.params[1].dval == -200.0 &&
+	      m.params[2].type == QUACK_P_INT && m.params[2].ival == 5,
+	      "params_float");
+
+	/* 18f: blob param -- hex and base64 object forms */
+	CHECK(parse("{\"q\":\"x\",\"params\":[{\"hex\":\"deadbeef\"},"
+	            "{\"b64\":\"aGk=\"}]}", &m) == 0 &&
+	      m.n_params == 2 &&
+	      m.params[0].type == QUACK_P_BLOB && m.params[0].blob_b64 == 0 &&
+	      m.params[0].slen == 8 &&
+	      memcmp(m.params[0].sval, "deadbeef", 8) == 0 &&
+	      m.params[1].type == QUACK_P_BLOB && m.params[1].blob_b64 == 1 &&
+	      m.params[1].slen == 4 &&
+	      memcmp(m.params[1].sval, "aGk=", 4) == 0,
+	      "params_blob");
+
+	/* 18g: blob object with an unknown key is rejected */
+	CHECK(parse("{\"q\":\"x\",\"params\":[{\"oops\":\"00\"}]}", &m) < 0,
+	      "params_blob_bad_key");
+
 	/* 19: trailing garbage after object is ignored (we only require
 	 * a valid object up front -- trailing content tolerated) */
 	{

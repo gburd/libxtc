@@ -40,8 +40,10 @@ typedef struct quack_msg {
 	struct quack_param {
 		int          type;       /* QUACK_P_* */
 		int64_t      ival;       /* QUACK_P_INT */
-		const char  *sval;       /* QUACK_P_TEXT (into caller buffer) */
+		double       dval;       /* QUACK_P_FLOAT */
+		const char  *sval;       /* QUACK_P_TEXT / QUACK_P_BLOB (encoded) */
 		size_t       slen;
+		int          blob_b64;   /* QUACK_P_BLOB: 1 = base64, 0 = hex */
 	}                params[32];
 	int              n_params;
 	const char      *err;        /* parse error message; NULL on OK */
@@ -51,6 +53,8 @@ typedef struct quack_msg {
 #define QUACK_P_NULL  0
 #define QUACK_P_INT   1
 #define QUACK_P_TEXT  2
+#define QUACK_P_FLOAT 3
+#define QUACK_P_BLOB  4
 
 /* Parse one line.  `line` need NOT be NUL-terminated; `len` is the
  * length up to but not including the terminating '\n' (which the

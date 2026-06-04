@@ -448,6 +448,39 @@ jp_int(jp_t *j, int64_t *out)
 	return 0;
 }
 
+/*
+ * Parse a JSON number, distinguishing integer from floating point.
+ * A token containing '.', 'e', or 'E' is a double; otherwise an int.
+ * Copies the token into a small NUL-terminated buffer so strtod/strtoll
+ * cannot read past the (not necessarily NUL-terminated) line span.
+ */
+static int
+jp_number(jp_t *j, int *is_dbl, int64_t *iv, double *dv)
+{
+	size_t start, tn;
+	int    is_float = 0;
+	char   tmp[64];
+	jp_skip(j);
+	start = j->pos;
+	if (j->pos < j->len && (j->p[j->pos] == '-' || j->p[j->pos] == '+'))
+		j->pos++;
+	while (j->pos < j->len) {
+		char c = j->p[j->pos];
+		if (c >= '0' && c <= '9') { j->pos++; continue; }
+		if (c == '.' || c == 'e' || c == 'E' ||
+		    c == '+' || c == '-') { is_float = 1; j->pos++; continue; }
+		break;
+	}
+	if (j->pos == start) { j->err = "expected number"; return -1; }
+	tn = j->pos - start;
+	if (tn >= sizeof tmp) tn = sizeof tmp - 1;
+	memcpy(tmp, j->p + start, tn);
+	tmp[tn] = '\0';
+	if (is_float) { *dv = strtod(tmp, NULL); *is_dbl = 1; }
+	else          { *iv = strtoll(tmp, NULL, 10); *is_dbl = 0; }
+	return 0;
+}
+
 /* Skip a JSON value (any type) without keeping it. */
 static int jp_skip_value(jp_t *j);
 
@@ -614,11 +647,40 @@ quack_parse(const char *line, size_t len, quack_msg_t *msg)
 					}
 					prm->type = QUACK_P_NULL;
 				} else if (pc == '-' || (pc >= '0' && pc <= '9')) {
-					if (jp_int(&j, &prm->ival) < 0) {
-						msg->err = "json: bad param int";
+					int isd = 0;
+					if (jp_number(&j, &isd, &prm->ival,
+					    &prm->dval) < 0) {
+						msg->err = "json: bad param number";
 						return -1;
 					}
-					prm->type = QUACK_P_INT;
+					prm->type = isd ? QUACK_P_FLOAT
+					                : QUACK_P_INT;
+				} else if (pc == '{') {
+					/* Blob param: {"hex":".."} or {"b64":".."}. */
+					const char *kp2; size_t kn2;
+					const char *vp; size_t vn;
+					if (jp_eat(&j, '{') < 0 ||
+					    jp_string_span(&j, &kp2, &kn2) < 0 ||
+					    jp_eat(&j, ':') < 0) {
+						msg->err = "json: bad blob param";
+						return -1;
+					}
+					if (kn2 == 3 && memcmp(kp2, "hex", 3) == 0)
+						prm->blob_b64 = 0;
+					else if (kn2 == 3 && memcmp(kp2, "b64", 3) == 0)
+						prm->blob_b64 = 1;
+					else {
+						msg->err = "json: blob key must be hex|b64";
+						return -1;
+					}
+					if (jp_string_span(&j, &vp, &vn) < 0 ||
+					    jp_eat(&j, '}') < 0) {
+						msg->err = "json: bad blob value";
+						return -1;
+					}
+					prm->type = QUACK_P_BLOB;
+					prm->sval = vp;
+					prm->slen = vn;
 				} else {
 					msg->err = "json: unsupported param type";
 					return -1;
