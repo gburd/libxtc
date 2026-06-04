@@ -97,6 +97,7 @@ int  sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
                 const char **tail);
 int  sx_step(sx_stmt *st);
 int  sx_reset(sx_stmt *st);
+int  sx_clear_bindings(sx_stmt *st);
 void sx_finalize(sx_stmt *st);
 
 /* Parameter binding (1-based index), for prepared statements. */
