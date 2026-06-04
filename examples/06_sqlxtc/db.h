@@ -33,10 +33,15 @@ typedef struct db_catalog {
 } db_catalog_t;
 
 typedef struct db {
-	sx_db     *sdb;          /* shared handle (in-memory databases) */
+	sx_db     *sdb;          /* shared handle (single-handle mode) */
+	sx_db     *anchor;       /* keep-alive handle for shared-cache memory */
 	xtc_res_t *res;
-	const char *path;
+	const char *path;        /* user-supplied path */
+	char       *open_path;   /* path used for per-connection opens (may be
+	                          * a shared-cache URI for parallel :memory:) */
 	int         shared;      /* 1 = single shared handle for all conns */
+	int         owns_temp;   /* 1 = open_path is an ephemeral temp file to
+	                          * unlink on destroy (parallel :memory:) */
 
 	xtc_lrlock_t *cat;       /* read-mostly db_catalog_t */
 } db_t;
@@ -44,11 +49,15 @@ typedef struct db {
 typedef struct db_opts {
 	const char *path;        /* ":memory:" by default */
 	int         shared;      /* 1 to share one handle; auto-forced for
-	                          * in-memory; file-backed defaults per-conn */
+	                          * in-memory unless parallel; file-backed
+	                          * defaults per-conn */
+	int         parallel;    /* 1 = connection-per-proc: per-connection
+	                          * handles even for :memory: (shared cache),
+	                          * so connections run on separate loops */
 	xtc_res_t  *res;
 } db_opts_t;
 
-#define DB_OPTS_DEFAULT { .path = ":memory:", .shared = 1, .res = NULL }
+#define DB_OPTS_DEFAULT { .path = ":memory:", .shared = 1, .parallel = 0, .res = NULL }
 
 int  db_create(const db_opts_t *opts, db_t **out);
 void db_destroy(db_t *db);
@@ -58,6 +67,15 @@ void db_destroy(db_t *db);
  * caller releases it via db_handle_put). */
 int  db_handle_get(db_t *db, sx_db **out, int *out_owned);
 void db_handle_put(db_t *db, sx_db *h, int owned);
+
+/* Connection-lifetime handle: open once when a connection starts and
+ * hold it until the connection closes (vs db_handle_get's per-call
+ * acquire).  In single-handle mode returns the shared handle
+ * (*out_owned == 0); otherwise opens a fresh per-connection handle
+ * (*out_owned == 1).  This stable handle is what makes the prepared-
+ * statement cache and connection-per-proc parallelism possible. */
+int  db_conn_open(db_t *db, sx_db **out, int *out_owned);
+void db_conn_close(db_t *db, sx_db *h, int owned);
 
 /* Execute SQL and stream rows into out_buf via Quack encoder.
  * Returns 0 on success (sets *n_rows); -1 on failure (sets *err
