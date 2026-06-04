@@ -72,8 +72,11 @@ run_exec(char *const argv[], int *exitcode)
 static MunitResult
 test_exec_true_false(const MunitParameter p[], void *d)
 {
-	char *const t[] = { "/bin/true", NULL };
-	char *const f[] = { "/bin/false", NULL };
+	/* /bin/sh is guaranteed on every POSIX host; /bin/true and
+	 * /bin/false are not (macOS keeps them in /usr/bin), so drive the
+	 * exit code through sh -c instead. */
+	char *const t[] = { "/bin/sh", "-c", "exit 0", NULL };
+	char *const f[] = { "/bin/sh", "-c", "exit 1", NULL };
 	int code = -1;
 	(void)p; (void)d;
 
