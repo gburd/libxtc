@@ -52,6 +52,12 @@ struct bm_frame {
 	_Atomic int       pin;        /* >0: a worker holds it; do not evict */
 	_Atomic int       io_busy;    /* a write is in flight */
 	_Atomic int       dirty;      /* page modified since last write */
+	_Atomic int       ref;        /* CLOCK second-chance: set on access,
+	                               * cleared by the eviction sweep -- a
+	                               * recently used COOL page survives one
+	                               * sweep, so a hot page is not evicted
+	                               * out from under a fixer about to
+	                               * re-pin it (anti-thrash). */
 	_Atomic uint64_t  dirty_seq;  /* order it was dirtied (recLSN proxy) */
 	bm_pid_t          pid;
 	bm_swip_t        *parent;     /* the Swip word that points here (swip mode) */
@@ -171,12 +177,53 @@ try_reserve(bm_frame_t *f)
 	    memory_order_acquire, memory_order_relaxed);
 }
 
+/* Release an eviction reservation made by try_reserve: -1 -> 0, but
+ * ONLY if we still hold it.  A plain store would be unsafe: a frame
+ * that was concurrently freed and re-popped can have a fresh loader's
+ * pin == 1 (the loader's get_free_frame path stores pin = 1 directly,
+ * bypassing try_pin), and an unconditional store of 0 would clobber
+ * that, leaving the loader's frame at pin == 0 -- a later bm_unfix then
+ * underflows it to -1, which is indistinguishable from a reservation
+ * and wedges the frame forever (a fixer spins try_pin on it).  The CAS
+ * leaves a loader's pin untouched. */
+static void
+release_reservation(bm_frame_t *f)
+{
+	int e = -1;
+	(void)atomic_compare_exchange_strong_explicit(&f->pin, &e, 0,
+	    memory_order_release, memory_order_relaxed);
+}
+
+/* Claim a just-allocated frame for loading: pin 0 -> 1.  Must NOT be a
+ * blind store: a frame taken off the free list can be transiently
+ * try_pin'd by a fixer that still holds a STALE swip pointing here (the
+ * frame used to live at that fixer's slot before it was evicted, freed,
+ * and recycled to us).  Such a fixer does try_pin (pin++), fails its
+ * slot recheck, then unpin (pin--) -- net zero, but a blind store of 1
+ * over its transient pin would be lost and the fixer's unpin would then
+ * underflow our pin to -1, wedging the frame forever.  CAS-claim from 0
+ * coexists with those transient stale pins; we spin (briefly -- stale
+ * holders drain as their rechecks fail) until we own it cleanly. */
+static void
+claim_frame(bm_frame_t *f)
+{
+	int e = 0;
+	while (!atomic_compare_exchange_weak_explicit(&f->pin, &e, 1,
+	    memory_order_acq_rel, memory_order_relaxed)) {
+		e = 0;
+		xtc_yield();
+	}
+}
+
 /* ---- free list ---- */
 static void
 free_push(bm_t *bm, bm_frame_t *f)
 {
-	atomic_store_explicit(&f->pin, 0, memory_order_release);   /* clear any reservation */
+	/* Mark FREE before clearing the reservation, so an eviction sweep
+	 * that is mid-scan sees a non-COOL state and never reserves a frame
+	 * that is on its way to the free list. */
 	atomic_store_explicit(&f->state, BM_FREE, memory_order_release);
+	atomic_store_explicit(&f->pin, 0, memory_order_release);   /* clear any reservation */
 	(void)pthread_mutex_lock(&bm->free_mu);
 	f->next_free = bm->free_head;
 	bm->free_head = f;
@@ -337,10 +384,20 @@ evict_one(bm_t *bm)
 			}
 			if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
 				continue;
+			if (atomic_exchange_explicit(&f->ref, 0, memory_order_relaxed))
+				continue;            /* recently used: spare one sweep */
 			if (!try_reserve(f))
 				continue;            /* pinned: a fixer holds it */
-			/* Reserved (pin == -1): no fixer can pin it now.  ht_remove
-			 * under the table lock excludes a concurrent ht_lookup_pin. */
+			/* Reserved (pin == -1): no fixer can pin it now.  Re-validate
+			 * the state under the reservation: a stale COOL read above
+			 * could have raced a concurrent free, leaving this frame on
+			 * the free list.  ht_remove under the table lock excludes a
+			 * concurrent ht_lookup_pin. */
+			if (atomic_load_explicit(&f->state, memory_order_acquire)
+			    != BM_COOL) {
+				release_reservation(f);
+				continue;
+			}
 			ht_remove(bm, f);
 			f->via_pid = 0;
 			atomic_fetch_sub_explicit(&bm->resident, 1, memory_order_relaxed);
@@ -372,18 +429,21 @@ evict_one(bm_t *bm)
 		}
 		if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
 			continue;
+		if (atomic_exchange_explicit(&f->ref, 0, memory_order_relaxed))
+			continue;                   /* recently used: spare one sweep */
 		if (!try_reserve(f))
 			continue;                   /* pinned: a fixer holds it */
 		/* Evict: parent COOL -> EVICTED.  Reserved (pin == -1), so no
 		 * fixer can rescue it; release the reservation if the parent
 		 * changed under us. */
 		w = atomic_load_explicit(f->parent, memory_order_acquire);
-		if (!sw_is_cool(w) || sw_frame(w) != f) {
-			atomic_store_explicit(&f->pin, 0, memory_order_release); continue;
+		if (atomic_load_explicit(&f->state, memory_order_acquire) != BM_COOL ||
+		    !sw_is_cool(w) || sw_frame(w) != f) {
+			release_reservation(f); continue;
 		}
 		repl = sw_evicted(f->pid);
 		if (!atomic_compare_exchange_strong(f->parent, &w, repl)) {
-			atomic_store_explicit(&f->pin, 0, memory_order_release); continue;
+			release_reservation(f); continue;
 		}
 		atomic_fetch_sub_explicit(&bm->resident, 1, memory_order_relaxed);
 		atomic_fetch_add_explicit(&bm->s_evicted, 1, memory_order_relaxed);
@@ -581,7 +641,7 @@ bm_alloc(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame, bm_pid_t *out_pid)
 	if ((f = get_free_frame(bm)) == NULL) return XTC_E_RESOURCE;
 	pid = next_pid(bm);
 	atomic_store_explicit(&f->state, BM_LOADED, memory_order_relaxed);
-	atomic_store_explicit(&f->pin, 1, memory_order_relaxed);
+	claim_frame(f);
 	atomic_store_explicit(&f->dirty, 1, memory_order_relaxed);  /* fresh */
 	atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
 	f->pid = pid;
@@ -604,8 +664,12 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
 
 		if (sw_is_hot(w)) {
 			bm_frame_t *f = sw_frame(w);
-			if (!try_pin(f))
-				continue;             /* reserved for eviction: retry */
+			if (!try_pin(f)) {
+				xtc_yield();          /* reserved for eviction: yield so
+				                       * the loop can dispatch the
+				                       * evictor's flush completion */
+				continue;
+			}
 			/* Recheck: it may have been cooled/evicted meanwhile. */
 			if (atomic_load_explicit(slot, memory_order_acquire) == w) {
 				atomic_fetch_add_explicit(&bm->s_hits, 1, memory_order_relaxed);
@@ -617,8 +681,10 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
 		}
 		if (sw_is_cool(w)) {
 			bm_frame_t *f = sw_frame(w);
-			if (!try_pin(f))
-				continue;             /* reserved for eviction: retry */
+			if (!try_pin(f)) {
+				xtc_yield();          /* reserved for eviction: yield */
+				continue;
+			}
 			if (atomic_compare_exchange_strong(slot, &w, sw_hot(f))) {
 				atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
 				atomic_fetch_add_explicit(&bm->s_rescues, 1, memory_order_relaxed);
@@ -642,15 +708,14 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
 			 * would otherwise double-own the frame (published AND back
 			 * on the free list) and corrupt the free list.  While it is
 			 * BM_LOADED below, eviction skips it by state anyway. */
-			atomic_store_explicit(&f->pin, 1, memory_order_release);
+			claim_frame(f);
 			atomic_store_explicit(&f->state, BM_LOADED, memory_order_relaxed);
 			f->pid = pid;
 			f->parent = slot;
 			atomic_store_explicit(&f->dirty, 0, memory_order_relaxed);
 			atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
 			if (do_io(bm, f->page, pid, 0) != 0) {
-				atomic_store_explicit(&f->pin, 0, memory_order_release);
-				free_push(bm, f);
+				free_push(bm, f);   /* sets state=FREE then pin=0 */
 				return XTC_E_INTERNAL;
 			}
 			atomic_store_explicit(&f->state,
@@ -668,8 +733,9 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
 				*out_frame = f;
 				return XTC_OK;
 			}
-			/* Someone else resolved it; unpin, drop our frame, retry. */
-			atomic_store_explicit(&f->pin, 0, memory_order_release);
+			/* Someone else resolved it; drop our frame, retry.
+			 * free_push sets state=FREE before pin=0, so no eviction
+			 * sweep can reserve it in a COOL+pin==0 window. */
 			free_push(bm, f);
 			continue;
 		}
@@ -687,6 +753,7 @@ bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty)
 			frame->dirty_seq = atomic_fetch_add_explicit(&bm->dirty_clock,
 			    1, memory_order_relaxed);
 	}
+	atomic_store_explicit(&frame->ref, 1, memory_order_relaxed);  /* CLOCK: recently used */
 	atomic_fetch_sub_explicit(&frame->pin, 1, memory_order_release);
 }
 
@@ -728,6 +795,9 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 		 * the table after acquiring a frame. */
 		f = get_free_frame(bm);
 		if (f == NULL) return XTC_E_RESOURCE;
+		/* pid-mode: no swip references this frame, so no stale fixer can
+		 * transiently pin it -- a plain store is safe (and claim_frame's
+		 * CAS-wait would deadlock against a latch-coupling pin). */
 		atomic_store_explicit(&f->pin, 1, memory_order_release);
 		atomic_store_explicit(&f->state, BM_LOADED, memory_order_relaxed);
 		f->pid = pid;
@@ -735,7 +805,7 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 		f->via_pid = 1;
 		atomic_store_explicit(&f->dirty, 0, memory_order_relaxed);
 		atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
-		if (do_io(bm, f->page, pid, 0) != 0) { atomic_store_explicit(&f->pin, 0, memory_order_release); free_push(bm, f); return XTC_E_INTERNAL; }
+		if (do_io(bm, f->page, pid, 0) != 0) { free_push(bm, f); return XTC_E_INTERNAL; }
 		/* Publish: under the table lock, re-check no one beat us. */
 		{
 			uint32_t b = (uint32_t)(pid % bm->nbucket);
