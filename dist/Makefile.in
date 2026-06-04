@@ -84,6 +84,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/orc/reg.c \
 	$(srcdir)/../src/orc/svr.c \
 	$(srcdir)/../src/orc/app.c \
+	$(srcdir)/../src/orc/osproc.c \
 	$(srcdir)/../src/ptc/lock_lr.c \
 	$(srcdir)/../src/ptc/lock_lw.c \
 	$(srcdir)/../src/ptc/lock_mgr.c \
@@ -135,6 +136,7 @@ LIB_OBJS	= \
 	reg.o \
 	svr.o \
 	app.o \
+	osproc.o \
 	lock_lr.o \
 	lock_lw.o \
 	lock_mgr.o \
@@ -194,6 +196,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_reg \
 		  test_svr \
 		  test_app \
+		  test_osproc \
 		  test_mctx \
 		  test_slab \
 		  test_slab_shm \
@@ -387,6 +390,9 @@ svr.o: $(srcdir)/../src/orc/svr.c xtc_config.h
 
 app.o: $(srcdir)/../src/orc/app.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/app.c
+
+osproc.o: $(srcdir)/../src/orc/osproc.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/osproc.c
 
 lock_lr.o: $(srcdir)/../src/ptc/lock_lr.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/lock_lr.c
@@ -733,6 +739,12 @@ test_app: $(srcdir)/../test/m10/test_app.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
 		-o $@ $(srcdir)/../test/m10/test_app.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_osproc: $(srcdir)/../test/m10/test_osproc.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_osproc.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M11 tests.

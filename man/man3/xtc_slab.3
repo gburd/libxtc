@@ -13,6 +13,8 @@
 .Nm xtc_slab_offset ,
 .Nm xtc_slab_resolve ,
 .Nm xtc_slab_pressure_listen ,
+.Nm xtc_slab_pressure_listen_ex ,
+.Nm xtc_slab_pressure_stop ,
 .Nm xtc_slab_reaper_spawn
 .Nd slab + magazine allocator
 .Sh SYNOPSIS
@@ -36,6 +38,10 @@
 .Fn xtc_slab_resolve "const xtc_slab_t *slab" "xtc_slab_off_t off"
 .Ft int
 .Fn xtc_slab_pressure_listen "const char *psi_path" "xtc_slab_pressure_fn fn" "void *user"
+.Ft int
+.Fn xtc_slab_pressure_listen_ex "const char *psi_path" "xtc_slab_pressure_fn fn" "void *user" "xtc_slab_pressure_t **out"
+.Ft int
+.Fn xtc_slab_pressure_stop "xtc_slab_pressure_t *handle"
 .Ft int
 .Fn xtc_slab_reaper_spawn "xtc_loop_t *loop" "int64_t interval_ns" "xtc_pid_t *out_pid"
 .Sh DESCRIPTION
