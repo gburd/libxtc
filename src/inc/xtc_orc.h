@@ -42,24 +42,37 @@ typedef enum xtc_restart_policy {
 	XTC_RESTART_TEMPORARY  = 2     /* never restart */
 } xtc_restart_policy_t;
 
+/* Forward declaration: the L2 multi-loop executor (xtc_exec.h).  A
+ * supervisor may be given one so it places children across loops and
+ * owns the executor's stop on its own exit. */
+struct xtc_exec;
+
 typedef struct xtc_child_spec {
 	const char           *name;       /* optional, for logs */
 	xtc_proc_fn           fn;
 	void                 *arg;
 	xtc_restart_policy_t  policy;
 	size_t                mailbox_cap; /* 0 = default */
+	int                   loop;        /* exec loop index to place this
+	                                    * child on (only when the supervisor
+	                                    * has an exec); 0 = loop 0 */
 } xtc_child_spec_t;
 
 typedef struct xtc_sup_opts {
 	xtc_restart_strategy_t strategy;
 	int                    max_restarts;     /* default 3 */
 	int64_t                period_ns;        /* default 5 s */
+	struct xtc_exec       *exec;             /* optional: place children
+	                                          * across its loops and stop
+	                                          * it when the supervisor exits;
+	                                          * NULL = single-loop */
 } xtc_sup_opts_t;
 
 #define XTC_SUP_OPTS_DEFAULT { \
 	.strategy     = XTC_SUP_ONE_FOR_ONE, \
 	.max_restarts = 3, \
-	.period_ns    = 5LL * 1000 * 1000 * 1000 \
+	.period_ns    = 5LL * 1000 * 1000 * 1000, \
+	.exec         = NULL \
 }
 
 typedef struct xtc_supervisor xtc_supervisor_t;
