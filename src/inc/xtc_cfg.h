@@ -104,6 +104,8 @@ typedef struct xtc_cfg_spec {
  *
  * PUBLIC: int  xtc_cfg_count __P((void));
  * PUBLIC: int  xtc_cfg_kind __P((const char *, xtc_cfg_kind_t *));
+ * PUBLIC: int  xtc_cfg_load_file __P((const char *));
+ * PUBLIC: int  xtc_cfg_reload __P((void));
  */
 
 int  xtc_cfg_register(const xtc_cfg_spec_t *spec);
@@ -125,5 +127,20 @@ int  xtc_cfg_set_enum(const char *name, int v);
 
 int  xtc_cfg_count(void);
 int  xtc_cfg_kind(const char *name, xtc_cfg_kind_t *out);
+
+/* Load a postgresql.conf-style `name = value` file: per-line, with `#`
+ * comments and optional quotes; each value parsed per the variable's
+ * registered kind and applied via xtc_cfg_set_* (bounds/validators
+ * apply).  Unknown names and bad values are skipped.  Returns the
+ * count applied (>= 0), XTC_E_INVAL (NULL path), or XTC_E_IO (open
+ * failed).  Remembers the path for xtc_cfg_reload. */
+int  xtc_cfg_load_file(const char *path);
+
+/* Re-read the file last loaded by xtc_cfg_load_file.  Meant to back a
+ * SIGHUP handler, but is NOT async-signal-safe (uses stdio and the
+ * registry lock): set a flag in the handler and call this from the
+ * event loop.  Returns the applied count, XTC_E_INVAL (no file loaded),
+ * or XTC_E_IO. */
+int  xtc_cfg_reload(void);
 
 #endif /* XTC_CFG_H */
