@@ -1,0 +1,144 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd June 3, 2026
+.Dt XTC_OSPROC 3
+.Os
+.Sh NAME
+.Nm xtc_osproc_spawn ,
+.Nm xtc_osproc_pid ,
+.Nm xtc_osproc_ctrl_fd ,
+.Nm xtc_osproc_signal ,
+.Nm xtc_osproc_try_wait ,
+.Nm xtc_osproc_wait ,
+.Nm xtc_osproc_destroy
+.Nd OS-process spawn, control socket, and lifecycle
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_osproc.h
+.Ft int
+.Fn xtc_osproc_spawn "const xtc_osproc_opts_t *opts" "xtc_osproc_t **out"
+.Ft long
+.Fn xtc_osproc_pid "const xtc_osproc_t *p"
+.Ft int
+.Fn xtc_osproc_ctrl_fd "const xtc_osproc_t *p"
+.Ft int
+.Fn xtc_osproc_signal "const xtc_osproc_t *p" "int sig"
+.Ft int
+.Fn xtc_osproc_try_wait "xtc_osproc_t *p" "int *status"
+.Ft int
+.Fn xtc_osproc_wait "xtc_osproc_t *p" "int *status" "int64_t timeout_ns"
+.Ft void
+.Fn xtc_osproc_destroy "xtc_osproc_t *p"
+.Sh DESCRIPTION
+These functions run work in a separate operating-system process -- the
+.Dq default-to-fork
+tier -- as opposed to
+.Xr xtc_proc 3 ,
+which spawns an in-process fiber.
+Use this tier for un-cooperative or untrusted work that must not run in
+a loop thread, and for one-process-per-connection isolation.
+.Pp
+.Fn xtc_osproc_spawn
+forks a child described by
+.Fa opts .
+Exactly one of
+.Va opts->argv
+(the child
+.Xr execvp 3 Ns s
+a program) or
+.Va opts->fn
+(the child runs
+.Fn fn ctrl_fd arg
+and
+.Xr _exit 2 Ns s
+with its return value) must be set.
+When
+.Va opts->ctrl_socket
+is non-zero an
+.Dv AF_UNIX
+.Dv SOCK_STREAM
+socketpair is created; the parent end is returned by
+.Fn xtc_osproc_ctrl_fd
+(it is
+.Dv O_NONBLOCK
+and
+.Dv O_CLOEXEC ,
+pollable with
+.Xr xtc_proc 3
+or wrappable with
+.Xr xtc_net 3 ) ,
+and the child end is delivered to a forked callback as its
+.Fa ctrl_fd
+argument or, for an exec'd program, in the environment variable
+.Ev XTC_CTRL_FD .
+.Pp
+.Fn xtc_osproc_signal
+sends
+.Fa sig
+to the child.
+.Fn xtc_osproc_try_wait
+reaps the child without blocking, returning
+.Dv XTC_OK
+and the raw
+.Xr waitpid 2
+status if it has exited or
+.Dv XTC_E_AGAIN
+if it is still running.
+.Fn xtc_osproc_wait
+parks the calling fiber until the child exits (or
+.Fa timeout_ns
+elapses; a negative value waits forever), then reaps it; it never
+blocks the loop thread.
+.Fn xtc_osproc_destroy
+closes the control socket, releases the handle, and best-effort reaps
+an already-exited child; it does not kill a still-running child.
+.Sh IMPLEMENTATION NOTES
+On Linux (>= 5.3) a
+.Xr pidfd 2
+backs
+.Fn xtc_osproc_wait
+so the caller parks on a readable descriptor with no process-wide
+.Dv SIGCHLD
+handler; elsewhere
+.Fn xtc_osproc_wait
+falls back to a cooperative
+.Xr waitpid 2
+.Dv WNOHANG
+poll that yields between probes.
+The library never installs a
+.Dv SIGCHLD
+handler, so it does not collide with an embedder's signal handling.
+.Pp
+An xtc executor is multi-threaded;
+.Xr fork 2
+duplicates only the calling thread.
+The exec path is therefore safe.
+A
+.Va fn
+(fork-only) callback runs in a half-initialised child and must
+restrict itself to async-signal-safe work until it re-initialises its
+own runtime.
+.Sh RETURN VALUES
+.Fn xtc_osproc_spawn
+returns
+.Dv XTC_OK
+on success, or
+.Dv XTC_E_INVAL ,
+.Dv XTC_E_NOMEM ,
+or
+.Dv XTC_E_INTERNAL .
+The wait functions return
+.Dv XTC_OK
+(exited),
+.Dv XTC_E_AGAIN
+(running or timed out), or a negative error.
+On a platform without
+.Xr fork 2
+(Windows) every function returns
+.Dv XTC_E_NOSYS .
+.Sh SEE ALSO
+.Xr xtc_proc 3 ,
+.Xr xtc_net 3 ,
+.Xr xtc_sync 3
+.Sh AUTHORS
+The XTC Project.

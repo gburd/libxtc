@@ -1,0 +1,116 @@
+To: PG-on-xtc integration
+From: xtc-dev
+Subject: Re: PG-on-xtc follow-up -- R1 pair done (SEH + signal-safety), R2/R4 ready
+Date: 2026-05-31
+
+Both of your scheduled items are in main now, plus two you can pick up.
+
+----------------------------------------------------------------------
+R1  async-signal-safety pair             -- DONE
+----------------------------------------------------------------------
+The handler->siglongjmp window is walked through operation by
+operation in the source (src/ptc/proc.c) and is entirely
+async-signal-safe: thread-local reads of __current_proc and the
+recovery flags; writes of the one-shot recovery_armed clear and
+fault_sig; siglongjmp; and on the escalation path memset / sigemptyset
+/ sigaction / raise -- nothing else, no heap, stdio, or locking.  The
+flags the handler touches (recovery_armed, recovery_fired, crit_depth,
+fault_sig) are now volatile sig_atomic_t, so each access is single and
+untearable, and the faulting process is the only other writer (a
+synchronous fault interrupts its own instruction stream).  The
+cleanup -- at-exit hooks, lock-release-all, xtc_exit_self -- runs
+AFTER the longjmp in normal context, never in the handler, exactly
+your model.
+
+----------------------------------------------------------------------
+R1  Windows SEH                          -- DONE (no longer a no-op)
+----------------------------------------------------------------------
+xtc_fault_guard_install installs a Vectored Exception Handler.  On the
+parity set of the POSIX signals (access violation / misalignment /
+in-page error / int+float divide-by-zero / illegal+privileged
+instruction) it contains the fault and recovers to the armed frame;
+STACK_OVERFLOW and anything inside a critical section or with no armed
+frame escalate via EXCEPTION_CONTINUE_SEARCH, preserving the default
+crash disposition (your PANIC).
+
+One implementation note worth your time, since you will lean on this:
+recovery on Windows is a CONTEXT capture/restore, NOT setjmp/longjmp.
+xtc_proc_recovery_arm() captures with RtlCaptureContext (inline in the
+backend fn, like setjmp), and the VEH restores that CONTEXT via
+EXCEPTION_CONTINUE_EXECUTION -- the kernel reloads the registers and
+resumes at the capture point with no stack unwinding.  We tried the
+obvious longjmp-from-the-VEH first; on a fiber stack it walks unwind
+tables that no longer match and reliably corrupts the CRT heap.  The
+context restore does no unwinding and is clean.  Validated on the MSVC
+host: a real wild-pointer write is contained and the backend recovers,
+the loop completes, and it tears down cleanly.  (That last part also
+flushed out a latent Windows double-free in the fiber teardown, now
+fixed.)  POSIX behaviour is unchanged.
+
+The public surface is identical across platforms: arm with
+xtc_proc_recovery_arm(), nonzero return == contained fault; your F5
+spike needs no source change.
+
+----------------------------------------------------------------------
+R2  length-framed transport              -- READY, please rebase F7
+----------------------------------------------------------------------
+xtc_net_send_frame(fd, buf, len) / xtc_net_recv_frame(fd, &out,
+&out_len, max_len, timeout_ns) are in (src/inc/xtc_net.h, man
+xtc_net.3).  4-byte big-endian length prefix + payload; loop-aware --
+on a non-blocking fd they yield the calling fiber via xtc_proc_wait_fd
+on partial I/O (poll(2) fallback off a loop).  max_len is the OOM
+guard you asked for: a claimed length above it is rejected with
+XTC_E_RANGE before any allocation, so a peer cannot make the server
+allocate an arbitrary buffer.  XTC_E_AGAIN on timeout, XTC_E_INVAL on
+a mid-frame close, XTC_OK with *out==NULL for a zero-length frame.
+This is the ping: F7 can drop its hand-rolled framing.
+
+----------------------------------------------------------------------
+R4  SIMPLE_ONE_FOR_ONE (session pool)    -- DONE
+----------------------------------------------------------------------
+xtc_sup_add_child(sup, spec, &pid) adds a child to a running
+supervisor on demand; the supervisor proc owns the spawn + monitor.
+Start the pool with zero children (xtc_sup_start accepts n_children ==
+0) and grow it per session; TEMPORARY children are reclaimed (not
+restarted) on exit, which is the pool policy you want.  REST_FOR_ONE
+(your aux group) and ONE_FOR_ALL are also implemented + tested.
+
+----------------------------------------------------------------------
+R3  xtc_osproc_spawn                     -- DELIVERED (review the spec)
+----------------------------------------------------------------------
+Implemented ahead of your spec, as our best estimate of the
+default-to-fork tier's needs; treat src/inc/xtc_osproc.h as the spec
+for review and tell us what to change before we freeze it.
+
+  xtc_osproc_spawn(opts, &h)   fork+execvp a program, OR fork and run
+                               fn(ctrl_fd, arg) in the child; optional
+                               AF_UNIX control socketpair.
+  xtc_osproc_ctrl_fd(h)        parent end: O_NONBLOCK + O_CLOEXEC,
+                               pollable via xtc_proc_wait_fd / wrappable
+                               with xtc_net_send_frame/recv_frame.  The
+                               child finds its end in fn's ctrl_fd arg,
+                               or in $XTC_CTRL_FD for an exec'd program.
+  xtc_osproc_signal(h, sig)    SIGTERM/SIGKILL/SIGINT to the child.
+  xtc_osproc_try_wait(h, &st)  non-blocking reap (XTC_OK / XTC_E_AGAIN).
+  xtc_osproc_wait(h, &st, ns)  cooperative wait: parks the fiber on a
+                               Linux pidfd (no process-wide SIGCHLD
+                               handler); cooperative waitpid-poll
+                               fallback elsewhere.  Never blocks the
+                               loop thread.
+  xtc_osproc_destroy(h)        close ctrl socket + handle; best-effort
+                               reap of an already-exited child.
+
+Notes for review: (1) the library installs NO SIGCHLD handler -- exit
+is observed via pidfd or cooperative reaping, so it never collides with
+your postmaster's signal handling.  (2) fork in our multi-threaded
+executor duplicates only the calling thread; the exec path is safe, and
+a fork-only fn must stay async-signal-safe until it re-inits (the
+contract a PG backend already meets).  (3) Windows returns XTC_E_NOSYS
+(no fork).  Open questions for you: do you need fd inheritance control
+(an explicit keep-fds set) and an env/cwd override on the exec path,
+and a batch/group reap for the postmaster's many backends?
+
+Pin-to-spawn-loop (R5) stands; the lock ABI remains frozen at 0.4.0
+(R6).
+
+-- xtc-dev
