@@ -182,73 +182,64 @@ db_exec(sx_db *h, const char *sql, int64_t limit,
 	return db_exec_params(h, sql, NULL, 0, limit, out_buf, n_rows, err);
 }
 
-int
-db_exec_params(sx_db *h, const char *sql,
-        const struct quack_param *params, int n_params, int64_t limit,
-        quack_buf_t *out_buf, int64_t *n_rows, char **err)
+/* Bind ?1..?N from the request's params.  Returns 0 or -1 (*err set). */
+static int
+bind_params(sx_stmt *stmt, const struct quack_param *params, int n_params,
+            char **err)
 {
-	sx_stmt *stmt = NULL;
-	int rc;
-	int ncols;
-	int64_t rows = 0;
-	int wrote_cols = 0;
-
-	rc = sx_prepare(h, sql, -1, &stmt, NULL);
-	if (rc != SX_OK) {
-		const char *msg = sx_errmsg(h);
-		*err = strdup(msg ? msg : "prepare failed");
-		if (stmt) sx_finalize(stmt);
-		return -1;
-	}
-
-	/* Bind parameters (?1..?N) from the request, if any. */
-	if (n_params > 0) {
-		int pi;
-		for (pi = 0; pi < n_params; pi++) {
-			const struct quack_param *p = &params[pi];
-			int idx = pi + 1;
-			switch (p->type) {
-			case QUACK_P_INT:
-				rc = sx_bind_int64(stmt, idx, p->ival); break;
-			case QUACK_P_FLOAT:
-				rc = sx_bind_double(stmt, idx, p->dval); break;
-			case QUACK_P_TEXT:
-				rc = sx_bind_text(stmt, idx, p->sval,
-				    (int)p->slen); break;
-			case QUACK_P_BLOB: {
-				unsigned char *bb = NULL; int bn = 0;
-				if (decode_blob(p, &bb, &bn) != 0) {
-					*err = strdup("bad blob param");
-					sx_finalize(stmt);
-					return -1;
-				}
-				rc = sx_bind_blob(stmt, idx, bb, bn);
-				free(bb);
-				break;
+	int pi, rc;
+	for (pi = 0; pi < n_params; pi++) {
+		const struct quack_param *p = &params[pi];
+		int idx = pi + 1;
+		switch (p->type) {
+		case QUACK_P_INT:
+			rc = sx_bind_int64(stmt, idx, p->ival); break;
+		case QUACK_P_FLOAT:
+			rc = sx_bind_double(stmt, idx, p->dval); break;
+		case QUACK_P_TEXT:
+			rc = sx_bind_text(stmt, idx, p->sval, (int)p->slen); break;
+		case QUACK_P_BLOB: {
+			unsigned char *bb = NULL; int bn = 0;
+			if (decode_blob(p, &bb, &bn) != 0) {
+				*err = strdup("bad blob param"); return -1;
 			}
-			case QUACK_P_NULL:
-			default:
-				rc = sx_bind_null(stmt, idx); break;
-			}
-			if (rc != SX_OK) {
-				*err = strdup("bind failed");
-				sx_finalize(stmt);
-				return -1;
-			}
+			rc = sx_bind_blob(stmt, idx, bb, bn);
+			free(bb);
+			break;
 		}
+		case QUACK_P_NULL:
+		default:
+			rc = sx_bind_null(stmt, idx); break;
+		}
+		if (rc != SX_OK) { *err = strdup("bind failed"); return -1; }
 	}
+	return 0;
+}
 
-	ncols = sx_column_count(stmt);
+/* Step a prepared statement to completion.  When `emit` is set, write
+ * the column header (once) and each row to out_buf; otherwise step for
+ * side effects only (multi-statement: non-final statements).  Sets
+ * *rows_out to the streamed row count.  Returns 0 or -1 (*err set). */
+static int
+exec_stmt(sx_db *h, sx_stmt *stmt, int64_t limit, int emit,
+          quack_buf_t *out_buf, int *ncols_out, int64_t *rows_out,
+          char **err)
+{
+	int ncols = sx_column_count(stmt);
+	int wrote_cols = 0;
+	int64_t rows = 0;
+	int rc;
 
+	*ncols_out = ncols;
 	for (;;) {
 		rc = sx_step(stmt);
 		if (rc == SX_DONE) break;
 		if (rc != SX_ROW) {
 			const char *msg = sx_errmsg(h);
 			*err = strdup(msg ? msg : "step failed");
-			sx_finalize(stmt);
 			return -1;
 		}
+		if (!emit) { rows++; continue; }   /* consume silently */
 
 		if (!wrote_cols && ncols > 0) {
 			int i;
@@ -261,7 +252,6 @@ db_exec_params(sx_db *h, const char *sql,
 			if (quack_emit_cols_end(out_buf) < 0) goto oom;
 			wrote_cols = 1;
 		}
-
 		if (ncols > 0) {
 			int i;
 			if (quack_emit_row_begin(out_buf) < 0) goto oom;
@@ -270,56 +260,124 @@ db_exec_params(sx_db *h, const char *sql,
 				switch (t) {
 				case SX_INTEGER:
 					if (quack_emit_row_int(out_buf, i,
-					    sx_column_int64(stmt, i)) < 0)
-						goto oom;
+					    sx_column_int64(stmt, i)) < 0) goto oom;
 					break;
 				case SX_FLOAT:
 					if (quack_emit_row_double(out_buf, i,
-					    sx_column_double(stmt, i)) < 0)
-						goto oom;
+					    sx_column_double(stmt, i)) < 0) goto oom;
 					break;
 				case SX_TEXT: {
 					const char *s = sx_column_text(stmt, i);
 					int n = sx_column_bytes(stmt, i);
 					if (quack_emit_row_text(out_buf, i,
-					    s ? s : "", (size_t)n) < 0)
-						goto oom;
+					    s ? s : "", (size_t)n) < 0) goto oom;
 					break;
 				}
 				case SX_BLOB: {
 					const void *p = sx_column_blob(stmt, i);
 					int n = sx_column_bytes(stmt, i);
 					if (quack_emit_row_blob(out_buf, i, p,
-					    (size_t)n) < 0)
-						goto oom;
+					    (size_t)n) < 0) goto oom;
 					break;
 				}
 				case SX_NULL:
 				default:
-					if (quack_emit_row_null(out_buf, i) < 0)
-						goto oom;
+					if (quack_emit_row_null(out_buf, i) < 0) goto oom;
 					break;
 				}
 			}
 			if (quack_emit_row_end(out_buf) < 0) goto oom;
 		}
-
 		rows++;
 		if (limit > 0 && rows >= limit) break;
 	}
-
-	/* For DML/DDL with no result set, return changes() as the count. */
-	if (ncols == 0)
-		rows = sx_changes(h);
-
-	if (quack_emit_done(out_buf, rows) < 0) goto oom;
-
-	*n_rows = rows;
-	sx_finalize(stmt);
+	*rows_out = rows;
 	return 0;
-
 oom:
 	*err = strdup("oom");
-	sx_finalize(stmt);
 	return -1;
+}
+
+/* True if `s` holds another statement (non-whitespace, non-';'). */
+static int
+has_more_sql(const char *s)
+{
+	if (s == NULL) return 0;
+	while (*s) {
+		if (*s != ' ' && *s != '\t' && *s != '\r' &&
+		    *s != '\n' && *s != ';')
+			return 1;
+		s++;
+	}
+	return 0;
+}
+
+int
+db_exec_params(sx_db *h, const char *sql,
+        const struct quack_param *params, int n_params, int64_t limit,
+        quack_buf_t *out_buf, int64_t *n_rows, char **err)
+{
+	const char *cur = sql;
+	int64_t rows = 0;
+	int     last_ncols = 0;
+	int     ran_any = 0;
+
+	for (;;) {
+		sx_stmt    *stmt = NULL;
+		const char *tail = NULL;
+		int         is_last, rc;
+
+		rc = sx_prepare(h, cur, -1, &stmt, &tail);
+		if (rc != SX_OK) {
+			const char *msg = sx_errmsg(h);
+			*err = strdup(msg ? msg : "prepare failed");
+			if (stmt) sx_finalize(stmt);
+			return -1;
+		}
+		if (stmt == NULL) {
+			/* Blank / comment-only fragment; advance or finish. */
+			if (!has_more_sql(tail)) break;
+			cur = tail;
+			continue;
+		}
+		is_last = !has_more_sql(tail);
+
+		if (n_params > 0 && !is_last) {
+			*err = strdup("parameters require a single statement");
+			sx_finalize(stmt);
+			return -1;
+		}
+		if (n_params > 0 && bind_params(stmt, params, n_params, err) != 0) {
+			sx_finalize(stmt);
+			return -1;
+		}
+
+		/* Stream rows only for the final statement; earlier ones run
+		 * for side effects (multi-statement batch). */
+		if (exec_stmt(h, stmt, limit, is_last, out_buf,
+		    &last_ncols, &rows, err) != 0) {
+			sx_finalize(stmt);
+			return -1;
+		}
+		sx_finalize(stmt);
+		ran_any = 1;
+		if (is_last) break;
+		cur = tail;
+	}
+
+	if (!ran_any) {
+		*err = strdup("empty query");
+		return -1;
+	}
+
+	/* DML/DDL final statement: report changes() instead of a row count. */
+	if (last_ncols == 0)
+		rows = sx_changes(h);
+
+	if (quack_emit_done(out_buf, rows) < 0) {
+		*err = strdup("oom");
+		return -1;
+	}
+	*n_rows = rows;
+	return 0;
 }
