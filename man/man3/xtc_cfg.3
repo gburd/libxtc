@@ -11,7 +11,9 @@
 .Nm xtc_cfg_register_string ,
 .Nm xtc_cfg_register_enum ,
 .Nm xtc_cfg_set ,
-.Nm xtc_cfg_get
+.Nm xtc_cfg_get ,
+.Nm xtc_cfg_load_file ,
+.Nm xtc_cfg_reload
 .Nd typed runtime configuration registry
 .Sh SYNOPSIS
 .In xtc.h
@@ -28,6 +30,10 @@
 .Fn xtc_cfg_register_string "const char *name" "char *buf" "size_t buflen" "const char *default_v" "const char *help"
 .Ft int
 .Fn xtc_cfg_set "const char *name" "const char *value"
+.Ft int
+.Fn xtc_cfg_load_file "const char *path"
+.Ft int
+.Fn xtc_cfg_reload "void"
 .Sh DESCRIPTION
 .Nm xtc_cfg
 is a typed runtime configuration registry, modeled on PostgreSQL's
