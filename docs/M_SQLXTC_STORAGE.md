@@ -662,3 +662,71 @@ isolation.
     per partition, as the free list already is) before adding writer
     parallelism.  LeanStore's partitioning is the precedent and the
     mitigation.
+
+## Remaining arc: making xstore the default backend (sequenced plan)
+
+Status at this checkpoint: the storage engine (bufmgr + B-link tree +
+WAL + recovery + checkpoint) and the xstore MVCC virtual table are
+built and tested, and xstore is reachable via `CREATE VIRTUAL TABLE t
+USING xstore`.  Snapshot MVCC, transaction-level isolation
+(xBegin/xCommit write buffering + one commit timestamp), and Cahill SSI
+serializability with predicate (range) locking are implemented and
+enforced (xs_sync returns SQLITE_BUSY on a pivot) -- see test_xstore.c.
+Quack supports int/float/text/blob/null bind params, multi-statement
+batches, and a per-connection prepared-statement cache.
+
+What remains to make sqlxtc fully xtc-native, in dependency order.
+Each step is self-contained and independently testable; do them as
+separate commits.
+
+1. **Multi-column rowstore (xstore.c).**  Today the vtab is hardwired
+   to `x(k INTEGER PRIMARY KEY, v)` with the version payload a single
+   blob.  Make it ADDITIVE so existing tests stay green:
+     - xCreate/xConnect parse the column list from the
+       `CREATE VIRTUAL TABLE t USING xstore(col1, col2, ...)` args
+       (argv[3..]); with no args keep the current k/v default exactly.
+     - Add a record codec: encode N SQLite values into one version blob
+       `[ncol:u8][per col: type:u8, payload]` (0 null, 1 int64, 2
+       double, 3 text len+bytes, 4 blob len+bytes); decode the i-th.
+     - xColumn decodes column i from the version record; xUpdate encodes
+       all argv values into the record.  The MVCC key stays (rowid,
+       commit_ts); only the payload shape changes.
+   Test: a 3-column xstore table round-trips every type; the existing
+   k/v + MVCC + SSI tests still pass.
+
+2. **Persisted catalog.**  Store table definitions (name, column list,
+   table-id) in a reserved catalog tree/table keyed by table-id, so the
+   rowstore is multi-table and survives restart.  Replay the catalog at
+   startup (after bt_reopen) to re-declare the vtabs.  Key each table's
+   versions by (table-id, rowid, commit_ts).
+   Test: create two tables, write rows, restart, read them back.
+
+3. **Transparent CREATE TABLE -> xstore.**  In the SQL pre-processor
+   (sql_parse / conn), rewrite a plain `CREATE TABLE t (cols)` into
+   `CREATE VIRTUAL TABLE t USING xstore(cols)` so no opt-in is needed
+   and plain DDL lands in the xtc-native engine.  Keep an escape hatch
+   (a pragma or prefix) to fall back to SQLite's native btree for
+   comparison.
+   Test: `CREATE TABLE t(a,b); INSERT; SELECT` runs entirely on xstore.
+
+4. **connection-per-proc parallelism (main.c).**  Replace the single
+   app loop + one SERIALIZED shared handle with an N-loop executor;
+   accept on one loop and spawn each connection's proc round-robin
+   across loops; switch to SQLITE_CONFIG_MULTITHREAD with a per-
+   connection handle (db_handle_get already returns owned=1 per-conn
+   handles for non-shared mode).  This is gated on steps 1-3 so the
+   per-connection handles share one xstore catalog + B-tree (a shared
+   in-memory SQLite database cannot span handles, but the xtc-native
+   engine -- a process-global bufmgr/B-tree -- can).  Then VDBE runs in
+   parallel across cores.
+   Test: a multi-loop server serving concurrent clients with linear
+   read scaling; writers serialize at the B-tree latch, not a global
+   handle mutex.
+
+5. **ARIES recovery remainder (M_SQLXTC_WAL.md sec 3).**  Physiological
+   SMO logging + page LSNs for STEAL-safe restart from a torn page
+   file (superblock + reopen + checkpoint + truncation already done).
+
+Highest-risk item remains the WAL flush-before-page-write ordering
+under concurrent eviction (step 5); the multi-column + catalog +
+routing steps (1-3) are mechanical and low-risk by comparison.

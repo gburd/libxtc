@@ -34,11 +34,17 @@
  *	latest) -- a time-travel / AS OF read that makes snapshot
  *	visibility observable from SQL.
  *
- *	STATUS: writes commit per-statement (autocommit) at a fresh
- *	timestamp.  Transaction-level snapshot isolation across multiple
- *	statements (write buffering + a single commit timestamp via
- *	xBegin/xCommit, merging mvcc.c's 2PC coordinator) and Cahill SSI
- *	serializability are the next steps in docs/M_SQLXTC_MVCC_SQL.md.
+ *	STATUS: implemented.  Transaction-level snapshot isolation spans
+ *	multiple statements -- xBegin captures one read snapshot, writes
+ *	buffer, and xCommit assigns a single commit timestamp and flushes
+ *	the whole transaction (so all of its rows share one xmin); a
+ *	multi-statement BEGIN..COMMIT (or separate Quack messages on the
+ *	same handle) forms one transaction.  Cahill SSI serializability is
+ *	enforced: xs_sync (2PC phase 1) calls ssi_in_conflict and returns
+ *	SQLITE_BUSY on a dangerous rw-antidependency pivot, rolling the
+ *	transaction back -- with predicate (range) locking so disjoint
+ *	readers do not falsely conflict.  See docs/M_SQLXTC_MVCC_SQL.md and
+ *	the scenario_serializable / SSI-range tests in test_xstore.c.
  */
 
 #include "xstore.h"
