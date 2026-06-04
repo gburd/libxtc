@@ -288,6 +288,7 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 
 int   sx_step(sx_stmt *st)        { return xsql_step((xsql_stmt *)st); }
 int   sx_reset(sx_stmt *st)       { return xsql_reset((xsql_stmt *)st); }
+int   sx_clear_bindings(sx_stmt *st) { return xsql_clear_bindings((xsql_stmt *)st); }
 void  sx_finalize(sx_stmt *st)    { (void)xsql_finalize((xsql_stmt *)st); }
 
 int
