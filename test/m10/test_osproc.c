@@ -1,0 +1,241 @@
+/*-
+ * Copyright (c) 2026, The XTC Project
+ * Use of this source code is governed by the ISC License,
+ * a copy of which is in the file LICENSE in the top-level directory
+ * of this distribution.
+ *
+ * test/m10/test_osproc.c -- xtc_osproc_spawn (R3) verification.
+ */
+
+#include "munit.h"
+#include "xtc.h"
+#include "xtc_loop.h"
+#include "xtc_proc.h"
+#include "xtc_osproc.h"
+#include "xtc_io.h"
+
+#include <signal.h>
+#include <stdatomic.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+#if !defined(_WIN32)
+
+/* ---- bad opts ---- */
+static MunitResult
+test_bad_opts(const MunitParameter p[], void *d)
+{
+	xtc_osproc_t *h = NULL;
+	xtc_osproc_opts_t o;
+	char *const argv[] = { "/bin/true", NULL };
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_osproc_spawn(NULL, &h), ==, XTC_E_INVAL);
+	memset(&o, 0, sizeof o);
+	/* neither argv nor fn */
+	munit_assert_int(xtc_osproc_spawn(&o, &h), ==, XTC_E_INVAL);
+	/* both argv and fn */
+	o.argv = argv;
+	o.fn   = (int (*)(int, void *))1;
+	munit_assert_int(xtc_osproc_spawn(&o, &h), ==, XTC_E_INVAL);
+	return MUNIT_OK;
+}
+
+/* ---- exec a program; reap with try_wait (off-loop) ---- */
+static int
+run_exec(char *const argv[], int *exitcode)
+{
+	xtc_osproc_t *h = NULL;
+	xtc_osproc_opts_t o;
+	int spins, st = 0, rc;
+
+	memset(&o, 0, sizeof o);
+	o.argv = argv;
+	if (xtc_osproc_spawn(&o, &h) != XTC_OK)
+		return -1;
+	munit_assert_int(xtc_osproc_pid(h), >, 0);
+	for (spins = 0; spins < 5000; spins++) {
+		rc = xtc_osproc_try_wait(h, &st);
+		if (rc == XTC_OK) break;
+		munit_assert_int(rc, ==, XTC_E_AGAIN);
+		{ struct timespec ts = { 0, 1000000 }; nanosleep(&ts, NULL); }
+	}
+	munit_assert_int(rc, ==, XTC_OK);
+	munit_assert_true(WIFEXITED(st));
+	*exitcode = WEXITSTATUS(st);
+	xtc_osproc_destroy(h);
+	return 0;
+}
+
+static MunitResult
+test_exec_true_false(const MunitParameter p[], void *d)
+{
+	char *const t[] = { "/bin/true", NULL };
+	char *const f[] = { "/bin/false", NULL };
+	int code = -1;
+	(void)p; (void)d;
+
+	munit_assert_int(run_exec(t, &code), ==, 0);
+	munit_assert_int(code, ==, 0);
+	munit_assert_int(run_exec(f, &code), ==, 0);
+	munit_assert_int(code, ==, 1);
+	return MUNIT_OK;
+}
+
+/* ---- fork callback + control socket + cooperative wait (on a loop) ---- */
+static _Atomic int g_ok;
+
+/* Child: send a known byte string on the control fd, then exit 7. */
+static int
+child_ping(int ctrl_fd, void *arg)
+{
+	const char *msg = "PING";
+	(void)arg;
+	if (ctrl_fd >= 0)
+		(void)write(ctrl_fd, msg, 4);
+	return 7;
+}
+
+static void
+parent_proc(void *arg)
+{
+	xtc_osproc_t *h = NULL;
+	xtc_osproc_opts_t o;
+	int cfd, st = 0, rc;
+	char buf[8];
+	uint32_t rev = 0;
+	size_t got = 0;
+	(void)arg;
+
+	memset(&o, 0, sizeof o);
+	o.fn = child_ping;
+	o.ctrl_socket = 1;
+	if (xtc_osproc_spawn(&o, &h) != XTC_OK) return;
+
+	cfd = xtc_osproc_ctrl_fd(h);
+	if (cfd < 0) { xtc_osproc_destroy(h); return; }
+
+	/* Read the 4-byte PING from the (non-blocking) parent end, parking
+	 * on readability via the loop. */
+	while (got < 4) {
+		ssize_t n = read(cfd, buf + got, sizeof buf - got);
+		if (n > 0) { got += (size_t)n; continue; }
+		if (n == 0) break;            /* child closed */
+		if (xtc_proc_wait_fd(cfd, XTC_IO_READABLE,
+		    2000LL * 1000 * 1000, &rev) != XTC_OK)
+			break;
+	}
+
+	rc = xtc_osproc_wait(h, &st, 2000LL * 1000 * 1000);
+	if (rc == XTC_OK && got == 4 && memcmp(buf, "PING", 4) == 0 &&
+	    WIFEXITED(st) && WEXITSTATUS(st) == 7)
+		atomic_store(&g_ok, 1);
+
+	xtc_osproc_destroy(h);
+}
+
+static MunitResult
+test_fn_ctrl_wait(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t pid;
+	(void)p; (void)d;
+	atomic_store(&g_ok, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, parent_proc, NULL, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_ok), ==, 1);
+	return MUNIT_OK;
+}
+
+/* ---- signal a long-lived child ---- */
+static _Atomic int g_sig_ok;
+
+static int
+child_sleep(int ctrl_fd, void *arg)
+{
+	(void)ctrl_fd; (void)arg;
+	for (;;) { struct timespec ts = { 1, 0 }; nanosleep(&ts, NULL); }
+	return 0;
+}
+
+static void
+signal_proc(void *arg)
+{
+	xtc_osproc_t *h = NULL;
+	xtc_osproc_opts_t o;
+	int st = 0;
+	(void)arg;
+
+	memset(&o, 0, sizeof o);
+	o.fn = child_sleep;
+	if (xtc_osproc_spawn(&o, &h) != XTC_OK) return;
+
+	munit_assert_int(xtc_osproc_signal(h, SIGTERM), ==, XTC_OK);
+	if (xtc_osproc_wait(h, &st, 2000LL * 1000 * 1000) == XTC_OK &&
+	    WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM)
+		atomic_store(&g_sig_ok, 1);
+	xtc_osproc_destroy(h);
+}
+
+static MunitResult
+test_signal(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t pid;
+	(void)p; (void)d;
+	atomic_store(&g_sig_ok, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, signal_proc, NULL, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_sig_ok), ==, 1);
+	return MUNIT_OK;
+}
+
+static MunitTest tests[] = {
+	{ "/bad_opts",     test_bad_opts,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/exec",         test_exec_true_false, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fn_ctrl_wait", test_fn_ctrl_wait,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/signal",       test_signal,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
+};
+
+#else  /* _WIN32: xtc_osproc is XTC_E_NOSYS; smoke that the stubs link */
+
+static MunitResult
+test_nosys(const MunitParameter p[], void *d)
+{
+	xtc_osproc_t *h = NULL;
+	xtc_osproc_opts_t o;
+	char *const argv[] = { "cmd", NULL };
+	(void)p; (void)d;
+	memset(&o, 0, sizeof o);
+	o.argv = argv;
+	munit_assert_int(xtc_osproc_spawn(&o, &h), ==, XTC_E_NOSYS);
+	return MUNIT_OK;
+}
+
+static MunitTest tests[] = {
+	{ "/nosys", test_nosys, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
+};
+
+#endif /* _WIN32 */
+
+static const MunitSuite suite = {
+	"/m10/osproc", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE
+};
+
+int
+main(int argc, char *argv[])
+{
+	return munit_suite_main(&suite, NULL, argc, argv);
+}
