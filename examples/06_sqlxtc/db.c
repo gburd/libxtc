@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "xtc_int.h"
 
@@ -101,15 +102,53 @@ db_create(const db_opts_t *opts, db_t **out)
 	db->path = opts->path ? opts->path : ":memory:";
 	db->res = opts->res;
 
-	/* An in-memory database has no file to share, so every private
-	 * handle would be a separate empty database: force one shared
-	 * handle.  A file-backed database defaults to a private handle
-	 * per connection -- concurrent executions, WAL readers running
-	 * alongside a writer -- unless the caller asked to share one. */
-	if (is_memory(db->path))
+	/* An in-memory database has no file to share, so separate handles
+	 * would each be a distinct empty database.  Single-handle mode (the
+	 * default) uses one shared handle for all connections.  Parallel
+	 * (connection-per-proc) mode instead wants a private handle per
+	 * connection running on its own loop; for :memory: that requires a
+	 * shared-cache URI so the handles share one in-memory database
+	 * (anchored by a keep-alive handle so it outlives any connection).
+	 * A file-backed database shares naturally (WAL: concurrent readers
+	 * + one writer), so per-connection handles need no special URI. */
+	if (opts->parallel) {
+		db->shared = 0;
+		if (is_memory(db->path)) {
+			/* Connection-per-proc needs a backing store the private
+			 * per-connection handles can share; a bare :memory: db
+			 * cannot span handles, and this build omits shared-cache.
+			 * Use a unique temp file in WAL mode (concurrent readers +
+			 * one writer); prefer tmpfs (/dev/shm) so it stays RAM-
+			 * backed and behaves like :memory: -- ephemeral, removed on
+			 * shutdown. */
+			char p[160];
+			const char *dir = (access("/dev/shm", W_OK) == 0)
+			    ? "/dev/shm" : "/tmp";
+			(void)snprintf(p, sizeof p, "%s/sqlxtc-%ld-%p.db",
+			    dir, (long)getpid(), (void *)db);
+			db->open_path = strdup(p);
+			if (db->open_path == NULL) { free(db); return XTC_E_NOMEM; }
+			db->owns_temp = 1;
+			/* Anchor handle: initialise + keep the temp db warm for the
+			 * server's lifetime. */
+			if (sx_open(db->open_path, &db->anchor) != SX_OK) {
+				if (db->anchor) sx_close(db->anchor);
+				free(db->open_path); free(db);
+				return XTC_E_INVAL;
+			}
+		} else {
+			db->open_path = strdup(db->path);
+			if (db->open_path == NULL) { free(db); return XTC_E_NOMEM; }
+		}
+	} else if (is_memory(db->path)) {
 		db->shared = 1;
-	else
+	} else {
 		db->shared = opts->shared;
+		if (!db->shared) {
+			db->open_path = strdup(db->path);
+			if (db->open_path == NULL) { free(db); return XTC_E_NOMEM; }
+		}
+	}
 
 	if (db->shared) {
 		int rc = sx_open(db->path, &db->sdb);
@@ -144,7 +183,47 @@ db_destroy(db_t *db)
 	if (!db) return;
 	if (db->cat) xtc_lrlock_destroy(db->cat);
 	if (db->sdb) sx_close(db->sdb);
+	if (db->anchor) sx_close(db->anchor);   /* drop the temp/anchor handle last */
+	/* Remove an ephemeral parallel-:memory: temp file + its WAL/SHM. */
+	if (db->owns_temp && db->open_path) {
+		char side[176];
+		(void)unlink(db->open_path);
+		(void)snprintf(side, sizeof side, "%s-wal", db->open_path);
+		(void)unlink(side);
+		(void)snprintf(side, sizeof side, "%s-shm", db->open_path);
+		(void)unlink(side);
+	}
+	free(db->open_path);
 	free(db);
+}
+
+int
+db_conn_open(db_t *db, sx_db **out, int *out_owned)
+{
+	if (db->shared && db->sdb) {
+		*out = db->sdb;
+		*out_owned = 0;
+		return XTC_OK;
+	}
+	{
+		sx_db *h = NULL;
+		const char *p = db->open_path ? db->open_path : db->path;
+		int rc = sx_open(p, &h);
+		if (rc != SX_OK) {
+			if (h) sx_close(h);
+			return XTC_E_INVAL;
+		}
+		*out = h;
+		*out_owned = 1;
+		return XTC_OK;
+	}
+}
+
+void
+db_conn_close(db_t *db, sx_db *h, int owned)
+{
+	(void)db;
+	if (owned && h) sx_close(h);
 }
 
 int

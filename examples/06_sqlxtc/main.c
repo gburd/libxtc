@@ -26,6 +26,7 @@
 
 #include "xtc.h"
 #include "xtc_app.h"
+#include "xtc_exec.h"
 #include "xtc_int.h"
 #include "xtc_io.h"
 #include "xtc_log.h"
@@ -58,6 +59,7 @@ typedef struct server_cfg {
 	const char *storage_path;        /* libxtc-native engine file (NULL = off) */
 	unsigned int storage_frames;     /* xstore buffer-pool frames (0 = default) */
 	int         shared_handle;       /* 1 default; --no-shared turns off */
+	int         threads;             /* worker loops; 0 = auto (ncpus) */
 	int         verbose;
 } server_cfg_t;
 
@@ -73,6 +75,7 @@ typedef struct server_cfg {
 	.storage_path = NULL, \
 	.storage_frames = 0,  \
 	.shared_handle = 1,   \
+	.threads = 1,         \
 	.verbose = 0          \
 }
 
@@ -80,8 +83,10 @@ typedef struct server {
 	server_cfg_t  cfg;
 	db_t         *db;
 	xtc_res_t    *res;
-	xtc_loop_t   *loop;
-	xtc_app_t    *app;
+	xtc_loop_t   *loop;            /* loop 0: listener, metrics, storage */
+	xtc_exec_t   *exec;           /* N worker loops */
+	int           n_loops;
+	_Atomic unsigned next_loop;   /* round-robin cursor for conn placement */
 	int           listen_fd;
 
 	_Atomic int      conn_count;
@@ -162,7 +167,6 @@ listener_proc(void *arg)
 
 	while (!atomic_load(&srv->shutdown_requested)) {
 		rate_limit_refill(srv);
-
 		for (;;) {
 			struct sockaddr_in addr;
 			socklen_t alen = sizeof addr;
@@ -208,7 +212,10 @@ listener_proc(void *arg)
 				opts.iops_cap = srv->cfg.max_iops;
 			}
 
-			if (conn_spawn(srv->loop, &opts, &pid) == XTC_OK) {
+			if (conn_spawn(xtc_exec_loop(srv->exec,
+			        (int)(atomic_fetch_add(&srv->next_loop, 1) %
+			              (unsigned)srv->n_loops)),
+			    &opts, &pid) == XTC_OK) {
 				server_inc_conn(srv);
 			} else {
 				close(fd);
@@ -230,6 +237,9 @@ listener_proc(void *arg)
 			}
 		}
 	}
+
+	/* Shutdown observed: stop the executor so xtc_exec_run returns. */
+	(void)xtc_exec_stop(srv->exec);
 }
 
 static void
@@ -268,6 +278,8 @@ usage(const char *prog)
 	    "      --storage=PATH    libxtc-native durable engine file\n"
 	    "      --storage-frames=N  xstore buffer-pool pages (0=default)\n"
 	    "      --no-shared       per-conn handle (vs one shared handle)\n"
+	    "  -t, --threads=N       worker loops (default 1; >1 = parallel,\n"
+	    "                        connection-per-proc across N OS threads)\n"
 	    "  -v, --verbose\n"
 	    "      --help\n",
 	    prog);
@@ -289,13 +301,14 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		{ "storage", required_argument, NULL, OPT_STORAGE },
 		{ "storage-frames", required_argument, NULL, OPT_STORAGE_FRAMES },
 		{ "no-shared", no_argument, NULL, OPT_NO_SHARED },
+		{ "threads", required_argument, NULL, 't' },
 		{ "verbose", no_argument, NULL, 'v' },
 		{ "help", no_argument, NULL, OPT_HELP },
 		{ NULL, 0, NULL, 0 }
 	};
 	int c;
 	*cfg = (server_cfg_t)SERVER_CFG_DEFAULT;
-	while ((c = getopt_long(argc, argv, "h:p:d:c:m:n:i:D:v",
+	while ((c = getopt_long(argc, argv, "h:p:d:c:m:n:i:D:t:v",
 	                        lo, NULL)) != -1) {
 		switch (c) {
 		case 'h': cfg->host = optarg; break;
@@ -306,6 +319,7 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		case 'n': cfg->max_clients = atoi(optarg); break;
 		case 'i': cfg->max_iops = atoll(optarg); break;
 		case 'D': cfg->max_databases = atoi(optarg); break;
+		case 't': cfg->threads = atoi(optarg); break;
 		case OPT_STORAGE: cfg->storage_path = optarg; break;
 		case OPT_STORAGE_FRAMES: cfg->storage_frames = (unsigned)atoi(optarg); break;
 		case 'v': cfg->verbose = 1; break;
@@ -322,13 +336,11 @@ main(int argc, char **argv)
 {
 	server_t *srv = &g_server;
 	server_cfg_t cfg;
-	xtc_app_opts_t app_opts = XTC_APP_OPTS_DEFAULT;
 	xtc_log_opts_t log_opts = XTC_LOG_OPTS_DEFAULT;
 	xtc_log_t *log;
 	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
 	xtc_tcp_opts_t tcp_opts = XTC_TCP_OPTS_DEFAULT;
 	db_opts_t db_opts = DB_OPTS_DEFAULT;
-	xtc_child_spec_t kids[1];
 	xtc_pid_t metrics_pid;
 	int rc;
 
@@ -351,8 +363,12 @@ main(int argc, char **argv)
 	if (cfg.cores > 0) pin_to_cores(cfg.cores);
 
 	/* Engine global config: install the xtc_amutex-backed mutex
-	 * methods, the xtc-allocator-backed memory methods, and the safe
-	 * (serialized) threading mode BEFORE the first open. */
+	 * methods and the xtc-allocator-backed memory methods BEFORE the
+	 * first open.  Threading mode depends on the connection model:
+	 * connection-per-proc (--threads != 1) gives each connection a
+	 * private handle on its own loop, so MULTITHREAD is correct and
+	 * avoids per-call mutexing; the single-shared-handle mode needs
+	 * SERIALIZED because many fibers interleave on one handle. */
 	rc = sx_config_mutex(mutex_methods());
 	if (rc != SX_OK) {
 		fprintf(stderr,
@@ -365,10 +381,11 @@ main(int argc, char **argv)
 		        "sx_config_mem failed: %d\n", rc);
 		/* Continue with default allocator; not fatal. */
 	}
-	rc = sx_config_serialized();
-	if (rc != SX_OK) {
-		fprintf(stderr,
-		        "sx_config_serialized failed: %d\n", rc);
+	{
+		int parallel = (cfg.threads != 1);
+		rc = parallel ? sx_config_multithread() : sx_config_serialized();
+		if (rc != SX_OK)
+			fprintf(stderr, "sx_config threading failed: %d\n", rc);
 	}
 	/* Route the engine's page cache through an xtc_slab (one
 	 * object-size class per cache).  Must precede sx_init(). */
@@ -402,6 +419,7 @@ main(int argc, char **argv)
 	/* Database. */
 	db_opts.path = cfg.db_path;
 	db_opts.shared = cfg.shared_handle;
+	db_opts.parallel = (cfg.threads != 1);   /* per-conn handles when >1 */
 	db_opts.res = srv->res;
 	if (db_create(&db_opts, &srv->db) != XTC_OK) {
 		fprintf(stderr, "db_create failed\n"); return 1;
@@ -419,38 +437,42 @@ main(int argc, char **argv)
 
 	setup_signals();
 
-	app_opts.name = "sqlxtc";
-	app_opts.sup.strategy = XTC_SUP_ONE_FOR_ONE;
-	app_opts.sup.max_restarts = 10;
-	app_opts.sup.period_ns = 60LL * 1000 * 1000 * 1000;
-	if (xtc_app_create(&app_opts, &srv->app) != XTC_OK) {
-		fprintf(stderr, "app create failed\n"); return 1;
+	/* Multi-loop executor: loop 0 hosts the listener, metrics, and the
+	 * storage background procs; connections are spawned round-robin
+	 * across all loops so they execute SQL in parallel.  (--threads <= 0
+	 * auto-sizes to the CPU count.) */
+	if (xtc_exec_init(&srv->exec, cfg.threads) != XTC_OK) {
+		fprintf(stderr, "exec init failed\n"); return 1;
 	}
-	srv->loop = xtc_app_loop(srv->app);
+	srv->n_loops = xtc_exec_n_loops(srv->exec);
+	srv->loop = xtc_exec_loop(srv->exec, 0);
+	atomic_init(&srv->next_loop, 0);
 
-	memset(kids, 0, sizeof kids);
-	kids[0].name = "listener";
-	kids[0].fn = listener_proc;
-	kids[0].arg = srv;
-	kids[0].policy = XTC_RESTART_PERMANENT;
-
-	if (xtc_app_start(srv->app, kids, 1) != XTC_OK) {
-		fprintf(stderr, "app start failed\n"); return 1;
+	/* Spawn the listener on loop 0 (procs spawned before xtc_exec_run
+	 * are queued and run when the loops start). */
+	{
+		xtc_proc_opts_t po = { 0 };
+		xtc_pid_t lpid;
+		po.name = "listener";
+		if (xtc_proc_spawn(srv->loop, listener_proc, srv, &po, &lpid)
+		    != XTC_OK) {
+			fprintf(stderr, "listener spawn failed\n"); return 1;
+		}
 	}
 
-	/* Now the loop exists: start the storage engine's background
-	 * procs (group-commit WAL writer, page provider, trickler). */
+	/* Start the storage engine's background procs (group-commit WAL
+	 * writer, page provider, trickler) on loop 0. */
 	if (cfg.storage_path != NULL)
 		(void)sx_storage_run(srv->loop);
 
 	(void)metrics_spawn(srv->loop, srv->res, &srv->conn_count,
 	                    &srv->queries_total, &metrics_pid);
 
-	XTC_LOG_INFO_F("sqlxtc ready (max_clients=%d max_memory=%lld)",
-	               cfg.max_clients, (long long)cfg.max_memory);
+	XTC_LOG_INFO_F("sqlxtc ready (loops=%d max_clients=%d max_memory=%lld)",
+	               srv->n_loops, cfg.max_clients, (long long)cfg.max_memory);
 	xtc_log_drain(log);
 
-	xtc_app_run(srv->app);
+	xtc_exec_run(srv->exec);   /* blocks until the listener calls exec_stop */
 
 	XTC_LOG_INFO_F("sqlxtc shutting down");
 	xtc_log_drain(log);
@@ -458,7 +480,7 @@ main(int argc, char **argv)
 	db_destroy(srv->db);
 	if (cfg.storage_path != NULL)
 		sx_storage_close();        /* checkpoint + stop procs + close */
-	xtc_app_destroy(srv->app);
+	(void)xtc_exec_fini(srv->exec);
 	free(srv->res);
 	xtc_log_destroy(log);
 	(void)sx_shutdown();
