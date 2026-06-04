@@ -92,11 +92,17 @@ typedef struct conn_state {
 	int        closed;
 
 	/* Prepared-statement cache (one slot): cached_stmt holds the
-	 * statement last prepared for cached_sql on a stable shared db
-	 * handle; reused (reset + re-bind) when the next query text matches.
+	 * statement last prepared for cached_sql on the connection's handle;
+	 * reused (reset + re-bind) when the next query text matches.
 	 * Finalized when the text changes or the connection closes. */
 	char      *cached_sql;
 	sx_stmt   *cached_stmt;
+
+	/* Connection-lifetime engine handle (opened in conn_proc, closed at
+	 * teardown).  h_owned == 1 when this is a private per-connection
+	 * handle (connection-per-proc), 0 when it is the shared handle. */
+	sx_db     *h_conn;
+	int        h_owned;
 } conn_state_t;
 
 /* Forward declared in main.c */
@@ -155,8 +161,7 @@ try_write(conn_state_t *st)
 static void
 handle_query(conn_state_t *st, const quack_msg_t *msg)
 {
-	sx_db *h;
-	int      owned;
+	sx_db *h = st->h_conn;
 	int64_t  rows = 0;
 	char    *err = NULL;
 	sql_info_t info;
@@ -180,7 +185,7 @@ handle_query(conn_state_t *st, const quack_msg_t *msg)
 	}
 	(void)sql_len;
 
-	if (db_handle_get(st->db, &h, &owned) != XTC_OK) {
+	if (h == NULL) {
 		quack_emit_err(&st->wbuf, "no db handle");
 		if (sqlxtc_stat_query_errors != NULL)
 			xtc_counter_inc(sqlxtc_stat_query_errors);
@@ -193,26 +198,20 @@ handle_query(conn_state_t *st, const quack_msg_t *msg)
 		int exec_rc;
 		const struct quack_param *bp =
 		    msg->n_params > 0 ? msg->params : NULL;
-		if (owned == 0) {
-			/* Stable shared handle: use the per-connection prepared-
-			 * statement cache.  Refresh the slot when the text
-			 * changes. */
-			if (st->cached_sql == NULL ||
-			    strcmp(st->cached_sql, sql_to_exec) != 0) {
-				if (st->cached_stmt != NULL) {
-					sx_finalize(st->cached_stmt);
-					st->cached_stmt = NULL;
-				}
-				free(st->cached_sql);
-				st->cached_sql = strdup(sql_to_exec);
+		/* The connection's handle is stable for its lifetime, so the
+		 * prepared-statement cache is always valid.  Refresh the slot
+		 * when the query text changes. */
+		if (st->cached_sql == NULL ||
+		    strcmp(st->cached_sql, sql_to_exec) != 0) {
+			if (st->cached_stmt != NULL) {
+				sx_finalize(st->cached_stmt);
+				st->cached_stmt = NULL;
 			}
-			exec_rc = db_exec_cached(h, &st->cached_stmt, sql_to_exec,
-			    bp, msg->n_params, msg->limit, &st->wbuf, &rows, &err);
-		} else {
-			/* Per-call reopened handle: no stable statement to cache. */
-			exec_rc = db_exec_params(h, sql_to_exec, bp, msg->n_params,
-			    msg->limit, &st->wbuf, &rows, &err);
+			free(st->cached_sql);
+			st->cached_sql = strdup(sql_to_exec);
 		}
+		exec_rc = db_exec_cached(h, &st->cached_stmt, sql_to_exec,
+		    bp, msg->n_params, msg->limit, &st->wbuf, &rows, &err);
 		if (sqlxtc_stat_query_total != NULL)
 			xtc_counter_inc(sqlxtc_stat_query_total);
 		if (sqlxtc_stat_query_latency != NULL)
@@ -230,7 +229,6 @@ handle_query(conn_state_t *st, const quack_msg_t *msg)
 		}
 	}
 
-	db_handle_put(st->db, h, owned);
 	free(normalized);
 }
 
@@ -324,6 +322,14 @@ conn_proc(void *arg)
 	conn_state_t *st = arg;
 	void *msg; size_t msg_len;
 
+	/* Open this connection's engine handle once, for its whole life.
+	 * In connection-per-proc mode this is a private handle on the loop
+	 * the proc runs on, so connections execute SQL in parallel. */
+	if (db_conn_open(st->db, &st->h_conn, &st->h_owned) != XTC_OK) {
+		st->h_conn = NULL;
+		quack_emit_err(&st->wbuf, "no db handle");
+	}
+
 	/* Send banner. */
 	quack_emit_hello(&st->wbuf, SQLXTC_VERSION);
 
@@ -374,11 +380,13 @@ conn_proc(void *arg)
 
 	if (st->server) server_dec_conn(st->server);
 
-	/* Release the cached prepared statement (the shared handle that
-	 * owns it outlives this connection). */
+	/* Release the cached prepared statement and the connection handle
+	 * (finalize the statement before closing its handle). */
 	if (st->cached_stmt != NULL)
 		sx_finalize(st->cached_stmt);
 	free(st->cached_sql);
+	if (st->h_conn != NULL)
+		db_conn_close(st->db, st->h_conn, st->h_owned);
 
 	close(st->fd);
 	free(st->rbuf);

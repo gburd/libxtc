@@ -13,6 +13,44 @@ sufficient.
 
 ---
 
+## Connection-per-proc parallelism (main.c, conn.c)
+
+Making the SQL server execute across cores -- one private engine handle
+per connection, connections spawned round-robin over an N-loop executor
+-- exercised the multi-loop primitives directly.  Findings:
+
+  * **Confirmed OK: the multi-loop executor + cross-loop spawn.**
+    `xtc_exec_init(N)`, `xtc_exec_loop(exec, i)`, `xtc_proc_spawn(loop,
+    ...)` onto a chosen loop, and `xtc_exec_stop()` from inside the
+    listener fiber all behaved exactly as needed.  Procs spawned on a
+    loop before `xtc_exec_run` are queued and run when the loops start;
+    a SIGINT-driven flag observed by the listener cleanly stops the
+    executor.  Eight worker connections inserting concurrently across
+    four loops landed all rows (1601/1601) with no corruption, and a
+    read-heavy load scaled past the single-loop ceiling.  The
+    multi-loop core is solid.
+
+  * **GAP: no supervised executor (xtc_app is single-loop).**
+    `xtc_app` -- which carries the supervisor that restarts a crashed
+    listener -- creates exactly one loop; the multi-loop `xtc_exec`
+    has no built-in supervision.  Going parallel therefore meant
+    dropping the app/supervisor and spawning the listener directly
+    onto loop 0.  Per-fiber fault containment (R1) still isolates a
+    crashing connection, but a crashed listener is not auto-restarted.
+    The missing piece is an `xtc_app`-over-`xtc_exec` (a supervised
+    multi-loop application), or letting `xtc_app` own N loops and place
+    children across them.  Worked around in the example for now;
+    recorded as a library gap for robust parallel servers.
+
+  * **(Not a libxtc gap) SQLite shared-cache is compiled out.**  The
+    sqlxtc build sets `-DSQLITE_OMIT_SHARED_CACHE`, so a
+    `cache=shared` in-memory URI silently does not share across
+    handles -- a per-connection :memory: handle is a private database.
+    The example handles this by backing parallel `:memory:` with an
+    ephemeral tmpfs file in WAL mode; libxtc is not involved.
+
+---
+
 ## SQL-on-our-storage integration (xstore.c)
 
 ### LIBRARY BUG (open): epoll lost blocking-I/O-completion wakeup
