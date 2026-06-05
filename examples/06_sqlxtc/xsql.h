@@ -84,8 +84,11 @@
 #define sqlite3_prepare_v2 xsql_prepare_v2
 #define sqlite3_reset xsql_reset
 #define sqlite3_result_blob xsql_result_blob
+#define sqlite3_result_double xsql_result_double
 #define sqlite3_result_int xsql_result_int
 #define sqlite3_result_int64 xsql_result_int64
+#define sqlite3_result_null xsql_result_null
+#define sqlite3_result_text xsql_result_text
 #define sqlite3_shutdown xsql_shutdown
 #define sqlite3_step xsql_step
 #define sqlite3_stmt xsql_stmt
@@ -93,8 +96,10 @@
 #define sqlite3_value xsql_value
 #define sqlite3_value_blob xsql_value_blob
 #define sqlite3_value_bytes xsql_value_bytes
+#define sqlite3_value_double xsql_value_double
 #define sqlite3_value_int xsql_value_int
 #define sqlite3_value_int64 xsql_value_int64
+#define sqlite3_value_text xsql_value_text
 #define sqlite3_value_type xsql_value_type
 #define sqlite3_vfs xsql_vfs
 #define sqlite3_vfs_find xsql_vfs_find
