@@ -24,16 +24,33 @@
 #include "coro_int.h"
 
 #include <errno.h>
-#include <unistd.h>
 #include <string.h>
+#if defined(_WIN32)
+#  include <io.h>          /* _read/_write/_lseeki64/_commit */
+#else
+#  include <unistd.h>
+#endif
 
-/* Blocking-pool fallback: run the op on a worker thread. */
+/* Blocking-pool fallback: run the op on a worker thread.  Portable
+ * across the platforms libxtc builds on -- the native (non-blocking)
+ * path is io_uring-only anyway, so this is purely the offload case. */
 struct aio_blk { int fd; int op; void *buf; uint32_t len; int64_t off; };
 
 static int
 aio_blk_fn(void *arg)
 {
 	struct aio_blk *b = arg;
+#if defined(_WIN32)
+	int n;
+	if (b->op == XTC_AIO_FSYNC)
+		return _commit(b->fd) == 0 ? 0 : -EIO;
+	if (_lseeki64(b->fd, (long long)b->off, SEEK_SET) < 0)
+		return -EIO;
+	n = (b->op == XTC_AIO_PWRITE)
+	    ? _write(b->fd, b->buf, b->len)
+	    : _read(b->fd, b->buf, b->len);
+	return n < 0 ? -EIO : n;
+#else
 	ssize_t n;
 	switch (b->op) {
 	case XTC_AIO_PREAD:
@@ -43,10 +60,15 @@ aio_blk_fn(void *arg)
 		n = pwrite(b->fd, b->buf, b->len, (off_t)b->off); /* XTC_BLOCKING_OK: offloaded to the blocking pool */
 		return n < 0 ? -errno : (int)n;
 	case XTC_AIO_FSYNC:
+#if defined(__APPLE__)
+		return fsync(b->fd) == 0 ? 0 : -errno;   /* macOS has no fdatasync */
+#else
 		return fdatasync(b->fd) == 0 ? 0 : -errno;
+#endif
 	default:
 		return -EINVAL;
 	}
+#endif
 }
 
 static int
