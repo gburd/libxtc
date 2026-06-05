@@ -35,6 +35,16 @@ struct __xtc_iocp_reg {
 	uint32_t  interest;
 	void     *tag;
 };
+/* A file AIO (pread/pwrite) in flight: an overlapped op whose
+ * OVERLAPPED.hEvent joins the poll's wait set; on completion
+ * GetOverlappedResult yields the byte count.  fsync has no async form
+ * on Windows (FlushFileBuffers is synchronous) and is offloaded. */
+struct __xtc_iocp_aio {
+	void *aio;     /* xtc_aio_t * awaiting completion */
+	void *ov;      /* OVERLAPPED * (heap; owned here) */
+	void *event;   /* HANDLE: manual-reset, == ov->hEvent */
+	void *fh;      /* HANDLE: the file, for GetOverlappedResult */
+};
 #elif defined(XTC_IO_BACKEND_AIX)
 /* AIX pollset_* backend.  Like solaris/kqueue, we maintain a
  * side-table for duplicate detection and to map fd -> user tag
@@ -89,6 +99,9 @@ struct xtc_io {
 	struct __xtc_iocp_reg *reg_iocp;
 	int  n_reg;
 	int  cap_reg;
+	struct __xtc_iocp_aio *aio_pend;   /* file AIOs in flight */
+	int  n_aio;
+	int  cap_aio;
 #elif defined(XTC_IO_BACKEND_AIX)
 	int   ps;                          /* pollset_t */
 	void *reg_aix;                     /* struct __xtc_aix_reg * */
