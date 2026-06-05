@@ -41,6 +41,7 @@
 
 #define N_TXN     40          /* explicit transactions, 2 rows each */
 #define N_AUTO    20          /* autocommit single-row inserts */
+#define N_T2      5           /* rows in a second table (catalog recovery) */
 #define PAGE_SZ   4096
 
 static wal_t      *g_wal;
@@ -49,11 +50,13 @@ static xsql       *g_db1;
 static _Atomic int g_phase1;          /* 0 unset, 1 ok, -1 fail */
 
 static int
-sel_v(xsql *db, int64_t k, char *out, size_t cap)
+sel_v(xsql *db, const char *tbl, int64_t k, char *out, size_t cap)
 {
 	xsql_stmt *st = NULL;
+	char q[64];
 	int got = 0;
-	if (xsql_prepare_v2(db, "SELECT v FROM t WHERE k=?", -1, &st, 0) != SQLITE_OK)
+	snprintf(q, sizeof q, "SELECT v FROM %s WHERE k=?", tbl);
+	if (xsql_prepare_v2(db, q, -1, &st, 0) != SQLITE_OK)
 		return -1;
 	xsql_bind_int64(st, 1, k);
 	if (xsql_step(st) == SQLITE_ROW) {
@@ -88,6 +91,13 @@ worker(void *arg)
 		snprintf(sql, sizeof sql, "INSERT INTO t(k,v) VALUES(%d,'au-%d');", 3000 + k, k);
 		if (xsql_exec(g_db1, sql, 0, 0, 0) != SQLITE_OK) { ok = 0; break; }
 	}
+	/* A second table whose rowids OVERLAP t's (1000..) but live in a
+	 * distinct table-id: recovery must restore the catalog mapping for
+	 * BOTH names or the two tables' rows would alias. */
+	for (k = 0; ok && k < N_T2; k++) {
+		snprintf(sql, sizeof sql, "INSERT INTO t2(k,v) VALUES(%d,'t2-%d');", 1000 + k, k);
+		if (xsql_exec(g_db1, sql, 0, 0, 0) != SQLITE_OK) { ok = 0; break; }
+	}
 	atomic_store(&g_phase1, ok ? 1 : -1);
 	(void)wal_writer_stop(g_wal);
 }
@@ -107,7 +117,7 @@ main(void)
 	char btA[]  = "/tmp/sqlxtc-rec-A-XXXXXX";
 	char btB[]  = "/tmp/sqlxtc-rec-B-XXXXXX";
 	char b[32], want[16];
-	int fd, k, found = 0, miss = 0, expected = N_TXN * 2 + N_AUTO;
+	int fd, k, found = 0, miss = 0, expected = N_TXN * 2 + N_AUTO + N_T2;
 
 	fd = mkstemp(logp); if (fd < 0) return 1; close(fd);
 	fd = mkstemp(btA);  if (fd < 0) return 1; close(fd);
@@ -125,6 +135,8 @@ main(void)
 	if (xsql_open(":memory:", &g_db1) != SQLITE_OK) return 1;
 	if (xstore_register(g_db1, g_bt1) != SQLITE_OK) return 1;
 	if (xsql_exec(g_db1, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) != SQLITE_OK)
+		return 1;
+	if (xsql_exec(g_db1, "CREATE VIRTUAL TABLE t2 USING xstore;", 0, 0, 0) != SQLITE_OK)
 		return 1;
 
 	if (xtc_loop_init(&loop) != XTC_OK) return 1;
@@ -156,15 +168,24 @@ main(void)
 	if (xstore_register(db2, bt2) != SQLITE_OK) return 1;
 	if (xsql_exec(db2, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) != SQLITE_OK)
 		return 1;
+	if (xsql_exec(db2, "CREATE VIRTUAL TABLE t2 USING xstore;", 0, 0, 0) != SQLITE_OK)
+		return 1;
 
 	for (k = 0; k < N_TXN; k++) {
 		snprintf(want, sizeof want, "tx-%d", k);
-		if (sel_v(db2, 1000 + k, b, sizeof b) == 1 && strcmp(b, want) == 0) found++; else miss++;
-		if (sel_v(db2, 2000 + k, b, sizeof b) == 1 && strcmp(b, want) == 0) found++; else miss++;
+		if (sel_v(db2, "t", 1000 + k, b, sizeof b) == 1 && strcmp(b, want) == 0) found++; else miss++;
+		if (sel_v(db2, "t", 2000 + k, b, sizeof b) == 1 && strcmp(b, want) == 0) found++; else miss++;
 	}
 	for (k = 0; k < N_AUTO; k++) {
 		snprintf(want, sizeof want, "au-%d", k);
-		if (sel_v(db2, 3000 + k, b, sizeof b) == 1 && strcmp(b, want) == 0) found++; else miss++;
+		if (sel_v(db2, "t", 3000 + k, b, sizeof b) == 1 && strcmp(b, want) == 0) found++; else miss++;
+	}
+	/* t2's rows must recover under their own table-id: rowids 1000..
+	 * exist in BOTH t and t2 with different values, so any catalog
+	 * mix-up shows up as a wrong value here. */
+	for (k = 0; k < N_T2; k++) {
+		snprintf(want, sizeof want, "t2-%d", k);
+		if (sel_v(db2, "t2", 1000 + k, b, sizeof b) == 1 && strcmp(b, want) == 0) found++; else miss++;
 	}
 
 	xsql_close(db2); bt_close(bt2); bm_destroy(bm2);
@@ -175,9 +196,11 @@ main(void)
 		    found, expected, miss);
 		return 1;
 	}
-	printf("  ok   WAL recovery: %d committed rows (%d explicit-txn + %d "
-	    "autocommit) reconstructed from the log after the entire buffer "
-	    "pool was lost unflushed\n", found, N_TXN * 2, N_AUTO);
+	printf("  ok   WAL recovery: %d rows across two tables (%d explicit-txn"
+	    " + %d autocommit in t, %d in t2 with overlapping rowids)"
+	    " reconstructed from the log after the entire buffer pool was lost"
+	    " unflushed; the catalog restored both table-ids by name\n",
+	    found, N_TXN * 2, N_AUTO, N_T2);
 	printf("All sqlxtc WAL recovery tests passed.\n");
 	return 0;
 }
