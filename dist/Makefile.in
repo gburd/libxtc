@@ -82,6 +82,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/mctx.c \
 	$(srcdir)/../src/ptc/rcu.c \
 	$(srcdir)/../src/ptc/dump.c \
+	$(srcdir)/../src/ptc/aio.c \
 	$(srcdir)/../src/orc/sup.c \
 	$(srcdir)/../src/orc/reg.c \
 	$(srcdir)/../src/orc/svr.c \
@@ -136,6 +137,7 @@ LIB_OBJS	= \
 	mctx.o \
 	rcu.o \
 	dump.o \
+	aio.o \
 	sup.o \
 	reg.o \
 	svr.o \
@@ -188,6 +190,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_net test_net_udp test_net_frame \
 		  test_loop test_task test_waker test_timer test_io_integration \
 		  test_async \
+		  test_aio \
 		  test_fctx \
 		  test_exec test_cross_wake test_deque test_steal \
 		  test_chan test_chan_mpmc_bcast \
@@ -356,6 +359,9 @@ proc.o: $(srcdir)/../src/ptc/proc.c xtc_config.h
 
 dump.o: $(srcdir)/../src/ptc/dump.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/dump.c
+
+aio.o: $(srcdir)/../src/ptc/aio.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/aio.c
 
 sync.o: $(srcdir)/../src/ptc/sync.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/sync.c
@@ -636,6 +642,12 @@ test_async: $(srcdir)/../test/m4/test_async.c \
 		$(srcdir)/../test/m4/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m4 \
 		-o $@ $(srcdir)/../test/m4/test_async.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_aio: $(srcdir)/../test/m4/test_aio.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m4 \
+		-o $@ $(srcdir)/../test/m4/test_aio.c \
 		$(srcdir)/../test/m4/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_fctx: $(srcdir)/../test/m4/test_fctx.c \

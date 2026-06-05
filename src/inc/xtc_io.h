@@ -31,11 +31,39 @@ typedef struct xtc_io xtc_io_t;
 #define XTC_IO_ERR       0x08u
 #define XTC_IO_WAKEUP    0x10u   /* set on the synthetic event delivered
                                     by xtc_io_wakeup; tag is NULL. */
+#define XTC_IO_AIO       0x20u   /* set on an async file-I/O completion;
+                                    tag is the xtc_aio_t's tag. */
 
 typedef struct xtc_io_event {
 	void     *tag;        /* the value passed at registration; NULL on wakeups */
 	uint32_t  flags;      /* XTC_IO_* bitset */
 } xtc_io_event_t;
+
+/*
+ * Async file I/O.  A native completion-based file operation: on the
+ * io_uring backend it submits IORING_OP_READ/WRITE/FSYNC and the
+ * completion wakes the tagged task; on a readiness-only backend (epoll,
+ * kqueue, poll, ...) xtc_io_aio_submit returns XTC_E_NOSYS and the
+ * caller offloads the op to the blocking pool instead.  Regular files
+ * are not pollable, so this completion model is the only way to do
+ * non-blocking file I/O, and io_uring is the only POSIX backend that
+ * provides it.  See xtc_aio(3).
+ */
+enum {
+	XTC_AIO_PREAD  = 0,
+	XTC_AIO_PWRITE = 1,
+	XTC_AIO_FSYNC  = 2     /* fdatasync (data only) */
+};
+typedef struct xtc_aio {
+	int       fd;
+	int       op;         /* XTC_AIO_* */
+	void     *buf;        /* read/write buffer (ignored for FSYNC) */
+	uint32_t  len;        /* byte count (ignored for FSYNC) */
+	int64_t   off;        /* file offset (ignored for FSYNC) */
+	void     *tag;        /* woken on completion (an xtc_task_t *) */
+	int       done;       /* 0 until the completion is reaped */
+	int32_t   res;        /* bytes transferred, or -errno */
+} xtc_aio_t;
 
 /*
  * PUBLIC: int          xtc_io_init __P((xtc_io_t **));
@@ -45,6 +73,7 @@ typedef struct xtc_io_event {
  * PUBLIC: int          xtc_io_mod_fd __P((xtc_io_t *, int, uint32_t, void *));
  * PUBLIC: int          xtc_io_del_fd __P((xtc_io_t *, int));
  * PUBLIC: int          xtc_io_poll __P((xtc_io_t *, xtc_io_event_t *, int, int64_t, int *));
+ * PUBLIC: int          xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *));
  * PUBLIC: int          xtc_io_wakeup __P((xtc_io_t *));
  */
 
@@ -71,6 +100,12 @@ int          xtc_io_del_fd(xtc_io_t *io, int fd);
  */
 int          xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
                          int64_t timeout_ns, int *n_out);
+
+/* Submit an async file op.  XTC_OK if queued (the caller parks until
+ * the completion event with tag a->tag arrives, then reads a->res);
+ * XTC_E_NOSYS if the backend has no native file completion (caller
+ * should offload instead). */
+int          xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a);
 
 /*
  * xtc_io_wakeup --
