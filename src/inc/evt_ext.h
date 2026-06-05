@@ -34,6 +34,7 @@ int xtc_yield_check __P((void));
 int xtc_yield_if_due __P((void));
 struct xtc_res *xtc_loop_res __P((xtc_loop_t *));
 uint64_t xtc_yield_due_count __P((const xtc_loop_t *));
+void xtc_exec_set_service_mode __P((xtc_exec_t *, int));
 void xtc_yield __P((void));
 void xtc_yield_set_budget __P((xtc_loop_t *, int64_t));
 xtc_loop_t *xtc_exec_loop __P((xtc_exec_t *, int));
