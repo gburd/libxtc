@@ -12,6 +12,12 @@
  *	emulation for AFD/NtDeviceIoControlFile (libuv-style) for full
  *	performance on connected sockets.
  *
+ *	File AIO (xtc_io_aio_submit) IS native here: a pread/pwrite is an
+ *	overlapped ReadFile/WriteFile whose OVERLAPPED.hEvent joins the
+ *	WaitForMultipleObjects set, so its completion wakes the loop with
+ *	no pool thread.  fsync has no async form on Windows
+ *	(FlushFileBuffers is synchronous), so xtc_aio offloads it.
+ *
  *	IOCP semantics:
  *	  - PostQueuedCompletionStatus(io, 0, key, NULL) injects a
  *	    "fake completion" with completion-key == key.
@@ -40,6 +46,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <io.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,6 +86,8 @@ __xtc_io_backend_init(xtc_io_t *io)
 	}
 	io->reg_iocp = NULL;
 	io->n_reg = io->cap_reg = 0;
+	io->aio_pend = NULL;
+	io->n_aio = io->cap_aio = 0;
 	return XTC_OK;
 }
 
@@ -93,6 +102,13 @@ __xtc_io_backend_fini(xtc_io_t *io)
 	__os_free(io->reg_iocp);
 	io->reg_iocp = NULL;
 	io->n_reg = io->cap_reg = 0;
+	for (i = 0; i < io->n_aio; i++) {
+		if (io->aio_pend[i].event) (void)CloseHandle(io->aio_pend[i].event);
+		__os_free(io->aio_pend[i].ov);
+	}
+	__os_free(io->aio_pend);
+	io->aio_pend = NULL;
+	io->n_aio = io->cap_aio = 0;
 }
 
 int
@@ -194,12 +210,129 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 	return XTC_OK;
 }
 
+/* PUBLIC: int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *)); */
+/*
+ * Native Windows file AIO: a pread/pwrite is issued as an overlapped
+ * ReadFile/WriteFile whose OVERLAPPED.hEvent joins the poll wait set, so
+ * its completion wakes the loop like any socket event.  fsync has no
+ * async form (FlushFileBuffers is synchronous), so it returns
+ * XTC_E_NOSYS and xtc_aio offloads it to the blocking pool.  An op that
+ * completes synchronously (a non-overlapped handle, or cached data) is
+ * finished inline -- a->done is set and the caller does not park.
+ */
+int
+xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
+{
+	HANDLE fh, ev;
+	OVERLAPPED *ov = NULL;
+	BOOL ok;
+	DWORD err, nbytes = 0;
+
+	if (io == NULL || a == NULL) return XTC_E_INVAL;
+	if (a->op != XTC_AIO_PREAD && a->op != XTC_AIO_PWRITE)
+		return XTC_E_NOSYS;             /* fsync/fdatasync: offload */
+
+	fh = (HANDLE)_get_osfhandle(a->fd);
+	if (fh == INVALID_HANDLE_VALUE) return XTC_E_INVAL;
+
+	if (__os_calloc(1, sizeof *ov, (void **)&ov) != XTC_OK)
+		return XTC_E_AGAIN;             /* offload */
+	ev = CreateEventA(NULL, TRUE /*manual reset*/, FALSE, NULL);
+	if (ev == NULL) { __os_free(ov); return XTC_E_AGAIN; }
+	ov->Offset     = (DWORD)((uint64_t)a->off & 0xFFFFFFFFu);
+	ov->OffsetHigh = (DWORD)((uint64_t)a->off >> 32);
+	ov->hEvent     = ev;
+
+	if (a->op == XTC_AIO_PREAD)
+		ok = ReadFile(fh, a->buf, (DWORD)a->len, NULL, ov);
+	else
+		ok = WriteFile(fh, a->buf, (DWORD)a->len, NULL, ov);
+
+	if (ok) {
+		/* Completed synchronously: the bytes are already in hand. */
+		(void)GetOverlappedResult(fh, ov, &nbytes, TRUE);
+		a->res = (int)nbytes;
+		a->done = 1;
+		(void)CloseHandle(ev);
+		__os_free(ov);
+		return XTC_OK;
+	}
+	err = GetLastError();
+	if (err == ERROR_HANDLE_EOF) {
+		a->res = 0;                     /* read at/after EOF */
+		a->done = 1;
+		(void)CloseHandle(ev);
+		__os_free(ov);
+		return XTC_OK;
+	}
+	if (err != ERROR_IO_PENDING) {
+		(void)CloseHandle(ev);
+		__os_free(ov);
+		return XTC_E_AGAIN;             /* hard failure: offload */
+	}
+	/* In flight: track it so the poll wait set includes its event. */
+	if (io->n_aio >= io->cap_aio) {
+		int nc = io->cap_aio == 0 ? 8 : io->cap_aio * 2;
+		void *p = NULL;
+		if (__os_realloc(io->aio_pend,
+		    sizeof(*io->aio_pend) * (size_t)nc, &p) != XTC_OK) {
+			(void)CancelIoEx(fh, ov);
+			(void)CloseHandle(ev);
+			__os_free(ov);
+			return XTC_E_AGAIN;
+		}
+		io->aio_pend = p;
+		io->cap_aio = nc;
+	}
+	io->aio_pend[io->n_aio].aio   = a;
+	io->aio_pend[io->n_aio].ov    = ov;
+	io->aio_pend[io->n_aio].event = ev;
+	io->aio_pend[io->n_aio].fh    = fh;
+	io->n_aio++;
+	return XTC_OK;
+}
+
+/* Reap any completed file AIOs into the event buffer, waking each
+ * parked task with an XTC_IO_AIO event.  Returns the new out_idx. */
+static int
+__reap_aio(xtc_io_t *io, xtc_io_event_t *events, int max, int out_idx)
+{
+	int i = 0;
+	while (i < io->n_aio && out_idx < max) {
+		struct __xtc_iocp_aio *e = &io->aio_pend[i];
+		xtc_aio_t *a;
+		DWORD nbytes = 0;
+		if (WaitForSingleObject((HANDLE)e->event, 0) != WAIT_OBJECT_0) {
+			i++;
+			continue;
+		}
+		a = (xtc_aio_t *)e->aio;
+		if (GetOverlappedResult((HANDLE)e->fh, (OVERLAPPED *)e->ov,
+		    &nbytes, FALSE))
+			a->res = (int)nbytes;
+		else if (GetLastError() == ERROR_HANDLE_EOF)
+			a->res = (int)nbytes;          /* short read at EOF */
+		else
+			a->res = -5;                   /* I/O error (~ -EIO) */
+		a->done = 1;
+		events[out_idx].tag = a->tag;
+		events[out_idx].flags = XTC_IO_AIO;
+		out_idx++;
+		(void)CloseHandle((HANDLE)e->event);
+		__os_free(e->ov);
+		io->n_aio--;
+		if (i != io->n_aio)
+			*e = io->aio_pend[io->n_aio];   /* swap-remove; recheck slot i */
+	}
+	return out_idx;
+}
+
 int
 xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
             int64_t timeout_ns, int *n_out)
 {
 	HANDLE   handles[64];
-	int      n_handles, i;
+	int      n_handles, n_sock, i;
 	DWORD    timeout_ms;
 	DWORD    wait_rc;
 	int      out_idx = 0;
@@ -224,11 +357,15 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		}
 	}
 
-	/* Build wait set: wakeup event first, then registered fd events. */
+	/* Build wait set: wakeup event, registered fd events, then the
+	 * events of any file AIOs in flight. */
 	handles[0] = (HANDLE)io->wakeup_ev;
 	n_handles = 1;
 	for (i = 0; i < io->n_reg && n_handles < 63; i++)
 		handles[n_handles++] = io->reg_iocp[i].event;
+	n_sock = n_handles - 1;            /* socket events occupy [1, n_sock] */
+	for (i = 0; i < io->n_aio && n_handles < 63; i++)
+		handles[n_handles++] = (HANDLE)io->aio_pend[i].event;
 
 	if (timeout_ns < 0)       timeout_ms = INFINITE;
 	else if (timeout_ns == 0) timeout_ms = 0;
@@ -254,6 +391,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			events[0].tag = NULL;
 			events[0].flags = XTC_IO_WAKEUP;
 			out_idx = 1;
+			out_idx = __reap_aio(io, events, max, out_idx);
 		} else {
 			/* One fd-event signaled.  Drain it AND scan all the
 			 * other registered events with a 0-timeout poll so a
@@ -261,7 +399,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			 * currently ready (matches the epoll/kqueue contract).
 			 */
 			int scan;
-			for (scan = 1; scan < n_handles && out_idx < max; scan++) {
+			for (scan = 1; scan <= n_sock && out_idx < max; scan++) {
 				DWORD wr = WaitForSingleObject(handles[scan], 0);
 				if (wr == WAIT_OBJECT_0) {
 					int reg_idx = scan - 1;
@@ -283,6 +421,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 					out_idx++;
 				}
 			}
+			out_idx = __reap_aio(io, events, max, out_idx);
 		}
 	}
 	*n_out = out_idx;
