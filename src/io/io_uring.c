@@ -210,6 +210,9 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		    (unsigned long long)a->off);
 		break;
 	case XTC_AIO_FSYNC:
+		io_uring_prep_fsync(sqe, a->fd, 0);
+		break;
+	case XTC_AIO_FDATASYNC:
 		io_uring_prep_fsync(sqe, a->fd, IORING_FSYNC_DATASYNC);
 		break;
 	default:
