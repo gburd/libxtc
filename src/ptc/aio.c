@@ -43,8 +43,8 @@ aio_blk_fn(void *arg)
 	struct aio_blk *b = arg;
 #if defined(_WIN32)
 	int n;
-	if (b->op == XTC_AIO_FSYNC)
-		return _commit(b->fd) == 0 ? 0 : -EIO;
+	if (b->op == XTC_AIO_FSYNC || b->op == XTC_AIO_FDATASYNC)
+		return _commit(b->fd) == 0 ? 0 : -EIO;  /* Windows: one durability level */
 	if (_lseeki64(b->fd, (long long)b->off, SEEK_SET) < 0)
 		return -EIO;
 	n = (b->op == XTC_AIO_PWRITE)
@@ -61,6 +61,8 @@ aio_blk_fn(void *arg)
 		n = pwrite(b->fd, b->buf, b->len, (off_t)b->off); /* XTC_BLOCKING_OK: offloaded to the blocking pool */
 		return n < 0 ? -errno : (int)n;
 	case XTC_AIO_FSYNC:
+		return fsync(b->fd) == 0 ? 0 : -errno;
+	case XTC_AIO_FDATASYNC:
 #if defined(__APPLE__)
 		return fsync(b->fd) == 0 ? 0 : -errno;   /* macOS has no fdatasync */
 #else
@@ -133,4 +135,11 @@ int
 xtc_aio_fsync(int fd)
 {
 	return aio_do(XTC_AIO_FSYNC, fd, NULL, 0, 0);
+}
+
+/* PUBLIC: int xtc_aio_fdatasync __P((int)); */
+int
+xtc_aio_fdatasync(int fd)
+{
+	return aio_do(XTC_AIO_FDATASYNC, fd, NULL, 0, 0);
 }
