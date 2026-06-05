@@ -325,12 +325,22 @@ bt_reopen(bm_t *bm, bt_t **out)
 	return XTC_OK;
 }
 
+static void (*bt_close_hook)(bt_t *) = NULL;
+
 void
 bt_close(bt_t *bt)
 {
 	if (bt == NULL)
 		return;
+	if (bt_close_hook != NULL)
+		bt_close_hook(bt);     /* let xstore drop cached state for this bt */
 	free(bt);
+}
+
+void
+bt_set_close_hook(void (*fn)(bt_t *))
+{
+	bt_close_hook = fn;
 }
 
 /*
