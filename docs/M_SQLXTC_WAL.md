@@ -124,42 +124,46 @@ pages.
 
 ## 3. What remains for full ARIES (honestly scoped)
 
-The engine recovers committed data correctly today by replaying the
-whole log into the B-tree (treating the page file as a rebuildable
-cache).  Three pieces remain to make it a fully checkpointed,
-cold-restartable ARIES system:
+The engine recovers committed data correctly across both clean and
+unclean restarts, validated by tests (test_persist, test_wal_recover,
+test_torn_smo, test_server_storage's crash cycle).  The recovery model
+is:
 
-  1. **Persistent superblock + non-truncating reopen.**  `bm_create`
-     currently opens the page file `O_TRUNC` and `bt_open` always
-     creates a fresh root, so the page file is never read back on
-     restart.  A superblock page (root pid, `next_pid`, page size) plus
-     a reopen mode that preserves the file is the prerequisite for the
-     page file to serve as a durable checkpoint base.
+  1. **Persistent superblock + non-truncating reopen.**  DONE.
+     `bm_create(reopen)` preserves the page file and `bt_reopen` reads
+     the root from the superblock (page 0), so a cleanly checkpointed
+     tree serves as a durable recovery base.
 
-  2. **Checkpoint + log truncation.**  Once the page file is a durable
-     base: a checkpoint flushes all dirty pages (`flush_frame` over the
-     dirty set, in `dirty_seq` order -- the trickler already does this
-     incrementally) + `fdatasync`, records the checkpoint LSN, and
-     truncates the WAL prefix whose effects are all materialized.  The
-     truncation horizon is the minimum `dirty_seq` over still-dirty
-     pages -- exactly Stasis `dirtyPageTable.c:minRecLSN` driving
-     `truncation.c:stasis_truncation_truncate`.  This bounds the log
-     and recovery time (recovery then replays only from the checkpoint
-     LSN forward, ARIES `redoLSN`).  `wal_truncate` is the missing
-     primitive; it is only SAFE after the page file durably reflects
-     the truncated prefix, which needs (1).
+  2. **Checkpoint + clean/unclean restart.**  DONE.  `bm_checkpoint`
+     flushes the dirty set durable.  A clean shutdown checkpoints the
+     tree and drops a marker file (`<data>.clean`); the next open sees
+     the marker and trusts the base directly.  Absent the marker (a
+     crash, or a first open) the on-disk tree may be STRUCTURALLY torn
+     by partial mid-SMO eviction (a parent page flushed before its
+     split child), and logical redo cannot repair a torn structure --
+     so the on-disk tree is DISCARDED and rebuilt from scratch by
+     replaying the whole log onto a fresh page file (the proven
+     redo-only path).  The torn-page case within an individual page is
+     handled separately by the double-write buffer.
 
-  3. **Physiological SMO logging for torn B-tree pages.**  Logical redo
-     reconstructs committed data onto a consistent base, but a crash
-     mid structure-modification (a leaf split that updated the leaf but
-     not the parent) can leave the on-disk tree structurally torn.
-     ARIES handles this with nested top actions + physiological page
-     redo and page LSNs (Stasis logs an SMO and redoes it idempotently
-     via `pageLSN`).  Adding a per-page `pageLSN` and physiological
-     redo records for node mutations is the path to STEAL-safe restart
-     from a torn page file; until then, recovery from the log onto a
-     freshly built (or cleanly checkpointed) tree is the supported
-     model.
+  3. **The log is the source of truth and is never truncated during the
+     engine's life** -- only at a clean shutdown -- so after a crash it
+     always holds the full history needed to rebuild.  This is the
+     lever that makes "discard the torn base, rebuild from the log"
+     sound without page LSNs: the immutable, append-only version keys
+     make redo idempotent, and the log is complete.
+
+The one piece that remains is **bounding the log for a long-running
+process.**  Because the log is not truncated between clean shutdowns,
+it grows with the write history; compacting it safely requires either a
+crash-coherent checkpoint (so a checkpointed base can be trusted after
+a crash and the log truncated behind it) or physiological page logging
+with page LSNs (ARIES proper: redo a torn SMO physically, gated by the
+page LSN, Stasis-style).  Either makes the page file a trustworthy
+post-crash base so the log prefix can be discarded.  Until then,
+recovery time and log size are bounded only by the interval between
+clean shutdowns -- correct, but not yet bounded for an always-on
+server.
 
 ## 4. Why this order
 
