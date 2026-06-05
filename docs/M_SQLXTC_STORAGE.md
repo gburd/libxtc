@@ -688,18 +688,27 @@ separate commits.
    (rowid, commit_ts); only the payload shape changed.
    Tested: test_xstore scenario_multicol.
 
-2. **Multi-table (xstore.c).**  DONE (in-process catalog; on-disk
-   catalog persistence is folded into step 5's work).  The version key
+2. **Multi-table + on-disk catalog (xstore.c).**  DONE.  The version key
    gained a 4-byte table-id prefix -- (table-id, rowid, commit_ts) --
    so one B-tree holds many tables; the write buffer, serializable read
    set, SSI read/range sets, GC grouping, and the WAL record are all
    table-id aware, so a cross-table BEGIN..COMMIT is still atomic and
-   recovery rebuilds every table.  The table-id is a deterministic
-   FNV-1a hash of the name, so it is stable across connections and
-   restarts (no catalog to persist or lose in a crash -- which is what
-   makes WAL recovery work); a within-process cache rejects the rare
-   distinct-name collision.  Tested: test_xstore scenario_multitable,
-   test_wal_recover.
+   recovery rebuilds every table.  Each table's id is allocated from a
+   persisted on-disk catalog kept at reserved table-id 0 (a catalog row
+   is keyed (0, id, name)): ids are dense and sequential, so distinct
+   names never collide -- unlike the earlier FNV name hash, which could
+   silently alias two tables that hashed equal.  The catalog is
+   authoritative and recovery-safe: every CREATE writes its (0, id,
+   name) row through xs_put, so it is WAL-logged and replayed into a
+   fresh B-tree, and a reconnecting vtab finds its id by name; the next
+   allocation continues past the recovered high-water id.  ALTER TABLE
+   RENAME writes a new version of the same id's catalog row.  A within-
+   process cache (B-tree + name) shortcuts the catalog scan and reserves
+   a just-allocated id against a concurrent creator; the catalog write
+   happens outside that lock, since xs_put can park on the WAL ack.
+   Tested: test_xstore scenario_multitable + scenario_catalog (30
+   tables, no collision), test_wal_recover (two tables with overlapping
+   rowids, both ids restored by name after total pool loss).
 
 3. **Transparent CREATE TABLE -> xstore.**  DONE.  The Quack db layer
    (db.c db_rewrite_create_table, hooked in db_exec_params) rewrites a
@@ -724,8 +733,7 @@ separate commits.
 5. **ARIES recovery remainder (M_SQLXTC_WAL.md sec 3).**  REMAINING.
    Physiological SMO logging + page LSNs for STEAL-safe restart from a
    torn page file (superblock + reopen + checkpoint + truncation
-   already done); an on-disk catalog (explicit unique table-ids, no
-   hash-collision risk) folds in here too.
+   already done).
 
 Steps 1-4 are landed and tested.  The remaining item (5) is the
 highest-risk one -- WAL flush-before-page-write ordering under
