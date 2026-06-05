@@ -482,19 +482,27 @@ typedef struct xstore_vtab {
 } xstore_vtab_t;
 
 /*
- * Table-id assignment.  A table's version namespace id is a
- * deterministic hash of its name (FNV-1a, 32-bit), so the same logical
- * table maps to the same id across every connection AND across a
- * restart -- which is what makes WAL recovery work: recovery replays
- * into a fresh B-tree and the reconnecting vtab derives the identical
- * id from the name, with no catalog to persist or lose in the crash.
- * Different B-trees (separate files) may reuse ids freely; the id only
- * needs to be unique among tables sharing one B-tree.  Id 0 is reserved
- * (a name hashing to 0 is bumped to 1).  Collisions between two
- * distinct names in one B-tree would alias their keyspaces; the cache
- * below detects that within a process and refuses the second table (a
- * persisted catalog with explicit unique ids is the future hardening).
+ * Table-id assignment.  A table's version-namespace id defaults to a
+ * deterministic FNV-1a hash of its name -- order-independent and stable
+ * across connections and restarts, which is what makes WAL recovery
+ * work (recovery replays into a fresh B-tree and a reconnecting vtab
+ * derives the identical id from the name, with nothing to persist).
+ *
+ * A persisted catalog (reserved table-id 0) overrides the hash where a
+ * table's name no longer matches its id -- after ALTER TABLE RENAME.
+ * A catalog row is keyed (0, id, commit_ts) with the table's current
+ * name as its value; it goes through xs_put, so it is WAL-logged and
+ * recovered like any other version, and xRename writes a new version
+ * with the new name.  Normal (never-renamed) tables write no catalog
+ * row and pay only a cheap table-id-0 probe at connect.
+ *
+ * Id 0 is reserved (a name hashing to 0 is bumped to 1).  Distinct
+ * names colliding on one hash in one B-tree would alias their
+ * keyspaces; the in-process cache below refuses the second.  (A
+ * collision-free allocated catalog is future hardening; see
+ * docs/M_SQLXTC_STORAGE.md step 5.)
  */
+#define XS_CAT_TABLEID 0u
 #define XS_CAT_MAX 256
 static struct xs_cat_ent {
 	bt_t    *bt;
@@ -510,17 +518,63 @@ xs_name_hash(const char *name)
 	uint32_t h = 2166136261u;
 	const unsigned char *p = (const unsigned char *)name;
 	for (; *p; p++) { h ^= *p; h *= 16777619u; }
-	return h ? h : 1u;   /* 0 is reserved */
+	return h ? h : 1u;   /* 0 is reserved for the catalog */
 }
 
-/* Map (bt, name) to a stable table-id.  Returns the id, or 0 on a
- * detected collision (two distinct names hashing equal in one bt). */
+/* Look up `name` in the persisted catalog (table-id 0): the newest
+ * non-tombstone catalog row whose value equals `name`.  Returns its id
+ * (the row's rowid), or 0 if the catalog has no override for it. */
+static uint32_t
+xs_cat_lookup(bt_t *bt, const char *name)
+{
+	bt_cursor_t *cur = NULL;
+	uint8_t startk[XS_VKLEN];
+	size_t want = strlen(name);
+	int64_t last_rowid = 0; int have_last = 0;
+	uint32_t found = 0;
+
+	enc_vkey(XS_CAT_TABLEID, INT64_MIN, ~(uint64_t)0, startk);
+	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
+		return 0;
+	for (;;) {
+		const void *k = NULL, *vv = NULL;
+		uint16_t klen = 0, vl = 0;
+		const uint8_t *kb, *vb;
+		int64_t rid;
+		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
+		    klen != XS_VKLEN)
+			break;
+		kb = (const uint8_t *)k; vb = (const uint8_t *)vv;
+		if (dec_tableid(kb) != XS_CAT_TABLEID)
+			break;                       /* past the catalog */
+		rid = dec_rowid(kb);
+		if (have_last && rid == last_rowid)
+			continue;                    /* older version of this id */
+		last_rowid = rid; have_last = 1;
+		if (vl >= 1 && (vb[0] & XS_F_DELETED))
+			continue;                    /* a renamed-away/dropped entry */
+		if ((size_t)(vl >= 1 ? vl - 1 : 0) == want &&
+		    memcmp(vb + 1, name, want) == 0) {
+			found = (uint32_t)rid;
+			break;
+		}
+	}
+	bt_cursor_close(cur);
+	return found;
+}
+
+/* Map (bt, name) to a stable table-id: a persisted catalog override if
+ * present, else the name hash.  Returns the id, or 0 on a detected
+ * collision (two distinct names hashing equal in one bt). */
 static uint32_t
 xs_cat_find_or_create(bt_t *bt, const char *name)
 {
-	uint32_t id = xs_name_hash(name);
+	uint32_t id;
 	int i;
 	pthread_mutex_lock(&g_cat_mu);
+	id = xs_cat_lookup(bt, name);          /* rename override wins */
+	if (id == 0)
+		id = xs_name_hash(name);
 	for (i = 0; i < g_cat_n; i++)
 		if (g_cat[i].bt == bt && g_cat[i].tableid == id) {
 			if (strcmp(g_cat[i].name, name) != 0)
@@ -1574,6 +1628,32 @@ fn_prune_count(xsql_context *ctx, int argc, xsql_value **argv)
 	    (xsql_int64)atomic_load_explicit(&g_av_prunes, memory_order_relaxed));
 }
 
+/*
+ * ALTER TABLE ... RENAME TO newname.  The table keeps its id; we write
+ * a persisted catalog override (table-id 0, rowid = id, value = the new
+ * name) so a later connect resolves the new name to the same id and the
+ * data is preserved.  Goes through xs_put, so the override is WAL-
+ * logged and recovered.  The in-process cache is refreshed so this
+ * connection's other handles agree immediately.
+ */
+static int
+xs_rename(xsql_vtab *pv, const char *newname)
+{
+	xstore_vtab_t *v = (xstore_vtab_t *)pv;
+	int i;
+	if (newname == NULL) return SQLITE_OK;
+	pthread_mutex_lock(&g_cat_mu);
+	(void)xs_put(v->ctx->bt, XS_CAT_TABLEID, (int64_t)v->tableid,
+	    newname, (int)strlen(newname), 0);
+	for (i = 0; i < g_cat_n; i++)
+		if (g_cat[i].bt == v->ctx->bt && g_cat[i].tableid == v->tableid) {
+			snprintf(g_cat[i].name, sizeof g_cat[i].name, "%s", newname);
+			break;
+		}
+	pthread_mutex_unlock(&g_cat_mu);
+	return SQLITE_OK;
+}
+
 static const xsql_module xstore_module = {
 	.iVersion    = 1,
 	.xCreate     = xs_connect,
@@ -1593,6 +1673,7 @@ static const xsql_module xstore_module = {
 	.xSync       = xs_sync,
 	.xCommit     = xs_commit,
 	.xRollback   = xs_rollback,
+	.xRename     = xs_rename,
 };
 
 static void
