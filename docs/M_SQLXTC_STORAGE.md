@@ -679,54 +679,54 @@ What remains to make sqlxtc fully xtc-native, in dependency order.
 Each step is self-contained and independently testable; do them as
 separate commits.
 
-1. **Multi-column rowstore (xstore.c).**  Today the vtab is hardwired
-   to `x(k INTEGER PRIMARY KEY, v)` with the version payload a single
-   blob.  Make it ADDITIVE so existing tests stay green:
-     - xCreate/xConnect parse the column list from the
-       `CREATE VIRTUAL TABLE t USING xstore(col1, col2, ...)` args
-       (argv[3..]); with no args keep the current k/v default exactly.
-     - Add a record codec: encode N SQLite values into one version blob
-       `[ncol:u8][per col: type:u8, payload]` (0 null, 1 int64, 2
-       double, 3 text len+bytes, 4 blob len+bytes); decode the i-th.
-     - xColumn decodes column i from the version record; xUpdate encodes
-       all argv values into the record.  The MVCC key stays (rowid,
-       commit_ts); only the payload shape changes.
-   Test: a 3-column xstore table round-trips every type; the existing
-   k/v + MVCC + SSI tests still pass.
+1. **Multi-column rowstore (xstore.c).**  DONE.  xConnect parses the
+   column list from `USING xstore(col1, col2, ...)` (no args keeps the
+   k/v default); a type-preserving record codec
+   `[ncol:u8][type:u8,payload]...` (0 null, 1 int64, 2 double, 3 text,
+   4 blob) encodes the non-key columns into the version blob; xColumn
+   decodes column i, xUpdate encodes argv[3..].  The MVCC key keeps
+   (rowid, commit_ts); only the payload shape changed.
+   Tested: test_xstore scenario_multicol.
 
-2. **Persisted catalog.**  Store table definitions (name, column list,
-   table-id) in a reserved catalog tree/table keyed by table-id, so the
-   rowstore is multi-table and survives restart.  Replay the catalog at
-   startup (after bt_reopen) to re-declare the vtabs.  Key each table's
-   versions by (table-id, rowid, commit_ts).
-   Test: create two tables, write rows, restart, read them back.
+2. **Multi-table (xstore.c).**  DONE (in-process catalog; on-disk
+   catalog persistence is folded into step 5's work).  The version key
+   gained a 4-byte table-id prefix -- (table-id, rowid, commit_ts) --
+   so one B-tree holds many tables; the write buffer, serializable read
+   set, SSI read/range sets, GC grouping, and the WAL record are all
+   table-id aware, so a cross-table BEGIN..COMMIT is still atomic and
+   recovery rebuilds every table.  The table-id is a deterministic
+   FNV-1a hash of the name, so it is stable across connections and
+   restarts (no catalog to persist or lose in a crash -- which is what
+   makes WAL recovery work); a within-process cache rejects the rare
+   distinct-name collision.  Tested: test_xstore scenario_multitable,
+   test_wal_recover.
 
-3. **Transparent CREATE TABLE -> xstore.**  In the SQL pre-processor
-   (sql_parse / conn), rewrite a plain `CREATE TABLE t (cols)` into
-   `CREATE VIRTUAL TABLE t USING xstore(cols)` so no opt-in is needed
-   and plain DDL lands in the xtc-native engine.  Keep an escape hatch
-   (a pragma or prefix) to fall back to SQLite's native btree for
-   comparison.
-   Test: `CREATE TABLE t(a,b); INSERT; SELECT` runs entirely on xstore.
+3. **Transparent CREATE TABLE -> xstore.**  DONE.  The Quack db layer
+   (db.c db_rewrite_create_table, hooked in db_exec_params) rewrites a
+   plain `CREATE TABLE t (cols)` into `CREATE VIRTUAL TABLE t USING
+   xstore(cols)` when the native engine is open, so ordinary DDL lands
+   in the xtc-native engine with no opt-in.  Conservative: only a
+   single well-formed CREATE TABLE is rewritten; a batch, table options,
+   trailing statements, or an already-virtual table pass through to
+   SQLite's native B-tree (the escape hatch).  Tested:
+   test_server_storage transparent_proc.
 
-4. **connection-per-proc parallelism (main.c).**  Replace the single
-   app loop + one SERIALIZED shared handle with an N-loop executor;
-   accept on one loop and spawn each connection's proc round-robin
-   across loops; switch to SQLITE_CONFIG_MULTITHREAD with a per-
-   connection handle (db_handle_get already returns owned=1 per-conn
-   handles for non-shared mode).  This is gated on steps 1-3 so the
-   per-connection handles share one xstore catalog + B-tree (a shared
-   in-memory SQLite database cannot span handles, but the xtc-native
-   engine -- a process-global bufmgr/B-tree -- can).  Then VDBE runs in
-   parallel across cores.
-   Test: a multi-loop server serving concurrent clients with linear
-   read scaling; writers serialize at the B-tree latch, not a global
-   handle mutex.
+4. **connection-per-proc parallelism (main.c).**  DONE.  --threads N
+   builds a supervised N-loop executor; the listener spawns each
+   connection's proc round-robin across loops, each with its own
+   MULTITHREAD handle.  With steps 1-3, per-connection handles sharing
+   one process-global xstore now agree on table-ids (name-derived), so
+   plain CREATE TABLE + reads/writes in a parallel server land in the
+   one shared B-tree -- VDBE runs across cores, writers serialize at the
+   B-tree latch, not a global handle mutex.  Tested: test_server_storage
+   cpp_driver (8 procs x 200 rows over one shared store).
 
-5. **ARIES recovery remainder (M_SQLXTC_WAL.md sec 3).**  Physiological
-   SMO logging + page LSNs for STEAL-safe restart from a torn page
-   file (superblock + reopen + checkpoint + truncation already done).
+5. **ARIES recovery remainder (M_SQLXTC_WAL.md sec 3).**  REMAINING.
+   Physiological SMO logging + page LSNs for STEAL-safe restart from a
+   torn page file (superblock + reopen + checkpoint + truncation
+   already done); an on-disk catalog (explicit unique table-ids, no
+   hash-collision risk) folds in here too.
 
-Highest-risk item remains the WAL flush-before-page-write ordering
-under concurrent eviction (step 5); the multi-column + catalog +
-routing steps (1-3) are mechanical and low-risk by comparison.
+Steps 1-4 are landed and tested.  The remaining item (5) is the
+highest-risk one -- WAL flush-before-page-write ordering under
+concurrent eviction -- and is a milestone of its own.

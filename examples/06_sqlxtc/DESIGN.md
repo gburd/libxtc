@@ -237,11 +237,16 @@ be held across a child fix or a page-allocation park without wedging a
 cooperative loop -- the property latch coupling requires.  `xtc_lwlock`
 (thread-blocking) and `xtc_amutex` (exclusive-only) could not back it.
 
-The from-scratch engine is **not yet wired into `engine.c`**; SQLite
-is still the live backend.  Wiring `engine.c` onto the B-tree cursors
-is the largest remaining piece and the moment SQLite's storage layer
-is actually replaced.  Remaining storage stages: cursor prefetch +
-skip-scan, WAL + recovery, then the SQL/VDBE integration.
+The from-scratch engine is wired in: with `--storage`, `engine.c`
+registers the xstore virtual table on every connection and the Quack db
+layer transparently rewrites a plain `CREATE TABLE` into a virtual
+table on it, so ordinary SQL executes on the xtc-native B-tree (cooling
+buffer pool, MVCC, multi-table, WAL + recovery) instead of SQLite's
+built-in B-tree.  VDBE and the SQL parser are retained by design; only
+the storage layer is replaced.  The remaining storage work is the ARIES
+recovery hardening (physiological SMO logging + page LSNs) and an
+on-disk catalog with explicit unique table-ids -- see
+`docs/M_SQLXTC_STORAGE.md`.
 
 
 ## 6. The two evolution paths, and where we are
