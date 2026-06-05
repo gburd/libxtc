@@ -23,6 +23,10 @@ struct xtc_exec {
 	__os_thread_t *workers;
 	_Atomic int   stop_flag;
 	int           started;
+	int           service_mode;    /* 1: run until xtc_exec_stop, never
+	                                * idle-auto-stop (a supervised app is
+	                                * a long-running service, not a finite
+	                                * work pool that drains and exits). */
 };
 
 /*
@@ -217,6 +221,14 @@ __exec_has_work(xtc_exec_t *e)
 	return 0;
 }
 
+/* PUBLIC: void xtc_exec_set_service_mode __P((xtc_exec_t *, int)); */
+void
+xtc_exec_set_service_mode(xtc_exec_t *e, int on)
+{
+	if (e != NULL)
+		e->service_mode = on ? 1 : 0;
+}
+
 /* PUBLIC: int xtc_exec_run __P((xtc_exec_t *)); */
 int
 xtc_exec_run(xtc_exec_t *e)
@@ -244,12 +256,20 @@ xtc_exec_run(xtc_exec_t *e)
 	 * Supervise from the calling thread.  Periodically check whether
 	 * every loop is idle; if so, signal stop and join.
 	 * Caller may also call xtc_exec_stop from any thread.
+	 *
+	 * In service mode (a supervised xtc_app) the idle check is skipped
+	 * entirely: the application is a long-running service that runs
+	 * until xtc_exec_stop is called explicitly (by xtc_app_stop or the
+	 * supervisor on a restart-intensity giveup).  Without this a
+	 * transient all-idle window during startup -- after the first
+	 * children exit but before the rest have been scheduled across
+	 * loops -- would stop the whole application prematurely.
 	 */
 	for (;;) {
 		if (atomic_load_explicit(&e->stop_flag,
 		    memory_order_relaxed))
 			break;
-		if (!__exec_has_work(e)) {
+		if (!e->service_mode && !__exec_has_work(e)) {
 			/*
 			 * Confirm with a small re-check window: a worker
 			 * might be mid-step.  Sleep ~1 ms, then re-check.
