@@ -70,16 +70,24 @@ static wal_t *g_xwal = NULL;
 void xstore_set_wal(struct wal *w) { g_xwal = (wal_t *)w; }
 
 #define XS_F_DELETED 0x01u     /* value[0] flag: this version is a tombstone */
-#define XS_VKLEN     16        /* (rowid:8) + (inverted commit_ts:8) */
+#define XS_VKLEN     20        /* (tableid:4) + (rowid:8) + (inverted commit_ts:8) */
 #define XS_VMAX      4096       /* max row payload bytes (one page-ish) */
 
 /* A buffered write within an open transaction (see xs_begin/xs_commit). */
 typedef struct xs_wrec {
+	uint32_t tableid;
 	int64_t  rowid;
 	int      deleted;
 	uint16_t len;
 	uint8_t *data;        /* malloc'd; NULL for a delete */
 } xs_wrec_t;
+
+/* A logical row identity: a transaction spans tables, so the read set
+ * and write set key on (tableid, rowid), not rowid alone. */
+typedef struct xs_rkey {
+	uint32_t tableid;
+	int64_t  rowid;
+} xs_rkey_t;
 
 /* Per-connection state, shared by the module and the SQL functions:
  * the engine storage, this connection's read snapshot, and the
@@ -93,7 +101,7 @@ typedef struct xstore_ctx {
 	xs_wrec_t       *wbuf;        /* buffered writes, applied atomically */
 	int              wn, wcap;
 	int              serializable; /* 1 == validate the read set on commit */
-	int64_t         *rset;        /* rowids read in this txn (serializable) */
+	xs_rkey_t       *rset;        /* (table,rowid) read in this txn (serializable) */
 	int              rn, rcap;
 	int              did_scan;    /* txn did a full scan (table-level read) */
 	ssi_txn_t       *ssi;         /* this txn's SSI registry slot (or NULL) */
@@ -110,7 +118,7 @@ wbuf_clear(xstore_ctx_t *c)
 	c->wn = 0;
 }
 static int
-wbuf_add(xstore_ctx_t *c, int64_t rowid, const void *blob, int n, int deleted)
+wbuf_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
 {
 	xs_wrec_t *w;
 	if (c->wn == c->wcap) {
@@ -120,7 +128,8 @@ wbuf_add(xstore_ctx_t *c, int64_t rowid, const void *blob, int n, int deleted)
 		c->wbuf = nb; c->wcap = nc;
 	}
 	w = &c->wbuf[c->wn];
-	w->rowid = rowid; w->deleted = deleted; w->len = 0; w->data = NULL;
+	w->tableid = tableid; w->rowid = rowid; w->deleted = deleted;
+	w->len = 0; w->data = NULL;
 	if (!deleted && n > 0) {
 		if (n > XS_VMAX) n = XS_VMAX;
 		w->data = malloc((size_t)n);
@@ -133,29 +142,32 @@ wbuf_add(xstore_ctx_t *c, int64_t rowid, const void *blob, int n, int deleted)
 }
 /* Read-your-writes: the newest buffered write for `rowid`, or NULL. */
 static const xs_wrec_t *
-wbuf_find(const xstore_ctx_t *c, int64_t rowid)
+wbuf_find(const xstore_ctx_t *c, uint32_t tableid, int64_t rowid)
 {
 	int i;
 	for (i = c->wn - 1; i >= 0; i--)
-		if (c->wbuf[i].rowid == rowid)
+		if (c->wbuf[i].rowid == rowid && c->wbuf[i].tableid == tableid)
 			return &c->wbuf[i];
 	return NULL;
 }
 
-/* Record a rowid in the transaction's read set (serializable mode). */
+/* Record a (table,rowid) in the transaction's read set (serializable). */
 static void
-rset_add(xstore_ctx_t *c, int64_t rowid)
+rset_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid)
 {
 	int i;
 	for (i = 0; i < c->rn; i++)
-		if (c->rset[i] == rowid) return;   /* already recorded */
+		if (c->rset[i].rowid == rowid && c->rset[i].tableid == tableid)
+			return;   /* already recorded */
 	if (c->rn == c->rcap) {
 		int nc = c->rcap ? c->rcap * 2 : 16;
-		int64_t *nb = realloc(c->rset, (size_t)nc * sizeof *nb);
+		xs_rkey_t *nb = realloc(c->rset, (size_t)nc * sizeof *nb);
 		if (nb == NULL) return;            /* best-effort; a miss is safe-ish */
 		c->rset = nb; c->rcap = nc;
 	}
-	c->rset[c->rn++] = rowid;
+	c->rset[c->rn].tableid = tableid;
+	c->rset[c->rn].rowid = rowid;
+	c->rn++;
 }
 
 /*
@@ -189,9 +201,9 @@ struct ssi_txn {
 	int       state;
 	uint64_t  snap;        /* read snapshot */
 	uint64_t  commit_ts;   /* set when COMMITTED */
-	int64_t  *reads;       /* rowids this txn read (point predicates) */
+	xs_rkey_t *reads;      /* (table,rowid) this txn read (point predicates) */
 	int       nreads, rcap;
-	struct ssi_rng { int64_t lo, hi; } *rngs;  /* range predicates (scans) */
+	struct ssi_rng { uint32_t tableid; int64_t lo, hi; } *rngs;  /* range predicates */
 	int       nrng, rngcap;
 };
 
@@ -247,20 +259,24 @@ ssi_begin(uint64_t snap)
 }
 
 static void
-ssi_record_read(ssi_txn_t *t, int64_t rowid)
+ssi_record_read(ssi_txn_t *t, uint32_t tableid, int64_t rowid)
 {
 	int i;
 	if (t == NULL) return;
 	pthread_mutex_lock(&g_ssi_mu);
 	for (i = 0; i < t->nreads; i++)
-		if (t->reads[i] == rowid) { pthread_mutex_unlock(&g_ssi_mu); return; }
+		if (t->reads[i].rowid == rowid && t->reads[i].tableid == tableid) {
+			pthread_mutex_unlock(&g_ssi_mu); return;
+		}
 	if (t->nreads == t->rcap) {
 		int nc = t->rcap ? t->rcap * 2 : 16;
-		int64_t *nb = realloc(t->reads, (size_t)nc * sizeof *nb);
+		xs_rkey_t *nb = realloc(t->reads, (size_t)nc * sizeof *nb);
 		if (nb == NULL) { pthread_mutex_unlock(&g_ssi_mu); return; }
 		t->reads = nb; t->rcap = nc;
 	}
-	t->reads[t->nreads++] = rowid;
+	t->reads[t->nreads].tableid = tableid;
+	t->reads[t->nreads].rowid = rowid;
+	t->nreads++;
 	pthread_mutex_unlock(&g_ssi_mu);
 }
 
@@ -271,7 +287,7 @@ ssi_record_read(ssi_txn_t *t, int64_t rowid)
  * range some concurrent reader actually scanned -- not "any write vs
  * any scan". */
 static void
-ssi_record_range(ssi_txn_t *t, int64_t lo, int64_t hi)
+ssi_record_range(ssi_txn_t *t, uint32_t tableid, int64_t lo, int64_t hi)
 {
 	if (t == NULL || lo > hi) return;
 	pthread_mutex_lock(&g_ssi_mu);
@@ -281,6 +297,7 @@ ssi_record_range(ssi_txn_t *t, int64_t lo, int64_t hi)
 		if (nb == NULL) { pthread_mutex_unlock(&g_ssi_mu); return; }
 		t->rngs = nb; t->rngcap = nc;
 	}
+	t->rngs[t->nrng].tableid = tableid;
 	t->rngs[t->nrng].lo = lo;
 	t->rngs[t->nrng].hi = hi;
 	t->nrng++;
@@ -292,7 +309,7 @@ ssi_record_range(ssi_txn_t *t, int64_t lo, int64_t hi)
  * set `wr[0..nwr)` (or scan the whole table)?  Returns 1 if so, or if
  * `me` is NULL (registry full -> conservative). */
 static int
-ssi_in_conflict(ssi_txn_t *me, const int64_t *wr, int nwr)
+ssi_in_conflict(ssi_txn_t *me, const xs_rkey_t *wr, int nwr)
 {
 	int i, j, k, in = 0;
 	if (me == NULL) return 1;
@@ -307,10 +324,13 @@ ssi_in_conflict(ssi_txn_t *me, const int64_t *wr, int nwr)
 		if (u->state == SSI_COMMITTED && u->commit_ts <= me->snap) continue;
 		for (k = 0; k < nwr; k++) {
 			for (j = 0; j < u->nreads; j++)
-				if (u->reads[j] == wr[k]) { in = 1; break; }
+				if (u->reads[j].rowid == wr[k].rowid &&
+				    u->reads[j].tableid == wr[k].tableid) { in = 1; break; }
 			if (in) break;
 			for (j = 0; j < u->nrng; j++)
-				if (wr[k] >= u->rngs[j].lo && wr[k] <= u->rngs[j].hi) {
+				if (u->rngs[j].tableid == wr[k].tableid &&
+				    wr[k].rowid >= u->rngs[j].lo &&
+				    wr[k].rowid <= u->rngs[j].hi) {
 					in = 1; break;
 				}
 			if (in) break;
@@ -415,20 +435,32 @@ xs_pin_recompute(xstore_ctx_t *cx)
 /* Order-preserving big-endian; the timestamp half is inverted so that,
  * within a rowid, higher commit_ts sorts first (newest version first). */
 static void
-enc_vkey(int64_t rowid, uint64_t commit_ts, uint8_t out[XS_VKLEN])
+enc_vkey(uint32_t tableid, int64_t rowid, uint64_t commit_ts,
+    uint8_t out[XS_VKLEN])
 {
 	uint64_t r = (uint64_t)rowid ^ 0x8000000000000000ull;
 	uint64_t t = ~commit_ts;
 	int i;
-	for (i = 7; i >= 0; i--) { out[i] = (uint8_t)(r & 0xFF); r >>= 8; }
-	for (i = 7; i >= 0; i--) { out[8 + i] = (uint8_t)(t & 0xFF); t >>= 8; }
+	/* tableid first (big-endian) so versions group + sort by table. */
+	for (i = 3; i >= 0; i--) { out[i] = (uint8_t)(tableid & 0xFF); tableid >>= 8; }
+	for (i = 7; i >= 0; i--) { out[4 + i] = (uint8_t)(r & 0xFF); r >>= 8; }
+	for (i = 7; i >= 0; i--) { out[12 + i] = (uint8_t)(t & 0xFF); t >>= 8; }
+}
+
+static uint32_t
+dec_tableid(const uint8_t *k)
+{
+	uint32_t v = 0;
+	int i;
+	for (i = 0; i < 4; i++) v = (v << 8) | k[i];
+	return v;
 }
 static int64_t
 dec_rowid(const uint8_t *k)
 {
 	uint64_t r = 0;
 	int i;
-	for (i = 0; i < 8; i++) r = (r << 8) | k[i];
+	for (i = 0; i < 8; i++) r = (r << 8) | k[4 + i];
 	return (int64_t)(r ^ 0x8000000000000000ull);
 }
 static uint64_t
@@ -436,7 +468,7 @@ dec_ts(const uint8_t *k)
 {
 	uint64_t t = 0;
 	int i;
-	for (i = 0; i < 8; i++) t = (t << 8) | k[8 + i];
+	for (i = 0; i < 8; i++) t = (t << 8) | k[12 + i];
 	return ~t;
 }
 
@@ -446,7 +478,65 @@ typedef struct xstore_vtab {
 	xstore_ctx_t *ctx;
 	xsql      *db;     /* for xsql_get_autocommit: detect explicit txn */
 	int        npay;   /* payload columns (declared columns minus the key) */
+	uint32_t   tableid; /* version-namespace id (key prefix) for this table */
 } xstore_vtab_t;
+
+/*
+ * Table-id assignment.  A table's version namespace id is a
+ * deterministic hash of its name (FNV-1a, 32-bit), so the same logical
+ * table maps to the same id across every connection AND across a
+ * restart -- which is what makes WAL recovery work: recovery replays
+ * into a fresh B-tree and the reconnecting vtab derives the identical
+ * id from the name, with no catalog to persist or lose in the crash.
+ * Different B-trees (separate files) may reuse ids freely; the id only
+ * needs to be unique among tables sharing one B-tree.  Id 0 is reserved
+ * (a name hashing to 0 is bumped to 1).  Collisions between two
+ * distinct names in one B-tree would alias their keyspaces; the cache
+ * below detects that within a process and refuses the second table (a
+ * persisted catalog with explicit unique ids is the future hardening).
+ */
+#define XS_CAT_MAX 256
+static struct xs_cat_ent {
+	bt_t    *bt;
+	char     name[64];
+	uint32_t tableid;
+} g_cat[XS_CAT_MAX];
+static int g_cat_n;
+static pthread_mutex_t g_cat_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t
+xs_name_hash(const char *name)
+{
+	uint32_t h = 2166136261u;
+	const unsigned char *p = (const unsigned char *)name;
+	for (; *p; p++) { h ^= *p; h *= 16777619u; }
+	return h ? h : 1u;   /* 0 is reserved */
+}
+
+/* Map (bt, name) to a stable table-id.  Returns the id, or 0 on a
+ * detected collision (two distinct names hashing equal in one bt). */
+static uint32_t
+xs_cat_find_or_create(bt_t *bt, const char *name)
+{
+	uint32_t id = xs_name_hash(name);
+	int i;
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_cat_n; i++)
+		if (g_cat[i].bt == bt && g_cat[i].tableid == id) {
+			if (strcmp(g_cat[i].name, name) != 0)
+				id = 0;   /* collision: distinct name, same id */
+			pthread_mutex_unlock(&g_cat_mu);
+			return id;
+		}
+	if (g_cat_n < XS_CAT_MAX) {
+		struct xs_cat_ent *e = &g_cat[g_cat_n++];
+		e->bt = bt;
+		snprintf(e->name, sizeof e->name, "%s", name);
+		e->tableid = id;
+	}
+	pthread_mutex_unlock(&g_cat_mu);
+	return id;
+}
 
 /*
  * Enter the SQL transaction on first vtab access.  SQLite fires xBegin
@@ -477,6 +567,7 @@ typedef struct xstore_cursor {
 	xsql_vtab_cursor base;
 	bt_t        *bt;
 	xstore_ctx_t *ctx;
+	uint32_t     tableid;       /* version namespace of the scanned table */
 	uint64_t     snap;          /* the read snapshot for this scan */
 	int          point;         /* 1 == point lookup (<= one row) */
 	int          eof;
@@ -671,6 +762,12 @@ xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
 	v->ctx = (xstore_ctx_t *)pAux;
 	v->db = db;
 	v->npay = npay;
+	/* argv[2] is the table name: map it to a stable per-B-tree id. */
+	v->tableid = xs_cat_find_or_create(v->ctx->bt, argv[2]);
+	if (v->tableid == 0) {
+		xsql_free(v);
+		return SQLITE_ERROR;
+	}
 	*ppv = &v->base;
 	return SQLITE_OK;
 }
@@ -728,6 +825,7 @@ xs_open(xsql_vtab *pv, xsql_vtab_cursor **ppc)
 	memset(c, 0, sizeof *c);
 	c->bt = v->ctx->bt;
 	c->ctx = v->ctx;
+	c->tableid = v->tableid;
 	c->eof = 1;
 	*ppc = &c->base;
 	return SQLITE_OK;
@@ -769,14 +867,16 @@ xs_advance(xstore_cursor_t *c)
 	if (c->btc == NULL) {
 		uint8_t startbuf[XS_VKLEN];
 		const uint8_t *start;
-		uint16_t startlen;
+		uint16_t startlen = XS_VKLEN;
 		if (c->have_last) {
-			start = c->last_key; startlen = XS_VKLEN;
-		} else if (c->has_lo) {       /* seek to the start of the lo bound */
-			enc_vkey(c->lo, ~(uint64_t)0, startbuf);
-			start = startbuf; startlen = XS_VKLEN;
+			start = c->last_key;
 		} else {
-			start = NULL; startlen = 0;
+			/* Seek to this table's lowest key (or the lo bound): a
+			 * single B-tree holds many tables, so a scan must start
+			 * at our table-id and stop when it changes. */
+			enc_vkey(c->tableid, c->has_lo ? c->lo : INT64_MIN,
+			    ~(uint64_t)0, startbuf);
+			start = startbuf;
 		}
 		if (bt_cursor_open(c->bt, start, startlen, &c->btc) != XTC_OK) {
 			c->eof = 1;
@@ -799,6 +899,10 @@ xs_advance(xstore_cursor_t *c)
 			break;
 		}
 		kb = (const uint8_t *)k; vb = (const uint8_t *)vv;
+		if (dec_tableid(kb) != c->tableid) {
+			c->eof = 1;             /* ran past our table into the next */
+			break;
+		}
 		rid = dec_rowid(kb);
 		ts = dec_ts(kb);
 		if (c->has_hi && rid > c->hi) {
@@ -854,11 +958,11 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 		int64_t want = xsql_value_int64(argv[0]);
 		c->point = 1;
 		if (v->ctx->in_txn && v->ctx->serializable) {
-			rset_add(v->ctx, want);   /* read set for serializable validation */
-			ssi_record_read(v->ctx->ssi, want);
+			rset_add(v->ctx, c->tableid, want);   /* read set for serializable validation */
+			ssi_record_read(v->ctx->ssi, c->tableid, want);
 		}
 		if (v->ctx->in_txn) {
-			const xs_wrec_t *w = wbuf_find(v->ctx, want);
+			const xs_wrec_t *w = wbuf_find(v->ctx, c->tableid, want);
 			if (w != NULL) {
 				if (!w->deleted) {
 					c->rowid = want;
@@ -870,11 +974,13 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 			}
 		}
 		/* Else the newest committed version at-or-before the snapshot. */
-		enc_vkey(want, snap, startk);
+		enc_vkey(c->tableid, want, snap, startk);
 		if (bt_cursor_open(c->bt, startk, XS_VKLEN, &cur) != XTC_OK)
 			return SQLITE_OK;
 		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) == XTC_OK &&
-		    klen == XS_VKLEN && dec_rowid((const uint8_t *)k) == want &&
+		    klen == XS_VKLEN &&
+		    dec_tableid((const uint8_t *)k) == c->tableid &&
+		    dec_rowid((const uint8_t *)k) == want &&
 		    !(vl >= 1 && (((const uint8_t *)vv)[0] & XS_F_DELETED))) {
 			xs_stash(c, want, (const uint8_t *)vv, vl);
 			c->eof = 0;
@@ -894,7 +1000,7 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 		int64_t rlo = c->has_lo ? c->lo : INT64_MIN;
 		int64_t rhi = c->has_hi ? c->hi : INT64_MAX;
 		v->ctx->did_scan = 1;     /* conservative outgoing edge */
-		ssi_record_range(v->ctx->ssi, rlo, rhi);  /* precise incoming predicate */
+		ssi_record_range(v->ctx->ssi, c->tableid, rlo, rhi);  /* precise incoming predicate */
 	}
 	xs_advance(c);
 	return SQLITE_OK;
@@ -953,9 +1059,9 @@ xs_wal_emit(const uint8_t *rec, size_t sz)
 /* Log a single committed version (the autocommit single-statement
  * path); same record layout as the multi-version xs_wal_log. */
 static void
-xs_wal_put(uint64_t ts, int64_t rowid, const void *val, int vlen, int deleted)
+xs_wal_put(uint64_t ts, uint32_t tableid, int64_t rowid, const void *val, int vlen, int deleted)
 {
-	uint8_t rec[12 + 11 + XS_VMAX];
+	uint8_t rec[12 + 15 + XS_VMAX];
 	uint8_t *p = rec;
 	uint32_t n = 1;
 	uint8_t flags = deleted ? XS_F_DELETED : 0;
@@ -964,6 +1070,7 @@ xs_wal_put(uint64_t ts, int64_t rowid, const void *val, int vlen, int deleted)
 	memcpy(p, &ts, 8); p += 8;
 	memcpy(p, &n, 4); p += 4;
 	memcpy(p, &rowid, 8); p += 8;
+	memcpy(p, &tableid, 4); p += 4;
 	*p++ = flags;
 	memcpy(p, &vl, 2); p += 2;
 	if (vl) { memcpy(p, val, vl); p += vl; }
@@ -971,7 +1078,7 @@ xs_wal_put(uint64_t ts, int64_t rowid, const void *val, int vlen, int deleted)
 }
 
 static int
-xs_put(bt_t *bt, int64_t rowid, const void *blob, int n, int deleted)
+xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
 {
 	uint8_t key[XS_VKLEN];
 	uint8_t buf[1 + XS_VMAX];
@@ -980,8 +1087,8 @@ xs_put(bt_t *bt, int64_t rowid, const void *blob, int n, int deleted)
 	if (n < 0) n = 0;
 	if (n > XS_VMAX) n = XS_VMAX;
 	if (g_xwal != NULL)
-		xs_wal_put(ts, rowid, blob, n, deleted);   /* durable BEFORE apply */
-	enc_vkey(rowid, ts, key);
+		xs_wal_put(ts, tableid, rowid, blob, n, deleted);   /* durable BEFORE apply */
+	enc_vkey(tableid, rowid, ts, key);
 	buf[0] = deleted ? XS_F_DELETED : 0;
 	if (!deleted && n > 0) memcpy(buf + 1, blob, (size_t)n);
 	return bt_insert(bt, key, XS_VKLEN, buf, (uint16_t)(1 + (deleted ? 0 : n)))
@@ -992,18 +1099,19 @@ xs_put(bt_t *bt, int64_t rowid, const void *blob, int n, int deleted)
  * rowid has no version.  Used by serializable validation to detect a
  * concurrent write to a key this transaction read. */
 static uint64_t
-xs_newest_ts(bt_t *bt, int64_t rowid)
+xs_newest_ts(bt_t *bt, uint32_t tableid, int64_t rowid)
 {
 	bt_cursor_t *cur = NULL;
 	uint8_t startk[XS_VKLEN];
 	const void *k = NULL, *vv = NULL;
 	uint16_t klen = 0, vl = 0;
 	uint64_t ts = 0;
-	enc_vkey(rowid, ~(uint64_t)0, startk);   /* newest version sorts first */
+	enc_vkey(tableid, rowid, ~(uint64_t)0, startk);   /* newest version sorts first */
 	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
 		return 0;
 	if (bt_cursor_next(cur, &k, &klen, &vv, &vl) == XTC_OK &&
-	    klen == XS_VKLEN && dec_rowid((const uint8_t *)k) == rowid)
+	    klen == XS_VKLEN && dec_tableid((const uint8_t *)k) == tableid &&
+	    dec_rowid((const uint8_t *)k) == rowid)
 		ts = dec_ts((const uint8_t *)k);
 	bt_cursor_close(cur);
 	return ts;
@@ -1039,6 +1147,7 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 		uint8_t dead[XS_GC_BATCH][XS_VKLEN];
 		int ndead = 0, i;
 		int64_t prev_rowid = 0;
+		uint32_t prev_tableid = 0;
 		int in_group = 0, survivor_found = 0;
 		const uint8_t *start = have_resume ? resume : NULL;
 
@@ -1048,6 +1157,7 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 			const void *k = NULL, *vv = NULL;
 			uint16_t klen = 0, vl = 0;
 			int64_t rid; uint64_t ts; int deleted, first_in_group;
+			uint32_t tid;
 
 			if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
 			    klen != XS_VKLEN)
@@ -1055,12 +1165,17 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 			/* Skip the resume key itself (already processed). */
 			if (have_resume && memcmp(k, resume, XS_VKLEN) == 0)
 				continue;
+			tid = dec_tableid((const uint8_t *)k);
 			rid = dec_rowid((const uint8_t *)k);
 			ts = dec_ts((const uint8_t *)k);
 			deleted = (vl >= 1 && (((const uint8_t *)vv)[0] & XS_F_DELETED));
-			first_in_group = (!in_group || rid != prev_rowid);
+			/* A logical row is (tableid, rowid): a group boundary is
+			 * either changing. */
+			first_in_group = (!in_group || rid != prev_rowid ||
+			    tid != prev_tableid);
 			if (first_in_group) {
-				prev_rowid = rid; in_group = 1; survivor_found = 0;
+				prev_rowid = rid; prev_tableid = tid;
+				in_group = 1; survivor_found = 0;
 			}
 			if (!survivor_found) {
 				if (ts <= horizon) {
@@ -1099,14 +1214,14 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
  * collect-then-delete discipline (no latch across the cursor).
  */
 static int
-xs_prune_rowid(bt_t *bt, int64_t rowid, uint64_t horizon)
+xs_prune_rowid(bt_t *bt, uint32_t tableid, int64_t rowid, uint64_t horizon)
 {
 	bt_cursor_t *cur = NULL;
 	uint8_t startk[XS_VKLEN];
 	uint8_t dead[16][XS_VKLEN];
 	int ndead = 0, i, survivor_found = 0, first = 1, reclaimed = 0;
 
-	enc_vkey(rowid, ~(uint64_t)0, startk);    /* newest version first */
+	enc_vkey(tableid, rowid, ~(uint64_t)0, startk);    /* newest version first */
 	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
 		return 0;
 	for (;;) {
@@ -1116,8 +1231,9 @@ xs_prune_rowid(bt_t *bt, int64_t rowid, uint64_t horizon)
 
 		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
 		    klen != XS_VKLEN ||
+		    dec_tableid((const uint8_t *)k) != tableid ||
 		    dec_rowid((const uint8_t *)k) != rowid)
-			break;                            /* past this rowid */
+			break;                            /* past this (table,rowid) */
 		ts = dec_ts((const uint8_t *)k);
 		deleted = (vl >= 1 && (((const uint8_t *)vv)[0] & XS_F_DELETED));
 		if (!survivor_found) {
@@ -1151,12 +1267,12 @@ static _Atomic int g_av_interval = 1;
 static _Atomic int g_av_countdown = 1;
 static _Atomic uint64_t g_av_prunes = 0;   /* prune passes actually run */
 static void
-xs_maybe_prune(bt_t *bt, int64_t rowid, uint64_t horizon)
+xs_maybe_prune(bt_t *bt, uint32_t tableid, int64_t rowid, uint64_t horizon)
 {
 	int reclaimed, iv;
 	if (atomic_fetch_sub_explicit(&g_av_countdown, 1, memory_order_relaxed) > 1)
 		return;                               /* not this write */
-	reclaimed = xs_prune_rowid(bt, rowid, horizon);
+	reclaimed = xs_prune_rowid(bt, tableid, rowid, horizon);
 	atomic_fetch_add_explicit(&g_av_prunes, 1, memory_order_relaxed);
 	if (reclaimed > 0) {
 		iv = 1;                               /* productive: prune every write */
@@ -1171,11 +1287,11 @@ xs_maybe_prune(bt_t *bt, int64_t rowid, uint64_t horizon)
 /* Write a version, then (if this connection enabled autovacuum) prune
  * the rowid's now-dead older versions up to the live-snapshot horizon. */
 static int
-xs_put_pruned(xstore_ctx_t *cx, int64_t rowid, const void *blob, int n, int deleted)
+xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
 {
-	int rc = xs_put(cx->bt, rowid, blob, n, deleted);
+	int rc = xs_put(cx->bt, tableid, rowid, blob, n, deleted);
 	if (rc == SQLITE_OK && cx->autovacuum)
-		xs_maybe_prune(cx->bt, rowid,
+		xs_maybe_prune(cx->bt, tableid, rowid,
 		    snap_horizon(atomic_load_explicit(&g_xclock, memory_order_relaxed)));
 	return rc;
 }
@@ -1198,8 +1314,8 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 	if (argc == 1) {
 		int64_t rid = xsql_value_int64(argv[0]);   /* DELETE */
 		if (cx->in_txn)
-			return wbuf_add(cx, rid, NULL, 0, 1);
-		return xs_put_pruned(cx, rid, NULL, 0, 1);
+			return wbuf_add(cx, v->tableid, rid, NULL, 0, 1);
+		return xs_put_pruned(cx, v->tableid, rid, NULL, 0, 1);
 	}
 	{
 		int64_t rowid = (xsql_value_type(argv[1]) == SQLITE_NULL)
@@ -1214,14 +1330,14 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 		if (xsql_value_type(argv[0]) != SQLITE_NULL) {
 			int64_t oldid = xsql_value_int64(argv[0]);
 			if (oldid != rowid) {
-				if (cx->in_txn) (void)wbuf_add(cx, oldid, NULL, 0, 1);
-				else (void)xs_put_pruned(cx, oldid, NULL, 0, 1);
+				if (cx->in_txn) (void)wbuf_add(cx, v->tableid, oldid, NULL, 0, 1);
+				else (void)xs_put_pruned(cx, v->tableid, oldid, NULL, 0, 1);
 			}
 		}
 		if (pRowid != NULL) *pRowid = rowid;
 		if (cx->in_txn)
-			return wbuf_add(cx, rowid, rec, reclen, 0);
-		return xs_put_pruned(cx, rowid, rec, reclen, 0);
+			return wbuf_add(cx, v->tableid, rowid, rec, reclen, 0);
+		return xs_put_pruned(cx, v->tableid, rowid, rec, reclen, 0);
 	}
 }
 
@@ -1243,7 +1359,7 @@ xs_sync(xsql_vtab *pv)
 {
 	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
 	int i, out_edge = 0, in_edge;
-	int64_t *wr;
+	xs_rkey_t *wr;
 	int nwr;
 	if (!cx->in_txn || !cx->serializable)
 		return SQLITE_OK;
@@ -1264,7 +1380,8 @@ xs_sync(xsql_vtab *pv)
 	 * first); in a write-skew this makes the second committer abort.
 	 */
 	for (i = 0; i < cx->rn; i++)
-		if (xs_newest_ts(cx->bt, cx->rset[i]) > cx->txn_snap) { out_edge = 1; break; }
+		if (xs_newest_ts(cx->bt, cx->rset[i].tableid, cx->rset[i].rowid)
+		    > cx->txn_snap) { out_edge = 1; break; }
 	if (cx->did_scan &&
 	    atomic_load_explicit(&g_xclock, memory_order_relaxed) > cx->txn_snap)
 		out_edge = 1;
@@ -1279,8 +1396,11 @@ xs_sync(xsql_vtab *pv)
 	wr = malloc((size_t)(cx->wn ? cx->wn : 1) * sizeof *wr);
 	nwr = 0;
 	if (wr != NULL)
-		for (i = 0; i < cx->wn; i++)
-			wr[nwr++] = cx->wbuf[i].rowid;
+		for (i = 0; i < cx->wn; i++) {
+			wr[nwr].tableid = cx->wbuf[i].tableid;
+			wr[nwr].rowid = cx->wbuf[i].rowid;
+			nwr++;
+		}
 	in_edge = ssi_in_conflict(cx->ssi, wr, nwr);
 	free(wr);
 	return in_edge ? SQLITE_BUSY : SQLITE_OK;   /* pivot -> serialization failure */
@@ -1308,7 +1428,7 @@ xs_wal_log(xstore_ctx_t *cx, uint64_t ts)
 	int i;
 
 	for (i = 0; i < cx->wn; i++)
-		sz += 11 + (cx->wbuf[i].deleted ? 0 : cx->wbuf[i].len);
+		sz += 15 + (cx->wbuf[i].deleted ? 0 : cx->wbuf[i].len);
 	rec = malloc(sz);
 	if (rec == NULL)
 		return;                       /* best-effort; durability lost on OOM */
@@ -1321,6 +1441,7 @@ xs_wal_log(xstore_ctx_t *cx, uint64_t ts)
 		uint8_t flags = w->deleted ? XS_F_DELETED : 0;
 		uint16_t vlen = w->deleted ? 0 : w->len;
 		memcpy(p, &w->rowid, 8); p += 8;
+		memcpy(p, &w->tableid, 4); p += 4;
 		*p++ = flags;
 		memcpy(p, &vlen, 2); p += 2;
 		if (vlen) { memcpy(p, w->data, vlen); p += vlen; }
@@ -1346,14 +1467,14 @@ xs_commit(xsql_vtab *pv)
 			uint8_t key[XS_VKLEN];
 			uint8_t buf[1 + XS_VMAX];
 			xs_wrec_t *w = &cx->wbuf[i];
-			enc_vkey(w->rowid, ts, key);
+			enc_vkey(w->tableid, w->rowid, ts, key);
 			buf[0] = w->deleted ? XS_F_DELETED : 0;
 			if (!w->deleted && w->len) memcpy(buf + 1, w->data, w->len);
 			if (bt_insert(cx->bt, key, XS_VKLEN, buf,
 			    (uint16_t)(1 + (w->deleted ? 0 : w->len))) != XTC_OK)
 				rc = SQLITE_ERROR;
 			else if (cx->autovacuum)
-				xs_maybe_prune(cx->bt, w->rowid, snap_horizon(ts));
+				xs_maybe_prune(cx->bt, w->tableid, w->rowid, snap_horizon(ts));
 		}
 		ssi_commit(cx->ssi, ts);     /* publish commit_ts for SSI peers */
 	} else {
@@ -1551,17 +1672,19 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 	memcpy(&n, p, 4); p += 4;
 	for (i = 0; i < n; i++) {
 		int64_t rowid;
+		uint32_t tableid;
 		uint8_t flags;
 		uint16_t vlen;
 		uint8_t key[XS_VKLEN];
 		uint8_t buf[1 + XS_VMAX];
 
-		if (p + 11 > end) break;      /* torn record */
+		if (p + 15 > end) break;      /* torn record */
 		memcpy(&rowid, p, 8); p += 8;
+		memcpy(&tableid, p, 4); p += 4;
 		flags = *p++;
 		memcpy(&vlen, p, 2); p += 2;
 		if (vlen > XS_VMAX || p + vlen > end) break;
-		enc_vkey(rowid, ts, key);
+		enc_vkey(tableid, rowid, ts, key);
 		buf[0] = flags;
 		if (vlen) memcpy(buf + 1, p, vlen);
 		p += vlen;
