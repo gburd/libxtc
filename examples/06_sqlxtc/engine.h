@@ -68,6 +68,10 @@ int  sx_storage_run(struct xtc_loop *loop);
 int  sx_storage_checkpoint(void);
 void sx_storage_close(void);
 
+/* 1 if the libxtc-native storage engine is open (so plain CREATE TABLE
+ * is routed to it).  0 otherwise. */
+int  sx_storage_active(void);
+
 /* Install the xtc_amutex-backed mutex methods (opaque table from
  * mutex_methods()).  Call before sx_init. */
 int  sx_config_mutex(const void *methods);
