@@ -19,15 +19,14 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>   /* abort */
 #include <string.h>
 #include <signal.h>
+#include <unistd.h>   /* read/write/close + ssize_t; the MSVC build maps
+                      * these to the CRT via src/inc/compat/unistd.h */
 
-#if !defined(_WIN32)
-#  include <unistd.h>
-#else
-#  include <io.h>
+#ifndef STDERR_FILENO
 #  define STDERR_FILENO 2
-#  define write _write
 #endif
 
 /* ---- raw fd writers (no stdio, no malloc) ---- */
