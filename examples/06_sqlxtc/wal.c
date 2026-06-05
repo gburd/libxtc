@@ -12,8 +12,11 @@
  *	ack.  A batch is drained from the mailbox -- the first record
  *	blocks, then more are gathered with a TIMED receive until the
  *	window closes or the batch cap is hit -- and committed with one
- *	write(2) + one fdatasync(2), both offloaded via xtc_blocking_run
- *	so the loop keeps running while the writer parks on disk.
+ *	pwrite + one fdatasync, both issued via libxtc async file I/O
+ *	(xtc_aio): native io_uring completion where the writer's loop
+ *	supports it, a blocking-pool offload elsewhere.  Either way the
+ *	writer parks while the loop keeps running, and on io_uring the
+ *	write and the fsync ride the same ring with no pool thread.
  *
  *	Dogfood note: this is implemented on raw xtc_proc send/recv, not
  *	xtc_svr, because group commit is the gen_server:reply/2 pattern
@@ -24,7 +27,7 @@
 
 #include "wal.h"
 
-#include "xtc_blocking.h"
+#include "xtc_aio.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -93,30 +96,6 @@ now_ns(void)
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
-
-/* ---- offloaded write + fsync ---- */
-struct flush_io { int fd; const uint8_t *buf; size_t len; off_t off; };
-
-static int
-flush_io_fn(void *arg)
-{
-	struct flush_io *f = arg;
-	size_t done = 0;
-
-	while (done < f->len) {
-		ssize_t w = pwrite(f->fd, f->buf + done, f->len - done,
-		    f->off + (off_t)done);
-		if (w < 0) {
-			if (errno == EINTR)
-				continue;
-			return errno ? errno : -1;
-		}
-		done += (size_t)w;
-	}
-	if (fdatasync(f->fd) != 0)
-		return errno ? errno : -1;
-	return 0;
 }
 
 int
@@ -198,17 +177,22 @@ batch_add(wal_t *w, const uint8_t *data, uint32_t len,
 static void
 batch_flush(wal_t *w)
 {
-	struct flush_io f;
 	struct wal_ack ack;
-	int rc = 0;
+	int rc;
 	uint32_t i;
 
 	if (w->pcount == 0)
 		return;
 
-	f.fd = w->fd; f.buf = w->bbuf; f.len = w->blen; f.off = w->off;
-	if (xtc_blocking_run(flush_io_fn, &f, &rc) != XTC_OK)
-		rc = flush_io_fn(&f);        /* off a loop: synchronous */
+	/*
+	 * Durably write the batch via libxtc async file I/O: native
+	 * io_uring completion when the writer runs on a capable loop, the
+	 * blocking pool otherwise.  The writer parks while the loop keeps
+	 * serving other work -- and on io_uring the batch write and its
+	 * fdatasync ride the same ring with no pool thread involved.
+	 */
+	rc = xtc_aio_pwrite(w->fd, w->bbuf, (uint32_t)w->blen, (int64_t)w->off);
+	rc = (rc == (int)w->blen) ? xtc_aio_fdatasync(w->fd) : -1;
 	(void)rc;                            /* a real engine would surface I/O errors */
 
 	w->off += (off_t)w->blen;
