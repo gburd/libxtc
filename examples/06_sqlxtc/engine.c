@@ -193,6 +193,7 @@ sx_storage_open(const char *path, unsigned int n_frames)
 		o.n_frames = n_frames;
 	existing = (stat(dpath, &stbuf) == 0 && stbuf.st_size >= (off_t)o.page_size);
 	o.reopen = existing ? 1 : 0;
+	o.double_write = 1;   /* torn-page protection for the persistent store */
 	if (bm_create(&o, &g_xbm) != XTC_OK)
 		return SQLITE_ERROR;
 	if (existing) {

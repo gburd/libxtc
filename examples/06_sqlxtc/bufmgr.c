@@ -25,6 +25,7 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -116,6 +117,14 @@ struct bm {
 	/* stats */
 	_Atomic uint64_t  s_hits, s_rescues, s_loads, s_cooled, s_flushed, s_evicted;
 	_Atomic uint64_t  resident;
+
+	/* double-write buffer (torn-page protection); dw_fd < 0 == disabled */
+	int               dw_fd;
+	pthread_mutex_t   dw_mu;
+	uint32_t          dw_slots;      /* ring size in slots */
+	uint32_t          dw_next;       /* next slot to claim (round-robin) */
+	_Atomic uint64_t  dw_seq;        /* monotonic write sequence */
+	_Atomic uint64_t  s_dw_repaired; /* pages restored from the DW on reopen */
 };
 
 /* ---- offloaded page I/O (never holds a lock) ---- */
@@ -242,6 +251,118 @@ free_pop(bm_t *bm)
 	return f;
 }
 
+/* ---- double-write buffer: torn-page protection ----
+ *
+ * Every page write goes first to a slot in a separate double-write
+ * file (a full page image plus a [pid, seq] header) which is fsync'd,
+ * and only THEN to the page's final location in the main file.  The
+ * ring holds the last dw_slots writes.  On reopen the ring is replayed
+ * in sequence order onto the main file: a final write the crash left
+ * torn is overwritten by its durable, complete double-write copy, and
+ * because writes apply oldest-to-newest the latest image of each page
+ * wins.  Re-applying an untorn final is a harmless idempotent rewrite.
+ * This is InnoDB's double-write; recovery unconditionally re-applies
+ * the (known-complete) ring rather than detecting which finals tore, so
+ * no in-page checksum is needed.
+ */
+#define BM_DW_SLOTS 64
+#define BM_DW_HDR   16            /* [pid:8][seq:8] per slot */
+
+struct dw_io {
+	int   fd;
+	off_t off;
+	const uint8_t *hdr;
+	const void *page;
+	size_t plen;
+};
+static int
+dw_io_fn(void *arg)
+{
+	struct dw_io *d = arg;
+	if (pwrite(d->fd, d->hdr, BM_DW_HDR, d->off) != BM_DW_HDR)
+		return -1;
+	if (pwrite(d->fd, d->page, d->plen, d->off + BM_DW_HDR) != (ssize_t)d->plen)
+		return -1;
+	return fdatasync(d->fd) == 0 ? 0 : -1;   /* durable before the final write */
+}
+
+/* Log `page` (destined for `pid`) to the next double-write slot and make
+ * it durable.  Called by flush_frame BEFORE the final write. */
+static void
+dw_protect(bm_t *bm, bm_pid_t pid, const void *page)
+{
+	uint8_t hdr[BM_DW_HDR];
+	uint64_t seq;
+	uint32_t slot;
+	struct dw_io d;
+	int rc;
+
+	if (bm->dw_fd < 0)
+		return;                       /* double-write disabled */
+	pthread_mutex_lock(&bm->dw_mu);
+	slot = bm->dw_next;
+	bm->dw_next = (slot + 1u) % bm->dw_slots;
+	pthread_mutex_unlock(&bm->dw_mu);
+	seq = atomic_fetch_add_explicit(&bm->dw_seq, 1, memory_order_relaxed) + 1;
+	memcpy(hdr, &pid, 8);
+	memcpy(hdr + 8, &seq, 8);
+	d.fd = bm->dw_fd;
+	d.off = (off_t)slot * (off_t)(BM_DW_HDR + bm->page_size);
+	d.hdr = hdr; d.page = page; d.plen = bm->page_size;
+	if (xtc_blocking_run(dw_io_fn, &d, &rc) != XTC_OK)
+		(void)dw_io_fn(&d);
+}
+
+/* On reopen, replay the double-write ring onto the main file in sequence
+ * order, repairing any torn final write, then clear the ring.  Single-
+ * threaded: runs in bm_create before any proc is spawned. */
+static void
+dw_recover(bm_t *bm)
+{
+	struct dw_ent { bm_pid_t pid; uint64_t seq; uint32_t slot; } ent[BM_DW_SLOTS];
+	uint32_t i, j, n = 0;
+	uint8_t *pg;
+	size_t slotsz = BM_DW_HDR + bm->page_size;
+
+	if (bm->dw_fd < 0)
+		return;
+	if (__os_malloc(bm->page_size, (void **)&pg) != XTC_OK)
+		return;
+	for (i = 0; i < bm->dw_slots; i++) {
+		uint8_t hdr[BM_DW_HDR];
+		bm_pid_t pid; uint64_t seq;
+		if (pread(bm->dw_fd, hdr, BM_DW_HDR,
+		    (off_t)i * (off_t)slotsz) != BM_DW_HDR)
+			continue;
+		memcpy(&pid, hdr, 8); memcpy(&seq, hdr + 8, 8);
+		if (pid == BM_PID_NONE || seq == 0)
+			continue;             /* empty slot */
+		ent[n].pid = pid; ent[n].seq = seq; ent[n].slot = i; n++;
+	}
+	for (i = 1; i < n; i++) {        /* insertion sort by seq ascending */
+		struct dw_ent tmp = ent[i];
+		for (j = i; j > 0 && ent[j - 1].seq > tmp.seq; j--)
+			ent[j] = ent[j - 1];
+		ent[j] = tmp;
+	}
+	for (i = 0; i < n; i++) {
+		if (pread(bm->dw_fd, pg, bm->page_size,
+		    (off_t)ent[i].slot * (off_t)slotsz + BM_DW_HDR)
+		    != (ssize_t)bm->page_size)
+			continue;
+		if (pwrite(bm->fd, pg, bm->page_size,
+		    (off_t)ent[i].pid * (off_t)bm->page_size)
+		    == (ssize_t)bm->page_size)
+			atomic_fetch_add_explicit(&bm->s_dw_repaired, 1,
+			    memory_order_relaxed);
+	}
+	if (n > 0)
+		(void)fdatasync(bm->fd);
+	if (ftruncate(bm->dw_fd, 0) != 0)
+		{ /* best-effort: a stale ring is re-applied idempotently next time */ }
+	__os_free(pg);
+}
+
 /* Write a dirty page out, off the loop.  Returns 1 if it is clean
  * afterward.  Snapshots the page under a NON-BLOCKING shared latch so
  * it never writes a torn image while a writer mutates the page, and
@@ -282,6 +403,7 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 	 * consistent image as of this point. */
 	atomic_store_explicit(&f->dirty, 0, memory_order_release);
 	xtc_arwlock_unlock(f->latch);
+	dw_protect(bm, f->pid, snap);       /* full-page log, durable, BEFORE the final write */
 	(void)do_io(bm, snap, f->pid, 1);
 	__os_free(snap);
 	atomic_store_explicit(&f->io_busy, 0, memory_order_release);
@@ -563,6 +685,28 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	    opts->reopen ? (O_RDWR | O_CREAT) : (O_RDWR | O_CREAT | O_TRUNC), 0644);
 	if (bm->fd < 0) { __os_free(bm); return XTC_E_INVAL; }
 
+	/* Double-write area: a sibling "<path>.dwb" file.  Off unless
+	 * requested (it costs an fsync per flush). */
+	bm->dw_fd = -1;
+	bm->dw_slots = BM_DW_SLOTS;
+	bm->dw_next = 0;
+	atomic_store(&bm->dw_seq, 0);
+	atomic_store(&bm->s_dw_repaired, 0);
+	(void)pthread_mutex_init(&bm->dw_mu, NULL);
+	if (opts->double_write) {
+		char dwpath[1024];
+		const char *base = opts->path ? opts->path : "/tmp/sqlxtc-bm.tmp";
+		if (snprintf(dwpath, sizeof dwpath, "%s.dwb", base) < (int)sizeof dwpath) {
+			bm->dw_fd = open(dwpath,
+			    opts->reopen ? (O_RDWR | O_CREAT) : (O_RDWR | O_CREAT | O_TRUNC),
+			    0644);
+			/* On reopen, repair the main file from the ring before the
+			 * B-tree reads any page. */
+			if (bm->dw_fd >= 0 && opts->reopen)
+				dw_recover(bm);
+		}
+	}
+
 	if ((rc = __os_calloc(bm->n_frames, sizeof *bm->frames,
 	    (void **)&bm->frames)) != XTC_OK) { close(bm->fd); __os_free(bm); return rc; }
 	if ((rc = __os_aligned_alloc(4096,
@@ -607,6 +751,8 @@ bm_destroy(bm_t *bm)
 	bm_provider_stop(bm);
 	bm_trickler_stop(bm);
 	if (bm->fd >= 0) close(bm->fd);
+	if (bm->dw_fd >= 0) close(bm->dw_fd);
+	(void)pthread_mutex_destroy(&bm->dw_mu);
 	if (bm->frames != NULL) {
 		uint32_t i;
 		for (i = 0; i < bm->n_frames; i++)
@@ -1091,6 +1237,7 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->free_frames = atomic_load_explicit(&bm->free_n, memory_order_relaxed);
 	out->prefetched = atomic_load_explicit(&bm->s_prefetched, memory_order_relaxed);
 	out->trickled = atomic_load_explicit(&bm->s_trickled, memory_order_relaxed);
+	out->dw_repaired = atomic_load_explicit(&bm->s_dw_repaired, memory_order_relaxed);
 }
 
 /* ---- persistence: superblock, sync, checkpoint ---- */
