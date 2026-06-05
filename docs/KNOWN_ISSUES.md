@@ -371,3 +371,27 @@ fd-park mechanism entirely.  Until then test_bufmgr_mt runs only on the
 io_uring CI and is skipped on the epoll CI, and xtc_blocking_run keeps
 its committed pipe + wait_fd path (fast on io_uring).  The reproducer
 and this write-up set up that focused effort.
+
+### OPEN -- test_server_storage flaky hang (lost cross-thread wakeup)
+
+`examples/06_sqlxtc/test_server_storage` hangs intermittently (~1 in 8
+locally, io_uring backend) in the connection-per-proc + storage
+workload.  A SIGABRT core of a hung run shows the scheduler loops
+blocked in `io_uring_wait_cqes` while two blocking-pool workers sit in
+`fdatasync` -- the WAL group-commit writer (wal.c `flush_io_fn`) and the
+double-write buffer (bufmgr.c `dw_io_fn`).  The signature is a lost
+cross-thread completion wakeup: a fiber offloaded an fsync via
+`xtc_blocking_run`, the worker is (or just finished) running it, but the
+loop never observes the completion and idle-waits forever.
+
+Present at the shipped state (e36a68d), so it is NOT caused by the
+xtc_aio page-I/O wiring; that work (do_io / bm_sync on xtc_aio) is
+orthogonal.  It was surfaced while attempting to convert the WAL writer
+and double-write buffer onto xtc_aio: that conversion must wait until
+this lost-wakeup is understood, since adding more concurrent
+completion traffic to the same hot path would only worsen it.
+
+Likely the same lost-wakeup class as the (A) investigation; needs a
+dedicated session with a clean core walk of the parked fiber's waker
+state and the blocking-pool -> loop wake path.  Until then it is a
+known flake on the io_uring examples CI.
