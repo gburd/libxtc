@@ -372,7 +372,7 @@ io_uring CI and is skipped on the epoll CI, and xtc_blocking_run keeps
 its committed pipe + wait_fd path (fast on io_uring).  The reproducer
 and this write-up set up that focused effort.
 
-### OPEN -- test_server_storage flaky hang (lost cross-thread wakeup)
+### FIXED -- test_server_storage flaky hang (lost cross-thread wakeup)
 
 `examples/06_sqlxtc/test_server_storage` hangs intermittently (~1 in 8
 locally, io_uring backend) in the connection-per-proc + storage
@@ -395,3 +395,12 @@ Likely the same lost-wakeup class as the (A) investigation; needs a
 dedicated session with a clean core walk of the parked fiber's waker
 state and the blocking-pool -> loop wake path.  Until then it is a
 known flake on the io_uring examples CI.
+
+FIXED (commit after b7a6558): the root cause was a cross-thread io_uring
+submission.  xtc_proc_wait_fd -- which xtc_blocking_run parks on --
+registered its wait fd on self->task->loop->io (the proc's HOME loop),
+but under the multi-loop executor a proc runs stolen on another loop, so
+the POLL_ADD went to a ring this thread does not own and was silently
+dropped.  Fixed by registering/timing/cleaning up on __xtc_current_loop
+(the running loop).  test_server_storage 30/30; the WAL/double-write
+xtc_aio conversion is now unblocked.
