@@ -20,6 +20,7 @@
 
 #include "xtc_int.h"
 #include "xtc_blocking.h"
+#include "xtc_aio.h"
 #include "xtc_stats.h"
 #include "xtc_sync.h"
 
@@ -127,27 +128,26 @@ struct bm {
 	_Atomic uint64_t  s_dw_repaired; /* pages restored from the DW on reopen */
 };
 
-/* ---- offloaded page I/O (never holds a lock) ---- */
-struct io_req { int fd; void *buf; size_t len; off_t off; int write; };
-static int
-io_fn(void *arg)
-{
-	struct io_req *r = arg;
-	ssize_t n = r->write ? pwrite(r->fd, r->buf, r->len, r->off)
-	                      : pread(r->fd, r->buf, r->len, r->off);
-	if (n == (ssize_t)r->len) return 0;
-	if (!r->write && n >= 0) { memset((char *)r->buf + n, 0, r->len - (size_t)n); return 0; }
-	return -1;
-}
+/* ---- page I/O via libxtc async file ops (xtc_aio): native io_uring
+ * completion where available, a blocking-pool offload elsewhere.  The
+ * loop is never blocked: the fiber parks until the op completes. ---- */
 static int
 do_io(bm_t *bm, void *buf, bm_pid_t pid, int write)
 {
-	struct io_req r = { bm->fd, buf, bm->page_size,
-	    (off_t)pid * (off_t)bm->page_size, write };
-	int rc;
-	if (xtc_blocking_run(io_fn, &r, &rc) != XTC_OK)
-		rc = io_fn(&r);
-	return rc;
+	off_t off = (off_t)pid * (off_t)bm->page_size;
+	int n;
+	if (write) {
+		n = xtc_aio_pwrite(bm->fd, buf, bm->page_size, off);
+		return (n == (int)bm->page_size) ? 0 : -1;
+	}
+	n = xtc_aio_pread(bm->fd, buf, bm->page_size, off);
+	if (n == (int)bm->page_size)
+		return 0;
+	if (n >= 0) {                          /* short read: zero-fill the tail */
+		memset((char *)buf + n, 0, bm->page_size - (size_t)n);
+		return 0;
+	}
+	return -1;
 }
 
 /* ---- pin protocol ----
@@ -1266,24 +1266,13 @@ bm_read_super(bm_t *bm, void *buf, size_t len)
 	return XTC_OK;
 }
 
-/* fdatasync the backing file, offloaded so the loop is not blocked. */
-struct sync_io { int fd; };
-static int
-sync_io_fn(void *arg)
-{
-	struct sync_io *s = arg;
-	return fdatasync(s->fd) == 0 ? 0 : -1;
-}
+/* fdatasync the backing file via xtc_aio (native or offloaded), so the
+ * loop is not blocked. */
 int
 bm_sync(bm_t *bm)
 {
-	struct sync_io s;
-	int rc;
 	if (bm == NULL) return XTC_E_INVAL;
-	s.fd = bm->fd;
-	if (xtc_blocking_run(sync_io_fn, &s, &rc) != XTC_OK)
-		rc = sync_io_fn(&s);
-	return rc == 0 ? XTC_OK : XTC_E_INTERNAL;
+	return xtc_aio_fsync(bm->fd) == 0 ? XTC_OK : XTC_E_INTERNAL;
 }
 
 int
