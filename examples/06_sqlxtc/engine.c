@@ -280,6 +280,12 @@ sx_storage_close(void)
 	if (g_xbm != NULL) { bm_destroy(g_xbm); g_xbm = NULL; }
 }
 
+int
+sx_storage_active(void)
+{
+	return g_xbt != NULL;
+}
+
 void
 sx_close(sx_db *h)
 {
