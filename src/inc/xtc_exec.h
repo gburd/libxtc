@@ -25,6 +25,7 @@ typedef struct xtc_exec xtc_exec_t;
  * PUBLIC: int  xtc_exec_init __P((xtc_exec_t **, int));
  * PUBLIC: int  xtc_exec_fini __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_run __P((xtc_exec_t *));
+ * PUBLIC: void xtc_exec_set_service_mode __P((xtc_exec_t *, int));
  * PUBLIC: int  xtc_exec_stop __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_n_loops __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_loop_id __P((void));
@@ -50,6 +51,11 @@ typedef struct xtc_exec xtc_exec_t;
 int  xtc_exec_init(xtc_exec_t **out, int n_loops);
 int  xtc_exec_fini(xtc_exec_t *exec);
 int  xtc_exec_run(xtc_exec_t *exec);
+
+/* Service mode: when set, xtc_exec_run does not idle-auto-stop and runs
+ * until xtc_exec_stop is called.  Used by a supervised xtc_app, which is
+ * a long-running service rather than a finite work pool. */
+void xtc_exec_set_service_mode(xtc_exec_t *exec, int on);
 int  xtc_exec_stop(xtc_exec_t *exec);
 
 int  xtc_exec_n_loops(xtc_exec_t *exec);

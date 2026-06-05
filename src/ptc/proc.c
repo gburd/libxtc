@@ -610,6 +610,21 @@ __proc_entry(void *arg)
 	int reason;
 	__current_proc = p;
 
+	/*
+	 * Bind the proc to its task/coro HERE, not in xtc_proc_spawn.  On a
+	 * cross-loop spawn the target loop may already be running, so this
+	 * coroutine can begin executing the instant xtc_async enqueues it --
+	 * before the spawning thread runs its next statement.  If the
+	 * spawner set p->task afterward, two bugs followed: (1) this proc's
+	 * own self->task uses (xtc_proc_sleep, recv, wait_fd) would read an
+	 * unset p->task, and (2) a short-lived proc could run to completion
+	 * and be reaped/freed before the spawner's "p->task = t", a
+	 * use-after-free.  Self-binding from the running coroutine closes
+	 * both: we are the task, and p is live for as long as we run.
+	 */
+	p->task = __xtc_current_task();
+	p->coro = __xtc_current_coro;
+
 	if ((reason = setjmp(p->exit_jb)) == 0) {
 		p->exit_jb_set = 1;
 		p->fn(p->arg);
@@ -647,6 +662,7 @@ xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	struct xtc_proc *p;
 	struct xtc_proc_table *tbl;
 	xtc_task_t *t;
+	xtc_pid_t spawned_pid;
 	uint16_t local;
 	uint32_t gen;
 	int rc;
@@ -691,18 +707,24 @@ xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	p->pid.loop_id  = (uint16_t)(loop->exec_id < 0 ? 0 : loop->exec_id + 1);
 	p->pid.local_id = local;
 	p->pid.gen      = gen;
+	/* Capture the pid before the spawn: once xtc_async enqueues the
+	 * task, p may be reaped on another thread, so reading p->pid for
+	 * out_pid afterward would be a use-after-free. */
+	spawned_pid = p->pid;
 
-	/* Spawn the underlying coroutine. */
+	/* Spawn the underlying coroutine.  Once xtc_async enqueues the
+	 * task it may run immediately on another loop's thread, so we must
+	 * NOT touch p afterward: the proc binds itself to its task/coro in
+	 * __proc_entry (see there).  Touching p here would race a reap. */
 	if ((rc = xtc_async(loop, __proc_entry, p, &t)) != XTC_OK) {
 		__table_release(tbl, local);
 		(void)pthread_mutex_destroy(&p->mbox_lock);
 		__os_free(p);
 		return rc;
 	}
-	p->task = t;
-	p->coro = (struct xtc_coro *)t->user;
+	(void)t;   /* p->task / p->coro are set by __proc_entry, not here */
 
-	if (out_pid) *out_pid = p->pid;
+	if (out_pid) *out_pid = spawned_pid;
 	return XTC_OK;
 }
 
@@ -1738,7 +1760,32 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 	struct mon_entry *me;
 	if (self == NULL) return XTC_E_INVAL;
 	peer = __resolve(target, NULL);
-	if (peer == NULL || !peer->alive) return XTC_E_INVAL;
+	if (peer == NULL || !peer->alive) {
+		/*
+		 * Target is already gone (it exited and was reaped between
+		 * the caller's spawn and this monitor -- a real race when the
+		 * target is spawned cross-loop onto an already-running loop
+		 * and finishes immediately).  Erlang semantics: a monitor of
+		 * a dead process delivers an immediate DOWN rather than
+		 * failing.  Deliver it to self so the caller's normal DOWN
+		 * path runs; we missed the real exit reason (it is reaped),
+		 * so report it as abnormal/noproc, which a supervisor treats
+		 * as "re-establish if you would restart on a crash."
+		 */
+		uint64_t ref = atomic_fetch_add_explicit(&__mon_ref_seq, 1,
+		    memory_order_relaxed) + 1;
+		XTC_PACK_PUSH
+		struct {
+			uint8_t kind;
+			uint64_t ref;
+			xtc_pid_t pid;
+			int     reason;
+		} XTC_PACKED down = { 'D', ref, target, XTC_E_NOTFOUND };
+		XTC_PACK_POP
+		(void)xtc_send(self->pid, &down, sizeof down);
+		if (out_ref) *out_ref = ref;
+		return XTC_OK;
+	}
 	me = __mon_alloc();
 	if (me == NULL) return XTC_E_NOMEM;
 	me->ref = atomic_fetch_add_explicit(&__mon_ref_seq, 1,

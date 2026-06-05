@@ -47,6 +47,9 @@ xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 		 * and stops the executor when it exits. */
 		if ((rc = xtc_exec_init(&a->exec, opts->n_loops)) != XTC_OK)
 			goto fail;
+		/* A supervised app is a long-running service: run until the
+		 * supervisor stops the executor, never idle-auto-stop. */
+		xtc_exec_set_service_mode(a->exec, 1);
 		a->loop = xtc_exec_loop(a->exec, 0);
 		a->owns_loop = 0;   /* the executor owns its loops */
 	} else {
