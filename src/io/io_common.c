@@ -236,7 +236,7 @@ xtc_io_backend_name(void)
 #endif
 }
 
-#if !defined(XTC_IO_BACKEND_URING)
+#if !defined(XTC_IO_BACKEND_URING) && !defined(XTC_IO_BACKEND_IOCP)
 /* PUBLIC: int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *)); */
 /*
  * Backends other than io_uring have no native file-completion engine

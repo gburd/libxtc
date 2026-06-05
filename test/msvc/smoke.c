@@ -22,12 +22,16 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
 
 #include "xtc.h"
 #include "xtc_slab.h"
 #include "xtc_lwlock.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "xtc_aio.h"
 #include "os_time.h"
 
 #define CHECK(cond) do { \
@@ -54,6 +58,31 @@ smoke_faulty_proc(void *arg)
 		return;
 	}
 	*wild = 42;                             /* access violation */
+}
+
+/* Native IOCP file AIO: a proc writes then reads back a marker through
+ * xtc_aio on an OVERLAPPED file handle.  pwrite/pread complete via
+ * overlapped ReadFile/WriteFile whose events the loop waits on; fsync
+ * has no async form on Windows and is offloaded.  Proves the
+ * xtc_io_aio_submit IOCP path end to end. */
+static volatile int s_aio_ok;
+static int s_aio_fd;
+static void
+smoke_aio_proc(void *arg)
+{
+	static const char msg[] = "xtc-iocp-aio-native";
+	char buf[64];
+	int n;
+	(void)arg;
+	memset(buf, 0, sizeof buf);
+	n = xtc_aio_pwrite(s_aio_fd, msg, (uint32_t)sizeof msg, 0);
+	if (n != (int)sizeof msg) { (void)xtc_exit_self(1); return; }
+	n = xtc_aio_pread(s_aio_fd, buf, (uint32_t)sizeof msg, 0);
+	if (n != (int)sizeof msg) { (void)xtc_exit_self(2); return; }
+	if (memcmp(buf, msg, sizeof msg) != 0) { (void)xtc_exit_self(3); return; }
+	(void)xtc_aio_fdatasync(s_aio_fd);   /* offloaded on Windows */
+	s_aio_ok = 1;
+	(void)xtc_exit_self(0);
 }
 
 int
@@ -133,6 +162,37 @@ main(void)
 		CHECK(s_fault_recovered == 1);
 		(void)xtc_loop_fini(loop);
 		printf("  ok   fault contained (wild write recovered via SEH)\n");
+	}
+
+	/* --- native IOCP file AIO (overlapped ReadFile/WriteFile) --- */
+	{
+		xtc_loop_t *loop = NULL;
+		xtc_proc_opts_t po = { 0 };
+		xtc_pid_t pid;
+		char path[MAX_PATH], dir[MAX_PATH];
+		HANDLE fh;
+		DWORD dn = GetTempPathA(sizeof dir, dir);
+		CHECK(dn > 0 && dn < sizeof dir);
+		CHECK(GetTempFileNameA(dir, "xtc", 0, path) != 0);
+		/* OVERLAPPED handle so the read/write are truly asynchronous. */
+		fh = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+		    CREATE_ALWAYS,
+		    FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_OVERLAPPED, NULL);
+		CHECK(fh != INVALID_HANDLE_VALUE);
+		s_aio_fd = _open_osfhandle((intptr_t)fh, _O_BINARY);
+		CHECK(s_aio_fd >= 0);
+		s_aio_ok = 0;
+		CHECK(xtc_loop_init(&loop) == XTC_OK);
+		po.name = "aio";
+		CHECK(xtc_proc_spawn(loop, smoke_aio_proc, NULL, &po, &pid)
+		    == XTC_OK);
+		CHECK(xtc_loop_run(loop) == XTC_OK);
+		CHECK(s_aio_ok == 1);
+		(void)xtc_loop_fini(loop);
+		(void)_close(s_aio_fd);            /* closes fh */
+		(void)DeleteFileA(path);
+		printf("  ok   native IOCP file AIO: overlapped pwrite+pread"
+		    " round-trip\n");
 	}
 
 	printf("All MSVC smoke checks passed.\n");
