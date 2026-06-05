@@ -7,6 +7,8 @@
 int __os_aligned_alloc __P((size_t, size_t, void **));
 int __os_alloc_get_hook __P((struct __os_alloc_hook *));
 int __os_alloc_set_hook __P((const struct __os_alloc_hook *));
+int __os_backtrace __P((void **, int));
+int __os_backtrace_supported __P((void));
 int __os_calloc __P((size_t, size_t, void **));
 int __os_clock_mono __P((int64_t *));
 int __os_clock_real __P((int64_t *));
@@ -49,6 +51,7 @@ int __os_tls_set __P((__os_tls_key_t, void *));
 size_t __os_msize __P((void *));
 void *__os_tls_get __P((__os_tls_key_t));
 void __os_aligned_free __P((void *));
+void __os_backtrace_emit __P((int, void *const *, int));
 void __os_free __P((void *));
 void __os_thread_yield __P((void));
 

@@ -94,6 +94,14 @@ uring_libs=
 AC_CHECK_HEADER([sys/epoll.h], [have_epoll=yes], [have_epoll=no])
 AC_CHECK_HEADER([sys/event.h], [have_kqueue=yes], [have_kqueue=no])
 
+# execinfo (backtrace/backtrace_symbols_fd) for native stack dumps in
+# the panic/abort facility.  glibc, macOS, and the BSDs have it; musl
+# does not (the backtrace seam falls back to a no-op stub there).
+AC_CHECK_HEADER([execinfo.h],
+  [AC_CHECK_FUNC([backtrace],
+    [AC_DEFINE([XTC_HAVE_EXECINFO], 1,
+       [Define to 1 if <execinfo.h> backtrace() is available])])])
+
 # musl libc deliberately omits the ucontext.h API (swapcontext et al.)
 # which the default coroutine substrate uses.  Detect this so the
 # build can fail loudly with a useful message rather than blowing
