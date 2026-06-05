@@ -22,6 +22,8 @@
 #include <unistd.h>
 
 #include "engine.h"
+#include "db.h"
+#include "quack.h"
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
@@ -38,6 +40,59 @@ static char g_path2[256];    /* storage file for the conn-per-proc cycle */
 static int  g_phase1_rows;   /* rows written in cycle 1 */
 static int  g_cycle2_seen;   /* rows seen after restart in cycle 2 */
 static int  g_cpp_total;     /* total rows seen after the conn-per-proc run */
+static char g_path3[300];
+static int  g_transparent_ok;   /* plain CREATE TABLE routed to xstore */
+static int  g_transparent_rows; /* rows read back from the routed table */
+
+/* Transparent routing: a plain CREATE TABLE, run through the Quack db
+ * layer with storage active, must become a CREATE VIRTUAL TABLE on
+ * xstore (visible in sqlite_master) and round-trip data. */
+static void
+transparent_proc(void *arg)
+{
+	xtc_loop_t *loop = arg;
+	sx_db *h = NULL;
+	quack_buf_t buf;
+	int64_t nrows = 0;
+	char *err = NULL;
+	sx_stmt *st = NULL;
+
+	CK(sx_storage_open(g_path3, 64) == SX_OK);
+	CK(sx_storage_run(loop) == SX_OK);
+	CK(sx_open(":memory:", &h) == SX_OK);   /* xstore auto-registered */
+	CK(quack_buf_init(&buf, 256) == 0);
+
+	/* Plain DDL -- no USING xstore.  The db layer rewrites it. */
+	quack_buf_reset(&buf);
+	CK(db_exec(h, "CREATE TABLE foo(id, name, age)", -1, &buf, &nrows, &err)
+	    == 0);
+
+	/* It landed as a virtual table on the xstore module. */
+	if (sx_prepare(h, "SELECT sql FROM sqlite_master WHERE name='foo'",
+	    -1, &st, NULL) == SX_OK) {
+		if (sx_step(st) == SX_ROW) {
+			const char *s = (const char *)sx_column_text(st, 0);
+			g_transparent_ok = (s != NULL &&
+			    strstr(s, "USING xstore") != NULL);
+		}
+		sx_finalize(st); st = NULL;
+	}
+
+	/* Data round-trips through the routed table. */
+	quack_buf_reset(&buf);
+	(void)db_exec(h, "INSERT INTO foo VALUES(1,'alice',30),(2,'bob',25)",
+	    -1, &buf, &nrows, &err);
+	if (sx_prepare(h, "SELECT count(*) FROM foo", -1, &st, NULL) == SX_OK) {
+		if (sx_step(st) == SX_ROW)
+			g_transparent_rows = (int)sx_column_int64(st, 0);
+		sx_finalize(st); st = NULL;
+	}
+	free(err);
+	quack_buf_free(&buf);
+	sx_close(h);
+	(void)sx_storage_checkpoint();
+	sx_storage_close();
+}
 static _Atomic int g_workers_done;
 
 /* Run "SELECT count(*) FROM t" on a fresh engine handle; -1 on error. */
@@ -177,17 +232,26 @@ main(void)
 	if (run_cycle(cpp_driver) != 0) return 1;
 	CK(g_cpp_total == NWORK * PERWORK); /* all concurrent writers landed */
 
+	strcpy(g_path3, "/tmp/sqlxtc-srvstore3-XXXXXX");
+	fd = mkstemp(g_path3); if (fd < 0) return 1; close(fd); unlink(g_path3);
+	if (run_cycle(transparent_proc) != 0) return 1;
+	CK(g_transparent_ok == 1);          /* plain CREATE TABLE -> xstore */
+	CK(g_transparent_rows == 2);        /* and data round-trips */
+
 	(void)sx_shutdown();
 	{
 		char wal[300];
 		snprintf(wal, sizeof wal, "%s-wal", g_path); unlink(wal); unlink(g_path);
 		snprintf(wal, sizeof wal, "%s-wal", g_path2); unlink(wal); unlink(g_path2);
+		snprintf(wal, sizeof wal, "%s-wal", g_path3); unlink(wal); unlink(g_path3);
 	}
 	if (g_fail) return 1;
 	printf("  ok   engine wired: %d rows written + checkpointed, %d survived "
 	    "a clean restart\n", NROW, g_cycle2_seen);
 	printf("  ok   connection-per-proc: %d procs x %d rows each = %d rows "
 	    "concurrent over one shared store\n", NWORK, PERWORK, g_cpp_total);
+	printf("  ok   transparent CREATE TABLE -> xstore: plain DDL routed to "
+	    "the native engine, %d rows round-tripped\n", g_transparent_rows);
 	printf("All sqlxtc server-storage tests passed.\n");
 	return 0;
 }

@@ -391,6 +391,147 @@ has_more_sql(const char *s)
 	return 0;
 }
 
+/*
+ * Transparent CREATE TABLE -> xstore.  When the libxtc-native storage
+ * engine is open, a plain CREATE TABLE is rewritten into a CREATE
+ * VIRTUAL TABLE on the xstore module, so ordinary DDL lands in the
+ * xtc-native engine (cooling buffer pool, MVCC, larger-than-RAM)
+ * instead of SQLite's built-in B-tree -- no opt-in.
+ *
+ * Conservative by design: only a single, well-formed
+ *   CREATE TABLE name (col [type/constraints], ..., [table-constraint])
+ * is rewritten.  Anything it cannot confidently parse -- a batch, table
+ * options (WITHOUT ROWID), trailing statements -- is passed through
+ * unchanged to SQLite's native B-tree, the documented escape hatch.
+ * The first column becomes the table's INTEGER PRIMARY KEY (xstore's
+ * rowid); the rest are the typed payload.  Returns 1 if it rewrote into
+ * `out`, else 0.
+ */
+static int
+ci_kw(const char **pp, const char *kw)
+{
+	const char *p = *pp;
+	size_t i;
+	for (i = 0; kw[i]; i++) {
+		unsigned char c = (unsigned char)p[i];
+		if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
+		if (c != (unsigned char)kw[i]) return 0;
+	}
+	{
+		unsigned char c = (unsigned char)p[i];
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		    (c >= '0' && c <= '9') || c == '_')
+			return 0;   /* keyword must end at a non-identifier char */
+	}
+	*pp = p + i;
+	return 1;
+}
+
+static const char *
+skip_ws(const char *p)
+{
+	while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+	return p;
+}
+
+static size_t
+read_name(const char **pp, char *out, size_t cap)
+{
+	const char *p = skip_ws(*pp);
+	size_t n = 0;
+	char close = 0;
+	if (*p == '"') close = '"';
+	else if (*p == '`') close = '`';
+	else if (*p == '[') close = ']';
+	if (close) {
+		p++;
+		while (*p && *p != close && n + 1 < cap) out[n++] = *p++;
+		if (*p == close) p++;
+	} else {
+		while (((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+		    (*p >= '0' && *p <= '9') || *p == '_') && n + 1 < cap)
+			out[n++] = *p++;
+	}
+	out[n] = '\0';
+	*pp = p;
+	return n;
+}
+
+static int
+db_rewrite_create_table(const char *sql, char *out, size_t cap)
+{
+	const char *p = skip_ws(sql);
+	const char *defs, *q, *s;
+	char name[128];
+	int depth, off, ncol = 0;
+
+	if (!ci_kw(&p, "create")) return 0;
+	p = skip_ws(p);
+	if (!ci_kw(&p, "table")) return 0;
+	p = skip_ws(p);
+	if (ci_kw(&p, "if")) {                 /* optional IF NOT EXISTS */
+		p = skip_ws(p);
+		if (!ci_kw(&p, "not")) return 0;
+		p = skip_ws(p);
+		if (!ci_kw(&p, "exists")) return 0;
+		p = skip_ws(p);
+	}
+	if (read_name(&p, name, sizeof name) == 0) return 0;
+	p = skip_ws(p);
+	if (*p != '(') return 0;
+	p++;
+	defs = p;
+	depth = 1;
+	for (q = p; *q; q++) {                 /* matching ')' (skip quotes) */
+		char c = *q;
+		if (c == '\'' || c == '"' || c == '`') {
+			char qc = c;
+			for (q++; *q && *q != qc; q++) ;
+			if (!*q) return 0;
+		} else if (c == '(') depth++;
+		else if (c == ')') { if (--depth == 0) break; }
+	}
+	if (depth != 0) return 0;
+	{
+		const char *r = skip_ws(q + 1);
+		if (*r == ';') r = skip_ws(r + 1);
+		if (*r != '\0') return 0;       /* trailing options/statements */
+	}
+	off = snprintf(out, cap, "CREATE VIRTUAL TABLE %s USING xstore(", name);
+	if (off < 0 || (size_t)off >= cap) return 0;
+	s = defs;
+	while (s < q) {                        /* split defs by top-level commas */
+		const char *piece = s, *e, *pp, *kw;
+		char col[128];
+		int d2 = 0;
+		for (e = s; e < q; e++) {
+			char c = *e;
+			if (c == '\'' || c == '"' || c == '`') {
+				char qc = c;
+				for (e++; e < q && *e != qc; e++) ;
+			} else if (c == '(') d2++;
+			else if (c == ')') d2--;
+			else if (c == ',' && d2 == 0) break;
+		}
+		s = (e < q) ? e + 1 : q;
+		pp = piece; kw = skip_ws(pp);
+		if (ci_kw(&kw, "primary") || ci_kw(&kw, "unique") ||
+		    ci_kw(&kw, "check") || ci_kw(&kw, "foreign") ||
+		    ci_kw(&kw, "constraint"))
+			continue;               /* table-level constraint, not a column */
+		if (read_name(&pp, col, sizeof col) == 0)
+			continue;
+		off += snprintf(out + off, cap - (size_t)off, "%s%s",
+		    ncol ? ", " : "", col);
+		if ((size_t)off >= cap) return 0;
+		ncol++;
+	}
+	if (ncol == 0) return 0;
+	off += snprintf(out + off, cap - (size_t)off, ")");
+	if ((size_t)off >= cap) return 0;
+	return 1;
+}
+
 int
 db_exec_params(sx_db *h, const char *sql,
         const struct quack_param *params, int n_params, int64_t limit,
@@ -400,6 +541,14 @@ db_exec_params(sx_db *h, const char *sql,
 	int64_t rows = 0;
 	int     last_ncols = 0;
 	int     ran_any = 0;
+	char    rewrite[1024];
+
+	/* Transparent routing: a plain CREATE TABLE becomes a CREATE VIRTUAL
+	 * TABLE on xstore when the native engine is open (DDL takes no
+	 * params, so this never collides with the extended/params path). */
+	if (n_params == 0 && sx_storage_active() &&
+	    db_rewrite_create_table(sql, rewrite, sizeof rewrite))
+		cur = sql = rewrite;
 
 	for (;;) {
 		sx_stmt    *stmt = NULL;
