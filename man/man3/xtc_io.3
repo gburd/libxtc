@@ -11,6 +11,7 @@
 .Nm xtc_io_mod_fd ,
 .Nm xtc_io_del_fd ,
 .Nm xtc_io_poll ,
+.Nm xtc_io_aio_submit ,
 .Nm xtc_io_wakeup
 .Nd L1 event-notification engine
 .Sh SYNOPSIS
@@ -30,6 +31,8 @@
 .Ft int
 .Fn xtc_io_poll "xtc_io_t *io" "xtc_io_event_t *events" "int max" \
                 "int64_t timeout_ns" "int *n_out"
+.Ft int
+.Fn xtc_io_aio_submit "xtc_io_t *io" "xtc_aio_t *a"
 .Ft int
 .Fn xtc_io_wakeup "xtc_io_t *io"
 .Sh DESCRIPTION
@@ -92,7 +95,36 @@ the event's
 .Va tag
 is
 .Dv NULL .
+.It Dv XTC_IO_AIO
+An async file-I/O completion delivered by
+.Fn xtc_io_aio_submit ;
+the event's
+.Va tag
+is the submitted
+.Vt xtc_aio_t Ns 's
+.Va tag ,
+and its result is in that struct's
+.Va res .
 .El
+.Sh ASYNC FILE I/O
+.Fn xtc_io_aio_submit
+queues a native file operation
+.Pq an Vt xtc_aio_t : Dv XTC_AIO_PREAD , XTC_AIO_PWRITE , No or Dv XTC_AIO_FSYNC
+and returns immediately.
+On the io_uring backend it submits the matching
+.Dv IORING_OP
+and the completion is delivered as an
+.Dv XTC_IO_AIO
+event that wakes the tagged task, which then reads
+.Va res
+.Pq bytes transferred, or a negative errno .
+A regular file is not pollable, so on a readiness-only backend
+.Pq epoll, kqueue, poll
+this returns
+.Dv XTC_E_NOSYS
+and the caller offloads the operation to the blocking pool instead;
+.Xr xtc_aio 3
+wraps both paths.
 .Sh REGISTRATION
 .Fn xtc_io_reg_fd
 registers a file descriptor with the engine.
