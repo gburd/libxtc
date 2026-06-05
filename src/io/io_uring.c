@@ -187,6 +187,42 @@ xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	return XTC_OK;
 }
 
+/* PUBLIC: int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *)); */
+int
+xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
+{
+	struct io_uring_sqe *sqe;
+	if (io == NULL || a == NULL || a->fd < 0)
+		return XTC_E_INVAL;
+	sqe = io_uring_get_sqe(&io->ring);
+	if (sqe == NULL) {
+		(void)io_uring_submit(&io->ring);
+		sqe = io_uring_get_sqe(&io->ring);
+		if (sqe == NULL) return XTC_E_AGAIN;
+	}
+	switch (a->op) {
+	case XTC_AIO_PREAD:
+		io_uring_prep_read(sqe, a->fd, a->buf, a->len,
+		    (unsigned long long)a->off);
+		break;
+	case XTC_AIO_PWRITE:
+		io_uring_prep_write(sqe, a->fd, a->buf, a->len,
+		    (unsigned long long)a->off);
+		break;
+	case XTC_AIO_FSYNC:
+		io_uring_prep_fsync(sqe, a->fd, IORING_FSYNC_DATASYNC);
+		break;
+	default:
+		return XTC_E_INVAL;
+	}
+	a->done = 0;
+	a->res = 0;
+	/* Low-bit tag distinguishes this completion from a poll-add CQE. */
+	io_uring_sqe_set_data(sqe, (void *)((uintptr_t)a | 1u));
+	(void)io_uring_submit(&io->ring);
+	return XTC_OK;
+}
+
 /* PUBLIC: int xtc_io_mod_fd __P((xtc_io_t *, int, uint32_t, void *)); */
 int
 xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
@@ -271,10 +307,27 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	int wakeup_emitted = 0;
 	for (i = 0; i < max; i++) {
 		struct __xtc_uring_fd *uf;
+		void *data;
 		if (cqe == NULL) {
 			if (io_uring_peek_cqe(&io->ring, &cqe) != 0) break;
 		}
-		uf = (struct __xtc_uring_fd *)io_uring_cqe_get_data(cqe);
+		data = io_uring_cqe_get_data(cqe);
+		/* Low bit tags an async file-I/O completion (xtc_aio_t *);
+		 * __xtc_uring_fd pointers are calloc-aligned, so bit 0 is 0. */
+		if (((uintptr_t)data & 1u) != 0) {
+			xtc_aio_t *a = (xtc_aio_t *)((uintptr_t)data & ~(uintptr_t)1);
+			a->res = cqe->res;
+			a->done = 1;
+			if (got < max) {
+				events[got].tag = a->tag;
+				events[got].flags = XTC_IO_AIO;
+				got++;
+			}
+			io_uring_cqe_seen(&io->ring, cqe);
+			cqe = NULL;
+			continue;
+		}
+		uf = (struct __xtc_uring_fd *)data;
 		if (uf != NULL && uf->dead) {
 			/* Registration was deleted.  Do not dispatch to it.
 			 * Once its multishot poll delivers the terminal CQE

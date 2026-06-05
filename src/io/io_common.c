@@ -235,3 +235,20 @@ xtc_io_backend_name(void)
 	return "unknown";
 #endif
 }
+
+#if !defined(XTC_IO_BACKEND_URING)
+/* PUBLIC: int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *)); */
+/*
+ * Backends other than io_uring have no native file-completion engine
+ * (a regular file is not pollable), so there is no async file op to
+ * submit -- the caller (xtc_aio_*) offloads to the blocking pool
+ * instead.  io_uring provides the real implementation.
+ */
+int
+xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
+{
+	(void)io;
+	(void)a;
+	return XTC_E_NOSYS;
+}
+#endif

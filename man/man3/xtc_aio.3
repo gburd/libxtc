@@ -1,0 +1,109 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd June 4, 2026
+.Dt XTC_AIO 3
+.Os
+.Sh NAME
+.Nm xtc_aio_pread ,
+.Nm xtc_aio_pwrite ,
+.Nm xtc_aio_fsync
+.Nd async file I/O for fibers
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_aio.h
+.Ft int
+.Fn xtc_aio_pread "int fd" "void *buf" "uint32_t len" "int64_t off"
+.Ft int
+.Fn xtc_aio_pwrite "int fd" "const void *buf" "uint32_t len" "int64_t off"
+.Ft int
+.Fn xtc_aio_fsync "int fd"
+.Sh DESCRIPTION
+These perform a file read, write, or data-sync that suspends the
+calling fiber and resumes it on completion, keeping the fiber's loop
+live for other work while the I/O is outstanding.  They use the
+platform's best mechanism, chosen at run time:
+.Bl -bullet -offset indent -compact
+.It
+On a loop whose I/O backend is io_uring, the operation is submitted
+natively
+.Pq Dv IORING_OP_READ , IORING_OP_WRITE , No or Dv IORING_OP_FSYNC ;
+the fiber parks and the kernel's completion re-enqueues it.  No worker
+thread is used.
+.It
+On a readiness-only backend
+.Pq epoll, kqueue, poll, select
+the operation is offloaded to the blocking thread pool
+.Pq Xr xtc_blocking 3 ,
+because a regular file is not pollable -- io_uring is the only POSIX
+backend that can complete file I/O asynchronously, and a thread offload
+is the correct fallback elsewhere.
+.It
+Off a loop entirely
+.Pq no current fiber
+the operation runs inline on the calling thread.
+.El
+.Pp
+This is the layer that lets storage code -- a buffer manager paging the
+B-tree, a WAL writer -- use the fastest async file path a host offers
+without the caller choosing or knowing which one.  In every case the
+call returns only once the operation has completed (or failed), so the
+caller may reuse
+.Fa buf
+immediately afterward.
+.Pp
+.Fn xtc_aio_pread
+reads up to
+.Fa len
+bytes from
+.Fa fd
+at absolute offset
+.Fa off
+into
+.Fa buf ;
+.Fn xtc_aio_pwrite
+writes
+.Fa len
+bytes from
+.Fa buf
+at
+.Fa off ;
+.Fn xtc_aio_fsync
+flushes the file's data
+.Pq fdatasync semantics: data, not necessarily metadata .
+None of them moves the file's seek pointer.
+.Sh RETURN VALUES
+.Fn xtc_aio_pread
+and
+.Fn xtc_aio_pwrite
+return the number of bytes transferred
+.Pq Ar >= 0 ;
+a short read at end of file returns the partial count, not an error.
+.Fn xtc_aio_fsync
+returns 0.
+On failure each returns a negative
+.Va errno
+value
+.Pq e.g. Li -EIO .
+.Sh CONTEXT
+Call from a fiber running on a loop for the async path; off a loop the
+operation runs synchronously on the calling thread.  The buffer must
+remain valid until the call returns, which is guaranteed simply by not
+returning from the call -- the fiber parks on this one operation's
+completion and arms no other waker, so the operation is never left in
+flight referencing a stack buffer that has gone away.
+.Sh EXAMPLES
+Page a 4 KiB block out and read it back, off the fiber's loop:
+.Bd -literal -offset indent
+int n = xtc_aio_pwrite(fd, page, 4096, (int64_t)pid * 4096);
+if (n != 4096) return -1;
+if (xtc_aio_fsync(fd) != 0) return -1;
+n = xtc_aio_pread(fd, page, 4096, (int64_t)pid * 4096);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_io 3 ,
+.Xr xtc_blocking 3 ,
+.Xr xtc_loop 3
+.Sh AUTHORS
+The
+.Nm xtc
+project.
