@@ -37,7 +37,7 @@
  *	  - Reap: drain magazines + return empty chunks to OS
  *
  *	Deferred to M11.5b:
- *	  - BACKTRACE (needs <execinfo.h>; portability work)
+ *	  - BACKTRACE (uses the __os_backtrace seam; no-op where unsupported)
  *	  - Reaper proc (xtc_proc that calls reap_all on a timer)
  */
 
@@ -68,10 +68,7 @@ static int   __win_chunk_free(void *p, size_t sz) { (void)sz; free(p); return 0;
 #endif
 #include <unistd.h>
 #include <time.h>
-#if defined(__linux__) && defined(__GLIBC__)
-#  include <execinfo.h>
-#  define XTC_HAS_EXECINFO 1
-#endif
+#include "os_backtrace.h"   /* cross-platform backtrace seam (was glibc-only) */
 
 /* ---- redzone magic ---- */
 #define XTC_RZ_MAGIC  0xA5A5A5A5A5A5A5A5ULL
@@ -113,7 +110,8 @@ struct audit_event {
 	uint8_t  op;        /* 'A'=alloc, 'F'=free */
 	int64_t  ts_ns;
 	/* When XTC_SLAB_BACKTRACE is set, capture up to 8 frames
-	 * via backtrace() (Linux/glibc; no-op elsewhere). */
+	 * via __os_backtrace (any platform with a backtrace backend; a
+	 * no-op stub elsewhere). */
 	void    *bt[XTC_AUDIT_BTSZ];
 	int      bt_n;
 };
@@ -272,11 +270,8 @@ __audit_record(xtc_slab_t *s, void *obj, uint8_t op)
 	ev->op = op;
 	ev->ts_ns = __now_ns_slab();
 	ev->bt_n = 0;
-#if defined(XTC_HAS_EXECINFO)
-	if (s->opts.flags & XTC_SLAB_BACKTRACE) {
-		ev->bt_n = backtrace(ev->bt, XTC_AUDIT_BTSZ);
-	}
-#endif
+	if (s->opts.flags & XTC_SLAB_BACKTRACE)
+		ev->bt_n = __os_backtrace(ev->bt, XTC_AUDIT_BTSZ);
 }
 
 /* ---- redzone helpers ---- */

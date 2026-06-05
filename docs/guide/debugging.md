@@ -272,6 +272,47 @@ see the recipe above and `xtc_trace(3)`.  The roadmap to a live
 `xtc-top` and to per-loop lock-free trace rings is in
 `docs/M_OBSERVABILITY.md`.
 
+## In-process dumps without a debugger (xtc_dump / XTC_PANIC)
+
+When you cannot attach a debugger or collect a core -- a container with
+`core_pattern` disabled, a CI runner, a customer site -- the same proc,
+loop, and mailbox view is available from inside the program:
+
+    #include "xtc_dump.h"
+
+    xtc_dump(STDERR_FILENO);   /* loops, procs, mailbox depths, backtrace */
+
+The output uses the same field names as `xtc-procs`/`xtc-loops`, so a
+dump and a `gdb` session read alike:
+
+    === xtc runtime dump ===
+    thread backtrace (4 frames):
+    ...
+    loops:
+      loop 0  procs=2 alive=2 tasks_run=3 steals=0
+    procs:
+      <0.0.1> parked    park=timer   mbox=2/4096 peak=2 recv=2 drop=0
+      <0.1.1> running   park=-       mbox=0/4096 peak=0 recv=0 drop=0
+    === end dump ===
+
+To abort with that dump on a failed invariant, use the panic/assert
+macros (always compiled in -- they are diagnostics, not debug-only):
+
+    XTC_ASSERT(frame->pin > 0);
+    XTC_ASSERT_F(n <= cap, "overflow: n=%zu cap=%zu", n, cap);
+    XTC_PANIC("unreachable: state=%d", st);
+
+To dump automatically on a fault, install the crash handler at startup:
+
+    xtc_crash_handler_install();   /* SIGSEGV/SIGBUS/SIGABRT -> dump -> core */
+
+The dump reports each proc's *state* and *mailbox*, not the C stack of
+every parked fiber (those live in saved coroutine contexts, not on a
+live OS thread -- only the faulting thread's C stack is unwound).  This
+makes it strongest for the hang/wedge class above ("which proc is
+waiting on whom"); for deep per-fiber stacks attach a debugger to the
+core.  See `xtc_dump(3)`.
+
 ## When you file a libxtc bug
 
 Include the output of `xtc-loops`, `xtc-procs`, and `thread apply all

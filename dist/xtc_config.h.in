@@ -53,6 +53,9 @@
    backward compatibility; new code need not use it. */
 #undef STDC_HEADERS
 
+/* Define to 1 if <execinfo.h> backtrace() is available */
+#undef XTC_HAVE_EXECINFO
+
 /* hegel-c property tests enabled */
 #undef XTC_HAVE_HEGEL
 
