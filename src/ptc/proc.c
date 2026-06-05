@@ -1247,6 +1247,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	uint32_t revents;
 	int had_timer = 0;
 	int had_fd = 0;
+	xtc_loop_t *wl = NULL;   /* the loop this fiber runs on (not its home) */
 
 	if (out_revents == NULL || fd < 0 || interest == 0) return XTC_E_INVAL;
 	if (self == NULL) return XTC_E_INVAL;
@@ -1277,7 +1278,18 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	 * simultaneously. */
 	self->task->wake_revents = 0;
 
-	if (xtc_io_reg_fd(self->task->loop->io, fd, interest,
+	/*
+	 * Register on the loop this fiber is RUNNING on, not its home loop.
+	 * Under the multi-loop executor a proc can run stolen on another
+	 * loop, and self->task->loop is the (fixed) home loop; submitting to
+	 * its io_uring ring from this thread would race that ring's single
+	 * producer and silently drop the POLL_ADD -- a lost wakeup.  The
+	 * completion is reaped + dispatched on this same loop, which deletes
+	 * park_fd before waking, so the post-yield cleanup never touches
+	 * another thread's ring either. */
+	wl = __xtc_current_loop != NULL ? __xtc_current_loop : self->task->loop;
+
+	if (xtc_io_reg_fd(wl->io, fd, interest,
 	    self->task) != XTC_OK)
 		return XTC_E_INTERNAL;
 	self->task->park_fd = fd;
@@ -1292,7 +1304,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		if (trc != XTC_OK || t == NULL ||
 		    __os_clock_mono(&now_ns) != XTC_OK) {
 			if (t) __os_free(t);
-			(void)xtc_io_del_fd(self->task->loop->io, fd);
+			(void)xtc_io_del_fd(wl->io, fd);
 			self->task->park_fd = -1;
 			return XTC_E_INTERNAL;
 		}
@@ -1303,15 +1315,15 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		t->heap_idx = -1;
 		t->cancelled = 0;
 		t->fired = 0;
-		t->loop = self->task->loop;
-		if (__xtc_timer_heap_push(self->task->loop, t) != XTC_OK) {
+		t->loop = wl;
+		if (__xtc_timer_heap_push(wl, t) != XTC_OK) {
 			__os_free(t);
-			(void)xtc_io_del_fd(self->task->loop->io, fd);
+			(void)xtc_io_del_fd(wl->io, fd);
 			self->task->park_fd = -1;
 			return XTC_E_INTERNAL;
 		}
-		t->all_next = self->task->loop->all_timers;
-		self->task->loop->all_timers = t;
+		t->all_next = wl->all_timers;
+		wl->all_timers = t;
 		self->task->park_timer = t;
 		had_timer = 1;
 	}
@@ -1341,10 +1353,11 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	revents = self->task->wake_revents;
 	self->task->wake_revents = 0;
 
-	/* Cleanup: unregister fd if still parked, cancel timer. */
+	/* Cleanup: unregister fd if still parked, cancel timer.  Use wl (the
+	 * loop we registered on), not the home loop. */
 	(void)had_fd;   /* unused but documents intent */
 	if (self->task->park_fd >= 0) {
-		(void)xtc_io_del_fd(self->task->loop->io, self->task->park_fd);
+		(void)xtc_io_del_fd(wl->io, self->task->park_fd);
 		self->task->park_fd = -1;
 	}
 	if (had_timer && self->task->park_timer != NULL) {
