@@ -871,6 +871,75 @@ scenario_multicol(void)
 	return 0;
 }
 
+/* ---- multi-table: two tables share one B-tree, are isolated by their
+ * table-id key prefix, and a single transaction spans both atomically. */
+static int
+scenario_multitable(void)
+{
+	bm_t *bm = NULL; bt_t *bt = NULL; xsql *db = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-mtab-XXXXXX";
+	xsql_stmt *st = NULL;
+	int fd;
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = N_FRAMES; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(xsql_open(":memory:", &db) == SQLITE_OK);
+	CK(xstore_register(db, bt) == SQLITE_OK);
+
+	CK(xsql_exec(db, "CREATE VIRTUAL TABLE accounts USING xstore(id, bal);",
+	    0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(db, "CREATE VIRTUAL TABLE logs USING xstore(id, msg);",
+	    0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(db, "INSERT INTO accounts VALUES(1,100),(2,200),(3,300);",
+	    0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(db, "INSERT INTO logs VALUES(1,'open');", 0, 0, 0)
+	    == SQLITE_OK);
+
+	/* Isolation: each table sees only its own rows (same rowid=1 in both
+	 * is two distinct logical rows). */
+	CK(eval_int(db, "SELECT count(*) FROM accounts") == 3);
+	CK(eval_int(db, "SELECT count(*) FROM logs") == 1);
+	CK(eval_int(db, "SELECT bal FROM accounts WHERE id=2") == 200);
+	CK(xsql_prepare_v2(db, "SELECT msg FROM logs WHERE id=1", -1, &st, 0)
+	    == SQLITE_OK);
+	CK(xsql_step(st) == SQLITE_ROW);
+	CK(strcmp((const char *)xsql_column_text(st, 0), "open") == 0);
+	xsql_finalize(st); st = NULL;
+
+	/* One transaction spans both tables and commits atomically (a
+	 * transfer plus its log entry land at one commit timestamp). */
+	CK(xsql_exec(db,
+	    "BEGIN;"
+	    "UPDATE accounts SET bal=bal-50 WHERE id=1;"
+	    "UPDATE accounts SET bal=bal+50 WHERE id=2;"
+	    "INSERT INTO logs VALUES(2,'xfer 1->2');"
+	    "COMMIT;", 0, 0, 0) == SQLITE_OK);
+	CK(eval_int(db, "SELECT bal FROM accounts WHERE id=1") == 50);
+	CK(eval_int(db, "SELECT bal FROM accounts WHERE id=2") == 250);
+	CK(eval_int(db, "SELECT count(*) FROM logs") == 2);
+
+	/* A rolled-back cross-table transaction touches neither. */
+	CK(xsql_exec(db,
+	    "BEGIN;"
+	    "UPDATE accounts SET bal=0 WHERE id=3;"
+	    "INSERT INTO logs VALUES(3,'oops');"
+	    "ROLLBACK;", 0, 0, 0) == SQLITE_OK);
+	CK(eval_int(db, "SELECT bal FROM accounts WHERE id=3") == 300);
+	CK(eval_int(db, "SELECT count(*) FROM logs") == 2);
+
+	xsql_close(db);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   multi-table: two tables in one B-tree, isolated by"
+	    " table-id, cross-table atomic commit + rollback\n");
+	return 0;
+}
+
 int
 main(void)
 {
@@ -885,6 +954,7 @@ main(void)
 	if (scenario_ssi_range() != 0) return 1;
 	if (scenario_o1_sql() != 0) return 1;
 	if (scenario_multicol() != 0) return 1;
+	if (scenario_multitable() != 0) return 1;
 	printf("All sqlxtc SQL-on-xstore tests passed.\n");
 	return 0;
 }
