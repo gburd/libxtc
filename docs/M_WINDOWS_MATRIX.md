@@ -54,9 +54,9 @@ reason as MinGW64).  Tracking the three Windows ports in
 ## MSVC cl.exe
 
 `C:\\Program Files\\Microsoft Visual Studio\\18\\Community` provides
-cl.exe 14.50 and ml64.exe.  libxtc builds with the Microsoft
-toolchain via `dist\\build_msvc.bat`, run inside an x64 Native Tools
-environment (or after calling `vcvars64.bat`):
+cl.exe 14.50 and ml64.exe; `...\\17\\Community` provides the VS2022
+cl.  libxtc builds with either via `dist\\build_msvc.bat`, run inside
+an x64 Native Tools environment (or after calling `vcvars64.bat`):
 
     set XTC_SRC=C:\\scratch\\xtc
     call "...\\VC\\Auxiliary\\Build\\vcvars64.bat"
@@ -64,9 +64,11 @@ environment (or after calling `vcvars64.bat`):
 
 This assembles `fctx_x86_64_ms_pe.asm` with ml64, compiles every
 `src/` translation unit with cl (`/std:c11 /experimental:c11atomics`),
-archives `xtc.lib` (45 objects), and builds `test\\msvc\\smoke.c`.
-The smoke test passes: version, strerror, the Win32 clocks, a slab
-alloc/free round-trip, and an lwlock acquire/release.
+archives `xtc.lib`, and builds `test\\msvc\\smoke.c`.  The smoke test
+passes on both VS2022 (17) and VS2026 (18): version, strerror, the
+Win32 clocks, a slab alloc/free round-trip, an lwlock acquire/release,
+SEH fault containment, and native IOCP file AIO (an overlapped
+ReadFile/WriteFile round-trip through xtc_aio on an OVERLAPPED handle).
 
 What made the MSVC build work:
 

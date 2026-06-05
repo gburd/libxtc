@@ -89,6 +89,15 @@ are not library defects:
   - **Round-2 AFD/NtDeviceIoControlFile fast path** is a performance
     upgrade, not a correctness gap (round 1 is correct).
 
+**Native file AIO: DONE.**  `xtc_io_aio_submit` is implemented natively
+on IOCP -- `xtc_aio_pread`/`pwrite` issue overlapped ReadFile/WriteFile
+whose OVERLAPPED.hEvent joins the poll's WaitForMultipleObjects set, so
+the completion wakes the loop with no pool thread; `fsync`/`fdatasync`
+have no async form on Windows (FlushFileBuffers is synchronous) and are
+offloaded.  Verified on santorini under both VS2022 (17) and VS2026
+(18) by the smoke test (an overlapped pwrite+pread round-trip).  This
+was the last "native async on every platform" gap.
+
 Driving the santorini host non-interactively from CI/automation is not
 yet wired (it is configured for an interactive PowerShell session); the
 Windows matrix is run by hand via `dist/santorini-matrix.sh`.

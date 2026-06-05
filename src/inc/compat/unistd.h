@@ -21,7 +21,8 @@
 #  error "compat/unistd.h is the MSVC-only shim"
 #endif
 
-#include <io.h>          /* _read, _write, _close */
+#include <io.h>          /* _read, _write, _close, _pipe */
+#include <fcntl.h>       /* _O_BINARY for the pipe shim */
 #include <BaseTsd.h>     /* SSIZE_T */
 
 typedef SSIZE_T ssize_t;
@@ -30,9 +31,14 @@ static __inline ssize_t xtc__read(int fd, void *buf, size_t n)
 { return _read(fd, buf, (unsigned)n); }
 static __inline ssize_t xtc__write(int fd, const void *buf, size_t n)
 { return _write(fd, buf, (unsigned)n); }
+/* POSIX pipe(fds) -> a binary CRT pipe; the blocking pool's wakeup
+ * channel.  4 KiB is ample for the single wakeup byte it carries. */
+static __inline int xtc__pipe(int fds[2])
+{ return _pipe(fds, 4096, _O_BINARY); }
 
 #define read(fd, buf, n)   xtc__read((fd), (buf), (n))
 #define write(fd, buf, n)  xtc__write((fd), (buf), (n))
 #define close(fd)          _close(fd)
+#define pipe(fds)          xtc__pipe(fds)
 
 #endif /* XTC_COMPAT_UNISTD_H */
