@@ -359,8 +359,8 @@ test-cursor-resume: test_cursor_resume
 	./test_cursor_resume
 
 # ---- server storage wiring + connection-per-proc (in-process) ----
-test_server_storage: test_server_storage.c engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_server_storage.c engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_server_storage: test_server_storage.c engine.o db.o quack.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_server_storage.c engine.o db.o quack.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-server-storage: test_server_storage
 	./test_server_storage
