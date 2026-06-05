@@ -789,6 +789,88 @@ scenario_o1_sql(void)
 	return 0;
 }
 
+/* ---- multi-column rowstore: a table with columns of every type
+ * round-trips type-preserving (the old single-blob payload coerced
+ * everything to a blob; the typed record codec preserves int/float/
+ * text/blob/null per column). ---- */
+static int
+scenario_multicol(void)
+{
+	bm_t *bm = NULL; bt_t *bt = NULL; xsql *db = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-mcol-XXXXXX";
+	xsql_stmt *st = NULL;
+	int fd;
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = N_FRAMES; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(xsql_open(":memory:", &db) == SQLITE_OK);
+	CK(xstore_register(db, bt) == SQLITE_OK);
+
+	/* Five columns: key id, plus int, real, text, blob payload. */
+	CK(xsql_exec(db,
+	    "CREATE VIRTUAL TABLE t USING xstore(id, n, r, s, b);",
+	    0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(db,
+	    "INSERT INTO t(id,n,r,s,b) VALUES"
+	    "(1, 42, 3.5, 'hello', x'deadbeef'),"
+	    "(2, -7, 0.0, '', NULL);", 0, 0, 0) == SQLITE_OK);
+
+	/* Row 1: every type comes back with its own affinity. */
+	CK(xsql_prepare_v2(db,
+	    "SELECT n, r, s, b, typeof(n), typeof(r), typeof(s), typeof(b) "
+	    "FROM t WHERE id=1", -1, &st, 0) == SQLITE_OK);
+	CK(xsql_step(st) == SQLITE_ROW);
+	CK(xsql_column_int64(st, 0) == 42);
+	CK(xsql_column_double(st, 1) == 3.5);
+	{
+		const unsigned char *s = xsql_column_text(st, 2);
+		CK(s != NULL && strcmp((const char *)s, "hello") == 0);
+	}
+	{
+		const unsigned char *b = xsql_column_blob(st, 3);
+		int bn = xsql_column_bytes(st, 3);
+		CK(bn == 4 && b != NULL &&
+		   b[0] == 0xde && b[1] == 0xad && b[2] == 0xbe && b[3] == 0xef);
+	}
+	CK(strcmp((const char *)xsql_column_text(st, 4), "integer") == 0);
+	CK(strcmp((const char *)xsql_column_text(st, 5), "real") == 0);
+	CK(strcmp((const char *)xsql_column_text(st, 6), "text") == 0);
+	CK(strcmp((const char *)xsql_column_text(st, 7), "blob") == 0);
+	xsql_finalize(st); st = NULL;
+
+	/* Row 2: NULL column reads back NULL; empty text is text, not null. */
+	CK(xsql_prepare_v2(db,
+	    "SELECT typeof(b), typeof(s), length(s), n FROM t WHERE id=2",
+	    -1, &st, 0) == SQLITE_OK);
+	CK(xsql_step(st) == SQLITE_ROW);
+	CK(strcmp((const char *)xsql_column_text(st, 0), "null") == 0);
+	CK(strcmp((const char *)xsql_column_text(st, 1), "text") == 0);
+	CK(xsql_column_int(st, 2) == 0);
+	CK(xsql_column_int64(st, 3) == -7);
+	xsql_finalize(st); st = NULL;
+
+	/* UPDATE one column; the others are preserved. */
+	CK(xsql_exec(db, "UPDATE t SET r=9.25 WHERE id=1", 0, 0, 0) == SQLITE_OK);
+	CK(xsql_prepare_v2(db, "SELECT n, r, s FROM t WHERE id=1", -1, &st, 0)
+	    == SQLITE_OK);
+	CK(xsql_step(st) == SQLITE_ROW);
+	CK(xsql_column_int64(st, 0) == 42);          /* preserved */
+	CK(xsql_column_double(st, 1) == 9.25);       /* updated */
+	CK(strcmp((const char *)xsql_column_text(st, 2), "hello") == 0);
+	xsql_finalize(st); st = NULL;
+
+	xsql_close(db);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   multi-column rowstore: int/real/text/blob/null round-trip\n");
+	return 0;
+}
+
 int
 main(void)
 {
@@ -802,6 +884,7 @@ main(void)
 	if (scenario_autovacuum() != 0) return 1;
 	if (scenario_ssi_range() != 0) return 1;
 	if (scenario_o1_sql() != 0) return 1;
+	if (scenario_multicol() != 0) return 1;
 	printf("All sqlxtc SQL-on-xstore tests passed.\n");
 	return 0;
 }
