@@ -482,25 +482,27 @@ typedef struct xstore_vtab {
 } xstore_vtab_t;
 
 /*
- * Table-id assignment.  A table's version-namespace id defaults to a
- * deterministic FNV-1a hash of its name -- order-independent and stable
- * across connections and restarts, which is what makes WAL recovery
- * work (recovery replays into a fresh B-tree and a reconnecting vtab
- * derives the identical id from the name, with nothing to persist).
+ * Table-id assignment.  A table's version-namespace id (the key prefix
+ * for all its versions) is allocated from a persisted on-disk catalog
+ * kept at reserved table-id 0: a catalog row is keyed (0, id, commit_ts)
+ * with the table's name as its value.  Ids are dense and allocated
+ * sequentially (max existing id + 1), so distinct names never collide
+ * -- unlike a name hash, which silently aliases two tables that hash
+ * equal.
  *
- * A persisted catalog (reserved table-id 0) overrides the hash where a
- * table's name no longer matches its id -- after ALTER TABLE RENAME.
- * A catalog row is keyed (0, id, commit_ts) with the table's current
- * name as its value; it goes through xs_put, so it is WAL-logged and
- * recovered like any other version, and xRename writes a new version
- * with the new name.  Normal (never-renamed) tables write no catalog
- * row and pay only a cheap table-id-0 probe at connect.
+ * The catalog is authoritative and recovery-safe: every CREATE writes
+ * its (0, id, name) row through xs_put, so it is WAL-logged and replayed
+ * into a fresh B-tree like any other version.  After recovery a
+ * reconnecting vtab finds its id by name in the catalog, and the next
+ * allocation continues past the recovered high-water id.  ALTER TABLE
+ * RENAME writes a new version of the same id's catalog row with the new
+ * name (the id -- and the table's data -- are preserved); the old name
+ * then resolves to nothing and is free to reuse.
  *
- * Id 0 is reserved (a name hashing to 0 is bumped to 1).  Distinct
- * names colliding on one hash in one B-tree would alias their
- * keyspaces; the in-process cache below refuses the second.  (A
- * collision-free allocated catalog is future hardening; see
- * docs/M_SQLXTC_STORAGE.md step 5.)
+ * Id 0 is reserved for the catalog itself.  An in-process cache (keyed
+ * by B-tree + name) shortcuts the catalog scan for tables already seen
+ * in this process, and reserves a just-allocated id so a concurrent
+ * allocator on another connection picks a higher one.
  */
 #define XS_CAT_TABLEID 0u
 #define XS_CAT_MAX 256
@@ -511,15 +513,6 @@ static struct xs_cat_ent {
 } g_cat[XS_CAT_MAX];
 static int g_cat_n;
 static pthread_mutex_t g_cat_mu = PTHREAD_MUTEX_INITIALIZER;
-
-static uint32_t
-xs_name_hash(const char *name)
-{
-	uint32_t h = 2166136261u;
-	const unsigned char *p = (const unsigned char *)name;
-	for (; *p; p++) { h ^= *p; h *= 16777619u; }
-	return h ? h : 1u;   /* 0 is reserved for the catalog */
-}
 
 /* Look up `name` in the persisted catalog (table-id 0): the newest
  * non-tombstone catalog row whose value equals `name`.  Returns its id
@@ -563,32 +556,82 @@ xs_cat_lookup(bt_t *bt, const char *name)
 	return found;
 }
 
-/* Map (bt, name) to a stable table-id: a persisted catalog override if
- * present, else the name hash.  Returns the id, or 0 on a detected
- * collision (two distinct names hashing equal in one bt). */
+/* The largest table-id present in the catalog (table-id 0), or 0 if it
+ * is empty.  Used to allocate the next id; covers ids recovered from
+ * the WAL, since the catalog is replayed before any connect. */
+static int xs_put(bt_t *bt, uint32_t tableid, int64_t rowid,
+    const void *blob, int n, int deleted);   /* defined below */
+static uint32_t
+xs_cat_max_id(bt_t *bt)
+{
+	bt_cursor_t *cur = NULL;
+	uint8_t startk[XS_VKLEN];
+	uint32_t maxid = 0;
+
+	enc_vkey(XS_CAT_TABLEID, INT64_MIN, ~(uint64_t)0, startk);
+	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
+		return 0;
+	for (;;) {
+		const void *k = NULL, *vv = NULL;
+		uint16_t klen = 0, vl = 0;
+		int64_t rid;
+		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
+		    klen != XS_VKLEN)
+			break;
+		if (dec_tableid((const uint8_t *)k) != XS_CAT_TABLEID)
+			break;                       /* past the catalog */
+		rid = dec_rowid((const uint8_t *)k);
+		if (rid > 0 && (uint32_t)rid > maxid)
+			maxid = (uint32_t)rid;
+	}
+	bt_cursor_close(cur);
+	return maxid;
+}
+
+/* Map (bt, name) to its allocated table-id: the in-process cache, then
+ * the persisted catalog, else allocate a fresh dense id and persist it.
+ * Returns the id (>= 1), or 0 only if a new id could not be written. */
 static uint32_t
 xs_cat_find_or_create(bt_t *bt, const char *name)
 {
-	uint32_t id;
-	int i;
+	uint32_t id = 0, maxid;
+	int i, do_persist = 0;
+
 	pthread_mutex_lock(&g_cat_mu);
-	id = xs_cat_lookup(bt, name);          /* rename override wins */
-	if (id == 0)
-		id = xs_name_hash(name);
-	for (i = 0; i < g_cat_n; i++)
-		if (g_cat[i].bt == bt && g_cat[i].tableid == id) {
-			if (strcmp(g_cat[i].name, name) != 0)
-				id = 0;   /* collision: distinct name, same id */
+	for (i = 0; i < g_cat_n; i++)            /* seen in this process? */
+		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
+			id = g_cat[i].tableid;
 			pthread_mutex_unlock(&g_cat_mu);
 			return id;
 		}
-	if (g_cat_n < XS_CAT_MAX) {
+	id = xs_cat_lookup(bt, name);            /* persisted (create/rename/recovery)? */
+	if (id == 0) {
+		/* New table: allocate past both the persisted high-water id
+		 * and any id reserved in-process but not yet written. */
+		maxid = xs_cat_max_id(bt);
+		for (i = 0; i < g_cat_n; i++)
+			if (g_cat[i].bt == bt && g_cat[i].tableid > maxid)
+				maxid = g_cat[i].tableid;
+		id = maxid + 1u;
+		if (id == 0u)
+			id = 1u;                 /* 32-bit wrap guard (unreachable) */
+		do_persist = 1;
+	}
+	if (g_cat_n < XS_CAT_MAX) {              /* reserve / shortcut next time */
 		struct xs_cat_ent *e = &g_cat[g_cat_n++];
 		e->bt = bt;
 		snprintf(e->name, sizeof e->name, "%s", name);
 		e->tableid = id;
 	}
 	pthread_mutex_unlock(&g_cat_mu);
+
+	/* Persist the new catalog row OUTSIDE the lock: xs_put can park on
+	 * the WAL ack, and parking while holding a pthread mutex would wedge
+	 * the loop if another fiber contended g_cat_mu. */
+	if (do_persist &&
+	    xs_put(bt, XS_CAT_TABLEID, (int64_t)id, name,
+	    (int)strlen(name), 0) != SQLITE_OK)
+		return 0;
 	return id;
 }
 
@@ -1640,17 +1683,21 @@ static int
 xs_rename(xsql_vtab *pv, const char *newname)
 {
 	xstore_vtab_t *v = (xstore_vtab_t *)pv;
+	uint32_t id;
 	int i;
 	if (newname == NULL) return SQLITE_OK;
+	id = v->tableid;
 	pthread_mutex_lock(&g_cat_mu);
-	(void)xs_put(v->ctx->bt, XS_CAT_TABLEID, (int64_t)v->tableid,
-	    newname, (int)strlen(newname), 0);
 	for (i = 0; i < g_cat_n; i++)
-		if (g_cat[i].bt == v->ctx->bt && g_cat[i].tableid == v->tableid) {
+		if (g_cat[i].bt == v->ctx->bt && g_cat[i].tableid == id) {
 			snprintf(g_cat[i].name, sizeof g_cat[i].name, "%s", newname);
 			break;
 		}
 	pthread_mutex_unlock(&g_cat_mu);
+	/* New version of the same id's catalog row -- outside the lock, since
+	 * xs_put can park on the WAL ack (see xs_cat_find_or_create). */
+	(void)xs_put(v->ctx->bt, XS_CAT_TABLEID, (int64_t)id,
+	    newname, (int)strlen(newname), 0);
 	return SQLITE_OK;
 }
 

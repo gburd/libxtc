@@ -243,10 +243,11 @@ layer transparently rewrites a plain `CREATE TABLE` into a virtual
 table on it, so ordinary SQL executes on the xtc-native B-tree (cooling
 buffer pool, MVCC, multi-table, WAL + recovery) instead of SQLite's
 built-in B-tree.  VDBE and the SQL parser are retained by design; only
-the storage layer is replaced.  The remaining storage work is the ARIES
-recovery hardening (physiological SMO logging + page LSNs) and an
-on-disk catalog with explicit unique table-ids -- see
-`docs/M_SQLXTC_STORAGE.md`.
+the storage layer is replaced.  Table-ids are allocated from a persisted
+on-disk catalog (reserved table-id 0), so distinct table names never
+collide and the mapping survives a crash via the WAL.  The remaining
+storage work is the ARIES recovery hardening (physiological SMO logging
++ page LSNs) -- see `docs/M_SQLXTC_STORAGE.md`.
 
 
 ## 6. The two evolution paths, and where we are

@@ -984,6 +984,59 @@ scenario_rename(void)
 	return 0;
 }
 
+/* ---- Collision-free catalog: many tables coexist, each with its own
+ * dense allocated table-id, so identical rowids in different tables
+ * never alias.  The old name-hash scheme could silently refuse a second
+ * table whose name hashed equal to an existing one; allocated ids never
+ * collide. ---- */
+static int
+scenario_catalog(void)
+{
+	bm_t *bm = NULL; bt_t *bt = NULL; xsql *db = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-cat-XXXXXX";
+	int fd, i;
+	enum { NT = 30 };
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = N_FRAMES; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(xsql_open(":memory:", &db) == SQLITE_OK);
+	CK(xstore_register(db, bt) == SQLITE_OK);
+
+	/* Create NT tables; every CREATE must succeed (no collision
+	 * refusal), and each must get a distinct version namespace. */
+	for (i = 0; i < NT; i++) {
+		char sql[128];
+		snprintf(sql, sizeof sql,
+		    "CREATE VIRTUAL TABLE t%d USING xstore(id, v);", i);
+		CK(xsql_exec(db, sql, 0, 0, 0) == SQLITE_OK);
+		/* Same rowid (1) in every table, a value unique to the table. */
+		snprintf(sql, sizeof sql, "INSERT INTO t%d VALUES(1,%d);",
+		    i, 100 + i);
+		CK(xsql_exec(db, sql, 0, 0, 0) == SQLITE_OK);
+	}
+	/* Isolation: rowid 1 in table i reads back i's own value -- proving
+	 * the NT tables occupy NT distinct table-ids, since a shared id
+	 * would alias rowid 1 across tables. */
+	for (i = 0; i < NT; i++) {
+		char q[64];
+		snprintf(q, sizeof q, "SELECT v FROM t%d WHERE id=1", i);
+		CK(eval_int(db, q) == 100 + i);
+	}
+
+	xsql_close(db);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   catalog: %d tables coexist with distinct allocated"
+	    " table-ids; identical rowids stay isolated (no hash collision)\n",
+	    NT);
+	return 0;
+}
+
 int
 main(void)
 {
@@ -1000,6 +1053,7 @@ main(void)
 	if (scenario_multicol() != 0) return 1;
 	if (scenario_multitable() != 0) return 1;
 	if (scenario_rename() != 0) return 1;
+	if (scenario_catalog() != 0) return 1;
 	printf("All sqlxtc SQL-on-xstore tests passed.\n");
 	return 0;
 }
