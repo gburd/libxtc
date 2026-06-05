@@ -940,6 +940,50 @@ scenario_multitable(void)
 	return 0;
 }
 
+/* ---- ALTER TABLE RENAME: the table keeps its id (a persisted catalog
+ * override), so data survives the rename and is reachable by the new
+ * name; the old name no longer resolves. ---- */
+static int
+scenario_rename(void)
+{
+	bm_t *bm = NULL; bt_t *bt = NULL; xsql *db = NULL;
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	char path[] = "/tmp/sqlxtc-rename-XXXXXX";
+	int fd;
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = N_FRAMES; bo.cool_pct = 25;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(xsql_open(":memory:", &db) == SQLITE_OK);
+	CK(xstore_register(db, bt) == SQLITE_OK);
+
+	CK(xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore(id, v);",
+	    0, 0, 0) == SQLITE_OK);
+	CK(xsql_exec(db, "INSERT INTO t VALUES(1,'a'),(2,'b'),(3,'c');",
+	    0, 0, 0) == SQLITE_OK);
+	CK(eval_int(db, "SELECT count(*) FROM t") == 3);
+
+	/* Rename: data must survive and be reachable by the new name. */
+	CK(xsql_exec(db, "ALTER TABLE t RENAME TO u;", 0, 0, 0) == SQLITE_OK);
+	CK(eval_int(db, "SELECT count(*) FROM u") == 3);
+	CK(eval_int(db, "SELECT id FROM u WHERE v='b'") == 2);
+	/* Writes through the new name reach the same data. */
+	CK(xsql_exec(db, "INSERT INTO u VALUES(4,'d');", 0, 0, 0) == SQLITE_OK);
+	CK(eval_int(db, "SELECT count(*) FROM u") == 4);
+	/* The old name no longer resolves to a table. */
+	CK(xsql_exec(db, "SELECT count(*) FROM t;", 0, 0, 0) != SQLITE_OK);
+
+	xsql_close(db);
+	bt_close(bt); bm_destroy(bm); unlink(path);
+	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	if (g_fail) return 1;
+	printf("  ok   ALTER TABLE RENAME: data survives via the persisted"
+	    " catalog override; new name reads + writes, old name is gone\n");
+	return 0;
+}
+
 int
 main(void)
 {
@@ -955,6 +999,7 @@ main(void)
 	if (scenario_o1_sql() != 0) return 1;
 	if (scenario_multicol() != 0) return 1;
 	if (scenario_multitable() != 0) return 1;
+	if (scenario_rename() != 0) return 1;
 	printf("All sqlxtc SQL-on-xstore tests passed.\n");
 	return 0;
 }
