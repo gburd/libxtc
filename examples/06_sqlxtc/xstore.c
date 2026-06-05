@@ -635,6 +635,26 @@ xs_cat_find_or_create(bt_t *bt, const char *name)
 	return id;
 }
 
+/* Drop every catalog-cache entry for `bt`.  Called from bt_close (via
+ * the close hook) so a freed bt pointer reused by a new tree cannot
+ * match a stale entry and resolve a wrong table-id.  The persisted
+ * catalog (table-id 0) remains authoritative. */
+static void
+xstore_cat_forget(bt_t *bt)
+{
+	int i;
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_cat_n; ) {
+		if (g_cat[i].bt == bt) {
+			g_cat_n--;
+			if (i != g_cat_n) g_cat[i] = g_cat[g_cat_n];  /* swap-remove */
+		} else {
+			i++;
+		}
+	}
+	pthread_mutex_unlock(&g_cat_mu);
+}
+
 /*
  * Enter the SQL transaction on first vtab access.  SQLite fires xBegin
  * at the first WRITE, not the first read, so reads before the first
@@ -1739,6 +1759,7 @@ xstore_register(xsql *db, bt_t *bt)
 	int rc;
 	if (ctx == NULL)
 		return SQLITE_NOMEM;
+	bt_set_close_hook(xstore_cat_forget);   /* clear cached ids when a bt closes */
 	ctx->bt = bt;
 	atomic_store(&ctx->read_snap, 0);
 	ctx->in_txn = 0;

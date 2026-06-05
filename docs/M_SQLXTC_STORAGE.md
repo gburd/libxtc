@@ -730,11 +730,29 @@ separate commits.
    B-tree latch, not a global handle mutex.  Tested: test_server_storage
    cpp_driver (8 procs x 200 rows over one shared store).
 
-5. **ARIES recovery remainder (M_SQLXTC_WAL.md sec 3).**  REMAINING.
-   Physiological SMO logging + page LSNs for STEAL-safe restart from a
-   torn page file (superblock + reopen + checkpoint + truncation
-   already done).
+5. **Crash recovery: clean/unclean restart (engine.c, wal.c).**  DONE.
+   A clean shutdown checkpoints the tree durable and drops a marker
+   (`<data>.clean`); the next open trusts the checkpointed base.  After
+   a crash (no marker) the on-disk tree may be structurally torn by
+   partial mid-SMO eviction -- a parent page flushed before its split
+   child -- which logical redo cannot repair, so the torn tree is
+   DISCARDED and rebuilt from scratch by replaying the whole log onto a
+   fresh page file.  The log is the source of truth and is truncated
+   only at a clean shutdown, so a crash can always rebuild the full
+   history; the immutable append-only version keys make that redo
+   idempotent.  (Torn pages within a single page are handled by the
+   double-write buffer.)  Tested: test_torn_smo (1000-row multi-level
+   tree, constant mid-SMO eviction under a tiny pool, crash, full
+   ordered-scan verification), test_server_storage's crash cycle
+   (engine-level abandon + rebuild), test_wal_recover, test_persist.
 
-Steps 1-4 are landed and tested.  The remaining item (5) is the
-highest-risk one -- WAL flush-before-page-write ordering under
-concurrent eviction -- and is a milestone of its own.
+6. **ARIES log bounding (M_SQLXTC_WAL.md sec 3).**  REMAINING.  Because
+   the log is not truncated between clean shutdowns it grows with the
+   write history; bounding it for an always-on server needs a
+   crash-coherent checkpoint (so a checkpointed base can be trusted
+   after a crash and the log truncated behind it) or physiological page
+   logging with page LSNs.
+
+Steps 1-5 are landed and tested.  The remaining item (6) bounds the log
+for an always-on server -- a crash-coherent checkpoint or physiological
+page logging -- and is a milestone of its own.
