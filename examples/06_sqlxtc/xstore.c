@@ -51,6 +51,7 @@
 
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -444,6 +445,7 @@ typedef struct xstore_vtab {
 	xsql_vtab base;
 	xstore_ctx_t *ctx;
 	xsql      *db;     /* for xsql_get_autocommit: detect explicit txn */
+	int        npay;   /* payload columns (declared columns minus the key) */
 } xstore_vtab_t;
 
 /*
@@ -504,15 +506,162 @@ typedef struct xstore_cursor {
 
 static const xsql_module xstore_module;   /* fwd */
 
+/*
+ * Record codec.  A version's payload is the non-key columns of one row,
+ * encoded type-preserving so a multi-column table round-trips every
+ * SQLite type (the old single-blob payload coerced everything to a
+ * blob).  Layout:
+ *
+ *   [ncol:u8]  then per column  [type:u8][payload]
+ *     type 0 NULL    -- no payload
+ *     type 1 INTEGER -- 8 bytes, little-endian int64
+ *     type 2 FLOAT   -- 8 bytes, little-endian IEEE-754 bit pattern
+ *     type 3 TEXT    -- [len:u32 LE][bytes]
+ *     type 4 BLOB    -- [len:u32 LE][bytes]
+ *
+ * The btree value is still [flag:u8][record] (xs_put prepends the
+ * tombstone flag), so the deleted-version path is unchanged.
+ */
+static void
+put_u32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+	p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t
+get_u32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Encode `npay` payload values into `out` (capacity `cap`).  Returns the
+ * encoded length, or -1 if it would overflow `cap` / 255 columns. */
+static int
+xs_rec_encode(xsql_value **vals, int npay, uint8_t *out, int cap)
+{
+	int off = 0, i, b;
+	if (npay < 0 || npay > 255 || cap < 1)
+		return -1;
+	out[off++] = (uint8_t)npay;
+	for (i = 0; i < npay; i++) {
+		xsql_value *v = vals[i];
+		int t = xsql_value_type(v);
+		if (t == SQLITE_NULL) {
+			if (off + 1 > cap) return -1;
+			out[off++] = 0;
+		} else if (t == SQLITE_INTEGER) {
+			int64_t x = xsql_value_int64(v);
+			if (off + 9 > cap) return -1;
+			out[off++] = 1;
+			for (b = 0; b < 8; b++) out[off++] = (uint8_t)(x >> (8 * b));
+		} else if (t == SQLITE_FLOAT) {
+			double d = xsql_value_double(v);
+			uint64_t bits;
+			memcpy(&bits, &d, 8);
+			if (off + 9 > cap) return -1;
+			out[off++] = 2;
+			for (b = 0; b < 8; b++) out[off++] = (uint8_t)(bits >> (8 * b));
+		} else {
+			/* TEXT or BLOB: [type][len:u32][bytes]. */
+			int n = xsql_value_bytes(v);
+			const void *p = (t == SQLITE_TEXT)
+			    ? (const void *)xsql_value_text(v)
+			    : xsql_value_blob(v);
+			if (n < 0) n = 0;
+			if (off + 5 + n > cap) return -1;
+			out[off++] = (t == SQLITE_TEXT) ? 3 : 4;
+			put_u32(out + off, (uint32_t)n); off += 4;
+			if (n) memcpy(out + off, p, (size_t)n);
+			off += n;
+		}
+	}
+	return off;
+}
+
+/* Decode the `idx`-th payload value (0-based) from `rec` into `ctx`.
+ * Out-of-range or malformed records resolve to NULL -- defensive, so a
+ * truncated/old record never reads past the buffer. */
+static void
+xs_rec_result(xsql_context *ctx, const uint8_t *rec, int reclen, int idx)
+{
+	int off = 0, i, ncol;
+	if (rec == NULL || reclen < 1) { xsql_result_null(ctx); return; }
+	ncol = rec[off++];
+	for (i = 0; i < ncol; i++) {
+		uint8_t t;
+		if (off >= reclen) break;
+		t = rec[off++];
+		if (t == 0) {
+			if (i == idx) { xsql_result_null(ctx); return; }
+		} else if (t == 1) {
+			int64_t x = 0; int b;
+			if (off + 8 > reclen) break;
+			for (b = 0; b < 8; b++) x |= (int64_t)rec[off + b] << (8 * b);
+			off += 8;
+			if (i == idx) { xsql_result_int64(ctx, x); return; }
+		} else if (t == 2) {
+			uint64_t bits = 0; double d; int b;
+			if (off + 8 > reclen) break;
+			for (b = 0; b < 8; b++) bits |= (uint64_t)rec[off + b] << (8 * b);
+			off += 8; memcpy(&d, &bits, 8);
+			if (i == idx) { xsql_result_double(ctx, d); return; }
+		} else {
+			uint32_t n;
+			if (off + 4 > reclen) break;
+			n = get_u32(rec + off); off += 4;
+			if (off + (int)n > reclen) break;
+			if (i == idx) {
+				if (t == 3)
+					xsql_result_text(ctx, (const char *)(rec + off),
+					    (int)n, SQLITE_TRANSIENT);
+				else
+					xsql_result_blob(ctx, rec + off, (int)n,
+					    SQLITE_TRANSIENT);
+				return;
+			}
+			off += (int)n;
+		}
+	}
+	xsql_result_null(ctx);   /* idx beyond the record */
+}
+
 static int
 xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
     xsql_vtab **ppv, char **pzErr)
 {
 	xstore_vtab_t *v;
-	int rc;
-	(void)argc; (void)argv; (void)pzErr;
+	int rc, i, npay;
+	(void)pzErr;
 
-	rc = xsql_declare_vtab(db, "CREATE TABLE x(k INTEGER PRIMARY KEY, v)");
+	if (argc <= 3) {
+		/* No column list: the historical k/v default, exactly. */
+		rc = xsql_declare_vtab(db,
+		    "CREATE TABLE x(k INTEGER PRIMARY KEY, v)");
+		npay = 1;
+	} else {
+		/* USING xstore(key, col1, col2, ...): the first arg is the
+		 * INTEGER PRIMARY KEY (the btree rowid); the rest are payload
+		 * columns encoded into the version record. */
+		char decl[1024];
+		int off = snprintf(decl, sizeof decl,
+		    "CREATE TABLE x(%s INTEGER PRIMARY KEY", argv[3]);
+		if (off < 0 || off >= (int)sizeof decl)
+			return SQLITE_ERROR;
+		for (i = 4; i < argc; i++) {
+			int w = snprintf(decl + off, sizeof decl - (size_t)off,
+			    ", %s", argv[i]);
+			if (w < 0 || w >= (int)sizeof decl - off)
+				return SQLITE_ERROR;   /* declaration too long */
+			off += w;
+		}
+		if (off + 2 > (int)sizeof decl)
+			return SQLITE_ERROR;
+		decl[off++] = ')'; decl[off] = '\0';
+		rc = xsql_declare_vtab(db, decl);
+		npay = argc - 4;
+	}
 	if (rc != SQLITE_OK)
 		return rc;
 	v = xsql_malloc(sizeof *v);
@@ -521,6 +670,7 @@ xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
 	memset(v, 0, sizeof *v);
 	v->ctx = (xstore_ctx_t *)pAux;
 	v->db = db;
+	v->npay = npay;
 	*ppv = &v->base;
 	return SQLITE_OK;
 }
@@ -772,7 +922,7 @@ xs_column(xsql_vtab_cursor *pc, xsql_context *ctx, int i)
 	if (i == 0)
 		xsql_result_int64(ctx, c->rowid);
 	else
-		xsql_result_blob(ctx, c->val, c->vlen, SQLITE_TRANSIENT);
+		xs_rec_result(ctx, c->val, c->vlen, i - 1);
 	return SQLITE_OK;
 }
 
@@ -1055,8 +1205,10 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 		int64_t rowid = (xsql_value_type(argv[1]) == SQLITE_NULL)
 		    ? xsql_value_int64(argv[2])
 		    : xsql_value_int64(argv[1]);
-		const void *blob = xsql_value_blob(argv[3]);
-		int n = xsql_value_bytes(argv[3]);
+		uint8_t rec[XS_VMAX];
+		int reclen = xs_rec_encode(&argv[3], argc - 3, rec, sizeof rec);
+		if (reclen < 0)
+			return SQLITE_TOOBIG;
 
 		/* An UPDATE that moves the rowid tombstones the old one. */
 		if (xsql_value_type(argv[0]) != SQLITE_NULL) {
@@ -1068,8 +1220,8 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 		}
 		if (pRowid != NULL) *pRowid = rowid;
 		if (cx->in_txn)
-			return wbuf_add(cx, rowid, blob, n, 0);
-		return xs_put_pruned(cx, rowid, blob, n, 0);
+			return wbuf_add(cx, rowid, rec, reclen, 0);
+		return xs_put_pruned(cx, rowid, rec, reclen, 0);
 	}
 }
 
