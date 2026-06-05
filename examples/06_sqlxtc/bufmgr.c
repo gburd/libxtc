@@ -19,7 +19,6 @@
 #include "bufmgr.h"
 
 #include "xtc_int.h"
-#include "xtc_blocking.h"
 #include "xtc_aio.h"
 #include "xtc_stats.h"
 #include "xtc_sync.h"
@@ -268,24 +267,6 @@ free_pop(bm_t *bm)
 #define BM_DW_SLOTS 64
 #define BM_DW_HDR   16            /* [pid:8][seq:8] per slot */
 
-struct dw_io {
-	int   fd;
-	off_t off;
-	const uint8_t *hdr;
-	const void *page;
-	size_t plen;
-};
-static int
-dw_io_fn(void *arg)
-{
-	struct dw_io *d = arg;
-	if (pwrite(d->fd, d->hdr, BM_DW_HDR, d->off) != BM_DW_HDR)
-		return -1;
-	if (pwrite(d->fd, d->page, d->plen, d->off + BM_DW_HDR) != (ssize_t)d->plen)
-		return -1;
-	return fdatasync(d->fd) == 0 ? 0 : -1;   /* durable before the final write */
-}
-
 /* Log `page` (destined for `pid`) to the next double-write slot and make
  * it durable.  Called by flush_frame BEFORE the final write. */
 static void
@@ -294,23 +275,26 @@ dw_protect(bm_t *bm, bm_pid_t pid, const void *page)
 	uint8_t hdr[BM_DW_HDR];
 	uint64_t seq;
 	uint32_t slot;
-	struct dw_io d;
-	int rc;
+	off_t off;
 
 	if (bm->dw_fd < 0)
 		return;                       /* double-write disabled */
 	pthread_mutex_lock(&bm->dw_mu);
 	slot = bm->dw_next;
 	bm->dw_next = (slot + 1u) % bm->dw_slots;
-	pthread_mutex_unlock(&bm->dw_mu);
+	pthread_mutex_unlock(&bm->dw_mu);   /* mutex NOT held across the I/O */
 	seq = atomic_fetch_add_explicit(&bm->dw_seq, 1, memory_order_relaxed) + 1;
 	memcpy(hdr, &pid, 8);
 	memcpy(hdr + 8, &seq, 8);
-	d.fd = bm->dw_fd;
-	d.off = (off_t)slot * (off_t)(BM_DW_HDR + bm->page_size);
-	d.hdr = hdr; d.page = page; d.plen = bm->page_size;
-	if (xtc_blocking_run(dw_io_fn, &d, &rc) != XTC_OK)
-		(void)dw_io_fn(&d);
+	off = (off_t)slot * (off_t)(BM_DW_HDR + bm->page_size);
+	/* Full-page log to the slot, durable BEFORE the final write, via
+	 * libxtc async file I/O (native io_uring completion, or offloaded
+	 * on a readiness-only backend).  Best-effort like the page writes:
+	 * a torn slot just means that page is re-logged at the next flush. */
+	(void)xtc_aio_pwrite(bm->dw_fd, hdr, BM_DW_HDR, (int64_t)off);
+	(void)xtc_aio_pwrite(bm->dw_fd, page, bm->page_size,
+	    (int64_t)off + BM_DW_HDR);
+	(void)xtc_aio_fdatasync(bm->dw_fd);
 }
 
 /* On reopen, replay the double-write ring onto the main file in sequence
