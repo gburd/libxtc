@@ -87,11 +87,20 @@ typedef struct bm_opts {
 	 * which is the flat case. */
 	int       (*has_resident_child)(const void *page, void *user);
 	void       *cb_user;
+
+	/* Torn-page protection (double-write).  When set, every page write
+	 * goes first to a durable double-write area (full-page logging) and
+	 * only then to its final location; a crash that tears the final
+	 * write is repaired on reopen from the double-write copy.  Costs an
+	 * extra write + fsync per flush, so it is off by default (enable it
+	 * for a persistent, crash-safe store; leave it off for a scratch or
+	 * pure-in-RAM pool). */
+	uint8_t     double_write;
 } bm_opts_t;
 
 #define BM_OPTS_DEFAULT \
 	{ .path = NULL, .page_size = 4096, .n_frames = 256, .cool_pct = 10, \
-	  .scan_resist = 1, .reopen = 0 }
+	  .scan_resist = 1, .reopen = 0, .double_write = 0 }
 
 /* Lifecycle. */
 int  bm_create(const bm_opts_t *opts, bm_t **out);
@@ -184,6 +193,7 @@ typedef struct bm_stats {
 	uint64_t free_frames;   /* frames on the free list */
 	uint64_t prefetched;    /* pages warmed by read-ahead */
 	uint64_t trickled;      /* dirty pages written ahead by the trickler */
+	uint64_t dw_repaired;   /* pages restored from the double-write on reopen */
 } bm_stats_t;
 void bm_get_stats(bm_t *bm, bm_stats_t *out);
 

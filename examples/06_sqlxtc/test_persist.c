@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "bufmgr.h"
 #include "btree.h"
@@ -135,11 +136,90 @@ scenario_wal_truncate(void)
 	return 0;
 }
 
+/* ---- torn-page recovery: the double-write buffer repairs a final page
+ * write that a crash left half-written. ---- */
+static int
+scenario_torn_page(void)
+{
+	char path[] = "/tmp/sqlxtc-torn-XXXXXX";
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	bm_t *bm = NULL;
+	bt_t *bt = NULL;
+	int fd, k, ok = 1;
+	const int NK = 300;          /* small: the whole tree fits in the DW ring */
+
+	g_fail = 0;
+	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
+	bo.path = path; bo.page_size = PAGE_SZ; bo.n_frames = 64; bo.cool_pct = 25;
+	bo.double_write = 1;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	for (k = 0; ok && k < NK; k++) {
+		char key[24], val[24];
+		snprintf(key, sizeof key, "k-%06d", k);
+		snprintf(val, sizeof val, "v-%06d", k);
+		if (bt_insert(bt, key, (uint16_t)strlen(key), val,
+		    (uint16_t)strlen(val)) != XTC_OK) { ok = 0; break; }
+	}
+	CK(ok);
+	CK(bm_checkpoint(bm) == XTC_OK);   /* flush all -> finals written + DW ring filled */
+	bt_close(bt);
+	bm_destroy(bm);
+
+	/* Simulate a torn final write: overwrite the middle of a data page
+	 * (page 1) in the MAIN file with garbage, as a crash mid-write would. */
+	{
+		int mfd = open(path, O_RDWR);
+		unsigned char garbage[256];
+		CK(mfd >= 0);
+		memset(garbage, 0xA5, sizeof garbage);
+		CK(pwrite(mfd, garbage, sizeof garbage,
+		    (off_t)PAGE_SZ + 64) == (ssize_t)sizeof garbage);
+		close(mfd);
+	}
+
+	/* Reopen: dw_recover re-applies the durable double-write ring,
+	 * overwriting the torn final page with its complete copy. */
+	{
+		bm_opts_t b2 = BM_OPTS_DEFAULT;
+		bm_t *bm2 = NULL;
+		bt_t *bt2 = NULL;
+		bm_stats_t st;
+		int miss = 0;
+		b2.path = path; b2.page_size = PAGE_SZ; b2.n_frames = 64;
+		b2.cool_pct = 25; b2.reopen = 1; b2.double_write = 1;
+		CK(bm_create(&b2, &bm2) == XTC_OK);   /* runs dw_recover */
+		bm_get_stats(bm2, &st);
+		CK(st.dw_repaired > 0);               /* the ring repaired pages */
+		CK(bt_reopen(bm2, &bt2) == XTC_OK);
+		for (k = 0; k < NK; k++) {
+			char key[24], want[24], got[24];
+			uint16_t vlen = 0;
+			snprintf(key, sizeof key, "k-%06d", k);
+			snprintf(want, sizeof want, "v-%06d", k);
+			if (bt_lookup(bt2, key, (uint16_t)strlen(key), got, sizeof got,
+			    &vlen) != XTC_OK || vlen != strlen(want) ||
+			    memcmp(got, want, vlen) != 0)
+				miss++;
+		}
+		CK(miss == 0);                        /* torn page repaired; data intact */
+		bt_close(bt2);
+		bm_destroy(bm2);
+	}
+	unlink(path);
+	{ char dw[80]; snprintf(dw, sizeof dw, "%s.dwb", path); unlink(dw); }
+	if (g_fail) return 1;
+	printf("  ok   torn-page recovery: a half-written final page was repaired"
+	    " from the double-write ring on reopen; %d keys intact\n", NK);
+	return 0;
+}
+
 int
 main(void)
 {
 	if (scenario_reopen() != 0) return 1;
 	if (scenario_wal_truncate() != 0) return 1;
+	if (scenario_torn_page() != 0) return 1;
 	printf("All sqlxtc persistence tests passed.\n");
 	return 0;
 }
