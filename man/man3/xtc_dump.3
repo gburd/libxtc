@@ -1,0 +1,177 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd June 4, 2026
+.Dt XTC_DUMP 3
+.Os
+.Sh NAME
+.Nm xtc_dump ,
+.Nm xtc_panic ,
+.Nm xtc_crash_handler_install
+.Nd crash diagnostics: runtime-state dump, panic, fatal-signal handler
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_dump.h
+.Ft void
+.Fn xtc_dump "int fd"
+.Ft void
+.Fn xtc_panic "const char *file" "int line" "const char *fmt" "..."
+.Ft int
+.Fn xtc_crash_handler_install "void"
+.Fn XTC_PANIC "fmt" "..."
+.Fn XTC_ASSERT "cond"
+.Fn XTC_ASSERT_F "cond" "fmt" "..."
+.Sh DESCRIPTION
+These routines turn the live runtime into a human-readable diagnostic
+on the way down, without a debugger or a core file.  The dump is the
+in-process counterpart of the debugger scripts
+.Pq Xr xtc_proc 3 , Xr xtc_inspect 3 :
+the same proc, loop, and mailbox view an
+.Sy observer
+session shows, written to a file descriptor.
+.Pp
+.Fn xtc_dump
+writes a best-effort runtime-state dump to
+.Fa fd
+.Pq commonly Dv STDERR_FILENO :
+.Bl -enum -offset indent -compact
+.It
+the C backtrace of the
+.Em calling
+OS thread, when a backtrace backend is compiled in
+.Pq see Sx PORTABILITY ;
+.It
+every scheduler loop with its run-queue and work-steal counters;
+.It
+every live proc with its run state, park reason, and mailbox depth,
+peak, capacity, and lifetime receive/drop counts.
+.El
+The field labels match the debugger scripts, so an in-process dump and
+a
+.Xr gdb 1
+session read alike.
+.Fn xtc_dump
+never allocates and never aborts; it writes through a fixed stack
+buffer with raw
+.Xr write 2
+calls, so it can run at any time and does not perturb the heap it may
+be diagnosing.  The caller decides what to do next.
+.Pp
+.Fn xtc_panic
+emits
+.Fa fmt Ns / Ns Fa ...
+as a panic banner, then
+.Fn xtc_dump STDERR_FILENO ,
+then calls
+.Xr abort 3 .
+It does not return.  Call it through the
+.Fn XTC_PANIC
+macro, which supplies
+.Fa file
+and
+.Fa line :
+.Bd -literal -offset indent
+XTC_PANIC("bad frame %ld: pin=%d", (long)idx, pin);
+.Ed
+.Pp
+.Fn XTC_ASSERT
+panics with the failed expression when
+.Fa cond
+is false;
+.Fn XTC_ASSERT_F
+does the same with a caller-supplied message.  Unlike the standard
+.Xr assert 3 ,
+both emit the full runtime dump before aborting, and both are always
+compiled in
+.Pq they are diagnostics, not debug-only checks .
+.Bd -literal -offset indent
+XTC_ASSERT(frame->pin > 0);
+XTC_ASSERT_F(n <= cap, "overflow: n=%zu cap=%zu", n, cap);
+.Ed
+.Pp
+.Fn xtc_crash_handler_install
+installs a handler for the fatal signals
+.Dv SIGSEGV , SIGBUS , SIGABRT , SIGFPE ,
+and
+.Dv SIGILL
+that emits a backtrace and a best-effort runtime dump to standard
+error, then re-raises the signal with its default disposition so a
+core is still produced.  It is idempotent and installs handlers only
+for faults -- never for
+.Dv SIGCHLD , SIGTERM ,
+or other signals an embedder may manage.  It returns
+.Dv XTC_OK ,
+or
+.Dv XTC_E_NOSYS
+on a platform without POSIX signals.
+.Sh SCOPE AND LIMITS
+A
+.Em parked
+fiber's own C stack is not unwound: it lives in a saved coroutine
+context, not on a live OS thread.  Like an Erlang crash dump or a Go
+panic, the dump reports each proc's state and mailbox -- which proc is
+parked, on what, with how deep a mailbox -- not N reconstructed C
+stacks.  Only the calling (faulting) thread's C stack is shown.  For
+deep per-fiber stacks attach a debugger to a core; the dump and the
+debugger share field names so the two views line up.
+.Pp
+This makes the facility strongest for the failure mode it was built
+for: a hung or wedged message-passing system, where the question is
+.Dq which proc is waiting on whom, and why did it not wake.
+For domain data-structure invariants, keep using
+.Fn XTC_ASSERT
+on those structures directly.
+.Sh SIGNAL SAFETY
+.Fn xtc_dump
+takes the per-loop inspection locks
+.Pq via Xr xtc_inspect 3 ,
+so it is fully reliable from an explicit
+.Fn XTC_PANIC
+or
+.Fn XTC_ASSERT
+in normal context.  From the fatal-signal handler the banner and
+backtrace are always emitted -- they use only async-signal-safe
+primitives -- but the proc/loop walk is attempted best-effort and may
+block if the fault happened while a loop lock was held.  A hung
+handler still leaves the banner and backtrace, and the re-raised
+signal still yields a core.
+.Sh PORTABILITY
+The C backtrace uses the
+.Fn __os_backtrace
+seam, selected at configure time: the
+.In execinfo.h
+.Fn backtrace
+backend on glibc, macOS, and the BSDs;
+otherwise a no-op stub.  Where no backend is present the dump omits the
+C stack but still reports the full proc/loop/mailbox state.
+.Fn xtc_crash_handler_install
+returns
+.Dv XTC_E_NOSYS
+on Windows
+.Pq SEH is future work .
+.Sh RETURN VALUES
+.Fn xtc_dump
+returns nothing.
+.Fn xtc_panic
+does not return.
+.Fn xtc_crash_handler_install
+returns
+.Dv XTC_OK ,
+or
+.Dv XTC_E_NOSYS
+where unsupported.
+.Sh EXAMPLES
+Install the crash handler at startup, then assert an invariant:
+.Bd -literal -offset indent
+xtc_crash_handler_install();
+\&...
+XTC_ASSERT_F(pin > 0, "unfix underflow: frame=%ld", (long)idx);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_inspect 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_loop 3 ,
+.Xr xtc_slab 3
+.Sh AUTHORS
+The
+.Nm xtc
+project.

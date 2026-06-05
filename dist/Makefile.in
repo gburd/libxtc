@@ -49,6 +49,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/os/os_tls.c \
 	$(srcdir)/../src/os/os_mutex.c \
 	$(srcdir)/../src/os/os_cpu.c \
+	$(srcdir)/../src/os/os_backtrace.c \
 	$(srcdir)/../src/io/io_common.c \
 	$(srcdir)/../src/io/io_net.c \
 	$(srcdir)/../src/io/io_poll.c \
@@ -80,6 +81,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/alloc_audit.c \
 	$(srcdir)/../src/ptc/mctx.c \
 	$(srcdir)/../src/ptc/rcu.c \
+	$(srcdir)/../src/ptc/dump.c \
 	$(srcdir)/../src/orc/sup.c \
 	$(srcdir)/../src/orc/reg.c \
 	$(srcdir)/../src/orc/svr.c \
@@ -101,6 +103,7 @@ LIB_OBJS	= \
 	os_tls.o \
 	os_mutex.o \
 	os_cpu.o \
+	os_backtrace.o \
 	io_common.o \
 	io_net.o \
 	io_poll.o \
@@ -132,6 +135,7 @@ LIB_OBJS	= \
 	alloc_audit.o \
 	mctx.o \
 	rcu.o \
+	dump.o \
 	sup.o \
 	reg.o \
 	svr.o \
@@ -211,6 +215,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_otp_supervisor \
 		  test_observability \
 		  test_stats \
+		  test_dump \
 		  test_tls_basic \
 		  test_tls_server \
 		  test_tls_client \
@@ -337,6 +342,9 @@ exec.o: $(srcdir)/../src/evt/exec.c xtc_config.h
 os_cpu.o: $(srcdir)/../src/os/os_cpu.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_cpu.c
 
+os_backtrace.o: $(srcdir)/../src/os/os_backtrace.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_backtrace.c
+
 res.o: $(srcdir)/../src/ptc/res.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/res.c
 
@@ -345,6 +353,9 @@ chan.o: $(srcdir)/../src/ptc/chan.c xtc_config.h
 
 proc.o: $(srcdir)/../src/ptc/proc.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/proc.c
+
+dump.o: $(srcdir)/../src/ptc/dump.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/dump.c
 
 sync.o: $(srcdir)/../src/ptc/sync.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/sync.c
@@ -832,6 +843,12 @@ test_stats: $(srcdir)/../test/m12/test_stats.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
 		-o $@ $(srcdir)/../test/m12/test_stats.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_dump: $(srcdir)/../test/m12/test_dump.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
+		-o $@ $(srcdir)/../test/m12/test_dump.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M18 tests -- TLS API surface.

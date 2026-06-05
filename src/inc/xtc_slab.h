@@ -58,8 +58,8 @@
  *	  AUDIT     -- small ring of recent (alloc, free, who, when)
  *	              events per cache for postmortem
  *	  BACKTRACE -- capture backtrace on alloc; combine with AUDIT
- *	              to identify leakers (Linux only, requires
- *	              <execinfo.h>)
+ *	              to identify leakers (via the __os_backtrace seam;
+ *	              a no-op where no backend is available)
  *
  *	OOM policies:
  *	  FAIL    -- return NULL, set XTC_E_RESOURCE in caller
