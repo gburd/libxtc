@@ -26,10 +26,12 @@
  * PUBLIC: int xtc_aio_pread __P((int, void *, uint32_t, int64_t));
  * PUBLIC: int xtc_aio_pwrite __P((int, const void *, uint32_t, int64_t));
  * PUBLIC: int xtc_aio_fsync __P((int));
+ * PUBLIC: int xtc_aio_fdatasync __P((int));
  */
 
 int xtc_aio_pread(int fd, void *buf, uint32_t len, int64_t off);
 int xtc_aio_pwrite(int fd, const void *buf, uint32_t len, int64_t off);
-int xtc_aio_fsync(int fd);
+int xtc_aio_fsync(int fd);       /* full sync: data + metadata */
+int xtc_aio_fdatasync(int fd);   /* data only (the page/WAL flush hot path) */
 
 #endif /* XTC_AIO_H */

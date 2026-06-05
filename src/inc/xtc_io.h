@@ -50,9 +50,10 @@ typedef struct xtc_io_event {
  * provides it.  See xtc_aio(3).
  */
 enum {
-	XTC_AIO_PREAD  = 0,
-	XTC_AIO_PWRITE = 1,
-	XTC_AIO_FSYNC  = 2     /* fdatasync (data only) */
+	XTC_AIO_PREAD     = 0,
+	XTC_AIO_PWRITE    = 1,
+	XTC_AIO_FSYNC     = 2,    /* full sync: data + metadata */
+	XTC_AIO_FDATASYNC = 3     /* data only (fsync on macOS, which lacks it) */
 };
 typedef struct xtc_aio {
 	int       fd;

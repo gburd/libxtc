@@ -6,7 +6,8 @@
 .Sh NAME
 .Nm xtc_aio_pread ,
 .Nm xtc_aio_pwrite ,
-.Nm xtc_aio_fsync
+.Nm xtc_aio_fsync ,
+.Nm xtc_aio_fdatasync
 .Nd async file I/O for fibers
 .Sh SYNOPSIS
 .In xtc.h
@@ -17,6 +18,8 @@
 .Fn xtc_aio_pwrite "int fd" "const void *buf" "uint32_t len" "int64_t off"
 .Ft int
 .Fn xtc_aio_fsync "int fd"
+.Ft int
+.Fn xtc_aio_fdatasync "int fd"
 .Sh DESCRIPTION
 These perform a file read, write, or data-sync that suspends the
 calling fiber and resumes it on completion, keeping the fiber's loop
@@ -68,8 +71,15 @@ bytes from
 at
 .Fa off ;
 .Fn xtc_aio_fsync
-flushes the file's data
-.Pq fdatasync semantics: data, not necessarily metadata .
+flushes the file's data and metadata durably;
+.Fn xtc_aio_fdatasync
+flushes the data only
+.Pq fdatasync semantics; the hot path for page and WAL flushes, and what
+.Xr xtc_io 3 Ns 's storage callers use .
+On macOS, which has no
+.Fn fdatasync ,
+the data-only call falls back to
+.Fn fsync .
 None of them moves the file's seek pointer.
 .Sh RETURN VALUES
 .Fn xtc_aio_pread
