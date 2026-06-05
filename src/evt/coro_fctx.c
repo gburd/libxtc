@@ -116,7 +116,7 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	struct xtc_coro *c = user;
 	struct xtc_coro *saved;
 
-	(void)self;
+	c->self = self;   /* bind on the running thread; see coro_uctx.c */
 
 	saved = __xtc_current_coro;
 	__xtc_current_coro = c;

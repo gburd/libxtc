@@ -103,7 +103,13 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	struct xtc_coro *c = user;
 	struct xtc_coro *saved;
 
-	(void)self;
+	/* Bind the coro's task back-pointer here, on the running thread,
+	 * every step.  It is also set at creation, but under the multi-loop
+	 * executor a freshly published coro can first run on another thread
+	 * before that store is visible, leaving c->self (hence
+	 * __xtc_current_task, hence a proc's self->task) transiently NULL.
+	 * Setting it from the task the loop hands us closes that race. */
+	c->self = self;
 
 	/* Set the per-thread cursor so xtc_yield() can find us. */
 	saved = __xtc_current_coro;

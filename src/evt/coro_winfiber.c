@@ -116,7 +116,7 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 {
 	struct xtc_coro *c = user;
 	struct xtc_coro *saved;
-	(void)self;
+	c->self = self;   /* bind on the running thread; see coro_uctx.c */
 
 	/* Convert this thread to a fiber on first entry; subsequent
 	 * calls return the existing fiber pointer. */
