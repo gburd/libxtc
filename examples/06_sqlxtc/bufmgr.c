@@ -1267,12 +1267,13 @@ bm_read_super(bm_t *bm, void *buf, size_t len)
 }
 
 /* fdatasync the backing file via xtc_aio (native or offloaded), so the
- * loop is not blocked. */
+ * loop is not blocked.  Data-only is correct here: page contents must
+ * be durable, not file metadata. */
 int
 bm_sync(bm_t *bm)
 {
 	if (bm == NULL) return XTC_E_INVAL;
-	return xtc_aio_fsync(bm->fd) == 0 ? XTC_OK : XTC_E_INTERNAL;
+	return xtc_aio_fdatasync(bm->fd) == 0 ? XTC_OK : XTC_E_INTERNAL;
 }
 
 int

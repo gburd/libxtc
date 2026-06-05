@@ -6,6 +6,7 @@
 
 int  xtc_cfg_load_file __P((const char *));
 int  xtc_cfg_reload __P((void));
+int xtc_aio_fdatasync __P((int));
 int xtc_aio_fsync __P((int));
 int xtc_aio_pread __P((int, void *, uint32_t, int64_t));
 int xtc_aio_pwrite __P((int, const void *, uint32_t, int64_t));
