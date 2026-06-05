@@ -108,12 +108,43 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 	w = calloc(1, sizeof *w);
 	if (w == NULL)
 		return XTC_E_NOMEM;
-	w->fd = open(opts->path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	w->fd = open(opts->path,
+	    O_RDWR | O_CREAT | (opts->append ? 0 : O_TRUNC), 0600);
 	if (w->fd < 0) {
 		free(w);
 		return XTC_E_INTERNAL;   /* no XTC_E_IO in the core enum -- see gaps ledger */
 	}
 	w->off = 0;
+	if (opts->append) {
+		/* Continue an existing log: scan to the end, resume LSNs past
+		 * the highest on disk, and append after the last COMPLETE
+		 * record (a torn tail from a crash mid-append is dropped). */
+		uint8_t *sb = NULL; size_t sbcap = 0; off_t o = 0;
+		for (;;) {
+			uint8_t hdr[WAL_REC_HDR];
+			uint64_t lsn; uint32_t len;
+			if (pread(w->fd, hdr, WAL_REC_HDR, o) != (ssize_t)WAL_REC_HDR)
+				break;                /* EOF or torn header */
+			memcpy(&lsn, hdr, 8); memcpy(&len, hdr + 8, 4);
+			if (len > sbcap) {
+				uint8_t *nb = realloc(sb, len);
+				if (nb == NULL) break;
+				sb = nb; sbcap = len;
+			}
+			if (len > 0 &&
+			    pread(w->fd, sb, len, o + (off_t)WAL_REC_HDR) != (ssize_t)len)
+				break;                /* torn body: stop at the tail */
+			if (lsn > w->next_lsn) w->next_lsn = lsn;
+			o += (off_t)WAL_REC_HDR + (off_t)len;
+		}
+		free(sb);
+		w->off = o;
+		w->durable_lsn = w->next_lsn;
+		{
+			int tr = ftruncate(w->fd, o);  /* drop torn tail */
+			(void)tr;                      /* non-fatal: appends overwrite it */
+		}
+	}
 	w->window_ns = opts->window_ns > 0 ? opts->window_ns : 500000;   /* 0.5ms */
 	w->max_batch = opts->max_batch > 0 ? opts->max_batch : 256;
 	w->bcap = 64 * 1024;

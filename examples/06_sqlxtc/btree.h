@@ -43,6 +43,11 @@ int  bt_open(bm_t *bm, bt_t **out);
  * reopen != 0); finds the live root rather than building a fresh one. */
 int  bt_reopen(bm_t *bm, bt_t **out);
 void bt_close(bt_t *bt);
+/* Register a callback invoked by bt_close just before the tree is freed.
+ * Used by higher layers (xstore) to drop any per-bt cached state keyed
+ * by the bt pointer, so a freed pointer reused by a new tree cannot
+ * alias stale entries.  A single global hook; the last setter wins. */
+void bt_set_close_hook(void (*fn)(bt_t *));
 
 /* Insert or replace key -> val.  Returns XTC_OK, or an error. */
 int  bt_insert(bt_t *bt, const void *key, uint16_t klen,

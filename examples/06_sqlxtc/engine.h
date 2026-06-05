@@ -64,9 +64,15 @@ int  sx_storage_open(const char *path, unsigned int n_frames);
 /* Start the background storage procs (WAL group-commit writer, page
  * provider, trickler) on `loop`.  Call after the loop exists. */
 int  sx_storage_run(struct xtc_loop *loop);
-/* Flush all dirty pages durable and truncate the log (a checkpoint). */
+/* Flush all dirty pages durable (a running checkpoint).  Does not
+ * truncate the log -- see engine.c. */
 int  sx_storage_checkpoint(void);
 void sx_storage_close(void);
+/* Drop all in-memory engine state WITHOUT a checkpoint or clean marker,
+ * simulating a crash (dirty pages lost, the log left intact and
+ * durable).  The next sx_storage_open rebuilds the tree from the full
+ * log.  Intended for crash-recovery tests. */
+void sx_storage_abandon(void);
 
 /* 1 if the libxtc-native storage engine is open (so plain CREATE TABLE
  * is routed to it).  0 otherwise. */

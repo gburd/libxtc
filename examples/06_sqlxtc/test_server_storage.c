@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "engine.h"
 #include "db.h"
@@ -152,6 +153,46 @@ verify_proc(void *arg)
 /* ---- cycle 3: connection-per-proc.  NWORK procs each open their own
  * engine handle and write a disjoint key range concurrently into the
  * one shared store; then we confirm every row landed. ---- */
+/* ---- cycle 4: CRASH recovery.  Write rows under a tiny pool (so
+ * eviction tears the on-disk tree mid-SMO), then ABANDON the engine
+ * without a clean shutdown -- no checkpoint, no marker, dirty pages
+ * lost, the log intact.  Reopen: no marker, so the torn base is
+ * discarded and the tree is rebuilt from the full log.  Every row must
+ * reappear. ---- */
+static char g_path4[300];
+static int  g_crash_wrote;
+static int  g_crash_seen;
+
+static void
+crash_writer_proc(void *arg)
+{
+	xtc_loop_t *loop = arg;
+	sx_db *h = NULL;
+	int i;
+	CK(sx_storage_open(g_path4, 16) == SX_OK);   /* tiny pool: eviction tears the base */
+	CK(sx_storage_run(loop) == SX_OK);
+	CK(sx_open(":memory:", &h) == SX_OK);
+	CK(sx_exec(h, "CREATE VIRTUAL TABLE t USING xstore;", NULL) == SX_OK);
+	for (i = 1; i <= NROW; i++) {
+		char sql[80];
+		snprintf(sql, sizeof sql, "INSERT INTO t(k,v) VALUES(%d,'crash%d');", i, i);
+		CK(sx_exec(h, sql, NULL) == SX_OK);   /* durable via group commit */
+	}
+	sx_close(h);
+	g_crash_wrote = count_rows();
+	sx_storage_abandon();                        /* CRASH: no checkpoint, no marker */
+}
+
+static void
+crash_verify_proc(void *arg)
+{
+	xtc_loop_t *loop = arg;
+	CK(sx_storage_open(g_path4, 16) == SX_OK);   /* no marker -> rebuild from full log */
+	CK(sx_storage_run(loop) == SX_OK);
+	g_crash_seen = count_rows();
+	sx_storage_close();
+}
+
 struct warg { int base; };
 static void
 worker_proc(void *arg)
@@ -238,12 +279,28 @@ main(void)
 	CK(g_transparent_ok == 1);          /* plain CREATE TABLE -> xstore */
 	CK(g_transparent_rows == 2);        /* and data round-trips */
 
+	strcpy(g_path4, "/tmp/sqlxtc-srvstore4-XXXXXX");
+	fd = mkstemp(g_path4); if (fd < 0) return 1; close(fd); unlink(g_path4);
+	if (run_cycle(crash_writer_proc) != 0) return 1;
+	CK(g_crash_wrote == NROW);          /* all rows committed before the crash */
+	if (run_cycle(crash_verify_proc) != 0) return 1;
+	CK(g_crash_seen == NROW);           /* all rebuilt from the log after the crash */
+
 	(void)sx_shutdown();
 	{
 		char wal[300];
 		snprintf(wal, sizeof wal, "%s-wal", g_path); unlink(wal); unlink(g_path);
 		snprintf(wal, sizeof wal, "%s-wal", g_path2); unlink(wal); unlink(g_path2);
 		snprintf(wal, sizeof wal, "%s-wal", g_path3); unlink(wal); unlink(g_path3);
+		snprintf(wal, sizeof wal, "%s-wal", g_path4); unlink(wal); unlink(g_path4);
+		snprintf(wal, sizeof wal, "%s.clean", g_path); unlink(wal);
+		snprintf(wal, sizeof wal, "%s.clean", g_path2); unlink(wal);
+		snprintf(wal, sizeof wal, "%s.clean", g_path3); unlink(wal);
+		snprintf(wal, sizeof wal, "%s.clean", g_path4); unlink(wal);
+		snprintf(wal, sizeof wal, "%s.dwb", g_path); unlink(wal);
+		snprintf(wal, sizeof wal, "%s.dwb", g_path2); unlink(wal);
+		snprintf(wal, sizeof wal, "%s.dwb", g_path3); unlink(wal);
+		snprintf(wal, sizeof wal, "%s.dwb", g_path4); unlink(wal);
 	}
 	if (g_fail) return 1;
 	printf("  ok   engine wired: %d rows written + checkpointed, %d survived "
@@ -252,6 +309,10 @@ main(void)
 	    "concurrent over one shared store\n", NWORK, PERWORK, g_cpp_total);
 	printf("  ok   transparent CREATE TABLE -> xstore: plain DDL routed to "
 	    "the native engine, %d rows round-tripped\n", g_transparent_rows);
+	printf("  ok   crash recovery: %d rows written under a tiny pool then"
+	    " abandoned (no clean shutdown); all %d rebuilt from the log onto a"
+	    " fresh tree after the torn base was discarded\n",
+	    g_crash_wrote, g_crash_seen);
 	printf("All sqlxtc server-storage tests passed.\n");
 	return 0;
 }

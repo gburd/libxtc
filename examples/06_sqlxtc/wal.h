@@ -37,9 +37,12 @@
 typedef struct wal wal_t;
 
 typedef struct wal_opts {
-	const char *path;          /* log file (created/truncated) */
+	const char *path;          /* log file */
 	int64_t     window_ns;     /* group-commit gather window (e.g. 500us) */
 	uint32_t    max_batch;     /* cap on records per fsync (e.g. 256) */
+	int         append;        /* 1: preserve an existing log and append
+	                            * (resume LSNs, drop a torn tail); 0:
+	                            * truncate to a fresh empty log */
 } wal_opts_t;
 
 typedef struct wal_stats {
