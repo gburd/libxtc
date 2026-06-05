@@ -26,6 +26,7 @@
 #include <errno.h>
 #include <string.h>
 #if defined(_WIN32)
+#  include <stdio.h>       /* SEEK_SET */
 #  include <io.h>          /* _read/_write/_lseeki64/_commit */
 #else
 #  include <unistd.h>
