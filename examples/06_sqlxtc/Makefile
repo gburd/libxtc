@@ -143,6 +143,7 @@ clean:
 	rm -f test_wal test_wal.o wal.o
 	rm -f test_wal_recover
 	rm -f test_torn_smo
+	rm -f test_wal_compact
 	rm -f test_shard test_shard.o
 	rm -f test_mvcc test_mvcc.o mvcc.o
 	rm -f test_xstore test_xstore.o xstore.o
@@ -167,7 +168,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-shard test-mvcc test-xstore test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -289,6 +290,12 @@ test_torn_smo: test_torn_smo.c xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.
 
 test-torn-smo: test_torn_smo
 	./test_torn_smo
+
+test_wal_compact: test_wal_compact.c xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_wal_compact.c xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-wal-compact: test_wal_compact
+	./test_wal_compact
 
 # ---- share-nothing sharded store + control plane (executor; no daemon) ----
 # N shard servers (one xtc_svr each, share-nothing) + a global

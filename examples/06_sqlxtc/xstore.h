@@ -38,4 +38,8 @@ void xstore_set_wal(struct wal *w);
  * xstore_set_wal's writer is needed.  Returns XTC_OK. */
 int xstore_recover(bt_t *bt, const char *wal_path);
 
+/* In-WAL checkpoint: compact the log to a CHECKPOINT record plus a dump
+ * of the live tree, bounding it.  Call only when commits are quiesced. */
+int xstore_checkpoint_wal(bt_t *bt, struct wal *w, const char *wal_path);
+
 #endif /* SQLXTC_XSTORE_H */

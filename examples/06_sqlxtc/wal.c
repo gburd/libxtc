@@ -34,6 +34,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>      /* snprintf, rename */
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -98,6 +99,35 @@ now_ns(void)
 	return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
+/* Scan an open log fd to its end: *off_out := offset just past the last
+ * COMPLETE record (a torn tail is excluded), *maxlsn_out := highest LSN
+ * seen.  Used to resume appending to an existing log. */
+static void
+wal_scan_tail(int fd, off_t *off_out, uint64_t *maxlsn_out)
+{
+	uint8_t *sb = NULL; size_t sbcap = 0; off_t o = 0; uint64_t maxlsn = 0;
+	for (;;) {
+		uint8_t hdr[WAL_REC_HDR];
+		uint64_t lsn; uint32_t len;
+		if (pread(fd, hdr, WAL_REC_HDR, o) != (ssize_t)WAL_REC_HDR)
+			break;                /* EOF or torn header */
+		memcpy(&lsn, hdr, 8); memcpy(&len, hdr + 8, 4);
+		if (len > sbcap) {
+			uint8_t *nb = realloc(sb, len);
+			if (nb == NULL) break;
+			sb = nb; sbcap = len;
+		}
+		if (len > 0 &&
+		    pread(fd, sb, len, o + (off_t)WAL_REC_HDR) != (ssize_t)len)
+			break;                /* torn body: stop at the tail */
+		if (lsn > maxlsn) maxlsn = lsn;
+		o += (off_t)WAL_REC_HDR + (off_t)len;
+	}
+	free(sb);
+	*off_out = o;
+	*maxlsn_out = maxlsn;
+}
+
 int
 wal_open(const wal_opts_t *opts, wal_t **out)
 {
@@ -116,28 +146,12 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 	}
 	w->off = 0;
 	if (opts->append) {
-		/* Continue an existing log: scan to the end, resume LSNs past
-		 * the highest on disk, and append after the last COMPLETE
-		 * record (a torn tail from a crash mid-append is dropped). */
-		uint8_t *sb = NULL; size_t sbcap = 0; off_t o = 0;
-		for (;;) {
-			uint8_t hdr[WAL_REC_HDR];
-			uint64_t lsn; uint32_t len;
-			if (pread(w->fd, hdr, WAL_REC_HDR, o) != (ssize_t)WAL_REC_HDR)
-				break;                /* EOF or torn header */
-			memcpy(&lsn, hdr, 8); memcpy(&len, hdr + 8, 4);
-			if (len > sbcap) {
-				uint8_t *nb = realloc(sb, len);
-				if (nb == NULL) break;
-				sb = nb; sbcap = len;
-			}
-			if (len > 0 &&
-			    pread(w->fd, sb, len, o + (off_t)WAL_REC_HDR) != (ssize_t)len)
-				break;                /* torn body: stop at the tail */
-			if (lsn > w->next_lsn) w->next_lsn = lsn;
-			o += (off_t)WAL_REC_HDR + (off_t)len;
-		}
-		free(sb);
+		/* Continue an existing log: resume LSNs past the highest on
+		 * disk, and append after the last COMPLETE record (a torn tail
+		 * from a crash mid-append is dropped). */
+		off_t o = 0; uint64_t maxlsn = 0;
+		wal_scan_tail(w->fd, &o, &maxlsn);
+		w->next_lsn = maxlsn;
 		w->off = o;
 		w->durable_lsn = w->next_lsn;
 		{
@@ -404,6 +418,100 @@ wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 out:
 	(void)pthread_mutex_unlock(&w->sync_mu);
 	return rc;
+}
+
+/* Rebind an open log handle to `path` after it was replaced on disk
+ * (the compaction rename): reopen the fd and resume appending past the
+ * last complete record.  Caller must hold no concurrent committers. */
+static int
+wal_rebind(wal_t *w, const char *path)
+{
+	off_t o = 0; uint64_t maxlsn = 0;
+	int fd = open(path, O_RDWR, 0600);
+	if (fd < 0)
+		return XTC_E_INTERNAL;
+	wal_scan_tail(fd, &o, &maxlsn);
+	if (w->fd >= 0) close(w->fd);
+	w->fd = fd;
+	w->off = o;
+	w->next_lsn = maxlsn;
+	w->durable_lsn = maxlsn;
+	return XTC_OK;
+}
+
+/* Emit context for wal_checkpoint: appends framed records to the temp
+ * compaction file, assigning fresh sequential LSNs. */
+struct wal_cmp_ctx { int fd; off_t off; uint64_t lsn; int err; };
+static void
+wal_cmp_emit(void *vctx, const void *payload, uint32_t len)
+{
+	struct wal_cmp_ctx *c = vctx;
+	uint8_t hdr[WAL_REC_HDR];
+	uint64_t lsn = ++c->lsn;
+	if (c->err)
+		return;
+	memcpy(hdr, &lsn, 8);
+	memcpy(hdr + 8, &len, 4);
+	if (pwrite(c->fd, hdr, WAL_REC_HDR, c->off) != (ssize_t)WAL_REC_HDR ||
+	    (len && pwrite(c->fd, payload, len, c->off + WAL_REC_HDR) != (ssize_t)len)) {
+		c->err = 1;
+		return;
+	}
+	c->off += (off_t)WAL_REC_HDR + (off_t)len;
+}
+
+/* WAL checkpoint record: ts = the persisted clock, count = the reserved
+ * sentinel so recovery recognizes it (a real put never has this count). */
+#define WAL_CKPT_SENTINEL 0xFFFFFFFFu
+
+int
+wal_checkpoint(wal_t *w, const char *path, uint64_t clock,
+    void (*dump)(wal_emit_fn emit, void *emit_ctx, void *user), void *user)
+{
+	char tmp[1100];
+	struct wal_cmp_ctx c;
+	uint8_t ck[12];
+	uint32_t sentinel = WAL_CKPT_SENTINEL;
+	int fd, dfd;
+
+	if (w == NULL || path == NULL)
+		return XTC_E_INVAL;
+	if ((int)strlen(path) + 9 >= (int)sizeof tmp)
+		return XTC_E_INVAL;
+	snprintf(tmp, sizeof tmp, "%s.compact", path);
+	fd = open(tmp, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	if (fd < 0)
+		return XTC_E_INTERNAL;
+	c.fd = fd; c.off = 0; c.lsn = 0; c.err = 0;
+
+	/* CHECKPOINT record first, then the live-state dump. */
+	memcpy(ck, &clock, 8);
+	memcpy(ck + 8, &sentinel, 4);
+	wal_cmp_emit(&c, ck, 12);
+	if (dump != NULL)
+		dump(wal_cmp_emit, &c, user);
+
+	if (c.err || fsync(fd) != 0) {
+		(void)close(fd);
+		(void)unlink(tmp);
+		return XTC_E_INTERNAL;
+	}
+	(void)close(fd);
+	if (rename(tmp, path) != 0) {     /* atomic replace of the live log */
+		(void)unlink(tmp);
+		return XTC_E_INTERNAL;
+	}
+	/* Make the rename durable so a crash cannot resurrect the old log. */
+	{
+		char dir[1100];
+		char *slash;
+		snprintf(dir, sizeof dir, "%s", path);
+		slash = strrchr(dir, '/');
+		if (slash != NULL) *slash = '\0'; else { dir[0] = '.'; dir[1] = '\0'; }
+		dfd = open(dir, O_RDONLY);
+		if (dfd >= 0) { (void)fsync(dfd); (void)close(dfd); }
+	}
+	return wal_rebind(w, path);
 }
 
 int
