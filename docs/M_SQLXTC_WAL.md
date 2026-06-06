@@ -122,48 +122,54 @@ pages.
     forward scan stays a cache hit.  This is Stasis
     `bufferHash.c:bhPrefetchPagesImpl` + `prefetch_worker`.
 
-## 3. What remains for full ARIES (honestly scoped)
+## 3. The recovery and checkpoint model
 
-The engine recovers committed data correctly across both clean and
-unclean restarts, validated by tests (test_persist, test_wal_recover,
-test_torn_smo, test_server_storage's crash cycle).  The recovery model
-is:
+The engine recovers committed data correctly across clean and unclean
+restarts and bounds its log for an always-on server, validated by tests
+(test_persist, test_wal_recover, test_torn_smo, test_wal_compact,
+test_server_storage's crash cycle).  The model:
 
-  1. **Persistent superblock + non-truncating reopen.**  DONE.
-     `bm_create(reopen)` preserves the page file and `bt_reopen` reads
-     the root from the superblock (page 0), so a cleanly checkpointed
-     tree serves as a durable recovery base.
+  1. **The log is the source of truth.**  Recovery rebuilds the tree by
+     replaying the log onto a FRESH page file (redo-only).  So a crash
+     that left the on-disk tree structurally torn by partial mid-SMO
+     eviction (a parent page flushed before its split child) -- which
+     logical redo cannot repair -- is simply discarded; the page file
+     is a rebuildable cache, not the recovery base.  The double-write
+     buffer separately handles a torn write WITHIN a single page.
+     Redo is idempotent because version keys are immutable and
+     append-only.
 
-  2. **Checkpoint + clean/unclean restart.**  DONE.  `bm_checkpoint`
-     flushes the dirty set durable.  A clean shutdown checkpoints the
-     tree and drops a marker file (`<data>.clean`); the next open sees
-     the marker and trusts the base directly.  Absent the marker (a
-     crash, or a first open) the on-disk tree may be STRUCTURALLY torn
-     by partial mid-SMO eviction (a parent page flushed before its
-     split child), and logical redo cannot repair a torn structure --
-     so the on-disk tree is DISCARDED and rebuilt from scratch by
-     replaying the whole log onto a fresh page file (the proven
-     redo-only path).  The torn-page case within an individual page is
-     handled separately by the double-write buffer.
+  2. **The checkpoint lives IN the log (no side files).**  An in-WAL
+     checkpoint (xstore_checkpoint_wal -> wal_checkpoint) atomically
+     rewrites the log as a CHECKPOINT record -- carrying the persisted
+     commit clock -- followed by a dump of the LIVE row set (the newest
+     committed version per key; superseded versions and tombstones are
+     dropped).  The rewrite goes to `<log>.compact`, is fsync'd, and is
+     atomically renamed over the log; the dir is fsync'd so the rename
+     survives a crash.  A crash before the rename leaves the previous
+     complete log; after it, the compacted log -- never a torn log.
 
-  3. **The log is the source of truth and is never truncated during the
-     engine's life** -- only at a clean shutdown -- so after a crash it
-     always holds the full history needed to rebuild.  This is the
-     lever that makes "discard the torn base, rebuild from the log"
-     sound without page LSNs: the immutable, append-only version keys
-     make redo idempotent, and the log is complete.
+  3. **This bounds the log.**  Because the checkpoint discards every
+     record before it (superseded by the dump), the log -- and the
+     replay that rebuilds the tree -- stay proportional to the LIVE
+     data, not the write history.  test_wal_compact churns 200 rows
+     x 10 updates (a log of N*(K+1) records) and shows the checkpoint
+     shrink it ~10x to the live set, then recovers from the compacted
+     log plus a post-checkpoint tail.  A long-running server calls
+     sx_storage_checkpoint periodically; it must run at a quiescent
+     point (no concurrent commit), since the compaction both scans the
+     live tree and replaces the log file.
 
-The one piece that remains is **bounding the log for a long-running
-process.**  Because the log is not truncated between clean shutdowns,
-it grows with the write history; compacting it safely requires either a
-crash-coherent checkpoint (so a checkpointed base can be trusted after
-a crash and the log truncated behind it) or physiological page logging
-with page LSNs (ARIES proper: redo a torn SMO physically, gated by the
-page LSN, Stasis-style).  Either makes the page file a trustworthy
-post-crash base so the log prefix can be discarded.  Until then,
-recovery time and log size are bounded only by the interval between
-clean shutdowns -- correct, but not yet bounded for an always-on
-server.
+A fuller ARIES would log B-tree mutations PHYSIOLOGICALLY with per-page
+LSNs, so a torn page file could be repaired in place (redo gated by the
+page LSN) and the page file trusted as the recovery base -- avoiding
+the rebuild-from-log on every restart.  That is a performance choice
+(faster cold restart for a very large database), not a correctness one:
+the log-rebuild model here is sound and bounded.  CLRs (compensation
+log records) are an ARIES UNDO device; this engine writes versions only
+at commit, so there are no loser transactions to undo and no CLRs -- the
+WAL record's reserved record types leave room for them should a STEAL
+(undo) policy ever be added.
 
 ## 4. Why this order
 
