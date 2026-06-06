@@ -31,6 +31,7 @@ test_btree_loop
 test_btree_mt
 test_wal_recover
 test_torn_smo
+test_wal_compact
 test_persist
 test_cursor_resume
 test_server_storage

@@ -102,6 +102,28 @@ int  wal_scan(const char *path, wal_replay_cb cb, void *user);
  */
 int  wal_truncate(wal_t *w);
 
+/*
+ * In-WAL checkpoint (log-compaction).  Atomically rewrites the log as a
+ * fresh CHECKPOINT record (carrying `clock`) followed by whatever
+ * `dump` emits -- the live database state as redo records.  This is the
+ * checkpoint: it lives IN the log, not in a side file, and it bounds
+ * the log because every record before it is superseded by the dump and
+ * discarded.  Recovery replays the compacted log onto a fresh tree.
+ *
+ * The rewrite goes to `path`.compact, is fsync'd, atomically renamed
+ * over `path`, and the handle is rebound to it (LSNs resume past the
+ * dump).  Crash-atomic: a crash before the rename leaves the previous
+ * (complete) log intact; after it, the compacted log.  Call ONLY when
+ * commits are quiesced.  Returns XTC_OK or an error (log unchanged).
+ *
+ * `dump(emit, emit_ctx, user)` calls emit(emit_ctx, payload, len) once
+ * per redo record, in the WAL payload format wal_scan delivers.
+ */
+typedef void (*wal_emit_fn)(void *emit_ctx, const void *payload, uint32_t len);
+int  wal_checkpoint(wal_t *w, const char *path, uint64_t clock,
+         void (*dump)(wal_emit_fn emit, void *emit_ctx, void *user),
+         void *user);
+
 /* Ask the writer to flush any pending batch and exit.  Call once all
  * committers are done so the loop can drain. */
 int  wal_writer_stop(wal_t *w);

@@ -746,13 +746,22 @@ separate commits.
    ordered-scan verification), test_server_storage's crash cycle
    (engine-level abandon + rebuild), test_wal_recover, test_persist.
 
-6. **ARIES log bounding (M_SQLXTC_WAL.md sec 3).**  REMAINING.  Because
-   the log is not truncated between clean shutdowns it grows with the
-   write history; bounding it for an always-on server needs a
-   crash-coherent checkpoint (so a checkpointed base can be trusted
-   after a crash and the log truncated behind it) or physiological page
-   logging with page LSNs.
+6. **In-WAL checkpoint: bounded log (engine.c, wal.c, xstore.c).**  DONE.
+   The log is the source of truth; recovery rebuilds the tree by
+   replaying it.  To keep it from growing with the write history, the
+   checkpoint lives IN the log: xstore_checkpoint_wal atomically
+   rewrites the log as a CHECKPOINT record (carrying the commit clock)
+   plus a dump of the LIVE row set -- newest committed version per key,
+   superseded versions and tombstones dropped -- via a temp file +
+   fsync + atomic rename (crash-atomic: the old log survives a crash
+   before the rename, the compacted log after).  This bounds the log
+   and replay to the live data, not the history.  A long-running server
+   calls sx_storage_checkpoint periodically at a quiescent point.
+   Tested: test_wal_compact (200 rows x 10 updates churn the log, the
+   checkpoint shrinks it ~10x, recovery from the compacted log + a
+   post-checkpoint tail restores every row).
 
-Steps 1-5 are landed and tested.  The remaining item (6) bounds the log
-for an always-on server -- a crash-coherent checkpoint or physiological
-page logging -- and is a milestone of its own.
+Steps 1-6 are landed and tested.  A fuller ARIES (physiological page
+logging + page LSNs, for an in-place-trusted base and faster cold
+restart of a very large database) is a performance refinement, not a
+correctness gap; see M_SQLXTC_WAL.md sec 3.
