@@ -1819,6 +1819,12 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 		return 0;                     /* malformed: skip */
 	memcpy(&ts, p, 8); p += 8;
 	memcpy(&n, p, 4); p += 4;
+	if (n == 0xFFFFFFFFu) {
+		/* CHECKPOINT record: ts carries the persisted commit clock.
+		 * No entries; just float the recovery clock up to it. */
+		if (ts > r->max_ts) r->max_ts = ts;
+		return 0;
+	}
 	for (i = 0; i < n; i++) {
 		int64_t rowid;
 		uint32_t tableid;
@@ -1852,4 +1858,70 @@ xstore_recover(bt_t *bt, const char *wal_path)
 	if (r.max_ts >= atomic_load_explicit(&g_xclock, memory_order_relaxed))
 		atomic_store_explicit(&g_xclock, r.max_ts + 1, memory_order_relaxed);
 	return rc;
+}
+
+/* Dump the LIVE database state as WAL redo records, in the same payload
+ * format wal_scan delivers to xs_recover_cb -- the body of an in-WAL
+ * checkpoint.  Walks the whole B-tree (table-id 0's catalog rows
+ * included), and for each (tableid, rowid) emits only the NEWEST
+ * version (versions sort newest-first within a key), skipping tombstones
+ * and all superseded versions.  This is the compaction that bounds the
+ * log: regardless of how much churn (updates/deletes) preceded it, the
+ * dump -- and the log it replaces -- is proportional to the live row
+ * count.  Safe only at a quiesced checkpoint (no active transaction
+ * needs an older snapshot).  Original commit timestamps are preserved. */
+static void
+xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
+{
+	bt_t *bt = user;
+	bt_cursor_t *cur = NULL;
+	uint8_t startk[XS_VKLEN];
+	uint32_t last_tid = 0; int64_t last_rid = 0; int have_last = 0;
+
+	enc_vkey(0, INT64_MIN, ~(uint64_t)0, startk);   /* before every key */
+	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
+		return;
+	for (;;) {
+		const void *k = NULL, *vv = NULL;
+		uint16_t klen = 0, vl = 0;
+		const uint8_t *kb;
+		uint8_t rec[12 + 15 + XS_VMAX];
+		uint8_t *p = rec;
+		uint64_t ts;
+		uint32_t n = 1, tableid;
+		int64_t rowid;
+		uint8_t flags;
+		uint16_t payl;
+
+		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
+		    klen != XS_VKLEN)
+			break;
+		kb = (const uint8_t *)k;
+		tableid = dec_tableid(kb); rowid = dec_rowid(kb);
+		if (have_last && tableid == last_tid && rowid == last_rid)
+			continue;                  /* older version of a key already dumped */
+		last_tid = tableid; last_rid = rowid; have_last = 1;
+		flags = (vl >= 1) ? ((const uint8_t *)vv)[0] : 0;
+		if (flags & XS_F_DELETED)
+			continue;                  /* newest is a tombstone: row is gone */
+		ts = dec_ts(kb);
+		payl = (vl >= 1) ? (uint16_t)(vl - 1) : 0;
+		if (payl > XS_VMAX) payl = XS_VMAX;
+		memcpy(p, &ts, 8); p += 8;
+		memcpy(p, &n, 4); p += 4;
+		memcpy(p, &rowid, 8); p += 8;
+		memcpy(p, &tableid, 4); p += 4;
+		*p++ = flags;
+		memcpy(p, &payl, 2); p += 2;
+		if (payl) { memcpy(p, (const uint8_t *)vv + 1, payl); p += payl; }
+		emit(ectx, rec, (uint32_t)(p - rec));
+	}
+	bt_cursor_close(cur);
+}
+
+int
+xstore_checkpoint_wal(bt_t *bt, struct wal *w, const char *wal_path)
+{
+	uint64_t clock = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	return wal_checkpoint((wal_t *)w, wal_path, clock, xs_dump_tree, bt);
 }

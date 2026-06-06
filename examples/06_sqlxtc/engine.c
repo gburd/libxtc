@@ -119,7 +119,6 @@ static bm_t *g_xbm;
 static bt_t *g_xbt;
 static wal_t *g_xwal;
 static char   g_xwal_path[1024];
-static char   g_xclean_path[1024]; /* clean-shutdown marker */
 static int    g_xrunning;        /* background procs spawned */
 
 int
@@ -166,37 +165,25 @@ sx_open(const char *path, sx_db **out)
 	return SQLITE_OK;
 }
 
-/* The clean-shutdown marker, "<data>.clean".  Created (after a coherent
- * checkpoint) ONLY by a clean shutdown, and removed at open.  Present =>
- * the page file is a trustworthy checkpoint base; absent (a crash, or a
- * first open) => the on-disk tree may be structurally torn by partial
- * mid-SMO eviction and must be rebuilt from the log. */
-static void
-clean_marker_path(const char *dpath, char *out, size_t cap)
-{
-	snprintf(out, cap, "%s.clean", dpath);
-}
-
 /*
  * Open (or reopen) the libxtc-native storage engine: the cooling
- * buffer pool, the on-disk B-tree, and its write-ahead log.  If a
- * store already exists at `path` it is reopened from its superblock
- * (the checkpointed tree is the recovery base); otherwise a fresh
- * store is created.  The existing log is then replayed onto that base
- * (redo-only), the result is checkpointed durable, and a fresh log is
- * opened for new commits.  No loop is required, so this may run before
- * the event loop exists (the shared connection handle registers the
- * tree at db_create time).  Call sx_storage_run once the loop is up to
- * start the group-commit writer, page provider, and trickler.
+ * buffer pool, the on-disk B-tree, and its write-ahead log.  The log is
+ * the source of truth: recovery always rebuilds the tree by replaying
+ * the log onto a fresh page file (redo-only -- so a crash that left the
+ * on-disk tree structurally torn by partial mid-SMO eviction is simply
+ * discarded; see test_torn_smo).  The log is kept bounded by the in-WAL
+ * checkpoint (xstore_checkpoint_wal): it compacts the log to a
+ * CHECKPOINT record plus a dump of the live tree, so replay -- and the
+ * log itself -- stay proportional to the live data, not the write
+ * history.  An open re-checkpoints once recovery is done, so the
+ * working page file plus the log are fresh.  No loop is required; call
+ * sx_storage_run once the loop is up for the writer/provider/trickler.
  */
 int
 sx_storage_open(const char *path, unsigned int n_frames)
 {
 	bm_opts_t o = BM_OPTS_DEFAULT;
-	struct stat stbuf;
-	int existing, clean;
 	wal_opts_t wo;
-	char markp[1024];
 	const char *dpath = (path && path[0]) ? path : "sqlxtc.xdb";
 
 	if (g_xbt != NULL)
@@ -206,59 +193,20 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	if (n_frames > 0)
 		o.n_frames = n_frames;
 	o.double_write = 1;   /* torn-page protection for the persistent store */
-	existing = (stat(dpath, &stbuf) == 0 && stbuf.st_size >= (off_t)o.page_size);
+	o.reopen = 0;         /* the page file is a rebuildable cache, not the base */
 
-	/* WAL path + clean-shutdown marker beside the data file. */
 	snprintf(g_xwal_path, sizeof g_xwal_path, "%s-wal", dpath);
-	clean_marker_path(dpath, markp, sizeof markp);
-	snprintf(g_xclean_path, sizeof g_xclean_path, "%s", markp);
-	clean = existing && (access(markp, F_OK) == 0);
 
-	/*
-	 * Recovery model.  A clean shutdown checkpoints the tree durable and
-	 * drops the marker, so on a clean restart the page file is a
-	 * trustworthy base -- reopen it directly, no replay.  Otherwise (a
-	 * crash, or a first open) the on-disk B-tree may be STRUCTURALLY torn
-	 * by partial mid-SMO eviction (a parent page flushed before its split
-	 * child), and logical redo cannot repair a torn structure -- so we
-	 * DISCARD the on-disk tree and rebuild it from scratch by replaying
-	 * the whole log onto a fresh page file (the proven redo-only path;
-	 * see test_torn_smo, test_wal_recover).
-	 *
-	 * The log is the source of truth and is NEVER truncated during the
-	 * engine's life, so a crash can always rebuild the full history.  The
-	 * marker only enables the fast trust-the-base path after a clean
-	 * shutdown; it does not let the log be discarded.  (Compacting the
-	 * log -- bounded recovery via a crash-coherent checkpoint or a
-	 * physical page scan -- is the remaining ARIES work, M_SQLXTC_WAL.md
-	 * sec 3.)
-	 */
-	if (clean) {
-		o.reopen = 1;                 /* trust the checkpointed base */
-		if (bm_create(&o, &g_xbm) != XTC_OK)
-			return SQLITE_ERROR;
-		if (bt_reopen(g_xbm, &g_xbt) != XTC_OK) {
-			/* Base unreadable after all: fall back to a log rebuild. */
-			bm_destroy(g_xbm); g_xbm = NULL;
-			clean = 0;
-		}
+	/* Fresh page file; rebuild the tree from the (bounded) log. */
+	if (bm_create(&o, &g_xbm) != XTC_OK)
+		return SQLITE_ERROR;
+	if (bt_open(g_xbm, &g_xbt) != XTC_OK) {
+		bm_destroy(g_xbm); g_xbm = NULL;
+		return SQLITE_ERROR;
 	}
-	if (!clean) {
-		o.reopen = 0;                 /* fresh / rebuild: drop any torn image */
-		if (bm_create(&o, &g_xbm) != XTC_OK)
-			return SQLITE_ERROR;
-		if (bt_open(g_xbm, &g_xbt) != XTC_OK) {
-			bm_destroy(g_xbm); g_xbm = NULL;
-			return SQLITE_ERROR;
-		}
-		(void)xstore_recover(g_xbt, g_xwal_path);  /* replay full log (no-op if absent) */
-	}
-	/* Now "running": remove the marker so any crash from here rebuilds. */
-	(void)unlink(markp);
-	(void)bm_checkpoint(g_xbm);           /* materialize the tree durable */
+	(void)xstore_recover(g_xbt, g_xwal_path);  /* replay the log (no-op if absent) */
 
-	/* Open the log in APPEND mode: preserve the full history (so a crash
-	 * during this run can rebuild) and resume LSNs. */
+	/* Open the log (append past the records recovery just replayed). */
 	memset(&wo, 0, sizeof wo);
 	wo.path = g_xwal_path;
 	wo.window_ns = 500LL * 1000;       /* 0.5ms group-commit window */
@@ -270,6 +218,9 @@ sx_storage_open(const char *path, unsigned int n_frames)
 		return SQLITE_ERROR;
 	}
 	xstore_set_wal(g_xwal);
+	/* Compact the log now: replace the just-replayed history with a fresh
+	 * checkpoint + live-tree dump, so the log starts this run bounded. */
+	(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path);
 	return SX_OK;
 }
 
@@ -294,21 +245,23 @@ sx_storage_run(xtc_loop_t *loop)
 }
 
 /*
- * Flush all dirty pages durable: a running checkpoint that materializes
- * the tree on the data file.  It does NOT truncate the log -- a running
- * checkpoint cannot make the on-disk tree trustworthy for crash
- * recovery, because subsequent eviction may tear it before the next
- * crash.  The log is truncated only at a clean shutdown (where no
- * further writes follow), which is what makes an empty log mean "the
- * base is trustworthy" on the next open.  Call when commits are
- * quiesced.
+ * Checkpoint: bound the log.  Flushes dirty pages (memory relief) and
+ * then COMPACTS THE LOG IN PLACE via xstore_checkpoint_wal -- a
+ * CHECKPOINT record plus a dump of the live tree atomically replace the
+ * log, so the write history before it is discarded and replay stays
+ * proportional to the live data.  Call when commits are quiesced (the
+ * compaction rewrites and rebinds the log file).
  */
 int
 sx_storage_checkpoint(void)
 {
 	if (g_xbm == NULL)
 		return SX_OK;
-	return bm_checkpoint(g_xbm) == XTC_OK ? SX_OK : SQLITE_ERROR;
+	(void)bm_checkpoint(g_xbm);            /* flush dirty pages (not for durability) */
+	if (g_xwal != NULL &&
+	    xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path) != XTC_OK)
+		return SQLITE_ERROR;
+	return SX_OK;
 }
 
 void
@@ -320,18 +273,11 @@ sx_storage_close(void)
 		bm_provider_stop(g_xbm);
 		g_xrunning = 0;
 	}
-	/* Clean shutdown: flush the tree coherent, then drop the clean
-	 * marker.  Its presence tells the next open the page file is a
-	 * trustworthy base; no writes follow, so the base cannot be torn
-	 * after this point.  The log is NOT truncated -- it remains the full
-	 * durable history for a future crash that occurs before the next
-	 * clean shutdown. */
-	if (g_xbm != NULL) {
-		if (bm_checkpoint(g_xbm) == XTC_OK && g_xclean_path[0] != '\0') {
-			FILE *mf = fopen(g_xclean_path, "w");
-			if (mf != NULL) (void)fclose(mf);
-		}
-	}
+	/* Compact the log on the way out so the next open replays a bounded
+	 * log.  Not required for correctness (recovery rebuilds from whatever
+	 * the log holds), just for a tidy, bounded restart. */
+	if (g_xbt != NULL && g_xwal != NULL)
+		(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path);
 	xstore_set_wal(NULL);
 	if (g_xwal != NULL) { wal_close(g_xwal); g_xwal = NULL; }
 	if (g_xbt != NULL) { bt_close(g_xbt); g_xbt = NULL; }
@@ -356,7 +302,6 @@ sx_storage_abandon(void)
 	if (g_xwal != NULL) { wal_close(g_xwal); g_xwal = NULL; }
 	if (g_xbt != NULL) { bt_close(g_xbt); g_xbt = NULL; }
 	if (g_xbm != NULL) { bm_destroy(g_xbm); g_xbm = NULL; }
-	g_xclean_path[0] = '\0';
 }
 
 int
