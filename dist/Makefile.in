@@ -50,6 +50,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/os/os_mutex.c \
 	$(srcdir)/../src/os/os_cpu.c \
 	$(srcdir)/../src/os/os_backtrace.c \
+	$(srcdir)/../src/os/os_file.c \
 	$(srcdir)/../src/io/io_common.c \
 	$(srcdir)/../src/io/io_net.c \
 	$(srcdir)/../src/io/io_poll.c \
@@ -105,6 +106,7 @@ LIB_OBJS	= \
 	os_mutex.o \
 	os_cpu.o \
 	os_backtrace.o \
+	os_file.o \
 	io_common.o \
 	io_net.o \
 	io_poll.o \
@@ -186,7 +188,7 @@ TESTS_SH	= \
 
 TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
-		  test_thread test_tls test_mutex \
+		  test_thread test_tls test_mutex test_fs \
 		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_net test_net_udp test_net_frame \
 		  test_loop test_task test_waker test_timer test_io_integration \
 		  test_async \
@@ -347,6 +349,9 @@ os_cpu.o: $(srcdir)/../src/os/os_cpu.c xtc_config.h
 
 os_backtrace.o: $(srcdir)/../src/os/os_backtrace.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_backtrace.c
+
+os_file.o: $(srcdir)/../src/os/os_file.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_file.c
 
 res.o: $(srcdir)/../src/ptc/res.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/res.c
@@ -537,6 +542,12 @@ test_time: $(srcdir)/../test/m1/test_time.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
 		-o $@ $(srcdir)/../test/m1/test_time.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_fs: $(srcdir)/../test/m1/test_fs.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_fs.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_thread: $(srcdir)/../test/m1/test_thread.c \
