@@ -67,6 +67,7 @@ int  sx_storage_run(struct xtc_loop *loop);
 /* Flush all dirty pages durable (a running checkpoint).  Does not
  * truncate the log -- see engine.c. */
 int  sx_storage_checkpoint(void);
+void sx_storage_quiesce(void);
 void sx_storage_close(void);
 /* Drop all in-memory engine state WITHOUT a checkpoint or clean marker,
  * simulating a crash (dirty pages lost, the log left intact and
