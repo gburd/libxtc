@@ -39,6 +39,13 @@
  *	                 state dump (a run of XL_UPDATE records) follows
  *	                 it in the compacted log.
  *	  XL_END         a loser's undo is complete (header only).
+ *	  XL_PAGE        a full-page after-image: physiological redo for a
+ *	                 structural change (a B-tree split/merge) that spans
+ *	                 several pages.  Redo-only and idempotent -- the page
+ *	                 LSN lives at the front of the image, so recovery
+ *	                 writes the image only onto a page whose on-disk LSN
+ *	                 is older.  This is what lets recovery repair a torn
+ *	                 page file in place instead of rebuilding it.
  *
  *	Field order within a record is fixed and host-endian (the log is
  *	a single-host artifact, like the page file); all integer reads
@@ -61,7 +68,8 @@ typedef enum xl_type {
 	XL_ABORT      = 4,
 	XL_CLR        = 5,
 	XL_CHECKPOINT = 6,
-	XL_END        = 7
+	XL_END        = 7,
+	XL_PAGE       = 8
 } xl_type_t;
 
 /* Common record header: type:1 + txn_id:8 + prev_lsn:8. */
@@ -106,10 +114,19 @@ int xl_enc_update(uint8_t *buf, size_t cap, const xl_hdr_t *h, const xl_body_t *
 int xl_enc_clr(uint8_t *buf, size_t cap, const xl_hdr_t *h, const xl_body_t *b);
 int xl_enc_checkpoint(uint8_t *buf, size_t cap, uint64_t commit_clock);
 
+/*
+ * Encode a full-page after-image (XL_PAGE): page_id + image bytes.  The
+ * image's leading bytes hold the page LSN, so recovery can gate the redo
+ * by page LSN without a separate field.
+ */
+int xl_enc_page(uint8_t *buf, size_t cap, const xl_hdr_t *h, uint32_t page_id,
+    const void *image, uint16_t image_len);
+
 /* The exact encoded size of an UPDATE/CLR body for a given payload, so
  * a caller can size its buffer (XL_HDR_LEN + this). */
 size_t xl_update_size(uint16_t redo_len, uint16_t undo_len);
 size_t xl_clr_size(uint16_t redo_len);
+size_t xl_page_size(uint16_t image_len);
 
 /*
  * Decoders.  xl_parse_hdr fills *h from the first XL_HDR_LEN bytes and
@@ -123,6 +140,11 @@ int xl_parse_hdr(const void *rec, uint32_t len, xl_hdr_t *h);
 int xl_parse_update(const void *rec, uint32_t len, xl_hdr_t *h, xl_body_t *b);
 int xl_parse_clr(const void *rec, uint32_t len, xl_hdr_t *h, xl_body_t *b);
 int xl_parse_checkpoint(const void *rec, uint32_t len, uint64_t *commit_clock);
+
+/* Parse an XL_PAGE: fills *h, *page_id, and points *image into rec
+ * (valid for the record's lifetime) with its length in *image_len. */
+int xl_parse_page(const void *rec, uint32_t len, xl_hdr_t *h,
+    uint32_t *page_id, const void **image, uint16_t *image_len);
 
 /*
  * Total encoded length of the record at the front of rec, given avail
