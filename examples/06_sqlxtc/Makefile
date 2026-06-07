@@ -149,6 +149,7 @@ clean:
 	rm -f test_xstore test_xstore.o xstore.o
 	rm -f test_xlog test_xlog.o xlog.o
 	rm -f test_recover_undo
+	rm -f test_redo_page
 	rm -f test_parallel test_parallel.o
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o
 	rm -f test_bufmgr_mt
@@ -170,7 +171,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xlog test-recover-undo test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -357,6 +358,13 @@ test_bufmgr: test_bufmgr.c bufmgr.o
 
 test-bufmgr: test_bufmgr
 	./test_bufmgr
+
+# ---- physiological redo apply (page-LSN gated image write) ----
+test_redo_page: test_redo_page.c bufmgr.o
+	$(CC) $(CFLAGS) -o $@ test_redo_page.c bufmgr.o $(LDFLAGS)
+
+test-redo-page: test_redo_page
+	./test_redo_page
 
 bufmgr.o: bufmgr.c bufmgr.h
 

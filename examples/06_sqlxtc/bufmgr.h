@@ -126,6 +126,17 @@ void bm_destroy(bm_t *bm);
 void bm_set_lsn(bm_t *bm, uint64_t lsn);
 void bm_set_wal_flush(bm_t *bm, int (*flush)(void *ctx, uint64_t lsn), void *ctx);
 
+/*
+ * Physiological redo: apply a full-page after-image during recovery.
+ * Fixes page `pid` and, only if its on-disk page LSN is older than the
+ * image's (read at lsn_off), overwrites it and marks it dirty.  Page-LSN
+ * gated, hence idempotent -- replaying the same image, or one already
+ * superseded, is a no-op.  Requires lsn_off >= 0 and image_len ==
+ * page_size.  Returns 1 if applied, 0 if skipped, or a negative XTC_E_*.
+ */
+int bm_apply_page_image(bm_t *bm, bm_pid_t pid, const void *image,
+    uint32_t image_len);
+
 /* Allocate a fresh page.  Installs a HOT swip into *slot and returns
  * the (pinned) frame; the caller fills frame's page and bm_unfix.
  * *out_pid receives the new page id. */
