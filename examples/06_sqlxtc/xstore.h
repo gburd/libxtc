@@ -49,4 +49,7 @@ int xstore_checkpoint_wal(bt_t *bt, struct wal *w, const char *wal_path);
 uint64_t xstore_clock(void);
 void xstore_set_clock(uint64_t v);
 
+/* Number of CLRs written during recovery undo passes (test/metric). */
+uint64_t xstore_undo_clrs(void);
+
 #endif /* SQLXTC_XSTORE_H */
