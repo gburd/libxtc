@@ -174,18 +174,22 @@ sx_wal_flush_cb(void *ctx, uint64_t lsn)
 }
 
 /*
- * Open (or reopen) the libxtc-native storage engine: the cooling
- * buffer pool, the on-disk B-tree, and its write-ahead log.  The log is
- * the source of truth: recovery always rebuilds the tree by replaying
- * the log onto a fresh page file (redo-only -- so a crash that left the
- * on-disk tree structurally torn by partial mid-SMO eviction is simply
- * discarded; see test_torn_smo).  The log is kept bounded by the in-WAL
- * checkpoint (xstore_checkpoint_wal): it compacts the log to a
- * CHECKPOINT record plus a dump of the live tree, so replay -- and the
- * log itself -- stay proportional to the live data, not the write
- * history.  An open re-checkpoints once recovery is done, so the
- * working page file plus the log are fresh.  No loop is required; call
- * sx_storage_run once the loop is up for the writer/provider/trickler.
+ * Open (or reopen) the libxtc-native storage engine.  Two paths:
+ *
+ *   Clean restart (fast): if the base was cleanly shut down (its
+ *   superblock clean flag is set), trust it -- reopen the page file in
+ *   place, restore the commit clock from the superblock, and skip
+ *   recovery entirely.  This is the ARIES clean-restart case (no
+ *   losers, nothing to redo).  The flag is cleared and fsync'd before
+ *   any work, so a crash from here on falls back to a rebuild.
+ *
+ *   Crash recovery (rebuild): otherwise the base may be structurally
+ *   torn by partial mid-SMO eviction, so it is discarded and the tree
+ *   is rebuilt by replaying the (bounded) log onto a fresh page file --
+ *   the redo-only path proven by test_torn_smo.  An open then
+ *   re-checkpoints so the working page file plus the log are fresh.
+ *
+ * No loop is required; call sx_storage_run once the loop is up.
  */
 int
 sx_storage_open(const char *path, unsigned int n_frames)
@@ -193,6 +197,8 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	bm_opts_t o = BM_OPTS_DEFAULT;
 	wal_opts_t wo;
 	const char *dpath = (path && path[0]) ? path : "sqlxtc.xdb";
+	uint64_t clean = 0, clock = 0;
+	int trusted = 0;
 
 	if (g_xbt != NULL)
 		return SX_OK;                 /* already open */
@@ -201,21 +207,40 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	if (n_frames > 0)
 		o.n_frames = n_frames;
 	o.double_write = 1;   /* torn-page protection for the persistent store */
-	o.reopen = 0;         /* the page file is a rebuildable cache, not the base */
 	o.lsn_off = 0;        /* ARIES page LSN: first field of every btnode */
 
 	snprintf(g_xwal_path, sizeof g_xwal_path, "%s-wal", dpath);
 
-	/* Fresh page file; rebuild the tree from the (bounded) log. */
-	if (bm_create(&o, &g_xbm) != XTC_OK)
-		return SQLITE_ERROR;
-	if (bt_open(g_xbm, &g_xbt) != XTC_OK) {
-		bm_destroy(g_xbm); g_xbm = NULL;
-		return SQLITE_ERROR;
+	/* Try to trust a cleanly-shut-down base. */
+	o.reopen = 1;
+	if (bm_create(&o, &g_xbm) == XTC_OK) {
+		if (bt_reopen(g_xbm, &g_xbt) == XTC_OK) {
+			bt_get_meta(g_xbt, &clean, &clock);
+			if (clean == 1)
+				trusted = 1;
+			else { bt_close(g_xbt); g_xbt = NULL; }  /* torn base */
+		}
+		if (!trusted) { bm_destroy(g_xbm); g_xbm = NULL; }
 	}
-	(void)xstore_recover(g_xbt, g_xwal_path);  /* replay the log (no-op if absent) */
 
-	/* Open the log (append past the records recovery just replayed). */
+	if (trusted) {
+		xstore_set_clock(clock);          /* restore the commit clock */
+		bt_set_meta(g_xbt, 0, clock);     /* mark dirty: a crash now rebuilds */
+		bt_write_super(g_xbt);
+		(void)bm_sync(g_xbm);
+	} else {
+		/* Fresh page file; rebuild the tree from the (bounded) log. */
+		o.reopen = 0;
+		if (bm_create(&o, &g_xbm) != XTC_OK)
+			return SQLITE_ERROR;
+		if (bt_open(g_xbm, &g_xbt) != XTC_OK) {
+			bm_destroy(g_xbm); g_xbm = NULL;
+			return SQLITE_ERROR;
+		}
+		(void)xstore_recover(g_xbt, g_xwal_path);  /* replay the log */
+	}
+
+	/* Open the log (append past whatever is there). */
 	memset(&wo, 0, sizeof wo);
 	wo.path = g_xwal_path;
 	wo.window_ns = 500LL * 1000;       /* 0.5ms group-commit window */
@@ -230,9 +255,11 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	/* Write-ahead enforcement: before the buffer manager writes a dirty
 	 * page it flushes the log through that page's LSN via this hook. */
 	bm_set_wal_flush(g_xbm, sx_wal_flush_cb, g_xwal);
-	/* Compact the log now: replace the just-replayed history with a fresh
-	 * checkpoint + live-tree dump, so the log starts this run bounded. */
-	(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path);
+	/* On a rebuild, compact the log so this run starts bounded; on a
+	 * trusted reopen the log is already the compacted log from the clean
+	 * shutdown, so leave it. */
+	if (!trusted)
+		(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path);
 	return SX_OK;
 }
 
@@ -285,13 +312,28 @@ sx_storage_close(void)
 		bm_provider_stop(g_xbm);
 		g_xrunning = 0;
 	}
-	/* Compact the log on the way out so the next open replays a bounded
-	 * log.  Not required for correctness (recovery rebuilds from whatever
-	 * the log holds), just for a tidy, bounded restart. */
-	if (g_xbt != NULL && g_xwal != NULL)
-		(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path);
+	/*
+	 * Clean shutdown.  Flush the base durable while the log is still
+	 * open (the write-ahead hook reads it), compact the log so a future
+	 * crash replays a bounded log, then mark the base clean and fsync
+	 * the marker so the next open can trust the base and skip recovery.
+	 * A crash anywhere before the clean marker is durable leaves the
+	 * flag unset, so recovery rebuilds -- always safe.
+	 */
+	if (g_xbt != NULL && g_xbm != NULL) {
+		(void)bm_checkpoint(g_xbm);        /* flush all dirty pages + fsync */
+		if (g_xwal != NULL)
+			(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
+			    g_xwal_path);
+		bm_set_wal_flush(g_xbm, NULL, NULL);   /* drop the hook before closing the log */
+	}
 	xstore_set_wal(NULL);
 	if (g_xwal != NULL) { wal_close(g_xwal); g_xwal = NULL; }
+	if (g_xbt != NULL && g_xbm != NULL) {
+		bt_set_meta(g_xbt, 1, xstore_clock());  /* base is consistent up to here */
+		bt_write_super(g_xbt);
+		(void)bm_sync(g_xbm);              /* make the clean marker durable */
+	}
 	if (g_xbt != NULL) { bt_close(g_xbt); g_xbt = NULL; }
 	if (g_xbm != NULL) { bm_destroy(g_xbm); g_xbm = NULL; }
 }
