@@ -21,7 +21,7 @@ REPS=${REPS:-3}
 [ -f "$EX/sqlite3.o" ] || make -C "$EX" XTC_BUILD="$XTC_BUILD" sqlite3.o >&2
 
 gcc -O2 -g -std=c11 -D_GNU_SOURCE -include "$EX/xsql.h" -I"$EX" -I../../src/inc \
-    engine_ab.c "$EX/xstore.c" "$EX/btree.c" "$EX/btnode.c" "$EX/bufmgr.c" \
+    engine_ab.c "$EX/xstore.c" "$EX/xlog.c" "$EX/wal.c" "$EX/btree.c" "$EX/btnode.c" "$EX/bufmgr.c" \
     "$EX/sqlite3.o" "$XTC_BUILD/libxtc.a" -pthread -ldl -lm -luring \
     -o engine_ab >&2
 
