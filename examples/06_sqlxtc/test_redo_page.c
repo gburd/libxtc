@@ -89,6 +89,43 @@ main(void)
 	CK(bm_apply_page_image(bm, 5, img, PAGE_SZ - 1) == XTC_E_INVAL);
 
 	bm_destroy(bm);
+
+	/* ---- recLSN horizon: oldest dirty page's first-dirty LSN ---- */
+	{
+		bm_opts_t b2 = BM_OPTS_DEFAULT;
+		bm_t *bm2 = NULL;
+		bm_frame_t *f;
+		char p2[256];
+		int fd2;
+
+		t_tmpl(p2, sizeof p2, "reclsn-bt");
+		if ((fd2 = mkstemp(p2)) >= 0) close(fd2);
+		b2.path = p2; b2.page_size = PAGE_SZ; b2.n_frames = 8; b2.lsn_off = 0;
+		CK(bm_create(&b2, &bm2) == XTC_OK);
+
+		CK(bm_min_rec_lsn(bm2) == 0);          /* nothing dirty yet */
+		bm_set_lsn(bm2, 10);
+		CK(bm_fix_pid(bm2, 1, &f) == XTC_OK);
+		bm_latch_exclusive(f); ((uint8_t *)bm_page(f))[64] = 1;
+		bm_unlatch(f); bm_unfix(bm2, f, 1);
+		bm_set_lsn(bm2, 20);
+		CK(bm_fix_pid(bm2, 2, &f) == XTC_OK);
+		bm_latch_exclusive(f); ((uint8_t *)bm_page(f))[64] = 1;
+		bm_unlatch(f); bm_unfix(bm2, f, 1);
+		CK(bm_min_rec_lsn(bm2) == 10);         /* oldest dirty page */
+		/* re-dirtying page 1 at a later LSN does not move its recLSN */
+		bm_set_lsn(bm2, 30);
+		CK(bm_fix_pid(bm2, 1, &f) == XTC_OK);
+		bm_latch_exclusive(f); ((uint8_t *)bm_page(f))[65] = 1;
+		bm_unlatch(f); bm_unfix(bm2, f, 1);
+		CK(bm_min_rec_lsn(bm2) == 10);         /* still page 1's first-dirty LSN */
+		CK(bm_checkpoint(bm2) == XTC_OK);      /* flush all: no dirty pages */
+		CK(bm_min_rec_lsn(bm2) == 0);
+		bm_destroy(bm2);
+		unlink(p2);
+		{ char s[280]; snprintf(s, sizeof s, "%s.dwb", p2); unlink(s); }
+	}
+
 	unlink(path);
 	{ char s[280]; snprintf(s, sizeof s, "%s.dwb", path); unlink(s); }
 
