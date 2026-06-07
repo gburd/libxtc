@@ -4,8 +4,7 @@
  *
  * src/inc/xtc_mctx.h
  *	Memory contexts: hierarchical allocation pools with parent-
- *	tracked lifetime and bulk reset/destroy.  Inspired by
- *	PostgreSQL's MemoryContext and libumem's allocation domains.
+ *	tracked lifetime and bulk reset/destroy.
  *
  *	A context owns:
  *	  - all allocations made within it (chained on a free list);

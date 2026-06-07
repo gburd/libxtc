@@ -4,8 +4,7 @@
  *
  * src/inc/xtc_lrlock.h
  *	Left-Right concurrency primitive: wait-free reads, single-writer
- *	with cooperative replay.  Ported from PostgreSQL's lrlck branch
- *	(src/backend/storage/lmgr/lrlock.c) -- see Pedro Ramalhete &
+ *	with cooperative replay -- see Pedro Ramalhete &
  *	Andreia Correia, "Left-Right: A Concurrency Control Technique
  *	with Wait-Free Population Oblivious Reads" (2014).
  *

@@ -22,7 +22,7 @@
  *	  - file descriptor (preopened by caller)
  *	  - custom callback (user-supplied function)
  *
- *	Levels follow Postgres / syslog: TRACE < DEBUG < INFO < WARN
+ *	Levels follow the usual syslog ordering: TRACE < DEBUG < INFO < WARN
  *	< ERROR < FATAL.  At configure-time the floor is set; calls
  *	below the floor are eliminated by the macro to a no-op.
  */

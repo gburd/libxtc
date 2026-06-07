@@ -11,7 +11,7 @@
  *	The design follows leanstore's BTreeNode (prefix derived from
  *	the fence keys, per-slot 4-byte "head" for fast ordering, key
  *	suffixes + values packed from the back of the page) and the
- *	classic slotted page of the threadskv B-tree (slot array grows
+ *	classic slotted page (slot array grows
  *	from the front, cells from the back).
  */
 
