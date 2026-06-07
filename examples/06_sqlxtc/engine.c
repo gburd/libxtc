@@ -303,6 +303,25 @@ sx_storage_checkpoint(void)
 	return SX_OK;
 }
 
+/*
+ * Stop the background storage procs (WAL writer, page provider,
+ * trickler) without tearing down the engine, so an executor running
+ * them can go idle and xtc_exec_run can return -- after which the
+ * caller does sx_storage_close off the loop.  Idempotent.  Safe to
+ * call from a proc once all committers are done (no commit may follow,
+ * since the group-commit writer is stopped).
+ */
+void
+sx_storage_quiesce(void)
+{
+	if (!g_xrunning)
+		return;
+	if (g_xwal != NULL) wal_writer_stop(g_xwal);
+	bm_trickler_stop(g_xbm);
+	bm_provider_stop(g_xbm);
+	g_xrunning = 0;
+}
+
 void
 sx_storage_close(void)
 {

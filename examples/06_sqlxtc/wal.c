@@ -91,14 +91,6 @@ struct wal {
 	uint64_t s_maxbatch;
 };
 
-static int64_t
-now_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
-
 /* Scan an open log fd to its end: *off_out := offset just past the last
  * COMPLETE record (a torn tail is excluded), *maxlsn_out := highest LSN
  * seen.  Used to resume appending to an existing log. */
@@ -265,7 +257,6 @@ wal_writer_proc(void *arg)
 		void *m = NULL;
 		size_t n = 0;
 		struct wal_msg *msg;
-		int64_t deadline;
 		int stop = 0;
 
 		/* Block for the first record of a batch. */
@@ -279,15 +270,21 @@ wal_writer_proc(void *arg)
 		(void)batch_add(w, msg->data, msg->len, msg->reply_to, msg->txn_id);
 		free(m);
 
-		/* Gather more until the window closes or the cap is hit. */
-		deadline = now_ns() + w->window_ns;
+		/*
+		 * Pipelined group commit: drain everything already queued
+		 * (non-blocking) and flush it at once -- no fixed gather window.
+		 * batch_flush parks the writer on the fsync, so commits that
+		 * arrive while that fsync is in flight queue in the mailbox and
+		 * form the next batch.  The batch size therefore self-tunes to
+		 * the fsync latency x arrival rate: a lone committer pays just
+		 * one fsync (no added window latency -- which on fast storage
+		 * would otherwise make group commit lose to a direct synchronous
+		 * commit), while under load many commits coalesce per fsync.
+		 */
 		while (w->pcount < w->max_batch) {
-			int64_t rem = deadline - now_ns();
-			if (rem <= 0)
-				break;
 			m = NULL; n = 0;
-			if (xtc_recv(&m, &n, rem) != XTC_OK || m == NULL)
-				break;               /* timeout: close the batch */
+			if (xtc_recv(&m, &n, 0) != XTC_OK || m == NULL)
+				break;               /* nothing more queued right now */
 			msg = m;
 			if (msg->kind == WAL_KIND_STOP) {
 				stop = 1;
