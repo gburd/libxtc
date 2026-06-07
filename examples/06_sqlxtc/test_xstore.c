@@ -143,7 +143,7 @@ scenario_offloop(void)
 	CK(bt_open(bm, &bt) == XTC_OK);
 	rc = run_sql(bt, "off-loop", bm);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	return rc;
 }
 
@@ -182,7 +182,7 @@ scenario_onloop(void)
 	CK(xtc_loop_run(loop) == XTC_OK);
 	CK(xtc_loop_fini(loop) == XTC_OK);
 	bt_close(g_bt); bm_destroy(g_bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	return g_loop_rc || g_fail;
 }
 
@@ -280,7 +280,7 @@ scenario_mvcc(void)
 
 	xsql_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   MVCC snapshot visibility: an AS-OF read at an old "
 	    "snapshot sees the pre-update value; latest sees the new one; "
@@ -352,7 +352,7 @@ scenario_txn(void)
 
 	xsql_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   atomic multi-row transaction: two rows commit at one "
 	    "timestamp (read-your-writes inside the txn); no snapshot sees a "
@@ -429,7 +429,7 @@ scenario_serializable(void)
 
 	xsql_close(d1); xsql_close(d2);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   serializable isolation: write-skew commits under SI "
 	    "(anomaly), but serializable validation aborts the second txn "
@@ -491,7 +491,7 @@ scenario_ssi_gain(void)
 
 	xsql_close(dr); xsql_close(dw);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   SSI lets a read-mostly txn commit (outgoing rw-edge "
 	    "only): precision validation would abort it, pivot detection "
@@ -564,7 +564,7 @@ scenario_gc(void)
 
 	xsql_close(d1); xsql_close(d2);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   version GC: reclaimed %d dead versions (kept 1/row), "
 	    "data intact, idempotent; a held snapshot pinned its version "
@@ -641,7 +641,7 @@ scenario_autovacuum(void)
 
 	xsql_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   inline autovacuum: %d versions churned per row pruned "
 	    "on the write path (no full scan); final vacuum reclaimed only "
@@ -730,7 +730,7 @@ scenario_ssi_range(void)
 
 	xsql_close(d1); xsql_close(d2);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   SSI range locking: disjoint range scans + out-of-range "
 	    "writes both commit; cross write-skew across ranges aborts one\n");
@@ -781,7 +781,7 @@ scenario_o1_sql(void)
 
 	xsql_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   O(1) SQL scan: %d rows, %llu btree descents (not %d), "
 	    "%llu cursor resumes\n", NROW,
@@ -866,7 +866,7 @@ scenario_multicol(void)
 
 	xsql_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   multi-column rowstore: int/real/text/blob/null round-trip\n");
 	return 0;
@@ -934,7 +934,7 @@ scenario_multitable(void)
 
 	xsql_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   multi-table: two tables in one B-tree, isolated by"
 	    " table-id, cross-table atomic commit + rollback\n");
@@ -978,7 +978,7 @@ scenario_rename(void)
 
 	xsql_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   ALTER TABLE RENAME: data survives via the persisted"
 	    " catalog override; new name reads + writes, old name is gone\n");
@@ -1030,7 +1030,7 @@ scenario_catalog(void)
 
 	xsql_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 	if (g_fail) return 1;
 	printf("  ok   catalog: %d tables coexist with distinct allocated"
 	    " table-ids; identical rowids stay isolated (no hash collision)\n",

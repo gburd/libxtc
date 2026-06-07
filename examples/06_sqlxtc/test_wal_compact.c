@@ -99,7 +99,7 @@ main(void)
 	wal_opts_t wo = { 0 };
 	char btp[256]; t_tmpl(btp, sizeof btp, "sqlxtc-cmp");
 	char logp[256]; t_tmpl(logp, sizeof logp, "sqlxtc-cmp-log");
-	char dwp[80], b[32], want[32];
+	char dwp[288], b[32], want[32];
 	off_t w_churn, w_compact;
 	int fd, i, u, miss = 0;
 
