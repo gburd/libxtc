@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_proc.h
- *	BEAM-style processes with mailboxes, selective receive,
+ *	Lightweight processes with mailboxes, selective receive,
  *	links, monitors, and explicit exit.  M8 ships the core; the
  *	`xtc_orc` supervisor (M10) sits on top of these primitives.
  *
@@ -135,7 +135,7 @@ xtc_pid_t xtc_self(void);
  * BACKPRESSURE CONTRACT -- read this.  Mailboxes are bounded (the
  * cap is xtc_proc_opts_t.mailbox_cap, default 4096).  This is
  * deliberate: an unbounded mailbox is how an actor system OOMs when
- * a fast sender outruns a slow receiver (the classic BEAM failure).
+ * a fast sender outruns a slow receiver (the classic unbounded-mailbox failure).
  * The price is that send can fail with XTC_E_AGAIN when the target
  * is full, and a dropped XTC_E_AGAIN is a SILENT MESSAGE LOSS.
  *
@@ -323,9 +323,9 @@ int       __xtc_recovery_result(void);
  *
  * IMPORTANT: containment only unwinds the fiber's CALL STACK.  Any
  * resources the proc held at fault time -- locks, fds, allocations,
- * buffer pins -- are the recovery block's responsibility to release,
- * exactly as a PostgreSQL backend's sigsetjmp handler aborts the
- * transaction and releases LWLocks.  Hold those under an xtc_mctx you
+ * buffer pins -- are the recovery block's responsibility to release:
+ * abort any in-progress transaction and release every held lock and
+ * resource before returning.  Hold those under an xtc_mctx you
  * can reset, and release lock-manager locks with the lock manager's
  * release-all; otherwise a contained fault leaks or, worse, leaves a
  * lock held and wedges peers.

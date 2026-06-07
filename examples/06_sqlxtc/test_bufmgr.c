@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/test_bufmgr.c
- *	In-process test of the LeanStore-style buffer manager.  A worker
+ *	In-process test of the cooling buffer manager.  A worker
  *	process allocates far more pages than the resident pool holds --
  *	forcing the swizzle -> cool -> write-out -> evict cycle -- while
  *	the page-provider process concurrently cools and flushes.  Every

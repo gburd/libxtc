@@ -31,8 +31,8 @@
  *	    process-local pointers.
  *	  SHARED_MEMORY -- chunks carved from a single user-supplied
  *	    region (mmap MAP_SHARED of a tmpfs/posix-shm fd).  Object
- *	    handles are offsets (xtc_slab_off_t -- BDB's roff_t
- *	    equivalent) so a peer process mapping the same fd at a
+ *	    handles are offsets (xtc_slab_off_t, a base-relative
+ *	    offset) so a peer process mapping the same fd at a
  *	    different VA can resolve them.  Use xtc_slab_resolve() and
  *	    xtc_slab_offset() to convert.
  *
@@ -84,7 +84,7 @@
 
 typedef struct xtc_slab xtc_slab_t;
 
-/* Offset handle for shared-memory caches (BDB roff_t analogue). */
+/* Offset handle for shared-memory caches (a base-relative offset). */
 typedef int64_t xtc_slab_off_t;
 #define XTC_SLAB_OFF_NONE  ((xtc_slab_off_t)-1)
 

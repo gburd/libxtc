@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/ptc/lock_mgr.c
- *	BDB-parity lock manager with 9-mode RIW lattice, configurable
+ *	Lock manager with a 9-mode RIW intent lattice, configurable
  *	conflict matrix, 8 victim policies, lock-vec compound ops,
  *	upgrade/downgrade primitives, per-locker timeouts, statistics,
  *	failchk, and a slab pool for entry allocation.

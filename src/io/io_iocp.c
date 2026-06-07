@@ -9,7 +9,7 @@
  *	completion (PostQueuedCompletionStatus); user-fd registration
  *	uses WSAEventSelect in conjunction with WaitForMultipleObjects
  *	for readiness emulation.  Round 2 will swap the readiness
- *	emulation for AFD/NtDeviceIoControlFile (libuv-style) for full
+ *	emulation for AFD/NtDeviceIoControlFile for full
  *	performance on connected sockets.
  *
  *	File AIO (xtc_io_aio_submit) IS native here: a pread/pwrite is an

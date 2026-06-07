@@ -12,8 +12,7 @@
  *	not pollable), getaddrinfo, third-party libraries.  xtc_blocking
  *	runs such a call on a dedicated pool thread and parks the
  *	calling process until it finishes, so the loop keeps running
- *	other work meanwhile.  This is the same division of labour the
- *	BEAM (dirty schedulers) and Tokio / libuv (blocking pool) use.
+ *	other work meanwhile.
  *
  *	The wakeup reuses the runtime's existing machinery: the pool
  *	thread signals completion on a pipe the calling process waits on

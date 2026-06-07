@@ -4,13 +4,11 @@
  *
  * src/inc/xtc_lockmgr.h
  *	Heavyweight lock manager: per-object queue locks with
- *	deadlock detection.  Models Berkeley DB's lock manager
- *	(~/ws/libdb/src/lock/) at full 9-mode parity.
+ *	deadlock detection and a 9-mode intent (RIW) lattice.
  *
- *	Modes follow BDB's RIW lattice (the default for transactional
- *	access).  The conflict matrix is configurable at create-time so
- *	callers can supply their own (e.g. a 5-mode subset, or the BDB
- *	"CDB" 5-mode for concurrent data store, or the PG 8-mode set).
+ *	The conflict matrix is configurable at create-time so
+ *	callers can supply their own (e.g. a 5-mode subset, a 5-mode
+ *	concurrent-data-store set, or an 8-mode set).
  *
  *	Default 9x9 conflict matrix (1 = conflict, 0 = compatible),
  *	verbatim from libdb's `db_riw_conflicts`:
@@ -40,7 +38,7 @@
  *
  *	Deadlock detection runs periodically by default; callers can
  *	also force a check or configure on-every-conflict mode.  Six
- *	victim policies match BDB.
+ *	victim-selection policies are configurable.
  */
 
 #ifndef XTC_LOCKMGR_H
@@ -58,17 +56,17 @@ typedef enum xtc_lock_mode {
 	XTC_LOCK_NL   = 0,   /* not granted / no lock */
 	XTC_LOCK_S    = 1,   /* shared / read */
 	XTC_LOCK_X    = 2,   /* exclusive / write */
-	XTC_LOCK_WAIT = 3,   /* wait placeholder (BDB's WT) */
-	XTC_LOCK_IX   = 4,   /* intent exclusive (BDB's IW) */
-	XTC_LOCK_IS   = 5,   /* intent shared (BDB's IR) */
-	XTC_LOCK_IWR  = 6,   /* intent read+write (BDB's RIW) */
-	XTC_LOCK_RU   = 7,   /* read-uncommitted / degree-1 (BDB's DR) */
+	XTC_LOCK_WAIT = 3,   /* wait placeholder */
+	XTC_LOCK_IX   = 4,   /* intent exclusive */
+	XTC_LOCK_IS   = 5,   /* intent shared */
+	XTC_LOCK_IWR  = 6,   /* intent read+write */
+	XTC_LOCK_RU   = 7,   /* read-uncommitted / degree-1 */
 	XTC_LOCK_WW   = 8,   /* was-written downgrade state */
 	XTC_LOCK_NMODES = 9
 } xtc_lock_mode_t;
 
 typedef enum xtc_lock_victim_policy {
-	XTC_LOCK_VICTIM_DEFAULT   = 0,    /* alias for RANDOM (BDB default) */
+	XTC_LOCK_VICTIM_DEFAULT   = 0,    /* alias for RANDOM (the default) */
 	XTC_LOCK_VICTIM_RANDOM    = 1,
 	XTC_LOCK_VICTIM_OLDEST    = 2,
 	XTC_LOCK_VICTIM_YOUNGEST  = 3,
@@ -126,7 +124,7 @@ typedef struct xtc_lockmgr_opts {
 	.n_modes            = 0 \
 }
 
-/* Lock-vec compound op kinds.  Mirrors BDB's lockreq_t. */
+/* Lock-vec compound op kinds. */
 typedef enum xtc_lock_op {
 	XTC_LOCK_OP_GET     = 0,
 	XTC_LOCK_OP_PUT     = 1,
@@ -211,8 +209,8 @@ int  xtc_lock_downgrade(xtc_lockmgr_t *mgr, xtc_locker_t locker,
                         xtc_lock_mode_t new_mode);
 
 /* Atomic compound: all ops are validated, then executed.  If any
- * GET would block in the middle, the prior GETs are NOT rolled back
- * (matching BDB's behaviour); set timeout_ns=0 in every req for
+ * GET would block in the middle, the prior GETs are NOT rolled back;
+ * set timeout_ns=0 in every req for
  * fully-atomic semantics.  *out_executed receives the number of
  * ops that succeeded. */
 int  xtc_lock_vec(xtc_lockmgr_t *mgr, xtc_locker_t locker,

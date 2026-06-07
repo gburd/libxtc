@@ -3,8 +3,8 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_cfg.h
- *	Typed runtime-configurable settings registry -- the xtc
- *	equivalent of PostgreSQL's GUC framework.  Each variable has:
+ *	Typed runtime-configurable settings registry -- named, typed,
+ *	bounds-checked tunables resolved at run time.  Each variable has:
  *	  - a name (string key)
  *	  - a type (int, int64, double, bool, string, enum)
  *	  - a default value
