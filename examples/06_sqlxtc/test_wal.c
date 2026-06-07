@@ -36,6 +36,7 @@
 #include "xtc_loop.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
+#include "t_tmp.h"
 
 #define N_COMMITTERS  16
 #define PER_COMMITTER 64
@@ -93,7 +94,7 @@ replay_check(const char *path)
 static int
 run_one(int n_loops, const char *tag)
 {
-	char path[] = "/tmp/sqlxtc-wal-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-wal");
 	wal_opts_t wo = { 0 };
 	wal_stats_t st;
 	int fd, replayed;

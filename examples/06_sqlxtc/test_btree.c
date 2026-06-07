@@ -32,6 +32,7 @@
 #include "btree.h"
 #include "bufmgr.h"
 #include "xtc.h"
+#include "t_tmp.h"
 
 static int g_checks;
 
@@ -112,7 +113,7 @@ make_bm(char *path_out, uint32_t page_size, uint32_t n_frames)
 	bm_t *bm = NULL;
 	int fd;
 
-	strcpy(path_out, "/tmp/sqlxtc-btree-XXXXXX");
+	t_tmpl(path_out, 64, "sqlxtc-btree");   /* callers pass char[64] */
 	fd = mkstemp(path_out);
 	CHECK(fd >= 0, "mkstemp");
 	(void)close(fd);

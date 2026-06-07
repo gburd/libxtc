@@ -22,6 +22,7 @@
 #include "btree.h"
 #include "wal.h"
 #include "xtc.h"
+#include "t_tmp.h"
 
 #define PAGE_SZ  4096
 #define N_KEYS   3000      /* > pool: forces paging, multi-level tree, splits */
@@ -33,7 +34,7 @@ static int g_fail;
 static int
 scenario_reopen(void)
 {
-	char path[] = "/tmp/sqlxtc-persist-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-persist");
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
@@ -103,7 +104,7 @@ count_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 static int
 scenario_wal_truncate(void)
 {
-	char path[] = "/tmp/sqlxtc-persist-wal-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-persist-wal");
 	wal_opts_t wo = { 0 };
 	wal_t *w = NULL;
 	int fd, i;
@@ -141,7 +142,7 @@ scenario_wal_truncate(void)
 static int
 scenario_torn_page(void)
 {
-	char path[] = "/tmp/sqlxtc-torn-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-torn");
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;

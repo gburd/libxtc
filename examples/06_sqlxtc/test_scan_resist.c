@@ -31,6 +31,7 @@
 
 #include "bufmgr.h"
 #include "xtc.h"
+#include "t_tmp.h"
 
 #define PAGE_SZ   4096
 #define N_FRAMES  32
@@ -62,7 +63,7 @@ static uint64_t
 run(int scan_resist)
 {
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-scan-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-scan");
 	bm_t *bm = NULL;
 	bm_frame_t *f;
 	bm_stats_t before, after;

@@ -25,6 +25,7 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "t_tmp.h"
 
 #define N_PAGES   200
 #define N_FRAMES  16
@@ -97,7 +98,7 @@ main(void)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	xtc_pid_t w, pp;
 	bm_stats_t st;
-	char path[] = "/tmp/sqlxtc-bm-test-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-bm-test");
 	int fd;
 
 	fd = mkstemp(path);

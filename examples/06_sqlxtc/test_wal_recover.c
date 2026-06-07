@@ -38,6 +38,7 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "t_tmp.h"
 
 #define N_TXN     40          /* explicit transactions, 2 rows each */
 #define N_AUTO    20          /* autocommit single-row inserts */
@@ -113,9 +114,9 @@ main(void)
 	bm_t *bm1 = NULL, *bm2 = NULL;
 	bt_t *bt2 = NULL;
 	xsql *db2 = NULL;
-	char logp[] = "/tmp/sqlxtc-rec-log-XXXXXX";
-	char btA[]  = "/tmp/sqlxtc-rec-A-XXXXXX";
-	char btB[]  = "/tmp/sqlxtc-rec-B-XXXXXX";
+	char logp[256]; t_tmpl(logp, sizeof logp, "sqlxtc-rec-log");
+	char btA[256]; t_tmpl(btA, sizeof btA, "sqlxtc-rec-A");
+	char btB[256]; t_tmpl(btB, sizeof btB, "sqlxtc-rec-B");
 	char b[32], want[16];
 	int fd, k, found = 0, miss = 0, expected = N_TXN * 2 + N_AUTO + N_T2;
 
