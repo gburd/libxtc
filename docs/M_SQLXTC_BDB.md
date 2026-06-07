@@ -189,7 +189,7 @@ note BDB instead made undo idempotent via page-LSN gating and skipped CLRs
 
 Staged so each step is independently testable and leaves the tree green:
 
-  **S1 -- Page LSNs + WAL enforcement at the buffer manager.**
+  **S1 -- Page LSNs + WAL enforcement at the buffer manager.  DONE.**
   Add `uint64_t page_lsn` to `btnode_hdr`.  Give the WAL a real monotonic
   LSN per record (it has lsn framing already).  In `flush_frame`, before
   writing a dirty page, flush the log up to that page's LSN (BDB
