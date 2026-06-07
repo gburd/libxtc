@@ -935,6 +935,35 @@ bm_set_wal_flush(bm_t *bm, int (*flush)(void *ctx, uint64_t lsn), void *ctx)
 }
 
 int
+bm_apply_page_image(bm_t *bm, bm_pid_t pid, const void *image, uint32_t image_len)
+{
+	bm_frame_t *f;
+	uint64_t on_disk, in_image;
+	int rc;
+
+	if (bm == NULL || image == NULL || bm->lsn_off < 0 ||
+	    image_len != bm->page_size)
+		return XTC_E_INVAL;
+	if ((rc = bm_fix_pid(bm, pid, &f)) != XTC_OK)
+		return rc;
+	bm_latch_exclusive(f);
+	memcpy(&on_disk, (uint8_t *)bm_page(f) + bm->lsn_off, sizeof on_disk);
+	memcpy(&in_image, (const uint8_t *)image + bm->lsn_off, sizeof in_image);
+	if (in_image > on_disk) {
+		memcpy(bm_page(f), image, bm->page_size);   /* redo this page */
+		/* bm_unfix stamps page_lsn = cur_lsn on the clean->dirty edge;
+		 * point it at the image's own LSN so the stamp preserves it. */
+		atomic_store_explicit(&bm->cur_lsn, in_image, memory_order_relaxed);
+		bm_unlatch(f);
+		bm_unfix(bm, f, 1);                          /* dirty: write it back */
+		return 1;
+	}
+	bm_unlatch(f);
+	bm_unfix(bm, f, 0);                                  /* already current */
+	return 0;
+}
+
+int
 bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid)
 {
 	bm_frame_t *f;
