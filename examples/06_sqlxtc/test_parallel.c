@@ -144,7 +144,7 @@ main(void)
 	}
 
 	unlink(path);
-	{ char wal[64], shm[64];
+	{ char wal[288], shm[288];
 	  snprintf(wal, sizeof wal, "%s-wal", path);
 	  snprintf(shm, sizeof shm, "%s-shm", path);
 	  unlink(wal); unlink(shm); }

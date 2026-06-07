@@ -124,4 +124,13 @@ int xl_parse_update(const void *rec, uint32_t len, xl_hdr_t *h, xl_body_t *b);
 int xl_parse_clr(const void *rec, uint32_t len, xl_hdr_t *h, xl_body_t *b);
 int xl_parse_checkpoint(const void *rec, uint32_t len, uint64_t *commit_clock);
 
+/*
+ * Total encoded length of the record at the front of rec, given avail
+ * readable bytes.  Lets a reader walk a buffer holding several records
+ * back to back (one WAL frame can carry a whole transaction's records).
+ * Returns the record length, or a negative XTC_E_* code if avail does
+ * not hold a complete record (a torn tail) or the type is unknown.
+ */
+int xl_record_len(const void *rec, uint32_t avail);
+
 #endif /* SQLXTC_XLOG_H */
