@@ -208,7 +208,7 @@ scenario_torn_page(void)
 		bm_destroy(bm2);
 	}
 	unlink(path);
-	{ char dw[80]; snprintf(dw, sizeof dw, "%s.dwb", path); unlink(dw); }
+	{ char dw[288]; snprintf(dw, sizeof dw, "%s.dwb", path); unlink(dw); }
 	if (g_fail) return 1;
 	printf("  ok   torn-page recovery: a half-written final page was repaired"
 	    " from the double-write ring on reopen; %d keys intact\n", NK);

@@ -96,7 +96,7 @@ main(void)
 	wal_opts_t wo = { 0 };
 	char btp[256]; t_tmpl(btp, sizeof btp, "sqlxtc-tsmo");
 	char logp[256]; t_tmpl(logp, sizeof logp, "sqlxtc-tsmo-log");
-	char dwp[80];
+	char dwp[288];
 	char want[32], got[32];
 	xsql_stmt *st = NULL;
 	int fd, i, miss = 0, scanned = 0, prev = -1, ordered = 1;

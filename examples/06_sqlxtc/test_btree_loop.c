@@ -122,7 +122,7 @@ main(void)
 	bt_close(g_bt);
 	bm_destroy(g_bm);
 	unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 
 	if (atomic_load(&g_result) != 1) {
 		fprintf(stderr, "FAIL: workload result=%d\n", atomic_load(&g_result));
