@@ -137,6 +137,15 @@ void bm_set_wal_flush(bm_t *bm, int (*flush)(void *ctx, uint64_t lsn), void *ctx
 int bm_apply_page_image(bm_t *bm, bm_pid_t pid, const void *image,
     uint32_t image_len);
 
+/*
+ * The smallest recLSN among currently dirty pages -- the oldest change
+ * not yet on the data file.  The log up to (but not including) this LSN
+ * describes only already-written pages and may be truncated.  Returns 0
+ * when no page is dirty (the pool imposes no constraint).  Meaningful
+ * only when lsn_off >= 0.
+ */
+uint64_t bm_min_rec_lsn(bm_t *bm);
+
 /* Allocate a fresh page.  Installs a HOT swip into *slot and returns
  * the (pinned) frame; the caller fills frame's page and bm_unfix.
  * *out_pid receives the new page id. */
