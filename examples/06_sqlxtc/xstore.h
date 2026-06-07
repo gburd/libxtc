@@ -12,6 +12,8 @@
 #ifndef SQLXTC_XSTORE_H
 #define SQLXTC_XSTORE_H
 
+#include <stdint.h>
+
 struct xsql;
 typedef struct bt bt_t;
 struct wal;
@@ -41,5 +43,10 @@ int xstore_recover(bt_t *bt, const char *wal_path);
 /* In-WAL checkpoint: compact the log to a CHECKPOINT record plus a dump
  * of the live tree, bounding it.  Call only when commits are quiesced. */
 int xstore_checkpoint_wal(bt_t *bt, struct wal *w, const char *wal_path);
+
+/* The MVCC commit clock: read it to persist at a clean shutdown,
+ * restore it when trusting the base on a clean restart. */
+uint64_t xstore_clock(void);
+void xstore_set_clock(uint64_t v);
 
 #endif /* SQLXTC_XSTORE_H */
