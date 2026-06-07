@@ -66,9 +66,25 @@
 /* Global logical commit clock for the shared engine B-tree. */
 static _Atomic uint64_t g_xclock = 1;
 
+/* STEAL: a unique key suffix for each spilled payload, and a logical id
+ * for each transaction that spills.  Steal-txn ids live in a high range
+ * so they never collide with commit timestamps (which come from
+ * g_xclock); recovery sees a steal-txn never commits and undoes its
+ * spilled payloads with CLRs. */
+static _Atomic uint64_t g_stage_seq  = 1;
+static _Atomic uint64_t g_steal_txn  = (1ULL << 62);
+
+/* Count of compensation records (CLRs) written across recovery undo
+ * passes -- nonzero proves the undo path ran for real (see
+ * xstore_undo_clrs). */
+static _Atomic uint64_t g_undo_clrs  = 0;
+
 /* Optional process-global write-ahead log (see xstore_set_wal). */
 static wal_t *g_xwal = NULL;
 void xstore_set_wal(struct wal *w) { g_xwal = (wal_t *)w; }
+
+/* Number of CLRs written during recovery undo so far (for tests/metrics). */
+uint64_t xstore_undo_clrs(void) { return atomic_load_explicit(&g_undo_clrs, memory_order_relaxed); }
 
 /* The MVCC commit clock, for the engine to persist at a clean shutdown
  * and restore when it trusts the base on restart. */
@@ -83,6 +99,9 @@ xstore_set_clock(uint64_t v)
 #define XS_F_DELETED 0x01u     /* value[0] flag: this version is a tombstone */
 #define XS_VKLEN     20        /* (tableid:4) + (rowid:8) + (inverted commit_ts:8) */
 #define XS_VMAX      4096       /* max row payload bytes (one page-ish) */
+#define XS_STAGE_TID 0xFFFFFFFEu  /* reserved table-id for STEAL spill payloads */
+#define XS_SPILL_HI  (256 * 1024) /* spill buffered payloads once they exceed this */
+#define XS_SPILL_LO  (64 * 1024)  /* spill down to this (hysteresis) */
 
 /* A buffered write within an open transaction (see xs_begin/xs_commit). */
 typedef struct xs_wrec {
@@ -90,7 +109,9 @@ typedef struct xs_wrec {
 	int64_t  rowid;
 	int      deleted;
 	uint16_t len;
-	uint8_t *data;        /* malloc'd; NULL for a delete */
+	uint8_t *data;        /* malloc'd; NULL for a delete or when spilled */
+	int      spilled;     /* 1: payload is in the STEAL staging area, not data */
+	int64_t  stage_id;    /* staging key suffix when spilled */
 } xs_wrec_t;
 
 /* A logical row identity: a transaction spans tables, so the read set
@@ -118,6 +139,8 @@ typedef struct xstore_ctx {
 	ssi_txn_t       *ssi;         /* this txn's SSI registry slot (or NULL) */
 	int              snap_slot;   /* GC snapshot-hold slot (-1 == none) */
 	int              autovacuum;  /* 1 == prune dead versions inline on write */
+	uint64_t         steal_txn;   /* STEAL: logical id once this txn spills (0 = none) */
+	size_t           wbuf_bytes;  /* buffered payload bytes (spill trigger) */
 } xstore_ctx_t;
 
 static void
@@ -127,6 +150,7 @@ wbuf_clear(xstore_ctx_t *c)
 	for (i = 0; i < c->wn; i++)
 		free(c->wbuf[i].data);
 	c->wn = 0;
+	c->wbuf_bytes = 0;
 }
 static int
 wbuf_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
@@ -140,13 +164,14 @@ wbuf_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid, const void *blob, int
 	}
 	w = &c->wbuf[c->wn];
 	w->tableid = tableid; w->rowid = rowid; w->deleted = deleted;
-	w->len = 0; w->data = NULL;
+	w->len = 0; w->data = NULL; w->spilled = 0; w->stage_id = 0;
 	if (!deleted && n > 0) {
 		if (n > XS_VMAX) n = XS_VMAX;
 		w->data = malloc((size_t)n);
 		if (w->data == NULL) return SQLITE_NOMEM;
 		memcpy(w->data, blob, (size_t)n);
 		w->len = (uint16_t)n;
+		c->wbuf_bytes += (size_t)n;
 	}
 	c->wn++;
 	return SQLITE_OK;
@@ -483,6 +508,34 @@ dec_ts(const uint8_t *k)
 	return ~t;
 }
 
+/* STEAL: bring a spilled payload back into memory (read it from the
+ * staging area into w->data) so the buffered write can be read or
+ * committed.  A no-op for entries that are not spilled.  Returns
+ * SQLITE_OK or an error. */
+static int
+xs_wrec_ensure(xstore_ctx_t *cx, xs_wrec_t *w)
+{
+	uint8_t key[XS_VKLEN];
+	uint16_t vl = 0;
+
+	if (!w->spilled)
+		return SQLITE_OK;
+	w->data = malloc(w->len ? w->len : 1);
+	if (w->data == NULL)
+		return SQLITE_NOMEM;
+	if (w->len) {
+		enc_vkey(XS_STAGE_TID, w->stage_id, 0, key);
+		if (bt_lookup(cx->bt, key, XS_VKLEN, w->data, w->len, &vl) != XTC_OK ||
+		    vl != w->len) {
+			free(w->data); w->data = NULL;
+			return SQLITE_ERROR;
+		}
+	}
+	w->spilled = 0;
+	cx->wbuf_bytes += w->len;
+	return SQLITE_OK;
+}
+
 /* ---- vtab + cursor ---- */
 typedef struct xstore_vtab {
 	xsql_vtab base;
@@ -684,6 +737,7 @@ xs_enter(xstore_vtab_t *v)
 		cx->in_txn = 1;
 		cx->txn_snap = atomic_load_explicit(&g_xclock, memory_order_relaxed);
 		wbuf_clear(cx);
+		cx->steal_txn = 0;
 		cx->rn = 0;
 		cx->did_scan = 0;
 		cx->ssi = cx->serializable ? ssi_begin(cx->txn_snap) : NULL;
@@ -1093,9 +1147,10 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 			const xs_wrec_t *w = wbuf_find(v->ctx, c->tableid, want);
 			if (w != NULL) {
 				if (!w->deleted) {
+					(void)xs_wrec_ensure(v->ctx, (xs_wrec_t *)w);  /* un-spill if needed */
 					c->rowid = want;
 					c->vlen = w->len;
-					if (w->len) memcpy(c->val, w->data, w->len);
+					if (w->len && w->data) memcpy(c->val, w->data, w->len);
 					c->eof = 0;
 				}
 				return SQLITE_OK;       /* buffered write decides it */
@@ -1214,6 +1269,62 @@ xs_wal_put(uint64_t ts, uint32_t tableid, int64_t rowid, const void *val, int vl
 	return xs_wal_emit(rec, (size_t)(p - rec));
 }
 
+/* STEAL: log one spilled payload as an XL_UPDATE belonging to a steal
+ * transaction that never commits (no XL_COMMIT for steal_txn).  Recovery
+ * therefore redoes it into the staging area and then undoes it with a
+ * CLR -- removing the uncommitted spill -- whether the owning SQL
+ * transaction committed (its real versions are logged separately under
+ * the commit timestamp) or not. */
+static void
+xs_wal_emit_stage(uint64_t steal_txn, int64_t stage_id, const void *val, uint16_t vlen)
+{
+	uint8_t rec[64 + XS_VMAX];
+	xl_hdr_t h;
+	xl_body_t b;
+	int n;
+
+	h.type = XL_UPDATE; h.txn_id = steal_txn; h.prev_lsn = 0;
+	memset(&b, 0, sizeof b);
+	b.tableid = XS_STAGE_TID; b.rowid = stage_id; b.commit_ts = 0;
+	b.redo = vlen ? val : NULL; b.redo_len = vlen;
+	if ((n = xl_enc_update(rec, sizeof rec, &h, &b)) > 0)
+		(void)xs_wal_emit(rec, (size_t)n);
+}
+
+/* STEAL: when buffered payloads exceed the high-water mark, write the
+ * oldest ones to the on-disk staging area (and the log) and free them
+ * from memory, bounding a large transaction's resident footprint during
+ * execution.  Keys stay in wbuf, so read-your-writes and SSI validation
+ * are unaffected; a spilled payload is brought back by xs_wrec_ensure.
+ * No-op without a log (nothing to recover from). */
+static void
+xs_spill_payloads(xstore_ctx_t *cx)
+{
+	int i;
+
+	if (g_xwal == NULL)
+		return;
+	for (i = 0; i < cx->wn && cx->wbuf_bytes > XS_SPILL_LO; i++) {
+		xs_wrec_t *w = &cx->wbuf[i];
+		uint8_t key[XS_VKLEN];
+		int64_t sid;
+
+		if (w->spilled || w->data == NULL || w->len == 0)
+			continue;
+		sid = (int64_t)atomic_fetch_add_explicit(&g_stage_seq, 1,
+		    memory_order_relaxed);
+		enc_vkey(XS_STAGE_TID, sid, 0, key);
+		if (bt_insert(cx->bt, key, XS_VKLEN, w->data, w->len) != XTC_OK)
+			continue;                  /* keep it in memory on failure */
+		if (cx->steal_txn == 0)
+			cx->steal_txn = atomic_fetch_add_explicit(&g_steal_txn, 1,
+			    memory_order_relaxed);
+		xs_wal_emit_stage(cx->steal_txn, sid, w->data, w->len);
+		free(w->data); w->data = NULL; w->spilled = 1; w->stage_id = sid;
+		cx->wbuf_bytes -= w->len;
+	}
+}
+
 static int
 xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
 {
@@ -1307,6 +1418,8 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 			tid = dec_tableid((const uint8_t *)k);
 			rid = dec_rowid((const uint8_t *)k);
 			ts = dec_ts((const uint8_t *)k);
+			if (tid == XS_STAGE_TID)
+				continue;          /* STEAL staging area: not GC's concern */
 			deleted = (vl >= 1 && (((const uint8_t *)vv)[0] & XS_F_DELETED));
 			/* A logical row is (tableid, rowid): a group boundary is
 			 * either changing. */
@@ -1435,6 +1548,20 @@ xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blo
 	return rc;
 }
 
+/* Buffer a write in an open transaction, spilling older buffered
+ * payloads to the STEAL staging area once they exceed the high-water
+ * mark, so a large transaction does not grow its resident footprint
+ * without bound during execution. */
+static int
+xs_buf_write(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid,
+    const void *blob, int n, int deleted)
+{
+	int rc = wbuf_add(cx, tableid, rowid, blob, n, deleted);
+	if (rc == SQLITE_OK && cx->wbuf_bytes > XS_SPILL_HI)
+		xs_spill_payloads(cx);
+	return rc;
+}
+
 static int
 xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
     xsql_int64 *pRowid)
@@ -1453,7 +1580,7 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 	if (argc == 1) {
 		int64_t rid = xsql_value_int64(argv[0]);   /* DELETE */
 		if (cx->in_txn)
-			return wbuf_add(cx, v->tableid, rid, NULL, 0, 1);
+			return xs_buf_write(cx, v->tableid, rid, NULL, 0, 1);
 		return xs_put_pruned(cx, v->tableid, rid, NULL, 0, 1);
 	}
 	{
@@ -1469,13 +1596,13 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 		if (xsql_value_type(argv[0]) != SQLITE_NULL) {
 			int64_t oldid = xsql_value_int64(argv[0]);
 			if (oldid != rowid) {
-				if (cx->in_txn) (void)wbuf_add(cx, v->tableid, oldid, NULL, 0, 1);
+				if (cx->in_txn) (void)xs_buf_write(cx, v->tableid, oldid, NULL, 0, 1);
 				else (void)xs_put_pruned(cx, v->tableid, oldid, NULL, 0, 1);
 			}
 		}
 		if (pRowid != NULL) *pRowid = rowid;
 		if (cx->in_txn)
-			return wbuf_add(cx, v->tableid, rowid, rec, reclen, 0);
+			return xs_buf_write(cx, v->tableid, rowid, rec, reclen, 0);
 		return xs_put_pruned(cx, v->tableid, rowid, rec, reclen, 0);
 	}
 }
@@ -1608,6 +1735,9 @@ xs_commit(xsql_vtab *pv)
 	if (!cx->in_txn)
 		return SQLITE_OK;
 	if (cx->wn > 0) {
+		if (cx->steal_txn != 0)              /* STEAL: bring spilled payloads back */
+			for (i = 0; i < cx->wn; i++)
+				(void)xs_wrec_ensure(cx, &cx->wbuf[i]);
 		ts = atomic_fetch_add_explicit(&g_xclock, 1,
 		    memory_order_relaxed) + 1;     /* one timestamp for the txn */
 		if (g_xwal != NULL)
@@ -1936,6 +2066,7 @@ xs_undo_loser(bt_t *bt, wal_t *w, struct rec_txn *t)
 		b.tableid = u->tableid; b.rowid = u->rowid; b.commit_ts = u->commit_ts;
 		if ((n = xl_enc_clr(clr, sizeof clr, &h, &b)) > 0)
 			(void)wal_commit_sync(w, clr, (uint32_t)n, &lsn);
+		atomic_fetch_add_explicit(&g_undo_clrs, 1, memory_order_relaxed);
 	}
 	{
 		uint8_t end[XL_HDR_LEN];
@@ -2087,6 +2218,8 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 			break;
 		kb = (const uint8_t *)k;
 		tableid = dec_tableid(kb); rowid = dec_rowid(kb);
+		if (tableid == XS_STAGE_TID)
+			continue;                  /* STEAL staging: never part of the live state */
 		if (have_last && tableid == last_tid && rowid == last_rid)
 			continue;                  /* older version of a key already dumped */
 		last_tid = tableid; last_rid = rowid; have_last = 1;
