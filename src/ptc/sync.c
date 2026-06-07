@@ -655,12 +655,12 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 				/* Removing us may unblock waiters behind us. */
 				{
 					struct arwlock_waiter *woke = __arw_grant_locked(r);
-					(void)pthread_mutex_unlock(&r->lock);
 					while (woke != NULL) {
 						struct arwlock_waiter *n = woke->next;
 						(void)xtc_waker_wake(&woke->waker);
 						woke = n;
 					}
+					(void)pthread_mutex_unlock(&r->lock);
 				}
 				return XTC_E_AGAIN;
 			}
@@ -699,12 +699,22 @@ xtc_arwlock_unlock(xtc_arwlock_t *r)
 	if (r->writer) r->writer = 0;
 	else if (r->readers > 0) r->readers--;
 	woke = __arw_grant_locked(r);
-	(void)pthread_mutex_unlock(&r->lock);
+	/*
+	 * Wake granted waiters WHILE HOLDING r->lock.  Each waiter is a
+	 * stack object on its own fiber; that fiber may wake on its own park
+	 * timer, observe w->granted, and return -- reclaiming the waiter's
+	 * stack -- the instant r->lock becomes free.  To return it must
+	 * re-acquire r->lock, so firing the wake before we release keeps the
+	 * waiter (and its waker) alive across xtc_waker_wake.  The wake only
+	 * posts to the target loop (no lock ordered against this leaf lock),
+	 * so this cannot deadlock.
+	 */
 	while (woke != NULL) {
 		struct arwlock_waiter *n = woke->next;
 		(void)xtc_waker_wake(&woke->waker);
 		woke = n;
 	}
+	(void)pthread_mutex_unlock(&r->lock);
 	return XTC_OK;
 }
 
