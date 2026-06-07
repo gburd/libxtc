@@ -26,6 +26,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "vfs.h"
+#include "t_tmp.h"
 
 static _Atomic int g_worker_done;
 static _Atomic int g_heartbeats;
@@ -106,7 +107,7 @@ main(void)
 	xtc_loop_t *loop = NULL;
 	xtc_proc_opts_t opts = { 0 };
 	xtc_pid_t w, h;
-	char path[] = "/tmp/sqlxtc-vfs-loop-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-vfs-loop");
 	int fd;
 
 	if (vfs_register(0) != SQLITE_OK) {

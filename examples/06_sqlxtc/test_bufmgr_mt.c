@@ -40,6 +40,7 @@
 #include "xtc_proc.h"
 #include "xtc_exec.h"
 #include "xtc_async.h"      /* xtc_yield */
+#include "t_tmp.h"
 
 #define PAGE_SZ          4096
 #define N_FRAMES         32        /* small resident pool -> eviction churn */
@@ -204,7 +205,7 @@ main(void)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	xtc_pid_t pp, w;
 	bm_stats_t st;
-	char path[] = "/tmp/sqlxtc-bm-mt-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-bm-mt");
 	int fd, i, bad;
 
 	fd = mkstemp(path);

@@ -28,6 +28,7 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "t_tmp.h"
 
 #define NROW    500
 #define NWORK   8
@@ -257,9 +258,9 @@ main(void)
 	int fd;
 
 	g_fail = 0;
-	strcpy(g_path, "/tmp/sqlxtc-srvstore-XXXXXX");
+	t_tmpl(g_path, sizeof g_path, "sqlxtc-srvstore");
 	fd = mkstemp(g_path); if (fd < 0) return 1; close(fd); unlink(g_path);
-	strcpy(g_path2, "/tmp/sqlxtc-srvstore2-XXXXXX");
+	t_tmpl(g_path2, sizeof g_path2, "sqlxtc-srvstore2");
 	fd = mkstemp(g_path2); if (fd < 0) return 1; close(fd); unlink(g_path2);
 
 	CK(sx_init() == SX_OK);
@@ -273,13 +274,13 @@ main(void)
 	if (run_cycle(cpp_driver) != 0) return 1;
 	CK(g_cpp_total == NWORK * PERWORK); /* all concurrent writers landed */
 
-	strcpy(g_path3, "/tmp/sqlxtc-srvstore3-XXXXXX");
+	t_tmpl(g_path3, sizeof g_path3, "sqlxtc-srvstore3");
 	fd = mkstemp(g_path3); if (fd < 0) return 1; close(fd); unlink(g_path3);
 	if (run_cycle(transparent_proc) != 0) return 1;
 	CK(g_transparent_ok == 1);          /* plain CREATE TABLE -> xstore */
 	CK(g_transparent_rows == 2);        /* and data round-trips */
 
-	strcpy(g_path4, "/tmp/sqlxtc-srvstore4-XXXXXX");
+	t_tmpl(g_path4, sizeof g_path4, "sqlxtc-srvstore4");
 	fd = mkstemp(g_path4); if (fd < 0) return 1; close(fd); unlink(g_path4);
 	if (run_cycle(crash_writer_proc) != 0) return 1;
 	CK(g_crash_wrote == NROW);          /* all rows committed before the crash */

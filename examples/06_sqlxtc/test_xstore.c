@@ -31,6 +31,7 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "t_tmp.h"
 
 #define N_ROWS    4000
 #define ROW_BYTES 200
@@ -133,7 +134,7 @@ scenario_offloop(void)
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-xstore-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-xstore");
 	int fd, rc;
 
 	fd = mkstemp(path); if (fd < 0) return 1; close(fd);
@@ -165,7 +166,7 @@ scenario_onloop(void)
 {
 	xtc_loop_t *loop = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-xstore2-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-xstore2");
 	xtc_proc_opts_t po = { .name = "sql" };
 	xtc_pid_t pid;
 	int fd;
@@ -235,7 +236,7 @@ scenario_mvcc(void)
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-xstore3-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-xstore3");
 	xsql *db = NULL;
 	xsql_stmt *st = NULL;
 	int64_t ts_mid = 0;
@@ -293,7 +294,7 @@ scenario_txn(void)
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-xstore4-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-xstore4");
 	xsql *db = NULL;
 	xsql_stmt *st = NULL;
 	int64_t ts_pre = 0, commit_ts = 0;
@@ -373,7 +374,7 @@ scenario_serializable(void)
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-xstore5-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-xstore5");
 	xsql *d1 = NULL, *d2 = NULL;
 	char b[32];
 	int fd;
@@ -450,7 +451,7 @@ scenario_ssi_gain(void)
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-xstore6-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-xstore6");
 	xsql *dr = NULL, *dw = NULL;
 	char b[32];
 	int fd;
@@ -507,7 +508,7 @@ scenario_gc(void)
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-xstore7-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-xstore7");
 	xsql *d1 = NULL, *d2 = NULL;
 	char b[32], want[16];
 	const int K = 50, N = 10;
@@ -580,7 +581,7 @@ scenario_autovacuum(void)
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-xstore8-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-xstore8");
 	xsql *db = NULL;
 	char b[32], want[16];
 	const int K = 50, N = 10;
@@ -673,7 +674,7 @@ scenario_ssi_range(void)
 {
 	bm_t *bm = NULL; bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-ssirng-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-ssirng");
 	xsql *d1 = NULL, *d2 = NULL;
 	int fd, i;
 
@@ -744,7 +745,7 @@ scenario_o1_sql(void)
 {
 	bm_t *bm = NULL; bt_t *bt = NULL; xsql *db = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-o1-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-o1");
 	bt_stats_t s0, s1;
 	xsql_stmt *st = NULL;
 	int fd, i, rows = 0;
@@ -798,7 +799,7 @@ scenario_multicol(void)
 {
 	bm_t *bm = NULL; bt_t *bt = NULL; xsql *db = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-mcol-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-mcol");
 	xsql_stmt *st = NULL;
 	int fd;
 
@@ -878,7 +879,7 @@ scenario_multitable(void)
 {
 	bm_t *bm = NULL; bt_t *bt = NULL; xsql *db = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-mtab-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-mtab");
 	xsql_stmt *st = NULL;
 	int fd;
 
@@ -948,7 +949,7 @@ scenario_rename(void)
 {
 	bm_t *bm = NULL; bt_t *bt = NULL; xsql *db = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-rename-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-rename");
 	int fd;
 
 	g_fail = 0;
@@ -994,7 +995,7 @@ scenario_catalog(void)
 {
 	bm_t *bm = NULL; bt_t *bt = NULL; xsql *db = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	char path[] = "/tmp/sqlxtc-cat-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-cat");
 	int fd, i;
 	enum { NT = 30 };
 

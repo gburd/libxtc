@@ -19,6 +19,7 @@
 
 #include "sqlite3.h"
 #include "pcache.h"
+#include "t_tmp.h"
 
 static int g_rows;
 
@@ -41,7 +42,7 @@ eviction_test(void)
 {
 	xsql *db = NULL;
 	char *err = NULL;
-	char path[] = "/tmp/sqlxtc-pcache-evict-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-pcache-evict");
 	int fd, i, fails = 0;
 	pcache_stats_t a, b;
 	uint64_t peak_live;
@@ -141,7 +142,7 @@ vacuum_test(void)
 {
 	xsql *db = NULL;
 	char *err = NULL;
-	char path[] = "/tmp/sqlxtc-pcache-vac-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-pcache-vac");
 	int fd, i, fails = 0;
 	pcache_stats_t a, b;
 
