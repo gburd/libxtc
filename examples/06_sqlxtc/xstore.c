@@ -70,6 +70,16 @@ static _Atomic uint64_t g_xclock = 1;
 static wal_t *g_xwal = NULL;
 void xstore_set_wal(struct wal *w) { g_xwal = (wal_t *)w; }
 
+/* The MVCC commit clock, for the engine to persist at a clean shutdown
+ * and restore when it trusts the base on restart. */
+uint64_t xstore_clock(void) { return atomic_load_explicit(&g_xclock, memory_order_relaxed); }
+void
+xstore_set_clock(uint64_t v)
+{
+	if (v >= atomic_load_explicit(&g_xclock, memory_order_relaxed))
+		atomic_store_explicit(&g_xclock, v, memory_order_relaxed);
+}
+
 #define XS_F_DELETED 0x01u     /* value[0] flag: this version is a tombstone */
 #define XS_VKLEN     20        /* (tableid:4) + (rowid:8) + (inverted commit_ts:8) */
 #define XS_VMAX      4096       /* max row payload bytes (one page-ish) */

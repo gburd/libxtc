@@ -134,6 +134,8 @@ struct bt {
 	_Atomic uint64_t  st_height;   /* number of levels (1 == root leaf) */
 	_Atomic uint64_t  st_descents; /* full root->leaf cursor descents */
 	_Atomic uint64_t  st_resumes;  /* parked-cursor O(1) resumes */
+	uint64_t          meta_clean;  /* superblock clean flag (open/close only) */
+	uint64_t          meta_clock;  /* superblock commit clock (open/close only) */
 };
 
 /* On-disk superblock (buffer-manager page 0), recording where the tree
@@ -145,8 +147,10 @@ struct bt_super {
 	uint32_t page_size;
 	uint64_t root_pid;
 	uint64_t height;
+	uint64_t clean;          /* 1 if the base was cleanly shut down */
+	uint64_t commit_clock;   /* persisted MVCC commit clock at clean shutdown */
 };
-static void
+void
 bt_write_super(bt_t *bt)
 {
 	struct bt_super s;
@@ -154,7 +158,23 @@ bt_write_super(bt_t *bt)
 	s.page_size = bt->page_size;
 	s.root_pid = (uint64_t)atomic_load(&bt->root_pid);
 	s.height = atomic_load(&bt->st_height);
+	s.clean = bt->meta_clean;
+	s.commit_clock = bt->meta_clock;
 	(void)bm_write_super(bt->bm, &s, sizeof s);
+}
+
+void
+bt_set_meta(bt_t *bt, uint64_t clean, uint64_t commit_clock)
+{
+	bt->meta_clean = clean;
+	bt->meta_clock = commit_clock;
+}
+
+void
+bt_get_meta(const bt_t *bt, uint64_t *clean, uint64_t *commit_clock)
+{
+	if (clean) *clean = bt->meta_clean;
+	if (commit_clock) *commit_clock = bt->meta_clock;
 }
 
 struct bt_cursor {
@@ -321,6 +341,8 @@ bt_reopen(bm_t *bm, bt_t **out)
 	bt->page_size = s.page_size;
 	atomic_store(&bt->root_pid, (bm_pid_t)s.root_pid);
 	atomic_store(&bt->st_height, s.height);
+	bt->meta_clean = s.clean;
+	bt->meta_clock = s.commit_clock;
 	*out = bt;
 	return XTC_OK;
 }

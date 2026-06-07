@@ -48,6 +48,13 @@ void bt_close(bt_t *bt);
  * by the bt pointer, so a freed pointer reused by a new tree cannot
  * alias stale entries.  A single global hook; the last setter wins. */
 void bt_set_close_hook(void (*fn)(bt_t *));
+/* Persist the superblock (root pid, height, clean flag, commit clock).
+ * The clean flag and commit clock are opaque metadata set by bt_set_meta:
+ * the engine marks the base clean at shutdown and reads it back to decide
+ * whether to trust the base on restart or rebuild from the log. */
+void bt_write_super(bt_t *bt);
+void bt_set_meta(bt_t *bt, uint64_t clean, uint64_t commit_clock);
+void bt_get_meta(const bt_t *bt, uint64_t *clean, uint64_t *commit_clock);
 /* Stamp `lsn` (the log LSN of the change about to be made) onto every
  * page this tree dirties from now on -- the ARIES page LSN. */
 void bt_set_lsn(bt_t *bt, uint64_t lsn);
