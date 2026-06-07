@@ -23,6 +23,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "engine.h"
+#include "t_tmp.h"
 
 #define N_WORKERS 4
 #define N_ROWS    50
@@ -99,7 +100,7 @@ main(void)
 	xtc_pid_t pid;
 	sx_db *h = NULL;
 	sx_stmt *st = NULL;
-	char path[] = "/tmp/sqlxtc-parallel-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-parallel");
 	long w;
 	int fd, total = -1;
 

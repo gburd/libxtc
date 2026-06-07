@@ -37,6 +37,7 @@
 #include "wal.h"
 #include "sqlite3.h"
 #include "xtc.h"
+#include "t_tmp.h"
 
 #define N_ROWS   200
 #define N_UPD    10           /* updates per row -> heavy version churn */
@@ -96,8 +97,8 @@ main(void)
 	bt_t *bt1 = NULL, *bt2 = NULL;
 	xsql *db1 = NULL, *db2 = NULL;
 	wal_opts_t wo = { 0 };
-	char btp[]  = "/tmp/sqlxtc-cmp-XXXXXX";
-	char logp[] = "/tmp/sqlxtc-cmp-log-XXXXXX";
+	char btp[256]; t_tmpl(btp, sizeof btp, "sqlxtc-cmp");
+	char logp[256]; t_tmpl(logp, sizeof logp, "sqlxtc-cmp-log");
 	char dwp[80], b[32], want[32];
 	off_t w_churn, w_compact;
 	int fd, i, u, miss = 0;

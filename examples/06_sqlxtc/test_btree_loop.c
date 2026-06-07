@@ -27,6 +27,7 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "t_tmp.h"
 
 #define N_KEYS    2000
 #define N_FRAMES  8       /* << tree (~22 pages): force real paging */
@@ -98,7 +99,7 @@ main(void)
 	xtc_pid_t w, pp;
 	bm_stats_t bs;
 	bt_stats_t ts;
-	char path[] = "/tmp/sqlxtc-btloop-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-btloop");
 	int fd;
 
 	fd = mkstemp(path); if (fd < 0) { perror("mkstemp"); return 1; }

@@ -40,6 +40,7 @@
 #include "wal.h"
 #include "sqlite3.h"
 #include "xtc.h"
+#include "t_tmp.h"
 
 #define N_ROWS   1000
 #define PAGE_SZ  512          /* tiny -> shallow fan-out -> deep tree, many splits */
@@ -93,8 +94,8 @@ main(void)
 	bt_t *bt1 = NULL, *bt2 = NULL;
 	xsql *db1 = NULL, *db2 = NULL;
 	wal_opts_t wo = { 0 };
-	char btp[]  = "/tmp/sqlxtc-tsmo-XXXXXX";
-	char logp[] = "/tmp/sqlxtc-tsmo-log-XXXXXX";
+	char btp[256]; t_tmpl(btp, sizeof btp, "sqlxtc-tsmo");
+	char logp[256]; t_tmpl(logp, sizeof logp, "sqlxtc-tsmo-log");
 	char dwp[80];
 	char want[32], got[32];
 	xsql_stmt *st = NULL;
