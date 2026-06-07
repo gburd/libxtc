@@ -160,6 +160,71 @@ flush mutex" style.  sqlxtc's logging path is the more scalable design;
 keep it.  (When STEAL arrives, the writer also carries the physiological
 page records, not just commit records.)
 
+### 2.7 Stasis -- the textbook reference, and what we borrow from it
+
+Stasis (Sears & Brewer, OSDI 2006; the tree under
+`/home/gburd/src/stasis-aries-wal`) is a pedagogically pure ARIES.  Where
+BDB is the production reference, Stasis is the clean-room one, and two of
+its mechanisms shape our plan directly:
+
+  - **CLRs written during undo, and replayed during redo.**
+    `recovery2.c` writes a compensation record for every reversed update
+    (the CLR's `prevLSN` skips the compensated record, so undo is bounded
+    and resumable across repeated crashes), and during the redo pass a CLR
+    re-applies its compensating action.  BDB instead omits CLRs and makes
+    undo idempotent via page-LSN gating.  We follow Stasis here -- our
+    XL_CLR carries `undo_next_lsn`, is redo-only, and is closed by an
+    XL_END (S3, implemented; see test_recover_undo).
+
+  - **Nested Top Actions + a dummy CLR for structure modification.**
+    Stasis brackets a multi-page structural change (a hash/B-tree split)
+    in `TbeginNestedTopAction` / `TendNestedTopAction`; the end writes a
+    dummy CLR whose redo re-runs the operation and whose presence makes
+    undo skip the interior physical records.  The whole SMO is therefore
+    atomic with respect to recovery -- redone if it finished, never half
+    undone.  This is exactly the device sqlxtc needs for crash-atomic
+    B-tree splits, and is the mechanism named in S3's remaining work.
+
+Stasis also uses STEAL/NO-FORCE with page-LSN-gated redo, a dirty-page
+table + transaction table rebuilt by analysis, fuzzy checkpointing via a
+continuous `min(applied, page recLSN, xact recLSN, flushed)`, and
+`lsnFree` / reorderable pages for updates whose final state -- not their
+intermediate order -- is what matters.  We adopt the first three (S3/S4)
+and skip lsnFree: our MVCC keyspace makes superseded versions GC-able
+instead.  Stasis's log manager is a simple timeout-batched group commit
+(`groupForce.c`) with no Aether-style buffer scaling -- our pipeline
+(below) is more modern than Stasis's here.
+
+### 2.8 Three-lineage scorecard: element -> who has it -> sqlxtc status
+
+| Element | BDB | Stasis | Aether | sqlxtc |
+| --- | --- | --- | --- | --- |
+| Page LSN at fixed offset | yes | yes | -- | in code (S1) |
+| Write-ahead enforce (flush log before dirty page) | yes | yes | -- | in code (S1) |
+| Log header type/txn/prev_lsn | gen'd | yes | -- | in code (S2) |
+| 3-pass recovery | yes | yes | -- | in code, reshaped (S3): redo-all + undo-losers |
+| CLRs + UndoNextLSN | skipped | yes | -- | **in code (S3), Stasis-style** |
+| Nested Top Action + dummy CLR (atomic SMO) | n/a | yes | -- | planned (S3 remainder) |
+| Physiological page/SMO logging | yes | yes | -- | planned (deferred from S2) |
+| STEAL/NO-FORCE | yes | yes | -- | diverged: NO-STEAL today; STEAL = S5 |
+| Dirty-page table + true recLSN | yes | yes | -- | partial (dirty_seq proxy); S4 |
+| Fuzzy checkpoint + min-recLSN truncation | yes | yes | -- | planned (S4) |
+| Log-record codegen from .src | yes | no | -- | planned (deferred from S2) |
+| Group commit | yes | yes | -- | in code |
+| Flush pipelining (no ctx-switch) | -- | -- | yes | in code, via fibers (committer yields, loop runs peers) |
+| Early Lock Release | -- | -- | yes | not adopted (candidate) |
+| Consolidation array / decoupled buffer fill | -- | -- | yes | not needed: message-passing single-writer has no shared-buffer mutex |
+| lsnFree / reorderable pages | -- | yes | -- | not adopted (MVCC GC instead) |
+| Double-write (torn-page atomicity) | no | no | -- | **in code, beyond all three** |
+
+Reading of the table: on physical recovery we are converging on the
+BDB/Stasis ARIES core (page LSNs done, CLRs done, physiological logging +
+NTA + STEAL remaining); on the log *pipeline* and the *isolation* model we
+are ahead of all three (fiber flush-pipelining, MVCC+SSI, double-write).
+Aether contributes throughput ideas, of which flush pipelining we get for
+free from the runtime and the buffer-contention fixes we do not need;
+early lock release is the one Aether idea still on the table.
+
 
 ## 3. Scorecard
 
