@@ -44,9 +44,7 @@
  *	  child only does async-signal-safe work, then execs a fresh
  *	  image).  The fn (fork-only) path runs the callback in that
  *	  half-initialised child: the callback must restrict itself to
- *	  async-signal-safe work until it re-initialises its own runtime
- *	  (this is exactly the contract a PostgreSQL-style forked backend
- *	  already meets).
+ *	  async-signal-safe work until it re-initialises its own runtime.
  */
 
 #ifndef XTC_OSPROC_H

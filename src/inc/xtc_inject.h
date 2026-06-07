@@ -6,8 +6,6 @@
  *	Injection points: named locations in production code that
  *	can be intercepted by tests to drive the runtime to a
  *	specific state and pause/resume execution from outside.
- *	Modeled directly on PostgreSQL's `injection_points.h` /
- *	`src/include/utils/injection_point.h`.
  *
  *	Three operations on a named point at runtime:
  *	  ATTACH   bind a callback (or "wait" semantics) to the name
