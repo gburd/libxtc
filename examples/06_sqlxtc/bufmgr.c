@@ -125,6 +125,12 @@ struct bm {
 	uint32_t          dw_next;       /* next slot to claim (round-robin) */
 	_Atomic uint64_t  dw_seq;        /* monotonic write sequence */
 	_Atomic uint64_t  s_dw_repaired; /* pages restored from the DW on reopen */
+
+	/* ARIES page LSN (active when lsn_off >= 0). */
+	int               lsn_off;       /* byte offset of the page LSN, or -1 */
+	_Atomic uint64_t  cur_lsn;       /* LSN stamped on the next clean->dirty edge */
+	int             (*wal_flush)(void *ctx, uint64_t lsn);  /* write-ahead hook */
+	void             *wal_ctx;
 };
 
 /* ---- page I/O via libxtc async file ops (xtc_aio): native io_uring
@@ -381,6 +387,20 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 		return 0;
 	}
 	memcpy(snap, f->page, bm->page_size);
+	/* Write-ahead rule: never write a dirty page to disk until the log
+	 * is durable through that page's LSN.  If it is not yet, abort this
+	 * flush (the page stays dirty) and let a later pass retry once the
+	 * log has caught up. */
+	if (bm->lsn_off >= 0 && bm->wal_flush != NULL && f->pid != 0) {
+		uint64_t plsn;
+		memcpy(&plsn, (uint8_t *)snap + bm->lsn_off, sizeof plsn);
+		if (bm->wal_flush(bm->wal_ctx, plsn) != XTC_OK) {
+			__os_free(snap);
+			xtc_arwlock_unlock(f->latch);
+			atomic_store_explicit(&f->io_busy, 0, memory_order_release);
+			return 0;
+		}
+	}
 	/* Clear dirty UNDER the latch: a later writer re-acquires the
 	 * exclusive latch and re-dirties on bm_unfix, so its change is not
 	 * lost -- the next flush captures it.  The snapshot we write is a
@@ -661,6 +681,10 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	    / 100u;
 	if (bm->cool_target < 1) bm->cool_target = 1;
 	bm->scan_resist = opts->scan_resist ? 1 : 0;
+	bm->lsn_off = opts->lsn_off;       /* -1 disables page-LSN handling */
+	atomic_store_explicit(&bm->cur_lsn, 0, memory_order_relaxed);
+	bm->wal_flush = NULL;
+	bm->wal_ctx = NULL;
 	(void)pthread_mutex_init(&bm->free_mu, NULL);
 	(void)pthread_mutex_init(&bm->pf_mu, NULL);
 	(void)pthread_mutex_init(&bm->pid_mu, NULL);
@@ -879,12 +903,35 @@ bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty)
 	if (mark_dirty) {
 		/* Stamp the dirtying order on the clean -> dirty edge, so the
 		 * trickler can write oldest dirt first (a recLSN proxy). */
-		if (atomic_exchange_explicit(&frame->dirty, 1, memory_order_acq_rel) == 0)
+		if (atomic_exchange_explicit(&frame->dirty, 1, memory_order_acq_rel) == 0) {
 			frame->dirty_seq = atomic_fetch_add_explicit(&bm->dirty_clock,
 			    1, memory_order_relaxed);
+			/* ARIES page LSN: stamp the change's log LSN onto the page.
+			 * The engine supplies it via bm_set_lsn before the mutation.
+			 * Skip page 0 (the superblock is not a btnode). */
+			if (bm->lsn_off >= 0 && frame->pid != 0) {
+				uint64_t lsn = atomic_load_explicit(&bm->cur_lsn,
+				    memory_order_relaxed);
+				memcpy((uint8_t *)frame->page + bm->lsn_off,
+				    &lsn, sizeof lsn);
+			}
+		}
 	}
 	atomic_store_explicit(&frame->ref, 1, memory_order_relaxed);  /* CLOCK: recently used */
 	atomic_fetch_sub_explicit(&frame->pin, 1, memory_order_release);
+}
+
+void
+bm_set_lsn(bm_t *bm, uint64_t lsn)
+{
+	atomic_store_explicit(&bm->cur_lsn, lsn, memory_order_relaxed);
+}
+
+void
+bm_set_wal_flush(bm_t *bm, int (*flush)(void *ctx, uint64_t lsn), void *ctx)
+{
+	bm->wal_flush = flush;
+	bm->wal_ctx = ctx;
 }
 
 int
