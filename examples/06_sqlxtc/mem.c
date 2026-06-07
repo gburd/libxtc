@@ -14,8 +14,8 @@
  *	register stacks, schema objects -- flows through xtc's allocator
  *	rather than bare malloc(3).  xtc's allocator is itself a hookable
  *	vtable (__os_alloc_set_hook), so a host that supplies its own
- *	primitives -- the PostgreSQL-on-xtc port substituting an
- *	arena/slab allocator, say -- transparently captures the engine's
+ *	primitives -- a host plugging in its own arena/slab allocator,
+ *	say -- transparently captures the engine's
  *	allocations too, and the xtc_alloc_audit machinery can attribute
  *	them to the owning proc.  This is exactly the platform malloc
  *	shim that the hard-fork plan lists as redundant once xtc supplies

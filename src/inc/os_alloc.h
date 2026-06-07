@@ -40,8 +40,8 @@ struct __os_alloc_hook {
 };
 
 /*
- * Public-internal API.  Every function returns int per the BDB
- * convention except __os_free which has no failure mode.
+ * Public-internal API.  Every function returns an int status code
+ * except __os_free which has no failure mode.
  *
  * PUBLIC: int  __os_malloc __P((size_t, void **));
  * PUBLIC: int  __os_calloc __P((size_t, size_t, void **));

@@ -48,7 +48,7 @@ extern "C" {
 
 /*
  * Error codes.
- * BDB convention: 0 == OK; negative values are stable XTC_E_* codes.
+ * 0 == OK; negative values are stable XTC_E_* codes.
  * Codes are added at the end of the enumeration in minor releases and
  * never renumbered.  See docs/abi-stability.md.
  */
