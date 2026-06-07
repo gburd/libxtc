@@ -1814,33 +1814,141 @@ xstore_register(xsql *db, bt_t *bt)
 }
 
 /*
- * Recovery: replay every committed transaction's versions from the log
- * into the B-tree.  Redo only -- there is no uncommitted data on disk
- * (the commit logs durably before touching the B-tree), and replay is
- * idempotent because version keys (rowid, ~commit_ts) are immutable, so
- * re-inserting one yields the identical entry.  Advances the commit
- * clock past the highest recovered timestamp so new commits do not
- * collide with recovered ones.
+ * Recovery driver.  One forward scan over the log redoes every update
+ * (idempotent: version keys (rowid, ~commit_ts) are immutable) and, as
+ * it goes, tracks the still-active transactions in a small table.  A
+ * transaction is born at its first XL_UPDATE and retired at its
+ * XL_COMMIT; whatever is still active when the log ends is a LOSER --
+ * its updates reached the tree but it never committed -- and is undone
+ * newest-first, a compensation record (XL_CLR) written per reversed
+ * update so a crash during recovery resumes without redoing compensated
+ * work, then an XL_END.
+ *
+ * In the NO-STEAL commit path a transaction's whole frame is
+ * [XL_UPDATE...][XL_COMMIT], so it is retired in the same frame it is
+ * born and the active table is empty between frames -- no losers, the
+ * undo pass is skipped.  Losers arise only once uncommitted updates can
+ * reach the tree before commit (STEAL); the machinery is exercised by
+ * test_recover_undo.  Advances the commit clock past the highest
+ * recovered timestamp so new commits do not collide with recovered ones.
  */
+struct rec_upd {
+	uint64_t lsn;            /* WAL LSN of the frame this update arrived in */
+	uint32_t tableid;
+	int64_t  rowid;
+	uint64_t commit_ts;
+};
+struct rec_txn {
+	uint64_t        txn_id;
+	struct rec_upd *upd;
+	int             n_upd, cap_upd;
+};
 struct xs_recover {
 	bt_t    *bt;
 	uint64_t max_ts;
 	uint64_t records;
+	struct rec_txn *txn;     /* ACTIVE (uncommitted) transactions only */
+	int      n_txn, cap_txn;
 };
+
+static struct rec_txn *
+rec_txn_get(struct xs_recover *r, uint64_t txn_id)
+{
+	int i;
+	struct rec_txn *t;
+
+	for (i = 0; i < r->n_txn; i++)
+		if (r->txn[i].txn_id == txn_id)
+			return &r->txn[i];
+	if (r->n_txn == r->cap_txn) {
+		int nc = r->cap_txn ? r->cap_txn * 2 : 8;
+		struct rec_txn *nt = realloc(r->txn, (size_t)nc * sizeof *nt);
+		if (nt == NULL)
+			return NULL;
+		r->txn = nt; r->cap_txn = nc;
+	}
+	t = &r->txn[r->n_txn++];
+	t->txn_id = txn_id; t->upd = NULL; t->n_upd = 0; t->cap_upd = 0;
+	return t;
+}
+
+static void
+rec_txn_addupd(struct rec_txn *t, uint64_t lsn, uint32_t tableid,
+    int64_t rowid, uint64_t commit_ts)
+{
+	if (t->n_upd == t->cap_upd) {
+		int nc = t->cap_upd ? t->cap_upd * 2 : 8;
+		struct rec_upd *nu = realloc(t->upd, (size_t)nc * sizeof *nu);
+		if (nu == NULL)
+			return;               /* best-effort: a dropped undo entry */
+		t->upd = nu; t->cap_upd = nc;
+	}
+	t->upd[t->n_upd].lsn = lsn;
+	t->upd[t->n_upd].tableid = tableid;
+	t->upd[t->n_upd].rowid = rowid;
+	t->upd[t->n_upd].commit_ts = commit_ts;
+	t->n_upd++;
+}
+
+/* Retire a committed (winner) transaction: its redo stays, drop it from
+ * the active table by swap-remove. */
+static void
+rec_txn_retire(struct xs_recover *r, struct rec_txn *t)
+{
+	int idx = (int)(t - r->txn);
+	free(t->upd);
+	r->txn[idx] = r->txn[--r->n_txn];
+}
+
+/* Undo one loser newest-first: delete each version it inserted and write
+ * an XL_CLR naming the next LSN still to undo (0 when done), then an
+ * XL_END.  A CLR is redo-only and never itself undone. */
+static void
+xs_undo_loser(bt_t *bt, wal_t *w, struct rec_txn *t)
+{
+	int i;
+
+	for (i = t->n_upd - 1; i >= 0; i--) {
+		struct rec_upd *u = &t->upd[i];
+		uint8_t key[XS_VKLEN];
+		uint8_t clr[64];
+		xl_hdr_t h;
+		xl_body_t b;
+		uint64_t lsn;
+		int n;
+
+		enc_vkey(u->tableid, u->rowid, u->commit_ts, key);
+		(void)bt_delete(bt, key, XS_VKLEN);     /* reverse the insert */
+
+		h.type = XL_CLR; h.txn_id = t->txn_id; h.prev_lsn = u->lsn;
+		memset(&b, 0, sizeof b);
+		b.undo_next_lsn = (i > 0) ? t->upd[i - 1].lsn : 0;
+		b.tableid = u->tableid; b.rowid = u->rowid; b.commit_ts = u->commit_ts;
+		if ((n = xl_enc_clr(clr, sizeof clr, &h, &b)) > 0)
+			(void)wal_commit_sync(w, clr, (uint32_t)n, &lsn);
+	}
+	{
+		uint8_t end[XL_HDR_LEN];
+		xl_hdr_t h;
+		uint64_t lsn;
+		int n;
+		h.type = XL_END; h.txn_id = t->txn_id; h.prev_lsn = 0;
+		if ((n = xl_enc_simple(end, sizeof end, &h)) > 0)
+			(void)wal_commit_sync(w, end, (uint32_t)n, &lsn);
+	}
+}
+
 static int
 xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 {
 	struct xs_recover *r = user;
 	const uint8_t *base = rec;
 	uint32_t off = 0;
-	(void)lsn;
 
 	/*
 	 * A WAL frame carries one transaction: a run of XL_UPDATE records
-	 * ending in XL_COMMIT, or a lone XL_CHECKPOINT.  Walk its records.
-	 * NO-STEAL means every complete frame is a committed transaction
-	 * (an incomplete write is the torn tail, which wal_scan never
-	 * delivers), so each XL_UPDATE is simply redone onto the tree.
+	 * then XL_COMMIT, a lone XL_CHECKPOINT, or (under STEAL) part of an
+	 * in-flight transaction.  Walk its records.
 	 */
 	while (off < len) {
 		xl_hdr_t h;
@@ -1862,14 +1970,24 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 				uint8_t key[XS_VKLEN];
 				uint8_t buf[1 + XS_VMAX];
 				uint16_t vl = b.redo_len > XS_VMAX ? XS_VMAX : b.redo_len;
+				struct rec_txn *t;
 				enc_vkey(b.tableid, b.rowid, b.commit_ts, key);
 				buf[0] = b.flags;
 				if (vl) memcpy(buf + 1, b.redo, vl);
 				(void)bt_insert(r->bt, key, XS_VKLEN, buf, (uint16_t)(1 + vl));
+				if ((t = rec_txn_get(r, uh.txn_id)) != NULL)
+					rec_txn_addupd(t, lsn, b.tableid, b.rowid, b.commit_ts);
 				if (b.commit_ts > r->max_ts) r->max_ts = b.commit_ts;
 			}
+		} else if (h.type == XL_COMMIT) {
+			int i;
+			for (i = 0; i < r->n_txn; i++)
+				if (r->txn[i].txn_id == h.txn_id) {
+					rec_txn_retire(r, &r->txn[i]);  /* winner: redo stays */
+					break;
+				}
 		}
-		/* XL_COMMIT and the rest carry no redo action in this model. */
+		/* XL_BEGIN / XL_ABORT / XL_CLR / XL_END: no redo action here. */
 		off += (uint32_t)rl;
 	}
 	r->records++;
@@ -1879,8 +1997,31 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 int
 xstore_recover(bt_t *bt, const char *wal_path)
 {
-	struct xs_recover r = { bt, 0, 0 };
-	int rc = wal_scan(wal_path, xs_recover_cb, &r);
+	struct xs_recover r;
+	int rc, i;
+
+	memset(&r, 0, sizeof r);
+	r.bt = bt;
+	rc = wal_scan(wal_path, xs_recover_cb, &r);
+
+	/* Whatever transactions are still active are losers: undo them,
+	 * writing CLRs through an append handle on the same log.  Skipped
+	 * entirely in the NO-STEAL path (no losers). */
+	if (r.n_txn > 0) {
+		wal_t *w = NULL;
+		wal_opts_t wo;
+		memset(&wo, 0, sizeof wo);
+		wo.path = wal_path; wo.append = 1;
+		if (wal_open(&wo, &w) == XTC_OK) {
+			for (i = 0; i < r.n_txn; i++)
+				xs_undo_loser(bt, w, &r.txn[i]);
+			wal_close(w);
+		}
+	}
+	for (i = 0; i < r.n_txn; i++)
+		free(r.txn[i].upd);
+	free(r.txn);
+
 	if (r.max_ts >= atomic_load_explicit(&g_xclock, memory_order_relaxed))
 		atomic_store_explicit(&g_xclock, r.max_ts + 1, memory_order_relaxed);
 	return rc;
