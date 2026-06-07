@@ -178,7 +178,7 @@ main(void)
 	bm_get_stats(g_bm, &bs);
 	bt_get_stats(g_bt, &ts);
 	bt_close(g_bt); bm_destroy(g_bm); unlink(path);
-	{ char wal[80]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
+	{ char wal[288]; snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal); }
 
 	if (atomic_load(&g_read_mismatch) != 0) {
 		fprintf(stderr, "FAIL: %ld concurrent reads saw a wrong value\n",
