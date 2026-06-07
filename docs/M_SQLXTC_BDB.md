@@ -197,15 +197,30 @@ Staged so each step is independently testable and leaves the tree green:
   Test: a page is never written while its log tail is unflushed (assert in
   flush_frame under a fault probe).
 
-  **S2 -- Physiological page-operation logging + a record header/codegen.**
+  **S2 -- Log record format + transaction-structured logging.  DONE
+  (logical records; physiological page/SMO logging deferred).**
   Define a standard log header (type, txn id, prev_lsn) and records for
   page insert, page delete, and the SMO (split/merge) carrying redo + undo
   images and the affected pages' prior LSNs.  Stamp each modified page's
-  LSN with the record LSN.  Add a tiny generator (BDB `.src` style) so the
+  LSN with the record LSN.  Add a tiny generator (`.src` style) so the
   record set is declarative.  Keep the existing logical records during the
   transition.  Test: a single page op round-trips through write/redo/undo.
 
-  **S3 -- ARIES 3-pass recovery.**
+  Landed as two commits: (1) the xlog codec -- a common header plus
+  XL_BEGIN/UPDATE/COMMIT/ABORT/CLR/CHECKPOINT/END records, bounds-checked
+  serialize/parse, unit-tested (test_xlog); (2) wiring the live WAL commit,
+  recovery, and checkpoint paths onto it.  A committed transaction is now
+  one WAL frame of [XL_UPDATE...][XL_COMMIT] (atomic durability, group
+  commit preserved); the checkpoint record is XL_CHECKPOINT, owned by the
+  storage layer (the generic WAL no longer knows the format).  The records
+  are LOGICAL (a version's value), not yet physiological page images: that
+  -- and the redo `.src` generator -- is a later refinement needed only for
+  trusting a torn page file in place (S3's "recover in place" goal).  The
+  UPDATE undo image and CLR record type are defined and tested but unused
+  until losers can persist (S5).
+
+  **S3 -- Recovery driver: redo-all + undo losers with CLRs.  DONE
+  (undo dormant under NO-STEAL; in-place torn-SMO repair deferred).**
   Replace `xstore_recover`'s rebuild-onto-fresh-tree with analysis (rebuild
   the dirty-page table + transaction table from the last checkpoint), redo
   (from min-recLSN, gated by page LSN), and undo (roll back losers, writing
@@ -214,6 +229,21 @@ Staged so each step is independently testable and leaves the tree green:
   trusted base and retires test_torn_smo's "discard + rebuild" path.
   Test: torn-SMO crash recovers in place (no rebuild); a partial UNDO that
   is itself interrupted re-recovers correctly (CLR/UndoNxtLSN bound).
+
+  Landed: xstore_recover now redoes every update while tracking the
+  still-active transactions, then undoes whatever is still active at end of
+  log -- the losers -- deleting each version newest-first and writing one
+  XL_CLR (undo_next_lsn = next LSN to undo, 0 when done) plus a closing
+  XL_END.  The active-transaction table is O(1) on the NO-STEAL path (a
+  frame opens and closes its own transaction), so the structure imposes no
+  per-history memory.  Because NO-STEAL never logs a loser, the undo pass
+  is dormant in the live engine (behavior unchanged, every storage test
+  passes); test_recover_undo synthesizes the loser log a STEAL engine would
+  leave and proves redo-winner / undo-loser / CLR + END.  STILL DEFERRED:
+  redo is not yet page-LSN-gated against a trusted torn base, so recovery
+  keeps rebuilding onto a fresh page file; "recover in place" needs the
+  physiological page/SMO logging held back from S2.  The undo + CLR path
+  this delivers is exactly what S5 (STEAL) plugs real losers into.
 
   **S4 -- Fuzzy checkpoint + min-recLSN truncation.**
   Checkpoint writes the dirty-page table + active-txn table + `ckp_lsn =
