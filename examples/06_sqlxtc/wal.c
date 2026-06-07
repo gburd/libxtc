@@ -80,7 +80,7 @@ struct wal {
 	struct wal_pending *pend;
 	uint32_t           pcount;
 	uint64_t           next_lsn;
-	uint64_t           durable_lsn;
+	_Atomic uint64_t   durable_lsn;
 
 	pthread_mutex_t    sync_mu;   /* serializes wal_commit_sync appends */
 
@@ -153,7 +153,7 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 		wal_scan_tail(w->fd, &o, &maxlsn);
 		w->next_lsn = maxlsn;
 		w->off = o;
-		w->durable_lsn = w->next_lsn;
+		atomic_store_explicit(&w->durable_lsn, w->next_lsn, memory_order_relaxed);
 		{
 			int tr = ftruncate(w->fd, o);  /* drop torn tail */
 			(void)tr;                      /* non-fatal: appends overwrite it */
@@ -241,7 +241,7 @@ batch_flush(wal_t *w)
 	(void)rc;                            /* a real engine would surface I/O errors */
 
 	w->off += (off_t)w->blen;
-	w->durable_lsn = w->pend[w->pcount - 1].lsn;
+	atomic_store_explicit(&w->durable_lsn, w->pend[w->pcount - 1].lsn, memory_order_relaxed);
 	w->s_batches++;
 	w->s_commits += w->pcount;
 	if (w->pcount > w->s_maxbatch)
@@ -410,7 +410,7 @@ wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 	}
 	if (fdatasync(w->fd) != 0) { rc = XTC_E_INTERNAL; goto out; }
 	w->off += (off_t)WAL_REC_HDR + (off_t)len;
-	w->durable_lsn = my_lsn;
+	atomic_store_explicit(&w->durable_lsn, my_lsn, memory_order_relaxed);
 	w->s_commits++;
 	w->s_batches++;
 	w->s_bytes += len;
@@ -435,7 +435,7 @@ wal_rebind(wal_t *w, const char *path)
 	w->fd = fd;
 	w->off = o;
 	w->next_lsn = maxlsn;
-	w->durable_lsn = maxlsn;
+	atomic_store_explicit(&w->durable_lsn, maxlsn, memory_order_relaxed);
 	return XTC_OK;
 }
 
@@ -569,6 +569,29 @@ wal_truncate(wal_t *w)
 	return XTC_OK;
 }
 
+uint64_t
+wal_durable_lsn(const wal_t *w)
+{
+	if (w == NULL)
+		return 0;
+	return atomic_load_explicit(&w->durable_lsn, memory_order_relaxed);
+}
+
+int
+wal_flush_through(wal_t *w, uint64_t lsn)
+{
+	if (w == NULL)
+		return XTC_E_INVAL;
+	/* The change at `lsn` was logged-and-acked before the page that
+	 * carries it was dirtied, so the log is already durable this far in
+	 * the current commit-before-apply protocol; report whether it is.
+	 * (When uncommitted pages may be stolen to disk, this is where the
+	 * log would be forced.) */
+	if (atomic_load_explicit(&w->durable_lsn, memory_order_relaxed) >= lsn)
+		return XTC_OK;
+	return XTC_E_AGAIN;
+}
+
 int
 wal_writer_stop(wal_t *w)
 {
@@ -595,5 +618,5 @@ wal_get_stats(wal_t *w, wal_stats_t *out)
 	out->batches = w->s_batches;
 	out->bytes = w->s_bytes;
 	out->max_batch_seen = w->s_maxbatch;
-	out->durable_lsn = w->durable_lsn;
+	out->durable_lsn = atomic_load_explicit(&w->durable_lsn, memory_order_relaxed);
 }

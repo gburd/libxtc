@@ -48,6 +48,9 @@ void bt_close(bt_t *bt);
  * by the bt pointer, so a freed pointer reused by a new tree cannot
  * alias stale entries.  A single global hook; the last setter wins. */
 void bt_set_close_hook(void (*fn)(bt_t *));
+/* Stamp `lsn` (the log LSN of the change about to be made) onto every
+ * page this tree dirties from now on -- the ARIES page LSN. */
+void bt_set_lsn(bt_t *bt, uint64_t lsn);
 
 /* Insert or replace key -> val.  Returns XTC_OK, or an error. */
 int  bt_insert(bt_t *bt, const void *key, uint16_t klen,

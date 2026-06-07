@@ -73,6 +73,8 @@ extern "C" {
  * id assigned by the buffer manager (0 means "no sibling").
  */
 struct btnode_hdr {
+	uint64_t page_lsn;      /* ARIES page LSN; MUST be first (buffer-manager
+	                         * reads it at a fixed offset, bm_opts.lsn_off) */
 	uint32_t page_size;     /* size of the whole page buffer */
 	uint32_t right_sibling; /* next leaf page id, 0 = none */
 	uint16_t count;         /* number of live slots */

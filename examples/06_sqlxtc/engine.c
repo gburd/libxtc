@@ -165,6 +165,14 @@ sx_open(const char *path, sx_db **out)
 	return SQLITE_OK;
 }
 
+/* Buffer-manager write-ahead hook: ensure the log is durable through a
+ * page's LSN before the page is written. */
+static int
+sx_wal_flush_cb(void *ctx, uint64_t lsn)
+{
+	return wal_flush_through((wal_t *)ctx, lsn);
+}
+
 /*
  * Open (or reopen) the libxtc-native storage engine: the cooling
  * buffer pool, the on-disk B-tree, and its write-ahead log.  The log is
@@ -194,6 +202,7 @@ sx_storage_open(const char *path, unsigned int n_frames)
 		o.n_frames = n_frames;
 	o.double_write = 1;   /* torn-page protection for the persistent store */
 	o.reopen = 0;         /* the page file is a rebuildable cache, not the base */
+	o.lsn_off = 0;        /* ARIES page LSN: first field of every btnode */
 
 	snprintf(g_xwal_path, sizeof g_xwal_path, "%s-wal", dpath);
 
@@ -218,6 +227,9 @@ sx_storage_open(const char *path, unsigned int n_frames)
 		return SQLITE_ERROR;
 	}
 	xstore_set_wal(g_xwal);
+	/* Write-ahead enforcement: before the buffer manager writes a dirty
+	 * page it flushes the log through that page's LSN via this hook. */
+	bm_set_wal_flush(g_xbm, sx_wal_flush_cb, g_xwal);
 	/* Compact the log now: replace the just-replayed history with a fresh
 	 * checkpoint + live-tree dump, so the log starts this run bounded. */
 	(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path);

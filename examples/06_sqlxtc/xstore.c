@@ -14,7 +14,7 @@
  *	B-tree.  Reimplementing the amalgamation's internal btree.h is
  *	impractical; the virtual-table seam is the supported mechanism.
  *
- *	MVCC model (the PostgreSQL heap lineage; see
+ *	MVCC model (see
  *	docs/M_SQLXTC_MVCC_SQL.md).  Each row VERSION is stored under the
  *	B-tree key (rowid, commit_ts), with versions of one rowid
  *	clustered and ordered newest-first (the timestamp half is stored
@@ -22,8 +22,8 @@
  *	first).  The version's commit_ts is its xmin (the transaction
  *	that created it); a delete writes a tombstone version.  A read at
  *	snapshot S returns, per rowid, the newest version with
- *	commit_ts <= S that is not a tombstone -- i.e. PostgreSQL's
- *	HeapTupleSatisfiesMVCC, with newer versions standing in for xmax.
+ *	commit_ts <= S that is not a tombstone; newer
+ *	versions stand in for xmax.
  *	Readers never block writers and writers never block readers.
  *
  *	A single global logical clock supplies commit timestamps and
@@ -171,8 +171,8 @@ rset_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid)
 }
 
 /*
- * Serializable Snapshot Isolation (Cahill et al., SIGMOD 2008; the
- * model PostgreSQL 9.1+ uses in predicate.c).  The read-set check in
+ * Serializable Snapshot Isolation (Cahill et al., SIGMOD 2008).  The
+ * read-set check in
  * xs_sync alone is conservative "precision validation" -- it aborts a
  * transaction whenever something it read was overwritten, i.e. on any
  * outgoing rw-antidependency.  SSI is more permissive: it aborts only
@@ -190,7 +190,7 @@ rset_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid)
  * B-tree -- reads leave no version -- so serializable transactions
  * publish their read sets to this small in-memory registry, and a
  * committing writer scans it for a concurrent reader of any rowid it
- * writes.  Following PostgreSQL, the outgoing edge counts toward an
+ * writes.  The outgoing edge counts toward an
  * abort only when its target has already COMMITTED (the pivot's
  * out-neighbor commits first): so in a write-skew the first committer
  * (whose out-neighbor is still active) commits and the second aborts.
@@ -282,7 +282,7 @@ ssi_record_read(ssi_txn_t *t, uint32_t tableid, int64_t rowid)
 
 /* Record a RANGE predicate [lo, hi] this txn read (a scan).  A full
  * table scan records [INT64_MIN, INT64_MAX]; a bounded scan its actual
- * key bounds.  This is the Cahill/PostgreSQL predicate lock: a future
+ * key bounds.  This is the SSI predicate lock: a future
  * writer's rowid creates an incoming rw-edge only if it falls inside a
  * range some concurrent reader actually scanned -- not "any write vs
  * any scan". */
@@ -367,7 +367,7 @@ ssi_abort(ssi_txn_t *t)
  * version older than the newest one at-or-before the oldest live
  * snapshot is unreachable (a tombstone that is itself the newest such
  * version, with nothing newer, is unreachable too).  This is the
- * MVCC vacuum horizon -- PostgreSQL's OldestXmin / RecentGlobalXmin.
+ * MVCC vacuum horizon -- the oldest snapshot any live transaction can see.
  *
  * Autocommit statement reads do not register: each reads at the
  * current clock, so it sees at least the surviving newest version,
@@ -1161,21 +1161,23 @@ xs_rowid(xsql_vtab_cursor *pc, xsql_int64 *pRowid)
 /* Dispatch one WAL record to the log durably: group commit on a loop
  * (parks the fiber on the writer's ack), synchronous append off a loop.
  * No-op when no WAL is attached. */
-static void
+static uint64_t
 xs_wal_emit(const uint8_t *rec, size_t sz)
 {
 	uint64_t lsn = 0;
 	if (g_xwal == NULL)
-		return;
+		return 0;
 	if (xtc_pid_is_none(xtc_self()))
 		(void)wal_commit_sync(g_xwal, rec, (uint32_t)sz, &lsn);
 	else
 		(void)wal_commit(g_xwal, rec, (uint32_t)sz, &lsn);
+	return lsn;
 }
 
 /* Log a single committed version (the autocommit single-statement
- * path); same record layout as the multi-version xs_wal_log. */
-static void
+ * path); same record layout as the multi-version xs_wal_log.  Returns
+ * the assigned log LSN. */
+static uint64_t
 xs_wal_put(uint64_t ts, uint32_t tableid, int64_t rowid, const void *val, int vlen, int deleted)
 {
 	uint8_t rec[12 + 15 + XS_VMAX];
@@ -1191,7 +1193,7 @@ xs_wal_put(uint64_t ts, uint32_t tableid, int64_t rowid, const void *val, int vl
 	*p++ = flags;
 	memcpy(p, &vl, 2); p += 2;
 	if (vl) { memcpy(p, val, vl); p += vl; }
-	xs_wal_emit(rec, (size_t)(p - rec));
+	return xs_wal_emit(rec, (size_t)(p - rec));
 }
 
 static int
@@ -1203,8 +1205,10 @@ xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int d
 	    memory_order_relaxed) + 1;
 	if (n < 0) n = 0;
 	if (n > XS_VMAX) n = XS_VMAX;
-	if (g_xwal != NULL)
-		xs_wal_put(ts, tableid, rowid, blob, n, deleted);   /* durable BEFORE apply */
+	if (g_xwal != NULL) {
+		uint64_t lsn = xs_wal_put(ts, tableid, rowid, blob, n, deleted);  /* durable BEFORE apply */
+		bt_set_lsn(bt, lsn);   /* stamp this change's LSN onto the page */
+	}
 	enc_vkey(tableid, rowid, ts, key);
 	buf[0] = deleted ? XS_F_DELETED : 0;
 	if (!deleted && n > 0) memcpy(buf + 1, blob, (size_t)n);

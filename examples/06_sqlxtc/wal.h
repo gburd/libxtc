@@ -102,6 +102,14 @@ int  wal_scan(const char *path, wal_replay_cb cb, void *user);
  */
 int  wal_truncate(wal_t *w);
 
+/* The highest LSN on stable storage (fsync'd).  Monotonic. */
+uint64_t wal_durable_lsn(const wal_t *w);
+
+/* Ensure the log is durable through `lsn`: XTC_OK if it already is,
+ * XTC_E_AGAIN if not yet (the buffer manager then defers writing a page
+ * whose LSN is past the durable point -- the write-ahead rule). */
+int  wal_flush_through(wal_t *w, uint64_t lsn);
+
 /*
  * In-WAL checkpoint (log-compaction).  Atomically rewrites the log as a
  * fresh CHECKPOINT record (carrying `clock`) followed by whatever
