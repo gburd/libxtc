@@ -26,6 +26,7 @@
 /* Fixed-size body prefixes (the bytes before the variable redo/undo). */
 #define XL_UPD_FIXED 27   /* page4 + tableid4 + rowid8 + commit_ts8 + flags1 + redo_len2 */
 #define XL_CLR_FIXED 35   /* undo_next8 + page4 + tableid4 + rowid8 + commit_ts8 + flags1 + redo_len2 */
+#define XL_PAGE_FIXED 6   /* page_id4 + image_len2 */
 
 /* Little-helper put/get: advance the cursor, host-endian via memcpy. */
 static inline uint8_t *
@@ -52,6 +53,12 @@ size_t
 xl_clr_size(uint16_t redo_len)
 {
 	return (size_t)XL_CLR_FIXED + redo_len;
+}
+
+size_t
+xl_page_size(uint16_t image_len)
+{
+	return (size_t)XL_PAGE_FIXED + image_len;
 }
 
 static uint8_t *
@@ -149,6 +156,25 @@ xl_enc_checkpoint(uint8_t *buf, size_t cap, uint64_t commit_clock)
 }
 
 int
+xl_enc_page(uint8_t *buf, size_t cap, const xl_hdr_t *h, uint32_t page_id,
+    const void *image, uint16_t image_len)
+{
+	uint8_t *p = buf;
+
+	if (buf == NULL || h == NULL || h->type != XL_PAGE)
+		return XTC_E_INVAL;
+	if (image_len && image == NULL)
+		return XTC_E_INVAL;
+	if (cap < (size_t)XL_HDR_LEN + xl_page_size(image_len))
+		return XTC_E_RANGE;
+	p = enc_hdr(p, h);
+	p = put(p, &page_id, 4);
+	p = put(p, &image_len, 2);
+	if (image_len) p = put(p, image, image_len);
+	return (int)(p - buf);
+}
+
+int
 xl_parse_hdr(const void *rec, uint32_t len, xl_hdr_t *h)
 {
 	const uint8_t *p = rec;
@@ -158,7 +184,7 @@ xl_parse_hdr(const void *rec, uint32_t len, xl_hdr_t *h)
 	h->type = *p++;
 	p = get(p, &h->txn_id, 8);
 	(void)get(p, &h->prev_lsn, 8);
-	if (h->type < XL_BEGIN || h->type > XL_END)
+	if (h->type < XL_BEGIN || h->type > XL_PAGE)
 		return XTC_E_INVAL;
 	return XTC_OK;
 }
@@ -239,6 +265,30 @@ xl_parse_checkpoint(const void *rec, uint32_t len, uint64_t *commit_clock)
 }
 
 int
+xl_parse_page(const void *rec, uint32_t len, xl_hdr_t *h,
+    uint32_t *page_id, const void **image, uint16_t *image_len)
+{
+	const uint8_t *p = rec;
+	uint16_t il;
+	int rc;
+
+	if (page_id == NULL || image == NULL || image_len == NULL)
+		return XTC_E_INVAL;
+	if ((rc = xl_parse_hdr(rec, len, h)) != XTC_OK)
+		return rc;
+	if (h->type != XL_PAGE || len < (uint32_t)XL_HDR_LEN + XL_PAGE_FIXED)
+		return XTC_E_INVAL;
+	p += XL_HDR_LEN;
+	p = get(p, page_id, 4);
+	p = get(p, &il, 2);
+	if ((uint32_t)XL_HDR_LEN + xl_page_size(il) > len)
+		return XTC_E_INVAL;
+	*image_len = il;
+	*image = il ? p : NULL;
+	return XTC_OK;
+}
+
+int
 xl_record_len(const void *rec, uint32_t avail)
 {
 	const uint8_t *p = rec;
@@ -269,6 +319,12 @@ xl_record_len(const void *rec, uint32_t avail)
 			return XTC_E_INVAL;
 		memcpy(&redo_len, p + XL_HDR_LEN + XL_CLR_FIXED - 2, 2);
 		total = (uint32_t)XL_HDR_LEN + (uint32_t)xl_clr_size(redo_len);
+		break;
+	case XL_PAGE:
+		if (avail < (uint32_t)XL_HDR_LEN + XL_PAGE_FIXED)
+			return XTC_E_INVAL;
+		memcpy(&redo_len, p + XL_HDR_LEN + XL_PAGE_FIXED - 2, 2);
+		total = (uint32_t)XL_HDR_LEN + (uint32_t)xl_page_size(redo_len);
 		break;
 	default:
 		return XTC_E_INVAL;
