@@ -32,6 +32,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_aio.h"
+#include "xtc_fs.h"
 #include "os_time.h"
 
 #define CHECK(cond) do { \
@@ -193,6 +194,38 @@ main(void)
 		(void)DeleteFileA(path);
 		printf("  ok   native IOCP file AIO: overlapped pwrite+pread"
 		    " round-trip\n");
+	}
+
+	/* --- portable filesystem helpers (xtc_fs): tmpdir + mkstemp +
+	 * pwrite/pread round-trip + fsize + stat + unlink on Win32 --- */
+	{
+		char dir[512], tmpl[600];
+		int fd = -1;
+		int64_t sz = -1;
+		size_t done = 0;
+		char buf[32];
+		xtc_fs_stat_t st;
+		static const char msg[] = "xtc_fs-win";
+
+		CHECK(xtc_fs_tmpdir(dir, sizeof dir) == XTC_OK);
+		CHECK(dir[0] != '\0');
+		_snprintf(tmpl, sizeof tmpl, "%s\\xtcfs-XXXXXX", dir);
+		CHECK(xtc_fs_mkstemp(tmpl, &fd) == XTC_OK && fd >= 0);
+		CHECK(xtc_fs_pwrite(fd, msg, sizeof msg, 0, &done) == XTC_OK);
+		CHECK(done == sizeof msg);
+		CHECK(xtc_fs_fsync(fd) == XTC_OK);
+		CHECK(xtc_fs_fsize(fd, &sz) == XTC_OK && sz == (int64_t)sizeof msg);
+		memset(buf, 0, sizeof buf);
+		done = 0;
+		CHECK(xtc_fs_pread(fd, buf, sizeof msg, 0, &done) == XTC_OK);
+		CHECK(done == sizeof msg && strcmp(buf, msg) == 0);
+		CHECK(xtc_fs_close(fd) == XTC_OK);
+		CHECK(xtc_fs_stat(tmpl, &st) == XTC_OK && st.size == (int64_t)sizeof msg);
+		CHECK(xtc_fs_exists(tmpl) == 1);
+		CHECK(xtc_fs_unlink(tmpl) == XTC_OK);
+		CHECK(xtc_fs_exists(tmpl) == 0);
+		printf("  ok   xtc_fs: tmpdir + mkstemp + pwrite/pread + stat +"
+		    " unlink round-trip\n");
 	}
 
 	printf("All MSVC smoke checks passed.\n");
