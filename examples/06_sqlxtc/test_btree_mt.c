@@ -37,6 +37,7 @@
 #include "xtc_loop.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
+#include "t_tmp.h"
 
 #define N_LOOPS     4
 #define N_WRITERS   4
@@ -122,7 +123,7 @@ main(void)
 	xtc_loop_t *l0;
 	bm_stats_t bs;
 	bt_stats_t ts;
-	char path[] = "/tmp/sqlxtc-btmt-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-btmt");
 	int fd, i, missing = 0;
 	char k[24], v[32], buf[40];
 	uint16_t vl;

@@ -20,6 +20,7 @@
 
 #include "sqlite3.h"
 #include "vfs.h"
+#include "t_tmp.h"
 
 static int g_sum;
 
@@ -53,7 +54,7 @@ wal_test(void)
 {
 	xsql *db = NULL;
 	char *err = NULL;
-	char path[] = "/tmp/sqlxtc-vfs-wal-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-vfs-wal");
 	int fd, rc, i, fails = 0;
 
 	fd = mkstemp(path);
@@ -117,7 +118,7 @@ main(void)
 {
 	xsql *db = NULL;
 	char *err = NULL;
-	char path[] = "/tmp/sqlxtc-vfs-test-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-vfs-test");
 	int fd, rc, i, fails = 0;
 	vfs_stats_t s0, s1;
 

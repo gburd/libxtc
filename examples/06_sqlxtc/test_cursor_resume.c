@@ -21,6 +21,7 @@
 #include "bufmgr.h"
 #include "btree.h"
 #include "xtc.h"
+#include "t_tmp.h"
 
 #define PAGE_SZ  4096
 #define N_KEYS   2000      /* many leaves -> multi-level tree */
@@ -47,7 +48,7 @@ kcmp(const void *a, uint16_t al, const void *b, uint16_t bl)
 static int
 scenario_o1_scan(void)
 {
-	char path[] = "/tmp/sqlxtc-resume-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-resume");
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
@@ -104,7 +105,7 @@ scenario_o1_scan(void)
 static int
 scenario_split_while_parked(void)
 {
-	char path[] = "/tmp/sqlxtc-resume2-XXXXXX";
+	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-resume2");
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
