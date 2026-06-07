@@ -59,3 +59,28 @@ networked server measure the loop path.
   * Drive the SQL path on libxtc loops/procs so the group-commit writer
     is used (the designed write-scaling path), instead of off-loop
     per-commit fsync.
+
+## After the fix: striped page-table lock (commit "stripe the buffer-manager page-table lock")
+
+Re-run on meh, in-cache (256 MB), 100% read, median kops/s.  The single
+global `ht_mu` is replaced by 256 striped bucket locks.
+
+| thr | xstore BEFORE | xstore AFTER | gain | sqlite |
+| --: | ------------: | -----------: | :--- | -----: |
+|   4 |  649 |  868 | 1.34x |  400 |
+|   8 |  647 | 1184 | 1.83x | 1087 |
+|  16 |  584 | 1515 | 2.59x | 1113 |
+|  24 |  569 | 1553 | 2.73x | 1292 |
+
+xstore now scales on reads and OVERTAKES SQLite at 16-24 threads (1553
+vs 1292 kops at 24 threads, where before it lost 569 vs 1245).  A stripe
+-count sweep (32/64/128/256) gives ~1520-1565 kops at 24 threads
+regardless, confirming the page-table contention is gone.  Single-thread
+is stripe-count-independent (~220 kops), i.e. unaffected by the change
+(run-to-run session variance dominates).
+
+The 95%-read mixed case improves only modestly (e.g. 16 threads
+120 -> 132): there the bottleneck is the SECOND issue -- off-loop
+synchronous commits with no group commit -- which a bufmgr lock change
+cannot help.  That requires driving the SQL path on libxtc loops/procs
+so the group-commit WAL writer is used; it is the next optimization.
