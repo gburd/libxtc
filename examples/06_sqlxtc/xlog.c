@@ -237,3 +237,43 @@ xl_parse_checkpoint(const void *rec, uint32_t len, uint64_t *commit_clock)
 	(void)get((const uint8_t *)rec + XL_HDR_LEN, commit_clock, 8);
 	return XTC_OK;
 }
+
+int
+xl_record_len(const void *rec, uint32_t avail)
+{
+	const uint8_t *p = rec;
+	uint16_t redo_len, undo_len;
+	uint32_t total;
+
+	if (rec == NULL || avail < XL_HDR_LEN)
+		return XTC_E_INVAL;
+	switch (p[0]) {
+	case XL_BEGIN: case XL_COMMIT: case XL_ABORT: case XL_END:
+		total = XL_HDR_LEN;
+		break;
+	case XL_CHECKPOINT:
+		total = XL_HDR_LEN + 8;
+		break;
+	case XL_UPDATE:
+		if (avail < (uint32_t)XL_HDR_LEN + XL_UPD_FIXED)
+			return XTC_E_INVAL;
+		memcpy(&redo_len, p + XL_HDR_LEN + XL_UPD_FIXED - 2, 2);
+		/* must reach the undo_len field to know the full size */
+		if (avail < (uint32_t)XL_HDR_LEN + XL_UPD_FIXED + redo_len + 2)
+			return XTC_E_INVAL;
+		memcpy(&undo_len, p + XL_HDR_LEN + XL_UPD_FIXED + redo_len, 2);
+		total = (uint32_t)XL_HDR_LEN + (uint32_t)xl_update_size(redo_len, undo_len);
+		break;
+	case XL_CLR:
+		if (avail < (uint32_t)XL_HDR_LEN + XL_CLR_FIXED)
+			return XTC_E_INVAL;
+		memcpy(&redo_len, p + XL_HDR_LEN + XL_CLR_FIXED - 2, 2);
+		total = (uint32_t)XL_HDR_LEN + (uint32_t)xl_clr_size(redo_len);
+		break;
+	default:
+		return XTC_E_INVAL;
+	}
+	if (avail < total)
+		return XTC_E_INVAL;
+	return (int)total;
+}

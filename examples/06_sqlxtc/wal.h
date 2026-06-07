@@ -125,10 +125,12 @@ int  wal_flush_through(wal_t *w, uint64_t lsn);
  * commits are quiesced.  Returns XTC_OK or an error (log unchanged).
  *
  * `dump(emit, emit_ctx, user)` calls emit(emit_ctx, payload, len) once
- * per redo record, in the WAL payload format wal_scan delivers.
+ * per record of the compacted log, in the WAL payload format wal_scan
+ * delivers.  The dump emits the leading checkpoint record itself; this
+ * layer does not interpret the bytes.
  */
 typedef void (*wal_emit_fn)(void *emit_ctx, const void *payload, uint32_t len);
-int  wal_checkpoint(wal_t *w, const char *path, uint64_t clock,
+int  wal_checkpoint(wal_t *w, const char *path,
          void (*dump)(wal_emit_fn emit, void *emit_ctx, void *user),
          void *user);
 
