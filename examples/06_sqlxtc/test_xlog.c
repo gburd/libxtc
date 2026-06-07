@@ -177,6 +177,31 @@ main(void)
 		CK(xl_record_len(blob, XL_HDR_LEN - 1) == XTC_E_INVAL);
 	}
 
+	/* --- XL_PAGE full-page after-image --- */
+	{
+		uint8_t img[128];
+		const void *pimg;
+		uint32_t pid;
+		uint16_t ilen;
+		uint64_t page_lsn = 0x5566;
+		for (int z = 0; z < (int)sizeof img; z++) img[z] = (uint8_t)z;
+		memcpy(img, &page_lsn, 8);          /* LSN lives at the front of the image */
+		memset(&h, 0, sizeof h);
+		h.type = XL_PAGE; h.txn_id = 3; h.prev_lsn = 0;
+		n = xl_enc_page(buf, sizeof buf, &h, 77, img, (uint16_t)sizeof img);
+		CK(n == (int)(XL_HDR_LEN + xl_page_size((uint16_t)sizeof img)));
+		CK(xl_parse_page(buf, (uint32_t)n, &ph, &pid, &pimg, &ilen) == XTC_OK);
+		CK(ph.type == XL_PAGE && pid == 77 && ilen == sizeof img);
+		CK(memcmp(pimg, img, sizeof img) == 0);
+		/* the page LSN recovery gates on is the front of the image */
+		{ uint64_t got; memcpy(&got, pimg, 8); CK(got == page_lsn); }
+		/* xl_record_len agrees and a wrong-type parse is refused */
+		CK(xl_record_len(buf, (uint32_t)n) == n);
+		CK(xl_parse_update(buf, (uint32_t)n, &ph, &pb) == XTC_E_INVAL);
+		for (uint32_t L = 0; L < (uint32_t)n; L++)
+			CK(xl_parse_page(buf, L, &ph, &pid, &pimg, &ilen) != XTC_OK);
+	}
+
 	if (g_fail) {
 		fprintf(stderr, "test_xlog: FAILED\n");
 		return 1;
