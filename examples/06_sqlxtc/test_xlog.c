@@ -140,6 +140,43 @@ main(void)
 		CK(xl_parse_checkpoint(buf, (uint32_t)n, &b.commit_ts) == XTC_E_INVAL);
 	}
 
+	/* --- walking several records packed back to back (one WAL frame
+	 * carries a whole transaction: UPDATE, UPDATE, COMMIT) --- */
+	{
+		uint8_t blob[256];
+		uint8_t *q = blob;
+		const char *vals[2] = { "row-one", "r2" };
+		uint32_t off, count;
+		int rl;
+
+		for (int u = 0; u < 2; u++) {
+			memset(&h, 0, sizeof h);
+			h.type = XL_UPDATE; h.txn_id = 7;
+			memset(&b, 0, sizeof b);
+			b.tableid = 1; b.rowid = 10 + u; b.commit_ts = 7;
+			b.redo = vals[u]; b.redo_len = (uint16_t)(strlen(vals[u]) + 1);
+			n = xl_enc_update(q, sizeof blob - (size_t)(q - blob), &h, &b);
+			CK(n > 0); q += n;
+		}
+		memset(&h, 0, sizeof h); h.type = XL_COMMIT; h.txn_id = 7;
+		n = xl_enc_simple(q, sizeof blob - (size_t)(q - blob), &h);
+		CK(n > 0); q += n;
+
+		/* walk it */
+		off = 0; count = 0;
+		while (off < (uint32_t)(q - blob)) {
+			rl = xl_record_len(blob + off, (uint32_t)(q - blob) - off);
+			CK(rl > 0);
+			CK(xl_parse_hdr(blob + off, (uint32_t)rl, &ph) == XTC_OK);
+			count++;
+			off += (uint32_t)rl;
+		}
+		CK(off == (uint32_t)(q - blob));   /* landed exactly on the end */
+		CK(count == 3);                    /* two UPDATEs + one COMMIT */
+		/* a buffer one byte short of a complete trailing record is rejected */
+		CK(xl_record_len(blob, XL_HDR_LEN - 1) == XTC_E_INVAL);
+	}
+
 	if (g_fail) {
 		fprintf(stderr, "test_xlog: FAILED\n");
 		return 1;

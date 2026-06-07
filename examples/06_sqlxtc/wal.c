@@ -460,18 +460,12 @@ wal_cmp_emit(void *vctx, const void *payload, uint32_t len)
 	c->off += (off_t)WAL_REC_HDR + (off_t)len;
 }
 
-/* WAL checkpoint record: ts = the persisted clock, count = the reserved
- * sentinel so recovery recognizes it (a real put never has this count). */
-#define WAL_CKPT_SENTINEL 0xFFFFFFFFu
-
 int
-wal_checkpoint(wal_t *w, const char *path, uint64_t clock,
+wal_checkpoint(wal_t *w, const char *path,
     void (*dump)(wal_emit_fn emit, void *emit_ctx, void *user), void *user)
 {
 	char tmp[1100];
 	struct wal_cmp_ctx c;
-	uint8_t ck[12];
-	uint32_t sentinel = WAL_CKPT_SENTINEL;
 	int fd, dfd;
 
 	if (w == NULL || path == NULL)
@@ -484,10 +478,9 @@ wal_checkpoint(wal_t *w, const char *path, uint64_t clock,
 		return XTC_E_INTERNAL;
 	c.fd = fd; c.off = 0; c.lsn = 0; c.err = 0;
 
-	/* CHECKPOINT record first, then the live-state dump. */
-	memcpy(ck, &clock, 8);
-	memcpy(ck + 8, &sentinel, 4);
-	wal_cmp_emit(&c, ck, 12);
+	/* The dump emits every record of the compacted log, starting with
+	 * its own checkpoint record -- this layer does not interpret the
+	 * record bytes. */
 	if (dump != NULL)
 		dump(wal_cmp_emit, &c, user);
 
