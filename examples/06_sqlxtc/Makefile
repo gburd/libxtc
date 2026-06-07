@@ -151,6 +151,7 @@ clean:
 	rm -f test_recover_undo
 	rm -f test_redo_page
 	rm -f test_clean_restart
+	rm -f test_steal
 	rm -f test_parallel test_parallel.o
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o
 	rm -f test_bufmgr_mt
@@ -172,7 +173,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -410,6 +411,13 @@ test_clean_restart: test_clean_restart.c engine.o db.o quack.o vfs.o xstore.o xl
 
 test-clean-restart: test_clean_restart
 	./test_clean_restart
+
+# ---- STEAL: large transaction spills to disk; undo on crash with CLRs ----
+test_steal: test_steal.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_steal.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-steal: test_steal
+	./test_steal
 
 # ---- B-tree node (prefix compression) unit test (standalone) ----
 test_btnode: test_btnode.c btnode.c btnode.h
