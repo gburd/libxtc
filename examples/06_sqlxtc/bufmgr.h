@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/bufmgr.h
- *	An xtc-native buffer manager modelled on LeanStore: pointer
+ *	An xtc-native buffer manager using pointer
  *	swizzling (Swip) and cooling-stage eviction.
  *
  *	A Swip is a single 64-bit word held in a parent (a B-tree child
@@ -68,7 +68,7 @@ typedef struct bm_opts {
 	 * path.  Zero (the default) creates/truncates a fresh store. */
 	uint8_t     reopen;
 
-	/* Scan resistance (LeanStore cooling + 2Q probation).  When set
+	/* Scan resistance (cooling stage + 2Q probation).  When set
 	 * (the default), a demand-LOADED page is admitted to the COOL
 	 * stage, not HOT: it becomes HOT only on a second access (rescue),
 	 * and eviction prefers COOL victims, cooling HOT pages only to
@@ -96,15 +96,35 @@ typedef struct bm_opts {
 	 * for a persistent, crash-safe store; leave it off for a scratch or
 	 * pure-in-RAM pool). */
 	uint8_t     double_write;
+
+	/* ARIES page LSN.  Byte offset of the 8-byte page LSN within each
+	 * page (0 if it is the first field, the btnode convention), or -1
+	 * (the default) to disable page-LSN handling entirely.  When set:
+	 * (1) the clean->dirty edge stamps the page's LSN with the value
+	 * given to bm_set_lsn, and (2) before writing a dirty page the
+	 * buffer manager calls the bm_set_wal_flush hook to ensure the log
+	 * is durable through that page's LSN -- the write-ahead rule.
+	 * Page 0 (the superblock) is never stamped. */
+	int         lsn_off;
 } bm_opts_t;
 
 #define BM_OPTS_DEFAULT \
 	{ .path = NULL, .page_size = 4096, .n_frames = 256, .cool_pct = 10, \
-	  .scan_resist = 1, .reopen = 0, .double_write = 0 }
+	  .scan_resist = 1, .reopen = 0, .double_write = 0, .lsn_off = -1 }
 
 /* Lifecycle. */
 int  bm_create(const bm_opts_t *opts, bm_t **out);
 void bm_destroy(bm_t *bm);
+
+/* ARIES page-LSN support (active only when bm_opts.lsn_off >= 0).
+ * bm_set_lsn records the LSN stamped onto pages dirtied from here on
+ * (the engine sets it to the log LSN of the change about to be made).
+ * bm_set_wal_flush registers the write-ahead hook: before writing a
+ * dirty page the manager calls flush(ctx, page_lsn) and defers the
+ * write if it does not return XTC_OK (the log is not yet durable that
+ * far). */
+void bm_set_lsn(bm_t *bm, uint64_t lsn);
+void bm_set_wal_flush(bm_t *bm, int (*flush)(void *ctx, uint64_t lsn), void *ctx);
 
 /* Allocate a fresh page.  Installs a HOT swip into *slot and returns
  * the (pinned) frame; the caller fills frame's page and bm_unfix.

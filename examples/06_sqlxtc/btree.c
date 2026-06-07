@@ -343,6 +343,14 @@ bt_set_close_hook(void (*fn)(bt_t *))
 	bt_close_hook = fn;
 }
 
+void
+bt_set_lsn(bt_t *bt, uint64_t lsn)
+{
+	/* The log LSN stamped onto every page this tree dirties from here
+	 * on; the caller sets it to the LSN of the change about to be made. */
+	bm_set_lsn(bt->bm, lsn);
+}
+
 /*
  * Split a full INTERNAL node `pp` (exclusively latched) the standard
  * B-tree way: the middle separator is pushed up and removed from the
