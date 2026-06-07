@@ -208,7 +208,7 @@ instead.  Stasis's log manager is a simple timeout-batched group commit
 | CLRs + UndoNextLSN | skipped | yes | -- | **in code (S3), Stasis-style** |
 | Nested Top Action + dummy CLR (atomic SMO) | n/a | yes | -- | planned (S3 remainder) |
 | Physiological page/SMO logging | yes | yes | -- | planned (deferred from S2) |
-| STEAL/NO-FORCE | yes | yes | -- | diverged: NO-STEAL today; STEAL = S5 |
+| STEAL/NO-FORCE | yes | yes | -- | in code (S5): payload spill + undo with CLRs |
 | Dirty-page table + true recLSN | yes | yes | -- | partial (dirty_seq proxy); S4 |
 | Fuzzy checkpoint + min-recLSN truncation | yes | yes | -- | planned (S4) |
 | Log-record codegen from .src | yes | no | -- | planned (deferred from S2) |
@@ -335,7 +335,7 @@ Staged so each step is independently testable and leaves the tree green:
   proportional to dirty pages, not live rows; log truncates to the recLSN
   horizon; recovery starts at ckp_lsn.
 
-  **S5 -- STEAL for large transactions.**
+  **S5 -- STEAL for large transactions.  DONE (payload spill).**
   Allow the per-transaction write buffer to spill uncommitted versions into
   the tree (marked uncommitted) when it grows past a threshold, and UNDO
   them on abort/crash via the S2/S3 machinery (CLRs).  This removes the
@@ -343,6 +343,23 @@ Staged so each step is independently testable and leaves the tree green:
   uncommitted versions from other transactions, so spilling is invisible to
   readers.  Test: a transaction larger than the write-buffer cap commits
   and aborts correctly; crash mid-large-transaction undoes the spill.
+
+  Landed: a transaction past XS_SPILL_HI spills its oldest buffered
+  payloads to a reserved staging table-id (logged under a high-range
+  steal-txn id), bounding its resident footprint; keys stay in the write
+  buffer so read-your-writes and SSI are unaffected.  The staging records'
+  steal-txn id never commits, so recovery's S3 undo pass redoes then undoes
+  them, writing a CLR per entry -- the same path for a committed
+  transaction's staging cleanup and an uncommitted one's rollback.  The
+  staging table-id is skipped by the checkpoint dump and GC.  This is what
+  finally makes CLRs fire during recovery from a real workload
+  (test_steal; xstore_undo_clrs).  Follow-up (efficiency, not correctness):
+  commit re-materializes the spilled payloads; a streamed commit would
+  keep the bound at commit time too.  Crash-case in-place recovery
+  (physiological redo from the page-image mechanism, XL_PAGE +
+  bm_apply_page_image) remains a performance refinement -- recovery still
+  rebuilds from the bounded log onto a fresh page file, which STEAL does
+  not change.
 
 Sequencing note: S1-S4 deliver the mature recovery + bounded-log story
 (fast restart, cheap checkpoints) without changing the data model.  S5 is
