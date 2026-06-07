@@ -148,6 +148,7 @@ clean:
 	rm -f test_mvcc test_mvcc.o mvcc.o
 	rm -f test_xstore test_xstore.o xstore.o
 	rm -f test_xlog test_xlog.o xlog.o
+	rm -f test_recover_undo
 	rm -f test_parallel test_parallel.o
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o
 	rm -f test_bufmgr_mt
@@ -169,7 +170,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xlog test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-btnode test-btree test-btree-loop test-btree-mt
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xlog test-recover-undo test-parallel test-bufmgr test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-btnode test-btree test-btree-loop test-btree-mt
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -335,6 +336,13 @@ test_xlog: test_xlog.c xlog.c
 
 test-xlog: test_xlog
 	./test_xlog
+
+# ---- recovery undo pass + CLR writing (synthetic loser log) ----
+test_recover_undo: test_recover_undo.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_recover_undo.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-recover-undo: test_recover_undo
+	./test_recover_undo
 
 # ---- sx_ engine parallel-execution test (in-process, no daemon) ----
 test_parallel: test_parallel.c engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
