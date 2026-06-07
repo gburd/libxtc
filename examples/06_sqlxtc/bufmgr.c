@@ -60,6 +60,8 @@ struct bm_frame {
 	                               * out from under a fixer about to
 	                               * re-pin it (anti-thrash). */
 	_Atomic uint64_t  dirty_seq;  /* order it was dirtied (recLSN proxy) */
+	_Atomic uint64_t  rec_lsn;    /* WAL LSN that first dirtied it since clean
+	                               * (the ARIES recLSN; log truncation horizon) */
 	bm_pid_t          pid;
 	bm_swip_t        *parent;     /* the Swip word that points here (swip mode) */
 	int               via_pid;    /* 1: referenced through the page table */
@@ -914,6 +916,10 @@ bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty)
 				    memory_order_relaxed);
 				memcpy((uint8_t *)frame->page + bm->lsn_off,
 				    &lsn, sizeof lsn);
+				/* recLSN: the LSN of the change that first dirtied
+				 * this page; the log is durable-needed up to here. */
+				atomic_store_explicit(&frame->rec_lsn, lsn,
+				    memory_order_relaxed);
 			}
 		}
 	}
@@ -961,6 +967,29 @@ bm_apply_page_image(bm_t *bm, bm_pid_t pid, const void *image, uint32_t image_le
 	bm_unlatch(f);
 	bm_unfix(bm, f, 0);                                  /* already current */
 	return 0;
+}
+
+uint64_t
+bm_min_rec_lsn(bm_t *bm)
+{
+	uint64_t m = 0;
+	int seen = 0;
+	uint32_t i;
+
+	if (bm == NULL)
+		return 0;
+	/* The oldest recLSN among dirty pages: the log before it describes
+	 * only changes already on the data file, so it can be truncated.
+	 * 0 means no page is dirty (no constraint from the pool). */
+	for (i = 0; i < bm->n_frames; i++) {
+		bm_frame_t *f = &bm->frames[i];
+		if (atomic_load_explicit(&f->dirty, memory_order_acquire)) {
+			uint64_t r = atomic_load_explicit(&f->rec_lsn,
+			    memory_order_relaxed);
+			if (!seen || r < m) { m = r; seen = 1; }
+		}
+	}
+	return seen ? m : 0;
 }
 
 int
