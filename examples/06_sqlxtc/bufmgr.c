@@ -71,6 +71,18 @@ struct bm_frame {
 	xtc_arwlock_t    *latch;      /* content latch (fiber-yielding) */
 };
 
+/*
+ * Page-table lock striping: instead of one global mutex over all hash
+ * buckets, an array of cache-line-isolated stripe locks, each guarding
+ * the buckets b with (b & (BM_HT_STRIPES-1)) == stripe.  Every table
+ * operation touches exactly one bucket, so it locks exactly one stripe;
+ * fixes of unrelated pages then proceed in parallel.  The 128-byte
+ * union keeps adjacent stripes off the same cache line (no false
+ * sharing) regardless of array base alignment.
+ */
+#define BM_HT_STRIPES 256u
+typedef union { pthread_mutex_t m; char pad[128]; } bm_htlock_t;
+
 struct bm {
 	int               fd;
 	uint32_t          page_size;
@@ -93,7 +105,7 @@ struct bm {
 	_Atomic uint32_t  clock;       /* round-robin victim cursor */
 
 	/* page table (pid mode): pid -> resident frame */
-	pthread_mutex_t   ht_mu;
+	bm_htlock_t      *ht_locks;    /* BM_HT_STRIPES striped bucket locks */
 	bm_frame_t      **buckets;
 	uint32_t          nbucket;
 
@@ -427,24 +439,32 @@ has_resident_child(bm_t *bm, bm_frame_t *f)
 }
 
 /* ---- page table (pid mode) ---- */
+/* The stripe lock guarding hash bucket `b`. */
+static inline pthread_mutex_t *
+ht_lock(bm_t *bm, uint32_t b)
+{
+	return &bm->ht_locks[b & (BM_HT_STRIPES - 1)].m;
+}
 static void
 ht_insert(bm_t *bm, bm_frame_t *f)
 {
 	uint32_t b = (uint32_t)(f->pid % bm->nbucket);
-	(void)pthread_mutex_lock(&bm->ht_mu);
+	pthread_mutex_t *lk = ht_lock(bm, b);
+	(void)pthread_mutex_lock(lk);
 	f->hnext = bm->buckets[b];
 	bm->buckets[b] = f;
-	(void)pthread_mutex_unlock(&bm->ht_mu);
+	(void)pthread_mutex_unlock(lk);
 }
 static void
 ht_remove(bm_t *bm, bm_frame_t *f)
 {
 	uint32_t b = (uint32_t)(f->pid % bm->nbucket);
+	pthread_mutex_t *lk = ht_lock(bm, b);
 	bm_frame_t **pp;
-	(void)pthread_mutex_lock(&bm->ht_mu);
+	(void)pthread_mutex_lock(lk);
 	for (pp = &bm->buckets[b]; *pp != NULL; pp = &(*pp)->hnext)
 		if (*pp == f) { *pp = f->hnext; break; }
-	(void)pthread_mutex_unlock(&bm->ht_mu);
+	(void)pthread_mutex_unlock(lk);
 }
 /* Look up pid; if resident, pin it and return the frame (caller holds
  * the pin).  Returns NULL on a miss. */
@@ -452,19 +472,20 @@ static bm_frame_t *
 ht_lookup_pin(bm_t *bm, bm_pid_t pid)
 {
 	uint32_t b = (uint32_t)(pid % bm->nbucket);
+	pthread_mutex_t *lk = ht_lock(bm, b);
 	bm_frame_t *f;
-	(void)pthread_mutex_lock(&bm->ht_mu);
+	(void)pthread_mutex_lock(lk);
 	for (f = bm->buckets[b]; f != NULL; f = f->hnext) {
 		if (f->pid == pid && f->via_pid) {
 			if (!try_pin(f))
 				break;            /* reserved for eviction: treat as a miss */
 			if (atomic_load_explicit(&f->state, memory_order_acquire) == BM_COOL)
 				atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
-			(void)pthread_mutex_unlock(&bm->ht_mu);
+			(void)pthread_mutex_unlock(lk);
 			return f;
 		}
 	}
-	(void)pthread_mutex_unlock(&bm->ht_mu);
+	(void)pthread_mutex_unlock(lk);
 	return NULL;
 }
 
@@ -734,9 +755,16 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	/* page table: next pow2 >= 2*n_frames */
 	bm->nbucket = 16;
 	while (bm->nbucket < bm->n_frames * 2u) bm->nbucket <<= 1;
-	(void)pthread_mutex_init(&bm->ht_mu, NULL);
+	if ((rc = __os_calloc(BM_HT_STRIPES, sizeof *bm->ht_locks,
+	    (void **)&bm->ht_locks)) != XTC_OK) {
+		__os_aligned_free(bm->pool); __os_free(bm->frames);
+		close(bm->fd); __os_free(bm); return rc;
+	}
+	for (i = 0; i < (int)BM_HT_STRIPES; i++)
+		(void)pthread_mutex_init(&bm->ht_locks[i].m, NULL);
 	if ((rc = __os_calloc(bm->nbucket, sizeof *bm->buckets,
 	    (void **)&bm->buckets)) != XTC_OK) {
+		__os_free(bm->ht_locks);
 		__os_aligned_free(bm->pool); __os_free(bm->frames);
 		close(bm->fd); __os_free(bm); return rc;
 	}
@@ -771,7 +799,12 @@ bm_destroy(bm_t *bm)
 	(void)pthread_mutex_destroy(&bm->free_mu);
 	(void)pthread_mutex_destroy(&bm->pf_mu);
 	(void)pthread_mutex_destroy(&bm->pid_mu);
-	(void)pthread_mutex_destroy(&bm->ht_mu);
+	{
+		uint32_t i;
+		for (i = 0; i < BM_HT_STRIPES; i++)
+			(void)pthread_mutex_destroy(&bm->ht_locks[i].m);
+	}
+	__os_free(bm->ht_locks);
 	__os_free(bm->buckets);
 	__os_aligned_free(bm->pool);
 	__os_free(bm->frames);
@@ -1041,11 +1074,12 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 		atomic_store_explicit(&f->dirty, 0, memory_order_relaxed);
 		atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
 		if (do_io(bm, f->page, pid, 0) != 0) { free_push(bm, f); return XTC_E_INTERNAL; }
-		/* Publish: under the table lock, re-check no one beat us. */
+		/* Publish: under the bucket's stripe lock, re-check no one beat us. */
 		{
 			uint32_t b = (uint32_t)(pid % bm->nbucket);
+			pthread_mutex_t *lk = ht_lock(bm, b);
 			bm_frame_t *e;
-			(void)pthread_mutex_lock(&bm->ht_mu);
+			(void)pthread_mutex_lock(lk);
 			for (e = bm->buckets[b]; e != NULL; e = e->hnext)
 				if (e->pid == pid && e->via_pid) break;
 			if (e != NULL) {
@@ -1056,7 +1090,7 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 				if (pinned &&
 				    atomic_load_explicit(&e->state, memory_order_acquire) == BM_COOL)
 					atomic_store_explicit(&e->state, BM_HOT, memory_order_release);
-				(void)pthread_mutex_unlock(&bm->ht_mu);
+				(void)pthread_mutex_unlock(lk);
 				f->via_pid = 0;
 				free_push(bm, f);
 				if (!pinned)
@@ -1073,12 +1107,12 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 			 * A scan touches each page once, so its pages never
 			 * displace the hot working set.  Pin BEFORE publishing
 			 * the COOL state so a concurrent evict_one (whose
-			 * try_reserve is not under ht_mu) cannot reserve and
+			 * try_reserve is not under a stripe lock) cannot reserve and
 			 * race the pin store. */
 			atomic_store_explicit(&f->pin, 1, memory_order_release);
 			atomic_store_explicit(&f->state,
 			    bm->scan_resist ? BM_COOL : BM_HOT, memory_order_release);
-			(void)pthread_mutex_unlock(&bm->ht_mu);
+			(void)pthread_mutex_unlock(lk);
 		}
 		atomic_fetch_add_explicit(&bm->resident, 1, memory_order_relaxed);
 		atomic_fetch_add_explicit(&bm->s_loads, 1, memory_order_relaxed);
