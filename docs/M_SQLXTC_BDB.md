@@ -200,6 +200,8 @@ instead.  Stasis's log manager is a simple timeout-batched group commit
 | Element | BDB | Stasis | Aether | sqlxtc |
 | --- | --- | --- | --- | --- |
 | Page LSN at fixed offset | yes | yes | -- | in code (S1) |
+| Physiological full-page redo (XL_PAGE) + gated apply | -- | -- | -- | in code (mechanism: xl_enc_page + bm_apply_page_image) |
+| In-place recovery, clean case (trust clean base) | yes | yes | -- | in code (clean-restart fast path) |
 | Write-ahead enforce (flush log before dirty page) | yes | yes | -- | in code (S1) |
 | Log header type/txn/prev_lsn | gen'd | yes | -- | in code (S2) |
 | 3-pass recovery | yes | yes | -- | in code, reshaped (S3): redo-all + undo-losers |
@@ -309,6 +311,19 @@ Staged so each step is independently testable and leaves the tree green:
   keeps rebuilding onto a fresh page file; "recover in place" needs the
   physiological page/SMO logging held back from S2.  The undo + CLR path
   this delivers is exactly what S5 (STEAL) plugs real losers into.
+
+  Progress since: the physiological-redo mechanism is built and tested on
+  both ends -- XL_PAGE (a full-page after-image record) and
+  bm_apply_page_image (page-LSN-gated, idempotent apply).  The CLEAN case
+  of in-place recovery is wired: a clean shutdown flushes the base and
+  marks its superblock clean + records the commit clock, and the next
+  open trusts that base and skips replay (test_clean_restart proves it by
+  deleting the WAL).  A crash still rebuilds from the log.  REMAINING for
+  the crash case: emit XL_PAGE from the B-tree SMO path inside a
+  nested-top-action bracket and run a physiological redo pass so a torn
+  base is repaired in place rather than discarded -- this couples with
+  the STEAL write-ordering (log changes physiologically as applied,
+  commit last), so it is best done together with S5.
 
   **S4 -- Fuzzy checkpoint + min-recLSN truncation.**
   Checkpoint writes the dirty-page table + active-txn table + `ckp_lsn =
