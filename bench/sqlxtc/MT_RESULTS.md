@@ -84,3 +84,38 @@ The 95%-read mixed case improves only modestly (e.g. 16 threads
 synchronous commits with no group commit -- which a bufmgr lock change
 cannot help.  That requires driving the SQL path on libxtc loops/procs
 so the group-commit WAL writer is used; it is the next optimization.
+
+## Group-commit WAL writer on loops (engine_loop) -- fast-NVMe finding
+
+Driving the SQL workload as libxtc procs on a multi-loop executor with
+the group-commit WAL writer (engine_loop) vs off-loop OS threads each
+doing a synchronous commit (engine_mt).  Write-heavy (50% read),
+in-cache, on arnold (20 cores, NVMe).  Median kops/s:
+
+| cores | off-loop sync (engine_mt) | on-loop group-commit (engine_loop P=4) |
+| ----: | ------------------------: | -------------------------------------: |
+|   1 |  676 | 201 |
+|   4 |  612 | 201 |
+|   8 |  338 | 162 |
+|  16 |  177 | 131 |
+|  20 |  142 | 123 |
+
+Finding: on fast local NVMe the group-commit path is NOT faster -- it
+loses at low concurrency and only converges at high.  fsync is cheap
+here, so batching saves little, while the group-commit machinery (a
+message round-trip to the writer proc + park + ack per commit) is pure
+overhead versus a direct fdatasync.  Group commit pays off when fsync is
+EXPENSIVE (slow/secure-erase disks, F_FULLFSYNC, replicated/remote logs)
+or at very high committer counts; it is a scale-out / durable-remote
+optimization, not a local-NVMe one.  The real local write ceiling is
+leaf-latch contention -- both paths decline with concurrency as writers
+serialize on hot pages -- which is the next thing to attack, not the
+commit path.
+
+Two improvements did land from this work:
+  * wal.c: pipelined group commit (drain non-blocking + flush; no fixed
+    gather window), which removes the window latency that made the
+    writer lose to synchronous commit even at low load.
+  * src/ptc/sync.c: a real use-after-scope crash in xtc_arwlock's
+    fiber-waiter wake path, found by the high-fiber-concurrency write
+    workload and fixed (wake under the lock).
