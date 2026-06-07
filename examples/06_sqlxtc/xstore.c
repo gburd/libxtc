@@ -59,6 +59,7 @@
 #include "sqlite3.h"
 #include "btree.h"
 #include "wal.h"
+#include "xlog.h"
 #include "xtc.h"
 #include "xtc_proc.h"
 
@@ -1180,19 +1181,26 @@ xs_wal_emit(const uint8_t *rec, size_t sz)
 static uint64_t
 xs_wal_put(uint64_t ts, uint32_t tableid, int64_t rowid, const void *val, int vlen, int deleted)
 {
-	uint8_t rec[12 + 15 + XS_VMAX];
+	uint8_t rec[64 + XS_VMAX];        /* one XL_UPDATE + a trailing XL_COMMIT */
 	uint8_t *p = rec;
-	uint32_t n = 1;
-	uint8_t flags = deleted ? XS_F_DELETED : 0;
+	xl_hdr_t h;
+	xl_body_t b;
+	int n;
 	uint16_t vl = (deleted || vlen < 0) ? 0
 	    : (uint16_t)(vlen > XS_VMAX ? XS_VMAX : vlen);
-	memcpy(p, &ts, 8); p += 8;
-	memcpy(p, &n, 4); p += 4;
-	memcpy(p, &rowid, 8); p += 8;
-	memcpy(p, &tableid, 4); p += 4;
-	*p++ = flags;
-	memcpy(p, &vl, 2); p += 2;
-	if (vl) { memcpy(p, val, vl); p += vl; }
+
+	h.type = XL_UPDATE; h.txn_id = ts; h.prev_lsn = 0;
+	memset(&b, 0, sizeof b);
+	b.tableid = tableid; b.rowid = rowid; b.commit_ts = ts;
+	b.flags = deleted ? XS_F_DELETED : 0;
+	b.redo = vl ? val : NULL; b.redo_len = vl;
+	if ((n = xl_enc_update(p, sizeof rec, &h, &b)) < 0)
+		return 0;
+	p += n;
+	h.type = XL_COMMIT;               /* this single statement is its own txn */
+	if ((n = xl_enc_simple(p, sizeof rec - (size_t)(p - rec), &h)) < 0)
+		return 0;
+	p += n;
 	return xs_wal_emit(rec, (size_t)(p - rec));
 }
 
@@ -1529,44 +1537,54 @@ xs_sync(xsql_vtab *pv)
 
 /*
  * Serialize the transaction's buffered versions into one WAL record and
- * make it DURABLE before any of them touch the B-tree.  Record layout:
+ * make it DURABLE before any of them touch the B-tree.  The record is a
+ * run of XL_UPDATE sub-records (one per buffered version) followed by an
+ * XL_COMMIT, all sharing this transaction's commit timestamp as txn_id;
+ * see xlog.h.  Packing the whole transaction into one WAL frame keeps it
+ * atomically durable with a single fsync (group commit), exactly the
+ * NO-STEAL discipline: a crash either has the complete frame (redo it)
+ * or not (nothing reached the B-tree, nothing to undo).
  *
- *	[u64 commit_ts][u32 n]  then n x { [i64 rowid][u8 flags][u16 vlen][vlen] }
- *
- * Logging before applying is what lets recovery be redo-only: a crash
- * after this returns can redo the commit from the log (idempotent --
- * version keys (rowid, ~commit_ts) are immutable), and a crash before
- * it has not touched the B-tree, so there is nothing to undo.  On a
- * loop the commit joins the group-commit batch (one fsync for many);
- * off a loop it appends synchronously.
+ * Logging before applying is what lets recovery redo the commit from the
+ * log (idempotent -- version keys (rowid, ~commit_ts) are immutable).
+ * On a loop the commit joins the group-commit batch; off a loop it
+ * appends synchronously.
  */
 static void
 xs_wal_log(xstore_ctx_t *cx, uint64_t ts)
 {
-	size_t sz = 12;
+	size_t sz = XL_HDR_LEN;           /* trailing XL_COMMIT */
 	uint8_t *rec, *p;
-	uint32_t n;
-	int i;
+	xl_hdr_t h;
+	xl_body_t b;
+	int i, n;
 
-	for (i = 0; i < cx->wn; i++)
-		sz += 15 + (cx->wbuf[i].deleted ? 0 : cx->wbuf[i].len);
+	for (i = 0; i < cx->wn; i++) {
+		uint16_t vl = cx->wbuf[i].deleted ? 0 : (uint16_t)cx->wbuf[i].len;
+		sz += (size_t)XL_HDR_LEN + xl_update_size(vl, 0);
+	}
 	rec = malloc(sz);
 	if (rec == NULL)
 		return;                       /* best-effort; durability lost on OOM */
 	p = rec;
-	memcpy(p, &ts, 8); p += 8;
-	n = (uint32_t)cx->wn;
-	memcpy(p, &n, 4); p += 4;
 	for (i = 0; i < cx->wn; i++) {
 		xs_wrec_t *w = &cx->wbuf[i];
-		uint8_t flags = w->deleted ? XS_F_DELETED : 0;
-		uint16_t vlen = w->deleted ? 0 : w->len;
-		memcpy(p, &w->rowid, 8); p += 8;
-		memcpy(p, &w->tableid, 4); p += 4;
-		*p++ = flags;
-		memcpy(p, &vlen, 2); p += 2;
-		if (vlen) { memcpy(p, w->data, vlen); p += vlen; }
+		uint16_t vl = w->deleted ? 0 : (uint16_t)w->len;
+		h.type = XL_UPDATE; h.txn_id = ts; h.prev_lsn = 0;
+		memset(&b, 0, sizeof b);
+		b.tableid = w->tableid; b.rowid = w->rowid; b.commit_ts = ts;
+		b.flags = w->deleted ? XS_F_DELETED : 0;
+		b.redo = vl ? w->data : NULL; b.redo_len = vl;
+		if ((n = xl_enc_update(p, sz - (size_t)(p - rec), &h, &b)) < 0) {
+			free(rec); return;
+		}
+		p += n;
 	}
+	h.type = XL_COMMIT; h.txn_id = ts; h.prev_lsn = 0;
+	if ((n = xl_enc_simple(p, sz - (size_t)(p - rec), &h)) < 0) {
+		free(rec); return;
+	}
+	p += n;
 	xs_wal_emit(rec, (size_t)(p - rec));
 	free(rec);
 }
@@ -1813,43 +1831,47 @@ static int
 xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 {
 	struct xs_recover *r = user;
-	const uint8_t *p = rec;
-	const uint8_t *end = (const uint8_t *)rec + len;
-	uint64_t ts;
-	uint32_t n, i;
+	const uint8_t *base = rec;
+	uint32_t off = 0;
 	(void)lsn;
 
-	if (len < 12)
-		return 0;                     /* malformed: skip */
-	memcpy(&ts, p, 8); p += 8;
-	memcpy(&n, p, 4); p += 4;
-	if (n == 0xFFFFFFFFu) {
-		/* CHECKPOINT record: ts carries the persisted commit clock.
-		 * No entries; just float the recovery clock up to it. */
-		if (ts > r->max_ts) r->max_ts = ts;
-		return 0;
-	}
-	for (i = 0; i < n; i++) {
-		int64_t rowid;
-		uint32_t tableid;
-		uint8_t flags;
-		uint16_t vlen;
-		uint8_t key[XS_VKLEN];
-		uint8_t buf[1 + XS_VMAX];
+	/*
+	 * A WAL frame carries one transaction: a run of XL_UPDATE records
+	 * ending in XL_COMMIT, or a lone XL_CHECKPOINT.  Walk its records.
+	 * NO-STEAL means every complete frame is a committed transaction
+	 * (an incomplete write is the torn tail, which wal_scan never
+	 * delivers), so each XL_UPDATE is simply redone onto the tree.
+	 */
+	while (off < len) {
+		xl_hdr_t h;
+		int rl = xl_record_len(base + off, len - off);
 
-		if (p + 15 > end) break;      /* torn record */
-		memcpy(&rowid, p, 8); p += 8;
-		memcpy(&tableid, p, 4); p += 4;
-		flags = *p++;
-		memcpy(&vlen, p, 2); p += 2;
-		if (vlen > XS_VMAX || p + vlen > end) break;
-		enc_vkey(tableid, rowid, ts, key);
-		buf[0] = flags;
-		if (vlen) memcpy(buf + 1, p, vlen);
-		p += vlen;
-		(void)bt_insert(r->bt, key, XS_VKLEN, buf, (uint16_t)(1 + vlen));
+		if (rl <= 0)
+			break;                    /* malformed: stop on this frame */
+		if (xl_parse_hdr(base + off, (uint32_t)rl, &h) != XTC_OK)
+			break;
+		if (h.type == XL_CHECKPOINT) {
+			uint64_t clk;
+			if (xl_parse_checkpoint(base + off, (uint32_t)rl, &clk) == XTC_OK
+			    && clk > r->max_ts)
+				r->max_ts = clk;
+		} else if (h.type == XL_UPDATE) {
+			xl_hdr_t uh;
+			xl_body_t b;
+			if (xl_parse_update(base + off, (uint32_t)rl, &uh, &b) == XTC_OK) {
+				uint8_t key[XS_VKLEN];
+				uint8_t buf[1 + XS_VMAX];
+				uint16_t vl = b.redo_len > XS_VMAX ? XS_VMAX : b.redo_len;
+				enc_vkey(b.tableid, b.rowid, b.commit_ts, key);
+				buf[0] = b.flags;
+				if (vl) memcpy(buf + 1, b.redo, vl);
+				(void)bt_insert(r->bt, key, XS_VKLEN, buf, (uint16_t)(1 + vl));
+				if (b.commit_ts > r->max_ts) r->max_ts = b.commit_ts;
+			}
+		}
+		/* XL_COMMIT and the rest carry no redo action in this model. */
+		off += (uint32_t)rl;
 	}
-	if (ts > r->max_ts) r->max_ts = ts;
 	r->records++;
 	return 0;
 }
@@ -1864,23 +1886,32 @@ xstore_recover(bt_t *bt, const char *wal_path)
 	return rc;
 }
 
-/* Dump the LIVE database state as WAL redo records, in the same payload
+/* Dump the LIVE database state as WAL records, in the same payload
  * format wal_scan delivers to xs_recover_cb -- the body of an in-WAL
- * checkpoint.  Walks the whole B-tree (table-id 0's catalog rows
- * included), and for each (tableid, rowid) emits only the NEWEST
- * version (versions sort newest-first within a key), skipping tombstones
- * and all superseded versions.  This is the compaction that bounds the
- * log: regardless of how much churn (updates/deletes) preceded it, the
- * dump -- and the log it replaces -- is proportional to the live row
- * count.  Safe only at a quiesced checkpoint (no active transaction
- * needs an older snapshot).  Original commit timestamps are preserved. */
+ * checkpoint.  Emits an XL_CHECKPOINT first (carrying the persisted
+ * commit clock), then walks the whole B-tree (table-id 0's catalog rows
+ * included) and for each (tableid, rowid) emits only the NEWEST version
+ * (versions sort newest-first within a key) as a one-version
+ * transaction frame [XL_UPDATE][XL_COMMIT], skipping tombstones and all
+ * superseded versions.  This is the compaction that bounds the log:
+ * regardless of how much churn preceded it, the dump -- and the log it
+ * replaces -- is proportional to the live row count.  Safe only at a
+ * quiesced checkpoint.  Original commit timestamps are preserved. */
+struct xs_dump_ctx { bt_t *bt; uint64_t clock; };
+
 static void
 xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 {
-	bt_t *bt = user;
+	struct xs_dump_ctx *dc = user;
+	bt_t *bt = dc->bt;
 	bt_cursor_t *cur = NULL;
 	uint8_t startk[XS_VKLEN];
+	uint8_t ck[XL_HDR_LEN + 8];
 	uint32_t last_tid = 0; int64_t last_rid = 0; int have_last = 0;
+	int cn;
+
+	if ((cn = xl_enc_checkpoint(ck, sizeof ck, dc->clock)) > 0)
+		emit(ectx, ck, (uint32_t)cn);
 
 	enc_vkey(0, INT64_MIN, ~(uint64_t)0, startk);   /* before every key */
 	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
@@ -1889,13 +1920,16 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 		const void *k = NULL, *vv = NULL;
 		uint16_t klen = 0, vl = 0;
 		const uint8_t *kb;
-		uint8_t rec[12 + 15 + XS_VMAX];
+		uint8_t rec[64 + XS_VMAX];
 		uint8_t *p = rec;
+		xl_hdr_t h;
+		xl_body_t b;
 		uint64_t ts;
-		uint32_t n = 1, tableid;
+		uint32_t tableid;
 		int64_t rowid;
 		uint8_t flags;
 		uint16_t payl;
+		int n;
 
 		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
 		    klen != XS_VKLEN)
@@ -1911,13 +1945,18 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 		ts = dec_ts(kb);
 		payl = (vl >= 1) ? (uint16_t)(vl - 1) : 0;
 		if (payl > XS_VMAX) payl = XS_VMAX;
-		memcpy(p, &ts, 8); p += 8;
-		memcpy(p, &n, 4); p += 4;
-		memcpy(p, &rowid, 8); p += 8;
-		memcpy(p, &tableid, 4); p += 4;
-		*p++ = flags;
-		memcpy(p, &payl, 2); p += 2;
-		if (payl) { memcpy(p, (const uint8_t *)vv + 1, payl); p += payl; }
+		h.type = XL_UPDATE; h.txn_id = ts; h.prev_lsn = 0;
+		memset(&b, 0, sizeof b);
+		b.tableid = tableid; b.rowid = rowid; b.commit_ts = ts;
+		b.flags = flags;
+		b.redo = payl ? (const uint8_t *)vv + 1 : NULL; b.redo_len = payl;
+		if ((n = xl_enc_update(p, sizeof rec, &h, &b)) < 0)
+			continue;
+		p += n;
+		h.type = XL_COMMIT;
+		if ((n = xl_enc_simple(p, sizeof rec - (size_t)(p - rec), &h)) < 0)
+			continue;
+		p += n;
 		emit(ectx, rec, (uint32_t)(p - rec));
 	}
 	bt_cursor_close(cur);
@@ -1926,6 +1965,8 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 int
 xstore_checkpoint_wal(bt_t *bt, struct wal *w, const char *wal_path)
 {
-	uint64_t clock = atomic_load_explicit(&g_xclock, memory_order_relaxed);
-	return wal_checkpoint((wal_t *)w, wal_path, clock, xs_dump_tree, bt);
+	struct xs_dump_ctx dc;
+	dc.bt = bt;
+	dc.clock = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	return wal_checkpoint((wal_t *)w, wal_path, xs_dump_tree, &dc);
 }

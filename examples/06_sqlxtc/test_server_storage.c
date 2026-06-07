@@ -289,7 +289,7 @@ main(void)
 
 	(void)sx_shutdown();
 	{
-		char wal[300];
+		char wal[320];
 		snprintf(wal, sizeof wal, "%s-wal", g_path); unlink(wal); unlink(g_path);
 		snprintf(wal, sizeof wal, "%s-wal", g_path2); unlink(wal); unlink(g_path2);
 		snprintf(wal, sizeof wal, "%s-wal", g_path3); unlink(wal); unlink(g_path3);

@@ -70,7 +70,7 @@ SQLITE_CFLAGS = -O2 -g -std=c11 -D_GNU_SOURCE \
     -Wno-unused-parameter \
     -Wno-implicit-fallthrough
 
-SRCS = main.c quack.c db.c conn.c engine.c mutex.c mem.c vfs.c pcache.c metrics.c sql_parse.c admin.c xstore.c wal.c bufmgr.c btree.c btnode.c
+SRCS = main.c quack.c db.c conn.c engine.c mutex.c mem.c vfs.c pcache.c metrics.c sql_parse.c admin.c xstore.c xlog.c wal.c bufmgr.c btree.c btnode.c
 OBJS = $(SRCS:.c=.o)
 
 # Lime-generated parser (Phase 2).  Compiled in if the file exists.
@@ -262,8 +262,8 @@ test-admin: test_admin
 # Installs the xtc allocator under an __os_alloc counting hook, then
 # drives a real SQL workload: proves the engine's allocations flow
 # through xtc (hook count > 0) and that the workload is correct.
-test_mem: test_mem.c mem.o mutex.o engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_mem.c mem.o mutex.o engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_mem: test_mem.c mem.o mutex.o engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_mem.c mem.o mutex.o engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-mem: test_mem
 	./test_mem
@@ -280,20 +280,20 @@ test-wal: test_wal
 	./test_wal
 
 # ---- WAL durability + crash recovery for the xstore SQL engine ----
-test_wal_recover: test_wal_recover.c xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_wal_recover.c xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_wal_recover: test_wal_recover.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_wal_recover.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-wal-recover: test_wal_recover
 	./test_wal_recover
 
-test_torn_smo: test_torn_smo.c xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_torn_smo.c xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_torn_smo: test_torn_smo.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_torn_smo.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-torn-smo: test_torn_smo
 	./test_torn_smo
 
-test_wal_compact: test_wal_compact.c xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_wal_compact.c xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_wal_compact: test_wal_compact.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_wal_compact.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-wal-compact: test_wal_compact
 	./test_wal_compact
@@ -323,8 +323,8 @@ test-mvcc: test_mvcc
 # SQLite's VDBE runs SQL; rows live in our btree/bufmgr (larger than
 # RAM).  Off-loop and on-loop (VDBE parks on offloaded page I/O
 # mid-statement).  See docs/M_SQLXTC_MVCC_SQL.md.
-test_xstore: test_xstore.c xstore.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_xstore.c xstore.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+test_xstore: test_xstore.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_xstore.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-xstore: test_xstore
 	./test_xstore
@@ -337,8 +337,8 @@ test-xlog: test_xlog
 	./test_xlog
 
 # ---- sx_ engine parallel-execution test (in-process, no daemon) ----
-test_parallel: test_parallel.c engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_parallel.c engine.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_parallel: test_parallel.c engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_parallel.c engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-parallel: test_parallel
 	./test_parallel
@@ -381,8 +381,8 @@ test-cursor-resume: test_cursor_resume
 	./test_cursor_resume
 
 # ---- server storage wiring + connection-per-proc (in-process) ----
-test_server_storage: test_server_storage.c engine.o db.o quack.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_server_storage.c engine.o db.o quack.o vfs.o xstore.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_server_storage: test_server_storage.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_server_storage.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-server-storage: test_server_storage
 	./test_server_storage
