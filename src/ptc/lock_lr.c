@@ -299,9 +299,7 @@ __wait_for_readers(xtc_lrlock_t *lr)
 		if (XTC_LIKELY(all_done)) return;
 		if (XTC_LIKELY(spin < XTC_LRLOCK_SPIN_LIMIT)) {
 			spin++;
-#if defined(__x86_64__) || defined(__i386__)
-			__asm__ __volatile__ ("pause");
-#endif
+			__os_cpu_relax();      /* x86 PAUSE / ARM YIELD / barrier */
 		} else {
 			(void)sched_yield();
 		}

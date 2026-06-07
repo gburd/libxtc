@@ -1,0 +1,223 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd June 7, 2026
+.Dt XTC_FS 3
+.Os
+.Sh NAME
+.Nm xtc_fs_open ,
+.Nm xtc_fs_close ,
+.Nm xtc_fs_pread ,
+.Nm xtc_fs_pwrite ,
+.Nm xtc_fs_fsync ,
+.Nm xtc_fs_fdatasync ,
+.Nm xtc_fs_ftruncate ,
+.Nm xtc_fs_fsize ,
+.Nm xtc_fs_stat ,
+.Nm xtc_fs_exists ,
+.Nm xtc_fs_unlink ,
+.Nm xtc_fs_rename ,
+.Nm xtc_fs_mkdir ,
+.Nm xtc_fs_rmdir ,
+.Nm xtc_fs_tmpdir ,
+.Nm xtc_fs_mkstemp ,
+.Nm xtc_fs_dir_open ,
+.Nm xtc_fs_dir_next ,
+.Nm xtc_fs_dir_close
+.Nd portable synchronous filesystem helpers
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_fs.h
+.Ft int
+.Fn xtc_fs_open "const char *path" "uint32_t flags" "int *out_fd"
+.Ft int
+.Fn xtc_fs_close "int fd"
+.Ft int
+.Fn xtc_fs_pread "int fd" "void *buf" "size_t n" "int64_t off" "size_t *out_done"
+.Ft int
+.Fn xtc_fs_pwrite "int fd" "const void *buf" "size_t n" "int64_t off" "size_t *out_done"
+.Ft int
+.Fn xtc_fs_fsync "int fd"
+.Ft int
+.Fn xtc_fs_fdatasync "int fd"
+.Ft int
+.Fn xtc_fs_ftruncate "int fd" "int64_t len"
+.Ft int
+.Fn xtc_fs_fsize "int fd" "int64_t *out_size"
+.Ft int
+.Fn xtc_fs_stat "const char *path" "xtc_fs_stat_t *out"
+.Ft int
+.Fn xtc_fs_exists "const char *path"
+.Ft int
+.Fn xtc_fs_unlink "const char *path"
+.Ft int
+.Fn xtc_fs_rename "const char *from" "const char *to"
+.Ft int
+.Fn xtc_fs_mkdir "const char *path"
+.Ft int
+.Fn xtc_fs_rmdir "const char *path"
+.Ft int
+.Fn xtc_fs_tmpdir "char *buf" "size_t cap"
+.Ft int
+.Fn xtc_fs_mkstemp "char *tmpl" "int *out_fd"
+.Ft int
+.Fn xtc_fs_dir_open "const char *path" "xtc_fs_dir_t **out"
+.Ft int
+.Fn xtc_fs_dir_next "xtc_fs_dir_t *d" "const char **out_name"
+.Ft void
+.Fn xtc_fs_dir_close "xtc_fs_dir_t *d"
+.Sh DESCRIPTION
+These functions are a small, uniform surface over the platform's file
+API (POSIX file descriptors and directories, or the Win32 equivalents),
+so callers need not re-roll
+.Xr open 2 ,
+.Xr stat 2 ,
+.Xr rename 2 ,
+directory walks, and the per-platform quirks
+.Pf ( Dv F_FULLFSYNC
+versus
+.Xr fdatasync 2
+versus
+.Fn _commit ,
+.Xr mkstemp 3
+versus
+.Fn _mktemp_s ,
+.Vt dirent
+versus
+.Fn FindFirstFile ) .
+.Pp
+Files are plain
+.Vt int
+file descriptors, so a handle returned by
+.Fn xtc_fs_open
+or
+.Fn xtc_fs_mkstemp
+composes directly with the asynchronous
+.Xr xtc_aio 3
+operations and with raw
+.Xr read 2 /
+.Xr write 2 .
+.Pp
+.Fn xtc_fs_open
+opens
+.Fa path
+according to
+.Fa flags ,
+a bitwise OR of
+.Dv XTC_FS_READ ,
+.Dv XTC_FS_WRITE ,
+.Dv XTC_FS_CREATE ,
+.Dv XTC_FS_TRUNC ,
+.Dv XTC_FS_APPEND ,
+and
+.Dv XTC_FS_EXCL ,
+returning the descriptor in
+.Fa *out_fd .
+.Fn xtc_fs_pread
+and
+.Fn xtc_fs_pwrite
+perform positioned I/O, retrying on
+.Er EINTR
+and
+.Er EAGAIN
+and looping until
+.Fa n
+bytes are transferred or, for a read, end of file is reached; the byte
+count is returned in
+.Fa *out_done
+(a short read is end of file, not an error).
+.Fn xtc_fs_fsync
+makes data and metadata durable;
+.Fn xtc_fs_fdatasync
+makes the data durable (the page- and log-flush hot path).
+.Pp
+.Fn xtc_fs_stat
+fills
+.Fa out
+with the size, last-modified time (nanoseconds since the epoch), and a
+directory flag.
+.Fn xtc_fs_exists
+returns 1 if
+.Fa path
+exists and 0 otherwise.
+.Fn xtc_fs_rename
+replaces
+.Fa to
+with
+.Fa from
+atomically.
+.Pp
+.Fn xtc_fs_tmpdir
+writes the temporary directory into
+.Fa buf ,
+honoring
+.Ev TMPDIR ,
+.Ev TMP ,
+and
+.Ev TEMP
+(and falling back to
+.Pa /tmp ,
+or
+.Fn GetTempPath
+on Windows), with any trailing separator trimmed.
+.Fn xtc_fs_mkstemp
+creates and opens a unique file from a
+.Fa tmpl
+ending in
+.Dq XXXXXX .
+.Pp
+.Fn xtc_fs_dir_open ,
+.Fn xtc_fs_dir_next ,
+and
+.Fn xtc_fs_dir_close
+iterate a directory's entries, skipping
+.Dq \&.
+and
+.Dq \&.. ;
+.Fn xtc_fs_dir_next
+sets
+.Fa *out_name
+to
+.Dv NULL
+at the end of the directory.
+.Pp
+These are blocking calls.
+On a fiber loop, prefer
+.Xr xtc_aio 3
+for the read/write hot path and use these for open, stat, rename, and
+directory management.
+.Sh RETURN VALUES
+Each function returns
+.Dv XTC_OK
+(zero) on success or a negative
+.Vt xtc_err_t
+code on failure:
+.Dv XTC_E_INVAL
+for a bad argument,
+.Dv XTC_E_NOTFOUND
+for an absent path,
+.Dv XTC_E_NOMEM
+on allocation failure, or
+.Dv XTC_E_IO
+for an underlying I/O error.
+.Fn xtc_fs_exists
+returns 1 or 0 and
+.Fn xtc_fs_dir_close
+returns nothing.
+.Sh SEE ALSO
+.Xr xtc_aio 3 ,
+.Xr xtc_strerror 3
+.Sh AUTHORS
+.An The XTC Project
+.Sh CAVEATS
+On Windows the file descriptors are C run-time descriptors;
+.Fn xtc_fs_pread
+and
+.Fn xtc_fs_pwrite
+use overlapped I/O internally for positioned access and do not disturb
+a file pointer.
+.Fn xtc_fs_fdatasync
+and
+.Fn xtc_fs_fsync
+both map to
+.Fn _commit ,
+which flushes data and metadata.
