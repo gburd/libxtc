@@ -5,14 +5,25 @@
  * src/inc/os_backtrace.h
  *	Cross-platform native stack backtrace seam.  Captures the C call
  *	stack of the CALLING OS thread and emits human-readable frames.
- *	The implementation is selected at configure time: execinfo
- *	(glibc/macOS/BSD) when present, otherwise a no-op stub.  libunwind
- *	(musl) and DbgHelp (Windows) backends are future work; until then
- *	those platforms get an empty backtrace rather than a build error.
+ *	The implementation is selected at configure time, in priority order:
  *
- *	__os_backtrace_emit uses only async-signal-safe primitives
- *	(the write syscall via backtrace_symbols_fd), so it is safe to call from a
- *	fatal-signal handler.  See src/ptc/dump.c and docs/guide/debugging.md.
+ *	  - execinfo  (glibc/macOS/BSD): symbolized frames, async-signal-safe.
+ *	  - libunwind (musl and other execinfo-less libc's): frame addresses
+ *	    via the unwinder, symbolized best-effort with dladdr when present
+ *	    (else addresses only).  Frame walking + address emission are
+ *	    async-signal-safe; the dladdr name lookup is best-effort.
+ *	  - DbgHelp   (Windows): symbolized frames -- COMPILED BUT NOT
+ *	    RUNTIME-VERIFIED on the porting host (no Windows machine in the
+ *	    CI matrix); reviewed against the DbgHelp API, like src/io/io_aix.c.
+ *	  - stub      (no backend available): an empty backtrace, never a
+ *	    build error.
+ *
+ *	__os_backtrace_emit uses only async-signal-safe primitives on the
+ *	execinfo (backtrace_symbols_fd) and libunwind (write(2)) paths, so it
+ *	is safe to call from a fatal-signal handler there.  The Windows path
+ *	serializes the non-signal-safe DbgHelp Sym* family under a lock and is
+ *	intended for the panic/abort path.  See src/ptc/dump.c and
+ *	docs/guide/debugging.md.
  */
 
 #ifndef XTC_OS_BACKTRACE_H
