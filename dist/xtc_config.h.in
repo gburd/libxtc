@@ -53,11 +53,17 @@
    backward compatibility; new code need not use it. */
 #undef STDC_HEADERS
 
+/* Define to 1 if dladdr() is available for symbolization */
+#undef XTC_HAVE_DLADDR
+
 /* Define to 1 if <execinfo.h> backtrace() is available */
 #undef XTC_HAVE_EXECINFO
 
 /* hegel-c property tests enabled */
 #undef XTC_HAVE_HEGEL
+
+/* Define to 1 to use the libunwind stack-backtrace backend */
+#undef XTC_HAVE_LIBUNWIND
 
 /* Define to 1 if swapcontext / getcontext / makecontext are available */
 #undef XTC_HAVE_UCONTEXT
