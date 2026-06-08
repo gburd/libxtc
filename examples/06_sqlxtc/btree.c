@@ -431,6 +431,88 @@ node_safe(bt_t *bt, const void *pg)
 	return btnode_free_space(pg) >= (uint16_t)(bt->page_size / 3);
 }
 
+/*
+ * Optimistic insert.  Descend with SHARED latch coupling (concurrent
+ * with readers and other writers) and take only the LEAF exclusive.
+ * Holding the parent shared across the leaf re-latch prevents the leaf
+ * from splitting -- a split needs the parent exclusive -- so this is
+ * safe without B-link sibling chasing.  Returns 1 if the row was
+ * inserted (the common no-split case, now parallel for disjoint
+ * leaves); returns 0, having made NO change, when a split is needed or
+ * the key already exists, so the pessimistic exclusive-coupling path
+ * below handles those.  btnode_insert is all-or-nothing (it checks
+ * space before mutating), so a full leaf leaves the node untouched.
+ */
+static int
+bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
+    uint16_t vlen)
+{
+	bm_t *bm = bt->bm;
+	bm_pid_t pid;
+	bm_frame_t *f, *leaf;
+	void *pg;
+	int found, r;
+
+retry:
+	pid = atomic_load(&bt->root_pid);
+	if (bm_fix_pid(bm, pid, &f) != XTC_OK)
+		return 0;
+	bm_latch_shared(f);
+	if (pid != atomic_load(&bt->root_pid)) {   /* root grew under us */
+		bm_unlatch(f); bm_unfix(bm, f, 0);
+		goto retry;
+	}
+	pg = bm_page(f);
+	if (btnode_is_leaf(pg)) {
+		/* Single-node tree: the root is the leaf.  Re-latch exclusive
+		 * and re-validate it is still the root leaf. */
+		bm_unlatch(f);
+		bm_latch_exclusive(f);
+		if (pid != atomic_load(&bt->root_pid) ||
+		    !btnode_is_leaf(bm_page(f))) {
+			bm_unlatch(f); bm_unfix(bm, f, 0);
+			goto retry;
+		}
+		leaf = f;
+	} else {
+		for (;;) {                         /* shared descent to the leaf */
+			bm_pid_t child = child_for_key(pg, key, klen);
+			bm_frame_t *cf;
+			if (bm_fix_pid(bm, child, &cf) != XTC_OK) {
+				bm_unlatch(f); bm_unfix(bm, f, 0);
+				return 0;
+			}
+			bm_latch_shared(cf);
+			if (btnode_is_leaf(bm_page(cf))) {
+				/* Parent f held shared -> cf cannot split.  Take
+				 * cf exclusive, then release the parent. */
+				bm_unlatch(cf);
+				bm_latch_exclusive(cf);
+				bm_unlatch(f); bm_unfix(bm, f, 0);
+				leaf = cf;
+				break;
+			}
+			bm_unlatch(f); bm_unfix(bm, f, 0);   /* couple down */
+			f = cf; pg = bm_page(f);
+		}
+	}
+
+	pg = bm_page(leaf);
+	(void)btnode_search(pg, key, klen, &found);
+	if (found) {                       /* upsert: defer to pessimistic path */
+		bm_unlatch(leaf); bm_unfix(bm, leaf, 0);
+		return 0;
+	}
+	r = btnode_insert(pg, key, klen, val, vlen);
+	if (r == 0) {
+		atomic_fetch_add(&bt->st_inserts, 1);
+		bm_unlatch(leaf); bm_unfix(bm, leaf, 1);   /* modified -> dirty */
+		return 1;
+	}
+	bm_unlatch(leaf); bm_unfix(bm, leaf, 0);   /* full: no change made */
+	return 0;
+}
+
 int
 bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
     uint16_t vlen)
@@ -449,6 +531,12 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	if (bt == NULL || key == NULL || (val == NULL && vlen != 0))
 		return XTC_E_INVAL;
 	bm = bt->bm;
+
+	/* Fast path: shared descent + leaf-exclusive insert, parallel for
+	 * disjoint leaves.  Falls through to pessimistic exclusive coupling
+	 * only when a split must propagate (or the key already exists). */
+	if (bt_insert_fast(bt, key, klen, val, vlen))
+		return XTC_OK;
 
 restart:
 	sd = 0;
