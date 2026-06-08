@@ -1,0 +1,38 @@
+#!/usr/bin/make -f
+# debian/rules -- build libxtc as Debian packages.
+#
+# Copyright (c) 2026, The XTC Project
+# Use of this source code is governed by the ISC License.
+#
+# xtc uses a hand-written autoconf build that mandates an out-of-source
+# build directory and is driven from dist/configure (not ./configure at
+# the source root).  We therefore override dh's auto_* steps rather than
+# relying on the autotools-dev sequence.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+BUILDDIR = debian/build
+DESTDIR  = $(CURDIR)/debian/tmp
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	mkdir -p $(BUILDDIR)
+	cd $(BUILDDIR) && ../../dist/configure \
+		--prefix=/usr \
+		--libdir=/usr/lib/$(DEB_HOST_MULTIARCH) \
+		--enable-shared \
+		--with-tls=auto
+
+override_dh_auto_build:
+	$(MAKE) -C $(BUILDDIR)
+
+override_dh_auto_test:
+	$(MAKE) -C $(BUILDDIR) check
+
+override_dh_auto_install:
+	$(MAKE) -C $(BUILDDIR) install DESTDIR=$(DESTDIR)
+
+override_dh_auto_clean:
+	rm -rf $(BUILDDIR)

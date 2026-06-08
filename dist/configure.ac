@@ -63,6 +63,19 @@ AC_PROG_INSTALL
 AC_PROG_RANLIB
 AC_PROG_AWK
 
+# -------------------------------------------------------------------------
+# Optional shared library.  Default off so the historical static-only
+# build keeps working unchanged; --enable-shared additionally builds and
+# installs libxtc.so with the dist/libxtc.map version script.
+# -------------------------------------------------------------------------
+AC_ARG_ENABLE([shared],
+  [AS_HELP_STRING([--enable-shared],
+    [Also build and install a shared libxtc.so (default: no).])],
+  [xtc_enable_shared=$enableval], [xtc_enable_shared=no])
+AC_MSG_CHECKING([whether to build a shared library])
+AC_MSG_RESULT([$xtc_enable_shared])
+AC_SUBST([XTC_ENABLE_SHARED], [$xtc_enable_shared])
+
 # pthread
 AC_SEARCH_LIBS([pthread_create], [pthread], [],
   [AC_MSG_ERROR([xtc requires pthreads])])
@@ -407,7 +420,16 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[]], [[
 AC_SUBST([CFLAGS])
 
 # -------------------------------------------------------------------------
+# pkg-config private link flags.  These are the transitive dependencies a
+# static consumer must add on the link line; pkg-config emits them under
+# Libs.private and `pkg-config --static --libs xtc` surfaces them.
+# -------------------------------------------------------------------------
+xtc_pc_libs_private="-pthread $LIBS $uring_libs $xtc_extra_libs $XTC_TLS_LIBS $libunwind_libs"
+AC_SUBST([XTC_PC_LIBS_PRIVATE], [$xtc_pc_libs_private])
+
+# -------------------------------------------------------------------------
 # Output.
 # -------------------------------------------------------------------------
 AC_CONFIG_FILES([Makefile:../dist/Makefile.in])
+AC_CONFIG_FILES([xtc.pc:../dist/xtc.pc.in])
 AC_OUTPUT

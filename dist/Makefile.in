@@ -24,12 +24,23 @@ XTC_HEGEL_PBT	 = @XTC_HEGEL_PBT@
 XTC_HEGEL_SERVER_COMMAND = @XTC_HEGEL_SERVER_COMMAND@
 XTC_TLS_BACKEND	 = @XTC_TLS_BACKEND@
 XTC_TLS_LIBS	 = @XTC_TLS_LIBS@
+XTC_ENABLE_SHARED = @XTC_ENABLE_SHARED@
+XTC_VERSION_FULL  = @XTC_VERSION_FULL@
+XTC_VERSION_MAJOR = @XTC_VERSION_MAJOR@
 AR		= ar
 RANLIB		= @RANLIB@
 INSTALL		= @INSTALL@
 INSTALL_DATA	= @INSTALL_DATA@
 INSTALL_PROGRAM	= @INSTALL_PROGRAM@
 RM		= rm -f
+
+# Shared-library knobs.  The version script (dist/libxtc.map) restricts
+# the exported ABI to the public xtc_* / __xtc_* symbols and hides the
+# internal __os_* layer.  SONAME carries the SemVer major only.
+SHARED_LIB_LINKNAME = libxtc.so
+SHARED_LIB_SONAME   = libxtc.so.$(XTC_VERSION_MAJOR)
+SHARED_LIB_REAL     = libxtc.so.$(XTC_VERSION_FULL)
+VERSION_SCRIPT      = $(srcdir)/libxtc.map
 
 # -------------------------------------------------------------------------
 # M0 sources.
@@ -154,6 +165,13 @@ LIB_OBJS	= \
 LIB_HDR_PUBLIC	= $(srcdir)/../src/inc/xtc.h
 STATIC_LIB	= libxtc.a
 
+# Shared library is built only when configure was run with
+# --enable-shared (XTC_ENABLE_SHARED=yes).  Selected here so the
+# default-goal and install logic can reference it unconditionally.
+SHARED_LIB_TARGETS_yes = $(SHARED_LIB_REAL)
+SHARED_LIB_TARGETS_no  =
+SHARED_LIB_TARGETS     = $(SHARED_LIB_TARGETS_$(XTC_ENABLE_SHARED))
+
 # -------------------------------------------------------------------------
 # Tests (M0).  See M0_CLAIMS.md.
 # -------------------------------------------------------------------------
@@ -234,7 +252,7 @@ TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt
 # -------------------------------------------------------------------------
 .PHONY: all check tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation
 
-all: $(STATIC_LIB) compile_commands.json
+all: $(STATIC_LIB) $(SHARED_LIB_TARGETS) compile_commands.json
 
 # compile_commands.json for LSP / clang-tooling.  One entry per
 # library translation unit, using the exact CFLAGS/CPPFLAGS the build
@@ -268,6 +286,19 @@ compile_commands.json: Makefile
 $(STATIC_LIB): $(LIB_OBJS)
 	$(AR) rcs $@ $(LIB_OBJS)
 	$(RANLIB) $@
+
+# Shared library.  All LIB_OBJS are already compiled -fPIC (see CFLAGS),
+# so they can be linked into a DSO directly.  The version script limits
+# the exported ABI; the SONAME carries only the SemVer major.  We build
+# the fully-versioned real file (libxtc.so.X.Y.Z) and create the SONAME
+# and bare-name symlinks beside it for the linker and runtime loader.
+$(SHARED_LIB_REAL): $(LIB_OBJS) $(VERSION_SCRIPT)
+	$(CC) -shared -fPIC \
+		-Wl,-soname,$(SHARED_LIB_SONAME) \
+		-Wl,--version-script=$(VERSION_SCRIPT) \
+		-o $@ $(LIB_OBJS) $(LDFLAGS) $(LIBS)
+	ln -sf $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME)
+	ln -sf $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 
 tls_openssl.o: $(srcdir)/../src/io/tls_openssl.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_openssl.c
@@ -948,11 +979,22 @@ pbt_deque: $(srcdir)/../test/pbt/pbt_deque.c $(STATIC_LIB)
 # -------------------------------------------------------------------------
 install: all
 	$(INSTALL) -d $(DESTDIR)$(libdir)
+	$(INSTALL) -d $(DESTDIR)$(libdir)/pkgconfig
 	$(INSTALL) -d $(DESTDIR)$(includedir)
 	$(INSTALL) -d $(DESTDIR)$(mandir)/man3
 	$(INSTALL) -d $(DESTDIR)$(mandir)/man7
 	$(INSTALL_DATA) $(STATIC_LIB) $(DESTDIR)$(libdir)/$(STATIC_LIB)
 	$(INSTALL_DATA) $(LIB_HDR_PUBLIC) $(DESTDIR)$(includedir)/xtc.h
+	$(INSTALL_DATA) xtc.pc $(DESTDIR)$(libdir)/pkgconfig/xtc.pc
+	@if [ "$(XTC_ENABLE_SHARED)" = yes ]; then \
+		echo "installing shared library"; \
+		$(INSTALL_PROGRAM) $(SHARED_LIB_REAL) \
+			$(DESTDIR)$(libdir)/$(SHARED_LIB_REAL); \
+		ln -sf $(SHARED_LIB_REAL) \
+			$(DESTDIR)$(libdir)/$(SHARED_LIB_SONAME); \
+		ln -sf $(SHARED_LIB_SONAME) \
+			$(DESTDIR)$(libdir)/$(SHARED_LIB_LINKNAME); \
+	fi
 	for m in $(srcdir)/../man/man3/*.3; do \
 		$(INSTALL_DATA) $$m $(DESTDIR)$(mandir)/man3/; \
 	done
@@ -960,12 +1002,21 @@ install: all
 		$(INSTALL_DATA) $$m $(DESTDIR)$(mandir)/man7/; \
 	done
 
+uninstall:
+	$(RM) $(DESTDIR)$(libdir)/$(STATIC_LIB)
+	$(RM) $(DESTDIR)$(libdir)/$(SHARED_LIB_REAL)
+	$(RM) $(DESTDIR)$(libdir)/$(SHARED_LIB_SONAME)
+	$(RM) $(DESTDIR)$(libdir)/$(SHARED_LIB_LINKNAME)
+	$(RM) $(DESTDIR)$(libdir)/pkgconfig/xtc.pc
+	$(RM) $(DESTDIR)$(includedir)/xtc.h
+
 # -------------------------------------------------------------------------
 # Cleanup.
 # -------------------------------------------------------------------------
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
+	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 
 distclean: clean
-	$(RM) Makefile xtc_config.h config.log config.status
+	$(RM) Makefile xtc_config.h xtc.pc config.log config.status
 	$(RM) -r autom4te.cache
