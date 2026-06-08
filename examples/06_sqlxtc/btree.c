@@ -136,6 +136,12 @@ struct bt {
 	_Atomic uint64_t  st_resumes;  /* parked-cursor O(1) resumes */
 	uint64_t          meta_clean;  /* superblock clean flag (open/close only) */
 	uint64_t          meta_clock;  /* superblock commit clock (open/close only) */
+	xtc_arwlock_t    *smo;         /* serializes structure-modification (splits
+	                               * and root growth).  Parking-safe so a
+	                               * splitter may park on page I/O without
+	                               * wedging the loop; non-splitting inserts
+	                               * never take it, so the common path stays
+	                               * fully parallel. */
 };
 
 /* On-disk superblock (buffer-manager page 0), recording where the tree
@@ -249,6 +255,47 @@ internal_insert(void *page, const void *sep, uint16_t seplen, bm_pid_t child)
 	return btnode_insert(page, sep, seplen, &v, (uint16_t)sizeof v);
 }
 
+/*
+ * Move-right (the B-link recovery step).  *fp is a fixed+latched node
+ * (shared or exclusive per `excl`).  While `key` lies strictly beyond
+ * the node's upper fence -- meaning a concurrent split moved `key`'s
+ * range into a right sibling after this descent read the parent's
+ * child pointer -- hop to the right sibling: latch it in the same
+ * mode, then release the old node.  Because btnode_split makes the
+ * new right node inherit the old right-link and sets the separator as
+ * both nodes' shared fence, the half-split state is immediately
+ * chase-consistent and a single rightward walk always reaches the
+ * node that owns `key`.  Internal and leaf nodes both carry fences,
+ * so this works at every level.  Latch coupling is never held during
+ * the hop (only one node latched at a time), so move-right cannot
+ * deadlock against a splitter posting a separator upward.
+ */
+static int
+move_right(bt_t *bt, bm_frame_t **fp, const void *key, uint16_t klen, int excl)
+{
+	bm_t *bm = bt->bm;
+	bm_frame_t *f = *fp;
+
+	while (key != NULL && btnode_beyond_hi_fence(bm_page(f), key, klen)) {
+		uint32_t rs = btnode_right_sibling(bm_page(f));
+		bm_frame_t *nf;
+
+		if (rs == 0)
+			break;            /* rightmost: key belongs here */
+		if (bm_fix_pid(bm, (bm_pid_t)rs, &nf) != XTC_OK)
+			break;
+		if (excl)
+			bm_latch_exclusive(nf);
+		else
+			bm_latch_shared(nf);
+		bm_unlatch(f);
+		bm_unfix(bm, f, 0);
+		f = nf;
+	}
+	*fp = f;
+	return XTC_OK;
+}
+
 int
 bt_open(bm_t *bm, bt_t **out)
 {
@@ -265,6 +312,7 @@ bt_open(bm_t *bm, bt_t **out)
 	if (bt == NULL)
 		return XTC_E_NOMEM;
 	bt->bm = bm;
+	if (xtc_arwlock_create(&bt->smo) != XTC_OK) { free(bt); return XTC_E_NOMEM; }
 
 	/*
 	 * The buffer manager exposes no page-size accessor and its
@@ -307,6 +355,7 @@ bt_open(bm_t *bm, bt_t **out)
 	return XTC_OK;
 
 fail:
+	xtc_arwlock_destroy(bt->smo);
 	free(bt);
 	return rc;
 }
@@ -330,11 +379,14 @@ bt_reopen(bm_t *bm, bt_t **out)
 	if (bt == NULL)
 		return XTC_E_NOMEM;
 	bt->bm = bm;
+	if (xtc_arwlock_create(&bt->smo) != XTC_OK) { free(bt); return XTC_E_NOMEM; }
 	if ((rc = bm_read_super(bm, &s, sizeof s)) != XTC_OK) {
+		xtc_arwlock_destroy(bt->smo);
 		free(bt);
 		return rc;
 	}
 	if (s.magic != BT_SUPER_MAGIC || s.page_size == 0) {
+		xtc_arwlock_destroy(bt->smo);
 		free(bt);
 		return XTC_E_INVAL;          /* not an xstore B-tree store */
 	}
@@ -356,6 +408,8 @@ bt_close(bt_t *bt)
 		return;
 	if (bt_close_hook != NULL)
 		bt_close_hook(bt);     /* let xstore drop cached state for this bt */
+	if (bt->smo != NULL)
+		xtc_arwlock_destroy(bt->smo);
 	free(bt);
 }
 
@@ -374,35 +428,46 @@ bt_set_lsn(bt_t *bt, uint64_t lsn)
 }
 
 /*
- * Split a full INTERNAL node `pp` (exclusively latched) the standard
- * B-tree way: the middle separator is pushed up and removed from the
- * node, pp keeps the children to its left, and a freshly allocated
- * right node rp receives the middle child as its empty-key leftmost
- * child followed by every separator/child to the right.  Internal
- * nodes always carry wide-open fences (prefix_len 0), so a separator
- * is stored verbatim and is never constrained by a fence -- which is
- * what makes routing a key through a node whose fence is tighter than
- * its subtree safe, and what btnode_split (which narrows fences to the
- * left node's max key) cannot give us for inner nodes.
- *
- * On success returns XTC_OK with rp fixed + exclusively latched in
- * *rf_out, its pid in *rpid_out, and the pushed-up separator copied
- * into pushup / *pushuplen.
+ * Split a full INTERNAL node the B-link way.  Unlike a leaf, an
+ * internal node's leftmost child is reached through a -infinity
+ * (empty-key) slot 0, so the right half cannot simply inherit raw
+ * slots: the middle separator is pushed UP and OUT (it becomes the
+ * boundary between the two halves), the middle child becomes the
+ * right node's -infinity leftmost child, and the separators above it
+ * follow.  For chase-consistency the left node's upper fence is set
+ * to the pushed-up separator and the right node inherits the old
+ * right-link, so a key routed into the left half but beyond the new
+ * fence is recovered by move_right.  `pp` is the full left internal
+ * (exclusively latched); `rp` is a freshly initialized right node.
+ * The pushed-up separator is copied into pushup / *pushuplen.
  */
 static int
-split_internal(bt_t *bt, void *pp, void *rp, uint8_t *pushup, uint16_t *pushuplen)
+bt_split_internal(bt_t *bt, void *pp, void *rp, uint32_t rpid,
+    uint8_t *pushup, uint16_t *pushuplen)
 {
 	int count = (int)btnode_count(pp);
 	int mid = count / 2;
 	int i;
 	uint8_t empty = 0;
+	uint32_t old_right = btnode_right_sibling(pp);
+	uint8_t scratch[BT_MAX_KEY * 8];   /* one page; internals are small */
+	void *lp = scratch;
 
-	btnode_init(rp, bt->page_size, 0);
+	if (bt->page_size > sizeof scratch)
+		return XTC_E_INTERNAL;
+
+	/* The mid key is pushed up; it becomes the boundary between the
+	 * two halves (and the left node's new upper fence). */
+	if (btnode_full_key(pp, mid, pushup, BT_MAX_KEY, pushuplen) != 0)
+		return XTC_E_INTERNAL;
+
+	/* Right node: -infinity leftmost child = mid's child, then the
+	 * separators/children strictly above mid.  Wide-open lo fence so
+	 * routing through slot 0 stays correct; upper fence inherits the
+	 * old node's (+infinity unless the old node was itself a left
+	 * half), and the old right-link transfers here. */
 	btnode_set_fences(rp, NULL, 0, NULL, 0);
-
-	/* Read everything from pp before trimming it. */
-	if (btnode_full_key(pp, mid, pushup, BT_MAX_KEY, pushuplen) != 0 ||
-	    internal_insert(rp, &empty, 0, child_pid_at(pp, mid)) != 0)
+	if (internal_insert(rp, &empty, 0, child_pid_at(pp, mid)) != 0)
 		return XTC_E_INTERNAL;
 	for (i = mid + 1; i < count; i++) {
 		uint8_t kb[BT_MAX_KEY];
@@ -412,36 +477,51 @@ split_internal(bt_t *bt, void *pp, void *rp, uint8_t *pushup, uint16_t *pushuple
 		    internal_insert(rp, kb, kl, child_pid_at(pp, i)) != 0)
 			return XTC_E_INTERNAL;
 	}
-	/* Drop slots mid..count-1 from pp (back to front keeps indices). */
-	for (i = count - 1; i >= mid; i--)
-		(void)btnode_remove(pp, i);
+	btnode_set_right_sibling(rp, old_right);
+
+	/* Left node, rebuilt in scratch: slots [0, mid) under a narrowed
+	 * upper fence == the pushed-up separator, so a key routed here in
+	 * the window before the parent learns of the split but actually
+	 * belonging to the right half is recovered by move_right.  The
+	 * lower fence is preserved from the old node. */
+	{
+		uint8_t lof[BT_MAX_KEY];
+		uint16_t loflen = 0;
+		const uint8_t *lo = NULL;
+
+		if (btnode_lo_fence(pp, lof, sizeof lof, &loflen) == 0 && loflen > 0)
+			lo = lof;
+		btnode_init(lp, bt->page_size, 0);
+		btnode_set_fences(lp, lo, loflen, pushup, *pushuplen);
+		for (i = 0; i < mid; i++) {
+			uint8_t kb[BT_MAX_KEY];
+			uint16_t kl = 0;
+
+			if (btnode_full_key(pp, i, kb, sizeof kb, &kl) != 0 ||
+			    internal_insert(lp, kb, kl, child_pid_at(pp, i)) != 0)
+				return XTC_E_INTERNAL;
+		}
+		btnode_set_right_sibling(lp, rpid);
+		memcpy(pp, lp, bt->page_size);
+	}
 	return XTC_OK;
 }
 
 /*
- * A node is "safe" for an insert when it has room for one more
- * maximal entry, so a split propagating up from below cannot cascade
- * a split into it.  Conservatively, a third of the page free.  When a
- * descending writer latches a safe node it may release every ancestor
- * above it: a split will stop there.
- */
-static int
-node_safe(bt_t *bt, const void *pg)
-{
-	return btnode_free_space(pg) >= (uint16_t)(bt->page_size / 3);
-}
-
-/*
- * Optimistic insert.  Descend with SHARED latch coupling (concurrent
- * with readers and other writers) and take only the LEAF exclusive.
- * Holding the parent shared across the leaf re-latch prevents the leaf
- * from splitting -- a split needs the parent exclusive -- so this is
- * safe without B-link sibling chasing.  Returns 1 if the row was
- * inserted (the common no-split case, now parallel for disjoint
- * leaves); returns 0, having made NO change, when a split is needed or
- * the key already exists, so the pessimistic exclusive-coupling path
- * below handles those.  btnode_insert is all-or-nothing (it checks
- * space before mutating), so a full leaf leaves the node untouched.
+ * Latch-free descent to the leaf that owns `key`, then insert if it
+ * fits.  Descends one node at a time (no latch coupling): latch a
+ * node, move-right if a concurrent split pushed `key`'s range to a
+ * sibling, read the child pointer, release, descend.  Releasing the
+ * parent before latching the child is what forces move-right -- the
+ * child may split in that window -- but it is also what makes the
+ * descent deadlock-free against a splitter that posts separators
+ * bottom-up (no thread ever holds two latches in opposite order).
+ *
+ * Takes only the LEAF exclusive, so disjoint-leaf inserts run fully
+ * in parallel.  Returns 1 if the row was inserted; returns 0, having
+ * made NO change, when the leaf is full (a split is needed) or the
+ * key already exists (upsert) -- the SMO path handles those.
+ * btnode_insert is all-or-nothing, so a full leaf is left untouched.
  */
 static int
 bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
@@ -449,68 +529,155 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 {
 	bm_t *bm = bt->bm;
 	bm_pid_t pid;
-	bm_frame_t *f, *leaf;
+	bm_frame_t *f;
 	void *pg;
 	int found, r;
 
-retry:
 	pid = atomic_load(&bt->root_pid);
 	if (bm_fix_pid(bm, pid, &f) != XTC_OK)
 		return 0;
 	bm_latch_shared(f);
 	if (pid != atomic_load(&bt->root_pid)) {   /* root grew under us */
 		bm_unlatch(f); bm_unfix(bm, f, 0);
-		goto retry;
+		return 0;
 	}
+	(void)move_right(bt, &f, key, klen, 0);
 	pg = bm_page(f);
-	if (btnode_is_leaf(pg)) {
-		/* Single-node tree: the root is the leaf.  Re-latch exclusive
-		 * and re-validate it is still the root leaf. */
-		bm_unlatch(f);
-		bm_latch_exclusive(f);
-		if (pid != atomic_load(&bt->root_pid) ||
-		    !btnode_is_leaf(bm_page(f))) {
+	while (!btnode_is_leaf(pg)) {                /* descend, no coupling */
+		bm_pid_t child = child_for_key(pg, key, klen);
+		bm_frame_t *cf;
+
+		if (bm_fix_pid(bm, child, &cf) != XTC_OK) {
 			bm_unlatch(f); bm_unfix(bm, f, 0);
-			goto retry;
+			return 0;
 		}
-		leaf = f;
-	} else {
-		for (;;) {                         /* shared descent to the leaf */
-			bm_pid_t child = child_for_key(pg, key, klen);
-			bm_frame_t *cf;
-			if (bm_fix_pid(bm, child, &cf) != XTC_OK) {
-				bm_unlatch(f); bm_unfix(bm, f, 0);
-				return 0;
-			}
-			bm_latch_shared(cf);
-			if (btnode_is_leaf(bm_page(cf))) {
-				/* Parent f held shared -> cf cannot split.  Take
-				 * cf exclusive, then release the parent. */
-				bm_unlatch(cf);
-				bm_latch_exclusive(cf);
-				bm_unlatch(f); bm_unfix(bm, f, 0);
-				leaf = cf;
-				break;
-			}
-			bm_unlatch(f); bm_unfix(bm, f, 0);   /* couple down */
-			f = cf; pg = bm_page(f);
-		}
+		bm_latch_shared(cf);
+		bm_unlatch(f); bm_unfix(bm, f, 0);   /* release before child */
+		f = cf;
+		(void)move_right(bt, &f, key, klen, 0);
+		pg = bm_page(f);
 	}
 
-	pg = bm_page(leaf);
+	/* Re-latch the leaf exclusive, then move-right again: between the
+	 * shared unlatch and the exclusive latch the leaf may have split. */
+	bm_unlatch(f);
+	bm_latch_exclusive(f);
+	(void)move_right(bt, &f, key, klen, 1);
+	pg = bm_page(f);
+
 	(void)btnode_search(pg, key, klen, &found);
-	if (found) {                       /* upsert: defer to pessimistic path */
-		bm_unlatch(leaf); bm_unfix(bm, leaf, 0);
+	if (found) {                       /* upsert: defer to the SMO path */
+		bm_unlatch(f); bm_unfix(bm, f, 0);
 		return 0;
 	}
 	r = btnode_insert(pg, key, klen, val, vlen);
 	if (r == 0) {
 		atomic_fetch_add(&bt->st_inserts, 1);
-		bm_unlatch(leaf); bm_unfix(bm, leaf, 1);   /* modified -> dirty */
+		bm_unlatch(f); bm_unfix(bm, f, 1);   /* modified -> dirty */
 		return 1;
 	}
-	bm_unlatch(leaf); bm_unfix(bm, leaf, 0);   /* full: no change made */
+	bm_unlatch(f); bm_unfix(bm, f, 0);   /* full: no change made */
 	return 0;
+}
+
+/*
+ * Post a separator into the parent level during a split.  Called
+ * under the SMO lock with the new right child already built and
+ * linked.  `path` is the ancestor pid stack captured top-down during
+ * descent (path[0] == root .. path[level] == the leaf's parent);
+ * `level` indexes the parent to receive (cur_sep, cur_right).  Walks
+ * up, splitting any full internal node (carrying its push-up further
+ * up), and grows a new root when it runs off the top.  Each level is
+ * latched independently with a move-right re-find -- the captured pid
+ * may itself have split since descent -- so no latch is ever held in
+ * the descent's top-down order while reaching upward (no deadlock).
+ */
+static int
+post_separator(bt_t *bt, bm_pid_t *path, int level,
+    const void *sep0, uint16_t sep0len, bm_pid_t right0)
+{
+	bm_t *bm = bt->bm;
+	bm_frame_t *rf;
+	bm_pid_t rpid;
+	uint8_t cur_sep[BT_MAX_KEY];
+	uint16_t cur_seplen = sep0len;
+	bm_pid_t cur_right = right0;
+	int rc, r;
+
+	memcpy(cur_sep, sep0, sep0len);
+
+	for (; level >= 0; level--) {
+		bm_frame_t *pf;
+		void *pp;
+		uint8_t pushup[BT_MAX_KEY];
+		uint16_t pushuplen = 0;
+
+		if (bm_fix_pid(bm, path[level], &pf) != XTC_OK)
+			return XTC_E_INTERNAL;
+		bm_latch_exclusive(pf);
+		/* The captured parent may have split since descent: walk
+		 * right to the internal node that now owns cur_sep. */
+		(void)move_right(bt, &pf, cur_sep, cur_seplen, 1);
+		pp = bm_page(pf);
+
+		if (internal_insert(pp, cur_sep, cur_seplen, cur_right) == 0) {
+			bm_unlatch(pf); bm_unfix(bm, pf, 1);   /* absorbed */
+			return XTC_OK;
+		}
+		/* Parent full: split it, link the new right internal, carry
+		 * the push-up further up. */
+		rc = bm_alloc_pid(bm, &rf, &rpid);
+		if (rc != XTC_OK) { bm_unlatch(pf); bm_unfix(bm, pf, 0); return rc; }
+		bm_latch_exclusive(rf);
+		btnode_init(bm_page(rf), bt->page_size, 0);
+		if (bt_split_internal(bt, pp, bm_page(rf), (uint32_t)rpid,
+		    pushup, &pushuplen) != XTC_OK) {
+			bm_unlatch(rf); bm_unfix(bm, rf, 1);
+			bm_unlatch(pf); bm_unfix(bm, pf, 0);
+			return XTC_E_INTERNAL;
+		}
+		if (key_cmp(cur_sep, cur_seplen, pushup, pushuplen) > 0)
+			r = internal_insert(bm_page(rf), cur_sep, cur_seplen, cur_right);
+		else
+			r = internal_insert(pp, cur_sep, cur_seplen, cur_right);
+		bm_unlatch(rf); bm_unfix(bm, rf, 1);
+		bm_unlatch(pf); bm_unfix(bm, pf, 1);
+		if (r != 0)
+			return XTC_E_INTERNAL;
+		atomic_fetch_add(&bt->st_splits, 1);
+		memcpy(cur_sep, pushup, pushuplen);
+		cur_seplen = pushuplen;
+		cur_right = rpid;
+	}
+
+	/*
+	 * Ran off the top: the root split.  Grow a new root holding the
+	 * old root (as -infinity child) and the carried right child.
+	 * Done under the SMO lock, so the root grows exactly once.
+	 */
+	{
+		bm_frame_t *nf;
+		bm_pid_t npid;
+		uint8_t empty = 0;
+		bm_pid_t oldroot = atomic_load(&bt->root_pid);
+
+		rc = bm_alloc_pid(bm, &nf, &npid);
+		if (rc != XTC_OK)
+			return rc;
+		bm_latch_exclusive(nf);
+		btnode_init(bm_page(nf), bt->page_size, 0);
+		btnode_set_fences(bm_page(nf), NULL, 0, NULL, 0);
+		if (internal_insert(bm_page(nf), &empty, 0, oldroot) != 0 ||
+		    internal_insert(bm_page(nf), cur_sep, cur_seplen, cur_right) != 0) {
+			bm_unlatch(nf); bm_unfix(bm, nf, 1);
+			return XTC_E_INTERNAL;
+		}
+		bm_unlatch(nf); bm_unfix(bm, nf, 1);
+		atomic_store(&bt->root_pid, npid);
+		atomic_fetch_add(&bt->st_height, 1);
+		bt_write_super(bt);     /* root pid changed: persist it */
+	}
+	return XTC_OK;
 }
 
 int
@@ -518,181 +685,124 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
     uint16_t vlen)
 {
 	bm_t *bm;
-	bm_frame_t *stack[BT_MAX_HEIGHT];   /* held exclusive, root..leaf */
-	int sd;
+	bm_pid_t path[BT_MAX_HEIGHT];   /* ancestor pids, root..parent-of-leaf */
+	int depth;
 	bm_pid_t pid, rpid;
 	bm_frame_t *f, *rf;
-	void *leaf;
+	void *pg;
 	uint8_t sep[BT_MAX_KEY];
 	uint16_t seplen = 0;
 	int rc = XTC_OK;
-	int r, found, s, i, level, modified_from = BT_MAX_HEIGHT;
+	int r, found, s;
 
 	if (bt == NULL || key == NULL || (val == NULL && vlen != 0))
 		return XTC_E_INVAL;
 	bm = bt->bm;
 
-	/* Fast path: shared descent + leaf-exclusive insert, parallel for
-	 * disjoint leaves.  Falls through to pessimistic exclusive coupling
-	 * only when a split must propagate (or the key already exists). */
+	/* Fast path: latch-free descent + leaf-exclusive insert, parallel
+	 * for disjoint leaves.  Falls through to the SMO path only when a
+	 * split is needed (full leaf) or the key already exists. */
 	if (bt_insert_fast(bt, key, klen, val, vlen))
 		return XTC_OK;
 
-restart:
-	sd = 0;
 	/*
-	 * Exclusive latch-couple from the root, keeping a stack of held
-	 * frames.  When a latched internal node is safe, release every
-	 * ancestor above it -- the retained stack is then
-	 * [deepest safe node .. leaf], exactly the frames a split may
-	 * touch, all already held top-down, so split propagation never
-	 * acquires a latch upward (no deadlock) and writers on disjoint
-	 * subtrees proceed in parallel below their safe nodes.  Latches
-	 * are fiber-yielding (xtc_arwlock), so holding one across a child
-	 * fix or a page-allocation park is safe on a cooperative loop.
+	 * SMO path: serialize structure modification on the tree's SMO
+	 * lock (parking-safe -- a splitter may park on page I/O).  Only
+	 * full-leaf inserts and upserts reach here, so this lock is off
+	 * the common path; it lets readers and non-splitting writers run
+	 * fully in parallel (they never take it), unlike a root-exclusive
+	 * scheme that blocks every descent during a split.
 	 */
-	pid = atomic_load(&bt->root_pid);
-	rc = bm_fix_pid(bm, pid, &f);
+	rc = xtc_arwlock_wrlock(bt->smo, -1);
 	if (rc != XTC_OK)
 		return rc;
+
+	/* Latch-free descent collecting the ancestor pid path.  move-right
+	 * at every level recovers from splits that happened before we held
+	 * the SMO lock. */
+	depth = 0;
+	pid = atomic_load(&bt->root_pid);
+	if ((rc = bm_fix_pid(bm, pid, &f)) != XTC_OK)
+		goto unlock;
 	bm_latch_exclusive(f);
-	if (pid != atomic_load(&bt->root_pid)) {   /* root grew under us */
-		bm_unlatch(f); bm_unfix(bm, f, 0);
-		goto restart;
-	}
-	stack[sd++] = f;
-	while (!btnode_is_leaf(bm_page(stack[sd - 1]))) {
-		bm_pid_t child = child_for_key(bm_page(stack[sd - 1]), key, klen);
+	(void)move_right(bt, &f, key, klen, 1);
+	while (!btnode_is_leaf(bm_page(f))) {
+		bm_pid_t child;
 		bm_frame_t *cf;
 
-		if (sd >= BT_MAX_HEIGHT) { rc = XTC_E_INTERNAL; goto release; }
-		rc = bm_fix_pid(bm, child, &cf);
-		if (rc != XTC_OK) goto release;
-		bm_latch_exclusive(cf);
-		if (!btnode_is_leaf(bm_page(cf)) && node_safe(bt, bm_page(cf))) {
-			for (i = 0; i < sd; i++) {
-				bm_unlatch(stack[i]); bm_unfix(bm, stack[i], 0);
-			}
-			sd = 0;
+		if (depth >= BT_MAX_HEIGHT) {
+			bm_unlatch(f); bm_unfix(bm, f, 0);
+			rc = XTC_E_INTERNAL; goto unlock;
 		}
-		stack[sd++] = cf;
+		path[depth++] = bm_frame_pid(f);
+		child = child_for_key(bm_page(f), key, klen);
+		if ((rc = bm_fix_pid(bm, child, &cf)) != XTC_OK) {
+			bm_unlatch(f); bm_unfix(bm, f, 0); goto unlock;
+		}
+		bm_latch_exclusive(cf);
+		bm_unlatch(f); bm_unfix(bm, f, 0);
+		f = cf;
+		(void)move_right(bt, &f, key, klen, 1);
 	}
 
-	/* Upsert into the leaf. */
-	leaf = bm_page(stack[sd - 1]);
+	/* f is the leaf, exclusive-latched.  Upsert, then re-check space:
+	 * a concurrent fast-path insert may have changed things, but we
+	 * hold the leaf exclusive now so its contents are stable. */
+	pg = bm_page(f);
 	found = 0;
-	s = btnode_search(leaf, key, klen, &found);
+	s = btnode_search(pg, key, klen, &found);
 	if (found)
-		(void)btnode_remove(leaf, s);
-	modified_from = sd - 1;             /* only the leaf, unless we split */
-	if (btnode_insert(leaf, key, klen, val, vlen) == 0) {
+		(void)btnode_remove(pg, s);
+	if (btnode_insert(pg, key, klen, val, vlen) == 0) {
 		atomic_fetch_add(&bt->st_inserts, 1);
-		rc = XTC_OK;
-		goto release;
+		bm_unlatch(f); bm_unfix(bm, f, 1);
+		rc = XTC_OK; goto unlock;
 	}
 
 	/*
-	 * Leaf full: split it, place the triggering pair, then propagate
-	 * the separator up through the held stack.  sep is the left
-	 * node's hi fence == the right's lo fence; keys <= sep route
-	 * left, keys > sep route right.
+	 * Leaf full: split it, link the new right leaf, place the
+	 * triggering pair, then post the separator up the captured path.
+	 * btnode_split sets the left leaf's hi fence == the right's lo
+	 * fence and makes the right inherit the old right-link, so the
+	 * half-split is immediately chase-consistent for any concurrent
+	 * reader/writer move-right before the separator reaches the
+	 * parent.
 	 */
 	rc = bm_alloc_pid(bm, &rf, &rpid);
-	if (rc != XTC_OK) goto release;
+	if (rc != XTC_OK) { bm_unlatch(f); bm_unfix(bm, f, 0); goto unlock; }
 	bm_latch_exclusive(rf);
 	btnode_init(bm_page(rf), bt->page_size, 1);
-	if (btnode_split(leaf, bm_page(rf), sep, &seplen) != 0) {
+	if (btnode_split(pg, bm_page(rf), sep, &seplen) != 0) {
 		bm_unlatch(rf); bm_unfix(bm, rf, 1);
-		rc = XTC_E_INTERNAL; goto release;
+		bm_unlatch(f); bm_unfix(bm, f, 0);
+		rc = XTC_E_INTERNAL; goto unlock;
 	}
-	btnode_set_right_sibling(leaf, (uint32_t)rpid);
+	btnode_set_right_sibling(pg, (uint32_t)rpid);
 	if (key_cmp(key, klen, sep, seplen) > 0)
 		r = btnode_insert(bm_page(rf), key, klen, val, vlen);
 	else
-		r = btnode_insert(leaf, key, klen, val, vlen);
+		r = btnode_insert(pg, key, klen, val, vlen);
 	bm_unlatch(rf); bm_unfix(bm, rf, 1);
-	if (r != 0) { rc = XTC_E_INTERNAL; goto release; }
+	bm_unlatch(f); bm_unfix(bm, f, 1);   /* left leaf modified */
+	if (r != 0) { rc = XTC_E_INTERNAL; goto unlock; }
 	atomic_fetch_add(&bt->st_inserts, 1);
 	atomic_fetch_add(&bt->st_splits, 1);
 
-	{
-		bm_pid_t cur_right = rpid;
-		uint8_t cur_sep[BT_MAX_KEY];
-		uint16_t cur_seplen = seplen;
+	rc = post_separator(bt, path, depth - 1, sep, seplen, rpid);
 
-		memcpy(cur_sep, sep, seplen);
-		for (level = sd - 2; level >= 0; level--) {
-			void *pp = bm_page(stack[level]);
-			uint8_t pushup[BT_MAX_KEY];
-			uint16_t pushuplen = 0;
-
-			if (internal_insert(pp, cur_sep, cur_seplen, cur_right) == 0) {
-				modified_from = level;
-				goto done_split;        /* absorbed */
-			}
-			/* Parent full: split it (held), carry the push-up up. */
-			rc = bm_alloc_pid(bm, &rf, &rpid);
-			if (rc != XTC_OK) goto release;
-			bm_latch_exclusive(rf);
-			rc = split_internal(bt, pp, bm_page(rf), pushup, &pushuplen);
-			if (rc != XTC_OK) { bm_unlatch(rf); bm_unfix(bm, rf, 1); goto release; }
-			if (key_cmp(cur_sep, cur_seplen, pushup, pushuplen) < 0)
-				r = internal_insert(pp, cur_sep, cur_seplen, cur_right);
-			else
-				r = internal_insert(bm_page(rf), cur_sep, cur_seplen, cur_right);
-			bm_unlatch(rf); bm_unfix(bm, rf, 1);
-			if (r != 0) { rc = XTC_E_INTERNAL; goto release; }
-			atomic_fetch_add(&bt->st_splits, 1);
-			memcpy(cur_sep, pushup, pushuplen);
-			cur_seplen = pushuplen;
-			cur_right = rpid;
-		}
-		/* Past the top of the stack: stack[0] was the root and split.
-		 * Grow a new root pointing at the old root + the new sibling. */
-		{
-			bm_frame_t *nf;
-			bm_pid_t npid;
-			uint8_t empty = 0;
-			bm_pid_t oldroot = bm_frame_pid(stack[0]);
-
-			rc = bm_alloc_pid(bm, &nf, &npid);
-			if (rc != XTC_OK) goto release;
-			bm_latch_exclusive(nf);
-			btnode_init(bm_page(nf), bt->page_size, 0);
-			btnode_set_fences(bm_page(nf), NULL, 0, NULL, 0);
-			if (internal_insert(bm_page(nf), &empty, 0, oldroot) != 0 ||
-			    internal_insert(bm_page(nf), cur_sep, cur_seplen, cur_right) != 0) {
-				bm_unlatch(nf); bm_unfix(bm, nf, 1);
-				rc = XTC_E_INTERNAL; goto release;
-			}
-			bm_unlatch(nf); bm_unfix(bm, nf, 1);
-			atomic_store(&bt->root_pid, npid);
-			atomic_fetch_add(&bt->st_height, 1);
-			bt_write_super(bt);     /* root pid changed: update superblock */
-			modified_from = 0;          /* whole path changed */
-		}
-	}
-done_split:
-	rc = XTC_OK;
-
-release:
-	/* Release the held stack, marking the modified frames dirty. */
-	for (i = 0; i < sd; i++) {
-		bm_unlatch(stack[i]);
-		bm_unfix(bm, stack[i], i >= modified_from ? 1 : 0);
-	}
+unlock:
+	(void)xtc_arwlock_unlock(bt->smo);
 	return rc;
 }
 
 /*
- * Shared latch-coupling descent to the leaf for `key`.  The child is
- * fixed and shared-latched BEFORE the parent is released, so a writer
- * cannot split the parent (it needs the parent exclusive) while the
- * descent reads a child pointer -- the descent therefore always lands
- * on the correct leaf without a B-link right-sibling follow.  Latches
- * are fiber-yielding, so holding the parent across the child fix is
- * safe on a cooperative loop.  Returns the leaf fixed + shared-latched
- * in *out.
+ * Latch-free descent to the leaf for `key` with B-link move-right.
+ * Latches one node at a time (no coupling): latch, move-right if a
+ * concurrent split pushed `key`'s range to a sibling, read the child
+ * pointer, release, descend.  This always lands on the leaf that owns
+ * `key` -- a miss is conclusive -- and never holds two latches in
+ * opposite order, so it cannot deadlock against a splitter posting
+ * separators upward.  Returns the leaf fixed + shared-latched in *out.
  */
 static int
 descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
@@ -702,17 +812,13 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 	bm_frame_t *f;
 	void *pg;
 	int rc;
-retry:
+
 	pid = atomic_load(&bt->root_pid);
 	rc = bm_fix_pid(bm, pid, &f);
 	if (rc != XTC_OK)
 		return rc;
 	bm_latch_shared(f);
-	if (pid != atomic_load(&bt->root_pid)) {   /* root grew under us */
-		bm_unlatch(f);
-		bm_unfix(bm, f, 0);
-		goto retry;
-	}
+	(void)move_right(bt, &f, key, klen, 0);
 	pg = bm_page(f);
 	while (!btnode_is_leaf(pg)) {
 		bm_pid_t child = child_for_key(pg, key, klen);
@@ -724,10 +830,11 @@ retry:
 			bm_unfix(bm, f, 0);
 			return rc;
 		}
-		bm_latch_shared(cf);       /* couple: child before releasing parent */
-		bm_unlatch(f);
+		bm_latch_shared(cf);
+		bm_unlatch(f);             /* release before latching deeper */
 		bm_unfix(bm, f, 0);
 		f = cf;
+		(void)move_right(bt, &f, key, klen, 0);
 		pg = bm_page(f);
 	}
 	*out = f;
@@ -802,22 +909,18 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 	bm = bt->bm;
 
 	/*
-	 * Exclusive latch-coupling descent: latch the child exclusive
-	 * before releasing the parent.  Acquisition is strictly top-down
-	 * (root toward leaf), the same order writers use, so this never
-	 * deadlocks against an inserter.  Delete does not split or merge
-	 * in this version, so no ancestor needs retaining.
+	 * Latch-free descent with B-link move-right.  Delete never splits
+	 * or merges, so it retains no ancestor; it latches one node at a
+	 * time and walks right past any concurrent split, landing on the
+	 * leaf that owns `key`.  One-at-a-time latching keeps it
+	 * deadlock-free against a splitter posting separators upward.
 	 */
-retry:
 	pid = atomic_load(&bt->root_pid);
 	rc = bm_fix_pid(bm, pid, &f);
 	if (rc != XTC_OK)
 		return rc;
 	bm_latch_exclusive(f);
-	if (pid != atomic_load(&bt->root_pid)) {   /* root grew under us */
-		bm_unlatch(f); bm_unfix(bm, f, 0);
-		goto retry;
-	}
+	(void)move_right(bt, &f, key, klen, 1);
 	pg = bm_page(f);
 	while (!btnode_is_leaf(pg)) {
 		bm_pid_t child = child_for_key(pg, key, klen);
@@ -828,10 +931,11 @@ retry:
 			bm_unlatch(f); bm_unfix(bm, f, 0);
 			return rc;
 		}
-		bm_latch_exclusive(cf);    /* couple: child before releasing parent */
-		bm_unlatch(f);
+		bm_latch_exclusive(cf);
+		bm_unlatch(f);             /* release before latching deeper */
 		bm_unfix(bm, f, 0);
 		f = cf;
+		(void)move_right(bt, &f, key, klen, 1);
 		pg = bm_page(f);
 	}
 
@@ -863,17 +967,12 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 	int rc;
 
 	atomic_fetch_add(&bt->st_descents, 1);
-retry:
 	pid = atomic_load(&bt->root_pid);
 	rc = bm_fix_pid(bm, pid, &f);
 	if (rc != XTC_OK)
 		return rc;
 	bm_latch_shared(f);
-	if (pid != atomic_load(&bt->root_pid)) {
-		bm_unlatch(f);
-		bm_unfix(bm, f, 0);
-		goto retry;
-	}
+	(void)move_right(bt, &f, start, klen, 0);
 	pg = bm_page(f);
 
 	while (!btnode_is_leaf(pg)) {
@@ -891,9 +990,10 @@ retry:
 			return rc;
 		}
 		bm_latch_shared(cf);
-		bm_unlatch(f);
+		bm_unlatch(f);             /* release before latching deeper */
 		bm_unfix(bm, f, 0);
 		f = cf;
+		(void)move_right(bt, &f, start, klen, 0);
 		pg = bm_page(f);
 	}
 	*out = f;

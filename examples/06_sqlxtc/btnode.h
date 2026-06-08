@@ -185,6 +185,10 @@ void btnode_set_right_sibling(void *page, uint32_t id);
  * always returns <0.  This is the Lehman-Yao B-link follow test. */
 int btnode_beyond_hi_fence(const void *page, const void *key, uint16_t klen);
 
+/* Copy the node's lower fence key into `out` (len 0 == -infinity).
+ * Returns 0 on success, -1 if `cap` is too small. */
+int btnode_lo_fence(const void *page, void *out, uint16_t cap, uint16_t *len);
+
 #ifdef __cplusplus
 }
 #endif
