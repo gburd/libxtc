@@ -26,23 +26,59 @@ struct __xtc_solaris_reg {
 	void     *tag;
 };
 #elif defined(XTC_IO_BACKEND_IOCP)
-/* Windows IOCP backend with WSAEventSelect-based readiness emulation
- * for round 1.  Each registration tracks the socket, its WSAEvent,
- * and the user's interest+tag. */
+/*
+ * Windows IOCP backend (round 2): native completion port plus the
+ * AFD poll fast path that turns a connected/listening socket's
+ * readiness into an IOCP completion.
+ *
+ * Each socket registration owns one AFD poll OVERLAPPED that is
+ * armed (submitted via NtDeviceIoControlFile(IOCTL_AFD_POLL)) into
+ * the kernel and re-armed after every completion -- level-triggered
+ * emulation matching the epoll/kqueue contract.
+ *
+ * OVERLAPPED OWNERSHIP RULE (the classic IOCP correctness invariant,
+ * enforced throughout io_iocp.c):
+ *   The OVERLAPPED (ov) and the AFD_POLL_INFO (poll_info) embedded in
+ *   a registration belong to the KERNEL from the moment the AFD poll
+ *   is armed (NtDeviceIoControlFile returns STATUS_PENDING) until the
+ *   matching completion is dequeued from the port by
+ *   GetQueuedCompletionStatusEx.  While armed (pending == 1) neither
+ *   buffer may be freed or reused.  Deregistering an armed socket
+ *   issues NtCancelIoFileEx and marks the registration dead; the
+ *   storage is only released once the (possibly canceled) completion
+ *   is reaped.  This is why the struct embeds ov/poll_info by value
+ *   and the registration node is freed lazily, never inline with
+ *   xtc_io_del_fd while a poll is in flight.
+ *
+ * The OVERLAPPED is the FIRST member so a completion's
+ * OVERLAPPED_ENTRY.lpOverlapped pointer can be cast straight back to
+ * the owning registration.  Each registration is a separately
+ * heap-allocated node with a STABLE address (held in a pointer array,
+ * never an inline array), because the kernel-owned OVERLAPPED carries
+ * a back-pointer to its node for the whole time the poll is armed --
+ * a realloc or swap-remove of an inline array would dangle it.
+ */
 struct __xtc_iocp_reg {
-	int       fd;
-	void     *event;            /* HANDLE (WSAEVENT) */
+	struct __xtc_iocp_overlapped *ovp; /* OVERLAPPED + AFD_POLL_INFO (heap) */
+	int       fd;               /* the SOCKET as an int (Winsock handle) */
+	void     *base;             /* base socket HANDLE (SIO_BASE_HANDLE) */
 	uint32_t  interest;
 	void     *tag;
+	int       pending;          /* 1 while an AFD poll is armed in the kernel */
+	int       dead;             /* deregistered; awaiting terminal completion */
 };
-/* A file AIO (pread/pwrite) in flight: an overlapped op whose
- * OVERLAPPED.hEvent joins the poll's wait set; on completion
- * GetOverlappedResult yields the byte count.  fsync has no async form
- * on Windows (FlushFileBuffers is synchronous) and is offloaded. */
+/* A file AIO (pread/pwrite) in flight on the IOCP backend.  The
+ * file HANDLE is associated with the completion port, so the
+ * overlapped ReadFile/WriteFile completion is dequeued by
+ * GetQueuedCompletionStatusEx like any socket event -- no hEvent and
+ * no WaitForMultipleObjects.  fsync has no async form on Windows
+ * (FlushFileBuffers is synchronous) and is offloaded.  The OVERLAPPED
+ * is the FIRST member so the completion's lpOverlapped recovers the
+ * node; ownership follows the same kernel-owns-while-pending rule as
+ * the socket poll OVERLAPPED above. */
 struct __xtc_iocp_aio {
+	void *ov;      /* OVERLAPPED * (heap; first field; owned here) */
 	void *aio;     /* xtc_aio_t * awaiting completion */
-	void *ov;      /* OVERLAPPED * (heap; owned here) */
-	void *event;   /* HANDLE: manual-reset, == ov->hEvent */
 	void *fh;      /* HANDLE: the file, for GetOverlappedResult */
 };
 #elif defined(XTC_IO_BACKEND_AIX)
@@ -94,12 +130,15 @@ struct xtc_io {
 	int  n_reg;
 	int  cap_reg;
 #elif defined(XTC_IO_BACKEND_IOCP)
-	void                  *iocp;       /* HANDLE */
-	void                  *wakeup_ev;  /* HANDLE: manual-reset event */
-	struct __xtc_iocp_reg *reg_iocp;
+	void                  *iocp;       /* HANDLE: the completion port */
+	void                  *afd;        /* HANDLE: \Device\Afd, port-associated */
+	struct __xtc_iocp_reg **reg_iocp;   /* live registration nodes (stable) */
 	int  n_reg;
 	int  cap_reg;
-	struct __xtc_iocp_aio *aio_pend;   /* file AIOs in flight */
+	struct __xtc_iocp_reg **dead_iocp;  /* deregistered, awaiting completion */
+	int  n_dead;
+	int  cap_dead;
+	struct __xtc_iocp_aio  *aio_pend;   /* file AIOs in flight */
 	int  n_aio;
 	int  cap_aio;
 #elif defined(XTC_IO_BACKEND_AIX)

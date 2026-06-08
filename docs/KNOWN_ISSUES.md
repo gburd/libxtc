@@ -106,18 +106,66 @@ loop+process tear down with heap corruption on Windows.
 2. Add `xtc_log` calls inside `__do_recv` to trace the receive path on Windows.
 3. Compare the IOCP wakeup integration after the fixes (round 3 IOCP poll now drains all signaled events; possibly some interaction).
 4. If unfixable in current shape, mark `test_proc::selective_receive` as Windows-skip until M16-era cleanup.
+5. **Re-evaluate against the round-2 IOCP rewrite (see "IOCP backend
+   status" below).**  The wakeup path changed substantially -- the
+   `WaitForMultipleObjects` set is gone, wakeups are now a plain
+   `PostQueuedCompletionStatus` reaped by `GetQueuedCompletionStatusEx`
+   and coalesced into one event.  This MIGHT shift or fix the flake,
+   but that is an untested hypothesis: it must be confirmed on a
+   Windows host, not assumed.  Do not claim the rewrite fixes it
+   without a santorini run.
 
 ## IOCP backend status (Windows)
 
-**Status:** backend functionally complete; remaining items are
-Windows-runtime-dependent and need an interactive santorini session.
+**Status:** round-2 native rewrite landed and COMPILES, but is NOT
+runtime-verified -- the round-1 santorini results below no longer
+describe the current source.
 
-The IOCP backend (`src/io/io_iocp.c`) passes the full suite on the
-reference Windows toolchain (MinGW64: 233/233, see
-`docs/M_WINDOWS_MATRIX.md`).  Registration uses loopback sockets in the
-tests (`test/include/io_pipe_compat.h`), which compose with
-WSAEventSelect; anonymous CRT pipes do not, by design.  The open items
-are not library defects:
+### Round 2 (current source): native completion port + AFD poll
+
+`src/io/io_iocp.c` was rewritten from the round-1 readiness emulation
+to a native completion-port design (details and the full test plan in
+`docs/M_WINDOWS_MATRIX.md` and `docs/M_PORT.md`):
+
+  - `CreateIoCompletionPort` + `GetQueuedCompletionStatusEx` is the
+    only wait primitive; the round-1 64-handle
+    `WaitForMultipleObjects` cap is GONE.
+  - Socket readiness uses the AFD poll fast path (`\Device\Afd` +
+    `IOCTL_AFD_POLL` via `NtDeviceIoControlFile`), re-armed per
+    completion (level-triggered).  This is the wepoll/libuv design.
+  - Wakeup is `PostQueuedCompletionStatus`; file AIO is overlapped
+    `ReadFile`/`WriteFile` reaped from the same port (no hEvent).
+  - OVERLAPPED-ownership rule enforced: the kernel owns an OVERLAPPED
+    from request-accept to completion-dequeue; deregister cancels with
+    `NtCancelIoFileEx` and defers the free to the reap; registration
+    nodes have stable heap addresses so the kernel-held back-pointer
+    never dangles.  `dist/configure.ac` adds `-lntdll`;
+    `dist/build_msvc.bat` links `ntdll.lib`.
+
+**What is verified (Linux dev host this round):** cross-compiles clean
+with mingw-w64 gcc 14.3.0 `-std=c11 -Wall -Wextra`, links into a
+PE32+ binary against `-lntdll -lws2_32`, and leaves the Linux build
+untouched (`io_iocp.c` is `XTC_IO_BACKEND_IOCP`-only -- an empty TU on
+Linux; the full C munit suite stays green on epoll/uring).
+
+**What is NOT verified:** the backend has NOT executed on Windows.
+The AFD poll correctness, the level-triggered re-arm (no busy-loop, no
+dropped edges), the cancel/lifetime under churn (no double-free, no
+freeing a kernel-owned OVERLAPPED), the wakeup coalescing/ordering,
+and the file-AIO port round-trip must all be validated on santorini
+before this is production quality.  Same reviewed-but-untested status
+as `src/io/io_aix.c`.  This rewrite is the suspected fix territory for
+the `test_proc::selective_receive` flake (the wakeup ordering changed),
+but that cannot be confirmed without the host.
+
+### Round 1 (historical): WSAEventSelect emulation -- SUPERSEDED
+
+The round-1 backend (WSAEventSelect + WaitForMultipleObjects,
+hard-capped at 64 handles, ~60% of native IOCP throughput) passed the
+full suite on the reference Windows toolchain (MinGW64: 233/233).
+Those results describe the SUPERSEDED source, not the round-2 rewrite
+above; they are retained here only as the baseline the round-2 code
+must re-establish on santorini.  Round-1 notes that still stand:
 
   - **Clang64 POSIX-only test ports.**  `test_net_udp` used a bare
     `nanosleep` (absent in the Clang64/MinGW runtime) -- now portable
@@ -130,17 +178,15 @@ are not library defects:
     equivalent (`test/otp/test_otp_proc_lib.c`) passes on every
     platform, so selective receive itself is correct; the flake is in
     test_proc's exact IOCP-wakeup timing and needs the host to chase.
-  - **Round-2 AFD/NtDeviceIoControlFile fast path** is a performance
-    upgrade, not a correctness gap (round 1 is correct).
 
-**Native file AIO: DONE.**  `xtc_io_aio_submit` is implemented natively
-on IOCP -- `xtc_aio_pread`/`pwrite` issue overlapped ReadFile/WriteFile
-whose OVERLAPPED.hEvent joins the poll's WaitForMultipleObjects set, so
-the completion wakes the loop with no pool thread; `fsync`/`fdatasync`
-have no async form on Windows (FlushFileBuffers is synchronous) and are
-offloaded.  Verified on santorini under both VS2022 (17) and VS2026
-(18) by the smoke test (an overlapped pwrite+pread round-trip).  This
-was the last "native async on every platform" gap.
+**Native file AIO (mechanism):** `xtc_io_aio_submit` issues overlapped
+`ReadFile`/`WriteFile`; `fsync`/`fdatasync` have no async form on
+Windows (FlushFileBuffers is synchronous) and are offloaded.  Round 1
+joined the OVERLAPPED.hEvent to the WaitForMultipleObjects set and was
+verified on santorini under VS2022 (17) and VS2026 (18) by the smoke
+test (an overlapped pwrite+pread round-trip).  Round 2 instead reaps
+the AIO completion from the port (no hEvent); that variant is
+COMPILED-NOT-RUNTIME-VERIFIED and the smoke test must be re-run.
 
 Driving the santorini host non-interactively from CI/automation is not
 yet wired (it is configured for an interactive PowerShell session); the
