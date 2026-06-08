@@ -1,5 +1,49 @@
 # Known issues -- pending investigation
 
+## RESOLVED (partial): native stack backtrace beyond execinfo
+
+**Status:** real backends added; one (Windows) remains compiled-but-not-
+runtime-verified for lack of a Windows host.
+
+**Previous issue:** `src/os/os_backtrace.c` had only the execinfo backend
+(glibc/macOS/BSD) and a no-op stub everywhere else, so musl and Windows
+got an empty C backtrace in `xtc_dump` / the panic+crash handler.
+
+**What changed this round:**
+  - **libunwind backend** (`XTC_HAVE_LIBUNWIND`) for libc's lacking
+    `<execinfo.h>` (notably musl): `__os_backtrace` walks the calling
+    thread with `unw_step`; `__os_backtrace_emit` symbolizes best-effort
+    with `dladdr` (`XTC_HAVE_DLADDR`) or prints raw addresses otherwise.
+    Detected by `dist/configure.ac` (`--with-libunwind=auto|yes|no|PATH`,
+    OPTIONAL); execinfo wins when both are present.
+  - **DbgHelp backend** (`_WIN32`): `CaptureStackBackTrace` +
+    `SymFromAddr`, linked with `-ldbghelp`.
+  - New test `test/m12/test_backtrace.c` drives a 3-deep call chain,
+    asserts >= 2 captured frames, and (on a symbolizing platform)
+    requires at least one of its own frames to be named.
+
+**Verified on this round's Linux glibc x86_64 host:**
+  - execinfo path: full `make check` for m1/m12 green, `test_backtrace`
+    green, the existing `test_dump` panic/crash path green.
+  - libunwind+dladdr path: built by forcing `XTC_HAVE_LIBUNWIND` and
+    linking the system libunwind; produced a REAL symbolized trace and
+    passed `test_backtrace`.
+  - libunwind addresses-only path (dladdr disabled): `test_backtrace`
+    passes on frame count alone.
+  - All three Unix variants compile `-Wall -Wextra -Wpedantic` clean.
+
+**NOT runtime-verified (honest gaps):**
+  - The libunwind path has not run on an actual musl host yet, only by
+    forcing the backend on glibc.
+  - The Windows DbgHelp path is COMPILED-NOT-RUNTIME-VERIFIED: it
+    cross-compiles clean with mingw-w64 and links with `-ldbghelp`, but
+    no Windows machine in the CI matrix exercises it.  Reviewed against
+    the Win32 DbgHelp API docs; same status as `src/io/io_aix.c`.
+  - Platforms with neither execinfo nor libunwind still get the honest
+    no-op stub (`__os_backtrace_supported()` returns 0).
+
+See `docs/M_PORT.md` for the per-platform symbolization matrix.
+
 ## RESOLVED: xtc_slab SHARED_MEMORY mode cross-process support
 
 **Status:** FIXED in this round.
