@@ -29,19 +29,55 @@ configure_file(
 
 # -----------------------------------------------------------------------------
 # Library.
+#
+# meson installs a pkg-config xtc.pc and (with -Dshared=true) a versioned
+# shared object alongside the static archive.  The autoconf build is the
+# reference; this mirrors its installed file set for the M0 subset that
+# meson currently compiles.
 # -----------------------------------------------------------------------------
 inc = include_directories('src/inc')
 
-xtc_lib = static_library('xtc',
-  sources : [
-    'src/xtc_version.c',
-    'src/xtc_strerror.c',
-  ],
-  include_directories : inc,
-  install : true,
-)
+lib_sources = [
+  'src/xtc_version.c',
+  'src/xtc_strerror.c',
+]
+
+build_shared = get_option('shared')
+
+if build_shared
+  xtc_lib = both_libraries('xtc',
+    sources : lib_sources,
+    include_directories : inc,
+    version : meson.project_version(),
+    soversion : ver_parts[0],
+    install : true,
+  )
+else
+  xtc_lib = static_library('xtc',
+    sources : lib_sources,
+    include_directories : inc,
+    install : true,
+  )
+endif
 
 install_headers('src/inc/xtc.h')
+
+# pkg-config metadata.  Mirrors dist/xtc.pc.in.
+pkg = import('pkgconfig')
+pkg.generate(
+  name : 'xtc',
+  description : 'High-performance async/concurrency runtime for C',
+  url : 'https://codeberg.org/gregburd/libxtc',
+  version : meson.project_version(),
+  libraries : xtc_lib,
+  subdirs : '.',
+)
+
+if build_shared
+  xtc_link_lib = xtc_lib.get_shared_lib()
+else
+  xtc_link_lib = xtc_lib
+endif
 
 # -----------------------------------------------------------------------------
 # Tests.
@@ -54,17 +90,17 @@ munit_dep = static_library('munit', 'test/m0/munit.c',
 test_version = executable('test_version',
   'test/m0/test_version.c',
   include_directories : test_inc,
-  link_with : [xtc_lib, munit_dep])
+  link_with : [xtc_link_lib, munit_dep])
 
 test_header = executable('test_header',
   'test/m0/test_header.c',
   include_directories : test_inc,
-  link_with : [xtc_lib, munit_dep])
+  link_with : [xtc_link_lib, munit_dep])
 
 test_errors = executable('test_errors',
   'test/m0/test_errors.c',
   include_directories : test_inc,
-  link_with : [xtc_lib, munit_dep])
+  link_with : [xtc_link_lib, munit_dep])
 
 test('m0/version', test_version)
 test('m0/header',  test_header)

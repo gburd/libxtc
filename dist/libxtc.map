@@ -1,0 +1,34 @@
+/*
+ * dist/libxtc.map -- ld version script for the shared libxtc.so.
+ *
+ * Copyright (c) 2026, The XTC Project
+ * Use of this source code is governed by the ISC License.
+ *
+ * This script controls which symbols the shared library exports.
+ * It is passed to the linker via -Wl,--version-script=libxtc.map
+ * when configure was run with --enable-shared.
+ *
+ * Export policy (matches test/m0/test_symbols.sh [C5]):
+ *   global:  xtc_*    -- the documented public API.
+ *            __xtc_*  -- internal hooks referenced by PUBLIC macros in
+ *                        the installed headers (e.g. the proc recovery
+ *                        and fcontext seams in src/inc/xtc_proc.h); they
+ *                        must remain callable from inlined user code.
+ *   local:   everything else, notably the __os_* OS-abstraction layer,
+ *            which is an internal implementation detail and must not
+ *            leak into the ABI.
+ *
+ * The single unnamed version node keeps the SONAME's symbols
+ * unversioned (plain global symbols), which is what a C library that
+ * has not yet committed to per-symbol versioning wants: consumers link
+ * against the SONAME (libxtc.so.MAJOR) and the SemVer policy in
+ * docs/abi-stability.md governs compatibility.  When per-symbol
+ * versioning is later desired, add named nodes (XTC_1.0 { ... };) here.
+ */
+{
+	global:
+		xtc_*;
+		__xtc_*;
+	local:
+		*;
+};
