@@ -137,12 +137,21 @@ signal still yields a core.
 .Sh PORTABILITY
 The C backtrace uses the
 .Fn __os_backtrace
-seam, selected at configure time: the
+seam, selected at configure time in priority order: the
 .In execinfo.h
 .Fn backtrace
-backend on glibc, macOS, and the BSDs;
-otherwise a no-op stub.  Where no backend is present the dump omits the
-C stack but still reports the full proc/loop/mailbox state.
+backend on glibc, macOS, and the BSDs (symbolized frames);
+a
+.Xr libunwind 3
+backend where execinfo is absent (notably musl), symbolized
+best-effort with
+.Xr dladdr 3
+or addresses-only when dladdr is unavailable; a Windows
+DbgHelp backend
+.Pq Fn CaptureStackBackTrace , Fn SymFromAddr ,
+compiled and reviewed but not yet runtime-verified on a Windows host;
+and otherwise a no-op stub.  Where no backend is present the dump omits
+the C stack but still reports the full proc/loop/mailbox state.
 .Fn xtc_crash_handler_install
 returns
 .Dv XTC_E_NOSYS

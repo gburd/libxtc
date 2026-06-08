@@ -96,11 +96,75 @@ AC_CHECK_HEADER([sys/event.h], [have_kqueue=yes], [have_kqueue=no])
 
 # execinfo (backtrace/backtrace_symbols_fd) for native stack dumps in
 # the panic/abort facility.  glibc, macOS, and the BSDs have it; musl
-# does not (the backtrace seam falls back to a no-op stub there).
+# does not.  The backtrace seam then falls back to libunwind (below)
+# and finally to a no-op stub.
 AC_CHECK_HEADER([execinfo.h],
   [AC_CHECK_FUNC([backtrace],
     [AC_DEFINE([XTC_HAVE_EXECINFO], 1,
-       [Define to 1 if <execinfo.h> backtrace() is available])])])
+       [Define to 1 if <execinfo.h> backtrace() is available])
+     xtc_have_execinfo=yes])],
+  [xtc_have_execinfo=no])
+
+# libunwind backtrace backend.  OPTIONAL.  Used on platforms that lack
+# <execinfo.h> (notably musl) to walk the calling thread's frames.  When
+# absent there, the seam degrades to the honest no-op stub.  We probe
+# via pkg-config first (Nix-style split outputs) then a plain link test.
+# dladdr() (libdl / libc) symbolizes the addresses best-effort; without
+# it the libunwind path emits raw frame addresses only.
+AC_ARG_WITH([libunwind],
+  [AS_HELP_STRING([--with-libunwind=auto|yes|no|PATH],
+    [Use libunwind for stack backtraces where execinfo is absent (default: auto).])],
+  [xtc_with_libunwind=$withval], [xtc_with_libunwind=auto])
+
+have_libunwind=no
+libunwind_cflags=
+libunwind_libs=
+AS_IF([test "x$xtc_with_libunwind" != xno],
+  [AS_IF([test "x$xtc_with_libunwind" = xauto || test "x$xtc_with_libunwind" = xyes],
+     [AC_PATH_PROG([PKG_CONFIG], [pkg-config], [no])
+      AS_IF([test "x$PKG_CONFIG" != xno && $PKG_CONFIG --exists libunwind 2>/dev/null],
+        [have_libunwind=yes
+         libunwind_cflags=`$PKG_CONFIG --cflags libunwind`
+         libunwind_libs=`$PKG_CONFIG --libs libunwind`],
+        [ac_save_LIBS=$LIBS
+         AC_CHECK_HEADER([libunwind.h],
+           [AC_CHECK_LIB([unwind], [unw_backtrace],
+              [have_libunwind=yes
+               libunwind_libs="-lunwind"], [have_libunwind=no])])
+         LIBS=$ac_save_LIBS])],
+     [# Explicit PATH to a libunwind prefix.
+      AS_IF([test -f "$xtc_with_libunwind/lib/pkgconfig/libunwind.pc"],
+        [PKG_CONFIG_PATH="$xtc_with_libunwind/lib/pkgconfig:$PKG_CONFIG_PATH"
+         export PKG_CONFIG_PATH
+         have_libunwind=yes
+         libunwind_cflags=`pkg-config --cflags libunwind 2>/dev/null`
+         libunwind_libs=`pkg-config --libs libunwind 2>/dev/null`],
+        [AS_IF([test -f "$xtc_with_libunwind/include/libunwind.h"],
+          [have_libunwind=yes
+           libunwind_cflags="-I$xtc_with_libunwind/include"
+           libunwind_libs="-L$xtc_with_libunwind/lib -Wl,-rpath,$xtc_with_libunwind/lib -lunwind"],
+          [AC_MSG_ERROR([--with-libunwind=$xtc_with_libunwind: libunwind.h not found])])])])])
+
+# Only define / link libunwind when execinfo is NOT the active backend.
+# execinfo wins when both are present; libunwind is the musl fallback.
+AS_IF([test "x$xtc_have_execinfo" != xyes && test "x$have_libunwind" = xyes],
+  [AC_DEFINE([XTC_HAVE_LIBUNWIND], 1,
+     [Define to 1 to use the libunwind stack-backtrace backend])
+   xtc_use_libunwind=yes],
+  [xtc_use_libunwind=no
+   libunwind_cflags=
+   libunwind_libs=])
+
+# dladdr() for best-effort symbolization on the libunwind path.  It is
+# in libc on glibc/musl and in libdl on some systems; only matters when
+# the libunwind backend is the active one.
+AS_IF([test "x$xtc_use_libunwind" = xyes],
+  [AC_SEARCH_LIBS([dladdr], [dl],
+     [AC_DEFINE([XTC_HAVE_DLADDR], 1,
+        [Define to 1 if dladdr() is available for symbolization])], [])])
+
+AC_SUBST([XTC_LIBUNWIND_CFLAGS], [$libunwind_cflags])
+AC_SUBST([XTC_LIBUNWIND_LIBS],   [$libunwind_libs])
 
 # musl libc deliberately omits the ucontext.h API (swapcontext et al.)
 # which the default coroutine substrate uses.  Detect this so the
@@ -178,7 +242,9 @@ AC_SUBST([XTC_URING_LIBS],   [$uring_libs])
 xtc_extra_libs=
 case "$host_os" in
   *mingw*|*cygwin*|*msys*)
-    xtc_extra_libs="-lws2_32"
+    # ws2_32 for the IOCP backend; dbghelp for the DbgHelp backtrace
+    # backend (CaptureStackBackTrace + SymFromAddr).
+    xtc_extra_libs="-lws2_32 -ldbghelp"
     ;;
   *solaris*|*illumos*)
     xtc_extra_libs="-lsocket -lnsl"

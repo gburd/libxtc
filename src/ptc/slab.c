@@ -110,8 +110,8 @@ struct audit_event {
 	uint8_t  op;        /* 'A'=alloc, 'F'=free */
 	int64_t  ts_ns;
 	/* When XTC_SLAB_BACKTRACE is set, capture up to 8 frames
-	 * via __os_backtrace (any platform with a backtrace backend; a
-	 * no-op stub elsewhere). */
+	 * via __os_backtrace (execinfo on glibc/macOS/BSD, libunwind on
+	 * musl, DbgHelp on Windows; a no-op stub where none is present). */
 	void    *bt[XTC_AUDIT_BTSZ];
 	int      bt_n;
 };

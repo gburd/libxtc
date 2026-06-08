@@ -295,6 +295,16 @@ dump and a `gdb` session read alike:
       <0.1.1> running   park=-       mbox=0/4096 peak=0 recv=0 drop=0
     === end dump ===
 
+The C backtrace is symbolized on glibc, macOS, and the BSDs (execinfo)
+and on musl when libunwind is present (frame addresses, symbolized
+best-effort via `dladdr`).  Where libunwind is absent on such a libc the
+frames are addresses-only, and on a platform with no backend at all the
+dump prints `thread backtrace: unavailable (no backtrace backend; attach
+a debugger to a core)` and still reports the full proc/loop/mailbox
+state.  The Windows DbgHelp backend is compiled and reviewed but has not
+yet been runtime-verified on a Windows host.  See `docs/M_PORT.md` for
+the per-platform matrix.
+
 To abort with that dump on a failed invariant, use the panic/assert
 macros (always compiled in -- they are diagnostics, not debug-only):
 

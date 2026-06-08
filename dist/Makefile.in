@@ -14,10 +14,10 @@ includedir	= @includedir@
 mandir		= @mandir@
 
 CC		= @CC@
-CFLAGS		= @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread @XTC_URING_CFLAGS@
+CFLAGS		= @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@
 CPPFLAGS	= @CPPFLAGS@ -I. -I$(srcdir)/../src/inc
 LDFLAGS		= @LDFLAGS@ -pthread
-LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@ @XTC_TLS_LIBS@
+LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@ @XTC_TLS_LIBS@ @XTC_LIBUNWIND_LIBS@
 XTC_HEGEL_CFLAGS = @XTC_HEGEL_CFLAGS@
 XTC_HEGEL_LIBS	 = @XTC_HEGEL_LIBS@
 XTC_HEGEL_PBT	 = @XTC_HEGEL_PBT@
@@ -221,6 +221,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_observability \
 		  test_stats \
 		  test_dump \
+		  test_backtrace \
 		  test_tls_basic \
 		  test_tls_server \
 		  test_tls_client \
@@ -873,6 +874,16 @@ test_dump: $(srcdir)/../test/m12/test_dump.c \
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
 		-o $@ $(srcdir)/../test/m12/test_dump.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# Linked -rdynamic so the test's own external-linkage chain functions
+# enter the dynamic symbol table; this lets the execinfo and libunwind+
+# dladdr backends resolve their names so the symbolization assertion
+# fires.  On addresses-only platforms the test asserts frame count only.
+test_backtrace: $(srcdir)/../test/m12/test_backtrace.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
+		-o $@ $(srcdir)/../test/m12/test_backtrace.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) -rdynamic $(LIBS)
 
 # M18 tests -- TLS API surface.
 test_tls_basic: $(srcdir)/../test/m18/test_tls_basic.c \

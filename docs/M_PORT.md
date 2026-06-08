@@ -98,6 +98,34 @@ Neither blocker affects the L0/L2/L3/L4 surface; they're isolated
 to the L1 readiness-on-Windows story and the optional fast-fiber-
 switch.  The **default** fiber path (Win32 fibers) is fully working.
 
+## Native stack backtrace (xtc_dump / panic handler)
+
+The backtrace seam (`src/os/os_backtrace.c`, header
+`src/inc/os_backtrace.h`) selects a backend at configure time in this
+priority order.  Per-platform symbolization status:
+
+| Backend | Platforms | Output | Verified |
+|---|---|---|---|
+| execinfo | glibc, macOS, FreeBSD/NetBSD/OpenBSD | symbolized frames (function name + offset + module) | RUNTIME-VERIFIED on Linux glibc x86_64 (this round): `test_backtrace` green, full panic/dump path exercised |
+| libunwind + dladdr | musl and any libc without `<execinfo.h>` where libunwind is present | symbolized frames best-effort (dladdr names + module) | RUNTIME-VERIFIED on Linux glibc x86_64 (this round) by forcing the backend and linking against the system libunwind: produced a real symbolized trace and passed `test_backtrace`.  NOT yet run on an actual musl host. |
+| libunwind, no dladdr | as above, dladdr absent | frame ADDRESSES only (no names) | RUNTIME-VERIFIED on Linux glibc x86_64 (this round) with dladdr disabled: `test_backtrace` falls back to asserting the frame count and passes |
+| DbgHelp | Windows (`_WIN32`, MinGW/MSVC) | symbolized frames via `CaptureStackBackTrace` + `SymFromAddr` | COMPILED-NOT-RUNTIME-VERIFIED.  Cross-compiles clean with mingw-w64 `-Wall -Wextra -Wpedantic` and links with `-ldbghelp`, but no Windows host in the CI matrix runs it.  Reviewed against the Win32 DbgHelp API docs; same status as `src/io/io_aix.c`. |
+| stub | any platform with none of the above | empty backtrace (length 0) | the dump degrades to proc/loop/mailbox state with the note "no backtrace backend" |
+
+Notes:
+
+* execinfo wins when both execinfo and libunwind are present; libunwind
+  is the musl fallback.  `--with-libunwind=auto|yes|no|PATH` controls
+  detection (default auto, OPTIONAL -- absence on a musl host leaves the
+  honest stub).
+* The execinfo and libunwind emit paths are async-signal-safe (the
+  former via `backtrace_symbols_fd`, the latter via a hand-rolled
+  formatter feeding `write(2)`; dladdr name lookup is best-effort, not
+  formally signal-safe, and is only an enrichment on top of the raw
+  address).  The DbgHelp `Sym*` family is single-threaded and is
+  serialized under a critical section; it is intended for the
+  panic/abort path, not arbitrary in-flight signals.
+
 ## Future port matrix items
 
 * AIX `pollset_*` -- same pattern as illumos's `port_*`, simpler
