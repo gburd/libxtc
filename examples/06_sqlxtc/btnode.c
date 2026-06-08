@@ -549,3 +549,23 @@ btnode_beyond_hi_fence(const void *page, const void *key, uint16_t klen)
 	hf = (const uint8_t *)page + h->hi_fence_off;
 	return cmp_bytes(key, klen, hf, h->hi_fence_len) > 0 ? 1 : 0;
 }
+
+/* Copy this node's lower fence key into `out`.  Returns 0 with *len
+ * set on success (0 == -infinity), -1 if the buffer is too small. */
+int
+btnode_lo_fence(const void *page, void *out, uint16_t cap, uint16_t *len)
+{
+	const struct btnode_hdr *h = CHDR(page);
+
+	if (h->lo_fence_off == 0 || h->lo_fence_len == 0) {
+		if (len != NULL)
+			*len = 0;
+		return 0;
+	}
+	if (h->lo_fence_len > cap)
+		return -1;
+	memcpy(out, (const uint8_t *)page + h->lo_fence_off, h->lo_fence_len);
+	if (len != NULL)
+		*len = h->lo_fence_len;
+	return 0;
+}
