@@ -30,6 +30,7 @@
 #if defined(_WIN32)
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+#  include <afunix.h>      /* AF_UNIX / struct sockaddr_un (Windows 10+) */
 #  include <io.h>
    /* Map errno-style codes to WSA. */
 #  define ssize_t intptr_t
@@ -413,15 +414,104 @@ xtc_net_unix_recv_creds(int fd, void *buf, size_t buflen,
 	if (out_gid) *out_gid = 0;
 	return XTC_OK;
 }
-#else /* _WIN32 -- UDS not yet supported on Windows */
-int xtc_net_unix_listen(const char *p, int *o)
-{ (void)p; (void)o; return XTC_E_NOSYS; }
-int xtc_net_unix_dial(const char *p, int *o)
-{ (void)p; (void)o; return XTC_E_NOSYS; }
-int xtc_net_unix_send_creds(int fd, const void *b, size_t l)
-{ (void)fd; (void)b; (void)l; return XTC_E_NOSYS; }
-int xtc_net_unix_recv_creds(int fd, void *b, size_t l, uint32_t *u, uint32_t *g, size_t *n)
-{ (void)fd; (void)b; (void)l; (void)u; (void)g; (void)n; return XTC_E_NOSYS; }
+#else /* _WIN32 -- AF_UNIX is supported on Windows 10 (build 17063+) */
+/*
+ * Windows AF_UNIX (\Device\Afd-backed) sockets.  Listen/dial mirror
+ * the POSIX path with three differences:
+ *   - the socket path is a filesystem path that bind(2) refuses to
+ *     reuse, so we DeleteFileA it first (the POSIX unlink analogue);
+ *   - WSA must be initialised (WSA_INIT_ONCE);
+ *   - Windows AF_UNIX carries NO peer credentials -- there is no
+ *     SO_PEERCRED/LOCAL_PEERCRED analogue -- so recv_creds returns the
+ *     received bytes with uid/gid reported as 0.
+ *
+ * COMPILED-NOT-RUNTIME-VERIFIED: cross-compiles with mingw-w64 against
+ * <afunix.h>; not yet exercised on a Windows host.
+ */
+int
+xtc_net_unix_listen(const char *path, int *out_fd)
+{
+	int fd, rc;
+	struct sockaddr_un sa;
+	WSA_INIT_ONCE();
+	if (out_fd == NULL || path == NULL) return XTC_E_INVAL;
+	if (strlen(path) >= sizeof sa.sun_path) return XTC_E_INVAL;
+
+	fd = (int)socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0) return XTC_E_INTERNAL;
+	if ((rc = xtc_net_setnonblock(fd)) != XTC_OK) {
+		(void)close(fd); return rc;
+	}
+	memset(&sa, 0, sizeof sa);
+	sa.sun_family = AF_UNIX;
+	strncpy(sa.sun_path, path, sizeof sa.sun_path - 1);
+	(void)DeleteFileA(path);            /* bind refuses to reuse a path */
+	if (bind(fd, (struct sockaddr *)&sa, (int)sizeof sa) != 0) {
+		(void)close(fd); return XTC_E_INTERNAL;
+	}
+	if (listen(fd, 64) != 0) {
+		(void)close(fd); return XTC_E_INTERNAL;
+	}
+	*out_fd = fd;
+	return XTC_OK;
+}
+
+int
+xtc_net_unix_dial(const char *path, int *out_fd)
+{
+	int fd, rc;
+	struct sockaddr_un sa;
+	WSA_INIT_ONCE();
+	if (out_fd == NULL || path == NULL) return XTC_E_INVAL;
+	if (strlen(path) >= sizeof sa.sun_path) return XTC_E_INVAL;
+	fd = (int)socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0) return XTC_E_INTERNAL;
+	if ((rc = xtc_net_setnonblock(fd)) != XTC_OK) {
+		(void)close(fd); return rc;
+	}
+	memset(&sa, 0, sizeof sa);
+	sa.sun_family = AF_UNIX;
+	strncpy(sa.sun_path, path, sizeof sa.sun_path - 1);
+	if (connect(fd, (struct sockaddr *)&sa, (int)sizeof sa) != 0) {
+		int we = WSAGetLastError();
+		if (we != WSAEWOULDBLOCK && we != WSAEINPROGRESS) {
+			(void)close(fd); return XTC_E_INTERNAL;
+		}
+	}
+	*out_fd = fd;
+	return XTC_OK;
+}
+
+int
+xtc_net_unix_send_creds(int fd, const void *buf, size_t buflen)
+{
+	/* Windows AF_UNIX has no ancillary credential channel; this is a
+	 * plain send, identical to the POSIX byte path. */
+	int n = send((SOCKET)fd, (const char *)buf, (int)buflen, 0);
+	if (n < 0) return XTC_E_INTERNAL;
+	if ((size_t)n != buflen) return XTC_E_AGAIN;
+	return XTC_OK;
+}
+
+int
+xtc_net_unix_recv_creds(int fd, void *buf, size_t buflen,
+                        uint32_t *out_uid, uint32_t *out_gid,
+                        size_t *out_n)
+{
+	int n;
+	if (out_n == NULL) return XTC_E_INVAL;
+	n = recv((SOCKET)fd, (char *)buf, (int)buflen, 0);
+	if (n < 0) {
+		int we = WSAGetLastError();
+		if (we == WSAEWOULDBLOCK) return XTC_E_AGAIN;
+		return XTC_E_INTERNAL;
+	}
+	*out_n = (size_t)n;
+	/* No peer-credential mechanism on Windows AF_UNIX. */
+	if (out_uid) *out_uid = 0;
+	if (out_gid) *out_gid = 0;
+	return XTC_OK;
+}
 #endif
 
 /* ---- UDP -------------------------------------------------------- */

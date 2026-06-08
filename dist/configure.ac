@@ -255,9 +255,11 @@ AC_SUBST([XTC_URING_LIBS],   [$uring_libs])
 xtc_extra_libs=
 case "$host_os" in
   *mingw*|*cygwin*|*msys*)
-    # ws2_32 for the IOCP backend; dbghelp for the DbgHelp backtrace
-    # backend (CaptureStackBackTrace + SymFromAddr).
-    xtc_extra_libs="-lws2_32 -ldbghelp"
+    # ws2_32 for sockets, ntdll for the AFD poll fast path
+    # (NtCreateFile / NtDeviceIoControlFile / NtCancelIoFileEx) in the
+    # IOCP backend, and dbghelp for the DbgHelp backtrace backend
+    # (CaptureStackBackTrace + SymFromAddr).
+    xtc_extra_libs="-lws2_32 -lntdll -ldbghelp"
     ;;
   *solaris*|*illumos*)
     xtc_extra_libs="-lsocket -lnsl"
