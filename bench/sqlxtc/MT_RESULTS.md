@@ -144,3 +144,42 @@ pessimistic exclusive-coupling from the root -- plus the single global
 commit-clock atomic (g_xclock); making splits optimistic (B-link sibling
 chasing) and sharding the clock are the next steps, with diminishing
 returns and rising complexity.
+
+## B-link splits + HLC commit clock (7dc290b / c5ae116)
+
+The split path was rewritten as a B-link (Lehman-Yao) tree: all four
+descents go latch-free with move-right (follow the right-link past a
+concurrent split), and splits serialize on one parking-safe per-tree
+SMO lock instead of holding an exclusive latch from the root.  A split
+no longer blocks reads or non-split writes.
+
+Write-heavy (50% read), in-cache, arnold (20c, NVMe), best of 3 kops/s:
+
+| cores | optimistic insert (f744bd6) | B-link (7dc290b) | gain |
+| ----: | --------------------------: | ---------------: | :--- |
+|   1 |  522 |  630 | 1.21x (single-thread regression recovered) |
+|   2 |  957 |  997 | 1.04x |
+|   4 | 1169 | 1346 | 1.15x (peak, 2.1x over 1c) |
+|   8 |  764 | 1182 | 1.55x |
+|  16 |  290 |  565 | 1.95x |
+|  20 |  227 |  381 | 1.68x |
+
+B-link both recovers the single-thread regression the optimistic path
+introduced (630 vs 522) and lifts high-thread throughput 55-95% at
+8-20 threads; the post-peak decline is far gentler.  Reads are
+unharmed (100% read, in-cache: 1145 / 2387 / 2226 / 1895 kops at
+1 / 4 / 8 / 20 cores).
+
+The commit clock is now a Hybrid Logical Clock (wall-clock ms in the
+high 48 bits, logical counter in the low 16) instead of a bare atomic
+counter.  In a single process this does not change throughput -- it is
+still one CAS per commit -- but it anchors stamps to wall-clock time
+and adds the merge-on-observe rule that makes the same stamp a valid
+causal timestamp once the engine is distributed (the chosen causality
+model).  Interval Tree Clocks were rejected: ITC tracks a partial
+causal order, not a single totally-ordered stamp, so it cannot serve
+as an MVCC commit timestamp.
+
+Remaining write-scaling levers (diminishing returns): full split-vs-split
+parallelism (drop the SMO lock for fine-grained per-level latching) and
+batching/sharding the commit-clock CAS under very high commit rates.
