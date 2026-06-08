@@ -119,3 +119,28 @@ Two improvements did land from this work:
   * src/ptc/sync.c: a real use-after-scope crash in xtc_arwlock's
     fiber-waiter wake path, found by the high-fiber-concurrency write
     workload and fixed (wake under the lock).
+
+## Parallel-writer B-tree: optimistic latch coupling for bt_insert
+
+The write decline (writers serializing on the root's exclusive latch)
+is fixed by descending shared and taking only the leaf exclusive.
+Write-heavy (50% read), in-cache, arnold (20c, NVMe), median kops/s:
+
+| cores | bt_insert BEFORE (excl. from root) | AFTER (optimistic) | gain |
+| ----: | ---------------------------------: | -----------------: | :--- |
+|   1 |  676 |  522 | 0.77x (re-latch overhead) |
+|   2 |   -- |  957 | -- |
+|   4 |  612 | 1169 | 1.91x (peak) |
+|   8 |  338 |  764 | 2.26x |
+|  16 |  177 |  290 | 1.64x |
+|  20 |  142 |  227 | 1.60x |
+
+Writes now SCALE to a ~1169 kops peak at 4 threads instead of declining
+monotonically, and are ~1.6-2.3x higher at 8-20 threads.  Trade-off:
+single-thread is ~23% lower (the optimistic path re-latches the leaf
+shared->exclusive, and a split-bound insert pays a second, pessimistic
+descent).  The residual decline past 4 threads is the SPLIT path -- still
+pessimistic exclusive-coupling from the root -- plus the single global
+commit-clock atomic (g_xclock); making splits optimistic (B-link sibling
+chasing) and sharding the clock are the next steps, with diminishing
+returns and rising complexity.
