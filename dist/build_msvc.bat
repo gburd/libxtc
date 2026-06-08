@@ -52,7 +52,7 @@ rem        this standalone test exercises the Win32 paths directly). ---
 echo [4/4] cl smoke.exe
 cl %CFLAGS% /Fe:smoke.exe ^
    "%XTC_SRC%\test\msvc\smoke.c" ^
-   xtc.lib ws2_32.lib
+   xtc.lib ws2_32.lib ntdll.lib
 if errorlevel 1 goto :fail
 
 echo.
