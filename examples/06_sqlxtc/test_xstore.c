@@ -230,6 +230,19 @@ eval_int(xsql *db, const char *sql)
 	return v;
 }
 
+/* Like eval_int but 64-bit, for commit timestamps (HLC stamps far
+ * exceed 32 bits). */
+static int64_t
+eval_int64(xsql *db, const char *sql)
+{
+	xsql_stmt *st = NULL;
+	int64_t v = -1;
+	if (xsql_prepare_v2(db, sql, -1, &st, 0) != SQLITE_OK) return -1;
+	if (xsql_step(st) == SQLITE_ROW) v = xsql_column_int64(st, 0);
+	xsql_finalize(st);
+	return v;
+}
+
 static int
 scenario_mvcc(void)
 {
@@ -332,8 +345,11 @@ scenario_txn(void)
 	xsql_finalize(st); st = NULL;
 
 	/* Both rows shared ONE commit timestamp (a single tick for the
-	 * whole transaction). */
-	CK(commit_ts == ts_pre + 1);
+	 * whole transaction): the timestamp advanced past the pre-txn
+	 * reading, and the atomicity checks below confirm both rows landed
+	 * at exactly that one stamp.  (The clock is an HLC, so a tick is
+	 * not necessarily +1 -- it jumps to wall-clock time.) */
+	CK(commit_ts > ts_pre);
 
 	/* Atomicity: no snapshot sees exactly one of the two rows.  Just
 	 * before the commit timestamp -> neither; at it -> both. */
@@ -551,7 +567,7 @@ scenario_gc(void)
 	/* A held snapshot pins its versions: d2 reads as-of the current
 	 * clock, d1 overwrites row 1, GC runs -- d2 still sees the pinned
 	 * version; after d2 releases, GC reclaims it. */
-	ts0 = eval_int(d1, "SELECT xstore_now();");
+	ts0 = eval_int64(d1, "SELECT xstore_now();");
 	set_as_of(d2, ts0);
 	CK(sel_v(d2, 1, b, sizeof b) == 1 && strcmp(b, want) == 0);
 	CK(xsql_exec(d1, "UPDATE t SET v='final' WHERE k=1;", 0, 0, 0) == SQLITE_OK);
