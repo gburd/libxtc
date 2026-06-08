@@ -1,0 +1,9 @@
+# meson_options.txt -- build-time options for the meson build.
+#
+# Copyright (c) 2026, The XTC Project
+# Use of this source code is governed by the ISC License.
+
+option('shared',
+  type : 'boolean',
+  value : false,
+  description : 'Also build and install a shared libxtc.so (mirrors the autoconf --enable-shared).')

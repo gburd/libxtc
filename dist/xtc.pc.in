@@ -1,0 +1,20 @@
+# dist/xtc.pc.in -- pkg-config metadata for libxtc.
+#
+# Copyright (c) 2026, The XTC Project
+# Use of this source code is governed by the ISC License.
+#
+# Substituted at configure time into the build directory as xtc.pc and
+# installed to $(libdir)/pkgconfig/xtc.pc by `make install`.
+
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: xtc
+Description: High-performance async/concurrency runtime for C
+URL: https://codeberg.org/gregburd/libxtc
+Version: @XTC_VERSION_FULL@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lxtc
+Libs.private: @XTC_PC_LIBS_PRIVATE@

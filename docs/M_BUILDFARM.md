@@ -96,13 +96,46 @@ PG vendors xtc as either:
   but supported.
 
 For packaging:
-- [ ] `pkg-config` `xtc.pc` file (currently NOT shipped -- add).
+- [x] `pkg-config` `xtc.pc` file.  Generated from `dist/xtc.pc.in`
+  at configure time (autoconf substitutes prefix/libdir/includedir/
+  version and the private link deps) and installed to
+  `$(libdir)/pkgconfig/xtc.pc`; the meson build emits an equivalent
+  via `pkgconfig.generate()`.  Verified on Linux x86_64:
+  `pkg-config --cflags --libs xtc`, `--static --libs`, and
+  `--modversion` resolve against a temp install prefix, and a sample
+  consumer compiles, links, and runs against the installed shared lib.
 - [ ] CMake config `xtc-config.cmake` for downstream finders (currently
   NOT shipped -- defer; pkg-config is sufficient).
-- [ ] SemVer policy in `docs/abi-stability.md` (already shipped).
-- [ ] Symbol versioning via `libxtc.map` -- currently NOT used because
-  we ship a static lib only.  When we ship `libxtc.so`, add a version
-  script.
+- [x] SemVer policy in `docs/abi-stability.md` (already shipped).
+- [x] Symbol versioning via `dist/libxtc.map` -- used when the build
+  ships `libxtc.so`.  The script exports only the public `xtc_*` and
+  `__xtc_*` symbols (the latter are internal seams referenced by PUBLIC
+  macros in the installed headers) and makes everything else, notably
+  the internal `__os_*` layer, local.  Verified with `nm -D`: 401
+  exported symbols, all `xtc_*`/`__xtc_*`, zero `__os_*` leaked.  The
+  shared library is OPTIONAL: `./dist/configure --enable-shared`
+  builds and installs `libxtc.so.X.Y.Z` plus the SONAME
+  (`libxtc.so.MAJOR`) and bare-name symlinks; the default build still
+  ships a static `libxtc.a` only.
+- [x] OS packaging recipes shipped:
+  - Debian: `debian/` (control with `libxtc0` + `libxtc-dev`,
+    debhelper-13 `rules` driving the out-of-source autoconf build,
+    DEP-5 ISC `copyright`, `changelog`, `*.install` maps).  The
+    changelog parses with `dpkg-parsechangelog` and the `.install`
+    globs were validated against a real `--enable-shared` DESTDIR
+    install.  A full `dpkg-buildpackage` run is unverified here
+    (no `debhelper`/`dh` on the build host); run it on a Debian/Ubuntu
+    box.
+  - RPM: `dist/xtc.spec` (`libxtc` + `libxtc-devel`, ISC `License:`
+    tag, `%check` runs the test suite).  Validated with
+    `rpmspec --parse`/`--query` (resolves to `libxtc-0.5.0-1` and
+    `libxtc-devel-0.5.0-1`); a full `rpmbuild -ba` is unverified here
+    (no RPM build root / rpmlint on the host).
+  - Nix: `flake.nix` exposes `packages.<system>.default` that
+    configures (`--enable-shared`), builds, and installs into `$out`,
+    plus a `devShells.default`.  Verified with `nix build` on Linux
+    x86_64: the derivation builds the shared + static libs and installs
+    the headers, pkg-config file, and man pages.
 
 ### 5. Test discipline
 - [ ] Every test must complete in < 30s (current `make check` runs
@@ -193,7 +226,7 @@ buildfarm readiness:
   only in `io_aix.c` while AIX awaits a host; this is acceptable).
 - [ ] Documentation parity: `make check` passes including all
   `test/dist/test_*.sh` shell tests; mandoc lint clean.
-- [ ] `pkg-config` `xtc.pc` shipped.
+- [x] `pkg-config` `xtc.pc` shipped.
 - [ ] All ABI-stable APIs documented in `man3/`.
 - [ ] PLAN.md, ARCHITECTURE.md, M_PORT.md all match reality (verified
   by the audit agent -- documented in `docs/audit-log.md`).
