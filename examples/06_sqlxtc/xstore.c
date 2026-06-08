@@ -62,9 +62,82 @@
 #include "xlog.h"
 #include "xtc.h"
 #include "xtc_proc.h"
+#include "os_time.h"
 
-/* Global logical commit clock for the shared engine B-tree. */
+/*
+ * Commit clock.  Every committed version is stamped with a unique,
+ * monotonically increasing 64-bit timestamp that is also the MVCC
+ * snapshot boundary: a snapshot S sees exactly the versions whose
+ * commit_ts <= S.  The stamp is a Hybrid Logical Clock (HLC):
+ *
+ *   bits 63..16  physical time in milliseconds since the epoch
+ *   bits 15..0   logical counter (disambiguates same-millisecond
+ *                commits and guarantees strict monotonicity)
+ *
+ * Packing physical time into the high bits keeps the stamp ordered as
+ * a plain uint64_t -- so every existing commit_ts comparison, the
+ * bit-inverted version-key encoding, and the persisted clock keep
+ * working unchanged -- while anchoring it to wall-clock time, so a
+ * snapshot is meaningful across nodes and the clock survives a
+ * restart monotonically (it is persisted and restored, and never
+ * runs backwards even if two nodes' wall clocks disagree, because the
+ * HLC update rule advances past any observed timestamp).  Physical
+ * milliseconds keep real stamps far below the steal-txn range
+ * (1<<62), so the two id spaces never collide.
+ *
+ * In a single process this is still one shared atomic advanced by CAS
+ * per commit; HLC's payoff is the wall-clock anchoring and the
+ * merge-on-observe rule (xstore_clock_observe) that make the same
+ * stamp valid as a causal timestamp once the engine is distributed.
+ */
+#define HLC_LOGICAL_BITS 16
+#define HLC_LOGICAL_MASK ((1ULL << HLC_LOGICAL_BITS) - 1)
 static _Atomic uint64_t g_xclock = 1;
+
+/* Wall-clock milliseconds since the epoch, the HLC physical component. */
+static uint64_t
+hlc_phys_ms(void)
+{
+	int64_t ns = 0;
+
+	if (__os_clock_real(&ns) != 0 || ns < 0)
+		ns = 0;
+	return (uint64_t)ns / 1000000ULL;
+}
+
+/*
+ * Mint the next commit timestamp.  Read the physical clock; if it has
+ * advanced past the stored physical component, adopt it with logical
+ * 0; otherwise keep the stored physical component and bump the logical
+ * counter (rolling into the next millisecond if the counter
+ * saturates, so the stamp is always strictly greater than the last).
+ * A CAS publishes the new stamp; on contention, retry.  The result is
+ * unique and strictly monotonic across all callers.
+ */
+static uint64_t
+hlc_tick(void)
+{
+	for (;;) {
+		uint64_t cur = atomic_load_explicit(&g_xclock,
+		    memory_order_relaxed);
+		uint64_t cur_phys = cur >> HLC_LOGICAL_BITS;
+		uint64_t cur_log = cur & HLC_LOGICAL_MASK;
+		uint64_t now = hlc_phys_ms();
+		uint64_t nxt;
+
+		if (now > cur_phys) {
+			nxt = now << HLC_LOGICAL_BITS;       /* logical 0 */
+		} else if (cur_log < HLC_LOGICAL_MASK) {
+			nxt = (cur_phys << HLC_LOGICAL_BITS) | (cur_log + 1);
+		} else {
+			nxt = (cur_phys + 1) << HLC_LOGICAL_BITS; /* carry */
+		}
+		if (atomic_compare_exchange_weak_explicit(&g_xclock, &cur, nxt,
+		    memory_order_relaxed, memory_order_relaxed))
+			return nxt;
+	}
+}
+
 
 /* STEAL: a unique key suffix for each spilled payload, and a logical id
  * for each transaction that spills.  Steal-txn ids live in a high range
@@ -92,9 +165,26 @@ uint64_t xstore_clock(void) { return atomic_load_explicit(&g_xclock, memory_orde
 void
 xstore_set_clock(uint64_t v)
 {
-	if (v >= atomic_load_explicit(&g_xclock, memory_order_relaxed))
-		atomic_store_explicit(&g_xclock, v, memory_order_relaxed);
+	uint64_t cur = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+
+	/* Restore-on-restart and the HLC merge-on-observe rule are the same
+	 * operation: never let the clock run backwards.  Advance to v only
+	 * if it is ahead of the current stamp (CAS-loop against concurrent
+	 * ticks).  When the engine is distributed, a node calls this with a
+	 * timestamp received from a peer so its own stamps stay causally
+	 * after everything it has observed. */
+	while (v > cur) {
+		if (atomic_compare_exchange_weak_explicit(&g_xclock, &cur, v,
+		    memory_order_relaxed, memory_order_relaxed))
+			return;
+	}
 }
+
+/* HLC merge-on-observe: fold a timestamp seen from a peer into the
+ * local clock so the next minted stamp is strictly greater than it.
+ * A thin alias over xstore_set_clock, named for the distributed call
+ * site that will use it. */
+void xstore_clock_observe(uint64_t peer_ts) { xstore_set_clock(peer_ts); }
 
 #define XS_F_DELETED 0x01u     /* value[0] flag: this version is a tombstone */
 #define XS_VKLEN     20        /* (tableid:4) + (rowid:8) + (inverted commit_ts:8) */
@@ -1330,8 +1420,7 @@ xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int d
 {
 	uint8_t key[XS_VKLEN];
 	uint8_t buf[1 + XS_VMAX];
-	uint64_t ts = atomic_fetch_add_explicit(&g_xclock, 1,
-	    memory_order_relaxed) + 1;
+	uint64_t ts = hlc_tick();
 	if (n < 0) n = 0;
 	if (n > XS_VMAX) n = XS_VMAX;
 	if (g_xwal != NULL) {
@@ -1738,8 +1827,7 @@ xs_commit(xsql_vtab *pv)
 		if (cx->steal_txn != 0)              /* STEAL: bring spilled payloads back */
 			for (i = 0; i < cx->wn; i++)
 				(void)xs_wrec_ensure(cx, &cx->wbuf[i]);
-		ts = atomic_fetch_add_explicit(&g_xclock, 1,
-		    memory_order_relaxed) + 1;     /* one timestamp for the txn */
+		ts = hlc_tick();     /* one timestamp for the txn */
 		if (g_xwal != NULL)
 			xs_wal_log(cx, ts);            /* durable BEFORE apply */
 		for (i = 0; i < cx->wn; i++) {

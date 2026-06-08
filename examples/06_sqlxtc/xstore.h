@@ -48,6 +48,10 @@ int xstore_checkpoint_wal(bt_t *bt, struct wal *w, const char *wal_path);
  * restore it when trusting the base on a clean restart. */
 uint64_t xstore_clock(void);
 void xstore_set_clock(uint64_t v);
+/* HLC merge-on-observe: fold a peer's commit timestamp into the local
+ * clock so the next minted stamp is causally after it (for the future
+ * distributed engine; an alias over xstore_set_clock). */
+void xstore_clock_observe(uint64_t peer_ts);
 
 /* Number of CLRs written during recovery undo passes (test/metric). */
 uint64_t xstore_undo_clrs(void);
