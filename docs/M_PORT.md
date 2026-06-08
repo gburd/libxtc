@@ -64,7 +64,7 @@ Substantial new code:
   16) so the hook surface remains symmetric.
 * `src/os/os_cpu.c` -- Windows uses `GetSystemInfo`.
 * `dist/configure.ac` -- adds `-lws2_32` to LIBS on `*-mingw*`/
-  `*-cygwin*`/`*-msys*`.
+  `*-cygwin*`/`*-msys*` (round 2 adds `-lntdll` for the AFD poll path).
 * `src/os/asm/fctx_x86_64_sysv.S` -- guarded with `#if !defined(_WIN32)`
   so the SysV asm stubs out (Win64 ABI is incompatible).
 
@@ -97,6 +97,55 @@ test_timer, test_waker.
 Neither blocker affects the L0/L2/L3/L4 surface; they're isolated
 to the L1 readiness-on-Windows story and the optional fast-fiber-
 switch.  The **default** fiber path (Win32 fibers) is fully working.
+
+### IOCP round 2: native overlapped (COMPILED, NOT RUNTIME-VERIFIED)
+
+`src/io/io_iocp.c` was taken from the round-1 readiness emulation
+(WSAEventSelect + WaitForMultipleObjects, hard-capped at 64 handles,
+~60% of native IOCP throughput) to a native completion-port design:
+
+* The single `CreateIoCompletionPort` / `GetQueuedCompletionStatusEx`
+  pair is the only wait primitive -- the **64-handle cap is removed**.
+* Socket readiness uses the **AFD poll fast path** the round-2 plan
+  called for: `\Device\Afd` opened with `NtCreateFile`, associated
+  with the port, one `IOCTL_AFD_POLL` (`NtDeviceIoControlFile`) armed
+  per socket and re-armed after each completion (level-triggered).
+  This is the wepoll/libuv design.
+* Wakeup is `PostQueuedCompletionStatus`; file AIO is overlapped
+  `ReadFile`/`WriteFile` reaped from the same port.
+* The OVERLAPPED-ownership rule is enforced: kernel owns the
+  OVERLAPPED from accept to completion-dequeue; deregistering an
+  armed socket cancels (`NtCancelIoFileEx`) and defers the free to the
+  reap.  Registration nodes are separately heap-allocated with stable
+  addresses so the kernel-held back-pointer never dangles.
+
+**Verified on the Linux dev host:** cross-compiles clean with
+mingw-w64 gcc 14.3.0 `-std=c11 -Wall -Wextra` and links into a PE32+
+binary against `-lntdll -lws2_32`.  The Linux build is unaffected
+(`io_iocp.c` is `XTC_IO_BACKEND_IOCP`-only; it is an empty TU
+everywhere else, and the full C munit suite stays green on epoll/
+uring).
+
+**NOT runtime-verified.**  The backend has not executed on Windows.
+The AFD poll correctness, the level-triggered re-arm, the cancel/
+lifetime under churn, and the wakeup ordering must be validated on
+santorini before this is production quality -- same reviewed-but-
+untested status as `src/io/io_aix.c`.  The exact test plan is in
+`docs/M_WINDOWS_MATRIX.md`.
+
+The round-1 test-side gap (item 1 above) is unchanged: the m2 io_*
+tests still need a tcp-socketpair shim because IOCP/AFD operate on
+sockets, not anonymous CRT pipes -- this is orthogonal to the backend
+rewrite.
+
+### Unix domain sockets on Windows (COMPILED, NOT RUNTIME-VERIFIED)
+
+`src/io/io_net.c`'s four UDS entry points are implemented on Windows
+via `AF_UNIX` (`<afunix.h>`, Windows 10 build 17063+) instead of
+returning `XTC_E_NOSYS`.  Listen/dial mirror POSIX; Windows `AF_UNIX`
+has no peer-credential channel, so the creds API returns the bytes
+with uid/gid 0.  Cross-compiles clean with mingw-w64; not yet run on
+a Windows host (details in `docs/M_WINDOWS_MATRIX.md`).
 
 ## Native stack backtrace (xtc_dump / panic handler)
 
