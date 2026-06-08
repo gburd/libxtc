@@ -1,0 +1,6 @@
+usr/include/xtc.h
+usr/lib/*/libxtc.a
+usr/lib/*/libxtc.so
+usr/lib/*/pkgconfig/xtc.pc
+usr/share/man/man3/*
+usr/share/man/man7/*

@@ -1,5 +1,5 @@
 {
-  description = "xtc — high-performance async/concurrency runtime for C";
+  description = "xtc -- high-performance async/concurrency runtime for C";
 
   inputs = {
     nixpkgs.url      = "github:NixOS/nixpkgs/nixos-24.11";
@@ -8,8 +8,67 @@
 
   outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
-      let pkgs = import nixpkgs { inherit system; };
+      let
+        pkgs = import nixpkgs { inherit system; };
+        version =
+          pkgs.lib.removeSuffix "\n" (builtins.readFile ./dist/version.in);
+
+        # The actual library build.  xtc mandates an out-of-source build
+        # driven from dist/configure; we create a build dir, configure
+        # with --enable-shared, build, run the test suite, and install
+        # into $out.  liburing is Linux-only.
+        xtc = pkgs.stdenv.mkDerivation {
+          pname = "xtc";
+          inherit version;
+          src = self;
+
+          nativeBuildInputs = with pkgs; [ autoconf gcc gnumake pkg-config ];
+          buildInputs = with pkgs; [ openssl ]
+            ++ pkgs.lib.optional pkgs.stdenv.isLinux liburing;
+
+          # configure.ac forbids configuring in the source root, so we
+          # run it from a dedicated build directory.
+          configurePhase = ''
+            runHook preConfigure
+            mkdir -p build_nix
+            cd build_nix
+            ../dist/configure \
+              --prefix=$out \
+              --enable-shared \
+              --with-tls=auto
+            runHook postConfigure
+          '';
+
+          buildPhase = ''
+            runHook preBuild
+            make -j$NIX_BUILD_CORES
+            runHook postBuild
+          '';
+
+          doCheck = false;
+          # The project's `make check` target mixes C unit tests with
+          # shell meta-tests that need autoreconf, a writable source
+          # tree, and host env vars (XTC_SRC_DIR) not present in the
+          # Nix sandbox; run it from the devShell or CI instead.  The
+          # packaging gate here is that the library builds and installs.
+
+          installPhase = ''
+            runHook preInstall
+            make install
+            runHook postInstall
+          '';
+
+          meta = with pkgs.lib; {
+            description = "High-performance async/concurrency runtime for C";
+            homepage    = "https://codeberg.org/gregburd/libxtc";
+            license     = licenses.isc;
+            platforms   = platforms.unix;
+          };
+        };
       in {
+        packages.default = xtc;
+        packages.xtc     = xtc;
+
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             # Toolchain

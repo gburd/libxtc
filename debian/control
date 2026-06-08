@@ -1,0 +1,41 @@
+Source: libxtc
+Priority: optional
+Maintainer: Greg Burd <greg@burd.me>
+Build-Depends:
+ debhelper-compat (= 13),
+ autoconf,
+ liburing-dev,
+ libssl-dev,
+ pkg-config
+Standards-Version: 4.6.2
+Section: libs
+Homepage: https://codeberg.org/gregburd/libxtc
+Vcs-Git: https://codeberg.org/gregburd/libxtc.git
+Vcs-Browser: https://codeberg.org/gregburd/libxtc
+Rules-Requires-Root: no
+
+Package: libxtc0
+Architecture: any
+Multi-Arch: same
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: high-performance async/concurrency runtime for C (shared library)
+ xtc is a C11 async/concurrency runtime: an event loop with pluggable
+ I/O backends (epoll, io_uring, kqueue, IOCP, event ports), stackful
+ coroutines, work-stealing executors, channels, an OTP-style process
+ and supervision model, and synchronisation primitives.
+ .
+ This package contains the shared library.
+
+Package: libxtc-dev
+Architecture: any
+Multi-Arch: same
+Section: libdevel
+Depends: libxtc0 (= ${binary:Version}), ${misc:Depends}
+Description: high-performance async/concurrency runtime for C (development files)
+ xtc is a C11 async/concurrency runtime: an event loop with pluggable
+ I/O backends (epoll, io_uring, kqueue, IOCP, event ports), stackful
+ coroutines, work-stealing executors, channels, an OTP-style process
+ and supervision model, and synchronisation primitives.
+ .
+ This package contains the static library, the public header, the
+ pkg-config metadata, and the manual pages needed to build against xtc.
