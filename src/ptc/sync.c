@@ -287,12 +287,41 @@ struct xtc_amutex {
 	pthread_mutex_t       lock;
 	pthread_cond_t        cv;        /* thread (non-fiber) waiters */
 	int                   held;
+	int                   recursive; /* XTC_AMUTEX_RECURSIVE */
+	struct amutex_owner {
+		int       kind;          /* 0 none, 1 fiber, 2 thread */
+		void     *task;          /* fiber identity (kind 1) */
+		pthread_t thr;           /* thread identity (kind 2) */
+	}                     owner;     /* valid while held; under lock */
+	int                   count;     /* recursion depth */
 	struct amutex_waiter *wq_head;   /* fiber waiters, FIFO */
 	struct amutex_waiter *wq_tail;
 };
 
+/* Identity of the current execution context: the running fiber's task
+ * on a loop, else the OS thread.  Tracked by FIBER on a loop so two
+ * fibers sharing one OS thread are distinct owners. */
+static struct amutex_owner
+amutex_self_owner(void)
+{
+	struct amutex_owner o;
+	xtc_task_t *t = __xtc_current_task();
+	o.task = NULL;
+	if (t != NULL) { o.kind = 1; o.task = t; }
+	else           { o.kind = 2; o.thr = pthread_self(); }
+	return o;
+}
+
+static int
+amutex_owner_eq(const struct amutex_owner *a, const struct amutex_owner *b)
+{
+	if (a->kind != b->kind || a->kind == 0) return 0;
+	if (a->kind == 1) return a->task == b->task;
+	return pthread_equal(a->thr, b->thr);
+}
+
 int
-xtc_amutex_create(xtc_amutex_t **out)
+xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags)
 {
 	xtc_amutex_t *m;
 	int rc;
@@ -300,8 +329,36 @@ xtc_amutex_create(xtc_amutex_t **out)
 	if ((rc = __os_calloc(1, sizeof *m, (void **)&m)) != XTC_OK) return rc;
 	(void)pthread_mutex_init(&m->lock, NULL);
 	(void)pthread_cond_init(&m->cv, NULL);
+	m->recursive = (flags & XTC_AMUTEX_RECURSIVE) ? 1 : 0;
 	*out = m;
 	return XTC_OK;
+}
+
+int
+xtc_amutex_create(xtc_amutex_t **out)
+{
+	return xtc_amutex_create_ex(out, 0);
+}
+
+/* Process-global recursive static mutexes, lazily created. */
+static xtc_amutex_t   *g_static_amutex[XTC_AMUTEX_STATIC_MAX];
+static pthread_mutex_t g_static_amutex_lock = PTHREAD_MUTEX_INITIALIZER;
+
+xtc_amutex_t *
+xtc_amutex_static(unsigned slot)
+{
+	xtc_amutex_t *m;
+	if (slot >= XTC_AMUTEX_STATIC_MAX) return NULL;
+	(void)pthread_mutex_lock(&g_static_amutex_lock);
+	m = g_static_amutex[slot];
+	if (m == NULL) {
+		if (xtc_amutex_create_ex(&m, XTC_AMUTEX_RECURSIVE) == XTC_OK)
+			g_static_amutex[slot] = m;
+		else
+			m = NULL;
+	}
+	(void)pthread_mutex_unlock(&g_static_amutex_lock);
+	return m;
 }
 
 void
@@ -319,7 +376,21 @@ xtc_amutex_try_lock(xtc_amutex_t *m)
 	int rc = XTC_E_AGAIN;
 	if (m == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&m->lock);
-	if (!m->held) { m->held = 1; rc = XTC_OK; }
+	if (m->recursive) {
+		struct amutex_owner self = amutex_self_owner();
+		if (m->held && amutex_owner_eq(&m->owner, &self)) {
+			m->count++;
+			rc = XTC_OK;
+		} else if (!m->held) {
+			m->held = 1;
+			m->owner = self;
+			m->count = 1;
+			rc = XTC_OK;
+		}
+	} else if (!m->held) {
+		m->held = 1;
+		rc = XTC_OK;
+	}
 	(void)pthread_mutex_unlock(&m->lock);
 	return rc;
 }
@@ -377,7 +448,21 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 	if (m == NULL) return XTC_E_INVAL;
 
 	(void)pthread_mutex_lock(&m->lock);
-	if (!m->held) {
+	if (m->recursive) {
+		struct amutex_owner self = amutex_self_owner();
+		if (m->held && amutex_owner_eq(&m->owner, &self)) {
+			m->count++;                 /* recursive re-entry */
+			(void)pthread_mutex_unlock(&m->lock);
+			return XTC_OK;
+		}
+		if (!m->held) {
+			m->held = 1;
+			m->owner = self;
+			m->count = 1;
+			(void)pthread_mutex_unlock(&m->lock);
+			return XTC_OK;
+		}
+	} else if (!m->held) {
 		m->held = 1;
 		(void)pthread_mutex_unlock(&m->lock);
 		return XTC_OK;
@@ -419,6 +504,10 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 			if (now >= deadline) {
 				(void)pthread_mutex_lock(&m->lock);
 				if (w.granted) {
+					if (m->recursive) {
+						m->owner = amutex_self_owner();
+						m->count = 1;
+					}
 					(void)pthread_mutex_unlock(&m->lock);
 					return XTC_OK;   /* raced with grant */
 				}
@@ -437,6 +526,10 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 
 		(void)pthread_mutex_lock(&m->lock);
 		if (w.granted) {
+			if (m->recursive) {
+				m->owner = amutex_self_owner();
+				m->count = 1;
+			}
 			(void)pthread_mutex_unlock(&m->lock);
 			return XTC_OK;
 		}
@@ -451,6 +544,15 @@ xtc_amutex_unlock(xtc_amutex_t *m)
 	struct amutex_waiter *w = NULL;
 	if (m == NULL) return XTC_E_INVAL;
 	(void)pthread_mutex_lock(&m->lock);
+	if (m->recursive) {
+		if (m->count > 1) {
+			m->count--;            /* still held by this owner */
+			(void)pthread_mutex_unlock(&m->lock);
+			return XTC_OK;
+		}
+		m->count = 0;
+		m->owner.kind = 0;         /* release; next owner claims it */
+	}
 	if (m->wq_head != NULL) {
 		/* Hand off to the head fiber waiter: keep held == 1. */
 		w = m->wq_head;
