@@ -73,6 +73,7 @@ metrics.o: metrics.c db.h
 
 clean:
 	rm -f $(OBJS) $(TARGET) test_bitcask test_db_persist test_metrics
+	rm -rf *.dSYM
 
 # Basic sanity test: start server, ping, stop
 test: $(TARGET)
