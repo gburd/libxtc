@@ -361,6 +361,32 @@ Staged so each step is independently testable and leaves the tree green:
   (torn structure modifications), and the logical rebuild remains the
   safe, proven crash default.
 
+  In-place vs logical-rebuild, the exact difference (the 13% question).
+  Both paths replay each committed XL_UPDATE by calling bt_insert; they
+  differ ONLY in the starting state of the tree they insert into:
+    - Logical rebuild starts from a FRESHLY TRUNCATED, empty page file.
+      Every bt_insert builds structure from nothing, so no insert can
+      land in a broken region and none can fail for structural reasons.
+      It needs the full committed history in the (bounded) log, which
+      it has.  This is why it is correct from an arbitrary crash.
+    - In-place trusts the on-disk base and repairs only the pages that
+      carry an XL_PAGE physiological image.  Today XL_PAGE is emitted
+      ONLY from the split / SMO path (smo_emit_page in btree.c, fired
+      by smo_begin/smo_end); an ordinary row-write leaf -- the common
+      bt_insert_fast path -- emits no page image, only the logical
+      XL_UPDATE.  So if such a leaf is torn, there is no image to
+      restore it, and the later logical bt_insert descends a structure
+      with a hole: roughly 13% of rows (the ones whose home leaf was a
+      torn non-split leaf) land wrong or fail.  The loss is not random
+      -- it is exactly the set of rows that depend on logical redo
+      navigating un-repaired structure.
+  The fix that makes in-place correct from ANY crash is therefore
+  precise: emit XL_PAGE for every dirtied page (or log row writes
+  physiologically as well), so logical redo never has to traverse a
+  torn region.  That is a bounded, well-scoped enhancement (more log
+  volume, paid back by mid-log truncation to the recLSN horizon); it is
+  deferred, not unknown.
+
   **S4 -- Fuzzy checkpoint + min-recLSN truncation.  PARTIAL.**
   Checkpoint writes the dirty-page table + active-txn table + `ckp_lsn =
   min(oldest active txn LSN, oldest dirty-page recLSN)` and flushes the
