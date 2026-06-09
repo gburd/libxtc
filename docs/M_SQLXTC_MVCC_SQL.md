@@ -32,12 +32,20 @@ deep SQLite-plus-B-tree C call chain correctly.  That validation (no
 fiber-stack overflow, correct results under heavy eviction) is the
 hardening this exercise exists to produce.
 
-Status: the storage swap is single-version today (`xstore` over the
-B-tree).  Snapshot-isolation visibility and serializability layer on
-this storage as described below; the engine already has the pieces
-(`mvcc.c`: per-shard HLC, 2PC coordinator, version chains), and the
-remaining work is to merge them with the B-tree-backed storage and put
-the visibility check on the read path.
+Status: implemented.  `xstore` over the B-tree is a multi-version
+store: each row version is keyed (tableid, rowid, inverted commit_ts),
+so a snapshot read returns the newest version at or before its
+timestamp.  Snapshot-isolation visibility and Cahill SSI
+serializability run on the read and commit paths (see xstore.c and the
+SSI / write-skew cases in test_xstore.c).  The full isolation-level
+set -- READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ, SNAPSHOT,
+SERIALIZABLE -- is selectable via xstore_isolation() (test_isolation.c),
+and savepoints / nested transactions are implemented via the vtab's
+xSavepoint/xRelease/xRollbackTo hooks (test_savepoint.c).  Commit
+timestamps come from a Hybrid Logical Clock.  The separate mvcc.c
+demonstrator (per-shard HLC, deferred-reply 2PC coordinator) remains a
+KV-level scale-out study; it is NOT the path under the SQL engine,
+which uses the single-process commit clock and SSI described here.
 
 ## The MVCC model: PostgreSQL heap visibility + Cahill SSI
 
