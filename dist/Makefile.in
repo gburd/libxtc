@@ -108,6 +108,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/os/asm/fctx_x86_64_sysv.S \
 	$(srcdir)/../src/os/asm/fctx_x86_64_ms_pe.S \
 	$(srcdir)/../src/os/asm/fctx_aarch64_aapcs.S \
+	$(srcdir)/../src/os/asm/fctx_aarch64_ms_pe.S \
 	$(srcdir)/../src/os/asm/fctx_ppc64le_elfv2.S \
 	$(srcdir)/../src/os/asm/fctx_riscv64_lp64d.S \
 	$(srcdir)/../src/os/asm/fctx_arm_aapcs.S \
@@ -170,6 +171,7 @@ LIB_OBJS	= \
 	fctx_x86_64_sysv.o \
 	fctx_x86_64_ms_pe.o \
 	fctx_aarch64_aapcs.o \
+	fctx_aarch64_ms_pe.o \
 	fctx_ppc64le_elfv2.o \
 	fctx_riscv64_lp64d.o \
 	fctx_arm_aapcs.o \
@@ -494,6 +496,9 @@ fctx_x86_64_ms_pe.o: $(srcdir)/../src/os/asm/fctx_x86_64_ms_pe.S
 
 fctx_aarch64_aapcs.o: $(srcdir)/../src/os/asm/fctx_aarch64_aapcs.S
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/asm/fctx_aarch64_aapcs.S
+
+fctx_aarch64_ms_pe.o: $(srcdir)/../src/os/asm/fctx_aarch64_ms_pe.S
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/asm/fctx_aarch64_ms_pe.S
 
 fctx_ppc64le_elfv2.o: $(srcdir)/../src/os/asm/fctx_ppc64le_elfv2.S
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/asm/fctx_ppc64le_elfv2.S
