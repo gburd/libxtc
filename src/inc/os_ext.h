@@ -24,6 +24,8 @@ int __os_mutex_lock __P((__os_mutex_t *));
 int __os_mutex_trylock __P((__os_mutex_t *));
 int __os_mutex_unlock __P((__os_mutex_t *));
 int __os_ncpus __P((void));
+int __os_ncpus_effic __P((void));
+int __os_ncpus_perf __P((void));
 int __os_numa_current_node __P((void));
 int __os_numa_nnodes __P((void));
 int __os_numa_node_of_cpu __P((int));
@@ -71,6 +73,7 @@ void *__os_tls_get __P((__os_tls_key_t));
 void __os_aligned_free __P((void *));
 void __os_backtrace_emit __P((int, void *const *, int));
 void __os_free __P((void *));
+void __os_thread_apply_default_qos __P((void));
 void __os_thread_yield __P((void));
 void xtc_fs_dir_close __P((xtc_fs_dir_t *));
 
