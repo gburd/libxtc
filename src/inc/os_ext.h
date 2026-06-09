@@ -46,6 +46,7 @@ int __os_thread_create __P((__os_thread_t *, __os_thread_fn, void *));
 int __os_thread_detach __P((__os_thread_t *));
 int __os_thread_join __P((__os_thread_t *, void **));
 int __os_thread_self __P((__os_thread_t *));
+int __os_thread_set_affinity __P((int));
 int __os_thread_setname __P((const char *));
 int __os_tls_create __P((__os_tls_key_t *, __os_tls_dtor));
 int __os_tls_destroy __P((__os_tls_key_t));

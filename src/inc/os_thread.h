@@ -74,6 +74,7 @@ typedef void  (*__os_tls_dtor)(void *);
  * PUBLIC: void __os_thread_yield __P((void));
  * PUBLIC: int  __os_thread_setname __P((const char *));
  * PUBLIC: void __os_thread_apply_default_qos __P((void));
+ * PUBLIC: int  __os_thread_set_affinity __P((int));
  */
 int  __os_thread_create(__os_thread_t *thr, __os_thread_fn fn, void *arg);
 int  __os_thread_join(__os_thread_t *thr, void **retval);
@@ -82,6 +83,7 @@ int  __os_thread_self(__os_thread_t *out);
 void __os_thread_yield(void);
 int  __os_thread_setname(const char *name);
 void __os_thread_apply_default_qos(void);
+int  __os_thread_set_affinity(int cpu);
 
 /*
  * --- TLS ---

@@ -59,10 +59,33 @@ test_qos_hint(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * The CPU-affinity hint: a negative CPU is rejected; a valid CPU on the
+ * calling thread returns OK (Linux pin, macOS advisory tag) or NOSYS on
+ * an unported platform.  Either way it must not fault.
+ */
+static MunitResult
+test_affinity_hint(const MunitParameter p[], void *d)
+{
+	int rc;
+	(void)p; (void)d;
+
+	munit_assert_int(__os_thread_set_affinity(-1), ==, XTC_E_INVAL);
+
+	rc = __os_thread_set_affinity(0);
+	munit_assert_true(rc == XTC_OK || rc == XTC_E_NOSYS);
+
+	/* A CPU index within the machine's count behaves the same. */
+	rc = __os_thread_set_affinity(__os_ncpus() - 1);
+	munit_assert_true(rc == XTC_OK || rc == XTC_E_NOSYS);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
-	{ "/ncpus",       test_ncpus,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-	{ "/perf_effic",  test_perf_effic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-	{ "/qos_hint",    test_qos_hint,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/ncpus",       test_ncpus,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/perf_effic",  test_perf_effic,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/qos_hint",    test_qos_hint,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/affinity",    test_affinity_hint, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m1/cpu", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
