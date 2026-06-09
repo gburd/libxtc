@@ -1070,6 +1070,7 @@ uninstall:
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
+	rm -rf *.dSYM
 
 distclean: clean
 	$(RM) Makefile xtc_config.h xtc.pc config.log config.status

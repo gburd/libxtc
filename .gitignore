@@ -28,6 +28,10 @@ vgcore.*
 tags
 TAGS
 
+# macOS debug-symbol bundles (created by the Apple clang driver when it
+# compiles and links an executable with -g in a single step)
+*.dSYM/
+
 # Nix
 result
 result-*
