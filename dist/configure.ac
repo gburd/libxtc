@@ -76,6 +76,19 @@ AC_MSG_CHECKING([whether to build a shared library])
 AC_MSG_RESULT([$xtc_enable_shared])
 AC_SUBST([XTC_ENABLE_SHARED], [$xtc_enable_shared])
 
+# Diagnostic build: enables runtime invariant checks that abort on
+# violation (e.g. unaligned direct I/O).  Off by default; for
+# development and CI hardening, not production.
+AC_ARG_ENABLE([diagnostic],
+  [AS_HELP_STRING([--enable-diagnostic],
+    [Enable runtime DIAGNOSTIC assertions (aborts on violations; default: no).])],
+  [xtc_enable_diagnostic=$enableval], [xtc_enable_diagnostic=no])
+AC_MSG_CHECKING([whether to enable diagnostic assertions])
+AC_MSG_RESULT([$xtc_enable_diagnostic])
+AS_IF([test "x$xtc_enable_diagnostic" = xyes],
+  [AC_DEFINE([XTC_DIAGNOSTIC], 1,
+    [Define to enable runtime diagnostic assertions.])])
+
 # pthread
 AC_SEARCH_LIBS([pthread_create], [pthread], [],
   [AC_MSG_ERROR([xtc requires pthreads])])

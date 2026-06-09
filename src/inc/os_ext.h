@@ -51,7 +51,10 @@ int __os_thread_setname __P((const char *));
 int __os_tls_create __P((__os_tls_key_t *, __os_tls_dtor));
 int __os_tls_destroy __P((__os_tls_key_t));
 int __os_tls_set __P((__os_tls_key_t, void *));
+int __xtc_dio_is_direct __P((int));
 int xtc_fs_close __P((int));
+int xtc_fs_dio_align __P((int, size_t *, size_t *, size_t *));
+int xtc_fs_dio_alloc __P((int, size_t, void **));
 int xtc_fs_dir_next __P((xtc_fs_dir_t *, const char **));
 int xtc_fs_dir_open __P((const char *, xtc_fs_dir_t **));
 int xtc_fs_exists __P((const char *));
@@ -76,6 +79,7 @@ void __os_backtrace_emit __P((int, void *const *, int));
 void __os_free __P((void *));
 void __os_thread_apply_default_qos __P((void));
 void __os_thread_yield __P((void));
+void xtc_fs_dio_free __P((void *));
 void xtc_fs_dir_close __P((xtc_fs_dir_t *));
 
 #endif /* OS_EXT_H */
