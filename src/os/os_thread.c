@@ -18,6 +18,10 @@
 #include <sched.h>
 #include <string.h>
 
+#if defined(__APPLE__)
+#include <sys/qos.h>
+#endif
+
 #include "os_thread.h"
 
 #include <stdlib.h>
@@ -137,4 +141,25 @@ __os_thread_setname(const char *name)
 	(void)name;
 #endif
 	return XTC_OK;
+}
+
+/*
+ * Apply the default QoS class for a runtime reactor/worker thread to
+ * the CALLING thread.  On macOS this is QOS_CLASS_USER_INITIATED:
+ * latency-sensitive work that the user is actively waiting on, which
+ * tells the Apple Silicon scheduler to prefer the performance (P)
+ * cores and avoid demoting these threads onto the efficiency (E)
+ * cores.  macOS does not permit hard CPU affinity, so a QoS hint is
+ * the supported, idiomatic mechanism for P-core bias.  A no-op on
+ * every other platform (where thread placement is governed by the
+ * scheduler or explicit affinity elsewhere).
+ *
+ * PUBLIC: void __os_thread_apply_default_qos __P((void));
+ */
+void
+__os_thread_apply_default_qos(void)
+{
+#if defined(__APPLE__)
+	(void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
 }
