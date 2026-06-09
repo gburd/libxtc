@@ -57,7 +57,9 @@ test_converge(const MunitParameter p[], void *d)
 		munit_assert_int(abs(best[i] - target[i]), <=, 4);
 	/* Best fitness near the optimum (0). */
 	munit_assert_double(bf, >=, -48.0);
-	munit_assert_uint64(xtc_dio_sched_generation(g), >=, 100);
+	munit_assert_uint64(xtc_dio_sched_generation(g), >=, 5);
+	/* Converge-and-freeze: a steady fitness stops the mutation tax. */
+	munit_assert_double(xtc_dio_sched_mutation_rate(g), ==, 0.0);
 
 	xtc_dio_sched_destroy(g);
 	return MUNIT_OK;
@@ -113,10 +115,46 @@ test_validate(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Converge-and-freeze: a steady fitness freezes exploration (mutation
+ * rate -> 0); a sharp regression (workload shift) thaws it. */
+static MunitResult
+test_freeze(const MunitParameter p[], void *d)
+{
+	xtc_dio_sched_spec_t spec;
+	xtc_dio_sched_t *g = NULL;
+	int genes[1], eval;
+	(void)p; (void)d;
+	memset(&spec, 0, sizeof spec);
+	spec.n_genes = 1;
+	spec.min[0] = 0; spec.max[0] = 100; spec.init[0] = 50;
+	spec.population = 8; spec.seed = 99;
+	munit_assert_int(xtc_dio_sched_create(&spec, &g), ==, XTC_OK);
+
+	for (eval = 0; eval < spec.population * 300; eval++) {
+		double f;
+		xtc_dio_sched_current(g, genes);
+		f = -(double)((genes[0] - 70) * (genes[0] - 70));  /* peak at 70 */
+		xtc_dio_sched_report(g, f);
+		if (xtc_dio_sched_mutation_rate(g) == 0.0)
+			break;                              /* frozen */
+	}
+	munit_assert_double(xtc_dio_sched_mutation_rate(g), ==, 0.0);
+	xtc_dio_sched_best(g, genes, NULL);
+	munit_assert_int(abs(genes[0] - 70), <=, 4);
+
+	/* Workload shift -> sharp regression -> re-arm. */
+	xtc_dio_sched_report(g, -100000.0);
+	munit_assert_double(xtc_dio_sched_mutation_rate(g), >, 0.0);
+
+	xtc_dio_sched_destroy(g);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/converge", test_converge, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/bounds",   test_bounds,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/validate", test_validate, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/freeze",   test_freeze,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m9/dio_sched", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
