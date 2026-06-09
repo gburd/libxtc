@@ -460,6 +460,54 @@ bt_set_lsn(bt_t *bt, uint64_t lsn)
 }
 
 /*
+ * SMO logging hook (ARIES physiological redo + nested-top-action).  A
+ * single global hook, set by the engine; NULL means no SMO logging and
+ * the recovery path rebuilds logically.  See btree.h.
+ */
+static bt_smo_hook_t bt_smo_hook = { NULL, NULL, NULL, NULL };
+
+void
+bt_set_smo_hook(const bt_smo_hook_t *hook)
+{
+	if (hook == NULL)
+		bt_smo_hook = (bt_smo_hook_t){ NULL, NULL, NULL, NULL };
+	else
+		bt_smo_hook = *hook;
+}
+
+/* Begin a nested top action around a split (returns the NTA token, or 0
+ * when no hook is installed). */
+static uint64_t
+smo_begin(void)
+{
+	return bt_smo_hook.begin != NULL ? bt_smo_hook.begin(bt_smo_hook.user)
+	    : 0;
+}
+
+/* Log one finished SMO page's full after-image: physiological redo for
+ * the structural change.  The caller has just bm_predirty'd the page, so
+ * its LSN field already holds bm_get_lsn (the SMO's LSN); pass that same
+ * LSN so recovery can gate the image apply by page LSN.  No-op without a
+ * hook.  Skips page 0 (never an SMO page) defensively. */
+static void
+smo_log_page(bt_t *bt, bm_pid_t pid, const void *image)
+{
+	if (bt_smo_hook.page == NULL || pid == 0)
+		return;
+	bt_smo_hook.page(bt_smo_hook.user, pid, image, bt->page_size,
+	    bm_get_lsn(bt->bm));
+}
+
+/* Close the nested top action (writes the dummy CLR).  No-op without a
+ * hook. */
+static void
+smo_end(uint64_t token)
+{
+	if (bt_smo_hook.end != NULL)
+		bt_smo_hook.end(bt_smo_hook.user, token);
+}
+
+/*
  * Split a full INTERNAL node the B-link way.  Unlike a leaf, an
  * internal node's leftmost child is reached through a -infinity
  * (empty-key) slot 0, so the right half cannot simply inherit raw
@@ -653,6 +701,7 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 		pp = bm_page(pf);
 
 		if (internal_insert(pp, cur_sep, cur_seplen, cur_right) == 0) {
+			bm_predirty(bm, pf); smo_log_page(bt, path[level], bm_page(pf));
 			bm_unlatch(pf); bm_unfix(bm, pf, 1);   /* absorbed */
 			return XTC_OK;
 		}
@@ -672,6 +721,8 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 			r = internal_insert(bm_page(rf), cur_sep, cur_seplen, cur_right);
 		else
 			r = internal_insert(pp, cur_sep, cur_seplen, cur_right);
+		bm_predirty(bm, rf); smo_log_page(bt, rpid, bm_page(rf));
+		bm_predirty(bm, pf); smo_log_page(bt, path[level], bm_page(pf));
 		bm_unlatch(rf); bm_unfix(bm, rf, 1);
 		bm_unlatch(pf); bm_unfix(bm, pf, 1);
 		if (r != 0)
@@ -704,6 +755,7 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 			bm_unlatch(nf); bm_unfix(bm, nf, 1);
 			return XTC_E_INTERNAL;
 		}
+		bm_predirty(bm, nf); smo_log_page(bt, npid, bm_page(nf));
 		bm_unlatch(nf); bm_unfix(bm, nf, 1);
 		atomic_store(&bt->root_pid, npid);
 		atomic_fetch_add(&bt->st_height, 1);
@@ -726,6 +778,7 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	uint16_t seplen = 0;
 	int rc = XTC_OK;
 	int r, found, s;
+	uint64_t nta = 0;          /* nested-top-action token for the split */
 
 	if (bt == NULL || key == NULL || (val == NULL && vlen != 0))
 		return XTC_E_INVAL;
@@ -814,13 +867,23 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		r = btnode_insert(bm_page(rf), key, klen, val, vlen);
 	else
 		r = btnode_insert(pg, key, klen, val, vlen);
+	/*
+	 * Open the nested top action and log both leaf images (the new
+	 * right and the shrunk left) as physiological redo before they
+	 * leave the latch.  bm_predirty stamps each page's LSN now, so the
+	 * image carries the LSN recovery gates the apply by.
+	 */
+	nta = smo_begin();
+	bm_predirty(bm, rf); smo_log_page(bt, rpid, bm_page(rf));
+	bm_predirty(bm, f);  smo_log_page(bt, bm_frame_pid(f), bm_page(f));
 	bm_unlatch(rf); bm_unfix(bm, rf, 1);
 	bm_unlatch(f); bm_unfix(bm, f, 1);   /* left leaf modified */
-	if (r != 0) { rc = XTC_E_INTERNAL; goto unlock; }
+	if (r != 0) { smo_end(nta); rc = XTC_E_INTERNAL; goto unlock; }
 	atomic_fetch_add(&bt->st_inserts, 1);
 	atomic_fetch_add(&bt->st_splits, 1);
 
 	rc = post_separator(bt, path, depth - 1, sep, seplen, rpid);
+	smo_end(nta);            /* close the NTA: the SMO is crash-atomic */
 
 unlock:
 	(void)xtc_arwlock_unlock(bt->smo);

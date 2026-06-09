@@ -15,6 +15,7 @@ test_wal
 test_shard
 test_mvcc
 test_xstore
+test_xlog
 sql_parse_gen.c
 sql_parse_gen.h
 sql_parse_gen.out
@@ -35,3 +36,11 @@ test_wal_compact
 test_persist
 test_cursor_resume
 test_server_storage
+test_clean_restart
+test_steal
+test_recover_undo
+test_redo_page
+test_inplace_redo
+test_btree_delete_merge
+test_savepoint
+test_isolation

@@ -745,6 +745,11 @@ separate commits.
    tree, constant mid-SMO eviction under a tiny pool, crash, full
    ordered-scan verification), test_server_storage's crash cycle
    (engine-level abandon + rebuild), test_wal_recover, test_persist.
+   (A physiological in-place REPAIR of a torn SMO -- XL_PAGE images
+   applied to the trusted base instead of a rebuild -- is now wired and
+   tested as a mechanism, xstore_recover_inplace + test_inplace_redo,
+   but is not yet the live crash default; see the "physiological
+   in-place redo" update below and M_SQLXTC_BDB.md S3.)
 
 6. **In-WAL checkpoint: bounded log (engine.c, wal.c, xstore.c).**  DONE.
    The log is the source of truth; recovery rebuilds the tree by
@@ -765,3 +770,43 @@ Steps 1-6 are landed and tested.  A fuller ARIES (physiological page
 logging + page LSNs, for an in-place-trusted base and faster cold
 restart of a very large database) is a performance refinement, not a
 correctness gap; see M_SQLXTC_WAL.md sec 3.
+
+Update (physiological in-place redo -- mechanism wired and tested).
+The physiological-redo path named above is now built and proven end to
+end, though it is not yet the LIVE crash default:
+
+  * Page LSNs are stamped (bm_opts.lsn_off; the first field of every
+    btnode), and the buffer manager enforces write-ahead before
+    flushing a dirty page (bm_set_wal_flush).
+  * The B-tree split / root-growth path logs each page it writes as an
+    XL_PAGE full-page after-image (xstore_register_smo installs the
+    hook; btree.c stays WAL-agnostic via bt_set_smo_hook), bracketed as
+    a nested top action closed by a dummy CLR -- the Stasis device that
+    makes a structure modification crash-atomic (redone if it finished,
+    never half-undone).
+  * bm_apply_page_image writes an image onto its page only when the
+    on-disk page LSN is older (page-LSN gated, hence idempotent), and
+    xstore_recover_inplace drives that apply per XL_PAGE record while
+    trusting a non-truncated base, repairing a torn structure
+    modification in place rather than discarding it.
+  * bm_min_rec_lsn returns the true recLSN truncation horizon (the
+    oldest dirty page's first-dirty LSN); the trickler writes
+    oldest-recLSN-first.
+
+  test_inplace_redo proves the loop: drive REAL splits through SQL with
+  SMO logging on, then (a) recover in place over the current base with
+  every row intact, and (b) ZERO the split pages on disk and recover,
+  watching the XL_PAGE images repair each torn page so every committed
+  row reappears and the ordered scan holds.  test_redo_page covers the
+  page-LSN gate and the recLSN horizon in isolation.
+
+  STILL the LIVE crash default (sx_storage_open) is the proven LOGICAL
+  rebuild onto a fresh page file (step 5, test_torn_smo), NOT in-place
+  redo.  The reason, confirmed by experiment: logical XL_UPDATE redo
+  cannot reliably navigate an ARBITRARILY torn base -- when a non-split
+  row write's leaf was lost (only its logical record survives), a
+  replayed bt_insert over the partially-repaired torn structure can
+  fail to insert the row.  A fully in-place crash restart additionally
+  needs physiological logging of non-split row writes (so logical redo
+  never descends torn structure); that, plus mid-log truncation to the
+  recLSN horizon, is the remaining work (see M_SQLXTC_BDB.md S3/S4/S5).

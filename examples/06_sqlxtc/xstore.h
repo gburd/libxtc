@@ -16,6 +16,7 @@
 
 struct xsql;
 typedef struct bt bt_t;
+typedef struct bm bm_t;
 struct wal;
 
 /* Register the "xstore" virtual-table module on `db`, backed by the
@@ -39,6 +40,26 @@ void xstore_set_wal(struct wal *w);
  * Call once at open, before serving, after bt_open and before
  * xstore_set_wal's writer is needed.  Returns XTC_OK. */
 int xstore_recover(bt_t *bt, const char *wal_path);
+
+/*
+ * In-place crash recovery (ARIES physiological redo).  Like
+ * xstore_recover, but trusts a possibly-torn base IN PLACE (bm opened
+ * reopen=1, not truncated) and applies the XL_PAGE full-page
+ * after-images logged on the structure-modification path, page-LSN
+ * gated, to repair a torn split/merge rather than discarding the base.
+ * Ordinary row writes still redo logically (idempotent).  `out_pages`
+ * (optional) receives the count of page images applied.  See xstore.c
+ * for the precise scope (mechanism + test; not the live default).
+ */
+int xstore_recover_inplace(bt_t *bt, bm_t *bm, const char *wal_path,
+    uint64_t *out_pages);
+
+/* Enable (or disable) physiological SMO logging on the B-tree: each
+ * split/merge logs its modified pages as XL_PAGE after-images inside a
+ * nested-top-action bracket (a dummy CLR).  Enable before driving
+ * writes whose torn structure should be repairable in place by
+ * xstore_recover_inplace. */
+void xstore_register_smo(int enable);
 
 /* In-WAL checkpoint: compact the log to a CHECKPOINT record plus a dump
  * of the live tree, bounding it.  Call only when commits are quiesced. */

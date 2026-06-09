@@ -1021,39 +1021,80 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
 	}
 }
 
+/* Mark a frame dirty and, on the clean->dirty edge, stamp its page LSN
+ * and recLSN.  Shared by bm_unfix (the normal release) and bm_predirty
+ * (a latch-held early stamp so the SMO can log the exact bytes that will
+ * be written).  Idempotent: the stamp happens only on the first
+ * transition, so a re-mark of an already-dirty page keeps its recLSN. */
+static void
+mark_dirty_edge(bm_t *bm, bm_frame_t *frame)
+{
+	/* Stamp the dirtying order on the clean -> dirty edge, so the
+	 * trickler can write oldest dirt first (a recLSN proxy). */
+	if (atomic_exchange_explicit(&frame->dirty, 1, memory_order_acq_rel) == 0) {
+		frame->dirty_seq = atomic_fetch_add_explicit(&bm->dirty_clock,
+		    1, memory_order_relaxed);
+		/* ARIES page LSN: stamp the change's log LSN onto the page.
+		 * The engine supplies it via bm_set_lsn before the mutation.
+		 * Skip page 0 (the superblock is not a btnode). */
+		if (bm->lsn_off >= 0 && frame->pid != 0) {
+			uint64_t lsn = atomic_load_explicit(&bm->cur_lsn,
+			    memory_order_relaxed);
+			memcpy((uint8_t *)frame->page + bm->lsn_off,
+			    &lsn, sizeof lsn);
+			/* recLSN: the LSN of the change that first dirtied
+			 * this page; the log is durable-needed up to here. */
+			atomic_store_explicit(&frame->rec_lsn, lsn,
+			    memory_order_relaxed);
+		}
+	}
+}
+
 void
 bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty)
 {
 	if (frame == NULL) return;
-	if (mark_dirty) {
-		/* Stamp the dirtying order on the clean -> dirty edge, so the
-		 * trickler can write oldest dirt first (a recLSN proxy). */
-		if (atomic_exchange_explicit(&frame->dirty, 1, memory_order_acq_rel) == 0) {
-			frame->dirty_seq = atomic_fetch_add_explicit(&bm->dirty_clock,
-			    1, memory_order_relaxed);
-			/* ARIES page LSN: stamp the change's log LSN onto the page.
-			 * The engine supplies it via bm_set_lsn before the mutation.
-			 * Skip page 0 (the superblock is not a btnode). */
-			if (bm->lsn_off >= 0 && frame->pid != 0) {
-				uint64_t lsn = atomic_load_explicit(&bm->cur_lsn,
-				    memory_order_relaxed);
-				memcpy((uint8_t *)frame->page + bm->lsn_off,
-				    &lsn, sizeof lsn);
-				/* recLSN: the LSN of the change that first dirtied
-				 * this page; the log is durable-needed up to here. */
-				atomic_store_explicit(&frame->rec_lsn, lsn,
-				    memory_order_relaxed);
-			}
-		}
-	}
+	if (mark_dirty)
+		mark_dirty_edge(bm, frame);
 	atomic_store_explicit(&frame->ref, 1, memory_order_relaxed);  /* CLOCK: recently used */
 	atomic_fetch_sub_explicit(&frame->pin, 1, memory_order_release);
+}
+
+void
+bm_predirty(bm_t *bm, bm_frame_t *frame)
+{
+	if (bm == NULL || frame == NULL)
+		return;
+	/*
+	 * A structure modification is about to log this page's after-image
+	 * (physiological redo), so the image must carry the SMO's LSN.
+	 * Unlike the clean->dirty edge -- which stamps only the FIRST
+	 * dirtying change's LSN (the recLSN) -- stamp cur_lsn UNCONDITIONALLY
+	 * here: an SMO page is typically already dirty (just allocated, or
+	 * modified by the triggering insert), and its page LSN must advance
+	 * to the latest change folded into the image, or recovery's page-LSN
+	 * gate would refuse a newer image.  Then take the normal dirty edge
+	 * so recLSN/dirty bookkeeping is set if this is the first touch.
+	 */
+	if (bm->lsn_off >= 0 && frame->pid != 0) {
+		uint64_t lsn = atomic_load_explicit(&bm->cur_lsn,
+		    memory_order_relaxed);
+		memcpy((uint8_t *)frame->page + bm->lsn_off, &lsn, sizeof lsn);
+	}
+	mark_dirty_edge(bm, frame);
 }
 
 void
 bm_set_lsn(bm_t *bm, uint64_t lsn)
 {
 	atomic_store_explicit(&bm->cur_lsn, lsn, memory_order_relaxed);
+}
+
+uint64_t
+bm_get_lsn(bm_t *bm)
+{
+	return bm == NULL ? 0
+	    : atomic_load_explicit(&bm->cur_lsn, memory_order_relaxed);
 }
 
 void
