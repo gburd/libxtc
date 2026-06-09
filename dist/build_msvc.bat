@@ -24,9 +24,17 @@ set INC=/I"%XTC_SRC%\src\inc" /I"%XTC_SRC%\src\inc\compat" /I.
 rem /experimental:c11atomics enables _Atomic on VS2022 17.5+ / VS2026.
 set CFLAGS=/nologo /std:c11 /experimental:c11atomics /W3 /O2 /MT /D_WIN32 /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS %INC%
 
-rem --- 1. Assemble the fcontext primitives with ml64. ---
-echo [1/4] ml64 fctx_x86_64_ms_pe.asm
-ml64 /nologo /c /Fo fctx_x86_64_ms_pe.obj "%XTC_SRC%\src\os\asm\fctx_x86_64_ms_pe.asm"
+rem --- 1. Assemble the fcontext primitives with the right assembler
+rem        for the target arch.  ml64 assembles the x86-64 MASM file;
+rem        armasm64 assembles the ARM64 file.  VSCMD_ARG_TGT_ARCH is set
+rem        by vcvarsall.bat / the Native Tools prompt (x64 or arm64). ---
+if /I "%VSCMD_ARG_TGT_ARCH%"=="arm64" (
+  echo [1/4] armasm64 fctx_aarch64_ms_pe.asm
+  armasm64 -nologo -o fctx_aarch64_ms_pe.obj "%XTC_SRC%\src\os\asm\fctx_aarch64_ms_pe.asm"
+) else (
+  echo [1/4] ml64 fctx_x86_64_ms_pe.asm
+  ml64 /nologo /c /Fo fctx_x86_64_ms_pe.obj "%XTC_SRC%\src\os\asm\fctx_x86_64_ms_pe.asm"
+)
 if errorlevel 1 goto :fail
 
 rem --- 2. Compile the C sources.  Platform-specific backends

@@ -1,10 +1,107 @@
 # Windows build matrix
 
 xtc supports multiple Windows toolchains.  This document records
-which compile and test combinations are exercised on the santorini
-build host (Windows 11 ARM64, x86_64 emulation layer).
+which compile and test combinations are exercised on Windows hosts.
 
-## Tested matrix
+## Native Windows 11 ARM64 verification (2026-06, real ARM64 host)
+
+The following was run on a REAL Windows 11 on ARM64 machine (native,
+no x86 emulation; `PROCESSOR_ARCHITECTURE=ARM64`), not on the older
+santorini x64-emulation layer.  Four compilers are present:
+
+| Compiler | Version | Target | Native ARM64 |
+|----------|---------|--------|:------------:|
+| clang.exe | 20.1.7 | aarch64-pc-windows-msvc | yes |
+| MSVC cl.exe (VS 17 / 2022) | 19.44.35227 (MSVC 14.44.35207) | ARM64 | yes |
+| MSVC cl.exe (VS 18 / 2026) | 19.50.35726 (MSVC 14.50.35717) | ARM64 | yes |
+| MinGW-W64 gcc.exe (Strawberry) | 13.2.0 | x86_64-w64-mingw32 | no (x64) |
+
+Note: the Strawberry gcc is an x86_64 cross, not ARM64; it produces
+x64 PE objects (still a valid Windows portability compile-check, run
+under the ARM64 host's x64 emulation).
+
+### Windows ARM64 fcontext assembly -- RUNTIME VERIFIED
+
+The AArch64 ELF fcontext (`src/os/asm/fctx_aarch64_aapcs.S`) is guarded
+`#if defined(__aarch64__) && !defined(_WIN32)` and therefore compiles
+to an EMPTY object on Windows ARM64 (where `_WIN32` is defined).  Two
+Windows-ARM64 siblings were added and verified on the real host:
+
+  * `src/os/asm/fctx_aarch64_ms_pe.S` -- GNU-assembler (`.S`) syntax
+    for Clang's integrated assembler, guarded
+    `#if defined(__aarch64__) && defined(_WIN32)`.  Drops the ELF-only
+    directives (`.type/.size/.section .note.GNU-stack`).
+  * `src/os/asm/fctx_aarch64_ms_pe.asm` -- armasm64 (MASM) syntax for
+    the MSVC toolchain, the sibling of `fctx_x86_64_ms_pe.asm`.
+
+Both implement the identical 160-byte frame (d8-d15, x19-x28, x29,
+x30) and the identical calling contract, and both DELIBERATELY leave
+x18 untouched -- on Windows ARM64 x18 is the reserved platform (TEB)
+register and must never be clobbered by application code.
+
+A standalone round-trip harness (transfer-arg threading; callee-saved
+x19-x28 + d8-d15 survive a switch; multi-resume) was run NATIVELY on
+the ARM64 host:
+
+| Build path | Assembler | C compiler | Harness result |
+|------------|-----------|------------|:--------------:|
+| `.S` + clang inline-asm harness | clang IAS | clang 20 | PASS |
+| `.asm` + churn() harness (VS17) | armasm64 14.44 | cl 19.44 | PASS |
+| `.asm` + churn() harness (VS18) | armasm64 14.50 | cl 19.50 | PASS |
+| CROSS: `.asm` obj + clang harness | armasm64 14.44 | clang 20 | PASS |
+| CROSS: `.S` obj + cl harness | clang IAS | cl 19.44 | PASS |
+
+The two cross-link cases prove the `.S` and `.asm` objects are
+ABI-interchangeable: clang's strict register-pinned harness passes
+against the armasm64 object, and MSVC's harness passes against the
+clang object.
+
+The clang harness pins sentinel values directly into x19-x28 and
+d8-d15 (single inline-asm block doing load + `bl __xtc_jump_fcontext`
++ readback, so only the fiber switch can preserve them).  The MSVC
+harness -- MSVC has no inline asm for ARM64 -- verifies the same
+property indirectly but soundly: the scheduler calls a deep recursive
+`churn()` between resumes to spill garbage through the entire
+callee-saved register file, and the fiber's long-lived locals must
+survive.
+
+CAVEAT: this verifies the fcontext ASSEMBLY in isolation.  The coro
+substrate `coro_fctx.c` is itself guarded `#if !defined(_WIN32)`, so
+the ACTIVE coroutine substrate on Windows remains `coro_winfiber.c`
+(Win32 fibers).  The Windows-ARM64 fcontext asm is ready and correct
+should the fctx path ever be enabled on Windows, but it is not on the
+live Windows coroutine path today.
+
+### IOCP / SChannel / trivial TU compile-check -- NATIVELY COMPILED
+
+Each file was compiled `-c` against the in-tree headers (`src/inc`,
+`__has_include`-optional `xtc_config.h`) on the real ARM64 host.  A
+full library link was not attempted (no configure run); the goal was
+a clean native compile against the Win32 / SSPI SDK headers.
+
+| File | clang 20 | cl 19.44 (VS17) | cl 19.50 (VS18) | gcc 13.2 (x64) |
+|------|:--------:|:---------------:|:---------------:|:--------------:|
+| `src/io/io_iocp.c` | OK | OK | OK | OK |
+| `src/io/tls_schannel.c` | OK | OK | OK | OK |
+| `src/xtc_version.c` | OK | OK | OK | OK |
+| `src/os/os_alloc.c` | OK | OK | OK | OK |
+
+All compiled with zero warnings (clang/gcc `-Wall -Wextra`; MSVC
+`/W4`).  No portability bugs were found in `io_iocp.c` or
+`tls_schannel.c` on the native ARM64 compile -- nothing needed fixing.
+MSVC requires `/std:c11 /experimental:c11atomics` (the headers pull in
+C11 `_Atomic` via `os_atomic.h`); clang and gcc accept `-std=c11`
+directly.  This CONFIRMS the headers are MSVC-clean on ARM64 (Task C).
+
+What is still NOT verified: `io_iocp.c` and `tls_schannel.c` have only
+been COMPILED, never RUN.  The AFD poll path, cancel/re-arm lifetime,
+wakeup ordering, and the SChannel handshake state machine all remain
+untested at runtime -- see the test plan below.
+
+## Earlier santorini matrix (x64 emulation layer)
+
+The table below is from the older santorini build host (Windows 11
+ARM64 running the x86_64 emulation layer, MSYS2 toolchains).
 
 | Toolchain   | Version       | Build  | Tests built | Tests pass | Notes |
 |-------------|---------------|:------:|:-----------:|:----------:|-------|

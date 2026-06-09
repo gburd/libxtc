@@ -10,6 +10,7 @@ Updated end of M_PORT round 4.
 | **FreeBSD 15 amd64** (kqueue/clang19) | clean, no warnings | full test suite tracked across rounds |
 | **OpenIndiana SPARC** (poll *and* port_*/gcc13) | clean | 132/132 with native event-port backend (full parity) |
 | **Windows 11 ARM64 / MinGW-W64 x64** (IOCP/gcc) | clean | 31/36 -- test_fctx now passes (Win64 fcontext asm working); 4 io_* tests blocked on IOCP CRT-fd-vs-HANDLE mismatch (round 3 work); 1 test_proc subtest needs separate fix |
+| **Windows 11 ARM64 NATIVE** (clang 20 / MSVC 19.44 & 19.50, real ARM64 host) | clean compile-checks; native fcontext asm RUNTIME-VERIFIED | fcontext round-trip harness PASSES on clang and both MSVC; `io_iocp.c`/`tls_schannel.c`/`xtc_version.c`/`os_alloc.c` all compile `-c` clean (0 warnings) under clang/cl-x2/gcc.  See `docs/M_WINDOWS_MATRIX.md`. |
 | **AIX** (pollset/xlc or gcc-aix) | code-complete, untested | `src/io/io_aix.c` implements `pollset_create`/`pollset_ctl`/`pollset_poll`; awaits AIX host for runtime verification |
 
 ## Linux (control)
@@ -94,6 +95,21 @@ test_timer, test_waker.
    `host_os` matches `*mingw*`.  Boost.Context's
    `make_x86_64_ms_pe_gas.asm` is a known-good template.
 
+   UPDATE (2026-06): the AArch64 Windows fcontext is now done and
+   RUNTIME-VERIFIED on a real Windows 11 ARM64 host.  The ELF
+   `fctx_aarch64_aapcs.S` is `!_WIN32`-guarded (empty on Windows), so
+   two siblings were added: `fctx_aarch64_ms_pe.S` (clang/GAS) and
+   `fctx_aarch64_ms_pe.asm` (armasm64/MSVC), both guarded
+   `defined(__aarch64__) && defined(_WIN32)`.  They keep x18 (the
+   Windows reserved TEB register) untouched and drop the ELF-only
+   directives.  A round-trip harness (transfer threading, x19-x28 +
+   d8-d15 preservation, multi-resume) passes natively under clang 20
+   and both MSVC (19.44 / 19.50), including the two cross-link cases
+   that prove the `.S` and `.asm` objects are ABI-interchangeable.
+   NOTE: `coro_fctx.c` is `!_WIN32`-guarded, so the live Windows coro
+   substrate is still Win32 fibers (`coro_winfiber.c`); the asm is
+   ready but not on the active Windows coroutine path.
+
 Neither blocker affects the L0/L2/L3/L4 surface; they're isolated
 to the L1 readiness-on-Windows story and the optional fast-fiber-
 switch.  The **default** fiber path (Win32 fibers) is fully working.
@@ -132,6 +148,14 @@ lifetime under churn, and the wakeup ordering must be validated on
 santorini before this is production quality -- same reviewed-but-
 untested status as `src/io/io_aix.c`.  The exact test plan is in
 `docs/M_WINDOWS_MATRIX.md`.
+
+**Native ARM64 compile-check (2026-06):** `io_iocp.c` and
+`tls_schannel.c` now COMPILE `-c` cleanly (0 warnings at `/W4` and
+`-Wall -Wextra`) on a real Windows 11 ARM64 host under clang 20, MSVC
+19.44 (VS17), MSVC 19.50 (VS18), and MinGW gcc 13.2 (x64).  MSVC needs
+`/std:c11 /experimental:c11atomics`.  No portability bugs surfaced;
+neither file needed changes.  They remain COMPILED-not-RUN: no runtime
+execution was attempted (no full library link / configure run).
 
 The round-1 test-side gap (item 1 above) is unchanged: the m2 io_*
 tests still need a tcp-socketpair shim because IOCP/AFD operate on
@@ -184,4 +208,7 @@ Notes:
 * CMake-on-Windows alternative configure path so MSYS2-pacman or
   Strawberry Perl users without autoconf can build.
 * Native ARM64 Windows (replace x64-emulated MinGW with llvm-mingw
-  aarch64).
+  aarch64).  PARTIALLY DONE (2026-06): the fcontext asm is
+  runtime-verified native ARM64 (clang 20 + both MSVC) and the IOCP/
+  SChannel/core TUs compile-check native ARM64 clean; the remaining
+  work is a full native-ARM64 library build + the m2 runtime suite.
