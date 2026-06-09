@@ -187,6 +187,28 @@ xstore_set_clock(uint64_t v)
 void xstore_clock_observe(uint64_t peer_ts) { xstore_set_clock(peer_ts); }
 
 #define XS_F_DELETED 0x01u     /* value[0] flag: this version is a tombstone */
+
+/*
+ * Isolation levels, mapped onto the MVCC snapshot model.  All reads
+ * are against committed versions (writes buffer in wbuf until commit),
+ * so there is no truly "dirty" read; the levels differ in WHEN the
+ * read snapshot is taken and whether the read set is validated:
+ *
+ *   READ UNCOMMITTED  treated as READ COMMITTED -- an MVCC engine has
+ *                     no uncommitted versions to expose.
+ *   READ COMMITTED    a fresh latest-committed snapshot per statement.
+ *   REPEATABLE READ   one snapshot per transaction (== SNAPSHOT here).
+ *   SNAPSHOT          one snapshot per transaction (the default).
+ *   SERIALIZABLE      per-transaction snapshot + Cahill SSI validation.
+ *
+ * The names cover both the SQL-standard set (PostgreSQL) and the
+ * snapshot level; SQLite's default maps to SERIALIZABLE.
+ */
+#define XS_ISO_READ_UNCOMMITTED 0
+#define XS_ISO_READ_COMMITTED   1
+#define XS_ISO_REPEATABLE_READ  2
+#define XS_ISO_SNAPSHOT         3
+#define XS_ISO_SERIALIZABLE     4
 #define XS_VKLEN     20        /* (tableid:4) + (rowid:8) + (inverted commit_ts:8) */
 #define XS_VMAX      4096       /* max row payload bytes (one page-ish) */
 #define XS_STAGE_TID 0xFFFFFFFEu  /* reserved table-id for STEAL spill payloads */
@@ -223,6 +245,7 @@ typedef struct xstore_ctx {
 	xs_wrec_t       *wbuf;        /* buffered writes, applied atomically */
 	int              wn, wcap;
 	int              serializable; /* 1 == validate the read set on commit */
+	int              isolation;   /* XS_ISO_* -- see below; default SNAPSHOT */
 	xs_rkey_t       *rset;        /* (table,rowid) read in this txn (serializable) */
 	int              rn, rcap;
 	int              did_scan;    /* txn did a full scan (table-level read) */
@@ -231,7 +254,43 @@ typedef struct xstore_ctx {
 	int              autovacuum;  /* 1 == prune dead versions inline on write */
 	uint64_t         steal_txn;   /* STEAL: logical id once this txn spills (0 = none) */
 	size_t           wbuf_bytes;  /* buffered payload bytes (spill trigger) */
+
+	/*
+	 * Savepoint stack for nested transactions.  SQLite drives
+	 * xSavepoint/xRelease/xRollbackTo with a savepoint index; we record
+	 * for each active savepoint level the write-buffer and read-set
+	 * positions at the moment it opened.  Because writes are appended
+	 * to wbuf (newest-wins on read-your-writes) and reads to rset,
+	 * rolling back to a savepoint is just truncating both back to the
+	 * recorded marks -- the nested transaction's effects vanish and the
+	 * parent sees exactly what it saw before, the Berkeley DB / nested
+	 * top-action child-abort model mapped onto buffered writes.
+	 * Releasing a savepoint merges the child into the parent: nothing
+	 * to undo, the writes simply remain in wbuf.
+	 */
+	int             *sp_wn;       /* wbuf position at each open savepoint */
+	int             *sp_rn;       /* rset position at each open savepoint */
+	int              sp_n, sp_cap;
 } xstore_ctx_t;
+
+/* Free and truncate wbuf entries [mark, wn), restoring the byte count.
+ * Used by savepoint rollback (and reused by wbuf_clear via mark 0). */
+static void
+wbuf_truncate(xstore_ctx_t *c, int mark)
+{
+	int i;
+	if (mark < 0)
+		mark = 0;
+	for (i = mark; i < c->wn; i++) {
+		if (c->wbuf[i].data != NULL) {
+			if (c->wbuf[i].len <= c->wbuf_bytes)
+				c->wbuf_bytes -= c->wbuf[i].len;
+			free(c->wbuf[i].data);
+			c->wbuf[i].data = NULL;
+		}
+	}
+	c->wn = mark;
+}
 
 static void
 wbuf_clear(xstore_ctx_t *c)
@@ -241,6 +300,7 @@ wbuf_clear(xstore_ctx_t *c)
 		free(c->wbuf[i].data);
 	c->wn = 0;
 	c->wbuf_bytes = 0;
+	c->sp_n = 0;          /* all savepoints close at end of transaction */
 }
 static int
 wbuf_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
@@ -823,6 +883,23 @@ static void
 xs_enter(xstore_vtab_t *v)
 {
 	xstore_ctx_t *cx = v->ctx;
+
+	/*
+	 * Close a finished transaction.  A read-only transaction fires
+	 * neither the vtab write hooks nor SQLite's connection commit hook
+	 * (that only runs when the database was modified), so detect its
+	 * end here: if SQLite is back in autocommit but we are still marked
+	 * in_txn, the prior transaction is over -- reset so the next access
+	 * re-snapshots.  A written transaction was already closed by the
+	 * 2PC xCommit/xRollback path before autocommit returned, so this is
+	 * then a no-op.
+	 */
+	if (cx->in_txn && xsql_get_autocommit(v->db)) {
+		if (cx->ssi != NULL) { ssi_abort(cx->ssi); cx->ssi = NULL; }
+		wbuf_clear(cx);
+		cx->in_txn = 0;
+		xs_pin_recompute(cx);
+	}
 	if (!xsql_get_autocommit(v->db) && !cx->in_txn) {
 		cx->in_txn = 1;
 		cx->txn_snap = atomic_load_explicit(&g_xclock, memory_order_relaxed);
@@ -830,6 +907,7 @@ xs_enter(xstore_vtab_t *v)
 		cx->steal_txn = 0;
 		cx->rn = 0;
 		cx->did_scan = 0;
+		cx->serializable = (cx->isolation == XS_ISO_SERIALIZABLE);
 		cx->ssi = cx->serializable ? ssi_begin(cx->txn_snap) : NULL;
 		xs_pin_recompute(cx);     /* pin txn_snap against version GC */
 	}
@@ -1212,10 +1290,16 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 	}
 	xs_enter(v);
 	snap = atomic_load_explicit(&v->ctx->read_snap, memory_order_relaxed);
-	if (snap == 0)
-		snap = v->ctx->in_txn
-		    ? v->ctx->txn_snap          /* repeatable snapshot for the txn */
-		    : atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	if (snap == 0) {
+		if (v->ctx->in_txn &&
+		    v->ctx->isolation >= XS_ISO_REPEATABLE_READ)
+			snap = v->ctx->txn_snap;   /* one snapshot for the txn */
+		else
+			/* READ COMMITTED / READ UNCOMMITTED, or autocommit:
+			 * a fresh latest-committed snapshot for this statement. */
+			snap = atomic_load_explicit(&g_xclock,
+			    memory_order_relaxed);
+	}
 	c->snap = snap;
 	c->have_last = 0;
 	c->eof = 1;
@@ -1868,6 +1952,93 @@ xs_rollback(xsql_vtab *pv)
 	return SQLITE_OK;
 }
 
+/*
+ * Nested-transaction (savepoint) hooks.  SQLite assigns each open
+ * savepoint a non-negative level and drives:
+ *   xSavepoint(n)   open savepoints through level n (record a mark)
+ *   xRelease(n)     close savepoints >= n, merging them into the
+ *                   parent (their buffered writes simply remain)
+ *   xRollbackTo(n)  undo everything done since savepoint n opened
+ *                   (truncate wbuf/rset back to its recorded mark)
+ * Levels stack, so sp_wn[i]/sp_rn[i] hold the write-buffer and
+ * read-set positions captured when level i opened.  Because writes
+ * are appended newest-wins and reads appended, truncation alone
+ * restores the exact pre-savepoint state -- the Berkeley DB child
+ * abort, expressed on the buffered write set.
+ */
+static int
+sp_reserve(xstore_ctx_t *cx, int level)
+{
+	if (level + 1 > cx->sp_cap) {
+		int nc = cx->sp_cap ? cx->sp_cap * 2 : 8;
+		int *nw, *nr;
+		while (nc < level + 1)
+			nc *= 2;
+		nw = realloc(cx->sp_wn, (size_t)nc * sizeof *nw);
+		if (nw == NULL)
+			return SQLITE_NOMEM;
+		cx->sp_wn = nw;
+		nr = realloc(cx->sp_rn, (size_t)nc * sizeof *nr);
+		if (nr == NULL)
+			return SQLITE_NOMEM;
+		cx->sp_rn = nr;
+		cx->sp_cap = nc;
+	}
+	return SQLITE_OK;
+}
+
+static int
+xs_savepoint(xsql_vtab *pv, int level)
+{
+	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
+	int i, rc;
+
+	if (level < 0)
+		return SQLITE_OK;
+	if ((rc = sp_reserve(cx, level)) != SQLITE_OK)
+		return rc;
+	/* Record the current marks for the newly opened level(s).  A
+	 * statement may open several levels at once; fill the gap so each
+	 * captures the same current position. */
+	for (i = cx->sp_n; i <= level; i++) {
+		cx->sp_wn[i] = cx->wn;
+		cx->sp_rn[i] = cx->rn;
+	}
+	cx->sp_n = level + 1;
+	return SQLITE_OK;
+}
+
+static int
+xs_release(xsql_vtab *pv, int level)
+{
+	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
+	/* Close savepoints >= level.  Their writes merge into the parent
+	 * (kept in wbuf), so there is nothing to undo -- just forget the
+	 * marks. */
+	if (level < 0)
+		return SQLITE_OK;
+	if (level < cx->sp_n)
+		cx->sp_n = level;
+	return SQLITE_OK;
+}
+
+static int
+xs_rollback_to(xsql_vtab *pv, int level)
+{
+	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
+	/* Undo everything since savepoint `level` opened: truncate the
+	 * write buffer and read set back to the marks captured then.  The
+	 * savepoint itself stays open (SQLite may roll back to it again),
+	 * so keep levels [0, level].  Deeper marks are discarded. */
+	if (level < 0 || level >= cx->sp_n)
+		return SQLITE_OK;
+	wbuf_truncate(cx, cx->sp_wn[level]);
+	if (cx->sp_rn[level] < cx->rn)
+		cx->rn = cx->sp_rn[level];
+	cx->sp_n = level + 1;
+	return SQLITE_OK;
+}
+
 /* SQL functions: xstore_now() -> current clock; xstore_as_of(ts) pins
  * this connection's read snapshot (0 = latest) and returns it. */
 static void
@@ -1897,7 +2068,63 @@ fn_serializable(xsql_context *ctx, int argc, xsql_value **argv)
 	xstore_ctx_t *c = (xstore_ctx_t *)xsql_user_data(ctx);
 	int on = (argc >= 1) ? (xsql_value_int(argv[0]) != 0) : 1;
 	c->serializable = on;
+	c->isolation = on ? XS_ISO_SERIALIZABLE : XS_ISO_SNAPSHOT;
 	xsql_result_int(ctx, on);
+}
+
+/* Case-insensitive ASCII prefix match: 1 if `s` starts with `pfx`. */
+static int
+ciprefix(const char *s, const char *pfx)
+{
+	size_t i;
+	for (i = 0; pfx[i] != '\0'; i++) {
+		int a = (unsigned char)s[i], b = (unsigned char)pfx[i];
+		if (a >= 'A' && a <= 'Z') a += 32;
+		if (b >= 'A' && b <= 'Z') b += 32;
+		if (a != b)
+			return 0;
+	}
+	return 1;
+}
+
+/* xstore_isolation(level): set this connection's isolation level.  The
+ * argument is a name ("read uncommitted", "read committed", "repeatable
+ * read", "snapshot", "serializable", case-insensitive) or the integer
+ * XS_ISO_* code.  Returns the resulting integer level.  Covers the
+ * PostgreSQL/SQL-standard set plus snapshot; takes effect at the next
+ * transaction's first access. */
+static void
+fn_isolation(xsql_context *ctx, int argc, xsql_value **argv)
+{
+	xstore_ctx_t *c = (xstore_ctx_t *)xsql_user_data(ctx);
+	int lvl = c->isolation;
+
+	if (argc >= 1) {
+		int t = xsql_value_type(argv[0]);
+		if (t == SQLITE_INTEGER) {
+			int v = xsql_value_int(argv[0]);
+			if (v >= XS_ISO_READ_UNCOMMITTED &&
+			    v <= XS_ISO_SERIALIZABLE)
+				lvl = v;
+		} else {
+			const char *s = (const char *)xsql_value_text(argv[0]);
+			if (s != NULL) {
+				if (ciprefix(s, "read un"))
+					lvl = XS_ISO_READ_UNCOMMITTED;
+				else if (ciprefix(s, "read c"))
+					lvl = XS_ISO_READ_COMMITTED;
+				else if (ciprefix(s, "rep"))
+					lvl = XS_ISO_REPEATABLE_READ;
+				else if (ciprefix(s, "snap"))
+					lvl = XS_ISO_SNAPSHOT;
+				else if (ciprefix(s, "ser"))
+					lvl = XS_ISO_SERIALIZABLE;
+			}
+		}
+		c->isolation = lvl;
+		c->serializable = (lvl == XS_ISO_SERIALIZABLE);
+	}
+	xsql_result_int(ctx, lvl);
 }
 /* xstore_gc(): vacuum dead versions up to the current GC horizon (the
  * oldest live snapshot, or the clock if none).  Returns the number of
@@ -1972,7 +2199,7 @@ xs_rename(xsql_vtab *pv, const char *newname)
 }
 
 static const xsql_module xstore_module = {
-	.iVersion    = 1,
+	.iVersion    = 2,
 	.xCreate     = xs_connect,
 	.xConnect    = xs_connect,
 	.xBestIndex  = xs_best_index,
@@ -1991,6 +2218,9 @@ static const xsql_module xstore_module = {
 	.xCommit     = xs_commit,
 	.xRollback   = xs_rollback,
 	.xRename     = xs_rename,
+	.xSavepoint  = xs_savepoint,
+	.xRelease    = xs_release,
+	.xRollbackTo = xs_rollback_to,
 };
 
 static void
@@ -1998,8 +2228,42 @@ ctx_free(void *p)
 {
 	xstore_ctx_t *cx = p;
 	if (cx != NULL) { ssi_abort(cx->ssi); snap_set(&cx->snap_slot, 0);
-	    wbuf_clear(cx); free(cx->wbuf); free(cx->rset); }
+	    wbuf_clear(cx); free(cx->wbuf); free(cx->rset);
+	    free(cx->sp_wn); free(cx->sp_rn); }
 	xsql_free(p);
+}
+
+/* Connection commit/rollback hooks: close a READ-ONLY transaction at
+ * its end.  A read-only transaction buffers no writes and never fires
+ * the vtab's write-path xCommit/xRollback, so without this its in_txn
+ * would persist and freeze txn_snap across later transactions.  When
+ * writes ARE buffered, the vtab 2PC path (xs_sync/xs_commit or
+ * xs_rollback) owns the transaction and has already reset in_txn by
+ * the time SQLite reaches the connection-level commit; in that case
+ * (wn != 0 was flushed, in_txn already 0) this is a no-op.  Guard on
+ * the absence of pending writes so the hook never discards a write
+ * set out from under the 2PC flush. */
+static int
+xs_conn_commit(void *p)
+{
+	xstore_ctx_t *cx = p;
+	if (cx->in_txn && cx->wn == 0) {   /* read-only transaction ending */
+		if (cx->ssi != NULL) { ssi_abort(cx->ssi); cx->ssi = NULL; }
+		cx->in_txn = 0;
+		xs_pin_recompute(cx);
+	}
+	return 0;   /* allow the commit */
+}
+
+static void
+xs_conn_rollback(void *p)
+{
+	xstore_ctx_t *cx = p;
+	if (cx->in_txn && cx->wn == 0) {   /* read-only transaction rolling back */
+		if (cx->ssi != NULL) { ssi_abort(cx->ssi); cx->ssi = NULL; }
+		cx->in_txn = 0;
+		xs_pin_recompute(cx);
+	}
 }
 
 int
@@ -2017,21 +2281,34 @@ xstore_register(xsql *db, bt_t *bt)
 	ctx->wbuf = NULL;
 	ctx->wn = ctx->wcap = 0;
 	ctx->serializable = 0;
+	ctx->isolation = XS_ISO_SNAPSHOT;
 	ctx->rset = NULL;
 	ctx->rn = ctx->rcap = 0;
 	ctx->did_scan = 0;
 	ctx->ssi = NULL;
 	ctx->snap_slot = -1;
 	ctx->autovacuum = 0;
+	ctx->steal_txn = 0;
+	ctx->wbuf_bytes = 0;
+	ctx->sp_wn = NULL;
+	ctx->sp_rn = NULL;
+	ctx->sp_n = ctx->sp_cap = 0;
 	rc = xsql_create_module_v2(db, "xstore", &xstore_module, ctx, ctx_free);
 	if (rc != SQLITE_OK)
 		return rc;
+	/* End-of-transaction hooks so read-only transactions reset in_txn
+	 * (they fire no vtab write hook); the ctx outlives them via the
+	 * module's ctx_free. */
+	(void)xsql_commit_hook(db, xs_conn_commit, ctx);
+	(void)xsql_rollback_hook(db, xs_conn_rollback, ctx);
 	(void)xsql_create_function(db, "xstore_now", 0,
 	    SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, fn_now, NULL, NULL);
 	(void)xsql_create_function(db, "xstore_as_of", 1, SQLITE_UTF8,
 	    ctx, fn_as_of, NULL, NULL);
 	(void)xsql_create_function(db, "xstore_serializable", 1, SQLITE_UTF8,
 	    ctx, fn_serializable, NULL, NULL);
+	(void)xsql_create_function(db, "xstore_isolation", 1, SQLITE_UTF8,
+	    ctx, fn_isolation, NULL, NULL);
 	(void)xsql_create_function(db, "xstore_gc", 0, SQLITE_UTF8,
 	    ctx, fn_gc, NULL, NULL);
 	(void)xsql_create_function(db, "xstore_autovacuum", 1, SQLITE_UTF8,
