@@ -75,11 +75,17 @@ static MunitResult
 test_xloop_recursive(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
-	int n_loops = 4;
-	int workers = 48;
+	int n_loops;
+	int workers;
 	int i;
 	(void)p; (void)d;
 
+	/* Scale to the host: one loop per CPU (>=2 so the hand-off is
+	 * genuinely cross-loop), capped so CI stays quick. */
+	n_loops = __os_ncpus();
+	if (n_loops < 2) n_loops = 2;
+	if (n_loops > 16) n_loops = 16;
+	workers = n_loops * 12;
 	g_iters = 300;
 	g_critical = 0;
 	__os_atomic_store_i32(&g_done, 0);
