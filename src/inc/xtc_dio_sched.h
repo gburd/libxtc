@@ -37,6 +37,16 @@ typedef struct xtc_dio_sched_spec {
 	int      init[XTC_DIO_SCHED_MAX_GENES];    /* seed candidate */
 	int      population;                    /* candidates/generation (>=2) */
 	uint64_t seed;                          /* PRNG seed (0 = default) */
+
+	/* Phenotypes (Moilanen): partition the genes into groups, each
+	 * tuned by its OWN fitness measure with its own selection and
+	 * adaptive-mutation/freeze state.  n_phenos <= 1 (the default)
+	 * means one phenotype over all genes (the single-fitness case).
+	 * Otherwise gene_pheno[i] is gene i's phenotype index
+	 * (0 .. n_phenos-1), and the caller reports one fitness per
+	 * phenotype via xtc_dio_sched_report_multi. */
+	int      n_phenos;
+	int      gene_pheno[XTC_DIO_SCHED_MAX_GENES];
 } xtc_dio_sched_spec_t;
 
 /*
@@ -60,6 +70,13 @@ void xtc_dio_sched_current(const xtc_dio_sched_t *g, int *out_genes);
  * population has been evaluated, breeds the next generation and adapts
  * the mutation rate. */
 void xtc_dio_sched_report(xtc_dio_sched_t *g, double fitness);
+
+/* Report one fitness per phenotype (n must equal the configured
+ * n_phenos; for a single phenotype this is equivalent to
+ * xtc_dio_sched_report).  Each phenotype advances and breeds its own
+ * genes independently against its own fitness. */
+void xtc_dio_sched_report_multi(xtc_dio_sched_t *g, const double *fitness,
+                                int n);
 
 /* Best gene-set found so far and its fitness.  Either pointer may be
  * NULL.  This is the set to use once tuning has converged / frozen. */
