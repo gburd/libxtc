@@ -228,6 +228,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_async \
 		  test_aio \
 		  test_fctx \
+		  test_stack_guard \
 		  test_exec test_cross_wake test_deque test_steal \
 		  test_chan test_chan_mpmc_bcast \
 		  test_proc \
@@ -241,6 +242,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_svr \
 		  test_app \
 		  test_osproc \
+		  test_isolated \
 		  test_mctx \
 		  test_slab \
 		  test_slab_shm \
@@ -761,6 +763,12 @@ test_fctx: $(srcdir)/../test/m4/test_fctx.c \
 		-o $@ $(srcdir)/../test/m4/test_fctx.c \
 		$(srcdir)/../test/m4/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_stack_guard: $(srcdir)/../test/m4/test_stack_guard.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m4 \
+		-o $@ $(srcdir)/../test/m4/test_stack_guard.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 # M5 tests.
 test_exec: $(srcdir)/../test/m5/test_exec.c \
 		$(srcdir)/../test/m5/munit.c $(STATIC_LIB)
@@ -879,6 +887,12 @@ test_osproc: $(srcdir)/../test/m10/test_osproc.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
 		-o $@ $(srcdir)/../test/m10/test_osproc.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_isolated: $(srcdir)/../test/m10/test_isolated.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_isolated.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M11 tests.
