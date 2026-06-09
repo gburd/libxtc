@@ -154,7 +154,7 @@ clean:
 	rm -f test_clean_restart
 	rm -f test_steal
 	rm -f test_parallel test_parallel.o
-	rm -f test_bufmgr test_bufmgr.o bufmgr.o
+	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
 	rm -f test_scan_resist
 	rm -f test_persist
@@ -376,6 +376,12 @@ test_bufmgr: test_bufmgr.c bufmgr.o
 
 test-bufmgr: test_bufmgr
 	./test_bufmgr
+
+test_bufmgr_dio: test_bufmgr_dio.c bufmgr.o
+	$(CC) $(CFLAGS) -o $@ test_bufmgr_dio.c bufmgr.o $(LDFLAGS)
+
+test-bufmgr-dio: test_bufmgr_dio
+	./test_bufmgr_dio
 
 # ---- physiological redo apply (page-LSN gated image write) ----
 test_redo_page: test_redo_page.c bufmgr.o

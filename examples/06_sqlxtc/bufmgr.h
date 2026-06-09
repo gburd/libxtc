@@ -106,11 +106,24 @@ typedef struct bm_opts {
 	 * is durable through that page's LSN -- the write-ahead rule.
 	 * Page 0 (the superblock) is never stamped. */
 	int         lsn_off;
+
+	/* Direct I/O: open the backing page file with XTC_FS_DIRECT
+	 * semantics (cache bypass).  Pages are page_size-aligned and
+	 * written at page-aligned offsets, so the alignment contract is
+	 * met.  Off by default.  (The double-write file stays buffered --
+	 * its records carry unaligned headers.) */
+	uint8_t     direct;
+
+	/* Adaptive writeback: the trickler genetically tunes its pacing
+	 * (pages per pass + interval) to maximise flush throughput, after
+	 * Moilanen's genetic scheduler.  Off by default (fixed pacing). */
+	uint8_t     adaptive_writeback;
 } bm_opts_t;
 
 #define BM_OPTS_DEFAULT \
 	{ .path = NULL, .page_size = 4096, .n_frames = 256, .cool_pct = 10, \
-	  .scan_resist = 1, .reopen = 0, .double_write = 0, .lsn_off = -1 }
+	  .scan_resist = 1, .reopen = 0, .double_write = 0, .lsn_off = -1, \
+	  .direct = 0, .adaptive_writeback = 0 }
 
 /* Lifecycle. */
 int  bm_create(const bm_opts_t *opts, bm_t **out);
