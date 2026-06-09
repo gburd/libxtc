@@ -92,8 +92,23 @@
 /* Linux io_uring backend */
 #undef XTC_IO_BACKEND_URING
 
-/* Define to 1 to use the OpenSSL/LibreSSL TLS backend */
+/* GnuTLS TLS backend */
+#undef XTC_TLS_BACKEND_GNUTLS
+
+/* mbedTLS TLS backend */
+#undef XTC_TLS_BACKEND_MBEDTLS
+
+/* No TLS backend; NOSYS stubs */
+#undef XTC_TLS_BACKEND_NONE
+
+/* OpenSSL/LibreSSL TLS backend */
 #undef XTC_TLS_BACKEND_OPENSSL
+
+/* Windows SChannel TLS backend */
+#undef XTC_TLS_BACKEND_SCHANNEL
+
+/* wolfSSL TLS backend */
+#undef XTC_TLS_BACKEND_WOLFSSL
 
 /* SemVer major */
 #undef XTC_VERSION_MAJOR
