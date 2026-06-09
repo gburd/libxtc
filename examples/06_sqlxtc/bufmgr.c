@@ -102,6 +102,33 @@ struct bm {
 	pthread_mutex_t   pid_mu;
 	bm_pid_t          next_pid;
 
+	/* Page-id freelist: page ids reclaimed by bm_free_pid (e.g. the
+	 * B-tree freeing a merged-away node), reissued by bm_alloc_pid
+	 * before the file is grown.  An in-memory stack guarded by pid_mu
+	 * -- the same lock that hands out next_pid -- so allocation pops a
+	 * freed pid or bumps next_pid under one lock and a pid is never
+	 * issued twice.  Not persisted: a crash leaks the freed pages
+	 * (the file does not shrink) but never double-allocates one, which
+	 * is the only unsafe outcome.  On a clean reopen the file's tail
+	 * pages are simply not on the freelist and stay leaked until the
+	 * tree reuses them through fresh splits. */
+	bm_pid_t         *free_pids;     /* stack of reclaimed page ids */
+	uint32_t          free_pids_n;   /* live entries */
+	uint32_t          free_pids_cap; /* allocated slots */
+	/* Quarantine: pids freed during the current structure-modification
+	 * epoch are parked here, not on free_pids, so a latch-free chaser
+	 * that read a now-stale pid before the unlink cannot have it
+	 * reissued under it for fresh contents.  bm_reclaim_quarantine
+	 * drains them to free_pids at the next epoch boundary (the start of
+	 * the next merge), by when any such chaser has completed or retried
+	 * -- chasers never park indefinitely on a freed page (drop_resident
+	 * already waits out an in-flight pin). */
+	bm_pid_t         *quar_pids;
+	uint32_t          quar_pids_n;
+	uint32_t          quar_pids_cap;
+	_Atomic uint64_t  s_freed;       /* total pages put on the freelist */
+	_Atomic uint64_t  s_reissued;    /* allocations served from the freelist */
+
 	_Atomic uint32_t  clock;       /* round-robin victim cursor */
 
 	/* page table (pid mode): pid -> resident frame */
@@ -769,6 +796,11 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 		close(bm->fd); __os_free(bm); return rc;
 	}
 	bm->next_pid = 1;          /* pid 0 reserved as "none" / superblock */
+	bm->free_pids = NULL;      /* page-id reclaim freelist (grown on demand) */
+	bm->free_pids_n = 0;
+	bm->free_pids_cap = 0;
+	atomic_store_explicit(&bm->s_freed, 0, memory_order_relaxed);
+	atomic_store_explicit(&bm->s_reissued, 0, memory_order_relaxed);
 	if (opts->reopen) {
 		/* Resume page-id allocation past the file's existing pages
 		 * (page 0 is the superblock; data pages are 1..N-1). */
@@ -806,6 +838,8 @@ bm_destroy(bm_t *bm)
 	}
 	__os_free(bm->ht_locks);
 	__os_free(bm->buckets);
+	__os_free(bm->free_pids);
+	__os_free(bm->quar_pids);
 	__os_aligned_free(bm->pool);
 	__os_free(bm->frames);
 	__os_free(bm);
@@ -816,9 +850,65 @@ next_pid(bm_t *bm)
 {
 	bm_pid_t p;
 	(void)pthread_mutex_lock(&bm->pid_mu);
-	p = bm->next_pid++;
+	if (bm->free_pids_n > 0) {
+		/* Reissue a reclaimed page id before growing the file. */
+		p = bm->free_pids[--bm->free_pids_n];
+		atomic_fetch_add_explicit(&bm->s_reissued, 1, memory_order_relaxed);
+	} else {
+		p = bm->next_pid++;
+	}
 	(void)pthread_mutex_unlock(&bm->pid_mu);
 	return p;
+}
+
+/*
+ * Drop a resident frame for `pid` to the free list, bypassing the
+ * writeback path: the page is being reclaimed, so its contents are
+ * dead and must NOT be flushed (a flush could resurrect stale bytes
+ * under a reissued id).  Removes the page-table entry under the
+ * bucket's stripe lock and reserves the frame so no concurrent fixer
+ * can re-pin it.  Returns 1 if a resident frame was dropped, 0 if the
+ * page was not resident.  The caller (bm_free_pid) holds no latch and
+ * guarantees no live pointer reaches `pid`, so any concurrent fixer
+ * is already draining (it found the page through a now-removed link).
+ */
+static int
+drop_resident(bm_t *bm, bm_pid_t pid)
+{
+	uint32_t b = (uint32_t)(pid % bm->nbucket);
+	pthread_mutex_t *lk = ht_lock(bm, b);
+	bm_frame_t *f;
+
+	(void)pthread_mutex_lock(lk);
+	for (f = bm->buckets[b]; f != NULL; f = f->hnext)
+		if (f->pid == pid && f->via_pid)
+			break;
+	if (f == NULL) {
+		(void)pthread_mutex_unlock(lk);
+		return 0;
+	}
+	/* Reserve the frame (pin 0 -> -1).  If it is pinned, a worker still
+	 * holds it; spin briefly -- the caller has unlinked the page, so any
+	 * such holder is finishing a read it began before the unlink and
+	 * will unpin shortly. */
+	while (!try_reserve(f)) {
+		(void)pthread_mutex_unlock(lk);
+		xtc_yield();
+		(void)pthread_mutex_lock(lk);
+		/* The page cannot reappear under a different frame (it is
+		 * unlinked, so no fixer can load it), so re-find is stable. */
+	}
+	atomic_store_explicit(&f->dirty, 0, memory_order_release); /* dead: do not flush */
+	{
+		bm_frame_t **pp;
+		for (pp = &bm->buckets[b]; *pp != NULL; pp = &(*pp)->hnext)
+			if (*pp == f) { *pp = f->hnext; break; }
+	}
+	f->via_pid = 0;
+	(void)pthread_mutex_unlock(lk);
+	atomic_fetch_sub_explicit(&bm->resident, 1, memory_order_relaxed);
+	free_push(bm, f);            /* clears the reservation (pin = 0) */
+	return 1;
 }
 
 int
@@ -1044,6 +1134,82 @@ bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid)
 	if (out_pid) *out_pid = f->pid;
 	*out_frame = f;
 	return XTC_OK;
+}
+
+int
+bm_free_pid(bm_t *bm, bm_pid_t pid)
+{
+	bm_pid_t *grow;
+	uint32_t cap;
+
+	if (bm == NULL || pid == BM_PID_NONE)
+		return XTC_E_INVAL;
+	/*
+	 * Drop any resident copy first, OUTSIDE the pid lock: a stale
+	 * resident frame for `pid` must not survive to be re-fixed once
+	 * the id is reissued for fresh contents.  The caller has unlinked
+	 * the page, so no live pointer reaches it and no fixer can load it
+	 * anew; drop_resident only has to evict an already-resident frame.
+	 */
+	(void)drop_resident(bm, pid);
+
+	(void)pthread_mutex_lock(&bm->pid_mu);
+	if (bm->quar_pids_n == bm->quar_pids_cap) {
+		cap = bm->quar_pids_cap ? bm->quar_pids_cap * 2u : 64u;
+		if (__os_realloc(bm->quar_pids,
+		    (size_t)cap * sizeof *bm->quar_pids,
+		    (void **)&bm->quar_pids) != XTC_OK) {
+			(void)pthread_mutex_unlock(&bm->pid_mu);
+			return XTC_E_NOMEM;   /* page leaked, never double-allocated */
+		}
+		bm->quar_pids_cap = cap;
+	}
+	bm->quar_pids[bm->quar_pids_n++] = pid;   /* parked, not yet reusable */
+	(void)pthread_mutex_unlock(&bm->pid_mu);
+	atomic_fetch_add_explicit(&bm->s_freed, 1, memory_order_relaxed);
+	return XTC_OK;
+}
+
+/*
+ * Drain the quarantine: move pids freed in the previous epoch onto the
+ * reusable freelist.  Called at a structure-modification epoch
+ * boundary (the start of a merge), by when any latch-free chaser that
+ * observed a now-freed pid has finished -- so reissuing it for fresh
+ * contents can no longer mislead an in-flight operation.
+ */
+void
+bm_reclaim_quarantine(bm_t *bm)
+{
+	bm_pid_t *grow;
+	uint32_t cap, need, i;
+
+	if (bm == NULL)
+		return;
+	(void)pthread_mutex_lock(&bm->pid_mu);
+	if (bm->quar_pids_n == 0) {
+		(void)pthread_mutex_unlock(&bm->pid_mu);
+		return;
+	}
+	need = bm->free_pids_n + bm->quar_pids_n;
+	if (need > bm->free_pids_cap) {
+		cap = bm->free_pids_cap ? bm->free_pids_cap : 64u;
+		while (cap < need)
+			cap *= 2u;
+		if (__os_realloc(bm->free_pids,
+		    (size_t)cap * sizeof *bm->free_pids,
+		    (void **)&bm->free_pids) != XTC_OK) {
+			/* Out of memory: leave them quarantined (still safe;
+			 * the pages stay leaked until a later drain). */
+			(void)pthread_mutex_unlock(&bm->pid_mu);
+			return;
+		}
+		bm->free_pids_cap = cap;
+	}
+	grow = bm->free_pids;
+	for (i = 0; i < bm->quar_pids_n; i++)
+		grow[bm->free_pids_n++] = bm->quar_pids[i];
+	bm->quar_pids_n = 0;
+	(void)pthread_mutex_unlock(&bm->pid_mu);
 }
 
 int
@@ -1361,6 +1527,9 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->prefetched = atomic_load_explicit(&bm->s_prefetched, memory_order_relaxed);
 	out->trickled = atomic_load_explicit(&bm->s_trickled, memory_order_relaxed);
 	out->dw_repaired = atomic_load_explicit(&bm->s_dw_repaired, memory_order_relaxed);
+	out->freed = atomic_load_explicit(&bm->s_freed, memory_order_relaxed);
+	out->reissued = atomic_load_explicit(&bm->s_reissued, memory_order_relaxed);
+	out->free_pids = bm->free_pids_n;   /* approximate (read without the pid lock) */
 }
 
 /* ---- persistence: superblock, sync, checkpoint ---- */

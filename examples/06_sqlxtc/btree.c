@@ -123,6 +123,25 @@
 #define BT_MAX_HEIGHT 32       /* fanout >= 2 => trees this tall are absurd */
 #define BT_MAX_KEY    1024     /* largest full key we route on the stack */
 
+/*
+ * Merge threshold: a delete that leaves a node using less than this
+ * fraction of its page triggers a merge attempt (right-merge under
+ * the SMO lock).  Kept low (1/4) so the common delete stays on the
+ * latch-free fast path and only a genuinely sparse node provokes an
+ * SMO -- the classic B-tree underflow bound, tuned conservatively so
+ * a delete/insert oscillation around the boundary does not thrash
+ * (insert splits near full, merge fires near a quarter full).
+ */
+#define BT_MERGE_NUM  1
+#define BT_MERGE_DEN  4
+
+/* Bound on delete re-descents.  A concurrent merge can move a key into
+ * its left sibling after a delete's descent has passed that subtree;
+ * the delete then re-descends to find it.  A handful of attempts
+ * absorbs any realistic merge race while still terminating promptly
+ * on a genuinely absent key. */
+#define BT_DELETE_RETRIES 4
+
 struct bt {
 	bm_t             *bm;
 	uint32_t          page_size;
@@ -131,6 +150,15 @@ struct bt {
 	_Atomic uint64_t  st_inserts;
 	_Atomic uint64_t  st_lookups;
 	_Atomic uint64_t  st_splits;
+	_Atomic uint64_t  st_merges;   /* node merges (right sibling pulled left) */
+	_Atomic uint64_t  st_reclaimed;/* pages returned to the bufmgr freelist */
+	_Atomic int       merge_on;    /* 1 == run merge/reclaim on delete underflow.
+	                                * Off by default: the merge SMO is correct
+	                                * under a single mutator but has a known
+	                                * structural race under concurrent latch-free
+	                                * deletes (see docs/M_SQLXTC_STORAGE.md).
+	                                * Callers that delete single-threaded (or hold
+	                                * the tree exclusively) enable it for compaction. */
 	_Atomic uint64_t  st_height;   /* number of levels (1 == root leaf) */
 	_Atomic uint64_t  st_descents; /* full root->leaf cursor descents */
 	_Atomic uint64_t  st_resumes;  /* parked-cursor O(1) resumes */
@@ -143,6 +171,10 @@ struct bt {
 	                               * never take it, so the common path stays
 	                               * fully parallel. */
 };
+
+static int bt_merge(bt_t *bt, const void *key, uint16_t klen);
+static int merge_level(bt_t *bt, bm_pid_t *path, int level,
+    const void *key, uint16_t klen);
 
 /* On-disk superblock (buffer-manager page 0), recording where the tree
  * lives so a restart can find the root instead of building a fresh
@@ -893,6 +925,370 @@ bt_lookup(bt_t *bt, const void *key, uint16_t klen, void *buf, uint16_t cap,
 	return leaf_get(bt, f, key, klen, buf, cap, vlen);
 }
 
+/*
+ * If the root is an internal node holding a single child (only the
+ * slot-0 -infinity child remains after a merge cascade removed its
+ * last separator), collapse it: make that child the new root and free
+ * the old root page, shrinking the tree height by one.  Repeats while
+ * the new root is itself a one-child internal node.  Called under the
+ * SMO lock, so the root is stable.  `key`/`klen` route move_right if
+ * the (single-child) root grew a right sibling -- it cannot, since a
+ * one-child internal node is the rightmost at its level, but the
+ * move_right call keeps the discipline uniform and is a no-op here.
+ */
+static void
+collapse_root(bt_t *bt)
+{
+	bm_t *bm = bt->bm;
+
+	for (;;) {
+		bm_pid_t rpid = atomic_load(&bt->root_pid);
+		bm_frame_t *rf;
+		void *rp;
+		bm_pid_t only_child;
+
+		if (bm_fix_pid(bm, rpid, &rf) != XTC_OK)
+			return;
+		bm_latch_exclusive(rf);
+		rp = bm_page(rf);
+		if (btnode_is_leaf(rp) || btnode_count(rp) != 1) {
+			bm_unlatch(rf); bm_unfix(bm, rf, 0);
+			return;
+		}
+		/* Sole child becomes the new root. */
+		only_child = child_pid_at(rp, 0);
+		bm_unlatch(rf); bm_unfix(bm, rf, 0);
+		if (only_child == BM_PID_NONE)
+			return;
+		atomic_store(&bt->root_pid, only_child);
+		atomic_fetch_sub(&bt->st_height, 1);
+		bt_write_super(bt);            /* root pid changed: persist it */
+		if (bm_free_pid(bm, rpid) == XTC_OK)
+			atomic_fetch_add(&bt->st_reclaimed, 1);
+	}
+}
+
+/*
+ * Right-merge at one level and cascade upward.  `path[level]` is the
+ * parent pid; `key`/`klen` route to the underflowing node L beneath
+ * it.  Latches strictly top-down: parent (exclusive), then L, then L's
+ * right sibling R.  If L still underflows and R exists with the SAME
+ * parent and the pair fits one page, absorbs R into L, unlinks R from
+ * the parent and the sibling chain, and frees R; then, if the parent
+ * now underflows, recurses on it.  Returns XTC_OK whether or not a
+ * merge happened (best-effort reclaim).  See bt_merge for the B-link
+ * safety invariant this latch discipline upholds.
+ */
+static int
+merge_level(bt_t *bt, bm_pid_t *path, int level, const void *key,
+    uint16_t klen)
+{
+	bm_t *bm = bt->bm;
+	bm_frame_t *pf = NULL, *lf = NULL, *rf = NULL;
+	void *pp, *lp = NULL, *rp = NULL;
+	bm_pid_t lpid = BM_PID_NONE, rpid = BM_PID_NONE;
+	int cslot, lslot, rslot;
+	int merged = 0;
+	int punder = 0;
+	uint32_t cap = bt->page_size;
+
+	if (level < 0)
+		return XTC_OK;
+
+	/* Parent, exclusive.  Under the SMO lock its structure is stable,
+	 * but its frame may have been evicted, so re-fix it.  move_right is
+	 * a no-op for an internal node that owns key (it has not split
+	 * since we hold the SMO lock), but keep the discipline uniform. */
+	if (bm_fix_pid(bm, path[level], &pf) != XTC_OK)
+		return XTC_OK;
+	bm_latch_exclusive(pf);
+	(void)move_right(bt, &pf, key, klen, 1);
+	pp = bm_page(pf);
+
+	/*
+	 * The child C the key routes through is the underflow candidate.
+	 * Form a merge pair (left, right) of adjacent siblings under THIS
+	 * parent: prefer C's right sibling (merge it into C); if C is the
+	 * parent's rightmost child, use C's left sibling (merge C into it).
+	 * The right member of the pair is always the one unlinked.  We do
+	 * not cross to a cousin under a different parent -- that would need
+	 * a second parent latch and break the simple top-down order.
+	 */
+	cslot = btnode_search(pp, key, klen, NULL) - 1;
+	if (cslot < 0)
+		cslot = 0;
+	if (cslot + 1 < (int)btnode_count(pp)) {
+		lslot = cslot;
+		rslot = cslot + 1;
+	} else if (cslot - 1 >= 0) {
+		lslot = cslot - 1;
+		rslot = cslot;
+	} else {
+		lslot = rslot = -1;        /* single child: nothing to merge */
+	}
+
+	if (lslot < 0)
+		goto check_parent;         /* no pair: maybe collapse the parent */
+
+	lpid = child_pid_at(pp, lslot);
+	rpid = child_pid_at(pp, rslot);
+	if (lpid == BM_PID_NONE || rpid == BM_PID_NONE || lpid == rpid)
+		goto done;                 /* malformed parent: leave intact */
+
+	/* Left child, then right sibling: top-down / left-right order, the
+	 * same order a descent and a move_right take, so no deadlock. */
+	if (bm_fix_pid(bm, lpid, &lf) != XTC_OK)
+		goto done;
+	bm_latch_exclusive(lf);
+	lp = bm_page(lf);
+	if (bm_fix_pid(bm, rpid, &rf) != XTC_OK)
+		goto done;
+	bm_latch_exclusive(rf);
+	rp = bm_page(rf);
+
+	/*
+	 * Re-validate under the latches.  A non-SMO insert/delete may have
+	 * changed either node while we reached up to the parent.  Merge
+	 * only when (a) the two are the same leaf-ness, (b) the left's
+	 * right-link really is the right (the sibling chain and the parent
+	 * agree -- they must, since lslot/rslot are adjacent and their
+	 * separator is the shared fence, but verify), (c) the pair fits in
+	 * one page, and (d) at least one of them underflows (so a healthy
+	 * pair is never needlessly combined).
+	 */
+	{
+		int leaf = btnode_is_leaf(lp);
+		uint32_t lrs = btnode_right_sibling(lp);
+		int lu = (btnode_count(lp) == 0) ||
+		    (!leaf && btnode_count(lp) <= 1) ||
+		    ((uint32_t)btnode_used_bytes(lp) * BT_MERGE_DEN
+		    < cap * BT_MERGE_NUM);
+		int ru = (btnode_count(rp) == 0) ||
+		    (!leaf && btnode_count(rp) <= 1) ||
+		    ((uint32_t)btnode_used_bytes(rp) * BT_MERGE_DEN
+		    < cap * BT_MERGE_NUM);
+
+		if (leaf != btnode_is_leaf(rp) || lrs != (uint32_t)rpid ||
+		    !(lu || ru) || !btnode_merge_fits(lp, rp))
+			goto done;
+	}
+
+	/*
+	 * Merge R into L.  For an INTERNAL pair the slot-0 of R is an
+	 * empty-key (-infinity) leftmost child; merging it verbatim would
+	 * leave a duplicate empty separator.  So first rebuild R into
+	 * scratch with its slot-0 keyed by the real separator (the parent's
+	 * rslot key == R's lower fence), carrying R's REAL upper fence so
+	 * the merged node's hi-fence is right (a finite hi-fence on R, from
+	 * an earlier split, must survive or a key beyond it would be
+	 * wrongly claimed instead of chased right).  Leaves merge directly.
+	 */
+	if (!btnode_is_leaf(lp)) {
+		uint8_t sepk[BT_MAX_KEY];
+		uint16_t seplen = 0;
+		uint8_t scratch[BT_MAX_KEY * 8];
+		void *tmp = scratch;
+		int i, rn;
+
+		if (cap > sizeof scratch)
+			goto done;
+		if (btnode_full_key(pp, rslot, sepk, sizeof sepk, &seplen) != 0)
+			goto done;
+		{
+			uint8_t rhi[BT_MAX_KEY];
+			uint16_t rhilen = 0;
+			const uint8_t *hip = NULL;
+
+			if (btnode_hi_fence(rp, rhi, sizeof rhi, &rhilen) == 0 &&
+			    rhilen > 0)
+				hip = rhi;
+			btnode_init(tmp, cap, 0);
+			btnode_set_fences(tmp, NULL, 0, hip, rhilen);
+		}
+		if (internal_insert(tmp, sepk, seplen, child_pid_at(rp, 0)) != 0)
+			goto done;
+		rn = (int)btnode_count(rp);
+		for (i = 1; i < rn; i++) {
+			uint8_t kb[BT_MAX_KEY];
+			uint16_t kl = 0;
+
+			if (btnode_full_key(rp, i, kb, sizeof kb, &kl) != 0 ||
+			    internal_insert(tmp, kb, kl,
+			    child_pid_at(rp, i)) != 0)
+				goto done;
+		}
+		btnode_set_right_sibling(tmp, btnode_right_sibling(rp));
+		if (btnode_merge(lp, tmp) != 0)
+			goto done;             /* did not fit after all */
+	} else {
+		if (btnode_merge(lp, rp) != 0)
+			goto done;
+	}
+
+	/*
+	 * L now owns R's keys and R's right-link (btnode_merge inherited
+	 * it).  Unlink R from the parent by removing the rslot separator,
+	 * so no descent or move_right can reach R anymore.  Order: commit L
+	 * (merged contents + new right-link) and the parent (R's slot
+	 * dropped), then free R -- which is now unreachable.
+	 */
+	(void)btnode_remove(pp, rslot);
+	bm_unlatch(lf); bm_unfix(bm, lf, 1);   /* merged node: dirty */
+	lf = NULL;
+	bm_unlatch(rf); bm_unfix(bm, rf, 0);   /* R is dead: do not dirty */
+	rf = NULL;
+	if (bm_free_pid(bm, rpid) == XTC_OK)
+		atomic_fetch_add(&bt->st_reclaimed, 1);
+	atomic_fetch_add(&bt->st_merges, 1);
+	merged = 1;
+
+ done:
+	if (rf != NULL) { bm_unlatch(rf); bm_unfix(bm, rf, merged); }
+	if (lf != NULL) { bm_unlatch(lf); bm_unfix(bm, lf, merged); }
+
+ check_parent:
+	/*
+	 * Did the parent underflow?  An internal node underflows when it is
+	 * down to a single child (only the slot-0 -infinity child) or its
+	 * heap drops below the threshold.  If so, collapse it at the root
+	 * or merge it one level up.  This runs whether or not a merge
+	 * happened here, so a one-child parent still collapses upward.
+	 */
+	{
+		uint16_t pcount = btnode_count(pp);
+		punder = (pcount <= 1) ||
+		    ((uint32_t)btnode_used_bytes(pp) * BT_MERGE_DEN
+		    < cap * BT_MERGE_NUM);
+	}
+	bm_unlatch(pf); bm_unfix(bm, pf, merged);   /* dirty iff we changed it */
+	if (punder) {
+		if (level == 0)
+			collapse_root(bt);     /* root may now have one child */
+		else
+			(void)merge_level(bt, path, level - 1, key, klen);
+	}
+	return XTC_OK;
+}
+
+/*
+ * Structure-modification pass: right-merge to reclaim space after a
+ * delete left a node sparse.  Runs under the SMO lock, so it never
+ * races a split or another merge (both serialize on bt->smo); it
+ * re-descends from the root because the sparse leaf may have moved or
+ * split since the delete dropped its latch.
+ *
+ * B-LINK SAFETY INVARIANT
+ * -----------------------
+ * A page is unlinked and its id freed only while this pass holds, at
+ * once and exclusively, the latches on (a) the parent that routes to
+ * it, (b) the LEFT node it is merged into, and (c) the node R being
+ * removed.  Because every descent latches a child before releasing
+ * its parent, and move_right latches the right sibling before
+ * releasing the left, any concurrent reader/writer that can reach R
+ * either already holds R's latch -- so this pass blocks acquiring R
+ * exclusively until that reader leaves R, reading only valid pre-merge
+ * bytes -- or reaches R through a live link (the parent separator or
+ * the left node's right-link), BOTH of which this pass rewires away
+ * before releasing the parent and left latches.  After the rewire no
+ * descent or move_right can newly reach R, and the lone reader that
+ * held R has left, so R is unreachable when its id is freed.  A reused
+ * id is therefore installed only behind a fresh link that no stale
+ * reader follows.  (A parked cursor that remembered R's id is handled
+ * separately, in bt_cursor_resume, which re-descends when its parked
+ * page no longer covers the resume key.)
+ *
+ * Direction matters: merging R INTO L keeps L's identity and its place
+ * in the right-sibling chain, so a reader that was on L and walks
+ * right now finds R's keys absorbed into L (L's hi-fence widened to
+ * R's) and stops there -- it never chases a dangling right-link.
+ *
+ * Best-effort: any obstacle (no right sibling, a different parent,
+ * the pair does not fit, an allocation failure) simply ends the pass
+ * with the tree intact and still correct, just not maximally compact.
+ */
+static int
+bt_merge(bt_t *bt, const void *key, uint16_t klen)
+{
+	bm_t *bm = bt->bm;
+	bm_pid_t path[BT_MAX_HEIGHT];   /* ancestor pids, root..parent-of-leaf */
+	int depth;
+	bm_pid_t pid;
+	bm_frame_t *f;
+	int rc;
+
+	rc = xtc_arwlock_wrlock(bt->smo, -1);
+	if (rc != XTC_OK)
+		return rc;
+
+	/*
+	 * Epoch boundary: drain pids freed by the PREVIOUS merge onto the
+	 * reusable freelist.  Holding the SMO lock here means every earlier
+	 * structure modification has completed; any latch-free chaser that
+	 * observed one of those now-freed pids has likewise finished (it
+	 * does not park on a freed page).  Pids freed by THIS pass go to
+	 * the quarantine and only become reusable at the next merge -- so a
+	 * page unlinked now is never reissued for fresh contents while a
+	 * chaser that read its id this epoch is still in flight.
+	 */
+	bm_reclaim_quarantine(bm);
+
+	/*
+	 * Latch-free descent collecting the ancestor pid path, exactly as
+	 * bt_insert does, with move-right at each level to recover from any
+	 * split that happened before we held the SMO lock.
+	 */
+	depth = 0;
+	pid = atomic_load(&bt->root_pid);
+	if ((rc = bm_fix_pid(bm, pid, &f)) != XTC_OK)
+		goto unlock;
+	bm_latch_exclusive(f);
+	(void)move_right(bt, &f, key, klen, 1);
+	while (!btnode_is_leaf(bm_page(f))) {
+		bm_pid_t child;
+		bm_frame_t *cf;
+
+		if (depth >= BT_MAX_HEIGHT) {
+			bm_unlatch(f); bm_unfix(bm, f, 0);
+			rc = XTC_E_INTERNAL; goto unlock;
+		}
+		path[depth++] = bm_frame_pid(f);
+		child = child_for_key(bm_page(f), key, klen);
+		if ((rc = bm_fix_pid(bm, child, &cf)) != XTC_OK) {
+			bm_unlatch(f); bm_unfix(bm, f, 0); goto unlock;
+		}
+		bm_latch_exclusive(cf);
+		bm_unlatch(f); bm_unfix(bm, f, 0);
+		f = cf;
+		(void)move_right(bt, &f, key, klen, 1);
+	}
+
+	/*
+	 * f is the leaf L that owns `key`, exclusive-latched.  A leaf with
+	 * no parent IS the root: a single-leaf tree never merges (nothing
+	 * to merge into).  Release and finish.
+	 */
+	if (depth == 0) {
+		bm_unlatch(f); bm_unfix(bm, f, 0);
+		rc = XTC_OK; goto unlock;
+	}
+
+	/*
+	 * Drop the leaf latch before reaching back up to the parent: the
+	 * merge re-acquires latches strictly top-down (parent, then the
+	 * left child, then its right sibling), the same order as a descent,
+	 * so it cannot deadlock.  We hold the SMO lock throughout, so no
+	 * split or other merge can restructure the path under us; only a
+	 * non-SMO insert/delete can mutate a leaf's contents, which the
+	 * merge re-reads after latching.
+	 */
+	bm_unlatch(f); bm_unfix(bm, f, 0);
+	rc = merge_level(bt, path, depth - 1, key, klen);
+
+ unlock:
+	(void)xtc_arwlock_unlock(bt->smo);
+	return rc;
+}
+
 int
 bt_delete(bt_t *bt, const void *key, uint16_t klen)
 {
@@ -903,22 +1299,104 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 	int rc = XTC_OK;
 	int found;
 	int s;
+	int attempt;
 
 	if (bt == NULL || key == NULL)
 		return XTC_E_INVAL;
 	bm = bt->bm;
 
 	/*
-	 * Latch-free descent with B-link move-right.  Delete never splits
-	 * or merges, so it retains no ancestor; it latches one node at a
-	 * time and walks right past any concurrent split, landing on the
-	 * leaf that owns `key`.  One-at-a-time latching keeps it
-	 * deadlock-free against a splitter posting separators upward.
+	 * Latch-free descent with B-link move-right.  The delete proper
+	 * retains no ancestor: it latches one node at a time, walks right
+	 * past any concurrent split, and removes the key from the owning
+	 * leaf -- the common path stays latch-free and leaf-exclusive,
+	 * exactly like before.  Only if the leaf then underflows does the
+	 * delete hand off to bt_merge, a separate structure-modification
+	 * pass under the SMO lock; the descent here never holds two
+	 * latches in opposite order, so it stays deadlock-free against a
+	 * splitter or merger posting changes upward.
+	 *
+	 * A concurrent merge can absorb this delete's leaf into its LEFT
+	 * sibling after the descent has already passed that sibling, so
+	 * the key the descent is chasing ends up to the LEFT of where it
+	 * landed -- a direction move_right cannot recover.  When the leaf
+	 * does not contain the key, re-descend from the root: the parent
+	 * separators now route to the node that absorbed it.  Bounded so a
+	 * genuinely absent key still terminates in NOTFOUND.
 	 */
+	for (attempt = 0; attempt < BT_DELETE_RETRIES; attempt++) {
+		pid = atomic_load(&bt->root_pid);
+		rc = bm_fix_pid(bm, pid, &f);
+		if (rc != XTC_OK)
+			return rc;
+		bm_latch_exclusive(f);
+		(void)move_right(bt, &f, key, klen, 1);
+		pg = bm_page(f);
+		while (!btnode_is_leaf(pg)) {
+			bm_pid_t child = child_for_key(pg, key, klen);
+			bm_frame_t *cf;
+
+			rc = bm_fix_pid(bm, child, &cf);
+			if (rc != XTC_OK) {
+				bm_unlatch(f); bm_unfix(bm, f, 0);
+				return rc;
+			}
+			bm_latch_exclusive(cf);
+			bm_unlatch(f);             /* release before latching deeper */
+			bm_unfix(bm, f, 0);
+			f = cf;
+			(void)move_right(bt, &f, key, klen, 1);
+			pg = bm_page(f);
+		}
+
+		found = 0;
+		s = btnode_search(pg, key, klen, &found);
+		if (!found) {
+			/* Key not here.  A concurrent merge may have moved it
+			 * left after we passed that subtree; release and
+			 * re-descend.  After the bounded retries, treat it as
+			 * genuinely absent. */
+			bm_unlatch(f);
+			bm_unfix(bm, f, 0);
+			f = NULL;
+			xtc_yield();           /* let a racing merge finish, then retry */
+			continue;
+		}
+		(void)btnode_remove(pg, s);
+		{
+			/* Decide whether the leaf now underflows.  We hold it
+			 * exclusive, so the count/used reading is stable. */
+			uint32_t cap = bt->page_size;
+			uint16_t used = btnode_used_bytes(pg);
+			uint16_t cnt = btnode_count(pg);
+			int underflow = (cnt == 0) ||
+			    ((uint32_t)used * BT_MERGE_DEN < cap * BT_MERGE_NUM);
+			bm_unlatch(f);
+			bm_unfix(bm, f, 1);
+			if (underflow && atomic_load(&bt->merge_on))
+				(void)bt_merge(bt, key, klen); /* best-effort reclaim */
+		}
+		return XTC_OK;
+	}
+
+	/*
+	 * The bounded latch-free retries did not find the key.  Either it
+	 * is genuinely absent, or a relentless merge storm kept relocating
+	 * it leftward faster than the lock-free descent could re-find it.
+	 * Settle it authoritatively under the SMO write lock: no split or
+	 * merge runs concurrently while it is held, so a single descent
+	 * with move-right deterministically reaches the leaf that owns the
+	 * key if it exists.  This is the rare path -- the common delete
+	 * stays fully latch-free -- and it guarantees a delete is never
+	 * lost to a concurrent structural change.
+	 */
+	if (xtc_arwlock_wrlock(bt->smo, -1) != XTC_OK)
+		return XTC_E_NOTFOUND;
 	pid = atomic_load(&bt->root_pid);
-	rc = bm_fix_pid(bm, pid, &f);
-	if (rc != XTC_OK)
-		return rc;
+	if (bm_fix_pid(bm, pid, &f) != XTC_OK) {
+		(void)xtc_arwlock_unlock(bt->smo);
+		return XTC_E_NOTFOUND;
+	}
 	bm_latch_exclusive(f);
 	(void)move_right(bt, &f, key, klen, 1);
 	pg = bm_page(f);
@@ -926,31 +1404,27 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 		bm_pid_t child = child_for_key(pg, key, klen);
 		bm_frame_t *cf;
 
-		rc = bm_fix_pid(bm, child, &cf);
-		if (rc != XTC_OK) {
+		if (bm_fix_pid(bm, child, &cf) != XTC_OK) {
 			bm_unlatch(f); bm_unfix(bm, f, 0);
-			return rc;
+			(void)xtc_arwlock_unlock(bt->smo);
+			return XTC_E_NOTFOUND;
 		}
 		bm_latch_exclusive(cf);
-		bm_unlatch(f);             /* release before latching deeper */
-		bm_unfix(bm, f, 0);
+		bm_unlatch(f); bm_unfix(bm, f, 0);
 		f = cf;
 		(void)move_right(bt, &f, key, klen, 1);
 		pg = bm_page(f);
 	}
-
 	found = 0;
 	s = btnode_search(pg, key, klen, &found);
 	if (!found) {
-		rc = XTC_E_NOTFOUND;
-		bm_unlatch(f);
-		bm_unfix(bm, f, 0);
-		return rc;
+		bm_unlatch(f); bm_unfix(bm, f, 0);
+		(void)xtc_arwlock_unlock(bt->smo);
+		return XTC_E_NOTFOUND;   /* genuinely absent */
 	}
 	(void)btnode_remove(pg, s);
-	bm_unlatch(f);
-	bm_unfix(bm, f, 1);
-	/* Leaves may underflow without merging in this version. */
+	bm_unlatch(f); bm_unfix(bm, f, 1);
+	(void)xtc_arwlock_unlock(bt->smo);
 	return XTC_OK;
 }
 
@@ -1182,6 +1656,23 @@ bt_cursor_close(bt_cursor_t *c)
 	free(c);
 }
 
+/*
+ * Enable or disable merge/reclaim on delete underflow.  Disabled by
+ * default.  The merge structure-modification is correct under a single
+ * mutator but has a known structural race against concurrent
+ * latch-free deletes (a delete and a merge can disagree on the tree's
+ * shape under maximal churn).  Enable it only when deletes are
+ * single-threaded or the caller otherwise holds the tree exclusively;
+ * with it off, deletes still remove keys correctly, pages just stay
+ * underfull (bounded, safe) instead of being reclaimed.
+ */
+void
+bt_set_merge_enabled(bt_t *bt, int on)
+{
+	if (bt != NULL)
+		atomic_store(&bt->merge_on, on ? 1 : 0);
+}
+
 void
 bt_get_stats(bt_t *bt, bt_stats_t *out)
 {
@@ -1190,6 +1681,8 @@ bt_get_stats(bt_t *bt, bt_stats_t *out)
 	out->inserts = atomic_load(&bt->st_inserts);
 	out->lookups = atomic_load(&bt->st_lookups);
 	out->splits = atomic_load(&bt->st_splits);
+	out->merges = atomic_load(&bt->st_merges);
+	out->reclaimed = atomic_load(&bt->st_reclaimed);
 	out->height = atomic_load(&bt->st_height);
 	out->descents = atomic_load(&bt->st_descents);
 	out->resumes = atomic_load(&bt->st_resumes);
