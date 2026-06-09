@@ -1,20 +1,30 @@
 # M_TLS -- Transport Layer Security design
 
-**Status:** research; not yet implemented.  This document describes
-the proposed `xtc_tls_t` API, the configure-time backend pluggability,
-and the integration with `xtc_io` for non-blocking handshakes.
+**Status:** implemented.  TLS 1.2/1.3 over `xtc_io` sockets with the
+same async, single-threaded event-loop discipline as the rest of xtc.
+A single internal `xtc_tls` seam fronts several configure-time-selected
+backends.  Verified backends (test/m18 tls_server + tls_client pass):
+OpenSSL, LibreSSL, mbedTLS, GnuTLS, and wolfSSL.  An SChannel (Windows
+SSPI) backend is written to the same seam but is compile-only -- not
+yet runtime-verified, awaiting a Windows host.  Select with
+`configure --with-tls=openssl|libressl|mbedtls|gnutls|wolfssl|schannel|auto|none`.
+See docs/M_TLS_MATRIX.md for the per-backend / per-version matrix.
 
 ## Goal
 
 Provide TLS 1.2/1.3 over `xtc_io` sockets with the same async,
 single-threaded event-loop discipline as the rest of xtc.  The API
-must work identically across at least four backends:
+works identically across the backends below:
 
-- **OpenSSL** (default on Linux/BSD; Tier-1)
-- **BoringSSL** (Google's fork; tier-1 alt)
-- **wolfSSL** (embedded; tier-2)
-- **macOS Network framework** (tier-2 native)
-- **SChannel** (Windows native; tier-2)
+- **OpenSSL** (default on Linux/BSD) -- implemented, verified.
+- **LibreSSL** (OpenSSL-API compatible, same backend) -- verified.
+- **mbedTLS** -- implemented, verified.
+- **GnuTLS** -- implemented, verified.
+- **wolfSSL** -- implemented, verified.
+- **SChannel** (Windows native) -- implemented, compile-only.
+
+BoringSSL builds through the OpenSSL-API backend; a macOS Network
+framework backend is not implemented.
 
 ## Design overview
 
