@@ -62,6 +62,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/os/os_tls.c \
 	$(srcdir)/../src/os/os_mutex.c \
 	$(srcdir)/../src/os/os_cpu.c \
+	$(srcdir)/../src/os/os_pkey.c \
 	$(srcdir)/../src/os/os_backtrace.c \
 	$(srcdir)/../src/os/os_file.c \
 	$(srcdir)/../src/io/io_common.c \
@@ -126,6 +127,7 @@ LIB_OBJS	= \
 	os_tls.o \
 	os_mutex.o \
 	os_cpu.o \
+	os_pkey.o \
 	os_backtrace.o \
 	os_file.o \
 	io_common.o \
@@ -227,6 +229,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_cpu \
 		  test_thread test_tls test_mutex test_fs \
 		  test_dio \
+		  test_pkey \
 		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_net test_net_udp test_net_frame \
 		  test_loop test_task test_waker test_timer test_io_integration \
 		  test_async \
@@ -418,6 +421,9 @@ exec.o: $(srcdir)/../src/evt/exec.c xtc_config.h
 
 os_cpu.o: $(srcdir)/../src/os/os_cpu.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_cpu.c
+
+os_pkey.o: $(srcdir)/../src/os/os_pkey.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_pkey.c
 
 os_backtrace.o: $(srcdir)/../src/os/os_backtrace.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_backtrace.c
@@ -656,6 +662,12 @@ test_dio: $(srcdir)/../test/m1/test_dio.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
 		-o $@ $(srcdir)/../test/m1/test_dio.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_pkey: $(srcdir)/../test/m1/test_pkey.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_pkey.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_thread: $(srcdir)/../test/m1/test_thread.c \
