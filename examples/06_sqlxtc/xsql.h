@@ -56,6 +56,8 @@
 #define sqlite3_context xsql_context
 #define sqlite3_create_function xsql_create_function
 #define sqlite3_create_module_v2 xsql_create_module_v2
+#define sqlite3_commit_hook xsql_commit_hook
+#define sqlite3_rollback_hook xsql_rollback_hook
 #define sqlite3_declare_vtab xsql_declare_vtab
 #define sqlite3_errmsg xsql_errmsg
 #define sqlite3_exec xsql_exec
