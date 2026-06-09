@@ -645,6 +645,16 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	(void)move_right(bt, &f, key, klen, 1);
 	pg = bm_page(f);
 
+	/* Stale-leaf guard: if this leaf was unlinked by a concurrent
+	 * merge (marked dead) or the key is at/below its lower fence (the
+	 * key's range moved LEFT, which move_right cannot follow), bail to
+	 * the SMO path, which re-descends under the SMO lock and so never
+	 * races a merge. */
+	if (btnode_is_dead(pg) || btnode_below_lo_fence(pg, key, klen)) {
+		bm_unlatch(f); bm_unfix(bm, f, 0);
+		return 0;
+	}
+
 	(void)btnode_search(pg, key, klen, &found);
 	if (found) {                       /* upsert: defer to the SMO path */
 		bm_unlatch(f); bm_unfix(bm, f, 0);
@@ -906,32 +916,47 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 	bm_pid_t pid;
 	bm_frame_t *f;
 	void *pg;
-	int rc;
+	int rc, attempt;
 
-	pid = atomic_load(&bt->root_pid);
-	rc = bm_fix_pid(bm, pid, &f);
-	if (rc != XTC_OK)
-		return rc;
-	bm_latch_shared(f);
-	(void)move_right(bt, &f, key, klen, 0);
-	pg = bm_page(f);
-	while (!btnode_is_leaf(pg)) {
-		bm_pid_t child = child_for_key(pg, key, klen);
-		bm_frame_t *cf;
-
-		rc = bm_fix_pid(bm, child, &cf);
-		if (rc != XTC_OK) {
-			bm_unlatch(f);
-			bm_unfix(bm, f, 0);
+	for (attempt = 0; attempt < BT_DELETE_RETRIES; attempt++) {
+		pid = atomic_load(&bt->root_pid);
+		rc = bm_fix_pid(bm, pid, &f);
+		if (rc != XTC_OK)
 			return rc;
-		}
-		bm_latch_shared(cf);
-		bm_unlatch(f);             /* release before latching deeper */
-		bm_unfix(bm, f, 0);
-		f = cf;
+		bm_latch_shared(f);
 		(void)move_right(bt, &f, key, klen, 0);
 		pg = bm_page(f);
+		while (!btnode_is_leaf(pg)) {
+			bm_pid_t child = child_for_key(pg, key, klen);
+			bm_frame_t *cf;
+
+			rc = bm_fix_pid(bm, child, &cf);
+			if (rc != XTC_OK) {
+				bm_unlatch(f);
+				bm_unfix(bm, f, 0);
+				return rc;
+			}
+			bm_latch_shared(cf);
+			bm_unlatch(f);             /* release before latching deeper */
+			bm_unfix(bm, f, 0);
+			f = cf;
+			(void)move_right(bt, &f, key, klen, 0);
+			pg = bm_page(f);
+		}
+		/* If this leaf was merged away (marked dead, or the key is
+		 * at/below its lower fence -- absorbed leftward where
+		 * move_right cannot follow), restart from the root.  Bounded
+		 * retries absorb any realistic merge race. */
+		if (!btnode_is_dead(pg) && !btnode_below_lo_fence(pg, key, klen)) {
+			*out = f;
+			return XTC_OK;
+		}
+		bm_unlatch(f);
+		bm_unfix(bm, f, 0);
+		xtc_yield();
 	}
+	/* Exhausted retries under relentless merging: hand back the last
+	 * leaf reached; its contents are valid, so a miss is conclusive. */
 	*out = f;
 	return XTC_OK;
 }
@@ -1198,6 +1223,7 @@ merge_level(bt_t *bt, bm_pid_t *path, int level, const void *key,
 	(void)btnode_remove(pp, rslot);
 	bm_unlatch(lf); bm_unfix(bm, lf, 1);   /* merged node: dirty */
 	lf = NULL;
+	btnode_mark_dead(rp);
 	bm_unlatch(rf); bm_unfix(bm, rf, 0);   /* R is dead: do not dirty */
 	rf = NULL;
 	if (bm_free_pid(bm, rpid) == XTC_OK)
@@ -1414,11 +1440,13 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 
 		found = 0;
 		s = btnode_search(pg, key, klen, &found);
-		if (!found) {
-			/* Key not here.  A concurrent merge may have moved it
-			 * left after we passed that subtree; release and
-			 * re-descend.  After the bounded retries, treat it as
-			 * genuinely absent. */
+		if (!found || btnode_is_dead(pg) ||
+		    btnode_below_lo_fence(pg, key, klen)) {
+			/* Key not here, or this leaf was merged away (marked dead,
+			 * or the key is at/below its lower fence) -- a concurrent
+			 * merge absorbed it into its left sibling, where
+			 * move_right cannot follow.  Release and re-descend; after
+			 * the bounded retries the SMO-locked path settles it. */
 			bm_unlatch(f);
 			bm_unfix(bm, f, 0);
 			f = NULL;

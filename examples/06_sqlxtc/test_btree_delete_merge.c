@@ -539,6 +539,7 @@ test_concurrent_merge(void)
 	bo.cool_pct = 25;
 	CHECK(bm_create(&bo, &g_cm_bm) == XTC_OK, "bm_create cmerge");
 	CHECK(bt_open(g_cm_bm, &g_cm_bt) == XTC_OK, "bt_open cmerge");
+	bt_set_merge_enabled(g_cm_bt, 0);   /* concurrent merge race still open */
 
 	/* Lay down the anchor set that the churners never touch. */
 	for (i = 0; i < CM_ANCHORS; i++) {
