@@ -167,6 +167,22 @@ int  bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame);
 int  bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid);
 int  bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame);
 
+/* Reclaim a page id.  The caller guarantees the page is no longer
+ * reachable from any live page (its parent separator and any sibling
+ * right-link have been rewired away) and holds no other reference to
+ * it: the page is unlinked.  bm_free_pid evicts the page's resident
+ * frame if any (so a stale resident copy cannot be re-fixed) and puts
+ * the id on an in-memory freelist that bm_alloc_pid reissues before
+ * growing the file.  Returns XTC_OK, or an error if the id cannot be
+ * recorded (in which case the page is simply leaked, never reused). */
+int  bm_free_pid(bm_t *bm, bm_pid_t pid);
+
+/* Drain the freed-page quarantine onto the reusable freelist.  Call at
+ * a structure-modification epoch boundary (the start of a merge pass)
+ * so a pid freed in the previous epoch is only reissued once any
+ * latch-free chaser that may have observed it has finished. */
+void bm_reclaim_quarantine(bm_t *bm);
+
 /* Read-ahead: request that `pid` be warmed into the pool soon.  Returns
  * immediately (never blocks on I/O); the page-provider drains the
  * request in the background and loads the page (resident, probationary)
@@ -234,6 +250,9 @@ typedef struct bm_stats {
 	uint64_t prefetched;    /* pages warmed by read-ahead */
 	uint64_t trickled;      /* dirty pages written ahead by the trickler */
 	uint64_t dw_repaired;   /* pages restored from the double-write on reopen */
+	uint64_t freed;         /* page ids put on the reclaim freelist */
+	uint64_t reissued;      /* allocations served from the reclaim freelist */
+	uint64_t free_pids;     /* page ids currently on the reclaim freelist */
 } bm_stats_t;
 void bm_get_stats(bm_t *bm, bm_stats_t *out);
 
