@@ -150,6 +150,7 @@ clean:
 	rm -f test_xlog test_xlog.o xlog.o
 	rm -f test_recover_undo
 	rm -f test_redo_page
+	rm -f test_inplace_redo
 	rm -f test_clean_restart
 	rm -f test_steal
 	rm -f test_parallel test_parallel.o
@@ -174,7 +175,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -380,6 +381,13 @@ test_redo_page: test_redo_page.c bufmgr.o
 
 test-redo-page: test_redo_page
 	./test_redo_page
+
+# ---- end-to-end in-place physiological crash recovery (XL_PAGE images) ----
+test_inplace_redo: test_inplace_redo.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_inplace_redo.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-inplace-redo: test_inplace_redo
+	./test_inplace_redo
 
 bufmgr.o: bufmgr.c bufmgr.h
 

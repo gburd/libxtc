@@ -59,6 +59,45 @@ void bt_get_meta(const bt_t *bt, uint64_t *clean, uint64_t *commit_clock);
  * page this tree dirties from now on -- the ARIES page LSN. */
 void bt_set_lsn(bt_t *bt, uint64_t lsn);
 
+/*
+ * Structure-modification (SMO) logging hook -- the ARIES physiological
+ * redo + nested-top-action (NTA) bracket for splits and root growth.
+ *
+ * A split touches several pages (the splitting node, its new right
+ * sibling, a posted-into parent, sometimes a fresh root); a crash that
+ * flushed some but not all of them leaves the on-disk tree structurally
+ * torn.  ARIES repairs this in place by logging each touched page's
+ * full after-image (physiological redo) inside an NTA: a begin marker,
+ * the page images, and a closing dummy compensation record whose
+ * presence makes a completed SMO redo to completion and never half-undo
+ * (Stasis TbeginNestedTopAction / TendNestedTopAction).
+ *
+ * btree.c stays WAL-agnostic: it calls these hooks, and the engine
+ * (xstore.c) implements them over the log (XL_PAGE images + a dummy
+ * XL_CLR).  All three may be NULL (the default: no SMO logging, the
+ * recovery path rebuilds logically instead of repairing in place).
+ *
+ *   begin(user)             -> opaque NTA token (e.g. the begin LSN);
+ *                              called under the SMO lock before the
+ *                              first page of a split is finalized.
+ *   page(user, pid, image,   -> log one finished page's full after-image
+ *        page_size, lsn)        (the bytes about to be unfixed dirty,
+ *                              with `lsn` already stamped at lsn_off).
+ *   end(user, token)        -> close the NTA (dummy CLR); the SMO is now
+ *                              crash-atomic with respect to recovery.
+ *
+ * A single global hook (the engine is process-global); the last setter
+ * wins, matching bt_set_close_hook.
+ */
+typedef struct bt_smo_hook {
+	void    *user;
+	uint64_t (*begin)(void *user);
+	void     (*page)(void *user, bm_pid_t pid, const void *image,
+	                 uint32_t page_size, uint64_t lsn);
+	void     (*end)(void *user, uint64_t token);
+} bt_smo_hook_t;
+void bt_set_smo_hook(const bt_smo_hook_t *hook);
+
 /* Insert or replace key -> val.  Returns XTC_OK, or an error. */
 int  bt_insert(bt_t *bt, const void *key, uint16_t klen,
                const void *val, uint16_t vlen);

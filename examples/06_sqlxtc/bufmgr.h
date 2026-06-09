@@ -124,6 +124,10 @@ void bm_destroy(bm_t *bm);
  * write if it does not return XTC_OK (the log is not yet durable that
  * far). */
 void bm_set_lsn(bm_t *bm, uint64_t lsn);
+/* Read back the LSN bm_set_lsn last recorded (the value the next
+ * clean->dirty edge will stamp).  Lets a structure-modification log a
+ * page's after-image carrying the same LSN the page is stamped with. */
+uint64_t bm_get_lsn(bm_t *bm);
 void bm_set_wal_flush(bm_t *bm, int (*flush)(void *ctx, uint64_t lsn), void *ctx);
 
 /*
@@ -193,6 +197,14 @@ int  bm_prefetch_pid(bm_t *bm, bm_pid_t pid);
 /* Release a frame fixed by bm_alloc/bm_fix.  mark_dirty != 0 records
  * that the page was modified (so it is written before eviction). */
 void bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty);
+
+/* Stamp a latched frame's page LSN with the current bm_set_lsn value
+ * NOW (unconditionally, even if already dirty) and ensure it is marked
+ * dirty, so a structure-modification can log the page's after-image
+ * carrying the LSN recovery gates the image apply by.  Distinct from
+ * the clean->dirty edge (which records only the first dirtying change's
+ * recLSN); a following bm_unfix(frame, 1) keeps the stamp. */
+void bm_predirty(bm_t *bm, bm_frame_t *frame);
 
 /* The page bytes of a fixed frame, and its page id. */
 void    *bm_page(bm_frame_t *frame);
