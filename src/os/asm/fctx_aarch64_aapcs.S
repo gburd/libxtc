@@ -40,7 +40,7 @@
  *	enters fn with the transfer value already loaded into x0.
  */
 
-#if defined(__aarch64__) && !defined(_WIN32)
+#if defined(__aarch64__) && !defined(__APPLE__) && !defined(_WIN32)
 
 	.text
 
