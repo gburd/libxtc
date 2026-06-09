@@ -62,6 +62,22 @@
 #include <stddef.h>
 #include "xtc.h"
 
+/*
+ * XTC_TLS_ENABLED is defined (to 1) whenever a real TLS backend is
+ * compiled in -- any one of OpenSSL/LibreSSL, mbedTLS, GnuTLS, wolfSSL,
+ * or SChannel.  It is NOT defined for --with-tls=none (the NOSYS
+ * stubs).  Callers and tests use it to gate code that needs a working
+ * handshake without caring which backend provides it.  The selecting
+ * XTC_TLS_BACKEND_* macro comes from xtc_config.h via configure.
+ */
+#if defined(XTC_TLS_BACKEND_OPENSSL)  || \
+    defined(XTC_TLS_BACKEND_MBEDTLS)  || \
+    defined(XTC_TLS_BACKEND_GNUTLS)   || \
+    defined(XTC_TLS_BACKEND_WOLFSSL)  || \
+    defined(XTC_TLS_BACKEND_SCHANNEL)
+#define XTC_TLS_ENABLED 1
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -14,7 +14,7 @@ includedir	= @includedir@
 mandir		= @mandir@
 
 CC		= @CC@
-CFLAGS		= @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@
+CFLAGS		= @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@ @XTC_TLS_CFLAGS@
 CPPFLAGS	= @CPPFLAGS@ -I. -I$(srcdir)/../src/inc
 LDFLAGS		= @LDFLAGS@ -pthread
 LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@ @XTC_TLS_LIBS@ @XTC_LIBUNWIND_LIBS@
@@ -45,11 +45,13 @@ VERSION_SCRIPT      = $(srcdir)/libxtc.map
 # -------------------------------------------------------------------------
 # M0 sources.
 # -------------------------------------------------------------------------
-# Conditionally add the TLS backend source.
-# configure sets XTC_TLS_BACKEND to "openssl" or "none".
-# tls_openssl.c is always compiled: when XTC_TLS_BACKEND_OPENSSL is not
-# defined it compiles as NOSYS stubs, so the symbols are always present.
-TLS_OBJS = tls_openssl.o
+# Conditionally add the TLS backend source.  configure sets
+# XTC_TLS_BACKEND to openssl|mbedtls|gnutls|wolfssl|schannel|none and
+# defines exactly one XTC_TLS_BACKEND_* macro.  Exactly one
+# tls_<backend>.c is compiled per build; that source provides the
+# public xtc_tls_* symbols.  For --with-tls=none the NOSYS stubs in
+# tls_none.c are compiled instead.
+TLS_OBJS = tls_@XTC_TLS_BACKEND@.o
 
 LIB_SRCS	= \
 	$(srcdir)/../src/xtc_version.c \
@@ -302,6 +304,21 @@ $(SHARED_LIB_REAL): $(LIB_OBJS) $(VERSION_SCRIPT)
 
 tls_openssl.o: $(srcdir)/../src/io/tls_openssl.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_openssl.c
+
+tls_mbedtls.o: $(srcdir)/../src/io/tls_mbedtls.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_mbedtls.c
+
+tls_gnutls.o: $(srcdir)/../src/io/tls_gnutls.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_gnutls.c
+
+tls_wolfssl.o: $(srcdir)/../src/io/tls_wolfssl.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_wolfssl.c
+
+tls_schannel.o: $(srcdir)/../src/io/tls_schannel.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_schannel.c
+
+tls_none.o: $(srcdir)/../src/io/tls_none.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_none.c
 
 # Pattern rule for compiling sources from ../src/ into ./*.o.
 xtc_version.o: $(srcdir)/../src/xtc_version.c $(LIB_HDR_PUBLIC) xtc_config.h
