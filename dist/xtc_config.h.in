@@ -121,3 +121,6 @@
 
 /* Library version as SemVer string */
 #undef XTC_VERSION_STRING
+
+/* Define to enable runtime diagnostic assertions. */
+#undef XTC_DIAGNOSTIC
