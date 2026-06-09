@@ -67,3 +67,4 @@ $(TARGET): $(OBJS)
 
 clean:
 	rm -f $(OBJS) $(TARGET) test_frame test_partition test_broker test_group
+	rm -rf *.dSYM

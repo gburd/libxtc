@@ -172,6 +172,8 @@ clean:
 
 distclean: clean
 	rm -f sqlite3.o
+	rm -rf *.dSYM
+	rm -rf ../../test/sqlxtc/test_quack ../../test/sqlxtc/*.dSYM
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
