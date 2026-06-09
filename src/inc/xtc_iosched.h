@@ -9,7 +9,7 @@
  *
  *	Queued writes are coalesced into batches; each flush issues the
  *	batch via xtc_aio_pwrite and measures throughput.  When adaptive
- *	mode is on, a genetic tuner (xtc_gsched) evolves the batch size
+ *	mode is on, a genetic tuner (xtc_dio_sched) evolves the batch size
  *	to maximise observed throughput and re-adapts when the workload
  *	or device behaviour shifts.  Opt-in per scheduler (per device):
  *	with adaptive off it uses a fixed batch size.

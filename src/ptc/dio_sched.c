@@ -2,13 +2,13 @@
  * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * src/ptc/gsched.c
- *	Genetic-algorithm tuner.  See xtc_gsched.h.  Deterministic
+ * src/ptc/dio_sched.c
+ *	Genetic-algorithm tuner.  See xtc_dio_sched.h.  Deterministic
  *	(seeded xorshift PRNG), no I/O, no global state.
  */
 
 #include "xtc_int.h"
-#include "xtc_gsched.h"
+#include "xtc_dio_sched.h"
 
 #include <string.h>
 
@@ -17,17 +17,17 @@
 #define MUT_RATE_INIT  0.15
 #define MUT_RATE_STEP  1.5      /* multiplicative up/down adjustment */
 
-struct xtc_gsched {
+struct xtc_dio_sched {
 	int       n_genes;
-	int       min[XTC_GSCHED_MAX_GENES];
-	int       max[XTC_GSCHED_MAX_GENES];
+	int       min[XTC_DIO_SCHED_MAX_GENES];
+	int       max[XTC_DIO_SCHED_MAX_GENES];
 	int       pop;
-	int     (*genes)[XTC_GSCHED_MAX_GENES];  /* [pop][n_genes] */
+	int     (*genes)[XTC_DIO_SCHED_MAX_GENES];  /* [pop][n_genes] */
 	double   *fitness;                       /* [pop], this generation */
 	int       cur;                           /* candidate under evaluation */
 	int       evaluated;                     /* candidates reported so far */
 
-	int       best[XTC_GSCHED_MAX_GENES];
+	int       best[XTC_DIO_SCHED_MAX_GENES];
 	double    best_fitness;
 	int       have_best;
 
@@ -41,7 +41,7 @@ struct xtc_gsched {
 
 /* ---- xorshift64 PRNG ---- */
 static uint64_t
-rng_next(struct xtc_gsched *g)
+rng_next(struct xtc_dio_sched *g)
 {
 	uint64_t x = g->rng;
 	x ^= x << 13;
@@ -52,14 +52,14 @@ rng_next(struct xtc_gsched *g)
 }
 
 static int
-rng_range(struct xtc_gsched *g, int lo, int hi)   /* inclusive */
+rng_range(struct xtc_dio_sched *g, int lo, int hi)   /* inclusive */
 {
 	if (hi <= lo) return lo;
 	return lo + (int)(rng_next(g) % (uint64_t)(hi - lo + 1));
 }
 
 static double
-rng_unit(struct xtc_gsched *g)   /* [0,1) */
+rng_unit(struct xtc_dio_sched *g)   /* [0,1) */
 {
 	return (double)(rng_next(g) >> 11) / (double)(1ULL << 53);
 }
@@ -71,13 +71,13 @@ clampi(int v, int lo, int hi)
 }
 
 int
-xtc_gsched_create(const xtc_gsched_spec_t *spec, xtc_gsched_t **out)
+xtc_dio_sched_create(const xtc_dio_sched_spec_t *spec, xtc_dio_sched_t **out)
 {
-	xtc_gsched_t *g;
+	xtc_dio_sched_t *g;
 	int i, j, rc;
 
 	if (spec == NULL || out == NULL) return XTC_E_INVAL;
-	if (spec->n_genes < 1 || spec->n_genes > XTC_GSCHED_MAX_GENES)
+	if (spec->n_genes < 1 || spec->n_genes > XTC_DIO_SCHED_MAX_GENES)
 		return XTC_E_INVAL;
 	if (spec->population < 2) return XTC_E_INVAL;
 	for (i = 0; i < spec->n_genes; i++)
@@ -113,7 +113,7 @@ xtc_gsched_create(const xtc_gsched_spec_t *spec, xtc_gsched_t **out)
 }
 
 void
-xtc_gsched_destroy(xtc_gsched_t *g)
+xtc_dio_sched_destroy(xtc_dio_sched_t *g)
 {
 	if (g == NULL) return;
 	__os_free(g->genes);
@@ -122,7 +122,7 @@ xtc_gsched_destroy(xtc_gsched_t *g)
 }
 
 void
-xtc_gsched_current(const xtc_gsched_t *g, int *out_genes)
+xtc_dio_sched_current(const xtc_dio_sched_t *g, int *out_genes)
 {
 	if (g == NULL || out_genes == NULL) return;
 	memcpy(out_genes, g->genes[g->cur], (size_t)g->n_genes * sizeof(int));
@@ -130,7 +130,7 @@ xtc_gsched_current(const xtc_gsched_t *g, int *out_genes)
 
 /* Tournament select: pick the fitter of two random candidates. */
 static int
-tournament(struct xtc_gsched *g)
+tournament(struct xtc_dio_sched *g)
 {
 	int a = rng_range(g, 0, g->pop - 1);
 	int b = rng_range(g, 0, g->pop - 1);
@@ -138,9 +138,9 @@ tournament(struct xtc_gsched *g)
 }
 
 static void
-breed(struct xtc_gsched *g)
+breed(struct xtc_dio_sched *g)
 {
-	int (*next)[XTC_GSCHED_MAX_GENES];
+	int (*next)[XTC_DIO_SCHED_MAX_GENES];
 	int elite = 0, i, j;
 	double gen_best;
 
@@ -201,7 +201,7 @@ breed(struct xtc_gsched *g)
 }
 
 void
-xtc_gsched_report(xtc_gsched_t *g, double fitness)
+xtc_dio_sched_report(xtc_dio_sched_t *g, double fitness)
 {
 	if (g == NULL) return;
 	g->fitness[g->cur] = fitness;
@@ -213,7 +213,7 @@ xtc_gsched_report(xtc_gsched_t *g, double fitness)
 }
 
 void
-xtc_gsched_best(const xtc_gsched_t *g, int *out_genes, double *out_fitness)
+xtc_dio_sched_best(const xtc_dio_sched_t *g, int *out_genes, double *out_fitness)
 {
 	if (g == NULL) return;
 	if (out_genes != NULL) {
@@ -229,13 +229,13 @@ xtc_gsched_best(const xtc_gsched_t *g, int *out_genes, double *out_fitness)
 }
 
 double
-xtc_gsched_mutation_rate(const xtc_gsched_t *g)
+xtc_dio_sched_mutation_rate(const xtc_dio_sched_t *g)
 {
 	return g != NULL ? g->mut_rate : 0.0;
 }
 
 uint64_t
-xtc_gsched_generation(const xtc_gsched_t *g)
+xtc_dio_sched_generation(const xtc_dio_sched_t *g)
 {
 	return g != NULL ? g->generation : 0;
 }
