@@ -5,7 +5,7 @@
  * of this distribution.
  *
  * test/m18/test_tls_server.c
- *	Server-side OpenSSL handshake smoke test (TLS-2).
+ *	Server-side handshake smoke test (TLS-2).
  *
  *	Exercises the xtc_tls server path end-to-end:
  *	  - xtc_tls_ctx_create (SERVER role, cert + key)
@@ -13,17 +13,21 @@
  *	  - xtc_tls_write / xtc_tls_read
  *	  - xtc_tls_shutdown / xtc_tls_destroy
  *
- *	The client side of the loopback connection is driven by raw
- *	OpenSSL calls inside a pthread so that both halves can run
- *	concurrently.
+ *	The peer (client) side of the loopback connection is driven by the
+ *	SAME xtc_tls API, in CLIENT role, inside a pthread.  Using xtc_tls
+ *	for both halves keeps the test backend-agnostic: whatever TLS
+ *	backend configure selected (OpenSSL/LibreSSL, mbedTLS, GnuTLS,
+ *	wolfSSL, ...) is the backend actually being exercised on both
+ *	sides.  Both fds are non-blocking and driven by poll(2), matching
+ *	the event-loop discipline of the library.
  *
  *	A self-signed RSA-2048 certificate and matching private key are
  *	generated at runtime via the openssl CLI and written to /tmp files
  *	during test setup.  This avoids embedding private keys in source
  *	(which triggers GitHub secret scanners).
  *
- *	When XTC_TLS_BACKEND_OPENSSL is not defined (--with-tls=none)
- *	every test in this suite returns MUNIT_SKIP cleanly.
+ *	When no TLS backend is compiled in (--with-tls=none) every test in
+ *	this suite returns MUNIT_SKIP cleanly.
  */
 
 #include "munit.h"
@@ -31,21 +35,18 @@
 #include "xtc_tls.h"
 
 /* =========================================================================
- * OpenSSL-backend branch -- full implementation.
+ * TLS-enabled branch -- full implementation (any backend).
  * ======================================================================= */
-#if defined(XTC_TLS_BACKEND_OPENSSL)
+#if defined(XTC_TLS_ENABLED)
 
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/x509.h>
 
 /* -------------------------------------------------------------------------
  * Runtime certificate generation.
@@ -88,12 +89,12 @@ generate_cert(const char *cert_path, const char *key_path, const char *cn)
 }
 
 /* -------------------------------------------------------------------------
- * Helpers.
+ * Helpers -- drive xtc_tls operations to completion over a poll(2) loop.
+ * Shared by both the system-under-test side and the peer thread.
  * ----------------------------------------------------------------------- */
 
-/* Drive a single xtc_tls operation with poll(2) until it returns
- * something other than XTC_E_AGAIN, or until timeout_ms elapses.
- * Returns the final xtc return code. */
+/* Drive a single 0-arg xtc_tls op until it returns != XTC_E_AGAIN, or
+ * timeout_ms elapses.  Returns the final xtc return code. */
 static int
 poll_until_done(xtc_tls_t *tls, int fd,
                 int (*fn)(xtc_tls_t *), int timeout_ms)
@@ -105,25 +106,23 @@ poll_until_done(xtc_tls_t *tls, int fd,
 
         struct pollfd pfd;
         pfd.fd      = fd;
-        pfd.events  = xtc_tls_wants_read(tls) ? POLLIN : POLLOUT;
+        pfd.events  = xtc_tls_wants_write(tls) ? POLLOUT : POLLIN;
         pfd.revents = 0;
 
-        int prc = poll(&pfd, 1, timeout_ms);
-        if (prc <= 0)
+        if (poll(&pfd, 1, timeout_ms) <= 0)
             return XTC_E_INTERNAL;  /* timeout or poll error */
     }
 }
 
 /* Drive xtc_tls_write until all bytes are sent or error. */
 static int
-server_write_all(xtc_tls_t *tls, int fd,
-                 const void *buf, size_t len, int timeout_ms)
+tls_write_all(xtc_tls_t *tls, int fd,
+              const void *buf, size_t len, int timeout_ms)
 {
     size_t total = 0;
     while (total < len) {
         size_t n = 0;
-        int rc = xtc_tls_write(tls,
-                               (const char *)buf + total,
+        int rc = xtc_tls_write(tls, (const char *)buf + total,
                                len - total, &n);
         if (rc == XTC_OK) {
             total += n;
@@ -143,14 +142,13 @@ server_write_all(xtc_tls_t *tls, int fd,
 
 /* Drive xtc_tls_read until exactly `len` bytes arrive or error. */
 static int
-server_read_exact(xtc_tls_t *tls, int fd,
-                  void *buf, size_t len, int timeout_ms)
+tls_read_exact(xtc_tls_t *tls, int fd,
+               void *buf, size_t len, int timeout_ms)
 {
     size_t total = 0;
     while (total < len) {
         size_t n = 0;
-        int rc = xtc_tls_read(tls,
-                              (char *)buf + total,
+        int rc = xtc_tls_read(tls, (char *)buf + total,
                               len - total, &n);
         if (rc == XTC_OK) {
             if (n == 0)
@@ -159,7 +157,7 @@ server_read_exact(xtc_tls_t *tls, int fd,
         } else if (rc == XTC_E_AGAIN) {
             struct pollfd pfd;
             pfd.fd      = fd;
-            pfd.events  = xtc_tls_wants_read(tls) ? POLLIN : POLLOUT;
+            pfd.events  = xtc_tls_wants_write(tls) ? POLLOUT : POLLIN;
             pfd.revents = 0;
             if (poll(&pfd, 1, timeout_ms) <= 0)
                 return XTC_E_INTERNAL;
@@ -170,80 +168,71 @@ server_read_exact(xtc_tls_t *tls, int fd,
     return XTC_OK;
 }
 
+static int
+set_nonblock(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1)
+        return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
 /* -------------------------------------------------------------------------
- * Client thread: connects via raw OpenSSL (blocking) on the peer fd.
+ * Client thread: connects via xtc_tls (CLIENT role) on the peer fd.
  *
  * Protocol:
- *   1. SSL_connect (blocking)
+ *   1. handshake
  *   2. Read exactly CLIENT_MSG_LEN bytes sent by the server.
  *   3. Echo them back.
- *   4. SSL_shutdown.
+ *   4. shutdown.
  * ----------------------------------------------------------------------- */
 
 #define CLIENT_MSG_LEN 5
 
 struct client_args {
-    int         fd;         /* socketpair peer fd (blocking) */
-    int         rc;         /* 0 = success; non-zero = error */
-    char        echoed[CLIENT_MSG_LEN + 1];
+    int   fd;         /* non-blocking socketpair peer fd */
+    int   rc;         /* 0 = success; non-zero = error */
+    char  echoed[CLIENT_MSG_LEN + 1];
 };
 
 static void *
 client_thread(void *arg)
 {
-    struct client_args *a    = (struct client_args *)arg;
-    SSL_CTX            *cctx = NULL;
-    SSL                *ssl  = NULL;
+    struct client_args *a   = (struct client_args *)arg;
+    xtc_tls_opts_t      opts;
+    xtc_tls_ctx_t      *ctx = NULL;
+    xtc_tls_t          *tls = NULL;
     char                buf[CLIENT_MSG_LEN];
-    int                 total;
 
     a->rc = 1;   /* assume failure */
 
-    /* Create a client-side SSL context that skips server cert verification
-     * (self-signed cert in test). */
-    cctx = SSL_CTX_new(TLS_client_method());
-    if (cctx == NULL)
-        goto done;
-    SSL_CTX_set_verify(cctx, SSL_VERIFY_NONE, NULL);
+    memset(&opts, 0, sizeof(opts));
+    opts.verify_peer = 0;   /* self-signed server cert in test */
+    opts.min_version = XTC_TLS_VER_12;
 
-    ssl = SSL_new(cctx);
-    if (ssl == NULL)
+    if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &opts, &ctx) != XTC_OK)
         goto done;
-    if (SSL_set_fd(ssl, a->fd) != 1)
+    if (xtc_tls_create(ctx, a->fd, &tls) != XTC_OK)
         goto done;
 
-    /* Blocking SSL_connect. */
-    if (SSL_connect(ssl) != 1)
+    if (poll_until_done(tls, a->fd, xtc_tls_handshake, 5000) != XTC_OK)
         goto done;
 
-    /* Read exactly CLIENT_MSG_LEN bytes from the server. */
-    total = 0;
-    while (total < CLIENT_MSG_LEN) {
-        int r = SSL_read(ssl, buf + total, CLIENT_MSG_LEN - total);
-        if (r <= 0)
-            goto done;
-        total += r;
-    }
+    if (tls_read_exact(tls, a->fd, buf, CLIENT_MSG_LEN, 5000) != XTC_OK)
+        goto done;
 
-    /* Echo back. */
-    total = 0;
-    while (total < CLIENT_MSG_LEN) {
-        int w = SSL_write(ssl, buf + total, CLIENT_MSG_LEN - total);
-        if (w <= 0)
-            goto done;
-        total += w;
-    }
+    if (tls_write_all(tls, a->fd, buf, CLIENT_MSG_LEN, 5000) != XTC_OK)
+        goto done;
 
-    /* Graceful shutdown. */
-    (void)SSL_shutdown(ssl);
+    (void)xtc_tls_shutdown(tls);
 
     memcpy(a->echoed, buf, CLIENT_MSG_LEN);
     a->echoed[CLIENT_MSG_LEN] = '\0';
     a->rc = 0;
 
 done:
-    if (ssl  != NULL) { SSL_free(ssl); }
-    if (cctx != NULL) { SSL_CTX_free(cctx); }
+    if (tls != NULL) xtc_tls_destroy(tls);
+    if (ctx != NULL) xtc_tls_ctx_destroy(ctx);
     return arg;
 }
 
@@ -253,8 +242,7 @@ done:
 
 /* -------------------------------------------------------------------------
  * test_server_ctx_create_destroy:
- *   Create a SERVER ctx with the embedded cert+key.
- *   Verify xtc_tls_ctx_create succeeds and ctx_destroy is clean.
+ *   Create a SERVER ctx with the runtime-generated cert+key.
  * ----------------------------------------------------------------------- */
 static MunitResult
 test_server_ctx_create_destroy(const MunitParameter params[], void *data)
@@ -282,9 +270,9 @@ test_server_ctx_create_destroy(const MunitParameter params[], void *data)
 
 /* -------------------------------------------------------------------------
  * test_server_handshake_roundtrip:
- *   Full loopback:
- *     - socketpair -> non-blocking server fd + blocking client fd
- *     - client thread: SSL_connect, read "hello", echo back
+ *   Full loopback, server side under test, client side via xtc_tls:
+ *     - socketpair -> both ends non-blocking
+ *     - client thread: xtc_tls CLIENT handshake, read "hello", echo
  *     - server: xtc_tls_handshake loop, write "hello", read echo
  *     - assert echo == "hello"
  * ----------------------------------------------------------------------- */
@@ -303,7 +291,6 @@ test_server_handshake_roundtrip(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    /* ---- ctx ---- */
     memset(&opts, 0, sizeof(opts));
     opts.cert_file   = TEST_CERT_PATH;
     opts.key_file    = TEST_KEY_PATH;
@@ -314,52 +301,36 @@ test_server_handshake_roundtrip(const MunitParameter params[], void *data)
     munit_assert_int(rc, ==, XTC_OK);
     munit_assert_ptr_not_null(ctx);
 
-    /* ---- socketpair ---- */
     munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(set_nonblock(sv[1]), ==, 0);
 
-    /* sv[0] = server (non-blocking), sv[1] = client (blocking) */
-    {
-        int flags = fcntl(sv[0], F_GETFL, 0);
-        munit_assert_int(flags, !=, -1);
-        munit_assert_int(fcntl(sv[0], F_SETFL, flags | O_NONBLOCK), ==, 0);
-    }
-
-    /* ---- wrap server fd ---- */
     rc = xtc_tls_create(ctx, sv[0], &tls);
     munit_assert_int(rc, ==, XTC_OK);
     munit_assert_ptr_not_null(tls);
 
-    /* ---- launch client thread ---- */
     memset(&ca, 0, sizeof(ca));
     ca.fd = sv[1];
     ca.rc = 1;
     munit_assert_int(pthread_create(&tid, NULL, client_thread, &ca), ==, 0);
 
-    /* ---- server: drive handshake ---- */
     rc = poll_until_done(tls, sv[0], xtc_tls_handshake, 5000);
     munit_assert_int(rc, ==, XTC_OK);
 
-    /* ---- server: write "hello" ---- */
-    rc = server_write_all(tls, sv[0], "hello", CLIENT_MSG_LEN, 5000);
+    rc = tls_write_all(tls, sv[0], "hello", CLIENT_MSG_LEN, 5000);
     munit_assert_int(rc, ==, XTC_OK);
 
-    /* ---- server: read echo ---- */
     memset(rbuf, 0, sizeof(rbuf));
-    rc = server_read_exact(tls, sv[0], rbuf, CLIENT_MSG_LEN, 5000);
+    rc = tls_read_exact(tls, sv[0], rbuf, CLIENT_MSG_LEN, 5000);
     munit_assert_int(rc, ==, XTC_OK);
     munit_assert_memory_equal(CLIENT_MSG_LEN, rbuf, "hello");
 
-    /* ---- server: graceful shutdown ---- */
-    /* Call once to send close_notify; do not loop -- peer may not have
-     * sent theirs yet, and the test does not need the full bidir close. */
     (void)xtc_tls_shutdown(tls);
 
-    /* ---- join client ---- */
     pthread_join(tid, NULL);
     munit_assert_int(ca.rc, ==, 0);
     munit_assert_memory_equal(CLIENT_MSG_LEN, ca.echoed, "hello");
 
-    /* ---- cleanup ---- */
     xtc_tls_destroy(tls);
     xtc_tls_ctx_destroy(ctx);
     close(sv[0]);
@@ -370,8 +341,7 @@ test_server_handshake_roundtrip(const MunitParameter params[], void *data)
 
 /* -------------------------------------------------------------------------
  * test_server_alpn:
- *   Create a SERVER ctx with ALPN h2 preference.
- *   Verify ctx creation succeeds (ALPN path exercised).
+ *   Create a SERVER ctx with ALPN h2 preference; exercise the ALPN path.
  * ----------------------------------------------------------------------- */
 static MunitResult
 test_server_alpn(const MunitParameter params[], void *data)
@@ -421,15 +391,12 @@ test_server_tls_create_bad_args(const MunitParameter params[], void *data)
     rc = xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx);
     munit_assert_int(rc, ==, XTC_OK);
 
-    /* NULL ctx */
     rc = xtc_tls_create(NULL, 3, &tls);
     munit_assert_int(rc, ==, XTC_E_INVAL);
 
-    /* negative fd */
     rc = xtc_tls_create(ctx, -1, &tls);
     munit_assert_int(rc, ==, XTC_E_INVAL);
 
-    /* NULL out */
     rc = xtc_tls_create(ctx, 3, NULL);
     munit_assert_int(rc, ==, XTC_E_INVAL);
 
@@ -506,10 +473,10 @@ static const MunitSuite suite = {
     "/m18/tls_server", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE
 };
 
-#else  /* !XTC_TLS_BACKEND_OPENSSL -- skip stubs */
+#else  /* !XTC_TLS_ENABLED -- skip stubs */
 
 /*
- * TLS backend not compiled in.  Each test function returns MUNIT_SKIP
+ * No TLS backend compiled in.  Each test function returns MUNIT_SKIP
  * so the test binary exits with a clean "all skipped" result.
  */
 
@@ -531,7 +498,7 @@ static const MunitSuite suite = {
     "/m18/tls_server", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE
 };
 
-#endif /* XTC_TLS_BACKEND_OPENSSL */
+#endif /* XTC_TLS_ENABLED */
 
 /* =========================================================================
  * main

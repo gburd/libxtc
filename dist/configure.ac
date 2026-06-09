@@ -279,21 +279,32 @@ AS_CASE([$xtc_io_backend],
 
 # -------------------------------------------------------------------------
 # TLS backend selection.
+#
+# One tls_<backend>.c is compiled per build.  Each backend fronts the
+# same internal seam (the public xtc_tls_* API); the rest of the library
+# is backend-agnostic.  --with-tls picks the backend at configure time,
+# the same discipline as --with-io-backend.  Detection prefers
+# pkg-config (Nix split outputs, custom prefixes) and falls back to a
+# header/lib probe.
 # -------------------------------------------------------------------------
 AC_ARG_WITH([tls],
-  [AS_HELP_STRING([--with-tls=openssl|libressl|none|auto],
+  [AS_HELP_STRING([--with-tls=openssl|libressl|mbedtls|gnutls|wolfssl|schannel|none|auto],
     [Select the TLS backend (default: auto).])],
   [xtc_tls=$withval], [xtc_tls=auto])
 
 xtc_tls_backend=none
+XTC_TLS_CFLAGS=
 XTC_TLS_LIBS=
+
+AC_PATH_PROG([PKG_CONFIG], [pkg-config], [no])
 
 AC_MSG_CHECKING([for TLS backend])
 case "$xtc_tls" in
   auto)
     # Try OpenSSL (or its API-compatible drop-in: LibreSSL).  Both
     # ship libssl.so + libcrypto.so + openssl/ssl.h, so the same
-    # detection works for either.
+    # detection works for either.  No other backend is auto-selected:
+    # they must be requested explicitly so a build stays reproducible.
     ac_save_LIBS=$LIBS
     AC_CHECK_LIB([ssl], [SSL_CTX_new],
       [ac_have_ssl_lib=yes], [ac_have_ssl_lib=no], [-lcrypto])
@@ -301,7 +312,8 @@ case "$xtc_tls" in
     AC_CHECK_HEADER([openssl/ssl.h],
       [ac_have_ssl_hdr=yes], [ac_have_ssl_hdr=no])
     AS_IF([test "x$ac_have_ssl_lib" = xyes && test "x$ac_have_ssl_hdr" = xyes],
-      [xtc_tls_backend=openssl],
+      [xtc_tls_backend=openssl
+       XTC_TLS_LIBS="-lssl -lcrypto"],
       [xtc_tls_backend=none])
     ;;
   openssl|libressl)
@@ -315,24 +327,74 @@ case "$xtc_tls" in
     AC_CHECK_HEADER([openssl/ssl.h], [],
       [AC_MSG_ERROR([--with-tls=$xtc_tls: openssl/ssl.h not found])])
     xtc_tls_backend=openssl
+    XTC_TLS_LIBS="-lssl -lcrypto"
     AS_IF([test "x$xtc_tls" = xlibressl],
       [xtc_tls_flavor=libressl], [xtc_tls_flavor=openssl])
+    ;;
+  mbedtls)
+    # mbedTLS splits into libmbedtls (TLS) + libmbedx509 + libmbedcrypto.
+    # Its mbedtls.pc emits only -lmbedtls (the shared object carries the
+    # other two as NEEDED), but linking our static libxtc.a needs all
+    # three named explicitly, so append the lower layers after the
+    # pkg-config output.
+    AS_IF([test "x$PKG_CONFIG" != xno && $PKG_CONFIG --exists mbedtls 2>/dev/null],
+      [XTC_TLS_CFLAGS=`$PKG_CONFIG --cflags mbedtls`
+       XTC_TLS_LIBS="`$PKG_CONFIG --libs mbedtls` -lmbedx509 -lmbedcrypto"],
+      [AC_CHECK_HEADER([mbedtls/ssl.h], [],
+         [AC_MSG_ERROR([--with-tls=mbedtls: mbedtls/ssl.h not found])])
+       XTC_TLS_LIBS="-lmbedtls -lmbedx509 -lmbedcrypto"])
+    xtc_tls_backend=mbedtls
+    ;;
+  gnutls)
+    AS_IF([test "x$PKG_CONFIG" != xno && $PKG_CONFIG --exists gnutls 2>/dev/null],
+      [XTC_TLS_CFLAGS=`$PKG_CONFIG --cflags gnutls`
+       XTC_TLS_LIBS=`$PKG_CONFIG --libs gnutls`],
+      [AC_CHECK_HEADER([gnutls/gnutls.h], [],
+         [AC_MSG_ERROR([--with-tls=gnutls: gnutls/gnutls.h not found])])
+       XTC_TLS_LIBS="-lgnutls"])
+    xtc_tls_backend=gnutls
+    ;;
+  wolfssl)
+    AS_IF([test "x$PKG_CONFIG" != xno && $PKG_CONFIG --exists wolfssl 2>/dev/null],
+      [XTC_TLS_CFLAGS=`$PKG_CONFIG --cflags wolfssl`
+       XTC_TLS_LIBS=`$PKG_CONFIG --libs wolfssl`],
+      [AC_CHECK_HEADER([wolfssl/ssl.h], [],
+         [AC_MSG_ERROR([--with-tls=wolfssl: wolfssl/ssl.h not found])])
+       XTC_TLS_LIBS="-lwolfssl"])
+    xtc_tls_backend=wolfssl
+    ;;
+  schannel)
+    # Windows-native SSPI/SChannel.  Only valid on a Windows host; the
+    # backend is compile-verified there and links against secur32 +
+    # crypt32.  Reject on non-Windows so the misconfiguration is loud.
+    case "$host_os" in
+      *mingw*|*cygwin*|*msys*|*windows*) ;;
+      *) AC_MSG_ERROR([--with-tls=schannel is Windows-only (host_os=$host_os)]) ;;
+    esac
+    xtc_tls_backend=schannel
+    XTC_TLS_LIBS="-lsecur32 -lcrypt32"
     ;;
   none)
     xtc_tls_backend=none
     ;;
   *)
-    AC_MSG_ERROR([invalid --with-tls=$xtc_tls; use openssl, libressl, none, or auto])
+    AC_MSG_ERROR([invalid --with-tls=$xtc_tls; use openssl, libressl, mbedtls, gnutls, wolfssl, schannel, none, or auto])
     ;;
 esac
 AC_MSG_RESULT([$xtc_tls_backend])
 
-AS_IF([test "x$xtc_tls_backend" = xopenssl],
-  [AC_DEFINE([XTC_TLS_BACKEND_OPENSSL], 1,
-     [Define to 1 to use the OpenSSL/LibreSSL TLS backend])
-   XTC_TLS_LIBS="-lssl -lcrypto"])
+# Exactly one XTC_TLS_BACKEND_* macro is defined; configure also exports
+# XTC_TLS_BACKEND so the Makefile compiles the matching tls_<backend>.c.
+AS_CASE([$xtc_tls_backend],
+  [openssl],  [AC_DEFINE([XTC_TLS_BACKEND_OPENSSL],  1, [OpenSSL/LibreSSL TLS backend])],
+  [mbedtls],  [AC_DEFINE([XTC_TLS_BACKEND_MBEDTLS],  1, [mbedTLS TLS backend])],
+  [gnutls],   [AC_DEFINE([XTC_TLS_BACKEND_GNUTLS],   1, [GnuTLS TLS backend])],
+  [wolfssl],  [AC_DEFINE([XTC_TLS_BACKEND_WOLFSSL],  1, [wolfSSL TLS backend])],
+  [schannel], [AC_DEFINE([XTC_TLS_BACKEND_SCHANNEL], 1, [Windows SChannel TLS backend])],
+  [none],     [AC_DEFINE([XTC_TLS_BACKEND_NONE],     1, [No TLS backend; NOSYS stubs])])
 
 AC_SUBST([XTC_TLS_BACKEND], [$xtc_tls_backend])
+AC_SUBST([XTC_TLS_CFLAGS])
 AC_SUBST([XTC_TLS_LIBS])
 
 # -------------------------------------------------------------------------
