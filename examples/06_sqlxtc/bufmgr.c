@@ -1512,6 +1512,12 @@ tr_proc(void *arg)
 		if (spec.init[1] < 1)  spec.init[1] = 1;
 		if (spec.init[1] > 50) spec.init[1] = 50;
 		spec.population = 8;
+		/* Two phenotypes (Moilanen): batch (gene 0) is tuned by
+		 * throughput, interval (gene 1) by the dirty backlog, so the
+		 * two objectives do not muddy each other's gradient. */
+		spec.n_phenos = 2;
+		spec.gene_pheno[0] = 0;     /* batch    -> throughput phenotype */
+		spec.gene_pheno[1] = 1;     /* interval -> backlog phenotype */
 		if (xtc_dio_sched_create(&spec, &tuner) == XTC_OK) {
 			int g[XTC_DIO_SCHED_MAX_GENES];
 			xtc_dio_sched_current(tuner, g);
@@ -1561,14 +1567,18 @@ tr_proc(void *arg)
 		if (tuner != NULL && w > 0) {
 			int g[XTC_DIO_SCHED_MAX_GENES];
 			double cycle = (double)((t1 - t0) + iv) / 1e9;
-			double rate, dfrac, fit;
+			double rate, dfrac, f[2];
 			if (cycle <= 0.0) cycle = 1e-9;
 			rate = (double)w / cycle;            /* sustained pages/s */
 			dfrac = bm->n_frames
 			    ? (double)dirty_total / (double)bm->n_frames : 0.0;
 			if (dfrac > 1.0) dfrac = 1.0;
-			fit = rate * (1.0 - dfrac);          /* backlog discount */
-			xtc_dio_sched_report(tuner, fit);
+			/* Phenotype 0 (batch): maximise throughput.
+			 * Phenotype 1 (interval): maximise backlog quality
+			 * (keep clean frames available). */
+			f[0] = rate;
+			f[1] = 1.0 - dfrac;
+			xtc_dio_sched_report_multi(tuner, f, 2);
 			xtc_dio_sched_current(tuner, g);
 			batch = g[0];
 			iv = (int64_t)g[1] * 1000000;
