@@ -222,6 +222,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
 		  test_cpu \
 		  test_thread test_tls test_mutex test_fs \
+		  test_dio \
 		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_net test_net_udp test_net_frame \
 		  test_loop test_task test_waker test_timer test_io_integration \
 		  test_async \
@@ -635,6 +636,12 @@ test_fs: $(srcdir)/../test/m1/test_fs.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
 		-o $@ $(srcdir)/../test/m1/test_fs.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_dio: $(srcdir)/../test/m1/test_dio.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_dio.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_thread: $(srcdir)/../test/m1/test_thread.c \

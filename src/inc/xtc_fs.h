@@ -33,6 +33,12 @@
 #define XTC_FS_TRUNC   0x08u   /* truncate to zero length on open */
 #define XTC_FS_APPEND  0x10u   /* each write appends at end of file */
 #define XTC_FS_EXCL    0x20u   /* with CREATE: fail if the file exists */
+#define XTC_FS_DIRECT  0x40u   /* bypass the OS page cache (direct I/O):
+                                * O_DIRECT (Linux and BSD), F_NOCACHE (macOS),
+                                * directio() (illumos),
+                                * FILE_FLAG_NO_BUFFERING (Windows).
+                                * Buffer address, file offset and transfer
+                                * length must satisfy xtc_fs_dio_align(). */
 
 /* Metadata returned by xtc_fs_stat. */
 typedef struct xtc_fs_stat {
@@ -53,6 +59,25 @@ int xtc_fs_fsync(int fd);          /* data + metadata durable */
 int xtc_fs_fdatasync(int fd);      /* data durable (metadata best-effort) */
 int xtc_fs_ftruncate(int fd, int64_t len);
 int xtc_fs_fsize(int fd, int64_t *out_size);
+
+/* ---- direct I/O alignment ---- */
+/*
+ * Report the alignment a direct-I/O (XTC_FS_DIRECT) transfer on fd must
+ * satisfy: *mem = buffer address alignment, *off = file-offset
+ * alignment, *len = transfer-length granularity, each a power-of-two
+ * byte count.  Any out-param may be NULL.  The values describe what a
+ * direct op on fd requires whether or not fd is currently in direct
+ * mode, so callers can align proactively.  Returns XTC_OK.
+ */
+int xtc_fs_dio_align(int fd, size_t *mem, size_t *off, size_t *len);
+
+/*
+ * Allocate a buffer suitable for direct I/O on fd: address-aligned to
+ * the memory requirement and size rounded up to the length granularity.
+ * Free with xtc_fs_dio_free.  Returns XTC_OK or XTC_E_NOMEM.
+ */
+int  xtc_fs_dio_alloc(int fd, size_t size, void **out);
+void xtc_fs_dio_free(void *p);
 
 /* ---- namespace operations ---- */
 int xtc_fs_stat(const char *path, xtc_fs_stat_t *out);
