@@ -79,7 +79,10 @@ struct btnode_hdr {
 	uint32_t right_sibling; /* next leaf page id, 0 = none */
 	uint16_t count;         /* number of live slots */
 	uint8_t is_leaf;        /* 1 = leaf, 0 = inner */
-	uint8_t reserved;       /* pad; keep struct layout explicit */
+	uint8_t dead;           /* 1 = unlinked by a merge; a racing op that
+	                         * latched this page after the merge freed it
+	                         * must NOT act on it (its keys moved into the
+	                         * left sibling) -- it restarts the descent */
 	uint16_t space_used;    /* heap bytes in use (suffixes+vals+fences) */
 	uint16_t data_offset;   /* lowest occupied cell byte; heap grows down */
 	uint16_t prefix_len;    /* shared-prefix length (compressed away) */
@@ -212,6 +215,19 @@ void btnode_set_right_sibling(void *page, uint32_t id);
  * A node with a +infinity upper fence (the rightmost at its level)
  * always returns <0.  This is the Lehman-Yao B-link follow test. */
 int btnode_beyond_hi_fence(const void *page, const void *key, uint16_t klen);
+
+/* 1 if `key` is at or below the node's lower (exclusive) fence, so the
+ * key does not belong here -- a stale descent onto a merged-away node.
+ * The caller restarts from the root (move_right cannot recover it). */
+int btnode_below_lo_fence(const void *page, const void *key, uint16_t klen);
+
+/* Mark a node dead: it has been unlinked from the tree by a merge and
+ * its keys absorbed into its left sibling.  A concurrent operation
+ * that latched it before the unlink must check btnode_is_dead after
+ * acquiring the latch and restart its descent rather than act on the
+ * detached page. */
+void btnode_mark_dead(void *page);
+int  btnode_is_dead(const void *page);
 
 /* Copy the node's lower fence key into `out` (len 0 == -infinity).
  * Returns 0 on success, -1 if `cap` is too small. */

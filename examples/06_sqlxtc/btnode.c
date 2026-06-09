@@ -636,6 +636,38 @@ btnode_beyond_hi_fence(const void *page, const void *key, uint16_t klen)
 	return cmp_bytes(key, klen, hf, h->hi_fence_len) > 0 ? 1 : 0;
 }
 
+/* 1 if `key` is at or below this node's lower fence, meaning it does
+ * NOT belong here -- the lower fence is the exclusive lower bound, so
+ * this node owns (lo, hi].  A concurrent merge that absorbed this node
+ * into its LEFT sibling, then freed it, leaves a stale descent holding
+ * a page whose lo fence now excludes the key; the caller must restart
+ * the descent from the root.  move_right cannot recover this (the key
+ * moved left, not right).  A -infinity lower fence excludes nothing. */
+int
+btnode_below_lo_fence(const void *page, const void *key, uint16_t klen)
+{
+	const struct btnode_hdr *h = CHDR(page);
+	const uint8_t *lf;
+
+	if (h->lo_fence_off == 0 || h->lo_fence_len == 0)
+		return 0;        /* -infinity: key is never below it */
+	lf = (const uint8_t *)page + h->lo_fence_off;
+	return cmp_bytes(key, klen, lf, h->lo_fence_len) <= 0 ? 1 : 0;
+}
+
+/* Mark / test the merge-unlinked "dead" flag (see btnode.h). */
+void
+btnode_mark_dead(void *page)
+{
+	HDR(page)->dead = 1;
+}
+
+int
+btnode_is_dead(const void *page)
+{
+	return CHDR(page)->dead ? 1 : 0;
+}
+
 /* Copy this node's lower fence key into `out`.  Returns 0 with *len
  * set on success (0 == -infinity), -1 if the buffer is too small. */
 int

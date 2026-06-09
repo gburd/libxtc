@@ -810,3 +810,47 @@ end, though it is not yet the LIVE crash default:
   needs physiological logging of non-split row writes (so logical redo
   never descends torn structure); that, plus mid-log truncation to the
   recLSN horizon, is the remaining work (see M_SQLXTC_BDB.md S3/S4/S5).
+
+## Delete merge / page reclaim, and the concurrent-merge race
+
+Deleting keys reclaims space: when a leaf falls below a quarter full,
+a right-merge structure modification (bt_merge, under the per-tree SMO
+lock) pulls the right sibling into the left, drops the parent
+separator, cascades the underflow upward, collapses a one-child root,
+and returns the emptied page to the buffer-manager freelist.  Freed
+page ids pass through a one-epoch quarantine before reissue.
+
+Single-mutator merge is correct and proven (test_shrink_and_reclaim,
+test_collapse_to_root, test_no_bloat_churn, and a dedicated
+single-threaded interleaved-churn stress that builds, empties, and
+rebuilds a multi-level tree while validating that every surviving key
+stays reachable by a from-root DESCENT, not just by a scan).
+
+Concurrent merge is NOT yet correct and is DISABLED by default
+(bt_set_merge_enabled, default off).  With it off, concurrent deletes
+are fully correct -- every key is removed, the tree stays valid -- and
+pages simply stay underfull rather than being reclaimed.
+
+The race, as far as it has been localized: under a concurrent
+insert/delete storm with merge enabled, a churn key whose delete
+returned success can still survive, reachable by a scan (so it is in a
+live, linked leaf -- not corruption of the page itself).  The merge
+algorithm is single-threaded-correct, so the fault is purely an
+interleaving.  Two latch-discipline guards were added and help but do
+NOT close it: a node carries a `dead` flag that bt_merge sets while it
+still holds the unlinked right node's latch, and the latch-free
+descents (bt_insert_fast, bt_delete, descend_shared) check both that
+flag and the node's lower fence (btnode_below_lo_fence) after latching
+a leaf -- a key at or below the lower fence, or a dead node, means a
+concurrent merge moved the key's range LEFT (which move_right cannot
+follow), so the operation restarts from the root (bounded retries,
+then an SMO-locked authoritative pass).  These correctly catch a
+descent that LANDS on a merged-away leaf, but the surviving-key case
+shows a remaining interleaving they do not cover -- most likely in the
+internal-node merge cascade (a latch-free descent caching an internal
+child pointer across a parent merge) or an insert/merge interaction
+that leaves a duplicate in a sibling.  Closing it needs move-right +
+dead/fence validation at EVERY internal level of every latch-free
+descent, and is left as open work; the guards and the dead flag are
+kept because they are correct improvements to the descent paths
+regardless.
