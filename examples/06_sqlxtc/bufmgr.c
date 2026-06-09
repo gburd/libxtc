@@ -1521,13 +1521,14 @@ tr_proc(void *arg)
 	}
 	while (atomic_load_explicit(&bm->tr_running, memory_order_acquire)) {
 		uint32_t i;
-		int n = 0, w = 0;
+		int n = 0, w = 0, dirty_total = 0;
 		for (i = 0; i < bm->n_frames; i++) {
 			bm_frame_t *f = &bm->frames[i];
 			uint8_t st;
-			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
-				continue;
 			if (!atomic_load_explicit(&f->dirty, memory_order_acquire))
+				continue;
+			dirty_total++;          /* writeback backlog (all dirty) */
+			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
 				continue;
 			if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
 				continue;
@@ -1550,13 +1551,24 @@ tr_proc(void *arg)
 			}
 		}
 		(void)__os_clock_mono(&t1);
-		/* Adaptive pacing: pages/s of this pass is the fitness; the
-		 * tuner evolves {batch, interval} to maximise writeback
-		 * throughput and re-adapts when the workload shifts. */
+		/* Adaptive pacing fitness: SUSTAINED writeback rate (pages
+		 * per real second, counting the inter-pass sleep) DISCOUNTED
+		 * by the dirty backlog.  Per-pass throughput alone rewarded
+		 * large, infrequent batches that let dirty pages pile up and
+		 * stalled eviction; multiplying by (1 - dirty_frac) makes the
+		 * tuner favour pacing that keeps clean frames available while
+		 * still batching for efficiency. */
 		if (tuner != NULL && w > 0) {
 			int g[XTC_DIO_SCHED_MAX_GENES];
-			double secs = (t1 > t0) ? (double)(t1 - t0) / 1e9 : 1e-9;
-			xtc_dio_sched_report(tuner, (double)w / secs);
+			double cycle = (double)((t1 - t0) + iv) / 1e9;
+			double rate, dfrac, fit;
+			if (cycle <= 0.0) cycle = 1e-9;
+			rate = (double)w / cycle;            /* sustained pages/s */
+			dfrac = bm->n_frames
+			    ? (double)dirty_total / (double)bm->n_frames : 0.0;
+			if (dfrac > 1.0) dfrac = 1.0;
+			fit = rate * (1.0 - dfrac);          /* backlog discount */
+			xtc_dio_sched_report(tuner, fit);
 			xtc_dio_sched_current(tuner, g);
 			batch = g[0];
 			iv = (int64_t)g[1] * 1000000;
