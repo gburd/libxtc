@@ -200,17 +200,17 @@ instead.  Stasis's log manager is a simple timeout-batched group commit
 | Element | BDB | Stasis | Aether | sqlxtc |
 | --- | --- | --- | --- | --- |
 | Page LSN at fixed offset | yes | yes | -- | in code (S1) |
-| Physiological full-page redo (XL_PAGE) + gated apply | -- | -- | -- | in code (mechanism: xl_enc_page + bm_apply_page_image) |
+| Physiological full-page redo (XL_PAGE) + gated apply | -- | -- | -- | in code (mechanism + end-to-end test: xl_enc_page + bm_apply_page_image + emission on the live SMO path, test_inplace_redo) |
 | In-place recovery, clean case (trust clean base) | yes | yes | -- | in code (clean-restart fast path) |
 | Write-ahead enforce (flush log before dirty page) | yes | yes | -- | in code (S1) |
 | Log header type/txn/prev_lsn | gen'd | yes | -- | in code (S2) |
 | 3-pass recovery | yes | yes | -- | in code, reshaped (S3): redo-all + undo-losers |
 | CLRs + UndoNextLSN | skipped | yes | -- | **in code (S3), Stasis-style** |
-| Nested Top Action + dummy CLR (atomic SMO) | n/a | yes | -- | planned (S3 remainder) |
-| Physiological page/SMO logging | yes | yes | -- | planned (deferred from S2) |
+| Nested Top Action + dummy CLR (atomic SMO) | n/a | yes | -- | in code (S3 remainder): emitted on every B-tree split inside an NTA bracket (xstore_register_smo); proven by test_inplace_redo; not the live recovery default (see S3) |
+| Physiological page/SMO logging | yes | yes | -- | in code (split/root-growth pages logged as XL_PAGE; non-split row writes still logical -- S2 deferred remainder) |
 | STEAL/NO-FORCE | yes | yes | -- | in code (S5): payload spill + undo with CLRs |
-| Dirty-page table + true recLSN | yes | yes | -- | partial (dirty_seq proxy); S4 |
-| Fuzzy checkpoint + min-recLSN truncation | yes | yes | -- | planned (S4) |
+| Dirty-page table + true recLSN | yes | yes | -- | in code (per-page rec_lsn stamped on the clean->dirty edge; bm_min_rec_lsn is the true-recLSN horizon, tested in test_redo_page); the trickler orders oldest-recLSN-first |
+| Fuzzy checkpoint + min-recLSN truncation | yes | yes | -- | partial (S4): the recLSN horizon (bm_min_rec_lsn) is in code and tested; LIVE mid-log truncation to the horizon is deferred (it requires trusting the base in place -- coupled to the in-place recovery default, see S3/S4) |
 | Log-record codegen from .src | yes | no | -- | planned (deferred from S2) |
 | Group commit | yes | yes | -- | in code |
 | Flush pipelining (no ctx-switch) | -- | -- | yes | in code, via fibers (committer yields, loop runs peers) |
@@ -286,6 +286,14 @@ Staged so each step is independently testable and leaves the tree green:
   UPDATE undo image and CLR record type are defined and tested but unused
   until losers can persist (S5).
 
+  Update (this milestone): the SMO half of physiological logging landed.
+  XL_PAGE (a full-page after-image, redo-only, page-LSN at the front) is
+  emitted by the B-tree split/root-growth path -- one image per page the
+  structure modification writes -- so a torn SMO is repaired in place by
+  its images (S3).  What is still LOGICAL is the NON-split row write
+  (XL_UPDATE); making those physiological too is the remaining S2/S5
+  refinement.  The `.src` generator is still not adopted.
+
   **S3 -- Recovery driver: redo-all + undo losers with CLRs.  DONE
   (undo dormant under NO-STEAL; in-place torn-SMO repair deferred).**
   Replace `xstore_recover`'s rebuild-onto-fresh-tree with analysis (rebuild
@@ -318,14 +326,42 @@ Staged so each step is independently testable and leaves the tree green:
   of in-place recovery is wired: a clean shutdown flushes the base and
   marks its superblock clean + records the commit clock, and the next
   open trusts that base and skips replay (test_clean_restart proves it by
-  deleting the WAL).  A crash still rebuilds from the log.  REMAINING for
-  the crash case: emit XL_PAGE from the B-tree SMO path inside a
-  nested-top-action bracket and run a physiological redo pass so a torn
-  base is repaired in place rather than discarded -- this couples with
-  the STEAL write-ordering (log changes physiologically as applied,
-  commit last), so it is best done together with S5.
+  deleting the WAL).  A crash still rebuilds from the log.
 
-  **S4 -- Fuzzy checkpoint + min-recLSN truncation.**
+  Wired since (this milestone): the B-tree SMO path EMITS the
+  physiological images.  Every split (leaf, internal, and root growth)
+  now logs each page it writes as an XL_PAGE full-page after-image,
+  carrying the page's stamped LSN, inside a nested-top-action bracket
+  closed by a dummy CLR (Stasis TbeginNestedTopAction /
+  TendNestedTopAction); the engine installs the hook with
+  xstore_register_smo and recovery applies the images through
+  xstore_recover_inplace, which trusts a non-truncated base and calls
+  bm_apply_page_image (page-LSN gated) per XL_PAGE record while redoing
+  ordinary row writes logically.  test_inplace_redo proves this end to
+  end: it drives REAL splits through SQL with SMO logging on, then (a)
+  recovers in place over the current base with every row intact (the
+  XL_PAGE + logical redo composition is idempotent on the final state),
+  and (b) ZEROES the split pages on disk and recovers, watching the
+  XL_PAGE images repair each torn page in place (no rebuild) so every
+  committed row reappears and the scan stays ordered.
+
+  STILL DEFERRED -- the LIVE crash default is unchanged: sx_storage_open
+  still rebuilds onto a fresh page file (test_torn_smo), NOT
+  xstore_recover_inplace.  The reason is concrete and was confirmed by
+  experiment: logical XL_UPDATE redo cannot reliably navigate an
+  ARBITRARILY torn base.  When a NON-split row write's leaf was lost
+  (only its logical XL_UPDATE survives, no XL_PAGE), replaying bt_insert
+  over the partially-repaired torn structure can fail to insert the row
+  (a measured ~13% of rows went missing in a tiny-pool crash run).  A
+  fully trusted in-place restart from an arbitrary crash therefore needs
+  physiological logging of non-split row writes too -- so logical redo
+  never has to descend torn structure -- which is the S5 write-ordering
+  coupling (log physiologically as applied, commit last).  Until then
+  the XL_PAGE path is wired and proven on the cases page images cover
+  (torn structure modifications), and the logical rebuild remains the
+  safe, proven crash default.
+
+  **S4 -- Fuzzy checkpoint + min-recLSN truncation.  PARTIAL.**
   Checkpoint writes the dirty-page table + active-txn table + `ckp_lsn =
   min(oldest active txn LSN, oldest dirty-page recLSN)` and flushes the
   dirty set incrementally (the trickler already orders by dirty_seq -- make
@@ -334,6 +370,26 @@ Staged so each step is independently testable and leaves the tree green:
   checkpoint cost from database size.  Test: checkpoint cost is
   proportional to dirty pages, not live rows; log truncates to the recLSN
   horizon; recovery starts at ckp_lsn.
+
+  Wired: the true recLSN horizon.  Each page carries `rec_lsn`, stamped
+  with the LSN of the change that first dirtied it on the clean->dirty
+  edge; `bm_min_rec_lsn` returns the smallest recLSN among dirty pages --
+  the oldest change not yet on the data file, i.e. the log-truncation
+  horizon (0 when nothing is dirty).  test_redo_page proves it: nothing
+  dirty -> 0; two pages dirtied at LSN 10 and 20 -> 10; re-dirtying page 1
+  at LSN 30 keeps the horizon at 10 (its FIRST-dirty LSN); a full
+  checkpoint -> 0.  The trickler writes oldest-recLSN-first (dirty_seq
+  and rec_lsn are stamped on the same edge in the same order, so the
+  ordering is the true recLSN order).
+
+  STILL DEFERRED: the LIVE checkpoint still does the O(live-data) full
+  compaction (xstore_checkpoint_wal), not an O(dirty) fuzzy checkpoint
+  that truncates the log behind `ckp_lsn`.  Mid-log truncation to a
+  recLSN horizon is only sound when recovery trusts the base in place
+  from that horizon -- which is exactly the in-place crash default held
+  back in S3.  So S4's horizon mechanism is in code and tested, but its
+  payoff (cheap O(dirty) checkpoints + a log truncated to the horizon)
+  lands together with the in-place crash recovery default (S3/S5).
 
   **S5 -- STEAL for large transactions.  DONE (payload spill).**
   Allow the per-transaction write buffer to spill uncommitted versions into

@@ -1465,6 +1465,94 @@ xs_wal_emit_stage(uint64_t steal_txn, int64_t stage_id, const void *val, uint16_
 		(void)xs_wal_emit(rec, (size_t)n);
 }
 
+/*
+ * SMO physiological logging (ARIES nested top action).  A B-tree split
+ * or root growth calls these hooks (registered via xstore_register_smo)
+ * for each page it modifies; we log a full-page after-image (XL_PAGE,
+ * redo-only, page-LSN at the front) per page, then a dummy compensation
+ * record closing the nested top action.  On a crash mid-SMO, recovery
+ * replays the XL_PAGE images (page-LSN gated, idempotent) to repair the
+ * torn structure in place; the dummy CLR records that a completed SMO is
+ * redone to completion and never half-undone (Stasis NTA model,
+ * docs/M_SQLXTC_BDB.md sec 2.7).  No-op without a log.
+ */
+static uint64_t
+xs_smo_begin(void *user)
+{
+	(void)user;
+	if (g_xwal == NULL)
+		return 0;
+	/* The NTA token is the log's current durable high-water LSN: the
+	 * SMO's records land after it, so a dummy CLR's undo_next_lsn can
+	 * point here to skip the interior physical records on undo. */
+	return wal_durable_lsn(g_xwal);
+}
+
+static void
+xs_smo_page(void *user, bm_pid_t pid, const void *image,
+    uint32_t page_size, uint64_t lsn)
+{
+	uint8_t *rec;
+	xl_hdr_t h;
+	int n;
+	size_t cap;
+
+	(void)user;
+	if (g_xwal == NULL || image == NULL || page_size == 0 ||
+	    page_size > 0xFFFFu)
+		return;
+	cap = (size_t)XL_HDR_LEN + xl_page_size((uint16_t)page_size);
+	if ((rec = malloc(cap)) == NULL)
+		return;                 /* best-effort: a missed image means the
+		                         * torn page is repaired by rebuild instead */
+	h.type = XL_PAGE; h.txn_id = 0; h.prev_lsn = lsn;
+	if ((n = xl_enc_page(rec, cap, &h, (uint32_t)pid, image,
+	    (uint16_t)page_size)) > 0)
+		(void)xs_wal_emit(rec, (size_t)n);
+	free(rec);
+}
+
+static void
+xs_smo_end(void *user, uint64_t token)
+{
+	uint8_t clr[64];
+	xl_hdr_t h;
+	xl_body_t b;
+	int n;
+
+	(void)user;
+	if (g_xwal == NULL)
+		return;
+	/* Dummy CLR closing the nested top action: redo-only, undo_next_lsn
+	 * = the LSN before the SMO so undo of an enclosing loser skips the
+	 * interior physical (XL_PAGE) records.  txn_id 0 (the SMO belongs to
+	 * no single transaction). */
+	h.type = XL_CLR; h.txn_id = 0; h.prev_lsn = 0;
+	memset(&b, 0, sizeof b);
+	b.undo_next_lsn = token;
+	if ((n = xl_enc_clr(clr, sizeof clr, &h, &b)) > 0)
+		(void)xs_wal_emit(clr, (size_t)n);
+}
+
+/* Install the SMO physiological-logging hook on the B-tree layer.  The
+ * engine calls this once after attaching the WAL; the hook is global
+ * (the store is process-global), matching bt_set_close_hook.  Passing 0
+ * removes it (e.g. for a tree that should rebuild logically). */
+void
+xstore_register_smo(int enable)
+{
+	if (enable) {
+		bt_smo_hook_t h;
+		h.user = NULL;
+		h.begin = xs_smo_begin;
+		h.page = xs_smo_page;
+		h.end = xs_smo_end;
+		bt_set_smo_hook(&h);
+	} else {
+		bt_set_smo_hook(NULL);
+	}
+}
+
 /* STEAL: when buffered payloads exceed the high-water mark, write the
  * oldest ones to the on-disk staging area (and the log) and free them
  * from memory, bounding a large transaction's resident footprint during
@@ -2350,8 +2438,10 @@ struct rec_txn {
 };
 struct xs_recover {
 	bt_t    *bt;
+	bm_t    *bm;             /* non-NULL for in-place mode: apply XL_PAGE */
 	uint64_t max_ts;
 	uint64_t records;
+	uint64_t pages_redone;   /* XL_PAGE images applied (in-place mode) */
 	struct rec_txn *txn;     /* ACTIVE (uncommitted) transactions only */
 	int      n_txn, cap_txn;
 };
@@ -2492,8 +2582,27 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 					rec_txn_retire(r, &r->txn[i]);  /* winner: redo stays */
 					break;
 				}
+		} else if (h.type == XL_PAGE && r->bm != NULL) {
+			/*
+			 * Physiological redo (in-place mode only).  Write the
+			 * full-page after-image onto its page ONLY if the on-disk
+			 * page LSN is older (bm_apply_page_image is page-LSN gated,
+			 * hence idempotent).  This repairs a torn structure
+			 * modification on the trusted base in place.  In rebuild
+			 * mode (r->bm == NULL) XL_PAGE is skipped: its page ids
+			 * mean nothing on a freshly truncated page file.
+			 */
+			xl_hdr_t ph;
+			uint32_t pid = 0;
+			const void *image = NULL;
+			uint16_t image_len = 0;
+			if (xl_parse_page(base + off, (uint32_t)rl, &ph, &pid,
+			    &image, &image_len) == XTC_OK &&
+			    bm_apply_page_image(r->bm, pid, image, image_len) == 1)
+				r->pages_redone++;
 		}
-		/* XL_BEGIN / XL_ABORT / XL_CLR / XL_END: no redo action here. */
+		/* XL_BEGIN / XL_ABORT / XL_CLR / XL_END: no redo action here.
+		 * XL_PAGE in rebuild mode is also a no-op (skipped above). */
 		off += (uint32_t)rl;
 	}
 	r->records++;
@@ -2528,6 +2637,66 @@ xstore_recover(bt_t *bt, const char *wal_path)
 		free(r.txn[i].upd);
 	free(r.txn);
 
+	if (r.max_ts >= atomic_load_explicit(&g_xclock, memory_order_relaxed))
+		atomic_store_explicit(&g_xclock, r.max_ts + 1, memory_order_relaxed);
+	return rc;
+}
+
+/*
+ * In-place crash recovery (ARIES physiological redo).  Unlike
+ * xstore_recover -- which rebuilds the whole tree by replaying the
+ * LOGICAL update log onto a FRESH (truncated) page file -- this trusts
+ * a possibly-torn base in place: it applies every XL_PAGE full-page
+ * after-image the SMO path logged, page-LSN gated (bm_apply_page_image),
+ * so a structure modification that was only partly flushed before the
+ * crash is repaired by its images rather than discarded.  Ordinary row
+ * writes still redo logically (idempotent: version keys are immutable),
+ * and losers are undone exactly as in xstore_recover.
+ *
+ * Requires `bm` to be the same buffer manager `bt` runs on, opened
+ * reopen=1 (not truncated) with lsn_off >= 0.  `out_pages` (optional)
+ * receives the count of page images actually applied -- nonzero proves
+ * the physiological path repaired something rather than rebuilding.
+ *
+ * STATUS / SCOPE: this is the physiological-redo mechanism wired end to
+ * end (emit on the SMO path -> XL_PAGE -> gated apply here); it is
+ * exercised by test_inplace_redo.  It is NOT the live sx_storage_open
+ * crash default, which keeps the proven logical rebuild: a fully
+ * trusted in-place restart additionally needs physiological logging of
+ * NON-split row writes (so logical XL_UPDATE redo never re-splits the
+ * repaired base and diverges its page ids) -- the S5 coupling
+ * docs/M_SQLXTC_BDB.md names.  See that doc for what is wired vs.
+ * deferred.
+ */
+int
+xstore_recover_inplace(bt_t *bt, bm_t *bm, const char *wal_path,
+    uint64_t *out_pages)
+{
+	struct xs_recover r;
+	int rc, i;
+
+	memset(&r, 0, sizeof r);
+	r.bt = bt;
+	r.bm = bm;               /* in-place mode: apply XL_PAGE images */
+	rc = wal_scan(wal_path, xs_recover_cb, &r);
+
+	if (r.n_txn > 0) {
+		wal_t *w = NULL;
+		wal_opts_t wo;
+		memset(&wo, 0, sizeof wo);
+		wo.path = wal_path; wo.append = 1;
+		if (wal_open(&wo, &w) == XTC_OK) {
+			for (i = 0; i < r.n_txn; i++)
+				xs_undo_loser(bt, w, &r.txn[i]);
+			wal_close(w);
+		}
+	}
+	for (i = 0; i < r.n_txn; i++)
+		free(r.txn[i].upd);
+	free(r.txn);
+
+	if (out_pages != NULL)
+		*out_pages = r.pages_redone;
 	if (r.max_ts >= atomic_load_explicit(&g_xclock, memory_order_relaxed))
 		atomic_store_explicit(&g_xclock, r.max_ts + 1, memory_order_relaxed);
 	return rc;
