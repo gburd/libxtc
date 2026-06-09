@@ -10,12 +10,23 @@
 #include "xtc_int.h"
 #include "xtc_dio_sched.h"
 
+#include <math.h>
 #include <string.h>
 
 #define MUT_RATE_MAX   0.45     /* Moilanen's cap */
 #define MUT_RATE_MIN   0.02
 #define MUT_RATE_INIT  0.15
 #define MUT_RATE_STEP  1.5      /* multiplicative up/down adjustment */
+
+/* Converge-and-freeze: after FREEZE_AFTER generations with no
+ * meaningful (> IMPROVE_EPS) gain in the best fitness, stop exploring
+ * and pin the best gene-set -- no more mutation tax on a steady
+ * workload.  Re-arm (thaw + re-explore) when the live fitness drops by
+ * REGRESS_FRAC of its magnitude below the frozen level: a workload
+ * shift the tuner must re-adapt to. */
+#define FREEZE_AFTER   10
+#define IMPROVE_EPS    0.01
+#define REGRESS_FRAC   0.15
 
 struct xtc_dio_sched {
 	int       n_genes;
@@ -35,6 +46,10 @@ struct xtc_dio_sched {
 	int       have_prev;
 	double    mut_rate;
 	uint64_t  generation;
+
+	int       frozen;                        /* converged: exploration off */
+	double    frozen_fitness;                /* best fitness at freeze time */
+	int       stagnant;                      /* generations w/o improvement */
 
 	uint64_t  rng;
 };
@@ -125,6 +140,10 @@ void
 xtc_dio_sched_current(const xtc_dio_sched_t *g, int *out_genes)
 {
 	if (g == NULL || out_genes == NULL) return;
+	if (g->frozen) {
+		memcpy(out_genes, g->best, (size_t)g->n_genes * sizeof(int));
+		return;
+	}
 	memcpy(out_genes, g->genes[g->cur], (size_t)g->n_genes * sizeof(int));
 }
 
@@ -149,12 +168,31 @@ breed(struct xtc_dio_sched *g)
 		if (g->fitness[i] > g->fitness[elite]) elite = i;
 	gen_best = g->fitness[elite];
 
+	/* Did the all-time best meaningfully improve this generation? */
+	{
+		int improved = !g->have_best ||
+		    gen_best > g->best_fitness +
+		        fabs(g->best_fitness) * IMPROVE_EPS;
+		if (improved) g->stagnant = 0;
+		else          g->stagnant++;
+	}
+
 	/* Update the all-time best. */
 	if (!g->have_best || gen_best > g->best_fitness) {
 		memcpy(g->best, g->genes[elite],
 		    (size_t)g->n_genes * sizeof(int));
 		g->best_fitness = gen_best;
 		g->have_best = 1;
+	}
+
+	/* Converged: stop exploring (no mutation tax on a steady load). */
+	if (g->stagnant >= FREEZE_AFTER) {
+		g->frozen = 1;
+		g->frozen_fitness = g->best_fitness;
+		g->mut_rate = 0.0;
+		g->cur = 0;
+		g->evaluated = 0;
+		return;
 	}
 
 	/* Adaptive mutation: improving -> calmer, regressing -> explore. */
@@ -204,6 +242,31 @@ void
 xtc_dio_sched_report(xtc_dio_sched_t *g, double fitness)
 {
 	if (g == NULL) return;
+
+	if (g->frozen) {
+		/* The live config is the frozen best.  Watch for a regression
+		 * (workload shift); thaw and re-explore around best if seen. */
+		double thr = g->frozen_fitness -
+		    fabs(g->frozen_fitness) * REGRESS_FRAC;
+		if (fitness < thr) {
+			int i, j;
+			g->frozen = 0;
+			g->mut_rate = MUT_RATE_INIT;
+			g->stagnant = 0;
+			g->have_prev = 0;
+			g->best_fitness = fitness;   /* recalibrate to new regime */
+			memcpy(g->genes[0], g->best,
+			    (size_t)g->n_genes * sizeof(int));   /* keep as a seed */
+			for (i = 1; i < g->pop; i++)
+				for (j = 0; j < g->n_genes; j++)
+					g->genes[i][j] = rng_range(g, g->min[j],
+					    g->max[j]);
+			g->cur = 0;
+			g->evaluated = 0;
+		}
+		return;
+	}
+
 	g->fitness[g->cur] = fitness;
 	g->evaluated++;
 	if (g->evaluated >= g->pop)
