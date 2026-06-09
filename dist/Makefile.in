@@ -233,6 +233,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_proc_wait_fd \
 		  test_recv_correlate \
 		  test_sync \
+		  test_amutex_xloop \
 		  test_blocking test_alloc_audit \
 		  test_sup \
 		  test_reg \
@@ -822,6 +823,12 @@ test_sync: $(srcdir)/../test/m9/test_sync.c \
 		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
 		-o $@ $(srcdir)/../test/m9/test_sync.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_amutex_xloop: $(srcdir)/../test/m9/test_amutex_xloop.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
+		-o $@ $(srcdir)/../test/m9/test_amutex_xloop.c \
 		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_blocking: $(srcdir)/../test/m9/test_blocking.c \
