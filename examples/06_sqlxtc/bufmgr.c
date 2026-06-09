@@ -16,12 +16,19 @@
  *	the loop.
  */
 
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE   /* expose fcntl(F_NOCACHE) for direct I/O */
+#endif
+
 #include "bufmgr.h"
 
 #include "xtc_int.h"
 #include "xtc_aio.h"
 #include "xtc_stats.h"
 #include "xtc_sync.h"
+#include "xtc_dio_sched.h"
+#include "os_time.h"
+#include <fcntl.h>
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -86,6 +93,8 @@ typedef union { pthread_mutex_t m; char pad[128]; } bm_htlock_t;
 struct bm {
 	int               fd;
 	uint32_t          page_size;
+	int               direct;             /* XTC_FS_DIRECT on fd */
+	int               adaptive_writeback; /* GA-tuned trickler pacing */
 	uint32_t          n_frames;
 	uint32_t          cool_target; /* keep this many frames free+cool */
 	int               scan_resist; /* probation + COOL-first eviction */
@@ -422,7 +431,7 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
 		return 1;                       /* raced with another flush */
 	}
-	if (__os_calloc(1, bm->page_size, (void **)&snap) != XTC_OK) {
+	if (__os_aligned_alloc(4096, bm->page_size, (void **)&snap) != XTC_OK) {
 		xtc_arwlock_unlock(f->latch);
 		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
 		return 0;
@@ -436,7 +445,7 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 		uint64_t plsn;
 		memcpy(&plsn, (uint8_t *)snap + bm->lsn_off, sizeof plsn);
 		if (bm->wal_flush(bm->wal_ctx, plsn) != XTC_OK) {
-			__os_free(snap);
+			__os_aligned_free(snap);
 			xtc_arwlock_unlock(f->latch);
 			atomic_store_explicit(&f->io_busy, 0, memory_order_release);
 			return 0;
@@ -450,7 +459,7 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 	xtc_arwlock_unlock(f->latch);
 	dw_protect(bm, f->pid, snap);       /* full-page log, durable, BEFORE the final write */
 	(void)do_io(bm, snap, f->pid, 1);
-	__os_free(snap);
+	__os_aligned_free(snap);
 	atomic_store_explicit(&f->io_busy, 0, memory_order_release);
 	atomic_fetch_add_explicit(&bm->s_flushed, 1, memory_order_relaxed);
 	return 1;
@@ -742,6 +751,22 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	bm->fd = open(opts->path ? opts->path : "/tmp/sqlxtc-bm.tmp",
 	    opts->reopen ? (O_RDWR | O_CREAT) : (O_RDWR | O_CREAT | O_TRUNC), 0644);
 	if (bm->fd < 0) { __os_free(bm); return XTC_E_INVAL; }
+
+	bm->direct = opts->direct ? 1 : 0;
+	bm->adaptive_writeback = opts->adaptive_writeback ? 1 : 0;
+	if (bm->direct) {
+		/* Pages and offsets are page_size-aligned, so the main store
+		 * meets the direct-I/O contract; the double-write file stays
+		 * buffered (its records carry unaligned headers). */
+#if defined(__APPLE__)
+		(void)fcntl(bm->fd, F_NOCACHE, 1);
+#elif defined(O_DIRECT)
+		{
+			int fl = fcntl(bm->fd, F_GETFL);
+			if (fl >= 0) (void)fcntl(bm->fd, F_SETFL, fl | O_DIRECT);
+		}
+#endif
+	}
 
 	/* Double-write area: a sibling "<path>.dwb" file.  Off unless
 	 * requested (it costs an fsync per flush). */
@@ -1468,9 +1493,32 @@ tr_proc(void *arg)
 	bm_t *bm = ta->bm;
 	int64_t iv = ta->interval;
 	struct tr_cand *cand;
+	xtc_dio_sched_t *tuner = NULL;
+	int batch = TR_BATCH;
 	__os_free(ta);
 	if (__os_calloc(bm->n_frames, sizeof *cand, (void **)&cand) != XTC_OK)
 		return;
+	if (bm->adaptive_writeback) {
+		xtc_dio_sched_spec_t spec;
+		int cap = bm->n_frames < 256 ? (int)bm->n_frames : 256;
+		memset(&spec, 0, sizeof spec);
+		spec.n_genes = 2;
+		spec.min[0] = 1;
+		spec.max[0] = cap < 1 ? 1 : cap;
+		spec.init[0] = TR_BATCH > spec.max[0] ? spec.max[0] : TR_BATCH;
+		spec.min[1] = 1;                 /* interval, ms */
+		spec.max[1] = 50;
+		spec.init[1] = (int)(iv / 1000000);
+		if (spec.init[1] < 1)  spec.init[1] = 1;
+		if (spec.init[1] > 50) spec.init[1] = 50;
+		spec.population = 8;
+		if (xtc_dio_sched_create(&spec, &tuner) == XTC_OK) {
+			int g[XTC_DIO_SCHED_MAX_GENES];
+			xtc_dio_sched_current(tuner, g);
+			batch = g[0];
+			iv = (int64_t)g[1] * 1000000;
+		}
+	}
 	while (atomic_load_explicit(&bm->tr_running, memory_order_acquire)) {
 		uint32_t i;
 		int n = 0, w = 0;
@@ -1491,18 +1539,34 @@ tr_proc(void *arg)
 			cand[n].seq = atomic_load_explicit(&f->dirty_seq, memory_order_relaxed);
 			n++;
 		}
+		int64_t t0 = 0, t1 = 0;
 		qsort(cand, (size_t)n, sizeof *cand, tr_cmp);
-		for (i = 0; i < (uint32_t)n && w < TR_BATCH; i++) {
+		(void)__os_clock_mono(&t0);
+		for (i = 0; i < (uint32_t)n && w < batch; i++) {
 			if (flush_frame(bm, cand[i].f)) {
 				atomic_fetch_add_explicit(&bm->s_trickled, 1,
 				    memory_order_relaxed);
 				w++;
 			}
 		}
+		(void)__os_clock_mono(&t1);
+		/* Adaptive pacing: pages/s of this pass is the fitness; the
+		 * tuner evolves {batch, interval} to maximise writeback
+		 * throughput and re-adapts when the workload shifts. */
+		if (tuner != NULL && w > 0) {
+			int g[XTC_DIO_SCHED_MAX_GENES];
+			double secs = (t1 > t0) ? (double)(t1 - t0) / 1e9 : 1e-9;
+			xtc_dio_sched_report(tuner, (double)w / secs);
+			xtc_dio_sched_current(tuner, g);
+			batch = g[0];
+			iv = (int64_t)g[1] * 1000000;
+			if (iv <= 0) iv = 1000000;
+		}
 		if (xtc_proc_sleep(iv) != XTC_OK)
 			break;
 	}
 	__os_free(cand);
+	xtc_dio_sched_destroy(tuner);
 	atomic_store_explicit(&bm->tr_alive, 0, memory_order_release);
 }
 
