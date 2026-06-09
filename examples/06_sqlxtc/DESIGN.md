@@ -98,9 +98,9 @@ The server replies with a banner on connect, then for each request a
 stream of row objects terminated by a status object.  `quack.c` is a
 hand-rolled encoder/decoder -- no JSON library dependency -- because
 the protocol surface is small and the parser must be auditable for a
-network-facing server.  Bound parameters (int / text / null) are
-supported; float and blob params are future work (they need a number
-parser in the hand-rolled reader).
+network-facing server.  Bound parameters of every value type --
+integer, real (float), text, NULL, and blob (hex or base64 on the
+wire) -- are supported; the one gap is escaped param strings.
 
 The protocol is intentionally minimal: it demonstrates the
 per-connection proc pattern and the engine facade without the
