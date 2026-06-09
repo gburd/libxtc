@@ -9,7 +9,7 @@
 #include "xtc_int.h"
 #include "xtc_iosched.h"
 #include "xtc_aio.h"
-#include "xtc_gsched.h"
+#include "xtc_dio_sched.h"
 #include "os_time.h"
 
 #include <string.h>
@@ -30,7 +30,7 @@ struct xtc_iosched {
 	struct iow    *queue;        /* up to max_batch entries */
 	int            n;            /* queued */
 
-	xtc_gsched_t  *tuner;        /* NULL unless adaptive */
+	xtc_dio_sched_t  *tuner;        /* NULL unless adaptive */
 
 	uint64_t       writes;
 	uint64_t       bytes;
@@ -56,7 +56,7 @@ xtc_iosched_create(const xtc_iosched_opts_t *opts, xtc_iosched_t **out)
 	if (s->batch > s->max_batch) s->batch = s->max_batch;
 
 	if (s->adaptive) {
-		xtc_gsched_spec_t spec;
+		xtc_dio_sched_spec_t spec;
 		memset(&spec, 0, sizeof spec);
 		spec.n_genes = 1;
 		spec.min[0] = s->min_batch;
@@ -64,13 +64,13 @@ xtc_iosched_create(const xtc_iosched_opts_t *opts, xtc_iosched_t **out)
 		spec.init[0] = s->batch;
 		spec.population = 8;
 		spec.seed = opts->seed;
-		if ((rc = xtc_gsched_create(&spec, &s->tuner)) != XTC_OK) {
+		if ((rc = xtc_dio_sched_create(&spec, &s->tuner)) != XTC_OK) {
 			__os_free(s);
 			return rc;
 		}
 		{
-			int g[XTC_GSCHED_MAX_GENES];
-			xtc_gsched_current(s->tuner, g);
+			int g[XTC_DIO_SCHED_MAX_GENES];
+			xtc_dio_sched_current(s->tuner, g);
 			s->batch = g[0];
 		}
 	}
@@ -78,7 +78,7 @@ xtc_iosched_create(const xtc_iosched_opts_t *opts, xtc_iosched_t **out)
 	cap = s->max_batch;
 	if ((rc = __os_calloc((size_t)cap, sizeof s->queue[0],
 	    (void **)&s->queue)) != XTC_OK) {
-		xtc_gsched_destroy(s->tuner);
+		xtc_dio_sched_destroy(s->tuner);
 		__os_free(s);
 		return rc;
 	}
@@ -90,7 +90,7 @@ void
 xtc_iosched_destroy(xtc_iosched_t *s)
 {
 	if (s == NULL) return;
-	xtc_gsched_destroy(s->tuner);
+	xtc_dio_sched_destroy(s->tuner);
 	__os_free(s->queue);
 	__os_free(s);
 }
@@ -124,9 +124,9 @@ xtc_iosched_flush(xtc_iosched_t *s)
 		 * size; report throughput as fitness and adopt the tuner's
 		 * next candidate batch size. */
 		if (s->adaptive && s->tuner != NULL && rc == XTC_OK) {
-			int g[XTC_GSCHED_MAX_GENES];
-			xtc_gsched_report(s->tuner, mbps);
-			xtc_gsched_current(s->tuner, g);
+			int g[XTC_DIO_SCHED_MAX_GENES];
+			xtc_dio_sched_report(s->tuner, mbps);
+			xtc_dio_sched_current(s->tuner, g);
 			s->batch = g[0];
 			if (s->batch < s->min_batch) s->batch = s->min_batch;
 			if (s->batch > s->max_batch) s->batch = s->max_batch;
@@ -159,5 +159,5 @@ xtc_iosched_get_stats(const xtc_iosched_t *s, xtc_iosched_stats_t *out)
 	out->flushes = s->flushes;
 	out->cur_batch = s->batch;
 	out->last_mbps = s->last_mbps;
-	out->mutation_rate = s->tuner ? xtc_gsched_mutation_rate(s->tuner) : 0.0;
+	out->mutation_rate = s->tuner ? xtc_dio_sched_mutation_rate(s->tuner) : 0.0;
 }
