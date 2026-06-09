@@ -33,6 +33,8 @@ static bm_t       *g_bm;
 static int         g_n_pages;
 static int64_t     g_deadline_ns;
 static _Atomic long g_ops;
+static _Atomic long g_syncs;
+static int         g_sync_every;     /* fdatasync every N ops (0 = never) */
 
 static bm_swip_t  *g_root;
 static bm_pid_t   *g_pid;
@@ -66,13 +68,22 @@ worker_proc(void *arg)
 		int i;
 		for (i = 0; i < 256; i++) {     /* batch before re-checking time */
 			int idx;
+			long n;
 			rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
 			idx = (int)(rng % (uint64_t)g_n_pages);
 			if (bm_fix(g_bm, &g_root[idx], &f) != XTC_OK)
 				continue;
 			((uint64_t *)bm_page(f))[1] += 1;   /* mutate */
 			bm_unfix(g_bm, f, 1);               /* dirty */
-			atomic_fetch_add_explicit(&g_ops, 1, memory_order_relaxed);
+			n = atomic_fetch_add_explicit(&g_ops, 1,
+			    memory_order_relaxed) + 1;
+			/* Durability barrier: force data to the device so the
+			 * buffered mode cannot "lie" by deferring writeback. */
+			if (g_sync_every > 0 && (n % g_sync_every) == 0) {
+				(void)bm_sync(g_bm);
+				atomic_fetch_add_explicit(&g_syncs, 1,
+				    memory_order_relaxed);
+			}
 		}
 	}
 	bm_provider_stop(g_bm);
@@ -106,6 +117,7 @@ main(int argc, char **argv)
 	}
 
 	g_n_pages = argc > 5 ? atoi(argv[5]) : 65536;   /* working set */
+	g_sync_every = argc > 6 ? atoi(argv[6]) : 1000; /* fdatasync cadence */
 	g_root = calloc((size_t)g_n_pages, sizeof *g_root);
 	g_pid  = calloc((size_t)g_n_pages, sizeof *g_pid);
 	if (!g_root || !g_pid) { fprintf(stderr, "oom\n"); return 1; }
@@ -120,6 +132,7 @@ main(int argc, char **argv)
 	if (bm_create(&bo, &g_bm) != XTC_OK) { fprintf(stderr, "bm_create\n"); return 1; }
 
 	atomic_store(&g_ops, 0);
+	atomic_store(&g_syncs, 0);
 	g_deadline_ns = now_ns() + (int64_t)secs * 1000000000LL;
 	t0 = now_ns();
 
@@ -138,10 +151,11 @@ main(int argc, char **argv)
 	unlink(path);
 	free(g_root); free(g_pid);
 
-	printf("DIRECT=%d ADAPTIVE=%d secs=%.1f frames=%d pages=%d\n",
-	    direct, adaptive, elapsed, frames, g_n_pages);
-	printf("  ops=%ld  ops_per_sec=%.0f\n", ops,
-	    elapsed > 0 ? (double)ops / elapsed : 0.0);
+	printf("DIRECT=%d ADAPTIVE=%d secs=%.1f frames=%d pages=%d sync_every=%d\n",
+	    direct, adaptive, elapsed, frames, g_n_pages, g_sync_every);
+	printf("  ops=%ld  ops_per_sec=%.0f  fdatasyncs=%ld\n", ops,
+	    elapsed > 0 ? (double)ops / elapsed : 0.0,
+	    atomic_load(&g_syncs));
 	printf("  flushed=%llu trickled=%llu evicted=%llu loads=%llu\n",
 	    (unsigned long long)st.flushed, (unsigned long long)st.trickled,
 	    (unsigned long long)st.evicted, (unsigned long long)st.loads);
