@@ -163,7 +163,7 @@ clean:
 	rm -f test_btree
 	rm -f test_btree_loop
 	rm -f test_btree_mt
-	rm -f test_btree_delete_merge
+	rm -f test_btree_delete_merge test_savepoint test_isolation
 	rm -f test_vfs_loop test_vfs_loop.o
 	rm -rf $(AMALG_DIR)
 	rm -f sql_parse_gen.o sql_parse_drv.o
@@ -174,7 +174,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -333,6 +333,18 @@ test_xstore: test_xstore.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlit
 
 test-xstore: test_xstore
 	./test_xstore
+
+test_savepoint: test_savepoint.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_savepoint.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-savepoint: test_savepoint
+	./test_savepoint
+
+test_isolation: test_isolation.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_isolation.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-isolation: test_isolation
+	./test_isolation
 
 # ---- ARIES log-record codec unit test (pure, no I/O) ----
 test_xlog: test_xlog.c xlog.c
