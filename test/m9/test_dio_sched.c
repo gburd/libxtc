@@ -150,11 +150,47 @@ test_freeze(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Two phenotypes, two genes: each gene is optimized by its OWN fitness
+ * toward a different target.  Verifies independent per-phenotype
+ * evolution. */
+static MunitResult
+test_phenotype(const MunitParameter p[], void *d)
+{
+	xtc_dio_sched_spec_t spec;
+	xtc_dio_sched_t *g = NULL;
+	int genes[2], best[2], eval;
+	(void)p; (void)d;
+	memset(&spec, 0, sizeof spec);
+	spec.n_genes = 2;
+	spec.min[0] = 0; spec.max[0] = 100; spec.init[0] = 0;
+	spec.min[1] = 0; spec.max[1] = 100; spec.init[1] = 0;
+	spec.population = 16;
+	spec.seed = 0xABCDEF;
+	spec.n_phenos = 2;
+	spec.gene_pheno[0] = 0;   /* gene 0 -> phenotype 0 (target 30) */
+	spec.gene_pheno[1] = 1;   /* gene 1 -> phenotype 1 (target 80) */
+	munit_assert_int(xtc_dio_sched_create(&spec, &g), ==, XTC_OK);
+
+	for (eval = 0; eval < spec.population * 200; eval++) {
+		double f[2];
+		xtc_dio_sched_current(g, genes);
+		f[0] = -(double)((genes[0] - 30) * (genes[0] - 30));
+		f[1] = -(double)((genes[1] - 80) * (genes[1] - 80));
+		xtc_dio_sched_report_multi(g, f, 2);
+	}
+	xtc_dio_sched_best(g, best, NULL);
+	munit_assert_int(abs(best[0] - 30), <=, 4);   /* phenotype 0 converged */
+	munit_assert_int(abs(best[1] - 80), <=, 4);   /* phenotype 1 converged */
+	xtc_dio_sched_destroy(g);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
-	{ "/converge", test_converge, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-	{ "/bounds",   test_bounds,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-	{ "/validate", test_validate, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-	{ "/freeze",   test_freeze,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/converge",  test_converge,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/bounds",    test_bounds,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/validate",  test_validate,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/freeze",    test_freeze,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/phenotype", test_phenotype, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m9/dio_sched", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
