@@ -10,6 +10,10 @@
  *	async xtc_aio_* ops.
  */
 
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE   /* expose fcntl(F_NOCACHE) for direct I/O */
+#endif
+
 #include "xtc_int.h"
 #include "xtc_fs.h"
 
@@ -27,6 +31,9 @@
  * PUBLIC: int xtc_fs_fdatasync __P((int));
  * PUBLIC: int xtc_fs_ftruncate __P((int, int64_t));
  * PUBLIC: int xtc_fs_fsize __P((int, int64_t *));
+ * PUBLIC: int xtc_fs_dio_align __P((int, size_t *, size_t *, size_t *));
+ * PUBLIC: int xtc_fs_dio_alloc __P((int, size_t, void **));
+ * PUBLIC: void xtc_fs_dio_free __P((void *));
  * PUBLIC: int xtc_fs_stat __P((const char *, xtc_fs_stat_t *));
  * PUBLIC: int xtc_fs_exists __P((const char *));
  * PUBLIC: int xtc_fs_unlink __P((const char *));
@@ -265,6 +272,40 @@ xtc_fs_dir_close(xtc_fs_dir_t *d)
 	__os_free(d);
 }
 
+/* ---- direct I/O alignment (Windows) ----
+ * NB: FILE_FLAG_NO_BUFFERING requires CreateFile and does not compose
+ * with the CRT _open() fd path used above, so XTC_FS_DIRECT is not yet
+ * honored on Windows (the open is buffered).  These helpers exist for
+ * link parity and report the NTFS sector granularity. */
+/* PUBLIC: int __xtc_dio_is_direct __P((int)); */
+int __xtc_dio_is_direct(int fd) { (void)fd; return 0; }
+
+int
+xtc_fs_dio_align(int fd, size_t *mem, size_t *off, size_t *len)
+{
+	(void)fd;
+	if (mem) *mem = 4096;
+	if (off) *off = 4096;
+	if (len) *len = 4096;
+	return XTC_OK;
+}
+
+int
+xtc_fs_dio_alloc(int fd, size_t size, void **out)
+{
+	size_t rounded = (size + 4095) & ~(size_t)4095;
+	void *p = NULL;
+	int rc;
+	(void)fd;
+	if (out == NULL) return XTC_E_INVAL;
+	if (rounded == 0) rounded = 4096;
+	if ((rc = __os_aligned_alloc(4096, rounded, &p)) != XTC_OK) return rc;
+	*out = p;
+	return XTC_OK;
+}
+
+void xtc_fs_dio_free(void *p) { __os_aligned_free(p); }
+
 #else
 /* ========================== POSIX ================================= */
 
@@ -282,6 +323,11 @@ xtc_fs_dir_close(xtc_fs_dir_t *d)
 } while (0)
 
 struct xtc_fs_dir { DIR *dp; };
+
+#if defined(XTC_DIAGNOSTIC)
+void __xtc_dio_register(int fd);
+void __xtc_dio_unregister(int fd);
+#endif
 
 static int
 err_map(int e)
@@ -311,9 +357,25 @@ xtc_fs_open(const char *path, uint32_t flags, int *out_fd)
 	if (flags & XTC_FS_TRUNC)  oflags |= O_TRUNC;
 	if (flags & XTC_FS_APPEND) oflags |= O_APPEND;
 	if (flags & XTC_FS_EXCL)   oflags |= O_EXCL;
+#if defined(O_DIRECT)
+	if (flags & XTC_FS_DIRECT) oflags |= O_DIRECT;   /* Linux, *BSD, illumos */
+#endif
 	FS_RETRY(open(path, oflags, 0644), fd);    /* XTC_BLOCKING_OK: blocking fs helper */
 	if (fd < 0)
 		return err_map(errno);
+	if (flags & XTC_FS_DIRECT) {
+#if defined(__APPLE__)
+		/* Darwin has no O_DIRECT; F_NOCACHE bypasses the unified
+		 * buffer cache for this descriptor. */
+		(void)fcntl(fd, F_NOCACHE, 1);
+#elif !defined(O_DIRECT) && defined(DIRECTIO_ON)
+		/* illumos without O_DIRECT: directio() per fd. */
+		(void)directio(fd, DIRECTIO_ON);
+#endif
+#if defined(XTC_DIAGNOSTIC)
+		__xtc_dio_register(fd);
+#endif
+	}
 	*out_fd = fd;
 	return XTC_OK;
 }
@@ -322,6 +384,9 @@ int
 xtc_fs_close(int fd)
 {
 	int rc;
+#if defined(XTC_DIAGNOSTIC)
+	__xtc_dio_unregister(fd);
+#endif
 	FS_RETRY(close(fd), rc);                   /* XTC_BLOCKING_OK */
 	return rc == 0 ? XTC_OK : err_map(errno);
 }
@@ -528,6 +593,122 @@ xtc_fs_dir_close(xtc_fs_dir_t *d)
 	if (d == NULL) return;
 	if (d->dp != NULL) (void)closedir(d->dp);
 	__os_free(d);
+}
+
+/* ---- direct I/O alignment (POSIX) ---- */
+
+#if defined(XTC_DIAGNOSTIC)
+/* Diagnostic-only registry of fds opened XTC_FS_DIRECT, so the aio
+ * alignment assert works even where direct mode is not queryable from
+ * the kernel (Darwin F_NOCACHE).  Small, mutex-guarded, debug-build. */
+#include <pthread.h>
+#define DIO_REG_MAX 1024
+static int             g_dio_reg[DIO_REG_MAX];
+static int             g_dio_reg_n;
+static pthread_mutex_t g_dio_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void
+__xtc_dio_register(int fd)
+{
+	(void)pthread_mutex_lock(&g_dio_reg_lock);
+	if (g_dio_reg_n < DIO_REG_MAX)
+		g_dio_reg[g_dio_reg_n++] = fd;
+	(void)pthread_mutex_unlock(&g_dio_reg_lock);
+}
+
+void
+__xtc_dio_unregister(int fd)
+{
+	int i;
+	(void)pthread_mutex_lock(&g_dio_reg_lock);
+	for (i = 0; i < g_dio_reg_n; i++)
+		if (g_dio_reg[i] == fd) {
+			g_dio_reg[i] = g_dio_reg[--g_dio_reg_n];
+			break;
+		}
+	(void)pthread_mutex_unlock(&g_dio_reg_lock);
+}
+
+static int
+dio_registered(int fd)
+{
+	int i, hit = 0;
+	(void)pthread_mutex_lock(&g_dio_reg_lock);
+	for (i = 0; i < g_dio_reg_n; i++)
+		if (g_dio_reg[i] == fd) { hit = 1; break; }
+	(void)pthread_mutex_unlock(&g_dio_reg_lock);
+	return hit;
+}
+#endif /* XTC_DIAGNOSTIC */
+
+/*
+ * PUBLIC: int __xtc_dio_is_direct __P((int));
+ *
+ * O_DIRECT is queryable via F_GETFL on Linux and BSD; Darwin F_NOCACHE is
+ * not, so a DIAGNOSTIC build also consults the registry populated by
+ * xtc_fs_open(XTC_FS_DIRECT).
+ */
+int
+__xtc_dio_is_direct(int fd)
+{
+#if defined(XTC_DIAGNOSTIC)
+	if (dio_registered(fd)) return 1;
+#endif
+#if defined(O_DIRECT)
+	{
+		int fl = fcntl(fd, F_GETFL);
+		return (fl >= 0 && (fl & O_DIRECT)) ? 1 : 0;
+	}
+#else
+	(void)fd;
+	return 0;
+#endif
+}
+
+int
+xtc_fs_dio_align(int fd, size_t *mem, size_t *off, size_t *len)
+{
+	size_t a = 4096;   /* conservative; accepted by every common device */
+#if defined(__linux__) && defined(STATX_DIO_ALIGN)
+	struct statx stx;
+	if (statx(fd, "", AT_EMPTY_PATH, STATX_DIO_ALIGN, &stx) == 0 &&
+	    (stx.stx_mask & STATX_DIO_ALIGN) != 0 &&
+	    stx.stx_dio_offset_align != 0) {
+		size_t o = (size_t)stx.stx_dio_offset_align;
+		size_t m = (size_t)stx.stx_dio_mem_align;
+		if (mem) *mem = m ? m : o;
+		if (off) *off = o;
+		if (len) *len = o;
+		return XTC_OK;
+	}
+#else
+	(void)fd;
+#endif
+	if (mem) *mem = a;
+	if (off) *off = a;
+	if (len) *len = a;
+	return XTC_OK;
+}
+
+int
+xtc_fs_dio_alloc(int fd, size_t size, void **out)
+{
+	size_t mem = 4096, len = 4096, rounded;
+	void *p = NULL;
+	int rc;
+	if (out == NULL) return XTC_E_INVAL;
+	(void)xtc_fs_dio_align(fd, &mem, NULL, &len);
+	rounded = (size + len - 1) & ~(len - 1);
+	if (rounded == 0) rounded = len;
+	if ((rc = __os_aligned_alloc(mem, rounded, &p)) != XTC_OK) return rc;
+	*out = p;
+	return XTC_OK;
+}
+
+void
+xtc_fs_dio_free(void *p)
+{
+	__os_aligned_free(p);
 }
 
 #endif /* _WIN32 vs POSIX */

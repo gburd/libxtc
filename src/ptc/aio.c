@@ -19,12 +19,19 @@
 #include "xtc_int.h"
 #include "xtc_aio.h"
 #include "xtc_io.h"
+#include "xtc_fs.h"
 #include "xtc_blocking.h"
 #include "loop_int.h"
 #include "coro_int.h"
 
 #include <errno.h>
 #include <string.h>
+#if defined(XTC_DIAGNOSTIC)
+#  include <stdio.h>
+#  include <stdlib.h>
+#  include <stdint.h>
+extern int __xtc_dio_is_direct(int fd);
+#endif
 #if defined(_WIN32)
 #  include <stdio.h>       /* SEEK_SET */
 #  include <io.h>          /* _read/_write/_lseeki64/_commit */
@@ -92,6 +99,28 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 	xtc_loop_t  *loop = __xtc_current_loop;
 	xtc_aio_t    a;
 	int          rc;
+
+#if defined(XTC_DIAGNOSTIC)
+	/* Direct I/O requires the buffer address, file offset and transfer
+	 * length to meet the device's alignment.  In a DIAGNOSTIC build,
+	 * abort loudly on a violation rather than letting the kernel return
+	 * a confusing EINVAL at runtime. */
+	if ((op == XTC_AIO_PREAD || op == XTC_AIO_PWRITE) &&
+	    __xtc_dio_is_direct(fd)) {
+		size_t ma = 4096, oa = 4096, la = 4096;
+		(void)xtc_fs_dio_align(fd, &ma, &oa, &la);
+		if ((ma && ((uintptr_t)buf & (ma - 1))) ||
+		    (oa && ((uint64_t)off & (oa - 1))) ||
+		    (la && ((uint64_t)len & (la - 1)))) {
+			fprintf(stderr,
+			    "XTC DIAGNOSTIC: unaligned direct I/O on fd %d: "
+			    "buf=%p off=%lld len=%u "
+			    "(require mem%%%zu off%%%zu len%%%zu)\n",
+			    fd, buf, (long long)off, (unsigned)len, ma, oa, la);
+			abort();
+		}
+	}
+#endif
 
 	/* Off a loop fiber: there is nothing to park, so run it inline
 	 * (the blocking-pool path, which itself runs inline with no loop). */
