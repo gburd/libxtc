@@ -95,6 +95,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/alloc_audit.c \
 	$(srcdir)/../src/ptc/mctx.c \
 	$(srcdir)/../src/ptc/rcu.c \
+	$(srcdir)/../src/ptc/gsched.c \
 	$(srcdir)/../src/ptc/dump.c \
 	$(srcdir)/../src/ptc/aio.c \
 	$(srcdir)/../src/orc/sup.c \
@@ -157,6 +158,7 @@ LIB_OBJS	= \
 	alloc_audit.o \
 	mctx.o \
 	rcu.o \
+	gsched.o \
 	dump.o \
 	aio.o \
 	sup.o \
@@ -236,6 +238,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_recv_correlate \
 		  test_sync \
 		  test_amutex_xloop \
+		  test_gsched \
 		  test_blocking test_alloc_audit \
 		  test_sup \
 		  test_reg \
@@ -466,6 +469,9 @@ mctx.o: $(srcdir)/../src/ptc/mctx.c xtc_config.h
 
 rcu.o: $(srcdir)/../src/ptc/rcu.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/rcu.c
+
+gsched.o: $(srcdir)/../src/ptc/gsched.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/gsched.c
 
 sup.o: $(srcdir)/../src/orc/sup.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/sup.c
@@ -844,6 +850,12 @@ test_amutex_xloop: $(srcdir)/../test/m9/test_amutex_xloop.c \
 		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
 		-o $@ $(srcdir)/../test/m9/test_amutex_xloop.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_gsched: $(srcdir)/../test/m9/test_gsched.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
+		-o $@ $(srcdir)/../test/m9/test_gsched.c \
 		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_blocking: $(srcdir)/../test/m9/test_blocking.c \
