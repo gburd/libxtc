@@ -70,7 +70,13 @@ int  bt_lookup(bt_t *bt, const void *key, uint16_t klen,
                void *buf, uint16_t cap, uint16_t *vlen);
 
 /* Remove key.  Returns XTC_OK if removed, XTC_E_NOTFOUND if absent.
- * (Leaves may underflow without merging in this version.) */
+ * When the owning leaf falls below the merge threshold the delete
+ * triggers a structure-modification pass that merges the leaf's right
+ * sibling into it (cascading up and shrinking the tree height when an
+ * internal level collapses) and returns the emptied pages to the
+ * buffer-manager freelist, so a delete-heavy workload reclaims space
+ * instead of bloating forever.  The non-merging common case stays on
+ * the latch-free, leaf-exclusive fast path. */
 int  bt_delete(bt_t *bt, const void *key, uint16_t klen);
 
 /* Forward range cursor.  start == NULL positions at the first key;
@@ -89,11 +95,19 @@ typedef struct bt_stats {
 	uint64_t inserts;
 	uint64_t lookups;
 	uint64_t splits;
+	uint64_t merges;        /* node merges (right sibling pulled into left) */
+	uint64_t reclaimed;     /* pages returned to the buffer-manager freelist */
 	uint64_t height;        /* number of levels (1 == root leaf) */
 	uint64_t descents;      /* full root->leaf cursor descents */
 	uint64_t resumes;       /* O(1) parked-cursor resumes (no descent) */
 } bt_stats_t;
 void bt_get_stats(bt_t *bt, bt_stats_t *out);
+
+/* Enable (on != 0) or disable merge/reclaim on delete underflow.
+ * Disabled by default; safe to enable only for single-threaded /
+ * exclusive deletes (see btree.c).  Deletes are correct either way;
+ * this only controls whether emptied pages are reclaimed. */
+void bt_set_merge_enabled(bt_t *bt, int on);
 
 /*
  * Latch-releasing, position-revalidating cursor.  A caller that must
@@ -102,10 +116,15 @@ void bt_get_stats(bt_t *bt, bt_stats_t *out);
  * leaf latch and pin while remembering the leaf and the last key
  * returned -- and later resumes it.  Resume re-fixes the SAME leaf and
  * continues from just past the last key, an O(1) amortized scan step
- * instead of an O(log n) re-descent.  Correct across concurrent splits:
- * page ids are never reused and the tree never merges, so the parked
- * leaf is always valid and the B-link right-sibling chain reaches any
- * keys that moved right after the park.
+ * instead of an O(log n) re-descent.  Correct across concurrent splits
+ * (page ids are stable for a live leaf and the B-link right-sibling
+ * chain reaches any keys that moved right after the park) and across
+ * concurrent merges: resume re-fixes the parked leaf and checks it
+ * still covers the resume key (it is a leaf whose fence range brackets
+ * the last key returned).  A merge that reclaimed the parked page --
+ * so the re-fixed page fails that check -- falls back to a fresh
+ * root-to-leaf descent from the remembered key, so a reclaimed-and-
+ * reused page id can never feed the scan stale rows.
  */
 int  bt_cursor_park(bt_cursor_t *c);
 int  bt_cursor_resume(bt_cursor_t *c);
