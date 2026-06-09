@@ -169,6 +169,34 @@ int btnode_remove(void *page, int slot);
 int btnode_split(void *page, void *right_page, void *sep_key_out,
     uint16_t *sep_len_out);
 
+/*
+ * Merge `right_page` into `page` (the inverse of btnode_split).  The
+ * two nodes must be adjacent siblings of the same leaf-ness: `page`'s
+ * upper fence equals `right_page`'s lower fence (the separator they
+ * share).  Rebuilds `page` with fences [page's lower fence, right's
+ * upper fence], appending all of right's slots after page's, and makes
+ * `page` inherit right's right_sibling at the node level (the caller
+ * still rewires page ids).  Recomputes the merged prefix and re-stores
+ * every cell under it.  Returns 0 on success, -1 if the combined cells
+ * do not fit in one page (the caller must skip this merge).  Reads
+ * both pages fully before writing `page`, so it is safe in place.
+ */
+int btnode_merge(void *page, const void *right_page);
+
+/*
+ * Would `page` and `right_page` fit in a single page after a merge?
+ * A cheap, conservative pre-check (sums both nodes' heap usage plus
+ * slot arrays against the page capacity) the caller uses to decide
+ * whether to attempt btnode_merge under the structure-modification
+ * lock.  Returns 1 if they fit, 0 otherwise.
+ */
+int btnode_merge_fits(const void *page, const void *right_page);
+
+/* Heap bytes currently in use (key suffixes, values, and fence keys).
+ * A node "underflows" when this drops well below the page capacity;
+ * the B-tree uses it to decide when to attempt a merge. */
+uint16_t btnode_used_bytes(const void *page);
+
 /* Accessors. */
 uint16_t btnode_count(const void *page);
 uint16_t btnode_free_space(const void *page); /* contiguous free bytes */
@@ -188,6 +216,10 @@ int btnode_beyond_hi_fence(const void *page, const void *key, uint16_t klen);
 /* Copy the node's lower fence key into `out` (len 0 == -infinity).
  * Returns 0 on success, -1 if `cap` is too small. */
 int btnode_lo_fence(const void *page, void *out, uint16_t cap, uint16_t *len);
+
+/* Copy the node's upper fence key into `out` (len 0 == +infinity).
+ * Returns 0 on success, -1 if `cap` is too small. */
+int btnode_hi_fence(const void *page, void *out, uint16_t cap, uint16_t *len);
 
 #ifdef __cplusplus
 }

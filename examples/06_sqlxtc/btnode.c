@@ -503,6 +503,92 @@ btnode_split(void *page, void *right_page, void *sep_key_out,
 }
 
 uint16_t
+btnode_used_bytes(const void *page)
+{
+	return CHDR(page)->space_used;
+}
+
+int
+btnode_merge_fits(const void *page, const void *right_page)
+{
+	const struct btnode_hdr *lh = CHDR(page);
+	const struct btnode_hdr *rh = CHDR(right_page);
+	uint32_t ps = lh->page_size;
+	uint32_t cap, slots, cells;
+
+	/*
+	 * After a merge the lower fence is the left's and the upper fence
+	 * is the right's, so the prefix can only get SHORTER (a wider
+	 * span shares fewer leading bytes), which only expands the stored
+	 * suffixes.  Bound the worst case conservatively: assume the
+	 * merged prefix is empty, so every key contributes its FULL bytes
+	 * (current suffix + the node's own prefix).  space_used already
+	 * counts the stored fence keys; the merged node keeps only two
+	 * fences (left.lo, right.hi), so drop one fence per side as slack
+	 * is unnecessary -- the bound is intentionally pessimistic.
+	 */
+	cells = (uint32_t)lh->space_used
+	    + (uint32_t)lh->count * (uint32_t)lh->prefix_len
+	    + (uint32_t)rh->space_used
+	    + (uint32_t)rh->count * (uint32_t)rh->prefix_len;
+	slots = ((uint32_t)lh->count + (uint32_t)rh->count)
+	    * (uint32_t)sizeof(struct btnode_slot);
+	cap = ps - (uint32_t)sizeof(struct btnode_hdr);
+	return (slots + cells) <= cap ? 1 : 0;
+}
+
+int
+btnode_merge(void *page, const void *right_page)
+{
+	struct btnode_hdr *lh = HDR(page);
+	const struct btnode_hdr *rh = CHDR(right_page);
+	const uint8_t *lp = page;
+	uint32_t ps = lh->page_size;
+	const uint8_t *lo, *hi;
+	uint16_t lo_len, hi_len;
+	uint16_t i, j;
+
+	if (rh->page_size != ps || lh->is_leaf != rh->is_leaf)
+		return -1;
+
+	/* Merged span: left's lower fence .. right's upper fence. */
+	lo = lh->lo_fence_len ? lp + lh->lo_fence_off : NULL;
+	lo_len = lh->lo_fence_len;
+	hi = rh->hi_fence_len ? (const uint8_t *)right_page + rh->hi_fence_off
+	    : NULL;
+	hi_len = rh->hi_fence_len;
+
+	/*
+	 * Build the merged node in scratch (so reads from `page` and
+	 * `right_page` all precede the single write-back), then commit it
+	 * over `page`.  left's slots first, then right's, preserving order.
+	 */
+	{
+		uint8_t scratch[ps];
+		struct btnode_hdr *th = HDR(scratch);
+		uint8_t keybuf[ps];
+
+		btnode_init(scratch, ps, lh->is_leaf);
+		btnode_set_fences(scratch, lo, lo_len, hi, hi_len);
+		j = 0;
+		for (i = 0; i < lh->count; i++) {
+			if (copy_slot(page, i, scratch, j, keybuf) != 0)
+				return -1;
+			j++;
+		}
+		for (i = 0; i < rh->count; i++) {
+			if (copy_slot(right_page, i, scratch, j, keybuf) != 0)
+				return -1;
+			j++;
+		}
+		th->count = j;
+		th->right_sibling = rh->right_sibling;  /* inherit right's link */
+		memcpy(page, scratch, ps);
+	}
+	return 0;
+}
+
+uint16_t
 btnode_count(const void *page)
 {
 	return CHDR(page)->count;
@@ -567,5 +653,25 @@ btnode_lo_fence(const void *page, void *out, uint16_t cap, uint16_t *len)
 	memcpy(out, (const uint8_t *)page + h->lo_fence_off, h->lo_fence_len);
 	if (len != NULL)
 		*len = h->lo_fence_len;
+	return 0;
+}
+
+/* Copy this node's upper fence key into `out`.  Returns 0 with *len
+ * set on success (0 == +infinity), -1 if the buffer is too small. */
+int
+btnode_hi_fence(const void *page, void *out, uint16_t cap, uint16_t *len)
+{
+	const struct btnode_hdr *h = CHDR(page);
+
+	if (h->hi_fence_off == 0 || h->hi_fence_len == 0) {
+		if (len != NULL)
+			*len = 0;
+		return 0;
+	}
+	if (h->hi_fence_len > cap)
+		return -1;
+	memcpy(out, (const uint8_t *)page + h->hi_fence_off, h->hi_fence_len);
+	if (len != NULL)
+		*len = h->hi_fence_len;
 	return 0;
 }
