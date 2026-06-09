@@ -16,6 +16,7 @@
 
 #include "xtc_proc.h"
 #include "xtc_io.h"
+#include "xtc_net.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -248,6 +249,57 @@ xtc_osproc_destroy(xtc_osproc_t *p)
 	__os_free(p);
 }
 
+int
+xtc_osproc_isolated_spawn(const char *name, int (*fn)(int, void *),
+                          void *arg, xtc_osproc_t **out)
+{
+	xtc_osproc_opts_t o;
+	memset(&o, 0, sizeof o);
+	o.name = name;
+	o.fn = fn;
+	o.arg = arg;
+	o.ctrl_socket = 1;
+	return xtc_osproc_spawn(&o, out);
+}
+
+int
+xtc_osproc_call(xtc_osproc_t *p, const void *req, size_t req_len,
+                void **reply, size_t *reply_len, size_t max_reply,
+                int64_t timeout_ns)
+{
+	int fd, rc;
+	if (p == NULL) return XTC_E_INVAL;
+	fd = xtc_osproc_ctrl_fd(p);
+	if (fd < 0) return XTC_E_INVAL;
+	if ((rc = xtc_net_send_frame(fd, req, req_len)) != XTC_OK)
+		return rc;
+	return xtc_net_recv_frame(fd, reply, reply_len, max_reply, timeout_ns);
+}
+
+int
+xtc_osproc_serve(int ctrl_fd, xtc_osproc_handler_fn handler, void *arg)
+{
+	if (ctrl_fd < 0 || handler == NULL) return XTC_E_INVAL;
+	for (;;) {
+		void  *req = NULL, *reply = NULL;
+		size_t req_len = 0, reply_len = 0;
+		int    rc, hr;
+		rc = xtc_net_recv_frame(ctrl_fd, &req, &req_len, 0, -1);
+		if (rc != XTC_OK)
+			return XTC_OK;   /* peer closed: clean stop */
+		hr = handler(req, req_len, &reply, &reply_len, arg);
+		__os_free(req);
+		if (hr != XTC_OK) {
+			free(reply);
+			return hr;
+		}
+		rc = xtc_net_send_frame(ctrl_fd, reply, reply_len);
+		free(reply);
+		if (rc != XTC_OK)
+			return rc;
+	}
+}
+
 #else  /* _WIN32 -- fork/exec + pidfd have no Windows equivalent yet */
 
 int  xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out)
@@ -258,5 +310,12 @@ int  xtc_osproc_signal(const xtc_osproc_t *p, int sig) { (void)p; (void)sig; ret
 int  xtc_osproc_try_wait(xtc_osproc_t *p, int *status) { (void)p; (void)status; return XTC_E_NOSYS; }
 int  xtc_osproc_wait(xtc_osproc_t *p, int *status, int64_t t) { (void)p; (void)status; (void)t; return XTC_E_NOSYS; }
 void xtc_osproc_destroy(xtc_osproc_t *p) { (void)p; }
+
+int xtc_osproc_isolated_spawn(const char *n, int (*f)(int, void *), void *a, xtc_osproc_t **o)
+{ (void)n; (void)f; (void)a; (void)o; return XTC_E_NOSYS; }
+int xtc_osproc_call(xtc_osproc_t *p, const void *r, size_t rl, void **rp, size_t *rpl, size_t m, int64_t t)
+{ (void)p; (void)r; (void)rl; (void)rp; (void)rpl; (void)m; (void)t; return XTC_E_NOSYS; }
+int xtc_osproc_serve(int fd, xtc_osproc_handler_fn h, void *a)
+{ (void)fd; (void)h; (void)a; return XTC_E_NOSYS; }
 
 #endif /* _WIN32 */
