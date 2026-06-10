@@ -108,6 +108,8 @@ xtc_pkey_protect(void *addr, size_t len, int key)
 {
 	if (addr == NULL)
 		return XTC_E_INVAL;
+	if (!xtc_pkey_supported())
+		return XTC_E_NOSYS;
 	if (pkey_mprotect(addr, len, PROT_READ | PROT_WRITE, key) != 0)
 		return XTC_E_INTERNAL;
 	return XTC_OK;
@@ -117,6 +119,13 @@ int
 xtc_pkey_set_access(int key, int allow_read, int allow_write)
 {
 	unsigned rights = 0;
+	/* Gate on the probe: pkey_set executes WRPKRU directly in
+	 * userspace, which faults on a host where PKU is not truly usable
+	 * (CPUID may claim OSPKE while WRPKRU traps).  Returning NOSYS here
+	 * keeps callers -- and the unsupported-contract test -- from
+	 * issuing WRPKRU on such a host. */
+	if (!xtc_pkey_supported())
+		return XTC_E_NOSYS;
 	if (!allow_read)
 		rights |= PKEY_DISABLE_ACCESS;
 	else if (!allow_write)
@@ -129,6 +138,8 @@ xtc_pkey_set_access(int key, int allow_read, int allow_write)
 int
 xtc_pkey_free(int key)
 {
+	if (!xtc_pkey_supported())
+		return XTC_E_NOSYS;
 	return pkey_free(key) == 0 ? XTC_OK : XTC_E_INTERNAL;
 }
 
