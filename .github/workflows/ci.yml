@@ -146,6 +146,58 @@ jobs:
           make XTC_BUILD=../../build_ci sqlxtc-server
           bash ../../test/sqlxtc/test_sqlxtc_mt.sh
 
+  tls-backends:
+    # Build the library against each TLS backend and run the m18 TLS
+    # suite, so every backend is exercised on every push -- not just
+    # the --with-tls=auto (OpenSSL) default the other jobs use.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [openssl, mbedtls, gnutls, wolfssl, boringssl]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install base toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf automake pkg-config \
+            liburing-dev gawk
+      - name: Install backend ${{ matrix.backend }}
+        run: |
+          case "${{ matrix.backend }}" in
+            openssl)   sudo apt-get install -y libssl-dev ;;
+            mbedtls)   sudo apt-get install -y libmbedtls-dev ;;
+            gnutls)    sudo apt-get install -y libgnutls28-dev ;;
+            wolfssl)   sudo apt-get install -y libwolfssl-dev ;;
+            boringssl)
+              # No distro package; build the static libs once.  CMake +
+              # a Go toolchain are on the runner image.
+              sudo apt-get install -y cmake golang-go
+              git clone --depth 1 https://boringssl.googlesource.com/boringssl /tmp/bssl
+              cmake -S /tmp/bssl -B /tmp/bssl/build -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
+              cmake --build /tmp/bssl/build -j"$(nproc)" --target ssl crypto >/dev/null
+              ;;
+          esac
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure --with-tls=${{ matrix.backend }}
+        run: |
+          mkdir -p build_tls && cd build_tls
+          if [ "${{ matrix.backend }}" = boringssl ]; then
+            CPPFLAGS="-I/tmp/bssl/include" \
+            LDFLAGS="-L/tmp/bssl/build/ssl -L/tmp/bssl/build/crypto" \
+            LIBS="-lstdc++" \
+              ../dist/configure --with-tls=boringssl
+          else
+            ../dist/configure --with-tls=${{ matrix.backend }}
+          fi
+      - name: Build + run the m18 TLS suite
+        run: |
+          make -C build_tls -j"$(nproc)" test_tls_server test_tls_client
+          ( cd build_tls && ./test_tls_server && ./test_tls_client )
+
   macos:
     # macOS runtime coverage: kqueue I/O backend + ucontext coroutine
     # substrate (the x86-64 fcontext .S files self-gate to empty on

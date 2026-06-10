@@ -44,10 +44,47 @@
 
 #include <pthread.h>
 #include <string.h>
+#include <limits.h>
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/tls1.h>
+
+/* -------------------------------------------------------------------------
+ * Portable read/write shim.
+ *
+ * OpenSSL 1.1.1+ and recent LibreSSL provide SSL_read_ex / SSL_write_ex,
+ * which report the byte count through a size_t out-parameter and return
+ * 1 on success.  BoringSSL (OPENSSL_IS_BORINGSSL) omits the _ex forms,
+ * so there we wrap the classic SSL_read / SSL_write (int-returning,
+ * positive == bytes transferred) behind the same 1-on-success, size_t
+ * out-parameter contract.  Callers below are flavor-agnostic.
+ * ----------------------------------------------------------------------- */
+#if defined(OPENSSL_IS_BORINGSSL)
+static int
+xtc_ssl_read_ex(SSL *ssl, void *buf, size_t len, size_t *readbytes)
+{
+	int n;
+	if (len > INT_MAX)
+		len = INT_MAX;
+	n = SSL_read(ssl, buf, (int)len);
+	if (n > 0) { *readbytes = (size_t)n; return 1; }
+	return n;   /* <= 0: caller resolves via SSL_get_error */
+}
+static int
+xtc_ssl_write_ex(SSL *ssl, const void *buf, size_t len, size_t *written)
+{
+	int n;
+	if (len > INT_MAX)
+		len = INT_MAX;
+	n = SSL_write(ssl, buf, (int)len);
+	if (n > 0) { *written = (size_t)n; return 1; }
+	return n;
+}
+#else
+#define xtc_ssl_read_ex  SSL_read_ex
+#define xtc_ssl_write_ex SSL_write_ex
+#endif
 
 /* -------------------------------------------------------------------------
  * Internal struct definitions.
@@ -406,7 +443,7 @@ xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 	tls->wants_read  = 0;
 	tls->wants_write = 0;
 
-	rc = SSL_read_ex(tls->ssl, buf, buflen, &nread);
+	rc = xtc_ssl_read_ex(tls->ssl, buf, buflen, &nread);
 	if (rc == 1) {
 		*out_n = nread;
 		return XTC_OK;
@@ -442,7 +479,7 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
 	tls->wants_read  = 0;
 	tls->wants_write = 0;
 
-	rc = SSL_write_ex(tls->ssl, buf, buflen, &nwritten);
+	rc = xtc_ssl_write_ex(tls->ssl, buf, buflen, &nwritten);
 	if (rc == 1) {
 		*out_n = nwritten;
 		return XTC_OK;

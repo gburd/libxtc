@@ -1379,7 +1379,7 @@ Optional Packages:
   --with-libunwind=auto|yes|no|PATH
                           Use libunwind for stack backtraces where execinfo is
                           absent (default: auto).
-  --with-tls=openssl|libressl|mbedtls|gnutls|wolfssl|schannel|none|auto
+  --with-tls=openssl|libressl|boringssl|mbedtls|gnutls|wolfssl|schannel|none|auto
                           Select the TLS backend (default: auto).
   --with-hegel=PATH       Enable hegel-c property-based tests; PATH is the
                           hegel-c source root that contains
@@ -4980,6 +4980,68 @@ else case e in #(
 esac
 fi
     ;;
+  boringssl)
+    # BoringSSL is OpenSSL-API compatible, so it uses the same
+    # tls_openssl.c backend; tls_openssl.c gates the few API gaps
+    # (it lacks SSL_read_ex/SSL_write_ex) on OPENSSL_IS_BORINGSSL,
+    # which BoringSSL's openssl/base.h defines.  BoringSSL is rarely
+    # installed system-wide, so the user typically points at a build
+    # tree via CPPFLAGS=-I.../include and LDFLAGS=-L.../lib; we honor
+    # pkg-config (some distros ship a boringssl.pc) but fall back to
+    # the plain header + -lssl -lcrypto search.
+    if test "x$PKG_CONFIG" != xno && $PKG_CONFIG --exists openssl 2>/dev/null && $PKG_CONFIG --variable=enginesdir openssl 2>/dev/null | grep -qi boring
+then :
+  XTC_TLS_CFLAGS=`$PKG_CONFIG --cflags openssl`
+       XTC_TLS_LIBS=`$PKG_CONFIG --libs openssl`
+else case e in #(
+  e) : ;;
+esac
+fi
+    ac_save_CPPFLAGS=$CPPFLAGS
+    CPPFLAGS="$CPPFLAGS $XTC_TLS_CFLAGS"
+    ac_fn_c_check_header_compile "$LINENO" "openssl/ssl.h" "ac_cv_header_openssl_ssl_h" "$ac_includes_default"
+if test "x$ac_cv_header_openssl_ssl_h" = xyes
+then :
+
+else case e in #(
+  e) as_fn_error $? "--with-tls=boringssl: openssl/ssl.h not found; set CPPFLAGS=-I<boringssl>/include" "$LINENO" 5 ;;
+esac
+fi
+
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether openssl/ssl.h is BoringSSL" >&5
+printf %s "checking whether openssl/ssl.h is BoringSSL... " >&6; }
+    cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+#include <openssl/ssl.h>
+int
+main (void)
+{
+#ifndef OPENSSL_IS_BORINGSSL
+           #error not boringssl
+           #endif
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"
+then :
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+printf "%s\n" "yes" >&6; }
+else case e in #(
+  e) { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf "%s\n" "no" >&6; }
+       as_fn_error $? "--with-tls=boringssl: the openssl/ssl.h on the include path is not BoringSSL (OPENSSL_IS_BORINGSSL undefined); fix CPPFLAGS" "$LINENO" 5 ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext
+    CPPFLAGS=$ac_save_CPPFLAGS
+    xtc_tls_backend=openssl
+    xtc_tls_flavor=boringssl
+    if test -z "$XTC_TLS_LIBS"
+then :
+  XTC_TLS_LIBS="-lssl -lcrypto"
+fi
+    ;;
   mbedtls)
     # mbedTLS splits into libmbedtls (TLS) + libmbedx509 + libmbedcrypto.
     # Its mbedtls.pc emits only -lmbedtls (the shared object carries the
@@ -5060,7 +5122,7 @@ fi
     xtc_tls_backend=none
     ;;
   *)
-    as_fn_error $? "invalid --with-tls=$xtc_tls; use openssl, libressl, mbedtls, gnutls, wolfssl, schannel, none, or auto" "$LINENO" 5
+    as_fn_error $? "invalid --with-tls=$xtc_tls; use openssl, libressl, boringssl, mbedtls, gnutls, wolfssl, schannel, none, or auto" "$LINENO" 5
     ;;
 esac
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $xtc_tls_backend" >&5

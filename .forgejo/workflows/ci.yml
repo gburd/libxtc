@@ -162,3 +162,42 @@ jobs:
         run: |
           make XTC_BUILD=../../build_ci sqlxtc-server
           bash ../../test/sqlxtc/test_sqlxtc_mt.sh
+
+  tls-backends:
+    # Build against each apt-available TLS backend and run the m18 TLS
+    # suite.  BoringSSL needs a from-source build (cmake + Go) that is
+    # impractical on the small Codeberg runner, so it runs on the
+    # GitHub mirror's tls-backends job instead; the other four are
+    # exercised here too.
+    runs-on: codeberg-small
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [openssl, mbedtls, gnutls, wolfssl]
+    steps:
+      - name: Install base toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf automake pkg-config \
+            liburing-dev gawk openssl
+      - name: Install backend ${{ matrix.backend }}
+        run: |
+          case "${{ matrix.backend }}" in
+            openssl)   sudo apt-get install -y libssl-dev ;;
+            mbedtls)   sudo apt-get install -y libmbedtls-dev ;;
+            gnutls)    sudo apt-get install -y libgnutls28-dev ;;
+            wolfssl)   sudo apt-get install -y libwolfssl-dev ;;
+          esac
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure --with-tls=${{ matrix.backend }}
+        run: |
+          mkdir -p build_tls && cd build_tls
+          ../dist/configure --with-tls=${{ matrix.backend }} --with-io-backend=epoll
+      - name: Build + run the m18 TLS suite
+        run: |
+          make -C build_tls -j"$(nproc)" test_tls_server test_tls_client
+          ( cd build_tls && ./test_tls_server && ./test_tls_client )
