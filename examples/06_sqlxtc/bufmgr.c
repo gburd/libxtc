@@ -1643,6 +1643,8 @@ tr_proc(void *arg)
 	bm_t *bm = ta->bm;
 	int64_t iv = ta->interval;
 	int64_t iv_default = ta->interval;   /* fixed pacing when backlog low */
+	uint64_t prev_tr_writes = 0, prev_evicted = 0;
+	double pp_ewma = 1.0;                 /* EWMA of trickler pages-per-write */
 	struct tr_cand *cand;
 	xtc_dio_sched_t *tuner = NULL;
 	int batch = TR_BATCH;
@@ -1731,11 +1733,30 @@ tr_proc(void *arg)
 		 * mis-tunes and steals CPU; fall back to fixed pacing.  Only
 		 * when the backlog is non-trivial (>= 1/4 of the pool) do we
 		 * feed the tuner and adopt its batch/interval. */
-		if (tuner != NULL) {
-			if (dirty_total * 4 < (int)bm->n_frames) {
-				batch = TR_BATCH > max_batch ? max_batch : TR_BATCH;
-				iv = iv_default;
-			} else if (w > 0) {
+		/* Gate adaptive on whether it can actually help.  It helps only
+		 * when (a) writes COALESCE -- a locality/sequential workload,
+		 * detected by an EWMA of pages-per-write rising above 1 -- or
+		 * (b) the working set fits and there is NO demand eviction, so
+		 * aggressive trickling cuts fsync cost.  On a random,
+		 * eviction-bound workload neither holds (pages_per_write ~= 1
+		 * and evictions keep coming), so the GA is pure overhead: fall
+		 * back to fixed pacing. */
+		{
+			uint64_t twr = atomic_load_explicit(&bm->s_tr_writes,
+			    memory_order_relaxed);
+			uint64_t ev = atomic_load_explicit(&bm->s_evicted,
+			    memory_order_relaxed);
+			uint64_t calls = twr - prev_tr_writes;
+			uint64_t evd = ev - prev_evicted;
+			int use_adaptive;
+			prev_tr_writes = twr;
+			prev_evicted = ev;
+			if (calls > 0) {
+				double pp = (double)w / (double)calls;
+				pp_ewma = 0.8 * pp_ewma + 0.2 * pp;
+			}
+			use_adaptive = (pp_ewma >= 1.5) || (evd == 0);
+			if (tuner != NULL && use_adaptive && w > 0) {
 				int g[XTC_DIO_SCHED_MAX_GENES];
 				double cycle = (double)((t1 - t0) + iv) / 1e9;
 				double rate, dfrac, f[2];
@@ -1753,6 +1774,9 @@ tr_proc(void *arg)
 				batch = g[0];
 				iv = (int64_t)g[1] * 1000000;
 				if (iv <= 0) iv = 1000000;
+			} else if (tuner != NULL) {     /* gated off: fixed pacing */
+				batch = TR_BATCH > max_batch ? max_batch : TR_BATCH;
+				iv = iv_default;
 			}
 		}
 		if (xtc_proc_sleep(iv) != XTC_OK)
