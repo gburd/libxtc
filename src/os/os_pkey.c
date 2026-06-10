@@ -20,16 +20,36 @@
 
 #include <sys/mman.h>
 #include <cpuid.h>
+#include <signal.h>
+#include <setjmp.h>
+#include <string.h>
+#include <pthread.h>
 
 /*
- * True only when the OS has actually enabled protection keys in CR4
- * (CPUID.(EAX=7,ECX=0).ECX bit 4, OSPKE).  pkey_alloc() succeeding is
- * NOT sufficient: the kernel can support the syscall while CR4.PKE is
- * clear (notably under hypervisors that expose the PKU CPUID bit but
- * not OSPKE), and then the WRPKRU instruction that glibc's pkey_set()
- * executes in userspace faults with SIGILL.  Gate on OSPKE so we never
- * issue WRPKRU on a CPU/OS that has not enabled it.
+ * Whether protection keys are actually usable is decided ONCE, by a
+ * guarded probe.  CPUID OSPKE and a successful pkey_alloc() are both
+ * necessary but NOT sufficient: a kernel can support the pkey syscalls
+ * (and even report OSPKE) while the WRPKRU instruction that glibc's
+ * pkey_set() executes in userspace still faults with SIGILL -- seen on
+ * virtualized CI runners.  So we additionally execute a real pkey_set
+ * under a temporary SIGILL handler: if WRPKRU traps we longjmp out and
+ * report "unsupported", so callers never issue WRPKRU on a host where
+ * it faults.  The probe runs at most once (pthread_once).
  */
+static int            g_pkey_ok;
+static pthread_once_t g_pkey_once = PTHREAD_ONCE_INIT;
+static sigjmp_buf     g_pkey_jmp;
+static volatile sig_atomic_t g_pkey_probing;
+
+static void
+pkey_sigill(int sig)
+{
+	(void)sig;
+	if (g_pkey_probing)
+		siglongjmp(g_pkey_jmp, 1);   /* WRPKRU trapped: not usable */
+	_exit(128 + 4);                     /* a real SIGILL elsewhere */
+}
+
 static int
 x86_ospke(void)
 {
@@ -41,18 +61,41 @@ x86_ospke(void)
 	return (ecx & (1u << 4)) != 0;   /* OSPKE: CR4.PKE is set */
 }
 
+static void
+pkey_probe(void)
+{
+	struct sigaction sa, old;
+	int k;
+
+	g_pkey_ok = 0;
+	if (!x86_ospke())
+		return;                       /* CR4.PKE clear: WRPKRU would trap */
+	k = pkey_alloc(0, 0);
+	if (k < 0)
+		return;                       /* kernel without pkey support */
+
+	/* OSPKE and the syscall agree; confirm WRPKRU itself does not trap. */
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = pkey_sigill;
+	sa.sa_flags = SA_NODEFER;
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGILL, &sa, &old) == 0) {
+		g_pkey_probing = 1;
+		if (sigsetjmp(g_pkey_jmp, 1) == 0) {
+			(void)pkey_set(k, 0);        /* the WRPKRU path */
+			g_pkey_ok = 1;              /* survived: usable */
+		}
+		g_pkey_probing = 0;
+		(void)sigaction(SIGILL, &old, NULL);
+	}
+	(void)pkey_free(k);
+}
+
 int
 xtc_pkey_supported(void)
 {
-	int k;
-
-	if (!x86_ospke())
-		return 0;             /* PKU not enabled by the OS -- WRPKRU would trap */
-	k = pkey_alloc(0, 0);
-	if (k < 0)
-		return 0;             /* CPU/kernel without PKU */
-	(void)pkey_free(k);
-	return 1;
+	(void)pthread_once(&g_pkey_once, pkey_probe);
+	return g_pkey_ok;
 }
 
 int
@@ -61,8 +104,8 @@ xtc_pkey_alloc(int *out_key)
 	int k;
 	if (out_key == NULL)
 		return XTC_E_INVAL;
-	if (!x86_ospke())
-		return XTC_E_NOSYS;   /* keys unusable without OSPKE (WRPKRU traps) */
+	if (!xtc_pkey_supported())
+		return XTC_E_NOSYS;   /* keys unusable here (WRPKRU traps or no PKU) */
 	k = pkey_alloc(0, 0);
 	if (k < 0)
 		return XTC_E_NOSYS;
