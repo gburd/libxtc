@@ -330,16 +330,16 @@ $(SHARED_LIB_REAL): $(LIB_OBJS) $(VERSION_SCRIPT)
 	ln -sf $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME)
 	ln -sf $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 
-tls_openssl.o: $(srcdir)/../src/io/tls_openssl.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
+tls_openssl.o: $(srcdir)/../src/io/tls_openssl.c $(srcdir)/../src/inc/xtc_tls.h $(srcdir)/../src/io/tls_common.h xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_openssl.c
 
-tls_mbedtls.o: $(srcdir)/../src/io/tls_mbedtls.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
+tls_mbedtls.o: $(srcdir)/../src/io/tls_mbedtls.c $(srcdir)/../src/inc/xtc_tls.h $(srcdir)/../src/io/tls_common.h xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_mbedtls.c
 
-tls_gnutls.o: $(srcdir)/../src/io/tls_gnutls.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
+tls_gnutls.o: $(srcdir)/../src/io/tls_gnutls.c $(srcdir)/../src/inc/xtc_tls.h $(srcdir)/../src/io/tls_common.h xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_gnutls.c
 
-tls_wolfssl.o: $(srcdir)/../src/io/tls_wolfssl.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h
+tls_wolfssl.o: $(srcdir)/../src/io/tls_wolfssl.c $(srcdir)/../src/inc/xtc_tls.h $(srcdir)/../src/io/tls_common.h xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_wolfssl.c
 
 tls_schannel.o: $(srcdir)/../src/io/tls_schannel.c $(srcdir)/../src/inc/xtc_tls.h xtc_config.h

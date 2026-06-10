@@ -96,6 +96,7 @@ struct xtc_tls_ctx {
 	char                    **alpn;
 };
 
+
 struct xtc_tls {
 	xtc_tls_ctx_t       *ctx;
 	int                  fd;
@@ -103,6 +104,8 @@ struct xtc_tls {
 	int                  wants_read;
 	int                  wants_write;
 };
+
+#include "tls_common.h"   /* after struct xtc_tls: shared want-flag accessors */
 
 /* -------------------------------------------------------------------------
  * Transport BIO callbacks.
@@ -445,8 +448,7 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 
 	t->ctx         = ctx;
 	t->fd          = fd;
-	t->wants_read  = 0;
-	t->wants_write = 0;
+	xtc_tls_clear_wants(t);
 	mbedtls_ssl_init(&t->ssl);
 
 	if (mbedtls_ssl_setup(&t->ssl, &ctx->conf) != 0) {
@@ -495,8 +497,7 @@ xtc_tls_handshake(xtc_tls_t *tls)
 	if (tls == NULL)
 		return XTC_E_INVAL;
 
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	rc = mbedtls_ssl_handshake(&tls->ssl);
 	if (rc == 0)
@@ -519,8 +520,7 @@ xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 		return XTC_E_INVAL;
 
 	*out_n           = 0;
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	rc = mbedtls_ssl_read(&tls->ssl, (unsigned char *)buf, buflen);
 	if (rc >= 0) {
@@ -544,8 +544,7 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
 		return XTC_E_INVAL;
 
 	*out_n           = 0;
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	rc = mbedtls_ssl_write(&tls->ssl, (const unsigned char *)buf, buflen);
 	if (rc >= 0) {
@@ -560,21 +559,7 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
  * PUBLIC: int  xtc_tls_wants_write __P((const xtc_tls_t *));
  * ----------------------------------------------------------------------- */
 
-int
-xtc_tls_wants_read(const xtc_tls_t *tls)
-{
-	if (tls == NULL)
-		return 0;
-	return tls->wants_read;
-}
-
-int
-xtc_tls_wants_write(const xtc_tls_t *tls)
-{
-	if (tls == NULL)
-		return 0;
-	return tls->wants_write;
-}
+XTC_TLS_DEFINE_WANTS_ACCESSORS
 
 /* -------------------------------------------------------------------------
  * PUBLIC: int  xtc_tls_shutdown __P((xtc_tls_t *));
@@ -591,8 +576,7 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 	if (tls == NULL)
 		return XTC_E_INVAL;
 
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	rc = mbedtls_ssl_close_notify(&tls->ssl);
 	if (rc == 0)
