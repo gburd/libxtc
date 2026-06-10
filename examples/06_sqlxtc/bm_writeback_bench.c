@@ -35,6 +35,8 @@ static int64_t     g_deadline_ns;
 static _Atomic long g_ops;
 static _Atomic long g_syncs;
 static int         g_sync_every;     /* fdatasync every N ops (0 = never) */
+static int         g_locality;       /* 0=random 1=sequential 2=clustered */
+#define BM_CLUSTER 64                /* run length for clustered locality */
 
 static bm_swip_t  *g_root;
 static bm_pid_t   *g_pid;
@@ -64,13 +66,31 @@ worker_proc(void *arg)
 	}
 
 	/* Sustained dirtying loop until the deadline. */
+	uint64_t seqcur = 0, clbase = 0;
+	int clrem = 0;
 	while (now_ns() < g_deadline_ns) {
 		int i;
 		for (i = 0; i < 256; i++) {     /* batch before re-checking time */
 			int idx;
 			long n;
-			rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-			idx = (int)(rng % (uint64_t)g_n_pages);
+			if (g_locality == 1) {              /* sequential */
+				idx = (int)(seqcur % (uint64_t)g_n_pages);
+				seqcur++;
+			} else if (g_locality == 2) {       /* clustered runs */
+				if (clrem == 0) {
+					rng ^= rng << 13; rng ^= rng >> 7;
+					rng ^= rng << 17;
+					clbase = rng % (uint64_t)g_n_pages;
+					clrem = BM_CLUSTER;
+				}
+				idx = (int)((clbase + (uint64_t)(BM_CLUSTER - clrem))
+				    % (uint64_t)g_n_pages);
+				clrem--;
+			} else {                            /* random */
+				rng ^= rng << 13; rng ^= rng >> 7;
+				rng ^= rng << 17;
+				idx = (int)(rng % (uint64_t)g_n_pages);
+			}
 			if (bm_fix(g_bm, &g_root[idx], &f) != XTC_OK)
 				continue;
 			((uint64_t *)bm_page(f))[1] += 1;   /* mutate */
@@ -118,6 +138,7 @@ main(int argc, char **argv)
 
 	g_n_pages = argc > 5 ? atoi(argv[5]) : 65536;   /* working set */
 	g_sync_every = argc > 6 ? atoi(argv[6]) : 1000; /* fdatasync cadence */
+	g_locality = argc > 7 ? atoi(argv[7]) : 0;      /* 0=rand 1=seq 2=clustered */
 	g_root = calloc((size_t)g_n_pages, sizeof *g_root);
 	g_pid  = calloc((size_t)g_n_pages, sizeof *g_pid);
 	if (!g_root || !g_pid) { fprintf(stderr, "oom\n"); return 1; }
@@ -151,13 +172,18 @@ main(int argc, char **argv)
 	unlink(path);
 	free(g_root); free(g_pid);
 
-	printf("DIRECT=%d ADAPTIVE=%d secs=%.1f frames=%d pages=%d sync_every=%d\n",
-	    direct, adaptive, elapsed, frames, g_n_pages, g_sync_every);
+	printf("DIRECT=%d ADAPTIVE=%d secs=%.1f frames=%d pages=%d sync_every=%d "
+	    "locality=%s\n",
+	    direct, adaptive, elapsed, frames, g_n_pages, g_sync_every,
+	    g_locality == 1 ? "seq" : (g_locality == 2 ? "clustered" : "random"));
 	printf("  ops=%ld  ops_per_sec=%.0f  fdatasyncs=%ld\n", ops,
 	    elapsed > 0 ? (double)ops / elapsed : 0.0,
 	    atomic_load(&g_syncs));
 	printf("  flushed=%llu trickled=%llu evicted=%llu loads=%llu\n",
 	    (unsigned long long)st.flushed, (unsigned long long)st.trickled,
 	    (unsigned long long)st.evicted, (unsigned long long)st.loads);
+	printf("  trickler_writes=%llu pages_per_write=%.2f\n",
+	    (unsigned long long)st.tr_writes,
+	    st.tr_writes ? (double)st.trickled / (double)st.tr_writes : 0.0);
 	return 0;
 }
