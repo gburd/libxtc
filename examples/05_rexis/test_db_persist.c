@@ -22,14 +22,8 @@
 #include <sys/stat.h>
 
 #include "db.h"
+#include "t_assert.h"
 
-#define ASSERT(cond) do { \
-	if (!(cond)) { \
-		fprintf(stderr, "FAIL: %s:%d: %s\n", \
-		    __FILE__, __LINE__, #cond); \
-		exit(1); \
-	} \
-} while (0)
 
 static char dir[256];
 

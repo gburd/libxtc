@@ -14,10 +14,8 @@
 #include <string.h>
 
 #include "frame.h"
+#include "t_assert.h"
 
-#define ASSERT(c) do { if (!(c)) { \
-	fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); \
-	exit(1); } } while (0)
 
 static void
 test_int_roundtrip(void)
