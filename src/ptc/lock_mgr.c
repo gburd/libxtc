@@ -1136,12 +1136,9 @@ static void *
 __detector_thread(void *arg)
 {
 	xtc_lockmgr_t *m = arg;
-	struct timespec ts;
 	int64_t  iv = m->opts.detect_interval_ns;
-	ts.tv_sec  = (time_t)(iv / 1000000000LL);
-	ts.tv_nsec = (long)(iv % 1000000000LL);
 	while (!atomic_load_explicit(&m->detector_stop, memory_order_acquire)) {
-		(void)nanosleep(&ts, NULL);
+		(void)__os_sleep_ns(iv);   /* portable; Windows uses Sleep() */
 		(void)xtc_lockmgr_check_deadlocks(m, NULL);
 	}
 	return NULL;
