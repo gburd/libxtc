@@ -1486,6 +1486,134 @@ tr_cmp(const void *a, const void *b)
 	return 0;
 }
 struct tr_arg { bm_t *bm; int64_t interval; };
+
+/* Elevator ordering: sort a selected batch by on-disk page number so the
+ * device sees ascending offsets (sequential, mergeable) instead of
+ * dirty-recency order. */
+static int
+tr_cmp_pid(const void *a, const void *b)
+{
+	const struct tr_cand *x = a, *y = b;
+	if (x->f->pid < y->f->pid) return -1;
+	if (x->f->pid > y->f->pid) return 1;
+	return 0;
+}
+
+/* Claim a dirty frame for writeback and snapshot it into `dst` (which
+ * the caller owns; for coalescing it is a slot in a larger gather
+ * buffer).  Mirrors flush_frame's claim protocol -- io_busy CAS, a
+ * non-blocking shared latch, the write-ahead-log gate, and clearing
+ * dirty under the latch -- but DEFERS the device write so the caller
+ * can batch several pages into one pwrite.  Returns 1 when the page is
+ * claimed (io_busy is held; the caller MUST write it and then release
+ * via tr_release), 0 when it could not be claimed (nothing to do). */
+static int
+tr_prepare(bm_t *bm, bm_frame_t *f, void *dst)
+{
+	int expect = 0;
+
+	if (!atomic_load_explicit(&f->dirty, memory_order_acquire))
+		return 0;
+	if (!atomic_compare_exchange_strong(&f->io_busy, &expect, 1))
+		return 0;
+	if (xtc_arwlock_rdlock(f->latch, 0) != XTC_OK) {
+		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
+		return 0;
+	}
+	if (!atomic_load_explicit(&f->dirty, memory_order_acquire)) {
+		xtc_arwlock_unlock(f->latch);
+		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
+		return 0;
+	}
+	memcpy(dst, f->page, bm->page_size);
+	if (bm->lsn_off >= 0 && bm->wal_flush != NULL && f->pid != 0) {
+		uint64_t plsn;
+		memcpy(&plsn, (uint8_t *)dst + bm->lsn_off, sizeof plsn);
+		if (bm->wal_flush(bm->wal_ctx, plsn) != XTC_OK) {
+			xtc_arwlock_unlock(f->latch);
+			atomic_store_explicit(&f->io_busy, 0, memory_order_release);
+			return 0;
+		}
+	}
+	atomic_store_explicit(&f->dirty, 0, memory_order_release);
+	xtc_arwlock_unlock(f->latch);
+	dw_protect(bm, f->pid, dst);    /* double-write log (no-op if disabled) */
+	return 1;
+}
+
+/* Release a claimed frame after its (coalesced) write completed.  On
+ * write failure the page is re-dirtied so a later pass retries it. */
+static void
+tr_release(bm_frame_t *f, int wrote_ok)
+{
+	if (!wrote_ok)
+		atomic_store_explicit(&f->dirty, 1, memory_order_release);
+	atomic_store_explicit(&f->io_busy, 0, memory_order_release);
+}
+
+/* Flush a priority-selected batch with elevator scheduling + write
+ * coalescing.  `sel[0..nsel)` are the chosen victims (any order on
+ * entry); they are sorted by page number, claimed/snapshotted into the
+ * contiguous gather buffer `wbuf` (>= nsel pages), and runs of
+ * consecutive page numbers are written with a single multi-page pwrite.
+ * `run_f` is caller scratch for >= nsel frame pointers.  Returns the
+ * number of pages durably written. */
+static int
+tr_flush_batch(bm_t *bm, struct tr_cand *sel, int nsel, uint8_t *wbuf,
+               bm_frame_t **run_f)
+{
+	uint32_t psz = bm->page_size;
+	int slot = 0, run_len = 0, written = 0, j;
+	bm_pid_t run_pid0 = 0, prev_pid = 0;
+
+	qsort(sel, (size_t)nsel, sizeof *sel, tr_cmp_pid);   /* elevator */
+
+	for (j = 0; j < nsel; j++) {
+		bm_frame_t *f = sel[j].f;
+		if (!tr_prepare(bm, f, wbuf + (size_t)slot * psz))
+			continue;
+		if (run_len > 0 && f->pid == prev_pid + 1) {
+			run_f[run_len++] = f;        /* extend the contiguous run */
+		} else {
+			if (run_len > 0) {           /* emit the finished run */
+				off_t off = (off_t)run_pid0 * (off_t)psz;
+				int len = run_len * (int)psz, k, ok;
+				ok = xtc_aio_pwrite(bm->fd,
+				    wbuf + (size_t)(slot - run_len) * psz,
+				    len, off) == len;
+				for (k = 0; k < run_len; k++) {
+					tr_release(run_f[k], ok);
+					if (ok) {
+						written++;
+						atomic_fetch_add_explicit(
+						    &bm->s_flushed, 1,
+						    memory_order_relaxed);
+					}
+				}
+			}
+			run_pid0 = f->pid;           /* start a new run at this slot */
+			run_f[0] = f;
+			run_len = 1;
+		}
+		prev_pid = f->pid;
+		slot++;
+	}
+	if (run_len > 0) {                           /* emit the trailing run */
+		off_t off = (off_t)run_pid0 * (off_t)psz;
+		int len = run_len * (int)psz, k, ok;
+		ok = xtc_aio_pwrite(bm->fd,
+		    wbuf + (size_t)(slot - run_len) * psz, len, off) == len;
+		for (k = 0; k < run_len; k++) {
+			tr_release(run_f[k], ok);
+			if (ok) {
+				written++;
+				atomic_fetch_add_explicit(&bm->s_flushed, 1,
+				    memory_order_relaxed);
+			}
+		}
+	}
+	return written;
+}
 static void
 tr_proc(void *arg)
 {
@@ -1495,12 +1623,27 @@ tr_proc(void *arg)
 	struct tr_cand *cand;
 	xtc_dio_sched_t *tuner = NULL;
 	int batch = TR_BATCH;
+	int cap = bm->n_frames < 256 ? (int)bm->n_frames : 256;
+	int max_batch = bm->adaptive_writeback ? (cap < 1 ? 1 : cap) : TR_BATCH;
+	uint8_t *wbuf = NULL;
+	bm_frame_t **run_f = NULL;
 	__os_free(ta);
+	if (max_batch < 1) max_batch = 1;
 	if (__os_calloc(bm->n_frames, sizeof *cand, (void **)&cand) != XTC_OK)
 		return;
+	/* Gather buffer for coalesced multi-page writes (direct-I/O aligned)
+	 * plus per-run frame scratch. */
+	if (__os_aligned_alloc(4096, (size_t)max_batch * bm->page_size,
+	    (void **)&wbuf) != XTC_OK ||
+	    __os_calloc((size_t)max_batch, sizeof *run_f, (void **)&run_f)
+	    != XTC_OK) {
+		__os_aligned_free(wbuf);
+		__os_free(run_f);
+		__os_free(cand);
+		return;
+	}
 	if (bm->adaptive_writeback) {
 		xtc_dio_sched_spec_t spec;
-		int cap = bm->n_frames < 256 ? (int)bm->n_frames : 256;
 		memset(&spec, 0, sizeof spec);
 		spec.n_genes = 2;
 		spec.min[0] = 1;
@@ -1547,15 +1690,14 @@ tr_proc(void *arg)
 			n++;
 		}
 		int64_t t0 = 0, t1 = 0;
-		qsort(cand, (size_t)n, sizeof *cand, tr_cmp);
+		int nsel;
+		qsort(cand, (size_t)n, sizeof *cand, tr_cmp);   /* priority select */
+		nsel = n < batch ? n : batch;
+		if (nsel > max_batch) nsel = max_batch;         /* guard wbuf */
 		(void)__os_clock_mono(&t0);
-		for (i = 0; i < (uint32_t)n && w < batch; i++) {
-			if (flush_frame(bm, cand[i].f)) {
-				atomic_fetch_add_explicit(&bm->s_trickled, 1,
-				    memory_order_relaxed);
-				w++;
-			}
-		}
+		/* Elevator-ordered, write-coalesced flush of the selected batch. */
+		w = tr_flush_batch(bm, cand, nsel, wbuf, run_f);
+		atomic_fetch_add_explicit(&bm->s_trickled, w, memory_order_relaxed);
 		(void)__os_clock_mono(&t1);
 		/* Adaptive pacing fitness: SUSTAINED writeback rate (pages
 		 * per real second, counting the inter-pass sleep) DISCOUNTED
@@ -1588,6 +1730,8 @@ tr_proc(void *arg)
 			break;
 	}
 	__os_free(cand);
+	__os_aligned_free(wbuf);
+	__os_free(run_f);
 	xtc_dio_sched_destroy(tuner);
 	atomic_store_explicit(&bm->tr_alive, 0, memory_order_release);
 }
