@@ -1,10 +1,26 @@
 # TLS backend matrix
 
-xtc's TLS layer (`xtc_tls`) is built around a single OpenSSL-API
-backend that compiles unchanged against any OpenSSL-compatible
-library.  This document records the tested combinations.
+xtc's TLS layer (`xtc_tls`) is one internal seam fronted by several
+configure-time-selected backends.  The OpenSSL-API backend
+(`src/io/tls_openssl.c`) compiles unchanged against any
+OpenSSL-compatible library -- OpenSSL, LibreSSL, and BoringSSL -- and
+the other libraries have their own backend source.  This document
+records the tested combinations.
 
-## Source-level compatibility
+## Backends and their source
+
+| --with-tls | source file | flavor notes |
+|------------|-------------|--------------|
+| openssl    | tls_openssl.c | default |
+| libressl   | tls_openssl.c | OpenSSL-API alias; documents what you built against |
+| boringssl  | tls_openssl.c | OpenSSL-API; tls_openssl.c gates the API gap (no SSL_read_ex/SSL_write_ex) on OPENSSL_IS_BORINGSSL |
+| mbedtls    | tls_mbedtls.c | native mbedTLS API |
+| gnutls     | tls_gnutls.c  | native GnuTLS API |
+| wolfssl    | tls_wolfssl.c | native wolfSSL API |
+| schannel   | tls_schannel.c | Windows SSPI; compile-only |
+| none       | tls_none.c    | XTC_E_NOSYS stubs |
+
+## OpenSSL-API source compatibility
 
 `src/io/tls_openssl.c` uses only the public OpenSSL 1.1+ API:
 
@@ -19,38 +35,33 @@ library.  This document records the tested combinations.
   `SSL_read` / `SSL_write` / `SSL_shutdown` / `SSL_free`
 * `SSL_get_error` / `ERR_get_error` / `ERR_error_string`
 
-All of these are stable across OpenSSL 1.1.1+, 3.x, and LibreSSL
-3.x+.  No version-specific `#ifdef`s are required to build.
+These are stable across OpenSSL 1.1.1+, 3.x, and LibreSSL 3.x+ with no
+version-specific `#ifdef`s.  BoringSSL is the one exception: it omits
+the OpenSSL 1.1.1 `SSL_read_ex` / `SSL_write_ex` byte-count forms, so
+tls_openssl.c wraps the classic `SSL_read` / `SSL_write` behind the
+same 1-on-success/size_t-out contract, gated on the
+`OPENSSL_IS_BORINGSSL` macro BoringSSL defines.
 
 ## Tested matrix
 
-Configuration: `--with-tls=auto` or `--with-tls=openssl|libressl`.
-Both names accept the same library set; `--with-tls=libressl` is a
-documentation-only alias so deployments can record what they
-actually built against.
+Each backend builds the library and runs the m18 TLS suite
+(`test_tls_server`, `test_tls_client`; `test_tls_basic` where present).
+All certs are generated at runtime with an explicit `-config`, so the
+suite is backend-agnostic.
 
-| Backend          | Build | tls_basic (9) | tls_server (5) | tls_client (2) | Notes |
-|------------------|:-----:|:-------------:|:--------------:|:--------------:|-------|
-| OpenSSL  3.0.10  |  OK   |     9/9       |      5/5       |     2/2        | Linux Nix; default |
-| LibreSSL 4.2.1   |  OK   |     9/9       |      5/5       |     2/2        | Linux Nix; fully qualified |
+| Backend             | Build | tls_server (5) | tls_client (2) | Notes |
+|---------------------|:-----:|:--------------:|:--------------:|-------|
+| OpenSSL 3.x         |  OK   |      5/5       |     2/2        | Linux Nix; default |
+| LibreSSL 4.x        |  OK   |      5/5       |     2/2        | OpenSSL-API; same source |
+| BoringSSL (2026-05) |  OK   |      5/5       |     2/2        | OpenSSL-API; SSL_read_ex shim; static libssl.a + -lstdc++ |
+| mbedTLS 3.x         |  OK   |      5/5       |     2/2        | native backend; client needs mbedtls_ssl_set_hostname(NULL) |
+| GnuTLS 3.x          |  OK   |      5/5       |     2/2        | native backend |
+| wolfSSL 5.x         |  OK   |      5/5       |     2/2        | native backend |
+| SChannel (Windows)  | compile-only | -- | -- | written to the seam; not runtime-verified (no Windows host) |
 
-LibreSSL builds the full backend cleanly (no source changes; same
-`libxtc.a` artefacts) and now passes every TLS test, client included.
-The earlier `test_tls_client` 0/2 was a test-harness defect, not an xtc
-or handshake bug: its `generate_wrong_ca` helper shelled out to
-`openssl req` WITHOUT an explicit `-config`, and LibreSSL's `openssl
-req` fatally tries to load the default `etc/ssl/openssl.cnf` (OpenSSL
-tolerates its absence).  That made `suite_setup` delete the good
-server cert+key and run the test certless, so the server's cert load
-failed and the client handshake timed out.  The fix mirrors
-`generate_cert`: write a tiny `[req]` cnf and pass `-config`
-(test_tls_server already did this).  All cert generation in the TLS
-tests is now backend-agnostic.
-
-GnuTLS, mbedTLS, and wolfSSL each present an entirely different
-API surface and would require a parallel `tls_<backend>.c` source
-file plus configure-time selection.  No xtc consumer has asked for
-non-OpenSSL backends yet, so they remain in the backlog.
+All listed backends except SChannel are runtime-verified on Linux/Nix.
+A dedicated CI job (`tls-backends`) re-builds and re-runs the suite
+against openssl, boringssl, mbedtls, gnutls, and wolfssl on every push.
 
 ## Reproducing
 
@@ -75,6 +86,18 @@ LibreSSL (drop-in replacement, same source):
          make -j4 test_tls_basic test_tls_server'
     ./test_tls_basic    # 9/9
     ./test_tls_server   # 5/5
+
+BoringSSL (OpenSSL-API; ships static libssl.a/libcrypto.a and is part
+C++, so name the lib dir and add -lstdc++):
+
+    mkdir -p /tmp/xtc_boringssl_build && cd /tmp/xtc_boringssl_build
+    nix-shell -p boringssl pkg-config liburing --command '
+        DEV=$(echo /nix/store/*boringssl*-dev); LIB=$(dirname $(echo /nix/store/*boringssl*/lib/libssl.a));
+        CPPFLAGS="-I$DEV/include" LDFLAGS="-L$LIB" LIBS="-lstdc++" \
+          /home/gburd/ws/xtc/dist/configure --with-tls=boringssl && \
+        make -j4 test_tls_server test_tls_client'
+    ./test_tls_server   # 5/5
+    ./test_tls_client   # 2/2
 
 ## Cert generation
 

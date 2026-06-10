@@ -301,7 +301,7 @@ AS_CASE([$xtc_io_backend],
 # header/lib probe.
 # -------------------------------------------------------------------------
 AC_ARG_WITH([tls],
-  [AS_HELP_STRING([--with-tls=openssl|libressl|mbedtls|gnutls|wolfssl|schannel|none|auto],
+  [AS_HELP_STRING([--with-tls=openssl|libressl|boringssl|mbedtls|gnutls|wolfssl|schannel|none|auto],
     [Select the TLS backend (default: auto).])],
   [xtc_tls=$withval], [xtc_tls=auto])
 
@@ -343,6 +343,36 @@ case "$xtc_tls" in
     XTC_TLS_LIBS="-lssl -lcrypto"
     AS_IF([test "x$xtc_tls" = xlibressl],
       [xtc_tls_flavor=libressl], [xtc_tls_flavor=openssl])
+    ;;
+  boringssl)
+    # BoringSSL is OpenSSL-API compatible, so it uses the same
+    # tls_openssl.c backend; tls_openssl.c gates the few API gaps
+    # (it lacks SSL_read_ex/SSL_write_ex) on OPENSSL_IS_BORINGSSL,
+    # which BoringSSL's openssl/base.h defines.  BoringSSL is rarely
+    # installed system-wide, so the user typically points at a build
+    # tree via CPPFLAGS=-I.../include and LDFLAGS=-L.../lib; we honor
+    # pkg-config (some distros ship a boringssl.pc) but fall back to
+    # the plain header + -lssl -lcrypto search.
+    AS_IF([test "x$PKG_CONFIG" != xno && $PKG_CONFIG --exists openssl 2>/dev/null && $PKG_CONFIG --variable=enginesdir openssl 2>/dev/null | grep -qi boring],
+      [XTC_TLS_CFLAGS=`$PKG_CONFIG --cflags openssl`
+       XTC_TLS_LIBS=`$PKG_CONFIG --libs openssl`], [:])
+    ac_save_CPPFLAGS=$CPPFLAGS
+    CPPFLAGS="$CPPFLAGS $XTC_TLS_CFLAGS"
+    AC_CHECK_HEADER([openssl/ssl.h], [],
+      [AC_MSG_ERROR([--with-tls=boringssl: openssl/ssl.h not found; set CPPFLAGS=-I<boringssl>/include])])
+    AC_MSG_CHECKING([whether openssl/ssl.h is BoringSSL])
+    AC_COMPILE_IFELSE(
+      [AC_LANG_PROGRAM([[#include <openssl/ssl.h>]],
+         [[#ifndef OPENSSL_IS_BORINGSSL
+           #error not boringssl
+           #endif]])],
+      [AC_MSG_RESULT([yes])],
+      [AC_MSG_RESULT([no])
+       AC_MSG_ERROR([--with-tls=boringssl: the openssl/ssl.h on the include path is not BoringSSL (OPENSSL_IS_BORINGSSL undefined); fix CPPFLAGS])])
+    CPPFLAGS=$ac_save_CPPFLAGS
+    xtc_tls_backend=openssl
+    xtc_tls_flavor=boringssl
+    AS_IF([test -z "$XTC_TLS_LIBS"], [XTC_TLS_LIBS="-lssl -lcrypto"])
     ;;
   mbedtls)
     # mbedTLS splits into libmbedtls (TLS) + libmbedx509 + libmbedcrypto.
@@ -391,7 +421,7 @@ case "$xtc_tls" in
     xtc_tls_backend=none
     ;;
   *)
-    AC_MSG_ERROR([invalid --with-tls=$xtc_tls; use openssl, libressl, mbedtls, gnutls, wolfssl, schannel, none, or auto])
+    AC_MSG_ERROR([invalid --with-tls=$xtc_tls; use openssl, libressl, boringssl, mbedtls, gnutls, wolfssl, schannel, none, or auto])
     ;;
 esac
 AC_MSG_RESULT([$xtc_tls_backend])
