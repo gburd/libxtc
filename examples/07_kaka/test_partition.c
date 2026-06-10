@@ -17,10 +17,8 @@
 #include <sys/stat.h>
 
 #include "partition.h"
+#include "t_assert.h"
 
-#define ASSERT(c) do { if (!(c)) { \
-	fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); \
-	exit(1); } } while (0)
 
 static kaka_record_t
 mkrec(const char *k, const char *v)

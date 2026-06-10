@@ -14,14 +14,8 @@
 #include <stdlib.h>
 
 #include "xtc_stats.h"
+#include "t_assert.h"
 
-#define ASSERT(cond) do { \
-	if (!(cond)) { \
-		fprintf(stderr, "FAIL: %s:%d: %s\n", \
-		    __FILE__, __LINE__, #cond); \
-		exit(1); \
-	} \
-} while (0)
 
 /* These are the objects metrics.c defines; here we create local
  * ones with the same shape to prove the API contract the example

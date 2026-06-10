@@ -25,4 +25,22 @@ t_tmpl(char *out, size_t cap, const char *prefix)
 	snprintf(out, cap, "%s/%s-XXXXXX", d, prefix);
 }
 
+/* Shared check macro for the hand-rolled (non-munit) tests.  A failed
+ * CK records file:line and sets g_fail; the test's main() returns
+ * g_fail at the end, so every failure is reported, not just the first.
+ * Each test translation unit gets its own g_fail.  Define
+ * T_NO_GFAIL before including to suppress the g_fail definition (for a
+ * unit that declares it itself). */
+#ifndef T_NO_GFAIL
+static int g_fail;
+#endif
+#ifndef CK
+#define CK(c) do {                                                        \
+	if (!(c)) {                                                       \
+		fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, #c); \
+		g_fail = 1;                                              \
+	}                                                                \
+} while (0)
+#endif
+
 #endif /* SQLXTC_T_TMP_H */
