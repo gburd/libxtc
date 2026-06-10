@@ -76,8 +76,6 @@ struct bm_frame {
 	void             *page;       /* page_size bytes (into the pool) */
 	struct bm_frame  *next_free;
 	xtc_arwlock_t    *latch;      /* content latch (fiber-yielding) */
-	struct bm_frame  *dl_next, *dl_prev;  /* intrusive dirty-list links */
-	_Atomic int       in_dirtyq;  /* 1: currently on the dirty list */
 };
 
 /*
@@ -161,12 +159,8 @@ struct bm {
 	_Atomic uint64_t  s_tr_writes;   /* trickler pwrite calls (coalescing) */
 	_Atomic uint64_t  s_evict_flush; /* dirty pages flushed on the foreground
 	                                  * eviction path (no clean victim) */
-	/* Intrusive dirty-frame list: the trickler walks this instead of
-	 * scanning all frames, so its per-pass cost is O(dirty) not O(pool).
-	 * Guarded by dirty_lock; membership tracked per frame by in_dirtyq. */
-	bm_frame_t       *dirty_head, *dirty_tail;
-	_Atomic uint32_t  dirty_count;
-	pthread_mutex_t   dirty_lock;
+	_Atomic uint32_t  s_dirty_backlog; /* dirty frames seen by the last
+	                                    * trickler pass (backlog gauge) */
 
 	/* prefetch ring: read-ahead requests, drained by the provider so a
 	 * scanning fiber never blocks on a prefetch (best-effort). */
@@ -420,9 +414,6 @@ dw_recover(bm_t *bm)
  * never blocks on the latch (so it cannot deadlock with the B-tree's
  * latch coupling on the eviction path).  No latch is held across the
  * I/O -- the consistent snapshot is. */
-static void dirty_list_add(bm_t *bm, bm_frame_t *f);
-static void dirty_list_remove(bm_t *bm, bm_frame_t *f);
-
 static int
 flush_frame(bm_t *bm, bm_frame_t *f)
 {
@@ -470,7 +461,6 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 	 * lost -- the next flush captures it.  The snapshot we write is a
 	 * consistent image as of this point. */
 	atomic_store_explicit(&f->dirty, 0, memory_order_release);
-	dirty_list_remove(bm, f);
 	xtc_arwlock_unlock(f->latch);
 	dw_protect(bm, f->pid, snap);       /* full-page log, durable, BEFORE the final write */
 	(void)do_io(bm, snap, f->pid, 1);
@@ -779,7 +769,6 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	(void)pthread_mutex_init(&bm->free_mu, NULL);
 	(void)pthread_mutex_init(&bm->pf_mu, NULL);
 	(void)pthread_mutex_init(&bm->pid_mu, NULL);
-	(void)pthread_mutex_init(&bm->dirty_lock, NULL);
 
 	bm->fd = open(opts->path ? opts->path : "/tmp/sqlxtc-bm.tmp",
 	    opts->reopen ? (O_RDWR | O_CREAT) : (O_RDWR | O_CREAT | O_TRUNC), 0644);
@@ -889,7 +878,6 @@ bm_destroy(bm_t *bm)
 	(void)pthread_mutex_destroy(&bm->free_mu);
 	(void)pthread_mutex_destroy(&bm->pf_mu);
 	(void)pthread_mutex_destroy(&bm->pid_mu);
-	(void)pthread_mutex_destroy(&bm->dirty_lock);
 	{
 		uint32_t i;
 		for (i = 0; i < BM_HT_STRIPES; i++)
@@ -958,7 +946,6 @@ drop_resident(bm_t *bm, bm_pid_t pid)
 		 * unlinked, so no fixer can load it), so re-find is stable. */
 	}
 	atomic_store_explicit(&f->dirty, 0, memory_order_release); /* dead: do not flush */
-	dirty_list_remove(bm, f);
 	{
 		bm_frame_t **pp;
 		for (pp = &bm->buckets[b]; *pp != NULL; pp = &(*pp)->hnext)
@@ -986,7 +973,6 @@ bm_alloc(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame, bm_pid_t *out_pid)
 	f->pid = pid;
 	f->parent = slot;
 	memset(f->page, 0, bm->page_size);
-	dirty_list_add(bm, f);
 	atomic_store_explicit(slot, sw_hot(f), memory_order_release);
 	atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
 	atomic_fetch_add_explicit(&bm->resident, 1, memory_order_relaxed);
@@ -1087,46 +1073,6 @@ bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame)
  * (a latch-held early stamp so the SMO can log the exact bytes that will
  * be written).  Idempotent: the stamp happens only on the first
  * transition, so a re-mark of an already-dirty page keeps its recLSN. */
-/* Intrusive dirty-list maintenance.  The in_dirtyq fast path keeps the
- * common case (re-dirtying an already-dirty page) lock-free; the lock is
- * taken only on a genuine clean<->dirty edge, whose rate is bounded by
- * the flush rate (I/O), not the op rate. */
-static void
-dirty_list_add(bm_t *bm, bm_frame_t *f)
-{
-	if (atomic_load_explicit(&f->in_dirtyq, memory_order_acquire))
-		return;
-	(void)pthread_mutex_lock(&bm->dirty_lock);
-	if (!atomic_load_explicit(&f->in_dirtyq, memory_order_relaxed)) {
-		f->dl_prev = bm->dirty_tail;
-		f->dl_next = NULL;
-		if (bm->dirty_tail != NULL) bm->dirty_tail->dl_next = f;
-		else                        bm->dirty_head = f;
-		bm->dirty_tail = f;
-		atomic_store_explicit(&f->in_dirtyq, 1, memory_order_release);
-		atomic_fetch_add_explicit(&bm->dirty_count, 1, memory_order_relaxed);
-	}
-	(void)pthread_mutex_unlock(&bm->dirty_lock);
-}
-
-static void
-dirty_list_remove(bm_t *bm, bm_frame_t *f)
-{
-	if (!atomic_load_explicit(&f->in_dirtyq, memory_order_acquire))
-		return;
-	(void)pthread_mutex_lock(&bm->dirty_lock);
-	if (atomic_load_explicit(&f->in_dirtyq, memory_order_relaxed)) {
-		if (f->dl_prev != NULL) f->dl_prev->dl_next = f->dl_next;
-		else                    bm->dirty_head = f->dl_next;
-		if (f->dl_next != NULL) f->dl_next->dl_prev = f->dl_prev;
-		else                    bm->dirty_tail = f->dl_prev;
-		f->dl_prev = f->dl_next = NULL;
-		atomic_store_explicit(&f->in_dirtyq, 0, memory_order_release);
-		atomic_fetch_sub_explicit(&bm->dirty_count, 1, memory_order_relaxed);
-	}
-	(void)pthread_mutex_unlock(&bm->dirty_lock);
-}
-
 static void
 mark_dirty_edge(bm_t *bm, bm_frame_t *frame)
 {
@@ -1148,7 +1094,6 @@ mark_dirty_edge(bm_t *bm, bm_frame_t *frame)
 			atomic_store_explicit(&frame->rec_lsn, lsn,
 			    memory_order_relaxed);
 		}
-		dirty_list_add(bm, frame);   /* discoverable by the trickler */
 	}
 }
 
@@ -1273,7 +1218,6 @@ bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid)
 	memset(f->page, 0, bm->page_size);
 	atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
 	ht_insert(bm, f);
-	dirty_list_add(bm, f);
 	atomic_fetch_add_explicit(&bm->resident, 1, memory_order_relaxed);
 	if (out_pid) *out_pid = f->pid;
 	*out_frame = f;
@@ -1614,7 +1558,6 @@ tr_prepare(bm_t *bm, bm_frame_t *f, void *dst)
 		}
 	}
 	atomic_store_explicit(&f->dirty, 0, memory_order_release);
-	dirty_list_remove(bm, f);
 	xtc_arwlock_unlock(f->latch);
 	dw_protect(bm, f->pid, dst);    /* double-write log (no-op if disabled) */
 	return 1;
@@ -1623,12 +1566,10 @@ tr_prepare(bm_t *bm, bm_frame_t *f, void *dst)
 /* Release a claimed frame after its (coalesced) write completed.  On
  * write failure the page is re-dirtied so a later pass retries it. */
 static void
-tr_release(bm_t *bm, bm_frame_t *f, int wrote_ok)
+tr_release(bm_frame_t *f, int wrote_ok)
 {
-	if (!wrote_ok) {
+	if (!wrote_ok)
 		atomic_store_explicit(&f->dirty, 1, memory_order_release);
-		dirty_list_add(bm, f);          /* retry on a later pass */
-	}
 	atomic_store_explicit(&f->io_busy, 0, memory_order_release);
 }
 
@@ -1644,7 +1585,7 @@ tr_emit_run(bm_t *bm, uint8_t *base, int run_len, bm_pid_t pid0,
 	ok = xtc_aio_pwrite(bm->fd, base, len, off) == len;
 	atomic_fetch_add_explicit(&bm->s_tr_writes, 1, memory_order_relaxed);
 	for (k = 0; k < run_len; k++) {
-		tr_release(bm, run_f[k], ok);
+		tr_release(run_f[k], ok);
 		if (ok) {
 			written++;
 			atomic_fetch_add_explicit(&bm->s_flushed, 1,
@@ -1701,6 +1642,7 @@ tr_proc(void *arg)
 	struct tr_arg *ta = arg;
 	bm_t *bm = ta->bm;
 	int64_t iv = ta->interval;
+	int64_t iv_default = ta->interval;   /* fixed pacing when backlog low */
 	struct tr_cand *cand;
 	xtc_dio_sched_t *tuner = NULL;
 	int batch = TR_BATCH;
@@ -1752,40 +1694,27 @@ tr_proc(void *arg)
 	while (atomic_load_explicit(&bm->tr_running, memory_order_acquire)) {
 		uint32_t i;
 		int n = 0, w = 0, dirty_total = 0;
-		/* Gather candidates from the maintained dirty list (head =
-		 * oldest dirtied), bounded so a pass costs O(collected), not
-		 * O(pool).  dirty_total is the true backlog (list length). */
-		int cand_cap = batch * 4;
-		int walked = 0, walk_cap;
-		bm_frame_t *df;
-		(void)i;
-		if (cand_cap < 256) cand_cap = 256;
-		if (cand_cap > (int)bm->n_frames) cand_cap = (int)bm->n_frames;
-		walk_cap = cand_cap + 4096;
-		(void)pthread_mutex_lock(&bm->dirty_lock);
-		dirty_total = (int)atomic_load_explicit(&bm->dirty_count,
-		    memory_order_relaxed);
-		for (df = bm->dirty_head;
-		     df != NULL && n < cand_cap && walked < walk_cap;
-		     df = df->dl_next) {
+		for (i = 0; i < bm->n_frames; i++) {
+			bm_frame_t *f = &bm->frames[i];
 			uint8_t st;
-			walked++;
-			if (!atomic_load_explicit(&df->dirty, memory_order_acquire))
+			if (!atomic_load_explicit(&f->dirty, memory_order_acquire))
 				continue;
-			if (atomic_load_explicit(&df->pin, memory_order_acquire) != 0)
+			dirty_total++;          /* writeback backlog (all dirty) */
+			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
 				continue;
-			if (atomic_load_explicit(&df->io_busy, memory_order_acquire))
+			if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
 				continue;
-			st = atomic_load_explicit(&df->state, memory_order_acquire);
+			st = atomic_load_explicit(&f->state, memory_order_acquire);
 			if (st != BM_HOT && st != BM_COOL)
 				continue;
-			cand[n].f = df;
+			cand[n].f = f;
 			cand[n].cool = (st == BM_COOL);
-			cand[n].seq = atomic_load_explicit(&df->dirty_seq,
+			cand[n].seq = atomic_load_explicit(&f->dirty_seq,
 			    memory_order_relaxed);
 			n++;
 		}
-		(void)pthread_mutex_unlock(&bm->dirty_lock);
+		atomic_store_explicit(&bm->s_dirty_backlog, (uint32_t)dirty_total,
+		    memory_order_relaxed);
 		int64_t t0 = 0, t1 = 0;
 		int nsel;
 		qsort(cand, (size_t)n, sizeof *cand, tr_cmp);   /* priority select */
@@ -1796,32 +1725,35 @@ tr_proc(void *arg)
 		w = tr_flush_batch(bm, cand, nsel, wbuf, run_f);
 		atomic_fetch_add_explicit(&bm->s_trickled, w, memory_order_relaxed);
 		(void)__os_clock_mono(&t1);
-		/* Adaptive pacing fitness: SUSTAINED writeback rate (pages
-		 * per real second, counting the inter-pass sleep) DISCOUNTED
-		 * by the dirty backlog.  Per-pass throughput alone rewarded
-		 * large, infrequent batches that let dirty pages pile up and
-		 * stalled eviction; multiplying by (1 - dirty_frac) makes the
-		 * tuner favour pacing that keeps clean frames available while
-		 * still batching for efficiency. */
-		if (tuner != NULL && w > 0) {
-			int g[XTC_DIO_SCHED_MAX_GENES];
-			double cycle = (double)((t1 - t0) + iv) / 1e9;
-			double rate, dfrac, f[2];
-			if (cycle <= 0.0) cycle = 1e-9;
-			rate = (double)w / cycle;            /* sustained pages/s */
-			dfrac = bm->n_frames
-			    ? (double)dirty_total / (double)bm->n_frames : 0.0;
-			if (dfrac > 1.0) dfrac = 1.0;
-			/* Phenotype 0 (batch): maximise throughput.
-			 * Phenotype 1 (interval): maximise backlog quality
-			 * (keep clean frames available). */
-			f[0] = rate;
-			f[1] = 1.0 - dfrac;
-			xtc_dio_sched_report_multi(tuner, f, 2);
-			xtc_dio_sched_current(tuner, g);
-			batch = g[0];
-			iv = (int64_t)g[1] * 1000000;
-			if (iv <= 0) iv = 1000000;
+		/* Adaptive pacing, GATED by backlog.  When the trickler is
+		 * comfortably keeping up (few dirty frames), the backlog-based
+		 * fitness signal has no gradient, so letting the GA run just
+		 * mis-tunes and steals CPU; fall back to fixed pacing.  Only
+		 * when the backlog is non-trivial (>= 1/4 of the pool) do we
+		 * feed the tuner and adopt its batch/interval. */
+		if (tuner != NULL) {
+			if (dirty_total * 4 < (int)bm->n_frames) {
+				batch = TR_BATCH > max_batch ? max_batch : TR_BATCH;
+				iv = iv_default;
+			} else if (w > 0) {
+				int g[XTC_DIO_SCHED_MAX_GENES];
+				double cycle = (double)((t1 - t0) + iv) / 1e9;
+				double rate, dfrac, f[2];
+				if (cycle <= 0.0) cycle = 1e-9;
+				rate = (double)w / cycle;        /* sustained pages/s */
+				dfrac = bm->n_frames
+				    ? (double)dirty_total / (double)bm->n_frames : 0.0;
+				if (dfrac > 1.0) dfrac = 1.0;
+				/* Phenotype 0 (batch): maximise throughput.
+				 * Phenotype 1 (interval): maximise backlog quality. */
+				f[0] = rate;
+				f[1] = 1.0 - dfrac;
+				xtc_dio_sched_report_multi(tuner, f, 2);
+				xtc_dio_sched_current(tuner, g);
+				batch = g[0];
+				iv = (int64_t)g[1] * 1000000;
+				if (iv <= 0) iv = 1000000;
+			}
 		}
 		if (xtc_proc_sleep(iv) != XTC_OK)
 			break;
@@ -1896,7 +1828,7 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->trickled = atomic_load_explicit(&bm->s_trickled, memory_order_relaxed);
 	out->tr_writes = atomic_load_explicit(&bm->s_tr_writes, memory_order_relaxed);
 	out->evict_flushes = atomic_load_explicit(&bm->s_evict_flush, memory_order_relaxed);
-	out->dirty_backlog = atomic_load_explicit(&bm->dirty_count, memory_order_relaxed);
+	out->dirty_backlog = atomic_load_explicit(&bm->s_dirty_backlog, memory_order_relaxed);
 	out->dw_repaired = atomic_load_explicit(&bm->s_dw_repaired, memory_order_relaxed);
 	out->freed = atomic_load_explicit(&bm->s_freed, memory_order_relaxed);
 	out->reissued = atomic_load_explicit(&bm->s_reissued, memory_order_relaxed);
