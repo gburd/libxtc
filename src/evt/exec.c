@@ -86,6 +86,9 @@ __xtc_exec_worker(void *arg)
 	xtc_exec_t *exec = loop->exec;
 
 	__xtc_current_loop = loop;
+	/* Bias this reactor thread onto the performance (P) cores on
+	 * asymmetric hardware (Apple Silicon); no-op elsewhere. */
+	__os_thread_apply_default_qos();
 	/* Record NUMA placement so the steal pass-1 can prefer same-node. */
 	if (exec->loop_node != NULL)
 		exec->loop_node[loop->exec_id] = __os_numa_current_node();

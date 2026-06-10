@@ -154,7 +154,7 @@ clean:
 	rm -f test_clean_restart
 	rm -f test_steal
 	rm -f test_parallel test_parallel.o
-	rm -f test_bufmgr test_bufmgr.o bufmgr.o
+	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
 	rm -f test_scan_resist
 	rm -f test_persist
@@ -172,6 +172,8 @@ clean:
 
 distclean: clean
 	rm -f sqlite3.o
+	rm -rf *.dSYM
+	rm -rf ../../test/sqlxtc/test_quack ../../test/sqlxtc/*.dSYM
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
@@ -374,6 +376,15 @@ test_bufmgr: test_bufmgr.c bufmgr.o
 
 test-bufmgr: test_bufmgr
 	./test_bufmgr
+
+test_bufmgr_dio: test_bufmgr_dio.c bufmgr.o
+	$(CC) $(CFLAGS) -o $@ test_bufmgr_dio.c bufmgr.o $(LDFLAGS)
+
+test-bufmgr-dio: test_bufmgr_dio
+	./test_bufmgr_dio
+
+bm_writeback_bench: bm_writeback_bench.c bufmgr.o
+	$(CC) $(CFLAGS) -o $@ bm_writeback_bench.c bufmgr.o $(LDFLAGS)
 
 # ---- physiological redo apply (page-LSN gated image write) ----
 test_redo_page: test_redo_page.c bufmgr.o

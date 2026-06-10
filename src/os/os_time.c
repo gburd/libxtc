@@ -112,6 +112,28 @@ __ts_to_ns(const struct timespec *ts, int64_t *out)
 /*
  * PUBLIC: int __os_clock_mono __P((int64_t *));
  */
+#if defined(__APPLE__)
+/*
+ * macOS fast path: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) returns a
+ * monotonic nanosecond count derived from mach_absolute_time scaled by
+ * the timebase, with no struct timespec round-trip.  CLOCK_UPTIME_RAW
+ * does not advance while the machine is asleep, which is the right
+ * behaviour for an interval/monotonic clock and matches CLOCK_MONOTONIC
+ * on the other POSIX platforms.  Available since macOS 10.12.
+ */
+int
+__os_clock_mono(int64_t *out)
+{
+	uint64_t ns;
+	if (out == NULL)
+		return XTC_E_INVAL;
+	ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+	if (ns == 0)
+		return XTC_E_INTERNAL;
+	*out = (int64_t)ns;
+	return XTC_OK;
+}
+#else
 int
 __os_clock_mono(int64_t *out)
 {
@@ -122,6 +144,7 @@ __os_clock_mono(int64_t *out)
 		return XTC_E_INTERNAL;
 	return __ts_to_ns(&ts, out);
 }
+#endif
 
 /*
  * PUBLIC: int __os_clock_real __P((int64_t *));

@@ -61,6 +61,10 @@ int  sx_shutdown(void);
  * against an xstore table runs on this engine, larger-than-RAM and
  * durable, instead of SQLite's built-in B-tree.  Needs no loop. */
 int  sx_storage_open(const char *path, unsigned int n_frames);
+
+/* Configure the page store's I/O for the next sx_storage_open:
+ * direct = cache-bypass (direct I/O), adaptive = GA-tuned writeback. */
+void sx_storage_set_io(int direct, int adaptive);
 /* Start the background storage procs (WAL group-commit writer, page
  * provider, trickler) on `loop`.  Call after the loop exists. */
 int  sx_storage_run(struct xtc_loop *loop);

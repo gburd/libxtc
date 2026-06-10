@@ -122,6 +122,53 @@ int  xtc_osproc_wait(xtc_osproc_t *p, int *status, int64_t timeout_ns);
  * PUBLIC: void xtc_osproc_destroy __P((xtc_osproc_t *)); */
 void xtc_osproc_destroy(xtc_osproc_t *p);
 
+/* ---- isolated-worker ergonomics ------------------------------------
+ *
+ * The request/reply convenience over the control socket: real MMU
+ * isolation (a separate OS process) with a simple framed call.  The
+ * parent spawns a worker, then xtc_osproc_call() ships a request frame
+ * and parks for the reply (never blocking the loop).  The child runs
+ * xtc_osproc_serve(), which loops handling framed requests until the
+ * socket closes.
+ */
+
+/* Spawn a forked isolated worker running fn(ctrl_fd, arg), with a
+ * control socket always created.  Equivalent to xtc_osproc_spawn with
+ * opts{.name, .fn, .arg, .ctrl_socket=1}.
+ *
+ * PUBLIC: int xtc_osproc_isolated_spawn __P((const char *, int (*)(int, void *), void *, xtc_osproc_t **));
+ */
+int xtc_osproc_isolated_spawn(const char *name,
+                              int (*fn)(int ctrl_fd, void *arg), void *arg,
+                              xtc_osproc_t **out);
+
+/* Parent side: send a request frame to the worker and park for its
+ * reply frame (allocated with the xtc allocator; free with __os_free).
+ * max_reply caps the reply (0 = uncapped).  Returns XTC_OK, XTC_E_AGAIN
+ * on timeout, or XTC_E_*.  Requires a control socket.
+ *
+ * PUBLIC: int xtc_osproc_call __P((xtc_osproc_t *, const void *, size_t, void **, size_t *, size_t, int64_t));
+ */
+int xtc_osproc_call(xtc_osproc_t *p, const void *req, size_t req_len,
+                    void **reply, size_t *reply_len, size_t max_reply,
+                    int64_t timeout_ns);
+
+/* Child-side handler: given a request, produce a reply.  Set *reply
+ * (malloc'd, or NULL for an empty reply) and *reply_len; return XTC_OK
+ * to send it and keep serving, or non-XTC_OK to stop.  xtc_osproc_serve
+ * frees *reply after sending. */
+typedef int (*xtc_osproc_handler_fn)(const void *req, size_t req_len,
+                                     void **reply, size_t *reply_len,
+                                     void *arg);
+
+/* Child side: serve framed requests on ctrl_fd until the peer closes
+ * (or a handler stops it).  Returns the handler's stop code, or XTC_OK
+ * on clean EOF.
+ *
+ * PUBLIC: int xtc_osproc_serve __P((int, xtc_osproc_handler_fn, void *));
+ */
+int xtc_osproc_serve(int ctrl_fd, xtc_osproc_handler_fn handler, void *arg);
+
 #ifdef __cplusplus
 }
 #endif

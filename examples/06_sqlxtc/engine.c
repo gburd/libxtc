@@ -191,6 +191,17 @@ sx_wal_flush_cb(void *ctx, uint64_t lsn)
  *
  * No loop is required; call sx_storage_run once the loop is up.
  */
+static int g_storage_direct = 0;
+static int g_storage_adaptive = 0;
+
+/* Configure direct I/O + adaptive writeback for the next sx_storage_open. */
+void
+sx_storage_set_io(int direct, int adaptive)
+{
+	g_storage_direct = direct ? 1 : 0;
+	g_storage_adaptive = adaptive ? 1 : 0;
+}
+
 int
 sx_storage_open(const char *path, unsigned int n_frames)
 {
@@ -208,6 +219,8 @@ sx_storage_open(const char *path, unsigned int n_frames)
 		o.n_frames = n_frames;
 	o.double_write = 1;   /* torn-page protection for the persistent store */
 	o.lsn_off = 0;        /* ARIES page LSN: first field of every btnode */
+	o.direct = g_storage_direct;             /* cache-bypass page store */
+	o.adaptive_writeback = g_storage_adaptive;  /* GA-tuned trickler */
 
 	snprintf(g_xwal_path, sizeof g_xwal_path, "%s-wal", dpath);
 

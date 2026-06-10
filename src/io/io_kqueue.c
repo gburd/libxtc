@@ -24,6 +24,17 @@
 
 extern int __xtc_io_drain_wakeup(xtc_io_t *io);
 
+/*
+ * The cross-thread wakeup uses an EVFILT_USER event rather than a
+ * self-pipe: no file descriptors, no read()/write() syscalls, and the
+ * trigger is a single kevent() call.  The (EVFILT_USER, ident)
+ * namespace is disjoint from the (EVFILT_READ/WRITE, fd) namespace, so
+ * a fixed sentinel ident is safe alongside any registered fd.  udata
+ * is set to `io` so xtc_io_poll recognizes the wakeup the same way it
+ * did the pipe's read end.
+ */
+#define XTC_KQ_WAKEUP_IDENT  ((uintptr_t)0)
+
 /* ----- registered-fd tracker (kqueue-only) ----------------------- */
 
 static int
@@ -108,7 +119,31 @@ __kev_register(xtc_io_t *io, int fd, uint32_t interest, void *udata, int del)
 int
 __xtc_io_register_wakeup(xtc_io_t *io, int fd)
 {
-	return __kev_register(io, fd, XTC_IO_READABLE, io, 0);
+	struct kevent kev;
+	(void)fd;   /* no pipe fd; the wakeup is an EVFILT_USER event */
+	EV_SET(&kev, XTC_KQ_WAKEUP_IDENT, EVFILT_USER, EV_ADD | EV_CLEAR,
+	    0, 0, io);
+	if (kevent(io->epfd, &kev, 1, NULL, 0, NULL) < 0)
+		return XTC_E_INTERNAL;
+	return XTC_OK;
+}
+
+/*
+ * Trigger the wakeup from any thread.  NOTE_TRIGGER makes the
+ * EVFILT_USER event active; EV_CLEAR (set at registration) means it
+ * auto-resets after delivery, so repeated triggers coalesce exactly
+ * like the old self-pipe did.  Called by xtc_io_wakeup in io_common.c.
+ */
+int
+__xtc_io_kqueue_wakeup_post(xtc_io_t *io)
+{
+	struct kevent kev;
+	if (io == NULL) return XTC_E_INVAL;
+	EV_SET(&kev, XTC_KQ_WAKEUP_IDENT, EVFILT_USER, 0, NOTE_TRIGGER,
+	    0, io);
+	if (kevent(io->epfd, &kev, 1, NULL, 0, NULL) < 0)
+		return XTC_E_INTERNAL;
+	return XTC_OK;
 }
 
 /* PUBLIC: int xtc_io_reg_fd __P((xtc_io_t *, int, uint32_t, void *)); */

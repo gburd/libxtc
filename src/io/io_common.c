@@ -24,9 +24,10 @@
 # include <unistd.h>
 #endif
 
-/* Set FD_CLOEXEC and O_NONBLOCK on a file descriptor.  POSIX only;
- * the Windows path uses ioctlsocket(FIONBIO) below. */
-#if !defined(_WIN32)
+/* Set FD_CLOEXEC and O_NONBLOCK on a file descriptor.  Used only by
+ * the self-pipe path (POSIX backends other than kqueue); the Windows
+ * path uses ioctlsocket(FIONBIO) and kqueue uses EVFILT_USER. */
+#if !defined(_WIN32) && !defined(XTC_IO_BACKEND_KQUEUE)
 static int
 __set_cloexec_nonblock(int fd)
 {
@@ -67,10 +68,12 @@ xtc_io_init(xtc_io_t **out)
 	io->wakeup_rfd = -1;
 	io->wakeup_wfd = -1;
 
-#if defined(_WIN32)
-	/* Windows IOCP wakeup uses PostQueuedCompletionStatus directly
-	 * -- no socket pair needed.  __xtc_io_register_wakeup is a no-op
-	 * but still called for symmetry. */
+#if defined(_WIN32) || defined(XTC_IO_BACKEND_KQUEUE)
+	/* No self-pipe needed:
+	 *   - Windows IOCP wakes via PostQueuedCompletionStatus.
+	 *   - kqueue wakes via an EVFILT_USER event (see io_kqueue.c).
+	 * __xtc_io_register_wakeup is still called below for symmetry;
+	 * wakeup_rfd/wfd stay -1. */
 #else
 	{
 		int p[2];
@@ -156,6 +159,10 @@ xtc_io_fini(xtc_io_t *io)
  * lives in the backend file. */
 int __xtc_io_iocp_wakeup_post(xtc_io_t *io);
 #endif
+#if defined(XTC_IO_BACKEND_KQUEUE)
+/* Forward decl for the kqueue backend's EVFILT_USER trigger. */
+int __xtc_io_kqueue_wakeup_post(xtc_io_t *io);
+#endif
 
 /*
  * PUBLIC: int xtc_io_wakeup __P((xtc_io_t *));
@@ -163,23 +170,26 @@ int __xtc_io_iocp_wakeup_post(xtc_io_t *io);
 int
 xtc_io_wakeup(xtc_io_t *io)
 {
-	unsigned char b = 1;
 	if (io == NULL)
 		return XTC_E_INVAL;
 #if defined(_WIN32)
 	return __xtc_io_iocp_wakeup_post(io);
+#elif defined(XTC_IO_BACKEND_KQUEUE)
+	return __xtc_io_kqueue_wakeup_post(io);
 #else
-	for (;;) {
-		ssize_t n = write(io->wakeup_wfd, &b, 1);
-		if (n == 1)
-			return XTC_OK;
-		if (n == -1 && errno == EINTR)
-			continue;
-		if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
-			return XTC_OK;   /* already pending; coalesced */
-		return XTC_E_INTERNAL;
+	{
+		unsigned char b = 1;
+		for (;;) {
+			ssize_t n = write(io->wakeup_wfd, &b, 1);
+			if (n == 1)
+				return XTC_OK;
+			if (n == -1 && errno == EINTR)
+				continue;
+			if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+				return XTC_OK;   /* already pending; coalesced */
+			return XTC_E_INTERNAL;
+		}
 	}
-	(void)b;
 #endif
 }
 
@@ -190,9 +200,11 @@ xtc_io_wakeup(xtc_io_t *io)
 int
 __xtc_io_drain_wakeup(xtc_io_t *io)
 {
-#if defined(_WIN32)
-	/* IOCP wakeup is consumed by GetQueuedCompletionStatusEx;
-	 * nothing to drain here. */
+#if defined(_WIN32) || defined(XTC_IO_BACKEND_KQUEUE)
+	/* Nothing to drain:
+	 *   - IOCP wakeup is consumed by GetQueuedCompletionStatusEx.
+	 *   - kqueue's EVFILT_USER was registered EV_CLEAR, so it
+	 *     auto-resets once xtc_io_poll reports it. */
 	(void)io;
 	return XTC_OK;
 #else

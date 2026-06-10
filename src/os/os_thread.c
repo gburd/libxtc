@@ -18,6 +18,12 @@
 #include <sched.h>
 #include <string.h>
 
+#if defined(__APPLE__)
+#include <sys/qos.h>
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
+#endif
+
 #include "os_thread.h"
 
 #include <stdlib.h>
@@ -137,4 +143,76 @@ __os_thread_setname(const char *name)
 	(void)name;
 #endif
 	return XTC_OK;
+}
+
+/*
+ * Apply the default QoS class for a runtime reactor/worker thread to
+ * the CALLING thread.  On macOS this is QOS_CLASS_USER_INITIATED:
+ * latency-sensitive work that the user is actively waiting on, which
+ * tells the Apple Silicon scheduler to prefer the performance (P)
+ * cores and avoid demoting these threads onto the efficiency (E)
+ * cores.  macOS does not permit hard CPU affinity, so a QoS hint is
+ * the supported, idiomatic mechanism for P-core bias.  A no-op on
+ * every other platform (where thread placement is governed by the
+ * scheduler or explicit affinity elsewhere).
+ *
+ * PUBLIC: void __os_thread_apply_default_qos __P((void));
+ */
+void
+__os_thread_apply_default_qos(void)
+{
+#if defined(__APPLE__)
+	(void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
+}
+
+/*
+ * Apply a CPU-affinity hint for the CALLING thread to logical CPU
+ * `cpu` (>= 0) -- the "pin this reactor to a core" lever for a
+ * thread-per-core runtime.
+ *
+ * Platform reality differs sharply, so this is a *hint*:
+ *   - Linux: a hard pin via pthread_setaffinity_np to the single CPU.
+ *   - macOS: there is NO hard CPU pinning.  The supported mechanism is
+ *     the Mach THREAD_AFFINITY_POLICY "affinity tag": threads sharing a
+ *     tag are hinted to run on a common L2 cache.  It is advisory, the
+ *     scheduler may ignore it, and Apple Silicon ignores it outright --
+ *     there the QoS class (__os_thread_apply_default_qos) is the only
+ *     effective placement lever.  The tag is still set so Intel Macs
+ *     (and any future arm64 scheduler that honours it) benefit; the
+ *     call is reported XTC_OK even where the kernel makes it a no-op.
+ *   - Other platforms: XTC_E_NOSYS until ported.
+ *
+ * PUBLIC: int __os_thread_set_affinity __P((int));
+ */
+int
+__os_thread_set_affinity(int cpu)
+{
+	if (cpu < 0)
+		return XTC_E_INVAL;
+#if defined(__linux__)
+	{
+		cpu_set_t set;
+		CPU_ZERO(&set);
+		CPU_SET((unsigned)cpu, &set);
+		if (pthread_setaffinity_np(pthread_self(), sizeof set, &set)
+		    != 0)
+			return XTC_E_INTERNAL;
+		return XTC_OK;
+	}
+#elif defined(__APPLE__)
+	{
+		thread_affinity_policy_data_t pol;
+		mach_port_t mt = pthread_mach_thread_np(pthread_self());
+		/* Tag 0 means "no affinity"; map cpu N -> tag N+1 so distinct
+		 * CPUs receive distinct, non-zero tags. */
+		pol.affinity_tag = cpu + 1;
+		(void)thread_policy_set(mt, THREAD_AFFINITY_POLICY,
+		    (thread_policy_t)&pol, THREAD_AFFINITY_POLICY_COUNT);
+		return XTC_OK;   /* advisory; ignored on Apple Silicon */
+	}
+#else
+	(void)cpu;
+	return XTC_E_NOSYS;
+#endif
 }

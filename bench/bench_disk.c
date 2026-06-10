@@ -35,6 +35,9 @@
 
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE   /* expose F_NOCACHE alongside _POSIX_C_SOURCE */
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -112,10 +115,16 @@ main(int argc, char **argv)
 	/* --- prepare the file --- */
 	fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
 	if (fd < 0) { perror("open"); return 1; }
+#if defined(__APPLE__)
+	/* macOS has no posix_fallocate; ftruncate sets the size and the
+	 * pwrite loop below materializes the blocks. */
+	if (ftruncate(fd, (off_t)bytes) != 0) { perror("ftruncate"); return 1; }
+#else
 	if (posix_fallocate(fd, 0, (off_t)bytes) != 0) {
 		fprintf(stderr, "posix_fallocate failed; falling back\n");
 		if (ftruncate(fd, (off_t)bytes) != 0) { perror("ftruncate"); return 1; }
 	}
+#endif
 	writable_open = 1;
 	zeros = aligned_alloc(BLOCK_SIZE, BLOCK_SIZE);
 	if (!zeros) { perror("aligned_alloc"); return 1; }
@@ -126,7 +135,11 @@ main(int argc, char **argv)
 		if (w != BLOCK_SIZE) { perror("pwrite"); return 1; }
 	}
 	(void)fsync(fd);
+#if defined(POSIX_FADV_DONTNEED)
 	(void)posix_fadvise(fd, 0, (off_t)bytes, POSIX_FADV_DONTNEED);
+#elif defined(__APPLE__)
+	(void)fcntl(fd, F_NOCACHE, 1);   /* macOS: bypass the unified buffer cache */
+#endif
 	(void)close(fd);
 	(void)writable_open;
 
@@ -138,6 +151,11 @@ main(int argc, char **argv)
 		    strerror(errno));
 		fd = open(path, O_RDONLY);
 	}
+#elif defined(__APPLE__)
+	/* macOS has no O_DIRECT; F_NOCACHE after open is the closest
+	 * equivalent (bypasses the unified buffer cache for this fd). */
+	fd = open(path, O_RDONLY);
+	if (fd >= 0) (void)fcntl(fd, F_NOCACHE, 1);
 #else
 	fd = open(path, O_RDONLY);
 #endif

@@ -137,11 +137,25 @@ xtc_waker_wake(const xtc_waker_t *w)
 		}
 	}
 
-	/* Cross-thread.  Inbox + wakeup. */
+	/* Cross-thread.  Inbox + wakeup.
+	 *
+	 * Capture loop and task into locals BEFORE the inbox push.  The
+	 * waker *w may be embedded in a stack-allocated waiter (e.g. the
+	 * struct amutex_waiter / chan / proc waiters) owned by the parked
+	 * task.  The instant the task is pushed to the target loop's
+	 * inbox, that loop can resume it on another thread and the task
+	 * may return -- freeing *w -- before we read it again.
+	 * Dereferencing w->loop after the push is a use-after-free,
+	 * observed as an EXC_BAD_ACCESS / pointer-authentication fault
+	 * inside xtc_io_wakeup under a multi-loop executor.  The loop and
+	 * its io are owned by the executor and outlive the task, so the
+	 * captured locals stay valid. */
 	{
-		int rc = __xtc_inbox_push(&w->loop->inbox, XTC_INB_WAKE, w->task);
+		xtc_loop_t *loop = w->loop;
+		xtc_task_t *task = w->task;
+		int rc = __xtc_inbox_push(&loop->inbox, XTC_INB_WAKE, task);
 		if (rc != XTC_OK) return rc;
-		return xtc_io_wakeup(w->loop->io);
+		return xtc_io_wakeup(loop->io);
 	}
 }
 

@@ -7,132 +7,48 @@
  * examples/06_sqlxtc/mutex.c
  *	SQLite mutex methods backed by xtc_amutex (the parking mutex).
  *
- *	sqlxtc runs many connection processes on one event loop, all
- *	sharing a single serialized xsql handle.  A contending
- *	process must therefore PARK (yield the loop) rather than block
- *	the OS thread -- otherwise a backend that parks mid-statement
- *	(e.g. while the VFS offloads a blocking read to the thread pool)
- *	would wedge every other process on the loop.  xtc_amutex parks
- *	the fiber on a loop and falls back to a condvar off a loop, so
- *	the same methods work for the in-process server and the
- *	off-loop standalone tests.
+ *	This is now a thin pass-through.  Everything SQLite's mutex
+ *	contract needs beyond a plain lock -- recursion, fiber-identity
+ *	ownership, and process-global static mutexes -- is provided by
+ *	xtc_amutex itself (xtc_amutex_create_ex(XTC_AMUTEX_RECURSIVE) and
+ *	xtc_amutex_static), where the owner/recursion accounting is done
+ *	under the mutex's own lock and is therefore race-free across
+ *	loops.  The seam used to carry that bookkeeping by hand; it was
+ *	racy and is gone.
  *
- *	SQLite distinguishes "fast" and "recursive" mutexes plus a set
- *	of well-known statics.  xtc_amutex is non-recursive, so the
- *	recursive case wraps it with an owner identity + a count.  The
- *	owner is tracked by FIBER identity (the proc pid) on a loop, not
- *	by thread id: two fibers sharing one OS thread must not be
- *	mistaken for the same lock owner, or mutual exclusion breaks the
- *	instant one of them parks while holding the lock.
+ *	A contending fiber PARKS (yields the loop) rather than blocking
+ *	the OS thread, so a backend that parks mid-statement (e.g. while
+ *	the VFS offloads a blocking read) does not wedge its peers.
  *
- *	The methods are registered from main.c via
- *	xsql_config(SQLITE_CONFIG_MUTEX, ...).
+ *	Registered from main.c via xsql_config(SQLITE_CONFIG_MUTEX, ...).
  */
 
-#include <pthread.h>
-#include <stdatomic.h>
-#include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
 
 #include "sqlite3.h"
 #include "xtc.h"
-#include "xtc_proc.h"
 #include "xtc_sync.h"
 
-/* ------------------------------------------------------------------ *
- * Owner identity
- *
- * On a loop the holder is a process (fiber); off a loop it is a plain
- * OS thread (startup, the standalone tests).  Recursion accounting
- * compares whichever identity applies.
- * ------------------------------------------------------------------ */
-enum mutex_owner_kind {
-	OWNER_NONE = 0,
-	OWNER_PROC,
-	OWNER_THREAD
-};
-
-struct mutex_owner {
-	enum mutex_owner_kind kind;
-	xtc_pid_t             pid;     /* when kind == OWNER_PROC */
-	pthread_t             thr;     /* when kind == OWNER_THREAD */
-};
-
-static struct mutex_owner
-owner_current(void)
-{
-	struct mutex_owner o;
-	xtc_pid_t self = xtc_self();
-
-	memset(&o, 0, sizeof o);
-	if (!xtc_pid_is_none(self)) {
-		o.kind = OWNER_PROC;
-		o.pid = self;
-	} else {
-		o.kind = OWNER_THREAD;
-		o.thr = pthread_self();
-	}
-	return o;
-}
-
-static int
-owner_eq(const struct mutex_owner *a, const struct mutex_owner *b)
-{
-	if (a->kind != b->kind || a->kind == OWNER_NONE)
-		return 0;
-	if (a->kind == OWNER_PROC)
-		return xtc_pid_eq(a->pid, b->pid);
-	return pthread_equal(a->thr, b->thr);
-}
-
-/* Wraps an xtc_amutex with optional recursive accounting. */
+/* One SQLite mutex == one xtc_amutex.  Static mutexes borrow the
+ * library's process-global pool so repeated allocs return the same
+ * object; dynamic mutexes own a freshly created amutex. */
 struct xsql_mutex {
-	xtc_amutex_t      *am;
-	int                type;
-	int                recursive;     /* 1 if SQLITE_MUTEX_RECURSIVE */
-
-	/* Recursive-only state; protected by the amutex itself. */
-	struct mutex_owner owner;
-	int                count;
+	xtc_amutex_t *am;
+	int           type;
+	int           is_static;
 };
 
-/* Static mutex pool: SQLite expects identical pointers for repeated
- * xMutexAlloc(SQLITE_MUTEX_STATIC_*) calls. */
-#define STATIC_MUTEX_COUNT  16
-static xsql_mutex g_static_mutexes[STATIC_MUTEX_COUNT];
-static _Atomic int   g_static_inited = 0;
-
-static void
-init_static_pool(void)
-{
-	int i;
-	int expected = 0;
-	if (!atomic_compare_exchange_strong(&g_static_inited, &expected, 1))
-		return;
-	for (i = 0; i < STATIC_MUTEX_COUNT; i++) {
-		(void)xtc_amutex_create(&g_static_mutexes[i].am);
-		g_static_mutexes[i].type = i;
-		g_static_mutexes[i].recursive = 1;     /* statics may recurse */
-	}
-}
+#define STATIC_BASE  2   /* SQLITE_MUTEX_STATIC_* start at 2 */
 
 static int
 xMutexInit(void)
 {
-	init_static_pool();
 	return SQLITE_OK;
 }
 
 static int
 xMutexEnd(void)
 {
-	int i;
-	for (i = 0; i < STATIC_MUTEX_COUNT; i++) {
-		xtc_amutex_destroy(g_static_mutexes[i].am);
-		g_static_mutexes[i].am = NULL;
-	}
-	atomic_store(&g_static_inited, 0);
 	return SQLITE_OK;
 }
 
@@ -140,17 +56,31 @@ static xsql_mutex *
 xMutexAlloc(int type)
 {
 	xsql_mutex *m;
+	unsigned flags;
 
-	if (type >= 2 && type < STATIC_MUTEX_COUNT) {
-		init_static_pool();
-		return &g_static_mutexes[type];
+	if (type >= STATIC_BASE) {
+		/* Named static mutex: stable object per type, never freed.
+		 * Wrap the library's static pool slot in a small static
+		 * descriptor (also stable). */
+		static xsql_mutex g_static[(int)XTC_AMUTEX_STATIC_MAX];
+		unsigned slot = (unsigned)(type - STATIC_BASE);
+		if (slot >= XTC_AMUTEX_STATIC_MAX)
+			return NULL;
+		if (g_static[slot].am == NULL) {
+			g_static[slot].am = xtc_amutex_static(slot);
+			g_static[slot].type = type;
+			g_static[slot].is_static = 1;
+		}
+		return g_static[slot].am != NULL ? &g_static[slot] : NULL;
 	}
 
 	m = (xsql_mutex *)calloc(1, sizeof(*m));
-	if (!m) return NULL;
+	if (!m)
+		return NULL;
 	m->type = type;
-	m->recursive = (type == SQLITE_MUTEX_RECURSIVE);
-	if (xtc_amutex_create(&m->am) != XTC_OK) {
+	m->is_static = 0;
+	flags = (type == SQLITE_MUTEX_RECURSIVE) ? XTC_AMUTEX_RECURSIVE : 0;
+	if (xtc_amutex_create_ex(&m->am, flags) != XTC_OK) {
 		free(m);
 		return NULL;
 	}
@@ -160,8 +90,8 @@ xMutexAlloc(int type)
 static void
 xMutexFree(xsql_mutex *m)
 {
-	if (!m) return;
-	if (m->type >= 2 && m->type < STATIC_MUTEX_COUNT) return;
+	if (!m || m->is_static)
+		return;
 	xtc_amutex_destroy(m->am);
 	free(m);
 }
@@ -169,76 +99,39 @@ xMutexFree(xsql_mutex *m)
 static void
 xMutexEnter(xsql_mutex *m)
 {
-	if (!m) return;
-
-	if (m->recursive) {
-		struct mutex_owner self = owner_current();
-		if (owner_eq(&m->owner, &self)) {
-			m->count++;
-			return;
-		}
-		(void)xtc_amutex_lock(m->am, -1);    /* park/block until held */
-		m->owner = self;
-		m->count = 1;
-		return;
-	}
-
-	(void)xtc_amutex_lock(m->am, -1);
+	if (m)
+		(void)xtc_amutex_lock(m->am, -1);   /* park/block until held */
 }
 
 static int
 xMutexTry(xsql_mutex *m)
 {
-	if (!m) return SQLITE_BUSY;
-
-	if (m->recursive) {
-		struct mutex_owner self = owner_current();
-		if (owner_eq(&m->owner, &self)) {
-			m->count++;
-			return SQLITE_OK;
-		}
-		if (xtc_amutex_try_lock(m->am) == XTC_OK) {
-			m->owner = self;
-			m->count = 1;
-			return SQLITE_OK;
-		}
+	if (!m)
 		return SQLITE_BUSY;
-	}
-
-	if (xtc_amutex_try_lock(m->am) == XTC_OK)
-		return SQLITE_OK;
-	return SQLITE_BUSY;
+	return xtc_amutex_try_lock(m->am) == XTC_OK ? SQLITE_OK : SQLITE_BUSY;
 }
 
 static void
 xMutexLeave(xsql_mutex *m)
 {
-	if (!m) return;
-	if (m->recursive) {
-		if (m->count > 1) {
-			m->count--;
-			return;
-		}
-		m->count = 0;
-		m->owner.kind = OWNER_NONE;
-	}
-	(void)xtc_amutex_unlock(m->am);
+	if (m)
+		(void)xtc_amutex_unlock(m->am);
 }
 
+/* Held/Notheld back only SQLite's debug-build asserts (compiled out in
+ * the release amalgamation).  Best-effort: report held. */
 static int
 xMutexHeld(xsql_mutex *m)
 {
-	struct mutex_owner self;
-	if (!m) return 1;
-	if (!m->recursive) return 1;   /* fast mutexes: best-effort assert */
-	self = owner_current();
-	return owner_eq(&m->owner, &self);
+	(void)m;
+	return 1;
 }
 
 static int
 xMutexNotheld(xsql_mutex *m)
 {
-	return !xMutexHeld(m);
+	(void)m;
+	return 0;
 }
 
 static const xsql_mutex_methods mutex_table = {

@@ -58,6 +58,8 @@ typedef struct server_cfg {
 	int         max_databases;
 	const char *storage_path;        /* libxtc-native engine file (NULL = off) */
 	unsigned int storage_frames;     /* xstore buffer-pool frames (0 = default) */
+	int          storage_direct;     /* open the page store with direct I/O */
+	int          storage_adaptive;   /* GA-tuned adaptive writeback */
 	int         shared_handle;       /* 1 default; --no-shared turns off */
 	int         threads;             /* worker loops; 0 = auto (ncpus) */
 	int         verbose;
@@ -296,7 +298,8 @@ usage(const char *prog)
 static int
 parse_args(int argc, char **argv, server_cfg_t *cfg)
 {
-	enum { OPT_NO_SHARED = 1000, OPT_HELP, OPT_STORAGE, OPT_STORAGE_FRAMES };
+	enum { OPT_NO_SHARED = 1000, OPT_HELP, OPT_STORAGE, OPT_STORAGE_FRAMES,
+	       OPT_STORAGE_DIRECT, OPT_STORAGE_ADAPTIVE };
 	static struct option lo[] = {
 		{ "host", required_argument, NULL, 'h' },
 		{ "port", required_argument, NULL, 'p' },
@@ -308,6 +311,8 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		{ "max-databases", required_argument, NULL, 'D' },
 		{ "storage", required_argument, NULL, OPT_STORAGE },
 		{ "storage-frames", required_argument, NULL, OPT_STORAGE_FRAMES },
+		{ "storage-direct", no_argument, NULL, OPT_STORAGE_DIRECT },
+		{ "storage-adaptive", no_argument, NULL, OPT_STORAGE_ADAPTIVE },
 		{ "no-shared", no_argument, NULL, OPT_NO_SHARED },
 		{ "threads", required_argument, NULL, 't' },
 		{ "verbose", no_argument, NULL, 'v' },
@@ -330,6 +335,8 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		case 't': cfg->threads = atoi(optarg); break;
 		case OPT_STORAGE: cfg->storage_path = optarg; break;
 		case OPT_STORAGE_FRAMES: cfg->storage_frames = (unsigned)atoi(optarg); break;
+		case OPT_STORAGE_DIRECT: cfg->storage_direct = 1; break;
+		case OPT_STORAGE_ADAPTIVE: cfg->storage_adaptive = 1; break;
 		case 'v': cfg->verbose = 1; break;
 		case OPT_NO_SHARED: cfg->shared_handle = 0; break;
 		case OPT_HELP:
@@ -407,13 +414,15 @@ main(int argc, char **argv)
 	 * background procs (WAL writer, page provider, trickler) start
 	 * once the loop exists (after xtc_app_start). */
 	if (cfg.storage_path != NULL) {
+		sx_storage_set_io(cfg.storage_direct, cfg.storage_adaptive);
 		rc = sx_storage_open(cfg.storage_path, cfg.storage_frames);
 		if (rc != SX_OK) {
 			fprintf(stderr, "sx_storage_open(%s) failed: %d\n",
 			        cfg.storage_path, rc);
 			return 1;
 		}
-		XTC_LOG_INFO_F("xstore engine open: %s", cfg.storage_path);
+		XTC_LOG_INFO_F("xstore engine open: %s (direct=%d adaptive=%d)",
+		    cfg.storage_path, cfg.storage_direct, cfg.storage_adaptive);
 	}
 
 	/* xtc_res. */
