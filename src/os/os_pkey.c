@@ -19,10 +19,9 @@
 #if defined(__linux__) && (defined(__x86_64__) || defined(__i386__))
 
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <cpuid.h>
-#include <signal.h>
-#include <setjmp.h>
-#include <string.h>
+#include <unistd.h>
 #include <pthread.h>
 
 /*
@@ -30,25 +29,15 @@
  * guarded probe.  CPUID OSPKE and a successful pkey_alloc() are both
  * necessary but NOT sufficient: a kernel can support the pkey syscalls
  * (and even report OSPKE) while the WRPKRU instruction that glibc's
- * pkey_set() executes in userspace still faults with SIGILL -- seen on
- * virtualized CI runners.  So we additionally execute a real pkey_set
- * under a temporary SIGILL handler: if WRPKRU traps we longjmp out and
- * report "unsupported", so callers never issue WRPKRU on a host where
- * it faults.  The probe runs at most once (pthread_once).
+ * pkey_set() executes in userspace still faults -- seen on virtualized
+ * CI runners.  So a forked child executes a real pkey_set (the WRPKRU
+ * path) and _exit(0)s only if it survives; if WRPKRU traps, the child
+ * dies on the signal and the parent sees an abnormal status and
+ * reports "unsupported".  A child is used rather than a signal handler
+ * so a trap can never disturb the caller's process.  Runs at most once.
  */
 static int            g_pkey_ok;
 static pthread_once_t g_pkey_once = PTHREAD_ONCE_INIT;
-static sigjmp_buf     g_pkey_jmp;
-static volatile sig_atomic_t g_pkey_probing;
-
-static void
-pkey_sigill(int sig)
-{
-	(void)sig;
-	if (g_pkey_probing)
-		siglongjmp(g_pkey_jmp, 1);   /* WRPKRU trapped: not usable */
-	_exit(128 + 4);                     /* a real SIGILL elsewhere */
-}
 
 static int
 x86_ospke(void)
@@ -64,8 +53,8 @@ x86_ospke(void)
 static void
 pkey_probe(void)
 {
-	struct sigaction sa, old;
-	int k;
+	pid_t pid;
+	int status, k;
 
 	g_pkey_ok = 0;
 	if (!x86_ospke())
@@ -73,22 +62,23 @@ pkey_probe(void)
 	k = pkey_alloc(0, 0);
 	if (k < 0)
 		return;                       /* kernel without pkey support */
-
-	/* OSPKE and the syscall agree; confirm WRPKRU itself does not trap. */
-	memset(&sa, 0, sizeof sa);
-	sa.sa_handler = pkey_sigill;
-	sa.sa_flags = SA_NODEFER;
-	sigemptyset(&sa.sa_mask);
-	if (sigaction(SIGILL, &sa, &old) == 0) {
-		g_pkey_probing = 1;
-		if (sigsetjmp(g_pkey_jmp, 1) == 0) {
-			(void)pkey_set(k, 0);        /* the WRPKRU path */
-			g_pkey_ok = 1;              /* survived: usable */
-		}
-		g_pkey_probing = 0;
-		(void)sigaction(SIGILL, &old, NULL);
-	}
 	(void)pkey_free(k);
+
+	/* OSPKE and the syscall agree; confirm WRPKRU does not trap by
+	 * running it in a throwaway child. */
+	pid = fork();   /* XTC_BLOCKING_OK: one-shot capability probe, not a hot path */
+	if (pid == 0) {
+		int ck = pkey_alloc(0, 0);
+		if (ck < 0)
+			_exit(1);
+		(void)pkey_set(ck, 0);        /* WRPKRU; a trap kills only the child */
+		_exit(0);                     /* survived: usable */
+	} else if (pid > 0) {
+		if (waitpid(pid, &status, 0) == pid &&
+		    WIFEXITED(status) && WEXITSTATUS(status) == 0)
+			g_pkey_ok = 1;
+	}
+	/* fork failure or any abnormal child exit -> not usable. */
 }
 
 int
