@@ -197,9 +197,11 @@ listener_proc(void *arg)
 			}
 
 			{
-				int flag = 1;
-				setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
-				           &flag, sizeof flag);
+				/* Disable Nagle on the accepted fd via the
+				 * portable helper (libxtc handles the per-OS
+				 * setsockopt), then make it non-blocking. */
+				xtc_tcp_opts_t topts = { .nodelay = 1 };
+				(void)xtc_net_apply_tcp_opts(fd, &topts);
 				xtc_net_setnonblock(fd);
 			}
 

@@ -31,6 +31,8 @@
 
 #include "bitcask.h"
 
+#include "os_time.h"     /* __os_clock_mono: portable monotonic clock */
+
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -100,9 +102,12 @@ static uint64_t get_u64(const uint8_t *p) {
 static int64_t
 now_ns(void)
 {
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+	int64_t ns = 0;
+	/* Portable monotonic nanoseconds: clock_gettime(CLOCK_MONOTONIC)
+	 * on POSIX, mach_continuous_time on macOS, QueryPerformanceCounter
+	 * on Windows -- libxtc smooths the platform difference. */
+	(void)__os_clock_mono(&ns);
+	return ns;
 }
 
 /* ---- in-memory index ----------------------------------------- */

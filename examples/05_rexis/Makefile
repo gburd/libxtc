@@ -48,7 +48,7 @@ TARGET = rexis-server-xtc
 all: $(TARGET) test_bitcask test_db_persist test_metrics
 
 test_bitcask: test_bitcask.c bitcask.c bitcask.h
-	$(CC) $(CFLAGS) -o $@ test_bitcask.c bitcask.c -lpthread
+	$(CC) $(CFLAGS) -o $@ test_bitcask.c bitcask.c $(LDFLAGS)
 
 test_db_persist: test_db_persist.c db.c bitcask.c db.h bitcask.h
 	$(CC) $(CFLAGS) -o $@ test_db_persist.c db.c proto.c expire.c bitcask.c $(LDFLAGS)
