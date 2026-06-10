@@ -70,6 +70,7 @@
 #include <ws2tcpip.h>
 #include <mswsock.h>
 #include <windows.h>
+#include <winioctl.h>     /* CTL_CODE, METHOD_BUFFERED, FILE_ANY_ACCESS (AFD poll IOCTL) */
 #include <winternl.h>
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
