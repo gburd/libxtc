@@ -25,6 +25,16 @@ test_guard(const MunitParameter p[], void *d)
 #include <sys/wait.h>
 #include <unistd.h>
 
+/* Detect AddressSanitizer on both gcc (__SANITIZE_ADDRESS__) and clang
+ * (__has_feature(address_sanitizer)). */
+#if defined(__SANITIZE_ADDRESS__)
+#  define XTC_TEST_ASAN 1
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define XTC_TEST_ASAN 1
+#  endif
+#endif
+
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 
@@ -65,7 +75,17 @@ test_guard(const MunitParameter p[], void *d)
 	munit_assert_int(waitpid(pid, &st, 0), ==, pid);
 	/* The child must have died from a memory fault, not exited. */
 	munit_assert_true(WIFSIGNALED(st));
+#if defined(XTC_TEST_ASAN)
+	/* Under AddressSanitizer the guard-page hit is intercepted by
+	 * ASan's own SEGV handler, which reports DEADLYSIGNAL and aborts
+	 * (SIGABRT) instead of letting SIGSEGV/SIGBUS propagate.  Either
+	 * way the overflow was caught rather than silently scribbling, so
+	 * accept the abort too. */
+	munit_assert_true(WTERMSIG(st) == SIGSEGV || WTERMSIG(st) == SIGBUS ||
+	    WTERMSIG(st) == SIGABRT);
+#else
 	munit_assert_true(WTERMSIG(st) == SIGSEGV || WTERMSIG(st) == SIGBUS);
+#endif
 	return MUNIT_OK;
 }
 #endif
