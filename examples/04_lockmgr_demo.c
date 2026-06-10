@@ -231,10 +231,9 @@ static void *
 txn_a(void *arg)
 {
 	xtc_locker_t l = *(xtc_locker_t *)arg;
-	struct timespec sleep_ns = { 0, 100 * 1000 * 1000 };
 	int rc;
 	(void)xtc_lock_get(g_mgr, l, "A", 1, XTC_LOCK_X, 0);
-	(void)nanosleep(&sleep_ns, NULL);
+	(void)__os_sleep_ns(100 * 1000 * 1000);   /* hold the lock, force the cycle */
 	rc = xtc_lock_get(g_mgr, l, "B", 1, XTC_LOCK_X,
 	    5LL * 1000 * 1000 * 1000);
 	atomic_store(&g_a_rc, rc);
@@ -249,10 +248,9 @@ static void *
 txn_b(void *arg)
 {
 	xtc_locker_t l = *(xtc_locker_t *)arg;
-	struct timespec sleep_ns = { 0, 100 * 1000 * 1000 };
 	int rc;
 	(void)xtc_lock_get(g_mgr, l, "B", 1, XTC_LOCK_X, 0);
-	(void)nanosleep(&sleep_ns, NULL);
+	(void)__os_sleep_ns(100 * 1000 * 1000);   /* hold the lock, force the cycle */
 	rc = xtc_lock_get(g_mgr, l, "A", 1, XTC_LOCK_X,
 	    5LL * 1000 * 1000 * 1000);
 	atomic_store(&g_b_rc, rc);
