@@ -85,6 +85,7 @@ struct xtc_tls_ctx {
 	int                               verify_peer;
 };
 
+
 struct xtc_tls {
 	xtc_tls_ctx_t    *ctx;
 	int               fd;
@@ -93,6 +94,8 @@ struct xtc_tls {
 	int               wants_read;
 	int               wants_write;
 };
+
+#include "tls_common.h"   /* after struct xtc_tls: shared want-flag accessors */
 
 /* -------------------------------------------------------------------------
  * One-time library initialisation.  GnuTLS 3.3+ auto-initialises via a
@@ -352,8 +355,7 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 	t->ctx            = ctx;
 	t->fd             = fd;
 	t->handshake_done = 0;
-	t->wants_read     = 0;
-	t->wants_write    = 0;
+	xtc_tls_clear_wants(t);
 
 	flags = GNUTLS_NONBLOCK |
 	    ((ctx->role == XTC_TLS_SERVER) ? GNUTLS_SERVER : GNUTLS_CLIENT);
@@ -417,8 +419,7 @@ xtc_tls_handshake(xtc_tls_t *tls)
 	if (tls == NULL)
 		return XTC_E_INVAL;
 
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	rc = gnutls_handshake(tls->session);
 	if (rc == GNUTLS_E_SUCCESS) {
@@ -461,8 +462,7 @@ xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 		return XTC_E_INVAL;
 
 	*out_n           = 0;
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	n = gnutls_record_recv(tls->session, buf, buflen);
 	if (n >= 0) {
@@ -481,8 +481,7 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
 		return XTC_E_INVAL;
 
 	*out_n           = 0;
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	n = gnutls_record_send(tls->session, buf, buflen);
 	if (n >= 0) {
@@ -497,21 +496,7 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
  * PUBLIC: int  xtc_tls_wants_write __P((const xtc_tls_t *));
  * ----------------------------------------------------------------------- */
 
-int
-xtc_tls_wants_read(const xtc_tls_t *tls)
-{
-	if (tls == NULL)
-		return 0;
-	return tls->wants_read;
-}
-
-int
-xtc_tls_wants_write(const xtc_tls_t *tls)
-{
-	if (tls == NULL)
-		return 0;
-	return tls->wants_write;
-}
+XTC_TLS_DEFINE_WANTS_ACCESSORS
 
 /* -------------------------------------------------------------------------
  * PUBLIC: int  xtc_tls_shutdown __P((xtc_tls_t *));
@@ -529,8 +514,7 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 	if (tls == NULL)
 		return XTC_E_INVAL;
 
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	rc = gnutls_bye(tls->session, GNUTLS_SHUT_WR);
 	if (rc == GNUTLS_E_SUCCESS)

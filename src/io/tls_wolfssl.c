@@ -73,6 +73,7 @@ struct xtc_tls_ctx {
 	char            *alpn;   /* comma-joined protocol names; NULL if unset */
 };
 
+
 struct xtc_tls {
 	xtc_tls_ctx_t  *ctx;
 	int             fd;
@@ -80,6 +81,8 @@ struct xtc_tls {
 	int             wants_read;
 	int             wants_write;
 };
+
+#include "tls_common.h"   /* after struct xtc_tls: shared want-flag accessors */
 
 /* -------------------------------------------------------------------------
  * One-time library initialisation.
@@ -325,8 +328,7 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 
 	t->ctx         = ctx;
 	t->fd          = fd;
-	t->wants_read  = 0;
-	t->wants_write = 0;
+	xtc_tls_clear_wants(t);
 
 	t->ssl = wolfSSL_new(ctx->ctx);
 	if (t->ssl == NULL) {
@@ -387,8 +389,7 @@ xtc_tls_handshake(xtc_tls_t *tls)
 	if (tls == NULL)
 		return XTC_E_INVAL;
 
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	rc = wolfSSL_negotiate(tls->ssl);
 	if (rc == WOLFSSL_SUCCESS)
@@ -412,8 +413,7 @@ xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 		return XTC_E_INVAL;
 
 	*out_n           = 0;
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	rc = wolfSSL_read(tls->ssl, buf, (int)buflen);
 	if (rc > 0) {
@@ -439,8 +439,7 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
 		return XTC_E_INVAL;
 
 	*out_n           = 0;
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	rc = wolfSSL_write(tls->ssl, buf, (int)buflen);
 	if (rc > 0) {
@@ -457,21 +456,7 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
  * PUBLIC: int  xtc_tls_wants_write __P((const xtc_tls_t *));
  * ----------------------------------------------------------------------- */
 
-int
-xtc_tls_wants_read(const xtc_tls_t *tls)
-{
-	if (tls == NULL)
-		return 0;
-	return tls->wants_read;
-}
-
-int
-xtc_tls_wants_write(const xtc_tls_t *tls)
-{
-	if (tls == NULL)
-		return 0;
-	return tls->wants_write;
-}
+XTC_TLS_DEFINE_WANTS_ACCESSORS
 
 /* -------------------------------------------------------------------------
  * PUBLIC: int  xtc_tls_shutdown __P((xtc_tls_t *));
@@ -489,8 +474,7 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 	if (tls == NULL)
 		return XTC_E_INVAL;
 
-	tls->wants_read  = 0;
-	tls->wants_write = 0;
+	xtc_tls_clear_wants(tls);
 
 	rc = wolfSSL_shutdown(tls->ssl);
 	if (rc == WOLFSSL_SUCCESS || rc == WOLFSSL_SHUTDOWN_NOT_DONE)
