@@ -172,8 +172,9 @@ jobs:
               # The Ubuntu libmbedtls-dev is 2.x; tls_mbedtls.c uses the
               # 3.x API (mbedtls_ssl_protocol_version, 3-arg
               # pk_parse_keyfile), so build mbedTLS 3.x from source.
+              # 3.6 pulls its build framework in as a submodule.
               sudo apt-get install -y cmake
-              git clone --depth 1 --branch v3.6.2 \
+              git clone --depth 1 --branch v3.6.2 --recurse-submodules \
                 https://github.com/Mbed-TLS/mbedtls /tmp/mbed
               cmake -S /tmp/mbed -B /tmp/mbed/build -DCMAKE_BUILD_TYPE=Release \
                     -DENABLE_TESTING=Off -DENABLE_PROGRAMS=Off \
@@ -202,9 +203,12 @@ jobs:
             boringssl)
               SSL_A=$(find /tmp/bssl/build -name libssl.a | head -1)
               CRY_A=$(find /tmp/bssl/build -name libcrypto.a | head -1)
+              # BoringSSL is C++; -lstdc++ must come AFTER its .a files on
+              # the link line, so append it via LDFLAGS (which the test
+              # link rule places after libxtc.a) rather than LIBS.
               CPPFLAGS="-I/tmp/bssl/include" \
               LDFLAGS="-L$(dirname "$SSL_A") -L$(dirname "$CRY_A")" \
-              LIBS="-lstdc++" \
+              LIBS="-lssl -lcrypto -lstdc++" \
                 ../dist/configure --with-tls=boringssl ;;
             mbedtls)
               LIB=$(dirname "$(find /tmp/mbed/build -name libmbedtls.a | head -1)")
