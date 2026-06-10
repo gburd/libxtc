@@ -156,6 +156,7 @@ struct bm {
 	xtc_pid_t         tr_pid;
 	_Atomic uint64_t  dirty_clock;   /* stamps dirty_seq on clean->dirty */
 	_Atomic uint64_t  s_trickled;    /* pages written by the trickler */
+	_Atomic uint64_t  s_tr_writes;   /* trickler pwrite calls (coalescing) */
 
 	/* prefetch ring: read-ahead requests, drained by the provider so a
 	 * scanning fiber never blocks on a prefetch (best-effort). */
@@ -541,6 +542,14 @@ evict_one(bm_t *bm)
 	 * (scan_resist off) cools eagerly on the first sweep.
 	 */
 	int force_cool = !bm->scan_resist;
+	/*
+	 * Decouple the foreground from synchronous writeback: prefer to
+	 * reclaim an ALREADY-CLEAN victim and leave dirty pages for the
+	 * background trickler, so a fix that misses is not blocked behind a
+	 * device write.  Only when a full sweep finds no clean victim do we
+	 * fall back to flushing a dirty one (to guarantee progress).
+	 */
+	int prefer_clean = 1;
 
 	for (;;) {
 	  for (scanned = 0; scanned < bm->n_frames * 2u; scanned++) {
@@ -564,8 +573,9 @@ evict_one(bm_t *bm)
 			}
 			if (st != BM_COOL) continue;
 			if (atomic_load_explicit(&f->dirty, memory_order_acquire)) {
-				(void)flush_frame(bm, f);
-				continue;
+				if (!prefer_clean)
+					(void)flush_frame(bm, f);  /* fallback write-out */
+				continue;          /* else leave it for the trickler */
 			}
 			if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
 				continue;
@@ -609,8 +619,9 @@ evict_one(bm_t *bm)
 		if (st != BM_COOL)
 			continue;
 		if (atomic_load_explicit(&f->dirty, memory_order_acquire)) {
-			(void)flush_frame(bm, f);   /* proactive write-out */
-			continue;                   /* revisit to evict once clean */
+			if (!prefer_clean)
+				(void)flush_frame(bm, f);   /* fallback write-out */
+			continue;                       /* else leave it for the trickler */
 		}
 		if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
 			continue;
@@ -635,9 +646,10 @@ evict_one(bm_t *bm)
 		free_push(bm, f);                   /* clears the reservation */
 		return 1;
 	  }
-	  if (force_cool)
-		return 0;        /* a full sweep cooling freely still found nothing */
-	  force_cool = 1;   /* no COOL victim available; cool HOT and retry */
+	  if (!force_cool) { force_cool = 1; continue; }   /* cool HOT for victims */
+	  if (prefer_clean) { prefer_clean = 0; continue; } /* no clean victim:
+	                                                     * allow a dirty flush */
+	  return 0;          /* nothing reclaimable (all pinned / in flight) */
 	}
 }
 
@@ -1551,6 +1563,28 @@ tr_release(bm_frame_t *f, int wrote_ok)
 	atomic_store_explicit(&f->io_busy, 0, memory_order_release);
 }
 
+/* Write one coalesced run [base, run_len pages) at page pid0 and release
+ * its frames.  Counts one pwrite call (for the coalescing ratio).
+ * Returns pages durably written. */
+static int
+tr_emit_run(bm_t *bm, uint8_t *base, int run_len, bm_pid_t pid0,
+            bm_frame_t **run_f)
+{
+	off_t off = (off_t)pid0 * (off_t)bm->page_size;
+	int len = run_len * (int)bm->page_size, k, ok, written = 0;
+	ok = xtc_aio_pwrite(bm->fd, base, len, off) == len;
+	atomic_fetch_add_explicit(&bm->s_tr_writes, 1, memory_order_relaxed);
+	for (k = 0; k < run_len; k++) {
+		tr_release(run_f[k], ok);
+		if (ok) {
+			written++;
+			atomic_fetch_add_explicit(&bm->s_flushed, 1,
+			    memory_order_relaxed);
+		}
+	}
+	return written;
+}
+
 /* Flush a priority-selected batch with elevator scheduling + write
  * coalescing.  `sel[0..nsel)` are the chosen victims (any order on
  * entry); they are sorted by page number, claimed/snapshotted into the
@@ -1575,22 +1609,10 @@ tr_flush_batch(bm_t *bm, struct tr_cand *sel, int nsel, uint8_t *wbuf,
 		if (run_len > 0 && f->pid == prev_pid + 1) {
 			run_f[run_len++] = f;        /* extend the contiguous run */
 		} else {
-			if (run_len > 0) {           /* emit the finished run */
-				off_t off = (off_t)run_pid0 * (off_t)psz;
-				int len = run_len * (int)psz, k, ok;
-				ok = xtc_aio_pwrite(bm->fd,
+			if (run_len > 0)             /* emit the finished run */
+				written += tr_emit_run(bm,
 				    wbuf + (size_t)(slot - run_len) * psz,
-				    len, off) == len;
-				for (k = 0; k < run_len; k++) {
-					tr_release(run_f[k], ok);
-					if (ok) {
-						written++;
-						atomic_fetch_add_explicit(
-						    &bm->s_flushed, 1,
-						    memory_order_relaxed);
-					}
-				}
-			}
+				    run_len, run_pid0, run_f);
 			run_pid0 = f->pid;           /* start a new run at this slot */
 			run_f[0] = f;
 			run_len = 1;
@@ -1598,20 +1620,10 @@ tr_flush_batch(bm_t *bm, struct tr_cand *sel, int nsel, uint8_t *wbuf,
 		prev_pid = f->pid;
 		slot++;
 	}
-	if (run_len > 0) {                           /* emit the trailing run */
-		off_t off = (off_t)run_pid0 * (off_t)psz;
-		int len = run_len * (int)psz, k, ok;
-		ok = xtc_aio_pwrite(bm->fd,
-		    wbuf + (size_t)(slot - run_len) * psz, len, off) == len;
-		for (k = 0; k < run_len; k++) {
-			tr_release(run_f[k], ok);
-			if (ok) {
-				written++;
-				atomic_fetch_add_explicit(&bm->s_flushed, 1,
-				    memory_order_relaxed);
-			}
-		}
-	}
+	if (run_len > 0)                             /* emit the trailing run */
+		written += tr_emit_run(bm,
+		    wbuf + (size_t)(slot - run_len) * psz, run_len, run_pid0,
+		    run_f);
 	return written;
 }
 static void
@@ -1797,6 +1809,7 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->free_frames = atomic_load_explicit(&bm->free_n, memory_order_relaxed);
 	out->prefetched = atomic_load_explicit(&bm->s_prefetched, memory_order_relaxed);
 	out->trickled = atomic_load_explicit(&bm->s_trickled, memory_order_relaxed);
+	out->tr_writes = atomic_load_explicit(&bm->s_tr_writes, memory_order_relaxed);
 	out->dw_repaired = atomic_load_explicit(&bm->s_dw_repaired, memory_order_relaxed);
 	out->freed = atomic_load_explicit(&bm->s_freed, memory_order_relaxed);
 	out->reissued = atomic_load_explicit(&bm->s_reissued, memory_order_relaxed);
