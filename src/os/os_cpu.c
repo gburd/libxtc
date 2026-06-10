@@ -24,6 +24,21 @@
 # endif
 #endif
 
+#if defined(__APPLE__)
+# include <sys/sysctl.h>
+
+/* Read an integer hw.* sysctl by name; returns -1 if unavailable. */
+static int
+__darwin_sysctl_int(const char *name)
+{
+	int64_t val = 0;
+	size_t len = sizeof val;
+	if (sysctlbyname(name, &val, &len, NULL, 0) != 0)
+		return -1;
+	return (int)val;
+}
+#endif
+
 /*
  * PUBLIC: int __os_ncpus __P((void));
  */
@@ -39,6 +54,52 @@ __os_ncpus(void)
 	if (n < 1) return 1;
 	return (int)n;
 #endif
+}
+
+/*
+ * Number of performance ("P") logical CPUs.  On Apple Silicon the
+ * scheduler exposes asymmetric "perf levels": level 0 is the
+ * highest-performance class (P-cores), higher indices are slower
+ * efficiency classes (E-cores).  A latency-sensitive, thread-per-core
+ * runtime wants to know how many P-cores exist so it can size or bias
+ * its reactor pool toward them.  On hardware with a single perf level
+ * (Intel Macs, and every non-Apple platform) every CPU is equivalent,
+ * so this returns the full __os_ncpus() count.
+ *
+ * PUBLIC: int __os_ncpus_perf __P((void));
+ */
+int
+__os_ncpus_perf(void)
+{
+#if defined(__APPLE__)
+	int nlevels = __darwin_sysctl_int("hw.nperflevels");
+	if (nlevels > 1) {
+		int p = __darwin_sysctl_int("hw.perflevel0.logicalcpu");
+		if (p > 0) return p;
+	}
+#endif
+	return __os_ncpus();
+}
+
+/*
+ * Number of efficiency ("E") logical CPUs: the CPUs that are NOT in
+ * the top perf level.  Returns 0 on symmetric hardware (no distinct
+ * efficiency class).
+ *
+ * PUBLIC: int __os_ncpus_effic __P((void));
+ */
+int
+__os_ncpus_effic(void)
+{
+#if defined(__APPLE__)
+	int nlevels = __darwin_sysctl_int("hw.nperflevels");
+	if (nlevels > 1) {
+		int total = __os_ncpus();
+		int perf  = __os_ncpus_perf();
+		if (total > perf) return total - perf;
+	}
+#endif
+	return 0;
 }
 
 /*

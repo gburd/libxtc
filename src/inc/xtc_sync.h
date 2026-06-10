@@ -124,12 +124,37 @@ typedef struct xtc_amutex xtc_amutex_t;
  * that is not on a loop blocks on a condvar as a fallback.
  *
  * PUBLIC: int  xtc_amutex_create __P((xtc_amutex_t **));
+ * PUBLIC: int  xtc_amutex_create_ex __P((xtc_amutex_t **, unsigned));
+ * PUBLIC: xtc_amutex_t *xtc_amutex_static __P((unsigned));
  * PUBLIC: void xtc_amutex_destroy __P((xtc_amutex_t *));
  * PUBLIC: int  xtc_amutex_lock __P((xtc_amutex_t *, int64_t));
  * PUBLIC: int  xtc_amutex_try_lock __P((xtc_amutex_t *));
  * PUBLIC: int  xtc_amutex_unlock __P((xtc_amutex_t *));
  */
 int  xtc_amutex_create(xtc_amutex_t **out);
+
+/*
+ * Recursive variant: with XTC_AMUTEX_RECURSIVE the same owner may
+ * re-lock without deadlocking; the lock is released only when the
+ * matching number of unlocks have run.  Ownership is tracked by FIBER
+ * identity on a loop (so two fibers sharing one OS thread are distinct
+ * owners) and by OS thread off a loop.  Owner/count are maintained
+ * under the mutex's own lock, so the recursion accounting is race-free
+ * across loops.
+ */
+#define XTC_AMUTEX_RECURSIVE 0x1u
+int  xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags);
+
+/*
+ * Process-global static mutexes.  Returns a stable, lazily-created
+ * recursive amutex for `slot` (0 .. XTC_AMUTEX_STATIC_MAX-1); repeated
+ * calls with the same slot return the same object.  Never destroyed by
+ * the caller.  Intended for adapters (e.g. a SQLite mutex vtable) that
+ * need named, never-freed mutexes.
+ */
+#define XTC_AMUTEX_STATIC_MAX 32u
+xtc_amutex_t *xtc_amutex_static(unsigned slot);
+
 void xtc_amutex_destroy(xtc_amutex_t *m);
 int  xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns);
 int  xtc_amutex_try_lock(xtc_amutex_t *m);

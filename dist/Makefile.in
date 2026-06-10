@@ -62,6 +62,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/os/os_tls.c \
 	$(srcdir)/../src/os/os_mutex.c \
 	$(srcdir)/../src/os/os_cpu.c \
+	$(srcdir)/../src/os/os_pkey.c \
 	$(srcdir)/../src/os/os_backtrace.c \
 	$(srcdir)/../src/os/os_file.c \
 	$(srcdir)/../src/io/io_common.c \
@@ -95,6 +96,8 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/alloc_audit.c \
 	$(srcdir)/../src/ptc/mctx.c \
 	$(srcdir)/../src/ptc/rcu.c \
+	$(srcdir)/../src/ptc/dio_sched.c \
+	$(srcdir)/../src/ptc/iosched.c \
 	$(srcdir)/../src/ptc/dump.c \
 	$(srcdir)/../src/ptc/aio.c \
 	$(srcdir)/../src/orc/sup.c \
@@ -125,6 +128,7 @@ LIB_OBJS	= \
 	os_tls.o \
 	os_mutex.o \
 	os_cpu.o \
+	os_pkey.o \
 	os_backtrace.o \
 	os_file.o \
 	io_common.o \
@@ -158,6 +162,8 @@ LIB_OBJS	= \
 	alloc_audit.o \
 	mctx.o \
 	rcu.o \
+	dio_sched.o \
+	iosched.o \
 	dump.o \
 	aio.o \
 	sup.o \
@@ -222,24 +228,32 @@ TESTS_SH	= \
 
 TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
+		  test_cpu \
 		  test_thread test_tls test_mutex test_fs \
+		  test_dio \
+		  test_pkey \
 		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_net test_net_udp test_net_frame \
 		  test_loop test_task test_waker test_timer test_io_integration \
 		  test_async \
 		  test_aio \
 		  test_fctx \
+		  test_stack_guard \
 		  test_exec test_cross_wake test_deque test_steal \
 		  test_chan test_chan_mpmc_bcast \
 		  test_proc \
 		  test_proc_wait_fd \
 		  test_recv_correlate \
 		  test_sync \
+		  test_amutex_xloop \
+		  test_dio_sched \
+		  test_iosched \
 		  test_blocking test_alloc_audit \
 		  test_sup \
 		  test_reg \
 		  test_svr \
 		  test_app \
 		  test_osproc \
+		  test_isolated \
 		  test_mctx \
 		  test_slab \
 		  test_slab_shm \
@@ -410,6 +424,9 @@ exec.o: $(srcdir)/../src/evt/exec.c xtc_config.h
 os_cpu.o: $(srcdir)/../src/os/os_cpu.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_cpu.c
 
+os_pkey.o: $(srcdir)/../src/os/os_pkey.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_pkey.c
+
 os_backtrace.o: $(srcdir)/../src/os/os_backtrace.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_backtrace.c
 
@@ -463,6 +480,12 @@ mctx.o: $(srcdir)/../src/ptc/mctx.c xtc_config.h
 
 rcu.o: $(srcdir)/../src/ptc/rcu.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/rcu.c
+
+dio_sched.o: $(srcdir)/../src/ptc/dio_sched.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/dio_sched.c
+
+iosched.o: $(srcdir)/../src/ptc/iosched.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/iosched.c
 
 sup.o: $(srcdir)/../src/orc/sup.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/sup.c
@@ -628,10 +651,28 @@ test_time: $(srcdir)/../test/m1/test_time.c \
 		-o $@ $(srcdir)/../test/m1/test_time.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_cpu: $(srcdir)/../test/m1/test_cpu.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_cpu.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_fs: $(srcdir)/../test/m1/test_fs.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
 		-o $@ $(srcdir)/../test/m1/test_fs.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_dio: $(srcdir)/../test/m1/test_dio.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_dio.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_pkey: $(srcdir)/../test/m1/test_pkey.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_pkey.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_thread: $(srcdir)/../test/m1/test_thread.c \
@@ -751,6 +792,12 @@ test_fctx: $(srcdir)/../test/m4/test_fctx.c \
 		-o $@ $(srcdir)/../test/m4/test_fctx.c \
 		$(srcdir)/../test/m4/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_stack_guard: $(srcdir)/../test/m4/test_stack_guard.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m4 \
+		-o $@ $(srcdir)/../test/m4/test_stack_guard.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 # M5 tests.
 test_exec: $(srcdir)/../test/m5/test_exec.c \
 		$(srcdir)/../test/m5/munit.c $(STATIC_LIB)
@@ -822,6 +869,24 @@ test_sync: $(srcdir)/../test/m9/test_sync.c \
 		-o $@ $(srcdir)/../test/m9/test_sync.c \
 		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_amutex_xloop: $(srcdir)/../test/m9/test_amutex_xloop.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
+		-o $@ $(srcdir)/../test/m9/test_amutex_xloop.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_dio_sched: $(srcdir)/../test/m9/test_dio_sched.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
+		-o $@ $(srcdir)/../test/m9/test_dio_sched.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_iosched: $(srcdir)/../test/m9/test_iosched.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
+		-o $@ $(srcdir)/../test/m9/test_iosched.c \
+		$(srcdir)/../test/m9/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_blocking: $(srcdir)/../test/m9/test_blocking.c \
 		$(srcdir)/../test/m9/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m9 \
@@ -863,6 +928,12 @@ test_osproc: $(srcdir)/../test/m10/test_osproc.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
 		-o $@ $(srcdir)/../test/m10/test_osproc.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_isolated: $(srcdir)/../test/m10/test_isolated.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_isolated.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M11 tests.
@@ -1068,6 +1139,7 @@ uninstall:
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
+	rm -rf *.dSYM
 
 distclean: clean
 	$(RM) Makefile xtc_config.h xtc.pc config.log config.status

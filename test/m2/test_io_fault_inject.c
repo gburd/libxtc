@@ -49,8 +49,10 @@ test_calloc_fail(const MunitParameter p[], void *d)
 }
 
 /* ----- pipe fail path ------------------------------------ */
-
-#if !defined(_WIN32)
+/* The self-pipe (and its fcntl calls) exist only on POSIX backends
+ * that use it for wakeup.  kqueue uses EVFILT_USER and has no pipe, so
+ * these injection points are never reached there. */
+#if !defined(_WIN32) && !defined(XTC_IO_BACKEND_KQUEUE)
 static MunitResult
 test_pipe_fail(const MunitParameter p[], void *d)
 {
@@ -134,7 +136,7 @@ test_normal_after_inject(const MunitParameter p[], void *d)
 
 static MunitTest tests[] = {
 	{ "/calloc_fail",         test_calloc_fail,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(XTC_IO_BACKEND_KQUEUE)
 	{ "/pipe_fail",           test_pipe_fail,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fcntl_fail",          test_fcntl_fail,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
