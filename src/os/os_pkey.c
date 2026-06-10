@@ -19,11 +19,36 @@
 #if defined(__linux__) && (defined(__x86_64__) || defined(__i386__))
 
 #include <sys/mman.h>
+#include <cpuid.h>
+
+/*
+ * True only when the OS has actually enabled protection keys in CR4
+ * (CPUID.(EAX=7,ECX=0).ECX bit 4, OSPKE).  pkey_alloc() succeeding is
+ * NOT sufficient: the kernel can support the syscall while CR4.PKE is
+ * clear (notably under hypervisors that expose the PKU CPUID bit but
+ * not OSPKE), and then the WRPKRU instruction that glibc's pkey_set()
+ * executes in userspace faults with SIGILL.  Gate on OSPKE so we never
+ * issue WRPKRU on a CPU/OS that has not enabled it.
+ */
+static int
+x86_ospke(void)
+{
+	unsigned eax, ebx, ecx, edx;
+
+	if (__get_cpuid_max(0, NULL) < 7)
+		return 0;
+	__cpuid_count(7, 0, eax, ebx, ecx, edx);
+	return (ecx & (1u << 4)) != 0;   /* OSPKE: CR4.PKE is set */
+}
 
 int
 xtc_pkey_supported(void)
 {
-	int k = pkey_alloc(0, 0);
+	int k;
+
+	if (!x86_ospke())
+		return 0;             /* PKU not enabled by the OS -- WRPKRU would trap */
+	k = pkey_alloc(0, 0);
 	if (k < 0)
 		return 0;             /* CPU/kernel without PKU */
 	(void)pkey_free(k);
@@ -36,6 +61,8 @@ xtc_pkey_alloc(int *out_key)
 	int k;
 	if (out_key == NULL)
 		return XTC_E_INVAL;
+	if (!x86_ospke())
+		return XTC_E_NOSYS;   /* keys unusable without OSPKE (WRPKRU traps) */
 	k = pkey_alloc(0, 0);
 	if (k < 0)
 		return XTC_E_NOSYS;
