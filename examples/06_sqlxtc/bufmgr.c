@@ -161,6 +161,8 @@ struct bm {
 	                                  * eviction path (no clean victim) */
 	_Atomic uint32_t  s_dirty_backlog; /* dirty frames seen by the last
 	                                    * trickler pass (backlog gauge) */
+	_Atomic uint64_t  s_tr_passes;   /* trickler passes (total) */
+	_Atomic uint64_t  s_tr_adaptive; /* trickler passes that ran the tuner */
 
 	/* prefetch ring: read-ahead requests, drained by the provider so a
 	 * scanning fiber never blocks on a prefetch (best-effort). */
@@ -1645,6 +1647,7 @@ tr_proc(void *arg)
 	int64_t iv_default = ta->interval;   /* fixed pacing when backlog low */
 	uint64_t prev_tr_writes = 0, prev_evicted = 0;
 	double pp_ewma = 1.0;                 /* EWMA of trickler pages-per-write */
+	double ev_ewma = 1.0;                 /* EWMA of evictions per pass */
 	struct tr_cand *cand;
 	xtc_dio_sched_t *tuner = NULL;
 	int batch = TR_BATCH;
@@ -1748,18 +1751,27 @@ tr_proc(void *arg)
 			    memory_order_relaxed);
 			uint64_t calls = twr - prev_tr_writes;
 			uint64_t evd = ev - prev_evicted;
-			int use_adaptive;
+			int use_adaptive, fits;
 			prev_tr_writes = twr;
 			prev_evicted = ev;
 			if (calls > 0) {
 				double pp = (double)w / (double)calls;
 				pp_ewma = 0.8 * pp_ewma + 0.2 * pp;
 			}
-			use_adaptive = (pp_ewma >= 1.5) || (evd == 0);
+			/* Smoothed eviction rate: "fits in RAM" (no demand
+			 * eviction) is a sustained property, so average per-pass
+			 * evictions instead of trusting a single twitchy sample. */
+			ev_ewma = 0.9 * ev_ewma + 0.1 * (double)evd;
+			fits = ev_ewma < 0.5;
+			use_adaptive = (pp_ewma >= 1.5) || fits;
+			atomic_fetch_add_explicit(&bm->s_tr_passes, 1,
+			    memory_order_relaxed);
 			if (tuner != NULL && use_adaptive && w > 0) {
 				int g[XTC_DIO_SCHED_MAX_GENES];
 				double cycle = (double)((t1 - t0) + iv) / 1e9;
 				double rate, dfrac, f[2];
+				atomic_fetch_add_explicit(&bm->s_tr_adaptive, 1,
+				    memory_order_relaxed);
 				if (cycle <= 0.0) cycle = 1e-9;
 				rate = (double)w / cycle;        /* sustained pages/s */
 				dfrac = bm->n_frames
@@ -1853,6 +1865,8 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->tr_writes = atomic_load_explicit(&bm->s_tr_writes, memory_order_relaxed);
 	out->evict_flushes = atomic_load_explicit(&bm->s_evict_flush, memory_order_relaxed);
 	out->dirty_backlog = atomic_load_explicit(&bm->s_dirty_backlog, memory_order_relaxed);
+	out->tr_passes = atomic_load_explicit(&bm->s_tr_passes, memory_order_relaxed);
+	out->tr_adaptive = atomic_load_explicit(&bm->s_tr_adaptive, memory_order_relaxed);
 	out->dw_repaired = atomic_load_explicit(&bm->s_dw_repaired, memory_order_relaxed);
 	out->freed = atomic_load_explicit(&bm->s_freed, memory_order_relaxed);
 	out->reissued = atomic_load_explicit(&bm->s_reissued, memory_order_relaxed);
