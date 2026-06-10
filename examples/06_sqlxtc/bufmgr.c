@@ -1760,9 +1760,14 @@ tr_proc(void *arg)
 			}
 			/* Smoothed eviction rate: "fits in RAM" (no demand
 			 * eviction) is a sustained property, so average per-pass
-			 * evictions instead of trusting a single twitchy sample. */
+			 * evictions instead of trusting a single twitchy sample.
+			 * Require it near zero (not merely low): even a few
+			 * adaptive passes in an eviction-bound run pick a
+			 * whole-pool batch / long interval that wrecks pacing, so
+			 * the gate must let essentially none through there.  The
+			 * EWMA's inertia from 1.0 also suppresses warmup leakage. */
 			ev_ewma = 0.9 * ev_ewma + 0.1 * (double)evd;
-			fits = ev_ewma < 0.5;
+			fits = ev_ewma < 0.05;
 			use_adaptive = (pp_ewma >= 1.5) || fits;
 			atomic_fetch_add_explicit(&bm->s_tr_passes, 1,
 			    memory_order_relaxed);
