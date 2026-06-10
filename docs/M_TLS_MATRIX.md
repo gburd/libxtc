@@ -60,8 +60,11 @@ suite is backend-agnostic.
 | SChannel (Windows)  | compile-only | -- | -- | written to the seam; not runtime-verified (no Windows host) |
 
 All listed backends except SChannel are runtime-verified on Linux/Nix.
-A dedicated CI job (`tls-backends`) re-builds and re-runs the suite
-against openssl, boringssl, mbedtls, gnutls, and wolfssl on every push.
+Dedicated CI jobs (`tls-backends`) re-build and re-run the suite on
+every push: the GitHub mirror covers openssl, gnutls, wolfssl,
+mbedtls (built 3.x from source -- apt ships an incompatible 2.x), and
+boringssl (built from source -- no distro packages it); the Codeberg
+/ Forgejo side covers openssl, gnutls, and wolfssl from apt.
 
 ## Reproducing
 

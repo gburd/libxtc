@@ -166,12 +166,25 @@ jobs:
         run: |
           case "${{ matrix.backend }}" in
             openssl)   sudo apt-get install -y libssl-dev ;;
-            mbedtls)   sudo apt-get install -y libmbedtls-dev ;;
             gnutls)    sudo apt-get install -y libgnutls28-dev ;;
             wolfssl)   sudo apt-get install -y libwolfssl-dev ;;
+            mbedtls)
+              # The Ubuntu libmbedtls-dev is 2.x; tls_mbedtls.c uses the
+              # 3.x API (mbedtls_ssl_protocol_version, 3-arg
+              # pk_parse_keyfile), so build mbedTLS 3.x from source.
+              sudo apt-get install -y cmake
+              git clone --depth 1 --branch v3.6.2 \
+                https://github.com/Mbed-TLS/mbedtls /tmp/mbed
+              cmake -S /tmp/mbed -B /tmp/mbed/build -DCMAKE_BUILD_TYPE=Release \
+                    -DENABLE_TESTING=Off -DENABLE_PROGRAMS=Off \
+                    -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
+              cmake --build /tmp/mbed/build -j"$(nproc)" >/dev/null
+              ;;
             boringssl)
-              # No distro package; build the static libs once.  CMake +
-              # a Go toolchain are on the runner image.
+              # No distro package; build the static libs.  CMake + a Go
+              # toolchain are on the runner image.  Modern BoringSSL
+              # emits libssl.a / libcrypto.a directly under the build
+              # dir; locate them rather than assume a layout.
               sudo apt-get install -y cmake golang-go
               git clone --depth 1 https://boringssl.googlesource.com/boringssl /tmp/bssl
               cmake -S /tmp/bssl -B /tmp/bssl/build -DCMAKE_BUILD_TYPE=Release \
@@ -185,14 +198,21 @@ jobs:
       - name: Configure --with-tls=${{ matrix.backend }}
         run: |
           mkdir -p build_tls && cd build_tls
-          if [ "${{ matrix.backend }}" = boringssl ]; then
-            CPPFLAGS="-I/tmp/bssl/include" \
-            LDFLAGS="-L/tmp/bssl/build/ssl -L/tmp/bssl/build/crypto" \
-            LIBS="-lstdc++" \
-              ../dist/configure --with-tls=boringssl
-          else
-            ../dist/configure --with-tls=${{ matrix.backend }}
-          fi
+          case "${{ matrix.backend }}" in
+            boringssl)
+              SSL_A=$(find /tmp/bssl/build -name libssl.a | head -1)
+              CRY_A=$(find /tmp/bssl/build -name libcrypto.a | head -1)
+              CPPFLAGS="-I/tmp/bssl/include" \
+              LDFLAGS="-L$(dirname "$SSL_A") -L$(dirname "$CRY_A")" \
+              LIBS="-lstdc++" \
+                ../dist/configure --with-tls=boringssl ;;
+            mbedtls)
+              LIB=$(dirname "$(find /tmp/mbed/build -name libmbedtls.a | head -1)")
+              CPPFLAGS="-I/tmp/mbed/include" LDFLAGS="-L$LIB" \
+                ../dist/configure --with-tls=mbedtls ;;
+            *)
+              ../dist/configure --with-tls=${{ matrix.backend }} ;;
+          esac
       - name: Build + run the m18 TLS suite
         run: |
           make -C build_tls -j"$(nproc)" test_tls_server test_tls_client

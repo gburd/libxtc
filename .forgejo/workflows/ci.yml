@@ -164,16 +164,17 @@ jobs:
           bash ../../test/sqlxtc/test_sqlxtc_mt.sh
 
   tls-backends:
-    # Build against each apt-available TLS backend and run the m18 TLS
-    # suite.  BoringSSL needs a from-source build (cmake + Go) that is
-    # impractical on the small Codeberg runner, so it runs on the
-    # GitHub mirror's tls-backends job instead; the other four are
-    # exercised here too.
+    # Build against each TLS backend that works with the apt packages
+    # on the small Codeberg runner and run the m18 TLS suite.  BoringSSL
+    # (from-source: cmake + Go) and mbedTLS (the backend needs the 3.x
+    # API, but apt ships 2.x) are impractical here, so they run on the
+    # GitHub mirror's tls-backends job; openssl, gnutls, and wolfssl are
+    # exercised on both CIs.
     runs-on: codeberg-small
     strategy:
       fail-fast: false
       matrix:
-        backend: [openssl, mbedtls, gnutls, wolfssl]
+        backend: [openssl, gnutls, wolfssl]
     steps:
       - name: Install base toolchain
         run: |
@@ -184,7 +185,6 @@ jobs:
         run: |
           case "${{ matrix.backend }}" in
             openssl)   sudo apt-get install -y libssl-dev ;;
-            mbedtls)   sudo apt-get install -y libmbedtls-dev ;;
             gnutls)    sudo apt-get install -y libgnutls28-dev ;;
             wolfssl)   sudo apt-get install -y libwolfssl-dev ;;
           esac
