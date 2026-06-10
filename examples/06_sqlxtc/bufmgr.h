@@ -274,6 +274,7 @@ typedef struct bm_stats {
 	uint64_t free_frames;   /* frames on the free list */
 	uint64_t prefetched;    /* pages warmed by read-ahead */
 	uint64_t trickled;      /* dirty pages written ahead by the trickler */
+	uint64_t tr_writes;     /* trickler pwrite calls (pages/call = coalescing) */
 	uint64_t dw_repaired;   /* pages restored from the double-write on reopen */
 	uint64_t freed;         /* page ids put on the reclaim freelist */
 	uint64_t reissued;      /* allocations served from the reclaim freelist */
