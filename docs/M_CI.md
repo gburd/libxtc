@@ -92,6 +92,33 @@ A second GHA workflow on `schedule:` runs the deeper matrix once a
 day on cron -- Tier 3 (below) but sourced from object-store caches, so nightly
 cost is bounded.
 
+## AI pull-request review (GitHub mirror only)
+
+`.github/workflows/ocr-review.yml` runs Open Code Review (OCR) on
+every pull request (drafts included), on the comment
+`/open-code-review`, and on manual dispatch.  It posts inline review
+comments backed by a Claude Opus model, reached through
+a LiteLLM proxy that the job starts on `127.0.0.1:4000` for the life
+of the run.  The per-path review rules -- tuned to libxtc's actual
+conventions (single-owner lock-free concurrency, the aligned-alloc
+and blocking-call disciplines, BDB/DBSQL naming, ASCII-only, BSD KNF,
+the dual autoconf+meson build, the fctx assembly ABIs, the sqlxtc
+B-link/MVCC/ARIES storage engine, honest docs) -- live in
+`.github/ocr/rule.json`; the model-proxy config in
+`.github/ocr/litellm.yaml`.
+
+This is the one place the GitHub and Codeberg pipelines are NOT
+equivalent.  The functional CI (build, test, sanitizers, the
+examples + storage suite) is mirrored byte-for-byte between
+`.github/workflows/ci.yml` and `.forgejo/workflows/ci.yml` and stays
+equal.  The AI review is an additive GitHub-only augmentation: it
+needs a cloud model endpoint via GitHub OIDC, which the Codeberg/Forgejo side
+has no access to, so it has no `.forgejo` counterpart and is
+advisory -- it posts comments, it does not gate the merge.  Auth uses
+no static secrets: the job assumes a cloud role (`vars.OCR_ROLE_ARN`)
+via GitHub OIDC; the only repo variables are `OCR_ROLE_ARN`,
+`OCR_REGION`, and `OCR_MODEL`.
+
 ## Tier 3: self-hosted cloud VMs + object-store-cached images
 
 This is what you asked about -- caching OS images in object storage to amortize
