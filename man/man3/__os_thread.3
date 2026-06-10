@@ -9,7 +9,9 @@
 .Nm __os_thread_detach ,
 .Nm __os_thread_self ,
 .Nm __os_thread_yield ,
-.Nm __os_thread_setname
+.Nm __os_thread_setname ,
+.Nm __os_thread_set_affinity ,
+.Nm __os_thread_apply_default_qos
 .Nd OS-thread primitives
 .Sh SYNOPSIS
 .In os_thread.h
@@ -25,6 +27,10 @@
 .Fn __os_thread_yield "void"
 .Ft int
 .Fn __os_thread_setname "const char *name"
+.Ft int
+.Fn __os_thread_set_affinity "int cpu"
+.Ft void
+.Fn __os_thread_apply_default_qos "void"
 .Sh DESCRIPTION
 The
 .Nm __os_thread_*
@@ -74,6 +80,27 @@ labels the calling thread for debuggers and
 .Xr ps 1 .
 The implementation is best-effort; some platforms truncate to 15
 characters, others ignore the call entirely.
+.Pp
+.Fn __os_thread_set_affinity
+pins the calling thread to logical CPU
+.Fa cpu
+where the platform exposes and honors a hard affinity
+.Pq sched_setaffinity on Linux; processor sets on illumos .
+It is a best-effort hint elsewhere
+.Pq notably macOS, which offers only affinity tags, not a hard pin ;
+on those platforms it returns
+.Dv XTC_E_NOSYS
+and the thread is left to the scheduler.
+.Pp
+.Fn __os_thread_apply_default_qos
+applies the runtime's default quality-of-service class to the calling
+thread.
+On macOS this biases the reactor thread toward the performance
+.Pq P
+cores rather than the efficiency
+.Pq E
+cores; on platforms with no QoS concept it is a no-op.
+It never fails and returns no value.
 .Sh RETURN VALUES
 .Dv XTC_OK
 on success;
