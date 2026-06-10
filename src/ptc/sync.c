@@ -22,6 +22,40 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* -------------------------------------------------------------------------
+ * Off-loop condvar wait helpers.
+ *
+ * Every blocking primitive here (notify, semaphore, mutex, rwlock,
+ * latch, ...) shares the same timed-wait shape for callers outside any
+ * process: compute an absolute deadline from a relative timeout, then
+ * loop pthread_cond_timedwait while the wake predicate is unmet,
+ * returning XTC_E_AGAIN once the deadline passes.  Factor the two
+ * mechanical pieces out so each primitive keeps only its own predicate.
+ *
+ * deadline_from_timeout fills *ts with now + timeout_ns (CLOCK_REALTIME,
+ * the clock pthread_cond_timedwait uses).  cv_wait_until does one
+ * bounded wait against that deadline and returns 0 if the cond was
+ * signaled (the caller re-tests its predicate) or 1 if the deadline
+ * has passed (the caller maps that to XTC_E_AGAIN).
+ * ----------------------------------------------------------------------- */
+static void
+deadline_from_timeout(int64_t timeout_ns, struct timespec *ts)
+{
+	int64_t now = 0;
+	(void)__os_clock_real(&now);
+	now += timeout_ns;
+	ts->tv_sec  = (time_t)(now / 1000000000LL);
+	ts->tv_nsec = (long)(now % 1000000000LL);
+}
+
+static int
+cv_wait_until(pthread_cond_t *cv, pthread_mutex_t *lock,
+    const struct timespec *ts)
+{
+	/* 0 == signaled (re-test the predicate); 1 == deadline reached. */
+	return pthread_cond_timedwait(cv, lock, ts) == 0 ? 0 : 1;
+}
+
 /* ----- notify ----------------------------------------------------- */
 
 struct xtc_notify {
@@ -85,16 +119,12 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 		n->stored = 0;
 	} else {
 		struct timespec ts;
-		int64_t now;
-		(void)__os_clock_real(&now);
-		now += timeout_ns;
-		ts.tv_sec  = (time_t)(now / 1000000000LL);
-		ts.tv_nsec = (long)(now % 1000000000LL);
+		deadline_from_timeout(timeout_ns, &ts);
 		while (!n->stored) {
-			int e = pthread_cond_timedwait(&n->cv, &n->lock, &ts);
-			if (e == 0) continue;
-			rc = XTC_E_AGAIN;
-			break;
+			if (cv_wait_until(&n->cv, &n->lock, &ts)) {
+				rc = XTC_E_AGAIN;
+				break;
+			}
 		}
 		if (n->stored) { n->stored = 0; rc = XTC_OK; }
 	}
@@ -173,16 +203,12 @@ xtc_sem_acquire(xtc_sem_t *s, unsigned n, int64_t timeout_ns)
 		s->count -= n;
 	} else {
 		struct timespec ts;
-		int64_t now;
-		(void)__os_clock_real(&now);
-		now += timeout_ns;
-		ts.tv_sec  = (time_t)(now / 1000000000LL);
-		ts.tv_nsec = (long)(now % 1000000000LL);
+		deadline_from_timeout(timeout_ns, &ts);
 		while (s->count < n) {
-			int e = pthread_cond_timedwait(&s->cv, &s->lock, &ts);
-			if (e == 0) continue;
-			rc = XTC_E_AGAIN;
-			goto out;
+			if (cv_wait_until(&s->cv, &s->lock, &ts)) {
+				rc = XTC_E_AGAIN;
+				goto out;
+			}
 		}
 		s->count -= n;
 	}
@@ -422,15 +448,10 @@ __amutex_lock_thread(xtc_amutex_t *m, int64_t timeout_ns)
 		m->held = 1;
 	} else {
 		struct timespec ts;
-		int64_t now;
-		(void)__os_clock_real(&now);
-		now += timeout_ns;
-		ts.tv_sec  = (time_t)(now / 1000000000LL);
-		ts.tv_nsec = (long)(now % 1000000000LL);
+		deadline_from_timeout(timeout_ns, &ts);
 		while (m->held) {
-			int e = pthread_cond_timedwait(&m->cv, &m->lock, &ts);
-			if (e == 0) continue;
-			return XTC_E_AGAIN;
+			if (cv_wait_until(&m->cv, &m->lock, &ts))
+				return XTC_E_AGAIN;
 		}
 		m->held = 1;
 	}
@@ -712,13 +733,9 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 				(void)pthread_cond_wait(&r->cv, &r->lock);
 		} else {
 			struct timespec ts;
-			int64_t now;
-			(void)__os_clock_real(&now);
-			now += timeout_ns;
-			ts.tv_sec = (time_t)(now / 1000000000LL);
-			ts.tv_nsec = (long)(now % 1000000000LL);
+			deadline_from_timeout(timeout_ns, &ts);
 			while (!(r->wq_head == NULL && __arw_compatible(r, mode))) {
-				if (pthread_cond_timedwait(&r->cv, &r->lock, &ts) != 0) {
+				if (cv_wait_until(&r->cv, &r->lock, &ts)) {
 					rc = XTC_E_AGAIN; break;
 				}
 			}
@@ -863,15 +880,10 @@ __rwlock_wait(xtc_rwlock_t *r, int64_t timeout_ns,
 	}
 	{
 		struct timespec ts;
-		int64_t now;
-		(void)__os_clock_real(&now);
-		now += timeout_ns;
-		ts.tv_sec = (time_t)(now / 1000000000LL);
-		ts.tv_nsec = (long)(now % 1000000000LL);
+		deadline_from_timeout(timeout_ns, &ts);
 		while (!ready(r)) {
-			int e = pthread_cond_timedwait(&r->cv, &r->lock, &ts);
-			if (e == 0) continue;
-			return XTC_E_AGAIN;
+			if (cv_wait_until(&r->cv, &r->lock, &ts))
+				return XTC_E_AGAIN;
 		}
 		return XTC_OK;
 	}
@@ -1055,15 +1067,11 @@ xtc_gate_drain(xtc_gate_t *g, int64_t timeout_ns)
 		if (g->count > 0) rc = XTC_E_AGAIN;
 	} else {
 		struct timespec ts;
-		int64_t now;
-		(void)__os_clock_real(&now);
-		now += timeout_ns;
-		ts.tv_sec  = (time_t)(now / 1000000000LL);
-		ts.tv_nsec = (long)(now % 1000000000LL);
+		deadline_from_timeout(timeout_ns, &ts);
 		while (g->count > 0) {
-			int e = pthread_cond_timedwait(&g->cv, &g->lock, &ts);
-			if (e == 0) continue;
-			rc = XTC_E_AGAIN; break;
+			if (cv_wait_until(&g->cv, &g->lock, &ts)) {
+				rc = XTC_E_AGAIN; break;
+			}
 		}
 	}
 	(void)pthread_mutex_unlock(&g->lock);
