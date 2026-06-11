@@ -186,5 +186,13 @@ main(int argc, char **argv)
 	printf("  trickler_writes=%llu pages_per_write=%.2f\n",
 	    (unsigned long long)st.tr_writes,
 	    st.tr_writes ? (double)st.trickled / (double)st.tr_writes : 0.0);
+	printf("  evict_flushes=%llu (%.1f%% of evictions forced a sync write) "
+	    "dirty_backlog=%llu\n",
+	    (unsigned long long)st.evict_flushes,
+	    st.evicted ? 100.0 * (double)st.evict_flushes / (double)st.evicted : 0.0,
+	    (unsigned long long)st.dirty_backlog);
+	printf("  trickler_passes=%llu adaptive_passes=%llu (%.1f%% adaptive)\n",
+	    (unsigned long long)st.tr_passes, (unsigned long long)st.tr_adaptive,
+	    st.tr_passes ? 100.0 * (double)st.tr_adaptive / (double)st.tr_passes : 0.0);
 	return 0;
 }
