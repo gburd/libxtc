@@ -275,6 +275,11 @@ typedef struct bm_stats {
 	uint64_t prefetched;    /* pages warmed by read-ahead */
 	uint64_t trickled;      /* dirty pages written ahead by the trickler */
 	uint64_t tr_writes;     /* trickler pwrite calls (pages/call = coalescing) */
+	uint64_t evict_flushes; /* dirty pages flushed on the foreground eviction
+	                         * path (no clean victim was available) */
+	uint64_t dirty_backlog; /* frames currently dirty (live gauge) */
+	uint64_t tr_passes;     /* trickler passes total */
+	uint64_t tr_adaptive;   /* trickler passes that ran the GA tuner */
 	uint64_t dw_repaired;   /* pages restored from the double-write on reopen */
 	uint64_t freed;         /* page ids put on the reclaim freelist */
 	uint64_t reissued;      /* allocations served from the reclaim freelist */
