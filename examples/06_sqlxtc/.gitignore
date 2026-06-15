@@ -45,6 +45,7 @@ test_isolation
 test_bufmgr_dio
 bm_writeback_bench
 test_sql_ast
+test_sqlrec
 /sql_grammar.c
 /sql_grammar.h
 sql_grammar.out
