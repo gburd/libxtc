@@ -44,3 +44,5 @@ test_inplace_redo
 test_btree_delete_merge
 test_savepoint
 test_isolation
+test_bufmgr_dio
+bm_writeback_bench
