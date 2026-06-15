@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/test_vexec.c
- *	Differential oracle for the vectorized executor (V0).
+ *	Differential oracle for the vectorized executor (V0/V1).
  *
  *	Seed a table, then for each query in a corpus:
  *	  - run it through the VDBE (the reference) and collect the rows;
@@ -181,16 +181,33 @@ main(void)
 		{ "SELECT a FROM t WHERE a = 5", 1 },          /* matches rows 1 and 4 */
 		{ "SELECT b FROM t WHERE b <> 'two'", 1 },     /* text inequality */
 
-		/* ---- must fall back (V0 does not handle these) ---- */
+		/* ---- P2: scalar expressions + functions (V1) ---- */
+		{ "SELECT a+1 FROM t", 1 },
+		{ "SELECT a*2, a-1 FROM t", 1 },
+		{ "SELECT k, a+k FROM t", 1 },
+		{ "SELECT a FROM t WHERE a > 1 AND a < 20", 1 },
+		{ "SELECT a, b FROM t WHERE a >= 5 AND a <= 10", 1 },
+		{ "SELECT a FROM t WHERE NOT (a = 5)", 1 },
+		{ "SELECT abs(a) FROM t", 1 },
+		{ "SELECT length(b) FROM t", 1 },
+		{ "SELECT upper(b), lower(b) FROM t", 1 },
+		{ "SELECT b || '!' FROM t", 1 },
+		{ "SELECT coalesce(a, -1) FROM t", 1 },
+		{ "SELECT ifnull(a, 0) FROM t", 1 },
+		{ "SELECT a FROM t WHERE a IS NULL", 1 },
+		{ "SELECT a FROM t WHERE a IS NOT NULL", 1 },
+		{ "SELECT a FROM t WHERE a > 4 OR b = 'two'", 1 },
+		{ "SELECT a/2 FROM t WHERE a IS NOT NULL", 1 },
+
+		/* ---- must fall back (not in V1) ---- */
 		{ "SELECT a FROM t ORDER BY a", 0 },
 		{ "SELECT count(*) FROM t", 0 },
-		{ "SELECT a+1 FROM t", 0 },
 		{ "SELECT a FROM t LIMIT 2", 0 },
 		{ "SELECT DISTINCT a FROM t", 0 },
 		{ "SELECT a FROM t GROUP BY a", 0 },
-		{ "SELECT a FROM t WHERE a > 1 AND b = 'x'", 0 },  /* compound WHERE */
 		{ "SELECT a.a FROM t a JOIN t b ON a.k=b.k", 0 },  /* join */
 		{ "SELECT a FROM t WHERE a IN (1,2)", 0 },          /* IN */
+		{ "SELECT substr(b,1,2) FROM t", 0 },               /* unsupported func */
 		{ "SELECT k FROM t WHERE a = 'x'", 0 },             /* INT col vs text lit: affinity */
 		{ "SELECT k FROM t WHERE b = 5", 0 },               /* TEXT col vs int lit: affinity */
 		{ "SELECT k FROM t WHERE b = '5'", 1 },             /* TEXT col vs text lit: safe */
@@ -249,9 +266,9 @@ main(void)
 
 	sqlite3_close(db);
 
-	if (g_fail) { fprintf(stderr, "  vexec V0: FAILURES\n"); return 1; }
-	printf("  ok   vexec V0: %d P1 queries recognized and matched the VDBE; "
+	if (g_fail) { fprintf(stderr, "  vexec: FAILURES\n"); return 1; }
+	printf("  ok   vexec V1: %d P1/P2 queries recognized and matched the VDBE; "
 	       "%d queries correctly fell back\n", recognized, fellback);
-	printf("All sqlxtc vectorized-executor (V0) tests passed.\n");
+	printf("All sqlxtc vectorized-executor (V0/V1) tests passed.\n");
 	return 0;
 }
