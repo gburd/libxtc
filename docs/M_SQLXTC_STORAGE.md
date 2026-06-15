@@ -1,11 +1,18 @@
 # sqlxtc -- an xtc-native storage engine
 
+> **Note.** This is a forward-looking plan; some sections describe
+> mechanisms that were considered but not shipped.  Where the buffer
+> manager is concerned, the engine addresses pages **by page id**
+> through a striped-lock page table, with a cooling-stage CLOCK
+> evictor and scan resistance (2Q probation).  It does not swizzle
+> pointers.
+
 This document specifies the storage engine that replaces SQLite's
 btree / pager / buffer-pool triad for the `examples/06_sqlxtc`
-example.  It is a design and planning document.  It synthesizes two
-reference engines -- LeanStore's pointer-swizzling buffer manager and
-the threadskv B-link tree -- onto xtc's concurrency primitives, behind
-the `sx_` facade that `engine.h` already publishes.
+example.  It is a design and planning document.  It draws on two
+reference engines -- LeanStore's cooling-stage buffer manager and the
+threadskv B-link tree -- adapted onto xtc's concurrency primitives,
+behind the `sx_` facade that `engine.h` already publishes.
 
 The companion documents frame the work.  `M_SQLXTC_HARDFORK.md`
 describes breaking the *existing* SQLite into concurrent xtc_procs in
@@ -46,8 +53,8 @@ What "fully uses xtc" means, concretely:
   * The **page table** that maps page id to frame is read through an
     `xtc_lrlock` so lookups are wait-free while the provider installs
     and evicts on the single writer side.
-  * **Old versions** of swizzled structures are reclaimed with
-    `xtc_rcu`.
+  * **Old versions** of structures freed during a structure
+    modification are reclaimed with `xtc_rcu`.
   * **Transaction locks** at table granularity, with deadlock
     detection, come from `xtc_lockmgr`.
   * **Frames and nodes** are allocated from `xtc_slab` caches.
@@ -62,45 +69,33 @@ real and substantial but bounded -- see section 4.
 
 ## 2. The buffer manager
 
-The buffer manager owns a fixed DRAM pool of frames and a backing
-file of pages.  It is modeled on LeanStore's design in
-`_/leanstore/backend/leanstore/storage/buffer-manager/`.
+The buffer manager owns a fixed DRAM pool of frames and a backing file
+of pages.
 
-### 2.1 Pointer swizzling -- the Swip
+### 2.1 Page-id resolution
 
-LeanStore's central trick is that a reference to a child page is not a
-page id that must be hashed to find the frame; it is a tagged 64-bit
-word that is *either* a direct pointer to the resident `BufferFrame`
-*or* an on-disk page id, distinguished by the two most significant
-bits.  `Swip.hpp` encodes this:
+A reference to a page -- a B-tree child pointer, a sibling right-link,
+the root -- is a stable on-disk **page id** (`bm_pid_t`).  `bm_fix_pid`
+resolves an id to a resident, pinned frame: it hashes the id to a
+bucket in the page table, takes that bucket's stripe lock, walks the
+short chain, and pins the frame if present.  A miss faults the page in
+through `xtc_io` into a free frame (evicting a cooling-stage victim if
+the pool is full) and installs it in the table.  `bm_alloc_pid`
+allocates a fresh id and returns a pinned, zeroed frame.  Frames carry
+a per-frame state (HOT when actively used, COOL once an eviction
+candidate); a fix that finds a resident COOL frame promotes it to HOT.
 
-```
-  1xxxxxxx...   EVICTED  -- low 63 bits are the page id (evicted_mask)
-  01xxxxxx...   COOL     -- pointer with the cool_bit set
-  00xxxxxx...   HOT      -- a bare BufferFrame* (hot_mask)
-```
-
-with `evicted_bit = 1<<63`, `cool_bit = 1<<62`, and the predicates
-`isHOT()`, `isCOOL()`, `isEVICTED()`.  A HOT swip is dereferenced with
-zero indirection -- `asBufferFrame()` is just the pointer.  The state
-transitions are `warm()` (COOL to HOT, clears the cool bit), `cool()`
-(HOT to COOL, sets it), and `evict(pid)` (to EVICTED, stores the page
-id).  This is what makes a warm working set effectively pointer-chase
-fast: most traversals never touch the page table at all.
-
-In our engine the swip is the child reference stored in a B-tree inner
-node's slot payload, exactly as `BTreeNode::getChild` casts the
-payload to a `SwipType`.  Resolving a swip during descent mirrors
-LeanStore's `resolveSwip`: HOT returns immediately; COOL warms it back
-to HOT under the parent and child latches; EVICTED triggers a fault
-that reads the page through `xtc_io`.
+Page ids -- not in-memory pointers -- are what the tree serializes into
+its node cells, what the WAL records name, and what the superblock
+stores; they are also the only page reference that remains valid when
+the same pool is mapped at different addresses in different processes,
+which a shared multi-process pool requires.
 
 ### 2.2 The frame -- header plus page
 
-A frame is LeanStore's `BufferFrame`: a `Header` followed by a
-512-byte-aligned `Page`.  The header carries the latch and the
-bookkeeping the provider needs; the page carries the persisted bytes.
-The fields we keep, named as in `BufferFrame.hpp`:
+A frame is a header followed by a 512-byte-aligned page.  The header
+carries the latch and the bookkeeping the evictor and provider need;
+the page carries the persisted bytes.  The fields:
 
   * `STATE state` -- `FREE`, `HOT`, `COOL`, or `LOADED`.
   * `HybridLatch latch` -- the optimistic version latch (section 4).
@@ -124,47 +119,43 @@ must-stay pages.
 
 Two structures index the pool:
 
-  * The **page table** maps an EVICTED page id to nothing (it is not
-    resident) and a resident page id to its frame.  Because swizzling
-    means most references are direct pointers, the page table is
-    consulted only on a fault or when a sibling must be located by id.
-    It is read through an `xtc_lrlock` (section 4.2).
+  * The **page table** maps a resident page id to its frame; an id
+    not in the table is not resident.  Every page reference goes
+    through it (there are no direct frame pointers to short-circuit),
+    so it is on the hot path: it is a fixed-modulo open-chained hash
+    (`pid % nbucket`) with 256 cache-line-isolated stripe locks, so
+    fixes of pages in different stripes proceed in parallel
+    (section 4.2).
   * The **free list** is a stack of `FREE` frames threaded through
-    `next_free_bf`.  `allocatePage` pops one and returns it
-    exclusively latched and marked `HOT`; `reclaimPage` pushes one
-    back.  LeanStore partitions both the free list and the page-id
-    space to cut contention; we keep that partitioning, one partition
-    per provider shard.
+    `next_free`.  `bm_alloc_pid` pops one and returns it pinned and
+    marked `HOT`; reclaim pushes one back.
 
 ### 2.4 Cooling-stage eviction, and how cooling drives writeback
 
-This is the part the user asked to be explicit about.  LeanStore does
-not evict a hot page directly.  It runs a three-phase cycle in
-`pageProviderThread` (`PageProviderThread.cpp`); the engine runs the
-same cycle inside an `xtc_proc`.
+Eviction does not write a hot page out synchronously on the fault
+path.  A CLOCK sweep (`evict_one`) and a background trickler
+(`xtc_proc`) cooperate in three steps.
 
-**Phase 1 -- cool.**  When a partition's free count drops below
-`free_bfs_limit`, the provider draws a random batch of frames
-(`randomBufferFrame`).  For each HOT candidate whose children are all
-evicted, it finds the parent, takes the child and parent latches, sets
-`state = COOL`, and calls `swip.cool()` on the parent's pointer to it.
-The page is now in the **cooling stage**: still resident, still
-correct to read, but marked as a future eviction candidate, and
-reachable only through the page table rather than a HOT pointer.  No
-data has moved and nothing has been written.
+**Phase 1 -- cool.**  When the free count drops below the cool target,
+the sweep advances a clock cursor over the frames and flips a HOT,
+unpinned frame whose `ref` second-chance bit is clear to `COOL`.  The
+page is now in the **cooling stage**: still resident, still correct to
+read, but marked as a future eviction candidate.  No data has moved
+and nothing has been written.
 
 **Phase 2 -- write dirty cooling pages ahead of eviction.**  The
-provider walks the cooling candidates.  For each:
+trickler walks the cooling candidates.  For each:
 
-  * If the page is **clean** (`!isDirty()`), it is evicted now:
-    `swip.evict(pid)` rewrites the parent pointer to the page id, the
-    frame is `reset()` and returned to the free list.
-  * If the page is **dirty**, it is *not* evicted yet.  The provider
-    sets `is_being_written_back` and submits the page to the async
-    write buffer.  The write is issued now, while the page is cooling,
-    not at the moment eviction is needed.
+  * If the page is **clean**, it can be evicted now: the sweep
+    reserves the frame (pin 0 -> -1 so no fixer can re-pin it),
+    removes its page-table entry, and returns the frame to the free
+    list.
+  * If the page is **dirty**, eviction prefers to skip it (leaving a
+    clean victim for the foreground) and the trickler writes it out
+    ahead of demand, while it is cooling, not at the moment a fault
+    needs the frame.
 
-This is the mechanism the user named: cooling informs the buffer
+This is the mechanism: cooling informs the buffer
 manager which pages are about to be evicted, and the provider
 proactively flushes those dirty cooling pages so that by the time a
 frame is actually needed, its disk image is already current and it can
@@ -202,28 +193,24 @@ working set and evict everything that was hot, so the OLTP traffic that
 resumes after (or runs alongside) the scan faults all of its pages back
 in.  This is the classic buffer-pool pollution problem.
 
-LeanStore deliberately keeps **no per-access bookkeeping** on the hot
-path -- a HOT (swizzled) hit is a bare pointer dereference, with no LRU
-list to update and no reference bit to set; that is the property that
-makes it scale.  So scan resistance cannot be bought with LRU-K or a
-CLOCK reference counter (those would put a write on every page hit).
-It has to come from the **cooling stage itself**, used as a
-probationary FIFO.  This is exactly the 2Q insight (Johnson and Shasha,
-"2Q: A Low Overhead High Performance Buffer Management Replacement
-Algorithm", VLDB 1994): a page seen once and a page seen repeatedly
-belong in different queues.
+The cooling-stage evictor keeps **no per-access bookkeeping** beyond a
+single `ref` bit, so scan resistance cannot be bought with LRU-K (that
+would put a write and a list splice on every page hit).  It comes from
+the **cooling stage itself**, used as a probationary FIFO.  This is the
+2Q insight (Johnson and Shasha, "2Q: A Low Overhead High Performance
+Buffer Management Replacement Algorithm", VLDB 1994): a page seen once
+and a page seen repeatedly belong in different queues.
 
-The engine maps 2Q onto LeanStore's existing states with one rule, and
-no new hot-path work:
+The engine maps 2Q onto the frame states with one rule, and no new
+hot-path work:
 
   * **Probationary admission.**  A demand-LOADED page is admitted to
     the COOL stage, not HOT (`scan_resist`, on by default).  A page
-    becomes HOT only on a SECOND access -- the rescue that the cooling
-    stage already performs (`bm_fix` COOL -> HOT, `ht_lookup_pin` COOL
-    -> HOT).  A scan touches each page once, so its pages stay COOL and
-    never enter the hot set.  Freshly ALLOCATED pages are still born
-    HOT: they are new, dirty, and certainly in use, not a scan
-    artifact.
+    becomes HOT only on a SECOND access -- the rescue that
+    `ht_lookup_pin` performs (COOL -> HOT).  A scan touches each page
+    once, so its pages stay COOL and never enter the hot set.  Freshly
+    ALLOCATED pages are still born HOT: they are new, dirty, and
+    certainly in use, not a scan artifact.
 
   * **COOL-first eviction.**  `evict_one` reclaims an already-COOL
     frame in preference to cooling a HOT one; it cools a HOT frame only
@@ -249,20 +236,19 @@ pruning (`xstore_autovacuum`, section in docs/M_SQLXTC_MVCC_SQL.md and
 the benchmark in bench/sqlxtc/ENGINE_AB.md) rather than a periodic
 stop-the-world full scan.
 
-The correctness subtlety the change exposed: a page must be PINNED
-before its swip is published, or a frame admitted COOL is briefly
-reachable-and-evictable with `pin == 0` and a concurrent evictor can
-reclaim it under the loader.  `bm_fix` now pins before the publishing
-CAS in both the rescue and load paths (the same optimistic discipline
-the HOT-hit path already used); the page-table path was already safe
-via its post-`ht_remove` pin re-check.
+The correctness subtlety the change exposed: a frame admitted COOL on
+a demand load must be PINNED before it is published in the page table,
+or it is briefly reachable-and-evictable with `pin == 0` and a
+concurrent evictor can reclaim it under the loader.  `bm_fix_pid`
+pins the frame before installing it under the bucket's stripe lock,
+and re-checks for a racing publisher after `ht_remove`, so the load
+and publish never expose an unpinned COOL frame.
 
 ## 3. The B-tree
 
-The on-disk index is a B-link tree (Lehman and Yao) with LeanStore's
-slotted node layout and prefix compression.  threadskv
-(`threadskv10g.c`) is the structural reference; `BTreeNode.hpp/.cpp`
-is the node-layout reference.
+The on-disk index is a B-link tree (Lehman and Yao) with a
+prefix-compressed slotted node layout.  threadskv
+(`threadskv10g.c`) is the structural reference.
 
 ### 3.1 B-link structure
 
@@ -370,7 +356,7 @@ sits on top of at the seam.
 
 **Prefetching.**  During a forward scan the cursor knows the next page
 from the current page's `right` pointer before it needs it.  When that
-sibling is EVICTED, the cursor submits an `xtc_io` read for it while
+sibling is not resident, the cursor submits an `xtc_io` read for it while
 still consuming the current page, so the fault is already in flight by
 the time the scan crosses the boundary.  The same readahead applies to
 inner-node descent: an index range scan can prefetch the child pages
@@ -430,14 +416,14 @@ than SQLite's pcache.
 
 ### 4.3 Reclaiming old versions
 
-When the provider swizzles a structure or rebuilds the off-side page
-table copy, the old version cannot be freed until every reader that
-might still hold a pointer into it has finished.  `xtc_rcu` provides
-this: readers wrap traversals in `xtc_rcu_read_lock` /
-`xtc_rcu_read_unlock`, and the writer hands retired objects to
-`xtc_rcu_retire`, which frees them only after a grace period drains.
-This is the deferred-reclaim safety net under both the swizzling and
-the lrlock publish.
+When the buffer manager evicts a frame or rebuilds a structure, an old
+version cannot be freed until every reader that might still hold a
+pointer into it has finished.  `xtc_rcu` provides this: readers wrap
+traversals in `xtc_rcu_read_lock` / `xtc_rcu_read_unlock`, and the
+writer hands retired objects to `xtc_rcu_retire`, which frees them only
+after a grace period drains.  This is the deferred-reclaim safety net
+for the page-table publish (and complements the freed-page-id
+quarantine the B-tree uses for reissued pids).
 
 ### 4.4 Table-level transaction locks and deadlock detection
 
@@ -507,9 +493,9 @@ The work is staged so each phase is independently testable and leaves
 a working tree.
 
   1. **Buffer manager -- foundational, in progress this milestone.**
-     Frame pool on `xtc_slab`, swip encoding, page table behind
-     `xtc_lrlock`, free-list partitions, and the page-provider proc
-     with the three-phase cooling cycle and `xtc_io` writeback.  Tests
+     Frame pool on `xtc_slab`, the striped-lock page table, the free
+     list, and the page-provider proc with the cooling cycle and
+     `xtc_io` writeback.  Tests
      drive synthetic page faults and assert the cooling-then-flush
      ordering and zero-leak reclamation.
   2. **Slotted node plus prefix compression -- next.**  Port
@@ -545,15 +531,15 @@ two converge on the same primitives.
 Landed and tested in `examples/06_sqlxtc/` (each with an in-process
 test, no daemon; ASan/UBSan clean):
 
-  * `bufmgr.c` -- Phase 1.  Swip swizzling (HOT/COOL/EVICTED), the
-    frame pool, the cooling-stage eviction with a page-provider
-    `xtc_proc` that proactively flushes dirty COOL pages ahead of
-    demand, the swizzle path (`bm_fix`) and the page-table path
-    (`bm_fix_pid`), per-frame content latches, and the child-aware
-    cooling invariant.  `test_bufmgr` cycles 200 pages through a
-    16-frame pool; `test_bufmgr_mt` drives it from a 4-thread
-    `xtc_exec` (16 workers + the provider) with 32000 verified reads
-    and zero mismatches -- the buffer manager is thread-safe.
+  * `bufmgr.c` -- Phase 1.  A page-id-addressed frame pool with a
+    striped-lock page table (`bm_fix_pid`/`bm_alloc_pid`), cooling-stage
+    CLOCK eviction with a page-provider `xtc_proc` that proactively
+    flushes dirty COOL pages ahead of demand, per-frame content
+    latches, and scan resistance (2Q probation).  `test_bufmgr` cycles
+    200 pages through a 16-frame pool; `test_bufmgr_mt` drives it from
+    a 4-thread `xtc_exec` (16 workers + the provider) with 32000
+    verified reads and zero mismatches -- the buffer manager is
+    thread-safe.
   * `btnode.c` -- Phase 2.  The prefix-compressed slotted node
     (common fence prefix stored once, per-slot 4-byte head, split /
     search / insert / remove).  `test_btnode`: 3834 checks.
