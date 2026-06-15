@@ -1,6 +1,6 @@
 # M_SQLXTC_VEXEC -- a vectorized execution engine to replace the VDBE
 
-Status: V0 LANDED; V1-V6 planned.  This document scopes a
+Status: V0-V1 LANDED (expression evaluator); columnar vectors + V2-V6 planned.  This document scopes a
 from-scratch execution engine for sqlxtc -- a DuckDB-style vectorized,
 push-based, morsel-parallel executor built on the libxtc concurrency
 model -- that replaces SQLite's VDBE (the bytecode interpreter,
@@ -172,6 +172,23 @@ still pass, so the oracle also guards that the fallback is never wrong.
       VDBE, 11 fall back; clean under ASan+UBSan.
   V1  Vectorized expression evaluator (P2) + the chunk/vector/selection
       model with NULL bitmasks and dictionary encoding.
+      EXPRESSION EVALUATOR DONE (vexec.c / test_vexec.c).  Projection
+      and WHERE are compiled from the Lime AST into a vexec expression
+      tree and evaluated per row: column refs, INTEGER/REAL/TEXT/NULL
+      literals, arithmetic (+ - * / % with SQLite int/real promotion,
+      integer division, x/0 -> NULL), || concat, comparisons with
+      3-valued NULL logic, AND/OR/NOT, IS [NOT] NULL, and the functions
+      abs/length/lower/upper/coalesce/ifnull.  The affinity no-coercion
+      gate is enforced per operator (a comparison or arithmetic that
+      would coerce types falls the whole query back).  32 P1/P2 queries
+      match the VDBE incl. arithmetic/NULL/div-by-zero edge cases;
+      clean under ASan+UBSan.  REMAINING for V1: the columnar vector
+      representation -- chunks are currently row-major cells (each cell
+      self-describes its type, so NULLs are represented but not yet as
+      a separate validity bitmask, and there is no dictionary encoding).
+      That is a representation/perf change with no observable-result
+      effect, deferred to a focused follow-up before V2's parallelism
+      makes the per-vector layout matter.
   V2  Morsel parallelism on the executor: P1/P2 scans run on N worker
       procs with an atomic morsel cursor; I/O overlap via xtc_aio.
       Gate: results unchanged, throughput scales with loops.

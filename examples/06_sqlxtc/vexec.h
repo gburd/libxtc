@@ -5,25 +5,27 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/vexec.h
- *	Vectorized execution engine -- V0 (recognizer + fallback + a
- *	single-pipeline scan/filter/project executor).  See
+ *	Vectorized execution engine -- V0/V1 (recognizer + fallback + a
+ *	single-pipeline scan/filter/project executor with a compiled,
+ *	vectorized scalar expression evaluator).  See
  *	docs/M_SQLXTC_VEXEC.md.
  *
- *	The engine intercepts a prepared statement: a RECOGNIZER inspects
- *	the planner's opcode program (via EXPLAIN, the stable public
- *	surface) and, if it matches the P1 template (single-table scan,
- *	optional WHERE filter, projection of columns/rowid), builds a
- *	vectorized plan that produces results in DataChunks.  Any query
- *	the recognizer does not match is left to run on the VDBE unchanged
- *	-- vexec is always a strict superset, so a fallback is never wrong.
+ *	The engine intercepts a query: a RECOGNIZER inspects the Lime AST
+ *	and, if it matches the P1/P2 template (single-table scan,
+ *	projection of scalar expressions, optional WHERE of a scalar
+ *	boolean expression), builds a vectorized plan that produces
+ *	results in DataChunks.  Any query the recognizer does not match --
+ *	including any expression whose SQLite affinity/coercion semantics
+ *	the engine cannot faithfully reproduce -- is left to run on the
+ *	VDBE unchanged, so vexec is always a strict superset and a
+ *	fallback is never wrong.
  *
- *	V0 is single-worker and reads rows through the reference engine's
- *	own cursor (so MVCC visibility, version decoding, and type/affinity
- *	are identical to the VDBE); the vectorization is the chunked,
- *	push-based shape that V1+ build parallelism and a native expression
- *	evaluator on top of.  The functional gate is the differential
- *	oracle: vexec results equal VDBE results (as a multiset when the
- *	query has no top-level ORDER BY).
+ *	The row source is the reference engine's own cursor (so MVCC
+ *	visibility, version decoding, and type/affinity are identical to
+ *	the VDBE); vexec compiles the projection and filter from the AST
+ *	and evaluates them per row.  The functional gate is the
+ *	differential oracle: vexec results equal VDBE results (as a
+ *	multiset when the query has no top-level ORDER BY).
  */
 
 #ifndef SQLXTC_VEXEC_H
