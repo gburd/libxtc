@@ -5,14 +5,16 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/sqlrec.h
- *	The sqlxtc record format and value type system.
+ *	SQLite-format record codec and value type system (interop).
  *
- *	sqlxtc stores rows in the SQLite record format so the data file
- *	and the SQL layer interoperate with the reference engine
- *	byte-for-byte.  This module is the standalone, self-contained
- *	encoder/decoder for that format -- the piece the vectorized
- *	executor will use to read column values out of a stored row
- *	without going through the VDBE.
+ *	A standalone, self-contained encoder/decoder for SQLite's row
+ *	record format and its five storage classes.  sqlxtc's own storage
+ *	engine does NOT use this format -- it keeps its own simpler record
+ *	layout (xs_rec_* in xstore.c), since the example owns its files and
+ *	has no on-disk compatibility requirement.  This module is the
+ *	interop boundary: the precise, tested codec for reading or writing
+ *	SQLite-format records (e.g. importing or exporting a SQLite file),
+ *	and a byte-exact specification of the format.
  *
  *	Storage classes (SQLite's five) and their serial types:
  *	    NULL                 serial 0
