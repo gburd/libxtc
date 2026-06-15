@@ -11,8 +11,8 @@
  *	owns N loops, each on its own thread, and we pin several worker
  *	processes to each loop.  Because procs are pinned to their loop,
  *	workers on distinct loops run truly in parallel -- so the
- *	bufmgr's atomics, free-list mutex, and CAS-based Swip state
- *	transitions (HOT/COOL/EVICTED) are exercised under real
+ *	bufmgr's atomics, free-list mutex, and page-table state
+ *	transitions (HOT/COOL, eviction) are exercised under real
  *	concurrency, with a page-provider proc cooling and flushing
  *	alongside.
  *
@@ -44,7 +44,7 @@
 
 #define PAGE_SZ          4096
 #define N_FRAMES         32        /* small resident pool -> eviction churn */
-#define N_ROOTS          1024      /* >> N_FRAMES: forces the swizzle cycle */
+#define N_ROOTS          1024      /* >> N_FRAMES: forces the eviction cycle */
 #define N_LOOPS          4         /* executor loops == OS threads */
 #define WORKERS_PER_LOOP 4
 #define N_WORKERS        (N_LOOPS * WORKERS_PER_LOOP)
@@ -53,7 +53,6 @@
 #define DISJOINT_PER     ((N_ROOTS - HOT_RANGE) / N_WORKERS)
 
 static bm_t       *g_bm;
-static bm_swip_t   g_root[N_ROOTS];     /* the "parents" holding the swips */
 static bm_pid_t    g_pid[N_ROOTS];
 
 static _Atomic uint64_t g_verified;     /* pinned reads that matched */
@@ -85,10 +84,10 @@ check_page(const void *p, bm_pid_t pid, uint64_t k)
 }
 
 /*
- * Worker process.  Each iteration picks a root either from the shared
- * hot range (concurrent fixes of the SAME swip across threads -> HOT
- * hits + COOL rescues + races on one slot) or from this worker's own
- * disjoint range (distinct pages -> free-list / eviction contention),
+ * Worker process.  Each iteration picks a page id either from the
+ * shared hot range (concurrent fixes of the SAME page across workers ->
+ * HOT hits + COOL rescues + races on one frame) or from this worker's
+ * own disjoint range (distinct pages -> free-list / eviction contention),
  * fixes it, copies + verifies the page while it is still pinned, then
  * unfixes (sometimes dirty, but WITHOUT changing the bytes).
  */
@@ -119,7 +118,7 @@ worker_proc(void *arg)
 		else
 			k = lo + (int)((unsigned)rand_r(&seed) % (unsigned)(hi - lo));
 
-		if (bm_fix(g_bm, &g_root[k], &f) != XTC_OK) {
+		if (bm_fix_pid(g_bm, g_pid[k], &f) != XTC_OK) {
 			atomic_fetch_add(&g_fix_fail, 1);
 			continue;
 		}
@@ -166,8 +165,8 @@ setup_roots(void)
 	int k;
 
 	for (k = 0; k < N_ROOTS; k++) {
-		if (bm_alloc(g_bm, &g_root[k], &f, &g_pid[k]) != XTC_OK) {
-			fprintf(stderr, "FAIL: bm_alloc(%d)\n", k);
+		if (bm_alloc_pid(g_bm, &f, &g_pid[k]) != XTC_OK) {
+			fprintf(stderr, "FAIL: bm_alloc_pid(%d)\n", k);
 			return -1;
 		}
 		fill_page(bm_page(f), g_pid[k], (uint64_t)k);
@@ -185,8 +184,8 @@ final_check(void)
 	int k, bad = 0;
 
 	for (k = 0; k < N_ROOTS; k++) {
-		if (bm_fix(g_bm, &g_root[k], &f) != XTC_OK) {
-			fprintf(stderr, "FAIL: final bm_fix(%d)\n", k);
+		if (bm_fix_pid(g_bm, g_pid[k], &f) != XTC_OK) {
+			fprintf(stderr, "FAIL: final bm_fix_pid(%d)\n", k);
 			return -1;
 		}
 		if (bm_frame_pid(f) != g_pid[k] ||
@@ -315,7 +314,7 @@ main(void)
 	    (unsigned long long)atomic_load(&g_verified));
 	printf("  ok   final single-threaded sweep: all %d pages intact\n",
 	    N_ROOTS);
-	printf("  ok   concurrent swizzle/cool/evict cycle "
+	printf("  ok   concurrent cool/evict cycle "
 	    "(hits=%llu rescues=%llu loads=%llu cooled=%llu flushed=%llu "
 	    "evicted=%llu resident=%llu free=%llu)\n",
 	    (unsigned long long)st.hits, (unsigned long long)st.rescues,

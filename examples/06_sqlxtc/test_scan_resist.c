@@ -7,14 +7,13 @@
  * examples/06_sqlxtc/test_scan_resist.c
  *	Scan resistance: a large scan must not evict the hot working set.
  *
- *	LeanStore keeps no per-access bookkeeping on the hot path -- a HOT
- *	(swizzled) hit is a bare pointer dereference -- so scan resistance
- *	cannot come from LRU/CLOCK reference bits.  It comes from the
- *	cooling stage used as a probationary FIFO (the 2Q insight, Johnson
- *	& Shasha 1994): a demand-LOADED page is admitted COOL, not HOT,
- *	and is promoted to HOT only on a SECOND access (a rescue).  A scan
- *	touches each page once, so its pages stay COOL and are evicted
- *	without ever displacing the hot set.
+ *	Scan resistance comes from the cooling stage used as a
+ *	probationary FIFO (the 2Q insight, Johnson & Shasha 1994): a
+ *	demand-LOADED page is admitted COOL, not HOT, and is promoted to
+ *	HOT only on a SECOND access (a rescue).  A scan touches each page
+ *	once, so its pages stay COOL and are evicted without ever
+ *	displacing the hot set -- so it does not depend on a CLOCK
+ *	reference bit getting the recency ordering right under a flood.
  *
  *	This test warms a hot set, runs a scan many times larger than the
  *	pool, then re-touches the hot set and counts how many pages had to
@@ -38,7 +37,6 @@
 #define HOT       16          /* hot working set (fits with room to spare) */
 #define COLD      3000        /* scan set, many times the pool */
 
-static bm_swip_t g_root[HOT + COLD];
 static bm_pid_t  g_pid[HOT + COLD];
 
 static void
@@ -77,7 +75,7 @@ run(int scan_resist)
 
 	/* Allocate every page (the pool overflows immediately). */
 	for (k = 0; k < HOT + COLD; k++) {
-		if (bm_alloc(bm, &g_root[k], &f, &g_pid[k]) != XTC_OK) goto err;
+		if (bm_alloc_pid(bm, &f, &g_pid[k]) != XTC_OK) goto err;
 		fill_page(bm_page(f), g_pid[k], (uint64_t)k);
 		bm_unfix(bm, f, 1);
 	}
@@ -85,20 +83,20 @@ run(int scan_resist)
 	 * (the second access rescues each from COOL). */
 	for (r = 0; r < 12; r++)
 		for (k = 0; k < HOT; k++) {
-			if (bm_fix(bm, &g_root[k], &f) != XTC_OK) goto err;
+			if (bm_fix_pid(bm, g_pid[k], &f) != XTC_OK) goto err;
 			if (!check_page(bm_page(f), g_pid[k], (uint64_t)k)) goto err;
 			bm_unfix(bm, f, 0);
 		}
 	/* Scan the cold set once each -- many times the pool size. */
 	for (k = HOT; k < HOT + COLD; k++) {
-		if (bm_fix(bm, &g_root[k], &f) != XTC_OK) goto err;
+		if (bm_fix_pid(bm, g_pid[k], &f) != XTC_OK) goto err;
 		if (!check_page(bm_page(f), g_pid[k], (uint64_t)k)) goto err;
 		bm_unfix(bm, f, 0);
 	}
 	/* Re-touch the hot set; count how many pages the scan evicted. */
 	bm_get_stats(bm, &before);
 	for (k = 0; k < HOT; k++) {
-		if (bm_fix(bm, &g_root[k], &f) != XTC_OK) goto err;
+		if (bm_fix_pid(bm, g_pid[k], &f) != XTC_OK) goto err;
 		if (!check_page(bm_page(f), g_pid[k], (uint64_t)k)) goto err;
 		bm_unfix(bm, f, 0);
 	}
