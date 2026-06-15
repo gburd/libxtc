@@ -112,6 +112,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # the Lime submodule, for the parser staleness check
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -137,9 +139,27 @@ jobs:
       - name: sqlxtc in-process tests + amalgamation
         working-directory: examples/06_sqlxtc
         run: |
-          make XTC_BUILD=../../build_ci test-quack test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge test-savepoint test-isolation
+          make XTC_BUILD=../../build_ci test-quack test-sql-parse test-sql-ast test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge test-savepoint test-isolation
           make XTC_BUILD=../../build_ci amalg
           make XTC_BUILD=../../build_ci test-vfs-amalg test-pcache-amalg
+      - name: sqlxtc Lime parser is regenerable + committed copy is current
+        working-directory: examples/06_sqlxtc
+        run: |
+          # Build Lime from the submodule, regenerate the parser, and
+          # diff against the committed sql_parse_gen.[ch].  Fails if the
+          # committed generated parser is stale relative to the grammar
+          # (someone changed sql_grammar.lime without regenerating) or if
+          # the grammar's %expect conflict count no longer matches.
+          if [ ! -d lime/src ]; then
+            echo "lime submodule not checked out; skipping staleness check"
+            exit 0
+          fi
+          make -C lime JIT=0 bin/lime
+          cp sql_parse_gen.c /tmp/committed_gen.c
+          cp sql_parse_gen.h /tmp/committed_gen.h
+          make sql_parse   # regenerates sql_parse_gen.[ch] (lime exits non-zero on a %expect mismatch)
+          diff -u /tmp/committed_gen.c sql_parse_gen.c
+          diff -u /tmp/committed_gen.h sql_parse_gen.h
       - name: sqlxtc multi-thread load (one loop per CPU; cross-loop regression)
         working-directory: examples/06_sqlxtc
         run: |

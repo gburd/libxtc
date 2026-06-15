@@ -17,6 +17,7 @@
 #include <stddef.h>
 
 #include "sql_parse.h"
+#include "sql_ast.h"
 
 typedef struct sql_token {
 	const char *p;
@@ -24,10 +25,12 @@ typedef struct sql_token {
 } sql_token_t;
 
 typedef struct sql_parse_state {
-	sql_kind_t  kind;
-	int         readonly;
-	int         error;
-	const char *err_msg;
+	sql_kind_t   kind;        /* kind of the FIRST statement (routing) */
+	int          readonly;    /* readonly-ness of the first statement */
+	int          error;
+	const char  *err_msg;
+	sql_arena_t *arena;       /* AST allocation arena (caller-owned) */
+	sql_stmt_t  *stmts;       /* parsed statement list (the AST root) */
 } sql_parse_state_t;
 
 #endif /* SQLXTC_SQL_PARSE_LIME_H */
