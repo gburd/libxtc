@@ -57,6 +57,15 @@ struct test_payload {
 
 #define TEST_MAGIC  0xCAFEBABE
 #define SHM_SIZE    (1024 * 1024)   /* 1 MiB */
+/*
+ * Inter-process coordination scratch.  The slab header (bytes
+ * 0..XTC_SHM_HDR_SIZE) is private to the allocator -- it now holds the
+ * cross-process offset free list -- so tests must NOT stash data there.
+ * Carve a small scratch area at the very top of the region instead;
+ * these tests allocate few objects, so the upward-growing cursor never
+ * reaches it.
+ */
+#define SHM_COORD_OFF   (SHM_SIZE - 4096)
 
 /* Generate a unique shm name for this test run. */
 static void
@@ -176,9 +185,9 @@ test_shm_basic_fork(const MunitParameter p[], void *d)
 	off = xtc_slab_offset(slab, obj);
 	munit_assert_int64(off, !=, XTC_SLAB_OFF_NONE);
 
-	/* Store offset in shm for child to find.
-	 * Use bytes 32-39 in the header's reserved area (safe from slot data). */
-	offset_slot = (volatile xtc_slab_off_t *)((uint8_t *)shm_addr + 32);
+	/* Store offset in shm for child to find.  Use the top-of-region
+	 * coordination scratch (the header now belongs to the allocator). */
+	offset_slot = (volatile xtc_slab_off_t *)((uint8_t *)shm_addr + SHM_COORD_OFF);
 	*offset_slot = off;
 
 	/* Memory barrier to ensure writes visible to child. */
@@ -200,9 +209,9 @@ test_shm_basic_fork(const MunitParameter p[], void *d)
 		child_fd = attach_shm_region(shm_name, SHM_SIZE, &child_shm_addr);
 		if (child_fd < 0) _exit(1);
 
-		/* Read offset from shm header's reserved area. */
+		/* Read offset from the top-of-region coordination scratch. */
 		volatile xtc_slab_off_t *child_offset_slot =
-		    (volatile xtc_slab_off_t *)((uint8_t *)child_shm_addr + 32);
+		    (volatile xtc_slab_off_t *)((uint8_t *)child_shm_addr + SHM_COORD_OFF);
 		atomic_thread_fence(memory_order_acquire);
 		child_off = *child_offset_slot;
 
@@ -276,9 +285,9 @@ test_shm_alloc_in_child(const MunitParameter p[], void *d)
 	shm_fd = create_shm_region(shm_name, SHM_SIZE, &shm_addr);
 	munit_assert_int(shm_fd, >=, 0);
 
-	/* Communication slots in shm header's reserved area. */
-	offset_slot = (volatile xtc_slab_off_t *)((uint8_t *)shm_addr + 32);
-	ready_flag = (volatile int *)((uint8_t *)shm_addr + 40);
+	/* Communication slots in the top-of-region coordination scratch. */
+	offset_slot = (volatile xtc_slab_off_t *)((uint8_t *)shm_addr + SHM_COORD_OFF);
+	ready_flag = (volatile int *)((uint8_t *)shm_addr + SHM_COORD_OFF + 8);
 	*ready_flag = 0;
 
 	opts.name = "shm_child_alloc";
@@ -303,9 +312,9 @@ test_shm_alloc_in_child(const MunitParameter p[], void *d)
 		if (child_fd < 0) _exit(1);
 
 		volatile xtc_slab_off_t *child_offset_slot =
-		    (volatile xtc_slab_off_t *)((uint8_t *)child_shm_addr + 32);
+		    (volatile xtc_slab_off_t *)((uint8_t *)child_shm_addr + SHM_COORD_OFF);
 		volatile int *child_ready =
-		    (volatile int *)((uint8_t *)child_shm_addr + 40);
+		    (volatile int *)((uint8_t *)child_shm_addr + SHM_COORD_OFF + 8);
 
 		child_opts.name = "shm_child_alloc_child";
 		child_opts.obj_size = sizeof(struct test_payload);
@@ -571,11 +580,120 @@ test_shm_resolve_invalid_offset(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- test_shm_reclaim_cross_process --------------------------- */
+/*
+ * Reclamation crosses the process boundary.  Parent allocates N slots,
+ * records their region offsets, and FREES them; the child -- attached
+ * through an independent mmap (generally a different address) -- then
+ * allocates N slots and must get back only offsets the parent freed.
+ * This passes only because the free list is threaded through region
+ * offsets in the shared header, not through process-local pointers.
+ */
+#define XP_N 48
+static MunitResult
+test_shm_reclaim_cross_process(const MunitParameter p[], void *d)
+{
+	char shm_name[64];
+	void *shm_addr = NULL;
+	int shm_fd = -1;
+	xtc_slab_t *slab = NULL;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	volatile int *ready_flag;
+	volatile xtc_slab_off_t *freed;   /* [XP_N] freed offsets */
+	void *objs[XP_N];
+	pid_t pid;
+	int i, status;
+	(void)p; (void)d;
+
+	make_shm_name(shm_name, sizeof(shm_name), "reclaim_xp");
+	shm_fd = create_shm_region(shm_name, SHM_SIZE, &shm_addr);
+	munit_assert_int(shm_fd, >=, 0);
+
+	/* Coordination scratch at the top of the region. */
+	ready_flag = (volatile int *)((uint8_t *)shm_addr + SHM_COORD_OFF);
+	freed = (volatile xtc_slab_off_t *)((uint8_t *)shm_addr + SHM_COORD_OFF + 16);
+	*ready_flag = 0;
+
+	opts.name = "shm_reclaim";
+	opts.obj_size = sizeof(struct test_payload);
+	opts.mode = XTC_SLAB_SHARED_MEMORY;
+	opts.shm_base = shm_addr;
+	opts.shm_size = SHM_SIZE;
+	munit_assert_int(xtc_slab_create(&opts, &slab), ==, XTC_OK);
+
+	/* Allocate N, record offsets, free them all. */
+	for (i = 0; i < XP_N; i++) {
+		objs[i] = xtc_slab_alloc(slab);
+		munit_assert_not_null(objs[i]);
+		freed[i] = xtc_slab_offset(slab, objs[i]);
+	}
+	for (i = 0; i < XP_N; i++)
+		xtc_slab_free(slab, objs[i]);
+	atomic_thread_fence(memory_order_release);
+	*ready_flag = 1;
+
+	pid = fork();
+	munit_assert_int(pid, >=, 0);
+
+	if (pid == 0) {
+		/* Child: independent attach (different mapping), own slab
+		 * handle, allocate N, verify each is a parent-freed offset. */
+		void *caddr = NULL;
+		int cfd;
+		xtc_slab_t *cslab = NULL;
+		xtc_slab_opts_t copts = XTC_SLAB_OPTS_DEFAULT;
+		volatile int *cready;
+		volatile xtc_slab_off_t *cfreed;
+		int ok = 1;
+
+		cfd = attach_shm_region(shm_name, SHM_SIZE, &caddr);
+		if (cfd < 0) _exit(2);
+		cready = (volatile int *)((uint8_t *)caddr + SHM_COORD_OFF);
+		cfreed = (volatile xtc_slab_off_t *)((uint8_t *)caddr + SHM_COORD_OFF + 16);
+		while (*cready == 0)
+			;
+		atomic_thread_fence(memory_order_acquire);
+
+		copts.name = "shm_reclaim_child";
+		copts.obj_size = sizeof(struct test_payload);
+		copts.mode = XTC_SLAB_SHARED_MEMORY;
+		copts.shm_base = caddr;
+		copts.shm_size = SHM_SIZE;
+		if (xtc_slab_create(&copts, &cslab) != XTC_OK) {
+			cleanup_shm(NULL, cfd, caddr, SHM_SIZE);
+			_exit(3);
+		}
+		for (i = 0; i < XP_N && ok; i++) {
+			void *o = xtc_slab_alloc(cslab);
+			xtc_slab_off_t got;
+			int j, found = 0;
+			if (o == NULL) { ok = 0; break; }
+			got = xtc_slab_offset(cslab, o);
+			for (j = 0; j < XP_N; j++)
+				if (cfreed[j] == got) { found = 1; break; }
+			if (!found) ok = 0;
+		}
+		xtc_slab_destroy(cslab);
+		(void)munmap(caddr, SHM_SIZE);
+		(void)close(cfd);
+		_exit(ok ? 0 : 1);
+	}
+
+	munit_assert_int(waitpid(pid, &status, 0), ==, pid);
+	munit_assert_true(WIFEXITED(status));
+	munit_assert_int(WEXITSTATUS(status), ==, 0);
+
+	xtc_slab_destroy(slab);
+	cleanup_shm(shm_name, shm_fd, shm_addr, SHM_SIZE);
+	return MUNIT_OK;
+}
+
 /* ----- Test suite ---------------------------------------------- */
 
 static MunitTest tests[] = {
 	{ "/basic_fork",        test_shm_basic_fork,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/alloc_in_child",    test_shm_alloc_in_child,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reclaim_cross_process", test_shm_reclaim_cross_process, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent_alloc",  test_shm_concurrent_alloc,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/size_too_small",    test_shm_size_too_small,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/invalid_offset",    test_shm_resolve_invalid_offset, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

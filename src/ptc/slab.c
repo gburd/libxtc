@@ -79,15 +79,23 @@ static int   __win_chunk_free(void *p, size_t sz) { (void)sz; free(p); return 0;
 /*
  * When mode == XTC_SLAB_SHARED_MEMORY, the first bytes of the region
  * contain a header that synchronizes multiple processes attaching to
- * the same shm segment.  The cursor is an atomic offset into the region;
- * chunk allocation CAS's this forward.
+ * the same shm segment.  The cursor is an atomic offset into the region
+ * that allocation CAS's forward to carve fresh slots; reclaimed slots
+ * are returned to a cross-process free list also kept in the header,
+ * threaded through region-relative offsets so a slot freed by any
+ * attached process is reusable by any other (a pointer would be
+ * meaningless under a different mapping address).
  *
- * Layout:
+ * Layout (64-byte header, one cache line):
  *   +0x00: magic (8 bytes) = 0x5854435F534C4142 "XTC_SLAB"
  *   +0x08: version (8 bytes) = 1
- *   +0x10: cursor (8 bytes, atomic) = next free offset
+ *   +0x10: cursor (8 bytes, atomic) = next un-carved offset
  *   +0x18: total_size (8 bytes) = size of entire region
- *   +0x20: reserved (32 bytes, pad to 64-byte cache line)
+ *   +0x20: free_off (8 bytes, atomic) = offset free-list head (NIL = empty)
+ *   +0x28: free_lock (4 bytes, atomic) = test-and-set spinlock for the list
+ *   +0x2c: pad0 (4 bytes)
+ *   +0x30: slot_size (8 bytes) = per-slot stride (all attachers must agree)
+ *   +0x38: reserved (8 bytes)
  *   +0x40: usable region starts here
  */
 #define XTC_SHM_MAGIC     0x5854435F534C4142ULL  /* "XTC_SLAB" */
@@ -99,8 +107,30 @@ struct xtc_slab_shm_header {
 	uint64_t         version;
 	_Atomic uint64_t cursor;      /* next free offset from region start */
 	uint64_t         total_size;
-	uint8_t          reserved[32];
+	/*
+	 * Cross-process free list.  Reclaimed slots are linked through
+	 * their first 8 bytes as REGION-RELATIVE OFFSETS (not pointers --
+	 * the segment may be mapped at a different address in each
+	 * process), with XTC_SHM_FREE_NIL as the end sentinel.  free_off
+	 * is the head; alloc pops it and free pushes onto it under
+	 * free_lock (a test-and-set spinlock in the shared header, since a
+	 * pthread mutex is not portably shareable across unrelated
+	 * mappings and the critical section is a couple of loads/stores).
+	 * slot_size records the stride so a popped offset is a valid slot
+	 * boundary regardless of which process carved the chunk it came
+	 * from.  All of this lives in the shared header so reclamation is
+	 * visible to every attached process.
+	 */
+	_Atomic uint64_t free_off;    /* head of the offset free list (NIL = empty) */
+	_Atomic uint32_t free_lock;   /* 0 = unlocked, 1 = locked (spin) */
+	uint32_t         pad0;
+	uint64_t         slot_size;   /* per-slot stride, set by the creator */
+	uint8_t          reserved[8];
 };
+
+/* End-of-list sentinel for the shared offset free list.  0 is a valid
+ * offset (the region start), so use all-ones. */
+#define XTC_SHM_FREE_NIL  ((uint64_t)-1)
 
 /* ---- audit ring ---- */
 #define XTC_AUDIT_N      64
@@ -527,6 +557,11 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 				/* We won the race; initialize header. */
 				hdr->version = XTC_SHM_VERSION;
 				hdr->total_size = s->opts.shm_size;
+				hdr->slot_size = (uint64_t)s->slot_size;
+				atomic_store_explicit(&hdr->free_off,
+				    XTC_SHM_FREE_NIL, memory_order_relaxed);
+				atomic_store_explicit(&hdr->free_lock, 0,
+				    memory_order_relaxed);
 				atomic_store_explicit(&hdr->cursor,
 				    XTC_SHM_HDR_SIZE, memory_order_release);
 			} else {
@@ -540,9 +575,21 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 			__os_free(s);
 			return XTC_E_VERSION;
 		}
+		/* All attachers must agree on the slot stride, or the shared
+		 * offset free list would hand a process a slot of the wrong
+		 * size.  The initializer wrote it; everyone else verifies. */
+		if (hdr->slot_size != (uint64_t)s->slot_size) {
+			(void)pthread_mutex_destroy(&s->lock);
+			__os_free(s);
+			return XTC_E_INVAL;
+		}
 		s->shm_hdr = hdr;
 		s->shm_base = (uint8_t *)s->opts.shm_base + XTC_SHM_HDR_SIZE;
 		s->shm_end = (uint8_t *)s->opts.shm_base + s->opts.shm_size;
+		/* The magazine caches process-local pointers, which are
+		 * meaningless to other attachers; route every alloc/free
+		 * through the shared offset free list. */
+		s->opts.flags |= XTC_SLAB_NO_MAGAZINE;
 	}
 
 	if (s->opts.flags & XTC_SLAB_AUDIT) {
@@ -633,6 +680,81 @@ xtc_slab_destroy(xtc_slab_t *s)
 	__os_free(s);
 }
 
+/* ---- shared-memory cross-process offset free list ----------------
+ *
+ * In SHARED_MEMORY mode the per-chunk pointer free list is useless
+ * across processes (a slot's *(void **) link is an address valid only
+ * in the process that carved it).  Instead, reclaimed slots are linked
+ * through their first 8 bytes as REGION-RELATIVE OFFSETS and threaded
+ * onto a single list in the shared header, so any attached process can
+ * pop a slot another freed.  A test-and-set spinlock in the header
+ * guards the head; the critical section is one load + one store. */
+static void
+__shm_lock(struct xtc_slab_shm_header *hdr)
+{
+	while (atomic_exchange_explicit(&hdr->free_lock, 1,
+	    memory_order_acquire) != 0)
+		;   /* spin: held only for two memory ops */
+}
+
+static void
+__shm_unlock(struct xtc_slab_shm_header *hdr)
+{
+	atomic_store_explicit(&hdr->free_lock, 0, memory_order_release);
+}
+
+/* Pop a reclaimed slot offset, or XTC_SHM_FREE_NIL if the list is
+ * empty (caller then bumps the cursor for a fresh slot). */
+static uint64_t
+__shm_free_pop(xtc_slab_t *s)
+{
+	struct xtc_slab_shm_header *hdr = s->shm_hdr;
+	uint64_t off;
+
+	__shm_lock(hdr);
+	off = atomic_load_explicit(&hdr->free_off, memory_order_relaxed);
+	if (off != XTC_SHM_FREE_NIL) {
+		/* The slot's first 8 bytes hold the next offset. */
+		uint64_t *link = (uint64_t *)((uint8_t *)s->opts.shm_base + off);
+		atomic_store_explicit(&hdr->free_off, *link, memory_order_relaxed);
+	}
+	__shm_unlock(hdr);
+	return off;
+}
+
+/* Push a slot offset back onto the shared free list. */
+static void
+__shm_free_push(xtc_slab_t *s, uint64_t off)
+{
+	struct xtc_slab_shm_header *hdr = s->shm_hdr;
+	uint64_t *link = (uint64_t *)((uint8_t *)s->opts.shm_base + off);
+
+	__shm_lock(hdr);
+	*link = atomic_load_explicit(&hdr->free_off, memory_order_relaxed);
+	atomic_store_explicit(&hdr->free_off, off, memory_order_relaxed);
+	__shm_unlock(hdr);
+}
+
+/* Carve one fresh slot from the shared cursor (when the free list is
+ * empty).  Returns the slot offset, or XTC_SHM_FREE_NIL if the region
+ * is exhausted. */
+static uint64_t
+__shm_cursor_carve(xtc_slab_t *s)
+{
+	struct xtc_slab_shm_header *hdr = s->shm_hdr;
+	uint64_t old, neu;
+
+	for (;;) {
+		old = atomic_load_explicit(&hdr->cursor, memory_order_acquire);
+		neu = old + (uint64_t)s->slot_size;
+		if (neu > hdr->total_size)
+			return XTC_SHM_FREE_NIL;   /* region full */
+		if (atomic_compare_exchange_weak_explicit(&hdr->cursor,
+		    &old, neu, memory_order_acq_rel, memory_order_acquire))
+			return old;
+	}
+}
+
 void *
 xtc_slab_alloc(xtc_slab_t *s)
 {
@@ -641,6 +763,28 @@ xtc_slab_alloc(xtc_slab_t *s)
 	void *obj;
 
 	if (XTC_UNLIKELY(s == NULL)) return NULL;
+
+	/*
+	 * SHARED_MEMORY mode: serve from the cross-process offset free
+	 * list (reuse a slot any process freed), falling back to carving
+	 * one from the shared cursor.  Bypasses the magazine and per-chunk
+	 * pointer free lists, which are process-local and not valid across
+	 * mappings.
+	 */
+	if (s->opts.mode == XTC_SLAB_SHARED_MEMORY) {
+		uint64_t off = __shm_free_pop(s);
+		if (off == XTC_SHM_FREE_NIL)
+			off = __shm_cursor_carve(s);
+		if (off == XTC_SHM_FREE_NIL) {
+			atomic_fetch_add_explicit(&s->s_oom_fails, 1,
+			    memory_order_relaxed);
+			if (s->opts.oom_policy == XTC_SLAB_OOM_ABORT) abort();
+			return NULL;
+		}
+		slot = (uint8_t *)s->opts.shm_base + off;
+		atomic_fetch_add_explicit(&s->s_alloc_slow, 1, memory_order_relaxed);
+		goto have_slot;
+	}
 
 	/* Magazine fast path. */
 	if (XTC_LIKELY(!(s->opts.flags & XTC_SLAB_NO_MAGAZINE))) {
@@ -678,12 +822,17 @@ have_slot:
 	obj = __obj_from_slot(s, slot);
 	if (s->opts.ctor != NULL) {
 		if (s->opts.ctor(obj, s->opts.cb_user) != XTC_OK) {
-			/* Constructor refused; return slot to free list. */
-			(void)pthread_mutex_lock(&s->lock);
-			__push_slot_locked(s, slot);
-			atomic_fetch_add_explicit(&s->s_n_free, 1,
-			    memory_order_relaxed);
-			(void)pthread_mutex_unlock(&s->lock);
+			/* Constructor refused; return slot to its free list. */
+			if (s->opts.mode == XTC_SLAB_SHARED_MEMORY) {
+				__shm_free_push(s, (uint64_t)
+				    ((uint8_t *)slot - (uint8_t *)s->opts.shm_base));
+			} else {
+				(void)pthread_mutex_lock(&s->lock);
+				__push_slot_locked(s, slot);
+				atomic_fetch_add_explicit(&s->s_n_free, 1,
+				    memory_order_relaxed);
+				(void)pthread_mutex_unlock(&s->lock);
+			}
 			return NULL;
 		}
 	}
@@ -710,6 +859,19 @@ xtc_slab_free(xtc_slab_t *s, void *obj)
 	if (s->opts.dtor != NULL) s->opts.dtor(obj, s->opts.cb_user);
 	atomic_fetch_sub_explicit(&s->s_n_inuse, 1, memory_order_relaxed);
 	__audit_record(s, obj, 'F');
+
+	/*
+	 * SHARED_MEMORY mode: push the slot's region offset onto the
+	 * cross-process free list so another process can reuse it.  No
+	 * magazine (it caches process-local pointers).
+	 */
+	if (s->opts.mode == XTC_SLAB_SHARED_MEMORY) {
+		__shm_free_push(s, (uint64_t)
+		    ((uint8_t *)slot - (uint8_t *)s->opts.shm_base));
+		atomic_fetch_add_explicit(&s->s_free_slow, 1,
+		    memory_order_relaxed);
+		return;
+	}
 
 	/* Magazine fast path. */
 	if (XTC_LIKELY(!(s->opts.flags & XTC_SLAB_NO_MAGAZINE))) {

@@ -402,6 +402,57 @@ test_pressure_listen_ex_stop(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- SHARED_MEMORY cross-process reclamation ----------------- *
+ *
+ * The shared region's free list is threaded through region-relative
+ * offsets so a slot freed in any attached process is reusable by any
+ * other.  These two tests prove (1) in-process reuse pops the freed
+ * slot back, and (2) a fork()ed child reuses a slot the parent freed
+ * (and vice versa) through a MAP_SHARED segment mapped -- in general
+ * -- at a different address in each process.
+ */
+static MunitResult
+test_shm_reclaim_single_process(const MunitParameter pa[], void *d)
+{
+	xtc_slab_t *s;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	size_t shm_size = 256 * 1024;
+	void *shm_base, *a, *b, *c;
+	xtc_slab_stats_t st;
+	(void)pa; (void)d;
+
+	shm_base = mmap(NULL, shm_size, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	munit_assert_not_null(shm_base);
+	opts.name = "shm_reuse"; opts.obj_size = 128;
+	opts.mode = XTC_SLAB_SHARED_MEMORY;
+	opts.shm_base = shm_base; opts.shm_size = shm_size;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
+
+	a = xtc_slab_alloc(s);
+	munit_assert_not_null(a);
+	/* Freeing then re-allocating must hand the SAME slot back: the
+	 * free list popped what we just pushed (LIFO). */
+	xtc_slab_free(s, a);
+	b = xtc_slab_alloc(s);
+	munit_assert_ptr_equal(a, b);
+
+	/* A second live alloc must be distinct (cursor advanced). */
+	c = xtc_slab_alloc(s);
+	munit_assert_not_null(c);
+	munit_assert_ptr_not_equal(b, c);
+
+	(void)xtc_slab_stat(s, &st);
+	/* One slow free recorded (no magazine in shm mode). */
+	munit_assert_uint64(st.free_slow, >=, 1);
+
+	xtc_slab_free(s, b);
+	xtc_slab_free(s, c);
+	xtc_slab_destroy(s);
+	(void)munmap(shm_base, shm_size);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/basic_alloc_free", test_basic_alloc_free, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pressure_listen_ex_stop", test_pressure_listen_ex_stop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -412,6 +463,7 @@ static MunitTest tests[] = {
 	{ "/redzone",          test_redzone,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/audit",            test_audit,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shm_offset_single_process", test_shm_offset_resolve_single_process, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/shm_reclaim_single_process", test_shm_reclaim_single_process, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent",       test_concurrent,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/backtrace",        test_backtrace,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

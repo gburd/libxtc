@@ -38,11 +38,16 @@
  *
  *	    Cross-process support: verified working.  Multiple processes
  *	    can attach to the same shm region (via shm_open + mmap) and
- *	    allocate concurrently without collision.  The region contains
- *	    a 64-byte header at offset 0 with an atomic cursor that
- *	    coordinates chunk allocation across processes.  First
+ *	    allocate AND free concurrently without collision.  The region
+ *	    contains a 64-byte header at offset 0 holding an atomic cursor
+ *	    (carves fresh slots) and a cross-process free list threaded
+ *	    through region-relative offsets (reclaims freed slots), so a
+ *	    slot freed by any attacher is reusable by any other -- memory
+ *	    is not bump-only and does not leak until destroy.  First
  *	    attacher initializes the header; subsequent attachers verify
- *	    magic and use the existing cursor.
+ *	    magic and the slot stride, then share the cursor and free list.
+ *	    NOTE: the shm header (the first 64 bytes) is private to the
+ *	    allocator; do not stash inter-process scratch there.
  *
  *	    Typical usage:
  *	      1. Process A: shm_open + ftruncate + mmap(MAP_SHARED)
