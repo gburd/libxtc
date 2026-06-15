@@ -197,22 +197,22 @@ shims that become redundant once xtc supplies the primitive.
 ## 5. The native storage engine (greenfield foundation)
 
 A from-scratch, xtc-native storage engine is being built to replace
-SQLite's btree/pager/buffer-pool behind the same `sx_` facade.  It is
-studied from LeanStore (pointer swizzling, cooling-stage eviction) and
+SQLite's btree/pager/buffer-pool behind the same `sx_` facade.  It
+draws on LeanStore (cooling-stage eviction, scan resistance) and
 Karl Malbrain's threadskv B-link trees (slotted pages, prefix
 compression, range cursors).  `M_SQLXTC_STORAGE.md` is the full
 design.  What is built and tested today:
 
-  * `bufmgr.c` -- a LeanStore-style buffer manager.  A *Swip* in the
-    parent encodes HOT / COOL / EVICTED in its two top bits, so
-    resolving a resident page is a pointer load with no hash lookup;
-    a page-table path (pid -> frame hash) coexists for callers (the
-    B-tree) whose child pointers are stable page ids.  A page-provider
-    `xtc_proc` proactively unswizzles cold frames to COOL and writes
+  * `bufmgr.c` -- a page-id-addressed buffer manager.  A fix resolves
+    a page id to a resident, pinned frame through a striped-lock page
+    table (`bm_fix_pid`), faulting the page in on a miss; this is the
+    path the B-tree uses, its child pointers being stable page ids.
+    A page-provider `xtc_proc` cools frames (HOT -> COOL) and writes
     dirty ones out ahead of demand, so reclaiming a frame is a cheap
-    state flip; page I/O is offloaded so the loop never stalls.  The
-    per-frame content latch is an `xtc_arwlock` (next paragraph).
-    Tested standalone and under a 4-thread executor stress.
+    state flip plus a page-table removal; page I/O is offloaded so the
+    loop never stalls.  The per-frame content latch is an
+    `xtc_arwlock` (next paragraph).  Tested standalone and under a
+    4-thread executor stress.
 
   * `btnode.c` -- a slotted node with prefix compression: the common
     prefix of a page's fence keys is stored once and each slot keeps
