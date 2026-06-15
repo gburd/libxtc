@@ -1,10 +1,11 @@
 # M_SQLXTC_VEXEC -- a vectorized execution engine to replace the VDBE
 
-Status: PLAN.  No code yet.  This document scopes a from-scratch
-execution engine for sqlxtc -- a DuckDB-style vectorized, push-based,
-morsel-parallel executor built on the libxtc concurrency model -- that
-replaces SQLite's VDBE (the bytecode interpreter, sqlite3VdbeExec)
-while keeping SQLite's tokenizer, parser, and query planner intact.
+Status: V0 LANDED; V1-V6 planned.  This document scopes a
+from-scratch execution engine for sqlxtc -- a DuckDB-style vectorized,
+push-based, morsel-parallel executor built on the libxtc concurrency
+model -- that replaces SQLite's VDBE (the bytecode interpreter,
+sqlite3VdbeExec) while keeping SQLite's tokenizer, parser, and query
+planner intact.
 
 The replacement must produce results IDENTICAL to the VDBE for every
 query, except that when the query does not specify an order
@@ -58,6 +59,13 @@ Recognizing opcodes rather than the AST is deliberate: the opcode
 program is a smaller, stabler, and already-optimized surface than the
 Select/Expr trees, and matching it guarantees we honor exactly the
 plan the planner chose (same join order, same index choices).
+
+(V0 deviation: for P1 -- a single base table with no join and no index
+choice -- there is no plan decision to preserve, so V0 recognizes from
+the Lime AST instead of the opcode program; it is simpler and the
+result is identical for that shape.  From P5 (joins) on, where join
+order and index selection matter, recognition moves to the opcode
+program as specified above.)
 
 Supported query shapes, in build order (each falls back to the VDBE
 until implemented):
@@ -145,11 +153,23 @@ still pass, so the oracle also guards that the fallback is never wrong.
 
 ## Milestones
 
-  V0  Recognizer + fallback plumbing: intercept aOp[], match P1
+  V0  Recognizer + fallback plumbing: intercept the query, match P1
       (scan+filter+project), build a single-pipeline single-worker
       vectorized executor; everything else falls back.  Differential
       oracle stood up.  Gate: P1 queries match the VDBE; all else
       falls back and still passes.
+      DONE (vexec.c / test_vexec.c).  V0 recognizes P1 from the Lime
+      AST (single base table, projection of plain columns or *,
+      optional WHERE of one column-OP-literal), runs it as a chunked
+      pipeline sourced from the engine's own cursor (so MVCC and value
+      decoding match the VDBE), and applies the filter/projection
+      itself.  The recognizer is conservative: joins, aggregates,
+      ORDER BY, LIMIT, DISTINCT, GROUP BY, compound/IN predicates, and
+      expression projections all fall back, as does any WHERE where
+      column affinity could coerce the literal (the affinity
+      no-coercion gate, after the affinity = '5' vs INTEGER column bug
+      was caught by the differential oracle).  16 P1 queries match the
+      VDBE, 11 fall back; clean under ASan+UBSan.
   V1  Vectorized expression evaluator (P2) + the chunk/vector/selection
       model with NULL bitmasks and dictionary encoding.
   V2  Morsel parallelism on the executor: P1/P2 scans run on N worker

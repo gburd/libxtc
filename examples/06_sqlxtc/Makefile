@@ -189,7 +189,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-sql-ast test-sqlrec test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-sql-parse test-sql-ast test-sqlrec test-vexec test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -364,6 +364,14 @@ test_sqlrec: test_sqlrec.c sqlrec.c sqlite3.o
 test-sqlrec: test_sqlrec
 	./test_sqlrec
 
+# ---- vectorized executor V0: recognizer + fallback + differential oracle ----
+test_vexec: test_vexec.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_vexec.c vexec.c sql_parse_drv.c sql_ast.c \
+		sql_parse_gen.c sqlite3.o $(LDFLAGS)
+
+test-vexec: test_vexec
+	./test_vexec
+
 test_savepoint: test_savepoint.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
 	$(CC) $(CFLAGS) -o $@ test_savepoint.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
@@ -534,4 +542,4 @@ test-sql-parse: ../../test/sqlxtc/test_sql_parse
         sql_parse.o $(LIME_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< sql_parse.o $(LIME_OBJ)
 
-.PHONY: test-quack test-sql-parse test-sql-ast test-sqlrec
+.PHONY: test-quack test-sql-parse test-sql-ast test-sqlrec test-vexec

@@ -46,6 +46,7 @@ test_bufmgr_dio
 bm_writeback_bench
 test_sql_ast
 test_sqlrec
+test_vexec
 /sql_grammar.c
 /sql_grammar.h
 sql_grammar.out
