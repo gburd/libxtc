@@ -10,10 +10,15 @@
  *	Exposes:
  *
  *	  int sql_parse_lime(const char *sql, size_t len, sql_info_t *info);
+ *	  int sql_parse_ast(const char *sql, size_t len,
+ *	                    sql_arena_t **arena_out, sql_stmt_t **root_out,
+ *	                    const char **err_out);
  *
- *	Returns 0 on accept, -1 on parse failure.  On accept, fills
- *	info->kind / info->readonly.  On failure, leaves them as
- *	the caller had them so the keyword-classifier fallback wins.
+ *	sql_parse_lime keeps the legacy classifier contract (sets
+ *	info->kind / info->readonly).  sql_parse_ast returns the full
+ *	AST: on success *arena_out owns the tree (caller frees it with
+ *	sql_arena_destroy) and *root_out is the statement list; on a
+ *	parse error it returns -1 with *err_out set and frees the arena.
  */
 
 #include <ctype.h>
@@ -22,6 +27,7 @@
 #include <string.h>
 
 #include "sql_parse.h"
+#include "sql_ast.h"
 #include "sql_parse_lime.h"
 
 /* From Lime-generated sql_parse_gen.[ch]. */
@@ -318,48 +324,182 @@ lex_next(lex_t *l, sql_token_t *tok)
 
 /* ===== driver ===== */
 
-int
-sql_parse_lime(const char *sql, size_t len, sql_info_t *info)
+/*
+ * Core: run the push parser over `sql`, filling `st` (which the caller
+ * has initialized with an arena).  Assigns 1-based ordinals to ? params
+ * in lexed order.  Returns 0 on accept, -1 on lex/parse error.
+ */
+static int
+sql_parse_run(const char *sql, size_t len, sql_parse_state_t *st)
 {
 	lex_t lex = { sql, sql + len };
 	void *parser;
 	sql_token_t tok;
-	sql_parse_state_t st;
-
-	memset(&st, 0, sizeof st);
-	st.kind = SQL_KIND_UNKNOWN;
-	st.readonly = 0;
-	st.error = 0;
-	st.err_msg = NULL;
 
 	parser = SqlParseAlloc(malloc);
-	if (!parser) return -1;
+	if (!parser) { st->error = 1; st->err_msg = "oom"; return -1; }
 
 	for (;;) {
 		int t = lex_next(&lex, &tok);
 		if (t == 0) break;
 		if (t < 0) {
-			st.error = 1;
-			st.err_msg = "lex error";
+			st->error = 1;
+			st->err_msg = "lex error";
 			break;
 		}
-		SqlParse(parser, t, tok, &st);
-		if (st.error) break;
+		SqlParse(parser, t, tok, st);
+		if (st->error) break;
 	}
-	if (!st.error) {
-		/* End-of-input. */
+	if (!st->error) {
 		sql_token_t z = { NULL, 0 };
-		SqlParse(parser, 0, z, &st);
+		SqlParse(parser, 0, z, st);   /* end-of-input */
 	}
 	SqlParseFree(parser, free);
+	return st->error ? -1 : 0;
+}
 
-	if (st.error) {
+/* Walk the AST and assign 1-based ordinals to ? parameters in the
+ * left-to-right order they appear.  (The grammar leaves PARAM.ival 0;
+ * a single post-order walk numbers them.) */
+static void number_params_expr(sql_expr_t *e, int *next);
+static void number_params_list(sql_exprlist_t *l, int *next) {
+	sql_exprlist_item_t *it;
+	if (!l) return;
+	for (it = l->head; it; it = it->next) number_params_expr(it->expr, next);
+}
+static void number_params_expr(sql_expr_t *e, int *next) {
+	sql_case_arm_t *arm;
+	if (!e) return;
+	if (e->op == SX_E_PARAM) { e->ival = (*next)++; return; }
+	number_params_expr(e->a, next);
+	number_params_expr(e->b, next);
+	number_params_expr(e->c, next);
+	number_params_list(e->list, next);
+	for (arm = e->arms; arm; arm = arm->next) {
+		number_params_expr(arm->when, next);
+		number_params_expr(arm->then, next);
+	}
+	number_params_expr(e->els, next);
+}
+
+static void number_params_select(sql_select_t *s, int *next);
+static void
+number_params_src(sql_src_t *src, int *next)
+{
+	for (; src; src = src->next) {
+		if (src->subquery) number_params_select(src->subquery, next);
+		number_params_expr(src->on, next);
+	}
+}
+static void
+number_params_select(sql_select_t *s, int *next)
+{
+	if (!s) return;
+	number_params_list(s->cols, next);
+	number_params_src(s->from, next);
+	number_params_expr(s->where, next);
+	number_params_list(s->group, next);
+	number_params_expr(s->having, next);
+	number_params_list(s->order, next);
+	number_params_expr(s->limit, next);
+	number_params_expr(s->offset, next);
+	number_params_select(s->rhs, next);
+}
+static void
+number_params_stmt(sql_stmt_t *s, int *next)
+{
+	if (!s) return;
+	switch (s->kind) {
+	case SQL_KIND_SELECT:
+		number_params_select(s->u.select, next);
+		break;
+	case SQL_KIND_INSERT:
+		if (s->u.insert) {
+			int i;
+			for (i = 0; i < s->u.insert->n_rows; i++)
+				number_params_list(s->u.insert->rows[i], next);
+			number_params_select(s->u.insert->select, next);
+		}
+		break;
+	case SQL_KIND_UPDATE:
+		if (s->u.update) {
+			sql_assign_t *a;
+			for (a = s->u.update->sets; a; a = a->next)
+				number_params_expr(a->val, next);
+			number_params_expr(s->u.update->where, next);
+		}
+		break;
+	case SQL_KIND_DELETE:
+		if (s->u.del) number_params_expr(s->u.del->where, next);
+		break;
+	case SQL_KIND_CREATE:
+		if (s->u.create) number_params_select(s->u.create->select, next);
+		break;
+	case SQL_KIND_PRAGMA:
+		if (s->u.pragma) number_params_expr(s->u.pragma->value, next);
+		break;
+	default: break;
+	}
+}
+
+int
+sql_parse_ast(const char *sql, size_t len, sql_arena_t **arena_out,
+              sql_stmt_t **root_out, const char **err_out)
+{
+	sql_parse_state_t st;
+	sql_arena_t *arena;
+
+	if (arena_out) *arena_out = NULL;
+	if (root_out) *root_out = NULL;
+	if (err_out) *err_out = NULL;
+
+	arena = sql_arena_create();
+	if (!arena) { if (err_out) *err_out = "oom"; return -1; }
+
+	memset(&st, 0, sizeof st);
+	st.kind = SQL_KIND_UNKNOWN;
+	st.arena = arena;
+
+	if (sql_parse_run(sql, len, &st) < 0) {
+		if (err_out) *err_out = st.err_msg ? st.err_msg : "parse error";
+		sql_arena_destroy(arena);
+		return -1;
+	}
+	/* ? parameter ordinals are assigned by a post-order walk of each
+	 * statement's expression trees (left-to-right appearance order). */
+	{
+		int next = 1;
+		sql_stmt_t *s;
+		for (s = st.stmts; s; s = s->next)
+			number_params_stmt(s, &next);
+	}
+	if (arena_out) *arena_out = arena; else sql_arena_destroy(arena);
+	if (root_out) *root_out = st.stmts;
+	return 0;
+}
+
+int
+sql_parse_lime(const char *sql, size_t len, sql_info_t *info)
+{
+	sql_parse_state_t st;
+	sql_arena_t *arena;
+
+	arena = sql_arena_create();
+	if (!arena) return -1;
+
+	memset(&st, 0, sizeof st);
+	st.kind = SQL_KIND_UNKNOWN;
+	st.arena = arena;
+
+	if (sql_parse_run(sql, len, &st) < 0) {
 		info->err = st.err_msg ? st.err_msg : "lime: parse failure";
+		sql_arena_destroy(arena);
 		return -1;
 	}
 	if (st.kind != SQL_KIND_UNKNOWN) {
 		info->kind = st.kind;
 		info->readonly = st.readonly;
 	}
+	sql_arena_destroy(arena);   /* classifier does not keep the tree */
 	return 0;
 }

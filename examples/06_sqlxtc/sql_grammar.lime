@@ -1,25 +1,19 @@
 /*
-** sql_parse.lime -- SQL grammar for sqlxtc, in Lime format.
+** sql_grammar.lime -- SQL grammar for sqlxtc, in Lime format.
 **
-** Covers a useful subset of SQLite's SQL: SELECT, INSERT, UPDATE,
-** DELETE, CREATE TABLE / INDEX / VIEW, DROP, PRAGMA, BEGIN / COMMIT /
-** ROLLBACK, ATTACH / DETACH DATABASE, EXPLAIN.
+** Covers a useful subset of SQLite's SQL: SELECT (with joins, set
+** operations, GROUP/HAVING/ORDER/LIMIT), INSERT, UPDATE, DELETE,
+** CREATE TABLE / INDEX / VIEW, DROP, PRAGMA, BEGIN / COMMIT / ROLLBACK,
+** ATTACH / DETACH DATABASE, EXPLAIN.
 **
-** The grammar is intentionally permissive: any expression position
-** accepts a flat sequence of tokens (with balanced parens) so we don't
-** need a full SQLite expression grammar to validate the high-level
-** shape.  This is enough for routing (SELECT vs DML), validation (we
-** reject obviously malformed shapes), and early error reporting.
+** The actions build the sql_ast.h tree from per-parse arena memory
+** (pstate->arena); the root statement list is left in pstate->stmts.
+** On a syntax error the driver discards the whole arena, so a partial
+** tree never leaks.  Token slices point into the original SQL text,
+** which the caller keeps alive for the tree's lifetime.
 **
-** The output is fed via sql_parse_lime() to set sql_info_t fields.
-** When the grammar accepts, it sets pstate->kind and pstate->readonly.
-** When syntax_error fires we leave pstate->kind = SQL_KIND_UNKNOWN
-** so the caller can still defer to SQLite's parser for the real
-** message (we want to surface SQLite errors verbatim).
-**
-** SQLite's own parse.y was consulted as a structural reference;
-** SQLite is public domain.  This grammar shares only the high-level
-** shape.
+** A high-level structural reference was SQLite's parse.y (public
+** domain); this grammar shares only the broad shape of the language.
 */
 
 %include {
@@ -28,7 +22,63 @@
 #include <string.h>
 #include <stdint.h>
 #include "sql_parse.h"
+#include "sql_ast.h"
 #include "sql_parse_lime.h"
+
+/* Allocate an AST node of the given type from the parse arena. */
+#define AST(ps, T)  ((T *)sql_arena_alloc((ps)->arena, sizeof(T)))
+
+/* Build a sql_str_t from a token (a slice into the source SQL). */
+static sql_str_t tok_str(sql_token_t t) {
+    sql_str_t s; s.p = t.p; s.len = (uint32_t)(t.len < 0 ? 0 : t.len); return s;
+}
+
+/* A string-literal token '...' -- strip the surrounding quotes. */
+static sql_str_t tok_str_unquote(sql_token_t t) {
+    sql_str_t s = tok_str(t);
+    if (s.len >= 2 && (s.p[0] == '\'' || s.p[0] == '"')) { s.p++; s.len -= 2; }
+    return s;
+}
+
+static sql_expr_t *mk_expr(sql_parse_state_t *ps, sql_expr_op_t op) {
+    sql_expr_t *e = AST(ps, sql_expr_t);
+    if (e) e->op = op;
+    return e;
+}
+
+static sql_expr_t *mk_binary(sql_parse_state_t *ps, int tok,
+                             sql_expr_t *a, sql_expr_t *b) {
+    sql_expr_t *e = mk_expr(ps, SX_E_BINARY);
+    if (e) { e->op2 = tok; e->a = a; e->b = b; }
+    return e;
+}
+
+static sql_expr_t *mk_unary(sql_parse_state_t *ps, int tok, sql_expr_t *a) {
+    sql_expr_t *e = mk_expr(ps, SX_E_UNARY);
+    if (e) { e->op2 = tok; e->a = a; }
+    return e;
+}
+
+static sql_exprlist_t *mk_list(sql_parse_state_t *ps) {
+    return AST(ps, sql_exprlist_t);
+}
+
+static sql_exprlist_t *list_add(sql_parse_state_t *ps, sql_exprlist_t *l,
+                                sql_expr_t *e) {
+    sql_exprlist_item_t *it;
+    if (l == NULL) l = mk_list(ps);
+    if (l == NULL) return NULL;
+    it = AST(ps, sql_exprlist_item_t);
+    if (it == NULL) return l;
+    it->expr = e;
+    if (l->tail) l->tail->next = it; else l->head = it;
+    l->tail = it;
+    l->n++;
+    return l;
+}
+
+/* Carries a WITH clause up to the select it prefixes. */
+struct with_clause_v { sql_cte_t *list; int rec; };
 }
 
 %token_type {sql_token_t}
@@ -48,6 +98,65 @@
 }
 
 %start_symbol input
+
+/*
+ * Expected unresolved conflicts.  All are TK_COMMA shift/reduce on
+ * list continuations (from_opt / group_opt / order_opt): at a comma the
+ * generator cannot tell whether the comma extends the current list or
+ * ends it, and resolves in favor of shift -- which is correct, because
+ * each of these lists is only ever followed by a keyword (WHERE, GROUP,
+ * ORDER, LIMIT, ...), never a bare comma at the enclosing level.  The
+ * differential parse oracle (test_sql_ast) confirms multi-element lists
+ * parse correctly.  Pinning the count makes CI flag any NEW conflict a
+ * future grammar change introduces.
+ */
+%expect 102
+
+/* ===== symbol types ===== */
+
+%type stmt          {sql_stmt_t *}
+%type stmt_list     {sql_stmt_t *}
+%type select_stmt   {sql_select_t *}
+%type select_core   {sql_select_t *}
+%type insert_stmt   {sql_stmt_t *}
+%type update_stmt   {sql_stmt_t *}
+%type delete_stmt   {sql_stmt_t *}
+%type create_stmt   {sql_stmt_t *}
+%type drop_stmt     {sql_stmt_t *}
+%type pragma_stmt   {sql_stmt_t *}
+%type begin_stmt    {sql_stmt_t *}
+%type commit_stmt   {sql_stmt_t *}
+%type rollback_stmt {sql_stmt_t *}
+%type attach_stmt   {sql_stmt_t *}
+%type detach_stmt   {sql_stmt_t *}
+%type explain_stmt  {sql_stmt_t *}
+
+%type expr          {sql_expr_t *}
+%type expr_atom     {sql_expr_t *}
+%type expr_list     {sql_exprlist_t *}
+%type sel_list      {sql_exprlist_t *}
+%type sel_item      {sql_exprlist_item_t *}
+%type id_list       {sql_exprlist_t *}
+%type distinct_opt  {int}
+%type where_opt     {sql_expr_t *}
+%type group_opt     {sql_exprlist_t *}
+%type having_opt    {sql_expr_t *}
+%type order_opt     {sql_exprlist_t *}
+%type order_list    {sql_exprlist_t *}
+%type order_item    {sql_exprlist_item_t *}
+%type limit_opt     {sql_expr_t *}
+%type offset_part   {sql_expr_t *}
+%type from_opt      {sql_src_t *}
+%type table_list    {sql_src_t *}
+%type table_ref     {sql_src_t *}
+%type join_op       {int}
+%type case_arms     {sql_case_arm_t *}
+%type case_else     {sql_expr_t *}
+%type values_list   {sql_insert_t *}
+%type assign_list   {sql_assign_t *}
+%type assign        {sql_assign_t *}
+%type coldef        {sql_coldef_t *}
+%type insert_cols   {sql_exprlist_t *}
 
 /* ===== tokens ===== */
 
@@ -84,393 +193,607 @@
 
 %token TK_ID.       %token TK_NUMBER.  %token TK_STRING.  %token TK_BLOB.
 
+/* ===== expression precedence (low to high) ===== *
+ *
+ * The ladder is complete: every operator that can appear in a binary
+ * or prefix expression has a precedence, so the LALR generator has no
+ * unresolved shift/reduce.  BETWEEN and IN sit at the comparison level
+ * with the relational operators; the BETWEEN..AND and unary-minus
+ * rules carry an explicit per-rule [%prec] below. */
+%left TK_OR.
+%left TK_AND.
+%right TK_NOT.
+%left TK_EQ TK_NE TK_LT TK_LE TK_GT TK_GE TK_IS TK_LIKE TK_IN TK_BETWEEN.
+%left TK_PLUS TK_MINUS TK_CONCAT.
+%left TK_STAR TK_SLASH TK_PERCENT TK_AMP TK_PIPE.
+%right TK_TILDE.
+%right TK_UMINUS.   /* synthetic: unary +/- and ~ precedence */
+
 /* ===== top level ===== */
 
-input ::= stmt_list maybe_semi.
-input ::= stmt_list TK_SEMI stmt_list maybe_semi.
+input ::= stmt_list(L) maybe_semi. {
+    pstate->stmts = L;
+    /* Route on the FIRST statement.  Set here (not in the per-statement
+     * actions) because reductions happen inner-first: a nested SELECT
+     * inside INSERT/CREATE VIEW/EXPLAIN would otherwise claim the kind
+     * before the outer statement reduces. */
+    if (L) { pstate->kind = L->kind; pstate->readonly = L->readonly; }
+}
 
 maybe_semi ::= .
 maybe_semi ::= TK_SEMI.
 
-stmt_list ::= stmt.
-stmt_list ::= stmt_list TK_SEMI stmt.
+stmt_list(R) ::= stmt(S). { R = S; }
+stmt_list(R) ::= stmt_list(L) TK_SEMI stmt(S). {
+    /* append S to the tail of L */
+    if (L == NULL) { R = S; }
+    else { sql_stmt_t *t = L; while (t->next) t = t->next; t->next = S; R = L; }
+}
 
-stmt ::= select_stmt.
-stmt ::= insert_stmt.
-stmt ::= update_stmt.
-stmt ::= delete_stmt.
-stmt ::= create_stmt.
-stmt ::= drop_stmt.
-stmt ::= pragma_stmt.
-stmt ::= begin_stmt.
-stmt ::= commit_stmt.
-stmt ::= rollback_stmt.
-stmt ::= attach_stmt.
-stmt ::= detach_stmt.
-stmt ::= explain_stmt.
+stmt(R) ::= select_stmt(S).  { R = AST(pstate, sql_stmt_t); if (R) { R->kind = SQL_KIND_SELECT; R->readonly = 1; R->u.select = S; } }
+stmt(R) ::= insert_stmt(S).  { R = S; }
+stmt(R) ::= update_stmt(S).  { R = S; }
+stmt(R) ::= delete_stmt(S).  { R = S; }
+stmt(R) ::= create_stmt(S).  { R = S; }
+stmt(R) ::= drop_stmt(S).    { R = S; }
+stmt(R) ::= pragma_stmt(S).  { R = S; }
+stmt(R) ::= begin_stmt(S).   { R = S; }
+stmt(R) ::= commit_stmt(S).  { R = S; }
+stmt(R) ::= rollback_stmt(S).{ R = S; }
+stmt(R) ::= attach_stmt(S).  { R = S; }
+stmt(R) ::= detach_stmt(S).  { R = S; }
+stmt(R) ::= explain_stmt(S). { R = S; }
 
 /* ===== SELECT ===== */
 
-select_stmt ::= maybe_with TK_SELECT distinct_opt sel_list
-                from_opt where_opt group_opt order_opt limit_opt
-                set_op_tail. {
-    pstate->kind = SQL_KIND_SELECT;
-    pstate->readonly = 1;
+/* A WITH clause prefixed to any select.  Kept as a separate rule (not
+ * folded into select_core) so the existing setop rules are untouched;
+ * the CTE list and the RECURSIVE flag are attached to the select it
+ * prefixes. */
+select_stmt(R) ::= with_clause(WC) select_stmt(S). {
+    if (S) { S->with = WC.list; S->with_recursive = WC.rec; }
+    R = S;
+}
+select_stmt(R) ::= select_core(C). { R = C; }
+select_stmt(R) ::= select_core(C) TK_UNION select_stmt(T). {
+    if (C) { C->setop = SX_SET_UNION; C->rhs = T; } R = C;
+}
+select_stmt(R) ::= select_core(C) TK_UNION TK_ALL select_stmt(T). {
+    if (C) { C->setop = SX_SET_UNION_ALL; C->rhs = T; } R = C;
+}
+select_stmt(R) ::= select_core(C) TK_INTERSECT select_stmt(T). {
+    if (C) { C->setop = SX_SET_INTERSECT; C->rhs = T; } R = C;
+}
+select_stmt(R) ::= select_core(C) TK_EXCEPT select_stmt(T). {
+    if (C) { C->setop = SX_SET_EXCEPT; C->rhs = T; } R = C;
 }
 
-maybe_with ::= .
-maybe_with ::= TK_WITH cte_list.
-maybe_with ::= TK_WITH TK_RECURSIVE cte_list.
+select_core(R) ::= TK_SELECT distinct_opt(D) sel_list(L) from_opt(F)
+                   where_opt(W) group_opt(G) having_opt(H)
+                   order_opt(O) limit_opt(LM) offset_part(OF). {
+    R = AST(pstate, sql_select_t);
+    if (R) {
+        R->distinct = D; R->cols = L; R->from = F; R->where = W;
+        R->group = G; R->having = H; R->order = O; R->limit = LM;
+        R->offset = OF;
+    }
+}
 
-cte_list ::= cte.
-cte_list ::= cte_list TK_COMMA cte.
+distinct_opt(R) ::= .            { R = 0; }
+distinct_opt(R) ::= TK_DISTINCT. { R = 1; }
+distinct_opt(R) ::= TK_ALL.      { R = 0; }
 
-cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP.
-cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP.
+sel_list(R) ::= sel_item(I). { R = mk_list(pstate); if (R && I) { R->head = R->tail = I; R->n = 1; } }
+sel_list(R) ::= sel_list(L) TK_COMMA sel_item(I). {
+    R = L; if (R && I) { if (R->tail) R->tail->next = I; else R->head = I; R->tail = I; R->n++; }
+}
 
-distinct_opt ::= .
-distinct_opt ::= TK_DISTINCT.
-distinct_opt ::= TK_ALL.
+sel_item(R) ::= TK_STAR. {
+    R = AST(pstate, sql_exprlist_item_t);
+    if (R) { R->expr = mk_expr(pstate, SX_E_STAR); }
+}
+sel_item(R) ::= TK_ID(T) TK_DOT TK_STAR. {
+    R = AST(pstate, sql_exprlist_item_t);
+    if (R) { R->expr = mk_expr(pstate, SX_E_STAR);
+             if (R->expr) { R->expr->name[0] = tok_str(T); R->expr->nname = 1; } }
+}
+sel_item(R) ::= expr(E). { R = AST(pstate, sql_exprlist_item_t); if (R) R->expr = E; }
+sel_item(R) ::= expr(E) TK_AS TK_ID(T). {
+    R = AST(pstate, sql_exprlist_item_t); if (R) { R->expr = E; R->alias = tok_str(T); }
+}
+sel_item(R) ::= expr(E) TK_ID(T). {
+    R = AST(pstate, sql_exprlist_item_t); if (R) { R->expr = E; R->alias = tok_str(T); }
+}
 
-sel_list ::= sel_item.
-sel_list ::= sel_list TK_COMMA sel_item.
+from_opt(R) ::= .                       { R = NULL; }
+from_opt(R) ::= TK_FROM table_list(L).  { R = L; }
 
-sel_item ::= TK_STAR.
-sel_item ::= TK_ID TK_DOT TK_STAR.
-sel_item ::= expr.
-sel_item ::= expr TK_AS TK_ID.
-sel_item ::= expr TK_ID.
+table_list(R) ::= table_ref(T). { R = T; }
+table_list(R) ::= table_list(L) TK_COMMA table_ref(T). {
+    if (T) T->join = SX_J_NONE;
+    if (L == NULL) { R = T; }
+    else { sql_src_t *s = L; while (s->next) s = s->next; s->next = T; R = L; }
+}
+table_list(R) ::= table_list(L) join_op(J) table_ref(T) join_constraint. {
+    if (T) T->join = (sql_join_type_t)J;
+    if (L == NULL) { R = T; }
+    else { sql_src_t *s = L; while (s->next) s = s->next; s->next = T; R = L; }
+}
 
-from_opt ::= .
-from_opt ::= TK_FROM table_list.
-
-table_list ::= table_ref.
-table_list ::= table_list TK_COMMA table_ref.
-table_list ::= table_list join_op table_ref join_constraint.
-
-join_op ::= TK_JOIN.
-join_op ::= TK_INNER TK_JOIN.
-join_op ::= TK_LEFT TK_JOIN.
-join_op ::= TK_LEFT TK_OUTER TK_JOIN.
-join_op ::= TK_RIGHT TK_JOIN.
-join_op ::= TK_RIGHT TK_OUTER TK_JOIN.
-join_op ::= TK_FULL TK_JOIN.
-join_op ::= TK_FULL TK_OUTER TK_JOIN.
-join_op ::= TK_CROSS TK_JOIN.
-join_op ::= TK_NATURAL TK_JOIN.
-join_op ::= TK_NATURAL TK_LEFT TK_JOIN.
+join_op(R) ::= TK_JOIN.                       { R = SX_J_INNER; }
+join_op(R) ::= TK_INNER TK_JOIN.              { R = SX_J_INNER; }
+join_op(R) ::= TK_LEFT TK_JOIN.               { R = SX_J_LEFT; }
+join_op(R) ::= TK_LEFT TK_OUTER TK_JOIN.      { R = SX_J_LEFT; }
+join_op(R) ::= TK_RIGHT TK_JOIN.              { R = SX_J_RIGHT; }
+join_op(R) ::= TK_RIGHT TK_OUTER TK_JOIN.     { R = SX_J_RIGHT; }
+join_op(R) ::= TK_FULL TK_JOIN.               { R = SX_J_FULL; }
+join_op(R) ::= TK_FULL TK_OUTER TK_JOIN.      { R = SX_J_FULL; }
+join_op(R) ::= TK_CROSS TK_JOIN.              { R = SX_J_CROSS; }
+join_op(R) ::= TK_NATURAL TK_JOIN.            { R = SX_J_NATURAL; }
+join_op(R) ::= TK_NATURAL TK_LEFT TK_JOIN.    { R = SX_J_NATURAL; }
 
 join_constraint ::= .
 join_constraint ::= TK_ON expr.
 join_constraint ::= TK_USING TK_LP id_list TK_RP.
 
-table_ref ::= TK_ID.
-table_ref ::= TK_ID TK_DOT TK_ID.
-table_ref ::= TK_ID TK_AS TK_ID.
-table_ref ::= TK_ID TK_ID.
-table_ref ::= TK_LP select_stmt TK_RP.
-table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID.
+table_ref(R) ::= TK_ID(T). {
+    R = AST(pstate, sql_src_t); if (R) R->table = tok_str(T);
+}
+table_ref(R) ::= TK_ID(S) TK_DOT TK_ID(T). {
+    R = AST(pstate, sql_src_t); if (R) { R->schema = tok_str(S); R->table = tok_str(T); }
+}
+table_ref(R) ::= TK_ID(T) TK_AS TK_ID(A). {
+    R = AST(pstate, sql_src_t); if (R) { R->table = tok_str(T); R->alias = tok_str(A); }
+}
+table_ref(R) ::= TK_ID(T) TK_ID(A). {
+    R = AST(pstate, sql_src_t); if (R) { R->table = tok_str(T); R->alias = tok_str(A); }
+}
+table_ref(R) ::= TK_LP select_stmt(Q) TK_RP. {
+    R = AST(pstate, sql_src_t); if (R) R->subquery = Q;
+}
+table_ref(R) ::= TK_LP select_stmt(Q) TK_RP TK_AS TK_ID(A). {
+    R = AST(pstate, sql_src_t); if (R) { R->subquery = Q; R->alias = tok_str(A); }
+}
 
-where_opt ::= .
-where_opt ::= TK_WHERE expr.
+where_opt(R) ::= .               { R = NULL; }
+where_opt(R) ::= TK_WHERE expr(E). { R = E; }
 
-group_opt ::= .
-group_opt ::= TK_GROUP TK_BY expr_list.
-group_opt ::= TK_GROUP TK_BY expr_list TK_HAVING expr.
+group_opt(R) ::= .                            { R = NULL; }
+group_opt(R) ::= TK_GROUP TK_BY expr_list(L). { R = L; }
 
-order_opt ::= .
-order_opt ::= TK_ORDER TK_BY order_list.
+having_opt(R) ::= .                  { R = NULL; }
+having_opt(R) ::= TK_HAVING expr(E). { R = E; }
 
-order_list ::= order_item.
-order_list ::= order_list TK_COMMA order_item.
+order_opt(R) ::= .                          { R = NULL; }
+order_opt(R) ::= TK_ORDER TK_BY order_list(L). { R = L; }
 
-order_item ::= expr.
-order_item ::= expr TK_ASC.
-order_item ::= expr TK_DESC.
+order_list(R) ::= order_item(I). { R = mk_list(pstate); if (R && I) { R->head = R->tail = I; R->n = 1; } }
+order_list(R) ::= order_list(L) TK_COMMA order_item(I). {
+    R = L; if (R && I) { if (R->tail) R->tail->next = I; else R->head = I; R->tail = I; R->n++; }
+}
 
-limit_opt ::= .
-limit_opt ::= TK_LIMIT expr.
-limit_opt ::= TK_LIMIT expr TK_OFFSET expr.
-limit_opt ::= TK_LIMIT expr TK_COMMA expr.
+order_item(R) ::= expr(E).         { R = AST(pstate, sql_exprlist_item_t); if (R) { R->expr = E; R->sort = 1; } }
+order_item(R) ::= expr(E) TK_ASC.  { R = AST(pstate, sql_exprlist_item_t); if (R) { R->expr = E; R->sort = 1; } }
+order_item(R) ::= expr(E) TK_DESC. { R = AST(pstate, sql_exprlist_item_t); if (R) { R->expr = E; R->sort = 2; } }
 
-set_op_tail ::= .
-set_op_tail ::= TK_UNION select_stmt.
-set_op_tail ::= TK_UNION TK_ALL select_stmt.
-set_op_tail ::= TK_INTERSECT select_stmt.
-set_op_tail ::= TK_EXCEPT select_stmt.
+limit_opt(R) ::= .                  { R = NULL; }
+limit_opt(R) ::= TK_LIMIT expr(E).  { R = E; }
+
+offset_part(R) ::= .                          { R = NULL; }
+offset_part(R) ::= TK_OFFSET expr(E).         { R = E; }
+offset_part(R) ::= TK_COMMA expr(E).          { R = E; }  /* LIMIT a, b form */
+
+/* ===== WITH / common table expressions ===== */
+
+%type with_clause {struct with_clause_v}
+%type cte_list    {sql_cte_t *}
+%type cte         {sql_cte_t *}
+
+with_clause(R) ::= TK_WITH cte_list(L).              { R.list = L; R.rec = 0; }
+with_clause(R) ::= TK_WITH TK_RECURSIVE cte_list(L). { R.list = L; R.rec = 1; }
+
+cte_list(R) ::= cte(C). { R = C; }
+cte_list(R) ::= cte_list(L) TK_COMMA cte(C). {
+    if (L == NULL) { R = C; }
+    else { sql_cte_t *s = L; while (s->next) s = s->next; s->next = C; R = L; }
+}
+
+cte(R) ::= TK_ID(N) TK_AS TK_LP select_stmt(S) TK_RP. {
+    R = AST(pstate, sql_cte_t); if (R) { R->name = tok_str(N); R->select = S; }
+}
+cte(R) ::= TK_ID(N) TK_LP id_list(IC) TK_RP TK_AS TK_LP select_stmt(S) TK_RP. {
+    R = AST(pstate, sql_cte_t); if (R) { R->name = tok_str(N); R->cols = IC; R->select = S; }
+}
 
 /* ===== INSERT ===== */
 
-insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_VALUES values_list. {
-    pstate->kind = SQL_KIND_INSERT;
-    pstate->readonly = 0;
+insert_stmt(R) ::= TK_INSERT TK_INTO qname(Q) insert_cols(C) values_list(V). {
+    sql_insert_t *ins = V ? V : AST(pstate, sql_insert_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && ins) {
+        ins->schema = Q.schema; ins->table = Q.table; ins->cols = C;
+        R->kind = SQL_KIND_INSERT; R->u.insert = ins;
+    }
 }
-insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES. {
-    pstate->kind = SQL_KIND_INSERT;
-    pstate->readonly = 0;
+insert_stmt(R) ::= TK_INSERT TK_INTO qname(Q) insert_cols(C) TK_DEFAULT TK_VALUES. {
+    sql_insert_t *ins = AST(pstate, sql_insert_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && ins) {
+        ins->schema = Q.schema; ins->table = Q.table; ins->cols = C; ins->def_values = 1;
+        R->kind = SQL_KIND_INSERT; R->u.insert = ins;
+    }
 }
-insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt. {
-    pstate->kind = SQL_KIND_INSERT;
-    pstate->readonly = 0;
+insert_stmt(R) ::= TK_INSERT TK_INTO qname(Q) insert_cols(C) select_stmt(S). {
+    sql_insert_t *ins = AST(pstate, sql_insert_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && ins) {
+        ins->schema = Q.schema; ins->table = Q.table; ins->cols = C; ins->select = S;
+        R->kind = SQL_KIND_INSERT; R->u.insert = ins;
+    }
 }
-insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols TK_VALUES values_list. {
-    pstate->kind = SQL_KIND_INSERT;
-    pstate->readonly = 0;
+insert_stmt(R) ::= TK_REPLACE TK_INTO qname(Q) insert_cols(C) values_list(V). {
+    sql_insert_t *ins = V ? V : AST(pstate, sql_insert_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && ins) {
+        ins->schema = Q.schema; ins->table = Q.table; ins->cols = C; ins->replace = 1;
+        R->kind = SQL_KIND_INSERT; R->u.insert = ins;
+    }
 }
 
-qname ::= TK_ID.
-qname ::= TK_ID TK_DOT TK_ID.
+%type qname {sql_qname_t}
+qname(R) ::= TK_ID(T). { R.schema.p = NULL; R.schema.len = 0; R.table = tok_str(T); }
+qname(R) ::= TK_ID(S) TK_DOT TK_ID(T). { R.schema = tok_str(S); R.table = tok_str(T); }
 
-insert_cols ::= .
-insert_cols ::= TK_LP id_list TK_RP.
+insert_cols(R) ::= .                          { R = NULL; }
+insert_cols(R) ::= TK_LP id_list(L) TK_RP.    { R = L; }
 
-values_list ::= TK_LP expr_list TK_RP.
-values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP.
+values_list(R) ::= TK_VALUES TK_LP expr_list(L) TK_RP. {
+    R = AST(pstate, sql_insert_t);
+    if (R) {
+        R->rows = (sql_exprlist_t **)sql_arena_alloc(pstate->arena, sizeof(sql_exprlist_t *));
+        if (R->rows) { R->rows[0] = L; R->n_rows = 1; }
+    }
+}
+values_list(R) ::= values_list(P) TK_COMMA TK_LP expr_list(L) TK_RP. {
+    R = P;
+    if (R) {
+        sql_exprlist_t **nr = (sql_exprlist_t **)sql_arena_alloc(pstate->arena,
+            sizeof(sql_exprlist_t *) * (size_t)(R->n_rows + 1));
+        if (nr) {
+            int i; for (i = 0; i < R->n_rows; i++) nr[i] = R->rows[i];
+            nr[R->n_rows] = L; R->rows = nr; R->n_rows++;
+        }
+    }
+}
 
 /* ===== UPDATE ===== */
 
-update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt. {
-    pstate->kind = SQL_KIND_UPDATE;
-    pstate->readonly = 0;
+update_stmt(R) ::= TK_UPDATE qname(Q) TK_SET assign_list(A) where_opt(W). {
+    sql_update_t *up = AST(pstate, sql_update_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && up) {
+        up->schema = Q.schema; up->table = Q.table; up->sets = A; up->where = W;
+        R->kind = SQL_KIND_UPDATE; R->u.update = up;
+    }
 }
 
-assign_list ::= assign.
-assign_list ::= assign_list TK_COMMA assign.
+assign_list(R) ::= assign(A). { R = A; }
+assign_list(R) ::= assign_list(L) TK_COMMA assign(A). {
+    if (L == NULL) { R = A; }
+    else { sql_assign_t *s = L; while (s->next) s = s->next; s->next = A; R = L; }
+}
 
-assign ::= TK_ID TK_EQ expr.
+assign(R) ::= TK_ID(C) TK_EQ expr(E). {
+    R = AST(pstate, sql_assign_t); if (R) { R->col = tok_str(C); R->val = E; }
+}
 
 /* ===== DELETE ===== */
 
-delete_stmt ::= TK_DELETE TK_FROM qname where_opt. {
-    pstate->kind = SQL_KIND_DELETE;
-    pstate->readonly = 0;
+delete_stmt(R) ::= TK_DELETE TK_FROM qname(Q) where_opt(W). {
+    sql_delete_t *d = AST(pstate, sql_delete_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && d) {
+        d->schema = Q.schema; d->table = Q.table; d->where = W;
+        R->kind = SQL_KIND_DELETE; R->u.del = d;
+    }
 }
 
 /* ===== CREATE ===== */
 
-create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname
-                TK_LP coldef_list table_extras TK_RP. {
-    pstate->kind = SQL_KIND_CREATE;
-    pstate->readonly = 0;
+create_stmt(R) ::= TK_CREATE temp_opt(TM) TK_TABLE if_not_exists(IE) qname(Q)
+                   TK_LP table_body(C) TK_RP. {
+    sql_create_t *cr = AST(pstate, sql_create_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && cr) {
+        cr->kind = SX_CR_TABLE; cr->temp = TM; cr->if_not_exists = IE;
+        cr->schema = Q.schema; cr->name = Q.table; cr->cols = C;
+        R->kind = SQL_KIND_CREATE; R->u.create = cr;
+    }
 }
-create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname
-                TK_AS select_stmt. {
-    pstate->kind = SQL_KIND_CREATE;
-    pstate->readonly = 0;
+create_stmt(R) ::= TK_CREATE temp_opt(TM) TK_TABLE if_not_exists(IE) qname(Q)
+                   TK_AS select_stmt(S). {
+    sql_create_t *cr = AST(pstate, sql_create_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && cr) {
+        cr->kind = SX_CR_TABLE_AS; cr->temp = TM; cr->if_not_exists = IE;
+        cr->schema = Q.schema; cr->name = Q.table; cr->select = S;
+        R->kind = SQL_KIND_CREATE; R->u.create = cr;
+    }
 }
-create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname
-                TK_ON TK_ID TK_LP id_list TK_RP. {
-    pstate->kind = SQL_KIND_CREATE;
-    pstate->readonly = 0;
+create_stmt(R) ::= TK_CREATE unique_opt(U) TK_INDEX if_not_exists(IE) qname(Q)
+                   TK_ON TK_ID(OT) TK_LP id_list(IC) TK_RP. {
+    sql_create_t *cr = AST(pstate, sql_create_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && cr) {
+        cr->kind = SX_CR_INDEX; cr->unique = U; cr->if_not_exists = IE;
+        cr->schema = Q.schema; cr->name = Q.table; cr->on_table = tok_str(OT);
+        cr->index_cols = IC;
+        R->kind = SQL_KIND_CREATE; R->u.create = cr;
+    }
 }
-create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname
-                TK_AS select_stmt. {
-    pstate->kind = SQL_KIND_CREATE;
-    pstate->readonly = 0;
+create_stmt(R) ::= TK_CREATE temp_opt(TM) TK_VIEW if_not_exists(IE) qname(Q)
+                   TK_AS select_stmt(S). {
+    sql_create_t *cr = AST(pstate, sql_create_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && cr) {
+        cr->kind = SX_CR_VIEW; cr->temp = TM; cr->if_not_exists = IE;
+        cr->schema = Q.schema; cr->name = Q.table; cr->select = S;
+        R->kind = SQL_KIND_CREATE; R->u.create = cr;
+    }
 }
 
-temp_opt ::= .
-temp_opt ::= TK_TEMP.
-temp_opt ::= TK_TEMPORARY.
+%type temp_opt {int}
+%type unique_opt {int}
+%type if_not_exists {int}
+temp_opt(R) ::= .             { R = 0; }
+temp_opt(R) ::= TK_TEMP.      { R = 1; }
+temp_opt(R) ::= TK_TEMPORARY. { R = 1; }
 
-unique_opt ::= .
-unique_opt ::= TK_UNIQUE.
+unique_opt(R) ::= .          { R = 0; }
+unique_opt(R) ::= TK_UNIQUE. { R = 1; }
 
-if_not_exists ::= .
-if_not_exists ::= TK_IF TK_NOT TK_EXISTS.
+if_not_exists(R) ::= .                       { R = 0; }
+if_not_exists(R) ::= TK_IF TK_NOT TK_EXISTS. { R = 1; }
 
-coldef_list ::= coldef.
-coldef_list ::= coldef_list TK_COMMA coldef.
+/* The body of CREATE TABLE is one comma-separated list whose elements
+ * are either column definitions or table constraints.  Merging them
+ * into a single list (rather than "coldefs then constraints") removes
+ * the comma shift/reduce ambiguity -- the parser never has to decide,
+ * at a comma, whether the next element is still a column or the first
+ * constraint.  A table_elem yields a coldef node (column) or NULL
+ * (constraint); table_body chains the columns. */
+%type table_body {sql_coldef_t *}
+%type table_elem {sql_coldef_t *}
 
-coldef ::= TK_ID type_opt col_constraints.
+table_body(R) ::= table_elem(E). { R = E; }
+table_body(R) ::= table_body(L) TK_COMMA table_elem(E). {
+    if (E == NULL) { R = L; }                    /* a constraint: no column */
+    else if (L == NULL) { R = E; }
+    else { sql_coldef_t *s = L; while (s->next) s = s->next; s->next = E; R = L; }
+}
 
-type_opt ::= .
-type_opt ::= TK_ID.
-type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP.
-type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP.
+table_elem(R) ::= coldef(C). { R = C; }
+table_elem(R) ::= table_constraint. { R = NULL; }
 
-col_constraints ::= .
-col_constraints ::= col_constraints col_constraint.
+coldef(R) ::= TK_ID(N) type_opt(TY) col_constraints(CC). {
+    R = AST(pstate, sql_coldef_t);
+    if (R) { R->name = tok_str(N); R->type = TY;
+             R->primary = (CC & 1) != 0; R->notnull = (CC & 2) != 0;
+             R->unique = (CC & 4) != 0; }
+}
 
-col_constraint ::= TK_PRIMARY TK_KEY.
-col_constraint ::= TK_PRIMARY TK_KEY TK_ASC.
-col_constraint ::= TK_PRIMARY TK_KEY TK_DESC.
-col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR.
-col_constraint ::= TK_NOT TK_NULL.
-col_constraint ::= TK_UNIQUE.
-col_constraint ::= TK_DEFAULT expr_atom.
-col_constraint ::= TK_CHECK TK_LP expr TK_RP.
-col_constraint ::= TK_REFERENCES qname.
-col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP.
+%type type_opt {sql_str_t}
+type_opt(R) ::= .                                          { R.p = NULL; R.len = 0; }
+type_opt(R) ::= TK_ID(T).                                  { R = tok_str(T); }
+type_opt(R) ::= TK_ID(T) TK_LP TK_NUMBER TK_RP.            { R = tok_str(T); }
+type_opt(R) ::= TK_ID(T) TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP. { R = tok_str(T); }
 
-table_extras ::= .
-table_extras ::= table_extras TK_COMMA table_extra.
+%type col_constraints {int}
+%type col_constraint  {int}
+col_constraints(R) ::= .                                   { R = 0; }
+col_constraints(R) ::= col_constraints(L) col_constraint(C). { R = L | C; }
 
-table_extra ::= TK_PRIMARY TK_KEY TK_LP id_list TK_RP.
-table_extra ::= TK_UNIQUE TK_LP id_list TK_RP.
-table_extra ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname.
-table_extra ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname TK_LP id_list TK_RP.
-table_extra ::= TK_CHECK TK_LP expr TK_RP.
+col_constraint(R) ::= TK_PRIMARY TK_KEY.            { R = 1; }
+col_constraint(R) ::= TK_PRIMARY TK_KEY TK_ASC.     { R = 1; }
+col_constraint(R) ::= TK_PRIMARY TK_KEY TK_DESC.    { R = 1; }
+col_constraint(R) ::= TK_PRIMARY TK_KEY TK_AUTOINCR.{ R = 1; }
+col_constraint(R) ::= TK_NOT TK_NULL.               { R = 2; }
+col_constraint(R) ::= TK_UNIQUE.                    { R = 4; }
+col_constraint(R) ::= TK_DEFAULT expr_atom.         { R = 0; }
+col_constraint(R) ::= TK_CHECK TK_LP expr TK_RP.    { R = 0; }
+col_constraint(R) ::= TK_REFERENCES qname.          { R = 0; }
+col_constraint(R) ::= TK_REFERENCES qname TK_LP id_list TK_RP. { R = 0; }
+
+table_constraint ::= TK_PRIMARY TK_KEY TK_LP id_list TK_RP.
+table_constraint ::= TK_UNIQUE TK_LP id_list TK_RP.
+table_constraint ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname.
+table_constraint ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname TK_LP id_list TK_RP.
+table_constraint ::= TK_CHECK TK_LP expr TK_RP.
 
 /* ===== DROP ===== */
 
-drop_stmt ::= TK_DROP TK_TABLE if_exists qname. {
-    pstate->kind = SQL_KIND_DROP;
-    pstate->readonly = 0;
+drop_stmt(R) ::= TK_DROP TK_TABLE if_exists(IE) qname(Q). {
+    sql_drop_t *d = AST(pstate, sql_drop_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && d) { d->kind = SX_DR_TABLE; d->if_exists = IE; d->schema = Q.schema; d->name = Q.table;
+                  R->kind = SQL_KIND_DROP; R->u.drop = d; }
 }
-drop_stmt ::= TK_DROP TK_INDEX if_exists qname. {
-    pstate->kind = SQL_KIND_DROP;
-    pstate->readonly = 0;
+drop_stmt(R) ::= TK_DROP TK_INDEX if_exists(IE) qname(Q). {
+    sql_drop_t *d = AST(pstate, sql_drop_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && d) { d->kind = SX_DR_INDEX; d->if_exists = IE; d->schema = Q.schema; d->name = Q.table;
+                  R->kind = SQL_KIND_DROP; R->u.drop = d; }
 }
-drop_stmt ::= TK_DROP TK_VIEW if_exists qname. {
-    pstate->kind = SQL_KIND_DROP;
-    pstate->readonly = 0;
+drop_stmt(R) ::= TK_DROP TK_VIEW if_exists(IE) qname(Q). {
+    sql_drop_t *d = AST(pstate, sql_drop_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && d) { d->kind = SX_DR_VIEW; d->if_exists = IE; d->schema = Q.schema; d->name = Q.table;
+                  R->kind = SQL_KIND_DROP; R->u.drop = d; }
 }
-drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname. {
-    pstate->kind = SQL_KIND_DROP;
-    pstate->readonly = 0;
+drop_stmt(R) ::= TK_DROP TK_TRIGGER if_exists(IE) qname(Q). {
+    sql_drop_t *d = AST(pstate, sql_drop_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && d) { d->kind = SX_DR_TRIGGER; d->if_exists = IE; d->schema = Q.schema; d->name = Q.table;
+                  R->kind = SQL_KIND_DROP; R->u.drop = d; }
 }
 
-if_exists ::= .
-if_exists ::= TK_IF TK_EXISTS.
+%type if_exists {int}
+if_exists(R) ::= .                  { R = 0; }
+if_exists(R) ::= TK_IF TK_EXISTS.   { R = 1; }
 
 /* ===== PRAGMA ===== */
 
-pragma_stmt ::= TK_PRAGMA qname. {
-    pstate->kind = SQL_KIND_PRAGMA;
-    pstate->readonly = 1;
+pragma_stmt(R) ::= TK_PRAGMA qname(Q). {
+    sql_pragma_t *p = AST(pstate, sql_pragma_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && p) { p->schema = Q.schema; p->name = Q.table; R->kind = SQL_KIND_PRAGMA; R->readonly = 1; R->u.pragma = p; }
 }
-pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom. {
-    pstate->kind = SQL_KIND_PRAGMA;
-    pstate->readonly = 0;
+pragma_stmt(R) ::= TK_PRAGMA qname(Q) TK_EQ expr_atom(E). {
+    sql_pragma_t *p = AST(pstate, sql_pragma_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && p) { p->schema = Q.schema; p->name = Q.table; p->value = E; R->kind = SQL_KIND_PRAGMA; R->u.pragma = p; }
 }
-pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP. {
-    pstate->kind = SQL_KIND_PRAGMA;
-    pstate->readonly = 0;
+pragma_stmt(R) ::= TK_PRAGMA qname(Q) TK_LP expr_atom(E) TK_RP. {
+    sql_pragma_t *p = AST(pstate, sql_pragma_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && p) { p->schema = Q.schema; p->name = Q.table; p->value = E; R->kind = SQL_KIND_PRAGMA; R->u.pragma = p; }
 }
 
 /* ===== TX ===== */
 
-begin_stmt ::= TK_BEGIN. {
-    pstate->kind = SQL_KIND_BEGIN; pstate->readonly = 0;
+begin_stmt(R) ::= TK_BEGIN.                  { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_BEGIN; }
+begin_stmt(R) ::= TK_BEGIN TK_TRANSACTION.   { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_BEGIN; }
+begin_stmt(R) ::= TK_BEGIN TK_ID.            { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_BEGIN; }
+begin_stmt(R) ::= TK_BEGIN TK_ID TK_TRANSACTION. { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_BEGIN; }
+
+commit_stmt(R) ::= TK_COMMIT.                { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_COMMIT; }
+commit_stmt(R) ::= TK_COMMIT TK_TRANSACTION. { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_COMMIT; }
+commit_stmt(R) ::= TK_END.                   { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_COMMIT; }
+commit_stmt(R) ::= TK_END TK_TRANSACTION.    { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_COMMIT; }
+
+rollback_stmt(R) ::= TK_ROLLBACK.                { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_ROLLBACK; }
+rollback_stmt(R) ::= TK_ROLLBACK TK_TRANSACTION. { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_ROLLBACK; }
+
+attach_stmt(R) ::= TK_ATTACH expr_atom(E) TK_AS TK_ID(A). {
+    sql_attach_t *at = AST(pstate, sql_attach_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && at) { at->target = E; at->alias = tok_str(A); R->kind = SQL_KIND_ATTACH; R->u.attach = at; }
 }
-begin_stmt ::= TK_BEGIN TK_TRANSACTION. {
-    pstate->kind = SQL_KIND_BEGIN; pstate->readonly = 0;
-}
-begin_stmt ::= TK_BEGIN TK_ID. {
-    pstate->kind = SQL_KIND_BEGIN; pstate->readonly = 0;
-}
-begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION. {
-    pstate->kind = SQL_KIND_BEGIN; pstate->readonly = 0;
+attach_stmt(R) ::= TK_ATTACH TK_DATABASE expr_atom(E) TK_AS TK_ID(A). {
+    sql_attach_t *at = AST(pstate, sql_attach_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && at) { at->target = E; at->alias = tok_str(A); R->kind = SQL_KIND_ATTACH; R->u.attach = at; }
 }
 
-commit_stmt ::= TK_COMMIT. {
-    pstate->kind = SQL_KIND_COMMIT; pstate->readonly = 0;
+detach_stmt(R) ::= TK_DETACH TK_ID(A). {
+    R = AST(pstate, sql_stmt_t); if (R) { R->kind = SQL_KIND_DETACH; R->u.detach = tok_str(A); }
 }
-commit_stmt ::= TK_COMMIT TK_TRANSACTION. {
-    pstate->kind = SQL_KIND_COMMIT; pstate->readonly = 0;
-}
-commit_stmt ::= TK_END. {
-    pstate->kind = SQL_KIND_COMMIT; pstate->readonly = 0;
-}
-commit_stmt ::= TK_END TK_TRANSACTION. {
-    pstate->kind = SQL_KIND_COMMIT; pstate->readonly = 0;
+detach_stmt(R) ::= TK_DETACH TK_DATABASE TK_ID(A). {
+    R = AST(pstate, sql_stmt_t); if (R) { R->kind = SQL_KIND_DETACH; R->u.detach = tok_str(A); }
 }
 
-rollback_stmt ::= TK_ROLLBACK. {
-    pstate->kind = SQL_KIND_ROLLBACK; pstate->readonly = 0;
+explain_stmt(R) ::= TK_EXPLAIN stmt(S). {
+    R = S; if (R) { R->explain = 1; R->kind = SQL_KIND_EXPLAIN; R->readonly = 1; }
 }
-rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION. {
-    pstate->kind = SQL_KIND_ROLLBACK; pstate->readonly = 0;
-}
-
-attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID. {
-    pstate->kind = SQL_KIND_ATTACH; pstate->readonly = 0;
-}
-attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID. {
-    pstate->kind = SQL_KIND_ATTACH; pstate->readonly = 0;
-}
-
-detach_stmt ::= TK_DETACH TK_ID. {
-    pstate->kind = SQL_KIND_DETACH; pstate->readonly = 0;
-}
-detach_stmt ::= TK_DETACH TK_DATABASE TK_ID. {
-    pstate->kind = SQL_KIND_DETACH; pstate->readonly = 0;
-}
-
-explain_stmt ::= TK_EXPLAIN stmt. {
-    pstate->kind = SQL_KIND_EXPLAIN; pstate->readonly = 1;
-}
-explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt. {
-    pstate->kind = SQL_KIND_EXPLAIN; pstate->readonly = 1;
+explain_stmt(R) ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt(S). {
+    R = S; if (R) { R->explain = 2; R->kind = SQL_KIND_EXPLAIN; R->readonly = 1; }
 }
 
 /* ===== expressions ===== */
 
-%left TK_OR.
-%left TK_AND.
-%right TK_NOT.
-%left TK_EQ TK_NE TK_LT TK_LE TK_GT TK_GE TK_IS TK_LIKE TK_IN.
-%left TK_PLUS TK_MINUS TK_CONCAT.
-%left TK_STAR TK_SLASH TK_PERCENT TK_AMP TK_PIPE.
-%right TK_TILDE.
+id_list(R) ::= TK_ID(T). {
+    sql_expr_t *c = mk_expr(pstate, SX_E_COLUMN);
+    if (c) { c->name[0] = tok_str(T); c->nname = 1; }
+    R = list_add(pstate, NULL, c);
+}
+id_list(R) ::= id_list(L) TK_COMMA TK_ID(T). {
+    sql_expr_t *c = mk_expr(pstate, SX_E_COLUMN);
+    if (c) { c->name[0] = tok_str(T); c->nname = 1; }
+    R = list_add(pstate, L, c);
+}
 
-id_list ::= TK_ID.
-id_list ::= id_list TK_COMMA TK_ID.
+expr_list(R) ::= expr(E).                       { R = list_add(pstate, NULL, E); }
+expr_list(R) ::= expr_list(L) TK_COMMA expr(E). { R = list_add(pstate, L, E); }
 
-expr_list ::= expr.
-expr_list ::= expr_list TK_COMMA expr.
+expr(R) ::= expr_atom(A).               { R = A; }
+expr(R) ::= TK_LP expr(E) TK_RP.        { R = E; }
+expr(R) ::= TK_LP select_stmt(Q) TK_RP. { R = mk_expr(pstate, SX_E_SUBQUERY); if (R) R->sel = Q; }
+expr(R) ::= TK_NOT expr(E).             { R = mk_unary(pstate, TK_NOT, E); }
+expr(R) ::= TK_MINUS expr(E). [TK_UMINUS] { R = mk_unary(pstate, TK_MINUS, E); }
+expr(R) ::= TK_PLUS expr(E).  [TK_UMINUS] { R = mk_unary(pstate, TK_PLUS, E); }
+expr(R) ::= TK_TILDE expr(E). [TK_UMINUS] { R = mk_unary(pstate, TK_TILDE, E); }
+expr(R) ::= expr(A) TK_OR expr(B).      { R = mk_binary(pstate, TK_OR, A, B); }
+expr(R) ::= expr(A) TK_AND expr(B).     { R = mk_binary(pstate, TK_AND, A, B); }
+expr(R) ::= expr(A) TK_EQ expr(B).      { R = mk_binary(pstate, TK_EQ, A, B); }
+expr(R) ::= expr(A) TK_NE expr(B).      { R = mk_binary(pstate, TK_NE, A, B); }
+expr(R) ::= expr(A) TK_LT expr(B).      { R = mk_binary(pstate, TK_LT, A, B); }
+expr(R) ::= expr(A) TK_LE expr(B).      { R = mk_binary(pstate, TK_LE, A, B); }
+expr(R) ::= expr(A) TK_GT expr(B).      { R = mk_binary(pstate, TK_GT, A, B); }
+expr(R) ::= expr(A) TK_GE expr(B).      { R = mk_binary(pstate, TK_GE, A, B); }
+expr(R) ::= expr(A) TK_PLUS expr(B).    { R = mk_binary(pstate, TK_PLUS, A, B); }
+expr(R) ::= expr(A) TK_MINUS expr(B).   { R = mk_binary(pstate, TK_MINUS, A, B); }
+expr(R) ::= expr(A) TK_STAR expr(B).    { R = mk_binary(pstate, TK_STAR, A, B); }
+expr(R) ::= expr(A) TK_SLASH expr(B).   { R = mk_binary(pstate, TK_SLASH, A, B); }
+expr(R) ::= expr(A) TK_PERCENT expr(B). { R = mk_binary(pstate, TK_PERCENT, A, B); }
+expr(R) ::= expr(A) TK_CONCAT expr(B).  { R = mk_binary(pstate, TK_CONCAT, A, B); }
+expr(R) ::= expr(A) TK_AMP expr(B).     { R = mk_binary(pstate, TK_AMP, A, B); }
+expr(R) ::= expr(A) TK_PIPE expr(B).    { R = mk_binary(pstate, TK_PIPE, A, B); }
+expr(R) ::= expr(A) TK_LIKE expr(B).    { R = mk_binary(pstate, TK_LIKE, A, B); }
+expr(R) ::= expr(A) TK_IS TK_NULL.      { R = mk_expr(pstate, SX_E_IS_NULL); if (R) { R->a = A; R->ival = 0; } }
+expr(R) ::= expr(A) TK_IS TK_NOT TK_NULL. { R = mk_expr(pstate, SX_E_IS_NULL); if (R) { R->a = A; R->ival = 1; } }
+expr(R) ::= expr(A) TK_IS expr(B).      { R = mk_binary(pstate, TK_IS, A, B); }
+expr(R) ::= expr(A) TK_IN TK_LP expr_list(L) TK_RP. {
+    R = mk_expr(pstate, SX_E_IN_LIST); if (R) { R->a = A; R->list = L; }
+}
+expr(R) ::= expr(A) TK_IN TK_LP select_stmt(Q) TK_RP. {
+    R = mk_expr(pstate, SX_E_IN_SELECT); if (R) { R->a = A; R->sel = Q; }
+}
+expr(R) ::= expr(A) TK_BETWEEN expr(B) TK_AND expr(C). [TK_BETWEEN] {
+    R = mk_expr(pstate, SX_E_BETWEEN); if (R) { R->a = A; R->b = B; R->c = C; }
+}
+expr(R) ::= TK_CASE expr_atom(BASE) case_arms(AR) case_else(EL) TK_END. {
+    R = mk_expr(pstate, SX_E_CASE); if (R) { R->a = BASE; R->arms = AR; R->els = EL; }
+}
+expr(R) ::= TK_CASE case_arms(AR) case_else(EL) TK_END. {
+    R = mk_expr(pstate, SX_E_CASE); if (R) { R->arms = AR; R->els = EL; }
+}
+expr(R) ::= TK_ID(F) TK_LP TK_RP. {
+    R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; }
+}
+expr(R) ::= TK_ID(F) TK_LP TK_STAR TK_RP. {
+    R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->ival = 2; }
+}
+expr(R) ::= TK_ID(F) TK_LP expr_list(L) TK_RP. {
+    R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->list = L; }
+}
+expr(R) ::= TK_ID(F) TK_LP TK_DISTINCT expr_list(L) TK_RP. {
+    R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->list = L; R->ival = 1; }
+}
 
-expr ::= expr_atom.
-expr ::= TK_LP expr TK_RP.
-expr ::= TK_LP select_stmt TK_RP.
-expr ::= TK_NOT expr.
-expr ::= TK_MINUS expr.
-expr ::= TK_PLUS expr.
-expr ::= TK_TILDE expr.
-expr ::= expr TK_OR expr.
-expr ::= expr TK_AND expr.
-expr ::= expr TK_EQ expr.
-expr ::= expr TK_NE expr.
-expr ::= expr TK_LT expr.
-expr ::= expr TK_LE expr.
-expr ::= expr TK_GT expr.
-expr ::= expr TK_GE expr.
-expr ::= expr TK_PLUS expr.
-expr ::= expr TK_MINUS expr.
-expr ::= expr TK_STAR expr.
-expr ::= expr TK_SLASH expr.
-expr ::= expr TK_PERCENT expr.
-expr ::= expr TK_CONCAT expr.
-expr ::= expr TK_AMP expr.
-expr ::= expr TK_PIPE expr.
-expr ::= expr TK_LIKE expr.
-expr ::= expr TK_IS TK_NULL.
-expr ::= expr TK_IS TK_NOT TK_NULL.
-expr ::= expr TK_IS expr.
-expr ::= expr TK_IN TK_LP expr_list TK_RP.
-expr ::= expr TK_IN TK_LP select_stmt TK_RP.
-expr ::= expr TK_BETWEEN expr TK_AND expr.
-expr ::= TK_CASE expr_atom case_arms case_else TK_END.
-expr ::= TK_CASE case_arms case_else TK_END.
-expr ::= TK_ID TK_LP TK_RP.
-expr ::= TK_ID TK_LP TK_STAR TK_RP.
-expr ::= TK_ID TK_LP expr_list TK_RP.
-expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP.
+case_arms(R) ::= TK_WHEN expr(W) TK_THEN expr(T). {
+    R = AST(pstate, sql_case_arm_t); if (R) { R->when = W; R->then = T; }
+}
+case_arms(R) ::= case_arms(L) TK_WHEN expr(W) TK_THEN expr(T). {
+    sql_case_arm_t *arm = AST(pstate, sql_case_arm_t);
+    if (arm) { arm->when = W; arm->then = T; }
+    if (L == NULL) { R = arm; }
+    else { sql_case_arm_t *s = L; while (s->next) s = s->next; s->next = arm; R = L; }
+}
 
-case_arms ::= TK_WHEN expr TK_THEN expr.
-case_arms ::= case_arms TK_WHEN expr TK_THEN expr.
+case_else(R) ::= .                { R = NULL; }
+case_else(R) ::= TK_ELSE expr(E). { R = E; }
 
-case_else ::= .
-case_else ::= TK_ELSE expr.
-
-expr_atom ::= TK_NUMBER.
-expr_atom ::= TK_STRING.
-expr_atom ::= TK_BLOB.
-expr_atom ::= TK_NULL.
-expr_atom ::= TK_TRUE.
-expr_atom ::= TK_FALSE.
-expr_atom ::= TK_QMARK.
-expr_atom ::= TK_ID.
-expr_atom ::= TK_ID TK_DOT TK_ID.
-expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID.
+expr_atom(R) ::= TK_NUMBER(T). { R = mk_expr(pstate, SX_E_NUMBER); if (R) R->lit = tok_str(T); }
+expr_atom(R) ::= TK_STRING(T). { R = mk_expr(pstate, SX_E_STRING); if (R) R->lit = tok_str_unquote(T); }
+expr_atom(R) ::= TK_BLOB(T).   { R = mk_expr(pstate, SX_E_BLOB);   if (R) R->lit = tok_str(T); }
+expr_atom(R) ::= TK_NULL.      { R = mk_expr(pstate, SX_E_NULL); }
+expr_atom(R) ::= TK_TRUE.      { R = mk_expr(pstate, SX_E_BOOL); if (R) R->ival = 1; }
+expr_atom(R) ::= TK_FALSE.     { R = mk_expr(pstate, SX_E_BOOL); if (R) R->ival = 0; }
+expr_atom(R) ::= TK_QMARK.     { R = mk_expr(pstate, SX_E_PARAM); }
+expr_atom(R) ::= TK_ID(T).     { R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(T); R->nname = 1; } }
+expr_atom(R) ::= TK_ID(A) TK_DOT TK_ID(B). {
+    R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(A); R->name[1] = tok_str(B); R->nname = 2; }
+}
+expr_atom(R) ::= TK_ID(A) TK_DOT TK_ID(B) TK_DOT TK_ID(C). {
+    R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(A); R->name[1] = tok_str(B); R->name[2] = tok_str(C); R->nname = 3; }
+}

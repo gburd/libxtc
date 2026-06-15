@@ -15,10 +15,8 @@ test_wal
 test_shard
 test_mvcc
 test_xstore
-test_xlog
-sql_parse_gen.c
-sql_parse_gen.h
 sql_parse_gen.out
+test_xlog
 sqlite3.o
 /build/
 test_parallel
@@ -46,3 +44,7 @@ test_savepoint
 test_isolation
 test_bufmgr_dio
 bm_writeback_bench
+test_sql_ast
+/sql_grammar.c
+/sql_grammar.h
+sql_grammar.out

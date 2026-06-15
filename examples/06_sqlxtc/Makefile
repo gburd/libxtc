@@ -76,7 +76,7 @@ OBJS = $(SRCS:.c=.o)
 # Lime-generated parser (Phase 2).  Compiled in if the file exists.
 LIME_OBJ :=
 ifneq ($(wildcard sql_parse_gen.c),)
-LIME_OBJ := sql_parse_gen.o sql_parse_drv.o
+LIME_OBJ := sql_parse_gen.o sql_parse_drv.o sql_ast.o
 CFLAGS  += -DSQLXTC_HAVE_LIME=1
 endif
 
@@ -105,15 +105,27 @@ lime/bin/lime:
 	    echo "lime/ submodule missing; skipping" 1>&2; \
 	fi
 
-# Generate sql_parse_gen.c (and .h) from sql_grammar.lime via Lime.
-# Lime names outputs after the input basename; we rename to *_gen.*
-# so they don't collide with the hand-written sql_parse.[ch].
+# Regenerate sql_parse_gen.c (and .h) from sql_grammar.lime via Lime.
+# This is an EXPLICIT target ('make sql_parse'), not a build dependency:
+# the generated parser is committed to the tree, so an ordinary build
+# (and CI, and a source tarball) compiles it without needing the Lime
+# binary or the submodule.  Regenerate only when the grammar changes,
+# then commit the result.  Lime names outputs after the input basename;
+# we rename to *_gen.* so they don't collide with the hand-written
+# sql_parse.[ch].  Lime exits non-zero if the conflict count differs
+# from the grammar's %expect, so a new conflict fails this target.
+#
+# The recipe is gated on the Lime binary being present: on a fresh
+# checkout the submodule is not built, so the committed sql_parse_gen.c
+# is used as-is and never spuriously "regenerated" stale.
+ifneq ($(wildcard lime/bin/lime),)
 sql_parse_gen.c sql_parse_gen.h: sql_grammar.lime lime/bin/lime
-	-./lime/bin/lime -T./lime/limpar.c sql_grammar.lime
+	./lime/bin/lime -T./lime/limpar.c sql_grammar.lime
 	@test -f sql_grammar.c || { echo "lime failed to produce sql_grammar.c"; exit 1; }
 	@mv -f sql_grammar.c sql_parse_gen.c
 	@mv -f sql_grammar.h sql_parse_gen.h
 	@rm -f sql_grammar.out
+endif
 
 sql_parse: sql_parse_gen.c
 
@@ -177,7 +189,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-sql-parse test-sql-ast test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -336,6 +348,14 @@ test_xstore: test_xstore.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlit
 
 test-xstore: test_xstore
 	./test_xstore
+
+# ---- Lime SQL parser: differential AST oracle vs the reference engine ----
+test_sql_ast: test_sql_ast.c sql_parse_drv.c sql_ast.c sql_parse_gen.c sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_sql_ast.c sql_parse_drv.c sql_ast.c \
+		sql_parse_gen.c sqlite3.o $(LDFLAGS)
+
+test-sql-ast: test_sql_ast
+	./test_sql_ast
 
 test_savepoint: test_savepoint.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
 	$(CC) $(CFLAGS) -o $@ test_savepoint.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
@@ -507,4 +527,4 @@ test-sql-parse: ../../test/sqlxtc/test_sql_parse
         sql_parse.o $(LIME_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< sql_parse.o $(LIME_OBJ)
 
-.PHONY: test-quack test-sql-parse
+.PHONY: test-quack test-sql-parse test-sql-ast
