@@ -5,29 +5,27 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/bufmgr.h
- *	An xtc-native buffer manager using pointer
- *	swizzling (Swip) and cooling-stage eviction.
+ *	An xtc-native buffer manager: a page-id-addressed pool with
+ *	cooling-stage eviction.
  *
- *	A Swip is a single 64-bit word held in a parent (a B-tree child
- *	slot, or a root pointer) that encodes one of three states in its
- *	two most significant bits:
+ *	Pages are referenced by stable on-disk page ids (bm_pid_t).  A
+ *	fix resolves a page id to a resident, pinned frame through an
+ *	internal page table (a striped-lock hash); a miss loads the page
+ *	from the backing file into a free frame, evicting another frame
+ *	if the pool is full.  This is the addressing model the B-tree
+ *	uses (its child pointers are page ids serialized into node
+ *	cells), and the one a multi-process shared pool requires (a page
+ *	id is meaningful under any mapping; an in-memory pointer is not).
  *
- *	    00......  HOT      low 62 bits are a bm_frame* (resident)
- *	    01......  COOL     low 62 bits are a bm_frame* (eviction
- *	                       candidate, parent unswizzled)
- *	    1.......  EVICTED  low 63 bits are a page id (on disk)
- *
- *	Resolving a HOT swip is a pointer load -- no lookup, no lock.  A
- *	COOL swip is rescued back to HOT on access.  An EVICTED swip
- *	triggers a load from the backing file into a free frame.
- *
- *	Eviction is two-phase and proactive: a page-provider process
- *	(an xtc_proc) samples resident frames, UNSWIZZLES cold ones to
- *	COOL (informing the manager which pages are cooling), and writes
- *	the dirty COOL pages out ahead of demand so that reclaiming a
- *	frame later is a cheap state flip rather than a synchronous
- *	write.  Page I/O is offloaded (xtc_blocking) so the loop never
- *	stalls; metrics go to xtc_stats.
+ *	Eviction is a CLOCK sweep with a cooling stage: a frame is HOT
+ *	when actively used, COOL once it is an eviction candidate, and
+ *	reclaimed (its page written first if dirty) when a COOL victim is
+ *	found.  With scan resistance a demand-loaded page is admitted COOL
+ *	(2Q probation) and promoted to HOT only on a second access, so a
+ *	one-touch scan fills and drains the cool stage without displacing
+ *	the hot working set.  A background trickler (an xtc_proc) writes
+ *	dirty pages out ahead of demand; page I/O is offloaded
+ *	(xtc_blocking) so the loop never stalls; metrics go to xtc_stats.
  */
 
 #ifndef SQLXTC_BUFMGR_H
@@ -47,12 +45,6 @@ extern "C" {
 typedef uint64_t bm_pid_t;          /* on-disk page id */
 typedef struct bm        bm_t;      /* the buffer manager */
 typedef struct bm_frame  bm_frame_t;/* a resident page frame */
-
-/* A Swip: one machine word, an eviction-state-tagged reference.  It
- * lives in the parent that points at a page (the test uses a root
- * array; a B-tree uses child slots).  Access it only through the
- * buffer manager. */
-typedef _Atomic uint64_t bm_swip_t;
 
 #define BM_PID_NONE  ((bm_pid_t)0)
 
@@ -77,16 +69,6 @@ typedef struct bm_opts {
 	 * displacing the hot working set.  Clear it for the legacy policy
 	 * (admit HOT, cool-then-evict in one sweep). */
 	uint8_t     scan_resist;
-
-	/* Tree support.  A parent page may not be cooled or evicted while
-	 * any of its children are resident (HOT or COOL), or a swizzled
-	 * child pointer would be written to disk as garbage.  If set, the
-	 * buffer manager calls this before cooling/evicting a frame; it
-	 * must return non-zero when the page has at least one resident
-	 * (non-EVICTED) child swip.  NULL means leaves only (no children),
-	 * which is the flat case. */
-	int       (*has_resident_child)(const void *page, void *user);
-	void       *cb_user;
 
 	/* Torn-page protection (double-write).  When set, every page write
 	 * goes first to a durable double-write area (full-page logging) and
@@ -163,25 +145,14 @@ int bm_apply_page_image(bm_t *bm, bm_pid_t pid, const void *image,
  */
 uint64_t bm_min_rec_lsn(bm_t *bm);
 
-/* Allocate a fresh page.  Installs a HOT swip into *slot and returns
- * the (pinned) frame; the caller fills frame's page and bm_unfix.
- * *out_pid receives the new page id. */
-int  bm_alloc(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame,
-              bm_pid_t *out_pid);
-
-/* Resolve *slot to a resident, pinned frame: a pointer load if HOT, a
- * rescue if COOL, a load-from-disk if EVICTED (which may evict another
- * frame to make room).  Returns XTC_OK and *out_frame on success. */
-int  bm_fix(bm_t *bm, bm_swip_t *slot, bm_frame_t **out_frame);
-
-/* Page-id resolution path (for structures whose child pointers are
- * stable page ids rather than in-page swizzled words -- e.g. the
- * B-tree).  bm_alloc_pid allocates a fresh page and returns its id and
- * a pinned frame; bm_fix_pid resolves a page id to a pinned frame via
- * an internal page table, loading from disk on a miss.  Frames fixed
- * this way are released with bm_unfix and evicted by the same
- * cooling-stage machinery. */
+/* Allocate a fresh page and return its id and a pinned frame; the
+ * caller fills the frame's page and bm_unfix.  *out_pid receives the
+ * new page id. */
 int  bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid);
+
+/* Resolve a page id to a resident, pinned frame through the internal
+ * page table, loading from disk on a miss (which may evict another
+ * frame to make room).  Returns XTC_OK and *out_frame on success. */
 int  bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame);
 
 /* Reclaim a page id.  The caller guarantees the page is no longer
@@ -207,8 +178,9 @@ void bm_reclaim_quarantine(bm_t *bm);
  * provider (bm_provider_spawn) to do the warming. */
 int  bm_prefetch_pid(bm_t *bm, bm_pid_t pid);
 
-/* Release a frame fixed by bm_alloc/bm_fix.  mark_dirty != 0 records
- * that the page was modified (so it is written before eviction). */
+/* Release a frame fixed by bm_alloc_pid/bm_fix_pid.  mark_dirty != 0
+ * records that the page was modified (so it is written before
+ * eviction). */
 void bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty);
 
 /* Stamp a latched frame's page LSN with the current bm_set_lsn value
@@ -264,10 +236,10 @@ int  bm_checkpoint(bm_t *bm);
 
 /* Observability snapshot. */
 typedef struct bm_stats {
-	uint64_t hits;          /* fix resolved a HOT swip */
-	uint64_t rescues;       /* fix rescued a COOL swip */
+	uint64_t hits;          /* fix found the page resident and HOT */
+	uint64_t rescues;       /* fix promoted a resident COOL page to HOT */
 	uint64_t loads;         /* fix read a page from disk */
-	uint64_t cooled;        /* frames unswizzled to COOL */
+	uint64_t cooled;        /* frames flipped HOT -> COOL */
 	uint64_t flushed;       /* dirty COOL pages written out */
 	uint64_t evicted;       /* frames reclaimed */
 	uint64_t resident;      /* frames currently HOT or COOL */

@@ -32,7 +32,6 @@
 #define PAGE_SZ   4096
 
 static bm_t       *g_bm;
-static bm_swip_t   g_root[N_PAGES];
 static bm_pid_t    g_pid[N_PAGES];
 static _Atomic int g_result;
 
@@ -60,12 +59,12 @@ worker_proc(void *arg)
 	bm_frame_t *f;
 	(void)arg;
 	for (k = 0; k < N_PAGES; k++) {
-		if (bm_alloc(g_bm, &g_root[k], &f, &g_pid[k]) != XTC_OK) { ok = 0; break; }
+		if (bm_alloc_pid(g_bm, &f, &g_pid[k]) != XTC_OK) { ok = 0; break; }
 		fill_page(bm_page(f), g_pid[k], (uint64_t)k);
 		bm_unfix(g_bm, f, 1);
 	}
 	for (k = 0; ok && k < N_PAGES; k++) {
-		if (bm_fix(g_bm, &g_root[k], &f) != XTC_OK) { ok = 0; break; }
+		if (bm_fix_pid(g_bm, g_pid[k], &f) != XTC_OK) { ok = 0; break; }
 		if (!check_page(bm_page(f), g_pid[k], (uint64_t)k)) ok = 0;
 		bm_unfix(g_bm, f, 0);
 	}

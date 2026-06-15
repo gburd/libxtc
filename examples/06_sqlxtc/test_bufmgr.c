@@ -7,7 +7,7 @@
  * examples/06_sqlxtc/test_bufmgr.c
  *	In-process test of the cooling buffer manager.  A worker
  *	process allocates far more pages than the resident pool holds --
- *	forcing the swizzle -> cool -> write-out -> evict cycle -- while
+ *	forcing the cool -> write-out -> evict cycle -- while
  *	the page-provider process concurrently cools and flushes.  Every
  *	page is then fixed back and its content verified, proving that
  *	evicted pages were written and reloaded intact and that the
@@ -32,7 +32,6 @@
 #define PAGE_SZ   4096
 
 static bm_t       *g_bm;
-static bm_swip_t   g_root[N_PAGES];     /* the "parents" holding swips */
 static bm_pid_t    g_pid[N_PAGES];
 static _Atomic int g_result;            /* 0 = not run, 1 = pass, -1 = fail */
 
@@ -64,7 +63,7 @@ worker_proc(void *arg)
 
 	/* Allocate N_PAGES pages into a pool of N_FRAMES: forces eviction. */
 	for (k = 0; k < N_PAGES; k++) {
-		if (bm_alloc(g_bm, &g_root[k], &f, &g_pid[k]) != XTC_OK) { ok = 0; break; }
+		if (bm_alloc_pid(g_bm, &f, &g_pid[k]) != XTC_OK) { ok = 0; break; }
 		fill_page(bm_page(f), g_pid[k], (uint64_t)k);
 		bm_unfix(g_bm, f, 1);                 /* dirty */
 	}
@@ -72,7 +71,7 @@ worker_proc(void *arg)
 	/* Fix every page back -- most were evicted, so they reload from the
 	 * backing file -- and verify content survived the round trip. */
 	for (k = 0; ok && k < N_PAGES; k++) {
-		if (bm_fix(g_bm, &g_root[k], &f) != XTC_OK) { ok = 0; break; }
+		if (bm_fix_pid(g_bm, g_pid[k], &f) != XTC_OK) { ok = 0; break; }
 		if (!check_page(bm_page(f), g_pid[k], (uint64_t)k)) ok = 0;
 		bm_unfix(g_bm, f, 0);
 	}
@@ -81,7 +80,7 @@ worker_proc(void *arg)
 	 * COOL rescues against the concurrent provider. */
 	for (k = 0; ok && k < 500; k++) {
 		int idx = k % 12;
-		if (bm_fix(g_bm, &g_root[idx], &f) != XTC_OK) { ok = 0; break; }
+		if (bm_fix_pid(g_bm, g_pid[idx], &f) != XTC_OK) { ok = 0; break; }
 		if (!check_page(bm_page(f), g_pid[idx], (uint64_t)idx)) ok = 0;
 		bm_unfix(g_bm, f, (k & 1));            /* sometimes dirty */
 	}
@@ -146,7 +145,7 @@ main(void)
 
 	printf("  ok   %d pages cycled through a %d-frame pool; all content "
 	    "survived eviction + reload\n", N_PAGES, N_FRAMES);
-	printf("  ok   swizzling + cooling-stage eviction "
+	printf("  ok   cooling-stage eviction "
 	    "(hits=%llu rescues=%llu loads=%llu cooled=%llu flushed=%llu "
 	    "evicted=%llu resident=%llu)\n",
 	    (unsigned long long)st.hits, (unsigned long long)st.rescues,

@@ -39,7 +39,6 @@ static int         g_sync_every;     /* fdatasync every N ops (0 = never) */
 static int         g_locality;       /* 0=random 1=sequential 2=clustered */
 #define BM_CLUSTER 64                /* run length for clustered locality */
 
-static bm_swip_t  *g_root;
 static bm_pid_t   *g_pid;
 
 static int64_t
@@ -60,7 +59,7 @@ worker_proc(void *arg)
 
 	/* Pre-allocate the working set (>> pool): forces eviction. */
 	for (k = 0; k < g_n_pages; k++) {
-		if (bm_alloc(g_bm, &g_root[k], &f, &g_pid[k]) != XTC_OK)
+		if (bm_alloc_pid(g_bm, &f, &g_pid[k]) != XTC_OK)
 			break;
 		((uint64_t *)bm_page(f))[0] = (uint64_t)k;
 		bm_unfix(g_bm, f, 1);
@@ -92,7 +91,7 @@ worker_proc(void *arg)
 				rng ^= rng << 17;
 				idx = (int)(rng % (uint64_t)g_n_pages);
 			}
-			if (bm_fix(g_bm, &g_root[idx], &f) != XTC_OK)
+			if (bm_fix_pid(g_bm, g_pid[idx], &f) != XTC_OK)
 				continue;
 			((uint64_t *)bm_page(f))[1] += 1;   /* mutate */
 			bm_unfix(g_bm, f, 1);               /* dirty */
@@ -140,9 +139,8 @@ main(int argc, char **argv)
 	g_n_pages = argc > 5 ? atoi(argv[5]) : 65536;   /* working set */
 	g_sync_every = argc > 6 ? atoi(argv[6]) : 1000; /* fdatasync cadence */
 	g_locality = argc > 7 ? atoi(argv[7]) : 0;      /* 0=rand 1=seq 2=clustered */
-	g_root = calloc((size_t)g_n_pages, sizeof *g_root);
 	g_pid  = calloc((size_t)g_n_pages, sizeof *g_pid);
-	if (!g_root || !g_pid) { fprintf(stderr, "oom\n"); return 1; }
+	if (!g_pid) { fprintf(stderr, "oom\n"); return 1; }
 
 	unlink(path);
 	bo.path = path;
@@ -171,7 +169,7 @@ main(int argc, char **argv)
 	bm_get_stats(g_bm, &st);
 	bm_destroy(g_bm);
 	unlink(path);
-	free(g_root); free(g_pid);
+	free(g_pid);
 
 	printf("DIRECT=%d ADAPTIVE=%d secs=%.1f frames=%d pages=%d sync_every=%d "
 	    "locality=%s\n",
