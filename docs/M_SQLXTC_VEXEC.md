@@ -1,6 +1,6 @@
 # M_SQLXTC_VEXEC -- a vectorized execution engine to replace the VDBE
 
-Status: V0-V5 landed; V6 benchmark done (parallel aggregation scales ~2x; vexec is VDBE-sourced so serially slower -- see bench/sqlxtc/VEXEC_RESULTS.md). Remaining: storage-native source, subqueries/set-ops, LEFT/parallel join.  sqlxtc is a ROW store -- the DuckDB columnar vector layout is deliberately not adopted; only the batched push-based morsel-parallel execution model is.  This document scopes a
+Status: V0-V6 landed; storage-native source rewire done for single-table (serial beats/matches the VDBE -- agg 1.41x, join 1.96x; parallel storage scan needs tuning -- see bench/sqlxtc/VEXEC_RESULTS.md).
 from-scratch execution engine for sqlxtc -- a DuckDB-style vectorized,
 push-based, morsel-parallel executor built on the libxtc concurrency
 model -- that replaces SQLite's VDBE (the bytecode interpreter,
@@ -314,7 +314,27 @@ still pass, so the oracle also guards that the fallback is never wrong.
       recognizer widening for subqueries / set operations (UNION etc.)
       and LEFT / parallel join from V5.
 
-## The vexec source rewire (next, well-specified)
+## The vexec source rewire (DONE for single-table; parallel needs tuning)
+
+The single-table scan / filter / project / aggregate / sort paths now
+read rows directly from the xstore B-tree (xstore_scan_*), with no
+sqlite3_stmt and no VDBE on the hot path; column origins + affinities
+come from PRAGMA table_info at prepare time (resolve_schema), and the
+V2 worker opens its own range scan per morsel on the shared bt.  vexec
+now accelerates xstore-backed tables only (a plain table falls back).
+
+Measured (bench/sqlxtc/VEXEC_RESULTS.md, 500k rows, 8 cores): the
+SERIAL path now beats or matches the VDBE -- full aggregate 1.41x
+(was 0.56x), hash join 1.96x (was 0.22x), filtered count / GROUP BY
+near parity -- because vexec no longer pays the VDBE row cost.  The
+PARALLEL path, however, regressed below serial: the benchmark exposed
+that per-morsel B-tree re-descent, many small morsels, and per-query
+executor setup dominate the saved scan work.  The serial win is banked;
+the parallel storage scan tuning (fewer/larger morsels, parked-cursor
+resume instead of re-descend, an amortized worker pool, buffer-pool
+contention sizing) is the next target.
+
+## The vexec source rewire (original spec, for reference)
 
 The one change that turns the parallel-aggregation scaling into an
 across-the-board win is replacing vexec's row source -- a stepped

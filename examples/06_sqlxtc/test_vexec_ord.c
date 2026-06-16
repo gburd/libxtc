@@ -22,6 +22,10 @@
 
 #include "vexec.h"
 #include "sqlite3.h"
+#include "bufmgr.h"
+#include "btree.h"
+#include "xstore.h"
+#include <unistd.h>
 
 static int g_fail;
 #define CK(c, msg) do { if (!(c)) { \
@@ -126,10 +130,17 @@ main(void)
 		"SELECT k FROM t ORDER BY a, k LIMIT 4 OFFSET 1"
 	};
 	int n = (int)(sizeof corpus / sizeof corpus[0]);
+	bm_t *bm = NULL; bt_t *bt = NULL; bm_opts_t bo = BM_OPTS_DEFAULT;
+	char dbpath[64] = "/tmp/sqlxtc_vexordXXXXXX";
+	int dbfd = mkstemp(dbpath); if (dbfd >= 0) close(dbfd);
 
+	bo.path = dbpath; bo.page_size = 4096; bo.n_frames = 256; bo.lsn_off = 0;
+	if (bm_create(&bo, &bm) != XTC_OK || bt_open(bm, &bt) != XTC_OK) {
+		fprintf(stderr, "storage open\n"); return 1; }
 	if (sqlite3_open(":memory:", &db) != SQLITE_OK) { fprintf(stderr, "open\n"); return 1; }
+	if (xstore_register(db, bt) != SQLITE_OK) { fprintf(stderr, "register\n"); return 1; }
 	if (sqlite3_exec(db,
-	        "CREATE TABLE t(k INTEGER PRIMARY KEY, a INT, b TEXT);"
+	        "CREATE VIRTUAL TABLE t USING xstore(k, a INT, b TEXT);"
 	        "INSERT INTO t VALUES(1,5,'one'),(2,10,'two'),(3,15,'three'),"
 	        "(4,5,'four'),(5,NULL,'five'),(6,10,'six'),(7,NULL,NULL)",
 	        0, 0, &err) != SQLITE_OK) {
@@ -164,6 +175,9 @@ main(void)
 	}
 
 	sqlite3_close(db);
+	bt_close(bt);
+	bm_destroy(bm);
+	unlink(dbpath);
 	if (g_fail) { fprintf(stderr, "  vexec V4: FAILURES\n"); return 1; }
 	printf("  ok   vexec V4: %d ORDER BY / LIMIT queries matched the VDBE "
 	       "positionally\n", recognized);
