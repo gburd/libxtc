@@ -201,7 +201,7 @@ main(void)
 
 		/* ---- must fall back ---- */
 		{ "SELECT DISTINCT a FROM t", 0 },
-		{ "SELECT a.a FROM t a JOIN t b ON a.k=b.k", 0 },  /* join */
+		{ "SELECT a.a FROM t a JOIN t b ON a.k=b.k", 1 },  /* self-join (V5) */
 		{ "SELECT a FROM t WHERE a IN (1,2)", 0 },          /* IN */
 		{ "SELECT substr(b,1,2) FROM t", 0 },               /* unsupported func */
 

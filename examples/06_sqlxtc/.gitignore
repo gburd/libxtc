@@ -49,6 +49,7 @@ test_sqlrec
 test_vexec
 test_vexec_par
 test_vexec_ord
+test_vexec_join
 /sql_grammar.c
 /sql_grammar.h
 sql_grammar.out
