@@ -298,9 +298,21 @@ still pass, so the oracle also guards that the fallback is never wrong.
       surcharge except where the extra aggregation work parallelizes.
       The honest fix (the across-the-board win): read rows directly
       from the xstore B-tree, bypassing the VDBE row machinery -- see
-      VEXEC_RESULTS.md.  REMAINING for V6: recognizer widening for
-      subqueries and set operations (UNION etc.), and LEFT join /
-      parallel join from V5.
+      VEXEC_RESULTS.md.  FOUNDATION LANDED: xstore_scan_open /
+      xstore_scan_next / xstore_scan_close (xstore.h) -- a standalone
+      MVCC snapshot scan over one table driven WITHOUT a SQLite
+      connection or the VDBE, reusing the vtab's exact xs_advance
+      visibility loop (newest non-tombstone version per rowid <= snap)
+      and the record codec (xstore_rec_col), bounded by a rowid range
+      so a worker scans a disjoint slice independently.  Proven by
+      test_xstore_scan to return exactly the VDBE's rows under MVCC
+      (incl. an UPDATE superseding a version, a DELETE tombstone, and a
+      range bound), clean under ASan+UBSan.  REMAINING: rewire vexec's
+      row source from the stepped sqlite3_stmt to this scan (the change
+      that removes the VDBE from the hot path and makes the
+      parallel-aggregation scaling an across-the-board win), plus
+      recognizer widening for subqueries / set operations (UNION etc.)
+      and LEFT / parallel join from V5.
 
 ## Risks and honest unknowns
 

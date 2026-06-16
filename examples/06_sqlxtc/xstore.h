@@ -77,4 +77,48 @@ void xstore_clock_observe(uint64_t peer_ts);
 /* Number of CLRs written during recovery undo passes (test/metric). */
 uint64_t xstore_undo_clrs(void);
 
+/* ---- storage-native scan (for a from-scratch executor) ----------- *
+ *
+ * A read-only MVCC snapshot scan over one table's rows, driven WITHOUT
+ * a SQLite connection or the VDBE: the vectorized executor uses this to
+ * read rows directly from the B-tree, applying the same snapshot
+ * visibility (newest non-tombstone version per rowid with commit_ts <=
+ * snap) the vtab cursor applies.  The row payload is returned as the
+ * engine's record bytes (see xstore's record codec); column 0 is the
+ * INTEGER PRIMARY KEY (the rowid), columns 1.. are the payload.
+ *
+ * The rowid range [lo, hi] (inclusive) bounds the scan -- pass
+ * has_lo / has_hi = 0 for an unbounded end -- so a morsel-parallel
+ * executor can hand each worker a disjoint slice and they scan
+ * independently (each opens its own xstore_scan).  snap = 0 selects the
+ * latest committed snapshot (xstore_clock()). */
+typedef struct xstore_scan xstore_scan_t;
+
+xstore_scan_t *xstore_scan_open(bt_t *bt, const char *table,
+                                uint64_t snap,
+                                int64_t lo, int has_lo,
+                                int64_t hi, int has_hi);
+
+/* Advance to the next visible row.  Returns 1 with *rowid set and
+ * *rec / *reclen pointing at the row's payload record (valid until the
+ * next xstore_scan_next or close), 0 at end of scan, or <0 on error.
+ * The table's resolved id is 0 (not found) -> open returns NULL. */
+int xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
+                     const uint8_t **rec, int *reclen);
+
+void xstore_scan_close(xstore_scan_t *s);
+
+/* Storage value classes returned by xstore_rec_col. */
+enum {
+	XSTORE_C_NULL = 0, XSTORE_C_INT, XSTORE_C_REAL, XSTORE_C_TEXT, XSTORE_C_BLOB
+};
+
+/* Decode payload column `idx` (0-based over the non-key columns) of a
+ * scan record into a typed value.  Returns the XSTORE_C_* class; for
+ * INT/REAL the value is in iout / rout, for TEXT/BLOB pout / nout point
+ * into rec (valid for rec's lifetime).  Pass NULL for unwanted outs. */
+int xstore_rec_col(const uint8_t *rec, int reclen, int idx,
+                   int64_t *iout, double *rout,
+                   const uint8_t **pout, int *nout);
+
 #endif /* SQLXTC_XSTORE_H */
