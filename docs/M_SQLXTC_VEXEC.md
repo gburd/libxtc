@@ -314,6 +314,44 @@ still pass, so the oracle also guards that the fallback is never wrong.
       recognizer widening for subqueries / set operations (UNION etc.)
       and LEFT / parallel join from V5.
 
+## The vexec source rewire (next, well-specified)
+
+The one change that turns the parallel-aggregation scaling into an
+across-the-board win is replacing vexec's row source -- a stepped
+sqlite3_stmt -- with the storage-native xstore_scan_* (landed).  The
+shape of that rewire, so it preserves all V0-V5 correctness:
+
+  - Column resolution must change.  Today vexec builds SELECT <cols>
+    FROM t and reads by the stmt's column index (and gets affinity from
+    sqlite3_column_decltype, the `*` set from sqlite3_column_count, and
+    name->index from sqlite3_column_name).  With xstore_scan the row is
+    (rowid) + a payload record where xstore_rec_col(rec, i) is declared
+    column i+1.  So vexec must, at PREPARE time only, read the table
+    schema via PRAGMA table_info(t) (no data-row step -- the VDBE stays
+    out of the hot path): that gives columns in definition order, each
+    column's declared type (-> affinity), and which column is the PK.
+    Column 0 (the INTEGER PRIMARY KEY) maps to the scan's rowid; column
+    i>0 maps to payload index i-1.  A VXO_COL then carries a tagged
+    index (rowid vs payload[i]) instead of a stmt column index.
+  - read_src_cell becomes read-from-record: rowid -> VX_INT(rowid);
+    payload i -> xstore_rec_col(rec, i, ...).  No sqlite3_column_*.
+  - The per-row loops (next_chunk, agg_materialize, ordered_materialize,
+    the V2 worker, join build/probe) call xstore_scan_next instead of
+    sqlite3_step; the V2 morsel cursor slices the rowid range directly
+    via xstore_scan_open(bt, table, snap, lo, 1, hi, 1) per morsel, and
+    snap comes from the connection's read snapshot (an accessor is
+    needed so an isolation-level txn snapshot is honored -- autocommit
+    can pass 0 = latest).
+  - Affinity gate, expression eval, sort, aggregation, join: unchanged
+    (they operate on vx_cell rows, not the source).
+  - Re-run every differential oracle (test_vexec, _ord, _join, _par) and
+    re-measure with vexec_bench; the gate is results-unchanged AND
+    vexec now >= the VDBE serially (it no longer pays the VDBE row
+    cost).  A snapshot accessor on the xsql/bt handle is the one new
+    piece of plumbing the rewire needs from the engine.
+  This is a large, single-purpose change best done in one focused pass
+  with the budget to re-validate all four oracles + the benchmark.
+
 ## Risks and honest unknowns
 
   - The recognizer is the crux: SQLite's planner emits many opcode
