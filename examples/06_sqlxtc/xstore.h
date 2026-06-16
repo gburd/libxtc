@@ -94,6 +94,11 @@ uint64_t xstore_undo_clrs(void);
  * latest committed snapshot (xstore_clock()). */
 typedef struct xstore_scan xstore_scan_t;
 
+/* The B-tree a connection's xstore tables are backed by (from
+ * xstore_register), so an executor with only the connection handle can
+ * open a storage-native scan over it.  NULL if db was never registered. */
+bt_t *xstore_bt_of(struct xsql *db);
+
 xstore_scan_t *xstore_scan_open(bt_t *bt, const char *table,
                                 uint64_t snap,
                                 int64_t lo, int has_lo,
