@@ -2800,11 +2800,15 @@ vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
 	par.plan = plan;
 	atomic_store(&par.cursor, lo);
 	par.hi = hi;
-	/* Morsel size: aim for a few morsels per worker so the atomic cursor
-	 * load-balances; floor at 1. */
+	/* Morsel size: each xstore_scan_open re-descends the B-tree from the
+	 * root to seek the morsel's start, so morsels must be LARGE for that
+	 * cost to amortize over a long scan.  Aim for ~2 morsels per worker
+	 * (enough to load-balance a skewed range, few enough that descents
+	 * are negligible), with a floor so tiny tables do not over-split. */
 	{
 		int64_t span = hi - lo;
-		int64_t target = span / (int64_t)(n_workers * 4 > 0 ? n_workers * 4 : 1);
+		int64_t target = span / (int64_t)(n_workers * 2 > 0 ? n_workers * 2 : 1);
+		if (target < 65536) target = 65536;   /* descents amortize over >=64K rows */
 		par.morsel = target > 0 ? target : 1;
 	}
 	par.nworkers = n_workers;
