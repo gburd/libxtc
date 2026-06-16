@@ -1,3 +1,4 @@
 engine_ab
 mvcc_bench
 *.o
+vexec_bench
