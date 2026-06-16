@@ -21,7 +21,8 @@ ROWS=${1:-2000000}
 
 gcc -O2 -g -std=c11 -D_GNU_SOURCE -include "$EX/xsql.h" -I"$EX" -I../../src/inc \
     vexec_bench.c "$EX/vexec.c" "$EX/sql_parse_drv.c" "$EX/sql_ast.c" \
-    "$EX/sql_parse_gen.c" "$EX/sqlite3.o" "$XTC_BUILD/libxtc.a" \
-    -pthread -ldl -lm -luring -o vexec_bench >&2
+    "$EX/sql_parse_gen.c" "$EX/xstore.c" "$EX/xlog.c" "$EX/wal.c" \
+    "$EX/btree.c" "$EX/btnode.c" "$EX/bufmgr.c" "$EX/sqlite3.o" \
+    "$XTC_BUILD/libxtc.a" -pthread -ldl -lm -luring -o vexec_bench >&2
 
 ./vexec_bench "$ROWS"

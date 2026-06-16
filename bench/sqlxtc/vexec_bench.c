@@ -28,6 +28,9 @@
 
 #include "vexec.h"
 #include "sqlite3.h"
+#include "bufmgr.h"
+#include "btree.h"
+#include "xstore.h"
 
 static uint64_t
 now_ns(void)
@@ -65,10 +68,11 @@ vexec_count(sqlite3 *db, const char *sql)
 int
 main(int argc, char **argv)
 {
-	const char *path = "/tmp/sqlxtc_vexec_bench.db";
+	char path[64] = "/tmp/sqlxtc_vexbenchXXXXXX";
 	long rows = (argc > 1) ? atol(argv[1]) : 2000000;
 	sqlite3 *db = NULL; char *err = NULL;
-	int reps = 3;
+	bm_t *bm = NULL; bt_t *bt = NULL; bm_opts_t bo = BM_OPTS_DEFAULT;
+	int reps = 3, dbfd;
 	long r;
 
 	static const char *queries[] = {
@@ -82,13 +86,15 @@ main(int argc, char **argv)
 	int nw = (int)(sizeof workers / sizeof workers[0]);
 	int qi, wi;
 
-	unlink(path);
-	if (sqlite3_open(path, &db) != SQLITE_OK) { fprintf(stderr, "open\n"); return 1; }
-	sqlite3_exec(db, "PRAGMA journal_mode=WAL", 0, 0, 0);
-	sqlite3_exec(db, "PRAGMA synchronous=NORMAL", 0, 0, 0);
+	dbfd = mkstemp(path); if (dbfd >= 0) close(dbfd);
+	bo.path = path; bo.page_size = 4096; bo.n_frames = 4096; bo.lsn_off = 0;
+	if (bm_create(&bo, &bm) != XTC_OK || bt_open(bm, &bt) != XTC_OK) {
+		fprintf(stderr, "storage open\n"); return 1; }
+	if (sqlite3_open(":memory:", &db) != SQLITE_OK) { fprintf(stderr, "open\n"); return 1; }
+	if (xstore_register(db, bt) != SQLITE_OK) { fprintf(stderr, "register\n"); return 1; }
 	if (sqlite3_exec(db,
-	        "CREATE TABLE t(k INTEGER PRIMARY KEY, a INT, g INT, b TEXT);"
-	        "CREATE TABLE u(j INTEGER PRIMARY KEY, c INT)",
+	        "CREATE VIRTUAL TABLE t USING xstore(k, a INT, g INT, b TEXT);"
+	        "CREATE VIRTUAL TABLE u USING xstore(j, c INT)",
 	        0, 0, &err) != SQLITE_OK) {
 		fprintf(stderr, "create: %s\n", err ? err : "?"); return 1;
 	}
@@ -169,7 +175,7 @@ main(int argc, char **argv)
 				uint64_t t0;
 				int rc;
 				t0 = now_ns();
-				rc = vx_run_parallel(path, sql, W, &res, &pe);
+				rc = vx_run_parallel(db, sql, W, &res, &pe);
 				{
 					double ms = (double)(now_ns() - t0) / 1e6;
 					if (rc == 1) {
@@ -193,8 +199,8 @@ main(int argc, char **argv)
 	}
 
 	sqlite3_close(db);
+	bt_close(bt);
+	bm_destroy(bm);
 	unlink(path);
-	{ char w[256]; snprintf(w, sizeof w, "%s-wal", path); unlink(w);
-	  snprintf(w, sizeof w, "%s-shm", path); unlink(w); }
 	return 0;
 }
