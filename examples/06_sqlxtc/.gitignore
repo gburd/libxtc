@@ -48,6 +48,7 @@ test_sql_ast
 test_sqlrec
 test_vexec
 test_vexec_par
+test_vexec_ord
 /sql_grammar.c
 /sql_grammar.h
 sql_grammar.out

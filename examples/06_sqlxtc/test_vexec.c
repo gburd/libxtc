@@ -199,9 +199,7 @@ main(void)
 		{ "SELECT a FROM t WHERE a > 4 OR b = 'two'", 1 },
 		{ "SELECT a/2 FROM t WHERE a IS NOT NULL", 1 },
 
-		/* ---- must fall back (not in V1) ---- */
-		{ "SELECT a FROM t ORDER BY a", 0 },
-		{ "SELECT a FROM t LIMIT 2", 0 },
+		/* ---- must fall back ---- */
 		{ "SELECT DISTINCT a FROM t", 0 },
 		{ "SELECT a.a FROM t a JOIN t b ON a.k=b.k", 0 },  /* join */
 		{ "SELECT a FROM t WHERE a IN (1,2)", 0 },          /* IN */

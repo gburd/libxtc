@@ -1,6 +1,6 @@
 # M_SQLXTC_VEXEC -- a vectorized execution engine to replace the VDBE
 
-Status: V0-V3 LANDED (expression evaluator, morsel parallelism, hash aggregation); V4-V6 planned.  sqlxtc is a ROW store -- the DuckDB columnar vector layout is deliberately not adopted; only the batched push-based morsel-parallel execution model is.  This document scopes a
+Status: V0-V4 LANDED (expression evaluator, morsel parallelism, hash aggregation, sort+LIMIT); V5-V6 planned.  sqlxtc is a ROW store -- the DuckDB columnar vector layout is deliberately not adopted; only the batched push-based morsel-parallel execution model is.  This document scopes a
 from-scratch execution engine for sqlxtc -- a DuckDB-style vectorized,
 push-based, morsel-parallel executor built on the libxtc concurrency
 model -- that replaces SQLite's VDBE (the bytecode interpreter,
@@ -230,6 +230,25 @@ still pass, so the oracle also guards that the fallback is never wrong.
       single-threaded queries and 11 parallel queries match the VDBE;
       clean under ASan+UBSan with leak detection on both paths.
   V4  Vectorized sort + LIMIT (P4); ORDER BY honored positionally.
+      DONE (vexec.c / test_vexec_ord.c).  The non-aggregating path now
+      recognizes ORDER BY, LIMIT, and OFFSET.  Order keys are either an
+      expression over the source columns or a 1-based output-column
+      position (ORDER BY 2); LIMIT/OFFSET must be non-negative integer
+      literals (expressions/parameters fall back).  On the first step
+      the query materializes all surviving (projected) rows together
+      with their computed sort-key cells, sorts an index array with a
+      storage-class-aware comparator that matches SQLite's
+      sqlite3MemCompare (NULL < numbers < TEXT < BLOB; per-key ASC/DESC;
+      ties broken by input order), applies OFFSET then LIMIT, and emits.
+      The differential oracle compares POSITIONALLY (row i vs row i),
+      with every corpus ORDER BY ending in the unique rowid so the
+      order is total and the comparison is well defined.  12 ordered
+      queries match the VDBE positionally; clean under ASan+UBSan.
+      Boundaries: ORDER BY/LIMIT over GROUP BY output falls back (the
+      agg path does not sort yet); and the parallel runner falls back
+      for ordered queries (its combine only concatenates -- a parallel
+      merge-sort combine is a later refinement), so an ordered query
+      runs on the single-threaded sorting path.
   V5  Hash join (P5), build/probe as pipeline boundary, parallel build.
   V6  Widen recognizer coverage (subqueries, set ops); measure vs VDBE
       on an analytic workload (the scan/agg/join queries where
