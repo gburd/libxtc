@@ -2748,34 +2748,33 @@ done:
 	return 0;   /* task DONE */
 }
 
-int
-vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
-                vx_result_t **res, char **errmsg)
+/* True when a recognized plan can run on the morsel-parallel storage
+ * scan: a single-table, unordered, unlimited, unjoined, storage-backed
+ * scan or aggregation.  Ordered/limited/joined/non-storage plans run
+ * single-threaded. */
+static int
+is_parallelizable_plan(const vx_stmt_t *plan)
 {
-	vx_stmt_t *plan = NULL;
+	return plan->norder == 0 && plan->limit < 0 && plan->offset <= 0 &&
+	    plan->join == NULL && plan->bt != NULL;
+}
+
+/* Run an already-recognized, already-checked-parallelizable plan on the
+ * morsel-parallel storage scan.  Takes ownership of plan (finalizes it).
+ * Returns 1 with *res set, or <0 on error. */
+static int
+run_parallel_plan(vx_stmt_t *plan, sqlite3 *db, int n_workers,
+                  vx_result_t **res, char **errmsg)
+{
 	struct vx_par par;
 	struct vx_result *out = NULL;
 	xtc_exec_t *exec = NULL;
 	struct { struct vx_par *par; int idx; } *args = NULL;
-	int i, rc = 0, recog;
+	int i, rc = 0;
 	int64_t lo = 0, hi = 0;
 
-	if (res) *res = NULL;
-	if (errmsg) *errmsg = NULL;
+	(void)errmsg;
 	if (n_workers < 1) n_workers = 1;
-
-	/* Recognize the plan once on the caller's connection (its bt is the
-	 * one the workers' storage scans run over -- the workers share that
-	 * process pointer and open their own range cursors on it). */
-	recog = vx_try_prepare(db, sql, &plan, errmsg);
-	if (recog != 1) return recog;             /* 0 fallback / <0 err */
-
-	/* The parallel path is the storage-native scan; an ordered, limited,
-	 * joined, or non-storage (bt == NULL) plan runs single-threaded. */
-	if (plan->norder > 0 || plan->limit >= 0 || plan->offset > 0 ||
-	    plan->join != NULL || plan->bt == NULL) {
-		vx_finalize(plan); return 0;
-	}
 
 	/* rowid bounds: [min, max] of the table (empty -> no rows). */
 	{
@@ -2914,6 +2913,97 @@ cleanup:
 	if (out) { arena_free(out->arena); free(out->cells); free(out); }
 	if (plan) vx_finalize(plan);
 	return rc;
+}
+
+/* Collect a recognized serial plan (vx_step) into a materialized result,
+ * for plans that vexec recognizes but cannot run on the parallel storage
+ * scan (ordered/limited/joined/single-table at one worker).  Takes
+ * ownership of plan (finalizes it).  Returns 1 with *res, or <0. */
+static int
+collect_serial(vx_stmt_t *plan, vx_result_t **res)
+{
+	struct vx_result *out;
+	int ncol, step, rc = 1, i;
+	vx_cell_t rowbuf[64];
+
+	ncol = vx_column_count(plan);
+	if (ncol > (int)(sizeof rowbuf / sizeof rowbuf[0])) { vx_finalize(plan); return 0; }
+	out = (struct vx_result *)calloc(1, sizeof *out);
+	if (out == NULL) { vx_finalize(plan); return -1; }
+	out->ncol = ncol;
+	out->nworkers = 1;
+
+	while ((step = vx_step(plan)) == SQLITE_ROW) {
+		for (i = 0; i < ncol; i++) {
+			vx_cell_t c; memset(&c, 0, sizeof c);
+			switch (vx_column_type(plan, i)) {
+			case VX_INT:  c.type = VX_INT;  c.i = vx_column_int64(plan, i); break;
+			case VX_REAL: c.type = VX_REAL; c.r = vx_column_double(plan, i); break;
+			case VX_TEXT: {
+				const char *t = vx_column_text(plan, i);
+				c.type = VX_TEXT; c.bytes = (const uint8_t *)t;
+				c.nbytes = vx_column_bytes(plan, i);
+				break; }
+			case VX_BLOB:
+				c.type = VX_BLOB; c.bytes = vx_column_blob(plan, i);
+				c.nbytes = vx_column_bytes(plan, i);
+				break;
+			default: c.type = VX_NULL; break;
+			}
+			rowbuf[i] = c;
+		}
+		if (result_push(out, rowbuf) != 0) { rc = -1; break; }
+	}
+	if (step != SQLITE_DONE && rc == 1) rc = -1;
+
+	if (rc == 1) { *res = out; }
+	else { arena_free(out->arena); free(out->cells); free(out); }
+	vx_finalize(plan);
+	return rc;
+}
+
+int
+vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
+                vx_result_t **res, char **errmsg)
+{
+	vx_stmt_t *plan = NULL;
+	int recog;
+
+	if (res) *res = NULL;
+	if (errmsg) *errmsg = NULL;
+
+	/* Recognize the plan once on the caller's connection (its bt is the
+	 * one the workers' storage scans run over -- the workers share that
+	 * process pointer and open their own range cursors on it). */
+	recog = vx_try_prepare(db, sql, &plan, errmsg);
+	if (recog != 1) return recog;             /* 0 fallback / <0 err */
+
+	if (!is_parallelizable_plan(plan)) { vx_finalize(plan); return 0; }
+	return run_parallel_plan(plan, db, n_workers, res, errmsg);
+}
+
+int
+vx_run(sqlite3 *db, const char *sql, int n_workers,
+       vx_result_t **res, char **errmsg)
+{
+	vx_stmt_t *plan = NULL;
+	int recog;
+
+	if (res) *res = NULL;
+	if (errmsg) *errmsg = NULL;
+	if (n_workers < 1) n_workers = 1;
+
+	/* Recognize once, then route: the morsel-parallel storage scan is the
+	 * committed path for parallelizable single-table scans/aggregations;
+	 * other recognized plans (ordered, limited, joined, or run at one
+	 * worker) collect from the serial vectorized path; anything not
+	 * recognized returns 0 so the caller runs the VDBE. */
+	recog = vx_try_prepare(db, sql, &plan, errmsg);
+	if (recog != 1) return recog;
+
+	if (n_workers > 1 && is_parallelizable_plan(plan))
+		return run_parallel_plan(plan, db, n_workers, res, errmsg);
+	return collect_serial(plan, res);
 }
 
 /* ---- result accessors -------------------------------------------- */
