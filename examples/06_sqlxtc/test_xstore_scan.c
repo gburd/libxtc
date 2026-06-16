@@ -81,6 +81,9 @@ main(void)
 
 	CK(xsql_open(":memory:", &db) == SQLITE_OK, "open");
 	CK(xstore_register(db, bt) == SQLITE_OK, "register");
+	/* The connection -> bt accessor returns the registered B-tree, so an
+	 * executor with only the connection handle can open a scan. */
+	CK(xstore_bt_of(db) == bt, "xstore_bt_of returns the registered bt");
 	CK(xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore(k,a);", 0, 0, 0)
 	    == SQLITE_OK, "create vtab");
 

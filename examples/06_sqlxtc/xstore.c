@@ -728,6 +728,24 @@ static struct xs_cat_ent {
 static int g_cat_n;
 static pthread_mutex_t g_cat_mu = PTHREAD_MUTEX_INITIALIZER;
 
+/* Connection -> B-tree association, so a from-scratch executor driven
+ * from a connection handle (xstore_bt_of) can open a storage-native
+ * scan over the same B-tree the connection's xstore tables use. */
+#define XS_DBMAP_MAX 64
+static struct xs_dbmap_ent { struct xsql *db; bt_t *bt; } g_dbmap[XS_DBMAP_MAX];
+static int g_dbmap_n;
+
+bt_t *
+xstore_bt_of(struct xsql *db)
+{
+	int i; bt_t *bt = NULL;
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_dbmap_n; i++)
+		if (g_dbmap[i].db == db) { bt = g_dbmap[i].bt; break; }
+	pthread_mutex_unlock(&g_cat_mu);
+	return bt;
+}
+
 /* Look up `name` in the persisted catalog (table-id 0): the newest
  * non-tombstone catalog row whose value equals `name`.  Returns its id
  * (the row's rowid), or 0 if the catalog has no override for it. */
@@ -2465,6 +2483,16 @@ xstore_register(xsql *db, bt_t *bt)
 		return SQLITE_NOMEM;
 	bt_set_close_hook(xstore_cat_forget);   /* clear cached ids when a bt closes */
 	ctx->bt = bt;
+	/* Record the connection -> bt association for xstore_bt_of. */
+	pthread_mutex_lock(&g_cat_mu);
+	{
+		int i, slot = -1;
+		for (i = 0; i < g_dbmap_n; i++)
+			if (g_dbmap[i].db == db) { slot = i; break; }
+		if (slot < 0 && g_dbmap_n < XS_DBMAP_MAX) slot = g_dbmap_n++;
+		if (slot >= 0) { g_dbmap[slot].db = db; g_dbmap[slot].bt = bt; }
+	}
+	pthread_mutex_unlock(&g_cat_mu);
 	atomic_store(&ctx->read_snap, 0);
 	ctx->in_txn = 0;
 	ctx->txn_snap = 0;
