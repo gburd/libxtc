@@ -34,11 +34,15 @@
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
+#include <stdatomic.h>
 
 #include "vexec.h"
 #include "sql_parse.h"
 #include "sql_ast.h"
 #include "sql_parse_gen.h"   /* TK_* token ids */
+
+#include "xtc.h"             /* XTC_OK */
+#include "xtc_exec.h"        /* V2: morsel-parallel workers, one per loop */
 
 /* ---- arena ------------------------------------------------------- */
 
@@ -125,6 +129,13 @@ struct vx_stmt {
 	vx_expr_t    *filter;       /* WHERE expression, or NULL */
 
 	struct vx_arena_blk *plan_arena;   /* expr tree + literal bytes */
+
+	/* The recognized source, kept so a parallel run can rebuild a
+	 * range-scoped source statement that reuses the SAME compiled
+	 * plan (the proj/filter trees index the source columns, whose
+	 * order is fixed by srccols). */
+	char          table[64];
+	char          srccols[2100];   /* comma-joined source column list, or "*" */
 
 	/* Per-row scratch: the source row materialized as cells. */
 	vx_cell_t    *srcrow;       /* nsrc_col cells */
@@ -878,6 +889,8 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 		srcsql = (char *)malloc(n);
 		if (!srcsql) goto oom;
 		snprintf(srcsql, n, "SELECT * FROM %s", tabbuf);
+		snprintf(st->table, sizeof st->table, "%s", tabbuf);
+		snprintf(st->srccols, sizeof st->srccols, "*");
 	} else {
 		char cols[2100]; int off = 0, k;
 		if (nv.n == 0 || nv.n > 32) goto fallback;
@@ -893,6 +906,8 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 			if (!srcsql) goto oom;
 			snprintf(srcsql, n, "SELECT %s FROM %s", cols, tabbuf);
 		}
+		snprintf(st->table, sizeof st->table, "%s", tabbuf);
+		snprintf(st->srccols, sizeof st->srccols, "%s", cols);
 	}
 
 	if (sqlite3_prepare_v2(db, srcsql, -1, &st->src, 0) != SQLITE_OK)
@@ -915,6 +930,7 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	}
 
 	st->nout = nproj;
+	if (nproj > 32) goto fallback;   /* worker out[] / result row bound */
 	st->proj = (vx_expr_t **)calloc((size_t)(nproj > 0 ? nproj : 1),
 	                                sizeof(vx_expr_t *));
 	if (!st->proj) goto oom;
@@ -1116,4 +1132,307 @@ vx_finalize(vx_stmt_t *st)
 	free(st->proj);
 	free(st->srcrow);
 	free(st);
+}
+
+/* ================================================================== *
+ * V2: morsel-parallel execution
+ * ================================================================== */
+
+/* A collected result: row-major cells + an arena owning TEXT/BLOB. */
+struct vx_result {
+	int        nrow, ncol, cap;
+	vx_cell_t *cells;
+	struct vx_arena_blk *arena;
+	int        nworkers;
+};
+
+static int
+result_push(struct vx_result *r, const vx_cell_t *row)
+{
+	int j;
+	if (r->nrow == r->cap) {
+		int nc = r->cap ? r->cap * 2 : 256;
+		vx_cell_t *nn = (vx_cell_t *)realloc(r->cells,
+		    sizeof(vx_cell_t) * (size_t)nc * (size_t)(r->ncol > 0 ? r->ncol : 1));
+		if (nn == NULL) return -1;
+		r->cells = nn; r->cap = nc;
+	}
+	/* Copy TEXT/BLOB bytes into the result arena so they outlive the
+	 * worker chunk they came from. */
+	for (j = 0; j < r->ncol; j++) {
+		vx_cell_t c = row[j];
+		if ((c.type == VX_TEXT || c.type == VX_BLOB) && c.nbytes) {
+			uint8_t *p = (uint8_t *)arena_alloc(&r->arena, (size_t)c.nbytes + 1);
+			if (p == NULL) return -1;
+			memcpy(p, c.bytes, c.nbytes); p[c.nbytes] = '\0';
+			c.bytes = p;
+		}
+		r->cells[(size_t)r->nrow * (size_t)r->ncol + (size_t)j] = c;
+	}
+	r->nrow++;
+	return 0;
+}
+
+/* Shared context across the morsel workers. */
+struct vx_par {
+	const struct vx_stmt *plan;   /* compiled template (proj/filter/cols/table) */
+	const char  *db_path;
+	_Atomic int64_t cursor;       /* next rowid to hand out */
+	int64_t      hi;              /* one past the max rowid */
+	int64_t      morsel;          /* rowids per morsel */
+	int          nworkers;
+	struct vx_result *parts;      /* nworkers result buffers */
+	_Atomic int  error;           /* any worker failed */
+};
+
+/* One worker: own connection, own range-scoped source statement, reuse
+ * the shared compiled plan (its proj/filter trees are immutable). */
+static int
+par_worker(xtc_task_t *self, void *user)
+{
+	struct { struct vx_par *par; int idx; } *a = user;
+	struct vx_par *par = a->par;
+	int widx = a->idx;
+	sqlite3 *db = NULL;
+	sqlite3_stmt *src = NULL;
+	char sql[2400];
+	struct vx_stmt w;     /* lightweight per-worker execution state */
+	struct vx_arena_blk *rowarena = NULL;
+	vx_cell_t *srcrow = NULL;
+	int rc_ok = 0;
+
+	(void)self;
+
+	if (sqlite3_open_v2(par->db_path, &db,
+	        SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
+		goto done;
+
+	/* Range-scoped source over rowid; reuse the plan's exact column list
+	 * so the compiled proj/filter (which index source columns) match. */
+	snprintf(sql, sizeof sql,
+	    "SELECT %s FROM %s WHERE _rowid_ >= ?1 AND _rowid_ < ?2",
+	    par->plan->srccols, par->plan->table);
+	if (sqlite3_prepare_v2(db, sql, -1, &src, 0) != SQLITE_OK) goto done;
+
+	/* The worker borrows the plan's compiled trees; its own scratch. */
+	memset(&w, 0, sizeof w);
+	w.nout = par->plan->nout;
+	w.proj = par->plan->proj;
+	w.filter = par->plan->filter;
+	w.nsrc_col = sqlite3_column_count(src);
+	srcrow = (vx_cell_t *)calloc((size_t)(w.nsrc_col > 0 ? w.nsrc_col : 1),
+	                             sizeof(vx_cell_t));
+	if (srcrow == NULL) goto done;
+	w.srcrow = srcrow;
+
+	for (;;) {
+		int64_t lo = atomic_fetch_add_explicit(&par->cursor, par->morsel,
+		                                       memory_order_relaxed);
+		int64_t mh;
+		if (lo >= par->hi) break;
+		mh = lo + par->morsel;
+		if (mh > par->hi) mh = par->hi;
+
+		sqlite3_reset(src);
+		sqlite3_bind_int64(src, 1, lo);
+		sqlite3_bind_int64(src, 2, mh);
+
+		for (;;) {
+			int step = sqlite3_step(src), j;
+			if (step == SQLITE_DONE) break;
+			if (step != SQLITE_ROW) { atomic_store(&par->error, 1); goto done; }
+
+			for (j = 0; j < w.nsrc_col; j++)
+				read_src_cell(src, j, &w.srcrow[j], &rowarena);
+
+			if (w.filter != NULL &&
+			    eval_bool(&w, w.filter, w.srcrow, &rowarena) != 1)
+				continue;
+
+			{
+				vx_cell_t out[32];
+				for (j = 0; j < w.nout; j++)
+					eval(&w, w.proj[j], w.srcrow, &rowarena, &out[j]);
+				if (result_push(&par->parts[widx], out) != 0) {
+					atomic_store(&par->error, 1); goto done;
+				}
+			}
+			/* The row arena grows across a morsel; reset it between
+			 * morsels would invalidate result_push copies -- but
+			 * result_push already copied bytes into the result arena,
+			 * so the row arena is transient.  Reset per morsel to bound
+			 * memory. */
+		}
+		arena_free(rowarena); rowarena = NULL;
+	}
+	rc_ok = 1;
+
+done:
+	if (rowarena) arena_free(rowarena);
+	free(srcrow);
+	if (src) sqlite3_finalize(src);
+	if (db) sqlite3_close(db);
+	if (!rc_ok) atomic_store(&par->error, 1);
+	return 0;   /* task DONE */
+}
+
+int
+vx_run_parallel(const char *db_path, const char *sql, int n_workers,
+                vx_result_t **res, char **errmsg)
+{
+	sqlite3 *coord = NULL;
+	vx_stmt_t *plan = NULL;
+	struct vx_par par;
+	struct vx_result *out = NULL;
+	xtc_exec_t *exec = NULL;
+	struct { struct vx_par *par; int idx; } *args = NULL;
+	int i, rc = 0, recog;
+	int64_t lo = 0, hi = 0;
+
+	if (res) *res = NULL;
+	if (errmsg) *errmsg = NULL;
+	if (n_workers < 1) n_workers = 1;
+
+	/* Recognize the plan once on a coordinator connection. */
+	if (sqlite3_open_v2(db_path, &coord, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
+		return -1;
+	recog = vx_try_prepare(coord, sql, &plan, errmsg);
+	if (recog != 1) { sqlite3_close(coord); return recog; }   /* 0 fallback / <0 err */
+
+	/* rowid bounds: [min, max] of the table (NULL table -> empty). */
+	{
+		char q[128]; sqlite3_stmt *b = NULL;
+		snprintf(q, sizeof q, "SELECT min(_rowid_), max(_rowid_) FROM %s",
+		         plan->table);
+		if (sqlite3_prepare_v2(coord, q, -1, &b, 0) == SQLITE_OK &&
+		    sqlite3_step(b) == SQLITE_ROW &&
+		    sqlite3_column_type(b, 0) != SQLITE_NULL) {
+			lo = sqlite3_column_int64(b, 0);
+			hi = sqlite3_column_int64(b, 1) + 1;   /* one past max */
+		}
+		if (b) sqlite3_finalize(b);
+	}
+
+	out = (struct vx_result *)calloc(1, sizeof *out);
+	if (out == NULL) { rc = -1; goto cleanup; }
+	out->ncol = plan->nout;
+	out->nworkers = n_workers;
+
+	memset(&par, 0, sizeof par);
+	par.plan = plan;
+	par.db_path = db_path;
+	atomic_store(&par.cursor, lo);
+	par.hi = hi;
+	/* Morsel size: aim for a few morsels per worker so the atomic cursor
+	 * load-balances; floor at 1. */
+	{
+		int64_t span = hi - lo;
+		int64_t target = span / (int64_t)(n_workers * 4 > 0 ? n_workers * 4 : 1);
+		par.morsel = target > 0 ? target : 1;
+	}
+	par.nworkers = n_workers;
+	par.parts = (struct vx_result *)calloc((size_t)n_workers, sizeof(struct vx_result));
+	if (par.parts == NULL) { rc = -1; goto cleanup; }
+	for (i = 0; i < n_workers; i++) par.parts[i].ncol = plan->nout;
+
+	/* Run one worker per loop on a libxtc executor. */
+	if (xtc_exec_init(&exec, n_workers) != XTC_OK) { rc = -1; goto cleanup; }
+	out->nworkers = xtc_exec_n_loops(exec);
+	args = (void *)calloc((size_t)n_workers, sizeof *args);
+	if (args == NULL) { rc = -1; goto cleanup; }
+	for (i = 0; i < n_workers; i++) {
+		args[i].par = &par; args[i].idx = i;
+		if (xtc_exec_spawn_on(exec, i % xtc_exec_n_loops(exec),
+		        par_worker, &args[i], NULL) != XTC_OK) {
+			rc = -1; goto cleanup;
+		}
+	}
+	(void)xtc_exec_run(exec);   /* blocks until all workers DONE */
+
+	if (atomic_load(&par.error)) { rc = -1; goto cleanup; }
+
+	/* Combine: concatenate per-worker buffers (multiset). */
+	for (i = 0; i < n_workers; i++) {
+		int k;
+		for (k = 0; k < par.parts[i].nrow; k++) {
+			const vx_cell_t *row =
+			    &par.parts[i].cells[(size_t)k * (size_t)out->ncol];
+			if (result_push(out, row) != 0) { rc = -1; goto cleanup; }
+		}
+	}
+
+	*res = out; out = NULL;
+	rc = 1;
+
+cleanup:
+	if (exec) xtc_exec_fini(exec);
+	if (par.parts) {
+		for (i = 0; i < n_workers; i++) {
+			arena_free(par.parts[i].arena);
+			free(par.parts[i].cells);
+		}
+		free(par.parts);
+	}
+	free(args);
+	if (out) { arena_free(out->arena); free(out->cells); free(out); }
+	if (plan) vx_finalize(plan);
+	if (coord) sqlite3_close(coord);
+	return rc;
+}
+
+/* ---- result accessors -------------------------------------------- */
+
+static const vx_cell_t *
+res_cell(const vx_result_t *r, int row, int col)
+{
+	if (r == NULL || row < 0 || row >= r->nrow || col < 0 || col >= r->ncol)
+		return NULL;
+	return &r->cells[(size_t)row * (size_t)r->ncol + (size_t)col];
+}
+
+int vx_result_nrow(const vx_result_t *r) { return r ? r->nrow : 0; }
+int vx_result_ncol(const vx_result_t *r) { return r ? r->ncol : 0; }
+int vx_result_nworkers(const vx_result_t *r) { return r ? r->nworkers : 0; }
+
+vx_type_t vx_result_type(const vx_result_t *r, int row, int col)
+{ const vx_cell_t *c = res_cell(r, row, col); return c ? c->type : VX_NULL; }
+
+int64_t vx_result_int64(const vx_result_t *r, int row, int col)
+{
+	const vx_cell_t *c = res_cell(r, row, col);
+	if (!c) return 0;
+	if (c->type == VX_INT) return c->i;
+	if (c->type == VX_REAL) return (int64_t)c->r;
+	return 0;
+}
+
+double vx_result_double(const vx_result_t *r, int row, int col)
+{
+	const vx_cell_t *c = res_cell(r, row, col);
+	if (!c) return 0;
+	if (c->type == VX_REAL) return c->r;
+	if (c->type == VX_INT) return (double)c->i;
+	return 0;
+}
+
+const char *vx_result_text(const vx_result_t *r, int row, int col)
+{
+	const vx_cell_t *c = res_cell(r, row, col);
+	return (c && (c->type == VX_TEXT || c->type == VX_BLOB))
+	    ? (const char *)c->bytes : NULL;
+}
+
+int vx_result_bytes(const vx_result_t *r, int row, int col)
+{
+	const vx_cell_t *c = res_cell(r, row, col);
+	return (c && (c->type == VX_TEXT || c->type == VX_BLOB)) ? (int)c->nbytes : 0;
+}
+
+void
+vx_result_free(vx_result_t *r)
+{
+	if (r == NULL) return;
+	arena_free(r->arena);
+	free(r->cells);
+	free(r);
 }

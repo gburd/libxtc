@@ -88,4 +88,40 @@ int          vx_column_bytes(vx_stmt_t *st, int i);
 
 void vx_finalize(vx_stmt_t *st);
 
+/* ---- V2: morsel-parallel execution ------------------------------- *
+ *
+ * Run a recognized P1/P2 query in parallel over N worker procs on a
+ * libxtc executor (one worker per loop).  The table's rowid space is
+ * sliced into morsels handed out by an atomic cursor; each worker opens
+ * its OWN connection to `db_path` (so the cursors are independent),
+ * runs the compiled plan over its morsels, and appends surviving rows
+ * to its own buffer.  A final combine concatenates the per-worker
+ * buffers (multiset semantics -- row order is unspecified, as the query
+ * has no top-level ORDER BY).
+ *
+ * The collected result is returned as a flat array of cells, row-major:
+ * *out_cells has (*out_nrow * *out_ncol) entries, owned by the returned
+ * vx_result and freed by vx_result_free.  TEXT/BLOB bytes are owned by
+ * the result.
+ *
+ * Returns 1 if the query was recognized and run in parallel (*res set),
+ * 0 if not recognized (caller falls back to the VDBE), <0 on error.
+ */
+typedef struct vx_result vx_result_t;
+
+int vx_run_parallel(const char *db_path, const char *sql, int n_workers,
+                    vx_result_t **res, char **errmsg);
+
+int            vx_result_nrow(const vx_result_t *r);
+int            vx_result_ncol(const vx_result_t *r);
+vx_type_t      vx_result_type(const vx_result_t *r, int row, int col);
+int64_t        vx_result_int64(const vx_result_t *r, int row, int col);
+double         vx_result_double(const vx_result_t *r, int row, int col);
+const char    *vx_result_text(const vx_result_t *r, int row, int col);
+int            vx_result_bytes(const vx_result_t *r, int row, int col);
+/* Number of executor loops the run actually used (for the scaling gate). */
+int            vx_result_nworkers(const vx_result_t *r);
+
+void vx_result_free(vx_result_t *r);
+
 #endif /* SQLXTC_VEXEC_H */

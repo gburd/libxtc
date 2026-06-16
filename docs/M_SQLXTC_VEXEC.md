@@ -1,6 +1,6 @@
 # M_SQLXTC_VEXEC -- a vectorized execution engine to replace the VDBE
 
-Status: V0-V1 LANDED (expression evaluator); columnar vectors + V2-V6 planned.  This document scopes a
+Status: V0-V2 LANDED (expression evaluator, morsel parallelism); columnar vectors + V3-V6 planned.  This document scopes a
 from-scratch execution engine for sqlxtc -- a DuckDB-style vectorized,
 push-based, morsel-parallel executor built on the libxtc concurrency
 model -- that replaces SQLite's VDBE (the bytecode interpreter,
@@ -192,6 +192,23 @@ still pass, so the oracle also guards that the fallback is never wrong.
   V2  Morsel parallelism on the executor: P1/P2 scans run on N worker
       procs with an atomic morsel cursor; I/O overlap via xtc_aio.
       Gate: results unchanged, throughput scales with loops.
+      DONE (vx_run_parallel in vexec.c / test_vexec_par.c).  The
+      table's rowid space is sliced into morsels handed out by an
+      atomic cursor; one worker per executor loop (xtc_exec_spawn_on)
+      opens its OWN connection, prepares a range-scoped source
+      (... WHERE _rowid_ >= ?1 AND _rowid_ < ?2) that reuses the SAME
+      compiled plan (the proj/filter expression trees are immutable and
+      shared read-only), evaluates it over its morsels, and appends
+      surviving rows to its own buffer; a final combine concatenates
+      them (multiset).  The expression evaluator is already stateless,
+      so it is parallel-safe unchanged.  Gate met: 6 queries match the
+      VDBE running on 4 loops; clean under ASan+UBSan on the parallel
+      path (the race surface is just the atomic morsel cursor and the
+      immutable shared plan -- each worker owns its connection, row
+      scratch, and result buffer).  NOTE: V2 uses a blocking step per
+      worker (one worker per loop, so the loop is never shared); the
+      xtc_aio fiber-overlap of page I/O within a worker is a
+      refinement deferred with the columnar model.
   V3  Hash aggregation + GROUP BY (P3), per-worker partial aggregates +
       Combine.
   V4  Vectorized sort + LIMIT (P4); ORDER BY honored positionally.
