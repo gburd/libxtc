@@ -31,27 +31,35 @@ The single-threaded vectorized executor now reads the B-tree directly
 applies MVCC visibility through the shared xs_advance loop -- so it does
 strictly LESS work than before and competes with or beats the VDBE.
 
-But the PARALLEL path regressed below serial (all < 1x).  The benchmark
-surfaced that the current morsel-parallel storage scan is dominated by
-per-morsel and per-run overhead, not the saved scan work:
-  - each morsel does a full B-tree DESCENT to seek its start key
-    (xstore_scan_open re-descends rather than resuming a parked cursor),
-    and the morsel sizing (span / (workers*4)) makes many small morsels;
-  - xtc_exec_init / run is set up and torn down PER QUERY, a fixed cost
-    that dominates at these row counts;
-  - concurrent scans on one shared bt contend on the buffer pool.
+But the PARALLEL path regressed below serial (all < 1x).  Investigation
+(measured, not guessed) narrowed the cause:
+  - The libxtc executor itself is NOT the problem: a pure CPU-bound
+    worker task carries only ~11% overhead vs running on the main
+    thread, and N workers each doing a full busy-loop finish in close
+    to 1x wall time (they genuinely run in parallel).  xtc_exec_init +
+    run + fini is ~3-5 ms, negligible at these query sizes.
+  - Coarsening morsels (from span/(workers*4) to span/(workers*2) with a
+    64K-row floor, so each xstore_scan_open's B-tree descent amortizes
+    over a long scan) helped marginally but did NOT close the gap.
+  - The remaining cost is in the concurrent SCAN itself: even a single
+    worker (1w, no contention) is ~2x slower than the serial path (1t)
+    on identical work, and adding workers does not recover it.  The
+    suspects are the buffer-pool fix path under the worker's scan
+    (bm_fix_pid's striped-lock hash lookup + B-tree cursor park/unpark
+    per row) and the per-worker hash-table + combine path differing
+    from the serial drain.  Pinning this down needs a profiler.
 
 ## The parallel-scan follow-up
 
-To make parallelism a win on top of the serial gain:
-  - far fewer, larger morsels (e.g. workers * 1, or a fixed large slice)
-    so the per-descent cost amortizes;
+The executor parallelism is sound (measured), so the win is recoverable
+once the per-worker scan path matches the serial scan's per-row cost:
+  - profile 1w vs 1t to find why one worker is ~2x slower than serial
+    on identical work (the buffer-pool fix path or the agg drain route
+    are the leading suspects);
   - resume a parked B-tree cursor across a worker's morsels instead of a
     fresh descent per morsel (the O(1) parked-cursor resume the storage
     engine already provides);
-  - amortize the executor: a long-lived worker pool rather than init/run
-    per query;
   - measure buffer-pool contention under concurrent scans and size the
     pool / striping accordingly.
-The serial storage-native win is the solid, banked result; the parallel
-storage scan is the next tuning target.
+The serial storage-native win is the solid, banked result; closing the
+parallel scan's per-worker overhead is the next profiler-driven target.
