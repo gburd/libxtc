@@ -201,13 +201,27 @@ main(void)
 
 		/* ---- must fall back (not in V1) ---- */
 		{ "SELECT a FROM t ORDER BY a", 0 },
-		{ "SELECT count(*) FROM t", 0 },
 		{ "SELECT a FROM t LIMIT 2", 0 },
 		{ "SELECT DISTINCT a FROM t", 0 },
-		{ "SELECT a FROM t GROUP BY a", 0 },
 		{ "SELECT a.a FROM t a JOIN t b ON a.k=b.k", 0 },  /* join */
 		{ "SELECT a FROM t WHERE a IN (1,2)", 0 },          /* IN */
 		{ "SELECT substr(b,1,2) FROM t", 0 },               /* unsupported func */
+
+		/* ---- P3: aggregation + GROUP BY (V3) ---- */
+		{ "SELECT count(*) FROM t", 1 },
+		{ "SELECT count(a) FROM t", 1 },
+		{ "SELECT sum(a) FROM t", 1 },
+		{ "SELECT total(a) FROM t", 1 },
+		{ "SELECT avg(a) FROM t", 1 },
+		{ "SELECT min(a), max(a) FROM t", 1 },
+		{ "SELECT count(*), sum(a), min(k), max(k) FROM t", 1 },
+		{ "SELECT a, count(*) FROM t GROUP BY a", 1 },
+		{ "SELECT a FROM t GROUP BY a", 1 },
+		{ "SELECT b, count(*), sum(a) FROM t GROUP BY b", 1 },
+		{ "SELECT a, count(*) FROM t WHERE a > 4 GROUP BY a", 1 },
+		{ "SELECT count(DISTINCT a) FROM t", 0 },           /* DISTINCT agg: fallback */
+		{ "SELECT a, count(*) FROM t GROUP BY a HAVING count(*) > 1", 0 }, /* HAVING */
+
 		{ "SELECT k FROM t WHERE a = 'x'", 0 },             /* INT col vs text lit: affinity */
 		{ "SELECT k FROM t WHERE b = 5", 0 },               /* TEXT col vs int lit: affinity */
 		{ "SELECT k FROM t WHERE b = '5'", 1 },             /* TEXT col vs text lit: safe */
