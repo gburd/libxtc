@@ -372,33 +372,33 @@ test-sqlrec: test_sqlrec
 	./test_sqlrec
 
 # ---- vectorized executor V0: recognizer + fallback + differential oracle ----
-test_vexec: test_vexec.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c sqlite3.o
+test_vexec: test_vexec.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
 	$(CC) $(CFLAGS) -o $@ test_vexec.c vexec.c sql_parse_drv.c sql_ast.c \
-		sql_parse_gen.c sqlite3.o $(LDFLAGS)
+		sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-vexec: test_vexec
 	./test_vexec
 
 # ---- vectorized executor V2: morsel-parallel + differential/scaling ----
-test_vexec_par: test_vexec_par.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c sqlite3.o
+test_vexec_par: test_vexec_par.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
 	$(CC) $(CFLAGS) -o $@ test_vexec_par.c vexec.c sql_parse_drv.c sql_ast.c \
-		sql_parse_gen.c sqlite3.o $(LDFLAGS)
+		sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-vexec-par: test_vexec_par
 	./test_vexec_par
 
 # ---- vectorized executor V4: ORDER BY / LIMIT positional differential ----
-test_vexec_ord: test_vexec_ord.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c sqlite3.o
+test_vexec_ord: test_vexec_ord.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
 	$(CC) $(CFLAGS) -o $@ test_vexec_ord.c vexec.c sql_parse_drv.c sql_ast.c \
-		sql_parse_gen.c sqlite3.o $(LDFLAGS)
+		sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-vexec-ord: test_vexec_ord
 	./test_vexec_ord
 
 # ---- vectorized executor V5: INNER hash join differential ----
-test_vexec_join: test_vexec_join.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c sqlite3.o
+test_vexec_join: test_vexec_join.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
 	$(CC) $(CFLAGS) -o $@ test_vexec_join.c vexec.c sql_parse_drv.c sql_ast.c \
-		sql_parse_gen.c sqlite3.o $(LDFLAGS)
+		sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
 test-vexec-join: test_vexec_join
 	./test_vexec_join
