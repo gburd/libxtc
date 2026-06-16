@@ -189,7 +189,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-sql-ast test-sqlrec test-vexec test-vexec-par test-vexec-ord test-vexec-join test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-sql-parse test-sql-ast test-sqlrec test-vexec test-vexec-par test-vexec-ord test-vexec-join test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -348,6 +348,13 @@ test_xstore: test_xstore.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlit
 
 test-xstore: test_xstore
 	./test_xstore
+
+# ---- storage-native scan (xstore_scan_*) vs the VDBE under MVCC ----
+test_xstore_scan: test_xstore_scan.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_xstore_scan.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-xstore-scan: test_xstore_scan
+	./test_xstore_scan
 
 # ---- Lime SQL parser: differential AST oracle vs the reference engine ----
 test_sql_ast: test_sql_ast.c sql_parse_drv.c sql_ast.c sql_parse_gen.c sqlite3.o

@@ -1275,6 +1275,108 @@ xs_advance(xstore_cursor_t *c)
 	bt_cursor_park(c->btc);            /* release the latch before returning */
 }
 
+/* ---- storage-native scan (public; see xstore.h) ------------------ *
+ *
+ * Drives the same xs_advance visibility loop as the vtab cursor, but
+ * standalone: no SQLite connection, no vtab base, no txn context.  The
+ * executor opens one of these per worker over a disjoint rowid range. */
+struct xstore_scan {
+	xstore_cursor_t c;
+	int             done;      /* sticky end-of-scan */
+};
+
+xstore_scan_t *
+xstore_scan_open(bt_t *bt, const char *table, uint64_t snap,
+                 int64_t lo, int has_lo, int64_t hi, int has_hi)
+{
+	xstore_scan_t *s;
+	uint32_t tid;
+	if (bt == NULL || table == NULL) return NULL;
+	tid = xs_cat_lookup(bt, table);
+	if (tid == 0) return NULL;             /* unknown table */
+	s = (xstore_scan_t *)calloc(1, sizeof *s);
+	if (s == NULL) return NULL;
+	s->c.bt = bt;
+	s->c.tableid = tid;
+	s->c.snap = snap ? snap : atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	s->c.lo = lo; s->c.has_lo = has_lo ? 1 : 0;
+	s->c.hi = hi; s->c.has_hi = has_hi ? 1 : 0;
+	s->c.have_last = 0;
+	s->c.eof = 0;
+	s->c.btc = NULL;
+	return s;
+}
+
+int
+xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
+                 const uint8_t **rec, int *reclen)
+{
+	if (s == NULL) return -1;
+	if (s->done) return 0;
+	s->c.eof = 0;
+	xs_advance(&s->c);
+	if (s->c.eof) { s->done = 1; return 0; }   /* end of scan (sticky) */
+	if (rowid) *rowid = s->c.rowid;
+	if (rec) *rec = s->c.val;
+	if (reclen) *reclen = (int)s->c.vlen;
+	return 1;
+}
+
+void
+xstore_scan_close(xstore_scan_t *s)
+{
+	if (s == NULL) return;
+	if (s->c.btc != NULL) bt_cursor_close(s->c.btc);
+	free(s);
+}
+
+/* Decode payload column `idx` (0-based, i.e. the non-key columns) of a
+ * record produced by the scan into a typed value.  Returns the type
+ * (one of XSTORE_C_*); for TEXT/BLOB the p / n outs point into rec (valid for
+ * rec's lifetime).  An out-of-range idx reads as NULL. */
+int
+xstore_rec_col(const uint8_t *rec, int reclen, int idx,
+               int64_t *iout, double *rout, const uint8_t **pout, int *nout)
+{
+	int off = 0, i, ncol;
+	if (rec == NULL || reclen < 1) return XSTORE_C_NULL;
+	ncol = rec[off++];
+	for (i = 0; i < ncol; i++) {
+		uint8_t t;
+		if (off >= reclen) break;
+		t = rec[off++];
+		if (t == 0) {
+			if (i == idx) return XSTORE_C_NULL;
+		} else if (t == 1) {
+			int64_t x = 0; int b;
+			if (off + 8 > reclen) break;
+			for (b = 0; b < 8; b++) x |= (int64_t)rec[off + b] << (8 * b);
+			off += 8;
+			if (i == idx) { if (iout) *iout = x; return XSTORE_C_INT; }
+		} else if (t == 2) {
+			uint64_t bits = 0; double d; int b;
+			if (off + 8 > reclen) break;
+			for (b = 0; b < 8; b++) bits |= (uint64_t)rec[off + b] << (8 * b);
+			off += 8; memcpy(&d, &bits, 8);
+			if (i == idx) { if (rout) *rout = d; return XSTORE_C_REAL; }
+		} else {
+			uint32_t n;
+			if (off + 4 > reclen) break;
+			n = (uint32_t)rec[off] | ((uint32_t)rec[off+1] << 8) |
+			    ((uint32_t)rec[off+2] << 16) | ((uint32_t)rec[off+3] << 24);
+			off += 4;
+			if (off + (int)n > reclen) break;
+			if (i == idx) {
+				if (pout) *pout = rec + off;
+				if (nout) *nout = (int)n;
+				return (t == 3) ? XSTORE_C_TEXT : XSTORE_C_BLOB;
+			}
+			off += (int)n;
+		}
+	}
+	return XSTORE_C_NULL;   /* idx beyond the record */
+}
+
 static int
 xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
     int argc, xsql_value **argv)
