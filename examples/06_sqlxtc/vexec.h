@@ -110,6 +110,19 @@ typedef struct vx_result vx_result_t;
 int vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
                     vx_result_t **res, char **errmsg);
 
+/* Unified dispatcher: the committed vexec entry point for a query.  It
+ * recognizes the query once, then routes it:
+ *   - a parallelizable single-table scan/aggregation at n_workers > 1
+ *     runs on the morsel-parallel storage scan;
+ *   - any other recognized plan (ordered, limited, joined, or one
+ *     worker) is collected from the serial vectorized path;
+ *   - an unrecognized query returns 0 so the caller runs the VDBE.
+ * Returns 1 with *res owned by the caller (vx_result_free), 0 to fall
+ * back to the VDBE, or <0 on error.
+ */
+int vx_run(sqlite3 *db, const char *sql, int n_workers,
+           vx_result_t **res, char **errmsg);
+
 int            vx_result_nrow(const vx_result_t *r);
 int            vx_result_ncol(const vx_result_t *r);
 vx_type_t      vx_result_type(const vx_result_t *r, int row, int col);

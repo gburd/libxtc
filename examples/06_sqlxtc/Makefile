@@ -189,7 +189,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-sql-ast test-sqlrec test-vexec test-vexec-par test-vexec-ord test-vexec-join test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-sql-parse test-sql-ast test-sqlrec test-vexec test-vexec-par test-vexec-ord test-vexec-join test-vexec-run test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -395,6 +395,14 @@ test_vexec_ord: test_vexec_ord.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen
 test-vexec-ord: test_vexec_ord
 	./test_vexec_ord
 
+# ---- vectorized executor: unified dispatcher (vx_run) ----
+test_vexec_run: test_vexec_run.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -o $@ test_vexec_run.c vexec.c sql_parse_drv.c sql_ast.c \
+		sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-vexec-run: test_vexec_run
+	./test_vexec_run
+
 # ---- vectorized executor V5: INNER hash join differential ----
 test_vexec_join: test_vexec_join.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
 	$(CC) $(CFLAGS) -o $@ test_vexec_join.c vexec.c sql_parse_drv.c sql_ast.c \
@@ -573,4 +581,4 @@ test-sql-parse: ../../test/sqlxtc/test_sql_parse
         sql_parse.o $(LIME_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< sql_parse.o $(LIME_OBJ)
 
-.PHONY: test-quack test-sql-parse test-sql-ast test-sqlrec test-vexec test-vexec-par test-vexec-ord test-vexec-join
+.PHONY: test-quack test-sql-parse test-sql-ast test-sqlrec test-vexec test-vexec-par test-vexec-ord test-vexec-join test-vexec-run
