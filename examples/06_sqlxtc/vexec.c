@@ -117,6 +117,61 @@ typedef struct vx_expr {
 	int           nargs;
 } vx_expr_t;
 
+/* ---- aggregation (V3) -------------------------------------------- */
+
+enum vx_agg_kind {
+	VXA_COUNT_STAR = 1,   /* count(*) */
+	VXA_COUNT,            /* count(expr): non-NULL inputs */
+	VXA_SUM,              /* sum(expr): NULL if all inputs NULL */
+	VXA_TOTAL,            /* total(expr): 0.0 if no rows; always REAL */
+	VXA_AVG,              /* avg(expr): sum/count over non-NULL, REAL */
+	VXA_MIN, VXA_MAX      /* min/max(expr): ignore NULLs */
+};
+
+/* A running accumulator for one aggregate within one group. */
+typedef struct vx_acc {
+	int64_t   cnt;        /* count of non-NULL inputs (all kinds) */
+	int       seen;       /* 1 if any non-NULL input seen (min/max/sum) */
+	int       is_real;    /* SUM/TOTAL/AVG: accumulator went real */
+	int64_t   isum;       /* integer running sum */
+	double    rsum;       /* real running sum */
+	vx_cell_t ext;        /* MIN/MAX current extreme (when seen) */
+} vx_acc_t;
+
+/* A column of the select list under aggregation: either a GROUP BY key
+ * expression (output verbatim) or an aggregate over an input expr. */
+typedef struct vx_outcol {
+	int            is_agg;
+	enum vx_agg_kind kind;   /* if is_agg */
+	vx_expr_t     *arg;      /* aggregate input expr (NULL for count(*)) */
+	vx_expr_t     *key;      /* group-key expr (if !is_agg) */
+} vx_outcol_t;
+
+typedef struct vx_aggplan {
+	int          ngrp;       /* number of GROUP BY key expressions */
+	vx_expr_t  **grp;        /* ngrp key expressions */
+	int          nout;       /* output columns */
+	vx_outcol_t *out;        /* nout output column descriptors */
+	int          nagg;       /* number of aggregate output columns */
+} vx_aggplan_t;
+
+/* A hash-table entry: a group, its key cells, and its accumulators. */
+typedef struct vx_grp {
+	struct vx_grp *next;     /* bucket chain */
+	uint64_t       hash;
+	vx_cell_t     *keys;     /* ngrp key values (bytes in the ht arena) */
+	vx_acc_t      *accs;     /* nagg accumulators */
+} vx_grp_t;
+
+typedef struct vx_htab {
+	vx_grp_t   **buckets;
+	int          nbucket;
+	int          ngroup;
+	int          ngrp_key;   /* keys per group */
+	int          nagg;       /* accumulators per group */
+	struct vx_arena_blk *arena;   /* group nodes + key bytes */
+} vx_htab_t;
+
 /* ---- the vexec statement ----------------------------------------- */
 
 struct vx_stmt {
@@ -125,8 +180,10 @@ struct vx_stmt {
 	int           nsrc_col;
 
 	int           nout;
-	vx_expr_t   **proj;         /* nout projection expressions */
+	vx_expr_t   **proj;         /* nout projection expressions (non-agg path) */
 	vx_expr_t    *filter;       /* WHERE expression, or NULL */
+
+	vx_aggplan_t *agg;          /* non-NULL => aggregating statement (V3) */
 
 	struct vx_arena_blk *plan_arena;   /* expr tree + literal bytes */
 
@@ -143,6 +200,10 @@ struct vx_stmt {
 	vx_chunk_t   *chunk;
 	int           cur;
 	int           done;
+
+	/* Aggregation execution state (agg path only). */
+	vx_htab_t     ht;           /* drained groups */
+	int           ht_built;     /* 1 once the source has been drained */
 };
 
 /* ---- recognizer: column affinity (SQLite rules, three buckets) --- */
@@ -262,6 +323,29 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 	return VX_AFF_BLOB;
 }
 
+/* Case-insensitive exact match of a name slice against a NUL keyword. */
+static int
+name_is(const sql_str_t *name, const char *kw)
+{
+	size_t ln = strlen(kw), k;
+	if ((size_t)name->len != ln) return 0;
+	for (k = 0; k < ln; k++) {
+		char x = name->p[k];
+		if (x >= 'A' && x <= 'Z') x += 32;
+		if (x != kw[k]) return 0;
+	}
+	return 1;
+}
+
+/* Is `name` one of the aggregate functions V3 recognizes? */
+static int
+is_agg_name(const sql_str_t *name)
+{
+	return name_is(name, "count") || name_is(name, "sum") ||
+	       name_is(name, "total") || name_is(name, "avg") ||
+	       name_is(name, "min") || name_is(name, "max");
+}
+
 static enum vx_func
 func_of(const sql_str_t *name, int *nargs_ok, int nargs)
 {
@@ -315,7 +399,6 @@ tok_to_binop(int tok, enum vx_op *out)
 }
 
 static vx_expr_t *compile_expr(struct vx_compiler *c, const sql_expr_t *e);
-
 /* Walk an AST expression collecting referenced base-column NAMES into
  * nv (so the source SELECT can list them) and rejecting any construct
  * the V1 compiler does not support -- WITHOUT applying the affinity
@@ -791,6 +874,215 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 	}
 }
 
+/* ---- aggregation engine (V3) ------------------------------------- */
+
+/* Cell hash + equality for GROUP BY keys.  Two NULLs group together;
+ * INT and REAL with the same numeric value group together (SQLite
+ * groups 1 and 1.0); TEXT/BLOB compare by bytes. */
+static uint64_t
+cell_hash(const vx_cell_t *c)
+{
+	uint64_t h = 1469598103934665603ULL;   /* FNV-1a */
+	const uint8_t *p; uint32_t n, i;
+	double d;
+	switch (c->type) {
+	case VX_NULL: return 0x9e3779b97f4a7c15ULL;
+	case VX_INT:  d = (double)c->i; goto num;
+	case VX_REAL: d = c->r; goto num;
+	default:
+		p = c->bytes; n = c->nbytes;
+		for (i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+		return h ^ (c->type == VX_TEXT ? 0x7777ULL : 0x4242ULL);
+	}
+num:
+	{
+		uint64_t bits; memcpy(&bits, &d, 8);
+		return bits * 0x9e3779b97f4a7c15ULL + 0x1234567ULL;
+	}
+}
+
+static int
+key_eq(const vx_cell_t *a, const vx_cell_t *b)
+{
+	if (a->type == VX_NULL || b->type == VX_NULL)
+		return a->type == VX_NULL && b->type == VX_NULL;
+	if ((a->type == VX_INT || a->type == VX_REAL) &&
+	    (b->type == VX_INT || b->type == VX_REAL)) {
+		double x = (a->type == VX_INT) ? (double)a->i : a->r;
+		double y = (b->type == VX_INT) ? (double)b->i : b->r;
+		return x == y;
+	}
+	if (a->type != b->type) return 0;
+	return a->nbytes == b->nbytes &&
+	       (a->nbytes == 0 || memcmp(a->bytes, b->bytes, a->nbytes) == 0);
+}
+
+static int
+htab_init(vx_htab_t *h, int ngrp_key, int nagg)
+{
+	memset(h, 0, sizeof *h);
+	h->nbucket = 1024;
+	h->ngrp_key = ngrp_key;
+	h->nagg = nagg;
+	h->buckets = (vx_grp_t **)calloc((size_t)h->nbucket, sizeof(vx_grp_t *));
+	return h->buckets ? 0 : -1;
+}
+
+static void
+htab_free(vx_htab_t *h)
+{
+	if (h == NULL) return;
+	arena_free(h->arena);
+	free(h->buckets);
+	h->buckets = NULL; h->arena = NULL;
+}
+
+/* Copy a cell into the htab arena (so TEXT/BLOB bytes outlive the row). */
+static int
+cell_dup(struct vx_arena_blk **arena, const vx_cell_t *src, vx_cell_t *dst)
+{
+	*dst = *src;
+	if ((src->type == VX_TEXT || src->type == VX_BLOB) && src->nbytes) {
+		uint8_t *p = (uint8_t *)arena_alloc(arena, (size_t)src->nbytes + 1);
+		if (p == NULL) return -1;
+		memcpy(p, src->bytes, src->nbytes); p[src->nbytes] = '\0';
+		dst->bytes = p;
+	}
+	return 0;
+}
+
+/* Find or create the group for key cells `keys` (ngrp_key of them). */
+static vx_grp_t *
+htab_group(vx_htab_t *h, const vx_cell_t *keys)
+{
+	uint64_t hv = 1469598103934665603ULL;
+	int k;
+	uint32_t b;
+	vx_grp_t *g;
+	for (k = 0; k < h->ngrp_key; k++)
+		hv ^= cell_hash(&keys[k]) * (uint64_t)(k + 1) * 0x100000001b3ULL;
+	b = (uint32_t)(hv % (uint64_t)h->nbucket);
+	for (g = h->buckets[b]; g; g = g->next) {
+		if (g->hash != hv) continue;
+		for (k = 0; k < h->ngrp_key; k++)
+			if (!key_eq(&g->keys[k], &keys[k])) break;
+		if (k == h->ngrp_key) return g;
+	}
+	/* New group. */
+	g = (vx_grp_t *)arena_alloc(&h->arena, sizeof *g);
+	if (g == NULL) return NULL;
+	g->hash = hv;
+	g->keys = (vx_cell_t *)arena_alloc(&h->arena,
+	    sizeof(vx_cell_t) * (size_t)(h->ngrp_key > 0 ? h->ngrp_key : 1));
+	g->accs = (vx_acc_t *)arena_alloc(&h->arena,
+	    sizeof(vx_acc_t) * (size_t)(h->nagg > 0 ? h->nagg : 1));
+	if ((h->ngrp_key && g->keys == NULL) || (h->nagg && g->accs == NULL))
+		return NULL;
+	for (k = 0; k < h->ngrp_key; k++)
+		if (cell_dup(&h->arena, &keys[k], &g->keys[k]) != 0) return NULL;
+	for (k = 0; k < h->nagg; k++) memset(&g->accs[k], 0, sizeof(vx_acc_t));
+	g->next = h->buckets[b];
+	h->buckets[b] = g;
+	h->ngroup++;
+	return g;
+}
+
+/* Fold one input value into an accumulator. */
+static void
+acc_step(vx_acc_t *a, enum vx_agg_kind kind, const vx_cell_t *v,
+         struct vx_arena_blk **arena)
+{
+	if (kind == VXA_COUNT_STAR) { a->cnt++; return; }
+	if (v->type == VX_NULL) return;        /* all others ignore NULL inputs */
+	a->cnt++;
+	switch (kind) {
+	case VXA_COUNT:
+		break;
+	case VXA_SUM: case VXA_TOTAL: case VXA_AVG:
+		if (v->type == VX_REAL) {
+			if (!a->is_real) { a->rsum = (double)a->isum; a->is_real = 1; }
+			a->rsum += v->r;
+		} else if (a->is_real) {
+			a->rsum += (double)v->i;
+		} else {
+			a->isum += v->i;
+		}
+		a->seen = 1;
+		break;
+	case VXA_MIN: case VXA_MAX:
+		if (!a->seen) {
+			(void)cell_dup(arena, v, &a->ext); a->seen = 1;
+		} else {
+			int c = cmp_vals(v, &a->ext);
+			if ((kind == VXA_MIN && c < 0) || (kind == VXA_MAX && c > 0))
+				(void)cell_dup(arena, v, &a->ext);
+		}
+		break;
+	default: break;
+	}
+}
+
+/* Merge accumulator `s` (from another worker) into `d`. */
+static void
+acc_merge(vx_acc_t *d, const vx_acc_t *s, enum vx_agg_kind kind,
+          struct vx_arena_blk **arena)
+{
+	if (kind == VXA_COUNT_STAR || kind == VXA_COUNT) { d->cnt += s->cnt; return; }
+	if (!s->seen) return;
+	d->cnt += s->cnt;
+	switch (kind) {
+	case VXA_SUM: case VXA_TOTAL: case VXA_AVG: {
+		double sv = s->is_real ? s->rsum : (double)s->isum;
+		if (s->is_real || d->is_real) {
+			if (!d->is_real) { d->rsum = (double)d->isum; d->is_real = 1; }
+			d->rsum += sv;
+		} else {
+			d->isum += s->isum;
+		}
+		d->seen = 1;
+		break;
+	}
+	case VXA_MIN: case VXA_MAX:
+		if (!d->seen) { (void)cell_dup(arena, &s->ext, &d->ext); d->seen = 1; }
+		else {
+			int c = cmp_vals(&s->ext, &d->ext);
+			if ((kind == VXA_MIN && c < 0) || (kind == VXA_MAX && c > 0))
+				(void)cell_dup(arena, &s->ext, &d->ext);
+		}
+		break;
+	default: break;
+	}
+}
+
+/* Final value of an accumulator. */
+static void
+acc_final(const vx_acc_t *a, enum vx_agg_kind kind, vx_cell_t *out)
+{
+	memset(out, 0, sizeof *out);
+	switch (kind) {
+	case VXA_COUNT_STAR: case VXA_COUNT:
+		out->type = VX_INT; out->i = a->cnt; return;
+	case VXA_TOTAL:
+		out->type = VX_REAL;
+		out->r = a->is_real ? a->rsum : (double)a->isum;
+		return;
+	case VXA_SUM:
+		if (!a->seen) { out->type = VX_NULL; return; }   /* all-NULL -> NULL */
+		if (a->is_real) { out->type = VX_REAL; out->r = a->rsum; }
+		else { out->type = VX_INT; out->i = a->isum; }
+		return;
+	case VXA_AVG:
+		if (a->cnt == 0) { out->type = VX_NULL; return; }
+		out->type = VX_REAL;
+		out->r = (a->is_real ? a->rsum : (double)a->isum) / (double)a->cnt;
+		return;
+	case VXA_MIN: case VXA_MAX:
+		if (!a->seen) { out->type = VX_NULL; return; }
+		*out = a->ext; return;
+	default: out->type = VX_NULL; return;
+	}
+}
+
 /* ---- recognizer + plan build ------------------------------------- */
 
 static void
@@ -801,6 +1093,10 @@ chunk_free(vx_chunk_t *c)
 	free(c->cells);
 	free(c);
 }
+
+static int vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast,
+                              const sql_select_t *sel, const char *tabbuf,
+                              vx_stmt_t **out, char **errmsg);
 
 int
 vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
@@ -828,9 +1124,11 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	sel = root->u.select;
 	if (sel == NULL) goto fallback;
 
-	/* P1/P2: no compound/CTE/DISTINCT/GROUP/HAVING/ORDER/LIMIT/OFFSET. */
+	/* Common gates for P1/P2/P3: no compound/CTE/DISTINCT/HAVING/
+	 * ORDER/LIMIT/OFFSET.  GROUP BY is allowed only on the aggregation
+	 * path (handled by vx_try_prepare_agg). */
 	if (sel->with || sel->setop != SX_SET_NONE || sel->distinct ||
-	    sel->group || sel->having || sel->order || sel->limit || sel->offset)
+	    sel->having || sel->order || sel->limit || sel->offset)
 		goto fallback;
 
 	/* FROM exactly one base table. */
@@ -839,6 +1137,23 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	if (src->table.len == 0 || src->table.len >= sizeof tabbuf) goto fallback;
 	memcpy(tabbuf, src->table.p, src->table.len);
 	tabbuf[src->table.len] = '\0';
+
+	/* Aggregation (P3): a GROUP BY, or any select item that is an
+	 * aggregate call.  Routed to the dedicated builder. */
+	{
+		int has_agg = (sel->group != NULL);
+		for (it = sel->cols ? sel->cols->head : NULL; it && !has_agg; it = it->next) {
+			const sql_expr_t *e = it->expr;
+			if (e && e->op == SX_E_FUNC && is_agg_name(&e->name[0]))
+				has_agg = 1;
+		}
+		if (has_agg) {
+			/* Hand off the AST (still alive) to the agg builder, which
+			 * destroys it before returning. */
+			return vx_try_prepare_agg(db, ast, sel, tabbuf, out, errmsg);
+		}
+	}
+	if (sel->group) goto fallback;   /* defensive: GROUP only on agg path */
 
 	/* Projection: either a single "*" (expand to all table columns) or a
 	 * list of scalar expressions.  Detect "*" up front. */
@@ -986,6 +1301,228 @@ fallback:
 	return rc;
 }
 
+/* ---- aggregation plan builder (P3) ------------------------------- *
+ *
+ * Validates and compiles SELECT [keys,] agg(expr)... FROM t [WHERE ...]
+ * [GROUP BY keys].  Conservative: each select item is either a GROUP BY
+ * key expression (which must appear in GROUP BY, compared structurally
+ * to a key) or a single non-DISTINCT aggregate over a scalar argument;
+ * no expressions over aggregates, no HAVING (gated earlier).  Anything
+ * else falls back. */
+
+/* Map an aggregate function name + arg shape to a kind, or 0. */
+static enum vx_agg_kind
+agg_kind_of(const sql_expr_t *e)
+{
+	int star = (e->ival & 2) != 0;
+	int nargs = 0;
+	const sql_exprlist_item_t *it;
+	for (it = e->list ? e->list->head : NULL; it; it = it->next) nargs++;
+	if (e->ival & 1) return 0;                 /* DISTINCT aggregate: fallback */
+	if (name_is(&e->name[0], "count")) {
+		if (star) return VXA_COUNT_STAR;
+		return nargs == 1 ? VXA_COUNT : 0;
+	}
+	if (star) return 0;                        /* sum(*) etc. invalid */
+	if (nargs != 1) return 0;
+	if (name_is(&e->name[0], "sum"))   return VXA_SUM;
+	if (name_is(&e->name[0], "total")) return VXA_TOTAL;
+	if (name_is(&e->name[0], "avg"))   return VXA_AVG;
+	if (name_is(&e->name[0], "min"))   return VXA_MIN;
+	if (name_is(&e->name[0], "max"))   return VXA_MAX;
+	return 0;
+}
+
+/* Structural equality of two AST scalar expressions (so a select-list
+ * key can be matched to a GROUP BY key).  Conservative: only the shapes
+ * the key compiler supports. */
+static int
+expr_same(const sql_expr_t *a, const sql_expr_t *b)
+{
+	if (a == NULL || b == NULL) return a == b;
+	if (a->op != b->op) return 0;
+	switch (a->op) {
+	case SX_E_COLUMN:
+		if (a->nname != b->nname) return 0;
+		{ int k; for (k = 0; k < a->nname; k++)
+			if (a->name[k].len != b->name[k].len ||
+			    memcmp(a->name[k].p, b->name[k].p, a->name[k].len) != 0)
+				return 0;
+		  return 1; }
+	case SX_E_NUMBER: case SX_E_STRING:
+		return a->lit.len == b->lit.len &&
+		       memcmp(a->lit.p, b->lit.p, a->lit.len) == 0;
+	case SX_E_UNARY:
+		return a->op2 == b->op2 && expr_same(a->a, b->a);
+	case SX_E_BINARY:
+		return a->op2 == b->op2 && expr_same(a->a, b->a) && expr_same(a->b, b->b);
+	default: return 0;
+	}
+}
+
+static int
+vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
+                   const char *tabbuf, vx_stmt_t **out, char **errmsg)
+{
+	struct vx_stmt *st = NULL;
+	struct namevec nv;
+	struct vx_compiler comp;
+	vx_aggplan_t *ap = NULL;
+	const sql_exprlist_item_t *it;
+	char *srcsql = NULL;
+	int nout = 0, ngrp = 0, nagg = 0, i, k, rc = 0;
+
+	if (errmsg) *errmsg = NULL;
+
+	/* Count output columns and GROUP BY keys. */
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
+		if (it->expr == NULL || it->expr->op == SX_E_STAR) {
+			/* count(*) is SX_E_FUNC with ival bit1, not SX_E_STAR; a bare
+			 * '*' in an aggregate query is not supported. */
+			goto fallback;
+		}
+		nout++;
+	}
+	if (nout == 0 || nout > 32) goto fallback;
+	for (it = sel->group ? sel->group->head : NULL; it; it = it->next) ngrp++;
+	if (ngrp > 16) goto fallback;
+
+	st = (struct vx_stmt *)calloc(1, sizeof *st);
+	if (!st) goto oom;
+	st->db = db;
+	st->cur = -1;
+	ap = (vx_aggplan_t *)calloc(1, sizeof *ap);
+	if (!ap) goto oom;
+	ap->nout = nout;
+	ap->ngrp = ngrp;
+	ap->out = (vx_outcol_t *)calloc((size_t)nout, sizeof(vx_outcol_t));
+	ap->grp = (vx_expr_t **)calloc((size_t)(ngrp > 0 ? ngrp : 1), sizeof(vx_expr_t *));
+	if (!ap->out || !ap->grp) goto oom;
+	st->agg = ap;
+
+	memset(&nv, 0, sizeof nv);
+	comp.st = st; comp.nv = &nv; comp.fail = 0;
+
+	/* Pass 1: collect referenced base columns (group keys, agg args,
+	 * WHERE), and classify each select item as key or aggregate. */
+	for (it = sel->group ? sel->group->head : NULL; it; it = it->next)
+		if (collect_columns(&nv, it->expr) != 0) goto fallback;
+	{
+		int oi = 0;
+		for (it = sel->cols->head; it; it = it->next, oi++) {
+			const sql_expr_t *e = it->expr;
+			if (e->op == SX_E_FUNC && is_agg_name(&e->name[0])) {
+				enum vx_agg_kind kk = agg_kind_of(e);
+				if (kk == 0) goto fallback;
+				ap->out[oi].is_agg = 1;
+				ap->out[oi].kind = kk;
+				if (kk != VXA_COUNT_STAR) {
+					const sql_expr_t *arg = e->list->head->expr;
+					if (collect_columns(&nv, arg) != 0) goto fallback;
+				}
+				nagg++;
+			} else {
+				/* A grouping-key output: must match a GROUP BY key. */
+				const sql_exprlist_item_t *g;
+				int matched = 0;
+				for (g = sel->group ? sel->group->head : NULL; g; g = g->next)
+					if (expr_same(e, g->expr)) { matched = 1; break; }
+				if (!matched) goto fallback;   /* bare column not in GROUP BY */
+				ap->out[oi].is_agg = 0;
+				if (collect_columns(&nv, e) != 0) goto fallback;
+			}
+		}
+	}
+	ap->nagg = nagg;
+	if (sel->where && collect_columns(&nv, sel->where) != 0) goto fallback;
+
+	/* Build the source SELECT over the collected base columns.  A pure
+	 * count(*) references no columns; select _rowid_ so there is a row
+	 * to count (and so the source has at least one column). */
+	{
+		char cols[2100]; int off = 0;
+		int nocols = (nv.n == 0);
+		if (nv.n > 32) goto fallback;
+		if (nocols) {
+			off = snprintf(cols, sizeof cols, "_rowid_");
+		} else {
+			for (k = 0; k < nv.n; k++) {
+				int r = snprintf(cols + off, sizeof cols - (size_t)off,
+				                 "%s%s", k ? "," : "", nv.names[k]);
+				if (r < 0 || (size_t)(off + r) >= sizeof cols) goto fallback;
+				off += r;
+			}
+		}
+		{
+			size_t n = strlen("SELECT  FROM ") + (size_t)off + strlen(tabbuf) + 1;
+			srcsql = (char *)malloc(n);
+			if (!srcsql) goto oom;
+			snprintf(srcsql, n, "SELECT %s FROM %s", cols, tabbuf);
+		}
+		snprintf(st->table, sizeof st->table, "%s", tabbuf);
+		snprintf(st->srccols, sizeof st->srccols, "%s", cols);
+	}
+
+	if (sqlite3_prepare_v2(db, srcsql, -1, &st->src, 0) != SQLITE_OK)
+		goto fallback;
+	st->nsrc_col = sqlite3_column_count(st->src);
+	/* With no referenced columns the source has the synthetic _rowid_
+	 * column (nsrc_col == 1, nv.n == 0); otherwise the counts match. */
+	if (st->nsrc_col > 32) goto fallback;
+	if (nv.n != 0 && st->nsrc_col != nv.n) goto fallback;
+
+	for (i = 0; i < st->nsrc_col; i++)
+		nv.aff[i] = vx_affinity(sqlite3_column_decltype(st->src, i));
+
+	/* Pass 2: compile group-key expressions, aggregate-arg expressions,
+	 * and the filter, with the affinity gate active. */
+	comp.fail = 0;
+	{
+		int gi = 0;
+		for (it = sel->group ? sel->group->head : NULL; it; it = it->next, gi++) {
+			ap->grp[gi] = compile_expr(&comp, it->expr);
+			if (comp.fail) goto fallback;
+		}
+	}
+	{
+		int oi = 0;
+		for (it = sel->cols->head; it; it = it->next, oi++) {
+			if (ap->out[oi].is_agg) {
+				if (ap->out[oi].kind != VXA_COUNT_STAR) {
+					ap->out[oi].arg = compile_expr(&comp, it->expr->list->head->expr);
+					if (comp.fail) goto fallback;
+				}
+			} else {
+				ap->out[oi].key = compile_expr(&comp, it->expr);
+				if (comp.fail) goto fallback;
+			}
+		}
+	}
+	if (sel->where) {
+		st->filter = compile_expr(&comp, sel->where);
+		if (comp.fail) goto fallback;
+	}
+
+	st->nout = nout;
+	st->srcrow = (vx_cell_t *)calloc((size_t)(st->nsrc_col > 0 ? st->nsrc_col : 1),
+	                                 sizeof(vx_cell_t));
+	if (!st->srcrow) goto oom;
+
+	free(srcsql);
+	sql_arena_destroy(ast);
+	*out = st;
+	return 1;
+
+oom:
+	rc = -1;
+fallback:
+	if (srcsql) free(srcsql);
+	if (ast) sql_arena_destroy(ast);
+	if (st) { free(ap ? ap->out : NULL); free(ap ? ap->grp : NULL); free(ap); st->agg = NULL; vx_finalize(st); }
+	else free(ap);
+	return rc;
+}
+
 /* ---- execution --------------------------------------------------- */
 
 static void
@@ -1056,14 +1593,123 @@ next_chunk(struct vx_stmt *st, int *done)
 	return c;
 }
 
+/* Drain the source into the hash table and build one result chunk with
+ * one row per group.  Used by the single-threaded agg path (vx_step).
+ * Returns 0 on success, -1 on error. */
+static int
+agg_materialize(struct vx_stmt *st)
+{
+	vx_aggplan_t *ap = st->agg;
+	vx_chunk_t *c;
+	struct vx_arena_blk *rowarena = NULL;
+	int j;
+	vx_grp_t *g;
+	int b;
+
+	if (htab_init(&st->ht, ap->ngrp, ap->nagg) != 0) return -1;
+
+	/* Drain. */
+	for (;;) {
+		int step = sqlite3_step(st->src);
+		vx_cell_t keys[16];
+		vx_grp_t *grp;
+		int ai;
+		if (step == SQLITE_DONE) break;
+		if (step != SQLITE_ROW) { arena_free(rowarena); return -1; }
+
+		for (j = 0; j < st->nsrc_col; j++)
+			read_src_cell(st->src, j, &st->srcrow[j], &rowarena);
+
+		if (st->filter != NULL &&
+		    eval_bool(st, st->filter, st->srcrow, &rowarena) != 1)
+			continue;
+
+		for (j = 0; j < ap->ngrp; j++)
+			eval(st, ap->grp[j], st->srcrow, &rowarena, &keys[j]);
+		grp = htab_group(&st->ht, keys);
+		if (grp == NULL) { arena_free(rowarena); return -1; }
+
+		ai = 0;
+		for (j = 0; j < ap->nout; j++) {
+			if (!ap->out[j].is_agg) continue;
+			if (ap->out[j].kind == VXA_COUNT_STAR) {
+				acc_step(&grp->accs[ai], VXA_COUNT_STAR, NULL, &st->ht.arena);
+			} else {
+				vx_cell_t v;
+				eval(st, ap->out[j].arg, st->srcrow, &rowarena, &v);
+				acc_step(&grp->accs[ai], ap->out[j].kind, &v, &st->ht.arena);
+			}
+			ai++;
+		}
+	}
+	arena_free(rowarena);
+
+	/* A no-GROUP-BY aggregate over zero rows still yields one row (the
+	 * empty-group aggregates: count=0, sum=NULL, etc.).  Create it. */
+	if (ap->ngrp == 0 && st->ht.ngroup == 0) {
+		vx_cell_t nokeys[1];
+		memset(nokeys, 0, sizeof nokeys);
+		if (htab_group(&st->ht, nokeys) == NULL) return -1;
+	}
+
+	/* Materialize one chunk row per group. */
+	c = (vx_chunk_t *)calloc(1, sizeof *c);
+	if (c == NULL) return -1;
+	c->ncol = ap->nout;
+	c->cap = st->ht.ngroup > 0 ? st->ht.ngroup : 1;
+	c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap *
+	                               (size_t)(c->ncol > 0 ? c->ncol : 1));
+	if (c->cells == NULL) { free(c); return -1; }
+
+	for (b = 0; b < st->ht.nbucket; b++) {
+		for (g = st->ht.buckets[b]; g; g = g->next) {
+			vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
+			int ki = 0, ai = 0;
+			for (j = 0; j < ap->nout; j++) {
+				if (ap->out[j].is_agg) {
+					vx_cell_t fv;
+					acc_final(&g->accs[ai], ap->out[j].kind, &fv);
+					/* TEXT/BLOB extremes live in the ht arena, which
+					 * outlives the chunk (freed in vx_finalize after the
+					 * chunk); copy into the chunk arena for safety. */
+					if ((fv.type == VX_TEXT || fv.type == VX_BLOB) && fv.nbytes) {
+						(void)cell_dup(&c->arena, &fv, &dst[j]);
+					} else dst[j] = fv;
+					ai++;
+				} else {
+					vx_cell_t kv = g->keys[ki++];
+					if ((kv.type == VX_TEXT || kv.type == VX_BLOB) && kv.nbytes)
+						(void)cell_dup(&c->arena, &kv, &dst[j]);
+					else dst[j] = kv;
+				}
+			}
+			c->nrow++;
+		}
+	}
+	st->chunk = c;
+	st->cur = -1;
+	st->ht_built = 1;
+	return 0;
+}
+
 int
 vx_step(vx_stmt_t *st)
 {
 	if (st == NULL) return SQLITE_MISUSE;
 
+	/* Aggregation: build all groups on first step, then walk the chunk. */
+	if (st->agg != NULL && !st->ht_built) {
+		if (agg_materialize(st) != 0) return SQLITE_ERROR;
+	}
+
 	if (st->chunk != NULL && st->cur + 1 < st->chunk->nrow) {
 		st->cur++;
 		return SQLITE_ROW;
+	}
+	if (st->agg != NULL) {
+		/* All group rows are in the one chunk; once consumed, done. */
+		if (st->chunk != NULL && st->cur + 1 >= st->chunk->nrow)
+			return SQLITE_DONE;
 	}
 	for (;;) {
 		int done = 0;
@@ -1129,6 +1775,8 @@ vx_finalize(vx_stmt_t *st)
 	if (st->src) sqlite3_finalize(st->src);
 	if (st->chunk) chunk_free(st->chunk);
 	if (st->plan_arena) arena_free(st->plan_arena);
+	htab_free(&st->ht);
+	if (st->agg) { free(st->agg->out); free(st->agg->grp); free(st->agg); }
 	free(st->proj);
 	free(st->srcrow);
 	free(st);
@@ -1181,7 +1829,8 @@ struct vx_par {
 	int64_t      hi;              /* one past the max rowid */
 	int64_t      morsel;          /* rowids per morsel */
 	int          nworkers;
-	struct vx_result *parts;      /* nworkers result buffers */
+	struct vx_result *parts;      /* nworkers result buffers (non-agg) */
+	vx_htab_t   *wht;             /* nworkers per-worker hash tables (agg) */
 	_Atomic int  error;           /* any worker failed */
 };
 
@@ -1219,6 +1868,7 @@ par_worker(xtc_task_t *self, void *user)
 	w.nout = par->plan->nout;
 	w.proj = par->plan->proj;
 	w.filter = par->plan->filter;
+	w.agg = par->plan->agg;   /* borrowed (immutable plan) */
 	w.nsrc_col = sqlite3_column_count(src);
 	srcrow = (vx_cell_t *)calloc((size_t)(w.nsrc_col > 0 ? w.nsrc_col : 1),
 	                             sizeof(vx_cell_t));
@@ -1249,7 +1899,28 @@ par_worker(xtc_task_t *self, void *user)
 			    eval_bool(&w, w.filter, w.srcrow, &rowarena) != 1)
 				continue;
 
-			{
+			if (w.agg != NULL) {
+				/* Accumulate into this worker's hash table. */
+				vx_aggplan_t *ap = w.agg;
+				vx_cell_t keys[16]; vx_grp_t *grp; int ai = 0;
+				for (j = 0; j < ap->ngrp; j++)
+					eval(&w, ap->grp[j], w.srcrow, &rowarena, &keys[j]);
+				grp = htab_group(&par->wht[widx], keys);
+				if (grp == NULL) { atomic_store(&par->error, 1); goto done; }
+				for (j = 0; j < ap->nout; j++) {
+					if (!ap->out[j].is_agg) continue;
+					if (ap->out[j].kind == VXA_COUNT_STAR)
+						acc_step(&grp->accs[ai], VXA_COUNT_STAR, NULL,
+						         &par->wht[widx].arena);
+					else {
+						vx_cell_t v;
+						eval(&w, ap->out[j].arg, w.srcrow, &rowarena, &v);
+						acc_step(&grp->accs[ai], ap->out[j].kind, &v,
+						         &par->wht[widx].arena);
+					}
+					ai++;
+				}
+			} else {
 				vx_cell_t out[32];
 				for (j = 0; j < w.nout; j++)
 					eval(&w, w.proj[j], w.srcrow, &rowarena, &out[j]);
@@ -1257,11 +1928,6 @@ par_worker(xtc_task_t *self, void *user)
 					atomic_store(&par->error, 1); goto done;
 				}
 			}
-			/* The row arena grows across a morsel; reset it between
-			 * morsels would invalidate result_push copies -- but
-			 * result_push already copied bytes into the result arena,
-			 * so the row arena is transient.  Reset per morsel to bound
-			 * memory. */
 		}
 		arena_free(rowarena); rowarena = NULL;
 	}
@@ -1334,6 +2000,15 @@ vx_run_parallel(const char *db_path, const char *sql, int n_workers,
 	par.parts = (struct vx_result *)calloc((size_t)n_workers, sizeof(struct vx_result));
 	if (par.parts == NULL) { rc = -1; goto cleanup; }
 	for (i = 0; i < n_workers; i++) par.parts[i].ncol = plan->nout;
+	/* Aggregating plan: a per-worker hash table accumulates partials. */
+	if (plan->agg != NULL) {
+		par.wht = (vx_htab_t *)calloc((size_t)n_workers, sizeof(vx_htab_t));
+		if (par.wht == NULL) { rc = -1; goto cleanup; }
+		for (i = 0; i < n_workers; i++)
+			if (htab_init(&par.wht[i], plan->agg->ngrp, plan->agg->nagg) != 0) {
+				rc = -1; goto cleanup;
+			}
+	}
 
 	/* Run one worker per loop on a libxtc executor. */
 	if (xtc_exec_init(&exec, n_workers) != XTC_OK) { rc = -1; goto cleanup; }
@@ -1351,13 +2026,56 @@ vx_run_parallel(const char *db_path, const char *sql, int n_workers,
 
 	if (atomic_load(&par.error)) { rc = -1; goto cleanup; }
 
-	/* Combine: concatenate per-worker buffers (multiset). */
-	for (i = 0; i < n_workers; i++) {
-		int k;
-		for (k = 0; k < par.parts[i].nrow; k++) {
-			const vx_cell_t *row =
-			    &par.parts[i].cells[(size_t)k * (size_t)out->ncol];
-			if (result_push(out, row) != 0) { rc = -1; goto cleanup; }
+	if (plan->agg != NULL) {
+		/* Combine the per-worker hash tables into worker 0's, merging
+		 * accumulators group by group, then emit one final row each. */
+		vx_aggplan_t *ap = plan->agg;
+		vx_htab_t *m = &par.wht[0];
+		int b;
+		for (i = 1; i < n_workers; i++) {
+			for (b = 0; b < par.wht[i].nbucket; b++) {
+				vx_grp_t *g;
+				for (g = par.wht[i].buckets[b]; g; g = g->next) {
+					vx_grp_t *d = htab_group(m, g->keys);
+					int ai = 0, j;
+					if (d == NULL) { rc = -1; goto cleanup; }
+					for (j = 0; j < ap->nout; j++) {
+						if (!ap->out[j].is_agg) continue;
+						acc_merge(&d->accs[ai], &g->accs[ai],
+						          ap->out[j].kind, &m->arena);
+						ai++;
+					}
+				}
+			}
+		}
+		/* Empty input with no GROUP BY still yields one row. */
+		if (ap->ngrp == 0 && m->ngroup == 0) {
+			vx_cell_t nokeys[1]; memset(nokeys, 0, sizeof nokeys);
+			if (htab_group(m, nokeys) == NULL) { rc = -1; goto cleanup; }
+		}
+		for (b = 0; b < m->nbucket; b++) {
+			vx_grp_t *g;
+			for (g = m->buckets[b]; g; g = g->next) {
+				vx_cell_t row[32];
+				int ki = 0, ai = 0, j;
+				for (j = 0; j < ap->nout; j++) {
+					if (ap->out[j].is_agg)
+						acc_final(&g->accs[ai++], ap->out[j].kind, &row[j]);
+					else
+						row[j] = g->keys[ki++];
+				}
+				if (result_push(out, row) != 0) { rc = -1; goto cleanup; }
+			}
+		}
+	} else {
+		/* Combine: concatenate per-worker buffers (multiset). */
+		for (i = 0; i < n_workers; i++) {
+			int k;
+			for (k = 0; k < par.parts[i].nrow; k++) {
+				const vx_cell_t *row =
+				    &par.parts[i].cells[(size_t)k * (size_t)out->ncol];
+				if (result_push(out, row) != 0) { rc = -1; goto cleanup; }
+			}
 		}
 	}
 
@@ -1374,6 +2092,10 @@ cleanup:
 		free(par.parts);
 	}
 	free(args);
+	if (par.wht) {
+		for (i = 0; i < n_workers; i++) htab_free(&par.wht[i]);
+		free(par.wht);
+	}
 	if (out) { arena_free(out->arena); free(out->cells); free(out); }
 	if (plan) vx_finalize(plan);
 	if (coord) sqlite3_close(coord);

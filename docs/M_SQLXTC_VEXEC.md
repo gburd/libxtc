@@ -1,6 +1,6 @@
 # M_SQLXTC_VEXEC -- a vectorized execution engine to replace the VDBE
 
-Status: V0-V2 LANDED (expression evaluator, morsel parallelism); columnar vectors + V3-V6 planned.  This document scopes a
+Status: V0-V3 LANDED (expression evaluator, morsel parallelism, hash aggregation); V4-V6 planned.  sqlxtc is a ROW store -- the DuckDB columnar vector layout is deliberately not adopted; only the batched push-based morsel-parallel execution model is.  This document scopes a
 from-scratch execution engine for sqlxtc -- a DuckDB-style vectorized,
 push-based, morsel-parallel executor built on the libxtc concurrency
 model -- that replaces SQLite's VDBE (the bytecode interpreter,
@@ -19,7 +19,7 @@ The VDBE is a scalar, tuple-at-a-time bytecode interpreter: one row
 flows through the opcode program at a time, every operator is a branch
 in a giant switch, and a single statement runs on a single thread.
 That is the opposite of what libxtc is for.  DuckDB showed the modern
-shape: columnar, vectorized (a "chunk" of ~2048 values per operator
+shape: row batches (a "chunk" of up to ~2048 rows per operator call so
 call so the per-tuple interpreter overhead amortizes and the inner
 loops auto-vectorize), push-based pipelines, and morsel-driven
 parallelism (the scan is sliced into morsels handed to a pool of
@@ -79,19 +79,27 @@ until implemented):
       vectorized engine adds), starting with INNER, then LEFT
   P6. + subqueries / set operations as the recognizer learns them
 
-## The vectorized data model
+## The data model -- a ROW store, batched
 
-  - A DataChunk is a small set of columns, each a Vector of up to
-    VEXEC_VECTOR_SIZE (2048) values, plus a selection vector (the
-    subset of rows still live after filters, so filters never compact
-    until necessary).  This is the DuckDB chunk model.
-  - Column types map from SQLite's storage classes (INTEGER, REAL,
-    TEXT, BLOB, NULL); TEXT/BLOB vectors hold (ptr, len) with the
-    bytes owned by an arena per chunk.  NULLs are a validity bitmask
-    per vector (no sentinel values).
-  - Vectors support the flat, constant, and dictionary encodings
-    DuckDB uses, so a constant or a low-cardinality column costs O(1)
-    per chunk.
+sqlxtc is and remains a ROW store; vexec is NOT columnar.  The DuckDB
+shape that this engine adopts is the batched, push-based, morsel-
+parallel *execution* model -- it deliberately does NOT adopt DuckDB's
+columnar vector layout, which would be the wrong representation for a
+row-store engine whose storage, MVCC version chains, and B-tree all
+operate on whole rows.
+
+  - A DataChunk is a batch of up to VEXEC_VECTOR_SIZE (2048) ROWS,
+    stored row-major: each row is a contiguous run of cells.  Batching
+    amortizes per-call overhead and keeps the operator interface
+    chunk-at-a-time, but the unit inside a chunk is a row, not a column
+    vector.
+  - A cell carries its own storage class (INTEGER, REAL, TEXT, BLOB,
+    NULL), so NULLs and mixed-type columns are represented directly
+    (no separate per-column validity bitmask, no dictionary encoding --
+    those are columnar constructs and are explicitly out of scope).
+    TEXT/BLOB cells hold (ptr, len) into a per-chunk arena.
+  - Filters drop non-matching rows as the chunk is built (the chunk
+    holds only surviving rows); there is no selection vector.
 
 ## Push-based pipelines, morsel-parallel on libxtc
 
@@ -170,9 +178,8 @@ still pass, so the oracle also guards that the fallback is never wrong.
       no-coercion gate, after the affinity = '5' vs INTEGER column bug
       was caught by the differential oracle).  16 P1 queries match the
       VDBE, 11 fall back; clean under ASan+UBSan.
-  V1  Vectorized expression evaluator (P2) + the chunk/vector/selection
-      model with NULL bitmasks and dictionary encoding.
-      EXPRESSION EVALUATOR DONE (vexec.c / test_vexec.c).  Projection
+  V1  Vectorized expression evaluator (P2).
+      DONE (vexec.c / test_vexec.c).  Projection
       and WHERE are compiled from the Lime AST into a vexec expression
       tree and evaluated per row: column refs, INTEGER/REAL/TEXT/NULL
       literals, arithmetic (+ - * / % with SQLite int/real promotion,
@@ -182,13 +189,9 @@ still pass, so the oracle also guards that the fallback is never wrong.
       gate is enforced per operator (a comparison or arithmetic that
       would coerce types falls the whole query back).  32 P1/P2 queries
       match the VDBE incl. arithmetic/NULL/div-by-zero edge cases;
-      clean under ASan+UBSan.  REMAINING for V1: the columnar vector
-      representation -- chunks are currently row-major cells (each cell
-      self-describes its type, so NULLs are represented but not yet as
-      a separate validity bitmask, and there is no dictionary encoding).
-      That is a representation/perf change with no observable-result
-      effect, deferred to a focused follow-up before V2's parallelism
-      makes the per-vector layout matter.
+      clean under ASan+UBSan.  (The DuckDB columnar vector layout is
+      deliberately NOT adopted -- sqlxtc is a row store; chunks are
+      row-major batches.  See "The data model" above.)
   V2  Morsel parallelism on the executor: P1/P2 scans run on N worker
       procs with an atomic morsel cursor; I/O overlap via xtc_aio.
       Gate: results unchanged, throughput scales with loops.
@@ -205,12 +208,27 @@ still pass, so the oracle also guards that the fallback is never wrong.
       VDBE running on 4 loops; clean under ASan+UBSan on the parallel
       path (the race surface is just the atomic morsel cursor and the
       immutable shared plan -- each worker owns its connection, row
-      scratch, and result buffer).  NOTE: V2 uses a blocking step per
-      worker (one worker per loop, so the loop is never shared); the
-      xtc_aio fiber-overlap of page I/O within a worker is a
-      refinement deferred with the columnar model.
+      scratch, and result buffer).
   V3  Hash aggregation + GROUP BY (P3), per-worker partial aggregates +
       Combine.
+      DONE (vexec.c / test_vexec.c + test_vexec_par.c).  Recognizes
+      SELECT [keys,] agg(expr)... FROM t [WHERE ...] [GROUP BY keys]
+      for the aggregates count(*), count(x), sum, total, avg, min, max
+      (no DISTINCT aggregate, no HAVING -- those fall back).  Each
+      select item is either a GROUP BY key (matched structurally to a
+      GROUP BY expression) or one aggregate over a scalar argument; a
+      group-key output that is not in GROUP BY falls back.  Aggregation
+      is a hash table keyed by the group values (NULLs group together;
+      1 and 1.0 group together) with one accumulator per aggregate;
+      acc_step folds an input, acc_final emits the result with SQLite
+      semantics (count never NULL; sum of all-NULL is NULL but total is
+      0.0; avg/min/max ignore NULLs; integer sum promotes to real on a
+      real input).  Single-threaded: drain into one hash table, emit a
+      row per group.  Parallel: each worker builds its OWN hash table
+      over its morsels, then Combine merges them (acc_merge) into one
+      and emits -- the worker-local-state-then-merge pattern.  43
+      single-threaded queries and 11 parallel queries match the VDBE;
+      clean under ASan+UBSan with leak detection on both paths.
   V4  Vectorized sort + LIMIT (P4); ORDER BY honored positionally.
   V5  Hash join (P5), build/probe as pipeline boundary, parallel build.
   V6  Widen recognizer coverage (subqueries, set ops); measure vs VDBE

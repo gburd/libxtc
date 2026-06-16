@@ -55,9 +55,10 @@ typedef struct vx_cell {
 	uint32_t  nbytes;
 } vx_cell_t;
 
-/* A DataChunk: ncol columns by up to VEXEC_VECTOR_SIZE rows, stored
- * row-major in V0 for simplicity (V1 switches to columnar vectors with
- * a selection vector + NULL bitmask). */
+/* A DataChunk: a batch of up to VEXEC_VECTOR_SIZE rows, stored
+ * row-major (ncol cells per row).  sqlxtc is a row store, so chunks
+ * are row batches, not column vectors -- there is no selection vector
+ * or NULL bitmask; each cell self-describes its storage class. */
 typedef struct vx_chunk vx_chunk_t;
 
 /* ---- the vexec statement ----------------------------------------- */

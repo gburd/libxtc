@@ -177,7 +177,13 @@ main(void)
 		"SELECT a+1, k FROM t WHERE a >= 100 AND a < 200",
 		"SELECT abs(a), length(b) FROM t WHERE a IS NOT NULL",
 		"SELECT k, b FROM t WHERE b <> 'row-1'",
-		"SELECT * FROM t WHERE a > 9990"
+		"SELECT * FROM t WHERE a > 9990",
+		/* aggregation across workers (V3 x V2) */
+		"SELECT count(*) FROM t",
+		"SELECT count(a), sum(a), min(a), max(a) FROM t",
+		"SELECT total(a), avg(a) FROM t WHERE a IS NOT NULL",
+		"SELECT b, count(*), sum(a) FROM t GROUP BY b",
+		"SELECT b, count(*) FROM t WHERE a > 5000 GROUP BY b"
 	};
 	int n = (int)(sizeof corpus / sizeof corpus[0]);
 
