@@ -1,6 +1,6 @@
 # M_SQLXTC_VEXEC -- a vectorized execution engine to replace the VDBE
 
-Status: V0-V5 LANDED (expression evaluator, morsel parallelism, hash aggregation, sort+LIMIT, INNER hash join); V6 + LEFT/parallel-join planned.  sqlxtc is a ROW store -- the DuckDB columnar vector layout is deliberately not adopted; only the batched push-based morsel-parallel execution model is.  This document scopes a
+Status: V0-V5 landed; V6 benchmark done (parallel aggregation scales ~2x; vexec is VDBE-sourced so serially slower -- see bench/sqlxtc/VEXEC_RESULTS.md). Remaining: storage-native source, subqueries/set-ops, LEFT/parallel join.  sqlxtc is a ROW store -- the DuckDB columnar vector layout is deliberately not adopted; only the batched push-based morsel-parallel execution model is.  This document scopes a
 from-scratch execution engine for sqlxtc -- a DuckDB-style vectorized,
 push-based, morsel-parallel executor built on the libxtc concurrency
 model -- that replaces SQLite's VDBE (the bytecode interpreter,
@@ -284,6 +284,23 @@ still pass, so the oracle also guards that the fallback is never wrong.
   V6  Widen recognizer coverage (subqueries, set ops); measure vs VDBE
       on an analytic workload (the scan/agg/join queries where
       vectorization + parallelism should show multiples).
+      BENCHMARK DONE (bench/sqlxtc/vexec_bench.c + run_vexec.sh +
+      VEXEC_RESULTS.md).  The same scan / filter / full-aggregate /
+      GROUP BY / join queries run through the VDBE, single-threaded
+      vexec, and parallel vexec at 1/2/4/8 workers, each checked for
+      result correctness before timing.  Finding: GROUP BY aggregation
+      SCALES with workers (measured ~1.2x at 2w -> ~2x at 8w on 500k
+      rows), the real V2/V3 parallel win.  But vexec is SLOWER than the
+      VDBE single-threaded across the board, because its row source is
+      the reference engine's own cursor (a stepped sqlite3_stmt) -- it
+      pays the full VDBE row cost PLUS its own materialization, so it
+      cannot be faster serially and parallelism only claws back the
+      surcharge except where the extra aggregation work parallelizes.
+      The honest fix (the across-the-board win): read rows directly
+      from the xstore B-tree, bypassing the VDBE row machinery -- see
+      VEXEC_RESULTS.md.  REMAINING for V6: recognizer widening for
+      subqueries and set operations (UNION etc.), and LEFT join /
+      parallel join from V5.
 
 ## Risks and honest unknowns
 
