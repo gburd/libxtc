@@ -314,8 +314,8 @@ table_list(R) ::= table_list(L) TK_COMMA table_ref(T). {
     if (L == NULL) { R = T; }
     else { sql_src_t *s = L; while (s->next) s = s->next; s->next = T; R = L; }
 }
-table_list(R) ::= table_list(L) join_op(J) table_ref(T) join_constraint. {
-    if (T) T->join = (sql_join_type_t)J;
+table_list(R) ::= table_list(L) join_op(J) table_ref(T) join_constraint(JC). {
+    if (T) { T->join = (sql_join_type_t)J; T->on = JC; }
     if (L == NULL) { R = T; }
     else { sql_src_t *s = L; while (s->next) s = s->next; s->next = T; R = L; }
 }
@@ -332,9 +332,10 @@ join_op(R) ::= TK_CROSS TK_JOIN.              { R = SX_J_CROSS; }
 join_op(R) ::= TK_NATURAL TK_JOIN.            { R = SX_J_NATURAL; }
 join_op(R) ::= TK_NATURAL TK_LEFT TK_JOIN.    { R = SX_J_NATURAL; }
 
-join_constraint ::= .
-join_constraint ::= TK_ON expr.
-join_constraint ::= TK_USING TK_LP id_list TK_RP.
+%type join_constraint {sql_expr_t *}
+join_constraint(R) ::= .                              { R = NULL; }
+join_constraint(R) ::= TK_ON expr(E).                 { R = E; }
+join_constraint(R) ::= TK_USING TK_LP id_list TK_RP.  { R = NULL; }
 
 table_ref(R) ::= TK_ID(T). {
     R = AST(pstate, sql_src_t); if (R) R->table = tok_str(T);

@@ -1,6 +1,6 @@
 # M_SQLXTC_VEXEC -- a vectorized execution engine to replace the VDBE
 
-Status: V0-V4 LANDED (expression evaluator, morsel parallelism, hash aggregation, sort+LIMIT); V5-V6 planned.  sqlxtc is a ROW store -- the DuckDB columnar vector layout is deliberately not adopted; only the batched push-based morsel-parallel execution model is.  This document scopes a
+Status: V0-V5 LANDED (expression evaluator, morsel parallelism, hash aggregation, sort+LIMIT, INNER hash join); V6 + LEFT/parallel-join planned.  sqlxtc is a ROW store -- the DuckDB columnar vector layout is deliberately not adopted; only the batched push-based morsel-parallel execution model is.  This document scopes a
 from-scratch execution engine for sqlxtc -- a DuckDB-style vectorized,
 push-based, morsel-parallel executor built on the libxtc concurrency
 model -- that replaces SQLite's VDBE (the bytecode interpreter,
@@ -250,6 +250,37 @@ still pass, so the oracle also guards that the fallback is never wrong.
       merge-sort combine is a later refinement), so an ordered query
       runs on the single-threaded sorting path.
   V5  Hash join (P5), build/probe as pipeline boundary, parallel build.
+      DONE for single-threaded INNER equi-join (vexec.c /
+      test_vexec_join.c).  Recognizes SELECT <exprs> FROM A [x] JOIN
+      B [y] ON a.col = b.col [WHERE ...] -- exactly two base tables, an
+      equi-join on one column from each side; LEFT, non-equi ON, three
+      or more tables, SELECT *, GROUP BY/ORDER BY/aggregates over a
+      join all fall back.  Execution is a hash join: build a hash table
+      on the first table keyed by its join column (a key -> row list,
+      since a key can match many build rows; a NULL key never matches),
+      then scan the probe side and, for each probe row, emit a combined
+      row [build cols | probe cols] per matching build row, over which
+      the projection and WHERE are evaluated.  Column references in
+      proj/filter/ON resolve across both sides by qualifier (alias or
+      table name) + column name into the combined row; an ambiguous
+      unqualified name falls back.  7 join shapes match the VDBE as a
+      multiset (PK joins, a multi-match non-indexed join, expression
+      projection over the join, WHERE over the join, self-join, a
+      function on a joined column); clean under ASan+UBSan.
+
+      DEVIATION from the opcode-recognition plan above: V5 recognizes
+      the LOGICAL equi-join from the Lime AST, not the opcode program.
+      The doc's rationale for opcode matching was to honor the
+      planner's join order and index choices -- but vexec deliberately
+      executes the join as a hash join (a different physical operator),
+      so there is no planner physical choice to preserve, only the
+      logical join to reproduce; the result multiset is identical
+      regardless of join order or nested-loop-vs-hash, which the
+      differential oracle confirms.  Matching SQLite's many nested-loop
+      / index-seek / coroutine opcode shapes just to replace them would
+      be fragile for no correctness gain.  (LEFT join, and a parallel
+      build/probe across worker procs -- the "parallel build" above --
+      remain; the single-threaded hash join is the V5 core.)
   V6  Widen recognizer coverage (subqueries, set ops); measure vs VDBE
       on an analytic workload (the scan/agg/join queries where
       vectorization + parallelism should show multiples).

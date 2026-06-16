@@ -172,6 +172,27 @@ typedef struct vx_htab {
 	struct vx_arena_blk *arena;   /* group nodes + key bytes */
 } vx_htab_t;
 
+/* ---- join (V5) --------------------------------------------------- *
+ *
+ * An INNER equi-join of two base tables.  vexec builds a hash table on
+ * the BUILD side keyed by its join column, then scans the PROBE side
+ * and emits a combined row [build cols | probe cols] for each match,
+ * over which the projection and WHERE filter are evaluated.  Column
+ * references in proj/filter index the combined row. */
+typedef struct vx_joinplan {
+	char       build_sql[1100];   /* SELECT <build cols> FROM <build table> */
+	char       probe_sql[1100];   /* SELECT <probe cols> FROM <probe table> */
+	int        build_ncol;        /* columns the build source returns */
+	int        probe_ncol;
+	int        build_key;         /* build-side join col (index within build) */
+	int        probe_key;         /* probe-side join col (index within probe) */
+	/* In the combined row, build columns come first (offset 0), then
+	 * probe columns (offset build_ncol).  proj/filter use those indices. */
+} vx_joinplan_t;
+
+typedef struct vx_jht vx_jht_t;   /* join build hash table (defined later) */
+typedef struct vx_jrow vx_jrow_t;
+
 /* ---- the vexec statement ----------------------------------------- */
 
 struct vx_stmt {
@@ -184,6 +205,7 @@ struct vx_stmt {
 	vx_expr_t    *filter;       /* WHERE expression, or NULL */
 
 	vx_aggplan_t *agg;          /* non-NULL => aggregating statement (V3) */
+	vx_joinplan_t *join;        /* non-NULL => two-table hash join (V5) */
 
 	/* ORDER BY / LIMIT (V4).  norder > 0 => ordered.  Each order key is
 	 * either an expression over the SOURCE columns (order_key[i]), or a
@@ -218,6 +240,14 @@ struct vx_stmt {
 
 	/* Ordered execution: rows are materialized + sorted on first step. */
 	int           ordered_built;
+
+	/* Join execution state (join path only). */
+	vx_jht_t     *jht;          /* build-side hash table: key -> row list */
+	sqlite3_stmt *probe;        /* probe-side cursor */
+	vx_jrow_t    *match;        /* current build match chain for the probe row */
+	vx_cell_t    *probe_cells;  /* current probe row's cells */
+	struct vx_arena_blk *probe_arena;  /* bytes for the current probe row */
+	int           join_built;   /* 1 once build side hashed + probe opened */
 };
 
 /* ---- recognizer: column affinity (SQLite rules, three buckets) --- */
@@ -290,11 +320,65 @@ nv_add(struct namevec *nv, const sql_str_t *s)
  * VX_AFF_BLOB (unknown -- a blob/none-affinity column).  This class is
  * conservative; when in doubt the compiler fails (fallback). */
 
+/* Join compilation context (V5): two sides, each a table + optional
+ * alias contributing a set of source columns to a COMBINED row that is
+ * [side0 cols | side1 cols].  A column reference resolves to a combined
+ * index by matching its qualifier (alias/table) and name against the
+ * sides.  When jc is NULL the compiler is single-table (nv). */
+struct vx_joinctx {
+	char      tab[2][64];     /* base table name per side */
+	char      alias[2][64];   /* alias per side ("" if none) */
+	struct namevec col[2];    /* columns collected per side */
+	int       base[2];        /* combined-row offset where each side starts */
+};
+
 struct vx_compiler {
 	struct vx_stmt *st;
 	struct namevec *nv;
+	struct vx_joinctx *jc;    /* non-NULL on the join path */
 	int             fail;
 };
+
+/* Slice == C-string (case-sensitive for identifiers, as SQLite folds
+ * case only for keywords; column-name matching here is exact). */
+static int
+str_eq_cstr(const sql_str_t *s, const char *cs)
+{
+	size_t n = strlen(cs);
+	return (size_t)s->len == n && memcmp(s->p, cs, n) == 0;
+}
+
+/* Resolve a column reference to a combined-row index in a join context.
+ * Handles `col` (unqualified -- must be unambiguous) and `q.col` (q is
+ * a table name or alias).  Returns the combined index, or -1 if not
+ * found / ambiguous. */
+static int
+jc_resolve(struct vx_joinctx *jc, const sql_expr_t *e)
+{
+	const sql_str_t *col;
+	const sql_str_t *qual = NULL;
+	int side, j, found = -1;
+
+	if (e->op != SX_E_COLUMN || e->nname < 1 || e->nname > 2) return -1;
+	if (e->nname == 2) { qual = &e->name[0]; col = &e->name[1]; }
+	else col = &e->name[0];
+
+	for (side = 0; side < 2; side++) {
+		if (qual) {
+			/* Qualifier must match this side's alias (if any) else table. */
+			const char *q = jc->alias[side][0] ? jc->alias[side] : jc->tab[side];
+			if (!str_eq_cstr(qual, q)) continue;
+		}
+		for (j = 0; j < jc->col[side].n; j++) {
+			if (str_eq_cstr(col, jc->col[side].names[j])) {
+				int idx = jc->base[side] + j;
+				if (found >= 0) return -1;   /* ambiguous */
+				found = idx;
+			}
+		}
+	}
+	return found;
+}
 
 static vx_expr_t *
 expr_node(struct vx_compiler *c, enum vx_op op)
@@ -316,6 +400,13 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 		if (e->lit.type == VX_TEXT) return VX_AFF_TEXT;
 		return VX_AFF_BLOB;
 	case VXO_COL:
+		if (c->jc != NULL) {
+			/* Combined index -> (side, j) -> that side's affinity. */
+			int idx = e->col;
+			if (idx >= c->jc->base[1])
+				return c->jc->col[1].aff[idx - c->jc->base[1]];
+			return c->jc->col[0].aff[idx - c->jc->base[0]];
+		}
 		return c->nv->aff[e->col];
 	case VXO_NEG: case VXO_BITNOT:
 	case VXO_ADD: case VXO_SUB: case VXO_MUL: case VXO_DIV: case VXO_MOD:
@@ -413,6 +504,8 @@ tok_to_binop(int tok, enum vx_op *out)
 }
 
 static vx_expr_t *compile_expr(struct vx_compiler *c, const sql_expr_t *e);
+static void read_src_cell(sqlite3_stmt *src, int i, vx_cell_t *cell,
+                          struct vx_arena_blk **arena);
 /* Walk an AST expression collecting referenced base-column NAMES into
  * nv (so the source SELECT can list them) and rejecting any construct
  * the V1 compiler does not support -- WITHOUT applying the affinity
@@ -508,8 +601,12 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		vx_expr_t *n;
 		int idx;
 		if (e->nname < 1 || e->nname > 2) { c->fail = 1; return NULL; }
-		cn = &e->name[e->nname - 1];
-		idx = nv_add(c->nv, cn);
+		if (c->jc != NULL) {
+			idx = jc_resolve(c->jc, e);   /* combined-row index */
+		} else {
+			cn = &e->name[e->nname - 1];
+			idx = nv_add(c->nv, cn);
+		}
 		if (idx < 0) { c->fail = 1; return NULL; }
 		n = expr_node(c, VXO_COL);
 		if (n) n->col = idx;
@@ -1137,6 +1234,9 @@ chunk_free(vx_chunk_t *c)
 static int vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast,
                               const sql_select_t *sel, const char *tabbuf,
                               vx_stmt_t **out, char **errmsg);
+static int vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast,
+                               const sql_select_t *sel,
+                               vx_stmt_t **out, char **errmsg);
 
 int
 vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
@@ -1171,9 +1271,18 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	    sel->having)
 		goto fallback;
 
-	/* FROM exactly one base table. */
+	/* FROM: one base table, or exactly two base tables joined (V5). */
 	src = sel->from;
-	if (src == NULL || src->next != NULL || src->subquery != NULL) goto fallback;
+	if (src == NULL) goto fallback;
+	if (src->next != NULL) {
+		/* Two-table INNER equi-join (no GROUP BY / ORDER BY / aggregates
+		 * on the join path yet -- those compose later). */
+		if (src->next->next != NULL) goto fallback;       /* >2 tables */
+		if (sel->group || sel->order || sel->limit || sel->offset)
+			goto fallback;
+		return vx_try_prepare_join(db, ast, sel, out, errmsg);
+	}
+	if (src->subquery != NULL) goto fallback;
 	if (src->table.len == 0 || src->table.len >= sizeof tabbuf) goto fallback;
 	memcpy(tabbuf, src->table.p, src->table.len);
 	tabbuf[src->table.len] = '\0';
@@ -1218,7 +1327,7 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	st->cur = -1;
 
 	memset(&nv, 0, sizeof nv);
-	comp.st = st; comp.nv = &nv; comp.fail = 0;
+	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
 
 	/* Pass 1: collect referenced base columns and reject unsupported
 	 * constructs, WITHOUT the affinity gate (affinities are unknown
@@ -1529,7 +1638,7 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	st->agg = ap;
 
 	memset(&nv, 0, sizeof nv);
-	comp.st = st; comp.nv = &nv; comp.fail = 0;
+	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
 
 	/* Pass 1: collect referenced base columns (group keys, agg args,
 	 * WHERE), and classify each select item as key or aggregate. */
@@ -1648,6 +1757,320 @@ fallback:
 	if (ast) sql_arena_destroy(ast);
 	if (st) { free(ap ? ap->out : NULL); free(ap ? ap->grp : NULL); free(ap); st->agg = NULL; vx_finalize(st); }
 	else free(ap);
+	return rc;
+}
+
+/* ---- join (V5): builder + hash table + execution ----------------- */
+
+/* A build-side row stored in the join hash table: the row's cells plus
+ * the next row sharing the same key (a key can match many rows). */
+struct vx_jrow {
+	struct vx_jrow *next;     /* next build row with the same key */
+	struct vx_jrow *bnext;    /* bucket chain (distinct keys) */
+	uint64_t        hash;
+	vx_cell_t       key;      /* join key value */
+	vx_cell_t      *cells;    /* build_ncol cells */
+};
+
+struct vx_jht {
+	vx_jrow_t **buckets;
+	int         nbucket;
+	struct vx_arena_blk *arena;
+};
+
+/* Find the first build row matching key (a probe), or NULL. */
+static vx_jrow_t *
+jht_find(vx_jht_t *h, const vx_cell_t *key)
+{
+	uint64_t hv = cell_hash(key);
+	uint32_t b = (uint32_t)(hv % (uint64_t)h->nbucket);
+	vx_jrow_t *r;
+	for (r = h->buckets[b]; r; r = r->bnext)
+		if (r->hash == hv && key_eq(&r->key, key)) return r;
+	return NULL;
+}
+
+/* Insert a build row under key (prepending to its key's row list). */
+static int
+jht_insert(vx_jht_t *h, const vx_cell_t *key, const vx_cell_t *cells, int ncol)
+{
+	uint64_t hv = cell_hash(key);
+	uint32_t b = (uint32_t)(hv % (uint64_t)h->nbucket);
+	vx_jrow_t *head = jht_find(h, key);
+	vx_jrow_t *r = (vx_jrow_t *)arena_alloc(&h->arena, sizeof *r);
+	int j;
+	if (r == NULL) return -1;
+	r->hash = hv;
+	if (cell_dup(&h->arena, key, &r->key) != 0) return -1;
+	r->cells = (vx_cell_t *)arena_alloc(&h->arena,
+	    sizeof(vx_cell_t) * (size_t)(ncol > 0 ? ncol : 1));
+	if (r->cells == NULL) return -1;
+	for (j = 0; j < ncol; j++)
+		if (cell_dup(&h->arena, &cells[j], &r->cells[j]) != 0) return -1;
+	if (head != NULL) {
+		/* Same key already present: chain onto its row list. */
+		r->next = head->next; head->next = r;
+		r->bnext = NULL;   /* not a new bucket entry */
+	} else {
+		r->next = NULL;
+		r->bnext = h->buckets[b]; h->buckets[b] = r;
+	}
+	return 0;
+}
+
+/* A plain `q.col` or `col` column reference, else NULL. */
+static const sql_expr_t *
+is_col_ref(const sql_expr_t *e)
+{
+	return (e && e->op == SX_E_COLUMN && e->nname >= 1 && e->nname <= 2) ? e : NULL;
+}
+
+/* Collect referenced columns of an expression into a join context's
+ * per-side namevecs (resolving the qualifier to a side).  Returns 0 if
+ * every column resolves to exactly one side, -1 otherwise.  Mirrors
+ * collect_columns' supported-construct gate. */
+static int
+jc_collect(struct vx_joinctx *jc, const sql_expr_t *e)
+{
+	const sql_exprlist_item_t *it;
+	if (e == NULL) return -1;
+	switch (e->op) {
+	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: return 0;
+	case SX_E_COLUMN: {
+		const sql_str_t *qual = (e->nname == 2) ? &e->name[0] : NULL;
+		const sql_str_t *col = &e->name[e->nname - 1];
+		int side, hit = -1;
+		for (side = 0; side < 2; side++) {
+			if (qual) {
+				const char *q = jc->alias[side][0] ? jc->alias[side] : jc->tab[side];
+				if (!str_eq_cstr(qual, q)) continue;
+			}
+			if (hit >= 0 && !qual) {
+				/* unqualified and could match either side -> add to the
+				 * side that already has it / both; ambiguity is rejected
+				 * at resolve time, so just record on each candidate side. */
+			}
+			if (nv_add(&jc->col[side], col) < 0) return -1;
+			hit = side;
+		}
+		return hit >= 0 ? 0 : -1;
+	}
+	case SX_E_UNARY:
+		if (e->op2 != TK_MINUS && e->op2 != TK_PLUS && e->op2 != TK_NOT) return -1;
+		return jc_collect(jc, e->a);
+	case SX_E_BINARY: {
+		enum vx_op d;
+		if (!tok_to_binop(e->op2, &d)) return -1;
+		if (jc_collect(jc, e->a) != 0) return -1;
+		return jc_collect(jc, e->b);
+	}
+	case SX_E_IS_NULL: return jc_collect(jc, e->a);
+	case SX_E_FUNC: {
+		int na = 0, ok = 0;
+		if (e->ival & 3) return -1;
+		for (it = e->list ? e->list->head : NULL; it; it = it->next) na++;
+		(void)func_of(&e->name[0], &ok, na);
+		if (!ok) return -1;
+		for (it = e->list ? e->list->head : NULL; it; it = it->next)
+			if (jc_collect(jc, it->expr) != 0) return -1;
+		return 0;
+	}
+	default: return -1;
+	}
+}
+
+static int
+vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
+                    vx_stmt_t **out, char **errmsg)
+{
+	struct vx_stmt *st = NULL;
+	struct vx_joinctx jc;
+	struct vx_compiler comp;
+	vx_joinplan_t *jp = NULL;
+	const sql_src_t *s0 = sel->from, *s1 = sel->from->next;
+	const sql_expr_t *on, *lhs, *rhs;
+	const sql_exprlist_item_t *it;
+	sqlite3_stmt *bsrc = NULL, *psrc = NULL;
+	char bcols[1000], pcols[1000];
+	int nproj = 0, i, side, rc = 0, lkey, rkey;
+
+	if (errmsg) *errmsg = NULL;
+
+	/* INNER only for now; ON must be present. */
+	if (s1->join != SX_J_INNER && s1->join != SX_J_NONE && s1->join != SX_J_CROSS)
+		goto fallback;
+	if (s0->subquery || s1->subquery) goto fallback;
+	if (s0->table.len == 0 || s0->table.len >= 64) goto fallback;
+	if (s1->table.len == 0 || s1->table.len >= 64) goto fallback;
+	on = s1->on;
+	if (on == NULL || on->op != SX_E_BINARY || on->op2 != TK_EQ) goto fallback;
+	lhs = is_col_ref(on->a); rhs = is_col_ref(on->b);
+	if (lhs == NULL || rhs == NULL) goto fallback;   /* only col = col */
+
+	memset(&jc, 0, sizeof jc);
+	memcpy(jc.tab[0], s0->table.p, s0->table.len); jc.tab[0][s0->table.len] = '\0';
+	memcpy(jc.tab[1], s1->table.p, s1->table.len); jc.tab[1][s1->table.len] = '\0';
+	if (s0->alias.len && s0->alias.len < 64) { memcpy(jc.alias[0], s0->alias.p, s0->alias.len); jc.alias[0][s0->alias.len] = '\0'; }
+	if (s1->alias.len && s1->alias.len < 64) { memcpy(jc.alias[1], s1->alias.p, s1->alias.len); jc.alias[1][s1->alias.len] = '\0'; }
+
+	/* SELECT * is not supported on the join path (column expansion +
+	 * dedup across two tables); fall back. */
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
+		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
+		if (it->expr->op == SX_E_FUNC && is_agg_name(&it->expr->name[0])) goto fallback;
+		nproj++;
+	}
+	if (nproj == 0 || nproj > 32) goto fallback;
+
+	/* Pass 1: collect referenced columns into per-side namevecs, from
+	 * the projection, the WHERE, and the ON's two columns. */
+	for (it = sel->cols->head; it; it = it->next)
+		if (jc_collect(&jc, it->expr) != 0) goto fallback;
+	if (sel->where && jc_collect(&jc, sel->where) != 0) goto fallback;
+	if (jc_collect(&jc, on->a) != 0) goto fallback;
+	if (jc_collect(&jc, on->b) != 0) goto fallback;
+
+	/* Each side must contribute at least one column and have its join
+	 * key.  Determine which ON column belongs to which side. */
+	{
+		int sa = -1, sb = -1;
+		struct vx_joinctx tmp = jc;   /* jc_resolve works on combined idx; here resolve sides */
+		/* Resolve lhs/rhs to a side by qualifier/name. */
+		for (side = 0; side < 2; side++) {
+			const sql_str_t *q = (lhs->nname == 2) ? &lhs->name[0] : NULL;
+			const char *sq = jc.alias[side][0] ? jc.alias[side] : jc.tab[side];
+			if (q && !str_eq_cstr(q, sq)) continue;
+			{ int j; for (j = 0; j < jc.col[side].n; j++)
+				if (str_eq_cstr(&lhs->name[lhs->nname-1], jc.col[side].names[j])) { sa = side; break; } }
+		}
+		for (side = 0; side < 2; side++) {
+			const sql_str_t *q = (rhs->nname == 2) ? &rhs->name[0] : NULL;
+			const char *sq = jc.alias[side][0] ? jc.alias[side] : jc.tab[side];
+			if (q && !str_eq_cstr(q, sq)) continue;
+			{ int j; for (j = 0; j < jc.col[side].n; j++)
+				if (str_eq_cstr(&rhs->name[rhs->nname-1], jc.col[side].names[j])) { sb = side; break; } }
+		}
+		(void)tmp;
+		if (sa < 0 || sb < 0 || sa == sb) goto fallback;   /* one col per side */
+	}
+	if (jc.col[0].n == 0 || jc.col[1].n == 0) goto fallback;
+
+	/* Build the per-side source SELECTs. */
+	for (side = 0; side < 2; side++) {
+		char *buf = side ? pcols : bcols; int off = 0, j;
+		if (jc.col[side].n > 16) goto fallback;
+		for (j = 0; j < jc.col[side].n; j++) {
+			int r = snprintf(buf + off, 1000 - (size_t)off, "%s%s",
+			                 j ? "," : "", jc.col[side].names[j]);
+			if (r < 0 || (size_t)(off + r) >= 1000) goto fallback;
+			off += r;
+		}
+	}
+
+	st = (struct vx_stmt *)calloc(1, sizeof *st);
+	if (!st) goto oom;
+	st->db = db; st->cur = -1; st->limit = -1;
+	jp = (vx_joinplan_t *)calloc(1, sizeof *jp);
+	if (!jp) goto oom;
+	st->join = jp;
+	st->nout = nproj;
+	st->proj = (vx_expr_t **)calloc((size_t)nproj, sizeof(vx_expr_t *));
+	if (!st->proj) goto oom;
+
+	snprintf(jp->build_sql, sizeof jp->build_sql, "SELECT %s FROM %s", bcols, jc.tab[0]);
+	snprintf(jp->probe_sql, sizeof jp->probe_sql, "SELECT %s FROM %s", pcols, jc.tab[1]);
+
+	/* Prepare both sources to learn column counts + affinities. */
+	if (sqlite3_prepare_v2(db, jp->build_sql, -1, &bsrc, 0) != SQLITE_OK) goto fallback;
+	if (sqlite3_prepare_v2(db, jp->probe_sql, -1, &psrc, 0) != SQLITE_OK) goto fallback;
+	jp->build_ncol = sqlite3_column_count(bsrc);
+	jp->probe_ncol = sqlite3_column_count(psrc);
+	if (jp->build_ncol != jc.col[0].n || jp->probe_ncol != jc.col[1].n) goto fallback;
+	jc.base[0] = 0;
+	jc.base[1] = jp->build_ncol;
+	for (i = 0; i < jp->build_ncol; i++)
+		jc.col[0].aff[i] = vx_affinity(sqlite3_column_decltype(bsrc, i));
+	for (i = 0; i < jp->probe_ncol; i++)
+		jc.col[1].aff[i] = vx_affinity(sqlite3_column_decltype(psrc, i));
+
+	/* The join keys, as combined-row indices, then split per side. */
+	lkey = jc_resolve(&jc, lhs);
+	rkey = jc_resolve(&jc, rhs);
+	if (lkey < 0 || rkey < 0) goto fallback;
+	/* Side 0 (build) key is whichever of lkey/rkey is < base[1]. */
+	if (lkey < jc.base[1]) { jp->build_key = lkey; jp->probe_key = rkey - jc.base[1]; }
+	else                   { jp->build_key = rkey; jp->probe_key = lkey - jc.base[1]; }
+	if (jp->build_key < 0 || jp->build_key >= jp->build_ncol ||
+	    jp->probe_key < 0 || jp->probe_key >= jp->probe_ncol) goto fallback;
+
+	/* Pass 2: compile projection + filter over the combined row. */
+	comp.st = st; comp.nv = NULL; comp.jc = &jc; comp.fail = 0;
+	{
+		int k = 0;
+		for (it = sel->cols->head; it; it = it->next, k++) {
+			st->proj[k] = compile_expr(&comp, it->expr);
+			if (comp.fail) goto fallback;
+		}
+		if (sel->where) {
+			st->filter = compile_expr(&comp, sel->where);
+			if (comp.fail) goto fallback;
+		}
+	}
+
+	sqlite3_finalize(bsrc); bsrc = NULL;
+	sqlite3_finalize(psrc); psrc = NULL;
+
+	/* Combined-row scratch lives in srcrow (build_ncol + probe_ncol). */
+	st->nsrc_col = jp->build_ncol + jp->probe_ncol;
+	st->srcrow = (vx_cell_t *)calloc((size_t)st->nsrc_col, sizeof(vx_cell_t));
+	if (!st->srcrow) goto oom;
+
+	sql_arena_destroy(ast);
+	*out = st;
+	return 1;
+
+oom:
+	rc = -1;
+fallback:
+	if (bsrc) sqlite3_finalize(bsrc);
+	if (psrc) sqlite3_finalize(psrc);
+	if (ast) sql_arena_destroy(ast);
+	if (st) { free(st->join); st->join = NULL; vx_finalize(st); }
+	else free(jp);
+	return rc;
+}
+
+/* Build the hash table from the build side, open the probe cursor. */
+static int
+join_build(struct vx_stmt *st, vx_jht_t *bh)
+{
+	vx_joinplan_t *jp = st->join;
+	sqlite3_stmt *bsrc = NULL;
+	struct vx_arena_blk *tmp = NULL;
+	vx_cell_t rowcells[16];
+	int j, rc = -1;
+
+	memset(bh, 0, sizeof *bh);
+	bh->nbucket = 1024;
+	bh->buckets = (vx_jrow_t **)calloc((size_t)bh->nbucket, sizeof(vx_jrow_t *));
+	if (bh->buckets == NULL) return -1;
+
+	if (sqlite3_prepare_v2(st->db, jp->build_sql, -1, &bsrc, 0) != SQLITE_OK) goto done;
+	for (;;) {
+		int step = sqlite3_step(bsrc);
+		if (step == SQLITE_DONE) break;
+		if (step != SQLITE_ROW) goto done;
+		for (j = 0; j < jp->build_ncol; j++)
+			read_src_cell(bsrc, j, &rowcells[j], &tmp);
+		/* SQLite equi-join: a NULL key never matches, so skip it. */
+		if (rowcells[jp->build_key].type == VX_NULL) continue;
+		if (jht_insert(bh, &rowcells[jp->build_key], rowcells, jp->build_ncol) != 0)
+			goto done;
+	}
+	rc = 0;
+done:
+	arena_free(tmp);
+	if (bsrc) sqlite3_finalize(bsrc);
 	return rc;
 }
 
@@ -1964,10 +2387,89 @@ cleanup:
 	return rc;
 }
 
+/* Produce one chunk of joined rows by probing.  Advances the current
+ * build-match chain, fetching the next probe row when the chain is
+ * exhausted.  *done set at end of the probe input. */
+static vx_chunk_t *
+join_next_chunk(struct vx_stmt *st, int *done)
+{
+	vx_joinplan_t *jp = st->join;
+	vx_chunk_t *c;
+	int j;
+
+	*done = 0;
+	c = (vx_chunk_t *)calloc(1, sizeof *c);
+	if (!c) return NULL;
+	c->ncol = st->nout;
+	c->cap = VEXEC_VECTOR_SIZE;
+	c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap *
+	                               (size_t)(c->ncol > 0 ? c->ncol : 1));
+	if (!c->cells) { free(c); return NULL; }
+
+	while (c->nrow < c->cap) {
+		/* Need a probe row + its matching build chain? */
+		if (st->match == NULL) {
+			int step;
+			vx_cell_t pk;
+			arena_free(st->probe_arena); st->probe_arena = NULL;
+			step = sqlite3_step(st->probe);
+			if (step == SQLITE_DONE) { *done = 1; break; }
+			if (step != SQLITE_ROW) { chunk_free(c); return NULL; }
+			if (st->probe_cells == NULL)
+				st->probe_cells = (vx_cell_t *)calloc((size_t)jp->probe_ncol,
+				                                      sizeof(vx_cell_t));
+			if (st->probe_cells == NULL) { chunk_free(c); return NULL; }
+			for (j = 0; j < jp->probe_ncol; j++)
+				read_src_cell(st->probe, j, &st->probe_cells[j], &st->probe_arena);
+			pk = st->probe_cells[jp->probe_key];
+			if (pk.type == VX_NULL) continue;   /* NULL never matches */
+			st->match = jht_find(st->jht, &pk);
+			if (st->match == NULL) continue;    /* INNER: no match -> skip */
+		}
+		/* Emit the combined row for the current match, then advance. */
+		for (j = 0; j < jp->build_ncol; j++)
+			st->srcrow[j] = st->match->cells[j];
+		for (j = 0; j < jp->probe_ncol; j++)
+			st->srcrow[jp->build_ncol + j] = st->probe_cells[j];
+		st->match = st->match->next;
+
+		if (st->filter != NULL &&
+		    eval_bool(st, st->filter, st->srcrow, &c->arena) != 1)
+			continue;
+		{
+			vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
+			for (j = 0; j < st->nout; j++) {
+				eval(st, st->proj[j], st->srcrow, &c->arena, &dst[j]);
+				/* eval may return a cell pointing into the build (jht,
+				 * statement-lifetime -- safe) or probe arena (reset per
+				 * probe row).  Deep-copy any TEXT/BLOB into the chunk
+				 * arena so it survives the next probe row and chunk reuse. */
+				if ((dst[j].type == VX_TEXT || dst[j].type == VX_BLOB) &&
+				    dst[j].nbytes) {
+					vx_cell_t cp;
+					if (cell_dup(&c->arena, &dst[j], &cp) == 0) dst[j] = cp;
+				}
+			}
+		}
+		c->nrow++;
+	}
+	return c;
+}
+
 int
 vx_step(vx_stmt_t *st)
 {
 	if (st == NULL) return SQLITE_MISUSE;
+
+	/* Join: build the hash table + open the probe cursor on first step. */
+	if (st->join != NULL && !st->join_built) {
+		st->jht = (vx_jht_t *)calloc(1, sizeof *st->jht);
+		if (st->jht == NULL) return SQLITE_ERROR;
+		if (join_build(st, st->jht) != 0) return SQLITE_ERROR;
+		if (sqlite3_prepare_v2(st->db, st->join->probe_sql, -1, &st->probe, 0)
+		    != SQLITE_OK) return SQLITE_ERROR;
+		st->join_built = 1;
+	}
 
 	/* Aggregation: build all groups on first step, then walk the chunk. */
 	if (st->agg != NULL && !st->ht_built) {
@@ -1991,7 +2493,7 @@ vx_step(vx_stmt_t *st)
 		int done = 0;
 		vx_chunk_t *c;
 		if (st->done) return SQLITE_DONE;
-		c = next_chunk(st, &done);
+		c = st->join ? join_next_chunk(st, &done) : next_chunk(st, &done);
 		if (c == NULL) return SQLITE_ERROR;
 		if (st->chunk) chunk_free(st->chunk);
 		st->chunk = c;
@@ -2053,6 +2555,13 @@ vx_finalize(vx_stmt_t *st)
 	if (st->plan_arena) arena_free(st->plan_arena);
 	htab_free(&st->ht);
 	if (st->agg) { free(st->agg->out); free(st->agg->grp); free(st->agg); }
+	if (st->join) {
+		if (st->jht) { arena_free(st->jht->arena); free(st->jht->buckets); free(st->jht); }
+		if (st->probe) sqlite3_finalize(st->probe);
+		arena_free(st->probe_arena);
+		free(st->probe_cells);
+		free(st->join);
+	}
 	free(st->order_key);
 	free(st->order_outcol);
 	free(st->order_desc);
@@ -2250,6 +2759,11 @@ vx_run_parallel(const char *db_path, const char *sql, int n_workers,
 	 * runs it on the single-threaded vexec path (which sorts) or the
 	 * VDBE.  (A parallel merge-sort combine is a later refinement.) */
 	if (plan->norder > 0 || plan->limit >= 0 || plan->offset > 0) {
+		vx_finalize(plan); sqlite3_close(coord); return 0;
+	}
+	/* Joins run on the single-threaded hash-join path (parallel join is a
+	 * later refinement). */
+	if (plan->join != NULL) {
 		vx_finalize(plan); sqlite3_close(coord); return 0;
 	}
 

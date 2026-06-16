@@ -316,7 +316,7 @@ typedef union {
 #undef YYFALLBACK
 #define YYNSTATE             286
 #define YYNRULE              215
-#define YYNRULE_WITH_ACTION  205
+#define YYNRULE_WITH_ACTION  208
 #define YYNTOKEN             108
 #define YY_MAX_SHIFT         285
 #define YY_MIN_SHIFTREDUCE   428
@@ -429,98 +429,98 @@ typedef union {
 #define YY_ACTTAB_COUNT (927)
 static const YYACTIONTYPE yy_action[] = {
  /*     0 */   647,  133,  649,  173,  650,  651,  652,  653,  654,  655,
- /*    10 */   656,  657,  658,  659,  660,  661,   89,  153,  801,  199,
- /*    20 */   795,  208,  649,  173,  650,  651,  652,  653,  654,  655,
- /*    30 */   656,  657,  658,  659,  660,  661,   89,  135,  801,  753,
+ /*    10 */   656,  657,  658,  659,  660,  661,   89,  153,  804,  199,
+ /*    20 */   798,  208,  649,  173,  650,  651,  652,  653,  654,  655,
+ /*    30 */   656,  657,  658,  659,  660,  661,   89,  135,  804,  756,
  /*    40 */    88,  672,  644,  206,   27,  262,   65,   66,   26,  213,
- /*    50 */   184,  204,  751,  754,  136,  801,  626,  627,  628,  125,
- /*    60 */   275,   46,   42,   45,   27,  265,  709,   98,   96,   94,
- /*    70 */    92,  494,  495,   37,  779,  466,  255,   85,  193,  192,
+ /*    50 */   184,  204,  754,  757,  136,  804,  629,  630,  631,  125,
+ /*    60 */   275,   46,   42,   45,   27,  265,  712,   98,   96,   94,
+ /*    70 */    92,  497,  498,   37,  782,  466,  255,   85,  193,  192,
  /*    80 */   191,  251,  190,  664,  173,   84,   71,   52,   54,   53,
  /*    90 */    51,   50,   63,   61,   59,   57,   56,   55,   49,   48,
- /*   100 */    47,  135,  801,  460,  260,  673,   71,   65,   66,  629,
- /*   110 */   575,  268,  623,  624,  625,   52,   54,   53,   51,   50,
- /*   120 */    76,  275,   46,   42,   45,   27,   49,   48,   47,  796,
+ /*   100 */    47,  135,  804,  460,  260,  673,   71,   65,   66,  632,
+ /*   110 */   578,  268,  626,  627,  628,   52,   54,   53,   51,   50,
+ /*   120 */    76,  275,   46,   42,   45,   27,   49,   48,   47,  799,
  /*   130 */    77,  649,  173,  650,  651,  652,  653,  654,  655,  656,
- /*   140 */   657,  658,  659,  660,  661,  261,  727,  173,   52,   54,
+ /*   140 */   657,  658,  659,  660,  661,  261,  730,  173,   52,   54,
  /*   150 */    53,   51,   50,   63,   61,   59,   57,   56,   55,   49,
- /*   160 */    48,   47,  480,  239,  275,   46,   42,   45,   65,   66,
- /*   170 */   153,  801,  188,   27,   75,  153,  801,  189,  626,  627,
- /*   180 */   628,  248,  275,   46,   42,   45,  743,  173,   27,  137,
- /*   190 */   801,   52,   54,   53,   51,   50,   63,   61,   59,   57,
- /*   200 */    56,   55,   49,   48,   47,  642,  153,  801,  263,   52,
+ /*   160 */    48,   47,  483,  239,  275,   46,   42,   45,   65,   66,
+ /*   170 */   153,  804,  188,   27,   75,  153,  804,  189,  629,  630,
+ /*   180 */   631,  248,  275,   46,   42,   45,  746,  173,   27,  137,
+ /*   190 */   804,   52,   54,   53,   51,   50,   63,   61,   59,   57,
+ /*   200 */    56,   55,   49,   48,   47,  642,  153,  804,  263,   52,
  /*   210 */    54,   53,   51,   50,   63,   61,   59,   57,   56,   55,
- /*   220 */    49,   48,   47,  270,  173,  153,  801,  198,   27,   65,
- /*   230 */    66,  629,   20,  268,  623,  624,  625,  153,  801,  197,
- /*   240 */   626,  627,  628,  275,   46,   42,   45,  113,  648,  103,
+ /*   220 */    49,   48,   47,  270,  173,  153,  804,  198,   27,   65,
+ /*   230 */    66,  632,   20,  268,  626,  627,  628,  153,  804,  197,
+ /*   240 */   629,  630,  631,  275,   46,   42,   45,  113,  648,  103,
  /*   250 */   649,  173,  650,  651,  652,  653,  654,  655,  656,  657,
- /*   260 */   658,  659,  660,  661,   23,   27,  551,  741,  173,    8,
+ /*   260 */   658,  659,  660,  661,   23,   27,  554,  744,  173,    8,
  /*   270 */    52,   54,   53,   51,   50,   63,   61,   59,   57,   56,
  /*   280 */    55,   49,   48,   47,   89,  172,   78,  667,  173,   32,
- /*   290 */    65,   66,   27,  629,   70,  268,  623,  624,  625,   73,
- /*   300 */   236,  753,  245,  246,  275,   46,   42,   45,  202,   27,
- /*   310 */    36,  267,  173,  186,  752,  754,  218,  237,  768,  549,
- /*   320 */   747,  110,  235,  527,  528,  141,  801,  138,  801,   27,
+ /*   290 */    65,   66,   27,  632,   70,  268,  626,  627,  628,   73,
+ /*   300 */   236,  756,  245,  246,  275,   46,   42,   45,  202,   27,
+ /*   310 */    36,  267,  173,  186,  755,  757,  218,  237,  771,  552,
+ /*   320 */   750,  110,  235,  530,  531,  141,  804,  138,  804,   27,
  /*   330 */   202,   52,   54,   53,   51,   50,   63,   61,   59,   57,
- /*   340 */    56,   55,   49,   48,   47,   67,  530,  666,  173,  136,
- /*   350 */   801,   65,   66,   27,   71,  142,  801,  229,   83,  227,
- /*   360 */   226,  710,  222,  545,  546,  275,   46,   42,   45,   52,
+ /*   340 */    56,   55,   49,   48,   47,   67,  533,  666,  173,  136,
+ /*   350 */   804,   65,   66,   27,   71,  142,  804,  229,   83,  227,
+ /*   360 */   226,  713,  222,  548,  549,  275,   46,   42,   45,   52,
  /*   370 */   116,   39,   51,   50,  259,  173,   11,  279,  173,  282,
- /*   380 */   173,   48,   47,  665,  173,  761,   18,   22,   21,   27,
+ /*   380 */   173,   48,   47,  665,  173,  764,   18,   22,   21,   27,
  /*   390 */   662,  173,   52,   54,   53,   51,   50,   63,   61,   59,
- /*   400 */    57,   56,   55,   49,   48,   47,  284,  721,  475,  111,
- /*   410 */   547,  250,   65,   66,   79,  681,   27,   81,  736,   27,
- /*   420 */    35,   27,  143,  801,  564,   27,  275,   46,   42,   45,
- /*   430 */   277,  721,   27,  735,  144,  801,  145,  801,  683,  146,
- /*   440 */   801,   82,  147,  801,  148,  801,  139,  801,  682,  584,
- /*   450 */   149,  801,  269,   52,   54,   53,   51,   50,   63,   61,
- /*   460 */    59,   57,   56,   55,   49,   48,   47,  150,  801,  151,
- /*   470 */   801,  162,  801,   65,   66,  152,  801,  276,  140,  801,
- /*   480 */   157,  801,  161,  801,  163,  801,  212,  275,   46,   42,
- /*   490 */    45,  823,  801,  822,  801,  668,   41,   66,  167,  801,
- /*   500 */   820,  801,  819,  801,  818,  801,  168,  801,  169,  801,
+ /*   400 */    57,   56,   55,   49,   48,   47,  284,  724,  475,  111,
+ /*   410 */   550,  250,   65,   66,   79,  681,   27,   81,  739,   27,
+ /*   420 */    35,   27,  143,  804,  567,   27,  275,   46,   42,   45,
+ /*   430 */   277,  724,   27,  738,  144,  804,  145,  804,  683,  146,
+ /*   440 */   804,   82,  147,  804,  148,  804,  139,  804,  682,  587,
+ /*   450 */   149,  804,  269,   52,   54,   53,   51,   50,   63,   61,
+ /*   460 */    59,   57,   56,   55,   49,   48,   47,  150,  804,  151,
+ /*   470 */   804,  162,  804,   65,   66,  152,  804,  276,  140,  804,
+ /*   480 */   157,  804,  161,  804,  163,  804,  212,  275,   46,   42,
+ /*   490 */    45,  826,  804,  825,  804,  668,   41,   66,  167,  804,
+ /*   500 */   823,  804,  822,  804,  821,  804,  168,  804,  169,  804,
  /*   510 */   275,   46,   42,   45,   52,   54,   53,   51,   50,   63,
- /*   520 */    61,   59,   57,   56,   55,   49,   48,   47,  164,  801,
- /*   530 */   165,  801,   31,  256,  166,  801,  132,   52,   54,   53,
+ /*   520 */    61,   59,   57,   56,   55,   49,   48,   47,  164,  804,
+ /*   530 */   165,  804,   31,  256,  166,  804,  132,   52,   54,   53,
  /*   540 */    51,   50,   63,   61,   59,   57,   56,   55,   49,   48,
- /*   550 */    47,    6,  807,  801,  160,  801,   43,   65,   38,  806,
- /*   560 */   801,  159,  801,  244,  805,  801,  214,  158,  801,  156,
- /*   570 */   801,  275,   46,   42,   45,  155,  801,   91,  154,  801,
- /*   580 */   452,  453,  524,  278,  641,  278,  224,  278,  639,  278,
- /*   590 */   638,  278,  540,  231,  176,  553,  278,  775,   52,   54,
+ /*   550 */    47,    6,  810,  804,  160,  804,   43,   65,   38,  809,
+ /*   560 */   804,  159,  804,  244,  808,  804,  214,  158,  804,  156,
+ /*   570 */   804,  275,   46,   42,   45,  155,  804,   91,  154,  804,
+ /*   580 */   452,  453,  527,  278,  641,  278,  224,  278,  639,  278,
+ /*   590 */   638,  278,  543,  231,  176,  556,  278,  778,   52,   54,
  /*   600 */    53,   51,   50,   63,   61,   59,   57,   56,   55,   49,
- /*   610 */    48,   47,   89,  522,   17,  514,  278,  515,   40,   16,
- /*   620 */   774,  516,   40,  472,  470,  252,  253,  468,  249,  254,
- /*   630 */   637,  278,  242,  117,   93,  238,   69,  610,   40,  283,
- /*   640 */    10,   64,  457,  170,  195,  618,   40,   90,  175,  211,
- /*   650 */   210,  209,  773,   74,  174,  626,  627,  628,  272,  617,
- /*   660 */    40,   10,  772,  281,  278,  273,   95,  579,   97,  177,
+ /*   610 */    48,   47,   89,  525,   17,  517,  278,  518,   40,   16,
+ /*   620 */   777,  519,   40,  472,  470,  252,  253,  468,  249,  254,
+ /*   630 */   479,  278,  242,  117,   93,  238,   69,  613,   40,  283,
+ /*   640 */    10,   64,  457,  170,  195,  621,   40,   90,  175,  211,
+ /*   650 */   210,  209,  776,   74,  174,  629,  630,  631,  272,  620,
+ /*   660 */    40,   10,  775,  281,  278,  273,   95,  582,   97,  177,
  /*   670 */   217,   68,  221,  100,  219,  102,  126,  178,  223,    1,
  /*   680 */   203,  179,   71,  234,  233,  180,  181,  134,  183,    5,
- /*   690 */   615,  185,   32,  114,  274,   60,   62,   89,   89,  112,
- /*   700 */   739,  240,  245,  121,  187,   37,  241,  737,  629,   58,
- /*   710 */   200,  623,  624,  625,  249,  118,  194,   86,  242,  117,
- /*   720 */     9,  238,   69,  119,  201,   34,  122,  722,   87,  170,
+ /*   690 */   618,  185,   32,  114,  274,   60,   62,   89,   89,  112,
+ /*   700 */   742,  240,  245,  121,  187,   37,  241,  740,  632,   58,
+ /*   710 */   200,  626,  627,  628,  249,  118,  194,   86,  242,  117,
+ /*   720 */     9,  238,   69,  119,  201,   34,  122,  725,   87,  170,
  /*   730 */    64,  266,  128,   90,  175,  211,  210,  209,   33,   74,
- /*   740 */   174,  129,  264,  131,  626,  627,  628,  130,    3,   80,
- /*   750 */   285,    2,  576,  574,  205,  573,   64,  207,  562,  572,
- /*   760 */    68,  570,  568,  559,  566,    1,   99,   71,   71,  215,
- /*   770 */   626,  627,  628,  216,  101,   19,  532,  220,    5,  548,
+ /*   740 */   174,  129,  264,  131,  629,  630,  631,  130,    3,   80,
+ /*   750 */   285,    2,  579,  577,  205,  576,   64,  207,  565,  575,
+ /*   760 */    68,  573,  571,  562,  569,    1,   99,   71,   71,  215,
+ /*   770 */   629,  630,  631,  216,  101,   19,  535,  220,    5,  551,
  /*   780 */    28,  104,  105,  106,   60,   62,   68,  225,  107,  108,
- /*   790 */   230,   64,  228,  541,  182,  232,  109,  629,   58,  200,
- /*   800 */   623,  624,  625,  171,    5,  626,  627,  628,   29,  456,
- /*   810 */    60,   62,  115,   72,  120,  243,  508,   30,  247,   64,
- /*   820 */   123,   68,  512,  629,   58,  196,  623,  624,  625,  476,
- /*   830 */    12,   13,  474,  608,  627,  628,  473,  471,  469,    5,
- /*   840 */   467,  124,  482,  257,  258,   60,   62,  479,  478,   68,
- /*   850 */    14,   40,   15,  459,   44,    7,  585,  273,  629,   58,
- /*   860 */   200,  623,  624,  625,  614,  611,  271,    5,  607,  627,
- /*   870 */   628,  616,  632,   60,   62,  272,    4,  613,  580,  127,
- /*   880 */   280,  646,  506,   24,   68,   25,  629,   58,  200,  623,
- /*   890 */   624,  625,  505,  645,  645,  645,  645,  645,  645,  645,
+ /*   790 */   230,   64,  228,  544,  182,  232,  109,  632,   58,  200,
+ /*   800 */   626,  627,  628,  171,    5,  629,  630,  631,   29,  456,
+ /*   810 */    60,   62,  115,   72,  120,  243,  511,   30,  247,   64,
+ /*   820 */   123,   68,  515,  632,   58,  196,  626,  627,  628,  476,
+ /*   830 */    12,   13,  474,  611,  630,  631,  473,  471,  469,    5,
+ /*   840 */   467,  124,  485,  257,  258,   60,   62,  482,  481,   68,
+ /*   850 */    14,   40,   15,  459,   44,    7,  588,  273,  632,   58,
+ /*   860 */   200,  626,  627,  628,  617,  614,  271,    5,  610,  630,
+ /*   870 */   631,  619,  635,   60,   62,  272,    4,  616,  583,  127,
+ /*   880 */   280,  646,  509,   24,   68,   25,  632,   58,  200,  626,
+ /*   890 */   627,  628,  508,  645,  645,  645,  645,  645,  645,  645,
  /*   900 */   645,  645,    5,  645,  645,  645,  645,  645,   60,   62,
  /*   910 */   645,  645,  645,  645,  645,  645,  645,  645,  645,  645,
- /*   920 */   645,  629,   58,  200,  623,  624,  625,
+ /*   920 */   645,  632,   58,  200,  626,  627,  628,
 };
 static const YYCODETYPE yy_lookahead[] = {
  /*     0 */   108,  109,  110,  111,  112,  113,  114,  115,  116,  117,
@@ -682,35 +682,35 @@ static const short yy_reduce_ofst[] = {
  /*   130 */   608,  615,  612,  599,  585,
 };
 static const YYACTIONTYPE yy_default[] = {
- /*     0 */   643,  643,  643,  852,  643,  643,  643,  643,  643,  643,
+ /*     0 */   643,  643,  643,  855,  643,  643,  643,  643,  643,  643,
  /*    10 */   643,  643,  643,  643,  643,  643,  643,  643,  643,  643,
  /*    20 */   643,  643,  643,  643,  643,  643,  643,  643,  643,  643,
  /*    30 */   643,  643,  643,  643,  643,  643,  643,  643,  643,  643,
  /*    40 */   643,  643,  643,  643,  643,  643,  643,  643,  643,  643,
  /*    50 */   643,  643,  643,  643,  643,  643,  643,  643,  643,  643,
- /*    60 */   643,  643,  643,  643,  643,  643,  643,  643,  643,  744,
+ /*    60 */   643,  643,  643,  643,  643,  643,  643,  643,  643,  747,
  /*    70 */   643,  643,  643,  643,  643,  643,  643,  643,  643,  680,
- /*    80 */   755,  701,  853,  643,  643,  839,  839,  716,  679,  669,
- /*    90 */   643,  643,  776,  643,  776,  643,  776,  643,  776,  643,
- /*   100 */   643,  749,  643,  749,  643,  643,  643,  643,  643,  643,
- /*   110 */   643,  756,  643,  749,  701,  643,  643,  643,  643,  731,
- /*   120 */   643,  643,  731,  643,  643,  643,  643,  643,  714,  707,
- /*   130 */   705,  703,  701,  851,  760,  676,  711,  643,  643,  643,
- /*   140 */   643,  643,  738,  854,  702,  706,  715,  718,  837,  840,
- /*   150 */   838,  800,  643,  799,  717,  808,  809,  804,  810,  811,
- /*   160 */   812,  827,  830,  824,  815,  814,  813,  821,  817,  816,
- /*   170 */   643,  762,  695,  663,  643,  781,  778,  643,  643,  643,
+ /*    80 */   758,  704,  695,  643,  643,  842,  842,  719,  679,  669,
+ /*    90 */   643,  643,  779,  643,  779,  643,  779,  643,  779,  643,
+ /*   100 */   643,  752,  643,  752,  643,  643,  643,  643,  643,  643,
+ /*   110 */   643,  759,  643,  752,  704,  643,  643,  643,  643,  734,
+ /*   120 */   643,  643,  734,  643,  643,  643,  643,  643,  717,  710,
+ /*   130 */   708,  706,  704,  854,  763,  676,  714,  643,  643,  643,
+ /*   140 */   643,  643,  741,  696,  705,  709,  718,  721,  840,  843,
+ /*   150 */   841,  803,  643,  802,  720,  811,  812,  807,  813,  814,
+ /*   160 */   815,  830,  833,  827,  818,  817,  816,  824,  820,  819,
+ /*   170 */   643,  765,  698,  663,  643,  784,  781,  643,  643,  643,
  /*   180 */   643,  643,  643,  643,  643,  643,  643,  643,  643,  643,
- /*   190 */   643,  643,  643,  643,  643,  643,  848,  643,  643,  643,
- /*   200 */   848,  643,  643,  643,  643,  643,  643,  643,  643,  789,
- /*   210 */   787,  785,  783,  643,  643,  643,  643,  643,  643,  643,
+ /*   190 */   643,  643,  643,  643,  643,  643,  851,  643,  643,  643,
+ /*   200 */   851,  643,  643,  643,  643,  643,  643,  643,  643,  792,
+ /*   210 */   790,  788,  786,  643,  643,  643,  643,  643,  643,  643,
  /*   220 */   643,  643,  643,  858,  643,  643,  643,  643,  643,  643,
- /*   230 */   643,  643,  643,  757,  770,  643,  643,  643,  643,  643,
- /*   240 */   643,  728,  643,  643,  729,  643,  643,  643,  725,  643,
- /*   250 */   643,  643,  643,  643,  643,  643,  643,  643,  699,  643,
- /*   260 */   643,  643,  643,  704,  643,  708,  643,  643,  848,  643,
- /*   270 */   643,  643,  849,  643,  643,  643,  643,  720,  643,  643,
- /*   280 */   643,  643,  643,  643,  719,  643,
+ /*   230 */   643,  643,  643,  760,  773,  643,  643,  643,  643,  643,
+ /*   240 */   643,  731,  643,  643,  732,  643,  643,  643,  728,  643,
+ /*   250 */   643,  643,  643,  643,  643,  643,  643,  643,  702,  643,
+ /*   260 */   643,  643,  643,  707,  643,  711,  643,  643,  851,  643,
+ /*   270 */   643,  643,  852,  643,  643,  643,  643,  723,  643,  643,
+ /*   280 */   643,  643,  643,  643,  722,  643,
 };
 /********** End of lemon-generated parsing tables *****************************/
 
@@ -1065,167 +1065,167 @@ static const char *const yyRuleName[] = {
  /*  46 */ "join_op ::= TK_CROSS TK_JOIN",
  /*  47 */ "join_op ::= TK_NATURAL TK_JOIN",
  /*  48 */ "join_op ::= TK_NATURAL TK_LEFT TK_JOIN",
- /*  49 */ "table_ref ::= TK_ID",
- /*  50 */ "table_ref ::= TK_ID TK_DOT TK_ID",
- /*  51 */ "table_ref ::= TK_ID TK_AS TK_ID",
- /*  52 */ "table_ref ::= TK_ID TK_ID",
- /*  53 */ "table_ref ::= TK_LP select_stmt TK_RP",
- /*  54 */ "table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID",
- /*  55 */ "where_opt ::=",
- /*  56 */ "where_opt ::= TK_WHERE expr",
- /*  57 */ "group_opt ::=",
- /*  58 */ "group_opt ::= TK_GROUP TK_BY expr_list",
- /*  59 */ "having_opt ::=",
- /*  60 */ "having_opt ::= TK_HAVING expr",
- /*  61 */ "order_opt ::=",
- /*  62 */ "order_opt ::= TK_ORDER TK_BY order_list",
- /*  63 */ "order_list ::= order_item",
- /*  64 */ "order_list ::= order_list TK_COMMA order_item",
- /*  65 */ "order_item ::= expr",
- /*  66 */ "order_item ::= expr TK_ASC",
- /*  67 */ "order_item ::= expr TK_DESC",
- /*  68 */ "limit_opt ::=",
- /*  69 */ "limit_opt ::= TK_LIMIT expr",
- /*  70 */ "offset_part ::=",
- /*  71 */ "offset_part ::= TK_OFFSET expr",
- /*  72 */ "offset_part ::= TK_COMMA expr",
- /*  73 */ "with_clause ::= TK_WITH cte_list",
- /*  74 */ "with_clause ::= TK_WITH TK_RECURSIVE cte_list",
- /*  75 */ "cte_list ::= cte",
- /*  76 */ "cte_list ::= cte_list TK_COMMA cte",
- /*  77 */ "cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP",
- /*  78 */ "cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP",
- /*  79 */ "insert_stmt ::= TK_INSERT TK_INTO qname insert_cols values_list",
- /*  80 */ "insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES",
- /*  81 */ "insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt",
- /*  82 */ "insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols values_list",
- /*  83 */ "qname ::= TK_ID",
- /*  84 */ "qname ::= TK_ID TK_DOT TK_ID",
- /*  85 */ "insert_cols ::=",
- /*  86 */ "insert_cols ::= TK_LP id_list TK_RP",
- /*  87 */ "values_list ::= TK_VALUES TK_LP expr_list TK_RP",
- /*  88 */ "values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP",
- /*  89 */ "update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt",
- /*  90 */ "assign_list ::= assign",
- /*  91 */ "assign_list ::= assign_list TK_COMMA assign",
- /*  92 */ "assign ::= TK_ID TK_EQ expr",
- /*  93 */ "delete_stmt ::= TK_DELETE TK_FROM qname where_opt",
- /*  94 */ "create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_LP table_body TK_RP",
- /*  95 */ "create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_AS select_stmt",
- /*  96 */ "create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname TK_ON TK_ID TK_LP id_list TK_RP",
- /*  97 */ "create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname TK_AS select_stmt",
- /*  98 */ "temp_opt ::=",
- /*  99 */ "temp_opt ::= TK_TEMP",
- /* 100 */ "temp_opt ::= TK_TEMPORARY",
- /* 101 */ "unique_opt ::=",
- /* 102 */ "unique_opt ::= TK_UNIQUE",
- /* 103 */ "if_not_exists ::=",
- /* 104 */ "if_not_exists ::= TK_IF TK_NOT TK_EXISTS",
- /* 105 */ "table_body ::= table_elem",
- /* 106 */ "table_body ::= table_body TK_COMMA table_elem",
- /* 107 */ "table_elem ::= coldef",
- /* 108 */ "table_elem ::= table_constraint",
- /* 109 */ "coldef ::= TK_ID type_opt col_constraints",
- /* 110 */ "type_opt ::=",
- /* 111 */ "type_opt ::= TK_ID",
- /* 112 */ "type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP",
- /* 113 */ "type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP",
- /* 114 */ "col_constraints ::=",
- /* 115 */ "col_constraints ::= col_constraints col_constraint",
- /* 116 */ "col_constraint ::= TK_PRIMARY TK_KEY",
- /* 117 */ "col_constraint ::= TK_PRIMARY TK_KEY TK_ASC",
- /* 118 */ "col_constraint ::= TK_PRIMARY TK_KEY TK_DESC",
- /* 119 */ "col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR",
- /* 120 */ "col_constraint ::= TK_NOT TK_NULL",
- /* 121 */ "col_constraint ::= TK_UNIQUE",
- /* 122 */ "col_constraint ::= TK_DEFAULT expr_atom",
- /* 123 */ "col_constraint ::= TK_CHECK TK_LP expr TK_RP",
- /* 124 */ "col_constraint ::= TK_REFERENCES qname",
- /* 125 */ "col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP",
- /* 126 */ "drop_stmt ::= TK_DROP TK_TABLE if_exists qname",
- /* 127 */ "drop_stmt ::= TK_DROP TK_INDEX if_exists qname",
- /* 128 */ "drop_stmt ::= TK_DROP TK_VIEW if_exists qname",
- /* 129 */ "drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname",
- /* 130 */ "if_exists ::=",
- /* 131 */ "if_exists ::= TK_IF TK_EXISTS",
- /* 132 */ "pragma_stmt ::= TK_PRAGMA qname",
- /* 133 */ "pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom",
- /* 134 */ "pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP",
- /* 135 */ "begin_stmt ::= TK_BEGIN",
- /* 136 */ "begin_stmt ::= TK_BEGIN TK_TRANSACTION",
- /* 137 */ "begin_stmt ::= TK_BEGIN TK_ID",
- /* 138 */ "begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION",
- /* 139 */ "commit_stmt ::= TK_COMMIT",
- /* 140 */ "commit_stmt ::= TK_COMMIT TK_TRANSACTION",
- /* 141 */ "commit_stmt ::= TK_END",
- /* 142 */ "commit_stmt ::= TK_END TK_TRANSACTION",
- /* 143 */ "rollback_stmt ::= TK_ROLLBACK",
- /* 144 */ "rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION",
- /* 145 */ "attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID",
- /* 146 */ "attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID",
- /* 147 */ "detach_stmt ::= TK_DETACH TK_ID",
- /* 148 */ "detach_stmt ::= TK_DETACH TK_DATABASE TK_ID",
- /* 149 */ "explain_stmt ::= TK_EXPLAIN stmt",
- /* 150 */ "explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt",
- /* 151 */ "id_list ::= TK_ID",
- /* 152 */ "id_list ::= id_list TK_COMMA TK_ID",
- /* 153 */ "expr_list ::= expr",
- /* 154 */ "expr_list ::= expr_list TK_COMMA expr",
- /* 155 */ "expr ::= expr_atom",
- /* 156 */ "expr ::= TK_LP expr TK_RP",
- /* 157 */ "expr ::= TK_LP select_stmt TK_RP",
- /* 158 */ "expr ::= TK_NOT expr",
- /* 159 */ "expr ::= TK_MINUS expr",
- /* 160 */ "expr ::= TK_PLUS expr",
- /* 161 */ "expr ::= TK_TILDE expr",
- /* 162 */ "expr ::= expr TK_OR expr",
- /* 163 */ "expr ::= expr TK_AND expr",
- /* 164 */ "expr ::= expr TK_EQ expr",
- /* 165 */ "expr ::= expr TK_NE expr",
- /* 166 */ "expr ::= expr TK_LT expr",
- /* 167 */ "expr ::= expr TK_LE expr",
- /* 168 */ "expr ::= expr TK_GT expr",
- /* 169 */ "expr ::= expr TK_GE expr",
- /* 170 */ "expr ::= expr TK_PLUS expr",
- /* 171 */ "expr ::= expr TK_MINUS expr",
- /* 172 */ "expr ::= expr TK_STAR expr",
- /* 173 */ "expr ::= expr TK_SLASH expr",
- /* 174 */ "expr ::= expr TK_PERCENT expr",
- /* 175 */ "expr ::= expr TK_CONCAT expr",
- /* 176 */ "expr ::= expr TK_AMP expr",
- /* 177 */ "expr ::= expr TK_PIPE expr",
- /* 178 */ "expr ::= expr TK_LIKE expr",
- /* 179 */ "expr ::= expr TK_IS TK_NULL",
- /* 180 */ "expr ::= expr TK_IS TK_NOT TK_NULL",
- /* 181 */ "expr ::= expr TK_IS expr",
- /* 182 */ "expr ::= expr TK_IN TK_LP expr_list TK_RP",
- /* 183 */ "expr ::= expr TK_IN TK_LP select_stmt TK_RP",
- /* 184 */ "expr ::= expr TK_BETWEEN expr TK_AND expr",
- /* 185 */ "expr ::= TK_CASE expr_atom case_arms case_else TK_END",
- /* 186 */ "expr ::= TK_CASE case_arms case_else TK_END",
- /* 187 */ "expr ::= TK_ID TK_LP TK_RP",
- /* 188 */ "expr ::= TK_ID TK_LP TK_STAR TK_RP",
- /* 189 */ "expr ::= TK_ID TK_LP expr_list TK_RP",
- /* 190 */ "expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP",
- /* 191 */ "case_arms ::= TK_WHEN expr TK_THEN expr",
- /* 192 */ "case_arms ::= case_arms TK_WHEN expr TK_THEN expr",
- /* 193 */ "case_else ::=",
- /* 194 */ "case_else ::= TK_ELSE expr",
- /* 195 */ "expr_atom ::= TK_NUMBER",
- /* 196 */ "expr_atom ::= TK_STRING",
- /* 197 */ "expr_atom ::= TK_BLOB",
- /* 198 */ "expr_atom ::= TK_NULL",
- /* 199 */ "expr_atom ::= TK_TRUE",
- /* 200 */ "expr_atom ::= TK_FALSE",
- /* 201 */ "expr_atom ::= TK_QMARK",
- /* 202 */ "expr_atom ::= TK_ID",
- /* 203 */ "expr_atom ::= TK_ID TK_DOT TK_ID",
- /* 204 */ "expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID",
- /* 205 */ "maybe_semi ::=",
- /* 206 */ "maybe_semi ::= TK_SEMI",
- /* 207 */ "join_constraint ::=",
- /* 208 */ "join_constraint ::= TK_ON expr",
- /* 209 */ "join_constraint ::= TK_USING TK_LP id_list TK_RP",
+ /*  49 */ "join_constraint ::=",
+ /*  50 */ "join_constraint ::= TK_ON expr",
+ /*  51 */ "join_constraint ::= TK_USING TK_LP id_list TK_RP",
+ /*  52 */ "table_ref ::= TK_ID",
+ /*  53 */ "table_ref ::= TK_ID TK_DOT TK_ID",
+ /*  54 */ "table_ref ::= TK_ID TK_AS TK_ID",
+ /*  55 */ "table_ref ::= TK_ID TK_ID",
+ /*  56 */ "table_ref ::= TK_LP select_stmt TK_RP",
+ /*  57 */ "table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID",
+ /*  58 */ "where_opt ::=",
+ /*  59 */ "where_opt ::= TK_WHERE expr",
+ /*  60 */ "group_opt ::=",
+ /*  61 */ "group_opt ::= TK_GROUP TK_BY expr_list",
+ /*  62 */ "having_opt ::=",
+ /*  63 */ "having_opt ::= TK_HAVING expr",
+ /*  64 */ "order_opt ::=",
+ /*  65 */ "order_opt ::= TK_ORDER TK_BY order_list",
+ /*  66 */ "order_list ::= order_item",
+ /*  67 */ "order_list ::= order_list TK_COMMA order_item",
+ /*  68 */ "order_item ::= expr",
+ /*  69 */ "order_item ::= expr TK_ASC",
+ /*  70 */ "order_item ::= expr TK_DESC",
+ /*  71 */ "limit_opt ::=",
+ /*  72 */ "limit_opt ::= TK_LIMIT expr",
+ /*  73 */ "offset_part ::=",
+ /*  74 */ "offset_part ::= TK_OFFSET expr",
+ /*  75 */ "offset_part ::= TK_COMMA expr",
+ /*  76 */ "with_clause ::= TK_WITH cte_list",
+ /*  77 */ "with_clause ::= TK_WITH TK_RECURSIVE cte_list",
+ /*  78 */ "cte_list ::= cte",
+ /*  79 */ "cte_list ::= cte_list TK_COMMA cte",
+ /*  80 */ "cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP",
+ /*  81 */ "cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP",
+ /*  82 */ "insert_stmt ::= TK_INSERT TK_INTO qname insert_cols values_list",
+ /*  83 */ "insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES",
+ /*  84 */ "insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt",
+ /*  85 */ "insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols values_list",
+ /*  86 */ "qname ::= TK_ID",
+ /*  87 */ "qname ::= TK_ID TK_DOT TK_ID",
+ /*  88 */ "insert_cols ::=",
+ /*  89 */ "insert_cols ::= TK_LP id_list TK_RP",
+ /*  90 */ "values_list ::= TK_VALUES TK_LP expr_list TK_RP",
+ /*  91 */ "values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP",
+ /*  92 */ "update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt",
+ /*  93 */ "assign_list ::= assign",
+ /*  94 */ "assign_list ::= assign_list TK_COMMA assign",
+ /*  95 */ "assign ::= TK_ID TK_EQ expr",
+ /*  96 */ "delete_stmt ::= TK_DELETE TK_FROM qname where_opt",
+ /*  97 */ "create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_LP table_body TK_RP",
+ /*  98 */ "create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_AS select_stmt",
+ /*  99 */ "create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname TK_ON TK_ID TK_LP id_list TK_RP",
+ /* 100 */ "create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname TK_AS select_stmt",
+ /* 101 */ "temp_opt ::=",
+ /* 102 */ "temp_opt ::= TK_TEMP",
+ /* 103 */ "temp_opt ::= TK_TEMPORARY",
+ /* 104 */ "unique_opt ::=",
+ /* 105 */ "unique_opt ::= TK_UNIQUE",
+ /* 106 */ "if_not_exists ::=",
+ /* 107 */ "if_not_exists ::= TK_IF TK_NOT TK_EXISTS",
+ /* 108 */ "table_body ::= table_elem",
+ /* 109 */ "table_body ::= table_body TK_COMMA table_elem",
+ /* 110 */ "table_elem ::= coldef",
+ /* 111 */ "table_elem ::= table_constraint",
+ /* 112 */ "coldef ::= TK_ID type_opt col_constraints",
+ /* 113 */ "type_opt ::=",
+ /* 114 */ "type_opt ::= TK_ID",
+ /* 115 */ "type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP",
+ /* 116 */ "type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP",
+ /* 117 */ "col_constraints ::=",
+ /* 118 */ "col_constraints ::= col_constraints col_constraint",
+ /* 119 */ "col_constraint ::= TK_PRIMARY TK_KEY",
+ /* 120 */ "col_constraint ::= TK_PRIMARY TK_KEY TK_ASC",
+ /* 121 */ "col_constraint ::= TK_PRIMARY TK_KEY TK_DESC",
+ /* 122 */ "col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR",
+ /* 123 */ "col_constraint ::= TK_NOT TK_NULL",
+ /* 124 */ "col_constraint ::= TK_UNIQUE",
+ /* 125 */ "col_constraint ::= TK_DEFAULT expr_atom",
+ /* 126 */ "col_constraint ::= TK_CHECK TK_LP expr TK_RP",
+ /* 127 */ "col_constraint ::= TK_REFERENCES qname",
+ /* 128 */ "col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP",
+ /* 129 */ "drop_stmt ::= TK_DROP TK_TABLE if_exists qname",
+ /* 130 */ "drop_stmt ::= TK_DROP TK_INDEX if_exists qname",
+ /* 131 */ "drop_stmt ::= TK_DROP TK_VIEW if_exists qname",
+ /* 132 */ "drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname",
+ /* 133 */ "if_exists ::=",
+ /* 134 */ "if_exists ::= TK_IF TK_EXISTS",
+ /* 135 */ "pragma_stmt ::= TK_PRAGMA qname",
+ /* 136 */ "pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom",
+ /* 137 */ "pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP",
+ /* 138 */ "begin_stmt ::= TK_BEGIN",
+ /* 139 */ "begin_stmt ::= TK_BEGIN TK_TRANSACTION",
+ /* 140 */ "begin_stmt ::= TK_BEGIN TK_ID",
+ /* 141 */ "begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION",
+ /* 142 */ "commit_stmt ::= TK_COMMIT",
+ /* 143 */ "commit_stmt ::= TK_COMMIT TK_TRANSACTION",
+ /* 144 */ "commit_stmt ::= TK_END",
+ /* 145 */ "commit_stmt ::= TK_END TK_TRANSACTION",
+ /* 146 */ "rollback_stmt ::= TK_ROLLBACK",
+ /* 147 */ "rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION",
+ /* 148 */ "attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID",
+ /* 149 */ "attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID",
+ /* 150 */ "detach_stmt ::= TK_DETACH TK_ID",
+ /* 151 */ "detach_stmt ::= TK_DETACH TK_DATABASE TK_ID",
+ /* 152 */ "explain_stmt ::= TK_EXPLAIN stmt",
+ /* 153 */ "explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt",
+ /* 154 */ "id_list ::= TK_ID",
+ /* 155 */ "id_list ::= id_list TK_COMMA TK_ID",
+ /* 156 */ "expr_list ::= expr",
+ /* 157 */ "expr_list ::= expr_list TK_COMMA expr",
+ /* 158 */ "expr ::= expr_atom",
+ /* 159 */ "expr ::= TK_LP expr TK_RP",
+ /* 160 */ "expr ::= TK_LP select_stmt TK_RP",
+ /* 161 */ "expr ::= TK_NOT expr",
+ /* 162 */ "expr ::= TK_MINUS expr",
+ /* 163 */ "expr ::= TK_PLUS expr",
+ /* 164 */ "expr ::= TK_TILDE expr",
+ /* 165 */ "expr ::= expr TK_OR expr",
+ /* 166 */ "expr ::= expr TK_AND expr",
+ /* 167 */ "expr ::= expr TK_EQ expr",
+ /* 168 */ "expr ::= expr TK_NE expr",
+ /* 169 */ "expr ::= expr TK_LT expr",
+ /* 170 */ "expr ::= expr TK_LE expr",
+ /* 171 */ "expr ::= expr TK_GT expr",
+ /* 172 */ "expr ::= expr TK_GE expr",
+ /* 173 */ "expr ::= expr TK_PLUS expr",
+ /* 174 */ "expr ::= expr TK_MINUS expr",
+ /* 175 */ "expr ::= expr TK_STAR expr",
+ /* 176 */ "expr ::= expr TK_SLASH expr",
+ /* 177 */ "expr ::= expr TK_PERCENT expr",
+ /* 178 */ "expr ::= expr TK_CONCAT expr",
+ /* 179 */ "expr ::= expr TK_AMP expr",
+ /* 180 */ "expr ::= expr TK_PIPE expr",
+ /* 181 */ "expr ::= expr TK_LIKE expr",
+ /* 182 */ "expr ::= expr TK_IS TK_NULL",
+ /* 183 */ "expr ::= expr TK_IS TK_NOT TK_NULL",
+ /* 184 */ "expr ::= expr TK_IS expr",
+ /* 185 */ "expr ::= expr TK_IN TK_LP expr_list TK_RP",
+ /* 186 */ "expr ::= expr TK_IN TK_LP select_stmt TK_RP",
+ /* 187 */ "expr ::= expr TK_BETWEEN expr TK_AND expr",
+ /* 188 */ "expr ::= TK_CASE expr_atom case_arms case_else TK_END",
+ /* 189 */ "expr ::= TK_CASE case_arms case_else TK_END",
+ /* 190 */ "expr ::= TK_ID TK_LP TK_RP",
+ /* 191 */ "expr ::= TK_ID TK_LP TK_STAR TK_RP",
+ /* 192 */ "expr ::= TK_ID TK_LP expr_list TK_RP",
+ /* 193 */ "expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP",
+ /* 194 */ "case_arms ::= TK_WHEN expr TK_THEN expr",
+ /* 195 */ "case_arms ::= case_arms TK_WHEN expr TK_THEN expr",
+ /* 196 */ "case_else ::=",
+ /* 197 */ "case_else ::= TK_ELSE expr",
+ /* 198 */ "expr_atom ::= TK_NUMBER",
+ /* 199 */ "expr_atom ::= TK_STRING",
+ /* 200 */ "expr_atom ::= TK_BLOB",
+ /* 201 */ "expr_atom ::= TK_NULL",
+ /* 202 */ "expr_atom ::= TK_TRUE",
+ /* 203 */ "expr_atom ::= TK_FALSE",
+ /* 204 */ "expr_atom ::= TK_QMARK",
+ /* 205 */ "expr_atom ::= TK_ID",
+ /* 206 */ "expr_atom ::= TK_ID TK_DOT TK_ID",
+ /* 207 */ "expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID",
+ /* 208 */ "maybe_semi ::=",
+ /* 209 */ "maybe_semi ::= TK_SEMI",
  /* 210 */ "table_constraint ::= TK_PRIMARY TK_KEY TK_LP id_list TK_RP",
  /* 211 */ "table_constraint ::= TK_UNIQUE TK_LP id_list TK_RP",
  /* 212 */ "table_constraint ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname",
@@ -1790,167 +1790,167 @@ static const YYCODETYPE yyRuleInfoLhs[] = {
    142,  /* (46) join_op ::= TK_CROSS TK_JOIN */
    142,  /* (47) join_op ::= TK_NATURAL TK_JOIN */
    142,  /* (48) join_op ::= TK_NATURAL TK_LEFT TK_JOIN */
-   141,  /* (49) table_ref ::= TK_ID */
-   141,  /* (50) table_ref ::= TK_ID TK_DOT TK_ID */
-   141,  /* (51) table_ref ::= TK_ID TK_AS TK_ID */
-   141,  /* (52) table_ref ::= TK_ID TK_ID */
-   141,  /* (53) table_ref ::= TK_LP select_stmt TK_RP */
-   141,  /* (54) table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID */
-   131,  /* (55) where_opt ::= */
-   131,  /* (56) where_opt ::= TK_WHERE expr */
-   132,  /* (57) group_opt ::= */
-   132,  /* (58) group_opt ::= TK_GROUP TK_BY expr_list */
-   133,  /* (59) having_opt ::= */
-   133,  /* (60) having_opt ::= TK_HAVING expr */
-   134,  /* (61) order_opt ::= */
-   134,  /* (62) order_opt ::= TK_ORDER TK_BY order_list */
-   135,  /* (63) order_list ::= order_item */
-   135,  /* (64) order_list ::= order_list TK_COMMA order_item */
-   136,  /* (65) order_item ::= expr */
-   136,  /* (66) order_item ::= expr TK_ASC */
-   136,  /* (67) order_item ::= expr TK_DESC */
-   137,  /* (68) limit_opt ::= */
-   137,  /* (69) limit_opt ::= TK_LIMIT expr */
-   138,  /* (70) offset_part ::= */
-   138,  /* (71) offset_part ::= TK_OFFSET expr */
-   138,  /* (72) offset_part ::= TK_COMMA expr */
-   152,  /* (73) with_clause ::= TK_WITH cte_list */
-   152,  /* (74) with_clause ::= TK_WITH TK_RECURSIVE cte_list */
-   154,  /* (75) cte_list ::= cte */
-   154,  /* (76) cte_list ::= cte_list TK_COMMA cte */
-   155,  /* (77) cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP */
-   155,  /* (78) cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP */
-   112,  /* (79) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols values_list */
-   112,  /* (80) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES */
-   112,  /* (81) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt */
-   112,  /* (82) insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols values_list */
-   156,  /* (83) qname ::= TK_ID */
-   156,  /* (84) qname ::= TK_ID TK_DOT TK_ID */
-   149,  /* (85) insert_cols ::= */
-   149,  /* (86) insert_cols ::= TK_LP id_list TK_RP */
-   145,  /* (87) values_list ::= TK_VALUES TK_LP expr_list TK_RP */
-   145,  /* (88) values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP */
-   113,  /* (89) update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt */
-   146,  /* (90) assign_list ::= assign */
-   146,  /* (91) assign_list ::= assign_list TK_COMMA assign */
-   147,  /* (92) assign ::= TK_ID TK_EQ expr */
-   114,  /* (93) delete_stmt ::= TK_DELETE TK_FROM qname where_opt */
-   115,  /* (94) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_LP table_body TK_RP */
-   115,  /* (95) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_AS select_stmt */
-   115,  /* (96) create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname TK_ON TK_ID TK_LP id_list TK_RP */
-   115,  /* (97) create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname TK_AS select_stmt */
-   157,  /* (98) temp_opt ::= */
-   157,  /* (99) temp_opt ::= TK_TEMP */
-   157,  /* (100) temp_opt ::= TK_TEMPORARY */
-   160,  /* (101) unique_opt ::= */
-   160,  /* (102) unique_opt ::= TK_UNIQUE */
-   158,  /* (103) if_not_exists ::= */
-   158,  /* (104) if_not_exists ::= TK_IF TK_NOT TK_EXISTS */
-   159,  /* (105) table_body ::= table_elem */
-   159,  /* (106) table_body ::= table_body TK_COMMA table_elem */
-   161,  /* (107) table_elem ::= coldef */
-   161,  /* (108) table_elem ::= table_constraint */
-   148,  /* (109) coldef ::= TK_ID type_opt col_constraints */
-   163,  /* (110) type_opt ::= */
-   163,  /* (111) type_opt ::= TK_ID */
-   163,  /* (112) type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP */
-   163,  /* (113) type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP */
-   164,  /* (114) col_constraints ::= */
-   164,  /* (115) col_constraints ::= col_constraints col_constraint */
-   165,  /* (116) col_constraint ::= TK_PRIMARY TK_KEY */
-   165,  /* (117) col_constraint ::= TK_PRIMARY TK_KEY TK_ASC */
-   165,  /* (118) col_constraint ::= TK_PRIMARY TK_KEY TK_DESC */
-   165,  /* (119) col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR */
-   165,  /* (120) col_constraint ::= TK_NOT TK_NULL */
-   165,  /* (121) col_constraint ::= TK_UNIQUE */
-   165,  /* (122) col_constraint ::= TK_DEFAULT expr_atom */
-   165,  /* (123) col_constraint ::= TK_CHECK TK_LP expr TK_RP */
-   165,  /* (124) col_constraint ::= TK_REFERENCES qname */
-   165,  /* (125) col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP */
-   116,  /* (126) drop_stmt ::= TK_DROP TK_TABLE if_exists qname */
-   116,  /* (127) drop_stmt ::= TK_DROP TK_INDEX if_exists qname */
-   116,  /* (128) drop_stmt ::= TK_DROP TK_VIEW if_exists qname */
-   116,  /* (129) drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname */
-   166,  /* (130) if_exists ::= */
-   166,  /* (131) if_exists ::= TK_IF TK_EXISTS */
-   117,  /* (132) pragma_stmt ::= TK_PRAGMA qname */
-   117,  /* (133) pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom */
-   117,  /* (134) pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP */
-   118,  /* (135) begin_stmt ::= TK_BEGIN */
-   118,  /* (136) begin_stmt ::= TK_BEGIN TK_TRANSACTION */
-   118,  /* (137) begin_stmt ::= TK_BEGIN TK_ID */
-   118,  /* (138) begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION */
-   119,  /* (139) commit_stmt ::= TK_COMMIT */
-   119,  /* (140) commit_stmt ::= TK_COMMIT TK_TRANSACTION */
-   119,  /* (141) commit_stmt ::= TK_END */
-   119,  /* (142) commit_stmt ::= TK_END TK_TRANSACTION */
-   120,  /* (143) rollback_stmt ::= TK_ROLLBACK */
-   120,  /* (144) rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION */
-   121,  /* (145) attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID */
-   121,  /* (146) attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID */
-   122,  /* (147) detach_stmt ::= TK_DETACH TK_ID */
-   122,  /* (148) detach_stmt ::= TK_DETACH TK_DATABASE TK_ID */
-   123,  /* (149) explain_stmt ::= TK_EXPLAIN stmt */
-   123,  /* (150) explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt */
-   129,  /* (151) id_list ::= TK_ID */
-   129,  /* (152) id_list ::= id_list TK_COMMA TK_ID */
-   126,  /* (153) expr_list ::= expr */
-   126,  /* (154) expr_list ::= expr_list TK_COMMA expr */
-   124,  /* (155) expr ::= expr_atom */
-   124,  /* (156) expr ::= TK_LP expr TK_RP */
-   124,  /* (157) expr ::= TK_LP select_stmt TK_RP */
-   124,  /* (158) expr ::= TK_NOT expr */
-   124,  /* (159) expr ::= TK_MINUS expr */
-   124,  /* (160) expr ::= TK_PLUS expr */
-   124,  /* (161) expr ::= TK_TILDE expr */
-   124,  /* (162) expr ::= expr TK_OR expr */
-   124,  /* (163) expr ::= expr TK_AND expr */
-   124,  /* (164) expr ::= expr TK_EQ expr */
-   124,  /* (165) expr ::= expr TK_NE expr */
-   124,  /* (166) expr ::= expr TK_LT expr */
-   124,  /* (167) expr ::= expr TK_LE expr */
-   124,  /* (168) expr ::= expr TK_GT expr */
-   124,  /* (169) expr ::= expr TK_GE expr */
-   124,  /* (170) expr ::= expr TK_PLUS expr */
-   124,  /* (171) expr ::= expr TK_MINUS expr */
-   124,  /* (172) expr ::= expr TK_STAR expr */
-   124,  /* (173) expr ::= expr TK_SLASH expr */
-   124,  /* (174) expr ::= expr TK_PERCENT expr */
-   124,  /* (175) expr ::= expr TK_CONCAT expr */
-   124,  /* (176) expr ::= expr TK_AMP expr */
-   124,  /* (177) expr ::= expr TK_PIPE expr */
-   124,  /* (178) expr ::= expr TK_LIKE expr */
-   124,  /* (179) expr ::= expr TK_IS TK_NULL */
-   124,  /* (180) expr ::= expr TK_IS TK_NOT TK_NULL */
-   124,  /* (181) expr ::= expr TK_IS expr */
-   124,  /* (182) expr ::= expr TK_IN TK_LP expr_list TK_RP */
-   124,  /* (183) expr ::= expr TK_IN TK_LP select_stmt TK_RP */
-   124,  /* (184) expr ::= expr TK_BETWEEN expr TK_AND expr */
-   124,  /* (185) expr ::= TK_CASE expr_atom case_arms case_else TK_END */
-   124,  /* (186) expr ::= TK_CASE case_arms case_else TK_END */
-   124,  /* (187) expr ::= TK_ID TK_LP TK_RP */
-   124,  /* (188) expr ::= TK_ID TK_LP TK_STAR TK_RP */
-   124,  /* (189) expr ::= TK_ID TK_LP expr_list TK_RP */
-   124,  /* (190) expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP */
-   143,  /* (191) case_arms ::= TK_WHEN expr TK_THEN expr */
-   143,  /* (192) case_arms ::= case_arms TK_WHEN expr TK_THEN expr */
-   144,  /* (193) case_else ::= */
-   144,  /* (194) case_else ::= TK_ELSE expr */
-   125,  /* (195) expr_atom ::= TK_NUMBER */
-   125,  /* (196) expr_atom ::= TK_STRING */
-   125,  /* (197) expr_atom ::= TK_BLOB */
-   125,  /* (198) expr_atom ::= TK_NULL */
-   125,  /* (199) expr_atom ::= TK_TRUE */
-   125,  /* (200) expr_atom ::= TK_FALSE */
-   125,  /* (201) expr_atom ::= TK_QMARK */
-   125,  /* (202) expr_atom ::= TK_ID */
-   125,  /* (203) expr_atom ::= TK_ID TK_DOT TK_ID */
-   125,  /* (204) expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID */
-   151,  /* (205) maybe_semi ::= */
-   151,  /* (206) maybe_semi ::= TK_SEMI */
-   153,  /* (207) join_constraint ::= */
-   153,  /* (208) join_constraint ::= TK_ON expr */
-   153,  /* (209) join_constraint ::= TK_USING TK_LP id_list TK_RP */
+   153,  /* (49) join_constraint ::= */
+   153,  /* (50) join_constraint ::= TK_ON expr */
+   153,  /* (51) join_constraint ::= TK_USING TK_LP id_list TK_RP */
+   141,  /* (52) table_ref ::= TK_ID */
+   141,  /* (53) table_ref ::= TK_ID TK_DOT TK_ID */
+   141,  /* (54) table_ref ::= TK_ID TK_AS TK_ID */
+   141,  /* (55) table_ref ::= TK_ID TK_ID */
+   141,  /* (56) table_ref ::= TK_LP select_stmt TK_RP */
+   141,  /* (57) table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID */
+   131,  /* (58) where_opt ::= */
+   131,  /* (59) where_opt ::= TK_WHERE expr */
+   132,  /* (60) group_opt ::= */
+   132,  /* (61) group_opt ::= TK_GROUP TK_BY expr_list */
+   133,  /* (62) having_opt ::= */
+   133,  /* (63) having_opt ::= TK_HAVING expr */
+   134,  /* (64) order_opt ::= */
+   134,  /* (65) order_opt ::= TK_ORDER TK_BY order_list */
+   135,  /* (66) order_list ::= order_item */
+   135,  /* (67) order_list ::= order_list TK_COMMA order_item */
+   136,  /* (68) order_item ::= expr */
+   136,  /* (69) order_item ::= expr TK_ASC */
+   136,  /* (70) order_item ::= expr TK_DESC */
+   137,  /* (71) limit_opt ::= */
+   137,  /* (72) limit_opt ::= TK_LIMIT expr */
+   138,  /* (73) offset_part ::= */
+   138,  /* (74) offset_part ::= TK_OFFSET expr */
+   138,  /* (75) offset_part ::= TK_COMMA expr */
+   152,  /* (76) with_clause ::= TK_WITH cte_list */
+   152,  /* (77) with_clause ::= TK_WITH TK_RECURSIVE cte_list */
+   154,  /* (78) cte_list ::= cte */
+   154,  /* (79) cte_list ::= cte_list TK_COMMA cte */
+   155,  /* (80) cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP */
+   155,  /* (81) cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP */
+   112,  /* (82) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols values_list */
+   112,  /* (83) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES */
+   112,  /* (84) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt */
+   112,  /* (85) insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols values_list */
+   156,  /* (86) qname ::= TK_ID */
+   156,  /* (87) qname ::= TK_ID TK_DOT TK_ID */
+   149,  /* (88) insert_cols ::= */
+   149,  /* (89) insert_cols ::= TK_LP id_list TK_RP */
+   145,  /* (90) values_list ::= TK_VALUES TK_LP expr_list TK_RP */
+   145,  /* (91) values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP */
+   113,  /* (92) update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt */
+   146,  /* (93) assign_list ::= assign */
+   146,  /* (94) assign_list ::= assign_list TK_COMMA assign */
+   147,  /* (95) assign ::= TK_ID TK_EQ expr */
+   114,  /* (96) delete_stmt ::= TK_DELETE TK_FROM qname where_opt */
+   115,  /* (97) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_LP table_body TK_RP */
+   115,  /* (98) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_AS select_stmt */
+   115,  /* (99) create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname TK_ON TK_ID TK_LP id_list TK_RP */
+   115,  /* (100) create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname TK_AS select_stmt */
+   157,  /* (101) temp_opt ::= */
+   157,  /* (102) temp_opt ::= TK_TEMP */
+   157,  /* (103) temp_opt ::= TK_TEMPORARY */
+   160,  /* (104) unique_opt ::= */
+   160,  /* (105) unique_opt ::= TK_UNIQUE */
+   158,  /* (106) if_not_exists ::= */
+   158,  /* (107) if_not_exists ::= TK_IF TK_NOT TK_EXISTS */
+   159,  /* (108) table_body ::= table_elem */
+   159,  /* (109) table_body ::= table_body TK_COMMA table_elem */
+   161,  /* (110) table_elem ::= coldef */
+   161,  /* (111) table_elem ::= table_constraint */
+   148,  /* (112) coldef ::= TK_ID type_opt col_constraints */
+   163,  /* (113) type_opt ::= */
+   163,  /* (114) type_opt ::= TK_ID */
+   163,  /* (115) type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP */
+   163,  /* (116) type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP */
+   164,  /* (117) col_constraints ::= */
+   164,  /* (118) col_constraints ::= col_constraints col_constraint */
+   165,  /* (119) col_constraint ::= TK_PRIMARY TK_KEY */
+   165,  /* (120) col_constraint ::= TK_PRIMARY TK_KEY TK_ASC */
+   165,  /* (121) col_constraint ::= TK_PRIMARY TK_KEY TK_DESC */
+   165,  /* (122) col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR */
+   165,  /* (123) col_constraint ::= TK_NOT TK_NULL */
+   165,  /* (124) col_constraint ::= TK_UNIQUE */
+   165,  /* (125) col_constraint ::= TK_DEFAULT expr_atom */
+   165,  /* (126) col_constraint ::= TK_CHECK TK_LP expr TK_RP */
+   165,  /* (127) col_constraint ::= TK_REFERENCES qname */
+   165,  /* (128) col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP */
+   116,  /* (129) drop_stmt ::= TK_DROP TK_TABLE if_exists qname */
+   116,  /* (130) drop_stmt ::= TK_DROP TK_INDEX if_exists qname */
+   116,  /* (131) drop_stmt ::= TK_DROP TK_VIEW if_exists qname */
+   116,  /* (132) drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname */
+   166,  /* (133) if_exists ::= */
+   166,  /* (134) if_exists ::= TK_IF TK_EXISTS */
+   117,  /* (135) pragma_stmt ::= TK_PRAGMA qname */
+   117,  /* (136) pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom */
+   117,  /* (137) pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP */
+   118,  /* (138) begin_stmt ::= TK_BEGIN */
+   118,  /* (139) begin_stmt ::= TK_BEGIN TK_TRANSACTION */
+   118,  /* (140) begin_stmt ::= TK_BEGIN TK_ID */
+   118,  /* (141) begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION */
+   119,  /* (142) commit_stmt ::= TK_COMMIT */
+   119,  /* (143) commit_stmt ::= TK_COMMIT TK_TRANSACTION */
+   119,  /* (144) commit_stmt ::= TK_END */
+   119,  /* (145) commit_stmt ::= TK_END TK_TRANSACTION */
+   120,  /* (146) rollback_stmt ::= TK_ROLLBACK */
+   120,  /* (147) rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION */
+   121,  /* (148) attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID */
+   121,  /* (149) attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID */
+   122,  /* (150) detach_stmt ::= TK_DETACH TK_ID */
+   122,  /* (151) detach_stmt ::= TK_DETACH TK_DATABASE TK_ID */
+   123,  /* (152) explain_stmt ::= TK_EXPLAIN stmt */
+   123,  /* (153) explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt */
+   129,  /* (154) id_list ::= TK_ID */
+   129,  /* (155) id_list ::= id_list TK_COMMA TK_ID */
+   126,  /* (156) expr_list ::= expr */
+   126,  /* (157) expr_list ::= expr_list TK_COMMA expr */
+   124,  /* (158) expr ::= expr_atom */
+   124,  /* (159) expr ::= TK_LP expr TK_RP */
+   124,  /* (160) expr ::= TK_LP select_stmt TK_RP */
+   124,  /* (161) expr ::= TK_NOT expr */
+   124,  /* (162) expr ::= TK_MINUS expr */
+   124,  /* (163) expr ::= TK_PLUS expr */
+   124,  /* (164) expr ::= TK_TILDE expr */
+   124,  /* (165) expr ::= expr TK_OR expr */
+   124,  /* (166) expr ::= expr TK_AND expr */
+   124,  /* (167) expr ::= expr TK_EQ expr */
+   124,  /* (168) expr ::= expr TK_NE expr */
+   124,  /* (169) expr ::= expr TK_LT expr */
+   124,  /* (170) expr ::= expr TK_LE expr */
+   124,  /* (171) expr ::= expr TK_GT expr */
+   124,  /* (172) expr ::= expr TK_GE expr */
+   124,  /* (173) expr ::= expr TK_PLUS expr */
+   124,  /* (174) expr ::= expr TK_MINUS expr */
+   124,  /* (175) expr ::= expr TK_STAR expr */
+   124,  /* (176) expr ::= expr TK_SLASH expr */
+   124,  /* (177) expr ::= expr TK_PERCENT expr */
+   124,  /* (178) expr ::= expr TK_CONCAT expr */
+   124,  /* (179) expr ::= expr TK_AMP expr */
+   124,  /* (180) expr ::= expr TK_PIPE expr */
+   124,  /* (181) expr ::= expr TK_LIKE expr */
+   124,  /* (182) expr ::= expr TK_IS TK_NULL */
+   124,  /* (183) expr ::= expr TK_IS TK_NOT TK_NULL */
+   124,  /* (184) expr ::= expr TK_IS expr */
+   124,  /* (185) expr ::= expr TK_IN TK_LP expr_list TK_RP */
+   124,  /* (186) expr ::= expr TK_IN TK_LP select_stmt TK_RP */
+   124,  /* (187) expr ::= expr TK_BETWEEN expr TK_AND expr */
+   124,  /* (188) expr ::= TK_CASE expr_atom case_arms case_else TK_END */
+   124,  /* (189) expr ::= TK_CASE case_arms case_else TK_END */
+   124,  /* (190) expr ::= TK_ID TK_LP TK_RP */
+   124,  /* (191) expr ::= TK_ID TK_LP TK_STAR TK_RP */
+   124,  /* (192) expr ::= TK_ID TK_LP expr_list TK_RP */
+   124,  /* (193) expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP */
+   143,  /* (194) case_arms ::= TK_WHEN expr TK_THEN expr */
+   143,  /* (195) case_arms ::= case_arms TK_WHEN expr TK_THEN expr */
+   144,  /* (196) case_else ::= */
+   144,  /* (197) case_else ::= TK_ELSE expr */
+   125,  /* (198) expr_atom ::= TK_NUMBER */
+   125,  /* (199) expr_atom ::= TK_STRING */
+   125,  /* (200) expr_atom ::= TK_BLOB */
+   125,  /* (201) expr_atom ::= TK_NULL */
+   125,  /* (202) expr_atom ::= TK_TRUE */
+   125,  /* (203) expr_atom ::= TK_FALSE */
+   125,  /* (204) expr_atom ::= TK_QMARK */
+   125,  /* (205) expr_atom ::= TK_ID */
+   125,  /* (206) expr_atom ::= TK_ID TK_DOT TK_ID */
+   125,  /* (207) expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID */
+   151,  /* (208) maybe_semi ::= */
+   151,  /* (209) maybe_semi ::= TK_SEMI */
    162,  /* (210) table_constraint ::= TK_PRIMARY TK_KEY TK_LP id_list TK_RP */
    162,  /* (211) table_constraint ::= TK_UNIQUE TK_LP id_list TK_RP */
    162,  /* (212) table_constraint ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname */
@@ -2010,167 +2010,167 @@ static const signed char yyRuleInfoNRhs[] = {
    -2,  /* (46) join_op ::= TK_CROSS TK_JOIN */
    -2,  /* (47) join_op ::= TK_NATURAL TK_JOIN */
    -3,  /* (48) join_op ::= TK_NATURAL TK_LEFT TK_JOIN */
-   -1,  /* (49) table_ref ::= TK_ID */
-   -3,  /* (50) table_ref ::= TK_ID TK_DOT TK_ID */
-   -3,  /* (51) table_ref ::= TK_ID TK_AS TK_ID */
-   -2,  /* (52) table_ref ::= TK_ID TK_ID */
-   -3,  /* (53) table_ref ::= TK_LP select_stmt TK_RP */
-   -5,  /* (54) table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID */
-    0,  /* (55) where_opt ::= */
-   -2,  /* (56) where_opt ::= TK_WHERE expr */
-    0,  /* (57) group_opt ::= */
-   -3,  /* (58) group_opt ::= TK_GROUP TK_BY expr_list */
-    0,  /* (59) having_opt ::= */
-   -2,  /* (60) having_opt ::= TK_HAVING expr */
-    0,  /* (61) order_opt ::= */
-   -3,  /* (62) order_opt ::= TK_ORDER TK_BY order_list */
-   -1,  /* (63) order_list ::= order_item */
-   -3,  /* (64) order_list ::= order_list TK_COMMA order_item */
-   -1,  /* (65) order_item ::= expr */
-   -2,  /* (66) order_item ::= expr TK_ASC */
-   -2,  /* (67) order_item ::= expr TK_DESC */
-    0,  /* (68) limit_opt ::= */
-   -2,  /* (69) limit_opt ::= TK_LIMIT expr */
-    0,  /* (70) offset_part ::= */
-   -2,  /* (71) offset_part ::= TK_OFFSET expr */
-   -2,  /* (72) offset_part ::= TK_COMMA expr */
-   -2,  /* (73) with_clause ::= TK_WITH cte_list */
-   -3,  /* (74) with_clause ::= TK_WITH TK_RECURSIVE cte_list */
-   -1,  /* (75) cte_list ::= cte */
-   -3,  /* (76) cte_list ::= cte_list TK_COMMA cte */
-   -5,  /* (77) cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP */
-   -8,  /* (78) cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP */
-   -5,  /* (79) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols values_list */
-   -6,  /* (80) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES */
-   -5,  /* (81) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt */
-   -5,  /* (82) insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols values_list */
-   -1,  /* (83) qname ::= TK_ID */
-   -3,  /* (84) qname ::= TK_ID TK_DOT TK_ID */
-    0,  /* (85) insert_cols ::= */
-   -3,  /* (86) insert_cols ::= TK_LP id_list TK_RP */
-   -4,  /* (87) values_list ::= TK_VALUES TK_LP expr_list TK_RP */
-   -5,  /* (88) values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP */
-   -5,  /* (89) update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt */
-   -1,  /* (90) assign_list ::= assign */
-   -3,  /* (91) assign_list ::= assign_list TK_COMMA assign */
-   -3,  /* (92) assign ::= TK_ID TK_EQ expr */
-   -4,  /* (93) delete_stmt ::= TK_DELETE TK_FROM qname where_opt */
-   -8,  /* (94) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_LP table_body TK_RP */
-   -7,  /* (95) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_AS select_stmt */
-  -10,  /* (96) create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname TK_ON TK_ID TK_LP id_list TK_RP */
-   -7,  /* (97) create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname TK_AS select_stmt */
-    0,  /* (98) temp_opt ::= */
-   -1,  /* (99) temp_opt ::= TK_TEMP */
-   -1,  /* (100) temp_opt ::= TK_TEMPORARY */
-    0,  /* (101) unique_opt ::= */
-   -1,  /* (102) unique_opt ::= TK_UNIQUE */
-    0,  /* (103) if_not_exists ::= */
-   -3,  /* (104) if_not_exists ::= TK_IF TK_NOT TK_EXISTS */
-   -1,  /* (105) table_body ::= table_elem */
-   -3,  /* (106) table_body ::= table_body TK_COMMA table_elem */
-   -1,  /* (107) table_elem ::= coldef */
-   -1,  /* (108) table_elem ::= table_constraint */
-   -3,  /* (109) coldef ::= TK_ID type_opt col_constraints */
-    0,  /* (110) type_opt ::= */
-   -1,  /* (111) type_opt ::= TK_ID */
-   -4,  /* (112) type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP */
-   -6,  /* (113) type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP */
-    0,  /* (114) col_constraints ::= */
-   -2,  /* (115) col_constraints ::= col_constraints col_constraint */
-   -2,  /* (116) col_constraint ::= TK_PRIMARY TK_KEY */
-   -3,  /* (117) col_constraint ::= TK_PRIMARY TK_KEY TK_ASC */
-   -3,  /* (118) col_constraint ::= TK_PRIMARY TK_KEY TK_DESC */
-   -3,  /* (119) col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR */
-   -2,  /* (120) col_constraint ::= TK_NOT TK_NULL */
-   -1,  /* (121) col_constraint ::= TK_UNIQUE */
-   -2,  /* (122) col_constraint ::= TK_DEFAULT expr_atom */
-   -4,  /* (123) col_constraint ::= TK_CHECK TK_LP expr TK_RP */
-   -2,  /* (124) col_constraint ::= TK_REFERENCES qname */
-   -5,  /* (125) col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP */
-   -4,  /* (126) drop_stmt ::= TK_DROP TK_TABLE if_exists qname */
-   -4,  /* (127) drop_stmt ::= TK_DROP TK_INDEX if_exists qname */
-   -4,  /* (128) drop_stmt ::= TK_DROP TK_VIEW if_exists qname */
-   -4,  /* (129) drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname */
-    0,  /* (130) if_exists ::= */
-   -2,  /* (131) if_exists ::= TK_IF TK_EXISTS */
-   -2,  /* (132) pragma_stmt ::= TK_PRAGMA qname */
-   -4,  /* (133) pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom */
-   -5,  /* (134) pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP */
-   -1,  /* (135) begin_stmt ::= TK_BEGIN */
-   -2,  /* (136) begin_stmt ::= TK_BEGIN TK_TRANSACTION */
-   -2,  /* (137) begin_stmt ::= TK_BEGIN TK_ID */
-   -3,  /* (138) begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION */
-   -1,  /* (139) commit_stmt ::= TK_COMMIT */
-   -2,  /* (140) commit_stmt ::= TK_COMMIT TK_TRANSACTION */
-   -1,  /* (141) commit_stmt ::= TK_END */
-   -2,  /* (142) commit_stmt ::= TK_END TK_TRANSACTION */
-   -1,  /* (143) rollback_stmt ::= TK_ROLLBACK */
-   -2,  /* (144) rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION */
-   -4,  /* (145) attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID */
-   -5,  /* (146) attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID */
-   -2,  /* (147) detach_stmt ::= TK_DETACH TK_ID */
-   -3,  /* (148) detach_stmt ::= TK_DETACH TK_DATABASE TK_ID */
-   -2,  /* (149) explain_stmt ::= TK_EXPLAIN stmt */
-   -4,  /* (150) explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt */
-   -1,  /* (151) id_list ::= TK_ID */
-   -3,  /* (152) id_list ::= id_list TK_COMMA TK_ID */
-   -1,  /* (153) expr_list ::= expr */
-   -3,  /* (154) expr_list ::= expr_list TK_COMMA expr */
-   -1,  /* (155) expr ::= expr_atom */
-   -3,  /* (156) expr ::= TK_LP expr TK_RP */
-   -3,  /* (157) expr ::= TK_LP select_stmt TK_RP */
-   -2,  /* (158) expr ::= TK_NOT expr */
-   -2,  /* (159) expr ::= TK_MINUS expr */
-   -2,  /* (160) expr ::= TK_PLUS expr */
-   -2,  /* (161) expr ::= TK_TILDE expr */
-   -3,  /* (162) expr ::= expr TK_OR expr */
-   -3,  /* (163) expr ::= expr TK_AND expr */
-   -3,  /* (164) expr ::= expr TK_EQ expr */
-   -3,  /* (165) expr ::= expr TK_NE expr */
-   -3,  /* (166) expr ::= expr TK_LT expr */
-   -3,  /* (167) expr ::= expr TK_LE expr */
-   -3,  /* (168) expr ::= expr TK_GT expr */
-   -3,  /* (169) expr ::= expr TK_GE expr */
-   -3,  /* (170) expr ::= expr TK_PLUS expr */
-   -3,  /* (171) expr ::= expr TK_MINUS expr */
-   -3,  /* (172) expr ::= expr TK_STAR expr */
-   -3,  /* (173) expr ::= expr TK_SLASH expr */
-   -3,  /* (174) expr ::= expr TK_PERCENT expr */
-   -3,  /* (175) expr ::= expr TK_CONCAT expr */
-   -3,  /* (176) expr ::= expr TK_AMP expr */
-   -3,  /* (177) expr ::= expr TK_PIPE expr */
-   -3,  /* (178) expr ::= expr TK_LIKE expr */
-   -3,  /* (179) expr ::= expr TK_IS TK_NULL */
-   -4,  /* (180) expr ::= expr TK_IS TK_NOT TK_NULL */
-   -3,  /* (181) expr ::= expr TK_IS expr */
-   -5,  /* (182) expr ::= expr TK_IN TK_LP expr_list TK_RP */
-   -5,  /* (183) expr ::= expr TK_IN TK_LP select_stmt TK_RP */
-   -5,  /* (184) expr ::= expr TK_BETWEEN expr TK_AND expr */
-   -5,  /* (185) expr ::= TK_CASE expr_atom case_arms case_else TK_END */
-   -4,  /* (186) expr ::= TK_CASE case_arms case_else TK_END */
-   -3,  /* (187) expr ::= TK_ID TK_LP TK_RP */
-   -4,  /* (188) expr ::= TK_ID TK_LP TK_STAR TK_RP */
-   -4,  /* (189) expr ::= TK_ID TK_LP expr_list TK_RP */
-   -5,  /* (190) expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP */
-   -4,  /* (191) case_arms ::= TK_WHEN expr TK_THEN expr */
-   -5,  /* (192) case_arms ::= case_arms TK_WHEN expr TK_THEN expr */
-    0,  /* (193) case_else ::= */
-   -2,  /* (194) case_else ::= TK_ELSE expr */
-   -1,  /* (195) expr_atom ::= TK_NUMBER */
-   -1,  /* (196) expr_atom ::= TK_STRING */
-   -1,  /* (197) expr_atom ::= TK_BLOB */
-   -1,  /* (198) expr_atom ::= TK_NULL */
-   -1,  /* (199) expr_atom ::= TK_TRUE */
-   -1,  /* (200) expr_atom ::= TK_FALSE */
-   -1,  /* (201) expr_atom ::= TK_QMARK */
-   -1,  /* (202) expr_atom ::= TK_ID */
-   -3,  /* (203) expr_atom ::= TK_ID TK_DOT TK_ID */
-   -5,  /* (204) expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID */
-    0,  /* (205) maybe_semi ::= */
-   -1,  /* (206) maybe_semi ::= TK_SEMI */
-    0,  /* (207) join_constraint ::= */
-   -2,  /* (208) join_constraint ::= TK_ON expr */
-   -4,  /* (209) join_constraint ::= TK_USING TK_LP id_list TK_RP */
+    0,  /* (49) join_constraint ::= */
+   -2,  /* (50) join_constraint ::= TK_ON expr */
+   -4,  /* (51) join_constraint ::= TK_USING TK_LP id_list TK_RP */
+   -1,  /* (52) table_ref ::= TK_ID */
+   -3,  /* (53) table_ref ::= TK_ID TK_DOT TK_ID */
+   -3,  /* (54) table_ref ::= TK_ID TK_AS TK_ID */
+   -2,  /* (55) table_ref ::= TK_ID TK_ID */
+   -3,  /* (56) table_ref ::= TK_LP select_stmt TK_RP */
+   -5,  /* (57) table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID */
+    0,  /* (58) where_opt ::= */
+   -2,  /* (59) where_opt ::= TK_WHERE expr */
+    0,  /* (60) group_opt ::= */
+   -3,  /* (61) group_opt ::= TK_GROUP TK_BY expr_list */
+    0,  /* (62) having_opt ::= */
+   -2,  /* (63) having_opt ::= TK_HAVING expr */
+    0,  /* (64) order_opt ::= */
+   -3,  /* (65) order_opt ::= TK_ORDER TK_BY order_list */
+   -1,  /* (66) order_list ::= order_item */
+   -3,  /* (67) order_list ::= order_list TK_COMMA order_item */
+   -1,  /* (68) order_item ::= expr */
+   -2,  /* (69) order_item ::= expr TK_ASC */
+   -2,  /* (70) order_item ::= expr TK_DESC */
+    0,  /* (71) limit_opt ::= */
+   -2,  /* (72) limit_opt ::= TK_LIMIT expr */
+    0,  /* (73) offset_part ::= */
+   -2,  /* (74) offset_part ::= TK_OFFSET expr */
+   -2,  /* (75) offset_part ::= TK_COMMA expr */
+   -2,  /* (76) with_clause ::= TK_WITH cte_list */
+   -3,  /* (77) with_clause ::= TK_WITH TK_RECURSIVE cte_list */
+   -1,  /* (78) cte_list ::= cte */
+   -3,  /* (79) cte_list ::= cte_list TK_COMMA cte */
+   -5,  /* (80) cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP */
+   -8,  /* (81) cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP */
+   -5,  /* (82) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols values_list */
+   -6,  /* (83) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES */
+   -5,  /* (84) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt */
+   -5,  /* (85) insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols values_list */
+   -1,  /* (86) qname ::= TK_ID */
+   -3,  /* (87) qname ::= TK_ID TK_DOT TK_ID */
+    0,  /* (88) insert_cols ::= */
+   -3,  /* (89) insert_cols ::= TK_LP id_list TK_RP */
+   -4,  /* (90) values_list ::= TK_VALUES TK_LP expr_list TK_RP */
+   -5,  /* (91) values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP */
+   -5,  /* (92) update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt */
+   -1,  /* (93) assign_list ::= assign */
+   -3,  /* (94) assign_list ::= assign_list TK_COMMA assign */
+   -3,  /* (95) assign ::= TK_ID TK_EQ expr */
+   -4,  /* (96) delete_stmt ::= TK_DELETE TK_FROM qname where_opt */
+   -8,  /* (97) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_LP table_body TK_RP */
+   -7,  /* (98) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_AS select_stmt */
+  -10,  /* (99) create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname TK_ON TK_ID TK_LP id_list TK_RP */
+   -7,  /* (100) create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname TK_AS select_stmt */
+    0,  /* (101) temp_opt ::= */
+   -1,  /* (102) temp_opt ::= TK_TEMP */
+   -1,  /* (103) temp_opt ::= TK_TEMPORARY */
+    0,  /* (104) unique_opt ::= */
+   -1,  /* (105) unique_opt ::= TK_UNIQUE */
+    0,  /* (106) if_not_exists ::= */
+   -3,  /* (107) if_not_exists ::= TK_IF TK_NOT TK_EXISTS */
+   -1,  /* (108) table_body ::= table_elem */
+   -3,  /* (109) table_body ::= table_body TK_COMMA table_elem */
+   -1,  /* (110) table_elem ::= coldef */
+   -1,  /* (111) table_elem ::= table_constraint */
+   -3,  /* (112) coldef ::= TK_ID type_opt col_constraints */
+    0,  /* (113) type_opt ::= */
+   -1,  /* (114) type_opt ::= TK_ID */
+   -4,  /* (115) type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP */
+   -6,  /* (116) type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP */
+    0,  /* (117) col_constraints ::= */
+   -2,  /* (118) col_constraints ::= col_constraints col_constraint */
+   -2,  /* (119) col_constraint ::= TK_PRIMARY TK_KEY */
+   -3,  /* (120) col_constraint ::= TK_PRIMARY TK_KEY TK_ASC */
+   -3,  /* (121) col_constraint ::= TK_PRIMARY TK_KEY TK_DESC */
+   -3,  /* (122) col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR */
+   -2,  /* (123) col_constraint ::= TK_NOT TK_NULL */
+   -1,  /* (124) col_constraint ::= TK_UNIQUE */
+   -2,  /* (125) col_constraint ::= TK_DEFAULT expr_atom */
+   -4,  /* (126) col_constraint ::= TK_CHECK TK_LP expr TK_RP */
+   -2,  /* (127) col_constraint ::= TK_REFERENCES qname */
+   -5,  /* (128) col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP */
+   -4,  /* (129) drop_stmt ::= TK_DROP TK_TABLE if_exists qname */
+   -4,  /* (130) drop_stmt ::= TK_DROP TK_INDEX if_exists qname */
+   -4,  /* (131) drop_stmt ::= TK_DROP TK_VIEW if_exists qname */
+   -4,  /* (132) drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname */
+    0,  /* (133) if_exists ::= */
+   -2,  /* (134) if_exists ::= TK_IF TK_EXISTS */
+   -2,  /* (135) pragma_stmt ::= TK_PRAGMA qname */
+   -4,  /* (136) pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom */
+   -5,  /* (137) pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP */
+   -1,  /* (138) begin_stmt ::= TK_BEGIN */
+   -2,  /* (139) begin_stmt ::= TK_BEGIN TK_TRANSACTION */
+   -2,  /* (140) begin_stmt ::= TK_BEGIN TK_ID */
+   -3,  /* (141) begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION */
+   -1,  /* (142) commit_stmt ::= TK_COMMIT */
+   -2,  /* (143) commit_stmt ::= TK_COMMIT TK_TRANSACTION */
+   -1,  /* (144) commit_stmt ::= TK_END */
+   -2,  /* (145) commit_stmt ::= TK_END TK_TRANSACTION */
+   -1,  /* (146) rollback_stmt ::= TK_ROLLBACK */
+   -2,  /* (147) rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION */
+   -4,  /* (148) attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID */
+   -5,  /* (149) attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID */
+   -2,  /* (150) detach_stmt ::= TK_DETACH TK_ID */
+   -3,  /* (151) detach_stmt ::= TK_DETACH TK_DATABASE TK_ID */
+   -2,  /* (152) explain_stmt ::= TK_EXPLAIN stmt */
+   -4,  /* (153) explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt */
+   -1,  /* (154) id_list ::= TK_ID */
+   -3,  /* (155) id_list ::= id_list TK_COMMA TK_ID */
+   -1,  /* (156) expr_list ::= expr */
+   -3,  /* (157) expr_list ::= expr_list TK_COMMA expr */
+   -1,  /* (158) expr ::= expr_atom */
+   -3,  /* (159) expr ::= TK_LP expr TK_RP */
+   -3,  /* (160) expr ::= TK_LP select_stmt TK_RP */
+   -2,  /* (161) expr ::= TK_NOT expr */
+   -2,  /* (162) expr ::= TK_MINUS expr */
+   -2,  /* (163) expr ::= TK_PLUS expr */
+   -2,  /* (164) expr ::= TK_TILDE expr */
+   -3,  /* (165) expr ::= expr TK_OR expr */
+   -3,  /* (166) expr ::= expr TK_AND expr */
+   -3,  /* (167) expr ::= expr TK_EQ expr */
+   -3,  /* (168) expr ::= expr TK_NE expr */
+   -3,  /* (169) expr ::= expr TK_LT expr */
+   -3,  /* (170) expr ::= expr TK_LE expr */
+   -3,  /* (171) expr ::= expr TK_GT expr */
+   -3,  /* (172) expr ::= expr TK_GE expr */
+   -3,  /* (173) expr ::= expr TK_PLUS expr */
+   -3,  /* (174) expr ::= expr TK_MINUS expr */
+   -3,  /* (175) expr ::= expr TK_STAR expr */
+   -3,  /* (176) expr ::= expr TK_SLASH expr */
+   -3,  /* (177) expr ::= expr TK_PERCENT expr */
+   -3,  /* (178) expr ::= expr TK_CONCAT expr */
+   -3,  /* (179) expr ::= expr TK_AMP expr */
+   -3,  /* (180) expr ::= expr TK_PIPE expr */
+   -3,  /* (181) expr ::= expr TK_LIKE expr */
+   -3,  /* (182) expr ::= expr TK_IS TK_NULL */
+   -4,  /* (183) expr ::= expr TK_IS TK_NOT TK_NULL */
+   -3,  /* (184) expr ::= expr TK_IS expr */
+   -5,  /* (185) expr ::= expr TK_IN TK_LP expr_list TK_RP */
+   -5,  /* (186) expr ::= expr TK_IN TK_LP select_stmt TK_RP */
+   -5,  /* (187) expr ::= expr TK_BETWEEN expr TK_AND expr */
+   -5,  /* (188) expr ::= TK_CASE expr_atom case_arms case_else TK_END */
+   -4,  /* (189) expr ::= TK_CASE case_arms case_else TK_END */
+   -3,  /* (190) expr ::= TK_ID TK_LP TK_RP */
+   -4,  /* (191) expr ::= TK_ID TK_LP TK_STAR TK_RP */
+   -4,  /* (192) expr ::= TK_ID TK_LP expr_list TK_RP */
+   -5,  /* (193) expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP */
+   -4,  /* (194) case_arms ::= TK_WHEN expr TK_THEN expr */
+   -5,  /* (195) case_arms ::= case_arms TK_WHEN expr TK_THEN expr */
+    0,  /* (196) case_else ::= */
+   -2,  /* (197) case_else ::= TK_ELSE expr */
+   -1,  /* (198) expr_atom ::= TK_NUMBER */
+   -1,  /* (199) expr_atom ::= TK_STRING */
+   -1,  /* (200) expr_atom ::= TK_BLOB */
+   -1,  /* (201) expr_atom ::= TK_NULL */
+   -1,  /* (202) expr_atom ::= TK_TRUE */
+   -1,  /* (203) expr_atom ::= TK_FALSE */
+   -1,  /* (204) expr_atom ::= TK_QMARK */
+   -1,  /* (205) expr_atom ::= TK_ID */
+   -3,  /* (206) expr_atom ::= TK_ID TK_DOT TK_ID */
+   -5,  /* (207) expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID */
+    0,  /* (208) maybe_semi ::= */
+   -1,  /* (209) maybe_semi ::= TK_SEMI */
    -5,  /* (210) table_constraint ::= TK_PRIMARY TK_KEY TK_LP id_list TK_RP */
    -4,  /* (211) table_constraint ::= TK_UNIQUE TK_LP id_list TK_RP */
    -7,  /* (212) table_constraint ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname */
@@ -3351,7 +3351,7 @@ static void yy_rule_37(yy_reduce_ctx *yy_ctx){
 #endif
 #line 317 "sql_grammar.lime"
 {
-    if (yymsp[-1].minor.yy11) yymsp[-1].minor.yy11->join = (sql_join_type_t)yymsp[-2].minor.yy292;
+    if (yymsp[-1].minor.yy11) { yymsp[-1].minor.yy11->join = (sql_join_type_t)yymsp[-2].minor.yy292; yymsp[-1].minor.yy11->on = yymsp[0].minor.yy234; }
     if (yymsp[-3].minor.yy11 == NULL) { yylhsminor.yy11 = yymsp[-1].minor.yy11; }
     else { sql_src_t *s = yymsp[-3].minor.yy11; while (s->next) s = s->next; s->next = yymsp[-1].minor.yy11; yylhsminor.yy11 = yymsp[-3].minor.yy11; }
 }
@@ -3661,7 +3661,7 @@ static void yy_rule_48(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (49) table_ref ::= TK_ID */
+/* (49) join_constraint ::= */
 static void yy_rule_49(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3678,12 +3678,9 @@ static void yy_rule_49(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 339 "sql_grammar.lime"
-{
-    yylhsminor.yy11 = AST(pstate, sql_src_t); if (yylhsminor.yy11) yylhsminor.yy11->table = tok_str(yymsp[0].minor.yy0);
-}
-#line 3686 "sql_grammar.c"
-  yymsp[0].minor.yy11 = yylhsminor.yy11;
+#line 336 "sql_grammar.lime"
+{ yymsp[1].minor.yy234 = NULL; }
+#line 3684 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3691,7 +3688,7 @@ static void yy_rule_49(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (50) table_ref ::= TK_ID TK_DOT TK_ID */
+/* (50) join_constraint ::= TK_ON expr */
 static void yy_rule_50(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3708,12 +3705,9 @@ static void yy_rule_50(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 342 "sql_grammar.lime"
-{
-    yylhsminor.yy11 = AST(pstate, sql_src_t); if (yylhsminor.yy11) { yylhsminor.yy11->schema = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy11->table = tok_str(yymsp[0].minor.yy0); }
-}
-#line 3716 "sql_grammar.c"
-  yymsp[-2].minor.yy11 = yylhsminor.yy11;
+#line 337 "sql_grammar.lime"
+{ yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
+#line 3711 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3721,7 +3715,7 @@ static void yy_rule_50(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (51) table_ref ::= TK_ID TK_AS TK_ID */
+/* (51) join_constraint ::= TK_USING TK_LP id_list TK_RP */
 static void yy_rule_51(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3738,12 +3732,9 @@ static void yy_rule_51(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 345 "sql_grammar.lime"
-{
-    yylhsminor.yy11 = AST(pstate, sql_src_t); if (yylhsminor.yy11) { yylhsminor.yy11->table = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy11->alias = tok_str(yymsp[0].minor.yy0); }
-}
-#line 3746 "sql_grammar.c"
-  yymsp[-2].minor.yy11 = yylhsminor.yy11;
+#line 338 "sql_grammar.lime"
+{ yymsp[-3].minor.yy234 = NULL; }
+#line 3738 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3751,7 +3742,7 @@ static void yy_rule_51(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (52) table_ref ::= TK_ID TK_ID */
+/* (52) table_ref ::= TK_ID */
 static void yy_rule_52(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3768,12 +3759,12 @@ static void yy_rule_52(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 348 "sql_grammar.lime"
+#line 340 "sql_grammar.lime"
 {
-    yylhsminor.yy11 = AST(pstate, sql_src_t); if (yylhsminor.yy11) { yylhsminor.yy11->table = tok_str(yymsp[-1].minor.yy0); yylhsminor.yy11->alias = tok_str(yymsp[0].minor.yy0); }
+    yylhsminor.yy11 = AST(pstate, sql_src_t); if (yylhsminor.yy11) yylhsminor.yy11->table = tok_str(yymsp[0].minor.yy0);
 }
-#line 3776 "sql_grammar.c"
-  yymsp[-1].minor.yy11 = yylhsminor.yy11;
+#line 3767 "sql_grammar.c"
+  yymsp[0].minor.yy11 = yylhsminor.yy11;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3781,7 +3772,7 @@ static void yy_rule_52(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (53) table_ref ::= TK_LP select_stmt TK_RP */
+/* (53) table_ref ::= TK_ID TK_DOT TK_ID */
 static void yy_rule_53(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3798,11 +3789,12 @@ static void yy_rule_53(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 351 "sql_grammar.lime"
+#line 343 "sql_grammar.lime"
 {
-    yymsp[-2].minor.yy11 = AST(pstate, sql_src_t); if (yymsp[-2].minor.yy11) yymsp[-2].minor.yy11->subquery = yymsp[-1].minor.yy61;
+    yylhsminor.yy11 = AST(pstate, sql_src_t); if (yylhsminor.yy11) { yylhsminor.yy11->schema = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy11->table = tok_str(yymsp[0].minor.yy0); }
 }
-#line 3806 "sql_grammar.c"
+#line 3797 "sql_grammar.c"
+  yymsp[-2].minor.yy11 = yylhsminor.yy11;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3810,7 +3802,7 @@ static void yy_rule_53(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (54) table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID */
+/* (54) table_ref ::= TK_ID TK_AS TK_ID */
 static void yy_rule_54(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3827,11 +3819,12 @@ static void yy_rule_54(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 354 "sql_grammar.lime"
+#line 346 "sql_grammar.lime"
 {
-    yymsp[-4].minor.yy11 = AST(pstate, sql_src_t); if (yymsp[-4].minor.yy11) { yymsp[-4].minor.yy11->subquery = yymsp[-3].minor.yy61; yymsp[-4].minor.yy11->alias = tok_str(yymsp[0].minor.yy0); }
+    yylhsminor.yy11 = AST(pstate, sql_src_t); if (yylhsminor.yy11) { yylhsminor.yy11->table = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy11->alias = tok_str(yymsp[0].minor.yy0); }
 }
-#line 3835 "sql_grammar.c"
+#line 3827 "sql_grammar.c"
+  yymsp[-2].minor.yy11 = yylhsminor.yy11;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3839,7 +3832,7 @@ static void yy_rule_54(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (55) where_opt ::= */
+/* (55) table_ref ::= TK_ID TK_ID */
 static void yy_rule_55(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3856,9 +3849,12 @@ static void yy_rule_55(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 358 "sql_grammar.lime"
-{ yymsp[1].minor.yy234 = NULL; }
-#line 3862 "sql_grammar.c"
+#line 349 "sql_grammar.lime"
+{
+    yylhsminor.yy11 = AST(pstate, sql_src_t); if (yylhsminor.yy11) { yylhsminor.yy11->table = tok_str(yymsp[-1].minor.yy0); yylhsminor.yy11->alias = tok_str(yymsp[0].minor.yy0); }
+}
+#line 3857 "sql_grammar.c"
+  yymsp[-1].minor.yy11 = yylhsminor.yy11;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3866,7 +3862,7 @@ static void yy_rule_55(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (56) where_opt ::= TK_WHERE expr */
+/* (56) table_ref ::= TK_LP select_stmt TK_RP */
 static void yy_rule_56(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3883,9 +3879,11 @@ static void yy_rule_56(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 359 "sql_grammar.lime"
-{ yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
-#line 3889 "sql_grammar.c"
+#line 352 "sql_grammar.lime"
+{
+    yymsp[-2].minor.yy11 = AST(pstate, sql_src_t); if (yymsp[-2].minor.yy11) yymsp[-2].minor.yy11->subquery = yymsp[-1].minor.yy61;
+}
+#line 3887 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3893,7 +3891,7 @@ static void yy_rule_56(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (57) group_opt ::= */
+/* (57) table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID */
 static void yy_rule_57(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3910,8 +3908,10 @@ static void yy_rule_57(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 361 "sql_grammar.lime"
-{ yymsp[1].minor.yy136 = NULL; }
+#line 355 "sql_grammar.lime"
+{
+    yymsp[-4].minor.yy11 = AST(pstate, sql_src_t); if (yymsp[-4].minor.yy11) { yymsp[-4].minor.yy11->subquery = yymsp[-3].minor.yy61; yymsp[-4].minor.yy11->alias = tok_str(yymsp[0].minor.yy0); }
+}
 #line 3916 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3920,7 +3920,7 @@ static void yy_rule_57(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (58) group_opt ::= TK_GROUP TK_BY expr_list */
+/* (58) where_opt ::= */
 static void yy_rule_58(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3937,8 +3937,8 @@ static void yy_rule_58(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 362 "sql_grammar.lime"
-{ yymsp[-2].minor.yy136 = yymsp[0].minor.yy136; }
+#line 359 "sql_grammar.lime"
+{ yymsp[1].minor.yy234 = NULL; }
 #line 3943 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3947,7 +3947,7 @@ static void yy_rule_58(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (59) having_opt ::= */
+/* (59) where_opt ::= TK_WHERE expr */
 static void yy_rule_59(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3964,8 +3964,8 @@ static void yy_rule_59(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 364 "sql_grammar.lime"
-{ yymsp[1].minor.yy234 = NULL; }
+#line 360 "sql_grammar.lime"
+{ yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
 #line 3970 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3974,7 +3974,7 @@ static void yy_rule_59(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (60) having_opt ::= TK_HAVING expr */
+/* (60) group_opt ::= */
 static void yy_rule_60(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -3991,8 +3991,8 @@ static void yy_rule_60(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 365 "sql_grammar.lime"
-{ yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
+#line 362 "sql_grammar.lime"
+{ yymsp[1].minor.yy136 = NULL; }
 #line 3997 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4001,7 +4001,7 @@ static void yy_rule_60(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (61) order_opt ::= */
+/* (61) group_opt ::= TK_GROUP TK_BY expr_list */
 static void yy_rule_61(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4018,8 +4018,8 @@ static void yy_rule_61(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 367 "sql_grammar.lime"
-{ yymsp[1].minor.yy136 = NULL; }
+#line 363 "sql_grammar.lime"
+{ yymsp[-2].minor.yy136 = yymsp[0].minor.yy136; }
 #line 4024 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4028,7 +4028,7 @@ static void yy_rule_61(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (62) order_opt ::= TK_ORDER TK_BY order_list */
+/* (62) having_opt ::= */
 static void yy_rule_62(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4045,8 +4045,8 @@ static void yy_rule_62(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 368 "sql_grammar.lime"
-{ yymsp[-2].minor.yy136 = yymsp[0].minor.yy136; }
+#line 365 "sql_grammar.lime"
+{ yymsp[1].minor.yy234 = NULL; }
 #line 4051 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4055,7 +4055,7 @@ static void yy_rule_62(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (63) order_list ::= order_item */
+/* (63) having_opt ::= TK_HAVING expr */
 static void yy_rule_63(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4072,10 +4072,9 @@ static void yy_rule_63(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 370 "sql_grammar.lime"
-{ yylhsminor.yy136 = mk_list(pstate); if (yylhsminor.yy136 && yymsp[0].minor.yy194) { yylhsminor.yy136->head = yylhsminor.yy136->tail = yymsp[0].minor.yy194; yylhsminor.yy136->n = 1; } }
+#line 366 "sql_grammar.lime"
+{ yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
 #line 4078 "sql_grammar.c"
-  yymsp[0].minor.yy136 = yylhsminor.yy136;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4083,7 +4082,7 @@ static void yy_rule_63(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (64) order_list ::= order_list TK_COMMA order_item */
+/* (64) order_opt ::= */
 static void yy_rule_64(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4100,12 +4099,9 @@ static void yy_rule_64(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 371 "sql_grammar.lime"
-{
-    yylhsminor.yy136 = yymsp[-2].minor.yy136; if (yylhsminor.yy136 && yymsp[0].minor.yy194) { if (yylhsminor.yy136->tail) yylhsminor.yy136->tail->next = yymsp[0].minor.yy194; else yylhsminor.yy136->head = yymsp[0].minor.yy194; yylhsminor.yy136->tail = yymsp[0].minor.yy194; yylhsminor.yy136->n++; }
-}
-#line 4108 "sql_grammar.c"
-  yymsp[-2].minor.yy136 = yylhsminor.yy136;
+#line 368 "sql_grammar.lime"
+{ yymsp[1].minor.yy136 = NULL; }
+#line 4105 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4113,7 +4109,7 @@ static void yy_rule_64(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (65) order_item ::= expr */
+/* (65) order_opt ::= TK_ORDER TK_BY order_list */
 static void yy_rule_65(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4130,10 +4126,9 @@ static void yy_rule_65(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 375 "sql_grammar.lime"
-{ yylhsminor.yy194 = AST(pstate, sql_exprlist_item_t); if (yylhsminor.yy194) { yylhsminor.yy194->expr = yymsp[0].minor.yy234; yylhsminor.yy194->sort = 1; } }
-#line 4136 "sql_grammar.c"
-  yymsp[0].minor.yy194 = yylhsminor.yy194;
+#line 369 "sql_grammar.lime"
+{ yymsp[-2].minor.yy136 = yymsp[0].minor.yy136; }
+#line 4132 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4141,7 +4136,7 @@ static void yy_rule_65(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (66) order_item ::= expr TK_ASC */
+/* (66) order_list ::= order_item */
 static void yy_rule_66(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4158,10 +4153,10 @@ static void yy_rule_66(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 376 "sql_grammar.lime"
-{ yylhsminor.yy194 = AST(pstate, sql_exprlist_item_t); if (yylhsminor.yy194) { yylhsminor.yy194->expr = yymsp[-1].minor.yy234; yylhsminor.yy194->sort = 1; } }
-#line 4164 "sql_grammar.c"
-  yymsp[-1].minor.yy194 = yylhsminor.yy194;
+#line 371 "sql_grammar.lime"
+{ yylhsminor.yy136 = mk_list(pstate); if (yylhsminor.yy136 && yymsp[0].minor.yy194) { yylhsminor.yy136->head = yylhsminor.yy136->tail = yymsp[0].minor.yy194; yylhsminor.yy136->n = 1; } }
+#line 4159 "sql_grammar.c"
+  yymsp[0].minor.yy136 = yylhsminor.yy136;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4169,7 +4164,7 @@ static void yy_rule_66(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (67) order_item ::= expr TK_DESC */
+/* (67) order_list ::= order_list TK_COMMA order_item */
 static void yy_rule_67(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4186,10 +4181,12 @@ static void yy_rule_67(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 377 "sql_grammar.lime"
-{ yylhsminor.yy194 = AST(pstate, sql_exprlist_item_t); if (yylhsminor.yy194) { yylhsminor.yy194->expr = yymsp[-1].minor.yy234; yylhsminor.yy194->sort = 2; } }
-#line 4192 "sql_grammar.c"
-  yymsp[-1].minor.yy194 = yylhsminor.yy194;
+#line 372 "sql_grammar.lime"
+{
+    yylhsminor.yy136 = yymsp[-2].minor.yy136; if (yylhsminor.yy136 && yymsp[0].minor.yy194) { if (yylhsminor.yy136->tail) yylhsminor.yy136->tail->next = yymsp[0].minor.yy194; else yylhsminor.yy136->head = yymsp[0].minor.yy194; yylhsminor.yy136->tail = yymsp[0].minor.yy194; yylhsminor.yy136->n++; }
+}
+#line 4189 "sql_grammar.c"
+  yymsp[-2].minor.yy136 = yylhsminor.yy136;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4197,7 +4194,7 @@ static void yy_rule_67(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (68) limit_opt ::= */
+/* (68) order_item ::= expr */
 static void yy_rule_68(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4214,9 +4211,10 @@ static void yy_rule_68(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 379 "sql_grammar.lime"
-{ yymsp[1].minor.yy234 = NULL; }
-#line 4220 "sql_grammar.c"
+#line 376 "sql_grammar.lime"
+{ yylhsminor.yy194 = AST(pstate, sql_exprlist_item_t); if (yylhsminor.yy194) { yylhsminor.yy194->expr = yymsp[0].minor.yy234; yylhsminor.yy194->sort = 1; } }
+#line 4217 "sql_grammar.c"
+  yymsp[0].minor.yy194 = yylhsminor.yy194;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4224,7 +4222,7 @@ static void yy_rule_68(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (69) limit_opt ::= TK_LIMIT expr */
+/* (69) order_item ::= expr TK_ASC */
 static void yy_rule_69(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4241,9 +4239,10 @@ static void yy_rule_69(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 380 "sql_grammar.lime"
-{ yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
-#line 4247 "sql_grammar.c"
+#line 377 "sql_grammar.lime"
+{ yylhsminor.yy194 = AST(pstate, sql_exprlist_item_t); if (yylhsminor.yy194) { yylhsminor.yy194->expr = yymsp[-1].minor.yy234; yylhsminor.yy194->sort = 1; } }
+#line 4245 "sql_grammar.c"
+  yymsp[-1].minor.yy194 = yylhsminor.yy194;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4251,7 +4250,7 @@ static void yy_rule_69(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (70) offset_part ::= */
+/* (70) order_item ::= expr TK_DESC */
 static void yy_rule_70(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4268,9 +4267,10 @@ static void yy_rule_70(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 382 "sql_grammar.lime"
-{ yymsp[1].minor.yy234 = NULL; }
-#line 4274 "sql_grammar.c"
+#line 378 "sql_grammar.lime"
+{ yylhsminor.yy194 = AST(pstate, sql_exprlist_item_t); if (yylhsminor.yy194) { yylhsminor.yy194->expr = yymsp[-1].minor.yy234; yylhsminor.yy194->sort = 2; } }
+#line 4273 "sql_grammar.c"
+  yymsp[-1].minor.yy194 = yylhsminor.yy194;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4278,7 +4278,7 @@ static void yy_rule_70(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (71) offset_part ::= TK_OFFSET expr */
+/* (71) limit_opt ::= */
 static void yy_rule_71(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4295,8 +4295,8 @@ static void yy_rule_71(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 383 "sql_grammar.lime"
-{ yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
+#line 380 "sql_grammar.lime"
+{ yymsp[1].minor.yy234 = NULL; }
 #line 4301 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4305,8 +4305,62 @@ static void yy_rule_71(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (72) offset_part ::= TK_COMMA expr */
+/* (72) limit_opt ::= TK_LIMIT expr */
 static void yy_rule_72(yy_reduce_ctx *yy_ctx){
+  yyParser *yypParser = yy_ctx->yypParser;
+  yyStackEntry *yymsp = yy_ctx->yymsp;
+  int yyLookahead = yy_ctx->yyLookahead;
+  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
+  YYMINORTYPE yylhsminor;
+#ifdef YYLOCATIONTYPE
+  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
+#endif
+  SqlParseCTX_FETCH
+  SqlParseARG_FETCH
+  (void)yypParser; (void)yymsp; (void)yyLookahead;
+  (void)yyLookaheadToken; (void)yylhsminor;
+#ifdef YYLOCATIONTYPE
+  (void)yyloc_lhs;
+#endif
+#line 381 "sql_grammar.lime"
+{ yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
+#line 4328 "sql_grammar.c"
+#ifdef YYLOCATIONTYPE
+  /* Commit any @$ writes back to yy_reduce's local
+  ** so the post-action stack-shift sees them. */
+  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
+#endif
+}
+
+/* (73) offset_part ::= */
+static void yy_rule_73(yy_reduce_ctx *yy_ctx){
+  yyParser *yypParser = yy_ctx->yypParser;
+  yyStackEntry *yymsp = yy_ctx->yymsp;
+  int yyLookahead = yy_ctx->yyLookahead;
+  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
+  YYMINORTYPE yylhsminor;
+#ifdef YYLOCATIONTYPE
+  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
+#endif
+  SqlParseCTX_FETCH
+  SqlParseARG_FETCH
+  (void)yypParser; (void)yymsp; (void)yyLookahead;
+  (void)yyLookaheadToken; (void)yylhsminor;
+#ifdef YYLOCATIONTYPE
+  (void)yyloc_lhs;
+#endif
+#line 383 "sql_grammar.lime"
+{ yymsp[1].minor.yy234 = NULL; }
+#line 4355 "sql_grammar.c"
+#ifdef YYLOCATIONTYPE
+  /* Commit any @$ writes back to yy_reduce's local
+  ** so the post-action stack-shift sees them. */
+  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
+#endif
+}
+
+/* (74) offset_part ::= TK_OFFSET expr */
+static void yy_rule_74(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
   int yyLookahead = yy_ctx->yyLookahead;
@@ -4324,60 +4378,6 @@ static void yy_rule_72(yy_reduce_ctx *yy_ctx){
 #endif
 #line 384 "sql_grammar.lime"
 { yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
-#line 4328 "sql_grammar.c"
-#ifdef YYLOCATIONTYPE
-  /* Commit any @$ writes back to yy_reduce's local
-  ** so the post-action stack-shift sees them. */
-  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
-#endif
-}
-
-/* (73) with_clause ::= TK_WITH cte_list */
-static void yy_rule_73(yy_reduce_ctx *yy_ctx){
-  yyParser *yypParser = yy_ctx->yypParser;
-  yyStackEntry *yymsp = yy_ctx->yymsp;
-  int yyLookahead = yy_ctx->yyLookahead;
-  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
-  YYMINORTYPE yylhsminor;
-#ifdef YYLOCATIONTYPE
-  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
-#endif
-  SqlParseCTX_FETCH
-  SqlParseARG_FETCH
-  (void)yypParser; (void)yymsp; (void)yyLookahead;
-  (void)yyLookaheadToken; (void)yylhsminor;
-#ifdef YYLOCATIONTYPE
-  (void)yyloc_lhs;
-#endif
-#line 392 "sql_grammar.lime"
-{ yymsp[-1].minor.yy69.list = yymsp[0].minor.yy62; yymsp[-1].minor.yy69.rec = 0; }
-#line 4355 "sql_grammar.c"
-#ifdef YYLOCATIONTYPE
-  /* Commit any @$ writes back to yy_reduce's local
-  ** so the post-action stack-shift sees them. */
-  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
-#endif
-}
-
-/* (74) with_clause ::= TK_WITH TK_RECURSIVE cte_list */
-static void yy_rule_74(yy_reduce_ctx *yy_ctx){
-  yyParser *yypParser = yy_ctx->yypParser;
-  yyStackEntry *yymsp = yy_ctx->yymsp;
-  int yyLookahead = yy_ctx->yyLookahead;
-  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
-  YYMINORTYPE yylhsminor;
-#ifdef YYLOCATIONTYPE
-  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
-#endif
-  SqlParseCTX_FETCH
-  SqlParseARG_FETCH
-  (void)yypParser; (void)yymsp; (void)yyLookahead;
-  (void)yyLookaheadToken; (void)yylhsminor;
-#ifdef YYLOCATIONTYPE
-  (void)yyloc_lhs;
-#endif
-#line 393 "sql_grammar.lime"
-{ yymsp[-2].minor.yy69.list = yymsp[0].minor.yy62; yymsp[-2].minor.yy69.rec = 1; }
 #line 4382 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4386,7 +4386,7 @@ static void yy_rule_74(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (75) cte_list ::= cte */
+/* (75) offset_part ::= TK_COMMA expr */
 static void yy_rule_75(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4403,10 +4403,9 @@ static void yy_rule_75(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 395 "sql_grammar.lime"
-{ yylhsminor.yy62 = yymsp[0].minor.yy62; }
+#line 385 "sql_grammar.lime"
+{ yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
 #line 4409 "sql_grammar.c"
-  yymsp[0].minor.yy62 = yylhsminor.yy62;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4414,7 +4413,7 @@ static void yy_rule_75(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (76) cte_list ::= cte_list TK_COMMA cte */
+/* (76) with_clause ::= TK_WITH cte_list */
 static void yy_rule_76(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4431,13 +4430,9 @@ static void yy_rule_76(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 396 "sql_grammar.lime"
-{
-    if (yymsp[-2].minor.yy62 == NULL) { yylhsminor.yy62 = yymsp[0].minor.yy62; }
-    else { sql_cte_t *s = yymsp[-2].minor.yy62; while (s->next) s = s->next; s->next = yymsp[0].minor.yy62; yylhsminor.yy62 = yymsp[-2].minor.yy62; }
-}
-#line 4440 "sql_grammar.c"
-  yymsp[-2].minor.yy62 = yylhsminor.yy62;
+#line 393 "sql_grammar.lime"
+{ yymsp[-1].minor.yy69.list = yymsp[0].minor.yy62; yymsp[-1].minor.yy69.rec = 0; }
+#line 4436 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4445,7 +4440,7 @@ static void yy_rule_76(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (77) cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP */
+/* (77) with_clause ::= TK_WITH TK_RECURSIVE cte_list */
 static void yy_rule_77(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4462,12 +4457,9 @@ static void yy_rule_77(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 401 "sql_grammar.lime"
-{
-    yylhsminor.yy62 = AST(pstate, sql_cte_t); if (yylhsminor.yy62) { yylhsminor.yy62->name = tok_str(yymsp[-4].minor.yy0); yylhsminor.yy62->select = yymsp[-1].minor.yy61; }
-}
-#line 4470 "sql_grammar.c"
-  yymsp[-4].minor.yy62 = yylhsminor.yy62;
+#line 394 "sql_grammar.lime"
+{ yymsp[-2].minor.yy69.list = yymsp[0].minor.yy62; yymsp[-2].minor.yy69.rec = 1; }
+#line 4463 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4475,7 +4467,7 @@ static void yy_rule_77(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (78) cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP */
+/* (78) cte_list ::= cte */
 static void yy_rule_78(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4492,12 +4484,10 @@ static void yy_rule_78(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 404 "sql_grammar.lime"
-{
-    yylhsminor.yy62 = AST(pstate, sql_cte_t); if (yylhsminor.yy62) { yylhsminor.yy62->name = tok_str(yymsp[-7].minor.yy0); yylhsminor.yy62->cols = yymsp[-5].minor.yy136; yylhsminor.yy62->select = yymsp[-1].minor.yy61; }
-}
-#line 4500 "sql_grammar.c"
-  yymsp[-7].minor.yy62 = yylhsminor.yy62;
+#line 396 "sql_grammar.lime"
+{ yylhsminor.yy62 = yymsp[0].minor.yy62; }
+#line 4490 "sql_grammar.c"
+  yymsp[0].minor.yy62 = yylhsminor.yy62;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4505,7 +4495,7 @@ static void yy_rule_78(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (79) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols values_list */
+/* (79) cte_list ::= cte_list TK_COMMA cte */
 static void yy_rule_79(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4522,16 +4512,13 @@ static void yy_rule_79(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 410 "sql_grammar.lime"
+#line 397 "sql_grammar.lime"
 {
-    sql_insert_t *ins = yymsp[0].minor.yy254 ? yymsp[0].minor.yy254 : AST(pstate, sql_insert_t);
-    yymsp[-4].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-4].minor.yy219 && ins) {
-        ins->schema = yymsp[-2].minor.yy151.schema; ins->table = yymsp[-2].minor.yy151.table; ins->cols = yymsp[-1].minor.yy136;
-        yymsp[-4].minor.yy219->kind = SQL_KIND_INSERT; yymsp[-4].minor.yy219->u.insert = ins;
-    }
+    if (yymsp[-2].minor.yy62 == NULL) { yylhsminor.yy62 = yymsp[0].minor.yy62; }
+    else { sql_cte_t *s = yymsp[-2].minor.yy62; while (s->next) s = s->next; s->next = yymsp[0].minor.yy62; yylhsminor.yy62 = yymsp[-2].minor.yy62; }
 }
-#line 4535 "sql_grammar.c"
+#line 4521 "sql_grammar.c"
+  yymsp[-2].minor.yy62 = yylhsminor.yy62;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4539,7 +4526,7 @@ static void yy_rule_79(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (80) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES */
+/* (80) cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP */
 static void yy_rule_80(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4556,16 +4543,12 @@ static void yy_rule_80(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 418 "sql_grammar.lime"
+#line 402 "sql_grammar.lime"
 {
-    sql_insert_t *ins = AST(pstate, sql_insert_t);
-    yymsp[-5].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-5].minor.yy219 && ins) {
-        ins->schema = yymsp[-3].minor.yy151.schema; ins->table = yymsp[-3].minor.yy151.table; ins->cols = yymsp[-2].minor.yy136; ins->def_values = 1;
-        yymsp[-5].minor.yy219->kind = SQL_KIND_INSERT; yymsp[-5].minor.yy219->u.insert = ins;
-    }
+    yylhsminor.yy62 = AST(pstate, sql_cte_t); if (yylhsminor.yy62) { yylhsminor.yy62->name = tok_str(yymsp[-4].minor.yy0); yylhsminor.yy62->select = yymsp[-1].minor.yy61; }
 }
-#line 4569 "sql_grammar.c"
+#line 4551 "sql_grammar.c"
+  yymsp[-4].minor.yy62 = yylhsminor.yy62;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4573,7 +4556,7 @@ static void yy_rule_80(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (81) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt */
+/* (81) cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP */
 static void yy_rule_81(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4590,16 +4573,12 @@ static void yy_rule_81(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 426 "sql_grammar.lime"
+#line 405 "sql_grammar.lime"
 {
-    sql_insert_t *ins = AST(pstate, sql_insert_t);
-    yymsp[-4].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-4].minor.yy219 && ins) {
-        ins->schema = yymsp[-2].minor.yy151.schema; ins->table = yymsp[-2].minor.yy151.table; ins->cols = yymsp[-1].minor.yy136; ins->select = yymsp[0].minor.yy61;
-        yymsp[-4].minor.yy219->kind = SQL_KIND_INSERT; yymsp[-4].minor.yy219->u.insert = ins;
-    }
+    yylhsminor.yy62 = AST(pstate, sql_cte_t); if (yylhsminor.yy62) { yylhsminor.yy62->name = tok_str(yymsp[-7].minor.yy0); yylhsminor.yy62->cols = yymsp[-5].minor.yy136; yylhsminor.yy62->select = yymsp[-1].minor.yy61; }
 }
-#line 4603 "sql_grammar.c"
+#line 4581 "sql_grammar.c"
+  yymsp[-7].minor.yy62 = yylhsminor.yy62;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4607,7 +4586,7 @@ static void yy_rule_81(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (82) insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols values_list */
+/* (82) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols values_list */
 static void yy_rule_82(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4624,16 +4603,16 @@ static void yy_rule_82(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 434 "sql_grammar.lime"
+#line 411 "sql_grammar.lime"
 {
     sql_insert_t *ins = yymsp[0].minor.yy254 ? yymsp[0].minor.yy254 : AST(pstate, sql_insert_t);
     yymsp[-4].minor.yy219 = AST(pstate, sql_stmt_t);
     if (yymsp[-4].minor.yy219 && ins) {
-        ins->schema = yymsp[-2].minor.yy151.schema; ins->table = yymsp[-2].minor.yy151.table; ins->cols = yymsp[-1].minor.yy136; ins->replace = 1;
+        ins->schema = yymsp[-2].minor.yy151.schema; ins->table = yymsp[-2].minor.yy151.table; ins->cols = yymsp[-1].minor.yy136;
         yymsp[-4].minor.yy219->kind = SQL_KIND_INSERT; yymsp[-4].minor.yy219->u.insert = ins;
     }
 }
-#line 4637 "sql_grammar.c"
+#line 4616 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4641,7 +4620,7 @@ static void yy_rule_82(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (83) qname ::= TK_ID */
+/* (83) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES */
 static void yy_rule_83(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4658,10 +4637,16 @@ static void yy_rule_83(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 444 "sql_grammar.lime"
-{ yylhsminor.yy151.schema.p = NULL; yylhsminor.yy151.schema.len = 0; yylhsminor.yy151.table = tok_str(yymsp[0].minor.yy0); }
-#line 4664 "sql_grammar.c"
-  yymsp[0].minor.yy151 = yylhsminor.yy151;
+#line 419 "sql_grammar.lime"
+{
+    sql_insert_t *ins = AST(pstate, sql_insert_t);
+    yymsp[-5].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-5].minor.yy219 && ins) {
+        ins->schema = yymsp[-3].minor.yy151.schema; ins->table = yymsp[-3].minor.yy151.table; ins->cols = yymsp[-2].minor.yy136; ins->def_values = 1;
+        yymsp[-5].minor.yy219->kind = SQL_KIND_INSERT; yymsp[-5].minor.yy219->u.insert = ins;
+    }
+}
+#line 4650 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4669,7 +4654,7 @@ static void yy_rule_83(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (84) qname ::= TK_ID TK_DOT TK_ID */
+/* (84) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt */
 static void yy_rule_84(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4686,10 +4671,16 @@ static void yy_rule_84(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 445 "sql_grammar.lime"
-{ yylhsminor.yy151.schema = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy151.table = tok_str(yymsp[0].minor.yy0); }
-#line 4692 "sql_grammar.c"
-  yymsp[-2].minor.yy151 = yylhsminor.yy151;
+#line 427 "sql_grammar.lime"
+{
+    sql_insert_t *ins = AST(pstate, sql_insert_t);
+    yymsp[-4].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-4].minor.yy219 && ins) {
+        ins->schema = yymsp[-2].minor.yy151.schema; ins->table = yymsp[-2].minor.yy151.table; ins->cols = yymsp[-1].minor.yy136; ins->select = yymsp[0].minor.yy61;
+        yymsp[-4].minor.yy219->kind = SQL_KIND_INSERT; yymsp[-4].minor.yy219->u.insert = ins;
+    }
+}
+#line 4684 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4697,7 +4688,7 @@ static void yy_rule_84(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (85) insert_cols ::= */
+/* (85) insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols values_list */
 static void yy_rule_85(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4714,9 +4705,16 @@ static void yy_rule_85(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 447 "sql_grammar.lime"
-{ yymsp[1].minor.yy136 = NULL; }
-#line 4720 "sql_grammar.c"
+#line 435 "sql_grammar.lime"
+{
+    sql_insert_t *ins = yymsp[0].minor.yy254 ? yymsp[0].minor.yy254 : AST(pstate, sql_insert_t);
+    yymsp[-4].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-4].minor.yy219 && ins) {
+        ins->schema = yymsp[-2].minor.yy151.schema; ins->table = yymsp[-2].minor.yy151.table; ins->cols = yymsp[-1].minor.yy136; ins->replace = 1;
+        yymsp[-4].minor.yy219->kind = SQL_KIND_INSERT; yymsp[-4].minor.yy219->u.insert = ins;
+    }
+}
+#line 4718 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4724,7 +4722,7 @@ static void yy_rule_85(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (86) insert_cols ::= TK_LP id_list TK_RP */
+/* (86) qname ::= TK_ID */
 static void yy_rule_86(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4741,9 +4739,10 @@ static void yy_rule_86(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 448 "sql_grammar.lime"
-{ yymsp[-2].minor.yy136 = yymsp[-1].minor.yy136; }
-#line 4747 "sql_grammar.c"
+#line 445 "sql_grammar.lime"
+{ yylhsminor.yy151.schema.p = NULL; yylhsminor.yy151.schema.len = 0; yylhsminor.yy151.table = tok_str(yymsp[0].minor.yy0); }
+#line 4745 "sql_grammar.c"
+  yymsp[0].minor.yy151 = yylhsminor.yy151;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4751,7 +4750,7 @@ static void yy_rule_86(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (87) values_list ::= TK_VALUES TK_LP expr_list TK_RP */
+/* (87) qname ::= TK_ID TK_DOT TK_ID */
 static void yy_rule_87(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4768,15 +4767,10 @@ static void yy_rule_87(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 450 "sql_grammar.lime"
-{
-    yymsp[-3].minor.yy254 = AST(pstate, sql_insert_t);
-    if (yymsp[-3].minor.yy254) {
-        yymsp[-3].minor.yy254->rows = (sql_exprlist_t **)sql_arena_alloc(pstate->arena, sizeof(sql_exprlist_t *));
-        if (yymsp[-3].minor.yy254->rows) { yymsp[-3].minor.yy254->rows[0] = yymsp[-1].minor.yy136; yymsp[-3].minor.yy254->n_rows = 1; }
-    }
-}
-#line 4780 "sql_grammar.c"
+#line 446 "sql_grammar.lime"
+{ yylhsminor.yy151.schema = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy151.table = tok_str(yymsp[0].minor.yy0); }
+#line 4773 "sql_grammar.c"
+  yymsp[-2].minor.yy151 = yylhsminor.yy151;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4784,7 +4778,7 @@ static void yy_rule_87(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (88) values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP */
+/* (88) insert_cols ::= */
 static void yy_rule_88(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4801,20 +4795,9 @@ static void yy_rule_88(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 457 "sql_grammar.lime"
-{
-    yylhsminor.yy254 = yymsp[-4].minor.yy254;
-    if (yylhsminor.yy254) {
-        sql_exprlist_t **nr = (sql_exprlist_t **)sql_arena_alloc(pstate->arena,
-            sizeof(sql_exprlist_t *) * (size_t)(yylhsminor.yy254->n_rows + 1));
-        if (nr) {
-            int i; for (i = 0; i < yylhsminor.yy254->n_rows; i++) nr[i] = yylhsminor.yy254->rows[i];
-            nr[yylhsminor.yy254->n_rows] = yymsp[-1].minor.yy136; yylhsminor.yy254->rows = nr; yylhsminor.yy254->n_rows++;
-        }
-    }
-}
-#line 4817 "sql_grammar.c"
-  yymsp[-4].minor.yy254 = yylhsminor.yy254;
+#line 448 "sql_grammar.lime"
+{ yymsp[1].minor.yy136 = NULL; }
+#line 4801 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4822,7 +4805,7 @@ static void yy_rule_88(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (89) update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt */
+/* (89) insert_cols ::= TK_LP id_list TK_RP */
 static void yy_rule_89(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4839,16 +4822,9 @@ static void yy_rule_89(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 471 "sql_grammar.lime"
-{
-    sql_update_t *up = AST(pstate, sql_update_t);
-    yymsp[-4].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-4].minor.yy219 && up) {
-        up->schema = yymsp[-3].minor.yy151.schema; up->table = yymsp[-3].minor.yy151.table; up->sets = yymsp[-1].minor.yy12; up->where = yymsp[0].minor.yy234;
-        yymsp[-4].minor.yy219->kind = SQL_KIND_UPDATE; yymsp[-4].minor.yy219->u.update = up;
-    }
-}
-#line 4852 "sql_grammar.c"
+#line 449 "sql_grammar.lime"
+{ yymsp[-2].minor.yy136 = yymsp[-1].minor.yy136; }
+#line 4828 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4856,7 +4832,7 @@ static void yy_rule_89(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (90) assign_list ::= assign */
+/* (90) values_list ::= TK_VALUES TK_LP expr_list TK_RP */
 static void yy_rule_90(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4873,10 +4849,15 @@ static void yy_rule_90(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 480 "sql_grammar.lime"
-{ yylhsminor.yy12 = yymsp[0].minor.yy12; }
-#line 4879 "sql_grammar.c"
-  yymsp[0].minor.yy12 = yylhsminor.yy12;
+#line 451 "sql_grammar.lime"
+{
+    yymsp[-3].minor.yy254 = AST(pstate, sql_insert_t);
+    if (yymsp[-3].minor.yy254) {
+        yymsp[-3].minor.yy254->rows = (sql_exprlist_t **)sql_arena_alloc(pstate->arena, sizeof(sql_exprlist_t *));
+        if (yymsp[-3].minor.yy254->rows) { yymsp[-3].minor.yy254->rows[0] = yymsp[-1].minor.yy136; yymsp[-3].minor.yy254->n_rows = 1; }
+    }
+}
+#line 4861 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4884,7 +4865,7 @@ static void yy_rule_90(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (91) assign_list ::= assign_list TK_COMMA assign */
+/* (91) values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP */
 static void yy_rule_91(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4901,13 +4882,20 @@ static void yy_rule_91(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 481 "sql_grammar.lime"
+#line 458 "sql_grammar.lime"
 {
-    if (yymsp[-2].minor.yy12 == NULL) { yylhsminor.yy12 = yymsp[0].minor.yy12; }
-    else { sql_assign_t *s = yymsp[-2].minor.yy12; while (s->next) s = s->next; s->next = yymsp[0].minor.yy12; yylhsminor.yy12 = yymsp[-2].minor.yy12; }
+    yylhsminor.yy254 = yymsp[-4].minor.yy254;
+    if (yylhsminor.yy254) {
+        sql_exprlist_t **nr = (sql_exprlist_t **)sql_arena_alloc(pstate->arena,
+            sizeof(sql_exprlist_t *) * (size_t)(yylhsminor.yy254->n_rows + 1));
+        if (nr) {
+            int i; for (i = 0; i < yylhsminor.yy254->n_rows; i++) nr[i] = yylhsminor.yy254->rows[i];
+            nr[yylhsminor.yy254->n_rows] = yymsp[-1].minor.yy136; yylhsminor.yy254->rows = nr; yylhsminor.yy254->n_rows++;
+        }
+    }
 }
-#line 4910 "sql_grammar.c"
-  yymsp[-2].minor.yy12 = yylhsminor.yy12;
+#line 4898 "sql_grammar.c"
+  yymsp[-4].minor.yy254 = yylhsminor.yy254;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4915,7 +4903,7 @@ static void yy_rule_91(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (92) assign ::= TK_ID TK_EQ expr */
+/* (92) update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt */
 static void yy_rule_92(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4932,12 +4920,16 @@ static void yy_rule_92(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 486 "sql_grammar.lime"
+#line 472 "sql_grammar.lime"
 {
-    yylhsminor.yy12 = AST(pstate, sql_assign_t); if (yylhsminor.yy12) { yylhsminor.yy12->col = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy12->val = yymsp[0].minor.yy234; }
+    sql_update_t *up = AST(pstate, sql_update_t);
+    yymsp[-4].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-4].minor.yy219 && up) {
+        up->schema = yymsp[-3].minor.yy151.schema; up->table = yymsp[-3].minor.yy151.table; up->sets = yymsp[-1].minor.yy12; up->where = yymsp[0].minor.yy234;
+        yymsp[-4].minor.yy219->kind = SQL_KIND_UPDATE; yymsp[-4].minor.yy219->u.update = up;
+    }
 }
-#line 4940 "sql_grammar.c"
-  yymsp[-2].minor.yy12 = yylhsminor.yy12;
+#line 4933 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4945,7 +4937,7 @@ static void yy_rule_92(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (93) delete_stmt ::= TK_DELETE TK_FROM qname where_opt */
+/* (93) assign_list ::= assign */
 static void yy_rule_93(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4962,16 +4954,10 @@ static void yy_rule_93(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 492 "sql_grammar.lime"
-{
-    sql_delete_t *d = AST(pstate, sql_delete_t);
-    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-3].minor.yy219 && d) {
-        d->schema = yymsp[-1].minor.yy151.schema; d->table = yymsp[-1].minor.yy151.table; d->where = yymsp[0].minor.yy234;
-        yymsp[-3].minor.yy219->kind = SQL_KIND_DELETE; yymsp[-3].minor.yy219->u.del = d;
-    }
-}
-#line 4975 "sql_grammar.c"
+#line 481 "sql_grammar.lime"
+{ yylhsminor.yy12 = yymsp[0].minor.yy12; }
+#line 4960 "sql_grammar.c"
+  yymsp[0].minor.yy12 = yylhsminor.yy12;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4979,7 +4965,7 @@ static void yy_rule_93(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (94) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_LP table_body TK_RP */
+/* (94) assign_list ::= assign_list TK_COMMA assign */
 static void yy_rule_94(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -4996,17 +4982,13 @@ static void yy_rule_94(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 504 "sql_grammar.lime"
+#line 482 "sql_grammar.lime"
 {
-    sql_create_t *cr = AST(pstate, sql_create_t);
-    yymsp[-7].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-7].minor.yy219 && cr) {
-        cr->kind = SX_CR_TABLE; cr->temp = yymsp[-6].minor.yy292; cr->if_not_exists = yymsp[-4].minor.yy292;
-        cr->schema = yymsp[-3].minor.yy151.schema; cr->name = yymsp[-3].minor.yy151.table; cr->cols = yymsp[-1].minor.yy126;
-        yymsp[-7].minor.yy219->kind = SQL_KIND_CREATE; yymsp[-7].minor.yy219->u.create = cr;
-    }
+    if (yymsp[-2].minor.yy12 == NULL) { yylhsminor.yy12 = yymsp[0].minor.yy12; }
+    else { sql_assign_t *s = yymsp[-2].minor.yy12; while (s->next) s = s->next; s->next = yymsp[0].minor.yy12; yylhsminor.yy12 = yymsp[-2].minor.yy12; }
 }
-#line 5010 "sql_grammar.c"
+#line 4991 "sql_grammar.c"
+  yymsp[-2].minor.yy12 = yylhsminor.yy12;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5014,7 +4996,7 @@ static void yy_rule_94(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (95) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_AS select_stmt */
+/* (95) assign ::= TK_ID TK_EQ expr */
 static void yy_rule_95(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5031,17 +5013,12 @@ static void yy_rule_95(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 514 "sql_grammar.lime"
+#line 487 "sql_grammar.lime"
 {
-    sql_create_t *cr = AST(pstate, sql_create_t);
-    yymsp[-6].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-6].minor.yy219 && cr) {
-        cr->kind = SX_CR_TABLE_AS; cr->temp = yymsp[-5].minor.yy292; cr->if_not_exists = yymsp[-3].minor.yy292;
-        cr->schema = yymsp[-2].minor.yy151.schema; cr->name = yymsp[-2].minor.yy151.table; cr->select = yymsp[0].minor.yy61;
-        yymsp[-6].minor.yy219->kind = SQL_KIND_CREATE; yymsp[-6].minor.yy219->u.create = cr;
-    }
+    yylhsminor.yy12 = AST(pstate, sql_assign_t); if (yylhsminor.yy12) { yylhsminor.yy12->col = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy12->val = yymsp[0].minor.yy234; }
 }
-#line 5045 "sql_grammar.c"
+#line 5021 "sql_grammar.c"
+  yymsp[-2].minor.yy12 = yylhsminor.yy12;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5049,7 +5026,7 @@ static void yy_rule_95(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (96) create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname TK_ON TK_ID TK_LP id_list TK_RP */
+/* (96) delete_stmt ::= TK_DELETE TK_FROM qname where_opt */
 static void yy_rule_96(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5066,18 +5043,16 @@ static void yy_rule_96(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 524 "sql_grammar.lime"
+#line 493 "sql_grammar.lime"
 {
-    sql_create_t *cr = AST(pstate, sql_create_t);
-    yymsp[-9].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-9].minor.yy219 && cr) {
-        cr->kind = SX_CR_INDEX; cr->unique = yymsp[-8].minor.yy292; cr->if_not_exists = yymsp[-6].minor.yy292;
-        cr->schema = yymsp[-5].minor.yy151.schema; cr->name = yymsp[-5].minor.yy151.table; cr->on_table = tok_str(yymsp[-3].minor.yy0);
-        cr->index_cols = yymsp[-1].minor.yy136;
-        yymsp[-9].minor.yy219->kind = SQL_KIND_CREATE; yymsp[-9].minor.yy219->u.create = cr;
+    sql_delete_t *d = AST(pstate, sql_delete_t);
+    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-3].minor.yy219 && d) {
+        d->schema = yymsp[-1].minor.yy151.schema; d->table = yymsp[-1].minor.yy151.table; d->where = yymsp[0].minor.yy234;
+        yymsp[-3].minor.yy219->kind = SQL_KIND_DELETE; yymsp[-3].minor.yy219->u.del = d;
     }
 }
-#line 5081 "sql_grammar.c"
+#line 5056 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5085,7 +5060,7 @@ static void yy_rule_96(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (97) create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname TK_AS select_stmt */
+/* (97) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_LP table_body TK_RP */
 static void yy_rule_97(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5102,17 +5077,17 @@ static void yy_rule_97(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 535 "sql_grammar.lime"
+#line 505 "sql_grammar.lime"
 {
     sql_create_t *cr = AST(pstate, sql_create_t);
-    yymsp[-6].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-6].minor.yy219 && cr) {
-        cr->kind = SX_CR_VIEW; cr->temp = yymsp[-5].minor.yy292; cr->if_not_exists = yymsp[-3].minor.yy292;
-        cr->schema = yymsp[-2].minor.yy151.schema; cr->name = yymsp[-2].minor.yy151.table; cr->select = yymsp[0].minor.yy61;
-        yymsp[-6].minor.yy219->kind = SQL_KIND_CREATE; yymsp[-6].minor.yy219->u.create = cr;
+    yymsp[-7].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-7].minor.yy219 && cr) {
+        cr->kind = SX_CR_TABLE; cr->temp = yymsp[-6].minor.yy292; cr->if_not_exists = yymsp[-4].minor.yy292;
+        cr->schema = yymsp[-3].minor.yy151.schema; cr->name = yymsp[-3].minor.yy151.table; cr->cols = yymsp[-1].minor.yy126;
+        yymsp[-7].minor.yy219->kind = SQL_KIND_CREATE; yymsp[-7].minor.yy219->u.create = cr;
     }
 }
-#line 5116 "sql_grammar.c"
+#line 5091 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5120,7 +5095,7 @@ static void yy_rule_97(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (98) temp_opt ::= */
+/* (98) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_AS select_stmt */
 static void yy_rule_98(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5137,9 +5112,17 @@ static void yy_rule_98(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 548 "sql_grammar.lime"
-{ yymsp[1].minor.yy292 = 0; }
-#line 5143 "sql_grammar.c"
+#line 515 "sql_grammar.lime"
+{
+    sql_create_t *cr = AST(pstate, sql_create_t);
+    yymsp[-6].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-6].minor.yy219 && cr) {
+        cr->kind = SX_CR_TABLE_AS; cr->temp = yymsp[-5].minor.yy292; cr->if_not_exists = yymsp[-3].minor.yy292;
+        cr->schema = yymsp[-2].minor.yy151.schema; cr->name = yymsp[-2].minor.yy151.table; cr->select = yymsp[0].minor.yy61;
+        yymsp[-6].minor.yy219->kind = SQL_KIND_CREATE; yymsp[-6].minor.yy219->u.create = cr;
+    }
+}
+#line 5126 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5147,7 +5130,7 @@ static void yy_rule_98(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (99) temp_opt ::= TK_TEMP */
+/* (99) create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname TK_ON TK_ID TK_LP id_list TK_RP */
 static void yy_rule_99(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5164,9 +5147,18 @@ static void yy_rule_99(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 549 "sql_grammar.lime"
-{ yymsp[0].minor.yy292 = 1; }
-#line 5170 "sql_grammar.c"
+#line 525 "sql_grammar.lime"
+{
+    sql_create_t *cr = AST(pstate, sql_create_t);
+    yymsp[-9].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-9].minor.yy219 && cr) {
+        cr->kind = SX_CR_INDEX; cr->unique = yymsp[-8].minor.yy292; cr->if_not_exists = yymsp[-6].minor.yy292;
+        cr->schema = yymsp[-5].minor.yy151.schema; cr->name = yymsp[-5].minor.yy151.table; cr->on_table = tok_str(yymsp[-3].minor.yy0);
+        cr->index_cols = yymsp[-1].minor.yy136;
+        yymsp[-9].minor.yy219->kind = SQL_KIND_CREATE; yymsp[-9].minor.yy219->u.create = cr;
+    }
+}
+#line 5162 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5174,8 +5166,70 @@ static void yy_rule_99(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (100) temp_opt ::= TK_TEMPORARY */
+/* (100) create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname TK_AS select_stmt */
 static void yy_rule_100(yy_reduce_ctx *yy_ctx){
+  yyParser *yypParser = yy_ctx->yypParser;
+  yyStackEntry *yymsp = yy_ctx->yymsp;
+  int yyLookahead = yy_ctx->yyLookahead;
+  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
+  YYMINORTYPE yylhsminor;
+#ifdef YYLOCATIONTYPE
+  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
+#endif
+  SqlParseCTX_FETCH
+  SqlParseARG_FETCH
+  (void)yypParser; (void)yymsp; (void)yyLookahead;
+  (void)yyLookaheadToken; (void)yylhsminor;
+#ifdef YYLOCATIONTYPE
+  (void)yyloc_lhs;
+#endif
+#line 536 "sql_grammar.lime"
+{
+    sql_create_t *cr = AST(pstate, sql_create_t);
+    yymsp[-6].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-6].minor.yy219 && cr) {
+        cr->kind = SX_CR_VIEW; cr->temp = yymsp[-5].minor.yy292; cr->if_not_exists = yymsp[-3].minor.yy292;
+        cr->schema = yymsp[-2].minor.yy151.schema; cr->name = yymsp[-2].minor.yy151.table; cr->select = yymsp[0].minor.yy61;
+        yymsp[-6].minor.yy219->kind = SQL_KIND_CREATE; yymsp[-6].minor.yy219->u.create = cr;
+    }
+}
+#line 5197 "sql_grammar.c"
+#ifdef YYLOCATIONTYPE
+  /* Commit any @$ writes back to yy_reduce's local
+  ** so the post-action stack-shift sees them. */
+  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
+#endif
+}
+
+/* (101) temp_opt ::= */
+static void yy_rule_101(yy_reduce_ctx *yy_ctx){
+  yyParser *yypParser = yy_ctx->yypParser;
+  yyStackEntry *yymsp = yy_ctx->yymsp;
+  int yyLookahead = yy_ctx->yyLookahead;
+  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
+  YYMINORTYPE yylhsminor;
+#ifdef YYLOCATIONTYPE
+  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
+#endif
+  SqlParseCTX_FETCH
+  SqlParseARG_FETCH
+  (void)yypParser; (void)yymsp; (void)yyLookahead;
+  (void)yyLookaheadToken; (void)yylhsminor;
+#ifdef YYLOCATIONTYPE
+  (void)yyloc_lhs;
+#endif
+#line 549 "sql_grammar.lime"
+{ yymsp[1].minor.yy292 = 0; }
+#line 5224 "sql_grammar.c"
+#ifdef YYLOCATIONTYPE
+  /* Commit any @$ writes back to yy_reduce's local
+  ** so the post-action stack-shift sees them. */
+  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
+#endif
+}
+
+/* (102) temp_opt ::= TK_TEMP */
+static void yy_rule_102(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
   int yyLookahead = yy_ctx->yyLookahead;
@@ -5193,60 +5247,6 @@ static void yy_rule_100(yy_reduce_ctx *yy_ctx){
 #endif
 #line 550 "sql_grammar.lime"
 { yymsp[0].minor.yy292 = 1; }
-#line 5197 "sql_grammar.c"
-#ifdef YYLOCATIONTYPE
-  /* Commit any @$ writes back to yy_reduce's local
-  ** so the post-action stack-shift sees them. */
-  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
-#endif
-}
-
-/* (101) unique_opt ::= */
-static void yy_rule_101(yy_reduce_ctx *yy_ctx){
-  yyParser *yypParser = yy_ctx->yypParser;
-  yyStackEntry *yymsp = yy_ctx->yymsp;
-  int yyLookahead = yy_ctx->yyLookahead;
-  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
-  YYMINORTYPE yylhsminor;
-#ifdef YYLOCATIONTYPE
-  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
-#endif
-  SqlParseCTX_FETCH
-  SqlParseARG_FETCH
-  (void)yypParser; (void)yymsp; (void)yyLookahead;
-  (void)yyLookaheadToken; (void)yylhsminor;
-#ifdef YYLOCATIONTYPE
-  (void)yyloc_lhs;
-#endif
-#line 552 "sql_grammar.lime"
-{ yymsp[1].minor.yy292 = 0; }
-#line 5224 "sql_grammar.c"
-#ifdef YYLOCATIONTYPE
-  /* Commit any @$ writes back to yy_reduce's local
-  ** so the post-action stack-shift sees them. */
-  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
-#endif
-}
-
-/* (102) unique_opt ::= TK_UNIQUE */
-static void yy_rule_102(yy_reduce_ctx *yy_ctx){
-  yyParser *yypParser = yy_ctx->yypParser;
-  yyStackEntry *yymsp = yy_ctx->yymsp;
-  int yyLookahead = yy_ctx->yyLookahead;
-  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
-  YYMINORTYPE yylhsminor;
-#ifdef YYLOCATIONTYPE
-  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
-#endif
-  SqlParseCTX_FETCH
-  SqlParseARG_FETCH
-  (void)yypParser; (void)yymsp; (void)yyLookahead;
-  (void)yyLookaheadToken; (void)yylhsminor;
-#ifdef YYLOCATIONTYPE
-  (void)yyloc_lhs;
-#endif
-#line 553 "sql_grammar.lime"
-{ yymsp[0].minor.yy292 = 1; }
 #line 5251 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5255,7 +5255,7 @@ static void yy_rule_102(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (103) if_not_exists ::= */
+/* (103) temp_opt ::= TK_TEMPORARY */
 static void yy_rule_103(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5272,8 +5272,8 @@ static void yy_rule_103(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 555 "sql_grammar.lime"
-{ yymsp[1].minor.yy292 = 0; }
+#line 551 "sql_grammar.lime"
+{ yymsp[0].minor.yy292 = 1; }
 #line 5278 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5282,7 +5282,7 @@ static void yy_rule_103(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (104) if_not_exists ::= TK_IF TK_NOT TK_EXISTS */
+/* (104) unique_opt ::= */
 static void yy_rule_104(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5299,8 +5299,8 @@ static void yy_rule_104(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 556 "sql_grammar.lime"
-{ yymsp[-2].minor.yy292 = 1; }
+#line 553 "sql_grammar.lime"
+{ yymsp[1].minor.yy292 = 0; }
 #line 5305 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5309,7 +5309,7 @@ static void yy_rule_104(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (105) table_body ::= table_elem */
+/* (105) unique_opt ::= TK_UNIQUE */
 static void yy_rule_105(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5326,10 +5326,9 @@ static void yy_rule_105(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 568 "sql_grammar.lime"
-{ yylhsminor.yy126 = yymsp[0].minor.yy126; }
+#line 554 "sql_grammar.lime"
+{ yymsp[0].minor.yy292 = 1; }
 #line 5332 "sql_grammar.c"
-  yymsp[0].minor.yy126 = yylhsminor.yy126;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5337,7 +5336,7 @@ static void yy_rule_105(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (106) table_body ::= table_body TK_COMMA table_elem */
+/* (106) if_not_exists ::= */
 static void yy_rule_106(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5354,14 +5353,9 @@ static void yy_rule_106(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 569 "sql_grammar.lime"
-{
-    if (yymsp[0].minor.yy126 == NULL) { yylhsminor.yy126 = yymsp[-2].minor.yy126; }                    /* a constraint: no column */
-    else if (yymsp[-2].minor.yy126 == NULL) { yylhsminor.yy126 = yymsp[0].minor.yy126; }
-    else { sql_coldef_t *s = yymsp[-2].minor.yy126; while (s->next) s = s->next; s->next = yymsp[0].minor.yy126; yylhsminor.yy126 = yymsp[-2].minor.yy126; }
-}
-#line 5364 "sql_grammar.c"
-  yymsp[-2].minor.yy126 = yylhsminor.yy126;
+#line 556 "sql_grammar.lime"
+{ yymsp[1].minor.yy292 = 0; }
+#line 5359 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5369,7 +5363,7 @@ static void yy_rule_106(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (107) table_elem ::= coldef */
+/* (107) if_not_exists ::= TK_IF TK_NOT TK_EXISTS */
 static void yy_rule_107(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5386,10 +5380,9 @@ static void yy_rule_107(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 575 "sql_grammar.lime"
-{ yylhsminor.yy126 = yymsp[0].minor.yy126; }
-#line 5392 "sql_grammar.c"
-  yymsp[0].minor.yy126 = yylhsminor.yy126;
+#line 557 "sql_grammar.lime"
+{ yymsp[-2].minor.yy292 = 1; }
+#line 5386 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5397,7 +5390,7 @@ static void yy_rule_107(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (108) table_elem ::= table_constraint */
+/* (108) table_body ::= table_elem */
 static void yy_rule_108(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5414,9 +5407,10 @@ static void yy_rule_108(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 576 "sql_grammar.lime"
-{ yymsp[0].minor.yy126 = NULL; }
-#line 5420 "sql_grammar.c"
+#line 569 "sql_grammar.lime"
+{ yylhsminor.yy126 = yymsp[0].minor.yy126; }
+#line 5413 "sql_grammar.c"
+  yymsp[0].minor.yy126 = yylhsminor.yy126;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5424,7 +5418,7 @@ static void yy_rule_108(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (109) coldef ::= TK_ID type_opt col_constraints */
+/* (109) table_body ::= table_body TK_COMMA table_elem */
 static void yy_rule_109(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5441,14 +5435,13 @@ static void yy_rule_109(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 578 "sql_grammar.lime"
+#line 570 "sql_grammar.lime"
 {
-    yylhsminor.yy126 = AST(pstate, sql_coldef_t);
-    if (yylhsminor.yy126) { yylhsminor.yy126->name = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy126->type = yymsp[-1].minor.yy60;
-             yylhsminor.yy126->primary = (yymsp[0].minor.yy292 & 1) != 0; yylhsminor.yy126->notnull = (yymsp[0].minor.yy292 & 2) != 0;
-             yylhsminor.yy126->unique = (yymsp[0].minor.yy292 & 4) != 0; }
+    if (yymsp[0].minor.yy126 == NULL) { yylhsminor.yy126 = yymsp[-2].minor.yy126; }                    /* a constraint: no column */
+    else if (yymsp[-2].minor.yy126 == NULL) { yylhsminor.yy126 = yymsp[0].minor.yy126; }
+    else { sql_coldef_t *s = yymsp[-2].minor.yy126; while (s->next) s = s->next; s->next = yymsp[0].minor.yy126; yylhsminor.yy126 = yymsp[-2].minor.yy126; }
 }
-#line 5452 "sql_grammar.c"
+#line 5445 "sql_grammar.c"
   yymsp[-2].minor.yy126 = yylhsminor.yy126;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5457,7 +5450,7 @@ static void yy_rule_109(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (110) type_opt ::= */
+/* (110) table_elem ::= coldef */
 static void yy_rule_110(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5474,9 +5467,10 @@ static void yy_rule_110(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 586 "sql_grammar.lime"
-{ yymsp[1].minor.yy60.p = NULL; yymsp[1].minor.yy60.len = 0; }
-#line 5480 "sql_grammar.c"
+#line 576 "sql_grammar.lime"
+{ yylhsminor.yy126 = yymsp[0].minor.yy126; }
+#line 5473 "sql_grammar.c"
+  yymsp[0].minor.yy126 = yylhsminor.yy126;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5484,7 +5478,7 @@ static void yy_rule_110(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (111) type_opt ::= TK_ID */
+/* (111) table_elem ::= table_constraint */
 static void yy_rule_111(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5501,10 +5495,9 @@ static void yy_rule_111(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 587 "sql_grammar.lime"
-{ yylhsminor.yy60 = tok_str(yymsp[0].minor.yy0); }
-#line 5507 "sql_grammar.c"
-  yymsp[0].minor.yy60 = yylhsminor.yy60;
+#line 577 "sql_grammar.lime"
+{ yymsp[0].minor.yy126 = NULL; }
+#line 5501 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5512,7 +5505,7 @@ static void yy_rule_111(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (112) type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP */
+/* (112) coldef ::= TK_ID type_opt col_constraints */
 static void yy_rule_112(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5529,10 +5522,15 @@ static void yy_rule_112(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 588 "sql_grammar.lime"
-{ yylhsminor.yy60 = tok_str(yymsp[-3].minor.yy0); }
-#line 5535 "sql_grammar.c"
-  yymsp[-3].minor.yy60 = yylhsminor.yy60;
+#line 579 "sql_grammar.lime"
+{
+    yylhsminor.yy126 = AST(pstate, sql_coldef_t);
+    if (yylhsminor.yy126) { yylhsminor.yy126->name = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy126->type = yymsp[-1].minor.yy60;
+             yylhsminor.yy126->primary = (yymsp[0].minor.yy292 & 1) != 0; yylhsminor.yy126->notnull = (yymsp[0].minor.yy292 & 2) != 0;
+             yylhsminor.yy126->unique = (yymsp[0].minor.yy292 & 4) != 0; }
+}
+#line 5533 "sql_grammar.c"
+  yymsp[-2].minor.yy126 = yylhsminor.yy126;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5540,7 +5538,7 @@ static void yy_rule_112(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (113) type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP */
+/* (113) type_opt ::= */
 static void yy_rule_113(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5557,10 +5555,9 @@ static void yy_rule_113(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 589 "sql_grammar.lime"
-{ yylhsminor.yy60 = tok_str(yymsp[-5].minor.yy0); }
-#line 5563 "sql_grammar.c"
-  yymsp[-5].minor.yy60 = yylhsminor.yy60;
+#line 587 "sql_grammar.lime"
+{ yymsp[1].minor.yy60.p = NULL; yymsp[1].minor.yy60.len = 0; }
+#line 5561 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5568,7 +5565,7 @@ static void yy_rule_113(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (114) col_constraints ::= */
+/* (114) type_opt ::= TK_ID */
 static void yy_rule_114(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5585,9 +5582,10 @@ static void yy_rule_114(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 593 "sql_grammar.lime"
-{ yymsp[1].minor.yy292 = 0; }
-#line 5591 "sql_grammar.c"
+#line 588 "sql_grammar.lime"
+{ yylhsminor.yy60 = tok_str(yymsp[0].minor.yy0); }
+#line 5588 "sql_grammar.c"
+  yymsp[0].minor.yy60 = yylhsminor.yy60;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5595,7 +5593,7 @@ static void yy_rule_114(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (115) col_constraints ::= col_constraints col_constraint */
+/* (115) type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP */
 static void yy_rule_115(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5612,10 +5610,10 @@ static void yy_rule_115(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 594 "sql_grammar.lime"
-{ yylhsminor.yy292 = yymsp[-1].minor.yy292 | yymsp[0].minor.yy292; }
-#line 5618 "sql_grammar.c"
-  yymsp[-1].minor.yy292 = yylhsminor.yy292;
+#line 589 "sql_grammar.lime"
+{ yylhsminor.yy60 = tok_str(yymsp[-3].minor.yy0); }
+#line 5616 "sql_grammar.c"
+  yymsp[-3].minor.yy60 = yylhsminor.yy60;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5623,7 +5621,7 @@ static void yy_rule_115(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (116) col_constraint ::= TK_PRIMARY TK_KEY */
+/* (116) type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP */
 static void yy_rule_116(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5640,9 +5638,10 @@ static void yy_rule_116(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 596 "sql_grammar.lime"
-{ yymsp[-1].minor.yy292 = 1; }
-#line 5646 "sql_grammar.c"
+#line 590 "sql_grammar.lime"
+{ yylhsminor.yy60 = tok_str(yymsp[-5].minor.yy0); }
+#line 5644 "sql_grammar.c"
+  yymsp[-5].minor.yy60 = yylhsminor.yy60;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5650,7 +5649,7 @@ static void yy_rule_116(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (117) col_constraint ::= TK_PRIMARY TK_KEY TK_ASC */
+/* (117) col_constraints ::= */
 static void yy_rule_117(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5667,9 +5666,9 @@ static void yy_rule_117(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 597 "sql_grammar.lime"
-{ yymsp[-2].minor.yy292 = 1; }
-#line 5673 "sql_grammar.c"
+#line 594 "sql_grammar.lime"
+{ yymsp[1].minor.yy292 = 0; }
+#line 5672 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5677,8 +5676,63 @@ static void yy_rule_117(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (118) col_constraint ::= TK_PRIMARY TK_KEY TK_DESC */
+/* (118) col_constraints ::= col_constraints col_constraint */
 static void yy_rule_118(yy_reduce_ctx *yy_ctx){
+  yyParser *yypParser = yy_ctx->yypParser;
+  yyStackEntry *yymsp = yy_ctx->yymsp;
+  int yyLookahead = yy_ctx->yyLookahead;
+  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
+  YYMINORTYPE yylhsminor;
+#ifdef YYLOCATIONTYPE
+  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
+#endif
+  SqlParseCTX_FETCH
+  SqlParseARG_FETCH
+  (void)yypParser; (void)yymsp; (void)yyLookahead;
+  (void)yyLookaheadToken; (void)yylhsminor;
+#ifdef YYLOCATIONTYPE
+  (void)yyloc_lhs;
+#endif
+#line 595 "sql_grammar.lime"
+{ yylhsminor.yy292 = yymsp[-1].minor.yy292 | yymsp[0].minor.yy292; }
+#line 5699 "sql_grammar.c"
+  yymsp[-1].minor.yy292 = yylhsminor.yy292;
+#ifdef YYLOCATIONTYPE
+  /* Commit any @$ writes back to yy_reduce's local
+  ** so the post-action stack-shift sees them. */
+  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
+#endif
+}
+
+/* (119) col_constraint ::= TK_PRIMARY TK_KEY */
+static void yy_rule_119(yy_reduce_ctx *yy_ctx){
+  yyParser *yypParser = yy_ctx->yypParser;
+  yyStackEntry *yymsp = yy_ctx->yymsp;
+  int yyLookahead = yy_ctx->yyLookahead;
+  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
+  YYMINORTYPE yylhsminor;
+#ifdef YYLOCATIONTYPE
+  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
+#endif
+  SqlParseCTX_FETCH
+  SqlParseARG_FETCH
+  (void)yypParser; (void)yymsp; (void)yyLookahead;
+  (void)yyLookaheadToken; (void)yylhsminor;
+#ifdef YYLOCATIONTYPE
+  (void)yyloc_lhs;
+#endif
+#line 597 "sql_grammar.lime"
+{ yymsp[-1].minor.yy292 = 1; }
+#line 5727 "sql_grammar.c"
+#ifdef YYLOCATIONTYPE
+  /* Commit any @$ writes back to yy_reduce's local
+  ** so the post-action stack-shift sees them. */
+  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
+#endif
+}
+
+/* (120) col_constraint ::= TK_PRIMARY TK_KEY TK_ASC */
+static void yy_rule_120(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
   int yyLookahead = yy_ctx->yyLookahead;
@@ -5696,7 +5750,7 @@ static void yy_rule_118(yy_reduce_ctx *yy_ctx){
 #endif
 #line 598 "sql_grammar.lime"
 { yymsp[-2].minor.yy292 = 1; }
-#line 5700 "sql_grammar.c"
+#line 5754 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5704,8 +5758,8 @@ static void yy_rule_118(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (119) col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR */
-static void yy_rule_119(yy_reduce_ctx *yy_ctx){
+/* (121) col_constraint ::= TK_PRIMARY TK_KEY TK_DESC */
+static void yy_rule_121(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
   int yyLookahead = yy_ctx->yyLookahead;
@@ -5723,60 +5777,6 @@ static void yy_rule_119(yy_reduce_ctx *yy_ctx){
 #endif
 #line 599 "sql_grammar.lime"
 { yymsp[-2].minor.yy292 = 1; }
-#line 5727 "sql_grammar.c"
-#ifdef YYLOCATIONTYPE
-  /* Commit any @$ writes back to yy_reduce's local
-  ** so the post-action stack-shift sees them. */
-  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
-#endif
-}
-
-/* (120) col_constraint ::= TK_NOT TK_NULL */
-static void yy_rule_120(yy_reduce_ctx *yy_ctx){
-  yyParser *yypParser = yy_ctx->yypParser;
-  yyStackEntry *yymsp = yy_ctx->yymsp;
-  int yyLookahead = yy_ctx->yyLookahead;
-  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
-  YYMINORTYPE yylhsminor;
-#ifdef YYLOCATIONTYPE
-  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
-#endif
-  SqlParseCTX_FETCH
-  SqlParseARG_FETCH
-  (void)yypParser; (void)yymsp; (void)yyLookahead;
-  (void)yyLookaheadToken; (void)yylhsminor;
-#ifdef YYLOCATIONTYPE
-  (void)yyloc_lhs;
-#endif
-#line 600 "sql_grammar.lime"
-{ yymsp[-1].minor.yy292 = 2; }
-#line 5754 "sql_grammar.c"
-#ifdef YYLOCATIONTYPE
-  /* Commit any @$ writes back to yy_reduce's local
-  ** so the post-action stack-shift sees them. */
-  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
-#endif
-}
-
-/* (121) col_constraint ::= TK_UNIQUE */
-static void yy_rule_121(yy_reduce_ctx *yy_ctx){
-  yyParser *yypParser = yy_ctx->yypParser;
-  yyStackEntry *yymsp = yy_ctx->yymsp;
-  int yyLookahead = yy_ctx->yyLookahead;
-  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
-  YYMINORTYPE yylhsminor;
-#ifdef YYLOCATIONTYPE
-  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
-#endif
-  SqlParseCTX_FETCH
-  SqlParseARG_FETCH
-  (void)yypParser; (void)yymsp; (void)yyLookahead;
-  (void)yyLookaheadToken; (void)yylhsminor;
-#ifdef YYLOCATIONTYPE
-  (void)yyloc_lhs;
-#endif
-#line 601 "sql_grammar.lime"
-{ yymsp[0].minor.yy292 = 4; }
 #line 5781 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5785,7 +5785,7 @@ static void yy_rule_121(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (122) col_constraint ::= TK_DEFAULT expr_atom */
+/* (122) col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR */
 static void yy_rule_122(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5802,8 +5802,8 @@ static void yy_rule_122(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 602 "sql_grammar.lime"
-{ yymsp[-1].minor.yy292 = 0; }
+#line 600 "sql_grammar.lime"
+{ yymsp[-2].minor.yy292 = 1; }
 #line 5808 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5812,7 +5812,7 @@ static void yy_rule_122(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (123) col_constraint ::= TK_CHECK TK_LP expr TK_RP */
+/* (123) col_constraint ::= TK_NOT TK_NULL */
 static void yy_rule_123(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5829,8 +5829,8 @@ static void yy_rule_123(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 603 "sql_grammar.lime"
-{ yymsp[-3].minor.yy292 = 0; }
+#line 601 "sql_grammar.lime"
+{ yymsp[-1].minor.yy292 = 2; }
 #line 5835 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5839,7 +5839,7 @@ static void yy_rule_123(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (124) col_constraint ::= TK_REFERENCES qname */
+/* (124) col_constraint ::= TK_UNIQUE */
 static void yy_rule_124(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5856,8 +5856,8 @@ static void yy_rule_124(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 604 "sql_grammar.lime"
-{ yymsp[-1].minor.yy292 = 0; }
+#line 602 "sql_grammar.lime"
+{ yymsp[0].minor.yy292 = 4; }
 #line 5862 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5866,7 +5866,7 @@ static void yy_rule_124(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (125) col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP */
+/* (125) col_constraint ::= TK_DEFAULT expr_atom */
 static void yy_rule_125(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5883,8 +5883,8 @@ static void yy_rule_125(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 605 "sql_grammar.lime"
-{ yymsp[-4].minor.yy292 = 0; }
+#line 603 "sql_grammar.lime"
+{ yymsp[-1].minor.yy292 = 0; }
 #line 5889 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5893,7 +5893,7 @@ static void yy_rule_125(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (126) drop_stmt ::= TK_DROP TK_TABLE if_exists qname */
+/* (126) col_constraint ::= TK_CHECK TK_LP expr TK_RP */
 static void yy_rule_126(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5910,14 +5910,9 @@ static void yy_rule_126(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 615 "sql_grammar.lime"
-{
-    sql_drop_t *d = AST(pstate, sql_drop_t);
-    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-3].minor.yy219 && d) { d->kind = SX_DR_TABLE; d->if_exists = yymsp[-1].minor.yy292; d->schema = yymsp[0].minor.yy151.schema; d->name = yymsp[0].minor.yy151.table;
-                  yymsp[-3].minor.yy219->kind = SQL_KIND_DROP; yymsp[-3].minor.yy219->u.drop = d; }
-}
-#line 5921 "sql_grammar.c"
+#line 604 "sql_grammar.lime"
+{ yymsp[-3].minor.yy292 = 0; }
+#line 5916 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5925,7 +5920,7 @@ static void yy_rule_126(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (127) drop_stmt ::= TK_DROP TK_INDEX if_exists qname */
+/* (127) col_constraint ::= TK_REFERENCES qname */
 static void yy_rule_127(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5942,14 +5937,9 @@ static void yy_rule_127(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 621 "sql_grammar.lime"
-{
-    sql_drop_t *d = AST(pstate, sql_drop_t);
-    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-3].minor.yy219 && d) { d->kind = SX_DR_INDEX; d->if_exists = yymsp[-1].minor.yy292; d->schema = yymsp[0].minor.yy151.schema; d->name = yymsp[0].minor.yy151.table;
-                  yymsp[-3].minor.yy219->kind = SQL_KIND_DROP; yymsp[-3].minor.yy219->u.drop = d; }
-}
-#line 5953 "sql_grammar.c"
+#line 605 "sql_grammar.lime"
+{ yymsp[-1].minor.yy292 = 0; }
+#line 5943 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5957,7 +5947,7 @@ static void yy_rule_127(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (128) drop_stmt ::= TK_DROP TK_VIEW if_exists qname */
+/* (128) col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP */
 static void yy_rule_128(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -5974,14 +5964,9 @@ static void yy_rule_128(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 627 "sql_grammar.lime"
-{
-    sql_drop_t *d = AST(pstate, sql_drop_t);
-    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-3].minor.yy219 && d) { d->kind = SX_DR_VIEW; d->if_exists = yymsp[-1].minor.yy292; d->schema = yymsp[0].minor.yy151.schema; d->name = yymsp[0].minor.yy151.table;
-                  yymsp[-3].minor.yy219->kind = SQL_KIND_DROP; yymsp[-3].minor.yy219->u.drop = d; }
-}
-#line 5985 "sql_grammar.c"
+#line 606 "sql_grammar.lime"
+{ yymsp[-4].minor.yy292 = 0; }
+#line 5970 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5989,7 +5974,7 @@ static void yy_rule_128(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (129) drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname */
+/* (129) drop_stmt ::= TK_DROP TK_TABLE if_exists qname */
 static void yy_rule_129(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6006,14 +5991,14 @@ static void yy_rule_129(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 633 "sql_grammar.lime"
+#line 616 "sql_grammar.lime"
 {
     sql_drop_t *d = AST(pstate, sql_drop_t);
     yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-3].minor.yy219 && d) { d->kind = SX_DR_TRIGGER; d->if_exists = yymsp[-1].minor.yy292; d->schema = yymsp[0].minor.yy151.schema; d->name = yymsp[0].minor.yy151.table;
+    if (yymsp[-3].minor.yy219 && d) { d->kind = SX_DR_TABLE; d->if_exists = yymsp[-1].minor.yy292; d->schema = yymsp[0].minor.yy151.schema; d->name = yymsp[0].minor.yy151.table;
                   yymsp[-3].minor.yy219->kind = SQL_KIND_DROP; yymsp[-3].minor.yy219->u.drop = d; }
 }
-#line 6017 "sql_grammar.c"
+#line 6002 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6021,7 +6006,7 @@ static void yy_rule_129(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (130) if_exists ::= */
+/* (130) drop_stmt ::= TK_DROP TK_INDEX if_exists qname */
 static void yy_rule_130(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6038,9 +6023,14 @@ static void yy_rule_130(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 641 "sql_grammar.lime"
-{ yymsp[1].minor.yy292 = 0; }
-#line 6044 "sql_grammar.c"
+#line 622 "sql_grammar.lime"
+{
+    sql_drop_t *d = AST(pstate, sql_drop_t);
+    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-3].minor.yy219 && d) { d->kind = SX_DR_INDEX; d->if_exists = yymsp[-1].minor.yy292; d->schema = yymsp[0].minor.yy151.schema; d->name = yymsp[0].minor.yy151.table;
+                  yymsp[-3].minor.yy219->kind = SQL_KIND_DROP; yymsp[-3].minor.yy219->u.drop = d; }
+}
+#line 6034 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6048,7 +6038,7 @@ static void yy_rule_130(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (131) if_exists ::= TK_IF TK_EXISTS */
+/* (131) drop_stmt ::= TK_DROP TK_VIEW if_exists qname */
 static void yy_rule_131(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6065,9 +6055,14 @@ static void yy_rule_131(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 642 "sql_grammar.lime"
-{ yymsp[-1].minor.yy292 = 1; }
-#line 6071 "sql_grammar.c"
+#line 628 "sql_grammar.lime"
+{
+    sql_drop_t *d = AST(pstate, sql_drop_t);
+    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-3].minor.yy219 && d) { d->kind = SX_DR_VIEW; d->if_exists = yymsp[-1].minor.yy292; d->schema = yymsp[0].minor.yy151.schema; d->name = yymsp[0].minor.yy151.table;
+                  yymsp[-3].minor.yy219->kind = SQL_KIND_DROP; yymsp[-3].minor.yy219->u.drop = d; }
+}
+#line 6066 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6075,7 +6070,7 @@ static void yy_rule_131(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (132) pragma_stmt ::= TK_PRAGMA qname */
+/* (132) drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname */
 static void yy_rule_132(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6092,13 +6087,14 @@ static void yy_rule_132(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 646 "sql_grammar.lime"
+#line 634 "sql_grammar.lime"
 {
-    sql_pragma_t *p = AST(pstate, sql_pragma_t);
-    yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-1].minor.yy219 && p) { p->schema = yymsp[0].minor.yy151.schema; p->name = yymsp[0].minor.yy151.table; yymsp[-1].minor.yy219->kind = SQL_KIND_PRAGMA; yymsp[-1].minor.yy219->readonly = 1; yymsp[-1].minor.yy219->u.pragma = p; }
+    sql_drop_t *d = AST(pstate, sql_drop_t);
+    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-3].minor.yy219 && d) { d->kind = SX_DR_TRIGGER; d->if_exists = yymsp[-1].minor.yy292; d->schema = yymsp[0].minor.yy151.schema; d->name = yymsp[0].minor.yy151.table;
+                  yymsp[-3].minor.yy219->kind = SQL_KIND_DROP; yymsp[-3].minor.yy219->u.drop = d; }
 }
-#line 6102 "sql_grammar.c"
+#line 6098 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6106,7 +6102,7 @@ static void yy_rule_132(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (133) pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom */
+/* (133) if_exists ::= */
 static void yy_rule_133(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6123,13 +6119,9 @@ static void yy_rule_133(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 651 "sql_grammar.lime"
-{
-    sql_pragma_t *p = AST(pstate, sql_pragma_t);
-    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-3].minor.yy219 && p) { p->schema = yymsp[-2].minor.yy151.schema; p->name = yymsp[-2].minor.yy151.table; p->value = yymsp[0].minor.yy234; yymsp[-3].minor.yy219->kind = SQL_KIND_PRAGMA; yymsp[-3].minor.yy219->u.pragma = p; }
-}
-#line 6133 "sql_grammar.c"
+#line 642 "sql_grammar.lime"
+{ yymsp[1].minor.yy292 = 0; }
+#line 6125 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6137,7 +6129,7 @@ static void yy_rule_133(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (134) pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP */
+/* (134) if_exists ::= TK_IF TK_EXISTS */
 static void yy_rule_134(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6154,13 +6146,9 @@ static void yy_rule_134(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 656 "sql_grammar.lime"
-{
-    sql_pragma_t *p = AST(pstate, sql_pragma_t);
-    yymsp[-4].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-4].minor.yy219 && p) { p->schema = yymsp[-3].minor.yy151.schema; p->name = yymsp[-3].minor.yy151.table; p->value = yymsp[-1].minor.yy234; yymsp[-4].minor.yy219->kind = SQL_KIND_PRAGMA; yymsp[-4].minor.yy219->u.pragma = p; }
-}
-#line 6164 "sql_grammar.c"
+#line 643 "sql_grammar.lime"
+{ yymsp[-1].minor.yy292 = 1; }
+#line 6152 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6168,7 +6156,7 @@ static void yy_rule_134(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (135) begin_stmt ::= TK_BEGIN */
+/* (135) pragma_stmt ::= TK_PRAGMA qname */
 static void yy_rule_135(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6185,9 +6173,13 @@ static void yy_rule_135(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 664 "sql_grammar.lime"
-{ yymsp[0].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy219) yymsp[0].minor.yy219->kind = SQL_KIND_BEGIN; }
-#line 6191 "sql_grammar.c"
+#line 647 "sql_grammar.lime"
+{
+    sql_pragma_t *p = AST(pstate, sql_pragma_t);
+    yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-1].minor.yy219 && p) { p->schema = yymsp[0].minor.yy151.schema; p->name = yymsp[0].minor.yy151.table; yymsp[-1].minor.yy219->kind = SQL_KIND_PRAGMA; yymsp[-1].minor.yy219->readonly = 1; yymsp[-1].minor.yy219->u.pragma = p; }
+}
+#line 6183 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6195,7 +6187,7 @@ static void yy_rule_135(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (136) begin_stmt ::= TK_BEGIN TK_TRANSACTION */
+/* (136) pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom */
 static void yy_rule_136(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6212,9 +6204,13 @@ static void yy_rule_136(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 665 "sql_grammar.lime"
-{ yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy219) yymsp[-1].minor.yy219->kind = SQL_KIND_BEGIN; }
-#line 6218 "sql_grammar.c"
+#line 652 "sql_grammar.lime"
+{
+    sql_pragma_t *p = AST(pstate, sql_pragma_t);
+    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-3].minor.yy219 && p) { p->schema = yymsp[-2].minor.yy151.schema; p->name = yymsp[-2].minor.yy151.table; p->value = yymsp[0].minor.yy234; yymsp[-3].minor.yy219->kind = SQL_KIND_PRAGMA; yymsp[-3].minor.yy219->u.pragma = p; }
+}
+#line 6214 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6222,8 +6218,66 @@ static void yy_rule_136(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (137) begin_stmt ::= TK_BEGIN TK_ID */
+/* (137) pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP */
 static void yy_rule_137(yy_reduce_ctx *yy_ctx){
+  yyParser *yypParser = yy_ctx->yypParser;
+  yyStackEntry *yymsp = yy_ctx->yymsp;
+  int yyLookahead = yy_ctx->yyLookahead;
+  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
+  YYMINORTYPE yylhsminor;
+#ifdef YYLOCATIONTYPE
+  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
+#endif
+  SqlParseCTX_FETCH
+  SqlParseARG_FETCH
+  (void)yypParser; (void)yymsp; (void)yyLookahead;
+  (void)yyLookaheadToken; (void)yylhsminor;
+#ifdef YYLOCATIONTYPE
+  (void)yyloc_lhs;
+#endif
+#line 657 "sql_grammar.lime"
+{
+    sql_pragma_t *p = AST(pstate, sql_pragma_t);
+    yymsp[-4].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-4].minor.yy219 && p) { p->schema = yymsp[-3].minor.yy151.schema; p->name = yymsp[-3].minor.yy151.table; p->value = yymsp[-1].minor.yy234; yymsp[-4].minor.yy219->kind = SQL_KIND_PRAGMA; yymsp[-4].minor.yy219->u.pragma = p; }
+}
+#line 6245 "sql_grammar.c"
+#ifdef YYLOCATIONTYPE
+  /* Commit any @$ writes back to yy_reduce's local
+  ** so the post-action stack-shift sees them. */
+  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
+#endif
+}
+
+/* (138) begin_stmt ::= TK_BEGIN */
+static void yy_rule_138(yy_reduce_ctx *yy_ctx){
+  yyParser *yypParser = yy_ctx->yypParser;
+  yyStackEntry *yymsp = yy_ctx->yymsp;
+  int yyLookahead = yy_ctx->yyLookahead;
+  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
+  YYMINORTYPE yylhsminor;
+#ifdef YYLOCATIONTYPE
+  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
+#endif
+  SqlParseCTX_FETCH
+  SqlParseARG_FETCH
+  (void)yypParser; (void)yymsp; (void)yyLookahead;
+  (void)yyLookaheadToken; (void)yylhsminor;
+#ifdef YYLOCATIONTYPE
+  (void)yyloc_lhs;
+#endif
+#line 665 "sql_grammar.lime"
+{ yymsp[0].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy219) yymsp[0].minor.yy219->kind = SQL_KIND_BEGIN; }
+#line 6272 "sql_grammar.c"
+#ifdef YYLOCATIONTYPE
+  /* Commit any @$ writes back to yy_reduce's local
+  ** so the post-action stack-shift sees them. */
+  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
+#endif
+}
+
+/* (139) begin_stmt ::= TK_BEGIN TK_TRANSACTION */
+static void yy_rule_139(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
   int yyLookahead = yy_ctx->yyLookahead;
@@ -6241,60 +6295,6 @@ static void yy_rule_137(yy_reduce_ctx *yy_ctx){
 #endif
 #line 666 "sql_grammar.lime"
 { yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy219) yymsp[-1].minor.yy219->kind = SQL_KIND_BEGIN; }
-#line 6245 "sql_grammar.c"
-#ifdef YYLOCATIONTYPE
-  /* Commit any @$ writes back to yy_reduce's local
-  ** so the post-action stack-shift sees them. */
-  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
-#endif
-}
-
-/* (138) begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION */
-static void yy_rule_138(yy_reduce_ctx *yy_ctx){
-  yyParser *yypParser = yy_ctx->yypParser;
-  yyStackEntry *yymsp = yy_ctx->yymsp;
-  int yyLookahead = yy_ctx->yyLookahead;
-  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
-  YYMINORTYPE yylhsminor;
-#ifdef YYLOCATIONTYPE
-  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
-#endif
-  SqlParseCTX_FETCH
-  SqlParseARG_FETCH
-  (void)yypParser; (void)yymsp; (void)yyLookahead;
-  (void)yyLookaheadToken; (void)yylhsminor;
-#ifdef YYLOCATIONTYPE
-  (void)yyloc_lhs;
-#endif
-#line 667 "sql_grammar.lime"
-{ yymsp[-2].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-2].minor.yy219) yymsp[-2].minor.yy219->kind = SQL_KIND_BEGIN; }
-#line 6272 "sql_grammar.c"
-#ifdef YYLOCATIONTYPE
-  /* Commit any @$ writes back to yy_reduce's local
-  ** so the post-action stack-shift sees them. */
-  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
-#endif
-}
-
-/* (139) commit_stmt ::= TK_COMMIT */
-static void yy_rule_139(yy_reduce_ctx *yy_ctx){
-  yyParser *yypParser = yy_ctx->yypParser;
-  yyStackEntry *yymsp = yy_ctx->yymsp;
-  int yyLookahead = yy_ctx->yyLookahead;
-  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
-  YYMINORTYPE yylhsminor;
-#ifdef YYLOCATIONTYPE
-  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
-#endif
-  SqlParseCTX_FETCH
-  SqlParseARG_FETCH
-  (void)yypParser; (void)yymsp; (void)yyLookahead;
-  (void)yyLookaheadToken; (void)yylhsminor;
-#ifdef YYLOCATIONTYPE
-  (void)yyloc_lhs;
-#endif
-#line 669 "sql_grammar.lime"
-{ yymsp[0].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy219) yymsp[0].minor.yy219->kind = SQL_KIND_COMMIT; }
 #line 6299 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6303,7 +6303,7 @@ static void yy_rule_139(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (140) commit_stmt ::= TK_COMMIT TK_TRANSACTION */
+/* (140) begin_stmt ::= TK_BEGIN TK_ID */
 static void yy_rule_140(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6320,8 +6320,8 @@ static void yy_rule_140(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 670 "sql_grammar.lime"
-{ yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy219) yymsp[-1].minor.yy219->kind = SQL_KIND_COMMIT; }
+#line 667 "sql_grammar.lime"
+{ yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy219) yymsp[-1].minor.yy219->kind = SQL_KIND_BEGIN; }
 #line 6326 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6330,7 +6330,7 @@ static void yy_rule_140(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (141) commit_stmt ::= TK_END */
+/* (141) begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION */
 static void yy_rule_141(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6347,8 +6347,8 @@ static void yy_rule_141(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 671 "sql_grammar.lime"
-{ yymsp[0].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy219) yymsp[0].minor.yy219->kind = SQL_KIND_COMMIT; }
+#line 668 "sql_grammar.lime"
+{ yymsp[-2].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-2].minor.yy219) yymsp[-2].minor.yy219->kind = SQL_KIND_BEGIN; }
 #line 6353 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6357,7 +6357,7 @@ static void yy_rule_141(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (142) commit_stmt ::= TK_END TK_TRANSACTION */
+/* (142) commit_stmt ::= TK_COMMIT */
 static void yy_rule_142(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6374,8 +6374,8 @@ static void yy_rule_142(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 672 "sql_grammar.lime"
-{ yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy219) yymsp[-1].minor.yy219->kind = SQL_KIND_COMMIT; }
+#line 670 "sql_grammar.lime"
+{ yymsp[0].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy219) yymsp[0].minor.yy219->kind = SQL_KIND_COMMIT; }
 #line 6380 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6384,7 +6384,7 @@ static void yy_rule_142(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (143) rollback_stmt ::= TK_ROLLBACK */
+/* (143) commit_stmt ::= TK_COMMIT TK_TRANSACTION */
 static void yy_rule_143(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6401,8 +6401,8 @@ static void yy_rule_143(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 674 "sql_grammar.lime"
-{ yymsp[0].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy219) yymsp[0].minor.yy219->kind = SQL_KIND_ROLLBACK; }
+#line 671 "sql_grammar.lime"
+{ yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy219) yymsp[-1].minor.yy219->kind = SQL_KIND_COMMIT; }
 #line 6407 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6411,7 +6411,7 @@ static void yy_rule_143(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (144) rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION */
+/* (144) commit_stmt ::= TK_END */
 static void yy_rule_144(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6428,8 +6428,8 @@ static void yy_rule_144(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 675 "sql_grammar.lime"
-{ yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy219) yymsp[-1].minor.yy219->kind = SQL_KIND_ROLLBACK; }
+#line 672 "sql_grammar.lime"
+{ yymsp[0].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy219) yymsp[0].minor.yy219->kind = SQL_KIND_COMMIT; }
 #line 6434 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6438,7 +6438,7 @@ static void yy_rule_144(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (145) attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID */
+/* (145) commit_stmt ::= TK_END TK_TRANSACTION */
 static void yy_rule_145(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6455,13 +6455,9 @@ static void yy_rule_145(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 677 "sql_grammar.lime"
-{
-    sql_attach_t *at = AST(pstate, sql_attach_t);
-    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-3].minor.yy219 && at) { at->target = yymsp[-2].minor.yy234; at->alias = tok_str(yymsp[0].minor.yy0); yymsp[-3].minor.yy219->kind = SQL_KIND_ATTACH; yymsp[-3].minor.yy219->u.attach = at; }
-}
-#line 6465 "sql_grammar.c"
+#line 673 "sql_grammar.lime"
+{ yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy219) yymsp[-1].minor.yy219->kind = SQL_KIND_COMMIT; }
+#line 6461 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6469,7 +6465,7 @@ static void yy_rule_145(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (146) attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID */
+/* (146) rollback_stmt ::= TK_ROLLBACK */
 static void yy_rule_146(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6486,13 +6482,9 @@ static void yy_rule_146(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 682 "sql_grammar.lime"
-{
-    sql_attach_t *at = AST(pstate, sql_attach_t);
-    yymsp[-4].minor.yy219 = AST(pstate, sql_stmt_t);
-    if (yymsp[-4].minor.yy219 && at) { at->target = yymsp[-2].minor.yy234; at->alias = tok_str(yymsp[0].minor.yy0); yymsp[-4].minor.yy219->kind = SQL_KIND_ATTACH; yymsp[-4].minor.yy219->u.attach = at; }
-}
-#line 6496 "sql_grammar.c"
+#line 675 "sql_grammar.lime"
+{ yymsp[0].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy219) yymsp[0].minor.yy219->kind = SQL_KIND_ROLLBACK; }
+#line 6488 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6500,7 +6492,7 @@ static void yy_rule_146(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (147) detach_stmt ::= TK_DETACH TK_ID */
+/* (147) rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION */
 static void yy_rule_147(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6517,11 +6509,9 @@ static void yy_rule_147(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 688 "sql_grammar.lime"
-{
-    yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy219) { yymsp[-1].minor.yy219->kind = SQL_KIND_DETACH; yymsp[-1].minor.yy219->u.detach = tok_str(yymsp[0].minor.yy0); }
-}
-#line 6525 "sql_grammar.c"
+#line 676 "sql_grammar.lime"
+{ yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy219) yymsp[-1].minor.yy219->kind = SQL_KIND_ROLLBACK; }
+#line 6515 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6529,7 +6519,7 @@ static void yy_rule_147(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (148) detach_stmt ::= TK_DETACH TK_DATABASE TK_ID */
+/* (148) attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID */
 static void yy_rule_148(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6546,11 +6536,13 @@ static void yy_rule_148(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 691 "sql_grammar.lime"
+#line 678 "sql_grammar.lime"
 {
-    yymsp[-2].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-2].minor.yy219) { yymsp[-2].minor.yy219->kind = SQL_KIND_DETACH; yymsp[-2].minor.yy219->u.detach = tok_str(yymsp[0].minor.yy0); }
+    sql_attach_t *at = AST(pstate, sql_attach_t);
+    yymsp[-3].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-3].minor.yy219 && at) { at->target = yymsp[-2].minor.yy234; at->alias = tok_str(yymsp[0].minor.yy0); yymsp[-3].minor.yy219->kind = SQL_KIND_ATTACH; yymsp[-3].minor.yy219->u.attach = at; }
 }
-#line 6554 "sql_grammar.c"
+#line 6546 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6558,7 +6550,7 @@ static void yy_rule_148(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (149) explain_stmt ::= TK_EXPLAIN stmt */
+/* (149) attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID */
 static void yy_rule_149(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6575,11 +6567,13 @@ static void yy_rule_149(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 695 "sql_grammar.lime"
+#line 683 "sql_grammar.lime"
 {
-    yymsp[-1].minor.yy219 = yymsp[0].minor.yy219; if (yymsp[-1].minor.yy219) { yymsp[-1].minor.yy219->explain = 1; yymsp[-1].minor.yy219->kind = SQL_KIND_EXPLAIN; yymsp[-1].minor.yy219->readonly = 1; }
+    sql_attach_t *at = AST(pstate, sql_attach_t);
+    yymsp[-4].minor.yy219 = AST(pstate, sql_stmt_t);
+    if (yymsp[-4].minor.yy219 && at) { at->target = yymsp[-2].minor.yy234; at->alias = tok_str(yymsp[0].minor.yy0); yymsp[-4].minor.yy219->kind = SQL_KIND_ATTACH; yymsp[-4].minor.yy219->u.attach = at; }
 }
-#line 6583 "sql_grammar.c"
+#line 6577 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6587,7 +6581,7 @@ static void yy_rule_149(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (150) explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt */
+/* (150) detach_stmt ::= TK_DETACH TK_ID */
 static void yy_rule_150(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6604,11 +6598,11 @@ static void yy_rule_150(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 698 "sql_grammar.lime"
+#line 689 "sql_grammar.lime"
 {
-    yymsp[-3].minor.yy219 = yymsp[0].minor.yy219; if (yymsp[-3].minor.yy219) { yymsp[-3].minor.yy219->explain = 2; yymsp[-3].minor.yy219->kind = SQL_KIND_EXPLAIN; yymsp[-3].minor.yy219->readonly = 1; }
+    yymsp[-1].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy219) { yymsp[-1].minor.yy219->kind = SQL_KIND_DETACH; yymsp[-1].minor.yy219->u.detach = tok_str(yymsp[0].minor.yy0); }
 }
-#line 6612 "sql_grammar.c"
+#line 6606 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6616,7 +6610,7 @@ static void yy_rule_150(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (151) id_list ::= TK_ID */
+/* (151) detach_stmt ::= TK_DETACH TK_DATABASE TK_ID */
 static void yy_rule_151(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6633,14 +6627,11 @@ static void yy_rule_151(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 704 "sql_grammar.lime"
+#line 692 "sql_grammar.lime"
 {
-    sql_expr_t *c = mk_expr(pstate, SX_E_COLUMN);
-    if (c) { c->name[0] = tok_str(yymsp[0].minor.yy0); c->nname = 1; }
-    yylhsminor.yy136 = list_add(pstate, NULL, c);
+    yymsp[-2].minor.yy219 = AST(pstate, sql_stmt_t); if (yymsp[-2].minor.yy219) { yymsp[-2].minor.yy219->kind = SQL_KIND_DETACH; yymsp[-2].minor.yy219->u.detach = tok_str(yymsp[0].minor.yy0); }
 }
-#line 6643 "sql_grammar.c"
-  yymsp[0].minor.yy136 = yylhsminor.yy136;
+#line 6635 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6648,7 +6639,7 @@ static void yy_rule_151(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (152) id_list ::= id_list TK_COMMA TK_ID */
+/* (152) explain_stmt ::= TK_EXPLAIN stmt */
 static void yy_rule_152(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6665,14 +6656,11 @@ static void yy_rule_152(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 709 "sql_grammar.lime"
+#line 696 "sql_grammar.lime"
 {
-    sql_expr_t *c = mk_expr(pstate, SX_E_COLUMN);
-    if (c) { c->name[0] = tok_str(yymsp[0].minor.yy0); c->nname = 1; }
-    yylhsminor.yy136 = list_add(pstate, yymsp[-2].minor.yy136, c);
+    yymsp[-1].minor.yy219 = yymsp[0].minor.yy219; if (yymsp[-1].minor.yy219) { yymsp[-1].minor.yy219->explain = 1; yymsp[-1].minor.yy219->kind = SQL_KIND_EXPLAIN; yymsp[-1].minor.yy219->readonly = 1; }
 }
-#line 6675 "sql_grammar.c"
-  yymsp[-2].minor.yy136 = yylhsminor.yy136;
+#line 6664 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6680,7 +6668,7 @@ static void yy_rule_152(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (153) expr_list ::= expr */
+/* (153) explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt */
 static void yy_rule_153(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6697,10 +6685,11 @@ static void yy_rule_153(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 715 "sql_grammar.lime"
-{ yylhsminor.yy136 = list_add(pstate, NULL, yymsp[0].minor.yy234); }
-#line 6703 "sql_grammar.c"
-  yymsp[0].minor.yy136 = yylhsminor.yy136;
+#line 699 "sql_grammar.lime"
+{
+    yymsp[-3].minor.yy219 = yymsp[0].minor.yy219; if (yymsp[-3].minor.yy219) { yymsp[-3].minor.yy219->explain = 2; yymsp[-3].minor.yy219->kind = SQL_KIND_EXPLAIN; yymsp[-3].minor.yy219->readonly = 1; }
+}
+#line 6693 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6708,7 +6697,7 @@ static void yy_rule_153(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (154) expr_list ::= expr_list TK_COMMA expr */
+/* (154) id_list ::= TK_ID */
 static void yy_rule_154(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6725,10 +6714,14 @@ static void yy_rule_154(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 716 "sql_grammar.lime"
-{ yylhsminor.yy136 = list_add(pstate, yymsp[-2].minor.yy136, yymsp[0].minor.yy234); }
-#line 6731 "sql_grammar.c"
-  yymsp[-2].minor.yy136 = yylhsminor.yy136;
+#line 705 "sql_grammar.lime"
+{
+    sql_expr_t *c = mk_expr(pstate, SX_E_COLUMN);
+    if (c) { c->name[0] = tok_str(yymsp[0].minor.yy0); c->nname = 1; }
+    yylhsminor.yy136 = list_add(pstate, NULL, c);
+}
+#line 6724 "sql_grammar.c"
+  yymsp[0].minor.yy136 = yylhsminor.yy136;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6736,7 +6729,7 @@ static void yy_rule_154(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (155) expr ::= expr_atom */
+/* (155) id_list ::= id_list TK_COMMA TK_ID */
 static void yy_rule_155(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6753,10 +6746,14 @@ static void yy_rule_155(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 718 "sql_grammar.lime"
-{ yylhsminor.yy234 = yymsp[0].minor.yy234; }
-#line 6759 "sql_grammar.c"
-  yymsp[0].minor.yy234 = yylhsminor.yy234;
+#line 710 "sql_grammar.lime"
+{
+    sql_expr_t *c = mk_expr(pstate, SX_E_COLUMN);
+    if (c) { c->name[0] = tok_str(yymsp[0].minor.yy0); c->nname = 1; }
+    yylhsminor.yy136 = list_add(pstate, yymsp[-2].minor.yy136, c);
+}
+#line 6756 "sql_grammar.c"
+  yymsp[-2].minor.yy136 = yylhsminor.yy136;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6764,7 +6761,7 @@ static void yy_rule_155(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (156) expr ::= TK_LP expr TK_RP */
+/* (156) expr_list ::= expr */
 static void yy_rule_156(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6781,9 +6778,10 @@ static void yy_rule_156(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 719 "sql_grammar.lime"
-{ yymsp[-2].minor.yy234 = yymsp[-1].minor.yy234; }
-#line 6787 "sql_grammar.c"
+#line 716 "sql_grammar.lime"
+{ yylhsminor.yy136 = list_add(pstate, NULL, yymsp[0].minor.yy234); }
+#line 6784 "sql_grammar.c"
+  yymsp[0].minor.yy136 = yylhsminor.yy136;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6791,7 +6789,7 @@ static void yy_rule_156(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (157) expr ::= TK_LP select_stmt TK_RP */
+/* (157) expr_list ::= expr_list TK_COMMA expr */
 static void yy_rule_157(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6808,9 +6806,10 @@ static void yy_rule_157(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 720 "sql_grammar.lime"
-{ yymsp[-2].minor.yy234 = mk_expr(pstate, SX_E_SUBQUERY); if (yymsp[-2].minor.yy234) yymsp[-2].minor.yy234->sel = yymsp[-1].minor.yy61; }
-#line 6814 "sql_grammar.c"
+#line 717 "sql_grammar.lime"
+{ yylhsminor.yy136 = list_add(pstate, yymsp[-2].minor.yy136, yymsp[0].minor.yy234); }
+#line 6812 "sql_grammar.c"
+  yymsp[-2].minor.yy136 = yylhsminor.yy136;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6818,7 +6817,7 @@ static void yy_rule_157(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (158) expr ::= TK_NOT expr */
+/* (158) expr ::= expr_atom */
 static void yy_rule_158(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6835,9 +6834,10 @@ static void yy_rule_158(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 721 "sql_grammar.lime"
-{ yymsp[-1].minor.yy234 = mk_unary(pstate, TK_NOT, yymsp[0].minor.yy234); }
-#line 6841 "sql_grammar.c"
+#line 719 "sql_grammar.lime"
+{ yylhsminor.yy234 = yymsp[0].minor.yy234; }
+#line 6840 "sql_grammar.c"
+  yymsp[0].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6845,7 +6845,7 @@ static void yy_rule_158(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (159) expr ::= TK_MINUS expr */
+/* (159) expr ::= TK_LP expr TK_RP */
 static void yy_rule_159(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6862,8 +6862,8 @@ static void yy_rule_159(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 722 "sql_grammar.lime"
-{ yymsp[-1].minor.yy234 = mk_unary(pstate, TK_MINUS, yymsp[0].minor.yy234); }
+#line 720 "sql_grammar.lime"
+{ yymsp[-2].minor.yy234 = yymsp[-1].minor.yy234; }
 #line 6868 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6872,7 +6872,7 @@ static void yy_rule_159(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (160) expr ::= TK_PLUS expr */
+/* (160) expr ::= TK_LP select_stmt TK_RP */
 static void yy_rule_160(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6889,8 +6889,8 @@ static void yy_rule_160(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 723 "sql_grammar.lime"
-{ yymsp[-1].minor.yy234 = mk_unary(pstate, TK_PLUS, yymsp[0].minor.yy234); }
+#line 721 "sql_grammar.lime"
+{ yymsp[-2].minor.yy234 = mk_expr(pstate, SX_E_SUBQUERY); if (yymsp[-2].minor.yy234) yymsp[-2].minor.yy234->sel = yymsp[-1].minor.yy61; }
 #line 6895 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6899,7 +6899,7 @@ static void yy_rule_160(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (161) expr ::= TK_TILDE expr */
+/* (161) expr ::= TK_NOT expr */
 static void yy_rule_161(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6916,8 +6916,8 @@ static void yy_rule_161(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 724 "sql_grammar.lime"
-{ yymsp[-1].minor.yy234 = mk_unary(pstate, TK_TILDE, yymsp[0].minor.yy234); }
+#line 722 "sql_grammar.lime"
+{ yymsp[-1].minor.yy234 = mk_unary(pstate, TK_NOT, yymsp[0].minor.yy234); }
 #line 6922 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6926,7 +6926,7 @@ static void yy_rule_161(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (162) expr ::= expr TK_OR expr */
+/* (162) expr ::= TK_MINUS expr */
 static void yy_rule_162(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6943,10 +6943,9 @@ static void yy_rule_162(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 725 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_OR, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 723 "sql_grammar.lime"
+{ yymsp[-1].minor.yy234 = mk_unary(pstate, TK_MINUS, yymsp[0].minor.yy234); }
 #line 6949 "sql_grammar.c"
-  yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6954,7 +6953,7 @@ static void yy_rule_162(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (163) expr ::= expr TK_AND expr */
+/* (163) expr ::= TK_PLUS expr */
 static void yy_rule_163(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6971,10 +6970,9 @@ static void yy_rule_163(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 726 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_AND, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 6977 "sql_grammar.c"
-  yymsp[-2].minor.yy234 = yylhsminor.yy234;
+#line 724 "sql_grammar.lime"
+{ yymsp[-1].minor.yy234 = mk_unary(pstate, TK_PLUS, yymsp[0].minor.yy234); }
+#line 6976 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6982,7 +6980,7 @@ static void yy_rule_163(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (164) expr ::= expr TK_EQ expr */
+/* (164) expr ::= TK_TILDE expr */
 static void yy_rule_164(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -6999,10 +6997,9 @@ static void yy_rule_164(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 727 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_EQ, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7005 "sql_grammar.c"
-  yymsp[-2].minor.yy234 = yylhsminor.yy234;
+#line 725 "sql_grammar.lime"
+{ yymsp[-1].minor.yy234 = mk_unary(pstate, TK_TILDE, yymsp[0].minor.yy234); }
+#line 7003 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7010,7 +7007,7 @@ static void yy_rule_164(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (165) expr ::= expr TK_NE expr */
+/* (165) expr ::= expr TK_OR expr */
 static void yy_rule_165(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7027,9 +7024,9 @@ static void yy_rule_165(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 728 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_NE, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7033 "sql_grammar.c"
+#line 726 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_OR, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7030 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7038,7 +7035,7 @@ static void yy_rule_165(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (166) expr ::= expr TK_LT expr */
+/* (166) expr ::= expr TK_AND expr */
 static void yy_rule_166(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7055,9 +7052,9 @@ static void yy_rule_166(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 729 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_LT, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7061 "sql_grammar.c"
+#line 727 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_AND, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7058 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7066,7 +7063,7 @@ static void yy_rule_166(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (167) expr ::= expr TK_LE expr */
+/* (167) expr ::= expr TK_EQ expr */
 static void yy_rule_167(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7083,9 +7080,9 @@ static void yy_rule_167(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 730 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_LE, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7089 "sql_grammar.c"
+#line 728 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_EQ, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7086 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7094,7 +7091,7 @@ static void yy_rule_167(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (168) expr ::= expr TK_GT expr */
+/* (168) expr ::= expr TK_NE expr */
 static void yy_rule_168(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7111,9 +7108,9 @@ static void yy_rule_168(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 731 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_GT, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7117 "sql_grammar.c"
+#line 729 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_NE, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7114 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7122,7 +7119,7 @@ static void yy_rule_168(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (169) expr ::= expr TK_GE expr */
+/* (169) expr ::= expr TK_LT expr */
 static void yy_rule_169(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7139,9 +7136,9 @@ static void yy_rule_169(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 732 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_GE, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7145 "sql_grammar.c"
+#line 730 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_LT, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7142 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7150,7 +7147,7 @@ static void yy_rule_169(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (170) expr ::= expr TK_PLUS expr */
+/* (170) expr ::= expr TK_LE expr */
 static void yy_rule_170(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7167,9 +7164,9 @@ static void yy_rule_170(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 733 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_PLUS, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7173 "sql_grammar.c"
+#line 731 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_LE, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7170 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7178,7 +7175,7 @@ static void yy_rule_170(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (171) expr ::= expr TK_MINUS expr */
+/* (171) expr ::= expr TK_GT expr */
 static void yy_rule_171(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7195,9 +7192,9 @@ static void yy_rule_171(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 734 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_MINUS, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7201 "sql_grammar.c"
+#line 732 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_GT, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7198 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7206,7 +7203,7 @@ static void yy_rule_171(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (172) expr ::= expr TK_STAR expr */
+/* (172) expr ::= expr TK_GE expr */
 static void yy_rule_172(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7223,9 +7220,9 @@ static void yy_rule_172(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 735 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_STAR, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7229 "sql_grammar.c"
+#line 733 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_GE, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7226 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7234,7 +7231,7 @@ static void yy_rule_172(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (173) expr ::= expr TK_SLASH expr */
+/* (173) expr ::= expr TK_PLUS expr */
 static void yy_rule_173(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7251,9 +7248,9 @@ static void yy_rule_173(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 736 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_SLASH, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7257 "sql_grammar.c"
+#line 734 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_PLUS, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7254 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7262,7 +7259,7 @@ static void yy_rule_173(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (174) expr ::= expr TK_PERCENT expr */
+/* (174) expr ::= expr TK_MINUS expr */
 static void yy_rule_174(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7279,9 +7276,9 @@ static void yy_rule_174(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 737 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_PERCENT, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7285 "sql_grammar.c"
+#line 735 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_MINUS, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7282 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7290,7 +7287,7 @@ static void yy_rule_174(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (175) expr ::= expr TK_CONCAT expr */
+/* (175) expr ::= expr TK_STAR expr */
 static void yy_rule_175(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7307,9 +7304,9 @@ static void yy_rule_175(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 738 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_CONCAT, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7313 "sql_grammar.c"
+#line 736 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_STAR, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7310 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7318,7 +7315,7 @@ static void yy_rule_175(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (176) expr ::= expr TK_AMP expr */
+/* (176) expr ::= expr TK_SLASH expr */
 static void yy_rule_176(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7335,9 +7332,9 @@ static void yy_rule_176(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 739 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_AMP, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7341 "sql_grammar.c"
+#line 737 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_SLASH, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7338 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7346,7 +7343,7 @@ static void yy_rule_176(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (177) expr ::= expr TK_PIPE expr */
+/* (177) expr ::= expr TK_PERCENT expr */
 static void yy_rule_177(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7363,9 +7360,9 @@ static void yy_rule_177(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 740 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_PIPE, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7369 "sql_grammar.c"
+#line 738 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_PERCENT, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7366 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7374,7 +7371,7 @@ static void yy_rule_177(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (178) expr ::= expr TK_LIKE expr */
+/* (178) expr ::= expr TK_CONCAT expr */
 static void yy_rule_178(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7391,9 +7388,9 @@ static void yy_rule_178(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 741 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_LIKE, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7397 "sql_grammar.c"
+#line 739 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_CONCAT, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7394 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7402,7 +7399,7 @@ static void yy_rule_178(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (179) expr ::= expr TK_IS TK_NULL */
+/* (179) expr ::= expr TK_AMP expr */
 static void yy_rule_179(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7419,9 +7416,9 @@ static void yy_rule_179(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 742 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_expr(pstate, SX_E_IS_NULL); if (yylhsminor.yy234) { yylhsminor.yy234->a = yymsp[-2].minor.yy234; yylhsminor.yy234->ival = 0; } }
-#line 7425 "sql_grammar.c"
+#line 740 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_AMP, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7422 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7430,7 +7427,7 @@ static void yy_rule_179(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (180) expr ::= expr TK_IS TK_NOT TK_NULL */
+/* (180) expr ::= expr TK_PIPE expr */
 static void yy_rule_180(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7447,10 +7444,10 @@ static void yy_rule_180(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 743 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_expr(pstate, SX_E_IS_NULL); if (yylhsminor.yy234) { yylhsminor.yy234->a = yymsp[-3].minor.yy234; yylhsminor.yy234->ival = 1; } }
-#line 7453 "sql_grammar.c"
-  yymsp[-3].minor.yy234 = yylhsminor.yy234;
+#line 741 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_PIPE, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7450 "sql_grammar.c"
+  yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7458,7 +7455,7 @@ static void yy_rule_180(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (181) expr ::= expr TK_IS expr */
+/* (181) expr ::= expr TK_LIKE expr */
 static void yy_rule_181(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7475,9 +7472,9 @@ static void yy_rule_181(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 744 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_binary(pstate, TK_IS, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
-#line 7481 "sql_grammar.c"
+#line 742 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_LIKE, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7478 "sql_grammar.c"
   yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7486,7 +7483,7 @@ static void yy_rule_181(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (182) expr ::= expr TK_IN TK_LP expr_list TK_RP */
+/* (182) expr ::= expr TK_IS TK_NULL */
 static void yy_rule_182(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7503,12 +7500,10 @@ static void yy_rule_182(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 745 "sql_grammar.lime"
-{
-    yylhsminor.yy234 = mk_expr(pstate, SX_E_IN_LIST); if (yylhsminor.yy234) { yylhsminor.yy234->a = yymsp[-4].minor.yy234; yylhsminor.yy234->list = yymsp[-1].minor.yy136; }
-}
-#line 7511 "sql_grammar.c"
-  yymsp[-4].minor.yy234 = yylhsminor.yy234;
+#line 743 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_expr(pstate, SX_E_IS_NULL); if (yylhsminor.yy234) { yylhsminor.yy234->a = yymsp[-2].minor.yy234; yylhsminor.yy234->ival = 0; } }
+#line 7506 "sql_grammar.c"
+  yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7516,7 +7511,7 @@ static void yy_rule_182(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (183) expr ::= expr TK_IN TK_LP select_stmt TK_RP */
+/* (183) expr ::= expr TK_IS TK_NOT TK_NULL */
 static void yy_rule_183(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7533,12 +7528,10 @@ static void yy_rule_183(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 748 "sql_grammar.lime"
-{
-    yylhsminor.yy234 = mk_expr(pstate, SX_E_IN_SELECT); if (yylhsminor.yy234) { yylhsminor.yy234->a = yymsp[-4].minor.yy234; yylhsminor.yy234->sel = yymsp[-1].minor.yy61; }
-}
-#line 7541 "sql_grammar.c"
-  yymsp[-4].minor.yy234 = yylhsminor.yy234;
+#line 744 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_expr(pstate, SX_E_IS_NULL); if (yylhsminor.yy234) { yylhsminor.yy234->a = yymsp[-3].minor.yy234; yylhsminor.yy234->ival = 1; } }
+#line 7534 "sql_grammar.c"
+  yymsp[-3].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7546,7 +7539,7 @@ static void yy_rule_183(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (184) expr ::= expr TK_BETWEEN expr TK_AND expr */
+/* (184) expr ::= expr TK_IS expr */
 static void yy_rule_184(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7563,12 +7556,10 @@ static void yy_rule_184(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 751 "sql_grammar.lime"
-{
-    yylhsminor.yy234 = mk_expr(pstate, SX_E_BETWEEN); if (yylhsminor.yy234) { yylhsminor.yy234->a = yymsp[-4].minor.yy234; yylhsminor.yy234->b = yymsp[-2].minor.yy234; yylhsminor.yy234->c = yymsp[0].minor.yy234; }
-}
-#line 7571 "sql_grammar.c"
-  yymsp[-4].minor.yy234 = yylhsminor.yy234;
+#line 745 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_binary(pstate, TK_IS, yymsp[-2].minor.yy234, yymsp[0].minor.yy234); }
+#line 7562 "sql_grammar.c"
+  yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7576,7 +7567,7 @@ static void yy_rule_184(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (185) expr ::= TK_CASE expr_atom case_arms case_else TK_END */
+/* (185) expr ::= expr TK_IN TK_LP expr_list TK_RP */
 static void yy_rule_185(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7593,11 +7584,12 @@ static void yy_rule_185(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 754 "sql_grammar.lime"
+#line 746 "sql_grammar.lime"
 {
-    yymsp[-4].minor.yy234 = mk_expr(pstate, SX_E_CASE); if (yymsp[-4].minor.yy234) { yymsp[-4].minor.yy234->a = yymsp[-3].minor.yy234; yymsp[-4].minor.yy234->arms = yymsp[-2].minor.yy98; yymsp[-4].minor.yy234->els = yymsp[-1].minor.yy234; }
+    yylhsminor.yy234 = mk_expr(pstate, SX_E_IN_LIST); if (yylhsminor.yy234) { yylhsminor.yy234->a = yymsp[-4].minor.yy234; yylhsminor.yy234->list = yymsp[-1].minor.yy136; }
 }
-#line 7601 "sql_grammar.c"
+#line 7592 "sql_grammar.c"
+  yymsp[-4].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7605,7 +7597,7 @@ static void yy_rule_185(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (186) expr ::= TK_CASE case_arms case_else TK_END */
+/* (186) expr ::= expr TK_IN TK_LP select_stmt TK_RP */
 static void yy_rule_186(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7622,11 +7614,12 @@ static void yy_rule_186(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 757 "sql_grammar.lime"
+#line 749 "sql_grammar.lime"
 {
-    yymsp[-3].minor.yy234 = mk_expr(pstate, SX_E_CASE); if (yymsp[-3].minor.yy234) { yymsp[-3].minor.yy234->arms = yymsp[-2].minor.yy98; yymsp[-3].minor.yy234->els = yymsp[-1].minor.yy234; }
+    yylhsminor.yy234 = mk_expr(pstate, SX_E_IN_SELECT); if (yylhsminor.yy234) { yylhsminor.yy234->a = yymsp[-4].minor.yy234; yylhsminor.yy234->sel = yymsp[-1].minor.yy61; }
 }
-#line 7630 "sql_grammar.c"
+#line 7622 "sql_grammar.c"
+  yymsp[-4].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7634,7 +7627,7 @@ static void yy_rule_186(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (187) expr ::= TK_ID TK_LP TK_RP */
+/* (187) expr ::= expr TK_BETWEEN expr TK_AND expr */
 static void yy_rule_187(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7651,12 +7644,12 @@ static void yy_rule_187(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 760 "sql_grammar.lime"
+#line 752 "sql_grammar.lime"
 {
-    yylhsminor.yy234 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy234->nname = 1; }
+    yylhsminor.yy234 = mk_expr(pstate, SX_E_BETWEEN); if (yylhsminor.yy234) { yylhsminor.yy234->a = yymsp[-4].minor.yy234; yylhsminor.yy234->b = yymsp[-2].minor.yy234; yylhsminor.yy234->c = yymsp[0].minor.yy234; }
 }
-#line 7659 "sql_grammar.c"
-  yymsp[-2].minor.yy234 = yylhsminor.yy234;
+#line 7652 "sql_grammar.c"
+  yymsp[-4].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7664,7 +7657,7 @@ static void yy_rule_187(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (188) expr ::= TK_ID TK_LP TK_STAR TK_RP */
+/* (188) expr ::= TK_CASE expr_atom case_arms case_else TK_END */
 static void yy_rule_188(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7681,12 +7674,11 @@ static void yy_rule_188(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 763 "sql_grammar.lime"
+#line 755 "sql_grammar.lime"
 {
-    yylhsminor.yy234 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[-3].minor.yy0); yylhsminor.yy234->nname = 1; yylhsminor.yy234->ival = 2; }
+    yymsp[-4].minor.yy234 = mk_expr(pstate, SX_E_CASE); if (yymsp[-4].minor.yy234) { yymsp[-4].minor.yy234->a = yymsp[-3].minor.yy234; yymsp[-4].minor.yy234->arms = yymsp[-2].minor.yy98; yymsp[-4].minor.yy234->els = yymsp[-1].minor.yy234; }
 }
-#line 7689 "sql_grammar.c"
-  yymsp[-3].minor.yy234 = yylhsminor.yy234;
+#line 7682 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7694,7 +7686,7 @@ static void yy_rule_188(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (189) expr ::= TK_ID TK_LP expr_list TK_RP */
+/* (189) expr ::= TK_CASE case_arms case_else TK_END */
 static void yy_rule_189(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7711,12 +7703,11 @@ static void yy_rule_189(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 766 "sql_grammar.lime"
+#line 758 "sql_grammar.lime"
 {
-    yylhsminor.yy234 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[-3].minor.yy0); yylhsminor.yy234->nname = 1; yylhsminor.yy234->list = yymsp[-1].minor.yy136; }
+    yymsp[-3].minor.yy234 = mk_expr(pstate, SX_E_CASE); if (yymsp[-3].minor.yy234) { yymsp[-3].minor.yy234->arms = yymsp[-2].minor.yy98; yymsp[-3].minor.yy234->els = yymsp[-1].minor.yy234; }
 }
-#line 7719 "sql_grammar.c"
-  yymsp[-3].minor.yy234 = yylhsminor.yy234;
+#line 7711 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7724,7 +7715,7 @@ static void yy_rule_189(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (190) expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP */
+/* (190) expr ::= TK_ID TK_LP TK_RP */
 static void yy_rule_190(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7741,12 +7732,12 @@ static void yy_rule_190(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 769 "sql_grammar.lime"
+#line 761 "sql_grammar.lime"
 {
-    yylhsminor.yy234 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[-4].minor.yy0); yylhsminor.yy234->nname = 1; yylhsminor.yy234->list = yymsp[-1].minor.yy136; yylhsminor.yy234->ival = 1; }
+    yylhsminor.yy234 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy234->nname = 1; }
 }
-#line 7749 "sql_grammar.c"
-  yymsp[-4].minor.yy234 = yylhsminor.yy234;
+#line 7740 "sql_grammar.c"
+  yymsp[-2].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7754,7 +7745,7 @@ static void yy_rule_190(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (191) case_arms ::= TK_WHEN expr TK_THEN expr */
+/* (191) expr ::= TK_ID TK_LP TK_STAR TK_RP */
 static void yy_rule_191(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7771,11 +7762,12 @@ static void yy_rule_191(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 773 "sql_grammar.lime"
+#line 764 "sql_grammar.lime"
 {
-    yymsp[-3].minor.yy98 = AST(pstate, sql_case_arm_t); if (yymsp[-3].minor.yy98) { yymsp[-3].minor.yy98->when = yymsp[-2].minor.yy234; yymsp[-3].minor.yy98->then = yymsp[0].minor.yy234; }
+    yylhsminor.yy234 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[-3].minor.yy0); yylhsminor.yy234->nname = 1; yylhsminor.yy234->ival = 2; }
 }
-#line 7779 "sql_grammar.c"
+#line 7770 "sql_grammar.c"
+  yymsp[-3].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7783,7 +7775,7 @@ static void yy_rule_191(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (192) case_arms ::= case_arms TK_WHEN expr TK_THEN expr */
+/* (192) expr ::= TK_ID TK_LP expr_list TK_RP */
 static void yy_rule_192(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7800,15 +7792,12 @@ static void yy_rule_192(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 776 "sql_grammar.lime"
+#line 767 "sql_grammar.lime"
 {
-    sql_case_arm_t *arm = AST(pstate, sql_case_arm_t);
-    if (arm) { arm->when = yymsp[-2].minor.yy234; arm->then = yymsp[0].minor.yy234; }
-    if (yymsp[-4].minor.yy98 == NULL) { yylhsminor.yy98 = arm; }
-    else { sql_case_arm_t *s = yymsp[-4].minor.yy98; while (s->next) s = s->next; s->next = arm; yylhsminor.yy98 = yymsp[-4].minor.yy98; }
+    yylhsminor.yy234 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[-3].minor.yy0); yylhsminor.yy234->nname = 1; yylhsminor.yy234->list = yymsp[-1].minor.yy136; }
 }
-#line 7811 "sql_grammar.c"
-  yymsp[-4].minor.yy98 = yylhsminor.yy98;
+#line 7800 "sql_grammar.c"
+  yymsp[-3].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7816,7 +7805,7 @@ static void yy_rule_192(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (193) case_else ::= */
+/* (193) expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP */
 static void yy_rule_193(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7833,9 +7822,12 @@ static void yy_rule_193(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 783 "sql_grammar.lime"
-{ yymsp[1].minor.yy234 = NULL; }
-#line 7839 "sql_grammar.c"
+#line 770 "sql_grammar.lime"
+{
+    yylhsminor.yy234 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[-4].minor.yy0); yylhsminor.yy234->nname = 1; yylhsminor.yy234->list = yymsp[-1].minor.yy136; yylhsminor.yy234->ival = 1; }
+}
+#line 7830 "sql_grammar.c"
+  yymsp[-4].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7843,7 +7835,7 @@ static void yy_rule_193(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (194) case_else ::= TK_ELSE expr */
+/* (194) case_arms ::= TK_WHEN expr TK_THEN expr */
 static void yy_rule_194(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7860,9 +7852,11 @@ static void yy_rule_194(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 784 "sql_grammar.lime"
-{ yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
-#line 7866 "sql_grammar.c"
+#line 774 "sql_grammar.lime"
+{
+    yymsp[-3].minor.yy98 = AST(pstate, sql_case_arm_t); if (yymsp[-3].minor.yy98) { yymsp[-3].minor.yy98->when = yymsp[-2].minor.yy234; yymsp[-3].minor.yy98->then = yymsp[0].minor.yy234; }
+}
+#line 7860 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7870,7 +7864,7 @@ static void yy_rule_194(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (195) expr_atom ::= TK_NUMBER */
+/* (195) case_arms ::= case_arms TK_WHEN expr TK_THEN expr */
 static void yy_rule_195(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7887,10 +7881,15 @@ static void yy_rule_195(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 786 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_expr(pstate, SX_E_NUMBER); if (yylhsminor.yy234) yylhsminor.yy234->lit = tok_str(yymsp[0].minor.yy0); }
-#line 7893 "sql_grammar.c"
-  yymsp[0].minor.yy234 = yylhsminor.yy234;
+#line 777 "sql_grammar.lime"
+{
+    sql_case_arm_t *arm = AST(pstate, sql_case_arm_t);
+    if (arm) { arm->when = yymsp[-2].minor.yy234; arm->then = yymsp[0].minor.yy234; }
+    if (yymsp[-4].minor.yy98 == NULL) { yylhsminor.yy98 = arm; }
+    else { sql_case_arm_t *s = yymsp[-4].minor.yy98; while (s->next) s = s->next; s->next = arm; yylhsminor.yy98 = yymsp[-4].minor.yy98; }
+}
+#line 7892 "sql_grammar.c"
+  yymsp[-4].minor.yy98 = yylhsminor.yy98;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7898,7 +7897,7 @@ static void yy_rule_195(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (196) expr_atom ::= TK_STRING */
+/* (196) case_else ::= */
 static void yy_rule_196(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7915,10 +7914,9 @@ static void yy_rule_196(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 787 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_expr(pstate, SX_E_STRING); if (yylhsminor.yy234) yylhsminor.yy234->lit = tok_str_unquote(yymsp[0].minor.yy0); }
-#line 7921 "sql_grammar.c"
-  yymsp[0].minor.yy234 = yylhsminor.yy234;
+#line 784 "sql_grammar.lime"
+{ yymsp[1].minor.yy234 = NULL; }
+#line 7920 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7926,7 +7924,7 @@ static void yy_rule_196(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (197) expr_atom ::= TK_BLOB */
+/* (197) case_else ::= TK_ELSE expr */
 static void yy_rule_197(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7943,10 +7941,9 @@ static void yy_rule_197(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 788 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_expr(pstate, SX_E_BLOB);   if (yylhsminor.yy234) yylhsminor.yy234->lit = tok_str(yymsp[0].minor.yy0); }
-#line 7949 "sql_grammar.c"
-  yymsp[0].minor.yy234 = yylhsminor.yy234;
+#line 785 "sql_grammar.lime"
+{ yymsp[-1].minor.yy234 = yymsp[0].minor.yy234; }
+#line 7947 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7954,7 +7951,7 @@ static void yy_rule_197(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (198) expr_atom ::= TK_NULL */
+/* (198) expr_atom ::= TK_NUMBER */
 static void yy_rule_198(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7971,9 +7968,10 @@ static void yy_rule_198(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 789 "sql_grammar.lime"
-{ yymsp[0].minor.yy234 = mk_expr(pstate, SX_E_NULL); }
-#line 7977 "sql_grammar.c"
+#line 787 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_expr(pstate, SX_E_NUMBER); if (yylhsminor.yy234) yylhsminor.yy234->lit = tok_str(yymsp[0].minor.yy0); }
+#line 7974 "sql_grammar.c"
+  yymsp[0].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7981,7 +7979,7 @@ static void yy_rule_198(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (199) expr_atom ::= TK_TRUE */
+/* (199) expr_atom ::= TK_STRING */
 static void yy_rule_199(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -7998,9 +7996,10 @@ static void yy_rule_199(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 790 "sql_grammar.lime"
-{ yymsp[0].minor.yy234 = mk_expr(pstate, SX_E_BOOL); if (yymsp[0].minor.yy234) yymsp[0].minor.yy234->ival = 1; }
-#line 8004 "sql_grammar.c"
+#line 788 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_expr(pstate, SX_E_STRING); if (yylhsminor.yy234) yylhsminor.yy234->lit = tok_str_unquote(yymsp[0].minor.yy0); }
+#line 8002 "sql_grammar.c"
+  yymsp[0].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8008,7 +8007,7 @@ static void yy_rule_199(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (200) expr_atom ::= TK_FALSE */
+/* (200) expr_atom ::= TK_BLOB */
 static void yy_rule_200(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -8025,9 +8024,10 @@ static void yy_rule_200(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 791 "sql_grammar.lime"
-{ yymsp[0].minor.yy234 = mk_expr(pstate, SX_E_BOOL); if (yymsp[0].minor.yy234) yymsp[0].minor.yy234->ival = 0; }
-#line 8031 "sql_grammar.c"
+#line 789 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_expr(pstate, SX_E_BLOB);   if (yylhsminor.yy234) yylhsminor.yy234->lit = tok_str(yymsp[0].minor.yy0); }
+#line 8030 "sql_grammar.c"
+  yymsp[0].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8035,7 +8035,7 @@ static void yy_rule_200(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (201) expr_atom ::= TK_QMARK */
+/* (201) expr_atom ::= TK_NULL */
 static void yy_rule_201(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -8052,8 +8052,8 @@ static void yy_rule_201(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 792 "sql_grammar.lime"
-{ yymsp[0].minor.yy234 = mk_expr(pstate, SX_E_PARAM); }
+#line 790 "sql_grammar.lime"
+{ yymsp[0].minor.yy234 = mk_expr(pstate, SX_E_NULL); }
 #line 8058 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -8062,7 +8062,7 @@ static void yy_rule_201(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (202) expr_atom ::= TK_ID */
+/* (202) expr_atom ::= TK_TRUE */
 static void yy_rule_202(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -8079,10 +8079,9 @@ static void yy_rule_202(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 793 "sql_grammar.lime"
-{ yylhsminor.yy234 = mk_expr(pstate, SX_E_COLUMN); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[0].minor.yy0); yylhsminor.yy234->nname = 1; } }
+#line 791 "sql_grammar.lime"
+{ yymsp[0].minor.yy234 = mk_expr(pstate, SX_E_BOOL); if (yymsp[0].minor.yy234) yymsp[0].minor.yy234->ival = 1; }
 #line 8085 "sql_grammar.c"
-  yymsp[0].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8090,7 +8089,7 @@ static void yy_rule_202(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (203) expr_atom ::= TK_ID TK_DOT TK_ID */
+/* (203) expr_atom ::= TK_FALSE */
 static void yy_rule_203(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -8107,12 +8106,9 @@ static void yy_rule_203(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 794 "sql_grammar.lime"
-{
-    yylhsminor.yy234 = mk_expr(pstate, SX_E_COLUMN); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy234->name[1] = tok_str(yymsp[0].minor.yy0); yylhsminor.yy234->nname = 2; }
-}
-#line 8115 "sql_grammar.c"
-  yymsp[-2].minor.yy234 = yylhsminor.yy234;
+#line 792 "sql_grammar.lime"
+{ yymsp[0].minor.yy234 = mk_expr(pstate, SX_E_BOOL); if (yymsp[0].minor.yy234) yymsp[0].minor.yy234->ival = 0; }
+#line 8112 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8120,7 +8116,7 @@ static void yy_rule_203(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (204) expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID */
+/* (204) expr_atom ::= TK_QMARK */
 static void yy_rule_204(yy_reduce_ctx *yy_ctx){
   yyParser *yypParser = yy_ctx->yypParser;
   yyStackEntry *yymsp = yy_ctx->yymsp;
@@ -8137,11 +8133,96 @@ static void yy_rule_204(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 797 "sql_grammar.lime"
+#line 793 "sql_grammar.lime"
+{ yymsp[0].minor.yy234 = mk_expr(pstate, SX_E_PARAM); }
+#line 8139 "sql_grammar.c"
+#ifdef YYLOCATIONTYPE
+  /* Commit any @$ writes back to yy_reduce's local
+  ** so the post-action stack-shift sees them. */
+  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
+#endif
+}
+
+/* (205) expr_atom ::= TK_ID */
+static void yy_rule_205(yy_reduce_ctx *yy_ctx){
+  yyParser *yypParser = yy_ctx->yypParser;
+  yyStackEntry *yymsp = yy_ctx->yymsp;
+  int yyLookahead = yy_ctx->yyLookahead;
+  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
+  YYMINORTYPE yylhsminor;
+#ifdef YYLOCATIONTYPE
+  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
+#endif
+  SqlParseCTX_FETCH
+  SqlParseARG_FETCH
+  (void)yypParser; (void)yymsp; (void)yyLookahead;
+  (void)yyLookaheadToken; (void)yylhsminor;
+#ifdef YYLOCATIONTYPE
+  (void)yyloc_lhs;
+#endif
+#line 794 "sql_grammar.lime"
+{ yylhsminor.yy234 = mk_expr(pstate, SX_E_COLUMN); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[0].minor.yy0); yylhsminor.yy234->nname = 1; } }
+#line 8166 "sql_grammar.c"
+  yymsp[0].minor.yy234 = yylhsminor.yy234;
+#ifdef YYLOCATIONTYPE
+  /* Commit any @$ writes back to yy_reduce's local
+  ** so the post-action stack-shift sees them. */
+  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
+#endif
+}
+
+/* (206) expr_atom ::= TK_ID TK_DOT TK_ID */
+static void yy_rule_206(yy_reduce_ctx *yy_ctx){
+  yyParser *yypParser = yy_ctx->yypParser;
+  yyStackEntry *yymsp = yy_ctx->yymsp;
+  int yyLookahead = yy_ctx->yyLookahead;
+  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
+  YYMINORTYPE yylhsminor;
+#ifdef YYLOCATIONTYPE
+  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
+#endif
+  SqlParseCTX_FETCH
+  SqlParseARG_FETCH
+  (void)yypParser; (void)yymsp; (void)yyLookahead;
+  (void)yyLookaheadToken; (void)yylhsminor;
+#ifdef YYLOCATIONTYPE
+  (void)yyloc_lhs;
+#endif
+#line 795 "sql_grammar.lime"
+{
+    yylhsminor.yy234 = mk_expr(pstate, SX_E_COLUMN); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy234->name[1] = tok_str(yymsp[0].minor.yy0); yylhsminor.yy234->nname = 2; }
+}
+#line 8196 "sql_grammar.c"
+  yymsp[-2].minor.yy234 = yylhsminor.yy234;
+#ifdef YYLOCATIONTYPE
+  /* Commit any @$ writes back to yy_reduce's local
+  ** so the post-action stack-shift sees them. */
+  *yy_ctx->yyloc_lhs_ptr = yyloc_lhs;
+#endif
+}
+
+/* (207) expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID */
+static void yy_rule_207(yy_reduce_ctx *yy_ctx){
+  yyParser *yypParser = yy_ctx->yypParser;
+  yyStackEntry *yymsp = yy_ctx->yymsp;
+  int yyLookahead = yy_ctx->yyLookahead;
+  SqlParseTOKENTYPE yyLookaheadToken = yy_ctx->yyLookaheadToken;
+  YYMINORTYPE yylhsminor;
+#ifdef YYLOCATIONTYPE
+  YYLOCATIONTYPE yyloc_lhs = *yy_ctx->yyloc_lhs_ptr;
+#endif
+  SqlParseCTX_FETCH
+  SqlParseARG_FETCH
+  (void)yypParser; (void)yymsp; (void)yyLookahead;
+  (void)yyLookaheadToken; (void)yylhsminor;
+#ifdef YYLOCATIONTYPE
+  (void)yyloc_lhs;
+#endif
+#line 798 "sql_grammar.lime"
 {
     yylhsminor.yy234 = mk_expr(pstate, SX_E_COLUMN); if (yylhsminor.yy234) { yylhsminor.yy234->name[0] = tok_str(yymsp[-4].minor.yy0); yylhsminor.yy234->name[1] = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy234->name[2] = tok_str(yymsp[0].minor.yy0); yylhsminor.yy234->nname = 3; }
 }
-#line 8145 "sql_grammar.c"
+#line 8226 "sql_grammar.c"
   yymsp[-4].minor.yy234 = yylhsminor.yy234;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -8150,27 +8231,12 @@ static void yy_rule_204(yy_reduce_ctx *yy_ctx){
 #endif
 }
 
-/* (205) maybe_semi ::= */
-static void yy_rule_205(yy_reduce_ctx *yy_ctx){
-  (void)yy_ctx;
-}
-
-/* (206) maybe_semi ::= TK_SEMI */
-static void yy_rule_206(yy_reduce_ctx *yy_ctx){
-  (void)yy_ctx;
-}
-
-/* (207) join_constraint ::= */
-static void yy_rule_207(yy_reduce_ctx *yy_ctx){
-  (void)yy_ctx;
-}
-
-/* (208) join_constraint ::= TK_ON expr */
+/* (208) maybe_semi ::= */
 static void yy_rule_208(yy_reduce_ctx *yy_ctx){
   (void)yy_ctx;
 }
 
-/* (209) join_constraint ::= TK_USING TK_LP id_list TK_RP */
+/* (209) maybe_semi ::= TK_SEMI */
 static void yy_rule_209(yy_reduce_ctx *yy_ctx){
   (void)yy_ctx;
 }
@@ -8253,167 +8319,167 @@ static void (*const yy_rule_reduce_fn[])(yy_reduce_ctx *) = {
   yy_rule_46,  /* (46) join_op ::= TK_CROSS TK_JOIN */
   yy_rule_47,  /* (47) join_op ::= TK_NATURAL TK_JOIN */
   yy_rule_48,  /* (48) join_op ::= TK_NATURAL TK_LEFT TK_JOIN */
-  yy_rule_49,  /* (49) table_ref ::= TK_ID */
-  yy_rule_50,  /* (50) table_ref ::= TK_ID TK_DOT TK_ID */
-  yy_rule_51,  /* (51) table_ref ::= TK_ID TK_AS TK_ID */
-  yy_rule_52,  /* (52) table_ref ::= TK_ID TK_ID */
-  yy_rule_53,  /* (53) table_ref ::= TK_LP select_stmt TK_RP */
-  yy_rule_54,  /* (54) table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID */
-  yy_rule_55,  /* (55) where_opt ::= */
-  yy_rule_56,  /* (56) where_opt ::= TK_WHERE expr */
-  yy_rule_57,  /* (57) group_opt ::= */
-  yy_rule_58,  /* (58) group_opt ::= TK_GROUP TK_BY expr_list */
-  yy_rule_59,  /* (59) having_opt ::= */
-  yy_rule_60,  /* (60) having_opt ::= TK_HAVING expr */
-  yy_rule_61,  /* (61) order_opt ::= */
-  yy_rule_62,  /* (62) order_opt ::= TK_ORDER TK_BY order_list */
-  yy_rule_63,  /* (63) order_list ::= order_item */
-  yy_rule_64,  /* (64) order_list ::= order_list TK_COMMA order_item */
-  yy_rule_65,  /* (65) order_item ::= expr */
-  yy_rule_66,  /* (66) order_item ::= expr TK_ASC */
-  yy_rule_67,  /* (67) order_item ::= expr TK_DESC */
-  yy_rule_68,  /* (68) limit_opt ::= */
-  yy_rule_69,  /* (69) limit_opt ::= TK_LIMIT expr */
-  yy_rule_70,  /* (70) offset_part ::= */
-  yy_rule_71,  /* (71) offset_part ::= TK_OFFSET expr */
-  yy_rule_72,  /* (72) offset_part ::= TK_COMMA expr */
-  yy_rule_73,  /* (73) with_clause ::= TK_WITH cte_list */
-  yy_rule_74,  /* (74) with_clause ::= TK_WITH TK_RECURSIVE cte_list */
-  yy_rule_75,  /* (75) cte_list ::= cte */
-  yy_rule_76,  /* (76) cte_list ::= cte_list TK_COMMA cte */
-  yy_rule_77,  /* (77) cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP */
-  yy_rule_78,  /* (78) cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP */
-  yy_rule_79,  /* (79) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols values_list */
-  yy_rule_80,  /* (80) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES */
-  yy_rule_81,  /* (81) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt */
-  yy_rule_82,  /* (82) insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols values_list */
-  yy_rule_83,  /* (83) qname ::= TK_ID */
-  yy_rule_84,  /* (84) qname ::= TK_ID TK_DOT TK_ID */
-  yy_rule_85,  /* (85) insert_cols ::= */
-  yy_rule_86,  /* (86) insert_cols ::= TK_LP id_list TK_RP */
-  yy_rule_87,  /* (87) values_list ::= TK_VALUES TK_LP expr_list TK_RP */
-  yy_rule_88,  /* (88) values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP */
-  yy_rule_89,  /* (89) update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt */
-  yy_rule_90,  /* (90) assign_list ::= assign */
-  yy_rule_91,  /* (91) assign_list ::= assign_list TK_COMMA assign */
-  yy_rule_92,  /* (92) assign ::= TK_ID TK_EQ expr */
-  yy_rule_93,  /* (93) delete_stmt ::= TK_DELETE TK_FROM qname where_opt */
-  yy_rule_94,  /* (94) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_LP table_body TK_RP */
-  yy_rule_95,  /* (95) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_AS select_stmt */
-  yy_rule_96,  /* (96) create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname TK_ON TK_ID TK_LP id_list TK_RP */
-  yy_rule_97,  /* (97) create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname TK_AS select_stmt */
-  yy_rule_98,  /* (98) temp_opt ::= */
-  yy_rule_99,  /* (99) temp_opt ::= TK_TEMP */
-  yy_rule_100,  /* (100) temp_opt ::= TK_TEMPORARY */
-  yy_rule_101,  /* (101) unique_opt ::= */
-  yy_rule_102,  /* (102) unique_opt ::= TK_UNIQUE */
-  yy_rule_103,  /* (103) if_not_exists ::= */
-  yy_rule_104,  /* (104) if_not_exists ::= TK_IF TK_NOT TK_EXISTS */
-  yy_rule_105,  /* (105) table_body ::= table_elem */
-  yy_rule_106,  /* (106) table_body ::= table_body TK_COMMA table_elem */
-  yy_rule_107,  /* (107) table_elem ::= coldef */
-  yy_rule_108,  /* (108) table_elem ::= table_constraint */
-  yy_rule_109,  /* (109) coldef ::= TK_ID type_opt col_constraints */
-  yy_rule_110,  /* (110) type_opt ::= */
-  yy_rule_111,  /* (111) type_opt ::= TK_ID */
-  yy_rule_112,  /* (112) type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP */
-  yy_rule_113,  /* (113) type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP */
-  yy_rule_114,  /* (114) col_constraints ::= */
-  yy_rule_115,  /* (115) col_constraints ::= col_constraints col_constraint */
-  yy_rule_116,  /* (116) col_constraint ::= TK_PRIMARY TK_KEY */
-  yy_rule_117,  /* (117) col_constraint ::= TK_PRIMARY TK_KEY TK_ASC */
-  yy_rule_118,  /* (118) col_constraint ::= TK_PRIMARY TK_KEY TK_DESC */
-  yy_rule_119,  /* (119) col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR */
-  yy_rule_120,  /* (120) col_constraint ::= TK_NOT TK_NULL */
-  yy_rule_121,  /* (121) col_constraint ::= TK_UNIQUE */
-  yy_rule_122,  /* (122) col_constraint ::= TK_DEFAULT expr_atom */
-  yy_rule_123,  /* (123) col_constraint ::= TK_CHECK TK_LP expr TK_RP */
-  yy_rule_124,  /* (124) col_constraint ::= TK_REFERENCES qname */
-  yy_rule_125,  /* (125) col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP */
-  yy_rule_126,  /* (126) drop_stmt ::= TK_DROP TK_TABLE if_exists qname */
-  yy_rule_127,  /* (127) drop_stmt ::= TK_DROP TK_INDEX if_exists qname */
-  yy_rule_128,  /* (128) drop_stmt ::= TK_DROP TK_VIEW if_exists qname */
-  yy_rule_129,  /* (129) drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname */
-  yy_rule_130,  /* (130) if_exists ::= */
-  yy_rule_131,  /* (131) if_exists ::= TK_IF TK_EXISTS */
-  yy_rule_132,  /* (132) pragma_stmt ::= TK_PRAGMA qname */
-  yy_rule_133,  /* (133) pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom */
-  yy_rule_134,  /* (134) pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP */
-  yy_rule_135,  /* (135) begin_stmt ::= TK_BEGIN */
-  yy_rule_136,  /* (136) begin_stmt ::= TK_BEGIN TK_TRANSACTION */
-  yy_rule_137,  /* (137) begin_stmt ::= TK_BEGIN TK_ID */
-  yy_rule_138,  /* (138) begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION */
-  yy_rule_139,  /* (139) commit_stmt ::= TK_COMMIT */
-  yy_rule_140,  /* (140) commit_stmt ::= TK_COMMIT TK_TRANSACTION */
-  yy_rule_141,  /* (141) commit_stmt ::= TK_END */
-  yy_rule_142,  /* (142) commit_stmt ::= TK_END TK_TRANSACTION */
-  yy_rule_143,  /* (143) rollback_stmt ::= TK_ROLLBACK */
-  yy_rule_144,  /* (144) rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION */
-  yy_rule_145,  /* (145) attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID */
-  yy_rule_146,  /* (146) attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID */
-  yy_rule_147,  /* (147) detach_stmt ::= TK_DETACH TK_ID */
-  yy_rule_148,  /* (148) detach_stmt ::= TK_DETACH TK_DATABASE TK_ID */
-  yy_rule_149,  /* (149) explain_stmt ::= TK_EXPLAIN stmt */
-  yy_rule_150,  /* (150) explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt */
-  yy_rule_151,  /* (151) id_list ::= TK_ID */
-  yy_rule_152,  /* (152) id_list ::= id_list TK_COMMA TK_ID */
-  yy_rule_153,  /* (153) expr_list ::= expr */
-  yy_rule_154,  /* (154) expr_list ::= expr_list TK_COMMA expr */
-  yy_rule_155,  /* (155) expr ::= expr_atom */
-  yy_rule_156,  /* (156) expr ::= TK_LP expr TK_RP */
-  yy_rule_157,  /* (157) expr ::= TK_LP select_stmt TK_RP */
-  yy_rule_158,  /* (158) expr ::= TK_NOT expr */
-  yy_rule_159,  /* (159) expr ::= TK_MINUS expr */
-  yy_rule_160,  /* (160) expr ::= TK_PLUS expr */
-  yy_rule_161,  /* (161) expr ::= TK_TILDE expr */
-  yy_rule_162,  /* (162) expr ::= expr TK_OR expr */
-  yy_rule_163,  /* (163) expr ::= expr TK_AND expr */
-  yy_rule_164,  /* (164) expr ::= expr TK_EQ expr */
-  yy_rule_165,  /* (165) expr ::= expr TK_NE expr */
-  yy_rule_166,  /* (166) expr ::= expr TK_LT expr */
-  yy_rule_167,  /* (167) expr ::= expr TK_LE expr */
-  yy_rule_168,  /* (168) expr ::= expr TK_GT expr */
-  yy_rule_169,  /* (169) expr ::= expr TK_GE expr */
-  yy_rule_170,  /* (170) expr ::= expr TK_PLUS expr */
-  yy_rule_171,  /* (171) expr ::= expr TK_MINUS expr */
-  yy_rule_172,  /* (172) expr ::= expr TK_STAR expr */
-  yy_rule_173,  /* (173) expr ::= expr TK_SLASH expr */
-  yy_rule_174,  /* (174) expr ::= expr TK_PERCENT expr */
-  yy_rule_175,  /* (175) expr ::= expr TK_CONCAT expr */
-  yy_rule_176,  /* (176) expr ::= expr TK_AMP expr */
-  yy_rule_177,  /* (177) expr ::= expr TK_PIPE expr */
-  yy_rule_178,  /* (178) expr ::= expr TK_LIKE expr */
-  yy_rule_179,  /* (179) expr ::= expr TK_IS TK_NULL */
-  yy_rule_180,  /* (180) expr ::= expr TK_IS TK_NOT TK_NULL */
-  yy_rule_181,  /* (181) expr ::= expr TK_IS expr */
-  yy_rule_182,  /* (182) expr ::= expr TK_IN TK_LP expr_list TK_RP */
-  yy_rule_183,  /* (183) expr ::= expr TK_IN TK_LP select_stmt TK_RP */
-  yy_rule_184,  /* (184) expr ::= expr TK_BETWEEN expr TK_AND expr */
-  yy_rule_185,  /* (185) expr ::= TK_CASE expr_atom case_arms case_else TK_END */
-  yy_rule_186,  /* (186) expr ::= TK_CASE case_arms case_else TK_END */
-  yy_rule_187,  /* (187) expr ::= TK_ID TK_LP TK_RP */
-  yy_rule_188,  /* (188) expr ::= TK_ID TK_LP TK_STAR TK_RP */
-  yy_rule_189,  /* (189) expr ::= TK_ID TK_LP expr_list TK_RP */
-  yy_rule_190,  /* (190) expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP */
-  yy_rule_191,  /* (191) case_arms ::= TK_WHEN expr TK_THEN expr */
-  yy_rule_192,  /* (192) case_arms ::= case_arms TK_WHEN expr TK_THEN expr */
-  yy_rule_193,  /* (193) case_else ::= */
-  yy_rule_194,  /* (194) case_else ::= TK_ELSE expr */
-  yy_rule_195,  /* (195) expr_atom ::= TK_NUMBER */
-  yy_rule_196,  /* (196) expr_atom ::= TK_STRING */
-  yy_rule_197,  /* (197) expr_atom ::= TK_BLOB */
-  yy_rule_198,  /* (198) expr_atom ::= TK_NULL */
-  yy_rule_199,  /* (199) expr_atom ::= TK_TRUE */
-  yy_rule_200,  /* (200) expr_atom ::= TK_FALSE */
-  yy_rule_201,  /* (201) expr_atom ::= TK_QMARK */
-  yy_rule_202,  /* (202) expr_atom ::= TK_ID */
-  yy_rule_203,  /* (203) expr_atom ::= TK_ID TK_DOT TK_ID */
-  yy_rule_204,  /* (204) expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID */
-  yy_rule_205,  /* (205) maybe_semi ::= */
-  yy_rule_206,  /* (206) maybe_semi ::= TK_SEMI */
-  yy_rule_207,  /* (207) join_constraint ::= */
-  yy_rule_208,  /* (208) join_constraint ::= TK_ON expr */
-  yy_rule_209,  /* (209) join_constraint ::= TK_USING TK_LP id_list TK_RP */
+  yy_rule_49,  /* (49) join_constraint ::= */
+  yy_rule_50,  /* (50) join_constraint ::= TK_ON expr */
+  yy_rule_51,  /* (51) join_constraint ::= TK_USING TK_LP id_list TK_RP */
+  yy_rule_52,  /* (52) table_ref ::= TK_ID */
+  yy_rule_53,  /* (53) table_ref ::= TK_ID TK_DOT TK_ID */
+  yy_rule_54,  /* (54) table_ref ::= TK_ID TK_AS TK_ID */
+  yy_rule_55,  /* (55) table_ref ::= TK_ID TK_ID */
+  yy_rule_56,  /* (56) table_ref ::= TK_LP select_stmt TK_RP */
+  yy_rule_57,  /* (57) table_ref ::= TK_LP select_stmt TK_RP TK_AS TK_ID */
+  yy_rule_58,  /* (58) where_opt ::= */
+  yy_rule_59,  /* (59) where_opt ::= TK_WHERE expr */
+  yy_rule_60,  /* (60) group_opt ::= */
+  yy_rule_61,  /* (61) group_opt ::= TK_GROUP TK_BY expr_list */
+  yy_rule_62,  /* (62) having_opt ::= */
+  yy_rule_63,  /* (63) having_opt ::= TK_HAVING expr */
+  yy_rule_64,  /* (64) order_opt ::= */
+  yy_rule_65,  /* (65) order_opt ::= TK_ORDER TK_BY order_list */
+  yy_rule_66,  /* (66) order_list ::= order_item */
+  yy_rule_67,  /* (67) order_list ::= order_list TK_COMMA order_item */
+  yy_rule_68,  /* (68) order_item ::= expr */
+  yy_rule_69,  /* (69) order_item ::= expr TK_ASC */
+  yy_rule_70,  /* (70) order_item ::= expr TK_DESC */
+  yy_rule_71,  /* (71) limit_opt ::= */
+  yy_rule_72,  /* (72) limit_opt ::= TK_LIMIT expr */
+  yy_rule_73,  /* (73) offset_part ::= */
+  yy_rule_74,  /* (74) offset_part ::= TK_OFFSET expr */
+  yy_rule_75,  /* (75) offset_part ::= TK_COMMA expr */
+  yy_rule_76,  /* (76) with_clause ::= TK_WITH cte_list */
+  yy_rule_77,  /* (77) with_clause ::= TK_WITH TK_RECURSIVE cte_list */
+  yy_rule_78,  /* (78) cte_list ::= cte */
+  yy_rule_79,  /* (79) cte_list ::= cte_list TK_COMMA cte */
+  yy_rule_80,  /* (80) cte ::= TK_ID TK_AS TK_LP select_stmt TK_RP */
+  yy_rule_81,  /* (81) cte ::= TK_ID TK_LP id_list TK_RP TK_AS TK_LP select_stmt TK_RP */
+  yy_rule_82,  /* (82) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols values_list */
+  yy_rule_83,  /* (83) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols TK_DEFAULT TK_VALUES */
+  yy_rule_84,  /* (84) insert_stmt ::= TK_INSERT TK_INTO qname insert_cols select_stmt */
+  yy_rule_85,  /* (85) insert_stmt ::= TK_REPLACE TK_INTO qname insert_cols values_list */
+  yy_rule_86,  /* (86) qname ::= TK_ID */
+  yy_rule_87,  /* (87) qname ::= TK_ID TK_DOT TK_ID */
+  yy_rule_88,  /* (88) insert_cols ::= */
+  yy_rule_89,  /* (89) insert_cols ::= TK_LP id_list TK_RP */
+  yy_rule_90,  /* (90) values_list ::= TK_VALUES TK_LP expr_list TK_RP */
+  yy_rule_91,  /* (91) values_list ::= values_list TK_COMMA TK_LP expr_list TK_RP */
+  yy_rule_92,  /* (92) update_stmt ::= TK_UPDATE qname TK_SET assign_list where_opt */
+  yy_rule_93,  /* (93) assign_list ::= assign */
+  yy_rule_94,  /* (94) assign_list ::= assign_list TK_COMMA assign */
+  yy_rule_95,  /* (95) assign ::= TK_ID TK_EQ expr */
+  yy_rule_96,  /* (96) delete_stmt ::= TK_DELETE TK_FROM qname where_opt */
+  yy_rule_97,  /* (97) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_LP table_body TK_RP */
+  yy_rule_98,  /* (98) create_stmt ::= TK_CREATE temp_opt TK_TABLE if_not_exists qname TK_AS select_stmt */
+  yy_rule_99,  /* (99) create_stmt ::= TK_CREATE unique_opt TK_INDEX if_not_exists qname TK_ON TK_ID TK_LP id_list TK_RP */
+  yy_rule_100,  /* (100) create_stmt ::= TK_CREATE temp_opt TK_VIEW if_not_exists qname TK_AS select_stmt */
+  yy_rule_101,  /* (101) temp_opt ::= */
+  yy_rule_102,  /* (102) temp_opt ::= TK_TEMP */
+  yy_rule_103,  /* (103) temp_opt ::= TK_TEMPORARY */
+  yy_rule_104,  /* (104) unique_opt ::= */
+  yy_rule_105,  /* (105) unique_opt ::= TK_UNIQUE */
+  yy_rule_106,  /* (106) if_not_exists ::= */
+  yy_rule_107,  /* (107) if_not_exists ::= TK_IF TK_NOT TK_EXISTS */
+  yy_rule_108,  /* (108) table_body ::= table_elem */
+  yy_rule_109,  /* (109) table_body ::= table_body TK_COMMA table_elem */
+  yy_rule_110,  /* (110) table_elem ::= coldef */
+  yy_rule_111,  /* (111) table_elem ::= table_constraint */
+  yy_rule_112,  /* (112) coldef ::= TK_ID type_opt col_constraints */
+  yy_rule_113,  /* (113) type_opt ::= */
+  yy_rule_114,  /* (114) type_opt ::= TK_ID */
+  yy_rule_115,  /* (115) type_opt ::= TK_ID TK_LP TK_NUMBER TK_RP */
+  yy_rule_116,  /* (116) type_opt ::= TK_ID TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP */
+  yy_rule_117,  /* (117) col_constraints ::= */
+  yy_rule_118,  /* (118) col_constraints ::= col_constraints col_constraint */
+  yy_rule_119,  /* (119) col_constraint ::= TK_PRIMARY TK_KEY */
+  yy_rule_120,  /* (120) col_constraint ::= TK_PRIMARY TK_KEY TK_ASC */
+  yy_rule_121,  /* (121) col_constraint ::= TK_PRIMARY TK_KEY TK_DESC */
+  yy_rule_122,  /* (122) col_constraint ::= TK_PRIMARY TK_KEY TK_AUTOINCR */
+  yy_rule_123,  /* (123) col_constraint ::= TK_NOT TK_NULL */
+  yy_rule_124,  /* (124) col_constraint ::= TK_UNIQUE */
+  yy_rule_125,  /* (125) col_constraint ::= TK_DEFAULT expr_atom */
+  yy_rule_126,  /* (126) col_constraint ::= TK_CHECK TK_LP expr TK_RP */
+  yy_rule_127,  /* (127) col_constraint ::= TK_REFERENCES qname */
+  yy_rule_128,  /* (128) col_constraint ::= TK_REFERENCES qname TK_LP id_list TK_RP */
+  yy_rule_129,  /* (129) drop_stmt ::= TK_DROP TK_TABLE if_exists qname */
+  yy_rule_130,  /* (130) drop_stmt ::= TK_DROP TK_INDEX if_exists qname */
+  yy_rule_131,  /* (131) drop_stmt ::= TK_DROP TK_VIEW if_exists qname */
+  yy_rule_132,  /* (132) drop_stmt ::= TK_DROP TK_TRIGGER if_exists qname */
+  yy_rule_133,  /* (133) if_exists ::= */
+  yy_rule_134,  /* (134) if_exists ::= TK_IF TK_EXISTS */
+  yy_rule_135,  /* (135) pragma_stmt ::= TK_PRAGMA qname */
+  yy_rule_136,  /* (136) pragma_stmt ::= TK_PRAGMA qname TK_EQ expr_atom */
+  yy_rule_137,  /* (137) pragma_stmt ::= TK_PRAGMA qname TK_LP expr_atom TK_RP */
+  yy_rule_138,  /* (138) begin_stmt ::= TK_BEGIN */
+  yy_rule_139,  /* (139) begin_stmt ::= TK_BEGIN TK_TRANSACTION */
+  yy_rule_140,  /* (140) begin_stmt ::= TK_BEGIN TK_ID */
+  yy_rule_141,  /* (141) begin_stmt ::= TK_BEGIN TK_ID TK_TRANSACTION */
+  yy_rule_142,  /* (142) commit_stmt ::= TK_COMMIT */
+  yy_rule_143,  /* (143) commit_stmt ::= TK_COMMIT TK_TRANSACTION */
+  yy_rule_144,  /* (144) commit_stmt ::= TK_END */
+  yy_rule_145,  /* (145) commit_stmt ::= TK_END TK_TRANSACTION */
+  yy_rule_146,  /* (146) rollback_stmt ::= TK_ROLLBACK */
+  yy_rule_147,  /* (147) rollback_stmt ::= TK_ROLLBACK TK_TRANSACTION */
+  yy_rule_148,  /* (148) attach_stmt ::= TK_ATTACH expr_atom TK_AS TK_ID */
+  yy_rule_149,  /* (149) attach_stmt ::= TK_ATTACH TK_DATABASE expr_atom TK_AS TK_ID */
+  yy_rule_150,  /* (150) detach_stmt ::= TK_DETACH TK_ID */
+  yy_rule_151,  /* (151) detach_stmt ::= TK_DETACH TK_DATABASE TK_ID */
+  yy_rule_152,  /* (152) explain_stmt ::= TK_EXPLAIN stmt */
+  yy_rule_153,  /* (153) explain_stmt ::= TK_EXPLAIN TK_QUERY TK_PLAN stmt */
+  yy_rule_154,  /* (154) id_list ::= TK_ID */
+  yy_rule_155,  /* (155) id_list ::= id_list TK_COMMA TK_ID */
+  yy_rule_156,  /* (156) expr_list ::= expr */
+  yy_rule_157,  /* (157) expr_list ::= expr_list TK_COMMA expr */
+  yy_rule_158,  /* (158) expr ::= expr_atom */
+  yy_rule_159,  /* (159) expr ::= TK_LP expr TK_RP */
+  yy_rule_160,  /* (160) expr ::= TK_LP select_stmt TK_RP */
+  yy_rule_161,  /* (161) expr ::= TK_NOT expr */
+  yy_rule_162,  /* (162) expr ::= TK_MINUS expr */
+  yy_rule_163,  /* (163) expr ::= TK_PLUS expr */
+  yy_rule_164,  /* (164) expr ::= TK_TILDE expr */
+  yy_rule_165,  /* (165) expr ::= expr TK_OR expr */
+  yy_rule_166,  /* (166) expr ::= expr TK_AND expr */
+  yy_rule_167,  /* (167) expr ::= expr TK_EQ expr */
+  yy_rule_168,  /* (168) expr ::= expr TK_NE expr */
+  yy_rule_169,  /* (169) expr ::= expr TK_LT expr */
+  yy_rule_170,  /* (170) expr ::= expr TK_LE expr */
+  yy_rule_171,  /* (171) expr ::= expr TK_GT expr */
+  yy_rule_172,  /* (172) expr ::= expr TK_GE expr */
+  yy_rule_173,  /* (173) expr ::= expr TK_PLUS expr */
+  yy_rule_174,  /* (174) expr ::= expr TK_MINUS expr */
+  yy_rule_175,  /* (175) expr ::= expr TK_STAR expr */
+  yy_rule_176,  /* (176) expr ::= expr TK_SLASH expr */
+  yy_rule_177,  /* (177) expr ::= expr TK_PERCENT expr */
+  yy_rule_178,  /* (178) expr ::= expr TK_CONCAT expr */
+  yy_rule_179,  /* (179) expr ::= expr TK_AMP expr */
+  yy_rule_180,  /* (180) expr ::= expr TK_PIPE expr */
+  yy_rule_181,  /* (181) expr ::= expr TK_LIKE expr */
+  yy_rule_182,  /* (182) expr ::= expr TK_IS TK_NULL */
+  yy_rule_183,  /* (183) expr ::= expr TK_IS TK_NOT TK_NULL */
+  yy_rule_184,  /* (184) expr ::= expr TK_IS expr */
+  yy_rule_185,  /* (185) expr ::= expr TK_IN TK_LP expr_list TK_RP */
+  yy_rule_186,  /* (186) expr ::= expr TK_IN TK_LP select_stmt TK_RP */
+  yy_rule_187,  /* (187) expr ::= expr TK_BETWEEN expr TK_AND expr */
+  yy_rule_188,  /* (188) expr ::= TK_CASE expr_atom case_arms case_else TK_END */
+  yy_rule_189,  /* (189) expr ::= TK_CASE case_arms case_else TK_END */
+  yy_rule_190,  /* (190) expr ::= TK_ID TK_LP TK_RP */
+  yy_rule_191,  /* (191) expr ::= TK_ID TK_LP TK_STAR TK_RP */
+  yy_rule_192,  /* (192) expr ::= TK_ID TK_LP expr_list TK_RP */
+  yy_rule_193,  /* (193) expr ::= TK_ID TK_LP TK_DISTINCT expr_list TK_RP */
+  yy_rule_194,  /* (194) case_arms ::= TK_WHEN expr TK_THEN expr */
+  yy_rule_195,  /* (195) case_arms ::= case_arms TK_WHEN expr TK_THEN expr */
+  yy_rule_196,  /* (196) case_else ::= */
+  yy_rule_197,  /* (197) case_else ::= TK_ELSE expr */
+  yy_rule_198,  /* (198) expr_atom ::= TK_NUMBER */
+  yy_rule_199,  /* (199) expr_atom ::= TK_STRING */
+  yy_rule_200,  /* (200) expr_atom ::= TK_BLOB */
+  yy_rule_201,  /* (201) expr_atom ::= TK_NULL */
+  yy_rule_202,  /* (202) expr_atom ::= TK_TRUE */
+  yy_rule_203,  /* (203) expr_atom ::= TK_FALSE */
+  yy_rule_204,  /* (204) expr_atom ::= TK_QMARK */
+  yy_rule_205,  /* (205) expr_atom ::= TK_ID */
+  yy_rule_206,  /* (206) expr_atom ::= TK_ID TK_DOT TK_ID */
+  yy_rule_207,  /* (207) expr_atom ::= TK_ID TK_DOT TK_ID TK_DOT TK_ID */
+  yy_rule_208,  /* (208) maybe_semi ::= */
+  yy_rule_209,  /* (209) maybe_semi ::= TK_SEMI */
   yy_rule_210,  /* (210) table_constraint ::= TK_PRIMARY TK_KEY TK_LP id_list TK_RP */
   yy_rule_211,  /* (211) table_constraint ::= TK_UNIQUE TK_LP id_list TK_RP */
   yy_rule_212,  /* (212) table_constraint ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname */
@@ -8556,7 +8622,7 @@ static void yy_parse_failed(
 
     pstate->error = 1;
     if (!pstate->err_msg) pstate->err_msg = "parse failure";
-#line 8560 "sql_grammar.c"
+#line 8626 "sql_grammar.c"
 /************ End %parse_failure code *****************************************/
   SqlParseARG_STORE /* Suppress warning about unused %extra_argument variable */
   SqlParseCTX_STORE
@@ -8610,7 +8676,7 @@ static void yy_syntax_error(
     (void)yyminor;
     pstate->error = 1;
     if (!pstate->err_msg) pstate->err_msg = "syntax error";
-#line 8614 "sql_grammar.c"
+#line 8680 "sql_grammar.c"
 /************ End %syntax_error code ******************************************/
   SqlParseARG_STORE /* Suppress warning about unused %extra_argument variable */
   SqlParseCTX_STORE
