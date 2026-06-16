@@ -91,26 +91,23 @@ void vx_finalize(vx_stmt_t *st);
 
 /* ---- V2: morsel-parallel execution ------------------------------- *
  *
- * Run a recognized P1/P2 query in parallel over N worker procs on a
- * libxtc executor (one worker per loop).  The table's rowid space is
- * sliced into morsels handed out by an atomic cursor; each worker opens
- * its OWN connection to `db_path` (so the cursors are independent),
- * runs the compiled plan over its morsels, and appends surviving rows
- * to its own buffer.  A final combine concatenates the per-worker
+ * Run a recognized P1/P2 query in parallel over N worker tasks on a
+ * libxtc executor (one per loop).  The table's rowid space is sliced
+ * into morsels handed out by an atomic cursor; each worker opens its
+ * OWN storage scan (xstore_scan) over a disjoint rowid range on the
+ * connection's shared B-tree, so the cursors are independent and no
+ * VDBE is on the hot path.  A final combine concatenates the per-worker
  * buffers (multiset semantics -- row order is unspecified, as the query
  * has no top-level ORDER BY).
  *
- * The collected result is returned as a flat array of cells, row-major:
- * *out_cells has (*out_nrow * *out_ncol) entries, owned by the returned
- * vx_result and freed by vx_result_free.  TEXT/BLOB bytes are owned by
- * the result.
- *
- * Returns 1 if the query was recognized and run in parallel (*res set),
- * 0 if not recognized (caller falls back to the VDBE), <0 on error.
+ * `db` must be a connection with xstore_register'd tables (the workers
+ * scan its B-tree directly).  An ordered, limited, joined, or
+ * non-storage plan returns 0 (caller runs it single-threaded / VDBE).
+ * On 1, *res is the row-major result owned by the caller (vx_result_free).
  */
 typedef struct vx_result vx_result_t;
 
-int vx_run_parallel(const char *db_path, const char *sql, int n_workers,
+int vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
                     vx_result_t **res, char **errmsg);
 
 int            vx_result_nrow(const vx_result_t *r);

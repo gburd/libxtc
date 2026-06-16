@@ -40,6 +40,8 @@
 #include "sql_parse.h"
 #include "sql_ast.h"
 #include "sql_parse_gen.h"   /* TK_* token ids */
+#include "btree.h"           /* bt_t */
+#include "xstore.h"          /* storage-native scan: the VDBE-free row source */
 
 #include "xtc.h"             /* XTC_OK */
 #include "xtc_exec.h"        /* V2: morsel-parallel workers, one per loop */
@@ -197,8 +199,18 @@ typedef struct vx_jrow vx_jrow_t;
 
 struct vx_stmt {
 	sqlite3      *db;
-	sqlite3_stmt *src;          /* SELECT <base cols> FROM <table> */
+	sqlite3_stmt *src;          /* join path metadata stmt; NULL on the
+	                             * storage-native single-table path */
 	int           nsrc_col;
+
+	/* Storage-native source (single-table scan/agg paths).  bt != NULL
+	 * marks the storage path: rows come from xstore_scan over `table`,
+	 * and src_pay[i] is source column i's origin -- -1 = rowid (the
+	 * INTEGER PRIMARY KEY), else the payload index in the record. */
+	bt_t          *bt;
+	xstore_scan_t *scan;
+	int           src_pay[32];
+	uint64_t      snap;         /* 0 = latest committed */
 
 	int           nout;
 	vx_expr_t   **proj;         /* nout projection expressions (non-agg path) */
@@ -305,6 +317,41 @@ nv_add(struct namevec *nv, const sql_str_t *s)
 	memcpy(nv->names[nv->n], s->p, s->len);
 	nv->names[nv->n][s->len] = '\0';
 	return nv->n++;
+}
+
+/* Resolve each source column (by name, in nv order) against the table
+ * schema via PRAGMA table_info -- WITHOUT stepping a data row, so the
+ * VDBE stays off the hot path.  Fills nv->aff[i] from the declared type
+ * and pay[i] = -1 if the column is the INTEGER PRIMARY KEY (the rowid)
+ * else its 0-based payload index (cid - 1).  Returns 0 if every source
+ * column resolved, -1 otherwise. */
+static int
+resolve_schema(sqlite3 *db, const char *table, struct namevec *nv, int *pay)
+{
+	sqlite3_stmt *ti = NULL;
+	char q[128];
+	int i, ok = 1, resolved = 0;
+
+	for (i = 0; i < nv->n; i++) pay[i] = -2;   /* unresolved sentinel */
+	snprintf(q, sizeof q, "PRAGMA table_info(%s)", table);
+	if (sqlite3_prepare_v2(db, q, -1, &ti, 0) != SQLITE_OK) return -1;
+	while (sqlite3_step(ti) == SQLITE_ROW) {
+		int cid = sqlite3_column_int(ti, 0);
+		const char *nm = (const char *)sqlite3_column_text(ti, 1);
+		const char *ty = (const char *)sqlite3_column_text(ti, 2);
+		int pk = sqlite3_column_int(ti, 5);
+		if (nm == NULL) continue;
+		for (i = 0; i < nv->n; i++) {
+			if (pay[i] != -2) continue;
+			if (strcmp(nv->names[i], nm) != 0) continue;
+			pay[i] = pk ? -1 : (cid - 1);
+			nv->aff[i] = vx_affinity(ty);
+			resolved++;
+		}
+	}
+	sqlite3_finalize(ti);
+	for (i = 0; i < nv->n; i++) if (pay[i] == -2) ok = 0;
+	return (ok && resolved >= nv->n) ? 0 : -1;
 }
 
 /* ---- expression compiler ----------------------------------------- *
@@ -1252,7 +1299,7 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	const sql_exprlist_item_t *it;
 	char tabbuf[64];
 	char *srcsql = NULL;
-	int i, nproj = 0, rc = 0, proj_star = 0;
+	int nproj = 0, rc = 0, proj_star = 0;
 
 	if (out) *out = NULL;
 	if (errmsg) *errmsg = NULL;
@@ -1357,51 +1404,22 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 			goto fallback;
 	}
 
-	/* Build the source SELECT. */
-	if (proj_star) {
-		size_t n = strlen("SELECT * FROM ") + strlen(tabbuf) + 1;
-		srcsql = (char *)malloc(n);
-		if (!srcsql) goto oom;
-		snprintf(srcsql, n, "SELECT * FROM %s", tabbuf);
-		snprintf(st->table, sizeof st->table, "%s", tabbuf);
-		snprintf(st->srccols, sizeof st->srccols, "*");
-	} else {
-		char cols[2100]; int off = 0, k;
-		if (nv.n == 0 || nv.n > 32) goto fallback;
-		for (k = 0; k < nv.n; k++) {
-			int r = snprintf(cols + off, sizeof cols - (size_t)off,
-			                 "%s%s", k ? "," : "", nv.names[k]);
-			if (r < 0 || (size_t)(off + r) >= sizeof cols) goto fallback;
-			off += r;
-		}
-		{
-			size_t n = strlen("SELECT  FROM ") + (size_t)off + strlen(tabbuf) + 1;
-			srcsql = (char *)malloc(n);
-			if (!srcsql) goto oom;
-			snprintf(srcsql, n, "SELECT %s FROM %s", cols, tabbuf);
-		}
-		snprintf(st->table, sizeof st->table, "%s", tabbuf);
-		snprintf(st->srccols, sizeof st->srccols, "%s", cols);
-	}
+	/* Storage-native source.  SELECT * falls back (its column set would
+	 * have to be expanded from the schema); explicit-column queries scan
+	 * the B-tree directly with no VDBE on the hot path. */
+	if (proj_star) goto fallback;
+	if (nv.n == 0 || nv.n > 32) goto fallback;
 
-	if (sqlite3_prepare_v2(db, srcsql, -1, &st->src, 0) != SQLITE_OK)
-		goto fallback;   /* let the VDBE produce the authoritative error */
-	st->nsrc_col = sqlite3_column_count(st->src);
-	if (st->nsrc_col > 32) goto fallback;
+	st->bt = xstore_bt_of(db);
+	if (st->bt == NULL) goto fallback;   /* not an xstore-backed connection */
+	snprintf(st->table, sizeof st->table, "%s", tabbuf);
+	st->nsrc_col = nv.n;
+	st->snap = 0;   /* latest committed (vexec is the read fast path) */
 
-	/* For "*", the source columns ARE the namevec, in order; record their
-	 * names so the WHERE compiler can resolve column references. */
-	if (proj_star) {
-		for (i = 0; i < st->nsrc_col; i++) {
-			const char *nm = sqlite3_column_name(st->src, i);
-			if (nm == NULL || strlen(nm) >= 64) goto fallback;
-			strcpy(nv.names[i], nm);
-		}
-		nv.n = st->nsrc_col;
-		nproj = st->nsrc_col;
-	} else if (st->nsrc_col != nv.n) {
-		goto fallback;   /* defensive: column set mismatch */
-	}
+	/* Resolve each source column to its record origin + affinity from
+	 * the schema (prepare-time only; no data row stepped). */
+	if (resolve_schema(db, tabbuf, &nv, st->src_pay) != 0)
+		goto fallback;
 
 	st->nout = nproj;
 	if (nproj > 32) goto fallback;   /* worker out[] / result row bound */
@@ -1409,29 +1427,15 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	                                sizeof(vx_expr_t *));
 	if (!st->proj) goto oom;
 
-	/* Fill real column affinities for the gate. */
-	for (i = 0; i < st->nsrc_col; i++)
-		nv.aff[i] = vx_affinity(sqlite3_column_decltype(st->src, i));
-
 	/* Pass 2: compile the projection + filter with the affinity gate
 	 * active.  Any affinity-ambiguous comparison/arithmetic fails here
 	 * and the query falls back. */
 	{
 		int k = 0;
 		comp.fail = 0;
-		if (proj_star) {
-			/* Identity projection: one column reference per source column. */
-			for (k = 0; k < st->nsrc_col; k++) {
-				vx_expr_t *n = expr_node(&comp, VXO_COL);
-				if (n == NULL) goto fallback;
-				n->col = k;
-				st->proj[k] = n;
-			}
-		} else {
-			for (it = sel->cols->head; it; it = it->next, k++) {
-				st->proj[k] = compile_expr(&comp, it->expr);
-				if (comp.fail) goto fallback;
-			}
+		for (it = sel->cols->head; it; it = it->next, k++) {
+			st->proj[k] = compile_expr(&comp, it->expr);
+			if (comp.fail) goto fallback;
 		}
 		if (sel->where) {
 			st->filter = compile_expr(&comp, sel->where);
@@ -1448,15 +1452,6 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	 * or parameters fall back. */
 	st->limit = -1;
 	st->offset = 0;
-	/* On the "SELECT *" path, a non-position ORDER BY key would need a
-	 * column resolved by name against the source after prepare, which the
-	 * key compiler (indexing nv) does not do; fall back conservatively
-	 * (a bare position key is fine). */
-	if (proj_star && sel->order) {
-		const sql_exprlist_item_t *o;
-		for (o = sel->order->head; o; o = o->next)
-			if (!(o->expr && o->expr->op == SX_E_NUMBER)) goto fallback;
-	}
 	if (sel->order) {
 		const sql_exprlist_item_t *o;
 		int no = 0, oi = 0;
@@ -1602,7 +1597,7 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	vx_aggplan_t *ap = NULL;
 	const sql_exprlist_item_t *it;
 	char *srcsql = NULL;
-	int nout = 0, ngrp = 0, nagg = 0, i, k, rc = 0;
+	int nout = 0, ngrp = 0, nagg = 0, rc = 0;
 
 	if (errmsg) *errmsg = NULL;
 
@@ -1676,40 +1671,17 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	/* Build the source SELECT over the collected base columns.  A pure
 	 * count(*) references no columns; select _rowid_ so there is a row
 	 * to count (and so the source has at least one column). */
-	{
-		char cols[2100]; int off = 0;
-		int nocols = (nv.n == 0);
-		if (nv.n > 32) goto fallback;
-		if (nocols) {
-			off = snprintf(cols, sizeof cols, "_rowid_");
-		} else {
-			for (k = 0; k < nv.n; k++) {
-				int r = snprintf(cols + off, sizeof cols - (size_t)off,
-				                 "%s%s", k ? "," : "", nv.names[k]);
-				if (r < 0 || (size_t)(off + r) >= sizeof cols) goto fallback;
-				off += r;
-			}
-		}
-		{
-			size_t n = strlen("SELECT  FROM ") + (size_t)off + strlen(tabbuf) + 1;
-			srcsql = (char *)malloc(n);
-			if (!srcsql) goto oom;
-			snprintf(srcsql, n, "SELECT %s FROM %s", cols, tabbuf);
-		}
-		snprintf(st->table, sizeof st->table, "%s", tabbuf);
-		snprintf(st->srccols, sizeof st->srccols, "%s", cols);
-	}
-
-	if (sqlite3_prepare_v2(db, srcsql, -1, &st->src, 0) != SQLITE_OK)
+	/* Storage-native source.  A pure count(*) references no columns
+	 * (nv.n == 0) -- the scan still yields every rowid to count, no
+	 * record decode needed. */
+	if (nv.n > 32) goto fallback;
+	st->bt = xstore_bt_of(db);
+	if (st->bt == NULL) goto fallback;
+	snprintf(st->table, sizeof st->table, "%s", tabbuf);
+	st->nsrc_col = nv.n;
+	st->snap = 0;
+	if (nv.n > 0 && resolve_schema(db, tabbuf, &nv, st->src_pay) != 0)
 		goto fallback;
-	st->nsrc_col = sqlite3_column_count(st->src);
-	/* With no referenced columns the source has the synthetic _rowid_
-	 * column (nsrc_col == 1, nv.n == 0); otherwise the counts match. */
-	if (st->nsrc_col > 32) goto fallback;
-	if (nv.n != 0 && st->nsrc_col != nv.n) goto fallback;
-
-	for (i = 0; i < st->nsrc_col; i++)
-		nv.aff[i] = vx_affinity(sqlite3_column_decltype(st->src, i));
 
 	/* Pass 2: compile group-key expressions, aggregate-arg expressions,
 	 * and the filter, with the affinity gate active. */
@@ -2103,6 +2075,42 @@ read_src_cell(sqlite3_stmt *src, int i, vx_cell_t *cell, struct vx_arena_blk **a
 	}
 }
 
+/* Fill the storage-native source row: for each source column, the rowid
+ * (src_pay == -1) or a payload column decoded from the scan record.
+ * TEXT/BLOB bytes are copied into `arena` so they outlive the record. */
+static void
+read_rec_row(struct vx_stmt *st, int64_t rowid, const uint8_t *rec, int reclen,
+             struct vx_arena_blk **arena)
+{
+	int i;
+	for (i = 0; i < st->nsrc_col; i++) {
+		vx_cell_t *cell = &st->srcrow[i];
+		memset(cell, 0, sizeof *cell);
+		if (st->src_pay[i] < 0) {
+			cell->type = VX_INT; cell->i = rowid;
+			continue;
+		}
+		{
+			int64_t iv = 0; double dv = 0; const uint8_t *p = NULL; int n = 0;
+			int cls = xstore_rec_col(rec, reclen, st->src_pay[i],
+			                         &iv, &dv, &p, &n);
+			switch (cls) {
+			case XSTORE_C_INT:  cell->type = VX_INT; cell->i = iv; break;
+			case XSTORE_C_REAL: cell->type = VX_REAL; cell->r = dv; break;
+			case XSTORE_C_TEXT:
+			case XSTORE_C_BLOB: {
+				uint8_t *b = (uint8_t *)arena_alloc(arena, (size_t)(n > 0 ? n : 1) + 1);
+				if (b) { if (n) memcpy(b, p, (size_t)n); b[n > 0 ? n : 0] = '\0'; }
+				cell->type = (cls == XSTORE_C_TEXT) ? VX_TEXT : VX_BLOB;
+				cell->bytes = b; cell->nbytes = (uint32_t)(n > 0 ? n : 0);
+				break;
+			}
+			default: cell->type = VX_NULL; break;
+			}
+		}
+	}
+}
+
 static vx_chunk_t *
 next_chunk(struct vx_stmt *st, int *done)
 {
@@ -2118,14 +2126,20 @@ next_chunk(struct vx_stmt *st, int *done)
 	                               (size_t)(c->ncol > 0 ? c->ncol : 1));
 	if (!c->cells) { free(c); return NULL; }
 
+	/* Open the storage scan lazily on first chunk. */
+	if (st->scan == NULL) {
+		st->scan = xstore_scan_open(st->bt, st->table, st->snap, 0, 0, 0, 0);
+		if (st->scan == NULL) { chunk_free(c); return NULL; }
+	}
+
 	while (c->nrow < c->cap) {
 		int j;
-		rc = sqlite3_step(st->src);
-		if (rc == SQLITE_DONE) { *done = 1; break; }
-		if (rc != SQLITE_ROW) { chunk_free(c); return NULL; }
+		int64_t rowid; const uint8_t *rec; int reclen;
+		rc = xstore_scan_next(st->scan, &rowid, &rec, &reclen);
+		if (rc == 0) { *done = 1; break; }
+		if (rc != 1) { chunk_free(c); return NULL; }
 
-		for (j = 0; j < st->nsrc_col; j++)
-			read_src_cell(st->src, j, &st->srcrow[j], &c->arena);
+		read_rec_row(st, rowid, rec, reclen, &c->arena);
 
 		/* Filter (3-valued: only a TRUE keeps the row). */
 		if (st->filter != NULL) {
@@ -2158,18 +2172,22 @@ agg_materialize(struct vx_stmt *st)
 	int b;
 
 	if (htab_init(&st->ht, ap->ngrp, ap->nagg) != 0) return -1;
+	if (st->scan == NULL) {
+		st->scan = xstore_scan_open(st->bt, st->table, st->snap, 0, 0, 0, 0);
+		if (st->scan == NULL) return -1;
+	}
 
 	/* Drain. */
 	for (;;) {
-		int step = sqlite3_step(st->src);
+		int64_t rowid; const uint8_t *rec; int reclen;
+		int step = xstore_scan_next(st->scan, &rowid, &rec, &reclen);
 		vx_cell_t keys[16];
 		vx_grp_t *grp;
 		int ai;
-		if (step == SQLITE_DONE) break;
-		if (step != SQLITE_ROW) { arena_free(rowarena); return -1; }
+		if (step == 0) break;
+		if (step != 1) { arena_free(rowarena); return -1; }
 
-		for (j = 0; j < st->nsrc_col; j++)
-			read_src_cell(st->src, j, &st->srcrow[j], &rowarena);
+		read_rec_row(st, rowid, rec, reclen, &rowarena);
 
 		if (st->filter != NULL &&
 		    eval_bool(st, st->filter, st->srcrow, &rowarena) != 1)
@@ -2300,13 +2318,18 @@ ordered_materialize(struct vx_stmt *st)
 	int emit_n, e;
 
 	for (;;) {
-		int step = sqlite3_step(st->src);
+		int64_t rowid; const uint8_t *rec; int reclen;
+		int step;
 		vx_cell_t outrow[32], keyrow[16];
-		if (step == SQLITE_DONE) break;
-		if (step != SQLITE_ROW) goto cleanup;
+		if (st->scan == NULL) {
+			st->scan = xstore_scan_open(st->bt, st->table, st->snap, 0, 0, 0, 0);
+			if (st->scan == NULL) goto cleanup;
+		}
+		step = xstore_scan_next(st->scan, &rowid, &rec, &reclen);
+		if (step == 0) break;
+		if (step != 1) goto cleanup;
 
-		for (j = 0; j < st->nsrc_col; j++)
-			read_src_cell(st->src, j, &st->srcrow[j], &rowarena);
+		read_rec_row(st, rowid, rec, reclen, &rowarena);
 		if (st->filter != NULL &&
 		    eval_bool(st, st->filter, st->srcrow, &rowarena) != 1)
 			continue;
@@ -2551,6 +2574,7 @@ vx_finalize(vx_stmt_t *st)
 {
 	if (st == NULL) return;
 	if (st->src) sqlite3_finalize(st->src);
+	if (st->scan) xstore_scan_close(st->scan);
 	if (st->chunk) chunk_free(st->chunk);
 	if (st->plan_arena) arena_free(st->plan_arena);
 	htab_free(&st->ht);
@@ -2612,7 +2636,6 @@ result_push(struct vx_result *r, const vx_cell_t *row)
 /* Shared context across the morsel workers. */
 struct vx_par {
 	const struct vx_stmt *plan;   /* compiled template (proj/filter/cols/table) */
-	const char  *db_path;
 	_Atomic int64_t cursor;       /* next rowid to hand out */
 	int64_t      hi;              /* one past the max rowid */
 	int64_t      morsel;          /* rowids per morsel */
@@ -2630,9 +2653,6 @@ par_worker(xtc_task_t *self, void *user)
 	struct { struct vx_par *par; int idx; } *a = user;
 	struct vx_par *par = a->par;
 	int widx = a->idx;
-	sqlite3 *db = NULL;
-	sqlite3_stmt *src = NULL;
-	char sql[2400];
 	struct vx_stmt w;     /* lightweight per-worker execution state */
 	struct vx_arena_blk *rowarena = NULL;
 	vx_cell_t *srcrow = NULL;
@@ -2640,24 +2660,21 @@ par_worker(xtc_task_t *self, void *user)
 
 	(void)self;
 
-	if (sqlite3_open_v2(par->db_path, &db,
-	        SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
-		goto done;
-
-	/* Range-scoped source over rowid; reuse the plan's exact column list
-	 * so the compiled proj/filter (which index source columns) match. */
-	snprintf(sql, sizeof sql,
-	    "SELECT %s FROM %s WHERE _rowid_ >= ?1 AND _rowid_ < ?2",
-	    par->plan->srccols, par->plan->table);
-	if (sqlite3_prepare_v2(db, sql, -1, &src, 0) != SQLITE_OK) goto done;
-
-	/* The worker borrows the plan's compiled trees; its own scratch. */
+	/* The worker borrows the plan's compiled trees + storage source
+	 * (the bt is a shared process pointer; each worker opens its OWN
+	 * xstore_scan over a disjoint rowid range, so the cursors are
+	 * independent -- the B-link tree's latch-free reads make concurrent
+	 * range scans safe). */
 	memset(&w, 0, sizeof w);
 	w.nout = par->plan->nout;
 	w.proj = par->plan->proj;
 	w.filter = par->plan->filter;
-	w.agg = par->plan->agg;   /* borrowed (immutable plan) */
-	w.nsrc_col = sqlite3_column_count(src);
+	w.agg = par->plan->agg;        /* borrowed (immutable plan) */
+	w.bt = par->plan->bt;
+	w.snap = par->plan->snap;
+	w.nsrc_col = par->plan->nsrc_col;
+	memcpy(w.src_pay, par->plan->src_pay, sizeof w.src_pay);
+	snprintf(w.table, sizeof w.table, "%s", par->plan->table);
 	srcrow = (vx_cell_t *)calloc((size_t)(w.nsrc_col > 0 ? w.nsrc_col : 1),
 	                             sizeof(vx_cell_t));
 	if (srcrow == NULL) goto done;
@@ -2667,21 +2684,22 @@ par_worker(xtc_task_t *self, void *user)
 		int64_t lo = atomic_fetch_add_explicit(&par->cursor, par->morsel,
 		                                       memory_order_relaxed);
 		int64_t mh;
+		xstore_scan_t *ms;
 		if (lo >= par->hi) break;
 		mh = lo + par->morsel;
 		if (mh > par->hi) mh = par->hi;
 
-		sqlite3_reset(src);
-		sqlite3_bind_int64(src, 1, lo);
-		sqlite3_bind_int64(src, 2, mh);
+		/* A morsel = the rowid range [lo, mh-1]. */
+		ms = xstore_scan_open(w.bt, w.table, w.snap, lo, 1, mh - 1, 1);
+		if (ms == NULL) { atomic_store(&par->error, 1); goto done; }
 
 		for (;;) {
-			int step = sqlite3_step(src), j;
-			if (step == SQLITE_DONE) break;
-			if (step != SQLITE_ROW) { atomic_store(&par->error, 1); goto done; }
+			int64_t rowid; const uint8_t *rec; int reclen, j;
+			int step = xstore_scan_next(ms, &rowid, &rec, &reclen);
+			if (step == 0) break;
+			if (step != 1) { xstore_scan_close(ms); atomic_store(&par->error, 1); goto done; }
 
-			for (j = 0; j < w.nsrc_col; j++)
-				read_src_cell(src, j, &w.srcrow[j], &rowarena);
+			read_rec_row(&w, rowid, rec, reclen, &rowarena);
 
 			if (w.filter != NULL &&
 			    eval_bool(&w, w.filter, w.srcrow, &rowarena) != 1)
@@ -2694,7 +2712,7 @@ par_worker(xtc_task_t *self, void *user)
 				for (j = 0; j < ap->ngrp; j++)
 					eval(&w, ap->grp[j], w.srcrow, &rowarena, &keys[j]);
 				grp = htab_group(&par->wht[widx], keys);
-				if (grp == NULL) { atomic_store(&par->error, 1); goto done; }
+				if (grp == NULL) { xstore_scan_close(ms); atomic_store(&par->error, 1); goto done; }
 				for (j = 0; j < ap->nout; j++) {
 					if (!ap->out[j].is_agg) continue;
 					if (ap->out[j].kind == VXA_COUNT_STAR)
@@ -2713,10 +2731,12 @@ par_worker(xtc_task_t *self, void *user)
 				for (j = 0; j < w.nout; j++)
 					eval(&w, w.proj[j], w.srcrow, &rowarena, &out[j]);
 				if (result_push(&par->parts[widx], out) != 0) {
+					xstore_scan_close(ms);
 					atomic_store(&par->error, 1); goto done;
 				}
 			}
 		}
+		xstore_scan_close(ms);
 		arena_free(rowarena); rowarena = NULL;
 	}
 	rc_ok = 1;
@@ -2724,17 +2744,14 @@ par_worker(xtc_task_t *self, void *user)
 done:
 	if (rowarena) arena_free(rowarena);
 	free(srcrow);
-	if (src) sqlite3_finalize(src);
-	if (db) sqlite3_close(db);
 	if (!rc_ok) atomic_store(&par->error, 1);
 	return 0;   /* task DONE */
 }
 
 int
-vx_run_parallel(const char *db_path, const char *sql, int n_workers,
+vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
                 vx_result_t **res, char **errmsg)
 {
-	sqlite3 *coord = NULL;
 	vx_stmt_t *plan = NULL;
 	struct vx_par par;
 	struct vx_result *out = NULL;
@@ -2747,32 +2764,25 @@ vx_run_parallel(const char *db_path, const char *sql, int n_workers,
 	if (errmsg) *errmsg = NULL;
 	if (n_workers < 1) n_workers = 1;
 
-	/* Recognize the plan once on a coordinator connection. */
-	if (sqlite3_open_v2(db_path, &coord, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
-		return -1;
-	recog = vx_try_prepare(coord, sql, &plan, errmsg);
-	if (recog != 1) { sqlite3_close(coord); return recog; }   /* 0 fallback / <0 err */
+	/* Recognize the plan once on the caller's connection (its bt is the
+	 * one the workers' storage scans run over -- the workers share that
+	 * process pointer and open their own range cursors on it). */
+	recog = vx_try_prepare(db, sql, &plan, errmsg);
+	if (recog != 1) return recog;             /* 0 fallback / <0 err */
 
-	/* ORDER BY / LIMIT / OFFSET need a global sort across all workers'
-	 * output; the parallel combine here only concatenates, so an ordered
-	 * query is not run in parallel.  Signal not-recognized so the caller
-	 * runs it on the single-threaded vexec path (which sorts) or the
-	 * VDBE.  (A parallel merge-sort combine is a later refinement.) */
-	if (plan->norder > 0 || plan->limit >= 0 || plan->offset > 0) {
-		vx_finalize(plan); sqlite3_close(coord); return 0;
-	}
-	/* Joins run on the single-threaded hash-join path (parallel join is a
-	 * later refinement). */
-	if (plan->join != NULL) {
-		vx_finalize(plan); sqlite3_close(coord); return 0;
+	/* The parallel path is the storage-native scan; an ordered, limited,
+	 * joined, or non-storage (bt == NULL) plan runs single-threaded. */
+	if (plan->norder > 0 || plan->limit >= 0 || plan->offset > 0 ||
+	    plan->join != NULL || plan->bt == NULL) {
+		vx_finalize(plan); return 0;
 	}
 
-	/* rowid bounds: [min, max] of the table (NULL table -> empty). */
+	/* rowid bounds: [min, max] of the table (empty -> no rows). */
 	{
 		char q[128]; sqlite3_stmt *b = NULL;
 		snprintf(q, sizeof q, "SELECT min(_rowid_), max(_rowid_) FROM %s",
 		         plan->table);
-		if (sqlite3_prepare_v2(coord, q, -1, &b, 0) == SQLITE_OK &&
+		if (sqlite3_prepare_v2(db, q, -1, &b, 0) == SQLITE_OK &&
 		    sqlite3_step(b) == SQLITE_ROW &&
 		    sqlite3_column_type(b, 0) != SQLITE_NULL) {
 			lo = sqlite3_column_int64(b, 0);
@@ -2788,7 +2798,6 @@ vx_run_parallel(const char *db_path, const char *sql, int n_workers,
 
 	memset(&par, 0, sizeof par);
 	par.plan = plan;
-	par.db_path = db_path;
 	atomic_store(&par.cursor, lo);
 	par.hi = hi;
 	/* Morsel size: aim for a few morsels per worker so the atomic cursor
@@ -2900,7 +2909,6 @@ cleanup:
 	}
 	if (out) { arena_free(out->arena); free(out->cells); free(out); }
 	if (plan) vx_finalize(plan);
-	if (coord) sqlite3_close(coord);
 	return rc;
 }
 

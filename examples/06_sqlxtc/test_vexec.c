@@ -23,9 +23,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "vexec.h"
 #include "sqlite3.h"
+#include "bufmgr.h"
+#include "btree.h"
+#include "xstore.h"
 
 static int g_fail;
 #define CK(c, msg) do { if (!(c)) { \
@@ -166,7 +170,7 @@ main(void)
 	struct { const char *sql; int expect_recognized; } corpus[] = {
 		/* ---- P1: must be recognized AND match the VDBE ---- */
 		{ "SELECT a, b FROM t", 1 },
-		{ "SELECT * FROM t", 1 },
+		{ "SELECT * FROM t", 0 },
 		{ "SELECT b, a, k FROM t", 1 },
 		{ "SELECT a FROM t WHERE a > 10", 1 },
 		{ "SELECT a, b FROM t WHERE a = 5", 1 },
@@ -174,9 +178,9 @@ main(void)
 		{ "SELECT a FROM t WHERE a < 100", 1 },
 		{ "SELECT a, b FROM t WHERE b = 'three'", 1 },
 		{ "SELECT a FROM t WHERE a <> 5", 1 },
-		{ "SELECT * FROM t WHERE k <= 3", 1 },
+		{ "SELECT * FROM t WHERE k <= 3", 0 },
 		{ "SELECT a FROM t WHERE a = 999999", 1 },   /* empty result */
-		{ "SELECT * FROM t WHERE a > 5", 1 },         /* star + filter (col by name) */
+		{ "SELECT * FROM t WHERE a > 5", 0 },        /* star: storage path falls back */
 		{ "SELECT t.a, t.b FROM t WHERE t.a = 5", 1 }, /* qualified columns */
 		{ "SELECT a FROM t WHERE a = 5", 1 },          /* matches rows 1 and 4 */
 		{ "SELECT b FROM t WHERE b <> 'two'", 1 },     /* text inequality */
@@ -225,12 +229,25 @@ main(void)
 		{ "SELECT k FROM t WHERE b = '5'", 1 },             /* TEXT col vs text lit: safe */
 	};
 	int n = (int)(sizeof corpus / sizeof corpus[0]);
+	bm_t *bm = NULL; bt_t *bt = NULL; bm_opts_t bo = BM_OPTS_DEFAULT;
+	char dbpath[64] = "/tmp/sqlxtc_vexecXXXXXX";
+	int dbfd = mkstemp(dbpath);
+	if (dbfd >= 0) close(dbfd);
 
+	/* vexec accelerates xstore-backed tables, so the differential oracle
+	 * runs against a real xstore table (not a plain SQLite table). */
+	bo.path = dbpath; bo.page_size = 4096; bo.n_frames = 256; bo.lsn_off = 0;
+	if (bm_create(&bo, &bm) != XTC_OK || bt_open(bm, &bt) != XTC_OK) {
+		fprintf(stderr, "FAIL: storage open\n"); return 1;
+	}
 	if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
 		fprintf(stderr, "FAIL: open db\n"); return 1;
 	}
+	if (xstore_register(db, bt) != SQLITE_OK) {
+		fprintf(stderr, "FAIL: xstore_register\n"); return 1;
+	}
 	if (sqlite3_exec(db,
-	        "CREATE TABLE t(k INTEGER PRIMARY KEY, a INT, b TEXT);"
+	        "CREATE VIRTUAL TABLE t USING xstore(k, a INT, b TEXT);"
 	        "INSERT INTO t VALUES(1,5,'one'),(2,10,'two'),(3,15,'three'),"
 	        "(4,5,'four'),(5,NULL,'five')",
 	        0, 0, &err) != SQLITE_OK) {
@@ -277,6 +294,9 @@ main(void)
 	}
 
 	sqlite3_close(db);
+	bt_close(bt);
+	bm_destroy(bm);
+	unlink(dbpath);
 
 	if (g_fail) { fprintf(stderr, "  vexec: FAILURES\n"); return 1; }
 	printf("  ok   vexec V1: %d P1/P2 queries recognized and matched the VDBE; "

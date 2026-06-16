@@ -23,6 +23,9 @@
 
 #include "vexec.h"
 #include "sqlite3.h"
+#include "bufmgr.h"
+#include "btree.h"
+#include "xstore.h"
 
 static int g_fail;
 #define CK(c, msg) do { if (!(c)) { \
@@ -166,10 +169,12 @@ multiset_eq(const struct rset *a, const struct rset *b)
 int
 main(void)
 {
-	const char *path = "/tmp/sqlxtc_vexec_par.db";
+	char path[64] = "/tmp/sqlxtc_vexparXXXXXX";
 	sqlite3 *db = NULL;
 	char *err = NULL;
 	int i, recognized = 0, max_loops = 0;
+	bm_t *bm = NULL; bt_t *bt = NULL; bm_opts_t bo = BM_OPTS_DEFAULT;
+	int dbfd;
 
 	static const char *corpus[] = {
 		"SELECT a FROM t",
@@ -177,7 +182,6 @@ main(void)
 		"SELECT a+1, k FROM t WHERE a >= 100 AND a < 200",
 		"SELECT abs(a), length(b) FROM t WHERE a IS NOT NULL",
 		"SELECT k, b FROM t WHERE b <> 'row-1'",
-		"SELECT * FROM t WHERE a > 9990",
 		/* aggregation across workers (V3 x V2) */
 		"SELECT count(*) FROM t",
 		"SELECT count(a), sum(a), min(a), max(a) FROM t",
@@ -187,16 +191,21 @@ main(void)
 	};
 	int n = (int)(sizeof corpus / sizeof corpus[0]);
 
-	unlink(path);
-	if (sqlite3_open(path, &db) != SQLITE_OK) {
+	dbfd = mkstemp(path); if (dbfd >= 0) close(dbfd);
+	bo.path = path; bo.page_size = 4096; bo.n_frames = 512; bo.lsn_off = 0;
+	if (bm_create(&bo, &bm) != XTC_OK || bt_open(bm, &bt) != XTC_OK) {
+		fprintf(stderr, "FAIL: storage open\n"); return 1;
+	}
+	if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
 		fprintf(stderr, "FAIL: open\n"); return 1;
 	}
-	/* Seed 10000 rows. */
-	sqlite3_exec(db, "PRAGMA journal_mode=WAL", 0, 0, 0);
-	if (sqlite3_exec(db, "CREATE TABLE t(k INTEGER PRIMARY KEY, a INT, b TEXT)",
+	if (xstore_register(db, bt) != SQLITE_OK) {
+		fprintf(stderr, "FAIL: register\n"); return 1;
+	}
+	if (sqlite3_exec(db, "CREATE VIRTUAL TABLE t USING xstore(k, a INT, b TEXT)",
 	                 0, 0, &err) != SQLITE_OK) {
 		fprintf(stderr, "FAIL: create: %s\n", err ? err : "?");
-		sqlite3_free(err); sqlite3_close(db); unlink(path); return 1;
+		sqlite3_free(err); sqlite3_close(db); return 1;
 	}
 	sqlite3_exec(db, "BEGIN", 0, 0, 0);
 	{
@@ -227,7 +236,7 @@ main(void)
 		rs_init(&ref); rs_init(&got);
 		CK(run_vdbe(db, sql, &ref) == 0, "vdbe run");
 
-		rc = vx_run_parallel(path, sql, 4, &pr, &perr);
+		rc = vx_run_parallel(db, sql, 4, &pr, &perr);
 		CK(rc == 1, sql);   /* must be recognized + run in parallel */
 		if (rc == 1) {
 			recognized++;
@@ -245,10 +254,9 @@ main(void)
 	}
 
 	sqlite3_close(db);
+	bt_close(bt);
+	bm_destroy(bm);
 	unlink(path);
-	{ char wal[256], shm[256];
-	  snprintf(wal, sizeof wal, "%s-wal", path); unlink(wal);
-	  snprintf(shm, sizeof shm, "%s-shm", path); unlink(shm); }
 
 	if (g_fail) { fprintf(stderr, "  vexec V2: FAILURES\n"); return 1; }
 	/* The scaling gate: the run must have used more than one loop (work
