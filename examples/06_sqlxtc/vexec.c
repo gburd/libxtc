@@ -185,6 +185,17 @@ struct vx_stmt {
 
 	vx_aggplan_t *agg;          /* non-NULL => aggregating statement (V3) */
 
+	/* ORDER BY / LIMIT (V4).  norder > 0 => ordered.  Each order key is
+	 * either an expression over the SOURCE columns (order_key[i]), or a
+	 * 1-based reference to an output column (order_outcol[i] > 0, key
+	 * NULL).  order_desc[i] = 1 for DESC. */
+	int           norder;
+	vx_expr_t   **order_key;    /* norder expressions, or NULL entry */
+	int          *order_outcol; /* norder: 1-based output col, or 0 */
+	int          *order_desc;   /* norder: 1 = DESC */
+	int64_t       limit;        /* -1 = no LIMIT */
+	int64_t       offset;       /* 0 if none */
+
 	struct vx_arena_blk *plan_arena;   /* expr tree + literal bytes */
 
 	/* The recognized source, kept so a parallel run can rebuild a
@@ -204,6 +215,9 @@ struct vx_stmt {
 	/* Aggregation execution state (agg path only). */
 	vx_htab_t     ht;           /* drained groups */
 	int           ht_built;     /* 1 once the source has been drained */
+
+	/* Ordered execution: rows are materialized + sorted on first step. */
+	int           ordered_built;
 };
 
 /* ---- recognizer: column affinity (SQLite rules, three buckets) --- */
@@ -677,6 +691,32 @@ cmp_vals(const vx_cell_t *a, const vx_cell_t *b)
 	}
 }
 
+/* Full storage-class-aware comparison for ORDER BY, matching SQLite's
+ * sqlite3MemCompare: NULL sorts first, then numbers (int/real compared
+ * by value), then TEXT (BINARY collation), then BLOB. */
+static int
+sort_cmp(const vx_cell_t *a, const vx_cell_t *b)
+{
+	int na = (a->type == VX_NULL), nb = (b->type == VX_NULL);
+	int numa, numb;
+	if (na || nb) return nb - na;   /* both NULL -> 0; NULL is smallest */
+	numa = (a->type == VX_INT || a->type == VX_REAL);
+	numb = (b->type == VX_INT || b->type == VX_REAL);
+	if (numa || numb) {
+		if (numa && numb) return cmp_vals(a, b);
+		return numa ? -1 : 1;       /* number sorts before text/blob */
+	}
+	/* both are TEXT or BLOB: TEXT sorts before BLOB. */
+	if (a->type != b->type)
+		return (a->type == VX_TEXT) ? -1 : 1;
+	{
+		uint32_t n = a->nbytes < b->nbytes ? a->nbytes : b->nbytes;
+		int r = n ? memcmp(a->bytes, b->bytes, n) : 0;
+		if (r) return r;
+		return (int)a->nbytes - (int)b->nbytes;
+	}
+}
+
 static void
 eval(const struct vx_stmt *st, const vx_expr_t *e,
      const vx_cell_t *row, struct vx_arena_blk **arena, vx_cell_t *out)
@@ -1124,11 +1164,11 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	sel = root->u.select;
 	if (sel == NULL) goto fallback;
 
-	/* Common gates for P1/P2/P3: no compound/CTE/DISTINCT/HAVING/
-	 * ORDER/LIMIT/OFFSET.  GROUP BY is allowed only on the aggregation
-	 * path (handled by vx_try_prepare_agg). */
+	/* Common gates: no compound/CTE/DISTINCT/HAVING.  GROUP BY is
+	 * allowed only on the aggregation path; ORDER BY / LIMIT / OFFSET
+	 * are allowed only on the non-aggregating path (handled below). */
 	if (sel->with || sel->setop != SX_SET_NONE || sel->distinct ||
-	    sel->having || sel->order || sel->limit || sel->offset)
+	    sel->having)
 		goto fallback;
 
 	/* FROM exactly one base table. */
@@ -1190,6 +1230,16 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 		for (it = sel->cols->head; it; it = it->next)
 			if (collect_columns(&nv, it->expr) != 0) goto fallback;
 		if (sel->where && collect_columns(&nv, sel->where) != 0) goto fallback;
+		/* ORDER BY key columns must be in the source too.  A bare integer
+		 * key is an output-column position (collected via the output);
+		 * any other key expression is collected here. */
+		if (sel->order) {
+			const sql_exprlist_item_t *o;
+			for (o = sel->order->head; o; o = o->next) {
+				if (o->expr && o->expr->op == SX_E_NUMBER) continue;
+				if (collect_columns(&nv, o->expr) != 0) goto fallback;
+			}
+		}
 	} else {
 		/* Verify the WHERE (if any) is V1-compilable in principle; its
 		 * column names are resolved against the "SELECT *" source below. */
@@ -1279,6 +1329,79 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 			if (comp.fail) goto fallback;
 		} else {
 			st->filter = NULL;
+		}
+	}
+
+	/* ORDER BY / LIMIT / OFFSET (V4).  Order keys compile over the
+	 * source columns (reusing the compiler + nv); a bare integer order
+	 * key is treated as a 1-based output-column reference (ORDER BY 2).
+	 * LIMIT/OFFSET must be non-negative integer literals -- expressions
+	 * or parameters fall back. */
+	st->limit = -1;
+	st->offset = 0;
+	/* On the "SELECT *" path, a non-position ORDER BY key would need a
+	 * column resolved by name against the source after prepare, which the
+	 * key compiler (indexing nv) does not do; fall back conservatively
+	 * (a bare position key is fine). */
+	if (proj_star && sel->order) {
+		const sql_exprlist_item_t *o;
+		for (o = sel->order->head; o; o = o->next)
+			if (!(o->expr && o->expr->op == SX_E_NUMBER)) goto fallback;
+	}
+	if (sel->order) {
+		const sql_exprlist_item_t *o;
+		int no = 0, oi = 0;
+		for (o = sel->order->head; o; o = o->next) no++;
+		if (no == 0 || no > 16) goto fallback;
+		st->norder = no;
+		st->order_key = (vx_expr_t **)calloc((size_t)no, sizeof(vx_expr_t *));
+		st->order_outcol = (int *)calloc((size_t)no, sizeof(int));
+		st->order_desc = (int *)calloc((size_t)no, sizeof(int));
+		if (!st->order_key || !st->order_outcol || !st->order_desc) goto oom;
+		for (o = sel->order->head; o; o = o->next, oi++) {
+			const sql_expr_t *e = o->expr;
+			st->order_desc[oi] = (o->sort == 2);
+			if (e && e->op == SX_E_NUMBER) {
+				/* ORDER BY <int>: output-column position (1-based). */
+				char buf[32]; long pos;
+				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
+				memcpy(buf, e->lit.p, e->lit.len); buf[e->lit.len] = '\0';
+				if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E'))
+					goto fallback;
+				pos = strtol(buf, NULL, 10);
+				if (pos < 1 || pos > st->nout) goto fallback;
+				st->order_outcol[oi] = (int)pos;
+			} else {
+				comp.fail = 0;
+				st->order_key[oi] = compile_expr(&comp, e);
+				if (comp.fail) goto fallback;
+			}
+		}
+	}
+	if (sel->limit) {
+		if (sel->limit->op != SX_E_NUMBER) goto fallback;
+		{
+			char buf[32];
+			if (sel->limit->lit.len >= sizeof buf) goto fallback;
+			memcpy(buf, sel->limit->lit.p, sel->limit->lit.len);
+			buf[sel->limit->lit.len] = '\0';
+			if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E'))
+				goto fallback;
+			st->limit = strtoll(buf, NULL, 10);
+			if (st->limit < 0) st->limit = 0;
+		}
+	}
+	if (sel->offset) {
+		if (sel->offset->op != SX_E_NUMBER) goto fallback;
+		{
+			char buf[32];
+			if (sel->offset->lit.len >= sizeof buf) goto fallback;
+			memcpy(buf, sel->offset->lit.p, sel->offset->lit.len);
+			buf[sel->offset->lit.len] = '\0';
+			if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E'))
+				goto fallback;
+			st->offset = strtoll(buf, NULL, 10);
+			if (st->offset < 0) st->offset = 0;
 		}
 	}
 
@@ -1374,6 +1497,10 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 
 	if (errmsg) *errmsg = NULL;
 
+	/* V4 ORDER BY / LIMIT over aggregated output is not supported yet;
+	 * fall back so the VDBE handles it. */
+	if (sel->order || sel->limit || sel->offset) goto fallback;
+
 	/* Count output columns and GROUP BY keys. */
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
 		if (it->expr == NULL || it->expr->op == SX_E_STAR) {
@@ -1391,6 +1518,7 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	if (!st) goto oom;
 	st->db = db;
 	st->cur = -1;
+	st->limit = -1;   /* agg path has no LIMIT/ORDER BY (gated above) */
 	ap = (vx_aggplan_t *)calloc(1, sizeof *ap);
 	if (!ap) goto oom;
 	ap->nout = nout;
@@ -1692,6 +1820,150 @@ agg_materialize(struct vx_stmt *st)
 	return 0;
 }
 
+/* Is this an ordered/limited query (non-agg path)? */
+static int
+is_ordered(const struct vx_stmt *st)
+{
+	return st->agg == NULL &&
+	       (st->norder > 0 || st->limit >= 0 || st->offset > 0);
+}
+
+/* qsort context: the order keys per row + directions.  Keys are stored
+ * row-major: nkey cells per row, in a flat array parallel to the output
+ * rows.  We sort an index array to keep the output rows paired. */
+struct sort_ctx {
+	const vx_cell_t *keys;   /* nrow * nkey */
+	int              nkey;
+	const int       *desc;   /* nkey */
+};
+static struct sort_ctx *g_sort_ctx;   /* qsort_r is not portable; serialize */
+
+static int
+sort_index_cmp(const void *pa, const void *pb)
+{
+	int ia = *(const int *)pa, ib = *(const int *)pb;
+	const struct sort_ctx *c = g_sort_ctx;
+	int k;
+	for (k = 0; k < c->nkey; k++) {
+		const vx_cell_t *ka = &c->keys[(size_t)ia * (size_t)c->nkey + (size_t)k];
+		const vx_cell_t *kb = &c->keys[(size_t)ib * (size_t)c->nkey + (size_t)k];
+		int r = sort_cmp(ka, kb);
+		if (c->desc[k]) r = -r;
+		if (r) return r;
+	}
+	/* Stable-ish tiebreak by original index so equal-key rows keep a
+	 * deterministic order (the differential oracle compares positionally,
+	 * and SQLite leaves equal-key order unspecified, so any consistent
+	 * tiebreak that the oracle also applies is fine -- but we keep input
+	 * order here and the oracle compares the FULL row, so ties on the
+	 * key still must match SQLite; see the test's note). */
+	return ia - ib;
+}
+
+/* Materialize, sort, and offset/limit a non-agg ordered query into one
+ * chunk that vx_step then walks. */
+static int
+ordered_materialize(struct vx_stmt *st)
+{
+	struct vx_arena_blk *rowarena = NULL;   /* transient per-row source bytes */
+	struct vx_arena_blk *keep = NULL;        /* output + key bytes (kept) */
+	vx_cell_t *rows = NULL;   /* cap * nout */
+	vx_cell_t *keys = NULL;   /* cap * nkey */
+	int *idx = NULL;
+	int nkey = st->norder;
+	int cap = 0, nrow = 0, j, rc = -1;
+	vx_chunk_t *c = NULL;
+	int64_t lim, off;
+	int emit_n, e;
+
+	for (;;) {
+		int step = sqlite3_step(st->src);
+		vx_cell_t outrow[32], keyrow[16];
+		if (step == SQLITE_DONE) break;
+		if (step != SQLITE_ROW) goto cleanup;
+
+		for (j = 0; j < st->nsrc_col; j++)
+			read_src_cell(st->src, j, &st->srcrow[j], &rowarena);
+		if (st->filter != NULL &&
+		    eval_bool(st, st->filter, st->srcrow, &rowarena) != 1)
+			continue;
+
+		/* Project the output row. */
+		for (j = 0; j < st->nout; j++)
+			eval(st, st->proj[j], st->srcrow, &rowarena, &outrow[j]);
+		/* Compute the sort keys. */
+		for (j = 0; j < nkey; j++) {
+			if (st->order_outcol[j] > 0)
+				keyrow[j] = outrow[st->order_outcol[j] - 1];
+			else
+				eval(st, st->order_key[j], st->srcrow, &rowarena, &keyrow[j]);
+		}
+
+		if (nrow == cap) {
+			int nc = cap ? cap * 2 : 256;
+			vx_cell_t *nr = realloc(rows, sizeof(vx_cell_t) * (size_t)nc * (size_t)(st->nout > 0 ? st->nout : 1));
+			vx_cell_t *nk = realloc(keys, sizeof(vx_cell_t) * (size_t)nc * (size_t)(nkey > 0 ? nkey : 1));
+			if (!nr || !nk) { free(nr); free(nk); goto cleanup; }
+			rows = nr; keys = nk; cap = nc;
+		}
+		/* Copy output + key cells into the kept arena (row bytes are
+		 * transient -- the next sqlite3_step reuses the source row). */
+		for (j = 0; j < st->nout; j++)
+			if (cell_dup(&keep, &outrow[j], &rows[(size_t)nrow * (size_t)st->nout + (size_t)j]) != 0) goto cleanup;
+		for (j = 0; j < nkey; j++)
+			if (cell_dup(&keep, &keyrow[j], &keys[(size_t)nrow * (size_t)nkey + (size_t)j]) != 0) goto cleanup;
+		nrow++;
+		arena_free(rowarena); rowarena = NULL;
+	}
+
+	/* Sort the index array by keys (if any ORDER BY). */
+	idx = (int *)malloc(sizeof(int) * (size_t)(nrow > 0 ? nrow : 1));
+	if (!idx) goto cleanup;
+	for (j = 0; j < nrow; j++) idx[j] = j;
+	if (nkey > 0) {
+		struct sort_ctx sc; sc.keys = keys; sc.nkey = nkey; sc.desc = st->order_desc;
+		g_sort_ctx = &sc;
+		qsort(idx, (size_t)nrow, sizeof(int), sort_index_cmp);
+		g_sort_ctx = NULL;
+	}
+
+	/* Apply OFFSET / LIMIT. */
+	off = st->offset;
+	lim = st->limit;   /* -1 = unbounded */
+	if (off > nrow) off = nrow;
+	emit_n = nrow - (int)off;
+	if (lim >= 0 && emit_n > (int)lim) emit_n = (int)lim;
+
+	c = (vx_chunk_t *)calloc(1, sizeof *c);
+	if (!c) goto cleanup;
+	c->ncol = st->nout;
+	c->cap = emit_n > 0 ? emit_n : 1;
+	c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap * (size_t)(st->nout > 0 ? st->nout : 1));
+	if (!c->cells) { free(c); c = NULL; goto cleanup; }
+	for (e = 0; e < emit_n; e++) {
+		int si = idx[(int)off + e];
+		vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
+		for (j = 0; j < st->nout; j++) {
+			vx_cell_t v = rows[(size_t)si * (size_t)st->nout + (size_t)j];
+			if ((v.type == VX_TEXT || v.type == VX_BLOB) && v.nbytes)
+				(void)cell_dup(&c->arena, &v, &dst[j]);
+			else dst[j] = v;
+		}
+		c->nrow++;
+	}
+	st->chunk = c; c = NULL;
+	st->cur = -1;
+	st->ordered_built = 1;
+	rc = 0;
+
+cleanup:
+	arena_free(rowarena);
+	arena_free(keep);
+	free(rows); free(keys); free(idx);
+	if (c) chunk_free(c);
+	return rc;
+}
+
 int
 vx_step(vx_stmt_t *st)
 {
@@ -1701,13 +1973,17 @@ vx_step(vx_stmt_t *st)
 	if (st->agg != NULL && !st->ht_built) {
 		if (agg_materialize(st) != 0) return SQLITE_ERROR;
 	}
+	/* Ordered/limited (non-agg): materialize + sort on first step. */
+	if (is_ordered(st) && !st->ordered_built) {
+		if (ordered_materialize(st) != 0) return SQLITE_ERROR;
+	}
 
 	if (st->chunk != NULL && st->cur + 1 < st->chunk->nrow) {
 		st->cur++;
 		return SQLITE_ROW;
 	}
-	if (st->agg != NULL) {
-		/* All group rows are in the one chunk; once consumed, done. */
+	if (st->agg != NULL || is_ordered(st)) {
+		/* All rows are in the one materialized chunk; once consumed, done. */
 		if (st->chunk != NULL && st->cur + 1 >= st->chunk->nrow)
 			return SQLITE_DONE;
 	}
@@ -1777,6 +2053,9 @@ vx_finalize(vx_stmt_t *st)
 	if (st->plan_arena) arena_free(st->plan_arena);
 	htab_free(&st->ht);
 	if (st->agg) { free(st->agg->out); free(st->agg->grp); free(st->agg); }
+	free(st->order_key);
+	free(st->order_outcol);
+	free(st->order_desc);
 	free(st->proj);
 	free(st->srcrow);
 	free(st);
@@ -1964,6 +2243,15 @@ vx_run_parallel(const char *db_path, const char *sql, int n_workers,
 		return -1;
 	recog = vx_try_prepare(coord, sql, &plan, errmsg);
 	if (recog != 1) { sqlite3_close(coord); return recog; }   /* 0 fallback / <0 err */
+
+	/* ORDER BY / LIMIT / OFFSET need a global sort across all workers'
+	 * output; the parallel combine here only concatenates, so an ordered
+	 * query is not run in parallel.  Signal not-recognized so the caller
+	 * runs it on the single-threaded vexec path (which sorts) or the
+	 * VDBE.  (A parallel merge-sort combine is a later refinement.) */
+	if (plan->norder > 0 || plan->limit >= 0 || plan->offset > 0) {
+		vx_finalize(plan); sqlite3_close(coord); return 0;
+	}
 
 	/* rowid bounds: [min, max] of the table (NULL table -> empty). */
 	{
