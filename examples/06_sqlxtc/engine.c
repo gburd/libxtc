@@ -562,6 +562,8 @@ const void *sx_vexec_blob(const sx_vx_result *r, int row, int col)
 { return vx_result_text((const vx_result_t *)r, row, col); }
 int sx_vexec_bytes(const sx_vx_result *r, int row, int col)
 { return vx_result_bytes((const vx_result_t *)r, row, col); }
+const char *sx_vexec_name(const sx_vx_result *r, int col)
+{ return vx_result_name((const vx_result_t *)r, col); }
 
 int
 sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges)
@@ -591,6 +593,8 @@ const void *sx_vexec_blob(const sx_vx_result *r, int row, int col)
 { (void)r; (void)row; (void)col; return NULL; }
 int sx_vexec_bytes(const sx_vx_result *r, int row, int col)
 { (void)r; (void)row; (void)col; return 0; }
+const char *sx_vexec_name(const sx_vx_result *r, int col)
+{ (void)r; (void)col; return NULL; }
 
 int sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges)
 { (void)h; (void)sql; if (nchanges) *nchanges = 0; return 0; }

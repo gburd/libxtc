@@ -138,6 +138,8 @@ main(void)
 	struct q { const char *sql; int ordered; };
 	static const struct q vexec_q[] = {
 		{ "SELECT a, b FROM t WHERE a > 50",                       0 },
+		{ "SELECT a AS amount, b AS label FROM t WHERE a > 50",     0 },
+		{ "SELECT t.k, a FROM t WHERE a > 50",                      0 },
 		{ "SELECT abs(a), length(b) FROM t WHERE a IS NOT NULL",   0 },
 		{ "SELECT count(*) FROM t",                                1 },
 		{ "SELECT count(a), sum(a), min(a), max(a) FROM t",        1 },
