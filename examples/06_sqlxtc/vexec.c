@@ -3159,33 +3159,102 @@ encode_payload(const vx_cell_t *cells, int npay, uint8_t *out, int cap)
  * rejected by encode_payload (-> VDBE fallback) rather than truncated. */
 #define XS_REC_MAX  4096
 
-/* Recognize WHERE <pkcol> = <integer-literal> (the only WHERE the native
- * UPDATE / DELETE path handles -- a single-row point operation by the
- * primary key).  pkname is the declared name of column 0.  Returns 1
- * with *rowid set, or 0 (the statement is left to the VDBE). */
+/* Upper bound on rows a single native DELETE / UPDATE will touch.  A
+ * range matching more than this falls back to the VDBE rather than run
+ * unbounded work (and an unbounded native buffer) on one statement. */
+#define XS_NATIVE_MAX_ROWS  100000
+
+/* Does `e` name the primary-key column (unqualified or table-qualified)? */
 static int
-where_pk_eq(const sql_expr_t *w, const char *pkname, int64_t *rowid)
+is_pk_col(const sql_expr_t *e, const char *pkname)
 {
-	const sql_expr_t *colside = NULL, *litside = NULL;
+	return e != NULL && e->op == SX_E_COLUMN && e->nname >= 1 &&
+	    e->name[e->nname - 1].len == strlen(pkname) &&
+	    strncmp(e->name[e->nname - 1].p, pkname, strlen(pkname)) == 0;
+}
+
+/* Evaluate a literal expression to an integer, or fail. */
+static int
+lit_int(const sql_expr_t *e, int64_t *out)
+{
 	struct vx_arena_blk *tmp = NULL;
 	vx_cell_t c;
 	int ok = 0;
-
-	if (w == NULL || w->op != SX_E_BINARY || w->op2 != TK_EQ ||
-	    w->a == NULL || w->b == NULL)
-		return 0;
-	if (w->a->op == SX_E_COLUMN) { colside = w->a; litside = w->b; }
-	else if (w->b->op == SX_E_COLUMN) { colside = w->b; litside = w->a; }
-	else return 0;
-	/* Unqualified or table-qualified reference to the pk column only. */
-	if (colside->nname < 1 ||
-	    colside->name[colside->nname - 1].len != strlen(pkname) ||
-	    strncmp(colside->name[colside->nname - 1].p, pkname, strlen(pkname)) != 0)
-		return 0;
-	if (lit_cell(&tmp, litside, &c) != 0) { arena_free(tmp); return 0; }
-	if (c.type == VX_INT) { *rowid = c.i; ok = 1; }
+	if (lit_cell(&tmp, e, &c) == 0 && c.type == VX_INT) { *out = c.i; ok = 1; }
 	arena_free(tmp);
 	return ok;
+}
+
+/* Recognize a WHERE clause the native write path can turn into an
+ * inclusive rowid range over the primary key: no WHERE (whole table),
+ * pk = / pk < / pk <= / pk > / pk >= an int literal, or pk BETWEEN
+ * <int> AND <int>.  Returns 1 with lo / hi set to the inclusive bound
+ * and has_lo / has_hi marking which bounds are present; 0 otherwise
+ * (the statement goes to the VDBE).  An equality yields lo == hi.  This
+ * is a SUPERSET-safe recognizer: any predicate
+ * it does not understand falls back. */
+static int
+where_pk_range(const sql_expr_t *w, const char *pkname,
+               int64_t *lo, int *has_lo, int64_t *hi, int *has_hi)
+{
+	*has_lo = *has_hi = 0;
+	*lo = 0; *hi = 0;
+	if (w == NULL) return 1;   /* no WHERE: the whole table */
+
+	if (w->op == SX_E_BETWEEN) {
+		int64_t b, c;
+		if (!is_pk_col(w->a, pkname)) return 0;
+		if (!lit_int(w->b, &b) || !lit_int(w->c, &c)) return 0;
+		*lo = b; *has_lo = 1; *hi = c; *has_hi = 1;
+		return 1;
+	}
+	if (w->op == SX_E_BINARY && w->a && w->b) {
+		const sql_expr_t *col, *lit;
+		int op = w->op2, swapped = 0;
+		int64_t v;
+		if (is_pk_col(w->a, pkname)) { col = w->a; lit = w->b; }
+		else if (is_pk_col(w->b, pkname)) { col = w->b; lit = w->a; swapped = 1; }
+		else return 0;
+		(void)col;
+		if (!lit_int(lit, &v)) return 0;
+		/* Normalize the operator if the column was on the right. */
+		if (swapped) {
+			switch (op) {
+			case TK_LT: op = TK_GT; break;  case TK_GT: op = TK_LT; break;
+			case TK_LE: op = TK_GE; break;  case TK_GE: op = TK_LE; break;
+			default: break;   /* EQ unchanged */
+			}
+		}
+		switch (op) {
+		case TK_EQ: *lo = v; *has_lo = 1; *hi = v; *has_hi = 1; return 1;
+		case TK_LT: *hi = v - 1; *has_hi = 1; return 1;
+		case TK_LE: *hi = v;     *has_hi = 1; return 1;
+		case TK_GT: *lo = v + 1; *has_lo = 1; return 1;
+		case TK_GE: *lo = v;     *has_lo = 1; return 1;
+		default: return 0;
+		}
+	}
+	return 0;
+}
+
+/* Collect up to `cap` rowids visible in the pk range [lo,hi] (bounds per
+ * has_lo/has_hi) into `out`.  Returns the count, or -1 if more than
+ * `cap` rows match (the caller falls back so a huge range does not run
+ * unbounded natively).  -2 on a scan error. */
+static int
+collect_rowids(bt_t *bt, const char *table, int64_t lo, int has_lo,
+               int64_t hi, int has_hi, int64_t *out, int cap)
+{
+	xstore_scan_t *s;
+	int64_t rid; const uint8_t *rec; int reclen, n = 0, step;
+	s = xstore_scan_open(bt, table, 0, lo, has_lo, hi, has_hi);
+	if (s == NULL) return -2;
+	while ((step = xstore_scan_next(s, &rid, &rec, &reclen)) == 1) {
+		if (n >= cap) { xstore_scan_close(s); return -1; }
+		out[n++] = rid;
+	}
+	xstore_scan_close(s);
+	return step < 0 ? -2 : n;
 }
 
 /* Read the current visible payload record of one rowid into buf (latest
@@ -3268,74 +3337,110 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 	}
 
 	/* ---- DELETE ... WHERE pk = <lit> --------------------------------- */
+	/* ---- DELETE [WHERE pk-range] -- a point, a range, or the whole table
+	 * over the primary key (= / < / <= / > / >= / BETWEEN / no WHERE). */
 	if (root->kind == SQL_KIND_DELETE) {
-		int64_t rowid; uint8_t cur[XS_REC_MAX]; int existed;
-		if (!where_pk_eq(root->u.del->where, ws.name[0], &rowid)) {
-			sql_arena_destroy(arena); return 0;   /* no WHERE / not pk= -> VDBE */
+		int64_t lo, hi; int has_lo, has_hi;
+		int64_t *rids;
+		int nr, i;
+		if (!where_pk_range(root->u.del->where, ws.name[0],
+		                    &lo, &has_lo, &hi, &has_hi)) {
+			sql_arena_destroy(arena); return 0;   /* unsupported WHERE -> VDBE */
 		}
-		existed = read_one_row(bt, tabbuf, rowid, cur, (int)sizeof cur);
-		if (existed < 0) { rc = -1; goto done; }
-		if (existed > 0) {
-			if (xstore_delete_rec(bt, tableid, rowid) != 0) {
+		rids = (int64_t *)malloc(sizeof(int64_t) * XS_NATIVE_MAX_ROWS);
+		if (rids == NULL) { rc = -1; goto done; }
+		nr = collect_rowids(bt, tabbuf, lo, has_lo, hi, has_hi,
+		                    rids, XS_NATIVE_MAX_ROWS);
+		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many -> VDBE */
+		if (nr < 0) { free(rids); rc = -1; goto done; }
+		for (i = 0; i < nr; i++) {
+			if (xstore_delete_rec(bt, tableid, rids[i]) != 0) {
+				free(rids);
 				if (errmsg) *errmsg = strdup("native delete failed");
 				rc = -1; goto done;
 			}
-			applied = 1;
 		}
-		if (nchanges) *nchanges = applied;   /* SQLite changes(): rows deleted */
+		free(rids);
+		if (nchanges) *nchanges = nr;   /* SQLite changes(): rows deleted */
 		rc = 1; goto done;
 	}
 
-	/* ---- UPDATE ... SET col=<lit>,... WHERE pk = <lit> --------------- */
+	/* ---- UPDATE SET col=<lit>,... [WHERE pk-range] ------------------- */
 	if (root->kind == SQL_KIND_UPDATE) {
 		sql_update_t *up = root->u.update;
 		sql_assign_t *a;
-		int64_t rowid; uint8_t cur[XS_REC_MAX]; int curlen;
-		vx_cell_t cells[64];
-		uint8_t rec[XS_REC_MAX]; int reclen, ci;
+		int64_t lo, hi; int has_lo, has_hi;
+		int nr, i, ci;
+		/* Validate the SET list ONCE up front (the same literal columns
+		 * apply to every matched row); record which payload column each
+		 * SET targets and its new cell. */
+		vx_cell_t setval[64]; int setcol[64], nset = 0;
+		int64_t *rids;
 
-		if (!where_pk_eq(up->where, ws.name[0], &rowid)) {
-			sql_arena_destroy(arena); return 0;   /* not pk= -> VDBE */
+		if (!where_pk_range(up->where, ws.name[0], &lo, &has_lo, &hi, &has_hi)) {
+			sql_arena_destroy(arena); return 0;   /* unsupported WHERE -> VDBE */
 		}
-		/* Decode the current row's payload columns 1..n-1 into cells. */
-		curlen = read_one_row(bt, tabbuf, rowid, cur, (int)sizeof cur);
-		if (curlen < 0) { rc = -1; goto done; }
-		if (curlen == 0) {                       /* no such row: 0 changes */
-			if (nchanges) *nchanges = 0;
-			rc = 1; goto done;
-		}
-		for (ci = 1; ci < ws.n; ci++) {
-			int64_t iv; double rv; const uint8_t *pv; int pn;
-			int cls = xstore_rec_col(cur, curlen, ci - 1, &iv, &rv, &pv, &pn);
-			vx_cell_t *c = &cells[ci - 1];
-			memset(c, 0, sizeof *c);
-			switch (cls) {
-			case XSTORE_C_INT:  c->type = VX_INT;  c->i = iv; break;
-			case XSTORE_C_REAL: c->type = VX_REAL; c->r = rv; break;
-			case XSTORE_C_TEXT: c->type = VX_TEXT; c->bytes = pv; c->nbytes = pn; break;
-			case XSTORE_C_BLOB: c->type = VX_BLOB; c->bytes = pv; c->nbytes = pn; break;
-			default:            c->type = VX_NULL; break;
-			}
-		}
-		/* Apply each SET col=<literal>; the pk column may not be updated
-		 * by this slice (a rowid move needs a tombstone of the old key). */
 		for (a = up->sets; a; a = a->next) {
 			int col = -1, k;
 			for (k = 0; k < ws.n; k++)
 				if (a->col.len == strlen(ws.name[k]) &&
 				    strncmp(a->col.p, ws.name[k], a->col.len) == 0) { col = k; break; }
 			if (col <= 0) { sql_arena_destroy(arena); return 0; } /* unknown / pk -> VDBE */
-			if (lit_cell(&cell_arena, a->val, &cells[col - 1]) != 0) {
+			if (nset >= 64) { sql_arena_destroy(arena); return 0; }
+			if (lit_cell(&cell_arena, a->val, &setval[nset]) != 0) {
 				sql_arena_destroy(arena); return 0;  /* non-literal SET -> VDBE */
 			}
+			setcol[nset] = col;   /* declared index (>=1) */
+			nset++;
 		}
-		reclen = encode_payload(cells, ws.n - 1, rec, (int)sizeof rec);
-		if (reclen < 0) { rc = 0; goto done; }   /* too big -> VDBE */
-		if (xstore_put_rec(bt, tableid, rowid, rec, reclen) != 0) {
-			if (errmsg) *errmsg = strdup("native update failed");
-			rc = -1; goto done;
+		rids = (int64_t *)malloc(sizeof(int64_t) * XS_NATIVE_MAX_ROWS);
+		if (rids == NULL) { rc = -1; goto done; }
+		nr = collect_rowids(bt, tabbuf, lo, has_lo, hi, has_hi,
+		                    rids, XS_NATIVE_MAX_ROWS);
+		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many -> VDBE */
+		if (nr < 0) { free(rids); rc = -1; goto done; }
+		for (i = 0; i < nr; i++) {
+			uint8_t cur[XS_REC_MAX]; int curlen;
+			vx_cell_t cells[64];
+			uint8_t rec[XS_REC_MAX]; int reclen;
+			curlen = read_one_row(bt, tabbuf, rids[i], cur, (int)sizeof cur);
+			if (curlen < 0) { free(rids); rc = -1; goto done; }
+			if (curlen == 0) continue;          /* vanished under us: skip */
+			for (ci = 1; ci < ws.n; ci++) {
+				int64_t iv; double rv; const uint8_t *pv; int pn;
+				int cls = xstore_rec_col(cur, curlen, ci - 1, &iv, &rv, &pv, &pn);
+				vx_cell_t *c = &cells[ci - 1];
+				memset(c, 0, sizeof *c);
+				switch (cls) {
+				case XSTORE_C_INT:  c->type = VX_INT;  c->i = iv; break;
+				case XSTORE_C_REAL: c->type = VX_REAL; c->r = rv; break;
+				case XSTORE_C_TEXT: c->type = VX_TEXT; c->bytes = pv; c->nbytes = pn; break;
+				case XSTORE_C_BLOB: c->type = VX_BLOB; c->bytes = pv; c->nbytes = pn; break;
+				default:            c->type = VX_NULL; break;
+				}
+			}
+			for (ci = 0; ci < nset; ci++)
+				cells[setcol[ci] - 1] = setval[ci];   /* overlay the SET values */
+			reclen = encode_payload(cells, ws.n - 1, rec, (int)sizeof rec);
+			if (reclen < 0) {
+				/* Row too large to encode.  If nothing applied yet, fall
+				 * back cleanly to the VDBE; otherwise it is too late to
+				 * fall back (the VDBE would re-update applied rows and
+				 * misreport changes()), so report an error. */
+				if (applied == 0) { free(rids); sql_arena_destroy(arena); return 0; }
+				free(rids);
+				if (errmsg) *errmsg = strdup("native update row too large");
+				rc = -1; goto done;
+			}
+			if (xstore_put_rec(bt, tableid, rids[i], rec, reclen) != 0) {
+				free(rids);
+				if (errmsg) *errmsg = strdup("native update failed");
+				rc = -1; goto done;
+			}
+			applied++;
 		}
-		if (nchanges) *nchanges = 1;
+		free(rids);
+		if (nchanges) *nchanges = applied;
 		rc = 1; goto done;
 	}
 
