@@ -384,10 +384,10 @@ model depends on, and it holds.
     fiber starves its loop; the over-budget signal is the bridge to
     fire a cancellation.  Added to the library.
 
-## Gap: a single runtime-introspection call (xtc_runtime_info)
+## Gap: a single runtime-introspection call (xtc_runtime_info) -- LANDED
 
-The pieces exist but are scattered, and there is no one call that
-reports what the process was given:
+The pieces existed but were scattered, with no one call reporting what
+the process was given:
   - loop/thread count: xtc_exec_n_loops(xtc_app_exec(app)) -- needs the
     exec handle;
   - CPU topology: __os_ncpus / __os_ncpus_perf / __os_ncpus_effic /
@@ -397,10 +397,14 @@ reports what the process was given:
   - live scheduler: xtc_inspect_loops / xtc_inspect_procs are per-loop
     / per-proc snapshots, not a process aggregate.
 
-A clean public xtc_runtime_info(xtc_runtime_info_t *) that aggregates
+Resolved by the public xtc_runtime_info(xtc_runtime_info_t *)
+(src/inc/xtc_runtime.h, implemented in src/ptc/proc.c) which aggregates
 {n_loops, n_cpus_online, n_cpus_perf, n_cpus_effic, numa_nodes,
-mem_cap_bytes, rss_bytes} in one struct would let a libxtc application
-(the SQL engine in particular) size its buffer pool, worker counts, and
-morsel granularity to the box without reaching into __os_* internals.
-sqlxtc will want exactly this; until it lands, the engine uses
-xtc_exec_n_loops + __os_ncpus directly.
+mem_cap_bytes, mem_used_bytes} in one struct, so a libxtc application
+(the SQL engine in particular) can size its buffer pool, worker counts,
+and morsel granularity to the box without reaching into __os_*.  Two
+documented limitations: n_loops reflects the CALLER's executor via the
+thread-local current loop (defaults to 1 off-loop, since there is no
+process-global app/exec registry), and the memory fields report 0
+because xtc_res is caller-owned with no global accountant (they are not
+the OS RSS).  Tested in test/m12/test_runtime.c.

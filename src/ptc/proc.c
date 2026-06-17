@@ -20,6 +20,8 @@
 #include "xtc_tailcall.h"
 #include "xtc_slab.h"
 #include "xtc_inspect.h"
+#include "xtc_runtime.h"
+#include "os_cpu.h"
 #include "xtc_trace.h"
 #include "xtc_slab.h"
 #include "xtc_mctx.h"
@@ -2050,6 +2052,37 @@ xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 	}
 	(void)pthread_mutex_unlock(&__lt_lock);
 	return found ? XTC_OK : XTC_E_NOTFOUND;
+}
+
+/* ---------- process runtime introspection (xtc_runtime.h) ---------- */
+
+int
+xtc_runtime_info(xtc_runtime_info_t *out)
+{
+	int n;
+
+	if (out == NULL)
+		return XTC_E_INVAL;
+
+	/* n_loops: the executor the caller runs on.  xtc_shard_count()
+	 * returns that executor's loop count on a multi-loop loop, 1 on
+	 * a standalone loop, and 0 off any loop -- map the off-loop case
+	 * (no thread-local current executor to consult) to 1. */
+	n = xtc_shard_count();
+	out->n_loops = n > 0 ? n : 1;
+
+	out->n_cpus_online = __os_ncpus();
+	out->n_cpus_perf   = __os_ncpus_perf();
+	out->n_cpus_effic  = __os_ncpus_effic();
+	out->numa_nodes    = __os_numa_nnodes();
+
+	/* Memory: libxtc has no process-global / default resource
+	 * accountant, and these fields are not the OS RSS.  Report 0
+	 * ("no cap / unknown"); see xtc_runtime.h. */
+	out->mem_cap_bytes  = 0;
+	out->mem_used_bytes = 0;
+
+	return XTC_OK;
 }
 
 /* ---------- causal tracing public API (xtc_trace.h) ---------- */

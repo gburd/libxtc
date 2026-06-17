@@ -267,6 +267,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_otp_gen_server_phase2 \
 		  test_otp_supervisor \
 		  test_observability \
+		  test_runtime \
 		  test_stats \
 		  test_dump \
 		  test_backtrace \
@@ -439,7 +440,7 @@ res.o: $(srcdir)/../src/ptc/res.c xtc_config.h
 chan.o: $(srcdir)/../src/ptc/chan.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/chan.c
 
-proc.o: $(srcdir)/../src/ptc/proc.c xtc_config.h
+proc.o: $(srcdir)/../src/ptc/proc.c $(srcdir)/../src/inc/xtc_runtime.h xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/proc.c
 
 dump.o: $(srcdir)/../src/ptc/dump.c xtc_config.h
@@ -1017,6 +1018,12 @@ test_observability: $(srcdir)/../test/m12/test_observability.c \
 		-o $@ $(srcdir)/../test/m12/test_observability.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_runtime: $(srcdir)/../test/m12/test_runtime.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
+		-o $@ $(srcdir)/../test/m12/test_runtime.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_stats: $(srcdir)/../test/m12/test_stats.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
@@ -1108,6 +1115,7 @@ install: all
 	$(INSTALL) -d $(DESTDIR)$(mandir)/man7
 	$(INSTALL_DATA) $(STATIC_LIB) $(DESTDIR)$(libdir)/$(STATIC_LIB)
 	$(INSTALL_DATA) $(LIB_HDR_PUBLIC) $(DESTDIR)$(includedir)/xtc.h
+	$(INSTALL_DATA) $(srcdir)/../src/inc/xtc_runtime.h $(DESTDIR)$(includedir)/xtc_runtime.h
 	$(INSTALL_DATA) xtc.pc $(DESTDIR)$(libdir)/pkgconfig/xtc.pc
 	@if [ "$(XTC_ENABLE_SHARED)" = yes ]; then \
 		echo "installing shared library"; \
@@ -1132,6 +1140,7 @@ uninstall:
 	$(RM) $(DESTDIR)$(libdir)/$(SHARED_LIB_LINKNAME)
 	$(RM) $(DESTDIR)$(libdir)/pkgconfig/xtc.pc
 	$(RM) $(DESTDIR)$(includedir)/xtc.h
+	$(RM) $(DESTDIR)$(includedir)/xtc_runtime.h
 
 # -------------------------------------------------------------------------
 # Cleanup.
