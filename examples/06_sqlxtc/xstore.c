@@ -1443,6 +1443,15 @@ xstore_put_rec(bt_t *bt, uint32_t tableid, int64_t rowid,
 	return xs_put(bt, tableid, rowid, rec, reclen, 0) == SQLITE_OK ? 0 : -1;
 }
 
+int
+xstore_delete_rec(bt_t *bt, uint32_t tableid, int64_t rowid)
+{
+	/* A delete is a tombstone version (deleted=1) at a fresh commit
+	 * timestamp -- the same thing the vtab xUpdate DELETE path writes. */
+	if (bt == NULL) return -1;
+	return xs_put(bt, tableid, rowid, NULL, 0, 1) == SQLITE_OK ? 0 : -1;
+}
+
 static int
 xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
     int argc, xsql_value **argv)
