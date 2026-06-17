@@ -272,40 +272,43 @@ What is on the live path now (after the Lime + vexec wiring):
     unordered as a row multiset -- an unordered result may legally come
     back in a different row order from each engine).
   - **Writes.**  db_exec_cached also tries a native write path
-    (vx_run_write -> xstore_put_rec / xstore_delete_rec, no VDBE / no
-    vtab) for: INSERT INTO t VALUES (literal rows), and DELETE / UPDATE
-    by a primary-key point or range (= / < / <= / > / >= / BETWEEN / no
-    WHERE).  These apply straight to the B-tree at one commit timestamp
-    per row, WAL-durable, byte-identical to the VDBE-driven vtab path
-    (differential-tested).  All-or-nothing: an unrecognized write writes
-    nothing and falls back.
+    (vx_run_write -> xstore_write_txn / xstore_delete_rec, no VDBE / no
+    vtab) for: INSERT INTO t VALUES (literal rows); DELETE / UPDATE by a
+    primary-key point or range; and DELETE / UPDATE by an arbitrary
+    vexec-compilable WHERE (non-pk columns, compound AND/OR) via a
+    scan-evaluate.  Writes apply at one commit timestamp per row,
+    WAL-durable, byte-identical to the VDBE-driven vtab path.  Native
+    writes inside a BEGIN..COMMIT buffer into the connection's shared
+    transaction and commit / abort atomically (db_native_txn_end flushes
+    the native buffer around COMMIT/ROLLBACK); a transactional
+    DELETE/UPDATE falls back to the VDBE for read-your-writes.  Reads
+    push a primary-key WHERE constraint down to a bounded scan (a point
+    read seeks rather than full-scanning).  All-or-nothing: an
+    unrecognized write writes nothing and falls back.
   - **Everything else is still SQLite:** the verbatim name of an
     EXPRESSION column the AST cannot span (rare edge); writes outside
     the recognized shapes (INSERT...SELECT, REPLACE, an explicit column
-    list, a non-pk / compound WHERE, a non-literal SET, a pk
-    reassignment); all DDL; all parametrized statements; and every read
-    query vexec does not recognize -- all flow through the VDBE (reads
-    via xsql_step, writes via the xstore vtab xUpdate/xBegin/xCommit).
+    list, a pk reassignment, a transactional DELETE/UPDATE); all DDL;
+    all parametrized statements; and every read query vexec does not
+    recognize -- all flow through the VDBE.
 
 The gates to actually deleting sqlite3.c, in dependency order:
 
-  3. **A native storage path -- drop the vtab round-trip.**  DONE for
-     the common DML: xstore has native write primitives
-     (xstore_put_rec / xstore_delete_rec / xstore_max_rowid /
-     xstore_table_id) and vx_run_write applies a literal INSERT and a
-     pk point/range DELETE/UPDATE without the VDBE or the vtab.
-     REMAINING: INSERT...SELECT, REPLACE, explicit column lists, non-pk
-     / compound WHERE predicates (need the expression evaluator wired
-     to the write loop), pk-reassigning UPDATEs (old-key tombstone), and
-     native transaction control (BEGIN/COMMIT spanning multiple native
-     statements -- today each native write autocommits one row at a
-     time).
-  4. **Native column naming + a minimal planner.**  Column naming DONE:
-     vexec names alias / bare-column / expression (verbatim source span)
-     columns itself (parser source spans on sql_expr_t), so a recognized
-     read no longer depends on the VDBE prepare for names.  REMAINING: a
-     minimal planner for the cases SQLite currently plans
-     (index choice / join order) for the shapes vexec executes.
+  3. **A native storage path -- drop the vtab round-trip.**  Largely
+     DONE: native write primitives (xstore_write_txn /
+     xstore_delete_rec / xstore_commit / xstore_rollback / max_rowid /
+     table_id) apply INSERT, pk-point/range and arbitrary-predicate
+     DELETE/UPDATE, and multi-statement transactions without the VDBE
+     or the vtab.  REMAINING: INSERT...SELECT, REPLACE, explicit column
+     lists, pk-reassigning UPDATEs (old-key tombstone), and
+     read-your-writes inside a transaction (so a transactional
+     DELETE/UPDATE can also go native).
+  4. **Native column naming + a minimal planner.**  DONE: vexec names
+     alias / bare-column / verbatim-source-span expression columns
+     itself (no VDBE prepare for names), and a minimal read planner
+     pushes a primary-key WHERE down to a bounded scan (point read
+     seeks).  REMAINING (optional): index selection beyond the rowid,
+     join-order costing.
   5. **Retire sqlite3.c.**  Possible only once the parser + planner +
      read executor + write executor cover the ENTIRE accepted surface,
      so the VDBE fallback can be removed.  Then drop xsql.h, delete
