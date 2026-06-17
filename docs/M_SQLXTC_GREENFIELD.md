@@ -264,32 +264,47 @@ What is on the live path now (after the Lime + vexec wiring):
     read-only queries; vexec serves the recognized shapes (scan /
     filter / project / scalar expressions / hash aggregation +
     GROUP BY / ORDER BY + LIMIT / one INNER hash join) over the xstore
-    B-tree with no VDBE on the hot path, and falls back to the VDBE
-    for anything it does not recognize.  test_db_vexec proves the live
-    response is identical whichever engine serves it (ordered queries
-    byte-identical, unordered as a row multiset -- an unordered result
-    may legally come back in a different row order from each engine).
-  - **Everything else is still SQLite:** column NAMES even for vexec
-    queries (borrowed from the VDBE prepare), all WRITES (INSERT /
-    UPDATE / DELETE flow VDBE -> xstore vtab xUpdate/xBegin/xCommit),
-    all DDL, all parametrized statements, and every query vexec does
-    not recognize.
+    B-tree with no VDBE on the hot path, and names its own output
+    columns (alias / bare column / an expression's verbatim source span
+    -- step 4 done), falling back to the VDBE only for a query it does
+    not recognize.  test_db_vexec proves the live response is identical
+    whichever engine serves it (ordered queries byte-identical,
+    unordered as a row multiset -- an unordered result may legally come
+    back in a different row order from each engine).
+  - **Writes.**  db_exec_cached also tries a native write path
+    (vx_run_write -> xstore_put_rec / xstore_delete_rec, no VDBE / no
+    vtab) for: INSERT INTO t VALUES (literal rows), and DELETE / UPDATE
+    by a primary-key point or range (= / < / <= / > / >= / BETWEEN / no
+    WHERE).  These apply straight to the B-tree at one commit timestamp
+    per row, WAL-durable, byte-identical to the VDBE-driven vtab path
+    (differential-tested).  All-or-nothing: an unrecognized write writes
+    nothing and falls back.
+  - **Everything else is still SQLite:** the verbatim name of an
+    EXPRESSION column the AST cannot span (rare edge); writes outside
+    the recognized shapes (INSERT...SELECT, REPLACE, an explicit column
+    list, a non-pk / compound WHERE, a non-literal SET, a pk
+    reassignment); all DDL; all parametrized statements; and every read
+    query vexec does not recognize -- all flow through the VDBE (reads
+    via xsql_step, writes via the xstore vtab xUpdate/xBegin/xCommit).
 
 The gates to actually deleting sqlite3.c, in dependency order:
 
-  3. **A native storage path -- drop the vtab round-trip.**  Today
-     every write is VDBE-driven: SQLite parses+plans the DML and calls
-     the xstore virtual-table methods (xUpdate/xBegin/xSync/xCommit).
-     Give xstore a native write/transaction entry point so a write
-     executor calls storage directly.  Writes are 100% SQLite-driven
-     today, so this is the single largest dependency and the highest-
-     leverage cut.  First slice: the simplest INSERT, behind the same
-     vexec-first / VDBE-fallback discipline and differential-tested
-     against the VDBE.
-  4. **Native column naming + a minimal planner.**  vexec must produce
-     its own column names (from the Lime select-items + SQLite's
-     naming rules) so it stops borrowing the VDBE prepare, and a
-     minimal planner must cover the cases SQLite currently plans
+  3. **A native storage path -- drop the vtab round-trip.**  DONE for
+     the common DML: xstore has native write primitives
+     (xstore_put_rec / xstore_delete_rec / xstore_max_rowid /
+     xstore_table_id) and vx_run_write applies a literal INSERT and a
+     pk point/range DELETE/UPDATE without the VDBE or the vtab.
+     REMAINING: INSERT...SELECT, REPLACE, explicit column lists, non-pk
+     / compound WHERE predicates (need the expression evaluator wired
+     to the write loop), pk-reassigning UPDATEs (old-key tombstone), and
+     native transaction control (BEGIN/COMMIT spanning multiple native
+     statements -- today each native write autocommits one row at a
+     time).
+  4. **Native column naming + a minimal planner.**  Column naming DONE:
+     vexec names alias / bare-column / expression (verbatim source span)
+     columns itself (parser source spans on sql_expr_t), so a recognized
+     read no longer depends on the VDBE prepare for names.  REMAINING: a
+     minimal planner for the cases SQLite currently plans
      (index choice / join order) for the shapes vexec executes.
   5. **Retire sqlite3.c.**  Possible only once the parser + planner +
      read executor + write executor cover the ENTIRE accepted surface,
