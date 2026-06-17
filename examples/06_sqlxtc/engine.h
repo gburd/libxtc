@@ -164,6 +164,10 @@ double           sx_vexec_double(const sx_vx_result *r, int row, int col);
 const char      *sx_vexec_text(const sx_vx_result *r, int row, int col);
 const void      *sx_vexec_blob(const sx_vx_result *r, int row, int col);
 int              sx_vexec_bytes(const sx_vx_result *r, int row, int col);
+/* Output column name from the plan, or NULL when the caller should use
+ * the VDBE-prepared name (an expression column whose name is its source
+ * text). */
+const char      *sx_vexec_name(const sx_vx_result *r, int col);
 
 /*
  * Native write fast path.  Recognizes a simple literal-row INSERT into

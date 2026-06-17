@@ -141,6 +141,11 @@ int vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges,
 
 int            vx_result_nrow(const vx_result_t *r);
 int            vx_result_ncol(const vx_result_t *r);
+/* The output column's name as derived from the AST select item (the AS
+ * alias, or a bare column's name), or NULL when the name is the
+ * expression's verbatim source text -- which the AST does not record, so
+ * the caller supplies the VDBE-prepared name for those columns. */
+const char    *vx_result_name(const vx_result_t *r, int col);
 vx_type_t      vx_result_type(const vx_result_t *r, int row, int col);
 int64_t        vx_result_int64(const vx_result_t *r, int row, int col);
 double         vx_result_double(const vx_result_t *r, int row, int col);

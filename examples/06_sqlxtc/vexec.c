@@ -216,6 +216,14 @@ struct vx_stmt {
 	vx_expr_t   **proj;         /* nout projection expressions (non-agg path) */
 	vx_expr_t    *filter;       /* WHERE expression, or NULL */
 
+	/* Output column names, derived from the AST select items at compile
+	 * time (alias if present; else the bare column's unqualified name).
+	 * outname[i][0] == '\0' means "unknown" -- an expression / function /
+	 * star column whose SQLite name is its verbatim source text, which
+	 * the AST does not record; the caller uses the VDBE-prepared name for
+	 * those.  nout entries. */
+	char          outname[64][64];
+
 	vx_aggplan_t *agg;          /* non-NULL => aggregating statement (V3) */
 	vx_joinplan_t *join;        /* non-NULL => two-table hash join (V5) */
 
@@ -594,6 +602,33 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	}
 	default:
 		return -1;   /* BETWEEN/IN/CASE/subquery/param/bool/blob: not V1 */
+	}
+}
+
+/* Derive the output column name for a select item, matching SQLite:
+ * the AS alias if present, else for a bare (optionally qualified) column
+ * reference the unqualified column name.  For anything else (an
+ * expression, function, or star) SQLite names the column by its
+ * verbatim source text, which the AST does not record -- leave dst
+ * empty so the caller uses the VDBE-prepared name. */
+static void
+item_name(const sql_exprlist_item_t *it, char *dst, size_t cap)
+{
+	const sql_expr_t *e;
+	dst[0] = '\0';
+	if (it == NULL) return;
+	if (it->alias.len > 0 && it->alias.len < cap) {
+		memcpy(dst, it->alias.p, it->alias.len);
+		dst[it->alias.len] = '\0';
+		return;
+	}
+	e = it->expr;
+	if (e != NULL && e->op == SX_E_COLUMN && e->nname >= 1) {
+		const sql_str_t *nm = &e->name[e->nname - 1];   /* unqualified part */
+		if (nm->len > 0 && nm->len < cap) {
+			memcpy(dst, nm->p, nm->len);
+			dst[nm->len] = '\0';
+		}
 	}
 }
 
@@ -1436,6 +1471,7 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 		for (it = sel->cols->head; it; it = it->next, k++) {
 			st->proj[k] = compile_expr(&comp, it->expr);
 			if (comp.fail) goto fallback;
+			item_name(it, st->outname[k], sizeof st->outname[0]);
 		}
 		if (sel->where) {
 			st->filter = compile_expr(&comp, sel->where);
@@ -1643,6 +1679,7 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 		int oi = 0;
 		for (it = sel->cols->head; it; it = it->next, oi++) {
 			const sql_expr_t *e = it->expr;
+			item_name(it, st->outname[oi], sizeof st->outname[0]);
 			if (e->op == SX_E_FUNC && is_agg_name(&e->name[0])) {
 				enum vx_agg_kind kk = agg_kind_of(e);
 				if (kk == 0) goto fallback;
@@ -1982,6 +2019,7 @@ vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 		for (it = sel->cols->head; it; it = it->next, k++) {
 			st->proj[k] = compile_expr(&comp, it->expr);
 			if (comp.fail) goto fallback;
+			item_name(it, st->outname[k], sizeof st->outname[0]);
 		}
 		if (sel->where) {
 			st->filter = compile_expr(&comp, sel->where);
@@ -2604,6 +2642,8 @@ struct vx_result {
 	vx_cell_t *cells;
 	struct vx_arena_blk *arena;
 	int        nworkers;
+	char       name[64][64];   /* output column names from the plan; an
+	                            * empty entry means "use the VDBE name" */
 };
 
 static int
@@ -2794,6 +2834,7 @@ run_parallel_plan(vx_stmt_t *plan, sqlite3 *db, int n_workers,
 	if (out == NULL) { rc = -1; goto cleanup; }
 	out->ncol = plan->nout;
 	out->nworkers = n_workers;
+	memcpy(out->name, plan->outname, sizeof out->name);
 
 	memset(&par, 0, sizeof par);
 	par.plan = plan;
@@ -2932,6 +2973,7 @@ collect_serial(vx_stmt_t *plan, vx_result_t **res)
 	if (out == NULL) { vx_finalize(plan); return -1; }
 	out->ncol = ncol;
 	out->nworkers = 1;
+	memcpy(out->name, plan->outname, sizeof out->name);
 
 	while ((step = vx_step(plan)) == SQLITE_ROW) {
 		for (i = 0; i < ncol; i++) {
@@ -3398,6 +3440,13 @@ res_cell(const vx_result_t *r, int row, int col)
 int vx_result_nrow(const vx_result_t *r) { return r ? r->nrow : 0; }
 int vx_result_ncol(const vx_result_t *r) { return r ? r->ncol : 0; }
 int vx_result_nworkers(const vx_result_t *r) { return r ? r->nworkers : 0; }
+
+const char *
+vx_result_name(const vx_result_t *r, int col)
+{
+	if (r == NULL || col < 0 || col >= r->ncol) return NULL;
+	return r->name[col][0] ? r->name[col] : NULL;   /* NULL => use VDBE name */
+}
 
 vx_type_t vx_result_type(const vx_result_t *r, int row, int col)
 { const vx_cell_t *c = res_cell(r, row, col); return c ? c->type : VX_NULL; }
