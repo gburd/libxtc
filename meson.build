@@ -61,6 +61,7 @@ else
 endif
 
 install_headers('src/inc/xtc.h')
+install_headers('src/inc/xtc_runtime.h')
 
 # pkg-config metadata.  Mirrors dist/xtc.pc.in.
 pkg = import('pkgconfig')
