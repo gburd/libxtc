@@ -212,6 +212,14 @@ struct vx_stmt {
 	int           src_pay[32];
 	uint64_t      snap;         /* 0 = latest committed */
 
+	/* Rowid-range pushdown (the minimal planner): when the WHERE pins the
+	 * primary key to a range, the scan is bounded to it instead of full,
+	 * so a point/range read seeks rather than scanning the whole table.
+	 * The WHERE filter still runs (it may carry other conjuncts); these
+	 * bounds only skip rows that cannot match the pk constraint. */
+	int64_t       scan_lo, scan_hi;
+	int           scan_has_lo, scan_has_hi;
+
 	int           nout;
 	vx_expr_t   **proj;         /* nout projection expressions (non-agg path) */
 	vx_expr_t    *filter;       /* WHERE expression, or NULL */
@@ -1327,6 +1335,97 @@ static int vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast,
                                const sql_select_t *sel,
                                vx_stmt_t **out, char **errmsg);
 
+/* Parse a NUMBER expr (with an optional leading unary minus) as an
+ * integer literal.  Returns 1 with *v set, or 0 (not an integer
+ * literal). */
+static int
+ast_int_lit(const sql_expr_t *e, int64_t *v)
+{
+	int neg = 0;
+	char buf[32]; int i;
+	if (e == NULL) return 0;
+	if (e->op == SX_E_UNARY && e->op2 == TK_MINUS) { neg = 1; e = e->a; }
+	if (e == NULL || e->op != SX_E_NUMBER || e->lit.len == 0 ||
+	    e->lit.len >= sizeof buf) return 0;
+	for (i = 0; i < (int)e->lit.len; i++) {
+		char c = e->lit.p[i];
+		if (c == '.' || c == 'e' || c == 'E') return 0;   /* real, not int */
+	}
+	memcpy(buf, e->lit.p, e->lit.len); buf[e->lit.len] = '\0';
+	*v = strtoll(buf, NULL, 10);
+	if (neg) *v = -*v;
+	return 1;
+}
+
+/* Does `e` name the column `pk` (unqualified or table-qualified)? */
+static int
+ast_is_named_col(const sql_expr_t *e, const char *pk)
+{
+	return e && e->op == SX_E_COLUMN && e->nname >= 1 &&
+	    e->name[e->nname - 1].len == strlen(pk) &&
+	    strncmp(e->name[e->nname - 1].p, pk, strlen(pk)) == 0;
+}
+
+/* Tighten a rowid range [lo, hi] (per has_lo / has_hi) with any
+ * primary-key comparison found among the AND-conjuncts of `w`: pk
+ * = / < / <= / > / >= an int literal, or pk BETWEEN.  Non-pk and
+ * non-recognized conjuncts are ignored (the row filter still enforces
+ * them), so this is a safe pushdown -- it only narrows the scan.  The
+ * read planner uses it to seek instead of full-scanning. */
+static void
+where_rowid_bound(const sql_expr_t *w, const char *pk,
+                  int64_t *lo, int *has_lo, int64_t *hi, int *has_hi)
+{
+	if (w == NULL) return;
+	if (w->op == SX_E_BINARY && w->op2 == TK_AND) {
+		where_rowid_bound(w->a, pk, lo, has_lo, hi, has_hi);
+		where_rowid_bound(w->b, pk, lo, has_lo, hi, has_hi);
+		return;
+	}
+	if (w->op == SX_E_BETWEEN && ast_is_named_col(w->a, pk)) {
+		int64_t b, c;
+		if (ast_int_lit(w->b, &b) && ast_int_lit(w->c, &c)) {
+			if (!*has_lo || b > *lo) { *lo = b; *has_lo = 1; }
+			if (!*has_hi || c < *hi) { *hi = c; *has_hi = 1; }
+		}
+		return;
+	}
+	if (w->op == SX_E_BINARY && w->a && w->b) {
+		const sql_expr_t *lit; int op = w->op2, swapped = 0;
+		int64_t v;
+		if (ast_is_named_col(w->a, pk)) lit = w->b;
+		else if (ast_is_named_col(w->b, pk)) { lit = w->a; swapped = 1; }
+		else return;
+		if (!ast_int_lit(lit, &v)) return;
+		if (swapped) {
+			switch (op) {
+			case TK_LT: op = TK_GT; break;  case TK_GT: op = TK_LT; break;
+			case TK_LE: op = TK_GE; break;  case TK_GE: op = TK_LE; break;
+			default: break;
+			}
+		}
+		switch (op) {
+		case TK_EQ:
+			if (!*has_lo || v > *lo) { *lo = v; *has_lo = 1; }
+			if (!*has_hi || v < *hi) { *hi = v; *has_hi = 1; }
+			break;
+		case TK_GT:
+			if (!*has_lo || v + 1 > *lo) { *lo = v + 1; *has_lo = 1; }
+			break;
+		case TK_GE:
+			if (!*has_lo || v > *lo) { *lo = v; *has_lo = 1; }
+			break;
+		case TK_LT:
+			if (!*has_hi || v - 1 < *hi) { *hi = v - 1; *has_hi = 1; }
+			break;
+		case TK_LE:
+			if (!*has_hi || v < *hi) { *hi = v; *has_hi = 1; }
+			break;
+		default: break;
+		}
+	}
+}
+
 int
 vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 {
@@ -1462,6 +1561,19 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	 * the schema (prepare-time only; no data row stepped). */
 	if (resolve_schema(db, tabbuf, &nv, st->src_pay) != 0)
 		goto fallback;
+
+	/* Rowid-range pushdown (the minimal planner): if the WHERE pins the
+	 * primary key (the source column whose origin is the rowid) to a
+	 * range, bound the scan to it so a point/range read seeks instead of
+	 * full-scanning.  The WHERE filter still runs unchanged. */
+	{
+		int pk = -1, i;
+		for (i = 0; i < nv.n; i++) if (st->src_pay[i] == -1) { pk = i; break; }
+		if (pk >= 0 && sel->where)
+			where_rowid_bound(sel->where, nv.names[pk],
+			                  &st->scan_lo, &st->scan_has_lo,
+			                  &st->scan_hi, &st->scan_has_hi);
+	}
 
 	st->nout = nproj;
 	if (nproj > 32) goto fallback;   /* worker out[] / result row bound */
@@ -2173,7 +2285,9 @@ next_chunk(struct vx_stmt *st, int *done)
 
 	/* Open the storage scan lazily on first chunk. */
 	if (st->scan == NULL) {
-		st->scan = xstore_scan_open(st->bt, st->table, st->snap, 0, 0, 0, 0);
+		st->scan = xstore_scan_open(st->bt, st->table, st->snap,
+		                            st->scan_lo, st->scan_has_lo,
+		                            st->scan_hi, st->scan_has_hi);
 		if (st->scan == NULL) { chunk_free(c); return NULL; }
 	}
 
@@ -2218,7 +2332,9 @@ agg_materialize(struct vx_stmt *st)
 
 	if (htab_init(&st->ht, ap->ngrp, ap->nagg) != 0) return -1;
 	if (st->scan == NULL) {
-		st->scan = xstore_scan_open(st->bt, st->table, st->snap, 0, 0, 0, 0);
+		st->scan = xstore_scan_open(st->bt, st->table, st->snap,
+		                            st->scan_lo, st->scan_has_lo,
+		                            st->scan_hi, st->scan_has_hi);
 		if (st->scan == NULL) return -1;
 	}
 
@@ -2367,7 +2483,9 @@ ordered_materialize(struct vx_stmt *st)
 		int step;
 		vx_cell_t outrow[32], keyrow[16];
 		if (st->scan == NULL) {
-			st->scan = xstore_scan_open(st->bt, st->table, st->snap, 0, 0, 0, 0);
+			st->scan = xstore_scan_open(st->bt, st->table, st->snap,
+		                            st->scan_lo, st->scan_has_lo,
+		                            st->scan_hi, st->scan_has_hi);
 			if (st->scan == NULL) goto cleanup;
 		}
 		step = xstore_scan_next(st->scan, &rowid, &rec, &reclen);
