@@ -20,12 +20,16 @@
 #include "wal.h"
 
 #include "sqlite3.h"
+#ifdef SQLXTC_HAVE_LIME
+#include "vexec.h"        /* vx_run -- the vectorized-executor fast path */
+#endif
 #include "xtc_async.h"     /* xtc_yield -- the fiber-yielding busy handler */
 #include "xtc_proc.h"      /* xtc_proc_sleep -- park, do not spin */
 #include "xtc_loop.h"      /* xtc_loop_t -- background storage procs */
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>      /* access, unlink, F_OK */
@@ -505,3 +509,79 @@ sx_changes(sx_db *h)
 {
 	return (int64_t)xsql_changes64((xsql *)h);
 }
+
+/* ---- vectorized-executor seam (vexec) ---------------------------- */
+
+#ifdef SQLXTC_HAVE_LIME
+
+int
+sx_vexec_try(sx_db *h, const char *sql, int n_workers, sx_vx_result **out)
+{
+	vx_result_t *r = NULL;
+	char *verr = NULL;
+	int rc;
+
+	if (out == NULL) return XTC_E_INVAL;
+	*out = NULL;
+	rc = vx_run((xsql *)h, sql, n_workers, &r, &verr);
+	if (verr) free(verr);          /* the caller falls back; no message needed */
+	if (rc == 1) { *out = (sx_vx_result *)r; return 1; }
+	if (r) vx_result_free(r);
+	return rc;                     /* 0 fallback / <0 error */
+}
+
+void
+sx_vexec_free(sx_vx_result *r)
+{
+	vx_result_free((vx_result_t *)r);
+}
+
+int sx_vexec_nrow(const sx_vx_result *r) { return vx_result_nrow((const vx_result_t *)r); }
+int sx_vexec_ncol(const sx_vx_result *r) { return vx_result_ncol((const vx_result_t *)r); }
+
+int
+sx_vexec_type(const sx_vx_result *r, int row, int col)
+{
+	switch (vx_result_type((const vx_result_t *)r, row, col)) {
+	case VX_INT:  return SX_INTEGER;
+	case VX_REAL: return SX_FLOAT;
+	case VX_TEXT: return SX_TEXT;
+	case VX_BLOB: return SX_BLOB;
+	case VX_NULL:
+	default:      return SX_NULL;
+	}
+}
+
+int64_t sx_vexec_int64(const sx_vx_result *r, int row, int col)
+{ return vx_result_int64((const vx_result_t *)r, row, col); }
+double sx_vexec_double(const sx_vx_result *r, int row, int col)
+{ return vx_result_double((const vx_result_t *)r, row, col); }
+const char *sx_vexec_text(const sx_vx_result *r, int row, int col)
+{ return vx_result_text((const vx_result_t *)r, row, col); }
+const void *sx_vexec_blob(const sx_vx_result *r, int row, int col)
+{ return vx_result_text((const vx_result_t *)r, row, col); }
+int sx_vexec_bytes(const sx_vx_result *r, int row, int col)
+{ return vx_result_bytes((const vx_result_t *)r, row, col); }
+
+#else  /* !SQLXTC_HAVE_LIME -- no parser, so no vexec; always fall back. */
+
+int sx_vexec_try(sx_db *h, const char *sql, int n_workers, sx_vx_result **out)
+{ (void)h; (void)sql; (void)n_workers; if (out) *out = NULL; return 0; }
+void sx_vexec_free(sx_vx_result *r) { (void)r; }
+int sx_vexec_nrow(const sx_vx_result *r) { (void)r; return 0; }
+int sx_vexec_ncol(const sx_vx_result *r) { (void)r; return 0; }
+int sx_vexec_type(const sx_vx_result *r, int row, int col)
+{ (void)r; (void)row; (void)col; return SX_NULL; }
+int64_t sx_vexec_int64(const sx_vx_result *r, int row, int col)
+{ (void)r; (void)row; (void)col; return 0; }
+double sx_vexec_double(const sx_vx_result *r, int row, int col)
+{ (void)r; (void)row; (void)col; return 0.0; }
+const char *sx_vexec_text(const sx_vx_result *r, int row, int col)
+{ (void)r; (void)row; (void)col; return ""; }
+const void *sx_vexec_blob(const sx_vx_result *r, int row, int col)
+{ (void)r; (void)row; (void)col; return NULL; }
+int sx_vexec_bytes(const sx_vx_result *r, int row, int col)
+{ (void)r; (void)row; (void)col; return 0; }
+
+#endif /* SQLXTC_HAVE_LIME */
+
