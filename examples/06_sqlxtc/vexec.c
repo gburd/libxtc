@@ -3257,6 +3257,77 @@ collect_rowids(bt_t *bt, const char *table, int64_t lo, int has_lo,
 	return step < 0 ? -2 : n;
 }
 
+/* Collect rowids matching an arbitrary WHERE predicate, by compiling the
+ * predicate with vexec's own expression compiler and scanning the whole
+ * table evaluating it per row -- the general (non-pk) DELETE/UPDATE
+ * filter path.  Returns the count into `out` (<= cap), -1 if more than
+ * cap rows match OR the predicate is not vexec-compilable (clean VDBE
+ * fallback), or -2 on a scan/setup error.  The affinity gate inside the
+ * compiler guarantees the predicate is evaluated with SQLite semantics
+ * or rejected.  rowid_out, when non-NULL, also captures whether a row
+ * existed at all (unused here; the scan only yields live rows). */
+static int
+collect_matching(sqlite3 *db, bt_t *bt, const char *table,
+                 const sql_expr_t *where, int64_t *out, int cap)
+{
+	struct vx_stmt *st;
+	struct vx_compiler comp;
+	struct namevec nv;
+	xstore_scan_t *s = NULL;
+	struct vx_arena_blk *rowarena = NULL;
+	int64_t rid; const uint8_t *rec; int reclen, step;
+	int n = 0, ret;
+
+	if (where == NULL) return -1;   /* no WHERE -> the pk-range path handles it */
+
+	st = (struct vx_stmt *)calloc(1, sizeof *st);
+	if (st == NULL) return -2;
+	st->db = db;
+	st->bt = bt;
+	st->snap = 0;
+	snprintf(st->table, sizeof st->table, "%s", table);
+
+	memset(&nv, 0, sizeof nv);
+	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
+
+	/* Pass 1: collect the predicate's columns. */
+	if (collect_columns(&nv, where) != 0 || nv.n == 0 || nv.n > 32) {
+		ret = -1; goto out;
+	}
+	st->nsrc_col = nv.n;
+	if (resolve_schema(db, table, &nv, st->src_pay) != 0) { ret = -1; goto out; }
+
+	/* Pass 2: compile the predicate with the affinity gate active. */
+	comp.fail = 0;
+	st->filter = compile_expr(&comp, where);
+	if (comp.fail || st->filter == NULL) { ret = -1; goto out; }
+
+	st->srcrow = (vx_cell_t *)calloc((size_t)nv.n, sizeof(vx_cell_t));
+	if (st->srcrow == NULL) { ret = -2; goto out; }
+
+	s = xstore_scan_open(bt, table, 0, 0, 0, 0, 0);   /* whole table */
+	if (s == NULL) { ret = -2; goto out; }
+	while ((step = xstore_scan_next(s, &rid, &rec, &reclen)) == 1) {
+		int b;
+		arena_free(rowarena); rowarena = NULL;   /* per-row scratch */
+		read_rec_row(st, rid, rec, reclen, &rowarena);
+		b = eval_bool(st, st->filter, st->srcrow, &rowarena);
+		if (b == 1) {
+			if (n >= cap) { ret = -1; goto out; }   /* too many -> VDBE */
+			out[n++] = rid;
+		}
+	}
+	ret = (step < 0) ? -2 : n;
+
+out:
+	if (s) xstore_scan_close(s);
+	arena_free(rowarena);
+	if (st->plan_arena) arena_free(st->plan_arena);
+	free(st->srcrow);
+	free(st);
+	return ret;
+}
+
 /* Read the current visible payload record of one rowid into buf (latest
  * snapshot).  Returns the record length (>=1) if the row exists, 0 if it
  * does not (or is tombstoned), or -1 on error. */
@@ -3343,15 +3414,18 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 		int64_t lo, hi; int has_lo, has_hi;
 		int64_t *rids;
 		int nr, i;
-		if (!where_pk_range(root->u.del->where, ws.name[0],
-		                    &lo, &has_lo, &hi, &has_hi)) {
-			sql_arena_destroy(arena); return 0;   /* unsupported WHERE -> VDBE */
-		}
 		rids = (int64_t *)malloc(sizeof(int64_t) * XS_NATIVE_MAX_ROWS);
 		if (rids == NULL) { rc = -1; goto done; }
-		nr = collect_rowids(bt, tabbuf, lo, has_lo, hi, has_hi,
-		                    rids, XS_NATIVE_MAX_ROWS);
-		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many -> VDBE */
+		if (where_pk_range(root->u.del->where, ws.name[0],
+		                   &lo, &has_lo, &hi, &has_hi)) {
+			nr = collect_rowids(bt, tabbuf, lo, has_lo, hi, has_hi,
+			                    rids, XS_NATIVE_MAX_ROWS);
+		} else {
+			/* General predicate: compile + scan-evaluate per row. */
+			nr = collect_matching(db, bt, tabbuf, root->u.del->where,
+			                      rids, XS_NATIVE_MAX_ROWS);
+		}
+		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many / not compilable -> VDBE */
 		if (nr < 0) { free(rids); rc = -1; goto done; }
 		for (i = 0; i < nr; i++) {
 			if (xstore_delete_rec(bt, tableid, rids[i]) != 0) {
@@ -3377,9 +3451,6 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 		vx_cell_t setval[64]; int setcol[64], nset = 0;
 		int64_t *rids;
 
-		if (!where_pk_range(up->where, ws.name[0], &lo, &has_lo, &hi, &has_hi)) {
-			sql_arena_destroy(arena); return 0;   /* unsupported WHERE -> VDBE */
-		}
 		for (a = up->sets; a; a = a->next) {
 			int col = -1, k;
 			for (k = 0; k < ws.n; k++)
@@ -3395,9 +3466,14 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 		}
 		rids = (int64_t *)malloc(sizeof(int64_t) * XS_NATIVE_MAX_ROWS);
 		if (rids == NULL) { rc = -1; goto done; }
-		nr = collect_rowids(bt, tabbuf, lo, has_lo, hi, has_hi,
-		                    rids, XS_NATIVE_MAX_ROWS);
-		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many -> VDBE */
+		if (where_pk_range(up->where, ws.name[0], &lo, &has_lo, &hi, &has_hi)) {
+			nr = collect_rowids(bt, tabbuf, lo, has_lo, hi, has_hi,
+			                    rids, XS_NATIVE_MAX_ROWS);
+		} else {
+			nr = collect_matching(db, bt, tabbuf, up->where,
+			                      rids, XS_NATIVE_MAX_ROWS);
+		}
+		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many / not compilable -> VDBE */
 		if (nr < 0) { free(rids); rc = -1; goto done; }
 		for (i = 0; i < nr; i++) {
 			uint8_t cur[XS_REC_MAX]; int curlen;
