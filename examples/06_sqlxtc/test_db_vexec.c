@@ -224,6 +224,70 @@ main(void)
 		free(on); free(off);
 	}
 
+	/* ---- native write path: literal-row INSERT bypassing the VDBE ----
+	 * Two more xstore tables on the same bt: u takes the native write
+	 * path, v takes the VDBE.  Run the SAME INSERTs into each, then read
+	 * both back (SELECT * ORDER BY k, VDBE both times -- a neutral
+	 * reader) and assert byte-identical.  That proves a native insert
+	 * lands the same bytes on disk as a VDBE insert. */
+	{
+		static const char *inserts[] = {
+			"INSERT INTO %s VALUES(1, 100, 'one')",
+			"INSERT INTO %s VALUES(2, -50, 'two'), (3, 7, 'three')",
+			"INSERT INTO %s VALUES(4, 3.5, 'pi'), (5, NULL, NULL)",
+			"INSERT INTO %s VALUES(10, 0, '')"
+		};
+		int ni = (int)(sizeof inserts / sizeof inserts[0]);
+		int native_served = 0;
+		char *ru = NULL, *rv = NULL; size_t nu = 0, nv2 = 0;
+
+		if (sx_exec(h, "CREATE VIRTUAL TABLE u USING xstore(k, a INT, b TEXT)", &err)
+		    != SX_OK || sx_exec(h, "CREATE VIRTUAL TABLE v USING xstore(k, a INT, b TEXT)",
+		    &err) != SX_OK) {
+			fprintf(stderr, "FAIL: create u/v: %s\n", err ? err : "?");
+			free(err); g_fail = 1;
+		} else {
+			int j;
+			for (j = 0; j < ni; j++) {
+				char squ[128], sqv[128];
+				char *ou = NULL, *ov = NULL; size_t a = 0, b = 0;
+				int64_t nch = 0;
+				snprintf(squ, sizeof squ, inserts[j], "u");
+				snprintf(sqv, sizeof sqv, inserts[j], "v");
+
+				/* u via the native write path -- assert it is recognized. */
+				CK(sx_vexec_write(h, squ, &nch) == 1, squ);
+				if (nch >= 1) native_served++;
+				/* v via the VDBE. */
+				setenv("SQLXTC_VEXEC", "0", 1);
+				CK(run_live(h, sqv, &ov, &b) == 0, sqv);
+				unsetenv("SQLXTC_VEXEC");
+				free(ou); free(ov); (void)a;
+			}
+			/* Read both back with the VDBE (neutral) and compare. */
+			setenv("SQLXTC_VEXEC", "0", 1);
+			CK(run_live(h, "SELECT * FROM u ORDER BY k", &ru, &nu) == 0, "read u");
+			CK(run_live(h, "SELECT * FROM v ORDER BY k", &rv, &nv2) == 0, "read v");
+			unsetenv("SQLXTC_VEXEC");
+			if (ru && rv) {
+				/* Same rows; column header differs only by table alias?  No --
+				 * SELECT * names columns by the table's own column names, which
+				 * are identical (k,a,b) for u and v, so the bytes match. */
+				if (nu != nv2 || memcmp(ru, rv, nu) != 0) {
+					fprintf(stderr, "FAIL: native vs VDBE insert differ:\n"
+					        "  u (native): %s\n  v (vdbe)  : %s\n", ru, rv);
+					g_fail = 1;
+				}
+			}
+			free(ru); free(rv);
+			CK(native_served == ni, "all inserts native-served");
+			served_by_vexec += 0;   /* counted separately below */
+			printf("  ok   native write: %d literal INSERTs applied to the "
+			       "B-tree without the VDBE, byte-identical to VDBE inserts\n",
+			       native_served);
+		}
+	}
+
 	sx_close(h);
 	bt_close(bt);
 	bm_destroy(bm);

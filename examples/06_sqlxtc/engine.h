@@ -155,8 +155,7 @@ int64_t      sx_changes(sx_db *h);
 typedef struct sx_vx_result sx_vx_result;
 int              sx_vexec_try(sx_db *h, const char *sql, int n_workers,
                              sx_vx_result **out);
-void             sx_vexec_free(sx_vx_result *r);
-int              sx_vexec_nrow(const sx_vx_result *r);
+void             sx_vexec_free(sx_vx_result *r);int              sx_vexec_nrow(const sx_vx_result *r);
 int              sx_vexec_ncol(const sx_vx_result *r);
 /* Column cell type: returns one of SX_INTEGER/SX_FLOAT/SX_TEXT/SX_BLOB/SX_NULL. */
 int              sx_vexec_type(const sx_vx_result *r, int row, int col);
@@ -165,6 +164,15 @@ double           sx_vexec_double(const sx_vx_result *r, int row, int col);
 const char      *sx_vexec_text(const sx_vx_result *r, int row, int col);
 const void      *sx_vexec_blob(const sx_vx_result *r, int row, int col);
 int              sx_vexec_bytes(const sx_vx_result *r, int row, int col);
+
+/*
+ * Native write fast path.  Recognizes a simple literal-row INSERT into
+ * an xstore table and applies it directly to the B-tree (no VDBE / no
+ * vtab round-trip), returning 1 with *nchanges set.  Returns 0 when the
+ * statement is not a recognized native write (the caller runs the
+ * VDBE), or <0 on a storage error.  All-or-nothing on a 0 return.
+ */
+int              sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges);
 
 #ifdef __cplusplus
 }

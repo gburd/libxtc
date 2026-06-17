@@ -123,6 +123,22 @@ int vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
 int vx_run(sqlite3 *db, const char *sql, int n_workers,
            vx_result_t **res, char **errmsg);
 
+/*
+ * Native autocommit write path (step 3 of the greenfield teardown).
+ * Recognizes a simple INSERT that can run on the xstore B-tree with no
+ * VDBE: a single INSERT INTO t VALUES (...), (...) of literal values
+ * (INT/REAL/TEXT/NULL, a leading minus allowed) into all columns of an
+ * xstore table whose primary key is declared column 0.  On a match it
+ * applies every row natively (one commit timestamp per row, WAL-durable)
+ * and returns 1 with *nchanges set.  Returns 0 -- caller runs the VDBE
+ * -- for anything else (INSERT...SELECT, REPLACE, DEFAULT VALUES, an
+ * explicit column list, non-literal values, a non-integer or absent
+ * rowid PK, a non-xstore table, or any parse it cannot handle).  All-or-
+ * nothing: a return of 0 has written nothing.  <0 is a storage error.
+ */
+int vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges,
+                 char **errmsg);
+
 int            vx_result_nrow(const vx_result_t *r);
 int            vx_result_ncol(const vx_result_t *r);
 vx_type_t      vx_result_type(const vx_result_t *r, int row, int col);
