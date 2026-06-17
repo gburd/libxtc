@@ -243,11 +243,17 @@ main(void)
 			/* native DELETE by pk: an existing row and an absent row */
 			"DELETE FROM %s WHERE k = 3",
 			"DELETE FROM %s WHERE k = 999",
+			/* native range DELETE: a closed range and a half-open one */
+			"DELETE FROM %s WHERE k BETWEEN 4 AND 5",
+			"DELETE FROM %s WHERE k > 9000",
 			/* native UPDATE by pk: change a subset of columns, all columns,
 			 * and a no-such-row update */
 			"UPDATE %s SET a = 42 WHERE k = 1",
 			"UPDATE %s SET a = -7, b = 'two!' WHERE k = 2",
-			"UPDATE %s SET b = 'gone' WHERE k = 999"
+			"UPDATE %s SET b = 'gone' WHERE k = 999",
+			/* native range UPDATE: multiple rows by a pk range */
+			"UPDATE %s SET b = 'lo' WHERE k <= 10",
+			"UPDATE %s SET a = 0 WHERE k >= 8000"
 		};
 		int ni = (int)(sizeof dml / sizeof dml[0]);
 		int native_served = 0;
