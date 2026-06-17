@@ -3104,13 +3104,69 @@ encode_payload(const vx_cell_t *cells, int npay, uint8_t *out, int cap)
 	return off;
 }
 
+/* Native payload-record buffer cap.  Matches xstore's row payload limit
+ * (XS_VMAX, 4096): the engine truncates a longer payload, so a record
+ * never exceeds this, and a SET / VALUES literal that would not fit is
+ * rejected by encode_payload (-> VDBE fallback) rather than truncated. */
+#define XS_REC_MAX  4096
+
+/* Recognize WHERE <pkcol> = <integer-literal> (the only WHERE the native
+ * UPDATE / DELETE path handles -- a single-row point operation by the
+ * primary key).  pkname is the declared name of column 0.  Returns 1
+ * with *rowid set, or 0 (the statement is left to the VDBE). */
+static int
+where_pk_eq(const sql_expr_t *w, const char *pkname, int64_t *rowid)
+{
+	const sql_expr_t *colside = NULL, *litside = NULL;
+	struct vx_arena_blk *tmp = NULL;
+	vx_cell_t c;
+	int ok = 0;
+
+	if (w == NULL || w->op != SX_E_BINARY || w->op2 != TK_EQ ||
+	    w->a == NULL || w->b == NULL)
+		return 0;
+	if (w->a->op == SX_E_COLUMN) { colside = w->a; litside = w->b; }
+	else if (w->b->op == SX_E_COLUMN) { colside = w->b; litside = w->a; }
+	else return 0;
+	/* Unqualified or table-qualified reference to the pk column only. */
+	if (colside->nname < 1 ||
+	    colside->name[colside->nname - 1].len != strlen(pkname) ||
+	    strncmp(colside->name[colside->nname - 1].p, pkname, strlen(pkname)) != 0)
+		return 0;
+	if (lit_cell(&tmp, litside, &c) != 0) { arena_free(tmp); return 0; }
+	if (c.type == VX_INT) { *rowid = c.i; ok = 1; }
+	arena_free(tmp);
+	return ok;
+}
+
+/* Read the current visible payload record of one rowid into buf (latest
+ * snapshot).  Returns the record length (>=1) if the row exists, 0 if it
+ * does not (or is tombstoned), or -1 on error. */
+static int
+read_one_row(bt_t *bt, const char *table, int64_t rowid, uint8_t *buf, int cap)
+{
+	xstore_scan_t *s;
+	int64_t rid; const uint8_t *rec; int reclen, got = 0;
+
+	s = xstore_scan_open(bt, table, 0, rowid, 1, rowid, 1);
+	if (s == NULL) return -1;
+	if (xstore_scan_next(s, &rid, &rec, &reclen) == 1 && rid == rowid) {
+		if (reclen > cap) { xstore_scan_close(s); return -1; }
+		memcpy(buf, rec, (size_t)reclen);
+		got = reclen;
+	}
+	xstore_scan_close(s);
+	return got;
+}
+
 int
 vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 {
 	sql_arena_t *arena = NULL;
 	sql_stmt_t *root = NULL;
 	const char *perr = NULL;
-	sql_insert_t *ins;
+	sql_insert_t *ins = NULL;
+	const sql_str_t *tname = NULL;
 	char tabbuf[64];
 	bt_t *bt;
 	uint32_t tableid;
@@ -3124,22 +3180,33 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 
 	if (sql_parse_ast(sql, strlen(sql), &arena, &root, &perr) != 0)
 		return 0;                         /* unparseable -> VDBE */
-	/* Exactly one INSERT statement, VALUES rows only. */
-	if (root == NULL || root->next != NULL ||
-	    root->kind != SQL_KIND_INSERT || root->u.insert == NULL) {
+	/* Exactly one write statement (INSERT / DELETE / UPDATE). */
+	if (root == NULL || root->next != NULL) { sql_arena_destroy(arena); return 0; }
+	switch (root->kind) {
+	case SQL_KIND_INSERT:
+		ins = root->u.insert;
+		if (ins == NULL || ins->select != NULL || ins->def_values ||
+		    ins->replace || ins->rows == NULL || ins->n_rows < 1 ||
+		    ins->cols != NULL) { sql_arena_destroy(arena); return 0; }
+		tname = &ins->table;
+		break;
+	case SQL_KIND_DELETE:
+		if (root->u.del == NULL) { sql_arena_destroy(arena); return 0; }
+		tname = &root->u.del->table;
+		break;
+	case SQL_KIND_UPDATE:
+		if (root->u.update == NULL || root->u.update->sets == NULL) {
+			sql_arena_destroy(arena); return 0; }
+		tname = &root->u.update->table;
+		break;
+	default:
 		sql_arena_destroy(arena); return 0;
 	}
-	ins = root->u.insert;
-	if (ins->select != NULL || ins->def_values || ins->replace ||
-	    ins->rows == NULL || ins->n_rows < 1 || ins->cols != NULL ||
-	    ins->table.len == 0 || ins->table.len >= sizeof tabbuf) {
-		/* INSERT...SELECT, DEFAULT VALUES, REPLACE, an explicit column
-		 * list (column reordering / omission), or a missing table: let
-		 * the VDBE handle it.  Positional VALUES into all columns only. */
+	if (tname->len == 0 || tname->len >= sizeof tabbuf) {
 		sql_arena_destroy(arena); return 0;
 	}
-	memcpy(tabbuf, ins->table.p, ins->table.len);
-	tabbuf[ins->table.len] = '\0';
+	memcpy(tabbuf, tname->p, tname->len);
+	tabbuf[tname->len] = '\0';
 
 	bt = xstore_bt_of(db);
 	if (bt == NULL || !xstore_table_id(bt, tabbuf, &tableid)) {
@@ -3150,6 +3217,80 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 		 * convention); anything else -> VDBE. */
 		sql_arena_destroy(arena); return 0;
 	}
+
+	/* ---- DELETE ... WHERE pk = <lit> --------------------------------- */
+	if (root->kind == SQL_KIND_DELETE) {
+		int64_t rowid; uint8_t cur[XS_REC_MAX]; int existed;
+		if (!where_pk_eq(root->u.del->where, ws.name[0], &rowid)) {
+			sql_arena_destroy(arena); return 0;   /* no WHERE / not pk= -> VDBE */
+		}
+		existed = read_one_row(bt, tabbuf, rowid, cur, (int)sizeof cur);
+		if (existed < 0) { rc = -1; goto done; }
+		if (existed > 0) {
+			if (xstore_delete_rec(bt, tableid, rowid) != 0) {
+				if (errmsg) *errmsg = strdup("native delete failed");
+				rc = -1; goto done;
+			}
+			applied = 1;
+		}
+		if (nchanges) *nchanges = applied;   /* SQLite changes(): rows deleted */
+		rc = 1; goto done;
+	}
+
+	/* ---- UPDATE ... SET col=<lit>,... WHERE pk = <lit> --------------- */
+	if (root->kind == SQL_KIND_UPDATE) {
+		sql_update_t *up = root->u.update;
+		sql_assign_t *a;
+		int64_t rowid; uint8_t cur[XS_REC_MAX]; int curlen;
+		vx_cell_t cells[64];
+		uint8_t rec[XS_REC_MAX]; int reclen, ci;
+
+		if (!where_pk_eq(up->where, ws.name[0], &rowid)) {
+			sql_arena_destroy(arena); return 0;   /* not pk= -> VDBE */
+		}
+		/* Decode the current row's payload columns 1..n-1 into cells. */
+		curlen = read_one_row(bt, tabbuf, rowid, cur, (int)sizeof cur);
+		if (curlen < 0) { rc = -1; goto done; }
+		if (curlen == 0) {                       /* no such row: 0 changes */
+			if (nchanges) *nchanges = 0;
+			rc = 1; goto done;
+		}
+		for (ci = 1; ci < ws.n; ci++) {
+			int64_t iv; double rv; const uint8_t *pv; int pn;
+			int cls = xstore_rec_col(cur, curlen, ci - 1, &iv, &rv, &pv, &pn);
+			vx_cell_t *c = &cells[ci - 1];
+			memset(c, 0, sizeof *c);
+			switch (cls) {
+			case XSTORE_C_INT:  c->type = VX_INT;  c->i = iv; break;
+			case XSTORE_C_REAL: c->type = VX_REAL; c->r = rv; break;
+			case XSTORE_C_TEXT: c->type = VX_TEXT; c->bytes = pv; c->nbytes = pn; break;
+			case XSTORE_C_BLOB: c->type = VX_BLOB; c->bytes = pv; c->nbytes = pn; break;
+			default:            c->type = VX_NULL; break;
+			}
+		}
+		/* Apply each SET col=<literal>; the pk column may not be updated
+		 * by this slice (a rowid move needs a tombstone of the old key). */
+		for (a = up->sets; a; a = a->next) {
+			int col = -1, k;
+			for (k = 0; k < ws.n; k++)
+				if (a->col.len == strlen(ws.name[k]) &&
+				    strncmp(a->col.p, ws.name[k], a->col.len) == 0) { col = k; break; }
+			if (col <= 0) { sql_arena_destroy(arena); return 0; } /* unknown / pk -> VDBE */
+			if (lit_cell(&cell_arena, a->val, &cells[col - 1]) != 0) {
+				sql_arena_destroy(arena); return 0;  /* non-literal SET -> VDBE */
+			}
+		}
+		reclen = encode_payload(cells, ws.n - 1, rec, (int)sizeof rec);
+		if (reclen < 0) { rc = 0; goto done; }   /* too big -> VDBE */
+		if (xstore_put_rec(bt, tableid, rowid, rec, reclen) != 0) {
+			if (errmsg) *errmsg = strdup("native update failed");
+			rc = -1; goto done;
+		}
+		if (nchanges) *nchanges = 1;
+		rc = 1; goto done;
+	}
+
+	/* ---- INSERT INTO t VALUES (...) ... ------------------------------ */
 	maxr = xstore_max_rowid(bt, tableid);
 
 	/* Two passes: validate + buffer EVERY row first (no writes); only if
@@ -3157,7 +3298,7 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 	 * PK do we apply.  Any unsupported row -> return 0 with zero writes,
 	 * a clean VDBE fallback (never a partial native apply). */
 	{
-		struct { int64_t rowid; uint8_t rec[1 + 64 * 16]; int reclen; } *buf;
+		struct { int64_t rowid; uint8_t rec[XS_REC_MAX]; int reclen; } *buf;
 		int nb = 0;
 
 		buf = (void *)calloc((size_t)ins->n_rows, sizeof *buf);

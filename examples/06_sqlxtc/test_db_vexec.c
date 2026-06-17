@@ -226,18 +226,26 @@ main(void)
 
 	/* ---- native write path: literal-row INSERT bypassing the VDBE ----
 	 * Two more xstore tables on the same bt: u takes the native write
-	 * path, v takes the VDBE.  Run the SAME INSERTs into each, then read
-	 * both back (SELECT * ORDER BY k, VDBE both times -- a neutral
-	 * reader) and assert byte-identical.  That proves a native insert
-	 * lands the same bytes on disk as a VDBE insert. */
+	 * path, v takes the VDBE.  Run the SAME DML (INSERT / DELETE / UPDATE)
+	 * into each, then read both back (SELECT * ORDER BY k, VDBE both times
+	 * -- a neutral reader) and assert byte-identical.  That proves a
+	 * native write lands the same bytes on disk as a VDBE write. */
 	{
-		static const char *inserts[] = {
+		static const char *dml[] = {
 			"INSERT INTO %s VALUES(1, 100, 'one')",
 			"INSERT INTO %s VALUES(2, -50, 'two'), (3, 7, 'three')",
 			"INSERT INTO %s VALUES(4, 3.5, 'pi'), (5, NULL, NULL)",
-			"INSERT INTO %s VALUES(10, 0, '')"
+			"INSERT INTO %s VALUES(10, 0, '')",
+			/* native DELETE by pk: an existing row and an absent row */
+			"DELETE FROM %s WHERE k = 3",
+			"DELETE FROM %s WHERE k = 999",
+			/* native UPDATE by pk: change a subset of columns, all columns,
+			 * and a no-such-row update */
+			"UPDATE %s SET a = 42 WHERE k = 1",
+			"UPDATE %s SET a = -7, b = 'two!' WHERE k = 2",
+			"UPDATE %s SET b = 'gone' WHERE k = 999"
 		};
-		int ni = (int)(sizeof inserts / sizeof inserts[0]);
+		int ni = (int)(sizeof dml / sizeof dml[0]);
 		int native_served = 0;
 		char *ru = NULL, *rv = NULL; size_t nu = 0, nv2 = 0;
 
@@ -251,13 +259,15 @@ main(void)
 			for (j = 0; j < ni; j++) {
 				char squ[128], sqv[128];
 				char *ou = NULL, *ov = NULL; size_t a = 0, b = 0;
-				int64_t nch = 0;
-				snprintf(squ, sizeof squ, inserts[j], "u");
-				snprintf(sqv, sizeof sqv, inserts[j], "v");
+				int64_t nch = -1;
+				snprintf(squ, sizeof squ, dml[j], "u");
+				snprintf(sqv, sizeof sqv, dml[j], "v");
 
-				/* u via the native write path -- assert it is recognized. */
+				/* u via the native write path -- assert it is recognized
+				 * (returns 1 even when 0 rows change, e.g. a no-such-row
+				 * DELETE/UPDATE). */
 				CK(sx_vexec_write(h, squ, &nch) == 1, squ);
-				if (nch >= 1) native_served++;
+				if (nch >= 0) native_served++;
 				/* v via the VDBE. */
 				setenv("SQLXTC_VEXEC", "0", 1);
 				CK(run_live(h, sqv, &ov, &b) == 0, sqv);
@@ -280,11 +290,10 @@ main(void)
 				}
 			}
 			free(ru); free(rv);
-			CK(native_served == ni, "all inserts native-served");
-			served_by_vexec += 0;   /* counted separately below */
-			printf("  ok   native write: %d literal INSERTs applied to the "
-			       "B-tree without the VDBE, byte-identical to VDBE inserts\n",
-			       native_served);
+			CK(native_served == ni, "all DML native-served");
+			printf("  ok   native write: %d INSERT/DELETE/UPDATE statements "
+			       "applied to the B-tree without the VDBE, byte-identical "
+			       "to VDBE writes\n", native_served);
 		}
 	}
 

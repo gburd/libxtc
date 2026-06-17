@@ -151,4 +151,9 @@ int64_t xstore_max_rowid(bt_t *bt, uint32_t tableid);
 int xstore_put_rec(bt_t *bt, uint32_t tableid, int64_t rowid,
                    const uint8_t *rec, int reclen);
 
+/* Autocommit-delete `rowid` (write a tombstone version).  Returns 0 on
+ * success or <0 on error.  Deleting an absent rowid still writes a
+ * tombstone (idempotent), matching the vtab DELETE path. */
+int xstore_delete_rec(bt_t *bt, uint32_t tableid, int64_t rowid);
+
 #endif /* SQLXTC_XSTORE_H */
