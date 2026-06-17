@@ -138,6 +138,34 @@ int          sx_column_bytes(sx_stmt *st, int i);
 const char  *sx_errmsg(sx_db *h);
 int64_t      sx_changes(sx_db *h);
 
+/*
+ * Vectorized-executor fast path.  sx_vexec_try recognizes a read-only
+ * query and, when it can run it on the libxtc-native vectorized executor
+ * (vexec) over the xstore B-tree, materializes the full result and
+ * returns 1 with *out set (caller must sx_vexec_free it).  It returns 0
+ * when the query is not recognized (the caller runs the VDBE), or a
+ * negative XTC_E_* on error.  n_workers > 1 requests morsel-parallel
+ * execution where the plan supports it.  This is correct-by-fallback:
+ * anything vexec cannot reproduce exactly is left to the VDBE.
+ *
+ * The result carries typed cells but NOT column names; the caller
+ * supplies names from the parallel VDBE prepare (so a client sees
+ * identical headers whichever path served the rows).
+ */
+typedef struct sx_vx_result sx_vx_result;
+int              sx_vexec_try(sx_db *h, const char *sql, int n_workers,
+                             sx_vx_result **out);
+void             sx_vexec_free(sx_vx_result *r);
+int              sx_vexec_nrow(const sx_vx_result *r);
+int              sx_vexec_ncol(const sx_vx_result *r);
+/* Column cell type: returns one of SX_INTEGER/SX_FLOAT/SX_TEXT/SX_BLOB/SX_NULL. */
+int              sx_vexec_type(const sx_vx_result *r, int row, int col);
+int64_t          sx_vexec_int64(const sx_vx_result *r, int row, int col);
+double           sx_vexec_double(const sx_vx_result *r, int row, int col);
+const char      *sx_vexec_text(const sx_vx_result *r, int row, int col);
+const void      *sx_vexec_blob(const sx_vx_result *r, int row, int col);
+int              sx_vexec_bytes(const sx_vx_result *r, int row, int col);
+
 #ifdef __cplusplus
 }
 #endif

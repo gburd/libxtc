@@ -18,8 +18,28 @@
 
 #include "xtc_int.h"
 
+/* Worker count for the vexec fast path on the live query path.  Serial
+ * (1) by default: vexec's morsel-parallel scan is correct but not yet
+ * faster than serial for typical scans (per-worker scan-path overhead,
+ * see bench/sqlxtc/VEXEC_RESULTS.md), so the live path stays serial
+ * until that is profiled and fixed.  SQLXTC_VEXEC_WORKERS overrides the
+ * worker count; SQLXTC_VEXEC=0 disables the fast path entirely (so the
+ * VDBE serves every query -- used by the differential test and as an
+ * escape hatch).  Returns 0 when disabled, else the worker count. */
+static int
+db_vexec_workers(void)
+{
+	const char *off = getenv("SQLXTC_VEXEC");
+	const char *e;
+	int w;
+	if (off != NULL && off[0] == '0' && off[1] == '\0') return 0;
+	e = getenv("SQLXTC_VEXEC_WORKERS");
+	w = e ? atoi(e) : 1;
+	return w > 0 ? w : 1;
+}
+
 /* Decode a hex or base64 blob param into a freshly malloc'd buffer.
- * Returns 0 and sets *out/*outn (caller frees *out), or -1 on a
+ * Returns 0 and sets out / outn (caller frees *out), or -1 on a
  * malformed encoding. */
 static int
 hexval(int c)
@@ -610,6 +630,67 @@ db_exec_params(sx_db *h, const char *sql,
 	return 0;
 }
 
+/* Emit a materialized vexec result to the Quack buffer, using column
+ * names from the already-prepared statement (so headers are identical
+ * to the VDBE path).  Returns 0 or -1 (*err set). */
+static int
+emit_vexec(sx_vx_result *vr, sx_stmt *names, int64_t limit,
+           quack_buf_t *out_buf, int64_t *rows_out, char **err)
+{
+	int ncol = sx_vexec_ncol(vr);
+	int nrow = sx_vexec_nrow(vr);
+	int64_t emitted = 0;
+	int i, j;
+
+	if (ncol > 0) {
+		if (quack_emit_cols_begin(out_buf) < 0) goto oom;
+		for (j = 0; j < ncol; j++) {
+			const char *nm = sx_column_name(names, j);
+			if (quack_emit_cols_name(out_buf, j, nm) < 0) goto oom;
+		}
+		if (quack_emit_cols_end(out_buf) < 0) goto oom;
+	}
+	for (i = 0; i < nrow; i++) {
+		if (ncol > 0) {
+			if (quack_emit_row_begin(out_buf) < 0) goto oom;
+			for (j = 0; j < ncol; j++) {
+				switch (sx_vexec_type(vr, i, j)) {
+				case SX_INTEGER:
+					if (quack_emit_row_int(out_buf, j,
+					    sx_vexec_int64(vr, i, j)) < 0) goto oom;
+					break;
+				case SX_FLOAT:
+					if (quack_emit_row_double(out_buf, j,
+					    sx_vexec_double(vr, i, j)) < 0) goto oom;
+					break;
+				case SX_TEXT:
+					if (quack_emit_row_text(out_buf, j,
+					    sx_vexec_text(vr, i, j),
+					    (size_t)sx_vexec_bytes(vr, i, j)) < 0) goto oom;
+					break;
+				case SX_BLOB:
+					if (quack_emit_row_blob(out_buf, j,
+					    sx_vexec_blob(vr, i, j),
+					    (size_t)sx_vexec_bytes(vr, i, j)) < 0) goto oom;
+					break;
+				case SX_NULL:
+				default:
+					if (quack_emit_row_null(out_buf, j) < 0) goto oom;
+					break;
+				}
+			}
+			if (quack_emit_row_end(out_buf) < 0) goto oom;
+		}
+		emitted++;
+		if (limit > 0 && emitted >= limit) break;
+	}
+	*rows_out = emitted;
+	return 0;
+oom:
+	*err = strdup("oom");
+	return -1;
+}
+
 int
 db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
         const struct quack_param *params, int n_params, int64_t limit,
@@ -644,6 +725,29 @@ db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
 		sx_finalize(*pstmt); *pstmt = NULL;
 		return -1;
 	}
+
+	/* Vectorized-executor fast path: a recognized, param-free read-only
+	 * query runs on the libxtc-native vectorized executor over the xstore
+	 * B-tree; the prepared statement supplies the column names so the
+	 * client sees identical headers.  Anything not recognized falls
+	 * through to the VDBE (correct-by-fallback).  The prepared statement
+	 * stays cached and reusable either way. */
+	if (n_params == 0) {
+		int vw = db_vexec_workers();
+		sx_vx_result *vr = NULL;
+		if (vw > 0 && sx_vexec_try(h, sql, vw, &vr) == 1) {
+			int erc = emit_vexec(vr, *pstmt, limit, out_buf, &rows, err);
+			sx_vexec_free(vr);
+			if (erc != 0) { (void)sx_reset(*pstmt); return -1; }
+			if (quack_emit_done(out_buf, rows) < 0) {
+				*err = strdup("oom"); (void)sx_reset(*pstmt); return -1;
+			}
+			*n_rows = rows;
+			(void)sx_reset(*pstmt);   /* leave clean + ready for reuse */
+			return 0;
+		}
+	}
+
 	if (exec_stmt(h, *pstmt, limit, 1, out_buf, &ncols, &rows, err) != 0) {
 		sx_finalize(*pstmt); *pstmt = NULL;
 		return -1;

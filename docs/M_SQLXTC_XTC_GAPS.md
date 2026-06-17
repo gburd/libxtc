@@ -383,3 +383,24 @@ model depends on, and it holds.
   * **Cooperative-yield watchdog** -- `xtc_yield_*`: a non-yielding
     fiber starves its loop; the over-budget signal is the bridge to
     fire a cancellation.  Added to the library.
+
+## Gap: a single runtime-introspection call (xtc_runtime_info)
+
+The pieces exist but are scattered, and there is no one call that
+reports what the process was given:
+  - loop/thread count: xtc_exec_n_loops(xtc_app_exec(app)) -- needs the
+    exec handle;
+  - CPU topology: __os_ncpus / __os_ncpus_perf / __os_ncpus_effic /
+    __os_numa_nnodes -- internal __os_*, not public xtc_*;
+  - memory: xtc_res_* is an opt-in quota/accounting facility (caps you
+    set), not the OS-allocated RSS;
+  - live scheduler: xtc_inspect_loops / xtc_inspect_procs are per-loop
+    / per-proc snapshots, not a process aggregate.
+
+A clean public xtc_runtime_info(xtc_runtime_info_t *) that aggregates
+{n_loops, n_cpus_online, n_cpus_perf, n_cpus_effic, numa_nodes,
+mem_cap_bytes, rss_bytes} in one struct would let a libxtc application
+(the SQL engine in particular) size its buffer pool, worker counts, and
+morsel granularity to the box without reaching into __os_* internals.
+sqlxtc will want exactly this; until it lands, the engine uses
+xtc_exec_n_loops + __os_ncpus directly.
