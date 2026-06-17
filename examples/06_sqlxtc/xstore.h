@@ -145,6 +145,25 @@ int xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid);
  * needing concurrency-safe allocation must serialize. */
 int64_t xstore_max_rowid(bt_t *bt, uint32_t tableid);
 
+/* Native table schema (replaces PRAGMA table_info / sqlite_master).  One
+ * column descriptor per declared column, in declared order; column 0 is
+ * the INTEGER PRIMARY KEY (the rowid).  `affinity` is the SQLite type
+ * affinity letter derived from the declared type ('i' INTEGER, 'r'
+ * REAL/numeric, 't' TEXT, 'b' BLOB/none). */
+typedef struct xstore_col {
+	char name[64];
+	char decltype[32];
+	char affinity;
+	int  is_pk;
+} xstore_col_t;
+
+/* Fill `cols` (capacity `cap`) with the schema of `name` from the
+ * persisted catalog.  Returns the column count (>=1) on success, 0 if
+ * the table is unknown or has no recorded schema (caller falls back to
+ * sqlite_master), or <0 on error / overflow. */
+int xstore_table_schema(bt_t *bt, const char *name,
+                        xstore_col_t *cols, int cap);
+
 /* Autocommit-insert one already-encoded payload record at `rowid` (a new
  * committed version).  `rec` is the xstore payload record (the same
  * format xstore_rec_col decodes).  Returns 0 on success or <0 on error. */

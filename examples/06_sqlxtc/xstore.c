@@ -794,10 +794,17 @@ xs_cat_lookup(bt_t *bt, const char *name)
 		last_rowid = rid; have_last = 1;
 		if (vl >= 1 && (vb[0] & XS_F_DELETED))
 			continue;                    /* a renamed-away/dropped entry */
-		if ((size_t)(vl >= 1 ? vl - 1 : 0) == want &&
-		    memcmp(vb + 1, name, want) == 0) {
-			found = (uint32_t)rid;
-			break;
+		{
+			/* The catalog value is the table name, optionally followed by
+			 * a NUL and the serialized column schema.  Match the name
+			 * portion (up to the NUL, or the whole value if none). */
+			const uint8_t *nm = vb + 1;
+			size_t nlen = (size_t)(vl >= 1 ? vl - 1 : 0), j;
+			for (j = 0; j < nlen; j++) if (nm[j] == 0) { nlen = j; break; }
+			if (nlen == want && memcmp(nm, name, want) == 0) {
+				found = (uint32_t)rid;
+				break;
+			}
 		}
 	}
 	bt_cursor_close(cur);
@@ -840,7 +847,7 @@ xs_cat_max_id(bt_t *bt)
  * the persisted catalog, else allocate a fresh dense id and persist it.
  * Returns the id (>= 1), or 0 only if a new id could not be written. */
 static uint32_t
-xs_cat_find_or_create(bt_t *bt, const char *name)
+xs_cat_find_or_create(bt_t *bt, const char *name, const char *coldefs)
 {
 	uint32_t id = 0, maxid;
 	int i, do_persist = 0;
@@ -875,11 +882,26 @@ xs_cat_find_or_create(bt_t *bt, const char *name)
 
 	/* Persist the new catalog row OUTSIDE the lock: xs_put can park on
 	 * the WAL ack, and parking while holding a pthread mutex would wedge
-	 * the loop if another fiber contended g_cat_mu. */
-	if (do_persist &&
-	    xs_put(bt, XS_CAT_TABLEID, (int64_t)id, name,
-	    (int)strlen(name), 0) != SQLITE_OK)
-		return 0;
+	 * the loop if another fiber contended g_cat_mu.  The value is the
+	 * table name, optionally followed by a NUL and the column schema
+	 * (the comma-joined column-def list, so the native schema reader can
+	 * recover column names / types / the pk without sqlite_master). */
+	if (do_persist) {
+		uint8_t vbuf[1024];
+		size_t nlen = strlen(name), clen = coldefs ? strlen(coldefs) : 0;
+		size_t total;
+		if (nlen + 1 + clen > sizeof vbuf) clen = 0;   /* schema too long: name only */
+		memcpy(vbuf, name, nlen);
+		total = nlen;
+		if (clen > 0) {
+			vbuf[total++] = '\0';
+			memcpy(vbuf + total, coldefs, clen);
+			total += clen;
+		}
+		if (xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)total, 0)
+		    != SQLITE_OK)
+			return 0;
+	}
 	return id;
 }
 
@@ -1112,6 +1134,9 @@ xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
 {
 	xstore_vtab_t *v;
 	int rc, i, npay;
+	char coldefs[1024];
+	int coff = 0;
+	const char *cdp = NULL;
 	(void)pzErr;
 
 	if (argc <= 3) {
@@ -1119,6 +1144,8 @@ xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
 		rc = xsql_declare_vtab(db,
 		    "CREATE TABLE x(k INTEGER PRIMARY KEY, v)");
 		npay = 1;
+		coff = snprintf(coldefs, sizeof coldefs, "k,v");
+		if (coff > 0 && coff < (int)sizeof coldefs) cdp = coldefs;
 	} else {
 		/* USING xstore(key, col1, col2, ...): the first arg is the
 		 * INTEGER PRIMARY KEY (the btree rowid); the rest are payload
@@ -1128,18 +1155,27 @@ xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
 		    "CREATE TABLE x(%s INTEGER PRIMARY KEY", argv[3]);
 		if (off < 0 || off >= (int)sizeof decl)
 			return SQLITE_ERROR;
+		coff = snprintf(coldefs, sizeof coldefs, "%s", argv[3]);
+		if (coff < 0 || coff >= (int)sizeof coldefs) coff = -1;
 		for (i = 4; i < argc; i++) {
 			int w = snprintf(decl + off, sizeof decl - (size_t)off,
 			    ", %s", argv[i]);
 			if (w < 0 || w >= (int)sizeof decl - off)
 				return SQLITE_ERROR;   /* declaration too long */
 			off += w;
+			if (coff >= 0) {
+				int cw = snprintf(coldefs + coff, sizeof coldefs - (size_t)coff,
+				    ",%s", argv[i]);
+				if (cw < 0 || cw >= (int)sizeof coldefs - coff) coff = -1;
+				else coff += cw;
+			}
 		}
 		if (off + 2 > (int)sizeof decl)
 			return SQLITE_ERROR;
 		decl[off++] = ')'; decl[off] = '\0';
 		rc = xsql_declare_vtab(db, decl);
 		npay = argc - 4;
+		if (coff > 0) cdp = coldefs;
 	}
 	if (rc != SQLITE_OK)
 		return rc;
@@ -1150,8 +1186,10 @@ xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
 	v->ctx = (xstore_ctx_t *)pAux;
 	v->db = db;
 	v->npay = npay;
-	/* argv[2] is the table name: map it to a stable per-B-tree id. */
-	v->tableid = xs_cat_find_or_create(v->ctx->bt, argv[2]);
+	/* argv[2] is the table name: map it to a stable per-B-tree id and
+	 * persist its column schema (cdp) so the native paths read the
+	 * schema from the catalog, not sqlite_master. */
+	v->tableid = xs_cat_find_or_create(v->ctx->bt, argv[2], cdp);
 	if (v->tableid == 0) {
 		xsql_free(v);
 		return SQLITE_ERROR;
@@ -1426,6 +1464,110 @@ xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid)
 	if (id == 0) return 0;
 	if (tableid) *tableid = id;
 	return 1;
+}
+
+/* Map a declared type string to a SQLite type-affinity letter, using
+ * SQLite's substring rules (INT->i, CHAR/CLOB/TEXT->t, BLOB or empty
+ * ->b, REAL/FLOA/DOUB->r, else numeric->r). */
+static char
+xs_affinity_of(const char *ty)
+{
+	char up[64]; int i;
+	if (ty == NULL || ty[0] == '\0') return 'b';
+	for (i = 0; ty[i] && i < (int)sizeof up - 1; i++) {
+		char c = ty[i];
+		up[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+	}
+	up[i] = '\0';
+	if (strstr(up, "INT")) return 'i';
+	if (strstr(up, "CHAR") || strstr(up, "CLOB") || strstr(up, "TEXT")) return 't';
+	if (strstr(up, "BLOB")) return 'b';
+	if (strstr(up, "REAL") || strstr(up, "FLOA") || strstr(up, "DOUB")) return 'r';
+	return 'r';   /* NUMERIC and friends */
+}
+
+/* Read the catalog value (name + optional NUL + coldefs) for the newest
+ * live entry whose name matches `name`.  Returns the value length into
+ * *vlen with the bytes copied to `out` (capacity `cap`), or 0 if not
+ * found. */
+static int
+xs_cat_value(bt_t *bt, const char *name, uint8_t *out, int cap)
+{
+	bt_cursor_t *cur = NULL;
+	uint8_t startk[XS_VKLEN];
+	size_t want = strlen(name);
+	int64_t last_rowid = 0; int have_last = 0, got = 0;
+
+	enc_vkey(XS_CAT_TABLEID, INT64_MIN, ~(uint64_t)0, startk);
+	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK) return 0;
+	for (;;) {
+		const void *k = NULL, *vv = NULL; uint16_t klen = 0, vl = 0;
+		const uint8_t *kb, *vb; int64_t rid; size_t nlen, j;
+		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
+		    klen != XS_VKLEN) break;
+		kb = (const uint8_t *)k; vb = (const uint8_t *)vv;
+		if (dec_tableid(kb) != XS_CAT_TABLEID) break;
+		rid = dec_rowid(kb);
+		if (have_last && rid == last_rowid) continue;
+		last_rowid = rid; have_last = 1;
+		if (vl >= 1 && (vb[0] & XS_F_DELETED)) continue;
+		nlen = (size_t)(vl >= 1 ? vl - 1 : 0);
+		for (j = 0; j < nlen; j++) if (vb[1 + j] == 0) { nlen = j; break; }
+		if (nlen == want && memcmp(vb + 1, name, want) == 0) {
+			int n = (int)(vl >= 1 ? vl - 1 : 0);
+			if (n > cap) n = cap;
+			if (n > 0) memcpy(out, vb + 1, (size_t)n);
+			got = n;
+			break;
+		}
+	}
+	bt_cursor_close(cur);
+	return got;
+}
+
+int
+xstore_table_schema(bt_t *bt, const char *name, xstore_col_t *cols, int cap)
+{
+	uint8_t val[1024];
+	int vlen, i, ncol = 0;
+	const char *cd; int cdlen;
+
+	if (bt == NULL || name == NULL || cols == NULL || cap <= 0) return -1;
+	vlen = xs_cat_value(bt, name, val, (int)sizeof val);
+	if (vlen <= 0) return 0;
+	/* The coldefs follow the name and a NUL. */
+	for (i = 0; i < vlen; i++) if (val[i] == 0) break;
+	if (i >= vlen - 1) return 0;          /* no schema recorded */
+	cd = (const char *)val + i + 1;
+	cdlen = vlen - (i + 1);
+
+	/* Parse comma-separated column defs: "<name>[ <type...>]". */
+	{
+		int p = 0;
+		while (p < cdlen && ncol < cap) {
+			int start = p, ce, nn = 0, tn = 0;
+			xstore_col_t *c = &cols[ncol];
+			while (p < cdlen && cd[p] != ',') p++;   /* one column def */
+			ce = p;
+			if (p < cdlen) p++;                      /* skip comma */
+			/* trim leading space */
+			while (start < ce && cd[start] == ' ') start++;
+			/* name = up to the first space */
+			memset(c, 0, sizeof *c);
+			while (start < ce && cd[start] != ' ' && nn < (int)sizeof c->name - 1)
+				c->name[nn++] = cd[start++];
+			c->name[nn] = '\0';
+			while (start < ce && cd[start] == ' ') start++;
+			/* the rest is the declared type */
+			while (start < ce && tn < (int)sizeof c->decltype - 1)
+				c->decltype[tn++] = cd[start++];
+			c->decltype[tn] = '\0';
+			c->is_pk = (ncol == 0);          /* column 0 is the rowid PK */
+			c->affinity = c->is_pk ? 'i' : xs_affinity_of(c->decltype);
+			ncol++;
+		}
+	}
+	return ncol > 0 ? ncol : 0;
 }
 
 int64_t
