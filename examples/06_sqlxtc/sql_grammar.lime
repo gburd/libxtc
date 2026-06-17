@@ -40,6 +40,13 @@ static sql_str_t tok_str_unquote(sql_token_t t) {
     return s;
 }
 
+/* Record an expression node's verbatim source span from a token (the
+ * slice covering this leaf in the original SQL).  The whole-expression
+ * span is unioned over the tree by sql_expr_span(). */
+static void span_tok(sql_expr_t *e, sql_token_t t) {
+    if (e && t.p && t.len > 0) { e->src = t.p; e->srclen = (uint32_t)t.len; }
+}
+
 static sql_expr_t *mk_expr(sql_parse_state_t *ps, sql_expr_op_t op) {
     sql_expr_t *e = AST(ps, sql_expr_t);
     if (e) e->op = op;
@@ -717,7 +724,12 @@ expr_list(R) ::= expr(E).                       { R = list_add(pstate, NULL, E);
 expr_list(R) ::= expr_list(L) TK_COMMA expr(E). { R = list_add(pstate, L, E); }
 
 expr(R) ::= expr_atom(A).               { R = A; }
-expr(R) ::= TK_LP expr(E) TK_RP.        { R = E; }
+expr(R) ::= TK_LP(L) expr(E) TK_RP(P). {
+    R = E;
+    /* Grow the span to include the parentheses so a parenthesized
+     * select item is named with them, as SQLite does ((a+1)*2). */
+    if (R) { R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
+}
 expr(R) ::= TK_LP select_stmt(Q) TK_RP. { R = mk_expr(pstate, SX_E_SUBQUERY); if (R) R->sel = Q; }
 expr(R) ::= TK_NOT expr(E).             { R = mk_unary(pstate, TK_NOT, E); }
 expr(R) ::= TK_MINUS expr(E). [TK_UMINUS] { R = mk_unary(pstate, TK_MINUS, E); }
@@ -758,17 +770,21 @@ expr(R) ::= TK_CASE expr_atom(BASE) case_arms(AR) case_else(EL) TK_END. {
 expr(R) ::= TK_CASE case_arms(AR) case_else(EL) TK_END. {
     R = mk_expr(pstate, SX_E_CASE); if (R) { R->arms = AR; R->els = EL; }
 }
-expr(R) ::= TK_ID(F) TK_LP TK_RP. {
+expr(R) ::= TK_ID(F) TK_LP TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; }
+    if (R) { R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
 }
-expr(R) ::= TK_ID(F) TK_LP TK_STAR TK_RP. {
+expr(R) ::= TK_ID(F) TK_LP TK_STAR TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->ival = 2; }
+    if (R) { R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
 }
-expr(R) ::= TK_ID(F) TK_LP expr_list(L) TK_RP. {
+expr(R) ::= TK_ID(F) TK_LP expr_list(L) TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->list = L; }
+    if (R) { R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
 }
-expr(R) ::= TK_ID(F) TK_LP TK_DISTINCT expr_list(L) TK_RP. {
+expr(R) ::= TK_ID(F) TK_LP TK_DISTINCT expr_list(L) TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->list = L; R->ival = 1; }
+    if (R) { R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
 }
 
 case_arms(R) ::= TK_WHEN expr(W) TK_THEN expr(T). {
@@ -784,17 +800,19 @@ case_arms(R) ::= case_arms(L) TK_WHEN expr(W) TK_THEN expr(T). {
 case_else(R) ::= .                { R = NULL; }
 case_else(R) ::= TK_ELSE expr(E). { R = E; }
 
-expr_atom(R) ::= TK_NUMBER(T). { R = mk_expr(pstate, SX_E_NUMBER); if (R) R->lit = tok_str(T); }
-expr_atom(R) ::= TK_STRING(T). { R = mk_expr(pstate, SX_E_STRING); if (R) R->lit = tok_str_unquote(T); }
-expr_atom(R) ::= TK_BLOB(T).   { R = mk_expr(pstate, SX_E_BLOB);   if (R) R->lit = tok_str(T); }
-expr_atom(R) ::= TK_NULL.      { R = mk_expr(pstate, SX_E_NULL); }
-expr_atom(R) ::= TK_TRUE.      { R = mk_expr(pstate, SX_E_BOOL); if (R) R->ival = 1; }
-expr_atom(R) ::= TK_FALSE.     { R = mk_expr(pstate, SX_E_BOOL); if (R) R->ival = 0; }
-expr_atom(R) ::= TK_QMARK.     { R = mk_expr(pstate, SX_E_PARAM); }
-expr_atom(R) ::= TK_ID(T).     { R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(T); R->nname = 1; } }
+expr_atom(R) ::= TK_NUMBER(T). { R = mk_expr(pstate, SX_E_NUMBER); if (R) { R->lit = tok_str(T); span_tok(R, T); } }
+expr_atom(R) ::= TK_STRING(T). { R = mk_expr(pstate, SX_E_STRING); if (R) { R->lit = tok_str_unquote(T); span_tok(R, T); } }
+expr_atom(R) ::= TK_BLOB(T).   { R = mk_expr(pstate, SX_E_BLOB);   if (R) { R->lit = tok_str(T); span_tok(R, T); } }
+expr_atom(R) ::= TK_NULL(T).   { R = mk_expr(pstate, SX_E_NULL); span_tok(R, T); }
+expr_atom(R) ::= TK_TRUE(T).   { R = mk_expr(pstate, SX_E_BOOL); if (R) { R->ival = 1; span_tok(R, T); } }
+expr_atom(R) ::= TK_FALSE(T).  { R = mk_expr(pstate, SX_E_BOOL); if (R) { R->ival = 0; span_tok(R, T); } }
+expr_atom(R) ::= TK_QMARK(T).  { R = mk_expr(pstate, SX_E_PARAM); span_tok(R, T); }
+expr_atom(R) ::= TK_ID(T).     { R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(T); R->nname = 1; span_tok(R, T); } }
 expr_atom(R) ::= TK_ID(A) TK_DOT TK_ID(B). {
-    R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(A); R->name[1] = tok_str(B); R->nname = 2; }
+    R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(A); R->name[1] = tok_str(B); R->nname = 2;
+                                              R->src = A.p; R->srclen = (uint32_t)((B.p + B.len) - A.p); }
 }
 expr_atom(R) ::= TK_ID(A) TK_DOT TK_ID(B) TK_DOT TK_ID(C). {
-    R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(A); R->name[1] = tok_str(B); R->name[2] = tok_str(C); R->nname = 3; }
+    R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(A); R->name[1] = tok_str(B); R->name[2] = tok_str(C); R->nname = 3;
+                                              R->src = A.p; R->srclen = (uint32_t)((C.p + C.len) - A.p); }
 }
