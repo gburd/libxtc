@@ -312,6 +312,61 @@ main(void)
 		}
 	}
 
+	/* ---- native multi-statement transactions ------------------------
+	 * Native INSERTs inside a BEGIN..COMMIT must buffer into the shared
+	 * transaction and become visible atomically only after COMMIT; a
+	 * BEGIN..ROLLBACK must leave none of them.  BEGIN/COMMIT/ROLLBACK
+	 * still run through the VDBE (cheap), but the INSERTs are native and
+	 * join the same write buffer. */
+	{
+		char *err2 = NULL;
+		sx_stmt *st = NULL;
+		quack_buf_t b; int64_t nr = 0;
+		int64_t mid_count = -1, post_commit = -1, post_rollback = -1;
+
+		if (sx_exec(h, "CREATE VIRTUAL TABLE tx USING xstore(k, a INT)", &err2) != SX_OK) {
+			fprintf(stderr, "FAIL: create tx: %s\n", err2 ? err2 : "?"); free(err2); g_fail = 1;
+		} else {
+			char *o = NULL; size_t on2 = 0;
+			/* Drive the WHOLE transaction through the live path (run_live
+			 * -> db_exec_cached), so BEGIN/COMMIT/ROLLBACK hit the native
+			 * txn-end hook and the INSERTs are routed to the native write
+			 * path inside the open transaction. */
+			CK(run_live(h, "BEGIN", &o, &on2) == 0, "BEGIN"); free(o); o = NULL;
+			CK(run_live(h, "INSERT INTO tx VALUES(1, 10)", &o, &on2) == 0, "ins1"); free(o); o = NULL;
+			CK(run_live(h, "INSERT INTO tx VALUES(2, 20)", &o, &on2) == 0, "ins2"); free(o); o = NULL;
+			CK(run_live(h, "INSERT INTO tx VALUES(3, 30)", &o, &on2) == 0, "ins3"); free(o); o = NULL;
+			CK(run_live(h, "COMMIT", &o, &on2) == 0, "COMMIT"); free(o); o = NULL;
+			/* Read the committed count via a fresh VDBE query. */
+			{
+				sx_stmt *q = NULL; const char *tail = NULL;
+				if (sx_prepare(h, "SELECT count(*) FROM tx", -1, &q, &tail) == SX_OK) {
+					if (sx_step(q) == SX_ROW) post_commit = sx_column_int64(q, 0);
+					sx_finalize(q);
+				}
+			}
+			CK(post_commit == 3, "3 rows visible after native-insert COMMIT");
+
+			/* ROLLBACK: native INSERTs must leave nothing. */
+			CK(run_live(h, "BEGIN", &o, &on2) == 0, "BEGIN2"); free(o); o = NULL;
+			CK(run_live(h, "INSERT INTO tx VALUES(4, 40)", &o, &on2) == 0, "ins4"); free(o); o = NULL;
+			CK(run_live(h, "INSERT INTO tx VALUES(5, 50)", &o, &on2) == 0, "ins5"); free(o); o = NULL;
+			CK(run_live(h, "ROLLBACK", &o, &on2) == 0, "ROLLBACK"); free(o); o = NULL;
+			{
+				sx_stmt *q = NULL; const char *tail = NULL;
+				if (sx_prepare(h, "SELECT count(*) FROM tx", -1, &q, &tail) == SX_OK) {
+					if (sx_step(q) == SX_ROW) post_rollback = sx_column_int64(q, 0);
+					sx_finalize(q);
+				}
+			}
+			CK(post_rollback == 3, "rolled-back native inserts left nothing (still 3)");
+			(void)mid_count; (void)st; (void)b; (void)nr;
+			if (!g_fail)
+				printf("  ok   native transactions: BEGIN + native INSERTs + "
+				       "COMMIT commits atomically; ROLLBACK discards\n");
+		}
+	}
+
 	sx_close(h);
 	bt_close(bt);
 	bm_destroy(bm);

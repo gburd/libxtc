@@ -574,6 +574,9 @@ sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges)
 	return rc;
 }
 
+void sx_vexec_commit(sx_db *h)   { (void)xstore_commit((xsql *)h); }
+void sx_vexec_rollback(sx_db *h) { (void)xstore_rollback((xsql *)h); }
+
 #else  /* !SQLXTC_HAVE_LIME -- no parser, so no vexec; always fall back. */
 
 int sx_vexec_try(sx_db *h, const char *sql, int n_workers, sx_vx_result **out)
@@ -598,6 +601,9 @@ const char *sx_vexec_name(const sx_vx_result *r, int col)
 
 int sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges)
 { (void)h; (void)sql; if (nchanges) *nchanges = 0; return 0; }
+
+void sx_vexec_commit(sx_db *h)   { (void)h; }
+void sx_vexec_rollback(sx_db *h) { (void)h; }
 
 #endif /* SQLXTC_HAVE_LIME */
 
