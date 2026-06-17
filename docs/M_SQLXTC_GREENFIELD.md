@@ -302,18 +302,35 @@ The gates to actually deleting sqlite3.c, in dependency order:
      or the vtab.  REMAINING: INSERT...SELECT, REPLACE, explicit column
      lists, pk-reassigning UPDATEs (old-key tombstone), and
      read-your-writes inside a transaction (so a transactional
-     DELETE/UPDATE can also go native).
-  4. **Native column naming + a minimal planner.**  DONE: vexec names
-     alias / bare-column / verbatim-source-span expression columns
-     itself (no VDBE prepare for names), and a minimal read planner
-     pushes a primary-key WHERE down to a bounded scan (point read
-     seeks).  REMAINING (optional): index selection beyond the rowid,
-     join-order costing.
-  5. **Retire sqlite3.c.**  Possible only once the parser + planner +
-     read executor + write executor cover the ENTIRE accepted surface,
-     so the VDBE fallback can be removed.  Then drop xsql.h, delete
-     sqlite3.c / sqlite3.h, drop vfs.c / pcache.c / mutex.c / mem.c
-     (they exist to plug INTO SQLite), and the residual xsql_* call
-     sites in engine.c call the native engine directly.  The sqlite3_*
+     DELETE/UPDATE can also go native rather than fall back).
+  4. **Native column naming + a minimal planner + native catalog.**
+     DONE: vexec names alias / bare-column / verbatim-source-span
+     expression columns itself; a minimal read planner pushes a
+     primary-key WHERE down to a bounded scan; the xstore catalog now
+     stores the full column schema (names / types / pk) so the native
+     read and write paths resolve schema WITHOUT sqlite_master
+     (xstore_table_schema), and SELECT * expands from it.  REMAINING
+     (optional): index selection beyond the rowid, join-order costing.
+  5. **Retire sqlite3.c.**  The deep remaining step.  As long as the
+     VDBE is the fallback, SQLite must still parse every statement and
+     keep each table in sqlite_master (the fallback path resolves names
+     there), so DDL (CREATE / DROP) cannot go native yet -- it is LAST,
+     not next.  The order is: keep shrinking the VDBE-fallback surface
+     (the step-3/4 REMAINING items, plus parametrized statements and the
+     remaining read shapes), and only when the native parser + planner +
+     read + write engine covers the ENTIRE accepted surface can the VDBE
+     fallback be deleted -- then native DDL, then drop xsql.h, sqlite3.c
+     / .h, vfs.c / pcache.c / mutex.c / mem.c (they exist to plug INTO
+     SQLite), and the residual xsql_* calls in engine.c.  The sqlite3_*
      names leave the tree automatically when the code they rename is
      gone -- they are the last thing removed, not the first.
+
+Where the live path stands today: most single-table reads (scan /
+filter / project / scalar + aggregate + GROUP BY + ORDER BY / LIMIT /
+INNER join / SELECT *) and the common writes (literal INSERT, pk-point
+and pk-range and arbitrary-predicate DELETE/UPDATE, multi-statement
+transactions) run with NO VDBE and NO vtab, naming columns and resolving
+schema natively.  The VDBE still serves: parametrized statements, DDL,
+the write shapes in step 3's REMAINING, transactional DELETE/UPDATE
+(read-your-writes), and any read vexec does not recognize -- each
+differential-tested to be byte-identical whichever engine serves it.
