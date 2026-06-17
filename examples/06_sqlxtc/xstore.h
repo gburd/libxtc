@@ -126,4 +126,29 @@ int xstore_rec_col(const uint8_t *rec, int reclen, int idx,
                    int64_t *iout, double *rout,
                    const uint8_t **pout, int *nout);
 
+/*
+ * Native autocommit write path -- the storage side of bypassing the
+ * VDBE for a recognized INSERT.  These run a write WITHOUT a SQLite
+ * connection / VDBE / vtab, reusing the engine's own commit machinery
+ * (one hlc_tick commit timestamp per row, WAL-durable before apply,
+ * the same versioned record the vtab xUpdate path writes), so a native
+ * insert and a VDBE insert are byte-identical on disk.
+ */
+
+/* Resolve a table name to its catalog id.  Returns 1 with *tableid set,
+ * or 0 if the table is unknown (read-only catalog lookup). */
+int xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid);
+
+/* The smallest rowid strictly greater than every existing rowid in the
+ * table (max existing + 1, or 1 for an empty table) -- the value SQLite
+ * would assign to a NULL INTEGER PRIMARY KEY.  Snapshot value; callers
+ * needing concurrency-safe allocation must serialize. */
+int64_t xstore_max_rowid(bt_t *bt, uint32_t tableid);
+
+/* Autocommit-insert one already-encoded payload record at `rowid` (a new
+ * committed version).  `rec` is the xstore payload record (the same
+ * format xstore_rec_col decodes).  Returns 0 on success or <0 on error. */
+int xstore_put_rec(bt_t *bt, uint32_t tableid, int64_t rowid,
+                   const uint8_t *rec, int reclen);
+
 #endif /* SQLXTC_XSTORE_H */

@@ -1395,6 +1395,54 @@ xstore_rec_col(const uint8_t *rec, int reclen, int idx,
 	return XSTORE_C_NULL;   /* idx beyond the record */
 }
 
+/* ---- native autocommit write path (VDBE-free INSERT) ------------- */
+
+int
+xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid)
+{
+	uint32_t id;
+	if (bt == NULL || name == NULL) return 0;
+	id = xs_cat_lookup(bt, name);
+	if (id == 0) return 0;
+	if (tableid) *tableid = id;
+	return 1;
+}
+
+int64_t
+xstore_max_rowid(bt_t *bt, uint32_t tableid)
+{
+	/* The largest rowid in the table sorts last within the table's key
+	 * range (keys are (tableid, rowid, ~ts)).  Walk the range tracking
+	 * the max rowid seen; this counts tombstoned versions too, so a
+	 * reused rowid never collides with a deleted one's slot.  Empty
+	 * table -> 0, so the first insert is rowid 1. */
+	bt_cursor_t *cur = NULL;
+	uint8_t startk[XS_VKLEN];
+	const void *k = NULL, *vv = NULL; uint16_t klen = 0, vl = 0;
+	int64_t maxr = 0;
+
+	if (bt == NULL) return 0;
+	enc_vkey(tableid, INT64_MIN, ~(uint64_t)0, startk);
+	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK) return 0;
+	while (bt_cursor_next(cur, &k, &klen, &vv, &vl) == XTC_OK) {
+		int64_t rid;
+		if (klen != XS_VKLEN ||
+		    dec_tableid((const uint8_t *)k) != tableid) break;
+		rid = dec_rowid((const uint8_t *)k);
+		if (rid > maxr) maxr = rid;
+	}
+	bt_cursor_close(cur);
+	return maxr;
+}
+
+int
+xstore_put_rec(bt_t *bt, uint32_t tableid, int64_t rowid,
+               const uint8_t *rec, int reclen)
+{
+	if (bt == NULL || rec == NULL || reclen < 1) return -1;
+	return xs_put(bt, tableid, rowid, rec, reclen, 0) == SQLITE_OK ? 0 : -1;
+}
+
 static int
 xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
     int argc, xsql_value **argv)

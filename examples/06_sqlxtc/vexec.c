@@ -2982,6 +2982,244 @@ vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
 	return run_parallel_plan(plan, db, n_workers, res, errmsg);
 }
 
+/* ---- native autocommit write path (VDBE-free INSERT) ------------- */
+
+/*
+ * One column of the target table, in declared order.  is_pk marks the
+ * INTEGER PRIMARY KEY (xstore's rowid); the other columns are the
+ * payload, encoded in declared order (payload index = declared index
+ * with the pk column removed).
+ */
+struct wschema {
+	char    name[64][64];
+	int     is_pk[64];
+	int     n;
+	int     pk_col;        /* declared index of the pk, or -1 */
+};
+
+static int
+load_wschema(sqlite3 *db, const char *table, struct wschema *ws)
+{
+	sqlite3_stmt *ti = NULL;
+	char q[128];
+	ws->n = 0; ws->pk_col = -1;
+	snprintf(q, sizeof q, "PRAGMA table_info(%s)", table);
+	if (sqlite3_prepare_v2(db, q, -1, &ti, 0) != SQLITE_OK) return -1;
+	while (sqlite3_step(ti) == SQLITE_ROW && ws->n < 64) {
+		const char *nm = (const char *)sqlite3_column_text(ti, 1);
+		int pk = sqlite3_column_int(ti, 5);
+		if (nm == NULL) { sqlite3_finalize(ti); return -1; }
+		snprintf(ws->name[ws->n], sizeof ws->name[0], "%s", nm);
+		ws->is_pk[ws->n] = pk;
+		if (pk) ws->pk_col = ws->n;
+		ws->n++;
+	}
+	sqlite3_finalize(ti);
+	return ws->n > 0 ? 0 : -1;
+}
+
+/* Evaluate an INSERT VALUES literal into a vx_cell.  Returns 0 on a
+ * supported literal (INT/REAL/TEXT/NULL), or -1 (the statement is left
+ * to the VDBE).  No params, no expressions, no functions. */
+static int
+lit_cell(struct vx_arena_blk **arena, const sql_expr_t *e, vx_cell_t *out)
+{
+	memset(out, 0, sizeof *out);
+	if (e == NULL) { out->type = VX_NULL; return 0; }
+	switch (e->op) {
+	case SX_E_NULL:
+		out->type = VX_NULL; return 0;
+	case SX_E_NUMBER: {
+		char buf[64]; int i, isreal = 0;
+		if (e->lit.len == 0 || e->lit.len >= sizeof buf) return -1;
+		for (i = 0; i < (int)e->lit.len; i++) {
+			char ch = e->lit.p[i];
+			if (ch == '.' || ch == 'e' || ch == 'E') isreal = 1;
+		}
+		memcpy(buf, e->lit.p, e->lit.len); buf[e->lit.len] = '\0';
+		if (isreal) { out->type = VX_REAL; out->r = strtod(buf, NULL); }
+		else        { out->type = VX_INT;  out->i = strtoll(buf, NULL, 10); }
+		return 0;
+	}
+	case SX_E_STRING: {
+		uint8_t *p = (uint8_t *)arena_alloc(arena, e->lit.len + 1);
+		if (p == NULL) return -1;
+		if (e->lit.len) memcpy(p, e->lit.p, e->lit.len);
+		p[e->lit.len] = '\0';
+		out->type = VX_TEXT; out->bytes = p; out->nbytes = (int)e->lit.len;
+		return 0;
+	}
+	case SX_E_UNARY:
+		/* a leading minus on a numeric literal (-5) */
+		if (e->op2 == TK_MINUS && e->a && e->a->op == SX_E_NUMBER) {
+			if (lit_cell(arena, e->a, out) != 0) return -1;
+			if (out->type == VX_INT)  out->i = -out->i;
+			else if (out->type == VX_REAL) out->r = -out->r;
+			return 0;
+		}
+		return -1;
+	default:
+		return -1;
+	}
+}
+
+/* Encode a row's payload cells into the xstore record format
+ * ([npay:u8] then per-column [type][payload]) -- the SAME format the
+ * vtab xUpdate path writes via xs_rec_encode, so a native insert and a
+ * VDBE insert are byte-identical.  Returns the record length or -1. */
+static int
+encode_payload(const vx_cell_t *cells, int npay, uint8_t *out, int cap)
+{
+	int off = 0, i, b;
+	if (npay < 0 || npay > 255 || cap < 1) return -1;
+	out[off++] = (uint8_t)npay;
+	for (i = 0; i < npay; i++) {
+		const vx_cell_t *c = &cells[i];
+		if (c->type == VX_NULL) {
+			if (off + 1 > cap) return -1;
+			out[off++] = 0;
+		} else if (c->type == VX_INT) {
+			int64_t x = c->i;
+			if (off + 9 > cap) return -1;
+			out[off++] = 1;
+			for (b = 0; b < 8; b++) out[off++] = (uint8_t)(x >> (8 * b));
+		} else if (c->type == VX_REAL) {
+			uint64_t bits; memcpy(&bits, &c->r, 8);
+			if (off + 9 > cap) return -1;
+			out[off++] = 2;
+			for (b = 0; b < 8; b++) out[off++] = (uint8_t)(bits >> (8 * b));
+		} else {
+			int n = c->nbytes;
+			if (n < 0) n = 0;
+			if (off + 5 + n > cap) return -1;
+			out[off++] = (c->type == VX_TEXT) ? 3 : 4;
+			out[off++] = (uint8_t)(n & 0xff);
+			out[off++] = (uint8_t)((n >> 8) & 0xff);
+			out[off++] = (uint8_t)((n >> 16) & 0xff);
+			out[off++] = (uint8_t)((n >> 24) & 0xff);
+			if (n) memcpy(out + off, c->bytes, (size_t)n);
+			off += n;
+		}
+	}
+	return off;
+}
+
+int
+vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
+{
+	sql_arena_t *arena = NULL;
+	sql_stmt_t *root = NULL;
+	const char *perr = NULL;
+	sql_insert_t *ins;
+	char tabbuf[64];
+	bt_t *bt;
+	uint32_t tableid;
+	struct wschema ws;
+	struct vx_arena_blk *cell_arena = NULL;
+	int rc = 0, r, applied = 0;
+	int64_t maxr;
+
+	if (nchanges) *nchanges = 0;
+	if (errmsg) *errmsg = NULL;
+
+	if (sql_parse_ast(sql, strlen(sql), &arena, &root, &perr) != 0)
+		return 0;                         /* unparseable -> VDBE */
+	/* Exactly one INSERT statement, VALUES rows only. */
+	if (root == NULL || root->next != NULL ||
+	    root->kind != SQL_KIND_INSERT || root->u.insert == NULL) {
+		sql_arena_destroy(arena); return 0;
+	}
+	ins = root->u.insert;
+	if (ins->select != NULL || ins->def_values || ins->replace ||
+	    ins->rows == NULL || ins->n_rows < 1 || ins->cols != NULL ||
+	    ins->table.len == 0 || ins->table.len >= sizeof tabbuf) {
+		/* INSERT...SELECT, DEFAULT VALUES, REPLACE, an explicit column
+		 * list (column reordering / omission), or a missing table: let
+		 * the VDBE handle it.  Positional VALUES into all columns only. */
+		sql_arena_destroy(arena); return 0;
+	}
+	memcpy(tabbuf, ins->table.p, ins->table.len);
+	tabbuf[ins->table.len] = '\0';
+
+	bt = xstore_bt_of(db);
+	if (bt == NULL || !xstore_table_id(bt, tabbuf, &tableid)) {
+		sql_arena_destroy(arena); return 0;   /* not an xstore table -> VDBE */
+	}
+	if (load_wschema(db, tabbuf, &ws) != 0 || ws.pk_col != 0) {
+		/* The native path assumes the PK is declared column 0 (xstore's
+		 * convention); anything else -> VDBE. */
+		sql_arena_destroy(arena); return 0;
+	}
+	maxr = xstore_max_rowid(bt, tableid);
+
+	/* Two passes: validate + buffer EVERY row first (no writes); only if
+	 * all rows are literal-only with the right arity and an integer/NULL
+	 * PK do we apply.  Any unsupported row -> return 0 with zero writes,
+	 * a clean VDBE fallback (never a partial native apply). */
+	{
+		struct { int64_t rowid; uint8_t rec[1 + 64 * 16]; int reclen; } *buf;
+		int nb = 0;
+
+		buf = (void *)calloc((size_t)ins->n_rows, sizeof *buf);
+		if (buf == NULL) { rc = -1; goto done; }
+
+		for (r = 0; r < ins->n_rows; r++) {
+			sql_exprlist_t *row = ins->rows[r];
+			vx_cell_t cells[64];
+			int reclen, ncol = 0;
+			int64_t rowid;
+			sql_exprlist_item_t *it;
+
+			for (it = row ? row->head : NULL; it; it = it->next) {
+				if (ncol >= ws.n) { ncol = -1; break; }
+				if (lit_cell(&cell_arena, it->expr, &cells[ncol]) != 0) {
+					ncol = -1; break;             /* non-literal -> VDBE */
+				}
+				ncol++;
+			}
+			if (ncol != ws.n) { free(buf); rc = 0; goto done; }  /* arity / non-lit */
+
+			if (cells[0].type == VX_INT) {
+				rowid = cells[0].i;
+				if (rowid > maxr) maxr = rowid;
+			} else if (cells[0].type == VX_NULL) {
+				rowid = ++maxr;
+			} else { free(buf); rc = 0; goto done; }   /* non-int PK -> VDBE */
+
+			reclen = encode_payload(&cells[1], ws.n - 1, buf[nb].rec,
+			                        (int)sizeof buf[nb].rec);
+			if (reclen < 0) { free(buf); rc = 0; goto done; }   /* too big -> VDBE */
+			buf[nb].rowid = rowid;
+			buf[nb].reclen = reclen;
+			nb++;
+		}
+
+		/* All rows validated: apply. */
+		for (r = 0; r < nb; r++) {
+			if (xstore_put_rec(bt, tableid, buf[r].rowid,
+			                   buf[r].rec, buf[r].reclen) != 0) {
+				/* A put failed after some applied: report an error rather
+				 * than fall back (the VDBE would re-insert the applied
+				 * rows).  Storage-level failure, not a recognition miss. */
+				free(buf);
+				if (errmsg) *errmsg = strdup("native insert failed");
+				rc = -1; goto done;
+			}
+			applied++;
+		}
+		free(buf);
+	}
+
+	if (nchanges) *nchanges = applied;
+	rc = 1;
+
+done:
+	arena_free(cell_arena);
+	sql_arena_destroy(arena);
+	return rc;
+}
+
+
 int
 vx_run(sqlite3 *db, const char *sql, int n_workers,
        vx_result_t **res, char **errmsg)

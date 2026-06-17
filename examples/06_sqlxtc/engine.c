@@ -563,6 +563,15 @@ const void *sx_vexec_blob(const sx_vx_result *r, int row, int col)
 int sx_vexec_bytes(const sx_vx_result *r, int row, int col)
 { return vx_result_bytes((const vx_result_t *)r, row, col); }
 
+int
+sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges)
+{
+	char *verr = NULL;
+	int rc = vx_run_write((xsql *)h, sql, nchanges, &verr);
+	if (verr) free(verr);          /* caller falls back; no message surfaced */
+	return rc;
+}
+
 #else  /* !SQLXTC_HAVE_LIME -- no parser, so no vexec; always fall back. */
 
 int sx_vexec_try(sx_db *h, const char *sql, int n_workers, sx_vx_result **out)
@@ -582,6 +591,9 @@ const void *sx_vexec_blob(const sx_vx_result *r, int row, int col)
 { (void)r; (void)row; (void)col; return NULL; }
 int sx_vexec_bytes(const sx_vx_result *r, int row, int col)
 { (void)r; (void)row; (void)col; return 0; }
+
+int sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges)
+{ (void)h; (void)sql; if (nchanges) *nchanges = 0; return 0; }
 
 #endif /* SQLXTC_HAVE_LIME */
 

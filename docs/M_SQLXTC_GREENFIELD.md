@@ -240,3 +240,62 @@ slab-backed page cache (step 1 in its resident-set form); the
 lrlock-COW page table and the async
 read-submission refinement of the VFS are the proposed next phase,
 tracked in PLAN.md.
+
+## Front-end replacement: retiring the VDBE (the other axis)
+
+The steps above replace SQLite's OS-facing layers (pcache, VFS,
+mutex) while keeping its parser + planner + VDBE.  A parallel effort
+replaces the FRONT end -- the parser, the planner, and the executor --
+so that eventually nothing of sqlite3.c is on the live path and the
+amalgamation (and the xsql_* rename that hides it) can be deleted.
+This is the axis tracked in M_SQLXTC_VEXEC.md; its live-path state and
+the remaining gates are recorded here so the teardown order is
+explicit.
+
+What is on the live path now (after the Lime + vexec wiring):
+  - **Parser.**  Lime parses the statement once for routing
+    (sql_parse classifies kind / read-only from the AST; its grammar
+    is a strict subset of SQLite's, so an unparseable statement falls
+    through to a permissive keyword classifier and still reaches the
+    engine).  vexec parses the same statement with Lime to build its
+    plan.  SQLite ALSO still parses every query (for execution and for
+    column names).
+  - **Executor.**  db_exec_cached tries vexec first for param-free
+    read-only queries; vexec serves the recognized shapes (scan /
+    filter / project / scalar expressions / hash aggregation +
+    GROUP BY / ORDER BY + LIMIT / one INNER hash join) over the xstore
+    B-tree with no VDBE on the hot path, and falls back to the VDBE
+    for anything it does not recognize.  test_db_vexec proves the live
+    response is identical whichever engine serves it (ordered queries
+    byte-identical, unordered as a row multiset -- an unordered result
+    may legally come back in a different row order from each engine).
+  - **Everything else is still SQLite:** column NAMES even for vexec
+    queries (borrowed from the VDBE prepare), all WRITES (INSERT /
+    UPDATE / DELETE flow VDBE -> xstore vtab xUpdate/xBegin/xCommit),
+    all DDL, all parametrized statements, and every query vexec does
+    not recognize.
+
+The gates to actually deleting sqlite3.c, in dependency order:
+
+  3. **A native storage path -- drop the vtab round-trip.**  Today
+     every write is VDBE-driven: SQLite parses+plans the DML and calls
+     the xstore virtual-table methods (xUpdate/xBegin/xSync/xCommit).
+     Give xstore a native write/transaction entry point so a write
+     executor calls storage directly.  Writes are 100% SQLite-driven
+     today, so this is the single largest dependency and the highest-
+     leverage cut.  First slice: the simplest INSERT, behind the same
+     vexec-first / VDBE-fallback discipline and differential-tested
+     against the VDBE.
+  4. **Native column naming + a minimal planner.**  vexec must produce
+     its own column names (from the Lime select-items + SQLite's
+     naming rules) so it stops borrowing the VDBE prepare, and a
+     minimal planner must cover the cases SQLite currently plans
+     (index choice / join order) for the shapes vexec executes.
+  5. **Retire sqlite3.c.**  Possible only once the parser + planner +
+     read executor + write executor cover the ENTIRE accepted surface,
+     so the VDBE fallback can be removed.  Then drop xsql.h, delete
+     sqlite3.c / sqlite3.h, drop vfs.c / pcache.c / mutex.c / mem.c
+     (they exist to plug INTO SQLite), and the residual xsql_* call
+     sites in engine.c call the native engine directly.  The sqlite3_*
+     names leave the tree automatically when the code they rename is
+     gone -- they are the last thing removed, not the first.
