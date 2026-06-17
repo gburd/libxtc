@@ -607,14 +607,15 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 
 /* Derive the output column name for a select item, matching SQLite:
  * the AS alias if present, else for a bare (optionally qualified) column
- * reference the unqualified column name.  For anything else (an
- * expression, function, or star) SQLite names the column by its
- * verbatim source text, which the AST does not record -- leave dst
- * empty so the caller uses the VDBE-prepared name. */
+ * reference the unqualified column name, else the expression's VERBATIM
+ * SOURCE TEXT (its span in the original SQL) -- which is how SQLite
+ * names an expression column (a+1, count(*), a || b).  Leaves dst empty
+ * only if no name can be derived (the caller then uses the VDBE name). */
 static void
 item_name(const sql_exprlist_item_t *it, char *dst, size_t cap)
 {
 	const sql_expr_t *e;
+	const char *sp; int sl;
 	dst[0] = '\0';
 	if (it == NULL) return;
 	if (it->alias.len > 0 && it->alias.len < cap) {
@@ -629,6 +630,12 @@ item_name(const sql_exprlist_item_t *it, char *dst, size_t cap)
 			memcpy(dst, nm->p, nm->len);
 			dst[nm->len] = '\0';
 		}
+		return;
+	}
+	/* Expression column: name it by its verbatim source span. */
+	if (sql_expr_span(e, &sp, &sl) && sl > 0 && (size_t)sl < cap) {
+		memcpy(dst, sp, (size_t)sl);
+		dst[sl] = '\0';
 	}
 }
 

@@ -87,3 +87,41 @@ sql_arena_alloc(sql_arena_t *a, size_t n)
 	memset(p, 0, n);
 	return p;
 }
+
+/* Accumulate the min start / max end over the span-bearing leaves of an
+ * expression tree.  All spans point into the same source buffer, so the
+ * union is just [min(start), max(end)). */
+static void
+expr_span_acc(const sql_expr_t *e, const char **lo, const char **hi)
+{
+	const sql_case_arm_t *arm;
+	const sql_exprlist_item_t *it;
+	if (e == NULL) return;
+	if (e->src != NULL && e->srclen > 0) {
+		const char *s = e->src, *t = e->src + e->srclen;
+		if (*lo == NULL || s < *lo) *lo = s;
+		if (*hi == NULL || t > *hi) *hi = t;
+	}
+	expr_span_acc(e->a, lo, hi);
+	expr_span_acc(e->b, lo, hi);
+	expr_span_acc(e->c, lo, hi);
+	if (e->list)
+		for (it = e->list->head; it; it = it->next)
+			expr_span_acc(it->expr, lo, hi);
+	for (arm = e->arms; arm; arm = arm->next) {
+		expr_span_acc(arm->when, lo, hi);
+		expr_span_acc(arm->then, lo, hi);
+	}
+	expr_span_acc(e->els, lo, hi);
+}
+
+int
+sql_expr_span(const sql_expr_t *e, const char **p, int *len)
+{
+	const char *lo = NULL, *hi = NULL;
+	expr_span_acc(e, &lo, &hi);
+	if (lo == NULL || hi == NULL || hi <= lo) return 0;
+	if (p) *p = lo;
+	if (len) *len = (int)(hi - lo);
+	return 1;
+}

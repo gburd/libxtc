@@ -101,6 +101,13 @@ struct sql_expr {
 	sql_select_t   *sel;      /* subquery (SUBQUERY / IN_SELECT) */
 	sql_case_arm_t *arms;     /* CASE arms */
 	sql_expr_t     *els;      /* CASE ELSE */
+	/* Verbatim source span of this node's own token(s), into the SQL
+	 * text the parser was given (NULL/0 if not a span-bearing leaf).
+	 * The whole-expression span is the union over the tree -- see
+	 * sql_expr_span() -- and gives SQLite-style column names for
+	 * expression select items. */
+	const char     *src;
+	uint32_t        srclen;
 };
 
 /* A list of expressions (select list items, VALUES row, IN list, args). */
@@ -270,5 +277,12 @@ typedef struct sql_stmt {
 	} u;
 	struct sql_stmt *next;      /* statements are chained (a; b; c) */
 } sql_stmt_t;
+
+/* Compute the verbatim source span of an expression: the union of the
+ * span-bearing leaves under it.  Returns 1 with *p / *len set to the
+ * slice of the original SQL text covering the whole expression, or 0 if
+ * no leaf carried a span.  Used to name an expression select item the
+ * way SQLite does (its source text). */
+int sql_expr_span(const sql_expr_t *e, const char **p, int *len);
 
 #endif /* SQLXTC_SQL_AST_H */
