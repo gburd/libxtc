@@ -5,9 +5,15 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/sql_parse.c
- *	Phase 1: keyword-based SQL classifier (no Lime yet).
- *	Phase 2: drives the Lime-generated parser in sql_parse_gen.c
- *	via sql_parse_lime() (compiled in when SQLXTC_HAVE_LIME=1).
+ *	SQL statement classifier for query routing.  When the Lime parser
+ *	is compiled in (SQLXTC_HAVE_LIME), Lime classifies the statement
+ *	from its AST whenever it can parse it -- one parse, kind and the
+ *	read-only flag taken from the parsed statement rather than guessed
+ *	from the leading keyword.  Lime's grammar is a strict subset of
+ *	SQLite's, so a query Lime cannot parse falls through to the
+ *	permissive keyword-prefix classifier (the no-Lime fallback) and
+ *	still reaches the engine; routing never rejects a query SQLite
+ *	would accept.
  */
 
 #include "sql_parse.h"
@@ -59,16 +65,16 @@ parse_keyword(const char *p, const char *end, const char *kw)
 extern int sql_parse_lime(const char *sql, size_t len, sql_info_t *info);
 #endif
 
-int
-sql_parse(const char *sql, size_t len, sql_info_t *info)
+/* Keyword-prefix classifier: the fallback when Lime is not compiled in.
+ * Looks only at the leading keyword, so its read-only flags are
+ * approximations (a PRAGMA that sets a value, an EXPLAIN of a writer);
+ * the Lime path computes kind / read-only from the parsed statement. */
+static int
+sql_classify_prefix(const char *sql, size_t len, sql_info_t *info)
 {
 	const char *p = sql;
 	const char *end = sql + len;
 	int n;
-
-	memset(info, 0, sizeof *info);
-	info->kind = SQL_KIND_UNKNOWN;
-	info->readonly = 0;
 
 	parse_skip_ws(&p, end);
 
@@ -118,19 +124,37 @@ sql_parse(const char *sql, size_t len, sql_info_t *info)
 		return -1;
 	}
 	(void)n;
+	return 0;
+}
+
+int
+sql_parse(const char *sql, size_t len, sql_info_t *info)
+{
+	memset(info, 0, sizeof *info);
+	info->kind = SQL_KIND_UNKNOWN;
+	info->readonly = 0;
 
 #ifdef SQLXTC_HAVE_LIME
+	/* Lime classifies the statement from the AST when it can parse it.
+	 * Lime's grammar is a strict subset of SQLite's, so a Lime parse
+	 * FAILURE does not reject the query (SQLite may still accept it) --
+	 * it falls through to the permissive prefix classifier, which keeps
+	 * the query reaching the VDBE.  Only when Lime parses AND classifies
+	 * do we trust its AST-derived kind / read-only flag. */
 	{
-		sql_info_t lime_info = *info;
-		int rc = sql_parse_lime(sql, len, &lime_info);
-		if (rc == 0 && lime_info.kind != SQL_KIND_UNKNOWN) {
+		sql_info_t lime_info;
+		memset(&lime_info, 0, sizeof lime_info);
+		lime_info.kind = SQL_KIND_UNKNOWN;
+		if (sql_parse_lime(sql, len, &lime_info) == 0 &&
+		    lime_info.kind != SQL_KIND_UNKNOWN) {
 			info->kind = lime_info.kind;
 			info->readonly = lime_info.readonly;
+			return 0;                        /* classified from the AST */
 		}
 	}
 #endif
 
-	return 0;
+	return sql_classify_prefix(sql, len, info);
 }
 
 char *
