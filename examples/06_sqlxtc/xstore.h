@@ -156,4 +156,22 @@ int xstore_put_rec(bt_t *bt, uint32_t tableid, int64_t rowid,
  * tombstone (idempotent), matching the vtab DELETE path. */
 int xstore_delete_rec(bt_t *bt, uint32_t tableid, int64_t rowid);
 
+/* Transaction-aware native write: buffers into the connection's write
+ * set when a BEGIN..COMMIT is open (committing atomically at one
+ * timestamp with any other writes in the transaction, VDBE or native),
+ * or autocommits immediately in autocommit mode.  `deleted` writes a
+ * tombstone (rec/reclen ignored).  Returns 0 on success, <0 on error. */
+int xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
+                     const uint8_t *rec, int reclen, int deleted);
+
+/* True if the connection has an open (non-autocommit) transaction. */
+int xstore_in_txn(struct xsql *db);
+/* Native transaction control: flush (commit) or discard (rollback) the
+ * connection's buffered write set at one timestamp.  The live path runs
+ * these just before the SQLite COMMIT/ROLLBACK statement so native
+ * (VDBE-free) buffered writes are durable / discarded atomically.
+ * No-ops when not in a transaction.  Return 0 / <0. */
+int xstore_commit(struct xsql *db);
+int xstore_rollback(struct xsql *db);
+
 #endif /* SQLXTC_XSTORE_H */

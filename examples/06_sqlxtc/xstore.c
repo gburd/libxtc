@@ -732,7 +732,7 @@ static pthread_mutex_t g_cat_mu = PTHREAD_MUTEX_INITIALIZER;
  * from a connection handle (xstore_bt_of) can open a storage-native
  * scan over the same B-tree the connection's xstore tables use. */
 #define XS_DBMAP_MAX 64
-static struct xs_dbmap_ent { struct xsql *db; bt_t *bt; } g_dbmap[XS_DBMAP_MAX];
+static struct xs_dbmap_ent { struct xsql *db; bt_t *bt; xstore_ctx_t *ctx; } g_dbmap[XS_DBMAP_MAX];
 static int g_dbmap_n;
 
 bt_t *
@@ -744,6 +744,22 @@ xstore_bt_of(struct xsql *db)
 		if (g_dbmap[i].db == db) { bt = g_dbmap[i].bt; break; }
 	pthread_mutex_unlock(&g_cat_mu);
 	return bt;
+}
+
+/* The connection's transaction context (the per-connection xstore_ctx_t
+ * registered by xstore_register), or NULL if the connection is not
+ * xstore-backed.  Lets the native write path buffer into the SAME
+ * transaction buffer the vtab path uses, so native and VDBE writes in
+ * one BEGIN..COMMIT commit atomically at one timestamp. */
+static xstore_ctx_t *
+xstore_ctx_of(struct xsql *db)
+{
+	int i; xstore_ctx_t *ctx = NULL;
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_dbmap_n; i++)
+		if (g_dbmap[i].db == db) { ctx = g_dbmap[i].ctx; break; }
+	pthread_mutex_unlock(&g_cat_mu);
+	return ctx;
 }
 
 /* Look up `name` in the persisted catalog (table-id 0): the newest
@@ -898,10 +914,8 @@ xstore_cat_forget(bt_t *bt)
  * read).
  */
 static void
-xs_enter(xstore_vtab_t *v)
+xs_enter_ctx(xstore_ctx_t *cx, struct xsql *db)
 {
-	xstore_ctx_t *cx = v->ctx;
-
 	/*
 	 * Close a finished transaction.  A read-only transaction fires
 	 * neither the vtab write hooks nor SQLite's connection commit hook
@@ -912,13 +926,13 @@ xs_enter(xstore_vtab_t *v)
 	 * 2PC xCommit/xRollback path before autocommit returned, so this is
 	 * then a no-op.
 	 */
-	if (cx->in_txn && xsql_get_autocommit(v->db)) {
+	if (cx->in_txn && xsql_get_autocommit(db)) {
 		if (cx->ssi != NULL) { ssi_abort(cx->ssi); cx->ssi = NULL; }
 		wbuf_clear(cx);
 		cx->in_txn = 0;
 		xs_pin_recompute(cx);
 	}
-	if (!xsql_get_autocommit(v->db) && !cx->in_txn) {
+	if (!xsql_get_autocommit(db) && !cx->in_txn) {
 		cx->in_txn = 1;
 		cx->txn_snap = atomic_load_explicit(&g_xclock, memory_order_relaxed);
 		wbuf_clear(cx);
@@ -929,6 +943,12 @@ xs_enter(xstore_vtab_t *v)
 		cx->ssi = cx->serializable ? ssi_begin(cx->txn_snap) : NULL;
 		xs_pin_recompute(cx);     /* pin txn_snap against version GC */
 	}
+}
+
+static void
+xs_enter(xstore_vtab_t *v)
+{
+	xs_enter_ctx(v->ctx, v->db);
 }
 
 typedef struct xstore_cursor {
@@ -2000,6 +2020,46 @@ xs_buf_write(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid,
 	return rc;
 }
 
+/*
+ * Native write entry points (transaction-aware).  These are what the
+ * VDBE-free write path (vexec) calls: they route a write the SAME way
+ * xs_update does -- buffer into the connection's wbuf when a transaction
+ * is open (so COMMIT flushes it atomically at one timestamp, ROLLBACK
+ * discards it, and it commits together with any VDBE writes in the same
+ * BEGIN..COMMIT), or autocommit immediately (one fresh timestamp) in
+ * autocommit mode.  Transaction open/close is driven by SQLite's
+ * autocommit flag exactly as the vtab path is, via xs_enter_ctx, so the
+ * two paths share one transaction.  Returns 0 on success, <0 on error.
+ */
+int
+xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
+                 const uint8_t *rec, int reclen, int deleted)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	int rc;
+	if (cx == NULL) return -1;
+	xs_enter_ctx(cx, db);   /* sync in_txn with SQLite's autocommit flag */
+	if (cx->in_txn)
+		rc = xs_buf_write(cx, tableid, rowid, deleted ? NULL : rec,
+		                  deleted ? 0 : reclen, deleted);
+	else
+		rc = xs_put_pruned(cx, tableid, rowid, deleted ? NULL : rec,
+		                   deleted ? 0 : reclen, deleted);
+	return rc == SQLITE_OK ? 0 : -1;
+}
+
+/* True if the connection currently has an open (non-autocommit)
+ * transaction -- so the native write path can read the current row's
+ * pre-image from the wbuf (read-your-writes) rather than the B-tree. */
+int
+xstore_in_txn(struct xsql *db)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx == NULL) return 0;
+	xs_enter_ctx(cx, db);
+	return cx->in_txn;
+}
+
 static int
 xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
     xsql_int64 *pRowid)
@@ -2165,9 +2225,8 @@ xs_wal_log(xstore_ctx_t *cx, uint64_t ts)
 }
 
 static int
-xs_commit(xsql_vtab *pv)
+xs_commit_ctx(xstore_ctx_t *cx)
 {
-	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
 	uint64_t ts;
 	int i, rc = SQLITE_OK;
 	if (!cx->in_txn)
@@ -2206,15 +2265,49 @@ xs_commit(xsql_vtab *pv)
 	return rc;
 }
 static int
-xs_rollback(xsql_vtab *pv)
+xs_commit(xsql_vtab *pv)
 {
-	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
+	return xs_commit_ctx(((xstore_vtab_t *)pv)->ctx);
+}
+static int
+xs_rollback_ctx(xstore_ctx_t *cx)
+{
 	ssi_abort(cx->ssi);
 	cx->ssi = NULL;
 	wbuf_clear(cx);
 	cx->in_txn = 0;
 	xs_pin_recompute(cx);
 	return SQLITE_OK;
+}
+static int
+xs_rollback(xsql_vtab *pv)
+{
+	return xs_rollback_ctx(((xstore_vtab_t *)pv)->ctx);
+}
+
+/*
+ * Native transaction control -- what the live path calls when it sees a
+ * COMMIT / ROLLBACK statement that may carry native (VDBE-free) writes
+ * buffered in this connection's wbuf.  The live path runs these BEFORE
+ * the SQLite COMMIT/ROLLBACK statement, so the native writes flush /
+ * discard while in_txn is still set; the subsequent SQLite statement
+ * just flips autocommit back on (its vtab xCommit/xRollback then no-ops
+ * on the now-empty, closed buffer).  No-ops when not in a transaction or
+ * not xstore-backed.
+ */
+int
+xstore_commit(struct xsql *db)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx == NULL || !cx->in_txn) return 0;
+	return xs_commit_ctx(cx) == SQLITE_OK ? 0 : -1;
+}
+int
+xstore_rollback(struct xsql *db)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx == NULL || !cx->in_txn) return 0;
+	return xs_rollback_ctx(cx) == SQLITE_OK ? 0 : -1;
 }
 
 /*
@@ -2547,7 +2640,7 @@ xstore_register(xsql *db, bt_t *bt)
 		for (i = 0; i < g_dbmap_n; i++)
 			if (g_dbmap[i].db == db) { slot = i; break; }
 		if (slot < 0 && g_dbmap_n < XS_DBMAP_MAX) slot = g_dbmap_n++;
-		if (slot >= 0) { g_dbmap[slot].db = db; g_dbmap[slot].bt = bt; }
+		if (slot >= 0) { g_dbmap[slot].db = db; g_dbmap[slot].bt = bt; g_dbmap[slot].ctx = ctx; }
 	}
 	pthread_mutex_unlock(&g_cat_mu);
 	atomic_store(&ctx->read_snap, 0);

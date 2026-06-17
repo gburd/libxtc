@@ -38,6 +38,52 @@ db_vexec_workers(void)
 	return w > 0 ? w : 1;
 }
 
+/* Skip leading whitespace and a leading SQL comment, then case-
+ * insensitively test whether `sql` begins with `kw` as a whole keyword.
+ * Cheap recognizer for COMMIT / ROLLBACK / END so the live path can
+ * flush native buffered writes around transaction control. */
+static int
+sql_starts_kw(const char *sql, const char *kw)
+{
+	const char *p = sql;
+	size_t n = strlen(kw), i;
+	while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+	for (i = 0; i < n; i++) {
+		char c = p[i];
+		if (c >= 'a' && c <= 'z') c -= 32;
+		if (c != kw[i]) return 0;
+	}
+	{
+		char t = p[n];
+		if ((t >= 'a' && t <= 'z') || (t >= 'A' && t <= 'Z') ||
+		    (t >= '0' && t <= '9') || t == '_')
+			return 0;   /* longer identifier, not the bare keyword */
+	}
+	return 1;
+}
+
+/* Before running a COMMIT / ROLLBACK / END statement, flush or discard
+ * any native (VDBE-free) writes buffered in this connection's write set
+ * so they commit / abort atomically with the transaction.  The SQLite
+ * statement then runs to flip autocommit back on (its vtab hook no-ops
+ * on the now-closed buffer). */
+static void
+db_native_txn_end(sx_db *h, const char *sql)
+{
+	if (sql_starts_kw(sql, "COMMIT") || sql_starts_kw(sql, "END")) {
+		sx_vexec_commit(h);
+	} else if (sql_starts_kw(sql, "ROLLBACK")) {
+		/* ROLLBACK TO <savepoint> is a partial undo, not a transaction
+		 * abort -- leave it to SQLite + the vtab savepoint hooks. */
+		const char *p = sql;
+		while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+		p += 8;   /* past "ROLLBACK" */
+		while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+		if (sql_starts_kw(p, "TO")) return;       /* savepoint partial undo */
+		sx_vexec_rollback(h);
+	}
+}
+
 /* Decode a hex or base64 blob param into a freshly malloc'd buffer.
  * Returns 0 and sets out / outn (caller frees *out), or -1 on a
  * malformed encoding. */
@@ -602,6 +648,7 @@ db_exec_params(sx_db *h, const char *sql,
 
 		/* Stream rows only for the final statement; earlier ones run
 		 * for side effects (multi-statement batch). */
+		db_native_txn_end(h, cur);   /* flush native writes before COMMIT/ROLLBACK */
 		if (exec_stmt(h, stmt, limit, is_last, out_buf,
 		    &last_ncols, &rows, err) != 0) {
 			sx_finalize(stmt);
@@ -769,6 +816,7 @@ db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
 		}
 	}
 
+	db_native_txn_end(h, sql);   /* flush native writes before COMMIT/ROLLBACK */
 	if (exec_stmt(h, *pstmt, limit, 1, out_buf, &ncols, &rows, err) != 0) {
 		sx_finalize(*pstmt); *pstmt = NULL;
 		return -1;

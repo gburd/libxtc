@@ -3407,9 +3407,19 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 		sql_arena_destroy(arena); return 0;
 	}
 
-	/* ---- DELETE ... WHERE pk = <lit> --------------------------------- */
-	/* ---- DELETE [WHERE pk-range] -- a point, a range, or the whole table
-	 * over the primary key (= / < / <= / > / >= / BETWEEN / no WHERE). */
+	/* DELETE / UPDATE inside an open transaction must observe this
+	 * transaction's own earlier buffered writes (read-your-writes) when
+	 * reading the row to delete/update.  The native read path scans the
+	 * committed B-tree at the txn snapshot and does not see the wbuf, so
+	 * a transactional DELETE/UPDATE falls back to the VDBE (whose vtab
+	 * cursor merges the wbuf).  INSERT needs no such read, so it stays
+	 * native and buffers into the same transaction. */
+	if ((root->kind == SQL_KIND_DELETE || root->kind == SQL_KIND_UPDATE) &&
+	    xstore_in_txn(db)) {
+		sql_arena_destroy(arena); return 0;
+	}
+
+	/* ---- DELETE [WHERE pk-range or general predicate] ---------------- */
 	if (root->kind == SQL_KIND_DELETE) {
 		int64_t lo, hi; int has_lo, has_hi;
 		int64_t *rids;
@@ -3565,10 +3575,11 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 			nb++;
 		}
 
-		/* All rows validated: apply. */
+		/* All rows validated: apply.  xstore_write_txn buffers into the
+		 * open transaction (atomic at COMMIT) or autocommits each row. */
 		for (r = 0; r < nb; r++) {
-			if (xstore_put_rec(bt, tableid, buf[r].rowid,
-			                   buf[r].rec, buf[r].reclen) != 0) {
+			if (xstore_write_txn(db, tableid, buf[r].rowid,
+			                     buf[r].rec, buf[r].reclen, 0) != 0) {
 				/* A put failed after some applied: report an error rather
 				 * than fall back (the VDBE would re-insert the applied
 				 * rows).  Storage-level failure, not a recognition miss. */

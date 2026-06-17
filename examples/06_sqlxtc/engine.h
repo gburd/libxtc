@@ -178,6 +178,14 @@ const char      *sx_vexec_name(const sx_vx_result *r, int col);
  */
 int              sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges);
 
+/* Native transaction control: flush / discard the connection's buffered
+ * native writes at one timestamp.  The live path calls the matching one
+ * just before running a COMMIT / ROLLBACK statement, so VDBE-free writes
+ * buffered during a BEGIN..COMMIT are made durable / discarded
+ * atomically.  No-ops when not in a transaction or not xstore-backed. */
+void             sx_vexec_commit(sx_db *h);
+void             sx_vexec_rollback(sx_db *h);
+
 #ifdef __cplusplus
 }
 #endif
