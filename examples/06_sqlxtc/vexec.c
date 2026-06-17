@@ -336,11 +336,12 @@ nv_add(struct namevec *nv, const sql_str_t *s)
 }
 
 /* Resolve each source column (by name, in nv order) against the table
- * schema via PRAGMA table_info -- WITHOUT stepping a data row, so the
- * VDBE stays off the hot path.  Fills nv->aff[i] from the declared type
- * and pay[i] = -1 if the column is the INTEGER PRIMARY KEY (the rowid)
- * else its 0-based payload index (cid - 1).  Returns 0 if every source
- * column resolved, -1 otherwise. */
+ * schema.  Tries the native xstore catalog first (no VDBE, no
+ * sqlite_master); falls back to PRAGMA table_info for non-xstore tables
+ * or tables without a recorded schema.  Fills nv->aff[i] from the
+ * declared type and pay[i] = -1 if the column is the INTEGER PRIMARY KEY
+ * (the rowid) else its 0-based payload index.  Returns 0 if every
+ * source column resolved, -1 otherwise. */
 static int
 resolve_schema(sqlite3 *db, const char *table, struct namevec *nv, int *pay)
 {
@@ -349,6 +350,33 @@ resolve_schema(sqlite3 *db, const char *table, struct namevec *nv, int *pay)
 	int i, ok = 1, resolved = 0;
 
 	for (i = 0; i < nv->n; i++) pay[i] = -2;   /* unresolved sentinel */
+
+	/* Native catalog first. */
+	{
+		bt_t *bt = xstore_bt_of(db);
+		xstore_col_t cols[64];
+		int nc = bt ? xstore_table_schema(bt, table, cols, 64) : 0;
+		if (nc > 0) {
+			int c;
+			for (c = 0; c < nc; c++)
+				for (i = 0; i < nv->n; i++) {
+					if (pay[i] != -2) continue;
+					if (strcmp(nv->names[i], cols[c].name) != 0) continue;
+					pay[i] = cols[c].is_pk ? -1 : (c - 1);
+					/* The PK is the INTEGER rowid regardless of its declared
+					 * type, matching how SQLite reports an INTEGER PRIMARY
+					 * KEY -- so its affinity is numeric, not the empty/BLOB
+					 * default a bare "k" coldef would give. */
+					nv->aff[i] = cols[c].is_pk ? VX_AFF_NUMERIC
+					                          : vx_affinity(cols[c].decltype);
+					resolved++;
+				}
+			for (i = 0; i < nv->n; i++) if (pay[i] == -2) ok = 0;
+			return (ok && resolved >= nv->n) ? 0 : -1;
+		}
+	}
+
+	/* Fall back to sqlite_master via PRAGMA table_info. */
 	snprintf(q, sizeof q, "PRAGMA table_info(%s)", table);
 	if (sqlite3_prepare_v2(db, q, -1, &ti, 0) != SQLITE_OK) return -1;
 	while (sqlite3_step(ti) == SQLITE_ROW) {
@@ -3170,6 +3198,24 @@ load_wschema(sqlite3 *db, const char *table, struct wschema *ws)
 	sqlite3_stmt *ti = NULL;
 	char q[128];
 	ws->n = 0; ws->pk_col = -1;
+
+	/* Native catalog first (no VDBE / no sqlite_master). */
+	{
+		bt_t *bt = xstore_bt_of(db);
+		xstore_col_t cols[64];
+		int nc = bt ? xstore_table_schema(bt, table, cols, 64) : 0, c;
+		if (nc > 0) {
+			for (c = 0; c < nc && ws->n < 64; c++) {
+				snprintf(ws->name[ws->n], sizeof ws->name[0], "%.*s",
+				         (int)(sizeof ws->name[0] - 1), cols[c].name);
+				ws->is_pk[ws->n] = cols[c].is_pk;
+				if (cols[c].is_pk) ws->pk_col = ws->n;
+				ws->n++;
+			}
+			return ws->n > 0 ? 0 : -1;
+		}
+	}
+
 	snprintf(q, sizeof q, "PRAGMA table_info(%s)", table);
 	if (sqlite3_prepare_v2(db, q, -1, &ti, 0) != SQLITE_OK) return -1;
 	while (sqlite3_step(ti) == SQLITE_ROW && ws->n < 64) {

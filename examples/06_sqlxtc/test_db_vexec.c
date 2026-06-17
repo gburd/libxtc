@@ -172,6 +172,18 @@ main(void)
 		fprintf(stderr, "FAIL: create: %s\n", err ? err : "?");
 		free(err); return 1;
 	}
+	/* The native catalog must carry the column schema (no sqlite_master):
+	 * (k pk), (a INT), (b TEXT). */
+	{
+		xstore_col_t cols[8];
+		int nc = xstore_table_schema(bt, "t", cols, 8);
+		CK(nc == 3, "native schema has 3 columns");
+		if (nc == 3) {
+			CK(strcmp(cols[0].name, "k") == 0 && cols[0].is_pk, "col0 = k pk");
+			CK(strcmp(cols[1].name, "a") == 0 && cols[1].affinity == 'i', "col1 = a INT");
+			CK(strcmp(cols[2].name, "b") == 0 && cols[2].affinity == 't', "col2 = b TEXT");
+		}
+	}
 	{
 		sqlite3_stmt *ins = NULL;
 		int r;
