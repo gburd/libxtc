@@ -1566,17 +1566,24 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 			}
 		}
 	} else {
-		/* Verify the WHERE (if any) is V1-compilable in principle; its
-		 * column names are resolved against the "SELECT *" source below. */
-		struct namevec scratch; memset(&scratch, 0, sizeof scratch);
-		if (sel->where && collect_columns(&scratch, sel->where) != 0)
-			goto fallback;
+		/* SELECT *: expand to every table column (in declared order)
+		 * from the native catalog, so the source carries all of them and
+		 * the projection is the identity.  Needs the native schema (an
+		 * xstore table); a non-xstore SELECT * falls back. */
+		bt_t *sbt = xstore_bt_of(db);
+		xstore_col_t scols[64];
+		int snc = sbt ? xstore_table_schema(sbt, tabbuf, scols, 64) : 0, sc;
+		if (snc <= 0) goto fallback;
+		for (sc = 0; sc < snc; sc++) {
+			sql_str_t s; s.p = scols[sc].name; s.len = (uint32_t)strlen(scols[sc].name);
+			if (nv_add(&nv, &s) < 0) goto fallback;
+		}
+		if (sel->where && collect_columns(&nv, sel->where) != 0) goto fallback;
+		nproj = snc;
 	}
 
-	/* Storage-native source.  SELECT * falls back (its column set would
-	 * have to be expanded from the schema); explicit-column queries scan
-	 * the B-tree directly with no VDBE on the hot path. */
-	if (proj_star) goto fallback;
+	/* Storage-native source.  SELECT * is expanded above into the column
+	 * list; explicit-column queries scan the B-tree directly. */
 	if (nv.n == 0 || nv.n > 32) goto fallback;
 
 	st->bt = xstore_bt_of(db);
@@ -1615,10 +1622,23 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	{
 		int k = 0;
 		comp.fail = 0;
-		for (it = sel->cols->head; it; it = it->next, k++) {
-			st->proj[k] = compile_expr(&comp, it->expr);
-			if (comp.fail) goto fallback;
-			item_name(it, st->outname[k], sizeof st->outname[0]);
+		if (proj_star) {
+			/* Identity projection over every source column, named from
+			 * the schema (the nv column order is the declared order). */
+			for (k = 0; k < nproj; k++) {
+				vx_expr_t *n = expr_node(&comp, VXO_COL);
+				if (n == NULL) goto oom;
+				n->col = k;
+				st->proj[k] = n;
+				snprintf(st->outname[k], sizeof st->outname[0], "%.*s",
+				         (int)(sizeof st->outname[0] - 1), nv.names[k]);
+			}
+		} else {
+			for (it = sel->cols->head; it; it = it->next, k++) {
+				st->proj[k] = compile_expr(&comp, it->expr);
+				if (comp.fail) goto fallback;
+				item_name(it, st->outname[k], sizeof st->outname[0]);
+			}
 		}
 		if (sel->where) {
 			st->filter = compile_expr(&comp, sel->where);
