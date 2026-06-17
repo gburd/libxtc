@@ -147,14 +147,15 @@ main(void)
 		{ "SELECT count(a), sum(a), min(a), max(a) FROM t",        1 },
 		{ "SELECT b, count(*), sum(a) FROM t GROUP BY b",          0 },
 		{ "SELECT k, a FROM t ORDER BY a, k",                      1 },
-		{ "SELECT k, a FROM t ORDER BY k LIMIT 5 OFFSET 3",        1 }
+		{ "SELECT k, a FROM t ORDER BY k LIMIT 5 OFFSET 3",        1 },
+		{ "SELECT * FROM t WHERE k = 5",                           1 },
+		{ "SELECT * FROM t WHERE a > 50",                          0 }
 	};
 	/* Queries vexec FALLS BACK on -- the VDBE serves both runs, so they
 	 * are byte-identical by construction. */
 	static const struct q fallback_q[] = {
 		{ "SELECT a FROM t WHERE a IN (1,2,3)",  1 },
-		{ "SELECT DISTINCT b FROM t",            0 },
-		{ "SELECT * FROM t WHERE k = 5",         1 }
+		{ "SELECT DISTINCT b FROM t",            0 }
 	};
 	int nv = (int)(sizeof vexec_q / sizeof vexec_q[0]);
 	int nf = (int)(sizeof fallback_q / sizeof fallback_q[0]);

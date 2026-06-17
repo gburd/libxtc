@@ -170,7 +170,7 @@ main(void)
 	struct { const char *sql; int expect_recognized; } corpus[] = {
 		/* ---- P1: must be recognized AND match the VDBE ---- */
 		{ "SELECT a, b FROM t", 1 },
-		{ "SELECT * FROM t", 0 },
+		{ "SELECT * FROM t", 1 },
 		{ "SELECT b, a, k FROM t", 1 },
 		{ "SELECT a FROM t WHERE a > 10", 1 },
 		{ "SELECT a, b FROM t WHERE a = 5", 1 },
@@ -178,9 +178,9 @@ main(void)
 		{ "SELECT a FROM t WHERE a < 100", 1 },
 		{ "SELECT a, b FROM t WHERE b = 'three'", 1 },
 		{ "SELECT a FROM t WHERE a <> 5", 1 },
-		{ "SELECT * FROM t WHERE k <= 3", 0 },
+		{ "SELECT * FROM t WHERE k <= 3", 1 },
 		{ "SELECT a FROM t WHERE a = 999999", 1 },   /* empty result */
-		{ "SELECT * FROM t WHERE a > 5", 0 },        /* star: storage path falls back */
+		{ "SELECT * FROM t WHERE a > 5", 1 },        /* star: now expanded natively */
 		{ "SELECT t.a, t.b FROM t WHERE t.a = 5", 1 }, /* qualified columns */
 		{ "SELECT a FROM t WHERE a = 5", 1 },          /* matches rows 1 and 4 */
 		{ "SELECT b FROM t WHERE b <> 'two'", 1 },     /* text inequality */
