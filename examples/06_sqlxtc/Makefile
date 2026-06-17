@@ -74,11 +74,16 @@ SRCS = main.c quack.c db.c conn.c engine.c mutex.c mem.c vfs.c pcache.c metrics.
 OBJS = $(SRCS:.c=.o)
 
 # Lime-generated parser (Phase 2).  Compiled in if the file exists.
-# The vectorized executor (vexec) recognizes off the Lime AST, so it is
-# wired into the server only alongside the parser.
+# The vectorized executor (vexec) recognizes off the Lime AST and is
+# wired into the server alongside the parser, but it also needs the
+# storage engine (xstore/btree/...) and sqlite3.o, so it is a SEPARATE
+# object set: parser-only consumers (the sql_parse / sql_ast oracles)
+# link LIME_OBJ; engine consumers link LIME_OBJ + VEXEC_OBJ.
 LIME_OBJ :=
+VEXEC_OBJ :=
 ifneq ($(wildcard sql_parse_gen.c),)
-LIME_OBJ := sql_parse_gen.o sql_parse_drv.o sql_ast.o vexec.o
+LIME_OBJ := sql_parse_gen.o sql_parse_drv.o sql_ast.o
+VEXEC_OBJ := vexec.o
 CFLAGS  += -DSQLXTC_HAVE_LIME=1
 endif
 
@@ -88,8 +93,8 @@ TARGET = sqlxtc-server
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS) sqlite3.o $(LIME_OBJ)
-	$(CC) $(CFLAGS) -o $@ $(OBJS) sqlite3.o $(LIME_OBJ) $(LDFLAGS)
+$(TARGET): $(OBJS) sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
 
 # SQLite amalgamation: build once, slow.
 sqlite3.o: sqlite3.c sqlite3.h
@@ -284,8 +289,8 @@ test-admin: test_admin
 # Installs the xtc allocator under an __os_alloc counting hook, then
 # drives a real SQL workload: proves the engine's allocations flow
 # through xtc (hook count > 0) and that the workload is correct.
-test_mem: test_mem.c mem.o mutex.o engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ)
-	$(CC) $(CFLAGS) -o $@ test_mem.c mem.o mutex.o engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(LDFLAGS)
+test_mem: test_mem.c mem.o mutex.o engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_mem.c mem.o mutex.o engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
 
 test-mem: test_mem
 	./test_mem
@@ -448,8 +453,8 @@ test-recover-undo: test_recover_undo
 	./test_recover_undo
 
 # ---- sx_ engine parallel-execution test (in-process, no daemon) ----
-test_parallel: test_parallel.c engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ)
-	$(CC) $(CFLAGS) -o $@ test_parallel.c engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(LDFLAGS)
+test_parallel: test_parallel.c engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_parallel.c engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
 
 test-parallel: test_parallel
 	./test_parallel
@@ -515,22 +520,22 @@ test-cursor-resume: test_cursor_resume
 	./test_cursor_resume
 
 # ---- server storage wiring + connection-per-proc (in-process) ----
-test_server_storage: test_server_storage.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ)
-	$(CC) $(CFLAGS) -o $@ test_server_storage.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(LDFLAGS)
+test_server_storage: test_server_storage.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_server_storage.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
 
 test-server-storage: test_server_storage
 	./test_server_storage
 
 # ---- clean-restart fast path: trust a cleanly shut-down base ----
-test_clean_restart: test_clean_restart.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ)
-	$(CC) $(CFLAGS) -o $@ test_clean_restart.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(LDFLAGS)
+test_clean_restart: test_clean_restart.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_clean_restart.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
 
 test-clean-restart: test_clean_restart
 	./test_clean_restart
 
 # ---- STEAL: large transaction spills to disk; undo on crash with CLRs ----
-test_steal: test_steal.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ)
-	$(CC) $(CFLAGS) -o $@ test_steal.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(LDFLAGS)
+test_steal: test_steal.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_steal.c engine.o db.o quack.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
 
 test-steal: test_steal
 	./test_steal
