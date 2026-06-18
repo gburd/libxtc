@@ -23,8 +23,27 @@
 .Sh DESCRIPTION
 These perform a file read, write, or data-sync that suspends the
 calling fiber and resumes it on completion, keeping the fiber's loop
-live for other work while the I/O is outstanding.  They use the
-platform's best mechanism, chosen at run time:
+live for other work while the I/O is outstanding.
+.Pp
+They are a
+.Em single, portable async-file-I/O API .
+Write storage code once -- a buffer manager paging the B-tree, a WAL
+writer -- calling these as though true asynchronous I/O is always
+available, and it runs unchanged on every platform
+.Nm libxtc
+supports.  Where the host has a native completion engine the call uses
+it; where it does not, the call uses a transparent fallback that
+presents the
+.Em same API and the same observable behavior
+.Pq the fiber parks, the loop keeps running other work, the call
+returns bytes-transferred or a negative errno .
+A consumer never has to branch on the platform.  Branching with
+.Dv #ifdef
+between a native-AIO and a non-AIO path is permitted if a consumer
+wants it, but is never required: one API that always appears to be AIO
+covers the common case.
+.Pp
+The mechanism, chosen at run time, is:
 .Bl -bullet -offset indent -compact
 .It
 On a loop whose I/O backend is io_uring, the operation is submitted
@@ -33,26 +52,46 @@ natively
 the fiber parks and the kernel's completion re-enqueues it.  No worker
 thread is used.
 .It
+On Windows (IOCP),
+.Fn xtc_aio_pread
+and
+.Fn xtc_aio_pwrite
+are native overlapped
+.Fn ReadFile Ns / Ns Fn WriteFile
+completions dequeued from the same completion port as socket events;
+.Fn xtc_aio_fsync
+and
+.Fn xtc_aio_fdatasync
+have no async form and take the offload path below.
+.It
 On a readiness-only backend
-.Pq epoll, kqueue, poll, select
+.Pq epoll, kqueue, poll, select, Solaris event ports, AIX
 the operation is offloaded to the blocking thread pool
 .Pq Xr xtc_blocking 3 ,
 because a regular file is not pollable -- io_uring is the only POSIX
 backend that can complete file I/O asynchronously, and a thread offload
-is the correct fallback elsewhere.
+is the correct, behavior-preserving fallback elsewhere.  The fiber
+still parks and the loop stays live, so the API behaves identically to
+the native path.
 .It
 Off a loop entirely
 .Pq no current fiber
 the operation runs inline on the calling thread.
 .El
 .Pp
-This is the layer that lets storage code -- a buffer manager paging the
-B-tree, a WAL writer -- use the fastest async file path a host offers
-without the caller choosing or knowing which one.  In every case the
-call returns only once the operation has completed (or failed), so the
-caller may reuse
+This is the layer that lets storage code use the fastest async file
+path a host offers without the caller choosing or knowing which one.
+In every case the call returns only once the operation has completed
+(or failed), so the caller may reuse
 .Fa buf
 immediately afterward.
+.Pp
+The one behavioral caveat to size for: where the offload path is used,
+concurrency is bounded by the blocking-pool thread count
+.Pq see Xr xtc_blocking 3 ,
+whereas the native engines admit many more in-flight ops.  Code that
+issues a very high number of concurrent file ops should size the pool
+accordingly; correctness is identical either way.
 .Pp
 .Fn xtc_aio_pread
 reads up to
