@@ -2202,6 +2202,28 @@ xstore_in_txn(struct xsql *db)
 	return cx->in_txn;
 }
 
+/*
+ * Does the current transaction hold any buffered (uncommitted) write
+ * for `tableid`?  When 0, a committed-B-tree scan of that table sees
+ * exactly what a vtab cursor would (the wbuf adds nothing), so a native
+ * read path may safely run in-transaction; when 1, the wbuf could
+ * supersede committed rows and the caller must defer to the merge-aware
+ * path.  Returns 0 outside a transaction.
+ */
+int
+xstore_txn_table_dirty(struct xsql *db, uint32_t tableid)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	int i;
+	if (cx == NULL) return 0;
+	xs_enter_ctx(cx, db);
+	if (!cx->in_txn) return 0;
+	for (i = 0; i < cx->wn; i++)
+		if (cx->wbuf[i].tableid == tableid)
+			return 1;
+	return 0;
+}
+
 static int
 xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
     xsql_int64 *pRowid)
