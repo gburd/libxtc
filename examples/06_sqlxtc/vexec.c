@@ -200,6 +200,7 @@ typedef struct vx_joinplan {
 	int        probe_ncol;
 	int        build_key;         /* build-side join col (index within build) */
 	int        probe_key;         /* probe-side join col (index within probe) */
+	int        join_kind;         /* SX_J_INNER / LEFT / RIGHT / FULL */
 	/* In the combined row, build columns come first (offset 0), then
 	 * probe columns (offset build_ncol).  proj/filter use those indices. */
 } vx_joinplan_t;
@@ -296,6 +297,9 @@ struct vx_stmt {
 	vx_cell_t    *probe_cells;  /* current probe row's cells */
 	struct vx_arena_blk *probe_arena;  /* bytes for the current probe row */
 	int           join_built;   /* 1 once build side hashed + probe opened */
+	int           probe_done;   /* 1 once the probe cursor is drained */
+	int           bscan_b;      /* unmatched-build final scan: bucket idx */
+	vx_jrow_t    *bscan_r;      /* unmatched-build final scan: row cursor */
 };
 
 /* ---- recognizer: column affinity (SQLite rules, three buckets) --- */
@@ -2279,6 +2283,7 @@ struct vx_jrow {
 	uint64_t        hash;
 	vx_cell_t       key;      /* join key value */
 	vx_cell_t      *cells;    /* build_ncol cells */
+	int             matched;  /* probe matched this build row (LEFT/FULL) */
 };
 
 struct vx_jht {
@@ -2310,6 +2315,7 @@ jht_insert(vx_jht_t *h, const vx_cell_t *key, const vx_cell_t *cells, int ncol)
 	int j;
 	if (r == NULL) return -1;
 	r->hash = hv;
+	r->matched = 0;
 	if (cell_dup(&h->arena, key, &r->key) != 0) return -1;
 	r->cells = (vx_cell_t *)arena_alloc(&h->arena,
 	    sizeof(vx_cell_t) * (size_t)(ncol > 0 ? ncol : 1));
@@ -2406,8 +2412,11 @@ vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 
 	if (errmsg) *errmsg = NULL;
 
-	/* INNER only for now; ON must be present. */
-	if (s1->join != SX_J_INNER && s1->join != SX_J_NONE && s1->join != SX_J_CROSS)
+	/* INNER / LEFT / RIGHT / FULL (and comma/cross) supported; ON must be
+	 * present for the outer kinds (a join key is required for hashing). */
+	if (s1->join != SX_J_INNER && s1->join != SX_J_NONE &&
+	    s1->join != SX_J_CROSS && s1->join != SX_J_LEFT &&
+	    s1->join != SX_J_RIGHT && s1->join != SX_J_FULL)
 		goto fallback;
 	if (s0->subquery || s1->subquery) goto fallback;
 	if (s0->table.len == 0 || s0->table.len >= 64) goto fallback;
@@ -2484,6 +2493,9 @@ vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	jp = (vx_joinplan_t *)calloc(1, sizeof *jp);
 	if (!jp) goto oom;
 	st->join = jp;
+	/* A bare comma / CROSS join with an equality ON behaves as INNER. */
+	jp->join_kind = (s1->join == SX_J_LEFT || s1->join == SX_J_RIGHT ||
+	                 s1->join == SX_J_FULL) ? s1->join : SX_J_INNER;
 	st->nout = nproj;
 	st->proj = (vx_expr_t **)calloc((size_t)nproj, sizeof(vx_expr_t *));
 	if (!st->proj) goto oom;
@@ -2575,8 +2587,14 @@ join_build(struct vx_stmt *st, vx_jht_t *bh)
 		if (step != SQLITE_ROW) goto done;
 		for (j = 0; j < jp->build_ncol; j++)
 			read_src_cell(bsrc, j, &rowcells[j], &tmp);
-		/* SQLite equi-join: a NULL key never matches, so skip it. */
-		if (rowcells[jp->build_key].type == VX_NULL) continue;
+		/* SQLite equi-join: a NULL key never matches.  For INNER / RIGHT
+		 * (build side not preserved) such a build row can never appear, so
+		 * skip it.  For LEFT / FULL the build side is preserved, so insert
+		 * it anyway -- it will never be probed (NULL never key_eq) and so
+		 * surfaces in the final unmatched-build scan, NULL-extended. */
+		if (rowcells[jp->build_key].type == VX_NULL &&
+		    jp->join_kind != SX_J_LEFT && jp->join_kind != SX_J_FULL)
+			continue;
 		if (jht_insert(bh, &rowcells[jp->build_key], rowcells, jp->build_ncol) != 0)
 			goto done;
 	}
@@ -2997,10 +3015,41 @@ cleanup:
 /* Produce one chunk of joined rows by probing.  Advances the current
  * build-match chain, fetching the next probe row when the chain is
  * exhausted.  *done set at end of the probe input. */
+/* Run st->srcrow (the combined build|probe row already laid out) through
+ * the join's filter + projection, writing one output row into the chunk.
+ * Returns 1 if a row was emitted (c->nrow advanced), 0 if the filter
+ * rejected it, -1 on error. */
+static int
+join_emit_row(struct vx_stmt *st, vx_chunk_t *c)
+{
+	int j;
+	vx_cell_t *dst;
+	if (st->filter != NULL &&
+	    eval_bool(st, st->filter, st->srcrow, &c->arena) != 1)
+		return 0;
+	dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
+	for (j = 0; j < st->nout; j++) {
+		eval(st, st->proj[j], st->srcrow, &c->arena, &dst[j]);
+		/* eval may return a cell pointing into the build (jht,
+		 * statement-lifetime -- safe) or probe arena (reset per probe
+		 * row).  Deep-copy any TEXT/BLOB into the chunk arena so it
+		 * survives the next probe row and chunk reuse. */
+		if ((dst[j].type == VX_TEXT || dst[j].type == VX_BLOB) &&
+		    dst[j].nbytes) {
+			vx_cell_t cp;
+			if (cell_dup(&c->arena, &dst[j], &cp) == 0) dst[j] = cp;
+		}
+	}
+	c->nrow++;
+	return 1;
+}
+
 static vx_chunk_t *
 join_next_chunk(struct vx_stmt *st, int *done)
 {
 	vx_joinplan_t *jp = st->join;
+	int left_outer = (jp->join_kind == SX_J_LEFT || jp->join_kind == SX_J_FULL);
+	int right_outer = (jp->join_kind == SX_J_RIGHT || jp->join_kind == SX_J_FULL);
 	vx_chunk_t *c;
 	int j;
 
@@ -3014,13 +3063,43 @@ join_next_chunk(struct vx_stmt *st, int *done)
 	if (!c->cells) { free(c); return NULL; }
 
 	while (c->nrow < c->cap) {
-		/* Need a probe row + its matching build chain? */
+		/* Phase 2 (LEFT / FULL): once the probe is drained, walk the
+		 * build hash emitting unmatched build rows NULL-extended on the
+		 * probe side. */
+		if (st->probe_done) {
+			if (!left_outer) { *done = 1; break; }
+			for (;;) {
+				if (st->bscan_r == NULL) {
+					if (st->bscan_b >= st->jht->nbucket) { *done = 1; goto out; }
+					st->bscan_r = st->jht->buckets[st->bscan_b++];
+					continue;
+				}
+				/* Walk this bucket's distinct keys (bnext) AND each key's
+				 * same-key chain (next): every build row is reachable. */
+				{
+					vx_jrow_t *r = st->bscan_r;
+					vx_jrow_t *chain;
+					st->bscan_r = r->bnext;
+					for (chain = r; chain; chain = chain->next) {
+						if (chain->matched) continue;
+						for (j = 0; j < jp->build_ncol; j++)
+							st->srcrow[j] = chain->cells[j];
+						for (j = 0; j < jp->probe_ncol; j++)
+							st->srcrow[jp->build_ncol + j].type = VX_NULL;
+						if (join_emit_row(st, c) < 0) { chunk_free(c); return NULL; }
+						if (c->nrow >= c->cap) goto out;
+					}
+				}
+			}
+		}
+
+		/* Phase 1: probe.  Need a probe row + its matching build chain? */
 		if (st->match == NULL) {
 			int step;
 			vx_cell_t pk;
 			arena_free(st->probe_arena); st->probe_arena = NULL;
 			step = sqlite3_step(st->probe);
-			if (step == SQLITE_DONE) { *done = 1; break; }
+			if (step == SQLITE_DONE) { st->probe_done = 1; continue; }
 			if (step != SQLITE_ROW) { chunk_free(c); return NULL; }
 			if (st->probe_cells == NULL)
 				st->probe_cells = (vx_cell_t *)calloc((size_t)jp->probe_ncol,
@@ -3029,37 +3108,30 @@ join_next_chunk(struct vx_stmt *st, int *done)
 			for (j = 0; j < jp->probe_ncol; j++)
 				read_src_cell(st->probe, j, &st->probe_cells[j], &st->probe_arena);
 			pk = st->probe_cells[jp->probe_key];
-			if (pk.type == VX_NULL) continue;   /* NULL never matches */
-			st->match = jht_find(st->jht, &pk);
-			if (st->match == NULL) continue;    /* INNER: no match -> skip */
+			st->match = (pk.type == VX_NULL) ? NULL : jht_find(st->jht, &pk);
+			if (st->match == NULL) {
+				/* Probe row matched nothing.  RIGHT / FULL: emit it once
+				 * with the build side NULL.  INNER / LEFT: skip. */
+				if (right_outer) {
+					for (j = 0; j < jp->build_ncol; j++)
+						st->srcrow[j].type = VX_NULL;
+					for (j = 0; j < jp->probe_ncol; j++)
+						st->srcrow[jp->build_ncol + j] = st->probe_cells[j];
+					if (join_emit_row(st, c) < 0) { chunk_free(c); return NULL; }
+				}
+				continue;
+			}
 		}
 		/* Emit the combined row for the current match, then advance. */
+		st->match->matched = 1;   /* this build row found a probe (LEFT/FULL) */
 		for (j = 0; j < jp->build_ncol; j++)
 			st->srcrow[j] = st->match->cells[j];
 		for (j = 0; j < jp->probe_ncol; j++)
 			st->srcrow[jp->build_ncol + j] = st->probe_cells[j];
 		st->match = st->match->next;
-
-		if (st->filter != NULL &&
-		    eval_bool(st, st->filter, st->srcrow, &c->arena) != 1)
-			continue;
-		{
-			vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
-			for (j = 0; j < st->nout; j++) {
-				eval(st, st->proj[j], st->srcrow, &c->arena, &dst[j]);
-				/* eval may return a cell pointing into the build (jht,
-				 * statement-lifetime -- safe) or probe arena (reset per
-				 * probe row).  Deep-copy any TEXT/BLOB into the chunk
-				 * arena so it survives the next probe row and chunk reuse. */
-				if ((dst[j].type == VX_TEXT || dst[j].type == VX_BLOB) &&
-				    dst[j].nbytes) {
-					vx_cell_t cp;
-					if (cell_dup(&c->arena, &dst[j], &cp) == 0) dst[j] = cp;
-				}
-			}
-		}
-		c->nrow++;
+		if (join_emit_row(st, c) < 0) { chunk_free(c); return NULL; }
 	}
+out:
 	return c;
 }
 

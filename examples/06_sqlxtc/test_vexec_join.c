@@ -127,8 +127,15 @@ main(void)
 		{ "SELECT x.a, y.a FROM t x JOIN t y ON x.a = y.a", 1 },
 		/* function over a joined column. */
 		{ "SELECT t.k, length(u.e) FROM t JOIN u ON t.k = u.j", 1 },
-		/* must fall back: LEFT join (V5 is INNER only), non-equi ON. */
-		{ "SELECT t.a FROM t LEFT JOIN u ON t.k = u.j", 0 },
+		/* outer joins: LEFT preserves unmatched t rows (NULL u side),
+		 * RIGHT preserves unmatched u rows (NULL t side), FULL both. */
+		{ "SELECT t.k, u.c FROM t LEFT JOIN u ON t.k = u.j", 1 },
+		{ "SELECT t.a, u.j FROM t LEFT OUTER JOIN u ON t.k = u.j", 1 },
+		{ "SELECT t.k, u.c FROM t RIGHT JOIN u ON t.k = u.j", 1 },
+		{ "SELECT t.k, u.j FROM t FULL JOIN u ON t.k = u.j", 1 },
+		{ "SELECT t.k, u.c FROM t LEFT JOIN u ON t.k = u.j WHERE u.c IS NULL", 1 },
+		{ "SELECT t.k, u.j FROM t FULL OUTER JOIN u ON t.a = u.d", 1 },
+		/* must fall back: non-equi ON, three tables. */
 		{ "SELECT t.a FROM t JOIN u ON t.k < u.j", 0 },
 		{ "SELECT t.a FROM t, u, t v", 0 }   /* three tables */
 	};
@@ -177,7 +184,7 @@ main(void)
 
 	sqlite3_close(db);
 	if (g_fail) { fprintf(stderr, "  vexec V5: FAILURES\n"); return 1; }
-	printf("  ok   vexec V5: %d INNER hash joins matched the VDBE (multiset)\n", recognized);
+	printf("  ok   vexec V5: %d hash joins (INNER/LEFT/RIGHT/FULL) matched the VDBE (multiset)\n", recognized);
 	printf("All sqlxtc vectorized-executor join (V5) tests passed.\n");
 	return 0;
 }
