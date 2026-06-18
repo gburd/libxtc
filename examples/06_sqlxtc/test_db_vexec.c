@@ -182,7 +182,9 @@ main(void)
 		{ "SELECT k, a FROM t ORDER BY a, k",                      1 },
 		{ "SELECT k, a FROM t ORDER BY k LIMIT 5 OFFSET 3",        1 },
 		{ "SELECT * FROM t WHERE k = 5",                           1 },
-		{ "SELECT * FROM t WHERE a > 50",                          0 }
+		{ "SELECT * FROM t WHERE a > 50",                          0 },
+		{ "SELECT a FROM t WHERE k < 3 UNION ALL SELECT a FROM t WHERE k > 8", 0 },
+		{ "SELECT k, a FROM t WHERE a = 5 UNION ALL SELECT k, a FROM t WHERE a = 10", 0 }
 	};
 	/* Queries vexec FALLS BACK on -- the VDBE serves both runs, so they
 	 * are byte-identical by construction. */
