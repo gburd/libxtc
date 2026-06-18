@@ -4318,8 +4318,8 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 	case SQL_KIND_INSERT:
 		ins = root->u.insert;
 		if (ins == NULL || ins->select != NULL || ins->def_values ||
-		    ins->replace || ins->rows == NULL || ins->n_rows < 1 ||
-		    ins->cols != NULL) { sql_arena_destroy(arena); return 0; }
+		    ins->replace || ins->rows == NULL || ins->n_rows < 1) {
+			sql_arena_destroy(arena); return 0; }
 		tname = &ins->table;
 		break;
 	case SQL_KIND_DELETE:
@@ -4473,8 +4473,43 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 		rc = 1; goto done;
 	}
 
-	/* ---- INSERT INTO t VALUES (...) ... ------------------------------ */
+	/* ---- INSERT INTO t [(col,...)] VALUES (...) ... ----------------- */
 	maxr = xstore_max_rowid(bt, tableid);
+
+	/* Build the column-position map.  With no explicit column list the
+	 * VALUES tuples are positional (declared order, all columns).  With
+	 * an explicit list (c1, c3, ...) each VALUES element maps to that
+	 * column's DECLARED index; omitted columns are filled with NULL.
+	 * colmap[v] = declared index of the v-th VALUES element; ncolmap =
+	 * number of VALUES elements expected per row. */
+	int colmap[64];
+	int ncolmap;
+	{
+		int i;
+		if (ins->cols == NULL) {
+			/* Positional: element i -> declared column i. */
+			ncolmap = ws.n;
+			for (i = 0; i < ws.n && i < 64; i++) colmap[i] = i;
+		} else {
+			sql_exprlist_item_t *ci;
+			ncolmap = 0;
+			for (ci = ins->cols->head; ci; ci = ci->next) {
+				const sql_expr_t *ce = ci->expr;
+				int col = -1, k;
+				const sql_str_t *nm;
+				if (ce == NULL || ce->op != SX_E_COLUMN || ce->nname < 1) {
+					sql_arena_destroy(arena); return 0;
+				}
+				nm = &ce->name[ce->nname - 1];
+				for (k = 0; k < ws.n; k++)
+					if (nm->len == strlen(ws.name[k]) &&
+					    strncmp(nm->p, ws.name[k], nm->len) == 0) { col = k; break; }
+				if (col < 0 || ncolmap >= 64) { sql_arena_destroy(arena); return 0; }
+				colmap[ncolmap++] = col;
+			}
+			if (ncolmap == 0) { sql_arena_destroy(arena); return 0; }
+		}
+	}
 
 	/* Two passes: validate + buffer EVERY row first (no writes); only if
 	 * all rows are literal-only with the right arity and an integer/NULL
@@ -4490,18 +4525,22 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 		for (r = 0; r < ins->n_rows; r++) {
 			sql_exprlist_t *row = ins->rows[r];
 			vx_cell_t cells[64];
-			int reclen, ncol = 0;
+			int reclen, vidx = 0, ci;
 			int64_t rowid;
 			sql_exprlist_item_t *it;
 
+			/* Start every declared column NULL (omitted columns stay NULL),
+			 * then place each VALUES element at its mapped declared index. */
+			for (ci = 0; ci < ws.n; ci++) { cells[ci].type = VX_NULL; cells[ci].nbytes = 0; }
 			for (it = row ? row->head : NULL; it; it = it->next) {
-				if (ncol >= ws.n) { ncol = -1; break; }
-				if (lit_cell(&cell_arena, it->expr, &cells[ncol], binds, nbinds) != 0) {
-					ncol = -1; break;             /* non-literal -> VDBE */
+				if (vidx >= ncolmap) { vidx = -1; break; }   /* too many values */
+				if (lit_cell(&cell_arena, it->expr, &cells[colmap[vidx]],
+				             binds, nbinds) != 0) {
+					vidx = -1; break;             /* non-literal -> VDBE */
 				}
-				ncol++;
+				vidx++;
 			}
-			if (ncol != ws.n) { free(buf); rc = 0; goto done; }  /* arity / non-lit */
+			if (vidx != ncolmap) { free(buf); rc = 0; goto done; }  /* arity / non-lit */
 
 			if (cells[0].type == VX_INT) {
 				rowid = cells[0].i;

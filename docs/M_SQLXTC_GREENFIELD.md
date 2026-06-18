@@ -328,43 +328,27 @@ The gates to actually deleting sqlite3.c, in dependency order:
 Where the live path stands today: most single-table reads (scan /
 filter / project / scalar + aggregate + GROUP BY + HAVING [incl. over a
 non-selected aggregate] + ORDER BY / LIMIT / DISTINCT [+ ORDER BY +
-LIMIT] / INNER join / SELECT * / UNION [ALL] / INTERSECT / EXCEPT /
-IN (list) / NOT IN) and the common writes (INSERT, DELETE/UPDATE by
-pk-point/range/arbitrary-predicate, multi-statement transactions) --
-INCLUDING parametrized (?) reads and writes -- run with NO VDBE and NO
-vtab, naming columns and resolving schema natively.
+LIMIT] / INNER + LEFT + RIGHT + FULL join / SELECT * / UNION [ALL] /
+INTERSECT / EXCEPT / IN (list) / NOT IN / IN (SELECT) / NOT IN (SELECT)
+/ uncorrelated scalar subqueries) and the common writes (INSERT,
+DELETE/UPDATE by pk-point/range/arbitrary-predicate, multi-statement
+transactions) -- INCLUDING parametrized (?) reads and writes -- run
+with NO VDBE and NO vtab, naming columns and resolving schema natively.
 
 The read long-tail still on the VDBE, in rough order of effort:
   - DISTINCT / set-op + LIMIT WITHOUT ORDER BY -- the surviving subset
     is unspecified in SQL, so not byte-reproducible; with ORDER BY it
     is native.  (Intentional fallback, not a gap.)
-  - Outer joins (LEFT/RIGHT/FULL) and 3+ table joins -- the V5 hash
-    join (vx_try_prepare_join) is INNER and two-table.  LEFT: build the
-    hash on the right, scan the left, and for a left row with no probe
-    match emit it once with the right columns NULL (jc_resolve already
-    maps combined indices; the probe-miss path must synthesize a NULL
-    right row).  RIGHT = LEFT with sides swapped; FULL needs both plus
-    tracking which build rows were matched.  N-way joins chain
-    builds/probes.  Large.
-  - Subqueries (scalar, IN (SELECT), correlated, FROM-clause / derived
-    tables) -- the single largest area; a subquery is itself a plan
-    whose result feeds the outer query.  Multi-milestone.
+  - 3+ table joins -- the two-table hash join (vx_try_prepare_join,
+    INNER/LEFT/RIGHT/FULL) is done; N-way needs the join context (which
+    is fixed at 2 sides) generalized to chain builds/probes.
+  - Correlated subqueries (scalar or IN) and FROM-clause / derived
+    tables -- the uncorrelated scalar + IN (SELECT) forms are native
+    (run once via SQLite, spliced as a literal / literal list); a
+    correlated subquery references the outer row and would need per-row
+    evaluation, and a derived table is a nested plan feeding FROM.
 
-The write long-tail (step 3 REMAINING) still on the VDBE:
-transactional DELETE/UPDATE (read-your-writes -- merge the wbuf into
-the native scan), INSERT...SELECT (run the inner SELECT, insert each
-row), REPLACE, explicit-column-list INSERT (reorder VALUES into the
-declared column order), and pk-reassigning UPDATE (tombstone the old
-key).
-
-DDL (CREATE / DROP / ALTER) is LAST: the VDBE fallback requires SQLite
-to keep every table in sqlite_master, so DDL cannot go native until the
-fallback is removed -- which needs the entire read + write surface
-above to be native first.  Then the VDBE fallback comes out, native
-DDL goes in, and sqlite3.c / the vfs/pcache/mutex shims / the xsql_*
-rename are deleted.
-
-The write long-tail (step 3 REMAINING) still on the VDBE:
+The write long-tail still on the VDBE:
 transactional DELETE/UPDATE (read-your-writes -- merge the wbuf into
 the native scan), INSERT...SELECT (run the inner SELECT, insert each
 row), REPLACE, explicit-column-list INSERT (reorder VALUES into the

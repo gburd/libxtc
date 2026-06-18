@@ -313,6 +313,11 @@ main(void)
 			"INSERT INTO %s VALUES(2, -50, 'two'), (3, 7, 'three')",
 			"INSERT INTO %s VALUES(4, 3.5, 'pi'), (5, NULL, NULL)",
 			"INSERT INTO %s VALUES(10, 0, '')",
+			/* native explicit-column-list INSERT: reordered, and omitting
+			 * a column (filled with NULL) -- both must match the VDBE. */
+			"INSERT INTO %s(k, b, a) VALUES(20, 'twenty', 200)",
+			"INSERT INTO %s(b, k) VALUES('justk', 21)",
+			"INSERT INTO %s(a, k, b) VALUES(22, 22, 'all')",
 			/* native DELETE by pk: an existing row and an absent row */
 			"DELETE FROM %s WHERE k = 3",
 			"DELETE FROM %s WHERE k = 999",
