@@ -662,6 +662,10 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 		 * rejected later when its standalone prepare fails.  Either way it
 		 * contributes no column to the outer namevec. */
 		return 0;
+	case SX_E_IN_SELECT:
+		/* a IN (SELECT ...): collect the operand's columns; the subquery
+		 * itself contributes none (materialized as a literal list). */
+		return collect_columns(nv, e->a);
 	case SX_E_IN_LIST: {
 		/* a IN (v1, v2, ...): operand + each list element. */
 		if (e->a == NULL || e->sel != NULL) return -1;   /* IN (SELECT): not here */
@@ -795,46 +799,52 @@ compile_param(struct vx_compiler *c, const sql_expr_t *e)
  * return exactly one column, and use no bind parameters (binds are not
  * threaded into the inner run).  Anything else sets c->fail so the whole
  * statement falls back. */
+
+/* Prepare an uncorrelated subquery from its verbatim source span (which
+ * includes the wrapping parens).  Strips the outer '(' ')' and prepares
+ * the inner SELECT standalone via SQLite.  Returns the prepared stmt, or
+ * NULL (correlated / unparseable / has parameters) -- the caller then
+ * falls back.  Requires exactly `want_ncol` result columns. */
+static sqlite3_stmt *
+prepare_subquery(sqlite3 *db, const char *src, uint32_t srclen, int want_ncol)
+{
+	sqlite3_stmt *q = NULL;
+	char *sub, *s;
+	size_t len = srclen;
+	if (db == NULL || src == NULL || srclen == 0) return NULL;
+	sub = (char *)malloc((size_t)srclen + 1);
+	if (sub == NULL) return NULL;
+	memcpy(sub, src, srclen); sub[srclen] = '\0';
+	s = sub;
+	while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
+	while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
+	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); return NULL; }
+	s[len-1] = '\0';
+	memmove(sub, s + 1, len - 1);   /* drop leading '(' */
+	if (sqlite3_prepare_v2(db, sub, -1, &q, NULL) != SQLITE_OK) {
+		free(sub); return NULL;   /* correlated / unparseable -> VDBE */
+	}
+	free(sub);
+	if (sqlite3_bind_parameter_count(q) != 0 ||
+	    sqlite3_column_count(q) != want_ncol) {
+		sqlite3_finalize(q); return NULL;
+	}
+	return q;
+}
+
 static vx_expr_t *
 compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 {
 	sqlite3_stmt *q = NULL;
 	vx_expr_t *n;
-	char *sub;
 	int step;
 
-	if (c->st == NULL || c->st->db == NULL || e->src == NULL || e->srclen == 0) {
-		c->fail = 1; return NULL;
-	}
+	if (c->st == NULL || c->st->db == NULL) { c->fail = 1; return NULL; }
 	/* A correlated subquery references an outer column; SQLite's prepare
 	 * is the gate -- run standalone, an unknown column fails to prepare
 	 * and we fall back.  An uncorrelated subquery prepares + runs here. */
-	sub = (char *)malloc((size_t)e->srclen + 1);
-	if (sub == NULL) { c->fail = 1; return NULL; }
-	memcpy(sub, e->src, e->srclen); sub[e->srclen] = '\0';
-	/* The span includes the wrapping parens: (SELECT ...).  Strip the
-	 * outer '(' and ')' so the inner SELECT prepares as a standalone
-	 * statement. */
-	{
-		char *s = sub;
-		size_t len = (size_t)e->srclen;
-		while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
-		while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
-		if (len >= 2 && s[0] == '(' && s[len-1] == ')') {
-			s[len-1] = '\0';
-			memmove(sub, s + 1, len - 1);   /* drop leading '(' */
-		} else {
-			free(sub); c->fail = 1; return NULL;
-		}
-	}
-
-	if (sqlite3_prepare_v2(c->st->db, sub, -1, &q, NULL) != SQLITE_OK) {
-		free(sub); c->fail = 1; return NULL;   /* unpreparable -> VDBE */
-	}
-	free(sub);
-	if (sqlite3_bind_parameter_count(q) != 0 || sqlite3_column_count(q) != 1) {
-		sqlite3_finalize(q); c->fail = 1; return NULL;
-	}
+	q = prepare_subquery(c->st->db, e->src, e->srclen, 1);
+	if (q == NULL) { c->fail = 1; return NULL; }
 
 	n = expr_node(c, VXO_LIT);
 	if (n == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
@@ -868,6 +878,101 @@ compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 	return n;
 }
 
+/* Build a VXO_LIT node from a SQLite result column (copying TEXT/BLOB
+ * into the plan arena).  Returns the node, or NULL (sets c->fail). */
+static vx_expr_t *
+lit_node_from_col(struct vx_compiler *c, sqlite3_stmt *q, int col)
+{
+	vx_expr_t *n = expr_node(c, VXO_LIT);
+	if (n == NULL) { c->fail = 1; return NULL; }
+	switch (sqlite3_column_type(q, col)) {
+	case SQLITE_INTEGER:
+		n->lit.type = VX_INT; n->lit.i = sqlite3_column_int64(q, col); break;
+	case SQLITE_FLOAT:
+		n->lit.type = VX_REAL; n->lit.r = sqlite3_column_double(q, col); break;
+	case SQLITE_TEXT: case SQLITE_BLOB: {
+		const void *b = sqlite3_column_blob(q, col);
+		int nb = sqlite3_column_bytes(q, col);
+		uint8_t *p = (uint8_t *)arena_alloc(&c->st->plan_arena, (size_t)nb + 1);
+		if (p == NULL) { c->fail = 1; return NULL; }
+		if (nb && b) memcpy(p, b, (size_t)nb);
+		p[nb] = '\0';
+		n->lit.type = (sqlite3_column_type(q, col) == SQLITE_TEXT) ? VX_TEXT : VX_BLOB;
+		n->lit.bytes = p; n->lit.nbytes = nb;
+		break; }
+	default:
+		n->lit.type = VX_NULL; break;
+	}
+	return n;
+}
+
+/* Max rows materialized from an IN (SELECT ...) subquery; a larger
+ * result set falls back to the VDBE rather than build an unbounded
+ * literal list. */
+#define VX_IN_SELECT_MAX 4096
+
+/* Compile a IN (SELECT ...) (or NOT IN) against an UNCORRELATED, single-
+ * column subquery.  The subquery is run ONCE, its values materialized as
+ * a literal list, and the membership test reuses the VXO_IN / VXO_NOTIN
+ * machinery (same as IN (list)).  Each value must share the operand's
+ * affinity class.  Returns the node, or NULL (sets c->fail -> VDBE) for
+ * a correlated / parametrized / too-large / mixed-affinity subquery. */
+static vx_expr_t *
+compile_in_select(struct vx_compiler *c, const sql_expr_t *e)
+{
+	sqlite3_stmt *q = NULL;
+	vx_expr_t *n, *a;
+	enum vx_aff acls;
+	int step, cnt = 0, cap = 16;
+
+	if (c->st == NULL || c->st->db == NULL) { c->fail = 1; return NULL; }
+	a = compile_expr(c, e->a);
+	if (a == NULL) return NULL;
+	acls = node_class(c, a);
+
+	q = prepare_subquery(c->st->db, e->src, e->srclen, 1);
+	if (q == NULL) { c->fail = 1; return NULL; }
+
+	n = expr_node(c, e->ival ? VXO_NOTIN : VXO_IN);   /* ival = NOT IN */
+	if (n == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+	n->a = a;
+	n->args = (vx_expr_t **)arena_alloc(&c->st->plan_arena,
+	                                    sizeof(vx_expr_t *) * (size_t)cap);
+	if (n->args == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+
+	while ((step = sqlite3_step(q)) == SQLITE_ROW) {
+		vx_expr_t *v;
+		if (cnt >= VX_IN_SELECT_MAX) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+		if (cnt == cap) {
+			int nc = cap * 2;
+			vx_expr_t **na = (vx_expr_t **)arena_alloc(&c->st->plan_arena,
+			                                  sizeof(vx_expr_t *) * (size_t)nc);
+			if (na == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+			memcpy(na, n->args, sizeof(vx_expr_t *) * (size_t)cnt);
+			n->args = na; cap = nc;
+		}
+		v = lit_node_from_col(c, q, 0);
+		if (v == NULL) { sqlite3_finalize(q); return NULL; }
+		/* A NULL subquery value participates in IN's 3-valued logic; the
+		 * VXO_IN eval already treats a NULL list element correctly, but
+		 * the affinity gate only applies to non-NULL values. */
+		if (v->lit.type != VX_NULL && node_class(c, v) != acls) {
+			sqlite3_finalize(q); c->fail = 1; return NULL;
+		}
+		n->args[cnt++] = v;
+	}
+	if (step != SQLITE_DONE) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+	sqlite3_finalize(q);
+
+	if (cnt == 0) {
+		/* IN (empty) is always false; NOT IN (empty) always true.  The
+		 * VXO_IN eval needs >=1 arg, so leave the empty case to the VDBE. */
+		c->fail = 1; return NULL;
+	}
+	n->nargs = cnt;
+	return n;
+}
+
 static vx_expr_t *
 compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 {
@@ -876,6 +981,8 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 	switch (e->op) {
 	case SX_E_SUBQUERY:
 		return compile_scalar_subquery(c, e);
+	case SX_E_IN_SELECT:
+		return compile_in_select(c, e);
 	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
 		return compile_literal(c, e);
 	case SX_E_PARAM:
@@ -964,8 +1071,7 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 	}
 
 	case SX_E_IN_LIST: {
-		/* a IN (v1, v2, ...) -> VXO_IN with operand .a and list args[].
-		 * Each list element must share the operand's affinity class
+		/* a IN (v1, v2, ...) -> VXO_IN with operand .a and list args[].		 * Each list element must share the operand's affinity class
 		 * (the comparison gate), so the membership test is numeric/
 		 * numeric or text/text -- otherwise fall back. */
 		const sql_exprlist_item_t *it;

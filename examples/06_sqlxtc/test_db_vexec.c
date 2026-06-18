@@ -205,12 +205,17 @@ main(void)
 		{ "SELECT k FROM t WHERE a = (SELECT max(a) FROM t)",      0 },
 		{ "SELECT k FROM t WHERE k <= 3 ORDER BY k",               1 },
 		{ "SELECT k, (SELECT count(*) FROM t) FROM t WHERE k <= 3 ORDER BY k", 1 },
-		{ "SELECT k FROM t WHERE a < (SELECT min(a) FROM t WHERE a > 50) ORDER BY k", 1 }
+		{ "SELECT k FROM t WHERE a < (SELECT min(a) FROM t WHERE a > 50) ORDER BY k", 1 },
+		{ "SELECT k FROM t WHERE a IN (SELECT a FROM t WHERE k < 5) ORDER BY k", 1 },
+		{ "SELECT k FROM t WHERE k IN (SELECT k FROM t WHERE b = 'g1') ORDER BY k LIMIT 5", 1 },
+		{ "SELECT k FROM t WHERE a NOT IN (SELECT a FROM t WHERE k > 100 AND a IS NOT NULL) AND a IS NOT NULL ORDER BY k LIMIT 5", 1 }
 	};
 	/* Queries vexec FALLS BACK on -- the VDBE serves both runs, so they
 	 * are byte-identical by construction. */
 	static const struct q fallback_q[] = {
-		{ "SELECT a FROM t WHERE a IN (SELECT k FROM t WHERE a > 100)", 1 }
+		/* correlated subquery: the standalone prepare fails (it references
+		 * the outer t.k), so vexec falls back and the VDBE serves it. */
+		{ "SELECT k FROM t x WHERE a = (SELECT max(a) FROM t y WHERE y.k <= x.k)", 1 }
 	};
 	int nv = (int)(sizeof vexec_q / sizeof vexec_q[0]);
 	int nf = (int)(sizeof fallback_q / sizeof fallback_q[0]);
