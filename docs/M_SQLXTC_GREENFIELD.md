@@ -326,23 +326,21 @@ The gates to actually deleting sqlite3.c, in dependency order:
      gone -- they are the last thing removed, not the first.
 
 Where the live path stands today: most single-table reads (scan /
-filter / project / scalar + aggregate + GROUP BY + ORDER BY / LIMIT /
-INNER join / SELECT * / DISTINCT / UNION [ALL] / INTERSECT / EXCEPT /
-IN (list) / NOT IN) and the common writes (INSERT, DELETE/UPDATE by
-pk-point/range/arbitrary-predicate, multi-statement transactions) --
-INCLUDING parametrized (?) reads and writes -- run with NO VDBE and NO
-vtab, naming columns and resolving schema natively.
+filter / project / scalar + aggregate + GROUP BY + HAVING + ORDER BY /
+LIMIT / INNER join / SELECT * / DISTINCT / UNION [ALL] / INTERSECT /
+EXCEPT / IN (list) / NOT IN) and the common writes (INSERT,
+DELETE/UPDATE by pk-point/range/arbitrary-predicate, multi-statement
+transactions) -- INCLUDING parametrized (?) reads and writes -- run
+with NO VDBE and NO vtab, naming columns and resolving schema natively.
 
 The read long-tail still on the VDBE, in rough order of effort:
-  - HAVING -- a predicate over aggregated groups.  vexec has the full
-    hash-aggregation machinery; HAVING is: allow it through the gate,
-    compile a predicate whose aggregate sub-expressions resolve to the
-    group's accumulators (the same ones the SELECT list uses) and whose
-    column refs resolve to group keys, then in agg_materialize's emit
-    loop skip a group when the predicate is false.  Contained.
   - DISTINCT / set-op combined with LIMIT/OFFSET -- needs dedup BEFORE
     limiting (today the materialize path limits before dedup, so it
     falls back).  A reorder of ordered_materialize.
+  - HAVING that references an aggregate NOT in the SELECT list (e.g.
+    SELECT sum(a) ... HAVING count(*) > 5) -- needs an extra
+    accumulator per such HAVING aggregate; the common in-SELECT HAVING
+    is already native.
   - Outer joins (LEFT/RIGHT/FULL) and 3+ table joins -- the V5 hash
     join is INNER and two-table; LEFT join emits unmatched left rows
     with NULL right columns; N-way joins chain builds/probes.  Large.
