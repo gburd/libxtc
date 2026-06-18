@@ -200,7 +200,12 @@ main(void)
 		{ "SELECT a FROM t WHERE a IN (1, 2, 3)",                   0 },
 		{ "SELECT k FROM t WHERE k IN (5, 10, 50, 999)",            0 },
 		{ "SELECT a FROM t WHERE a NOT IN (1, 2, 3) AND a IS NOT NULL", 0 },
-		{ "SELECT k FROM t WHERE b IN ('g1', 'g3')",               0 }
+		{ "SELECT k FROM t WHERE b IN ('g1', 'g3')",               0 },
+		{ "SELECT k, a FROM t WHERE a > (SELECT avg(a) FROM t) ORDER BY k LIMIT 5", 1 },
+		{ "SELECT k FROM t WHERE a = (SELECT max(a) FROM t)",      0 },
+		{ "SELECT k FROM t WHERE k <= 3 ORDER BY k",               1 },
+		{ "SELECT k, (SELECT count(*) FROM t) FROM t WHERE k <= 3 ORDER BY k", 1 },
+		{ "SELECT k FROM t WHERE a < (SELECT min(a) FROM t WHERE a > 50) ORDER BY k", 1 }
 	};
 	/* Queries vexec FALLS BACK on -- the VDBE serves both runs, so they
 	 * are byte-identical by construction. */

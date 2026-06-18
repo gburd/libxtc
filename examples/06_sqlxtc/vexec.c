@@ -656,6 +656,12 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	}
 	case SX_E_IS_NULL:
 		return collect_columns(nv, e->a);
+	case SX_E_SUBQUERY:
+		/* An uncorrelated scalar subquery references no OUTER column (it
+		 * is spliced as a literal at compile time); a correlated one is
+		 * rejected later when its standalone prepare fails.  Either way it
+		 * contributes no column to the outer namevec. */
+		return 0;
 	case SX_E_IN_LIST: {
 		/* a IN (v1, v2, ...): operand + each list element. */
 		if (e->a == NULL || e->sel != NULL) return -1;   /* IN (SELECT): not here */
@@ -778,12 +784,98 @@ compile_param(struct vx_compiler *c, const sql_expr_t *e)
 	return n;
 }
 
+/* Compile an UNCORRELATED scalar subquery (SELECT ...) used as an
+ * expression.  The subquery is run ONCE via SQLite (the same engine that
+ * is the fallback / oracle) and its single scalar result -- first column
+ * of the first row, or NULL if it returns no row -- is spliced in as a
+ * literal.  Correct for any subquery that does not reference the outer
+ * row (no correlation); a correlated subquery would need per-row
+ * evaluation and is left to the VDBE.  Recognition is conservative: the
+ * subquery must carry its verbatim source span (set by the grammar),
+ * return exactly one column, and use no bind parameters (binds are not
+ * threaded into the inner run).  Anything else sets c->fail so the whole
+ * statement falls back. */
+static vx_expr_t *
+compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
+{
+	sqlite3_stmt *q = NULL;
+	vx_expr_t *n;
+	char *sub;
+	int step;
+
+	if (c->st == NULL || c->st->db == NULL || e->src == NULL || e->srclen == 0) {
+		c->fail = 1; return NULL;
+	}
+	/* A correlated subquery references an outer column; SQLite's prepare
+	 * is the gate -- run standalone, an unknown column fails to prepare
+	 * and we fall back.  An uncorrelated subquery prepares + runs here. */
+	sub = (char *)malloc((size_t)e->srclen + 1);
+	if (sub == NULL) { c->fail = 1; return NULL; }
+	memcpy(sub, e->src, e->srclen); sub[e->srclen] = '\0';
+	/* The span includes the wrapping parens: (SELECT ...).  Strip the
+	 * outer '(' and ')' so the inner SELECT prepares as a standalone
+	 * statement. */
+	{
+		char *s = sub;
+		size_t len = (size_t)e->srclen;
+		while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
+		while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
+		if (len >= 2 && s[0] == '(' && s[len-1] == ')') {
+			s[len-1] = '\0';
+			memmove(sub, s + 1, len - 1);   /* drop leading '(' */
+		} else {
+			free(sub); c->fail = 1; return NULL;
+		}
+	}
+
+	if (sqlite3_prepare_v2(c->st->db, sub, -1, &q, NULL) != SQLITE_OK) {
+		free(sub); c->fail = 1; return NULL;   /* unpreparable -> VDBE */
+	}
+	free(sub);
+	if (sqlite3_bind_parameter_count(q) != 0 || sqlite3_column_count(q) != 1) {
+		sqlite3_finalize(q); c->fail = 1; return NULL;
+	}
+
+	n = expr_node(c, VXO_LIT);
+	if (n == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+
+	step = sqlite3_step(q);
+	if (step == SQLITE_DONE) {
+		n->lit.type = VX_NULL;            /* empty subquery -> NULL */
+	} else if (step == SQLITE_ROW) {
+		switch (sqlite3_column_type(q, 0)) {
+		case SQLITE_INTEGER:
+			n->lit.type = VX_INT; n->lit.i = sqlite3_column_int64(q, 0); break;
+		case SQLITE_FLOAT:
+			n->lit.type = VX_REAL; n->lit.r = sqlite3_column_double(q, 0); break;
+		case SQLITE_TEXT: case SQLITE_BLOB: {
+			const void *b = sqlite3_column_blob(q, 0);
+			int nb = sqlite3_column_bytes(q, 0);
+			uint8_t *p = (uint8_t *)arena_alloc(&c->st->plan_arena, (size_t)nb + 1);
+			if (p == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+			if (nb && b) memcpy(p, b, (size_t)nb);
+			p[nb] = '\0';
+			n->lit.type = (sqlite3_column_type(q, 0) == SQLITE_TEXT) ? VX_TEXT : VX_BLOB;
+			n->lit.bytes = p; n->lit.nbytes = nb;
+			break; }
+		default:
+			n->lit.type = VX_NULL; break;
+		}
+	} else {
+		sqlite3_finalize(q); c->fail = 1; return NULL;   /* error -> VDBE */
+	}
+	sqlite3_finalize(q);
+	return n;
+}
+
 static vx_expr_t *
 compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 {
 	if (c->fail || e == NULL) { c->fail = 1; return NULL; }
 
 	switch (e->op) {
+	case SX_E_SUBQUERY:
+		return compile_scalar_subquery(c, e);
 	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
 		return compile_literal(c, e);
 	case SX_E_PARAM:
