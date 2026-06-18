@@ -189,6 +189,8 @@ main(void)
 		{ "SELECT k, a FROM t WHERE a = 5 UNION ALL SELECT k, a FROM t WHERE a = 10", 0 },
 		{ "SELECT DISTINCT b FROM t",                               0 },
 		{ "SELECT DISTINCT a FROM t WHERE a IS NOT NULL",           0 },
+		{ "SELECT DISTINCT b FROM t ORDER BY b LIMIT 2",            1 },
+		{ "SELECT DISTINCT b FROM t ORDER BY b LIMIT 2 OFFSET 1",   1 },
 		{ "SELECT b FROM t WHERE k < 5 UNION SELECT b FROM t WHERE k > 3", 0 },
 		{ "SELECT b FROM t WHERE k <= 3 INTERSECT SELECT b FROM t WHERE k >= 2", 0 },
 		{ "SELECT b FROM t WHERE k <= 4 EXCEPT SELECT b FROM t WHERE k = 2", 0 },

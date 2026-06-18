@@ -1868,10 +1868,14 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 		}
 	}
 
-	/* DISTINCT combined with LIMIT/OFFSET needs dedup BEFORE limiting;
-	 * the materialize path applies limit before dedup, so leave that
-	 * combination to the VDBE. */
-	if (st->distinct && (st->limit >= 0 || st->offset > 0)) goto fallback;
+	/* DISTINCT + LIMIT/OFFSET is handled (dedup into a kept list, then
+	 * OFFSET/LIMIT over the DISTINCT set) -- but only with an ORDER BY,
+	 * so which DISTINCT rows survive the limit is deterministic and
+	 * matches the VDBE.  DISTINCT + LIMIT without ORDER BY picks an
+	 * unspecified subset (valid in SQL, but not byte-reproducible), so
+	 * leave that to the VDBE. */
+	if (st->distinct && (st->limit >= 0 || st->offset > 0) && st->norder == 0)
+		goto fallback;
 
 	st->srcrow = (vx_cell_t *)calloc((size_t)(st->nsrc_col > 0 ? st->nsrc_col : 1),
 	                                 sizeof(vx_cell_t));
@@ -2843,45 +2847,56 @@ ordered_materialize(struct vx_stmt *st)
 		g_sort_ctx = NULL;
 	}
 
-	/* Apply OFFSET / LIMIT. */
-	off = st->offset;
-	lim = st->limit;   /* -1 = unbounded */
-	if (off > nrow) off = nrow;
-	emit_n = nrow - (int)off;
-	if (lim >= 0 && emit_n > (int)lim) emit_n = (int)lim;
-
-	c = (vx_chunk_t *)calloc(1, sizeof *c);
-	if (!c) goto cleanup;
-	c->ncol = st->nout;
-	c->cap = emit_n > 0 ? emit_n : 1;
-	c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap * (size_t)(st->nout > 0 ? st->nout : 1));
-	if (!c->cells) { free(c); c = NULL; goto cleanup; }
-	for (e = 0; e < emit_n; e++) {
-		int si = idx[(int)off + e];
-		vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
-		if (st->distinct) {
-			/* Skip a row that duplicates an already-emitted one (SQL
-			 * DISTINCT: NULLs equal, numeric cross-type equal). */
-			int d, dup = 0;
-			for (d = 0; d < c->nrow && !dup; d++) {
-				const vx_cell_t *prev = &c->cells[(size_t)d * (size_t)c->ncol];
-				int cc, same = 1;
-				for (cc = 0; cc < st->nout; cc++)
-					if (!key_eq(&prev[cc],
-					            &rows[(size_t)si * (size_t)st->nout + (size_t)cc])) {
-						same = 0; break;
-					}
-				if (same) dup = 1;
+	/* Build the surviving index list (sorted order), deduping first when
+	 * DISTINCT so OFFSET/LIMIT apply to the DISTINCT result -- not the
+	 * raw rows.  kept[] holds row indices into rows[] in emit order. */
+	{
+		int *kept = (int *)malloc(sizeof(int) * (size_t)(nrow > 0 ? nrow : 1));
+		int nkept = 0, p;
+		if (!kept) goto cleanup;
+		for (p = 0; p < nrow; p++) {
+			int si = idx[p];
+			if (st->distinct) {
+				int d, dup = 0;
+				for (d = 0; d < nkept && !dup; d++) {
+					int cc, same = 1;
+					for (cc = 0; cc < st->nout; cc++)
+						if (!key_eq(&rows[(size_t)kept[d] * (size_t)st->nout + (size_t)cc],
+						            &rows[(size_t)si * (size_t)st->nout + (size_t)cc])) {
+							same = 0; break;
+						}
+					if (same) dup = 1;
+				}
+				if (dup) continue;
 			}
-			if (dup) continue;
+			kept[nkept++] = si;
 		}
-		for (j = 0; j < st->nout; j++) {
-			vx_cell_t v = rows[(size_t)si * (size_t)st->nout + (size_t)j];
-			if ((v.type == VX_TEXT || v.type == VX_BLOB) && v.nbytes)
-				(void)cell_dup(&c->arena, &v, &dst[j]);
-			else dst[j] = v;
+
+		/* OFFSET / LIMIT over the kept (deduped) list. */
+		off = st->offset;
+		lim = st->limit;   /* -1 = unbounded */
+		if (off > nkept) off = nkept;
+		emit_n = nkept - (int)off;
+		if (lim >= 0 && emit_n > (int)lim) emit_n = (int)lim;
+
+		c = (vx_chunk_t *)calloc(1, sizeof *c);
+		if (!c) { free(kept); goto cleanup; }
+		c->ncol = st->nout;
+		c->cap = emit_n > 0 ? emit_n : 1;
+		c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap * (size_t)(st->nout > 0 ? st->nout : 1));
+		if (!c->cells) { free(kept); free(c); c = NULL; goto cleanup; }
+		for (e = 0; e < emit_n; e++) {
+			int si = kept[(int)off + e];
+			vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
+			for (j = 0; j < st->nout; j++) {
+				vx_cell_t v = rows[(size_t)si * (size_t)st->nout + (size_t)j];
+				if ((v.type == VX_TEXT || v.type == VX_BLOB) && v.nbytes)
+					(void)cell_dup(&c->arena, &v, &dst[j]);
+				else dst[j] = v;
+			}
+			c->nrow++;
 		}
-		c->nrow++;
+		free(kept);
 	}
 	st->chunk = c; c = NULL;
 	st->cur = -1;
