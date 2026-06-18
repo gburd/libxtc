@@ -327,20 +327,22 @@ The gates to actually deleting sqlite3.c, in dependency order:
 
 Where the live path stands today: most single-table reads (scan /
 filter / project / scalar + aggregate + GROUP BY + HAVING + ORDER BY /
-LIMIT / INNER join / SELECT * / DISTINCT / UNION [ALL] / INTERSECT /
-EXCEPT / IN (list) / NOT IN) and the common writes (INSERT,
-DELETE/UPDATE by pk-point/range/arbitrary-predicate, multi-statement
-transactions) -- INCLUDING parametrized (?) reads and writes -- run
-with NO VDBE and NO vtab, naming columns and resolving schema natively.
+LIMIT / DISTINCT [+ ORDER BY + LIMIT] / INNER join / SELECT * /
+UNION [ALL] / INTERSECT / EXCEPT / IN (list) / NOT IN) and the common
+writes (INSERT, DELETE/UPDATE by pk-point/range/arbitrary-predicate,
+multi-statement transactions) -- INCLUDING parametrized (?) reads and
+writes -- run with NO VDBE and NO vtab, naming columns and resolving
+schema natively.
 
 The read long-tail still on the VDBE, in rough order of effort:
-  - DISTINCT / set-op combined with LIMIT/OFFSET -- needs dedup BEFORE
-    limiting (today the materialize path limits before dedup, so it
-    falls back).  A reorder of ordered_materialize.
-  - HAVING that references an aggregate NOT in the SELECT list (e.g.
-    SELECT sum(a) ... HAVING count(*) > 5) -- needs an extra
-    accumulator per such HAVING aggregate; the common in-SELECT HAVING
-    is already native.
+  - HAVING over an aggregate NOT in the SELECT list (e.g. SELECT b ...
+    GROUP BY b HAVING count(*) > 5) -- needs each such HAVING aggregate
+    to get its own accumulator in the group (an extra is_agg outcol
+    beyond nout, accumulated but not emitted) and a VXO_AGGREF op that
+    reads g->accs[idx] at emit time.  The in-SELECT HAVING is native.
+  - DISTINCT / set-op + LIMIT WITHOUT ORDER BY -- the surviving subset
+    is unspecified in SQL, so not byte-reproducible; with ORDER BY it
+    is native.
   - Outer joins (LEFT/RIGHT/FULL) and 3+ table joins -- the V5 hash
     join is INNER and two-table; LEFT join emits unmatched left rows
     with NULL right columns; N-way joins chain builds/probes.  Large.
