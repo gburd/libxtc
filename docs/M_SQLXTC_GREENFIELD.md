@@ -327,13 +327,42 @@ The gates to actually deleting sqlite3.c, in dependency order:
 
 Where the live path stands today: most single-table reads (scan /
 filter / project / scalar + aggregate + GROUP BY + ORDER BY / LIMIT /
-INNER join / SELECT * / DISTINCT / UNION [ALL] / INTERSECT / EXCEPT)
-and the common writes (INSERT, DELETE/UPDATE by
+INNER join / SELECT * / DISTINCT / UNION [ALL] / INTERSECT / EXCEPT /
+IN (list) / NOT IN) and the common writes (INSERT, DELETE/UPDATE by
 pk-point/range/arbitrary-predicate, multi-statement transactions) --
 INCLUDING parametrized (?) reads and writes -- run with NO VDBE and NO
-vtab, naming columns and resolving schema natively.  The VDBE still
-serves: DDL, transactional DELETE/UPDATE (read-your-writes), the write
-shapes in step 3's REMAINING, and the harder read long-tail --
-subqueries, LEFT/OUTER and 3+ table joins, IN (list), HAVING, and
-DISTINCT/set-op combined with LIMIT -- each differential-tested to be
-byte-identical whichever engine serves it.
+vtab, naming columns and resolving schema natively.
+
+The read long-tail still on the VDBE, in rough order of effort:
+  - HAVING -- a predicate over aggregated groups.  vexec has the full
+    hash-aggregation machinery; HAVING is: allow it through the gate,
+    compile a predicate whose aggregate sub-expressions resolve to the
+    group's accumulators (the same ones the SELECT list uses) and whose
+    column refs resolve to group keys, then in agg_materialize's emit
+    loop skip a group when the predicate is false.  Contained.
+  - DISTINCT / set-op combined with LIMIT/OFFSET -- needs dedup BEFORE
+    limiting (today the materialize path limits before dedup, so it
+    falls back).  A reorder of ordered_materialize.
+  - Outer joins (LEFT/RIGHT/FULL) and 3+ table joins -- the V5 hash
+    join is INNER and two-table; LEFT join emits unmatched left rows
+    with NULL right columns; N-way joins chain builds/probes.  Large.
+  - Subqueries (scalar, IN (SELECT), correlated, FROM-clause / derived
+    tables) -- the single largest area; a subquery is itself a plan
+    whose result feeds the outer query.  Multi-milestone.
+
+The write long-tail (step 3 REMAINING) still on the VDBE:
+transactional DELETE/UPDATE (read-your-writes -- merge the wbuf into
+the native scan), INSERT...SELECT (run the inner SELECT, insert each
+row), REPLACE, explicit-column-list INSERT (reorder VALUES into the
+declared column order), and pk-reassigning UPDATE (tombstone the old
+key).
+
+DDL (CREATE / DROP / ALTER) is LAST: the VDBE fallback requires SQLite
+to keep every table in sqlite_master, so DDL cannot go native until the
+fallback is removed -- which needs the entire read + write surface
+above to be native first.  Then the VDBE fallback comes out, native
+DDL goes in, and sqlite3.c / the vfs/pcache/mutex shims / the xsql_*
+rename are deleted.
+
+Each gate is differential-tested byte-identical (positional for ordered,
+multiset otherwise) against the VDBE and clean under ASan+UBSan.
