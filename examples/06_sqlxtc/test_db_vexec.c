@@ -27,6 +27,7 @@
 #include "db.h"
 #include "engine.h"
 #include "quack.h"
+#include "vexec.h"
 #include "sqlite3.h"
 #include "bufmgr.h"
 #include "btree.h"
@@ -105,6 +106,38 @@ run_live(sx_db *h, const char *sql, char **out, size_t *outn)
 
 	if (quack_buf_init(&buf, 256) != 0) return -1;
 	rc = db_exec_cached(h, &st, sql, NULL, 0, -1, &buf, &nrows, &err);
+	if (st) sx_finalize(st);
+	if (rc != 0) {
+		fprintf(stderr, "  live exec failed [%s]: %s\n", sql, err ? err : "?");
+		free(err); quack_buf_free(&buf); return -1;
+	}
+	*outn = buf.len;
+	*out = malloc(*outn + 1);
+	if (*out == NULL) { quack_buf_free(&buf); return -1; }
+	if (*outn) memcpy(*out, buf.p, *outn);
+	(*out)[*outn] = '\0';
+	quack_buf_free(&buf);
+	return 0;
+}
+
+/* run_live with bound integer parameters (1-based). */
+static int
+run_live_pi(sx_db *h, const char *sql, const int64_t *ivals, int n,
+            char **out, size_t *outn)
+{
+	quack_buf_t buf;
+	sx_stmt *st = NULL;
+	int64_t nrows = 0;
+	char *err = NULL;
+	struct quack_param ps[8];
+	int i, rc;
+
+	for (i = 0; i < n && i < 8; i++) {
+		memset(&ps[i], 0, sizeof ps[i]);
+		ps[i].type = QUACK_P_INT; ps[i].ival = ivals[i];
+	}
+	if (quack_buf_init(&buf, 256) != 0) return -1;
+	rc = db_exec_cached(h, &st, sql, ps, n, -1, &buf, &nrows, &err);
 	if (st) sx_finalize(st);
 	if (rc != 0) {
 		fprintf(stderr, "  live exec failed [%s]: %s\n", sql, err ? err : "?");
@@ -378,6 +411,53 @@ main(void)
 				printf("  ok   native transactions: BEGIN + native INSERTs + "
 				       "COMMIT commits atomically; ROLLBACK discards\n");
 		}
+	}
+
+	/* ---- parametrized statements (? binds) on the native path -------
+	 * A ? compiles to its bound value, so a parametrized read runs on
+	 * vexec.  Drive each query with params bound through the live path
+	 * (vexec on) vs SQLXTC_VEXEC=0 (VDBE) and assert byte-identical. */
+	{
+		static const struct { const char *sql; int64_t v[2]; int nv; int ordered; } pq[] = {
+			{ "SELECT a, b FROM t WHERE k = ?",            { 5 },     1, 0 },
+			{ "SELECT k, a FROM t WHERE a > ? ORDER BY k", { 100 },   1, 1 },
+			{ "SELECT k, a FROM t WHERE a >= ? AND a <= ?", { 50, 150 }, 2, 0 },
+			{ "SELECT count(*) FROM t WHERE a > ?",        { 0 },     1, 1 },
+			{ "SELECT * FROM t WHERE k = ?",               { 3 },     1, 1 }
+		};
+		int np = (int)(sizeof pq / sizeof pq[0]), pi2, served = 0;
+		for (pi2 = 0; pi2 < np; pi2++) {
+			char *on = NULL, *off = NULL; size_t non = 0, noff = 0;
+			sx_vx_result *probe = NULL;
+			vx_cell_t bc[2]; int bi;
+			for (bi = 0; bi < pq[pi2].nv; bi++) {
+				memset(&bc[bi], 0, sizeof bc[bi]);
+				bc[bi].type = VX_INT; bc[bi].i = pq[pi2].v[bi];
+			}
+			if (sx_vexec_try_p(h, pq[pi2].sql, bc, pq[pi2].nv, 1, &probe) == 1) {
+				served++; sx_vexec_free(probe);
+			}
+			unsetenv("SQLXTC_VEXEC");
+			CK(run_live_pi(h, pq[pi2].sql, pq[pi2].v, pq[pi2].nv, &on, &non) == 0, pq[pi2].sql);
+			setenv("SQLXTC_VEXEC", "0", 1);
+			CK(run_live_pi(h, pq[pi2].sql, pq[pi2].v, pq[pi2].nv, &off, &noff) == 0, pq[pi2].sql);
+			unsetenv("SQLXTC_VEXEC");
+			if (on && off) {
+				int eq = pq[pi2].ordered
+				    ? (non == noff && memcmp(on, off, non) == 0)
+				    : resp_eq(on, off, 0);
+				if (!eq) {
+					fprintf(stderr, "FAIL: param mismatch [%s]:\n  vexec: %s\n  vdbe : %s\n",
+					        pq[pi2].sql, on, off);
+					g_fail = 1;
+				}
+			}
+			free(on); free(off);
+		}
+		CK(served == np, "all parametrized reads served by vexec");
+		if (!g_fail)
+			printf("  ok   parametrized reads: %d ? queries served by vexec, "
+			       "byte-identical to the VDBE\n", served);
 	}
 
 	sx_close(h);

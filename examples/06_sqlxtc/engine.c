@@ -530,6 +530,24 @@ sx_vexec_try(sx_db *h, const char *sql, int n_workers, sx_vx_result **out)
 	return rc;                     /* 0 fallback / <0 error */
 }
 
+int
+sx_vexec_try_p(sx_db *h, const char *sql, const void *binds, int nbinds,
+               int n_workers, sx_vx_result **out)
+{
+	vx_result_t *r = NULL;
+	char *verr = NULL;
+	int rc;
+
+	if (out == NULL) return XTC_E_INVAL;
+	*out = NULL;
+	rc = vx_run_p((xsql *)h, sql, (const vx_cell_t *)binds, nbinds,
+	              n_workers, &r, &verr);
+	if (verr) free(verr);
+	if (rc == 1) { *out = (sx_vx_result *)r; return 1; }
+	if (r) vx_result_free(r);
+	return rc;
+}
+
 void
 sx_vexec_free(sx_vx_result *r)
 {
@@ -581,6 +599,10 @@ void sx_vexec_rollback(sx_db *h) { (void)xstore_rollback((xsql *)h); }
 
 int sx_vexec_try(sx_db *h, const char *sql, int n_workers, sx_vx_result **out)
 { (void)h; (void)sql; (void)n_workers; if (out) *out = NULL; return 0; }
+int sx_vexec_try_p(sx_db *h, const char *sql, const void *binds, int nbinds,
+                   int n_workers, sx_vx_result **out)
+{ (void)h; (void)sql; (void)binds; (void)nbinds; (void)n_workers;
+  if (out) *out = NULL; return 0; }
 void sx_vexec_free(sx_vx_result *r) { (void)r; }
 int sx_vexec_nrow(const sx_vx_result *r) { (void)r; return 0; }
 int sx_vexec_ncol(const sx_vx_result *r) { (void)r; return 0; }

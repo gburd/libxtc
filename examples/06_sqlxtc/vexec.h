@@ -123,6 +123,14 @@ int vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
 int vx_run(sqlite3 *db, const char *sql, int n_workers,
            vx_result_t **res, char **errmsg);
 
+/* Parametrized form of vx_run: `binds` holds the bound ? parameters
+ * (1-based by ordinal, `nbinds` of them) as vx_cell values, which the
+ * compiler substitutes for SX_E_PARAM nodes.  A parametrized query runs
+ * single-threaded.  vx_run is vx_run_p with no binds. */
+int vx_run_p(sqlite3 *db, const char *sql,
+             const vx_cell_t *binds, int nbinds, int n_workers,
+             vx_result_t **res, char **errmsg);
+
 /*
  * Native autocommit write path (step 3 of the greenfield teardown).
  * Recognizes a simple INSERT that can run on the xstore B-tree with no

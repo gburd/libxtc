@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "xtc_int.h"
+#include "vexec.h"     /* vx_cell_t for the parametrized vexec fast path */
 
 /* Worker count for the vexec fast path on the live query path.  Serial
  * (1) by default: vexec's morsel-parallel scan is correct but not yet
@@ -357,6 +358,42 @@ bind_params(sx_stmt *stmt, const struct quack_param *params, int n_params,
 			rc = sx_bind_null(stmt, idx); break;
 		}
 		if (rc != SX_OK) { *err = strdup("bind failed"); return -1; }
+	}
+	return 0;
+}
+
+/* Convert the request's quack params into a vx_cell array for the vexec
+ * fast path.  TEXT cells point into the param's sval; a BLOB is decoded
+ * into a freshly malloc'd buffer recorded in `owned` (caller frees the
+ * first *n_owned entries).  The cells are valid until those buffers are
+ * freed.  Returns 0, or -1 (a malformed blob; *err set). */
+static int
+quack_to_binds(const struct quack_param *params, int n_params,
+               vx_cell_t *binds, void **owned, int *n_owned, char **err)
+{
+	int pi;
+	*n_owned = 0;
+	for (pi = 0; pi < n_params; pi++) {
+		const struct quack_param *p = &params[pi];
+		vx_cell_t *c = &binds[pi];
+		memset(c, 0, sizeof *c);
+		switch (p->type) {
+		case QUACK_P_INT:   c->type = VX_INT;  c->i = p->ival; break;
+		case QUACK_P_FLOAT: c->type = VX_REAL; c->r = p->dval; break;
+		case QUACK_P_TEXT:
+			c->type = VX_TEXT; c->bytes = (const uint8_t *)p->sval;
+			c->nbytes = (uint32_t)p->slen; break;
+		case QUACK_P_BLOB: {
+			unsigned char *bb = NULL; int bn = 0;
+			if (decode_blob(p, &bb, &bn) != 0) {
+				*err = strdup("bad blob param"); return -1;
+			}
+			owned[(*n_owned)++] = bb;
+			c->type = VX_BLOB; c->bytes = bb; c->nbytes = (uint32_t)bn; break;
+		}
+		case QUACK_P_NULL:
+		default: c->type = VX_NULL; break;
+		}
 	}
 	return 0;
 }
@@ -783,10 +820,21 @@ db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
 	 * client sees identical headers.  Anything not recognized falls
 	 * through to the VDBE (correct-by-fallback).  The prepared statement
 	 * stays cached and reusable either way. */
-	if (n_params == 0) {
+	if (n_params >= 0) {
 		int vw = db_vexec_workers();
 		sx_vx_result *vr = NULL;
-		if (vw > 0 && sx_vexec_try(h, sql, vw, &vr) == 1) {
+		int hit = 0;
+		if (vw > 0 && n_params == 0) {
+			hit = (sx_vexec_try(h, sql, vw, &vr) == 1);
+		} else if (vw > 0 && n_params > 0 && n_params <= 32) {
+			vx_cell_t binds[32]; void *owned[32]; int no = 0, k;
+			if (quack_to_binds(params, n_params, binds, owned, &no, err) != 0) {
+				sx_finalize(*pstmt); *pstmt = NULL; return -1;
+			}
+			hit = (sx_vexec_try_p(h, sql, binds, n_params, 1, &vr) == 1);
+			for (k = 0; k < no; k++) free(owned[k]);
+		}
+		if (hit) {
 			int erc = emit_vexec(vr, *pstmt, limit, out_buf, &rows, err);
 			sx_vexec_free(vr);
 			if (erc != 0) { (void)sx_reset(*pstmt); return -1; }
@@ -802,8 +850,8 @@ db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
 		 * straight to the xstore B-tree, no VDBE / no vtab round-trip.
 		 * Emits the same {"done":N} a DML statement does.  Not recognized
 		 * (0) -> fall through to the VDBE; the prepared statement is the
-		 * fallback and stays cached. */
-		if (vw > 0) {
+		 * fallback and stays cached.  Writes stay param-free for now. */
+		if (vw > 0 && n_params == 0) {
 			int64_t nch = 0;
 			if (sx_vexec_write(h, sql, &nch) == 1) {
 				if (quack_emit_done(out_buf, nch) < 0) {
