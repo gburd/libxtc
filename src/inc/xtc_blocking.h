@@ -50,8 +50,16 @@ int xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result);
 int xtc_blocking_submit(int (*fn)(void *), void *arg);
 
 /*
- * Set the pool size (worker threads).  Must be called before the
- * first xtc_blocking_run; later calls are ignored.  Default 4.
+ * Pin the pool to a fixed size (worker threads), overriding the
+ * automatic default.  Must be called before the first xtc_blocking_run
+ * / xtc_blocking_submit; later calls return XTC_E_INVAL (too late).
+ *
+ * By DEFAULT the pool auto-sizes: it starts with a CPU-scaled number of
+ * workers (max(4, online CPUs), capped at 64) and grows on demand up to
+ * 64 when work queues up faster than idle workers can take it, so the
+ * offload path is not an artificial bottleneck on a large host nor
+ * over-provisioned on a small one.  Setting an explicit size disables
+ * the growth and fixes the pool at exactly that many threads.
  *
  * PUBLIC: int  xtc_blocking_pool_size __P((int));
  */

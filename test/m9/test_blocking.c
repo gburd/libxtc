@@ -270,11 +270,85 @@ test_submit_fire_forget(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- on-demand pool growth: many same-duration offloads run
+ * concurrently (the pool grows past its initial size), so wall-clock
+ * time is ~one sleep, not (N / initial_threads) sleeps ---- */
+#define NGROW 32
+#define GROW_MS 80
+static _Atomic int   g_grow_ok;
+static _Atomic long  g_grow_wall_start, g_grow_wall_end;
+
+static void
+grow_proc(void *arg)
+{
+	int out = -1;
+	(void)arg;
+	(void)xtc_blocking_run(sleep_fn, (void *)(intptr_t)GROW_MS, &out);
+	if (out == GROW_MS * 2)
+		atomic_fetch_add(&g_grow_ok, 1);
+}
+
+static void
+grow_timer_proc(void *arg)
+{
+	int64_t t = 0;
+	(void)arg;
+	(void)__os_clock_mono(&t);
+	atomic_store(&g_grow_wall_start, (long)t);
+}
+
+static MunitResult
+test_pool_grows(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	int64_t t1 = 0;
+	long elapsed_ms;
+	int i;
+	(void)p; (void)d;
+
+	/* A prior test may have pinned / started the pool; restart it clean
+	 * so this runs against the auto-sizing + growth default. */
+	xtc_blocking_shutdown();
+
+	atomic_store(&g_grow_ok, 0);
+	atomic_store(&g_grow_wall_start, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "t";
+	munit_assert_int(xtc_proc_spawn(loop, grow_timer_proc, NULL, &opts, &pid),
+	    ==, XTC_OK);
+	for (i = 0; i < NGROW; i++) {
+		opts.name = "g";
+		munit_assert_int(xtc_proc_spawn(loop, grow_proc, NULL, &opts, &pid),
+		    ==, XTC_OK);
+	}
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)__os_clock_mono(&t1);
+	atomic_store(&g_grow_wall_end, (long)t1);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	/* All offloads returned correctly. */
+	munit_assert_int(atomic_load(&g_grow_ok), ==, NGROW);
+
+	/* With the pool growing toward NGROW workers, the offloads run
+	 * largely in parallel: total wall time is a small multiple of one
+	 * GROW_MS sleep, not NGROW * GROW_MS (fully serial) and not
+	 * (NGROW / 4) * GROW_MS (the old fixed-4 pool, ~640ms here).  Allow
+	 * generous slack for scheduling and thread spin-up: assert it
+	 * finished well under the old fixed-4 floor. */
+	elapsed_ms = (atomic_load(&g_grow_wall_end) -
+	              atomic_load(&g_grow_wall_start)) / 1000000L;
+	munit_assert_int64(elapsed_ms, <, (NGROW / 4) * GROW_MS);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/fallback",   test_fallback,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/submit",     test_submit_fire_forget, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/liveness",   test_in_proc_liveness, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent", test_concurrent,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/pool_grows", test_pool_grows,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/file_offload", test_file_offload,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shutdown",   test_shutdown,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
