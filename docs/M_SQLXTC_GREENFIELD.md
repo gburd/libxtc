@@ -334,6 +334,11 @@ INTERSECT / EXCEPT / IN (list) / NOT IN / IN (SELECT) / NOT IN (SELECT)
 DELETE/UPDATE by pk-point/range/arbitrary-predicate, multi-statement
 transactions) -- INCLUDING parametrized (?) reads and writes -- run
 with NO VDBE and NO vtab, naming columns and resolving schema natively.
+The common writes that are native: INSERT (positional, explicit column
+list, REPLACE, and INSERT...SELECT), DELETE/UPDATE by
+pk-point/range/arbitrary-predicate, and -- in a transaction -- INSERT
+always, and DELETE/UPDATE while the target table is still clean in the
+txn.  Parametrized (?) reads and writes are native too.
 
 The read long-tail still on the VDBE, in rough order of effort:
   - DISTINCT / set-op + LIMIT WITHOUT ORDER BY -- the surviving subset
@@ -349,11 +354,12 @@ The read long-tail still on the VDBE, in rough order of effort:
     evaluation, and a derived table is a nested plan feeding FROM.
 
 The write long-tail still on the VDBE:
-transactional DELETE/UPDATE (read-your-writes -- merge the wbuf into
-the native scan), INSERT...SELECT (run the inner SELECT, insert each
-row), REPLACE, explicit-column-list INSERT (reorder VALUES into the
-declared column order), and pk-reassigning UPDATE (tombstone the old
-key).
+  - pk-reassigning UPDATE (SET <pk> = <new>): a DELETE of the old key +
+    INSERT at the new key, with a uniqueness check on the new key.
+  - a transactional DELETE/UPDATE on a table the txn has ALREADY
+    written to (dirtied): the vtab's point path could merge the wbuf
+    where the native committed scan would not, so it falls back.
+  - INSERT...DEFAULT VALUES, and a non-integer / pk-reassigning target.
 
 DDL (CREATE / DROP / ALTER) is LAST: the VDBE fallback requires SQLite
 to keep every table in sqlite_master, so DDL cannot go native until the
