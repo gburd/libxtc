@@ -206,7 +206,7 @@ main(void)
 		/* ---- must fall back ---- */
 		{ "SELECT DISTINCT a FROM t", 1 },   /* DISTINCT now native (dedup) */
 		{ "SELECT a.a FROM t a JOIN t b ON a.k=b.k", 1 },  /* self-join (V5) */
-		{ "SELECT a FROM t WHERE a IN (1,2)", 0 },          /* IN */
+		{ "SELECT a FROM t WHERE a IN (1,2)", 1 },          /* IN (list) now native */
 		{ "SELECT substr(b,1,2) FROM t", 0 },               /* unsupported func */
 
 		/* ---- P3: aggregation + GROUP BY (V3) ---- */

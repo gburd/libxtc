@@ -117,7 +117,7 @@ struct with_clause_v { sql_cte_t *list; int rec; };
  * parse correctly.  Pinning the count makes CI flag any NEW conflict a
  * future grammar change introduces.
  */
-%expect 102
+%expect 104
 
 /* ===== symbol types ===== */
 
@@ -757,6 +757,9 @@ expr(R) ::= expr(A) TK_IS TK_NOT TK_NULL. { R = mk_expr(pstate, SX_E_IS_NULL); i
 expr(R) ::= expr(A) TK_IS expr(B).      { R = mk_binary(pstate, TK_IS, A, B); }
 expr(R) ::= expr(A) TK_IN TK_LP expr_list(L) TK_RP. {
     R = mk_expr(pstate, SX_E_IN_LIST); if (R) { R->a = A; R->list = L; }
+}
+expr(R) ::= expr(A) TK_NOT TK_IN TK_LP expr_list(L) TK_RP. {
+    R = mk_expr(pstate, SX_E_IN_LIST); if (R) { R->a = A; R->list = L; R->ival = 1; }
 }
 expr(R) ::= expr(A) TK_IN TK_LP select_stmt(Q) TK_RP. {
     R = mk_expr(pstate, SX_E_IN_SELECT); if (R) { R->a = A; R->sel = Q; }

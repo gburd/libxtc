@@ -189,12 +189,16 @@ main(void)
 		{ "SELECT DISTINCT a FROM t WHERE a IS NOT NULL",           0 },
 		{ "SELECT b FROM t WHERE k < 5 UNION SELECT b FROM t WHERE k > 3", 0 },
 		{ "SELECT b FROM t WHERE k <= 3 INTERSECT SELECT b FROM t WHERE k >= 2", 0 },
-		{ "SELECT b FROM t WHERE k <= 4 EXCEPT SELECT b FROM t WHERE k = 2", 0 }
+		{ "SELECT b FROM t WHERE k <= 4 EXCEPT SELECT b FROM t WHERE k = 2", 0 },
+		{ "SELECT a FROM t WHERE a IN (1, 2, 3)",                   0 },
+		{ "SELECT k FROM t WHERE k IN (5, 10, 50, 999)",            0 },
+		{ "SELECT a FROM t WHERE a NOT IN (1, 2, 3) AND a IS NOT NULL", 0 },
+		{ "SELECT k FROM t WHERE b IN ('g1', 'g3')",               0 }
 	};
 	/* Queries vexec FALLS BACK on -- the VDBE serves both runs, so they
 	 * are byte-identical by construction. */
 	static const struct q fallback_q[] = {
-		{ "SELECT a FROM t WHERE a IN (1,2,3)",  1 }
+		{ "SELECT a FROM t WHERE a IN (SELECT k FROM t WHERE a > 100)", 1 }
 	};
 	int nv = (int)(sizeof vexec_q / sizeof vexec_q[0]);
 	int nf = (int)(sizeof fallback_q / sizeof fallback_q[0]);

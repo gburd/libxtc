@@ -102,6 +102,7 @@ enum vx_op {
 	VXO_EQ, VXO_NE, VXO_LT, VXO_LE, VXO_GT, VXO_GE,  /* comparison */
 	VXO_AND, VXO_OR,                     /* boolean */
 	VXO_ISNULL, VXO_NOTNULL,             /* IS [NOT] NULL */
+	VXO_IN, VXO_NOTIN,                   /* a IN/NOT IN (list): a in .a, list in args */
 	VXO_FUNC                             /* builtin function (.func) */
 };
 
@@ -520,6 +521,7 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 	case VXO_NOT: case VXO_AND: case VXO_OR:
 	case VXO_EQ: case VXO_NE: case VXO_LT: case VXO_LE: case VXO_GT: case VXO_GE:
 	case VXO_ISNULL: case VXO_NOTNULL:
+	case VXO_IN: case VXO_NOTIN:
 		return VX_AFF_NUMERIC;   /* booleans are 0/1 integers */
 	case VXO_FUNC:
 		switch (e->func) {
@@ -639,6 +641,14 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	}
 	case SX_E_IS_NULL:
 		return collect_columns(nv, e->a);
+	case SX_E_IN_LIST: {
+		/* a IN (v1, v2, ...): operand + each list element. */
+		if (e->a == NULL || e->sel != NULL) return -1;   /* IN (SELECT): not here */
+		if (collect_columns(nv, e->a) != 0) return -1;
+		for (it = e->list ? e->list->head : NULL; it; it = it->next)
+			if (collect_columns(nv, it->expr) != 0) return -1;
+		return 0;
+	}
 	case SX_E_FUNC: {
 		int nargs = 0, ok = 0;
 		if (e->ival & 3) return -1;   /* DISTINCT or func(*) */
@@ -843,6 +853,38 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		vx_expr_t *a = compile_expr(c, e->a);
 		if (a == NULL) return NULL;
 		if (n) n->a = a;
+		return n;
+	}
+
+	case SX_E_IN_LIST: {
+		/* a IN (v1, v2, ...) -> VXO_IN with operand .a and list args[].
+		 * Each list element must share the operand's affinity class
+		 * (the comparison gate), so the membership test is numeric/
+		 * numeric or text/text -- otherwise fall back. */
+		const sql_exprlist_item_t *it;
+		vx_expr_t *n, *a;
+		enum vx_aff acls;
+		int cnt = 0, k;
+		if (e->sel != NULL) { c->fail = 1; return NULL; }   /* IN (SELECT) */
+		a = compile_expr(c, e->a);
+		if (a == NULL) return NULL;
+		acls = node_class(c, a);
+		for (it = e->list ? e->list->head : NULL; it; it = it->next) cnt++;
+		if (cnt == 0) { c->fail = 1; return NULL; }   /* empty IN list: VDBE */
+		n = expr_node(c, e->ival ? VXO_NOTIN : VXO_IN);   /* ival = NOT IN */
+		if (n == NULL) return NULL;
+		n->a = a;
+		n->args = (vx_expr_t **)arena_alloc(&c->st->plan_arena,
+		                                    sizeof(vx_expr_t *) * (size_t)cnt);
+		if (n->args == NULL) { c->fail = 1; return NULL; }
+		k = 0;
+		for (it = e->list->head; it; it = it->next) {
+			vx_expr_t *v = compile_expr(c, it->expr);
+			if (v == NULL) return NULL;
+			if (node_class(c, v) != acls) { c->fail = 1; return NULL; }
+			n->args[k++] = v;
+		}
+		n->nargs = cnt;
 		return n;
 	}
 
@@ -1102,6 +1144,28 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 	case VXO_NOTNULL: {
 		vx_cell_t a; eval(st, e->a, row, arena, &a);
 		out->type = VX_INT; out->i = (a.type != VX_NULL);
+		return;
+	}
+
+	case VXO_IN:
+	case VXO_NOTIN: {
+		/* a IN (list).  SQL 3-valued: NULL operand -> NULL; a match -> 1;
+		 * no match but a NULL element present -> NULL; else 0.  NOT IN is
+		 * the logical negation (NULL stays NULL).  The compiler ensured
+		 * operand and elements share an affinity class, so cmp_vals
+		 * applies. */
+		vx_cell_t a; int k, saw_null = 0, res;
+		eval(st, e->a, row, arena, &a);
+		if (a.type == VX_NULL) { out->type = VX_NULL; return; }
+		res = 0;
+		for (k = 0; k < e->nargs; k++) {
+			vx_cell_t v; eval(st, e->args[k], row, arena, &v);
+			if (v.type == VX_NULL) { saw_null = 1; continue; }
+			if (cmp_vals(&a, &v) == 0) { res = 1; break; }
+		}
+		if (res == 0 && saw_null) { out->type = VX_NULL; return; }
+		out->type = VX_INT;
+		out->i = (e->op == VXO_NOTIN) ? !res : res;
 		return;
 	}
 
