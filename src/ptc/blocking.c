@@ -20,6 +20,7 @@
 #include "xtc_io.h"
 
 #include "os_thread.h"
+#include "os_cpu.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -42,10 +43,30 @@ static pthread_cond_t    g_cv = PTHREAD_COND_INITIALIZER;
 static struct blk_work  *g_head;          /* queue head (dequeue) */
 static struct blk_work  *g_tail;          /* queue tail (enqueue) */
 static __os_thread_t     g_threads[BLK_MAX_THREADS];
-static int               g_nthreads = 4;  /* configured pool size */
+static int               g_nthreads;      /* user-configured size, 0 = auto */
 static int               g_nstarted;      /* threads actually running */
 static int               g_started;       /* pool up? */
 static int               g_stopping;      /* shutdown in progress */
+static int               g_max_threads;   /* growth cap (auto or configured) */
+static int               g_idle;          /* workers parked in cond_wait */
+static int               g_qlen;          /* items waiting in the queue */
+
+/*
+ * Auto pool size: scale with the host's CPU count so the offload path
+ * is not an artificial bottleneck on a large machine, with a floor so a
+ * small one still has a few workers.  Blocking-I/O threads are mostly
+ * parked in the kernel rather than CPU-bound, so a count near the core
+ * count is a reasonable steady-state floor; the pool also grows on
+ * demand up to BLK_MAX_THREADS when work queues up (see blk_grow).
+ */
+static int
+blk_auto_size(void)
+{
+	int n = __os_ncpus();
+	if (n < 4) n = 4;                 /* floor */
+	if (n > BLK_MAX_THREADS) n = BLK_MAX_THREADS;
+	return n;
+}
 
 static void *
 blk_worker(void *unused)
@@ -56,8 +77,10 @@ blk_worker(void *unused)
 		int fn_fd, r;
 
 		(void)pthread_mutex_lock(&g_lock);
+		g_idle++;
 		while (g_head == NULL && !g_stopping)
 			(void)pthread_cond_wait(&g_cv, &g_lock);
+		g_idle--;
 		if (g_stopping && g_head == NULL) {
 			(void)pthread_mutex_unlock(&g_lock);
 			return NULL;
@@ -66,6 +89,7 @@ blk_worker(void *unused)
 		g_head = w->next;
 		if (g_head == NULL)
 			g_tail = NULL;
+		g_qlen--;
 		(void)pthread_mutex_unlock(&g_lock);
 
 		/* Run the user's blocking call on this pool thread. */
@@ -92,7 +116,8 @@ blk_worker(void *unused)
 	}
 }
 
-/* Start the pool on first use.  Returns 0 on success. */
+/* Start the pool on first use.  Returns 0 on success.  Called with
+ * g_lock held. */
 static int
 blk_start_locked(void)
 {
@@ -100,11 +125,15 @@ blk_start_locked(void)
 
 	if (g_started)
 		return 0;
-	n = g_nthreads;
+	/* Initial size: the user's explicit setting, or the CPU-scaled auto
+	 * default.  Either way the pool may grow on demand up to the cap. */
+	n = (g_nthreads > 0) ? g_nthreads : blk_auto_size();
 	if (n < 1) n = 1;
 	if (n > BLK_MAX_THREADS) n = BLK_MAX_THREADS;
+	g_max_threads = (g_nthreads > 0) ? n : BLK_MAX_THREADS;
 	g_stopping = 0;
 	g_nstarted = 0;
+	g_idle = 0;
 	for (i = 0; i < n; i++) {
 		if (__os_thread_create(&g_threads[i], blk_worker, NULL)
 		    != XTC_OK)
@@ -115,6 +144,28 @@ blk_start_locked(void)
 		return -1;
 	g_started = 1;
 	return 0;
+}
+
+/*
+ * Grow the pool by one worker when work is queued and no idle thread is
+ * waiting to take it, up to the cap.  Called with g_lock held, after an
+ * item has been enqueued.  A spawn failure is harmless -- the item just
+ * waits for an existing worker.  An explicitly configured pool
+ * (g_nthreads > 0, g_max_threads == that size) does not grow past its
+ * configured size.
+ */
+static void
+blk_grow_locked(void)
+{
+	if (g_stopping || g_nstarted >= g_max_threads)
+		return;
+	/* Only add a thread if every started worker is (or is about to be)
+	 * busy: more queued items than idle waiters. */
+	if (g_qlen <= g_idle)
+		return;
+	if (__os_thread_create(&g_threads[g_nstarted], blk_worker, NULL)
+	    == XTC_OK)
+		g_nstarted++;
 }
 
 int
@@ -169,6 +220,8 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	else
 		g_head = &w;
 	g_tail = &w;
+	g_qlen++;
+	blk_grow_locked();
 	(void)pthread_cond_signal(&g_cv);
 	(void)pthread_mutex_unlock(&g_lock);
 
@@ -234,6 +287,8 @@ xtc_blocking_submit(int (*fn)(void *), void *arg)
 	else
 		g_head = w;
 	g_tail = w;
+	g_qlen++;
+	blk_grow_locked();
 	(void)pthread_cond_signal(&g_cv);
 	(void)pthread_mutex_unlock(&g_lock);
 	return XTC_OK;
@@ -264,5 +319,9 @@ xtc_blocking_shutdown(void)
 	g_started = 0;
 	g_nstarted = 0;
 	g_stopping = 0;
+	g_idle = 0;
+	g_qlen = 0;
+	/* g_nthreads (user-configured size) is intentionally preserved so a
+	 * later restart honors it; g_max_threads is recomputed on restart. */
 	(void)pthread_mutex_unlock(&g_lock);
 }
