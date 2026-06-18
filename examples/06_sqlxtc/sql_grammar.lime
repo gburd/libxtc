@@ -275,7 +275,7 @@ select_stmt(R) ::= select_core(C) TK_EXCEPT select_stmt(T). {
     if (C) { C->setop = SX_SET_EXCEPT; C->rhs = T; } R = C;
 }
 
-select_core(R) ::= TK_SELECT distinct_opt(D) sel_list(L) from_opt(F)
+select_core(R) ::= TK_SELECT(KW) distinct_opt(D) sel_list(L) from_opt(F)
                    where_opt(W) group_opt(G) having_opt(H)
                    order_opt(O) limit_opt(LM) offset_part(OF). {
     R = AST(pstate, sql_select_t);
@@ -283,6 +283,7 @@ select_core(R) ::= TK_SELECT distinct_opt(D) sel_list(L) from_opt(F)
         R->distinct = D; R->cols = L; R->from = F; R->where = W;
         R->group = G; R->having = H; R->order = O; R->limit = LM;
         R->offset = OF;
+        R->src = KW.p;   /* SELECT keyword; length resolved by the consumer */
     }
 }
 

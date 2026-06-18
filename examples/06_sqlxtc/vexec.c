@@ -4317,8 +4317,9 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 	switch (root->kind) {
 	case SQL_KIND_INSERT:
 		ins = root->u.insert;
-		if (ins == NULL || ins->select != NULL || ins->def_values ||
-		    ins->rows == NULL || ins->n_rows < 1) {
+		if (ins == NULL || ins->def_values) { sql_arena_destroy(arena); return 0; }
+		/* Either VALUES rows or a SELECT source, not neither. */
+		if (ins->select == NULL && (ins->rows == NULL || ins->n_rows < 1)) {
 			sql_arena_destroy(arena); return 0; }
 		tname = &ins->table;
 		break;
@@ -4511,6 +4512,105 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 		}
 	}
 
+	/* ---- INSERT INTO t [(cols)] SELECT ... --------------------------
+	 * Run the source SELECT once via SQLite (the fallback / oracle
+	 * engine; the SELECT's own tables may be xstore vtabs or anything
+	 * SQLite knows), then insert each result row natively.  The SELECT
+	 * must return exactly ncolmap columns (one per target slot).  An
+	 * in-txn INSERT..SELECT, a parametrized SELECT, an arity mismatch,
+	 * a non-integer PK, a duplicate PK, or a too-large row falls back
+	 * (writing nothing first).  REPLACE..SELECT overwrites on conflict. */
+	if (ins->select != NULL) {
+		sqlite3_stmt *q = NULL;
+		const char *ssrc = ins->select->src;
+		int scol, step, applied2 = 0;
+		struct { int64_t rowid; uint8_t rec[XS_REC_MAX]; int reclen; } *buf2 = NULL;
+		int nb2 = 0, cap2 = 0;
+
+		/* Read-your-writes: a SELECT run standalone via SQLite would not
+		 * see this transaction's uncommitted buffered rows, so defer to
+		 * the VDBE inside a txn. */
+		if (xstore_in_txn(db)) { rc = 0; goto done; }
+		if (ssrc == NULL) { rc = 0; goto done; }
+		/* The SELECT is the trailing clause of the INSERT, so its text
+		 * runs from its keyword to the end of the statement. */
+		if (sqlite3_prepare_v2(db, ssrc, -1, &q, NULL) != SQLITE_OK) {
+			rc = 0; goto done;
+		}
+		if (sqlite3_bind_parameter_count(q) != 0) {
+			sqlite3_finalize(q); rc = 0; goto done;
+		}
+		scol = sqlite3_column_count(q);
+		if (scol != ncolmap) {
+			sqlite3_finalize(q); rc = 0; goto done;
+		}
+
+		while ((step = sqlite3_step(q)) == SQLITE_ROW) {
+			vx_cell_t cells[64];
+			int ci, reclen;
+			int64_t rowid;
+			for (ci = 0; ci < ws.n; ci++) { cells[ci].type = VX_NULL; cells[ci].nbytes = 0; }
+			for (ci = 0; ci < scol; ci++) {
+				vx_cell_t *dst = &cells[colmap[ci]];
+				switch (sqlite3_column_type(q, ci)) {
+				case SQLITE_INTEGER: dst->type = VX_INT; dst->i = sqlite3_column_int64(q, ci); break;
+				case SQLITE_FLOAT:   dst->type = VX_REAL; dst->r = sqlite3_column_double(q, ci); break;
+				case SQLITE_TEXT: case SQLITE_BLOB: {
+					const void *b = sqlite3_column_blob(q, ci);
+					int n = sqlite3_column_bytes(q, ci);
+					uint8_t *pp = (uint8_t *)arena_alloc(&cell_arena, (size_t)n + 1);
+					if (pp == NULL) { free(buf2); sqlite3_finalize(q); rc = -1; goto done; }
+					if (n && b) memcpy(pp, b, (size_t)n);
+					pp[n] = '\0';
+					dst->type = (sqlite3_column_type(q, ci) == SQLITE_TEXT) ? VX_TEXT : VX_BLOB;
+					dst->bytes = pp; dst->nbytes = n;
+					break; }
+				default: dst->type = VX_NULL; break;
+				}
+			}
+			if (cells[0].type == VX_INT) {
+				rowid = cells[0].i; if (rowid > maxr) maxr = rowid;
+			} else if (cells[0].type == VX_NULL) {
+				rowid = ++maxr;
+			} else { free(buf2); sqlite3_finalize(q); rc = 0; goto done; }
+
+			if (cells[0].type == VX_INT && !ins->replace) {
+				uint8_t probe[XS_REC_MAX]; int pl, bi;
+				pl = read_one_row(bt, tabbuf, rowid, probe, (int)sizeof probe);
+				if (pl < 0) { free(buf2); sqlite3_finalize(q); rc = -1; goto done; }
+				if (pl > 0) { free(buf2); sqlite3_finalize(q); rc = 0; goto done; }
+				for (bi = 0; bi < nb2; bi++)
+					if (buf2[bi].rowid == rowid) { free(buf2); sqlite3_finalize(q); rc = 0; goto done; }
+			}
+
+			if (nb2 == cap2) {
+				int nc = cap2 ? cap2 * 2 : 64;
+				void *nn = realloc(buf2, sizeof *buf2 * (size_t)nc);
+				if (nn == NULL) { free(buf2); sqlite3_finalize(q); rc = -1; goto done; }
+				buf2 = nn; cap2 = nc;
+			}
+			if (nb2 >= XS_NATIVE_MAX_ROWS) { free(buf2); sqlite3_finalize(q); rc = 0; goto done; }
+			reclen = encode_payload(&cells[1], ws.n - 1, buf2[nb2].rec, (int)sizeof buf2[nb2].rec);
+			if (reclen < 0) { free(buf2); sqlite3_finalize(q); rc = 0; goto done; }
+			buf2[nb2].rowid = rowid; buf2[nb2].reclen = reclen; nb2++;
+		}
+		if (step != SQLITE_DONE) { free(buf2); sqlite3_finalize(q); rc = -1; goto done; }
+		sqlite3_finalize(q);
+
+		for (r = 0; r < nb2; r++) {
+			if (xstore_write_txn(db, tableid, buf2[r].rowid,
+			                     buf2[r].rec, buf2[r].reclen, 0) != 0) {
+				free(buf2);
+				if (errmsg) *errmsg = strdup("native insert-select failed");
+				rc = -1; goto done;
+			}
+			applied2++;
+		}
+		free(buf2);
+		if (nchanges) *nchanges = applied2;
+		rc = 1; goto done;
+	}
+
 	/* Two passes: validate + buffer EVERY row first (no writes); only if
 	 * all rows are literal-only with the right arity and an integer/NULL
 	 * PK do we apply.  Any unsupported row -> return 0 with zero writes,
@@ -4568,14 +4668,14 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 					 * last row, which xstore's put-by-rowid achieves since
 					 * the rows apply in order. */
 				} else if (xstore_in_txn(db)) {
-					free(buf); sql_arena_destroy(arena); return 0;
+					free(buf); rc = 0; goto done;
 				} else {
 					pl = read_one_row(bt, tabbuf, rowid, probe, (int)sizeof probe);
 					if (pl < 0) { free(buf); rc = -1; goto done; }
-					if (pl > 0) { free(buf); sql_arena_destroy(arena); return 0; }
+					if (pl > 0) { free(buf); rc = 0; goto done; }
 					for (bi = 0; bi < nb; bi++)
 						if (buf[bi].rowid == rowid) {
-							free(buf); sql_arena_destroy(arena); return 0;
+							free(buf); rc = 0; goto done;
 						}
 				}
 			}

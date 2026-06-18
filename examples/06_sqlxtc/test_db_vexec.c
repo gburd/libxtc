@@ -341,7 +341,11 @@ main(void)
 			"UPDATE %s SET b = 'lo' WHERE k <= 10",
 			"UPDATE %s SET a = 0 WHERE k >= 8000",
 			/* native general-predicate UPDATE: non-pk column WHERE */
-			"UPDATE %s SET b = 'hit' WHERE a < 8"
+			"UPDATE %s SET b = 'hit' WHERE a < 8",
+			/* native INSERT...SELECT: from a shared source table, with a
+			 * WHERE, an explicit reordered column list, and expressions. */
+			"INSERT INTO %s SELECT k+500, a, b FROM isrc WHERE a > 1",
+			"INSERT INTO %s(b, k, a) SELECT b, k+600, a*10 FROM isrc WHERE k = 1"
 		};
 		int ni = (int)(sizeof dml / sizeof dml[0]);
 		int native_served = 0;
@@ -354,6 +358,11 @@ main(void)
 			free(err); g_fail = 1;
 		} else {
 			int j;
+			/* Shared source for the INSERT...SELECT cases (read by both
+			 * the native u run and the VDBE v run; identical for each). */
+			(void)sx_exec(h, "CREATE VIRTUAL TABLE isrc USING xstore(k, a INT, b TEXT)", &err);
+			(void)sx_exec(h, "INSERT INTO isrc VALUES(1, 5, 'is-one'), "
+			              "(2, 0, 'is-two'), (3, 9, 'is-three')", &err);
 			for (j = 0; j < ni; j++) {
 				char squ[128], sqv[128];
 				char *ou = NULL, *ov = NULL; size_t a = 0, b = 0;
