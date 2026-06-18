@@ -318,6 +318,11 @@ main(void)
 			"INSERT INTO %s(k, b, a) VALUES(20, 'twenty', 200)",
 			"INSERT INTO %s(b, k) VALUES('justk', 21)",
 			"INSERT INTO %s(a, k, b) VALUES(22, 22, 'all')",
+			/* native REPLACE: overwrite an existing row, insert a new one,
+			 * and a column-list REPLACE that nulls the omitted column. */
+			"REPLACE INTO %s VALUES(1, 11, 'one-prime')",
+			"REPLACE INTO %s VALUES(30, 300, 'thirty')",
+			"REPLACE INTO %s(k, a) VALUES(20, 222)",
 			/* native DELETE by pk: an existing row and an absent row */
 			"DELETE FROM %s WHERE k = 3",
 			"DELETE FROM %s WHERE k = 999",
@@ -387,6 +392,24 @@ main(void)
 			printf("  ok   native write: %d INSERT/DELETE/UPDATE statements "
 			       "applied to the B-tree without the VDBE, byte-identical "
 			       "to VDBE writes\n", native_served);
+
+			/* PRIMARY KEY uniqueness: a plain INSERT onto an already
+			 * present rowid must NOT silently overwrite.  The native
+			 * path detects the collision (committed row or intra-
+			 * statement repeat) and falls back (returns 0) so the VDBE
+			 * raises the canonical UNIQUE-constraint error. */
+			{
+				int64_t dn = 0;
+				/* Insert a fresh row, then a plain INSERT onto the same PK
+				 * must fall back (so the VDBE raises UNIQUE), not silently
+				 * overwrite. */
+				CK(sx_vexec_write(h, "INSERT INTO u VALUES(5000, 1, 'orig')", &dn) == 1,
+				   "seed row for duplicate-PK check");
+				CK(sx_vexec_write(h, "INSERT INTO u VALUES(5000, 2, 'dup')", &dn) == 0,
+				   "duplicate-PK INSERT falls back (no silent overwrite)");
+				CK(sx_vexec_write(h, "INSERT INTO u VALUES(7777, 1, 'a'), (7777, 2, 'b')",
+				   &dn) == 0, "intra-statement duplicate PK falls back");
+			}
 		}
 	}
 
