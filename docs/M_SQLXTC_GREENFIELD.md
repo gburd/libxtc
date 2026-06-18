@@ -327,10 +327,13 @@ The gates to actually deleting sqlite3.c, in dependency order:
 
 Where the live path stands today: most single-table reads (scan /
 filter / project / scalar + aggregate + GROUP BY + ORDER BY / LIMIT /
-INNER join / SELECT *) and the common writes (literal INSERT, pk-point
-and pk-range and arbitrary-predicate DELETE/UPDATE, multi-statement
-transactions) run with NO VDBE and NO vtab, naming columns and resolving
-schema natively.  The VDBE still serves: parametrized statements, DDL,
-the write shapes in step 3's REMAINING, transactional DELETE/UPDATE
-(read-your-writes), and any read vexec does not recognize -- each
-differential-tested to be byte-identical whichever engine serves it.
+INNER join / SELECT * / UNION ALL) and the common writes (INSERT,
+DELETE/UPDATE by pk-point/range/arbitrary-predicate, multi-statement
+transactions) -- INCLUDING parametrized (?) reads and writes -- run
+with NO VDBE and NO vtab, naming columns and resolving schema natively.
+The VDBE still serves: DDL, transactional DELETE/UPDATE
+(read-your-writes), the write shapes in step 3's REMAINING, and the
+read long-tail -- UNION / INTERSECT / EXCEPT (dedup/intersect),
+subqueries, LEFT/OUTER and 3+ table joins, DISTINCT, HAVING, IN --
+each differential-tested to be byte-identical whichever engine serves
+it.
