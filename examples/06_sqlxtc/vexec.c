@@ -4318,7 +4318,7 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 	case SQL_KIND_INSERT:
 		ins = root->u.insert;
 		if (ins == NULL || ins->select != NULL || ins->def_values ||
-		    ins->replace || ins->rows == NULL || ins->n_rows < 1) {
+		    ins->rows == NULL || ins->n_rows < 1) {
 			sql_arena_destroy(arena); return 0; }
 		tname = &ins->table;
 		break;
@@ -4548,6 +4548,37 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 			} else if (cells[0].type == VX_NULL) {
 				rowid = ++maxr;
 			} else { free(buf); rc = 0; goto done; }   /* non-int PK -> VDBE */
+
+			/* PRIMARY KEY uniqueness: a plain INSERT onto an existing
+			 * rowid is a constraint violation in SQLite (REPLACE would
+			 * overwrite -- handled separately).  When the target PK
+			 * already exists (committed B-tree) or repeats within THIS
+			 * statement, fall back to the VDBE, which produces the
+			 * canonical UNIQUE-constraint error -- the native path has
+			 * written nothing yet, so the fallback is clean.  An explicit
+			 * PK inside an open transaction may also collide with an
+			 * uncommitted buffered row the committed scan cannot see, so
+			 * that case also falls back.  An autovalued (NULL) PK never
+			 * collides. */
+			if (cells[0].type == VX_INT) {
+				uint8_t probe[XS_REC_MAX]; int pl, bi;
+				if (ins->replace) {
+					/* REPLACE deliberately overwrites a conflicting PK; no
+					 * uniqueness check.  An intra-statement repeat keeps the
+					 * last row, which xstore's put-by-rowid achieves since
+					 * the rows apply in order. */
+				} else if (xstore_in_txn(db)) {
+					free(buf); sql_arena_destroy(arena); return 0;
+				} else {
+					pl = read_one_row(bt, tabbuf, rowid, probe, (int)sizeof probe);
+					if (pl < 0) { free(buf); rc = -1; goto done; }
+					if (pl > 0) { free(buf); sql_arena_destroy(arena); return 0; }
+					for (bi = 0; bi < nb; bi++)
+						if (buf[bi].rowid == rowid) {
+							free(buf); sql_arena_destroy(arena); return 0;
+						}
+				}
+			}
 
 			reclen = encode_payload(&cells[1], ws.n - 1, buf[nb].rec,
 			                        (int)sizeof buf[nb].rec);
