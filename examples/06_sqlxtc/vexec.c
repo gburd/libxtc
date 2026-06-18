@@ -1408,6 +1408,10 @@ static int vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast,
 static int vx_try_prepare_binds(sqlite3 *db, const char *sql,
                                 const vx_cell_t *binds, int nbinds,
                                 vx_stmt_t **out, char **errmsg);
+static int vx_prepare_select(sqlite3 *db, sql_arena_t *ast,
+                             const sql_select_t *sel,
+                             const vx_cell_t *binds, int nbinds,
+                             vx_stmt_t **out, char **errmsg);
 
 /* Parse a NUMBER expr (with an optional leading unary minus) as an
  * integer literal.  Returns 1 with *v set, or 0 (not an integer
@@ -1514,7 +1518,32 @@ vx_try_prepare_binds(sqlite3 *db, const char *sql,
 	sql_arena_t *ast = NULL;
 	sql_stmt_t  *root = NULL;
 	const char  *perr = NULL;
-	const sql_select_t *sel;
+
+	if (out) *out = NULL;
+	if (errmsg) *errmsg = NULL;
+
+	if (sql_parse_ast(sql, strlen(sql), &ast, &root, &perr) != 0)
+		return 0;
+	if (root == NULL || root->next != NULL ||
+	    root->kind != SQL_KIND_SELECT || root->explain || root->u.select == NULL) {
+		sql_arena_destroy(ast);
+		return 0;
+	}
+	/* A compound (set-op) select is not a single plan; vx_run_p handles
+	 * it.  Here, only a non-compound SELECT becomes one vx_stmt. */
+	if (root->u.select->setop != SX_SET_NONE) { sql_arena_destroy(ast); return 0; }
+	return vx_prepare_select(db, ast, root->u.select, binds, nbinds, out, errmsg);
+}
+
+/* Recognize ONE (non-compound) SELECT given its already-parsed AST and
+ * arena (which it takes ownership of -- freed on fallback, kept on the
+ * returned plan).  This is the post-parse body shared by the string
+ * entry point and the set-op runner. */
+static int
+vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
+                  const vx_cell_t *binds, int nbinds,
+                  vx_stmt_t **out, char **errmsg)
+{
 	const sql_src_t *src;
 	struct namevec nv;
 	struct vx_compiler comp;
@@ -1526,19 +1555,12 @@ vx_try_prepare_binds(sqlite3 *db, const char *sql,
 
 	if (out) *out = NULL;
 	if (errmsg) *errmsg = NULL;
-
-	if (sql_parse_ast(sql, strlen(sql), &ast, &root, &perr) != 0)
-		goto fallback;
-	if (root == NULL || root->next != NULL) goto fallback;
-	if (root->kind != SQL_KIND_SELECT || root->explain) goto fallback;
-	sel = root->u.select;
 	if (sel == NULL) goto fallback;
 
-	/* Common gates: no compound/CTE/DISTINCT/HAVING.  GROUP BY is
+	/* Common gates: no CTE/DISTINCT/HAVING.  GROUP BY is
 	 * allowed only on the aggregation path; ORDER BY / LIMIT / OFFSET
 	 * are allowed only on the non-aggregating path (handled below). */
-	if (sel->with || sel->setop != SX_SET_NONE || sel->distinct ||
-	    sel->having)
+	if (sel->with || sel->distinct || sel->having)
 		goto fallback;
 
 	/* FROM: one base table, or exactly two base tables joined (V5). */
@@ -1783,7 +1805,6 @@ fallback:
 	if (srcsql) free(srcsql);
 	if (ast) sql_arena_destroy(ast);
 	if (st) vx_finalize(st);
-	(void)perr;
 	return rc;
 }
 
@@ -3878,6 +3899,98 @@ done:
 }
 
 
+/* Cheap case-insensitive test for the substring "union" in the SQL, so
+ * the set-op runner is only invoked (with its parse) when a UNION is
+ * plausibly present.  A false positive (the word in a string literal or
+ * identifier) costs only one extra parse that then falls back; never a
+ * correctness issue. */
+static int
+sql_has_union(const char *s)
+{
+	for (; s && *s; s++) {
+		if ((s[0] == 'u' || s[0] == 'U') && (s[1] == 'n' || s[1] == 'N') &&
+		    (s[2] == 'i' || s[2] == 'I') && (s[3] == 'o' || s[3] == 'O') &&
+		    (s[4] == 'n' || s[4] == 'N'))
+			return 1;
+	}
+	return 0;
+}
+
+/* Run a compound SELECT (set operation).  Handles UNION ALL: recognize
+ * and run each side independently, then concatenate the results (both
+ * sides must have the same column count, as SQL requires).  Returns 1
+ * with *res, 0 to fall back to the VDBE (either side unrecognized, a
+ * non-UNION-ALL operator, mismatched arity, or a chained compound), or
+ * <0 on error.  UNION / INTERSECT / EXCEPT (which dedup / intersect)
+ * fall back for now. */
+static int
+run_setop(sqlite3 *db, const char *sql, const vx_cell_t *binds, int nbinds,
+          vx_result_t **res, char **errmsg)
+{
+	sql_arena_t *ast = NULL;
+	sql_stmt_t *root = NULL;
+	const char *perr = NULL;
+	sql_select_t *lhs, *rhs;
+	vx_stmt_t *lp = NULL, *rp = NULL;
+	vx_result_t *lr = NULL, *rr = NULL;
+	int rc = 0, i, j;
+
+	if (sql_parse_ast(sql, strlen(sql), &ast, &root, &perr) != 0) return 0;
+	if (root == NULL || root->next != NULL ||
+	    root->kind != SQL_KIND_SELECT || root->u.select == NULL) {
+		sql_arena_destroy(ast); return 0;
+	}
+	lhs = root->u.select;
+	if (lhs->setop != SX_SET_UNION_ALL || lhs->rhs == NULL) {
+		sql_arena_destroy(ast); return 0;   /* not UNION ALL (or not compound) */
+	}
+	rhs = lhs->rhs;
+	if (rhs->setop != SX_SET_NONE) { sql_arena_destroy(ast); return 0; }  /* chained */
+	/* An ORDER BY / LIMIT on the compound applies to the whole result;
+	 * not handled here -- fall back. */
+	if (lhs->order || lhs->limit || lhs->offset) { sql_arena_destroy(ast); return 0; }
+
+	/* Recognize each side WITHOUT giving away the shared arena (pass
+	 * NULL so vx_prepare_select does not free it; run_setop owns it). */
+	if (vx_prepare_select(db, NULL, lhs, binds, nbinds, &lp, errmsg) != 1) {
+		sql_arena_destroy(ast); return 0;
+	}
+	if (vx_prepare_select(db, NULL, rhs, binds, nbinds, &rp, errmsg) != 1) {
+		vx_finalize(lp); sql_arena_destroy(ast); return 0;
+	}
+	/* SQL requires equal arity on both sides of a compound. */
+	if (lp->nout != rp->nout) {
+		vx_finalize(lp); vx_finalize(rp); sql_arena_destroy(ast); return 0;
+	}
+
+	/* The plans no longer reference the AST; free it before executing. */
+	sql_arena_destroy(ast); ast = NULL;
+
+	if (collect_serial(lp, &lr) != 1) { rc = -1; goto out; }
+	if (collect_serial(rp, &rr) != 1) { rc = -1; goto out; }
+	lp = rp = NULL;   /* collect_serial finalized them */
+
+	/* Concatenate rr onto lr (UNION ALL keeps duplicates, in order). */
+	for (i = 0; i < rr->nrow; i++) {
+		vx_cell_t rowbuf[64];
+		for (j = 0; j < rr->ncol; j++) {
+			const vx_cell_t *c = &rr->cells[(size_t)i * (size_t)rr->ncol + (size_t)j];
+			rowbuf[j] = *c;
+		}
+		if (result_push(lr, rowbuf) != 0) { rc = -1; goto out; }
+	}
+	*res = lr; lr = NULL;
+	rc = 1;
+
+out:
+	if (lp) vx_finalize(lp);
+	if (rp) vx_finalize(rp);
+	if (lr) vx_result_free(lr);
+	if (rr) vx_result_free(rr);
+	if (ast) sql_arena_destroy(ast);
+	return rc;
+}
+
 int
 vx_run(sqlite3 *db, const char *sql, int n_workers,
        vx_result_t **res, char **errmsg)
@@ -3899,6 +4012,15 @@ vx_run_p(sqlite3 *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	 * re-prepares a range-scoped source per worker, which does not carry
 	 * the binds, so force one worker when binds are present. */
 	if (binds != NULL && nbinds > 0) n_workers = 1;
+
+	/* A compound (set-op) SELECT is composed of independent sub-selects;
+	 * the set-op runner recognizes and concatenates them (UNION ALL).
+	 * Only probe when the text plausibly contains a UNION, so the common
+	 * path does not pay an extra parse. */
+	if (sql_has_union(sql)) {
+		int sr = run_setop(db, sql, binds, nbinds, res, errmsg);
+		if (sr != 0) return sr;   /* 1 handled, <0 error */
+	}
 
 	/* Recognize once, then route: the morsel-parallel storage scan is the
 	 * committed path for parallelizable single-table scans/aggregations;
