@@ -204,7 +204,7 @@ main(void)
 		{ "SELECT a/2 FROM t WHERE a IS NOT NULL", 1 },
 
 		/* ---- must fall back ---- */
-		{ "SELECT DISTINCT a FROM t", 0 },
+		{ "SELECT DISTINCT a FROM t", 1 },   /* DISTINCT now native (dedup) */
 		{ "SELECT a.a FROM t a JOIN t b ON a.k=b.k", 1 },  /* self-join (V5) */
 		{ "SELECT a FROM t WHERE a IN (1,2)", 0 },          /* IN */
 		{ "SELECT substr(b,1,2) FROM t", 0 },               /* unsupported func */
