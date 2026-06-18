@@ -176,6 +176,10 @@ struct sql_select {
 	sql_expr_t     *offset;     /* OFFSET (NULL if none) */
 	sql_setop_t     setop;      /* compound operator to .rhs */
 	sql_select_t   *rhs;        /* right side of a set operation */
+	const char     *src;        /* verbatim start of this SELECT in the
+	                             * source SQL (the SELECT keyword), or
+	                             * NULL; length runs to end-of-statement
+	                             * for a trailing SELECT (INSERT..SELECT) */
 };
 
 /* ---- INSERT / UPDATE / DELETE / CREATE / DROP --------------------- */
