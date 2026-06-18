@@ -846,14 +846,25 @@ db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
 			return 0;
 		}
 
-		/* Native write fast path: a recognized literal-row INSERT applies
-		 * straight to the xstore B-tree, no VDBE / no vtab round-trip.
-		 * Emits the same {"done":N} a DML statement does.  Not recognized
-		 * (0) -> fall through to the VDBE; the prepared statement is the
-		 * fallback and stays cached.  Writes stay param-free for now. */
-		if (vw > 0 && n_params == 0) {
+		/* Native write fast path: a recognized INSERT / DELETE / UPDATE
+		 * applies straight to the xstore B-tree, no VDBE / no vtab
+		 * round-trip.  Emits the same {"done":N} a DML statement does.
+		 * Not recognized (0) -> fall through to the VDBE.  ? params in
+		 * VALUES / SET / WHERE are supported via the binds. */
+		if (vw > 0) {
 			int64_t nch = 0;
-			if (sx_vexec_write(h, sql, &nch) == 1) {
+			int wrote = 0;
+			if (n_params == 0) {
+				wrote = (sx_vexec_write(h, sql, &nch) == 1);
+			} else if (n_params <= 32) {
+				vx_cell_t binds[32]; void *owned[32]; int no = 0, k;
+				if (quack_to_binds(params, n_params, binds, owned, &no, err) != 0) {
+					sx_finalize(*pstmt); *pstmt = NULL; return -1;
+				}
+				wrote = (sx_vexec_write_p(h, sql, binds, n_params, &nch) == 1);
+				for (k = 0; k < no; k++) free(owned[k]);
+			}
+			if (wrote) {
 				if (quack_emit_done(out_buf, nch) < 0) {
 					*err = strdup("oom"); (void)sx_reset(*pstmt); return -1;
 				}

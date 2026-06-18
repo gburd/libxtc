@@ -592,6 +592,17 @@ sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges)
 	return rc;
 }
 
+int
+sx_vexec_write_p(sx_db *h, const char *sql, const void *binds, int nbinds,
+                 int64_t *nchanges)
+{
+	char *verr = NULL;
+	int rc = vx_run_write_p((xsql *)h, sql, (const vx_cell_t *)binds, nbinds,
+	                        nchanges, &verr);
+	if (verr) free(verr);
+	return rc;
+}
+
 void sx_vexec_commit(sx_db *h)   { (void)xstore_commit((xsql *)h); }
 void sx_vexec_rollback(sx_db *h) { (void)xstore_rollback((xsql *)h); }
 
@@ -623,6 +634,10 @@ const char *sx_vexec_name(const sx_vx_result *r, int col)
 
 int sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges)
 { (void)h; (void)sql; if (nchanges) *nchanges = 0; return 0; }
+int sx_vexec_write_p(sx_db *h, const char *sql, const void *binds, int nbinds,
+                     int64_t *nchanges)
+{ (void)h; (void)sql; (void)binds; (void)nbinds;
+  if (nchanges) *nchanges = 0; return 0; }
 
 void sx_vexec_commit(sx_db *h)   { (void)h; }
 void sx_vexec_rollback(sx_db *h) { (void)h; }
