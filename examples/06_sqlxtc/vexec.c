@@ -122,6 +122,9 @@ typedef struct vx_expr {
 
 /* ---- aggregation (V3) -------------------------------------------- */
 
+/* Max HAVING-only aggregates (not in the SELECT list) per query. */
+#define VX_HAVING_AGG_MAX 8
+
 enum vx_agg_kind {
 	VXA_COUNT_STAR = 1,   /* count(*) */
 	VXA_COUNT,            /* count(expr): non-NULL inputs */
@@ -148,16 +151,22 @@ typedef struct vx_outcol {
 	enum vx_agg_kind kind;   /* if is_agg */
 	vx_expr_t     *arg;      /* aggregate input expr (NULL for count(*)) */
 	vx_expr_t     *key;      /* group-key expr (if !is_agg) */
+	const sql_expr_t *ast;   /* HAVING-only agg: the AST node, so
+	                          * compile_having can match it (NULL else) */
 } vx_outcol_t;
 
 typedef struct vx_aggplan {
 	int          ngrp;       /* number of GROUP BY key expressions */
 	vx_expr_t  **grp;        /* ngrp key expressions */
-	int          nout;       /* output columns */
-	vx_outcol_t *out;        /* nout output column descriptors */
-	int          nagg;       /* number of aggregate output columns */
-	vx_expr_t   *having;     /* HAVING predicate over the output row (cols
-	                          * resolve to SELECT items), or NULL */
+	int          nout;       /* output columns (emitted) */
+	int          nout_all;   /* outcols including HAVING-only aggregates,
+	                          * which are accumulated but not emitted;
+	                          * out[nout .. nout_all) are those. */
+	vx_outcol_t *out;        /* nout_all output column descriptors */
+	int          nagg;       /* number of aggregate outcols (all of them) */
+	vx_expr_t   *having;     /* HAVING predicate over the EXTENDED row
+	                          * (nout_all cells: emitted + HAVING aggs),
+	                          * cols resolve by index; NULL if no HAVING */
 } vx_aggplan_t;
 
 /* A hash-table entry: a group, its key cells, and its accumulators. */
@@ -1975,6 +1984,48 @@ expr_same(const sql_expr_t *a, const sql_expr_t *b)
  * list (e.g. an aggregate that is not output) -- the caller falls back.
  * This covers the common HAVING (a condition on an output aggregate or
  * key) without adding extra accumulators. */
+/* Pass 1 for HAVING: walk the HAVING AST and, for each aggregate call
+ * that is NOT already a SELECT output item, append a HAVING-only
+ * aggregate outcol to ap->out (past ap->nout, growing ap->nout_all and
+ * counting it in *nagg) and collect its argument columns into nv.
+ * Returns 0, or -1 (unsupported aggregate / too many / column-collect
+ * failure -> caller falls back). */
+static int
+having_collect_aggs(const sql_select_t *sel, const sql_expr_t *e,
+                    vx_aggplan_t *ap, struct namevec *nv, int *nagg)
+{
+	const sql_exprlist_item_t *it;
+	if (e == NULL) return 0;
+	if (e->op == SX_E_FUNC && is_agg_name(&e->name[0])) {
+		enum vx_agg_kind kk;
+		int matched = 0, oi = 0;
+		/* Already a SELECT output aggregate?  Then it reuses that accs. */
+		for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next, oi++)
+			if (expr_same(e, it->expr)) { matched = 1; break; }
+		if (matched) return 0;
+		kk = agg_kind_of(e);
+		if (kk == 0) return -1;
+		if (ap->nout_all - ap->nout >= VX_HAVING_AGG_MAX) return -1;
+		ap->out[ap->nout_all].is_agg = 1;
+		ap->out[ap->nout_all].kind = kk;
+		ap->out[ap->nout_all].ast = e;
+		if (kk != VXA_COUNT_STAR) {
+			if (e->list == NULL || e->list->head == NULL) return -1;
+			if (collect_columns(nv, e->list->head->expr) != 0) return -1;
+		}
+		ap->nout_all++;
+		(*nagg)++;
+		return 0;
+	}
+	/* Recurse into the predicate structure. */
+	if (having_collect_aggs(sel, e->a, ap, nv, nagg) != 0) return -1;
+	if (having_collect_aggs(sel, e->b, ap, nv, nagg) != 0) return -1;
+	if (having_collect_aggs(sel, e->c, ap, nv, nagg) != 0) return -1;
+	for (it = e->list ? e->list->head : NULL; it; it = it->next)
+		if (having_collect_aggs(sel, it->expr, ap, nv, nagg) != 0) return -1;
+	return 0;
+}
+
 static vx_expr_t *
 compile_having(struct vx_compiler *c, const sql_select_t *sel,
                const sql_expr_t *e)
@@ -1991,9 +2042,22 @@ compile_having(struct vx_compiler *c, const sql_select_t *sel,
 		if (expr_same(e, it->expr)) {
 			vx_expr_t *n = expr_node(c, VXO_COL);
 			if (n == NULL) return NULL;
-			n->col = oi;   /* index into the output row */
+			n->col = oi;   /* index into the extended output row */
 			return n;
 		}
+	}
+	/* Or a HAVING-only aggregate appended past nout (its value lands in
+	 * the extended row at its outcol index). */
+	if (c->st->agg != NULL) {
+		vx_aggplan_t *ap = c->st->agg;
+		int i;
+		for (i = ap->nout; i < ap->nout_all; i++)
+			if (ap->out[i].ast != NULL && expr_same(e, ap->out[i].ast)) {
+				vx_expr_t *n = expr_node(c, VXO_COL);
+				if (n == NULL) return NULL;
+				n->col = i;
+				return n;
+			}
 	}
 
 	switch (e->op) {
@@ -2075,8 +2139,12 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	ap = (vx_aggplan_t *)calloc(1, sizeof *ap);
 	if (!ap) goto oom;
 	ap->nout = nout;
+	ap->nout_all = nout;
 	ap->ngrp = ngrp;
-	ap->out = (vx_outcol_t *)calloc((size_t)nout, sizeof(vx_outcol_t));
+	/* Over-allocate out[] to leave room for up to VX_HAVING_AGG_MAX
+	 * HAVING-only aggregates appended past nout. */
+	ap->out = (vx_outcol_t *)calloc((size_t)(nout + VX_HAVING_AGG_MAX),
+	                                sizeof(vx_outcol_t));
 	ap->grp = (vx_expr_t **)calloc((size_t)(ngrp > 0 ? ngrp : 1), sizeof(vx_expr_t *));
 	if (!ap->out || !ap->grp) goto oom;
 	st->agg = ap;
@@ -2116,6 +2184,11 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 			}
 		}
 	}
+	/* HAVING-only aggregates (not in SELECT) get appended outcols +
+	 * accumulators, and their args collected, in this same pass. */
+	if (sel->having &&
+	    having_collect_aggs(sel, sel->having, ap, &nv, &nagg) != 0)
+		goto fallback;
 	ap->nagg = nagg;
 	if (sel->where && collect_columns(&nv, sel->where) != 0) goto fallback;
 
@@ -2154,6 +2227,15 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 				}
 			} else {
 				ap->out[oi].key = compile_expr(&comp, it->expr);
+				if (comp.fail) goto fallback;
+			}
+		}
+		/* Compile the appended HAVING-only aggregate args. */
+		for (oi = ap->nout; oi < ap->nout_all; oi++) {
+			if (ap->out[oi].kind != VXA_COUNT_STAR && ap->out[oi].ast != NULL) {
+				const sql_expr_t *ag = ap->out[oi].ast;
+				if (ag->list == NULL || ag->list->head == NULL) goto fallback;
+				ap->out[oi].arg = compile_expr(&comp, ag->list->head->expr);
 				if (comp.fail) goto fallback;
 			}
 		}
@@ -2662,7 +2744,7 @@ agg_materialize(struct vx_stmt *st)
 		if (grp == NULL) { arena_free(rowarena); return -1; }
 
 		ai = 0;
-		for (j = 0; j < ap->nout; j++) {
+		for (j = 0; j < ap->nout_all; j++) {
 			if (!ap->out[j].is_agg) continue;
 			if (ap->out[j].kind == VXA_COUNT_STAR) {
 				acc_step(&grp->accs[ai], VXA_COUNT_STAR, NULL, &st->ht.arena);
@@ -2696,33 +2778,34 @@ agg_materialize(struct vx_stmt *st)
 	for (b = 0; b < st->ht.nbucket; b++) {
 		for (g = st->ht.buckets[b]; g; g = g->next) {
 			vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
+			vx_cell_t erow[64];   /* extended row: emitted cols + HAVING aggs */
 			int ki = 0, ai = 0;
-			for (j = 0; j < ap->nout; j++) {
+			/* Compute every outcol (emitted + HAVING-only) into erow; the
+			 * accumulator index ai advances over all is_agg outcols in
+			 * order, matching how they were stepped. */
+			for (j = 0; j < ap->nout_all && j < 64; j++) {
 				if (ap->out[j].is_agg) {
-					vx_cell_t fv;
-					acc_final(&g->accs[ai], ap->out[j].kind, &fv);
-					/* TEXT/BLOB extremes live in the ht arena, which
-					 * outlives the chunk (freed in vx_finalize after the
-					 * chunk); copy into the chunk arena for safety. */
-					if ((fv.type == VX_TEXT || fv.type == VX_BLOB) && fv.nbytes) {
-						(void)cell_dup(&c->arena, &fv, &dst[j]);
-					} else dst[j] = fv;
+					acc_final(&g->accs[ai], ap->out[j].kind, &erow[j]);
 					ai++;
 				} else {
-					vx_cell_t kv = g->keys[ki++];
-					if ((kv.type == VX_TEXT || kv.type == VX_BLOB) && kv.nbytes)
-						(void)cell_dup(&c->arena, &kv, &dst[j]);
-					else dst[j] = kv;
+					erow[j] = g->keys[ki++];
 				}
 			}
-			/* HAVING: a predicate over the just-computed output row.  Skip
-			 * the group (do not advance c->nrow, so dst is reused) when the
-			 * predicate is not true. */
+			/* HAVING: a predicate over the extended row.  Skip the group
+			 * (do not advance c->nrow) when it is not true. */
 			if (ap->having != NULL) {
 				struct vx_arena_blk *hr = NULL;
-				int hb = eval_bool(st, ap->having, dst, &hr);
+				int hb = eval_bool(st, ap->having, erow, &hr);
 				arena_free(hr);
 				if (hb != 1) continue;
+			}
+			/* Emit only the first nout columns; copy TEXT/BLOB into the
+			 * chunk arena (the ht arena is freed after the chunk). */
+			for (j = 0; j < ap->nout; j++) {
+				vx_cell_t v = erow[j];
+				if ((v.type == VX_TEXT || v.type == VX_BLOB) && v.nbytes)
+					(void)cell_dup(&c->arena, &v, &dst[j]);
+				else dst[j] = v;
 			}
 			c->nrow++;
 		}
@@ -3343,7 +3426,8 @@ static int
 is_parallelizable_plan(const vx_stmt_t *plan)
 {
 	return plan->norder == 0 && plan->limit < 0 && plan->offset <= 0 &&
-	    plan->join == NULL && plan->bt != NULL && !plan->distinct;
+	    plan->join == NULL && plan->bt != NULL && !plan->distinct &&
+	    (plan->agg == NULL || plan->agg->having == NULL);
 }
 
 /* Run an already-recognized, already-checked-parallelizable plan on the
