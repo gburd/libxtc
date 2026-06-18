@@ -222,7 +222,7 @@ main(void)
 		{ "SELECT b, count(*), sum(a) FROM t GROUP BY b", 1 },
 		{ "SELECT a, count(*) FROM t WHERE a > 4 GROUP BY a", 1 },
 		{ "SELECT count(DISTINCT a) FROM t", 0 },           /* DISTINCT agg: fallback */
-		{ "SELECT a, count(*) FROM t GROUP BY a HAVING count(*) > 1", 0 }, /* HAVING */
+		{ "SELECT a, count(*) FROM t GROUP BY a HAVING count(*) > 1", 1 }, /* HAVING now native */
 
 		{ "SELECT k FROM t WHERE a = 'x'", 0 },             /* INT col vs text lit: affinity */
 		{ "SELECT k FROM t WHERE b = 5", 0 },               /* TEXT col vs int lit: affinity */

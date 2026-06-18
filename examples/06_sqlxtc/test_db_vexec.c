@@ -179,6 +179,8 @@ main(void)
 		{ "SELECT count(*) FROM t",                                1 },
 		{ "SELECT count(a), sum(a), min(a), max(a) FROM t",        1 },
 		{ "SELECT b, count(*), sum(a) FROM t GROUP BY b",          0 },
+		{ "SELECT b, count(*) FROM t GROUP BY b HAVING count(*) > 20", 0 },
+		{ "SELECT b, count(*), sum(a) FROM t GROUP BY b HAVING sum(a) > 1000 AND count(*) > 5", 0 },
 		{ "SELECT k, a FROM t ORDER BY a, k",                      1 },
 		{ "SELECT k, a FROM t ORDER BY k LIMIT 5 OFFSET 3",        1 },
 		{ "SELECT * FROM t WHERE k = 5",                           1 },

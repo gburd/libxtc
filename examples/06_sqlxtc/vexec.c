@@ -156,6 +156,8 @@ typedef struct vx_aggplan {
 	int          nout;       /* output columns */
 	vx_outcol_t *out;        /* nout output column descriptors */
 	int          nagg;       /* number of aggregate output columns */
+	vx_expr_t   *having;     /* HAVING predicate over the output row (cols
+	                          * resolve to SELECT items), or NULL */
 } vx_aggplan_t;
 
 /* A hash-table entry: a group, its key cells, and its accumulators. */
@@ -1625,9 +1627,16 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 
 	/* Common gates: no CTE/DISTINCT/HAVING.  GROUP BY is
 	 * allowed only on the aggregation path; ORDER BY / LIMIT / OFFSET
-	 * are allowed only on the non-aggregating path (handled below). */
-	if (sel->with || sel->having)
+	 * are allowed only on the non-aggregating path (handled below).
+	 * HAVING is allowed only on the aggregation path (gated there). */
+	if (sel->with)
 		goto fallback;
+	if (sel->having && sel->group == NULL) {
+		/* HAVING without GROUP BY -- only valid with an aggregate select
+		 * list, which the agg path detects below; a HAVING here that is
+		 * not aggregated would be handled there too.  Defer the decision
+		 * to the path split. */
+	}
 
 	/* FROM: one base table, or exactly two base tables joined (V5). */
 	src = sel->from;
@@ -1662,6 +1671,7 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 		}
 	}
 	if (sel->group) goto fallback;   /* defensive: GROUP only on agg path */
+	if (sel->having) goto fallback;  /* HAVING only with aggregation */
 
 	/* Projection: either a single "*" (expand to all table columns) or a
 	 * list of scalar expressions.  Detect "*" up front. */
@@ -1936,7 +1946,87 @@ expr_same(const sql_expr_t *a, const sql_expr_t *b)
 		return a->op2 == b->op2 && expr_same(a->a, b->a);
 	case SX_E_BINARY:
 		return a->op2 == b->op2 && expr_same(a->a, b->a) && expr_same(a->b, b->b);
+	case SX_E_FUNC: {
+		/* same function name, same flags (DISTINCT/star), same args. */
+		const sql_exprlist_item_t *ia, *ib;
+		if (a->ival != b->ival) return 0;
+		if (a->name[0].len != b->name[0].len ||
+		    memcmp(a->name[0].p, b->name[0].p, a->name[0].len) != 0) return 0;
+		ia = a->list ? a->list->head : NULL;
+		ib = b->list ? b->list->head : NULL;
+		for (; ia && ib; ia = ia->next, ib = ib->next)
+			if (!expr_same(ia->expr, ib->expr)) return 0;
+		return ia == NULL && ib == NULL;
+	}
 	default: return 0;
+	}
+}
+
+/* Compile a HAVING predicate into an expression over the aggregation
+ * OUTPUT row: any sub-expression that matches a SELECT item (an
+ * aggregate call or a group-key reference, by expr_same) becomes a
+ * VXO_COL referencing that output column; comparisons and AND/OR/NOT
+ * recurse; literals/params compile as usual.  Returns NULL with
+ * *c->fail set when the HAVING references something not in the SELECT
+ * list (e.g. an aggregate that is not output) -- the caller falls back.
+ * This covers the common HAVING (a condition on an output aggregate or
+ * key) without adding extra accumulators. */
+static vx_expr_t *
+compile_having(struct vx_compiler *c, const sql_select_t *sel,
+               const sql_expr_t *e)
+{
+	const sql_exprlist_item_t *it;
+	int oi;
+	enum vx_op op;
+	if (c->fail || e == NULL) { c->fail = 1; return NULL; }
+
+	/* First, does this whole sub-expression match a SELECT output item?
+	 * (Matches an aggregate call like count(*) or a group key.) */
+	oi = 0;
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next, oi++) {
+		if (expr_same(e, it->expr)) {
+			vx_expr_t *n = expr_node(c, VXO_COL);
+			if (n == NULL) return NULL;
+			n->col = oi;   /* index into the output row */
+			return n;
+		}
+	}
+
+	switch (e->op) {
+	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
+		return compile_literal(c, e);
+	case SX_E_PARAM:
+		return compile_param(c, e);
+	case SX_E_UNARY:
+		if (e->op2 == TK_NOT) {
+			vx_expr_t *n = expr_node(c, VXO_NOT);
+			vx_expr_t *a = compile_having(c, sel, e->a);
+			if (a == NULL) return NULL;
+			if (n) n->a = a;
+			return n;
+		}
+		c->fail = 1; return NULL;
+	case SX_E_BINARY: {
+		vx_expr_t *n, *a, *b;
+		if (!tok_to_binop(e->op2, &op)) { c->fail = 1; return NULL; }
+		a = compile_having(c, sel, e->a);
+		if (a == NULL) return NULL;
+		b = compile_having(c, sel, e->b);
+		if (b == NULL) return NULL;
+		n = expr_node(c, op);
+		if (n == NULL) return NULL;
+		n->a = a; n->b = b;
+		return n;
+	}
+	case SX_E_IS_NULL: {
+		vx_expr_t *n = expr_node(c, e->ival ? VXO_NOTNULL : VXO_ISNULL);
+		vx_expr_t *a = compile_having(c, sel, e->a);
+		if (a == NULL) return NULL;
+		if (n) n->a = a;
+		return n;
+	}
+	default:
+		c->fail = 1; return NULL;
 	}
 }
 
@@ -2067,6 +2157,10 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	if (sel->where) {
 		st->filter = compile_expr(&comp, sel->where);
 		if (comp.fail) goto fallback;
+	}
+	if (sel->having) {
+		ap->having = compile_having(&comp, sel, sel->having);
+		if (comp.fail || ap->having == NULL) goto fallback;
 	}
 
 	st->nout = nout;
@@ -2616,6 +2710,15 @@ agg_materialize(struct vx_stmt *st)
 						(void)cell_dup(&c->arena, &kv, &dst[j]);
 					else dst[j] = kv;
 				}
+			}
+			/* HAVING: a predicate over the just-computed output row.  Skip
+			 * the group (do not advance c->nrow, so dst is reused) when the
+			 * predicate is not true. */
+			if (ap->having != NULL) {
+				struct vx_arena_blk *hr = NULL;
+				int hb = eval_bool(st, ap->having, dst, &hr);
+				arena_free(hr);
+				if (hb != 1) continue;
 			}
 			c->nrow++;
 		}
