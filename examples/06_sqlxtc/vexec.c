@@ -226,6 +226,8 @@ struct vx_stmt {
 	const vx_cell_t *binds;
 	int              nbinds;
 
+	int           distinct;     /* SELECT DISTINCT: dedup the result */
+
 	int           nout;
 	vx_expr_t   **proj;         /* nout projection expressions (non-agg path) */
 	vx_expr_t    *filter;       /* WHERE expression, or NULL */
@@ -1560,7 +1562,7 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	/* Common gates: no CTE/DISTINCT/HAVING.  GROUP BY is
 	 * allowed only on the aggregation path; ORDER BY / LIMIT / OFFSET
 	 * are allowed only on the non-aggregating path (handled below). */
-	if (sel->with || sel->distinct || sel->having)
+	if (sel->with || sel->having)
 		goto fallback;
 
 	/* FROM: one base table, or exactly two base tables joined (V5). */
@@ -1570,7 +1572,7 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 		/* Two-table INNER equi-join (no GROUP BY / ORDER BY / aggregates
 		 * on the join path yet -- those compose later). */
 		if (src->next->next != NULL) goto fallback;       /* >2 tables */
-		if (sel->group || sel->order || sel->limit || sel->offset)
+		if (sel->group || sel->order || sel->limit || sel->offset || sel->distinct)
 			goto fallback;
 		return vx_try_prepare_join(db, ast, sel, binds, nbinds, out, errmsg);
 	}
@@ -1589,6 +1591,7 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 				has_agg = 1;
 		}
 		if (has_agg) {
+			if (sel->distinct) goto fallback;   /* DISTINCT over aggregates: VDBE */
 			/* Hand off the AST (still alive) to the agg builder, which
 			 * destroys it before returning. */
 			return vx_try_prepare_agg(db, ast, sel, tabbuf, binds, nbinds, out, errmsg);
@@ -1618,6 +1621,7 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	st->db = db;
 	st->cur = -1;
 	st->binds = binds; st->nbinds = nbinds;
+	st->distinct = sel->distinct;
 
 	memset(&nv, 0, sizeof nv);
 	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
@@ -1789,6 +1793,11 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 			if (st->offset < 0) st->offset = 0;
 		}
 	}
+
+	/* DISTINCT combined with LIMIT/OFFSET needs dedup BEFORE limiting;
+	 * the materialize path applies limit before dedup, so leave that
+	 * combination to the VDBE. */
+	if (st->distinct && (st->limit >= 0 || st->offset > 0)) goto fallback;
 
 	st->srcrow = (vx_cell_t *)calloc((size_t)(st->nsrc_col > 0 ? st->nsrc_col : 1),
 	                                 sizeof(vx_cell_t));
@@ -2558,7 +2567,7 @@ static int
 is_ordered(const struct vx_stmt *st)
 {
 	return st->agg == NULL &&
-	       (st->norder > 0 || st->limit >= 0 || st->offset > 0);
+	       (st->norder > 0 || st->limit >= 0 || st->offset > 0 || st->distinct);
 }
 
 /* qsort context: the order keys per row + directions.  Keys are stored
@@ -2683,6 +2692,22 @@ ordered_materialize(struct vx_stmt *st)
 	for (e = 0; e < emit_n; e++) {
 		int si = idx[(int)off + e];
 		vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
+		if (st->distinct) {
+			/* Skip a row that duplicates an already-emitted one (SQL
+			 * DISTINCT: NULLs equal, numeric cross-type equal). */
+			int d, dup = 0;
+			for (d = 0; d < c->nrow && !dup; d++) {
+				const vx_cell_t *prev = &c->cells[(size_t)d * (size_t)c->ncol];
+				int cc, same = 1;
+				for (cc = 0; cc < st->nout; cc++)
+					if (!key_eq(&prev[cc],
+					            &rows[(size_t)si * (size_t)st->nout + (size_t)cc])) {
+						same = 0; break;
+					}
+				if (same) dup = 1;
+			}
+			if (dup) continue;
+		}
 		for (j = 0; j < st->nout; j++) {
 			vx_cell_t v = rows[(size_t)si * (size_t)st->nout + (size_t)j];
 			if ((v.type == VX_TEXT || v.type == VX_BLOB) && v.nbytes)
@@ -2929,6 +2954,90 @@ result_push(struct vx_result *r, const vx_cell_t *row)
 	return 0;
 }
 
+/* Hash a whole result row (combine the per-cell hashes). */
+static uint64_t
+row_hash(const vx_cell_t *row, int ncol)
+{
+	uint64_t h = 1469598103934665603ULL;
+	int j;
+	for (j = 0; j < ncol; j++)
+		h ^= cell_hash(&row[j]) * (uint64_t)(j + 1) * 0x100000001b3ULL;
+	return h;
+}
+
+/* Two result rows are equal as a SQL row value: every column compares
+ * equal under key_eq (NULLs equal, numeric cross-type equal). */
+static int
+row_cells_eq(const vx_cell_t *a, const vx_cell_t *b, int ncol)
+{
+	int j;
+	for (j = 0; j < ncol; j++)
+		if (!key_eq(&a[j], &b[j])) return 0;
+	return 1;
+}
+
+/* A hash index over result rows, for dedup / set membership.  Stores
+ * (hash, row-index) pairs; lookups verify with row_cells_eq against the
+ * backing result's cells. */
+struct row_index {
+	struct { uint64_t h; int row; } *e;
+	int n, cap;
+};
+
+static void row_index_free(struct row_index *ix) { free(ix->e); ix->e = NULL; ix->n = ix->cap = 0; }
+
+/* Is `row` present among the rows already added to `ix` (which index
+ * into `r`)?  Returns 1 if found. */
+static int
+row_index_has(const struct row_index *ix, const struct vx_result *r,
+              const vx_cell_t *row, uint64_t h)
+{
+	int i;
+	for (i = 0; i < ix->n; i++) {
+		if (ix->e[i].h != h) continue;
+		if (row_cells_eq(&r->cells[(size_t)ix->e[i].row * (size_t)r->ncol],
+		                 row, r->ncol))
+			return 1;
+	}
+	return 0;
+}
+
+static int
+row_index_add(struct row_index *ix, int rowno, uint64_t h)
+{
+	if (ix->n == ix->cap) {
+		int nc = ix->cap ? ix->cap * 2 : 64;
+		void *nn = realloc(ix->e, sizeof *ix->e * (size_t)nc);
+		if (nn == NULL) return -1;
+		ix->e = nn; ix->cap = nc;
+	}
+	ix->e[ix->n].h = h; ix->e[ix->n].row = rowno; ix->n++;
+	return 0;
+}
+
+/* Remove duplicate rows from `r` in place, keeping the first occurrence
+ * (SQL DISTINCT / UNION semantics).  Returns 0 or -1 on OOM. */
+static int
+result_dedup(struct vx_result *r)
+{
+	struct row_index ix; int i, w = 0, rc = 0;
+	memset(&ix, 0, sizeof ix);
+	for (i = 0; i < r->nrow; i++) {
+		const vx_cell_t *row = &r->cells[(size_t)i * (size_t)r->ncol];
+		uint64_t h = row_hash(row, r->ncol);
+		/* Build the index against the COMPACTED prefix [0,w). */
+		if (row_index_has(&ix, r, row, h)) continue;
+		if (w != i)
+			memmove(&r->cells[(size_t)w * (size_t)r->ncol], row,
+			        sizeof(vx_cell_t) * (size_t)r->ncol);
+		if (row_index_add(&ix, w, h) != 0) { rc = -1; break; }
+		w++;
+	}
+	r->nrow = w;
+	row_index_free(&ix);
+	return rc;
+}
+
 /* Shared context across the morsel workers. */
 struct vx_par {
 	const struct vx_stmt *plan;   /* compiled template (proj/filter/cols/table) */
@@ -3052,7 +3161,7 @@ static int
 is_parallelizable_plan(const vx_stmt_t *plan)
 {
 	return plan->norder == 0 && plan->limit < 0 && plan->offset <= 0 &&
-	    plan->join == NULL && plan->bt != NULL;
+	    plan->join == NULL && plan->bt != NULL && !plan->distinct;
 }
 
 /* Run an already-recognized, already-checked-parallelizable plan on the
@@ -3220,7 +3329,7 @@ static int
 collect_serial(vx_stmt_t *plan, vx_result_t **res)
 {
 	struct vx_result *out;
-	int ncol, step, rc = 1, i;
+	int ncol, step, rc = 1, i, distinct = plan->distinct;
 	vx_cell_t rowbuf[64];
 
 	ncol = vx_column_count(plan);
@@ -3253,6 +3362,7 @@ collect_serial(vx_stmt_t *plan, vx_result_t **res)
 		if (result_push(out, rowbuf) != 0) { rc = -1; break; }
 	}
 	if (step != SQLITE_DONE && rc == 1) rc = -1;
+	if (rc == 1 && distinct && result_dedup(out) != 0) rc = -1;
 
 	if (rc == 1) { *res = out; }
 	else { arena_free(out->arena); free(out->cells); free(out); }
@@ -3899,21 +4009,30 @@ done:
 }
 
 
-/* Cheap case-insensitive test for the substring "union" in the SQL, so
- * the set-op runner is only invoked (with its parse) when a UNION is
- * plausibly present.  A false positive (the word in a string literal or
- * identifier) costs only one extra parse that then falls back; never a
- * correctness issue. */
+/* Cheap case-insensitive test for a set-operation keyword (UNION /
+ * INTERSECT / EXCEPT) in the SQL, so the set-op runner is only invoked
+ * (with its parse) when one is plausibly present.  A false positive
+ * costs one extra parse that then falls back; never a correctness
+ * issue. */
 static int
-sql_has_union(const char *s)
+ci_word(const char *s, const char *w)
 {
+	size_t n = strlen(w), i;
 	for (; s && *s; s++) {
-		if ((s[0] == 'u' || s[0] == 'U') && (s[1] == 'n' || s[1] == 'N') &&
-		    (s[2] == 'i' || s[2] == 'I') && (s[3] == 'o' || s[3] == 'O') &&
-		    (s[4] == 'n' || s[4] == 'N'))
-			return 1;
+		for (i = 0; i < n; i++) {
+			char c = s[i];
+			if (c >= 'a' && c <= 'z') c -= 32;
+			if (c != w[i]) break;
+		}
+		if (i == n) return 1;
 	}
 	return 0;
+}
+
+static int
+sql_has_setop(const char *s)
+{
+	return ci_word(s, "UNION") || ci_word(s, "INTERSECT") || ci_word(s, "EXCEPT");
 }
 
 /* Run a compound SELECT (set operation).  Handles UNION ALL: recognize
@@ -3931,6 +4050,7 @@ run_setop(sqlite3 *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	sql_stmt_t *root = NULL;
 	const char *perr = NULL;
 	sql_select_t *lhs, *rhs;
+	sql_setop_t op;
 	vx_stmt_t *lp = NULL, *rp = NULL;
 	vx_result_t *lr = NULL, *rr = NULL;
 	int rc = 0, i, j;
@@ -3941,8 +4061,12 @@ run_setop(sqlite3 *db, const char *sql, const vx_cell_t *binds, int nbinds,
 		sql_arena_destroy(ast); return 0;
 	}
 	lhs = root->u.select;
-	if (lhs->setop != SX_SET_UNION_ALL || lhs->rhs == NULL) {
-		sql_arena_destroy(ast); return 0;   /* not UNION ALL (or not compound) */
+	if (lhs->setop == SX_SET_NONE || lhs->rhs == NULL) {
+		sql_arena_destroy(ast); return 0;   /* not a set operation */
+	}
+	if (lhs->setop != SX_SET_UNION_ALL && lhs->setop != SX_SET_UNION &&
+	    lhs->setop != SX_SET_INTERSECT && lhs->setop != SX_SET_EXCEPT) {
+		sql_arena_destroy(ast); return 0;
 	}
 	rhs = lhs->rhs;
 	if (rhs->setop != SX_SET_NONE) { sql_arena_destroy(ast); return 0; }  /* chained */
@@ -3963,21 +4087,72 @@ run_setop(sqlite3 *db, const char *sql, const vx_cell_t *binds, int nbinds,
 		vx_finalize(lp); vx_finalize(rp); sql_arena_destroy(ast); return 0;
 	}
 
-	/* The plans no longer reference the AST; free it before executing. */
+	/* The plans no longer reference the AST; capture the operator, then
+	 * free it before executing (lhs points into the arena). */
+	op = lhs->setop;
 	sql_arena_destroy(ast); ast = NULL;
 
 	if (collect_serial(lp, &lr) != 1) { rc = -1; goto out; }
 	if (collect_serial(rp, &rr) != 1) { rc = -1; goto out; }
 	lp = rp = NULL;   /* collect_serial finalized them */
 
-	/* Concatenate rr onto lr (UNION ALL keeps duplicates, in order). */
-	for (i = 0; i < rr->nrow; i++) {
-		vx_cell_t rowbuf[64];
-		for (j = 0; j < rr->ncol; j++) {
-			const vx_cell_t *c = &rr->cells[(size_t)i * (size_t)rr->ncol + (size_t)j];
-			rowbuf[j] = *c;
+	if (op == SX_SET_UNION_ALL || op == SX_SET_UNION) {
+		/* Concatenate rr onto lr (order preserved). */
+		for (i = 0; i < rr->nrow; i++) {
+			vx_cell_t rowbuf[64];
+			for (j = 0; j < rr->ncol; j++)
+				rowbuf[j] = rr->cells[(size_t)i * (size_t)rr->ncol + (size_t)j];
+			if (result_push(lr, rowbuf) != 0) { rc = -1; goto out; }
 		}
-		if (result_push(lr, rowbuf) != 0) { rc = -1; goto out; }
+		if (op == SX_SET_UNION && result_dedup(lr) != 0) { rc = -1; goto out; }
+	} else if (op == SX_SET_INTERSECT) {
+		/* Keep distinct left rows that also appear in the right. */
+		struct vx_result *outr = (struct vx_result *)calloc(1, sizeof *outr);
+		struct row_index seen; int k;
+		if (outr == NULL) { rc = -1; goto out; }
+		outr->ncol = lr->ncol;
+		memcpy(outr->name, lr->name, sizeof outr->name);
+		memset(&seen, 0, sizeof seen);
+		for (i = 0; i < lr->nrow; i++) {
+			const vx_cell_t *row = &lr->cells[(size_t)i * (size_t)lr->ncol];
+			uint64_t h = row_hash(row, lr->ncol);
+			int inr = 0;
+			if (row_index_has(&seen, outr, row, h)) continue;   /* already emitted */
+			for (k = 0; k < rr->nrow; k++)
+				if (row_cells_eq(row, &rr->cells[(size_t)k * (size_t)rr->ncol],
+				                 lr->ncol)) { inr = 1; break; }
+			if (!inr) continue;
+			if (result_push(outr, row) != 0 ||
+			    row_index_add(&seen, outr->nrow - 1, h) != 0) {
+				row_index_free(&seen); vx_result_free(outr); rc = -1; goto out;
+			}
+		}
+		row_index_free(&seen);
+		vx_result_free(lr); lr = outr;
+	} else {   /* SX_SET_EXCEPT */
+		/* Keep distinct left rows that do NOT appear in the right. */
+		struct vx_result *outr = (struct vx_result *)calloc(1, sizeof *outr);
+		struct row_index seen; int k;
+		if (outr == NULL) { rc = -1; goto out; }
+		outr->ncol = lr->ncol;
+		memcpy(outr->name, lr->name, sizeof outr->name);
+		memset(&seen, 0, sizeof seen);
+		for (i = 0; i < lr->nrow; i++) {
+			const vx_cell_t *row = &lr->cells[(size_t)i * (size_t)lr->ncol];
+			uint64_t h = row_hash(row, lr->ncol);
+			int inr = 0;
+			if (row_index_has(&seen, outr, row, h)) continue;
+			for (k = 0; k < rr->nrow; k++)
+				if (row_cells_eq(row, &rr->cells[(size_t)k * (size_t)rr->ncol],
+				                 lr->ncol)) { inr = 1; break; }
+			if (inr) continue;
+			if (result_push(outr, row) != 0 ||
+			    row_index_add(&seen, outr->nrow - 1, h) != 0) {
+				row_index_free(&seen); vx_result_free(outr); rc = -1; goto out;
+			}
+		}
+		row_index_free(&seen);
+		vx_result_free(lr); lr = outr;
 	}
 	*res = lr; lr = NULL;
 	rc = 1;
@@ -4017,7 +4192,7 @@ vx_run_p(sqlite3 *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	 * the set-op runner recognizes and concatenates them (UNION ALL).
 	 * Only probe when the text plausibly contains a UNION, so the common
 	 * path does not pay an extra parse. */
-	if (sql_has_union(sql)) {
+	if (sql_has_setop(sql)) {
 		int sr = run_setop(db, sql, binds, nbinds, res, errmsg);
 		if (sr != 0) return sr;   /* 1 handled, <0 error */
 	}
