@@ -730,7 +730,10 @@ expr(R) ::= TK_LP(L) expr(E) TK_RP(P). {
      * select item is named with them, as SQLite does ((a+1)*2). */
     if (R) { R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
 }
-expr(R) ::= TK_LP select_stmt(Q) TK_RP. { R = mk_expr(pstate, SX_E_SUBQUERY); if (R) R->sel = Q; }
+expr(R) ::= TK_LP(L) select_stmt(Q) TK_RP(P). {
+    R = mk_expr(pstate, SX_E_SUBQUERY);
+    if (R) { R->sel = Q; R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
+}
 expr(R) ::= TK_NOT expr(E).             { R = mk_unary(pstate, TK_NOT, E); }
 expr(R) ::= TK_MINUS expr(E). [TK_UMINUS] { R = mk_unary(pstate, TK_MINUS, E); }
 expr(R) ::= TK_PLUS expr(E).  [TK_UMINUS] { R = mk_unary(pstate, TK_PLUS, E); }
