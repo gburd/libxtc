@@ -326,29 +326,43 @@ The gates to actually deleting sqlite3.c, in dependency order:
      gone -- they are the last thing removed, not the first.
 
 Where the live path stands today: most single-table reads (scan /
-filter / project / scalar + aggregate + GROUP BY + HAVING + ORDER BY /
-LIMIT / DISTINCT [+ ORDER BY + LIMIT] / INNER join / SELECT * /
-UNION [ALL] / INTERSECT / EXCEPT / IN (list) / NOT IN) and the common
-writes (INSERT, DELETE/UPDATE by pk-point/range/arbitrary-predicate,
-multi-statement transactions) -- INCLUDING parametrized (?) reads and
-writes -- run with NO VDBE and NO vtab, naming columns and resolving
-schema natively.
+filter / project / scalar + aggregate + GROUP BY + HAVING [incl. over a
+non-selected aggregate] + ORDER BY / LIMIT / DISTINCT [+ ORDER BY +
+LIMIT] / INNER join / SELECT * / UNION [ALL] / INTERSECT / EXCEPT /
+IN (list) / NOT IN) and the common writes (INSERT, DELETE/UPDATE by
+pk-point/range/arbitrary-predicate, multi-statement transactions) --
+INCLUDING parametrized (?) reads and writes -- run with NO VDBE and NO
+vtab, naming columns and resolving schema natively.
 
 The read long-tail still on the VDBE, in rough order of effort:
-  - HAVING over an aggregate NOT in the SELECT list (e.g. SELECT b ...
-    GROUP BY b HAVING count(*) > 5) -- needs each such HAVING aggregate
-    to get its own accumulator in the group (an extra is_agg outcol
-    beyond nout, accumulated but not emitted) and a VXO_AGGREF op that
-    reads g->accs[idx] at emit time.  The in-SELECT HAVING is native.
   - DISTINCT / set-op + LIMIT WITHOUT ORDER BY -- the surviving subset
     is unspecified in SQL, so not byte-reproducible; with ORDER BY it
-    is native.
+    is native.  (Intentional fallback, not a gap.)
   - Outer joins (LEFT/RIGHT/FULL) and 3+ table joins -- the V5 hash
-    join is INNER and two-table; LEFT join emits unmatched left rows
-    with NULL right columns; N-way joins chain builds/probes.  Large.
+    join (vx_try_prepare_join) is INNER and two-table.  LEFT: build the
+    hash on the right, scan the left, and for a left row with no probe
+    match emit it once with the right columns NULL (jc_resolve already
+    maps combined indices; the probe-miss path must synthesize a NULL
+    right row).  RIGHT = LEFT with sides swapped; FULL needs both plus
+    tracking which build rows were matched.  N-way joins chain
+    builds/probes.  Large.
   - Subqueries (scalar, IN (SELECT), correlated, FROM-clause / derived
     tables) -- the single largest area; a subquery is itself a plan
     whose result feeds the outer query.  Multi-milestone.
+
+The write long-tail (step 3 REMAINING) still on the VDBE:
+transactional DELETE/UPDATE (read-your-writes -- merge the wbuf into
+the native scan), INSERT...SELECT (run the inner SELECT, insert each
+row), REPLACE, explicit-column-list INSERT (reorder VALUES into the
+declared column order), and pk-reassigning UPDATE (tombstone the old
+key).
+
+DDL (CREATE / DROP / ALTER) is LAST: the VDBE fallback requires SQLite
+to keep every table in sqlite_master, so DDL cannot go native until the
+fallback is removed -- which needs the entire read + write surface
+above to be native first.  Then the VDBE fallback comes out, native
+DDL goes in, and sqlite3.c / the vfs/pcache/mutex shims / the xsql_*
+rename are deleted.
 
 The write long-tail (step 3 REMAINING) still on the VDBE:
 transactional DELETE/UPDATE (read-your-writes -- merge the wbuf into
