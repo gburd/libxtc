@@ -220,6 +220,12 @@ struct vx_stmt {
 	int64_t       scan_lo, scan_hi;
 	int           scan_has_lo, scan_has_hi;
 
+	/* Bound ? parameters for this statement (1-based), used by the
+	 * compiler to turn SX_E_PARAM into a literal.  Borrowed (the caller's
+	 * array outlives the prepare); NULL when there are no params. */
+	const vx_cell_t *binds;
+	int              nbinds;
+
 	int           nout;
 	vx_expr_t   **proj;         /* nout projection expressions (non-agg path) */
 	vx_expr_t    *filter;       /* WHERE expression, or NULL */
@@ -428,6 +434,11 @@ struct vx_compiler {
 	struct namevec *nv;
 	struct vx_joinctx *jc;    /* non-NULL on the join path */
 	int             fail;
+	/* Bound parameters (1-based by ordinal).  A SX_E_PARAM compiles to a
+	 * VXO_LIT holding binds[ordinal-1]; binds == NULL means no params
+	 * (a ? then fails the compile -> VDBE fallback). */
+	const vx_cell_t *binds;
+	int              nbinds;
 };
 
 /* Slice == C-string (case-sensitive for identifiers, as SQLite folds
@@ -609,7 +620,7 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	const sql_exprlist_item_t *it;
 	if (e == NULL) return -1;
 	switch (e->op) {
-	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
+	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_PARAM:
 		return 0;
 	case SX_E_COLUMN:
 		if (e->nname < 1 || e->nname > 2) return -1;
@@ -712,6 +723,34 @@ compile_literal(struct vx_compiler *c, const sql_expr_t *e)
 	}
 }
 
+/* Compile a ? parameter into a VXO_LIT holding its bound value (the live
+ * path binds before executing, so the value is known at compile time).
+ * TEXT/BLOB bytes are copied into the plan arena.  Fails the compile --
+ * VDBE fallback -- if no binds were supplied or the ordinal is out of
+ * range. */
+static vx_expr_t *
+compile_param(struct vx_compiler *c, const sql_expr_t *e)
+{
+	vx_expr_t *n;
+	int ord = (int)e->ival;   /* 1-based */
+	const vx_cell_t *v;
+	if (c->binds == NULL || ord < 1 || ord > c->nbinds) { c->fail = 1; return NULL; }
+	n = expr_node(c, VXO_LIT);
+	if (n == NULL) { c->fail = 1; return NULL; }
+	v = &c->binds[ord - 1];
+	if (v->type == VX_TEXT || v->type == VX_BLOB) {
+		uint8_t *p = (uint8_t *)arena_alloc(&c->st->plan_arena,
+		                                    (size_t)v->nbytes + 1);
+		if (p == NULL) { c->fail = 1; return NULL; }
+		if (v->nbytes) memcpy(p, v->bytes, v->nbytes);
+		p[v->nbytes] = '\0';
+		n->lit.type = v->type; n->lit.bytes = p; n->lit.nbytes = v->nbytes;
+	} else {
+		n->lit = *v;   /* INT / REAL / NULL: by value */
+	}
+	return n;
+}
+
 static vx_expr_t *
 compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 {
@@ -720,6 +759,8 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 	switch (e->op) {
 	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
 		return compile_literal(c, e);
+	case SX_E_PARAM:
+		return compile_param(c, e);
 
 	case SX_E_COLUMN: {
 		const sql_str_t *cn;
@@ -1358,10 +1399,15 @@ chunk_free(vx_chunk_t *c)
 
 static int vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast,
                               const sql_select_t *sel, const char *tabbuf,
+                              const vx_cell_t *binds, int nbinds,
                               vx_stmt_t **out, char **errmsg);
 static int vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast,
                                const sql_select_t *sel,
+                               const vx_cell_t *binds, int nbinds,
                                vx_stmt_t **out, char **errmsg);
+static int vx_try_prepare_binds(sqlite3 *db, const char *sql,
+                                const vx_cell_t *binds, int nbinds,
+                                vx_stmt_t **out, char **errmsg);
 
 /* Parse a NUMBER expr (with an optional leading unary minus) as an
  * integer literal.  Returns 1 with *v set, or 0 (not an integer
@@ -1457,6 +1503,14 @@ where_rowid_bound(const sql_expr_t *w, const char *pk,
 int
 vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 {
+	return vx_try_prepare_binds(db, sql, NULL, 0, out, errmsg);
+}
+
+static int
+vx_try_prepare_binds(sqlite3 *db, const char *sql,
+                     const vx_cell_t *binds, int nbinds,
+                     vx_stmt_t **out, char **errmsg)
+{
 	sql_arena_t *ast = NULL;
 	sql_stmt_t  *root = NULL;
 	const char  *perr = NULL;
@@ -1496,7 +1550,7 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 		if (src->next->next != NULL) goto fallback;       /* >2 tables */
 		if (sel->group || sel->order || sel->limit || sel->offset)
 			goto fallback;
-		return vx_try_prepare_join(db, ast, sel, out, errmsg);
+		return vx_try_prepare_join(db, ast, sel, binds, nbinds, out, errmsg);
 	}
 	if (src->subquery != NULL) goto fallback;
 	if (src->table.len == 0 || src->table.len >= sizeof tabbuf) goto fallback;
@@ -1515,7 +1569,7 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 		if (has_agg) {
 			/* Hand off the AST (still alive) to the agg builder, which
 			 * destroys it before returning. */
-			return vx_try_prepare_agg(db, ast, sel, tabbuf, out, errmsg);
+			return vx_try_prepare_agg(db, ast, sel, tabbuf, binds, nbinds, out, errmsg);
 		}
 	}
 	if (sel->group) goto fallback;   /* defensive: GROUP only on agg path */
@@ -1541,9 +1595,11 @@ vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out, char **errmsg)
 	if (!st) goto oom;
 	st->db = db;
 	st->cur = -1;
+	st->binds = binds; st->nbinds = nbinds;
 
 	memset(&nv, 0, sizeof nv);
 	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
+	comp.binds = binds; comp.nbinds = nbinds;
 
 	/* Pass 1: collect referenced base columns and reject unsupported
 	 * constructs, WITHOUT the affinity gate (affinities are unknown
@@ -1792,7 +1848,8 @@ expr_same(const sql_expr_t *a, const sql_expr_t *b)
 
 static int
 vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
-                   const char *tabbuf, vx_stmt_t **out, char **errmsg)
+                   const char *tabbuf, const vx_cell_t *binds, int nbinds,
+                   vx_stmt_t **out, char **errmsg)
 {
 	struct vx_stmt *st = NULL;
 	struct namevec nv;
@@ -1826,6 +1883,7 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	st->db = db;
 	st->cur = -1;
 	st->limit = -1;   /* agg path has no LIMIT/ORDER BY (gated above) */
+	st->binds = binds; st->nbinds = nbinds;
 	ap = (vx_aggplan_t *)calloc(1, sizeof *ap);
 	if (!ap) goto oom;
 	ap->nout = nout;
@@ -1837,6 +1895,7 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 
 	memset(&nv, 0, sizeof nv);
 	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
+	comp.binds = binds; comp.nbinds = nbinds;
 
 	/* Pass 1: collect referenced base columns (group keys, agg args,
 	 * WHERE), and classify each select item as key or aggregate. */
@@ -2057,6 +2116,7 @@ jc_collect(struct vx_joinctx *jc, const sql_expr_t *e)
 
 static int
 vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
+                    const vx_cell_t *binds, int nbinds,
                     vx_stmt_t **out, char **errmsg)
 {
 	struct vx_stmt *st = NULL;
@@ -2146,6 +2206,7 @@ vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	st = (struct vx_stmt *)calloc(1, sizeof *st);
 	if (!st) goto oom;
 	st->db = db; st->cur = -1; st->limit = -1;
+	st->binds = binds; st->nbinds = nbinds;
 	jp = (vx_joinplan_t *)calloc(1, sizeof *jp);
 	if (!jp) goto oom;
 	st->join = jp;
@@ -2181,6 +2242,7 @@ vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 
 	/* Pass 2: compile projection + filter over the combined row. */
 	comp.st = st; comp.nv = NULL; comp.jc = &jc; comp.fail = 0;
+	comp.binds = binds; comp.nbinds = nbinds;
 	{
 		int k = 0;
 		for (it = sel->cols->head; it; it = it->next, k++) {
@@ -3790,19 +3852,30 @@ int
 vx_run(sqlite3 *db, const char *sql, int n_workers,
        vx_result_t **res, char **errmsg)
 {
+	return vx_run_p(db, sql, NULL, 0, n_workers, res, errmsg);
+}
+
+int
+vx_run_p(sqlite3 *db, const char *sql, const vx_cell_t *binds, int nbinds,
+         int n_workers, vx_result_t **res, char **errmsg)
+{
 	vx_stmt_t *plan = NULL;
 	int recog;
 
 	if (res) *res = NULL;
 	if (errmsg) *errmsg = NULL;
 	if (n_workers < 1) n_workers = 1;
+	/* A parametrized query runs serial: the morsel-parallel path
+	 * re-prepares a range-scoped source per worker, which does not carry
+	 * the binds, so force one worker when binds are present. */
+	if (binds != NULL && nbinds > 0) n_workers = 1;
 
 	/* Recognize once, then route: the morsel-parallel storage scan is the
 	 * committed path for parallelizable single-table scans/aggregations;
 	 * other recognized plans (ordered, limited, joined, or run at one
 	 * worker) collect from the serial vectorized path; anything not
 	 * recognized returns 0 so the caller runs the VDBE. */
-	recog = vx_try_prepare(db, sql, &plan, errmsg);
+	recog = vx_try_prepare_binds(db, sql, binds, nbinds, &plan, errmsg);
 	if (recog != 1) return recog;
 
 	if (n_workers > 1 && is_parallelizable_plan(plan))

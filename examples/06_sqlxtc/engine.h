@@ -155,7 +155,14 @@ int64_t      sx_changes(sx_db *h);
 typedef struct sx_vx_result sx_vx_result;
 int              sx_vexec_try(sx_db *h, const char *sql, int n_workers,
                              sx_vx_result **out);
-void             sx_vexec_free(sx_vx_result *r);int              sx_vexec_nrow(const sx_vx_result *r);
+/* Parametrized form: `binds` is a vexec vx_cell array (1-based by
+ * ordinal, nbinds of them).  Declared with void* to keep vexec's type
+ * out of engine.h; db.c passes a vx_cell_t* and engine.c casts it. */
+int              sx_vexec_try_p(sx_db *h, const char *sql,
+                               const void *binds, int nbinds, int n_workers,
+                               sx_vx_result **out);
+void             sx_vexec_free(sx_vx_result *r);
+int              sx_vexec_nrow(const sx_vx_result *r);
 int              sx_vexec_ncol(const sx_vx_result *r);
 /* Column cell type: returns one of SX_INTEGER/SX_FLOAT/SX_TEXT/SX_BLOB/SX_NULL. */
 int              sx_vexec_type(const sx_vx_result *r, int row, int col);
