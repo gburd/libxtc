@@ -3317,13 +3317,30 @@ load_wschema(sqlite3 *db, const char *table, struct wschema *ws)
  * supported literal (INT/REAL/TEXT/NULL), or -1 (the statement is left
  * to the VDBE).  No params, no expressions, no functions. */
 static int
-lit_cell(struct vx_arena_blk **arena, const sql_expr_t *e, vx_cell_t *out)
+lit_cell(struct vx_arena_blk **arena, const sql_expr_t *e, vx_cell_t *out,
+         const vx_cell_t *binds, int nbinds)
 {
 	memset(out, 0, sizeof *out);
 	if (e == NULL) { out->type = VX_NULL; return 0; }
 	switch (e->op) {
 	case SX_E_NULL:
 		out->type = VX_NULL; return 0;
+	case SX_E_PARAM: {
+		int ord = (int)e->ival;   /* 1-based */
+		const vx_cell_t *v;
+		if (binds == NULL || ord < 1 || ord > nbinds) return -1;
+		v = &binds[ord - 1];
+		if (v->type == VX_TEXT || v->type == VX_BLOB) {
+			uint8_t *p = (uint8_t *)arena_alloc(arena, (size_t)v->nbytes + 1);
+			if (p == NULL) return -1;
+			if (v->nbytes) memcpy(p, v->bytes, v->nbytes);
+			p[v->nbytes] = '\0';
+			out->type = v->type; out->bytes = p; out->nbytes = v->nbytes;
+		} else {
+			*out = *v;   /* INT / REAL / NULL by value */
+		}
+		return 0;
+	}
 	case SX_E_NUMBER: {
 		char buf[64]; int i, isreal = 0;
 		if (e->lit.len == 0 || e->lit.len >= sizeof buf) return -1;
@@ -3347,7 +3364,7 @@ lit_cell(struct vx_arena_blk **arena, const sql_expr_t *e, vx_cell_t *out)
 	case SX_E_UNARY:
 		/* a leading minus on a numeric literal (-5) */
 		if (e->op2 == TK_MINUS && e->a && e->a->op == SX_E_NUMBER) {
-			if (lit_cell(arena, e->a, out) != 0) return -1;
+			if (lit_cell(arena, e->a, out, binds, nbinds) != 0) return -1;
 			if (out->type == VX_INT)  out->i = -out->i;
 			else if (out->type == VX_REAL) out->r = -out->r;
 			return 0;
@@ -3421,12 +3438,14 @@ is_pk_col(const sql_expr_t *e, const char *pkname)
 
 /* Evaluate a literal expression to an integer, or fail. */
 static int
-lit_int(const sql_expr_t *e, int64_t *out)
+lit_int(const sql_expr_t *e, int64_t *out, const vx_cell_t *binds, int nbinds)
 {
 	struct vx_arena_blk *tmp = NULL;
 	vx_cell_t c;
 	int ok = 0;
-	if (lit_cell(&tmp, e, &c) == 0 && c.type == VX_INT) { *out = c.i; ok = 1; }
+	if (lit_cell(&tmp, e, &c, binds, nbinds) == 0 && c.type == VX_INT) {
+		*out = c.i; ok = 1;
+	}
 	arena_free(tmp);
 	return ok;
 }
@@ -3441,7 +3460,8 @@ lit_int(const sql_expr_t *e, int64_t *out)
  * it does not understand falls back. */
 static int
 where_pk_range(const sql_expr_t *w, const char *pkname,
-               int64_t *lo, int *has_lo, int64_t *hi, int *has_hi)
+               int64_t *lo, int *has_lo, int64_t *hi, int *has_hi,
+               const vx_cell_t *binds, int nbinds)
 {
 	*has_lo = *has_hi = 0;
 	*lo = 0; *hi = 0;
@@ -3450,7 +3470,7 @@ where_pk_range(const sql_expr_t *w, const char *pkname,
 	if (w->op == SX_E_BETWEEN) {
 		int64_t b, c;
 		if (!is_pk_col(w->a, pkname)) return 0;
-		if (!lit_int(w->b, &b) || !lit_int(w->c, &c)) return 0;
+		if (!lit_int(w->b, &b, binds, nbinds) || !lit_int(w->c, &c, binds, nbinds)) return 0;
 		*lo = b; *has_lo = 1; *hi = c; *has_hi = 1;
 		return 1;
 	}
@@ -3462,7 +3482,7 @@ where_pk_range(const sql_expr_t *w, const char *pkname,
 		else if (is_pk_col(w->b, pkname)) { col = w->b; lit = w->a; swapped = 1; }
 		else return 0;
 		(void)col;
-		if (!lit_int(lit, &v)) return 0;
+		if (!lit_int(lit, &v, binds, nbinds)) return 0;
 		/* Normalize the operator if the column was on the right. */
 		if (swapped) {
 			switch (op) {
@@ -3514,7 +3534,8 @@ collect_rowids(bt_t *bt, const char *table, int64_t lo, int has_lo,
  * existed at all (unused here; the scan only yields live rows). */
 static int
 collect_matching(sqlite3 *db, bt_t *bt, const char *table,
-                 const sql_expr_t *where, int64_t *out, int cap)
+                 const sql_expr_t *where, int64_t *out, int cap,
+                 const vx_cell_t *binds, int nbinds)
 {
 	struct vx_stmt *st;
 	struct vx_compiler comp;
@@ -3535,6 +3556,7 @@ collect_matching(sqlite3 *db, bt_t *bt, const char *table,
 
 	memset(&nv, 0, sizeof nv);
 	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
+	comp.binds = binds; comp.nbinds = nbinds;
 
 	/* Pass 1: collect the predicate's columns. */
 	if (collect_columns(&nv, where) != 0 || nv.n == 0 || nv.n > 32) {
@@ -3596,6 +3618,14 @@ read_one_row(bt_t *bt, const char *table, int64_t rowid, uint8_t *buf, int cap)
 
 int
 vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
+{
+	return vx_run_write_p(db, sql, NULL, 0, nchanges, errmsg);
+}
+
+int
+vx_run_write_p(sqlite3 *db, const char *sql,
+               const vx_cell_t *binds, int nbinds,
+               int64_t *nchanges, char **errmsg)
 {
 	sql_arena_t *arena = NULL;
 	sql_stmt_t *root = NULL;
@@ -3673,13 +3703,13 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 		rids = (int64_t *)malloc(sizeof(int64_t) * XS_NATIVE_MAX_ROWS);
 		if (rids == NULL) { rc = -1; goto done; }
 		if (where_pk_range(root->u.del->where, ws.name[0],
-		                   &lo, &has_lo, &hi, &has_hi)) {
+		                   &lo, &has_lo, &hi, &has_hi, binds, nbinds)) {
 			nr = collect_rowids(bt, tabbuf, lo, has_lo, hi, has_hi,
 			                    rids, XS_NATIVE_MAX_ROWS);
 		} else {
 			/* General predicate: compile + scan-evaluate per row. */
 			nr = collect_matching(db, bt, tabbuf, root->u.del->where,
-			                      rids, XS_NATIVE_MAX_ROWS);
+			                      rids, XS_NATIVE_MAX_ROWS, binds, nbinds);
 		}
 		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many / not compilable -> VDBE */
 		if (nr < 0) { free(rids); rc = -1; goto done; }
@@ -3714,7 +3744,7 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 				    strncmp(a->col.p, ws.name[k], a->col.len) == 0) { col = k; break; }
 			if (col <= 0) { sql_arena_destroy(arena); return 0; } /* unknown / pk -> VDBE */
 			if (nset >= 64) { sql_arena_destroy(arena); return 0; }
-			if (lit_cell(&cell_arena, a->val, &setval[nset]) != 0) {
+			if (lit_cell(&cell_arena, a->val, &setval[nset], binds, nbinds) != 0) {
 				sql_arena_destroy(arena); return 0;  /* non-literal SET -> VDBE */
 			}
 			setcol[nset] = col;   /* declared index (>=1) */
@@ -3722,12 +3752,12 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 		}
 		rids = (int64_t *)malloc(sizeof(int64_t) * XS_NATIVE_MAX_ROWS);
 		if (rids == NULL) { rc = -1; goto done; }
-		if (where_pk_range(up->where, ws.name[0], &lo, &has_lo, &hi, &has_hi)) {
+		if (where_pk_range(up->where, ws.name[0], &lo, &has_lo, &hi, &has_hi, binds, nbinds)) {
 			nr = collect_rowids(bt, tabbuf, lo, has_lo, hi, has_hi,
 			                    rids, XS_NATIVE_MAX_ROWS);
 		} else {
 			nr = collect_matching(db, bt, tabbuf, up->where,
-			                      rids, XS_NATIVE_MAX_ROWS);
+			                      rids, XS_NATIVE_MAX_ROWS, binds, nbinds);
 		}
 		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many / not compilable -> VDBE */
 		if (nr < 0) { free(rids); rc = -1; goto done; }
@@ -3799,7 +3829,7 @@ vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 
 			for (it = row ? row->head : NULL; it; it = it->next) {
 				if (ncol >= ws.n) { ncol = -1; break; }
-				if (lit_cell(&cell_arena, it->expr, &cells[ncol]) != 0) {
+				if (lit_cell(&cell_arena, it->expr, &cells[ncol], binds, nbinds) != 0) {
 					ncol = -1; break;             /* non-literal -> VDBE */
 				}
 				ncol++;

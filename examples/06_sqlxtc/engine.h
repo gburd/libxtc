@@ -184,6 +184,11 @@ const char      *sx_vexec_name(const sx_vx_result *r, int col);
  * VDBE), or <0 on a storage error.  All-or-nothing on a 0 return.
  */
 int              sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges);
+/* Parametrized native write: `binds` is a vexec vx_cell array (void* to
+ * keep vexec's type out of engine.h; db.c passes vx_cell_t*). */
+int              sx_vexec_write_p(sx_db *h, const char *sql,
+                                 const void *binds, int nbinds,
+                                 int64_t *nchanges);
 
 /* Native transaction control: flush / discard the connection's buffered
  * native writes at one timestamp.  The live path calls the matching one

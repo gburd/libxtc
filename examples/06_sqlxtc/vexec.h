@@ -147,6 +147,13 @@ int vx_run_p(sqlite3 *db, const char *sql,
 int vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges,
                  char **errmsg);
 
+/* Parametrized form of vx_run_write: ? values in VALUES / SET / WHERE
+ * are taken from `binds` (1-based by ordinal).  vx_run_write is this
+ * with no binds. */
+int vx_run_write_p(sqlite3 *db, const char *sql,
+                   const vx_cell_t *binds, int nbinds,
+                   int64_t *nchanges, char **errmsg);
+
 int            vx_result_nrow(const vx_result_t *r);
 int            vx_result_ncol(const vx_result_t *r);
 /* The output column's name as derived from the AST select item (the AS

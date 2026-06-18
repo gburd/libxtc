@@ -460,6 +460,57 @@ main(void)
 			       "byte-identical to the VDBE\n", served);
 	}
 
+	/* ---- parametrized writes (? in VALUES / SET / WHERE) ------------
+	 * Apply the same parametrized DML natively to one xstore table and
+	 * via the VDBE to another, then read both back byte-identical. */
+	{
+		static const struct { const char *sql; int64_t v[3]; int nv; } pw[] = {
+			{ "INSERT INTO %s VALUES(?, ?, ?)",         { 1, 100, 0 }, 3 },
+			{ "INSERT INTO %s VALUES(?, ?, ?)",         { 2, 200, 0 }, 3 },
+			{ "INSERT INTO %s VALUES(?, ?, ?)",         { 3, 300, 0 }, 3 },
+			{ "UPDATE %s SET a = ? WHERE k = ?",        { 999, 2 },    2 },
+			{ "DELETE FROM %s WHERE k = ?",             { 3 },         1 }
+		};
+		int npw = (int)(sizeof pw / sizeof pw[0]), wi, wserved = 0;
+		char *ru = NULL, *rv = NULL; size_t nu = 0, nv3 = 0;
+		if (sx_exec(h, "CREATE VIRTUAL TABLE pwu USING xstore(k, a INT, b INT)", &err) != SX_OK ||
+		    sx_exec(h, "CREATE VIRTUAL TABLE pwv USING xstore(k, a INT, b INT)", &err) != SX_OK) {
+			fprintf(stderr, "FAIL: create pwu/pwv: %s\n", err ? err : "?"); free(err); g_fail = 1;
+		} else {
+			for (wi = 0; wi < npw; wi++) {
+				char squ[96], sqv[96];
+				char *o = NULL; size_t on2 = 0;
+				vx_cell_t bc[3]; int bi;
+				int64_t nch = -1;
+				snprintf(squ, sizeof squ, pw[wi].sql, "pwu");
+				snprintf(sqv, sizeof sqv, pw[wi].sql, "pwv");
+				for (bi = 0; bi < pw[wi].nv; bi++) {
+					memset(&bc[bi], 0, sizeof bc[bi]);
+					bc[bi].type = VX_INT; bc[bi].i = pw[wi].v[bi];
+				}
+				/* native into pwu */
+				if (sx_vexec_write_p(h, squ, bc, pw[wi].nv, &nch) == 1) wserved++;
+				/* VDBE into pwv */
+				setenv("SQLXTC_VEXEC", "0", 1);
+				CK(run_live_pi(h, sqv, pw[wi].v, pw[wi].nv, &o, &on2) == 0, sqv);
+				unsetenv("SQLXTC_VEXEC"); free(o);
+			}
+			setenv("SQLXTC_VEXEC", "0", 1);
+			CK(run_live(h, "SELECT * FROM pwu ORDER BY k", &ru, &nu) == 0, "read pwu");
+			CK(run_live(h, "SELECT * FROM pwv ORDER BY k", &rv, &nv3) == 0, "read pwv");
+			unsetenv("SQLXTC_VEXEC");
+			if (ru && rv && (nu != nv3 || memcmp(ru, rv, nu) != 0)) {
+				fprintf(stderr, "FAIL: param-write native vs VDBE differ:\n  u: %s\n  v: %s\n", ru, rv);
+				g_fail = 1;
+			}
+			free(ru); free(rv);
+			CK(wserved == npw, "all parametrized writes native-served");
+			if (!g_fail)
+				printf("  ok   parametrized writes: %d ? INSERT/UPDATE/DELETE "
+				       "native, byte-identical to the VDBE\n", wserved);
+		}
+	}
+
 	sx_close(h);
 	bt_close(bt);
 	bm_destroy(bm);
