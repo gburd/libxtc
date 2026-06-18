@@ -71,14 +71,15 @@ aio_proc(void *arg)
 }
 
 static MunitResult
-test_aio_roundtrip(const MunitParameter p[], void *d)
+run_roundtrip(int force_offload)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_proc_opts_t o = { 0 };
 	xtc_pid_t a, b;
 	struct aio_ctx c;
 	char tmpl[] = "/tmp/xtc_aio_XXXXXX";
-	(void)p; (void)d;
+
+	__xtc_aio_force_offload(force_offload);
 
 	memset(&c, 0, sizeof c);
 	atomic_store(&g_peer_ran, 0);
@@ -93,6 +94,7 @@ test_aio_roundtrip(const MunitParameter p[], void *d)
 
 	close(c.fd);
 	unlink(tmpl);
+	__xtc_aio_force_offload(0);   /* restore auto for later tests */
 
 	munit_assert_int(c.wrote, ==, AIO_LEN);     /* all bytes written */
 	munit_assert_int(c.fsynced, ==, 0);         /* fsync ok */
@@ -100,6 +102,32 @@ test_aio_roundtrip(const MunitParameter p[], void *d)
 	munit_assert_int(c.match, ==, 1);           /* content round-tripped */
 	munit_assert_int(c.loop_ran, ==, 1);        /* peer ran during the I/O */
 	return MUNIT_OK;
+}
+
+/*
+ * The native path (io_uring / IOCP where present, inline elsewhere):
+ * one async-looking API, best mechanism the host offers.
+ */
+static MunitResult
+test_aio_roundtrip(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return run_roundtrip(0);
+}
+
+/*
+ * The SAME round-trip with the blocking-pool offload FORCED, even on a
+ * host with a native engine.  Proves the portable fallback presents the
+ * identical async-looking behavior (parks the fiber, peer runs, bytes
+ * round-trip, fsync ok) -- the "write once, runs as AIO everywhere"
+ * guarantee, tested where the tests actually run rather than only
+ * asserted for platforms CI never sees.
+ */
+static MunitResult
+test_aio_roundtrip_offload(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return run_roundtrip(1);
 }
 
 /* A short read at EOF returns the partial count, not an error. */
@@ -138,8 +166,9 @@ test_aio_short_read(const MunitParameter p[], void *d)
 }
 
 static MunitTest tests[] = {
-	{ "/roundtrip",  test_aio_roundtrip,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-	{ "/short_read", test_aio_short_read, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/roundtrip",         test_aio_roundtrip,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/roundtrip_offload", test_aio_roundtrip_offload, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/short_read",        test_aio_short_read,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/aio", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

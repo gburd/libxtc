@@ -38,6 +38,37 @@ extern int __xtc_dio_is_direct(int fd);
 #else
 #  include <unistd.h>
 #endif
+#include <stdlib.h>        /* getenv */
+
+/*
+ * Force the blocking-pool offload path even where a native completion
+ * engine (io_uring / IOCP) exists.  This exists so the portable
+ * fallback can be exercised and proven byte-for-byte identical to the
+ * native path on a host that also has the native one (e.g. CI on Linux
+ * with io_uring): a consumer's "write once, runs as AIO everywhere"
+ * expectation is only credible if the non-native path is actually
+ * tested where the tests run.  0 = auto (native where available),
+ * 1 = always offload.  Resolved from XTC_AIO_FORCE_OFFLOAD on first use
+ * and overridable via __xtc_aio_force_offload().
+ */
+static int g_force_offload = -1;   /* -1 = unresolved */
+
+/* PUBLIC (internal): set by tests / tuning to force the offload path. */
+void
+__xtc_aio_force_offload(int on)
+{
+	g_force_offload = on ? 1 : 0;
+}
+
+static int
+aio_offload_forced(void)
+{
+	if (g_force_offload < 0) {
+		const char *e = getenv("XTC_AIO_FORCE_OFFLOAD");
+		g_force_offload = (e != NULL && e[0] == '1') ? 1 : 0;
+	}
+	return g_force_offload;
+}
 
 /* Blocking-pool fallback: run the op on a worker thread.  Portable
  * across the platforms libxtc builds on -- the native (non-blocking)
@@ -125,6 +156,12 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 	/* Off a loop fiber: there is nothing to park, so run it inline
 	 * (the blocking-pool path, which itself runs inline with no loop). */
 	if (t == NULL || loop == NULL || loop->io == NULL)
+		return aio_offload(op, fd, buf, len, off);
+
+	/* Forced offload (test / tuning): take the portable thread-pool path
+	 * even though a native engine is present.  Still parks the fiber and
+	 * keeps the loop live -- same observable behavior as native AIO. */
+	if (aio_offload_forced())
 		return aio_offload(op, fd, buf, len, off);
 
 	memset(&a, 0, sizeof a);
