@@ -185,6 +185,14 @@ int xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
 
 /* True if the connection has an open (non-autocommit) transaction. */
 int xstore_in_txn(struct xsql *db);
+
+/*
+ * 1 if the current transaction holds any buffered (uncommitted) write
+ * for `tableid`, else 0 (also 0 outside a transaction).  A native read
+ * path may run in-transaction only when this is 0: then a committed
+ * scan sees exactly what a vtab cursor would.
+ */
+int xstore_txn_table_dirty(struct xsql *db, uint32_t tableid);
 /* Native transaction control: flush (commit) or discard (rollback) the
  * connection's buffered write set at one timestamp.  The live path runs
  * these just before the SQLite COMMIT/ROLLBACK statement so native

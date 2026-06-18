@@ -4351,15 +4351,18 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 		sql_arena_destroy(arena); return 0;
 	}
 
-	/* DELETE / UPDATE inside an open transaction must observe this
-	 * transaction's own earlier buffered writes (read-your-writes) when
-	 * reading the row to delete/update.  The native read path scans the
-	 * committed B-tree at the txn snapshot and does not see the wbuf, so
-	 * a transactional DELETE/UPDATE falls back to the VDBE (whose vtab
-	 * cursor merges the wbuf).  INSERT needs no such read, so it stays
-	 * native and buffers into the same transaction. */
+	/* DELETE / UPDATE inside an open transaction reads the rows to
+	 * change.  The native read path scans the COMMITTED B-tree at the
+	 * txn snapshot; it does not merge this transaction's own buffered
+	 * writes (the wbuf).  That is safe -- and matches the vtab cursor,
+	 * which also does not merge the wbuf into a RANGE scan -- EXCEPT
+	 * when the txn has already written to this very table, where the
+	 * vtab's point path (xs_filter / wbuf_find) could diverge.  So a
+	 * transactional DELETE/UPDATE stays native while this table is
+	 * clean in the txn, and falls back once the txn has buffered a
+	 * write to it.  INSERT needs no such read and is always native. */
 	if ((root->kind == SQL_KIND_DELETE || root->kind == SQL_KIND_UPDATE) &&
-	    xstore_in_txn(db)) {
+	    xstore_txn_table_dirty(db, tableid)) {
 		sql_arena_destroy(arena); return 0;
 	}
 
@@ -4382,7 +4385,7 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many / not compilable -> VDBE */
 		if (nr < 0) { free(rids); rc = -1; goto done; }
 		for (i = 0; i < nr; i++) {
-			if (xstore_delete_rec(bt, tableid, rids[i]) != 0) {
+			if (xstore_write_txn(db, tableid, rids[i], NULL, 0, 1) != 0) {
 				free(rids);
 				if (errmsg) *errmsg = strdup("native delete failed");
 				rc = -1; goto done;
@@ -4462,7 +4465,7 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 				if (errmsg) *errmsg = strdup("native update row too large");
 				rc = -1; goto done;
 			}
-			if (xstore_put_rec(bt, tableid, rids[i], rec, reclen) != 0) {
+			if (xstore_write_txn(db, tableid, rids[i], rec, reclen, 0) != 0) {
 				free(rids);
 				if (errmsg) *errmsg = strdup("native update failed");
 				rc = -1; goto done;

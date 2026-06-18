@@ -419,6 +419,45 @@ main(void)
 				CK(sx_vexec_write(h, "INSERT INTO u VALUES(7777, 1, 'a'), (7777, 2, 'b')",
 				   &dn) == 0, "intra-statement duplicate PK falls back");
 			}
+
+			/* Transactional DELETE/UPDATE on COMMITTED rows is native while
+			 * the table is clean in the txn (the committed scan sees what a
+			 * vtab cursor would), and falls back once the txn has buffered a
+			 * write to that table (where the vtab's wbuf merge could
+			 * diverge). */
+			{
+				int64_t dn = 0;
+				char *o = NULL; size_t on3 = 0;
+				(void)sx_exec(h, "CREATE VIRTUAL TABLE tdml USING xstore(k, a INT)", &err);
+				(void)sx_exec(h, "CREATE VIRTUAL TABLE tdml2 USING xstore(k, a INT)", &err);
+				CK(sx_vexec_write(h, "INSERT INTO tdml VALUES(1,10),(2,20),(3,30),(4,40)", &dn) == 1,
+				   "seed tdml");
+				CK(sx_vexec_write(h, "INSERT INTO tdml2 VALUES(1,10),(2,20)", &dn) == 1,
+				   "seed tdml2");
+				/* A transactional range DELETE/UPDATE on COMMITTED rows is
+				 * native while the table is clean in the txn; once the txn
+				 * has buffered a write to a table, further DML on it falls
+				 * back.  Recognition is probed directly via sx_vexec_write;
+				 * the txn itself runs through run_live (the live path, which
+				 * flushes the buffered native writes at COMMIT). */
+				CK(run_live(h, "BEGIN", &o, &on3) == 0, "begin tdml txn"); free(o); o = NULL;
+				CK(sx_vexec_write(h, "DELETE FROM tdml WHERE k BETWEEN 2 AND 3", &dn) == 1,
+				   "in-txn range DELETE on clean table is native");
+				CK(sx_vexec_write(h, "UPDATE tdml2 SET a = 99 WHERE k = 1", &dn) == 1,
+				   "in-txn UPDATE on clean table is native");
+				CK(sx_vexec_write(h, "DELETE FROM tdml WHERE k = 1", &dn) == 0,
+				   "in-txn DML on a dirtied table falls back");
+				CK(run_live(h, "COMMIT", &o, &on3) == 0, "commit tdml txn"); free(o); o = NULL;
+				/* After COMMIT the buffered DELETE (k=2,3) is durable: 2 rows. */
+				{
+					sx_stmt *q = NULL; const char *tl = NULL; int64_t cnt = -1;
+					if (sx_prepare(h, "SELECT count(*) FROM tdml", -1, &q, &tl) == SX_OK) {
+						if (sx_step(q) == SX_ROW) cnt = sx_column_int64(q, 0);
+						sx_finalize(q);
+					}
+					CK(cnt == 2, "tdml has 2 rows after committed in-txn DELETE");
+				}
+			}
 		}
 	}
 
