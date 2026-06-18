@@ -203,8 +203,9 @@ main(void)
 		{ "SELECT k, a FROM t ORDER BY k LIMIT 5",        R_SER, 1 },
 		{ "SELECT k, a FROM t ORDER BY k LIMIT 5 OFFSET 3", R_SER, 1 },
 		{ "SELECT DISTINCT b FROM t",                     R_SER, 0 },
+		{ "SELECT a FROM t WHERE a IN (1,2,3)",           R_PAR, 0 },
 		/* not recognized -> caller runs the VDBE (R_VDBE) */
-		{ "SELECT a FROM t WHERE a IN (1,2,3)",           R_VDBE, 0 }
+		{ "SELECT a FROM t WHERE a IN (SELECT k FROM t WHERE a > 5000)", R_VDBE, 0 }
 	};
 	int n = (int)(sizeof corpus / sizeof corpus[0]);
 
