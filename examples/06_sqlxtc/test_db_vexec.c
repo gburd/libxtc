@@ -222,6 +222,8 @@ main(void)
 		{ "SELECT k FROM t WHERE a = (SELECT max(a) FROM t)",      0 },
 		{ "SELECT k FROM t WHERE k <= 3 ORDER BY k",               1 },
 		{ "SELECT k, (SELECT count(*) FROM t) FROM t WHERE k <= 3 ORDER BY k", 1 },
+		{ "SELECT k, (SELECT count(*) FROM t x WHERE x.b = t.b) FROM t WHERE k <= 5 ORDER BY k", 1 },
+		{ "SELECT k, (SELECT max(a) FROM t y WHERE y.b = t.b) FROM t WHERE k <= 5 ORDER BY k", 1 },
 		{ "SELECT k FROM t WHERE a < (SELECT min(a) FROM t WHERE a > 50) ORDER BY k", 1 },
 		{ "SELECT k FROM t WHERE a IN (SELECT a FROM t WHERE k < 5) ORDER BY k", 1 },
 		{ "SELECT k FROM t WHERE k IN (SELECT k FROM t WHERE b = 'g1') ORDER BY k LIMIT 5", 1 },
