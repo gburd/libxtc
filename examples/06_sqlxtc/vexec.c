@@ -1252,11 +1252,15 @@ compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 		c->fail = 1; return NULL;
 	}
 	/* Correlation gate: an uncorrelated subquery prepares standalone; a
-	 * correlated one references an outer column and fails to prepare on
-	 * its own.  Use SQLite's prepare ONLY as that yes/no test (the
-	 * statement is finalized immediately, never stepped), so a correlated
-	 * subquery here falls through to compile_corr_subquery rather than
-	 * being mis-run by vexec as if it named a second table instance. */
+	 * correlated one references an outer column/alias and fails to
+	 * prepare on its own.  Use SQLite's prepare ONLY as that yes/no test
+	 * (finalized immediately, never stepped) -- a NATIVE check would need
+	 * full scope analysis to tell an outer-alias reference (x.k, the
+	 * outer table aliased) from an inner one (y.k) when the inner FROM
+	 * names the same base table, which SQLite's scoped resolver does for
+	 * free.  Execution itself is vexec's below; this is the last small
+	 * prepare-as-gate dependency.  A correlated subquery here falls
+	 * through to compile_corr_subquery. */
 	{
 		sqlite3_stmt *probe = prepare_subquery(c->st->db, e->src, e->srclen, 1);
 		if (probe == NULL) { c->fail = 1; return NULL; }
