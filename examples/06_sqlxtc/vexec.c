@@ -46,6 +46,14 @@
 #include "xtc.h"             /* XTC_OK */
 #include "xtc_exec.h"        /* V2: morsel-parallel workers, one per loop */
 
+/* The vendored engine's pattern matchers (renamed via xsql.h).  Declared
+ * here so LIKE/GLOB reuse SQLite's exact semantics without re-including
+ * the full public header: sqlite3_strlike returns 0 on match (ASCII
+ * case-insensitive, optional ESCAPE), sqlite3_strglob returns 0 on a
+ * case-sensitive glob match. */
+int sqlite3_strglob(const char *zGlob, const char *zStr);
+int sqlite3_strlike(const char *zGlob, const char *zStr, unsigned int esc);
+
 /* ---- arena ------------------------------------------------------- */
 
 #define VX_ARENA_BLK (64 * 1024)
@@ -106,6 +114,7 @@ enum vx_op {
 	VXO_CASE,                            /* CASE: base in .a (NULL=searched),
 	                                      * args[]=when0,then0,when1,then1,...,
 	                                      * nargs=2*arms, ELSE in .b (NULL=none) */
+	VXO_LIKE, VXO_GLOB,                  /* a LIKE/GLOB b: operand in .a, pattern in .b */
 	VXO_FUNC                             /* builtin function (.func) */
 };
 
@@ -131,11 +140,28 @@ typedef struct vx_expr {
 enum vx_agg_kind {
 	VXA_COUNT_STAR = 1,   /* count(*) */
 	VXA_COUNT,            /* count(expr): non-NULL inputs */
+	VXA_COUNT_DISTINCT,   /* count(DISTINCT expr): distinct non-NULL inputs */
 	VXA_SUM,              /* sum(expr): NULL if all inputs NULL */
 	VXA_TOTAL,            /* total(expr): 0.0 if no rows; always REAL */
 	VXA_AVG,              /* avg(expr): sum/count over non-NULL, REAL */
 	VXA_MIN, VXA_MAX      /* min/max(expr): ignore NULLs */
 };
+
+/* An open-chained hash set of distinct cell values, used by
+ * count(DISTINCT).  Nodes and key bytes are allocated from the group
+ * accumulator's htab arena (the same arena passed to acc_step), so the
+ * set lives exactly as long as its group and needs no separate free. */
+typedef struct vx_dnode {
+	struct vx_dnode *next;
+	uint64_t         hash;
+	vx_cell_t        val;
+} vx_dnode_t;
+
+typedef struct vx_dset {
+	vx_dnode_t **buckets;
+	int          nbucket;
+	int64_t      count;
+} vx_dset_t;
 
 /* A running accumulator for one aggregate within one group. */
 typedef struct vx_acc {
@@ -145,6 +171,7 @@ typedef struct vx_acc {
 	int64_t   isum;       /* integer running sum */
 	double    rsum;       /* real running sum */
 	vx_cell_t ext;        /* MIN/MAX current extreme (when seen) */
+	vx_dset_t *dset;      /* COUNT_DISTINCT: distinct-value set (lazy) */
 } vx_acc_t;
 
 /* A column of the select list under aggregation: either a GROUP BY key
@@ -541,6 +568,8 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 	case VXO_ISNULL: case VXO_NOTNULL:
 	case VXO_IN: case VXO_NOTIN:
 		return VX_AFF_NUMERIC;   /* booleans are 0/1 integers */
+	case VXO_LIKE: case VXO_GLOB:
+		return VX_AFF_NUMERIC;   /* match result is a 0/1 integer */
 	case VXO_CASE:
 		return VX_AFF_BLOB;      /* dynamic result type: treat as no affinity */
 	case VXO_FUNC:
@@ -575,6 +604,21 @@ is_agg_name(const sql_str_t *name)
 	return name_is(name, "count") || name_is(name, "sum") ||
 	       name_is(name, "total") || name_is(name, "avg") ||
 	       name_is(name, "min") || name_is(name, "max");
+}
+
+/* The 2-argument like(P,X) / glob(P,X) scalar forms, which SQLite
+ * defines as identical to "X LIKE P" / "X GLOB P".  Returns VXO_LIKE /
+ * VXO_GLOB (a truthy op) for those names with exactly two args, else 0.
+ * In practice only glob(P,X) reaches here as a call: LIKE is a reserved
+ * keyword so like(...) is a parse error (infix "X LIKE P" is handled in
+ * compile_expr).  The 3-arg like(P,X,E) (ESCAPE) is left to the VDBE. */
+static enum vx_op
+likeglob_func_op(const sql_str_t *name, int nargs)
+{
+	if (nargs != 2) return 0;
+	if (name_is(name, "like")) return VXO_LIKE;
+	if (name_is(name, "glob")) return VXO_GLOB;
+	return 0;
 }
 
 static enum vx_func
@@ -655,7 +699,7 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 		return collect_columns(nv, e->a);
 	case SX_E_BINARY: {
 		enum vx_op dummy;
-		if (!tok_to_binop(e->op2, &dummy)) return -1;
+		if (e->op2 != TK_LIKE && !tok_to_binop(e->op2, &dummy)) return -1;
 		if (collect_columns(nv, e->a) != 0) return -1;
 		return collect_columns(nv, e->b);
 	}
@@ -697,8 +741,10 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 		int nargs = 0, ok = 0;
 		if (e->ival & 3) return -1;   /* DISTINCT or func(*) */
 		for (it = e->list ? e->list->head : NULL; it; it = it->next) nargs++;
-		(void)func_of(&e->name[0], &ok, nargs);
-		if (!ok) return -1;
+		if (likeglob_func_op(&e->name[0], nargs) == 0) {
+			(void)func_of(&e->name[0], &ok, nargs);
+			if (!ok) return -1;
+		}
 		for (it = e->list ? e->list->head : NULL; it; it = it->next)
 			if (collect_columns(nv, it->expr) != 0) return -1;
 		return 0;
@@ -1044,6 +1090,20 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 	case SX_E_BINARY: {
 		enum vx_op op;
 		vx_expr_t *n, *a, *b;
+		if (e->op2 == TK_LIKE) {
+			/* x LIKE y  ==  like(y, x): operand in .a, pattern in .b.
+			 * SQLite's LIKE is ASCII case-insensitive with no ESCAPE
+			 * here (the grammar has no ESCAPE clause).  Both operands
+			 * must be text-affinity (no numeric->text coercion). */
+			a = compile_expr(c, e->a);   /* the value being matched */
+			b = compile_expr(c, e->b);   /* the pattern */
+			if (a == NULL || b == NULL) return NULL;
+			if (node_class(c, a) != VX_AFF_TEXT ||
+			    node_class(c, b) != VX_AFF_TEXT) { c->fail = 1; return NULL; }
+			n = expr_node(c, VXO_LIKE);
+			if (n) { n->a = a; n->b = b; }
+			return n;
+		}
 		if (!tok_to_binop(e->op2, &op)) { c->fail = 1; return NULL; }
 		a = compile_expr(c, e->a);
 		b = compile_expr(c, e->b);
@@ -1217,11 +1277,28 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		int nargs = 0, ok = 0;
 		const sql_exprlist_item_t *it;
 		enum vx_func f;
+		enum vx_op lg;
 		vx_expr_t *n;
 		int k;
 		if (e->ival & 1) { c->fail = 1; return NULL; }   /* DISTINCT agg */
 		if (e->ival & 2) { c->fail = 1; return NULL; }   /* func(*) */
 		for (it = e->list ? e->list->head : NULL; it; it = it->next) nargs++;
+		/* like(P,X) / glob(P,X): SQLite defines these as "X LIKE P" /
+		 * "X GLOB P".  Arg 0 is the pattern, arg 1 is the value; build
+		 * a VXO_LIKE/VXO_GLOB node (operand in .a, pattern in .b). */
+		lg = likeglob_func_op(&e->name[0], nargs);
+		if (lg != 0) {
+			vx_expr_t *pat, *val;
+			it = e->list->head;
+			pat = compile_expr(c, it->expr);
+			val = compile_expr(c, it->next->expr);
+			if (pat == NULL || val == NULL) return NULL;
+			if (node_class(c, pat) != VX_AFF_TEXT ||
+			    node_class(c, val) != VX_AFF_TEXT) { c->fail = 1; return NULL; }
+			n = expr_node(c, lg);
+			if (n) { n->a = val; n->b = pat; }
+			return n;
+		}
 		f = func_of(&e->name[0], &ok, nargs);
 		if (!ok) { c->fail = 1; return NULL; }
 		n = expr_node(c, VXO_FUNC);
@@ -1511,6 +1588,44 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		return;
 	}
 
+	case VXO_LIKE:
+	case VXO_GLOB: {
+		/* a LIKE/GLOB b: .a is the value being matched, .b is the
+		 * pattern.  3-valued: a NULL operand or NULL pattern yields
+		 * NULL.  Delegate the match to the vendored engine so the
+		 * semantics are byte-identical to the VDBE (LIKE is ASCII
+		 * case-insensitive, GLOB is case-sensitive with glob
+		 * wildcards).  Both operands are text-classed by the
+		 * compiler; render to NUL-terminated C strings (TEXT bytes
+		 * may be a non-terminated slice). */
+		vx_cell_t val, pat;
+		char *vs, *ps;
+		int m;
+		eval(st, e->a, row, arena, &val);
+		eval(st, e->b, row, arena, &pat);
+		if (val.type == VX_NULL || pat.type == VX_NULL) {
+			out->type = VX_NULL; return;
+		}
+		if (val.type != VX_TEXT || pat.type != VX_TEXT) {
+			/* The compiler kept both text-classed; a stored value of a
+			 * different storage class should not reach here, but guard. */
+			out->type = VX_NULL; return;
+		}
+		ps = (char *)arena_alloc(arena, (size_t)pat.nbytes + 1);
+		vs = (char *)arena_alloc(arena, (size_t)val.nbytes + 1);
+		if (ps == NULL || vs == NULL) { out->type = VX_NULL; return; }
+		if (pat.nbytes) memcpy(ps, pat.bytes, pat.nbytes);
+		ps[pat.nbytes] = '\0';
+		if (val.nbytes) memcpy(vs, val.bytes, val.nbytes);
+		vs[val.nbytes] = '\0';
+		if (e->op == VXO_LIKE)
+			m = (sqlite3_strlike(ps, vs, 0) == 0);
+		else
+			m = (sqlite3_strglob(ps, vs) == 0);
+		out->type = VX_INT; out->i = m;
+		return;
+	}
+
 	case VXO_FUNC: {
 		vx_cell_t a;
 		switch (e->func) {
@@ -1698,6 +1813,43 @@ htab_group(vx_htab_t *h, const vx_cell_t *keys)
 	return g;
 }
 
+/* Add a non-NULL value to a count(DISTINCT) set (lazily allocating the
+ * set and its buckets from `arena`).  Returns 0 on success, -1 on OOM.
+ * A value already present (key_eq) is ignored; a new one bumps count.
+ * Uses the same hash/equality as group keys, so DISTINCT-ness matches
+ * GROUP BY grouping -- which is how SQLite defines count(DISTINCT). */
+static int
+dset_add(vx_dset_t **pset, const vx_cell_t *v, struct vx_arena_blk **arena)
+{
+	vx_dset_t *s = *pset;
+	uint64_t hv;
+	uint32_t b;
+	vx_dnode_t *n;
+	if (s == NULL) {
+		s = (vx_dset_t *)arena_alloc(arena, sizeof *s);
+		if (s == NULL) return -1;
+		s->nbucket = 256;
+		s->count = 0;
+		s->buckets = (vx_dnode_t **)arena_alloc(arena,
+		    sizeof(vx_dnode_t *) * (size_t)s->nbucket);
+		if (s->buckets == NULL) return -1;
+		memset(s->buckets, 0, sizeof(vx_dnode_t *) * (size_t)s->nbucket);
+		*pset = s;
+	}
+	hv = cell_hash(v);
+	b = (uint32_t)(hv % (uint64_t)s->nbucket);
+	for (n = s->buckets[b]; n; n = n->next)
+		if (n->hash == hv && key_eq(&n->val, v)) return 0;   /* already seen */
+	n = (vx_dnode_t *)arena_alloc(arena, sizeof *n);
+	if (n == NULL) return -1;
+	n->hash = hv;
+	if (cell_dup(arena, v, &n->val) != 0) return -1;
+	n->next = s->buckets[b];
+	s->buckets[b] = n;
+	s->count++;
+	return 0;
+}
+
 /* Fold one input value into an accumulator. */
 static void
 acc_step(vx_acc_t *a, enum vx_agg_kind kind, const vx_cell_t *v,
@@ -1705,6 +1857,11 @@ acc_step(vx_acc_t *a, enum vx_agg_kind kind, const vx_cell_t *v,
 {
 	if (kind == VXA_COUNT_STAR) { a->cnt++; return; }
 	if (v->type == VX_NULL) return;        /* all others ignore NULL inputs */
+	if (kind == VXA_COUNT_DISTINCT) {
+		/* Distinct non-NULL inputs: the set tracks the count. */
+		(void)dset_add(&a->dset, v, arena);
+		return;
+	}
 	a->cnt++;
 	switch (kind) {
 	case VXA_COUNT:
@@ -1739,6 +1896,18 @@ acc_merge(vx_acc_t *d, const vx_acc_t *s, enum vx_agg_kind kind,
           struct vx_arena_blk **arena)
 {
 	if (kind == VXA_COUNT_STAR || kind == VXA_COUNT) { d->cnt += s->cnt; return; }
+	if (kind == VXA_COUNT_DISTINCT) {
+		/* Union the source distinct set into the dest by re-adding each
+		 * source value (dedup against what dest already has). */
+		int bi;
+		if (s->dset == NULL) return;
+		for (bi = 0; bi < s->dset->nbucket; bi++) {
+			vx_dnode_t *n;
+			for (n = s->dset->buckets[bi]; n; n = n->next)
+				(void)dset_add(&d->dset, &n->val, arena);
+		}
+		return;
+	}
 	if (!s->seen) return;
 	d->cnt += s->cnt;
 	switch (kind) {
@@ -1773,6 +1942,8 @@ acc_final(const vx_acc_t *a, enum vx_agg_kind kind, vx_cell_t *out)
 	switch (kind) {
 	case VXA_COUNT_STAR: case VXA_COUNT:
 		out->type = VX_INT; out->i = a->cnt; return;
+	case VXA_COUNT_DISTINCT:
+		out->type = VX_INT; out->i = a->dset ? a->dset->count : 0; return;
 	case VXA_TOTAL:
 		out->type = VX_REAL;
 		out->r = a->is_real ? a->rsum : (double)a->isum;
@@ -2249,14 +2420,16 @@ static enum vx_agg_kind
 agg_kind_of(const sql_expr_t *e)
 {
 	int star = (e->ival & 2) != 0;
+	int distinct = (e->ival & 1) != 0;
 	int nargs = 0;
 	const sql_exprlist_item_t *it;
 	for (it = e->list ? e->list->head : NULL; it; it = it->next) nargs++;
-	if (e->ival & 1) return 0;                 /* DISTINCT aggregate: fallback */
 	if (name_is(&e->name[0], "count")) {
-		if (star) return VXA_COUNT_STAR;
-		return nargs == 1 ? VXA_COUNT : 0;
+		if (star) return distinct ? 0 : VXA_COUNT_STAR;  /* count(DISTINCT *) invalid */
+		if (nargs != 1) return 0;
+		return distinct ? VXA_COUNT_DISTINCT : VXA_COUNT;
 	}
+	if (distinct) return 0;                    /* DISTINCT only for count */
 	if (star) return 0;                        /* sum(*) etc. invalid */
 	if (nargs != 1) return 0;
 	if (name_is(&e->name[0], "sum"))   return VXA_SUM;
@@ -4533,16 +4706,29 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 		int nr, i, ci;
 		/* Validate the SET list ONCE up front (the same literal columns
 		 * apply to every matched row); record which payload column each
-		 * SET targets and its new cell. */
+		 * SET targets and its new cell.  A SET on the primary key column
+		 * (col 0) is a pk reassign, captured separately and applied as a
+		 * tombstone-old + insert-new move. */
 		vx_cell_t setval[64]; int setcol[64], nset = 0;
+		int pk_reassign = 0; vx_cell_t pk_newval;
 		int64_t *rids;
+		memset(&pk_newval, 0, sizeof pk_newval);
 
 		for (a = up->sets; a; a = a->next) {
 			int col = -1, k;
 			for (k = 0; k < ws.n; k++)
 				if (a->col.len == strlen(ws.name[k]) &&
 				    strncmp(a->col.p, ws.name[k], a->col.len) == 0) { col = k; break; }
-			if (col <= 0) { sql_arena_destroy(arena); return 0; } /* unknown / pk -> VDBE */
+			if (col < 0) { sql_arena_destroy(arena); return 0; } /* unknown col -> VDBE */
+			if (col == 0) {
+				if (pk_reassign) { sql_arena_destroy(arena); return 0; }  /* SET k twice */
+				if (lit_cell(&cell_arena, a->val, &pk_newval, binds, nbinds) != 0 ||
+				    pk_newval.type != VX_INT) {
+					sql_arena_destroy(arena); return 0;  /* non-int / non-literal pk -> VDBE */
+				}
+				pk_reassign = 1;
+				continue;
+			}
 			if (nset >= 64) { sql_arena_destroy(arena); return 0; }
 			if (lit_cell(&cell_arena, a->val, &setval[nset], binds, nbinds) != 0) {
 				sql_arena_destroy(arena); return 0;  /* non-literal SET -> VDBE */
@@ -4561,6 +4747,23 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 		}
 		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many / not compilable -> VDBE */
 		if (nr < 0) { free(rids); rc = -1; goto done; }
+
+		/* A pk reassign sets the primary key to a single constant.  More
+		 * than one matched row would all collide on that one new pk (a
+		 * UNIQUE violation) -- defer to the VDBE.  For exactly one row,
+		 * verify the new pk is free (no committed row there, unless it is
+		 * the row being moved); a collision also falls back. */
+		if (pk_reassign) {
+			int64_t newpk = pk_newval.i;
+			if (nr > 1) { free(rids); sql_arena_destroy(arena); return 0; }
+			if (nr == 1 && newpk != rids[0]) {
+				uint8_t probe[XS_REC_MAX]; int pl;
+				if (xstore_in_txn(db)) { free(rids); sql_arena_destroy(arena); return 0; }  /* committed-scan check unsafe in txn */
+				pl = read_one_row(bt, tabbuf, newpk, probe, (int)sizeof probe);
+				if (pl < 0) { free(rids); rc = -1; goto done; }
+				if (pl > 0) { free(rids); sql_arena_destroy(arena); return 0; }  /* collision -> VDBE */
+			}
+		}
 		for (i = 0; i < nr; i++) {
 			uint8_t cur[XS_REC_MAX]; int curlen;
 			vx_cell_t cells[64];
@@ -4594,7 +4797,16 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 				if (errmsg) *errmsg = strdup("native update row too large");
 				rc = -1; goto done;
 			}
-			if (xstore_write_txn(db, tableid, rids[i], rec, reclen, 0) != 0) {
+			if (pk_reassign && pk_newval.i != rids[i]) {
+				/* Move: write the new payload at the new pk and tombstone
+				 * the old key. */
+				if (xstore_write_txn(db, tableid, pk_newval.i, rec, reclen, 0) != 0 ||
+				    xstore_write_txn(db, tableid, rids[i], NULL, 0, 1) != 0) {
+					free(rids);
+					if (errmsg) *errmsg = strdup("native pk-reassign failed");
+					rc = -1; goto done;
+				}
+			} else if (xstore_write_txn(db, tableid, rids[i], rec, reclen, 0) != 0) {
 				free(rids);
 				if (errmsg) *errmsg = strdup("native update failed");
 				rc = -1; goto done;

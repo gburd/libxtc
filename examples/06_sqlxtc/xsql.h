@@ -94,6 +94,8 @@
 #define sqlite3_shutdown xsql_shutdown
 #define sqlite3_step xsql_step
 #define sqlite3_stmt xsql_stmt
+#define sqlite3_strglob xsql_strglob
+#define sqlite3_strlike xsql_strlike
 #define sqlite3_user_data xsql_user_data
 #define sqlite3_value xsql_value
 #define sqlite3_value_blob xsql_value_blob

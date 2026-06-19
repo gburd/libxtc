@@ -724,22 +724,27 @@ emit_vexec(sx_vx_result *vr, sx_stmt *names, int64_t limit,
 	int ncol = sx_vexec_ncol(vr);
 	int nrow = sx_vexec_nrow(vr);
 	int64_t emitted = 0;
-	int i, j;
+	int i, j, wrote_cols = 0;
 
-	if (ncol > 0) {
-		if (quack_emit_cols_begin(out_buf) < 0) goto oom;
-		for (j = 0; j < ncol; j++) {
-			/* Prefer vexec's own column name (AS alias / bare column);
-			 * fall back to the VDBE-prepared name only for an expression
-			 * column, whose SQLite name is its verbatim source text. */
-			const char *nm = sx_vexec_name(vr, j);
-			if (nm == NULL) nm = sx_column_name(names, j);
-			if (quack_emit_cols_name(out_buf, j, nm) < 0) goto oom;
-		}
-		if (quack_emit_cols_end(out_buf) < 0) goto oom;
-	}
 	for (i = 0; i < nrow; i++) {
 		if (ncol > 0) {
+			/* Emit the column header lazily on the first row, exactly
+			 * as the VDBE path does -- a zero-row result then emits no
+			 * header at all, so vexec and the VDBE stay byte-identical. */
+			if (!wrote_cols) {
+				if (quack_emit_cols_begin(out_buf) < 0) goto oom;
+				for (j = 0; j < ncol; j++) {
+					/* Prefer vexec's own column name (AS alias / bare
+					 * column); fall back to the VDBE-prepared name only
+					 * for an expression column, whose SQLite name is its
+					 * verbatim source text. */
+					const char *nm = sx_vexec_name(vr, j);
+					if (nm == NULL) nm = sx_column_name(names, j);
+					if (quack_emit_cols_name(out_buf, j, nm) < 0) goto oom;
+				}
+				if (quack_emit_cols_end(out_buf) < 0) goto oom;
+				wrote_cols = 1;
+			}
 			if (quack_emit_row_begin(out_buf) < 0) goto oom;
 			for (j = 0; j < ncol; j++) {
 				switch (sx_vexec_type(vr, i, j)) {
