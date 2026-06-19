@@ -354,12 +354,21 @@ The read long-tail still on the VDBE, in rough order of effort:
     evaluation, and a derived table is a nested plan feeding FROM.
 
 The write long-tail still on the VDBE:
-  - pk-reassigning UPDATE (SET <pk> = <new>): a DELETE of the old key +
-    INSERT at the new key, with a uniqueness check on the new key.
+  - pk-reassigning UPDATE (SET <pk> = <new>): a native implementation
+    is straightforward (tombstone the old key, insert at the new, with
+    a collision check) and was prototyped, but it cannot ship behind
+    the differential yet: the xstore VTAB FALLBACK is itself wrong here
+    -- SQLite reports changes=1 for UPDATE t SET k=<new> WHERE k=<old>
+    on an INTEGER-PRIMARY-KEY vtab but the row is NOT moved (it stays
+    at the old rowid).  xs_update has rowid-move logic (argv[0] !=
+    argv[1] -> tombstone old), so SQLite is not handing the vtab a new
+    rowid for a rowid-alias SET.  Until that vtab-protocol gap is
+    understood and fixed, native pk-reassign would (correctly) disagree
+    with the (buggy) fallback, so it stays on the VDBE.
   - a transactional DELETE/UPDATE on a table the txn has ALREADY
     written to (dirtied): the vtab's point path could merge the wbuf
     where the native committed scan would not, so it falls back.
-  - INSERT...DEFAULT VALUES, and a non-integer / pk-reassigning target.
+  - INSERT...DEFAULT VALUES, and a non-integer target.
 
 DDL (CREATE / DROP / ALTER) is LAST: the VDBE fallback requires SQLite
 to keep every table in sqlite_master, so DDL cannot go native until the
