@@ -413,7 +413,8 @@ unit).  Steps 1-2 are independent; 3 gates on both; 4-5 are mechanical.
   - a derived table joined to other tables / with outer ORDER BY /
     GROUP BY: compose the derived source into the join + ordered paths.
   - remaining writes: transactional DELETE/UPDATE on a DIRTIED table
-    (needs wbuf-merge into the native read), INSERT...DEFAULT VALUES,
+    (needs wbuf-merge into the native read), INSERT...DEFAULT VALUES
+    (DONE -- one auto-PK all-NULL row, xstore honors no DEFAULT clause),
     non-integer / colliding / multi-row pk reassign.
 
 ### 2. Track B -- stop the native paths from CALLING SQLite
