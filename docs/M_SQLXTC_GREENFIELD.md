@@ -402,9 +402,9 @@ unit).  Steps 1-2 are independent; 3 gates on both; 4-5 are mechanical.
 
 ### 1. Track A -- recognize the rest of the accepted read/write surface
   - correlated subquery as a COMPARISON operand (a < (subquery)):
-    today its result is BLOB-affinity so the no-coercion gate rejects
-    it; give a subquery node the comparison's affinity (SQLite applies
-    the operand's) so a < (corr) compiles.  Small.
+    DONE -- the comparison gate now lets a dynamic-type operand (a
+    correlated subquery or CASE) compare against a numeric/text side,
+    with SQLite numeric-affinity coercion at eval (coerce_numeric).
   - correlated IN (SELECT): re-run the inner select per row (like the
     correlated scalar path) and test membership.  Medium.
   - 3+ table OUTER joins: extend the N-way pipeline (vx_try_prepare_
