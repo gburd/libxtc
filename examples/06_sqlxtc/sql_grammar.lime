@@ -357,11 +357,14 @@ table_ref(R) ::= TK_ID(T) TK_AS TK_ID(A). {
 table_ref(R) ::= TK_ID(T) TK_ID(A). {
     R = AST(pstate, sql_src_t); if (R) { R->table = tok_str(T); R->alias = tok_str(A); }
 }
-table_ref(R) ::= TK_LP select_stmt(Q) TK_RP. {
-    R = AST(pstate, sql_src_t); if (R) R->subquery = Q;
+table_ref(R) ::= TK_LP(L) select_stmt(Q) TK_RP(P). {
+    R = AST(pstate, sql_src_t);
+    if (R) { R->subquery = Q; R->subsrc = L.p; R->subsrclen = (uint32_t)((P.p + P.len) - L.p); }
 }
-table_ref(R) ::= TK_LP select_stmt(Q) TK_RP TK_AS TK_ID(A). {
-    R = AST(pstate, sql_src_t); if (R) { R->subquery = Q; R->alias = tok_str(A); }
+table_ref(R) ::= TK_LP(L) select_stmt(Q) TK_RP(P) TK_AS TK_ID(A). {
+    R = AST(pstate, sql_src_t);
+    if (R) { R->subquery = Q; R->alias = tok_str(A);
+             R->subsrc = L.p; R->subsrclen = (uint32_t)((P.p + P.len) - L.p); }
 }
 
 where_opt(R) ::= .               { R = NULL; }

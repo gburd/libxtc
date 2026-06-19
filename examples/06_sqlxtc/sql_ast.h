@@ -141,6 +141,8 @@ typedef struct sql_src {
 	sql_str_t      table;     /* table name; len 0 if subquery */
 	sql_select_t  *subquery;  /* non-NULL for ( select ) AS alias */
 	sql_str_t      alias;     /* len 0 if none */
+	const char    *subsrc;    /* verbatim ( select ) span (subquery only) */
+	uint32_t       subsrclen;
 	/* Join to the PREVIOUS src in the list. */
 	sql_join_type_t join;
 	sql_expr_t    *on;        /* ON expr (NULL if USING or none) */
