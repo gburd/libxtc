@@ -224,6 +224,8 @@ main(void)
 		{ "SELECT k, (SELECT count(*) FROM t) FROM t WHERE k <= 3 ORDER BY k", 1 },
 		{ "SELECT k, (SELECT count(*) FROM t x WHERE x.b = t.b) FROM t WHERE k <= 5 ORDER BY k", 1 },
 		{ "SELECT k, (SELECT max(a) FROM t y WHERE y.b = t.b) FROM t WHERE k <= 5 ORDER BY k", 1 },
+		{ "SELECT k FROM t WHERE a < (SELECT max(a) FROM t y WHERE y.b = t.b) ORDER BY k LIMIT 5", 1 },
+		{ "SELECT k FROM t WHERE a = (SELECT min(a) FROM t z WHERE z.b = t.b) ORDER BY k LIMIT 5", 1 },
 		{ "SELECT x.k, x.a FROM (SELECT k, a FROM t WHERE k <= 5) AS x", 0 },
 		{ "SELECT x.k FROM (SELECT k, a FROM t) AS x WHERE x.a > 150", 0 },
 		{ "SELECT k, a + 1 FROM (SELECT k, a FROM t WHERE a IS NOT NULL) AS x WHERE k <= 5", 0 },

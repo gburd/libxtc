@@ -1388,12 +1388,23 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		case VXO_GT: case VXO_GE: {
 			/* No-coercion gate: both numeric, or both text.  Anything
 			 * with a blob/none-affinity operand or a numeric-vs-text
-			 * pairing could coerce -> fall back. */
+			 * pairing could coerce -> fall back.  EXCEPTION: a value of
+			 * dynamic type (a correlated subquery or a CASE) carries no
+			 * fixed affinity; SQLite applies the OTHER operand's affinity
+			 * to the comparison, so it is safe to compare against a
+			 * numeric or text operand (the dynamic side adopts that
+			 * class).  Compared against a blob (or two dynamic sides) we
+			 * still fall back. */
 			enum vx_aff ca = node_class(c, a), cb = node_class(c, b);
-			if (!((ca == VX_AFF_NUMERIC && cb == VX_AFF_NUMERIC) ||
-			      (ca == VX_AFF_TEXT && cb == VX_AFF_TEXT))) {
-				c->fail = 1; return NULL;
-			}
+			int a_dyn = (a->op == VXO_CORRSUBQ || a->op == VXO_CASE);
+			int b_dyn = (b->op == VXO_CORRSUBQ || b->op == VXO_CASE);
+			int ok = (ca == VX_AFF_NUMERIC && cb == VX_AFF_NUMERIC) ||
+			         (ca == VX_AFF_TEXT && cb == VX_AFF_TEXT);
+			if (!ok && a_dyn && !b_dyn &&
+			    (cb == VX_AFF_NUMERIC || cb == VX_AFF_TEXT)) ok = 1;
+			if (!ok && b_dyn && !a_dyn &&
+			    (ca == VX_AFF_NUMERIC || ca == VX_AFF_TEXT)) ok = 1;
+			if (!ok) { c->fail = 1; return NULL; }
 			break;
 		}
 		default: break;   /* AND/OR: operands are boolean-ish, fine */
@@ -1639,6 +1650,38 @@ eval_bool(const struct vx_stmt *st, const vx_expr_t *e,
 	return 0;
 }
 
+/* SQLite numeric affinity on a TEXT cell: if the WHOLE string parses as
+ * an integer or real (optional sign, decimal, exponent), rewrite the
+ * cell in place to VX_INT / VX_REAL; otherwise leave it as text.  Used
+ * only when a dynamic operand (subquery / CASE) is compared against a
+ * numeric operand, mirroring SQLite's comparison-affinity coercion. */
+static void
+coerce_numeric(vx_cell_t *v)
+{
+	char buf[64];
+	char *end = NULL;
+	uint32_t n = v->nbytes;
+	if (v->type != VX_TEXT || v->bytes == NULL) return;
+	if (n == 0 || n >= sizeof buf) return;
+	memcpy(buf, v->bytes, n); buf[n] = '\0';
+	{
+		int isreal = 0; uint32_t i;
+		for (i = 0; i < n; i++)
+			if (buf[i] == '.' || buf[i] == 'e' || buf[i] == 'E') { isreal = 1; break; }
+		if (isreal) {
+			double d = strtod(buf, &end);
+			if (end == buf + n) { v->type = VX_REAL; v->r = d; }
+		} else {
+			long long ll = strtoll(buf, &end, 10);
+			if (end == buf + n) { v->type = VX_INT; v->i = (int64_t)ll; }
+			else {
+				double d = strtod(buf, &end);
+				if (end == buf + n) { v->type = VX_REAL; v->r = d; }
+			}
+		}
+	}
+}
+
 /* Compare two non-NULL cells of the SAME affinity class (the compiler
  * guarantees comparisons are numeric/numeric or text/text). */
 static int
@@ -1780,6 +1823,18 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		eval(st, e->a, row, arena, &a);
 		eval(st, e->b, row, arena, &b);
 		if (a.type == VX_NULL || b.type == VX_NULL) { out->type = VX_NULL; return; }
+		/* SQLite applies numeric affinity when one side is numeric and the
+		 * other text (reachable here only via a dynamic operand -- a
+		 * subquery / CASE -- since the compile gate forbids a fixed
+		 * numeric-vs-text pairing).  Coerce the text side to a number when
+		 * it looks numeric, matching SQLite; a non-numeric string keeps
+		 * its text value (SQLite then orders number < text). */
+		{
+			int a_num = (a.type == VX_INT || a.type == VX_REAL);
+			int b_num = (b.type == VX_INT || b.type == VX_REAL);
+			if (a_num && b.type == VX_TEXT) (void)coerce_numeric(&b);
+			else if (b_num && a.type == VX_TEXT) (void)coerce_numeric(&a);
+		}
 		c = cmp_vals(&a, &b);
 		out->type = VX_INT;
 		switch (e->op) {
