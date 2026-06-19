@@ -444,13 +444,16 @@ The 79 sqlite3_* calls left in vexec.c, by purpose (grep
     vx_try_prepare_derived, the INSERT...SELECT path): run an arbitrary
     nested SELECT.  Native means RECURSIVELY running the inner select
     through vexec (vx_run) instead of sqlite3_prepare/step.
-    IN PROGRESS: the UNCORRELATED scalar subquery now EXECUTES via
+    DONE so far: the UNCORRELATED scalar subquery, the FROM-clause
+    derived table, and the INSERT...SELECT source now all EXECUTE via
     vx_run (recursive native execution; whole-query fallback if the
-    inner is unrecognized), with SQLite's prepare retained only as the
-    correlation yes/no gate (finalized, never stepped).  Still to do:
-    the derived-table and INSERT...SELECT inner SELECTs the same way,
-    the correlated per-row re-execution, and replacing the
-    correlation-gate prepare with a native check.
+    inner is unrecognized).  This needed per-output-column affinity on
+    vx_result (st->outaff recorded at compile time, copied to
+    vx_result.aff) so the outer comparison gate is exact without SQLite
+    metadata.  STILL on SQLite: the correlated scalar / IN per-row
+    re-execution (build_corr_stmt prepares + steps per row), and the
+    correlation-gate prepare in compile_scalar_subquery (prepared, never
+    stepped -- purely a yes/no "is this correlated" test).
   - resolve_schema PRAGMA table_info (line ~5185): only the non-xstore
     fallback; xstore tables already use the native catalog.
   - parallel rowid bounds SELECT min/max(_rowid_) (line ~4941): replace
