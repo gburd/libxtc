@@ -64,12 +64,23 @@ and
 .Fn xtc_aio_fdatasync
 have no async form and take the offload path below.
 .It
+On the kqueue backend
+.Pq FreeBSD, macOS
+the operation is submitted as POSIX AIO
+.Pq Fn aio_read , Fn aio_write , Fn aio_fsync
+with completion delivered to the same kqueue via
+.Dv SIGEV_KEVENT
+and reaped as an
+.Dv EVFILT_AIO
+event -- no worker thread.  A platform lacking either falls back to the
+offload path below.
+.It
 On a readiness-only backend
-.Pq epoll, kqueue, poll, select, Solaris event ports, AIX
+.Pq epoll, poll, select, Solaris event ports, AIX
 the operation is offloaded to the blocking thread pool
 .Pq Xr xtc_blocking 3 ,
-because a regular file is not pollable -- io_uring is the only POSIX
-backend that can complete file I/O asynchronously, and a thread offload
+because a regular file is not pollable -- a readiness poller cannot
+complete file I/O asynchronously, and a thread offload
 is the correct, behavior-preserving fallback elsewhere.  The fiber
 still parks and the loop stays live, so the API behaves identically to
 the native path.
