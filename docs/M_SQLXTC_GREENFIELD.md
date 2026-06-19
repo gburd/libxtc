@@ -346,25 +346,29 @@ The read long-tail still on the VDBE, in rough order of effort:
     is native.  (Intentional fallback, not a gap.)
   - Correlated subqueries: a correlated SCALAR subquery in a projection
     or equality is native on the single-table read path (outer refs ->
-    ? binds, re-run per row).  Still falling back: a correlated
+    ? binds, re-run per row).  A FROM-clause DERIVED table is native
+    (single derived table, no join, no correlation, no outer GROUP BY /
+    ORDER BY / LIMIT / DISTINCT).  Still falling back: a correlated
     subquery as a COMPARISON operand (a < (subquery) -- dynamic result
-    affinity), correlated IN (SELECT), and correlation on the join
-    path.  FROM-clause / derived tables are a nested plan feeding FROM.
+    affinity), correlated IN (SELECT), correlation on the join path,
+    and a derived table joined to other tables / with outer ordering.
   - 3+ table INNER joins are native (N-way hash-join pipeline,
     vx_try_prepare_njoin); 3+ table OUTER joins fall back.
 
 NOTE -- two tracks to retire sqlite3.c.  Track A (recognition): make
 every accepted query native (the long-tails above + DDL).  Track B
-(execution): the native paths still CALL SQLite in places --
-  * the join build/probe/stream sources are SELECT ... FROM <table>
-    prepared+stepped via SQLite (so joins work over ANY table, not
-    just xstore); for xstore tables these can become xstore_scan_*.
-  * uncorrelated subqueries and INSERT...SELECT run their inner SELECT
-    via SQLite.
-  * resolve_schema falls back to PRAGMA table_info; parallel bounds use
-    SELECT min/max(_rowid_).
-Both tracks must complete before the amalgamation can be deleted; Track
-B (especially the join sources) is the larger architectural piece.
+(execution): stop the native paths from CALLING SQLite --
+  * DONE: the join build/probe/stream sources read via xstore_scan_*
+    for xstore tables (per-side vx_jsrc_t; the SQLite-cursor path
+    remains only for plain non-xstore tables).
+  * the inner SELECT of an uncorrelated / correlated subquery, an
+    INSERT...SELECT, and a derived table still run via SQLite (these
+    are arbitrary nested queries; running them through the engine
+    recursively is the remaining Track-B work).
+  * resolve_schema prefers the native catalog (PRAGMA only for non-
+    xstore tables); parallel rowid bounds still use a SQLite
+    min/max(_rowid_) probe at prepare time (not the hot path).
+Both tracks must complete before the amalgamation can be deleted.
 
 The write long-tail still on the VDBE:
   - a transactional DELETE/UPDATE on a table the txn has ALREADY
