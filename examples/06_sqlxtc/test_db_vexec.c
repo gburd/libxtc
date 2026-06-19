@@ -339,6 +339,11 @@ main(void)
 			"INSERT INTO %s VALUES(2, -50, 'two'), (3, 7, 'three')",
 			"INSERT INTO %s VALUES(4, 3.5, 'pi'), (5, NULL, NULL)",
 			"INSERT INTO %s VALUES(10, 0, '')",
+			/* native INSERT ... DEFAULT VALUES: one row, PK auto-assigned
+			 * (max + 1), every non-PK column NULL (an xstore table honors no
+			 * DEFAULT clause) -- byte-identical to the VDBE. */
+			"INSERT INTO %s DEFAULT VALUES",
+			"INSERT INTO %s DEFAULT VALUES",
 			/* native explicit-column-list INSERT: reordered, and omitting
 			 * a column (filled with NULL) -- both must match the VDBE. */
 			"INSERT INTO %s(k, b, a) VALUES(20, 'twenty', 200)",
