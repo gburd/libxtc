@@ -394,3 +394,61 @@ rename are deleted.
 
 Each gate is differential-tested byte-identical (positional for ordered,
 multiset otherwise) against the VDBE and clean under ASan+UBSan.
+
+## Teardown checklist -- the ordered, measured path to deleting sqlite3.c
+
+This is the exact remaining sequence (each step a verified, CI-green
+unit).  Steps 1-2 are independent; 3 gates on both; 4-5 are mechanical.
+
+### 1. Track A -- recognize the rest of the accepted read/write surface
+  - correlated subquery as a COMPARISON operand (a < (subquery)):
+    today its result is BLOB-affinity so the no-coercion gate rejects
+    it; give a subquery node the comparison's affinity (SQLite applies
+    the operand's) so a < (corr) compiles.  Small.
+  - correlated IN (SELECT): re-run the inner select per row (like the
+    correlated scalar path) and test membership.  Medium.
+  - 3+ table OUTER joins: extend the N-way pipeline (vx_try_prepare_
+    njoin) with NULL-extension + matched-tracking per side.  Large.
+  - a derived table joined to other tables / with outer ORDER BY /
+    GROUP BY: compose the derived source into the join + ordered paths.
+  - remaining writes: transactional DELETE/UPDATE on a DIRTIED table
+    (needs wbuf-merge into the native read), INSERT...DEFAULT VALUES,
+    non-integer / colliding / multi-row pk reassign.
+
+### 2. Track B -- stop the native paths from CALLING SQLite
+The 79 sqlite3_* calls left in vexec.c, by purpose (grep
+'sqlite3_prepare_v2' vexec.c):
+  - join-source column metadata (build/probe/src_sql prepares): prepared
+    ONCE per side at plan time only to learn column count + affinity;
+    the per-row read is already native (vx_jsrc_t).  Replace with the
+    native catalog (xstore_table_schema) so no prepare is needed.
+  - subquery / derived-table / INSERT...SELECT inner SELECTs
+    (compile_scalar_subquery, compile_corr_subquery,
+    vx_try_prepare_derived, the INSERT...SELECT path): run an arbitrary
+    nested SELECT.  Native means RECURSIVELY running the inner select
+    through vexec (vx_run) instead of sqlite3_prepare/step -- the single
+    largest Track-B item.  Until then these keep one SQLite call each.
+  - resolve_schema PRAGMA table_info (line ~5185): only the non-xstore
+    fallback; xstore tables already use the native catalog.
+  - parallel rowid bounds SELECT min/max(_rowid_) (line ~4941): replace
+    with a native xstore min/max scan.
+
+### 3. Remove the VDBE fallback
+Only once 1+2 leave NO query reaching sx_step: delete the
+fall-through in db_exec_cached (db.c ~line 689) and the column-name
+borrow (the VDBE-prepared name is the last reason vexec keeps a
+prepared stmt for expression columns -- native column naming via the
+verbatim source span already covers it; verify no expression column
+still needs it).
+
+### 4. Native DDL
+With the fallback gone, CREATE/DROP/ALTER no longer need sqlite_master.
+Add native DDL (CREATE VIRTUAL TABLE already creates the xstore
+catalog entry; generalize to CREATE TABLE, DROP, ALTER over the native
+catalog).
+
+### 5. Delete the amalgamation
+Remove sqlite3.c / sqlite3.h, vfs.c / pcache.c / mutex.c / mem.c (the
+SQLite OS shims), the xsql_* -> sqlite3_* rename header, and the
+sqlite3.o build rule.  The xsql_* names vanish automatically when the
+code they rename is gone.  Re-run the full examples CI job.
