@@ -405,8 +405,9 @@ unit).  Steps 1-2 are independent; 3 gates on both; 4-5 are mechanical.
     DONE -- the comparison gate now lets a dynamic-type operand (a
     correlated subquery or CASE) compare against a numeric/text side,
     with SQLite numeric-affinity coercion at eval (coerce_numeric).
-  - correlated IN (SELECT): re-run the inner select per row (like the
-    correlated scalar path) and test membership.  Medium.
+  - correlated IN (SELECT): DONE -- VXO_CORRIN re-runs the inner
+    select per row (build_corr_stmt shared with the scalar form) and
+    tests membership with 3-valued NULL semantics; NOT IN supported.
   - 3+ table OUTER joins: extend the N-way pipeline (vx_try_prepare_
     njoin) with NULL-extension + matched-tracking per side.  Large.
   - a derived table joined to other tables / with outer ORDER BY /
