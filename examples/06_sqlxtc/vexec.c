@@ -238,6 +238,32 @@ typedef struct vx_joinplan {
 typedef struct vx_jht vx_jht_t;   /* join build hash table (defined later) */
 typedef struct vx_jrow vx_jrow_t;
 
+/* Max tables in a single native equi-join (t0 .. t[VX_JOIN_MAX-1]). */
+#define VX_JOIN_MAX 6
+
+/*
+ * N-way INNER equi-join plan (3 .. VX_JOIN_MAX tables).  Side 0 is the
+ * streamed (outer) table; sides 1 .. nside-1 are each hashed (build) on
+ * their own join key.  A row is produced by streaming side 0 and, for
+ * each build side in order, probing its hash with the value of the
+ * combined row at probe_outidx[s] -- a column of an EARLIER side (0 ..
+ * s-1) that this side's ON clause equates to its own key column
+ * key_local[s].  The combined row is [side0][side1]...[sideN-1] at the
+ * offsets base[].  INNER only (no NULL-extension), which is what makes
+ * the streamed pipeline correct without per-side matched tracking.
+ */
+typedef struct vx_njoinplan {
+	int   nside;
+	char  src_sql[VX_JOIN_MAX][512];  /* SELECT <cols> FROM <table> per side */
+	int   ncol[VX_JOIN_MAX];          /* columns each side returns */
+	int   base[VX_JOIN_MAX];          /* combined-row offset of each side */
+	/* For build side s (1 .. nside-1): probe its hash with the combined
+	 * row's cell at probe_outidx[s]; the build row's key is its local
+	 * column key_local[s]. */
+	int   probe_outidx[VX_JOIN_MAX];  /* combined index of the probe value */
+	int   key_local[VX_JOIN_MAX];     /* build-side local key column */
+} vx_njoinplan_t;
+
 /* ---- the vexec statement ----------------------------------------- */
 
 struct vx_stmt {
@@ -330,6 +356,15 @@ struct vx_stmt {
 	int           probe_done;   /* 1 once the probe cursor is drained */
 	int           bscan_b;      /* unmatched-build final scan: bucket idx */
 	vx_jrow_t    *bscan_r;      /* unmatched-build final scan: row cursor */
+
+	/* N-way INNER join execution state (njoin path only). */
+	vx_njoinplan_t *njoin;            /* non-NULL => N-way INNER join */
+	vx_jht_t       *njht[VX_JOIN_MAX];/* per-build-side hash tables (1..) */
+	sqlite3_stmt   *nstream;          /* side-0 stream cursor */
+	vx_jrow_t      *ncur[VX_JOIN_MAX];/* current match row per build side */
+	struct vx_arena_blk *nstream_arena;
+	int             nbuilt;           /* 1 once hashes built + stream open */
+	int             nstream_done;     /* 1 once the stream cursor is drained */
 };
 
 /* ---- recognizer: column affinity (SQLite rules, three buckets) --- */
@@ -470,11 +505,13 @@ resolve_schema(sqlite3 *db, const char *table, struct namevec *nv, int *pay)
  * [side0 cols | side1 cols].  A column reference resolves to a combined
  * index by matching its qualifier (alias/table) and name against the
  * sides.  When jc is NULL the compiler is single-table (nv). */
+
 struct vx_joinctx {
-	char      tab[2][64];     /* base table name per side */
-	char      alias[2][64];   /* alias per side ("" if none) */
-	struct namevec col[2];    /* columns collected per side */
-	int       base[2];        /* combined-row offset where each side starts */
+	int       nside;          /* number of join sides (2 .. VX_JOIN_MAX) */
+	char      tab[VX_JOIN_MAX][64];     /* base table name per side */
+	char      alias[VX_JOIN_MAX][64];   /* alias per side ("" if none) */
+	struct namevec col[VX_JOIN_MAX];    /* columns collected per side */
+	int       base[VX_JOIN_MAX];        /* combined-row offset where each side starts */
 };
 
 struct vx_compiler {
@@ -513,7 +550,7 @@ jc_resolve(struct vx_joinctx *jc, const sql_expr_t *e)
 	if (e->nname == 2) { qual = &e->name[0]; col = &e->name[1]; }
 	else col = &e->name[0];
 
-	for (side = 0; side < 2; side++) {
+	for (side = 0; side < jc->nside; side++) {
 		if (qual) {
 			/* Qualifier must match this side's alias (if any) else table. */
 			const char *q = jc->alias[side][0] ? jc->alias[side] : jc->tab[side];
@@ -551,10 +588,12 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 		return VX_AFF_BLOB;
 	case VXO_COL:
 		if (c->jc != NULL) {
-			/* Combined index -> (side, j) -> that side's affinity. */
-			int idx = e->col;
-			if (idx >= c->jc->base[1])
-				return c->jc->col[1].aff[idx - c->jc->base[1]];
+			/* Combined index -> (side, j) -> that side's affinity.  Find
+			 * the side whose [base, base+col.n) range contains idx. */
+			int idx = e->col, s;
+			for (s = c->jc->nside - 1; s >= 0; s--)
+				if (idx >= c->jc->base[s])
+					return c->jc->col[s].aff[idx - c->jc->base[s]];
 			return c->jc->col[0].aff[idx - c->jc->base[0]];
 		}
 		return c->nv->aff[e->col];
@@ -1984,6 +2023,10 @@ static int vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast,
                                const sql_select_t *sel,
                                const vx_cell_t *binds, int nbinds,
                                vx_stmt_t **out, char **errmsg);
+static int vx_try_prepare_njoin(sqlite3 *db, sql_arena_t *ast,
+                                const sql_select_t *sel,
+                                const vx_cell_t *binds, int nbinds,
+                                vx_stmt_t **out, char **errmsg);
 static int vx_try_prepare_binds(sqlite3 *db, const char *sql,
                                 const vx_cell_t *binds, int nbinds,
                                 vx_stmt_t **out, char **errmsg);
@@ -2153,12 +2196,14 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	src = sel->from;
 	if (src == NULL) goto fallback;
 	if (src->next != NULL) {
-		/* Two-table INNER equi-join (no GROUP BY / ORDER BY / aggregates
-		 * on the join path yet -- those compose later). */
-		if (src->next->next != NULL) goto fallback;       /* >2 tables */
+		/* Multi-table equi-join (no GROUP BY / ORDER BY / aggregates on
+		 * the join path yet -- those compose later). */
 		if (sel->group || sel->order || sel->limit || sel->offset || sel->distinct)
 			goto fallback;
-		return vx_try_prepare_join(db, ast, sel, binds, nbinds, out, errmsg);
+		if (src->next->next == NULL)
+			return vx_try_prepare_join(db, ast, sel, binds, nbinds, out, errmsg);
+		/* 3+ tables: INNER-only N-way pipeline. */
+		return vx_try_prepare_njoin(db, ast, sel, binds, nbinds, out, errmsg);
 	}
 	if (src->subquery != NULL) goto fallback;
 	if (src->table.len == 0 || src->table.len >= sizeof tabbuf) goto fallback;
@@ -2855,7 +2900,7 @@ jc_collect(struct vx_joinctx *jc, const sql_expr_t *e)
 		const sql_str_t *qual = (e->nname == 2) ? &e->name[0] : NULL;
 		const sql_str_t *col = &e->name[e->nname - 1];
 		int side, hit = -1;
-		for (side = 0; side < 2; side++) {
+		for (side = 0; side < jc->nside; side++) {
 			if (qual) {
 				const char *q = jc->alias[side][0] ? jc->alias[side] : jc->tab[side];
 				if (!str_eq_cstr(qual, q)) continue;
@@ -2927,6 +2972,7 @@ vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	if (lhs == NULL || rhs == NULL) goto fallback;   /* only col = col */
 
 	memset(&jc, 0, sizeof jc);
+	jc.nside = 2;
 	memcpy(jc.tab[0], s0->table.p, s0->table.len); jc.tab[0][s0->table.len] = '\0';
 	memcpy(jc.tab[1], s1->table.p, s1->table.len); jc.tab[1][s1->table.len] = '\0';
 	if (s0->alias.len && s0->alias.len < 64) { memcpy(jc.alias[0], s0->alias.p, s0->alias.len); jc.alias[0][s0->alias.len] = '\0'; }
@@ -3061,6 +3107,173 @@ fallback:
 	if (psrc) sqlite3_finalize(psrc);
 	if (ast) sql_arena_destroy(ast);
 	if (st) { free(st->join); st->join = NULL; vx_finalize(st); }
+	else free(jp);
+	return rc;
+}
+
+/*
+ * N-way INNER equi-join (3 .. VX_JOIN_MAX base tables).  Side 0 streams;
+ * sides 1.. are each hashed on their own key and probed with a column
+ * of an earlier side that their ON clause equates to.  Outer joins,
+ * subquery sources, SELECT *, and aggregates fall back (return 0).
+ */
+static int
+vx_try_prepare_njoin(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
+                     const vx_cell_t *binds, int nbinds,
+                     vx_stmt_t **out, char **errmsg)
+{
+	struct vx_stmt *st = NULL;
+	struct vx_joinctx jc;
+	struct vx_compiler comp;
+	vx_njoinplan_t *jp = NULL;
+	const sql_src_t *src[VX_JOIN_MAX];
+	const sql_expr_t *on_lhs[VX_JOIN_MAX], *on_rhs[VX_JOIN_MAX];
+	const sql_src_t *s;
+	const sql_exprlist_item_t *it;
+	sqlite3_stmt *psrc[VX_JOIN_MAX];
+	int nside = 0, nproj = 0, i, side, rc = 0, total = 0;
+
+	if (errmsg) *errmsg = NULL;
+	for (i = 0; i < VX_JOIN_MAX; i++) psrc[i] = NULL;
+
+	/* Gather the FROM sources: all base tables, all INNER / comma /
+	 * cross; each after the first carries an equi-join ON (col = col). */
+	for (s = sel->from; s != NULL; s = s->next) {
+		if (nside >= VX_JOIN_MAX) goto fallback;
+		if (s->subquery) goto fallback;
+		if (s->table.len == 0 || s->table.len >= 64) goto fallback;
+		if (nside > 0) {
+			const sql_expr_t *on = s->on, *l, *r;
+			if (s->join != SX_J_INNER && s->join != SX_J_NONE &&
+			    s->join != SX_J_CROSS)
+				goto fallback;   /* outer joins: 3+ way not supported */
+			if (on == NULL || on->op != SX_E_BINARY || on->op2 != TK_EQ)
+				goto fallback;
+			l = is_col_ref(on->a); r = is_col_ref(on->b);
+			if (l == NULL || r == NULL) goto fallback;
+			on_lhs[nside] = l; on_rhs[nside] = r;
+		}
+		src[nside] = s;
+		nside++;
+	}
+	if (nside < 3) goto fallback;   /* 2-table goes to vx_try_prepare_join */
+
+	memset(&jc, 0, sizeof jc);
+	jc.nside = nside;
+	for (side = 0; side < nside; side++) {
+		memcpy(jc.tab[side], src[side]->table.p, src[side]->table.len);
+		jc.tab[side][src[side]->table.len] = '\0';
+		if (src[side]->alias.len && src[side]->alias.len < 64) {
+			memcpy(jc.alias[side], src[side]->alias.p, src[side]->alias.len);
+			jc.alias[side][src[side]->alias.len] = '\0';
+		}
+	}
+
+	/* SELECT * + aggregates fall back on the join path. */
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
+		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
+		if (it->expr->op == SX_E_FUNC && is_agg_name(&it->expr->name[0])) goto fallback;
+		nproj++;
+	}
+	if (nproj == 0 || nproj > 32) goto fallback;
+
+	/* Pass 1: collect columns from the projection, WHERE, and every ON. */
+	for (it = sel->cols->head; it; it = it->next)
+		if (jc_collect(&jc, it->expr) != 0) goto fallback;
+	if (sel->where && jc_collect(&jc, sel->where) != 0) goto fallback;
+	for (side = 1; side < nside; side++) {
+		if (jc_collect(&jc, on_lhs[side]) != 0) goto fallback;
+		if (jc_collect(&jc, on_rhs[side]) != 0) goto fallback;
+	}
+	for (side = 0; side < nside; side++)
+		if (jc.col[side].n == 0 || jc.col[side].n > 16) goto fallback;
+
+	st = (struct vx_stmt *)calloc(1, sizeof *st);
+	if (!st) goto oom;
+	st->db = db; st->cur = -1; st->limit = -1;
+	st->binds = binds; st->nbinds = nbinds;
+	jp = (vx_njoinplan_t *)calloc(1, sizeof *jp);
+	if (!jp) goto oom;
+	st->njoin = jp;
+	jp->nside = nside;
+	st->nout = nproj;
+	st->proj = (vx_expr_t **)calloc((size_t)nproj, sizeof(vx_expr_t *));
+	if (!st->proj) goto oom;
+
+	/* Build each side's source SELECT, prepare it for ncol + affinity,
+	 * and lay out the combined-row offsets. */
+	for (side = 0; side < nside; side++) {
+		char cols[400]; int off = 0, j;
+		for (j = 0; j < jc.col[side].n; j++) {
+			int w = snprintf(cols + off, sizeof cols - (size_t)off, "%s%s",
+			                 j ? "," : "", jc.col[side].names[j]);
+			if (w < 0 || (size_t)(off + w) >= sizeof cols) goto fallback;
+			off += w;
+		}
+		snprintf(jp->src_sql[side], sizeof jp->src_sql[side],
+		         "SELECT %s FROM %s", cols, jc.tab[side]);
+		if (sqlite3_prepare_v2(db, jp->src_sql[side], -1, &psrc[side], 0) != SQLITE_OK)
+			goto fallback;
+		jp->ncol[side] = sqlite3_column_count(psrc[side]);
+		if (jp->ncol[side] != jc.col[side].n) goto fallback;
+		jp->base[side] = total;
+		jc.base[side] = total;
+		for (j = 0; j < jp->ncol[side]; j++)
+			jc.col[side].aff[j] = vx_affinity(sqlite3_column_decltype(psrc[side], j));
+		total += jp->ncol[side];
+	}
+	if (total > 64) goto fallback;   /* combined-row scratch bound */
+
+	/* For each build side, resolve its ON to a (probe-from-earlier,
+	 * key-on-this-side) pair.  One ON column must land on side `side`
+	 * (its local key); the other must land on an EARLIER side (the probe
+	 * value).  Reject anything else (e.g. both on the same side, or a
+	 * forward reference). */
+	for (side = 1; side < nside; side++) {
+		int li = jc_resolve(&jc, on_lhs[side]);
+		int ri = jc_resolve(&jc, on_rhs[side]);
+		int this_lo = jp->base[side], this_hi = jp->base[side] + jp->ncol[side];
+		int local = -1, probe = -1;
+		if (li < 0 || ri < 0) goto fallback;
+		if (li >= this_lo && li < this_hi) { local = li; probe = ri; }
+		else if (ri >= this_lo && ri < this_hi) { local = ri; probe = li; }
+		else goto fallback;   /* neither ON column is on this side */
+		if (probe >= this_lo) goto fallback;   /* probe must come from an earlier side */
+		jp->key_local[side] = local - this_lo;
+		jp->probe_outidx[side] = probe;
+	}
+
+	/* Pass 2: compile projection + filter over the combined row. */
+	comp.st = st; comp.nv = NULL; comp.jc = &jc; comp.fail = 0;
+	comp.binds = binds; comp.nbinds = nbinds;
+	{
+		int k = 0;
+		for (it = sel->cols->head; it; it = it->next, k++) {
+			st->proj[k] = compile_expr(&comp, it->expr);
+			if (comp.fail) goto fallback;
+			item_name(it, st->outname[k], sizeof st->outname[0]);
+		}
+		if (sel->where) {
+			st->filter = compile_expr(&comp, sel->where);
+			if (comp.fail) goto fallback;
+		}
+	}
+	for (side = 0; side < nside; side++) { sqlite3_finalize(psrc[side]); psrc[side] = NULL; }
+
+	st->nsrc_col = total;
+	st->srcrow = (vx_cell_t *)calloc((size_t)total, sizeof(vx_cell_t));
+	if (!st->srcrow) goto oom;
+
+	sql_arena_destroy(ast);
+	*out = st;
+	return 1;
+
+oom:
+	rc = -1;
+fallback:
+	for (i = 0; i < VX_JOIN_MAX; i++) if (psrc[i]) sqlite3_finalize(psrc[i]);
+	if (ast) sql_arena_destroy(ast);
+	if (st) { free(st->njoin); st->njoin = NULL; vx_finalize(st); }
 	else free(jp);
 	return rc;
 }
@@ -3635,6 +3848,159 @@ out:
 	return c;
 }
 
+/* ---- N-way INNER join executor ----------------------------------- */
+
+/* Build the hash table for one build side from its source SELECT. */
+static int
+njoin_build_side(struct vx_stmt *st, int side)
+{
+	vx_njoinplan_t *jp = st->njoin;
+	sqlite3_stmt *bs = NULL;
+	struct vx_arena_blk *tmp = NULL;
+	vx_jht_t *h;
+	vx_cell_t rowcells[16];
+	int j, rc = -1;
+	int klocal = jp->key_local[side];
+	int nc = jp->ncol[side];
+	(void)side;   /* GCC -Wextra miscounts an index-only parameter as unused */
+
+	h = (vx_jht_t *)calloc(1, sizeof *h);
+	if (h == NULL) return -1;
+	h->nbucket = 1024;
+	h->buckets = (vx_jrow_t **)calloc((size_t)h->nbucket, sizeof(vx_jrow_t *));
+	if (h->buckets == NULL) { free(h); return -1; }
+	st->njht[side] = h;
+
+	if (sqlite3_prepare_v2(st->db, jp->src_sql[side], -1, &bs, 0) != SQLITE_OK)
+		goto done;
+	for (;;) {
+		int step = sqlite3_step(bs);
+		if (step == SQLITE_DONE) break;
+		if (step != SQLITE_ROW) goto done;
+		for (j = 0; j < nc; j++)
+			read_src_cell(bs, j, &rowcells[j], &tmp);
+		/* INNER: a NULL key never matches, so it is never probed -- skip. */
+		if (rowcells[klocal].type == VX_NULL)
+			continue;
+		if (jht_insert(h, &rowcells[klocal], rowcells, nc) != 0)
+			goto done;
+	}
+	rc = 0;
+done:
+	arena_free(tmp);
+	if (bs) sqlite3_finalize(bs);
+	return rc;
+}
+
+/* Place build side `side`'s current match (st->ncur[side]) into the
+ * combined srcrow at that side's base offset. */
+static void
+njoin_place(struct vx_stmt *st, int side)
+{
+	vx_njoinplan_t *jp = st->njoin;
+	int j;
+	(void)side;   /* GCC -Wextra miscounts an index-only parameter as unused */
+	for (j = 0; j < jp->ncol[side]; j++)
+		st->srcrow[jp->base[side] + j] = st->ncur[side]->cells[j];
+}
+
+/*
+ * Produce one chunk of the N-way INNER join.  Side 0 is streamed; each
+ * build side keeps a current-match cursor (ncur[]) into its hash chain.
+ * The cursor stack advances depth-first: the deepest side advances
+ * first, backtracking to shallower sides (and ultimately a new stream
+ * row) when a chain is exhausted.  A full combined row exists when
+ * every build side has a live match.
+ */
+static vx_chunk_t *
+njoin_next_chunk(struct vx_stmt *st, int *done)
+{
+	vx_njoinplan_t *jp = st->njoin;
+	vx_chunk_t *c;
+	int j;
+
+	*done = 0;
+	c = (vx_chunk_t *)calloc(1, sizeof *c);
+	if (!c) return NULL;
+	c->ncol = st->nout;
+	c->cap = VEXEC_VECTOR_SIZE;
+	c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap *
+	                               (size_t)(c->ncol > 0 ? c->ncol : 1));
+	if (!c->cells) { free(c); return NULL; }
+
+	while (c->nrow < c->cap) {
+		int side;
+		/* If no build side has an open cursor, fetch the next stream row
+		 * and seed side 1's probe. */
+		if (st->ncur[1] == NULL) {
+			int step;
+			vx_cell_t pv;
+			arena_free(st->nstream_arena); st->nstream_arena = NULL;
+			step = sqlite3_step(st->nstream);
+			if (step == SQLITE_DONE) { *done = 1; break; }
+			if (step != SQLITE_ROW) { chunk_free(c); return NULL; }
+			for (j = 0; j < jp->ncol[0]; j++)
+				read_src_cell(st->nstream, j, &st->srcrow[jp->base[0] + j],
+				              &st->nstream_arena);
+			pv = st->srcrow[jp->probe_outidx[1]];
+			st->ncur[1] = (pv.type == VX_NULL) ? NULL
+			                                   : jht_find(st->njht[1], &pv);
+			if (st->ncur[1] == NULL) continue;   /* no match: next stream row */
+			njoin_place(st, 1);
+		}
+
+		/* Descend: for each side beyond 1 with no open cursor, probe it
+		 * using a value from an earlier (already-placed) side.  If any
+		 * side has no match, backtrack. */
+		side = 2;
+		while (side < jp->nside) {
+			if (st->ncur[side] == NULL) {
+				vx_cell_t pv = st->srcrow[jp->probe_outidx[side]];
+				st->ncur[side] = (pv.type == VX_NULL) ? NULL
+				                 : jht_find(st->njht[side], &pv);
+				if (st->ncur[side] == NULL) {
+					/* No match at this side: backtrack to the previous
+					 * build side and advance its chain. */
+					side--;
+					while (side >= 1) {
+						st->ncur[side] = st->ncur[side]->next;
+						if (st->ncur[side] != NULL) { njoin_place(st, side); break; }
+						side--;
+					}
+					if (side < 1) break;   /* exhausted: new stream row */
+					side++;
+					continue;
+				}
+				njoin_place(st, side);
+			}
+			side++;
+		}
+		if (side < jp->nside) continue;   /* backtracked past side 1: restream */
+		if (st->ncur[1] == NULL) continue;
+
+		/* All sides matched: emit the combined row, then advance the
+		 * deepest cursor for the next iteration. */
+		if (join_emit_row(st, c) < 0) { chunk_free(c); return NULL; }
+		{
+			int d = jp->nside - 1;
+			while (d >= 1) {
+				st->ncur[d] = st->ncur[d]->next;
+				if (st->ncur[d] != NULL) { njoin_place(st, d); break; }
+				d--;
+			}
+			/* d < 1 leaves ncur[1] == NULL -> next loop fetches a new
+			 * stream row.  Otherwise re-probe the sides below d next
+			 * iteration (they were left non-NULL; clear them so the
+			 * descend loop re-probes with the new upper-side values). */
+			if (d >= 1) {
+				int k;
+				for (k = d + 1; k < jp->nside; k++) st->ncur[k] = NULL;
+			}
+		}
+	}
+	return c;
+}
+
 int
 vx_step(vx_stmt_t *st)
 {
@@ -3648,6 +4014,16 @@ vx_step(vx_stmt_t *st)
 		if (sqlite3_prepare_v2(st->db, st->join->probe_sql, -1, &st->probe, 0)
 		    != SQLITE_OK) return SQLITE_ERROR;
 		st->join_built = 1;
+	}
+
+	/* N-way join: build every build side's hash, open the side-0 stream. */
+	if (st->njoin != NULL && !st->nbuilt) {
+		int side;
+		for (side = 1; side < st->njoin->nside; side++)
+			if (njoin_build_side(st, side) != 0) return SQLITE_ERROR;
+		if (sqlite3_prepare_v2(st->db, st->njoin->src_sql[0], -1, &st->nstream, 0)
+		    != SQLITE_OK) return SQLITE_ERROR;
+		st->nbuilt = 1;
 	}
 
 	/* Aggregation: build all groups on first step, then walk the chunk. */
@@ -3672,7 +4048,8 @@ vx_step(vx_stmt_t *st)
 		int done = 0;
 		vx_chunk_t *c;
 		if (st->done) return SQLITE_DONE;
-		c = st->join ? join_next_chunk(st, &done) : next_chunk(st, &done);
+		c = st->join ? join_next_chunk(st, &done) :
+		    st->njoin ? njoin_next_chunk(st, &done) : next_chunk(st, &done);
 		if (c == NULL) return SQLITE_ERROR;
 		if (st->chunk) chunk_free(st->chunk);
 		st->chunk = c;
@@ -3741,6 +4118,18 @@ vx_finalize(vx_stmt_t *st)
 		arena_free(st->probe_arena);
 		free(st->probe_cells);
 		free(st->join);
+	}
+	if (st->njoin) {
+		int side;
+		for (side = 1; side < VX_JOIN_MAX; side++)
+			if (st->njht[side]) {
+				arena_free(st->njht[side]->arena);
+				free(st->njht[side]->buckets);
+				free(st->njht[side]);
+			}
+		if (st->nstream) sqlite3_finalize(st->nstream);
+		arena_free(st->nstream_arena);
+		free(st->njoin);
 	}
 	free(st->order_key);
 	free(st->order_outcol);

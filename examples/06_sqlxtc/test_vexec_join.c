@@ -135,9 +135,14 @@ main(void)
 		{ "SELECT t.k, u.j FROM t FULL JOIN u ON t.k = u.j", 1 },
 		{ "SELECT t.k, u.c FROM t LEFT JOIN u ON t.k = u.j WHERE u.c IS NULL", 1 },
 		{ "SELECT t.k, u.j FROM t FULL OUTER JOIN u ON t.a = u.d", 1 },
-		/* must fall back: non-equi ON, three tables. */
+		/* 3+ table INNER joins: chained equi-joins through w. */
+		{ "SELECT t.k, u.c, w.r FROM t JOIN u ON t.k = u.j JOIN w ON u.c = w.p", 1 },
+		{ "SELECT t.a + w.q FROM t JOIN u ON t.k = u.j JOIN w ON u.c = w.p WHERE t.a > 0", 1 },
+		/* 3-way with multiple matches per key (t.a = u.d fans out). */
+		{ "SELECT t.k, u.j, w.q FROM t JOIN u ON t.a = u.d JOIN w ON u.c = w.p", 1 },
+		/* must fall back: non-equi ON, a 3-way comma join with no ON. */
 		{ "SELECT t.a FROM t JOIN u ON t.k < u.j", 0 },
-		{ "SELECT t.a FROM t, u, t v", 0 }   /* three tables */
+		{ "SELECT t.a FROM t, u, t v", 0 }   /* three tables, no ON (cross) */
 	};
 	int n = (int)(sizeof corpus / sizeof corpus[0]);
 
@@ -145,9 +150,11 @@ main(void)
 	if (sqlite3_exec(db,
 	        "CREATE TABLE t(k INTEGER PRIMARY KEY, a INT);"
 	        "CREATE TABLE u(j INTEGER PRIMARY KEY, c INT, d INT, e TEXT);"
+	        "CREATE TABLE w(p INTEGER PRIMARY KEY, q INT, r TEXT);"
 	        "INSERT INTO t VALUES(1,5),(2,10),(3,5),(4,15),(5,NULL);"
 	        "INSERT INTO u VALUES(1,100,5,'aa'),(2,200,10,'bbb'),(3,NULL,5,'c'),"
-	        "(6,300,5,'dddd'),(7,400,99,NULL)",
+	        "(6,300,5,'dddd'),(7,400,99,NULL);"
+	        "INSERT INTO w VALUES(100,1,'w1'),(200,2,'w2'),(300,3,'w3'),(400,4,'w4')",
 	        0, 0, &err) != SQLITE_OK) {
 		fprintf(stderr, "seed: %s\n", err ? err : "?"); sqlite3_free(err);
 		sqlite3_close(db); return 1;
@@ -184,7 +191,7 @@ main(void)
 
 	sqlite3_close(db);
 	if (g_fail) { fprintf(stderr, "  vexec V5: FAILURES\n"); return 1; }
-	printf("  ok   vexec V5: %d hash joins (INNER/LEFT/RIGHT/FULL) matched the VDBE (multiset)\n", recognized);
+	printf("  ok   vexec V5: %d hash joins (2-table INNER/LEFT/RIGHT/FULL + 3+ table INNER) matched the VDBE (multiset)\n", recognized);
 	printf("All sqlxtc vectorized-executor join (V5) tests passed.\n");
 	return 0;
 }
