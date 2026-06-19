@@ -103,6 +103,9 @@ enum vx_op {
 	VXO_AND, VXO_OR,                     /* boolean */
 	VXO_ISNULL, VXO_NOTNULL,             /* IS [NOT] NULL */
 	VXO_IN, VXO_NOTIN,                   /* a IN/NOT IN (list): a in .a, list in args */
+	VXO_CASE,                            /* CASE: base in .a (NULL=searched),
+	                                      * args[]=when0,then0,when1,then1,...,
+	                                      * nargs=2*arms, ELSE in .b (NULL=none) */
 	VXO_FUNC                             /* builtin function (.func) */
 };
 
@@ -538,6 +541,8 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 	case VXO_ISNULL: case VXO_NOTNULL:
 	case VXO_IN: case VXO_NOTIN:
 		return VX_AFF_NUMERIC;   /* booleans are 0/1 integers */
+	case VXO_CASE:
+		return VX_AFF_BLOB;      /* dynamic result type: treat as no affinity */
 	case VXO_FUNC:
 		switch (e->func) {
 		case VXF_ABS:    return VX_AFF_NUMERIC;
@@ -660,6 +665,16 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 		if (collect_columns(nv, e->a) != 0) return -1;
 		if (collect_columns(nv, e->b) != 0) return -1;
 		return collect_columns(nv, e->c);
+	case SX_E_CASE: {
+		const sql_case_arm_t *arm;
+		if (e->a != NULL && collect_columns(nv, e->a) != 0) return -1;
+		for (arm = e->arms; arm; arm = arm->next) {
+			if (collect_columns(nv, arm->when) != 0) return -1;
+			if (collect_columns(nv, arm->then) != 0) return -1;
+		}
+		if (e->els != NULL && collect_columns(nv, e->els) != 0) return -1;
+		return 0;
+	}
 	case SX_E_SUBQUERY:
 		/* An uncorrelated scalar subquery references no OUTER column (it
 		 * is spliced as a literal at compile time); a correlated one is
@@ -1107,6 +1122,66 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		return conj;
 	}
 
+	case SX_E_CASE: {
+		/* CASE [base] WHEN w THEN t ... [ELSE e] END.
+		 * Searched form (no base): each WHEN is a boolean predicate.
+		 * Simple form (CASE x WHEN v ...): x = v per arm; compile the
+		 * base once and an equality per arm.  args[] holds the arms as
+		 * when0,then0,when1,then1,...; nargs = 2*arms; ELSE in .b.
+		 * The THEN/ELSE values may be any type (result class is dynamic,
+		 * so node_class returns BLOB -> a CASE cannot be a comparison
+		 * operand, only a projection / boolean-tested value). */
+		const sql_case_arm_t *arm;
+		vx_expr_t *n, *base = NULL;
+		int narm = 0, k;
+		for (arm = e->arms; arm; arm = arm->next) narm++;
+		if (narm == 0 || narm > 32) { c->fail = 1; return NULL; }
+		if (e->a != NULL) {
+			base = compile_expr(c, e->a);
+			if (base == NULL) return NULL;
+		}
+		n = expr_node(c, VXO_CASE);
+		if (n == NULL) return NULL;
+		n->a = base;
+		n->args = (vx_expr_t **)arena_alloc(&c->st->plan_arena,
+		                                    sizeof(vx_expr_t *) * (size_t)(narm * 2));
+		if (n->args == NULL) { c->fail = 1; return NULL; }
+		k = 0;
+		for (arm = e->arms; arm; arm = arm->next) {
+			vx_expr_t *w, *t;
+			if (base != NULL) {
+				/* simple form: compile (base = arm->when) with the
+				 * comparison affinity gate. */
+				vx_expr_t *base2 = compile_expr(c, e->a);
+				vx_expr_t *val = compile_expr(c, arm->when);
+				enum vx_aff cb, cv;
+				if (base2 == NULL || val == NULL) return NULL;
+				cb = node_class(c, base2); cv = node_class(c, val);
+				if (!((cb == VX_AFF_NUMERIC && cv == VX_AFF_NUMERIC) ||
+				      (cb == VX_AFF_TEXT && cv == VX_AFF_TEXT))) {
+					c->fail = 1; return NULL;
+				}
+				w = expr_node(c, VXO_EQ);
+				if (w == NULL) return NULL;
+				w->a = base2; w->b = val;
+			} else {
+				/* searched form: WHEN is a boolean predicate. */
+				w = compile_expr(c, arm->when);
+				if (w == NULL) return NULL;
+			}
+			t = compile_expr(c, arm->then);
+			if (t == NULL) return NULL;
+			n->args[k++] = w;
+			n->args[k++] = t;
+		}
+		n->nargs = narm * 2;
+		if (e->els != NULL) {
+			n->b = compile_expr(c, e->els);
+			if (n->b == NULL) return NULL;
+		}
+		return n;
+	}
+
 	case SX_E_IN_LIST: {
 		/* a IN (v1, v2, ...) -> VXO_IN with operand .a and list args[].		 * Each list element must share the operand's affinity class
 		 * (the comparison gate), so the membership test is numeric/
@@ -1416,6 +1491,23 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		if (res == 0 && saw_null) { out->type = VX_NULL; return; }
 		out->type = VX_INT;
 		out->i = (e->op == VXO_NOTIN) ? !res : res;
+		return;
+	}
+
+	case VXO_CASE: {
+		/* Evaluate each WHEN (a boolean predicate -- for the simple form
+		 * the compiler turned base=val into VXO_EQ) and return its THEN on
+		 * the first that is TRUE.  A WHEN that is NULL or false is skipped
+		 * (SQL CASE semantics).  No arm matched -> the ELSE, or NULL. */
+		int k;
+		for (k = 0; k + 1 < e->nargs; k += 2) {
+			if (eval_bool(st, e->args[k], row, arena) == 1) {
+				eval(st, e->args[k + 1], row, arena, out);
+				return;
+			}
+		}
+		if (e->b != NULL) { eval(st, e->b, row, arena, out); return; }
+		out->type = VX_NULL;
 		return;
 	}
 
