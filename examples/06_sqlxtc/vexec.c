@@ -118,6 +118,10 @@ enum vx_op {
 	VXO_CORRSUBQ,                        /* correlated scalar subquery: the stmt
 	                                      * st->corr[col] re-run per row, binding
 	                                      * ? from srcrow[bindcol[i]] */
+	VXO_CORRIN,                          /* operand .a IN (correlated select):
+	                                      * st->corr[col] re-run per row (binds
+	                                      * as VXO_CORRSUBQ), membership over its
+	                                      * single-column rows; lit.i != 0 = NOT IN */
 	VXO_FUNC                             /* builtin function (.func) */
 };
 
@@ -657,6 +661,8 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 		return VX_AFF_BLOB;      /* dynamic result type: treat as no affinity */
 	case VXO_CORRSUBQ:
 		return VX_AFF_BLOB;      /* dynamic subquery result */
+	case VXO_CORRIN:
+		return VX_AFF_NUMERIC;   /* membership result is a 0/1 integer */
 	case VXO_FUNC:
 		switch (e->func) {
 		case VXF_ABS:    return VX_AFF_NUMERIC;
@@ -839,9 +845,26 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 		}
 		return 0;
 	case SX_E_IN_SELECT:
-		/* a IN (SELECT ...): collect the operand's columns; the subquery
-		 * itself contributes none (materialized as a literal list). */
-		return collect_columns(nv, e->a);
+		/* a IN (SELECT ...): collect the operand's columns.  An
+		 * uncorrelated subquery contributes none (materialized as a
+		 * literal list); a correlated one (cc_otab set) references the
+		 * outer table's columns -- collect those so they get srcrow slots
+		 * (the compiler later rewrites them to ? binds), exactly as the
+		 * scalar-subquery case does. */
+		if (collect_columns(nv, e->a) != 0) return -1;
+		if (cc_otab != NULL && e->sel != NULL) {
+			struct corr_ref refs[VX_CORR_MAX];
+			int nr = 0, i;
+			const sql_select_t *q = e->sel;
+			const sql_exprlist_item_t *it;
+			for (it = q->cols ? q->cols->head : NULL; it; it = it->next)
+				if ((nr = corr_collect(it->expr, cc_otab, refs, nr)) < 0) return 0;
+			if ((nr = corr_collect(q->where, cc_otab, refs, nr)) < 0) return 0;
+			if ((nr = corr_collect(q->having, cc_otab, refs, nr)) < 0) return 0;
+			for (i = 0; i < nr; i++)
+				if (nv_add(nv, refs[i].col) < 0) return -1;
+		}
+		return 0;
 	case SX_E_IN_LIST: {
 		/* a IN (v1, v2, ...): operand + each list element. */
 		if (e->a == NULL || e->sel != NULL) return -1;   /* IN (SELECT): not here */
@@ -1052,33 +1075,34 @@ static int corr_ref_cmp(const void *a, const void *b)
 }
 
 /*
- * Compile a CORRELATED scalar subquery on the single-table read path.
- * Outer references (columns qualified by the outer table) are rewritten
- * to ? parameters in the subquery text and bound from the current row
- * at eval time.  Returns a VXO_CORRSUBQ node, or NULL (sets c->fail)
- * when correlation cannot be turned into the supported shape (multiple
- * outer tables, a join, too many refs, > 1 result column, etc.).
- */
-static vx_expr_t *
-compile_corr_subquery(struct vx_compiler *c, const sql_expr_t *e)
+ * Shared machinery for a CORRELATED subquery on the single-table read
+ * path (used by both the scalar form and the IN form).  Collects outer
+ * references (columns qualified by the outer table) from the subquery's
+ * expressions, rewrites each to a ? parameter in the subquery text,
+ * prepares it ONCE, and records it in st->corr[].  On success returns
+ * 0 and sets *pidx (the st->corr[] slot), *pbindcol (a plan-arena array
+ * of srcrow indices feeding each ?), and *pnref; the prepared stmt's
+ * column count is left to the caller to validate.  Returns -1 (caller
+ * sets c->fail) when correlation cannot be turned into the supported
+ * shape.  ncol_want is the required result column count (1). */
+static int
+build_corr_stmt(struct vx_compiler *c, const sql_expr_t *e,
+                int ncol_want, int *pidx, int **pbindcol, int *pnref)
 {
 	struct corr_ref refs[VX_CORR_MAX];
 	const char *otab;
 	char *sub = NULL, *out = NULL, *s;
 	size_t len, oi;
-	int nref, i, ci;
+	int nref, i, ci, *bindcol;
 	sqlite3_stmt *q = NULL;
-	vx_expr_t *n;
 
 	/* Single-table read path only (need the outer table name + nv). */
 	if (c->jc != NULL || c->nv == NULL || c->st == NULL ||
 	    c->st->db == NULL || c->st->table[0] == '\0' ||
-	    e->src == NULL || e->srclen == 0) {
-		c->fail = 1; return NULL;
-	}
-	if (c->st->ncorr >= (int)(sizeof c->st->corr / sizeof c->st->corr[0])) {
-		c->fail = 1; return NULL;
-	}
+	    e->src == NULL || e->srclen == 0)
+		return -1;
+	if (c->st->ncorr >= (int)(sizeof c->st->corr / sizeof c->st->corr[0]))
+		return -1;
 	otab = c->st->table;
 
 	/* Collect outer-column references from the subquery's expressions. */
@@ -1087,26 +1111,24 @@ compile_corr_subquery(struct vx_compiler *c, const sql_expr_t *e)
 		const sql_select_t *q2 = e->sel;
 		const sql_exprlist_item_t *it;
 		for (it = q2->cols ? q2->cols->head : NULL; it; it = it->next)
-			if ((nref = corr_collect(it->expr, otab, refs, nref)) < 0) { c->fail = 1; return NULL; }
-		if ((nref = corr_collect(q2->where, otab, refs, nref)) < 0) { c->fail = 1; return NULL; }
-		if ((nref = corr_collect(q2->having, otab, refs, nref)) < 0) { c->fail = 1; return NULL; }
+			if ((nref = corr_collect(it->expr, otab, refs, nref)) < 0) return -1;
+		if ((nref = corr_collect(q2->where, otab, refs, nref)) < 0) return -1;
+		if ((nref = corr_collect(q2->having, otab, refs, nref)) < 0) return -1;
 	}
-	if (nref == 0) { c->fail = 1; return NULL; }   /* not actually correlated */
+	if (nref == 0) return -1;   /* not actually correlated */
 
 	/* Build the parameterized subquery text: strip the wrapping parens,
 	 * then splice ? in place of each outer-ref span (left to right). */
 	sub = (char *)malloc((size_t)e->srclen + 1);
-	if (sub == NULL) { c->fail = 1; return NULL; }
+	if (sub == NULL) return -1;
 	memcpy(sub, e->src, e->srclen); sub[e->srclen] = '\0';
 	s = sub; len = e->srclen;
 	while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
 	while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
-	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); c->fail = 1; return NULL; }
-	/* s[1 .. len-2] is the inner SELECT; refs[].p point into e->src,
-	 * which is the SAME buffer region as sub via the same offsets. */
+	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); return -1; }
 	qsort(refs, (size_t)nref, sizeof refs[0], corr_ref_cmp);
 	out = (char *)malloc((size_t)e->srclen + 1);
-	if (out == NULL) { free(sub); c->fail = 1; return NULL; }
+	if (out == NULL) { free(sub); return -1; }
 	oi = 0;
 	{
 		const char *cur = e->src + 1;            /* past '(' */
@@ -1114,7 +1136,7 @@ compile_corr_subquery(struct vx_compiler *c, const sql_expr_t *e)
 		for (i = 0; i < nref; i++) {
 			size_t pre = (size_t)(refs[i].p - cur);
 			if (refs[i].p < cur || refs[i].p + refs[i].len > end) {
-				free(sub); free(out); c->fail = 1; return NULL;
+				free(sub); free(out); return -1;
 			}
 			memcpy(out + oi, cur, pre); oi += pre;
 			out[oi++] = '?';
@@ -1126,26 +1148,86 @@ compile_corr_subquery(struct vx_compiler *c, const sql_expr_t *e)
 	free(sub);
 
 	if (sqlite3_prepare_v2(c->st->db, out, -1, &q, NULL) != SQLITE_OK) {
-		free(out); c->fail = 1; return NULL;
+		free(out); return -1;
 	}
 	free(out);
 	if (sqlite3_bind_parameter_count(q) != nref ||
-	    sqlite3_column_count(q) != 1) {
-		sqlite3_finalize(q); c->fail = 1; return NULL;
+	    sqlite3_column_count(q) != ncol_want) {
+		sqlite3_finalize(q); return -1;
 	}
 
-	n = expr_node(c, VXO_CORRSUBQ);
-	if (n == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
-	n->bindcol = (int *)arena_alloc(&c->st->plan_arena, sizeof(int) * (size_t)nref);
-	if (n->bindcol == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+	bindcol = (int *)arena_alloc(&c->st->plan_arena, sizeof(int) * (size_t)nref);
+	if (bindcol == NULL) { sqlite3_finalize(q); return -1; }
 	for (i = 0; i < nref; i++) {
 		ci = nv_add(c->nv, refs[i].col);   /* outer column -> srcrow index */
-		if (ci < 0) { sqlite3_finalize(q); c->fail = 1; return NULL; }
-		n->bindcol[i] = ci;
+		if (ci < 0) { sqlite3_finalize(q); return -1; }
+		bindcol[i] = ci;
 	}
-	n->nargs = nref;
-	n->col = c->st->ncorr;
+	*pidx = c->st->ncorr;
 	c->st->corr[c->st->ncorr++] = q;
+	*pbindcol = bindcol;
+	*pnref = nref;
+	return 0;
+}
+
+/*
+ * Compile a CORRELATED scalar subquery on the single-table read path.
+ * Outer references (columns qualified by the outer table) are rewritten
+ * to ? parameters in the subquery text and bound from the current row
+ * at eval time.  Returns a VXO_CORRSUBQ node, or NULL (sets c->fail)
+ * when correlation cannot be turned into the supported shape (multiple
+ * outer tables, a join, too many refs, > 1 result column, etc.).
+ */
+static vx_expr_t *
+compile_corr_subquery(struct vx_compiler *c, const sql_expr_t *e)
+{
+	int idx, nref, *bindcol;
+	vx_expr_t *n;
+
+	if (build_corr_stmt(c, e, 1, &idx, &bindcol, &nref) != 0) {
+		c->fail = 1; return NULL;
+	}
+	n = expr_node(c, VXO_CORRSUBQ);
+	if (n == NULL) { c->fail = 1; return NULL; }
+	n->bindcol = bindcol;
+	n->nargs = nref;
+	n->col = idx;
+	return n;
+}
+
+/*
+ * Compile a CORRELATED IN (SELECT) -- operand IN (subquery referencing
+ * an outer column).  Like the correlated scalar form: the inner select
+ * is parameterized on its outer refs and prepared once; at eval it is
+ * re-run for the current row and the operand tested for membership in
+ * its single-column result, with SQL 3-valued NULL semantics.  Returns
+ * a VXO_CORRIN node (lit.i set for NOT IN), or NULL (sets c->fail). */
+static vx_expr_t *
+compile_corr_in_select(struct vx_compiler *c, const sql_expr_t *e)
+{
+	int idx, nref, *bindcol;
+	vx_expr_t *n, *a;
+	enum vx_aff acls;
+
+	/* The operand must have a fixed (numeric or text) affinity so the
+	 * per-row membership comparison has no ambiguous coercion -- the same
+	 * gate the literal-list IN uses. */
+	a = compile_expr(c, e->a);
+	if (a == NULL) return NULL;
+	acls = node_class(c, a);
+	if (acls != VX_AFF_NUMERIC && acls != VX_AFF_TEXT) { c->fail = 1; return NULL; }
+
+	if (build_corr_stmt(c, e, 1, &idx, &bindcol, &nref) != 0) {
+		c->fail = 1; return NULL;
+	}
+	n = expr_node(c, VXO_CORRIN);
+	if (n == NULL) { c->fail = 1; return NULL; }
+	n->a = a;
+	n->bindcol = bindcol;
+	n->nargs = nref;
+	n->col = idx;
+	n->lit.type = VX_INT;
+	n->lit.i = e->ival ? 1 : 0;   /* ival = NOT IN */
 	return n;
 }
 
@@ -1309,8 +1391,18 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		c->fail = save;
 		return compile_corr_subquery(c, e);
 	}
-	case SX_E_IN_SELECT:
-		return compile_in_select(c, e);
+	case SX_E_IN_SELECT: {
+		/* Uncorrelated first (run once, materialize a literal list); if
+		 * that fails because the subquery references an outer column,
+		 * try the correlated form (re-run per row, test membership). */
+		vx_expr_t *u;
+		int save = c->fail;
+		c->fail = 0;
+		u = compile_in_select(c, e);
+		if (!c->fail && u != NULL) return u;
+		c->fail = save;
+		return compile_corr_in_select(c, e);
+	}
 	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
 		return compile_literal(c, e);
 	case SX_E_PARAM:
@@ -1947,6 +2039,62 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 			out->type = VX_NULL;   /* no row, or an error -> NULL */
 		}
 		sqlite3_reset(q);
+		return;
+	}
+
+	case VXO_CORRIN: {
+		/* operand IN (correlated select).  Bind ? from the current row,
+		 * step every result row, and test the operand for membership with
+		 * SQL 3-valued logic: a NULL operand -> NULL; a match -> 1; no
+		 * match but a NULL element seen -> NULL; else 0.  NOT IN (lit.i)
+		 * negates, keeping NULL as NULL. */
+		sqlite3_stmt *q = st->corr[e->col];
+		vx_cell_t a; int i, step, res = 0, saw_null = 0;
+		eval(st, e->a, row, arena, &a);
+		if (a.type == VX_NULL) { out->type = VX_NULL; return; }
+		sqlite3_reset(q);
+		sqlite3_clear_bindings(q);
+		for (i = 0; i < e->nargs; i++) {
+			const vx_cell_t *v = &row[e->bindcol[i]];
+			switch (v->type) {
+			case VX_INT:  sqlite3_bind_int64(q, i + 1, v->i); break;
+			case VX_REAL: sqlite3_bind_double(q, i + 1, v->r); break;
+			case VX_TEXT: sqlite3_bind_text(q, i + 1, (const char *)v->bytes,
+			                                (int)v->nbytes, SQLITE_TRANSIENT); break;
+			case VX_BLOB: sqlite3_bind_blob(q, i + 1, v->bytes,
+			                                (int)v->nbytes, SQLITE_TRANSIENT); break;
+			default:      sqlite3_bind_null(q, i + 1); break;
+			}
+		}
+		while ((step = sqlite3_step(q)) == SQLITE_ROW) {
+			vx_cell_t v;
+			memset(&v, 0, sizeof v);
+			switch (sqlite3_column_type(q, 0)) {
+			case SQLITE_INTEGER: v.type = VX_INT; v.i = sqlite3_column_int64(q, 0); break;
+			case SQLITE_FLOAT:   v.type = VX_REAL; v.r = sqlite3_column_double(q, 0); break;
+			case SQLITE_NULL:    v.type = VX_NULL; break;
+			default: {
+				const void *b = sqlite3_column_blob(q, 0);
+				int nb = sqlite3_column_bytes(q, 0);
+				uint8_t *p = (uint8_t *)arena_alloc(arena, (size_t)nb + 1);
+				if (p == NULL) { v.type = VX_NULL; break; }
+				if (nb && b) memcpy(p, b, (size_t)nb);
+				p[nb] = '\0';
+				v.type = (sqlite3_column_type(q, 0) == SQLITE_TEXT) ? VX_TEXT : VX_BLOB;
+				v.bytes = p; v.nbytes = (uint32_t)nb;
+				break; }
+			}
+			if (v.type == VX_NULL) { saw_null = 1; continue; }
+			/* Apply numeric affinity when the operand is numeric and the
+			 * subquery value is text (matching SQLite's IN coercion). */
+			if ((a.type == VX_INT || a.type == VX_REAL) && v.type == VX_TEXT)
+				(void)coerce_numeric(&v);
+			if (cmp_vals(&a, &v) == 0) { res = 1; break; }
+		}
+		sqlite3_reset(q);
+		if (res == 0 && saw_null) { out->type = VX_NULL; return; }
+		out->type = VX_INT;
+		out->i = e->lit.i ? !res : res;
 		return;
 	}
 
