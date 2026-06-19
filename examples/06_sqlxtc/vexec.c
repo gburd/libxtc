@@ -233,6 +233,9 @@ typedef struct vx_htab {
  * over which the projection and WHERE filter are evaluated.  Column
  * references in proj/filter index the combined row. */
 
+/* Column affinity (SQLite rules, three buckets). */
+enum vx_aff { VX_AFF_BLOB = 0, VX_AFF_TEXT, VX_AFF_NUMERIC };
+
 /*
  * A join side's row source.  When the table is xstore-backed (the
  * common case) the side is read NATIVELY via xstore_scan_* + the
@@ -245,6 +248,7 @@ typedef struct vx_jsrc {
 	int   native;          /* 1: xstore scan; 0: SQLite cursor */
 	char  table[64];       /* xstore table name (native only) */
 	int   pay[16];         /* per-column payload map (native only) */
+	enum vx_aff aff[16];   /* per-column affinity (native only) */
 	int   ncol;
 } vx_jsrc_t;
 
@@ -416,8 +420,6 @@ struct vx_stmt {
 };
 
 /* ---- recognizer: column affinity (SQLite rules, three buckets) --- */
-
-enum vx_aff { VX_AFF_BLOB = 0, VX_AFF_TEXT, VX_AFF_NUMERIC };
 
 static int
 str_contains_ci(const char *hay, const char *needle)
@@ -3535,23 +3537,37 @@ vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 
 	/* Native row sources when the sides are xstore-backed (no SQLite
 	 * cursor); else read through the prepared SELECT.  -1 = unresolved. */
-	if (jsrc_build(db, jc.tab[0], jc.col[0].names, jc.col[0].n, &jp->build_src) < 0)
-		goto fallback;
-	if (jsrc_build(db, jc.tab[1], jc.col[1].names, jc.col[1].n, &jp->probe_src) < 0)
-		goto fallback;
+	{
+		int bn = jsrc_build(db, jc.tab[0], jc.col[0].names, jc.col[0].n, &jp->build_src);
+		int pn = jsrc_build(db, jc.tab[1], jc.col[1].names, jc.col[1].n, &jp->probe_src);
+		if (bn < 0 || pn < 0) goto fallback;
 
-	/* Prepare both sources to learn column counts + affinities. */
-	if (sqlite3_prepare_v2(db, jp->build_sql, -1, &bsrc, 0) != SQLITE_OK) goto fallback;
-	if (sqlite3_prepare_v2(db, jp->probe_sql, -1, &psrc, 0) != SQLITE_OK) goto fallback;
-	jp->build_ncol = sqlite3_column_count(bsrc);
-	jp->probe_ncol = sqlite3_column_count(psrc);
-	if (jp->build_ncol != jc.col[0].n || jp->probe_ncol != jc.col[1].n) goto fallback;
-	jc.base[0] = 0;
-	jc.base[1] = jp->build_ncol;
-	for (i = 0; i < jp->build_ncol; i++)
-		jc.col[0].aff[i] = vx_affinity(sqlite3_column_decltype(bsrc, i));
-	for (i = 0; i < jp->probe_ncol; i++)
-		jc.col[1].aff[i] = vx_affinity(sqlite3_column_decltype(psrc, i));
+		jp->build_ncol = jc.col[0].n;
+		jp->probe_ncol = jc.col[1].n;
+		jc.base[0] = 0;
+		jc.base[1] = jp->build_ncol;
+
+		/* Column count + affinity: from the native catalog for an xstore
+		 * side (no SQLite prepare), else prepare the source SELECT to learn
+		 * them.  jsrc_build already validated that a native side's columns
+		 * all resolve. */
+		if (jp->build_src.native) {
+			for (i = 0; i < jp->build_ncol; i++) jc.col[0].aff[i] = jp->build_src.aff[i];
+		} else {
+			if (sqlite3_prepare_v2(db, jp->build_sql, -1, &bsrc, 0) != SQLITE_OK) goto fallback;
+			if (sqlite3_column_count(bsrc) != jc.col[0].n) goto fallback;
+			for (i = 0; i < jp->build_ncol; i++)
+				jc.col[0].aff[i] = vx_affinity(sqlite3_column_decltype(bsrc, i));
+		}
+		if (jp->probe_src.native) {
+			for (i = 0; i < jp->probe_ncol; i++) jc.col[1].aff[i] = jp->probe_src.aff[i];
+		} else {
+			if (sqlite3_prepare_v2(db, jp->probe_sql, -1, &psrc, 0) != SQLITE_OK) goto fallback;
+			if (sqlite3_column_count(psrc) != jc.col[1].n) goto fallback;
+			for (i = 0; i < jp->probe_ncol; i++)
+				jc.col[1].aff[i] = vx_affinity(sqlite3_column_decltype(psrc, i));
+		}
+	}
 
 	/* The join keys, as combined-row indices, then split per side. */
 	lkey = jc_resolve(&jc, lhs);
@@ -3706,14 +3722,21 @@ vx_try_prepare_njoin(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (jsrc_build(db, jc.tab[side], jc.col[side].names, jc.col[side].n,
 		               &jp->src[side]) < 0)
 			goto fallback;
-		if (sqlite3_prepare_v2(db, jp->src_sql[side], -1, &psrc[side], 0) != SQLITE_OK)
-			goto fallback;
-		jp->ncol[side] = sqlite3_column_count(psrc[side]);
-		if (jp->ncol[side] != jc.col[side].n) goto fallback;
+		jp->ncol[side] = jc.col[side].n;
 		jp->base[side] = total;
 		jc.base[side] = total;
-		for (j = 0; j < jp->ncol[side]; j++)
-			jc.col[side].aff[j] = vx_affinity(sqlite3_column_decltype(psrc[side], j));
+		/* Column affinity: native catalog for an xstore side (no SQLite
+		 * prepare), else prepare the source SELECT. */
+		if (jp->src[side].native) {
+			for (j = 0; j < jp->ncol[side]; j++)
+				jc.col[side].aff[j] = jp->src[side].aff[j];
+		} else {
+			if (sqlite3_prepare_v2(db, jp->src_sql[side], -1, &psrc[side], 0) != SQLITE_OK)
+				goto fallback;
+			if (sqlite3_column_count(psrc[side]) != jc.col[side].n) goto fallback;
+			for (j = 0; j < jp->ncol[side]; j++)
+				jc.col[side].aff[j] = vx_affinity(sqlite3_column_decltype(psrc[side], j));
+		}
 		total += jp->ncol[side];
 	}
 	if (total > 64) goto fallback;   /* combined-row scratch bound */
@@ -4041,6 +4064,10 @@ jsrc_build(sqlite3 *db, const char *table, char names[][64], int ncol,
 		for (c = 0; c < nc; c++)
 			if (strcmp(names[i], cols[c].name) == 0) {
 				js->pay[i] = cols[c].is_pk ? -1 : (c - 1);
+				/* The PK is the INTEGER rowid (numeric affinity)
+				 * regardless of its declared type, matching SQLite. */
+				js->aff[i] = cols[c].is_pk ? VX_AFF_NUMERIC
+				                          : vx_affinity(cols[c].decltype);
 				break;
 			}
 	for (i = 0; i < ncol; i++) if (js->pay[i] == -2) return -1;   /* unresolved */
