@@ -200,6 +200,8 @@ main(void)
 		{ "SELECT a FROM t WHERE a IN (1, 2, 3)",                   0 },
 		{ "SELECT k FROM t WHERE a BETWEEN 50 AND 100 ORDER BY k",  1 },
 		{ "SELECT k FROM t WHERE b BETWEEN 'g1' AND 'g3' AND a IS NOT NULL ORDER BY k LIMIT 5", 1 },
+		{ "SELECT k, CASE WHEN a > 100 THEN 'big' ELSE 'small' END FROM t WHERE k <= 5 ORDER BY k", 1 },
+		{ "SELECT k, CASE b WHEN 'g1' THEN 1 WHEN 'g2' THEN 2 ELSE 0 END FROM t WHERE k <= 5 ORDER BY k", 1 },
 		{ "SELECT k FROM t WHERE k IN (5, 10, 50, 999)",            0 },
 		{ "SELECT a FROM t WHERE a NOT IN (1, 2, 3) AND a IS NOT NULL", 0 },
 		{ "SELECT k FROM t WHERE b IN ('g1', 'g3')",               0 },

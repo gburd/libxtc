@@ -777,11 +777,15 @@ expr(R) ::= expr(A) TK_IN TK_LP(L) select_stmt(Q) TK_RP(P). {
 expr(R) ::= expr(A) TK_BETWEEN expr(B) TK_AND expr(C). [TK_BETWEEN] {
     R = mk_expr(pstate, SX_E_BETWEEN); if (R) { R->a = A; R->b = B; R->c = C; }
 }
-expr(R) ::= TK_CASE expr_atom(BASE) case_arms(AR) case_else(EL) TK_END. {
-    R = mk_expr(pstate, SX_E_CASE); if (R) { R->a = BASE; R->arms = AR; R->els = EL; }
+expr(R) ::= TK_CASE(C) expr_atom(BASE) case_arms(AR) case_else(EL) TK_END(E). {
+    R = mk_expr(pstate, SX_E_CASE);
+    if (R) { R->a = BASE; R->arms = AR; R->els = EL;
+             R->src = C.p; R->srclen = (uint32_t)((E.p + E.len) - C.p); }
 }
-expr(R) ::= TK_CASE case_arms(AR) case_else(EL) TK_END. {
-    R = mk_expr(pstate, SX_E_CASE); if (R) { R->arms = AR; R->els = EL; }
+expr(R) ::= TK_CASE(C) case_arms(AR) case_else(EL) TK_END(E). {
+    R = mk_expr(pstate, SX_E_CASE);
+    if (R) { R->arms = AR; R->els = EL;
+             R->src = C.p; R->srclen = (uint32_t)((E.p + E.len) - C.p); }
 }
 expr(R) ::= TK_ID(F) TK_LP TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; }
