@@ -221,7 +221,9 @@ main(void)
 		{ "SELECT a FROM t GROUP BY a", 1 },
 		{ "SELECT b, count(*), sum(a) FROM t GROUP BY b", 1 },
 		{ "SELECT a, count(*) FROM t WHERE a > 4 GROUP BY a", 1 },
-		{ "SELECT count(DISTINCT a) FROM t", 0 },           /* DISTINCT agg: fallback */
+		{ "SELECT count(DISTINCT a) FROM t", 1 },           /* count(DISTINCT) now native */
+		{ "SELECT b, count(DISTINCT a) FROM t GROUP BY b", 1 }, /* count(DISTINCT) per group */
+		{ "SELECT sum(DISTINCT a) FROM t", 0 },             /* only count(DISTINCT) is native */
 		{ "SELECT a, count(*) FROM t GROUP BY a HAVING count(*) > 1", 1 }, /* HAVING now native */
 
 		{ "SELECT k FROM t WHERE a = 'x'", 0 },             /* INT col vs text lit: affinity */

@@ -187,6 +187,9 @@ main(void)
 		"SELECT count(a), sum(a), min(a), max(a) FROM t",
 		"SELECT total(a), avg(a) FROM t WHERE a IS NOT NULL",
 		"SELECT b, count(*), sum(a) FROM t GROUP BY b",
+		"SELECT count(DISTINCT b) FROM t",
+		"SELECT count(DISTINCT a) FROM t",
+		"SELECT b, count(DISTINCT a) FROM t GROUP BY b",
 		"SELECT b, count(*) FROM t WHERE a > 5000 GROUP BY b"
 	};
 	int n = (int)(sizeof corpus / sizeof corpus[0]);
