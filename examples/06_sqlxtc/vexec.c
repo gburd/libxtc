@@ -5736,10 +5736,18 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 	switch (root->kind) {
 	case SQL_KIND_INSERT:
 		ins = root->u.insert;
-		if (ins == NULL || ins->def_values) { sql_arena_destroy(arena); return 0; }
-		/* Either VALUES rows or a SELECT source, not neither. */
-		if (ins->select == NULL && (ins->rows == NULL || ins->n_rows < 1)) {
+		if (ins == NULL) { sql_arena_destroy(arena); return 0; }
+		/* DEFAULT VALUES, a VALUES list, or a SELECT source -- exactly
+		 * one.  DEFAULT VALUES inserts a single all-default row; an
+		 * xstore vtab ignores any DEFAULT clause (its column args carry
+		 * none it honors), so every non-PK column is NULL and the PK is
+		 * auto-assigned -- the same row the VDBE produces. */
+		if (!ins->def_values && ins->select == NULL &&
+		    (ins->rows == NULL || ins->n_rows < 1)) {
 			sql_arena_destroy(arena); return 0; }
+		if (ins->def_values && (ins->select != NULL || ins->cols != NULL ||
+		    (ins->rows != NULL && ins->n_rows > 0))) {
+			sql_arena_destroy(arena); return 0; }   /* malformed -> VDBE */
 		tname = &ins->table;
 		break;
 	case SQL_KIND_DELETE:
@@ -5937,6 +5945,28 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 
 	/* ---- INSERT INTO t [(col,...)] VALUES (...) ... ----------------- */
 	maxr = xstore_max_rowid(bt, tableid);
+
+	/* ---- INSERT INTO t DEFAULT VALUES -------------------------------
+	 * One row: PK auto-assigned (max committed + 1), every non-PK column
+	 * NULL.  An xstore table honors no DEFAULT clause, so this is exactly
+	 * what the VDBE inserts.  Inside a txn with an explicit-PK collision
+	 * risk there is none (the PK is auto), so this is always native --
+	 * the same as a positional INSERT of a single NULL tuple. */
+	if (ins->def_values) {
+		vx_cell_t cells[64];
+		uint8_t rec[XS_REC_MAX];
+		int ci, reclen;
+		int64_t rowid = ++maxr;
+		for (ci = 0; ci < ws.n; ci++) { cells[ci].type = VX_NULL; cells[ci].nbytes = 0; }
+		reclen = encode_payload(&cells[1], ws.n - 1, rec, (int)sizeof rec);
+		if (reclen < 0) { rc = 0; goto done; }   /* unexpected -> VDBE */
+		if (xstore_write_txn(db, tableid, rowid, rec, reclen, 0) != 0) {
+			if (errmsg) *errmsg = strdup("native default-values insert failed");
+			rc = -1; goto done;
+		}
+		if (nchanges) *nchanges = 1;
+		rc = 1; goto done;
+	}
 
 	/* Build the column-position map.  With no explicit column list the
 	 * VALUES tuples are positional (declared order, all columns).  With
