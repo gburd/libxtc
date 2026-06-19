@@ -322,7 +322,10 @@ struct vx_stmt {
 
 	/* Derived-table (FROM subquery) source: the inner SELECT, prepared
 	 * once; rows are stepped into srcrow.  derived != NULL marks this
-	 * path (mutually exclusive with bt/scan). */
+	 * path (mutually exclusive with bt/scan).  Converting this to run the
+	 * inner via vexec needs per-column declared-type affinity exposed on
+	 * vx_result_t (the outer compile's comparison gate needs it; a row's
+	 * runtime type is not a reliable affinity) -- a later step. */
 	sqlite3_stmt *derived;
 
 	/* Rowid-range pushdown (the minimal planner): when the WHERE pins the
