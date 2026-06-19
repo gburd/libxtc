@@ -435,8 +435,10 @@ The 79 sqlite3_* calls left in vexec.c, by purpose (grep
 'sqlite3_prepare_v2' vexec.c):
   - join-source column metadata (build/probe/src_sql prepares): prepared
     ONCE per side at plan time only to learn column count + affinity;
-    the per-row read is already native (vx_jsrc_t).  Replace with the
-    native catalog (xstore_table_schema) so no prepare is needed.
+    the per-row read is already native (vx_jsrc_t).  DONE -- jsrc_build
+    now fills each native side's affinity from the catalog, so an
+    all-xstore join plans + executes with NO sqlite3_prepare at all;
+    only a non-xstore side (plain SQLite table) still prepares.
   - subquery / derived-table / INSERT...SELECT inner SELECTs
     (compile_scalar_subquery, compile_corr_subquery,
     vx_try_prepare_derived, the INSERT...SELECT path): run an arbitrary
