@@ -344,14 +344,27 @@ The read long-tail still on the VDBE, in rough order of effort:
   - DISTINCT / set-op + LIMIT WITHOUT ORDER BY -- the surviving subset
     is unspecified in SQL, so not byte-reproducible; with ORDER BY it
     is native.  (Intentional fallback, not a gap.)
-  - 3+ table joins -- the two-table hash join (vx_try_prepare_join,
-    INNER/LEFT/RIGHT/FULL) is done; N-way needs the join context (which
-    is fixed at 2 sides) generalized to chain builds/probes.
   - Correlated subqueries (scalar or IN) and FROM-clause / derived
     tables -- the uncorrelated scalar + IN (SELECT) forms are native
     (run once via SQLite, spliced as a literal / literal list); a
     correlated subquery references the outer row and would need per-row
-    evaluation, and a derived table is a nested plan feeding FROM.
+    evaluation (rewrite outer refs to binds, re-run per row), and a
+    derived table is a nested plan feeding FROM.
+  - 3+ table INNER joins are native (N-way hash-join pipeline,
+    vx_try_prepare_njoin); 3+ table OUTER joins fall back.
+
+NOTE -- two tracks to retire sqlite3.c.  Track A (recognition): make
+every accepted query native (the long-tails above + DDL).  Track B
+(execution): the native paths still CALL SQLite in places --
+  * the join build/probe/stream sources are SELECT ... FROM <table>
+    prepared+stepped via SQLite (so joins work over ANY table, not
+    just xstore); for xstore tables these can become xstore_scan_*.
+  * uncorrelated subqueries and INSERT...SELECT run their inner SELECT
+    via SQLite.
+  * resolve_schema falls back to PRAGMA table_info; parallel bounds use
+    SELECT min/max(_rowid_).
+Both tracks must complete before the amalgamation can be deleted; Track
+B (especially the join sources) is the larger architectural piece.
 
 The write long-tail still on the VDBE:
   - a transactional DELETE/UPDATE on a table the txn has ALREADY
