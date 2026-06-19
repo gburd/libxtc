@@ -327,18 +327,18 @@ The gates to actually deleting sqlite3.c, in dependency order:
 
 Where the live path stands today: most single-table reads (scan /
 filter / project / scalar + aggregate + GROUP BY + HAVING [incl. over a
-non-selected aggregate] + ORDER BY / LIMIT / DISTINCT [+ ORDER BY +
-LIMIT] / INNER + LEFT + RIGHT + FULL join / SELECT * / UNION [ALL] /
-INTERSECT / EXCEPT / IN (list) / NOT IN / IN (SELECT) / NOT IN (SELECT)
-/ uncorrelated scalar subqueries) and the common writes (INSERT,
-DELETE/UPDATE by pk-point/range/arbitrary-predicate, multi-statement
-transactions) -- INCLUDING parametrized (?) reads and writes -- run
-with NO VDBE and NO vtab, naming columns and resolving schema natively.
+non-selected aggregate] + count(DISTINCT) + ORDER BY / LIMIT / DISTINCT
+[+ ORDER BY + LIMIT] / INNER + LEFT + RIGHT + FULL join / SELECT * /
+UNION [ALL] / INTERSECT / EXCEPT / IN (list) / NOT IN / IN (SELECT) /
+NOT IN (SELECT) / uncorrelated scalar subqueries / BETWEEN / CASE /
+LIKE / GLOB) run with NO VDBE and NO vtab, naming columns and resolving
+schema natively.
 The common writes that are native: INSERT (positional, explicit column
 list, REPLACE, and INSERT...SELECT), DELETE/UPDATE by
-pk-point/range/arbitrary-predicate, and -- in a transaction -- INSERT
-always, and DELETE/UPDATE while the target table is still clean in the
-txn.  Parametrized (?) reads and writes are native too.
+pk-point/range/arbitrary-predicate, pk-reassigning UPDATE (move to a
+free key), and -- in a transaction -- INSERT always, and DELETE/UPDATE
+while the target table is still clean in the txn.  Parametrized (?)
+reads and writes are native too.
 
 The read long-tail still on the VDBE, in rough order of effort:
   - DISTINCT / set-op + LIMIT WITHOUT ORDER BY -- the surviving subset
@@ -354,21 +354,19 @@ The read long-tail still on the VDBE, in rough order of effort:
     evaluation, and a derived table is a nested plan feeding FROM.
 
 The write long-tail still on the VDBE:
-  - pk-reassigning UPDATE (SET <pk> = <new>): a native implementation
-    is straightforward (tombstone the old key, insert at the new, with
-    a collision check) and was prototyped, but it cannot ship behind
-    the differential yet: the xstore VTAB FALLBACK is itself wrong here
-    -- SQLite reports changes=1 for UPDATE t SET k=<new> WHERE k=<old>
-    on an INTEGER-PRIMARY-KEY vtab but the row is NOT moved (it stays
-    at the old rowid).  xs_update has rowid-move logic (argv[0] !=
-    argv[1] -> tombstone old), so SQLite is not handing the vtab a new
-    rowid for a rowid-alias SET.  Until that vtab-protocol gap is
-    understood and fixed, native pk-reassign would (correctly) disagree
-    with the (buggy) fallback, so it stays on the VDBE.
   - a transactional DELETE/UPDATE on a table the txn has ALREADY
     written to (dirtied): the vtab's point path could merge the wbuf
     where the native committed scan would not, so it falls back.
+  - a pk reassign whose new key collides with an existing row, or that
+    matches more than one row (both UNIQUE violations) -- falls back so
+    the VDBE raises the error; the single-row move to a free key is
+    native.
   - INSERT...DEFAULT VALUES, and a non-integer target.
+
+(The xstore vtab xUpdate rowid-move + auto-rowid bugs that previously
+blocked native pk-reassign were fixed; the vtab fallback now moves the
+row and assigns auto rowids correctly, so native pk-reassign agrees
+with it.)
 
 DDL (CREATE / DROP / ALTER) is LAST: the VDBE fallback requires SQLite
 to keep every table in sqlite_master, so DDL cannot go native until the
