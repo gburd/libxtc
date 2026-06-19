@@ -344,12 +344,12 @@ The read long-tail still on the VDBE, in rough order of effort:
   - DISTINCT / set-op + LIMIT WITHOUT ORDER BY -- the surviving subset
     is unspecified in SQL, so not byte-reproducible; with ORDER BY it
     is native.  (Intentional fallback, not a gap.)
-  - Correlated subqueries (scalar or IN) and FROM-clause / derived
-    tables -- the uncorrelated scalar + IN (SELECT) forms are native
-    (run once via SQLite, spliced as a literal / literal list); a
-    correlated subquery references the outer row and would need per-row
-    evaluation (rewrite outer refs to binds, re-run per row), and a
-    derived table is a nested plan feeding FROM.
+  - Correlated subqueries: a correlated SCALAR subquery in a projection
+    or equality is native on the single-table read path (outer refs ->
+    ? binds, re-run per row).  Still falling back: a correlated
+    subquery as a COMPARISON operand (a < (subquery) -- dynamic result
+    affinity), correlated IN (SELECT), and correlation on the join
+    path.  FROM-clause / derived tables are a nested plan feeding FROM.
   - 3+ table INNER joins are native (N-way hash-join pipeline,
     vx_try_prepare_njoin); 3+ table OUTER joins fall back.
 
