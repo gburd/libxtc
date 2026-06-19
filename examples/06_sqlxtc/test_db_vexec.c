@@ -179,6 +179,12 @@ main(void)
 		{ "SELECT count(*) FROM t",                                1 },
 		{ "SELECT count(a), sum(a), min(a), max(a) FROM t",        1 },
 		{ "SELECT b, count(*), sum(a) FROM t GROUP BY b",          0 },
+		{ "SELECT count(DISTINCT b) FROM t",                        1 },
+		{ "SELECT count(DISTINCT a) FROM t",                        1 },
+		{ "SELECT count(DISTINCT a) FROM t WHERE a IS NOT NULL",    1 },
+		{ "SELECT count(DISTINCT b), count(*), count(a) FROM t",    1 },
+		{ "SELECT b, count(DISTINCT a) FROM t GROUP BY b",          0 },
+		{ "SELECT count(DISTINCT a) FROM t WHERE a > 1000",         1 },
 		{ "SELECT b, count(*) FROM t GROUP BY b HAVING count(*) > 20", 0 },
 		{ "SELECT b, count(*), sum(a) FROM t GROUP BY b HAVING sum(a) > 1000 AND count(*) > 5", 0 },
 		{ "SELECT b FROM t GROUP BY b HAVING count(*) > 20", 0 },
@@ -205,6 +211,13 @@ main(void)
 		{ "SELECT k FROM t WHERE k IN (5, 10, 50, 999)",            0 },
 		{ "SELECT a FROM t WHERE a NOT IN (1, 2, 3) AND a IS NOT NULL", 0 },
 		{ "SELECT k FROM t WHERE b IN ('g1', 'g3')",               0 },
+		{ "SELECT k FROM t WHERE b LIKE 'g%' ORDER BY k LIMIT 5",   1 },
+		{ "SELECT k FROM t WHERE b LIKE 'G_' ORDER BY k LIMIT 5",   1 },
+		{ "SELECT k FROM t WHERE b LIKE 'g3' ORDER BY k LIMIT 5",   1 },
+		{ "SELECT k FROM t WHERE b LIKE 'z%'",                      0 },
+		{ "SELECT k FROM t WHERE glob('g*', b) ORDER BY k LIMIT 5", 1 },
+		{ "SELECT k FROM t WHERE glob('G*', b)",                    0 },
+		{ "SELECT k FROM t WHERE glob('g[12]', b) ORDER BY k LIMIT 5", 1 },
 		{ "SELECT k, a FROM t WHERE a > (SELECT avg(a) FROM t) ORDER BY k LIMIT 5", 1 },
 		{ "SELECT k FROM t WHERE a = (SELECT max(a) FROM t)",      0 },
 		{ "SELECT k FROM t WHERE k <= 3 ORDER BY k",               1 },
@@ -346,6 +359,10 @@ main(void)
 			"UPDATE %s SET a = 0 WHERE k >= 8000",
 			/* native general-predicate UPDATE: non-pk column WHERE */
 			"UPDATE %s SET b = 'hit' WHERE a < 8",
+			/* native pk-reassigning UPDATE: move a row to a free key
+			 * (tombstone old + insert new), payload optionally changed. */
+			"UPDATE %s SET k = 700 WHERE k = 10",
+			"UPDATE %s SET k = 701, b = 'moved' WHERE k = 2",
 			/* native INSERT...SELECT: from a shared source table, with a
 			 * WHERE, an explicit reordered column list, and expressions. */
 			"INSERT INTO %s SELECT k+500, a, b FROM isrc WHERE a > 1",
@@ -422,6 +439,13 @@ main(void)
 				   "duplicate-PK INSERT falls back (no silent overwrite)");
 				CK(sx_vexec_write(h, "INSERT INTO u VALUES(7777, 1, 'a'), (7777, 2, 'b')",
 				   &dn) == 0, "intra-statement duplicate PK falls back");
+				/* pk-reassign onto an occupied key, and a multi-row reassign
+				 * to a constant, fall back so the VDBE raises the UNIQUE
+				 * error.  u has rows at k=1 and k=700,701 from the corpus. */
+				CK(sx_vexec_write(h, "UPDATE u SET k = 700 WHERE k = 1", &dn) == 0,
+				   "pk-reassign onto an occupied key falls back");
+				CK(sx_vexec_write(h, "UPDATE u SET k = 9000 WHERE k >= 1", &dn) == 0,
+				   "multi-row pk-reassign to a constant falls back");
 			}
 
 			/* Transactional DELETE/UPDATE on COMMITTED rows is native while
