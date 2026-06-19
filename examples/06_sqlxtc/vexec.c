@@ -484,8 +484,6 @@ nv_add(struct namevec *nv, const sql_str_t *s)
 static int
 resolve_schema(sqlite3 *db, const char *table, struct namevec *nv, int *pay)
 {
-	sqlite3_stmt *ti = NULL;
-	char q[128];
 	int i, ok = 1, resolved = 0;
 
 	for (i = 0; i < nv->n; i++) pay[i] = -2;   /* unresolved sentinel */
@@ -515,26 +513,11 @@ resolve_schema(sqlite3 *db, const char *table, struct namevec *nv, int *pay)
 		}
 	}
 
-	/* Fall back to sqlite_master via PRAGMA table_info. */
-	snprintf(q, sizeof q, "PRAGMA table_info(%s)", table);
-	if (sqlite3_prepare_v2(db, q, -1, &ti, 0) != SQLITE_OK) return -1;
-	while (sqlite3_step(ti) == SQLITE_ROW) {
-		int cid = sqlite3_column_int(ti, 0);
-		const char *nm = (const char *)sqlite3_column_text(ti, 1);
-		const char *ty = (const char *)sqlite3_column_text(ti, 2);
-		int pk = sqlite3_column_int(ti, 5);
-		if (nm == NULL) continue;
-		for (i = 0; i < nv->n; i++) {
-			if (pay[i] != -2) continue;
-			if (strcmp(nv->names[i], nm) != 0) continue;
-			pay[i] = pk ? -1 : (cid - 1);
-			nv->aff[i] = vx_affinity(ty);
-			resolved++;
-		}
-	}
-	sqlite3_finalize(ti);
-	for (i = 0; i < nv->n; i++) if (pay[i] == -2) ok = 0;
-	return (ok && resolved >= nv->n) ? 0 : -1;
+	/* No native catalog entry: this is not an xstore-backed table, so a
+	 * storage-native scan of it is meaningless -- fall back to the VDBE
+	 * rather than resolve a schema (via PRAGMA table_info / sqlite_master)
+	 * for a table the native scan path cannot read anyway. */
+	return -1;
 }
 
 /* ---- expression compiler ----------------------------------------- *
@@ -5392,8 +5375,6 @@ struct wschema {
 static int
 load_wschema(sqlite3 *db, const char *table, struct wschema *ws)
 {
-	sqlite3_stmt *ti = NULL;
-	char q[128];
 	ws->n = 0; ws->pk_col = -1;
 
 	/* Native catalog first (no VDBE / no sqlite_master). */
@@ -5413,19 +5394,11 @@ load_wschema(sqlite3 *db, const char *table, struct wschema *ws)
 		}
 	}
 
-	snprintf(q, sizeof q, "PRAGMA table_info(%s)", table);
-	if (sqlite3_prepare_v2(db, q, -1, &ti, 0) != SQLITE_OK) return -1;
-	while (sqlite3_step(ti) == SQLITE_ROW && ws->n < 64) {
-		const char *nm = (const char *)sqlite3_column_text(ti, 1);
-		int pk = sqlite3_column_int(ti, 5);
-		if (nm == NULL) { sqlite3_finalize(ti); return -1; }
-		snprintf(ws->name[ws->n], sizeof ws->name[0], "%s", nm);
-		ws->is_pk[ws->n] = pk;
-		if (pk) ws->pk_col = ws->n;
-		ws->n++;
-	}
-	sqlite3_finalize(ti);
-	return ws->n > 0 ? 0 : -1;
+	/* No native catalog entry: not an xstore-backed table.  The native
+	 * write path only reaches here for a table xstore knows (the caller
+	 * resolves xstore_table_id first), so a miss means fall back to the
+	 * VDBE rather than read the schema via PRAGMA table_info. */
+	return -1;
 }
 
 /* Evaluate an INSERT VALUES literal into a vx_cell.  Returns 0 on a
