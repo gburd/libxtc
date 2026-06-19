@@ -656,6 +656,10 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	}
 	case SX_E_IS_NULL:
 		return collect_columns(nv, e->a);
+	case SX_E_BETWEEN:
+		if (collect_columns(nv, e->a) != 0) return -1;
+		if (collect_columns(nv, e->b) != 0) return -1;
+		return collect_columns(nv, e->c);
 	case SX_E_SUBQUERY:
 		/* An uncorrelated scalar subquery references no OUTER column (it
 		 * is spliced as a literal at compile time); a correlated one is
@@ -1068,6 +1072,39 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		if (a == NULL) return NULL;
 		if (n) n->a = a;
 		return n;
+	}
+
+	case SX_E_BETWEEN: {
+		/* a BETWEEN lo AND hi  ==  (a >= lo) AND (a <= hi).  Desugar so
+		 * it reuses the comparison ops + the no-coercion affinity gate
+		 * (each comparison's operands must be both-numeric or both-text).
+		 * SQLite evaluates `a` once, but with no side effects in the
+		 * supported expression set, evaluating it twice is equivalent. */
+		vx_expr_t *operand, *operand2, *lo, *hi, *gel, *leh, *conj;
+		enum vx_aff ca, clo, chi;
+		operand = compile_expr(c, e->a);
+		operand2 = compile_expr(c, e->a);   /* second copy: avoid node sharing */
+		lo = compile_expr(c, e->b);
+		hi = compile_expr(c, e->c);
+		if (operand == NULL || operand2 == NULL || lo == NULL || hi == NULL)
+			return NULL;
+		ca = node_class(c, operand); clo = node_class(c, lo); chi = node_class(c, hi);
+		/* Both bounds must compare to the operand under the no-coercion
+		 * rule (both numeric, or both text). */
+		if (!(((ca == VX_AFF_NUMERIC && clo == VX_AFF_NUMERIC) ||
+		       (ca == VX_AFF_TEXT && clo == VX_AFF_TEXT)) &&
+		      ((ca == VX_AFF_NUMERIC && chi == VX_AFF_NUMERIC) ||
+		       (ca == VX_AFF_TEXT && chi == VX_AFF_TEXT)))) {
+			c->fail = 1; return NULL;
+		}
+		gel = expr_node(c, VXO_GE);
+		leh = expr_node(c, VXO_LE);
+		conj = expr_node(c, VXO_AND);
+		if (gel == NULL || leh == NULL || conj == NULL) return NULL;
+		gel->a = operand; gel->b = lo;
+		leh->a = operand2; leh->b = hi;
+		conj->a = gel; conj->b = leh;
+		return conj;
 	}
 
 	case SX_E_IN_LIST: {
