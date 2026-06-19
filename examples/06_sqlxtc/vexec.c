@@ -115,6 +115,9 @@ enum vx_op {
 	                                      * args[]=when0,then0,when1,then1,...,
 	                                      * nargs=2*arms, ELSE in .b (NULL=none) */
 	VXO_LIKE, VXO_GLOB,                  /* a LIKE/GLOB b: operand in .a, pattern in .b */
+	VXO_CORRSUBQ,                        /* correlated scalar subquery: the stmt
+	                                      * st->corr[col] re-run per row, binding
+	                                      * ? from srcrow[bindcol[i]] */
 	VXO_FUNC                             /* builtin function (.func) */
 };
 
@@ -124,12 +127,14 @@ enum vx_func {
 
 typedef struct vx_expr {
 	enum vx_op    op;
-	int           col;        /* VXO_COL: source-column index */
+	int           col;        /* VXO_COL: source-column index;
+	                           * VXO_CORRSUBQ: index into st->corr[] */
 	vx_cell_t     lit;        /* VXO_LIT */
 	enum vx_func  func;       /* VXO_FUNC */
 	struct vx_expr *a, *b;    /* operands (a for unary; a,b for binary) */
 	struct vx_expr **args;    /* VXO_FUNC argument list */
-	int           nargs;
+	int           nargs;      /* VXO_CORRSUBQ: number of correlated binds */
+	int          *bindcol;    /* VXO_CORRSUBQ: srcrow index feeding each ? */
 } vx_expr_t;
 
 /* ---- aggregation (V3) -------------------------------------------- */
@@ -324,6 +329,12 @@ struct vx_stmt {
 	int64_t       offset;       /* 0 if none */
 
 	struct vx_arena_blk *plan_arena;   /* expr tree + literal bytes */
+
+	/* Correlated-subquery prepared statements (one per VXO_CORRSUBQ
+	 * node).  Owned here so vx_finalize can finalize them; the nodes
+	 * reference these by index. */
+	sqlite3_stmt *corr[8];
+	int           ncorr;
 
 	/* The recognized source, kept so a parallel run can rebuild a
 	 * range-scoped source statement that reuses the SAME compiled
@@ -611,6 +622,8 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 		return VX_AFF_NUMERIC;   /* match result is a 0/1 integer */
 	case VXO_CASE:
 		return VX_AFF_BLOB;      /* dynamic result type: treat as no affinity */
+	case VXO_CORRSUBQ:
+		return VX_AFF_BLOB;      /* dynamic subquery result */
 	case VXO_FUNC:
 		switch (e->func) {
 		case VXF_ABS:    return VX_AFF_NUMERIC;
@@ -721,6 +734,22 @@ static void read_src_cell(sqlite3_stmt *src, int i, vx_cell_t *cell,
  * gate, which needs column affinities not known until the source is
  * prepared.  Returns 0 if the whole expression is compilable in
  * principle, -1 if it contains an unsupported construct. */
+/* When non-NULL during a single-table prepare's pass 1, collect_columns
+ * also gathers the OUTER-column references inside a correlated subquery
+ * (a 2-part column qualified by this outer table) so they get srcrow
+ * slots.  Set around the single-table pass-1 collection and cleared
+ * after; NULL on the join path (correlated subqueries fall back there).
+ * Prepare is single-threaded per statement, so a file-scoped pointer is
+ * safe. */
+static const char *cc_otab;
+
+/* An outer-column reference inside a correlated subquery (defined with
+ * its collector below); forward-declared for collect_columns. */
+struct corr_ref { const char *p; uint32_t len; const sql_str_t *col; };
+#define VX_CORR_MAX 8
+static int corr_collect(const sql_expr_t *e, const char *otab,
+                        struct corr_ref *refs, int n);
+
 static int
 collect_columns(struct namevec *nv, const sql_expr_t *e)
 {
@@ -759,10 +788,22 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 		return 0;
 	}
 	case SX_E_SUBQUERY:
-		/* An uncorrelated scalar subquery references no OUTER column (it
-		 * is spliced as a literal at compile time); a correlated one is
-		 * rejected later when its standalone prepare fails.  Either way it
-		 * contributes no column to the outer namevec. */
+		/* An uncorrelated scalar subquery references no OUTER column.  A
+		 * correlated one (single-table path, cc_otab set) references the
+		 * outer table's columns -- collect those so they get srcrow slots;
+		 * the compiler later rewrites them to ? binds. */
+		if (cc_otab != NULL && e->sel != NULL) {
+			struct corr_ref refs[VX_CORR_MAX];
+			int nr = 0, i;
+			const sql_select_t *q = e->sel;
+			const sql_exprlist_item_t *it;
+			for (it = q->cols ? q->cols->head : NULL; it; it = it->next)
+				if ((nr = corr_collect(it->expr, cc_otab, refs, nr)) < 0) return 0;
+			if ((nr = corr_collect(q->where, cc_otab, refs, nr)) < 0) return 0;
+			if ((nr = corr_collect(q->having, cc_otab, refs, nr)) < 0) return 0;
+			for (i = 0; i < nr; i++)
+				if (nv_add(nv, refs[i].col) < 0) return -1;
+		}
 		return 0;
 	case SX_E_IN_SELECT:
 		/* a IN (SELECT ...): collect the operand's columns; the subquery
@@ -936,6 +977,145 @@ prepare_subquery(sqlite3 *db, const char *src, uint32_t srclen, int want_ncol)
 	return q;
 }
 
+/* Walk a subquery expression collecting outer-column references: an
+ * SX_E_COLUMN qualified by `otab` (the outer table name).  Appends to
+ * refs[] (cap VX_CORR_MAX).  Returns the count, or -1 on overflow /
+ * unsupported shape.  A column qualified by anything else is assumed to
+ * belong to the subquery's own FROM (left alone). */
+static int
+corr_collect(const sql_expr_t *e, const char *otab,
+             struct corr_ref *refs, int n)
+{
+	const sql_exprlist_item_t *it;
+	const sql_case_arm_t *arm;
+	if (e == NULL) return n;
+	if (e->op == SX_E_COLUMN && e->nname == 2 && e->src && e->srclen) {
+		if (str_eq_cstr(&e->name[0], otab)) {
+			if (n >= VX_CORR_MAX) return -1;
+			refs[n].p = e->src; refs[n].len = e->srclen;
+			refs[n].col = &e->name[1];
+			return n + 1;
+		}
+		return n;
+	}
+	if ((n = corr_collect(e->a, otab, refs, n)) < 0) return -1;
+	if ((n = corr_collect(e->b, otab, refs, n)) < 0) return -1;
+	if ((n = corr_collect(e->c, otab, refs, n)) < 0) return -1;
+	for (it = e->list ? e->list->head : NULL; it; it = it->next)
+		if ((n = corr_collect(it->expr, otab, refs, n)) < 0) return -1;
+	for (arm = e->arms; arm; arm = arm->next) {
+		if ((n = corr_collect(arm->when, otab, refs, n)) < 0) return -1;
+		if ((n = corr_collect(arm->then, otab, refs, n)) < 0) return -1;
+	}
+	if ((n = corr_collect(e->els, otab, refs, n)) < 0) return -1;
+	if (e->sel != NULL) return -1;   /* nested subquery: not handled */
+	return n;
+}
+
+static int corr_ref_cmp(const void *a, const void *b)
+{
+	const struct corr_ref *x = a, *y = b;
+	return (x->p < y->p) ? -1 : (x->p > y->p) ? 1 : 0;
+}
+
+/*
+ * Compile a CORRELATED scalar subquery on the single-table read path.
+ * Outer references (columns qualified by the outer table) are rewritten
+ * to ? parameters in the subquery text and bound from the current row
+ * at eval time.  Returns a VXO_CORRSUBQ node, or NULL (sets c->fail)
+ * when correlation cannot be turned into the supported shape (multiple
+ * outer tables, a join, too many refs, > 1 result column, etc.).
+ */
+static vx_expr_t *
+compile_corr_subquery(struct vx_compiler *c, const sql_expr_t *e)
+{
+	struct corr_ref refs[VX_CORR_MAX];
+	const char *otab;
+	char *sub = NULL, *out = NULL, *s;
+	size_t len, oi;
+	int nref, i, ci;
+	sqlite3_stmt *q = NULL;
+	vx_expr_t *n;
+
+	/* Single-table read path only (need the outer table name + nv). */
+	if (c->jc != NULL || c->nv == NULL || c->st == NULL ||
+	    c->st->db == NULL || c->st->table[0] == '\0' ||
+	    e->src == NULL || e->srclen == 0) {
+		c->fail = 1; return NULL;
+	}
+	if (c->st->ncorr >= (int)(sizeof c->st->corr / sizeof c->st->corr[0])) {
+		c->fail = 1; return NULL;
+	}
+	otab = c->st->table;
+
+	/* Collect outer-column references from the subquery's expressions. */
+	nref = 0;
+	if (e->sel) {
+		const sql_select_t *q2 = e->sel;
+		const sql_exprlist_item_t *it;
+		for (it = q2->cols ? q2->cols->head : NULL; it; it = it->next)
+			if ((nref = corr_collect(it->expr, otab, refs, nref)) < 0) { c->fail = 1; return NULL; }
+		if ((nref = corr_collect(q2->where, otab, refs, nref)) < 0) { c->fail = 1; return NULL; }
+		if ((nref = corr_collect(q2->having, otab, refs, nref)) < 0) { c->fail = 1; return NULL; }
+	}
+	if (nref == 0) { c->fail = 1; return NULL; }   /* not actually correlated */
+
+	/* Build the parameterized subquery text: strip the wrapping parens,
+	 * then splice ? in place of each outer-ref span (left to right). */
+	sub = (char *)malloc((size_t)e->srclen + 1);
+	if (sub == NULL) { c->fail = 1; return NULL; }
+	memcpy(sub, e->src, e->srclen); sub[e->srclen] = '\0';
+	s = sub; len = e->srclen;
+	while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
+	while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
+	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); c->fail = 1; return NULL; }
+	/* s[1 .. len-2] is the inner SELECT; refs[].p point into e->src,
+	 * which is the SAME buffer region as sub via the same offsets. */
+	qsort(refs, (size_t)nref, sizeof refs[0], corr_ref_cmp);
+	out = (char *)malloc((size_t)e->srclen + 1);
+	if (out == NULL) { free(sub); c->fail = 1; return NULL; }
+	oi = 0;
+	{
+		const char *cur = e->src + 1;            /* past '(' */
+		const char *end = e->src + e->srclen - 1; /* before ')' */
+		for (i = 0; i < nref; i++) {
+			size_t pre = (size_t)(refs[i].p - cur);
+			if (refs[i].p < cur || refs[i].p + refs[i].len > end) {
+				free(sub); free(out); c->fail = 1; return NULL;
+			}
+			memcpy(out + oi, cur, pre); oi += pre;
+			out[oi++] = '?';
+			cur = refs[i].p + refs[i].len;
+		}
+		memcpy(out + oi, cur, (size_t)(end - cur)); oi += (size_t)(end - cur);
+		out[oi] = '\0';
+	}
+	free(sub);
+
+	if (sqlite3_prepare_v2(c->st->db, out, -1, &q, NULL) != SQLITE_OK) {
+		free(out); c->fail = 1; return NULL;
+	}
+	free(out);
+	if (sqlite3_bind_parameter_count(q) != nref ||
+	    sqlite3_column_count(q) != 1) {
+		sqlite3_finalize(q); c->fail = 1; return NULL;
+	}
+
+	n = expr_node(c, VXO_CORRSUBQ);
+	if (n == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+	n->bindcol = (int *)arena_alloc(&c->st->plan_arena, sizeof(int) * (size_t)nref);
+	if (n->bindcol == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+	for (i = 0; i < nref; i++) {
+		ci = nv_add(c->nv, refs[i].col);   /* outer column -> srcrow index */
+		if (ci < 0) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+		n->bindcol[i] = ci;
+	}
+	n->nargs = nref;
+	n->col = c->st->ncorr;
+	c->st->corr[c->st->ncorr++] = q;
+	return n;
+}
+
 static vx_expr_t *
 compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 {
@@ -1083,8 +1263,19 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 	if (c->fail || e == NULL) { c->fail = 1; return NULL; }
 
 	switch (e->op) {
-	case SX_E_SUBQUERY:
-		return compile_scalar_subquery(c, e);
+	case SX_E_SUBQUERY: {
+		/* Try the uncorrelated form first (run once, splice a literal);
+		 * if that fails (the subquery references an outer column, so its
+		 * standalone prepare fails), try the correlated form (rewrite
+		 * outer refs to ? and re-run per row). */
+		vx_expr_t *u;
+		int save = c->fail;
+		c->fail = 0;
+		u = compile_scalar_subquery(c, e);
+		if (!c->fail && u != NULL) return u;
+		c->fail = save;
+		return compile_corr_subquery(c, e);
+	}
 	case SX_E_IN_SELECT:
 		return compile_in_select(c, e);
 	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
@@ -1624,6 +1815,50 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		}
 		if (e->b != NULL) { eval(st, e->b, row, arena, out); return; }
 		out->type = VX_NULL;
+		return;
+	}
+
+	case VXO_CORRSUBQ: {
+		/* Re-run the prepared correlated subquery: bind each ? from the
+		 * current outer row, step once for the scalar (first column of
+		 * first row, or NULL if no row), then reset for the next row. */
+		sqlite3_stmt *q = st->corr[e->col];
+		int i, step;
+		sqlite3_reset(q);
+		sqlite3_clear_bindings(q);
+		for (i = 0; i < e->nargs; i++) {
+			const vx_cell_t *v = &row[e->bindcol[i]];
+			switch (v->type) {
+			case VX_INT:  sqlite3_bind_int64(q, i + 1, v->i); break;
+			case VX_REAL: sqlite3_bind_double(q, i + 1, v->r); break;
+			case VX_TEXT: sqlite3_bind_text(q, i + 1, (const char *)v->bytes,
+			                                (int)v->nbytes, SQLITE_TRANSIENT); break;
+			case VX_BLOB: sqlite3_bind_blob(q, i + 1, v->bytes,
+			                                (int)v->nbytes, SQLITE_TRANSIENT); break;
+			default:      sqlite3_bind_null(q, i + 1); break;
+			}
+		}
+		step = sqlite3_step(q);
+		if (step == SQLITE_ROW) {
+			switch (sqlite3_column_type(q, 0)) {
+			case SQLITE_INTEGER: out->type = VX_INT; out->i = sqlite3_column_int64(q, 0); break;
+			case SQLITE_FLOAT:   out->type = VX_REAL; out->r = sqlite3_column_double(q, 0); break;
+			case SQLITE_TEXT: case SQLITE_BLOB: {
+				const void *b = sqlite3_column_blob(q, 0);
+				int nb = sqlite3_column_bytes(q, 0);
+				uint8_t *p = (uint8_t *)arena_alloc(arena, (size_t)nb + 1);
+				if (p == NULL) { out->type = VX_NULL; break; }
+				if (nb && b) memcpy(p, b, (size_t)nb);
+				p[nb] = '\0';
+				out->type = (sqlite3_column_type(q, 0) == SQLITE_TEXT) ? VX_TEXT : VX_BLOB;
+				out->bytes = p; out->nbytes = (uint32_t)nb;
+				break; }
+			default: out->type = VX_NULL; break;
+			}
+		} else {
+			out->type = VX_NULL;   /* no row, or an error -> NULL */
+		}
+		sqlite3_reset(q);
 		return;
 	}
 
@@ -2264,9 +2499,10 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	 * WHERE column names must resolve against the source columns, which
 	 * we do by name after preparing "SELECT *". */
 	if (!proj_star) {
+		cc_otab = tabbuf;   /* collect correlated-subquery outer refs */
 		for (it = sel->cols->head; it; it = it->next)
-			if (collect_columns(&nv, it->expr) != 0) goto fallback;
-		if (sel->where && collect_columns(&nv, sel->where) != 0) goto fallback;
+			if (collect_columns(&nv, it->expr) != 0) { cc_otab = NULL; goto fallback; }
+		if (sel->where && collect_columns(&nv, sel->where) != 0) { cc_otab = NULL; goto fallback; }
 		/* ORDER BY key columns must be in the source too.  A bare integer
 		 * key is an output-column position (collected via the output);
 		 * any other key expression is collected here. */
@@ -2274,9 +2510,10 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 			const sql_exprlist_item_t *o;
 			for (o = sel->order->head; o; o = o->next) {
 				if (o->expr && o->expr->op == SX_E_NUMBER) continue;
-				if (collect_columns(&nv, o->expr) != 0) goto fallback;
+				if (collect_columns(&nv, o->expr) != 0) { cc_otab = NULL; goto fallback; }
 			}
 		}
+		cc_otab = NULL;   /* pass 1 done: stop collecting outer refs */
 	} else {
 		/* SELECT *: expand to every table column (in declared order)
 		 * from the native catalog, so the source carries all of them and
@@ -2445,6 +2682,7 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 oom:
 	rc = -1;
 fallback:
+	cc_otab = NULL;
 	if (srcsql) free(srcsql);
 	if (ast) sql_arena_destroy(ast);
 	if (st) vx_finalize(st);
@@ -4110,6 +4348,8 @@ vx_finalize(vx_stmt_t *st)
 	if (st->scan) xstore_scan_close(st->scan);
 	if (st->chunk) chunk_free(st->chunk);
 	if (st->plan_arena) arena_free(st->plan_arena);
+	{ int ci; for (ci = 0; ci < st->ncorr; ci++)
+		if (st->corr[ci]) sqlite3_finalize(st->corr[ci]); }
 	htab_free(&st->ht);
 	if (st->agg) { free(st->agg->out); free(st->agg->grp); free(st->agg); }
 	if (st->join) {
