@@ -448,7 +448,9 @@ The 79 sqlite3_* calls left in vexec.c, by purpose (grep
   - resolve_schema PRAGMA table_info (line ~5185): only the non-xstore
     fallback; xstore tables already use the native catalog.
   - parallel rowid bounds SELECT min/max(_rowid_) (line ~4941): replace
-    with a native xstore min/max scan.
+    with a native xstore min/max scan.  DONE -- the morsel range now
+    comes from xstore_max_rowid (lo=1, hi=max+1; workers re-check
+    visibility so a tombstone-inclusive bound is safe), no SQLite call.
 
 ### 3. Remove the VDBE fallback
 Only once 1+2 leave NO query reaching sx_step: delete the
