@@ -236,6 +236,19 @@ typedef struct vx_htab {
 /* Column affinity (SQLite rules, three buckets). */
 enum vx_aff { VX_AFF_BLOB = 0, VX_AFF_TEXT, VX_AFF_NUMERIC };
 
+/* Materialized result of running a plan (also the row source when a
+ * plan runs as a nested derived table / subquery).  Defined here so the
+ * recursive-execution sites can read it directly. */
+struct vx_result {
+	int        nrow, ncol, cap;
+	vx_cell_t *cells;
+	struct vx_arena_blk *arena;
+	int        nworkers;
+	char       name[64][64];   /* output column names from the plan; an
+	                            * empty entry means "use the VDBE name" */
+	enum vx_aff aff[64];       /* per-column affinity class (from the plan) */
+};
+
 /*
  * A join side's row source.  When the table is xstore-backed (the
  * common case) the side is read NATIVELY via xstore_scan_* + the
@@ -320,13 +333,13 @@ struct vx_stmt {
 	int           src_pay[32];
 	uint64_t      snap;         /* 0 = latest committed */
 
-	/* Derived-table (FROM subquery) source: the inner SELECT, prepared
-	 * once; rows are stepped into srcrow.  derived != NULL marks this
-	 * path (mutually exclusive with bt/scan).  Converting this to run the
-	 * inner via vexec needs per-column declared-type affinity exposed on
-	 * vx_result_t (the outer compile's comparison gate needs it; a row's
-	 * runtime type is not a reliable affinity) -- a later step. */
-	sqlite3_stmt *derived;
+	/* Derived-table (FROM subquery) source: the inner SELECT is run once
+	 * through vexec (vx_run) and its result materialized; rows are
+	 * streamed from derived_res into srcrow (cursor derived_cur).
+	 * derived_res != NULL marks this path (mutually exclusive with
+	 * bt/scan). */
+	vx_result_t  *derived_res;
+	int           derived_cur;
 
 	/* Rowid-range pushdown (the minimal planner): when the WHERE pins the
 	 * primary key to a range, the scan is bounded to it instead of full,
@@ -355,6 +368,13 @@ struct vx_stmt {
 	 * the AST does not record; the caller uses the VDBE-prepared name for
 	 * those.  nout entries. */
 	char          outname[64][64];
+
+	/* Per-output-column affinity class, computed at compile time (when the
+	 * compiler -- and its nv->aff -- is alive).  Carried to vx_result so a
+	 * caller running this plan as a nested subquery (recursive execution)
+	 * can compile the OUTER query's comparison gate against these without
+	 * a SQLite prepare.  nout entries. */
+	enum vx_aff   outaff[64];
 
 	vx_aggplan_t *agg;          /* non-NULL => aggregating statement (V3) */
 	vx_joinplan_t *join;        /* non-NULL => two-table hash join (V5) */
@@ -2858,6 +2878,10 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 		} else {
 			st->filter = NULL;
 		}
+		/* Record each output column's affinity while the compiler is
+		 * live (for recursive execution as a nested subquery). */
+		for (k = 0; k < nproj && k < 64; k++)
+			st->outaff[k] = st->proj[k] ? node_class(&comp, st->proj[k]) : VX_AFF_BLOB;
 	}
 
 	/* ORDER BY / LIMIT / OFFSET (V4).  Order keys compile over the
@@ -3278,6 +3302,21 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 			} else {
 				ap->out[oi].key = compile_expr(&comp, it->expr);
 				if (comp.fail) goto fallback;
+			}
+			/* Output affinity for recursive execution: count/sum/total/avg
+			 * are numeric; min/max take their argument's class; a group
+			 * key takes the key expr's class. */
+			if (oi < 64) {
+				if (!ap->out[oi].is_agg)
+					st->outaff[oi] = ap->out[oi].key ? node_class(&comp, ap->out[oi].key) : VX_AFF_BLOB;
+				else switch (ap->out[oi].kind) {
+				case VXA_MIN: case VXA_MAX:
+					st->outaff[oi] = ap->out[oi].arg ? node_class(&comp, ap->out[oi].arg) : VX_AFF_BLOB;
+					break;
+				default:
+					st->outaff[oi] = VX_AFF_NUMERIC;   /* count/sum/total/avg */
+					break;
+				}
 			}
 		}
 		/* Compile the appended HAVING-only aggregate args. */
@@ -3812,13 +3851,15 @@ fallback:
 
 /*
  * FROM-clause derived table: SELECT <outer> FROM ( <inner select> )
- * [AS x] [WHERE <pred>].  The inner select is run via SQLite as the row
- * source (its verbatim text, parens stripped); its output columns
- * become the source columns the outer projection / filter reference
- * (qualified by the alias, or unqualified).  Conservative: a single
- * derived table only (no join), no correlation, and no outer GROUP BY /
- * ORDER BY / LIMIT / DISTINCT (those read via the storage scan, which a
- * derived source does not have) -- anything else falls back.
+ * [AS x] [WHERE <pred>].  The inner select is run through vexec (vx_run,
+ * no SQLite) and its result materialized as the row source; its output
+ * columns become the source columns the outer projection / filter
+ * reference (qualified by the alias, or unqualified).  If vexec cannot
+ * run the inner select, the whole query falls back to the VDBE.
+ * Conservative: a single derived table only (no join), no correlation,
+ * and no outer GROUP BY / ORDER BY / LIMIT / DISTINCT (those read via
+ * the storage scan, which a derived source does not have) -- anything
+ * else falls back.
  */
 static int
 vx_try_prepare_derived(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
@@ -3830,7 +3871,7 @@ vx_try_prepare_derived(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	struct namevec nv;
 	const sql_src_t *src = sel->from;
 	const sql_exprlist_item_t *it;
-	sqlite3_stmt *q = NULL;
+	vx_result_t *ires = NULL;
 	char *sub = NULL, *s;
 	size_t len;
 	int nproj = 0, i, rc = 0, ncol;
@@ -3863,25 +3904,29 @@ vx_try_prepare_derived(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); goto fallback; }
 	s[len-1] = '\0';
 	memmove(sub, s + 1, len - 1);
-	if (sqlite3_prepare_v2(db, sub, -1, &q, NULL) != SQLITE_OK) { free(sub); goto fallback; }
+	/* Run the inner select through vexec (no SQLite) and materialize it.
+	 * If vexec cannot run it (rc != 1), fall the whole query back. */
+	rc = vx_run(db, sub, 1, &ires, NULL);
 	free(sub);
-	if (sqlite3_bind_parameter_count(q) != 0) goto fallback;   /* correlated/param inner */
-	ncol = sqlite3_column_count(q);
+	if (rc != 1 || ires == NULL) { if (ires) vx_result_free(ires); rc = 0; goto fallback; }
+	rc = 0;
+	ncol = vx_result_ncol(ires);
 	if (ncol <= 0 || ncol > 32) goto fallback;
 
 	/* The inner output columns are the source columns: name them so the
 	 * outer projection / filter resolve against them.  An unnamed inner
-	 * column (e.g. an unaliased expression) cannot be referenced by name
-	 * -- fall back if any outer ref would need it (handled by compile
-	 * failing to resolve the name). */
+	 * column (vexec reports NULL -- an unaliased expression) cannot be
+	 * referenced by name, so fall back.  Affinities come from the inner
+	 * plan (recorded at its compile time), so the outer comparison gate
+	 * is exact -- no SQLite metadata needed. */
 	memset(&nv, 0, sizeof nv);
 	for (i = 0; i < ncol; i++) {
-		const char *cn = sqlite3_column_name(q, i);
+		const char *cn = vx_result_name(ires, i);
 		sql_str_t snm;
 		if (cn == NULL) goto fallback;
 		snm.p = cn; snm.len = (uint32_t)strlen(cn);
 		if (nv_add(&nv, &snm) < 0) goto fallback;
-		nv.aff[i] = vx_affinity(sqlite3_column_decltype(q, i));
+		nv.aff[i] = ires->aff[i];
 	}
 	if (nv.n != ncol) goto fallback;   /* duplicate inner column names */
 
@@ -3920,16 +3965,18 @@ vx_try_prepare_derived(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 
 	st->srcrow = (vx_cell_t *)calloc((size_t)ncol, sizeof(vx_cell_t));
 	if (!st->srcrow) { rc = -1; goto fallback; }
-	st->derived = q;   /* the inner row source; vx_finalize finalizes it */
+	st->derived_res = ires;   /* the inner row source; vx_finalize frees it */
+	st->derived_cur = 0;
+	ires = NULL;              /* ownership transferred to st */
 
 	sql_arena_destroy(ast);
 	*out = st;
 	return 1;
 
 fallback:
-	if (q) sqlite3_finalize(q);
+	if (ires) vx_result_free(ires);
 	if (ast) sql_arena_destroy(ast);
-	if (st) { st->derived = NULL; vx_finalize(st); }
+	if (st) { st->derived_res = NULL; vx_finalize(st); }
 	return rc;
 }
 
@@ -4116,8 +4163,8 @@ next_chunk(struct vx_stmt *st, int *done)
 	if (!c->cells) { free(c); return NULL; }
 
 	/* Open the storage scan lazily on first chunk (storage path only;
- * the derived-table path steps st->derived instead). */
-	if (st->derived == NULL && st->scan == NULL) {
+	 * the derived-table path streams st->derived_res instead). */
+	if (st->derived_res == NULL && st->scan == NULL) {
 		st->scan = xstore_scan_open(st->bt, st->table, st->snap,
 		                            st->scan_lo, st->scan_has_lo,
 		                            st->scan_hi, st->scan_has_hi);
@@ -4126,13 +4173,15 @@ next_chunk(struct vx_stmt *st, int *done)
 
 	while (c->nrow < c->cap) {
 		int j;
-		if (st->derived != NULL) {
-			/* Derived table: step the inner SELECT into srcrow. */
-			int step = sqlite3_step(st->derived);
-			if (step == SQLITE_DONE) { *done = 1; break; }
-			if (step != SQLITE_ROW) { chunk_free(c); return NULL; }
+		if (st->derived_res != NULL) {
+			/* Derived table: take the next materialized inner row into
+			 * srcrow (a shallow copy; the bytes live in the inner result's
+			 * arena, which outlives this scan via st->derived_res). */
+			vx_result_t *ir = st->derived_res;
+			if (st->derived_cur >= ir->nrow) { *done = 1; break; }
 			for (j = 0; j < st->nsrc_col; j++)
-				read_src_cell(st->derived, j, &st->srcrow[j], &c->arena);
+				st->srcrow[j] = ir->cells[(size_t)st->derived_cur * (size_t)ir->ncol + (size_t)j];
+			st->derived_cur++;
 		} else {
 			int64_t rowid; const uint8_t *rec; int reclen;
 			rc = xstore_scan_next(st->scan, &rowid, &rec, &reclen);
@@ -4873,7 +4922,7 @@ vx_finalize(vx_stmt_t *st)
 	if (st == NULL) return;
 	if (st->src) sqlite3_finalize(st->src);
 	if (st->scan) xstore_scan_close(st->scan);
-	if (st->derived) sqlite3_finalize(st->derived);
+	if (st->derived_res) vx_result_free(st->derived_res);
 	if (st->chunk) chunk_free(st->chunk);
 	if (st->plan_arena) arena_free(st->plan_arena);
 	{ int ci; for (ci = 0; ci < st->ncorr; ci++)
@@ -4913,16 +4962,8 @@ vx_finalize(vx_stmt_t *st)
  * V2: morsel-parallel execution
  * ================================================================== */
 
-/* A collected result: row-major cells + an arena owning TEXT/BLOB. */
-struct vx_result {
-	int        nrow, ncol, cap;
-	vx_cell_t *cells;
-	struct vx_arena_blk *arena;
-	int        nworkers;
-	char       name[64][64];   /* output column names from the plan; an
-	                            * empty entry means "use the VDBE name" */
-};
-
+/* A collected result: row-major cells + an arena owning TEXT/BLOB.
+ * (struct vx_result is defined near the top for recursive execution.) */
 static int
 result_push(struct vx_result *r, const vx_cell_t *row)
 {
@@ -5199,6 +5240,7 @@ run_parallel_plan(vx_stmt_t *plan, sqlite3 *db, int n_workers,
 	out->ncol = plan->nout;
 	out->nworkers = n_workers;
 	memcpy(out->name, plan->outname, sizeof out->name);
+	memcpy(out->aff, plan->outaff, sizeof out->aff);
 
 	memset(&par, 0, sizeof par);
 	par.plan = plan;
@@ -5338,6 +5380,7 @@ collect_serial(vx_stmt_t *plan, vx_result_t **res)
 	out->ncol = ncol;
 	out->nworkers = 1;
 	memcpy(out->name, plan->outname, sizeof out->name);
+	memcpy(out->aff, plan->outaff, sizeof out->aff);
 
 	while ((step = vx_step(plan)) == SQLITE_ROW) {
 		for (i = 0; i < ncol; i++) {
