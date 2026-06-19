@@ -2246,11 +2246,38 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 		return xs_put_pruned(cx, v->tableid, rid, NULL, 0, 1);
 	}
 	{
-		int64_t rowid = (xsql_value_type(argv[1]) == SQLITE_NULL)
-		    ? xsql_value_int64(argv[2])
-		    : xsql_value_int64(argv[1]);
+		/*
+		 * The first declared column is the INTEGER PRIMARY KEY (the
+		 * rowid).  For a virtual table SQLite delivers that column's NEW
+		 * value in the column slot argv[2] -- NOT in the rowid slot
+		 * argv[1], which it leaves at the OLD rowid on an UPDATE.  So the
+		 * effective new rowid is argv[2] (its explicit value on INSERT,
+		 * or the reassigned pk on UPDATE), and argv[0] is the old rowid
+		 * to tombstone when the pk changed.  Using argv[1] here would
+		 * silently ignore an UPDATE ... SET <pk> = <new>.
+		 *
+		 * When argv[2] is NULL (an INSERT with no explicit pk, or pk
+		 * NULL), assign the next rowid: one past the larger of the
+		 * committed max and any rowid already buffered in this txn, so
+		 * successive auto inserts do not collide.
+		 *
+		 * The payload columns are argv[3..], encoded as the version
+		 * record (the pk/rowid is the key, not part of the payload).
+		 */
+		int64_t rowid;
 		uint8_t rec[XS_VMAX];
-		int reclen = xs_rec_encode(&argv[3], argc - 3, rec, sizeof rec);
+		int reclen;
+		if (xsql_value_type(argv[2]) == SQLITE_NULL) {
+			int64_t mx = xstore_max_rowid(cx->bt, v->tableid), i;
+			for (i = 0; i < cx->wn; i++)
+				if (cx->wbuf[i].tableid == v->tableid &&
+				    cx->wbuf[i].rowid > mx)
+					mx = cx->wbuf[i].rowid;
+			rowid = mx + 1;
+		} else {
+			rowid = xsql_value_int64(argv[2]);
+		}
+		reclen = xs_rec_encode(&argv[3], argc - 3, rec, sizeof rec);
 		if (reclen < 0)
 			return SQLITE_TOOBIG;
 
