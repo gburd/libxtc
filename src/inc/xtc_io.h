@@ -40,14 +40,14 @@ typedef struct xtc_io_event {
 } xtc_io_event_t;
 
 /*
- * Async file I/O.  A native completion-based file operation: on the
- * io_uring backend it submits IORING_OP_READ/WRITE/FSYNC and the
- * completion wakes the tagged task; on a readiness-only backend (epoll,
- * kqueue, poll, ...) xtc_io_aio_submit returns XTC_E_NOSYS and the
- * caller offloads the op to the blocking pool instead.  Regular files
- * are not pollable, so this completion model is the only way to do
- * non-blocking file I/O, and io_uring is the only POSIX backend that
- * provides it.  See xtc_aio(3).
+ * Async file I/O.  A native completion-based file operation: io_uring
+ * submits IORING_OP_READ/WRITE/FSYNC; kqueue submits POSIX AIO with
+ * SIGEV_KEVENT and reaps EVFILT_AIO; IOCP uses overlapped reads/writes
+ * on the port -- in each case the completion wakes the tagged task.  On
+ * a readiness-only backend (epoll, poll, select, event ports, AIX)
+ * xtc_io_aio_submit returns XTC_E_NOSYS and the caller offloads the op
+ * to the blocking pool instead, because a regular file is not pollable.
+ * See xtc_aio(3).
  */
 enum {
 	XTC_AIO_PREAD     = 0,

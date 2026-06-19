@@ -22,6 +22,23 @@
 #include <sys/time.h>
 #include <sys/types.h>
 
+/*
+ * Native file AIO on the kqueue backend uses POSIX AIO (<aio.h>) with
+ * completion delivered to THIS kqueue via SIGEV_KEVENT, reaped as an
+ * EVFILT_AIO event.  This is the FreeBSD model (and macOS, which also
+ * defines SIGEV_KEVENT + EVFILT_AIO).  Guard on BOTH EVFILT_AIO and
+ * SIGEV_KEVENT: a kqueue platform missing either still builds, with the
+ * op offloaded to the blocking pool (the XTC_E_NOSYS path below).  The
+ * sigevent fields used (sigev_notify_kqueue, sigev_value.sival_ptr) are
+ * the SIGEV_KEVENT contract on both targets.
+ */
+#if defined(EVFILT_AIO) && defined(SIGEV_KEVENT)
+#  include <aio.h>
+#  include <fcntl.h>
+#  include <string.h>
+#  define XTC_KQ_HAVE_AIO 1
+#endif
+
 extern int __xtc_io_drain_wakeup(xtc_io_t *io);
 
 /*
@@ -185,6 +202,76 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 	return XTC_OK;
 }
 
+/* ----- native file AIO (POSIX AIO + EVFILT_AIO) ------------------- */
+
+#if defined(XTC_KQ_HAVE_AIO)
+/*
+ * One in-flight async file op.  The struct aiocb must outlive the
+ * submit call (the kernel reads it asynchronously), so it is heap-
+ * allocated and freed when its EVFILT_AIO completion is reaped.  `a`
+ * is the caller's xtc_aio_t (woken via a->tag); aio_sigevent carries a
+ * pointer to THIS wrapper as the kevent udata.
+ */
+struct kq_aio {
+	struct aiocb cb;
+	xtc_aio_t   *a;
+};
+
+/* PUBLIC: int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *)); */
+int
+xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
+{
+	struct kq_aio *w;
+	int rc;
+
+	if (io == NULL || a == NULL || a->fd < 0)
+		return XTC_E_INVAL;
+	if (__os_calloc(1, sizeof *w, (void **)&w) != XTC_OK)
+		return XTC_E_AGAIN;          /* offload */
+	w->a = a;
+	w->cb.aio_fildes = a->fd;
+	w->cb.aio_offset = (off_t)a->off;
+	w->cb.aio_buf = a->buf;
+	w->cb.aio_nbytes = a->len;
+	/* Completion posts to THIS kqueue as an EVFILT_AIO event whose
+	 * udata is the wrapper. */
+	w->cb.aio_sigevent.sigev_notify = SIGEV_KEVENT;
+	w->cb.aio_sigevent.sigev_notify_kqueue = io->epfd;
+	w->cb.aio_sigevent.sigev_value.sival_ptr = w;
+
+	a->done = 0;
+	a->res = 0;
+	switch (a->op) {
+	case XTC_AIO_PREAD:  rc = aio_read(&w->cb); break;
+	case XTC_AIO_PWRITE: rc = aio_write(&w->cb); break;
+	case XTC_AIO_FSYNC:  rc = aio_fsync(O_SYNC, &w->cb); break;
+	case XTC_AIO_FDATASYNC:
+#ifdef O_DSYNC
+		rc = aio_fsync(O_DSYNC, &w->cb); break;
+#else
+		rc = aio_fsync(O_SYNC, &w->cb); break;   /* no data-only sync here */
+#endif
+	default: __os_free(w); return XTC_E_INVAL;
+	}
+	if (rc != 0) {
+		/* Submission refused (e.g. EAGAIN at the AIO queue limit, or
+		 * the fd does not support AIO).  No completion will arrive, so
+		 * free the wrapper and let the caller offload to the pool. */
+		__os_free(w);
+		return XTC_E_AGAIN;
+	}
+	return XTC_OK;
+}
+#else  /* a kqueue platform without EVFILT_AIO */
+/* PUBLIC: int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *)); */
+int
+xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
+{
+	(void)io; (void)a;
+	return XTC_E_NOSYS;          /* xtc_aio offloads to the blocking pool */
+}
+#endif
+
 /* PUBLIC: int xtc_io_poll __P((xtc_io_t *, xtc_io_event_t *, int, int64_t, int *)); */
 int
 xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
@@ -223,6 +310,24 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			if (rc != XTC_OK) return rc;
 			events[out_idx].tag = NULL;
 			events[out_idx].flags = XTC_IO_WAKEUP;
+#if defined(XTC_KQ_HAVE_AIO)
+		} else if (evs[i].filter == EVFILT_AIO) {
+			/* Native file-AIO completion: udata is the kq_aio wrapper.
+			 * aio_return collects the result (and clears the op); a
+			 * negative aio_error becomes a -errno result. */
+			struct kq_aio *w = (struct kq_aio *)evs[i].udata;
+			xtc_aio_t *a = w->a;
+			int err = aio_error(&w->cb);
+			ssize_t n = aio_return(&w->cb);
+			if (err != 0)
+				a->res = -err;
+			else
+				a->res = (int32_t)n;   /* bytes (0 for fsync) */
+			a->done = 1;
+			events[out_idx].tag = a->tag;
+			events[out_idx].flags = XTC_IO_AIO;
+			__os_free(w);
+#endif
 		} else {
 			uint32_t f = 0;
 			if (evs[i].filter == EVFILT_READ)  f |= XTC_IO_READABLE;
