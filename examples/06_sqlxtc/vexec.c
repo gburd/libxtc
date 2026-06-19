@@ -5163,18 +5163,20 @@ run_parallel_plan(vx_stmt_t *plan, sqlite3 *db, int n_workers,
 	(void)errmsg;
 	if (n_workers < 1) n_workers = 1;
 
-	/* rowid bounds: [min, max] of the table (empty -> no rows). */
+	/* rowid scan range [lo, hi): the morsel cursor partitions this span
+	 * across workers, each of which re-checks per-row visibility, so any
+	 * span covering every live rowid is correct.  Use the native max
+	 * rowid (counts tombstones -> a safe upper bound) + 1 for hi and the
+	 * start of the table for lo -- no SQLite call.  An empty table gives
+	 * max 0 -> hi 0 -> no rows. */
 	{
-		char q[128]; sqlite3_stmt *b = NULL;
-		snprintf(q, sizeof q, "SELECT min(_rowid_), max(_rowid_) FROM %s",
-		         plan->table);
-		if (sqlite3_prepare_v2(db, q, -1, &b, 0) == SQLITE_OK &&
-		    sqlite3_step(b) == SQLITE_ROW &&
-		    sqlite3_column_type(b, 0) != SQLITE_NULL) {
-			lo = sqlite3_column_int64(b, 0);
-			hi = sqlite3_column_int64(b, 1) + 1;   /* one past max */
+		bt_t *bt = xstore_bt_of(db);
+		uint32_t tid;
+		if (bt != NULL && xstore_table_id(bt, plan->table, &tid)) {
+			int64_t mx = xstore_max_rowid(bt, tid);
+			lo = (mx > 0) ? 1 : 0;
+			hi = (mx > 0) ? mx + 1 : 0;   /* empty -> no scan */
 		}
-		if (b) sqlite3_finalize(b);
 	}
 
 	out = (struct vx_result *)calloc(1, sizeof *out);
