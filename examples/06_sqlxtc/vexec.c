@@ -312,6 +312,11 @@ struct vx_stmt {
 	int           src_pay[32];
 	uint64_t      snap;         /* 0 = latest committed */
 
+	/* Derived-table (FROM subquery) source: the inner SELECT, prepared
+	 * once; rows are stepped into srcrow.  derived != NULL marks this
+	 * path (mutually exclusive with bt/scan). */
+	sqlite3_stmt *derived;
+
 	/* Rowid-range pushdown (the minimal planner): when the WHERE pins the
 	 * primary key to a range, the scan is bounded to it instead of full,
 	 * so a point/range read seeks rather than scanning the whole table.
@@ -2290,6 +2295,10 @@ static int vx_try_prepare_njoin(sqlite3 *db, sql_arena_t *ast,
                                 const sql_select_t *sel,
                                 const vx_cell_t *binds, int nbinds,
                                 vx_stmt_t **out, char **errmsg);
+static int vx_try_prepare_derived(sqlite3 *db, sql_arena_t *ast,
+                                  const sql_select_t *sel,
+                                  const vx_cell_t *binds, int nbinds,
+                                  vx_stmt_t **out, char **errmsg);
 static int vx_try_prepare_binds(sqlite3 *db, const char *sql,
                                 const vx_cell_t *binds, int nbinds,
                                 vx_stmt_t **out, char **errmsg);
@@ -2468,7 +2477,13 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 		/* 3+ tables: INNER-only N-way pipeline. */
 		return vx_try_prepare_njoin(db, ast, sel, binds, nbinds, out, errmsg);
 	}
-	if (src->subquery != NULL) goto fallback;
+	if (src->subquery != NULL) {
+		/* FROM ( select ) [AS x]: a derived table.  Handled by a dedicated
+		 * recognizer that runs the inner select via SQLite as the row
+		 * source.  No GROUP BY / aggregates on the outer query yet. */
+		if (sel->group) goto fallback;
+		return vx_try_prepare_derived(db, ast, sel, binds, nbinds, out, errmsg);
+	}
 	if (src->table.len == 0 || src->table.len >= sizeof tabbuf) goto fallback;
 	memcpy(tabbuf, src->table.p, src->table.len);
 	tabbuf[src->table.len] = '\0';
@@ -3554,7 +3569,129 @@ fallback:
 	return rc;
 }
 
-/* Build the hash table from the build side, open the probe cursor. */
+/*
+ * FROM-clause derived table: SELECT <outer> FROM ( <inner select> )
+ * [AS x] [WHERE <pred>].  The inner select is run via SQLite as the row
+ * source (its verbatim text, parens stripped); its output columns
+ * become the source columns the outer projection / filter reference
+ * (qualified by the alias, or unqualified).  Conservative: a single
+ * derived table only (no join), no correlation, and no outer GROUP BY /
+ * ORDER BY / LIMIT / DISTINCT (those read via the storage scan, which a
+ * derived source does not have) -- anything else falls back.
+ */
+static int
+vx_try_prepare_derived(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
+                       const vx_cell_t *binds, int nbinds,
+                       vx_stmt_t **out, char **errmsg)
+{
+	struct vx_stmt *st = NULL;
+	struct vx_compiler comp;
+	struct namevec nv;
+	const sql_src_t *src = sel->from;
+	const sql_exprlist_item_t *it;
+	sqlite3_stmt *q = NULL;
+	char *sub = NULL, *s;
+	size_t len;
+	int nproj = 0, i, rc = 0, ncol;
+
+	if (errmsg) *errmsg = NULL;
+
+	/* Outer query restrictions: single source, no outer ORDER BY / LIMIT
+	 * / OFFSET / DISTINCT / GROUP BY (handled by paths that need a
+	 * storage scan), no params threaded into the inner run. */
+	if (src->next != NULL || src->subquery == NULL) goto fallback;
+	if (sel->order || sel->limit || sel->offset || sel->distinct || sel->group)
+		goto fallback;
+	if (src->subsrc == NULL || src->subsrclen == 0) goto fallback;
+
+	/* No aggregates / STAR in the outer projection (compose later). */
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
+		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
+		if (it->expr->op == SX_E_FUNC && is_agg_name(&it->expr->name[0])) goto fallback;
+		nproj++;
+	}
+	if (nproj == 0 || nproj > 32) goto fallback;
+
+	/* Prepare the inner select standalone (strip the wrapping parens). */
+	sub = (char *)malloc((size_t)src->subsrclen + 1);
+	if (sub == NULL) { rc = -1; goto fallback; }
+	memcpy(sub, src->subsrc, src->subsrclen); sub[src->subsrclen] = '\0';
+	s = sub; len = src->subsrclen;
+	while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
+	while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
+	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); goto fallback; }
+	s[len-1] = '\0';
+	memmove(sub, s + 1, len - 1);
+	if (sqlite3_prepare_v2(db, sub, -1, &q, NULL) != SQLITE_OK) { free(sub); goto fallback; }
+	free(sub);
+	if (sqlite3_bind_parameter_count(q) != 0) goto fallback;   /* correlated/param inner */
+	ncol = sqlite3_column_count(q);
+	if (ncol <= 0 || ncol > 32) goto fallback;
+
+	/* The inner output columns are the source columns: name them so the
+	 * outer projection / filter resolve against them.  An unnamed inner
+	 * column (e.g. an unaliased expression) cannot be referenced by name
+	 * -- fall back if any outer ref would need it (handled by compile
+	 * failing to resolve the name). */
+	memset(&nv, 0, sizeof nv);
+	for (i = 0; i < ncol; i++) {
+		const char *cn = sqlite3_column_name(q, i);
+		sql_str_t snm;
+		if (cn == NULL) goto fallback;
+		snm.p = cn; snm.len = (uint32_t)strlen(cn);
+		if (nv_add(&nv, &snm) < 0) goto fallback;
+		nv.aff[i] = vx_affinity(sqlite3_column_decltype(q, i));
+	}
+	if (nv.n != ncol) goto fallback;   /* duplicate inner column names */
+
+	st = (struct vx_stmt *)calloc(1, sizeof *st);
+	if (!st) { rc = -1; goto fallback; }
+	st->db = db; st->cur = -1; st->limit = -1;
+	st->binds = binds; st->nbinds = nbinds;
+	st->nout = nproj;
+	st->nsrc_col = ncol;
+	st->proj = (vx_expr_t **)calloc((size_t)nproj, sizeof(vx_expr_t *));
+	if (!st->proj) { rc = -1; goto fallback; }
+
+	/* Compile the outer projection + filter against the inner columns.
+	 * The compiler resolves an outer column reference by name via nv;
+	 * a reference qualified by the derived-table alias resolves to the
+	 * same unqualified inner column name (nv_add ignores the qualifier),
+	 * so x.col and col both work. */
+	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
+	comp.binds = binds; comp.nbinds = nbinds;
+	{
+		int k = 0;
+		for (it = sel->cols->head; it; it = it->next, k++) {
+			st->proj[k] = compile_expr(&comp, it->expr);
+			if (comp.fail) goto fallback;
+			item_name(it, st->outname[k], sizeof st->outname[0]);
+		}
+		if (sel->where) {
+			st->filter = compile_expr(&comp, sel->where);
+			if (comp.fail) goto fallback;
+		}
+	}
+	/* nv may have grown past ncol if the outer query referenced a name
+	 * not produced by the inner select -- that is an unresolved column,
+	 * so fall back. */
+	if (nv.n != ncol) goto fallback;
+
+	st->srcrow = (vx_cell_t *)calloc((size_t)ncol, sizeof(vx_cell_t));
+	if (!st->srcrow) { rc = -1; goto fallback; }
+	st->derived = q;   /* the inner row source; vx_finalize finalizes it */
+
+	sql_arena_destroy(ast);
+	*out = st;
+	return 1;
+
+fallback:
+	if (q) sqlite3_finalize(q);
+	if (ast) sql_arena_destroy(ast);
+	if (st) { st->derived = NULL; vx_finalize(st); }
+	return rc;
+}
+
 static int
 join_build(struct vx_stmt *st, vx_jht_t *bh)
 {
@@ -3733,8 +3870,9 @@ next_chunk(struct vx_stmt *st, int *done)
 	                               (size_t)(c->ncol > 0 ? c->ncol : 1));
 	if (!c->cells) { free(c); return NULL; }
 
-	/* Open the storage scan lazily on first chunk. */
-	if (st->scan == NULL) {
+	/* Open the storage scan lazily on first chunk (storage path only;
+ * the derived-table path steps st->derived instead). */
+	if (st->derived == NULL && st->scan == NULL) {
 		st->scan = xstore_scan_open(st->bt, st->table, st->snap,
 		                            st->scan_lo, st->scan_has_lo,
 		                            st->scan_hi, st->scan_has_hi);
@@ -3743,12 +3881,20 @@ next_chunk(struct vx_stmt *st, int *done)
 
 	while (c->nrow < c->cap) {
 		int j;
-		int64_t rowid; const uint8_t *rec; int reclen;
-		rc = xstore_scan_next(st->scan, &rowid, &rec, &reclen);
-		if (rc == 0) { *done = 1; break; }
-		if (rc != 1) { chunk_free(c); return NULL; }
-
-		read_rec_row(st, rowid, rec, reclen, &c->arena);
+		if (st->derived != NULL) {
+			/* Derived table: step the inner SELECT into srcrow. */
+			int step = sqlite3_step(st->derived);
+			if (step == SQLITE_DONE) { *done = 1; break; }
+			if (step != SQLITE_ROW) { chunk_free(c); return NULL; }
+			for (j = 0; j < st->nsrc_col; j++)
+				read_src_cell(st->derived, j, &st->srcrow[j], &c->arena);
+		} else {
+			int64_t rowid; const uint8_t *rec; int reclen;
+			rc = xstore_scan_next(st->scan, &rowid, &rec, &reclen);
+			if (rc == 0) { *done = 1; break; }
+			if (rc != 1) { chunk_free(c); return NULL; }
+			read_rec_row(st, rowid, rec, reclen, &c->arena);
+		}
 
 		/* Filter (3-valued: only a TRUE keeps the row). */
 		if (st->filter != NULL) {
@@ -4482,6 +4628,7 @@ vx_finalize(vx_stmt_t *st)
 	if (st == NULL) return;
 	if (st->src) sqlite3_finalize(st->src);
 	if (st->scan) xstore_scan_close(st->scan);
+	if (st->derived) sqlite3_finalize(st->derived);
 	if (st->chunk) chunk_free(st->chunk);
 	if (st->plan_arena) arena_free(st->plan_arena);
 	{ int ci; for (ci = 0; ci < st->ncorr; ci++)
