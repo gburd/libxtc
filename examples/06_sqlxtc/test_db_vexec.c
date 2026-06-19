@@ -644,6 +644,52 @@ main(void)
 		}
 	}
 
+	/* ---- native-source joins over xstore tables ----------------------
+	 * The dedicated join oracle (test_vexec_join) uses plain SQLite
+	 * tables, exercising the SQLite-cursor join source.  Here both join
+	 * tables are xstore-backed, so the build/probe/stream sources read
+	 * via native xstore scans (no SQLite cursor) -- verify those are
+	 * byte-identical to the VDBE. */
+	{
+		char *err3 = NULL;
+		static const char *jq[] = {
+			"SELECT jt.k, ju.c FROM jt JOIN ju ON jt.k = ju.owner",
+			"SELECT jt.b, ju.c FROM jt JOIN ju ON jt.k = ju.owner WHERE ju.c > 1",
+			"SELECT jt.k, ju.c, jw.r FROM jt JOIN ju ON jt.k = ju.owner JOIN jw ON ju.c = jw.q",
+			"SELECT jt.k, ju.c FROM jt LEFT JOIN ju ON jt.k = ju.owner"
+		};
+		int njq = (int)(sizeof jq / sizeof jq[0]), x, jserved = 0;
+		if (sx_exec(h, "CREATE VIRTUAL TABLE jt USING xstore(k, b TEXT)", &err3) == SX_OK &&
+		    sx_exec(h, "CREATE VIRTUAL TABLE ju USING xstore(j, c INT, owner INT)", &err3) == SX_OK &&
+		    sx_exec(h, "CREATE VIRTUAL TABLE jw USING xstore(q, r TEXT)", &err3) == SX_OK) {
+			(void)sx_exec(h, "INSERT INTO jt VALUES(1,'one'),(2,'two'),(3,'three')", &err3);
+			(void)sx_exec(h, "INSERT INTO ju VALUES(10,2,1),(11,3,1),(12,5,2)", &err3);
+			(void)sx_exec(h, "INSERT INTO jw VALUES(2,'q2'),(3,'q3'),(5,'q5')", &err3);
+			free(err3); err3 = NULL;
+			for (x = 0; x < njq; x++) {
+				char *on = NULL, *off = NULL; size_t no = 0, nf = 0;
+				sx_vx_result *vr = NULL;
+				int served = (sx_vexec_try(h, jq[x], 1, &vr) == 1);
+				if (vr) sx_vexec_free(vr);
+				if (served) jserved++;
+				CK(served, jq[x]);   /* native-source join must be recognized */
+				CK(run_live(h, jq[x], &on, &no) == 0, jq[x]);
+				setenv("SQLXTC_VEXEC", "0", 1);
+				CK(run_live(h, jq[x], &off, &nf) == 0, jq[x]);
+				unsetenv("SQLXTC_VEXEC");
+				if (on && off && !resp_eq(on, off, 0)) {
+					fprintf(stderr, "FAIL: native-source join differs [%s]:\n  vexec: %s\n  vdbe : %s\n",
+					        jq[x], on, off);
+					g_fail = 1;
+				}
+				free(on); free(off);
+			}
+			if (!g_fail)
+				printf("  ok   native-source joins: %d joins over xstore tables "
+				       "(no SQLite cursor) byte-identical to the VDBE\n", jserved);
+		} else { free(err3); }
+	}
+
 	sx_close(h);
 	bt_close(bt);
 	bm_destroy(bm);
