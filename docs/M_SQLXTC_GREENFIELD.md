@@ -374,6 +374,19 @@ The write long-tail still on the VDBE:
   - a transactional DELETE/UPDATE on a table the txn has ALREADY
     written to (dirtied): the vtab's point path could merge the wbuf
     where the native committed scan would not, so it falls back.
+    INVESTIGATED and deliberately LEFT as a fallback: the VDBE's own
+    xstore range scan reads COMMITTED values only (it does not merge
+    the wbuf), so a second range UPDATE to a row already updated in the
+    same txn reads the stale committed value and CLOBBERS the first
+    write (verified: BEGIN; UPDATE t SET a=999 WHERE k=2; UPDATE t SET
+    a=a+1 WHERE k<=3; COMMIT leaves k=2 at 21, not 1000 -- the 999 is
+    lost).  A native path that merged the wbuf would be MORE correct
+    than this and thus DISAGREE with the fallback, which the
+    correct-by-fallback rule forbids; reproducing the VDBE's
+    clobbering exactly is not worth it.  This is a latent xstore-vtab
+    read-your-writes anomaly on the range path, tracked separately --
+    when it is fixed in the vtab, native in-txn DML on a dirty table
+    can follow.
   - a pk reassign whose new key collides with an existing row, or that
     matches more than one row (both UNIQUE violations) -- falls back so
     the VDBE raises the error; the single-row move to a free key is
