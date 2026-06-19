@@ -1219,46 +1219,75 @@ compile_corr_in_select(struct vx_compiler *c, const sql_expr_t *e)
 static vx_expr_t *
 compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 {
-	sqlite3_stmt *q = NULL;
 	vx_expr_t *n;
-	int step;
+	char *sub, *s;
+	size_t len;
+	vx_result_t *r = NULL;
+	int rc, nrow;
 
-	if (c->st == NULL || c->st->db == NULL) { c->fail = 1; return NULL; }
-	/* A correlated subquery references an outer column; SQLite's prepare
-	 * is the gate -- run standalone, an unknown column fails to prepare
-	 * and we fall back.  An uncorrelated subquery prepares + runs here. */
-	q = prepare_subquery(c->st->db, e->src, e->srclen, 1);
-	if (q == NULL) { c->fail = 1; return NULL; }
+	if (c->st == NULL || c->st->db == NULL || e->src == NULL || e->srclen == 0) {
+		c->fail = 1; return NULL;
+	}
+	/* Correlation gate: an uncorrelated subquery prepares standalone; a
+	 * correlated one references an outer column and fails to prepare on
+	 * its own.  Use SQLite's prepare ONLY as that yes/no test (the
+	 * statement is finalized immediately, never stepped), so a correlated
+	 * subquery here falls through to compile_corr_subquery rather than
+	 * being mis-run by vexec as if it named a second table instance. */
+	{
+		sqlite3_stmt *probe = prepare_subquery(c->st->db, e->src, e->srclen, 1);
+		if (probe == NULL) { c->fail = 1; return NULL; }
+		sqlite3_finalize(probe);
+	}
+	/* Strip the wrapping parens to get the inner SELECT text. */
+	sub = (char *)malloc((size_t)e->srclen + 1);
+	if (sub == NULL) { c->fail = 1; return NULL; }
+	memcpy(sub, e->src, e->srclen); sub[e->srclen] = '\0';
+	s = sub; len = e->srclen;
+	while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
+	while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
+	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); c->fail = 1; return NULL; }
+	s[len-1] = '\0';
+	memmove(sub, s + 1, len - 1);   /* drop leading '(' */
+
+	/* Run the inner SELECT through vexec (no SQLite).  An uncorrelated
+	 * scalar subquery: it must produce exactly one column and at most one
+	 * row (SQLite would too).  If vexec cannot recognize the inner SELECT
+	 * (rc 0) or errors (rc < 0), or it returns the wrong shape, fall the
+	 * WHOLE outer query back to the VDBE -- so the result is always the
+	 * VDBE's, never a divergence. */
+	rc = vx_run(c->st->db, sub, 1, &r, NULL);
+	free(sub);
+	if (rc != 1 || r == NULL) { if (r) vx_result_free(r); c->fail = 1; return NULL; }
+	if (vx_result_ncol(r) != 1) { vx_result_free(r); c->fail = 1; return NULL; }
+	nrow = vx_result_nrow(r);
+	if (nrow > 1) { vx_result_free(r); c->fail = 1; return NULL; }
 
 	n = expr_node(c, VXO_LIT);
-	if (n == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
-
-	step = sqlite3_step(q);
-	if (step == SQLITE_DONE) {
+	if (n == NULL) { vx_result_free(r); c->fail = 1; return NULL; }
+	if (nrow == 0) {
 		n->lit.type = VX_NULL;            /* empty subquery -> NULL */
-	} else if (step == SQLITE_ROW) {
-		switch (sqlite3_column_type(q, 0)) {
-		case SQLITE_INTEGER:
-			n->lit.type = VX_INT; n->lit.i = sqlite3_column_int64(q, 0); break;
-		case SQLITE_FLOAT:
-			n->lit.type = VX_REAL; n->lit.r = sqlite3_column_double(q, 0); break;
-		case SQLITE_TEXT: case SQLITE_BLOB: {
-			const void *b = sqlite3_column_blob(q, 0);
-			int nb = sqlite3_column_bytes(q, 0);
+	} else {
+		switch (vx_result_type(r, 0, 0)) {
+		case VX_INT:
+			n->lit.type = VX_INT; n->lit.i = vx_result_int64(r, 0, 0); break;
+		case VX_REAL:
+			n->lit.type = VX_REAL; n->lit.r = vx_result_double(r, 0, 0); break;
+		case VX_TEXT: case VX_BLOB: {
+			const char *b = vx_result_text(r, 0, 0);
+			int nb = vx_result_bytes(r, 0, 0);
 			uint8_t *p = (uint8_t *)arena_alloc(&c->st->plan_arena, (size_t)nb + 1);
-			if (p == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+			if (p == NULL) { vx_result_free(r); c->fail = 1; return NULL; }
 			if (nb && b) memcpy(p, b, (size_t)nb);
 			p[nb] = '\0';
-			n->lit.type = (sqlite3_column_type(q, 0) == SQLITE_TEXT) ? VX_TEXT : VX_BLOB;
-			n->lit.bytes = p; n->lit.nbytes = nb;
+			n->lit.type = (vx_result_type(r, 0, 0) == VX_TEXT) ? VX_TEXT : VX_BLOB;
+			n->lit.bytes = p; n->lit.nbytes = (uint32_t)nb;
 			break; }
 		default:
 			n->lit.type = VX_NULL; break;
 		}
-	} else {
-		sqlite3_finalize(q); c->fail = 1; return NULL;   /* error -> VDBE */
 	}
-	sqlite3_finalize(q);
+	vx_result_free(r);
 	return n;
 }
 
