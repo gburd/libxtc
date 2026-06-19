@@ -192,6 +192,47 @@ Driving the santorini host non-interactively from CI/automation is not
 yet wired (it is configured for an interactive PowerShell session); the
 Windows matrix is run by hand via `dist/santorini-matrix.sh`.
 
+## Async file I/O: backend coverage
+
+`xtc_aio_pread/pwrite/fsync/fdatasync` present one portable API; the
+native completion mechanism is per backend, with a blocking-pool
+offload everywhere else (always correct, just thread-backed).  Native
+completion is implemented and validated on:
+
+  - **io_uring** (Linux): `IORING_OP_READ/WRITE/FSYNC`, reaped from the
+    CQE ring.  CI `build-and-test` + ASan/UBSan.
+  - **IOCP** (Windows): overlapped `ReadFile`/`WriteFile` reaped from
+    the completion port; fsync offloaded.  santorini smoke test.
+  - **kqueue** (FreeBSD, macOS): POSIX AIO (`aio_read`/`aio_write`/
+    `aio_fsync`) with `SIGEV_KEVENT` -> `EVFILT_AIO`.  CI `macos` job
+    compiles and runs `test_aio` against it (green).
+
+Still offloaded to the blocking pool (native AIO is a follow-up with
+platform-specific completion plumbing -- they are DIFFERENT mechanisms,
+not one shared path):
+
+  - **epoll / poll / select** (Linux without io_uring, generic POSIX):
+    would need POSIX AIO with `SIGEV_SIGNAL` delivered to a self-pipe /
+    signalfd the loop already watches (epoll has no AIO filter).  A new
+    shared `io_posixaio.c` submodule.
+  - **Solaris / illumos event ports**: POSIX AIO with `SIGEV_PORT`
+    posting completions to the existing event port.
+  - **AIX**: AIX `aio_*` (or the legacy LIO interface).
+
+The offload fallback makes "write storage code once as if AIO is always
+available" hold on all of these today; the follow-ups only remove the
+thread hop.
+
+## Portable block-device I/O layer (not yet built)
+
+A portable block-device abstraction (open a raw device / partition,
+query logical+physical sector size and capacity, aligned read/write
+through the xtc_aio path, flush/barrier) is requested but not yet
+implemented.  It would sit at L1 over xtc_aio + a thin per-OS device
+layer (Linux `BLKSSZGET`/`BLKGETSIZE64` + `O_DIRECT`; the BSDs
+`DIOCGSECTORSIZE`/`DIOCGMEDIASIZE`; Windows `IOCTL_DISK_GET_*` +
+`FILE_FLAG_NO_BUFFERING`).  A separate effort.
+
 ## test_alloc M7 skipped on Windows
 
 **Status:** intentional -- `_aligned_malloc` returns memory that requires `_aligned_free`, not plain `free`. The hook surface uses a single free path. Keeping the M7 case Windows-skipped is correct.
