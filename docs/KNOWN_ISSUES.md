@@ -261,6 +261,25 @@ semaphores, _SC_NPROCESSORS_ONLN, hardcoded -lrt, lrlock slot
 reclamation teardown order).
 
 
+## sqlxtc multi-thread load test flakes on the macOS CI runner
+
+**Status:** KNOWN FLAKE (transient, re-run passes).  The
+`sqlxtc multi-thread load` CI step (`test/sqlxtc/test_sqlxtc_mt.sh` ->
+`test_sqlxtc_concurrent.py`, N clients * M queries against a shared
+server on a plain `CREATE TABLE`) intermittently fails on the macOS
+runner with all clients timing out and `server CRASHED under multi-loop
+load (cores=3)`.  Observed once on 5d78c00 and passed on re-run with no
+code change; the 5 preceding commits' macOS jobs were green.
+
+The failing path is the VDBE/connection handling under concurrent load
+(the test table is NOT xstore-backed, so it never reaches the vexec
+fast path) -- so it is independent of the vexec/Track-B work.  Likely
+the same multi-loop cross-thread timing sensitivity seen elsewhere on
+the macOS/kqueue runner.  Treat a lone macOS MT-load failure as flaky:
+re-run the job (`gh run rerun <id> --failed`) and judge by the other 12
+jobs.  A persistent failure across re-runs would indicate a real
+concurrency regression and must be chased.
+
 ## `pbt_proc::send_recv_roundtrip` and `pbt_proc::fifo_order` flake under `make check`
 
 **Status:** RESOLVED in M11.5b.  The proc registry's `__lt[]` table was
