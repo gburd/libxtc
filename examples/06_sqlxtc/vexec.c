@@ -116,10 +116,10 @@ enum vx_op {
 	                                      * nargs=2*arms, ELSE in .b (NULL=none) */
 	VXO_LIKE, VXO_GLOB,                  /* a LIKE/GLOB b: operand in .a, pattern in .b */
 	VXO_CORRSUBQ,                        /* correlated scalar subquery: the stmt
-	                                      * st->corr[col] re-run per row, binding
+	                                      * st->corrsql[col] re-run per row via vx_run_p, binding
 	                                      * ? from srcrow[bindcol[i]] */
 	VXO_CORRIN,                          /* operand .a IN (correlated select):
-	                                      * st->corr[col] re-run per row (binds
+	                                      * st->corrsql[col] re-run per row via vx_run_p (binds
 	                                      * as VXO_CORRSUBQ), membership over its
 	                                      * single-column rows; lit.i != 0 = NOT IN */
 	VXO_FUNC                             /* builtin function (.func) */
@@ -132,7 +132,7 @@ enum vx_func {
 typedef struct vx_expr {
 	enum vx_op    op;
 	int           col;        /* VXO_COL: source-column index;
-	                           * VXO_CORRSUBQ: index into st->corr[] */
+	                           * VXO_CORRSUBQ/CORRIN: index into st->corrsql[] */
 	vx_cell_t     lit;        /* VXO_LIT */
 	enum vx_func  func;       /* VXO_FUNC */
 	struct vx_expr *a, *b;    /* operands (a for unary; a,b for binary) */
@@ -392,10 +392,13 @@ struct vx_stmt {
 
 	struct vx_arena_blk *plan_arena;   /* expr tree + literal bytes */
 
-	/* Correlated-subquery prepared statements (one per VXO_CORRSUBQ
-	 * node).  Owned here so vx_finalize can finalize them; the nodes
-	 * reference these by index. */
-	sqlite3_stmt *corr[8];
+	/* Correlated-subquery sources (one per VXO_CORRSUBQ / VXO_CORRIN
+	 * node).  Each is the parameterized inner SELECT text (outer refs
+	 * rewritten to ? binds), run per row through vexec (vx_run_p) -- no
+	 * SQLite.  The text is plan_arena-owned; the nodes reference it by
+	 * index. */
+	const char   *corrsql[8];
+	int           corr_ncol[8];   /* result columns each must return (1) */
 	int           ncorr;
 
 	/* The recognized source, kept so a parallel run can rebuild a
@@ -1087,8 +1090,9 @@ static int corr_ref_cmp(const void *a, const void *b)
  * path (used by both the scalar form and the IN form).  Collects outer
  * references (columns qualified by the outer table) from the subquery's
  * expressions, rewrites each to a ? parameter in the subquery text,
- * prepares it ONCE, and records it in st->corr[].  On success returns
- * 0 and sets *pidx (the st->corr[] slot), *pbindcol (a plan-arena array
+ * validates it via a trial vx_run_p and records its text in
+ * st->corrsql[].  On success returns
+ * 0 and sets *pidx (the st->corrsql[] slot), *pbindcol (a plan-arena array
  * of srcrow indices feeding each ?), and *pnref; the prepared stmt's
  * column count is left to the caller to validate.  Returns -1 (caller
  * sets c->fail) when correlation cannot be turned into the supported
@@ -1102,14 +1106,13 @@ build_corr_stmt(struct vx_compiler *c, const sql_expr_t *e,
 	char *sub = NULL, *out = NULL, *s;
 	size_t len, oi;
 	int nref, i, ci, *bindcol;
-	sqlite3_stmt *q = NULL;
 
 	/* Single-table read path only (need the outer table name + nv). */
 	if (c->jc != NULL || c->nv == NULL || c->st == NULL ||
 	    c->st->db == NULL || c->st->table[0] == '\0' ||
 	    e->src == NULL || e->srclen == 0)
 		return -1;
-	if (c->st->ncorr >= (int)(sizeof c->st->corr / sizeof c->st->corr[0]))
+	if (c->st->ncorr >= (int)(sizeof c->st->corrsql / sizeof c->st->corrsql[0]))
 		return -1;
 	otab = c->st->table;
 
@@ -1155,24 +1158,55 @@ build_corr_stmt(struct vx_compiler *c, const sql_expr_t *e,
 	}
 	free(sub);
 
-	if (sqlite3_prepare_v2(c->st->db, out, -1, &q, NULL) != SQLITE_OK) {
-		free(out); return -1;
-	}
-	free(out);
-	if (sqlite3_bind_parameter_count(q) != nref ||
-	    sqlite3_column_count(q) != ncol_want) {
-		sqlite3_finalize(q); return -1;
-	}
-
+	/* Map each ? to its outer source column FIRST, so the trial run can
+	 * type its dummy binds to match (a NULL bind would trip vexec's
+	 * comparison affinity gate and falsely reject a runnable inner). */
 	bindcol = (int *)arena_alloc(&c->st->plan_arena, sizeof(int) * (size_t)nref);
-	if (bindcol == NULL) { sqlite3_finalize(q); return -1; }
+	if (bindcol == NULL) { free(out); return -1; }
 	for (i = 0; i < nref; i++) {
 		ci = nv_add(c->nv, refs[i].col);   /* outer column -> srcrow index */
-		if (ci < 0) { sqlite3_finalize(q); return -1; }
+		if (ci < 0) { free(out); return -1; }
 		bindcol[i] = ci;
 	}
-	*pidx = c->st->ncorr;
-	c->st->corr[c->st->ncorr++] = q;
+
+	/* Validate the parameterized inner SELECT is vexec-runnable and
+	 * returns the required number of columns, by a trial run (no SQLite).
+	 * Type each dummy bind to its outer column's affinity so the inner's
+	 * comparison gate sees a compatible operand; NUMERIC -> INT, TEXT ->
+	 * a 1-char string, else NULL.  A run vexec cannot recognize (rc != 1)
+	 * or with the wrong shape -> fall back. */
+	{
+		vx_cell_t tb[VX_CORR_MAX];
+		vx_result_t *tr = NULL;
+		int trc, tnc;
+		for (i = 0; i < nref; i++) {
+			memset(&tb[i], 0, sizeof tb[i]);
+			switch (c->nv->aff[bindcol[i]]) {
+			case VX_AFF_NUMERIC: tb[i].type = VX_INT; tb[i].i = 0; break;
+			case VX_AFF_TEXT:    tb[i].type = VX_TEXT;
+			                     tb[i].bytes = (const uint8_t *)""; tb[i].nbytes = 0; break;
+			default:             tb[i].type = VX_NULL; break;
+			}
+		}
+		trc = vx_run_p(c->st->db, out, tb, nref, 1, &tr, NULL);
+		if (trc != 1 || tr == NULL) { if (tr) vx_result_free(tr); free(out); return -1; }
+		tnc = vx_result_ncol(tr);
+		vx_result_free(tr);
+		if (tnc != ncol_want) { free(out); return -1; }
+	}
+
+	/* Keep the parameterized text (plan-arena owned) for per-row runs. */
+	{
+		size_t tl = strlen(out) + 1;
+		char *kept = (char *)arena_alloc(&c->st->plan_arena, tl);
+		if (kept == NULL) { free(out); return -1; }
+		memcpy(kept, out, tl);
+		free(out);
+		*pidx = c->st->ncorr;
+		c->st->corrsql[c->st->ncorr] = kept;
+		c->st->corr_ncol[c->st->ncorr] = ncol_want;
+		c->st->ncorr++;
+	}
 	*pbindcol = bindcol;
 	*pnref = nref;
 	return 0;
@@ -2040,88 +2074,67 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 	}
 
 	case VXO_CORRSUBQ: {
-		/* Re-run the prepared correlated subquery: bind each ? from the
-		 * current outer row, step once for the scalar (first column of
-		 * first row, or NULL if no row), then reset for the next row. */
-		sqlite3_stmt *q = st->corr[e->col];
-		int i, step;
-		sqlite3_reset(q);
-		sqlite3_clear_bindings(q);
-		for (i = 0; i < e->nargs; i++) {
-			const vx_cell_t *v = &row[e->bindcol[i]];
-			switch (v->type) {
-			case VX_INT:  sqlite3_bind_int64(q, i + 1, v->i); break;
-			case VX_REAL: sqlite3_bind_double(q, i + 1, v->r); break;
-			case VX_TEXT: sqlite3_bind_text(q, i + 1, (const char *)v->bytes,
-			                                (int)v->nbytes, SQLITE_TRANSIENT); break;
-			case VX_BLOB: sqlite3_bind_blob(q, i + 1, v->bytes,
-			                                (int)v->nbytes, SQLITE_TRANSIENT); break;
-			default:      sqlite3_bind_null(q, i + 1); break;
-			}
+		/* Re-run the parameterized correlated subquery through vexec: bind
+		 * each ? from the current outer row, run, take the scalar (first
+		 * column of the first row, or NULL if no row). */
+		vx_cell_t binds[VX_CORR_MAX];
+		vx_result_t *r = NULL;
+		int i, rc;
+		for (i = 0; i < e->nargs && i < VX_CORR_MAX; i++)
+			binds[i] = row[e->bindcol[i]];
+		rc = vx_run_p(st->db, st->corrsql[e->col], binds, e->nargs, 1, &r, NULL);
+		if (rc != 1 || r == NULL) { if (r) vx_result_free(r); out->type = VX_NULL; return; }
+		if (vx_result_nrow(r) == 0) { out->type = VX_NULL; vx_result_free(r); return; }
+		switch (vx_result_type(r, 0, 0)) {
+		case VX_INT:  out->type = VX_INT; out->i = vx_result_int64(r, 0, 0); break;
+		case VX_REAL: out->type = VX_REAL; out->r = vx_result_double(r, 0, 0); break;
+		case VX_TEXT: case VX_BLOB: {
+			const char *b = vx_result_text(r, 0, 0);
+			int nb = vx_result_bytes(r, 0, 0);
+			uint8_t *p = (uint8_t *)arena_alloc(arena, (size_t)nb + 1);
+			if (p == NULL) { out->type = VX_NULL; break; }
+			if (nb && b) memcpy(p, b, (size_t)nb);
+			p[nb] = '\0';
+			out->type = (vx_result_type(r, 0, 0) == VX_TEXT) ? VX_TEXT : VX_BLOB;
+			out->bytes = p; out->nbytes = (uint32_t)nb;
+			break; }
+		default: out->type = VX_NULL; break;
 		}
-		step = sqlite3_step(q);
-		if (step == SQLITE_ROW) {
-			switch (sqlite3_column_type(q, 0)) {
-			case SQLITE_INTEGER: out->type = VX_INT; out->i = sqlite3_column_int64(q, 0); break;
-			case SQLITE_FLOAT:   out->type = VX_REAL; out->r = sqlite3_column_double(q, 0); break;
-			case SQLITE_TEXT: case SQLITE_BLOB: {
-				const void *b = sqlite3_column_blob(q, 0);
-				int nb = sqlite3_column_bytes(q, 0);
-				uint8_t *p = (uint8_t *)arena_alloc(arena, (size_t)nb + 1);
-				if (p == NULL) { out->type = VX_NULL; break; }
-				if (nb && b) memcpy(p, b, (size_t)nb);
-				p[nb] = '\0';
-				out->type = (sqlite3_column_type(q, 0) == SQLITE_TEXT) ? VX_TEXT : VX_BLOB;
-				out->bytes = p; out->nbytes = (uint32_t)nb;
-				break; }
-			default: out->type = VX_NULL; break;
-			}
-		} else {
-			out->type = VX_NULL;   /* no row, or an error -> NULL */
-		}
-		sqlite3_reset(q);
+		vx_result_free(r);
 		return;
 	}
 
 	case VXO_CORRIN: {
 		/* operand IN (correlated select).  Bind ? from the current row,
-		 * step every result row, and test the operand for membership with
-		 * SQL 3-valued logic: a NULL operand -> NULL; a match -> 1; no
-		 * match but a NULL element seen -> NULL; else 0.  NOT IN (lit.i)
-		 * negates, keeping NULL as NULL. */
-		sqlite3_stmt *q = st->corr[e->col];
-		vx_cell_t a; int i, step, res = 0, saw_null = 0;
+		 * run the parameterized inner through vexec, and test the operand
+		 * for membership over every result row with SQL 3-valued logic: a
+		 * NULL operand -> NULL; a match -> 1; no match but a NULL element
+		 * seen -> NULL; else 0.  NOT IN (lit.i) negates, keeping NULL. */
+		vx_cell_t binds[VX_CORR_MAX];
+		vx_result_t *r = NULL;
+		vx_cell_t a; int i, nr, res = 0, saw_null = 0, rc;
 		eval(st, e->a, row, arena, &a);
 		if (a.type == VX_NULL) { out->type = VX_NULL; return; }
-		sqlite3_reset(q);
-		sqlite3_clear_bindings(q);
-		for (i = 0; i < e->nargs; i++) {
-			const vx_cell_t *v = &row[e->bindcol[i]];
-			switch (v->type) {
-			case VX_INT:  sqlite3_bind_int64(q, i + 1, v->i); break;
-			case VX_REAL: sqlite3_bind_double(q, i + 1, v->r); break;
-			case VX_TEXT: sqlite3_bind_text(q, i + 1, (const char *)v->bytes,
-			                                (int)v->nbytes, SQLITE_TRANSIENT); break;
-			case VX_BLOB: sqlite3_bind_blob(q, i + 1, v->bytes,
-			                                (int)v->nbytes, SQLITE_TRANSIENT); break;
-			default:      sqlite3_bind_null(q, i + 1); break;
-			}
-		}
-		while ((step = sqlite3_step(q)) == SQLITE_ROW) {
+		for (i = 0; i < e->nargs && i < VX_CORR_MAX; i++)
+			binds[i] = row[e->bindcol[i]];
+		rc = vx_run_p(st->db, st->corrsql[e->col], binds, e->nargs, 1, &r, NULL);
+		if (rc != 1 || r == NULL) { if (r) vx_result_free(r); out->type = VX_NULL; return; }
+		nr = vx_result_nrow(r);
+		for (i = 0; i < nr; i++) {
 			vx_cell_t v;
 			memset(&v, 0, sizeof v);
-			switch (sqlite3_column_type(q, 0)) {
-			case SQLITE_INTEGER: v.type = VX_INT; v.i = sqlite3_column_int64(q, 0); break;
-			case SQLITE_FLOAT:   v.type = VX_REAL; v.r = sqlite3_column_double(q, 0); break;
-			case SQLITE_NULL:    v.type = VX_NULL; break;
+			switch (vx_result_type(r, i, 0)) {
+			case VX_INT:  v.type = VX_INT; v.i = vx_result_int64(r, i, 0); break;
+			case VX_REAL: v.type = VX_REAL; v.r = vx_result_double(r, i, 0); break;
+			case VX_NULL: v.type = VX_NULL; break;
 			default: {
-				const void *b = sqlite3_column_blob(q, 0);
-				int nb = sqlite3_column_bytes(q, 0);
+				const char *b = vx_result_text(r, i, 0);
+				int nb = vx_result_bytes(r, i, 0);
 				uint8_t *p = (uint8_t *)arena_alloc(arena, (size_t)nb + 1);
 				if (p == NULL) { v.type = VX_NULL; break; }
 				if (nb && b) memcpy(p, b, (size_t)nb);
 				p[nb] = '\0';
-				v.type = (sqlite3_column_type(q, 0) == SQLITE_TEXT) ? VX_TEXT : VX_BLOB;
+				v.type = (vx_result_type(r, i, 0) == VX_TEXT) ? VX_TEXT : VX_BLOB;
 				v.bytes = p; v.nbytes = (uint32_t)nb;
 				break; }
 			}
@@ -2132,7 +2145,7 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 				(void)coerce_numeric(&v);
 			if (cmp_vals(&a, &v) == 0) { res = 1; break; }
 		}
-		sqlite3_reset(q);
+		vx_result_free(r);
 		if (res == 0 && saw_null) { out->type = VX_NULL; return; }
 		out->type = VX_INT;
 		out->i = e->lit.i ? !res : res;
@@ -4929,8 +4942,7 @@ vx_finalize(vx_stmt_t *st)
 	if (st->derived_res) vx_result_free(st->derived_res);
 	if (st->chunk) chunk_free(st->chunk);
 	if (st->plan_arena) arena_free(st->plan_arena);
-	{ int ci; for (ci = 0; ci < st->ncorr; ci++)
-		if (st->corr[ci]) sqlite3_finalize(st->corr[ci]); }
+	/* corrsql[] texts are plan_arena-owned (freed above); nothing else. */
 	htab_free(&st->ht);
 	if (st->agg) { free(st->agg->out); free(st->agg->grp); free(st->agg); }
 	if (st->join) {
