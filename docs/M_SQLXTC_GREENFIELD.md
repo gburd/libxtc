@@ -443,17 +443,19 @@ The 79 sqlite3_* calls left in vexec.c, by purpose (grep
     (compile_scalar_subquery, compile_corr_subquery,
     vx_try_prepare_derived, the INSERT...SELECT path): run an arbitrary
     nested SELECT.  Native means RECURSIVELY running the inner select
-    through vexec (vx_run) instead of sqlite3_prepare/step.
-    DONE so far: the UNCORRELATED scalar subquery, the FROM-clause
-    derived table, and the INSERT...SELECT source now all EXECUTE via
-    vx_run (recursive native execution; whole-query fallback if the
-    inner is unrecognized).  This needed per-output-column affinity on
-    vx_result (st->outaff recorded at compile time, copied to
-    vx_result.aff) so the outer comparison gate is exact without SQLite
-    metadata.  STILL on SQLite: the correlated scalar / IN per-row
-    re-execution (build_corr_stmt prepares + steps per row), and the
-    correlation-gate prepare in compile_scalar_subquery (prepared, never
-    stepped -- purely a yes/no "is this correlated" test).
+    through vexec (vx_run / vx_run_p) instead of sqlite3_prepare/step.
+    DONE: the uncorrelated scalar subquery, the FROM-clause derived
+    table, the INSERT...SELECT source, AND the correlated scalar / IN /
+    NOT IN per-row re-execution all EXECUTE via vexec now (correlated
+    keeps the parameterized inner text in st->corrsql[] and runs it per
+    row via vx_run_p, binds typed from the outer row).  Per-output-col
+    affinity on vx_result (st->outaff) makes the outer/IN comparison
+    gate exact with no SQLite metadata.  NO inner SELECT is executed
+    through SQLite any more.  The ONE remaining prepare in the live
+    read path is the correlation GATE in compile_scalar_subquery
+    (prepared, never stepped -- purely "is this correlated?"), blocked
+    on a scoped name resolver (an outer-alias vs inner-alias ref to the
+    same base table), not on execution.
   - resolve_schema PRAGMA table_info (line ~5185): only the non-xstore
     fallback; xstore tables already use the native catalog.
   - parallel rowid bounds SELECT min/max(_rowid_) (line ~4941): replace
