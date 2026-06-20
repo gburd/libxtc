@@ -299,10 +299,20 @@ main(void)
 
 		/* vexec ON */
 		unsetenv("SQLXTC_VEXEC");
-		/* Probe whether vexec recognizes this (independent of bytes). */
+		/* Probe whether vexec recognizes this (independent of bytes), and
+		 * -- a teardown prerequisite -- that when recognized it produces a
+		 * column NAME for EVERY output column natively (no borrow from a
+		 * VDBE-prepared statement).  vexec must name every column itself
+		 * before the VDBE fallback can be removed. */
 		{
 			sx_vx_result *vr = NULL;
 			von_recognized = (sx_vexec_try(h, sql, 1, &vr) == 1);
+			if (von_recognized && vr) {
+				int nc = sx_vexec_ncol(vr), c, named = 1;
+				for (c = 0; c < nc; c++)
+					if (sx_vexec_name(vr, c) == NULL) named = 0;
+				CK(named, sql);   /* vexec names every column natively */
+			}
 			if (vr) sx_vexec_free(vr);
 		}
 		CK(run_live(h, sql, &on, &non) == 0, sql);
