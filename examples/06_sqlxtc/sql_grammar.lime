@@ -761,6 +761,7 @@ expr(R) ::= expr(A) TK_PIPE expr(B).    { R = mk_binary(pstate, TK_PIPE, A, B); 
 expr(R) ::= expr(A) TK_LIKE expr(B).    { R = mk_binary(pstate, TK_LIKE, A, B); }
 expr(R) ::= expr(A) TK_IS TK_NULL.      { R = mk_expr(pstate, SX_E_IS_NULL); if (R) { R->a = A; R->ival = 0; } }
 expr(R) ::= expr(A) TK_IS TK_NOT TK_NULL. { R = mk_expr(pstate, SX_E_IS_NULL); if (R) { R->a = A; R->ival = 1; } }
+expr(R) ::= expr(A) TK_NOT TK_NULL. { R = mk_expr(pstate, SX_E_IS_NULL); if (R) { R->a = A; R->ival = 1; } }
 expr(R) ::= expr(A) TK_IS expr(B).      { R = mk_binary(pstate, TK_IS, A, B); }
 expr(R) ::= expr(A) TK_IN TK_LP expr_list(L) TK_RP. {
     R = mk_expr(pstate, SX_E_IN_LIST); if (R) { R->a = A; R->list = L; }
