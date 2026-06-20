@@ -2726,7 +2726,11 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	if (src == NULL) goto fallback;
 	if (src->next != NULL) {
 		/* Multi-table equi-join (no GROUP BY / ORDER BY / aggregates on
-		 * the join path yet -- those compose later). */
+		 * the join path yet -- those compose later).  A post-join ORDER BY
+		 * has the same tie-order non-reproducibility as the agg path AND
+		 * two streaming join executors (2-table + N-way, native +
+		 * non-native sources) to thread it through; deferred as a distinct
+		 * step.  Falls back correctly via the VDBE today. */
 		if (sel->group || sel->order || sel->limit || sel->offset || sel->distinct)
 			goto fallback;
 		if (src->next->next == NULL)
