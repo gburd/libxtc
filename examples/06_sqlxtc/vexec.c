@@ -3204,9 +3204,12 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 
 	if (errmsg) *errmsg = NULL;
 
-	/* V4 ORDER BY / LIMIT over aggregated output is not supported yet;
-	 * fall back so the VDBE handles it. */
-	if (sel->order || sel->limit || sel->offset) goto fallback;
+	/* ORDER BY / LIMIT / OFFSET over aggregated output ARE supported
+	 * (sorted post-aggregation, see agg_order_limit), as long as every
+	 * ORDER BY key resolves to an OUTPUT column (a 1-based position or a
+	 * select item matched by expr_same).  An order key that is not an
+	 * output column falls back below.  DISTINCT over aggregates still
+	 * falls back (handled by the caller's gate). */
 
 	/* Count output columns and GROUP BY keys. */
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
@@ -3356,6 +3359,72 @@ vx_try_prepare_agg(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	}
 
 	st->nout = nout;
+
+	/* ORDER BY / LIMIT / OFFSET over the aggregated output.  Each ORDER
+	 * BY key must resolve to an OUTPUT column: a 1-based position, or an
+	 * expression that matches a SELECT item (by expr_same).  Anything
+	 * else -> fall back.  Stored as order_outcol[] (1-based); the sort
+	 * runs post-aggregation in agg_order_limit. */
+	st->limit = -1;
+	st->offset = 0;
+	if (sel->order) {
+		const sql_exprlist_item_t *o;
+		int no = 0, oi = 0;
+		for (o = sel->order->head; o; o = o->next) no++;
+		if (no == 0 || no > 16) goto fallback;
+		st->norder = no;
+		st->order_key = (vx_expr_t **)calloc((size_t)no, sizeof(vx_expr_t *));
+		st->order_outcol = (int *)calloc((size_t)no, sizeof(int));
+		st->order_desc = (int *)calloc((size_t)no, sizeof(int));
+		if (!st->order_key || !st->order_outcol || !st->order_desc) goto oom;
+		for (o = sel->order->head; o; o = o->next, oi++) {
+			const sql_expr_t *e = o->expr;
+			st->order_desc[oi] = (o->sort == 2);
+			if (e && e->op == SX_E_NUMBER) {
+				char buf[32]; long pos;
+				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
+				memcpy(buf, e->lit.p, e->lit.len); buf[e->lit.len] = '\0';
+				if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+				pos = strtol(buf, NULL, 10);
+				if (pos < 1 || pos > nout) goto fallback;
+				st->order_outcol[oi] = (int)pos;
+			} else {
+				/* Match the key expression to a SELECT output item. */
+				const sql_exprlist_item_t *ci; int pos = 0, found = 0;
+				for (ci = sel->cols->head; ci; ci = ci->next, pos++)
+					if (expr_same(e, ci->expr)) { st->order_outcol[oi] = pos + 1; found = 1; break; }
+				if (!found) goto fallback;   /* order key not an output column */
+			}
+		}
+	}
+	if (sel->limit) {
+		char buf[32];
+		if (sel->limit->op != SX_E_NUMBER || sel->limit->lit.len >= sizeof buf) goto fallback;
+		memcpy(buf, sel->limit->lit.p, sel->limit->lit.len); buf[sel->limit->lit.len] = '\0';
+		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+		st->limit = strtoll(buf, NULL, 10);
+		if (st->limit < 0) st->limit = 0;
+	}
+	if (sel->offset) {
+		char buf[32];
+		if (sel->offset->op != SX_E_NUMBER || sel->offset->lit.len >= sizeof buf) goto fallback;
+		memcpy(buf, sel->offset->lit.p, sel->offset->lit.len); buf[sel->offset->lit.len] = '\0';
+		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+		st->offset = strtoll(buf, NULL, 10);
+		if (st->offset < 0) st->offset = 0;
+	}
+	/* A LIMIT/OFFSET over aggregated output is byte-reproducible only when
+	 * the ORDER BY is a TOTAL order (no ties): with a tie on the sort key,
+	 * WHICH tied groups survive the limit is unspecified in SQL and our
+	 * group-iteration order need not match the VDBE's.  We cannot prove a
+	 * total order cheaply, so an agg query with LIMIT/OFFSET falls back
+	 * unless it has no ORDER BY at all (one row, or an unspecified subset
+	 * the VDBE also leaves unspecified -- but then the differential is not
+	 * reproducible either, so require ORDER BY-free).  Net: serve ORDER BY
+	 * (full set, ties only reorder -- the corpus marks these unordered) OR
+	 * a bare LIMIT with no ORDER BY; fall back ORDER BY + LIMIT/OFFSET. */
+	if (st->norder > 0 && (st->limit >= 0 || st->offset > 0))
+		goto fallback;
 	st->srcrow = (vx_cell_t *)calloc((size_t)(st->nsrc_col > 0 ? st->nsrc_col : 1),
 	                                 sizeof(vx_cell_t));
 	if (!st->srcrow) goto oom;
@@ -4224,6 +4293,11 @@ next_chunk(struct vx_stmt *st, int *done)
 	return c;
 }
 
+/* Sort an aggregated result chunk's rows in place by the ORDER BY keys
+ * (output-column references) and apply OFFSET/LIMIT.  Defined after the
+ * sort machinery below. */
+static int agg_order_limit(struct vx_stmt *st, vx_chunk_t *c);
+
 /* Drain the source into the hash table and build one result chunk with
  * one row per group.  Used by the single-threaded agg path (vx_step).
  * Returns 0 on success, -1 on error. */
@@ -4333,6 +4407,12 @@ agg_materialize(struct vx_stmt *st)
 			c->nrow++;
 		}
 	}
+	/* ORDER BY / LIMIT / OFFSET over the aggregated output rows (V4 on the
+	 * agg path).  The keys reference OUTPUT columns (a positional integer
+	 * or a select item matched by expr_same -> order_outcol), so we sort
+	 * the just-built chunk rows in place, then apply OFFSET/LIMIT. */
+	if (st->norder > 0 || st->limit >= 0 || st->offset > 0)
+		if (agg_order_limit(st, c) != 0) { chunk_free(c); return -1; }
 	st->chunk = c;
 	st->cur = -1;
 	st->ht_built = 1;
@@ -4377,6 +4457,75 @@ sort_index_cmp(const void *pa, const void *pb)
 	 * order here and the oracle compares the FULL row, so ties on the
 	 * key still must match SQLite; see the test's note). */
 	return ia - ib;
+}
+
+/* Sort an aggregated result chunk (c->nrow rows, c->ncol cells each, in
+ * c->cells) in place by the ORDER BY keys and apply OFFSET/LIMIT.  The
+ * agg ORDER BY keys all reference OUTPUT columns: order_outcol[k] > 0 is
+ * a 1-based output position; order_outcol[k] == 0 means order_key[k] is
+ * a select-item expression resolved to an output column at compile time
+ * (stored as a VXO_COL over the output row -- see the agg gate).  Sorts
+ * an index permutation, then rewrites c->cells in the surviving order. */
+static int
+agg_order_limit(struct vx_stmt *st, vx_chunk_t *c)
+{
+	int nkey = st->norder, nr = c->nrow, nc = c->ncol;
+	vx_cell_t *keys = NULL;
+	int *idx = NULL;
+	vx_cell_t *nrows = NULL;
+	int64_t off, lim;
+	int i, k, e, emit_n, rc = -1;
+
+	if (nr <= 0) { /* still apply: empty stays empty */
+		return 0;
+	}
+	/* Build the per-row key array from the output columns. */
+	if (nkey > 0) {
+		keys = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)nr * (size_t)nkey);
+		if (keys == NULL) goto done;
+		for (i = 0; i < nr; i++)
+			for (k = 0; k < nkey; k++) {
+				int oc = st->order_outcol[k];   /* 1-based output col, or 0 */
+				if (oc < 1 || oc > nc) { rc = -1; goto done; }
+				keys[(size_t)i * (size_t)nkey + (size_t)k] =
+				    c->cells[(size_t)i * (size_t)nc + (size_t)(oc - 1)];
+			}
+	}
+	idx = (int *)malloc(sizeof(int) * (size_t)nr);
+	if (idx == NULL) goto done;
+	for (i = 0; i < nr; i++) idx[i] = i;
+	if (nkey > 0) {
+		struct sort_ctx sc; sc.keys = keys; sc.nkey = nkey; sc.desc = st->order_desc;
+		g_sort_ctx = &sc;
+		qsort(idx, (size_t)nr, sizeof(int), sort_index_cmp);
+		g_sort_ctx = NULL;
+	}
+	/* OFFSET / LIMIT over the sorted rows. */
+	off = st->offset > 0 ? st->offset : 0;
+	lim = st->limit;
+	if (off > nr) off = nr;
+	emit_n = nr - (int)off;
+	if (lim >= 0 && lim < emit_n) emit_n = (int)lim;
+	if (emit_n < 0) emit_n = 0;
+	/* Rewrite c->cells in surviving order (cells reference the chunk
+	 * arena, which we keep -- a shallow reorder is correct). */
+	nrows = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)(emit_n > 0 ? emit_n : 1) *
+	                            (size_t)(nc > 0 ? nc : 1));
+	if (nrows == NULL) goto done;
+	for (e = 0; e < emit_n; e++) {
+		int src = idx[(int)off + e];
+		for (k = 0; k < nc; k++)
+			nrows[(size_t)e * (size_t)nc + (size_t)k] =
+			    c->cells[(size_t)src * (size_t)nc + (size_t)k];
+	}
+	free(c->cells);
+	c->cells = nrows; nrows = NULL;
+	c->nrow = emit_n;
+	c->cap = emit_n > 0 ? emit_n : 1;
+	rc = 0;
+done:
+	free(keys); free(idx); free(nrows);
+	return rc;
 }
 
 /* Materialize, sort, and offset/limit a non-agg ordered query into one
