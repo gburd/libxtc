@@ -421,8 +421,18 @@ unit).  Steps 1-2 are independent; 3 gates on both; 4-5 are mechanical.
   - correlated IN (SELECT): DONE -- VXO_CORRIN re-runs the inner
     select per row (build_corr_stmt shared with the scalar form) and
     tests membership with 3-valued NULL semantics; NOT IN supported.
+  - postfix NOT NULL predicate (expr NOT NULL): DONE -- a grammar rule
+    reusing TK_NOT TK_NULL builds the same SX_E_IS_NULL node as IS NOT
+    NULL (no new conflict, byte-stable regen).
+  - ORDER BY over aggregated output (GROUP BY ... ORDER BY): DONE --
+    agg_order_limit sorts the drained agg chunk by output-column keys
+    (positional or expr_same-matched).  ORDER BY + LIMIT/OFFSET on the
+    agg path falls back (tie + limit is not byte-reproducible).
   - 3+ table OUTER joins: extend the N-way pipeline (vx_try_prepare_
-    njoin) with NULL-extension + matched-tracking per side.  Large.
+    njoin) with NULL-extension + matched-tracking per side.  Large +
+    high-risk (output ordering must match the VDBE's nested-loop order
+    on a depth-first backtracking cursor stack); falls back correctly
+    today, so this is a nativeness gap, not a correctness gap.
   - a derived table joined to other tables / with outer ORDER BY /
     GROUP BY: compose the derived source into the join + ordered paths.
   - remaining writes: transactional DELETE/UPDATE on a DIRTIED table
