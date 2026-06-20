@@ -487,3 +487,60 @@ Remove sqlite3.c / sqlite3.h, vfs.c / pcache.c / mutex.c / mem.c (the
 SQLite OS shims), the xsql_* -> sqlite3_* rename header, and the
 sqlite3.o build rule.  The xsql_* names vanish automatically when the
 code they rename is gone.  Re-run the full examples CI job.
+
+## What SQLite still load-bears (the honest excision scope)
+
+The vexec/native-write fast paths sit ON TOP of SQLite: every query
+that is not recognized, plus all DDL, transactions, and the table
+plumbing itself, still run on the VDBE.  sqlite3.c (257k lines)
+currently provides FIVE subsystems that must each be replaced natively
+before it can be deleted -- this is the project's ultimate "replace the
+front-end" goal and spans multiple milestones, NOT a single change:
+
+  A. **Virtual-table dispatch.**  xstore is registered via
+     xsql_create_module_v2 and driven ENTIRELY by SQLite's vtab
+     callbacks -- xBestIndex / xFilter / xNext / xColumn / xUpdate /
+     xBegin / xSync / xCommit / xRollback.  Without SQLite there is no
+     caller for these.  A native executor must own table open / scan /
+     point-read / write and call into the xstore B-tree directly
+     (vexec + the native write path already do the data part; what is
+     missing is the DISPATCH -- deciding per statement which native
+     routine runs, with no VDBE program).
+
+  B. **A statement driver / connection lifecycle.**  xsql_open_v2,
+     prepare_v2, step, reset, finalize, bind, column_*, errmsg,
+     changes64, busy_handler -- the sx_* bridge in engine.c maps these
+     1:1 onto SQLite.  A native sx_* implementation must parse (Lime),
+     plan (vexec / native-write / DDL), and iterate results without a
+     VDBE program, while keeping the exact sx_* ABI conn.c/db.c expect.
+
+  C. **Transaction + savepoint manager.**  BEGIN / COMMIT / ROLLBACK /
+     SAVEPOINT / RELEASE currently go through SQLite's txn manager,
+     which calls the vtab xBegin/xSync/xCommit/xRollback that drive the
+     xstore txn (snapshot, wbuf, savepoint stack).  Native control must
+     call xstore_txn_* directly and own autocommit vs explicit txn
+     state.  (db_native_txn_end already flushes native writes at
+     COMMIT/ROLLBACK -- the recognizer exists; the OWNERSHIP does not.)
+
+  D. **DDL + catalog.**  CREATE / DROP / ALTER are parsed + executed by
+     SQLite, which persists schema in sqlite_master and creates the
+     vtab.  Native DDL needs its own persisted catalog (xstore already
+     has a per-table column catalog; it must become the source of
+     truth, persisted + recovered) and a DDL executor over it.  A plain
+     CREATE TABLE is today rewritten to CREATE VIRTUAL TABLE xstore and
+     run on the VDBE; that rewrite + vtab-create must become native.
+
+  E. **PRAGMA / introspection / misc.**  journal_mode, synchronous,
+     table_info (already off the native read/write paths), and any
+     PRAGMA a client sends.  Mostly no-ops or native-catalog reads once
+     A-D exist.
+
+Realistic sequence: finish the recognition gaps (3+ outer joins,
+derived-with-join) and the correlation gate (B-adjacent) FIRST, since
+they are bounded; then build B (the native statement driver) with A
+(native vtab-free dispatch) together, because the driver is what
+replaces the VDBE program; then C and D on top of the driver; E falls
+out; then step 5 deletes the amalgamation.  Each is its own milestone
+with its own differential tests against a reference SQLite kept OUTSIDE
+the build (so correctness can still be checked after sqlite3.c is gone
+from the shipped engine).
