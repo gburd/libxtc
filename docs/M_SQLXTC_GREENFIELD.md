@@ -465,11 +465,16 @@ The 79 sqlite3_* calls left in vexec.c, by purpose (grep
 
 ### 3. Remove the VDBE fallback
 Only once 1+2 leave NO query reaching sx_step: delete the
-fall-through in db_exec_cached (db.c ~line 689) and the column-name
-borrow (the VDBE-prepared name is the last reason vexec keeps a
-prepared stmt for expression columns -- native column naming via the
-verbatim source span already covers it; verify no expression column
-still needs it).
+fall-through in db_exec_cached (db.c ~line 689).  The column-name
+borrow is already GONE -- vexec names every output column itself from
+the AST select-item source span (verified: instrumenting the borrow
+across the whole corpus showed it is never taken; test_db_vexec now
+asserts sx_vexec_name is non-NULL for every column of every recognized
+query, and emit_vexec no longer takes the VDBE statement).  What still
+keeps a VDBE prepare on the served path is ONLY the correlation gate in
+compile_scalar_subquery (prepared, never stepped) -- a scoped name
+resolver removes that; and the fallback prepare itself for an
+UNrecognized query, which this step removes.
 
 ### 4. Native DDL
 With the fallback gone, CREATE/DROP/ALTER no longer need sqlite_master.
