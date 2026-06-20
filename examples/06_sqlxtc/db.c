@@ -714,11 +714,12 @@ db_exec_params(sx_db *h, const char *sql,
 	return 0;
 }
 
-/* Emit a materialized vexec result to the Quack buffer, using column
- * names from the already-prepared statement (so headers are identical
- * to the VDBE path).  Returns 0 or -1 (*err set). */
+/* Emit a materialized vexec result to the Quack buffer.  vexec names
+ * every output column itself (verified by a test_db_vexec assertion),
+ * so no name is borrowed from a VDBE-prepared statement.  Returns 0 or
+ * -1 (*err set). */
 static int
-emit_vexec(sx_vx_result *vr, sx_stmt *names, int64_t limit,
+emit_vexec(sx_vx_result *vr, int64_t limit,
            quack_buf_t *out_buf, int64_t *rows_out, char **err)
 {
 	int ncol = sx_vexec_ncol(vr);
@@ -734,12 +735,10 @@ emit_vexec(sx_vx_result *vr, sx_stmt *names, int64_t limit,
 			if (!wrote_cols) {
 				if (quack_emit_cols_begin(out_buf) < 0) goto oom;
 				for (j = 0; j < ncol; j++) {
-					/* Prefer vexec's own column name (AS alias / bare
-					 * column); fall back to the VDBE-prepared name only
-					 * for an expression column, whose SQLite name is its
-					 * verbatim source text. */
+					/* vexec names every column itself (AS alias, bare
+					 * column, or an expression's verbatim source span);
+					 * test_db_vexec asserts this is never NULL. */
 					const char *nm = sx_vexec_name(vr, j);
-					if (nm == NULL) nm = sx_column_name(names, j);
 					if (quack_emit_cols_name(out_buf, j, nm) < 0) goto oom;
 				}
 				if (quack_emit_cols_end(out_buf) < 0) goto oom;
@@ -840,7 +839,7 @@ db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
 			for (k = 0; k < no; k++) free(owned[k]);
 		}
 		if (hit) {
-			int erc = emit_vexec(vr, *pstmt, limit, out_buf, &rows, err);
+			int erc = emit_vexec(vr, limit, out_buf, &rows, err);
 			sx_vexec_free(vr);
 			if (erc != 0) { (void)sx_reset(*pstmt); return -1; }
 			if (quack_emit_done(out_buf, rows) < 0) {
