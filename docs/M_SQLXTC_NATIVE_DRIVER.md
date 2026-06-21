@@ -168,12 +168,11 @@ DONE and CI-green (commits 72a20ad, dc9bdbb, fef78b0):
     the VDBE until the driver is complete.
 
 REMAINING before sqlite3.c can be deleted:
-  - Subsystem D -- native DDL + catalog.  CREATE TABLE today is
-    rewritten to CREATE VIRTUAL TABLE xstore and run by SQLite's vtab
-    create; DROP/ALTER likewise.  The native driver must create/drop
-    xstore catalog entries directly (allocate a tableid, persist the
-    column catalog as the source of truth) so CREATE/DROP classify
-    native instead of declining to the VDBE.
+  - Subsystem D -- native DDL + catalog: DONE for CREATE TABLE / DROP
+    TABLE (xstore_create_table / xstore_drop_table; sx_classify +
+    sx_step dispatch them; test_native_driver creates/inserts/selects/
+    drops a table with no SQLite schema).  ALTER and CREATE INDEX/VIEW
+    still decline to the VDBE.
   - PRAGMA: journal_mode/synchronous -> no-op; table_info / table list
     -> native catalog.
   - Recognition completeness: with the driver on and NO fallback, every
@@ -186,11 +185,10 @@ REMAINING before sqlite3.c can be deleted:
     target) so the differential oracle still works after sqlite3.c is
     gone from the engine.
 
-Once CREATE/DROP/PRAGMA classify native and the recognition surface
-covers the corpus, flip g_native_driver on by default, change the
-sx_prepare decline into an error, delete the db_exec VDBE fall-through,
-then delete sqlite3.c + the vtab module + the shims (the mechanical
-step below).
+Once PRAGMA classifies native and the recognition surface covers the
+corpus, flip g_native_driver on by default, change the sx_prepare
+decline into an error, delete the db_exec VDBE fall-through, then delete
+sqlite3.c + the vtab module + the shims (the mechanical step below).
 
 ## Build strategy (how to do it without breaking the tree)
 
