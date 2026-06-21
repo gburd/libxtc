@@ -271,6 +271,20 @@ typedef struct xstore_ctx {
 	int             *sp_wn;       /* wbuf position at each open savepoint */
 	int             *sp_rn;       /* rset position at each open savepoint */
 	int              sp_n, sp_cap;
+
+	/*
+	 * Native-driver transaction ownership.  When native_mode is set (by
+	 * the native sx_stmt driver, which never calls the SQLite VDBE),
+	 * xs_enter_ctx consults native_autocommit BELOW instead of SQLite's
+	 * xsql_get_autocommit(db) -- the native driver, not SQLite, owns
+	 * autocommit / BEGIN state.  native_autocommit == 1 means autocommit
+	 * (no open explicit txn); the driver clears it on BEGIN and sets it
+	 * on COMMIT/ROLLBACK.  When native_mode is 0 the behavior is exactly
+	 * the SQLite-driven path (default), so this is inert until a native
+	 * driver opts in.
+	 */
+	int              native_mode;       /* 1 == driver owns autocommit */
+	int              native_autocommit; /* 1 == autocommit (native_mode only) */
 } xstore_ctx_t;
 
 /* Free and truncate wbuf entries [mark, wn), restoring the byte count.
@@ -939,22 +953,21 @@ static void
 xs_enter_ctx(xstore_ctx_t *cx, struct xsql *db)
 {
 	/*
-	 * Close a finished transaction.  A read-only transaction fires
-	 * neither the vtab write hooks nor SQLite's connection commit hook
-	 * (that only runs when the database was modified), so detect its
-	 * end here: if SQLite is back in autocommit but we are still marked
-	 * in_txn, the prior transaction is over -- reset so the next access
-	 * re-snapshots.  A written transaction was already closed by the
-	 * 2PC xCommit/xRollback path before autocommit returned, so this is
-	 * then a no-op.
+	 * Effective autocommit: in native_mode the native driver owns it
+	 * (native_autocommit); otherwise SQLite's connection flag governs,
+	 * as before.  The rest of the logic is identical -- close a finished
+	 * txn when autocommit is back on but we are still in_txn; open a txn
+	 * when autocommit is off and we are not yet in_txn.
 	 */
-	if (cx->in_txn && xsql_get_autocommit(db)) {
+	int autocommit = cx->native_mode ? cx->native_autocommit
+	                                 : xsql_get_autocommit(db);
+	if (cx->in_txn && autocommit) {
 		if (cx->ssi != NULL) { ssi_abort(cx->ssi); cx->ssi = NULL; }
 		wbuf_clear(cx);
 		cx->in_txn = 0;
 		xs_pin_recompute(cx);
 	}
-	if (!xsql_get_autocommit(db) && !cx->in_txn) {
+	if (!autocommit && !cx->in_txn) {
 		cx->in_txn = 1;
 		cx->txn_snap = atomic_load_explicit(&g_xclock, memory_order_relaxed);
 		wbuf_clear(cx);
@@ -2490,15 +2503,54 @@ int
 xstore_commit(struct xsql *db)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
-	if (cx == NULL || !cx->in_txn) return 0;
+	if (cx == NULL) return 0;
+	if (cx->native_mode) cx->native_autocommit = 1;   /* end explicit txn */
+	if (!cx->in_txn) return 0;
 	return xs_commit_ctx(cx) == SQLITE_OK ? 0 : -1;
 }
 int
 xstore_rollback(struct xsql *db)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
-	if (cx == NULL || !cx->in_txn) return 0;
+	if (cx == NULL) return 0;
+	if (cx->native_mode) cx->native_autocommit = 1;   /* end explicit txn */
+	if (!cx->in_txn) return 0;
 	return xs_rollback_ctx(cx) == SQLITE_OK ? 0 : -1;
+}
+
+/*
+ * Native-driver transaction ownership.  A native sx_stmt driver (which
+ * never calls the SQLite VDBE) calls xstore_native_mode(db, 1) once to
+ * take ownership of autocommit from SQLite, then drives BEGIN / COMMIT
+ * / ROLLBACK directly:
+ *   - xstore_native_begin clears native_autocommit (opening an explicit
+ *     txn) and enters the ctx so the snapshot is captured now;
+ *   - xstore_commit / xstore_rollback (above) set native_autocommit
+ *     back to 1 and flush / discard the txn.
+ * In native_mode xs_enter_ctx consults native_autocommit, so the
+ * autocommit DML path (a single statement outside an explicit txn) and
+ * the savepoint API work without any SQLite autocommit flag.  No-op /
+ * returns -1 when not xstore-backed.
+ */
+int
+xstore_native_mode(struct xsql *db, int on)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx == NULL) return -1;
+	cx->native_mode = on ? 1 : 0;
+	if (on) cx->native_autocommit = cx->in_txn ? 0 : 1;
+	return 0;
+}
+int
+xstore_native_begin(struct xsql *db)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx == NULL) return -1;
+	cx->native_mode = 1;
+	if (cx->in_txn) return 0;        /* already in a txn */
+	cx->native_autocommit = 0;       /* explicit txn open */
+	xs_enter_ctx(cx, db);            /* capture the snapshot now */
+	return 0;
 }
 
 /*
@@ -2602,6 +2654,53 @@ static int
 xs_rollback_to(xsql_vtab *pv, int level)
 {
 	return sp_rollback_to_ctx(((xstore_vtab_t *)pv)->ctx, level);
+}
+
+/* Public savepoint API for the native driver (native_mode).  level is
+ * 0-based.  In native_mode xs_enter_ctx consults native_autocommit, so
+ * a savepoint opened after xstore_native_begin operates on the open
+ * txn's wbuf -- identical semantics to the vtab xSavepoint/xRelease/
+ * xRollbackTo callbacks, which delegate to the same sp_*_ctx helpers.
+ * Return 0 / -1. */
+int
+xstore_savepoint(struct xsql *db, int level)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx == NULL) return -1;
+	return sp_open_ctx(cx, level) == SQLITE_OK ? 0 : -1;
+}
+int
+xstore_release(struct xsql *db, int level)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx == NULL) return -1;
+	return sp_release_ctx(cx, level) == SQLITE_OK ? 0 : -1;
+}
+int
+xstore_rollback_to(struct xsql *db, int level)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx == NULL) return -1;
+	return sp_rollback_to_ctx(cx, level) == SQLITE_OK ? 0 : -1;
+}
+
+/* Largest rowid in `tableid` INCLUDING this connection's uncommitted
+ * buffered writes -- the auto-rowid base for an in-txn INSERT, so a
+ * buffered row's rowid is not reused (matching the vtab xUpdate auto-
+ * rowid path).  Outside a txn this equals xstore_max_rowid.  Returns 0
+ * for an empty table / unknown db. */
+int64_t
+xstore_max_rowid_txn(struct xsql *db, uint32_t tableid)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	int64_t mx;
+	int i;
+	if (cx == NULL) return 0;
+	mx = xstore_max_rowid(cx->bt, tableid);
+	for (i = 0; i < cx->wn; i++)
+		if (cx->wbuf[i].tableid == tableid && cx->wbuf[i].rowid > mx)
+			mx = cx->wbuf[i].rowid;
+	return mx;
 }
 
 /* SQL functions: xstore_now() -> current clock; xstore_as_of(ts) pins
@@ -2868,6 +2967,8 @@ xstore_register(xsql *db, bt_t *bt)
 	ctx->sp_wn = NULL;
 	ctx->sp_rn = NULL;
 	ctx->sp_n = ctx->sp_cap = 0;
+	ctx->native_mode = 0;        /* SQLite drives autocommit until opted in */
+	ctx->native_autocommit = 1;  /* autocommit on (used only in native_mode) */
 	rc = xsql_create_module_v2(db, "xstore", &xstore_module, ctx, ctx_free);
 	if (rc != SQLITE_OK)
 		return rc;

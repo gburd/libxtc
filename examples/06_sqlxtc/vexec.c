@@ -6190,7 +6190,10 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 	}
 
 	/* ---- INSERT INTO t [(col,...)] VALUES (...) ... ----------------- */
-	maxr = xstore_max_rowid(bt, tableid);
+	/* Auto-rowid base includes this txn's buffered rows (so an in-txn
+	 * auto-PK INSERT does not reuse a buffered rowid); outside a txn this
+	 * is the committed max. */
+	maxr = xstore_max_rowid_txn(db, tableid);
 
 	/* ---- INSERT INTO t DEFAULT VALUES -------------------------------
 	 * One row: PK auto-assigned (max committed + 1), every non-PK column
