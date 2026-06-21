@@ -144,7 +144,10 @@ int xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid);
  * would assign to a NULL INTEGER PRIMARY KEY.  Snapshot value; callers
  * needing concurrency-safe allocation must serialize. */
 int64_t xstore_max_rowid(bt_t *bt, uint32_t tableid);
-
+/* Largest rowid in `tableid` including this connection's uncommitted
+ * buffered writes -- the auto-rowid base for an in-txn INSERT (a
+ * db-handle variant of xstore_max_rowid that also scans the wbuf). */
+int64_t xstore_max_rowid_txn(struct xsql *db, uint32_t tableid);
 /* Native table schema (replaces PRAGMA table_info / sqlite_master).  One
  * column descriptor per declared column, in declared order; column 0 is
  * the INTEGER PRIMARY KEY (the rowid).  `affinity` is the SQLite type
@@ -200,5 +203,18 @@ int xstore_txn_table_dirty(struct xsql *db, uint32_t tableid);
  * No-ops when not in a transaction.  Return 0 / <0. */
 int xstore_commit(struct xsql *db);
 int xstore_rollback(struct xsql *db);
+
+/* Native-driver transaction ownership (subsystems A+B).  A native
+ * sx_stmt driver calls xstore_native_mode(db, 1) to take autocommit
+ * ownership from SQLite, then drives BEGIN via xstore_native_begin and
+ * COMMIT/ROLLBACK via xstore_commit/xstore_rollback.  Savepoints (0-
+ * based level) go through xstore_savepoint/_release/_rollback_to.  When
+ * native_mode is off the engine behaves exactly as the SQLite-driven
+ * path.  Return 0 / -1 (not xstore-backed). */
+int xstore_native_mode(struct xsql *db, int on);
+int xstore_native_begin(struct xsql *db);
+int xstore_savepoint(struct xsql *db, int level);
+int xstore_release(struct xsql *db, int level);
+int xstore_rollback_to(struct xsql *db, int level);
 
 #endif /* SQLXTC_XSTORE_H */
