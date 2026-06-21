@@ -31,10 +31,13 @@
 extern "C" {
 #endif
 
-/* Opaque handles -- the same underlying structs the engine uses, named
- * so the application never references the vendored type names. */
+/* Opaque handles -- the application never references the vendored type
+ * names.  sx_db is still the engine connection; sx_stmt is a WRAPPER
+ * (defined in engine.c) that is either a VDBE statement (the default)
+ * or a NATIVE plan (when the native driver owns the connection), so the
+ * sx_* accessors can dispatch without the application caring. */
 typedef struct xsql      sx_db;
-typedef struct xsql_stmt sx_stmt;
+typedef struct sx_stmt   sx_stmt;
 struct xtc_loop;                 /* fwd: background storage procs run here */
 
 /* Result codes (values match the engine ABI; engine.c static-asserts). */
@@ -115,6 +118,14 @@ int  sx_step(sx_stmt *st);
 int  sx_reset(sx_stmt *st);
 int  sx_clear_bindings(sx_stmt *st);
 void sx_finalize(sx_stmt *st);
+
+/* Native-driver toggle (subsystems A+B).  When ON, sx_prepare builds a
+ * native plan (vexec / native write / native txn) instead of a VDBE
+ * statement and the engine runs WITHOUT the SQLite VDBE.  OFF by
+ * default until the recognition surface is complete; enabling it on an
+ * unhandled statement makes sx_prepare ERROR (no VDBE fallback). */
+void sx_native_driver(int on);
+int  sx_native_driver_enabled(void);
 
 /* Parameter binding (1-based index), for prepared statements. */
 int  sx_bind_count(sx_stmt *st);
