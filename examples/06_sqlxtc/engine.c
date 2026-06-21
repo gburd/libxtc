@@ -45,6 +45,47 @@ _Static_assert(SX_TEXT == SQLITE_TEXT, "SX_TEXT");
 _Static_assert(SX_BLOB == SQLITE_BLOB, "SX_BLOB");
 _Static_assert(SX_NULL == SQLITE_NULL, "SX_NULL");
 
+/*
+ * sx_stmt -- the statement wrapper.  native == 0 wraps a VDBE statement
+ * and every accessor below forwards to SQLite exactly as the engine
+ * always has (the default, byte-for-byte unchanged).  native == 1 holds
+ * a plan the native driver executes WITHOUT the VDBE: vexec for a
+ * SELECT, the native write path for DML, the xstore native-txn API for
+ * BEGIN/COMMIT/ROLLBACK/SAVEPOINT.  The driver is opt-in per process
+ * (g_native_driver); until it is enabled sx_stmt.native is always 0.
+ */
+enum sx_native_kind {
+	SXN_NONE = 0, SXN_SELECT, SXN_WRITE, SXN_BEGIN, SXN_COMMIT,
+	SXN_ROLLBACK, SXN_SAVEPOINT, SXN_RELEASE, SXN_ROLLBACK_TO
+};
+
+struct sx_stmt {
+	int            native;     /* 0 = VDBE (vdbe set); 1 = native plan */
+	xsql_stmt     *vdbe;       /* native == 0 */
+
+	/* native == 1 */
+	sx_db         *db;
+#ifdef SQLXTC_HAVE_LIME
+	enum sx_native_kind nkind;
+	char          *sql;        /* statement text (write / re-runnable) */
+	int            splevel;    /* SAVEPOINT/RELEASE/ROLLBACK TO level */
+	vx_cell_t      binds[32];
+	int            nbind;
+	vx_result_t   *vres;       /* SELECT: materialized result */
+	int            cur;        /* current row in vres (-1 before first) */
+	int            ran;        /* 1 once executed (one-shot for DML/txn) */
+	int64_t        nchanges;
+#endif
+};
+
+/* Native-driver enable: off by default (the engine is byte-for-byte the
+ * VDBE).  A future complete driver flips this on once the recognition
+ * surface covers the whole workload fall-back-free. */
+static int g_native_driver;
+
+void sx_native_driver(int on) { g_native_driver = on ? 1 : 0; }
+int  sx_native_driver_enabled(void) { return g_native_driver; }
+
 int
 sx_init(void)
 {
@@ -416,87 +457,136 @@ int
 sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
            const char **tail)
 {
-	return xsql_prepare_v2((xsql *)h, sql, n_bytes,
-	    (xsql_stmt **)out, tail);
+	struct sx_stmt *st;
+	xsql_stmt *vdbe = NULL;
+	int rc;
+
+	*out = NULL;
+	/*
+	 * Native-driver classification goes here when g_native_driver is on
+	 * (build a native plan, no VDBE).  Until the driver is complete this
+	 * is off, so every statement wraps a VDBE stmt -- the prepared
+	 * statement is byte-for-byte what it always was, just behind the
+	 * wrapper.  A NULL VDBE stmt (blank/comment-only fragment) is
+	 * preserved as a NULL *out so the caller's existing logic is
+	 * unchanged.
+	 */
+	rc = xsql_prepare_v2((xsql *)h, sql, n_bytes, &vdbe, tail);
+	if (rc != SQLITE_OK)
+		return rc;
+	if (vdbe == NULL)
+		return SQLITE_OK;            /* blank fragment: *out stays NULL */
+	st = (struct sx_stmt *)calloc(1, sizeof *st);
+	if (st == NULL) { (void)xsql_finalize(vdbe); return SQLITE_NOMEM; }
+	st->native = 0;
+	st->vdbe = vdbe;
+	*out = st;
+	return SQLITE_OK;
 }
 
-int   sx_step(sx_stmt *st)        { return xsql_step((xsql_stmt *)st); }
-int   sx_reset(sx_stmt *st)       { return xsql_reset((xsql_stmt *)st); }
-int   sx_clear_bindings(sx_stmt *st) { return xsql_clear_bindings((xsql_stmt *)st); }
-void  sx_finalize(sx_stmt *st)    { (void)xsql_finalize((xsql_stmt *)st); }
+int
+sx_step(sx_stmt *st)
+{
+	if (st == NULL) return SQLITE_MISUSE;
+	return xsql_step(st->vdbe);
+}
+int
+sx_reset(sx_stmt *st)
+{
+	if (st == NULL) return SQLITE_OK;
+	return xsql_reset(st->vdbe);
+}
+int
+sx_clear_bindings(sx_stmt *st)
+{
+	if (st == NULL) return SQLITE_OK;
+	return xsql_clear_bindings(st->vdbe);
+}
+void
+sx_finalize(sx_stmt *st)
+{
+	if (st == NULL) return;
+	if (!st->native)
+		(void)xsql_finalize(st->vdbe);
+#ifdef SQLXTC_HAVE_LIME
+	else {
+		if (st->vres) vx_result_free(st->vres);
+		free(st->sql);
+	}
+#endif
+	free(st);
+}
 
 int
 sx_bind_count(sx_stmt *st)
 {
-	return xsql_bind_parameter_count((xsql_stmt *)st);
+	return xsql_bind_parameter_count(st->vdbe);
 }
 int
 sx_bind_int64(sx_stmt *st, int idx, int64_t v)
 {
-	return xsql_bind_int64((xsql_stmt *)st, idx, v);
+	return xsql_bind_int64(st->vdbe, idx, v);
 }
 int
 sx_bind_double(sx_stmt *st, int idx, double v)
 {
-	return xsql_bind_double((xsql_stmt *)st, idx, v);
+	return xsql_bind_double(st->vdbe, idx, v);
 }
 int
 sx_bind_text(sx_stmt *st, int idx, const char *s, int n)
 {
-	return xsql_bind_text((xsql_stmt *)st, idx, s, n,
-	    SQLITE_TRANSIENT);
+	return xsql_bind_text(st->vdbe, idx, s, n, SQLITE_TRANSIENT);
 }
 int
 sx_bind_blob(sx_stmt *st, int idx, const void *p, int n)
 {
-	return xsql_bind_blob((xsql_stmt *)st, idx, p, n,
-	    SQLITE_TRANSIENT);
+	return xsql_bind_blob(st->vdbe, idx, p, n, SQLITE_TRANSIENT);
 }
 int
 sx_bind_null(sx_stmt *st, int idx)
 {
-	return xsql_bind_null((xsql_stmt *)st, idx);
+	return xsql_bind_null(st->vdbe, idx);
 }
 
 int
 sx_column_count(sx_stmt *st)
 {
-	return xsql_column_count((xsql_stmt *)st);
+	return xsql_column_count(st->vdbe);
 }
 const char *
 sx_column_name(sx_stmt *st, int i)
 {
-	return xsql_column_name((xsql_stmt *)st, i);
+	return xsql_column_name(st->vdbe, i);
 }
 int
 sx_column_type(sx_stmt *st, int i)
 {
-	return xsql_column_type((xsql_stmt *)st, i);
+	return xsql_column_type(st->vdbe, i);
 }
 int64_t
 sx_column_int64(sx_stmt *st, int i)
 {
-	return xsql_column_int64((xsql_stmt *)st, i);
+	return xsql_column_int64(st->vdbe, i);
 }
 double
 sx_column_double(sx_stmt *st, int i)
 {
-	return xsql_column_double((xsql_stmt *)st, i);
+	return xsql_column_double(st->vdbe, i);
 }
 const char *
 sx_column_text(sx_stmt *st, int i)
 {
-	return (const char *)xsql_column_text((xsql_stmt *)st, i);
+	return (const char *)xsql_column_text(st->vdbe, i);
 }
 const void *
 sx_column_blob(sx_stmt *st, int i)
 {
-	return xsql_column_blob((xsql_stmt *)st, i);
+	return xsql_column_blob(st->vdbe, i);
 }
 int
 sx_column_bytes(sx_stmt *st, int i)
 {
-	return xsql_column_bytes((xsql_stmt *)st, i);
+	return xsql_column_bytes(st->vdbe, i);
 }
 
 const char *
