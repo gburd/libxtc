@@ -2536,12 +2536,12 @@ sp_reserve(xstore_ctx_t *cx, int level)
 	return SQLITE_OK;
 }
 
+/* Savepoint operations on a txn context (shared by the vtab callbacks
+ * and the public db-handle wrappers below).  level is 0-based. */
 static int
-xs_savepoint(xsql_vtab *pv, int level)
+sp_open_ctx(xstore_ctx_t *cx, int level)
 {
-	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
 	int i, rc;
-
 	if (level < 0)
 		return SQLITE_OK;
 	if ((rc = sp_reserve(cx, level)) != SQLITE_OK)
@@ -2558,9 +2558,8 @@ xs_savepoint(xsql_vtab *pv, int level)
 }
 
 static int
-xs_release(xsql_vtab *pv, int level)
+sp_release_ctx(xstore_ctx_t *cx, int level)
 {
-	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
 	/* Close savepoints >= level.  Their writes merge into the parent
 	 * (kept in wbuf), so there is nothing to undo -- just forget the
 	 * marks. */
@@ -2572,13 +2571,12 @@ xs_release(xsql_vtab *pv, int level)
 }
 
 static int
-xs_rollback_to(xsql_vtab *pv, int level)
+sp_rollback_to_ctx(xstore_ctx_t *cx, int level)
 {
-	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
 	/* Undo everything since savepoint `level` opened: truncate the
 	 * write buffer and read set back to the marks captured then.  The
-	 * savepoint itself stays open (SQLite may roll back to it again),
-	 * so keep levels [0, level].  Deeper marks are discarded. */
+	 * savepoint itself stays open (it may be rolled back to again), so
+	 * keep levels [0, level].  Deeper marks are discarded. */
 	if (level < 0 || level >= cx->sp_n)
 		return SQLITE_OK;
 	wbuf_truncate(cx, cx->sp_wn[level]);
@@ -2586,6 +2584,24 @@ xs_rollback_to(xsql_vtab *pv, int level)
 		cx->rn = cx->sp_rn[level];
 	cx->sp_n = level + 1;
 	return SQLITE_OK;
+}
+
+static int
+xs_savepoint(xsql_vtab *pv, int level)
+{
+	return sp_open_ctx(((xstore_vtab_t *)pv)->ctx, level);
+}
+
+static int
+xs_release(xsql_vtab *pv, int level)
+{
+	return sp_release_ctx(((xstore_vtab_t *)pv)->ctx, level);
+}
+
+static int
+xs_rollback_to(xsql_vtab *pv, int level)
+{
+	return sp_rollback_to_ctx(((xstore_vtab_t *)pv)->ctx, level);
 }
 
 /* SQL functions: xstore_now() -> current clock; xstore_as_of(ts) pins
