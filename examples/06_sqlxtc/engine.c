@@ -22,6 +22,8 @@
 #include "sqlite3.h"
 #ifdef SQLXTC_HAVE_LIME
 #include "vexec.h"        /* vx_run -- the vectorized-executor fast path */
+#include "sql_parse.h"    /* sql_parse_ast -- classify statements natively */
+#include "sql_ast.h"
 #endif
 #include "xtc_async.h"     /* xtc_yield -- the fiber-yielding busy handler */
 #include "xtc_proc.h"      /* xtc_proc_sleep -- park, do not spin */
@@ -453,6 +455,45 @@ sx_exec(sx_db *h, const char *sql, char **errmsg)
 	return xsql_exec((xsql *)h, sql, NULL, NULL, errmsg);
 }
 
+#ifdef SQLXTC_HAVE_LIME
+/*
+ * Classify a single SQL statement for the native driver.  Returns the
+ * native kind (SXN_*), or SXN_NONE if the statement is not one the
+ * driver handles natively yet (multi-statement, DDL, PRAGMA, SAVEPOINT,
+ * EXPLAIN, ATTACH, or unparseable) -- the caller then builds a VDBE
+ * wrapper.  *tail_more is set when more SQL follows (multi-statement).
+ */
+static enum sx_native_kind
+sx_classify(const char *sql, int *tail_more)
+{
+	sql_arena_t *ast = NULL;
+	sql_stmt_t  *root = NULL;
+	const char  *perr = NULL;
+	enum sx_native_kind k = SXN_NONE;
+
+	*tail_more = 0;
+	if (sql_parse_ast(sql, strlen(sql), &ast, &root, &perr) != 0) {
+		if (ast) sql_arena_destroy(ast);
+		return SXN_NONE;
+	}
+	if (root == NULL) { if (ast) sql_arena_destroy(ast); return SXN_NONE; }
+	if (root->next != NULL) { *tail_more = 1; sql_arena_destroy(ast); return SXN_NONE; }
+	if (root->explain) { sql_arena_destroy(ast); return SXN_NONE; }
+	switch (root->kind) {
+	case SQL_KIND_SELECT:   k = SXN_SELECT;   break;
+	case SQL_KIND_INSERT:
+	case SQL_KIND_UPDATE:
+	case SQL_KIND_DELETE:   k = SXN_WRITE;    break;
+	case SQL_KIND_BEGIN:    k = SXN_BEGIN;    break;
+	case SQL_KIND_COMMIT:   k = SXN_COMMIT;   break;
+	case SQL_KIND_ROLLBACK: k = SXN_ROLLBACK; break;
+	default:                k = SXN_NONE;     break;   /* DDL/PRAGMA/etc. */
+	}
+	sql_arena_destroy(ast);
+	return k;
+}
+#endif /* SQLXTC_HAVE_LIME */
+
 int
 sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
            const char **tail)
@@ -462,10 +503,37 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 	int rc;
 
 	*out = NULL;
+#ifdef SQLXTC_HAVE_LIME
 	/*
-	 * Native-driver classification goes here when g_native_driver is on
-	 * (build a native plan, no VDBE).  Until the driver is complete this
-	 * is off, so every statement wraps a VDBE stmt -- the prepared
+	 * Native-driver path: when enabled, classify the statement.  A kind
+	 * the driver handles natively (SELECT / DML / BEGIN / COMMIT /
+	 * ROLLBACK, single-statement) becomes a native sx_stmt with NO VDBE
+	 * prepare.  Anything else (DDL, PRAGMA, SAVEPOINT, multi-statement,
+	 * unparseable) declines to the VDBE wrapper below -- during the
+	 * transition the VDBE still covers what the driver does not.  (When
+	 * the driver is complete this decline becomes an error instead.)
+	 */
+	if (g_native_driver && (n_bytes < 0 || (size_t)n_bytes == strlen(sql))) {
+		int more = 0;
+		enum sx_native_kind k = sx_classify(sql, &more);
+		if (k != SXN_NONE) {
+			st = (struct sx_stmt *)calloc(1, sizeof *st);
+			if (st == NULL) return SQLITE_NOMEM;
+			st->native = 1;
+			st->db = h;
+			st->nkind = k;
+			st->cur = -1;
+			st->sql = strdup(sql);
+			if (st->sql == NULL) { free(st); return SQLITE_NOMEM; }
+			if (tail) *tail = sql + strlen(sql);   /* single statement */
+			*out = st;
+			return SQLITE_OK;
+		}
+		/* SXN_NONE: fall through to the VDBE wrapper. */
+	}
+#endif
+	/*
+	 * Default (and native decline): wrap a VDBE statement.  The prepared
 	 * statement is byte-for-byte what it always was, just behind the
 	 * wrapper.  A NULL VDBE stmt (blank/comment-only fragment) is
 	 * preserved as a NULL *out so the caller's existing logic is
@@ -488,18 +556,77 @@ int
 sx_step(sx_stmt *st)
 {
 	if (st == NULL) return SQLITE_MISUSE;
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native) {
+		if (st->nkind == SXN_SELECT) {
+			/* First step: run the SELECT through vexec into vres. */
+			if (!st->ran) {
+				char *verr = NULL;
+				int rc = vx_run_p((sqlite3 *)st->db, st->sql,
+				    st->nbind ? st->binds : NULL, st->nbind, 1,
+				    &st->vres, &verr);
+				st->ran = 1;
+				if (verr) free(verr);
+				if (rc != 1 || st->vres == NULL) return SQLITE_ERROR;
+			}
+			st->cur++;
+			return (st->cur < vx_result_nrow(st->vres)) ? SQLITE_ROW
+			                                             : SQLITE_DONE;
+		}
+		if (st->ran) return SQLITE_DONE;   /* one-shot kinds */
+		st->ran = 1;
+		switch (st->nkind) {
+		case SXN_WRITE: {
+			int64_t nch = 0;
+			int rc = vx_run_write_p((sqlite3 *)st->db, st->sql,
+			    st->nbind ? st->binds : NULL, st->nbind, &nch, NULL);
+			if (rc != 1) return SQLITE_ERROR;
+			st->nchanges = nch;
+			return SQLITE_DONE;
+		}
+		case SXN_BEGIN:
+			return xstore_native_begin(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
+		case SXN_COMMIT:
+			return xstore_commit(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
+		case SXN_ROLLBACK:
+			return xstore_rollback(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
+		default:
+			return SQLITE_ERROR;
+		}
+	}
+#endif
 	return xsql_step(st->vdbe);
 }
 int
 sx_reset(sx_stmt *st)
 {
 	if (st == NULL) return SQLITE_OK;
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native) {
+		if (st->vres) { vx_result_free(st->vres); st->vres = NULL; }
+		st->cur = -1; st->ran = 0;
+		return SQLITE_OK;
+	}
+#endif
 	return xsql_reset(st->vdbe);
 }
 int
 sx_clear_bindings(sx_stmt *st)
 {
 	if (st == NULL) return SQLITE_OK;
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native) {
+		int i;
+		for (i = 0; i < st->nbind; i++)
+			if ((st->binds[i].type == VX_TEXT || st->binds[i].type == VX_BLOB) &&
+			    st->binds[i].bytes != NULL) {
+				free((void *)st->binds[i].bytes);
+				st->binds[i].bytes = NULL;
+			}
+		st->nbind = 0;
+		return SQLITE_OK;
+	}
+#endif
 	return xsql_clear_bindings(st->vdbe);
 }
 void
@@ -510,7 +637,12 @@ sx_finalize(sx_stmt *st)
 		(void)xsql_finalize(st->vdbe);
 #ifdef SQLXTC_HAVE_LIME
 	else {
+		int i;
 		if (st->vres) vx_result_free(st->vres);
+		for (i = 0; i < st->nbind; i++)
+			if ((st->binds[i].type == VX_TEXT || st->binds[i].type == VX_BLOB) &&
+			    st->binds[i].bytes != NULL)
+				free((void *)st->binds[i].bytes);
 		free(st->sql);
 	}
 #endif
@@ -520,72 +652,171 @@ sx_finalize(sx_stmt *st)
 int
 sx_bind_count(sx_stmt *st)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native) return st->nbind;   /* binds tracked as they are set */
+#endif
 	return xsql_bind_parameter_count(st->vdbe);
 }
 int
 sx_bind_int64(sx_stmt *st, int idx, int64_t v)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native) {
+		if (idx < 1 || idx > 32) return SQLITE_RANGE;
+		st->binds[idx-1].type = VX_INT; st->binds[idx-1].i = v;
+		if (idx > st->nbind) st->nbind = idx;
+		return SQLITE_OK;
+	}
+#endif
 	return xsql_bind_int64(st->vdbe, idx, v);
 }
 int
 sx_bind_double(sx_stmt *st, int idx, double v)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native) {
+		if (idx < 1 || idx > 32) return SQLITE_RANGE;
+		st->binds[idx-1].type = VX_REAL; st->binds[idx-1].r = v;
+		if (idx > st->nbind) st->nbind = idx;
+		return SQLITE_OK;
+	}
+#endif
 	return xsql_bind_double(st->vdbe, idx, v);
 }
 int
 sx_bind_text(sx_stmt *st, int idx, const char *s, int n)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native) {
+		uint8_t *p;
+		if (idx < 1 || idx > 32) return SQLITE_RANGE;
+		if (n < 0) n = s ? (int)strlen(s) : 0;
+		p = (uint8_t *)malloc((size_t)n + 1);
+		if (p == NULL) return SQLITE_NOMEM;
+		if (n && s) memcpy(p, s, (size_t)n);
+		p[n] = '\0';
+		/* The bind buffer is owned by the cell and freed on finalize/
+		 * reset/clear (see bind cleanup). */
+		st->binds[idx-1].type = VX_TEXT; st->binds[idx-1].bytes = p;
+		st->binds[idx-1].nbytes = (uint32_t)n;
+		if (idx > st->nbind) st->nbind = idx;
+		return SQLITE_OK;
+	}
+#endif
 	return xsql_bind_text(st->vdbe, idx, s, n, SQLITE_TRANSIENT);
 }
 int
 sx_bind_blob(sx_stmt *st, int idx, const void *p, int n)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native) {
+		uint8_t *b;
+		if (idx < 1 || idx > 32) return SQLITE_RANGE;
+		if (n < 0) n = 0;
+		b = (uint8_t *)malloc((size_t)n + 1);
+		if (b == NULL) return SQLITE_NOMEM;
+		if (n && p) memcpy(b, p, (size_t)n);
+		b[n] = '\0';
+		st->binds[idx-1].type = VX_BLOB; st->binds[idx-1].bytes = b;
+		st->binds[idx-1].nbytes = (uint32_t)n;
+		if (idx > st->nbind) st->nbind = idx;
+		return SQLITE_OK;
+	}
+#endif
 	return xsql_bind_blob(st->vdbe, idx, p, n, SQLITE_TRANSIENT);
 }
 int
 sx_bind_null(sx_stmt *st, int idx)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native) {
+		if (idx < 1 || idx > 32) return SQLITE_RANGE;
+		st->binds[idx-1].type = VX_NULL; st->binds[idx-1].nbytes = 0;
+		if (idx > st->nbind) st->nbind = idx;
+		return SQLITE_OK;
+	}
+#endif
 	return xsql_bind_null(st->vdbe, idx);
 }
 
 int
 sx_column_count(sx_stmt *st)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native)
+		return (st->nkind == SXN_SELECT && st->vres) ? vx_result_ncol(st->vres) : 0;
+#endif
 	return xsql_column_count(st->vdbe);
 }
 const char *
 sx_column_name(sx_stmt *st, int i)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native)
+		return (st->nkind == SXN_SELECT && st->vres) ? vx_result_name(st->vres, i) : NULL;
+#endif
 	return xsql_column_name(st->vdbe, i);
 }
 int
 sx_column_type(sx_stmt *st, int i)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native) {
+		if (st->nkind != SXN_SELECT || st->vres == NULL || st->cur < 0) return SX_NULL;
+		switch (vx_result_type(st->vres, st->cur, i)) {
+		case VX_INT:  return SX_INTEGER;
+		case VX_REAL: return SX_FLOAT;
+		case VX_TEXT: return SX_TEXT;
+		case VX_BLOB: return SX_BLOB;
+		default:      return SX_NULL;
+		}
+	}
+#endif
 	return xsql_column_type(st->vdbe, i);
 }
 int64_t
 sx_column_int64(sx_stmt *st, int i)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native)
+		return (st->vres && st->cur >= 0) ? vx_result_int64(st->vres, st->cur, i) : 0;
+#endif
 	return xsql_column_int64(st->vdbe, i);
 }
 double
 sx_column_double(sx_stmt *st, int i)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native)
+		return (st->vres && st->cur >= 0) ? vx_result_double(st->vres, st->cur, i) : 0.0;
+#endif
 	return xsql_column_double(st->vdbe, i);
 }
 const char *
 sx_column_text(sx_stmt *st, int i)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native)
+		return (st->vres && st->cur >= 0) ? vx_result_text(st->vres, st->cur, i) : NULL;
+#endif
 	return (const char *)xsql_column_text(st->vdbe, i);
 }
 const void *
 sx_column_blob(sx_stmt *st, int i)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native)
+		return (st->vres && st->cur >= 0) ? (const void *)vx_result_text(st->vres, st->cur, i) : NULL;
+#endif
 	return xsql_column_blob(st->vdbe, i);
 }
 int
 sx_column_bytes(sx_stmt *st, int i)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (st->native)
+		return (st->vres && st->cur >= 0) ? vx_result_bytes(st->vres, st->cur, i) : 0;
+#endif
 	return xsql_column_bytes(st->vdbe, i);
 }
 
