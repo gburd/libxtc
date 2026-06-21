@@ -439,6 +439,14 @@ test_native_txn: test_native_txn.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_g
 test-native-txn: test_native_txn
 	./test_native_txn
 
+test_native_driver: test_native_driver.c engine.c vfs.c mem.c mutex.c pcache.c metrics.c \
+    vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
+	$(CC) $(CFLAGS) -DSQLXTC_HAVE_LIME=1 -o $@ test_native_driver.c engine.c vfs.c mem.c mutex.c pcache.c metrics.c \
+		vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+
+test-native-driver: test_native_driver
+	./test_native_driver
+
 test_isolation: test_isolation.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
 	$(CC) $(CFLAGS) -o $@ test_isolation.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
