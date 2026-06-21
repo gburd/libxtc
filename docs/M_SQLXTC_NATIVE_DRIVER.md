@@ -92,6 +92,65 @@ xstore_scan_* / the write path / the catalog directly.  xs_best_index /
 xs_filter / xs_update / xBegin... and xsql_create_module_v2 are deleted
 with sqlite3.c.
 
+## The sx_stmt wrapper (the concrete subsystem-B change)
+
+Today `sx_stmt` is literally `typedef struct xsql_stmt sx_stmt` -- every
+sx_* accessor in engine.c is a cast + a call into SQLite.  The native
+driver makes `sx_stmt` an OPAQUE WRAPPER (a real struct in engine.c):
+
+    struct sx_stmt {
+        int          native;        /* 1 = native plan, 0 = VDBE stmt */
+        xsql_stmt   *vdbe;          /* native == 0 */
+        /* native == 1: */
+        sx_db       *db;
+        sql_kind_t   kind;          /* classified by the Lime parser */
+        vx_stmt_t   *vplan;         /* SELECT: a vexec plan (or run lazily) */
+        vx_result_t *vres;          /* materialized result for stepping */
+        int          cur;           /* current row in vres, -1 before first */
+        char        *sql;           /* kept for write/DDL/txn execution */
+        vx_cell_t    binds[32]; int nbind;
+        int64_t      nchanges;
+        char        *errmsg;
+    };
+
+ALL ~25 sx_* accessors dispatch on `native`: when 0 they call SQLite as
+today (so the wrapper is a no-op until native_mode); when 1 they read
+the native plan/result.  This is ONE atomic change (the moment the type
+changes shape every accessor must handle both), but it is mechanical:
+
+  - sx_prepare: parse (sql_parse_ast).  If native_mode AND the single
+    statement is one the native engine handles, build a native sx_stmt
+    (classify kind; for SELECT, defer the vexec run to sx_step so binds
+    can be set first).  Else build a VDBE sx_stmt (native == 0) exactly
+    as now.  Multi-statement stays on the looping db_exec path.
+  - sx_step (native): on first call, dispatch by kind --
+      SELECT  -> vx_run_p(db, sql, binds, nbind) -> vres; step rows;
+      DML     -> vx_run_write_p; set nchanges; return DONE (no rows);
+      BEGIN   -> xstore_native_begin; COMMIT -> xstore_commit;
+                 ROLLBACK -> xstore_rollback; SAVEPOINT/RELEASE/
+                 ROLLBACK TO -> xstore_savepoint/_release/_rollback_to
+                 (the sql_txn AST already carries the savepoint name ->
+                 map to a 0-based level);
+      CREATE/DROP -> native catalog DDL (subsystem D);
+      PRAGMA  -> native/no-op.
+    Subsequent calls walk vres rows (SELECT) or return DONE.
+  - sx_bind_* (native): store into binds[] for the deferred vx_run_p.
+  - sx_column_* (native): read vres via the vx_result_* accessors
+    (names from vx_result_name, already complete).
+  - sx_reset / sx_clear_bindings / sx_finalize: free vres / vplan /
+    sql; reset cur.
+
+The no-fallback gate lives in sx_prepare: in native_mode, if a single
+statement is NOT natively handled, it is an ERROR (sx_errmsg set), not a
+VDBE prepare -- which is why the recognition surface must be complete
+(below) before native_mode becomes the default.  Until then native_mode
+is off and sx_stmt.native is always 0, so the wrapper is inert and the
+tree stays byte-for-byte today's.
+
+The transaction foundation this rests on is DONE: xstore_native_mode /
+_begin / _commit / _rollback / _savepoint / _release / _rollback_to and
+xstore_max_rowid_txn (commit 72a20ad), validated by test_native_txn.
+
 ## Build strategy (how to do it without breaking the tree)
 
 1. Build the driver as a NEW module (`ndriver.c`) implementing a native
