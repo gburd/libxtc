@@ -151,6 +151,47 @@ The transaction foundation this rests on is DONE: xstore_native_mode /
 _begin / _commit / _rollback / _savepoint / _release / _rollback_to and
 xstore_max_rowid_txn (commit 72a20ad), validated by test_native_txn.
 
+## Status (what is built and proven)
+
+DONE and CI-green (commits 72a20ad, dc9bdbb, fef78b0):
+  - Subsystem C -- native transaction ownership: xstore_native_mode /
+    _begin / _commit / _rollback / _savepoint / _release /
+    _rollback_to + xstore_max_rowid_txn; xs_enter_ctx consults a native
+    autocommit flag.  Tested by test_native_txn.
+  - Subsystem B structure -- sx_stmt is a VDBE-or-native wrapper; all
+    ~25 sx_* accessors dispatch.
+  - Subsystems A+B execution -- sx_prepare classifies via the Lime
+    parser; sx_step dispatches SELECT -> vexec, DML -> native write,
+    BEGIN/COMMIT/ROLLBACK -> native txn, with NO VDBE program.  Tested
+    end to end by test_native_driver (driver-on vs VDBE, byte-identical).
+  - g_native_driver is OFF by default, so the engine is byte-for-byte
+    the VDBE until the driver is complete.
+
+REMAINING before sqlite3.c can be deleted:
+  - Subsystem D -- native DDL + catalog.  CREATE TABLE today is
+    rewritten to CREATE VIRTUAL TABLE xstore and run by SQLite's vtab
+    create; DROP/ALTER likewise.  The native driver must create/drop
+    xstore catalog entries directly (allocate a tableid, persist the
+    column catalog as the source of truth) so CREATE/DROP classify
+    native instead of declining to the VDBE.
+  - PRAGMA: journal_mode/synchronous -> no-op; table_info / table list
+    -> native catalog.
+  - Recognition completeness: with the driver on and NO fallback, every
+    statement the workload issues must classify + execute natively.
+    Known gaps still declining to the VDBE: SAVEPOINT (no grammar rule),
+    3+ table OUTER joins, join + ORDER BY, the scalar-subquery
+    correlation gate (needs a scoped resolver), and any read vexec does
+    not yet recognize.  Each is a bounded milestone.
+  - A reference SQLite kept OUTSIDE the shipped engine (a test-only
+    target) so the differential oracle still works after sqlite3.c is
+    gone from the engine.
+
+Once CREATE/DROP/PRAGMA classify native and the recognition surface
+covers the corpus, flip g_native_driver on by default, change the
+sx_prepare decline into an error, delete the db_exec VDBE fall-through,
+then delete sqlite3.c + the vtab module + the shims (the mechanical
+step below).
+
 ## Build strategy (how to do it without breaking the tree)
 
 1. Build the driver as a NEW module (`ndriver.c`) implementing a native
