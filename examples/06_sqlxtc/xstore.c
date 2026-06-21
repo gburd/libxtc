@@ -939,6 +939,23 @@ xstore_cat_forget(bt_t *bt)
 	pthread_mutex_unlock(&g_cat_mu);
 }
 
+/* Forget the cached id for ONE (bt, name) -- used by xstore_drop_table
+ * so a later create reallocates a fresh id rather than reusing the
+ * dropped one from the in-process cache. */
+static void
+xstore_cat_forget_one(bt_t *bt, const char *name)
+{
+	int i;
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_cat_n; i++)
+		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
+			g_cat_n--;
+			if (i != g_cat_n) g_cat[i] = g_cat[g_cat_n];
+			break;
+		}
+	pthread_mutex_unlock(&g_cat_mu);
+}
+
 /*
  * Enter the SQL transaction on first vtab access.  SQLite fires xBegin
  * at the first WRITE, not the first read, so reads before the first
@@ -2701,6 +2718,49 @@ xstore_max_rowid_txn(struct xsql *db, uint32_t tableid)
 		if (cx->wbuf[i].tableid == tableid && cx->wbuf[i].rowid > mx)
 			mx = cx->wbuf[i].rowid;
 	return mx;
+}
+
+/*
+ * Native DDL over the xstore catalog (subsystem D, for the native
+ * driver -- no SQLite vtab create).  xstore_create_table allocates a
+ * tableid and persists the column schema (coldefs = the comma-joined
+ * column-def list, first column the INTEGER PRIMARY KEY), exactly as
+ * the vtab xConnect does via xs_cat_find_or_create -- so vexec / the
+ * native write path can then operate on the table with no SQLite
+ * schema.  Returns the tableid (>0) or 0 on error / already-exists
+ * (find_or_create returns the existing id, which is fine: idempotent).
+ * xstore_drop_table writes a delete-marked catalog row (the lookup
+ * skips it, like a renamed-away entry) and forgets the cache.  Returns
+ * 0 / -1.  NOTE: these bypass SQLite's schema entirely; they are for
+ * the native driver, where there is no VDBE to keep in sync.
+ */
+uint32_t
+xstore_create_table(struct xsql *db, const char *name, const char *coldefs)
+{
+	bt_t *bt = xstore_bt_of(db);
+	if (bt == NULL || name == NULL) return 0;
+	return xs_cat_find_or_create(bt, name, coldefs);
+}
+int
+xstore_drop_table(struct xsql *db, const char *name)
+{
+	bt_t *bt = xstore_bt_of(db);
+	uint32_t id;
+	uint8_t vbuf[256];
+	size_t nlen;
+	if (bt == NULL || name == NULL) return -1;
+	id = xs_cat_lookup(bt, name);
+	if (id == 0) return 0;               /* not present: idempotent */
+	/* Tombstone the catalog row: a new version at (XS_CAT_TABLEID, id)
+	 * marked deleted, so xs_cat_lookup skips it.  Keep the name as the
+	 * payload (harmless; the delete flag is what matters). */
+	nlen = strlen(name);
+	if (nlen > sizeof vbuf) nlen = sizeof vbuf;
+	memcpy(vbuf, name, nlen);
+	if (xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)nlen, 1) != SQLITE_OK)
+		return -1;
+	xstore_cat_forget_one(bt, name);
+	return 0;
 }
 
 /* SQL functions: xstore_now() -> current clock; xstore_as_of(ts) pins

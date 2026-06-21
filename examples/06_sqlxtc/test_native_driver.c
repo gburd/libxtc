@@ -115,6 +115,30 @@ main(void)
 	run(h, "SELECT count(*) FROM t WHERE b = 'r'", off, sizeof off);
 	CK(strcmp(off, "0 | ") == 0, "native BEGIN/insert/ROLLBACK discarded the row");
 
+	/* Native DDL: CREATE TABLE + DROP TABLE through the native driver
+	 * (no SQLite schema), then write + read the natively-created table
+	 * entirely natively. */
+	sx_native_driver(1);
+	exec1(h, "CREATE TABLE nt(id INTEGER PRIMARY KEY, v INT, s TEXT)");
+	exec1(h, "INSERT INTO nt(v, s) VALUES(11, 'aa')");
+	exec1(h, "INSERT INTO nt(v, s) VALUES(22, 'bb')");
+	run(h, "SELECT v, s FROM nt WHERE v > 5 ORDER BY v", on, sizeof on);
+	CK(strcmp(on, "11 aa | 22 bb | ") == 0, "native CREATE + INSERT + SELECT on a vtab-free table");
+	exec1(h, "DROP TABLE nt");
+	{
+		/* After DROP the catalog entry is gone: the native SELECT prepares
+		 * (a SELECT classifies structurally) but vexec finds no catalog
+		 * entry, so the step errors -- no rows, not SX_ROW. */
+		sx_stmt *st = NULL; const char *tl = NULL;
+		int pr = sx_prepare(h, "SELECT v FROM nt", -1, &st, &tl);
+		int got_row = 0;
+		if (pr == SX_OK && st != NULL)
+			got_row = (sx_step(st) == SX_ROW);
+		CK(!got_row, "DROP TABLE: no rows from the dropped table");
+		if (st) sx_finalize(st);
+	}
+	sx_native_driver(0);
+
 	sx_close(h);
 	sx_storage_close();
 	unlink(storepath);

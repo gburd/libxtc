@@ -58,7 +58,8 @@ _Static_assert(SX_NULL == SQLITE_NULL, "SX_NULL");
  */
 enum sx_native_kind {
 	SXN_NONE = 0, SXN_SELECT, SXN_WRITE, SXN_BEGIN, SXN_COMMIT,
-	SXN_ROLLBACK, SXN_SAVEPOINT, SXN_RELEASE, SXN_ROLLBACK_TO
+	SXN_ROLLBACK, SXN_SAVEPOINT, SXN_RELEASE, SXN_ROLLBACK_TO,
+	SXN_CREATE, SXN_DROP
 };
 
 struct sx_stmt {
@@ -71,6 +72,8 @@ struct sx_stmt {
 	enum sx_native_kind nkind;
 	char          *sql;        /* statement text (write / re-runnable) */
 	int            splevel;    /* SAVEPOINT/RELEASE/ROLLBACK TO level */
+	char          *ddl_name;   /* CREATE/DROP table name */
+	char          *ddl_cols;   /* CREATE coldefs (comma-joined) */
 	vx_cell_t      binds[32];
 	int            nbind;
 	vx_result_t   *vres;       /* SELECT: materialized result */
@@ -459,12 +462,16 @@ sx_exec(sx_db *h, const char *sql, char **errmsg)
 /*
  * Classify a single SQL statement for the native driver.  Returns the
  * native kind (SXN_*), or SXN_NONE if the statement is not one the
- * driver handles natively yet (multi-statement, DDL, PRAGMA, SAVEPOINT,
- * EXPLAIN, ATTACH, or unparseable) -- the caller then builds a VDBE
- * wrapper.  *tail_more is set when more SQL follows (multi-statement).
+ * driver handles natively yet (PRAGMA, SAVEPOINT, multi-statement,
+ * EXPLAIN, ATTACH, an INDEX/VIEW CREATE, or unparseable) -- the caller
+ * then builds a VDBE wrapper.  *tail_more is set when more SQL follows.
+ * For CREATE TABLE / DROP TABLE the table name (and, for CREATE, the
+ * comma-joined coldefs with the PK column first) are written to the
+ * caller's buffers so the AST can be freed here.
  */
 static enum sx_native_kind
-sx_classify(const char *sql, int *tail_more)
+sx_classify(const char *sql, int *tail_more,
+            char *namebuf, size_t namecap, char *colbuf, size_t colcap)
 {
 	sql_arena_t *ast = NULL;
 	sql_stmt_t  *root = NULL;
@@ -472,6 +479,8 @@ sx_classify(const char *sql, int *tail_more)
 	enum sx_native_kind k = SXN_NONE;
 
 	*tail_more = 0;
+	if (namebuf) namebuf[0] = '\0';
+	if (colbuf) colbuf[0] = '\0';
 	if (sql_parse_ast(sql, strlen(sql), &ast, &root, &perr) != 0) {
 		if (ast) sql_arena_destroy(ast);
 		return SXN_NONE;
@@ -487,7 +496,61 @@ sx_classify(const char *sql, int *tail_more)
 	case SQL_KIND_BEGIN:    k = SXN_BEGIN;    break;
 	case SQL_KIND_COMMIT:   k = SXN_COMMIT;   break;
 	case SQL_KIND_ROLLBACK: k = SXN_ROLLBACK; break;
-	default:                k = SXN_NONE;     break;   /* DDL/PRAGMA/etc. */
+	case SQL_KIND_CREATE: {
+		/* Only a plain CREATE TABLE with a column list maps to the native
+		 * xstore catalog; TABLE AS / VIEW / INDEX decline to the VDBE.
+		 * The persisted coldefs is "<name> <type>" per column with the
+		 * INTEGER PRIMARY KEY column FIRST (xstore's rowid convention),
+		 * matching what the vtab xConnect records. */
+		const sql_create_t *c = root->u.create;
+		const sql_coldef_t *col, *pk = NULL;
+		size_t co = 0;
+		int ok = (c != NULL && c->cols != NULL && c->select == NULL &&
+		          c->name.len > 0 && (size_t)c->name.len < namecap);
+		if (ok) {
+			memcpy(namebuf, c->name.p, c->name.len);
+			namebuf[c->name.len] = '\0';
+			/* Find the PRIMARY KEY column (xstore requires exactly one,
+			 * the integer rowid).  If none is declared, decline -- xstore
+			 * tables always have an explicit pk as column 0. */
+			for (col = c->cols; col; col = col->next)
+				if (col->primary) { if (pk) { ok = 0; } pk = col; }
+			if (pk == NULL) ok = 0;
+		}
+		if (ok) {
+			/* Emit the pk first, then the rest in declared order. */
+			int phase;
+			for (phase = 0; phase < 2 && ok; phase++) {
+				for (col = c->cols; col && ok; col = col->next) {
+					int w, is_pk = (col == pk);
+					if (phase == 0 ? !is_pk : is_pk) continue;
+					if (col->name.len == 0) { ok = 0; break; }
+					if (col->type.len > 0)
+						w = snprintf(colbuf + co, colcap - co, "%s%.*s %.*s",
+						    co ? "," : "", (int)col->name.len, col->name.p,
+						    (int)col->type.len, col->type.p);
+					else
+						w = snprintf(colbuf + co, colcap - co, "%s%.*s",
+						    co ? "," : "", (int)col->name.len, col->name.p);
+					if (w < 0 || (size_t)(co + (size_t)w) >= colcap) { ok = 0; break; }
+					co += (size_t)w;
+				}
+			}
+		}
+		k = ok ? SXN_CREATE : SXN_NONE;
+		break;
+	}
+	case SQL_KIND_DROP: {
+		const sql_drop_t *d = root->u.drop;
+		if (d != NULL && d->kind == SX_DR_TABLE &&
+		    d->name.len > 0 && (size_t)d->name.len < namecap) {
+			memcpy(namebuf, d->name.p, d->name.len);
+			namebuf[d->name.len] = '\0';
+			k = SXN_DROP;
+		} else k = SXN_NONE;
+		break;
+	}
+	default:                k = SXN_NONE;     break;   /* PRAGMA/etc. */
 	}
 	sql_arena_destroy(ast);
 	return k;
@@ -515,7 +578,9 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 	 */
 	if (g_native_driver && (n_bytes < 0 || (size_t)n_bytes == strlen(sql))) {
 		int more = 0;
-		enum sx_native_kind k = sx_classify(sql, &more);
+		char nm[128], cols[1024];
+		enum sx_native_kind k = sx_classify(sql, &more, nm, sizeof nm,
+		                                    cols, sizeof cols);
 		if (k != SXN_NONE) {
 			st = (struct sx_stmt *)calloc(1, sizeof *st);
 			if (st == NULL) return SQLITE_NOMEM;
@@ -525,6 +590,17 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 			st->cur = -1;
 			st->sql = strdup(sql);
 			if (st->sql == NULL) { free(st); return SQLITE_NOMEM; }
+			if (k == SXN_CREATE || k == SXN_DROP) {
+				st->ddl_name = strdup(nm);
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
+				if (k == SXN_CREATE) {
+					st->ddl_cols = strdup(cols);
+					if (st->ddl_cols == NULL) {
+						free(st->ddl_name); free(st->sql); free(st);
+						return SQLITE_NOMEM;
+					}
+				}
+			}
 			if (tail) *tail = sql + strlen(sql);   /* single statement */
 			*out = st;
 			return SQLITE_OK;
@@ -590,6 +666,12 @@ sx_step(sx_stmt *st)
 			return xstore_commit(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
 		case SXN_ROLLBACK:
 			return xstore_rollback(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
+		case SXN_CREATE:
+			return xstore_create_table(st->db, st->ddl_name, st->ddl_cols) != 0
+			    ? SQLITE_DONE : SQLITE_ERROR;
+		case SXN_DROP:
+			return xstore_drop_table(st->db, st->ddl_name) == 0
+			    ? SQLITE_DONE : SQLITE_ERROR;
 		default:
 			return SQLITE_ERROR;
 		}
@@ -644,6 +726,8 @@ sx_finalize(sx_stmt *st)
 			    st->binds[i].bytes != NULL)
 				free((void *)st->binds[i].bytes);
 		free(st->sql);
+		free(st->ddl_name);
+		free(st->ddl_cols);
 	}
 #endif
 	free(st);

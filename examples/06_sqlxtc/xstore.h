@@ -217,4 +217,15 @@ int xstore_savepoint(struct xsql *db, int level);
 int xstore_release(struct xsql *db, int level);
 int xstore_rollback_to(struct xsql *db, int level);
 
+/* Native DDL over the xstore catalog (subsystem D).  create_table
+ * allocates a tableid + persists the column schema (coldefs = the
+ * comma-joined column list, first column the INTEGER PRIMARY KEY), the
+ * same catalog row the vtab xConnect writes -- vexec / the native write
+ * path then operate on the table with no SQLite schema.  Returns the
+ * tableid (>0) or 0.  drop_table tombstones the catalog row (lookup
+ * skips it).  Returns 0 / -1.  These bypass SQLite's schema -- for the
+ * native driver, where there is no VDBE to keep in sync. */
+uint32_t xstore_create_table(struct xsql *db, const char *name, const char *coldefs);
+int xstore_drop_table(struct xsql *db, const char *name);
+
 #endif /* SQLXTC_XSTORE_H */
