@@ -680,7 +680,6 @@ nat_select_run(struct sx_stmt *st)
 	if (verr) free(verr);
 	return (rc == 1 && st->vres != NULL);
 }
-#endif
 
 /* Convert a native sx_stmt to a VDBE statement when the native executor
  * declines a statement at run time (e.g. an in-txn explicit-PK INSERT
@@ -713,6 +712,7 @@ nat_fallback_to_vdbe(struct sx_stmt *st)
 	st->native = 0;   /* from here the wrapper forwards to the VDBE */
 	return 1;
 }
+#endif /* SQLXTC_HAVE_LIME */
 
 int
 sx_step(sx_stmt *st)
