@@ -325,9 +325,14 @@ main(void)
 		}
 		CK(run_live(h, sql, &on, &non) == 0, sql);
 
-		/* vexec OFF (VDBE only) */
+		/* vexec OFF (VDBE only): also force the native sx_stmt driver off
+		 * so this run is a PURE VDBE reference -- the differential oracle.
+		 * (The driver is on by default now; without this the reference
+		 * would itself be native and the comparison vacuous.) */
 		setenv("SQLXTC_VEXEC", "0", 1);
+		sx_native_driver(0);
 		CK(run_live(h, sql, &off, &noff) == 0, sql);
+		sx_native_driver(1);
 		unsetenv("SQLXTC_VEXEC");
 
 		if (on && off) {

@@ -2720,6 +2720,48 @@ xstore_max_rowid_txn(struct xsql *db, uint32_t tableid)
 	return mx;
 }
 
+/* Is `rowid` a live committed row of `tableid` (newest version present
+ * and not a tombstone)?  Used by the in-txn uniqueness check. */
+static int
+xs_row_live(bt_t *bt, uint32_t tableid, int64_t rowid)
+{
+	bt_cursor_t *cur = NULL;
+	uint8_t startk[XS_VKLEN];
+	const void *k = NULL, *vv = NULL;
+	uint16_t klen = 0, vl = 0;
+	int live = 0;
+	if (bt == NULL) return 0;
+	enc_vkey(tableid, rowid, ~(uint64_t)0, startk);   /* newest version first */
+	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
+		return 0;
+	if (bt_cursor_next(cur, &k, &klen, &vv, &vl) == XTC_OK &&
+	    klen == XS_VKLEN &&
+	    dec_tableid((const uint8_t *)k) == tableid &&
+	    dec_rowid((const uint8_t *)k) == rowid)
+		live = !(vl >= 1 && (((const uint8_t *)vv)[0] & XS_F_DELETED));
+	bt_cursor_close(cur);
+	return live;
+}
+
+/* Does `rowid` exist as a LIVE row of `tableid`, accounting for this
+ * connection's uncommitted buffered writes?  A buffered tombstone hides
+ * a committed row; a buffered upsert reveals one.  Lets the native
+ * INSERT enforce PK uniqueness INSIDE a transaction (where a plain
+ * committed-B-tree probe would miss buffered rows).  Returns 1 if live,
+ * 0 otherwise. */
+int
+xstore_row_exists_txn(struct xsql *db, uint32_t tableid, int64_t rowid)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx == NULL) return 0;
+	if (cx->in_txn) {
+		const xs_wrec_t *w = wbuf_find(cx, tableid, rowid);
+		if (w != NULL)
+			return w->deleted ? 0 : 1;   /* buffered write decides */
+	}
+	return xs_row_live(cx->bt, tableid, rowid);
+}
+
 /*
  * Native DDL over the xstore catalog (subsystem D, for the native
  * driver -- no SQLite vtab create).  xstore_create_table allocates a

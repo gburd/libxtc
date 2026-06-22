@@ -148,6 +148,11 @@ int64_t xstore_max_rowid(bt_t *bt, uint32_t tableid);
  * buffered writes -- the auto-rowid base for an in-txn INSERT (a
  * db-handle variant of xstore_max_rowid that also scans the wbuf). */
 int64_t xstore_max_rowid_txn(struct xsql *db, uint32_t tableid);
+/* Does `rowid` exist as a live row of `tableid`, including this
+ * connection's uncommitted buffered writes (a buffered tombstone hides
+ * a committed row, a buffered upsert reveals one)?  Lets the native
+ * INSERT enforce PK uniqueness inside a transaction.  Returns 1 / 0. */
+int xstore_row_exists_txn(struct xsql *db, uint32_t tableid, int64_t rowid);
 /* Native table schema (replaces PRAGMA table_info / sqlite_master).  One
  * column descriptor per declared column, in declared order; column 0 is
  * the INTEGER PRIMARY KEY (the rowid).  `affinity` is the SQLite type
