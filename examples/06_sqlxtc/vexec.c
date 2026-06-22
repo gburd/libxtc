@@ -406,6 +406,11 @@ struct vx_stmt {
 	 * plan (the proj/filter trees index the source columns, whose
 	 * order is fixed by srccols). */
 	char          table[64];
+	char          corr_alias[64];   /* outer correlation name: the FROM
+	                                 * alias if present, else the table name
+	                                 * -- the qualifier a correlated
+	                                 * subquery uses to reference this
+	                                 * (single-table read path) row. */
 	char          srccols[2100];   /* comma-joined source column list, or "*" */
 
 	/* Per-row scratch: the source row materialized as cells. */
@@ -1114,7 +1119,7 @@ build_corr_stmt(struct vx_compiler *c, const sql_expr_t *e,
 		return -1;
 	if (c->st->ncorr >= (int)(sizeof c->st->corrsql / sizeof c->st->corrsql[0]))
 		return -1;
-	otab = c->st->table;
+	otab = c->st->corr_alias[0] ? c->st->corr_alias : c->st->table;
 
 	/* Collect outer-column references from the subquery's expressions. */
 	nref = 0;
@@ -2791,6 +2796,16 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	st->cur = -1;
 	st->binds = binds; st->nbinds = nbinds;
 	st->distinct = sel->distinct;
+	/* Outer correlation name: the FROM alias if present (a correlated
+	 * subquery must reference the outer row by the alias, e.g.
+	 * FROM t x ... WHERE ... = (SELECT ... WHERE inner.k <= x.k)), else
+	 * the bare table name. */
+	if (src->alias.len > 0 && src->alias.len < sizeof st->corr_alias) {
+		memcpy(st->corr_alias, src->alias.p, src->alias.len);
+		st->corr_alias[src->alias.len] = '\0';
+	} else {
+		snprintf(st->corr_alias, sizeof st->corr_alias, "%s", tabbuf);
+	}
 
 	memset(&nv, 0, sizeof nv);
 	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
@@ -2803,7 +2818,7 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	 * WHERE column names must resolve against the source columns, which
 	 * we do by name after preparing "SELECT *". */
 	if (!proj_star) {
-		cc_otab = tabbuf;   /* collect correlated-subquery outer refs */
+		cc_otab = st->corr_alias;   /* collect correlated-subquery outer refs */
 		for (it = sel->cols->head; it; it = it->next)
 			if (collect_columns(&nv, it->expr) != 0) { cc_otab = NULL; goto fallback; }
 		if (sel->where && collect_columns(&nv, sel->where) != 0) { cc_otab = NULL; goto fallback; }
