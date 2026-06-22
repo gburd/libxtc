@@ -182,23 +182,25 @@ REMAINING before sqlite3.c can be deleted (the exact final gate):
     module).  In a vtab-free world they must use plain CREATE TABLE ->
     xstore_create_table.  Switch the idiom everywhere, then the vtab
     module + xsql_create_module_v2 can go.
-  - Recognition completeness: with the driver on and NO fallback, every
-    statement must classify + execute natively.  The corpus has ONE
-    decliner left -- the aliased-outer correlated subquery
-    (SELECT max(a) FROM t y WHERE y.k <= x.k), the scalar-subquery
-    correlation gate that needs a scoped name resolver to tell x.k
-    (outer) from y.k (inner) when both name table t.  Plus the gaps a
-    real client could hit: SAVEPOINT (no grammar rule), read PRAGMA
-    returning rows (table_info), 3+ table OUTER joins, join + ORDER BY,
-    ALTER, CREATE INDEX/VIEW.  Each is a bounded milestone.
+  - Recognition completeness: DONE for the corpus -- the last decliner
+    (the aliased-outer correlated subquery) is now served natively
+    (commit 7e269f2), so the full 70-query read corpus + writes run
+    fall-back-free with the driver on, byte-identical to the VDBE.
+    Client-reachable gaps that would still need closing for a general
+    workload (not in the corpus): SAVEPOINT, read PRAGMA returning rows
+    (table_info), 3+ table OUTER joins, join + ORDER BY, ALTER, CREATE
+    INDEX/VIEW.  Each is a bounded milestone; the corpus is the
+    contract for the differential, so corpus-complete is the bar for
+    flipping the default on for the tested workload.
   - A reference SQLite kept OUTSIDE the shipped engine (a test-only
     target) so the differential oracle still works after sqlite3.c is
-    gone from the engine.  This is itself a build-system change.
+    gone from the engine.  This is itself a build-system change and is
+    ESSENTIAL: deleting sqlite3.c without it removes the oracle that
+    proves correctness.
 
-Once the idiom is switched, the corpus decliner is closed, and a
-reference oracle exists, flip g_native_driver on by default, change the
-sx_prepare decline into an error, delete the db_exec VDBE fall-through,
-then delete
+Once the idiom is switched and a reference oracle exists, flip
+g_native_driver on by default, change the sx_prepare decline into an
+error, delete the db_exec VDBE fall-through, then delete
 sqlite3.c + the vtab module + the shims (the mechanical step below).
 
 ## Build strategy (how to do it without breaking the tree)
