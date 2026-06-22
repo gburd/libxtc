@@ -26,6 +26,10 @@ struct wal;
  * (the cooling buffer pool, larger-than-RAM capable) rather than in
  * SQLite's built-in B-tree. */
 int xstore_register(struct xsql *db, bt_t *bt);
+/* Drop a connection's xstore association on close (releases its g_dbmap
+ * slot so the fixed-size map does not overflow under many connections).
+ * Call before xsql_close.  Safe for an unregistered handle. */
+void xstore_unregister(struct xsql *db);
 
 /* Attach a write-ahead log to the engine (process-global, like the
  * shared B-tree and commit clock).  When set, each commit logs its

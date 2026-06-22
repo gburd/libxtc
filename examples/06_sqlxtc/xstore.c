@@ -3144,6 +3144,29 @@ xstore_register(xsql *db, bt_t *bt)
 	return SQLITE_OK;
 }
 
+/* Drop the connection -> bt/ctx association when a connection closes, so
+ * the fixed-size g_dbmap does not leak slots and overflow under many
+ * short-lived connections (the 64-client load test).  The ctx itself is
+ * freed by SQLite's module ctx_free; here we only release the map slot
+ * (swap-remove).  Without this, the (N+1)-th connection past XS_DBMAP_MAX
+ * went unregistered, so xstore_bt_of returned NULL and every native
+ * statement on it fell back to the VDBE -- which does not know the
+ * catalog-only tables ("no such table").  Safe to call for a handle that
+ * was never registered. */
+void
+xstore_unregister(struct xsql *db)
+{
+	int i;
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_dbmap_n; i++)
+		if (g_dbmap[i].db == db) {
+			g_dbmap_n--;
+			if (i != g_dbmap_n) g_dbmap[i] = g_dbmap[g_dbmap_n];
+			break;
+		}
+	pthread_mutex_unlock(&g_cat_mu);
+}
+
 /*
  * Recovery driver.  One forward scan over the log redoes every update
  * (idempotent: version keys (rowid, ~commit_ts) are immutable) and, as
