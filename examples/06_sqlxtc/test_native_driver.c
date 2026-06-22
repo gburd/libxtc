@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "engine.h"
+#include "xstore.h"
 
 static int g_fail;
 #define CK(c, m) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", (m)); g_fail = 1; } } while (0)
@@ -115,20 +116,21 @@ main(void)
 	run(h, "SELECT count(*) FROM t WHERE b = 'r'", off, sizeof off);
 	CK(strcmp(off, "0 | ") == 0, "native BEGIN/insert/ROLLBACK discarded the row");
 
-	/* Native DDL: CREATE TABLE + DROP TABLE through the native driver
-	 * (no SQLite schema), then write + read the natively-created table
-	 * entirely natively. */
+	/* Native DDL over the xstore catalog -- via the direct primitives
+	 * (xstore_create_table / xstore_drop_table), the path the from-
+	 * scratch engine uses once the vtab is retired.  Create a table with
+	 * NO SQLite schema, then INSERT + SELECT run natively over it. */
 	sx_native_driver(1);
-	exec1(h, "CREATE TABLE nt(id INTEGER PRIMARY KEY, v INT, s TEXT)");
+	CK(xstore_create_table((struct xsql *)h, "nt", "id INTEGER PRIMARY KEY,v INT,s TEXT") != 0,
+	   "native CREATE TABLE (catalog, no vtab)");
 	exec1(h, "INSERT INTO nt(v, s) VALUES(11, 'aa')");
 	exec1(h, "INSERT INTO nt(v, s) VALUES(22, 'bb')");
 	run(h, "SELECT v, s FROM nt WHERE v > 5 ORDER BY v", on, sizeof on);
-	CK(strcmp(on, "11 aa | 22 bb | ") == 0, "native CREATE + INSERT + SELECT on a vtab-free table");
-	exec1(h, "DROP TABLE nt");
+	CK(strcmp(on, "11 aa | 22 bb | ") == 0,
+	   "native INSERT + SELECT on a vtab-free catalog table");
+	CK(xstore_drop_table((struct xsql *)h, "nt") == 0, "native DROP TABLE");
 	{
-		/* After DROP the catalog entry is gone: the native SELECT prepares
-		 * (a SELECT classifies structurally) but vexec finds no catalog
-		 * entry, so the step errors -- no rows, not SX_ROW. */
+		/* After DROP the catalog entry is gone: a SELECT yields no rows. */
 		sx_stmt *st = NULL; const char *tl = NULL;
 		int pr = sx_prepare(h, "SELECT v FROM nt", -1, &st, &tl);
 		int got_row = 0;
@@ -137,7 +139,6 @@ main(void)
 		CK(!got_row, "DROP TABLE: no rows from the dropped table");
 		if (st) sx_finalize(st);
 	}
-	sx_native_driver(1);
 	{
 		/* A value-setting PRAGMA classifies native (no-op, no rows). */
 		sx_stmt *st = NULL; const char *tl = NULL;
@@ -151,18 +152,6 @@ main(void)
 		}
 		CK(pr == SX_OK && rows == 0 && done, "native value-setting PRAGMA is a no-op");
 	}
-
-	/* Plain CREATE TABLE -- NO vtab -- is the post-excision table
-	 * creation idiom: the native driver creates the xstore catalog
-	 * entry, then INSERT + SELECT run natively over it.  This is the
-	 * drop-in that replaces CREATE VIRTUAL TABLE ... USING xstore. */
-	sx_native_driver(1);
-	exec1(h, "CREATE TABLE m(k INTEGER PRIMARY KEY, a INT, b TEXT)");
-	exec1(h, "INSERT INTO m(a, b) VALUES(5, 'p')");
-	exec1(h, "INSERT INTO m(a, b) VALUES(9, 'q')");
-	run(h, "SELECT a, b FROM m WHERE a > 4 ORDER BY a", on, sizeof on);
-	CK(strcmp(on, "5 p | 9 q | ") == 0,
-	   "plain CREATE TABLE: native create + insert + select (no vtab)");
 	sx_native_driver(0);
 
 	sx_close(h);

@@ -648,7 +648,10 @@ db_exec_params(sx_db *h, const char *sql,
 
 	/* Transparent routing: a plain CREATE TABLE becomes a CREATE VIRTUAL
 	 * TABLE on xstore when the native engine is open (DDL takes no
-	 * params, so this never collides with the extended/params path). */
+	 * params, so this never collides with the extended/params path).
+	 * The vtab create keeps SQLite's schema and the native catalog in
+	 * sync; native DDL (sx_classify SXN_CREATE/DROP) is reserved for the
+	 * sx_prepare-direct path and declined in db_exec_cached. */
 	if (n_params == 0 && sx_storage_active() &&
 	    db_rewrite_create_table(sql, rewrite, sizeof rewrite))
 		cur = sql = rewrite;
@@ -824,7 +827,7 @@ db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
 	 * path / the native txn API, with NO VDBE program.  This is the path
 	 * that retires the VDBE; until the driver is the default it is
 	 * reached only with SQLXTC_NATIVE_DRIVER=1. */
-	if (sx_stmt_is_native(*pstmt)) {
+	if (sx_stmt_is_native(*pstmt) && !sx_stmt_is_ddl(*pstmt)) {
 		db_native_txn_end(h, sql);   /* flush native writes before COMMIT/ROLLBACK */
 		rc = exec_stmt(h, *pstmt, limit, 1, out_buf, &ncols, &rows, err);
 		if (rc != 0) { (void)sx_reset(*pstmt); return -1; }
@@ -835,6 +838,16 @@ db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
 		*n_rows = rows + sx_stmt_changes(*pstmt);
 		(void)sx_reset(*pstmt);
 		return 0;
+	}
+	if (sx_stmt_is_ddl(*pstmt)) {
+		/* Native DDL is reserved for the sx_prepare-direct path; on the
+		 * server's cached path keep DDL on the VDBE (its CREATE TABLE ->
+		 * CREATE VIRTUAL TABLE rewrite, applied in db_exec, and the vtab
+		 * schema must stay consistent).  Finalize the native plan and run
+		 * the statement via the general (VDBE) path. */
+		sx_finalize(*pstmt); *pstmt = NULL;
+		return db_exec_params(h, sql, params, n_params, limit,
+		    out_buf, n_rows, err);
 	}
 
 	/* Vectorized-executor fast path: a recognized, param-free read-only
