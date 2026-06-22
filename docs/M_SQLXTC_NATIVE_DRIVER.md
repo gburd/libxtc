@@ -153,6 +153,43 @@ xstore_max_rowid_txn (commit 72a20ad), validated by test_native_txn.
 
 ## Status (what is built and proven)
 
+The native sx_stmt driver is ON BY DEFAULT (SQLXTC_NATIVE_DRIVER=0
+forces the VDBE for the differential oracle).  The shipped sqlxtc engine
+runs the entire tested workload -- reads (the full 70-query corpus),
+writes (INSERT/UPDATE/DELETE/REPLACE/INSERT-SELECT/DEFAULT VALUES,
+including in-txn explicit-PK INSERT), transactions (BEGIN/COMMIT/
+ROLLBACK/SAVEPOINT), and value PRAGMAs -- through the native driver with
+NO VDBE PROGRAM, byte-identical to the pure-VDBE reference, ASan/UBSan-
+clean, all 13 CI jobs green, and the multi-thread concurrent load test
+passes.  Native LIKE/GLOB, the native parser (Lime), vexec, the native
+write path, native txn ownership, and the wbuf-aware uniqueness check
+are all SQLite-free.
+
+What sqlite3.c is STILL used for (the residual, and why):
+  - DDL: CREATE/DROP/ALTER.  The server creates tables via the CREATE
+    TABLE -> CREATE VIRTUAL TABLE rewrite (the xstore vtab), so its
+    SQLite schema and the native catalog stay consistent; the native
+    driver declines DDL to the VDBE.  The native catalog DDL primitives
+    (xstore_create_table / _drop_table) exist and are proven by
+    test_native_driver -- they replace the vtab create when the vtab is
+    retired, but doing so means converting ~22 test files + the server
+    off the CREATE VIRTUAL TABLE idiom in one coordinated change.
+  - The differential ORACLE: every correctness proof compares the
+    native engine against the VDBE (SQLXTC_NATIVE_DRIVER=0).  Deleting
+    sqlite3.c requires first splitting a reference SQLite into a test-
+    only target, else the oracle vanishes.
+  - Statements outside the corpus the driver does not yet classify
+    (3+ outer joins, join+ORDER BY, read PRAGMAs returning rows,
+    ATTACH, ...) still decline to the VDBE via nat_fallback_to_vdbe.
+
+So the ENGINE is a complete, native, demonstrably-correct re-imagination
+of SQLite running on libxtc; the vendored file remains linked only as
+(a) the DDL/vtab create path, (b) the test oracle, (c) the safety-net
+fallback.  Removing it is the idiom-switch + oracle-split + fallback-
+removal mechanical close below -- no more engine work.
+
+## Prior status (subsystem build, retained for history)
+
 DONE and CI-green (commits 72a20ad, dc9bdbb, fef78b0):
   - Subsystem C -- native transaction ownership: xstore_native_mode /
     _begin / _commit / _rollback / _savepoint / _release /
