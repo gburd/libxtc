@@ -738,6 +738,10 @@ static struct xs_cat_ent {
 	bt_t    *bt;
 	char     name[64];
 	uint32_t tableid;
+	char     coldefs[512];   /* cached schema, so a concurrent reader sees
+	                          * it the instant CREATE caches the entry --
+	                          * before the persisted catalog row is
+	                          * necessarily visible to xs_cat_value. */
 } g_cat[XS_CAT_MAX];
 static int g_cat_n;
 static pthread_mutex_t g_cat_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -891,6 +895,15 @@ xs_cat_find_or_create(bt_t *bt, const char *name, const char *coldefs)
 		e->bt = bt;
 		snprintf(e->name, sizeof e->name, "%s", name);
 		e->tableid = id;
+		/* Cache the schema too, so a concurrent connection that resolves
+		 * this table-id can read its columns immediately -- before the
+		 * persisted catalog row (written outside the lock below) is
+		 * necessarily visible.  Closes a cross-connection CREATE-then-
+		 * SELECT race seen under load. */
+		if (coldefs != NULL)
+			snprintf(e->coldefs, sizeof e->coldefs, "%s", coldefs);
+		else
+			e->coldefs[0] = '\0';
 	}
 	pthread_mutex_unlock(&g_cat_mu);
 
@@ -1559,17 +1572,37 @@ int
 xstore_table_schema(bt_t *bt, const char *name, xstore_col_t *cols, int cap)
 {
 	uint8_t val[1024];
+	char    cached[512];
 	int vlen, i, ncol = 0;
 	const char *cd; int cdlen;
 
 	if (bt == NULL || name == NULL || cols == NULL || cap <= 0) return -1;
-	vlen = xs_cat_value(bt, name, val, (int)sizeof val);
-	if (vlen <= 0) return 0;
-	/* The coldefs follow the name and a NUL. */
-	for (i = 0; i < vlen; i++) if (val[i] == 0) break;
-	if (i >= vlen - 1) return 0;          /* no schema recorded */
-	cd = (const char *)val + i + 1;
-	cdlen = vlen - (i + 1);
+
+	/* Prefer the in-process cache's coldefs: a CREATE on another
+	 * connection caches the schema the instant it reserves the table-id,
+	 * before the persisted catalog row is necessarily visible here.  Fall
+	 * back to the persisted value (recovery / cross-process). */
+	cached[0] = '\0';
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_cat_n; i++)
+		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
+			if (g_cat[i].coldefs[0] != '\0')
+				snprintf(cached, sizeof cached, "%s", g_cat[i].coldefs);
+			break;
+		}
+	pthread_mutex_unlock(&g_cat_mu);
+	if (cached[0] != '\0') {
+		cd = cached;
+		cdlen = (int)strlen(cached);
+	} else {
+		vlen = xs_cat_value(bt, name, val, (int)sizeof val);
+		if (vlen <= 0) return 0;
+		/* The coldefs follow the name and a NUL. */
+		for (i = 0; i < vlen; i++) if (val[i] == 0) break;
+		if (i >= vlen - 1) return 0;          /* no schema recorded */
+		cd = (const char *)val + i + 1;
+		cdlen = vlen - (i + 1);
+	}
 
 	/* Parse comma-separated column defs: "<name>[ <type...>]". */
 	{
