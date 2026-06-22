@@ -137,6 +137,20 @@ main(void)
 		CK(!got_row, "DROP TABLE: no rows from the dropped table");
 		if (st) sx_finalize(st);
 	}
+	sx_native_driver(1);
+	{
+		/* A value-setting PRAGMA classifies native (no-op, no rows). */
+		sx_stmt *st = NULL; const char *tl = NULL;
+		int pr = sx_prepare(h, "PRAGMA synchronous=NORMAL", -1, &st, &tl);
+		int rows = 0, done = 0;
+		if (pr == SX_OK && st != NULL) {
+			int rc;
+			while ((rc = sx_step(st)) == SX_ROW) rows++;
+			done = (rc == SX_DONE);
+			sx_finalize(st);
+		}
+		CK(pr == SX_OK && rows == 0 && done, "native value-setting PRAGMA is a no-op");
+	}
 	sx_native_driver(0);
 
 	sx_close(h);

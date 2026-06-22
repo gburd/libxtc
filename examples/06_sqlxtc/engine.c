@@ -59,7 +59,7 @@ _Static_assert(SX_NULL == SQLITE_NULL, "SX_NULL");
 enum sx_native_kind {
 	SXN_NONE = 0, SXN_SELECT, SXN_WRITE, SXN_BEGIN, SXN_COMMIT,
 	SXN_ROLLBACK, SXN_SAVEPOINT, SXN_RELEASE, SXN_ROLLBACK_TO,
-	SXN_CREATE, SXN_DROP
+	SXN_CREATE, SXN_DROP, SXN_PRAGMA_NOP
 };
 
 struct sx_stmt {
@@ -550,7 +550,18 @@ sx_classify(const char *sql, int *tail_more,
 		} else k = SXN_NONE;
 		break;
 	}
-	default:                k = SXN_NONE;     break;   /* PRAGMA/etc. */
+	case SQL_KIND_PRAGMA: {
+		/* A PRAGMA that SETS a value (journal_mode=WAL, synchronous=...,
+		 * busy_timeout=...) is a no-op for the native engine -- it has no
+		 * SQLite journal/cache to configure -- so classify it native and
+		 * return no rows.  A bare read PRAGMA that returns rows (e.g.
+		 * table_info) still declines to the VDBE for now (native rows
+		 * are a later refinement). */
+		const sql_pragma_t *p = root->u.pragma;
+		k = (p != NULL && p->value != NULL) ? SXN_PRAGMA_NOP : SXN_NONE;
+		break;
+	}
+	default:                k = SXN_NONE;     break;   /* other */
 	}
 	sql_arena_destroy(ast);
 	return k;
@@ -672,6 +683,8 @@ sx_step(sx_stmt *st)
 		case SXN_DROP:
 			return xstore_drop_table(st->db, st->ddl_name) == 0
 			    ? SQLITE_DONE : SQLITE_ERROR;
+		case SXN_PRAGMA_NOP:
+			return SQLITE_DONE;   /* value-setting PRAGMA: no-op, no rows */
 		default:
 			return SQLITE_ERROR;
 		}
