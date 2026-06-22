@@ -164,30 +164,41 @@ DONE and CI-green (commits 72a20ad, dc9bdbb, fef78b0):
     parser; sx_step dispatches SELECT -> vexec, DML -> native write,
     BEGIN/COMMIT/ROLLBACK -> native txn, with NO VDBE program.  Tested
     end to end by test_native_driver (driver-on vs VDBE, byte-identical).
+  - Subsystem D core -- native CREATE TABLE / DROP TABLE over the xstore
+    catalog (xstore_create_table / _drop_table); value-setting PRAGMA
+    classified as a no-op (SXN_PRAGMA_NOP).
+  - LIVE PATH WIRED (commit 5ae2f61) -- db_exec_cached drives a native
+    sx_stmt straight through exec_stmt (sx_step), no VDBE program, when
+    the driver built one.  With SQLXTC_NATIVE_DRIVER=1 the entire
+    69-query read corpus + the native writes run through the native
+    driver, byte-identical to the VDBE, clean under ASan+UBSan -- the
+    real query path, not just an isolated test.
   - g_native_driver is OFF by default, so the engine is byte-for-byte
-    the VDBE until the driver is complete.
+    the VDBE until the recognition surface is complete.
 
-REMAINING before sqlite3.c can be deleted:
-  - Subsystem D -- native DDL + catalog: DONE for CREATE TABLE / DROP
-    TABLE (xstore_create_table / xstore_drop_table; sx_classify +
-    sx_step dispatch them; test_native_driver creates/inserts/selects/
-    drops a table with no SQLite schema).  ALTER and CREATE INDEX/VIEW
-    still decline to the VDBE.
-  - PRAGMA: journal_mode/synchronous -> no-op; table_info / table list
-    -> native catalog.
+REMAINING before sqlite3.c can be deleted (the exact final gate):
+  - The CREATE VIRTUAL TABLE xstore(...) idiom: the corpus + server +
+    db_rewrite_create_table create tables this way (it needs the vtab
+    module).  In a vtab-free world they must use plain CREATE TABLE ->
+    xstore_create_table.  Switch the idiom everywhere, then the vtab
+    module + xsql_create_module_v2 can go.
   - Recognition completeness: with the driver on and NO fallback, every
-    statement the workload issues must classify + execute natively.
-    Known gaps still declining to the VDBE: SAVEPOINT (no grammar rule),
-    3+ table OUTER joins, join + ORDER BY, the scalar-subquery
-    correlation gate (needs a scoped resolver), and any read vexec does
-    not yet recognize.  Each is a bounded milestone.
+    statement must classify + execute natively.  The corpus has ONE
+    decliner left -- the aliased-outer correlated subquery
+    (SELECT max(a) FROM t y WHERE y.k <= x.k), the scalar-subquery
+    correlation gate that needs a scoped name resolver to tell x.k
+    (outer) from y.k (inner) when both name table t.  Plus the gaps a
+    real client could hit: SAVEPOINT (no grammar rule), read PRAGMA
+    returning rows (table_info), 3+ table OUTER joins, join + ORDER BY,
+    ALTER, CREATE INDEX/VIEW.  Each is a bounded milestone.
   - A reference SQLite kept OUTSIDE the shipped engine (a test-only
     target) so the differential oracle still works after sqlite3.c is
-    gone from the engine.
+    gone from the engine.  This is itself a build-system change.
 
-Once PRAGMA classifies native and the recognition surface covers the
-corpus, flip g_native_driver on by default, change the sx_prepare
-decline into an error, delete the db_exec VDBE fall-through, then delete
+Once the idiom is switched, the corpus decliner is closed, and a
+reference oracle exists, flip g_native_driver on by default, change the
+sx_prepare decline into an error, delete the db_exec VDBE fall-through,
+then delete
 sqlite3.c + the vtab module + the shims (the mechanical step below).
 
 ## Build strategy (how to do it without breaking the tree)
