@@ -509,7 +509,8 @@ sx_exec(sx_db *h, const char *sql, char **errmsg)
  * caller's buffers so the AST can be freed here.
  */
 static enum sx_native_kind
-sx_classify(const char *sql, int *tail_more)
+sx_classify(const char *sql, int *tail_more,
+            char *namebuf, size_t namecap, char *colbuf, size_t colcap)
 {
 	sql_arena_t *ast = NULL;
 	sql_stmt_t  *root = NULL;
@@ -517,6 +518,8 @@ sx_classify(const char *sql, int *tail_more)
 	enum sx_native_kind k = SXN_NONE;
 
 	*tail_more = 0;
+	if (namebuf) namebuf[0] = '\0';
+	if (colbuf) colbuf[0] = '\0';
 	if (sql_parse_ast(sql, strlen(sql), &ast, &root, &perr) != 0) {
 		if (ast) sql_arena_destroy(ast);
 		return SXN_NONE;
@@ -532,16 +535,53 @@ sx_classify(const char *sql, int *tail_more)
 	case SQL_KIND_BEGIN:    k = SXN_BEGIN;    break;
 	case SQL_KIND_COMMIT:   k = SXN_COMMIT;   break;
 	case SQL_KIND_ROLLBACK: k = SXN_ROLLBACK; break;
-	case SQL_KIND_CREATE:
-	case SQL_KIND_DROP:
-		/* DDL is kept on the VDBE in the live path (the server's CREATE
-		 * TABLE -> CREATE VIRTUAL TABLE rewrite + the vtab schema must
-		 * stay consistent).  Native DDL over the xstore catalog is
-		 * available directly via xstore_create_table / xstore_drop_table
-		 * (used by the from-scratch engine once the vtab is retired).
-		 * Decline here -> VDBE wrapper. */
-		k = SXN_NONE;
+	case SQL_KIND_CREATE: {
+		/* Plain CREATE TABLE -> native xstore catalog (no vtab).
+		 * TABLE AS / VIEW / INDEX, or no single PRIMARY KEY column,
+		 * decline.  Coldefs is "<name> <type>" per column, PK first. */
+		const sql_create_t *c = root->u.create;
+		const sql_coldef_t *col, *pk = NULL;
+		size_t co = 0;
+		int ok = (c != NULL && c->cols != NULL && c->select == NULL &&
+		          c->name.len > 0 && (size_t)c->name.len < namecap);
+		if (ok) {
+			memcpy(namebuf, c->name.p, c->name.len);
+			namebuf[c->name.len] = '\0';
+			for (col = c->cols; col; col = col->next)
+				if (col->primary) { if (pk) ok = 0; pk = col; }
+			if (pk == NULL) ok = 0;
+		}
+		if (ok) {
+			int phase;
+			for (phase = 0; phase < 2 && ok; phase++)
+				for (col = c->cols; col && ok; col = col->next) {
+					int w, is_pk = (col == pk);
+					if (phase == 0 ? !is_pk : is_pk) continue;
+					if (col->name.len == 0) { ok = 0; break; }
+					if (col->type.len > 0)
+						w = snprintf(colbuf + co, colcap - co, "%s%.*s %.*s",
+						    co ? "," : "", (int)col->name.len, col->name.p,
+						    (int)col->type.len, col->type.p);
+					else
+						w = snprintf(colbuf + co, colcap - co, "%s%.*s",
+						    co ? "," : "", (int)col->name.len, col->name.p);
+					if (w < 0 || (size_t)(co + (size_t)w) >= colcap) { ok = 0; break; }
+					co += (size_t)w;
+				}
+		}
+		k = ok ? SXN_CREATE : SXN_NONE;
 		break;
+	}
+	case SQL_KIND_DROP: {
+		const sql_drop_t *d = root->u.drop;
+		if (d != NULL && d->kind == SX_DR_TABLE &&
+		    d->name.len > 0 && (size_t)d->name.len < namecap) {
+			memcpy(namebuf, d->name.p, d->name.len);
+			namebuf[d->name.len] = '\0';
+			k = SXN_DROP;
+		} else k = SXN_NONE;
+		break;
+	}
 	case SQL_KIND_PRAGMA: {
 		/* A PRAGMA that SETS a value (journal_mode=WAL, synchronous=...,
 		 * busy_timeout=...) is a no-op for the native engine -- it has no
@@ -581,7 +621,8 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 	 */
 	if (g_native_driver && (n_bytes < 0 || (size_t)n_bytes == strlen(sql))) {
 		int more = 0;
-		enum sx_native_kind k = sx_classify(sql, &more);
+		char nm[128], cols[1024];
+		enum sx_native_kind k = sx_classify(sql, &more, nm, sizeof nm, cols, sizeof cols);
 		if (k != SXN_NONE) {
 			st = (struct sx_stmt *)calloc(1, sizeof *st);
 			if (st == NULL) return SQLITE_NOMEM;
@@ -591,6 +632,15 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 			st->cur = -1;
 			st->sql = strdup(sql);
 			if (st->sql == NULL) { free(st); return SQLITE_NOMEM; }
+			if (k == SXN_CREATE || k == SXN_DROP) {
+				st->ddl_name = strdup(nm);
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
+				if (k == SXN_CREATE) {
+					st->ddl_cols = strdup(cols);
+					if (st->ddl_cols == NULL) {
+						free(st->ddl_name); free(st->sql); free(st); return SQLITE_NOMEM; }
+				}
+			}
 			if (tail) *tail = sql + strlen(sql);   /* single statement */
 			*out = st;
 			return SQLITE_OK;

@@ -414,7 +414,27 @@ main(int argc, char **argv)
 	/* libxtc-native durable storage engine.  Opened before the
 	 * database so the shared connection handle registers it; the
 	 * background procs (WAL writer, page provider, trickler) start
-	 * once the loop exists (after xtc_app_start). */
+	 * once the loop exists (after xtc_app_start).
+	 *
+	 * The xstore engine is MANDATORY: sqlxtc is a from-scratch SQL
+	 * engine over libxtc storage, not a SQLite shell, so every table
+	 * lives in xstore.  When --storage is not given, derive the store
+	 * path from the database path (<db>.xstore), or use an in-process
+	 * store for an in-memory database, so there is always a native
+	 * B-tree for the native driver. */
+	static char storage_derived[1024];
+	if (cfg.storage_path == NULL) {
+		if (cfg.db_path != NULL && cfg.db_path[0] != '\0' &&
+		    strcmp(cfg.db_path, ":memory:") != 0) {
+			snprintf(storage_derived, sizeof storage_derived,
+			    "%s.xstore", cfg.db_path);
+		} else {
+			/* in-memory db: a unique per-process store file */
+			snprintf(storage_derived, sizeof storage_derived,
+			    "/tmp/sqlxtc-mem-%ld.xstore", (long)getpid());
+		}
+		cfg.storage_path = storage_derived;
+	}
 	if (cfg.storage_path != NULL) {
 		sx_storage_set_io(cfg.storage_direct, cfg.storage_adaptive);
 		rc = sx_storage_open(cfg.storage_path, cfg.storage_frames);
