@@ -238,14 +238,18 @@ main(void)
 		{ "SELECT k FROM t WHERE a < (SELECT min(a) FROM t WHERE a > 50) ORDER BY k", 1 },
 		{ "SELECT k FROM t WHERE a IN (SELECT a FROM t WHERE k < 5) ORDER BY k", 1 },
 		{ "SELECT k FROM t WHERE k IN (SELECT k FROM t WHERE b = 'g1') ORDER BY k LIMIT 5", 1 },
-		{ "SELECT k FROM t WHERE a NOT IN (SELECT a FROM t WHERE k > 100 AND a IS NOT NULL) AND a IS NOT NULL ORDER BY k LIMIT 5", 1 }
+		{ "SELECT k FROM t WHERE a NOT IN (SELECT a FROM t WHERE k > 100 AND a IS NOT NULL) AND a IS NOT NULL ORDER BY k LIMIT 5", 1 },
+		/* aliased-outer correlated subquery: the gate routes it to the
+		 * correlated path, which rewrites x.k (the outer FROM alias) to a
+		 * ? bind and runs the inner per row -- now served natively. */
+		{ "SELECT k FROM t x WHERE a = (SELECT max(a) FROM t y WHERE y.k <= x.k) ORDER BY k", 1 }
 	};
 	/* Queries vexec FALLS BACK on -- the VDBE serves both runs, so they
 	 * are byte-identical by construction. */
 	static const struct q fallback_q[] = {
-		/* correlated subquery: the standalone prepare fails (it references
-		 * the outer t.k), so vexec falls back and the VDBE serves it. */
-		{ "SELECT k FROM t x WHERE a = (SELECT max(a) FROM t y WHERE y.k <= x.k)", 1 }
+		/* A 3+ table OUTER join: the N-way pipeline is INNER-only, so a
+		 * FULL JOIN across three tables declines to the VDBE. */
+		{ "SELECT t.k FROM t LEFT JOIN t u ON t.k=u.k LEFT JOIN t w ON u.k=w.a", 0 }
 	};
 	int nv = (int)(sizeof vexec_q / sizeof vexec_q[0]);
 	int nf = (int)(sizeof fallback_q / sizeof fallback_q[0]);
