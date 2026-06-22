@@ -1502,7 +1502,22 @@ int
 xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid)
 {
 	uint32_t id;
+	int i;
 	if (bt == NULL || name == NULL) return 0;
+	/* Cache first: a CREATE on another connection reserves the table-id
+	 * in the in-process cache before its catalog row is persisted to the
+	 * B-tree (xs_put parks on the WAL ack), so a concurrent xs_cat_lookup
+	 * would miss it.  The cache makes the table visible immediately to
+	 * every connection on the shared bt. */
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_cat_n; i++)
+		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
+			id = g_cat[i].tableid;
+			pthread_mutex_unlock(&g_cat_mu);
+			if (tableid) *tableid = id;
+			return 1;
+		}
+	pthread_mutex_unlock(&g_cat_mu);
 	id = xs_cat_lookup(bt, name);
 	if (id == 0) return 0;
 	if (tableid) *tableid = id;
