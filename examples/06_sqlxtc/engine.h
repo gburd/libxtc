@@ -130,6 +130,10 @@ int  sx_native_driver_enabled(void);
  * the driver handles)?  The live path drives such a statement straight
  * through sx_step, with no VDBE prepare/fast-path dance. */
 int  sx_stmt_is_native(const sx_stmt *st);
+/* Native CREATE/DROP TABLE -- the server's live path declines these to
+ * the VDBE so its CREATE-VIRTUAL-TABLE rewrite + vtab schema stay
+ * consistent; native DDL is used via the sx_prepare-direct path. */
+int  sx_stmt_is_ddl(const sx_stmt *st);
 /* Rows changed by a native DML statement (INSERT/UPDATE/DELETE) -- the
  * count for the {"done":N} reply, since sx_changes reads SQLite. */
 int64_t sx_stmt_changes(const sx_stmt *st);
