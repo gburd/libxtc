@@ -46,13 +46,67 @@
 #include "xtc.h"             /* XTC_OK */
 #include "xtc_exec.h"        /* V2: morsel-parallel workers, one per loop */
 
-/* The vendored engine's pattern matchers (renamed via xsql.h).  Declared
- * here so LIKE/GLOB reuse SQLite's exact semantics without re-including
- * the full public header: sqlite3_strlike returns 0 on match (ASCII
- * case-insensitive, optional ESCAPE), sqlite3_strglob returns 0 on a
- * case-sensitive glob match. */
-int sqlite3_strglob(const char *zGlob, const char *zStr);
-int sqlite3_strlike(const char *zGlob, const char *zStr, unsigned int esc);
+/* Native ASCII pattern matchers (no SQLite).  xs_like: '%' matches any
+ * run, '_' any one byte, ASCII case-insensitive (SQLite's default LIKE).
+ * xs_glob: '*' any run, '?' any one byte, '[set]' a class (with ranges
+ * and a leading '^' negation), case-sensitive.  Both return 1 on a full
+ * match.  Recursive on the wildcard, iterative otherwise -- patterns
+ * here are short. */
+static int
+xs_like(const char *p, const char *s)
+{
+	while (*p) {
+		if (*p == '%') {
+			while (*p == '%') p++;          /* collapse runs */
+			if (*p == '\0') return 1;        /* trailing % matches rest */
+			for (; *s; s++)
+				if (xs_like(p, s)) return 1;
+			return 0;
+		}
+		if (*s == '\0') return 0;
+		if (*p != '_') {
+			char a = *p, b = *s;
+			if (a >= 'A' && a <= 'Z') a += 32;
+			if (b >= 'A' && b <= 'Z') b += 32;
+			if (a != b) return 0;
+		}
+		p++; s++;
+	}
+	return *s == '\0';
+}
+static int
+xs_glob(const char *p, const char *s)
+{
+	while (*p) {
+		if (*p == '*') {
+			while (*p == '*') p++;
+			if (*p == '\0') return 1;
+			for (; *s; s++)
+				if (xs_glob(p, s)) return 1;
+			return 0;
+		}
+		if (*s == '\0') return 0;
+		if (*p == '?') { p++; s++; continue; }
+		if (*p == '[') {
+			const char *q = p + 1;
+			int neg = 0, matched = 0;
+			if (*q == '^') { neg = 1; q++; }
+			for (; *q && *q != ']'; q++) {
+				if (q[1] == '-' && q[2] && q[2] != ']') {
+					if ((unsigned char)*s >= (unsigned char)q[0] &&
+					    (unsigned char)*s <= (unsigned char)q[2]) matched = 1;
+					q += 2;
+				} else if (*q == *s) matched = 1;
+			}
+			if (*q != ']') return 0;          /* malformed class */
+			if (matched == neg) return 0;
+			p = q + 1; s++; continue;
+		}
+		if (*p != *s) return 0;
+		p++; s++;
+	}
+	return *s == '\0';
+}
 
 /* ---- arena ------------------------------------------------------- */
 
@@ -2188,9 +2242,9 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		if (val.nbytes) memcpy(vs, val.bytes, val.nbytes);
 		vs[val.nbytes] = '\0';
 		if (e->op == VXO_LIKE)
-			m = (sqlite3_strlike(ps, vs, 0) == 0);
+			m = xs_like(ps, vs);
 		else
-			m = (sqlite3_strglob(ps, vs) == 0);
+			m = xs_glob(ps, vs);
 		out->type = VX_INT; out->i = m;
 		return;
 	}
