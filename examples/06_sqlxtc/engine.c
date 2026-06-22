@@ -83,15 +83,20 @@ struct sx_stmt {
 #endif
 };
 
-/* Native-driver enable.  ON by default: the engine runs every
- * recognized statement (the whole tested corpus -- reads, writes,
- * transactions, CREATE/DROP TABLE, value PRAGMA) through the native
- * sx_stmt driver with NO VDBE program.  A statement the driver does not
- * yet classify natively still declines to the VDBE wrapper (correct-by-
- * fallback) until sqlite3.c is removed, at which point the decline
- * becomes an error.  SQLXTC_NATIVE_DRIVER=0 forces the VDBE for the
- * differential oracle. */
-static int g_native_driver = 1;
+/* Native-driver enable.  Default OFF for the shipped server: the
+ * default path is the proven VDBE+vtab engine, fully green on every
+ * platform including the concurrent macOS runner.  The native sx_stmt
+ * driver -- which runs the whole tested corpus (reads, writes,
+ * transactions, CREATE/DROP TABLE, value PRAGMA) with NO VDBE program,
+ * byte-identical to the VDBE -- is enabled with SQLXTC_NATIVE_DRIVER=1
+ * (or sx_native_driver(1)).  It is complete and proven by
+ * test_native_driver + the driver-on differential, but is not yet the
+ * concurrent-server default: native CREATE visibility across
+ * connections under the macOS scheduler still has a race to close
+ * before the flip (see M_SQLXTC_NATIVE_DRIVER.md).  This was 1 (on)
+ * briefly; reverted to 0 to keep the tree green while that race is
+ * resolved. */
+static int g_native_driver;
 
 void sx_native_driver(int on) { g_native_driver = on ? 1 : 0; }
 int  sx_native_driver_enabled(void) { return g_native_driver; }
@@ -127,12 +132,12 @@ int64_t sx_stmt_changes(const sx_stmt *st)
 int
 sx_init(void)
 {
-	/* The native sx_stmt driver is on by default; SQLXTC_NATIVE_DRIVER=0
-	 * forces the VDBE (used by the differential oracle to produce the
-	 * reference result).  Any other value (or unset) leaves it on. */
+	/* The native sx_stmt driver is off by default; SQLXTC_NATIVE_DRIVER=1
+	 * enables it (the whole workload then runs with no VDBE).  Any other
+	 * value (or unset) leaves it off. */
 	const char *nd = getenv("SQLXTC_NATIVE_DRIVER");
-	if (nd != NULL && nd[0] == '0')
-		g_native_driver = 0;
+	if (nd != NULL && nd[0] == '1')
+		g_native_driver = 1;
 	return xsql_initialize();
 }
 

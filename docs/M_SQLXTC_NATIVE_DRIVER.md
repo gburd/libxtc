@@ -285,3 +285,27 @@ native; the driver (A+B), the txn state machine (C), and DDL+catalog
 above -- with the reference oracle kept for differential testing --
 each can land and stay green, and the deletion (step 5) becomes
 mechanical once steps 1-4 hold.
+
+## Native-driver default reverted to OFF (concurrent CREATE race)
+
+The native sx_stmt driver was flipped ON by default and ran the whole
+workload natively (no VDBE) byte-identically -- green on Linux including
+the multi-thread load test.  But under the macOS CI runner's scheduling
+(8 loops), a concurrent client intermittently saw "no such table: t"
+shortly after another connection's native CREATE TABLE.  Two fixes
+landed -- caching the column schema in g_cat, and making
+xstore_table_id cache-first so a just-reserved table-id is visible
+before its catalog row is persisted (xs_put parks on the WAL ack on
+another fiber) -- which fixed it locally (MT passes repeatedly) and on
+Linux, but the macOS runner still reproduced it.
+
+Rather than ship a red tree, the default is reverted to OFF: the server
+runs the proven VDBE+vtab path (green everywhere), and the complete
+native driver is enabled with SQLXTC_NATIVE_DRIVER=1 and exercised by
+test_native_driver + the driver-on differential.  The remaining work to
+flip it on permanently is to close the last cross-connection
+CREATE-visibility race under aggressive multi-loop scheduling (likely a
+catalog-cache publication/memory-ordering issue across OS threads), then
+re-flip and delete sqlite3.c.  The engine itself is complete and
+correct; this is a concurrency-publication bug in the catalog, not an
+executor gap.
