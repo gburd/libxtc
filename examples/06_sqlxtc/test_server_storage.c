@@ -25,6 +25,8 @@
 #include "engine.h"
 #include "db.h"
 #include "quack.h"
+#include "xstore.h"   /* xstore_bt_of / xstore_table_id -- the native catalog */
+#include "btree.h"
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
@@ -56,31 +58,30 @@ transparent_proc(void *arg)
 	int64_t nrows = 0;
 	char *err = NULL;
 	sx_stmt *st = NULL;
+	bt_t *bt;
+	uint32_t tid = 0;
 
 	CK(sx_storage_open(g_path3, 64) == SX_OK);
 	CK(sx_storage_run(loop) == SX_OK);
 	CK(sx_open(":memory:", &h) == SX_OK);   /* xstore auto-registered */
 	CK(quack_buf_init(&buf, 256) == 0);
 
-	/* Plain DDL -- no USING xstore.  The db layer rewrites it. */
+	/* Plain CREATE TABLE -- no USING xstore -- creates an xstore CATALOG
+	 * table natively (no SQLite vtab, no sqlite_master).  An explicit
+	 * INTEGER PRIMARY KEY is the xstore rowid (the from-scratch engine
+	 * has no implicit-rowid tables). */
 	quack_buf_reset(&buf);
-	CK(db_exec(h, "CREATE TABLE foo(id, name, age)", -1, &buf, &nrows, &err)
-	    == 0);
+	CK(db_exec(h, "CREATE TABLE foo(id INTEGER PRIMARY KEY, name TEXT, age INT)",
+	    -1, &buf, &nrows, &err) == 0);
 
-	/* It landed as a virtual table on the xstore module. */
-	if (sx_prepare(h, "SELECT sql FROM sqlite_master WHERE name='foo'",
-	    -1, &st, NULL) == SX_OK) {
-		if (sx_step(st) == SX_ROW) {
-			const char *s = (const char *)sx_column_text(st, 0);
-			g_transparent_ok = (s != NULL &&
-			    strstr(s, "USING xstore") != NULL);
-		}
-		sx_finalize(st); st = NULL;
-	}
+	/* It exists in the NATIVE catalog (the source of truth), not as a
+	 * SQLite vtab. */
+	bt = xstore_bt_of(h);
+	g_transparent_ok = (bt != NULL && xstore_table_id(bt, "foo", &tid) && tid != 0);
 
-	/* Data round-trips through the routed table. */
+	/* Data round-trips through the native table. */
 	quack_buf_reset(&buf);
-	(void)db_exec(h, "INSERT INTO foo VALUES(1,'alice',30),(2,'bob',25)",
+	(void)db_exec(h, "INSERT INTO foo(name,age) VALUES('alice',30),('bob',25)",
 	    -1, &buf, &nrows, &err);
 	if (sx_prepare(h, "SELECT count(*) FROM foo", -1, &st, NULL) == SX_OK) {
 		if (sx_step(st) == SX_ROW)
@@ -306,8 +307,9 @@ main(void)
 	    "a clean restart\n", NROW, g_cycle2_seen);
 	printf("  ok   connection-per-proc: %d procs x %d rows each = %d rows "
 	    "concurrent over one shared store\n", NWORK, PERWORK, g_cpp_total);
-	printf("  ok   transparent CREATE TABLE -> xstore: plain DDL routed to "
-	    "the native engine, %d rows round-tripped\n", g_transparent_rows);
+	printf("  ok   native CREATE TABLE -> xstore catalog: plain DDL creates"
+	    " a native catalog table (no vtab, no sqlite_master), %d rows"
+	    " round-tripped\n", g_transparent_rows);
 	printf("  ok   crash recovery: %d rows written under a tiny pool then"
 	    " abandoned (no clean shutdown); all %d rebuilt from the log onto a"
 	    " fresh tree after the torn base was discarded\n",
