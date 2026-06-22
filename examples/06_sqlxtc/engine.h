@@ -126,6 +126,13 @@ void sx_finalize(sx_stmt *st);
  * unhandled statement makes sx_prepare ERROR (no VDBE fallback). */
 void sx_native_driver(int on);
 int  sx_native_driver_enabled(void);
+/* Is `st` a native (VDBE-free) prepared statement (driver on + a kind
+ * the driver handles)?  The live path drives such a statement straight
+ * through sx_step, with no VDBE prepare/fast-path dance. */
+int  sx_stmt_is_native(const sx_stmt *st);
+/* Rows changed by a native DML statement (INSERT/UPDATE/DELETE) -- the
+ * count for the {"done":N} reply, since sx_changes reads SQLite. */
+int64_t sx_stmt_changes(const sx_stmt *st);
 
 /* Parameter binding (1-based index), for prepared statements. */
 int  sx_bind_count(sx_stmt *st);

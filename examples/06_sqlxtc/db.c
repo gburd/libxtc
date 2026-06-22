@@ -818,6 +818,25 @@ db_exec_cached(sx_db *h, sx_stmt **pstmt, const char *sql,
 		return -1;
 	}
 
+	/* Native sx_stmt driver: when sx_prepare built a native plan (the
+	 * driver is on and classified this statement), drive it straight
+	 * through exec_stmt -- sx_step runs it via vexec / the native write
+	 * path / the native txn API, with NO VDBE program.  This is the path
+	 * that retires the VDBE; until the driver is the default it is
+	 * reached only with SQLXTC_NATIVE_DRIVER=1. */
+	if (sx_stmt_is_native(*pstmt)) {
+		db_native_txn_end(h, sql);   /* flush native writes before COMMIT/ROLLBACK */
+		rc = exec_stmt(h, *pstmt, limit, 1, out_buf, &ncols, &rows, err);
+		if (rc != 0) { (void)sx_reset(*pstmt); return -1; }
+		/* done count: emitted rows for a SELECT, change count for DML
+		 * (exec_stmt emits no rows for a write, so one of these is 0). */
+		if (quack_emit_done(out_buf, rows + sx_stmt_changes(*pstmt)) < 0) {
+			*err = strdup("oom"); (void)sx_reset(*pstmt); return -1; }
+		*n_rows = rows + sx_stmt_changes(*pstmt);
+		(void)sx_reset(*pstmt);
+		return 0;
+	}
+
 	/* Vectorized-executor fast path: a recognized, param-free read-only
 	 * query runs on the libxtc-native vectorized executor over the xstore
 	 * B-tree; the prepared statement supplies the column names so the

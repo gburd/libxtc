@@ -91,9 +91,28 @@ static int g_native_driver;
 void sx_native_driver(int on) { g_native_driver = on ? 1 : 0; }
 int  sx_native_driver_enabled(void) { return g_native_driver; }
 
+/* Is this a native (VDBE-free) prepared statement? */
+int  sx_stmt_is_native(const sx_stmt *st) { return st != NULL && st->native; }
+
+/* Native DML change count (0 for a SELECT / txn / DDL). */
+int64_t sx_stmt_changes(const sx_stmt *st)
+{
+#ifdef SQLXTC_HAVE_LIME
+	return (st != NULL && st->native) ? st->nchanges : 0;
+#else
+	(void)st; return 0;
+#endif
+}
+
 int
 sx_init(void)
 {
+	/* Opt into the native sx_stmt driver via the environment, so the
+	 * whole live path (db_exec / db_exec_cached) can be exercised
+	 * fall-back-free without a code change.  Off unless set. */
+	const char *nd = getenv("SQLXTC_NATIVE_DRIVER");
+	if (nd != NULL && nd[0] == '1')
+		g_native_driver = 1;
 	return xsql_initialize();
 }
 
