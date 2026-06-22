@@ -64,6 +64,7 @@ transparent_proc(void *arg)
 	CK(sx_storage_open(g_path3, 64) == SX_OK);
 	CK(sx_storage_run(loop) == SX_OK);
 	CK(sx_open(":memory:", &h) == SX_OK);   /* xstore auto-registered */
+	sx_native_driver(1);                    /* native CREATE -> catalog */
 	CK(quack_buf_init(&buf, 256) == 0);
 
 	/* Plain CREATE TABLE -- no USING xstore -- creates an xstore CATALOG
@@ -90,6 +91,7 @@ transparent_proc(void *arg)
 	}
 	free(err);
 	quack_buf_free(&buf);
+	sx_native_driver(0);   /* do not leak the flag into later procs */
 	sx_close(h);
 	(void)sx_storage_checkpoint();
 	sx_storage_close();
