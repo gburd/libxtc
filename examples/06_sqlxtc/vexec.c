@@ -6473,7 +6473,16 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 					 * last row, which xstore's put-by-rowid achieves since
 					 * the rows apply in order. */
 				} else if (xstore_in_txn(db)) {
-					free(buf); rc = 0; goto done;
+					/* In a txn the committed scan cannot see this txn's
+					 * buffered rows, so use the wbuf-aware existence check.
+					 * A collision (committed or buffered) -> fall back so the
+					 * VDBE raises the canonical UNIQUE error; an intra-stmt
+					 * repeat also falls back. */
+					if (xstore_row_exists_txn(db, tableid, rowid)) {
+						free(buf); rc = 0; goto done;
+					}
+					for (bi = 0; bi < nb; bi++)
+						if (buf[bi].rowid == rowid) { free(buf); rc = 0; goto done; }
 				} else {
 					pl = read_one_row(bt, tabbuf, rowid, probe, (int)sizeof probe);
 					if (pl < 0) { free(buf); rc = -1; goto done; }

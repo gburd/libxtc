@@ -83,10 +83,15 @@ struct sx_stmt {
 #endif
 };
 
-/* Native-driver enable: off by default (the engine is byte-for-byte the
- * VDBE).  A future complete driver flips this on once the recognition
- * surface covers the whole workload fall-back-free. */
-static int g_native_driver;
+/* Native-driver enable.  ON by default: the engine runs every
+ * recognized statement (the whole tested corpus -- reads, writes,
+ * transactions, CREATE/DROP TABLE, value PRAGMA) through the native
+ * sx_stmt driver with NO VDBE program.  A statement the driver does not
+ * yet classify natively still declines to the VDBE wrapper (correct-by-
+ * fallback) until sqlite3.c is removed, at which point the decline
+ * becomes an error.  SQLXTC_NATIVE_DRIVER=0 forces the VDBE for the
+ * differential oracle. */
+static int g_native_driver = 1;
 
 void sx_native_driver(int on) { g_native_driver = on ? 1 : 0; }
 int  sx_native_driver_enabled(void) { return g_native_driver; }
@@ -107,12 +112,12 @@ int64_t sx_stmt_changes(const sx_stmt *st)
 int
 sx_init(void)
 {
-	/* Opt into the native sx_stmt driver via the environment, so the
-	 * whole live path (db_exec / db_exec_cached) can be exercised
-	 * fall-back-free without a code change.  Off unless set. */
+	/* The native sx_stmt driver is on by default; SQLXTC_NATIVE_DRIVER=0
+	 * forces the VDBE (used by the differential oracle to produce the
+	 * reference result).  Any other value (or unset) leaves it on. */
 	const char *nd = getenv("SQLXTC_NATIVE_DRIVER");
-	if (nd != NULL && nd[0] == '1')
-		g_native_driver = 1;
+	if (nd != NULL && nd[0] == '0')
+		g_native_driver = 0;
 	return xsql_initialize();
 }
 
@@ -658,6 +663,57 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 	return SQLITE_OK;
 }
 
+/* Run a native SELECT through vexec into st->vres, once (idempotent).
+ * Returns 1 on success (vres ready), 0 on error.  Called from sx_step
+ * on the first step AND from sx_column_count / sx_column_name, since the
+ * caller (exec_stmt) reads the column count BEFORE the first step. */
+#ifdef SQLXTC_HAVE_LIME
+static int
+nat_select_run(struct sx_stmt *st)
+{
+	char *verr = NULL;
+	int rc;
+	if (st->ran) return st->vres != NULL;
+	rc = vx_run_p((sqlite3 *)st->db, st->sql,
+	    st->nbind ? st->binds : NULL, st->nbind, 1, &st->vres, &verr);
+	st->ran = 1;
+	if (verr) free(verr);
+	return (rc == 1 && st->vres != NULL);
+}
+#endif
+
+/* Convert a native sx_stmt to a VDBE statement when the native executor
+ * declines a statement at run time (e.g. an in-txn explicit-PK INSERT
+ * the native write path does not handle, or a read vexec cannot run).
+ * Prepares the VDBE, re-binds the cells, flips the stmt to VDBE mode.
+ * Returns 1 on success, 0 on failure.  This is the transition safety
+ * net; it vanishes when sqlite3.c is removed (a decline then errors). */
+static int
+nat_fallback_to_vdbe(struct sx_stmt *st)
+{
+	xsql_stmt *vdbe = NULL;
+	int i;
+	if (st->sql == NULL) return 0;
+	if (xsql_prepare_v2((xsql *)st->db, st->sql, -1, &vdbe, NULL) != SQLITE_OK ||
+	    vdbe == NULL)
+		return 0;
+	for (i = 0; i < st->nbind; i++) {
+		switch (st->binds[i].type) {
+		case VX_INT:  xsql_bind_int64(vdbe, i + 1, st->binds[i].i); break;
+		case VX_REAL: xsql_bind_double(vdbe, i + 1, st->binds[i].r); break;
+		case VX_TEXT: xsql_bind_text(vdbe, i + 1, (const char *)st->binds[i].bytes,
+		                             (int)st->binds[i].nbytes, SQLITE_TRANSIENT); break;
+		case VX_BLOB: xsql_bind_blob(vdbe, i + 1, st->binds[i].bytes,
+		                             (int)st->binds[i].nbytes, SQLITE_TRANSIENT); break;
+		default:      xsql_bind_null(vdbe, i + 1); break;
+		}
+	}
+	if (st->vres) { vx_result_free(st->vres); st->vres = NULL; }
+	st->vdbe = vdbe;
+	st->native = 0;   /* from here the wrapper forwards to the VDBE */
+	return 1;
+}
+
 int
 sx_step(sx_stmt *st)
 {
@@ -665,15 +721,15 @@ sx_step(sx_stmt *st)
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
 		if (st->nkind == SXN_SELECT) {
-			/* First step: run the SELECT through vexec into vres. */
-			if (!st->ran) {
-				char *verr = NULL;
-				int rc = vx_run_p((sqlite3 *)st->db, st->sql,
-				    st->nbind ? st->binds : NULL, st->nbind, 1,
-				    &st->vres, &verr);
-				st->ran = 1;
-				if (verr) free(verr);
-				if (rc != 1 || st->vres == NULL) return SQLITE_ERROR;
+			/* First step: run the SELECT through vexec into vres; if vexec
+			 * declines, fall the whole statement back to the VDBE. */
+			if (!st->ran && !nat_select_run(st)) {
+				if (!nat_fallback_to_vdbe(st)) return SQLITE_ERROR;
+				return xsql_step(st->vdbe);
+			}
+			if (st->vres == NULL) {
+				if (!nat_fallback_to_vdbe(st)) return SQLITE_ERROR;
+				return xsql_step(st->vdbe);
 			}
 			st->cur++;
 			return (st->cur < vx_result_nrow(st->vres)) ? SQLITE_ROW
@@ -686,9 +742,11 @@ sx_step(sx_stmt *st)
 			int64_t nch = 0;
 			int rc = vx_run_write_p((sqlite3 *)st->db, st->sql,
 			    st->nbind ? st->binds : NULL, st->nbind, &nch, NULL);
-			if (rc != 1) return SQLITE_ERROR;
-			st->nchanges = nch;
-			return SQLITE_DONE;
+			if (rc == 1) { st->nchanges = nch; return SQLITE_DONE; }
+			/* The native write path declined (e.g. an in-txn explicit-PK
+			 * INSERT): fall the statement back to the VDBE. */
+			if (!nat_fallback_to_vdbe(st)) return SQLITE_ERROR;
+			return xsql_step(st->vdbe);
 		}
 		case SXN_BEGIN:
 			return xstore_native_begin(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
@@ -747,10 +805,13 @@ void
 sx_finalize(sx_stmt *st)
 {
 	if (st == NULL) return;
-	if (!st->native)
+	if (st->vdbe != NULL)
 		(void)xsql_finalize(st->vdbe);
 #ifdef SQLXTC_HAVE_LIME
-	else {
+	/* Free the native-plan resources whether or not the stmt fell back
+	 * to the VDBE (nat_fallback_to_vdbe sets native=0 but the sql / bind
+	 * buffers / ddl strings were allocated in native mode). */
+	{
 		int i;
 		if (st->vres) vx_result_free(st->vres);
 		for (i = 0; i < st->nbind; i++)
@@ -859,8 +920,18 @@ int
 sx_column_count(sx_stmt *st)
 {
 #ifdef SQLXTC_HAVE_LIME
-	if (st->native)
-		return (st->nkind == SXN_SELECT && st->vres) ? vx_result_ncol(st->vres) : 0;
+	if (st->native) {
+		if (st->nkind != SXN_SELECT) return 0;
+		if (!st->ran && !nat_select_run(st)) {
+			if (!nat_fallback_to_vdbe(st)) return 0;
+			return xsql_column_count(st->vdbe);
+		}
+		if (st->vres == NULL) {
+			if (!nat_fallback_to_vdbe(st)) return 0;
+			return xsql_column_count(st->vdbe);
+		}
+		return vx_result_ncol(st->vres);
+	}
 #endif
 	return xsql_column_count(st->vdbe);
 }
@@ -868,8 +939,16 @@ const char *
 sx_column_name(sx_stmt *st, int i)
 {
 #ifdef SQLXTC_HAVE_LIME
-	if (st->native)
-		return (st->nkind == SXN_SELECT && st->vres) ? vx_result_name(st->vres, i) : NULL;
+	if (st->native) {
+		if (st->nkind != SXN_SELECT) return NULL;
+		if (!st->ran) (void)nat_select_run(st);
+		if (st->vres == NULL) {
+			/* declined + fell back via sx_column_count earlier, or now */
+			if (st->native && !nat_fallback_to_vdbe(st)) return NULL;
+			return st->native ? NULL : xsql_column_name(st->vdbe, i);
+		}
+		return vx_result_name(st->vres, i);
+	}
 #endif
 	return xsql_column_name(st->vdbe, i);
 }
