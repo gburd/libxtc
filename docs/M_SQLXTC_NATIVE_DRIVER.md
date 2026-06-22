@@ -309,3 +309,27 @@ catalog-cache publication/memory-ordering issue across OS threads), then
 re-flip and delete sqlite3.c.  The engine itself is complete and
 correct; this is a concurrency-publication bug in the catalog, not an
 executor gap.
+
+## The macOS race ROOT-CAUSED and FIXED -- native driver back ON
+
+The "no such table: t" under concurrent load was NOT a catalog-cache
+publication issue per se -- it was the connection->bt map (g_dbmap,
+fixed at XS_DBMAP_MAX=64) OVERFLOWING.  Each per-connection handle
+registered a slot in xstore_register but sx_close never released it, so
+under the 64-client load test the (65th+) connection went unregistered;
+xstore_bt_of then returned NULL for it, vexec declined, and the VDBE
+fallback -- which does not know the catalog-only tables -- reported "no
+such table".  macOS reproduced it readily because its scheduling kept
+more connections concurrently live.
+
+Fix: xstore_unregister(db) releases the map slot (swap-remove), called
+from sx_close before xsql_close.  With the slot leak closed, the native
+driver is ON BY DEFAULT again and the multi-thread load test passes
+repeatedly (5/5 locally, 64 clients).  The schema cache + cache-first
+table-id lookup remain (they make a fresh CREATE visible immediately).
+
+The engine now runs the entire workload natively by default with no
+VDBE program, byte-identical to the VDBE, green on all platforms.  The
+remaining excision steps are mechanical: a reference SQLite test-only
+oracle, turning the sx_prepare decline into an error, and deleting
+sqlite3.c + the vtab module + the shims.
