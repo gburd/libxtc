@@ -151,6 +151,18 @@ main(void)
 		}
 		CK(pr == SX_OK && rows == 0 && done, "native value-setting PRAGMA is a no-op");
 	}
+
+	/* Plain CREATE TABLE -- NO vtab -- is the post-excision table
+	 * creation idiom: the native driver creates the xstore catalog
+	 * entry, then INSERT + SELECT run natively over it.  This is the
+	 * drop-in that replaces CREATE VIRTUAL TABLE ... USING xstore. */
+	sx_native_driver(1);
+	exec1(h, "CREATE TABLE m(k INTEGER PRIMARY KEY, a INT, b TEXT)");
+	exec1(h, "INSERT INTO m(a, b) VALUES(5, 'p')");
+	exec1(h, "INSERT INTO m(a, b) VALUES(9, 'q')");
+	run(h, "SELECT a, b FROM m WHERE a > 4 ORDER BY a", on, sizeof on);
+	CK(strcmp(on, "5 p | 9 q | ") == 0,
+	   "plain CREATE TABLE: native create + insert + select (no vtab)");
 	sx_native_driver(0);
 
 	sx_close(h);
