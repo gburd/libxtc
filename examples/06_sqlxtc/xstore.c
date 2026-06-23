@@ -746,6 +746,20 @@ static struct xs_cat_ent {
 static int g_cat_n;
 static pthread_mutex_t g_cat_mu = PTHREAD_MUTEX_INITIALIZER;
 
+/* View registry: CREATE VIEW name AS <select> stored as the SELECT
+ * text, keyed by (bt, name).  Views are query rewrites, not stored
+ * tables; the executor expands a FROM reference to a view as a derived
+ * table (its SELECT).  Protected by g_cat_mu (shared with the catalog
+ * cache).  In-process only for now (recreated each session, like
+ * SQLite re-reads sqlite_master); persistence is a follow-up. */
+#define XS_VIEW_MAX 128
+static struct xs_view_ent {
+	bt_t *bt;
+	char  name[64];
+	char  sql[1024];   /* the view's SELECT text */
+} g_view[XS_VIEW_MAX];
+static int g_view_n;
+
 /* Connection -> B-tree association, so a from-scratch executor driven
  * from a connection handle (xstore_bt_of) can open a storage-native
  * scan over the same B-tree the connection's xstore tables use. */
@@ -2832,6 +2846,68 @@ xstore_create_table(struct xsql *db, const char *name, const char *coldefs)
 	bt_t *bt = xstore_bt_of(db);
 	if (bt == NULL || name == NULL) return 0;
 	return xs_cat_find_or_create(bt, name, coldefs);
+}
+
+/* Register a view (CREATE VIEW name AS <select>): record the SELECT
+ * text keyed by (bt, name).  Returns 1 on success, 0 on failure (full
+ * registry / too-long SQL / missing bt). */
+int
+xstore_create_view(struct xsql *db, const char *name, const char *select_sql)
+{
+	bt_t *bt = xstore_bt_of(db);
+	int i, rc = 0;
+	if (bt == NULL || name == NULL || select_sql == NULL) return 0;
+	if (strlen(select_sql) >= sizeof g_view[0].sql) return 0;
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_view_n; i++)          /* replace if redefined */
+		if (g_view[i].bt == bt && strcmp(g_view[i].name, name) == 0) {
+			snprintf(g_view[i].sql, sizeof g_view[i].sql, "%s", select_sql);
+			rc = 1; break;
+		}
+	if (rc == 0 && g_view_n < XS_VIEW_MAX) {
+		struct xs_view_ent *v = &g_view[g_view_n++];
+		v->bt = bt;
+		snprintf(v->name, sizeof v->name, "%s", name);
+		snprintf(v->sql, sizeof v->sql, "%s", select_sql);
+		rc = 1;
+	}
+	pthread_mutex_unlock(&g_cat_mu);
+	return rc;
+}
+
+/* Look up a view's SELECT text for (bt, name).  Copies into out (cap
+ * bytes) and returns 1 if found, 0 otherwise. */
+int
+xstore_view_sql(bt_t *bt, const char *name, char *out, int cap)
+{
+	int i, rc = 0;
+	if (bt == NULL || name == NULL || out == NULL || cap <= 0) return 0;
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_view_n; i++)
+		if (g_view[i].bt == bt && strcmp(g_view[i].name, name) == 0) {
+			snprintf(out, (size_t)cap, "%s", g_view[i].sql);
+			rc = 1; break;
+		}
+	pthread_mutex_unlock(&g_cat_mu);
+	return rc;
+}
+
+/* Drop a view (DROP VIEW): forget its registry entry.  Idempotent. */
+int
+xstore_drop_view(struct xsql *db, const char *name)
+{
+	bt_t *bt = xstore_bt_of(db);
+	int i;
+	if (bt == NULL || name == NULL) return 0;
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_view_n; i++)
+		if (g_view[i].bt == bt && strcmp(g_view[i].name, name) == 0) {
+			g_view_n--;
+			if (i != g_view_n) g_view[i] = g_view[g_view_n];
+			break;
+		}
+	pthread_mutex_unlock(&g_cat_mu);
+	return 1;
 }
 int
 xstore_drop_table(struct xsql *db, const char *name)

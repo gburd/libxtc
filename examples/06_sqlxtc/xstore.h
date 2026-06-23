@@ -247,5 +247,10 @@ int xstore_rollback_to(struct xsql *db, int level);
  * native driver, where there is no VDBE to keep in sync. */
 uint32_t xstore_create_table(struct xsql *db, const char *name, const char *coldefs);
 int xstore_drop_table(struct xsql *db, const char *name);
+/* Views (CREATE VIEW / DROP VIEW): the executor expands a FROM
+ * reference to a view as a derived table (its SELECT text). */
+int xstore_create_view(struct xsql *db, const char *name, const char *select_sql);
+int xstore_view_sql(bt_t *bt, const char *name, char *out, int cap);
+int xstore_drop_view(struct xsql *db, const char *name);
 
 #endif /* SQLXTC_XSTORE_H */
