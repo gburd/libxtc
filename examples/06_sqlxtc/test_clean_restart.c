@@ -54,6 +54,7 @@ main(void)
 	snprintf(wal, sizeof wal, "%s-wal", path);
 
 	CK(sx_init() == SX_OK);
+	sx_native_conn(0);   /* vtab + recovery test: needs a SQLite connection */
 
 	/* ---- populate, then shut down cleanly ---- */
 	CK(sx_storage_open(path, 64) == SX_OK);

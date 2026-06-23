@@ -92,13 +92,13 @@ struct sx_stmt {
 static int g_native_driver = 1;
 
 /* Fully SQLite-free connection (no xsql object at all): the final state
- * of the excision.  Default OFF while recognition completeness is being
- * finished -- with it off the connection is a SQLite handle that runs
- * the native EXECUTION path (g_native_driver) and still has the VDBE as
- * a safety net for any not-yet-recognized statement.  With it on,
- * sx_open returns a tagged native handle and an unrecognized statement
- * is a hard error.  SQLXTC_NATIVE_CONN=1 enables it. */
-static int g_native_conn;
+ * of the excision.  Now ON by default -- the entire differential oracle
+ * (32/32) and the whole server test surface run natively with zero VDBE
+ * and zero sqlite3 prepare, so sx_open returns a tagged native handle
+ * and an unrecognized statement is a hard error (no VDBE fallback).
+ * SQLXTC_NATIVE_CONN=0 forces the legacy SQLite-handle path (kept while
+ * sqlite3.c is still linked for the driver-off differential oracle). */
+static int g_native_conn = 1;
 
 void sx_native_driver(int on) { g_native_driver = on ? 1 : 0; }
 int  sx_native_driver_enabled(void) { return g_native_driver; }
@@ -172,8 +172,8 @@ sx_init(void)
 		g_native_driver = 0;
 	{
 		const char *nc = getenv("SQLXTC_NATIVE_CONN");
-		if (nc != NULL && nc[0] == '1')
-			g_native_conn = 1;
+		if (nc != NULL && nc[0] == '0')
+			g_native_conn = 0;
 	}
 	return xsql_initialize();
 }
@@ -917,6 +917,34 @@ nat_fallback_to_vdbe(struct sx_stmt *st)
 }
 #endif /* SQLXTC_HAVE_LIME */
 
+#ifdef SQLXTC_HAVE_LIME
+/* Set a descriptive error on a native connection when the native engine
+ * declines a statement at run time.  For a SELECT/DML over a table that
+ * is not in the catalog, produce SQLite's "no such table: NAME"; for
+ * any other decline, a generic "unsupported SQL".  This keeps the error
+ * surface compatible with SQLite for the common case (a typo'd table).
+ */
+static int
+nat_set_run_error(struct sx_stmt *st)
+{
+	struct sx_native_db *nd;
+	char buf[160];
+	const char *tab = NULL;
+	if (!sx_is_native_db(st->db)) return SQLITE_ERROR;
+	nd = (struct sx_native_db *)st->db;
+	free(nd->errmsg);
+	/* A first unresolved base table name -> "no such table: NAME". */
+	tab = vx_unknown_table((sqlite3 *)st->db, st->sql);
+	if (tab != NULL) {
+		snprintf(buf, sizeof buf, "no such table: %s", tab);
+		nd->errmsg = strdup(buf);
+	} else {
+		nd->errmsg = strdup("unsupported SQL (native engine)");
+	}
+	return SQLITE_ERROR;
+}
+#endif
+
 int
 sx_step(sx_stmt *st)
 {
@@ -928,11 +956,13 @@ sx_step(sx_stmt *st)
 			 * through vexec into vres; if vexec declines, fall the whole
 			 * statement back to the VDBE. */
 			if (!st->ran && !nat_select_run(st)) {
-				if (!nat_fallback_to_vdbe(st)) return SQLITE_ERROR;
+				if (!nat_fallback_to_vdbe(st))
+					return nat_set_run_error(st);
 				return xsql_step(st->vdbe);
 			}
 			if (st->vres == NULL) {
-				if (!nat_fallback_to_vdbe(st)) return SQLITE_ERROR;
+				if (!nat_fallback_to_vdbe(st))
+					return nat_set_run_error(st);
 				return xsql_step(st->vdbe);
 			}
 			st->cur++;

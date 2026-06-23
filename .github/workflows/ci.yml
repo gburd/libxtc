@@ -165,6 +165,15 @@ jobs:
         run: |
           make XTC_BUILD=../../build_ci sqlxtc-server
           bash ../../test/sqlxtc/test_sqlxtc_mt.sh
+      - name: sqlxtc differential oracle (vs python sqlite3 -- the correctness proof)
+        working-directory: examples/06_sqlxtc
+        run: |
+          # The whole corpus must match a reference SQLite (python's
+          # sqlite3 module, linked separately from the engine).  This is
+          # the differential that proves the native engine is
+          # functionally equivalent to SQLite, and it must keep passing
+          # as sqlite3.c is excised.
+          bash ../../test/sqlxtc/test_sqlxtc_oracle.sh
 
   tls-backends:
     # Build the library against each TLS backend and run the m18 TLS

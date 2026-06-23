@@ -265,6 +265,11 @@ main(void)
 	fd = mkstemp(g_path2); if (fd < 0) return 1; close(fd); unlink(g_path2);
 
 	CK(sx_init() == SX_OK);
+	/* Most cycles use vtab tables (CREATE VIRTUAL TABLE) + crash recovery
+	 * through a SQLite connection, so default to the legacy connection;
+	 * transparent_proc flips on the SQLite-free native connection for its
+	 * native-DDL check. */
+	sx_native_conn(0);
 
 	if (run_cycle(writer_proc) != 0) return 1;
 	CK(g_phase1_rows == NROW);

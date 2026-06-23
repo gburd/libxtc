@@ -80,6 +80,10 @@ main(void)
 
 	if (sfd >= 0) close(sfd);
 	if (sx_init() != SX_OK) { fprintf(stderr, "FAIL: sx_init\n"); return 1; }
+	/* This test compares the native driver against the in-process VDBE
+	 * (driver off) over a vtab table, which needs a SQLite connection --
+	 * force the legacy connection (not the SQLite-free native handle). */
+	sx_native_conn(0);
 	if (sx_storage_open(storepath, 64) != SX_OK) {
 		fprintf(stderr, "FAIL: storage_open\n"); return 1; }
 	if (sx_open(":memory:", &h) != SX_OK) { fprintf(stderr, "FAIL: open\n"); return 1; }

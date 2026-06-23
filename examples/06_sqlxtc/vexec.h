@@ -175,5 +175,9 @@ void vx_result_free(vx_result_t *r);
  * (columns cid,name,type,notnull,dflt_value,pk).  Returns 1 with *res
  * owned by the caller, 0 if the table has no native schema, <0 on OOM. */
 int vx_pragma_table_info(sqlite3 *db, const char *table, vx_result_t **res);
+/* Name the first FROM base table that is not a catalog table or view
+ * (the "no such table" culprit) for a failed native query, or NULL.
+ * Returns a static buffer. */
+const char *vx_unknown_table(sqlite3 *db, const char *sql);
 
 #endif /* SQLXTC_VEXEC_H */
