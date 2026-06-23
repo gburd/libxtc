@@ -2747,6 +2747,10 @@ static int vx_try_prepare_view(sqlite3 *db, sql_arena_t *ast,
                                const sql_select_t *sel, const char *view_sql,
                                const vx_cell_t *binds, int nbinds,
                                vx_stmt_t **out, char **errmsg);
+static int vx_try_prepare_const(sqlite3 *db, sql_arena_t *ast,
+                                const sql_select_t *sel,
+                                const vx_cell_t *binds, int nbinds,
+                                vx_stmt_t **out, char **errmsg);
 static int vx_try_prepare_binds(sqlite3 *db, const char *sql,
                                 const vx_cell_t *binds, int nbinds,
                                 vx_stmt_t **out, char **errmsg);
@@ -2914,7 +2918,14 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 
 	/* FROM: one base table, or exactly two base tables joined (V5). */
 	src = sel->from;
-	if (src == NULL) goto fallback;
+	if (src == NULL) {
+		/* FROM-less constant SELECT (SELECT 1+1, SELECT 'x', ...): one
+		 * row, each projection an expression over no columns. */
+		if (sel->where || sel->group || sel->having || sel->order ||
+		    sel->limit || sel->offset || sel->distinct)
+			goto fallback;
+		return vx_try_prepare_const(db, ast, sel, binds, nbinds, out, errmsg);
+	}
 	if (src->next != NULL) {
 		/* Multi-table equi-join (no GROUP BY / ORDER BY / aggregates on
 		 * the join path yet -- those compose later).  A post-join ORDER BY
@@ -4495,6 +4506,78 @@ vx_try_prepare_view(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 
 fallback:
 	if (ires) vx_result_free(ires);
+	if (ast) sql_arena_destroy(ast);
+	if (st) { st->derived_res = NULL; vx_finalize(st); }
+	return rc;
+}
+
+/*
+ * FROM-less constant SELECT (SELECT 1+1, SELECT 'hi', SELECT 2*3, ...):
+ * exactly one output row, each projection an expression over no source
+ * columns.  Built as a derived source of one empty (0-column) row so the
+ * standard chunk path evaluates the projections once.  GROUP BY /
+ * WHERE / ORDER BY are gated off by the caller.
+ */
+static int
+vx_try_prepare_const(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
+                     const vx_cell_t *binds, int nbinds,
+                     vx_stmt_t **out, char **errmsg)
+{
+	struct vx_stmt *st = NULL;
+	struct vx_compiler comp;
+	struct namevec nv;
+	const sql_exprlist_item_t *it;
+	vx_result_t *one = NULL;
+	int nproj = 0, rc = 0;
+
+	if (errmsg) *errmsg = NULL;
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
+		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
+		if (it->expr->op == SX_E_FUNC && is_agg_name(&it->expr->name[0])) goto fallback;
+		nproj++;
+	}
+	if (nproj == 0 || nproj > 32) goto fallback;
+
+	/* A single 0-column row as the source: next_chunk yields it once. */
+	one = (vx_result_t *)calloc(1, sizeof *one);
+	if (one == NULL) { rc = -1; goto fallback; }
+	one->ncol = 0; one->nrow = 1; one->cap = 0; one->cells = NULL;
+
+	st = (struct vx_stmt *)calloc(1, sizeof *st);
+	if (!st) { rc = -1; goto fallback; }
+	st->db = db; st->cur = -1; st->limit = -1;
+	st->binds = binds; st->nbinds = nbinds;
+	st->nout = nproj;
+	st->nsrc_col = 0;
+	st->proj = (vx_expr_t **)calloc((size_t)nproj, sizeof(vx_expr_t *));
+	if (!st->proj) { rc = -1; goto fallback; }
+
+	memset(&nv, 0, sizeof nv);
+	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
+	comp.binds = binds; comp.nbinds = nbinds;
+	{
+		int k = 0;
+		for (it = sel->cols->head; it; it = it->next, k++) {
+			st->proj[k] = compile_expr(&comp, it->expr);
+			if (comp.fail) goto fallback;
+			item_name(it, st->outname[k], sizeof st->outname[0]);
+		}
+	}
+	/* A constant projection references no columns; any column reference
+	 * makes nv grow, which is unresolvable here -> fall back. */
+	if (nv.n != 0) goto fallback;
+
+	st->srcrow = NULL;          /* 0 source columns */
+	st->derived_res = one;      /* one empty row; vx_finalize frees it */
+	st->derived_cur = 0;
+	one = NULL;
+
+	sql_arena_destroy(ast);
+	*out = st;
+	return 1;
+
+fallback:
+	if (one) vx_result_free(one);
 	if (ast) sql_arena_destroy(ast);
 	if (st) { st->derived_res = NULL; vx_finalize(st); }
 	return rc;
@@ -7470,6 +7553,48 @@ vx_pragma_table_info(sqlite3 *db, const char *table, vx_result_t **res)
 	}
 	*res = r;
 	return 1;
+}
+
+/*
+ * For a failed native SELECT/DML, return the name of the first FROM
+ * base table that is NOT in the catalog (and not a view) -- i.e. the
+ * "no such table" culprit -- or NULL if every referenced table exists
+ * (the decline was for some other unsupported reason).  The name is
+ * returned in a static thread-unsafe buffer (used only to format an
+ * error message on the failing path).  Parses sql via Lime.
+ */
+const char *
+vx_unknown_table(sqlite3 *db, const char *sql)
+{
+	static char namebuf[64];
+	bt_t *bt = xstore_bt_of((struct xsql *)db);
+	sql_arena_t *arena = NULL;
+	sql_stmt_t *root = NULL;
+	const char *perr = NULL;
+	const sql_src_t *fr = NULL;
+	const char *found = NULL;
+
+	if (bt == NULL || sql == NULL) return NULL;
+	if (sql_parse_ast(sql, strlen(sql), &arena, &root, &perr) != 0 || root == NULL)
+		return NULL;
+	if (root->kind == SQL_KIND_SELECT && root->u.select != NULL)
+		fr = root->u.select->from;
+	else if (root->kind == SQL_KIND_UPDATE && root->u.update != NULL)
+		/* UPDATE has a single target table (not a sql_src chain). */
+		fr = NULL;
+	for (; fr != NULL; fr = fr->next) {
+		char t[64], vtmp[64]; uint32_t id;
+		if (fr->subquery || fr->table.len == 0 || fr->table.len >= sizeof t)
+			continue;
+		memcpy(t, fr->table.p, fr->table.len); t[fr->table.len] = '\0';
+		if (xstore_table_id(bt, t, &id)) continue;          /* table exists */
+		if (xstore_view_sql(bt, t, vtmp, (int)sizeof vtmp)) continue; /* view */
+		snprintf(namebuf, sizeof namebuf, "%s", t);
+		found = namebuf;
+		break;
+	}
+	sql_arena_destroy(arena);
+	return found;
 }
 
 void

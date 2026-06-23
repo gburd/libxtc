@@ -98,6 +98,7 @@ main(void)
 	snprintf(dwb, sizeof dwb, "%s.dwb", path);
 
 	CK(sx_init() == SX_OK);
+	sx_native_conn(0);   /* vtab-backed test: needs a SQLite connection */
 
 	/* ---- commit a large (spilling) transaction ---- */
 	CK(sx_storage_open(path, 64) == SX_OK);
