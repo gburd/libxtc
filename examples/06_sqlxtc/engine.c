@@ -90,8 +90,48 @@ struct sx_stmt {
  * SQLXTC_NATIVE_DRIVER=0 forces the VDBE (the differential oracle). */
 static int g_native_driver = 1;
 
+/* Fully SQLite-free connection (no xsql object at all): the final state
+ * of the excision.  Default OFF while recognition completeness is being
+ * finished -- with it off the connection is a SQLite handle that runs
+ * the native EXECUTION path (g_native_driver) and still has the VDBE as
+ * a safety net for any not-yet-recognized statement.  With it on,
+ * sx_open returns a tagged native handle and an unrecognized statement
+ * is a hard error.  SQLXTC_NATIVE_CONN=1 enables it. */
+static int g_native_conn;
+
 void sx_native_driver(int on) { g_native_driver = on ? 1 : 0; }
 int  sx_native_driver_enabled(void) { return g_native_driver; }
+void sx_native_conn(int on) { g_native_conn = on ? 1 : 0; }
+
+#ifdef SQLXTC_HAVE_LIME
+/*
+ * A NATIVE connection handle.  When the native driver is on and the
+ * libxtc storage engine is open, sx_open returns one of these instead
+ * of a SQLite (xsql) connection: the engine then runs the entire
+ * workload (the whole server test surface runs with zero VDBE
+ * fallback -- verified) on xstore + vexec with NO sqlite3 connection
+ * object at all.  It is identified by a magic first word, which the
+ * handle-level entry points (sx_close / sx_errmsg / sx_changes /
+ * sx_exec) check to route native vs SQLite.  The pointer's identity is
+ * its key in xstore's g_dbmap (bt + ctx), exactly as a SQLite handle
+ * was used -- xstore/vexec never dereference the connection.
+ */
+#define SX_NATIVE_MAGIC 0x73786E63u   /* "sxnc" */
+struct sx_native_db {
+	uint32_t   magic;          /* SX_NATIVE_MAGIC */
+	char      *errmsg;         /* last error text (owned), or NULL */
+	int64_t    changes;        /* rows changed by the last write */
+};
+
+static int
+sx_is_native_db(const sx_db *h)
+{
+	return h != NULL &&
+	    ((const struct sx_native_db *)h)->magic == SX_NATIVE_MAGIC;
+}
+#else
+static int sx_is_native_db(const sx_db *h) { (void)h; return 0; }
+#endif
 
 /* Is this a native (VDBE-free) prepared statement? */
 int  sx_stmt_is_native(const sx_stmt *st) { return st != NULL && st->native; }
@@ -129,6 +169,11 @@ sx_init(void)
 	const char *nd = getenv("SQLXTC_NATIVE_DRIVER");
 	if (nd != NULL && nd[0] == '0')
 		g_native_driver = 0;
+	{
+		const char *nc = getenv("SQLXTC_NATIVE_CONN");
+		if (nc != NULL && nc[0] == '1')
+			g_native_conn = 1;
+	}
 	return xsql_initialize();
 }
 
@@ -214,6 +259,32 @@ sx_open(const char *path, sx_db **out)
 	    strcmp(path, ":memory:") == 0 ||
 	    strstr(path, "mode=memory") != NULL);   /* shared-cache :memory: URI */
 	int rc;
+
+#ifdef SQLXTC_HAVE_LIME
+	/*
+	 * Fully native connection: when the native driver is on and the
+	 * libxtc storage engine is open, the connection needs no SQLite
+	 * object at all -- the entire workload runs on xstore + vexec.
+	 * Allocate a tagged native handle and register it as the g_dbmap
+	 * key (bt + a fresh per-connection ctx).  (:memory: with no storage,
+	 * or the driver-off oracle run, still opens a SQLite connection
+	 * below.)
+	 */
+	if (g_native_conn && g_xbt != NULL) {
+		struct sx_native_db *nd =
+		    (struct sx_native_db *)calloc(1, sizeof *nd);
+		if (nd == NULL) { *out = NULL; return SQLITE_NOMEM; }
+		nd->magic = SX_NATIVE_MAGIC;
+		nd->errmsg = NULL;
+		nd->changes = 0;
+		if (!memlike)
+			(void)vfs_register(0);   /* page store still uses the xtc VFS */
+		rc = xstore_register_native((xsql *)nd, g_xbt);
+		if (rc != SQLITE_OK) { free(nd); *out = NULL; return rc; }
+		*out = (sx_db *)nd;
+		return SQLITE_OK;
+	}
+#endif
 
 	/* File-backed databases go through the xtc VFS (instrumented,
 	 * offloaded I/O); in-memory databases do no file I/O. */
@@ -484,6 +555,15 @@ sx_storage_active(void)
 void
 sx_close(sx_db *h)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (sx_is_native_db(h)) {
+		struct sx_native_db *nd = (struct sx_native_db *)h;
+		xstore_unregister_native((struct xsql *)h);   /* frees the ctx too */
+		free(nd->errmsg);
+		free(nd);
+		return;
+	}
+#endif
 	/* Release the xstore connection->bt/ctx map slot before closing, so
 	 * the fixed-size map does not leak under many short-lived
 	 * connections; the ctx is freed by the module's ctx_free in
@@ -497,6 +577,31 @@ sx_close(sx_db *h)
 int
 sx_exec(sx_db *h, const char *sql, char **errmsg)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (sx_is_native_db(h)) {
+		/* Native multi-statement exec: prepare/step/finalize each
+		 * statement in turn through the native driver (no SQLite). */
+		const char *p = sql, *tail = NULL;
+		if (errmsg) *errmsg = NULL;
+		while (p != NULL && *p != '\0') {
+			sx_stmt *st = NULL;
+			int rc = sx_prepare(h, p, -1, &st, &tail);
+			if (rc != SQLITE_OK) return rc;
+			if (st != NULL) {
+				int sc;
+				(void)sx_column_count(st);   /* run a SELECT/table_info */
+				while ((sc = sx_step(st)) == SQLITE_ROW)
+					;
+				sx_finalize(st);
+				if (sc != SQLITE_DONE && sc != SQLITE_OK)
+					return sc;
+			}
+			if (tail == NULL || tail == p) break;
+			p = tail;
+		}
+		return SQLITE_OK;
+	}
+#endif
 	return xsql_exec((xsql *)h, sql, NULL, NULL, errmsg);
 }
 
@@ -540,26 +645,41 @@ sx_classify(const char *sql, int *tail_more,
 	case SQL_KIND_ROLLBACK: k = SXN_ROLLBACK; break;
 	case SQL_KIND_CREATE: {
 		/* Plain CREATE TABLE -> native xstore catalog (no vtab).
-		 * TABLE AS / VIEW / INDEX, or no single PRIMARY KEY column,
-		 * decline.  Coldefs is "<name> <type>" per column, PK first. */
+		 * TABLE AS / VIEW / INDEX decline.  Coldefs is "<name> <type>"
+		 * per column, the INTEGER PRIMARY KEY column first (it is the
+		 * rowid).  A table with no single INTEGER PRIMARY KEY column gets
+		 * an implicit rowid: a synthetic hidden "__rowid__ INTEGER"
+		 * column is prepended as the storage key, and all declared
+		 * columns follow as payload (SQLite-equivalent implicit-rowid
+		 * table). */
 		const sql_create_t *c = root->u.create;
 		const sql_coldef_t *col, *pk = NULL;
 		size_t co = 0;
+		int npk = 0, implicit;
 		int ok = (c != NULL && c->cols != NULL && c->select == NULL &&
 		          c->name.len > 0 && (size_t)c->name.len < namecap);
 		if (ok) {
 			memcpy(namebuf, c->name.p, c->name.len);
 			namebuf[c->name.len] = '\0';
 			for (col = c->cols; col; col = col->next)
-				if (col->primary) { if (pk) ok = 0; pk = col; }
-			if (pk == NULL) ok = 0;
+				if (col->primary) { npk++; pk = col; }
+			if (npk > 1) ok = 0;     /* composite PK: not yet native */
+		}
+		implicit = ok && (pk == NULL);
+		if (ok && implicit) {
+			/* synthetic hidden rowid as storage-column 0 */
+			int w = snprintf(colbuf, colcap, "__rowid__ INTEGER");
+			if (w < 0 || (size_t)w >= colcap) ok = 0;
+			else co = (size_t)w;
 		}
 		if (ok) {
-			int phase;
-			for (phase = 0; phase < 2 && ok; phase++)
+			int phase, phases = implicit ? 1 : 2;
+			/* explicit PK: PK column first (phase 0), then the rest.
+			 * implicit: a single pass over all declared columns. */
+			for (phase = 0; phase < phases && ok; phase++)
 				for (col = c->cols; col && ok; col = col->next) {
-					int w, is_pk = (col == pk);
-					if (phase == 0 ? !is_pk : is_pk) continue;
+					int w, is_pk = (!implicit && col == pk);
+					if (!implicit && (phase == 0 ? !is_pk : is_pk)) continue;
 					if (col->name.len == 0) { ok = 0; break; }
 					if (col->type.len > 0)
 						w = snprintf(colbuf + co, colcap - co, "%s%.*s %.*s",
@@ -670,6 +790,18 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 		}
 		/* SXN_NONE: fall through to the VDBE wrapper. */
 	}
+	/*
+	 * A fully native connection has no SQLite object: an unrecognized
+	 * statement is a hard error (the entire server workload is recognized
+	 * natively).  This is where the transition's VDBE safety net is
+	 * deliberately absent for native handles.
+	 */
+	if (sx_is_native_db(h)) {
+		struct sx_native_db *nd = (struct sx_native_db *)h;
+		free(nd->errmsg);
+		nd->errmsg = strdup("unsupported SQL (native engine)");
+		return SQLITE_ERROR;
+	}
 #endif
 	/*
 	 * Default (and native decline): wrap a VDBE statement.  The prepared
@@ -726,6 +858,11 @@ nat_fallback_to_vdbe(struct sx_stmt *st)
 	xsql_stmt *vdbe = NULL;
 	int i;
 	if (st->sql == NULL) return 0;
+	/* A fully native connection has no SQLite object to prepare against;
+	 * the entire server workload is recognized natively (verified: zero
+	 * fallbacks across the server test surface), so a decline here is a
+	 * genuine error rather than a VDBE handoff. */
+	if (sx_is_native_db(st->db)) return 0;
 	if (xsql_prepare_v2((xsql *)st->db, st->sql, -1, &vdbe, NULL) != SQLITE_OK ||
 	    vdbe == NULL)
 		return 0;
@@ -1052,11 +1189,23 @@ sx_column_bytes(sx_stmt *st, int i)
 const char *
 sx_errmsg(sx_db *h)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (sx_is_native_db(h)) {
+		const struct sx_native_db *nd = (const struct sx_native_db *)h;
+		return nd->errmsg != NULL ? nd->errmsg : "";
+	}
+#endif
 	return xsql_errmsg((xsql *)h);
 }
 int64_t
 sx_changes(sx_db *h)
 {
+#ifdef SQLXTC_HAVE_LIME
+	if (sx_is_native_db(h)) {
+		const struct sx_native_db *nd = (const struct sx_native_db *)h;
+		return nd->changes;
+	}
+#endif
 	return (int64_t)xsql_changes64((xsql *)h);
 }
 

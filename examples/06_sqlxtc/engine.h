@@ -126,6 +126,9 @@ void sx_finalize(sx_stmt *st);
  * unhandled statement makes sx_prepare ERROR (no VDBE fallback). */
 void sx_native_driver(int on);
 int  sx_native_driver_enabled(void);
+/* Enable the fully SQLite-free connection (sx_open returns a native
+ * handle; an unrecognized statement is a hard error).  Default off. */
+void sx_native_conn(int on);
 /* Is `st` a native (VDBE-free) prepared statement (driver on + a kind
  * the driver handles)?  The live path drives such a statement straight
  * through sx_step, with no VDBE prepare/fast-path dance. */

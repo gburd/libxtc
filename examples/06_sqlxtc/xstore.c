@@ -1641,6 +1641,8 @@ xstore_table_schema(bt_t *bt, const char *name, xstore_col_t *cols, int cap)
 				c->decltype[tn++] = cd[start++];
 			c->decltype[tn] = '\0';
 			c->is_pk = (ncol == 0);          /* column 0 is the rowid PK */
+			c->hidden = (ncol == 0 &&
+			    strcmp(c->name, "__rowid__") == 0); /* implicit rowid */
 			c->affinity = c->is_pk ? 'i' : xs_affinity_of(c->decltype);
 			ncol++;
 		}
@@ -3080,16 +3082,20 @@ xs_conn_rollback(void *p)
 	}
 }
 
-int
-xstore_register(xsql *db, bt_t *bt)
+/* Allocate a connection ctx, initialise it, and record the
+ * connection -> (bt, ctx) association in g_dbmap.  Shared by the SQLite
+ * registration (which then also installs the vtab module + SQL
+ * functions) and the native registration (which needs nothing else).
+ * Returns the ctx, or NULL on OOM.  In native mode autocommit is owned
+ * by the engine from the start. */
+static xstore_ctx_t *
+xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 {
 	xstore_ctx_t *ctx = xsql_malloc(sizeof *ctx);
-	int rc;
 	if (ctx == NULL)
-		return SQLITE_NOMEM;
+		return NULL;
 	bt_set_close_hook(xstore_cat_forget);   /* clear cached ids when a bt closes */
 	ctx->bt = bt;
-	/* Record the connection -> bt association for xstore_bt_of. */
 	pthread_mutex_lock(&g_cat_mu);
 	{
 		int i, slot = -1;
@@ -3117,8 +3123,34 @@ xstore_register(xsql *db, bt_t *bt)
 	ctx->sp_wn = NULL;
 	ctx->sp_rn = NULL;
 	ctx->sp_n = ctx->sp_cap = 0;
-	ctx->native_mode = 0;        /* SQLite drives autocommit until opted in */
-	ctx->native_autocommit = 1;  /* autocommit on (used only in native_mode) */
+	ctx->native_mode = native ? 1 : 0;
+	ctx->native_autocommit = 1;
+	return ctx;
+}
+
+/*
+ * Native registration: a sqlite3-free connection.  Installs only the
+ * ctx + g_dbmap mapping (no vtab module, no SQL functions, no
+ * commit/rollback hooks -- the native engine owns transactions and
+ * exposes no SQL UDFs).  The connection runs in native_mode from the
+ * start.
+ */
+int
+xstore_register_native(struct xsql *db, bt_t *bt)
+{
+	xstore_ctx_t *ctx = xs_ctx_init_and_map(db, bt, 1);
+	if (ctx == NULL)
+		return SQLITE_NOMEM;
+	return SQLITE_OK;
+}
+
+int
+xstore_register(xsql *db, bt_t *bt)
+{
+	xstore_ctx_t *ctx = xs_ctx_init_and_map(db, bt, 0);
+	int rc;
+	if (ctx == NULL)
+		return SQLITE_NOMEM;
 	rc = xsql_create_module_v2(db, "xstore", &xstore_module, ctx, ctx_free);
 	if (rc != SQLITE_OK)
 		return rc;
@@ -3165,6 +3197,30 @@ xstore_unregister(struct xsql *db)
 			break;
 		}
 	pthread_mutex_unlock(&g_cat_mu);
+}
+
+/*
+ * Native-handle unregister: like xstore_unregister, but also FREES the
+ * connection ctx (a native sx_open has no SQLite xsql_close to invoke
+ * the module's ctx_free, so the ctx is freed here).  Used only by a
+ * native (sqlite3-free) connection on close.
+ */
+void
+xstore_unregister_native(struct xsql *db)
+{
+	xstore_ctx_t *ctx = NULL;
+	int i;
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_dbmap_n; i++)
+		if (g_dbmap[i].db == db) {
+			ctx = g_dbmap[i].ctx;
+			g_dbmap_n--;
+			if (i != g_dbmap_n) g_dbmap[i] = g_dbmap[g_dbmap_n];
+			break;
+		}
+	pthread_mutex_unlock(&g_cat_mu);
+	if (ctx != NULL)
+		ctx_free(ctx);
 }
 
 /*
