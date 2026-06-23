@@ -6334,6 +6334,104 @@ read_one_row(bt_t *bt, const char *table, int64_t rowid, uint8_t *buf, int cap)
 	return got;
 }
 
+/*
+ * Evaluate an UPDATE SET right-hand-side expression against ONE row,
+ * for the (common) case where the RHS is not a bare literal: a column
+ * reference (the rowid, or a payload column), a numeric/text/NULL
+ * literal, a unary minus, or a binary arithmetic op (+ - * /) over those
+ * -- enough for SET v = v * 2, v = v + 1, etc.  `pay` holds the row's
+ * payload cells (declared column i maps to pay[i-1]); `rowid` is the
+ * INTEGER primary key.  ws gives column names.  Writes the result to
+ * *out and returns 0; returns -1 for any shape this mini-evaluator does
+ * not handle (the caller then declines the whole UPDATE).  Arithmetic
+ * follows SQLite: integer op integer is integer (except / which is
+ * integer division for two ints), any real operand yields real, a NULL
+ * operand yields NULL.
+ */
+static int
+eval_set_expr(const sql_expr_t *e, const vx_cell_t *pay, int npay,
+              int64_t rowid, const struct wschema *ws, vx_cell_t *out)
+{
+	if (e == NULL) return -1;
+	switch (e->op) {
+	case SX_E_NULL:
+		out->type = VX_NULL; out->nbytes = 0; return 0;
+	case SX_E_NUMBER: {
+		char buf[64];
+		if (e->lit.len == 0 || e->lit.len >= sizeof buf) return -1;
+		memcpy(buf, e->lit.p, e->lit.len); buf[e->lit.len] = '\0';
+		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) {
+			out->type = VX_REAL; out->r = strtod(buf, NULL);
+		} else { out->type = VX_INT; out->i = strtoll(buf, NULL, 10); }
+		return 0;
+	}
+	case SX_E_STRING:
+		/* The literal text is already unquoted in e->lit; it points into
+		 * the SQL buffer (stable for this call). */
+		out->type = VX_TEXT; out->bytes = (const uint8_t *)e->lit.p;
+		out->nbytes = e->lit.len; return 0;
+	case SX_E_COLUMN: {
+		const sql_str_t *nm = &e->name[e->nname - 1];
+		int k;
+		if (nm->len == 5 && strncasecmp(nm->p, "rowid", 5) == 0) {
+			out->type = VX_INT; out->i = rowid; return 0;
+		}
+		for (k = 0; k < ws->n; k++)
+			if (nm->len == strlen(ws->name[k]) &&
+			    strncmp(nm->p, ws->name[k], nm->len) == 0) {
+				if (k == 0) { out->type = VX_INT; out->i = rowid; return 0; }
+				if (k - 1 >= npay) return -1;
+				*out = pay[k - 1]; return 0;
+			}
+		return -1;
+	}
+	case SX_E_UNARY:
+		if (e->op2 == TK_MINUS) {
+			vx_cell_t v;
+			if (eval_set_expr(e->a, pay, npay, rowid, ws, &v) != 0) return -1;
+			if (v.type == VX_INT) { out->type = VX_INT; out->i = -v.i; return 0; }
+			if (v.type == VX_REAL) { out->type = VX_REAL; out->r = -v.r; return 0; }
+			if (v.type == VX_NULL) { out->type = VX_NULL; out->nbytes = 0; return 0; }
+		}
+		return -1;
+	case SX_E_BINARY: {
+		vx_cell_t a, b;
+		double x, y; int both_int;
+		if (e->op2 != TK_PLUS && e->op2 != TK_MINUS &&
+		    e->op2 != TK_STAR && e->op2 != TK_SLASH) return -1;
+		if (eval_set_expr(e->a, pay, npay, rowid, ws, &a) != 0) return -1;
+		if (eval_set_expr(e->b, pay, npay, rowid, ws, &b) != 0) return -1;
+		if (a.type == VX_NULL || b.type == VX_NULL) {
+			out->type = VX_NULL; out->nbytes = 0; return 0;
+		}
+		if (a.type != VX_INT && a.type != VX_REAL) return -1;
+		if (b.type != VX_INT && b.type != VX_REAL) return -1;
+		both_int = (a.type == VX_INT && b.type == VX_INT);
+		x = (a.type == VX_INT) ? (double)a.i : a.r;
+		y = (b.type == VX_INT) ? (double)b.i : b.r;
+		if (e->op2 == TK_SLASH) {
+			if (both_int) {
+				if (b.i == 0) { out->type = VX_NULL; out->nbytes = 0; return 0; }
+				out->type = VX_INT; out->i = a.i / b.i; return 0;
+			}
+			if (y == 0.0) { out->type = VX_NULL; out->nbytes = 0; return 0; }
+			out->type = VX_REAL; out->r = x / y; return 0;
+		}
+		if (both_int) {
+			out->type = VX_INT;
+			out->i = (e->op2 == TK_PLUS) ? a.i + b.i :
+			         (e->op2 == TK_MINUS) ? a.i - b.i : a.i * b.i;
+			return 0;
+		}
+		out->type = VX_REAL;
+		out->r = (e->op2 == TK_PLUS) ? x + y :
+		         (e->op2 == TK_MINUS) ? x - y : x * y;
+		return 0;
+	}
+	default: return -1;
+	}
+}
+
 int
 vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges, char **errmsg)
 {
@@ -6467,6 +6565,7 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 		 * (col 0) is a pk reassign, captured separately and applied as a
 		 * tombstone-old + insert-new move. */
 		vx_cell_t setval[64]; int setcol[64], nset = 0;
+		const sql_expr_t *setast[64];   /* non-literal RHS, evaluated per row */
 		int pk_reassign = 0; vx_cell_t pk_newval;
 		int64_t *rids;
 		memset(&pk_newval, 0, sizeof pk_newval);
@@ -6487,8 +6586,10 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 				continue;
 			}
 			if (nset >= 64) { sql_arena_destroy(arena); return 0; }
-			if (lit_cell(&cell_arena, a->val, &setval[nset], binds, nbinds) != 0) {
-				sql_arena_destroy(arena); return 0;  /* non-literal SET -> VDBE */
+			if (lit_cell(&cell_arena, a->val, &setval[nset], binds, nbinds) == 0) {
+				setast[nset] = NULL;          /* literal: same value every row */
+			} else {
+				setast[nset] = a->val;        /* expression: eval per row */
 			}
 			setcol[nset] = col;   /* declared index (>=1) */
 			nset++;
@@ -6541,8 +6642,28 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 				default:            c->type = VX_NULL; break;
 				}
 			}
-			for (ci = 0; ci < nset; ci++)
-				cells[setcol[ci] - 1] = setval[ci];   /* overlay the SET values */
+			for (ci = 0; ci < nset; ci++) {
+				/* Evaluate against the OLD row (SQLite evaluates every
+				 * SET RHS against the pre-update values), then overlay.
+				 * A literal SET has setast == NULL (setval precomputed);
+				 * an expression is evaluated per row. */
+				vx_cell_t nvval;
+				if (setast[ci] == NULL) {
+					nvval = setval[ci];
+				} else if (eval_set_expr(setast[ci], cells, ws.n - 1,
+				                         rids[i], &ws, &nvval) != 0) {
+					/* Unsupported RHS shape: clean fallback only if
+					 * nothing applied yet. */
+					if (applied == 0) { free(rids); sql_arena_destroy(arena); return 0; }
+					free(rids);
+					if (errmsg) *errmsg = strdup("native update expr unsupported");
+					rc = -1; goto done;
+				}
+				/* Apply the target column's declared affinity. */
+				coerce_to_affinity(&nvval,
+				    vx_affinity(ws.decltype[setcol[ci]]), &cell_arena);
+				cells[setcol[ci] - 1] = nvval;
+			}
 			reclen = encode_payload(cells, ws.n - 1, rec, (int)sizeof rec);
 			if (reclen < 0) {
 				/* Row too large to encode.  If nothing applied yet, fall
