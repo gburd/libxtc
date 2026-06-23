@@ -593,6 +593,20 @@ resolve_schema(sqlite3 *db, const char *table, struct namevec *nv, int *pay)
 					                          : vx_affinity(cols[c].decltype);
 					resolved++;
 				}
+			/* The special names rowid / _rowid_ / oid are aliases for the
+			 * INTEGER rowid in BOTH explicit-PK and implicit-rowid tables
+			 * (SQLite semantics), so resolve any still-unresolved such
+			 * reference to the rowid (pay = -1). */
+			for (i = 0; i < nv->n; i++) {
+				if (pay[i] != -2) continue;
+				if (strcasecmp(nv->names[i], "rowid") == 0 ||
+				    strcasecmp(nv->names[i], "_rowid_") == 0 ||
+				    strcasecmp(nv->names[i], "oid") == 0) {
+					pay[i] = -1;
+					nv->aff[i] = VX_AFF_NUMERIC;
+					resolved++;
+				}
+			}
 			for (i = 0; i < nv->n; i++) if (pay[i] == -2) ok = 0;
 			return (ok && resolved >= nv->n) ? 0 : -1;
 		}
@@ -2897,11 +2911,13 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 		int snc = sbt ? xstore_table_schema(sbt, tabbuf, scols, 64) : 0, sc;
 		if (snc <= 0) goto fallback;
 		for (sc = 0; sc < snc; sc++) {
-			sql_str_t s; s.p = scols[sc].name; s.len = (uint32_t)strlen(scols[sc].name);
+			sql_str_t s;
+			if (scols[sc].hidden) continue;  /* implicit rowid: not in * */
+			s.p = scols[sc].name; s.len = (uint32_t)strlen(scols[sc].name);
 			if (nv_add(&nv, &s) < 0) goto fallback;
 		}
 		if (sel->where && collect_columns(&nv, sel->where) != 0) goto fallback;
-		nproj = snc;
+		nproj = nv.n;
 	}
 
 	/* Storage-native source.  SELECT * is expanded above into the column
@@ -5681,14 +5697,16 @@ vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
 struct wschema {
 	char    name[64][64];
 	int     is_pk[64];
+	int     hidden[64];    /* synthetic implicit-rowid column (storage 0) */
 	int     n;
 	int     pk_col;        /* declared index of the pk, or -1 */
+	int     implicit_rowid;/* table has a hidden __rowid__ at index 0 */
 };
 
 static int
 load_wschema(sqlite3 *db, const char *table, struct wschema *ws)
 {
-	ws->n = 0; ws->pk_col = -1;
+	ws->n = 0; ws->pk_col = -1; ws->implicit_rowid = 0;
 
 	/* Native catalog first (no VDBE / no sqlite_master). */
 	{
@@ -5700,6 +5718,8 @@ load_wschema(sqlite3 *db, const char *table, struct wschema *ws)
 				snprintf(ws->name[ws->n], sizeof ws->name[0], "%.*s",
 				         (int)(sizeof ws->name[0] - 1), cols[c].name);
 				ws->is_pk[ws->n] = cols[c].is_pk;
+				ws->hidden[ws->n] = cols[c].hidden;
+				if (cols[c].hidden) ws->implicit_rowid = 1;
 				if (cols[c].is_pk) ws->pk_col = ws->n;
 				ws->n++;
 			}
@@ -6297,9 +6317,17 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 	{
 		int i;
 		if (ins->cols == NULL) {
-			/* Positional: element i -> declared column i. */
-			ncolmap = ws.n;
-			for (i = 0; i < ws.n && i < 64; i++) colmap[i] = i;
+			/* Positional: element i -> declared column i.  For an
+			 * implicit-rowid table the hidden __rowid__ is storage
+			 * column 0 and is NOT supplied by the user, so the values
+			 * map to columns 1..n-1 (rowid stays NULL -> auto). */
+			if (ws.implicit_rowid) {
+				ncolmap = ws.n - 1;
+				for (i = 0; i < ncolmap && i < 64; i++) colmap[i] = i + 1;
+			} else {
+				ncolmap = ws.n;
+				for (i = 0; i < ws.n && i < 64; i++) colmap[i] = i;
+			}
 		} else {
 			sql_exprlist_item_t *ci;
 			ncolmap = 0;
@@ -6812,27 +6840,38 @@ vx_pragma_table_info(sqlite3 *db, const char *table, vx_result_t **res)
 	if (nc <= 0)
 		return 0;                       /* unknown table */
 
-	r = (vx_result_t *)calloc(1, sizeof *r);
-	if (r == NULL) return -1;
-	r->ncol = 6;
-	r->nrow = nc;
-	r->cap = nc * 6;
+	/* Count user-visible columns (skip a synthetic implicit-rowid). */
+	{
+		int vis = 0, c;
+		for (c = 0; c < nc; c++) if (!cols[c].hidden) vis++;
+		r = (vx_result_t *)calloc(1, sizeof *r);
+		if (r == NULL) return -1;
+		r->ncol = 6;
+		r->nrow = vis;
+		r->cap = vis * 6;
+	}
 	r->cells = (vx_cell_t *)calloc((size_t)r->cap, sizeof *r->cells);
 	if (r->cells == NULL) { free(r); return -1; }
 	for (i = 0; i < 6; i++) {
 		snprintf(r->name[i], sizeof r->name[i], "%s", cn[i]);
 		r->aff[i] = (i == 0 || i == 3 || i == 5) ? VX_AFF_NUMERIC : VX_AFF_TEXT;
 	}
+	{
+	int cid = 0;
 	for (i = 0; i < nc; i++) {
-		vx_cell_t *row = &r->cells[(size_t)i * 6];
-		size_t nlen = strlen(cols[i].name);
-		size_t tlen = strlen(cols[i].decltype);
-		char *nbuf = (char *)arena_alloc(&r->arena, nlen + 1);
-		char *tbuf = (char *)arena_alloc(&r->arena, tlen + 1);
+		vx_cell_t *row;
+		size_t nlen, tlen;
+		char *nbuf, *tbuf;
+		if (cols[i].hidden) continue;   /* implicit rowid: not reported */
+		row = &r->cells[(size_t)cid * 6];
+		nlen = strlen(cols[i].name);
+		tlen = strlen(cols[i].decltype);
+		nbuf = (char *)arena_alloc(&r->arena, nlen + 1);
+		tbuf = (char *)arena_alloc(&r->arena, tlen + 1);
 		if (nbuf == NULL || tbuf == NULL) { vx_result_free(r); return -1; }
 		memcpy(nbuf, cols[i].name, nlen + 1);
 		memcpy(tbuf, cols[i].decltype, tlen + 1);
-		row[0].type = VX_INT;  row[0].i = i;                 /* cid */
+		row[0].type = VX_INT;  row[0].i = cid;               /* cid */
 		row[1].type = VX_TEXT; row[1].bytes = (const uint8_t *)nbuf;
 		row[1].nbytes = (uint32_t)nlen;                      /* name */
 		row[2].type = VX_TEXT; row[2].bytes = (const uint8_t *)tbuf;
@@ -6840,6 +6879,8 @@ vx_pragma_table_info(sqlite3 *db, const char *table, vx_result_t **res)
 		row[3].type = VX_INT;  row[3].i = 0;                 /* notnull */
 		row[4].type = VX_NULL;                               /* dflt_value */
 		row[5].type = VX_INT;  row[5].i = cols[i].is_pk ? 1 : 0; /* pk */
+		cid++;
+	}
 	}
 	*res = r;
 	return 1;
