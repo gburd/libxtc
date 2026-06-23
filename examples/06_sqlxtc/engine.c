@@ -59,7 +59,8 @@ _Static_assert(SX_NULL == SQLITE_NULL, "SX_NULL");
 enum sx_native_kind {
 	SXN_NONE = 0, SXN_SELECT, SXN_WRITE, SXN_BEGIN, SXN_COMMIT,
 	SXN_ROLLBACK, SXN_SAVEPOINT, SXN_RELEASE, SXN_ROLLBACK_TO,
-	SXN_CREATE, SXN_DROP, SXN_PRAGMA_NOP, SXN_PRAGMA_TABLE_INFO
+	SXN_CREATE, SXN_DROP, SXN_PRAGMA_NOP, SXN_PRAGMA_TABLE_INFO,
+	SXN_CREATE_VIEW, SXN_DROP_VIEW
 };
 
 struct sx_stmt {
@@ -645,19 +646,40 @@ sx_classify(const char *sql, int *tail_more,
 	case SQL_KIND_ROLLBACK: k = SXN_ROLLBACK; break;
 	case SQL_KIND_CREATE: {
 		/* Plain CREATE TABLE -> native xstore catalog (no vtab).
-		 * TABLE AS / VIEW / INDEX decline.  Coldefs is "<name> <type>"
-		 * per column, the INTEGER PRIMARY KEY column first (it is the
-		 * rowid).  A table with no single INTEGER PRIMARY KEY column gets
-		 * an implicit rowid: a synthetic hidden "__rowid__ INTEGER"
-		 * column is prepended as the storage key, and all declared
-		 * columns follow as payload (SQLite-equivalent implicit-rowid
-		 * table). */
+		 * CREATE VIEW -> the view registry (name in namebuf, the view's
+		 * SELECT text in colbuf).  TABLE AS / INDEX decline.  Coldefs is
+		 * "<name> <type>" per column, the INTEGER PRIMARY KEY column first
+		 * (it is the rowid).  A table with no single INTEGER PRIMARY KEY
+		 * column gets an implicit rowid: a synthetic hidden
+		 * "__rowid__ INTEGER" column is prepended as the storage key, and
+		 * all declared columns follow as payload (SQLite-equivalent
+		 * implicit-rowid table). */
 		const sql_create_t *c = root->u.create;
 		const sql_coldef_t *col, *pk = NULL;
 		size_t co = 0;
 		int npk = 0, implicit;
-		int ok = (c != NULL && c->cols != NULL && c->select == NULL &&
-		          c->name.len > 0 && (size_t)c->name.len < namecap);
+		int ok;
+		/* CREATE VIEW name AS <select>: capture the name (namebuf) and the
+		 * verbatim SELECT text (colbuf) for the view registry. */
+		if (c != NULL && c->kind == SX_CR_VIEW && c->select != NULL &&
+		    c->name.len > 0 && (size_t)c->name.len < namecap &&
+		    c->select->src != NULL) {
+			const char *vs = c->select->src;
+			size_t vlen = strlen(vs);   /* src runs to end-of-statement */
+			while (vlen > 0 && (vs[vlen-1] == ';' || vs[vlen-1] == ' ' ||
+			       vs[vlen-1] == '\n' || vs[vlen-1] == '\t')) vlen--;
+			if (vlen > 0 && vlen < colcap) {
+				memcpy(namebuf, c->name.p, c->name.len);
+				namebuf[c->name.len] = '\0';
+				memcpy(colbuf, vs, vlen);
+				colbuf[vlen] = '\0';
+				k = SXN_CREATE_VIEW;
+				break;
+			}
+			k = SXN_NONE; break;
+		}
+		ok = (c != NULL && c->cols != NULL && c->select == NULL &&
+		      c->name.len > 0 && (size_t)c->name.len < namecap);
 		if (ok) {
 			memcpy(namebuf, c->name.p, c->name.len);
 			namebuf[c->name.len] = '\0';
@@ -702,6 +724,11 @@ sx_classify(const char *sql, int *tail_more,
 			memcpy(namebuf, d->name.p, d->name.len);
 			namebuf[d->name.len] = '\0';
 			k = SXN_DROP;
+		} else if (d != NULL && d->kind == SX_DR_VIEW &&
+		           d->name.len > 0 && (size_t)d->name.len < namecap) {
+			memcpy(namebuf, d->name.p, d->name.len);
+			namebuf[d->name.len] = '\0';
+			k = SXN_DROP_VIEW;
 		} else k = SXN_NONE;
 		break;
 	}
@@ -780,8 +807,14 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 					if (st->ddl_cols == NULL) {
 						free(st->ddl_name); free(st->sql); free(st); return SQLITE_NOMEM; }
 				}
-			} else if (k == SXN_PRAGMA_TABLE_INFO) {
-				st->ddl_name = strdup(nm);   /* the table to introspect */
+			} else if (k == SXN_CREATE_VIEW) {
+				st->ddl_name = strdup(nm);
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
+				st->ddl_cols = strdup(cols);   /* the view's SELECT text */
+				if (st->ddl_cols == NULL) {
+					free(st->ddl_name); free(st->sql); free(st); return SQLITE_NOMEM; }
+			} else if (k == SXN_DROP_VIEW || k == SXN_PRAGMA_TABLE_INFO) {
+				st->ddl_name = strdup(nm);   /* view to drop / table to introspect */
 				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
 			}
 			if (tail) *tail = sql + strlen(sql);   /* single statement */
@@ -930,6 +963,12 @@ sx_step(sx_stmt *st)
 			    ? SQLITE_DONE : SQLITE_ERROR;
 		case SXN_DROP:
 			return xstore_drop_table(st->db, st->ddl_name) == 0
+			    ? SQLITE_DONE : SQLITE_ERROR;
+		case SXN_CREATE_VIEW:
+			return xstore_create_view(st->db, st->ddl_name, st->ddl_cols) != 0
+			    ? SQLITE_DONE : SQLITE_ERROR;
+		case SXN_DROP_VIEW:
+			return xstore_drop_view(st->db, st->ddl_name) != 0
 			    ? SQLITE_DONE : SQLITE_ERROR;
 		case SXN_PRAGMA_NOP:
 			return SQLITE_DONE;   /* value-setting PRAGMA: no-op, no rows */

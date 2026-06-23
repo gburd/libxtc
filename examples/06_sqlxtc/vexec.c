@@ -2743,6 +2743,10 @@ static int vx_try_prepare_derived(sqlite3 *db, sql_arena_t *ast,
                                   const sql_select_t *sel,
                                   const vx_cell_t *binds, int nbinds,
                                   vx_stmt_t **out, char **errmsg);
+static int vx_try_prepare_view(sqlite3 *db, sql_arena_t *ast,
+                               const sql_select_t *sel, const char *view_sql,
+                               const vx_cell_t *binds, int nbinds,
+                               vx_stmt_t **out, char **errmsg);
 static int vx_try_prepare_binds(sqlite3 *db, const char *sql,
                                 const vx_cell_t *binds, int nbinds,
                                 vx_stmt_t **out, char **errmsg);
@@ -2941,6 +2945,16 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 	if (src->table.len == 0 || src->table.len >= sizeof tabbuf) goto fallback;
 	memcpy(tabbuf, src->table.p, src->table.len);
 	tabbuf[src->table.len] = '\0';
+
+	/* A view reference in FROM: expand it as a derived table over the
+	 * view's stored SELECT (vx_try_prepare_view runs the view SELECT via
+	 * vexec and applies the outer projection / filter / ORDER BY). */
+	{
+		char vsql[1024];
+		if (xstore_view_sql(xstore_bt_of(db), tabbuf, vsql, (int)sizeof vsql))
+			return vx_try_prepare_view(db, ast, sel, vsql,
+			                           binds, nbinds, out, errmsg);
+	}
 
 	/* Aggregation (P3): a GROUP BY, or any select item that is an
 	 * aggregate call.  Routed to the dedicated builder. */
@@ -4341,6 +4355,151 @@ fallback:
 	return rc;
 }
 
+/*
+ * Expand a FROM reference to a VIEW: run the view's stored SELECT
+ * (view_sql) via vexec, materialize it, and apply the outer query's
+ * projection / WHERE / ORDER BY / LIMIT / OFFSET over the view's output
+ * columns -- exactly a derived table whose source is the view.  Unlike
+ * vx_try_prepare_derived this supports an outer ORDER BY / LIMIT /
+ * OFFSET (collected + sorted by join_ordered_materialize, since the
+ * source is derived_res).  GROUP BY / aggregates / a multi-table outer
+ * FROM are not yet composed over a view; those decline.
+ */
+static int
+vx_try_prepare_view(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
+                    const char *view_sql, const vx_cell_t *binds, int nbinds,
+                    vx_stmt_t **out, char **errmsg)
+{
+	struct vx_stmt *st = NULL;
+	struct vx_compiler comp;
+	struct namevec nv;
+	const sql_src_t *src = sel->from;
+	const sql_exprlist_item_t *it;
+	vx_result_t *ires = NULL;
+	int nproj = 0, i, rc = 0, ncol;
+
+	if (errmsg) *errmsg = NULL;
+	if (src->next != NULL) goto fallback;       /* single (view) source only */
+	if (sel->group || sel->distinct) goto fallback;
+
+	/* No aggregates / STAR in the outer projection (compose later). */
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
+		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
+		if (it->expr->op == SX_E_FUNC && is_agg_name(&it->expr->name[0])) goto fallback;
+		nproj++;
+	}
+	if (nproj == 0 || nproj > 32) goto fallback;
+
+	/* Run the view's SELECT through vexec and materialize it. */
+	rc = vx_run(db, view_sql, 1, &ires, NULL);
+	if (rc != 1 || ires == NULL) { if (ires) vx_result_free(ires); rc = 0; goto fallback; }
+	rc = 0;
+	ncol = vx_result_ncol(ires);
+	if (ncol <= 0 || ncol > 32) goto fallback;
+
+	/* The view's output columns are the source columns (named so the
+	 * outer projection / filter / ORDER BY resolve against them). */
+	memset(&nv, 0, sizeof nv);
+	for (i = 0; i < ncol; i++) {
+		const char *cn = vx_result_name(ires, i);
+		sql_str_t snm;
+		if (cn == NULL) goto fallback;
+		snm.p = cn; snm.len = (uint32_t)strlen(cn);
+		if (nv_add(&nv, &snm) < 0) goto fallback;
+		nv.aff[i] = ires->aff[i];
+	}
+	if (nv.n != ncol) goto fallback;
+
+	st = (struct vx_stmt *)calloc(1, sizeof *st);
+	if (!st) { rc = -1; goto fallback; }
+	st->db = db; st->cur = -1; st->limit = -1;
+	st->binds = binds; st->nbinds = nbinds;
+	st->nout = nproj;
+	st->nsrc_col = ncol;
+	st->proj = (vx_expr_t **)calloc((size_t)nproj, sizeof(vx_expr_t *));
+	if (!st->proj) { rc = -1; goto fallback; }
+
+	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
+	comp.binds = binds; comp.nbinds = nbinds;
+	{
+		int k = 0;
+		for (it = sel->cols->head; it; it = it->next, k++) {
+			st->proj[k] = compile_expr(&comp, it->expr);
+			if (comp.fail) goto fallback;
+			item_name(it, st->outname[k], sizeof st->outname[0]);
+		}
+		if (sel->where) {
+			st->filter = compile_expr(&comp, sel->where);
+			if (comp.fail) goto fallback;
+		}
+	}
+	if (nv.n != ncol) goto fallback;   /* outer referenced an unknown column */
+
+	/* ORDER BY / LIMIT / OFFSET over the view's output columns (sorted
+	 * post-collection -- the source is derived_res). */
+	if (sel->order) {
+		const sql_exprlist_item_t *o;
+		int no = 0, oi = 0;
+		for (o = sel->order->head; o; o = o->next) no++;
+		if (no == 0 || no > 16) goto fallback;
+		st->norder = no;
+		st->order_key = (vx_expr_t **)calloc((size_t)no, sizeof(vx_expr_t *));
+		st->order_outcol = (int *)calloc((size_t)no, sizeof(int));
+		st->order_desc = (int *)calloc((size_t)no, sizeof(int));
+		if (!st->order_key || !st->order_outcol || !st->order_desc) { rc = -1; goto fallback; }
+		for (o = sel->order->head; o; o = o->next, oi++) {
+			const sql_expr_t *e = o->expr;
+			st->order_desc[oi] = (o->sort == 2);
+			if (e && e->op == SX_E_NUMBER) {
+				char buf[32]; long pos;
+				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
+				memcpy(buf, e->lit.p, e->lit.len); buf[e->lit.len] = '\0';
+				if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+				pos = strtol(buf, NULL, 10);
+				if (pos < 1 || pos > nproj) goto fallback;
+				st->order_outcol[oi] = (int)pos;
+			} else {
+				const sql_exprlist_item_t *ci; int pos = 0, found = 0;
+				for (ci = sel->cols->head; ci; ci = ci->next, pos++)
+					if (expr_same(e, ci->expr)) { st->order_outcol[oi] = pos + 1; found = 1; break; }
+				if (!found) goto fallback;
+			}
+		}
+	}
+	if (sel->limit) {
+		char buf[32];
+		if (sel->limit->op != SX_E_NUMBER || sel->limit->lit.len >= sizeof buf) goto fallback;
+		memcpy(buf, sel->limit->lit.p, sel->limit->lit.len); buf[sel->limit->lit.len] = '\0';
+		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+		st->limit = strtoll(buf, NULL, 10);
+		if (st->limit < 0) st->limit = 0;
+	}
+	if (sel->offset) {
+		char buf[32];
+		if (sel->offset->op != SX_E_NUMBER || sel->offset->lit.len >= sizeof buf) goto fallback;
+		memcpy(buf, sel->offset->lit.p, sel->offset->lit.len); buf[sel->offset->lit.len] = '\0';
+		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+		st->offset = strtoll(buf, NULL, 10);
+		if (st->offset < 0) st->offset = 0;
+	}
+
+	st->srcrow = (vx_cell_t *)calloc((size_t)ncol, sizeof(vx_cell_t));
+	if (!st->srcrow) { rc = -1; goto fallback; }
+	st->derived_res = ires;   /* the view's row source; vx_finalize frees it */
+	st->derived_cur = 0;
+	ires = NULL;
+
+	sql_arena_destroy(ast);
+	*out = st;
+	return 1;
+
+fallback:
+	if (ires) vx_result_free(ires);
+	if (ast) sql_arena_destroy(ast);
+	if (st) { st->derived_res = NULL; vx_finalize(st); }
+	return rc;
+}
+
 static int
 join_build(struct vx_stmt *st, vx_jht_t *bh)
 {
@@ -5267,11 +5426,14 @@ join_ordered_materialize(struct vx_stmt *st)
 	int64_t lim, off;
 	int emit_n, e, done = 0;
 
-	/* Drain every join output chunk into rows[] (ncollect cols each:
-	 * the nout user columns followed by any sort-only extras). */
+	/* Drain every output chunk into rows[] (ncollect cols each: the nout
+	 * user columns followed by any sort-only extras).  The producer is
+	 * the two-table join, the N-way join, or -- for an ordered
+	 * derived/view query -- the standard chunk path. */
 	while (!done) {
 		vx_chunk_t *jc = st->join ? join_next_chunk(st, &done)
-		                          : njoin_next_chunk(st, &done);
+		              : st->njoin ? njoin_next_chunk(st, &done)
+		              : next_chunk(st, &done);
 		int r;
 		if (jc == NULL) { if (done) break; goto cleanup; }
 		for (r = 0; r < jc->nrow; r++) {
@@ -5390,10 +5552,11 @@ vx_step(vx_stmt_t *st)
 		if (agg_materialize(st) != 0) return SQLITE_ERROR;
 	}
 	/* Ordered/limited (non-agg): materialize + sort on first step.  A
-	 * join with ORDER BY uses the join-aware collector (it drains the
-	 * streaming join), a single-table scan uses ordered_materialize. */
+	 * join or a derived/view source uses the collecting collector (it
+	 * drains the streaming producer); a single-table scan uses
+	 * ordered_materialize. */
 	if (is_ordered(st) && !st->ordered_built) {
-		if (st->join != NULL || st->njoin != NULL) {
+		if (st->join != NULL || st->njoin != NULL || st->derived_res != NULL) {
 			if (join_ordered_materialize(st) != 0) return SQLITE_ERROR;
 		} else if (ordered_materialize(st) != 0) return SQLITE_ERROR;
 	}
