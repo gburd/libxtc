@@ -1088,36 +1088,118 @@ compile_param(struct vx_compiler *c, const sql_expr_t *e)
  * threaded into the inner run).  Anything else sets c->fail so the whole
  * statement falls back. */
 
-/* Prepare an uncorrelated subquery from its verbatim source span (which
- * includes the wrapping parens).  Strips the outer '(' ')' and prepares
- * the inner SELECT standalone via SQLite.  Returns the prepared stmt, or
- * NULL (correlated / unparseable / has parameters) -- the caller then
- * falls back.  Requires exactly `want_ncol` result columns. */
-static sqlite3_stmt *
-prepare_subquery(sqlite3 *db, const char *src, uint32_t srclen, int want_ncol)
+/* Walk an expression collecting whether any column reference is
+ * qualified by a table/alias name NOT in `intab` (the inner FROM set):
+ * such a reference is to an OUTER query, i.e. the subquery is
+ * correlated.  Sets *corr = 1 on the first such reference. */
+static void
+corr_scan_expr(const sql_expr_t *e, char intab[][64], int nintab, int *corr)
 {
-	sqlite3_stmt *q = NULL;
+	const sql_exprlist_item_t *it;
+	const sql_case_arm_t *arm;
+	if (e == NULL || *corr) return;
+	if (e->op == SX_E_COLUMN && e->nname >= 2) {
+		/* qualified: e->name[nname-2] is the table/alias qualifier */
+		const sql_str_t *q = &e->name[e->nname - 2];
+		int i, found = 0;
+		for (i = 0; i < nintab; i++)
+			if (q->len == strlen(intab[i]) &&
+			    strncasecmp(q->p, intab[i], q->len) == 0) { found = 1; break; }
+		if (!found) { *corr = 1; return; }
+	}
+	corr_scan_expr(e->a, intab, nintab, corr);
+	corr_scan_expr(e->b, intab, nintab, corr);
+	corr_scan_expr(e->c, intab, nintab, corr);
+	corr_scan_expr(e->els, intab, nintab, corr);
+	for (it = e->list ? e->list->head : NULL; it; it = it->next)
+		corr_scan_expr(it->expr, intab, nintab, corr);
+	for (arm = e->arms; arm; arm = arm->next) {
+		corr_scan_expr(arm->when, intab, nintab, corr);
+		corr_scan_expr(arm->then, intab, nintab, corr);
+	}
+	/* A nested subquery is checked by its own gate when compiled; here
+	 * we only need to know whether THIS level references an outer name. */
+}
+
+/*
+ * Native correlation/shape gate for an uncorrelated scalar/IN subquery,
+ * replacing the SQLite prepare-as-gate so catalog-only tables work.
+ * Parses the inner SELECT (src/srclen INCLUDE the wrapping parens),
+ * and returns 1 iff it is a single non-compound SELECT, has no "?"
+ * parameter, projects exactly `want_ncol` columns (no STAR), and is
+ * UNCORRELATED -- every qualified column reference uses a table/alias
+ * named in the inner FROM.  Returns 0 otherwise (the caller then treats
+ * it as correlated / unsupported).
+ */
+static int
+native_subquery_gate(const char *src, uint32_t srclen, int want_ncol)
+{
 	char *sub, *s;
 	size_t len = srclen;
-	if (db == NULL || src == NULL || srclen == 0) return NULL;
+	sql_arena_t *arena = NULL;
+	sql_stmt_t *root = NULL;
+	const char *perr = NULL;
+	int ok = 0;
+
+	if (src == NULL || srclen == 0) return 0;
 	sub = (char *)malloc((size_t)srclen + 1);
-	if (sub == NULL) return NULL;
+	if (sub == NULL) return 0;
 	memcpy(sub, src, srclen); sub[srclen] = '\0';
 	s = sub;
 	while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
 	while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
-	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); return NULL; }
+	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); return 0; }
 	s[len-1] = '\0';
 	memmove(sub, s + 1, len - 1);   /* drop leading '(' */
-	if (sqlite3_prepare_v2(db, sub, -1, &q, NULL) != SQLITE_OK) {
-		free(sub); return NULL;   /* correlated / unparseable -> VDBE */
+
+	if (sql_parse_ast(sub, strlen(sub), &arena, &root, &perr) != 0 || root == NULL)
+		goto out;
+	if (root->kind != SQL_KIND_SELECT || root->u.select == NULL)
+		goto out;
+	{
+		const sql_select_t *q = root->u.select;
+		char intab[8][64]; int nintab = 0, ncol = 0, corr = 0;
+		const sql_src_t *fr;
+		const sql_exprlist_item_t *it;
+		const sql_exprlist_t *g;
+		if (q->setop != 0 || q->rhs != NULL) goto out;   /* compound */
+		/* Inner FROM table names + aliases.  An aliased source contributes
+		 * ONLY its alias (SQLite requires the alias for qualification; the
+		 * base name then refers to an outer query -- the correlated case). */
+		for (fr = q->from; fr; fr = fr->next) {
+			if (fr->subquery) goto out;   /* nested derived: not gated here */
+			if (fr->alias.len > 0 && fr->alias.len < 64 && nintab < 8) {
+				memcpy(intab[nintab], fr->alias.p, fr->alias.len);
+				intab[nintab][fr->alias.len] = '\0'; nintab++;
+			} else if (fr->table.len > 0 && fr->table.len < 64 && nintab < 8) {
+				memcpy(intab[nintab], fr->table.p, fr->table.len);
+				intab[nintab][fr->table.len] = '\0'; nintab++;
+			}
+		}
+		/* Output column count (no STAR). */
+		for (it = q->cols ? q->cols->head : NULL; it; it = it->next) {
+			if (it->expr == NULL || it->expr->op == SX_E_STAR) goto out;
+			ncol++;
+		}
+		if (ncol != want_ncol) goto out;
+		/* Correlation: any qualified ref to a non-inner table -> correlated. */
+		for (it = q->cols->head; it; it = it->next)
+			corr_scan_expr(it->expr, intab, nintab, &corr);
+		corr_scan_expr(q->where, intab, nintab, &corr);
+		corr_scan_expr(q->having, intab, nintab, &corr);
+		for (g = q->group; g && g->head; ) { /* group is an exprlist */
+			const sql_exprlist_item_t *gi;
+			for (gi = g->head; gi; gi = gi->next)
+				corr_scan_expr(gi->expr, intab, nintab, &corr);
+			break;
+		}
+		if (corr) goto out;
+		ok = 1;
 	}
+out:
+	if (arena) sql_arena_destroy(arena);
 	free(sub);
-	if (sqlite3_bind_parameter_count(q) != 0 ||
-	    sqlite3_column_count(q) != want_ncol) {
-		sqlite3_finalize(q); return NULL;
-	}
-	return q;
+	return ok;
 }
 
 /* Walk a subquery expression collecting outer-column references: an
@@ -1361,21 +1443,12 @@ compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 	if (c->st == NULL || c->st->db == NULL || e->src == NULL || e->srclen == 0) {
 		c->fail = 1; return NULL;
 	}
-	/* Correlation gate: an uncorrelated subquery prepares standalone; a
-	 * correlated one references an outer column/alias and fails to
-	 * prepare on its own.  Use SQLite's prepare ONLY as that yes/no test
-	 * (finalized immediately, never stepped) -- a NATIVE check would need
-	 * full scope analysis to tell an outer-alias reference (x.k, the
-	 * outer table aliased) from an inner one (y.k) when the inner FROM
-	 * names the same base table, which SQLite's scoped resolver does for
-	 * free.  Execution itself is vexec's below; this is the last small
-	 * prepare-as-gate dependency.  A correlated subquery here falls
-	 * through to compile_corr_subquery. */
-	{
-		sqlite3_stmt *probe = prepare_subquery(c->st->db, e->src, e->srclen, 1);
-		if (probe == NULL) { c->fail = 1; return NULL; }
-		sqlite3_finalize(probe);
-	}
+	/* Correlation/shape gate, NATIVE: an uncorrelated scalar subquery
+	 * projects exactly one column and references no outer column.  This
+	 * replaces the former SQLite prepare-as-gate so a subquery over a
+	 * catalog-only (native DDL) table is recognized.  A correlated
+	 * subquery fails the gate and falls through to compile_corr_subquery. */
+	if (!native_subquery_gate(e->src, e->srclen, 1)) { c->fail = 1; return NULL; }
 	/* Strip the wrapping parens to get the inner SELECT text. */
 	sub = (char *)malloc((size_t)e->srclen + 1);
 	if (sub == NULL) { c->fail = 1; return NULL; }
@@ -1428,34 +1501,6 @@ compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 	return n;
 }
 
-/* Build a VXO_LIT node from a SQLite result column (copying TEXT/BLOB
- * into the plan arena).  Returns the node, or NULL (sets c->fail). */
-static vx_expr_t *
-lit_node_from_col(struct vx_compiler *c, sqlite3_stmt *q, int col)
-{
-	vx_expr_t *n = expr_node(c, VXO_LIT);
-	if (n == NULL) { c->fail = 1; return NULL; }
-	switch (sqlite3_column_type(q, col)) {
-	case SQLITE_INTEGER:
-		n->lit.type = VX_INT; n->lit.i = sqlite3_column_int64(q, col); break;
-	case SQLITE_FLOAT:
-		n->lit.type = VX_REAL; n->lit.r = sqlite3_column_double(q, col); break;
-	case SQLITE_TEXT: case SQLITE_BLOB: {
-		const void *b = sqlite3_column_blob(q, col);
-		int nb = sqlite3_column_bytes(q, col);
-		uint8_t *p = (uint8_t *)arena_alloc(&c->st->plan_arena, (size_t)nb + 1);
-		if (p == NULL) { c->fail = 1; return NULL; }
-		if (nb && b) memcpy(p, b, (size_t)nb);
-		p[nb] = '\0';
-		n->lit.type = (sqlite3_column_type(q, col) == SQLITE_TEXT) ? VX_TEXT : VX_BLOB;
-		n->lit.bytes = p; n->lit.nbytes = nb;
-		break; }
-	default:
-		n->lit.type = VX_NULL; break;
-	}
-	return n;
-}
-
 /* Max rows materialized from an IN (SELECT ...) subquery; a larger
  * result set falls back to the VDBE rather than build an unbounded
  * literal list. */
@@ -1470,49 +1515,82 @@ lit_node_from_col(struct vx_compiler *c, sqlite3_stmt *q, int col)
 static vx_expr_t *
 compile_in_select(struct vx_compiler *c, const sql_expr_t *e)
 {
-	sqlite3_stmt *q = NULL;
+	vx_result_t *r = NULL;
 	vx_expr_t *n, *a;
 	enum vx_aff acls;
-	int step, cnt = 0, cap = 16;
+	char *sub, *s;
+	size_t len;
+	int cnt = 0, cap = 16, nrow, ri, rc;
 
 	if (c->st == NULL || c->st->db == NULL) { c->fail = 1; return NULL; }
 	a = compile_expr(c, e->a);
 	if (a == NULL) return NULL;
 	acls = node_class(c, a);
 
-	q = prepare_subquery(c->st->db, e->src, e->srclen, 1);
-	if (q == NULL) { c->fail = 1; return NULL; }
+	/* NATIVE gate + run: an uncorrelated single-column subquery, run once
+	 * through vexec (no SQLite), its values materialized as a literal
+	 * list.  A correlated subquery fails the gate and the caller tries
+	 * compile_corr_subquery. */
+	if (!native_subquery_gate(e->src, e->srclen, 1)) { c->fail = 1; return NULL; }
+	if (e->src == NULL || e->srclen == 0) { c->fail = 1; return NULL; }
+	sub = (char *)malloc((size_t)e->srclen + 1);
+	if (sub == NULL) { c->fail = 1; return NULL; }
+	memcpy(sub, e->src, e->srclen); sub[e->srclen] = '\0';
+	s = sub; len = e->srclen;
+	while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
+	while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
+	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); c->fail = 1; return NULL; }
+	s[len-1] = '\0';
+	memmove(sub, s + 1, len - 1);
+	rc = vx_run(c->st->db, sub, 1, &r, NULL);
+	free(sub);
+	if (rc != 1 || r == NULL || vx_result_ncol(r) != 1) {
+		if (r) vx_result_free(r);
+		c->fail = 1; return NULL;
+	}
 
 	n = expr_node(c, e->ival ? VXO_NOTIN : VXO_IN);   /* ival = NOT IN */
-	if (n == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+	if (n == NULL) { vx_result_free(r); c->fail = 1; return NULL; }
 	n->a = a;
 	n->args = (vx_expr_t **)arena_alloc(&c->st->plan_arena,
 	                                    sizeof(vx_expr_t *) * (size_t)cap);
-	if (n->args == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+	if (n->args == NULL) { vx_result_free(r); c->fail = 1; return NULL; }
 
-	while ((step = sqlite3_step(q)) == SQLITE_ROW) {
+	nrow = vx_result_nrow(r);
+	for (ri = 0; ri < nrow; ri++) {
 		vx_expr_t *v;
-		if (cnt >= VX_IN_SELECT_MAX) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+		if (cnt >= VX_IN_SELECT_MAX) { vx_result_free(r); c->fail = 1; return NULL; }
 		if (cnt == cap) {
 			int nc = cap * 2;
 			vx_expr_t **na = (vx_expr_t **)arena_alloc(&c->st->plan_arena,
 			                                  sizeof(vx_expr_t *) * (size_t)nc);
-			if (na == NULL) { sqlite3_finalize(q); c->fail = 1; return NULL; }
+			if (na == NULL) { vx_result_free(r); c->fail = 1; return NULL; }
 			memcpy(na, n->args, sizeof(vx_expr_t *) * (size_t)cnt);
 			n->args = na; cap = nc;
 		}
-		v = lit_node_from_col(c, q, 0);
-		if (v == NULL) { sqlite3_finalize(q); return NULL; }
-		/* A NULL subquery value participates in IN's 3-valued logic; the
-		 * VXO_IN eval already treats a NULL list element correctly, but
-		 * the affinity gate only applies to non-NULL values. */
+		v = expr_node(c, VXO_LIT);
+		if (v == NULL) { vx_result_free(r); c->fail = 1; return NULL; }
+		switch (vx_result_type(r, ri, 0)) {
+		case VX_INT:  v->lit.type = VX_INT;  v->lit.i = vx_result_int64(r, ri, 0); break;
+		case VX_REAL: v->lit.type = VX_REAL; v->lit.r = vx_result_double(r, ri, 0); break;
+		case VX_TEXT: case VX_BLOB: {
+			const char *b = vx_result_text(r, ri, 0);
+			int nb = vx_result_bytes(r, ri, 0);
+			uint8_t *pp = (uint8_t *)arena_alloc(&c->st->plan_arena, (size_t)nb + 1);
+			if (pp == NULL) { vx_result_free(r); c->fail = 1; return NULL; }
+			if (nb && b) memcpy(pp, b, (size_t)nb);
+			pp[nb] = '\0';
+			v->lit.type = (vx_result_type(r, ri, 0) == VX_TEXT) ? VX_TEXT : VX_BLOB;
+			v->lit.bytes = pp; v->lit.nbytes = (uint32_t)nb;
+			break; }
+		default: v->lit.type = VX_NULL; v->lit.nbytes = 0; break;
+		}
 		if (v->lit.type != VX_NULL && node_class(c, v) != acls) {
-			sqlite3_finalize(q); c->fail = 1; return NULL;
+			vx_result_free(r); c->fail = 1; return NULL;
 		}
 		n->args[cnt++] = v;
 	}
-	if (step != SQLITE_DONE) { sqlite3_finalize(q); c->fail = 1; return NULL; }
-	sqlite3_finalize(q);
+	vx_result_free(r);
 
 	if (cnt == 0) {
 		/* IN (empty) is always false; NOT IN (empty) always true.  The
