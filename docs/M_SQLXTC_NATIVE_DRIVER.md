@@ -333,3 +333,59 @@ VDBE program, byte-identical to the VDBE, green on all platforms.  The
 remaining excision steps are mechanical: a reference SQLite test-only
 oracle, turning the sx_prepare decline into an error, and deleting
 sqlite3.c + the vtab module + the shims.
+
+## Milestone: server SQLite-free by default; full oracle native (32/32)
+
+The native engine now serves the ENTIRE differential oracle corpus
+(32/32) with no VDBE and no sqlite3 prepare: CREATE/INSERT/UPDATE/DELETE
+/SELECT, INNER/LEFT joins, aggregates with HAVING, uncorrelated and
+correlated subqueries, IN (SELECT), scalar subqueries, ORDER BY (single
+table, join, view), LIMIT/OFFSET, column affinity on INSERT/UPDATE,
+LIKE/GLOB, PRAGMA table_info, implicit-rowid tables, FROM-less constant
+SELECT, and CREATE/DROP VIEW.  Recognition completeness was reached by:
+
+* implicit-rowid tables (synthetic hidden __rowid__ column);
+* rowid / _rowid_ / oid resolution;
+* native PRAGMA table_info from the catalog;
+* ORDER BY on the two-table join + the derived/view path
+  (join_ordered_materialize collects + sorts; a non-output sort key is
+  carried as an extra sort-only projection column);
+* column affinity applied on INSERT and UPDATE (coerce_to_affinity);
+* expression-RHS UPDATE (eval_set_expr);
+* native_subquery_gate (correlation decided by parsing, not a SQLite
+  prepare) + IN (SELECT) materialized via vx_run -- the last
+  prepare-as-gate dependency removed;
+* native CREATE VIEW / DROP VIEW (view registry + FROM expansion);
+* "no such table: NAME" for an unknown table (nat_set_run_error +
+  vx_unknown_table).
+
+The connection itself is now SQLite-free by default: sx_open returns a
+tagged native handle (struct sx_native_db) registered via
+xstore_register_native (ctx + g_dbmap only, no vtab module / SQL
+functions / hooks); sx_close / sx_errmsg / sx_changes / sx_exec dispatch
+native vs SQLite; a declined statement is a hard error.  The external
+differential oracle (python's sqlite3, linked outside the engine) is the
+correctness proof and is a gating CI check.
+
+### What still links sqlite3.c, and the remaining mechanical work
+
+The sqlxtc-server binary still LINKS sqlite3.o because engine.c /
+xstore.c / db.c / vexec.c still REFERENCE xsql_* symbols on the legacy
+(driver-off / native-conn-off) code paths: the vtab module in xstore.c,
+the VDBE fallback (nat_fallback_to_vdbe), and the legacy connection
+lifecycle.  These paths are dead at runtime (native conn default) but
+still compiled.  In-process tests that exercise the vtab + crash
+recovery (test_db_vexec, test_native_driver, test_server_storage,
+test_clean_restart, test_steal, and the vtab-using xstore/isolation/
+mvcc/savepoint/wal tests) still use CREATE VIRTUAL TABLE and the SQLite
+API as an in-process reference.
+
+To delete sqlite3.c: (1) convert those ~22 test files off CREATE VIRTUAL
+TABLE and the sqlite3_/xsql_ API to native CREATE TABLE + the sx_* API
+(the external oracle remains the correctness proof); (2) remove the vtab
+module, the VDBE fallback, and the legacy connection path from the
+engine, compile-guarding or deleting every xsql_* reference; (3) drop
+sqlite3.o from the server link in dist/Makefile.in + the example
+Makefile; (4) delete sqlite3.c/.h + the vfs/pcache/mutex/mem shims +
+xsql.h; (5) re-run all CI jobs (the oracle gate proves equivalence
+throughout).
