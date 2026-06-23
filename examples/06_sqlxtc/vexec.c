@@ -432,6 +432,9 @@ struct vx_stmt {
 
 	vx_aggplan_t *agg;          /* non-NULL => aggregating statement (V3) */
 	vx_joinplan_t *join;        /* non-NULL => two-table hash join (V5) */
+	int           join_emit;    /* join: columns to emit into the chunk
+	                             * (nout user cols + sort-only extras); 0
+	                             * means "use nout". */
 
 	/* ORDER BY / LIMIT (V4).  norder > 0 => ordered.  Each order key is
 	 * either an expression over the SOURCE columns (order_key[i]), or a
@@ -2804,11 +2807,17 @@ vx_prepare_select(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 		 * two streaming join executors (2-table + N-way, native +
 		 * non-native sources) to thread it through; deferred as a distinct
 		 * step.  Falls back correctly via the VDBE today. */
-		if (sel->group || sel->order || sel->limit || sel->offset || sel->distinct)
+		if (sel->group || sel->distinct)
 			goto fallback;
+		/* ORDER BY / LIMIT / OFFSET on the join path are applied as a
+		 * post-collection sort over the output columns (collect_serial),
+		 * exactly like the aggregation path -- deterministic for unique
+		 * sort keys. */
 		if (src->next->next == NULL)
 			return vx_try_prepare_join(db, ast, sel, binds, nbinds, out, errmsg);
-		/* 3+ tables: INNER-only N-way pipeline. */
+		/* 3+ tables: INNER-only N-way pipeline (no ORDER BY yet). */
+		if (sel->order || sel->limit || sel->offset)
+			goto fallback;
 		return vx_try_prepare_njoin(db, ast, sel, binds, nbinds, out, errmsg);
 	}
 	if (src->subquery != NULL) {
@@ -3824,6 +3833,72 @@ vx_try_prepare_join(sqlite3 *db, sql_arena_t *ast, const sql_select_t *sel,
 		}
 	}
 
+	/* ORDER BY / LIMIT / OFFSET: order keys reference OUTPUT columns (a
+	 * positional integer or a select item matched by expr_same), applied
+	 * as a post-collection sort in collect_serial -- deterministic for a
+	 * total order. */
+	st->limit = -1;
+	st->offset = 0;
+	if (sel->order) {
+		const sql_exprlist_item_t *o;
+		int no = 0, oi = 0, nextra = 0;
+		for (o = sel->order->head; o; o = o->next) no++;
+		if (no == 0 || no > 16) goto fallback;
+		st->norder = no;
+		st->order_key = (vx_expr_t **)calloc((size_t)no, sizeof(vx_expr_t *));
+		st->order_outcol = (int *)calloc((size_t)no, sizeof(int));
+		st->order_desc = (int *)calloc((size_t)no, sizeof(int));
+		if (!st->order_key || !st->order_outcol || !st->order_desc) goto oom;
+		for (o = sel->order->head; o; o = o->next, oi++) {
+			const sql_expr_t *e = o->expr;
+			st->order_desc[oi] = (o->sort == 2);
+			if (e && e->op == SX_E_NUMBER) {
+				char buf[32]; long pos;
+				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
+				memcpy(buf, e->lit.p, e->lit.len); buf[e->lit.len] = '\0';
+				if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+				pos = strtol(buf, NULL, 10);
+				if (pos < 1 || pos > nproj) goto fallback;
+				st->order_outcol[oi] = (int)pos;
+			} else {
+				const sql_exprlist_item_t *ci; int pos = 0, found = 0;
+				for (ci = sel->cols->head; ci; ci = ci->next, pos++)
+					if (expr_same(e, ci->expr)) { st->order_outcol[oi] = pos + 1; found = 1; break; }
+				if (!found) {
+					/* The sort key is not an output column: compile it as
+					 * an extra projection column appended after the user
+					 * columns (the join emits nproj + extras; the result
+					 * keeps only the first nproj). */
+					int slot = nproj + nextra;
+					if (slot >= 32) goto fallback;
+					comp.fail = 0;
+					st->proj[slot] = compile_expr(&comp, e);
+					if (comp.fail) goto fallback;
+					st->order_outcol[oi] = slot + 1;   /* 1-based extra col */
+					nextra++;
+				}
+			}
+		}
+		if (nextra > 0)
+			st->join_emit = nproj + nextra;   /* emit user + sort-only cols */
+	}
+	if (sel->limit) {
+		char buf[32];
+		if (sel->limit->op != SX_E_NUMBER || sel->limit->lit.len >= sizeof buf) goto fallback;
+		memcpy(buf, sel->limit->lit.p, sel->limit->lit.len); buf[sel->limit->lit.len] = '\0';
+		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+		st->limit = strtoll(buf, NULL, 10);
+		if (st->limit < 0) st->limit = 0;
+	}
+	if (sel->offset) {
+		char buf[32];
+		if (sel->offset->op != SX_E_NUMBER || sel->offset->lit.len >= sizeof buf) goto fallback;
+		memcpy(buf, sel->offset->lit.p, sel->offset->lit.len); buf[sel->offset->lit.len] = '\0';
+		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+		st->offset = strtoll(buf, NULL, 10);
+		if (st->offset < 0) st->offset = 0;
+	}
+
 	sqlite3_finalize(bsrc); bsrc = NULL;
 	sqlite3_finalize(psrc); psrc = NULL;
 
@@ -4765,13 +4840,13 @@ cleanup:
 static int
 join_emit_row(struct vx_stmt *st, vx_chunk_t *c)
 {
-	int j;
+	int j, nemit = st->join_emit > 0 ? st->join_emit : st->nout;
 	vx_cell_t *dst;
 	if (st->filter != NULL &&
 	    eval_bool(st, st->filter, st->srcrow, &c->arena) != 1)
 		return 0;
 	dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
-	for (j = 0; j < st->nout; j++) {
+	for (j = 0; j < nemit; j++) {
 		eval(st, st->proj[j], st->srcrow, &c->arena, &dst[j]);
 		/* eval may return a cell pointing into the build (jht,
 		 * statement-lifetime -- safe) or probe arena (reset per probe
@@ -4799,7 +4874,7 @@ join_next_chunk(struct vx_stmt *st, int *done)
 	*done = 0;
 	c = (vx_chunk_t *)calloc(1, sizeof *c);
 	if (!c) return NULL;
-	c->ncol = st->nout;
+	c->ncol = st->join_emit > 0 ? st->join_emit : st->nout;
 	c->cap = VEXEC_VECTOR_SIZE;
 	c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap *
 	                               (size_t)(c->ncol > 0 ? c->ncol : 1));
@@ -4975,7 +5050,7 @@ njoin_next_chunk(struct vx_stmt *st, int *done)
 	*done = 0;
 	c = (vx_chunk_t *)calloc(1, sizeof *c);
 	if (!c) return NULL;
-	c->ncol = st->nout;
+	c->ncol = st->join_emit > 0 ? st->join_emit : st->nout;
 	c->cap = VEXEC_VECTOR_SIZE;
 	c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap *
 	                               (size_t)(c->ncol > 0 ? c->ncol : 1));
@@ -5062,6 +5137,110 @@ njoin_next_chunk(struct vx_stmt *st, int *done)
 	return c;
 }
 
+/* Materialize, sort, and offset/limit a JOIN with ORDER BY into one
+ * chunk.  Drains the join's streaming chunks (join_next_chunk /
+ * njoin_next_chunk), copies each output row into a growable array, sorts
+ * by the ORDER BY keys (which reference OUTPUT columns via
+ * order_outcol), then applies OFFSET/LIMIT -- the same post-collection
+ * model the aggregation path uses.  Deterministic for a total order. */
+static int
+join_ordered_materialize(struct vx_stmt *st)
+{
+	struct vx_arena_blk *keep = NULL;   /* output bytes (kept) */
+	vx_cell_t *rows = NULL;             /* cap * ncollect */
+	int *idx = NULL;
+	int nkey = st->norder;
+	int ncollect = st->join_emit > 0 ? st->join_emit : st->nout;
+	int cap = 0, nrow = 0, j, rc = -1;
+	vx_chunk_t *c = NULL;
+	int64_t lim, off;
+	int emit_n, e, done = 0;
+
+	/* Drain every join output chunk into rows[] (ncollect cols each:
+	 * the nout user columns followed by any sort-only extras). */
+	while (!done) {
+		vx_chunk_t *jc = st->join ? join_next_chunk(st, &done)
+		                          : njoin_next_chunk(st, &done);
+		int r;
+		if (jc == NULL) { if (done) break; goto cleanup; }
+		for (r = 0; r < jc->nrow; r++) {
+			if (nrow == cap) {
+				int nc = cap ? cap * 2 : 256;
+				vx_cell_t *nr = realloc(rows, sizeof(vx_cell_t) *
+				    (size_t)nc * (size_t)(ncollect > 0 ? ncollect : 1));
+				if (!nr) { chunk_free(jc); goto cleanup; }
+				rows = nr; cap = nc;
+			}
+			for (j = 0; j < ncollect; j++) {
+				vx_cell_t v = jc->cells[(size_t)r * (size_t)jc->ncol + (size_t)j];
+				if (cell_dup(&keep, &v, &rows[(size_t)nrow * (size_t)ncollect + (size_t)j]) != 0) {
+					chunk_free(jc); goto cleanup;
+				}
+			}
+			nrow++;
+		}
+		chunk_free(jc);
+	}
+
+	/* Sort an index array by the ORDER BY keys (output columns, which may
+	 * be sort-only extras past nout). */
+	idx = (int *)malloc(sizeof(int) * (size_t)(nrow > 0 ? nrow : 1));
+	if (!idx) goto cleanup;
+	for (j = 0; j < nrow; j++) idx[j] = j;
+	if (nkey > 0) {
+		vx_cell_t *keys = (vx_cell_t *)malloc(sizeof(vx_cell_t) *
+		    (size_t)(nrow > 0 ? nrow : 1) * (size_t)nkey);
+		struct sort_ctx sc;
+		int p;
+		if (!keys) goto cleanup;
+		for (p = 0; p < nrow; p++)
+			for (j = 0; j < nkey; j++)
+				keys[(size_t)p * (size_t)nkey + (size_t)j] =
+				    rows[(size_t)p * (size_t)ncollect + (size_t)(st->order_outcol[j] - 1)];
+		sc.keys = keys; sc.nkey = nkey; sc.desc = st->order_desc;
+		g_sort_ctx = &sc;
+		qsort(idx, (size_t)nrow, sizeof(int), sort_index_cmp);
+		g_sort_ctx = NULL;
+		free(keys);
+	}
+
+	/* OFFSET / LIMIT over the sorted rows. */
+	off = st->offset; lim = st->limit;
+	if (off > nrow) off = nrow;
+	emit_n = nrow - (int)off;
+	if (lim >= 0 && emit_n > lim) emit_n = (int)lim;
+	if (emit_n < 0) emit_n = 0;
+
+	c = (vx_chunk_t *)calloc(1, sizeof *c);
+	if (!c) goto cleanup;
+	c->ncol = st->nout;          /* emit only the user columns */
+	c->cap = emit_n > 0 ? emit_n : 1;
+	c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap *
+	    (size_t)(st->nout > 0 ? st->nout : 1));
+	if (!c->cells) { chunk_free(c); c = NULL; goto cleanup; }
+	for (e = 0; e < emit_n; e++) {
+		int si = idx[(int)off + e];
+		vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
+		for (j = 0; j < st->nout; j++) {
+			vx_cell_t v = rows[(size_t)si * (size_t)ncollect + (size_t)j];
+			if ((v.type == VX_TEXT || v.type == VX_BLOB) && v.nbytes)
+				(void)cell_dup(&c->arena, &v, &dst[j]);
+			else dst[j] = v;
+		}
+		c->nrow++;
+	}
+	st->chunk = c; c = NULL;
+	st->cur = -1;
+	st->ordered_built = 1;
+	rc = 0;
+
+cleanup:
+	arena_free(keep);
+	free(rows); free(idx);
+	if (c) chunk_free(c);
+	return rc;
+}
+
 int
 vx_step(vx_stmt_t *st)
 {
@@ -5099,9 +5278,13 @@ vx_step(vx_stmt_t *st)
 	if (st->agg != NULL && !st->ht_built) {
 		if (agg_materialize(st) != 0) return SQLITE_ERROR;
 	}
-	/* Ordered/limited (non-agg): materialize + sort on first step. */
+	/* Ordered/limited (non-agg): materialize + sort on first step.  A
+	 * join with ORDER BY uses the join-aware collector (it drains the
+	 * streaming join), a single-table scan uses ordered_materialize. */
 	if (is_ordered(st) && !st->ordered_built) {
-		if (ordered_materialize(st) != 0) return SQLITE_ERROR;
+		if (st->join != NULL || st->njoin != NULL) {
+			if (join_ordered_materialize(st) != 0) return SQLITE_ERROR;
+		} else if (ordered_materialize(st) != 0) return SQLITE_ERROR;
 	}
 
 	if (st->chunk != NULL && st->cur + 1 < st->chunk->nrow) {
