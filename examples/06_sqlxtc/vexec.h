@@ -171,4 +171,9 @@ int            vx_result_nworkers(const vx_result_t *r);
 
 void vx_result_free(vx_result_t *r);
 
+/* Build PRAGMA table_info(<table>) natively from the xstore catalog
+ * (columns cid,name,type,notnull,dflt_value,pk).  Returns 1 with *res
+ * owned by the caller, 0 if the table has no native schema, <0 on OOM. */
+int vx_pragma_table_info(sqlite3 *db, const char *table, vx_result_t **res);
+
 #endif /* SQLXTC_VEXEC_H */
