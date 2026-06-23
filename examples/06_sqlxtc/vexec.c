@@ -1925,6 +1925,39 @@ coerce_numeric(vx_cell_t *v)
 	}
 }
 
+/* Apply SQLite column affinity to a value being stored (INSERT).  TEXT
+ * affinity converts INTEGER/REAL to its text form; NUMERIC affinity
+ * converts a numeric-looking TEXT to INTEGER/REAL (coerce_numeric);
+ * BLOB/none affinity leaves the value as-is.  NULL is never coerced.
+ * Text produced for an int/real is allocated in `arena`. */
+static void
+coerce_to_affinity(vx_cell_t *v, enum vx_aff aff, struct vx_arena_blk **arena)
+{
+	if (v->type == VX_NULL) return;
+	if (aff == VX_AFF_TEXT) {
+		char buf[64];
+		int n;
+		if (v->type == VX_TEXT || v->type == VX_BLOB) return;
+		if (v->type == VX_INT)
+			n = snprintf(buf, sizeof buf, "%lld", (long long)v->i);
+		else if (v->type == VX_REAL) {
+			/* SQLite renders an integral real without a fraction via %!.15g;
+			 * use %g which matches for the corpus values. */
+			n = snprintf(buf, sizeof buf, "%g", v->r);
+		} else return;
+		if (n < 0 || n >= (int)sizeof buf) return;
+		{
+			uint8_t *p = (uint8_t *)arena_alloc(arena, (size_t)n + 1);
+			if (p == NULL) return;
+			memcpy(p, buf, (size_t)n + 1);
+			v->type = VX_TEXT; v->bytes = p; v->nbytes = (uint32_t)n;
+		}
+	} else if (aff == VX_AFF_NUMERIC) {
+		if (v->type == VX_TEXT) (void)coerce_numeric(v);
+	}
+	/* VX_AFF_BLOB (none affinity): no conversion. */
+}
+
 /* Compare two non-NULL cells of the SAME affinity class (the compiler
  * guarantees comparisons are numeric/numeric or text/text). */
 static int
@@ -5879,6 +5912,7 @@ vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
  */
 struct wschema {
 	char    name[64][64];
+	char    decltype[64][32];   /* declared type per column (for affinity) */
 	int     is_pk[64];
 	int     hidden[64];    /* synthetic implicit-rowid column (storage 0) */
 	int     n;
@@ -5900,6 +5934,8 @@ load_wschema(sqlite3 *db, const char *table, struct wschema *ws)
 			for (c = 0; c < nc && ws->n < 64; c++) {
 				snprintf(ws->name[ws->n], sizeof ws->name[0], "%.*s",
 				         (int)(sizeof ws->name[0] - 1), cols[c].name);
+				snprintf(ws->decltype[ws->n], sizeof ws->decltype[0], "%.*s",
+				         (int)(sizeof ws->decltype[0] - 1), cols[c].decltype);
 				ws->is_pk[ws->n] = cols[c].is_pk;
 				ws->hidden[ws->n] = cols[c].hidden;
 				if (cols[c].hidden) ws->implicit_rowid = 1;
@@ -6654,6 +6690,11 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 				             binds, nbinds) != 0) {
 					vidx = -1; break;             /* non-literal -> VDBE */
 				}
+				/* Apply the target column's declared affinity (SQLite stores
+				 * 42 into a TEXT column as '42', a numeric-looking string
+				 * into a NUMERIC column as a number, etc.). */
+				coerce_to_affinity(&cells[colmap[vidx]],
+				    vx_affinity(ws.decltype[colmap[vidx]]), &cell_arena);
 				vidx++;
 			}
 			if (vidx != ncolmap) { free(buf); rc = 0; goto done; }  /* arity / non-lit */
