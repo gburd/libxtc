@@ -59,7 +59,7 @@ _Static_assert(SX_NULL == SQLITE_NULL, "SX_NULL");
 enum sx_native_kind {
 	SXN_NONE = 0, SXN_SELECT, SXN_WRITE, SXN_BEGIN, SXN_COMMIT,
 	SXN_ROLLBACK, SXN_SAVEPOINT, SXN_RELEASE, SXN_ROLLBACK_TO,
-	SXN_CREATE, SXN_DROP, SXN_PRAGMA_NOP
+	SXN_CREATE, SXN_DROP, SXN_PRAGMA_NOP, SXN_PRAGMA_TABLE_INFO
 };
 
 struct sx_stmt {
@@ -589,11 +589,28 @@ sx_classify(const char *sql, int *tail_more,
 		/* A PRAGMA that SETS a value (journal_mode=WAL, synchronous=...,
 		 * busy_timeout=...) is a no-op for the native engine -- it has no
 		 * SQLite journal/cache to configure -- so classify it native and
-		 * return no rows.  A bare read PRAGMA that returns rows (e.g.
-		 * table_info) still declines to the VDBE for now (native rows
-		 * are a later refinement). */
+		 * return no rows.  table_info(<t>) is served natively from the
+		 * xstore catalog (its table name is captured into namebuf).  Any
+		 * other bare read PRAGMA declines. */
 		const sql_pragma_t *p = root->u.pragma;
-		k = (p != NULL && p->value != NULL) ? SXN_PRAGMA_NOP : SXN_NONE;
+		if (p != NULL && p->name.len == 10 &&
+		    strncasecmp(p->name.p, "table_info", 10) == 0 &&
+		    p->value != NULL) {
+			const sql_expr_t *v = p->value;
+			const char *tp = NULL; size_t tl = 0;
+			if (v->op == SX_E_COLUMN && v->nname >= 1) {
+				tp = v->name[0].p; tl = v->name[0].len;
+			} else if (v->op == SX_E_STRING) {
+				tp = v->lit.p; tl = v->lit.len;
+			}
+			if (tp != NULL && tl > 0 && tl < namecap) {
+				memcpy(namebuf, tp, tl);
+				namebuf[tl] = '\0';
+				k = SXN_PRAGMA_TABLE_INFO;
+			} else k = SXN_NONE;
+		} else if (p != NULL && p->value != NULL) {
+			k = SXN_PRAGMA_NOP;
+		} else k = SXN_NONE;
 		break;
 	}
 	default:                k = SXN_NONE;     break;   /* other */
@@ -643,6 +660,9 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 					if (st->ddl_cols == NULL) {
 						free(st->ddl_name); free(st->sql); free(st); return SQLITE_NOMEM; }
 				}
+			} else if (k == SXN_PRAGMA_TABLE_INFO) {
+				st->ddl_name = strdup(nm);   /* the table to introspect */
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
 			}
 			if (tail) *tail = sql + strlen(sql);   /* single statement */
 			*out = st;
@@ -682,6 +702,11 @@ nat_select_run(struct sx_stmt *st)
 	char *verr = NULL;
 	int rc;
 	if (st->ran) return st->vres != NULL;
+	if (st->nkind == SXN_PRAGMA_TABLE_INFO) {
+		rc = vx_pragma_table_info((sqlite3 *)st->db, st->ddl_name, &st->vres);
+		st->ran = 1;
+		return (rc == 1 && st->vres != NULL);
+	}
 	rc = vx_run_p((sqlite3 *)st->db, st->sql,
 	    st->nbind ? st->binds : NULL, st->nbind, 1, &st->vres, &verr);
 	st->ran = 1;
@@ -728,9 +753,10 @@ sx_step(sx_stmt *st)
 	if (st == NULL) return SQLITE_MISUSE;
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
-		if (st->nkind == SXN_SELECT) {
-			/* First step: run the SELECT through vexec into vres; if vexec
-			 * declines, fall the whole statement back to the VDBE. */
+		if (st->nkind == SXN_SELECT || st->nkind == SXN_PRAGMA_TABLE_INFO) {
+			/* First step: run the SELECT (or native PRAGMA table_info)
+			 * through vexec into vres; if vexec declines, fall the whole
+			 * statement back to the VDBE. */
 			if (!st->ran && !nat_select_run(st)) {
 				if (!nat_fallback_to_vdbe(st)) return SQLITE_ERROR;
 				return xsql_step(st->vdbe);
@@ -929,7 +955,7 @@ sx_column_count(sx_stmt *st)
 {
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
-		if (st->nkind != SXN_SELECT) return 0;
+		if (st->nkind != SXN_SELECT && st->nkind != SXN_PRAGMA_TABLE_INFO) return 0;
 		if (!st->ran && !nat_select_run(st)) {
 			if (!nat_fallback_to_vdbe(st)) return 0;
 			return xsql_column_count(st->vdbe);
@@ -948,7 +974,7 @@ sx_column_name(sx_stmt *st, int i)
 {
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
-		if (st->nkind != SXN_SELECT) return NULL;
+		if (st->nkind != SXN_SELECT && st->nkind != SXN_PRAGMA_TABLE_INFO) return NULL;
 		if (!st->ran) (void)nat_select_run(st);
 		if (st->vres == NULL) {
 			/* declined + fell back via sx_column_count earlier, or now */
@@ -965,7 +991,7 @@ sx_column_type(sx_stmt *st, int i)
 {
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
-		if (st->nkind != SXN_SELECT || st->vres == NULL || st->cur < 0) return SX_NULL;
+		if ((st->nkind != SXN_SELECT && st->nkind != SXN_PRAGMA_TABLE_INFO) || st->vres == NULL || st->cur < 0) return SX_NULL;
 		switch (vx_result_type(st->vres, st->cur, i)) {
 		case VX_INT:  return SX_INTEGER;
 		case VX_REAL: return SX_FLOAT;

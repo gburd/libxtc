@@ -6785,6 +6785,66 @@ int vx_result_bytes(const vx_result_t *r, int row, int col)
 	return (c && (c->type == VX_TEXT || c->type == VX_BLOB)) ? (int)c->nbytes : 0;
 }
 
+/*
+ * Build the result of PRAGMA table_info(<table>) NATIVELY from the
+ * xstore catalog -- the six standard columns (cid, name, type, notnull,
+ * dflt_value, pk) -- with no VDBE / sqlite_master.  Returns 1 with *res
+ * owned by the caller, 0 if the table is unknown (no native schema), or
+ * <0 on allocation failure.  notnull is reported 0 and dflt_value NULL
+ * for every column (the native catalog records neither yet; matches the
+ * common CREATE TABLE ... INTEGER PRIMARY KEY corpus, where SQLite also
+ * reports notnull=0 / dflt=NULL for those columns).
+ */
+int
+vx_pragma_table_info(sqlite3 *db, const char *table, vx_result_t **res)
+{
+	bt_t *bt = xstore_bt_of((struct xsql *)db);
+	xstore_col_t cols[64];
+	vx_result_t *r;
+	int nc, i;
+	static const char *const cn[6] = {
+		"cid", "name", "type", "notnull", "dflt_value", "pk" };
+
+	*res = NULL;
+	if (bt == NULL || table == NULL)
+		return 0;
+	nc = xstore_table_schema(bt, table, cols, 64);
+	if (nc <= 0)
+		return 0;                       /* unknown table */
+
+	r = (vx_result_t *)calloc(1, sizeof *r);
+	if (r == NULL) return -1;
+	r->ncol = 6;
+	r->nrow = nc;
+	r->cap = nc * 6;
+	r->cells = (vx_cell_t *)calloc((size_t)r->cap, sizeof *r->cells);
+	if (r->cells == NULL) { free(r); return -1; }
+	for (i = 0; i < 6; i++) {
+		snprintf(r->name[i], sizeof r->name[i], "%s", cn[i]);
+		r->aff[i] = (i == 0 || i == 3 || i == 5) ? VX_AFF_NUMERIC : VX_AFF_TEXT;
+	}
+	for (i = 0; i < nc; i++) {
+		vx_cell_t *row = &r->cells[(size_t)i * 6];
+		size_t nlen = strlen(cols[i].name);
+		size_t tlen = strlen(cols[i].decltype);
+		char *nbuf = (char *)arena_alloc(&r->arena, nlen + 1);
+		char *tbuf = (char *)arena_alloc(&r->arena, tlen + 1);
+		if (nbuf == NULL || tbuf == NULL) { vx_result_free(r); return -1; }
+		memcpy(nbuf, cols[i].name, nlen + 1);
+		memcpy(tbuf, cols[i].decltype, tlen + 1);
+		row[0].type = VX_INT;  row[0].i = i;                 /* cid */
+		row[1].type = VX_TEXT; row[1].bytes = (const uint8_t *)nbuf;
+		row[1].nbytes = (uint32_t)nlen;                      /* name */
+		row[2].type = VX_TEXT; row[2].bytes = (const uint8_t *)tbuf;
+		row[2].nbytes = (uint32_t)tlen;                      /* type */
+		row[3].type = VX_INT;  row[3].i = 0;                 /* notnull */
+		row[4].type = VX_NULL;                               /* dflt_value */
+		row[5].type = VX_INT;  row[5].i = cols[i].is_pk ? 1 : 0; /* pk */
+	}
+	*res = r;
+	return 1;
+}
+
 void
 vx_result_free(vx_result_t *r)
 {
