@@ -1413,9 +1413,21 @@ xs_advance(xstore_cursor_t *c)
  * Drives the same xs_advance visibility loop as the vtab cursor, but
  * standalone: no SQLite connection, no vtab base, no txn context.  The
  * executor opens one of these per worker over a disjoint rowid range. */
+static int xs_row_live(bt_t *bt, uint32_t tableid, int64_t rowid);
+
 struct xstore_scan {
 	xstore_cursor_t c;
 	int             done;      /* sticky end-of-scan */
+	/* Read-your-writes merge (txn scans only): when ryw_ctx != NULL the
+	 * scan overlays the connection's uncommitted writes -- a buffered
+	 * UPDATE replaces the committed row, a buffered DELETE hides it, and
+	 * after the committed range is drained, buffered INSERTs (rowids not
+	 * in the committed tree) are emitted in ascending rowid order. */
+	xstore_ctx_t   *ryw_ctx;   /* connection write buffer, or NULL */
+	int             ryw_phase; /* 0 = committed range, 1 = wbuf-only inserts */
+	int64_t         ryw_emitted_max; /* highest committed rowid already seen */
+	int             ryw_next_wi;     /* next wbuf index to consider (phase 1) */
+	uint8_t         ryw_val[XS_VMAX]; /* staging for a wbuf payload */
 };
 
 xstore_scan_t *
@@ -1440,19 +1452,111 @@ xstore_scan_open(bt_t *bt, const char *table, uint64_t snap,
 	return s;
 }
 
+/*
+ * Open a scan that honours the connection's uncommitted writes
+ * (read-your-writes).  Identical to xstore_scan_open when the connection
+ * is not in a transaction or its write buffer is empty; otherwise the
+ * returned scan overlays the buffer (UPDATE replaces, DELETE hides,
+ * INSERT appended after the committed range).  `db` is the native
+ * connection; the committed snapshot is the txn snapshot.
+ */
+xstore_scan_t *
+xstore_scan_open_txn(struct xsql *db, const char *table, uint64_t snap,
+                     int64_t lo, int has_lo, int64_t hi, int has_hi)
+{
+	bt_t *bt = xstore_bt_of(db);
+	xstore_ctx_t *ctx = xstore_ctx_of(db);
+	xstore_scan_t *s = xstore_scan_open(bt, table, snap, lo, has_lo, hi, has_hi);
+	if (s == NULL) return NULL;
+	/* Enable the merge only inside a txn with buffered writes for this
+	 * table; otherwise the plain committed scan is exact. */
+	if (ctx != NULL && ctx->in_txn && ctx->wn > 0) {
+		s->ryw_ctx = ctx;
+		s->ryw_phase = 0;
+		s->ryw_emitted_max = INT64_MIN;
+		s->ryw_next_wi = 0;
+	}
+	return s;
+}
+
 int
 xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
                  const uint8_t **rec, int *reclen)
 {
 	if (s == NULL) return -1;
 	if (s->done) return 0;
-	s->c.eof = 0;
-	xs_advance(&s->c);
-	if (s->c.eof) { s->done = 1; return 0; }   /* end of scan (sticky) */
-	if (rowid) *rowid = s->c.rowid;
-	if (rec) *rec = s->c.val;
-	if (reclen) *reclen = (int)s->c.vlen;
-	return 1;
+
+	/* Plain committed scan (no read-your-writes overlay). */
+	if (s->ryw_ctx == NULL) {
+		s->c.eof = 0;
+		xs_advance(&s->c);
+		if (s->c.eof) { s->done = 1; return 0; }
+		if (rowid) *rowid = s->c.rowid;
+		if (rec) *rec = s->c.val;
+		if (reclen) *reclen = (int)s->c.vlen;
+		return 1;
+	}
+
+	/* Phase 0: walk the committed range, overlaying the write buffer. */
+	if (s->ryw_phase == 0) {
+		for (;;) {
+			const xs_wrec_t *w;
+			s->c.eof = 0;
+			xs_advance(&s->c);
+			if (s->c.eof) { s->ryw_phase = 1; s->ryw_next_wi = 0; break; }
+			s->ryw_emitted_max = s->c.rowid;
+			w = wbuf_find(s->ryw_ctx, s->c.tableid, s->c.rowid);
+			if (w == NULL) {                 /* unbuffered: committed row */
+				if (rowid) *rowid = s->c.rowid;
+				if (rec) *rec = s->c.val;
+				if (reclen) *reclen = (int)s->c.vlen;
+				return 1;
+			}
+			if (w->deleted) continue;        /* buffered DELETE: hide it */
+			/* buffered UPDATE: return the buffered payload. */
+			(void)xs_wrec_ensure(s->ryw_ctx, (xs_wrec_t *)w);
+			if (w->len && w->data) memcpy(s->ryw_val, w->data, w->len);
+			if (rowid) *rowid = s->c.rowid;
+			if (rec) *rec = s->ryw_val;
+			if (reclen) *reclen = (int)w->len;
+			return 1;
+		}
+	}
+
+	/* Phase 1: emit buffered INSERTs (rowids with no committed row), in
+	 * ascending rowid order, within the scan range. */
+	for (;;) {
+		const xstore_ctx_t *cx = s->ryw_ctx;
+		int i, best = -1; int64_t bestrid = 0;
+		/* Pick the smallest rowid > ryw_emitted_max that has a buffered
+		 * write for this table, in range, with no committed row.  Among
+		 * duplicate entries for a rowid the NEWEST wins (wbuf_find scans
+		 * from the tail), so resolve each candidate via wbuf_find and skip
+		 * those whose newest state is a delete. */
+		for (i = 0; i < cx->wn; i++) {
+			const xs_wrec_t *w = &cx->wbuf[i];
+			const xs_wrec_t *newest;
+			if (w->tableid != s->c.tableid) continue;
+			if (w->rowid <= s->ryw_emitted_max) continue;
+			if (s->c.has_lo && w->rowid < s->c.lo) continue;
+			if (s->c.has_hi && w->rowid > s->c.hi) continue;
+			if (xs_row_live(s->c.bt, s->c.tableid, w->rowid)) continue; /* committed -> already overlaid */
+			newest = wbuf_find(cx, s->c.tableid, w->rowid);
+			if (newest == NULL || newest->deleted) continue;   /* hidden */
+			if (best < 0 || w->rowid < bestrid) { best = i; bestrid = w->rowid; }
+		}
+		if (best < 0) { s->done = 1; return 0; }
+		s->ryw_emitted_max = bestrid;
+		{
+			const xs_wrec_t *w = wbuf_find(cx, s->c.tableid, bestrid);  /* newest */
+			(void)xs_wrec_ensure(s->ryw_ctx, (xs_wrec_t *)w);
+			if (w->len && w->data) memcpy(s->ryw_val, w->data, w->len);
+			if (rowid) *rowid = bestrid;
+			if (rec) *rec = s->ryw_val;
+			if (reclen) *reclen = (int)w->len;
+			return 1;
+		}
+	}
 }
 
 void

@@ -433,8 +433,8 @@ test_vexec_join: test_vexec_join.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_g
 test-vexec-join: test_vexec_join
 	./test_vexec_join
 
-test_savepoint: test_savepoint.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_savepoint.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+test_savepoint: test_savepoint.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_savepoint.c $(ENGINE_NATIVE) $(LDFLAGS)
 
 test-savepoint: test_savepoint
 	./test_savepoint

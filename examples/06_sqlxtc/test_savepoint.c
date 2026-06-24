@@ -20,7 +20,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "sqlite3.h"
+#include "engine.h"
 #include "bufmgr.h"
 #include "btree.h"
 #include "xstore.h"
@@ -31,47 +31,47 @@
 
 /* Value of key k, or -1 if absent. */
 static int64_t
-val_of(xsql *db, int64_t k)
+val_of(sx_db *db, int64_t k)
 {
-	xsql_stmt *st = NULL;
+	sx_stmt *st = NULL;
 	int64_t v = -1;
 	char sql[64];
 	(void)snprintf(sql, sizeof sql, "SELECT v FROM t WHERE k=%lld;",
 	    (long long)k);
-	if (xsql_prepare_v2(db, sql, -1, &st, 0) != SQLITE_OK)
+	if (sx_prepare(db, sql, -1, &st, NULL) != SX_OK)
 		return -2;
-	if (xsql_step(st) == SQLITE_ROW)
-		v = xsql_column_int64(st, 0);
-	xsql_finalize(st);
+	if (sx_step(st) == SX_ROW)
+		v = sx_column_int64(st, 0);
+	sx_finalize(st);
 	return v;
 }
 
 static int
-row_count(xsql *db)
+row_count(sx_db *db)
 {
-	xsql_stmt *st = NULL;
+	sx_stmt *st = NULL;
 	int n = -1;
-	if (xsql_prepare_v2(db, "SELECT count(*) FROM t;", -1, &st, 0)
-	    != SQLITE_OK)
+	if (sx_prepare(db, "SELECT count(*) FROM t;", -1, &st, 0)
+	    != SX_OK)
 		return -1;
-	if (xsql_step(st) == SQLITE_ROW)
-		n = xsql_column_int(st, 0);
-	xsql_finalize(st);
+	if (sx_step(st) == SX_ROW)
+		n = (int)sx_column_int64(st, 0);
+	sx_finalize(st);
 	return n;
 }
 
 static void
-exec(xsql *db, const char *sql)
+exec(sx_db *db, const char *sql)
 {
 	char *err = NULL;
-	int rc = xsql_exec(db, sql, 0, 0, &err);
-	if (rc != SQLITE_OK) {
+	int rc = sx_exec(db, sql, &err);
+	if (rc != SX_OK) {
 		fprintf(stderr, "FAIL exec [%s]: %s\n", sql,
 		    err ? err : "?");
 		g_fail = 1;
 	}
 	if (err)
-		xsql_free(err);
+		free(err);
 }
 
 int
@@ -80,11 +80,12 @@ main(void)
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	xsql *db = NULL;
+	sx_db *db = NULL;
 	char path[64] = "/tmp/sqlxtc-savepoint-XXXXXX";
 	int fd;
 
 	g_fail = 0;
+	if (sx_init() != SX_OK) { fprintf(stderr, "FAIL: sx_init\n"); return 1; }
 	fd = mkstemp(path);
 	if (fd < 0) { perror("mkstemp"); return 1; }
 	(void)close(fd);
@@ -92,10 +93,9 @@ main(void)
 	bo.cool_pct = 25;
 	CK(bm_create(&bo, &bm) == XTC_OK);
 	CK(bt_open(bm, &bt) == XTC_OK);
-	CK(xsql_open(":memory:", &db) == SQLITE_OK);
-	CK(xstore_register(db, bt) == SQLITE_OK);
-	CK(xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0)
-	    == SQLITE_OK);
+	CK(sx_open_bt(bt, &db) == SX_OK);
+	CK(sx_exec(db, "CREATE TABLE t(k INTEGER PRIMARY KEY, v)", NULL)
+	    == SX_OK);
 
 	/* ---- ROLLBACK TO undoes a nested transaction ---- */
 	exec(db, "BEGIN;");
@@ -164,7 +164,7 @@ main(void)
 	CK(val_of(db, 9) == 90);
 	printf("  ok   nested unit rolled back, surrounding txn commits\n");
 
-	xsql_close(db);
+	sx_close(db);
 	bt_close(bt);
 	bm_destroy(bm);
 	unlink(path);
