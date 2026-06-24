@@ -134,6 +134,8 @@ struct with_clause_v { sql_cte_t *list; int rec; };
 %type begin_stmt    {sql_stmt_t *}
 %type commit_stmt   {sql_stmt_t *}
 %type rollback_stmt {sql_stmt_t *}
+%type savepoint_stmt {sql_stmt_t *}
+%type release_stmt  {sql_stmt_t *}
 %type attach_stmt   {sql_stmt_t *}
 %type detach_stmt   {sql_stmt_t *}
 %type explain_stmt  {sql_stmt_t *}
@@ -179,6 +181,7 @@ struct with_clause_v { sql_cte_t *list; int rec; };
 %token TK_DROP.     %token TK_IF.      %token TK_NOT.     %token TK_EXISTS.
 %token TK_PRAGMA.   %token TK_BEGIN.   %token TK_COMMIT.  %token TK_END.
 %token TK_ROLLBACK. %token TK_TRANSACTION.
+%token TK_SAVEPOINT. %token TK_RELEASE.
 %token TK_ATTACH.   %token TK_DETACH.  %token TK_DATABASE.
 %token TK_AS.       %token TK_AND.     %token TK_OR.      %token TK_NULL.
 %token TK_TRUE.     %token TK_FALSE.   %token TK_PRIMARY. %token TK_KEY.
@@ -247,6 +250,8 @@ stmt(R) ::= pragma_stmt(S).  { R = S; }
 stmt(R) ::= begin_stmt(S).   { R = S; }
 stmt(R) ::= commit_stmt(S).  { R = S; }
 stmt(R) ::= rollback_stmt(S).{ R = S; }
+stmt(R) ::= savepoint_stmt(S).{ R = S; }
+stmt(R) ::= release_stmt(S).{ R = S; }
 stmt(R) ::= attach_stmt(S).  { R = S; }
 stmt(R) ::= detach_stmt(S).  { R = S; }
 stmt(R) ::= explain_stmt(S). { R = S; }
@@ -685,6 +690,32 @@ commit_stmt(R) ::= TK_END TK_TRANSACTION.    { R = AST(pstate, sql_stmt_t); if (
 
 rollback_stmt(R) ::= TK_ROLLBACK.                { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_ROLLBACK; }
 rollback_stmt(R) ::= TK_ROLLBACK TK_TRANSACTION. { R = AST(pstate, sql_stmt_t); if (R) R->kind = SQL_KIND_ROLLBACK; }
+rollback_stmt(R) ::= TK_ROLLBACK TK_TO TK_ID(N). {
+    sql_txn_t *x = AST(pstate, sql_txn_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R) { R->kind = SQL_KIND_ROLLBACK; R->u.txn = x; if (x) x->name = tok_str(N); } }
+rollback_stmt(R) ::= TK_ROLLBACK TK_TRANSACTION TK_TO TK_ID(N). {
+    sql_txn_t *x = AST(pstate, sql_txn_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R) { R->kind = SQL_KIND_ROLLBACK; R->u.txn = x; if (x) x->name = tok_str(N); } }
+rollback_stmt(R) ::= TK_ROLLBACK TK_TO TK_SAVEPOINT TK_ID(N). {
+    sql_txn_t *x = AST(pstate, sql_txn_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R) { R->kind = SQL_KIND_ROLLBACK; R->u.txn = x; if (x) x->name = tok_str(N); } }
+
+savepoint_stmt(R) ::= TK_SAVEPOINT TK_ID(N). {
+    sql_txn_t *x = AST(pstate, sql_txn_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R) { R->kind = SQL_KIND_SAVEPOINT; R->u.txn = x; if (x) x->name = tok_str(N); } }
+
+release_stmt(R) ::= TK_RELEASE TK_ID(N). {
+    sql_txn_t *x = AST(pstate, sql_txn_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R) { R->kind = SQL_KIND_RELEASE; R->u.txn = x; if (x) x->name = tok_str(N); } }
+release_stmt(R) ::= TK_RELEASE TK_SAVEPOINT TK_ID(N). {
+    sql_txn_t *x = AST(pstate, sql_txn_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R) { R->kind = SQL_KIND_RELEASE; R->u.txn = x; if (x) x->name = tok_str(N); } }
 
 attach_stmt(R) ::= TK_ATTACH expr_atom(E) TK_AS TK_ID(A). {
     sql_attach_t *at = AST(pstate, sql_attach_t);
