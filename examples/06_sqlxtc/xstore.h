@@ -241,6 +241,9 @@ int xstore_rollback(struct xsql *db);
  * native_mode is off the engine behaves exactly as the SQLite-driven
  * path.  Return 0 / -1 (not xstore-backed). */
 int xstore_native_mode(struct xsql *db, int on);
+/* Set the connection isolation level from a name (the native C-API
+ * equivalent of the xstore_isolation() SQL function). */
+int xstore_set_isolation(struct xsql *db, const char *level);
 int xstore_native_begin(struct xsql *db);
 int xstore_savepoint(struct xsql *db, int level);
 int xstore_release(struct xsql *db, int level);

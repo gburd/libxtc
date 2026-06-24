@@ -453,8 +453,8 @@ test_native_driver: test_native_driver.c engine.c vfs.c mem.c mutex.c pcache.c m
 test-native-driver: test_native_driver
 	./test_native_driver
 
-test_isolation: test_isolation.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_isolation.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+test_isolation: test_isolation.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_isolation.c $(ENGINE_NATIVE) $(LDFLAGS)
 
 test-isolation: test_isolation
 	./test_isolation

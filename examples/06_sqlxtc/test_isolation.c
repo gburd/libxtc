@@ -28,7 +28,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "sqlite3.h"
+#include "engine.h"
 #include "bufmgr.h"
 #include "btree.h"
 #include "xstore.h"
@@ -38,47 +38,43 @@
 
 
 static void
-exec(xsql *db, const char *sql)
+exec(sx_db *db, const char *sql)
 {
 	char *err = NULL;
-	if (xsql_exec(db, sql, 0, 0, &err) != SQLITE_OK) {
+	if (sx_exec(db, sql, &err) != SX_OK) {
 		fprintf(stderr, "FAIL exec [%s]: %s\n", sql, err ? err : "?");
 		g_fail = 1;
 	}
 	if (err)
-		xsql_free(err);
+		free(err);
 }
 
 static int64_t
-val_of(xsql *db, int64_t k)
+val_of(sx_db *db, int64_t k)
 {
-	xsql_stmt *st = NULL;
+	sx_stmt *st = NULL;
 	int64_t v = -1;
 	char sql[64];
 	(void)snprintf(sql, sizeof sql, "SELECT v FROM t WHERE k=%lld;",
 	    (long long)k);
-	if (xsql_prepare_v2(db, sql, -1, &st, 0) != SQLITE_OK)
+	if (sx_prepare(db, sql, -1, &st, NULL) != SX_OK)
 		return -2;
-	if (xsql_step(st) == SQLITE_ROW)
-		v = xsql_column_int64(st, 0);
-	xsql_finalize(st);
+	if (sx_step(st) == SX_ROW)
+		v = sx_column_int64(st, 0);
+	sx_finalize(st);
 	return v;
 }
 
 /* Open a second connection on the SAME bt (shared engine). */
-static xsql *
+static sx_db *
 open_conn(bt_t *bt)
 {
-	xsql *db = NULL;
-	if (xsql_open(":memory:", &db) != SQLITE_OK)
+	sx_db *db = NULL;
+	if (sx_open_bt(bt, &db) != SX_OK)
 		return NULL;
-	if (xstore_register(db, bt) != SQLITE_OK) {
-		xsql_close(db);
-		return NULL;
-	}
-	/* Each connection re-declares the virtual table over the shared
-	 * engine; the table-id catalog keeps them consistent. */
-	(void)xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0);
+	/* Each connection re-declares the table over the shared engine; the
+	 * table-id catalog keeps them consistent. */
+	(void)sx_exec(db, "CREATE TABLE t(k INTEGER PRIMARY KEY, v)", NULL);
 	return db;
 }
 
@@ -88,7 +84,7 @@ main(void)
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
-	xsql *a = NULL, *b = NULL;
+	sx_db *a = NULL, *b = NULL;
 	char path[64] = "/tmp/sqlxtc-isolation-XXXXXX";
 	int fd;
 
@@ -110,7 +106,7 @@ main(void)
 	CK(val_of(a, 1) == 100);
 
 	/* ---- REPEATABLE READ: A's snapshot is frozen at txn start ---- */
-	exec(a, "SELECT xstore_isolation('repeatable read');");
+	CK(xstore_set_isolation(a, "repeatable read") == 0);
 	exec(a, "BEGIN;");
 	CK(val_of(a, 1) == 100);          /* first read fixes the snapshot */
 	exec(b, "UPDATE t SET v=200 WHERE k=1;");   /* B commits a new value */
@@ -122,7 +118,7 @@ main(void)
 	    "commit\n");
 
 	/* ---- READ COMMITTED: A re-samples per statement ---- */
-	exec(a, "SELECT xstore_isolation('read committed');");
+	CK(xstore_set_isolation(a, "read committed") == 0);
 	exec(a, "BEGIN;");
 	CK(val_of(a, 1) == 200);          /* current committed value */
 	exec(b, "UPDATE t SET v=300 WHERE k=1;");   /* B commits again */
@@ -132,7 +128,7 @@ main(void)
 	    "commit\n");
 
 	/* ---- READ UNCOMMITTED behaves as READ COMMITTED (no dirty rows) -- */
-	exec(a, "SELECT xstore_isolation('read uncommitted');");
+	CK(xstore_set_isolation(a, "read uncommitted") == 0);
 	exec(a, "BEGIN;");
 	CK(val_of(a, 1) == 300);
 	exec(b, "UPDATE t SET v=400 WHERE k=1;");
@@ -150,7 +146,7 @@ main(void)
 	CK(val_of(a, 1) == 400);
 
 	/* ---- SERIALIZABLE: snapshot frozen + read-set validation ---- */
-	exec(a, "SELECT xstore_isolation('serializable');");
+	CK(xstore_set_isolation(a, "serializable") == 0);
 	exec(a, "BEGIN;");
 	CK(val_of(a, 1) == 400);          /* frozen like repeatable read */
 	exec(b, "UPDATE t SET v=500 WHERE k=1;");
@@ -159,21 +155,15 @@ main(void)
 	CK(val_of(a, 1) == 500);
 	printf("  ok   SERIALIZABLE: frozen snapshot, read-set validated\n");
 
-	/* ---- The level setter reports the resulting integer level ---- */
+	/* ---- The level setter accepts every named level ---- */
 	{
-		xsql_stmt *st = NULL;
-		int lvl = -1;
-		CK(xsql_prepare_v2(a, "SELECT xstore_isolation('snapshot');",
-		    -1, &st, 0) == SQLITE_OK);
-		if (xsql_step(st) == SQLITE_ROW)
-			lvl = xsql_column_int(st, 0);
-		xsql_finalize(st);
-		CK(lvl == 3);   /* XS_ISO_SNAPSHOT */
+		CK(xstore_set_isolation(a, "snapshot") == 0);
+		CK(xstore_set_isolation(a, "bogus level") == -1);
 	}
-	printf("  ok   xstore_isolation reports the resolved level\n");
+	printf("  ok   xstore_set_isolation accepts named levels\n");
 
-	xsql_close(a);
-	xsql_close(b);
+	sx_close(a);
+	sx_close(b);
 	bt_close(bt);
 	bm_destroy(bm);
 	unlink(path);
