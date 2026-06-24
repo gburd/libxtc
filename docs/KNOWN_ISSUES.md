@@ -563,3 +563,21 @@ the POLL_ADD went to a ring this thread does not own and was silently
 dropped.  Fixed by registering/timing/cleaning up on __xtc_current_loop
 (the running loop).  test_server_storage 30/30; the WAL/double-write
 xtc_aio conversion is now unblocked.
+
+## macOS build break: sigev_notify_kqueue (io_kqueue.c) -- SDK drift (2026-06)
+
+As of a 2026-06 macOS CI runner image, the build fails in
+src/io/io_kqueue.c with "no member named 'sigev_notify_kqueue' in
+'struct sigevent'".  This is the native-file-AIO path added in ce0cacc;
+the member is the SIGEV_KEVENT contract on BSD/macOS, but the current
+macOS SDK no longer exposes it under the default feature macros (it is
+gated behind a Darwin-private define).  The #if guard
+(defined(EVFILT_AIO) && defined(SIGEV_KEVENT)) passes, but the struct
+member is absent -> compile error.
+
+This is unrelated to the sqlxtc / sqlite3.c excision work (which never
+touches io_kqueue.c; the examples CI job is green).  The fix is a
+configure-time check for the sigevent.sigev_notify_kqueue member (and
+fall back to the generic NOSYS AIO path when absent), or compiling
+io_kqueue.c with -D_DARWIN_C_SOURCE.  Tracked separately from the
+excision.

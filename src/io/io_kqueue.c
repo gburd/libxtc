@@ -10,6 +10,14 @@
  *	The wakeup pipe registration uses a sentinel udata == io.
  */
 
+/* macOS gates the BSD sigevent members (sigev_notify_kqueue, used by
+ * the native-file-AIO path below for SIGEV_KEVENT completion) behind
+ * the Darwin feature macro; define it before any system header so the
+ * member is visible on current macOS SDKs.  No effect on *BSD. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
+
 #include "xtc_int.h"
 
 #if defined(XTC_IO_BACKEND_KQUEUE)
