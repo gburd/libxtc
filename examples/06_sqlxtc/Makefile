@@ -203,7 +203,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-sql-ast test-sqlrec test-vexec test-vexec-par test-vexec-ord test-vexec-join test-vexec-run test-db-vexec test-vfs test-vfs-loop test-pcache test-concurrency test-admin test-mem test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-savepoint test-isolation test-xlog test-recover-undo test-parallel test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-server-storage test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -244,44 +244,22 @@ amalg-test: sqlxtc-server-amalg
 # ---- xtc VFS test (in-process, no daemon) ----
 # Builds the VFS test against both libxtc.a and the amalgamation, so
 # the custom sqlite3_vfs is exercised in both link configurations.
-.PHONY: test-vfs test-vfs-amalg
+.PHONY:-amalg
 
-test_vfs: test_vfs.c vfs.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_vfs.c vfs.o sqlite3.o $(LDFLAGS)
 
-test-vfs: test_vfs
-	./test_vfs
 
 # ---- xtc VFS on-loop blocking-offload test (in-process, no daemon) ----
-test_vfs_loop: test_vfs_loop.c vfs.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_vfs_loop.c vfs.o sqlite3.o $(LDFLAGS)
 
-test-vfs-loop: test_vfs_loop
-	./test_vfs_loop
 
-test_vfs_amalg: test_vfs.c vfs.amalg.o sqlite3.o \
-        $(AMALG_DIR)/xtc.o
-	$(CC) $(AMALG_CFLAGS) -o $@ test_vfs.c vfs.amalg.o \
-		sqlite3.o $(AMALG_DIR)/xtc.o -pthread -ldl -lm
 
-test-vfs-amalg: test_vfs_amalg
-	./test_vfs_amalg
 
 # ---- xtc page-cache test (in-process, no daemon) ----
-.PHONY: test-pcache test-pcache-amalg
+.PHONY:-amalg
 
-test_pcache: test_pcache.c pcache.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_pcache.c pcache.o sqlite3.o $(LDFLAGS)
 
-test-pcache: test_pcache
-	./test_pcache
 
 # ---- xtc_amutex SQLite-mutex concurrency test (in-process, no daemon) ----
-test_concurrency: test_concurrency.c mutex.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_concurrency.c mutex.o sqlite3.o $(LDFLAGS)
 
-test-concurrency: test_concurrency
-	./test_concurrency
 
 # ---- SHOW PROCESSES admin command test (in-process, no daemon) ----
 # Links only admin.o + quack.o against libxtc.a; no SQLite needed --
@@ -296,11 +274,7 @@ test-admin: test_admin
 # Installs the xtc allocator under an __os_alloc counting hook, then
 # drives a real SQL workload: proves the engine's allocations flow
 # through xtc (hook count > 0) and that the workload is correct.
-test_mem: test_mem.c mem.o mutex.o engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ)
-	$(CC) $(CFLAGS) -o $@ test_mem.c mem.o mutex.o engine.o vfs.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
 
-test-mem: test_mem
-	./test_mem
 
 # ---- group-commit WAL writer process (in-process, no daemon) ----
 # Many committer procs drive concurrent commits at one writer; proves
@@ -371,67 +345,28 @@ test-xstore-scan: test_xstore_scan
 	./test_xstore_scan
 
 # ---- Lime SQL parser: differential AST oracle vs the reference engine ----
-test_sql_ast: test_sql_ast.c sql_parse_drv.c sql_ast.c sql_parse_gen.c sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_sql_ast.c sql_parse_drv.c sql_ast.c \
-		sql_parse_gen.c sqlite3.o $(LDFLAGS)
 
-test-sql-ast: test_sql_ast
-	./test_sql_ast
 
 # ---- record codec: byte-for-byte SQLite-format encode/decode ----
-test_sqlrec: test_sqlrec.c sqlrec.c sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_sqlrec.c sqlrec.c sqlite3.o $(LDFLAGS)
 
-test-sqlrec: test_sqlrec
-	./test_sqlrec
 
 # ---- vectorized executor V0: recognizer + fallback + differential oracle ----
-test_vexec: test_vexec.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_vexec.c vexec.c sql_parse_drv.c sql_ast.c \
-		sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
-test-vexec: test_vexec
-	./test_vexec
 
 # ---- vectorized executor V2: morsel-parallel + differential/scaling ----
-test_vexec_par: test_vexec_par.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_vexec_par.c vexec.c sql_parse_drv.c sql_ast.c \
-		sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
-test-vexec-par: test_vexec_par
-	./test_vexec_par
 
 # ---- vectorized executor V4: ORDER BY / LIMIT positional differential ----
-test_vexec_ord: test_vexec_ord.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_vexec_ord.c vexec.c sql_parse_drv.c sql_ast.c \
-		sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
-test-vexec-ord: test_vexec_ord
-	./test_vexec_ord
 
 # ---- vectorized executor: unified dispatcher (vx_run) ----
-test_vexec_run: test_vexec_run.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_vexec_run.c vexec.c sql_parse_drv.c sql_ast.c \
-		sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
-test-vexec-run: test_vexec_run
-	./test_vexec_run
 
 # ---- live query path: vexec fast path differential (db_exec_cached) ----
-test_db_vexec: test_db_vexec.c db.c engine.c quack.c mem.c vfs.c pcache.c mutex.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -DSQLXTC_HAVE_LIME=1 -o $@ test_db_vexec.c db.c engine.c quack.c mem.c vfs.c pcache.c mutex.c \
-		vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
-test-db-vexec: test_db_vexec
-	./test_db_vexec
 
 # ---- vectorized executor V5: INNER hash join differential ----
-test_vexec_join: test_vexec_join.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_vexec_join.c vexec.c sql_parse_drv.c sql_ast.c \
-		sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
-test-vexec-join: test_vexec_join
-	./test_vexec_join
 
 test_savepoint: test_savepoint.c $(ENGINE_NATIVE)
 	$(CC) $(CFLAGS) -o $@ test_savepoint.c $(ENGINE_NATIVE) $(LDFLAGS)
@@ -445,13 +380,7 @@ test_native_txn: test_native_txn.c $(ENGINE_NATIVE)
 test-native-txn: test_native_txn
 	./test_native_txn
 
-test_native_driver: test_native_driver.c engine.c vfs.c mem.c mutex.c pcache.c metrics.c \
-    vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -DSQLXTC_HAVE_LIME=1 -o $@ test_native_driver.c engine.c vfs.c mem.c mutex.c pcache.c metrics.c \
-		vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
 
-test-native-driver: test_native_driver
-	./test_native_driver
 
 test_isolation: test_isolation.c $(ENGINE_NATIVE)
 	$(CC) $(CFLAGS) -o $@ test_isolation.c $(ENGINE_NATIVE) $(LDFLAGS)
@@ -596,13 +525,7 @@ test_btree_delete_merge: test_btree_delete_merge.c btree.c bufmgr.o btnode.c
 test-btree-delete-merge: test_btree_delete_merge
 	./test_btree_delete_merge
 
-test_pcache_amalg: test_pcache.c pcache.amalg.o sqlite3.o \
-        $(AMALG_DIR)/xtc.o
-	$(CC) $(AMALG_CFLAGS) -o $@ test_pcache.c pcache.amalg.o \
-		sqlite3.o $(AMALG_DIR)/xtc.o -pthread -ldl -lm
 
-test-pcache-amalg: test_pcache_amalg
-	./test_pcache_amalg
 
 test-quack: ../../test/sqlxtc/test_quack
 	../../test/sqlxtc/test_quack
@@ -617,4 +540,4 @@ test-sql-parse: ../../test/sqlxtc/test_sql_parse
         sql_parse.o $(LIME_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< sql_parse.o $(LIME_OBJ)
 
-.PHONY: test-quack test-sql-parse test-sql-ast test-sqlrec test-vexec test-vexec-par test-vexec-ord test-vexec-join test-vexec-run test-db-vexec
+.PHONY: test-quack test-sql-parse-par-ord-join-run
