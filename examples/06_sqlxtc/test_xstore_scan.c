@@ -22,7 +22,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "sqlite3.h"
+#include "engine.h"
 #include "bufmgr.h"
 #include "btree.h"
 #include "xstore.h"
@@ -36,18 +36,18 @@ static int g_fail;
 struct kv { int64_t k; int64_t a; int has_a; };
 
 static int
-collect_vdbe(xsql *db, const char *sql, struct kv *out, int cap)
+collect_vdbe(sx_db *db, const char *sql, struct kv *out, int cap)
 {
-	xsql_stmt *st = NULL;
+	sx_stmt *st = NULL;
 	int n = 0;
-	if (xsql_prepare_v2(db, sql, -1, &st, 0) != SQLITE_OK) return -1;
-	while (xsql_step(st) == SQLITE_ROW && n < cap) {
-		out[n].k = xsql_column_int64(st, 0);
-		if (xsql_column_type(st, 1) == SQLITE_NULL) { out[n].has_a = 0; out[n].a = 0; }
-		else { out[n].has_a = 1; out[n].a = xsql_column_int64(st, 1); }
+	if (sx_prepare(db, sql, -1, &st, NULL) != SX_OK) return -1;
+	while (sx_step(st) == SX_ROW && n < cap) {
+		out[n].k = sx_column_int64(st, 0);
+		if (sx_column_type(st, 1) == SX_NULL) { out[n].has_a = 0; out[n].a = 0; }
+		else { out[n].has_a = 1; out[n].a = sx_column_int64(st, 1); }
 		n++;
 	}
-	xsql_finalize(st);
+	sx_finalize(st);
 	return n;
 }
 
@@ -66,8 +66,8 @@ main(void)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	char path[64] = "/tmp/sqlxtc_scanXXXXXX";
 	int fd;
-	xsql *db = NULL;
-	xsql_stmt *st = NULL;
+	sx_db *db = NULL;
+	sx_stmt *st = NULL;
 	struct kv ref[256];
 	int nref, i;
 	xstore_scan_t *sc;
@@ -79,28 +79,27 @@ main(void)
 	CK(bm_create(&bo, &bm) == XTC_OK, "bm_create");
 	CK(bt_open(bm, &bt) == XTC_OK, "bt_open");
 
-	CK(xsql_open(":memory:", &db) == SQLITE_OK, "open");
-	CK(xstore_register(db, bt) == SQLITE_OK, "register");
+	CK(sx_open_bt(bt, &db) == SX_OK, "open");
 	/* The connection -> bt accessor returns the registered B-tree, so an
 	 * executor with only the connection handle can open a scan. */
 	CK(xstore_bt_of(db) == bt, "xstore_bt_of returns the registered bt");
-	CK(xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore(k,a);", 0, 0, 0)
-	    == SQLITE_OK, "create vtab");
+	CK(sx_exec(db, "CREATE TABLE t(k INTEGER PRIMARY KEY, a)", NULL)
+	    == SX_OK, "create table");
 
 	/* Seed: 20 rows; some a-values NULL. */
-	CK(xsql_prepare_v2(db, "INSERT INTO t(k,a) VALUES(?,?)", -1, &st, 0) == SQLITE_OK, "prep ins");
+	CK(sx_prepare(db, "INSERT INTO t(k,a) VALUES(?,?)", -1, &st, NULL) == SX_OK, "prep ins");
 	for (i = 1; i <= 20; i++) {
-		xsql_reset(st);
-		xsql_bind_int64(st, 1, i);
-		if (i % 5 == 0) xsql_bind_null(st, 2);
-		else xsql_bind_int64(st, 2, i * 100);
-		CK(xsql_step(st) == SQLITE_DONE, "ins step");
+		sx_reset(st);
+		sx_bind_int64(st, 1, i);
+		if (i % 5 == 0) sx_bind_null(st, 2);
+		else sx_bind_int64(st, 2, i * 100);
+		CK(sx_step(st) == SX_DONE, "ins step");
 	}
-	xsql_finalize(st); st = NULL;
+	sx_finalize(st); st = NULL;
 
 	/* An UPDATE (supersede a version) and a DELETE (tombstone). */
-	CK(xsql_exec(db, "UPDATE t SET a = 7777 WHERE k = 3", 0, 0, 0) == SQLITE_OK, "update");
-	CK(xsql_exec(db, "DELETE FROM t WHERE k = 10", 0, 0, 0) == SQLITE_OK, "delete");
+	CK(sx_exec(db, "UPDATE t SET a = 7777 WHERE k = 3", NULL) == SX_OK, "update");
+	CK(sx_exec(db, "DELETE FROM t WHERE k = 10", NULL) == SX_OK, "delete");
 
 	/* Reference: what the VDBE sees at the latest snapshot. */
 	nref = collect_vdbe(db, "SELECT k, a FROM t", ref, 256);
@@ -151,7 +150,7 @@ main(void)
 	/* Unknown table -> NULL. */
 	CK(xstore_scan_open(bt, "nope", 0, 0, 0, 0, 0) == NULL, "unknown table -> NULL");
 
-	xsql_close(db);
+	sx_close(db);
 	bt_close(bt);
 	bm_destroy(bm);
 	unlink(path);

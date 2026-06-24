@@ -59,7 +59,7 @@
 #include "xstore.h"
 #include "wal.h"
 #include "xlog.h"
-#include "sqlite3.h"
+#include "engine.h"
 #include "xtc.h"
 #include "t_tmp.h"
 
@@ -70,35 +70,35 @@
 
 
 static int
-eval_int(xsql *db, const char *sql)
+eval_int(sx_db *db, const char *sql)
 {
-	xsql_stmt *st = NULL;
+	sx_stmt *st = NULL;
 	int v = -1;
-	if (xsql_prepare_v2(db, sql, -1, &st, 0) != SQLITE_OK)
+	if (sx_prepare(db, sql, -1, &st, NULL) != SX_OK)
 		return -1;
-	if (xsql_step(st) == SQLITE_ROW)
-		v = xsql_column_int(st, 0);
-	xsql_finalize(st);
+	if (sx_step(st) == SX_ROW)
+		v = (int)sx_column_int64(st, 0);
+	sx_finalize(st);
 	return v;
 }
 
 static int
-sel_v(xsql *db, int k, char *out, size_t cap)
+sel_v(sx_db *db, int k, char *out, size_t cap)
 {
-	xsql_stmt *st = NULL;
+	sx_stmt *st = NULL;
 	int got = 0;
-	if (xsql_prepare_v2(db, "SELECT v FROM t WHERE k=?", -1, &st, 0) != SQLITE_OK)
+	if (sx_prepare(db, "SELECT v FROM t WHERE k=?", -1, &st, NULL) != SX_OK)
 		return -1;
-	xsql_bind_int64(st, 1, k);
-	if (xsql_step(st) == SQLITE_ROW) {
-		const unsigned char *t = xsql_column_text(st, 0);
-		size_t n = (size_t)xsql_column_bytes(st, 0);
+	sx_bind_int64(st, 1, k);
+	if (sx_step(st) == SX_ROW) {
+		const unsigned char *t = sx_column_text(st, 0);
+		size_t n = (size_t)sx_column_bytes(st, 0);
 		if (n >= cap) n = cap - 1;
 		if (t) memcpy(out, t, n);
 		out[n] = '\0';
 		got = 1;
 	}
-	xsql_finalize(st);
+	sx_finalize(st);
 	return got;
 }
 
@@ -155,8 +155,8 @@ verify(const char *btp, const char *logp, int reopen, uint64_t *out_pages)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
-	xsql *db = NULL;
-	xsql_stmt *st = NULL;
+	sx_db *db = NULL;
+	sx_stmt *st = NULL;
 	char want[32], got[32];
 	int i, miss = 0, scanned = 0, prev = -1, ordered = 1;
 	uint64_t pages = 0;
@@ -171,10 +171,9 @@ verify(const char *btp, const char *logp, int reopen, uint64_t *out_pages)
 	CK(xstore_recover_inplace(bt, bm, logp, &pages) == XTC_OK);
 	CK(bm_checkpoint(bm) == XTC_OK);
 
-	CK(xsql_open(":memory:", &db) == SQLITE_OK);
-	CK(xstore_register(db, bt) == SQLITE_OK);
-	CK(xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore(k, v);", 0, 0, 0)
-	    == SQLITE_OK);
+	CK(sx_open_bt(bt, &db) == SX_OK);
+	CK(sx_exec(db, "CREATE TABLE t(k INTEGER PRIMARY KEY, v)", NULL)
+	    == SX_OK);
 
 	CK(eval_int(db, "SELECT count(*) FROM t") == N_ROWS);
 	for (i = 0; i < N_ROWS; i++) {
@@ -184,15 +183,15 @@ verify(const char *btp, const char *logp, int reopen, uint64_t *out_pages)
 		miss++;
 	}
 	CK(miss == 0);
-	if (xsql_prepare_v2(db, "SELECT k FROM t ORDER BY k", -1, &st, 0)
-	    == SQLITE_OK) {
-		while (xsql_step(st) == SQLITE_ROW) {
-			int k = xsql_column_int(st, 0);
+	if (sx_prepare(db, "SELECT k FROM t ORDER BY k", -1, &st, NULL)
+	    == SX_OK) {
+		while (sx_step(st) == SX_ROW) {
+			int k = (int)sx_column_int64(st, 0);
 			if (k <= prev) ordered = 0;
 			prev = k;
 			scanned++;
 		}
-		xsql_finalize(st);
+		sx_finalize(st);
 	}
 	CK(ordered == 1);
 	CK(scanned == N_ROWS);
@@ -201,7 +200,7 @@ verify(const char *btp, const char *logp, int reopen, uint64_t *out_pages)
 		fprintf(stderr, "FAIL: verify miss=%d scanned=%d ordered=%d pages=%llu\n",
 		    miss, scanned, ordered, (unsigned long long)pages);
 
-	xsql_close(db); bt_close(bt); bm_destroy(bm);
+	sx_close(db); bt_close(bt); bm_destroy(bm);
 	if (out_pages) *out_pages = pages;
 }
 
@@ -212,7 +211,7 @@ main(void)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
 	bt_t *bt = NULL;
-	xsql *db = NULL;
+	sx_db *db = NULL;
 	wal_opts_t wo = { 0 };
 	char btp[256]; t_tmpl(btp, sizeof btp, "sqlxtc-iplace");
 	char logp[256]; t_tmpl(logp, sizeof logp, "sqlxtc-iplace-log");
@@ -233,21 +232,20 @@ main(void)
 	if (bt_open(bm, &bt) != XTC_OK) return 1;
 	xstore_set_wal((struct wal *)wal);
 	xstore_register_smo(1);    /* emit XL_PAGE per split page, NTA-bracketed */
-	if (xsql_open(":memory:", &db) != SQLITE_OK) return 1;
-	if (xstore_register(db, bt) != SQLITE_OK) return 1;
-	if (xsql_exec(db, "CREATE VIRTUAL TABLE t USING xstore(k, v);", 0, 0, 0)
-	    != SQLITE_OK) return 1;
+	if (sx_open_bt(bt, &db) != SX_OK) return 1;
+	if (sx_exec(db, "CREATE TABLE t(k INTEGER PRIMARY KEY, v)", NULL)
+	    != SX_OK) return 1;
 	for (i = 0; i < N_ROWS; i++) {
 		char sql[64];
 		snprintf(sql, sizeof sql, "INSERT INTO t(k,v) VALUES(%d,'val-%d');", i, i);
-		if (xsql_exec(db, sql, 0, 0, 0) != SQLITE_OK) {
+		if (sx_exec(db, sql, NULL) != SX_OK) {
 			fprintf(stderr, "FAIL: insert %d\n", i); return 1;
 		}
 	}
 	/* Clean-checkpoint the base durable: now every page is at its final
 	 * LSN, the correct answer.  Close the engine cleanly. */
 	if (bm_checkpoint(bm) != XTC_OK) return 1;
-	xsql_close(db);
+	sx_close(db);
 	xstore_register_smo(0);
 	xstore_set_wal(NULL);
 	bt_close(bt);

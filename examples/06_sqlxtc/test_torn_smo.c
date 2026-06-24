@@ -38,7 +38,7 @@
 #include "btree.h"
 #include "xstore.h"
 #include "wal.h"
-#include "sqlite3.h"
+#include "engine.h"
 #include "xtc.h"
 #include "t_tmp.h"
 
@@ -48,36 +48,36 @@
 
 
 static int
-eval_int(xsql *db, const char *sql)
+eval_int(sx_db *db, const char *sql)
 {
-	xsql_stmt *st = NULL;
+	sx_stmt *st = NULL;
 	int v = -1;
-	if (xsql_prepare_v2(db, sql, -1, &st, 0) != SQLITE_OK)
+	if (sx_prepare(db, sql, -1, &st, NULL) != SX_OK)
 		return -1;
-	if (xsql_step(st) == SQLITE_ROW)
-		v = xsql_column_int(st, 0);
-	xsql_finalize(st);
+	if (sx_step(st) == SX_ROW)
+		v = (int)sx_column_int64(st, 0);
+	sx_finalize(st);
 	return v;
 }
 
 /* Read v for key k; return 1 + fill out on hit, 0 on miss. */
 static int
-sel_v(xsql *db, int k, char *out, size_t cap)
+sel_v(sx_db *db, int k, char *out, size_t cap)
 {
-	xsql_stmt *st = NULL;
+	sx_stmt *st = NULL;
 	int got = 0;
-	if (xsql_prepare_v2(db, "SELECT v FROM t WHERE k=?", -1, &st, 0) != SQLITE_OK)
+	if (sx_prepare(db, "SELECT v FROM t WHERE k=?", -1, &st, NULL) != SX_OK)
 		return -1;
-	xsql_bind_int64(st, 1, k);
-	if (xsql_step(st) == SQLITE_ROW) {
-		const unsigned char *t = xsql_column_text(st, 0);
-		size_t n = (size_t)xsql_column_bytes(st, 0);
+	sx_bind_int64(st, 1, k);
+	if (sx_step(st) == SX_ROW) {
+		const unsigned char *t = sx_column_text(st, 0);
+		size_t n = (size_t)sx_column_bytes(st, 0);
 		if (n >= cap) n = cap - 1;
 		if (t) memcpy(out, t, n);
 		out[n] = '\0';
 		got = 1;
 	}
-	xsql_finalize(st);
+	sx_finalize(st);
 	return got;
 }
 
@@ -88,13 +88,13 @@ main(void)
 	bm_opts_t bo = BM_OPTS_DEFAULT, b2 = BM_OPTS_DEFAULT;
 	bm_t *bm1 = NULL, *bm2 = NULL;
 	bt_t *bt1 = NULL, *bt2 = NULL;
-	xsql *db1 = NULL, *db2 = NULL;
+	sx_db *db1 = NULL, *db2 = NULL;
 	wal_opts_t wo = { 0 };
 	char btp[256]; t_tmpl(btp, sizeof btp, "sqlxtc-tsmo");
 	char logp[256]; t_tmpl(logp, sizeof logp, "sqlxtc-tsmo-log");
 	char dwp[288];
 	char want[32], got[32];
-	xsql_stmt *st = NULL;
+	sx_stmt *st = NULL;
 	int fd, i, miss = 0, scanned = 0, prev = -1, ordered = 1;
 
 	fd = mkstemp(btp);  if (fd < 0) return 1; close(fd);
@@ -108,10 +108,8 @@ main(void)
 	if (bm_create(&bo, &bm1) != XTC_OK) return 1;
 	if (bt_open(bm1, &bt1) != XTC_OK) return 1;
 	xstore_set_wal((struct wal *)wal);
-	if (xsql_open(":memory:", &db1) != SQLITE_OK) return 1;
-	if (xstore_register(db1, bt1) != SQLITE_OK) return 1;
-	if (xsql_exec(db1, "CREATE VIRTUAL TABLE t USING xstore(k, v);",
-	    0, 0, 0) != SQLITE_OK) return 1;
+	if (sx_open_bt(bt1, &db1) != SX_OK) return 1;
+	if (sx_exec(db1, "CREATE TABLE t(k INTEGER PRIMARY KEY, v)", NULL) != SX_OK) return 1;
 
 	/* Each INSERT is an autocommit transaction: durable via wal_commit_sync
 	 * (off a loop), then bt_insert -- which splits as the tree grows and
@@ -120,7 +118,7 @@ main(void)
 		char sql[64];
 		snprintf(sql, sizeof sql, "INSERT INTO t(k,v) VALUES(%d,'val-%d');",
 		    i, i);
-		if (xsql_exec(db1, sql, 0, 0, 0) != SQLITE_OK) {
+		if (sx_exec(db1, sql, NULL) != SX_OK) {
 			fprintf(stderr, "FAIL: insert %d\n", i);
 			return 1;
 		}
@@ -130,7 +128,7 @@ main(void)
 	 * is lost; only pages demand-evicted during the workload (a partial,
 	 * structurally torn tree) survive on the data file.  The WAL holds
 	 * every commit. ---- */
-	xsql_close(db1);
+	sx_close(db1);
 	xstore_set_wal(NULL);
 	bt_close(bt1);
 	bm_destroy(bm1);
@@ -149,10 +147,8 @@ main(void)
 	if (xstore_recover(bt2, logp) != XTC_OK) { fprintf(stderr, "FAIL: recover\n"); return 1; }
 	if (bm_checkpoint(bm2) != XTC_OK) { fprintf(stderr, "FAIL: checkpoint\n"); return 1; }
 
-	if (xsql_open(":memory:", &db2) != SQLITE_OK) return 1;
-	if (xstore_register(db2, bt2) != SQLITE_OK) return 1;
-	if (xsql_exec(db2, "CREATE VIRTUAL TABLE t USING xstore(k, v);",
-	    0, 0, 0) != SQLITE_OK) return 1;
+	if (sx_open_bt(bt2, &db2) != SX_OK) return 1;
+	if (sx_exec(db2, "CREATE TABLE t(k INTEGER PRIMARY KEY, v)", NULL) != SX_OK) return 1;
 
 	/* (a) the count is exactly right. */
 	CK(eval_int(db2, "SELECT count(*) FROM t") == N_ROWS);
@@ -168,21 +164,21 @@ main(void)
 
 	/* (c) a full ordered scan returns EXACTLY the inserted keys, in order
 	 * and without gaps or duplicates -- the structural integrity check. */
-	if (xsql_prepare_v2(db2, "SELECT k FROM t ORDER BY k", -1, &st, 0)
-	    == SQLITE_OK) {
-		while (xsql_step(st) == SQLITE_ROW) {
-			int k = xsql_column_int(st, 0);
+	if (sx_prepare(db2, "SELECT k FROM t ORDER BY k", -1, &st, NULL)
+	    == SX_OK) {
+		while (sx_step(st) == SX_ROW) {
+			int k = (int)sx_column_int64(st, 0);
 			if (k <= prev) ordered = 0;     /* gap, dup, or misorder */
 			prev = k;
 			scanned++;
 		}
-		xsql_finalize(st);
+		sx_finalize(st);
 	}
 	CK(ordered == 1);
 	CK(scanned == N_ROWS);
 	CK(prev == N_ROWS - 1);
 
-	xsql_close(db2); bt_close(bt2); bm_destroy(bm2);
+	sx_close(db2); bt_close(bt2); bm_destroy(bm2);
 	unlink(btp); unlink(logp);
 	snprintf(dwp, sizeof dwp, "%s.dwb", btp); unlink(dwp);
 
