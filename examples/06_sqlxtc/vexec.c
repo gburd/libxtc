@@ -4768,7 +4768,7 @@ next_chunk(struct vx_stmt *st, int *done)
 	/* Open the storage scan lazily on first chunk (storage path only;
 	 * the derived-table path streams st->derived_res instead). */
 	if (st->derived_res == NULL && st->scan == NULL) {
-		st->scan = xstore_scan_open(st->bt, st->table, st->snap,
+		st->scan = xstore_scan_open_txn((sqlite3 *)st->db, st->table, st->snap,
 		                            st->scan_lo, st->scan_has_lo,
 		                            st->scan_hi, st->scan_has_hi);
 		if (st->scan == NULL) { chunk_free(c); return NULL; }
@@ -4830,7 +4830,7 @@ agg_materialize(struct vx_stmt *st)
 
 	if (htab_init(&st->ht, ap->ngrp, ap->nagg) != 0) return -1;
 	if (st->scan == NULL) {
-		st->scan = xstore_scan_open(st->bt, st->table, st->snap,
+		st->scan = xstore_scan_open_txn((sqlite3 *)st->db, st->table, st->snap,
 		                            st->scan_lo, st->scan_has_lo,
 		                            st->scan_hi, st->scan_has_hi);
 		if (st->scan == NULL) return -1;
@@ -5066,7 +5066,7 @@ ordered_materialize(struct vx_stmt *st)
 		int step;
 		vx_cell_t outrow[32], keyrow[16];
 		if (st->scan == NULL) {
-			st->scan = xstore_scan_open(st->bt, st->table, st->snap,
+			st->scan = xstore_scan_open_txn((sqlite3 *)st->db, st->table, st->snap,
 		                            st->scan_lo, st->scan_has_lo,
 		                            st->scan_hi, st->scan_has_hi);
 			if (st->scan == NULL) goto cleanup;
@@ -6472,12 +6472,13 @@ where_pk_range(const sql_expr_t *w, const char *pkname,
  * `cap` rows match (the caller falls back so a huge range does not run
  * unbounded natively).  -2 on a scan error. */
 static int
-collect_rowids(bt_t *bt, const char *table, int64_t lo, int has_lo,
+collect_rowids(sqlite3 *db, bt_t *bt, const char *table, int64_t lo, int has_lo,
                int64_t hi, int has_hi, int64_t *out, int cap)
 {
 	xstore_scan_t *s;
 	int64_t rid; const uint8_t *rec; int reclen, n = 0, step;
-	s = xstore_scan_open(bt, table, 0, lo, has_lo, hi, has_hi);
+	(void)bt;
+	s = xstore_scan_open_txn(db, table, 0, lo, has_lo, hi, has_hi);
 	if (s == NULL) return -2;
 	while ((step = xstore_scan_next(s, &rid, &rec, &reclen)) == 1) {
 		if (n >= cap) { xstore_scan_close(s); return -1; }
@@ -6537,7 +6538,7 @@ collect_matching(sqlite3 *db, bt_t *bt, const char *table,
 	st->srcrow = (vx_cell_t *)calloc((size_t)nv.n, sizeof(vx_cell_t));
 	if (st->srcrow == NULL) { ret = -2; goto out; }
 
-	s = xstore_scan_open(bt, table, 0, 0, 0, 0, 0);   /* whole table */
+	s = xstore_scan_open_txn((sqlite3 *)db, table, 0, 0, 0, 0, 0);   /* whole table, read-your-writes */
 	if (s == NULL) { ret = -2; goto out; }
 	while ((step = xstore_scan_next(s, &rid, &rec, &reclen)) == 1) {
 		int b;
@@ -6564,12 +6565,12 @@ out:
  * snapshot).  Returns the record length (>=1) if the row exists, 0 if it
  * does not (or is tombstoned), or -1 on error. */
 static int
-read_one_row(bt_t *bt, const char *table, int64_t rowid, uint8_t *buf, int cap)
+read_one_row(sqlite3 *db, bt_t *bt, const char *table, int64_t rowid, uint8_t *buf, int cap)
 {
 	xstore_scan_t *s;
 	int64_t rid; const uint8_t *rec; int reclen, got = 0;
-
-	s = xstore_scan_open(bt, table, 0, rowid, 1, rowid, 1);
+	(void)bt;
+	s = xstore_scan_open_txn(db, table, 0, rowid, 1, rowid, 1);
 	if (s == NULL) return -1;
 	if (xstore_scan_next(s, &rid, &rec, &reclen) == 1 && rid == rowid) {
 		if (reclen > cap) { xstore_scan_close(s); return -1; }
@@ -6755,19 +6756,12 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 	}
 
 	/* DELETE / UPDATE inside an open transaction reads the rows to
-	 * change.  The native read path scans the COMMITTED B-tree at the
-	 * txn snapshot; it does not merge this transaction's own buffered
-	 * writes (the wbuf).  That is safe -- and matches the vtab cursor,
-	 * which also does not merge the wbuf into a RANGE scan -- EXCEPT
-	 * when the txn has already written to this very table, where the
-	 * vtab's point path (xs_filter / wbuf_find) could diverge.  So a
-	 * transactional DELETE/UPDATE stays native while this table is
-	 * clean in the txn, and falls back once the txn has buffered a
-	 * write to it.  INSERT needs no such read and is always native. */
-	if ((root->kind == SQL_KIND_DELETE || root->kind == SQL_KIND_UPDATE) &&
-	    xstore_txn_table_dirty(db, tableid)) {
-		sql_arena_destroy(arena); return 0;
-	}
+	 * change.  The native collect path uses a read-your-writes range
+	 * scan (xstore_scan_open_txn) that overlays this transaction's
+	 * buffered writes (UPDATE replaces, DELETE hides, INSERT appended),
+	 * so a transactional DELETE/UPDATE stays native even after the txn
+	 * has buffered writes to the same table.  INSERT needs no such
+	 * read and is always native. */
 
 	/* ---- DELETE [WHERE pk-range or general predicate] ---------------- */
 	if (root->kind == SQL_KIND_DELETE) {
@@ -6778,7 +6772,7 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 		if (rids == NULL) { rc = -1; goto done; }
 		if (where_pk_range(root->u.del->where, ws.name[0],
 		                   &lo, &has_lo, &hi, &has_hi, binds, nbinds)) {
-			nr = collect_rowids(bt, tabbuf, lo, has_lo, hi, has_hi,
+			nr = collect_rowids((sqlite3 *)db, bt, tabbuf, lo, has_lo, hi, has_hi,
 			                    rids, XS_NATIVE_MAX_ROWS);
 		} else {
 			/* General predicate: compile + scan-evaluate per row. */
@@ -6843,7 +6837,7 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 		rids = (int64_t *)malloc(sizeof(int64_t) * XS_NATIVE_MAX_ROWS);
 		if (rids == NULL) { rc = -1; goto done; }
 		if (where_pk_range(up->where, ws.name[0], &lo, &has_lo, &hi, &has_hi, binds, nbinds)) {
-			nr = collect_rowids(bt, tabbuf, lo, has_lo, hi, has_hi,
+			nr = collect_rowids((sqlite3 *)db, bt, tabbuf, lo, has_lo, hi, has_hi,
 			                    rids, XS_NATIVE_MAX_ROWS);
 		} else {
 			nr = collect_matching(db, bt, tabbuf, up->where,
@@ -6863,7 +6857,7 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 			if (nr == 1 && newpk != rids[0]) {
 				uint8_t probe[XS_REC_MAX]; int pl;
 				if (xstore_in_txn(db)) { free(rids); sql_arena_destroy(arena); return 0; }  /* committed-scan check unsafe in txn */
-				pl = read_one_row(bt, tabbuf, newpk, probe, (int)sizeof probe);
+				pl = read_one_row((sqlite3 *)db, bt, tabbuf, newpk, probe, (int)sizeof probe);
 				if (pl < 0) { free(rids); rc = -1; goto done; }
 				if (pl > 0) { free(rids); sql_arena_destroy(arena); return 0; }  /* collision -> VDBE */
 			}
@@ -6872,7 +6866,7 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 			uint8_t cur[XS_REC_MAX]; int curlen;
 			vx_cell_t cells[64];
 			uint8_t rec[XS_REC_MAX]; int reclen;
-			curlen = read_one_row(bt, tabbuf, rids[i], cur, (int)sizeof cur);
+			curlen = read_one_row((sqlite3 *)db, bt, tabbuf, rids[i], cur, (int)sizeof cur);
 			if (curlen < 0) { free(rids); rc = -1; goto done; }
 			if (curlen == 0) continue;          /* vanished under us: skip */
 			for (ci = 1; ci < ws.n; ci++) {
@@ -7074,7 +7068,7 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 
 			if (cells[0].type == VX_INT && !ins->replace) {
 				uint8_t probe[XS_REC_MAX]; int pl, bi;
-				pl = read_one_row(bt, tabbuf, rowid, probe, (int)sizeof probe);
+				pl = read_one_row((sqlite3 *)db, bt, tabbuf, rowid, probe, (int)sizeof probe);
 				if (pl < 0) { free(buf2); vx_result_free(sres); rc = -1; goto done; }
 				if (pl > 0) { free(buf2); vx_result_free(sres); rc = 0; goto done; }
 				for (bi = 0; bi < nb2; bi++)
@@ -7181,7 +7175,7 @@ vx_run_write_p(sqlite3 *db, const char *sql,
 					for (bi = 0; bi < nb; bi++)
 						if (buf[bi].rowid == rowid) { free(buf); rc = 0; goto done; }
 				} else {
-					pl = read_one_row(bt, tabbuf, rowid, probe, (int)sizeof probe);
+					pl = read_one_row((sqlite3 *)db, bt, tabbuf, rowid, probe, (int)sizeof probe);
 					if (pl < 0) { free(buf); rc = -1; goto done; }
 					if (pl > 0) { free(buf); rc = 0; goto done; }
 					for (bi = 0; bi < nb; bi++)

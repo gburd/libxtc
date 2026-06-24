@@ -115,6 +115,15 @@ xstore_scan_t *xstore_scan_open(bt_t *bt, const char *table,
                                 uint64_t snap,
                                 int64_t lo, int has_lo,
                                 int64_t hi, int has_hi);
+/* Like xstore_scan_open, but honours the connection's uncommitted
+ * writes (read-your-writes): inside a transaction the scan overlays the
+ * write buffer (UPDATE replaces, DELETE hides, INSERT appended).  When
+ * the connection is not in a txn (or the buffer is empty) it is exactly
+ * xstore_scan_open over the connection's bt. */
+xstore_scan_t *xstore_scan_open_txn(struct xsql *db, const char *table,
+                                    uint64_t snap,
+                                    int64_t lo, int has_lo,
+                                    int64_t hi, int has_hi);
 
 /* Advance to the next visible row.  Returns 1 with *rowid set and
  * *rec / *reclen pointing at the row's payload record (valid until the
