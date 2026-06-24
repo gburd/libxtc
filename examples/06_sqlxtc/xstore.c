@@ -1414,6 +1414,7 @@ xs_advance(xstore_cursor_t *c)
  * standalone: no SQLite connection, no vtab base, no txn context.  The
  * executor opens one of these per worker over a disjoint rowid range. */
 static int xs_row_live(bt_t *bt, uint32_t tableid, int64_t rowid);
+static int ciprefix(const char *s, const char *pfx);
 
 struct xstore_scan {
 	xstore_cursor_t c;
@@ -1466,10 +1467,23 @@ xstore_scan_open_txn(struct xsql *db, const char *table, uint64_t snap,
 {
 	bt_t *bt = xstore_bt_of(db);
 	xstore_ctx_t *ctx = xstore_ctx_of(db);
-	xstore_scan_t *s = xstore_scan_open(bt, table, snap, lo, has_lo, hi, has_hi);
+	xstore_scan_t *s;
+	/* Effective read snapshot, mirroring the vtab cursor (xs_filter): an
+	 * explicit ctx->read_snap (AS OF), else the txn's frozen snapshot for
+	 * REPEATABLE READ and stricter, else the latest committed clock for
+	 * READ COMMITTED / autocommit.  A caller-supplied snap overrides. */
+	if (snap == 0 && ctx != NULL) {
+		uint64_t rs = atomic_load_explicit(&ctx->read_snap, memory_order_relaxed);
+		if (rs != 0)
+			snap = rs;
+		else if (ctx->in_txn && ctx->isolation >= XS_ISO_REPEATABLE_READ)
+			snap = ctx->txn_snap;
+		/* else leave 0 -> xstore_scan_open uses the latest clock */
+	}
+	s = xstore_scan_open(bt, table, snap, lo, has_lo, hi, has_hi);
 	if (s == NULL) return NULL;
-	/* Enable the merge only inside a txn with buffered writes for this
-	 * table; otherwise the plain committed scan is exact. */
+	/* Enable the write-buffer overlay only inside a txn with buffered
+	 * writes; otherwise the plain committed scan is exact. */
 	if (ctx != NULL && ctx->in_txn && ctx->wn > 0) {
 		s->ryw_ctx = ctx;
 		s->ryw_phase = 0;
@@ -2724,6 +2738,27 @@ xstore_native_mode(struct xsql *db, int on)
 	if (cx == NULL) return -1;
 	cx->native_mode = on ? 1 : 0;
 	if (on) cx->native_autocommit = cx->in_txn ? 0 : 1;
+	return 0;
+}
+
+/* Set the connection isolation level from a name ("read uncommitted",
+ * "read committed", "repeatable read", "snapshot", "serializable").  The
+ * native C-API equivalent of the xstore_isolation() SQL function.
+ * Returns 0 on success, -1 if the connection or name is unknown. */
+int
+xstore_set_isolation(struct xsql *db, const char *level)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	int lvl;
+	if (cx == NULL || level == NULL) return -1;
+	if (ciprefix(level, "read un"))      lvl = XS_ISO_READ_UNCOMMITTED;
+	else if (ciprefix(level, "read c"))  lvl = XS_ISO_READ_COMMITTED;
+	else if (ciprefix(level, "rep"))     lvl = XS_ISO_REPEATABLE_READ;
+	else if (ciprefix(level, "snap"))    lvl = XS_ISO_SNAPSHOT;
+	else if (ciprefix(level, "ser"))     lvl = XS_ISO_SERIALIZABLE;
+	else return -1;
+	cx->isolation = lvl;
+	cx->serializable = (lvl == XS_ISO_SERIALIZABLE);
 	return 0;
 }
 int
