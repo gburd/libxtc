@@ -87,6 +87,13 @@ VEXEC_OBJ := vexec.o
 CFLAGS  += -DSQLXTC_HAVE_LIME=1
 endif
 
+# The full native SQL engine, for storage-engine tests that drive the
+# B-tree through the native sx_* SQL API (sx_open_bt) instead of the
+# SQLite vtab.  No sqlite3.o.
+ENGINE_NATIVE = engine.c db.c quack.c vfs.c mem.c mutex.c pcache.c metrics.c \
+    vexec.c sql_parse.c sql_parse_drv.c sql_ast.c sql_parse_gen.c \
+    xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
+
 TARGET = sqlxtc-server
 
 .PHONY: all clean distclean test lime sql_parse
@@ -307,20 +314,20 @@ test-wal: test_wal
 	./test_wal
 
 # ---- WAL durability + crash recovery for the xstore SQL engine ----
-test_wal_recover: test_wal_recover.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_wal_recover.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_wal_recover: test_wal_recover.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_wal_recover.c $(ENGINE_NATIVE) $(LDFLAGS)
 
 test-wal-recover: test_wal_recover
 	./test_wal_recover
 
-test_torn_smo: test_torn_smo.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_torn_smo.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_torn_smo: test_torn_smo.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_torn_smo.c $(ENGINE_NATIVE) $(LDFLAGS)
 
 test-torn-smo: test_torn_smo
 	./test_torn_smo
 
-test_wal_compact: test_wal_compact.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_wal_compact.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_wal_compact: test_wal_compact.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_wal_compact.c $(ENGINE_NATIVE) $(LDFLAGS)
 
 test-wal-compact: test_wal_compact
 	./test_wal_compact
@@ -357,8 +364,8 @@ test-xstore: test_xstore
 	./test_xstore
 
 # ---- storage-native scan (xstore_scan_*) vs the VDBE under MVCC ----
-test_xstore_scan: test_xstore_scan.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_xstore_scan.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+test_xstore_scan: test_xstore_scan.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_xstore_scan.c $(ENGINE_NATIVE) $(LDFLAGS)
 
 test-xstore-scan: test_xstore_scan
 	./test_xstore_scan
@@ -498,8 +505,8 @@ test-redo-page: test_redo_page
 	./test_redo_page
 
 # ---- end-to-end in-place physiological crash recovery (XL_PAGE images) ----
-test_inplace_redo: test_inplace_redo.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_inplace_redo.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o sqlite3.o $(LDFLAGS)
+test_inplace_redo: test_inplace_redo.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_inplace_redo.c $(ENGINE_NATIVE) $(LDFLAGS)
 
 test-inplace-redo: test_inplace_redo
 	./test_inplace_redo

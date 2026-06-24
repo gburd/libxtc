@@ -34,7 +34,7 @@
 #include "btree.h"
 #include "xstore.h"
 #include "wal.h"
-#include "sqlite3.h"
+#include "engine.h"
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
@@ -47,28 +47,28 @@
 
 static wal_t      *g_wal;
 static bt_t       *g_bt1;
-static xsql       *g_db1;
+static sx_db *g_db1;
 static _Atomic int g_phase1;          /* 0 unset, 1 ok, -1 fail */
 
 static int
-sel_v(xsql *db, const char *tbl, int64_t k, char *out, size_t cap)
+sel_v(sx_db *db, const char *tbl, int64_t k, char *out, size_t cap)
 {
-	xsql_stmt *st = NULL;
+	sx_stmt *st = NULL;
 	char q[64];
 	int got = 0;
 	snprintf(q, sizeof q, "SELECT v FROM %s WHERE k=?", tbl);
-	if (xsql_prepare_v2(db, q, -1, &st, 0) != SQLITE_OK)
+	if (sx_prepare(db, q, -1, &st, NULL) != SX_OK)
 		return -1;
-	xsql_bind_int64(st, 1, k);
-	if (xsql_step(st) == SQLITE_ROW) {
-		const unsigned char *t = xsql_column_text(st, 0);
-		size_t n = (size_t)xsql_column_bytes(st, 0);
+	sx_bind_int64(st, 1, k);
+	if (sx_step(st) == SX_ROW) {
+		const unsigned char *t = sx_column_text(st, 0);
+		size_t n = (size_t)sx_column_bytes(st, 0);
 		if (n >= cap) n = cap - 1;
 		if (t) memcpy(out, t, n);
 		out[n] = '\0';
 		got = 1;
 	}
-	xsql_finalize(st);
+	sx_finalize(st);
 	return got;
 }
 
@@ -81,23 +81,23 @@ worker(void *arg)
 	(void)arg;
 
 	for (k = 0; ok && k < N_TXN; k++) {
-		if (xsql_exec(g_db1, "BEGIN;", 0, 0, 0) != SQLITE_OK) { ok = 0; break; }
+		if (sx_exec(g_db1, "BEGIN", NULL) != SX_OK) { ok = 0; break; }
 		snprintf(sql, sizeof sql, "INSERT INTO t(k,v) VALUES(%d,'tx-%d');", 1000 + k, k);
-		if (xsql_exec(g_db1, sql, 0, 0, 0) != SQLITE_OK) { ok = 0; break; }
+		if (sx_exec(g_db1, sql, NULL) != SX_OK) { ok = 0; break; }
 		snprintf(sql, sizeof sql, "INSERT INTO t(k,v) VALUES(%d,'tx-%d');", 2000 + k, k);
-		if (xsql_exec(g_db1, sql, 0, 0, 0) != SQLITE_OK) { ok = 0; break; }
-		if (xsql_exec(g_db1, "COMMIT;", 0, 0, 0) != SQLITE_OK) { ok = 0; break; }
+		if (sx_exec(g_db1, sql, NULL) != SX_OK) { ok = 0; break; }
+		if (sx_exec(g_db1, "COMMIT", NULL) != SX_OK) { ok = 0; break; }
 	}
 	for (k = 0; ok && k < N_AUTO; k++) {
 		snprintf(sql, sizeof sql, "INSERT INTO t(k,v) VALUES(%d,'au-%d');", 3000 + k, k);
-		if (xsql_exec(g_db1, sql, 0, 0, 0) != SQLITE_OK) { ok = 0; break; }
+		if (sx_exec(g_db1, sql, NULL) != SX_OK) { ok = 0; break; }
 	}
 	/* A second table whose rowids OVERLAP t's (1000..) but live in a
 	 * distinct table-id: recovery must restore the catalog mapping for
 	 * BOTH names or the two tables' rows would alias. */
 	for (k = 0; ok && k < N_T2; k++) {
 		snprintf(sql, sizeof sql, "INSERT INTO t2(k,v) VALUES(%d,'t2-%d');", 1000 + k, k);
-		if (xsql_exec(g_db1, sql, 0, 0, 0) != SQLITE_OK) { ok = 0; break; }
+		if (sx_exec(g_db1, sql, NULL) != SX_OK) { ok = 0; break; }
 	}
 	atomic_store(&g_phase1, ok ? 1 : -1);
 	(void)wal_writer_stop(g_wal);
@@ -113,7 +113,7 @@ main(void)
 	bm_opts_t bo = BM_OPTS_DEFAULT, b2 = BM_OPTS_DEFAULT;
 	bm_t *bm1 = NULL, *bm2 = NULL;
 	bt_t *bt2 = NULL;
-	xsql *db2 = NULL;
+	sx_db *db2 = NULL;
 	char logp[256]; t_tmpl(logp, sizeof logp, "sqlxtc-rec-log");
 	char btA[256]; t_tmpl(btA, sizeof btA, "sqlxtc-rec-A");
 	char btB[256]; t_tmpl(btB, sizeof btB, "sqlxtc-rec-B");
@@ -133,11 +133,10 @@ main(void)
 	if (bm_create(&bo, &bm1) != XTC_OK) return 1;
 	if (bt_open(bm1, &g_bt1) != XTC_OK) return 1;
 	xstore_set_wal((struct wal *)g_wal);
-	if (xsql_open(":memory:", &g_db1) != SQLITE_OK) return 1;
-	if (xstore_register(g_db1, g_bt1) != SQLITE_OK) return 1;
-	if (xsql_exec(g_db1, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) != SQLITE_OK)
+	if (sx_open_bt(g_bt1, &g_db1) != SX_OK) return 1;
+	if (sx_exec(g_db1, "CREATE TABLE t(k INTEGER PRIMARY KEY, v)", NULL) != SX_OK)
 		return 1;
-	if (xsql_exec(g_db1, "CREATE VIRTUAL TABLE t2 USING xstore;", 0, 0, 0) != SQLITE_OK)
+	if (sx_exec(g_db1, "CREATE TABLE t2(k INTEGER PRIMARY KEY, v)", NULL) != SX_OK)
 		return 1;
 
 	if (xtc_loop_init(&loop) != XTC_OK) return 1;
@@ -151,7 +150,7 @@ main(void)
 	}
 
 	/* ---- crash: lose the pool WITHOUT flushing (data file A empty) ---- */
-	xsql_close(g_db1);
+	sx_close(g_db1);
 	xstore_set_wal(NULL);
 	bt_close(g_bt1);
 	bm_destroy(bm1);                 /* every dirty page is lost */
@@ -165,11 +164,10 @@ main(void)
 		fprintf(stderr, "FAIL: xstore_recover\n");
 		return 1;
 	}
-	if (xsql_open(":memory:", &db2) != SQLITE_OK) return 1;
-	if (xstore_register(db2, bt2) != SQLITE_OK) return 1;
-	if (xsql_exec(db2, "CREATE VIRTUAL TABLE t USING xstore;", 0, 0, 0) != SQLITE_OK)
+	if (sx_open_bt(bt2, &db2) != SX_OK) return 1;
+	if (sx_exec(db2, "CREATE TABLE t(k INTEGER PRIMARY KEY, v)", NULL) != SX_OK)
 		return 1;
-	if (xsql_exec(db2, "CREATE VIRTUAL TABLE t2 USING xstore;", 0, 0, 0) != SQLITE_OK)
+	if (sx_exec(db2, "CREATE TABLE t2(k INTEGER PRIMARY KEY, v)", NULL) != SX_OK)
 		return 1;
 
 	for (k = 0; k < N_TXN; k++) {
@@ -189,7 +187,7 @@ main(void)
 		if (sel_v(db2, "t2", 1000 + k, b, sizeof b) == 1 && strcmp(b, want) == 0) found++; else miss++;
 	}
 
-	xsql_close(db2); bt_close(bt2); bm_destroy(bm2);
+	sx_close(db2); bt_close(bt2); bm_destroy(bm2);
 	unlink(logp); unlink(btA); unlink(btB);
 
 	if (miss != 0 || found != expected) {
