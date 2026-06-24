@@ -60,7 +60,7 @@ enum sx_native_kind {
 	SXN_NONE = 0, SXN_SELECT, SXN_WRITE, SXN_BEGIN, SXN_COMMIT,
 	SXN_ROLLBACK, SXN_SAVEPOINT, SXN_RELEASE, SXN_ROLLBACK_TO,
 	SXN_CREATE, SXN_DROP, SXN_PRAGMA_NOP, SXN_PRAGMA_TABLE_INFO,
-	SXN_CREATE_VIEW, SXN_DROP_VIEW
+	SXN_CREATE_VIEW, SXN_DROP_VIEW, SXN_ALTER
 };
 
 struct sx_stmt {
@@ -613,25 +613,47 @@ sx_exec(sx_db *h, const char *sql, char **errmsg)
 {
 #ifdef SQLXTC_HAVE_LIME
 	if (sx_is_native_db(h)) {
-		/* Native multi-statement exec: prepare/step/finalize each
-		 * statement in turn through the native driver (no SQLite). */
-		const char *p = sql, *tail = NULL;
+		/* Native multi-statement exec: split the script on top-level ';'
+		 * (respecting '...' string and x'...' blob literals), then
+		 * prepare/step/finalize each statement through the native driver
+		 * (no SQLite). */
+		const char *p = sql;
 		if (errmsg) *errmsg = NULL;
 		while (p != NULL && *p != '\0') {
+			const char *q = p;
+			int in_str = 0;
+			char *stmt; size_t n;
 			sx_stmt *st = NULL;
-			int rc = sx_prepare(h, p, -1, &st, &tail);
-			if (rc != SQLITE_OK) return rc;
+			int rc, sc, blank = 1;
+			/* Find the end of this statement (next top-level ';'). */
+			for (; *q != '\0'; q++) {
+				if (in_str) { if (*q == '\'') in_str = 0; continue; }
+				if (*q == '\'') { in_str = 1; continue; }
+				if (*q == ';') break;
+			}
+			n = (size_t)(q - p);
+			/* Skip a blank/whitespace-only fragment. */
+			{ size_t i; for (i = 0; i < n; i++)
+				if (p[i] != ' ' && p[i] != '\t' && p[i] != '\n' &&
+				    p[i] != '\r') { blank = 0; break; } }
+			if (blank) { if (*q == ';') q++; p = q; continue; }
+			stmt = (char *)malloc(n + 1);
+			if (stmt == NULL) return SQLITE_NOMEM;
+			memcpy(stmt, p, n); stmt[n] = '\0';
+			rc = sx_prepare(h, stmt, -1, &st, NULL);
+			if (rc != SQLITE_OK) { free(stmt); return rc; }
+			sc = SQLITE_OK;
 			if (st != NULL) {
-				int sc;
 				(void)sx_column_count(st);   /* run a SELECT/table_info */
 				while ((sc = sx_step(st)) == SQLITE_ROW)
 					;
 				sx_finalize(st);
-				if (sc != SQLITE_DONE && sc != SQLITE_OK)
-					return sc;
 			}
-			if (tail == NULL || tail == p) break;
-			p = tail;
+			free(stmt);
+			if (sc != SQLITE_DONE && sc != SQLITE_OK)
+				return sc;
+			if (*q == ';') q++;
+			p = q;
 		}
 		return SQLITE_OK;
 	}
@@ -790,6 +812,20 @@ sx_classify(const char *sql, int *tail_more,
 		} else k = SXN_NONE;
 		break;
 	}
+	case SQL_KIND_ALTER: {
+		/* ALTER TABLE old RENAME TO new: old in create->name, new in
+		 * create->on_table.  Old -> namebuf, new -> colbuf. */
+		const sql_create_t *c = root->u.create;
+		if (c != NULL && c->name.len > 0 && (size_t)c->name.len < namecap &&
+		    c->on_table.len > 0 && (size_t)c->on_table.len < colcap) {
+			memcpy(namebuf, c->name.p, c->name.len);
+			namebuf[c->name.len] = '\0';
+			memcpy(colbuf, c->on_table.p, c->on_table.len);
+			colbuf[c->on_table.len] = '\0';
+			k = SXN_ALTER;
+		} else k = SXN_NONE;
+		break;
+	}
 	case SQL_KIND_PRAGMA: {
 		/* A PRAGMA that SETS a value (journal_mode=WAL, synchronous=...,
 		 * busy_timeout=...) is a no-op for the native engine -- it has no
@@ -869,6 +905,12 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 				st->ddl_name = strdup(nm);
 				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
 				st->ddl_cols = strdup(cols);   /* the view's SELECT text */
+				if (st->ddl_cols == NULL) {
+					free(st->ddl_name); free(st->sql); free(st); return SQLITE_NOMEM; }
+			} else if (k == SXN_ALTER) {
+				st->ddl_name = strdup(nm);     /* old table name */
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
+				st->ddl_cols = strdup(cols);   /* new table name */
 				if (st->ddl_cols == NULL) {
 					free(st->ddl_name); free(st->sql); free(st); return SQLITE_NOMEM; }
 			} else if (k == SXN_DROP_VIEW || k == SXN_PRAGMA_TABLE_INFO) {
@@ -1053,8 +1095,12 @@ sx_step(sx_stmt *st)
 		case SXN_COMMIT: {
 			struct sx_native_db *nd = sx_is_native_db(st->db)
 			    ? (struct sx_native_db *)st->db : NULL;
+			int rc;
 			if (nd) nd->spn = 0;
-			return xstore_commit(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
+			rc = xstore_commit(st->db);
+			if (rc == 0) return SQLITE_DONE;
+			if (rc == SQLITE_BUSY) return SQLITE_BUSY;   /* serialization conflict */
+			return SQLITE_ERROR;
 		}
 		case SXN_ROLLBACK: {
 			struct sx_native_db *nd = sx_is_native_db(st->db)
@@ -1114,6 +1160,9 @@ sx_step(sx_stmt *st)
 			    ? SQLITE_DONE : SQLITE_ERROR;
 		case SXN_DROP_VIEW:
 			return xstore_drop_view(st->db, st->ddl_name) != 0
+			    ? SQLITE_DONE : SQLITE_ERROR;
+		case SXN_ALTER:
+			return xstore_rename_table(st->db, st->ddl_name, st->ddl_cols) == 0
 			    ? SQLITE_DONE : SQLITE_ERROR;
 		case SXN_PRAGMA_NOP:
 			return SQLITE_DONE;   /* value-setting PRAGMA: no-op, no rows */

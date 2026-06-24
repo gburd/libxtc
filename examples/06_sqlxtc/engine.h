@@ -42,6 +42,8 @@ struct xtc_loop;                 /* fwd: background storage procs run here */
 
 /* Result codes (values match the engine ABI; engine.c static-asserts). */
 #define SX_OK        0
+#define SX_ERROR     1
+#define SX_BUSY      5     /* serialization conflict / contention */
 #define SX_ROW     100
 #define SX_DONE    101
 

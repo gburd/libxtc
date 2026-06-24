@@ -48,6 +48,7 @@ typedef struct kw {
 /* Sorted by name for clarity.  Linear scan is fine for ~70 entries. */
 static const kw_t k_kws[] = {
 	{ "ALL",         TK_ALL },
+	{ "ALTER",       TK_ALTER },
 	{ "AND",         TK_AND },
 	{ "AS",          TK_AS },
 	{ "ASC",         TK_ASC },
@@ -107,6 +108,7 @@ static const kw_t k_kws[] = {
 	{ "RECURSIVE",   TK_RECURSIVE },
 	{ "REFERENCES",  TK_REFERENCES },
 	{ "RELEASE",     TK_RELEASE },
+	{ "RENAME",      TK_RENAME },
 	{ "REPLACE",     TK_REPLACE },
 	{ "RIGHT",       TK_RIGHT },
 	{ "ROLLBACK",    TK_ROLLBACK },
