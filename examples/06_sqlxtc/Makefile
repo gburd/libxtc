@@ -357,8 +357,8 @@ test-mvcc: test_mvcc
 # SQLite's VDBE runs SQL; rows live in our btree/bufmgr (larger than
 # RAM).  Off-loop and on-loop (VDBE parks on offloaded page I/O
 # mid-statement).  See docs/M_SQLXTC_MVCC_SQL.md.
-test_xstore: test_xstore.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -o $@ test_xstore.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+test_xstore: test_xstore.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_xstore.c $(ENGINE_NATIVE) $(LDFLAGS)
 
 test-xstore: test_xstore
 	./test_xstore

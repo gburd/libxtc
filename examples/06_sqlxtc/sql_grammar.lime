@@ -130,6 +130,7 @@ struct with_clause_v { sql_cte_t *list; int rec; };
 %type delete_stmt   {sql_stmt_t *}
 %type create_stmt   {sql_stmt_t *}
 %type drop_stmt     {sql_stmt_t *}
+%type alter_stmt    {sql_stmt_t *}
 %type pragma_stmt   {sql_stmt_t *}
 %type begin_stmt    {sql_stmt_t *}
 %type commit_stmt   {sql_stmt_t *}
@@ -178,6 +179,7 @@ struct with_clause_v { sql_cte_t *list; int rec; };
 %token TK_UPDATE.   %token TK_SET.     %token TK_DELETE.
 %token TK_CREATE.   %token TK_TABLE.   %token TK_INDEX.   %token TK_VIEW.
 %token TK_TRIGGER.  %token TK_TEMP.    %token TK_TEMPORARY.
+%token TK_ALTER.    %token TK_RENAME.
 %token TK_DROP.     %token TK_IF.      %token TK_NOT.     %token TK_EXISTS.
 %token TK_PRAGMA.   %token TK_BEGIN.   %token TK_COMMIT.  %token TK_END.
 %token TK_ROLLBACK. %token TK_TRANSACTION.
@@ -246,6 +248,7 @@ stmt(R) ::= update_stmt(S).  { R = S; }
 stmt(R) ::= delete_stmt(S).  { R = S; }
 stmt(R) ::= create_stmt(S).  { R = S; }
 stmt(R) ::= drop_stmt(S).    { R = S; }
+stmt(R) ::= alter_stmt(S).   { R = S; }
 stmt(R) ::= pragma_stmt(S).  { R = S; }
 stmt(R) ::= begin_stmt(S).   { R = S; }
 stmt(R) ::= commit_stmt(S).  { R = S; }
@@ -652,6 +655,15 @@ drop_stmt(R) ::= TK_DROP TK_TRIGGER if_exists(IE) qname(Q). {
     R = AST(pstate, sql_stmt_t);
     if (R && d) { d->kind = SX_DR_TRIGGER; d->if_exists = IE; d->schema = Q.schema; d->name = Q.table;
                   R->kind = SQL_KIND_DROP; R->u.drop = d; }
+}
+
+/* ALTER TABLE old RENAME TO new -- old name in create->name, new in
+ * create->on_table (SQL_KIND_ALTER). */
+alter_stmt(R) ::= TK_ALTER TK_TABLE qname(Q) TK_RENAME TK_TO qname(N). {
+    sql_create_t *cr = AST(pstate, sql_create_t);
+    R = AST(pstate, sql_stmt_t);
+    if (R && cr) { cr->name = Q.table; cr->on_table = N.table;
+                   R->kind = SQL_KIND_ALTER; R->u.create = cr; }
 }
 
 %type if_exists {int}

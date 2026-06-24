@@ -1415,6 +1415,7 @@ xs_advance(xstore_cursor_t *c)
  * executor opens one of these per worker over a disjoint rowid range. */
 static int xs_row_live(bt_t *bt, uint32_t tableid, int64_t rowid);
 static int ciprefix(const char *s, const char *pfx);
+static int xs_rollback_ctx(xstore_ctx_t *cx);
 
 struct xstore_scan {
 	xstore_cursor_t c;
@@ -1425,6 +1426,8 @@ struct xstore_scan {
 	 * after the committed range is drained, buffered INSERTs (rowids not
 	 * in the committed tree) are emitted in ascending rowid order. */
 	xstore_ctx_t   *ryw_ctx;   /* connection write buffer, or NULL */
+	int             ryw_overlay; /* 1 = overlay the write buffer (wn > 0) */
+	int             ryw_track;   /* 1 = record reads into the SSI read set */
 	int             ryw_phase; /* 0 = committed range, 1 = wbuf-only inserts */
 	int64_t         ryw_emitted_max; /* highest committed rowid already seen */
 	int             ryw_next_wi;     /* next wbuf index to consider (phase 1) */
@@ -1482,10 +1485,15 @@ xstore_scan_open_txn(struct xsql *db, const char *table, uint64_t snap,
 	}
 	s = xstore_scan_open(bt, table, snap, lo, has_lo, hi, has_hi);
 	if (s == NULL) return NULL;
-	/* Enable the write-buffer overlay only inside a txn with buffered
-	 * writes; otherwise the plain committed scan is exact. */
-	if (ctx != NULL && ctx->in_txn && ctx->wn > 0) {
+	/* Inside a txn, attach the connection ctx so the scan can (a) overlay
+	 * the write buffer for read-your-writes (when it has buffered writes)
+	 * and (b) record each read into the SSI read set (when serializable),
+	 * exactly as the vtab cursor does.  Outside a txn the plain committed
+	 * scan is exact. */
+	if (ctx != NULL && ctx->in_txn) {
 		s->ryw_ctx = ctx;
+		s->ryw_overlay = (ctx->wn > 0);
+		s->ryw_track = (ctx->serializable != 0);
 		s->ryw_phase = 0;
 		s->ryw_emitted_max = INT64_MIN;
 		s->ryw_next_wi = 0;
@@ -1500,8 +1508,9 @@ xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
 	if (s == NULL) return -1;
 	if (s->done) return 0;
 
-	/* Plain committed scan (no read-your-writes overlay). */
-	if (s->ryw_ctx == NULL) {
+	/* Plain committed scan: no txn, or a txn that needs neither the
+	 * write-buffer overlay nor SSI read tracking. */
+	if (s->ryw_ctx == NULL || (!s->ryw_overlay && !s->ryw_track)) {
 		s->c.eof = 0;
 		xs_advance(&s->c);
 		if (s->c.eof) { s->done = 1; return 0; }
@@ -1511,7 +1520,8 @@ xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
 		return 1;
 	}
 
-	/* Phase 0: walk the committed range, overlaying the write buffer. */
+	/* Phase 0: walk the committed range, overlaying the write buffer and
+	 * recording reads into the SSI read set. */
 	if (s->ryw_phase == 0) {
 		for (;;) {
 			const xs_wrec_t *w;
@@ -1519,7 +1529,12 @@ xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
 			xs_advance(&s->c);
 			if (s->c.eof) { s->ryw_phase = 1; s->ryw_next_wi = 0; break; }
 			s->ryw_emitted_max = s->c.rowid;
-			w = wbuf_find(s->ryw_ctx, s->c.tableid, s->c.rowid);
+			if (s->ryw_track) {
+				rset_add(s->ryw_ctx, s->c.tableid, s->c.rowid);
+				ssi_record_read(s->ryw_ctx->ssi, s->c.tableid, s->c.rowid);
+			}
+			w = s->ryw_overlay
+			    ? wbuf_find(s->ryw_ctx, s->c.tableid, s->c.rowid) : NULL;
 			if (w == NULL) {                 /* unbuffered: committed row */
 				if (rowid) *rowid = s->c.rowid;
 				if (rec) *rec = s->c.val;
@@ -1538,7 +1553,9 @@ xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
 	}
 
 	/* Phase 1: emit buffered INSERTs (rowids with no committed row), in
-	 * ascending rowid order, within the scan range. */
+	 * ascending rowid order, within the scan range.  Only when overlaying
+	 * the write buffer (a read-only serializable scan has none). */
+	if (!s->ryw_overlay) { s->done = 1; return 0; }
 	for (;;) {
 		const xstore_ctx_t *cx = s->ryw_ctx;
 		int i, best = -1; int64_t bestrid = 0;
@@ -2521,30 +2538,24 @@ xs_begin(xsql_vtab *pv)
 	xs_enter((xstore_vtab_t *)pv);
 	return SQLITE_OK;
 }
+/*
+ * Serializable validation (Cahill SSI pivot detection).  Returns
+ * SQLITE_BUSY if this transaction is a dangerous pivot (BOTH an
+ * outgoing and an incoming rw-antidependency), else SQLITE_OK.  Shared
+ * by the vtab xSync (2PC phase 1) and the native commit path.
+ */
 static int
-xs_sync(xsql_vtab *pv)
+xs_ssi_validate(xstore_ctx_t *cx)
 {
-	xstore_ctx_t *cx = ((xstore_vtab_t *)pv)->ctx;
 	int i, out_edge = 0, in_edge;
 	xs_rkey_t *wr;
 	int nwr;
 	if (!cx->in_txn || !cx->serializable)
 		return SQLITE_OK;
 	/*
-	 * Serializable validation, in xSync (2PC phase 1) so a failure
-	 * rolls the transaction back -- xCommit (phase 2) is too late.
-	 * Cahill SSI pivot detection (docs/M_SQLXTC_MVCC_SQL.md): abort
-	 * only if this transaction has BOTH an outgoing and an incoming
-	 * rw-antidependency.  This commits read-mostly transactions that
-	 * the older precision validation (any overwritten read -> abort)
-	 * would have failed, while still forbidding write-skew.
-	 *
 	 * Outgoing edge: a key we read was overwritten by a transaction
 	 * that committed after our snapshot -- read straight from the
 	 * shared B-tree's version timestamps, so it sees every committer.
-	 * Counts toward an abort only because such a writer has, by
-	 * definition, already committed (the pivot's out-neighbor commits
-	 * first); in a write-skew this makes the second committer abort.
 	 */
 	for (i = 0; i < cx->rn; i++)
 		if (xs_newest_ts(cx->bt, cx->rset[i].tableid, cx->rset[i].rowid)
@@ -2571,6 +2582,17 @@ xs_sync(xsql_vtab *pv)
 	in_edge = ssi_in_conflict(cx->ssi, wr, nwr);
 	free(wr);
 	return in_edge ? SQLITE_BUSY : SQLITE_OK;   /* pivot -> serialization failure */
+}
+
+static int
+xs_sync(xsql_vtab *pv)
+{
+	/*
+	 * Serializable validation, in xSync (2PC phase 1) so a failure
+	 * rolls the transaction back -- xCommit (phase 2) is too late.
+	 * See docs/M_SQLXTC_MVCC_SQL.md.
+	 */
+	return xs_ssi_validate(((xstore_vtab_t *)pv)->ctx);
 }
 
 /*
@@ -2634,6 +2656,15 @@ xs_commit_ctx(xstore_ctx_t *cx)
 	int i, rc = SQLITE_OK;
 	if (!cx->in_txn)
 		return SQLITE_OK;
+	/* Serializable validation (SSI pivot) BEFORE applying writes: a
+	 * dangerous pivot aborts with SQLITE_BUSY.  The vtab runs this in
+	 * xSync; the native commit path runs it here, and on a failure rolls
+	 * the transaction back (the vtab relies on SQLite calling xRollback
+	 * after an xSync failure; the native path must do it itself). */
+	if ((rc = xs_ssi_validate(cx)) != SQLITE_OK) {
+		(void)xs_rollback_ctx(cx);
+		return rc;
+	}
 	if (cx->wn > 0) {
 		if (cx->steal_txn != 0)              /* STEAL: bring spilled payloads back */
 			for (i = 0; i < cx->wn; i++)
@@ -2705,7 +2736,12 @@ xstore_commit(struct xsql *db)
 	if (cx == NULL) return 0;
 	if (cx->native_mode) cx->native_autocommit = 1;   /* end explicit txn */
 	if (!cx->in_txn) return 0;
-	return xs_commit_ctx(cx) == SQLITE_OK ? 0 : -1;
+	{
+		int rc = xs_commit_ctx(cx);
+		if (rc == SQLITE_OK) return 0;
+		if (rc == SQLITE_BUSY) return SQLITE_BUSY;   /* serialization conflict */
+		return -1;
+	}
 }
 int
 xstore_rollback(struct xsql *db)
@@ -2760,6 +2796,64 @@ xstore_set_isolation(struct xsql *db, const char *level)
 	cx->isolation = lvl;
 	cx->serializable = (lvl == XS_ISO_SERIALIZABLE);
 	return 0;
+}
+
+/* Native C-API equivalents of the MVCC SQL functions (the functions
+ * stay for the vtab; these let a SQLite-free connection drive the same
+ * machinery). */
+
+/* Current HLC clock (xstore_now()). */
+int64_t
+xstore_clock_now(void)
+{
+	return (int64_t)atomic_load_explicit(&g_xclock, memory_order_relaxed);
+}
+
+/* Pin the connection's reads at timestamp ts (xstore_as_of(ts)); ts 0
+ * releases the pin (back to latest committed). */
+int
+xstore_as_of(struct xsql *db, int64_t ts)
+{
+	xstore_ctx_t *c = xstore_ctx_of(db);
+	if (c == NULL) return -1;
+	if (ts < 0) ts = 0;
+	atomic_store_explicit(&c->read_snap, (uint64_t)ts, memory_order_relaxed);
+	xs_pin_recompute(c);
+	return 0;
+}
+
+/* Garbage-collect versions below the global snapshot horizon
+ * (xstore_gc()).  Returns the number of versions reclaimed, or -1. */
+int
+xstore_gc_run(struct xsql *db)
+{
+	xstore_ctx_t *c = xstore_ctx_of(db);
+	uint64_t now, horizon;
+	int reclaimed = 0;
+	if (c == NULL) return -1;
+	now = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	horizon = snap_horizon(now);
+	(void)xs_gc(c->bt, horizon, &reclaimed);
+	if (horizon > atomic_load_explicit(&g_gc_horizon, memory_order_relaxed))
+		atomic_store_explicit(&g_gc_horizon, horizon, memory_order_relaxed);
+	return reclaimed;
+}
+
+/* Enable/disable autovacuum for the connection (xstore_autovacuum(on)). */
+int
+xstore_autovacuum_set(struct xsql *db, int on)
+{
+	xstore_ctx_t *c = xstore_ctx_of(db);
+	if (c == NULL) return -1;
+	c->autovacuum = on ? 1 : 0;
+	return c->autovacuum;
+}
+
+/* Total autovacuum prunes so far (xstore_prune_count()). */
+int64_t
+xstore_prune_count(void)
+{
+	return (int64_t)atomic_load_explicit(&g_av_prunes, memory_order_relaxed);
 }
 int
 xstore_native_begin(struct xsql *db)
@@ -3067,6 +3161,66 @@ xstore_drop_table(struct xsql *db, const char *name)
 	if (xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)nlen, 1) != SQLITE_OK)
 		return -1;
 	xstore_cat_forget_one(bt, name);
+	return 0;
+}
+
+/* ALTER TABLE oldname RENAME TO newname: re-key the catalog entry to the
+ * new name, keeping the same table-id (and therefore all the row data)
+ * and column schema.  Returns 0 on success, 0 (idempotent no-op) if the
+ * old name is unknown, -1 on error or if the new name already exists. */
+int
+xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
+{
+	bt_t *bt = xstore_bt_of(db);
+	uint32_t id, exists;
+	uint8_t val[1024], vbuf[1024];
+	int vlen, i;
+	const char *coldefs = NULL;
+	size_t nlen, clen = 0, total;
+	if (bt == NULL || oldname == NULL || newname == NULL) return -1;
+	id = xs_cat_lookup(bt, oldname);
+	if (id == 0) return 0;                       /* unknown: idempotent */
+	exists = xs_cat_lookup(bt, newname);
+	if (exists != 0 && exists != id) return -1;  /* target name taken */
+
+	/* Recover the column schema from the persisted catalog value
+	 * (name\0coldefs); fall back to the cached coldefs. */
+	vlen = xs_cat_value(bt, oldname, val, (int)sizeof val);
+	if (vlen > 0) {
+		for (i = 0; i < vlen; i++) if (val[i] == 0) break;
+		if (i < vlen - 1) coldefs = (const char *)val + i + 1;
+	}
+	if (coldefs == NULL) {
+		pthread_mutex_lock(&g_cat_mu);
+		for (i = 0; i < g_cat_n; i++)
+			if (g_cat[i].bt == bt && strcmp(g_cat[i].name, oldname) == 0 &&
+			    g_cat[i].coldefs[0] != '\0') { coldefs = g_cat[i].coldefs; break; }
+		pthread_mutex_unlock(&g_cat_mu);
+	}
+
+	/* Persist a new catalog row for the SAME table-id under the new
+	 * name (name\0coldefs), so xs_cat_lookup(newname) resolves to id and
+	 * xs_cat_lookup(oldname) no longer matches (one row per table-id). */
+	nlen = strlen(newname);
+	clen = coldefs ? strlen(coldefs) : 0;
+	if (nlen + 1 + clen > sizeof vbuf) clen = 0;
+	memcpy(vbuf, newname, nlen);
+	total = nlen;
+	if (clen > 0) { vbuf[total++] = '\0'; memcpy(vbuf + total, coldefs, clen); total += clen; }
+	if (xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)total, 0) != SQLITE_OK)
+		return -1;
+
+	/* Update the in-process cache: drop the old name, install the new
+	 * (same id + coldefs) so cross-connection lookups see it at once. */
+	pthread_mutex_lock(&g_cat_mu);
+	for (i = 0; i < g_cat_n; i++)
+		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, oldname) == 0) {
+			snprintf(g_cat[i].name, sizeof g_cat[i].name, "%s", newname);
+			if (clen > 0)
+				snprintf(g_cat[i].coldefs, sizeof g_cat[i].coldefs, "%s", coldefs);
+			break;
+		}
+	pthread_mutex_unlock(&g_cat_mu);
 	return 0;
 }
 

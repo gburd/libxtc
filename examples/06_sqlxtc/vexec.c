@@ -180,7 +180,8 @@ enum vx_op {
 };
 
 enum vx_func {
-	VXF_ABS = 1, VXF_LENGTH, VXF_LOWER, VXF_UPPER, VXF_COALESCE, VXF_IFNULL
+	VXF_ABS = 1, VXF_LENGTH, VXF_LOWER, VXF_UPPER, VXF_COALESCE, VXF_IFNULL,
+	VXF_TYPEOF
 };
 
 typedef struct vx_expr {
@@ -755,6 +756,7 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 		case VXF_ABS:    return VX_AFF_NUMERIC;
 		case VXF_LENGTH: return VX_AFF_NUMERIC;
 		case VXF_LOWER: case VXF_UPPER: return VX_AFF_TEXT;
+		case VXF_TYPEOF: return VX_AFF_TEXT;
 		default:         return VX_AFF_BLOB;   /* coalesce/ifnull: mixed */
 		}
 	}
@@ -805,7 +807,8 @@ func_of(const sql_str_t *name, int *nargs_ok, int nargs)
 	struct { const char *n; enum vx_func f; int args; } tbl[] = {
 		{ "abs", VXF_ABS, 1 }, { "length", VXF_LENGTH, 1 },
 		{ "lower", VXF_LOWER, 1 }, { "upper", VXF_UPPER, 1 },
-		{ "coalesce", VXF_COALESCE, -1 }, { "ifnull", VXF_IFNULL, 2 }
+		{ "coalesce", VXF_COALESCE, -1 }, { "ifnull", VXF_IFNULL, 2 },
+		{ "typeof", VXF_TYPEOF, 1 }
 	};
 	size_t i;
 	for (i = 0; i < sizeof tbl / sizeof tbl[0]; i++) {
@@ -2380,6 +2383,22 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 	case VXO_FUNC: {
 		vx_cell_t a;
 		switch (e->func) {
+		case VXF_TYPEOF: {
+			/* SQLite storage-class name of the argument. */
+			const char *tn;
+			eval(st, e->args[0], row, arena, &a);
+			switch (a.type) {
+			case VX_INT:  tn = "integer"; break;
+			case VX_REAL: tn = "real";    break;
+			case VX_TEXT: tn = "text";    break;
+			case VX_BLOB: tn = "blob";    break;
+			default:      tn = "null";    break;
+			}
+			out->type = VX_TEXT;
+			out->bytes = (const uint8_t *)tn;
+			out->nbytes = (uint32_t)strlen(tn);
+			return;
+		}
 		case VXF_ABS:
 			eval(st, e->args[0], row, arena, &a);
 			if (a.type == VX_NULL) { out->type = VX_NULL; return; }
@@ -6323,6 +6342,30 @@ lit_cell(struct vx_arena_blk **arena, const sql_expr_t *e, vx_cell_t *out,
 		if (e->lit.len) memcpy(p, e->lit.p, e->lit.len);
 		p[e->lit.len] = '\0';
 		out->type = VX_TEXT; out->bytes = p; out->nbytes = (int)e->lit.len;
+		return 0;
+	}
+	case SX_E_BLOB: {
+		/* x'..hex..' literal: lit holds the full token text including the
+		 * x' prefix and ' suffix.  Decode the hex body into raw bytes. */
+		const char *t = e->lit.p; uint32_t tn = e->lit.len, i, nb;
+		uint8_t *p;
+		if (tn < 3 || (t[0] != 'x' && t[0] != 'X') || t[1] != '\'' ||
+		    t[tn - 1] != '\'') return -1;
+		tn -= 3; t += 2;                /* the hex body, tn chars */
+		if (tn % 2 != 0) return -1;
+		nb = tn / 2;
+		p = (uint8_t *)arena_alloc(arena, nb ? nb : 1);
+		if (p == NULL) return -1;
+		for (i = 0; i < nb; i++) {
+			int hi = t[i * 2], lo = t[i * 2 + 1];
+			#define HEXV(ch) ((ch) >= '0' && (ch) <= '9' ? (ch) - '0' : \
+			    ((ch) | 0x20) >= 'a' && ((ch) | 0x20) <= 'f' ? ((ch) | 0x20) - 'a' + 10 : -1)
+			int h = HEXV(hi), l = HEXV(lo);
+			#undef HEXV
+			if (h < 0 || l < 0) return -1;
+			p[i] = (uint8_t)((h << 4) | l);
+		}
+		out->type = VX_BLOB; out->bytes = p; out->nbytes = nb;
 		return 0;
 	}
 	case SX_E_UNARY:

@@ -244,6 +244,12 @@ int xstore_native_mode(struct xsql *db, int on);
 /* Set the connection isolation level from a name (the native C-API
  * equivalent of the xstore_isolation() SQL function). */
 int xstore_set_isolation(struct xsql *db, const char *level);
+/* Native C-API equivalents of the MVCC SQL functions. */
+int64_t xstore_clock_now(void);              /* xstore_now() */
+int xstore_as_of(struct xsql *db, int64_t ts);   /* xstore_as_of(ts) */
+int xstore_gc_run(struct xsql *db);          /* xstore_gc() -> reclaimed */
+int xstore_autovacuum_set(struct xsql *db, int on); /* xstore_autovacuum(on) */
+int64_t xstore_prune_count(void);            /* xstore_prune_count() */
 int xstore_native_begin(struct xsql *db);
 int xstore_savepoint(struct xsql *db, int level);
 int xstore_release(struct xsql *db, int level);
@@ -259,6 +265,8 @@ int xstore_rollback_to(struct xsql *db, int level);
  * native driver, where there is no VDBE to keep in sync. */
 uint32_t xstore_create_table(struct xsql *db, const char *name, const char *coldefs);
 int xstore_drop_table(struct xsql *db, const char *name);
+/* ALTER TABLE oldname RENAME TO newname (re-keys the catalog entry). */
+int xstore_rename_table(struct xsql *db, const char *oldname, const char *newname);
 /* Views (CREATE VIEW / DROP VIEW): the executor expands a FROM
  * reference to a view as a derived table (its SELECT text). */
 int xstore_create_view(struct xsql *db, const char *name, const char *select_sql);
