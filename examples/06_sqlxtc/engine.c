@@ -91,18 +91,11 @@ struct sx_stmt {
  * SQLXTC_NATIVE_DRIVER=0 forces the VDBE (the differential oracle). */
 static int g_native_driver = 1;
 
-/* Fully SQLite-free connection (no xsql object at all): the final state
- * of the excision.  Now ON by default -- the entire differential oracle
- * (32/32) and the whole server test surface run natively with zero VDBE
- * and zero sqlite3 prepare, so sx_open returns a tagged native handle
- * and an unrecognized statement is a hard error (no VDBE fallback).
- * SQLXTC_NATIVE_CONN=0 forces the legacy SQLite-handle path (kept while
- * sqlite3.c is still linked for the driver-off differential oracle). */
-static int g_native_conn = 1;
-
 void sx_native_driver(int on) { g_native_driver = on ? 1 : 0; }
 int  sx_native_driver_enabled(void) { return g_native_driver; }
-void sx_native_conn(int on) { g_native_conn = on ? 1 : 0; }
+/* The connection is now always SQLite-free native; sx_native_conn is a
+ * retained no-op for API compatibility (the legacy handle is gone). */
+void sx_native_conn(int on) { (void)on; }
 
 #ifdef SQLXTC_HAVE_LIME
 /*
@@ -170,43 +163,36 @@ int64_t sx_stmt_changes(const sx_stmt *st)
 int
 sx_init(void)
 {
-	/* The native sx_stmt driver is on by default; SQLXTC_NATIVE_DRIVER=0
-	 * forces the VDBE (the differential oracle's reference run). */
 	const char *nd = getenv("SQLXTC_NATIVE_DRIVER");
 	if (nd != NULL && nd[0] == '0')
 		g_native_driver = 0;
-	{
-		const char *nc = getenv("SQLXTC_NATIVE_CONN");
-		if (nc != NULL && nc[0] == '0')
-			g_native_conn = 0;
-	}
-	return xsql_initialize();
+	return SX_OK;
 }
 
 int
 sx_shutdown(void)
 {
-	return xsql_shutdown();
+	return SX_OK;
 }
 
 int
 sx_config_mutex(const void *methods)
 {
-	return xsql_config(SQLITE_CONFIG_MUTEX,
-	    (const xsql_mutex_methods *)methods);
+	(void)methods;   /* native engine: no SQLite mutex subsystem */
+	return SX_OK;
 }
 
 int
 sx_config_mem(const void *methods)
 {
-	return xsql_config(SQLITE_CONFIG_MALLOC,
-	    (const xsql_mem_methods *)methods);
+	(void)methods;   /* native engine: no SQLite allocator subsystem */
+	return SX_OK;
 }
 
 int
 sx_config_serialized(void)
 {
-	return xsql_config(SQLITE_CONFIG_SERIALIZED);
+	return SX_OK;
 }
 
 /*
@@ -219,35 +205,7 @@ sx_config_serialized(void)
 int
 sx_config_multithread(void)
 {
-	return xsql_config(SQLITE_CONFIG_MULTITHREAD);
-}
-
-/*
- * Busy handler: when a connection finds the database locked (another
- * connection holds the WAL write lock), do NOT sleep the OS thread --
- * that would wedge a cooperative loop, since the lock holder may be a
- * parked fiber on this same thread (e.g. mid-fsync via the offloaded
- * VFS) that can only resume once the loop runs.  Instead yield the
- * fiber, letting the holder run, finish, and release; then retry.
- * Off a loop xtc_yield is a no-op and this becomes a bounded spin.
- * Give up after a generous cap so a genuinely stuck lock still
- * surfaces as an error rather than hanging.
- */
-static int
-sx_busy_handler(void *arg, int n_prior)
-{
-	(void)arg;
-	if (n_prior > 100000)
-		return 0;               /* give up -> SQLITE_BUSY */
-	/* Park briefly (not spin): a timer park drains the run queue so
-	 * the loop polls I/O and the lock holder -- which may be a parked
-	 * fiber on this same thread doing an offloaded fsync -- can
-	 * resume, finish, and release.  A bare xtc_yield would keep the
-	 * run queue hot and starve that I/O.  Off a loop xtc_proc_sleep
-	 * is a no-op (XTC_E_INVAL) and this falls back to a yield. */
-	if (xtc_proc_sleep(200LL * 1000) != XTC_OK)   /* 0.2ms */
-		xtc_yield();
-	return 1;                       /* retry */
+	return SX_OK;   /* native engine: no SQLite threading-mode subsystem */
 }
 
 /* ---- engine-native storage (xstore) lifecycle ---- */
@@ -260,70 +218,29 @@ static int    g_xrunning;        /* background procs spawned */
 int
 sx_open(const char *path, sx_db **out)
 {
-	xsql *h = NULL;
 	int memlike = (path == NULL || path[0] == '\0' ||
 	    strcmp(path, ":memory:") == 0 ||
 	    strstr(path, "mode=memory") != NULL);   /* shared-cache :memory: URI */
 	int rc;
+	struct sx_native_db *nd;
 
-#ifdef SQLXTC_HAVE_LIME
 	/*
-	 * Fully native connection: when the native driver is on and the
-	 * libxtc storage engine is open, the connection needs no SQLite
-	 * object at all -- the entire workload runs on xstore + vexec.
-	 * Allocate a tagged native handle and register it as the g_dbmap
-	 * key (bt + a fresh per-connection ctx).  (:memory: with no storage,
-	 * or the driver-off oracle run, still opens a SQLite connection
-	 * below.)
+	 * The connection is always a SQLite-free native handle over the
+	 * global storage engine: the entire workload runs on xstore + vexec
+	 * with no SQLite object.  (A connection opened before the storage
+	 * engine is up has no B-tree to bind -- an error.)
 	 */
-	if (g_native_conn && g_xbt != NULL) {
-		struct sx_native_db *nd =
-		    (struct sx_native_db *)calloc(1, sizeof *nd);
-		if (nd == NULL) { *out = NULL; return SQLITE_NOMEM; }
-		nd->magic = SX_NATIVE_MAGIC;
-		nd->errmsg = NULL;
-		nd->changes = 0;
-		if (!memlike)
-			(void)vfs_register(0);   /* page store still uses the xtc VFS */
-		rc = xstore_register_native((xsql *)nd, g_xbt);
-		if (rc != SQLITE_OK) { free(nd); *out = NULL; return rc; }
-		*out = (sx_db *)nd;
-		return SQLITE_OK;
-	}
-#endif
-
-	/* File-backed databases go through the xtc VFS (instrumented,
-	 * offloaded I/O); in-memory databases do no file I/O. */
+	if (g_xbt == NULL) { *out = NULL; return SX_ERROR; }
+	nd = (struct sx_native_db *)calloc(1, sizeof *nd);
+	if (nd == NULL) { *out = NULL; return SQLITE_NOMEM; }
+	nd->magic = SX_NATIVE_MAGIC;
+	nd->errmsg = NULL;
+	nd->changes = 0;
 	if (!memlike)
-		(void)vfs_register(0);
-	rc = xsql_open_v2(path, &h,
-	    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI,
-	    memlike ? NULL : "sqlxtc");
-	if (rc != SQLITE_OK) {
-		if (h) xsql_close(h);
-		*out = NULL;
-		return rc;
-	}
-
-	/* Concurrency policy.  WAL lets readers run concurrently with a
-	 * writer; a busy timeout makes concurrent writers queue and
-	 * retry rather than fail with SQLITE_BUSY; NORMAL sync is the
-	 * WAL-safe durability tradeoff.  (:memory: ignores journal_mode
-	 * but honours busy_timeout harmlessly.) */
-	(void)xsql_exec(h, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
-	(void)xsql_exec(h, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
-	xsql_busy_handler((xsql *)h, sx_busy_handler, NULL);
-
-	/* If the libxtc-native storage engine is open, expose it to this
-	 * connection as the "xstore" virtual table.  SQL against an
-	 * xstore table executes on our on-disk B-tree (cooling buffer
-	 * pool, larger-than-RAM) instead of SQLite's built-in B-tree.
-	 * The B-tree is concurrent (parallel-writer crabbing), so the
-	 * single shared instance is safe across connection procs. */
-	if (g_xbt != NULL)
-		(void)xstore_register((xsql *)h, g_xbt);
-
-	*out = (sx_db *)h;
+		(void)vfs_register(0);   /* page store still uses the xtc VFS */
+	rc = xstore_register_native((xsql *)nd, g_xbt);
+	if (rc != SQLITE_OK) { free(nd); *out = NULL; return rc; }
+	*out = (sx_db *)nd;
 	return SQLITE_OK;
 }
 
