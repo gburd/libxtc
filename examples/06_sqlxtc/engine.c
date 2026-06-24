@@ -122,6 +122,11 @@ struct sx_native_db {
 	uint32_t   magic;          /* SX_NATIVE_MAGIC */
 	char      *errmsg;         /* last error text (owned), or NULL */
 	int64_t    changes;        /* rows changed by the last write */
+	/* Named-savepoint stack: SQL savepoints nest by name, the storage
+	 * engine tracks them by integer level (0-based depth).  spname[i] is
+	 * the name of the savepoint opened at level i; spn is the count. */
+	char       spname[32][64];
+	int        spn;
 };
 
 static int
@@ -321,6 +326,34 @@ sx_open(const char *path, sx_db **out)
 	*out = (sx_db *)h;
 	return SQLITE_OK;
 }
+
+#ifdef SQLXTC_HAVE_LIME
+/*
+ * Open a SQLite-free native connection over a caller-provided B-tree
+ * (not the global storage engine).  Used by the storage-engine tests,
+ * which create their own bm/bt and want to drive it through SQL with no
+ * SQLite object.  The handle is a tagged native handle registered to
+ * `bt`; close it with sx_close.
+ */
+int
+sx_open_bt(bt_t *bt, sx_db **out)
+{
+	struct sx_native_db *nd;
+	int rc;
+	*out = NULL;
+	if (bt == NULL) return SQLITE_MISUSE;
+	nd = (struct sx_native_db *)calloc(1, sizeof *nd);
+	if (nd == NULL) return SQLITE_NOMEM;
+	nd->magic = SX_NATIVE_MAGIC;
+	nd->errmsg = NULL;
+	nd->changes = 0;
+	nd->spn = 0;
+	rc = xstore_register_native((xsql *)nd, bt);
+	if (rc != SQLITE_OK) { free(nd); return rc; }
+	*out = (sx_db *)nd;
+	return SQLITE_OK;
+}
+#endif
 
 /* Buffer-manager write-ahead hook: ensure the log is durable through a
  * page's LSN before the page is written. */
@@ -643,7 +676,32 @@ sx_classify(const char *sql, int *tail_more,
 	case SQL_KIND_DELETE:   k = SXN_WRITE;    break;
 	case SQL_KIND_BEGIN:    k = SXN_BEGIN;    break;
 	case SQL_KIND_COMMIT:   k = SXN_COMMIT;   break;
-	case SQL_KIND_ROLLBACK: k = SXN_ROLLBACK; break;
+	case SQL_KIND_ROLLBACK:
+		/* Bare ROLLBACK -> SXN_ROLLBACK; ROLLBACK TO <name> -> ROLLBACK_TO
+		 * with the savepoint name captured. */
+		if (root->u.txn != NULL && root->u.txn->name.len > 0 &&
+		    (size_t)root->u.txn->name.len < namecap) {
+			memcpy(namebuf, root->u.txn->name.p, root->u.txn->name.len);
+			namebuf[root->u.txn->name.len] = '\0';
+			k = SXN_ROLLBACK_TO;
+		} else k = SXN_ROLLBACK;
+		break;
+	case SQL_KIND_SAVEPOINT:
+		if (root->u.txn != NULL && root->u.txn->name.len > 0 &&
+		    (size_t)root->u.txn->name.len < namecap) {
+			memcpy(namebuf, root->u.txn->name.p, root->u.txn->name.len);
+			namebuf[root->u.txn->name.len] = '\0';
+			k = SXN_SAVEPOINT;
+		} else k = SXN_NONE;
+		break;
+	case SQL_KIND_RELEASE:
+		if (root->u.txn != NULL && root->u.txn->name.len > 0 &&
+		    (size_t)root->u.txn->name.len < namecap) {
+			memcpy(namebuf, root->u.txn->name.p, root->u.txn->name.len);
+			namebuf[root->u.txn->name.len] = '\0';
+			k = SXN_RELEASE;
+		} else k = SXN_NONE;
+		break;
 	case SQL_KIND_CREATE: {
 		/* Plain CREATE TABLE -> native xstore catalog (no vtab).
 		 * CREATE VIEW -> the view registry (name in namebuf, the view's
@@ -816,6 +874,10 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 			} else if (k == SXN_DROP_VIEW || k == SXN_PRAGMA_TABLE_INFO) {
 				st->ddl_name = strdup(nm);   /* view to drop / table to introspect */
 				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
+			} else if (k == SXN_SAVEPOINT || k == SXN_RELEASE ||
+			           k == SXN_ROLLBACK_TO) {
+				st->ddl_name = strdup(nm);   /* the savepoint name */
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
 			}
 			if (tail) *tail = sql + strlen(sql);   /* single statement */
 			*out = st;
@@ -982,12 +1044,65 @@ sx_step(sx_stmt *st)
 			if (!nat_fallback_to_vdbe(st)) return SQLITE_ERROR;
 			return xsql_step(st->vdbe);
 		}
-		case SXN_BEGIN:
+		case SXN_BEGIN: {
+			struct sx_native_db *nd = sx_is_native_db(st->db)
+			    ? (struct sx_native_db *)st->db : NULL;
+			if (nd) nd->spn = 0;
 			return xstore_native_begin(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
-		case SXN_COMMIT:
+		}
+		case SXN_COMMIT: {
+			struct sx_native_db *nd = sx_is_native_db(st->db)
+			    ? (struct sx_native_db *)st->db : NULL;
+			if (nd) nd->spn = 0;
 			return xstore_commit(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
-		case SXN_ROLLBACK:
+		}
+		case SXN_ROLLBACK: {
+			struct sx_native_db *nd = sx_is_native_db(st->db)
+			    ? (struct sx_native_db *)st->db : NULL;
+			if (nd) nd->spn = 0;
 			return xstore_rollback(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
+		}
+		case SXN_SAVEPOINT: {
+			/* Push a named savepoint at the next level. */
+			struct sx_native_db *nd = sx_is_native_db(st->db)
+			    ? (struct sx_native_db *)st->db : NULL;
+			int lvl;
+			if (nd == NULL || nd->spn >= 32) return SQLITE_ERROR;
+			lvl = nd->spn;
+			if (xstore_savepoint(st->db, lvl) != 0) return SQLITE_ERROR;
+			snprintf(nd->spname[lvl], sizeof nd->spname[0], "%s",
+			    st->ddl_name ? st->ddl_name : "");
+			nd->spn = lvl + 1;
+			return SQLITE_DONE;
+		}
+		case SXN_RELEASE: {
+			/* RELEASE name: find the innermost savepoint with that name,
+			 * release it and everything nested inside it (pop to it). */
+			struct sx_native_db *nd = sx_is_native_db(st->db)
+			    ? (struct sx_native_db *)st->db : NULL;
+			int i, lvl = -1;
+			if (nd == NULL) return SQLITE_ERROR;
+			for (i = nd->spn - 1; i >= 0; i--)
+				if (st->ddl_name && strcmp(nd->spname[i], st->ddl_name) == 0) { lvl = i; break; }
+			if (lvl < 0) return SQLITE_ERROR;   /* no such savepoint */
+			if (xstore_release(st->db, lvl) != 0) return SQLITE_ERROR;
+			nd->spn = lvl;
+			return SQLITE_DONE;
+		}
+		case SXN_ROLLBACK_TO: {
+			/* ROLLBACK TO name: undo to the savepoint (it stays open);
+			 * any savepoints nested inside it are discarded. */
+			struct sx_native_db *nd = sx_is_native_db(st->db)
+			    ? (struct sx_native_db *)st->db : NULL;
+			int i, lvl = -1;
+			if (nd == NULL) return SQLITE_ERROR;
+			for (i = nd->spn - 1; i >= 0; i--)
+				if (st->ddl_name && strcmp(nd->spname[i], st->ddl_name) == 0) { lvl = i; break; }
+			if (lvl < 0) return SQLITE_ERROR;   /* no such savepoint */
+			if (xstore_rollback_to(st->db, lvl) != 0) return SQLITE_ERROR;
+			nd->spn = lvl + 1;   /* the named savepoint remains open */
+			return SQLITE_DONE;
+		}
 		case SXN_CREATE:
 			return xstore_create_table(st->db, st->ddl_name, st->ddl_cols) != 0
 			    ? SQLITE_DONE : SQLITE_ERROR;

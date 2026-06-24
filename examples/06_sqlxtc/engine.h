@@ -106,6 +106,10 @@ int  sx_config_multithread(void);
  * backed databases go through the xtc VFS and get the concurrency
  * policy (WAL + busy timeout).  Each call is an independent handle. */
 int  sx_open(const char *path, sx_db **out);
+/* Open a SQLite-free native connection over a caller-provided B-tree
+ * (for storage-engine tests that manage their own bm/bt).  Lime build. */
+struct bt;
+int  sx_open_bt(struct bt *bt, sx_db **out);
 void sx_close(sx_db *h);
 
 /* One-shot statement (no result rows expected), e.g. a PRAGMA. */
