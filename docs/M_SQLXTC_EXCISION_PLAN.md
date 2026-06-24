@@ -162,3 +162,52 @@ they are sequenced first behind the still-present fallback.
 - 1 parser feature (SAVEPOINT) + 1 test helper (`sx_open_bt`) added.
 - engine.c / xstore.c / vexec.c lose every `xsql_*` / `sqlite3_*`
   reference; the Makefile / dist / amalgamation lose `sqlite3.o`.
+
+## Progress update (native-feature completion for the storage tests)
+
+Steps 1-3 are substantially done.  The native engine gained the
+features the in-process storage tests needed, and those tests now run
+SQLite-free:
+
+* native SAVEPOINT / RELEASE / ROLLBACK TO (grammar + name->level stack);
+* sx_open_bt(bt, &h) -- a native connection over a test-owned B-tree;
+* in-transaction read-your-writes (xstore_scan_open_txn overlays the
+  write buffer: UPDATE replaces, DELETE hides, INSERT appended);
+* per-connection MVCC isolation snapshots on the native read path
+  (REPEATABLE READ / SNAPSHOT / SERIALIZABLE freeze; READ COMMITTED
+  re-samples);
+* SSI serializable conflict detection on the native commit path
+  (xs_ssi_validate runs in xs_commit_ctx; the native scan records reads
+  into the read set + SSI registry; xstore_commit returns SX_BUSY on a
+  pivot and rolls back);
+* MVCC SQL functions as native C APIs (xstore_set_isolation /
+  clock_now / as_of / gc_run / autovacuum_set / prune_count);
+* blob literals x'..' (lit_cell); typeof() (vexec VXF_TYPEOF);
+* native multi-statement sx_exec (split on top-level ';');
+* ALTER TABLE x RENAME TO y (grammar + xstore_rename_table).
+
+Re-homed to the native sx_* / xstore C API (no vtab, no sqlite3_):
+test_xstore_scan, test_torn_smo, test_wal_compact, test_wal_recover,
+test_inplace_redo, test_clean_restart, test_steal, test_native_txn,
+test_savepoint, test_isolation, test_xstore.
+
+### Remaining for the physical sqlite3.c deletion
+
+1. test_server_storage: a server-storage + crash-recovery test.
+   Converted draft hit a crash-recovery + tiny-pool WAL timing issue on
+   the native autocommit path (the rest converted cleanly); kept on the
+   vtab path for now -- a focused crash/WAL investigation, not a
+   recognition gap.
+2. Retire the VDBE-comparison tests (test_vexec, test_vexec_ord,
+   test_vexec_join, test_vexec_par, test_vexec_run, test_db_vexec): the
+   external python-sqlite3 oracle is their replacement.  test_native_driver
+   intentionally keeps the in-process VDBE as a differential oracle.
+3. Remove the non-native vexec source path (the sqlite3_prepare_v2
+   join/derived cursor branches -- dead once test_vexec_join retires),
+   the VDBE fallback (nat_fallback_to_vdbe), the legacy connection in
+   sx_open, the vtab module + SQL functions in xstore.c, and the
+   mem/mutex/pcache/vfs shims.
+4. Drop sqlite3.o from every Makefile rule + dist + amalgamation; delete
+   sqlite3.c/.h + xsql.h + the shims; re-run CI.
+
+The external oracle stays the gating correctness proof throughout.
