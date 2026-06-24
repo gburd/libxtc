@@ -46,7 +46,7 @@ count_rows(void)
 	int n = -1;
 	if (sx_open(":memory:", &h) != SX_OK)
 		return -1;
-	(void)sx_exec(h, "CREATE VIRTUAL TABLE t USING xstore;", NULL);
+	(void)sx_exec(h, "CREATE TABLE t(k INTEGER PRIMARY KEY, v)", NULL);
 	if (sx_prepare(h, "SELECT count(*) FROM t", -1, &st, NULL) == SX_OK) {
 		if (sx_step(st) == SX_ROW) n = (int)sx_column_int64(st, 0);
 		sx_finalize(st);
@@ -65,7 +65,7 @@ big_txn(const char *fin, int do_create, int base)
 	if (sx_open(":memory:", &h) != SX_OK)
 		return NULL;
 	if (do_create)
-		(void)sx_exec(h, "CREATE VIRTUAL TABLE t USING xstore;", NULL);
+		(void)sx_exec(h, "CREATE TABLE t(k INTEGER PRIMARY KEY, v)", NULL);
 	(void)sx_exec(h, "BEGIN;", NULL);
 	for (i = 0; i < NROW; i++) {
 		char sql[VLEN + 64];
@@ -98,7 +98,6 @@ main(void)
 	snprintf(dwb, sizeof dwb, "%s.dwb", path);
 
 	CK(sx_init() == SX_OK);
-	sx_native_conn(0);   /* vtab-backed test: needs a SQLite connection */
 
 	/* ---- commit a large (spilling) transaction ---- */
 	CK(sx_storage_open(path, 64) == SX_OK);

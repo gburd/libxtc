@@ -439,9 +439,8 @@ test_savepoint: test_savepoint.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o
 test-savepoint: test_savepoint
 	./test_savepoint
 
-test_native_txn: test_native_txn.c vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o
-	$(CC) $(CFLAGS) -DSQLXTC_HAVE_LIME=1 -o $@ test_native_txn.c \
-		vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o sqlite3.o $(LDFLAGS)
+test_native_txn: test_native_txn.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_native_txn.c $(ENGINE_NATIVE) $(LDFLAGS)
 
 test-native-txn: test_native_txn
 	./test_native_txn
