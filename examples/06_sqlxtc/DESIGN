@@ -1,0 +1,391 @@
+==============================================================================
+sqlxtc -- design
+==============================================================================
+
+This is the in-depth design document for examples/06_sqlxtc, a
+networked, concurrent SQL database engine built on libxtc.  README is
+the operator's guide (build, run, flags, tests); this document explains
+why the pieces are shaped the way they are.
+
+Three companion deep-dives live in ../../docs/:
+
+    M_SQLXTC_STORAGE.md    the from-scratch storage engine
+    M_SQLXTC_VEXEC.md      the vectorized executor
+    M_SQLXTC_MVCC_SQL.md   MVCC, isolation, and SSI
+    M_SQLXTC_WAL.md        the write-ahead log and ARIES recovery
+    M_SQLXTC_GREENFIELD.md the clean-slate direction this example took
+    M_SQLXTC_EXCISION_PLAN.md  the record of removing SQLite
+
+
+------------------------------------------------------------------------------
+1. What sqlxtc is
+------------------------------------------------------------------------------
+
+sqlxtc is a complete SQL engine written against the libxtc runtime, and
+nothing else.  Its job is to carry a real, demanding workload -- a
+multi-client SQL server with durable storage, transactions, isolation,
+and crash recovery -- entirely on xtc primitives, because whatever works
+here is meant to generalize to a future threaded-PostgreSQL-on-xtc port.
+
+The example began as a fork of SQLite.  The original plan ran two
+strategies in parallel: a "hard fork" that routed stock SQLite through
+xtc at its documented extension points (mutex, memory, page cache, VFS),
+and a "greenfield" build of an xtc-native storage engine underneath the
+same engine facade.  The greenfield path won.  The storage engine, a
+vectorized executor, and a Lime-generated SQL parser grew until they
+covered the entire workload, and then the SQLite code was removed:
+sqlite3.c, the VDBE, the virtual-table layer, and all four extension
+shims are gone.  The server links no SQLite and contains zero sqlite3
+symbols.
+
+The design principles that survived from the SQLite era and shaped the
+native engine:
+
+  - The session is the process.  A client connection plus its private
+    state (prepared statements, transaction) is one xtc_proc.  There is
+    no shared session table and no session mutex.
+
+  - No operation may block the OS thread.  Many sessions run as fibers
+    on one (or, with the executor, a few) OS threads, so every blocking
+    point -- a latch, a page fault, an fsync -- must park the calling
+    fiber and yield the loop, never block the thread.  A thread blocked
+    inside one session stalls every peer that shares it.
+
+  - Concurrency is bounded by refusal, not by buffering.  xtc_res caps
+    (max clients, max memory, max in-flight queries, max attached
+    databases) refuse work at the cap rather than queue it unboundedly;
+    that is what keeps p99 latency and resource use predictable.
+
+
+------------------------------------------------------------------------------
+2. Process and concurrency model
+------------------------------------------------------------------------------
+
+      accept()                              spawn
+    listen_fd ----> listener_proc ----xtc_proc----> conn_proc(fd)
+                      (xtc_proc)                        |
+                                                        v
+                                          read a line -> quack_parse
+                                          -> sx_prepare (Lime parse)
+                                          -> sx_step (vexec over xstore)
+                                          -> quack_emit row stream
+                                                        |
+                                                        v
+                                              send() back to client
+
+  - main.c brings up an xtc_app and a supervisor, applies the xtc_res
+    caps, opens the storage engine, and spawns the listener.
+
+  - The listener xtc_proc owns the listening socket (xtc_net, with
+    SO_REUSEPORT) and spawns one conn_proc per accepted connection.
+
+  - Each conn_proc is the client's session: its prepared statements, its
+    transaction state, and its connection handle are the proc's private
+    state.
+
+  - Many conn_procs run as fibers.  With -t 1 they share one loop on one
+    OS thread.  With -t N they are spread round-robin by the listener
+    across an N-loop executor (N OS threads), so SQL runs in parallel
+    across cores.  The parking primitives below are what make a session
+    blocked on a latch or on disk yield the thread to its peers instead
+    of stalling them.
+
+All connections share one process-global storage engine: its B-link
+tree, cooling buffer pool, commit clock, and write-ahead log are shared.
+The concurrency comes from inside the engine -- the tree's per-node
+latches and the WAL's group-commit writer -- so there is no global
+handle mutex on the hot path.  A file-backed database may also be opened
+with a private handle per connection (--no-shared), but the data still
+lives in the one shared engine.
+
+
+------------------------------------------------------------------------------
+3. The Quack wire protocol
+------------------------------------------------------------------------------
+
+Quack (see PROTOCOL.md) is a deliberately tiny, line-delimited JSON
+protocol over TCP, named in homage to DuckDB but not interoperable with
+it.  A request is one JSON object per line:
+
+    {"q": "SELECT id, v FROM t WHERE id > ?1", "params": [10]}
+
+On connect the server sends a hello banner; for each request it streams
+one row object per result row, terminated by a status object.  quack.c
+is a hand-rolled encoder/decoder with no JSON-library dependency,
+because the protocol surface is small and a network-facing parser must
+be auditable.  Bound parameters of every value type are supported:
+integer, real, text, NULL, and blob (hex or base64 on the wire).
+
+The protocol is intentionally minimal: it demonstrates the
+per-connection proc pattern and the engine facade without the weight of
+a real wire protocol.  A PostgreSQL-wire front end is a separate, larger
+exercise.
+
+
+------------------------------------------------------------------------------
+4. The engine facade
+------------------------------------------------------------------------------
+
+engine.h / engine.c define the sx_ surface: sx_open, sx_close, sx_exec,
+sx_prepare / sx_step / sx_reset / sx_finalize, the sx_bind_* and
+sx_column_* families, sx_errmsg, sx_changes, plus the global lifecycle
+(sx_init, sx_shutdown) and the storage-engine controls (sx_storage_open,
+sx_storage_run, sx_storage_checkpoint, sx_storage_close).
+
+The entire application speaks sx_.  main.c, conn.c, db.c, quack.c, and
+metrics.c never touch the engine internals; engine.c is the boundary.
+That boundary is what made the SQLite removal a localized change rather
+than a rewrite of the server: the application did not move while the
+backend underneath sx_ was replaced.
+
+A connection is a native handle (struct sx_native_db, magic-tagged).
+sx_open returns one bound to the global storage engine; sx_open_bt binds
+one to a caller-provided B-tree (the in-process storage tests use this).
+There is no SQLite object behind the handle.
+
+sx_prepare classifies the statement and parses it.  Reads and writes
+recognized by the executor become native statements; sx_step drives the
+executor and walks the result.  DDL (CREATE / DROP / ALTER TABLE,
+CREATE / DROP VIEW), transaction control (BEGIN / COMMIT / ROLLBACK,
+SAVEPOINT / RELEASE / ROLLBACK TO), and PRAGMA table_info are recognized
+natively against the engine catalog.  Because the catalog is the only
+source of truth -- there is no second schema to fall back to -- a
+statement the engine does not recognize is a hard error, not a handoff.
+
+
+------------------------------------------------------------------------------
+5. The SQL front end: parser and vectorized executor
+------------------------------------------------------------------------------
+
+5.1 The Lime parser
+
+The accepted SQL subset is described by a Lime grammar
+(sql_grammar.lime).  Lime is an LALR push-parser generator (bundled as a
+submodule).  The committed, generated parser tables (sql_parse_gen.c /
+.h) are checked into the tree and compiled directly, so an ordinary
+build needs neither the submodule nor the Lime binary.  The grammar is
+regenerated only when it changes (make sql_parse); continuous
+integration regenerates it and fails if the committed copy is not
+byte-stable.  sql_parse_drv.c is the push-parser driver that turns the
+token stream into an AST, sql_ast.c holds the arena-allocated AST nodes,
+and sql_parse.c is the lexer and statement pre-classifier.
+
+5.2 The vectorized executor (vexec.c)
+
+vexec is a DuckDB-style vectorized executor: it works on column-oriented
+batches ("morsels") of rows rather than interpreting one row at a time.
+It plans directly off the Lime AST.  The capability surface, by
+entry point:
+
+  - single-table scan with predicate pushdown and projection;
+  - aggregation (COUNT / SUM / AVG / MIN / MAX, GROUP BY, HAVING);
+  - ORDER BY / LIMIT / OFFSET, including over a join and a view;
+  - INNER and LEFT hash joins, two-table and N-way;
+  - scalar and IN (SELECT) subqueries, correlation decided by parsing;
+  - derived tables (FROM (SELECT ...)) and CREATE / DROP VIEW expansion;
+  - FROM-less constant SELECT;
+  - column affinity on INSERT and UPDATE, expression-RHS UPDATE;
+  - scalar functions (LENGTH, UPPER, LOWER, ABS, COALESCE, IFNULL,
+    TYPEOF), LIKE / GLOB, blob literals;
+  - INSERT / UPDATE / DELETE with in-transaction read-your-writes.
+
+Single-table scans can be split into morsels and run in parallel through
+xtc_exec when the plan allows it.  Reads see a consistent MVCC snapshot
+and record their read set so the commit-time SSI check can detect
+write-skew.
+
+The correctness bar is an external differential oracle: a corpus of
+queries is run against sqlxtc-server and against python's sqlite3, and
+any divergence fails the test.  The oracle is independent of any SQLite
+linked into sqlxtc -- there is none -- so it is a true black-box
+equivalence check, and it is gated in CI.
+
+
+------------------------------------------------------------------------------
+6. The storage engine
+------------------------------------------------------------------------------
+
+The storage engine is from scratch and xtc-native.  It draws on
+LeanStore (cooling-stage eviction, scan resistance) and on B-link-tree
+designs (slotted pages, prefix compression, latch crabbing, range
+cursors).
+
+6.1 Buffer manager (bufmgr.c)
+
+A page-id-addressed buffer pool.  A fix resolves a page id to a
+resident, pinned frame through a striped-lock page table, faulting the
+page in on a miss; this is the path the B-tree uses, its child pointers
+being stable page ids.  A page-provider xtc_proc cools cold frames (HOT
+-> COOL) and writes the dirty ones out ahead of demand, so reclaiming a
+frame is a cheap state flip plus a page-table removal.  A second
+xtc_proc, the trickler, paces background writeback.
+
+Page reads and writes are submitted to xtc_aio (io_uring on Linux,
+kqueue file-AIO on the BSDs) through xtc_dio_sched, so the reactor
+thread never blocks on disk: the calling fiber parks until the
+completion arrives and the loop keeps serving peers.  A double-write
+buffer guards against torn pages: a page is written to the double-write
+area and fsynced before it overwrites its home location, so a crash
+mid-write can always be repaired during recovery.
+
+The per-frame content latch is an xtc_arwlock.
+
+6.2 Node and tree (btnode.c, btree.c)
+
+btnode.c is a slotted node with prefix compression: the common prefix of
+a page's fence keys is stored once and each slot keeps only the key
+suffix plus a 4-byte head for fast comparison.
+
+btree.c is a B-link tree with parallel writers and no global writer
+lock.  Writers exclusive-latch-couple ("crab") from the root, keeping a
+stack of held frames, release every ancestor above a node a child split
+cannot cascade into, and propagate a split upward through the
+already-held stack -- never acquiring a latch upward, so the scheme is
+deadlock-free.  Readers shared-latch-couple (latch the child before
+releasing the parent), so a reader is never split out from under itself.
+The B-link right-links let a reader or writer that arrives mid-split
+follow the link to the correct page rather than block or restart.
+
+The enabling primitive is xtc_arwlock, a fiber-yielding shared/exclusive
+latch: its contended waiters park rather than block the OS thread, so a
+latch can be held across a child fix or a page-allocation park without
+wedging a cooperative loop -- exactly the property latch coupling needs.
+A thread-blocking lock could not back it.
+
+6.3 Write-ahead log and recovery (wal.c, xlog.c)
+
+An ARIES-style write-ahead log.  Each transaction logs its changes
+durably before they reach the tree; a group-commit writer (an xtc_proc)
+coalesces many committers' fsyncs into one batch and hands back durable,
+monotonically increasing LSNs.  xlog.c is the log-record codec.
+
+Recovery runs the ARIES analysis / redo / undo passes: redo is
+physiological and page-LSN-gated (replaying an already-applied change is
+a no-op), and undo of a loser transaction writes compensation log
+records so undo is itself idempotent under a second crash.  A clean
+shutdown is detected and trusted, so a clean restart skips replay.  The
+log is bounded by checkpointing, which compacts it in place (a checkpoint
+record plus a dump of the live tree atomically replace the old log).
+
+6.4 Catalog, MVCC, isolation (xstore.c)
+
+xstore.c is the catalog and the MVCC record store on top of the tree.
+Table ids are allocated from a persisted on-disk catalog (reserved
+table id 0), so distinct table names never collide and the mapping
+survives a crash through the WAL.  Each table's rows are versioned;
+storage column 0 is the integer rowid (a table with no explicit primary
+key gets a hidden synthetic rowid column).
+
+The engine provides:
+
+  - snapshot isolation with per-connection isolation levels (read
+    committed through serializable), and time-travel reads (AS OF a
+    commit timestamp);
+  - serializable snapshot isolation (SSI): a native scan records its
+    reads into both a read set and the SSI registry, and the commit-time
+    check rolls the transaction back on a dangerous read-write pivot
+    (write-skew);
+  - in-transaction read-your-writes: an uncommitted write buffer is
+    overlaid on a committed range scan (insert appends newest-wins,
+    update replaces, delete hides);
+  - savepoints (named, nested), via a level stack on the connection;
+  - garbage collection / autovacuum of dead versions, with adaptive
+    back-off.
+
+A commit clock provides the timestamps; it is a hybrid logical clock so
+ordering survives clock skew between nodes for the eventual scale-out
+work.
+
+
+------------------------------------------------------------------------------
+7. Build, amalgamation, and tests
+------------------------------------------------------------------------------
+
+The example builds two ways, both in CI:
+
+  - Against libxtc.a (the normal static library).
+
+  - Against the single-file xtc amalgamation (make amalg): the sqlxtc
+    sources are compiled -Iamalg/include, where forwarding stub headers
+    resolve every "#include xtc_*.h" to one xtc.h, and link
+    sqlxtc-server-amalg against a single xtc.o.  This exercises the
+    amalgamation as a real, broad consumer of the runtime.  Both links
+    are native; there is no SQLite in either.
+
+Tests are claim-driven and run in-process where possible (no daemon,
+which the agent harness cannot drive safely):
+
+  - test_xstore / test_xstore_scan -- SQL on xstore, and the
+    storage-native scan with read-your-writes and snapshots.
+  - test_isolation / test_savepoint / test_native_txn -- isolation
+    levels, SSI, savepoints, and native transaction control.
+  - test_wal / test_wal_recover / test_torn_smo / test_wal_compact --
+    group commit, crash recovery, torn-structure recovery, log
+    compaction.
+  - test_recover_undo / test_redo_page / test_inplace_redo --
+    the ARIES undo pass with CLRs, page-LSN-gated redo, and end-to-end
+    in-place physiological recovery.
+  - test_clean_restart / test_steal -- the clean-restart fast path and
+    a large transaction that spills to disk and is undone on crash.
+  - test_bufmgr / test_bufmgr_mt / test_scan_resist / test_persist /
+    test_cursor_resume -- the buffer manager single- and
+    multi-threaded, scan resistance, superblock persistence, and the
+    latch-releasing resumable cursor.
+  - test_btnode / test_btree / test_btree_loop / test_btree_mt /
+    test_btree_delete_merge -- the slotted node and the B-link tree
+    serially, on a loop with offloaded I/O, under parallel writers and
+    readers, and with delete-driven merges.
+  - test_admin -- the SHOW PROCESSES introspection command.
+
+Outside the in-process suite:
+
+  - test/sqlxtc/test_sqlxtc_oracle.sh -- the differential oracle against
+    python's sqlite3 (the authoritative correctness proof).
+  - test/sqlxtc/test_sqlxtc_mt.sh -- a multi-thread load test (many
+    concurrent clients against a parallel server).
+
+
+------------------------------------------------------------------------------
+8. File map
+------------------------------------------------------------------------------
+
+  Server and protocol
+    main.c          app/supervisor bringup, listener, resource caps, flags
+    conn.c          per-connection xtc_proc; read line, dispatch, reply
+    quack.c/.h      Quack JSON codec (hand-rolled, no dependency)
+    db.c/.h         connection lifecycle; Quack result streaming
+    admin.c/.h      SHOW PROCESSES and other introspection commands
+    metrics.c       periodic xtc_res / xtc_stats snapshot logger
+
+  SQL front end
+    sql_grammar.lime    the Lime grammar
+    sql_parse_gen.c/.h  the committed Lime-generated parser tables
+    sql_parse_drv.c     the push-parser driver (tokens -> AST)
+    sql_ast.c/.h        the AST node arena
+    sql_parse.c/.h      the lexer and statement pre-classifier
+    sql_parse_lime.h    the token/parser glue header
+    vexec.c/.h          the vectorized executor
+
+  Engine facade and storage
+    engine.c/.h     the sx_ facade -- the engine boundary
+    xstore.c/.h     catalog, MVCC record store, isolation, SSI, native
+                    transaction / DDL / scan APIs
+    sqlrec.c/.h     the tuple record codec
+    btree.c/.h      the B-link tree (latch crabbing)
+    btnode.c/.h     the prefix-compressed slotted node
+    bufmgr.c/.h     the cooling buffer pool (async page I/O, double-write)
+    wal.c/.h        the write-ahead log and group-commit writer
+    xlog.c/.h       the ARIES log-record codec
+    mvcc.c/.h       the sharded MVCC / 2PC scale-out experiment (standalone)
+
+  Generated / vendored
+    amalg/          generated single-file xtc (gitignored)
+    lime/           the Lime parser generator (submodule)
+
+
+------------------------------------------------------------------------------
+9. License
+------------------------------------------------------------------------------
+
+ISC, like the rest of libxtc.  The bundled Lime parser generator is
+BSD-2-Clause.

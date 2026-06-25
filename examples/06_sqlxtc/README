@@ -1,0 +1,290 @@
+==============================================================================
+sqlxtc -- a networked, threaded SQL engine built on libxtc
+==============================================================================
+
+sqlxtc is a worked example that drives a complete, from-scratch SQL
+engine entirely on the libxtc runtime.  It began life as a fork of
+SQLite whose substrate was progressively re-homed onto xtc primitives;
+that migration is now complete, and the SQLite code (sqlite3.c, the
+VDBE, and all four extension-point shims) has been removed.  What
+remains is a self-contained engine: a Lime-generated SQL parser, a
+DuckDB-style vectorized executor, an xtc-native concurrent storage
+engine (a B-link tree over a LeanStore-style cooling buffer pool with
+an ARIES write-ahead log), and a small multi-client TCP server -- all
+written against libxtc and nothing else.
+
+The point of the example is to show libxtc carrying a real, demanding
+workload end to end:
+
+  - xtc_app plus a supervisor for process orchestration
+  - one xtc_proc per client connection
+  - xtc_net for TCP listen/accept with SO_REUSEPORT
+  - xtc_exec for an N-loop (N OS threads) executor when run parallel
+  - xtc_aio plus xtc_dio_sched for asynchronous, never-blocking page I/O
+  - xtc_arwlock for B-link-tree crabbing and for read-mostly catalog state
+  - xtc_res for hard caps on memory, file descriptors, and in-flight work
+  - xtc_stats for counters and latency histograms
+  - xtc_log for structured logging
+
+The wire protocol is "Quack" (see PROTOCOL.md): a deliberately tiny,
+line-delimited JSON-over-TCP protocol.  The name is a nod to DuckDB; it
+is not interoperable with DuckDB.
+
+
+------------------------------------------------------------------------------
+1. Building
+------------------------------------------------------------------------------
+
+Build libxtc first, then the server:
+
+    cd ../..
+    mkdir -p build_unix && cd build_unix && ../dist/configure && make
+    cd ../examples/06_sqlxtc
+    make
+
+The build produces sqlxtc-server.  There is no SQLite to compile, so
+the build is fast.  The committed Lime-generated parser
+(sql_parse_gen.c) is compiled directly; you only need the Lime
+submodule and "make sql_parse" if you change the grammar
+(sql_grammar.lime).
+
+To build against the single-file xtc amalgamation instead of
+libxtc.a -- which exercises the amalgamation as a real, broad consumer
+of the runtime -- run:
+
+    make amalg
+
+That generates amalg/xtc.c and amalg/include/xtc.h, compiles the one
+xtc object, and links sqlxtc-server-amalg against it (no libxtc.a, no
+liburing; the amalgamation auto-selects the epoll backend).  The sqlxtc
+sources are compiled with -Iamalg/include, where forwarding stub
+headers resolve every "#include xtc_*.h" to the single xtc.h.
+
+
+------------------------------------------------------------------------------
+2. Running
+------------------------------------------------------------------------------
+
+Start an in-memory server on the default port 15432 (background it so
+the loop is not tied to the shell):
+
+    nohup setsid ./sqlxtc-server -p 15432 -d :memory: \
+        < /dev/null > /tmp/sqlxtc.log 2>&1 &
+    disown
+
+Talk to it from python.  The server sends a hello banner first, then
+one JSON line per result row, terminated by a status line:
+
+    python3 -c '
+    import socket, json
+    s = socket.create_connection(("127.0.0.1", 15432), timeout=5)
+    f = s.makefile("rwb", buffering=0)
+    print(f.readline().decode().strip())                  # hello banner
+    f.write(json.dumps({"q": "SELECT 1+1"}).encode() + b"\n")
+    for _ in range(3):
+        print(f.readline().decode().strip())
+    '
+
+Even with -d :memory: the engine keeps its rows in the xstore storage
+engine: when --storage is not given, the store file is derived from the
+database path (PATH.xstore), or a unique per-process temporary file for
+an in-memory database.  Every table lives in xstore; sqlxtc is a SQL
+engine over libxtc storage, not a shell over an in-RAM table.
+
+
+------------------------------------------------------------------------------
+3. Command-line options
+------------------------------------------------------------------------------
+
+    sqlxtc-server [options]
+
+      -h, --host=ADDR        bind address           (default 0.0.0.0)
+      -p, --port=PORT        bind port              (default 15432)
+      -d, --db=PATH          database path          (default :memory:)
+      -c, --cores=N          pin to N cores via sched_setaffinity
+      -m, --max-memory=N     xtc_res memory cap in bytes; OOM on exceed
+      -n, --max-clients=N    reject new connections at the cap (default 1000)
+      -i, --max-iops=N       queries/sec token bucket (0 = unlimited)
+      -D, --max-databases=N  cap on ATTACHed databases (default 16)
+          --storage=PATH     xstore engine file (default: derived from --db)
+          --storage-frames=N xstore buffer-pool size in pages (0 = default)
+          --storage-direct   open the store with O_DIRECT
+          --storage-adaptive adaptive writeback pacing
+          --no-shared        give each connection its own handle
+      -t, --threads=N        worker loops (default 1; >1 = parallel,
+                             connection-per-proc across N OS threads)
+      -v, --verbose
+          --help
+
+
+------------------------------------------------------------------------------
+4. How it is put together
+------------------------------------------------------------------------------
+
+A connection flows like this:
+
+      accept()                              spawn
+    listen_fd ----> listener_proc ----xtc_proc----> conn_proc(fd)
+                      (xtc_proc)                        |
+                                                        v
+                                          read a line, quack_parse,
+                                          sx_prepare/sx_step (Lime parse
+                                          plus vexec over xstore),
+                                          quack_emit the row stream
+                                                        |
+                                                        v
+                                              send() back to client
+
+The server opens connections through the sx_ engine facade.  A
+connection is a SQLite-free native handle: sx_prepare parses the SQL
+with the Lime grammar into an AST, the vectorized executor (vexec) plans
+and runs it against the xstore storage engine, and sx_step walks the
+result.  There is no VDBE and no virtual-table layer.
+
+When run with -t 1 (the default) everything shares one loop and one
+handle.  With -t N (N > 1) an N-loop executor runs N OS threads; the
+listener accepts on loop 0 and spawns each connection's proc
+round-robin across loops, so SQL runs in parallel across cores.
+Connections share data through the one process-global xstore engine
+(its B-link tree, buffer pool, commit clock, and WAL are shared); the
+storage engine's latches and the WAL group-commit writer provide the
+concurrency, so there is no global handle mutex on the hot path.
+
+
+------------------------------------------------------------------------------
+5. Source layout (server and engine)
+------------------------------------------------------------------------------
+
+  Server / protocol
+    main.c       argument parsing, app and supervisor bringup, listener
+    conn.c       per-connection xtc_proc; reads lines, dispatches SQL
+    quack.c      hand-rolled JSON encoder/decoder for the Quack protocol
+    db.c         connection lifecycle and result streaming via Quack
+    admin.c      SHOW PROCESSES and other introspection commands
+    metrics.c    periodic xtc_res / xtc_stats snapshot logger
+
+  SQL front end
+    sql_grammar.lime   the Lime grammar for the accepted SQL subset
+    sql_parse_gen.c    the committed Lime-generated parser tables
+    sql_parse_drv.c    the push-parser driver (tokens -> AST)
+    sql_ast.c          the AST node arena and constructors
+    sql_parse.c        the lexer / pre-classifier
+    vexec.c            the vectorized executor (scan, filter, project,
+                       aggregate, sort, hash join, subquery, DDL/DML)
+
+  Engine facade and storage
+    engine.c     the sx_ facade: open/prepare/step/finalize, the native
+                 driver, statement classification, transactions
+    xstore.c     the catalog, the MVCC record store, snapshot isolation
+                 and SSI, the native transaction / DDL / scan APIs
+    sqlrec.c     the row record codec (encode / decode of a tuple)
+    btree.c      the B-link tree (latch crabbing, splits, merges)
+    btnode.c     the slotted node with prefix compression
+    bufmgr.c     the cooling buffer pool (CLOCK eviction, double-write
+                 torn-page protection, async page I/O via xtc_aio)
+    wal.c        the write-ahead log and group-commit writer
+    xlog.c       the ARIES log-record codec
+    mvcc.c       the sharded MVCC / 2PC scale-out experiment (standalone)
+
+
+------------------------------------------------------------------------------
+6. The storage engine
+------------------------------------------------------------------------------
+
+Rows live in a from-scratch, xtc-native storage engine, not in any
+borrowed B-tree.  The major pieces:
+
+  bufmgr.c -- a page-id-addressed buffer manager.  A fix resolves a page
+  id to a resident, pinned frame through a striped-lock page table,
+  faulting the page in on a miss, with a cooling-stage CLOCK evictor.  A
+  page-provider process (an xtc_proc) cools cold frames and writes the
+  dirty ones out ahead of demand, so reclaiming a frame is a cheap state
+  flip plus a page-table removal.  Page reads and writes are submitted
+  to xtc_aio (io_uring on Linux, kqueue file-AIO on the BSDs), so the
+  reactor thread never blocks on disk; the calling fiber parks until the
+  completion arrives and the loop keeps serving peers.  A double-write
+  buffer protects against torn pages on crash.
+
+  btnode.c -- a slotted B-tree node with prefix compression: the common
+  prefix of a page's fence keys is stored once and each slot keeps only
+  the key suffix plus a 4-byte head for fast comparison.
+
+  btree.c -- a B-link tree.  Concurrent writers descend with latch
+  crabbing (an xtc_arwlock per node), and the B-link right-links let a
+  reader that arrives mid-split follow the link rather than block, so
+  reads and writes proceed concurrently.
+
+  wal.c / xlog.c -- an ARIES-style write-ahead log.  Each commit logs
+  its changes durably before they reach the tree; a group-commit writer
+  coalesces many committers' fsyncs into one.  Recovery does the
+  analysis / redo / undo passes and writes compensation log records.
+
+  xstore.c -- the catalog and the MVCC record store on top of the tree.
+  It provides snapshot isolation, serializable snapshot isolation (SSI)
+  write-skew detection, in-transaction read-your-writes, savepoints, and
+  the native transaction / DDL / scan APIs the executor calls.
+
+
+------------------------------------------------------------------------------
+7. Testing
+------------------------------------------------------------------------------
+
+The in-process tests build small drivers against the engine objects and
+run without a daemon:
+
+    make test                 # the full in-process test aggregate
+
+The authoritative correctness proof is an external differential oracle:
+it runs a corpus of queries against sqlxtc-server and against python's
+sqlite3, and fails on any divergence.  It is independent of any SQLite
+code linked into sqlxtc (there is none):
+
+    bash ../../test/sqlxtc/test_sqlxtc_oracle.sh
+
+A multi-thread load test drives many concurrent clients against a
+parallel server:
+
+    bash ../../test/sqlxtc/test_sqlxtc_mt.sh
+
+Continuous integration runs the in-process tests, the amalgamation
+build, the Lime-parser regeneration check (the committed parser must be
+byte-stable), the multi-thread load test, and the differential oracle.
+
+
+------------------------------------------------------------------------------
+8. Performance
+------------------------------------------------------------------------------
+
+See ../../bench/sqlxtc/ for benchmark drivers and recorded results
+(SQLITE_VS_SQLXTC.md compares the native executor against the historical
+VDBE path on the same stored data; LIBXTC_USAGE.md maps each subsystem
+to the libxtc primitive it uses).  In broad strokes: GROUP BY
+aggregation is faster than the old VDBE path and scales with row count;
+scans are at parity; the executor's morsel-parallel reads use xtc_exec.
+
+Read-heavy concurrent load scales past the single-loop ceiling with
+-t N.  Write throughput serializes at the WAL group-commit writer and
+the B-link-tree latches rather than at any global handle mutex.
+
+
+------------------------------------------------------------------------------
+9. Further reading
+------------------------------------------------------------------------------
+
+DESIGN is the in-depth architecture document for this example.  The
+companion deep-dives live in ../../docs/:
+
+    M_SQLXTC_STORAGE.md       the storage engine design
+    M_SQLXTC_VEXEC.md         the vectorized executor
+    M_SQLXTC_WAL.md           the write-ahead log and recovery
+    M_SQLXTC_MVCC_SQL.md      MVCC, isolation, and SSI
+    M_SQLXTC_GREENFIELD.md    the from-scratch (greenfield) direction
+    M_SQLXTC_EXCISION_PLAN.md the record of removing SQLite
+
+
+------------------------------------------------------------------------------
+10. License
+------------------------------------------------------------------------------
+
+ISC, like the rest of libxtc.  The bundled Lime parser generator is
+BSD-2-Clause (see lime/LICENSE).
