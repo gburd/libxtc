@@ -16,7 +16,7 @@ make examples
 | `03_supervised_app.c` | OTP application: `xtc_app` with a root supervisor (`one_for_all`), two workers, restart-on-crash. |
 | `04_lockmgr_demo.c` | Heavyweight lock manager: deadlock between two transactions; detector aborts the youngest. |
 | `05_rexis/` | **Redis-compatible server** with hard resource budgets.  Drop-in for redis-cli. |
-| `06_sqlxtc/` | **Networked SQLite** with the Quack JSON protocol.  Multi-client; uses xtc throughout. |
+| `06_sqlxtc/` | **A from-scratch SQL engine on libxtc** (Lime parser + vectorized executor + B-link/buffer-pool/WAL storage), served over the Quack JSON protocol.  Multi-client; uses xtc throughout. |
 | `07_kaka/` | **Kafka-shaped log broker** (Phase 0 scaffold): partitioned append-only logs with credit-based backpressure.  See its README for the design. |
 
 ## What each example proves
