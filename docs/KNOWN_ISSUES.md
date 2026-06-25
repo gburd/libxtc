@@ -17,9 +17,6 @@ RUNTIME (the full test suite executes) versus which only COMPILE:
   "IOCP backend status" below).
 - AIX (pollset): compiles, code-reviewed, no test host.
 
-The full production-readiness review is in
-`docs/M_1X_READINESS_REVIEW.md`.
-
 ## RESOLVED (partial): native stack backtrace beyond execinfo
 
 **Status:** real backends added; one (Windows) remains compiled-but-not-
