@@ -55,14 +55,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 
 #include "btree.h"
 #include "wal.h"
 #include "xlog.h"
 #include "xtc.h"
 #include "xtc_proc.h"
+#include "xtc_sync.h"
 #include "os_time.h"
+
+/*
+ * Process-global engine locks.  These were pthread mutexes; they are
+ * now xtc_amutex parking mutexes (xtc_amutex_static slots), so a holder
+ * may PARK on I/O (e.g. xs_put waiting on the WAL ack) inside the
+ * critical section without wedging a cooperative loop when another
+ * fiber on that loop contends.  That is what lets the catalog persist
+ * its new row inside the lock, closing the cross-connection
+ * CREATE-then-SELECT race by construction.  Each name maps to a stable
+ * static slot; xtc_amutex_static lazily creates and never frees it.
+ */
+#define XS_LK_CAT  8u   /* catalog (g_cat) + view registry */
+#define XS_LK_SSI  9u   /* SSI registry */
+#define XS_LK_SNAP 10u  /* active-snapshot set */
+#define xs_cat_lock()    (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_CAT), -1)
+#define xs_cat_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_CAT))
+#define xs_ssi_lock()    (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_SSI), -1)
+#define xs_ssi_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_SSI))
+#define xs_snap_lock()   (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_SNAP), -1)
+#define xs_snap_unlock() (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_SNAP))
 
 /*
  * Commit clock.  Every committed version is stamped with a unique,
@@ -408,11 +428,10 @@ struct ssi_txn {
 };
 
 static ssi_txn_t       g_ssi[SSI_MAX];
-static pthread_mutex_t g_ssi_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* Free committed slots no active transaction can still conflict with:
  * a committed W is needed only while some active U started before W
- * committed (U.snap < W.commit_ts).  Caller holds g_ssi_mu. */
+ * committed (U.snap < W.commit_ts).  Caller holds the SSI lock. */
 static void
 ssi_gc_locked(void)
 {
@@ -442,7 +461,7 @@ ssi_begin(uint64_t snap)
 {
 	ssi_txn_t *t = NULL;
 	int i;
-	pthread_mutex_lock(&g_ssi_mu);
+	xs_ssi_lock();
 	ssi_gc_locked();
 	for (i = 0; i < SSI_MAX; i++)
 		if (g_ssi[i].state == SSI_FREE) {
@@ -454,7 +473,7 @@ ssi_begin(uint64_t snap)
 			t->nrng = 0;          /* keep any allocated rngcap/rngs */
 			break;
 		}
-	pthread_mutex_unlock(&g_ssi_mu);
+	xs_ssi_unlock();
 	return t;
 }
 
@@ -463,21 +482,21 @@ ssi_record_read(ssi_txn_t *t, uint32_t tableid, int64_t rowid)
 {
 	int i;
 	if (t == NULL) return;
-	pthread_mutex_lock(&g_ssi_mu);
+	xs_ssi_lock();
 	for (i = 0; i < t->nreads; i++)
 		if (t->reads[i].rowid == rowid && t->reads[i].tableid == tableid) {
-			pthread_mutex_unlock(&g_ssi_mu); return;
+			xs_ssi_unlock(); return;
 		}
 	if (t->nreads == t->rcap) {
 		int nc = t->rcap ? t->rcap * 2 : 16;
 		xs_rkey_t *nb = realloc(t->reads, (size_t)nc * sizeof *nb);
-		if (nb == NULL) { pthread_mutex_unlock(&g_ssi_mu); return; }
+		if (nb == NULL) { xs_ssi_unlock(); return; }
 		t->reads = nb; t->rcap = nc;
 	}
 	t->reads[t->nreads].tableid = tableid;
 	t->reads[t->nreads].rowid = rowid;
 	t->nreads++;
-	pthread_mutex_unlock(&g_ssi_mu);
+	xs_ssi_unlock();
 }
 
 /* Record a RANGE predicate [lo, hi] this txn read (a scan).  A full
@@ -491,18 +510,18 @@ static void
 ssi_record_range(ssi_txn_t *t, uint32_t tableid, int64_t lo, int64_t hi)
 {
 	if (t == NULL || lo > hi) return;
-	pthread_mutex_lock(&g_ssi_mu);
+	xs_ssi_lock();
 	if (t->nrng == t->rngcap) {
 		int nc = t->rngcap ? t->rngcap * 2 : 8;
 		struct ssi_rng *nb = realloc(t->rngs, (size_t)nc * sizeof *nb);
-		if (nb == NULL) { pthread_mutex_unlock(&g_ssi_mu); return; }
+		if (nb == NULL) { xs_ssi_unlock(); return; }
 		t->rngs = nb; t->rngcap = nc;
 	}
 	t->rngs[t->nrng].tableid = tableid;
 	t->rngs[t->nrng].lo = lo;
 	t->rngs[t->nrng].hi = hi;
 	t->nrng++;
-	pthread_mutex_unlock(&g_ssi_mu);
+	xs_ssi_unlock();
 }
 #endif /* SQLXTC_VTAB */
 
@@ -516,7 +535,7 @@ ssi_in_conflict(ssi_txn_t *me, const xs_rkey_t *wr, int nwr)
 	int i, j, k, in = 0;
 	if (me == NULL) return 1;
 	if (nwr == 0) return 0;
-	pthread_mutex_lock(&g_ssi_mu);
+	xs_ssi_lock();
 	for (i = 0; i < SSI_MAX && !in; i++) {
 		ssi_txn_t *u = &g_ssi[i];
 		if (u == me || u->state == SSI_FREE) continue;
@@ -538,7 +557,7 @@ ssi_in_conflict(ssi_txn_t *me, const xs_rkey_t *wr, int nwr)
 			if (in) break;
 		}
 	}
-	pthread_mutex_unlock(&g_ssi_mu);
+	xs_ssi_unlock();
 	return in;
 }
 
@@ -546,21 +565,21 @@ static void
 ssi_commit(ssi_txn_t *t, uint64_t commit_ts)
 {
 	if (t == NULL) return;
-	pthread_mutex_lock(&g_ssi_mu);
+	xs_ssi_lock();
 	t->state = SSI_COMMITTED;
 	t->commit_ts = commit_ts;
-	pthread_mutex_unlock(&g_ssi_mu);
+	xs_ssi_unlock();
 }
 
 static void
 ssi_abort(ssi_txn_t *t)
 {
 	if (t == NULL) return;
-	pthread_mutex_lock(&g_ssi_mu);
+	xs_ssi_lock();
 	t->state = SSI_FREE;
 	t->nreads = 0;
 	t->nrng = 0;
-	pthread_mutex_unlock(&g_ssi_mu);
+	xs_ssi_unlock();
 }
 
 /*
@@ -582,7 +601,6 @@ ssi_abort(ssi_txn_t *t)
  */
 #define SNAP_MAX 256
 static uint64_t        g_holds[SNAP_MAX];   /* 0 == free slot */
-static pthread_mutex_t g_snap_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_gc_horizon = 0;   /* newest reclaimed commit_ts */
 
 /* Set connection slot *slotp to pin `ts` (0 releases it). */
@@ -590,7 +608,7 @@ static void
 snap_set(int *slotp, uint64_t ts)
 {
 	int i;
-	pthread_mutex_lock(&g_snap_mu);
+	xs_snap_lock();
 	if (ts == 0) {
 		if (*slotp >= 0) { g_holds[*slotp] = 0; *slotp = -1; }
 	} else {
@@ -602,7 +620,7 @@ snap_set(int *slotp, uint64_t ts)
 		 * (g_xclock-bounded), so correctness holds; only an as_of pin
 		 * could then be GC'd early. */
 	}
-	pthread_mutex_unlock(&g_snap_mu);
+	xs_snap_unlock();
 }
 
 /* The GC horizon: the oldest live pinned snapshot, or `now` if none. */
@@ -611,10 +629,10 @@ snap_horizon(uint64_t now)
 {
 	uint64_t h = now;
 	int i;
-	pthread_mutex_lock(&g_snap_mu);
+	xs_snap_lock();
 	for (i = 0; i < SNAP_MAX; i++)
 		if (g_holds[i] != 0 && g_holds[i] < h) h = g_holds[i];
-	pthread_mutex_unlock(&g_snap_mu);
+	xs_snap_unlock();
 	return h;
 }
 
@@ -748,12 +766,11 @@ static struct xs_cat_ent {
 	                          * necessarily visible to xs_cat_value. */
 } g_cat[XS_CAT_MAX];
 static int g_cat_n;
-static pthread_mutex_t g_cat_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* View registry: CREATE VIEW name AS <select> stored as the SELECT
  * text, keyed by (bt, name).  Views are query rewrites, not stored
  * tables; the executor expands a FROM reference to a view as a derived
- * table (its SELECT).  Protected by g_cat_mu (shared with the catalog
+ * table (its SELECT).  Protected by the catalog lock (shared with
  * cache).  In-process only for now (recreated each session, like
  * SQLite re-reads sqlite_master); persistence is a follow-up. */
 #define XS_VIEW_MAX 128
@@ -775,10 +792,10 @@ bt_t *
 xstore_bt_of(struct xsql *db)
 {
 	int i; bt_t *bt = NULL;
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_dbmap_n; i++)
 		if (g_dbmap[i].db == db) { bt = g_dbmap[i].bt; break; }
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 	return bt;
 }
 
@@ -791,10 +808,10 @@ static xstore_ctx_t *
 xstore_ctx_of(struct xsql *db)
 {
 	int i; xstore_ctx_t *ctx = NULL;
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_dbmap_n; i++)
 		if (g_dbmap[i].db == db) { ctx = g_dbmap[i].ctx; break; }
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 	return ctx;
 }
 
@@ -888,11 +905,11 @@ xs_cat_find_or_create(bt_t *bt, const char *name, const char *coldefs)
 	uint32_t id = 0, maxid;
 	int i, do_persist = 0;
 
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_cat_n; i++)            /* seen in this process? */
 		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
 			id = g_cat[i].tableid;
-			pthread_mutex_unlock(&g_cat_mu);
+			xs_cat_unlock();
 			return id;
 		}
 	id = xs_cat_lookup(bt, name);            /* persisted (create/rename/recovery)? */
@@ -913,28 +930,29 @@ xs_cat_find_or_create(bt_t *bt, const char *name, const char *coldefs)
 		e->bt = bt;
 		snprintf(e->name, sizeof e->name, "%s", name);
 		e->tableid = id;
-		/* Cache the schema too, so a concurrent connection that resolves
-		 * this table-id can read its columns immediately -- before the
-		 * persisted catalog row (written outside the lock below) is
-		 * necessarily visible.  Closes a cross-connection CREATE-then-
-		 * SELECT race seen under load. */
+		/* Cache the schema so a concurrent connection that resolves this
+		 * table-id can read its columns immediately. */
 		if (coldefs != NULL)
 			snprintf(e->coldefs, sizeof e->coldefs, "%s", coldefs);
 		else
 			e->coldefs[0] = '\0';
 	}
-	pthread_mutex_unlock(&g_cat_mu);
 
-	/* Persist the new catalog row OUTSIDE the lock: xs_put can park on
-	 * the WAL ack, and parking while holding a pthread mutex would wedge
-	 * the loop if another fiber contended g_cat_mu.  The value is the
-	 * table name, optionally followed by a NUL and the column schema
-	 * (the comma-joined column-def list, so the native schema reader can
-	 * recover column names / types / the pk without sqlite_master). */
+	/* Persist the new catalog row INSIDE the lock.  g_cat_mu is now an
+	 * xtc_amutex, so xs_put may park on the WAL ack here without wedging
+	 * the loop: a contending fiber simply parks behind us.  Persisting
+	 * inside the lock means the durable catalog row exists before any
+	 * other connection can acquire the lock and look the table up, which
+	 * closes the cross-connection CREATE-then-SELECT race by
+	 * construction (the in-process cache above is now an optimization,
+	 * not the race fix).  The value is the table name, optionally
+	 * followed by a NUL and the comma-joined column-def list, so the
+	 * native schema reader can recover column names / types / the pk. */
 	if (do_persist) {
 		uint8_t vbuf[1024];
 		size_t nlen = strlen(name), clen = coldefs ? strlen(coldefs) : 0;
 		size_t total;
+		int prc;
 		if (nlen + 1 + clen > sizeof vbuf) clen = 0;   /* schema too long: name only */
 		memcpy(vbuf, name, nlen);
 		total = nlen;
@@ -943,10 +961,13 @@ xs_cat_find_or_create(bt_t *bt, const char *name, const char *coldefs)
 			memcpy(vbuf + total, coldefs, clen);
 			total += clen;
 		}
-		if (xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)total, 0)
-		    != SX_OK)
+		prc = xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)total, 0);
+		xs_cat_unlock();
+		if (prc != SX_OK)
 			return 0;
+		return id;
 	}
+	xs_cat_unlock();
 	return id;
 }
 
@@ -958,7 +979,7 @@ static void
 xstore_cat_forget(bt_t *bt)
 {
 	int i;
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_cat_n; ) {
 		if (g_cat[i].bt == bt) {
 			g_cat_n--;
@@ -967,7 +988,7 @@ xstore_cat_forget(bt_t *bt)
 			i++;
 		}
 	}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 }
 
 /* Forget the cached id for ONE (bt, name) -- used by xstore_drop_table
@@ -977,14 +998,14 @@ static void
 xstore_cat_forget_one(bt_t *bt, const char *name)
 {
 	int i;
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_cat_n; i++)
 		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
 			g_cat_n--;
 			if (i != g_cat_n) g_cat[i] = g_cat[g_cat_n];
 			break;
 		}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 }
 
 /*
@@ -1687,15 +1708,15 @@ xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid)
 	 * B-tree (xs_put parks on the WAL ack), so a concurrent xs_cat_lookup
 	 * would miss it.  The cache makes the table visible immediately to
 	 * every connection on the shared bt. */
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_cat_n; i++)
 		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
 			id = g_cat[i].tableid;
-			pthread_mutex_unlock(&g_cat_mu);
+			xs_cat_unlock();
 			if (tableid) *tableid = id;
 			return 1;
 		}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 	id = xs_cat_lookup(bt, name);
 	if (id == 0) return 0;
 	if (tableid) *tableid = id;
@@ -1776,14 +1797,14 @@ xstore_table_schema(bt_t *bt, const char *name, xstore_col_t *cols, int cap)
 	 * before the persisted catalog row is necessarily visible here.  Fall
 	 * back to the persisted value (recovery / cross-process). */
 	cached[0] = '\0';
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_cat_n; i++)
 		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
 			if (g_cat[i].coldefs[0] != '\0')
 				snprintf(cached, sizeof cached, "%s", g_cat[i].coldefs);
 			break;
 		}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 	if (cached[0] != '\0') {
 		cd = cached;
 		cdlen = (int)strlen(cached);
@@ -3146,7 +3167,7 @@ xstore_create_view(struct xsql *db, const char *name, const char *select_sql)
 	int i, rc = 0;
 	if (bt == NULL || name == NULL || select_sql == NULL) return 0;
 	if (strlen(select_sql) >= sizeof g_view[0].sql) return 0;
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_view_n; i++)          /* replace if redefined */
 		if (g_view[i].bt == bt && strcmp(g_view[i].name, name) == 0) {
 			snprintf(g_view[i].sql, sizeof g_view[i].sql, "%s", select_sql);
@@ -3159,7 +3180,7 @@ xstore_create_view(struct xsql *db, const char *name, const char *select_sql)
 		snprintf(v->sql, sizeof v->sql, "%s", select_sql);
 		rc = 1;
 	}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 	return rc;
 }
 
@@ -3170,13 +3191,13 @@ xstore_view_sql(bt_t *bt, const char *name, char *out, int cap)
 {
 	int i, rc = 0;
 	if (bt == NULL || name == NULL || out == NULL || cap <= 0) return 0;
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_view_n; i++)
 		if (g_view[i].bt == bt && strcmp(g_view[i].name, name) == 0) {
 			snprintf(out, (size_t)cap, "%s", g_view[i].sql);
 			rc = 1; break;
 		}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 	return rc;
 }
 
@@ -3187,14 +3208,14 @@ xstore_drop_view(struct xsql *db, const char *name)
 	bt_t *bt = xstore_bt_of(db);
 	int i;
 	if (bt == NULL || name == NULL) return 0;
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_view_n; i++)
 		if (g_view[i].bt == bt && strcmp(g_view[i].name, name) == 0) {
 			g_view_n--;
 			if (i != g_view_n) g_view[i] = g_view[g_view_n];
 			break;
 		}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 	return 1;
 }
 int
@@ -3246,11 +3267,11 @@ xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
 		if (i < vlen - 1) coldefs = (const char *)val + i + 1;
 	}
 	if (coldefs == NULL) {
-		pthread_mutex_lock(&g_cat_mu);
+		xs_cat_lock();
 		for (i = 0; i < g_cat_n; i++)
 			if (g_cat[i].bt == bt && strcmp(g_cat[i].name, oldname) == 0 &&
 			    g_cat[i].coldefs[0] != '\0') { coldefs = g_cat[i].coldefs; break; }
-		pthread_mutex_unlock(&g_cat_mu);
+		xs_cat_unlock();
 	}
 
 	/* Persist a new catalog row for the SAME table-id under the new
@@ -3267,7 +3288,7 @@ xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
 
 	/* Update the in-process cache: drop the old name, install the new
 	 * (same id + coldefs) so cross-connection lookups see it at once. */
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_cat_n; i++)
 		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, oldname) == 0) {
 			snprintf(g_cat[i].name, sizeof g_cat[i].name, "%s", newname);
@@ -3275,7 +3296,7 @@ xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
 				snprintf(g_cat[i].coldefs, sizeof g_cat[i].coldefs, "%s", coldefs);
 			break;
 		}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 	return 0;
 }
 
@@ -3439,13 +3460,13 @@ xs_rename(xsql_vtab *pv, const char *newname)
 	int i;
 	if (newname == NULL) return SX_OK;
 	id = v->tableid;
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_cat_n; i++)
 		if (g_cat[i].bt == v->ctx->bt && g_cat[i].tableid == id) {
 			snprintf(g_cat[i].name, sizeof g_cat[i].name, "%s", newname);
 			break;
 		}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 	/* New version of the same id's catalog row -- outside the lock, since
 	 * xs_put can park on the WAL ack (see xs_cat_find_or_create). */
 	(void)xs_put(v->ctx->bt, XS_CAT_TABLEID, (int64_t)id,
@@ -3542,7 +3563,7 @@ xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 		return NULL;
 	bt_set_close_hook(xstore_cat_forget);   /* clear cached ids when a bt closes */
 	ctx->bt = bt;
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	{
 		int i, slot = -1;
 		for (i = 0; i < g_dbmap_n; i++)
@@ -3550,7 +3571,7 @@ xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 		if (slot < 0 && g_dbmap_n < XS_DBMAP_MAX) slot = g_dbmap_n++;
 		if (slot >= 0) { g_dbmap[slot].db = db; g_dbmap[slot].bt = bt; g_dbmap[slot].ctx = ctx; }
 	}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 	atomic_store(&ctx->read_snap, 0);
 	ctx->in_txn = 0;
 	ctx->txn_snap = 0;
@@ -3637,14 +3658,14 @@ void
 xstore_unregister(struct xsql *db)
 {
 	int i;
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_dbmap_n; i++)
 		if (g_dbmap[i].db == db) {
 			g_dbmap_n--;
 			if (i != g_dbmap_n) g_dbmap[i] = g_dbmap[g_dbmap_n];
 			break;
 		}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 }
 
 /*
@@ -3658,7 +3679,7 @@ xstore_unregister_native(struct xsql *db)
 {
 	xstore_ctx_t *ctx = NULL;
 	int i;
-	pthread_mutex_lock(&g_cat_mu);
+	xs_cat_lock();
 	for (i = 0; i < g_dbmap_n; i++)
 		if (g_dbmap[i].db == db) {
 			ctx = g_dbmap[i].ctx;
@@ -3666,7 +3687,7 @@ xstore_unregister_native(struct xsql *db)
 			if (i != g_dbmap_n) g_dbmap[i] = g_dbmap[g_dbmap_n];
 			break;
 		}
-	pthread_mutex_unlock(&g_cat_mu);
+	xs_cat_unlock();
 	if (ctx != NULL)
 		ctx_free(ctx);
 }
