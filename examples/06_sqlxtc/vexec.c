@@ -195,6 +195,14 @@ typedef struct vx_expr {
 	struct vx_expr **args;    /* VXO_FUNC argument list */
 	int           nargs;      /* VXO_CORRSUBQ: number of correlated binds */
 	int          *bindcol;    /* VXO_CORRSUBQ: srcrow index feeding each ? */
+	/* VXO_IN / VXO_NOTIN fast membership: when every list element is a
+	 * constant literal of one comparable class, the values are sorted
+	 * once at compile time so eval does a binary search instead of an
+	 * O(nargs) linear scan.  in_sorted == NULL means fall back to the
+	 * linear path (mixed/non-literal elements). */
+	vx_cell_t    *in_sorted;  /* nargs_sorted non-NULL elements, ascending */
+	int           in_nsorted;
+	int           in_has_null; /* a NULL element was present in the list */
 } vx_expr_t;
 
 /* ---- aggregation (V3) -------------------------------------------- */
@@ -1504,6 +1512,40 @@ compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
  * literal list. */
 #define VX_IN_SELECT_MAX 4096
 
+static int cmp_vals(const vx_cell_t *a, const vx_cell_t *b);   /* fwd */
+
+static int in_sorted_cmp(const void *pa, const void *pb)
+{
+	return cmp_vals((const vx_cell_t *)pa, (const vx_cell_t *)pb);
+}
+
+/* Build the sorted membership index for a VXO_IN / VXO_NOTIN node whose
+ * list (e->args[0..nargs-1]) is entirely constant literals.  Sorts the
+ * non-NULL element values into n->in_sorted (arena-allocated, plan
+ * lifetime) so eval can binary-search; records whether a NULL element
+ * was present.  A non-literal element leaves the node on the linear
+ * path (in_sorted stays NULL).  Best-effort: on allocation failure the
+ * node simply keeps the linear path. */
+static void
+build_in_index(struct vx_compiler *c, vx_expr_t *n)
+{
+	int k, m = 0;
+	vx_cell_t *arr;
+	for (k = 0; k < n->nargs; k++)
+		if (n->args[k] == NULL || n->args[k]->op != VXO_LIT) return;
+	if (n->nargs <= 0) return;
+	arr = (vx_cell_t *)arena_alloc(&c->st->plan_arena,
+	    sizeof(vx_cell_t) * (size_t)n->nargs);
+	if (arr == NULL) return;
+	for (k = 0; k < n->nargs; k++) {
+		if (n->args[k]->lit.type == VX_NULL) { n->in_has_null = 1; continue; }
+		arr[m++] = n->args[k]->lit;
+	}
+	if (m > 1) qsort(arr, (size_t)m, sizeof(vx_cell_t), in_sorted_cmp);
+	n->in_sorted = arr;
+	n->in_nsorted = m;
+}
+
 /* Compile a IN (SELECT ...) (or NOT IN) against an UNCORRELATED, single-
  * column subquery.  The subquery is run ONCE, its values materialized as
  * a literal list, and the membership test reuses the VXO_IN / VXO_NOTIN
@@ -1596,6 +1638,7 @@ compile_in_select(struct vx_compiler *c, const sql_expr_t *e)
 		c->fail = 1; return NULL;
 	}
 	n->nargs = cnt;
+	build_in_index(c, n);   /* sorted membership: subquery values are literals */
 	return n;
 }
 
@@ -1863,6 +1906,7 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 			n->args[k++] = v;
 		}
 		n->nargs = cnt;
+		build_in_index(c, n);   /* sorted membership when all elements literal */
 		return n;
 	}
 
@@ -2230,10 +2274,22 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		eval(st, e->a, row, arena, &a);
 		if (a.type == VX_NULL) { out->type = VX_NULL; return; }
 		res = 0;
-		for (k = 0; k < e->nargs; k++) {
-			vx_cell_t v; eval(st, e->args[k], row, arena, &v);
-			if (v.type == VX_NULL) { saw_null = 1; continue; }
-			if (cmp_vals(&a, &v) == 0) { res = 1; break; }
+		if (e->in_sorted != NULL) {
+			/* Fast path: binary search the pre-sorted literal list. */
+			int lo = 0, hi = e->in_nsorted - 1;
+			saw_null = e->in_has_null;
+			while (lo <= hi) {
+				int mid = lo + (hi - lo) / 2;
+				int cr = cmp_vals(&a, &e->in_sorted[mid]);
+				if (cr == 0) { res = 1; break; }
+				if (cr < 0) hi = mid - 1; else lo = mid + 1;
+			}
+		} else {
+			for (k = 0; k < e->nargs; k++) {
+				vx_cell_t v; eval(st, e->args[k], row, arena, &v);
+				if (v.type == VX_NULL) { saw_null = 1; continue; }
+				if (cmp_vals(&a, &v) == 0) { res = 1; break; }
+			}
 		}
 		if (res == 0 && saw_null) { out->type = VX_NULL; return; }
 		out->type = VX_INT;
