@@ -1719,6 +1719,79 @@ xtc_down_decode(const void *msg, size_t len, xtc_pid_t *out_pid,
 	return XTC_OK;
 }
 
+/*
+ * Cross-loop link/monitor safety.
+ *
+ * self->links / self->monitors are mutated only by the owning fiber, so
+ * they need no lock.  But xtc_link / xtc_monitor also push an entry onto
+ * the PEER's list (peer->links / peer->monitored_by), and the peer may
+ * live on another loop / OS thread and may be exiting concurrently --
+ * __notify_links_and_monitors walks and frees those lists and then frees
+ * the proc struct.  Two races follow if the peer push is unlocked: a
+ * torn list (concurrent push vs. walk) and a use-after-free of the peer
+ * struct itself (push vs. __os_free).
+ *
+ * The peer's TABLE lock (the per-loop slot table lock, which already
+ * guards slot existence + generation) is the serialization point.  A
+ * peer push takes that lock, re-validates the slot still holds the same
+ * live proc (gen match), and pushes -- so it cannot run against a freed
+ * or recycled struct.  __notify detaches the peer-visible lists AND
+ * releases the slot under the same lock, so a push either lands before
+ * the exit (and is notified) or finds the slot gone (and is dropped).
+ * Only ONE table lock is ever held at a time (never nested with a send,
+ * which takes a peer mbox_lock), so there is no lock-order cycle.
+ *
+ * Returns 1 if the entry was pushed (peer live), 0 if the peer is gone
+ * (caller frees the entry).
+ */
+static int
+__peer_push_link(xtc_pid_t peer_pid, struct link_entry *e)
+{
+	xtc_loop_t *lp = NULL;
+	struct xtc_proc_table *tbl;
+	struct xtc_proc *peer;
+	int pushed = 0;
+	peer = __resolve(peer_pid, &lp);
+	if (peer == NULL || lp == NULL) return 0;
+	tbl = __table_for(lp, 0);
+	if (tbl == NULL) return 0;
+	(void)pthread_mutex_lock(&tbl->lock);
+	if (peer_pid.local_id < tbl->cap &&
+	    tbl->slots[peer_pid.local_id].proc == peer &&
+	    tbl->slots[peer_pid.local_id].gen == peer_pid.gen &&
+	    peer->alive) {
+		e->next = peer->links;
+		peer->links = e;
+		pushed = 1;
+	}
+	(void)pthread_mutex_unlock(&tbl->lock);
+	return pushed;
+}
+
+static int
+__peer_push_monitored_by(xtc_pid_t peer_pid, struct mon_entry *m)
+{
+	xtc_loop_t *lp = NULL;
+	struct xtc_proc_table *tbl;
+	struct xtc_proc *peer;
+	int pushed = 0;
+	peer = __resolve(peer_pid, &lp);
+	if (peer == NULL || lp == NULL) return 0;
+	tbl = __table_for(lp, 0);
+	if (tbl == NULL) return 0;
+	(void)pthread_mutex_lock(&tbl->lock);
+	if (peer_pid.local_id < tbl->cap &&
+	    tbl->slots[peer_pid.local_id].proc == peer &&
+	    tbl->slots[peer_pid.local_id].gen == peer_pid.gen &&
+	    peer->alive) {
+		m->next = peer->monitored_by;
+		peer->monitored_by = m;
+		pushed = 1;
+	}
+	(void)pthread_mutex_unlock(&tbl->lock);
+	return pushed;
+}
+
 /* PUBLIC: int xtc_link __P((xtc_pid_t)); */
 int
 xtc_link(xtc_pid_t other)
@@ -1734,13 +1807,16 @@ xtc_link(xtc_pid_t other)
 	le->peer = other;
 	le->next = self->links;
 	self->links = le;
-	/* Symmetric: add ourselves to peer's links too. */
+	/* Symmetric: add ourselves to the peer's link list.  This may be a
+	 * cross-loop push, so it goes through __peer_push_link, which holds
+	 * the peer's table lock and re-validates liveness.  If the peer is
+	 * already gone, free the entry (no link to maintain). */
 	{
 		struct link_entry *pe = __link_alloc();
 		if (pe != NULL) {
 			pe->peer = self->pid;
-			pe->next = peer->links;
-			peer->links = pe;
+			if (!__peer_push_link(other, pe))
+				__link_free(pe);
 		}
 	}
 	return XTC_OK;
@@ -1813,8 +1889,10 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 		struct mon_entry *m2 = __mon_alloc();
 		if (m2 != NULL) {
 			*m2 = *me;
-			m2->next = peer->monitored_by;
-			peer->monitored_by = m2;
+			/* Cross-loop-safe push onto the peer's monitored_by list;
+			 * drop the entry if the peer exited meanwhile. */
+			if (!__peer_push_monitored_by(target, m2))
+				__mon_free(m2);
 		}
 	}
 	if (out_ref) *out_ref = me->ref;
@@ -1842,15 +1920,43 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		int     reason;
 	} XTC_PACKED down_signal;
 	XTC_PACK_POP
+	struct link_entry *links;
+	struct mon_entry  *monitored_by, *monitors;
 
-	for (le = p->links; le != NULL; le = next_le) {
+	/*
+	 * Detach the peer-visible lists (links, monitored_by) AND release
+	 * the slot under the table lock, so a concurrent cross-loop
+	 * __peer_push_link / __peer_push_monitored_by either landed before
+	 * this (and is in the detached list, so it gets notified) or finds
+	 * the slot already gone (and drops its entry).  After the slot is
+	 * released no __resolve can hand this proc out again.  monitors
+	 * (the lists WE hold on others) is owner-only, but detach it here
+	 * too for uniformity.  Sends/frees run OUTSIDE the lock (xtc_send
+	 * takes a peer mbox_lock; never nest two proc locks).
+	 */
+	{
+		struct xtc_proc_table *tbl = __table_for(p->loop, 0);
+		if (tbl != NULL) (void)pthread_mutex_lock(&tbl->lock);
+		links = p->links;               p->links = NULL;
+		monitored_by = p->monitored_by; p->monitored_by = NULL;
+		monitors = p->monitors;         p->monitors = NULL;
+		if (tbl != NULL) {
+			if (p->pid.local_id < tbl->cap &&
+			    tbl->slots[p->pid.local_id].proc == p) {
+				tbl->slots[p->pid.local_id].proc = NULL;
+				tbl->n_used--;
+			}
+			(void)pthread_mutex_unlock(&tbl->lock);
+		}
+	}
+
+	for (le = links; le != NULL; le = next_le) {
 		next_le = le->next;
 		(void)xtc_send(le->peer, &exit_signal, sizeof exit_signal);
 		__link_free(le);
 	}
-	p->links = NULL;
 
-	for (me = p->monitored_by; me != NULL; me = next_me) {
+	for (me = monitored_by; me != NULL; me = next_me) {
 		next_me = me->next;
 		down_signal.kind = 'D';
 		down_signal.ref  = me->ref;
@@ -1859,13 +1965,11 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		(void)xtc_send(me->watcher, &down_signal, sizeof down_signal);
 		__mon_free(me);
 	}
-	p->monitored_by = NULL;
 
-	for (me = p->monitors; me != NULL; me = next_me) {
+	for (me = monitors; me != NULL; me = next_me) {
 		next_me = me->next;
 		__mon_free(me);
 	}
-	p->monitors = NULL;
 
 	/* Drain mailbox + save queue. */
 	{
@@ -1878,11 +1982,9 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		p->save_head = p->save_tail = NULL;
 	}
 
-	/* Release slot. */
-	{
-		struct xtc_proc_table *tbl = __table_for(p->loop, 0);
-		if (tbl != NULL) __table_release(tbl, p->pid.local_id);
-	}
+	/* The slot was already released (under the table lock) when the
+	 * peer-visible lists were detached above, so a concurrent linker
+	 * can no longer resolve this proc.  Just tear down and free. */
 	(void)pthread_mutex_destroy(&p->mbox_lock);
 	__os_free(p);
 }

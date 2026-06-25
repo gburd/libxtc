@@ -16,6 +16,10 @@
  *	run in a loop thread (no in-thread forcible unwind exists), and
  *	for the classic one-backend-per-connection isolation model.
  *
+ *	PLATFORM: POSIX only (fork/exec + pidfd).  On Windows every entry
+ *	point is present but returns XTC_E_NOSYS (CreateProcess + a
+ *	control pipe is a future port); callers must handle the decline.
+ *
  *	Control socket
  *	  When opts.ctrl_socket is set, spawn creates an AF_UNIX
  *	  SOCK_STREAM socketpair.  The PARENT end is returned by

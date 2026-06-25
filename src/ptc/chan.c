@@ -130,7 +130,11 @@ xtc_chan_mpsc_create(xtc_res_t *res, size_t capacity, xtc_chan_mpsc_t **out)
 	size_t i;
 
 	if (out == NULL || capacity == 0) return XTC_E_INVAL;
-	/* Round up to power of two for cheap masking. */
+	/* Round up to power of two for cheap masking, guarding the shift
+	 * against wrap: a capacity above the top power-of-two representable
+	 * in size_t would loop p to 0 and then calloc a zero/garbage size.
+	 * Reject it (the allocation could never succeed anyway). */
+	if (capacity > (SIZE_MAX / 2) + 1) return XTC_E_RANGE;
 	{
 		size_t p = 1;
 		while (p < capacity) p <<= 1;

@@ -185,6 +185,53 @@ LIB_OBJS	= \
 	fctx_sparc64_sysv.o
 
 LIB_HDR_PUBLIC	= $(srcdir)/../src/inc/xtc.h
+
+# The full public header set installed into includedir.  xtc.h is the
+# umbrella (version/error/strerror); the per-subsystem xtc_*.h headers
+# carry the functional API.  All are self-contained with
+# -I$(includedir) (they cross-include only each other and standard
+# headers; none depends on an internal *_int.h).  Keep this in step
+# with the public surface enumerated by dist/mkamalgamation.py.
+LIB_HDRS_PUBLIC	= \
+	$(srcdir)/../src/inc/xtc.h \
+	$(srcdir)/../src/inc/xtc_runtime.h \
+	$(srcdir)/../src/inc/xtc_aio.h \
+	$(srcdir)/../src/inc/xtc_alloc_audit.h \
+	$(srcdir)/../src/inc/xtc_app.h \
+	$(srcdir)/../src/inc/xtc_async.h \
+	$(srcdir)/../src/inc/xtc_blocking.h \
+	$(srcdir)/../src/inc/xtc_cfg.h \
+	$(srcdir)/../src/inc/xtc_chan.h \
+	$(srcdir)/../src/inc/xtc_dio_sched.h \
+	$(srcdir)/../src/inc/xtc_dump.h \
+	$(srcdir)/../src/inc/xtc_exec.h \
+	$(srcdir)/../src/inc/xtc_fs.h \
+	$(srcdir)/../src/inc/xtc_inject.h \
+	$(srcdir)/../src/inc/xtc_inspect.h \
+	$(srcdir)/../src/inc/xtc_io.h \
+	$(srcdir)/../src/inc/xtc_iosched.h \
+	$(srcdir)/../src/inc/xtc_lockmgr.h \
+	$(srcdir)/../src/inc/xtc_log.h \
+	$(srcdir)/../src/inc/xtc_loop.h \
+	$(srcdir)/../src/inc/xtc_lrlock.h \
+	$(srcdir)/../src/inc/xtc_lwlock.h \
+	$(srcdir)/../src/inc/xtc_mctx.h \
+	$(srcdir)/../src/inc/xtc_net.h \
+	$(srcdir)/../src/inc/xtc_orc.h \
+	$(srcdir)/../src/inc/xtc_osproc.h \
+	$(srcdir)/../src/inc/xtc_pdict.h \
+	$(srcdir)/../src/inc/xtc_pkey.h \
+	$(srcdir)/../src/inc/xtc_proc.h \
+	$(srcdir)/../src/inc/xtc_rcu.h \
+	$(srcdir)/../src/inc/xtc_reg.h \
+	$(srcdir)/../src/inc/xtc_res.h \
+	$(srcdir)/../src/inc/xtc_slab.h \
+	$(srcdir)/../src/inc/xtc_stats.h \
+	$(srcdir)/../src/inc/xtc_svr.h \
+	$(srcdir)/../src/inc/xtc_sync.h \
+	$(srcdir)/../src/inc/xtc_tailcall.h \
+	$(srcdir)/../src/inc/xtc_tls.h \
+	$(srcdir)/../src/inc/xtc_trace.h
 STATIC_LIB	= libxtc.a
 
 # Shared library is built only when configure was run with
@@ -242,6 +289,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_chan test_chan_mpmc_bcast \
 		  test_proc \
 		  test_proc_wait_fd \
+		  test_proc_link_race \
 		  test_recv_correlate \
 		  test_sync \
 		  test_amutex_xloop \
@@ -856,6 +904,12 @@ test_recv_correlate: $(srcdir)/../test/m8/test_recv_correlate.c \
 		-o $@ $(srcdir)/../test/m8/test_recv_correlate.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_proc_link_race: $(srcdir)/../test/m8/test_proc_link_race.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
+		-o $@ $(srcdir)/../test/m8/test_proc_link_race.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 # M7.5 tests.
 test_chan_mpmc_bcast: $(srcdir)/../test/m7/test_chan_mpmc_bcast.c \
 		$(srcdir)/../test/m7/munit.c $(STATIC_LIB)
@@ -1114,8 +1168,9 @@ install: all
 	$(INSTALL) -d $(DESTDIR)$(mandir)/man3
 	$(INSTALL) -d $(DESTDIR)$(mandir)/man7
 	$(INSTALL_DATA) $(STATIC_LIB) $(DESTDIR)$(libdir)/$(STATIC_LIB)
-	$(INSTALL_DATA) $(LIB_HDR_PUBLIC) $(DESTDIR)$(includedir)/xtc.h
-	$(INSTALL_DATA) $(srcdir)/../src/inc/xtc_runtime.h $(DESTDIR)$(includedir)/xtc_runtime.h
+	for h in $(LIB_HDRS_PUBLIC); do \
+		$(INSTALL_DATA) $$h $(DESTDIR)$(includedir)/; \
+	done
 	$(INSTALL_DATA) xtc.pc $(DESTDIR)$(libdir)/pkgconfig/xtc.pc
 	@if [ "$(XTC_ENABLE_SHARED)" = yes ]; then \
 		echo "installing shared library"; \
@@ -1139,8 +1194,9 @@ uninstall:
 	$(RM) $(DESTDIR)$(libdir)/$(SHARED_LIB_SONAME)
 	$(RM) $(DESTDIR)$(libdir)/$(SHARED_LIB_LINKNAME)
 	$(RM) $(DESTDIR)$(libdir)/pkgconfig/xtc.pc
-	$(RM) $(DESTDIR)$(includedir)/xtc.h
-	$(RM) $(DESTDIR)$(includedir)/xtc_runtime.h
+	for h in $(LIB_HDRS_PUBLIC); do \
+		$(RM) $(DESTDIR)$(includedir)/`basename $$h`; \
+	done
 
 # -------------------------------------------------------------------------
 # Cleanup.

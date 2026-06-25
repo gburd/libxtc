@@ -60,8 +60,50 @@ else
   )
 endif
 
-install_headers('src/inc/xtc.h')
-install_headers('src/inc/xtc_runtime.h')
+# Public headers.  xtc.h is the umbrella; the per-subsystem xtc_*.h
+# carry the functional API.  Kept in step with dist/Makefile.in's
+# LIB_HDRS_PUBLIC and the surface in dist/mkamalgamation.py.
+install_headers(
+  'src/inc/xtc.h',
+  'src/inc/xtc_runtime.h',
+  'src/inc/xtc_aio.h',
+  'src/inc/xtc_alloc_audit.h',
+  'src/inc/xtc_app.h',
+  'src/inc/xtc_async.h',
+  'src/inc/xtc_blocking.h',
+  'src/inc/xtc_cfg.h',
+  'src/inc/xtc_chan.h',
+  'src/inc/xtc_dio_sched.h',
+  'src/inc/xtc_dump.h',
+  'src/inc/xtc_exec.h',
+  'src/inc/xtc_fs.h',
+  'src/inc/xtc_inject.h',
+  'src/inc/xtc_inspect.h',
+  'src/inc/xtc_io.h',
+  'src/inc/xtc_iosched.h',
+  'src/inc/xtc_lockmgr.h',
+  'src/inc/xtc_log.h',
+  'src/inc/xtc_loop.h',
+  'src/inc/xtc_lrlock.h',
+  'src/inc/xtc_lwlock.h',
+  'src/inc/xtc_mctx.h',
+  'src/inc/xtc_net.h',
+  'src/inc/xtc_orc.h',
+  'src/inc/xtc_osproc.h',
+  'src/inc/xtc_pdict.h',
+  'src/inc/xtc_pkey.h',
+  'src/inc/xtc_proc.h',
+  'src/inc/xtc_rcu.h',
+  'src/inc/xtc_reg.h',
+  'src/inc/xtc_res.h',
+  'src/inc/xtc_slab.h',
+  'src/inc/xtc_stats.h',
+  'src/inc/xtc_svr.h',
+  'src/inc/xtc_sync.h',
+  'src/inc/xtc_tailcall.h',
+  'src/inc/xtc_tls.h',
+  'src/inc/xtc_trace.h',
+)
 
 # pkg-config metadata.  Mirrors dist/xtc.pc.in.
 pkg = import('pkgconfig')
