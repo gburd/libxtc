@@ -1,3 +1,22 @@
+libxtc (0.6.0-1) unstable; urgency=medium
+
+  * sqlxtc example is now a fully libxtc-native SQL engine: the vendored
+    SQLite (sqlite3.c, the VDBE, virtual tables, and the mutex/memory/
+    page-cache/VFS shims) is removed.  The engine runs on a Lime SQL
+    parser, a vectorized executor, and an xtc-native storage engine
+    (B-link tree over a cooling buffer pool with an ARIES write-ahead
+    log).  Correctness is proved by an external differential oracle
+    against python's sqlite3.
+  * sqlxtc performance: bounded top-N for ORDER BY ... LIMIT, and a
+    binary-search membership test for IN (list) / IN (SELECT).
+  * sqlxtc: the catalog, SSI, and snapshot locks moved to xtc_amutex so
+    the catalog row is persisted inside the lock, closing a CREATE race.
+  * io_kqueue: native file AIO restricted to FreeBSD/DragonFly; macOS
+    (whose 26 SDK no longer exposes sigev_notify_kqueue) uses the
+    blocking-pool offload.
+
+ -- Greg Burd <greg@burd.me>  Thu, 25 Jun 2026 00:00:00 +0000
+
 libxtc (0.5.0-1) unstable; urgency=medium
 
   * Initial Debian packaging.
