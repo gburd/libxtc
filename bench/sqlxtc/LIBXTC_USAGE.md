@@ -87,77 +87,88 @@ OS primitives and would benefit from moving to the libxtc model.
   gen_servers; HLC timestamps and snapshot registration go through
   `xtc_svr_call`.
 
-## What still uses raw OS primitives -- candidates to shift to libxtc
+## What still uses raw OS primitives -- and what was done
 
-These are the places sqlxtc still reaches past libxtc to the OS.  Each
-is a candidate for the libxtc model, in rough priority order.
+The items below were the shift candidates; the status of each follows.
+The guiding rule that emerged: convert a lock to `xtc_amutex` only when
+it is (or could be) held ACROSS an I/O park on a loop.  A lock that is
+always released before I/O, or that only ever runs off a loop, is
+faster and just as correct as a raw `pthread_mutex`, so converting it is
+a regression for no benefit.
 
-### 1. The catalog lock (xstore.c: ~52 raw `pthread_mutex` sites) -- HIGH
+### 1. The catalog lock (xstore.c) -- DONE
 
-`g_cat_mu` (the table-id catalog cache + view registry + connection
-map) is a raw `pthread_mutex`.  The code already documents the hazard
-this creates: `xs_cat_find_or_create` must persist the catalog row
-(`xs_put`, which PARKS on the WAL ack) OUTSIDE the lock, because
-"parking while holding a pthread mutex would wedge the loop if another
-fiber contended g_cat_mu."  That out-of-lock publish is exactly the
-cross-connection CREATE race we had to chase down twice.
+`g_cat_mu` (the table-id catalog cache + view registry), the SSI
+registry lock, and the active-snapshot lock are now `xtc_amutex`
+(`xtc_amutex_static` slots).  `xs_cat_find_or_create` persists the
+catalog row (`xs_put`, which parks on the WAL ack) INSIDE the lock now
+that the park releases the loop, so the durable row exists before any
+other connection can take the lock and look the table up -- the
+cross-connection CREATE-then-SELECT race is closed by construction.
+This was the single highest-value libxtc-ification.
 
-**Shift:** make `g_cat_mu` an `xtc_amutex`.  Then the catalog row can be
-persisted INSIDE the critical section (the park releases the loop), the
-reserve-then-publish window closes, and the visibility race disappears
-by construction.  This is the single highest-value libxtc-ification.
+### 2. The buffer-pool partition/frame locks (bufmgr.c) -- AUDITED, KEPT RAW
 
-### 2. The buffer-pool partition/frame locks (bufmgr.c: ~56 raw
-       `pthread_mutex`, mixed with 15 `xtc_arwlock`) -- HIGH
+The pool already uses `xtc_arwlock` for the frame/page CONTENT latch --
+the one latch held across a page-in.  The hash-partition, free-list,
+page-id, prefetch-ring, and double-write locks are raw `pthread_mutex`,
+and the code is audited (and now commented) to release every one of
+them BEFORE any `xtc_aio` I/O: a miss loads into a free frame and only
+then re-takes the stripe to publish; the double-write lock only hands
+out a ring slot.  Since none of these ever spans a park, converting
+them to a parking mutex only adds ownership-tracking overhead to the
+hottest path in the engine.  Measured on the resident fix/unfix loop:
+~18 ns/op with `pthread_mutex` vs ~22 ns with `xtc_amutex`, a 24%
+regression.  Kept raw, by design.
 
-The pool already uses `xtc_arwlock` for the frame/page latches, but the
-hash-partition and free-list bookkeeping still use raw `pthread_mutex`.
-Under a fiber that parks for a page-in while holding a partition mutex,
-the loop stalls.
+### 3. The WAL append lock (wal.c) -- AUDITED, KEPT RAW
 
-**Shift:** convert the remaining partition/free-list `pthread_mutex` to
-`xtc_amutex` (or fold them into the existing `xtc_arwlock` discipline)
-so no pool lock is ever held across an `xtc_aio` park.
+The WAL's on-loop path is the group-commit writer: committers park on
+the writer's mailbox (`xtc_recv`) and the writer does its pwrite +
+fdatasync through `xtc_aio` with no mutex around the I/O -- already
+fully libxtc-native.  The `sync_mu`-guarded `wal_commit_sync` that holds
+the lock across a synchronous `fdatasync` is the OFF-LOOP fallback only:
+`xs_wal_emit` dispatches to the group-commit `wal_commit` whenever it
+runs on a loop (`xtc_self()` is a real pid), and to `wal_commit_sync`
+only off a loop (recovery before the loop is up, and the off-loop
+tests).  An `xtc_amutex` there would fall back to a condvar off-loop
+anyway, so there is nothing to gain.  Kept raw.
 
-### 3. The WAL append lock (wal.c: ~8 raw `pthread_mutex`) -- MEDIUM
+### 4. IN-list / IN (SELECT) membership (vexec.c) -- DONE
 
-The WAL is a gen_server, but a few internal counters/buffers are guarded
-by raw `pthread_mutex`.  Since the append path parks on fdatasync,
-these should be `xtc_amutex` for the same reason.
+The membership test was a linear scan over the list per row.  When
+every element is a constant literal (always true for an uncorrelated
+IN (SELECT) whose values are materialized as literals), the values are
+now sorted once at compile time and eval does a binary search:
+O(rows * log list) instead of O(rows * list).  Measured 1.40x on a
+~2000-element list over 20k rows; the win grows with list size.  (The
+benchmark's earlier 0.07x was a harness that re-prepared per call; the
+server caches the prepared statement, so the materialization is
+amortized.)
 
-### 4. The native subquery / IN-list materialization (vexec.c) -- MEDIUM
-       (perf, not correctness)
+### 5. ORDER BY ... LIMIT top-N (vexec.c) -- DONE
 
-The benchmark's worst case is uncorrelated `IN (SELECT ...)`, which
-re-runs and re-materializes the subquery on every outer execution.
-This is not a libxtc primitive gap; it is a vexec caching gap.  But the
-fix -- materialize once and share across executions of a prepared
-statement -- pairs naturally with caching the morsel-parallel
-`xtc_exec` plan, so the parallel scan does not re-`xtc_exec_init` per
-call either.
+vexec materialized the full result then sorted then sliced LIMIT.  It
+now keeps a bounded top-N buffer of K = OFFSET + LIMIT rows during the
+scan, with a lazily-recomputed worst slot, then sorts only those K.
+Measured 2.8x-3.8x on 50k-row ORDER BY ... LIMIT queries; this turns
+the old 0.60x regression vs the VDBE into a clear win.
 
-### 5. ORDER BY ... LIMIT top-N (vexec.c) -- LOW (perf)
+### 6. The SQLite mutex/mem/pcache/vfs shims -- RETIRED
 
-vexec sorts the full result then applies LIMIT.  A bounded top-N heap
-(the VDBE's approach) would close the 0.6x gap.  No libxtc involvement;
-listed for completeness.
-
-### 6. The blocking-mutex shim for the vendored engine
-       (mutex.c via xtc_amutex) -- RETIRES WITH sqlite3.c
-
-Once sqlite3.c is removed, the SQLite mutex/mem/pcache/vfs shims and the
-`xtc_blocking` offload they need go away entirely; the native engine
-never makes a blocking syscall on the hot path.
+sqlite3.c and the four extension-point shims (and the `xtc_blocking`
+offload they needed) are removed.  The native engine makes no blocking
+syscall on the hot path: page I/O is `xtc_aio`, WAL commit is the
+group-commit writer, and the catalog/SSI/snapshot locks are
+`xtc_amutex`.
 
 ## Summary
 
-sqlxtc already runs its server, connections, buffer pool, B-tree
-latching, WAL, recovery, MVCC, and parallel reads on libxtc's
-async/proc/gen_server/aio/exec primitives -- it is a real exercise of
-the runtime, not a toy.  The remaining raw-`pthread_mutex` sites in the
-catalog, buffer pool, and WAL are the clear next shifts: moving them to
-`xtc_amutex` lets every critical section safely span an I/O park, which
-both removes a class of cross-fiber visibility races (the catalog) and
-keeps the event loop from ever stalling under load.  The vexec
-subquery/top-N items are pure performance follow-ups orthogonal to the
-runtime.
+sqlxtc runs its server, connections, buffer pool, B-tree latching, WAL,
+recovery, MVCC, and parallel reads on libxtc's async / proc /
+gen_server / aio / exec primitives -- a real exercise of the runtime.
+The catalog locks moved to `xtc_amutex` (closing a real race); the
+buffer-pool and WAL locks were audited and intentionally kept raw
+because they never span a park on a loop, and a parking mutex there
+measurably regresses the hot path for no benefit.  The vexec top-N and
+IN-membership wins are pure performance, orthogonal to the runtime.

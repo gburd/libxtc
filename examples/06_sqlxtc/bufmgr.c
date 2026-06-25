@@ -70,6 +70,19 @@ struct bm_frame {
  * fixes of unrelated pages then proceed in parallel.  The 128-byte
  * union keeps adjacent stripes off the same cache line (no false
  * sharing) regardless of array base alignment.
+ *
+ * These stripe latches -- and the free-list, page-id, prefetch-ring,
+ * and double-write locks below -- are raw pthread mutexes by design,
+ * NOT xtc_amutex.  The reason a pool lock would need to park is if it
+ * were held across an xtc_aio page-in; this code is audited to release
+ * every one of these locks BEFORE any I/O (a miss loads into a free
+ * frame and only then re-takes the stripe to publish; the double-write
+ * lock only hands out a ring slot and is dropped before the writes).
+ * The page-CONTENT latch -- the one thing held across a page-in -- is
+ * already an xtc_arwlock.  Since these locks never span a park, a
+ * parking amutex would only add ownership-tracking overhead to the
+ * hottest path in the engine (measured: ~18ns/fix with pthread vs
+ * ~22ns with amutex, a 24% regression) for no loop-safety gain.
  */
 #define BM_HT_STRIPES 256u
 typedef union { pthread_mutex_t m; char pad[128]; } bm_htlock_t;
