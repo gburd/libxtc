@@ -26,17 +26,18 @@ struct wal;
  * (the cooling buffer pool, larger-than-RAM capable) rather than in
  * SQLite's built-in B-tree. */
 int xstore_register(struct xsql *db, bt_t *bt);
-/* Native registration: a sqlite3-free connection (only the ctx +
- * g_dbmap mapping; no vtab module / SQL functions / hooks).  Runs in
- * native_mode from the start. */
+/* Native registration: the only connection model.  Wires the ctx +
+ * g_dbmap mapping over the shared engine B-tree `bt` (no vtab module /
+ * SQL functions / hooks).  Runs in native_mode from the start.
+ * (The vtab-based xstore_register is compiled only under SQLXTC_VTAB,
+ * kept for reference; the shipping engine never uses it.) */
 int xstore_register_native(struct xsql *db, bt_t *bt);
 /* Drop a connection's xstore association on close (releases its g_dbmap
  * slot so the fixed-size map does not overflow under many connections).
- * Call before xsql_close.  Safe for an unregistered handle. */
+ * Safe for an unregistered handle. */
 void xstore_unregister(struct xsql *db);
-/* Like xstore_unregister, but also frees the connection ctx.  For a
- * native (sqlite3-free) connection, which has no xsql_close to invoke
- * the module ctx_free. */
+/* Like xstore_unregister, but also frees the connection ctx (the native
+ * connection has no module ctx_free hook to run it on close). */
 void xstore_unregister_native(struct xsql *db);
 
 /* Attach a write-ahead log to the engine (process-global, like the

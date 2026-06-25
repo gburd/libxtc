@@ -13,13 +13,11 @@
  */
 
 #include "engine.h"
-#include "vfs.h"
 #include "xstore.h"
 #include "btree.h"
 #include "bufmgr.h"
 #include "wal.h"
 
-#include "sqlite3.h"
 #ifdef SQLXTC_HAVE_LIME
 #include "vexec.h"        /* vx_run -- the vectorized-executor fast path */
 #include "sql_parse.h"    /* sql_parse_ast -- classify statements natively */
@@ -35,17 +33,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>      /* access, unlink, F_OK */
-
-/* The sx_ result/type codes are the engine's ABI values; keep them in
- * lockstep so the wrappers need no translation. */
-_Static_assert(SX_OK == SQLITE_OK, "SX_OK");
-_Static_assert(SX_ROW == SQLITE_ROW, "SX_ROW");
-_Static_assert(SX_DONE == SQLITE_DONE, "SX_DONE");
-_Static_assert(SX_INTEGER == SQLITE_INTEGER, "SX_INTEGER");
-_Static_assert(SX_FLOAT == SQLITE_FLOAT, "SX_FLOAT");
-_Static_assert(SX_TEXT == SQLITE_TEXT, "SX_TEXT");
-_Static_assert(SX_BLOB == SQLITE_BLOB, "SX_BLOB");
-_Static_assert(SX_NULL == SQLITE_NULL, "SX_NULL");
 
 /*
  * sx_stmt -- the statement wrapper.  native == 0 wraps a VDBE statement
@@ -64,10 +51,8 @@ enum sx_native_kind {
 };
 
 struct sx_stmt {
-	int            native;     /* 0 = VDBE (vdbe set); 1 = native plan */
-	xsql_stmt     *vdbe;       /* native == 0 */
-
-	/* native == 1 */
+	int            native;     /* always 1 (native-only); kept for the
+	                            * public sx_stmt_is_native accessor */
 	sx_db         *db;
 #ifdef SQLXTC_HAVE_LIME
 	enum sx_native_kind nkind;
@@ -232,16 +217,15 @@ sx_open(const char *path, sx_db **out)
 	 */
 	if (g_xbt == NULL) { *out = NULL; return SX_ERROR; }
 	nd = (struct sx_native_db *)calloc(1, sizeof *nd);
-	if (nd == NULL) { *out = NULL; return SQLITE_NOMEM; }
+	if (nd == NULL) { *out = NULL; return SX_NOMEM; }
 	nd->magic = SX_NATIVE_MAGIC;
 	nd->errmsg = NULL;
 	nd->changes = 0;
-	if (!memlike)
-		(void)vfs_register(0);   /* page store still uses the xtc VFS */
-	rc = xstore_register_native((xsql *)nd, g_xbt);
-	if (rc != SQLITE_OK) { free(nd); *out = NULL; return rc; }
+	(void)memlike;
+	rc = xstore_register_native((struct xsql *)nd, g_xbt);
+	if (rc != SX_OK) { free(nd); *out = NULL; return rc; }
 	*out = (sx_db *)nd;
-	return SQLITE_OK;
+	return SX_OK;
 }
 
 #ifdef SQLXTC_HAVE_LIME
@@ -258,17 +242,17 @@ sx_open_bt(bt_t *bt, sx_db **out)
 	struct sx_native_db *nd;
 	int rc;
 	*out = NULL;
-	if (bt == NULL) return SQLITE_MISUSE;
+	if (bt == NULL) return SX_MISUSE;
 	nd = (struct sx_native_db *)calloc(1, sizeof *nd);
-	if (nd == NULL) return SQLITE_NOMEM;
+	if (nd == NULL) return SX_NOMEM;
 	nd->magic = SX_NATIVE_MAGIC;
 	nd->errmsg = NULL;
 	nd->changes = 0;
 	nd->spn = 0;
-	rc = xstore_register_native((xsql *)nd, bt);
-	if (rc != SQLITE_OK) { free(nd); return rc; }
+	rc = xstore_register_native((struct xsql *)nd, bt);
+	if (rc != SX_OK) { free(nd); return rc; }
 	*out = (sx_db *)nd;
-	return SQLITE_OK;
+	return SX_OK;
 }
 #endif
 
@@ -352,10 +336,10 @@ sx_storage_open(const char *path, unsigned int n_frames)
 		/* Fresh page file; rebuild the tree from the (bounded) log. */
 		o.reopen = 0;
 		if (bm_create(&o, &g_xbm) != XTC_OK)
-			return SQLITE_ERROR;
+			return SX_ERROR;
 		if (bt_open(g_xbm, &g_xbt) != XTC_OK) {
 			bm_destroy(g_xbm); g_xbm = NULL;
-			return SQLITE_ERROR;
+			return SX_ERROR;
 		}
 		(void)xstore_recover(g_xbt, g_xwal_path);  /* replay the log */
 	}
@@ -369,7 +353,7 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	if (wal_open(&wo, &g_xwal) != XTC_OK) {
 		bt_close(g_xbt); g_xbt = NULL;
 		bm_destroy(g_xbm); g_xbm = NULL;
-		return SQLITE_ERROR;
+		return SX_ERROR;
 	}
 	xstore_set_wal(g_xwal);
 	/* Write-ahead enforcement: before the buffer manager writes a dirty
@@ -419,7 +403,7 @@ sx_storage_checkpoint(void)
 	(void)bm_checkpoint(g_xbm);            /* flush dirty pages (not for durability) */
 	if (g_xwal != NULL &&
 	    xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path) != XTC_OK)
-		return SQLITE_ERROR;
+		return SX_ERROR;
 	return SX_OK;
 }
 
@@ -506,38 +490,23 @@ sx_storage_active(void)
 void
 sx_close(sx_db *h)
 {
-#ifdef SQLXTC_HAVE_LIME
-	if (sx_is_native_db(h)) {
-		struct sx_native_db *nd = (struct sx_native_db *)h;
-		xstore_unregister_native((struct xsql *)h);   /* frees the ctx too */
-		free(nd->errmsg);
-		free(nd);
-		return;
-	}
-#endif
-	/* Release the xstore connection->bt/ctx map slot before closing, so
-	 * the fixed-size map does not leak under many short-lived
-	 * connections; the ctx is freed by the module's ctx_free in
-	 * xsql_close. */
-#ifdef SQLXTC_HAVE_LIME
-	xstore_unregister((struct xsql *)h);
-#endif
-	(void)xsql_close((xsql *)h);
+	struct sx_native_db *nd = (struct sx_native_db *)h;
+	if (h == NULL) return;
+	xstore_unregister_native((struct xsql *)h);   /* frees the ctx too */
+	free(nd->errmsg);
+	free(nd);
 }
 
 int
 sx_exec(sx_db *h, const char *sql, char **errmsg)
 {
-#ifdef SQLXTC_HAVE_LIME
-	if (sx_is_native_db(h)) {
-		/* Native multi-statement exec: split the script on top-level ';'
-		 * (respecting '...' string and x'...' blob literals), then
-		 * prepare/step/finalize each statement through the native driver
-		 * (no SQLite). */
-		const char *p = sql;
-		if (errmsg) *errmsg = NULL;
-		while (p != NULL && *p != '\0') {
-			const char *q = p;
+	/* Native multi-statement exec: split the script on top-level ';'
+	 * (respecting '...' string and x'...' blob literals), then
+	 * prepare/step/finalize each statement through the native driver. */
+	const char *p = sql;
+	if (errmsg) *errmsg = NULL;
+	while (p != NULL && *p != '\0') {
+		const char *q = p;
 			int in_str = 0;
 			char *stmt; size_t n;
 			sx_stmt *st = NULL;
@@ -555,27 +524,24 @@ sx_exec(sx_db *h, const char *sql, char **errmsg)
 				    p[i] != '\r') { blank = 0; break; } }
 			if (blank) { if (*q == ';') q++; p = q; continue; }
 			stmt = (char *)malloc(n + 1);
-			if (stmt == NULL) return SQLITE_NOMEM;
+			if (stmt == NULL) return SX_NOMEM;
 			memcpy(stmt, p, n); stmt[n] = '\0';
 			rc = sx_prepare(h, stmt, -1, &st, NULL);
-			if (rc != SQLITE_OK) { free(stmt); return rc; }
-			sc = SQLITE_OK;
+			if (rc != SX_OK) { free(stmt); return rc; }
+			sc = SX_OK;
 			if (st != NULL) {
 				(void)sx_column_count(st);   /* run a SELECT/table_info */
-				while ((sc = sx_step(st)) == SQLITE_ROW)
+				while ((sc = sx_step(st)) == SX_ROW)
 					;
 				sx_finalize(st);
 			}
 			free(stmt);
-			if (sc != SQLITE_DONE && sc != SQLITE_OK)
+			if (sc != SX_DONE && sc != SX_OK)
 				return sc;
 			if (*q == ';') q++;
 			p = q;
 		}
-		return SQLITE_OK;
-	}
-#endif
-	return xsql_exec((xsql *)h, sql, NULL, NULL, errmsg);
+	return SX_OK;
 }
 
 #ifdef SQLXTC_HAVE_LIME
@@ -783,8 +749,6 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
            const char **tail)
 {
 	struct sx_stmt *st;
-	xsql_stmt *vdbe = NULL;
-	int rc;
 
 	*out = NULL;
 #ifdef SQLXTC_HAVE_LIME
@@ -803,78 +767,61 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 		enum sx_native_kind k = sx_classify(sql, &more, nm, sizeof nm, cols, sizeof cols);
 		if (k != SXN_NONE) {
 			st = (struct sx_stmt *)calloc(1, sizeof *st);
-			if (st == NULL) return SQLITE_NOMEM;
+			if (st == NULL) return SX_NOMEM;
 			st->native = 1;
 			st->db = h;
 			st->nkind = k;
 			st->cur = -1;
 			st->sql = strdup(sql);
-			if (st->sql == NULL) { free(st); return SQLITE_NOMEM; }
+			if (st->sql == NULL) { free(st); return SX_NOMEM; }
 			if (k == SXN_CREATE || k == SXN_DROP) {
 				st->ddl_name = strdup(nm);
-				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
 				if (k == SXN_CREATE) {
 					st->ddl_cols = strdup(cols);
 					if (st->ddl_cols == NULL) {
-						free(st->ddl_name); free(st->sql); free(st); return SQLITE_NOMEM; }
+						free(st->ddl_name); free(st->sql); free(st); return SX_NOMEM; }
 				}
 			} else if (k == SXN_CREATE_VIEW) {
 				st->ddl_name = strdup(nm);
-				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
 				st->ddl_cols = strdup(cols);   /* the view's SELECT text */
 				if (st->ddl_cols == NULL) {
-					free(st->ddl_name); free(st->sql); free(st); return SQLITE_NOMEM; }
+					free(st->ddl_name); free(st->sql); free(st); return SX_NOMEM; }
 			} else if (k == SXN_ALTER) {
 				st->ddl_name = strdup(nm);     /* old table name */
-				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
 				st->ddl_cols = strdup(cols);   /* new table name */
 				if (st->ddl_cols == NULL) {
-					free(st->ddl_name); free(st->sql); free(st); return SQLITE_NOMEM; }
+					free(st->ddl_name); free(st->sql); free(st); return SX_NOMEM; }
 			} else if (k == SXN_DROP_VIEW || k == SXN_PRAGMA_TABLE_INFO) {
 				st->ddl_name = strdup(nm);   /* view to drop / table to introspect */
-				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
 			} else if (k == SXN_SAVEPOINT || k == SXN_RELEASE ||
 			           k == SXN_ROLLBACK_TO) {
 				st->ddl_name = strdup(nm);   /* the savepoint name */
-				if (st->ddl_name == NULL) { free(st->sql); free(st); return SQLITE_NOMEM; }
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
 			}
 			if (tail) *tail = sql + strlen(sql);   /* single statement */
 			*out = st;
-			return SQLITE_OK;
+			return SX_OK;
 		}
-		/* SXN_NONE: fall through to the VDBE wrapper. */
+		/* SXN_NONE: fall through to the hard-error path below. */
 	}
 	/*
 	 * A fully native connection has no SQLite object: an unrecognized
-	 * statement is a hard error (the entire server workload is recognized
-	 * natively).  This is where the transition's VDBE safety net is
-	 * deliberately absent for native handles.
+	 * statement is a hard error (no VDBE fallback).
 	 */
-	if (sx_is_native_db(h)) {
+	{
 		struct sx_native_db *nd = (struct sx_native_db *)h;
 		free(nd->errmsg);
 		nd->errmsg = strdup("unsupported SQL (native engine)");
-		return SQLITE_ERROR;
+		return SX_ERROR;
 	}
+#else
+	(void)h; (void)sql; (void)n_bytes; (void)tail; (void)st;
+	return SX_ERROR;
 #endif
-	/*
-	 * Default (and native decline): wrap a VDBE statement.  The prepared
-	 * statement is byte-for-byte what it always was, just behind the
-	 * wrapper.  A NULL VDBE stmt (blank/comment-only fragment) is
-	 * preserved as a NULL *out so the caller's existing logic is
-	 * unchanged.
-	 */
-	rc = xsql_prepare_v2((xsql *)h, sql, n_bytes, &vdbe, tail);
-	if (rc != SQLITE_OK)
-		return rc;
-	if (vdbe == NULL)
-		return SQLITE_OK;            /* blank fragment: *out stays NULL */
-	st = (struct sx_stmt *)calloc(1, sizeof *st);
-	if (st == NULL) { (void)xsql_finalize(vdbe); return SQLITE_NOMEM; }
-	st->native = 0;
-	st->vdbe = vdbe;
-	*out = st;
-	return SQLITE_OK;
 }
 
 /* Run a native SELECT through vexec into st->vres, once (idempotent).
@@ -889,53 +836,19 @@ nat_select_run(struct sx_stmt *st)
 	int rc;
 	if (st->ran) return st->vres != NULL;
 	if (st->nkind == SXN_PRAGMA_TABLE_INFO) {
-		rc = vx_pragma_table_info((sqlite3 *)st->db, st->ddl_name, &st->vres);
+		rc = vx_pragma_table_info((struct xsql *)st->db, st->ddl_name, &st->vres);
 		st->ran = 1;
 		return (rc == 1 && st->vres != NULL);
 	}
-	rc = vx_run_p((sqlite3 *)st->db, st->sql,
+	rc = vx_run_p((struct xsql *)st->db, st->sql,
 	    st->nbind ? st->binds : NULL, st->nbind, 1, &st->vres, &verr);
 	st->ran = 1;
 	if (verr) free(verr);
 	return (rc == 1 && st->vres != NULL);
 }
 
-/* Convert a native sx_stmt to a VDBE statement when the native executor
- * declines a statement at run time (e.g. an in-txn explicit-PK INSERT
- * the native write path does not handle, or a read vexec cannot run).
- * Prepares the VDBE, re-binds the cells, flips the stmt to VDBE mode.
- * Returns 1 on success, 0 on failure.  This is the transition safety
- * net; it vanishes when sqlite3.c is removed (a decline then errors). */
-static int
-nat_fallback_to_vdbe(struct sx_stmt *st)
-{
-	xsql_stmt *vdbe = NULL;
-	int i;
-	if (st->sql == NULL) return 0;
-	/* A fully native connection has no SQLite object to prepare against;
-	 * the entire server workload is recognized natively (verified: zero
-	 * fallbacks across the server test surface), so a decline here is a
-	 * genuine error rather than a VDBE handoff. */
-	if (sx_is_native_db(st->db)) return 0;
-	if (xsql_prepare_v2((xsql *)st->db, st->sql, -1, &vdbe, NULL) != SQLITE_OK ||
-	    vdbe == NULL)
-		return 0;
-	for (i = 0; i < st->nbind; i++) {
-		switch (st->binds[i].type) {
-		case VX_INT:  xsql_bind_int64(vdbe, i + 1, st->binds[i].i); break;
-		case VX_REAL: xsql_bind_double(vdbe, i + 1, st->binds[i].r); break;
-		case VX_TEXT: xsql_bind_text(vdbe, i + 1, (const char *)st->binds[i].bytes,
-		                             (int)st->binds[i].nbytes, SQLITE_TRANSIENT); break;
-		case VX_BLOB: xsql_bind_blob(vdbe, i + 1, st->binds[i].bytes,
-		                             (int)st->binds[i].nbytes, SQLITE_TRANSIENT); break;
-		default:      xsql_bind_null(vdbe, i + 1); break;
-		}
-	}
-	if (st->vres) { vx_result_free(st->vres); st->vres = NULL; }
-	st->vdbe = vdbe;
-	st->native = 0;   /* from here the wrapper forwards to the VDBE */
-	return 1;
-}
+/* The native engine has no VDBE fallback: a runtime decline is a hard
+ * error (nat_set_run_error reports it). */
 #endif /* SQLXTC_HAVE_LIME */
 
 #ifdef SQLXTC_HAVE_LIME
@@ -951,63 +864,54 @@ nat_set_run_error(struct sx_stmt *st)
 	struct sx_native_db *nd;
 	char buf[160];
 	const char *tab = NULL;
-	if (!sx_is_native_db(st->db)) return SQLITE_ERROR;
+	if (!sx_is_native_db(st->db)) return SX_ERROR;
 	nd = (struct sx_native_db *)st->db;
 	free(nd->errmsg);
 	/* A first unresolved base table name -> "no such table: NAME". */
-	tab = vx_unknown_table((sqlite3 *)st->db, st->sql);
+	tab = vx_unknown_table((struct xsql *)st->db, st->sql);
 	if (tab != NULL) {
 		snprintf(buf, sizeof buf, "no such table: %s", tab);
 		nd->errmsg = strdup(buf);
 	} else {
 		nd->errmsg = strdup("unsupported SQL (native engine)");
 	}
-	return SQLITE_ERROR;
+	return SX_ERROR;
 }
 #endif
 
 int
 sx_step(sx_stmt *st)
 {
-	if (st == NULL) return SQLITE_MISUSE;
+	if (st == NULL) return SX_MISUSE;
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
 		if (st->nkind == SXN_SELECT || st->nkind == SXN_PRAGMA_TABLE_INFO) {
 			/* First step: run the SELECT (or native PRAGMA table_info)
-			 * through vexec into vres; if vexec declines, fall the whole
-			 * statement back to the VDBE. */
-			if (!st->ran && !nat_select_run(st)) {
-				if (!nat_fallback_to_vdbe(st))
-					return nat_set_run_error(st);
-				return xsql_step(st->vdbe);
-			}
-			if (st->vres == NULL) {
-				if (!nat_fallback_to_vdbe(st))
-					return nat_set_run_error(st);
-				return xsql_step(st->vdbe);
-			}
+			 * through vexec into vres; a decline is a hard error. */
+			if (!st->ran && !nat_select_run(st))
+				return nat_set_run_error(st);
+			if (st->vres == NULL)
+				return nat_set_run_error(st);
 			st->cur++;
-			return (st->cur < vx_result_nrow(st->vres)) ? SQLITE_ROW
-			                                             : SQLITE_DONE;
+			return (st->cur < vx_result_nrow(st->vres)) ? SX_ROW
+			                                             : SX_DONE;
 		}
-		if (st->ran) return SQLITE_DONE;   /* one-shot kinds */
+		if (st->ran) return SX_DONE;   /* one-shot kinds */
 		st->ran = 1;
 		switch (st->nkind) {
 		case SXN_WRITE: {
 			int64_t nch = 0;
-			int rc = vx_run_write_p((sqlite3 *)st->db, st->sql,
+			int rc = vx_run_write_p((struct xsql *)st->db, st->sql,
 			    st->nbind ? st->binds : NULL, st->nbind, &nch, NULL);
-			if (rc == 1) { st->nchanges = nch; return SQLITE_DONE; }
-			/* The native write path declined (e.g. an in-txn explicit-PK
-			 * INSERT): fall the statement back to the VDBE. */
-			if (!nat_fallback_to_vdbe(st)) return SQLITE_ERROR;
-			return xsql_step(st->vdbe);
+			if (rc == 1) { st->nchanges = nch; return SX_DONE; }
+			/* The native write path declined: a hard error (no VDBE). */
+			return nat_set_run_error(st);
 		}
 		case SXN_BEGIN: {
 			struct sx_native_db *nd = sx_is_native_db(st->db)
 			    ? (struct sx_native_db *)st->db : NULL;
 			if (nd) nd->spn = 0;
-			return xstore_native_begin(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
+			return xstore_native_begin(st->db) == 0 ? SX_DONE : SX_ERROR;
 		}
 		case SXN_COMMIT: {
 			struct sx_native_db *nd = sx_is_native_db(st->db)
@@ -1015,28 +919,28 @@ sx_step(sx_stmt *st)
 			int rc;
 			if (nd) nd->spn = 0;
 			rc = xstore_commit(st->db);
-			if (rc == 0) return SQLITE_DONE;
-			if (rc == SQLITE_BUSY) return SQLITE_BUSY;   /* serialization conflict */
-			return SQLITE_ERROR;
+			if (rc == 0) return SX_DONE;
+			if (rc == SX_BUSY) return SX_BUSY;   /* serialization conflict */
+			return SX_ERROR;
 		}
 		case SXN_ROLLBACK: {
 			struct sx_native_db *nd = sx_is_native_db(st->db)
 			    ? (struct sx_native_db *)st->db : NULL;
 			if (nd) nd->spn = 0;
-			return xstore_rollback(st->db) == 0 ? SQLITE_DONE : SQLITE_ERROR;
+			return xstore_rollback(st->db) == 0 ? SX_DONE : SX_ERROR;
 		}
 		case SXN_SAVEPOINT: {
 			/* Push a named savepoint at the next level. */
 			struct sx_native_db *nd = sx_is_native_db(st->db)
 			    ? (struct sx_native_db *)st->db : NULL;
 			int lvl;
-			if (nd == NULL || nd->spn >= 32) return SQLITE_ERROR;
+			if (nd == NULL || nd->spn >= 32) return SX_ERROR;
 			lvl = nd->spn;
-			if (xstore_savepoint(st->db, lvl) != 0) return SQLITE_ERROR;
+			if (xstore_savepoint(st->db, lvl) != 0) return SX_ERROR;
 			snprintf(nd->spname[lvl], sizeof nd->spname[0], "%s",
 			    st->ddl_name ? st->ddl_name : "");
 			nd->spn = lvl + 1;
-			return SQLITE_DONE;
+			return SX_DONE;
 		}
 		case SXN_RELEASE: {
 			/* RELEASE name: find the innermost savepoint with that name,
@@ -1044,13 +948,13 @@ sx_step(sx_stmt *st)
 			struct sx_native_db *nd = sx_is_native_db(st->db)
 			    ? (struct sx_native_db *)st->db : NULL;
 			int i, lvl = -1;
-			if (nd == NULL) return SQLITE_ERROR;
+			if (nd == NULL) return SX_ERROR;
 			for (i = nd->spn - 1; i >= 0; i--)
 				if (st->ddl_name && strcmp(nd->spname[i], st->ddl_name) == 0) { lvl = i; break; }
-			if (lvl < 0) return SQLITE_ERROR;   /* no such savepoint */
-			if (xstore_release(st->db, lvl) != 0) return SQLITE_ERROR;
+			if (lvl < 0) return SX_ERROR;   /* no such savepoint */
+			if (xstore_release(st->db, lvl) != 0) return SX_ERROR;
 			nd->spn = lvl;
-			return SQLITE_DONE;
+			return SX_DONE;
 		}
 		case SXN_ROLLBACK_TO: {
 			/* ROLLBACK TO name: undo to the savepoint (it stays open);
@@ -1058,55 +962,55 @@ sx_step(sx_stmt *st)
 			struct sx_native_db *nd = sx_is_native_db(st->db)
 			    ? (struct sx_native_db *)st->db : NULL;
 			int i, lvl = -1;
-			if (nd == NULL) return SQLITE_ERROR;
+			if (nd == NULL) return SX_ERROR;
 			for (i = nd->spn - 1; i >= 0; i--)
 				if (st->ddl_name && strcmp(nd->spname[i], st->ddl_name) == 0) { lvl = i; break; }
-			if (lvl < 0) return SQLITE_ERROR;   /* no such savepoint */
-			if (xstore_rollback_to(st->db, lvl) != 0) return SQLITE_ERROR;
+			if (lvl < 0) return SX_ERROR;   /* no such savepoint */
+			if (xstore_rollback_to(st->db, lvl) != 0) return SX_ERROR;
 			nd->spn = lvl + 1;   /* the named savepoint remains open */
-			return SQLITE_DONE;
+			return SX_DONE;
 		}
 		case SXN_CREATE:
 			return xstore_create_table(st->db, st->ddl_name, st->ddl_cols) != 0
-			    ? SQLITE_DONE : SQLITE_ERROR;
+			    ? SX_DONE : SX_ERROR;
 		case SXN_DROP:
 			return xstore_drop_table(st->db, st->ddl_name) == 0
-			    ? SQLITE_DONE : SQLITE_ERROR;
+			    ? SX_DONE : SX_ERROR;
 		case SXN_CREATE_VIEW:
 			return xstore_create_view(st->db, st->ddl_name, st->ddl_cols) != 0
-			    ? SQLITE_DONE : SQLITE_ERROR;
+			    ? SX_DONE : SX_ERROR;
 		case SXN_DROP_VIEW:
 			return xstore_drop_view(st->db, st->ddl_name) != 0
-			    ? SQLITE_DONE : SQLITE_ERROR;
+			    ? SX_DONE : SX_ERROR;
 		case SXN_ALTER:
 			return xstore_rename_table(st->db, st->ddl_name, st->ddl_cols) == 0
-			    ? SQLITE_DONE : SQLITE_ERROR;
+			    ? SX_DONE : SX_ERROR;
 		case SXN_PRAGMA_NOP:
-			return SQLITE_DONE;   /* value-setting PRAGMA: no-op, no rows */
+			return SX_DONE;   /* value-setting PRAGMA: no-op, no rows */
 		default:
-			return SQLITE_ERROR;
+			return SX_ERROR;
 		}
 	}
 #endif
-	return xsql_step(st->vdbe);
+	return SX_MISUSE;
 }
 int
 sx_reset(sx_stmt *st)
 {
-	if (st == NULL) return SQLITE_OK;
+	if (st == NULL) return SX_OK;
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
 		if (st->vres) { vx_result_free(st->vres); st->vres = NULL; }
 		st->cur = -1; st->ran = 0;
-		return SQLITE_OK;
+		return SX_OK;
 	}
 #endif
-	return xsql_reset(st->vdbe);
+	return SX_OK;
 }
 int
 sx_clear_bindings(sx_stmt *st)
 {
-	if (st == NULL) return SQLITE_OK;
+	if (st == NULL) return SX_OK;
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
 		int i;
@@ -1117,17 +1021,15 @@ sx_clear_bindings(sx_stmt *st)
 				st->binds[i].bytes = NULL;
 			}
 		st->nbind = 0;
-		return SQLITE_OK;
+		return SX_OK;
 	}
 #endif
-	return xsql_clear_bindings(st->vdbe);
+	return SX_OK;
 }
 void
 sx_finalize(sx_stmt *st)
 {
 	if (st == NULL) return;
-	if (st->vdbe != NULL)
-		(void)xsql_finalize(st->vdbe);
 #ifdef SQLXTC_HAVE_LIME
 	/* Free the native-plan resources whether or not the stmt fell back
 	 * to the VDBE (nat_fallback_to_vdbe sets native=0 but the sql / bind
@@ -1153,33 +1055,33 @@ sx_bind_count(sx_stmt *st)
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) return st->nbind;   /* binds tracked as they are set */
 #endif
-	return xsql_bind_parameter_count(st->vdbe);
+	return 0;
 }
 int
 sx_bind_int64(sx_stmt *st, int idx, int64_t v)
 {
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
-		if (idx < 1 || idx > 32) return SQLITE_RANGE;
+		if (idx < 1 || idx > 32) return SX_ERROR;
 		st->binds[idx-1].type = VX_INT; st->binds[idx-1].i = v;
 		if (idx > st->nbind) st->nbind = idx;
-		return SQLITE_OK;
+		return SX_OK;
 	}
 #endif
-	return xsql_bind_int64(st->vdbe, idx, v);
+	return SX_MISUSE;
 }
 int
 sx_bind_double(sx_stmt *st, int idx, double v)
 {
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
-		if (idx < 1 || idx > 32) return SQLITE_RANGE;
+		if (idx < 1 || idx > 32) return SX_ERROR;
 		st->binds[idx-1].type = VX_REAL; st->binds[idx-1].r = v;
 		if (idx > st->nbind) st->nbind = idx;
-		return SQLITE_OK;
+		return SX_OK;
 	}
 #endif
-	return xsql_bind_double(st->vdbe, idx, v);
+	return SX_MISUSE;
 }
 int
 sx_bind_text(sx_stmt *st, int idx, const char *s, int n)
@@ -1187,10 +1089,10 @@ sx_bind_text(sx_stmt *st, int idx, const char *s, int n)
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
 		uint8_t *p;
-		if (idx < 1 || idx > 32) return SQLITE_RANGE;
+		if (idx < 1 || idx > 32) return SX_ERROR;
 		if (n < 0) n = s ? (int)strlen(s) : 0;
 		p = (uint8_t *)malloc((size_t)n + 1);
-		if (p == NULL) return SQLITE_NOMEM;
+		if (p == NULL) return SX_NOMEM;
 		if (n && s) memcpy(p, s, (size_t)n);
 		p[n] = '\0';
 		/* The bind buffer is owned by the cell and freed on finalize/
@@ -1198,10 +1100,10 @@ sx_bind_text(sx_stmt *st, int idx, const char *s, int n)
 		st->binds[idx-1].type = VX_TEXT; st->binds[idx-1].bytes = p;
 		st->binds[idx-1].nbytes = (uint32_t)n;
 		if (idx > st->nbind) st->nbind = idx;
-		return SQLITE_OK;
+		return SX_OK;
 	}
 #endif
-	return xsql_bind_text(st->vdbe, idx, s, n, SQLITE_TRANSIENT);
+	return SX_MISUSE;
 }
 int
 sx_bind_blob(sx_stmt *st, int idx, const void *p, int n)
@@ -1209,32 +1111,32 @@ sx_bind_blob(sx_stmt *st, int idx, const void *p, int n)
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
 		uint8_t *b;
-		if (idx < 1 || idx > 32) return SQLITE_RANGE;
+		if (idx < 1 || idx > 32) return SX_ERROR;
 		if (n < 0) n = 0;
 		b = (uint8_t *)malloc((size_t)n + 1);
-		if (b == NULL) return SQLITE_NOMEM;
+		if (b == NULL) return SX_NOMEM;
 		if (n && p) memcpy(b, p, (size_t)n);
 		b[n] = '\0';
 		st->binds[idx-1].type = VX_BLOB; st->binds[idx-1].bytes = b;
 		st->binds[idx-1].nbytes = (uint32_t)n;
 		if (idx > st->nbind) st->nbind = idx;
-		return SQLITE_OK;
+		return SX_OK;
 	}
 #endif
-	return xsql_bind_blob(st->vdbe, idx, p, n, SQLITE_TRANSIENT);
+	return SX_MISUSE;
 }
 int
 sx_bind_null(sx_stmt *st, int idx)
 {
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
-		if (idx < 1 || idx > 32) return SQLITE_RANGE;
+		if (idx < 1 || idx > 32) return SX_ERROR;
 		st->binds[idx-1].type = VX_NULL; st->binds[idx-1].nbytes = 0;
 		if (idx > st->nbind) st->nbind = idx;
-		return SQLITE_OK;
+		return SX_OK;
 	}
 #endif
-	return xsql_bind_null(st->vdbe, idx);
+	return SX_MISUSE;
 }
 
 int
@@ -1243,18 +1145,12 @@ sx_column_count(sx_stmt *st)
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
 		if (st->nkind != SXN_SELECT && st->nkind != SXN_PRAGMA_TABLE_INFO) return 0;
-		if (!st->ran && !nat_select_run(st)) {
-			if (!nat_fallback_to_vdbe(st)) return 0;
-			return xsql_column_count(st->vdbe);
-		}
-		if (st->vres == NULL) {
-			if (!nat_fallback_to_vdbe(st)) return 0;
-			return xsql_column_count(st->vdbe);
-		}
+		if (!st->ran && !nat_select_run(st)) return 0;
+		if (st->vres == NULL) return 0;
 		return vx_result_ncol(st->vres);
 	}
 #endif
-	return xsql_column_count(st->vdbe);
+	return 0;
 }
 const char *
 sx_column_name(sx_stmt *st, int i)
@@ -1263,15 +1159,11 @@ sx_column_name(sx_stmt *st, int i)
 	if (st->native) {
 		if (st->nkind != SXN_SELECT && st->nkind != SXN_PRAGMA_TABLE_INFO) return NULL;
 		if (!st->ran) (void)nat_select_run(st);
-		if (st->vres == NULL) {
-			/* declined + fell back via sx_column_count earlier, or now */
-			if (st->native && !nat_fallback_to_vdbe(st)) return NULL;
-			return st->native ? NULL : xsql_column_name(st->vdbe, i);
-		}
+		if (st->vres == NULL) return NULL;
 		return vx_result_name(st->vres, i);
 	}
 #endif
-	return xsql_column_name(st->vdbe, i);
+	return NULL;
 }
 int
 sx_column_type(sx_stmt *st, int i)
@@ -1288,7 +1180,7 @@ sx_column_type(sx_stmt *st, int i)
 		}
 	}
 #endif
-	return xsql_column_type(st->vdbe, i);
+	return SX_NULL;
 }
 int64_t
 sx_column_int64(sx_stmt *st, int i)
@@ -1297,7 +1189,7 @@ sx_column_int64(sx_stmt *st, int i)
 	if (st->native)
 		return (st->vres && st->cur >= 0) ? vx_result_int64(st->vres, st->cur, i) : 0;
 #endif
-	return xsql_column_int64(st->vdbe, i);
+	return 0;
 }
 double
 sx_column_double(sx_stmt *st, int i)
@@ -1306,7 +1198,7 @@ sx_column_double(sx_stmt *st, int i)
 	if (st->native)
 		return (st->vres && st->cur >= 0) ? vx_result_double(st->vres, st->cur, i) : 0.0;
 #endif
-	return xsql_column_double(st->vdbe, i);
+	return 0.0;
 }
 const char *
 sx_column_text(sx_stmt *st, int i)
@@ -1315,7 +1207,7 @@ sx_column_text(sx_stmt *st, int i)
 	if (st->native)
 		return (st->vres && st->cur >= 0) ? vx_result_text(st->vres, st->cur, i) : NULL;
 #endif
-	return (const char *)xsql_column_text(st->vdbe, i);
+	return NULL;
 }
 const void *
 sx_column_blob(sx_stmt *st, int i)
@@ -1324,7 +1216,7 @@ sx_column_blob(sx_stmt *st, int i)
 	if (st->native)
 		return (st->vres && st->cur >= 0) ? (const void *)vx_result_text(st->vres, st->cur, i) : NULL;
 #endif
-	return xsql_column_blob(st->vdbe, i);
+	return NULL;
 }
 int
 sx_column_bytes(sx_stmt *st, int i)
@@ -1333,7 +1225,7 @@ sx_column_bytes(sx_stmt *st, int i)
 	if (st->native)
 		return (st->vres && st->cur >= 0) ? vx_result_bytes(st->vres, st->cur, i) : 0;
 #endif
-	return xsql_column_bytes(st->vdbe, i);
+	return 0;
 }
 
 const char *
@@ -1345,7 +1237,7 @@ sx_errmsg(sx_db *h)
 		return nd->errmsg != NULL ? nd->errmsg : "";
 	}
 #endif
-	return xsql_errmsg((xsql *)h);
+	return "";
 }
 int64_t
 sx_changes(sx_db *h)
@@ -1356,7 +1248,7 @@ sx_changes(sx_db *h)
 		return nd->changes;
 	}
 #endif
-	return (int64_t)xsql_changes64((xsql *)h);
+	return 0;
 }
 
 /* ---- vectorized-executor seam (vexec) ---------------------------- */
@@ -1372,7 +1264,7 @@ sx_vexec_try(sx_db *h, const char *sql, int n_workers, sx_vx_result **out)
 
 	if (out == NULL) return XTC_E_INVAL;
 	*out = NULL;
-	rc = vx_run((xsql *)h, sql, n_workers, &r, &verr);
+	rc = vx_run((struct xsql *)h, sql, n_workers, &r, &verr);
 	if (verr) free(verr);          /* the caller falls back; no message needed */
 	if (rc == 1) { *out = (sx_vx_result *)r; return 1; }
 	if (r) vx_result_free(r);
@@ -1389,7 +1281,7 @@ sx_vexec_try_p(sx_db *h, const char *sql, const void *binds, int nbinds,
 
 	if (out == NULL) return XTC_E_INVAL;
 	*out = NULL;
-	rc = vx_run_p((xsql *)h, sql, (const vx_cell_t *)binds, nbinds,
+	rc = vx_run_p((struct xsql *)h, sql, (const vx_cell_t *)binds, nbinds,
 	              n_workers, &r, &verr);
 	if (verr) free(verr);
 	if (rc == 1) { *out = (sx_vx_result *)r; return 1; }
@@ -1436,7 +1328,7 @@ int
 sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges)
 {
 	char *verr = NULL;
-	int rc = vx_run_write((xsql *)h, sql, nchanges, &verr);
+	int rc = vx_run_write((struct xsql *)h, sql, nchanges, &verr);
 	if (verr) free(verr);          /* caller falls back; no message surfaced */
 	return rc;
 }
@@ -1446,14 +1338,14 @@ sx_vexec_write_p(sx_db *h, const char *sql, const void *binds, int nbinds,
                  int64_t *nchanges)
 {
 	char *verr = NULL;
-	int rc = vx_run_write_p((xsql *)h, sql, (const vx_cell_t *)binds, nbinds,
+	int rc = vx_run_write_p((struct xsql *)h, sql, (const vx_cell_t *)binds, nbinds,
 	                        nchanges, &verr);
 	if (verr) free(verr);
 	return rc;
 }
 
-void sx_vexec_commit(sx_db *h)   { (void)xstore_commit((xsql *)h); }
-void sx_vexec_rollback(sx_db *h) { (void)xstore_rollback((xsql *)h); }
+void sx_vexec_commit(sx_db *h)   { (void)xstore_commit((struct xsql *)h); }
+void sx_vexec_rollback(sx_db *h) { (void)xstore_rollback((struct xsql *)h); }
 
 #else  /* !SQLXTC_HAVE_LIME -- no parser, so no vexec; always fall back. */
 

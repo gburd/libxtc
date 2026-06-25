@@ -39,9 +39,6 @@
 #include "conn.h"
 #include "db.h"
 #include "engine.h"
-#include "mem.h"
-#include "mutex.h"
-#include "pcache.h"
 extern int metrics_spawn(xtc_loop_t *loop, xtc_res_t *res,
                          _Atomic int *conn_count,
                          _Atomic int64_t *queries_total,
@@ -379,36 +376,8 @@ main(int argc, char **argv)
 	               cfg.host, cfg.port, cfg.db_path);
 	if (cfg.cores > 0) pin_to_cores(cfg.cores);
 
-	/* Engine global config: install the xtc_amutex-backed mutex
-	 * methods and the xtc-allocator-backed memory methods BEFORE the
-	 * first open.  Threading mode depends on the connection model:
-	 * connection-per-proc (--threads != 1) gives each connection a
-	 * private handle on its own loop, so MULTITHREAD is correct and
-	 * avoids per-call mutexing; the single-shared-handle mode needs
-	 * SERIALIZED because many fibers interleave on one handle. */
-	rc = sx_config_mutex(mutex_methods());
-	if (rc != SX_OK) {
-		fprintf(stderr,
-		        "sx_config_mutex failed: %d\n", rc);
-		/* Continue with default mutex; not fatal. */
-	}
-	rc = sx_config_mem(mem_methods());
-	if (rc != SX_OK) {
-		fprintf(stderr,
-		        "sx_config_mem failed: %d\n", rc);
-		/* Continue with default allocator; not fatal. */
-	}
-	{
-		int parallel = (cfg.threads != 1);
-		rc = parallel ? sx_config_multithread() : sx_config_serialized();
-		if (rc != SX_OK)
-			fprintf(stderr, "sx_config threading failed: %d\n", rc);
-	}
-	/* Route the engine's page cache through an xtc_slab (one
-	 * object-size class per cache).  Must precede sx_init(). */
-	if (pcache_register() != SX_OK)
-		fprintf(stderr, "pcache_register failed; "
-		        "using the default page cache\n");
+	/* The engine is native (no SQLite mutex/mem/pcache subsystems to
+	 * configure): sx_init() is a no-op kept for symmetry. */
 	(void)sx_init();
 
 	/* libxtc-native durable storage engine.  Opened before the

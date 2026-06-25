@@ -40,7 +40,7 @@ static int
 W(sx_db *db, const char *q)
 {
 	int64_t n = 0;
-	return vx_run_write((sqlite3 *)db, q, &n, NULL);
+	return vx_run_write((struct xsql *)db, q, &n, NULL);
 }
 
 int
@@ -66,7 +66,7 @@ main(void)
 
 	/* Take native ownership of autocommit -- from here the native API
 	 * drives the txn, NOT SQLite's autocommit flag. */
-	CK(xstore_native_mode((sqlite3 *)db, 1) == 0, "native_mode on");
+	CK(xstore_native_mode((struct xsql *)db, 1) == 0, "native_mode on");
 
 	/* Autocommit: each native write commits on its own. */
 	CK(W(db, "INSERT INTO t(a) VALUES(10)") == 1, "autocommit insert 1");
@@ -75,13 +75,13 @@ main(void)
 	CK(strstr(a1, "10") && strstr(a1, "20"), "autocommit writes persisted");
 
 	/* Explicit native txn with an inner savepoint rolled back. */
-	CK(xstore_native_begin((sqlite3 *)db) == 0, "native begin");
+	CK(xstore_native_begin((struct xsql *)db) == 0, "native begin");
 	CK(W(db, "INSERT INTO t(a) VALUES(30)") == 1, "in-txn insert before sp");
-	CK(xstore_savepoint((sqlite3 *)db, 0) == 0, "savepoint 0");
+	CK(xstore_savepoint((struct xsql *)db, 0) == 0, "savepoint 0");
 	CK(W(db, "INSERT INTO t(a) VALUES(40)") == 1, "in-txn insert in sp");
-	CK(xstore_rollback_to((sqlite3 *)db, 0) == 0, "rollback to sp 0");
+	CK(xstore_rollback_to((struct xsql *)db, 0) == 0, "rollback to sp 0");
 	CK(W(db, "INSERT INTO t(a) VALUES(50)") == 1, "in-txn insert after rollback");
-	CK(xstore_commit((sqlite3 *)db) == 0, "native commit");
+	CK(xstore_commit((struct xsql *)db) == 0, "native commit");
 	dump(db, a2, sizeof a2);
 	/* 30 (before sp, kept) and 50 (after rollback, kept) survive; 40
 	 * (inside the rolled-back savepoint) does not. */
@@ -90,9 +90,9 @@ main(void)
 	CK(strstr(a2, "40") == NULL, "rolled-back savepoint write gone");
 
 	/* Whole-transaction rollback discards everything since BEGIN. */
-	CK(xstore_native_begin((sqlite3 *)db) == 0, "native begin 2");
+	CK(xstore_native_begin((struct xsql *)db) == 0, "native begin 2");
 	CK(W(db, "INSERT INTO t(a) VALUES(99)") == 1, "in-txn insert to roll back");
-	CK(xstore_rollback((sqlite3 *)db) == 0, "native rollback");
+	CK(xstore_rollback((struct xsql *)db) == 0, "native rollback");
 	dump(db, a3, sizeof a3);
 	CK(strcmp(a3, a2) == 0, "rollback left the table unchanged");
 	CK(strstr(a3, "99") == NULL, "rolled-back write gone");

@@ -23,15 +23,17 @@ cd ../..
 mkdir -p build_unix && cd build_unix && ../dist/configure && make
 cd ../examples/06_sqlxtc
 
-# build sqlxtc-server (sqlite3.o is built once; ~30 sec)
+# build sqlxtc-server (native engine; no SQLite)
 make
 ```
 
-The first make compiles the bundled SQLite amalgamation (`sqlite3.c`,
-9 MB, 250 K LOC).  Later builds reuse the object file.  (The
-amalgamation lives directly in the example directory: sqlxtc is a
-fork of SQLite that progressively routes its substrate through xtc,
-not a pristine vendor drop -- see `DESIGN.md`.)
+sqlxtc is a from-scratch SQL engine built on libxtc: the Lime parser
+produces an AST, the vectorized executor (vexec) runs it, and rows
+live in the xtc-native storage engine (B-tree + cooling buffer pool +
+ARIES WAL).  There is no SQLite -- no `sqlite3.c`, no VDBE, no virtual
+tables (the prior fork's SQLite substrate was fully excised; the
+differential oracle in `test/sqlxtc/` proves equivalence against
+python's sqlite3 on a 32-query corpus).
 
 To build sqlxtc against the single-file xtc amalgamation instead of
 `libxtc.a` -- which exercises the amalgamation as a real, broad
@@ -212,9 +214,8 @@ engine the default backend -- is documented in
 
 ## License
 
-ISC, like the rest of libxtc.  The bundled SQLite amalgamation is
-public domain.  The bundled Lime parser generator is BSD-2-Clause
-(see `lime/LICENSE`).
+ISC, like the rest of libxtc.  The bundled Lime parser generator is
+BSD-2-Clause (see `lime/LICENSE`).
 
 ## Design
 
