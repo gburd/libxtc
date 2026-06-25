@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 0.5.0"
+#       --define "version 0.6.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        0.5.0
+Version:        0.6.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,5 +82,11 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Thu Jun 25 2026 Greg Burd <greg@burd.me> - 0.6.0-1
+- sqlxtc example is now a fully libxtc-native SQL engine: the vendored
+  SQLite (sqlite3.c, VDBE, virtual tables, and the four extension-point
+  shims) is removed; the engine runs on a Lime parser, a vectorized
+  executor, and an xtc-native B-link/buffer-pool/WAL storage engine.
+- io_kqueue: native AIO restricted to FreeBSD/DragonFly (macOS 26 SDK).
 * Mon Jun 08 2026 Greg Burd <greg@burd.me> - 0.5.0-1
 - Initial RPM packaging (shared library + -devel subpackage).

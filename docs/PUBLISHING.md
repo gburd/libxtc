@@ -146,7 +146,7 @@ runs the test suite in `%check`.  Build from a release tarball with:
     rpmbuild -ba dist/xtc.spec
 
 Status: validated with `rpmspec --parse` and `rpmspec --query`
-(resolves to `libxtc-0.5.0-1` and `libxtc-devel-0.5.0-1`).  A full
+(resolves to `libxtc-0.6.0-1` and `libxtc-devel-0.6.0-1`).  A full
 `rpmbuild -ba` / `rpmlint` run was NOT performed on the development
 host (no RPM build root / rpmlint there); run it on a Fedora/RHEL/
 openSUSE machine, adjusting the `BuildRequires` package names if your
