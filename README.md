@@ -51,10 +51,14 @@ faults, and stay inside a fixed resource budget on commodity hardware.
   musl uses), as are macOS (Apple Silicon, the kqueue backend +
   ucontext substrate, full C munit suite) and Windows/MSVC (xtc.lib +
   smoke test).  FreeBSD 15 (clang, kqueue) and illumos (SunOS 5.11,
-  gcc, the solaris port backend) are verified against the current
-  tree -- 283/283 and a clean C suite respectively.  Windows builds
-  with all three of MinGW, Clang64, and MSVC.  macOS and AIX have
-  OS-layer ports awaiting a test host.  See `docs/M_WINDOWS_MATRIX.md`,
+  gcc, the solaris port backend) were verified in PRIOR runs -- 283/283
+  and a clean C suite respectively -- but are not in per-commit CI, so
+  the current tree has not been re-verified on them.  Windows builds
+  with all three of MinGW, Clang64, and MSVC, but only the MSVC
+  xtc.lib + smoke build runs in CI; the full runtime (IOCP, AFD poll)
+  is compiled, not yet runtime-verified on a Windows host.  macOS and
+  AIX have OS-layer ports; AIX awaits a test host.  See
+  `docs/M_WINDOWS_MATRIX.md`,
   `docs/M_LIBC_MATRIX.md`, and PLAN.md for the per-platform status.
 
 * **You want to stay close to the metal.**  No GC, no STW pauses.
@@ -166,22 +170,25 @@ What's working today:
 
 | Layer | Status |
 |---|---|
-| L0 OS substrate | Done.  Linux, FreeBSD, illumos, Windows (MinGW, Clang64, MSVC); macOS + AIX OS-layer ports await a test host. |
-| L1 I/O | Done.  io_uring, epoll, kqueue, IOCP, poll, select, illumos port_*, AIX pollset (untested). |
-| L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written x86_64 fcontext (~7.6 ns/swap). |
+| L0 OS substrate | Linux, FreeBSD, illumos runtime-verified; Windows (MinGW/Clang64/MSVC) and macOS OS-layer ports build; AIX builds, awaits a test host. |
+| L1 I/O | io_uring, epoll, kqueue, poll, select runtime-verified.  IOCP (Windows), illumos port_*, and AIX pollset COMPILE and are code-reviewed but are not yet runtime-verified on their hosts (CI runs Linux + macOS at runtime; Windows is a build-only smoke). |
+| L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written x86_64 fcontext (~7.6 ns/swap) + 7 more arches + ucontext fallback. |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
 | L5 PG adapter | Designed (`docs/M16_PG_ADAPTER.md`); not yet implemented. |
-| TLS | OpenSSL backend done (also builds + mostly passes on LibreSSL, see `docs/M_TLS_MATRIX.md`); GnuTLS/wolfSSL/Mbed TLS designed (`docs/M_TLS.md`). |
+| TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/M_TLS_MATRIX.md`); SChannel (Windows) is compile-only. |
 
-Test coverage today: **280 munit + 23 hegel-c property tests on
-Linux**, clean under AddressSanitizer and UBSan in CI.  GitHub CI also
-runs the full C munit suite on **macOS** (Apple Silicon: kqueue +
-ucontext + GCD dispatch semaphores) and an **MSVC** xtc.lib + smoke
-build on **Windows** every commit.  FreeBSD and illumos have been
-verified at matching numbers in prior runs (a re-verify against the
-current tree is pending); Windows also passes ~233 munit under MinGW
-and 48/48 of the buildable binaries under Clang64.
+Test coverage today: **412 munit test cases + 23 hegel-c property
+tests on Linux** (the munit total spans the L0-L5 suites plus the 35
+OTP/gen_server cases), clean under AddressSanitizer and UBSan in CI.
+GitHub CI also runs the full C munit suite on **macOS** (Apple Silicon:
+kqueue + ucontext + GCD dispatch semaphores) and an **MSVC** xtc.lib +
+smoke build on **Windows** every commit.  FreeBSD and illumos were
+verified at matching numbers in PRIOR runs (FreeBSD 15 clang/kqueue
+283/283; illumos SunOS 5.11 gcc clean); they are NOT in per-commit CI,
+so the current tree has not been re-verified on those platforms.
+Windows also passes ~233 munit under MinGW and 48/48 of the buildable
+binaries under Clang64 in prior runs.
 
 Honest gaps and known issues live in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 The full milestone roadmap is in [PLAN.md](PLAN.md).
@@ -225,7 +232,7 @@ options and behaviour.
 ## Documentation
 
 * `examples/` -- start here.  Five working programs from "hello async" to "Redis-compat server with budgets".
-* `docs/getting-started.md` -- step-by-step beginner walkthrough.  TODO: the document currently lives only as fragments inside the examples; a unified guide is in flight.
+* `docs/getting-started.md` -- step-by-step beginner walkthrough, from "just cloned" to an async TCP server.
 * `man/man3/` and `man/man7/` -- per-API reference.  Coverage is partial; see `docs/MAN_TODO.md` for the gap list.
 * `PLAN.md` -- the full design rationale.  Long but exhaustive.
 * `docs/ARCHITECTURE.md` -- the layer diagram, the principles, the why.

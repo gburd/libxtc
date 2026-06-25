@@ -1,5 +1,25 @@
 # Known issues -- pending investigation
 
+## Platform runtime-verification status (1.x readiness, B2)
+
+For an honest 1.x stance, here is exactly which platforms run at
+RUNTIME (the full test suite executes) versus which only COMPILE:
+
+- Linux (epoll + io_uring), macOS (kqueue): runtime-verified on every
+  commit in CI.
+- FreeBSD 15 (clang, kqueue) and illumos (SunOS 5.11, gcc, event
+  ports): verified 283/283 and clean respectively in PRIOR runs, but
+  they are NOT in per-commit CI, so the current tree is not re-verified
+  on them.  The README status table reflects this.
+- Windows: only the MSVC xtc.lib + smoke build runs in CI.  The full
+  IOCP runtime (AFD poll, file-AIO cancel/re-arm, wakeup ordering) is
+  COMPILED and code-reviewed but has never run on a Windows host (see
+  "IOCP backend status" below).
+- AIX (pollset): compiles, code-reviewed, no test host.
+
+The full production-readiness review is in
+`docs/M_1X_READINESS_REVIEW.md`.
+
 ## RESOLVED (partial): native stack backtrace beyond execinfo
 
 **Status:** real backends added; one (Windows) remains compiled-but-not-

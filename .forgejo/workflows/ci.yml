@@ -57,6 +57,9 @@ jobs:
       - name: Test
         run: make -C build_ci check
 
+      - name: Install + compile a consumer against the installed headers
+        run: XTC_SRC_DIR="$PWD" sh test/dist/test_install_headers.sh
+
   coro-fctx:
     # Force the fcontext coroutine substrate (the musl path) on a
     # glibc runner so it is exercised on every commit without needing

@@ -110,7 +110,16 @@ int   xtc_lrlock_create_ex(const xtc_lrlock_opts_t *opts,
 
 void  xtc_lrlock_destroy(xtc_lrlock_t *lr);
 
-/* ---- reader (wait-free) ---- */
+/* ---- reader (wait-free) ----
+ *
+ * read_begin returns the read-side data snapshot for the calling
+ * thread, registering a reader slot on first use.  Reader slots are a
+ * fixed per-lock pool (max_readers, default 64; a global cap of 4096
+ * slots backs the registry).  If the pool is exhausted -- more distinct
+ * reader threads than slots -- read_begin returns NULL; the caller must
+ * treat NULL as "retry later" (a thread that cannot get a slot should
+ * back off, not dereference).  In practice size max_readers to the
+ * expected concurrent-reader-thread count. */
 const void *xtc_lrlock_read_begin(xtc_lrlock_t *lr);
 void        xtc_lrlock_read_end(xtc_lrlock_t *lr);
 
