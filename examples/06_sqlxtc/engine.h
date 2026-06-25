@@ -43,6 +43,8 @@ struct xtc_loop;                 /* fwd: background storage procs run here */
 /* Result codes (values match the engine ABI; engine.c static-asserts). */
 #define SX_OK        0
 #define SX_ERROR     1
+#define SX_MISUSE   21     /* API misuse (NULL stmt, out-of-range bind) */
+#define SX_NOMEM     7     /* out of memory */
 #define SX_BUSY      5     /* serialization conflict / contention */
 #define SX_ROW     100
 #define SX_DONE    101
@@ -88,19 +90,14 @@ void sx_storage_abandon(void);
  * is routed to it).  0 otherwise. */
 int  sx_storage_active(void);
 
-/* Install the xtc_amutex-backed mutex methods (opaque table from
- * mutex_methods()).  Call before sx_init. */
+/* Engine configuration shims (now no-ops: the native engine has no
+ * SQLite mutex/mem subsystems).  Retained on the sx_* surface for
+ * source compatibility; call before sx_init. */
 int  sx_config_mutex(const void *methods);
-
-/* Install the xtc-allocator-backed memory methods (opaque table from
- * mem_methods()).  Call before sx_init.  Routes every engine
- * allocation through xtc's allocator. */
 int  sx_config_mem(const void *methods);
 
-/* Threading mode (call before sx_init).  sx_config_serialized is the
- * safe default -- the engine guards every handle, so a shared handle
- * and per-connection handles are both correct; the xtc_amutex methods
- * make that guarding yield the fiber rather than block the loop. */
+/* Threading mode (no-ops; the native engine guards every handle and
+ * the xtc_amutex paths yield the fiber rather than block the loop). */
 int  sx_config_serialized(void);
 int  sx_config_multithread(void);
 

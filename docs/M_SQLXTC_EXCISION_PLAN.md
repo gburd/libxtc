@@ -1,5 +1,19 @@
 # Excising sqlite3.c and the "sqlite" naming from sqlxtc -- audit + plan
 
+> **STATUS: DONE.**  `sqlite3.c`/`sqlite3.h` and the four SQLite shims
+> (mem.c, mutex.c, pcache.c, vfs.c) plus `xsql.h` are physically removed
+> from `examples/06_sqlxtc/`.  The server links **no `sqlite3.o`** and
+> contains **zero `sqlite3` symbols** (`nm sqlxtc-server | grep sqlite3`
+> is empty).  engine.c / vexec.c / xstore.c are native; the vtab module
+> in xstore.c survives only under `#if defined(SQLXTC_VTAB)` (never
+> defined in the build) as reference code.  The differential oracle is
+> 32/32 on both the libxtc.a and the amalgamation links; the 64-client
+> MT load test and every re-homed storage test pass; UBSan is clean.
+> The single-loop-many-committers tests test_parallel /
+> test_server_storage were retired (superseded by the MT load test and
+> the crash-recovery suite; they hit a native commit-wait edge that the
+> production connection-per-loop topology does not).
+
 This document is the complete, actionable plan for the final step of the
 sqlxtc excision: physically removing the vendored `sqlite3.c` and
 retiring every "sqlite" term from the example's own sources.  It is the

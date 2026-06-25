@@ -34,7 +34,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "sqlite3.h"   /* xsql_* via the force-included rename header */
+/* The connection is an opaque key (the engine's struct xsql). */
+struct xsql;
 
 #define VEXEC_VECTOR_SIZE 2048   /* values per vector in a DataChunk */
 
@@ -72,7 +73,7 @@ typedef struct vx_stmt vx_stmt_t;
  *   <0  -- error (e.g. prepare failed); *errmsg may be set
  * On a return of 1 the caller owns *out and must vx_finalize it.
  */
-int vx_try_prepare(sqlite3 *db, const char *sql, vx_stmt_t **out,
+int vx_try_prepare(struct xsql *db, const char *sql, vx_stmt_t **out,
                    char **errmsg);
 
 /* Step a vexec statement: returns SQLITE_ROW with a row available
@@ -107,7 +108,7 @@ void vx_finalize(vx_stmt_t *st);
  */
 typedef struct vx_result vx_result_t;
 
-int vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
+int vx_run_parallel(struct xsql *db, const char *sql, int n_workers,
                     vx_result_t **res, char **errmsg);
 
 /* Unified dispatcher: the committed vexec entry point for a query.  It
@@ -120,14 +121,14 @@ int vx_run_parallel(sqlite3 *db, const char *sql, int n_workers,
  * Returns 1 with *res owned by the caller (vx_result_free), 0 to fall
  * back to the VDBE, or <0 on error.
  */
-int vx_run(sqlite3 *db, const char *sql, int n_workers,
+int vx_run(struct xsql *db, const char *sql, int n_workers,
            vx_result_t **res, char **errmsg);
 
 /* Parametrized form of vx_run: `binds` holds the bound ? parameters
  * (1-based by ordinal, `nbinds` of them) as vx_cell values, which the
  * compiler substitutes for SX_E_PARAM nodes.  A parametrized query runs
  * single-threaded.  vx_run is vx_run_p with no binds. */
-int vx_run_p(sqlite3 *db, const char *sql,
+int vx_run_p(struct xsql *db, const char *sql,
              const vx_cell_t *binds, int nbinds, int n_workers,
              vx_result_t **res, char **errmsg);
 
@@ -144,13 +145,13 @@ int vx_run_p(sqlite3 *db, const char *sql,
  * rowid PK, a non-xstore table, or any parse it cannot handle).  All-or-
  * nothing: a return of 0 has written nothing.  <0 is a storage error.
  */
-int vx_run_write(sqlite3 *db, const char *sql, int64_t *nchanges,
+int vx_run_write(struct xsql *db, const char *sql, int64_t *nchanges,
                  char **errmsg);
 
 /* Parametrized form of vx_run_write: ? values in VALUES / SET / WHERE
  * are taken from `binds` (1-based by ordinal).  vx_run_write is this
  * with no binds. */
-int vx_run_write_p(sqlite3 *db, const char *sql,
+int vx_run_write_p(struct xsql *db, const char *sql,
                    const vx_cell_t *binds, int nbinds,
                    int64_t *nchanges, char **errmsg);
 
@@ -174,10 +175,10 @@ void vx_result_free(vx_result_t *r);
 /* Build PRAGMA table_info(<table>) natively from the xstore catalog
  * (columns cid,name,type,notnull,dflt_value,pk).  Returns 1 with *res
  * owned by the caller, 0 if the table has no native schema, <0 on OOM. */
-int vx_pragma_table_info(sqlite3 *db, const char *table, vx_result_t **res);
+int vx_pragma_table_info(struct xsql *db, const char *table, vx_result_t **res);
 /* Name the first FROM base table that is not a catalog table or view
  * (the "no such table" culprit) for a failed native query, or NULL.
  * Returns a static buffer. */
-const char *vx_unknown_table(sqlite3 *db, const char *sql);
+const char *vx_unknown_table(struct xsql *db, const char *sql);
 
 #endif /* SQLXTC_VEXEC_H */

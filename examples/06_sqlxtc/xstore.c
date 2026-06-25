@@ -41,12 +41,13 @@
  *	multi-statement BEGIN..COMMIT (or separate Quack messages on the
  *	same handle) forms one transaction.  Cahill SSI serializability is
  *	enforced: xs_sync (2PC phase 1) calls ssi_in_conflict and returns
- *	SQLITE_BUSY on a dangerous rw-antidependency pivot, rolling the
+ *	SX_BUSY on a dangerous rw-antidependency pivot, rolling the
  *	transaction back -- with predicate (range) locking so disjoint
  *	readers do not falsely conflict.  See docs/M_SQLXTC_MVCC_SQL.md and
  *	the scenario_serializable / SSI-range tests in test_xstore.c.
  */
 
+#include "engine.h"      /* SX_* result codes */
 #include "xstore.h"
 
 #include <stdatomic.h>
@@ -56,7 +57,6 @@
 #include <string.h>
 #include <pthread.h>
 
-#include "sqlite3.h"
 #include "btree.h"
 #include "wal.h"
 #include "xlog.h"
@@ -323,7 +323,7 @@ wbuf_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid, const void *blob, int
 	if (c->wn == c->wcap) {
 		int nc = c->wcap ? c->wcap * 2 : 16;
 		xs_wrec_t *nb = realloc(c->wbuf, (size_t)nc * sizeof *nb);
-		if (nb == NULL) return SQLITE_NOMEM;
+		if (nb == NULL) return SX_NOMEM;
 		c->wbuf = nb; c->wcap = nc;
 	}
 	w = &c->wbuf[c->wn];
@@ -332,13 +332,13 @@ wbuf_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid, const void *blob, int
 	if (!deleted && n > 0) {
 		if (n > XS_VMAX) n = XS_VMAX;
 		w->data = malloc((size_t)n);
-		if (w->data == NULL) return SQLITE_NOMEM;
+		if (w->data == NULL) return SX_NOMEM;
 		memcpy(w->data, blob, (size_t)n);
 		w->len = (uint16_t)n;
 		c->wbuf_bytes += (size_t)n;
 	}
 	c->wn++;
-	return SQLITE_OK;
+	return SX_OK;
 }
 /* Read-your-writes: the newest buffered write for `rowid`, or NULL. */
 static const xs_wrec_t *
@@ -486,6 +486,7 @@ ssi_record_read(ssi_txn_t *t, uint32_t tableid, int64_t rowid)
  * writer's rowid creates an incoming rw-edge only if it falls inside a
  * range some concurrent reader actually scanned -- not "any write vs
  * any scan". */
+#if defined(SQLXTC_VTAB)
 static void
 ssi_record_range(ssi_txn_t *t, uint32_t tableid, int64_t lo, int64_t hi)
 {
@@ -503,6 +504,7 @@ ssi_record_range(ssi_txn_t *t, uint32_t tableid, int64_t lo, int64_t hi)
 	t->nrng++;
 	pthread_mutex_unlock(&g_ssi_mu);
 }
+#endif /* SQLXTC_VTAB */
 
 /* Does any OTHER serializable transaction, concurrent with `me`, have
  * an incoming rw-edge to me -- i.e. did it read a rowid in my write
@@ -675,7 +677,7 @@ dec_ts(const uint8_t *k)
 /* STEAL: bring a spilled payload back into memory (read it from the
  * staging area into w->data) so the buffered write can be read or
  * committed.  A no-op for entries that are not spilled.  Returns
- * SQLITE_OK or an error. */
+ * SX_OK or an error. */
 static int
 xs_wrec_ensure(xstore_ctx_t *cx, xs_wrec_t *w)
 {
@@ -683,24 +685,25 @@ xs_wrec_ensure(xstore_ctx_t *cx, xs_wrec_t *w)
 	uint16_t vl = 0;
 
 	if (!w->spilled)
-		return SQLITE_OK;
+		return SX_OK;
 	w->data = malloc(w->len ? w->len : 1);
 	if (w->data == NULL)
-		return SQLITE_NOMEM;
+		return SX_NOMEM;
 	if (w->len) {
 		enc_vkey(XS_STAGE_TID, w->stage_id, 0, key);
 		if (bt_lookup(cx->bt, key, XS_VKLEN, w->data, w->len, &vl) != XTC_OK ||
 		    vl != w->len) {
 			free(w->data); w->data = NULL;
-			return SQLITE_ERROR;
+			return SX_ERROR;
 		}
 	}
 	w->spilled = 0;
 	cx->wbuf_bytes += w->len;
-	return SQLITE_OK;
+	return SX_OK;
 }
 
 /* ---- vtab + cursor ---- */
+#if defined(SQLXTC_VTAB)
 typedef struct xstore_vtab {
 	xsql_vtab base;
 	xstore_ctx_t *ctx;
@@ -708,6 +711,7 @@ typedef struct xstore_vtab {
 	int        npay;   /* payload columns (declared columns minus the key) */
 	uint32_t   tableid; /* version-namespace id (key prefix) for this table */
 } xstore_vtab_t;
+#endif
 
 /*
  * Table-id assignment.  A table's version-namespace id (the key prefix
@@ -940,7 +944,7 @@ xs_cat_find_or_create(bt_t *bt, const char *name, const char *coldefs)
 			total += clen;
 		}
 		if (xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)total, 0)
-		    != SQLITE_OK)
+		    != SX_OK)
 			return 0;
 	}
 	return id;
@@ -1003,8 +1007,9 @@ xs_enter_ctx(xstore_ctx_t *cx, struct xsql *db)
 	 * txn when autocommit is back on but we are still in_txn; open a txn
 	 * when autocommit is off and we are not yet in_txn.
 	 */
-	int autocommit = cx->native_mode ? cx->native_autocommit
-	                                 : xsql_get_autocommit(db);
+	/* The connection is always native: autocommit is engine-owned. */
+	int autocommit = cx->native_autocommit;
+	(void)db;
 	if (cx->in_txn && autocommit) {
 		if (cx->ssi != NULL) { ssi_abort(cx->ssi); cx->ssi = NULL; }
 		wbuf_clear(cx);
@@ -1024,14 +1029,18 @@ xs_enter_ctx(xstore_ctx_t *cx, struct xsql *db)
 	}
 }
 
+#if defined(SQLXTC_VTAB)
 static void
 xs_enter(xstore_vtab_t *v)
 {
 	xs_enter_ctx(v->ctx, v->db);
 }
+#endif /* SQLXTC_VTAB */
 
 typedef struct xstore_cursor {
+#if defined(SQLXTC_VTAB)
 	xsql_vtab_cursor base;
+#endif
 	bt_t        *bt;
 	xstore_ctx_t *ctx;
 	uint32_t     tableid;       /* version namespace of the scanned table */
@@ -1062,7 +1071,9 @@ typedef struct xstore_cursor {
  * (see bench/sqlxtc/PERF_IDEAS.md).
  */
 
+#if defined(SQLXTC_VTAB)
 static const xsql_module xstore_module;   /* fwd */
+#endif
 
 /*
  * Record codec.  A version's payload is the non-key columns of one row,
@@ -1080,22 +1091,27 @@ static const xsql_module xstore_module;   /* fwd */
  * The btree value is still [flag:u8][record] (xs_put prepends the
  * tombstone flag), so the deleted-version path is unchanged.
  */
+#if defined(SQLXTC_VTAB)
 static void
 put_u32(uint8_t *p, uint32_t v)
 {
 	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
 	p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static uint32_t
 get_u32(const uint8_t *p)
 {
 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
 	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
+#endif /* SQLXTC_VTAB */
 
 /* Encode `npay` payload values into `out` (capacity `cap`).  Returns the
  * encoded length, or -1 if it would overflow `cap` / 255 columns. */
+#if defined(SQLXTC_VTAB)
 static int
 xs_rec_encode(xsql_value **vals, int npay, uint8_t *out, int cap)
 {
@@ -1137,10 +1153,12 @@ xs_rec_encode(xsql_value **vals, int npay, uint8_t *out, int cap)
 	}
 	return off;
 }
+#endif /* SQLXTC_VTAB */
 
 /* Decode the `idx`-th payload value (0-based) from `rec` into `ctx`.
  * Out-of-range or malformed records resolve to NULL -- defensive, so a
  * truncated/old record never reads past the buffer. */
+#if defined(SQLXTC_VTAB)
 static void
 xs_rec_result(xsql_context *ctx, const uint8_t *rec, int reclen, int idx)
 {
@@ -1184,7 +1202,9 @@ xs_rec_result(xsql_context *ctx, const uint8_t *rec, int reclen, int idx)
 	}
 	xsql_result_null(ctx);   /* idx beyond the record */
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
     xsql_vtab **ppv, char **pzErr)
@@ -1211,14 +1231,14 @@ xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
 		int off = snprintf(decl, sizeof decl,
 		    "CREATE TABLE x(%s INTEGER PRIMARY KEY", argv[3]);
 		if (off < 0 || off >= (int)sizeof decl)
-			return SQLITE_ERROR;
+			return SX_ERROR;
 		coff = snprintf(coldefs, sizeof coldefs, "%s", argv[3]);
 		if (coff < 0 || coff >= (int)sizeof coldefs) coff = -1;
 		for (i = 4; i < argc; i++) {
 			int w = snprintf(decl + off, sizeof decl - (size_t)off,
 			    ", %s", argv[i]);
 			if (w < 0 || w >= (int)sizeof decl - off)
-				return SQLITE_ERROR;   /* declaration too long */
+				return SX_ERROR;   /* declaration too long */
 			off += w;
 			if (coff >= 0) {
 				int cw = snprintf(coldefs + coff, sizeof coldefs - (size_t)coff,
@@ -1228,17 +1248,17 @@ xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
 			}
 		}
 		if (off + 2 > (int)sizeof decl)
-			return SQLITE_ERROR;
+			return SX_ERROR;
 		decl[off++] = ')'; decl[off] = '\0';
 		rc = xsql_declare_vtab(db, decl);
 		npay = argc - 4;
 		if (coff > 0) cdp = coldefs;
 	}
-	if (rc != SQLITE_OK)
+	if (rc != SX_OK)
 		return rc;
 	v = xsql_malloc(sizeof *v);
 	if (v == NULL)
-		return SQLITE_NOMEM;
+		return SX_NOMEM;
 	memset(v, 0, sizeof *v);
 	v->ctx = (xstore_ctx_t *)pAux;
 	v->db = db;
@@ -1249,19 +1269,23 @@ xs_connect(xsql *db, void *pAux, int argc, const char *const *argv,
 	v->tableid = xs_cat_find_or_create(v->ctx->bt, argv[2], cdp);
 	if (v->tableid == 0) {
 		xsql_free(v);
-		return SQLITE_ERROR;
+		return SX_ERROR;
 	}
 	*ppv = &v->base;
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_disconnect(xsql_vtab *pv)
 {
 	xsql_free(pv);
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_best_index(xsql_vtab *pv, xsql_index_info *info)
 {
@@ -1285,7 +1309,7 @@ xs_best_index(xsql_vtab *pv, xsql_index_info *info)
 		info->idxNum = 1;
 		info->estimatedCost = 1.0;
 		info->estimatedRows = 1;
-		return SQLITE_OK;
+		return SX_OK;
 	}
 	/* Bounded range: pass the bounds to xFilter (idxNum bits 2/4), but
 	 * do NOT omit -- the bounds drive the scan seek/stop and the SSI
@@ -1295,25 +1319,29 @@ xs_best_index(xsql_vtab *pv, xsql_index_info *info)
 	if (hi >= 0) { info->aConstraintUsage[hi].argvIndex = ++argc; idx |= 4; }
 	info->idxNum = idx;
 	info->estimatedCost = idx ? 100.0 : 1.0e6;
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_open(xsql_vtab *pv, xsql_vtab_cursor **ppc)
 {
 	xstore_vtab_t *v = (xstore_vtab_t *)pv;
 	xstore_cursor_t *c = xsql_malloc(sizeof *c);
 	if (c == NULL)
-		return SQLITE_NOMEM;
+		return SX_NOMEM;
 	memset(c, 0, sizeof *c);
 	c->bt = v->ctx->bt;
 	c->ctx = v->ctx;
 	c->tableid = v->tableid;
 	c->eof = 1;
 	*ppc = &c->base;
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_close(xsql_vtab_cursor *pc)
 {
@@ -1323,8 +1351,9 @@ xs_close(xsql_vtab_cursor *pc)
 		c->btc = NULL;
 	}
 	xsql_free(pc);          /* no latch/cursor held between calls */
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 
 /* Copy the value payload (after the flag byte) into the cursor. */
 static void
@@ -1831,7 +1860,7 @@ xstore_put_rec(bt_t *bt, uint32_t tableid, int64_t rowid,
                const uint8_t *rec, int reclen)
 {
 	if (bt == NULL || rec == NULL || reclen < 1) return -1;
-	return xs_put(bt, tableid, rowid, rec, reclen, 0) == SQLITE_OK ? 0 : -1;
+	return xs_put(bt, tableid, rowid, rec, reclen, 0) == SX_OK ? 0 : -1;
 }
 
 int
@@ -1840,9 +1869,10 @@ xstore_delete_rec(bt_t *bt, uint32_t tableid, int64_t rowid)
 	/* A delete is a tombstone version (deleted=1) at a fresh commit
 	 * timestamp -- the same thing the vtab xUpdate DELETE path writes. */
 	if (bt == NULL) return -1;
-	return xs_put(bt, tableid, rowid, NULL, 0, 1) == SQLITE_OK ? 0 : -1;
+	return xs_put(bt, tableid, rowid, NULL, 0, 1) == SX_OK ? 0 : -1;
 }
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
     int argc, xsql_value **argv)
@@ -1895,13 +1925,13 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 					if (w->len && w->data) memcpy(c->val, w->data, w->len);
 					c->eof = 0;
 				}
-				return SQLITE_OK;       /* buffered write decides it */
+				return SX_OK;       /* buffered write decides it */
 			}
 		}
 		/* Else the newest committed version at-or-before the snapshot. */
 		enc_vkey(c->tableid, want, snap, startk);
 		if (bt_cursor_open(c->bt, startk, XS_VKLEN, &cur) != XTC_OK)
-			return SQLITE_OK;
+			return SX_OK;
 		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) == XTC_OK &&
 		    klen == XS_VKLEN &&
 		    dec_tableid((const uint8_t *)k) == c->tableid &&
@@ -1911,7 +1941,7 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 			c->eof = 0;
 		}
 		bt_cursor_close(cur);
-		return SQLITE_OK;
+		return SX_OK;
 	}
 	c->point = 0;
 	/* Range bounds from best_index (idxNum bit 2 = lo, bit 4 = hi). */
@@ -1928,24 +1958,30 @@ xs_filter(xsql_vtab_cursor *pc, int idxNum, const char *idxStr,
 		ssi_record_range(v->ctx->ssi, c->tableid, rlo, rhi);  /* precise incoming predicate */
 	}
 	xs_advance(c);
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_next(xsql_vtab_cursor *pc)
 {
 	xstore_cursor_t *c = (xstore_cursor_t *)pc;
-	if (c->point) { c->eof = 1; return SQLITE_OK; }
+	if (c->point) { c->eof = 1; return SX_OK; }
 	xs_advance(c);
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_eof(xsql_vtab_cursor *pc)
 {
 	return ((xstore_cursor_t *)pc)->eof;
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_column(xsql_vtab_cursor *pc, xsql_context *ctx, int i)
 {
@@ -1954,15 +1990,18 @@ xs_column(xsql_vtab_cursor *pc, xsql_context *ctx, int i)
 		xsql_result_int64(ctx, c->rowid);
 	else
 		xs_rec_result(ctx, c->val, c->vlen, i - 1);
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_rowid(xsql_vtab_cursor *pc, xsql_int64 *pRowid)
 {
 	*pRowid = ((xstore_cursor_t *)pc)->rowid;
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 
 /* Write one version of `rowid`: a tombstone if deleted, else a copy of
  * `blob`, stamped with a fresh commit timestamp (autocommit). */
@@ -2171,7 +2210,7 @@ xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int d
 	buf[0] = deleted ? XS_F_DELETED : 0;
 	if (!deleted && n > 0) memcpy(buf + 1, blob, (size_t)n);
 	return bt_insert(bt, key, XS_VKLEN, buf, (uint16_t)(1 + (deleted ? 0 : n)))
-	    == XTC_OK ? SQLITE_OK : SQLITE_ERROR;
+	    == XTC_OK ? SX_OK : SX_ERROR;
 }
 
 /* The commit_ts of the newest committed version of `rowid`, or 0 if the
@@ -2371,7 +2410,7 @@ static int
 xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
 {
 	int rc = xs_put(cx->bt, tableid, rowid, blob, n, deleted);
-	if (rc == SQLITE_OK && cx->autovacuum)
+	if (rc == SX_OK && cx->autovacuum)
 		xs_maybe_prune(cx->bt, tableid, rowid,
 		    snap_horizon(atomic_load_explicit(&g_xclock, memory_order_relaxed)));
 	return rc;
@@ -2386,7 +2425,7 @@ xs_buf_write(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid,
     const void *blob, int n, int deleted)
 {
 	int rc = wbuf_add(cx, tableid, rowid, blob, n, deleted);
-	if (rc == SQLITE_OK && cx->wbuf_bytes > XS_SPILL_HI)
+	if (rc == SX_OK && cx->wbuf_bytes > XS_SPILL_HI)
 		xs_spill_payloads(cx);
 	return rc;
 }
@@ -2416,7 +2455,7 @@ xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
 	else
 		rc = xs_put_pruned(cx, tableid, rowid, deleted ? NULL : rec,
 		                   deleted ? 0 : reclen, deleted);
-	return rc == SQLITE_OK ? 0 : -1;
+	return rc == SX_OK ? 0 : -1;
 }
 
 /* True if the connection currently has an open (non-autocommit)
@@ -2453,6 +2492,7 @@ xstore_txn_table_dirty(struct xsql *db, uint32_t tableid)
 	return 0;
 }
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
     xsql_int64 *pRowid)
@@ -2524,6 +2564,7 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 		return xs_put_pruned(cx, v->tableid, rowid, rec, reclen, 0);
 	}
 }
+#endif /* SQLXTC_VTAB */
 
 /*
  * Transaction hooks.  xBegin captures the read snapshot and opens the
@@ -2532,16 +2573,18 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
  * its rows share an xmin); xRollback discards the buffer.  This is
  * mvcc.c's stage-then-commit, applied to the B-tree-backed store.
  */
+#if defined(SQLXTC_VTAB)
 static int
 xs_begin(xsql_vtab *pv)
 {
 	xs_enter((xstore_vtab_t *)pv);
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 /*
  * Serializable validation (Cahill SSI pivot detection).  Returns
- * SQLITE_BUSY if this transaction is a dangerous pivot (BOTH an
- * outgoing and an incoming rw-antidependency), else SQLITE_OK.  Shared
+ * SX_BUSY if this transaction is a dangerous pivot (BOTH an
+ * outgoing and an incoming rw-antidependency), else SX_OK.  Shared
  * by the vtab xSync (2PC phase 1) and the native commit path.
  */
 static int
@@ -2551,7 +2594,7 @@ xs_ssi_validate(xstore_ctx_t *cx)
 	xs_rkey_t *wr;
 	int nwr;
 	if (!cx->in_txn || !cx->serializable)
-		return SQLITE_OK;
+		return SX_OK;
 	/*
 	 * Outgoing edge: a key we read was overwritten by a transaction
 	 * that committed after our snapshot -- read straight from the
@@ -2564,7 +2607,7 @@ xs_ssi_validate(xstore_ctx_t *cx)
 	    atomic_load_explicit(&g_xclock, memory_order_relaxed) > cx->txn_snap)
 		out_edge = 1;
 	if (!out_edge)
-		return SQLITE_OK;          /* no outgoing edge -> cannot be a pivot */
+		return SX_OK;          /* no outgoing edge -> cannot be a pivot */
 	/*
 	 * Incoming edge: another concurrent serializable transaction read
 	 * a rowid we are about to write.  Reads leave no version in the
@@ -2581,9 +2624,10 @@ xs_ssi_validate(xstore_ctx_t *cx)
 		}
 	in_edge = ssi_in_conflict(cx->ssi, wr, nwr);
 	free(wr);
-	return in_edge ? SQLITE_BUSY : SQLITE_OK;   /* pivot -> serialization failure */
+	return in_edge ? SX_BUSY : SX_OK;   /* pivot -> serialization failure */
 }
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_sync(xsql_vtab *pv)
 {
@@ -2594,6 +2638,7 @@ xs_sync(xsql_vtab *pv)
 	 */
 	return xs_ssi_validate(((xstore_vtab_t *)pv)->ctx);
 }
+#endif /* SQLXTC_VTAB */
 
 /*
  * Serialize the transaction's buffered versions into one WAL record and
@@ -2653,15 +2698,15 @@ static int
 xs_commit_ctx(xstore_ctx_t *cx)
 {
 	uint64_t ts;
-	int i, rc = SQLITE_OK;
+	int i, rc = SX_OK;
 	if (!cx->in_txn)
-		return SQLITE_OK;
+		return SX_OK;
 	/* Serializable validation (SSI pivot) BEFORE applying writes: a
-	 * dangerous pivot aborts with SQLITE_BUSY.  The vtab runs this in
+	 * dangerous pivot aborts with SX_BUSY.  The vtab runs this in
 	 * xSync; the native commit path runs it here, and on a failure rolls
 	 * the transaction back (the vtab relies on SQLite calling xRollback
 	 * after an xSync failure; the native path must do it itself). */
-	if ((rc = xs_ssi_validate(cx)) != SQLITE_OK) {
+	if ((rc = xs_ssi_validate(cx)) != SX_OK) {
 		(void)xs_rollback_ctx(cx);
 		return rc;
 	}
@@ -2681,7 +2726,7 @@ xs_commit_ctx(xstore_ctx_t *cx)
 			if (!w->deleted && w->len) memcpy(buf + 1, w->data, w->len);
 			if (bt_insert(cx->bt, key, XS_VKLEN, buf,
 			    (uint16_t)(1 + (w->deleted ? 0 : w->len))) != XTC_OK)
-				rc = SQLITE_ERROR;
+				rc = SX_ERROR;
 			else if (cx->autovacuum)
 				xs_maybe_prune(cx->bt, w->tableid, w->rowid, snap_horizon(ts));
 		}
@@ -2698,11 +2743,13 @@ xs_commit_ctx(xstore_ctx_t *cx)
 	xs_pin_recompute(cx);     /* txn done: drop (or re-pin as_of) */
 	return rc;
 }
+#if defined(SQLXTC_VTAB)
 static int
 xs_commit(xsql_vtab *pv)
 {
 	return xs_commit_ctx(((xstore_vtab_t *)pv)->ctx);
 }
+#endif /* SQLXTC_VTAB */
 static int
 xs_rollback_ctx(xstore_ctx_t *cx)
 {
@@ -2711,13 +2758,15 @@ xs_rollback_ctx(xstore_ctx_t *cx)
 	wbuf_clear(cx);
 	cx->in_txn = 0;
 	xs_pin_recompute(cx);
-	return SQLITE_OK;
+	return SX_OK;
 }
+#if defined(SQLXTC_VTAB)
 static int
 xs_rollback(xsql_vtab *pv)
 {
 	return xs_rollback_ctx(((xstore_vtab_t *)pv)->ctx);
 }
+#endif /* SQLXTC_VTAB */
 
 /*
  * Native transaction control -- what the live path calls when it sees a
@@ -2738,8 +2787,8 @@ xstore_commit(struct xsql *db)
 	if (!cx->in_txn) return 0;
 	{
 		int rc = xs_commit_ctx(cx);
-		if (rc == SQLITE_OK) return 0;
-		if (rc == SQLITE_BUSY) return SQLITE_BUSY;   /* serialization conflict */
+		if (rc == SX_OK) return 0;
+		if (rc == SX_BUSY) return SX_BUSY;   /* serialization conflict */
 		return -1;
 	}
 }
@@ -2750,7 +2799,7 @@ xstore_rollback(struct xsql *db)
 	if (cx == NULL) return 0;
 	if (cx->native_mode) cx->native_autocommit = 1;   /* end explicit txn */
 	if (!cx->in_txn) return 0;
-	return xs_rollback_ctx(cx) == SQLITE_OK ? 0 : -1;
+	return xs_rollback_ctx(cx) == SX_OK ? 0 : -1;
 }
 
 /*
@@ -2891,15 +2940,15 @@ sp_reserve(xstore_ctx_t *cx, int level)
 			nc *= 2;
 		nw = realloc(cx->sp_wn, (size_t)nc * sizeof *nw);
 		if (nw == NULL)
-			return SQLITE_NOMEM;
+			return SX_NOMEM;
 		cx->sp_wn = nw;
 		nr = realloc(cx->sp_rn, (size_t)nc * sizeof *nr);
 		if (nr == NULL)
-			return SQLITE_NOMEM;
+			return SX_NOMEM;
 		cx->sp_rn = nr;
 		cx->sp_cap = nc;
 	}
-	return SQLITE_OK;
+	return SX_OK;
 }
 
 /* Savepoint operations on a txn context (shared by the vtab callbacks
@@ -2909,8 +2958,8 @@ sp_open_ctx(xstore_ctx_t *cx, int level)
 {
 	int i, rc;
 	if (level < 0)
-		return SQLITE_OK;
-	if ((rc = sp_reserve(cx, level)) != SQLITE_OK)
+		return SX_OK;
+	if ((rc = sp_reserve(cx, level)) != SX_OK)
 		return rc;
 	/* Record the current marks for the newly opened level(s).  A
 	 * statement may open several levels at once; fill the gap so each
@@ -2920,7 +2969,7 @@ sp_open_ctx(xstore_ctx_t *cx, int level)
 		cx->sp_rn[i] = cx->rn;
 	}
 	cx->sp_n = level + 1;
-	return SQLITE_OK;
+	return SX_OK;
 }
 
 static int
@@ -2930,10 +2979,10 @@ sp_release_ctx(xstore_ctx_t *cx, int level)
 	 * (kept in wbuf), so there is nothing to undo -- just forget the
 	 * marks. */
 	if (level < 0)
-		return SQLITE_OK;
+		return SX_OK;
 	if (level < cx->sp_n)
 		cx->sp_n = level;
-	return SQLITE_OK;
+	return SX_OK;
 }
 
 static int
@@ -2944,31 +2993,37 @@ sp_rollback_to_ctx(xstore_ctx_t *cx, int level)
 	 * savepoint itself stays open (it may be rolled back to again), so
 	 * keep levels [0, level].  Deeper marks are discarded. */
 	if (level < 0 || level >= cx->sp_n)
-		return SQLITE_OK;
+		return SX_OK;
 	wbuf_truncate(cx, cx->sp_wn[level]);
 	if (cx->sp_rn[level] < cx->rn)
 		cx->rn = cx->sp_rn[level];
 	cx->sp_n = level + 1;
-	return SQLITE_OK;
+	return SX_OK;
 }
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_savepoint(xsql_vtab *pv, int level)
 {
 	return sp_open_ctx(((xstore_vtab_t *)pv)->ctx, level);
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_release(xsql_vtab *pv, int level)
 {
 	return sp_release_ctx(((xstore_vtab_t *)pv)->ctx, level);
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static int
 xs_rollback_to(xsql_vtab *pv, int level)
 {
 	return sp_rollback_to_ctx(((xstore_vtab_t *)pv)->ctx, level);
 }
+#endif /* SQLXTC_VTAB */
 
 /* Public savepoint API for the native driver (native_mode).  level is
  * 0-based.  In native_mode xs_enter_ctx consults native_autocommit, so
@@ -2981,21 +3036,21 @@ xstore_savepoint(struct xsql *db, int level)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
 	if (cx == NULL) return -1;
-	return sp_open_ctx(cx, level) == SQLITE_OK ? 0 : -1;
+	return sp_open_ctx(cx, level) == SX_OK ? 0 : -1;
 }
 int
 xstore_release(struct xsql *db, int level)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
 	if (cx == NULL) return -1;
-	return sp_release_ctx(cx, level) == SQLITE_OK ? 0 : -1;
+	return sp_release_ctx(cx, level) == SX_OK ? 0 : -1;
 }
 int
 xstore_rollback_to(struct xsql *db, int level)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
 	if (cx == NULL) return -1;
-	return sp_rollback_to_ctx(cx, level) == SQLITE_OK ? 0 : -1;
+	return sp_rollback_to_ctx(cx, level) == SX_OK ? 0 : -1;
 }
 
 /* Largest rowid in `tableid` INCLUDING this connection's uncommitted
@@ -3158,7 +3213,7 @@ xstore_drop_table(struct xsql *db, const char *name)
 	nlen = strlen(name);
 	if (nlen > sizeof vbuf) nlen = sizeof vbuf;
 	memcpy(vbuf, name, nlen);
-	if (xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)nlen, 1) != SQLITE_OK)
+	if (xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)nlen, 1) != SX_OK)
 		return -1;
 	xstore_cat_forget_one(bt, name);
 	return 0;
@@ -3207,7 +3262,7 @@ xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
 	memcpy(vbuf, newname, nlen);
 	total = nlen;
 	if (clen > 0) { vbuf[total++] = '\0'; memcpy(vbuf + total, coldefs, clen); total += clen; }
-	if (xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)total, 0) != SQLITE_OK)
+	if (xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)total, 0) != SX_OK)
 		return -1;
 
 	/* Update the in-process cache: drop the old name, install the new
@@ -3226,6 +3281,7 @@ xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
 
 /* SQL functions: xstore_now() -> current clock; xstore_as_of(ts) pins
  * this connection's read snapshot (0 = latest) and returns it. */
+#if defined(SQLXTC_VTAB)
 static void
 fn_now(xsql_context *ctx, int argc, xsql_value **argv)
 {
@@ -3233,6 +3289,8 @@ fn_now(xsql_context *ctx, int argc, xsql_value **argv)
 	xsql_result_int64(ctx,
 	    (xsql_int64)atomic_load_explicit(&g_xclock, memory_order_relaxed));
 }
+#endif /* SQLXTC_VTAB */
+#if defined(SQLXTC_VTAB)
 static void
 fn_as_of(xsql_context *ctx, int argc, xsql_value **argv)
 {
@@ -3243,10 +3301,12 @@ fn_as_of(xsql_context *ctx, int argc, xsql_value **argv)
 	xs_pin_recompute(c);      /* pin (or release) the as_of snapshot */
 	xsql_result_int64(ctx, ts);
 }
+#endif /* SQLXTC_VTAB */
 /* xstore_serializable(on): set this connection's isolation to
  * serializable (on != 0) or snapshot isolation (0).  Returns the new
  * setting.  Serializable validates the transaction's read set at
- * commit and aborts (SQLITE_BUSY) on a read-write conflict. */
+ * commit and aborts (SX_BUSY) on a read-write conflict. */
+#if defined(SQLXTC_VTAB)
 static void
 fn_serializable(xsql_context *ctx, int argc, xsql_value **argv)
 {
@@ -3256,6 +3316,7 @@ fn_serializable(xsql_context *ctx, int argc, xsql_value **argv)
 	c->isolation = on ? XS_ISO_SERIALIZABLE : XS_ISO_SNAPSHOT;
 	xsql_result_int(ctx, on);
 }
+#endif /* SQLXTC_VTAB */
 
 /* Case-insensitive ASCII prefix match: 1 if `s` starts with `pfx`. */
 static int
@@ -3278,6 +3339,7 @@ ciprefix(const char *s, const char *pfx)
  * XS_ISO_* code.  Returns the resulting integer level.  Covers the
  * PostgreSQL/SQL-standard set plus snapshot; takes effect at the next
  * transaction's first access. */
+#if defined(SQLXTC_VTAB)
 static void
 fn_isolation(xsql_context *ctx, int argc, xsql_value **argv)
 {
@@ -3311,10 +3373,12 @@ fn_isolation(xsql_context *ctx, int argc, xsql_value **argv)
 	}
 	xsql_result_int(ctx, lvl);
 }
+#endif /* SQLXTC_VTAB */
 /* xstore_gc(): vacuum dead versions up to the current GC horizon (the
  * oldest live snapshot, or the clock if none).  Returns the number of
  * versions reclaimed.  The horizon advances g_gc_horizon so an as_of
  * read below it is known to be best-effort. */
+#if defined(SQLXTC_VTAB)
 static void
 fn_gc(xsql_context *ctx, int argc, xsql_value **argv)
 {
@@ -3328,12 +3392,14 @@ fn_gc(xsql_context *ctx, int argc, xsql_value **argv)
 		atomic_store_explicit(&g_gc_horizon, horizon, memory_order_relaxed);
 	xsql_result_int(ctx, reclaimed);
 }
+#endif /* SQLXTC_VTAB */
 
 /* xstore_autovacuum(on): when on (default off), each write prunes that
  * rowid's dead versions inline (HOT-style), keeping version chains
  * short on a write-heavy workload without a full-tree scan.  Off keeps
  * all versions, so xstore_as_of() time travel can reach any historical
  * snapshot; on bounds time travel to the live-snapshot horizon. */
+#if defined(SQLXTC_VTAB)
 static void
 fn_autovacuum(xsql_context *ctx, int argc, xsql_value **argv)
 {
@@ -3342,9 +3408,11 @@ fn_autovacuum(xsql_context *ctx, int argc, xsql_value **argv)
 	c->autovacuum = on;
 	xsql_result_int(ctx, on);
 }
+#endif /* SQLXTC_VTAB */
 /* xstore_prune_count(): number of inline-prune passes adaptive
  * autovacuum has actually run (vs the number of writes) -- lets a test
  * see the backoff on a low-garbage workload. */
+#if defined(SQLXTC_VTAB)
 static void
 fn_prune_count(xsql_context *ctx, int argc, xsql_value **argv)
 {
@@ -3352,6 +3420,7 @@ fn_prune_count(xsql_context *ctx, int argc, xsql_value **argv)
 	xsql_result_int64(ctx,
 	    (xsql_int64)atomic_load_explicit(&g_av_prunes, memory_order_relaxed));
 }
+#endif /* SQLXTC_VTAB */
 
 /*
  * ALTER TABLE ... RENAME TO newname.  The table keeps its id; we write
@@ -3361,13 +3430,14 @@ fn_prune_count(xsql_context *ctx, int argc, xsql_value **argv)
  * logged and recovered.  The in-process cache is refreshed so this
  * connection's other handles agree immediately.
  */
+#if defined(SQLXTC_VTAB)
 static int
 xs_rename(xsql_vtab *pv, const char *newname)
 {
 	xstore_vtab_t *v = (xstore_vtab_t *)pv;
 	uint32_t id;
 	int i;
-	if (newname == NULL) return SQLITE_OK;
+	if (newname == NULL) return SX_OK;
 	id = v->tableid;
 	pthread_mutex_lock(&g_cat_mu);
 	for (i = 0; i < g_cat_n; i++)
@@ -3380,9 +3450,11 @@ xs_rename(xsql_vtab *pv, const char *newname)
 	 * xs_put can park on the WAL ack (see xs_cat_find_or_create). */
 	(void)xs_put(v->ctx->bt, XS_CAT_TABLEID, (int64_t)id,
 	    newname, (int)strlen(newname), 0);
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static const xsql_module xstore_module = {
 	.iVersion    = 2,
 	.xCreate     = xs_connect,
@@ -3407,6 +3479,7 @@ static const xsql_module xstore_module = {
 	.xRelease    = xs_release,
 	.xRollbackTo = xs_rollback_to,
 };
+#endif /* SQLXTC_VTAB */
 
 static void
 ctx_free(void *p)
@@ -3415,7 +3488,7 @@ ctx_free(void *p)
 	if (cx != NULL) { ssi_abort(cx->ssi); snap_set(&cx->snap_slot, 0);
 	    wbuf_clear(cx); free(cx->wbuf); free(cx->rset);
 	    free(cx->sp_wn); free(cx->sp_rn); }
-	xsql_free(p);
+	free(p);
 }
 
 /* Connection commit/rollback hooks: close a READ-ONLY transaction at
@@ -3428,6 +3501,7 @@ ctx_free(void *p)
  * (wn != 0 was flushed, in_txn already 0) this is a no-op.  Guard on
  * the absence of pending writes so the hook never discards a write
  * set out from under the 2PC flush. */
+#if defined(SQLXTC_VTAB)
 static int
 xs_conn_commit(void *p)
 {
@@ -3439,7 +3513,9 @@ xs_conn_commit(void *p)
 	}
 	return 0;   /* allow the commit */
 }
+#endif /* SQLXTC_VTAB */
 
+#if defined(SQLXTC_VTAB)
 static void
 xs_conn_rollback(void *p)
 {
@@ -3450,6 +3526,7 @@ xs_conn_rollback(void *p)
 		xs_pin_recompute(cx);
 	}
 }
+#endif /* SQLXTC_VTAB */
 
 /* Allocate a connection ctx, initialise it, and record the
  * connection -> (bt, ctx) association in g_dbmap.  Shared by the SQLite
@@ -3460,7 +3537,7 @@ xs_conn_rollback(void *p)
 static xstore_ctx_t *
 xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 {
-	xstore_ctx_t *ctx = xsql_malloc(sizeof *ctx);
+	xstore_ctx_t *ctx = malloc(sizeof *ctx);
 	if (ctx == NULL)
 		return NULL;
 	bt_set_close_hook(xstore_cat_forget);   /* clear cached ids when a bt closes */
@@ -3509,19 +3586,20 @@ xstore_register_native(struct xsql *db, bt_t *bt)
 {
 	xstore_ctx_t *ctx = xs_ctx_init_and_map(db, bt, 1);
 	if (ctx == NULL)
-		return SQLITE_NOMEM;
-	return SQLITE_OK;
+		return SX_NOMEM;
+	return SX_OK;
 }
 
+#if defined(SQLXTC_VTAB)
 int
 xstore_register(xsql *db, bt_t *bt)
 {
 	xstore_ctx_t *ctx = xs_ctx_init_and_map(db, bt, 0);
 	int rc;
 	if (ctx == NULL)
-		return SQLITE_NOMEM;
+		return SX_NOMEM;
 	rc = xsql_create_module_v2(db, "xstore", &xstore_module, ctx, ctx_free);
-	if (rc != SQLITE_OK)
+	if (rc != SX_OK)
 		return rc;
 	/* End-of-transaction hooks so read-only transactions reset in_txn
 	 * (they fire no vtab write hook); the ctx outlives them via the
@@ -3542,8 +3620,9 @@ xstore_register(xsql *db, bt_t *bt)
 	    ctx, fn_autovacuum, NULL, NULL);
 	(void)xsql_create_function(db, "xstore_prune_count", 0, SQLITE_UTF8,
 	    ctx, fn_prune_count, NULL, NULL);
-	return SQLITE_OK;
+	return SX_OK;
 }
+#endif /* SQLXTC_VTAB */
 
 /* Drop the connection -> bt/ctx association when a connection closes, so
  * the fixed-size g_dbmap does not leak slots and overflow under many
