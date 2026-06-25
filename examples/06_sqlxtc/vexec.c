@@ -4918,6 +4918,25 @@ sort_index_cmp(const void *pa, const void *pb)
 	return ia - ib;
 }
 
+/* Compare two key-rows (nkey cells each) under the ORDER BY direction
+ * vector, returning <0 if row A sorts before row B, >0 if after, 0 if
+ * equal on every key.  Used by the bounded top-N path, which has no
+ * stable per-row index to tiebreak on (it streams), so equal keys
+ * compare equal here -- correctness for the LIMIT cut does not depend
+ * on the tiebreak, since the row kept is then re-sorted by the full
+ * sort_index_cmp before emit. */
+static int
+topn_cmp(const vx_cell_t *ka, const vx_cell_t *kb, int nkey, const int *desc)
+{
+	int k;
+	for (k = 0; k < nkey; k++) {
+		int r = sort_cmp(&ka[k], &kb[k]);
+		if (desc[k]) r = -r;
+		if (r) return r;
+	}
+	return 0;
+}
+
 /* Sort an aggregated result chunk (c->nrow rows, c->ncol cells each, in
  * c->cells) in place by the ORDER BY keys and apply OFFSET/LIMIT.  The
  * agg ORDER BY keys all reference OUTPUT columns: order_outcol[k] > 0 is
@@ -4988,7 +5007,16 @@ done:
 }
 
 /* Materialize, sort, and offset/limit a non-agg ordered query into one
- * chunk that vx_step then walks. */
+ * chunk that vx_step then walks.
+ *
+ * When LIMIT is present (and there is no DISTINCT), the scan keeps only
+ * the top K = OFFSET + LIMIT rows in a bounded buffer rather than
+ * materializing the whole input and sorting it: each row past the first
+ * K replaces the current worst kept row only if it sorts ahead of it.
+ * This bounds memory to K rows and replaces the O(N log N) full sort
+ * with an O(N*K) selection that wins decisively when K << N (e.g.
+ * ORDER BY ... LIMIT 50 over 100k rows).  The kept K are then sorted by
+ * the full comparator before emit, so output order is identical. */
 static int
 ordered_materialize(struct vx_stmt *st)
 {
@@ -5002,6 +5030,19 @@ ordered_materialize(struct vx_stmt *st)
 	vx_chunk_t *c = NULL;
 	int64_t lim, off;
 	int emit_n, e;
+	/* Bounded top-N: eligible when LIMIT is set, there are sort keys,
+	 * and no DISTINCT (DISTINCT dedups the kept set, so a row dropped
+	 * early could change which distinct values survive).  K caps the
+	 * kept buffer; topn_full marks it saturated. */
+	int64_t topn_k = -1;
+	int topn = (st->limit >= 0 && nkey > 0 && !st->distinct);
+	int topn_full = 0;
+	int topn_worst = -1;   /* cached worst-kept slot; -1 = recompute */
+	if (topn) {
+		topn_k = st->offset + st->limit;
+		if (topn_k < 0) topn = 0;                 /* overflow guard */
+		else if (topn_k == 0) topn_k = 1;         /* keep room for >=1 */
+	}
 
 	for (;;) {
 		int64_t rowid; const uint8_t *rec; int reclen;
@@ -5033,8 +5074,46 @@ ordered_materialize(struct vx_stmt *st)
 				eval(st, st->order_key[j], st->srcrow, &rowarena, &keyrow[j]);
 		}
 
+		if (topn && topn_full) {
+			/* Buffer holds K rows.  Replace the current worst (sorts
+			 * last) only if this row sorts ahead of it; otherwise drop
+			 * this row.  The worst slot is cached and recomputed lazily
+			 * only after it is replaced, so the common "row is not good
+			 * enough" case is a single compare, not an O(K) rescan.
+			 * Kept slots are reused in place; a replaced row's old bytes
+			 * are abandoned in the keep arena (freed as a unit at
+			 * statement end), so total allocation stays O(N) as in the
+			 * full-sort path, but the buffer never exceeds K and there
+			 * is no global sort over N. */
+			int r;
+			if (topn_worst < 0) {
+				topn_worst = 0;
+				for (r = 1; r < nrow; r++)
+					if (topn_cmp(&keys[(size_t)r * (size_t)nkey],
+					             &keys[(size_t)topn_worst * (size_t)nkey],
+					             nkey, st->order_desc) > 0)
+						topn_worst = r;
+			}
+			if (topn_cmp(keyrow, &keys[(size_t)topn_worst * (size_t)nkey],
+			             nkey, st->order_desc) >= 0) {
+				arena_free(rowarena); rowarena = NULL;
+				continue;   /* not better than the worst kept */
+			}
+			for (j = 0; j < st->nout; j++)
+				if (cell_dup(&keep, &outrow[j],
+				    &rows[(size_t)topn_worst * (size_t)st->nout + (size_t)j]) != 0) goto cleanup;
+			for (j = 0; j < nkey; j++)
+				if (cell_dup(&keep, &keyrow[j],
+				    &keys[(size_t)topn_worst * (size_t)nkey + (size_t)j]) != 0) goto cleanup;
+			topn_worst = -1;   /* worst was overwritten; recompute next time */
+			arena_free(rowarena); rowarena = NULL;
+			continue;
+		}
+
 		if (nrow == cap) {
 			int nc = cap ? cap * 2 : 256;
+			/* Under top-N never grow past K. */
+			if (topn && nc > (int)topn_k) nc = (int)topn_k;
 			vx_cell_t *nr = realloc(rows, sizeof(vx_cell_t) * (size_t)nc * (size_t)(st->nout > 0 ? st->nout : 1));
 			vx_cell_t *nk = realloc(keys, sizeof(vx_cell_t) * (size_t)nc * (size_t)(nkey > 0 ? nkey : 1));
 			if (!nr || !nk) { free(nr); free(nk); goto cleanup; }
@@ -5047,6 +5126,7 @@ ordered_materialize(struct vx_stmt *st)
 		for (j = 0; j < nkey; j++)
 			if (cell_dup(&keep, &keyrow[j], &keys[(size_t)nrow * (size_t)nkey + (size_t)j]) != 0) goto cleanup;
 		nrow++;
+		if (topn && (int64_t)nrow >= topn_k) topn_full = 1;
 		arena_free(rowarena); rowarena = NULL;
 	}
 
