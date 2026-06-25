@@ -10,10 +10,11 @@
  *	The wakeup pipe registration uses a sentinel udata == io.
  */
 
-/* macOS gates the BSD sigevent members (sigev_notify_kqueue, used by
- * the native-file-AIO path below for SIGEV_KEVENT completion) behind
- * the Darwin feature macro; define it before any system header so the
- * member is visible on current macOS SDKs.  No effect on *BSD. */
+/* Define the Darwin feature macro before any system header so the full
+ * BSD <sys/event.h> / sigevent surface is visible on macOS SDKs.  The
+ * native-file-AIO path below is FreeBSD/DragonFly-only, so this is not
+ * strictly required for it anymore, but it keeps the BSD-superset
+ * declarations available and has no effect on the other BSDs. */
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE 1
 #endif
@@ -33,14 +34,26 @@
 /*
  * Native file AIO on the kqueue backend uses POSIX AIO (<aio.h>) with
  * completion delivered to THIS kqueue via SIGEV_KEVENT, reaped as an
- * EVFILT_AIO event.  This is the FreeBSD model (and macOS, which also
- * defines SIGEV_KEVENT + EVFILT_AIO).  Guard on BOTH EVFILT_AIO and
- * SIGEV_KEVENT: a kqueue platform missing either still builds, with the
- * op offloaded to the blocking pool (the XTC_E_NOSYS path below).  The
- * sigevent fields used (sigev_notify_kqueue, sigev_value.sival_ptr) are
- * the SIGEV_KEVENT contract on both targets.
+ * EVFILT_AIO event.  This is the FreeBSD model.  The gate below is
+ * FreeBSD/DragonFly-only (see XTC_KQ_HAVE_AIO); every other kqueue
+ * platform -- macOS included -- offloads the op to the blocking pool
+ * (the XTC_E_NOSYS path below), which never blocks the loop.
  */
-#if defined(EVFILT_AIO) && defined(SIGEV_KEVENT)
+/*
+ * Native file AIO via POSIX AIO (<aio.h>) with completion delivered to
+ * THIS kqueue via SIGEV_KEVENT, reaped as an EVFILT_AIO event -- the
+ * FreeBSD model.  This is restricted to FreeBSD (and DragonFly): they
+ * define the BSD `struct sigevent` member `sigev_notify_kqueue` and
+ * their POSIX AIO honors SIGEV_KEVENT for regular files.  Apple is
+ * deliberately EXCLUDED: macOS 26's SDK no longer exposes
+ * `sigev_notify_kqueue` even under _DARWIN_C_SOURCE, and Darwin's
+ * POSIX AIO does not reliably support SIGEV_KEVENT completion on
+ * regular files anyway -- so macOS (and any other kqueue platform
+ * without the member) falls through to the blocking-pool offload (the
+ * XTC_E_NOSYS path below), which is correct and never blocks the loop.
+ */
+#if defined(EVFILT_AIO) && defined(SIGEV_KEVENT) && \
+    (defined(__FreeBSD__) || defined(__DragonFly__))
 #  include <aio.h>
 #  include <fcntl.h>
 #  include <string.h>
