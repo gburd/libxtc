@@ -14,8 +14,14 @@ includedir	= @includedir@
 mandir		= @mandir@
 
 CC		= @CC@
-CFLAGS		= @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@ @XTC_TLS_CFLAGS@
-CPPFLAGS	= @CPPFLAGS@ -I. -I$(srcdir)/../src/inc
+# Project includes go FIRST so the in-tree headers always win over any
+# system include dir (e.g. -I/usr/local/include on the BSDs, added by
+# @CFLAGS@/@CPPFLAGS@ for liburing/openssl) -- otherwise a previously
+# installed /usr/local/include/xtc.h would shadow the source tree and
+# build against a stale API.
+XTC_INCLUDES	= -I. -I$(srcdir)/../src/inc
+CFLAGS		= $(XTC_INCLUDES) @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@ @XTC_TLS_CFLAGS@
+CPPFLAGS	= @CPPFLAGS@ $(XTC_INCLUDES)
 LDFLAGS		= @LDFLAGS@ -pthread
 LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@ @XTC_TLS_LIBS@ @XTC_LIBUNWIND_LIBS@
 XTC_HEGEL_CFLAGS = @XTC_HEGEL_CFLAGS@

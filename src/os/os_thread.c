@@ -17,6 +17,11 @@
 #include <pthread.h>
 #include <sched.h>
 #include <string.h>
+#if defined(__FreeBSD__) || defined(__DragonFly__)
+#include <sys/param.h>
+#include <sys/cpuset.h>
+#include <pthread_np.h>     /* pthread_setaffinity_np + cpuset_t */
+#endif
 
 #if defined(__APPLE__)
 #include <sys/qos.h>
@@ -193,6 +198,19 @@ __os_thread_set_affinity(int cpu)
 #if defined(__linux__)
 	{
 		cpu_set_t set;
+		CPU_ZERO(&set);
+		CPU_SET((unsigned)cpu, &set);
+		if (pthread_setaffinity_np(pthread_self(), sizeof set, &set)
+		    != 0)
+			return XTC_E_INTERNAL;
+		return XTC_OK;
+	}
+#elif defined(__FreeBSD__) || defined(__DragonFly__)
+	{
+		/* FreeBSD/DragonFly: pthread_setaffinity_np takes a cpuset_t
+		 * (from <sys/cpuset.h>), the BSD analogue of Linux's
+		 * cpu_set_t.  CPU_ZERO/CPU_SET operate on it the same way. */
+		cpuset_t set;
 		CPU_ZERO(&set);
 		CPU_SET((unsigned)cpu, &set);
 		if (pthread_setaffinity_np(pthread_self(), sizeof set, &set)
