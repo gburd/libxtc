@@ -10,6 +10,7 @@
 #define XTC_IO_INT_H
 
 #include "xtc_io.h"
+#include <stdatomic.h>
 
 #if defined(XTC_IO_BACKEND_EPOLL)
 /* nothing to predefine; epoll keeps tags via epoll_data_t */
@@ -132,6 +133,7 @@ struct xtc_io {
 #elif defined(XTC_IO_BACKEND_IOCP)
 	void                  *iocp;       /* HANDLE: the completion port */
 	void                  *afd;        /* HANDLE: \Device\Afd, port-associated */
+	_Atomic int            wakeup_pending; /* 1 = a wakeup completion is queued */
 	struct __xtc_iocp_reg **reg_iocp;   /* live registration nodes (stable) */
 	int  n_reg;
 	int  cap_reg;

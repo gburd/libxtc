@@ -155,15 +155,28 @@ static const WCHAR XTC_AFD_DEVICE[] = L"\\Device\\Afd\\Xtc";
 
 /* Posts a sentinel completion to the IOCP so the next
  * GetQueuedCompletionStatusEx returns immediately.  Called from
- * io_common.c's xtc_io_wakeup on Windows. */
+ * io_common.c's xtc_io_wakeup on Windows.
+ *
+ * Coalesced at POST time: at most ONE wakeup completion is ever queued,
+ * regardless of how many concurrent xtc_io_wakeup calls happen, so a
+ * burst of N wakeups cannot leave N - drained completions sitting in
+ * the port for later polls to re-report (the epoll self-pipe and the
+ * kqueue EVFILT_USER coalesce the same way).  The poll side clears
+ * wakeup_pending when it drains the wakeup event. */
 int
 __xtc_io_iocp_wakeup_post(xtc_io_t *io)
 {
+	int expected = 0;
 	if (io == NULL || io->iocp == NULL)
 		return XTC_E_INVAL;
+	/* Only the thread that flips 0 -> 1 posts the (single) completion. */
+	if (!atomic_compare_exchange_strong(&io->wakeup_pending, &expected, 1))
+		return XTC_OK;            /* a wakeup is already queued; coalesce */
 	if (!PostQueuedCompletionStatus((HANDLE)io->iocp, 0,
-	    XTC_IOCP_KEY_WAKEUP, NULL))
+	    XTC_IOCP_KEY_WAKEUP, NULL)) {
+		atomic_store(&io->wakeup_pending, 0);   /* post failed; allow retry */
 		return XTC_E_INTERNAL;
+	}
 	return XTC_OK;
 }
 
@@ -604,6 +617,17 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		err = GetLastError();
 		if (err != ERROR_INVALID_PARAMETER)
 			return XTC_E_AGAIN;     /* cannot associate: offload */
+	} else {
+		/* Newly associated: ask the kernel to NOT post a port
+		 * completion when the op completes synchronously (the call
+		 * returns TRUE).  We finish those inline below.  This keeps a
+		 * synchronous completion from being double-counted, and it is
+		 * the only correct behavior for a non-overlapped handle (one
+		 * opened by _open / CreateFile without FILE_FLAG_OVERLAPPED),
+		 * which NEVER posts a port completion -- without this, such a
+		 * handle's op would park the fiber forever. */
+		(void)SetFileCompletionNotificationModes(fh,
+		    FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
 	}
 
 	if (__os_calloc(1, sizeof *ov, (void **)&ov) != XTC_OK)
@@ -618,7 +642,22 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	else
 		ok = WriteFile(fh, a->buf, (DWORD)a->len, NULL, ov);
 
-	if (!ok) {
+	if (ok) {
+		/* Synchronous completion.  With
+		 * FILE_SKIP_COMPLETION_PORT_ON_SUCCESS set above (and always,
+		 * for a non-overlapped handle), NO completion will arrive on
+		 * the port, so finish the op inline rather than parking the
+		 * fiber on a completion that never comes.  The transferred
+		 * count is in the OVERLAPPED's InternalHigh. */
+		DWORD nb = 0;
+		(void)GetOverlappedResult(fh, ov, &nb, FALSE);
+		a->res = (int)nb;
+		a->done = 1;
+		__os_free(ov);
+		return XTC_OK;
+	}
+
+	{
 		err = GetLastError();
 		if (err == ERROR_HANDLE_EOF) {
 			/* Read started at/after EOF: the request did not begin,
@@ -635,10 +674,10 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		}
 	}
 	/*
-	 * Whether ok==TRUE (synchronous) or ERROR_IO_PENDING, a
-	 * completion is posted to the port (we did not set
-	 * FILE_SKIP_COMPLETION_PORT_ON_SUCCESS on the file handle).  Track
-	 * the op so xtc_io_poll reaps it.  ov is now owned by the kernel.
+	 * ERROR_IO_PENDING: the op is genuinely asynchronous (an
+	 * overlapped handle), so its completion WILL be posted to the
+	 * port.  Track it so xtc_io_poll reaps it; ov is now owned by the
+	 * kernel until that completion is dequeued.
 	 */
 	if (io->n_aio >= io->cap_aio) {
 		int nc = io->cap_aio == 0 ? 8 : io->cap_aio * 2;
@@ -768,8 +807,11 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		struct __xtc_iocp_aio        *ar;
 
 		/* Wakeup: a PostQueuedCompletionStatus with a NULL
-		 * OVERLAPPED and the wakeup key.  Coalesce duplicates. */
+		 * OVERLAPPED and the wakeup key.  At most one is ever queued
+		 * (coalesced at post time), so clearing wakeup_pending here
+		 * re-arms the post side; emit a single XTC_IO_WAKEUP event. */
 		if (ce->lpCompletionKey == XTC_IOCP_KEY_WAKEUP || ov == NULL) {
+			atomic_store(&io->wakeup_pending, 0);
 			if (!wakeup_emitted && out_idx < max) {
 				(void)__xtc_io_drain_wakeup(io);
 				events[out_idx].tag = NULL;

@@ -27,6 +27,18 @@
 #include <unistd.h>
 #include <errno.h>
 
+#if defined(_WIN32)
+/* Windows has no POSIX pipe(); _pipe() in <io.h> is the equivalent.
+ * Use a binary pipe with a small buffer (this is a 1-byte wakeup
+ * channel).  Works under both MinGW and MSVC without the compat shim
+ * being on the include path. */
+#include <io.h>
+#include <fcntl.h>
+static __inline int xtc__blk_pipe(int fds[2])
+{ return _pipe(fds, 4096, _O_BINARY); }
+#define pipe(fds) xtc__blk_pipe(fds)
+#endif
+
 struct blk_work {
 	int            (*fn)(void *);
 	void            *arg;

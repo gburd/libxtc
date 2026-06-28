@@ -109,7 +109,50 @@ ARM64 running the x86_64 emulation layer, MSYS2 toolchains).
 | Clang64     | 22.1.4        | OK     | 50          | 48/48      | LLVM clang with MinGW runtime; 3 POSIX-only tests don't compile |
 | MSVC cl.exe | 14.50.35717   | OK     | smoke       | 5/5        | xtc.lib (45 objs incl. ml64 fcontext); standalone smoke test |
 
-## IOCP backend: round-2 native overlapped (COMPILED, NOT RUNTIME-VERIFIED)
+## IOCP backend: round-2 native overlapped (RUNTIME-VERIFIED 2026-06)
+
+**Update 2026-06 (santorini, Windows 10.0.26200 ARM64, MinGW gcc 13.2.0
+x86_64 under x64 emulation):** the IOCP backend has now been RUNTIME-
+verified on a real Windows host.  Built libxtc.a with MinGW
+(-DXTC_IO_BACKEND_IOCP=1, real winpthreads/winsock, no compat shim) and
+ran the IOCP-exercising munit suites + a standalone file-AIO driver:
+
+  - PASS: test_loop, test_task, test_timer, test_waker (4/4),
+    test_io_wakeup (3/3), test_io_lifecycle (3/3), test_net (3/3 -- the
+    AFD-poll socket path on real TCP sockets), and a standalone
+    file-AIO round-trip driver (write+fsync+read 8192 bytes, peer fiber
+    ran during the I/O).
+  - Three real bugs found and fixed this round (see below).
+  - BY CONTRACT (not a bug): test_io_events / test_io_register /
+    test_io_integration register a POSIX pipe fd; a Windows anonymous
+    pipe is not AFD-pollable, so xtc_io_reg_fd returns XTC_E_INTERNAL.
+    On Windows only SOCKETS are pollable via AFD -- these tests encode
+    a POSIX readiness assumption and need socket-based variants or a
+    Windows skip.  The m4 test_aio failed only because it uses a
+    /tmp/XXXXXX mkstemp template (a POSIX-ism); the standalone driver
+    using GetTempFileNameA exercises the same path and passes.
+
+### Bugs found and fixed by running on the host
+
+  1. Wakeup did not coalesce at POST time: every xtc_io_wakeup did a
+     PostQueuedCompletionStatus, so N wakeups queued N completions and
+     GetQueuedCompletionStatusEx only drained `max` per poll, leaving
+     residue that later polls re-reported (W3_coalesce failed).  Fixed
+     with an atomic wakeup_pending flag so at most one completion is in
+     flight (the epoll self-pipe / kqueue EVFILT_USER coalesce the same
+     way); the poll clears it on drain.
+  2. File AIO hung on a synchronous handle: a file opened with _open
+     (or CreateFile without FILE_FLAG_OVERLAPPED) completes ReadFile/
+     WriteFile synchronously and posts NO port completion, so the
+     parked fiber waited forever.  Fixed by setting
+     FILE_SKIP_COMPLETION_PORT_ON_SUCCESS on association and finishing
+     the op inline when the call returns TRUE (only ERROR_IO_PENDING is
+     tracked for a port completion).
+  3. blocking.c used POSIX pipe(), which does not link on Windows;
+     added a _pipe()-based wrapper (works under both MinGW and MSVC,
+     no compat-shim dependency).
+
+### Original round-2 design (now verified)
 
 `src/io/io_iocp.c` was rewritten from the round-1 WSAEventSelect +
 WaitForMultipleObjects readiness emulation (hard-capped at 64 handles)
