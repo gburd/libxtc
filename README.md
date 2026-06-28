@@ -50,10 +50,12 @@ faults, and stay inside a fixed resource budget on commodity hardware.
   AddressSanitizer, UBSan, and the forced-fcontext substrate that
   musl uses), as are macOS (Apple Silicon, the kqueue backend +
   ucontext substrate, full C munit suite) and Windows/MSVC (xtc.lib +
-  smoke test).  FreeBSD 15 (clang, kqueue) and illumos (SunOS 5.11,
-  gcc, the solaris port backend) were verified in PRIOR runs -- 283/283
-  and a clean C suite respectively -- but are not in per-commit CI, so
-  the current tree has not been re-verified on them.  Windows builds
+  smoke test).  FreeBSD 15 (clang, kqueue) was re-verified against the
+  current tree (full gmake check passes, including the native kqueue
+  file-AIO path).  illumos (SunOS 5.11, gcc, the solaris port backend)
+  was verified in PRIOR runs -- a clean C suite -- but the host was
+  not reachable for a current-tree re-verify.
+  Windows builds
   with all three of MinGW, Clang64, and MSVC.  The IOCP runtime (AFD
   socket poll, cross-thread wakeup, file AIO) was runtime-verified on a
   Windows host with MinGW (loop/task/timer/waker/net + file-AIO); the
@@ -184,12 +186,14 @@ tests on Linux** (the munit total spans the L0-L5 suites plus the 35
 OTP/gen_server cases), clean under AddressSanitizer and UBSan in CI.
 GitHub CI also runs the full C munit suite on **macOS** (Apple Silicon:
 kqueue + ucontext + GCD dispatch semaphores) and an **MSVC** xtc.lib +
-smoke build on **Windows** every commit.  FreeBSD and illumos were
-verified at matching numbers in PRIOR runs (FreeBSD 15 clang/kqueue
-283/283; illumos SunOS 5.11 gcc clean); they are NOT in per-commit CI,
-so the current tree has not been re-verified on those platforms.
-Windows also passes ~233 munit under MinGW and 48/48 of the buildable
-binaries under Clang64 in prior runs.
+smoke build on **Windows** every commit.  FreeBSD 15 (clang, kqueue)
+was re-verified against the current tree (full gmake check passes,
+including the native kqueue file-AIO path); the Windows IOCP runtime
+was runtime-verified on a host with MinGW.  illumos (SunOS 5.11, gcc)
+was clean in a PRIOR run but was not reachable for a current-tree
+re-verify.  None of FreeBSD/illumos/Windows-runtime is in per-commit
+CI yet.  Windows also passes ~233 munit under MinGW and 48/48 of the
+buildable binaries under Clang64 in prior runs.
 
 Honest gaps and known issues live in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 The full milestone roadmap is in [PLAN.md](PLAN.md).
