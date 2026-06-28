@@ -54,9 +54,10 @@ faults, and stay inside a fixed resource budget on commodity hardware.
   gcc, the solaris port backend) were verified in PRIOR runs -- 283/283
   and a clean C suite respectively -- but are not in per-commit CI, so
   the current tree has not been re-verified on them.  Windows builds
-  with all three of MinGW, Clang64, and MSVC, but only the MSVC
-  xtc.lib + smoke build runs in CI; the full runtime (IOCP, AFD poll)
-  is compiled, not yet runtime-verified on a Windows host.  macOS and
+  with all three of MinGW, Clang64, and MSVC.  The IOCP runtime (AFD
+  socket poll, cross-thread wakeup, file AIO) was runtime-verified on a
+  Windows host with MinGW (loop/task/timer/waker/net + file-AIO); the
+  per-commit Windows CI remains an MSVC xtc.lib + smoke build.  macOS and
   AIX have OS-layer ports; AIX awaits a test host.  See
   `docs/M_WINDOWS_MATRIX.md`,
   `docs/M_LIBC_MATRIX.md`, and PLAN.md for the per-platform status.
@@ -171,7 +172,7 @@ What's working today:
 | Layer | Status |
 |---|---|
 | L0 OS substrate | Linux, FreeBSD, illumos runtime-verified; Windows (MinGW/Clang64/MSVC) and macOS OS-layer ports build; AIX builds, awaits a test host. |
-| L1 I/O | io_uring, epoll, kqueue, poll, select runtime-verified.  IOCP (Windows), illumos port_*, and AIX pollset COMPILE and are code-reviewed but are not yet runtime-verified on their hosts (CI runs Linux + macOS at runtime; Windows is a build-only smoke). |
+| L1 I/O | io_uring, epoll, kqueue, poll, select runtime-verified.  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); illumos port_* and AIX pollset COMPILE and are code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux + macOS at runtime; Windows CI is a build-only smoke. |
 | L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written x86_64 fcontext (~7.6 ns/swap) + 7 more arches + ucontext fallback. |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
