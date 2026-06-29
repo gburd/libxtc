@@ -7,7 +7,7 @@ set -eu
 : "${XTC_SRC_DIR:?}"
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+trap 'cd / 2>/dev/null; rm -rf "$tmp"' EXIT
 
 mkdir -p "$tmp/src/inc" "$tmp/src/zzz" "$tmp/dist"
 cp "$XTC_SRC_DIR/dist/s_include"   "$tmp/dist/"

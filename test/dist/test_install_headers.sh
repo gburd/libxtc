@@ -18,7 +18,7 @@ XTC_SRC_DIR="${XTC_SRC_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 CC="${CC:-cc}"
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT INT TERM
+trap 'cd / 2>/dev/null; rm -rf "$work"' EXIT INT TERM
 
 prefix="$work/prefix"
 build="$work/build"

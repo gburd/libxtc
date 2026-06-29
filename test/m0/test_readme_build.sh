@@ -32,13 +32,25 @@ if [ -z "$b1" ]; then
 fi
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+trap 'cd / 2>/dev/null; rm -rf "$tmp"' EXIT
 cp -r "$XTC_SRC_DIR/." "$tmp/"
 cd "$tmp/dist" && autoreconf -i >/dev/null 2>&1
 cd "$tmp"
 
 # Run the B1 commands.  We expand $XTC_SRC for documentation clarity
 # in the README; in the test harness the cwd is a clone.
+#
+# Portability: the README documents the Linux build (`make -j$(nproc)`).
+# On hosts where /usr/bin/make is not GNU make (illumos ships Sun
+# dmake, which rejects GNU's -j flag) or `nproc` is absent, the caller
+# sets MAKE=gmake; we then rewrite the README's `make` token to $MAKE
+# and the `$(nproc)` token to a portable CPU count so the documented
+# sequence still exercises the build.
+if [ -n "${MAKE:-}" ] && [ "${MAKE}" != "make" ]; then
+	ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
+	b1=$(printf '%s\n' "$b1" \
+		| sed -e "s|\$(nproc)|${ncpu}|g" -e "s|^make |${MAKE} |g")
+fi
 ( eval "$b1" ) >"$tmp/b1.log" 2>&1 || {
 	echo "  [D1] FAIL: B1 commands from README failed" >&2
 	cat "$tmp/b1.log" >&2

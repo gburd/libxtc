@@ -18,7 +18,7 @@ fi
 
 CC="${CC:-cc}"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT INT TERM
+trap 'cd / 2>/dev/null; rm -rf "$work"' EXIT INT TERM
 
 python3 "$XTC_SRC_DIR/dist/mkamalgamation.py" \
 	--root "$XTC_SRC_DIR" --out "$work" >/dev/null
@@ -83,6 +83,12 @@ int main(void) {
 EOF
 
 LIBS="-pthread"
+# illumos/Solaris keep the socket + name-resolver functions in
+# libsocket/libnsl, not libc -- the net code in the amalgamation
+# (getaddrinfo/recvfrom/...) needs them at link time.
+case "$(uname -s 2>/dev/null)" in
+	SunOS) LIBS="$LIBS -lsocket -lnsl" ;;
+esac
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists liburing 2>/dev/null; then
 	LIBS="$LIBS $(pkg-config --libs liburing)"
 fi
@@ -117,6 +123,6 @@ if grep -q "__amalgtest__/src/" "$work/warn.err" 2>/dev/null; then
 fi
 
 echo "  [amalgamation] OK: xtc.c+xtc.h compile, demo links and runs;" \
-     "version $(grep -m1 XTC_VERSION_STRING "$work/xtc.h" | sed 's/.*\"\(.*\)\".*/\1/');" \
+     "version $(awk '/XTC_VERSION_STRING/{ if (match($0, /"[^"]*"/)) { print substr($0, RSTART+1, RLENGTH-2); exit } }' "$work/xtc.h");" \
      "line-remap=$remap_ok"
 exit 0

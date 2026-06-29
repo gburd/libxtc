@@ -9,7 +9,7 @@ set -eu
 : "${XTC_SRC_DIR:?}"
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+trap 'cd / 2>/dev/null; rm -rf "$tmp"' EXIT
 cp -r "$XTC_SRC_DIR/." "$tmp/"
 
 cd "$tmp/dist" && autoreconf -i >/dev/null 2>&1

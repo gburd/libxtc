@@ -22,6 +22,10 @@
 #include <sys/cpuset.h>
 #include <pthread_np.h>     /* pthread_setaffinity_np + cpuset_t */
 #endif
+#if defined(__sun) || defined(__illumos__)
+#include <sys/processor.h>  /* processor_bind, P_LWPID, P_MYID */
+#include <sys/procset.h>
+#endif
 
 #if defined(__APPLE__)
 #include <sys/qos.h>
@@ -214,6 +218,16 @@ __os_thread_set_affinity(int cpu)
 		CPU_ZERO(&set);
 		CPU_SET((unsigned)cpu, &set);
 		if (pthread_setaffinity_np(pthread_self(), sizeof set, &set)
+		    != 0)
+			return XTC_E_INTERNAL;
+		return XTC_OK;
+	}
+#elif defined(__sun) || defined(__illumos__)
+	{
+		/* illumos/Solaris: bind the calling LWP to a processor with
+		 * processor_bind (there is no pthread affinity API).  P_MYID
+		 * with P_LWPID is the running LWP. */
+		if (processor_bind(P_LWPID, P_MYID, (processorid_t)cpu, NULL)
 		    != 0)
 			return XTC_E_INTERNAL;
 		return XTC_OK;
