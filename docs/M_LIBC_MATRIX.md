@@ -6,15 +6,17 @@ area that varies.  This document records what's been verified.
 
 ## Tested matrix
 
-Configuration: a fresh out-of-source build per libc, with
-`--with-tls=none` and `--without-liburing` (where the dev headers
-aren't present in the test shell).
+Configuration: a fresh out-of-source build per libc / platform.
 
-| libc    | Version  | OS layer (m0/m1) | Higher layers | Notes |
-|---------|----------|:----------------:|:-------------:|-------|
-| glibc   | 2.40     |     33/33        |    266/266    | Default; the canonical Linux build |
-| musl    | 1.2.5    |     33/33        |    n/a        | Builds libxtc.a clean.  Higher-layer link fails because musl deliberately omits ucontext (swapcontext / getcontext / makecontext) |
-| MSVC    | -        |     untested     |     -         | Windows MinGW ucrt covered by the existing Windows build path; native MSVC not yet attempted |
+| libc / platform | Version | OS layer | Full suite | Notes |
+|-----------------|---------|:--------:|:----------:|-------|
+| glibc (Linux x86_64) | 2.40 | pass | pass | Canonical build; runtime-verified every commit in CI (gcc + clang, ASan, UBSan) |
+| musl (Linux x86_64) | 1.2.5 | pass | pass (forced-fcontext CI) | musl omits ucontext; the hand-written fcontext substrate covers it and the forced-fcontext CI job runs the suite every commit |
+| FreeBSD libc (15.0, clang, amd64) | 15.0 | pass | pass (gmake check) | Re-verified against the current tree; native kqueue file-AIO exercised |
+| illumos libc (SunOS 5.11, gcc, UltraSPARC v9) | illumos-31d3d510d0 | pass | pass (gmake check) | Big-endian sparcv9 -- validates byte order in codecs/hashing/atomics; event-ports backend, OpenSSL 3 |
+| macOS libSystem (Apple Silicon, clang) | -- | pass | pass | kqueue + ucontext; runtime-verified every commit in CI |
+| Windows ucrt (MinGW gcc 13.2) | UCRT | pass | IOCP runtime-verified on a host | loop/task/timer/wakeup/socket-poll/file-AIO; per-commit Windows CI is an MSVC xtc.lib + smoke build |
+| Windows MSVC (cl) | 14.x | builds (xtc.lib) | smoke | The munit harness uses GCC-isms cl rejects; a standalone smoke test stands in |
 
 ## glibc
 
