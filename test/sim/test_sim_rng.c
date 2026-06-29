@@ -22,6 +22,7 @@
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_sim.h"
+#include "os_time.h"
 
 #define N 64
 
@@ -116,12 +117,42 @@ test_rng_range(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Virtual clock controls __os_clock_mono deterministically, and
+ * reverting hands control back to the real monotonic clock. */
+static MunitResult
+test_virtual_clock(const MunitParameter p[], void *d)
+{
+	int64_t a = 0, b = 0;
+	(void)p; (void)d;
+
+	xtc_sim_clock_enable(1000000);
+	munit_assert_int(__os_clock_mono(&a), ==, XTC_OK);
+	munit_assert_int64(a, ==, 1000000);
+
+	xtc_sim_clock_advance(500);
+	munit_assert_int(__os_clock_mono(&b), ==, XTC_OK);
+	munit_assert_int64(b, ==, 1000500);
+
+	xtc_sim_clock_set(42);
+	munit_assert_int(__os_clock_mono(&a), ==, XTC_OK);
+	munit_assert_int64(a, ==, 42);
+
+	/* Disabled: real monotonic clock, which only moves forward. */
+	xtc_sim_clock_disable();
+	munit_assert_int(__os_clock_mono(&a), ==, XTC_OK);
+	munit_assert_int(__os_clock_mono(&b), ==, XTC_OK);
+	munit_assert_int64(b, >=, a);
+	munit_assert_int64(a, !=, 42);   /* not the virtual value anymore */
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/inactive_default",   test_inactive_by_default, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/seed_reproducible",  test_seed_reproducible,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/seed_differs",       test_seed_differs,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/streams_independent",test_streams_independent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/rng_range",          test_rng_range,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/virtual_clock",      test_virtual_clock,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/sim/rng", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

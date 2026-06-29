@@ -26,6 +26,14 @@ static _Atomic int      g_sim_active;
 static uint64_t         g_sim_seed;
 static uint64_t         g_sim_stream[XTC_SIM_RNG_NSTREAMS];
 
+/* Virtual (logical) clock.  When sim is active and the clock mode is
+ * VIRTUAL, __os_clock_mono returns this instead of the host monotonic
+ * clock, so time is a pure function of the schedule (hence the seed).
+ * The scheduler advances it (later phase); phase 0/1 just establish the
+ * seam and let a test drive it manually. */
+static _Atomic int      g_vclock_on;
+static _Atomic int64_t  g_vclock_ns;
+
 /* splitmix64: the standard finalizer used to derive independent streams
  * from a seed (the 0x9E3779B97F4A7C15 increment is the golden-ratio
  * constant already used elsewhere in the tree). */
@@ -87,4 +95,55 @@ __xtc_sim_rng_range(int s, uint64_t bound)
 	 * 64-bit draw with a small bound is negligible and -- crucially --
 	 * deterministic. */
 	return __xtc_sim_rng(s) % bound;
+}
+
+/* ---- virtual clock ---- */
+
+/* PUBLIC: void xtc_sim_clock_enable __P((int64_t)); */
+void
+xtc_sim_clock_enable(int64_t start_ns)
+{
+	atomic_store_explicit(&g_vclock_ns, start_ns, memory_order_relaxed);
+	atomic_store_explicit(&g_vclock_on, 1, memory_order_release);
+}
+
+/* PUBLIC: void xtc_sim_clock_disable __P((void)); */
+void
+xtc_sim_clock_disable(void)
+{
+	atomic_store_explicit(&g_vclock_on, 0, memory_order_release);
+}
+
+/* PUBLIC: void xtc_sim_clock_advance __P((int64_t)); */
+void
+xtc_sim_clock_advance(int64_t delta_ns)
+{
+	if (delta_ns > 0)
+		(void)atomic_fetch_add_explicit(&g_vclock_ns, delta_ns,
+		    memory_order_relaxed);
+}
+
+/* PUBLIC: void xtc_sim_clock_set __P((int64_t)); */
+void
+xtc_sim_clock_set(int64_t ns)
+{
+	atomic_store_explicit(&g_vclock_ns, ns, memory_order_relaxed);
+}
+
+/*
+ * Query the virtual clock.  Returns 1 and writes *out_ns when the
+ * virtual clock is active; returns 0 otherwise (caller uses the host
+ * clock).  __os_clock_mono consults this -- the single seam point.
+ *
+ * PUBLIC: int __xtc_sim_vclock __P((int64_t *));
+ */
+int
+__xtc_sim_vclock(int64_t *out_ns)
+{
+	if (!atomic_load_explicit(&g_vclock_on, memory_order_acquire))
+		return 0;
+	if (out_ns != NULL)
+		*out_ns = atomic_load_explicit(&g_vclock_ns,
+		    memory_order_relaxed);
+	return 1;
 }
