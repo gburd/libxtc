@@ -46,6 +46,11 @@ enum xtc_sim_stream {
  * PUBLIC: void     xtc_sim_deactivate __P((void));
  * PUBLIC: uint64_t __xtc_sim_rng __P((int));
  * PUBLIC: uint64_t __xtc_sim_rng_range __P((int, uint64_t));
+ * PUBLIC: void     xtc_sim_clock_enable __P((int64_t));
+ * PUBLIC: void     xtc_sim_clock_disable __P((void));
+ * PUBLIC: void     xtc_sim_clock_advance __P((int64_t));
+ * PUBLIC: void     xtc_sim_clock_set __P((int64_t));
+ * PUBLIC: int      __xtc_sim_vclock __P((int64_t *));
  */
 int      __xtc_sim_active(void);
 
@@ -62,5 +67,17 @@ uint64_t __xtc_sim_rng(int s);
 /* Convenience: a uniform value in [0, bound) from stream `s`.  bound==0
  * returns 0. */
 uint64_t __xtc_sim_rng_range(int s, uint64_t bound);
+
+/* Virtual (logical) clock.  When enabled, __os_clock_mono returns the
+ * virtual time instead of the host monotonic clock, so time is a pure
+ * function of the schedule.  Test/scheduler-only. */
+void     xtc_sim_clock_enable(int64_t start_ns);
+void     xtc_sim_clock_disable(void);
+void     xtc_sim_clock_advance(int64_t delta_ns);
+void     xtc_sim_clock_set(int64_t ns);
+
+/* Query the virtual clock: returns 1 and writes *out_ns when active,
+ * 0 otherwise.  The single seam __os_clock_mono consults. */
+int      __xtc_sim_vclock(int64_t *out_ns);
 
 #endif /* XTC_SIM_H */

@@ -14,6 +14,15 @@
 #include <errno.h>
 #include <time.h>
 
+/* The DST virtual-clock seam (src/evt/sim.c).  Forward-declared here
+ * rather than including the L2 xtc_sim.h from this L0 file: when the
+ * virtual clock is active it returns the logical time so deterministic
+ * simulation gets reproducible timestamps; otherwise __os_clock_mono
+ * reads the host monotonic clock.  sim.c is always linked into
+ * libxtc, so the symbol always resolves; the check is a single relaxed
+ * atomic load and is dormant in production. */
+int __xtc_sim_vclock(int64_t *out_ns);
+
 #if defined(_WIN32)
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -32,6 +41,8 @@ __os_clock_mono(int64_t *out)
 	LARGE_INTEGER c, f;
 	if (out == NULL)
 		return XTC_E_INVAL;
+	if (__xtc_sim_vclock(out))
+		return XTC_OK;
 	if (!QueryPerformanceCounter(&c) || !QueryPerformanceFrequency(&f)
 	    || f.QuadPart == 0)
 		return XTC_E_INTERNAL;
@@ -127,6 +138,8 @@ __os_clock_mono(int64_t *out)
 	uint64_t ns;
 	if (out == NULL)
 		return XTC_E_INVAL;
+	if (__xtc_sim_vclock(out))
+		return XTC_OK;
 	ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 	if (ns == 0)
 		return XTC_E_INTERNAL;
@@ -140,6 +153,8 @@ __os_clock_mono(int64_t *out)
 	struct timespec ts;
 	if (out == NULL)
 		return XTC_E_INVAL;
+	if (__xtc_sim_vclock(out))
+		return XTC_OK;
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
 		return XTC_E_INTERNAL;
 	return __ts_to_ns(&ts, out);

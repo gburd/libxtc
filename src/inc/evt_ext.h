@@ -5,6 +5,7 @@
 #define EVT_EXT_H
 
 int __xtc_sim_active __P((void));
+int __xtc_sim_vclock __P((int64_t *));
 int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
 int xtc_await __P((xtc_task_t *, intptr_t *));
 int xtc_exec_async __P((xtc_exec_t *, xtc_coro_fn, void *, xtc_task_t **));
@@ -39,6 +40,10 @@ uint64_t __xtc_sim_rng_range __P((int, uint64_t));
 uint64_t xtc_yield_due_count __P((const xtc_loop_t *));
 void xtc_exec_set_service_mode __P((xtc_exec_t *, int));
 void xtc_sim_activate __P((uint64_t));
+void xtc_sim_clock_advance __P((int64_t));
+void xtc_sim_clock_disable __P((void));
+void xtc_sim_clock_enable __P((int64_t));
+void xtc_sim_clock_set __P((int64_t));
 void xtc_sim_deactivate __P((void));
 void xtc_yield __P((void));
 void xtc_yield_set_budget __P((xtc_loop_t *, int64_t));
