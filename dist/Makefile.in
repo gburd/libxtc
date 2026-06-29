@@ -81,6 +81,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/io/io_solaris.c \
 	$(srcdir)/../src/io/io_aix.c \
 	$(srcdir)/../src/io/io_select.c \
+	$(srcdir)/../src/io/io_sim.c \
 	$(srcdir)/../src/evt/loop.c \
 	$(srcdir)/../src/evt/task.c \
 	$(srcdir)/../src/evt/timer.c \
@@ -148,6 +149,7 @@ LIB_OBJS	= \
 	io_solaris.o \
 	io_aix.o \
 	io_select.o \
+	io_sim.o \
 	loop.o \
 	task.o \
 	timer.o \
@@ -457,6 +459,9 @@ io_aix.o: $(srcdir)/../src/io/io_aix.c xtc_config.h
 
 io_select.o: $(srcdir)/../src/io/io_select.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_select.c
+
+io_sim.o: $(srcdir)/../src/io/io_sim.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_sim.c
 
 loop.o: $(srcdir)/../src/evt/loop.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/loop.c

@@ -103,7 +103,7 @@ AC_SEARCH_LIBS([shm_open], [rt], [], [])
 # L1 I/O backend selection.
 # -------------------------------------------------------------------------
 AC_ARG_WITH([io-backend],
-  [AS_HELP_STRING([--with-io-backend=auto|poll|epoll|uring|kqueue|iocp|solaris|aix],
+  [AS_HELP_STRING([--with-io-backend=auto|poll|epoll|uring|kqueue|iocp|solaris|aix|sim],
     [Pick the L1 I/O backend (default: auto).])],
   [xtc_io_backend=$withval], [xtc_io_backend=auto])
 
@@ -255,6 +255,7 @@ case "$xtc_io_backend" in
       AC_MSG_ERROR([--with-io-backend=kqueue requires <sys/event.h>])
     fi ;;
   poll|iocp|solaris|aix|select) ;;
+  sim) ;;   # deterministic-simulation backend (DST); test-only, no platform deps
   *) AC_MSG_ERROR([invalid --with-io-backend=$xtc_io_backend]) ;;
 esac
 AC_MSG_RESULT([$xtc_io_backend])
@@ -288,7 +289,8 @@ AS_CASE([$xtc_io_backend],
   [iocp],    [AC_DEFINE([XTC_IO_BACKEND_IOCP],    1, [Windows IOCP backend (stub)])],
   [solaris], [AC_DEFINE([XTC_IO_BACKEND_SOLARIS], 1, [Solaris event ports backend (stub)])],
   [aix],     [AC_DEFINE([XTC_IO_BACKEND_AIX],     1, [AIX pollset backend (stub)])],
-  [select],  [AC_DEFINE([XTC_IO_BACKEND_SELECT],  1, [POSIX select(2) backend (fallback)])])
+  [select],  [AC_DEFINE([XTC_IO_BACKEND_SELECT],  1, [POSIX select(2) backend (fallback)])],
+  [sim],     [AC_DEFINE([XTC_IO_BACKEND_SIM],     1, [Deterministic-simulation backend (DST; test-only)])])
 
 # -------------------------------------------------------------------------
 # TLS backend selection.

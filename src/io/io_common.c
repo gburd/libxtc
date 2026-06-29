@@ -68,10 +68,12 @@ xtc_io_init(xtc_io_t **out)
 	io->wakeup_rfd = -1;
 	io->wakeup_wfd = -1;
 
-#if defined(_WIN32) || defined(XTC_IO_BACKEND_KQUEUE)
+#if defined(_WIN32) || defined(XTC_IO_BACKEND_KQUEUE) || \
+    defined(XTC_IO_BACKEND_SIM)
 	/* No self-pipe needed:
 	 *   - Windows IOCP wakes via PostQueuedCompletionStatus.
 	 *   - kqueue wakes via an EVFILT_USER event (see io_kqueue.c).
+	 *   - the sim backend wakes via an in-process flag (io_sim.c).
 	 * __xtc_io_register_wakeup is still called below for symmetry;
 	 * wakeup_rfd/wfd stay -1. */
 #else
@@ -163,6 +165,11 @@ int __xtc_io_iocp_wakeup_post(xtc_io_t *io);
 /* Forward decl for the kqueue backend's EVFILT_USER trigger. */
 int __xtc_io_kqueue_wakeup_post(xtc_io_t *io);
 #endif
+#if defined(XTC_IO_BACKEND_SIM)
+/* Forward decls for the simulation backend's in-process wakeup. */
+int __xtc_io_sim_wakeup_post(xtc_io_t *io);
+int __xtc_io_sim_wakeup_drain(xtc_io_t *io);
+#endif
 
 /*
  * PUBLIC: int xtc_io_wakeup __P((xtc_io_t *));
@@ -176,6 +183,8 @@ xtc_io_wakeup(xtc_io_t *io)
 	return __xtc_io_iocp_wakeup_post(io);
 #elif defined(XTC_IO_BACKEND_KQUEUE)
 	return __xtc_io_kqueue_wakeup_post(io);
+#elif defined(XTC_IO_BACKEND_SIM)
+	return __xtc_io_sim_wakeup_post(io);
 #else
 	{
 		unsigned char b = 1;
@@ -207,6 +216,8 @@ __xtc_io_drain_wakeup(xtc_io_t *io)
 	 *     auto-resets once xtc_io_poll reports it. */
 	(void)io;
 	return XTC_OK;
+#elif defined(XTC_IO_BACKEND_SIM)
+	return __xtc_io_sim_wakeup_drain(io);
 #else
 	unsigned char buf[64];
 	for (;;) {
@@ -243,12 +254,15 @@ xtc_io_backend_name(void)
 	return "select";
 #elif defined(XTC_IO_BACKEND_POLL)
 	return "poll";
+#elif defined(XTC_IO_BACKEND_SIM)
+	return "sim";
 #else
 	return "unknown";
 #endif
 }
 
 #if !defined(XTC_IO_BACKEND_URING) && !defined(XTC_IO_BACKEND_IOCP) && \
+    !defined(XTC_IO_BACKEND_SIM) && \
     !defined(XTC_IO_BACKEND_KQUEUE)
 /* PUBLIC: int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *)); */
 /*
