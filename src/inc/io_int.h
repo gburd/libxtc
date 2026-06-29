@@ -110,8 +110,13 @@ struct __xtc_uring_fd {
 #include <poll.h>
 #elif defined(XTC_IO_BACKEND_SELECT)
 #include <sys/select.h>
+#elif defined(XTC_IO_BACKEND_SIM)
+/* Deterministic-simulation backend (DST): no kernel poller.  Readiness
+ * and file-AIO completions come from a scripted in-process event store
+ * driven against the virtual clock; the wakeup is an in-process flag.
+ * See src/io/io_sim.c and docs/M_DST.md. */
 #else
-# error "M2 build expects XTC_IO_BACKEND_{POLL,EPOLL,URING,KQUEUE,IOCP,SOLARIS,AIX,SELECT} to be defined"
+# error "M2 build expects XTC_IO_BACKEND_{POLL,EPOLL,URING,KQUEUE,IOCP,SOLARIS,AIX,SELECT,SIM} to be defined"
 #endif
 
 struct xtc_io {
@@ -165,6 +170,11 @@ struct xtc_io {
 	void         **tags;
 	int            n;
 	int            cap;
+#elif defined(XTC_IO_BACKEND_SIM)
+	/* Registered fds (tag map) for readiness simulation, a scripted
+	 * event queue ordered by virtual-time due, and an in-process
+	 * wakeup flag.  Defined in io_sim.c; opaque here. */
+	struct __xtc_sim_io *sim;
 #endif
 };
 

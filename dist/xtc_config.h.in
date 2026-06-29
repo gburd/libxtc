@@ -53,6 +53,9 @@
    backward compatibility; new code need not use it. */
 #undef STDC_HEADERS
 
+/* Define to enable runtime diagnostic assertions. */
+#undef XTC_DIAGNOSTIC
+
 /* Define to 1 if dladdr() is available for symbolization */
 #undef XTC_HAVE_DLADDR
 
@@ -85,6 +88,9 @@
 
 /* POSIX select(2) backend (fallback) */
 #undef XTC_IO_BACKEND_SELECT
+
+/* Deterministic-simulation backend (DST; test-only) */
+#undef XTC_IO_BACKEND_SIM
 
 /* Solaris event ports backend (stub) */
 #undef XTC_IO_BACKEND_SOLARIS
@@ -121,6 +127,3 @@
 
 /* Library version as SemVer string */
 #undef XTC_VERSION_STRING
-
-/* Define to enable runtime diagnostic assertions. */
-#undef XTC_DIAGNOSTIC
