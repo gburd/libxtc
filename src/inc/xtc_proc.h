@@ -376,6 +376,70 @@ int       xtc_proc_at_exit(void (*fn)(void *), void *arg);
  * block itself faults).  Returns NULL off a proc.  See xtc_mctx.h. */
 struct xtc_mctx *xtc_proc_mctx(void);
 
+/*
+ * Recovery resource registry.
+ *
+ * A contained fault unwinds the faulting fiber's call stack but frees
+ * NONE of the resources the proc held -- locks stay locked, fds stay
+ * open, memory arenas stay live -- and a leaked lock can wedge every
+ * peer.  Register the resources a proc acquires so the runtime can
+ * release them automatically:
+ *
+ *   xtc_proc_recovery_track_fd(fd);          // close(fd) on cleanup
+ *   xtc_proc_recovery_track_mctx(mctx);      // xtc_mctx_reset(mctx)
+ *   xtc_proc_recovery_track_locks(mgr, locker, release_all);
+ *   xtc_proc_recovery_track(fn, arg);        // generic fn(arg)
+ *
+ * xtc_proc_recovery_cleanup() releases everything registered (LIFO).
+ * It is the DEFAULT recovery action and is ALSO callable from a custom
+ * recovery block to finish the standard bits after the block's own
+ * application-specific unwinding:
+ *
+ *   int sig = xtc_proc_recovery_arm();
+ *   if (sig != 0) {                 // recovered from a contained fault
+ *       my_app_abort_txn();          // custom unwinding first
+ *       xtc_proc_recovery_cleanup();  // then the registered standard bits
+ *       xtc_exit_self(sig);
+ *   }
+ *
+ * Or use xtc_proc_recovery_arm_clean(), which performs the cleanup and
+ * xtc_exit_self automatically on the recovered branch (no custom block).
+ *
+ * Registered resources are ALSO released automatically on a NORMAL
+ * proc exit (before the at-exit hooks), so a proc that simply returns
+ * without explicitly releasing still cleans up.  Use
+ * xtc_proc_recovery_untrack_fd() when the proc releases an fd itself,
+ * to avoid a double close on a later recovery.
+ *
+ * Each registration returns XTC_OK, XTC_E_RESOURCE past the per-proc
+ * limit, or XTC_E_INVAL off a proc / on a bad argument.
+ */
+int  xtc_proc_recovery_track_fd(int fd);
+int  xtc_proc_recovery_track_mctx(struct xtc_mctx *mctx);
+int  xtc_proc_recovery_track_locks(void *mgr, uint64_t locker,
+                                   void (*release_all)(void *, uint64_t));
+int  xtc_proc_recovery_track(void (*fn)(void *), void *arg);
+int  xtc_proc_recovery_untrack_fd(int fd);
+void xtc_proc_recovery_cleanup(void);
+
+/*
+ * Arm a recovery frame whose default recovered action is to release
+ * all tracked resources and exit the proc with the fault code.  On the
+ * normal (arming) pass it returns 0 and execution continues into the
+ * session work; on a contained fault it does NOT return -- it runs
+ * xtc_proc_recovery_cleanup() then xtc_exit_self(sig).  Use this when
+ * the registered resources are the whole cleanup story; use the bare
+ * xtc_proc_recovery_arm() + a custom block when they are not.
+ */
+#define xtc_proc_recovery_arm_clean()                       \
+	do {                                                \
+		int __xtc_rsig = xtc_proc_recovery_arm();   \
+		if (__xtc_rsig != 0) {                      \
+			xtc_proc_recovery_cleanup();        \
+			(void)xtc_exit_self(__xtc_rsig);    \
+		}                                           \
+	} while (0)
+
 /* Decode a DOWN signal (delivered to a monitor when its target exits)
  * into the target pid and exit reason, without hand-rolling the
  * on-wire layout.  The DOWN/EXIT signals are sent packed; a mismatched

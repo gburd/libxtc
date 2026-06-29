@@ -18,6 +18,7 @@
 #include "xtc_loop.h"
 #include "xtc_async.h"
 #include "xtc_proc.h"
+#include "xtc_mctx.h"
 #include "xtc_int.h"
 
 /* Helper: a "shared" pointer the test main thread uses to read out
@@ -536,6 +537,118 @@ flt_watcher(void *arg)
 	__os_free(msg);
 }
 
+/* Recovery resource registry: a proc registers an fd, a memory
+ * context, a lock-manager release-all, and a generic callback, then
+ * faults.  xtc_proc_recovery_arm_clean's recovered branch releases all
+ * four automatically (LIFO) -- the embedder writes no cleanup code. */
+struct rec_state {
+	int saw_down;
+	int reason;
+	int cb_ran;          /* generic callback released */
+	int lock_released;   /* lock-manager release-all ran */
+	int mctx_reset;      /* mctx reset ran (via a register_cleanup hook) */
+	int fd;              /* a real pipe fd; closed on recovery */
+};
+static struct rec_state g_rec;
+
+static void
+rec_cb(void *arg)
+{
+	struct rec_state *s = arg;
+	s->cb_ran = 1;
+}
+
+/* Stands in for xtc_lock_release_all(mgr, locker): the track_locks
+ * callback shape is void(*)(void *mgr, uint64_t locker). */
+static void
+rec_release_all(void *mgr, uint64_t locker)
+{
+	struct rec_state *s = mgr;
+	(void)locker;
+	s->lock_released = 1;
+}
+
+static void
+rec_mctx_cleanup(void *arg)
+{
+	struct rec_state *s = arg;
+	s->mctx_reset = 1;
+}
+
+static void
+rec_faulter(void *arg)
+{
+	struct rec_state *s = arg;
+	void *m = NULL; size_t n = 0;
+	struct xtc_mctx *mctx;
+	int pfd[2];
+
+	/* Arm with the auto-cleanup convenience: on a contained fault it
+	 * releases every tracked resource and exits -- no custom block. */
+	xtc_proc_recovery_arm_clean();
+
+	/* Register the resources this "session" holds. */
+	if (pipe(pfd) == 0) {
+		s->fd = pfd[1];
+		(void)xtc_proc_recovery_track_fd(pfd[1]);
+		(void)close(pfd[0]);
+	}
+	mctx = xtc_proc_mctx();
+	if (mctx != NULL) {
+		(void)xtc_mctx_register_cleanup(mctx, rec_mctx_cleanup, s);
+		(void)xtc_proc_recovery_track_mctx(mctx);
+	}
+	(void)xtc_proc_recovery_track_locks(s, 7u, rec_release_all);
+	(void)xtc_proc_recovery_track(rec_cb, s);
+
+	/* Wait for the monitor, then fault. */
+	if (xtc_recv(&m, &n, 2LL * 1000 * 1000 * 1000) == XTC_OK && m)
+		__os_free(m);
+	{
+		volatile uintptr_t addr = 0x10;
+		*(volatile int *)addr = 1;     /* boom */
+	}
+}
+
+static MunitResult
+test_recovery_registry(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t faulter, watcher;
+	(void)p; (void)d;
+
+#if defined(__SANITIZE_ADDRESS__)
+	return MUNIT_SKIP;   /* ASan owns SIGSEGV */
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;
+#  endif
+#endif
+	memset(&g_rec, 0, sizeof g_rec);
+	g_rec.fd = -1;
+
+	munit_assert_int(xtc_fault_guard_install(), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, flt_watcher, &g_rec, NULL,
+	    &watcher), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, rec_faulter, &g_rec, NULL,
+	    &faulter), ==, XTC_OK);
+	munit_assert_int(xtc_send(watcher, &faulter, sizeof faulter),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	/* All four registered resources were released on the contained
+	 * fault, with no hand-written cleanup in the recovery block. */
+	munit_assert_int(g_rec.cb_ran, ==, 1);
+	munit_assert_int(g_rec.lock_released, ==, 1);
+	munit_assert_int(g_rec.mctx_reset, ==, 1);
+	/* The tracked fd was closed: a second close fails with EBADF. */
+	munit_assert_int(close(g_rec.fd), ==, -1);
+	munit_assert_int(g_rec.saw_down, ==, 1);   /* monitor observed it */
+	return MUNIT_OK;
+}
+
 static MunitResult
 test_fault_contain(const MunitParameter p[], void *d)
 {
@@ -675,6 +788,7 @@ static MunitTest tests[] = {
 	{ "/mailbox_stats",     test_mailbox_stats,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/save_queue_cap",    test_save_queue_cap,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fault_contain",     test_fault_contain,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/recovery_registry", test_recovery_registry, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fault_escalate",    test_fault_escalate,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/proc_at_exit",      test_proc_at_exit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

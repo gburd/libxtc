@@ -25,6 +25,7 @@
 #include "xtc_trace.h"
 #include "xtc_slab.h"
 #include "xtc_mctx.h"
+#include "xtc_fs.h"     /* xtc_fs_close: portable fd close for recovery */
 #include <stdio.h>
 #include <pthread.h>
 #include <setjmp.h>
@@ -333,6 +334,31 @@ struct xtc_proc {
 	int           n_at_exit;
 	struct xtc_mctx *proc_mctx;   /* lazily created by xtc_proc_mctx() */
 
+	/* Recovery resource registry: the resources a proc holds that must
+	 * be released if a contained fault unwinds its stack (the stack
+	 * unwind via siglongjmp/VEH frees no locks, fds, or pins).  Each
+	 * record names a built-in kind (fd close, mctx reset, lock-manager
+	 * release-all) or a generic callback.  xtc_proc_recovery_cleanup()
+	 * releases them LIFO; it is the default recovery action and is also
+	 * callable from a custom recovery block to finish the standard
+	 * bits.  Released records are also run on the normal exit path so a
+	 * proc that returns without explicitly releasing still cleans up. */
+#define XTC_PROC_MAX_RECOVERY 16
+/* Recovery-resource kinds (struct xtc_recov_rec.kind). */
+#define XTC_RECOV_FD    1   /* close(fd) */
+#define XTC_RECOV_MCTX  2   /* xtc_mctx_reset(ptr) */
+#define XTC_RECOV_LOCKS 3   /* lock-manager release-all (fn(ptr) with u64=locker) */
+#define XTC_RECOV_CB    4   /* generic fn(ptr) */
+	struct xtc_recov_rec {
+		int   kind;       /* XTC_RECOV_* */
+		int   fd;         /* XTC_RECOV_FD */
+		void *ptr;        /* mctx (RESET) / lockmgr (LOCKS) / arg (CB) */
+		uint64_t u64;     /* locker id (LOCKS) */
+		void (*fn)(void *); /* XTC_RECOV_CB */
+		void (*lock_release)(void *, uint64_t); /* XTC_RECOV_LOCKS */
+	} recov[XTC_PROC_MAX_RECOVERY];
+	int           n_recov;
+
 	/* Asynchronous kill (cross-process exit signal).  Set by
 	 * xtc_exit_pid; checked at every yield/recv parking point.
 	 * The flag carries the reason+1 so 0 means "no kill pending". */
@@ -604,6 +630,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 /* Forward decls. */
 static void __notify_links_and_monitors(struct xtc_proc *p);
 static void __run_proc_at_exit(struct xtc_proc *p);
+static void __recov_release_all(struct xtc_proc *p);
 
 static intptr_t
 __proc_entry(void *arg)
@@ -1672,6 +1699,9 @@ static void
 __run_proc_at_exit(struct xtc_proc *p)
 {
 	int i;
+	/* Release any resources the proc registered for recovery but did
+	 * not explicitly release (LIFO), before the at-exit hooks. */
+	__recov_release_all(p);
 	for (i = p->n_at_exit - 1; i >= 0; i--)
 		p->at_exit[i].fn(p->at_exit[i].arg);
 	p->n_at_exit = 0;
@@ -1691,6 +1721,156 @@ xtc_proc_mctx(void)
 	if (p->proc_mctx == NULL)
 		(void)xtc_mctx_create(NULL, "proc", 0, &p->proc_mctx);
 	return p->proc_mctx;
+}
+
+/* ---------- recovery resource registry ----------
+ *
+ * A contained fault unwinds the faulting fiber's call stack (siglongjmp
+ * on POSIX, a CONTEXT restore via the VEH on Windows) but frees NONE of
+ * the resources the proc held -- locks stay locked, fds stay open,
+ * memory contexts keep their arenas, buffer pins stay pinned -- and a
+ * leaked lock can wedge every peer that later contends it.  Before the
+ * fix, the recovery block had to remember and release each one by hand.
+ *
+ * These calls let a proc REGISTER the resources it acquires so the
+ * runtime can release them automatically.  xtc_proc_recovery_cleanup()
+ * releases everything registered, LIFO, and is:
+ *   - the DEFAULT recovery action (xtc_proc_recovery_arm's recovered
+ *     branch can just call it, or use the xtc_proc_recovery_arm_clean
+ *     convenience that does cleanup + exit), and
+ *   - callable from a CUSTOM recovery block to finish the standard
+ *     bits after the block's own application-specific unwinding.
+ * It also runs automatically on the normal exit path (before the
+ * at-exit hooks), so a proc that simply returns still releases what it
+ * registered.
+ */
+
+static int
+__recov_push(struct xtc_proc *p, struct xtc_recov_rec r)
+{
+	if (p == NULL)
+		return XTC_E_INVAL;
+	if (p->n_recov >= XTC_PROC_MAX_RECOVERY)
+		return XTC_E_RESOURCE;
+	p->recov[p->n_recov++] = r;
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_proc_recovery_track_fd __P((int)); */
+int
+xtc_proc_recovery_track_fd(int fd)
+{
+	struct xtc_recov_rec r;
+	if (fd < 0)
+		return XTC_E_INVAL;
+	memset(&r, 0, sizeof r);
+	r.kind = XTC_RECOV_FD;
+	r.fd = fd;
+	return __recov_push(__current_proc, r);
+}
+
+/* PUBLIC: int xtc_proc_recovery_track_mctx __P((struct xtc_mctx *)); */
+int
+xtc_proc_recovery_track_mctx(struct xtc_mctx *mctx)
+{
+	struct xtc_recov_rec r;
+	if (mctx == NULL)
+		return XTC_E_INVAL;
+	memset(&r, 0, sizeof r);
+	r.kind = XTC_RECOV_MCTX;
+	r.ptr = mctx;
+	return __recov_push(__current_proc, r);
+}
+
+/* PUBLIC: int xtc_proc_recovery_track_locks __P((void *, uint64_t, void (*)(void *, uint64_t))); */
+int
+xtc_proc_recovery_track_locks(void *mgr, uint64_t locker,
+                              void (*release_all)(void *, uint64_t))
+{
+	struct xtc_recov_rec r;
+	if (mgr == NULL || release_all == NULL)
+		return XTC_E_INVAL;
+	memset(&r, 0, sizeof r);
+	r.kind = XTC_RECOV_LOCKS;
+	r.ptr = mgr;
+	r.u64 = locker;
+	r.lock_release = release_all;
+	return __recov_push(__current_proc, r);
+}
+
+/* PUBLIC: int xtc_proc_recovery_track __P((void (*)(void *), void *)); */
+int
+xtc_proc_recovery_track(void (*fn)(void *), void *arg)
+{
+	struct xtc_recov_rec r;
+	if (fn == NULL)
+		return XTC_E_INVAL;
+	memset(&r, 0, sizeof r);
+	r.kind = XTC_RECOV_CB;
+	r.fn = fn;
+	r.ptr = arg;
+	return __recov_push(__current_proc, r);
+}
+
+/* Release every tracked resource (LIFO) and forget them.  Shared by
+ * the public cleanup call and the proc exit path. */
+static void
+__recov_release_all(struct xtc_proc *p)
+{
+	int i;
+	if (p == NULL)
+		return;
+	for (i = p->n_recov - 1; i >= 0; i--) {
+		struct xtc_recov_rec *r = &p->recov[i];
+		switch (r->kind) {
+		case XTC_RECOV_FD:
+			if (r->fd >= 0) (void)xtc_fs_close(r->fd);
+			break;
+		case XTC_RECOV_MCTX:
+			if (r->ptr != NULL)
+				xtc_mctx_reset((struct xtc_mctx *)r->ptr);
+			break;
+		case XTC_RECOV_LOCKS:
+			if (r->lock_release != NULL && r->ptr != NULL)
+				r->lock_release(r->ptr, r->u64);
+			break;
+		case XTC_RECOV_CB:
+			if (r->fn != NULL) r->fn(r->ptr);
+			break;
+		default:
+			break;
+		}
+	}
+	p->n_recov = 0;
+}
+
+/* PUBLIC: void xtc_proc_recovery_cleanup __P((void)); */
+void
+xtc_proc_recovery_cleanup(void)
+{
+	__recov_release_all(__current_proc);
+}
+
+/* PUBLIC: int xtc_proc_recovery_untrack_fd __P((int)); */
+int
+xtc_proc_recovery_untrack_fd(int fd)
+{
+	/* Drop the most-recent FD record matching `fd` so a resource the
+	 * proc released NORMALLY is not double-released on recovery. */
+	struct xtc_proc *p = __current_proc;
+	int i;
+	if (p == NULL)
+		return XTC_E_INVAL;
+	for (i = p->n_recov - 1; i >= 0; i--) {
+		if (p->recov[i].kind == XTC_RECOV_FD && p->recov[i].fd == fd) {
+			int j;
+			for (j = i; j < p->n_recov - 1; j++)
+				p->recov[j] = p->recov[j + 1];
+			p->n_recov--;
+			return XTC_OK;
+		}
+	}
+	return XTC_E_NOTFOUND;
 }
 
 /* PUBLIC: int xtc_down_decode __P((const void *, size_t, xtc_pid_t *, int *)); */
