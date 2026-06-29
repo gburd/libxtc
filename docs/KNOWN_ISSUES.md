@@ -99,8 +99,15 @@ fiber-attributable hardware fault by restoring the CONTEXT captured at
 `xtc_proc_recovery_arm()` (via `EXCEPTION_CONTINUE_EXECUTION` -- no
 stack unwinding, which is what makes it safe on a fiber stack; a
 `longjmp` driven from a VEH reliably corrupted the CRT heap).
-Validated on the MSVC build host: the smoke test triggers a real
-access violation, the VEH contains it, and the process recovers.
+Runtime-verified on a Windows host (santorini, MinGW gcc) by a
+dedicated driver: a proc arms recovery, registers resources, and takes
+a real access violation -- the VEH contains it (exit 0), the recovery
+resource registry releases the proc's fd + callback automatically, and
+the monitor observes DOWN(reason).  A companion driver confirms the
+ESCALATION half of the contract: a fault inside a critical section is
+NOT contained -- the VEH returns EXCEPTION_CONTINUE_SEARCH and the
+process dies with 0xC0000005 (EXCEPTION_ACCESS_VIOLATION), preserving
+the PG critical-section PANIC semantics.
 While wiring this up, a pre-existing Windows double-free was found and
 fixed in `coro_winfiber.c` (the done branch destroyed the coro
 eagerly *and* via the task cleanup at `loop_fini`), which had made any

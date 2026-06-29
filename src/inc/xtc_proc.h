@@ -255,15 +255,20 @@ int       xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out);
 
 /* ---- R1: per-fiber fault containment ----
  *
- * Turns a real synchronous fault (SIGSEGV / SIGBUS / SIGFPE / SIGILL)
- * inside one coroutine into an unwind of only that process, leaving
- * siblings on the same loop untouched -- the runtime support PG's
- * "let it crash" session containment needs.
+ * Turns a real synchronous fault (SIGSEGV / SIGBUS / SIGFPE / SIGILL
+ * on POSIX; the equivalent EXCEPTION_* on Windows) inside one
+ * coroutine into an unwind of only that process, leaving siblings on
+ * the same loop untouched -- the runtime support PG's "let it crash"
+ * session containment needs.
  *
- * POSIX only (sigaltstack + sigaction + siglongjmp).  On Windows the
- * API is present and compiles, but containment is INACTIVE -- a fault
- * keeps its process-wide disposition (the status quo); structured
- * exception handling is the Windows mechanism and is not yet wired.
+ * POSIX: sigaltstack + sigaction + siglongjmp.  Windows: a Vectored
+ * Exception Handler restores the CONTEXT captured at
+ * xtc_proc_recovery_arm() (no stack unwind).  Both paths are
+ * runtime-verified on their hosts: a contained fault outside a
+ * critical section unwinds the one proc and delivers DOWN to its
+ * monitors; a fault inside a critical section escalates to process
+ * abort (POSIX re-raise; Windows EXCEPTION_CONTINUE_SEARCH ->
+ * 0xC0000005), preserving PG's critical-section PANIC semantics.
  */
 #if (defined(__sun) || defined(__illumos__)) && !defined(__EXTENSIONS__)
 /* illumos/Solaris gate sigjmp_buf / sigsetjmp / siglongjmp behind a

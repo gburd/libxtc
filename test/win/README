@@ -1,0 +1,35 @@
+Windows fault-containment runtime drivers
+=========================================
+
+These two standalone drivers runtime-verify the Windows fault
+containment path (the Vectored Exception Handler + RtlCaptureContext in
+src/ptc/proc.c) and the recovery resource registry.  They are NOT part
+of the build-only Windows CI (which compiles xtc.lib + a smoke test);
+run them by hand on a Windows host with the MinGW toolchain.
+
+Build libxtc.a with MinGW (IOCP backend), then:
+
+    gcc -std=c11 -O2 -g -D_WIN32_WINNT=0x0A00 -I <src>/src/inc \
+        -o veh_contain.exe veh_contain.c libxtc.a \
+        -lntdll -lws2_32 -lmswsock -ldbghelp -lpthread
+
+    gcc ... -o veh_escalate.exe veh_escalate.c libxtc.a ...
+
+Expected results (verified on santorini, Windows 10.0.26200, MinGW
+gcc 13.2):
+
+  veh_contain.exe   -> exit 0, prints "OK: Windows VEH contained ...".
+                       A real access violation inside an armed proc is
+                       contained; the recovery registry releases the
+                       proc's fd + callback; the monitor sees DOWN.
+
+  veh_escalate.exe  -> exit code 0xC0000005 (-1073741819,
+                       EXCEPTION_ACCESS_VIOLATION); must NOT print
+                       "ESCAPED".  A fault inside a critical section is
+                       NOT contained -- it crashes the process,
+                       preserving the PG critical-section PANIC contract.
+
+Capture the true exit code via PowerShell:
+
+    $p = Start-Process -FilePath .\veh_escalate.exe -PassThru -Wait -NoNewWindow
+    $p.ExitCode    # expect -1073741819
