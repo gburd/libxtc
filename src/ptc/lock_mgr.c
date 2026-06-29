@@ -21,6 +21,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_sim.h"
 #include "xtc_lockmgr.h"
 #include "xtc_slab.h"
 
@@ -971,6 +972,9 @@ __dd_score(xtc_lockmgr_t *m, struct dd_node *n)
 	case XTC_LOCK_VICTIM_RANDOM:
 	case XTC_LOCK_VICTIM_DEFAULT:
 	default:
+		/* Seeded under sim so the deadlock-victim choice replays. */
+		if (__xtc_sim_active())
+			return (int)(__xtc_sim_rng(XTC_SIM_RNG_LOCKVIC) & 0x7fffffff);
 		return rand();
 	}
 }

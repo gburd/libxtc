@@ -88,6 +88,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/evt/coro_fctx.c \
 	$(srcdir)/../src/evt/coro_winfiber.c \
 	$(srcdir)/../src/evt/exec.c \
+	$(srcdir)/../src/evt/sim.c \
 	$(srcdir)/../src/ptc/res.c \
 	$(srcdir)/../src/ptc/chan.c \
 	$(srcdir)/../src/ptc/proc.c \
@@ -154,6 +155,7 @@ LIB_OBJS	= \
 	coro_fctx.o \
 	coro_winfiber.o \
 	exec.o \
+	sim.o \
 	res.o \
 	chan.o \
 	proc.o \
@@ -292,6 +294,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_fctx \
 		  test_stack_guard \
 		  test_exec test_cross_wake test_deque test_steal \
+		  test_sim_rng \
 		  test_chan test_chan_mpmc_bcast \
 		  test_proc \
 		  test_proc_wait_fd \
@@ -475,6 +478,9 @@ coro_winfiber.o: $(srcdir)/../src/evt/coro_winfiber.c xtc_config.h
 
 exec.o: $(srcdir)/../src/evt/exec.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/exec.c
+
+sim.o: $(srcdir)/../src/evt/sim.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/sim.c
 
 os_cpu.o: $(srcdir)/../src/os/os_cpu.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_cpu.c
@@ -859,6 +865,12 @@ test_exec: $(srcdir)/../test/m5/test_exec.c \
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m5 \
 		-o $@ $(srcdir)/../test/m5/test_exec.c \
 		$(srcdir)/../test/m5/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_sim_rng: $(srcdir)/../test/sim/test_sim_rng.c \
+		$(srcdir)/../test/sim/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/sim \
+		-o $@ $(srcdir)/../test/sim/test_sim_rng.c \
+		$(srcdir)/../test/sim/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_cross_wake: $(srcdir)/../test/m5/test_cross_wake.c \
 		$(srcdir)/../test/m5/munit.c $(STATIC_LIB)
