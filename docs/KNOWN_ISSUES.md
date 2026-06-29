@@ -10,8 +10,10 @@ RUNTIME (the full test suite executes) versus which only COMPILE:
 - FreeBSD 15 (clang, kqueue): re-verified against the current tree
   (2026-06, full gmake check passes, including the native kqueue
   file-AIO path).  Not in per-commit CI.
-- illumos (SunOS 5.11, gcc, event ports): clean in a PRIOR run; the
-  host was not reachable for a current-tree re-verify this round.
+- illumos (SunOS 5.11, UltraSPARC v9 / sparcv9 big-endian, gcc, event
+  ports): re-verified against the current tree (2026-06, full gmake
+  check passes -- including the property suites on big-endian SPARC,
+  with OpenSSL 3).  Not in per-commit CI.
 - Windows: the IOCP runtime (AFD socket poll, cross-thread wakeup,
   file AIO) was RUNTIME-verified on a Windows host with MinGW (2026-06
   -- see "IOCP backend status" below; three bugs found and fixed).

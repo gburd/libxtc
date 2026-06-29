@@ -52,9 +52,9 @@ faults, and stay inside a fixed resource budget on commodity hardware.
   ucontext substrate, full C munit suite) and Windows/MSVC (xtc.lib +
   smoke test).  FreeBSD 15 (clang, kqueue) was re-verified against the
   current tree (full gmake check passes, including the native kqueue
-  file-AIO path).  illumos (SunOS 5.11, gcc, the solaris port backend)
-  was verified in PRIOR runs -- a clean C suite -- but the host was
-  not reachable for a current-tree re-verify.
+  file-AIO path).  illumos (SunOS 5.11, UltraSPARC v9 / big-endian
+  sparcv9, gcc, the event-ports backend) was re-verified against the
+  current tree (full gmake check, with OpenSSL 3).
   Windows builds
   with all three of MinGW, Clang64, and MSVC.  The IOCP runtime (AFD
   socket poll, cross-thread wakeup, file AIO) was runtime-verified on a
@@ -174,7 +174,7 @@ What's working today:
 | Layer | Status |
 |---|---|
 | L0 OS substrate | Linux, FreeBSD, illumos runtime-verified; Windows (MinGW/Clang64/MSVC) and macOS OS-layer ports build; AIX builds, awaits a test host. |
-| L1 I/O | io_uring, epoll, kqueue, poll, select runtime-verified.  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); illumos port_* and AIX pollset COMPILE and are code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux + macOS at runtime; Windows CI is a build-only smoke. |
+| L1 I/O | io_uring, epoll, kqueue, poll, select, and illumos event-ports (port_*) runtime-verified (the last on big-endian sparcv9).  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); AIX pollset COMPILES and is code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux + macOS at runtime; Windows CI is a build-only smoke. |
 | L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written x86_64 fcontext (~7.6 ns/swap) + 7 more arches + ucontext fallback. |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
@@ -189,11 +189,12 @@ kqueue + ucontext + GCD dispatch semaphores) and an **MSVC** xtc.lib +
 smoke build on **Windows** every commit.  FreeBSD 15 (clang, kqueue)
 was re-verified against the current tree (full gmake check passes,
 including the native kqueue file-AIO path); the Windows IOCP runtime
-was runtime-verified on a host with MinGW.  illumos (SunOS 5.11, gcc)
-was clean in a PRIOR run but was not reachable for a current-tree
-re-verify.  None of FreeBSD/illumos/Windows-runtime is in per-commit
-CI yet.  Windows also passes ~233 munit under MinGW and 48/48 of the
-buildable binaries under Clang64 in prior runs.
+was runtime-verified on a host with MinGW.  illumos (SunOS 5.11,
+UltraSPARC v9 / big-endian sparcv9, gcc) was also re-verified against
+the current tree (full gmake check, OpenSSL 3).  None of
+FreeBSD/illumos/Windows-runtime is in per-commit CI yet.  Windows also
+passes ~233 munit under MinGW and 48/48 of the buildable binaries
+under Clang64 in prior runs.
 
 Honest gaps and known issues live in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 The full milestone roadmap is in [PLAN.md](PLAN.md).
