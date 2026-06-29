@@ -11,6 +11,7 @@
 #include "loop_int.h"
 #include "xtc_exec.h"
 #include "xtc_async.h"
+#include "xtc_sim.h"
 
 #include <stdatomic.h>
 
@@ -47,9 +48,18 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 	my_node = exec->loop_node ? exec->loop_node[me->exec_id] : 0;
 
 	{
-		static _Thread_local unsigned int rot = 0x9E3779B9u;
-		rot += 0x9E3779B9u;
-		start = (int)((rot >> 8) % (unsigned)n);
+		/* Steal-victim start point.  Under a deterministic sim the
+		 * choice is drawn from the seeded STEAL stream so the steal
+		 * pattern replays; in production it is the cheap rotating
+		 * thread-local counter. */
+		if (__xtc_sim_active()) {
+			start = (int)__xtc_sim_rng_range(XTC_SIM_RNG_STEAL,
+			    (uint64_t)n);
+		} else {
+			static _Thread_local unsigned int rot = 0x9E3779B9u;
+			rot += 0x9E3779B9u;
+			start = (int)((rot >> 8) % (unsigned)n);
+		}
 	}
 
 	/* Pass 1: same NUMA node. */
@@ -375,10 +385,17 @@ xtc_exec_loop_stats(xtc_exec_t *e, int idx, xtc_loop_stats_t *out)
 static int
 __pick_loop(xtc_exec_t *e)
 {
-	/* Round-robin counter for default placement.  */
-	static _Atomic int rr;
-	int n = atomic_fetch_add_explicit(&rr, 1, memory_order_relaxed);
-	return n % e->n_loops;
+	/* Round-robin counter for default placement.  Under sim the
+	 * placement is drawn from the seeded PLACE stream so spawn
+	 * locations replay; otherwise the rr counter. */
+	if (__xtc_sim_active())
+		return (int)__xtc_sim_rng_range(XTC_SIM_RNG_PLACE,
+		    (uint64_t)e->n_loops);
+	{
+		static _Atomic int rr;
+		int n = atomic_fetch_add_explicit(&rr, 1, memory_order_relaxed);
+		return n % e->n_loops;
+	}
 }
 
 /* PUBLIC: int xtc_exec_spawn __P((xtc_exec_t *, xtc_task_fn, void *, xtc_task_t **)); */
