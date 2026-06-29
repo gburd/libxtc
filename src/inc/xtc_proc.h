@@ -265,6 +265,14 @@ int       xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out);
  * keeps its process-wide disposition (the status quo); structured
  * exception handling is the Windows mechanism and is not yet wired.
  */
+#if (defined(__sun) || defined(__illumos__)) && !defined(__EXTENSIONS__)
+/* illumos/Solaris gate sigjmp_buf / sigsetjmp / siglongjmp behind a
+ * feature-test macro; under -std=c11 (strict ISO C) <setjmp.h> hides
+ * them.  A consumer that includes this PUBLIC header need not know to
+ * set the macro itself, so expose the POSIX setjmp surface here before
+ * the include.  No effect on other platforms. */
+#define __EXTENSIONS__ 1
+#endif
 #include <setjmp.h>
 
 #if defined(_WIN32)

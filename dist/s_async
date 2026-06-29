@@ -34,29 +34,28 @@ VIOL_FILE=$(mktemp)
 trap 'rm -f "$VIOL_FILE"' EXIT
 
 for sym in $BLOCKING_CALLS; do
-	# Match `<sym>(` not preceded by an identifier character.
-	grep -rnE "(^|[^A-Za-z0-9_])${sym}\\(" \
-		"$SRC" --include='*.c' 2>/dev/null \
+	# Match `<sym>(` not preceded by an identifier character.  Scan only
+	# .c files via find (-include is a GNU-grep extension absent on
+	# illumos/BSD grep, which would otherwise scan headers too).
+	find "$SRC" -name '*.c' -type f -exec \
+		grep -nHE "(^|[^A-Za-z0-9_])${sym}\\(" {} + 2>/dev/null \
 		| grep -vE "$ALLOWLIST_RE" \
 		| while IFS= read -r line; do
-			# Skip commented-out lines.
-			rest=${line#*:}
-			rest=${rest#*:}
-			case "$rest" in
-				*//*|*\/\**|*\**) ;;
-				*) ;;
-			esac
-			if printf '%s' "$line" | grep -qE '^\s*//|^\s*\*|^\s*/\*'; then
-				continue
-			fi
-			# Skip XTC_BLOCKING_OK on this line.
-			if printf '%s' "$line" | grep -q 'XTC_BLOCKING_OK'; then
-				continue
-			fi
-			# Check 5 lines back for XTC_BLOCKING_REGION.
+			# The grep line is file:lineno:code; isolate the code part.
 			file=${line%%:*}
 			rest=${line#*:}
 			lineno=${rest%%:*}
+			code=${rest#*:}
+			# Skip commented-out lines ([[:space:]] is POSIX; \s is a
+			# GNU/PCRE escape illumos grep treats literally).
+			if printf '%s' "$code" | grep -qE '^[[:space:]]*(//|\*|/\*)'; then
+				continue
+			fi
+			# Skip XTC_BLOCKING_OK on this line.
+			if printf '%s' "$code" | grep -q 'XTC_BLOCKING_OK'; then
+				continue
+			fi
+			# Check 5 lines back for XTC_BLOCKING_REGION.
 			start=$((lineno > 5 ? lineno - 5 : 1))
 			window=$(sed -n "${start},${lineno}p" "$file" 2>/dev/null || true)
 			if printf '%s' "$window" | grep -q 'XTC_BLOCKING_REGION'; then

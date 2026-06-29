@@ -6,7 +6,7 @@ set -eu
 : "${XTC_SRC_DIR:?}"
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+trap 'cd / 2>/dev/null; rm -rf "$tmp"' EXIT
 
 # Build a tiny fake repo with one PUBLIC: marker.
 mkdir -p "$tmp/src/inc" "$tmp/src/foo" "$tmp/dist"
