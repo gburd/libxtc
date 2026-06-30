@@ -587,6 +587,16 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[]], [[
    AC_MSG_RESULT([no])
    AC_MSG_ERROR([xtc requires a C11 compiler])])
 
+# Under -std=c11 the libc exposes only the ISO C namespace by default;
+# POSIX functions (nanosleep, fdopen, etc.) need a feature-test macro.
+# The library TUs get _DEFAULT_SOURCE via xtc_int.h, but the test
+# programs include only the public <xtc.h> (which must not leak feature
+# macros), so they would miss POSIX declarations on a strict libc like
+# musl (glibc is laxer and happens to expose them anyway).  Set
+# _DEFAULT_SOURCE globally: it is the right base feature level for a
+# POSIX program and is a no-op where the libc already exposes POSIX.
+CFLAGS="$CFLAGS -D_DEFAULT_SOURCE"
+
 AC_SUBST([CFLAGS])
 
 # -------------------------------------------------------------------------

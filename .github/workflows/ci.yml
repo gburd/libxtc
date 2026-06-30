@@ -72,6 +72,42 @@ jobs:
       - name: Test
         run: make -C build_fctx check
 
+  musl:
+    # Build and test against musl libc -- the real execinfo-less,
+    # ucontext-less target.  Exercises the builtin _Unwind_Backtrace
+    # backtrace tier (no libunwind), the fctx coroutine substrate
+    # (configure leaves XTC_HAVE_UCONTEXT undefined on musl), and the
+    # _DEFAULT_SOURCE feature-macro path.  Runs the C unit tests + the
+    # property tests; the shell/dist tests are skipped here because the
+    # single-file amalgamation deliberately requires ucontext (it cannot
+    # carry the fctx assembly) and #errors on musl by design -- the
+    # library build is the supported musl path.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools musl-dev make autoconf pkg-config gawk
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure (musl)
+        run: |
+          mkdir -p build_musl
+          cd build_musl
+          CC=musl-gcc ../dist/configure --with-tls=none --without-liburing
+      - name: Build
+        run: make -C build_musl -j"$(nproc)"
+      - name: Test (unit + property)
+        run: make -C build_musl tests-c tests-pbt
+      - name: Confirm builtin unwind + fctx are the active backends
+        run: |
+          grep -q 'define XTC_HAVE_BUILTIN_UNWIND 1' build_musl/xtc_config.h
+          ! grep -q 'define XTC_HAVE_EXECINFO 1' build_musl/xtc_config.h
+          ! grep -q 'define XTC_HAVE_UCONTEXT 1' build_musl/xtc_config.h
+          echo "musl: builtin _Unwind_Backtrace active; execinfo + ucontext absent (fctx substrate), as expected"
+
   sim-dst:
     # Deterministic Simulation Testing: build with the sim I/O backend
     # and run the multi-loop deterministic scheduler + cross-loop
