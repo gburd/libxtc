@@ -151,7 +151,24 @@ Tests live in test/sim/ (run_sim_tests.sh on a --with-io-backend=sim
 build; a sim-dst CI job runs them every push): test_sim_rng (PRNG +
 virtual clock, in the ordinary make check), test_sim_sched (multi-loop
 deterministic scheduler + replay), test_sim_pingpong (cross-loop
-park/wake replay), test_sim_fault (seeded fault-schedule replay).
+park/wake replay), test_sim_fault (seeded fault-schedule replay),
+test_sim_soak (seed sweep + invariants + schedule exploration),
+test_sim_critsec (seeded critical-section fault points), test_sim_latch
+(the fiber-yielding latches xtc_amutex/xtc_arwlock: mutual exclusion +
+rwlock exclusivity + no-torn-read under contention, replayed).
+
+## Feature coverage progress (toward modelling all of libxtc)
+
+Goal: the DST sim should drive every libxtc concurrency feature so a
+green sim sweep is evidence of production readiness.  Covered so far:
+the scheduler core (loop/exec/proc/task placement + work stealing),
+cross-loop messaging (send/recv mailbox park/wake), the virtual clock
+(xtc_proc_sleep / timers), seeded fault injection + critical-section
+fault points, and the fiber-yielding latches (xtc_amutex, xtc_arwlock).
+Still to bring under the sim: the lock manager + deadlock detector (the
+LOCKVIC seeded-victim stream already exists; needs a deadlock-inducing
+sim test), the supervisor/gen_server restart logic, and file AIO under
+the sim I/O backend with seeded completion ordering.
 
 Cross-cutting risk: undeclared nondeterminism (any rand(), un-seeded
 _Thread_local, hash-of-pointer iteration order leaking into a scheduling
