@@ -335,7 +335,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_tls_client \
 		  test_inject_races
 
-TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_lrlock pbt_lwlock pbt_chan
+TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_lrlock pbt_lwlock pbt_chan pbt_sim
 
 # -------------------------------------------------------------------------
 # Default goal.
@@ -1165,6 +1165,9 @@ pbt_async: $(srcdir)/../test/pbt/pbt_async.c $(STATIC_LIB)
 
 pbt_proc: $(srcdir)/../test/pbt/pbt_proc.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_proc.c $(PBT_LIBS)
+
+pbt_sim: $(srcdir)/../test/pbt/pbt_sim.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_sim.c $(PBT_LIBS)
 
 pbt_slab: $(srcdir)/../test/pbt/pbt_slab.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_slab.c $(PBT_LIBS)
