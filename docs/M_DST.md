@@ -164,11 +164,39 @@ green sim sweep is evidence of production readiness.  Covered so far:
 the scheduler core (loop/exec/proc/task placement + work stealing),
 cross-loop messaging (send/recv mailbox park/wake), the virtual clock
 (xtc_proc_sleep / timers), seeded fault injection + critical-section
-fault points, and the fiber-yielding latches (xtc_amutex, xtc_arwlock).
-Still to bring under the sim: the lock manager + deadlock detector (the
-LOCKVIC seeded-victim stream already exists; needs a deadlock-inducing
-sim test), the supervisor/gen_server restart logic, and file AIO under
-the sim I/O backend with seeded completion ordering.
+fault points, and the fiber-yielding latches (xtc_amutex, xtc_arwlock:
+mutual exclusion + rwlock exclusivity + no-torn-read under contention).
+
+Known gaps and why:
+
+- Lock manager + deadlock detector (lock_mgr.c): NOT DST-able as built.
+  A contended xtc_lock_get blocks via pthread_cond_wait (an OS-thread
+  wait, not a fiber yield) and the detector runs on a periodic
+  background thread -- both incompatible with the single-thread sim.
+  The seeded LOCKVIC victim stream already exists; bringing the lock
+  manager under DST needs a fiber-park wait path in xtc_lock_get and a
+  synchronous detector tick driven by the sim clock.  Tracked as future
+  work; the storage engine uses the lock manager from blocking-pool
+  threads today, where its current design is correct.
+
+- Supervisor restart logic (sup.c): the restart behaviour itself runs
+  on a loop and IS deterministic under the sim (verified locally: a
+  child crashing N times is restarted N times, replayed identically).
+  But a supervisor's wind-down is ASYNC (xtc_sup_stop kicks the proc;
+  the self-free happens on a later mailbox-poll), and the sim scheduler
+  declares quiescence before that async shutdown drains -- so the
+  supervisor struct is not reclaimed within one sim run (a leak under
+  ASan that does NOT occur under the real xtc_loop_run, which keeps
+  stepping until truly idle).  A faithful supervisor DST test needs the
+  sim scheduler to drain async-service shutdown (continue stepping a
+  bounded number of steps after the last app proc exits, until the
+  service procs reach their at-exit free) before declaring quiescence.
+  Tracked; not shipped to avoid a leaky test.
+
+- File AIO under the sim I/O backend with seeded completion ordering
+  (the XTC_SIM_RNG_IO stream): the backend exists (io_sim.c) and does
+  inline single-fiber AIO; seeded multi-request completion reordering
+  is future work.
 
 Cross-cutting risk: undeclared nondeterminism (any rand(), un-seeded
 _Thread_local, hash-of-pointer iteration order leaking into a scheduling
