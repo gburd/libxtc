@@ -1,0 +1,57 @@
+Deterministic Simulation Testing (DST) tests
+=============================================
+
+See docs/M_DST.md for the design.  DST runs the REAL multi-loop,
+work-stealing executor and shared-everything, fiber-yielding-latch data
+plane deterministically by serializing the N loops as N cooperatively-
+scheduled entities on ONE OS thread under a seed-determined
+interleaving: the identical concurrency code runs; only WHICH runnable
+loop advances next, and when virtual time advances, are decided by the
+seed -- so a run replays byte-for-byte from (seed, config).
+
+Tests
+-----
+
+test_sim_rng.c
+    Phase 0/1 unit test: the seeded PRNG tree (reproducibility,
+    per-stream independence) and the virtual clock.  Runs in the
+    ordinary `make check` -- sim is dormant in a normal build, so these
+    properties are checked without a sim build.
+
+test_sim_sched.c  (needs a sim build)
+    Phase 3: a 4-loop, 16-worker executor with cross-loop spawn, work
+    stealing, and fiber yields, driven by xtc_sim_exec_run.  Asserts the
+    run reaches quiescence on one thread (no hang) and that the same
+    seed replays an identical completion-order hash while a different
+    seed reorders.
+
+test_sim_pingpong.c  (needs a sim build)
+    Phase 3: N ping/pong pairs where each ping is on a DIFFERENT loop
+    from its pong, so each ping PARKS on xtc_recv awaiting a cross-loop
+    reply.  Exercises the mailbox park/wake path across loops under the
+    deterministic scheduler; asserts full completion + identical replay.
+
+Running the sim-build tests
+---------------------------
+
+The sched/pingpong tests require the deterministic-simulation I/O
+backend, which is a separate build (the backend is single-per-binary):
+
+    XTC_SRC_DIR=<repo> CC=gcc sh test/sim/run_sim_tests.sh
+
+The harness builds libxtc with --with-io-backend=sim, then compiles and
+runs both tests.  A CI job (sim-dst) runs this on every push.
+
+What DST does and does not catch
+--------------------------------
+
+CAUGHT: ordering/logic races, lock-discipline races (lost wakeup,
+double-grant, FIFO violation), message races, use-after-free on
+scheduling boundaries (run under ASan), liveness/deadlock, timer
+ordering.
+
+NOT CAUGHT: pure hardware memory-ordering races (missing/weak
+memory_order, store-buffer reorder) -- those remain the domain of
+ThreadSanitizer + the CI sanitizer jobs.  Sim DST owns the logical
+concurrency-correctness space; TSan owns the physical memory-ordering
+space.  They are complementary.

@@ -85,6 +85,24 @@ jobs:
       - name: Test
         run: make -C build_fctx check
 
+  sim-dst:
+    # Deterministic Simulation Testing: sim I/O backend + the multi-loop
+    # deterministic scheduler + cross-loop park/wake replay tests.
+    # See docs/M_DST.md and test/sim/.
+    runs-on: codeberg-small
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf automake pkg-config libssl-dev gawk openssl
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: DST sim-backend tests
+        run: XTC_SRC_DIR="$PWD" CC=gcc sh test/sim/run_sim_tests.sh
+
   sanitizers:
     runs-on: codeberg-small
     strategy:

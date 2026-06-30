@@ -72,6 +72,24 @@ jobs:
       - name: Test
         run: make -C build_fctx check
 
+  sim-dst:
+    # Deterministic Simulation Testing: build with the sim I/O backend
+    # and run the multi-loop deterministic scheduler + cross-loop
+    # park/wake replay tests (the REAL work-stealing executor, made
+    # deterministic with a seed).  See docs/M_DST.md and test/sim/.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf pkg-config libssl-dev gawk
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: DST sim-backend tests
+        run: XTC_SRC_DIR="$PWD" CC=gcc sh test/sim/run_sim_tests.sh
+
   sanitizers:
     runs-on: ubuntu-latest
     strategy:

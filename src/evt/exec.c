@@ -306,6 +306,140 @@ xtc_exec_run(xtc_exec_t *e)
 	return XTC_OK;
 }
 
+/* ---- deterministic simulation scheduler (DST, phase 3) ---------- *
+ *
+ * Runs the executor's N loops as N cooperatively-scheduled entities on
+ * the CALLING thread (no worker threads), under a seed-determined
+ * interleaving, against the virtual clock.  The identical loop /
+ * work-stealing / cross-loop / shared-latch CODE runs (via
+ * __xtc_loop_step_once); only WHICH runnable loop advances next, and
+ * when virtual time advances, are decided by the seed -- so the whole
+ * run replays byte-for-byte from (seed, config).  See docs/M_DST.md.
+ *
+ * Requires a sim build (XTC_IO_BACKEND_SIM): the sim I/O backend's
+ * xtc_io_poll never blocks, so __xtc_loop_step_once always returns
+ * promptly and this scheduler -- not a kernel poller -- owns blocking
+ * and advancing the clock.  The parking primitives (amutex/arwlock/
+ * recv) already yield the fiber to the per-thread coro scheduler, so a
+ * parked task simply is not re-run until its waker fires on a later
+ * step of its loop.
+ */
+
+/* A loop is runnable now if it has a live task, queued/stealable work,
+ * a timer due at the current virtual time, or a pending cross-loop
+ * inbox message. */
+static int
+__sim_loop_runnable(xtc_loop_t *l, int64_t now_ns)
+{
+	int64_t dl;
+	if (atomic_load_explicit(&l->n_alive, memory_order_relaxed) > 0)
+		return 1;
+	if (xtc_deque_len(&l->deque) > 0)
+		return 1;
+	if (l->inbox.head != NULL)
+		return 1;
+	dl = __xtc_timer_heap_next_deadline(l);
+	if (dl >= 0 && dl <= now_ns)
+		return 1;
+	return 0;
+}
+
+/* The earliest timer deadline across all loops, or -1 if none pending.
+ * Used to advance the virtual clock when no loop is runnable now. */
+static int64_t
+__sim_earliest_deadline(xtc_exec_t *e)
+{
+	int64_t best = -1;
+	int i;
+	for (i = 0; i < e->n_loops; i++) {
+		int64_t dl = __xtc_timer_heap_next_deadline(e->loops[i]);
+		if (dl >= 0 && (best < 0 || dl < best))
+			best = dl;
+	}
+	return best;
+}
+
+/*
+ * PUBLIC: int xtc_sim_exec_run __P((xtc_exec_t *, uint64_t, long));
+ *
+ * Activate sim (seed) + the virtual clock, then drive the loops
+ * deterministically until quiescence (no runnable loop and no pending
+ * timer), the step budget is hit, or xtc_exec_stop is called.  max_steps
+ * <= 0 means unbounded.  Returns XTC_OK on quiescence, XTC_E_AGAIN if
+ * the step budget was exhausted with work remaining (a possible hang /
+ * livelock -- inspect), or a negative code on a loop-step error.
+ */
+int
+xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
+{
+	long steps = 0;
+	if (e == NULL) return XTC_E_INVAL;
+
+	xtc_sim_activate(seed);
+	xtc_sim_clock_enable(0);
+	atomic_store_explicit(&e->stop_flag, 0, memory_order_relaxed);
+	e->started = 1;
+
+	for (;;) {
+		int64_t now, dl;
+		int i, n_runnable = 0, pick, chosen = -1, rc;
+
+		if (atomic_load_explicit(&e->stop_flag, memory_order_relaxed))
+			break;
+		if (max_steps > 0 && steps >= max_steps) {
+			e->started = 0;
+			xtc_sim_clock_disable();
+			xtc_sim_deactivate();
+			return XTC_E_AGAIN;   /* budget exhausted; work may remain */
+		}
+
+		(void)__xtc_sim_vclock(&now);
+
+		/* Count loops runnable at the current virtual time. */
+		for (i = 0; i < e->n_loops; i++)
+			if (__sim_loop_runnable(e->loops[i], now))
+				n_runnable++;
+
+		if (n_runnable == 0) {
+			/* Nobody can progress now.  Advance the virtual clock
+			 * to the earliest pending timer; if there is none, the
+			 * system is quiescent -- done. */
+			dl = __sim_earliest_deadline(e);
+			if (dl < 0)
+				break;                 /* quiescent */
+			if (dl > now)
+				xtc_sim_clock_set(dl);
+			continue;
+		}
+
+		/* Seeded pick among the runnable loops (the SCHED stream). */
+		pick = (int)__xtc_sim_rng_range(XTC_SIM_RNG_SCHED,
+		    (uint64_t)n_runnable);
+		for (i = 0; i < e->n_loops; i++) {
+			if (__sim_loop_runnable(e->loops[i], now)) {
+				if (pick == 0) { chosen = i; break; }
+				pick--;
+			}
+		}
+		if (chosen < 0)
+			continue;   /* raced to empty (shouldn't, single thread) */
+
+		rc = __xtc_loop_step_once(e->loops[chosen]);
+		steps++;
+		if (rc < 0) {
+			e->started = 0;
+			xtc_sim_clock_disable();
+			xtc_sim_deactivate();
+			return rc;
+		}
+	}
+
+	e->started = 0;
+	xtc_sim_clock_disable();
+	xtc_sim_deactivate();
+	return XTC_OK;
+}
+
 /* PUBLIC: int xtc_exec_stop __P((xtc_exec_t *)); */
 int
 xtc_exec_stop(xtc_exec_t *e)
