@@ -179,22 +179,29 @@ priority order.  Per-platform symbolization status:
 
 | Backend | Platforms | Output | Verified |
 |---|---|---|---|
-| execinfo | glibc, macOS, FreeBSD/NetBSD/OpenBSD | symbolized frames (function name + offset + module) | RUNTIME-VERIFIED on Linux glibc x86_64 (this round): `test_backtrace` green, full panic/dump path exercised |
-| libunwind + dladdr | musl and any libc without `<execinfo.h>` where libunwind is present | symbolized frames best-effort (dladdr names + module) | RUNTIME-VERIFIED on Linux glibc x86_64 (this round) by forcing the backend and linking against the system libunwind: produced a real symbolized trace and passed `test_backtrace`.  NOT yet run on an actual musl host. |
-| libunwind, no dladdr | as above, dladdr absent | frame ADDRESSES only (no names) | RUNTIME-VERIFIED on Linux glibc x86_64 (this round) with dladdr disabled: `test_backtrace` falls back to asserting the frame count and passes |
+| execinfo | glibc, macOS, FreeBSD/NetBSD/OpenBSD | symbolized frames (function name + offset + module) | RUNTIME-VERIFIED on Linux glibc x86_64: `test_backtrace` green, full panic/dump path exercised |
+| builtin `_Unwind_Backtrace` + dladdr | musl and any libc without `<execinfo.h>` whose toolchain provides the EH-ABI unwinder (libgcc_s / LLVM) -- effectively every GCC/Clang target | symbolized frames best-effort (dladdr names + module) | RUNTIME-VERIFIED on REAL musl (x86_64-unknown-linux-musl gcc 14.3): `os_backtrace.o` references only `_Unwind_Backtrace`/`_Unwind_GetIP` (auto-linked from libgcc_s, NO `unw_*` / NO `-lunwind`), the walk produces a real trace.  Also forced+verified on glibc. |
+| libunwind + dladdr | OPT-IN (`--with-libunwind=yes`) or last resort where neither execinfo nor a working `_Unwind_Backtrace` exists | symbolized frames best-effort (dladdr names + module) | RUNTIME-VERIFIED on Linux glibc x86_64 by forcing the backend and linking against the system libunwind: produced a real symbolized trace and passed `test_backtrace`. |
+| libunwind, no dladdr | as above, dladdr absent | frame ADDRESSES only (no names) | RUNTIME-VERIFIED on Linux glibc x86_64 with dladdr disabled: `test_backtrace` falls back to asserting the frame count and passes |
 | DbgHelp | Windows (`_WIN32`, MinGW/MSVC) | symbolized frames via `CaptureStackBackTrace` + `SymFromAddr` | COMPILED-NOT-RUNTIME-VERIFIED.  Cross-compiles clean with mingw-w64 `-Wall -Wextra -Wpedantic` and links with `-ldbghelp`, but no Windows host in the CI matrix runs it.  Reviewed against the Win32 DbgHelp API docs; same status as `src/io/io_aix.c`. |
 | stub | any platform with none of the above | empty backtrace (length 0) | the dump degrades to proc/loop/mailbox state with the note "no backtrace backend" |
 
 Notes:
 
-* execinfo wins when both execinfo and libunwind are present; libunwind
-  is the musl fallback.  `--with-libunwind=auto|yes|no|PATH` controls
-  detection (default auto, OPTIONAL -- absence on a musl host leaves the
-  honest stub).
-* The execinfo and libunwind emit paths are async-signal-safe (the
-  former via `backtrace_symbols_fd`, the latter via a hand-rolled
-  formatter feeding `write(2)`; dladdr name lookup is best-effort, not
-  formally signal-safe, and is only an enrichment on top of the raw
+* Priority: execinfo > builtin `_Unwind_Backtrace` > libunwind > stub.
+  execinfo wins wherever present (symbolized, signal-safe).  On an
+  execinfo-less libc (musl) the BUILTIN unwinder is now the default --
+  it needs no third-party library, only the compiler's own EH-ABI
+  unwinder (libgcc_s / LLVM), auto-linked with no `-l` flag.  This
+  DEMOTES libunwind to opt-in: `--with-libunwind=yes` forces it above
+  the builtin tier (still below execinfo); `--with-libunwind=auto`
+  (default) uses it only when both execinfo and the builtin unwinder
+  are unavailable.  A stock musl build no longer links libunwind.
+* The execinfo, builtin-unwind, and libunwind emit paths are async-
+  signal-safe (the first via `backtrace_symbols_fd`, the latter two via
+  a hand-rolled formatter feeding `write(2)`; dladdr name lookup is
+  best-effort, not formally signal-safe, and is only an enrichment on
+  top of the raw
   address).  The DbgHelp `Sym*` family is single-threaded and is
   serialized under a critical section; it is intended for the
   panic/abort path, not arbitrary in-flight signals.

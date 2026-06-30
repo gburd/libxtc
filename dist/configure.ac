@@ -131,21 +131,58 @@ AC_CHECK_HEADER([execinfo.h],
      xtc_have_execinfo=yes])],
   [xtc_have_execinfo=no])
 
-# libunwind backtrace backend.  OPTIONAL.  Used on platforms that lack
-# <execinfo.h> (notably musl) to walk the calling thread's frames.  When
-# absent there, the seam degrades to the honest no-op stub.  We probe
-# via pkg-config first (Nix-style split outputs) then a plain link test.
-# dladdr() (libdl / libc) symbolizes the addresses best-effort; without
-# it the libunwind path emits raw frame addresses only.
+# Builtin unwinder (_Unwind_Backtrace from <unwind.h>).  This is the
+# C++ EH-personality ABI walker provided by libgcc_s / LLVM's unwinder
+# and AUTO-LINKED -- no extra -l flag.  It is the same unwinder glibc's
+# backtrace() uses internally, but needs no <execinfo.h>, so it covers
+# musl (and any execinfo-less target) WITHOUT a third-party libunwind
+# dependency.  Probed with a compile+link test; sits ABOVE libunwind in
+# priority so libunwind is demoted to an explicit opt-in.
+AC_MSG_CHECKING([for _Unwind_Backtrace])
+xtc_have_builtin_unwind=no
+AC_LINK_IFELSE(
+  [AC_LANG_PROGRAM([[#include <unwind.h>
+     static _Unwind_Reason_Code cb(struct _Unwind_Context *c, void *a)
+     { (void)a; (void)_Unwind_GetIP(c); return _URC_NO_REASON; }]],
+    [[(void)_Unwind_Backtrace(cb, 0);]])],
+  [xtc_have_builtin_unwind=yes])
+AC_MSG_RESULT([$xtc_have_builtin_unwind])
+# Note: a third-party libunwind installed at configure time can ship a
+# <unwind.h> that omits _Unwind_Backtrace, making this probe report no
+# even where the compiler's own <unwind.h> would work.  That is benign:
+# on such a system libunwind is present and simply becomes the active
+# backend instead.  The case this tier exists for -- a stock musl build
+# with NO libunwind -- finds the compiler's <unwind.h> and reports yes.
+
+# libunwind backtrace backend.  OPTIONAL and now DEMOTED to a fallback
+# below the builtin _Unwind_Backtrace tier: it is used only when an
+# execinfo-less target ALSO lacks a working _Unwind_Backtrace, or when
+# the user explicitly asks for it with --with-libunwind=yes.  We still
+# probe via pkg-config first (Nix-style split outputs) then a plain link
+# test.  dladdr() (libdl / libc) symbolizes the addresses best-effort;
+# without it the libunwind path emits raw frame addresses only.
 AC_ARG_WITH([libunwind],
   [AS_HELP_STRING([--with-libunwind=auto|yes|no|PATH],
-    [Use libunwind for stack backtraces where execinfo is absent (default: auto).])],
+    [Use the third-party libunwind for stack backtraces.  Default auto:
+     libunwind is used only when both execinfo and the builtin
+     _Unwind_Backtrace are unavailable.  yes forces it above the
+     builtin tier (but still below execinfo).])],
   [xtc_with_libunwind=$withval], [xtc_with_libunwind=auto])
 
 have_libunwind=no
 libunwind_cflags=
 libunwind_libs=
-AS_IF([test "x$xtc_with_libunwind" != xno],
+# Under auto, do not even probe libunwind when a higher-priority backend
+# (execinfo or the builtin unwinder) is present -- it would never be the
+# active backend.  An explicit --with-libunwind=yes|PATH always probes.
+xtc_probe_libunwind=no
+AS_IF([test "x$xtc_with_libunwind" = xyes],
+  [xtc_probe_libunwind=yes],
+  [AS_IF([test "x$xtc_with_libunwind" != xno && test "x$xtc_with_libunwind" != xauto],
+     [xtc_probe_libunwind=yes],
+     [AS_IF([test "x$xtc_with_libunwind" = xauto && test "x$xtc_have_execinfo" != xyes && test "x$xtc_have_builtin_unwind" != xyes],
+        [xtc_probe_libunwind=yes])])])
+AS_IF([test "x$xtc_probe_libunwind" = xyes],
   [AS_IF([test "x$xtc_with_libunwind" = xauto || test "x$xtc_with_libunwind" = xyes],
      [AC_PATH_PROG([PKG_CONFIG], [pkg-config], [no])
       AS_IF([test "x$PKG_CONFIG" != xno && $PKG_CONFIG --exists libunwind 2>/dev/null],
@@ -171,20 +208,44 @@ AS_IF([test "x$xtc_with_libunwind" != xno],
            libunwind_libs="-L$xtc_with_libunwind/lib -Wl,-rpath,$xtc_with_libunwind/lib -lunwind"],
           [AC_MSG_ERROR([--with-libunwind=$xtc_with_libunwind: libunwind.h not found])])])])])
 
-# Only define / link libunwind when execinfo is NOT the active backend.
-# execinfo wins when both are present; libunwind is the musl fallback.
-AS_IF([test "x$xtc_have_execinfo" != xyes && test "x$have_libunwind" = xyes],
-  [AC_DEFINE([XTC_HAVE_LIBUNWIND], 1,
-     [Define to 1 to use the libunwind stack-backtrace backend])
-   xtc_use_libunwind=yes],
-  [xtc_use_libunwind=no
+# Backend selection.  Priority:
+#   1. execinfo (when present, always wins -- symbolized, signal-safe).
+#   2. libunwind ONLY when forced with --with-libunwind=yes (a user who
+#      explicitly wants the richer third-party unwinder over the builtin
+#      one), and execinfo is absent.
+#   3. builtin _Unwind_Backtrace (the no-dependency musl fallback).
+#   4. libunwind as the last resort (auto found it and nothing above is
+#      available).
+# This demotes libunwind to opt-in: a stock musl build now uses the
+# builtin unwinder and needs no -lunwind.
+xtc_use_libunwind=no
+xtc_use_builtin_unwind=no
+AS_IF([test "x$xtc_have_execinfo" = xyes],
+  [: # execinfo is the active backend; nothing else to enable.
    libunwind_cflags=
-   libunwind_libs=])
+   libunwind_libs=],
+  [AS_IF([test "x$xtc_with_libunwind" = xyes && test "x$have_libunwind" = xyes],
+     [xtc_use_libunwind=yes],
+     [AS_IF([test "x$xtc_have_builtin_unwind" = xyes],
+        [xtc_use_builtin_unwind=yes
+         libunwind_cflags=
+         libunwind_libs=],
+        [AS_IF([test "x$have_libunwind" = xyes],
+           [xtc_use_libunwind=yes],
+           [libunwind_cflags=
+            libunwind_libs=])])])])
 
-# dladdr() for best-effort symbolization on the libunwind path.  It is
-# in libc on glibc/musl and in libdl on some systems; only matters when
-# the libunwind backend is the active one.
 AS_IF([test "x$xtc_use_libunwind" = xyes],
+  [AC_DEFINE([XTC_HAVE_LIBUNWIND], 1,
+     [Define to 1 to use the libunwind stack-backtrace backend])])
+AS_IF([test "x$xtc_use_builtin_unwind" = xyes],
+  [AC_DEFINE([XTC_HAVE_BUILTIN_UNWIND], 1,
+     [Define to 1 to use the builtin _Unwind_Backtrace backend])])
+
+# dladdr() for best-effort symbolization on the unwind paths (libunwind
+# OR builtin).  It is in libc on glibc/musl and in libdl on some
+# systems; only matters when an unwind backend is the active one.
+AS_IF([test "x$xtc_use_libunwind" = xyes || test "x$xtc_use_builtin_unwind" = xyes],
   [AC_SEARCH_LIBS([dladdr], [dl],
      [AC_DEFINE([XTC_HAVE_DLADDR], 1,
         [Define to 1 if dladdr() is available for symbolization])], [])])
