@@ -37,6 +37,7 @@ result
 result-*
 .direnv/
 .agent/
+NOTES
 
 
 # autoreconf backup files
