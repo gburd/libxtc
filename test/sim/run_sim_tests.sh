@@ -21,9 +21,15 @@ set -eu
 
 XTC_SRC_DIR="${XTC_SRC_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 CC="${CC:-cc}"
-: "${TMPDIR:=/scratch/xtc-test}"
-export TMPDIR
-mkdir -p "$TMPDIR" 2>/dev/null || true
+# Prefer an explicit TMPDIR; otherwise use /scratch/xtc-test only if it
+# is usable (local convention), else fall back to the system default so
+# CI runners without /scratch work unchanged.
+if [ -z "${TMPDIR:-}" ]; then
+	if mkdir -p /scratch/xtc-test 2>/dev/null; then
+		TMPDIR=/scratch/xtc-test
+		export TMPDIR
+	fi
+fi
 
 if [ ! -x "$XTC_SRC_DIR/dist/configure" ]; then
 	echo "  [sim] SKIP: dist/configure not generated"
