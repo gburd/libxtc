@@ -46,7 +46,7 @@ worker(void *arg)
 
 /* Run once with `seed`; return the order-hash and set *out_done. */
 static long
-run_once(uint64_t seed, int *out_done)
+run_once(uint64_t seed, int *out_done, uint64_t *out_state_hash)
 {
 	xtc_exec_t *e = NULL;
 	long w;
@@ -63,6 +63,8 @@ run_once(uint64_t seed, int *out_done)
 	}
 	(void)xtc_sim_exec_run(e, seed, 1000000);
 	*out_done = atomic_load(&g_done);
+	if (out_state_hash != NULL)
+		*out_state_hash = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return atomic_load(&g_trace_hash);
 }
@@ -72,16 +74,20 @@ main(void)
 {
 	int d1 = 0, d2 = 0, d3 = 0;
 	long h1, h2, h3;
+	uint64_t s1 = 0, s2 = 0, s3 = 0;
 
 	/* Same seed -> identical completion count AND order hash (replay). */
-	h1 = run_once(0xC0FFEE, &d1);
-	h2 = run_once(0xC0FFEE, &d2);
+	h1 = run_once(0xC0FFEE, &d1, &s1);
+	h2 = run_once(0xC0FFEE, &d2, &s2);
 	/* Different seed -> same completion count, (almost surely) different order. */
-	h3 = run_once(0xBEEF, &d3);
+	h3 = run_once(0xBEEF, &d3, &s3);
 
-	printf("run1: done=%d hash=%ld\n", d1, h1);
-	printf("run2: done=%d hash=%ld\n", d2, h2);
-	printf("run3: done=%d hash=%ld (different seed)\n", d3, h3);
+	printf("run1: done=%d hash=%ld state=%016llx\n", d1, h1,
+	    (unsigned long long)s1);
+	printf("run2: done=%d hash=%ld state=%016llx\n", d2, h2,
+	    (unsigned long long)s2);
+	printf("run3: done=%d hash=%ld state=%016llx (different seed)\n", d3, h3,
+	    (unsigned long long)s3);
 
 	if (d1 != N_WORKERS || d2 != N_WORKERS || d3 != N_WORKERS) {
 		printf("FAIL: not all workers completed (expected %d)\n", N_WORKERS);
@@ -91,12 +97,18 @@ main(void)
 		printf("FAIL: same seed did not replay (hash %ld != %ld)\n", h1, h2);
 		return 1;
 	}
+	if (s1 != s2) {
+		printf("FAIL: state hash did not replay (%016llx != %016llx)\n",
+		    (unsigned long long)s1, (unsigned long long)s2);
+		return 1;
+	}
 	if (h1 == h3) {
 		/* Not strictly a failure (seeds could collide), but with these
 		 * seeds and 16 workers it would be astronomically unlikely. */
 		printf("WARN: different seeds produced the same order hash\n");
 	}
 	printf("OK: multi-loop deterministic run replays from seed "
-	       "(done=%d, hash=%ld); different seed reorders\n", d1, h1);
+	       "(done=%d, hash=%ld, state=%016llx); different seed reorders\n",
+	       d1, h1, (unsigned long long)s1);
 	return 0;
 }

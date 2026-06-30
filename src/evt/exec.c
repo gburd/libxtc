@@ -359,6 +359,73 @@ __sim_earliest_deadline(xtc_exec_t *e)
 	return best;
 }
 
+/* ---- DST invariant checker + state hash (phase 4) ---- */
+
+/*
+ * PUBLIC: int xtc_sim_check __P((xtc_exec_t *));
+ *
+ * Cheap structural invariants over every loop, meant to run after each
+ * sim step (the scheduler calls it when checking is enabled).  Returns
+ * XTC_OK if all hold, XTC_E_INTERNAL on the first violation.  These
+ * catch corruption the moment a step produces it, at the exact seeded
+ * interleaving that triggered it.
+ */
+int
+xtc_sim_check(xtc_exec_t *e)
+{
+	int i;
+	if (e == NULL) return XTC_E_INVAL;
+	for (i = 0; i < e->n_loops; i++) {
+		xtc_loop_t *l = e->loops[i];
+		int64_t len = (int64_t)xtc_deque_len(&l->deque);
+		int nalive = atomic_load_explicit(&l->n_alive,
+		    memory_order_relaxed);
+		/* Deque length within [0, CAP]: a negative or oversized span
+		 * means top/bottom corruption or a torn steal. */
+		if (len < 0 || len > XTC_DEQUE_CAP)
+			return XTC_E_INTERNAL;
+		/* Alive count is never negative (underflow on a double-reap). */
+		if (nalive < 0)
+			return XTC_E_INTERNAL;
+		/* Timer count is never negative. */
+		if (l->n_timers < 0)
+			return XTC_E_INTERNAL;
+	}
+	return XTC_OK;
+}
+
+/*
+ * PUBLIC: uint64_t xtc_sim_state_hash __P((xtc_exec_t *));
+ *
+ * A 64-bit digest of the observable per-loop state (tasks run, steals,
+ * alive, timer count) folded in loop order.  Two runs with the same
+ * (seed, config) must produce the same hash -- a stronger replay
+ * assertion than a single application counter.  Folds only LOGICAL
+ * state (counters), never pointers or timing.
+ */
+uint64_t
+xtc_sim_state_hash(xtc_exec_t *e)
+{
+	uint64_t h = 0xCBF29CE484222325ull;   /* FNV-1a basis */
+	int i;
+	if (e == NULL) return 0;
+	for (i = 0; i < e->n_loops; i++) {
+		xtc_loop_t *l = e->loops[i];
+		uint64_t v[4];
+		int k;
+		v[0] = atomic_load_explicit(&l->n_tasks_run, memory_order_relaxed);
+		v[1] = atomic_load_explicit(&l->n_steals, memory_order_relaxed);
+		v[2] = (uint64_t)(unsigned)atomic_load_explicit(&l->n_alive,
+		    memory_order_relaxed);
+		v[3] = (uint64_t)(unsigned)l->n_timers;
+		for (k = 0; k < 4; k++) {
+			h ^= v[k];
+			h *= 0x100000001B3ull;       /* FNV-1a prime */
+		}
+	}
+	return h;
+}
+
 /*
  * PUBLIC: int xtc_sim_exec_run __P((xtc_exec_t *, uint64_t, long));
  *
@@ -431,6 +498,15 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 			xtc_sim_clock_disable();
 			xtc_sim_deactivate();
 			return rc;
+		}
+		/* Structural invariants must hold after every step; a
+		 * violation pinpoints the exact seeded interleaving that
+		 * produced the corruption. */
+		if (xtc_sim_check(e) != XTC_OK) {
+			e->started = 0;
+			xtc_sim_clock_disable();
+			xtc_sim_deactivate();
+			return XTC_E_INTERNAL;
 		}
 	}
 
