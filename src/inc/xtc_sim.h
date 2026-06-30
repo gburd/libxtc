@@ -80,4 +80,20 @@ void     xtc_sim_clock_set(int64_t ns);
  * 0 otherwise.  The single seam __os_clock_mono consults. */
 int      __xtc_sim_vclock(int64_t *out_ns);
 
+/*
+ * Run an executor's loops deterministically (DST scheduler).  Activates
+ * sim with `seed` + the virtual clock, then drives the N loops as N
+ * cooperatively-scheduled entities on the calling thread under a
+ * seed-determined interleaving, until quiescence, the step budget
+ * (max_steps; <= 0 = unbounded), or xtc_exec_stop.  Requires a sim
+ * build (--with-io-backend=sim).  Returns XTC_OK on quiescence,
+ * XTC_E_AGAIN if the budget was hit with work remaining, or a negative
+ * code on a loop-step error.  Declared opaquely (xtc_exec is defined in
+ * xtc_exec.h).
+ *
+ * PUBLIC: int xtc_sim_exec_run __P((struct xtc_exec *, uint64_t, long));
+ */
+struct xtc_exec;
+int      xtc_sim_exec_run(struct xtc_exec *e, uint64_t seed, long max_steps);
+
 #endif /* XTC_SIM_H */
