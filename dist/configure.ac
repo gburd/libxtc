@@ -112,6 +112,43 @@ AC_ARG_WITH([liburing],
     [Path to a liburing install (overrides pkg-config search).])],
   [xtc_with_liburing=$withval], [xtc_with_liburing=auto])
 
+# DPDK: OPTIONAL userspace-networking dependency.  Default OFF -- DPDK
+# is a heavyweight L2 poll-mode-driver stack (EAL, hugepages) only worth
+# pulling in for a dedicated userspace-networking deployment.  This
+# probe just DETECTS libdpdk via pkg-config and defines XTC_HAVE_DPDK so
+# a future DPDK I/O backend (see docs/M_DPDK.md) can be wired; the
+# default build neither needs nor links it.  --with-dpdk=yes requires it.
+AC_ARG_WITH([dpdk],
+  [AS_HELP_STRING([--with-dpdk=auto|yes|no|PATH],
+    [Detect DPDK for the optional userspace-networking backend (default: no).])],
+  [xtc_with_dpdk=$withval], [xtc_with_dpdk=no])
+have_dpdk=no
+dpdk_cflags=
+dpdk_libs=
+AS_IF([test "x$xtc_with_dpdk" != xno],
+  [AC_PATH_PROG([PKG_CONFIG], [pkg-config], [no])
+   AS_IF([test "x$xtc_with_dpdk" = xauto || test "x$xtc_with_dpdk" = xyes],
+     [AS_IF([test "x$PKG_CONFIG" != xno && $PKG_CONFIG --exists libdpdk 2>/dev/null],
+        [have_dpdk=yes
+         dpdk_cflags=`$PKG_CONFIG --cflags libdpdk`
+         dpdk_libs=`$PKG_CONFIG --libs libdpdk`],
+        [AS_IF([test "x$xtc_with_dpdk" = xyes],
+          [AC_MSG_ERROR([--with-dpdk=yes: libdpdk not found via pkg-config])])])],
+     [# Explicit PATH to a DPDK prefix.
+      AS_IF([test -f "$xtc_with_dpdk/lib/pkgconfig/libdpdk.pc"],
+        [PKG_CONFIG_PATH="$xtc_with_dpdk/lib/pkgconfig:$PKG_CONFIG_PATH"
+         export PKG_CONFIG_PATH
+         have_dpdk=yes
+         dpdk_cflags=`pkg-config --cflags libdpdk 2>/dev/null`
+         dpdk_libs=`pkg-config --libs libdpdk 2>/dev/null`],
+        [AC_MSG_ERROR([--with-dpdk=$xtc_with_dpdk: libdpdk.pc not found])])])])
+AS_IF([test "x$have_dpdk" = xyes],
+  [AC_DEFINE([XTC_HAVE_DPDK], 1,
+     [Define to 1 if DPDK (libdpdk) is available for the optional
+      userspace-networking backend])])
+AC_SUBST([XTC_DPDK_CFLAGS], [$dpdk_cflags])
+AC_SUBST([XTC_DPDK_LIBS],   [$dpdk_libs])
+
 have_epoll=no
 have_kqueue=no
 have_uring=no

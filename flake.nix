@@ -24,7 +24,11 @@
 
           nativeBuildInputs = with pkgs; [ autoconf gcc gnumake pkg-config ];
           buildInputs = with pkgs; [ openssl ]
-            ++ pkgs.lib.optional pkgs.stdenv.isLinux liburing;
+            ++ pkgs.lib.optional pkgs.stdenv.isLinux liburing
+            # DPDK: optional userspace-networking backend, Linux-only.
+            # Present so `configure --with-dpdk` can find libdpdk via
+            # pkg-config; the default build does not require it.
+            ++ pkgs.lib.optional pkgs.stdenv.isLinux dpdk;
 
           # configure.ac forbids configuring in the source root, so we
           # run it from a dedicated build directory.
@@ -81,7 +85,10 @@
             valgrind gdb lcov gcovr
             # Misc
             gawk
-          ];
+          ]
+          # DPDK is Linux-only; make it available in the dev shell so
+          # `configure --with-dpdk` can find it.  liburing too.
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ liburing dpdk ];
           shellHook = ''
             echo "xtc dev shell ready."
             echo "  cd dist && autoreconf -i && cd .. && mkdir -p build_unix && cd build_unix && ../dist/configure && make check"
