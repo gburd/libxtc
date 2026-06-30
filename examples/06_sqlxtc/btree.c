@@ -156,9 +156,10 @@ struct bt {
 	                                * Off by default: the merge SMO is correct
 	                                * under a single mutator but has a known
 	                                * structural race under concurrent latch-free
-	                                * deletes (see docs/M_SQLXTC_STORAGE.md).
-	                                * Callers that delete single-threaded (or hold
-	                                * the tree exclusively) enable it for compaction. */
+	                                * deletes (see docs/M_SQLXTC_STORAGE.md and
+	                                * .agent/M_SQLXTC_BTREE_MERGE.md).  Callers that
+	                                * delete single-threaded (or hold the tree
+	                                * exclusively) enable it for compaction. */
 	_Atomic uint64_t  st_height;   /* number of levels (1 == root leaf) */
 	_Atomic uint64_t  st_descents; /* full root->leaf cursor descents */
 	_Atomic uint64_t  st_resumes;  /* parked-cursor O(1) resumes */
@@ -623,6 +624,13 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	}
 	(void)move_right(bt, &f, key, klen, 0);
 	pg = bm_page(f);
+	/* Stale-node guard at the root: a concurrent merge may have
+	 * unlinked it (dead) or absorbed its range leftward (key at/below
+	 * lo fence -- move_right cannot follow); bail to the SMO path. */
+	if (btnode_is_dead(pg) || btnode_below_lo_fence(pg, key, klen)) {
+		bm_unlatch(f); bm_unfix(bm, f, 0);
+		return 0;
+	}
 	while (!btnode_is_leaf(pg)) {                /* descend, no coupling */
 		bm_pid_t child = child_for_key(pg, key, klen);
 		bm_frame_t *cf;
@@ -636,6 +644,17 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		f = cf;
 		(void)move_right(bt, &f, key, klen, 0);
 		pg = bm_page(f);
+		/* Internal-level stale-node guard: the child we just latched
+		 * may itself have been merged away (dead) or had its range
+		 * absorbed leftward (key at/below lo fence) by a concurrent
+		 * merge between reading the parent's child pointer and
+		 * latching the child.  move_right handles only the rightward
+		 * (split) direction; a leftward absorb the SMO path settles.
+		 * Bail and let bt_insert re-descend under the SMO lock. */
+		if (btnode_is_dead(pg) || btnode_below_lo_fence(pg, key, klen)) {
+			bm_unlatch(f); bm_unfix(bm, f, 0);
+			return 0;
+		}
 	}
 
 	/* Re-latch the leaf exclusive, then move-right again: between the
@@ -919,6 +938,8 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 	int rc, attempt;
 
 	for (attempt = 0; attempt < BT_DELETE_RETRIES; attempt++) {
+		int stale = 0;
+
 		pid = atomic_load(&bt->root_pid);
 		rc = bm_fix_pid(bm, pid, &f);
 		if (rc != XTC_OK)
@@ -926,6 +947,15 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 		bm_latch_shared(f);
 		(void)move_right(bt, &f, key, klen, 0);
 		pg = bm_page(f);
+		/* Stale-node guard at the root (see the internal-level guard
+		 * below): a concurrent merge may have unlinked it or absorbed
+		 * its range leftward; restart the descent. */
+		if (btnode_is_dead(pg) || btnode_below_lo_fence(pg, key, klen)) {
+			bm_unlatch(f);
+			bm_unfix(bm, f, 0);
+			xtc_yield();
+			continue;
+		}
 		while (!btnode_is_leaf(pg)) {
 			bm_pid_t child = child_for_key(pg, key, klen);
 			bm_frame_t *cf;
@@ -942,6 +972,25 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 			f = cf;
 			(void)move_right(bt, &f, key, klen, 0);
 			pg = bm_page(f);
+			/* Internal-level stale-node guard.  Between reading the
+			 * parent's child pointer and latching the child, a
+			 * concurrent merge can unlink the child (dead) or absorb
+			 * its range into a LEFT sibling (key at/below lo fence) --
+			 * a direction move_right cannot follow.  Catch it at the
+			 * FIRST level it happens, not only at the leaf, so the
+			 * descent never lands on a live-but-wrong leaf; restart
+			 * from the root. */
+			if (btnode_is_dead(pg) ||
+			    btnode_below_lo_fence(pg, key, klen)) {
+				stale = 1;
+				break;
+			}
+		}
+		if (stale) {
+			bm_unlatch(f);
+			bm_unfix(bm, f, 0);
+			xtc_yield();
+			continue;
 		}
 		/* If this leaf was merged away (marked dead, or the key is
 		 * at/below its lower fence -- absorbed leftward where
@@ -1414,6 +1463,8 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 	 * genuinely absent key still terminates in NOTFOUND.
 	 */
 	for (attempt = 0; attempt < BT_DELETE_RETRIES; attempt++) {
+		int stale = 0;
+
 		pid = atomic_load(&bt->root_pid);
 		rc = bm_fix_pid(bm, pid, &f);
 		if (rc != XTC_OK)
@@ -1421,6 +1472,15 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 		bm_latch_exclusive(f);
 		(void)move_right(bt, &f, key, klen, 1);
 		pg = bm_page(f);
+		/* Stale-node guard at the root (see the internal-level guard
+		 * below): a concurrent merge may have unlinked it or absorbed
+		 * its range leftward; restart the descent. */
+		if (btnode_is_dead(pg) || btnode_below_lo_fence(pg, key, klen)) {
+			bm_unlatch(f); bm_unfix(bm, f, 0);
+			f = NULL;
+			xtc_yield();
+			continue;
+		}
 		while (!btnode_is_leaf(pg)) {
 			bm_pid_t child = child_for_key(pg, key, klen);
 			bm_frame_t *cf;
@@ -1436,6 +1496,25 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 			f = cf;
 			(void)move_right(bt, &f, key, klen, 1);
 			pg = bm_page(f);
+			/* Internal-level stale-node guard.  A concurrent merge can
+			 * unlink the child (dead) or absorb its range into a LEFT
+			 * sibling (key at/below lo fence) between reading the
+			 * parent's child pointer and latching the child -- a
+			 * direction move_right cannot follow.  Catch it at the
+			 * first level it happens (not only at the leaf) so the
+			 * descent never lands on a live-but-wrong leaf and silently
+			 * misses the key; restart from the root. */
+			if (btnode_is_dead(pg) ||
+			    btnode_below_lo_fence(pg, key, klen)) {
+				stale = 1;
+				break;
+			}
+		}
+		if (stale) {
+			bm_unlatch(f); bm_unfix(bm, f, 0);
+			f = NULL;
+			xtc_yield();
+			continue;
 		}
 
 		found = 0;
@@ -1529,38 +1608,74 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 	bm_pid_t pid;
 	bm_frame_t *f;
 	void *pg;
-	int rc;
+	int rc, attempt;
 
 	atomic_fetch_add(&bt->st_descents, 1);
-	pid = atomic_load(&bt->root_pid);
-	rc = bm_fix_pid(bm, pid, &f);
-	if (rc != XTC_OK)
-		return rc;
-	bm_latch_shared(f);
-	(void)move_right(bt, &f, start, klen, 0);
-	pg = bm_page(f);
 
-	while (!btnode_is_leaf(pg)) {
-		bm_pid_t child;
-		bm_frame_t *cf;
+	/*
+	 * Bounded latch-free retries (like descend_shared): a concurrent
+	 * merge can unlink a node we are descending through, or absorb its
+	 * range into a LEFT sibling -- which move_right cannot follow.  We
+	 * revalidate dead/lo-fence at EVERY level and restart from the root
+	 * on a hit so the cursor never opens onto a merged-away page.  With
+	 * start == NULL there is no routing key, so only the dead flag can
+	 * fire (the leftmost child is never absorbed leftward).
+	 */
+	for (attempt = 0; attempt < BT_DELETE_RETRIES; attempt++) {
+		int stale = 0;
 
-		if (start == NULL)
-			child = child_pid_at(pg, 0);     /* leftmost child */
-		else
-			child = child_for_key(pg, start, klen);
-		rc = bm_fix_pid(bm, child, &cf);
-		if (rc != XTC_OK) {
-			bm_unlatch(f);
-			bm_unfix(bm, f, 0);
+		pid = atomic_load(&bt->root_pid);
+		rc = bm_fix_pid(bm, pid, &f);
+		if (rc != XTC_OK)
 			return rc;
-		}
-		bm_latch_shared(cf);
-		bm_unlatch(f);             /* release before latching deeper */
-		bm_unfix(bm, f, 0);
-		f = cf;
+		bm_latch_shared(f);
 		(void)move_right(bt, &f, start, klen, 0);
 		pg = bm_page(f);
+		if (btnode_is_dead(pg) ||
+		    (start != NULL && btnode_below_lo_fence(pg, start, klen))) {
+			bm_unlatch(f); bm_unfix(bm, f, 0);
+			xtc_yield();
+			continue;
+		}
+
+		while (!btnode_is_leaf(pg)) {
+			bm_pid_t child;
+			bm_frame_t *cf;
+
+			if (start == NULL)
+				child = child_pid_at(pg, 0);     /* leftmost child */
+			else
+				child = child_for_key(pg, start, klen);
+			rc = bm_fix_pid(bm, child, &cf);
+			if (rc != XTC_OK) {
+				bm_unlatch(f);
+				bm_unfix(bm, f, 0);
+				return rc;
+			}
+			bm_latch_shared(cf);
+			bm_unlatch(f);             /* release before latching deeper */
+			bm_unfix(bm, f, 0);
+			f = cf;
+			(void)move_right(bt, &f, start, klen, 0);
+			pg = bm_page(f);
+			/* Internal-level stale-node guard (see descend_shared). */
+			if (btnode_is_dead(pg) ||
+			    (start != NULL &&
+			    btnode_below_lo_fence(pg, start, klen))) {
+				stale = 1;
+				break;
+			}
+		}
+		if (stale) {
+			bm_unlatch(f); bm_unfix(bm, f, 0);
+			xtc_yield();
+			continue;
+		}
+		*out = f;
+		return XTC_OK;
 	}
+	/* Exhausted retries under relentless merging: hand back the last
+	 * leaf reached; its contents are valid for a scan. */
 	*out = f;
 	return XTC_OK;
 }
@@ -1751,11 +1866,16 @@ bt_cursor_close(bt_cursor_t *c)
  * Enable or disable merge/reclaim on delete underflow.  Disabled by
  * default.  The merge structure-modification is correct under a single
  * mutator but has a known structural race against concurrent
- * latch-free deletes (a delete and a merge can disagree on the tree's
- * shape under maximal churn).  Enable it only when deletes are
- * single-threaded or the caller otherwise holds the tree exclusively;
- * with it off, deletes still remove keys correctly, pages just stay
- * underfull (bounded, safe) instead of being reclaimed.
+ * latch-free deletes -- not the descent-level dead/fence race (which
+ * this tree now revalidates at every internal level), but a deeper
+ * buffer-manager page-reclamation interaction: a latch-free chaser can
+ * reload a just-freed page id from disk during the quarantine epoch,
+ * leaving a phantom resident frame that aliases the id once it is
+ * reissued, so two frames map one pid and a reader can see a divergent
+ * (garbage) page.  Enable it only when deletes are single-threaded or
+ * the caller otherwise holds the tree exclusively; with it off, deletes
+ * still remove keys correctly, pages just stay underfull (bounded,
+ * safe) instead of being reclaimed.  See .agent/M_SQLXTC_BTREE_MERGE.md.
  */
 void
 bt_set_merge_enabled(bt_t *bt, int on)
