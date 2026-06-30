@@ -3,8 +3,16 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/os/os_pkey.c
- *	Memory-protection-key tier.  See xtc_pkey.h.  Real on Linux/x86
- *	(glibc pkey_* wrappers + PKRU); XTC_E_NOSYS everywhere else.
+ *	Memory-protection-key tier.  See xtc_pkey.h.  Real on glibc/Linux
+ *	x86 (the glibc pkey_* wrappers + PKRU); XTC_E_NOSYS everywhere
+ *	else.  The pkey_alloc/pkey_free/pkey_set/pkey_mprotect wrappers
+ *	and the PKEY_DISABLE_* constants are a glibc feature (declared in
+ *	glibc's <sys/mman.h> under _GNU_SOURCE); musl does not ship them,
+ *	so the real path is gated on __GLIBC__ rather than bare __linux__.
+ *	A musl/x86 build therefore takes the portable NOSYS stubs -- the
+ *	underlying pkey_alloc(2) syscall exists, but wiring raw syscalls
+ *	for a defense-in-depth tier that already degrades cleanly is not
+ *	worth the musl-only complexity.
  */
 
 #if defined(__linux__) && (defined(__x86_64__) || defined(__i386__))
@@ -16,7 +24,16 @@
 #include "xtc_int.h"
 #include "xtc_pkey.h"
 
-#if defined(__linux__) && (defined(__x86_64__) || defined(__i386__))
+/*
+ * The real pkey path needs the glibc pkey_* wrappers + PKEY_DISABLE_*
+ * constants, which are declared in glibc's <sys/mman.h> under
+ * _GNU_SOURCE.  This is gated on __GLIBC__ -- which is only visible
+ * AFTER a libc header is included (xtc_int.h above pulls one in), so
+ * unlike the _GNU_SOURCE block above it can safely test __GLIBC__.
+ * musl/x86 lacks the wrappers and takes the NOSYS stubs.
+ */
+#if defined(__linux__) && defined(__GLIBC__) && \
+    (defined(__x86_64__) || defined(__i386__))
 
 #include <sys/mman.h>
 #include <sys/wait.h>

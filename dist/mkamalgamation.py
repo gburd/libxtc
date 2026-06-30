@@ -188,7 +188,30 @@ REMAP_PROLOGUE = """\
 #endif
 
 /* ucontext is the amalgamation's coroutine substrate (coro_uctx.c).
- * Define it unless the consumer is on a platform we know lacks it. */
+ * The single-file amalgamation CANNOT use the fctx substrate, because
+ * fctx needs the hand-written assembly in src/os/asm/fctx_*.S, which a
+ * pure-.c amalgamation does not carry.  ucontext is therefore mandatory
+ * for the amalgamation.  Define it unless the consumer is on a platform
+ * we know lacks it (Windows -- which uses fibers, handled separately).
+ * On a non-glibc Linux libc (notably musl, which omits swapcontext/
+ * getcontext/makecontext) neither substrate is available to the
+ * amalgamation, so we emit a clear error pointing at the library build,
+ * which DOES support musl via fctx (configure leaves XTC_HAVE_UCONTEXT
+ * undefined there and links fctx_*.S).
+ *
+ * __GLIBC__ is defined by the libc's feature headers, not by the
+ * compiler, so pull in <limits.h> (always present, no side effects)
+ * first to make the macro visible before we test it. */
+#if defined(__linux__)
+# include <limits.h>
+#endif
+#if defined(__linux__) && !defined(__GLIBC__) && !defined(_WIN32) && \
+    !defined(XTC_HAVE_UCONTEXT)
+# error "The single-file xtc amalgamation requires ucontext, which this \
+libc (e.g. musl) lacks; build the library normally instead -- the \
+library build supports musl via the fctx coroutine substrate.  (Define \
+XTC_HAVE_UCONTEXT yourself only if you know your libc provides it.)"
+#endif
 #if !defined(XTC_HAVE_UCONTEXT) && !defined(_WIN32) && !defined(XTC_NO_UCONTEXT)
 # define XTC_HAVE_UCONTEXT 1
 #endif

@@ -85,6 +85,34 @@ jobs:
       - name: Test
         run: make -C build_fctx check
 
+  musl:
+    # Build and test against musl libc -- the real execinfo-less,
+    # ucontext-less target (builtin _Unwind_Backtrace tier, fctx
+    # coroutine substrate, _DEFAULT_SOURCE feature-macro path).  Runs
+    # the C unit + property tests; the dist/amalgamation shell tests are
+    # skipped (the single-file amalgamation requires ucontext and
+    # #errors on musl by design -- the library build is the musl path).
+    runs-on: codeberg-small
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools musl-dev make autoconf automake pkg-config gawk
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure (musl)
+        run: |
+          mkdir -p build_musl
+          cd build_musl
+          CC=musl-gcc ../dist/configure --with-tls=none --without-liburing
+      - name: Build
+        run: make -C build_musl -j"$(nproc)"
+      - name: Test (unit + property)
+        run: make -C build_musl tests-c tests-pbt
+
   sim-dst:
     # Deterministic Simulation Testing: sim I/O backend + the multi-loop
     # deterministic scheduler + cross-loop park/wake replay tests.
