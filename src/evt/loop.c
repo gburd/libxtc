@@ -14,6 +14,7 @@
 #include "coro_int.h"
 #include "xtc_async.h"
 #include "os_time.h"
+#include "xtc_sim.h"
 
 #include <stdint.h>
 #include <unistd.h>
@@ -59,6 +60,10 @@ __xtc_inbox_push(struct xtc_inbox *ib, enum xtc_inbox_kind k, xtc_task_t *t)
 	m->kind = k;
 	m->task = t;
 	m->next = NULL;
+	/* Critical section: the MPSC inbox is pushed by ANY thread/loop
+	 * and drained by this loop's owner.  A DST fault point marks the
+	 * cross-loop enqueue boundary. */
+	XTC_SIM_FAULT_POINT("sched.inbox.pre_push");
 	(void)__os_mutex_lock(&ib->lock);
 	if (ib->tail == NULL) ib->head = ib->tail = m;
 	else { ib->tail->next = m; ib->tail = m; }
@@ -213,6 +218,9 @@ __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t)
 	if (loop->exec != NULL) {
 		if (!t->pinned &&
 		    xtc_deque_push(&loop->deque, t) == XTC_OK) {
+			/* Critical section: a task pushed to the stealable deque
+			 * is immediately visible to thieves on other loops. */
+			XTC_SIM_FAULT_POINT("sched.enqueue.post_deque_push");
 			t->q_next = NULL;
 			return XTC_OK;
 		}

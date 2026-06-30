@@ -19,6 +19,8 @@
 #include "xtc_sim.h"
 
 #include <stdatomic.h>
+#include <pthread.h>
+#include <string.h>
 
 /* Activation state is process-global and read on hot paths, so it is a
  * relaxed atomic flag rather than a lock. */
@@ -119,6 +121,129 @@ xtc_sim_fault(unsigned pct_per_1000)
 	if (pct_per_1000 >= 1000)
 		return 1;
 	return __xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 1000) < pct_per_1000;
+}
+
+/* ---- critical-section fault points ----
+ *
+ * A fault POINT marks an interleaving-sensitive critical section (a
+ * lock CAS, an inbox push, a steal, a mailbox enqueue).  Under sim,
+ * when fault points are enabled, reaching a point draws from the FAULT
+ * stream and -- on a hit -- records the fire in a small per-name table.
+ * A DST test enables the points, runs the workload under the seeded
+ * scheduler, and verifies (a) the SAME seed fires the SAME points the
+ * SAME number of times (deterministic critical-section coverage), and
+ * (b) the run still reaches quiescence and replays.  Because the draw
+ * is on the dedicated FAULT stream, turning points on/off does not
+ * perturb the schedule stream.
+ *
+ * The fire count is the coverage signal: a point that never fires
+ * across a seed sweep is a critical section the sim never exercised
+ * under fault timing.  Production never reaches this (sim inactive).
+ */
+#define XTC_SIM_FP_MAX 64
+static _Atomic int      g_fp_on;          /* fault points enabled */
+static unsigned         g_fp_pct;         /* per-1000 fire probability */
+static char             g_fp_name[XTC_SIM_FP_MAX][48];
+static _Atomic uint64_t g_fp_fires[XTC_SIM_FP_MAX];
+static _Atomic int      g_fp_n;           /* number of distinct names seen */
+static pthread_mutex_t  g_fp_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Find (or register) the slot for `name`.  Returns the index, or -1 if
+ * the table is full.  Caller holds g_fp_lock. */
+static int
+__fp_slot_locked(const char *name)
+{
+	int i, n = atomic_load_explicit(&g_fp_n, memory_order_relaxed);
+	for (i = 0; i < n; i++)
+		if (strncmp(g_fp_name[i], name, sizeof g_fp_name[0]) == 0)
+			return i;
+	if (n >= XTC_SIM_FP_MAX)
+		return -1;
+	(void)strncpy(g_fp_name[n], name, sizeof g_fp_name[0] - 1);
+	g_fp_name[n][sizeof g_fp_name[0] - 1] = '\0';
+	atomic_store_explicit(&g_fp_fires[n], 0, memory_order_relaxed);
+	atomic_store_explicit(&g_fp_n, n + 1, memory_order_relaxed);
+	return n;
+}
+
+/* PUBLIC: void xtc_sim_fault_points_enable __P((unsigned)); */
+void
+xtc_sim_fault_points_enable(unsigned pct_per_1000)
+{
+	(void)pthread_mutex_lock(&g_fp_lock);
+	atomic_store_explicit(&g_fp_n, 0, memory_order_relaxed);
+	g_fp_pct = pct_per_1000;
+	atomic_store_explicit(&g_fp_on, 1, memory_order_release);
+	(void)pthread_mutex_unlock(&g_fp_lock);
+}
+
+/* PUBLIC: void xtc_sim_fault_points_disable __P((void)); */
+void
+xtc_sim_fault_points_disable(void)
+{
+	atomic_store_explicit(&g_fp_on, 0, memory_order_release);
+}
+
+/* PUBLIC: int xtc_sim_fault_point __P((const char *)); */
+/*
+ * Reach a critical-section fault point.  Returns 1 (and records a fire)
+ * when sim + fault points are active AND the FAULT-stream draw hits;
+ * else 0.  The XTC_SIM_FAULT_POINT(name) macro (xtc_sim.h) wraps this
+ * and compiles to nothing in a build with sim disabled at the call
+ * site only by the __xtc_sim_active() fast-out -- the call itself is a
+ * single relaxed load in production.
+ */
+int
+xtc_sim_fault_point(const char *name)
+{
+	int slot, hit;
+	if (name == NULL)
+		return 0;
+	if (!atomic_load_explicit(&g_fp_on, memory_order_acquire))
+		return 0;
+	if (!__xtc_sim_active())
+		return 0;
+	hit = (__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 1000) < g_fp_pct);
+	(void)pthread_mutex_lock(&g_fp_lock);
+	slot = __fp_slot_locked(name);
+	if (slot >= 0 && hit)
+		atomic_fetch_add_explicit(&g_fp_fires[slot], 1,
+		    memory_order_relaxed);
+	else if (slot < 0)
+		hit = 0;   /* table full: cannot record, treat as no fire */
+	(void)pthread_mutex_unlock(&g_fp_lock);
+	return hit;
+}
+
+/* PUBLIC: uint64_t xtc_sim_fault_point_fires __P((const char *)); */
+/* Total fires recorded for `name` since the last enable.  0 if unknown. */
+uint64_t
+xtc_sim_fault_point_fires(const char *name)
+{
+	int i, n;
+	uint64_t v = 0;
+	if (name == NULL)
+		return 0;
+	(void)pthread_mutex_lock(&g_fp_lock);
+	n = atomic_load_explicit(&g_fp_n, memory_order_relaxed);
+	for (i = 0; i < n; i++)
+		if (strncmp(g_fp_name[i], name, sizeof g_fp_name[0]) == 0) {
+			v = atomic_load_explicit(&g_fp_fires[i],
+			    memory_order_relaxed);
+			break;
+		}
+	(void)pthread_mutex_unlock(&g_fp_lock);
+	return v;
+}
+
+/* PUBLIC: int xtc_sim_fault_points_seen __P((void)); */
+/* Number of distinct fault-point names reached since the last enable
+ * (the coverage breadth: how many distinct critical sections the run
+ * actually executed). */
+int
+xtc_sim_fault_points_seen(void)
+{
+	return atomic_load_explicit(&g_fp_n, memory_order_relaxed);
 }
 
 /* ---- virtual clock ---- */

@@ -71,6 +71,10 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 		if (exec->loop_node && exec->loop_node[idx] != my_node) continue;
 		victim = exec->loops[idx];
 		if (xtc_deque_len(&victim->deque) == 0) continue;
+		/* Critical section: the steal CAS races the victim's owner
+		 * popping its own deque bottom.  A DST fault point here lets a
+		 * seeded run perturb/observe the steal-vs-pop interleaving. */
+		XTC_SIM_FAULT_POINT("sched.steal.pre_cas");
 		t = xtc_deque_steal(&victim->deque);
 		if (t != NULL) return t;
 	}
@@ -337,9 +341,18 @@ xtc_exec_run(xtc_exec_t *e)
  * is runnable the scheduler advances the clock to the earliest pending
  * deadline, which makes that timer due and the owning loop runnable on
  * the next iteration.
+ *
+ * `peer_stealable` is the total length of OTHER loops' stealable deques
+ * (computed once per scheduler iteration): an otherwise-idle loop is
+ * also runnable when a peer has stealable work, so the deterministic
+ * scheduler can pick it and exercise the work-stealing path (its
+ * step_once then steals).  This is bounded -- a step that steals shrinks
+ * the global stealable count, and a step that fails to steal (a peer
+ * raced it away) finds peer_stealable == 0 next iteration -- so it
+ * cannot spin.
  */
 static int
-__sim_loop_runnable(xtc_loop_t *l, int64_t now_ns)
+__sim_loop_runnable(xtc_loop_t *l, int64_t now_ns, int64_t peer_stealable)
 {
 	int64_t dl;
 	if (l->q_head != NULL)
@@ -351,7 +364,29 @@ __sim_loop_runnable(xtc_loop_t *l, int64_t now_ns)
 	dl = __xtc_timer_heap_next_deadline(l);
 	if (dl >= 0 && dl <= now_ns)
 		return 1;
+	/* Idle locally with NO pending timer, but a peer has stealable work
+	 * and this loop is part of an executor -> runnable (its step_once
+	 * will reach the steal branch and take the work).  The "no pending
+	 * timer" guard ensures the step actually reaches steal (a loop with
+	 * a future timer takes the clock-wait branch instead, so marking it
+	 * runnable-to-steal would spin). */
+	if (peer_stealable > 0 && l->exec != NULL && dl < 0)
+		return 1;
 	return 0;
+}
+
+/* Total stealable (deque) work across all loops EXCEPT `except_id`. */
+static int64_t
+__sim_peer_stealable(xtc_exec_t *e, int except_id)
+{
+	int64_t total = 0;
+	int i;
+	for (i = 0; i < e->n_loops; i++) {
+		if (i == except_id)
+			continue;
+		total += (int64_t)xtc_deque_len(&e->loops[i]->deque);
+	}
+	return total;
 }
 
 /* The earliest timer deadline across all loops, or -1 if none pending.
@@ -474,9 +509,11 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 
 		(void)__xtc_sim_vclock(&now);
 
-		/* Count loops runnable at the current virtual time. */
+		/* Count loops runnable at the current virtual time.  A loop is
+		 * also runnable-to-steal when a peer has stealable deque work. */
 		for (i = 0; i < e->n_loops; i++)
-			if (__sim_loop_runnable(e->loops[i], now))
+			if (__sim_loop_runnable(e->loops[i], now,
+			    __sim_peer_stealable(e, i)))
 				n_runnable++;
 
 		if (n_runnable == 0) {
@@ -507,7 +544,8 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 		pick = (int)__xtc_sim_rng_range(XTC_SIM_RNG_SCHED,
 		    (uint64_t)n_runnable);
 		for (i = 0; i < e->n_loops; i++) {
-			if (__sim_loop_runnable(e->loops[i], now)) {
+			if (__sim_loop_runnable(e->loops[i], now,
+			    __sim_peer_stealable(e, i))) {
 				if (pick == 0) { chosen = i; break; }
 				pick--;
 			}
