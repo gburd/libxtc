@@ -9,6 +9,24 @@ xtc has Tier-1 platform support for macOS (per PLAN.md (S)3), but no
 physical Mac in the current buildfarm.  KVM virtualization gives us
 a host-agnostic CI path until we can dedicate a Mac mini.
 
+## Status: superseded for CI by the GitHub macos runner
+
+Per-commit macOS coverage is ALREADY provided by the `macos` GitHub
+Actions job (macos-latest, Apple Silicon -- builds + runs the full C
+munit suite on the kqueue backend every commit; see
+docs/KNOWN_ISSUES.md "RESOLVED: macOS now in CI").  So this KVM route is
+no longer the primary macOS path; it is useful only for (a) local
+macOS debugging without a Mac, or (b) an Intel-macOS variant the Apple-
+Silicon runner does not cover (e.g. the `fctx_x86_64_sysv.S` path on
+Darwin, since the runner exercises `fctx_aarch64_*`).
+
+Host capability confirmed (2026-06-30): `/dev/kvm` exists (Intel
+VT-x), `qemu-system-x86_64` is available via `nix-shell -p qemu`.  The
+remaining gate is purely the macOS install image (fetched
+interactively by OSX-KVM's `fetch-macOS-v2.py`) plus Apple's licensing
+restriction to non-production personal/dev use -- so this cannot be
+wired as an unattended repo CI job and stays a manual/local procedure.
+
 ## Reference
 
 - Upstream: https://github.com/kholia/osx-kvm
