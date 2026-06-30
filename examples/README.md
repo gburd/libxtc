@@ -18,6 +18,7 @@ make examples
 | `05_rexis/` | **Redis-compatible server** with hard resource budgets.  Drop-in for redis-cli. |
 | `06_sqlxtc/` | **A from-scratch SQL engine on libxtc** (Lime parser + vectorized executor + B-link/buffer-pool/WAL storage), served over the Quack JSON protocol.  Multi-client; uses xtc throughout. |
 | `07_kaka/` | **Kafka-shaped log broker** (Phase 0 scaffold): partitioned append-only logs with credit-based backpressure.  See its README for the design. |
+| `08_tnt/` | **A Tina-faithful Isolate layer** on libxtc: thread-per-core, shared-nothing state machines that return transitions; generational handles, drop-on-full mailboxes, stage-then-commit I/O.  Canonical TCP echo server.  See docs/M_TINA_LAYER.md. |
 
 ## What each example proves
 

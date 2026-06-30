@@ -1,0 +1,5 @@
+# tnt build artifacts -- compiled output is never committed.
+*.o
+*.a
+tnt_echo
+test_tnt
