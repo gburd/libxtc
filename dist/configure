@@ -657,6 +657,8 @@ XTC_URING_CFLAGS
 XTC_IO_BACKEND
 XTC_LIBUNWIND_LIBS
 XTC_LIBUNWIND_CFLAGS
+XTC_DPDK_LIBS
+XTC_DPDK_CFLAGS
 PKG_CONFIG
 XTC_ENABLE_SHARED
 AWK
@@ -729,6 +731,7 @@ enable_shared
 enable_diagnostic
 with_io_backend
 with_liburing
+with_dpdk
 with_libunwind
 with_tls
 with_hegel
@@ -1376,6 +1379,9 @@ Optional Packages:
                           Pick the L1 I/O backend (default: auto).
   --with-liburing=PATH    Path to a liburing install (overrides pkg-config
                           search).
+  --with-dpdk=auto|yes|no|PATH
+                          Detect DPDK for the optional userspace-networking
+                          backend (default: no).
   --with-libunwind=auto|yes|no|PATH
                           Use the third-party libunwind for stack backtraces.
                           Default auto: libunwind is used only when both
@@ -4161,6 +4167,115 @@ else case e in #(
   e) xtc_with_liburing=auto ;;
 esac
 fi
+
+
+# DPDK: OPTIONAL userspace-networking dependency.  Default OFF -- DPDK
+# is a heavyweight L2 poll-mode-driver stack (EAL, hugepages) only worth
+# pulling in for a dedicated userspace-networking deployment.  This
+# probe just DETECTS libdpdk via pkg-config and defines XTC_HAVE_DPDK so
+# a future DPDK I/O backend (see docs/M_DPDK.md) can be wired; the
+# default build neither needs nor links it.  --with-dpdk=yes requires it.
+
+# Check whether --with-dpdk was given.
+if test ${with_dpdk+y}
+then :
+  withval=$with_dpdk; xtc_with_dpdk=$withval
+else case e in #(
+  e) xtc_with_dpdk=no ;;
+esac
+fi
+
+have_dpdk=no
+dpdk_cflags=
+dpdk_libs=
+if test "x$xtc_with_dpdk" != xno
+then :
+  # Extract the first word of "pkg-config", so it can be a program name with args.
+set dummy pkg-config; ac_word=$2
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for $ac_word" >&5
+printf %s "checking for $ac_word... " >&6; }
+if test ${ac_cv_path_PKG_CONFIG+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) case $PKG_CONFIG in
+  [\\/]* | ?:[\\/]*)
+  ac_cv_path_PKG_CONFIG="$PKG_CONFIG" # Let the user override the test with a path.
+  ;;
+  *)
+  as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
+for as_dir in $PATH
+do
+  IFS=$as_save_IFS
+  case $as_dir in #(((
+    '') as_dir=./ ;;
+    */) ;;
+    *) as_dir=$as_dir/ ;;
+  esac
+    for ac_exec_ext in '' $ac_executable_extensions; do
+  if as_fn_executable_p "$as_dir$ac_word$ac_exec_ext"; then
+    ac_cv_path_PKG_CONFIG="$as_dir$ac_word$ac_exec_ext"
+    printf "%s\n" "$as_me:${as_lineno-$LINENO}: found $as_dir$ac_word$ac_exec_ext" >&5
+    break 2
+  fi
+done
+  done
+IFS=$as_save_IFS
+
+  test -z "$ac_cv_path_PKG_CONFIG" && ac_cv_path_PKG_CONFIG="no"
+  ;;
+esac ;;
+esac
+fi
+PKG_CONFIG=$ac_cv_path_PKG_CONFIG
+if test -n "$PKG_CONFIG"; then
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $PKG_CONFIG" >&5
+printf "%s\n" "$PKG_CONFIG" >&6; }
+else
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf "%s\n" "no" >&6; }
+fi
+
+
+   if test "x$xtc_with_dpdk" = xauto || test "x$xtc_with_dpdk" = xyes
+then :
+  if test "x$PKG_CONFIG" != xno && $PKG_CONFIG --exists libdpdk 2>/dev/null
+then :
+  have_dpdk=yes
+         dpdk_cflags=`$PKG_CONFIG --cflags libdpdk`
+         dpdk_libs=`$PKG_CONFIG --libs libdpdk`
+else case e in #(
+  e) if test "x$xtc_with_dpdk" = xyes
+then :
+  as_fn_error $? "--with-dpdk=yes: libdpdk not found via pkg-config" "$LINENO" 5
+fi ;;
+esac
+fi
+else case e in #(
+  e) # Explicit PATH to a DPDK prefix.
+      if test -f "$xtc_with_dpdk/lib/pkgconfig/libdpdk.pc"
+then :
+  PKG_CONFIG_PATH="$xtc_with_dpdk/lib/pkgconfig:$PKG_CONFIG_PATH"
+         export PKG_CONFIG_PATH
+         have_dpdk=yes
+         dpdk_cflags=`pkg-config --cflags libdpdk 2>/dev/null`
+         dpdk_libs=`pkg-config --libs libdpdk 2>/dev/null`
+else case e in #(
+  e) as_fn_error $? "--with-dpdk=$xtc_with_dpdk: libdpdk.pc not found" "$LINENO" 5 ;;
+esac
+fi ;;
+esac
+fi
+fi
+if test "x$have_dpdk" = xyes
+then :
+
+printf "%s\n" "#define XTC_HAVE_DPDK 1" >>confdefs.h
+
+fi
+XTC_DPDK_CFLAGS=$dpdk_cflags
+
+XTC_DPDK_LIBS=$dpdk_libs
 
 
 have_epoll=no

@@ -62,6 +62,10 @@
 /* Define to 1 if dladdr() is available for symbolization */
 #undef XTC_HAVE_DLADDR
 
+/* Define to 1 if DPDK (libdpdk) is available for the optional
+   userspace-networking backend */
+#undef XTC_HAVE_DPDK
+
 /* Define to 1 if <execinfo.h> backtrace() is available */
 #undef XTC_HAVE_EXECINFO
 
