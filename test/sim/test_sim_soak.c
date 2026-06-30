@@ -138,6 +138,9 @@ int
 main(int argc, char **argv)
 {
 	long n_seeds = (argc > 1) ? strtol(argv[1], NULL, 10) : 200;
+	/* Optional seed offset (argv[2]) so CI can shard the seed space
+	 * across parallel invocations without overlap. */
+	long seed_base = (argc > 2) ? strtol(argv[2], NULL, 10) : 0;
 	long s;
 	int expect_done = N_PAIRS * N_HOPS + N_SLEEPERS;
 	uint64_t seen[256];
@@ -148,7 +151,8 @@ main(int argc, char **argv)
 		n_seeds = 1;
 
 	for (s = 0; s < n_seeds; s++) {
-		uint64_t seed = 0x9E3779B97F4A7C15ull * (uint64_t)(s + 1);
+		uint64_t seed = 0x9E3779B97F4A7C15ull *
+		    (uint64_t)(seed_base + s + 1);
 		uint64_t st1 = 0, st2 = 0;
 		long app1 = 0, app2 = 0;
 		int done1 = 0, done2 = 0, rc1, rc2, i;
