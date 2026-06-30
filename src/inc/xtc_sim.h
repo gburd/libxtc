@@ -78,6 +78,36 @@ uint64_t __xtc_sim_rng_range(int s, uint64_t bound);
  */
 int      xtc_sim_fault(unsigned pct_per_1000);
 
+/*
+ * Critical-section fault points.  A fault point marks an interleaving-
+ * sensitive critical section; under sim, when points are enabled,
+ * reaching one draws from the FAULT stream and, on a hit, records the
+ * fire.  Enable with a per-1000 fire probability; query coverage with
+ * the fires/seen accessors.  See docs/M_DST.md.  Production never
+ * reaches a fire (sim inactive); the call is a single relaxed load.
+ *
+ * PUBLIC: void     xtc_sim_fault_points_enable __P((unsigned));
+ * PUBLIC: void     xtc_sim_fault_points_disable __P((void));
+ * PUBLIC: int      xtc_sim_fault_point __P((const char *));
+ * PUBLIC: uint64_t xtc_sim_fault_point_fires __P((const char *));
+ * PUBLIC: int      xtc_sim_fault_points_seen __P((void));
+ */
+void     xtc_sim_fault_points_enable(unsigned pct_per_1000);
+void     xtc_sim_fault_points_disable(void);
+int      xtc_sim_fault_point(const char *name);
+uint64_t xtc_sim_fault_point_fires(const char *name);
+int      xtc_sim_fault_points_seen(void);
+
+/* Plant a critical-section fault point in runtime code.  A single
+ * relaxed load in production (sim inactive); under sim with points
+ * enabled it perturbs/records per the FAULT stream.  Elided entirely
+ * with XTC_INJECT_DISABLE, matching XTC_INJECTION_POINT. */
+#if defined(XTC_INJECT_DISABLE)
+# define XTC_SIM_FAULT_POINT(name)  ((void)0)
+#else
+# define XTC_SIM_FAULT_POINT(name)  ((void)xtc_sim_fault_point(name))
+#endif
+
 /* Virtual (logical) clock.  When enabled, __os_clock_mono returns the
  * virtual time instead of the host monotonic clock, so time is a pure
  * function of the schedule.  Test/scheduler-only. */
