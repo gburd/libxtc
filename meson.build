@@ -102,6 +102,7 @@ install_headers(
   'src/inc/xtc_sync.h',
   'src/inc/xtc_tailcall.h',
   'src/inc/xtc_tls.h',
+  'src/inc/xtc_tnt.h',
   'src/inc/xtc_trace.h',
 )
 

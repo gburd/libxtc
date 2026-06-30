@@ -35,7 +35,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#include "tnt.h"
+#include "xtc_tnt.h"
 
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -62,60 +62,60 @@ typedef struct echo_args {
 } echo_args_t;
 
 /* Initialize: record the fd and submit the first recv. */
-static tnt_transition_t
+static xtc_tnt_transition_t
 echo_init(void *self_raw, const void *args, size_t args_size)
 {
-	echo_conn_t *self = tnt_self_as(echo_conn_t, self_raw);
+	echo_conn_t *self = xtc_tnt_self_as(echo_conn_t, self_raw);
 	const echo_args_t *a = args;
 
 	(void)args_size;
 	self->fd = a->client_fd;
 	self->bytes = 0;
 
-	if (tnt_submit_recv(self->fd) != TNT_IO_OK)
-		return tnt_transition_to_crash(TNT_FAULT_CONTRACT_VIOLATION);
-	return TNT_TRANSITION_WAIT_IO;
+	if (xtc_tnt_submit_recv(self->fd) != XTC_TNT_IO_OK)
+		return xtc_tnt_transition_to_crash(XTC_TNT_FAULT_CONTRACT_VIOLATION);
+	return XTC_TNT_TRANSITION_WAIT_IO;
 }
 
 /* Handle I/O completions synchronously.  No callbacks, no hidden
  * queues.  If anything fails: let it crash (close + done). */
-static tnt_transition_t
-echo_handler(void *self_raw, tnt_message_t *msg)
+static xtc_tnt_transition_t
+echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 {
-	echo_conn_t *self = tnt_self_as(echo_conn_t, self_raw);
+	echo_conn_t *self = xtc_tnt_self_as(echo_conn_t, self_raw);
 
 	switch (msg->tag) {
-	case TNT_IO_TAG_RECV_COMPLETE:
+	case XTC_TNT_IO_TAG_RECV_COMPLETE:
 		if (msg->body.io.result <= 0) {
 			/* peer closed or error -> close */
-			(void)tnt_submit_close(self->fd);
-			return TNT_TRANSITION_WAIT_IO;
+			(void)xtc_tnt_submit_close(self->fd);
+			return XTC_TNT_TRANSITION_WAIT_IO;
 		}
 		/* copy the received bytes into our stable buffer, then send */
 		self->bytes = msg->body.io.result;
 		if (self->bytes > ECHO_BUFSZ)
 			self->bytes = ECHO_BUFSZ;
 		memcpy(self->buffer, msg->body.io.buffer, self->bytes);
-		if (tnt_io_send(self->fd, self->buffer, self->bytes)
-		    != TNT_IO_OK)
-			return tnt_transition_to_crash(
-			    TNT_FAULT_CONTRACT_VIOLATION);
-		return TNT_TRANSITION_WAIT_IO;
+		if (xtc_tnt_io_send(self->fd, self->buffer, self->bytes)
+		    != XTC_TNT_IO_OK)
+			return xtc_tnt_transition_to_crash(
+			    XTC_TNT_FAULT_CONTRACT_VIOLATION);
+		return XTC_TNT_TRANSITION_WAIT_IO;
 
-	case TNT_IO_TAG_SEND_COMPLETE:
+	case XTC_TNT_IO_TAG_SEND_COMPLETE:
 		if (msg->body.io.result < 0) {
-			(void)tnt_submit_close(self->fd);
-			return TNT_TRANSITION_WAIT_IO;
+			(void)xtc_tnt_submit_close(self->fd);
+			return XTC_TNT_TRANSITION_WAIT_IO;
 		}
 		/* echoed; wait for the next chunk */
-		(void)tnt_submit_recv(self->fd);
-		return TNT_TRANSITION_WAIT_IO;
+		(void)xtc_tnt_submit_recv(self->fd);
+		return XTC_TNT_TRANSITION_WAIT_IO;
 
-	case TNT_IO_TAG_CLOSE_COMPLETE:
-		return TNT_TRANSITION_DONE;
+	case XTC_TNT_IO_TAG_CLOSE_COMPLETE:
+		return XTC_TNT_TRANSITION_DONE;
 
 	default:
-		return TNT_TRANSITION_WAIT_MESSAGE;
+		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
 }
 
@@ -156,8 +156,8 @@ listener_proc(void *arg)
 			ea.client_fd = fd;
 			shard = (uint8_t)(atomic_fetch_add(&g_next_shard, 1) %
 			    g_shards);
-			if (tnt_spawn_on(shard, ECHO_TYPE, &ea, sizeof(ea))
-			    != TNT_SPAWN_OK) {
+			if (xtc_tnt_spawn_on(shard, ECHO_TYPE, &ea, sizeof(ea))
+			    != XTC_TNT_SPAWN_OK) {
 				close(fd);
 			}
 		}
@@ -172,7 +172,7 @@ listener_proc(void *arg)
 
 /* ---- Spec --------------------------------------------------------- */
 
-static const tnt_type_t echo_types[] = {
+static const xtc_tnt_type_t echo_types[] = {
 	{
 		.id = ECHO_TYPE,
 		.name = "EchoConnection",
@@ -191,7 +191,7 @@ on_signal(int sig)
 {
 	(void)sig;
 	atomic_store(&g_shutdown, 1);
-	tnt_stop();
+	xtc_tnt_stop();
 }
 
 /* The listener runs on a raw loop spawned alongside the shards.  We
@@ -224,7 +224,7 @@ listen_thread(void *arg)
 int
 main(int argc, char **argv)
 {
-	tnt_spec_t spec;
+	xtc_tnt_spec_t spec;
 	xtc_tcp_opts_t topts = XTC_TCP_OPTS_DEFAULT;
 	pthread_t lt;
 	int shards = 1;
@@ -266,7 +266,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Boot the tnt runtime (blocks until tnt_stop). */
+	/* Boot the tnt runtime (blocks until xtc_tnt_stop). */
 	memset(&spec, 0, sizeof(spec));
 	spec.name = "tnt-echo";
 	spec.types = echo_types;
@@ -275,9 +275,9 @@ main(int argc, char **argv)
 	spec.scratch_size = 65536;
 	spec.recv_buf_size = ECHO_BUFSZ;
 	spec.boot_type = -1;   /* echo has no boot isolate; the listener
-	                        * spawns connections via tnt_spawn_on */
+	                        * spawns connections via xtc_tnt_spawn_on */
 
-	(void)tnt_start(&spec);
+	(void)xtc_tnt_start(&spec);
 
 	/* Shutdown. */
 	atomic_store(&g_shutdown, 1);

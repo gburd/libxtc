@@ -2,8 +2,8 @@
  * Copyright (c) 2026, The XTC Project -- All rights reserved.
  * Use of this source code is governed by the ISC License.
  *
- * examples/08_tnt/tnt.c
- *	tnt scheduler + effect interpreter.  See tnt.h and
+ * src/orc/tnt.c
+ *	tnt scheduler + effect interpreter.  See xtc_tnt.h and
  *	docs/M_TINA_LAYER.md.
  *
  *	ARCHITECTURE.  One long-lived xtc_proc per shard (one per
@@ -22,12 +22,12 @@
  *	         call handler -> interpret the returned transition/effect.
  *
  *	Handlers never block.  Actions (send, spawn, submit I/O, arm
- *	timer) are staged via the ambient tnt_* calls during the
+ *	timer) are staged via the ambient xtc_tnt_* calls during the
  *	handler; the returned transition tells the shard how to commit
  *	them.  Only the shard is a fiber; Isolates are arena structs.
  *
  *	I/O MODEL.  A handler stages recv/send/close into the current
- *	turn frame.  If it returns TNT_WAIT_IO, the shard commits each
+ *	turn frame.  If it returns XTC_TNT_WAIT_IO, the shard commits each
  *	staged op by spawning a short-lived COURIER fiber that parks on
  *	the fd (xtc_proc_wait_fd), performs the non-blocking syscall,
  *	posts a completion record to the shard's ring, and wakes the
@@ -50,7 +50,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 
-#include "tnt.h"
+#include "xtc_int.h"
+#include "xtc_tnt.h"
 
 #include "xtc.h"
 #include "xtc_async.h"
@@ -63,87 +64,87 @@
 #include "os_time.h"
 
 /* ---- Tunables for this slice -------------------------------------- */
-#define TNT_MAX_SHARDS       8
-#define TNT_MAX_TYPES        16
-#define TNT_MAX_STAGED_IO    8     /* staged I/O ops per turn frame */
-#define TNT_COMPLETION_CAP   4096  /* per-shard completion ring depth */
-#define TNT_DEFAULT_RECVBUF  65536
+#define XTC_TNT_MAX_SHARDS       8
+#define XTC_TNT_MAX_TYPES        16
+#define XTC_TNT_MAX_STAGED_IO    8     /* staged I/O ops per turn frame */
+#define XTC_TNT_COMPLETION_CAP   4096  /* per-shard completion ring depth */
+#define XTC_TNT_DEFAULT_RECVBUF  65536
 
 /* ---- Slot states -------------------------------------------------- */
-enum tnt_slot_state {
-	TNT_SLOT_FREE = 0,     /* unused arena slot */
-	TNT_SLOT_WAIT_MESSAGE, /* live, parked until a message arrives */
-	TNT_SLOT_READY,        /* live, has a queued message OR yielded */
-	TNT_SLOT_WAIT_IO       /* live, parked on an outstanding I/O op */
+enum xtc_tnt_slot_state {
+	XTC_TNT_SLOT_FREE = 0,     /* unused arena slot */
+	XTC_TNT_SLOT_WAIT_MESSAGE, /* live, parked until a message arrives */
+	XTC_TNT_SLOT_READY,        /* live, has a queued message OR yielded */
+	XTC_TNT_SLOT_WAIT_IO       /* live, parked on an outstanding I/O op */
 };
 
 /* A queued message envelope (intrusive FIFO node). */
-typedef struct tnt_envelope {
-	struct tnt_envelope *next;
-	tnt_message_t        msg;
-} tnt_envelope_t;
+typedef struct xtc_tnt_envelope {
+	struct xtc_tnt_envelope *next;
+	xtc_tnt_message_t        msg;
+} xtc_tnt_envelope_t;
 
 /* Per-slot metadata.  The Isolate struct itself lives in a parallel
  * dense array (so the typed arena stays type-pure and cache-friendly,
  * exactly as Tina batches by type). */
-typedef struct tnt_slot {
+typedef struct xtc_tnt_slot {
 	uint32_t          gen;          /* generation counter (handle safety) */
-	uint8_t           state;        /* enum tnt_slot_state */
+	uint8_t           state;        /* enum xtc_tnt_slot_state */
 	uint8_t           type_id;
 	/* Intrusive mailbox FIFO. */
-	tnt_envelope_t   *mbox_head;
-	tnt_envelope_t   *mbox_tail;
+	xtc_tnt_envelope_t   *mbox_head;
+	xtc_tnt_envelope_t   *mbox_tail;
 	uint32_t          mbox_depth;
 	/* The single pending I/O completion that, when reaped, drives a
 	 * WAIT_IO slot back to READY. */
 	uint32_t          io_pending;   /* count of couriers in flight */
-} tnt_slot_t;
+} xtc_tnt_slot_t;
 
 /* Per-type arena on a shard. */
-typedef struct tnt_arena {
-	const tnt_type_t *type;
-	tnt_slot_t       *slots;        /* slot_count metadata records */
+typedef struct xtc_tnt_arena {
+	const xtc_tnt_type_t *type;
+	xtc_tnt_slot_t       *slots;        /* slot_count metadata records */
 	uint8_t          *store;        /* slot_count * stride Isolate bytes */
 	uint32_t         *free_list;    /* stack of free slot indices */
 	uint32_t          free_top;     /* number of free indices available */
 	uint32_t          slot_count;
 	/* Round-robin dispatch cursor across READY slots. */
 	uint32_t          cursor;
-} tnt_arena_t;
+} xtc_tnt_arena_t;
 
 /* A completion posted by a courier, drained by the shard. */
-typedef struct tnt_completion {
-	tnt_handle_t target;
+typedef struct xtc_tnt_completion {
+	xtc_tnt_handle_t target;
 	uint16_t     tag;
 	int          fd;
 	int32_t      result;
 	void        *buffer;        /* recv only; freed after delivery */
 	uint32_t     buffer_len;
-} tnt_completion_t;
+} xtc_tnt_completion_t;
 
 /* A staged I/O op, accumulated in the turn frame during a handler and
- * committed after the handler returns TNT_WAIT_IO. */
-typedef struct tnt_staged_io {
+ * committed after the handler returns XTC_TNT_WAIT_IO. */
+typedef struct xtc_tnt_staged_io {
 	uint16_t      kind;          /* completion tag the op will produce */
 	int           fd;
 	const void   *send_buf;      /* for send: points into the Isolate */
 	size_t        send_len;
-} tnt_staged_io_t;
+} xtc_tnt_staged_io_t;
 
 /* Shard: one per loop, owns everything it touches. */
-typedef struct tnt_shard {
+typedef struct xtc_tnt_shard {
 	uint8_t            id;
-	const tnt_spec_t  *spec;
+	const xtc_tnt_spec_t  *spec;
 	xtc_loop_t        *loop;
-	struct tnt_runtime *rt;
+	struct xtc_tnt_runtime *rt;
 
-	tnt_arena_t        arenas[TNT_MAX_TYPES];
+	xtc_tnt_arena_t        arenas[XTC_TNT_MAX_TYPES];
 	int                n_arenas;
 
 	/* Slab caches backing this shard's arenas (one per type) plus an
 	 * envelope cache shared across types. */
-	xtc_slab_t        *slot_cache[TNT_MAX_TYPES];   /* metadata slabs */
-	xtc_slab_t        *store_cache[TNT_MAX_TYPES];  /* Isolate-struct slabs */
+	xtc_slab_t        *slot_cache[XTC_TNT_MAX_TYPES];   /* metadata slabs */
+	xtc_slab_t        *store_cache[XTC_TNT_MAX_TYPES];  /* Isolate-struct slabs */
 	xtc_slab_t        *env_cache;                   /* message envelopes */
 
 	/* Turn-scratch bump arena: reset before every handler. */
@@ -156,7 +157,7 @@ typedef struct tnt_shard {
 	 * thread as the shard, so contention is nil, but a mutex keeps it
 	 * correct under the multi-loop executor where a courier may run
 	 * stolen elsewhere. */
-	tnt_completion_t  *comp_ring;
+	xtc_tnt_completion_t  *comp_ring;
 	uint32_t           comp_head;     /* consumer */
 	uint32_t           comp_tail;     /* producer */
 	pthread_mutex_t    comp_lock;
@@ -168,61 +169,61 @@ typedef struct tnt_shard {
 
 	/* Cross-shard / external spawn inbox (handle-less spawn requests).
 	 * Guarded by spawn_lock. */
-	struct tnt_spawn_req *spawn_head;
-	struct tnt_spawn_req *spawn_tail;
+	struct xtc_tnt_spawn_req *spawn_head;
+	struct xtc_tnt_spawn_req *spawn_tail;
 	pthread_mutex_t    spawn_lock;
 
 	atomic_int         stop;
 	uint64_t           ticks;
-} tnt_shard_t;
+} xtc_tnt_shard_t;
 
-typedef struct tnt_spawn_req {
-	struct tnt_spawn_req *next;
+typedef struct xtc_tnt_spawn_req {
+	struct xtc_tnt_spawn_req *next;
 	size_t    args_size;
 	uint8_t   type_id;
 	/* args is over-aligned (max_align_t) so a typed init-args struct
 	 * with a u32/u64/pointer member loads aligned out of it. */
-	_Alignas(16) uint8_t args[TNT_MAX_INIT_ARGS_SIZE];
-} tnt_spawn_req_t;
+	_Alignas(16) uint8_t args[XTC_TNT_MAX_INIT_ARGS_SIZE];
+} xtc_tnt_spawn_req_t;
 
 /* Runtime: the whole system. */
-typedef struct tnt_runtime {
-	const tnt_spec_t *spec;
+typedef struct xtc_tnt_runtime {
+	const xtc_tnt_spec_t *spec;
 	xtc_exec_t       *exec;
-	tnt_shard_t      *shards[TNT_MAX_SHARDS];
+	xtc_tnt_shard_t      *shards[XTC_TNT_MAX_SHARDS];
 	int               shard_count;
 	atomic_int        stop;
-} tnt_runtime_t;
+} xtc_tnt_runtime_t;
 
-/* The live runtime (one per process; tnt_start is not re-entrant). */
-static tnt_runtime_t *g_rt = NULL;
+/* The live runtime (one per process; xtc_tnt_start is not re-entrant). */
+static xtc_tnt_runtime_t *g_rt = NULL;
 
 /* Thread-local current turn frame.  Set while a handler runs. */
-typedef struct tnt_frame {
-	tnt_shard_t  *shard;
-	tnt_arena_t  *arena;
+typedef struct xtc_tnt_frame {
+	xtc_tnt_shard_t  *shard;
+	xtc_tnt_arena_t  *arena;
 	uint32_t      slot;
-	tnt_handle_t  self;
+	xtc_tnt_handle_t  self;
 	/* Staged I/O accumulated this turn. */
-	tnt_staged_io_t staged[TNT_MAX_STAGED_IO];
+	xtc_tnt_staged_io_t staged[XTC_TNT_MAX_STAGED_IO];
 	int             n_staged;
-} tnt_frame_t;
+} xtc_tnt_frame_t;
 
-static _Thread_local tnt_frame_t *tl_frame = NULL;
-static _Thread_local tnt_shard_t *tl_shard = NULL;
+static _Thread_local xtc_tnt_frame_t *tl_frame = NULL;
+static _Thread_local xtc_tnt_shard_t *tl_shard = NULL;
 
 /* ---- Forward decls ------------------------------------------------ */
-static void tnt_shard_main(void *arg);
-static void tnt_courier_main(void *arg);
-static tnt_send_result_t tnt_deliver(tnt_shard_t *sh, tnt_handle_t to,
-                                     const tnt_message_t *m);
-static void tnt_commit_one_io(tnt_shard_t *sh, tnt_handle_t target,
-                              tnt_staged_io_t *s, tnt_slot_t *meta);
+static void xtc_tnt_shard_main(void *arg);
+static void xtc_tnt_courier_main(void *arg);
+static xtc_tnt_send_result_t xtc_tnt_deliver(xtc_tnt_shard_t *sh, xtc_tnt_handle_t to,
+                                     const xtc_tnt_message_t *m);
+static void xtc_tnt_commit_one_io(xtc_tnt_shard_t *sh, xtc_tnt_handle_t target,
+                              xtc_tnt_staged_io_t *s, xtc_tnt_slot_t *meta);
 
 /* ---- Small helpers ------------------------------------------------ */
 
-static inline tnt_arena_t *
-shard_arena(tnt_shard_t *sh, uint8_t type_id)
+static inline xtc_tnt_arena_t *
+shard_arena(xtc_tnt_shard_t *sh, uint8_t type_id)
 {
 	int i;
 	for (i = 0; i < sh->n_arenas; i++)
@@ -232,7 +233,7 @@ shard_arena(tnt_shard_t *sh, uint8_t type_id)
 }
 
 static inline void *
-slot_isolate(tnt_arena_t *ar, uint32_t slot)
+slot_isolate(xtc_tnt_arena_t *ar, uint32_t slot)
 {
 	return ar->store + (size_t)slot * ar->type->stride;
 }
@@ -240,12 +241,12 @@ slot_isolate(tnt_arena_t *ar, uint32_t slot)
 /* ---- Completion ring ---------------------------------------------- */
 
 static int
-comp_push(tnt_shard_t *sh, const tnt_completion_t *c)
+comp_push(xtc_tnt_shard_t *sh, const xtc_tnt_completion_t *c)
 {
 	int ok = 0;
 	(void)pthread_mutex_lock(&sh->comp_lock);
-	if (sh->comp_tail - sh->comp_head < TNT_COMPLETION_CAP) {
-		sh->comp_ring[sh->comp_tail % TNT_COMPLETION_CAP] = *c;
+	if (sh->comp_tail - sh->comp_head < XTC_TNT_COMPLETION_CAP) {
+		sh->comp_ring[sh->comp_tail % XTC_TNT_COMPLETION_CAP] = *c;
 		sh->comp_tail++;
 		ok = 1;
 	}
@@ -254,12 +255,12 @@ comp_push(tnt_shard_t *sh, const tnt_completion_t *c)
 }
 
 static int
-comp_pop(tnt_shard_t *sh, tnt_completion_t *out)
+comp_pop(xtc_tnt_shard_t *sh, xtc_tnt_completion_t *out)
 {
 	int ok = 0;
 	(void)pthread_mutex_lock(&sh->comp_lock);
 	if (sh->comp_head != sh->comp_tail) {
-		*out = sh->comp_ring[sh->comp_head % TNT_COMPLETION_CAP];
+		*out = sh->comp_ring[sh->comp_head % XTC_TNT_COMPLETION_CAP];
 		sh->comp_head++;
 		ok = 1;
 	}
@@ -268,38 +269,38 @@ comp_pop(tnt_shard_t *sh, tnt_completion_t *out)
 }
 
 static void
-shard_wake(tnt_shard_t *sh)
+shard_wake(xtc_tnt_shard_t *sh)
 {
 	uint8_t b = 1;
-	ssize_t r = write(sh->wake_wr, &b, 1);
+	ssize_t r = write(sh->wake_wr, &b, 1);  /* XTC_BLOCKING_OK: 1 byte to a nonblocking self-wake pipe */
 	(void)r;
 }
 
 /* ---- Slot lifecycle ----------------------------------------------- */
 
 /* Allocate a free slot in arena, run init, return the new handle or
- * TNT_HANDLE_NONE on failure (with *err set). */
-static tnt_handle_t
-slot_spawn(tnt_shard_t *sh, tnt_arena_t *ar, const void *args,
-           size_t args_size, tnt_spawn_error_t *err)
+ * XTC_TNT_HANDLE_NONE on failure (with *err set). */
+static xtc_tnt_handle_t
+slot_spawn(xtc_tnt_shard_t *sh, xtc_tnt_arena_t *ar, const void *args,
+           size_t args_size, xtc_tnt_spawn_error_t *err)
 {
 	uint32_t slot;
-	tnt_slot_t *meta;
+	xtc_tnt_slot_t *meta;
 	void *iso;
-	tnt_frame_t frame;
-	tnt_frame_t *saved_frame = tl_frame;
-	tnt_transition_t tr;
+	xtc_tnt_frame_t frame;
+	xtc_tnt_frame_t *saved_frame = tl_frame;
+	xtc_tnt_transition_t tr;
 
 	if (ar->free_top == 0) {
-		*err = TNT_SPAWN_ARENA_FULL;
-		return TNT_HANDLE_NONE;
+		*err = XTC_TNT_SPAWN_ARENA_FULL;
+		return XTC_TNT_HANDLE_NONE;
 	}
 	slot = ar->free_list[--ar->free_top];
 	meta = &ar->slots[slot];
 	iso = slot_isolate(ar, slot);
 
 	memset(iso, 0, ar->type->stride);
-	meta->state = TNT_SLOT_READY;
+	meta->state = XTC_TNT_SLOT_READY;
 	meta->type_id = ar->type->id;
 	meta->mbox_head = meta->mbox_tail = NULL;
 	meta->mbox_depth = 0;
@@ -310,50 +311,50 @@ slot_spawn(tnt_shard_t *sh, tnt_arena_t *ar, const void *args,
 	frame.shard = sh;
 	frame.arena = ar;
 	frame.slot = slot;
-	frame.self = tnt_handle_make(sh->id, ar->type->id, slot, meta->gen);
+	frame.self = xtc_tnt_handle_make(sh->id, ar->type->id, slot, meta->gen);
 	tl_frame = &frame;
 
 	sh->scratch_off = 0;
 	if (ar->type->init_fn != NULL)
 		tr = ar->type->init_fn(iso, args, args_size);
 	else
-		tr = TNT_TRANSITION_WAIT_MESSAGE;
+		tr = XTC_TNT_TRANSITION_WAIT_MESSAGE;
 
 	tl_frame = saved_frame;
 
-	if (tr.kind == TNT_CRASH) {
+	if (tr.kind == XTC_TNT_CRASH) {
 		/* init failed: reclaim the slot, bump gen. */
-		meta->state = TNT_SLOT_FREE;
-		meta->gen = (meta->gen + 1) & TNT_GEN_MASK;
+		meta->state = XTC_TNT_SLOT_FREE;
+		meta->gen = (meta->gen + 1) & XTC_TNT_GEN_MASK;
 		ar->free_list[ar->free_top++] = slot;
-		*err = TNT_SPAWN_INIT_FAILED;
-		return TNT_HANDLE_NONE;
+		*err = XTC_TNT_SPAWN_INIT_FAILED;
+		return XTC_TNT_HANDLE_NONE;
 	}
 
-	*err = TNT_SPAWN_OK;
+	*err = XTC_TNT_SPAWN_OK;
 	/* The transition from init is interpreted by the same machinery
 	 * the dispatch loop uses; record the desired post-init state. */
 	switch (tr.kind) {
-	case TNT_DONE:
+	case XTC_TNT_DONE:
 		/* init says done immediately: tear down. */
-		meta->state = TNT_SLOT_FREE;
-		meta->gen = (meta->gen + 1) & TNT_GEN_MASK;
+		meta->state = XTC_TNT_SLOT_FREE;
+		meta->gen = (meta->gen + 1) & XTC_TNT_GEN_MASK;
 		ar->free_list[ar->free_top++] = slot;
 		break;
-	case TNT_WAIT_MESSAGE:
+	case XTC_TNT_WAIT_MESSAGE:
 		/* If init queued a message into our own mailbox (a self-send),
 		 * we are immediately READY; otherwise park. */
 		meta->state = (meta->mbox_depth > 0)
-		    ? TNT_SLOT_READY : TNT_SLOT_WAIT_MESSAGE;
+		    ? XTC_TNT_SLOT_READY : XTC_TNT_SLOT_WAIT_MESSAGE;
 		break;
-	case TNT_WAIT_IO:
+	case XTC_TNT_WAIT_IO:
 		/* init staged I/O; commit it (handled by caller-side commit
 		 * below via the frame).  We commit here using the frame copy. */
-		meta->state = TNT_SLOT_WAIT_IO;
+		meta->state = XTC_TNT_SLOT_WAIT_IO;
 		break;
-	case TNT_YIELD:
+	case XTC_TNT_YIELD:
 	default:
-		meta->state = TNT_SLOT_READY;
+		meta->state = XTC_TNT_SLOT_READY;
 		break;
 	}
 
@@ -361,21 +362,21 @@ slot_spawn(tnt_shard_t *sh, tnt_arena_t *ar, const void *args,
 	{
 		int i;
 		for (i = 0; i < frame.n_staged; i++) {
-			tnt_staged_io_t *s = &frame.staged[i];
-			tnt_handle_t h = tnt_handle_make(sh->id, ar->type->id,
+			xtc_tnt_staged_io_t *s = &frame.staged[i];
+			xtc_tnt_handle_t h = xtc_tnt_handle_make(sh->id, ar->type->id,
 			    slot, meta->gen);
-			tnt_commit_one_io(sh, h, s, meta);
+			xtc_tnt_commit_one_io(sh, h, s, meta);
 		}
 	}
 
-	return tnt_handle_make(sh->id, ar->type->id, slot, meta->gen);
+	return xtc_tnt_handle_make(sh->id, ar->type->id, slot, meta->gen);
 }
 
 static void
-slot_teardown(tnt_arena_t *ar, uint32_t slot)
+slot_teardown(xtc_tnt_arena_t *ar, uint32_t slot)
 {
-	tnt_slot_t *meta = &ar->slots[slot];
-	tnt_envelope_t *e, *n;
+	xtc_tnt_slot_t *meta = &ar->slots[slot];
+	xtc_tnt_envelope_t *e, *n;
 
 	/* Drain + free any queued envelopes. */
 	for (e = meta->mbox_head; e != NULL; e = n) {
@@ -384,30 +385,30 @@ slot_teardown(tnt_arena_t *ar, uint32_t slot)
 	}
 	meta->mbox_head = meta->mbox_tail = NULL;
 	meta->mbox_depth = 0;
-	meta->state = TNT_SLOT_FREE;
+	meta->state = XTC_TNT_SLOT_FREE;
 	/* Generation bump: any handle to the old generation is now stale. */
-	meta->gen = (meta->gen + 1) & TNT_GEN_MASK;
+	meta->gen = (meta->gen + 1) & XTC_TNT_GEN_MASK;
 	ar->free_list[ar->free_top++] = slot;
 }
 
 /* ---- I/O commit (spawn couriers) ---------------------------------- */
 
 /* Courier argument: heap-allocated, owned by the courier. */
-typedef struct tnt_courier_arg {
-	tnt_shard_t  *shard;
-	tnt_handle_t  target;
+typedef struct xtc_tnt_courier_arg {
+	xtc_tnt_shard_t  *shard;
+	xtc_tnt_handle_t  target;
 	uint16_t      kind;
 	int           fd;
 	const void   *send_buf;
 	size_t        send_len;
-} tnt_courier_arg_t;
+} xtc_tnt_courier_arg_t;
 
 /* Commit a single staged op by spawning a courier. */
 static void
-tnt_commit_one_io(tnt_shard_t *sh, tnt_handle_t target, tnt_staged_io_t *s,
-                  tnt_slot_t *meta)
+xtc_tnt_commit_one_io(xtc_tnt_shard_t *sh, xtc_tnt_handle_t target, xtc_tnt_staged_io_t *s,
+                  xtc_tnt_slot_t *meta)
 {
-	tnt_courier_arg_t *ca = NULL;
+	xtc_tnt_courier_arg_t *ca = NULL;
 	xtc_proc_opts_t popts = { 0 };
 	xtc_pid_t pid;
 
@@ -421,7 +422,7 @@ tnt_commit_one_io(tnt_shard_t *sh, tnt_handle_t target, tnt_staged_io_t *s,
 	ca->send_len = s->send_len;
 
 	popts.name = "tnt-io";
-	if (xtc_proc_spawn(sh->loop, tnt_courier_main, ca, &popts, &pid)
+	if (xtc_proc_spawn(sh->loop, xtc_tnt_courier_main, ca, &popts, &pid)
 	    != XTC_OK) {
 		__os_free(ca);
 		return;
@@ -433,11 +434,11 @@ tnt_commit_one_io(tnt_shard_t *sh, tnt_handle_t target, tnt_staged_io_t *s,
 /* Courier fiber: park on the fd, perform the op, post a completion,
  * wake the shard. */
 static void
-tnt_courier_main(void *arg)
+xtc_tnt_courier_main(void *arg)
 {
-	tnt_courier_arg_t *ca = arg;
-	tnt_shard_t *sh = ca->shard;
-	tnt_completion_t c;
+	xtc_tnt_courier_arg_t *ca = arg;
+	xtc_tnt_shard_t *sh = ca->shard;
+	xtc_tnt_completion_t c;
 	uint32_t interest;
 	uint32_t revents = 0;
 
@@ -446,13 +447,13 @@ tnt_courier_main(void *arg)
 	c.fd = ca->fd;
 	c.tag = ca->kind;
 
-	if (ca->kind == TNT_IO_TAG_CLOSE_COMPLETE) {
+	if (ca->kind == XTC_TNT_IO_TAG_CLOSE_COMPLETE) {
 		close(ca->fd);
 		c.result = 0;
 		goto post;
 	}
 
-	interest = (ca->kind == TNT_IO_TAG_SEND_COMPLETE)
+	interest = (ca->kind == XTC_TNT_IO_TAG_SEND_COMPLETE)
 	    ? XTC_IO_WRITABLE : XTC_IO_READABLE;
 	interest |= XTC_IO_HUP | XTC_IO_ERR;
 
@@ -473,19 +474,19 @@ tnt_courier_main(void *arg)
 		/* timeout: loop and re-check stop */
 	}
 
-	if (ca->kind == TNT_IO_TAG_RECV_COMPLETE) {
+	if (ca->kind == XTC_TNT_IO_TAG_RECV_COMPLETE) {
 		void *buf = NULL;
 		ssize_t n;
 		uint32_t cap = sh->spec->recv_buf_size
-		    ? sh->spec->recv_buf_size : TNT_DEFAULT_RECVBUF;
+		    ? sh->spec->recv_buf_size : XTC_TNT_DEFAULT_RECVBUF;
 		if (__os_malloc(cap, (void **)&buf) != XTC_OK || buf == NULL) {
 			c.result = -ENOMEM;
 			goto post;
 		}
-		n = recv(ca->fd, buf, cap, MSG_DONTWAIT);
+		n = recv(ca->fd, buf, cap, MSG_DONTWAIT);  /* XTC_BLOCKING_OK: MSG_DONTWAIT, fd is ready (courier parked on it) */
 		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
 			/* spurious wake; retry once synchronously */
-			n = recv(ca->fd, buf, cap, MSG_DONTWAIT);
+			n = recv(ca->fd, buf, cap, MSG_DONTWAIT);  /* XTC_BLOCKING_OK: MSG_DONTWAIT */
 		}
 		c.result = (int32_t)n;
 		if (n > 0) {
@@ -496,12 +497,12 @@ tnt_courier_main(void *arg)
 			c.buffer = NULL;
 			c.buffer_len = 0;
 		}
-	} else if (ca->kind == TNT_IO_TAG_SEND_COMPLETE) {
+	} else if (ca->kind == XTC_TNT_IO_TAG_SEND_COMPLETE) {
 		ssize_t total = 0;
 		const uint8_t *p = ca->send_buf;
 		size_t left = ca->send_len;
 		while (left > 0) {
-			ssize_t n = send(ca->fd, p + total, left, MSG_DONTWAIT);
+			ssize_t n = send(ca->fd, p + total, left, MSG_DONTWAIT);  /* XTC_BLOCKING_OK: MSG_DONTWAIT, re-parks on EAGAIN */
 			if (n > 0) {
 				total += n;
 				left -= (size_t)n;
@@ -536,22 +537,38 @@ post:
 
 /* ---- Ambient ctx_* API -------------------------------------------- */
 
-tnt_handle_t
-tnt_self(void)
+/*
+ * PUBLIC: int xtc_tnt_start __P((const xtc_tnt_spec_t *));
+ * PUBLIC: void xtc_tnt_stop __P((void));
+ * PUBLIC: xtc_tnt_spawn_error_t xtc_tnt_spawn_on __P((uint8_t, uint8_t, const void *, size_t));
+ *
+ * PUBLIC: xtc_tnt_send_result_t xtc_tnt_send __P((xtc_tnt_handle_t, uint16_t, const void *, size_t));
+ * PUBLIC: xtc_tnt_spawn_error_t xtc_tnt_spawn __P((uint8_t, const void *, size_t, xtc_tnt_handle_t *));
+ * PUBLIC: xtc_tnt_io_result_t xtc_tnt_submit_recv __P((int));
+ * PUBLIC: xtc_tnt_io_result_t xtc_tnt_io_send __P((int, const void *, size_t));
+ * PUBLIC: xtc_tnt_io_result_t xtc_tnt_submit_close __P((int));
+ * PUBLIC: void xtc_tnt_register_timer __P((uint64_t, uint16_t));
+ * PUBLIC: xtc_tnt_handle_t xtc_tnt_self __P((void));
+ * PUBLIC: uint8_t xtc_tnt_shard_id __P((void));
+ * PUBLIC: void *xtc_tnt_scratch_arena __P((size_t));
+ */
+
+xtc_tnt_handle_t
+xtc_tnt_self(void)
 {
-	return tl_frame ? tl_frame->self : TNT_HANDLE_NONE;
+	return tl_frame ? tl_frame->self : XTC_TNT_HANDLE_NONE;
 }
 
 uint8_t
-tnt_shard_id(void)
+xtc_tnt_shard_id(void)
 {
 	return tl_shard ? tl_shard->id : 0;
 }
 
 void *
-tnt_scratch_arena(size_t size)
+xtc_tnt_scratch_arena(size_t size)
 {
-	tnt_shard_t *sh = tl_shard;
+	xtc_tnt_shard_t *sh = tl_shard;
 	void *p;
 	if (sh == NULL)
 		return NULL;
@@ -564,23 +581,23 @@ tnt_scratch_arena(size_t size)
 	return p;
 }
 
-tnt_send_result_t
-tnt_send(tnt_handle_t to, uint16_t tag, const void *payload,
+xtc_tnt_send_result_t
+xtc_tnt_send(xtc_tnt_handle_t to, uint16_t tag, const void *payload,
          size_t payload_size)
 {
-	tnt_shard_t *sh = tl_shard;
-	tnt_message_t m;
+	xtc_tnt_shard_t *sh = tl_shard;
+	xtc_tnt_message_t m;
 
 	if (sh == NULL)
-		return TNT_SEND_STALE_HANDLE;
-	if (tag < TNT_USER_TAG_BASE)
-		return TNT_SEND_STALE_HANDLE; /* reject system tags */
-	if (payload_size > TNT_MAX_PAYLOAD_SIZE)
-		payload_size = TNT_MAX_PAYLOAD_SIZE;
+		return XTC_TNT_SEND_STALE_HANDLE;
+	if (tag < XTC_TNT_USER_TAG_BASE)
+		return XTC_TNT_SEND_STALE_HANDLE; /* reject system tags */
+	if (payload_size > XTC_TNT_MAX_PAYLOAD_SIZE)
+		payload_size = XTC_TNT_MAX_PAYLOAD_SIZE;
 
 	memset(&m, 0, sizeof(m));
 	m.tag = tag;
-	m.body.user.source = tnt_self();
+	m.body.user.source = xtc_tnt_self();
 	m.body.user.payload_size = (uint16_t)payload_size;
 	if (payload && payload_size)
 		memcpy(m.body.user.payload, payload, payload_size);
@@ -589,8 +606,8 @@ tnt_send(tnt_handle_t to, uint16_t tag, const void *payload,
 	 * Cross-shard would route via the runtime; this slice delivers
 	 * intra-shard directly and cross-shard through the same path since
 	 * all shards share the process address space. */
-	if (tnt_handle_shard(to) == sh->id)
-		return tnt_deliver(sh, to, &m);
+	if (xtc_tnt_handle_shard(to) == sh->id)
+		return xtc_tnt_deliver(sh, to, &m);
 
 	/* Cross-shard: hand to the target shard's deliver under its lock
 	 * via the completion ring is overkill for messages; instead route
@@ -600,39 +617,39 @@ tnt_send(tnt_handle_t to, uint16_t tag, const void *payload,
 	 * is called on the owning thread in the common case.  Cross-shard
 	 * faithful transport (per-pair rings) is layer-future work. */
 	{
-		tnt_runtime_t *rt = sh->rt;
-		uint8_t dst = tnt_handle_shard(to);
+		xtc_tnt_runtime_t *rt = sh->rt;
+		uint8_t dst = xtc_tnt_handle_shard(to);
 		if (dst >= rt->shard_count || rt->shards[dst] == NULL)
-			return TNT_SEND_STALE_HANDLE;
-		return tnt_deliver(rt->shards[dst], to, &m);
+			return XTC_TNT_SEND_STALE_HANDLE;
+		return xtc_tnt_deliver(rt->shards[dst], to, &m);
 	}
 }
 
 /* Deliver a message into a target slot's mailbox.  Drop-on-full with
  * sender feedback (Tina's .mailbox_full semantics). */
-static tnt_send_result_t
-tnt_deliver(tnt_shard_t *sh, tnt_handle_t to, const tnt_message_t *m)
+static xtc_tnt_send_result_t
+xtc_tnt_deliver(xtc_tnt_shard_t *sh, xtc_tnt_handle_t to, const xtc_tnt_message_t *m)
 {
-	tnt_arena_t *ar = shard_arena(sh, tnt_handle_type(to));
+	xtc_tnt_arena_t *ar = shard_arena(sh, xtc_tnt_handle_type(to));
 	uint32_t slot;
-	tnt_slot_t *meta;
-	tnt_envelope_t *e = NULL;
+	xtc_tnt_slot_t *meta;
+	xtc_tnt_envelope_t *e = NULL;
 
 	if (ar == NULL)
-		return TNT_SEND_STALE_HANDLE;
-	slot = tnt_handle_slot(to);
+		return XTC_TNT_SEND_STALE_HANDLE;
+	slot = xtc_tnt_handle_slot(to);
 	if (slot >= ar->slot_count)
-		return TNT_SEND_STALE_HANDLE;
+		return XTC_TNT_SEND_STALE_HANDLE;
 	meta = &ar->slots[slot];
-	if (meta->state == TNT_SLOT_FREE)
-		return TNT_SEND_STALE_HANDLE;
-	if (meta->gen != tnt_handle_gen(to))
-		return TNT_SEND_STALE_HANDLE;
+	if (meta->state == XTC_TNT_SLOT_FREE)
+		return XTC_TNT_SEND_STALE_HANDLE;
+	if (meta->gen != xtc_tnt_handle_gen(to))
+		return XTC_TNT_SEND_STALE_HANDLE;
 	if (meta->mbox_depth >= ar->type->mailbox_capacity)
-		return TNT_SEND_MAILBOX_FULL;   /* drop-on-full */
+		return XTC_TNT_SEND_MAILBOX_FULL;   /* drop-on-full */
 
 	if (__os_malloc(sizeof(*e), (void **)&e) != XTC_OK || e == NULL)
-		return TNT_SEND_POOL_EXHAUSTED;
+		return XTC_TNT_SEND_POOL_EXHAUSTED;
 	e->next = NULL;
 	e->msg = *m;
 	if (meta->mbox_tail)
@@ -643,100 +660,100 @@ tnt_deliver(tnt_shard_t *sh, tnt_handle_t to, const tnt_message_t *m)
 	meta->mbox_depth++;
 
 	/* A parked WAIT_MESSAGE slot becomes READY. */
-	if (meta->state == TNT_SLOT_WAIT_MESSAGE)
-		meta->state = TNT_SLOT_READY;
+	if (meta->state == XTC_TNT_SLOT_WAIT_MESSAGE)
+		meta->state = XTC_TNT_SLOT_READY;
 
 	/* If the target is on another shard's thread, wake it. */
 	if (sh != tl_shard)
 		shard_wake(sh);
-	return TNT_SEND_OK;
+	return XTC_TNT_SEND_OK;
 }
 
-tnt_spawn_error_t
-tnt_spawn(uint8_t type_id, const void *args, size_t args_size,
-          tnt_handle_t *out_handle)
+xtc_tnt_spawn_error_t
+xtc_tnt_spawn(uint8_t type_id, const void *args, size_t args_size,
+          xtc_tnt_handle_t *out_handle)
 {
-	tnt_shard_t *sh = tl_shard;
-	tnt_arena_t *ar;
-	tnt_spawn_error_t err;
-	tnt_handle_t h;
+	xtc_tnt_shard_t *sh = tl_shard;
+	xtc_tnt_arena_t *ar;
+	xtc_tnt_spawn_error_t err;
+	xtc_tnt_handle_t h;
 
 	if (sh == NULL)
-		return TNT_SPAWN_TYPE_NOT_ALLOCATED;
+		return XTC_TNT_SPAWN_TYPE_NOT_ALLOCATED;
 	ar = shard_arena(sh, type_id);
 	if (ar == NULL)
-		return TNT_SPAWN_TYPE_NOT_ALLOCATED;
+		return XTC_TNT_SPAWN_TYPE_NOT_ALLOCATED;
 	h = slot_spawn(sh, ar, args, args_size, &err);
 	if (out_handle)
 		*out_handle = h;
 	return err;
 }
 
-tnt_io_result_t
-tnt_submit_recv(int fd)
+xtc_tnt_io_result_t
+xtc_tnt_submit_recv(int fd)
 {
-	tnt_frame_t *fr = tl_frame;
-	tnt_staged_io_t *s;
+	xtc_tnt_frame_t *fr = tl_frame;
+	xtc_tnt_staged_io_t *s;
 	if (fr == NULL || fd < 0)
-		return TNT_IO_BAD_FD;
-	if (fr->n_staged >= TNT_MAX_STAGED_IO)
-		return TNT_IO_TOO_MANY;
+		return XTC_TNT_IO_BAD_FD;
+	if (fr->n_staged >= XTC_TNT_MAX_STAGED_IO)
+		return XTC_TNT_IO_TOO_MANY;
 	s = &fr->staged[fr->n_staged++];
-	s->kind = TNT_IO_TAG_RECV_COMPLETE;
+	s->kind = XTC_TNT_IO_TAG_RECV_COMPLETE;
 	s->fd = fd;
 	s->send_buf = NULL;
 	s->send_len = 0;
-	return TNT_IO_OK;
+	return XTC_TNT_IO_OK;
 }
 
-tnt_io_result_t
-tnt_io_send(int fd, const void *buffer, size_t len)
+xtc_tnt_io_result_t
+xtc_tnt_io_send(int fd, const void *buffer, size_t len)
 {
-	tnt_frame_t *fr = tl_frame;
-	tnt_staged_io_t *s;
+	xtc_tnt_frame_t *fr = tl_frame;
+	xtc_tnt_staged_io_t *s;
 	if (fr == NULL || fd < 0)
-		return TNT_IO_BAD_FD;
-	if (fr->n_staged >= TNT_MAX_STAGED_IO)
-		return TNT_IO_TOO_MANY;
+		return XTC_TNT_IO_BAD_FD;
+	if (fr->n_staged >= XTC_TNT_MAX_STAGED_IO)
+		return XTC_TNT_IO_TOO_MANY;
 	s = &fr->staged[fr->n_staged++];
-	s->kind = TNT_IO_TAG_SEND_COMPLETE;
+	s->kind = XTC_TNT_IO_TAG_SEND_COMPLETE;
 	s->fd = fd;
 	s->send_buf = buffer;
 	s->send_len = len;
-	return TNT_IO_OK;
+	return XTC_TNT_IO_OK;
 }
 
-tnt_io_result_t
-tnt_submit_close(int fd)
+xtc_tnt_io_result_t
+xtc_tnt_submit_close(int fd)
 {
-	tnt_frame_t *fr = tl_frame;
-	tnt_staged_io_t *s;
+	xtc_tnt_frame_t *fr = tl_frame;
+	xtc_tnt_staged_io_t *s;
 	if (fr == NULL || fd < 0)
-		return TNT_IO_BAD_FD;
-	if (fr->n_staged >= TNT_MAX_STAGED_IO)
-		return TNT_IO_TOO_MANY;
+		return XTC_TNT_IO_BAD_FD;
+	if (fr->n_staged >= XTC_TNT_MAX_STAGED_IO)
+		return XTC_TNT_IO_TOO_MANY;
 	s = &fr->staged[fr->n_staged++];
-	s->kind = TNT_IO_TAG_CLOSE_COMPLETE;
+	s->kind = XTC_TNT_IO_TAG_CLOSE_COMPLETE;
 	s->fd = fd;
 	s->send_buf = NULL;
 	s->send_len = 0;
-	return TNT_IO_OK;
+	return XTC_TNT_IO_OK;
 }
 
 /* Timer: arm a one-shot timer that delivers `tag` back to this Isolate.
  * Implemented with a courier-like fiber that sleeps then posts. */
-typedef struct tnt_timer_arg {
-	tnt_shard_t  *shard;
-	tnt_handle_t  target;
+typedef struct xtc_tnt_timer_arg {
+	xtc_tnt_shard_t  *shard;
+	xtc_tnt_handle_t  target;
 	uint64_t      duration_ns;
 	uint16_t      tag;
-} tnt_timer_arg_t;
+} xtc_tnt_timer_arg_t;
 
 static void
-tnt_timer_main(void *arg)
+xtc_tnt_timer_main(void *arg)
 {
-	tnt_timer_arg_t *ta = arg;
-	tnt_completion_t c;
+	xtc_tnt_timer_arg_t *ta = arg;
+	xtc_tnt_completion_t c;
 
 	(void)xtc_proc_sleep((int64_t)ta->duration_ns);
 	memset(&c, 0, sizeof(c));
@@ -750,10 +767,10 @@ tnt_timer_main(void *arg)
 }
 
 void
-tnt_register_timer(uint64_t duration_ns, uint16_t tag)
+xtc_tnt_register_timer(uint64_t duration_ns, uint16_t tag)
 {
-	tnt_shard_t *sh = tl_shard;
-	tnt_timer_arg_t *ta = NULL;
+	xtc_tnt_shard_t *sh = tl_shard;
+	xtc_tnt_timer_arg_t *ta = NULL;
 	xtc_proc_opts_t popts = { 0 };
 	xtc_pid_t pid;
 
@@ -762,36 +779,36 @@ tnt_register_timer(uint64_t duration_ns, uint16_t tag)
 	if (__os_calloc(1, sizeof(*ta), (void **)&ta) != XTC_OK || ta == NULL)
 		return;
 	ta->shard = sh;
-	ta->target = tnt_self();
+	ta->target = xtc_tnt_self();
 	ta->duration_ns = duration_ns;
 	ta->tag = tag;
 	popts.name = "tnt-timer";
-	if (xtc_proc_spawn(sh->loop, tnt_timer_main, ta, &popts, &pid)
+	if (xtc_proc_spawn(sh->loop, xtc_tnt_timer_main, ta, &popts, &pid)
 	    != XTC_OK)
 		__os_free(ta);
 }
 
 /* External / cross-thread spawn: enqueue a request onto the target
  * shard's spawn inbox and wake it. */
-tnt_spawn_error_t
-tnt_spawn_on(uint8_t shard, uint8_t type_id, const void *args,
+xtc_tnt_spawn_error_t
+xtc_tnt_spawn_on(uint8_t shard, uint8_t type_id, const void *args,
              size_t args_size)
 {
-	tnt_runtime_t *rt = g_rt;
-	tnt_shard_t *sh;
-	tnt_spawn_req_t *req = NULL;
+	xtc_tnt_runtime_t *rt = g_rt;
+	xtc_tnt_shard_t *sh;
+	xtc_tnt_spawn_req_t *req = NULL;
 
 	if (rt == NULL || shard >= rt->shard_count)
-		return TNT_SPAWN_TYPE_NOT_ALLOCATED;
+		return XTC_TNT_SPAWN_TYPE_NOT_ALLOCATED;
 	sh = rt->shards[shard];
 	if (sh == NULL)
-		return TNT_SPAWN_TYPE_NOT_ALLOCATED;
-	if (args_size > TNT_MAX_INIT_ARGS_SIZE)
-		args_size = TNT_MAX_INIT_ARGS_SIZE;
+		return XTC_TNT_SPAWN_TYPE_NOT_ALLOCATED;
+	if (args_size > XTC_TNT_MAX_INIT_ARGS_SIZE)
+		args_size = XTC_TNT_MAX_INIT_ARGS_SIZE;
 
 	if (__os_calloc(1, sizeof(*req), (void **)&req) != XTC_OK ||
 	    req == NULL)
-		return TNT_SPAWN_ARENA_FULL;
+		return XTC_TNT_SPAWN_ARENA_FULL;
 	req->type_id = type_id;
 	req->args_size = args_size;
 	if (args && args_size)
@@ -806,38 +823,38 @@ tnt_spawn_on(uint8_t shard, uint8_t type_id, const void *args,
 	sh->spawn_tail = req;
 	(void)pthread_mutex_unlock(&sh->spawn_lock);
 	shard_wake(sh);
-	return TNT_SPAWN_OK;
+	return XTC_TNT_SPAWN_OK;
 }
 
 /* ---- Dispatch -- run one handler for a READY slot ----------------- */
 
 /* Commit the staged I/O recorded in `fr` after a handler returned
- * TNT_WAIT_IO. */
+ * XTC_TNT_WAIT_IO. */
 static void
-commit_staged_io(tnt_shard_t *sh, tnt_frame_t *fr, tnt_slot_t *meta)
+commit_staged_io(xtc_tnt_shard_t *sh, xtc_tnt_frame_t *fr, xtc_tnt_slot_t *meta)
 {
 	int i;
 	for (i = 0; i < fr->n_staged; i++)
-		tnt_commit_one_io(sh, fr->self, &fr->staged[i], meta);
+		xtc_tnt_commit_one_io(sh, fr->self, &fr->staged[i], meta);
 }
 
 /* Run the handler for one slot with `msg`, then interpret the
  * transition.  Returns 1 if the slot was torn down. */
 static int
-dispatch_slot(tnt_shard_t *sh, tnt_arena_t *ar, uint32_t slot,
-              tnt_message_t *msg)
+dispatch_slot(xtc_tnt_shard_t *sh, xtc_tnt_arena_t *ar, uint32_t slot,
+              xtc_tnt_message_t *msg)
 {
-	tnt_slot_t *meta = &ar->slots[slot];
+	xtc_tnt_slot_t *meta = &ar->slots[slot];
 	void *iso = slot_isolate(ar, slot);
-	tnt_frame_t frame;
-	tnt_frame_t *saved = tl_frame;
-	tnt_transition_t tr;
+	xtc_tnt_frame_t frame;
+	xtc_tnt_frame_t *saved = tl_frame;
+	xtc_tnt_transition_t tr;
 
 	memset(&frame, 0, sizeof(frame));
 	frame.shard = sh;
 	frame.arena = ar;
 	frame.slot = slot;
-	frame.self = tnt_handle_make(sh->id, ar->type->id, slot, meta->gen);
+	frame.self = xtc_tnt_handle_make(sh->id, ar->type->id, slot, meta->gen);
 	tl_frame = &frame;
 
 	sh->scratch_off = 0;
@@ -846,32 +863,32 @@ dispatch_slot(tnt_shard_t *sh, tnt_arena_t *ar, uint32_t slot,
 	tl_frame = saved;
 
 	switch (tr.kind) {
-	case TNT_DONE:
-	case TNT_CRASH:
+	case XTC_TNT_DONE:
+	case XTC_TNT_CRASH:
 		/* Level-1 voluntary teardown (a real segfault would unwind
 		 * the shard fiber -- Level-2 -- and is layer-future work). */
 		slot_teardown(ar, slot);
 		return 1;
-	case TNT_WAIT_IO:
-		meta->state = TNT_SLOT_WAIT_IO;
+	case XTC_TNT_WAIT_IO:
+		meta->state = XTC_TNT_SLOT_WAIT_IO;
 		commit_staged_io(sh, &frame, meta);
 		return 0;
-	case TNT_WAIT_MESSAGE:
+	case XTC_TNT_WAIT_MESSAGE:
 		meta->state = (meta->mbox_depth > 0)
-		    ? TNT_SLOT_READY : TNT_SLOT_WAIT_MESSAGE;
+		    ? XTC_TNT_SLOT_READY : XTC_TNT_SLOT_WAIT_MESSAGE;
 		return 0;
-	case TNT_YIELD:
+	case XTC_TNT_YIELD:
 	default:
-		meta->state = TNT_SLOT_READY;
+		meta->state = XTC_TNT_SLOT_READY;
 		return 0;
 	}
 }
 
 /* Drain external spawn requests for this shard. */
 static void
-drain_spawns(tnt_shard_t *sh)
+drain_spawns(xtc_tnt_shard_t *sh)
 {
-	tnt_spawn_req_t *head, *req, *n;
+	xtc_tnt_spawn_req_t *head, *req, *n;
 
 	(void)pthread_mutex_lock(&sh->spawn_lock);
 	head = sh->spawn_head;
@@ -879,10 +896,10 @@ drain_spawns(tnt_shard_t *sh)
 	(void)pthread_mutex_unlock(&sh->spawn_lock);
 
 	for (req = head; req != NULL; req = n) {
-		tnt_arena_t *ar = shard_arena(sh, req->type_id);
+		xtc_tnt_arena_t *ar = shard_arena(sh, req->type_id);
 		n = req->next;
 		if (ar != NULL) {
-			tnt_spawn_error_t err;
+			xtc_tnt_spawn_error_t err;
 			(void)slot_spawn(sh, ar, req->args, req->args_size,
 			    &err);
 		}
@@ -892,22 +909,22 @@ drain_spawns(tnt_shard_t *sh)
 
 /* Drain completions: deliver each as an I/O message to its target. */
 static void
-drain_completions(tnt_shard_t *sh)
+drain_completions(xtc_tnt_shard_t *sh)
 {
-	tnt_completion_t c;
+	xtc_tnt_completion_t c;
 
 	while (comp_pop(sh, &c)) {
-		tnt_arena_t *ar = shard_arena(sh, tnt_handle_type(c.target));
+		xtc_tnt_arena_t *ar = shard_arena(sh, xtc_tnt_handle_type(c.target));
 		uint32_t slot;
-		tnt_slot_t *meta;
-		tnt_message_t m;
+		xtc_tnt_slot_t *meta;
+		xtc_tnt_message_t m;
 
 		if (ar == NULL) {
 			if (c.buffer)
 				__os_free(c.buffer);
 			continue;
 		}
-		slot = tnt_handle_slot(c.target);
+		slot = xtc_tnt_handle_slot(c.target);
 		if (slot >= ar->slot_count) {
 			if (c.buffer)
 				__os_free(c.buffer);
@@ -917,8 +934,8 @@ drain_completions(tnt_shard_t *sh)
 		if (meta->io_pending > 0)
 			meta->io_pending--;
 		/* Stale target (torn down while I/O was in flight): drop. */
-		if (meta->state == TNT_SLOT_FREE ||
-		    meta->gen != tnt_handle_gen(c.target)) {
+		if (meta->state == XTC_TNT_SLOT_FREE ||
+		    meta->gen != xtc_tnt_handle_gen(c.target)) {
 			if (c.buffer)
 				__os_free(c.buffer);
 			continue;
@@ -926,7 +943,7 @@ drain_completions(tnt_shard_t *sh)
 
 		memset(&m, 0, sizeof(m));
 		m.tag = c.tag;
-		if (c.tag == TNT_TAG_TIMER) {
+		if (c.tag == XTC_TNT_TAG_TIMER) {
 			m.body.user.source = c.target;
 		} else {
 			m.body.io.fd = c.fd;
@@ -940,15 +957,15 @@ drain_completions(tnt_shard_t *sh)
 		 * message, then free the recv buffer. */
 		{
 			void *iso = slot_isolate(ar, slot);
-			tnt_frame_t frame;
-			tnt_frame_t *saved = tl_frame;
-			tnt_transition_t tr;
+			xtc_tnt_frame_t frame;
+			xtc_tnt_frame_t *saved = tl_frame;
+			xtc_tnt_transition_t tr;
 
 			memset(&frame, 0, sizeof(frame));
 			frame.shard = sh;
 			frame.arena = ar;
 			frame.slot = slot;
-			frame.self = tnt_handle_make(sh->id, ar->type->id,
+			frame.self = xtc_tnt_handle_make(sh->id, ar->type->id,
 			    slot, meta->gen);
 			tl_frame = &frame;
 			sh->scratch_off = 0;
@@ -959,20 +976,20 @@ drain_completions(tnt_shard_t *sh)
 				__os_free(c.buffer);
 
 			switch (tr.kind) {
-			case TNT_DONE:
-			case TNT_CRASH:
+			case XTC_TNT_DONE:
+			case XTC_TNT_CRASH:
 				slot_teardown(ar, slot);
 				break;
-			case TNT_WAIT_IO:
-				meta->state = TNT_SLOT_WAIT_IO;
+			case XTC_TNT_WAIT_IO:
+				meta->state = XTC_TNT_SLOT_WAIT_IO;
 				commit_staged_io(sh, &frame, meta);
 				break;
-			case TNT_WAIT_MESSAGE:
+			case XTC_TNT_WAIT_MESSAGE:
 				meta->state = (meta->mbox_depth > 0)
-				    ? TNT_SLOT_READY : TNT_SLOT_WAIT_MESSAGE;
+				    ? XTC_TNT_SLOT_READY : XTC_TNT_SLOT_WAIT_MESSAGE;
 				break;
 			default:
-				meta->state = TNT_SLOT_READY;
+				meta->state = XTC_TNT_SLOT_READY;
 				break;
 			}
 		}
@@ -983,7 +1000,7 @@ drain_completions(tnt_shard_t *sh)
  * each READY slot (budgeted), pop the head message and dispatch.
  * Returns the number of handlers run. */
 static int
-shard_tick(tnt_shard_t *sh)
+shard_tick(xtc_tnt_shard_t *sh)
 {
 	int ran = 0;
 	int ai;
@@ -992,7 +1009,7 @@ shard_tick(tnt_shard_t *sh)
 	drain_completions(sh);
 
 	for (ai = 0; ai < sh->n_arenas; ai++) {
-		tnt_arena_t *ar = &sh->arenas[ai];
+		xtc_tnt_arena_t *ar = &sh->arenas[ai];
 		uint32_t budget = ar->type->budget_weight
 		    ? ar->type->budget_weight : ar->slot_count;
 		uint32_t scanned = 0;
@@ -1000,18 +1017,18 @@ shard_tick(tnt_shard_t *sh)
 
 		while (scanned < ar->slot_count && dispatched < budget) {
 			uint32_t slot = ar->cursor;
-			tnt_slot_t *meta;
+			xtc_tnt_slot_t *meta;
 
 			ar->cursor = (ar->cursor + 1) % ar->slot_count;
 			scanned++;
 			meta = &ar->slots[slot];
-			if (meta->state != TNT_SLOT_READY)
+			if (meta->state != XTC_TNT_SLOT_READY)
 				continue;
 
 			if (meta->mbox_depth > 0) {
 				/* Pop head message, dispatch. */
-				tnt_envelope_t *e = meta->mbox_head;
-				tnt_message_t msg = e->msg;
+				xtc_tnt_envelope_t *e = meta->mbox_head;
+				xtc_tnt_message_t msg = e->msg;
 				meta->mbox_head = e->next;
 				if (meta->mbox_head == NULL)
 					meta->mbox_tail = NULL;
@@ -1021,7 +1038,7 @@ shard_tick(tnt_shard_t *sh)
 			} else {
 				/* READY with no message: a YIELD re-run with a
 				 * synthetic empty message (tag 0). */
-				tnt_message_t msg;
+				xtc_tnt_message_t msg;
 				memset(&msg, 0, sizeof(msg));
 				(void)dispatch_slot(sh, ar, slot, &msg);
 			}
@@ -1034,14 +1051,14 @@ shard_tick(tnt_shard_t *sh)
 
 /* Is there any work left (live slots that are READY, or pending I/O)? */
 static int
-shard_has_ready(tnt_shard_t *sh)
+shard_has_ready(xtc_tnt_shard_t *sh)
 {
 	int ai;
 	for (ai = 0; ai < sh->n_arenas; ai++) {
-		tnt_arena_t *ar = &sh->arenas[ai];
+		xtc_tnt_arena_t *ar = &sh->arenas[ai];
 		uint32_t i;
 		for (i = 0; i < ar->slot_count; i++)
-			if (ar->slots[i].state == TNT_SLOT_READY)
+			if (ar->slots[i].state == XTC_TNT_SLOT_READY)
 				return 1;
 	}
 	return 0;
@@ -1050,9 +1067,9 @@ shard_has_ready(tnt_shard_t *sh)
 /* ---- Shard main fiber --------------------------------------------- */
 
 static void
-tnt_shard_main(void *arg)
+xtc_tnt_shard_main(void *arg)
 {
-	tnt_shard_t *sh = arg;
+	xtc_tnt_shard_t *sh = arg;
 	uint8_t drain[256];
 
 	tl_shard = sh;
@@ -1060,10 +1077,10 @@ tnt_shard_main(void *arg)
 	/* Boot isolate: shard 0 auto-spawns one instance of spec.boot_type
 	 * (Tina's boot spec spawns a root).  boot_type < 0 disables it. */
 	if (sh->id == 0 && sh->spec->boot_type >= 0) {
-		tnt_arena_t *ar = shard_arena(sh,
+		xtc_tnt_arena_t *ar = shard_arena(sh,
 		    (uint8_t)sh->spec->boot_type);
 		if (ar != NULL) {
-			tnt_spawn_error_t err;
+			xtc_tnt_spawn_error_t err;
 			(void)slot_spawn(sh, ar, NULL, 0, &err);
 		}
 	}
@@ -1091,7 +1108,7 @@ tnt_shard_main(void *arg)
 			    XTC_IO_READABLE,
 			    200LL * 1000 * 1000, &revents);
 			/* Drain the pipe (coalesced wakeups). */
-			while (read(sh->wake_rd, drain, sizeof(drain)) > 0)
+			while (read(sh->wake_rd, drain, sizeof(drain)) > 0)  /* XTC_BLOCKING_OK: nonblocking pipe drain after a ready wait */
 				;
 		}
 	}
@@ -1102,9 +1119,9 @@ tnt_shard_main(void *arg)
 /* ---- Boot --------------------------------------------------------- */
 
 static int
-arena_init(tnt_shard_t *sh, int idx, const tnt_type_t *type)
+arena_init(xtc_tnt_shard_t *sh, int idx, const xtc_tnt_type_t *type)
 {
-	tnt_arena_t *ar = &sh->arenas[idx];
+	xtc_tnt_arena_t *ar = &sh->arenas[idx];
 	uint32_t i;
 	xtc_slab_opts_t mopts = XTC_SLAB_OPTS_DEFAULT;
 	xtc_slab_opts_t sopts = XTC_SLAB_OPTS_DEFAULT;
@@ -1121,7 +1138,7 @@ arena_init(tnt_shard_t *sh, int idx, const tnt_type_t *type)
 	 * boot-time allocation per array -- no per-slot malloc. */
 	snprintf(nbuf, sizeof(nbuf), "tnt.meta.%u.%s", sh->id, type->name);
 	mopts.name = nbuf;
-	mopts.obj_size = (size_t)ar->slot_count * sizeof(tnt_slot_t);
+	mopts.obj_size = (size_t)ar->slot_count * sizeof(xtc_tnt_slot_t);
 	mopts.chunk_size = mopts.obj_size + 4096;
 	mopts.align = 64;
 	if (xtc_slab_create(&mopts, &sh->slot_cache[idx]) != XTC_OK)
@@ -1149,7 +1166,7 @@ arena_init(tnt_shard_t *sh, int idx, const tnt_type_t *type)
 	ar->free_top = 0;
 	for (i = 0; i < ar->slot_count; i++) {
 		ar->slots[i].gen = 1;        /* gen 0 reserved for NONE */
-		ar->slots[i].state = TNT_SLOT_FREE;
+		ar->slots[i].state = XTC_TNT_SLOT_FREE;
 		/* push in reverse so slot 0 is allocated first */
 		ar->free_list[ar->free_top++] = ar->slot_count - 1 - i;
 	}
@@ -1157,10 +1174,10 @@ arena_init(tnt_shard_t *sh, int idx, const tnt_type_t *type)
 }
 
 static int
-shard_init(tnt_runtime_t *rt, uint8_t id, tnt_shard_t **out)
+shard_init(xtc_tnt_runtime_t *rt, uint8_t id, xtc_tnt_shard_t **out)
 {
-	tnt_shard_t *sh = NULL;
-	const tnt_spec_t *spec = rt->spec;
+	xtc_tnt_shard_t *sh = NULL;
+	const xtc_tnt_spec_t *spec = rt->spec;
 	int i;
 	int pfd[2];
 	uint32_t scratch_cap;
@@ -1174,7 +1191,7 @@ shard_init(tnt_runtime_t *rt, uint8_t id, tnt_shard_t **out)
 	pthread_mutex_init(&sh->comp_lock, NULL);
 	pthread_mutex_init(&sh->spawn_lock, NULL);
 
-	if (__os_calloc(TNT_COMPLETION_CAP, sizeof(tnt_completion_t),
+	if (__os_calloc(XTC_TNT_COMPLETION_CAP, sizeof(xtc_tnt_completion_t),
 	    (void **)&sh->comp_ring) != XTC_OK || sh->comp_ring == NULL)
 		goto fail;
 
@@ -1188,8 +1205,8 @@ shard_init(tnt_runtime_t *rt, uint8_t id, tnt_shard_t **out)
 		goto fail;
 	sh->wake_rd = pfd[0];
 	sh->wake_wr = pfd[1];
-	(void)fcntl(sh->wake_rd, F_SETFL, O_NONBLOCK);
-	(void)fcntl(sh->wake_wr, F_SETFL, O_NONBLOCK);
+	(void)fcntl(sh->wake_rd, F_SETFL, O_NONBLOCK);  /* XTC_BLOCKING_OK: fd flag set */
+	(void)fcntl(sh->wake_wr, F_SETFL, O_NONBLOCK);  /* XTC_BLOCKING_OK: fd flag set */
 
 	for (i = 0; i < spec->n_types; i++) {
 		if (arena_init(sh, i, &spec->types[i]) != 0)
@@ -1217,7 +1234,7 @@ fail:
 static int
 shard_bootstrap(xtc_task_t *self, void *arg)
 {
-	tnt_shard_t *sh = arg;
+	xtc_tnt_shard_t *sh = arg;
 	xtc_proc_opts_t popts = { 0 };
 	xtc_pid_t pid;
 	xtc_loop_t *loop;
@@ -1226,27 +1243,27 @@ shard_bootstrap(xtc_task_t *self, void *arg)
 	loop = xtc_exec_loop(sh->rt->exec, sh->id);
 	sh->loop = loop;
 	popts.name = "tnt-shard";
-	(void)xtc_proc_spawn(loop, tnt_shard_main, sh, &popts, &pid);
+	(void)xtc_proc_spawn(loop, xtc_tnt_shard_main, sh, &popts, &pid);
 	return XTC_TASK_DONE;
 }
 
 /* Release a shard's arenas and backing memory.  Called after the
  * executor has stopped (no shard fiber is running). */
 static void
-shard_destroy(tnt_shard_t *sh)
+shard_destroy(xtc_tnt_shard_t *sh)
 {
 	int i;
-	tnt_spawn_req_t *req, *n;
+	xtc_tnt_spawn_req_t *req, *n;
 
 	if (sh == NULL)
 		return;
 
 	/* Drain + free any queued mailbox envelopes still in arenas. */
 	for (i = 0; i < sh->n_arenas; i++) {
-		tnt_arena_t *ar = &sh->arenas[i];
+		xtc_tnt_arena_t *ar = &sh->arenas[i];
 		uint32_t s;
 		for (s = 0; s < ar->slot_count; s++) {
-			tnt_envelope_t *e, *en;
+			xtc_tnt_envelope_t *e, *en;
 			for (e = ar->slots[s].mbox_head; e != NULL; e = en) {
 				en = e->next;
 				__os_free(e);
@@ -1281,16 +1298,16 @@ shard_destroy(tnt_shard_t *sh)
 }
 
 int
-tnt_start(const tnt_spec_t *spec)
+xtc_tnt_start(const xtc_tnt_spec_t *spec)
 {
-	tnt_runtime_t *rt = NULL;
+	xtc_tnt_runtime_t *rt = NULL;
 	int i;
 	int rc;
 
 	if (spec == NULL || spec->n_types <= 0 ||
-	    spec->n_types > TNT_MAX_TYPES)
+	    spec->n_types > XTC_TNT_MAX_TYPES)
 		return XTC_E_INVAL;
-	if (spec->shard_count <= 0 || spec->shard_count > TNT_MAX_SHARDS)
+	if (spec->shard_count <= 0 || spec->shard_count > XTC_TNT_MAX_SHARDS)
 		return XTC_E_INVAL;
 
 	if (__os_calloc(1, sizeof(*rt), (void **)&rt) != XTC_OK || rt == NULL)
@@ -1322,12 +1339,12 @@ tnt_start(const tnt_spec_t *spec)
 		xtc_task_t *t = NULL;
 		if (xtc_exec_spawn_on(rt->exec, i, shard_bootstrap,
 		    rt->shards[i], &t) != XTC_OK) {
-			tnt_stop();
+			xtc_tnt_stop();
 			break;
 		}
 	}
 
-	/* Run.  Blocks until tnt_stop / exec stop. */
+	/* Run.  Blocks until xtc_tnt_stop / exec stop. */
 	rc = xtc_exec_run(rt->exec);
 
 	(void)xtc_exec_fini(rt->exec);
@@ -1339,9 +1356,9 @@ tnt_start(const tnt_spec_t *spec)
 }
 
 void
-tnt_stop(void)
+xtc_tnt_stop(void)
 {
-	tnt_runtime_t *rt = g_rt;
+	xtc_tnt_runtime_t *rt = g_rt;
 	int i;
 	if (rt == NULL)
 		return;

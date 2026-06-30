@@ -1,0 +1,281 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd June 30, 2026
+.Dt XTC_TNT 3
+.Os
+.Sh NAME
+.Nm xtc_tnt_start ,
+.Nm xtc_tnt_stop ,
+.Nm xtc_tnt_spawn_on ,
+.Nm xtc_tnt_spawn ,
+.Nm xtc_tnt_send ,
+.Nm xtc_tnt_submit_recv ,
+.Nm xtc_tnt_io_send ,
+.Nm xtc_tnt_submit_close ,
+.Nm xtc_tnt_register_timer ,
+.Nm xtc_tnt_self ,
+.Nm xtc_tnt_shard_id ,
+.Nm xtc_tnt_scratch_arena
+.Nd Tina-faithful stackless Isolate layer
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_tnt.h
+.Ft int
+.Fn xtc_tnt_start "const xtc_tnt_spec_t *spec"
+.Ft void
+.Fn xtc_tnt_stop "void"
+.Ft xtc_tnt_spawn_error_t
+.Fn xtc_tnt_spawn_on "uint8_t shard" "uint8_t type_id" "const void *args" "size_t args_size"
+.Ft xtc_tnt_spawn_error_t
+.Fn xtc_tnt_spawn "uint8_t type_id" "const void *args" "size_t args_size" "xtc_tnt_handle_t *out_handle"
+.Ft xtc_tnt_send_result_t
+.Fn xtc_tnt_send "xtc_tnt_handle_t to" "uint16_t tag" "const void *payload" "size_t payload_size"
+.Ft xtc_tnt_io_result_t
+.Fn xtc_tnt_submit_recv "int fd"
+.Ft xtc_tnt_io_result_t
+.Fn xtc_tnt_io_send "int fd" "const void *buffer" "size_t len"
+.Ft xtc_tnt_io_result_t
+.Fn xtc_tnt_submit_close "int fd"
+.Ft void
+.Fn xtc_tnt_register_timer "uint64_t duration_ns" "uint16_t tag"
+.Ft xtc_tnt_handle_t
+.Fn xtc_tnt_self "void"
+.Ft uint8_t
+.Fn xtc_tnt_shard_id "void"
+.Ft "void *"
+.Fn xtc_tnt_scratch_arena "size_t size"
+.Sh DESCRIPTION
+.Nm tnt
+is an L4 orchestration layer that reproduces the
+.Em Tina
+Isolate programming model on the libxtc runtime.  An
+.Em Isolate
+is a stackless typed state machine: a dense struct in a per-type
+arena, addressed by a 64-bit generational handle, whose handler runs
+to completion and returns a
+.Em transition
+instead of blocking.  The decisive mapping is
+.Em shard-to-proc :
+one long-lived xtc_proc per
+.Xr xtc_exec 3
+loop owns the typed arenas and runs the dispatch loop, so a task
+costs the bytes of its struct
+.Pq hundreds
+rather than a full fiber stack
+.Pq kilobytes .
+.Pp
+The layer is configured by an
+.Vt xtc_tnt_spec_t
+that names the Isolate types
+.Po an
+.Vt xtc_tnt_type_t
+descriptor table giving each type a stride, mailbox capacity,
+per-tick dispatch budget, and
+.Va init_fn
+/
+.Va handler_fn
+callbacks
+.Pc ,
+the shard count, and an optional boot Isolate auto-spawned on shard 0.
+.Ss Lifecycle
+.Fn xtc_tnt_start
+validates the spec, carves every arena from boot-time
+.Xr xtc_slab 3
+caches, pins one shard proc per loop, and runs until the system stops.
+It blocks; it returns
+.Dv XTC_OK
+on clean shutdown or a negative
+.Dv XTC_E_*
+on a boot failure.
+.Fn xtc_tnt_stop
+requests shutdown and is safe to call from any thread or a signal
+handler.
+.Fn xtc_tnt_spawn_on
+spawns an Isolate from outside any handler
+.Po e.g. a listener proc or
+.Fn main
+before start
+.Pc
+and routes it onto the target shard; it is thread-safe.
+.Ss Ambient handler API
+The remaining functions are
+.Em ambient :
+they are valid only during an active handler or
+.Va init_fn
+invocation, where they resolve the current shard and turn frame from
+thread-local state.
+.Fn xtc_tnt_spawn
+creates a child Isolate on the current shard
+.Po its
+.Va init_fn
+runs immediately
+.Pc
+and returns its handle in
+.Fa out_handle .
+.Fn xtc_tnt_send
+enqueues a message
+.Po with a user
+.Fa tag
+of at least
+.Dv XTC_TNT_USER_TAG_BASE
+and a payload of at most
+.Dv XTC_TNT_MAX_PAYLOAD_SIZE
+bytes
+.Pc
+into the target's bounded mailbox; it never grows the mailbox or
+retries.
+.Fn xtc_tnt_submit_recv ,
+.Fn xtc_tnt_io_send ,
+and
+.Fn xtc_tnt_submit_close
+.Em stage
+an I/O operation into the current turn frame; the shard commits it
+.Pq via a short-lived courier fiber
+only if the handler then returns
+.Dv XTC_TNT_WAIT_IO .
+A staged
+.Fn xtc_tnt_io_send
+buffer must live inside the Isolate struct, since it is read at commit
+time after the handler returns.  On completion the Isolate receives a
+message tagged
+.Dv XTC_TNT_IO_TAG_RECV_COMPLETE ,
+.Dv XTC_TNT_IO_TAG_SEND_COMPLETE ,
+or
+.Dv XTC_TNT_IO_TAG_CLOSE_COMPLETE .
+.Fn xtc_tnt_register_timer
+arms a one-shot timer that delivers
+.Fa tag
+back to the current Isolate after
+.Fa duration_ns
+nanoseconds.
+.Fn xtc_tnt_self
+returns the current Isolate's handle and
+.Fn xtc_tnt_shard_id
+the current shard's 0-based id.
+.Fn xtc_tnt_scratch_arena
+bump-allocates
+.Fa size
+bytes from the shard-wide scratch arena, which is reset before every
+handler call; it is for per-turn temporaries only and must not be
+retained across a handler return.
+.Ss Transitions
+A handler returns an
+.Vt xtc_tnt_transition_t
+telling the shard what the Isolate wants next, not how to schedule it:
+.Bl -tag -width "XTC_TNT_WAIT_MESSAGE" -offset indent
+.It Dv XTC_TNT_DONE
+clean exit; the slot is torn down and its generation bumped.
+.It Dv XTC_TNT_YIELD
+run again next tick.
+.It Dv XTC_TNT_WAIT_MESSAGE
+park until the mailbox has a message.
+.It Dv XTC_TNT_WAIT_IO
+commit the staged I/O and park on it.
+.It Dv XTC_TNT_CRASH
+voluntary failure; the slot is torn down
+.Pq let it crash .
+.El
+.Sh RETURN VALUES
+.Fn xtc_tnt_start
+returns
+.Dv XTC_OK
+on clean shutdown, or a negative
+.Dv XTC_E_*
+.Po e.g.
+.Dv XTC_E_INVAL ,
+.Dv XTC_E_NOMEM
+.Pc
+on a boot failure.
+.Fn xtc_tnt_send
+returns
+.Dv XTC_TNT_SEND_OK ,
+.Dv XTC_TNT_SEND_MAILBOX_FULL
+.Pq target at capacity, message dropped ,
+.Dv XTC_TNT_SEND_POOL_EXHAUSTED ,
+or
+.Dv XTC_TNT_SEND_STALE_HANDLE
+.Pq target dead or generation mismatch .
+.Fn xtc_tnt_spawn
+and
+.Fn xtc_tnt_spawn_on
+return
+.Dv XTC_TNT_SPAWN_OK
+or one of
+.Dv XTC_TNT_SPAWN_ARENA_FULL ,
+.Dv XTC_TNT_SPAWN_TYPE_NOT_ALLOCATED ,
+.Dv XTC_TNT_SPAWN_INIT_FAILED .
+.Fn xtc_tnt_submit_recv ,
+.Fn xtc_tnt_io_send ,
+and
+.Fn xtc_tnt_submit_close
+return
+.Dv XTC_TNT_IO_OK ,
+.Dv XTC_TNT_IO_TOO_MANY
+.Pq turn-frame staging slots exhausted ,
+or
+.Dv XTC_TNT_IO_BAD_FD .
+.Fn xtc_tnt_self
+returns
+.Dv XTC_TNT_HANDLE_NONE
+when called outside a handler.
+.Fn xtc_tnt_scratch_arena
+returns
+.Dv NULL
+when the arena is exhausted or no shard is active.
+.Sh EXAMPLES
+A TCP echo Isolate, one per connection:
+.Bd -literal -offset indent
+typedef struct echo_conn {
+    int     fd;
+    uint8_t buffer[256];
+    int     bytes;
+} echo_conn_t;
+
+static xtc_tnt_transition_t
+echo_init(void *self_raw, const void *args, size_t n)
+{
+    echo_conn_t *self = xtc_tnt_self_as(echo_conn_t, self_raw);
+    const echo_args_t *a = args;
+    (void)n;
+    self->fd = a->client_fd;
+    if (xtc_tnt_submit_recv(self->fd) != XTC_TNT_IO_OK)
+        return xtc_tnt_transition_to_crash(
+            XTC_TNT_FAULT_CONTRACT_VIOLATION);
+    return XTC_TNT_TRANSITION_WAIT_IO;
+}
+
+static xtc_tnt_transition_t
+echo_handler(void *self_raw, xtc_tnt_message_t *msg)
+{
+    echo_conn_t *self = xtc_tnt_self_as(echo_conn_t, self_raw);
+    switch (msg->tag) {
+    case XTC_TNT_IO_TAG_RECV_COMPLETE:
+        if (msg->body.io.result <= 0) {
+            (void)xtc_tnt_submit_close(self->fd);
+            return XTC_TNT_TRANSITION_WAIT_IO;
+        }
+        self->bytes = msg->body.io.result;
+        memcpy(self->buffer, msg->body.io.buffer, self->bytes);
+        (void)xtc_tnt_io_send(self->fd, self->buffer, self->bytes);
+        return XTC_TNT_TRANSITION_WAIT_IO;
+    case XTC_TNT_IO_TAG_SEND_COMPLETE:
+        (void)xtc_tnt_submit_recv(self->fd);
+        return XTC_TNT_TRANSITION_WAIT_IO;
+    case XTC_TNT_IO_TAG_CLOSE_COMPLETE:
+        return XTC_TNT_TRANSITION_DONE;
+    default:
+        return XTC_TNT_TRANSITION_WAIT_MESSAGE;
+    }
+}
+.Ed
+.Sh SEE ALSO
+.Xr xtc_svr 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_exec 3 ,
+.Xr xtc_slab 3 ,
+.Xr xtc 7
+.Pp
+The design rationale and faithfulness verdict are in
+.Pa docs/M_TINA_LAYER.md .
+.Sh HISTORY
+Appeared in xtc 0.1.

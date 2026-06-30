@@ -9,6 +9,17 @@ Verdict: YES, as a distinct product ("Tina-on-xtc"), ~85% faithful at
 the API surface.  The decisive architectural choice is to map
 Shard -> libxtc proc, NOT Isolate -> proc.
 
+Status: this layer is now a **supported part of libxtc** (it was
+promoted out of `examples/08_tnt/`).  The implementation is
+`src/orc/tnt.c` (L4 orchestration, alongside svr/sup/app), the public
+header is `src/inc/xtc_tnt.h`, the manual page is
+`man/man3/xtc_tnt.3`, and the tests live in `test/tnt/`
+(`test_tnt.c`, `test_tnt_echo.sh`) and run under `make check`.  The
+public surface is prefixed `xtc_tnt_*` to match library convention;
+the 64-bit generational handle keeps its bit-identical Tina layout.
+The canonical TCP echo server remains in `examples/08_tnt/echo.c`,
+linking the in-library layer via `<xtc_tnt.h>`.
+
 ## The crux: stackless Isolates vs stackful procs
 
 Tina's Isolate is a stackless state machine: a typed struct in a dense
