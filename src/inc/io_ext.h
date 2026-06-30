@@ -25,6 +25,7 @@ int xtc_io_reg_fd __P((xtc_io_t *, int, uint32_t, void *));
 int xtc_io_wakeup __P((xtc_io_t *));
 int xtc_net_recv_frame __P((int, void **, size_t *, size_t, int64_t));
 int xtc_net_send_frame __P((int, const void *, size_t));
+int64_t __xtc_io_sim_next_due __P((xtc_io_t *));
 void __xtc_io_backend_fini __P((xtc_io_t *));
 void xtc_tls_ctx_destroy __P((xtc_tls_ctx_t *));
 void xtc_tls_destroy __P((xtc_tls_t *));

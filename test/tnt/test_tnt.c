@@ -14,7 +14,7 @@
  *
  *	The test isolates record into a process-global results struct
  *	(atomics), and a "driver" isolate spawned at boot orchestrates
- *	the scenario from inside a shard, then calls tnt_stop.
+ *	the scenario from inside a shard, then calls xtc_tnt_stop.
  */
 
 #ifndef _GNU_SOURCE
@@ -24,8 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "tnt.h"
-#include "os_time.h"
+#include "xtc_tnt.h"
 
 /* ---- Shared results -------------------------------------------------
  * Written by handlers (on the shard thread) and the driver; read by
@@ -52,11 +51,11 @@ static results_t g_res;
 #define T_DRIVER  3
 
 /* ---- User tags ---- */
-#define TAG_ADD       (TNT_USER_TAG_BASE + 0)  /* COUNTER: add payload */
-#define TAG_PING      (TNT_USER_TAG_BASE + 1)  /* SINK: count + maybe done */
-#define TAG_DONE      (TNT_USER_TAG_BASE + 2)  /* SINK: tear down (DONE) */
-#define TAG_ARMTIMER  (TNT_USER_TAG_BASE + 3)  /* TIMER: arm a timer */
-#define TAG_KICK      (TNT_USER_TAG_BASE + 4)  /* DRIVER: run the scenario */
+#define TAG_ADD       (XTC_TNT_USER_TAG_BASE + 0)  /* COUNTER: add payload */
+#define TAG_PING      (XTC_TNT_USER_TAG_BASE + 1)  /* SINK: count + maybe done */
+#define TAG_DONE      (XTC_TNT_USER_TAG_BASE + 2)  /* SINK: tear down (DONE) */
+#define TAG_ARMTIMER  (XTC_TNT_USER_TAG_BASE + 3)  /* TIMER: arm a timer */
+#define TAG_KICK      (XTC_TNT_USER_TAG_BASE + 4)  /* DRIVER: run the scenario */
 
 /* ====================================================================
  * COUNTER isolate -- accumulates an int payload across messages.
@@ -65,27 +64,27 @@ typedef struct counter_iso {
 	int total;
 } counter_iso_t;
 
-static tnt_transition_t
+static xtc_tnt_transition_t
 counter_init(void *self_raw, const void *args, size_t n)
 {
-	counter_iso_t *self = tnt_self_as(counter_iso_t, self_raw);
+	counter_iso_t *self = xtc_tnt_self_as(counter_iso_t, self_raw);
 	(void)args; (void)n;
 	self->total = 0;
-	return TNT_TRANSITION_WAIT_MESSAGE;
+	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
-static tnt_transition_t
-counter_handler(void *self_raw, tnt_message_t *msg)
+static xtc_tnt_transition_t
+counter_handler(void *self_raw, xtc_tnt_message_t *msg)
 {
-	counter_iso_t *self = tnt_self_as(counter_iso_t, self_raw);
+	counter_iso_t *self = xtc_tnt_self_as(counter_iso_t, self_raw);
 
 	if (msg->tag == TAG_ADD) {
-		int v = *tnt_payload_as(int, msg);
+		int v = *xtc_tnt_payload_as(int, msg);
 		self->total += v;
 		atomic_fetch_add(&g_res.counter_msgs, 1);
 		atomic_store(&g_res.counter_value, self->total);
 	}
-	return TNT_TRANSITION_WAIT_MESSAGE;
+	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
 /* ====================================================================
@@ -96,29 +95,29 @@ typedef struct sink_iso {
 	int seen;
 } sink_iso_t;
 
-static tnt_transition_t
+static xtc_tnt_transition_t
 sink_init(void *self_raw, const void *args, size_t n)
 {
-	sink_iso_t *self = tnt_self_as(sink_iso_t, self_raw);
+	sink_iso_t *self = xtc_tnt_self_as(sink_iso_t, self_raw);
 	(void)args; (void)n;
 	self->seen = 0;
-	return TNT_TRANSITION_WAIT_MESSAGE;
+	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
-static tnt_transition_t
-sink_handler(void *self_raw, tnt_message_t *msg)
+static xtc_tnt_transition_t
+sink_handler(void *self_raw, xtc_tnt_message_t *msg)
 {
-	sink_iso_t *self = tnt_self_as(sink_iso_t, self_raw);
+	sink_iso_t *self = xtc_tnt_self_as(sink_iso_t, self_raw);
 
 	if (msg->tag == TAG_DONE) {
 		atomic_fetch_add(&g_res.done_seen, 1);
-		return TNT_TRANSITION_DONE;
+		return XTC_TNT_TRANSITION_DONE;
 	}
 	if (msg->tag == TAG_PING) {
 		self->seen++;
 		atomic_fetch_add(&g_res.sink_handled, 1);
 	}
-	return TNT_TRANSITION_WAIT_MESSAGE;
+	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
 /* ====================================================================
@@ -128,79 +127,79 @@ typedef struct timer_iso {
 	int armed;
 } timer_iso_t;
 
-static tnt_transition_t
+static xtc_tnt_transition_t
 timer_init(void *self_raw, const void *args, size_t n)
 {
-	timer_iso_t *self = tnt_self_as(timer_iso_t, self_raw);
+	timer_iso_t *self = xtc_tnt_self_as(timer_iso_t, self_raw);
 	(void)args; (void)n;
 	self->armed = 0;
-	return TNT_TRANSITION_WAIT_MESSAGE;
+	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
-static tnt_transition_t
-timer_handler(void *self_raw, tnt_message_t *msg)
+static xtc_tnt_transition_t
+timer_handler(void *self_raw, xtc_tnt_message_t *msg)
 {
-	timer_iso_t *self = tnt_self_as(timer_iso_t, self_raw);
+	timer_iso_t *self = xtc_tnt_self_as(timer_iso_t, self_raw);
 
 	if (msg->tag == TAG_ARMTIMER) {
 		self->armed = 1;
-		tnt_register_timer(20LL * 1000 * 1000 /* 20ms */, TNT_TAG_TIMER);
-		return TNT_TRANSITION_WAIT_MESSAGE;
+		xtc_tnt_register_timer(20LL * 1000 * 1000 /* 20ms */, XTC_TNT_TAG_TIMER);
+		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
-	if (msg->tag == TNT_TAG_TIMER) {
+	if (msg->tag == XTC_TNT_TAG_TIMER) {
 		atomic_store(&g_res.timer_fired, 1);
-		return TNT_TRANSITION_WAIT_MESSAGE;
+		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
-	return TNT_TRANSITION_WAIT_MESSAGE;
+	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
 /* ====================================================================
  * DRIVER isolate -- runs the whole scenario from inside the shard, so
- * every tnt_* call happens in a valid handler context.  It spawns the
+ * every xtc_tnt_* call happens in a valid handler context.  It spawns the
  * other isolates, exercises sends, verifies drop-on-full + staleness,
  * arms a timer, then waits (via re-arming a short timer) for the timer
  * to fire, checks results, and stops the runtime.
  * ==================================================================== */
 typedef struct driver_iso {
 	int           phase;
-	tnt_handle_t  counter;
-	tnt_handle_t  sink;        /* the sink we tear down for staleness */
-	tnt_handle_t  fullsink;    /* the sink we overflow for drop-on-full */
-	tnt_handle_t  timer;
+	xtc_tnt_handle_t  counter;
+	xtc_tnt_handle_t  sink;        /* the sink we tear down for staleness */
+	xtc_tnt_handle_t  fullsink;    /* the sink we overflow for drop-on-full */
+	xtc_tnt_handle_t  timer;
 } driver_iso_t;
 
-static tnt_transition_t
+static xtc_tnt_transition_t
 driver_init(void *self_raw, const void *args, size_t n)
 {
-	driver_iso_t *self = tnt_self_as(driver_iso_t, self_raw);
+	driver_iso_t *self = xtc_tnt_self_as(driver_iso_t, self_raw);
 	(void)args; (void)n;
 	memset(self, 0, sizeof(*self));
 	self->phase = 0;
 	/* Kick ourselves to start phase 0 on the next tick. */
-	(void)tnt_send(tnt_self(), TAG_KICK, NULL, 0);
-	return TNT_TRANSITION_WAIT_MESSAGE;
+	(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
+	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
-static tnt_transition_t
-driver_handler(void *self_raw, tnt_message_t *msg)
+static xtc_tnt_transition_t
+driver_handler(void *self_raw, xtc_tnt_message_t *msg)
 {
-	driver_iso_t *self = tnt_self_as(driver_iso_t, self_raw);
+	driver_iso_t *self = xtc_tnt_self_as(driver_iso_t, self_raw);
 
-	if (msg->tag == TNT_TAG_TIMER) {
+	if (msg->tag == XTC_TNT_TAG_TIMER) {
 		/* phase 4: the sink's TAG_DONE has now been processed, so the
 		 * sink slot is torn down and its generation bumped.  A send to
 		 * the OLD handle must be STALE. */
 		if (self->phase == 4) {
-			tnt_send_result_t r =
-			    tnt_send(self->sink, TAG_PING, NULL, 0);
-			if (r == TNT_SEND_STALE_HANDLE)
+			xtc_tnt_send_result_t r =
+			    xtc_tnt_send(self->sink, TAG_PING, NULL, 0);
+			if (r == XTC_TNT_SEND_STALE_HANDLE)
 				atomic_fetch_add(&g_res.drop_stale, 1);
 			/* Now arm the real timer on the timer isolate. */
-			(void)tnt_send(self->timer, TAG_ARMTIMER, NULL, 0);
+			(void)xtc_tnt_send(self->timer, TAG_ARMTIMER, NULL, 0);
 			self->phase = 5;
 			/* Re-arm a poll timer to wait for timer_fired. */
-			tnt_register_timer(5LL * 1000 * 1000, TNT_TAG_TIMER);
-			return TNT_TRANSITION_WAIT_MESSAGE;
+			xtc_tnt_register_timer(5LL * 1000 * 1000, XTC_TNT_TAG_TIMER);
+			return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 		}
 		/* phase 5: poll until the timer isolate's timer fired. */
 		if (atomic_load(&g_res.timer_fired)) {
@@ -212,42 +211,42 @@ driver_handler(void *self_raw, tnt_message_t *msg)
 			pass &= (atomic_load(&g_res.done_seen) == 1);
 			pass &= (atomic_load(&g_res.timer_fired) == 1);
 			atomic_store(&g_res.all_pass, pass);
-			tnt_stop();
-			return TNT_TRANSITION_DONE;
+			xtc_tnt_stop();
+			return XTC_TNT_TRANSITION_DONE;
 		}
-		tnt_register_timer(5LL * 1000 * 1000, TNT_TAG_TIMER);
-		return TNT_TRANSITION_WAIT_MESSAGE;
+		xtc_tnt_register_timer(5LL * 1000 * 1000, XTC_TNT_TAG_TIMER);
+		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
 
 	if (msg->tag != TAG_KICK)
-		return TNT_TRANSITION_WAIT_MESSAGE;
+		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 
 	/* ---- Phase 0: spawn the other isolates. ---- */
 	if (self->phase == 0) {
-		tnt_spawn(T_COUNTER, NULL, 0, &self->counter);
-		tnt_spawn(T_SINK, NULL, 0, &self->sink);
-		tnt_spawn(T_SINK, NULL, 0, &self->fullsink);
-		tnt_spawn(T_TIMER, NULL, 0, &self->timer);
+		xtc_tnt_spawn(T_COUNTER, NULL, 0, &self->counter);
+		xtc_tnt_spawn(T_SINK, NULL, 0, &self->sink);
+		xtc_tnt_spawn(T_SINK, NULL, 0, &self->fullsink);
+		xtc_tnt_spawn(T_TIMER, NULL, 0, &self->timer);
 		self->phase = 1;
-		(void)tnt_send(tnt_self(), TAG_KICK, NULL, 0);
-		return TNT_TRANSITION_WAIT_MESSAGE;
+		(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
+		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
 
 	/* ---- Phase 1: send three ADDs to the counter. ---- */
 	if (self->phase == 1) {
 		int a = 1, b = 2, c = 3;
-		if (tnt_send(self->counter, TAG_ADD, &a, sizeof a) ==
-		    TNT_SEND_OK)
+		if (xtc_tnt_send(self->counter, TAG_ADD, &a, sizeof a) ==
+		    XTC_TNT_SEND_OK)
 			atomic_fetch_add(&g_res.send_ok, 1);
-		if (tnt_send(self->counter, TAG_ADD, &b, sizeof b) ==
-		    TNT_SEND_OK)
+		if (xtc_tnt_send(self->counter, TAG_ADD, &b, sizeof b) ==
+		    XTC_TNT_SEND_OK)
 			atomic_fetch_add(&g_res.send_ok, 1);
-		if (tnt_send(self->counter, TAG_ADD, &c, sizeof c) ==
-		    TNT_SEND_OK)
+		if (xtc_tnt_send(self->counter, TAG_ADD, &c, sizeof c) ==
+		    XTC_TNT_SEND_OK)
 			atomic_fetch_add(&g_res.send_ok, 1);
 		self->phase = 2;
-		(void)tnt_send(tnt_self(), TAG_KICK, NULL, 0);
-		return TNT_TRANSITION_WAIT_MESSAGE;
+		(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
+		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
 
 	/* ---- Phase 2: drop-on-full.  fullsink has mailbox capacity 4;
@@ -257,33 +256,33 @@ driver_handler(void *self_raw, tnt_message_t *msg)
 	if (self->phase == 2) {
 		int i;
 		for (i = 0; i < 16; i++) {
-			tnt_send_result_t r =
-			    tnt_send(self->fullsink, TAG_PING, NULL, 0);
-			if (r == TNT_SEND_OK)
+			xtc_tnt_send_result_t r =
+			    xtc_tnt_send(self->fullsink, TAG_PING, NULL, 0);
+			if (r == XTC_TNT_SEND_OK)
 				atomic_fetch_add(&g_res.send_ok, 1);
-			else if (r == TNT_SEND_MAILBOX_FULL)
+			else if (r == XTC_TNT_SEND_MAILBOX_FULL)
 				atomic_fetch_add(&g_res.drop_full, 1);
 		}
 		self->phase = 3;
-		(void)tnt_send(tnt_self(), TAG_KICK, NULL, 0);
-		return TNT_TRANSITION_WAIT_MESSAGE;
+		(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
+		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
 
 	/* ---- Phase 3: staleness.  Tear down `sink` (send TAG_DONE), then
 	 * defer the stale check to phase 4 via a short timer so the sink's
 	 * DONE is processed first. ---- */
 	if (self->phase == 3) {
-		(void)tnt_send(self->sink, TAG_DONE, NULL, 0);
+		(void)xtc_tnt_send(self->sink, TAG_DONE, NULL, 0);
 		self->phase = 4;
-		tnt_register_timer(2LL * 1000 * 1000, TNT_TAG_TIMER);
-		return TNT_TRANSITION_WAIT_MESSAGE;
+		xtc_tnt_register_timer(2LL * 1000 * 1000, XTC_TNT_TAG_TIMER);
+		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
 
-	return TNT_TRANSITION_WAIT_MESSAGE;
+	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
 /* ---- Spec --------------------------------------------------------- */
-static const tnt_type_t test_types[] = {
+static const xtc_tnt_type_t test_types[] = {
 	{ .id = T_COUNTER, .name = "Counter", .slot_count = 64,
 	  .stride = sizeof(counter_iso_t), .mailbox_capacity = 64,
 	  .budget_weight = 64, .init_fn = counter_init,
@@ -305,7 +304,7 @@ static const tnt_type_t test_types[] = {
 int
 main(void)
 {
-	tnt_spec_t spec;
+	xtc_tnt_spec_t spec;
 	int rc;
 
 	memset(&g_res, 0, sizeof(g_res));
@@ -320,7 +319,7 @@ main(void)
 	spec.boot_type = T_DRIVER;   /* runtime auto-spawns the driver on
 	                              * shard 0; its init kicks the scenario */
 
-	rc = tnt_start(&spec);
+	rc = xtc_tnt_start(&spec);
 	(void)rc;
 
 	/* Report. */

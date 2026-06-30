@@ -3,17 +3,19 @@
 # Copyright (c) 2026, The XTC Project -- All rights reserved.
 # Use of this source code is governed by the ISC License.
 #
-# examples/08_tnt/test_echo.sh -- end-to-end TCP echo round-trip test.
+# test/tnt/test_tnt_echo.sh -- end-to-end TCP echo round-trip test.
 #
-# Starts tnt_echo on a port, opens a TCP connection, sends several
-# lines, and verifies each is echoed back byte-for-byte.  Uses only
-# bash + /dev/tcp (no nc dependency).  Cleans up the server on exit.
+# Starts tnt_echo (the examples/08_tnt echo server, linked against the
+# in-library tnt L4 layer) on a port, opens a TCP connection, sends
+# several lines, and verifies each is echoed back byte-for-byte.  Uses
+# only bash + /dev/tcp (no nc dependency).  Cleans up the server on
+# exit.
 
 set -u
 
 PORT="${TNT_ECHO_PORT:-17777}"
 SHARDS="${TNT_ECHO_SHARDS:-2}"
-SERVER=./tnt_echo
+SERVER="${XTC_BUILD_DIR:-.}/tnt_echo"
 FAIL=0
 
 if [ ! -x "$SERVER" ]; then

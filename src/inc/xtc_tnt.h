@@ -2,8 +2,9 @@
  * Copyright (c) 2026, The XTC Project -- All rights reserved.
  * Use of this source code is governed by the ISC License.
  *
- * examples/08_tnt/tnt.h
- *	tnt -- a Tina-faithful Isolate layer built on top of the libxtc
+ * src/inc/xtc_tnt.h
+ *	tnt -- a Tina-faithful, stackless Isolate layer (L4) built on
+ *	top of the libxtc
  *	concurrency runtime.  See docs/M_TINA_LAYER.md (authoritative)
  *	and the Tina reference at github.com/pmbanugo/tina.
  *
@@ -22,13 +23,13 @@
  *	stackless arena structs; only the shard is a fiber.
  *
  *	This header is the entire public surface.  All ambient ctx_*
- *	style calls (here named tnt_*) are valid only during an active
+ *	style calls (here named xtc_tnt_*) are valid only during an active
  *	handler invocation -- they resolve the current shard + turn
  *	frame from thread-local state, exactly as Tina's TinaContext.
  */
 
-#ifndef TNT_H
-#define TNT_H
+#ifndef XTC_TNT_H
+#define XTC_TNT_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -49,53 +50,53 @@ extern "C" {
  * The generation is the key to safety: when an Isolate is torn down,
  * its slot's generation counter increments, so any handle still
  * referencing the old generation is recognisably stale.  A send to a
- * stale handle returns TNT_SEND_STALE_HANDLE rather than delivering to
+ * stale handle returns XTC_TNT_SEND_STALE_HANDLE rather than delivering to
  * whatever new Isolate now occupies the slot.
  */
-typedef uint64_t tnt_handle_t;
+typedef uint64_t xtc_tnt_handle_t;
 
-#define TNT_HANDLE_NONE ((tnt_handle_t)0)
+#define XTC_TNT_HANDLE_NONE ((xtc_tnt_handle_t)0)
 
-#define TNT_SHARD_BITS 8
-#define TNT_TYPE_BITS  8
-#define TNT_SLOT_BITS  20
-#define TNT_GEN_BITS   28
+#define XTC_TNT_SHARD_BITS 8
+#define XTC_TNT_TYPE_BITS  8
+#define XTC_TNT_SLOT_BITS  20
+#define XTC_TNT_GEN_BITS   28
 
-#define TNT_SLOT_MAX   ((1u << TNT_SLOT_BITS) - 1u)
-#define TNT_GEN_MASK   ((1u << TNT_GEN_BITS) - 1u)
+#define XTC_TNT_SLOT_MAX   ((1u << XTC_TNT_SLOT_BITS) - 1u)
+#define XTC_TNT_GEN_MASK   ((1u << XTC_TNT_GEN_BITS) - 1u)
 
-static inline tnt_handle_t
-tnt_handle_make(uint8_t shard, uint8_t type, uint32_t slot, uint32_t gen)
+static inline xtc_tnt_handle_t
+xtc_tnt_handle_make(uint8_t shard, uint8_t type, uint32_t slot, uint32_t gen)
 {
-	return ((tnt_handle_t)shard << (TNT_TYPE_BITS + TNT_SLOT_BITS +
-	                                TNT_GEN_BITS)) |
-	       ((tnt_handle_t)type << (TNT_SLOT_BITS + TNT_GEN_BITS)) |
-	       ((tnt_handle_t)(slot & TNT_SLOT_MAX) << TNT_GEN_BITS) |
-	       ((tnt_handle_t)(gen & TNT_GEN_MASK));
+	return ((xtc_tnt_handle_t)shard << (XTC_TNT_TYPE_BITS + XTC_TNT_SLOT_BITS +
+	                                XTC_TNT_GEN_BITS)) |
+	       ((xtc_tnt_handle_t)type << (XTC_TNT_SLOT_BITS + XTC_TNT_GEN_BITS)) |
+	       ((xtc_tnt_handle_t)(slot & XTC_TNT_SLOT_MAX) << XTC_TNT_GEN_BITS) |
+	       ((xtc_tnt_handle_t)(gen & XTC_TNT_GEN_MASK));
 }
 
 static inline uint8_t
-tnt_handle_shard(tnt_handle_t h)
+xtc_tnt_handle_shard(xtc_tnt_handle_t h)
 {
-	return (uint8_t)(h >> (TNT_TYPE_BITS + TNT_SLOT_BITS + TNT_GEN_BITS));
+	return (uint8_t)(h >> (XTC_TNT_TYPE_BITS + XTC_TNT_SLOT_BITS + XTC_TNT_GEN_BITS));
 }
 
 static inline uint8_t
-tnt_handle_type(tnt_handle_t h)
+xtc_tnt_handle_type(xtc_tnt_handle_t h)
 {
-	return (uint8_t)((h >> (TNT_SLOT_BITS + TNT_GEN_BITS)) & 0xffu);
+	return (uint8_t)((h >> (XTC_TNT_SLOT_BITS + XTC_TNT_GEN_BITS)) & 0xffu);
 }
 
 static inline uint32_t
-tnt_handle_slot(tnt_handle_t h)
+xtc_tnt_handle_slot(xtc_tnt_handle_t h)
 {
-	return (uint32_t)((h >> TNT_GEN_BITS) & TNT_SLOT_MAX);
+	return (uint32_t)((h >> XTC_TNT_GEN_BITS) & XTC_TNT_SLOT_MAX);
 }
 
 static inline uint32_t
-tnt_handle_gen(tnt_handle_t h)
+xtc_tnt_handle_gen(xtc_tnt_handle_t h)
 {
-	return (uint32_t)(h & TNT_GEN_MASK);
+	return (uint32_t)(h & XTC_TNT_GEN_MASK);
 }
 
 /* ---- Transitions --------------------------------------------------
@@ -106,37 +107,37 @@ tnt_handle_gen(tnt_handle_t h)
  * effect interpreter be swapped for deterministic simulation later:
  * the Isolate code is identical in production and in DST.
  */
-typedef enum tnt_transition_kind {
-	TNT_DONE = 0,         /* clean exit -- deallocate me */
-	TNT_YIELD,            /* run me again next tick */
-	TNT_WAIT_MESSAGE,     /* park until my mailbox has a message */
-	TNT_WAIT_IO,          /* staged I/O via tnt_submit_io -- park on it */
-	TNT_CRASH             /* voluntary failure -- "let it crash" */
-} tnt_transition_kind_t;
+typedef enum xtc_tnt_transition_kind {
+	XTC_TNT_DONE = 0,         /* clean exit -- deallocate me */
+	XTC_TNT_YIELD,            /* run me again next tick */
+	XTC_TNT_WAIT_MESSAGE,     /* park until my mailbox has a message */
+	XTC_TNT_WAIT_IO,          /* staged I/O via xtc_tnt_submit_io -- park on it */
+	XTC_TNT_CRASH             /* voluntary failure -- "let it crash" */
+} xtc_tnt_transition_kind_t;
 
 /* Fault reasons mirror Tina's Isolate_Fault_Reason. */
-typedef enum tnt_fault_reason {
-	TNT_FAULT_NONE = 0,
-	TNT_FAULT_SPAWN_FAILED,
-	TNT_FAULT_UNIMPLEMENTED_TRANSITION,
-	TNT_FAULT_INIT_FAILED,
-	TNT_FAULT_CONTRACT_VIOLATION
-} tnt_fault_reason_t;
+typedef enum xtc_tnt_fault_reason {
+	XTC_TNT_FAULT_NONE = 0,
+	XTC_TNT_FAULT_SPAWN_FAILED,
+	XTC_TNT_FAULT_UNIMPLEMENTED_TRANSITION,
+	XTC_TNT_FAULT_INIT_FAILED,
+	XTC_TNT_FAULT_CONTRACT_VIOLATION
+} xtc_tnt_fault_reason_t;
 
-typedef struct tnt_transition {
-	tnt_transition_kind_t kind;
-	tnt_fault_reason_t    fault_reason;
-} tnt_transition_t;
+typedef struct xtc_tnt_transition {
+	xtc_tnt_transition_kind_t kind;
+	xtc_tnt_fault_reason_t    fault_reason;
+} xtc_tnt_transition_t;
 
-#define TNT_TRANSITION_DONE         ((tnt_transition_t){ TNT_DONE, TNT_FAULT_NONE })
-#define TNT_TRANSITION_YIELD        ((tnt_transition_t){ TNT_YIELD, TNT_FAULT_NONE })
-#define TNT_TRANSITION_WAIT_MESSAGE ((tnt_transition_t){ TNT_WAIT_MESSAGE, TNT_FAULT_NONE })
-#define TNT_TRANSITION_WAIT_IO      ((tnt_transition_t){ TNT_WAIT_IO, TNT_FAULT_NONE })
+#define XTC_TNT_TRANSITION_DONE         ((xtc_tnt_transition_t){ XTC_TNT_DONE, XTC_TNT_FAULT_NONE })
+#define XTC_TNT_TRANSITION_YIELD        ((xtc_tnt_transition_t){ XTC_TNT_YIELD, XTC_TNT_FAULT_NONE })
+#define XTC_TNT_TRANSITION_WAIT_MESSAGE ((xtc_tnt_transition_t){ XTC_TNT_WAIT_MESSAGE, XTC_TNT_FAULT_NONE })
+#define XTC_TNT_TRANSITION_WAIT_IO      ((xtc_tnt_transition_t){ XTC_TNT_WAIT_IO, XTC_TNT_FAULT_NONE })
 
-static inline tnt_transition_t
-tnt_transition_to_crash(tnt_fault_reason_t reason)
+static inline xtc_tnt_transition_t
+xtc_tnt_transition_to_crash(xtc_tnt_fault_reason_t reason)
 {
-	tnt_transition_t t = { TNT_CRASH, reason };
+	xtc_tnt_transition_t t = { XTC_TNT_CRASH, reason };
 	return t;
 }
 
@@ -147,26 +148,26 @@ tnt_transition_to_crash(tnt_fault_reason_t reason)
  * message->tag to determine which.
  */
 
-/* Tag constants -- system tags are < TNT_USER_TAG_BASE; user tags
- * must be >= TNT_USER_TAG_BASE (matching Tina's 0x0040 base). */
-#define TNT_USER_TAG_BASE 0x0040u
+/* Tag constants -- system tags are < XTC_TNT_USER_TAG_BASE; user tags
+ * must be >= XTC_TNT_USER_TAG_BASE (matching Tina's 0x0040 base). */
+#define XTC_TNT_USER_TAG_BASE 0x0040u
 
 /* I/O completion tags (delivered by the effect interpreter / reactor,
  * never user-sendable).  Values match Tina's IO_TAG_* constants. */
-#define TNT_IO_TAG_ACCEPT_COMPLETE 0x0012u
-#define TNT_IO_TAG_CONNECT_COMPLETE 0x0013u
-#define TNT_IO_TAG_SEND_COMPLETE   0x0014u
-#define TNT_IO_TAG_RECV_COMPLETE   0x0015u
-#define TNT_IO_TAG_CLOSE_COMPLETE  0x0018u
+#define XTC_TNT_IO_TAG_ACCEPT_COMPLETE 0x0012u
+#define XTC_TNT_IO_TAG_CONNECT_COMPLETE 0x0013u
+#define XTC_TNT_IO_TAG_SEND_COMPLETE   0x0014u
+#define XTC_TNT_IO_TAG_RECV_COMPLETE   0x0015u
+#define XTC_TNT_IO_TAG_CLOSE_COMPLETE  0x0018u
 
 /* System tags. */
-#define TNT_TAG_TIMER    0x0002u
-#define TNT_TAG_SHUTDOWN 0x0003u
+#define XTC_TNT_TAG_TIMER    0x0002u
+#define XTC_TNT_TAG_SHUTDOWN 0x0003u
 
-#define TNT_MAX_PAYLOAD_SIZE  96
-#define TNT_MAX_INIT_ARGS_SIZE 64
+#define XTC_TNT_MAX_PAYLOAD_SIZE  96
+#define XTC_TNT_MAX_INIT_ARGS_SIZE 64
 
-typedef struct tnt_message {
+typedef struct xtc_tnt_message {
 	uint16_t tag;
 	union {
 		/* User / system message body.  payload is placed after an
@@ -174,10 +175,10 @@ typedef struct tnt_message {
 		 * the union itself 8-aligned, payload starts on an 8-byte
 		 * boundary -- a u32/u64 in the payload loads aligned. */
 		struct {
-			tnt_handle_t source;        /* offset 0 */
+			xtc_tnt_handle_t source;        /* offset 0 */
 			uint16_t     payload_size;  /* offset 8 */
 			uint8_t      _pad[6];       /* pad to 16 */
-			uint8_t      payload[TNT_MAX_PAYLOAD_SIZE]; /* offset 16 */
+			uint8_t      payload[XTC_TNT_MAX_PAYLOAD_SIZE]; /* offset 16 */
 		} user;
 		/* I/O completion body. */
 		struct {
@@ -187,7 +188,7 @@ typedef struct tnt_message {
 			uint32_t buffer_len;
 		} io;
 	} body;
-} tnt_message_t;
+} xtc_tnt_message_t;
 
 /* ---- Isolate type descriptor --------------------------------------
  *
@@ -196,13 +197,13 @@ typedef struct tnt_message {
  * transition), and a handler_fn (called on every message / completion,
  * returns the next transition).  Both functions receive a rawptr to
  * the Isolate's slot because the scheduler operates on heterogeneous
- * typed arenas; use tnt_self_as to cast.
+ * typed arenas; use xtc_tnt_self_as to cast.
  */
-typedef tnt_transition_t (*tnt_init_fn)(void *self, const void *args,
+typedef xtc_tnt_transition_t (*xtc_tnt_init_fn)(void *self, const void *args,
                                         size_t args_size);
-typedef tnt_transition_t (*tnt_handler_fn)(void *self, tnt_message_t *msg);
+typedef xtc_tnt_transition_t (*xtc_tnt_handler_fn)(void *self, xtc_tnt_message_t *msg);
 
-typedef struct tnt_type {
+typedef struct xtc_tnt_type {
 	uint8_t        id;                  /* 0..255 -- index in spec.types */
 	const char    *name;                /* for diagnostics */
 	uint32_t       slot_count;          /* arena capacity for this type */
@@ -210,19 +211,19 @@ typedef struct tnt_type {
 	size_t         working_memory_size; /* per-slot working arena bytes */
 	uint32_t       mailbox_capacity;    /* bounded mailbox depth */
 	uint32_t       budget_weight;       /* max slots dispatched per tick */
-	tnt_init_fn    init_fn;
-	tnt_handler_fn handler_fn;
-} tnt_type_t;
+	xtc_tnt_init_fn    init_fn;
+	xtc_tnt_handler_fn handler_fn;
+} xtc_tnt_type_t;
 
 /* ---- System spec --------------------------------------------------
  *
- * Tina's SystemSpec, trimmed to this slice.  At boot tnt_start carves
+ * Tina's SystemSpec, trimmed to this slice.  At boot xtc_tnt_start carves
  * every arena from boot-time slab caches (one per type per shard) and
  * never mallocs on the hot path again (disciplinary, per the doc).
  */
-typedef struct tnt_spec {
+typedef struct xtc_tnt_spec {
 	const char       *name;
-	const tnt_type_t *types;        /* descriptor table */
+	const xtc_tnt_type_t *types;        /* descriptor table */
 	int               n_types;
 	int               shard_count;  /* number of shards (loops) */
 	uint32_t          scratch_size; /* per-shard turn scratch arena bytes */
@@ -232,110 +233,110 @@ typedef struct tnt_spec {
 	 * a negative value (default after memset) to disable; the canonical
 	 * use is a "driver" or "root supervisor" isolate.  -1 = none. */
 	int               boot_type;
-} tnt_spec_t;
+} xtc_tnt_spec_t;
 
 /* ---- Send results -------------------------------------------------
  *
  * Tina's Send_Result.  The sender decides what to do -- the layer
  * never auto-retries or grows the mailbox.
  */
-typedef enum tnt_send_result {
-	TNT_SEND_OK = 0,            /* enqueued in the target mailbox */
-	TNT_SEND_MAILBOX_FULL,      /* target mailbox at capacity -- DROPPED */
-	TNT_SEND_POOL_EXHAUSTED,    /* no free envelope -- DROPPED */
-	TNT_SEND_STALE_HANDLE       /* target dead / generation mismatch */
-} tnt_send_result_t;
+typedef enum xtc_tnt_send_result {
+	XTC_TNT_SEND_OK = 0,            /* enqueued in the target mailbox */
+	XTC_TNT_SEND_MAILBOX_FULL,      /* target mailbox at capacity -- DROPPED */
+	XTC_TNT_SEND_POOL_EXHAUSTED,    /* no free envelope -- DROPPED */
+	XTC_TNT_SEND_STALE_HANDLE       /* target dead / generation mismatch */
+} xtc_tnt_send_result_t;
 
 /* Spawn outcome. */
-typedef enum tnt_spawn_error {
-	TNT_SPAWN_OK = 0,
-	TNT_SPAWN_ARENA_FULL,
-	TNT_SPAWN_TYPE_NOT_ALLOCATED,
-	TNT_SPAWN_INIT_FAILED
-} tnt_spawn_error_t;
+typedef enum xtc_tnt_spawn_error {
+	XTC_TNT_SPAWN_OK = 0,
+	XTC_TNT_SPAWN_ARENA_FULL,
+	XTC_TNT_SPAWN_TYPE_NOT_ALLOCATED,
+	XTC_TNT_SPAWN_INIT_FAILED
+} xtc_tnt_spawn_error_t;
 
 /* I/O submit results. */
-typedef enum tnt_io_result {
-	TNT_IO_OK = 0,
-	TNT_IO_TOO_MANY,        /* turn frame staging slots exhausted */
-	TNT_IO_BAD_FD
-} tnt_io_result_t;
+typedef enum xtc_tnt_io_result {
+	XTC_TNT_IO_OK = 0,
+	XTC_TNT_IO_TOO_MANY,        /* turn frame staging slots exhausted */
+	XTC_TNT_IO_BAD_FD
+} xtc_tnt_io_result_t;
 
 /* ---- Ambient ctx_* API (valid only during a handler) -------------- */
 
-/* Messaging.  tag must be >= TNT_USER_TAG_BASE.  Payload max 96 bytes.
+/* Messaging.  tag must be >= XTC_TNT_USER_TAG_BASE.  Payload max 96 bytes.
  * Drop-on-full with sender feedback, matching Tina's .mailbox_full. */
-tnt_send_result_t tnt_send(tnt_handle_t to, uint16_t tag,
+xtc_tnt_send_result_t xtc_tnt_send(xtc_tnt_handle_t to, uint16_t tag,
                            const void *payload, size_t payload_size);
 
 /* Spawn a new Isolate of type_id on the CURRENT shard.  The child's
  * init_fn runs immediately (not deferred).  Returns the new handle in
  * *out_handle on success. */
-tnt_spawn_error_t tnt_spawn(uint8_t type_id, const void *args,
-                            size_t args_size, tnt_handle_t *out_handle);
+xtc_tnt_spawn_error_t xtc_tnt_spawn(uint8_t type_id, const void *args,
+                            size_t args_size, xtc_tnt_handle_t *out_handle);
 
 /* I/O effects.  These stage an operation into the current turn frame;
  * the shard commits it into xtc_aio / the net layer only if the
- * handler returns TNT_WAIT_IO.  This is Tina's stage-then-commit. */
+ * handler returns XTC_TNT_WAIT_IO.  This is Tina's stage-then-commit. */
 
 /* Stage a recv on fd into a reactor buffer; on completion the Isolate
- * receives a TNT_IO_TAG_RECV_COMPLETE message. */
-tnt_io_result_t tnt_submit_recv(int fd);
+ * receives a XTC_TNT_IO_TAG_RECV_COMPLETE message. */
+xtc_tnt_io_result_t xtc_tnt_submit_recv(int fd);
 
 /* Stage a send of buffer[0..len) on fd; buffer must live inside the
  * Isolate struct (it is read at commit time, after the handler
- * returns).  On completion: TNT_IO_TAG_SEND_COMPLETE. */
-tnt_io_result_t tnt_io_send(int fd, const void *buffer, size_t len);
+ * returns).  On completion: XTC_TNT_IO_TAG_SEND_COMPLETE. */
+xtc_tnt_io_result_t xtc_tnt_io_send(int fd, const void *buffer, size_t len);
 
-/* Stage a close of fd; on completion: TNT_IO_TAG_CLOSE_COMPLETE. */
-tnt_io_result_t tnt_submit_close(int fd);
+/* Stage a close of fd; on completion: XTC_TNT_IO_TAG_CLOSE_COMPLETE. */
+xtc_tnt_io_result_t xtc_tnt_submit_close(int fd);
 
 /* Register a one-shot timer; after duration_ns the Isolate receives a
  * message with the given tag. */
-void tnt_register_timer(uint64_t duration_ns, uint16_t tag);
+void xtc_tnt_register_timer(uint64_t duration_ns, uint16_t tag);
 
 /* The current Isolate's identity. */
-tnt_handle_t tnt_self(void);
+xtc_tnt_handle_t xtc_tnt_self(void);
 
 /* The current shard's 0-based id. */
-uint8_t tnt_shard_id(void);
+uint8_t xtc_tnt_shard_id(void);
 
 /* The shard-wide scratch arena, reset before every handler call.  For
  * per-turn temporaries only; do not retain across handler returns.
  * Returns a bump pointer of `size` bytes, or NULL if exhausted. */
-void *tnt_scratch_arena(size_t size);
+void *xtc_tnt_scratch_arena(size_t size);
 
 /* ---- Ergonomic helpers -------------------------------------------- */
 
 /* Debug-checked cast from the rawptr self to a typed Isolate pointer.
  * In a debug build this validates the stride matches sizeof(T). */
-#define tnt_self_as(T, self_raw) ((T *)(self_raw))
+#define xtc_tnt_self_as(T, self_raw) ((T *)(self_raw))
 
 /* Cast a message payload to a typed pointer. */
-#define tnt_payload_as(T, msg) ((T *)((msg)->body.user.payload))
+#define xtc_tnt_payload_as(T, msg) ((T *)((msg)->body.user.payload))
 
 /* ---- Boot ---------------------------------------------------------
  *
  * Validate the spec, carve all arenas from boot-time slab caches, pin
  * one shard proc per loop, and enter the run loop.  Blocks until the
- * system stops (tnt_stop from any thread, or all shards idle).  Returns
+ * system stops (xtc_tnt_stop from any thread, or all shards idle).  Returns
  * XTC_OK-style 0 on clean shutdown, negative on a boot failure.
  */
-int tnt_start(const tnt_spec_t *spec);
+int xtc_tnt_start(const xtc_tnt_spec_t *spec);
 
 /* Request the running system to stop (kicks every shard).  Safe to
  * call from a signal handler or another thread. */
-void tnt_stop(void);
+void xtc_tnt_stop(void);
 
 /* Spawn an Isolate from OUTSIDE the shard fibers (e.g. from main before
- * tnt_start, or from a non-isolate listener).  Routes the spawn onto
+ * xtc_tnt_start, or from a non-isolate listener).  Routes the spawn onto
  * the target shard and runs the init synchronously on that shard's next
  * tick.  shard is 0..shard_count-1.  Thread-safe. */
-tnt_spawn_error_t tnt_spawn_on(uint8_t shard, uint8_t type_id,
+xtc_tnt_spawn_error_t xtc_tnt_spawn_on(uint8_t shard, uint8_t type_id,
                                const void *args, size_t args_size);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* TNT_H */
+#endif /* XTC_TNT_H */

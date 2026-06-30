@@ -2,13 +2,16 @@
 # Copyright (c) 2026, The XTC Project -- All rights reserved.
 # Use of this source code is governed by the ISC License.
 #
-# examples/08_tnt/Makefile -- builds the tnt Isolate layer + demos.
+# examples/08_tnt/Makefile -- builds the canonical tnt echo server.
+#
+# tnt is now a SUPPORTED part of libxtc (src/orc/tnt.c, public header
+# src/inc/xtc_tnt.h).  This directory keeps only the example: a TCP
+# echo server that links the in-library tnt L4 layer.
 #
 # Targets:
-#   make            build libtnt.a + the echo server + the in-process test
-#   make test       build and run the in-process dispatch test
+#   make            build the echo server (tnt_echo)
 #   make echo-test  build and run the TCP echo round-trip test
-#   make clean      remove objects + binaries
+#   make clean      remove the binary
 #
 # Override XTC_BUILD to point at a different libxtc build dir.
 
@@ -42,34 +45,18 @@ CFLAGS  += $(LIBURING_INC)
 LDFLAGS  = $(XTC_LDFLAGS) $(XTC_BUILD)/libxtc.a -pthread -ldl -lm \
            $(LIBURING_LDFLAGS)
 
-TNT_OBJ = tnt.o
+.PHONY: all clean echo-test
 
-.PHONY: all clean test echo-test
+all: tnt_echo
 
-all: libtnt.a tnt_echo test_tnt
-
-libtnt.a: $(TNT_OBJ)
-	ar rcs $@ $(TNT_OBJ)
-
-%.o: %.c tnt.h
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-# The canonical TCP echo server.
-tnt_echo: echo.o libtnt.a
-	$(CC) $(CFLAGS) -o $@ echo.o libtnt.a $(LDFLAGS)
-
-# The in-process dispatch test (no network).
-test_tnt: test_tnt.o libtnt.a
-	$(CC) $(CFLAGS) -o $@ test_tnt.o libtnt.a $(LDFLAGS)
-
-test: test_tnt
-	./test_tnt
+# The canonical TCP echo server.  Links the in-library tnt L4 layer.
+tnt_echo: echo.c
+	$(CC) $(CFLAGS) -o $@ echo.c $(LDFLAGS)
 
 # End-to-end TCP echo round-trip test (spawns the server, connects,
-# verifies echo).  Driven by a shell harness.
+# verifies echo).  Driven by the in-tree shell harness.
 echo-test: tnt_echo
-	bash ./test_echo.sh
+	XTC_BUILD_DIR=. bash ../../test/tnt/test_tnt_echo.sh
 
 clean:
-	rm -f tnt.o echo.o test_tnt.o
-	rm -f libtnt.a tnt_echo test_tnt
+	rm -f tnt_echo

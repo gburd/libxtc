@@ -112,6 +112,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/orc/reg.c \
 	$(srcdir)/../src/orc/svr.c \
 	$(srcdir)/../src/orc/app.c \
+	$(srcdir)/../src/orc/tnt.c \
 	$(srcdir)/../src/orc/osproc.c \
 	$(srcdir)/../src/ptc/lock_lr.c \
 	$(srcdir)/../src/ptc/lock_lw.c \
@@ -180,6 +181,7 @@ LIB_OBJS	= \
 	reg.o \
 	svr.o \
 	app.o \
+	tnt.o \
 	osproc.o \
 	lock_lr.o \
 	lock_lw.o \
@@ -241,6 +243,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_sync.h \
 	$(srcdir)/../src/inc/xtc_tailcall.h \
 	$(srcdir)/../src/inc/xtc_tls.h \
+	$(srcdir)/../src/inc/xtc_tnt.h \
 	$(srcdir)/../src/inc/xtc_trace.h
 STATIC_LIB	= libxtc.a
 
@@ -281,7 +284,8 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_cfg.sh \
 	$(abs_top_srcdir)/../test/dist/test_m17_smoke.sh \
 	$(abs_top_srcdir)/../test/security/test_alloc_overflow_sweep.sh \
-	$(abs_top_srcdir)/../test/dist/test_amalgamation.sh
+	$(abs_top_srcdir)/../test/dist/test_amalgamation.sh \
+	$(abs_top_srcdir)/../test/tnt/test_tnt_echo.sh
 
 TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
@@ -311,6 +315,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_reg \
 		  test_svr \
 		  test_app \
+		  test_tnt \
 		  test_osproc \
 		  test_isolated \
 		  test_mctx \
@@ -566,6 +571,9 @@ svr.o: $(srcdir)/../src/orc/svr.c xtc_config.h
 app.o: $(srcdir)/../src/orc/app.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/app.c
 
+tnt.o: $(srcdir)/../src/orc/tnt.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/tnt.c
+
 osproc.o: $(srcdir)/../src/orc/osproc.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/osproc.c
 
@@ -637,7 +645,7 @@ bench_fairness: $(srcdir)/../bench/bench_fairness.c $(STATIC_LIB)
 # -------------------------------------------------------------------------
 # Examples -- self-contained demos.
 # -------------------------------------------------------------------------
-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo
+examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo tnt_echo
 
 01_hello: $(srcdir)/../examples/01_hello_async.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
@@ -659,6 +667,13 @@ examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo
 		-o $@ $(srcdir)/../examples/04_lockmgr_demo.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+# The canonical tnt example: a TCP echo server.  Links the in-library
+# tnt L4 layer; driven by test/tnt/test_tnt_echo.sh.
+tnt_echo: $(srcdir)/../examples/08_tnt/echo.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../examples/08_tnt/echo.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 # -------------------------------------------------------------------------
 # Tests.
 # -------------------------------------------------------------------------
@@ -672,7 +687,7 @@ tests-c: $(TESTS_C)
 		./$$t || exit 1; \
 	done
 
-tests-sh: $(STATIC_LIB)
+tests-sh: $(STATIC_LIB) tnt_echo
 	@for t in $(TESTS_SH); do \
 		echo "running shell test: $$(basename $$t)"; \
 		XTC_BUILD_DIR=$(abs_builddir) \
@@ -1012,6 +1027,12 @@ test_app: $(srcdir)/../test/m10/test_app.c \
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
 		-o $@ $(srcdir)/../test/m10/test_app.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# tnt Isolate layer (L4): in-process dispatch test (no munit).
+test_tnt: $(srcdir)/../test/tnt/test_tnt.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../test/tnt/test_tnt.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_osproc: $(srcdir)/../test/m10/test_osproc.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
