@@ -40,6 +40,21 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+
+/*
+ * tnt's I/O effect interpreter does raw POSIX socket I/O (recv/send with
+ * MSG_DONTWAIT) in its courier fibers, so the implementation is gated on
+ * a POSIX target -- matching how the platform-specific I/O backends
+ * (io_aix.c, io_solaris.c) are gated.  On a non-POSIX target (MSVC) the
+ * public xtc_tnt_* entry points are NOSYS stubs (see the #else at the
+ * end of the file).  s_include scans the PUBLIC: markers regardless of
+ * the #if, so the generated prototypes stay consistent across platforms.
+ */
+#include "xtc_int.h"
+#include "xtc_tnt.h"
+
+#if !defined(_WIN32)
+
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -49,9 +64,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
-
-#include "xtc_int.h"
-#include "xtc_tnt.h"
 
 #include "xtc.h"
 #include "xtc_async.h"
@@ -1371,3 +1383,63 @@ xtc_tnt_stop(void)
 	}
 	(void)xtc_exec_stop(rt->exec);
 }
+
+#else  /* _WIN32: tnt is a POSIX feature (raw socket I/O in the couriers) */
+
+/*
+ * NOSYS stubs so the library links on a non-POSIX target.  The
+ * stackless-Isolate layer requires POSIX socket I/O; a Windows port
+ * would route the courier I/O through the IOCP-backed xtc_net instead.
+ */
+#include <stddef.h>
+
+int
+xtc_tnt_start(const xtc_tnt_spec_t *spec)
+{ (void)spec; return XTC_E_NOSYS; }
+
+void
+xtc_tnt_stop(void) { }
+
+xtc_tnt_spawn_error_t
+xtc_tnt_spawn_on(uint8_t shard, uint8_t type_id, const void *args,
+    size_t args_size)
+{ (void)shard; (void)type_id; (void)args; (void)args_size;
+  return XTC_TNT_SPAWN_INIT_FAILED; }
+
+xtc_tnt_send_result_t
+xtc_tnt_send(xtc_tnt_handle_t to, uint16_t tag, const void *payload,
+    size_t payload_size)
+{ (void)to; (void)tag; (void)payload; (void)payload_size;
+  return XTC_TNT_SEND_STALE_HANDLE; }
+
+xtc_tnt_spawn_error_t
+xtc_tnt_spawn(uint8_t type_id, const void *args, size_t args_size,
+    xtc_tnt_handle_t *out_handle)
+{ (void)type_id; (void)args; (void)args_size;
+  if (out_handle != NULL) *out_handle = XTC_TNT_HANDLE_NONE;
+  return XTC_TNT_SPAWN_INIT_FAILED; }
+
+xtc_tnt_io_result_t
+xtc_tnt_submit_recv(int fd) { (void)fd; return XTC_TNT_IO_BAD_FD; }
+
+xtc_tnt_io_result_t
+xtc_tnt_io_send(int fd, const void *buffer, size_t len)
+{ (void)fd; (void)buffer; (void)len; return XTC_TNT_IO_BAD_FD; }
+
+xtc_tnt_io_result_t
+xtc_tnt_submit_close(int fd) { (void)fd; return XTC_TNT_IO_BAD_FD; }
+
+void
+xtc_tnt_register_timer(uint64_t duration_ns, uint16_t tag)
+{ (void)duration_ns; (void)tag; }
+
+xtc_tnt_handle_t
+xtc_tnt_self(void) { return XTC_TNT_HANDLE_NONE; }
+
+uint8_t
+xtc_tnt_shard_id(void) { return 0; }
+
+void *
+xtc_tnt_scratch_arena(size_t size) { (void)size; return NULL; }
+
+#endif /* !_WIN32 */
