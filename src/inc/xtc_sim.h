@@ -96,4 +96,15 @@ int      __xtc_sim_vclock(int64_t *out_ns);
 struct xtc_exec;
 int      xtc_sim_exec_run(struct xtc_exec *e, uint64_t seed, long max_steps);
 
+/* Structural invariant checker (run after each sim step): returns
+ * XTC_OK if all per-loop invariants hold, XTC_E_INTERNAL on the first
+ * violation.  A 64-bit digest of observable per-loop state for replay
+ * equality (same seed+config -> same hash).  Both take an xtc_exec.
+ *
+ * PUBLIC: int      xtc_sim_check __P((struct xtc_exec *));
+ * PUBLIC: uint64_t xtc_sim_state_hash __P((struct xtc_exec *));
+ */
+int      xtc_sim_check(struct xtc_exec *e);
+uint64_t xtc_sim_state_hash(struct xtc_exec *e);
+
 #endif /* XTC_SIM_H */
