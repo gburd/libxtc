@@ -101,12 +101,23 @@ jobs:
         run: make -C build_musl -j"$(nproc)"
       - name: Test (unit + property)
         run: make -C build_musl tests-c tests-pbt
-      - name: Confirm builtin unwind + fctx are the active backends
+      - name: Confirm fctx substrate is active (no execinfo/ucontext)
         run: |
-          grep -q 'define XTC_HAVE_BUILTIN_UNWIND 1' build_musl/xtc_config.h
+          # musl has neither <execinfo.h> nor ucontext, so the library
+          # uses the fctx coroutine substrate and a non-execinfo
+          # backtrace tier.  Which backtrace tier (builtin _Unwind vs
+          # the no-op stub) depends on whether the toolchain links
+          # libgcc_s in the configure probe: a full musl toolchain gets
+          # builtin _Unwind_Backtrace; the minimal Ubuntu musl-gcc
+          # wrapper may not link the unwinder in the probe and falls to
+          # the stub (an acceptable degradation -- the dump still works
+          # without a C stack).  So assert only the invariants that hold
+          # on every musl: execinfo + ucontext absent (fctx active).
           ! grep -q 'define XTC_HAVE_EXECINFO 1' build_musl/xtc_config.h
           ! grep -q 'define XTC_HAVE_UCONTEXT 1' build_musl/xtc_config.h
-          echo "musl: builtin _Unwind_Backtrace active; execinfo + ucontext absent (fctx substrate), as expected"
+          echo "musl: execinfo + ucontext absent (fctx substrate active); backtrace tier:"
+          grep -E 'define XTC_HAVE_(BUILTIN_UNWIND|LIBUNWIND) 1' build_musl/xtc_config.h \
+            || echo "  (stub backtrace -- toolchain did not link an unwinder in the probe)"
 
   sim-dst:
     # Deterministic Simulation Testing: build with the sim I/O backend
