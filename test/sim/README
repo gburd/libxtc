@@ -31,6 +31,22 @@ test_sim_pingpong.c  (needs a sim build)
     reply.  Exercises the mailbox park/wake path across loops under the
     deterministic scheduler; asserts full completion + identical replay.
 
+test_sim_fault.c  (needs a sim build)
+    Phase 5: N workers each consult xtc_sim_fault at a decision point;
+    asserts the faulted-worker set replays from the seed and that the
+    state hash is stable whether faults are on or off (the FAULT PRNG
+    stream is isolated from the scheduling streams).
+
+test_sim_soak.c  (needs a sim build)
+    Phase 6: a configurable seed sweep (argv[1], default 200) over a
+    mixed workload -- many cross-loop ping/pong pairs (mailbox park/wake
+    across loops) plus timer-driven sleepers (the virtual clock).  For
+    each seed it runs twice and asserts the run reaches quiescence,
+    replays identically (state hash + application result), holds the
+    per-step invariants, and that the sweep explores many distinct
+    schedules.  This test surfaced a real scheduler liveness bug (timer
+    parks never woke -- see docs/M_DST.md).
+
 Running the sim-build tests
 ---------------------------
 

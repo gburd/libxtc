@@ -325,14 +325,24 @@ xtc_exec_run(xtc_exec_t *e)
  * step of its loop.
  */
 
-/* A loop is runnable now if it has a live task, queued/stealable work,
- * a timer due at the current virtual time, or a pending cross-loop
- * inbox message. */
+/*
+ * A loop is RUNNABLE NOW if it has a task it can actually advance: a
+ * ready task on the owner FIFO (q_head) or the stealable deque, a timer
+ * already due at the current virtual time, or a pending cross-loop
+ * inbox message.  Note: n_alive > 0 does NOT imply runnable -- an alive
+ * proc may be PARKED (awaiting a timer, fd, or cross-loop waker), and
+ * treating a parked-only loop as runnable would spin the scheduler
+ * forever (it would keep being picked, make no progress, and the
+ * virtual clock would never advance to fire its timer).  When no loop
+ * is runnable the scheduler advances the clock to the earliest pending
+ * deadline, which makes that timer due and the owning loop runnable on
+ * the next iteration.
+ */
 static int
 __sim_loop_runnable(xtc_loop_t *l, int64_t now_ns)
 {
 	int64_t dl;
-	if (atomic_load_explicit(&l->n_alive, memory_order_relaxed) > 0)
+	if (l->q_head != NULL)
 		return 1;
 	if (xtc_deque_len(&l->deque) > 0)
 		return 1;
@@ -432,9 +442,11 @@ xtc_sim_state_hash(xtc_exec_t *e)
  * Activate sim (seed) + the virtual clock, then drive the loops
  * deterministically until quiescence (no runnable loop and no pending
  * timer), the step budget is hit, or xtc_exec_stop is called.  max_steps
- * <= 0 means unbounded.  Returns XTC_OK on quiescence, XTC_E_AGAIN if
- * the step budget was exhausted with work remaining (a possible hang /
- * livelock -- inspect), or a negative code on a loop-step error.
+ * <= 0 means unbounded.  Returns XTC_OK on clean quiescence, XTC_E_AGAIN
+ * if the step budget was exhausted with work remaining (a possible
+ * livelock -- inspect), XTC_E_DEADLK if the system stopped with procs
+ * still alive but all parked (a deadlock: no waker can arrive), or a
+ * negative code on a loop-step error / invariant violation.
  */
 int
 xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
@@ -470,10 +482,22 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 		if (n_runnable == 0) {
 			/* Nobody can progress now.  Advance the virtual clock
 			 * to the earliest pending timer; if there is none, the
-			 * system is quiescent -- done. */
+			 * system has stopped.  Distinguish clean quiescence
+			 * (no proc alive anywhere) from a DEADLOCK (procs still
+			 * alive but all parked with no timer and no inbox -- no
+			 * waker can ever arrive on the single sim thread). */
 			dl = __sim_earliest_deadline(e);
-			if (dl < 0)
-				break;                 /* quiescent */
+			if (dl < 0) {
+				int alive = 0;
+				for (i = 0; i < e->n_loops; i++)
+					alive += atomic_load_explicit(
+					    &e->loops[i]->n_alive,
+					    memory_order_relaxed);
+				e->started = 0;
+				xtc_sim_clock_disable();
+				xtc_sim_deactivate();
+				return alive > 0 ? XTC_E_DEADLK : XTC_OK;
+			}
 			if (dl > now)
 				xtc_sim_clock_set(dl);
 			continue;

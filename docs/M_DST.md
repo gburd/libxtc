@@ -122,7 +122,30 @@ mailbox -- is reused unmodified.
   state hash (xtc_sim_state_hash) + replay-equality harness. DONE.
 - Phase 5: seeded fault injection (xtc_sim_fault, dedicated FAULT
   stream so faults do not perturb the schedule). DONE.
-- Phase 6: scale + soak; integrate with the PBT harness. PENDING.
+- Phase 6: scale + soak (test_sim_soak: a configurable seed sweep over
+  a mixed cross-loop ping/pong + timer-sleeper workload; asserts every
+  seed reaches quiescence, replays identically, holds invariants, and
+  that the sweep explores many distinct schedules).  DONE.
+
+## A real defect Phase 6 surfaced
+
+The soak's timer-sleeper workload immediately exposed a scheduler bug
+that the yield/recv-only Phase 3-5 tests missed: __sim_loop_runnable
+treated any loop with n_alive > 0 as runnable.  But an alive proc may be
+PARKED (awaiting a timer / fd / cross-loop waker), so a loop whose only
+proc was sleeping on a timer was reported runnable forever -- the
+scheduler kept picking it, it made no progress, and the virtual clock
+never advanced to fire the timer.  Result: xtc_proc_sleep (and any
+timer park) never completed under sim (budget exhaustion / hang).
+
+Fix: runnability is now the REAL ready-work signal -- a ready task on
+the owner FIFO (q_head) or the stealable deque, a timer already due at
+the current virtual time, or a pending cross-loop inbox -- never merely
+n_alive.  When no loop is runnable the scheduler advances the clock to
+the earliest pending deadline (making that timer due), and distinguishes
+clean quiescence (no proc alive) from a DEADLOCK (procs alive but all
+parked with no timer/inbox: no waker can arrive) -> XTC_E_DEADLK.  This
+is exactly the class of liveness bug DST exists to catch.
 
 Tests live in test/sim/ (run_sim_tests.sh on a --with-io-backend=sim
 build; a sim-dst CI job runs them every push): test_sim_rng (PRNG +
