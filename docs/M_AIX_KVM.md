@@ -37,6 +37,49 @@ A Linux x86_64 host with:
 - 8+ GB RAM (AIX 7.3 wants 4 GB minimum).
 - ~12 hours patience for the install (it's emulated PowerPC).
 
+## Capability confirmed on the dev host (2026-06-30)
+
+The toolchain side is verified present and need not be re-checked:
+
+```sh
+$ nix-shell -p qemu --run 'qemu-system-ppc64 -machine help | grep pseries'
+pseries-10.1   pSeries Logical Partition (PAPR compliant) (default)
+pseries        (alias of pseries-10.1)
+...
+```
+
+`/dev/kvm` exists on the host (Intel VT-x), but note KVM does NOT
+accelerate ppc64 on an x86 host -- AIX runs under TCG (pure software
+emulation), so the ~5-10x slowdown stands.  Use the CURRENT machine
+type, not the doc's original `pseries-7.2`: `qemu 10.x` ships
+`pseries-10.1` (alias `pseries`).  Substitute `-M pseries` (or a pinned
+`-M pseries-10.1`) in every command below.
+
+## What blocks turning this into a CI job
+
+Two hard gates, neither technical:
+
+1. **AIX install media.**  IBM does not publish a freely-downloadable
+   AIX ISO; the 30-day evaluation requires an IBM Developer account and
+   acceptance of the eval license, and ongoing CI needs an entitled
+   media kit via Passport Advantage.  No media == no VM, full stop.
+2. **Install + per-run time.**  A one-time ~4-8 hour emulated install,
+   then ~10-15 min per CI build+check under TCG (vs ~2 min native).
+   That is too slow for per-commit CI; the realistic model is a
+   nightly/weekly job against a pre-installed, snapshotted image, or an
+   on-demand manual run before a release.
+
+So the path is real and the mechanics are confirmed, but standing it up
+is gated on acquiring licensed media -- it cannot be fully automated
+from this repo alone.  Note the fctx coroutine assembly does NOT yet
+cover AIX: the only PowerPC variant is `fctx_ppc64le_elfv2.S` (Linux,
+little-endian, ELFv2 ABI), whereas AIX is BIG-endian ppc64 with the
+XCOFF / AIX calling convention -- a distinct assembly port.  Until that
+exists the M4 fiber tests will fail on AIX (matching the original note
+below); the non-fiber suites (loop + io + chan + sync) should still
+run, so an AIX VM is still worthwhile for validating the pollset I/O
+backend.
+
 ## Setup steps
 
 ```bash
