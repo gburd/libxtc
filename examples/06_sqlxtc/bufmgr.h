@@ -259,6 +259,12 @@ typedef struct bm_stats {
 } bm_stats_t;
 void bm_get_stats(bm_t *bm, bm_stats_t *out);
 
+/* Debug probe: returns the number of page ids that currently map more
+ * than one resident frame -- always 0 in a correct buffer manager (a
+ * duplicate is the page-reclamation aliasing race).  Intended for the
+ * concurrent-merge stress tests, which assert the result is 0. */
+uint32_t bm_dbg_dup_pid(bm_t *bm);
+
 #ifdef __cplusplus
 }
 #endif

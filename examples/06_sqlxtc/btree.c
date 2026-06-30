@@ -942,6 +942,10 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 
 		pid = atomic_load(&bt->root_pid);
 		rc = bm_fix_pid(bm, pid, &f);
+		if (rc == XTC_E_AGAIN) {   /* root pid quarantined: retry */
+			xtc_yield();
+			continue;
+		}
 		if (rc != XTC_OK)
 			return rc;
 		bm_latch_shared(f);
@@ -961,6 +965,12 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 			bm_frame_t *cf;
 
 			rc = bm_fix_pid(bm, child, &cf);
+			if (rc == XTC_E_AGAIN) {
+				/* Child pid quarantined by a concurrent merge:
+				 * restart from the root. */
+				stale = 1;
+				break;
+			}
 			if (rc != XTC_OK) {
 				bm_unlatch(f);
 				bm_unfix(bm, f, 0);
@@ -1467,6 +1477,11 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 
 		pid = atomic_load(&bt->root_pid);
 		rc = bm_fix_pid(bm, pid, &f);
+		if (rc == XTC_E_AGAIN) {   /* root pid quarantined: retry */
+			f = NULL;
+			xtc_yield();
+			continue;
+		}
 		if (rc != XTC_OK)
 			return rc;
 		bm_latch_exclusive(f);
@@ -1486,6 +1501,12 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 			bm_frame_t *cf;
 
 			rc = bm_fix_pid(bm, child, &cf);
+			if (rc == XTC_E_AGAIN) {
+				/* Child pid quarantined by a concurrent merge: the
+				 * page was freed under us; restart from the root. */
+				stale = 1;
+				break;
+			}
 			if (rc != XTC_OK) {
 				bm_unlatch(f); bm_unfix(bm, f, 0);
 				return rc;
@@ -1626,6 +1647,10 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 
 		pid = atomic_load(&bt->root_pid);
 		rc = bm_fix_pid(bm, pid, &f);
+		if (rc == XTC_E_AGAIN) {   /* root pid quarantined: retry */
+			xtc_yield();
+			continue;
+		}
 		if (rc != XTC_OK)
 			return rc;
 		bm_latch_shared(f);
@@ -1647,6 +1672,12 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 			else
 				child = child_for_key(pg, start, klen);
 			rc = bm_fix_pid(bm, child, &cf);
+			if (rc == XTC_E_AGAIN) {
+				/* Child pid quarantined by a concurrent merge:
+				 * restart from the root. */
+				stale = 1;
+				break;
+			}
 			if (rc != XTC_OK) {
 				bm_unlatch(f);
 				bm_unfix(bm, f, 0);
@@ -1765,6 +1796,7 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
 		{
 			uint32_t rs = btnode_right_sibling(pg);
 			bm_frame_t *nf;
+			int frc;
 
 			bm_unlatch(c->leaf);
 			bm_unfix(bm, c->leaf, 0);
@@ -1773,7 +1805,27 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
 				c->done = 1;
 				return XTC_E_NOTFOUND;
 			}
-			if (bm_fix_pid(bm, (bm_pid_t)rs, &nf) != XTC_OK) {
+			frc = bm_fix_pid(bm, (bm_pid_t)rs, &nf);
+			if (frc == XTC_E_AGAIN) {
+				/* The right sibling pid was quarantined by a
+				 * concurrent merge: the link is stale.  Re-descend
+				 * from the last key returned to find the leaf that
+				 * now owns the next key, then continue the scan. */
+				bm_frame_t *rf = NULL;
+				int slot, found = 0;
+
+				if (cursor_descend(c->bt, c->keybuf, c->keylen,
+				    &rf) != XTC_OK || rf == NULL) {
+					c->done = 1;
+					return XTC_E_NOTFOUND;
+				}
+				slot = btnode_search(bm_page(rf), c->keybuf,
+				    c->keylen, &found);
+				c->leaf = rf;
+				c->slot = found ? slot + 1 : slot;
+				continue;
+			}
+			if (frc != XTC_OK) {
 				c->done = 1;
 				return XTC_E_INTERNAL;
 			}
@@ -1835,8 +1887,22 @@ bt_cursor_resume(bt_cursor_t *c)
 	c->parked = 0;
 	bm = c->bt->bm;
 	if (bm_fix_pid(bm, c->parked_pid, &nf) != XTC_OK) {
-		c->done = 1;
-		return XTC_E_INTERNAL;
+		/* The parked leaf was reclaimed (its pid quarantined) by a
+		 * concurrent merge, or could not be re-fixed: fall back to a
+		 * fresh root-to-leaf descent from the last key returned. */
+		bm_frame_t *rf = NULL;
+		int rslot, rfound = 0;
+
+		if (cursor_descend(c->bt, c->keybuf, c->keylen, &rf) != XTC_OK ||
+		    rf == NULL) {
+			c->done = 1;
+			return XTC_E_NOTFOUND;
+		}
+		rslot = btnode_search(bm_page(rf), c->keybuf, c->keylen, &rfound);
+		c->leaf = rf;
+		c->slot = rfound ? rslot + 1 : rslot;
+		atomic_fetch_add(&c->bt->st_resumes, 1);
+		return XTC_OK;
 	}
 	bm_latch_shared(nf);
 	pg = bm_page(nf);
