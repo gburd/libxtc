@@ -321,6 +321,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_lwlock \
 		  test_lockmgr \
 		  test_coverage_pump \
+		  test_fault_inject \
 		  test_otp_proc_lib \
 		  test_otp_gen_server \
 		  test_otp_gen_server_phase2 \
@@ -1062,6 +1063,12 @@ test_coverage_pump: $(srcdir)/../test/coverage/test_coverage_pump.c \
 		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/coverage \
 		-o $@ $(srcdir)/../test/coverage/test_coverage_pump.c \
+		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_fault_inject: $(srcdir)/../test/coverage/test_fault_inject.c \
+		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/coverage \
+		-o $@ $(srcdir)/../test/coverage/test_fault_inject.c \
 		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # OTP-port tests.
