@@ -194,9 +194,24 @@ Known gaps and why:
   Tracked; not shipped to avoid a leaky test.
 
 - File AIO under the sim I/O backend with seeded completion ordering
-  (the XTC_SIM_RNG_IO stream): the backend exists (io_sim.c) and does
-  inline single-fiber AIO; seeded multi-request completion reordering
-  is future work.
+  (the XTC_SIM_RNG_IO stream): DONE.  xtc_sim_io_faults_enable(lat_min,
+  lat_max, fault_pct) makes the sim backend DEFER each file-AIO
+  completion to now + a seeded latency (so the completion ORDER across
+  concurrent ops is part of the replayable schedule and the fiber
+  genuinely parks) and optionally inject a seeded fault (a short
+  transfer or an EIO).  Off by default (inline completion).  Covered by
+  test_sim_iofault: 12 workers x 3 deferred AIO ops, seeded faults
+  injected, completion order + fault pattern replay identically.
+
+  Wiring this exposed and fixed TWO real latent bugs: (1) __xtc_loop_step
+  did not bind __xtc_current_loop, so a fiber doing xtc_aio_* under the
+  sim scheduler saw a NULL loop and wrongly took the off-loop blocking
+  path (a hang); the step now binds it, matching production wake routing.
+  (2) reporting a bare sim wakeup flag as pending work kept a loop
+  perpetually runnable after its work drained, so the scheduler never
+  reached quiescence; the wakeup flag is now correctly treated as
+  redundant with the XTC_INB_WAKE inbox message the sim scheduler
+  already observes.
 
 Cross-cutting risk: undeclared nondeterminism (any rand(), un-seeded
 _Thread_local, hash-of-pointer iteration order leaking into a scheduling
