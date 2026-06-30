@@ -296,9 +296,12 @@ dump and a `gdb` session read alike:
     === end dump ===
 
 The C backtrace is symbolized on glibc, macOS, and the BSDs (execinfo)
-and on musl when libunwind is present (frame addresses, symbolized
-best-effort via `dladdr`).  Where libunwind is absent on such a libc the
-frames are addresses-only, and on a platform with no backend at all the
+and on musl via the compiler's builtin `_Unwind_Backtrace` (frames
+symbolized best-effort via `dladdr`), which needs no third-party
+library.  The optional libunwind backend (`--with-libunwind=yes`) is a
+fallback for the rare target whose toolchain ships neither execinfo nor
+a working `_Unwind_Backtrace`.  Where none is available the frames are
+addresses-only, and on a platform with no backend at all the
 dump prints `thread backtrace: unavailable (no backtrace backend; attach
 a debugger to a core)` and still reports the full proc/loop/mailbox
 state.  The Windows DbgHelp backend is compiled and reviewed but has not

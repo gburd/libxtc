@@ -13,16 +13,29 @@
  *	   path is usable from a crash handler.  Produces SYMBOLIZED frames
  *	   (the loader+dladdr machinery inside libc resolves names).
  *
- *	2. libunwind (XTC_HAVE_LIBUNWIND): the fallback on libc's that lack
- *	   execinfo, notably musl.  __os_backtrace walks the calling thread
- *	   with unw_step() and records the instruction pointers.  __os_-
- *	   backtrace_emit symbolizes each address best-effort with dladdr()
- *	   when XTC_HAVE_DLADDR is set, falling back to a bare hex address
- *	   otherwise.  Frame WALKING and ADDRESS emission are async-signal-
- *	   safe (no allocation, write(2) only); the dladdr name lookup is
- *	   not guaranteed signal-safe but is only a best-effort enrichment.
+ *	2. builtin unwind (XTC_HAVE_BUILTIN_UNWIND): the compiler's own
+ *	   _Unwind_Backtrace from <unwind.h> (the C++ EH personality ABI,
+ *	   provided by libgcc_s / LLVM's unwinder and auto-linked -- no
+ *	   extra -l flag).  This walks the calling thread with the same
+ *	   unwinder execinfo's backtrace() uses internally, but needs no
+ *	   <execinfo.h>, so it covers libc's that lack execinfo (notably
+ *	   musl) WITHOUT a third-party libunwind dependency.  Frames are
+ *	   symbolized best-effort with dladdr() (XTC_HAVE_DLADDR), exactly
+ *	   as the libunwind backend.  This sits ABOVE libunwind in priority
+ *	   so libunwind becomes opt-in (--with-unwind=libunwind).
  *
- *	3. DbgHelp (_WIN32): CaptureStackBackTrace fills the frame array and
+ *	3. libunwind (XTC_HAVE_LIBUNWIND): an explicit opt-in fallback
+ *	   (--with-unwind=libunwind) for the rare target whose toolchain
+ *	   ships neither execinfo nor a working _Unwind_Backtrace.  __os_-
+ *	   backtrace walks the calling thread with unw_step() and records
+ *	   the instruction pointers.  __os_backtrace_emit symbolizes each
+ *	   address best-effort with dladdr() when XTC_HAVE_DLADDR is set,
+ *	   falling back to a bare hex address otherwise.  Frame WALKING and
+ *	   ADDRESS emission are async-signal-safe (no allocation, write(2)
+ *	   only); the dladdr name lookup is not guaranteed signal-safe but
+ *	   is only a best-effort enrichment.
+ *
+ *	4. DbgHelp (_WIN32): CaptureStackBackTrace fills the frame array and
  *	   SymFromAddr resolves names against the loaded modules.  COMPILED
  *	   BUT NOT RUNTIME-VERIFIED on this porting host -- there is no
  *	   Windows machine in the build/CI matrix that exercises it.  The
@@ -86,10 +99,14 @@ __os_backtrace_supported(void)
 	return 1;
 }
 
-#elif defined(XTC_HAVE_LIBUNWIND)
+#elif defined(XTC_HAVE_BUILTIN_UNWIND) || defined(XTC_HAVE_LIBUNWIND)
 
+#if defined(XTC_HAVE_LIBUNWIND)
 #define UNW_LOCAL_ONLY
 #include <libunwind.h>
+#else
+#include <unwind.h>
+#endif
 #include <unistd.h>
 #include <string.h>
 
@@ -154,6 +171,7 @@ bt_str(char *buf, size_t cap, size_t *off, const char *s)
 }
 
 /* PUBLIC: int __os_backtrace __P((void **, int)); */
+#if defined(XTC_HAVE_LIBUNWIND)
 int
 __os_backtrace(void **frames, int max)
 {
@@ -184,6 +202,51 @@ __os_backtrace(void **frames, int max)
 	}
 	return n;
 }
+#else /* XTC_HAVE_BUILTIN_UNWIND */
+/*
+ * The compiler/runtime's own unwinder.  _Unwind_Backtrace invokes our
+ * trace callback once per frame from innermost outward; _Unwind_GetIP
+ * yields each frame's instruction pointer.  This is the same EH-ABI
+ * unwinder libgcc_s / LLVM provide and that glibc's backtrace() uses
+ * internally -- but it needs no <execinfo.h>, so it works on musl with
+ * no third-party libunwind.  The walk allocates nothing and is async-
+ * signal-safe.
+ */
+struct bt_ctx {
+	void **frames;
+	int    max;
+	int    n;
+};
+
+static _Unwind_Reason_Code
+bt_trace_cb(struct _Unwind_Context *uctx, void *arg)
+{
+	struct bt_ctx *c = arg;
+	uintptr_t ip;
+
+	if (c->n >= c->max)
+		return _URC_END_OF_STACK;
+	ip = (uintptr_t)_Unwind_GetIP(uctx);
+	if (ip == 0)
+		return _URC_END_OF_STACK;
+	c->frames[c->n++] = (void *)ip;
+	return _URC_NO_REASON;
+}
+
+int
+__os_backtrace(void **frames, int max)
+{
+	struct bt_ctx c;
+
+	if (frames == NULL || max <= 0)
+		return 0;
+	c.frames = frames;
+	c.max = max;
+	c.n = 0;
+	(void)_Unwind_Backtrace(bt_trace_cb, &c);
+	return c.n;
+}
+#endif /* XTC_HAVE_LIBUNWIND vs builtin */
 
 /* PUBLIC: void __os_backtrace_emit __P((int, void *const *, int)); */
 void

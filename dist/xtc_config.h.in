@@ -56,6 +56,9 @@
 /* Define to enable runtime diagnostic assertions. */
 #undef XTC_DIAGNOSTIC
 
+/* Define to 1 to use the builtin _Unwind_Backtrace backend */
+#undef XTC_HAVE_BUILTIN_UNWIND
+
 /* Define to 1 if dladdr() is available for symbolization */
 #undef XTC_HAVE_DLADDR
 
