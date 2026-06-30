@@ -246,6 +246,81 @@ xtc_sim_fault_points_seen(void)
 	return atomic_load_explicit(&g_fp_n, memory_order_relaxed);
 }
 
+/* ---- simulated I/O faults (DST) ----
+ *
+ * Control knobs the sim I/O backend (io_sim.c) consults so file-AIO
+ * completions are DEFERRED by a seeded latency (making completion ORDER
+ * across concurrent ops part of the replayable schedule) and may carry
+ * a seeded fault (short read/write or EIO).  Off by default: a sim run
+ * that does not enable them gets the simple inline completion, so
+ * existing single-fiber sim AIO is unchanged.  All seeded draws are on
+ * the dedicated IO stream, so enabling I/O faults does not perturb the
+ * scheduling streams (stable replay regardless of I/O config).
+ */
+static _Atomic int     g_io_faults_on;
+static _Atomic int64_t g_io_lat_min_ns;
+static _Atomic int64_t g_io_lat_max_ns;
+static unsigned        g_io_fault_pct;     /* per-1000 op fault probability */
+
+/* PUBLIC: void xtc_sim_io_faults_enable __P((int64_t, int64_t, unsigned)); */
+void
+xtc_sim_io_faults_enable(int64_t lat_min_ns, int64_t lat_max_ns,
+    unsigned fault_pct_per_1000)
+{
+	if (lat_min_ns < 0) lat_min_ns = 0;
+	if (lat_max_ns < lat_min_ns) lat_max_ns = lat_min_ns;
+	atomic_store_explicit(&g_io_lat_min_ns, lat_min_ns, memory_order_relaxed);
+	atomic_store_explicit(&g_io_lat_max_ns, lat_max_ns, memory_order_relaxed);
+	g_io_fault_pct = fault_pct_per_1000;
+	atomic_store_explicit(&g_io_faults_on, 1, memory_order_release);
+}
+
+/* PUBLIC: void xtc_sim_io_faults_disable __P((void)); */
+void
+xtc_sim_io_faults_disable(void)
+{
+	atomic_store_explicit(&g_io_faults_on, 0, memory_order_release);
+}
+
+/* PUBLIC: int __xtc_sim_io_faults_active __P((void)); */
+int
+__xtc_sim_io_faults_active(void)
+{
+	return atomic_load_explicit(&g_io_faults_on, memory_order_acquire);
+}
+
+/* PUBLIC: int64_t __xtc_sim_io_latency __P((void)); */
+/* A seeded I/O latency in [lat_min, lat_max] ns from the IO stream.
+ * 0 when I/O faults are off. */
+int64_t
+__xtc_sim_io_latency(void)
+{
+	int64_t lo, hi;
+	if (!__xtc_sim_io_faults_active() || !__xtc_sim_active())
+		return 0;
+	lo = atomic_load_explicit(&g_io_lat_min_ns, memory_order_relaxed);
+	hi = atomic_load_explicit(&g_io_lat_max_ns, memory_order_relaxed);
+	if (hi <= lo)
+		return lo;
+	return lo + (int64_t)__xtc_sim_rng_range(XTC_SIM_RNG_IO,
+	    (uint64_t)(hi - lo + 1));
+}
+
+/* PUBLIC: int __xtc_sim_io_should_fault __P((void)); */
+/* 1 if this op should carry a seeded I/O fault (drawn from the IO
+ * stream), 0 otherwise / when off. */
+int
+__xtc_sim_io_should_fault(void)
+{
+	if (!__xtc_sim_io_faults_active() || !__xtc_sim_active())
+		return 0;
+	if (g_io_fault_pct == 0)
+		return 0;
+	if (g_io_fault_pct >= 1000)
+		return 1;
+	return __xtc_sim_rng_range(XTC_SIM_RNG_IO, 1000) < g_io_fault_pct;
+}
+
 /* ---- virtual clock ---- */
 
 /* PUBLIC: void xtc_sim_clock_enable __P((int64_t)); */

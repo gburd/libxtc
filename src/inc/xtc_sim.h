@@ -98,6 +98,27 @@ int      xtc_sim_fault_point(const char *name);
 uint64_t xtc_sim_fault_point_fires(const char *name);
 int      xtc_sim_fault_points_seen(void);
 
+/*
+ * Simulated I/O faults (DST).  When enabled, the sim I/O backend defers
+ * file-AIO completions by a seeded latency (so completion ORDER across
+ * concurrent ops is part of the replayable schedule) and may inject a
+ * seeded fault (short transfer or EIO).  Off by default -- a sim run
+ * that does not enable them gets inline completion.  Seeded on the IO
+ * stream, so enabling does not perturb the schedule.
+ *
+ * PUBLIC: void    xtc_sim_io_faults_enable __P((int64_t, int64_t, unsigned));
+ * PUBLIC: void    xtc_sim_io_faults_disable __P((void));
+ * PUBLIC: int     __xtc_sim_io_faults_active __P((void));
+ * PUBLIC: int64_t __xtc_sim_io_latency __P((void));
+ * PUBLIC: int     __xtc_sim_io_should_fault __P((void));
+ */
+void    xtc_sim_io_faults_enable(int64_t lat_min_ns, int64_t lat_max_ns,
+            unsigned fault_pct_per_1000);
+void    xtc_sim_io_faults_disable(void);
+int     __xtc_sim_io_faults_active(void);
+int64_t __xtc_sim_io_latency(void);
+int     __xtc_sim_io_should_fault(void);
+
 /* Plant a critical-section fault point in runtime code.  A single
  * relaxed load in production (sim inactive); under sim with points
  * enabled it perturbs/records per the FAULT stream.  Elided entirely

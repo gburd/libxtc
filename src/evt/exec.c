@@ -17,6 +17,18 @@
 
 extern int __xtc_loop_step_once(xtc_loop_t *loop);
 
+/* Earliest pending sim-I/O event time for a loop's backend.  Provided by
+ * io_sim.c only in a sim build; a non-sim build has no deferred sim I/O,
+ * so the sim scheduler (compiled but never run off a sim build) gets a
+ * stub that reports "none".  This keeps exec.c linkable in every build
+ * while letting the sim scheduler account for in-flight deferred AIO. */
+#if defined(XTC_IO_BACKEND_SIM)
+extern int64_t __xtc_io_sim_next_due(xtc_io_t *io);
+#else
+static inline int64_t __xtc_io_sim_next_due(xtc_io_t *io)
+{ (void)io; return -1; }
+#endif
+
 struct xtc_exec {
 	int           n_loops;
 	xtc_loop_t  **loops;
@@ -354,7 +366,7 @@ xtc_exec_run(xtc_exec_t *e)
 static int
 __sim_loop_runnable(xtc_loop_t *l, int64_t now_ns, int64_t peer_stealable)
 {
-	int64_t dl;
+	int64_t dl, iod;
 	if (l->q_head != NULL)
 		return 1;
 	if (xtc_deque_len(&l->deque) > 0)
@@ -364,13 +376,19 @@ __sim_loop_runnable(xtc_loop_t *l, int64_t now_ns, int64_t peer_stealable)
 	dl = __xtc_timer_heap_next_deadline(l);
 	if (dl >= 0 && dl <= now_ns)
 		return 1;
-	/* Idle locally with NO pending timer, but a peer has stealable work
-	 * and this loop is part of an executor -> runnable (its step_once
-	 * will reach the steal branch and take the work).  The "no pending
-	 * timer" guard ensures the step actually reaches steal (a loop with
-	 * a future timer takes the clock-wait branch instead, so marking it
-	 * runnable-to-steal would spin). */
-	if (peer_stealable > 0 && l->exec != NULL && dl < 0)
+	/* A sim-I/O event (readiness or a deferred AIO completion) due at
+	 * the current virtual time makes the loop runnable -- step_once
+	 * polls the sim backend and dispatches it, waking the parked op. */
+	iod = (l->io != NULL) ? __xtc_io_sim_next_due(l->io) : -1;
+	if (iod >= 0 && iod <= now_ns)
+		return 1;
+	/* Idle locally with NO pending timer or I/O, but a peer has
+	 * stealable work and this loop is part of an executor -> runnable
+	 * (its step_once will reach the steal branch and take the work).
+	 * The "no pending timer/io" guard ensures the step actually reaches
+	 * steal (a loop with a future wakeup takes the clock-wait branch
+	 * instead, so marking it runnable-to-steal would spin). */
+	if (peer_stealable > 0 && l->exec != NULL && dl < 0 && iod < 0)
 		return 1;
 	return 0;
 }
@@ -389,17 +407,23 @@ __sim_peer_stealable(xtc_exec_t *e, int except_id)
 	return total;
 }
 
-/* The earliest timer deadline across all loops, or -1 if none pending.
- * Used to advance the virtual clock when no loop is runnable now. */
+/* The earliest pending event (timer OR deferred sim-I/O) across all
+ * loops, or -1 if none.  Used to advance the virtual clock when no loop
+ * is runnable now -- so an in-flight deferred AIO completion is not
+ * mistaken for a deadlock. */
 static int64_t
 __sim_earliest_deadline(xtc_exec_t *e)
 {
 	int64_t best = -1;
 	int i;
 	for (i = 0; i < e->n_loops; i++) {
-		int64_t dl = __xtc_timer_heap_next_deadline(e->loops[i]);
+		xtc_loop_t *l = e->loops[i];
+		int64_t dl = __xtc_timer_heap_next_deadline(l);
+		int64_t iod = (l->io != NULL) ? __xtc_io_sim_next_due(l->io) : -1;
 		if (dl >= 0 && (best < 0 || dl < best))
 			best = dl;
+		if (iod >= 0 && (best < 0 || iod < best))
+			best = iod;
 	}
 	return best;
 }

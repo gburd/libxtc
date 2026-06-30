@@ -262,6 +262,17 @@ __xtc_loop_step(xtc_loop_t *loop)
 	int n_out, i, rc;
 	int64_t now_ns, next_deadline_ns, timeout_ns;
 
+	/* Bind the current loop for the duration of this step.  xtc_loop_run
+	 * sets this once for its dedicated thread, but the DST sim scheduler
+	 * multiplexes N loops on ONE thread by calling __xtc_loop_step_once
+	 * directly, so each step must (re)bind it -- otherwise code running
+	 * inside a fiber here (e.g. xtc_aio_*, which consults
+	 * __xtc_current_loop to find its reactor) would see a stale or NULL
+	 * loop and wrongly take the off-loop blocking path.  No restore is
+	 * needed: every step rebinds, and xtc_loop_run already saves/
+	 * restores around its own run loop. */
+	__xtc_current_loop = loop;
+
 	/* Drain any cross-thread wakers / publishes. */
 	(void)__xtc_inbox_drain(loop);
 
