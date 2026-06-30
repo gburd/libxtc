@@ -112,13 +112,23 @@ mailbox -- is reused unmodified.
 
 ## Roadmap
 
-- Phase 0: PRNG tree + route the random draw sites through it (low risk).
-- Phase 1: virtual clock seam (low risk).
-- Phase 2: io_sim.c backend (medium risk).
-- Phase 3: sim scheduler + parking shims (highest risk -- proves the model).
-- Phase 4: invariant checkers + trace/hash + replay-equality harness.
-- Phase 5: fault injection + seeded CI seed-sweep.
-- Phase 6: scale + soak; integrate with the PBT harness.
+- Phase 0: PRNG tree + route the random draw sites through it. DONE.
+- Phase 1: virtual clock seam. DONE.
+- Phase 2: io_sim.c backend. DONE.
+- Phase 3: sim scheduler (xtc_sim_exec_run) -- the real N-loop
+  work-stealing executor run deterministically on one thread; cross-
+  loop parking replays. DONE (validated under ASan).
+- Phase 4: invariant checker (xtc_sim_check, run every step) +
+  state hash (xtc_sim_state_hash) + replay-equality harness. DONE.
+- Phase 5: seeded fault injection (xtc_sim_fault, dedicated FAULT
+  stream so faults do not perturb the schedule). DONE.
+- Phase 6: scale + soak; integrate with the PBT harness. PENDING.
+
+Tests live in test/sim/ (run_sim_tests.sh on a --with-io-backend=sim
+build; a sim-dst CI job runs them every push): test_sim_rng (PRNG +
+virtual clock, in the ordinary make check), test_sim_sched (multi-loop
+deterministic scheduler + replay), test_sim_pingpong (cross-loop
+park/wake replay), test_sim_fault (seeded fault-schedule replay).
 
 Cross-cutting risk: undeclared nondeterminism (any rand(), un-seeded
 _Thread_local, hash-of-pointer iteration order leaking into a scheduling

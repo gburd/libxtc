@@ -68,6 +68,16 @@ uint64_t __xtc_sim_rng(int s);
  * returns 0. */
 uint64_t __xtc_sim_rng_range(int s, uint64_t bound);
 
+/* Deterministic fault toggle: returns 1 with probability
+ * pct_per_1000/1000, drawn from the dedicated FAULT stream (so enabling
+ * faults never shifts the schedule); 0 when sim is inactive.  A test
+ * calls it at a fault decision point; the same seed reproduces the
+ * identical fault schedule.
+ *
+ * PUBLIC: int xtc_sim_fault __P((unsigned));
+ */
+int      xtc_sim_fault(unsigned pct_per_1000);
+
 /* Virtual (logical) clock.  When enabled, __os_clock_mono returns the
  * virtual time instead of the host monotonic clock, so time is a pure
  * function of the schedule.  Test/scheduler-only. */

@@ -97,6 +97,30 @@ __xtc_sim_rng_range(int s, uint64_t bound)
 	return __xtc_sim_rng(s) % bound;
 }
 
+/* ---- seeded fault injection ---- */
+
+/* PUBLIC: int xtc_sim_fault __P((unsigned)); */
+/*
+ * Deterministic fault toggle: returns 1 with probability `pct_per_1000`
+ * in 1000 (e.g. 50 == 5%), drawn from the dedicated FAULT stream so
+ * enabling faults does not perturb the schedule stream (per-stream
+ * isolation == stable replay regardless of fault config).  Returns 0
+ * when sim is inactive (no faults in production).  A test calls this at
+ * a fault decision point -- e.g. "if (xtc_sim_fault(50)) inject a short
+ * read" -- and the SAME seed reproduces the identical fault schedule.
+ */
+int
+xtc_sim_fault(unsigned pct_per_1000)
+{
+	if (!__xtc_sim_active())
+		return 0;
+	if (pct_per_1000 == 0)
+		return 0;
+	if (pct_per_1000 >= 1000)
+		return 1;
+	return __xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 1000) < pct_per_1000;
+}
+
 /* ---- virtual clock ---- */
 
 /* PUBLIC: void xtc_sim_clock_enable __P((int64_t)); */
