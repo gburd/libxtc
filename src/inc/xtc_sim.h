@@ -129,6 +129,35 @@ int     __xtc_sim_io_should_fault(void);
 # define XTC_SIM_FAULT_POINT(name)  ((void)xtc_sim_fault_point(name))
 #endif
 
+/*
+ * Buggify (FoundationDB-style).  A named point in the REAL runtime code
+ * that, under sim, lets the code take a legal-but-pessimal path.  Unlike
+ * xtc_sim_fault (a fresh draw per call), a buggify point is a coin
+ * flipped ONCE per run per site: decided on first reach, cached, and
+ * every later reach of the same name returns the same decision -- so a
+ * buggified site is consistent within a run and the run replays.  0 in
+ * production / when disabled.  Enable with a per-1000 activation
+ * probability; query coverage with the active-count.
+ *
+ * PUBLIC: void xtc_sim_buggify_enable __P((unsigned));
+ * PUBLIC: void xtc_sim_buggify_disable __P((void));
+ * PUBLIC: int  xtc_sim_buggify __P((const char *));
+ * PUBLIC: int  xtc_sim_buggify_active_count __P((void));
+ */
+void xtc_sim_buggify_enable(unsigned pct_per_1000);
+void xtc_sim_buggify_disable(void);
+int  xtc_sim_buggify(const char *name);
+int  xtc_sim_buggify_active_count(void);
+
+/* Branch on a buggify point in runtime code:
+ *     if (XTC_SIM_BUGGIFY("wal.flush.tiny_batch")) { ... pessimal ... }
+ * A single relaxed load in production; elided with XTC_INJECT_DISABLE. */
+#if defined(XTC_INJECT_DISABLE)
+# define XTC_SIM_BUGGIFY(name)  (0)
+#else
+# define XTC_SIM_BUGGIFY(name)  xtc_sim_buggify(name)
+#endif
+
 /* Virtual (logical) clock.  When enabled, __os_clock_mono returns the
  * virtual time instead of the host monotonic clock, so time is a pure
  * function of the schedule.  Test/scheduler-only. */

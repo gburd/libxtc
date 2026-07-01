@@ -164,8 +164,34 @@ green sim sweep is evidence of production readiness.  Covered so far:
 the scheduler core (loop/exec/proc/task placement + work stealing),
 cross-loop messaging (send/recv mailbox park/wake), the virtual clock
 (xtc_proc_sleep / timers), seeded fault injection + critical-section
-fault points, and the fiber-yielding latches (xtc_amutex, xtc_arwlock:
-mutual exclusion + rwlock exclusivity + no-torn-read under contention).
+fault points, the fiber-yielding latches (xtc_amutex, xtc_arwlock:
+mutual exclusion + rwlock exclusivity + no-torn-read under contention),
+simulated I/O faults (deferred seeded AIO completions + short/EIO
+faults), and Buggify (FoundationDB-style pessimal-path injection in
+real runtime code).
+
+## FoundationDB parity
+
+Toward FDB-class DST, in addition to the seeded scheduler / virtual
+clock / replay / invariant checks already in place:
+
+- Simulated I/O fault injection (DONE, test_sim_iofault): deferred
+  seeded AIO completion ordering + short-transfer / EIO faults.
+- Buggify (DONE, test_sim_buggify): xtc_sim_buggify(name) is a named
+  point in REAL runtime code that, once-per-run-per-site (a seeded coin
+  cached on first reach), lets the code take a legal-but-pessimal path;
+  combined with a per-call xtc_sim_fault coin it fires on a fraction of
+  occurrences.  First planted at proc.mbox.spurious_full (xtc_send
+  reports a soft-cap full early), exercising every sender's
+  backpressure-retry path.  Deterministic + replayable; off in
+  production and when disabled.  Expand by planting more sites in the
+  WAL / buffer-pool / recovery paths.
+
+Still to reach full FDB parity: network-partition / machine-death
+simulation (kill a loop's procs mid-run, drop cross-loop messages by a
+seeded partition matrix), a swarm/soak fleet (millions of seeds), and
+the capstone -- a full sqlxtc-under-sim WAL+recovery test with seeded
+crashes.
 
 Known gaps and why:
 
