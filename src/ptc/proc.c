@@ -11,6 +11,7 @@
 
 #include "xtc_int.h"
 #include "xtc_inject.h"
+#include "xtc_sim.h"
 #include "xtc_proc.h"
 #include "xtc_loop.h"
 #include "xtc_async.h"
@@ -589,7 +590,18 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 	    (p->mbox_cap > 0 &&
 	     (p->mbox_n +
 	      atomic_load_explicit(&p->mbox_saved, memory_order_relaxed))
-	     >= p->mbox_cap)) {
+	     >= p->mbox_cap) ||
+	    /* Buggify: under sim, when the "spurious_full" site is activated
+	     * for this run (a once-per-run seeded gate), report the mailbox
+	     * full on SOME sends (a fresh per-call seeded coin) even with
+	     * room to spare.  Reporting XTC_E_AGAIN early is a LEGAL outcome
+	     * (the cap is a soft backpressure limit), so this exercises every
+	     * sender's drop/retry handling under the seeded schedule --
+	     * FoundationDB's "smallest legal buffer" buggify.  The per-call
+	     * coin (25%) keeps sends eventually succeeding so senders that
+	     * retry make progress.  A no-op in production. */
+	    (p->alive && XTC_SIM_BUGGIFY("proc.mbox.spurious_full") &&
+	     xtc_sim_fault(250))) {
 		p->mbox_drop_total++;
 		(void)pthread_mutex_unlock(&p->mbox_lock);
 		__env_free(e);

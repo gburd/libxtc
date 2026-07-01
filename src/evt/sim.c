@@ -246,6 +246,113 @@ xtc_sim_fault_points_seen(void)
 	return atomic_load_explicit(&g_fp_n, memory_order_relaxed);
 }
 
+/* ---- Buggify (DST) ----
+ *
+ * FoundationDB's "buggify": a named point in the REAL runtime code that,
+ * under sim, lets the code take a legal-but-pessimal path (a delay, the
+ * smallest legal buffer, an early spurious return, the slow branch).
+ * The key semantics differ from xtc_sim_fault (a fresh draw per call):
+ * a buggify point is a coin flipped ONCE per run per site -- the first
+ * time a named point is reached the seeded coin decides, and every
+ * later hit of that name returns the SAME decision that run.  So a
+ * buggified site behaves consistently within a run and the whole run
+ * replays from the seed.  Off (returns 0) in production and when
+ * buggify is not enabled.  Drawn from the FAULT stream, so enabling
+ * buggify does not perturb the scheduling streams.
+ */
+#define XTC_SIM_BUG_MAX 128
+static _Atomic int      g_bug_on;         /* buggify enabled */
+static unsigned         g_bug_pct;        /* per-1000 activation probability */
+static char             g_bug_name[XTC_SIM_BUG_MAX][48];
+static signed char      g_bug_decided[XTC_SIM_BUG_MAX]; /* -1 undecided, 0/1 */
+static _Atomic int      g_bug_n;
+static pthread_mutex_t  g_bug_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* PUBLIC: void xtc_sim_buggify_enable __P((unsigned)); */
+void
+xtc_sim_buggify_enable(unsigned pct_per_1000)
+{
+	(void)pthread_mutex_lock(&g_bug_lock);
+	atomic_store_explicit(&g_bug_n, 0, memory_order_relaxed);
+	g_bug_pct = pct_per_1000;
+	atomic_store_explicit(&g_bug_on, 1, memory_order_release);
+	(void)pthread_mutex_unlock(&g_bug_lock);
+}
+
+/* PUBLIC: void xtc_sim_buggify_disable __P((void)); */
+void
+xtc_sim_buggify_disable(void)
+{
+	(void)pthread_mutex_lock(&g_bug_lock);
+	atomic_store_explicit(&g_bug_on, 0, memory_order_release);
+	/* Reset the decision table so a subsequent run (or an
+	 * active-count query while disabled) reflects no activations. */
+	atomic_store_explicit(&g_bug_n, 0, memory_order_relaxed);
+	(void)pthread_mutex_unlock(&g_bug_lock);
+}
+
+/* PUBLIC: int xtc_sim_buggify __P((const char *)); */
+/*
+ * Return the once-per-run decision for buggify point `name`: 1 to take
+ * the pessimal path, 0 otherwise.  0 in production / when disabled.  The
+ * decision is decided on first reach (seeded coin) and cached, so all
+ * reaches of the same name in one run agree.
+ */
+int
+xtc_sim_buggify(const char *name)
+{
+	int i, n, decision;
+	if (name == NULL)
+		return 0;
+	if (!atomic_load_explicit(&g_bug_on, memory_order_acquire))
+		return 0;
+	if (!__xtc_sim_active())
+		return 0;
+	(void)pthread_mutex_lock(&g_bug_lock);
+	n = atomic_load_explicit(&g_bug_n, memory_order_relaxed);
+	for (i = 0; i < n; i++)
+		if (strncmp(g_bug_name[i], name, sizeof g_bug_name[0]) == 0) {
+			decision = g_bug_decided[i];
+			(void)pthread_mutex_unlock(&g_bug_lock);
+			return decision;
+		}
+	/* First reach: flip the seeded coin and cache it. */
+	if (n >= XTC_SIM_BUG_MAX) {
+		(void)pthread_mutex_unlock(&g_bug_lock);
+		return 0;     /* table full: no buggify */
+	}
+	if (g_bug_pct == 0)
+		decision = 0;
+	else if (g_bug_pct >= 1000)
+		decision = 1;
+	else
+		decision = __xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 1000) <
+		    g_bug_pct;
+	(void)strncpy(g_bug_name[n], name, sizeof g_bug_name[0] - 1);
+	g_bug_name[n][sizeof g_bug_name[0] - 1] = '\0';
+	g_bug_decided[n] = (signed char)decision;
+	atomic_store_explicit(&g_bug_n, n + 1, memory_order_relaxed);
+	(void)pthread_mutex_unlock(&g_bug_lock);
+	return decision;
+}
+
+/* PUBLIC: int xtc_sim_buggify_active_count __P((void)); */
+/* Number of buggify points that were reached AND activated (decided 1)
+ * this run -- the coverage signal: how many pessimal paths the run
+ * actually took. */
+int
+xtc_sim_buggify_active_count(void)
+{
+	int i, n, c = 0;
+	(void)pthread_mutex_lock(&g_bug_lock);
+	n = atomic_load_explicit(&g_bug_n, memory_order_relaxed);
+	for (i = 0; i < n; i++)
+		if (g_bug_decided[i] == 1)
+			c++;
+	(void)pthread_mutex_unlock(&g_bug_lock);
+	return c;
+}
+
 /* ---- simulated I/O faults (DST) ----
  *
  * Control knobs the sim I/O backend (io_sim.c) consults so file-AIO

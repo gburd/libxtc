@@ -55,7 +55,7 @@ lib="$build/libxtc.a"
 libs="-pthread -ldl -lm"
 
 fail=0
-for t in test_sim_sched test_sim_pingpong test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_iofault; do
+for t in test_sim_sched test_sim_pingpong test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_iofault test_sim_buggify; do
 	exe="$work/$t"
 	# inc/libs intentionally word-split (each holds several flags).
 	# shellcheck disable=SC2086
