@@ -602,23 +602,17 @@ test_concurrent_merge(void)
 	    "a pid maps two frames after the storm");
 
 	/*
-	 * KNOWN-OPEN RACE (concurrent merge): with merge ENABLED under the
-	 * concurrent storm the reclamation interlock added to bufmgr.c
-	 * closes the duplicate-frame aliasing bug (the two dup-pid CHECKs
-	 * above pass), but a SEPARATE descent-vs-scan consistency race
-	 * remains -- a churn key can be deleted (delete returns OK) yet
-	 * survive a forward scan while a re-lookup returns NOTFOUND, i.e.
-	 * the internal nodes are transiently inconsistent between the
-	 * descent and scan paths.  Two independent investigations localized
-	 * this to a divergent internal-node copy window the interlock does
-	 * not fully close.  See .agent/M_SQLXTC_BTREE_MERGE.md.
-	 *
-	 * Until that race is conclusively closed, concurrent merge stays
-	 * OPT-IN (bt_set_merge_enabled, default off).  We still RUN the
-	 * storm with merge on to keep exercising the interlock + dup-pid
-	 * probe (a real regression guard), but REPORT the descent/scan
-	 * survivors as a diagnostic rather than asserting churn-gone, so
-	 * this test does not gate CI on an unsolved race.
+	 * CHURN-GONE GATE (concurrent merge): with merge ENABLED under the
+	 * concurrent storm every churn key that was deleted must be absent
+	 * at quiescence -- a surviving churn key is a lost delete.  The
+	 * internal-node-merge fence bug (an internal node that was the right
+	 * half of a split carried a spurious +infinity hi-fence, so a merged
+	 * node claimed a wider range than its parent routed and a later
+	 * descent misrouted one leaf too far right and lost a delete) is
+	 * fixed in bt_split_internal: the right half inherits the old node's
+	 * routed upper bound, so the routing invariant hi_fence(child) ==
+	 * parent's routed upper bound holds through every split, merge, and
+	 * cascade.  A full forward scan yields exactly the anchors.
 	 */
 	{
 		bt_cursor_t *c = NULL;
@@ -635,11 +629,8 @@ test_concurrent_merge(void)
 		}
 		bt_cursor_close(c);
 
-		if (surv > 0)
-			printf("  test_concurrent_merge: DIAG %d churn "
-			    "survivor(s) of %d scanned -- known-open "
-			    "descent/scan race under concurrent merge "
-			    "(merge stays opt-in)\n", surv, count);
+		CHECK(surv == 0, "%d churn survivor(s) of %d scanned after "
+		    "concurrent merge storm (lost delete)", surv, count);
 	}
 
 	bt_get_stats(g_cm_bt, &ts);
