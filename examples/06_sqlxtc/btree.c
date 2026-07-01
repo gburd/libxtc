@@ -544,10 +544,27 @@ bt_split_internal(bt_t *bt, void *pp, void *rp, uint32_t rpid,
 
 	/* Right node: -infinity leftmost child = mid's child, then the
 	 * separators/children strictly above mid.  Wide-open lo fence so
-	 * routing through slot 0 stays correct; upper fence inherits the
-	 * old node's (+infinity unless the old node was itself a left
-	 * half), and the old right-link transfers here. */
-	btnode_set_fences(rp, NULL, 0, NULL, 0);
+	 * routing through slot 0 stays correct; the upper fence INHERITS
+	 * the old node's (which is the old node's routed upper bound --
+	 * +infinity only if the old node was itself rightmost/root), so the
+	 * right half's hi-fence equals what the parent will route to it and
+	 * the split maintains the routing invariant hi_fence(child) ==
+	 * parent's routed upper bound.  Setting it to +infinity here would
+	 * make the right half claim a wider range than its parent routes,
+	 * which is harmless for descent but becomes a lost-delete bug when
+	 * this node is later the RIGHT member of a merge (the merged node
+	 * inherits the bogus +infinity hi-fence).  The old right-link
+	 * transfers here. */
+	{
+		uint8_t ohi[BT_MAX_KEY];
+		uint16_t ohilen = 0;
+		const uint8_t *ohip = NULL;
+
+		if (btnode_hi_fence(pp, ohi, sizeof ohi, &ohilen) == 0 &&
+		    ohilen > 0)
+			ohip = ohi;
+		btnode_set_fences(rp, NULL, 0, ohip, ohilen);
+	}
 	if (internal_insert(rp, &empty, 0, child_pid_at(pp, mid)) != 0)
 		return XTC_E_INTERNAL;
 	for (i = mid + 1; i < count; i++) {
