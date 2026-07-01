@@ -47,7 +47,7 @@
  * a POSIX target -- matching how the platform-specific I/O backends
  * (io_aix.c, io_solaris.c) are gated.  On a non-POSIX target (MSVC) the
  * public xtc_tnt_* entry points are NOSYS stubs (see the #else at the
- * end of the file).  s_include scans the PUBLIC: markers regardless of
+ * end of the file).  s_include scans the export markers regardless of
  * the #if, so the generated prototypes stay consistent across platforms.
  */
 #include "xtc_int.h"
