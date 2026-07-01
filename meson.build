@@ -91,6 +91,7 @@ install_headers(
   'src/inc/xtc_orc.h',
   'src/inc/xtc_osproc.h',
   'src/inc/xtc_pdict.h',
+  'src/inc/xtc_preempt.h',
   'src/inc/xtc_pkey.h',
   'src/inc/xtc_proc.h',
   'src/inc/xtc_rcu.h',

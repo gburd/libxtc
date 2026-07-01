@@ -98,6 +98,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/cfg.c \
 	$(srcdir)/../src/ptc/inject.c \
 	$(srcdir)/../src/ptc/pdict.c \
+	$(srcdir)/../src/ptc/preempt.c \
 	$(srcdir)/../src/ptc/stats.c \
 	$(srcdir)/../src/ptc/slab.c \
 	$(srcdir)/../src/ptc/blocking.c \
@@ -167,6 +168,7 @@ LIB_OBJS	= \
 	cfg.o \
 	inject.o \
 	pdict.o \
+	preempt.o \
 	stats.o \
 	slab.o \
 	blocking.o \
@@ -232,6 +234,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_orc.h \
 	$(srcdir)/../src/inc/xtc_osproc.h \
 	$(srcdir)/../src/inc/xtc_pdict.h \
+	$(srcdir)/../src/inc/xtc_preempt.h \
 	$(srcdir)/../src/inc/xtc_pkey.h \
 	$(srcdir)/../src/inc/xtc_proc.h \
 	$(srcdir)/../src/inc/xtc_rcu.h \
@@ -331,6 +334,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_lrlock \
 		  test_lwlock \
 		  test_lockmgr \
+		  test_preempt \
 		  test_coverage_pump \
 		  test_fault_inject \
 		  test_otp_proc_lib \
@@ -540,6 +544,9 @@ inject.o: $(srcdir)/../src/ptc/inject.c xtc_config.h
 
 pdict.o: $(srcdir)/../src/ptc/pdict.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/pdict.c
+
+preempt.o: $(srcdir)/../src/ptc/preempt.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/preempt.c
 
 stats.o: $(srcdir)/../src/ptc/stats.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/stats.c
@@ -1095,6 +1102,12 @@ test_lockmgr: $(srcdir)/../test/m13/test_lockmgr.c \
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
 		-o $@ $(srcdir)/../test/m13/test_lockmgr.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_preempt: $(srcdir)/../test/m14/test_preempt.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
+		-o $@ $(srcdir)/../test/m14/test_preempt.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_coverage_pump: $(srcdir)/../test/coverage/test_coverage_pump.c \
 		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB)
