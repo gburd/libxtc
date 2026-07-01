@@ -180,3 +180,99 @@ does NOT preempt" boundary honestly, next to the libinger comparison.
 The native, crit_depth-scoped, phased approach delivers libinger's
 capability at libxtc's weight, on the machinery already present, with
 each step verifiable.
+
+## 8. Taking it to the next level: scalability levers alongside preemption
+
+Preemption (above) closes the fairness gap.  Two further levers close
+the SCALABILITY gaps measured against Tokio/Seastar, and one adds a
+capability the COW-namespace idea points at -- all reusing substrate
+libxtc already has, none requiring libgotcha.
+
+### Lever S1 -- stack memory: madvise-on-park (the Tokio fan-in gap)
+
+Measured (bench_mem_per_task): a parked stackful fiber commits ~4 KiB
+(one page faulted in) but RESERVES its full stack (default 64 KiB).
+Fiber stacks are mmap'd anonymous (coro_fctx.c: MAP_PRIVATE |
+MAP_ANONYMOUS, with a guard page), so the tail above a parked fiber's
+saved stack pointer can be returned to the OS with
+madvise(MADV_DONTNEED) and faults back as zero-fill on resume.  This is
+predictable (no relocation, no GC, no segmented-stack thrash -- the
+technique Go abandoned), portable (Linux/BSD madvise; a no-op elsewhere),
+and directly attacks the per-fiber RAM floor for the million-idle-
+connection case.
+
+  P-S1a: on park (xtc_yield / recv / latch wait), if the fiber's used
+  stack depth (stack_top - current SP) is below a threshold, madvise
+  the unused tail MADV_DONTNEED.  On resume it faults back.  Measure the
+  new bytes/park with bench_mem_per_task.
+  P-S1b: tune the threshold (only madvise when the reclaim exceeds a
+  page or two, to avoid fault churn on shallow frequently-woken fibers).
+  DELIVERABLE: bench_mem_per_task shows parked-fiber commit drop toward
+  1 page; make check + a park/resume stress test green; no measurable
+  hot-path regression for shallow fibers.  Bounded, low risk.
+
+### Lever S2 -- the stackless model is already the answer for extreme
+### fan-in
+
+For workloads where even one page per fiber is too much (millions of
+mostly-idle connections), the answer is NOT to shrink the stackful fiber
+further but to use the STACKLESS tnt Isolate layer (now a supported
+xtc_tnt_* API): Isolates are dense arena structs (hundreds of bytes, no
+stack).  The framework thus offers BOTH models -- stackful, preemptible
+fibers for general work; stackless Isolates for extreme fan-in -- and
+the developer picks per workload.  This duality is a deliberate
+next-level positioning, not a gap.  No new work; documented here so the
+tradeoff is explicit.
+
+### Lever S3 -- mctx-COW (the reframed libgotcha-COW idea)
+
+The COW-namespace idea is most valuable applied NOT to TLS (libxtc has
+almost no global TLS state by design -- confirmed by audit) but to the
+per-proc MEMORY CONTEXT (mctx), which libxtc already has as hierarchical
+arenas.  A COW snapshot of an mctx gives:
+  - speculative execution with cheap rollback for the SSI/MVCC path
+    (sqlxtc): snapshot, run speculatively, commit (keep) or abort (drop
+    the COW pages) -- free rollback;
+  - isolated cancellable allocations: a launch()ed unit (Phase 3) gets a
+    COW mctx view; cancel-on-timeout drops the view and every allocation
+    with it (no leak, no cleanup pass) -- composes with preemption.
+It uses mprotect / write-fault COW (userfaultfd or a fault handler),
+reusing the page-protection substrate the pkey tier already establishes.
+
+  P-S3a: mctx snapshot/restore via COW page protection (design + a
+  single-context prototype + a rollback microbench).
+  P-S3b: wire an optional COW mctx view into xtc_launch's cancel path.
+  DELIVERABLE (S3a): a test that snapshots an mctx, mutates it, restores,
+  and confirms the pre-snapshot bytes are back; rollback cost measured.
+  Higher effort, second-tier priority -- capability more than raw
+  scalability.  Explicitly OPTIONAL / later.
+
+### What we deliberately do NOT do (scalability)
+
+- libgotcha per-library TLS namespaces: solves per-function global
+  isolation, a non-problem for libxtc's message-passing procs; confirmed
+  libxtc has almost no global TLS state.  The COW idea is redirected to
+  mctx (S3) where it pays off.
+- Segmented / split stacks (Go's own cautionary tale: hot/cold
+  thrashing).  madvise-on-park (S1) gets the memory win without it.
+- Seastar-style share-nothing: conflicts with the deliberate
+  shared-buffer-pool threaded-PostgreSQL goal.
+
+## 9. Landing preemption + DST soak + B-tree merge together
+
+Three tracks, run independently and bounded, sequenced around one
+release:
+
+- TRACK A (preemption + S1): P0 timer seam + P0.5 crit_depth-coverage
+  audit -> P1 cooperative-assisted preemption -> S1 madvise-on-park ->
+  (next release) P2 signal-context preemption, P3 launch, S3 mctx-COW.
+- TRACK B (B-tree merge): the BOUNDED 3-step plan (Update 3 in
+  M_SQLXTC_BTREE_MERGE.md) -- Step 1 instrument-only (find the straddle,
+  no fix), Step 2 fix that one sub-update, Step 3 harden + flip
+  default-on.  Each a SHORT hard-capped task, never one open-ended run.
+- TRACK C (DST soak): a large seed sweep across the 8 sim tests, run in
+  the background, feeding release qualification.
+
+RELEASE GATE: preemption P1 + S1 + (B-tree Steps 1-2 if converged) + a
+clean DST soak -> qualify -> cut.  P2 / launch / mctx-COW / B-tree
+default-on land in the following release.
