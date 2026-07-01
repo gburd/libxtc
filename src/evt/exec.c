@@ -11,6 +11,7 @@
 #include "loop_int.h"
 #include "xtc_exec.h"
 #include "xtc_async.h"
+#include "xtc_preempt.h"
 #include "xtc_sim.h"
 
 #include <stdatomic.h>
@@ -40,6 +41,12 @@ struct xtc_exec {
 	                                * idle-auto-stop (a supervised app is
 	                                * a long-running service, not a finite
 	                                * work pool that drains and exits). */
+	int64_t       preempt_interval_ns; /* 0 = off (default); >0 arms a
+	                                    * per-worker preemption timer at
+	                                    * this CPU-time interval (Phase 1
+	                                    * cooperative-assisted preemption:
+	                                    * a tick makes xtc_yield_if_due
+	                                    * callers yield). */
 };
 
 /*
@@ -119,6 +126,12 @@ __xtc_exec_worker(void *arg)
 	if (exec->loop_node != NULL)
 		exec->loop_node[loop->exec_id] = __os_numa_current_node();
 
+	/* Preemption Phase 1: if enabled, arm a per-worker CPU-time timer.
+	 * A tick makes xtc_yield_if_due callers on this worker yield (see
+	 * xtc_yield_check).  Off by default (preempt_interval_ns == 0). */
+	if (exec->preempt_interval_ns > 0)
+		(void)xtc_preempt_arm(exec->preempt_interval_ns);
+
 	for (;;) {
 		int rc;
 		if (atomic_load_explicit(&exec->stop_flag,
@@ -150,6 +163,8 @@ __xtc_exec_worker(void *arg)
 		}
 	}
 
+	if (exec->preempt_interval_ns > 0)
+		(void)xtc_preempt_disarm();
 	__xtc_current_loop = NULL;
 	return NULL;
 }
@@ -256,6 +271,30 @@ xtc_exec_set_service_mode(xtc_exec_t *e, int on)
 {
 	if (e != NULL)
 		e->service_mode = on ? 1 : 0;
+}
+
+/* PUBLIC: int xtc_exec_set_preempt __P((xtc_exec_t *, int64_t)); */
+/*
+ * Enable cooperative-assisted preemption (M_PREEMPTION Phase 1): each
+ * worker arms a per-worker CPU-time timer at `interval_ns`; a tick makes
+ * this worker's xtc_yield_if_due() callers yield, so a long compute
+ * fiber that touches a yield-check periodically is time-sliced without
+ * a manual budget.  interval_ns == 0 disables (the default).  Must be
+ * set BEFORE xtc_exec_run (workers read it at start).  Returns
+ * XTC_E_NOSYS if the platform lacks per-thread CPU-time timers (the
+ * setting is stored but arming will no-op), XTC_E_INVAL on a NULL exec.
+ * NOTE: this does NOT preempt a fiber that never reaches a yield-check;
+ * that is Phase 2 (signal-context involuntary yield).
+ */
+int
+xtc_exec_set_preempt(xtc_exec_t *e, int64_t interval_ns)
+{
+	if (e == NULL)
+		return XTC_E_INVAL;
+	e->preempt_interval_ns = interval_ns < 0 ? 0 : interval_ns;
+	if (interval_ns > 0 && !xtc_preempt_supported())
+		return XTC_E_NOSYS;
+	return XTC_OK;
 }
 
 /* PUBLIC: int xtc_exec_run __P((xtc_exec_t *)); */

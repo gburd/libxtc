@@ -1,0 +1,79 @@
+.\" Copyright (c) 2026, The XTC Project -- All rights reserved.
+.\" Use of this source code is governed by the ISC License.
+.Dd July 1, 2026
+.Dt XTC_PREEMPT 3
+.Os
+.Sh NAME
+.Nm xtc_preempt_arm ,
+.Nm xtc_preempt_disarm ,
+.Nm xtc_preempt_supported ,
+.Nm xtc_preempt_ticks ,
+.Nm xtc_preempt_tick_pending
+.Nd per-worker preemption timer seam
+.Sh SYNOPSIS
+.In xtc_preempt.h
+.Ft int
+.Fn xtc_preempt_arm "int64_t interval_ns"
+.Ft int
+.Fn xtc_preempt_disarm "void"
+.Ft int
+.Fn xtc_preempt_supported "void"
+.Ft uint64_t
+.Fn xtc_preempt_ticks "void"
+.Ft int
+.Fn xtc_preempt_tick_pending "void"
+.Sh DESCRIPTION
+These functions manage a per-thread preemption timer -- the seam the
+libxtc preemption facility is built on (see the preemption design in the
+project docs).  The timer measures the calling thread's own CPU time,
+so a busy fiber accrues ticks while an idle worker does not.
+.Pp
+.Fn xtc_preempt_arm
+arms a timer on the calling thread that fires every
+.Fa interval_ns
+of that thread's CPU time, delivering an internal signal to the thread.
+Re-arming re-sets the interval.  It returns
+.Dv XTC_OK ,
+.Dv XTC_E_INVAL
+for a non-positive interval, or
+.Dv XTC_E_NOSYS
+where per-thread CPU-time timers are unavailable.
+.Pp
+.Fn xtc_preempt_disarm
+stops and deletes the calling thread's timer; it is safe to call when no
+timer is armed.
+.Pp
+.Fn xtc_preempt_supported
+returns non-zero where the platform provides per-thread CPU-time timers
+(Linux, the BSDs, illumos, AIX) and zero otherwise, in which case
+.Fn xtc_preempt_arm
+returns
+.Dv XTC_E_NOSYS .
+.Pp
+.Fn xtc_preempt_ticks
+returns the total number of timer ticks the calling thread has observed
+since arming -- telemetry, and the metric that confirms the seam works.
+.Pp
+.Fn xtc_preempt_tick_pending
+returns non-zero if a tick has fired and is unconsumed, clearing the
+flag.  The cooperative-assisted preemption path consults it at safe
+points to decide whether to yield.
+.Sh RETURN VALUES
+The
+.Ft int
+functions return
+.Dv XTC_OK
+on success or a negative
+.Dv XTC_E_*
+code as described above.
+.Sh NOTES
+The timer only records ticks; it does not by itself preempt a running
+fiber.  Higher layers of the preemption facility act on the ticks --
+cooperatively (a yield at the next safe point) or, in a later phase, via
+a signal-context involuntary yield.  Nothing arms the timer unless a
+caller opts in, so the cooperative fast path is unchanged when unused.
+.Sh SEE ALSO
+.Xr xtc_async 3 ,
+.Xr xtc_exec 3
+.Sh AUTHORS
+.An The XTC Project .

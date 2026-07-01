@@ -335,6 +335,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_lwlock \
 		  test_lockmgr \
 		  test_preempt \
+		  test_preempt_p1 \
 		  test_coverage_pump \
 		  test_fault_inject \
 		  test_otp_proc_lib \
@@ -1107,6 +1108,12 @@ test_preempt: $(srcdir)/../test/m14/test_preempt.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
 		-o $@ $(srcdir)/../test/m14/test_preempt.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_preempt_p1: $(srcdir)/../test/m14/test_preempt_p1.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
+		-o $@ $(srcdir)/../test/m14/test_preempt_p1.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_coverage_pump: $(srcdir)/../test/coverage/test_coverage_pump.c \

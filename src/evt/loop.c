@@ -13,6 +13,7 @@
 #include "xtc_slab.h"
 #include "coro_int.h"
 #include "xtc_async.h"
+#include "xtc_preempt.h"
 #include "os_time.h"
 #include "xtc_sim.h"
 
@@ -495,6 +496,21 @@ xtc_yield_check(void)
 
 	if (t == NULL || t->loop == NULL)
 		return 0;                       /* off a loop: never due */
+	/*
+	 * Preemption timer (M_PREEMPTION Phase 1, cooperative-assisted):
+	 * if a per-worker preemption tick fired, this run quantum is over
+	 * regardless of the manual budget, so any xtc_yield_if_due() caller
+	 * responds to the timer.  A single relaxed atomic load + clear when
+	 * armed; a no-op (the flag is never set) when the timer is off, so
+	 * the cooperative fast path is unchanged unless preemption is
+	 * enabled.  This does NOT preempt a loop that never reaches a
+	 * yield-check -- that is Phase 2 (signal-context involuntary
+	 * yield). */
+	if (xtc_preempt_tick_pending()) {
+		atomic_fetch_add_explicit(&t->loop->n_yield_due, 1,
+		    memory_order_relaxed);
+		return 1;
+	}
 	budget = t->loop->yield_budget_ns;
 	if (budget <= 0 || t->run_start_ns == 0)
 		return 0;                       /* watchdog disabled */

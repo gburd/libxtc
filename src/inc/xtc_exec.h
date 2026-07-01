@@ -56,6 +56,7 @@ int  xtc_exec_run(xtc_exec_t *exec);
  * until xtc_exec_stop is called.  Used by a supervised xtc_app, which is
  * a long-running service rather than a finite work pool. */
 void xtc_exec_set_service_mode(xtc_exec_t *exec, int on);
+int  xtc_exec_set_preempt(xtc_exec_t *exec, int64_t interval_ns);
 int  xtc_exec_stop(xtc_exec_t *exec);
 
 int  xtc_exec_n_loops(xtc_exec_t *exec);

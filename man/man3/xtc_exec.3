@@ -8,6 +8,7 @@
 .Nm xtc_exec_fini ,
 .Nm xtc_exec_run ,
 .Nm xtc_exec_set_service_mode ,
+.Nm xtc_exec_set_preempt ,
 .Nm xtc_exec_stop ,
 .Nm xtc_exec_n_loops ,
 .Nm xtc_exec_loop ,
@@ -30,6 +31,8 @@
 .Fn xtc_exec_run "xtc_exec_t *exec"
 .Ft void
 .Fn xtc_exec_set_service_mode "xtc_exec_t *exec" "int on"
+.Ft int
+.Fn xtc_exec_set_preempt "xtc_exec_t *exec" "int64_t interval_ns"
 .Ft int
 .Fn xtc_exec_stop "xtc_exec_t *exec"
 .Ft int
@@ -92,6 +95,24 @@ where a transient all-idle window during startup -- before every
 supervised child has been scheduled across loops -- must not terminate
 the application.  A bare work-pool leaves it off so the executor
 drains and returns when its tasks finish.
+.Pp
+.Fn xtc_exec_set_preempt
+enables cooperative-assisted preemption: each worker arms a per-worker
+CPU-time interval timer at
+.Fa interval_ns
+(of that worker thread's own CPU time), and a timer tick makes that
+worker's
+.Xr xtc_yield_if_due 3
+callers yield, so a long compute fiber that periodically consults a
+yield check is time-sliced without a manual budget.
+.Fa interval_ns
+of 0 disables it (the default).  Call before
+.Fn xtc_exec_run ;
+workers read the setting at start.  Returns
+.Dv XTC_E_NOSYS
+where the platform lacks per-thread CPU-time timers (the setting is
+stored but arming is a no-op).  This does not preempt a fiber that never
+reaches a yield check.
 .Pp
 Workers steal from peers when their own deque empties before going
 to
