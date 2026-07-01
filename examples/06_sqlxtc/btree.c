@@ -152,14 +152,6 @@ struct bt {
 	_Atomic uint64_t  st_splits;
 	_Atomic uint64_t  st_merges;   /* node merges (right sibling pulled left) */
 	_Atomic uint64_t  st_reclaimed;/* pages returned to the bufmgr freelist */
-	_Atomic int       merge_on;    /* 1 == run merge/reclaim on delete underflow.
-	                                * Off by default: the merge SMO is correct
-	                                * under a single mutator but has a known
-	                                * structural race under concurrent latch-free
-	                                * deletes (see docs/M_SQLXTC_STORAGE.md and
-	                                * .agent/M_SQLXTC_BTREE_MERGE.md).  Callers that
-	                                * delete single-threaded (or hold the tree
-	                                * exclusively) enable it for compaction. */
 	_Atomic uint64_t  st_height;   /* number of levels (1 == root leaf) */
 	_Atomic uint64_t  st_descents; /* full root->leaf cursor descents */
 	_Atomic uint64_t  st_resumes;  /* parked-cursor O(1) resumes */
@@ -1581,7 +1573,12 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 			    ((uint32_t)used * BT_MERGE_DEN < cap * BT_MERGE_NUM);
 			bm_unlatch(f);
 			bm_unfix(bm, f, 1);
-			if (underflow && atomic_load(&bt->merge_on))
+			/* Merge/reclaim on underflow is always on: the merge SMO
+			 * is concurrency-safe (the internal-split hi-fence fix
+			 * closed the last race; see the churn-gone gate in
+			 * test_btree_delete_merge and .agent/M_SQLXTC_BTREE_MERGE
+			 * .md). */
+			if (underflow)
 				(void)bt_merge(bt, key, klen); /* best-effort reclaim */
 		}
 		return XTC_OK;
@@ -1946,27 +1943,13 @@ bt_cursor_close(bt_cursor_t *c)
 }
 
 /*
- * Enable or disable merge/reclaim on delete underflow.  Disabled by
- * default.  The merge structure-modification is correct under a single
- * mutator but has a known structural race against concurrent
- * latch-free deletes -- not the descent-level dead/fence race (which
- * this tree now revalidates at every internal level), but a deeper
- * buffer-manager page-reclamation interaction: a latch-free chaser can
- * reload a just-freed page id from disk during the quarantine epoch,
- * leaving a phantom resident frame that aliases the id once it is
- * reissued, so two frames map one pid and a reader can see a divergent
- * (garbage) page.  Enable it only when deletes are single-threaded or
- * the caller otherwise holds the tree exclusively; with it off, deletes
- * still remove keys correctly, pages just stay underfull (bounded,
- * safe) instead of being reclaimed.  See .agent/M_SQLXTC_BTREE_MERGE.md.
+ * Merge/reclaim on delete underflow is ALWAYS ON.  The merge
+ * structure-modification is concurrency-safe: the descent-level
+ * dead/fence revalidation and the internal-split hi-fence fix closed
+ * the last races (see the churn-gone gate in test_btree_delete_merge
+ * and .agent/M_SQLXTC_BTREE_MERGE.md), so there is no opt-out -- a
+ * delete that empties a node merges and reclaims it.
  */
-void
-bt_set_merge_enabled(bt_t *bt, int on)
-{
-	if (bt != NULL)
-		atomic_store(&bt->merge_on, on ? 1 : 0);
-}
-
 void
 bt_get_stats(bt_t *bt, bt_stats_t *out)
 {

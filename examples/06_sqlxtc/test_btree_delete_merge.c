@@ -166,7 +166,6 @@ test_shrink_and_reclaim(void)
 	int i, survivors;
 
 	CHECK(bt_open(bm, &bt) == XTC_OK, "bt_open shrink");
-	bt_set_merge_enabled(bt, 1);   /* single mutator: reclaim is safe */
 
 	for (i = 0; i < N; i++) {
 		char k[16], v[32];
@@ -257,7 +256,6 @@ test_collapse_to_root(void)
 	uint16_t ckl, cvl;
 
 	CHECK(bt_open(bm, &bt) == XTC_OK, "bt_open collapse");
-	bt_set_merge_enabled(bt, 1);   /* single mutator: reclaim is safe */
 
 	for (i = 0; i < N; i++) {
 		char k[16], v[32];
@@ -362,7 +360,6 @@ test_no_bloat_churn(void)
 	int r, i;
 
 	CHECK(bt_open(bm, &bt) == XTC_OK, "bt_open churn");
-	bt_set_merge_enabled(bt, 1);   /* single mutator: reclaim is safe */
 
 	/* Prime a window of live keys [0, WINDOW). */
 	for (i = 0; i < WINDOW; i++) {
@@ -548,7 +545,6 @@ test_concurrent_merge(void)
 	bo.cool_pct = 25;
 	CHECK(bm_create(&bo, &g_cm_bm) == XTC_OK, "bm_create cmerge");
 	CHECK(bt_open(g_cm_bm, &g_cm_bt) == XTC_OK, "bt_open cmerge");
-	bt_set_merge_enabled(g_cm_bt, 1);   /* merge is concurrency-safe now */
 	atomic_store(&g_cm_dup, 0);
 
 	/* Lay down the anchor set that the churners never touch. */
