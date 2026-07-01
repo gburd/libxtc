@@ -142,12 +142,6 @@ typedef struct bt_stats {
 } bt_stats_t;
 void bt_get_stats(bt_t *bt, bt_stats_t *out);
 
-/* Enable (on != 0) or disable merge/reclaim on delete underflow.
- * Disabled by default; safe to enable only for single-threaded /
- * exclusive deletes (see btree.c).  Deletes are correct either way;
- * this only controls whether emptied pages are reclaimed. */
-void bt_set_merge_enabled(bt_t *bt, int on);
-
 /*
  * Latch-releasing, position-revalidating cursor.  A caller that must
  * not hold a page latch across an external boundary (the SQLite VDBE
