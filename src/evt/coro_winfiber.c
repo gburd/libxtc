@@ -218,6 +218,17 @@ xtc_yield(void)
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 }
 
+/* PUBLIC: int __xtc_coro_preempt __P((void *)); */
+/* Windows-fiber substrate declines signal-context preemption (Windows
+ * has no POSIX signal timer; a later phase adds a timer-queue variant).
+ * See coro_uctx.c for the resumable ucontext version. */
+int
+__xtc_coro_preempt(void *uctx)
+{
+	(void)uctx;
+	return 0;
+}
+
 xtc_task_t *
 __xtc_current_task(void)
 {

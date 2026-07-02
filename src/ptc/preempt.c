@@ -63,6 +63,29 @@ static XTC_THREAD_LOCAL preempt_tls_t g_pt;
 
 static _Atomic int g_handler_installed;
 
+/* Phase 2 (signal-context involuntary yield) opt-in.  When 0 (the
+ * default, and Phase 1) the handler only records a tick and the yield
+ * happens cooperatively at the next xtc_yield_if_due.  When 1, the
+ * handler ALSO performs a resumable involuntary yield when it is safe.
+ * A separate flag so Phase 1 users are never exposed to signal-context
+ * stack redirection. */
+static _Atomic int g_involuntary_on;
+
+/* Provided by the active coroutine substrate (coro_uctx.c does the real
+ * resumable redirect; coro_fctx.c / coro_winfiber.c decline and return
+ * 0) and by proc.c.  Forward-declared to keep preempt.c (L3) from
+ * pulling the substrate headers. */
+extern int __xtc_coro_preempt(void *uctx);
+extern int __xtc_proc_crit_depth(void);
+
+/*
+ * Per-thread async-signal-unsafe-region nesting depth (see the
+ * __xtc_unsafe_* section below).  Declared here because the timer
+ * handler reads it.  volatile so the handler's read is not hoisted;
+ * plain int because only this thread writes it and the handler runs on
+ * this same thread (a transient value only ever errs toward "defer"). */
+static XTC_THREAD_LOCAL volatile int g_unsafe_depth;
+
 #if defined(XTC_HAVE_POSIX_TIMERS)
 
 /*
@@ -78,8 +101,29 @@ preempt_handler(int sig, siginfo_t *si, void *uctx)
 {
 	(void)sig;
 	(void)si;
-	(void)uctx;
 	atomic_fetch_add_explicit(&g_pt.ticks, 1, memory_order_relaxed);
+	/*
+	 * Phase 2: a signal-context involuntary yield, but ONLY when it is
+	 * safe -- not inside a critical section (crit_depth) and not inside
+	 * an async-signal-unsafe region (unsafe_depth: the allocator, a
+	 * latch's internal lock).  This is libas-safe's discipline realized
+	 * via counters: we never redirect the stack out of malloc or a
+	 * lock.  __xtc_coro_preempt does the resumable redirect on the
+	 * ucontext substrate (Go's mechanism -- the kernel swaps context on
+	 * sigreturn) and declines on fctx/winfiber, in which case we fall
+	 * back to the cooperative pending flag.  g_unsafe_depth is read
+	 * directly (this handler runs on the same thread that maintains
+	 * it). */
+	if (atomic_load_explicit(&g_involuntary_on, memory_order_relaxed) &&
+	    g_unsafe_depth == 0 &&
+	    __xtc_proc_crit_depth() == 0 &&
+	    __xtc_coro_preempt(uctx)) {
+		/* The involuntary yield is armed: on sigreturn the scheduler
+		 * resumes and re-queues this fiber.  No pending flag needed. */
+		return;
+	}
+	/* Unsafe, disabled, or no fiber to preempt: defer to the next
+	 * cooperative yield-check (Phase 1). */
 	atomic_store_explicit(&g_pt.pending, 1, memory_order_relaxed);
 }
 
@@ -92,6 +136,11 @@ ensure_handler_installed(void)
 		return;
 	memset(&sa, 0, sizeof sa);
 	sa.sa_sigaction = preempt_handler;
+	/* No SA_ONSTACK: the involuntary-yield redirect only rewrites the
+	 * kernel-saved *uctx and returns; it needs no altstack, and running
+	 * the tiny handler on the interrupted fiber's stack is fine (its
+	 * frame is below the resume point that c->ctx captured, and is
+	 * abandoned when sigreturn restores the scheduler context). */
 	sa.sa_flags = SA_SIGINFO | SA_RESTART;
 	(void)sigemptyset(&sa.sa_mask);
 	(void)sigaction(XTC_PREEMPT_SIGNAL, &sa, NULL);
@@ -187,6 +236,24 @@ xtc_preempt_supported(void)
 
 #endif
 
+/* PUBLIC: void xtc_preempt_set_involuntary __P((int)); */
+/*
+ * Enable (on != 0) or disable signal-context involuntary yield (Phase
+ * 2).  When enabled AND a per-worker timer is armed, a tick preempts
+ * the running fiber in the handler -- resumably, and only when safe
+ * (crit_depth == 0, unsafe_depth == 0) -- on the ucontext substrate;
+ * on the fctx/winfiber substrate the involuntary yield declines and
+ * the timer falls back to Phase 1 cooperative-assisted preemption.
+ * Process-global (it flips the shared handler's behavior).  Off by
+ * default; Phase 1 users are never exposed to signal-context stack
+ * redirection unless they opt in here. */
+void
+xtc_preempt_set_involuntary(int on)
+{
+	atomic_store_explicit(&g_involuntary_on, on ? 1 : 0,
+	    memory_order_relaxed);
+}
+
 /* PUBLIC: uint64_t xtc_preempt_ticks __P((void)); */
 /* Total timer ticks this thread has observed since arming.  The Phase 0
  * signal-that-the-seam-works metric. */
@@ -203,4 +270,47 @@ int
 xtc_preempt_tick_pending(void)
 {
 	return atomic_exchange_explicit(&g_pt.pending, 0, memory_order_relaxed);
+}
+
+/* ---- async-signal-unsafe-region counter (Phase 2 prerequisite) ----
+ *
+ * A per-thread nesting depth that is > 0 while this thread is inside an
+ * async-signal-UNSAFE region -- the allocator (malloc/free) and the
+ * brief internal-lock windows of the latches.  The preemption timer
+ * handler (Phase 2) MUST NOT perform a signal-context involuntary yield
+ * while this depth is > 0, because jumping the stack out of malloc's
+ * arena lock or a latch's pthread_mutex would corrupt state; it defers
+ * (leaves the tick pending) instead.  This realizes libas-safe's
+ * discipline via a counter rather than rewriting the unsafe code.
+ *
+ * g_unsafe_depth is declared near the top of the file (the handler
+ * needs it).  It is a plain volatile int (not atomic): only THIS thread
+ * writes it, and the timer signal handler -- which runs ON this same
+ * thread -- reads it; enter increments BEFORE the unsafe op and leave
+ * decrements AFTER, so the handler seeing a transient value only ever
+ * errs toward "unsafe" (defer), never toward a wrongful yield.  The
+ * fault handler (proc.c) can consult it too, so a SIGSEGV inside malloc
+ * no longer siglongjmps out of a corrupt arena.
+ */
+
+/* PUBLIC: void __xtc_unsafe_enter __P((void)); */
+void
+__xtc_unsafe_enter(void)
+{
+	g_unsafe_depth++;
+}
+
+/* PUBLIC: void __xtc_unsafe_leave __P((void)); */
+void
+__xtc_unsafe_leave(void)
+{
+	if (g_unsafe_depth > 0)
+		g_unsafe_depth--;
+}
+
+/* PUBLIC: int __xtc_unsafe_depth __P((void)); */
+int
+__xtc_unsafe_depth(void)
+{
+	return g_unsafe_depth;
 }
