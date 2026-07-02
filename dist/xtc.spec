@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 0.7.0"
+#       --define "version 0.8.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        0.7.0
+Version:        0.8.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,13 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Wed Jul 01 2026 Greg Burd <greg@burd.me> - 0.8.0-1
+- Native preemption facility (docs/M_PREEMPTION.md): per-worker
+  CPU-time timer seam; a per-thread async-signal-unsafe-region depth
+  counter around the allocator; cooperative-assisted preemption
+  (xtc_exec_set_preempt) as the supported mode; signal-context
+  involuntary-yield infrastructure + safety gate in place (the resumable
+  redirect pending per-arch mcontext work, falls back to cooperative).
 * Wed Jul 01 2026 Greg Burd <greg@burd.me> - 0.7.0-1
 - DST toward FoundationDB parity: seeded replayable scheduler over the
   real multi-loop executor; 20,000-seed soak clean; simulated I/O
