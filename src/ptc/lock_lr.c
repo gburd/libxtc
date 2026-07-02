@@ -22,6 +22,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_inject.h"
 #include "xtc_lrlock.h"
 
@@ -91,10 +92,10 @@ __slot_release(void *value)
 	 * (so 0 means "unset"); decode it. */
 	int slot = (int)(intptr_t)value - 1;
 	if (slot < 0) return;
-	(void)pthread_mutex_lock(&__slot_free_lock);
+	(void)__xtc_mtx_lock(&__slot_free_lock);
 	if (__slot_free_n < XTC_LRLOCK_MAX_GLOBAL_SLOTS)
 		__slot_free_list[__slot_free_n++] = slot;
-	(void)pthread_mutex_unlock(&__slot_free_lock);
+	(void)__xtc_mtx_unlock(&__slot_free_lock);
 	__my_global_slot = -1;
 }
 
@@ -113,10 +114,10 @@ __slot_for(xtc_lrlock_t *lr)
 		(void)pthread_once(&__slot_key_once, __slot_key_init);
 
 		/* Prefer a reclaimed slot. */
-		(void)pthread_mutex_lock(&__slot_free_lock);
+		(void)__xtc_mtx_lock(&__slot_free_lock);
 		if (__slot_free_n > 0)
 			s = __slot_free_list[--__slot_free_n];
-		(void)pthread_mutex_unlock(&__slot_free_lock);
+		(void)__xtc_mtx_unlock(&__slot_free_lock);
 
 		if (s < 0) {
 			s = atomic_fetch_add_explicit(&__global_slot_counter, 1,
@@ -513,12 +514,12 @@ xtc_lrlock_write_begin(xtc_lrlock_t *lr)
 {
 	int read_idx;
 	if (lr == NULL) return NULL;
-	(void)pthread_mutex_lock(&lr->writer_mutex);
+	(void)__xtc_mtx_lock(&lr->writer_mutex);
 	lr->writer_owned = 1;
 	if ((lr->flags & XTC_LRLOCK_COW) || lr->data[1] == NULL) {
 		if (__cow_ensure_write_copy(lr) != XTC_OK) {
 			lr->writer_owned = 0;
-			(void)pthread_mutex_unlock(&lr->writer_mutex);
+			(void)__xtc_mtx_unlock(&lr->writer_mutex);
 			return NULL;
 		}
 	}
@@ -644,7 +645,7 @@ xtc_lrlock_write_end(xtc_lrlock_t *lr)
 {
 	if (lr == NULL || !lr->writer_owned) return;
 	lr->writer_owned = 0;
-	(void)pthread_mutex_unlock(&lr->writer_mutex);
+	(void)__xtc_mtx_unlock(&lr->writer_mutex);
 }
 
 const void *

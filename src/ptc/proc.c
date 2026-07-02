@@ -27,6 +27,7 @@
 #include "xtc_slab.h"
 #include "xtc_mctx.h"
 #include "xtc_fs.h"     /* xtc_fs_close: portable fd close for recovery */
+#include "xtc_preempt.h" /* __xtc_unsafe_enter/leave: preemption-safe lock brackets */
 #include <stdio.h>
 #include <pthread.h>
 #include <setjmp.h>
@@ -68,12 +69,25 @@ static pthread_mutex_t  __proc_slab_init_lock = PTHREAD_MUTEX_INITIALIZER;
  */
 #define ENV_POOL_PAYLOAD  256
 
+/*
+ * Preemption-safe mutex brackets: proc-layer mutexes go through the
+ * shared __xtc_mtx_lock/unlock (src/ptc/preempt.c) so a fiber holding a
+ * proc mutex is never involuntarily preempted -- otherwise the loop
+ * (many fibers, one OS thread) deadlocks when another same-loop fiber
+ * blocks on the same mutex (captured on EC2 as a hang in
+ * __notify_links_and_monitors on tbl->lock).  These thin aliases keep
+ * the proc.c call sites readable and route every acquire/release
+ * through the one library-wide helper.
+ */
+#define __proc_mtx_lock(m)    __xtc_mtx_lock(m)
+#define __proc_mtx_unlock(m)  __xtc_mtx_unlock(m)
+
 static void
 __proc_slabs_ensure(void)
 {
 	if (__link_slab != NULL && __mon_slab != NULL && __env_slab != NULL)
 		return;
-	(void)pthread_mutex_lock(&__proc_slab_init_lock);
+	(void) __proc_mtx_lock(&__proc_slab_init_lock);
 	if (__link_slab == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
 		o.name = "proc.link"; o.obj_size = sizeof(struct link_entry);
@@ -90,7 +104,7 @@ __proc_slabs_ensure(void)
 		o.obj_size = sizeof(struct envelope) + ENV_POOL_PAYLOAD;
 		(void)xtc_slab_create(&o, &__env_slab);
 	}
-	(void)pthread_mutex_unlock(&__proc_slab_init_lock);
+	(void) __proc_mtx_unlock(&__proc_slab_init_lock);
 }
 
 /* Allocate an envelope for a `size`-byte payload, from the pool when
@@ -191,14 +205,14 @@ __trace_record(int kind, xtc_pid_t self, xtc_pid_t peer, uint64_t hlc,
 	/* Hot-path guard: a single relaxed load when tracing is off. */
 	if (!atomic_load_explicit(&__trace_on, memory_order_relaxed))
 		return;
-	(void)pthread_mutex_lock(&__trace_lock);
+	(void) __proc_mtx_lock(&__trace_lock);
 	if (atomic_load_explicit(&__trace_on, memory_order_relaxed)) {
 		xtc_trace_rec_t *r = &__trace_ring[__trace_seq % XTC_TRACE_RING];
 		r->hlc = hlc; r->cause = cause; r->kind = kind;
 		r->self = self; r->peer = peer; r->detail = detail;
 		__trace_seq++;
 	}
-	(void)pthread_mutex_unlock(&__trace_lock);
+	(void) __proc_mtx_unlock(&__trace_lock);
 }
 
 /* True iff tracing is currently enabled (hot-path predicate). */
@@ -421,7 +435,7 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 {
 	int i;
 	struct xtc_proc_table *tbl = NULL;
-	(void)pthread_mutex_lock(&__lt_lock);
+	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
 		if (__lt[i].loop == loop) {
 			tbl = __lt[i].tbl;
@@ -430,7 +444,7 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 			break;
 		}
 	}
-	(void)pthread_mutex_unlock(&__lt_lock);
+	(void) __proc_mtx_unlock(&__lt_lock);
 	if (tbl != NULL) {
 		/* Free still-live process headers.  By contract a loop
 		 * being finalized has no live procs left, but we defend
@@ -457,7 +471,7 @@ __table_for(xtc_loop_t *loop, int create)
 {
 	int i;
 	struct xtc_proc_table *t = NULL;
-	(void)pthread_mutex_lock(&__lt_lock);
+	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
 		if (__lt[i].loop == loop) { t = __lt[i].tbl; goto out; }
 	}
@@ -474,7 +488,7 @@ __table_for(xtc_loop_t *loop, int create)
 	}
 	free(t); t = NULL;
 out:
-	(void)pthread_mutex_unlock(&__lt_lock);
+	(void) __proc_mtx_unlock(&__lt_lock);
 	return t;
 }
 
@@ -484,7 +498,7 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 {
 	size_t i;
 	int rc = XTC_OK;
-	(void)pthread_mutex_lock(&t->lock);
+	(void) __proc_mtx_lock(&t->lock);
 	for (i = 0; i < t->cap; i++) {
 		if (t->slots[i].proc == NULL) {
 			t->slots[i].proc = p;
@@ -515,7 +529,7 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 		t->n_used++;
 	}
 out:
-	(void)pthread_mutex_unlock(&t->lock);
+	(void) __proc_mtx_unlock(&t->lock);
 	return rc;
 }
 
@@ -523,26 +537,26 @@ static struct xtc_proc *
 __table_lookup(struct xtc_proc_table *t, uint16_t local_id, uint32_t gen)
 {
 	struct xtc_proc *p = NULL;
-	(void)pthread_mutex_lock(&t->lock);
+	(void) __proc_mtx_lock(&t->lock);
 	if (local_id < t->cap &&
 	    t->slots[local_id].proc != NULL &&
 	    t->slots[local_id].gen == gen)
 		p = t->slots[local_id].proc;
-	(void)pthread_mutex_unlock(&t->lock);
+	(void) __proc_mtx_unlock(&t->lock);
 	return p;
 }
 
 static void
 __table_release(struct xtc_proc_table *t, uint16_t local_id)
 {
-	(void)pthread_mutex_lock(&t->lock);
+	(void) __proc_mtx_lock(&t->lock);
 	if (local_id < t->cap) {
 		if (t->slots[local_id].proc != NULL) {
 			t->slots[local_id].proc = NULL;
 			t->n_used--;
 		}
 	}
-	(void)pthread_mutex_unlock(&t->lock);
+	(void) __proc_mtx_unlock(&t->lock);
 }
 
 /* ---------- mailbox plumbing ---------- */
@@ -579,7 +593,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 	int armed;
 	int wm_fire = 0;
 	size_t wm_depth = 0, wm_cap = 0;
-	(void)pthread_mutex_lock(&p->mbox_lock);
+	(void) __proc_mtx_lock(&p->mbox_lock);
 	/* Reject if proc is dead, or capped and full.
 	 * Note: precedence bug fix -- the original used
 	 *   if (!alive || cap > 0 ? mbox_n >= cap : 0)
@@ -603,7 +617,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 	    (p->alive && XTC_SIM_BUGGIFY("proc.mbox.spurious_full") &&
 	     xtc_sim_fault(250))) {
 		p->mbox_drop_total++;
-		(void)pthread_mutex_unlock(&p->mbox_lock);
+		(void) __proc_mtx_unlock(&p->mbox_lock);
 		__env_free(e);
 		return XTC_E_AGAIN;
 	}
@@ -624,7 +638,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 		wm_cap = p->mbox_cap;
 	}
 	armed = p->waker_armed;
-	(void)pthread_mutex_unlock(&p->mbox_lock);
+	(void) __proc_mtx_unlock(&p->mbox_lock);
 	if (wm_fire)
 		p->mbox_wm_fn(p->pid, wm_depth, wm_cap, p->mbox_wm_user);
 	if (armed) {
@@ -843,7 +857,7 @@ xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out)
 	p = __resolve(pid, NULL);
 	if (p == NULL)
 		return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&p->mbox_lock);
+	(void) __proc_mtx_lock(&p->mbox_lock);
 	out->depth = p->mbox_n;
 	out->saved = atomic_load_explicit(&p->mbox_saved,
 	    memory_order_relaxed);
@@ -851,7 +865,7 @@ xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out)
 	out->cap = p->mbox_cap;
 	out->recv_total = p->mbox_recv_total;
 	out->drop_total = p->mbox_drop_total;
-	(void)pthread_mutex_unlock(&p->mbox_lock);
+	(void) __proc_mtx_unlock(&p->mbox_lock);
 	return XTC_OK;
 }
 
@@ -887,7 +901,7 @@ __resolve(xtc_pid_t pid, xtc_loop_t **out_loop_for_send)
 	 */
 	if (target_loop == NULL) {
 		int i;
-		(void)pthread_mutex_lock(&__lt_lock);
+		(void) __proc_mtx_lock(&__lt_lock);
 		for (i = 0; i < LOOP_TABLE_MAX; i++) {
 			xtc_loop_t *l = __lt[i].loop;
 			uint16_t lid;
@@ -898,7 +912,7 @@ __resolve(xtc_pid_t pid, xtc_loop_t **out_loop_for_send)
 				break;
 			}
 		}
-		(void)pthread_mutex_unlock(&__lt_lock);
+		(void) __proc_mtx_unlock(&__lt_lock);
 	}
 
 	if (target_loop == NULL) return NULL;
@@ -979,12 +993,12 @@ xtc_exit_pid(xtc_pid_t target, int reason)
 	/* Best-effort: if the target is parked on its recv waker, wake
 	 * it so it can observe the kill.  If it's runnable already this
 	 * is a no-op. */
-	(void)pthread_mutex_lock(&p->mbox_lock);
+	(void) __proc_mtx_lock(&p->mbox_lock);
 	if (p->waker_armed) {
 		xtc_waker_wake(&p->recv_waker);
 		p->waker_armed = 0;
 	}
-	(void)pthread_mutex_unlock(&p->mbox_lock);
+	(void) __proc_mtx_unlock(&p->mbox_lock);
 	return XTC_OK;
 }
 
@@ -1080,7 +1094,7 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 		(void)xtc_task_waker(self->task, &self->recv_waker);
 
 		/* Pull from mailbox; for each, match or move to save. */
-		(void)pthread_mutex_lock(&self->mbox_lock);
+		(void) __proc_mtx_lock(&self->mbox_lock);
 		for (;;) {
 			e = __mbox_pop_locked(self);
 			if (e == NULL) {
@@ -1099,10 +1113,10 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 				 */
 				if (timeout_ns != 0)
 					self->waker_armed = 1;
-				(void)pthread_mutex_unlock(&self->mbox_lock);
+				(void) __proc_mtx_unlock(&self->mbox_lock);
 				break;
 			}
-			(void)pthread_mutex_unlock(&self->mbox_lock);
+			(void) __proc_mtx_unlock(&self->mbox_lock);
 			if (match(e->data, e->size, u))
 				goto deliver;
 			/* Append to save queue. */
@@ -1111,7 +1125,7 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			else { self->save_tail->next = e; self->save_tail = e; }
 			atomic_fetch_add_explicit(&self->mbox_saved, 1,
 			    memory_order_relaxed);
-			(void)pthread_mutex_lock(&self->mbox_lock);
+			(void) __proc_mtx_lock(&self->mbox_lock);
 		}
 
 		/* Update recv_mark: everything in save_queue has now been
@@ -1151,9 +1165,9 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 				xtc_exit_self(kp - 1);
 		}
 
-		(void)pthread_mutex_lock(&self->mbox_lock);
+		(void) __proc_mtx_lock(&self->mbox_lock);
 		self->waker_armed = 0;
-		(void)pthread_mutex_unlock(&self->mbox_lock);
+		(void) __proc_mtx_unlock(&self->mbox_lock);
 	}
 
 deliver:
@@ -1305,11 +1319,11 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	/* Fast path: if a message is already queued or the fd is already
 	 * ready, just return without yielding.  We can answer the mailbox
 	 * question without an actual recv call by peeking the queue. */
-	(void)pthread_mutex_lock(&self->mbox_lock);
+	(void) __proc_mtx_lock(&self->mbox_lock);
 	if (self->mbox_n > 0 || self->save_head != NULL) {
 		*out_revents |= XTC_WAIT_MAILBOX;
 	}
-	(void)pthread_mutex_unlock(&self->mbox_lock);
+	(void) __proc_mtx_unlock(&self->mbox_lock);
 	if (*out_revents & XTC_WAIT_MAILBOX) return XTC_OK;
 
 	/* Slow path: arm the recv waker, register the fd, optionally
@@ -1370,17 +1384,17 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	}
 
 	(void)xtc_task_waker(self->task, &self->recv_waker);
-	(void)pthread_mutex_lock(&self->mbox_lock);
+	(void) __proc_mtx_lock(&self->mbox_lock);
 	self->waker_armed = 1;
-	(void)pthread_mutex_unlock(&self->mbox_lock);
+	(void) __proc_mtx_unlock(&self->mbox_lock);
 
 	xtc_yield();
 	/* Restore __current_proc -- another fiber may have clobbered it. */
 	__current_proc = self;
 
-	(void)pthread_mutex_lock(&self->mbox_lock);
+	(void) __proc_mtx_lock(&self->mbox_lock);
 	self->waker_armed = 0;
-	(void)pthread_mutex_unlock(&self->mbox_lock);
+	(void) __proc_mtx_unlock(&self->mbox_lock);
 
 	/* Re-check kill-pending after yielding back. */
 	{
@@ -1408,11 +1422,11 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 
 	/* Check the mailbox again -- a message may have arrived without
 	 * tripping the waker race-window. */
-	(void)pthread_mutex_lock(&self->mbox_lock);
+	(void) __proc_mtx_lock(&self->mbox_lock);
 	if (self->mbox_n > 0 || self->save_head != NULL) {
 		revents |= XTC_WAIT_MAILBOX;
 	}
-	(void)pthread_mutex_unlock(&self->mbox_lock);
+	(void) __proc_mtx_unlock(&self->mbox_lock);
 
 	*out_revents = revents;
 
@@ -1959,7 +1973,7 @@ __peer_push_link(xtc_pid_t peer_pid, struct link_entry *e)
 	if (peer == NULL || lp == NULL) return 0;
 	tbl = __table_for(lp, 0);
 	if (tbl == NULL) return 0;
-	(void)pthread_mutex_lock(&tbl->lock);
+	(void) __proc_mtx_lock(&tbl->lock);
 	if (peer_pid.local_id < tbl->cap &&
 	    tbl->slots[peer_pid.local_id].proc == peer &&
 	    tbl->slots[peer_pid.local_id].gen == peer_pid.gen &&
@@ -1968,7 +1982,7 @@ __peer_push_link(xtc_pid_t peer_pid, struct link_entry *e)
 		peer->links = e;
 		pushed = 1;
 	}
-	(void)pthread_mutex_unlock(&tbl->lock);
+	(void) __proc_mtx_unlock(&tbl->lock);
 	return pushed;
 }
 
@@ -1983,7 +1997,7 @@ __peer_push_monitored_by(xtc_pid_t peer_pid, struct mon_entry *m)
 	if (peer == NULL || lp == NULL) return 0;
 	tbl = __table_for(lp, 0);
 	if (tbl == NULL) return 0;
-	(void)pthread_mutex_lock(&tbl->lock);
+	(void) __proc_mtx_lock(&tbl->lock);
 	if (peer_pid.local_id < tbl->cap &&
 	    tbl->slots[peer_pid.local_id].proc == peer &&
 	    tbl->slots[peer_pid.local_id].gen == peer_pid.gen &&
@@ -1992,7 +2006,7 @@ __peer_push_monitored_by(xtc_pid_t peer_pid, struct mon_entry *m)
 		peer->monitored_by = m;
 		pushed = 1;
 	}
-	(void)pthread_mutex_unlock(&tbl->lock);
+	(void) __proc_mtx_unlock(&tbl->lock);
 	return pushed;
 }
 
@@ -2140,7 +2154,7 @@ __notify_links_and_monitors(struct xtc_proc *p)
 	 */
 	{
 		struct xtc_proc_table *tbl = __table_for(p->loop, 0);
-		if (tbl != NULL) (void)pthread_mutex_lock(&tbl->lock);
+		if (tbl != NULL) (void) __proc_mtx_lock(&tbl->lock);
 		links = p->links;               p->links = NULL;
 		monitored_by = p->monitored_by; p->monitored_by = NULL;
 		monitors = p->monitors;         p->monitors = NULL;
@@ -2150,7 +2164,7 @@ __notify_links_and_monitors(struct xtc_proc *p)
 				tbl->slots[p->pid.local_id].proc = NULL;
 				tbl->n_used--;
 			}
-			(void)pthread_mutex_unlock(&tbl->lock);
+			(void) __proc_mtx_unlock(&tbl->lock);
 		}
 	}
 
@@ -2178,10 +2192,10 @@ __notify_links_and_monitors(struct xtc_proc *p)
 	/* Drain mailbox + save queue. */
 	{
 		struct envelope *e, *n;
-		(void)pthread_mutex_lock(&p->mbox_lock);
+		(void) __proc_mtx_lock(&p->mbox_lock);
 		for (e = p->mbox_head; e != NULL; e = n) { n = e->next; __env_free(e); }
 		p->mbox_head = p->mbox_tail = NULL;
-		(void)pthread_mutex_unlock(&p->mbox_lock);
+		(void) __proc_mtx_unlock(&p->mbox_lock);
 		for (e = p->save_head; e != NULL; e = n) { n = e->next; __env_free(e); }
 		p->save_head = p->save_tail = NULL;
 	}
@@ -2223,13 +2237,13 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 				info->park_reason = XTC_PARK_MAILBOX;
 		}
 	}
-	(void)pthread_mutex_lock(&p->mbox_lock);
+	(void) __proc_mtx_lock(&p->mbox_lock);
 	info->mbox_len = p->mbox_n;
 	info->mbox_peak = p->mbox_peak;
 	info->mbox_cap = p->mbox_cap;
 	info->mbox_recv_total = p->mbox_recv_total;
 	info->mbox_drop_total = p->mbox_drop_total;
-	(void)pthread_mutex_unlock(&p->mbox_lock);
+	(void) __proc_mtx_unlock(&p->mbox_lock);
 	info->mbox_saved =
 	    atomic_load_explicit(&p->mbox_saved, memory_order_relaxed);
 }
@@ -2253,13 +2267,13 @@ xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user)
 	 * into a buffer and invoke the callback only AFTER every lock is
 	 * dropped, so the callback may call back into the proc/loop APIs.
 	 */
-	(void)pthread_mutex_lock(&__lt_lock);
+	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
 		struct xtc_proc_table *tbl = __lt[i].tbl;
 		size_t s;
 		if (__lt[i].loop == NULL || tbl == NULL)
 			continue;
-		(void)pthread_mutex_lock(&tbl->lock);
+		(void) __proc_mtx_lock(&tbl->lock);
 		for (s = 0; s < tbl->cap; s++) {
 			struct xtc_proc *p = tbl->slots[s].proc;
 			if (p == NULL)
@@ -2269,8 +2283,8 @@ xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user)
 				xtc_proc_info_t *nb;
 				if (__os_realloc(buf, ncap * sizeof *nb,
 				    (void **)&nb) != XTC_OK) {
-					(void)pthread_mutex_unlock(&tbl->lock);
-					(void)pthread_mutex_unlock(&__lt_lock);
+					(void) __proc_mtx_unlock(&tbl->lock);
+					(void) __proc_mtx_unlock(&__lt_lock);
 					__os_free(buf);
 					return XTC_E_NOMEM;
 				}
@@ -2280,9 +2294,9 @@ xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user)
 			__fill_proc_info(p, &buf[n]);
 			n++;
 		}
-		(void)pthread_mutex_unlock(&tbl->lock);
+		(void) __proc_mtx_unlock(&tbl->lock);
 	}
-	(void)pthread_mutex_unlock(&__lt_lock);
+	(void) __proc_mtx_unlock(&__lt_lock);
 
 	for (i = 0; (size_t)i < n; i++)
 		if (cb(&buf[i], user) != 0)
@@ -2301,18 +2315,18 @@ xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 	if (cb == NULL)
 		return XTC_E_INVAL;
 
-	(void)pthread_mutex_lock(&__lt_lock);
+	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
 		struct xtc_proc_table *tbl = __lt[i].tbl;
 		xtc_loop_t *loop = __lt[i].loop;
 		size_t s, procs = 0;
 		if (loop == NULL || tbl == NULL)
 			continue;
-		(void)pthread_mutex_lock(&tbl->lock);
+		(void) __proc_mtx_lock(&tbl->lock);
 		for (s = 0; s < tbl->cap; s++)
 			if (tbl->slots[s].proc != NULL)
 				procs++;
-		(void)pthread_mutex_unlock(&tbl->lock);
+		(void) __proc_mtx_unlock(&tbl->lock);
 		infos[n].loop_id = loop->exec_id < 0 ? 0 : loop->exec_id + 1;
 		infos[n].n_procs = (int)procs;
 		infos[n].n_alive =
@@ -2323,7 +2337,7 @@ xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 		    atomic_load_explicit(&loop->n_steals, memory_order_relaxed);
 		n++;
 	}
-	(void)pthread_mutex_unlock(&__lt_lock);
+	(void) __proc_mtx_unlock(&__lt_lock);
 
 	for (i = 0; i < n; i++)
 		if (cb(&infos[i], user) != 0)
@@ -2339,13 +2353,13 @@ xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 	if (out == NULL)
 		return XTC_E_INVAL;
 
-	(void)pthread_mutex_lock(&__lt_lock);
+	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX && !found; i++) {
 		struct xtc_proc_table *tbl = __lt[i].tbl;
 		size_t s;
 		if (__lt[i].loop == NULL || tbl == NULL)
 			continue;
-		(void)pthread_mutex_lock(&tbl->lock);
+		(void) __proc_mtx_lock(&tbl->lock);
 		for (s = 0; s < tbl->cap; s++) {
 			struct xtc_proc *p = tbl->slots[s].proc;
 			if (p != NULL && xtc_pid_eq(p->pid, pid)) {
@@ -2354,9 +2368,9 @@ xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 				break;
 			}
 		}
-		(void)pthread_mutex_unlock(&tbl->lock);
+		(void) __proc_mtx_unlock(&tbl->lock);
 	}
-	(void)pthread_mutex_unlock(&__lt_lock);
+	(void) __proc_mtx_unlock(&__lt_lock);
 	return found ? XTC_OK : XTC_E_NOTFOUND;
 }
 
@@ -2403,9 +2417,9 @@ xtc_trace_enable(int on)
 int
 xtc_trace_reset(void)
 {
-	(void)pthread_mutex_lock(&__trace_lock);
+	(void) __proc_mtx_lock(&__trace_lock);
 	__trace_seq = 0;
-	(void)pthread_mutex_unlock(&__trace_lock);
+	(void) __proc_mtx_unlock(&__trace_lock);
 	return XTC_OK;
 }
 
@@ -2432,19 +2446,19 @@ xtc_trace_dump(xtc_trace_fn cb, void *user)
 	if (cb == NULL)
 		return XTC_E_INVAL;
 
-	(void)pthread_mutex_lock(&__trace_lock);
+	(void) __proc_mtx_lock(&__trace_lock);
 	n = __trace_seq < XTC_TRACE_RING ? __trace_seq : XTC_TRACE_RING;
 	if (n > 0) {
 		if (__os_malloc((size_t)n * sizeof *snap, (void **)&snap)
 		    != XTC_OK) {
-			(void)pthread_mutex_unlock(&__trace_lock);
+			(void) __proc_mtx_unlock(&__trace_lock);
 			return XTC_E_NOMEM;
 		}
 		start = __trace_seq - n;
 		for (i = 0; i < n; i++)
 			snap[i] = __trace_ring[(start + i) % XTC_TRACE_RING];
 	}
-	(void)pthread_mutex_unlock(&__trace_lock);
+	(void) __proc_mtx_unlock(&__trace_lock);
 
 	/* Present in causal (HLC-ascending) order. */
 	if (n > 1)

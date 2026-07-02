@@ -29,6 +29,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_inject.h"
 #include "xtc_lwlock.h"
 
@@ -116,7 +117,7 @@ __lw_track_acquire(const xtc_lwlock_t *acquired)
 
 	if (!atomic_load_explicit(&__lw_track_on, memory_order_relaxed))
 		return;
-	(void)pthread_mutex_lock(&__lw_track_mu);
+	(void)__xtc_mtx_lock(&__lw_track_mu);
 	for (i = 0; i < __n_held; i++) {
 		uint16_t a = __held[i].lock->tranche;
 		uint32_t fwd, rev;
@@ -131,7 +132,7 @@ __lw_track_acquire(const xtc_lwlock_t *acquired)
 		}
 		__lw_edge_insert(fwd);
 	}
-	(void)pthread_mutex_unlock(&__lw_track_mu);
+	(void)__xtc_mtx_unlock(&__lw_track_mu);
 }
 
 /* PUBLIC: void xtc_lwlock_track_enable __P((int)); */
@@ -153,10 +154,10 @@ xtc_lwlock_track_violations(void)
 void
 xtc_lwlock_track_reset(void)
 {
-	(void)pthread_mutex_lock(&__lw_track_mu);
+	(void)__xtc_mtx_lock(&__lw_track_mu);
 	memset(__lw_track_edge, 0, sizeof __lw_track_edge);
 	atomic_store_explicit(&__lw_track_viol, 0, memory_order_relaxed);
-	(void)pthread_mutex_unlock(&__lw_track_mu);
+	(void)__xtc_mtx_unlock(&__lw_track_mu);
 }
 
 /* PUBLIC: void xtc_lwlock_track_set_handler __P((xtc_lwlock_track_fn, void *)); */
@@ -303,7 +304,7 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 		}
 
 		/* Slow path: enqueue + cond_wait. */
-		(void)pthread_mutex_lock(&lock->wait_mu);
+		(void)__xtc_mtx_lock(&lock->wait_mu);
 		/* Set HAS_WAITERS on the state.  Use compare_exchange so we
 		 * don't wipe other flags. */
 		{
@@ -319,13 +320,13 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 		/* Re-check before sleeping. */
 		if (__try_attempt(lock, mode)) {
 			lock->n_waiters--;
-			(void)pthread_mutex_unlock(&lock->wait_mu);
+			(void)__xtc_mtx_unlock(&lock->wait_mu);
 			(void)__held_push(lock, mode);
 			return XTC_OK;
 		}
 		(void)pthread_cond_wait(&lock->wait_cv, &lock->wait_mu);
 		lock->n_waiters--;
-		(void)pthread_mutex_unlock(&lock->wait_mu);
+		(void)__xtc_mtx_unlock(&lock->wait_mu);
 		/* Loop: try CAS again.  Spurious wakeups are harmless; a
 		 * legitimate wakeup means the lock just became free and we
 		 * should beat the next thread to it. */
@@ -358,7 +359,7 @@ xtc_lwlock_release(xtc_lwlock_t *lock)
 	 * is queued. */
 	if ((new_state & LW_FLAG_HAS_WAITERS) != 0 &&
 	    (new_state & LW_VAL_EXCLUSIVE) == 0) {
-		(void)pthread_mutex_lock(&lock->wait_mu);
+		(void)__xtc_mtx_lock(&lock->wait_mu);
 		if (lock->n_waiters > 0) {
 			(void)pthread_cond_broadcast(&lock->wait_cv);
 		} else {
@@ -371,7 +372,7 @@ xtc_lwlock_release(xtc_lwlock_t *lock)
 				    memory_order_release, memory_order_relaxed)) break;
 			}
 		}
-		(void)pthread_mutex_unlock(&lock->wait_mu);
+		(void)__xtc_mtx_unlock(&lock->wait_mu);
 	}
 }
 

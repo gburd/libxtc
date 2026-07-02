@@ -7,6 +7,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_cfg.h"
 
 #include <pthread.h>
@@ -105,9 +106,9 @@ xtc_cfg_register(const xtc_cfg_spec_t *spec)
 	case XTC_CFG_ENUM:   v->cur.v_enum   = spec->dflt.d_enum;   break;
 	}
 
-	(void)pthread_mutex_lock(&__cfg_lock);
+	(void)__xtc_mtx_lock(&__cfg_lock);
 	if (__cfg_find_locked(spec->name) != NULL) {
-		(void)pthread_mutex_unlock(&__cfg_lock);
+		(void)__xtc_mtx_unlock(&__cfg_lock);
 		__os_free(v->name); __os_free(v->desc);
 		if (v->cur.v_string) __os_free(v->cur.v_string);
 		__os_free(v);
@@ -116,7 +117,7 @@ xtc_cfg_register(const xtc_cfg_spec_t *spec)
 	v->next = __cfg_head;
 	__cfg_head = v;
 	__cfg_count++;
-	(void)pthread_mutex_unlock(&__cfg_lock);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	return XTC_OK;
 }
 
@@ -126,12 +127,12 @@ xtc_cfg_unregister(const char *name)
 	struct cfg_var *v, **link;
 	int rc = XTC_E_INVAL;
 	if (name == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&__cfg_lock);
+	(void)__xtc_mtx_lock(&__cfg_lock);
 	for (link = &__cfg_head; (v = *link) != NULL; link = &v->next) {
 		if (strcmp(v->name, name) == 0) {
 			*link = v->next;
 			__cfg_count--;
-			(void)pthread_mutex_unlock(&__cfg_lock);
+			(void)__xtc_mtx_unlock(&__cfg_lock);
 			__os_free(v->name); __os_free(v->desc);
 			if (v->kind == XTC_CFG_STRING && v->cur.v_string)
 				__os_free(v->cur.v_string);
@@ -139,7 +140,7 @@ xtc_cfg_unregister(const char *name)
 			return XTC_OK;
 		}
 	}
-	(void)pthread_mutex_unlock(&__cfg_lock);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	return rc;
 }
 
@@ -147,10 +148,10 @@ xtc_cfg_unregister(const char *name)
 int xtc_cfg_get_##name_suffix(const char *name, type *out) { \
 	struct cfg_var *v; int rc = XTC_E_INVAL; \
 	if (name == NULL || out == NULL) return XTC_E_INVAL; \
-	(void)pthread_mutex_lock(&__cfg_lock); \
+	(void)__xtc_mtx_lock(&__cfg_lock); \
 	v = __cfg_find_locked(name); \
 	if (v && v->kind == K) { *out = v->cur.field; rc = XTC_OK; } \
-	(void)pthread_mutex_unlock(&__cfg_lock); \
+	(void)__xtc_mtx_unlock(&__cfg_lock); \
 	return rc; \
 }
 
@@ -166,13 +167,13 @@ xtc_cfg_get_string(const char *name, const char **out)
 	struct cfg_var *v;
 	int rc = XTC_E_INVAL;
 	if (name == NULL || out == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&__cfg_lock);
+	(void)__xtc_mtx_lock(&__cfg_lock);
 	v = __cfg_find_locked(name);
 	if (v && v->kind == XTC_CFG_STRING) {
 		*out = v->cur.v_string;
 		rc = XTC_OK;
 	}
-	(void)pthread_mutex_unlock(&__cfg_lock);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	return rc;
 }
 
@@ -182,7 +183,7 @@ int xtc_cfg_set_##name_suffix(const char *name, ctype v) { \
 	ctype old = 0, new_v = v; \
 	xtc_cfg_changed_fn cb = NULL; void *cb_u = NULL; \
 	if (name == NULL) return XTC_E_INVAL; \
-	(void)pthread_mutex_lock(&__cfg_lock); \
+	(void)__xtc_mtx_lock(&__cfg_lock); \
 	cv = __cfg_find_locked(name); \
 	if (cv && cv->kind == K) { \
 		if (!bounds_check) { rc = XTC_E_RANGE; goto done; } \
@@ -193,7 +194,7 @@ int xtc_cfg_set_##name_suffix(const char *name, ctype v) { \
 		cb = cv->on_change; cb_u = cv->cb_user; \
 		rc = XTC_OK; \
 	} \
-done:	(void)pthread_mutex_unlock(&__cfg_lock); \
+done:	(void)__xtc_mtx_unlock(&__cfg_lock); \
 	if (rc == XTC_OK && cb != NULL) cb(name, &old, &new_v, cb_u); \
 	return rc; \
 }
@@ -219,7 +220,7 @@ xtc_cfg_set_string(const char *name, const char *v)
 	void *cb_u = NULL;
 	if (name == NULL || v == NULL) return XTC_E_INVAL;
 	if ((rc = __os_strdup(v, &new_copy)) != XTC_OK) return rc;
-	(void)pthread_mutex_lock(&__cfg_lock);
+	(void)__xtc_mtx_lock(&__cfg_lock);
 	cv = __cfg_find_locked(name);
 	if (cv && cv->kind == XTC_CFG_STRING) {
 		if (cv->validator && cv->validator(new_copy, cv->cb_user) != XTC_OK) {
@@ -236,7 +237,7 @@ xtc_cfg_set_string(const char *name, const char *v)
 		rc = XTC_E_INVAL;
 	}
 done_str:
-	(void)pthread_mutex_unlock(&__cfg_lock);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	if (new_copy != NULL) __os_free(new_copy);
 	if (rc == XTC_OK && cb != NULL) cb(name, NULL, v, cb_u);
 	return rc;
@@ -246,9 +247,9 @@ int
 xtc_cfg_count(void)
 {
 	int n;
-	(void)pthread_mutex_lock(&__cfg_lock);
+	(void)__xtc_mtx_lock(&__cfg_lock);
 	n = __cfg_count;
-	(void)pthread_mutex_unlock(&__cfg_lock);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	return n;
 }
 
@@ -258,10 +259,10 @@ xtc_cfg_kind(const char *name, xtc_cfg_kind_t *out)
 	struct cfg_var *v;
 	int rc = XTC_E_INVAL;
 	if (name == NULL || out == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&__cfg_lock);
+	(void)__xtc_mtx_lock(&__cfg_lock);
 	v = __cfg_find_locked(name);
 	if (v != NULL) { *out = v->kind; rc = XTC_OK; }
-	(void)pthread_mutex_unlock(&__cfg_lock);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	return rc;
 }
 
@@ -285,7 +286,7 @@ __cfg_enum_index(const char *name, const char *sval, int *out)
 {
 	struct cfg_var *v;
 	int rc = XTC_E_NOTFOUND, i;
-	(void)pthread_mutex_lock(&__cfg_lock);
+	(void)__xtc_mtx_lock(&__cfg_lock);
 	v = __cfg_find_locked(name);
 	if (v != NULL && v->kind == XTC_CFG_ENUM) {
 		rc = XTC_E_INVAL;
@@ -296,7 +297,7 @@ __cfg_enum_index(const char *name, const char *sval, int *out)
 			}
 		}
 	}
-	(void)pthread_mutex_unlock(&__cfg_lock);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	return rc;
 }
 
@@ -411,10 +412,10 @@ xtc_cfg_load_file(const char *path)
 
 	/* Remember the path so xtc_cfg_reload can re-read it. */
 	if (__os_strdup(path, &dup) == XTC_OK) {
-		(void)pthread_mutex_lock(&__cfg_lock);
+		(void)__xtc_mtx_lock(&__cfg_lock);
 		if (__cfg_file != NULL) __os_free(__cfg_file);
 		__cfg_file = dup;
-		(void)pthread_mutex_unlock(&__cfg_lock);
+		(void)__xtc_mtx_unlock(&__cfg_lock);
 	}
 	return applied;
 }
@@ -435,9 +436,9 @@ xtc_cfg_reload(void)
 {
 	char *path = NULL;
 	int rc;
-	(void)pthread_mutex_lock(&__cfg_lock);
+	(void)__xtc_mtx_lock(&__cfg_lock);
 	if (__cfg_file != NULL) (void)__os_strdup(__cfg_file, &path);
-	(void)pthread_mutex_unlock(&__cfg_lock);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	if (path == NULL) return XTC_E_INVAL;
 	rc = xtc_cfg_load_file(path);
 	__os_free(path);

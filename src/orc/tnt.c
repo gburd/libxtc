@@ -51,6 +51,7 @@
  * the #if, so the generated prototypes stay consistent across platforms.
  */
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_tnt.h"
 
 #if !defined(_WIN32)
@@ -256,13 +257,13 @@ static int
 comp_push(xtc_tnt_shard_t *sh, const xtc_tnt_completion_t *c)
 {
 	int ok = 0;
-	(void)pthread_mutex_lock(&sh->comp_lock);
+	(void)__xtc_mtx_lock(&sh->comp_lock);
 	if (sh->comp_tail - sh->comp_head < XTC_TNT_COMPLETION_CAP) {
 		sh->comp_ring[sh->comp_tail % XTC_TNT_COMPLETION_CAP] = *c;
 		sh->comp_tail++;
 		ok = 1;
 	}
-	(void)pthread_mutex_unlock(&sh->comp_lock);
+	(void)__xtc_mtx_unlock(&sh->comp_lock);
 	return ok;
 }
 
@@ -270,13 +271,13 @@ static int
 comp_pop(xtc_tnt_shard_t *sh, xtc_tnt_completion_t *out)
 {
 	int ok = 0;
-	(void)pthread_mutex_lock(&sh->comp_lock);
+	(void)__xtc_mtx_lock(&sh->comp_lock);
 	if (sh->comp_head != sh->comp_tail) {
 		*out = sh->comp_ring[sh->comp_head % XTC_TNT_COMPLETION_CAP];
 		sh->comp_head++;
 		ok = 1;
 	}
-	(void)pthread_mutex_unlock(&sh->comp_lock);
+	(void)__xtc_mtx_unlock(&sh->comp_lock);
 	return ok;
 }
 
@@ -826,14 +827,14 @@ xtc_tnt_spawn_on(uint8_t shard, uint8_t type_id, const void *args,
 	if (args && args_size)
 		memcpy(req->args, args, args_size);
 
-	(void)pthread_mutex_lock(&sh->spawn_lock);
+	(void)__xtc_mtx_lock(&sh->spawn_lock);
 	req->next = NULL;
 	if (sh->spawn_tail)
 		sh->spawn_tail->next = req;
 	else
 		sh->spawn_head = req;
 	sh->spawn_tail = req;
-	(void)pthread_mutex_unlock(&sh->spawn_lock);
+	(void)__xtc_mtx_unlock(&sh->spawn_lock);
 	shard_wake(sh);
 	return XTC_TNT_SPAWN_OK;
 }
@@ -902,10 +903,10 @@ drain_spawns(xtc_tnt_shard_t *sh)
 {
 	xtc_tnt_spawn_req_t *head, *req, *n;
 
-	(void)pthread_mutex_lock(&sh->spawn_lock);
+	(void)__xtc_mtx_lock(&sh->spawn_lock);
 	head = sh->spawn_head;
 	sh->spawn_head = sh->spawn_tail = NULL;
-	(void)pthread_mutex_unlock(&sh->spawn_lock);
+	(void)__xtc_mtx_unlock(&sh->spawn_lock);
 
 	for (req = head; req != NULL; req = n) {
 		xtc_tnt_arena_t *ar = shard_arena(sh, req->type_id);

@@ -30,6 +30,7 @@
 #define _GNU_SOURCE
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_stats.h"
 
 #include <pthread.h>
@@ -101,17 +102,17 @@ __reg_add(const void *handle, xtc_metric_kind_t kind, const char *name)
 	e->handle = handle;
 	e->kind = kind;
 	strncpy(e->name, name, XTC_STATS_NAME_MAX - 1);
-	(void)pthread_mutex_lock(&__stats_reg_lock);
+	(void)__xtc_mtx_lock(&__stats_reg_lock);
 	e->next = __reg_head;
 	__reg_head = e;
-	(void)pthread_mutex_unlock(&__stats_reg_lock);
+	(void)__xtc_mtx_unlock(&__stats_reg_lock);
 }
 
 static void
 __reg_remove(const void *handle)
 {
 	struct stats_registry_entry **link, *e;
-	(void)pthread_mutex_lock(&__stats_reg_lock);
+	(void)__xtc_mtx_lock(&__stats_reg_lock);
 	for (link = &__reg_head; (e = *link) != NULL; link = &e->next) {
 		if (e->handle == handle) {
 			*link = e->next;
@@ -119,7 +120,7 @@ __reg_remove(const void *handle)
 			break;
 		}
 	}
-	(void)pthread_mutex_unlock(&__stats_reg_lock);
+	(void)__xtc_mtx_unlock(&__stats_reg_lock);
 }
 
 /* ---- counter ---- */
@@ -395,12 +396,12 @@ xtc_metrics_iterate(xtc_metric_visit_fn fn, void *user)
 	struct stats_registry_entry *e;
 	int n = 0;
 	if (fn == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&__stats_reg_lock);
+	(void)__xtc_mtx_lock(&__stats_reg_lock);
 	for (e = __reg_head; e != NULL; e = e->next) {
 		if (fn(e->name, e->kind, e->handle, user) != 0) break;
 		n++;
 	}
-	(void)pthread_mutex_unlock(&__stats_reg_lock);
+	(void)__xtc_mtx_unlock(&__stats_reg_lock);
 	return n;
 }
 

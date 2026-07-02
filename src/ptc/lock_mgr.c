@@ -21,6 +21,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_sim.h"
 #include "xtc_lockmgr.h"
 #include "xtc_slab.h"
@@ -218,10 +219,10 @@ xtc_lockmgr_id(xtc_lockmgr_t *m, xtc_locker_t *out)
 	r->timeout_ns = -1;
 	r->deadline_ns = -1;
 	b = (int)(r->id & 0xff);
-	(void)pthread_mutex_lock(&m->locker_lock);
+	(void)__xtc_mtx_lock(&m->locker_lock);
 	r->next = m->locker_table[b];
 	m->locker_table[b] = r;
-	(void)pthread_mutex_unlock(&m->locker_lock);
+	(void)__xtc_mtx_unlock(&m->locker_lock);
 	atomic_fetch_add_explicit(&m->n_lockers, 1, memory_order_relaxed);
 	*out = r->id;
 	return XTC_OK;
@@ -232,13 +233,13 @@ xtc_lockmgr_id_set_timeout(xtc_lockmgr_t *m, xtc_locker_t id, int64_t timeout_ns
 {
 	struct locker_rec *r;
 	if (m == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&m->locker_lock);
+	(void)__xtc_mtx_lock(&m->locker_lock);
 	r = __locker_find(m, id);
 	if (r != NULL) {
 		r->timeout_ns = timeout_ns;
 		r->deadline_ns = (timeout_ns < 0) ? -1 : r->ctime_ns + timeout_ns;
 	}
-	(void)pthread_mutex_unlock(&m->locker_lock);
+	(void)__xtc_mtx_unlock(&m->locker_lock);
 	return r ? XTC_OK : XTC_E_INVAL;
 }
 
@@ -250,18 +251,18 @@ xtc_lockmgr_id_free(xtc_lockmgr_t *m, xtc_locker_t id)
 	if (m == NULL) return XTC_E_INVAL;
 	(void)xtc_lock_release_all(m, id);
 	b = (int)(id & 0xff);
-	(void)pthread_mutex_lock(&m->locker_lock);
+	(void)__xtc_mtx_lock(&m->locker_lock);
 	for (link = &m->locker_table[b]; (r = *link) != NULL; link = &r->next) {
 		if (r->id == id) {
 			*link = r->next;
-			(void)pthread_mutex_unlock(&m->locker_lock);
+			(void)__xtc_mtx_unlock(&m->locker_lock);
 			__os_free(r);
 			atomic_fetch_sub_explicit(&m->n_lockers, 1,
 			    memory_order_relaxed);
 			return XTC_OK;
 		}
 	}
-	(void)pthread_mutex_unlock(&m->locker_lock);
+	(void)__xtc_mtx_unlock(&m->locker_lock);
 	return XTC_E_INVAL;
 }
 
@@ -476,9 +477,9 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		o->granted = e;
 		atomic_fetch_add_explicit(&m->n_held, 1, memory_order_relaxed);
 		atomic_fetch_add_explicit(&m->n_acquires, 1, memory_order_relaxed);
-		(void)pthread_mutex_lock(&m->locker_lock);
+		(void)__xtc_mtx_lock(&m->locker_lock);
 		lr = __locker_find(m, locker);
-		(void)pthread_mutex_unlock(&m->locker_lock);
+		(void)__xtc_mtx_unlock(&m->locker_lock);
 		if (lr) {
 			atomic_fetch_add_explicit(&lr->n_held, 1,
 			    memory_order_relaxed);
@@ -505,9 +506,9 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 
 	/* If detect-on-block, kick the detector synchronously. */
 	if (m->opts.detect_mode == XTC_LOCK_DETECT_ON_BLOCK) {
-		(void)pthread_mutex_unlock(&p->lock);
+		(void)__xtc_mtx_unlock(&p->lock);
 		(void)xtc_lockmgr_check_deadlocks(m, NULL);
-		(void)pthread_mutex_lock(&p->lock);
+		(void)__xtc_mtx_lock(&p->lock);
 	}
 
 	rc = XTC_OK;
@@ -554,9 +555,9 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		    memory_order_relaxed);
 		atomic_fetch_add_explicit(&m->n_held, 1, memory_order_relaxed);
 		atomic_fetch_add_explicit(&m->n_acquires, 1, memory_order_relaxed);
-		(void)pthread_mutex_lock(&m->locker_lock);
+		(void)__xtc_mtx_lock(&m->locker_lock);
 		lr = __locker_find(m, locker);
-		(void)pthread_mutex_unlock(&m->locker_lock);
+		(void)__xtc_mtx_unlock(&m->locker_lock);
 		if (lr) {
 			atomic_fetch_add_explicit(&lr->n_held, 1,
 			    memory_order_relaxed);
@@ -585,14 +586,14 @@ xtc_lock_get(xtc_lockmgr_t *m, xtc_locker_t locker,
 
 	h = __hash(obj, obj_size);
 	p = &m->parts[h % (uint32_t)m->n_parts];
-	(void)pthread_mutex_lock(&p->lock);
+	(void)__xtc_mtx_lock(&p->lock);
 	o = __obj_get(m, p, obj, obj_size, h, 1);
 	if (o == NULL) {
-		(void)pthread_mutex_unlock(&p->lock);
+		(void)__xtc_mtx_unlock(&p->lock);
 		return XTC_E_NOMEM;
 	}
 	rc = __do_acquire_locked(m, p, o, locker, mode, timeout_ns);
-	(void)pthread_mutex_unlock(&p->lock);
+	(void)__xtc_mtx_unlock(&p->lock);
 	return rc;
 }
 
@@ -606,9 +607,9 @@ __release_entry_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 	if (e->granted) {
 		atomic_fetch_sub_explicit(&m->n_held, 1, memory_order_relaxed);
 		atomic_fetch_add_explicit(&m->n_releases, 1, memory_order_relaxed);
-		(void)pthread_mutex_lock(&m->locker_lock);
+		(void)__xtc_mtx_lock(&m->locker_lock);
 		lr = __locker_find(m, e->locker);
-		(void)pthread_mutex_unlock(&m->locker_lock);
+		(void)__xtc_mtx_unlock(&m->locker_lock);
 		if (lr) {
 			atomic_fetch_sub_explicit(&lr->n_held, 1,
 			    memory_order_relaxed);
@@ -661,7 +662,7 @@ xtc_lock_put(xtc_lockmgr_t *m, xtc_locker_t locker,
 	if (m == NULL || obj == NULL || obj_size == 0) return XTC_E_INVAL;
 	h = __hash(obj, obj_size);
 	p = &m->parts[h % (uint32_t)m->n_parts];
-	(void)pthread_mutex_lock(&p->lock);
+	(void)__xtc_mtx_lock(&p->lock);
 	o = __obj_lookup(p, obj, obj_size, h);
 	if (o != NULL) {
 		for (e = o->granted; e != NULL; e = e->next) {
@@ -672,7 +673,7 @@ xtc_lock_put(xtc_lockmgr_t *m, xtc_locker_t locker,
 			}
 		}
 	}
-	(void)pthread_mutex_unlock(&p->lock);
+	(void)__xtc_mtx_unlock(&p->lock);
 	return rc;
 }
 
@@ -684,7 +685,7 @@ xtc_lock_release_all(xtc_lockmgr_t *m, xtc_locker_t locker)
 	for (i = 0; i < m->n_parts; i++) {
 		struct lock_partition *p = &m->parts[i];
 		struct lock_obj *o, *no;
-		(void)pthread_mutex_lock(&p->lock);
+		(void)__xtc_mtx_lock(&p->lock);
 		for (o = p->table; o != NULL; o = no) {
 			struct lock_entry *e, *ne;
 			no = o->next;
@@ -710,7 +711,7 @@ xtc_lock_release_all(xtc_lockmgr_t *m, xtc_locker_t locker)
 				}
 			}
 		}
-		(void)pthread_mutex_unlock(&p->lock);
+		(void)__xtc_mtx_unlock(&p->lock);
 	}
 	return rel;
 }
@@ -730,34 +731,34 @@ xtc_lock_upgrade(xtc_lockmgr_t *m, xtc_locker_t locker,
 		return XTC_E_INVAL;
 	h = __hash(obj, obj_size);
 	p = &m->parts[h % (uint32_t)m->n_parts];
-	(void)pthread_mutex_lock(&p->lock);
+	(void)__xtc_mtx_lock(&p->lock);
 	o = __obj_lookup(p, obj, obj_size, h);
 	if (o == NULL) {
-		(void)pthread_mutex_unlock(&p->lock);
+		(void)__xtc_mtx_unlock(&p->lock);
 		return XTC_E_INVAL;
 	}
 	cur = __find_granted(o, locker);
 	if (cur == NULL) {
-		(void)pthread_mutex_unlock(&p->lock);
+		(void)__xtc_mtx_unlock(&p->lock);
 		return XTC_E_INVAL;
 	}
 	if ((int)new_mode <= (int)cur->mode) {
-		(void)pthread_mutex_unlock(&p->lock);
+		(void)__xtc_mtx_unlock(&p->lock);
 		return XTC_E_INVAL;     /* not an upgrade */
 	}
 	/* Check conflicts excluding self. */
 	if (__has_conflict_granted(m, o, locker, new_mode)) {
 		/* Block via the standard wait-queue path. */
 		rc = __do_acquire_locked(m, p, o, locker, new_mode, -1);
-		(void)pthread_mutex_unlock(&p->lock);
+		(void)__xtc_mtx_unlock(&p->lock);
 		return rc;
 	}
 	/* In-place upgrade. */
 	{
 		struct locker_rec *lr;
-		(void)pthread_mutex_lock(&m->locker_lock);
+		(void)__xtc_mtx_lock(&m->locker_lock);
 		lr = __locker_find(m, locker);
-		(void)pthread_mutex_unlock(&m->locker_lock);
+		(void)__xtc_mtx_unlock(&m->locker_lock);
 		if (lr && !__is_write_mode(cur->mode) && __is_write_mode(new_mode))
 			atomic_fetch_add_explicit(&lr->n_write_held, 1,
 			    memory_order_relaxed);
@@ -766,7 +767,7 @@ xtc_lock_upgrade(xtc_lockmgr_t *m, xtc_locker_t locker,
 			    memory_order_relaxed);
 		cur->mode = new_mode;
 	}
-	(void)pthread_mutex_unlock(&p->lock);
+	(void)__xtc_mtx_unlock(&p->lock);
 	return XTC_OK;
 }
 
@@ -785,19 +786,19 @@ xtc_lock_downgrade(xtc_lockmgr_t *m, xtc_locker_t locker,
 		return XTC_E_INVAL;
 	h = __hash(obj, obj_size);
 	p = &m->parts[h % (uint32_t)m->n_parts];
-	(void)pthread_mutex_lock(&p->lock);
+	(void)__xtc_mtx_lock(&p->lock);
 	o = __obj_lookup(p, obj, obj_size, h);
-	if (o == NULL) { (void)pthread_mutex_unlock(&p->lock); return XTC_E_INVAL; }
+	if (o == NULL) { (void)__xtc_mtx_unlock(&p->lock); return XTC_E_INVAL; }
 	cur = __find_granted(o, locker);
-	if (cur == NULL) { (void)pthread_mutex_unlock(&p->lock); return XTC_E_INVAL; }
+	if (cur == NULL) { (void)__xtc_mtx_unlock(&p->lock); return XTC_E_INVAL; }
 	if ((int)new_mode > (int)cur->mode) {
-		(void)pthread_mutex_unlock(&p->lock);
+		(void)__xtc_mtx_unlock(&p->lock);
 		return XTC_E_INVAL;     /* not a downgrade */
 	}
 
-	(void)pthread_mutex_lock(&m->locker_lock);
+	(void)__xtc_mtx_lock(&m->locker_lock);
 	lr = __locker_find(m, locker);
-	(void)pthread_mutex_unlock(&m->locker_lock);
+	(void)__xtc_mtx_unlock(&m->locker_lock);
 	if (lr && __is_write_mode(cur->mode) && !__is_write_mode(new_mode))
 		atomic_fetch_sub_explicit(&lr->n_write_held, 1,
 		    memory_order_relaxed);
@@ -818,7 +819,7 @@ xtc_lock_downgrade(xtc_lockmgr_t *m, xtc_locker_t locker,
 		w->granted = 1;
 		(void)pthread_cond_signal(&w->cv);
 	}
-	(void)pthread_mutex_unlock(&p->lock);
+	(void)__xtc_mtx_unlock(&p->lock);
 	return XTC_OK;
 }
 
@@ -871,10 +872,10 @@ xtc_lockmgr_failchk(xtc_lockmgr_t *m, xtc_locker_t locker)
 {
 	struct locker_rec *r;
 	if (m == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&m->locker_lock);
+	(void)__xtc_mtx_lock(&m->locker_lock);
 	r = __locker_find(m, locker);
 	if (r) atomic_store_explicit(&r->failed, 1, memory_order_release);
-	(void)pthread_mutex_unlock(&m->locker_lock);
+	(void)__xtc_mtx_unlock(&m->locker_lock);
 	if (r) {
 		(void)xtc_lock_release_all(m, locker);
 		return XTC_OK;
@@ -1053,15 +1054,15 @@ xtc_lockmgr_check_deadlocks(xtc_lockmgr_t *m, int *n_aborted)
 	for (i = 0; i < m->n_parts; i++) {
 		struct lock_partition *p = &m->parts[i];
 		struct lock_obj *o;
-		(void)pthread_mutex_lock(&p->lock);
+		(void)__xtc_mtx_lock(&p->lock);
 		for (o = p->table; o != NULL; o = o->next) {
 			struct lock_entry *w, *g;
 			for (w = o->waiting; w != NULL; w = w->next) {
 				struct locker_rec *wl;
 				int from;
-				(void)pthread_mutex_lock(&m->locker_lock);
+				(void)__xtc_mtx_lock(&m->locker_lock);
 				wl = __locker_find(m, w->locker);
-				(void)pthread_mutex_unlock(&m->locker_lock);
+				(void)__xtc_mtx_unlock(&m->locker_lock);
 				from = __dd_node_idx(st, w->locker, wl, now);
 				for (g = o->granted; g != NULL; g = g->next) {
 					struct locker_rec *gl;
@@ -1069,9 +1070,9 @@ xtc_lockmgr_check_deadlocks(xtc_lockmgr_t *m, int *n_aborted)
 					if (g->locker == w->locker) continue;
 					if (!__conflicts(m, g->mode, w->mode))
 						continue;
-					(void)pthread_mutex_lock(&m->locker_lock);
+					(void)__xtc_mtx_lock(&m->locker_lock);
 					gl = __locker_find(m, g->locker);
-					(void)pthread_mutex_unlock(&m->locker_lock);
+					(void)__xtc_mtx_unlock(&m->locker_lock);
 					to = __dd_node_idx(st, g->locker, gl, now);
 					__dd_add_edge(st, from, to);
 				}
@@ -1125,7 +1126,7 @@ xtc_lockmgr_check_deadlocks(xtc_lockmgr_t *m, int *n_aborted)
 	}
 
 	for (i = m->n_parts - 1; i >= 0; i--)
-		(void)pthread_mutex_unlock(&m->parts[i].lock);
+		(void)__xtc_mtx_unlock(&m->parts[i].lock);
 
 	__os_free(parent);
 	__os_free(color);

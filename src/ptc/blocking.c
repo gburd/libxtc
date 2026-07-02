@@ -15,6 +15,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_blocking.h"
 #include "xtc_proc.h"
 #include "xtc_io.h"
@@ -88,13 +89,13 @@ blk_worker(void *unused)
 		struct blk_work *w;
 		int fn_fd, r;
 
-		(void)pthread_mutex_lock(&g_lock);
+		(void)__xtc_mtx_lock(&g_lock);
 		g_idle++;
 		while (g_head == NULL && !g_stopping)
 			(void)pthread_cond_wait(&g_cv, &g_lock);
 		g_idle--;
 		if (g_stopping && g_head == NULL) {
-			(void)pthread_mutex_unlock(&g_lock);
+			(void)__xtc_mtx_unlock(&g_lock);
 			return NULL;
 		}
 		w = g_head;
@@ -102,7 +103,7 @@ blk_worker(void *unused)
 		if (g_head == NULL)
 			g_tail = NULL;
 		g_qlen--;
-		(void)pthread_mutex_unlock(&g_lock);
+		(void)__xtc_mtx_unlock(&g_lock);
 
 		/* Run the user's blocking call on this pool thread. */
 		r = w->fn(w->arg);
@@ -184,14 +185,14 @@ int
 xtc_blocking_pool_size(int nthreads)
 {
 	int rc = XTC_OK;
-	(void)pthread_mutex_lock(&g_lock);
+	(void)__xtc_mtx_lock(&g_lock);
 	if (g_started)
 		rc = XTC_E_INVAL;          /* too late */
 	else if (nthreads >= 1 && nthreads <= BLK_MAX_THREADS)
 		g_nthreads = nthreads;
 	else
 		rc = XTC_E_INVAL;
-	(void)pthread_mutex_unlock(&g_lock);
+	(void)__xtc_mtx_unlock(&g_lock);
 	return rc;
 }
 
@@ -214,9 +215,9 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	if (pipe(pfd) != 0)
 		goto run_sync;
 
-	(void)pthread_mutex_lock(&g_lock);
+	(void)__xtc_mtx_lock(&g_lock);
 	if (blk_start_locked() != 0) {
-		(void)pthread_mutex_unlock(&g_lock);
+		(void)__xtc_mtx_unlock(&g_lock);
 		(void)close(pfd[0]);
 		(void)close(pfd[1]);
 		goto run_sync;
@@ -235,7 +236,7 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	g_qlen++;
 	blk_grow_locked();
 	(void)pthread_cond_signal(&g_cv);
-	(void)pthread_mutex_unlock(&g_lock);
+	(void)__xtc_mtx_unlock(&g_lock);
 
 	/* Park until the worker signals completion. */
 	(void)xtc_proc_wait_fd(pfd[0], XTC_IO_READABLE, -1, &revents);
@@ -288,9 +289,9 @@ xtc_blocking_submit(int (*fn)(void *), void *arg)
 	w->detached = 1;
 	w->next = NULL;
 
-	(void)pthread_mutex_lock(&g_lock);
+	(void)__xtc_mtx_lock(&g_lock);
 	if (blk_start_locked() != 0) {
-		(void)pthread_mutex_unlock(&g_lock);
+		(void)__xtc_mtx_unlock(&g_lock);
 		__os_free(w);
 		return XTC_E_INTERNAL;
 	}
@@ -302,7 +303,7 @@ xtc_blocking_submit(int (*fn)(void *), void *arg)
 	g_qlen++;
 	blk_grow_locked();
 	(void)pthread_cond_signal(&g_cv);
-	(void)pthread_mutex_unlock(&g_lock);
+	(void)__xtc_mtx_unlock(&g_lock);
 	return XTC_OK;
 }
 
@@ -312,9 +313,9 @@ xtc_blocking_shutdown(void)
 	int i, n;
 	__os_thread_t threads[BLK_MAX_THREADS];
 
-	(void)pthread_mutex_lock(&g_lock);
+	(void)__xtc_mtx_lock(&g_lock);
 	if (!g_started) {
-		(void)pthread_mutex_unlock(&g_lock);
+		(void)__xtc_mtx_unlock(&g_lock);
 		return;
 	}
 	g_stopping = 1;
@@ -322,12 +323,12 @@ xtc_blocking_shutdown(void)
 	for (i = 0; i < n; i++)
 		threads[i] = g_threads[i];
 	(void)pthread_cond_broadcast(&g_cv);
-	(void)pthread_mutex_unlock(&g_lock);
+	(void)__xtc_mtx_unlock(&g_lock);
 
 	for (i = 0; i < n; i++)
 		(void)__os_thread_join(&threads[i], NULL);
 
-	(void)pthread_mutex_lock(&g_lock);
+	(void)__xtc_mtx_lock(&g_lock);
 	g_started = 0;
 	g_nstarted = 0;
 	g_stopping = 0;
@@ -335,5 +336,5 @@ xtc_blocking_shutdown(void)
 	g_qlen = 0;
 	/* g_nthreads (user-configured size) is intentionally preserved so a
 	 * later restart honors it; g_max_threads is recomputed on restart. */
-	(void)pthread_mutex_unlock(&g_lock);
+	(void)__xtc_mtx_unlock(&g_lock);
 }
