@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 0.6.0"
+#       --define "version 0.7.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        0.6.0
+Version:        0.7.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,17 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Wed Jul 01 2026 Greg Burd <greg@burd.me> - 0.7.0-1
+- DST toward FoundationDB parity: seeded replayable scheduler over the
+  real multi-loop executor; 20,000-seed soak clean; simulated I/O
+  faults + Buggify + critical-section fault points + latch coverage.
+- Concurrent B-link node merge enabled by default (correct under
+  concurrent latch-free deletes; churn-gone gate + ASan + 32/32 oracle).
+- Cooperative-assisted preemption (xtc_exec_set_preempt + a per-worker
+  CPU-time timer); see docs/M_PREEMPTION.md.
+- Stackless Isolate layer promoted to a supported API (xtc_tnt_*).
+- musl CI qualification (builtin _Unwind_Backtrace, no libunwind);
+  optional DPDK (--with-dpdk); O(1) chained-hash process registry.
 * Thu Jun 25 2026 Greg Burd <greg@burd.me> - 0.6.0-1
 - sqlxtc example is now a fully libxtc-native SQL engine: the vendored
   SQLite (sqlite3.c, VDBE, virtual tables, and the four extension-point
