@@ -11,7 +11,105 @@
 #include "loop_int.h"
 
 #include <stdint.h>
+#include <string.h>
 #include <unistd.h>
+
+/*
+ * Per-loop task-struct free-list -- a plain single-threaded LIFO stack
+ * of recycled task structs, threaded through the task's own q_next
+ * field while it sits on the free list.  A completed PLAIN task on its
+ * home loop is pushed here instead of being freed; the next spawn on
+ * that loop pops it instead of calling malloc.  malloc is only hit to
+ * grow the pool.  This is a deliberate rejection of xtc_slab for this
+ * path: xtc_slab is a shm-capable, chunked, magazine + mutex allocator
+ * (measured ~25x slower than malloc for the task pattern); a bare
+ * per-loop free-list, touched only by the owning loop thread, is
+ * lock-free and beats malloc on the recycle-heavy hot path.
+ *
+ * Ownership: only the HOME loop's thread pushes/pops its free list
+ * (the DONE-handler recycle is gated on t->loop == running loop), so
+ * no synchronization is needed.  A stolen task completing on a thief
+ * is NOT recycled (it is left for loop_fini), keeping this single-
+ * threaded.  The free list is drained (structs __os_free'd) at
+ * loop_fini.
+ */
+
+/* Pop a recycled task struct from the loop's free list, or NULL. */
+static xtc_task_t *
+__task_freelist_pop(xtc_loop_t *loop)
+{
+	xtc_task_t *t = loop->task_free;
+	if (t != NULL) {
+		loop->task_free = t->q_next;
+		loop->task_free_n--;
+	}
+	return t;
+}
+
+/* Allocate a zeroed task struct: reuse a recycled one from the loop's
+ * free list if available, else malloc.  recyclable marks a free-list-
+ * eligible struct (recycle on completion). */
+static int
+__task_alloc(xtc_loop_t *loop, xtc_task_t **out)
+{
+	xtc_task_t *t = NULL;
+	int rc;
+	if (__xtc_current_loop == loop)      /* home thread owns the list */
+		t = __task_freelist_pop(loop);
+	if (t != NULL) {
+		memset(t, 0, sizeof *t);
+		t->recyclable = 1;
+		*out = t;
+		return XTC_OK;
+	}
+	if ((rc = __os_calloc(1, sizeof(*t), (void **)&t)) != XTC_OK)
+		return rc;
+	t->recyclable = 1;   /* freelist-eligible on completion */
+	*out = t;
+	return XTC_OK;
+}
+
+/* A cap so a burst of simultaneously-live tasks that all complete does
+ * not pin unbounded memory on the free list; beyond it, recycled
+ * structs are returned to the OS.  Overridable at build time (set to 0
+ * to disable recycling entirely, e.g. for an A/B measurement). */
+#ifndef XTC_TASK_FREELIST_MAX
+#define XTC_TASK_FREELIST_MAX 4096
+#endif
+
+/*
+ * PUBLIC: void __xtc_task_free __P((xtc_task_t *));
+ *
+ * Reclaim a completed task: unlink it O(1) from its home loop's
+ * all_tasks list and push it onto the loop's task free list for reuse
+ * (or __os_free if the list is full or the struct was a bare alloc).
+ * Called from the loop's DONE handler for plain tasks (cleanup ==
+ * NULL) completing ON THEIR HOME LOOP -- so the free-list push and the
+ * all_tasks unlink are single-threaded (the home loop's thread).
+ */
+void
+__xtc_task_free(xtc_task_t *t)
+{
+	xtc_loop_t *loop;
+	if (t == NULL)
+		return;
+	loop = t->loop;
+	/* Unlink from all_tasks (doubly linked -> O(1)). */
+	if (t->all_prev != NULL)
+		t->all_prev->all_next = t->all_next;
+	else if (loop != NULL && loop->all_tasks == t)
+		loop->all_tasks = t->all_next;
+	if (t->all_next != NULL)
+		t->all_next->all_prev = t->all_prev;
+	if (t->recyclable && loop != NULL &&
+	    loop->task_free_n < XTC_TASK_FREELIST_MAX) {
+		t->q_next = loop->task_free;   /* reuse q_next as free-list link */
+		loop->task_free = t;
+		loop->task_free_n++;
+	} else {
+		__os_free(t);
+	}
+}
 
 /*
  * PUBLIC: int xtc_task_spawn __P((xtc_loop_t *, xtc_task_fn, void *, xtc_task_t **));
@@ -33,7 +131,7 @@ __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 			return rc;
 	}
 
-	if ((rc = __os_calloc(1, sizeof(*t), (void **)&t)) != XTC_OK) {
+	if ((rc = __task_alloc(loop, &t)) != XTC_OK) {
 		if (loop->res != NULL)
 			xtc_res_release(loop->res, XTC_RES_TASKS, 1);
 		return rc;
@@ -52,6 +150,9 @@ __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 
 	if (__xtc_current_loop == loop) {
 		t->all_next = loop->all_tasks;
+		t->all_prev = NULL;
+		if (loop->all_tasks != NULL)
+			loop->all_tasks->all_prev = t;
 		loop->all_tasks = t;
 		atomic_fetch_add_explicit(&loop->n_alive, 1,
 		    memory_order_relaxed);
@@ -64,7 +165,7 @@ __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 		rc = xtc_res_acquire(loop->res, XTC_RES_INBOX_MSGS, 1);
 		if (rc != XTC_OK) {
 			xtc_res_release(loop->res, XTC_RES_TASKS, 1);
-			__os_free(t);
+			__xtc_task_free(t);   /* not yet on all_tasks; slab-aware */
 			if (out_task) *out_task = NULL;
 			return rc;
 		}
@@ -77,7 +178,7 @@ __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 			xtc_res_release(loop->res, XTC_RES_INBOX_MSGS, 1);
 			xtc_res_release(loop->res, XTC_RES_TASKS, 1);
 		}
-		__os_free(t);
+		__xtc_task_free(t);
 		if (out_task) *out_task = NULL;
 		return rc;
 	}

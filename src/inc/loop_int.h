@@ -73,8 +73,18 @@ struct xtc_task {
 	 * (set by the timer callback). */
 	uint32_t     wake_revents;
 
-	/* Linked into loop->all_tasks for cleanup at loop_fini. */
+	/* Doubly linked into loop->all_tasks so a completed task can be
+	 * unlinked in O(1) and recycled to the loop's task_slab (instead of
+	 * lingering until loop_fini).  all_prev == NULL means the head. */
 	struct xtc_task *all_next;
+	struct xtc_task *all_prev;
+
+	/* 1 if this task struct is eligible to be recycled onto the loop's
+	 * task free-list when it completes (a plain task on its home loop);
+	 * cleared for tasks that must not be recycled.  All task structs
+	 * are __os_calloc'd regardless -- this only gates the free-list
+	 * push, not the allocation source. */
+	int              recyclable;
 
 	/* Optional cleanup hook invoked by xtc_loop_fini before the task
 	 * struct is freed.  The coroutine layer sets this to release the
@@ -152,6 +162,16 @@ struct xtc_loop {
 	 * by xtc_timer_set; freed in loop_fini.  Per-loop = single-
 	 * threaded ownership = magazine fast path is lock-free. */
 	struct xtc_slab *timer_slab;
+
+	/* Per-loop task-struct free-list: a plain single-threaded LIFO of
+	 * recycled task structs (linked through their q_next while free).
+	 * xtc_task_spawn pops from it instead of malloc'ing, and a
+	 * completed plain task on its home loop is pushed back instead of
+	 * freed -- the spawn-heavy hot path, with no allocator call and no
+	 * accumulation.  Only the owning loop thread touches it, so it is
+	 * lock-free.  Drained (structs __os_free'd) at loop_fini. */
+	struct xtc_task *task_free;
+	int              task_free_n;
 
 	/* Live-task counter.  Atomic so cross-thread spawns/completions
 	 * can update it without lock. */

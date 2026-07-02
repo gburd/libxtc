@@ -52,6 +52,7 @@ uint64_t __xtc_sim_rng_range __P((int, uint64_t));
 uint64_t xtc_sim_fault_point_fires __P((const char *));
 uint64_t xtc_sim_state_hash __P((xtc_exec_t *));
 uint64_t xtc_yield_due_count __P((const xtc_loop_t *));
+void __xtc_task_free __P((xtc_task_t *));
 void xtc_exec_set_service_mode __P((xtc_exec_t *, int));
 void xtc_sim_activate __P((uint64_t));
 void xtc_sim_buggify_disable __P((void));

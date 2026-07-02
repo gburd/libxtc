@@ -155,6 +155,65 @@ test_n_tasks_independent(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [Ts7] Completed plain tasks are recycled, not accumulated.  A
+ * long-lived loop that spawns far more tasks than are ever concurrently
+ * live must not grow its memory without bound -- before the per-loop
+ * task free-list, every DONE task lingered in all_tasks until
+ * loop_fini, so a churning loop leaked ~1GB per 8M tasks.  This asserts
+ * the process RSS stays bounded across a large churn (steady-state
+ * width WIDTH, RECYCLE_N total retirements).
+ */
+#include <sys/resource.h>
+#define TS7_WIDTH    128
+#define TS7_TOTAL    600000L
+static xtc_loop_t *ts7_loop;
+static long ts7_owed;
+static long ts7_done;
+static int ts7_leaf(xtc_task_t *s, void *u) {
+	(void)s; (void)u;
+	ts7_done++;
+	if (--ts7_owed > TS7_WIDTH)
+		(void)xtc_task_spawn(ts7_loop, ts7_leaf, NULL, NULL);
+	return XTC_TASK_DONE;
+}
+static long ru_maxrss_kb(void) {
+	struct rusage r;
+	getrusage(RUSAGE_SELF, &r);
+	return (long)r.ru_maxrss;   /* Linux: KB */
+}
+static MunitResult
+test_recycle_bounded(const MunitParameter p[], void *d)
+{
+	long before, after, grew;
+	int i;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&ts7_loop), ==, XTC_OK);
+	ts7_owed = TS7_TOTAL;
+	ts7_done = 0;
+	before = ru_maxrss_kb();
+	for (i = 0; i < TS7_WIDTH; i++)
+		munit_assert_int(xtc_task_spawn(ts7_loop, ts7_leaf, NULL, NULL),
+		    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(ts7_loop), ==, XTC_OK);
+	after = ru_maxrss_kb();
+	munit_assert_long(ts7_done, >=, TS7_TOTAL - TS7_WIDTH);
+#if defined(__linux__)
+	/* Without recycling, ~600k lingering tasks would add tens of MB;
+	 * with the free-list the growth stays a few MB (bounded by
+	 * WIDTH + freelist cap).  Allow 32 MB of slack for allocator
+	 * arenas / RSS granularity while still catching linear growth.
+	 * ru_maxrss is KB on Linux; other platforms use different units,
+	 * so this footprint bound is Linux-only. */
+	grew = after - before;
+	munit_assert_long(grew, <, 32 * 1024);
+#else
+	(void)before; (void)after; (void)grew;
+#endif
+	munit_assert_int(xtc_loop_fini(ts7_loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Ts1_bad_args",          test_spawn_bad_args,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ts2_user_pointer",      test_user_pointer,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -162,6 +221,7 @@ static MunitTest tests[] = {
 	{ "/Ts4_resched_loops",     test_resched_loops,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ts5_spawn_inside",      test_spawn_inside_task,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ts6_independent",       test_n_tasks_independent,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Ts7_recycle_bounded",   test_recycle_bounded,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m3/task", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
