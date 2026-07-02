@@ -14,6 +14,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_reg.h"
 
 #include <pthread.h>
@@ -115,7 +116,7 @@ xtc_reg_register(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 	if (r == NULL || name == NULL) return XTC_E_INVAL;
 	h = __reg_hash(name);
 	b = h & (REG_NBUCKETS - 1);
-	(void)pthread_mutex_lock(&r->lock);
+	(void)__xtc_mtx_lock(&r->lock);
 	if (__reg_find_locked(r, name, h) != NULL) { rc = XTC_E_INVAL; goto out; }
 	if ((rc = __os_calloc(1, sizeof *node, (void **)&node)) != XTC_OK)
 		goto out;
@@ -129,7 +130,7 @@ xtc_reg_register(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 	r->buckets[b] = node;
 	r->n++;
 out:
-	(void)pthread_mutex_unlock(&r->lock);
+	(void)__xtc_mtx_unlock(&r->lock);
 	return rc;
 }
 
@@ -141,7 +142,7 @@ xtc_reg_unregister(xtc_reg_t *r, const char *name)
 	int rc = XTC_E_INVAL;
 	if (r == NULL || name == NULL) return XTC_E_INVAL;
 	h = __reg_hash(name);
-	(void)pthread_mutex_lock(&r->lock);
+	(void)__xtc_mtx_lock(&r->lock);
 	for (link = &r->buckets[h & (REG_NBUCKETS - 1)]; (node = *link) != NULL;
 	    link = &node->next) {
 		if (node->hash == h && strcmp(node->name, name) == 0) {
@@ -153,7 +154,7 @@ xtc_reg_unregister(xtc_reg_t *r, const char *name)
 			break;
 		}
 	}
-	(void)pthread_mutex_unlock(&r->lock);
+	(void)__xtc_mtx_unlock(&r->lock);
 	return rc;
 }
 
@@ -163,13 +164,13 @@ xtc_reg_whereis(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid)
 	struct reg_node *node;
 	int rc = XTC_E_INVAL;
 	if (r == NULL || name == NULL || out_pid == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&r->lock);
+	(void)__xtc_mtx_lock(&r->lock);
 	node = __reg_find_locked(r, name, __reg_hash(name));
 	if (node != NULL) {
 		*out_pid = node->pid;
 		rc = XTC_OK;
 	}
-	(void)pthread_mutex_unlock(&r->lock);
+	(void)__xtc_mtx_unlock(&r->lock);
 	return rc;
 }
 
@@ -178,8 +179,8 @@ xtc_reg_count(const xtc_reg_t *r)
 {
 	int n;
 	if (r == NULL) return 0;
-	(void)pthread_mutex_lock((pthread_mutex_t *)&r->lock);
+	(void)__xtc_mtx_lock((pthread_mutex_t *)&r->lock);
 	n = r->n;
-	(void)pthread_mutex_unlock((pthread_mutex_t *)&r->lock);
+	(void)__xtc_mtx_unlock((pthread_mutex_t *)&r->lock);
 	return n;
 }

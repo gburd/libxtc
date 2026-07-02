@@ -16,6 +16,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_mctx.h"
 
 #include <pthread.h>
@@ -61,12 +62,12 @@ struct xtc_mctx {
 static void
 __lock(xtc_mctx_t *m)
 {
-	if (m->has_lock) (void)pthread_mutex_lock(&m->lock);
+	if (m->has_lock) (void)__xtc_mtx_lock(&m->lock);
 }
 static void
 __unlock(xtc_mctx_t *m)
 {
-	if (m->has_lock) (void)pthread_mutex_unlock(&m->lock);
+	if (m->has_lock) (void)__xtc_mtx_unlock(&m->lock);
 }
 
 /* ----- create / destroy ------------------------------------------ */
@@ -285,9 +286,9 @@ xtc_mctx_total_bytes(const xtc_mctx_t *m)
 {
 	size_t v;
 	if (m == NULL) return 0;
-	if (m->has_lock) (void)pthread_mutex_lock((pthread_mutex_t *)&m->lock);
+	if (m->has_lock) (void)__xtc_mtx_lock((pthread_mutex_t *)&m->lock);
 	v = m->n_bytes;
-	if (m->has_lock) (void)pthread_mutex_unlock((pthread_mutex_t *)&m->lock);
+	if (m->has_lock) (void)__xtc_mtx_unlock((pthread_mutex_t *)&m->lock);
 	return v;
 }
 
@@ -296,8 +297,8 @@ xtc_mctx_total_chunks(const xtc_mctx_t *m)
 {
 	size_t v;
 	if (m == NULL) return 0;
-	if (m->has_lock) (void)pthread_mutex_lock((pthread_mutex_t *)&m->lock);
+	if (m->has_lock) (void)__xtc_mtx_lock((pthread_mutex_t *)&m->lock);
 	v = m->n_chunks;
-	if (m->has_lock) (void)pthread_mutex_unlock((pthread_mutex_t *)&m->lock);
+	if (m->has_lock) (void)__xtc_mtx_unlock((pthread_mutex_t *)&m->lock);
 	return v;
 }

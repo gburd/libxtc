@@ -26,6 +26,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_svr.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"
@@ -336,7 +337,7 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 				}
 			}
 		}
-		(void)pthread_mutex_lock(&slot.lock);
+		(void)__xtc_mtx_lock(&slot.lock);
 		if (rc == XTC_OK) {
 			rc = slot.rc;
 			if (rc == XTC_OK) {
@@ -346,7 +347,7 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 				if (slot.data) free(slot.data);
 			}
 		}
-		(void)pthread_mutex_unlock(&slot.lock);
+		(void)__xtc_mtx_unlock(&slot.lock);
 		xtc_notify_destroy(slot.done);
 		(void)pthread_mutex_destroy(&slot.lock);
 		return rc;
@@ -404,12 +405,12 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 			if (copy == NULL) return XTC_E_NOMEM;
 			memcpy(copy, reply, size);
 		}
-		(void)pthread_mutex_lock(&slot->lock);
+		(void)__xtc_mtx_lock(&slot->lock);
 		slot->data = copy;
 		slot->size = size;
 		slot->rc   = XTC_OK;
 		(void)xtc_notify_signal(slot->done);
-		(void)pthread_mutex_unlock(&slot->lock);
+		(void)__xtc_mtx_unlock(&slot->lock);
 		rc = XTC_OK;
 	} else if (!xtc_pid_is_none(call->reply_pid)) {
 		/* Encode reply for in-proc caller: tag (4 bytes) + payload. */

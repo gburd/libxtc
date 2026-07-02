@@ -12,6 +12,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_sync.h"
 #include "xtc_proc.h"
 #include "loop_int.h"
@@ -91,10 +92,10 @@ int
 xtc_notify_signal(xtc_notify_t *n)
 {
 	if (n == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&n->lock);
+	(void)__xtc_mtx_lock(&n->lock);
 	n->stored = 1;
 	(void)pthread_cond_broadcast(&n->cv);
-	(void)pthread_mutex_unlock(&n->lock);
+	(void)__xtc_mtx_unlock(&n->lock);
 	return XTC_OK;
 }
 
@@ -103,14 +104,14 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 {
 	int rc = XTC_OK;
 	if (n == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&n->lock);
+	(void)__xtc_mtx_lock(&n->lock);
 	if (n->stored) {
 		n->stored = 0;
-		(void)pthread_mutex_unlock(&n->lock);
+		(void)__xtc_mtx_unlock(&n->lock);
 		return XTC_OK;
 	}
 	if (timeout_ns == 0) {
-		(void)pthread_mutex_unlock(&n->lock);
+		(void)__xtc_mtx_unlock(&n->lock);
 		return XTC_E_AGAIN;
 	}
 	if (timeout_ns < 0) {
@@ -128,7 +129,7 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 		}
 		if (n->stored) { n->stored = 0; rc = XTC_OK; }
 	}
-	(void)pthread_mutex_unlock(&n->lock);
+	(void)__xtc_mtx_unlock(&n->lock);
 	return rc;
 }
 
@@ -168,10 +169,10 @@ int
 xtc_sem_post(xtc_sem_t *s, unsigned n)
 {
 	if (s == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&s->lock);
+	(void)__xtc_mtx_lock(&s->lock);
 	s->count += n;
 	(void)pthread_cond_broadcast(&s->cv);
-	(void)pthread_mutex_unlock(&s->lock);
+	(void)__xtc_mtx_unlock(&s->lock);
 	return XTC_OK;
 }
 
@@ -180,9 +181,9 @@ xtc_sem_try_acquire(xtc_sem_t *s, unsigned n)
 {
 	int rc = XTC_E_AGAIN;
 	if (s == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&s->lock);
+	(void)__xtc_mtx_lock(&s->lock);
 	if (s->count >= n) { s->count -= n; rc = XTC_OK; }
-	(void)pthread_mutex_unlock(&s->lock);
+	(void)__xtc_mtx_unlock(&s->lock);
 	return rc;
 }
 
@@ -191,7 +192,7 @@ xtc_sem_acquire(xtc_sem_t *s, unsigned n, int64_t timeout_ns)
 {
 	int rc = XTC_OK;
 	if (s == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&s->lock);
+	(void)__xtc_mtx_lock(&s->lock);
 	if (timeout_ns == 0) {
 		if (s->count < n) { rc = XTC_E_AGAIN; goto out; }
 		s->count -= n;
@@ -213,7 +214,7 @@ xtc_sem_acquire(xtc_sem_t *s, unsigned n, int64_t timeout_ns)
 		s->count -= n;
 	}
 out:
-	(void)pthread_mutex_unlock(&s->lock);
+	(void)__xtc_mtx_unlock(&s->lock);
 	return rc;
 }
 
@@ -222,9 +223,9 @@ xtc_sem_count(const xtc_sem_t *s)
 {
 	int v;
 	if (s == NULL) return 0;
-	(void)pthread_mutex_lock((pthread_mutex_t *)&s->lock);
+	(void)__xtc_mtx_lock((pthread_mutex_t *)&s->lock);
 	v = (int)s->count;
-	(void)pthread_mutex_unlock((pthread_mutex_t *)&s->lock);
+	(void)__xtc_mtx_unlock((pthread_mutex_t *)&s->lock);
 	return v;
 }
 
@@ -375,7 +376,7 @@ xtc_amutex_static(unsigned slot)
 {
 	xtc_amutex_t *m;
 	if (slot >= XTC_AMUTEX_STATIC_MAX) return NULL;
-	(void)pthread_mutex_lock(&g_static_amutex_lock);
+	(void)__xtc_mtx_lock(&g_static_amutex_lock);
 	m = g_static_amutex[slot];
 	if (m == NULL) {
 		if (xtc_amutex_create_ex(&m, XTC_AMUTEX_RECURSIVE) == XTC_OK)
@@ -383,7 +384,7 @@ xtc_amutex_static(unsigned slot)
 		else
 			m = NULL;
 	}
-	(void)pthread_mutex_unlock(&g_static_amutex_lock);
+	(void)__xtc_mtx_unlock(&g_static_amutex_lock);
 	return m;
 }
 
@@ -401,7 +402,7 @@ xtc_amutex_try_lock(xtc_amutex_t *m)
 {
 	int rc = XTC_E_AGAIN;
 	if (m == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&m->lock);
+	(void)__xtc_mtx_lock(&m->lock);
 	if (m->recursive) {
 		struct amutex_owner self = amutex_self_owner();
 		if (m->held && amutex_owner_eq(&m->owner, &self)) {
@@ -417,7 +418,7 @@ xtc_amutex_try_lock(xtc_amutex_t *m)
 		m->held = 1;
 		rc = XTC_OK;
 	}
-	(void)pthread_mutex_unlock(&m->lock);
+	(void)__xtc_mtx_unlock(&m->lock);
 	return rc;
 }
 
@@ -468,28 +469,28 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 
 	if (m == NULL) return XTC_E_INVAL;
 
-	(void)pthread_mutex_lock(&m->lock);
+	(void)__xtc_mtx_lock(&m->lock);
 	if (m->recursive) {
 		struct amutex_owner self = amutex_self_owner();
 		if (m->held && amutex_owner_eq(&m->owner, &self)) {
 			m->count++;                 /* recursive re-entry */
-			(void)pthread_mutex_unlock(&m->lock);
+			(void)__xtc_mtx_unlock(&m->lock);
 			return XTC_OK;
 		}
 		if (!m->held) {
 			m->held = 1;
 			m->owner = self;
 			m->count = 1;
-			(void)pthread_mutex_unlock(&m->lock);
+			(void)__xtc_mtx_unlock(&m->lock);
 			return XTC_OK;
 		}
 	} else if (!m->held) {
 		m->held = 1;
-		(void)pthread_mutex_unlock(&m->lock);
+		(void)__xtc_mtx_unlock(&m->lock);
 		return XTC_OK;
 	}
 	if (timeout_ns == 0) {
-		(void)pthread_mutex_unlock(&m->lock);
+		(void)__xtc_mtx_unlock(&m->lock);
 		return XTC_E_AGAIN;
 	}
 
@@ -497,7 +498,7 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 	if (cur == NULL) {
 		/* Not on a loop: block the thread on the condvar. */
 		int rc = __amutex_lock_thread(m, timeout_ns);
-		(void)pthread_mutex_unlock(&m->lock);
+		(void)__xtc_mtx_unlock(&m->lock);
 		return rc;
 	}
 
@@ -508,7 +509,7 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 	if (m->wq_tail != NULL) m->wq_tail->next = &w;
 	else m->wq_head = &w;
 	m->wq_tail = &w;
-	(void)pthread_mutex_unlock(&m->lock);
+	(void)__xtc_mtx_unlock(&m->lock);
 
 	if (timeout_ns > 0) {
 		int64_t now;
@@ -523,17 +524,17 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 		if (deadline >= 0) {
 			(void)__os_clock_mono(&now);
 			if (now >= deadline) {
-				(void)pthread_mutex_lock(&m->lock);
+				(void)__xtc_mtx_lock(&m->lock);
 				if (w.granted) {
 					if (m->recursive) {
 						m->owner = amutex_self_owner();
 						m->count = 1;
 					}
-					(void)pthread_mutex_unlock(&m->lock);
+					(void)__xtc_mtx_unlock(&m->lock);
 					return XTC_OK;   /* raced with grant */
 				}
 				__amutex_wq_remove(m, &w);
-				(void)pthread_mutex_unlock(&m->lock);
+				(void)__xtc_mtx_unlock(&m->lock);
 				return XTC_E_AGAIN;
 			}
 			(void)xtc_task_park_on_timer(cur, deadline - now);
@@ -545,16 +546,16 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 		xtc_yield();
 		__xtc_proc_ctx_restore(proc_ctx);
 
-		(void)pthread_mutex_lock(&m->lock);
+		(void)__xtc_mtx_lock(&m->lock);
 		if (w.granted) {
 			if (m->recursive) {
 				m->owner = amutex_self_owner();
 				m->count = 1;
 			}
-			(void)pthread_mutex_unlock(&m->lock);
+			(void)__xtc_mtx_unlock(&m->lock);
 			return XTC_OK;
 		}
-		(void)pthread_mutex_unlock(&m->lock);
+		(void)__xtc_mtx_unlock(&m->lock);
 		/* Spurious / timer wake without grant: loop and re-park. */
 	}
 }
@@ -564,11 +565,11 @@ xtc_amutex_unlock(xtc_amutex_t *m)
 {
 	struct amutex_waiter *w = NULL;
 	if (m == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&m->lock);
+	(void)__xtc_mtx_lock(&m->lock);
 	if (m->recursive) {
 		if (m->count > 1) {
 			m->count--;            /* still held by this owner */
-			(void)pthread_mutex_unlock(&m->lock);
+			(void)__xtc_mtx_unlock(&m->lock);
 			return XTC_OK;
 		}
 		m->count = 0;
@@ -586,7 +587,7 @@ xtc_amutex_unlock(xtc_amutex_t *m)
 		m->held = 0;
 		(void)pthread_cond_signal(&m->cv);
 	}
-	(void)pthread_mutex_unlock(&m->lock);
+	(void)__xtc_mtx_unlock(&m->lock);
 	if (w != NULL)
 		(void)xtc_waker_wake(&w->waker);
 	return XTC_OK;
@@ -711,15 +712,15 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 
 	if (r == NULL) return XTC_E_INVAL;
 
-	(void)pthread_mutex_lock(&r->lock);
+	(void)__xtc_mtx_lock(&r->lock);
 	/* Fast path: compatible AND nobody queued ahead (FIFO fairness). */
 	if (r->wq_head == NULL && __arw_compatible(r, mode)) {
 		if (mode == ARW_EXCL) r->writer = 1; else r->readers++;
-		(void)pthread_mutex_unlock(&r->lock);
+		(void)__xtc_mtx_unlock(&r->lock);
 		return XTC_OK;
 	}
 	if (timeout_ns == 0) {
-		(void)pthread_mutex_unlock(&r->lock);
+		(void)__xtc_mtx_unlock(&r->lock);
 		return XTC_E_AGAIN;
 	}
 
@@ -744,7 +745,7 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 			if (mode == ARW_EXCL) r->writer = 1; else r->readers++;
 		}
 		r->cv_waiters--;
-		(void)pthread_mutex_unlock(&r->lock);
+		(void)__xtc_mtx_unlock(&r->lock);
 		return rc;
 	}
 
@@ -756,7 +757,7 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 	if (r->wq_tail != NULL) r->wq_tail->next = &w;
 	else r->wq_head = &w;
 	r->wq_tail = &w;
-	(void)pthread_mutex_unlock(&r->lock);
+	(void)__xtc_mtx_unlock(&r->lock);
 
 	if (timeout_ns > 0) {
 		int64_t now;
@@ -768,8 +769,8 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 		if (deadline >= 0) {
 			(void)__os_clock_mono(&now);
 			if (now >= deadline) {
-				(void)pthread_mutex_lock(&r->lock);
-				if (w.granted) { (void)pthread_mutex_unlock(&r->lock); return XTC_OK; }
+				(void)__xtc_mtx_lock(&r->lock);
+				if (w.granted) { (void)__xtc_mtx_unlock(&r->lock); return XTC_OK; }
 				__arw_wq_remove(r, &w);
 				/* Removing us may unblock waiters behind us. */
 				{
@@ -779,7 +780,7 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 						(void)xtc_waker_wake(&woke->waker);
 						woke = n;
 					}
-					(void)pthread_mutex_unlock(&r->lock);
+					(void)__xtc_mtx_unlock(&r->lock);
 				}
 				return XTC_E_AGAIN;
 			}
@@ -791,9 +792,9 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 		xtc_yield();
 		__xtc_proc_ctx_restore(proc_ctx);
 
-		(void)pthread_mutex_lock(&r->lock);
-		if (w.granted) { (void)pthread_mutex_unlock(&r->lock); return XTC_OK; }
-		(void)pthread_mutex_unlock(&r->lock);
+		(void)__xtc_mtx_lock(&r->lock);
+		if (w.granted) { (void)__xtc_mtx_unlock(&r->lock); return XTC_OK; }
+		(void)__xtc_mtx_unlock(&r->lock);
 	}
 }
 
@@ -814,7 +815,7 @@ xtc_arwlock_unlock(xtc_arwlock_t *r)
 {
 	struct arwlock_waiter *woke;
 	if (r == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&r->lock);
+	(void)__xtc_mtx_lock(&r->lock);
 	if (r->writer) r->writer = 0;
 	else if (r->readers > 0) r->readers--;
 	woke = __arw_grant_locked(r);
@@ -833,7 +834,7 @@ xtc_arwlock_unlock(xtc_arwlock_t *r)
 		(void)xtc_waker_wake(&woke->waker);
 		woke = n;
 	}
-	(void)pthread_mutex_unlock(&r->lock);
+	(void)__xtc_mtx_unlock(&r->lock);
 	return XTC_OK;
 }
 
@@ -901,10 +902,10 @@ xtc_rwlock_rdlock(xtc_rwlock_t *r, int64_t timeout_ns)
 {
 	int rc;
 	if (r == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&r->lock);
+	(void)__xtc_mtx_lock(&r->lock);
 	rc = __rwlock_wait(r, timeout_ns, __rd_ready);
 	if (rc == XTC_OK) r->readers++;
-	(void)pthread_mutex_unlock(&r->lock);
+	(void)__xtc_mtx_unlock(&r->lock);
 	return rc;
 }
 
@@ -913,13 +914,13 @@ xtc_rwlock_wrlock(xtc_rwlock_t *r, int64_t timeout_ns)
 {
 	int rc;
 	if (r == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&r->lock);
+	(void)__xtc_mtx_lock(&r->lock);
 	r->waiting_writers++;
 	rc = __rwlock_wait(r, timeout_ns, __wr_ready);
 	r->waiting_writers--;
 	if (rc == XTC_OK) r->writer = 1;
 	else (void)pthread_cond_broadcast(&r->cv); /* let other readers in */
-	(void)pthread_mutex_unlock(&r->lock);
+	(void)__xtc_mtx_unlock(&r->lock);
 	return rc;
 }
 
@@ -927,11 +928,11 @@ int
 xtc_rwlock_unlock(xtc_rwlock_t *r)
 {
 	if (r == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&r->lock);
+	(void)__xtc_mtx_lock(&r->lock);
 	if (r->writer) r->writer = 0;
 	else if (r->readers > 0) r->readers--;
 	(void)pthread_cond_broadcast(&r->cv);
-	(void)pthread_mutex_unlock(&r->lock);
+	(void)__xtc_mtx_unlock(&r->lock);
 	return XTC_OK;
 }
 
@@ -973,7 +974,7 @@ xtc_barrier_wait(xtc_barrier_t *b)
 {
 	unsigned gen;
 	if (b == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&b->lock);
+	(void)__xtc_mtx_lock(&b->lock);
 	gen = b->generation;
 	b->arrived++;
 	if (b->arrived == b->target) {
@@ -984,7 +985,7 @@ xtc_barrier_wait(xtc_barrier_t *b)
 		while (gen == b->generation)
 			(void)pthread_cond_wait(&b->cv, &b->lock);
 	}
-	(void)pthread_mutex_unlock(&b->lock);
+	(void)__xtc_mtx_unlock(&b->lock);
 	return XTC_OK;
 }
 
@@ -1024,10 +1025,10 @@ xtc_gate_enter(xtc_gate_t *g)
 {
 	int rc = XTC_OK;
 	if (g == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&g->lock);
+	(void)__xtc_mtx_lock(&g->lock);
 	if (g->closed) rc = XTC_E_INVAL;
 	else g->count++;
-	(void)pthread_mutex_unlock(&g->lock);
+	(void)__xtc_mtx_unlock(&g->lock);
 	return rc;
 }
 
@@ -1035,11 +1036,11 @@ int
 xtc_gate_leave(xtc_gate_t *g)
 {
 	if (g == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&g->lock);
+	(void)__xtc_mtx_lock(&g->lock);
 	if (g->count > 0) g->count--;
 	if (g->closed && g->count == 0)
 		(void)pthread_cond_broadcast(&g->cv);
-	(void)pthread_mutex_unlock(&g->lock);
+	(void)__xtc_mtx_unlock(&g->lock);
 	return XTC_OK;
 }
 
@@ -1047,10 +1048,10 @@ int
 xtc_gate_close(xtc_gate_t *g)
 {
 	if (g == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&g->lock);
+	(void)__xtc_mtx_lock(&g->lock);
 	g->closed = 1;
 	(void)pthread_cond_broadcast(&g->cv);
-	(void)pthread_mutex_unlock(&g->lock);
+	(void)__xtc_mtx_unlock(&g->lock);
 	return XTC_OK;
 }
 
@@ -1059,7 +1060,7 @@ xtc_gate_drain(xtc_gate_t *g, int64_t timeout_ns)
 {
 	int rc = XTC_OK;
 	if (g == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&g->lock);
+	(void)__xtc_mtx_lock(&g->lock);
 	if (timeout_ns < 0) {
 		while (g->count > 0)
 			(void)pthread_cond_wait(&g->cv, &g->lock);
@@ -1074,7 +1075,7 @@ xtc_gate_drain(xtc_gate_t *g, int64_t timeout_ns)
 			}
 		}
 	}
-	(void)pthread_mutex_unlock(&g->lock);
+	(void)__xtc_mtx_unlock(&g->lock);
 	return rc;
 }
 
@@ -1083,8 +1084,8 @@ xtc_gate_count(const xtc_gate_t *g)
 {
 	int v;
 	if (g == NULL) return 0;
-	(void)pthread_mutex_lock((pthread_mutex_t *)&g->lock);
+	(void)__xtc_mtx_lock((pthread_mutex_t *)&g->lock);
 	v = g->count;
-	(void)pthread_mutex_unlock((pthread_mutex_t *)&g->lock);
+	(void)__xtc_mtx_unlock((pthread_mutex_t *)&g->lock);
 	return v;
 }

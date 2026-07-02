@@ -14,6 +14,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_alloc_audit.h"
 #include "os_alloc.h"
 #include "xtc_proc.h"
@@ -92,58 +93,58 @@ static void *
 __a_malloc(size_t sz)
 {
 	void *p;
-	(void)pthread_mutex_lock(&g_mu);
+	(void)__xtc_mtx_lock(&g_mu);
 	p = g_down.malloc(sz);
 	if (p != NULL) __rec_insert(p, sz);
-	(void)pthread_mutex_unlock(&g_mu);
+	(void)__xtc_mtx_unlock(&g_mu);
 	return p;
 }
 static void *
 __a_calloc(size_t n, size_t sz)
 {
 	void *p;
-	(void)pthread_mutex_lock(&g_mu);
+	(void)__xtc_mtx_lock(&g_mu);
 	p = g_down.calloc(n, sz);
 	if (p != NULL) __rec_insert(p, n * sz);
-	(void)pthread_mutex_unlock(&g_mu);
+	(void)__xtc_mtx_unlock(&g_mu);
 	return p;
 }
 static void *
 __a_realloc(void *p, size_t sz)
 {
 	void *np;
-	(void)pthread_mutex_lock(&g_mu);
+	(void)__xtc_mtx_lock(&g_mu);
 	if (p != NULL) (void)__rec_remove(p);
 	np = g_down.realloc(p, sz);
 	if (np != NULL) __rec_insert(np, sz);
-	(void)pthread_mutex_unlock(&g_mu);
+	(void)__xtc_mtx_unlock(&g_mu);
 	return np;
 }
 static void
 __a_free(void *p)
 {
-	(void)pthread_mutex_lock(&g_mu);
+	(void)__xtc_mtx_lock(&g_mu);
 	(void)__rec_remove(p);
 	g_down.free(p);
-	(void)pthread_mutex_unlock(&g_mu);
+	(void)__xtc_mtx_unlock(&g_mu);
 }
 static void *
 __a_aligned(size_t align, size_t sz)
 {
 	void *p;
-	(void)pthread_mutex_lock(&g_mu);
+	(void)__xtc_mtx_lock(&g_mu);
 	p = g_down.aligned(align, sz);
 	if (p != NULL) __rec_insert(p, sz);
-	(void)pthread_mutex_unlock(&g_mu);
+	(void)__xtc_mtx_unlock(&g_mu);
 	return p;
 }
 static void
 __a_aligned_free(void *p)
 {
-	(void)pthread_mutex_lock(&g_mu);
+	(void)__xtc_mtx_lock(&g_mu);
 	(void)__rec_remove(p);
 	g_down.aligned_free(p);
-	(void)pthread_mutex_unlock(&g_mu);
+	(void)__xtc_mtx_unlock(&g_mu);
 }
 
 static const struct __os_alloc_hook g_audit_hook = {
@@ -156,7 +157,7 @@ int
 xtc_alloc_audit_enable(int on)
 {
 	int rc = XTC_OK;
-	(void)pthread_mutex_lock(&g_mu);
+	(void)__xtc_mtx_lock(&g_mu);
 	if (on && !g_on) {
 		(void)__os_alloc_get_hook(&g_down);   /* downstream */
 		g_buckets = g_down.calloc(AUDIT_BUCKETS, sizeof *g_buckets);
@@ -177,7 +178,7 @@ xtc_alloc_audit_enable(int on)
 		g_on = 0;
 	}
 out:
-	(void)pthread_mutex_unlock(&g_mu);
+	(void)__xtc_mtx_unlock(&g_mu);
 	return rc;
 }
 
@@ -185,10 +186,10 @@ out:
 void
 xtc_alloc_audit_stats(size_t *out_count, size_t *out_bytes)
 {
-	(void)pthread_mutex_lock(&g_mu);
+	(void)__xtc_mtx_lock(&g_mu);
 	if (out_count != NULL) *out_count = g_live;
 	if (out_bytes != NULL) *out_bytes = g_live_bytes;
-	(void)pthread_mutex_unlock(&g_mu);
+	(void)__xtc_mtx_unlock(&g_mu);
 }
 
 /* PUBLIC: void xtc_alloc_audit_proc_leaks __P((xtc_pid_t, size_t *, size_t *)); */
@@ -196,7 +197,7 @@ void
 xtc_alloc_audit_proc_leaks(xtc_pid_t pid, size_t *out_count, size_t *out_bytes)
 {
 	size_t b, cnt = 0, bytes = 0;
-	(void)pthread_mutex_lock(&g_mu);
+	(void)__xtc_mtx_lock(&g_mu);
 	if (g_on) {
 		for (b = 0; b < AUDIT_BUCKETS; b++) {
 			struct rec *r;
@@ -208,7 +209,7 @@ xtc_alloc_audit_proc_leaks(xtc_pid_t pid, size_t *out_count, size_t *out_bytes)
 			}
 		}
 	}
-	(void)pthread_mutex_unlock(&g_mu);
+	(void)__xtc_mtx_unlock(&g_mu);
 	if (out_count != NULL) *out_count = cnt;
 	if (out_bytes != NULL) *out_bytes = bytes;
 }

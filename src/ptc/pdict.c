@@ -18,6 +18,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_pdict.h"
 #include "xtc_proc.h"
 
@@ -86,7 +87,7 @@ xtc_pdict_put_with_dtor(const char *key, void *value, xtc_pdict_dtor_fn dtor)
 	if (key == NULL) return XTC_E_INVAL;
 	if (xtc_pid_is_none(self)) return XTC_E_INVAL;
 
-	(void)pthread_mutex_lock(&__pd_lock);
+	(void)__xtc_mtx_lock(&__pd_lock);
 	te = __pdict_get_or_create_locked(self);
 	if (te == NULL) goto out;
 
@@ -112,7 +113,7 @@ xtc_pdict_put_with_dtor(const char *key, void *value, xtc_pdict_dtor_fn dtor)
 	te->n++;
 	rc = XTC_OK;
 out:
-	(void)pthread_mutex_unlock(&__pd_lock);
+	(void)__xtc_mtx_unlock(&__pd_lock);
 	return rc;
 }
 
@@ -132,7 +133,7 @@ xtc_pdict_get(const char *key, void **value)
 	if (key == NULL || value == NULL) return XTC_E_INVAL;
 	if (xtc_pid_is_none(self)) return XTC_E_INVAL;
 
-	(void)pthread_mutex_lock(&__pd_lock);
+	(void)__xtc_mtx_lock(&__pd_lock);
 	te = __pdict_find_locked(self);
 	if (te) {
 		for (e = te->head; e != NULL; e = e->next) {
@@ -143,7 +144,7 @@ xtc_pdict_get(const char *key, void **value)
 			}
 		}
 	}
-	(void)pthread_mutex_unlock(&__pd_lock);
+	(void)__xtc_mtx_unlock(&__pd_lock);
 	return rc;
 }
 
@@ -157,7 +158,7 @@ xtc_pdict_erase(const char *key)
 	if (key == NULL) return XTC_E_INVAL;
 	if (xtc_pid_is_none(self)) return XTC_E_INVAL;
 
-	(void)pthread_mutex_lock(&__pd_lock);
+	(void)__xtc_mtx_lock(&__pd_lock);
 	te = __pdict_find_locked(self);
 	if (te) {
 		for (link = &te->head; (e = *link) != NULL; link = &e->next) {
@@ -172,7 +173,7 @@ xtc_pdict_erase(const char *key)
 			}
 		}
 	}
-	(void)pthread_mutex_unlock(&__pd_lock);
+	(void)__xtc_mtx_unlock(&__pd_lock);
 	return rc;
 }
 
@@ -183,10 +184,10 @@ xtc_pdict_count(void)
 	struct pdict_table_entry *te;
 	int n = 0;
 	if (xtc_pid_is_none(self)) return 0;
-	(void)pthread_mutex_lock(&__pd_lock);
+	(void)__xtc_mtx_lock(&__pd_lock);
 	te = __pdict_find_locked(self);
 	if (te) n = te->n;
-	(void)pthread_mutex_unlock(&__pd_lock);
+	(void)__xtc_mtx_unlock(&__pd_lock);
 	return n;
 }
 
@@ -197,7 +198,7 @@ xtc_pdict_clear(void)
 	struct pdict_table_entry *te;
 	struct pdict_entry *e, *next;
 	if (xtc_pid_is_none(self)) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&__pd_lock);
+	(void)__xtc_mtx_lock(&__pd_lock);
 	te = __pdict_find_locked(self);
 	if (te) {
 		for (e = te->head; e != NULL; e = next) {
@@ -208,6 +209,6 @@ xtc_pdict_clear(void)
 		}
 		__remove_table_locked(self);
 	}
-	(void)pthread_mutex_unlock(&__pd_lock);
+	(void)__xtc_mtx_unlock(&__pd_lock);
 	return XTC_OK;
 }

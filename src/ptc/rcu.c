@@ -18,6 +18,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_rcu.h"
 #include "xtc_slab.h"
 
@@ -60,7 +61,7 @@ static void
 __rcu_slabs_ensure(void)
 {
 	if (__rcu_tls_slab != NULL && __rcu_retired_slab != NULL) return;
-	(void)pthread_mutex_lock(&__rcu_slab_init_lock);
+	(void)__xtc_mtx_lock(&__rcu_slab_init_lock);
 	if (__rcu_tls_slab == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
 		o.name = "rcu.tls"; o.obj_size = sizeof(struct rcu_tls);
@@ -71,7 +72,7 @@ __rcu_slabs_ensure(void)
 		o.name = "rcu.retired"; o.obj_size = sizeof(struct retired);
 		(void)xtc_slab_create(&o, &__rcu_retired_slab);
 	}
-	(void)pthread_mutex_unlock(&__rcu_slab_init_lock);
+	(void)__xtc_mtx_unlock(&__rcu_slab_init_lock);
 }
 
 /* Lazy registration of the per-thread slot. */
@@ -85,10 +86,10 @@ __rcu_register(void)
 	t = xtc_slab_alloc(__rcu_tls_slab);
 	if (t == NULL) return XTC_E_RESOURCE;
 	memset(t, 0, sizeof *t);
-	(void)pthread_mutex_lock(&__rcu.lock);
+	(void)__xtc_mtx_lock(&__rcu.lock);
 	t->next = __rcu.registry;
 	__rcu.registry = t;
-	(void)pthread_mutex_unlock(&__rcu.lock);
+	(void)__xtc_mtx_unlock(&__rcu.lock);
 	__rcu_self = t;
 	return XTC_OK;
 }
@@ -96,9 +97,9 @@ __rcu_register(void)
 int
 xtc_rcu_init(void)
 {
-	(void)pthread_mutex_lock(&__rcu.lock);
+	(void)__xtc_mtx_lock(&__rcu.lock);
 	__rcu.inited = 1;
-	(void)pthread_mutex_unlock(&__rcu.lock);
+	(void)__xtc_mtx_unlock(&__rcu.lock);
 	return XTC_OK;
 }
 
@@ -107,7 +108,7 @@ xtc_rcu_fini(void)
 {
 	struct rcu_tls *t, *next_t;
 	int b;
-	(void)pthread_mutex_lock(&__rcu.lock);
+	(void)__xtc_mtx_lock(&__rcu.lock);
 	for (b = 0; b < XTC_RCU_NBUCKETS; b++) {
 		struct retired *r, *next_r;
 		for (r = __rcu.buckets[b]; r != NULL; r = next_r) {
@@ -126,7 +127,7 @@ xtc_rcu_fini(void)
 	__rcu.registry = NULL;
 	__rcu.inited = 0;
 	atomic_store_explicit(&__rcu.epoch, 0, memory_order_relaxed);
-	(void)pthread_mutex_unlock(&__rcu.lock);
+	(void)__xtc_mtx_unlock(&__rcu.lock);
 }
 
 void
@@ -175,12 +176,12 @@ xtc_rcu_retire(void *p, xtc_rcu_free_fn fn)
 	}
 	r->p = p;
 	r->fn = fn;
-	(void)pthread_mutex_lock(&__rcu.lock);
+	(void)__xtc_mtx_lock(&__rcu.lock);
 	e = atomic_load_explicit(&__rcu.epoch, memory_order_relaxed);
 	b = (int)(e % XTC_RCU_NBUCKETS);
 	r->next = __rcu.buckets[b];
 	__rcu.buckets[b] = r;
-	(void)pthread_mutex_unlock(&__rcu.lock);
+	(void)__xtc_mtx_unlock(&__rcu.lock);
 }
 
 /* Wait for all readers in the OLD epoch (the one before we advanced)
@@ -201,13 +202,13 @@ xtc_rcu_synchronize(void)
 	 * (Readers see the new epoch on their next read_lock.) */
 	for (;;) {
 		int still_in_old = 0;
-		(void)pthread_mutex_lock(&__rcu.lock);
+		(void)__xtc_mtx_lock(&__rcu.lock);
 		for (t = __rcu.registry; t != NULL; t = t->next) {
 			uint64_t a = atomic_load_explicit(&t->active_epoch,
 			    memory_order_acquire);
 			if (a != 0 && a <= old) { still_in_old = 1; break; }
 		}
-		(void)pthread_mutex_unlock(&__rcu.lock);
+		(void)__xtc_mtx_unlock(&__rcu.lock);
 		if (!still_in_old) break;
 		/* Spin briefly then yield. */
 		sched_yield();
@@ -219,10 +220,10 @@ xtc_rcu_synchronize(void)
 	 * so bucket (E % N) at epoch E+2 is recycle-safe. */
 	if (new_e < 2) return;
 	reclaim_bucket = (int)((new_e - 2) % XTC_RCU_NBUCKETS);
-	(void)pthread_mutex_lock(&__rcu.lock);
+	(void)__xtc_mtx_lock(&__rcu.lock);
 	to_free = __rcu.buckets[reclaim_bucket];
 	__rcu.buckets[reclaim_bucket] = NULL;
-	(void)pthread_mutex_unlock(&__rcu.lock);
+	(void)__xtc_mtx_unlock(&__rcu.lock);
 
 	for (r = to_free; r != NULL; r = next) {
 		next = r->next;

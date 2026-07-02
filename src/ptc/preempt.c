@@ -27,6 +27,7 @@
 #include "xtc_preempt.h"
 
 #include <signal.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
 #include <time.h>
@@ -313,4 +314,43 @@ int
 __xtc_unsafe_depth(void)
 {
 	return g_unsafe_depth;
+}
+
+/*
+ * __xtc_mtx_lock / __xtc_mtx_unlock (declared in xtc_preempt.h):
+ *
+ * Preemption-safe raw-pthread mutex acquire.  A fiber that holds a
+ * mutex must not be involuntarily preempted (M_PREEMPTION Phase 2b): a
+ * loop runs many fibers on one OS thread, so a holder preempted
+ * mid-hold plus another same-loop fiber blocking on the same mutex
+ * deadlocks the thread.  Bracketing with __xtc_unsafe_enter/leave
+ * makes the preemption timer defer to the cooperative path while the
+ * lock is held.  This is the raw-pthread counterpart of the
+ * __os_mutex_* brackets, for the many internal subsystems that embed a
+ * bare pthread_mutex_t in their structures.  It must ONLY be used for
+ * short critical sections that never yield/park while the lock is held
+ * (a yield inside the bracket would strand the elevated unsafe depth on
+ * a different fiber).
+ */
+int
+__xtc_mtx_lock(pthread_mutex_t *m)
+{
+	int e;
+	__xtc_unsafe_enter();
+	e = pthread_mutex_lock(m);
+	if (e != 0)
+		__xtc_unsafe_leave();   /* not held; balance the enter */
+	return e;
+}
+
+/*
+ * __xtc_mtx_unlock: preemption-safe raw-pthread mutex release; balances
+ * __xtc_mtx_lock.
+ */
+int
+__xtc_mtx_unlock(pthread_mutex_t *m)
+{
+	int e = pthread_mutex_unlock(m);
+	__xtc_unsafe_leave();
+	return e;
 }

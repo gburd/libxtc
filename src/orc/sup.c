@@ -11,6 +11,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_orc.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
@@ -152,11 +153,11 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 
 	memset(&rep, 0, sizeof rep);
 	rep.tag = a->tag;
-	(void)pthread_mutex_lock(&sup->lock);
+	(void)__xtc_mtx_lock(&sup->lock);
 	if (__os_realloc(sup->children,
 	    (size_t)(sup->n_children + 1) * sizeof(struct child), &nc)
 	    != XTC_OK) {
-		(void)pthread_mutex_unlock(&sup->lock);
+		(void)__xtc_mtx_unlock(&sup->lock);
 		rep.ok = 0;
 		(void)xtc_send(a->reply, &rep, sizeof rep);
 		return;
@@ -167,7 +168,7 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 	sup->children[idx].spec = a->spec;
 	rc = __spawn_child(sup, &sup->children[idx]);
 	if (rc != XTC_OK) {
-		(void)pthread_mutex_unlock(&sup->lock);
+		(void)__xtc_mtx_unlock(&sup->lock);
 		rep.ok = 0;
 		(void)xtc_send(a->reply, &rep, sizeof rep);
 		return;
@@ -175,7 +176,7 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 	sup->n_children++;
 	rep.ok = 1;
 	rep.pid = sup->children[idx].pid;
-	(void)pthread_mutex_unlock(&sup->lock);
+	(void)__xtc_mtx_unlock(&sup->lock);
 	(void)xtc_send(a->reply, &rep, sizeof rep);
 }
 
@@ -297,29 +298,29 @@ __sup_entry(void *arg)
 		memcpy(&d, msg, sizeof d);
 		__os_free(msg);
 
-		(void)pthread_mutex_lock(&sup->lock);
+		(void)__xtc_mtx_lock(&sup->lock);
 		idx = __find_child_by_pid(sup, d.pid);
 		if (idx < 0) {
-			(void)pthread_mutex_unlock(&sup->lock);
+			(void)__xtc_mtx_unlock(&sup->lock);
 			continue;
 		}
 		sup->children[idx].alive = 0;
 
 		if (atomic_load_explicit(&sup->stop_requested,
 		    memory_order_acquire)) {
-			(void)pthread_mutex_unlock(&sup->lock);
+			(void)__xtc_mtx_unlock(&sup->lock);
 			break;
 		}
 
 		if (!__should_restart(sup, &sup->children[idx], d.reason)) {
-			(void)pthread_mutex_unlock(&sup->lock);
+			(void)__xtc_mtx_unlock(&sup->lock);
 			continue;
 		}
 
 		(void)__os_clock_mono(&now);
 		__record_restart(sup, now);
 		if (__intensity_exceeded(sup, now)) {
-			(void)pthread_mutex_unlock(&sup->lock);
+			(void)__xtc_mtx_unlock(&sup->lock);
 			break;
 		}
 
@@ -340,7 +341,7 @@ __sup_entry(void *arg)
 			(void)__spawn_child(sup, &sup->children[idx]);
 			break;
 		}
-		(void)pthread_mutex_unlock(&sup->lock);
+		(void)__xtc_mtx_unlock(&sup->lock);
 	}
 
 	atomic_store_explicit(&sup->alive, 0, memory_order_release);
@@ -348,14 +349,14 @@ __sup_entry(void *arg)
 	/* On exit, kill any still-alive children so the loop can drain. */
 	{
 		int k;
-		(void)pthread_mutex_lock(&sup->lock);
+		(void)__xtc_mtx_lock(&sup->lock);
 		for (k = 0; k < sup->n_children; k++) {
 			if (sup->children[k].alive) {
 				(void)xtc_exit_pid(sup->children[k].pid, 1);
 				sup->children[k].alive = 0;
 			}
 		}
-		(void)pthread_mutex_unlock(&sup->lock);
+		(void)__xtc_mtx_unlock(&sup->lock);
 	}
 
 	(void)xtc_notify_signal(sup->stopped);

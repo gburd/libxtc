@@ -15,6 +15,7 @@
 #define XTC_PREEMPT_H
 
 #include <stdint.h>
+#include <pthread.h>
 
 #include "xtc.h"
 
@@ -77,5 +78,20 @@ int      xtc_preempt_tick_pending(void);
 void __xtc_unsafe_enter(void);
 void __xtc_unsafe_leave(void);
 int  __xtc_unsafe_depth(void);
+
+/*
+ * Preemption-safe raw-pthread mutex brackets.  A fiber that holds a
+ * mutex must not be involuntarily preempted (a loop runs many fibers on
+ * one OS thread; a preempted holder plus another same-loop fiber
+ * blocking on the same mutex deadlocks the thread).  __xtc_mtx_lock/
+ * unlock wrap pthread_mutex_lock/unlock with __xtc_unsafe_enter/leave
+ * so the preemption timer defers while the lock is held -- the
+ * raw-pthread counterpart of the preemption-safe __os_mutex_* locks,
+ * for internal subsystems that embed a bare pthread_mutex_t.  Use only
+ * for short critical sections that do NOT yield/park while holding the
+ * lock.  They return the raw pthread errno (0 == success).
+ */
+int __xtc_mtx_lock(pthread_mutex_t *m);
+int __xtc_mtx_unlock(pthread_mutex_t *m);
 
 #endif /* XTC_PREEMPT_H */

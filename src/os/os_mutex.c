@@ -46,6 +46,28 @@ typedef char __chk_sem_size[
 #define CV(p)  ((pthread_cond_t   *)(void *)(p)->storage)
 #define SE(p)  ((sem_t            *)(void *)(p)->storage)
 
+/*
+ * Preemption-safe lock bracketing (M_PREEMPTION Phase 2b).  A fiber
+ * that holds a mutex MUST NOT be involuntarily preempted: a loop runs
+ * many fibers on one OS thread, so if the holder is preempted and
+ * another fiber on the same loop then blocks on the same mutex the
+ * thread deadlocks (the holder can only release by being rescheduled,
+ * which needs the very thread now blocked in pthread_mutex_lock).
+ * __xtc_unsafe_enter/leave raise the per-thread "unsafe depth" the
+ * preemption timer handler checks, so a tick landing inside a held
+ * lock defers to the cooperative path instead of redirecting the
+ * stack.  Every __os_mutex acquire/release brackets, so any code --
+ * library or application -- that locks through __os_mutex_* is
+ * automatically preemption-safe (the library's own dogfooded lock).
+ *
+ * Forward-declared (not via a header) to keep the L0 OS layer from
+ * depending on the L3 preemption header; preempt.o is always linked,
+ * and os_alloc.c uses the same pattern.  With preemption never enabled
+ * they are cheap increments of a thread-local int.
+ */
+void __xtc_unsafe_enter(void);
+void __xtc_unsafe_leave(void);
+
 /* --- mutex --- */
 
 /* PUBLIC: int __os_mutex_init __P((__os_mutex_t *)); */
@@ -61,22 +83,31 @@ int __os_mutex_destroy(__os_mutex_t *m) {
 }
 /* PUBLIC: int __os_mutex_lock __P((__os_mutex_t *)); */
 int __os_mutex_lock(__os_mutex_t *m) {
+	int e;
 	if (m == NULL) return XTC_E_INVAL;
-	return pthread_mutex_lock(MU(m)) == 0 ? XTC_OK : XTC_E_INTERNAL;
+	__xtc_unsafe_enter();
+	e = pthread_mutex_lock(MU(m));
+	if (e != 0) __xtc_unsafe_leave();   /* not held; balance the enter */
+	return e == 0 ? XTC_OK : XTC_E_INTERNAL;
 }
 /* PUBLIC: int __os_mutex_trylock __P((__os_mutex_t *)); */
 int __os_mutex_trylock(__os_mutex_t *m) {
 	int e;
 	if (m == NULL) return XTC_E_INVAL;
+	__xtc_unsafe_enter();
 	e = pthread_mutex_trylock(MU(m));
+	if (e != 0) __xtc_unsafe_leave();   /* lock not acquired */
 	if (e == 0)         return XTC_OK;
 	if (e == EBUSY)     return XTC_E_AGAIN;
 	return XTC_E_INTERNAL;
 }
 /* PUBLIC: int __os_mutex_unlock __P((__os_mutex_t *)); */
 int __os_mutex_unlock(__os_mutex_t *m) {
+	int e;
 	if (m == NULL) return XTC_E_INVAL;
-	return pthread_mutex_unlock(MU(m)) == 0 ? XTC_OK : XTC_E_INTERNAL;
+	e = pthread_mutex_unlock(MU(m));
+	__xtc_unsafe_leave();               /* balances the lock/trylock enter */
+	return e == 0 ? XTC_OK : XTC_E_INTERNAL;
 }
 
 /* --- rwlock --- */

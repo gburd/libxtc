@@ -9,6 +9,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_chan.h"
 
 #include <stdatomic.h>
@@ -401,7 +402,7 @@ xtc_chan_mpmc_try_send(xtc_chan_mpmc_t *c, void *msg)
 		if ((rc = xtc_res_acquire(c->res, XTC_RES_CHAN_SLOTS, 1)) != XTC_OK)
 			return rc;
 	}
-	(void)pthread_mutex_lock(&c->lock);
+	(void)__xtc_mtx_lock(&c->lock);
 	if (c->closed) {
 		rc = XTC_E_INVAL;
 	} else if (c->n >= c->cap) {
@@ -411,7 +412,7 @@ xtc_chan_mpmc_try_send(xtc_chan_mpmc_t *c, void *msg)
 		c->head = (c->head + 1) % c->cap;
 		c->n++;
 	}
-	(void)pthread_mutex_unlock(&c->lock);
+	(void)__xtc_mtx_unlock(&c->lock);
 	if (rc != XTC_OK && c->res != NULL)
 		xtc_res_release(c->res, XTC_RES_CHAN_SLOTS, 1);
 	return rc;
@@ -422,7 +423,7 @@ xtc_chan_mpmc_try_recv(xtc_chan_mpmc_t *c, void **out)
 {
 	int rc = XTC_E_AGAIN;
 	if (c == NULL || out == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&c->lock);
+	(void)__xtc_mtx_lock(&c->lock);
 	if (c->n > 0) {
 		*out = c->slots[c->tail];
 		c->tail = (c->tail + 1) % c->cap;
@@ -431,7 +432,7 @@ xtc_chan_mpmc_try_recv(xtc_chan_mpmc_t *c, void **out)
 	} else if (c->closed) {
 		rc = XTC_E_INVAL;
 	}
-	(void)pthread_mutex_unlock(&c->lock);
+	(void)__xtc_mtx_unlock(&c->lock);
 	if (rc == XTC_OK && c->res != NULL)
 		xtc_res_release(c->res, XTC_RES_CHAN_SLOTS, 1);
 	return rc;
@@ -441,9 +442,9 @@ int
 xtc_chan_mpmc_close(xtc_chan_mpmc_t *c)
 {
 	if (c == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&c->lock);
+	(void)__xtc_mtx_lock(&c->lock);
 	c->closed = 1;
-	(void)pthread_mutex_unlock(&c->lock);
+	(void)__xtc_mtx_unlock(&c->lock);
 	return XTC_OK;
 }
 
@@ -452,9 +453,9 @@ xtc_chan_mpmc_len(const xtc_chan_mpmc_t *c)
 {
 	size_t n;
 	if (c == NULL) return 0;
-	(void)pthread_mutex_lock((pthread_mutex_t *)&c->lock);
+	(void)__xtc_mtx_lock((pthread_mutex_t *)&c->lock);
 	n = c->n;
-	(void)pthread_mutex_unlock((pthread_mutex_t *)&c->lock);
+	(void)__xtc_mtx_unlock((pthread_mutex_t *)&c->lock);
 	return n;
 }
 
@@ -525,12 +526,12 @@ xtc_chan_broadcast_send(xtc_chan_broadcast_t *c, void *msg)
 {
 	uint64_t seq;
 	if (c == NULL) return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&c->lock);
+	(void)__xtc_mtx_lock(&c->lock);
 	seq = atomic_load_explicit(&c->pos, memory_order_relaxed);
 	c->slots[seq % c->cap] = msg;
 	c->seqs[seq % c->cap]  = seq + 1;     /* +1 so 0 = unset */
 	atomic_store_explicit(&c->pos, seq + 1, memory_order_release);
-	(void)pthread_mutex_unlock(&c->lock);
+	(void)__xtc_mtx_unlock(&c->lock);
 	return XTC_OK;
 }
 
@@ -544,11 +545,11 @@ xtc_chan_broadcast_subscribe(xtc_chan_broadcast_t *c,
 	if ((rc = __os_calloc(1, sizeof *r, (void **)&r)) != XTC_OK)
 		return rc;
 	r->chan = c;
-	(void)pthread_mutex_lock(&c->lock);
+	(void)__xtc_mtx_lock(&c->lock);
 	r->cursor = atomic_load_explicit(&c->pos, memory_order_acquire);
 	r->next = c->recvs;
 	c->recvs = r;
-	(void)pthread_mutex_unlock(&c->lock);
+	(void)__xtc_mtx_unlock(&c->lock);
 	*out_recv = r;
 	return XTC_OK;
 }
@@ -560,11 +561,11 @@ xtc_chan_broadcast_unsubscribe(xtc_chan_broadcast_recv_t *r)
 	xtc_chan_broadcast_recv_t **pp;
 	if (r == NULL) return;
 	c = r->chan;
-	(void)pthread_mutex_lock(&c->lock);
+	(void)__xtc_mtx_lock(&c->lock);
 	for (pp = &c->recvs; *pp != NULL; pp = &(*pp)->next) {
 		if (*pp == r) { *pp = r->next; break; }
 	}
-	(void)pthread_mutex_unlock(&c->lock);
+	(void)__xtc_mtx_unlock(&c->lock);
 	__os_free(r);
 }
 
@@ -577,10 +578,10 @@ xtc_chan_broadcast_recv(xtc_chan_broadcast_recv_t *r, void **out, int *lagged)
 	c = r->chan;
 	if (lagged) *lagged = 0;
 
-	(void)pthread_mutex_lock(&c->lock);
+	(void)__xtc_mtx_lock(&c->lock);
 	pos = atomic_load_explicit(&c->pos, memory_order_acquire);
 	if (r->cursor >= pos) {
-		(void)pthread_mutex_unlock(&c->lock);
+		(void)__xtc_mtx_unlock(&c->lock);
 		return XTC_E_AGAIN;
 	}
 	/* Lag check: if we're behind by > cap, we missed slots that
@@ -593,6 +594,6 @@ xtc_chan_broadcast_recv(xtc_chan_broadcast_recv_t *r, void **out, int *lagged)
 	}
 	*out = c->slots[r->cursor % c->cap];
 	r->cursor++;
-	(void)pthread_mutex_unlock(&c->lock);
+	(void)__xtc_mtx_unlock(&c->lock);
 	return XTC_OK;
 }
