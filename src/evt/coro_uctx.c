@@ -93,6 +93,65 @@ __coro_entry(void)
 }
 
 /*
+ * PUBLIC: int __xtc_coro_preempt __P((void *));
+ *
+ * Signal-context involuntary yield (M_PREEMPTION Phase 2b), ucontext
+ * substrate.  Called ONLY from the preemption timer signal handler,
+ * with `uctx` the interrupted ucontext_t* (the SA_SIGINFO third arg),
+ * and ONLY when it is safe (crit_depth == 0 and unsafe_depth == 0 --
+ * the handler checks).  It makes the running fiber yield to the
+ * scheduler AS IF it had called xtc_yield() at the interrupted
+ * instruction, resumably:
+ *
+ *   - copy the interrupted context into c->ctx, so the fiber resumes
+ *     EXACTLY where the timer hit it when the scheduler next runs it;
+ *   - overwrite *uctx with c->loop_ctx, so when the handler returns the
+ *     kernel's sigreturn restores the scheduler's context instead of
+ *     the interrupted one -- landing in __xtc_coro_step just after its
+ *     swapcontext, which (the fiber not being done/parked) returns
+ *     XTC_TASK_RESCHED and re-queues the fiber.
+ *
+ * This is Go's async-preemption mechanism: the kernel does the context
+ * swap on sigreturn, so no arch-specific stack surgery is needed -- it
+ * works on every ucontext platform.  Returns 1 if it armed the yield, 0
+ * if there is no current fiber (nothing to preempt; the handler leaves
+ * the tick pending for a cooperative yield instead).
+ *
+ * The fctx substrate (coro_fctx.c) provides its own version that
+ * declines (returns 0), so on musl the timer falls back to Phase 1
+ * cooperative-assisted preemption.
+ */
+int
+__xtc_coro_preempt(void *uctx)
+{
+	/*
+	 * Signal-context involuntary yield -- DECLINED for now (returns 0 ->
+	 * the timer falls back to Phase 1 cooperative-assisted preemption).
+	 *
+	 * A resumable preemption needs the fiber's interrupted machine state
+	 * as a resume point.  The obvious approach -- copy the signal's
+	 * ucontext_t (this uctx arg) into c->ctx and switch to the scheduler
+	 * -- is UNSOUND: a signal-delivered ucontext is not interchangeable
+	 * with a getcontext/swapcontext-captured one (different FP/XSAVE
+	 * state and flags), so the scheduler's later swapcontext(&c->ctx)
+	 * faults (verified: SIGSEGV in swapcontext).  The correct method is
+	 * Go's async preemption: extract only PC/SP/GP registers from the
+	 * signal mcontext and graft them onto a fresh, valid context (or
+	 * redirect the interrupted PC to an on-stack trampoline that then
+	 * does a normal cooperative switch).  That is per-architecture
+	 * assembly (x86-64, aarch64, ...), a bounded but distinctly separate
+	 * effort tracked in docs/M_PREEMPTION.md as Phase 2b-arch.
+	 *
+	 * Until then Phase 1 (a timer tick makes xtc_yield_if_due callers
+	 * yield) is the supported preemption; it covers every fiber that
+	 * reaches a yield-check, and untrusted pure-CPU work runs on
+	 * xtc_osproc (an OS thread the kernel preempts).
+	 */
+	(void)uctx;
+	return 0;
+}
+
+/*
  * The task fn that the L2 scheduler calls.  Swaps into the fiber.
  * On return, decides what to tell the loop based on the fiber's
  * state.

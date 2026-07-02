@@ -276,3 +276,39 @@ release:
 RELEASE GATE: preemption P1 + S1 + (B-tree Steps 1-2 if converged) + a
 clean DST soak -> qualify -> cut.  P2 / launch / mctx-COW / B-tree
 default-on land in the following release.
+
+## 10. Implementation status (2026-07)
+
+- Phase 0 (per-worker CPU-time timer seam): DONE.  xtc_preempt_arm/
+  disarm/ticks/tick_pending; test/m14/test_preempt.c.
+- Phase 0.5 (crit_depth / unsafe-depth audit): DONE.  Added a
+  per-thread unsafe-depth counter (__xtc_unsafe_enter/leave/depth)
+  bracketing the allocator (os_alloc.c); it also lets the fault handler
+  avoid unwinding out of malloc.  test/m14/test_unsafe_depth.c.
+- Phase 1 (cooperative-assisted preemption): DONE.  xtc_exec_set_preempt
+  arms the per-worker timer; a tick makes xtc_yield_if_due callers yield
+  (xtc_yield_check consults the tick).  test/m14/test_preempt_p1.c
+  proves a compute fiber that yields-if-due is timer-sliced with no
+  manual budget.  This is the SUPPORTED preemption today.
+- Phase 2 (signal-context involuntary yield): INFRASTRUCTURE in place
+  (xtc_preempt_set_involuntary, the handler's crit_depth+unsafe_depth
+  safety gate, and the __xtc_coro_preempt substrate hook), but the
+  resumable redirect DECLINES for now on all substrates -- so it safely
+  falls back to Phase 1.  WHY: the portable approach (copy the signal's
+  ucontext_t into the fiber's resume slot and switch to the scheduler)
+  is UNSOUND -- a signal-delivered ucontext is not interchangeable with
+  a getcontext/swapcontext-captured one (FP/XSAVE/flags differ), and the
+  scheduler's later swapcontext(&c->ctx) faults (verified: SIGSEGV in
+  swapcontext).  test/m14/test_preempt_p2.c drives a PURE tight-loop
+  runaway + peers and asserts the safe fallback (the runaway completes;
+  it is not sliced) plus no crash; it is also the harness that will
+  prove true preemption once Phase 2b-arch lands.
+
+  Phase 2b-arch (the real signal-context preemption): Go's method --
+  extract ONLY PC/SP/GP registers from the signal mcontext and graft
+  them onto a fresh valid context, or redirect the interrupted PC to an
+  on-stack trampoline that does a normal cooperative switch.  This is
+  per-architecture (x86-64, aarch64, ...) and is the bounded, separate
+  next task.  Until it lands, untrusted pure-CPU work uses xtc_osproc
+  (an OS thread the kernel preempts), and every cooperating fiber is
+  covered by Phase 1.

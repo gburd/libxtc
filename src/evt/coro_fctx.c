@@ -303,6 +303,23 @@ xtc_yield(void)
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 }
 
+/* PUBLIC: int __xtc_coro_preempt __P((void *)); */
+/*
+ * Signal-context involuntary yield (M_PREEMPTION Phase 2b).  The fctx
+ * substrate CANNOT do a resumable in-handler stack swap portably (its
+ * saved context is a raw stack pointer, not a kernel-restorable
+ * ucontext, so redirecting sigreturn is arch-specific asm), so it
+ * declines: the preemption timer falls back to Phase 1 cooperative-
+ * assisted preemption on this substrate (notably musl).  The ucontext
+ * substrate provides the real resumable version.
+ */
+int
+__xtc_coro_preempt(void *uctx)
+{
+	(void)uctx;
+	return 0;
+}
+
 xtc_task_t *
 __xtc_current_task(void)
 {

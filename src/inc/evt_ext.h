@@ -4,6 +4,7 @@
 #ifndef EVT_EXT_H
 #define EVT_EXT_H
 
+int __xtc_coro_preempt __P((void *));
 int __xtc_sim_active __P((void));
 int __xtc_sim_io_faults_active __P((void));
 int __xtc_sim_io_should_fault __P((void));

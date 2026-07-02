@@ -96,6 +96,18 @@ static const struct __os_alloc_hook __default_hook = {
  */
 static const struct __os_alloc_hook *volatile __active_hook = &__default_hook;
 
+/*
+ * Async-signal-unsafe-region bracket (defined in src/ptc/preempt.c, L3).
+ * Forward-declared here rather than including the L3 header so the L0
+ * allocator keeps its layering -- the same pattern os_time.c uses to
+ * consult __xtc_sim_vclock.  Bracketing every allocator call marks the
+ * malloc/free window unsafe so the preemption timer defers a
+ * signal-context yield across it (and the fault handler does not unwind
+ * out of a corrupt arena).  They are always linked (preempt.c is in
+ * every build); the counter is a per-thread no-op cost. */
+void __xtc_unsafe_enter(void);
+void __xtc_unsafe_leave(void);
+
 static const struct __os_alloc_hook *
 __hook(void)
 {
@@ -114,7 +126,9 @@ __os_malloc(size_t sz, void **out)
 	void *p;
 	if (out == NULL)
 		return XTC_E_INVAL;
+	__xtc_unsafe_enter();
 	p = __hook()->malloc(sz);
+	__xtc_unsafe_leave();
 	if (p == NULL && sz != 0)
 		return XTC_E_NOMEM;
 	*out = p;
@@ -132,7 +146,9 @@ __os_calloc(size_t n, size_t sz, void **out)
 		return XTC_E_INVAL;
 	if (n != 0 && sz > (size_t)-1 / n)
 		return XTC_E_RANGE;
+	__xtc_unsafe_enter();
 	p = __hook()->calloc(n, sz);
+	__xtc_unsafe_leave();
 	if (p == NULL && n != 0 && sz != 0)
 		return XTC_E_NOMEM;
 	*out = p;
@@ -148,7 +164,9 @@ __os_realloc(void *p, size_t sz, void **out)
 	void *q;
 	if (out == NULL)
 		return XTC_E_INVAL;
+	__xtc_unsafe_enter();
 	q = __hook()->realloc(p, sz);
+	__xtc_unsafe_leave();
 	if (q == NULL && sz != 0)
 		return XTC_E_NOMEM;
 	*out = q;
@@ -193,7 +211,9 @@ __os_free(void *p)
 {
 	if (p == NULL)
 		return;
+	__xtc_unsafe_enter();
 	__hook()->free(p);
+	__xtc_unsafe_leave();
 }
 
 /*

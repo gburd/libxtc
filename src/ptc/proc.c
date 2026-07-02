@@ -1687,6 +1687,18 @@ xtc_proc_critical_leave(void)
 		__current_proc->crit_depth--;
 }
 
+/* PUBLIC: int __xtc_proc_crit_depth __P((void)); */
+/* The current proc's critical-section depth, or 0 off a proc.  Read from
+ * the preemption timer signal handler to decide whether a signal-context
+ * involuntary yield is safe (a proc inside a critical section must not
+ * be preempted -- same rule the fault handler uses).  A plain read of a
+ * sig_atomic_t field, async-signal-safe. */
+int
+__xtc_proc_crit_depth(void)
+{
+	return __current_proc != NULL ? (int)__current_proc->crit_depth : 0;
+}
+
 /* ---------- per-proc at-exit hooks + proc-scoped memory ---------- */
 
 /* PUBLIC: int xtc_proc_at_exit __P((void (*)(void *), void *)); */

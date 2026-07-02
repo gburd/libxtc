@@ -37,6 +37,17 @@ int      xtc_preempt_arm(int64_t interval_ns);
 /* Stop + delete this thread's preemption timer.  Safe if not armed. */
 int      xtc_preempt_disarm(void);
 
+/* Enable (on != 0) / disable signal-context involuntary yield (Phase
+ * 2).  When on and the timer is armed, a tick preempts the running
+ * fiber in the handler -- resumably and only when safe (crit_depth ==
+ * 0, unsafe_depth == 0) -- on the ucontext substrate; the fctx/winfiber
+ * substrate declines and falls back to cooperative-assisted preemption.
+ * Off by default.
+ *
+ * PUBLIC: void xtc_preempt_set_involuntary __P((int));
+ */
+void     xtc_preempt_set_involuntary(int on);
+
 /* 1 if per-thread CPU-time preemption timers are available on this
  * platform, 0 otherwise (arm returns NOSYS then). */
 int      xtc_preempt_supported(void);
@@ -48,5 +59,23 @@ uint64_t xtc_preempt_ticks(void);
 /* 1 if a timer tick fired and is unconsumed; consumes (clears) it.
  * Phase 1 consults this at safe points to decide whether to yield. */
 int      xtc_preempt_tick_pending(void);
+
+/*
+ * Async-signal-unsafe-region depth (Phase 2 prerequisite).  A per-thread
+ * nesting counter that is > 0 while the thread is inside an
+ * async-signal-unsafe region (the allocator, a latch's internal lock).
+ * The preemption timer handler must not do a signal-context involuntary
+ * yield while it is > 0 (it defers).  __xtc_unsafe_enter/leave bracket
+ * such a region; __xtc_unsafe_depth reads the current depth (also used
+ * by the fault handler so a SIGSEGV inside malloc does not unwind out of
+ * a corrupt arena).
+ *
+ * PUBLIC: void __xtc_unsafe_enter __P((void));
+ * PUBLIC: void __xtc_unsafe_leave __P((void));
+ * PUBLIC: int  __xtc_unsafe_depth __P((void));
+ */
+void __xtc_unsafe_enter(void);
+void __xtc_unsafe_leave(void);
+int  __xtc_unsafe_depth(void);
 
 #endif /* XTC_PREEMPT_H */
