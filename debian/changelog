@@ -1,3 +1,27 @@
+libxtc (0.8.0-1) unstable; urgency=medium
+
+  * Preemption facility (native, inspired by CMU's Lightweight
+    Preemptible Functions; see docs/M_PREEMPTION.md):
+    - Phase 0: a per-worker CPU-time interval timer seam
+      (xtc_preempt_arm/disarm; POSIX per-thread CPU-time timers,
+      NOSYS elsewhere).
+    - Phase 0.5: a per-thread async-signal-unsafe-region depth counter
+      (__xtc_unsafe_enter/leave) bracketing the allocator, realizing
+      libas-safe's discipline via a counter -- also hardens the fault
+      handler against unwinding out of a corrupt malloc arena.
+    - Phase 1 (SUPPORTED): cooperative-assisted preemption --
+      xtc_exec_set_preempt(interval_ns) arms the timer per worker, and a
+      tick makes xtc_yield_if_due callers yield, time-slicing a compute
+      fiber with no manual budget.
+    - Phase 2: the signal-context involuntary-yield infrastructure +
+      safety gate (crit_depth + unsafe_depth) is in place; the resumable
+      redirect declines for now (a portable whole-ucontext copy is
+      unsound) and falls back to Phase 1, pending per-architecture
+      mcontext surgery (Go's method).  Untrusted pure-CPU work uses
+      xtc_osproc meanwhile.
+
+ -- Greg Burd <greg@burd.me>  Wed, 01 Jul 2026 22:00:00 -0400
+
 libxtc (0.7.0-1) unstable; urgency=medium
 
   * Deterministic Simulation Testing (DST) matured toward FoundationDB
