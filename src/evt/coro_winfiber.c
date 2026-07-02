@@ -229,6 +229,14 @@ __xtc_coro_preempt(void *uctx)
 	return 0;
 }
 
+/* PUBLIC: int __xtc_coro_preempt_effective __P((void)); */
+/* The Windows-fiber substrate declines the involuntary redirect. */
+int
+__xtc_coro_preempt_effective(void)
+{
+	return 0;
+}
+
 xtc_task_t *
 __xtc_current_task(void)
 {

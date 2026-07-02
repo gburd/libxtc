@@ -292,23 +292,55 @@ default-on land in the following release.
   manual budget.  This is the SUPPORTED preemption today.
 - Phase 2 (signal-context involuntary yield): INFRASTRUCTURE in place
   (xtc_preempt_set_involuntary, the handler's crit_depth+unsafe_depth
-  safety gate, and the __xtc_coro_preempt substrate hook), but the
-  resumable redirect DECLINES for now on all substrates -- so it safely
-  falls back to Phase 1.  WHY: the portable approach (copy the signal's
-  ucontext_t into the fiber's resume slot and switch to the scheduler)
-  is UNSOUND -- a signal-delivered ucontext is not interchangeable with
-  a getcontext/swapcontext-captured one (FP/XSAVE/flags differ), and the
+  safety gate, and the __xtc_coro_preempt substrate hook).  The portable
+  whole-ucontext approach (copy the signal's ucontext_t into the fiber's
+  resume slot and switch to the scheduler) is UNSOUND -- a
+  signal-delivered ucontext is not interchangeable with a
+  getcontext/swapcontext-captured one (FP/XSAVE/flags differ), and the
   scheduler's later swapcontext(&c->ctx) faults (verified: SIGSEGV in
   swapcontext).  test/m14/test_preempt_p2.c drives a PURE tight-loop
-  runaway + peers and asserts the safe fallback (the runaway completes;
-  it is not sliced) plus no crash; it is also the harness that will
-  prove true preemption once Phase 2b-arch lands.
+  runaway + peers.
 
-  Phase 2b-arch (the real signal-context preemption): Go's method --
-  extract ONLY PC/SP/GP registers from the signal mcontext and graft
-  them onto a fresh valid context, or redirect the interrupted PC to an
-  on-stack trampoline that does a normal cooperative switch.  This is
-  per-architecture (x86-64, aarch64, ...) and is the bounded, separate
-  next task.  Until it lands, untrusted pure-CPU work uses xtc_osproc
-  (an OS thread the kernel preempts), and every cooperating fiber is
-  covered by Phase 1.
+  Phase 2b-arch (the real signal-context preemption): DONE for x86-64
+  System V on the ucontext substrate (the default glibc build).  It is
+  Go's async-preemption PC redirect, NOT the unsound ucontext copy: the
+  timer handler, when safe (crit_depth == 0 && unsafe_depth == 0),
+  rewrites the interrupted mcontext's RIP/RSP so that on sigreturn the
+  fiber resumes -- on its own stack, with its own real registers -- at
+  an on-stack trampoline (src/os/asm/preempt_trampoline_x86_64.S).  The
+  trampoline saves the full GP file + RFLAGS + a 512-byte FXSAVE area,
+  performs a NORMAL cooperative xtc_yield() (the known-good swapcontext
+  path), and on resume restores everything and returns to the
+  interrupted PC with RSP exactly restored -- invisible to the
+  interrupted code.  test/m14/test_preempt_p2.c now ASSERTS that a pure
+  tight loop with no yield points is sliced (peers advance ~1000-1500x)
+  wherever __xtc_coro_preempt_effective() reports the redirect is active
+  (x86-64 ucontext); on fctx/musl, winfiber, and the amalgamation (which
+  cannot carry the .S) it DECLINES and falls back to Phase 1.
+
+  Correctness: the redirect must never fire while a context is
+  mid-switch or the trampoline is mid-save/restore, or a half-written
+  register/machine context is corrupted.  Two guards ensure this: (1) a
+  per-thread g_in_preempt flag set across every swapcontext (and the
+  save/restore of per-fiber TLS around it), cleared receiver-side once
+  control has fully landed; (2) an instruction-pointer range check that
+  declines when the interrupted PC lies within the trampoline itself
+  (covering its epilogue, where the flag is already back to 0).  With
+  both, 800+ pathological-stress runs (8 pure-CPU runaways monopolizing
+  one loop at 40-100us slices) are crash-free and ASan-clean.
+
+  Status: SUPPORTED but OPT-IN and EXPERIMENTAL.  It is enabled only by
+  an explicit xtc_preempt_set_involuntary(1) (off by default; Phase 1
+  cooperative is the default).  KNOWN LIMITATION: under that same
+  pathological stress there remains an extremely rare (<1/6000) HANG
+  (not a crash) -- a livelock/lost-wakeup distinct from the register
+  corruption that guards (1)/(2) fixed.  It has not been observed under
+  any realistic workload (real fibers yield at I/O rather than pure-CPU
+  spinning), which is why the involuntary path is opt-in.  Root-causing
+  the residual hang is tracked as a bounded follow-up.  Meanwhile
+  untrusted pure-CPU work can also use xtc_osproc (an OS thread the
+  kernel preempts), and every cooperating fiber is covered by Phase 1.
+
+  Remaining arches (aarch64, ...): the mechanism is identical, only the
+  per-arch mcontext register names (.pc/.sp) and trampoline asm differ;
+  a bounded follow-up.

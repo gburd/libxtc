@@ -320,6 +320,15 @@ __xtc_coro_preempt(void *uctx)
 	return 0;
 }
 
+/* PUBLIC: int __xtc_coro_preempt_effective __P((void)); */
+/* The fctx substrate always declines the involuntary redirect (see
+ * above), so involuntary preemption is never effective here. */
+int
+__xtc_coro_preempt_effective(void)
+{
+	return 0;
+}
+
 xtc_task_t *
 __xtc_current_task(void)
 {

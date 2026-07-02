@@ -16,6 +16,17 @@
  *	switches; the surface and contract here are unchanged.
  */
 
+/*
+ * REG_RIP / REG_RSP / greg_t (used by __xtc_coro_preempt to rewrite the
+ * signal mcontext for Phase 2b involuntary preemption) live in
+ * <sys/ucontext.h> behind __USE_GNU on glibc; _DEFAULT_SOURCE alone
+ * does not expose them.  Request _GNU_SOURCE for this TU before any
+ * header pulls ucontext.h in.
+ */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #include "xtc_int.h"
 
 /* Windows uses a separate fiber implementation in src/evt/coro_winfiber.c.
@@ -78,6 +89,37 @@ xtc_set_stack_size(size_t bytes)
 }
 
 /*
+ * Per-thread guard for the involuntary-preemption redirect (Phase 2b).
+ * It marks the brief windows during which the running context's
+ * machine state is being saved/restored by a ucontext swapcontext (or
+ * the trampoline is mid-save) -- exactly the windows in which an
+ * involuntary redirect would corrupt a half-written context (verified:
+ * a rare SIGSEGV in the scheduler's swapcontext resume under
+ * aggressive slicing).
+ *
+ * It is a FLAG set immediately before each swapcontext and cleared
+ * immediately after it returns -- on whichever side runs next, since a
+ * swapcontext hands control to a context that itself returns just
+ * after its own swapcontext.  So the flag is 1 only while a
+ * swapcontext instruction is actually executing, NOT for the whole
+ * time a fiber is parked (that earlier, depth-held-across-park design
+ * wrongly blocked ALL preemption whenever any fiber sat parked).
+ * __xtc_coro_preempt declines while the flag is set, deferring to the
+ * cooperative pending flag.  volatile: the timer handler reads it on
+ * the same thread that maintains it; a stale read only errs toward
+ * "decline", which is safe.
+ */
+static XTC_THREAD_LOCAL volatile int g_in_preempt;
+
+/* A swapcontext that must not be interrupted-and-redirected: mark the
+ * window on both entry and (post-return, either side) exit. */
+#define SAFE_SWAPCONTEXT(from, to) do {                                 \
+	g_in_preempt = 1;                                              \
+	(void)swapcontext((from), (to));                               \
+	g_in_preempt = 0;                                              \
+} while (0)
+
+/*
  * The trampoline that runs as the fiber's entry point.  We pull the
  * coro pointer back from the per-thread cursor (set just before
  * makecontext_swap).
@@ -86,10 +128,39 @@ static void
 __coro_entry(void)
 {
 	struct xtc_coro *c = __xtc_current_coro;
+	/*
+	 * Receiver-side clear: __xtc_coro_step set g_in_preempt just before
+	 * the swapcontext that transferred control here (protecting its
+	 * loop_ctx save).  Now that we hold control on the fiber, that
+	 * save is complete -- clear the guard so this fiber body (which
+	 * may never yield) can be involuntarily preempted.  Without this a
+	 * fresh pure-tight-loop fiber would run with the guard stuck at 1
+	 * and never be sliced.
+	 */
+	g_in_preempt = 0;
 	c->result = c->fn(c->arg);
 	c->done = 1;
 	/* Return to the loop's context. */
-	(void)swapcontext(&c->ctx, &c->loop_ctx);
+	SAFE_SWAPCONTEXT(&c->ctx, &c->loop_ctx);
+}
+
+/*
+ * PUBLIC: int __xtc_coro_preempt_effective __P((void));
+ *
+ * Returns 1 iff this build's coroutine substrate implements the
+ * involuntary preemption redirect (Phase 2b-arch), 0 if it falls back
+ * to Phase 1 cooperative-assisted preemption.  A runtime query so tests
+ * (and callers) need not know the internal substrate/arch macros: it
+ * tracks exactly the #if in __xtc_coro_preempt below.
+ */
+int
+__xtc_coro_preempt_effective(void)
+{
+#if defined(__x86_64__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
+	return 1;
+#else
+	return 0;
+#endif
 }
 
 /*
@@ -124,31 +195,88 @@ __coro_entry(void)
 int
 __xtc_coro_preempt(void *uctx)
 {
+#if defined(__x86_64__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
 	/*
-	 * Signal-context involuntary yield -- DECLINED for now (returns 0 ->
-	 * the timer falls back to Phase 1 cooperative-assisted preemption).
+	 * Phase 2b-arch, x86-64 System V: Go's async-preemption PC
+	 * redirect.  We do NOT copy the (unsound-to-reuse) signal
+	 * ucontext; we rewrite it so that on sigreturn the fiber resumes
+	 * -- on its own stack, with its own real registers -- at
+	 * __xtc_preempt_trampoline, which does a normal cooperative
+	 * xtc_yield() and later returns to the interrupted PC.
 	 *
-	 * A resumable preemption needs the fiber's interrupted machine state
-	 * as a resume point.  The obvious approach -- copy the signal's
-	 * ucontext_t (this uctx arg) into c->ctx and switch to the scheduler
-	 * -- is UNSOUND: a signal-delivered ucontext is not interchangeable
-	 * with a getcontext/swapcontext-captured one (different FP/XSAVE
-	 * state and flags), so the scheduler's later swapcontext(&c->ctx)
-	 * faults (verified: SIGSEGV in swapcontext).  The correct method is
-	 * Go's async preemption: extract only PC/SP/GP registers from the
-	 * signal mcontext and graft them onto a fresh, valid context (or
-	 * redirect the interrupted PC to an on-stack trampoline that then
-	 * does a normal cooperative switch).  That is per-architecture
-	 * assembly (x86-64, aarch64, ...), a bounded but distinctly separate
-	 * effort tracked in docs/M_PREEMPTION.md as Phase 2b-arch.
+	 * Only a real fiber can be preempted (the scheduler thread itself
+	 * has no coro; nothing to yield).  The handler already checked
+	 * crit_depth == 0 and unsafe_depth == 0.
 	 *
-	 * Until then Phase 1 (a timer tick makes xtc_yield_if_due callers
-	 * yield) is the supported preemption; it covers every fiber that
-	 * reaches a yield-check, and untrusted pure-CPU work runs on
-	 * xtc_osproc (an OS thread the kernel preempts).
+	 * RE-ENTRANCY GUARD: a second timer tick that fires after this
+	 * arms the redirect but before the trampoline has finished saving
+	 * the interrupted register file would rewrite the same fiber's
+	 * RIP/RSP a second time and corrupt c->ctx (verified: a rare
+	 * SIGSEGV in the scheduler's swapcontext resume under aggressive
+	 * slicing).  g_in_preempt closes that window: it is set here and
+	 * cleared by the trampoline the instant its saves are complete
+	 * (see __xtc_preempt_armed_clear), so a nested tick in the
+	 * vulnerable window declines and falls back to the pending flag.
+	 */
+	extern void __xtc_preempt_trampoline(void);
+	extern void __xtc_preempt_trampoline_end(void);
+	ucontext_t *uc = (ucontext_t *)uctx;
+	greg_t orig_pc, orig_sp, new_sp;
+
+	if (__xtc_current_coro == NULL)
+		return 0;   /* not in a fiber; leave the tick pending */
+	if (g_in_preempt > 0)
+		return 0;   /* inside a swapcontext or a redirect in flight */
+
+	orig_pc = uc->uc_mcontext.gregs[REG_RIP];
+	orig_sp = uc->uc_mcontext.gregs[REG_RSP];
+
+	/*
+	 * Decline if the fiber is executing inside the trampoline itself
+	 * (prologue saving the register file, the xtc_yield call, or the
+	 * epilogue restoring it): a nested redirect there would corrupt a
+	 * half-saved/half-restored register file.  The epilogue runs with
+	 * g_in_preempt already back to 0, so the flag alone cannot cover
+	 * it -- this instruction-pointer range check does.
+	 */
+	if (orig_pc >= (greg_t)(uintptr_t)&__xtc_preempt_trampoline &&
+	    orig_pc <  (greg_t)(uintptr_t)&__xtc_preempt_trampoline_end)
+		return 0;
+
+	/*
+	 * Push the original PC as the trampoline's return address, so its
+	 * terminal `ret` resumes at orig_pc with RSP == orig_sp exactly.
+	 * Entry RSP for the trampoline is orig_sp - 8; the trampoline
+	 * itself drops past the 128-byte red zone before saving anything,
+	 * so this single 8-byte store is the only write above the
+	 * interrupted RSP and it lands in the red zone (which the
+	 * interrupted code cannot rely on across an asynchronous event).
+	 */
+	new_sp = orig_sp - 8;
+	*(greg_t *)(uintptr_t)new_sp = orig_pc;
+
+	g_in_preempt++;
+	uc->uc_mcontext.gregs[REG_RSP] = new_sp;
+	uc->uc_mcontext.gregs[REG_RIP] =
+	    (greg_t)(uintptr_t)&__xtc_preempt_trampoline;
+	return 1;   /* armed: sigreturn lands in the trampoline */
+#else
+	/*
+	 * Other architectures (aarch64, ...) and the single-file
+	 * amalgamation (which cannot carry the trampoline's .S assembly)
+	 * decline, so the timer falls back to Phase 1 cooperative-assisted
+	 * preemption.  A resumable preemption needs the fiber's
+	 * interrupted machine state as a resume point; the whole-ucontext
+	 * copy is UNSOUND (a signal-delivered ucontext is not
+	 * interchangeable with a swapcontext-captured one -> SIGSEGV in
+	 * swapcontext).  The correct method is per-architecture: extract
+	 * PC/SP from the signal mcontext and redirect the interrupted PC
+	 * to an on-stack trampoline that does a normal cooperative switch
+	 * (see the x86-64 path above and docs/M_PREEMPTION.md).
 	 */
 	(void)uctx;
 	return 0;
+#endif
 }
 
 /*
@@ -170,11 +298,17 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	 * Setting it from the task the loop hands us closes that race. */
 	c->self = self;
 
-	/* Set the per-thread cursor so xtc_yield() can find us. */
+	/* Set the per-thread cursor so xtc_yield() can find us.  Guard from
+	 * here: once __xtc_current_coro == c a timer tick would treat the
+	 * scheduler's own execution as "in fiber c" and could redirect it
+	 * before the swap; hold the guard across the cursor update and the
+	 * swap (the fiber clears it on resume). */
+	g_in_preempt = 1;
 	saved = __xtc_current_coro;
 	__xtc_current_coro = c;
 
 	(void)swapcontext(&c->loop_ctx, &c->ctx);
+	g_in_preempt = 0;
 
 	__xtc_current_coro = saved;
 
@@ -367,9 +501,12 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 	 */
 	me->_parked_on = target;
 	{
-		void *pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
+		void *pctx;
+		g_in_preempt = 1;
+		pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 		(void)swapcontext(&me->ctx, &me->loop_ctx);
 		if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
+		g_in_preempt = 0;
 	}
 	/* When we return here, target->done must be true. */
 	if (result) *result = target->result;
@@ -386,10 +523,17 @@ xtc_yield(void)
 	void *pctx;
 	if (c == NULL) return;
 	/* Preserve the process layer's per-fiber TLS across the yield --
-	 * see the coro_fctx.c xtc_yield for the rationale. */
+	 * see the coro_fctx.c xtc_yield for the rationale.  Guard the whole
+	 * save/swap/restore against involuntary preemption: a redirect
+	 * caught while the machine context OR the per-fiber TLS is
+	 * half-swapped corrupts the fiber.  The receiver-side clear (in
+	 * __xtc_coro_step / __coro_entry) re-opens preemption once control
+	 * has fully landed. */
+	g_in_preempt = 1;
 	pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 	(void)swapcontext(&c->ctx, &c->loop_ctx);
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
+	g_in_preempt = 0;
 }
 
 xtc_task_t *
