@@ -98,6 +98,42 @@ deterministic and correct across a wide interleaving space.
 - The work-stealing executor scales ~8x across 32 cores under the
   realistic distributed-production pattern; a single producer is the
   bottleneck to shard around.
+
+## FOLLOW-UP (2026-07): the 7.7x was mostly benchmark artifact
+
+The 7.7x-on-32-cores number was investigated ("why so low?").  It is
+NOT a scheduler-design limit.  A local 8-core decomposition isolated
+two contention sources, both outside the scheduler:
+
+    variant                          8-core throughput   8-core scaling
+    shared global atomic (this bench)    6.5 M/s          ~4x (plateaus)
+    per-loop isolated counter            8.9 M/s          5.2x
+    no-alloc + per-loop (pure sched)    21.9 M/s          ~10x
+
+1. The benchmark folded every leaf's completion into ONE global
+   atomic (g_done).  That single cache line, written by all cores at
+   millions/sec, ping-pongs across the machine -- textbook false
+   contention, worse with more cores (hence the 32-core collapse).
+   Isolating the counter per loop recovered a large fraction.  Pure
+   BENCHMARK artifact.
+2. The remaining falloff is the per-task ALLOCATOR: xtc_task_spawn
+   mallocs a task + coro struct per unit, and glibc malloc's cross-core
+   arena contention caps spawn-heavy microbenchmarks at millions/sec.
+   Partly libxtc (it allocs per task), partly glibc.
+
+Removing BOTH (a rescheduling worker pool -- no per-unit alloc -- plus
+per-loop counters) shows the executor SCHEDULER scaling ~10x on 8 cores
+(2.2 -> 21.9 M ops/s).  So libxtc's work-stealing scheduler scales
+nearly linearly; the 7.7x figure was dominated by a single shared
+counter in the harness plus allocator pressure, not the runtime.
+
+Implications: (a) real workloads should not funnel through one shared
+atomic (they don't -- each connection/request keeps its own state);
+(b) a per-task slab/freelist for the task+coro structs (instead of
+malloc) would lift the spawn-heavy ceiling -- a concrete, bounded
+optimization (candidate for a future release, akin to the S1 stack
+work).  The corrected headline: the scheduler scales; feed it
+distributed work and pool the per-task allocation.
 - The stackful memory floor is ~1 committed page/parked fiber; S1
   (madvise-on-park) and the stackless tnt layer are the two levers for
   extreme fan-in.
