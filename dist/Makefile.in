@@ -653,6 +653,11 @@ bench_mem_per_task: $(srcdir)/../bench/bench_mem_per_task.c $(STATIC_LIB)
 		-o $@ $(srcdir)/../bench/bench_mem_per_task.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+bench_exec_scale: $(srcdir)/../bench/bench_exec_scale.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_exec_scale.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 bench_fairness: $(srcdir)/../bench/bench_fairness.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_fairness.c \

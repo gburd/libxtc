@@ -95,6 +95,9 @@ __xtc_inbox_drain(xtc_loop_t *loop)
 			break;
 		case XTC_INB_PUBLISH:
 			m->task->all_next = loop->all_tasks;
+			m->task->all_prev = NULL;
+			if (loop->all_tasks != NULL)
+				loop->all_tasks->all_prev = m->task;
 			loop->all_tasks = m->task;
 			(void)__xtc_loop_enqueue(loop, m->task);
 			break;
@@ -133,6 +136,8 @@ xtc_loop_init(xtc_loop_t **out)
 	loop->all_tasks = NULL;
 	loop->all_timers = NULL;
 	loop->timer_slab = NULL;
+	loop->task_free = NULL;
+	loop->task_free_n = 0;
 	loop->timers = NULL;
 	loop->n_timers = loop->cap_timers = 0;
 	atomic_store_explicit(&loop->n_alive, 0, memory_order_relaxed);
@@ -163,6 +168,11 @@ xtc_loop_fini(xtc_loop_t *loop)
 	for (t = loop->all_tasks; t != NULL; t = next_t) {
 		next_t = t->all_next;
 		if (t->cleanup != NULL) t->cleanup(t->cleanup_arg);
+		/* Every task struct was malloc'd via __os_calloc (the free-list
+		 * only recycles between spawns; structs still on all_tasks at
+		 * fini were never recycled), so free them all here.  recyclable
+		 * only marks free-list ELIGIBILITY on completion, not the
+		 * allocation source. */
 		__os_free(t);
 	}
 	for (tm = loop->all_timers; tm != NULL; tm = next_tm) {
@@ -174,6 +184,15 @@ xtc_loop_fini(xtc_loop_t *loop)
 	}
 	if (loop->timer_slab != NULL)
 		xtc_slab_destroy((struct xtc_slab *)loop->timer_slab);
+	/* Drain the task free-list (recycled task structs). */
+	{
+		xtc_task_t *ft, *fn;
+		for (ft = loop->task_free; ft != NULL; ft = fn) {
+			fn = ft->q_next;
+			__os_free(ft);
+		}
+		loop->task_free = NULL;
+	}
 	__os_free(loop->timers);
 	__xtc_inbox_fini(&loop->inbox);
 	(void)xtc_io_fini(loop->io);
@@ -303,6 +322,23 @@ __xtc_loop_step(xtc_loop_t *loop)
 			    memory_order_relaxed);
 			if (t->loop->res != NULL)
 				xtc_res_release(t->loop->res, XTC_RES_TASKS, 1);
+			/*
+			 * Recycle a completed PLAIN task (no cleanup hook) back
+			 * to its home loop's task_slab instead of leaking it into
+			 * all_tasks until loop_fini -- this is the spawn-heavy
+			 * hot path (no malloc/free per unit, no accumulation).
+			 * Only when completing on the HOME loop (t->loop ==
+			 * loop): the all_tasks unlink is not thread-safe, so a
+			 * task that was stolen and completes on the thief is left
+			 * for fini (correct, just not recycled -- a bounded,
+			 * rare case).  Coro-backed tasks (cleanup != NULL) keep
+			 * the cleanup-at-fini path so fiber-stack teardown is
+			 * unchanged. */
+			if (t->cleanup == NULL && t->loop == loop) {
+				extern void __xtc_task_free(xtc_task_t *);
+				__xtc_task_free(t);
+				t = NULL;
+			}
 			break;
 		case XTC_TASK_RESCHED:
 			t->state = XTC_TS_SCHEDULED;
