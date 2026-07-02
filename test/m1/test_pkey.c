@@ -48,9 +48,12 @@ test_pkey(const MunitParameter p[], void *d)
 	 * ASan.  CI runs a non-ASan gcc/clang make check where this
 	 * enforcement path is fully exercised.
 	 */
-#  if defined(__SANITIZE_ADDRESS__) || \
-      (defined(__has_feature) && __has_feature(address_sanitizer))
-	return MUNIT_OK;
+#  if defined(__SANITIZE_ADDRESS__)
+	return MUNIT_OK;                      /* gcc/clang -fsanitize=address */
+#  elif defined(__has_feature)
+#    if __has_feature(address_sanitizer)
+	return MUNIT_OK;                      /* clang feature form */
+#    endif
 #  endif
 	{
 		long pg = sysconf(_SC_PAGESIZE);
