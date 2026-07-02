@@ -1,3 +1,42 @@
+libxtc (0.7.0-1) unstable; urgency=medium
+
+  * Deterministic Simulation Testing (DST) matured toward FoundationDB
+    parity: a seeded, replayable scheduler drives the real multi-loop
+    work-stealing executor; a 20,000-seed soak passes with zero
+    failures across 256 distinct schedules; seeded fault injection,
+    critical-section fault points, simulated I/O faults (deferred
+    seeded AIO completions + short/EIO faults), and FoundationDB-style
+    Buggify (pessimal-path injection in real runtime code) are all in
+    the sim-dst test suite, and the fiber-yielding latches
+    (xtc_amutex/xtc_arwlock) are exercised under the deterministic
+    scheduler.  Wiring the I/O-fault work fixed two latent runtime bugs
+    (a missing per-loop bind and a quiescence stall).
+  * Concurrent B-link node merge is now enabled BY DEFAULT: emptied
+    pages are merged and reclaimed even under concurrent latch-free
+    deletes.  Three fixes made it correct -- descent-level dead/fence
+    revalidation, a buffer-manager reclamation interlock (pin-safe
+    deferred drop + quarantine + dedup-on-publish), and an
+    internal-split hi-fence fix -- verified by a churn-gone gate,
+    ASan, and the 32/32 SQL oracle.
+  * Cooperative-assisted preemption: xtc_exec_set_preempt arms a
+    per-worker CPU-time timer whose ticks make xtc_yield_if_due callers
+    yield, time-slicing a long compute fiber without a manual budget
+    (the first phases of a native preemption facility inspired by CMU's
+    Lightweight Preemptible Functions; see docs/M_PREEMPTION.md).
+  * The Tina-style stackless Isolate layer is now a supported library
+    API (xtc_tnt_*): dense-arena Isolates (hundreds of bytes each, no
+    per-isolate stack) for extreme fan-in, alongside the stackful
+    fiber model.
+  * Portability + build: qualified on musl libc with a CI job (builtin
+    _Unwind_Backtrace tier, no libunwind dependency); optional DPDK
+    dependency wired (configure --with-dpdk); the process registry is
+    now an O(1) chained FNV-1a hash table.
+  * Benchmarks: memory-per-task and fairness-under-a-runaway-task, to
+    measure the stackful-fiber RAM floor and the cooperative-scheduling
+    gap the preemption work closes.
+
+ -- Greg Burd <greg@burd.me>  Wed, 01 Jul 2026 18:00:00 -0400
+
 libxtc (0.6.0-1) unstable; urgency=medium
 
   * sqlxtc example is now a fully libxtc-native SQL engine: the vendored
