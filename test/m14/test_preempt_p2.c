@@ -154,6 +154,23 @@ test_p2_peers_progress_on_ucontext(const MunitParameter p[], void *d)
 	    "peers advanced %d times during a pure-tight-loop runaway "
 	    "(>0 == true preemption fired; 0 == substrate fallback)", peers);
 
+	/*
+	 * On a substrate that implements Phase 2b-arch (x86-64 ucontext,
+	 * the default glibc build), a pure tight loop with no yield points
+	 * MUST have been sliced, so peers MUST have advanced.  This is the
+	 * assertion that proves involuntary preemption actually works --
+	 * Phase 1 cooperative scheduling could never make peers run while a
+	 * non-yielding runaway holds the loop.  On substrates that decline
+	 * the redirect (fctx/musl, winfiber, the amalgamation) peers may be
+	 * 0 (documented fallback); __xtc_coro_preempt_effective() reports
+	 * which, at runtime, so this needs no build-macro visibility.
+	 */
+	{
+		extern int __xtc_coro_preempt_effective(void);
+		if (__xtc_coro_preempt_effective())
+			munit_assert_int(peers, >, 0);
+	}
+
 	xtc_preempt_set_involuntary(0);
 	(void)xtc_exec_fini(e);
 	return MUNIT_OK;

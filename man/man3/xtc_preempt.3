@@ -69,11 +69,29 @@ code as described above.
 .Sh NOTES
 The timer only records ticks; it does not by itself preempt a running
 fiber.  Higher layers of the preemption facility act on the ticks --
-cooperatively (a yield at the next safe point) or, in a later phase, via
-a signal-context involuntary yield.  Nothing arms the timer unless a
-caller opts in, so the cooperative fast path is unchanged when unused.
+cooperatively (a yield at the next safe point) or, when the involuntary
+path is enabled, via a signal-context involuntary yield.  Nothing arms
+the timer unless a caller opts in, so the cooperative fast path is
+unchanged when unused.
+.Pp
+The involuntary path (enabled by
+.Fn xtc_preempt_set_involuntary )
+is EXPERIMENTAL and off by default.  On x86-64 with the ucontext
+coroutine substrate (the default build on glibc) it performs a true
+resumable involuntary yield -- a fiber in a pure CPU loop with no
+cooperative yield points is time-sliced so its loop-mates make progress
+-- using an on-stack trampoline that the signal handler redirects the
+interrupted instruction pointer to (Go's async-preemption method).  On
+other substrates (the fcontext substrate used on musl, the Windows
+fiber substrate) and in the single-file amalgamation it declines and
+falls back to the cooperative path.  It is opt-in because a rare
+livelock has been observed under pathological all-CPU-bound load;
+untrusted pure-CPU work can alternatively run on
+.Xr xtc_osproc 3 ,
+an operating-system thread the kernel preempts.
 .Sh SEE ALSO
 .Xr xtc_async 3 ,
-.Xr xtc_exec 3
+.Xr xtc_exec 3 ,
+.Xr xtc_osproc 3
 .Sh AUTHORS
 .An The XTC Project .
