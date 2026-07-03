@@ -127,7 +127,8 @@ LIB_SRCS	= \
 	$(srcdir)/../src/os/asm/fctx_arm_aapcs.S \
 	$(srcdir)/../src/os/asm/fctx_s390x_zabi.S \
 	$(srcdir)/../src/os/asm/fctx_sparc64_sysv.S \
-	$(srcdir)/../src/os/asm/preempt_trampoline_x86_64.S
+	$(srcdir)/../src/os/asm/preempt_trampoline_x86_64.S \
+	$(srcdir)/../src/os/asm/preempt_trampoline_aarch64.S
 
 LIB_OBJS	= \
 	$(TLS_OBJS) \
@@ -198,7 +199,8 @@ LIB_OBJS	= \
 	fctx_arm_aapcs.o \
 	fctx_s390x_zabi.o \
 	fctx_sparc64_sysv.o \
-	preempt_trampoline_x86_64.o
+	preempt_trampoline_x86_64.o \
+	preempt_trampoline_aarch64.o
 
 LIB_HDR_PUBLIC	= $(srcdir)/../src/inc/xtc.h
 
@@ -633,6 +635,9 @@ fctx_sparc64_sysv.o: $(srcdir)/../src/os/asm/fctx_sparc64_sysv.S
 
 preempt_trampoline_x86_64.o: $(srcdir)/../src/os/asm/preempt_trampoline_x86_64.S
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/asm/preempt_trampoline_x86_64.S
+
+preempt_trampoline_aarch64.o: $(srcdir)/../src/os/asm/preempt_trampoline_aarch64.S
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/asm/preempt_trampoline_aarch64.S
 
 bench_disk: $(srcdir)/../bench/bench_disk.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
