@@ -414,7 +414,15 @@ xtc_chan_mpmc_try_send(xtc_chan_mpmc_t *c, void *msg)
 	(void)__xtc_mtx_lock(&c->lock);
 	if (c->closed) {
 		rc = XTC_E_INVAL;
-	} else if (c->n >= c->cap) {
+	} else if (c->n >= c->cap ||
+	    /* Buggify: under DST, occasionally report a not-yet-full mpmc
+	     * channel as full.  A legal pessimal choice -- try_send is
+	     * documented to return XTC_E_AGAIN and callers must retry --
+	     * stressing the backpressure/retry path deterministically (a
+	     * fresh per-call fault draw so senders retry rather than fail;
+	     * the site coin gates whether it is live).  Mirrors the mpsc
+	     * chan.mpsc.spurious_full site. */
+	    (XTC_SIM_BUGGIFY("chan.mpmc.spurious_full") && xtc_sim_fault(250))) {
 		rc = XTC_E_AGAIN;
 	} else {
 		c->slots[c->head] = msg;

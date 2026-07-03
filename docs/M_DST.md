@@ -182,9 +182,18 @@ replays byte-identically -- same content + engine state hash -- a first
 slice of storage-engine DST), test_sim_machine_death (a seeded
 xtc_exit_pid kill mid-run: exit propagation to a linked ('E') +
 monitored ('D') peer, deterministic one_for_one supervisor restart of
-the killed child, quiescence + replay), and test_sim_swarm (a
-shardable seed sweep combining partition + latency + buggify +
-machine-death, bounded 300-seed default and a manual 100k+ sweep).
+the killed child, quiescence + replay), test_sim_svr (the L4 gen_server
+svr.c: seeded call/cast sequences to an accumulator server, replies are
+running partial sums with no lost/double update, quiescence + replay --
+surfaced + fixed a real xtc_svr_join use-after-free, see below),
+test_sim_chan (the L3 channels chan.c beyond mpsc: mpmc exactly-once
+delivery, watch no-regress latest-value, broadcast full-ordered
+delivery, all replayed), test_sim_buggify3 (the two newest Buggify
+sites -- chan.mpmc.spurious_full + svr.recv.delay_dispatch -- progress +
+activation + replay + disabled=>zero), test_sim_crash_recover (the WAL
+crash-recovery capstone, see below), and test_sim_swarm (a shardable
+seed sweep combining partition + latency + buggify + machine-death,
+bounded 300-seed default and a manual 100k+ sweep).
 
 ## Feature coverage progress (toward modelling all of libxtc)
 
@@ -197,12 +206,38 @@ fault points, the fiber-yielding latches (xtc_amutex, xtc_arwlock:
 mutual exclusion + rwlock exclusivity + no-torn-read under contention),
 simulated I/O faults (deferred seeded AIO completions + short/EIO
 faults), Buggify (FoundationDB-style pessimal-path injection in
-real runtime code), and -- a first slice of storage-engine DST -- the
+real runtime code), the L4 gen_server (svr.c: seeded call/cast
+sequences dispatched by a server proc, deterministic reply values +
+quiescence + replay -- test_sim_svr), the L3 channels beyond the mpsc
+buggify site (chan.c mpmc / watch / broadcast: exactly-once delivery,
+no-regress latest-value, full ordered broadcast, all replayed --
+test_sim_chan), and -- a first slice of storage-engine DST -- the
 sqlxtc buffer manager (the storage concurrency layer: fixes, striped
 page-table locks, cooling-stage eviction, and background cool/flush all
 run under the deterministic scheduler with seeded page-I/O completion
-ordering, and replay).  WAL + crash-recovery under DST remains the
-capstone (see below).
+ordering, and replay).  WAL + crash-recovery under DST is DONE (the
+capstone, test_sim_crash_recover; see below).
+
+Still OUTSIDE sim's reach BY DESIGN (not a coverage gap to close):
+
+- RCU (rcu.c) uses XTC_THREAD_LOCAL per-thread reader state and
+  sched_yield() in synchronize().  Under the single-thread sim every
+  fiber shares ONE __rcu_self slot (so overlapping read-sides from
+  different fibers would corrupt each other's nesting count) and
+  sched_yield() does not yield to the DST scheduler (so a writer
+  spinning in synchronize() would never let a reader advance the epoch).
+  Bringing RCU under DST would require a per-FIBER reader slot and a
+  fiber-yield shim in synchronize() -- a real rcu.c change, deferred.
+  RCU's thread-path correctness stays the domain of TSan / stress tests.
+- The semaphore / gate / barrier primitives (sync.c) block a waiter in
+  raw pthread_cond_wait with NO fiber-yield path (unlike xtc_amutex /
+  xtc_arwlock, which park the fiber -- covered by test_sim_latch).  A
+  fiber that must block on a sem/gate/barrier under the single-thread
+  sim would freeze the whole scheduler (no other OS thread can signal
+  it).  Only the NON-blocking variants (xtc_sem_try_acquire, etc.) are
+  sim-safe today; the blocking paths need the same one-line "yield-and-
+  recheck if on a fiber" shim the roadmap notes for barrier/sem, which
+  is deferred.
 
 ## FoundationDB parity
 
@@ -259,15 +294,90 @@ clock / replay / invariant checks already in place:
   point in REAL runtime code that, once-per-run-per-site (a seeded coin
   cached on first reach), lets the code take a legal-but-pessimal path;
   combined with a per-call xtc_sim_fault coin it fires on a fraction of
-  occurrences.  Now planted at THREE sites: proc.mbox.spurious_full
+  occurrences.  Now planted at FIVE sites: proc.mbox.spurious_full
   (xtc_send reports a soft-cap full early), chan.mpsc.spurious_full
-  (xtc_chan_mpsc_try_send reports full with room to spare), and
+  (xtc_chan_mpsc_try_send reports full with room to spare),
   sched.steal.skip_near (the work-stealing scheduler skips a NUMA-near
-  victim that has stealable work).  test_sim_buggify covers the mailbox
-  site; test_sim_buggify2 covers the channel + steal sites over a
-  work-stealing task workload.  Deterministic + replayable; off in
-  production and when disabled.  Expand by planting more sites in the
-  WAL / buffer-pool / recovery paths.
+  victim that has stealable work), chan.mpmc.spurious_full
+  (xtc_chan_mpmc_try_send reports full with room to spare -- the mpmc
+  twin of the mpsc site), and svr.recv.delay_dispatch (the gen_server
+  yields AFTER receiving a message but BEFORE dispatching it -- the
+  message is in hand, not re-queued, so it cannot be lost; a legal
+  pessimal delay that lets other procs interleave in the recv/dispatch
+  window, and MAY push a slow call past its caller's timeout, a legal
+  XTC_E_AGAIN outcome).  test_sim_buggify covers the mailbox site;
+  test_sim_buggify2 covers the channel(mpsc) + steal sites over a
+  work-stealing task workload; test_sim_buggify3 covers the two new
+  sites (chan.mpmc.spurious_full over an mpmc producer/consumer workload
+  asserting every item is still delivered exactly once, and
+  svr.recv.delay_dispatch over a gen_server call workload asserting
+  replies+timeouts == total with no lost/duplicated reply).
+  Deterministic + replayable; off in production and when disabled.
+  Expand by planting more sites in the WAL / buffer-pool / recovery
+  paths.
+
+- gen_server under DST (DONE, test_sim_svr): the L4 gen_server (svr.c)
+  is an xtc_proc that dispatches each envelope to handle_call /
+  handle_cast; an in-proc call routes its reply back through the
+  caller's mailbox by tag (xtc_recv_match), so BOTH the server's recv
+  loop and the caller's reply wait PARK the fiber and re-run under the
+  seeded scheduler -- exactly the call/reply interleavings a race hides
+  in.  N client procs across loops issue seeded call/cast sequences to
+  an accumulator server; the test asserts (a) QUIESCENCE, (b) the
+  gen_server invariant (each delivered message updates the accumulator
+  exactly once, so every call reply is a running partial sum <= the
+  grand total -- no lost/double update, exactly one reply per call),
+  (c) byte-identical REPLAY (reply multiset + order hash + sim state
+  hash), and (d) a different seed reorders the replies while holding the
+  invariant.  The server's async xtc_svr_stop is drained the FDB way:
+  a winder proc issues the stop INSIDE the sim run (the server exits its
+  recv loop and signals its 'stopped' notify, the run drains and
+  quiesces), then the handle is reclaimed with a NON-blocking
+  xtc_svr_join(svr, 0) AFTER the run returns -- a blocking join would
+  pthread_cond_wait and freeze the single sim thread (sem/gate/notify
+  have no fiber-yield shim), mirroring test_sim_machine_death PART B's
+  supervisor teardown.
+
+  A REAL DEFECT this surfaced (and fixed) in svr.c: xtc_svr_join with a
+  finite timeout freed the server struct UNCONDITIONALLY -- it ignored
+  the xtc_notify_wait result.  If the deadline expired while the server
+  was still running its recv loop, the free happened out from under the
+  live server and its next read of s->stop_requested was a heap-use-
+  after-free.  Found by test_sim_svr + test_sim_buggify3 under ASan (the
+  deterministic scheduler + a slow-server buggify made the timeout race
+  reliably reproducible; confirmed with a minimal ASan reproducer that
+  joins with a short timeout while never stopping the server -- no
+  buggify involved).  This is a real production API hazard, not sim-
+  specific.  Fix: xtc_svr_join now reclaims ONLY when the wait confirms
+  the server stopped (XTC_OK); on timeout it returns XTC_E_AGAIN and
+  leaves the struct intact so the caller can join again.  A blocking
+  join (timeout < 0) waits until the server signals and always reclaims.
+  make check's OTP/gen_server suite (which joins with a 1 s timeout
+  after a prompt stop -> XTC_OK -> free) is unaffected.
+
+- Channels under DST (DONE, test_sim_chan): the L3 channels (chan.c)
+  beyond the mpsc buggify site.  Producers/consumers POLL the
+  non-blocking try_send/try_recv/recv and xtc_yield (or, when a producer
+  parks on a timer, xtc_proc_sleep so the virtual clock advances) back
+  to the seeded scheduler, which owns the interleaving.  Three variants:
+    * mpmc  -- P producers each enqueue a disjoint block into a small
+      bounded channel; C consumers drain until closed+empty.  INVARIANT:
+      every item is consumed EXACTLY ONCE (no drop, no duplicate); the
+      delivery order is part of the replayable schedule.
+    * watch -- a single-slot latest-value channel; a writer publishes a
+      monotonic sequence, readers sample.  INVARIANT: a reader never
+      sees an unpublished value or one that regresses below the last it
+      saw.
+    * broadcast -- one sender, R subscribers on a lossy ring (sized >
+      the message count so a keeping-up subscriber never lags).
+      INVARIANT: each subscriber sees the FULL published sequence in
+      strictly increasing order (never an unpublished / out-of-order
+      value).
+  Each variant asserts quiescence + its delivery invariant + byte-
+  identical replay (set/order hash + sim state hash) + a different seed
+  reorders while holding the invariant.  Footprint is small (few
+  producers/consumers, tiny counts, per-run free) so the suite stays
+  memory-bounded.
 
 - Storage-engine concurrency under DST (FIRST SLICE DONE,
   test_sim_bufmgr): the sqlxtc buffer manager -- the storage engine's
