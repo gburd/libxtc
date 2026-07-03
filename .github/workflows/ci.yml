@@ -266,7 +266,7 @@ jobs:
       - name: sqlxtc in-process tests + amalgamation
         working-directory: examples/06_sqlxtc
         run: |
-          make XTC_BUILD=../../build_ci test-quack test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge test-savepoint test-isolation test-native-txn
+          make XTC_BUILD=../../build_ci test-quack test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge test-savepoint test-isolation test-native-txn
           make XTC_BUILD=../../build_ci amalg
       - name: sqlxtc Lime parser is regenerable + committed copy is current
         working-directory: examples/06_sqlxtc
