@@ -90,6 +90,13 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 		if (exec->loop_node && exec->loop_node[idx] != my_node) continue;
 		victim = exec->loops[idx];
 		if (xtc_deque_len(&victim->deque) == 0) continue;
+		/* Buggify: under DST, occasionally skip a NUMA-near victim that
+		 * has stealable work.  A legal pessimal choice -- the work stays
+		 * on the victim and this thief falls through to pass 2 or retries
+		 * next scheduler turn -- that exercises the less-ideal steal
+		 * placement deterministically. */
+		if (XTC_SIM_BUGGIFY("sched.steal.skip_near") && xtc_sim_fault(200))
+			continue;
 		/* Critical section: the steal CAS races the victim's owner
 		 * popping its own deque bottom.  A DST fault point here lets a
 		 * seeded run perturb/observe the steal-vs-pop interleaving. */
