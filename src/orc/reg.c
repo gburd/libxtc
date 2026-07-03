@@ -16,6 +16,7 @@
 #include "xtc_int.h"
 #include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_reg.h"
+#include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
 
 #include <pthread.h>
 #include <stdint.h>
@@ -164,6 +165,17 @@ xtc_reg_whereis(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid)
 	struct reg_node *node;
 	int rc = XTC_E_INVAL;
 	if (r == NULL || name == NULL || out_pid == NULL) return XTC_E_INVAL;
+	/*
+	 * Buggify: under DST, occasionally report a registered name as
+	 * transiently NOT FOUND (a fresh per-call fault draw so a retrying
+	 * caller eventually resolves it; the site coin gates liveness).  A
+	 * lookup is a hint that may race a concurrent unregister, so a
+	 * transient miss is a legal outcome callers already retry -- this
+	 * stresses that retry path deterministically.  Zero cost when sim
+	 * is inactive.
+	 */
+	if (XTC_SIM_BUGGIFY("reg.whereis.transient_miss") && xtc_sim_fault(250))
+		return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&r->lock);
 	node = __reg_find_locked(r, name, __reg_hash(name));
 	if (node != NULL) {
