@@ -100,8 +100,14 @@ count_rows(bt_t *bt)
 static void
 cap_address_space(void)
 {
-#if !defined(__SANITIZE_ADDRESS__) && \
-    !(defined(__has_feature) && __has_feature(address_sanitizer))
+#if defined(__SANITIZE_ADDRESS__)
+#  define XTC_STEAL_UNDER_ASAN 1
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define XTC_STEAL_UNDER_ASAN 1
+#  endif
+#endif
+#ifndef XTC_STEAL_UNDER_ASAN
 	struct rlimit rl;
 	if (getrlimit(RLIMIT_AS, &rl) == 0) {
 		if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur > (rlim_t)AS_CAP) {
