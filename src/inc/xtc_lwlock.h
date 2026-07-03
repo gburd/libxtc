@@ -61,6 +61,13 @@ typedef struct xtc_lwlock {
 	uint16_t          tranche;       /* user-tag; for diagnostics only */
 	uint8_t           initialised;
 	uint8_t           pad_;
+	/* DST fiber-park wait queue (protected by wait_mu).  Only touched
+	 * when a caller acquires from inside a fiber under the sim
+	 * scheduler; the production OS-thread path uses wait_cv and never
+	 * reads/writes these.  Opaque here -- struct fiber_waiter lives in
+	 * lock_lw.c. */
+	void             *wq_head;
+	void             *wq_tail;
 } xtc_lwlock_t;
 
 /*

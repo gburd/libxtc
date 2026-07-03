@@ -32,6 +32,12 @@
 #include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_inject.h"
 #include "xtc_lwlock.h"
+#include "xtc_loop.h"      /* xtc_task_waker / xtc_waker_wake / park-on-timer */
+#include "xtc_async.h"     /* xtc_yield */
+#include "xtc_proc.h"      /* __xtc_proc_ctx_save/restore */
+#include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
+#include "coro_int.h"      /* __xtc_current_task */
+#include "loop_int.h"      /* xtc_task::park_requested / park_timer */
 
 #include <stdatomic.h>
 #include <string.h>
@@ -268,6 +274,72 @@ __release_state(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 	}
 }
 
+/* ----- DST fiber-park support ---------------------------------------
+ *
+ * PURELY ADDITIVE + gated on __xtc_current_task() != NULL.  A caller
+ * blocking on a contended lwlock acquire from INSIDE a fiber (under the
+ * sim scheduler) parks the fiber -- arms a waker, enqueues on the lock's
+ * FIFO fiber wait queue, drops wait_mu, and xtc_yield()s to the loop --
+ * instead of pthread_cond_wait, which would freeze the single sim
+ * thread.  A release wakes both kinds of waiter (broadcast the condvar
+ * for threads, wake every queued fiber).  On wake the fiber re-CASes the
+ * state word (wake-and-recheck, not direct hand-off: the lock is a
+ * shared count/exclusive bit, not a single ownable token), so a wake
+ * without the lock free simply re-parks -- exactly the semaphore /
+ * lock-manager discipline in sync.c / lock_mgr.c.  An OFF-loop caller
+ * (cur == NULL: OS threads, the blocking pool, tooling) takes the
+ * ORIGINAL pthread_cond_wait path byte for byte. */
+struct lw_fiber_waiter {
+	xtc_waker_t             waker;
+	struct lw_fiber_waiter *next;
+};
+
+/* Enqueue w at the tail of the FIFO fiber wait queue (under wait_mu). */
+static void
+__lw_fw_enqueue(xtc_lwlock_t *l, struct lw_fiber_waiter *w)
+{
+	struct lw_fiber_waiter *tail = l->wq_tail;
+	w->next = NULL;
+	if (tail != NULL) tail->next = w;
+	else l->wq_head = w;
+	l->wq_tail = w;
+}
+
+/* Unlink w from the fiber wait queue if still present (under wait_mu). */
+static void
+__lw_fw_remove(xtc_lwlock_t *l, struct lw_fiber_waiter *w)
+{
+	struct lw_fiber_waiter *p = l->wq_head, *prev = NULL;
+	while (p != NULL) {
+		if (p == w) {
+			if (prev != NULL) prev->next = p->next;
+			else l->wq_head = p->next;
+			if (l->wq_tail == p) l->wq_tail = prev;
+			return;
+		}
+		prev = p;
+		p = p->next;
+	}
+}
+
+/* Wake every queued fiber waker WITHOUT detaching -- each waiter
+ * removes itself only when it actually acquires (wake-and-recheck), so
+ * a loser that re-parks must stay on the queue to be woken by the next
+ * release.  Called UNDER wait_mu: a woken fiber cannot re-acquire
+ * wait_mu (and thus cannot mutate the list) until the caller drops it,
+ * and xtc_waker_wake only marks the task runnable (it does not run it
+ * inline), so waking in place is safe.  A duplicate wake of an
+ * already-runnable waiter is idempotent. */
+static void
+__lw_fw_wake_all(xtc_lwlock_t *l)
+{
+	struct lw_fiber_waiter *p = l->wq_head;
+	while (p != NULL) {
+		(void)xtc_waker_wake(&p->waker);
+		p = p->next;
+	}
+}
+
 /* ----- public API ----- */
 
 int
@@ -324,6 +396,48 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 			(void)__held_push(lock, mode);
 			return XTC_OK;
 		}
+
+		/* Fiber-park path (DST): a caller inside a fiber PARKS instead
+		 * of pthread_cond_wait, yielding to the sim scheduler.  Purely
+		 * additive; gated on running inside a fiber. */
+		{
+			xtc_task_t *cur = __xtc_current_task();
+			if (cur != NULL) {
+				struct lw_fiber_waiter w;
+				void *proc_ctx;
+				int granted = 0;
+				(void)xtc_task_waker(cur, &w.waker);
+				w.next = NULL;
+				__lw_fw_enqueue(lock, &w);
+				for (;;) {
+					if (__try_attempt(lock, mode)) {
+						granted = 1;
+						break;
+					}
+					/* Wake-and-recheck: park until a release
+					 * wakes our waker, then re-CAS.  No
+					 * spurious-decline buggify here -- an
+					 * uncontended acquire has no timeout, so a
+					 * decline-and-re-park with no pending wake
+					 * would hang (unlike the semaphore, whose
+					 * caller retries on a finite timeout). */
+					cur->park_requested = 1;
+					(void)__xtc_mtx_unlock(&lock->wait_mu);
+					proc_ctx = __xtc_proc_ctx_save();
+					xtc_yield();
+					__xtc_proc_ctx_restore(proc_ctx);
+					(void)__xtc_mtx_lock(&lock->wait_mu);
+				}
+				lock->n_waiters--;
+				__lw_fw_remove(lock, &w);
+				(void)__xtc_mtx_unlock(&lock->wait_mu);
+				if (granted) {
+					(void)__held_push(lock, mode);
+					return XTC_OK;
+				}
+			}
+		}
+
 		(void)pthread_cond_wait(&lock->wait_cv, &lock->wait_mu);
 		lock->n_waiters--;
 		(void)__xtc_mtx_unlock(&lock->wait_mu);
@@ -372,6 +486,12 @@ xtc_lwlock_release(xtc_lwlock_t *lock)
 				    memory_order_release, memory_order_relaxed)) break;
 			}
 		}
+		/* Wake any parked fibers (DST): each re-CASes the state and
+		 * re-parks if it lost the race.  Woken IN PLACE under wait_mu
+		 * (not detached) so a re-parking loser stays queued for the
+		 * next release -- avoiding a lost wakeup when several fibers
+		 * contend and only one wins. */
+		__lw_fw_wake_all(lock);
 		(void)__xtc_mtx_unlock(&lock->wait_mu);
 	}
 }
