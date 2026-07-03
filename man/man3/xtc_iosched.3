@@ -1,0 +1,109 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 3, 2026
+.Dt XTC_IOSCHED 3
+.Os
+.Sh NAME
+.Nm xtc_iosched_create ,
+.Nm xtc_iosched_destroy ,
+.Nm xtc_iosched_write ,
+.Nm xtc_iosched_flush ,
+.Nm xtc_iosched_get_stats
+.Nd adaptive write-batching scheduler for the async file path
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_iosched.h
+.Ft int
+.Fn xtc_iosched_create "const xtc_iosched_opts_t *opts" "xtc_iosched_t **out"
+.Ft void
+.Fn xtc_iosched_destroy "xtc_iosched_t *s"
+.Ft int
+.Fn xtc_iosched_write "xtc_iosched_t *s" "const void *buf" "uint32_t len" "int64_t off"
+.Ft int
+.Fn xtc_iosched_flush "xtc_iosched_t *s"
+.Ft void
+.Fn xtc_iosched_get_stats "const xtc_iosched_t *s" "xtc_iosched_stats_t *out"
+.Sh DESCRIPTION
+.Nm xtc_iosched
+is an adaptive write-batching scheduler for a single writer over the
+async file path
+.Pq Xr xtc_aio 3 ,
+intended for the direct-I/O writeback hot path such as a buffer
+manager flusher or a WAL writer.  Queued writes are coalesced into
+batches; each flush issues the batch via
+.Fn xtc_aio_pwrite
+and measures throughput.  When adaptive mode is enabled a genetic
+tuner
+.Pq Xr xtc_dio_sched 3
+evolves the batch size to maximise observed throughput and re-adapts
+when the workload or device behaviour shifts; with adaptive off it
+uses a fixed batch size.
+.Pp
+.Sy Single-writer contract :
+all calls for one scheduler must come from one fiber (the device's
+writer).  This keeps batching free of cross-fiber coordination;
+flushing parks only that fiber.
+.Pp
+.Fn xtc_iosched_create
+creates a scheduler from
+.Fa opts :
+the target descriptor
+.Fa fd ,
+whether to
+.Fa adaptive Ns -tune
+the batch size, the fixed or initial
+.Fa batch_size ,
+the
+.Fa min_batch Ns / Ns Fa max_batch
+gene bounds when adaptive, and the tuner PRNG
+.Fa seed .
+.Pp
+.Fn xtc_iosched_write
+queues a
+.Fa len Ns -byte
+write of
+.Fa buf
+at offset
+.Fa off .
+The buffer must remain valid until the next flush completes.  When the
+queue reaches the current batch size an implicit flush runs, issuing
+the batch and possibly parking the writer fiber.
+.Pp
+.Fn xtc_iosched_flush
+issues all queued writes immediately.
+.Pp
+.Fn xtc_iosched_get_stats
+copies the scheduler's counters into
+.Fa out :
+total
+.Fa writes
+queued,
+.Fa bytes
+written,
+.Fa flushes
+issued, the
+.Fa cur_batch
+size in use, the
+.Fa last_mbps
+throughput of the last flush, and the tuner
+.Fa mutation_rate
+(adaptive only).
+.Pp
+.Fn xtc_iosched_destroy
+frees the scheduler.
+.Sh RETURN VALUES
+.Fn xtc_iosched_create ,
+.Fn xtc_iosched_write ,
+and
+.Fn xtc_iosched_flush
+return
+.Dv XTC_OK
+on success or a negative errno / 
+.Dv XTC_E_*
+code from the underlying flush.
+.Sh SEE ALSO
+.Xr xtc_aio 3 ,
+.Xr xtc_dio_sched 3 ,
+.Xr xtc_fs 3
+.Sh AUTHORS
+.An The XTC Project .

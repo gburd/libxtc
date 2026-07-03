@@ -1,0 +1,95 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 3, 2026
+.Dt XTC_PKEY 3
+.Os
+.Sh NAME
+.Nm xtc_pkey_supported ,
+.Nm xtc_pkey_alloc ,
+.Nm xtc_pkey_protect ,
+.Nm xtc_pkey_set_access ,
+.Nm xtc_pkey_free
+.Nd memory-protection-key (PKU) tier for in-process isolation
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_pkey.h
+.Ft int
+.Fn xtc_pkey_supported "void"
+.Ft int
+.Fn xtc_pkey_alloc "int *out_key"
+.Ft int
+.Fn xtc_pkey_protect "void *addr" "size_t len" "int key"
+.Ft int
+.Fn xtc_pkey_set_access "int key" "int allow_read" "int allow_write"
+.Ft int
+.Fn xtc_pkey_free "int key"
+.Sh DESCRIPTION
+.Nm xtc_pkey
+is an optional memory-protection-key tier for in-process memory
+isolation, built on the hardware protection-key facility (Intel PKU /
+the
+.Xr pkey_alloc 2
+family on Linux/x86 with OSPKE).  A protection key tags a range of
+pages; the calling thread's per-key access rights then gate reads and
+writes to those pages independently of the pages' base protection
+bits, and rights can be flipped cheaply (a register write) without a
+syscall.  This lets a thread temporarily seal off a region -- for
+example to guard a metadata arena against stray writes outside a
+short critical window.
+.Pp
+.Fn xtc_pkey_supported
+returns non-zero if the running kernel and CPU provide protection
+keys.  All other functions return
+.Dv XTC_E_NOSYS
+where the facility is unavailable (non-glibc libc without the
+.Fn pkey_*
+wrappers, non-x86, macOS, Windows), so callers can probe once and
+fall back.
+.Pp
+.Fn xtc_pkey_alloc
+allocates a protection key into
+.Fa *out_key .
+Keys are a scarce hardware resource (typically 15 usable); free them
+with
+.Fn xtc_pkey_free .
+.Pp
+.Fn xtc_pkey_protect
+tags the
+.Fa len
+bytes at
+.Fa addr
+(page-aligned range) with
+.Fa key .
+Access is thereafter gated by the key's per-thread rights.
+.Pp
+.Fn xtc_pkey_set_access
+sets the calling thread's rights for
+.Fa key :
+.Fa allow_read
+and
+.Fa allow_write
+are booleans.  Disabling write, then writing a tagged page, faults
+(delivers
+.Dv SIGSEGV ) .
+Rights are per-thread: each thread sets its own view.
+.Pp
+.Fn xtc_pkey_free
+releases
+.Fa key .
+.Sh RETURN VALUES
+.Fn xtc_pkey_supported
+returns 1 if supported, 0 otherwise.  The
+.Ft int
+functions return
+.Dv XTC_OK
+on success, a negative
+.Dv XTC_E_*
+code on error, or
+.Dv XTC_E_NOSYS
+where protection keys are unavailable.
+.Sh SEE ALSO
+.Xr pkey_alloc 2 ,
+.Xr pkey_mprotect 2 ,
+.Xr xtc_mctx 3
+.Sh AUTHORS
+.An The XTC Project .
