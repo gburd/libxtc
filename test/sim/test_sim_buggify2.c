@@ -35,17 +35,20 @@
  * via xtc_send); together they exercise all three planted sites and
  * prove new pessimal paths do not break progress or determinism.
  *
- * NOTE (discovered DST gap): the COMPLETION SET and buggify activation
- * count replay bit-identically from a seed, but the work-stealing
- * completion ORDER does NOT yet replay when work is concentrated on one
- * loop and stolen by others (an order-sensitive hash diverged across
- * two runs of the same seed; a commutative one is stable).  The seeded
- * SCHED/STEAL streams pick which loop steps and which victim it starts
- * from, but the exact steal interleaving is not yet fully captured, so
- * this test hashes order-insensitively.  Full bit-identical steal-order
- * replay is a tracked DST-parity item (docs/M_DST.md); the invariants
- * asserted here -- every task completes, buggify replays, disabled =>
- * zero -- hold regardless.
+ * REPLAY NOTE (2026-07, gap now FIXED): the work-stealing completion
+ * ORDER now replays bit-identically even when work is concentrated on
+ * one loop and stolen by peers.  The earlier divergence was NOT in the
+ * steal path: xtc_sim_exec_run left __xtc_current_loop dangling at the
+ * last-stepped loop (the sim scheduler binds it per step, like
+ * production, but did not restore it on return).  A second sim run in
+ * the same process then saw a non-NULL binding on entry; when malloc
+ * reused a freed loop's address for the new run's loop-0, a
+ * spawn-from-main (__xtc_current_loop == loop) took the direct-enqueue
+ * path instead of the cross-loop inbox publish path the first run
+ * took, seeding a different initial deque distribution and thus a
+ * different (still valid) steal schedule.  xtc_sim_exec_run now saves
+ * and restores __xtc_current_loop, so this test hashes ORDER-sensitively
+ * and asserts the sequence replays.  See docs/M_DST.md.
  */
 
 #define N_LOOPS 4
@@ -62,7 +65,7 @@ leaf(xtc_task_t *self, void *u)
 	(void)self;
 	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
 	h = atomic_load_explicit(&g_hash, memory_order_relaxed);
-	h = h + (id + 1) * 2654435761u;   /* commutative: order-insensitive */
+	h = h * 1000003L + (id + 1);       /* ORDER-sensitive fold */
 	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
 	return XTC_TASK_DONE;
 }
@@ -120,7 +123,7 @@ main(void)
 	}
 	if (b1 != b2 || h1 != h2) {
 		printf("FAIL: buggify run did not replay (active %d/%d, "
-		    "hash %ld/%ld)\n", b1, b2, h1, h2);
+		    "order-hash %ld/%ld)\n", b1, b2, h1, h2);
 		return 1;
 	}
 	if (boff != 0) {
@@ -133,7 +136,8 @@ main(void)
 	 * the determinism + progress assertions above are the invariants.
 	 * Report activation for visibility. */
 	printf("OK: additional buggify sites under DST -- %d activation(s), "
-	    "all %d tasks completed, replays from seed; disabled => zero\n",
+	    "all %d tasks completed, ORDER-sensitive completion hash replays "
+	    "from seed; disabled => zero\n",
 	    b1, N_TASKS);
 	return 0;
 }

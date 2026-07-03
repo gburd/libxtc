@@ -557,7 +557,25 @@ int
 xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 {
 	long steps = 0;
+	xtc_loop_t *saved;
 	if (e == NULL) return XTC_E_INVAL;
+
+	/* Save the caller's current-loop binding.  __xtc_loop_step (called
+	 * below via __xtc_loop_step_once) binds __xtc_current_loop to the
+	 * loop it steps and does NOT restore it, so on return this thread's
+	 * binding would dangle at the last-stepped loop.  Left dangling, a
+	 * SECOND sim run in the same process would see a non-NULL binding on
+	 * entry: if malloc happened to reuse a freed loop's address for the
+	 * new run's loop, a spawn-from-caller (__xtc_current_loop == loop)
+	 * would take the direct-enqueue path instead of the cross-loop inbox
+	 * publish path the first run took -- a different initial deque
+	 * distribution and thus a different (but still valid) steal schedule.
+	 * That is the work-stealing completion-ORDER replay gap: not the
+	 * steal path itself but leaked per-thread state across runs.  Restore
+	 * on every exit so each run starts from the identical binding, like
+	 * xtc_loop_run already does.  Sim-only: this function only runs under
+	 * sim, so production current-loop handling is unchanged. */
+	saved = __xtc_current_loop;
 
 	xtc_sim_activate(seed);
 	xtc_sim_clock_enable(0);
@@ -574,6 +592,7 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 			e->started = 0;
 			xtc_sim_clock_disable();
 			xtc_sim_deactivate();
+			__xtc_current_loop = saved;
 			return XTC_E_AGAIN;   /* budget exhausted; work may remain */
 		}
 
@@ -603,6 +622,7 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 				e->started = 0;
 				xtc_sim_clock_disable();
 				xtc_sim_deactivate();
+				__xtc_current_loop = saved;
 				return alive > 0 ? XTC_E_DEADLK : XTC_OK;
 			}
 			if (dl > now)
@@ -629,6 +649,7 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 			e->started = 0;
 			xtc_sim_clock_disable();
 			xtc_sim_deactivate();
+			__xtc_current_loop = saved;
 			return rc;
 		}
 		/* Structural invariants must hold after every step; a
@@ -638,6 +659,7 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 			e->started = 0;
 			xtc_sim_clock_disable();
 			xtc_sim_deactivate();
+			__xtc_current_loop = saved;
 			return XTC_E_INTERNAL;
 		}
 	}
@@ -645,6 +667,7 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 	e->started = 0;
 	xtc_sim_clock_disable();
 	xtc_sim_deactivate();
+	__xtc_current_loop = saved;
 	return XTC_OK;
 }
 
