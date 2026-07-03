@@ -25,6 +25,7 @@ test_persist
 test_cursor_resume
 test_clean_restart
 test_steal
+test_steal_page
 test_steal_torn
 test_recover_undo
 test_redo_page

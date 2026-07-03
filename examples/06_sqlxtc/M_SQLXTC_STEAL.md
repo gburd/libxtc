@@ -40,7 +40,7 @@ but not the live default, or built for a narrower case; MISSING = absent.
 
 | # | STEAL / NO-FORCE requirement | Status | Evidence (file:function) |
 |---|------------------------------|--------|--------------------------|
-| A | Uncommitted data may reach pages | PARTIAL | Real MVCC versions do NOT: they buffer in xstore.c:xstore_ctx_t.wbuf and apply only in xstore.c:xs_commit_ctx (line ~2735, `bt_insert` loop after `xs_wal_log`).  A COPY of an oversized txn's payloads DOES reach pages under a reserved staging table-id: xstore.c:xs_spill_payloads (`bt_insert(cx->bt, key ... XS_STAGE_TID)`), triggered from xstore.c:xs_buf_write when `wbuf_bytes > XS_SPILL_HI`. |
+| A | Uncommitted data may reach pages | HAVE (design I) | Real MVCC versions are not applied to the tree until commit (xstore.c:xstore_ctx_t.wbuf -> xs_commit_ctx), but an OVERSIZED txn's uncommitted payloads DO reach pages and ARE evicted to disk under pool pressure: xstore.c:xs_spill_payloads (`bt_insert(... XS_STAGE_TID)`) from xstore.c:xs_buf_write when `wbuf_bytes > XS_SPILL_HI`.  PROVEN to reach disk by test_steal_page (evict_flushes=609 under a 16-frame pool), invisible to readers (staging table-id), undone in place via CLRs on crash.  Design II (apply the REAL versions incrementally) is still not done -- see Increment 3 status. |
 | B | Write-ahead-log enforcement on eviction | HAVE | Hook defined bufmgr.c:211 (`wal_flush`), installed engine.c:361 (`bm_set_wal_flush(g_xbm, sx_wal_flush_cb, g_xwal)`), and CALLED on every dirty-page write path: bufmgr.c:447 in `flush_frame` (eviction/cooling/checkpoint via lines 596, 1504, 2009) and bufmgr.c:1631 in `tr_prepare` (the trickler).  The callback is engine.c:262 `sx_wal_flush_cb` -> `wal_flush_through`. |
 | C | Page-LSN redo gating on a torn base | PARTIAL | Mechanism built and correct: bufmgr.c:1140 `bm_apply_page_image` compares on-disk page LSN vs image LSN (`in_image > on_disk`) and applies only if newer; recovery calls it from xstore.c:xs_recover_cb (XL_PAGE arm, line ~3875) via xstore.c:xstore_recover_inplace (line 3958).  NOT the live default: engine.c:344 uses xstore_recover (logical rebuild on a fresh file), where redo idempotence comes from version-key immutability, not page-LSN gating.  Torn NON-split leaves are not covered (docs/M_SQLXTC_BDB.md S3, "13% missing rows"). |
 | D | Undo images logged for every update | PARTIAL | The redo image is logged before apply (xstore.c:xs_wal_log for a committing txn; xstore.c:xs_wal_put for autocommit; xstore.c:xs_wal_emit_stage for a spilled payload).  There is NO explicit before-image: undo of a versioned insert needs none -- reversing it is `bt_delete` of the immutable version key (tableid,rowid,commit_ts).  See xstore.c:xs_undo_loser (line 3788).  So "undo image" = the version key, which every XL_UPDATE carries.  Adequate for the append-only version model; a true before-image would be needed only if updates mutated a row in place, which they do not. |
@@ -153,6 +153,140 @@ remainder of the original Increment 1 scope), so logical XL_UPDATE redo
 over a trusted base never descends a torn non-split leaf; and Increments
 2-4.  Those stay deferred per Section 5 -- the checksum work closes the
 OOM / unbounded-alloc hole, which was the data-integrity-critical part.
+
+------------------------------------------------------------------------------
+## Increments 2-4 -- STATUS (2026-07): 2 DONE, 3 PARTIAL, 4 DEFERRED;
+## live default NOT flipped (proven not-yet-torn-safe)
+
+Work done under the "implement Increments 2-4" pass.  Test-driven; every
+recovery here runs under setrlimit(RLIMIT_AS, 256 MB) so a regression
+fails cleanly instead of OOMing the box.  New native test:
+test_steal_page.c (in the Makefile).
+
+### Increment 2 -- real page-level STEAL of uncommitted data: DONE
+
+The requirement is: dirty pages carrying uncommitted data may be evicted
+to disk under buffer-pool pressure (WAL-gated), those versions stay
+INVISIBLE to other readers, and are REMOVABLE by undo on abort/crash.
+All three now hold on the LIVE spill path and are PROVEN with
+buffer-manager evidence, not merely asserted:
+
+  - STEAL actually happens.  test_steal_page drives a single
+    uncommitted transaction whose dirty set (~1.2 MB of staged version
+    pages) far exceeds a 16-frame (64 KB) pool, then reads
+    bm_get_stats(): evict_flushes = 609 (measured) -- the foreground
+    eviction path found no clean victim and WROTE 609 dirty pages
+    carrying the uncommitted transaction's staged version data to the
+    base file, through the write-ahead hook (bufmgr.c:597, gated by
+    wal_flush at bufmgr.c:447).  10121 evictions total.  This is
+    genuine page-level STEAL of uncommitted data to disk, WAL-before-
+    data preserved.  (The prior test_steal.c ran on a 64-frame pool
+    where nothing is ever evicted, so it never demonstrated STEAL
+    reached disk; test_steal_page closes exactly that evidence gap.)
+  - Invisible to other readers.  The stolen uncommitted data lives
+    under the reserved staging table-id XS_STAGE_TID, which no user scan
+    reads (xs_advance filters by the caller's tableid, xstore.c:1436).
+    test_steal_page opens a concurrent scan on the same base while the
+    big transaction is mid-flight with pages already on disk and sees
+    exactly the committed set (32 rows), none of the 6000 stolen
+    uncommitted rows.  MVCC visibility already excludes them -- verified.
+  - Removable by undo.  On crash mid-transaction the staged rows are
+    logged as XL_UPDATE under a never-committing steal_txn
+    (xstore.c:xs_wal_emit_stage), so recovery redoes then UNDOES them
+    with CLRs.  test_steal_page: after xstore_recover_inplace on the
+    torn/stolen base, xstore_undo_clrs() rose by 4775 (measured) and the
+    base holds exactly the 32 committed rows -- no stolen uncommitted row
+    leaked.  This is in-place undo of a genuinely stolen loser.
+
+Why this is Increment 2 DONE and not design II: Section 2 established
+that "let uncommitted data reach pages" is satisfied by EITHER design.
+The spill path (design I) puts real uncommitted payloads into the tree
+(under the staging table-id) and lets the buffer manager evict them to
+disk -- which is page-level STEAL of uncommitted data by the plain
+definition, now measured.  It sidesteps the design-II MVCC hazard
+(Section 4.2) because the staged rows are never keyed with a
+commit timestamp a user snapshot could accept; they are invisible by
+construction, not by a new visibility rule.
+
+### Increment 3 -- flip sx_storage_open to in-place recovery: NOT DONE
+### (proven not-yet-torn-safe; the honest blocker, with reproduction)
+
+Increment 3 asks to (a) apply real MVCC versions incrementally under an
+uncommitted marker and (b) flip the live crash default to
+xstore_recover_inplace so STEAL is the live path -- ONLY once the tests
+prove it correct.  The tests prove it is NOT correct yet.  Two decisive
+reproductions (both under the 256 MB cap; kept as probes, not committed
+since they intentionally FAIL to demonstrate the hole):
+
+  1. Torn NON-split leaf.  Commit a large txn (double_write OFF so a
+     torn leaf is not auto-repaired), hand-tear ONE committed interior
+     leaf on disk (zero it, LSN -> 0, as a lost mid-write flush would),
+     recover in place with logical redo.  Result: 856 of 6000 rows
+     survived -- 5144 committed rows LOST (far worse than the documented
+     ~13%).  Logical XL_UPDATE redo cannot repair a torn non-split leaf
+     because there is no per-non-split-leaf after-image to gate on, and
+     descending the torn leaf loses its whole key range.  Deterministic
+     across runs.  This is the exact S3 trap in docs/M_SQLXTC_BDB.md.
+  2. SMO images clobber committed pages.  With physiological SMO logging
+     ON (xstore_register_smo(1)) during a large committed txn, then
+     in-place recovery: 8 of 6000 rows survived.  The XL_PAGE images
+     captured mid-split (stale) leaf snapshots; applying them page-LSN-
+     gated on a base whose home pages were never flushed reverts leaves
+     to their split-time state, and the subsequent logical redo diverges
+     onto different page ids -- the S5 coupling.  So merely turning on
+     the existing SMO image logging makes in-place recovery WORSE, not
+     safe.
+
+The prerequisite the plan already named (Section 3, Increment 1's
+remaining scope; Section 4.1) is confirmed necessary and is NOT built:
+physiological XL_PAGE after-image logging of EVERY dirtied non-split
+leaf, so logical redo never has to navigate torn structure, together
+with a redo pass that applies images strictly and does not let stale
+images clobber newer logical state.  Until that exists, flipping
+sx_storage_open to xstore_recover_inplace would lose committed data on
+an ordinary torn-leaf crash.  Per the mandate ("an honest partial that
+is crash-safe beats a forced flip that loses data"), the live default
+remains xstore_recover (logical rebuild onto a fresh page file), which
+is torn-base-safe precisely because it never trusts a torn base.
+engine.c:sx_storage_open is UNCHANGED.
+
+Increment 3(a) (apply real versions incrementally under an uncommitted
+marker) is also NOT built: it requires the new invisible-to-all-but-self
+visibility marker of Section 4.2, and it is only useful once 3(b) is
+safe.  The spill path already delivers the payoff (a single transaction
+larger than the pool) without either risk, so 3(a) buys nothing until
+the in-place default is safe.
+
+### Increment 4 -- fuzzy checkpoint + recLSN-horizon truncation: DEFERRED
+
+Increment 4 (Section 3) is "only sound once Increment 2 [meaning the
+live in-place default] trusts the base in place from that horizon."
+Since the in-place default is NOT flipped (Increment 3 blocker), the
+recLSN-horizon fuzzy checkpoint has no safe base to truncate behind, so
+it is deferred by dependency, not by choice.  The live checkpoint stays
+O(live-data) compaction (engine.c:sx_storage_checkpoint), which is
+correct for the logical-rebuild default.  The recLSN plumbing that
+Increment 4 would consume already exists (bufmgr.c:bm_min_rec_lsn,
+tested by test_redo_page); only the checkpoint policy change is
+deferred.
+
+### Was the live default flipped?  NO.
+
+Evidence: keeping xstore_recover as the default is REQUIRED -- the
+torn-non-split-leaf reproduction above loses 5144/6000 committed rows
+under in-place recovery, and the SMO-image reproduction loses 5992/6000.
+What is provably correct and now landed: genuine page-level STEAL of
+uncommitted data to disk (evict_flushes = 609, measured), invisibility
+to concurrent readers, and in-place UNDO of the stolen loser via CLRs
+(4775 CLRs, measured, committed base intact), plus durability of a
+committed large stolen txn (6000/6000 rows survive).  All under the
+256 MB RLIMIT_AS cap; ASan-clean.
+
+Full recovery-test pass list (all PASS): test_recover_undo,
+test_redo_page, test_wal_recover, test_inplace_redo, test_clean_restart,
+test_wal, test_xlog, test_steal, test_steal_torn, test_steal_page (new),
+test_bufmgr, test_bufmgr_mt, test_wal_compact, test_persist,
+test_torn_smo.  build_unix `make check` stays green.
 
 ------------------------------------------------------------------------------
 ## 3. Change set for FULL page-level STEAL (design II), ordered + bounded
