@@ -197,7 +197,28 @@ the invariant), test_sim_reg (the process registry reg.c:
 register/whereis/unregister races across loops resolve
 deterministically -- at-most-one holder per name, no lost/duplicate
 registration, exact unregister, replayed; a reg.whereis.transient_miss
-buggify exercises the caller retry), test_sim_buggify3 (the two newest Buggify
+buggify exercises the caller retry), test_sim_lwlock (the M13b
+lightweight lock lock_lw.c: contending fibers park in the acquire
+slow path and are re-granted on release -- EXCLUSIVE mutual exclusion
++ no lost update, SHARED no torn read + writer-exclusive with
+concurrent readers, replayed; needs a fiber-park shim, see below),
+test_sim_lrlock (the wait-free-read Left-Right lock lock_lr.c:
+concurrent readers never observe a torn value under a mutating writer,
+publish is atomic, replayed -- NON-blocking, no shim), test_sim_mctx
+(hierarchical memory contexts mctx.c: byte/chunk accounting is exact,
+reset clears + keeps a context alive, destroy cascades children +
+fires every before-destroy cleanup once with no leak, replayed --
+NON-blocking, no shim), test_sim_slab (the slab + magazine allocator
+slab.c: fibers alloc/stamp/verify/free a shared cache asserting NO
+double-alloc + NO leak (n_inuse 0) + balanced alloc/free, replayed --
+NON-blocking, no shim), test_sim_pdict (the per-process dictionary
+pdict.c: put/get/erase/clear across yields stay correct AND ISOLATED
+between procs -- a get resolves only to the calling proc's own value
+-- replayed, NON-blocking, no shim), test_sim_stats (the
+per-CPU-sharded counters/gauges/histograms stats.c: a shared counter
+read == the exact sum of all fibers' increments, gauge net exact, hist
+count exact + quantile in range, replayed; totals schedule-independent
+-- NON-blocking, no shim), test_sim_buggify3 (the two newest Buggify
 sites -- chan.mpmc.spurious_full + svr.recv.delay_dispatch -- progress +
 activation + replay + disabled=>zero), test_sim_crash_recover (the WAL
 crash-recovery capstone, see below), and test_sim_swarm (a shardable
@@ -228,7 +249,22 @@ gate open/close/drain correctness, all replayed -- test_sim_sync), the
 process registry (reg.c: register/whereis/unregister races across loops
 resolve deterministically -- at-most-one holder per name, no
 lost/duplicate registration, exact unregister, replayed --
-test_sim_reg), and -- a first slice of storage-engine DST -- the
+test_sim_reg), the remaining ptc primitives -- the M13b lightweight
+lock (lock_lw.c: a fiber-park shim lets a fiber blocking on a
+contended acquire PARK instead of freezing the sim thread; EXCLUSIVE
+mutual exclusion + no lost update, SHARED no torn read + concurrent
+readers -- test_sim_lwlock), the wait-free-read Left-Right lock
+(lock_lr.c: concurrent readers never torn under a writer, atomic
+publish -- test_sim_lrlock), hierarchical memory contexts (mctx.c:
+exact byte/chunk accounting, reset-keeps-alive, destroy cascades +
+fires every cleanup once, no leak -- test_sim_mctx), the slab +
+magazine allocator (slab.c: no double-alloc, no leak, balanced
+alloc/free -- test_sim_slab), the per-process dictionary (pdict.c:
+per-proc isolation + exact erase/clear/count -- test_sim_pdict), and
+the per-CPU-sharded counters/gauges/histograms (stats.c: counter read
+== exact increment sum, gauge net exact, hist count exact --
+test_sim_stats) -- all NON-blocking except lwlock, all replayed, and
+-- a first slice of storage-engine DST -- the
 sqlxtc buffer manager (the storage concurrency layer: fixes, striped
 page-table locks, cooling-stage eviction, and background cool/flush all
 run under the deterministic scheduler with seeded page-I/O completion
@@ -252,7 +288,11 @@ Still OUTSIDE sim's reach BY DESIGN (not a coverage gap to close):
   do not ship a racy park" discipline that landed sem/gate/barrier --
   RCU is DEFERRED rather than forced.  Its thread-path correctness stays
   the domain of TSan / stress tests.  (The sem/gate/barrier deferral
-  that used to sit here is now CLOSED -- see test_sim_sync above.)
+  that used to sit here is now CLOSED -- see test_sim_sync above.)  With
+  lwlock / lrlock / mctx / slab / pdict / stats now under DST (see the
+  coverage list above), RCU is the ONE remaining concurrency primitive
+  outside sim's reach -- and it is deferred for the reason above, not
+  for lack of coverage effort.
 
 ## FoundationDB parity
 
@@ -494,6 +534,25 @@ now DONE; the honest scope limits noted per-feature -- raw-socket
 cross-machine transport, physical memory-ordering -- remain out of
 sim's reach by design).
 
+CONCURRENCY-PRIMITIVE COVERAGE IS NOW COMPLETE except RCU: every
+concurrency primitive in the tree is under DST -- the scheduler core,
+cross-loop messaging, the virtual clock, the fiber-yielding latches
+(amutex / arwlock), the blocking sync primitives (sem / gate /
+barrier / notify), the lock manager, the lightweight lock (lwlock),
+the wait-free-read lock (lrlock), memory contexts (mctx), the slab
+allocator, the per-process dictionary (pdict), the stats
+counters/gauges/histograms, the L3 channels, the L4 gen_server, the
+process registry, plus the storage-engine slices (buffer manager, WAL
+crash-recovery).  RCU is the SOLE remaining primitive, DEFERRED for a
+recorded reason (per-OS-thread reader slots + a spinning
+synchronize() -- see the RCU note above), not for lack of coverage.
+The primitives needing a fiber-park shim (a fiber blocking on a
+contended acquire PARKS instead of freezing the sim thread, gated on
+__xtc_current_task() != NULL, production thread path byte-identical)
+are: sem/gate/barrier/notify (sync.c), the lock manager (lock_mgr.c),
+and the lwlock (lock_lw.c); everything else is NON-blocking and needs
+no shim.
+
 - Machine-death / proc-kill simulation (DONE, test_sim_machine_death):
   FoundationDB's "kill a machine mid-run" at the granularity xtc's sim
   models.  A seeded reaper proc, after a seeded virtual-time delay,
@@ -612,7 +671,7 @@ Known gaps and why:
   each run starts from the identical binding.  Sim-only (the function
   only runs under sim); production current-loop handling is unchanged.
   test_sim_buggify2 now hashes the completion sequence ORDER-sensitively
-  and asserts it replays; the full sim suite (11 tests) replays, incl.
+  and asserts it replays; the full sim suite (26 tests) replays, incl.
   under ASan+UBSan.
 
 - Lock manager + deadlock detector (lock_mgr.c): DONE for the fiber path
@@ -633,6 +692,54 @@ Known gaps and why:
   (synchronous, no background thread) since the periodic detector thread
   cannot run on the single sim thread -- the production PERIODIC path is
   retained unchanged for threaded use.
+
+- Lightweight lock (lock_lw.c): DONE for the fiber path
+  (test_sim_lwlock), thread path unchanged.  The M13b lwlock is a
+  multi-reader / single-writer lock over an atomic state word whose
+  contended slow path is a pthread_cond_wait.  A fiber-park path was
+  added -- PURELY ADDITIVE and gated on __xtc_current_task() != NULL,
+  mirroring the sem / lock-manager discipline: a caller blocking on a
+  contended xtc_lwlock_acquire from INSIDE a fiber arms a waker,
+  enqueues on the lock's FIFO fiber wait queue, drops wait_mu, and
+  xtc_yield()s to the loop; on wake it re-CASes the state word
+  (WAKE-AND-RECHECK -- the lock is a shared count / exclusive bit, not
+  a single ownable token, so a wake without the lock free simply
+  re-parks).  A release wakes BOTH kinds of waiter (broadcast the
+  condvar for threads, wake every queued fiber).  Two subtleties the
+  DST test surfaced during development:
+    * A DETACH-ALL wake (splice the whole fiber queue out on release,
+      wake off-lock) LOST a wakeup once 3+ fibers contended: the
+      winner drains, a loser re-parks WITHOUT re-enqueuing (it never
+      left the acquire loop), so the next release found an empty queue
+      and the loser hung (XTC_E_DEADLK).  Fix: the release wakes the
+      queued wakers IN PLACE under wait_mu WITHOUT detaching -- each
+      waiter removes itself only when it actually acquires -- so a
+      re-parking loser stays queued for the next release.  Waking in
+      place under the lock is safe because a woken fiber cannot
+      re-acquire wait_mu (and thus cannot mutate the list) until the
+      releaser drops it, and xtc_waker_wake only marks the task
+      runnable (it does not run it inline).
+    * NO spurious-contention buggify was planted in the acquire park
+      loop: an uncontended acquire has no timeout, so a
+      decline-and-re-park with no pending wake would hang (unlike the
+      semaphore, whose caller retries on a finite timeout).  Per the
+      "do not ship a racy park" discipline the buggify was dropped.
+  A caller NOT on a loop (cur == NULL: OS threads, the blocking pool,
+  tooling) takes the ORIGINAL pthread_cond_wait path byte for byte --
+  test/m13/test_lwlock (the thread-path suite) still passes unchanged,
+  incl. under ASan+UBSan.  The struct gained two opaque void* fields
+  (wq_head / wq_tail) for the fiber queue, zero-initialised by
+  xtc_lwlock_init and never touched on the thread path.  No lwlock bug
+  was found -- the primitive parks and re-grants correctly.
+
+  (A slab.alloc.magazine_miss buggify was PROTOTYPED then REMOVED: the
+  slab allocator backs channels / gen_server, so the new site fired
+  inside test_sim_buggify / test_sim_buggify3 and its per-call
+  xtc_sim_fault draw perturbed those tests' replay -- a documented
+  hazard of adding a draw site on a hot shared path.  test_sim_slab's
+  small chunk_size + magazine already forces the cache-lock slow path
+  naturally, so the buggify added risk for no coverage gain and was
+  dropped rather than shipped.)
 
 - Supervisor restart logic (sup.c): the restart behaviour itself runs
   on a loop and IS deterministic under the sim (verified locally: a
