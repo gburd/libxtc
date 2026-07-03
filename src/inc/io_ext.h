@@ -15,6 +15,7 @@ int  xtc_tls_wants_write __P((const xtc_tls_t *));
 int  xtc_tls_write __P((xtc_tls_t *, const void *, size_t, size_t *));
 int __xtc_io_backend_init __P((xtc_io_t *));
 int __xtc_io_register_wakeup __P((xtc_io_t *, int));
+int __xtc_io_sim_defer_cb __P((xtc_io_t *, int64_t, void (*)(void *), void *));
 int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *));
 int xtc_io_del_fd __P((xtc_io_t *, int));
 int xtc_io_fini __P((xtc_io_t *));

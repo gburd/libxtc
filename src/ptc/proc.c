@@ -38,6 +38,22 @@
 
 /* ---------- envelope ---------- */
 
+/*
+ * Deferred cross-loop delivery (DST net-latency).  In a sim build the
+ * sim I/O backend enqueues a callback on the target loop's event store
+ * to run at a virtual-time deadline; a non-sim build has no such backend,
+ * so a stub reports "unavailable" and the delay path is never taken
+ * (xtc_sim_net_latency only fires under sim anyway).  This keeps proc.c
+ * linkable in every build -- mirrors exec.c's __xtc_io_sim_next_due. */
+#if defined(XTC_IO_BACKEND_SIM)
+extern int __xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns,
+    void (*fn)(void *), void *arg);
+#else
+static inline int __xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns,
+    void (*fn)(void *), void *arg)
+{ (void)io; (void)due_ns; (void)fn; (void)arg; return XTC_E_NOSYS; }
+#endif
+
 struct envelope {
 	struct envelope *next;
 	xtc_pid_t        from;
@@ -588,7 +604,7 @@ __mbox_pop_locked(struct xtc_proc *p)
 }
 
 static int
-__mbox_deliver(struct xtc_proc *p, struct envelope *e)
+__mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
 {
 	int armed;
 	int wm_fire = 0;
@@ -649,6 +665,78 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 		(void)xtc_waker_wake(&p->recv_waker);
 	}
 	return XTC_OK;
+}
+
+/*
+ * DST net-latency: a deferred cross-loop delivery.  The sim I/O backend
+ * runs this on the TARGET loop's poll drain at now + a seeded latency
+ * (enqueued by __mbox_deliver below).  It pushes into the mailbox via
+ * __mbox_deliver_locked -- the identical production path -- so a delayed
+ * message behaves exactly like an on-time one, just observed later in
+ * virtual time.  Single sim thread, so no lifecycle race beyond the
+ * mbox_lock the push already takes.
+ */
+struct __mbox_deferred { struct xtc_proc *p; struct envelope *e; };
+
+static void
+__mbox_deferred_run(void *arg)
+{
+	struct __mbox_deferred *d = arg;
+	(void)__mbox_deliver_locked(d->p, d->e);
+	free(d);
+}
+
+static int
+__mbox_deliver(struct xtc_proc *p, struct envelope *e)
+{
+	/*
+	 * DST cross-loop network model (sim only; a single relaxed load
+	 * gates it out of production).  Loops are identified by pid.loop_id
+	 * (== exec_id + 1; 0 == standalone).  A partition cut DROPS the
+	 * message via the sender's existing soft-full path (XTC_E_AGAIN); a
+	 * net-latency window DEFERS the delivery to now + a seeded latency so
+	 * delivery ORDER is part of the replayable schedule.  Off by default.
+	 */
+	if (__xtc_sim_active()) {
+		xtc_loop_t *src = __xtc_current_loop;
+		xtc_loop_t *dst = p->loop;
+		int src_id = (src == NULL) ? -1
+		    : (src->exec_id < 0 ? 0 : src->exec_id + 1);
+		int dst_id = (dst == NULL) ? -1
+		    : (dst->exec_id < 0 ? 0 : dst->exec_id + 1);
+		int cross = (src != NULL && dst != NULL && src != dst);
+
+		if (cross && __xtc_sim_partition_blocked(src_id, dst_id)) {
+			/* Partitioned: drop like a soft-full mailbox.  The
+			 * sender already handles XTC_E_AGAIN, so a partitioned
+			 * peer never deadlocks the sim. */
+			(void) __proc_mtx_lock(&p->mbox_lock);
+			p->mbox_drop_total++;
+			(void) __proc_mtx_unlock(&p->mbox_lock);
+			__env_free(e);
+			return XTC_E_AGAIN;
+		}
+		if (cross && dst->io != NULL) {
+			int64_t lat = __xtc_sim_net_latency();
+			if (lat > 0) {
+				struct __mbox_deferred *d = malloc(sizeof *d);
+				if (d != NULL) {
+					int64_t now = 0;
+					(void)__os_clock_mono(&now);
+					d->p = p;
+					d->e = e;
+					if (__xtc_io_sim_defer_cb(dst->io,
+					    now + lat, __mbox_deferred_run,
+					    d) == XTC_OK)
+						return XTC_OK;
+					free(d);
+				}
+				/* alloc/defer failed: deliver inline (correct,
+				 * just not delayed). */
+			}
+		}
+	}
+	return __mbox_deliver_locked(p, e);
 }
 
 /* ---------- spawn entry trampoline ---------- */

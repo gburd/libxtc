@@ -155,7 +155,10 @@ park/wake replay), test_sim_fault (seeded fault-schedule replay),
 test_sim_soak (seed sweep + invariants + schedule exploration),
 test_sim_critsec (seeded critical-section fault points), test_sim_latch
 (the fiber-yielding latches xtc_amutex/xtc_arwlock: mutual exclusion +
-rwlock exclusivity + no-torn-read under contention, replayed).
+rwlock exclusivity + no-torn-read under contention, replayed),
+test_sim_partition (a seeded cross-loop network partition: cut groups
+drop messages, connected groups deliver, the run quiesces without a
+partitioned-peer deadlock, and replays identically).
 
 ## Feature coverage progress (toward modelling all of libxtc)
 
@@ -177,6 +180,50 @@ clock / replay / invariant checks already in place:
 
 - Simulated I/O fault injection (DONE, test_sim_iofault): deferred
   seeded AIO completion ordering + short-transfer / EIO faults.
+- Simulated network partition + message latency (DONE,
+  test_sim_partition): a seeded, deterministic model of a partitioned /
+  lossy / delayed network at the cross-LOOP message granularity the sim
+  models.  xtc_send between procs on different loops routes through
+  __mbox_deliver (proc.c) -- the single cross-loop delivery seam -- and
+  three knobs hook it, all OFF by default (no behaviour change in
+  production or in a normal sim run):
+    * xtc_sim_partition_set(src_loop_id, dst_loop_id, blocked): set/clear
+      one directed edge in a partition matrix indexed by pid.loop_id
+      (== exec_id + 1; 0 == standalone).  A blocked edge makes
+      __mbox_deliver DROP the message via the sender's EXISTING soft-full
+      path (XTC_E_AGAIN) -- the sender already handles that return, so a
+      partitioned peer never deadlocks the sim (the DST test asserts
+      clean quiescence, not XTC_E_DEADLK).
+    * xtc_sim_partition_isolate(loop_id): cut a loop off from every other
+      loop in both directions (a fully-partitioned / dead-machine peer);
+      same-loop delivery is left intact.
+    * xtc_sim_partition_clear(): heal the network (clear the matrix,
+      disable partitioning, clear the latency window).
+    * xtc_sim_net_latency(min_ns, max_ns): defer each surviving cross-loop
+      delivery to now + a seeded latency in [min,max] drawn from the IO
+      stream (not a new PRNG stream, so enabling latency does not perturb
+      the schedule).  The delivery is enqueued on the TARGET loop's sim
+      event store (via __xtc_io_sim_defer_cb) at a virtual-time deadline;
+      __xtc_io_sim_next_due already reports it, so the scheduler advances
+      the clock to it and an in-flight delayed message is never mistaken
+      for a deadlock.  Delivery ORDER across concurrent sends thus becomes
+      part of the replayable schedule.
+  test_sim_partition splits 4 loops into two groups A={0,1}, B={2,3},
+  cuts every cross-group edge, and asserts: (a) within-group cross-loop
+  messages still deliver (4 of 12 sends land), (b) the run reaches
+  quiescence (no hang -- a partitioned peer cannot receive its cross-
+  group messages yet does not deadlock), (c) the seeded run REPLAYS
+  identically (arrival count + order hash + sim state hash), and (d) with
+  the partition cleared all 12 messages deliver.
+
+  HONEST LIMITATION: this covers the IN-PROCESS cross-loop message path
+  only.  xtc's real cross-MACHINE transport is raw sockets (io_net.c),
+  which cannot run under the single-thread sim (a blocking recv/send on a
+  real fd has no fiber-yield seam and the sim I/O backend does not model
+  a socket wire).  Simulating raw sockets / TLS deterministically is a
+  separate, much larger effort and is NOT modelled here; the partition /
+  latency knobs act at loop granularity, which is exactly what xtc's sim
+  faithfully represents.
 - Buggify (DONE, test_sim_buggify): xtc_sim_buggify(name) is a named
   point in REAL runtime code that, once-per-run-per-site (a seeded coin
   cached on first reach), lets the code take a legal-but-pessimal path;
@@ -191,31 +238,44 @@ clock / replay / invariant checks already in place:
   production and when disabled.  Expand by planting more sites in the
   WAL / buffer-pool / recovery paths.
 
-Still to reach full FDB parity: network-partition / machine-death
-simulation (kill a loop's procs mid-run, drop cross-loop messages by a
-seeded partition matrix), a swarm/soak fleet (millions of seeds), and
-the capstone -- a full sqlxtc-under-sim WAL+recovery test with seeded
-crashes.
+Still to reach full FDB parity: machine-death simulation (kill a loop's
+procs mid-run), a swarm/soak fleet (millions of seeds), and the capstone
+-- a full sqlxtc-under-sim WAL+recovery test with seeded crashes.
+(Network-partition simulation is now DONE at loop granularity -- see the
+simulated network partition entry above.)
 
 Known gaps and why:
 
-- Work-stealing completion ORDER is not yet bit-identical under replay.
-  Discovered by test_sim_buggify2 (2026-07): when 400 plain tasks are
-  spawned on one loop and stolen by three idle peers, the COMPLETION
-  SET and the buggify activation count replay identically from a seed,
-  but an ORDER-SENSITIVE hash of the completion sequence diverged
-  across two runs of the same seed (a commutative hash is stable).  The
-  seeded SCHED stream picks which loop steps and the seeded STEAL
-  stream picks each thief's victim start, so the choice inputs are
-  captured -- yet the exact steal interleaving is not fully pinned.
-  When tasks are DISTRIBUTED across loops (test_sim_sched) each loop
-  runs its own queue and an order-sensitive hash DOES replay, so the
-  gap is specific to the steal path.  Root cause not yet isolated
-  (candidate: __sim_loop_runnable's steal-readiness interacting with
-  __xtc_exec_try_steal's two-pass victim walk, or the deque top/bottom
-  snapshot across steps).  Full bit-identical steal-order replay is
-  required for FDB parity; the progress + set-determinism invariants
-  hold today.
+- Work-stealing completion ORDER is now bit-identical under replay
+  (FIXED 2026-07).  Discovered by test_sim_buggify2: when 400 plain
+  tasks are spawned on one loop and stolen by three idle peers, an
+  ORDER-SENSITIVE hash of the completion sequence diverged across two
+  runs of the SAME seed IN THE SAME PROCESS (the completion SET and the
+  buggify activation count always replayed; a commutative hash was
+  stable; and two SEPARATE processes each produced the same value).
+  Root cause: the leak was NOT in the steal path (the two-pass victim
+  walk, the seeded STEAL/SCHED streams, or a deque top/bottom snapshot
+  were all deterministic).  It was leaked per-thread state ACROSS runs.
+  __xtc_loop_step binds __xtc_current_loop to the loop it steps -- the
+  DST scheduler multiplexes N loops on one thread, so each step must
+  rebind it -- but xtc_sim_exec_run did NOT restore it on return (unlike
+  xtc_loop_run, which saves/restores).  On return the calling thread's
+  binding dangled at the last-stepped loop.  A SECOND sim run in the
+  same process then saw a non-NULL binding on entry; when malloc reused
+  a freed loop's address for the new run's loop-0 (observed: identical
+  address across runs), a spawn-from-caller took the
+  __xtc_current_loop == loop DIRECT-enqueue path (filling the deque to
+  256 immediately) instead of the cross-loop inbox PUBLISH path the
+  first run took (deque empty until drained).  That different initial
+  deque distribution made a different set of loops runnable at step 0
+  (peer-stealable vs not), so the seeded scheduler produced a different
+  -- still valid -- steal interleaving.  Fix: xtc_sim_exec_run now saves
+  __xtc_current_loop on entry and restores it on every exit path, so
+  each run starts from the identical binding.  Sim-only (the function
+  only runs under sim); production current-loop handling is unchanged.
+  test_sim_buggify2 now hashes the completion sequence ORDER-sensitively
+  and asserts it replays; the full sim suite (9 tests) replays, incl.
+  under ASan+UBSan.
 
 - Lock manager + deadlock detector (lock_mgr.c): NOT DST-able as built.
   A contended xtc_lock_get blocks via pthread_cond_wait (an OS-thread
