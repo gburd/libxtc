@@ -290,8 +290,14 @@ main(void)
 	 * shadow memory, which a 256 MB RLIMIT_AS denies ("Failed to mmap").
 	 * Under ASan the cap is unnecessary anyway -- ASan itself catches the
 	 * allocation bug -- so leave RLIMIT_AS alone in that build. */
-#if !defined(__SANITIZE_ADDRESS__) && \
-    !(defined(__has_feature) && __has_feature(address_sanitizer))
+#if defined(__SANITIZE_ADDRESS__)
+#  define XTC_STEAL_UNDER_ASAN 1
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define XTC_STEAL_UNDER_ASAN 1
+#  endif
+#endif
+#ifndef XTC_STEAL_UNDER_ASAN
 	if (getrlimit(RLIMIT_AS, &rl) == 0) {
 		if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur > (rlim_t)AS_CAP) {
 			rl.rlim_cur = (rlim_t)AS_CAP;
