@@ -315,8 +315,10 @@ default-on land in the following release.
   interrupted code.  test/m14/test_preempt_p2.c now ASSERTS that a pure
   tight loop with no yield points is sliced (peers advance ~1000-1500x)
   wherever __xtc_coro_preempt_effective() reports the redirect is active
-  (x86-64 ucontext); on fctx/musl, winfiber, and the amalgamation (which
-  cannot carry the .S) it DECLINES and falls back to Phase 1.
+  (x86-64 and aarch64 ucontext); on fctx/musl, winfiber, and the
+  amalgamation (which cannot carry the .S) it DECLINES and falls back
+  to Phase 1.  __xtc_coro_preempt_effective() reports at runtime which
+  is active.
 
   Correctness: the redirect must never fire while a context is
   mid-switch or the trampoline is mid-save/restore, or a half-written
@@ -329,18 +331,47 @@ default-on land in the following release.
   both, 800+ pathological-stress runs (8 pure-CPU runaways monopolizing
   one loop at 40-100us slices) are crash-free and ASan-clean.
 
-  Status: SUPPORTED but OPT-IN and EXPERIMENTAL.  It is enabled only by
-  an explicit xtc_preempt_set_involuntary(1) (off by default; Phase 1
-  cooperative is the default).  KNOWN LIMITATION: under that same
-  pathological stress there remains an extremely rare (<1/6000) HANG
-  (not a crash) -- a livelock/lost-wakeup distinct from the register
-  corruption that guards (1)/(2) fixed.  It has not been observed under
-  any realistic workload (real fibers yield at I/O rather than pure-CPU
-  spinning), which is why the involuntary path is opt-in.  Root-causing
-  the residual hang is tracked as a bounded follow-up.  Meanwhile
-  untrusted pure-CPU work can also use xtc_osproc (an OS thread the
-  kernel preempts), and every cooperating fiber is covered by Phase 1.
+  A THIRD hazard was found and fixed: a fiber preempted while holding a
+  pthread_mutex deadlocked the loop, because the loop runs many fibers
+  on one OS thread -- the preempted holder plus another same-loop fiber
+  blocking on the same mutex wedges the thread (a holder can only
+  release by being rescheduled, which needs the thread now blocked in
+  pthread_mutex_lock).  This was the earlier "rare hang": captured on a
+  96-vCPU EC2 host running the stress 90-way in parallel (a hang in
+  __notify_links_and_monitors on tbl->lock).  Fixed by making the
+  library's own locks preemption-safe -- __os_mutex_* and the new
+  __xtc_mtx_lock/unlock bracket __xtc_unsafe_enter/leave, and every
+  fiber-reachable internal lock (proc, sync, chan, lock_mgr, lock_lr,
+  lock_lw, rcu, pdict, blocking, stats, alloc_audit, inject, cfg, mctx,
+  sup, svr, reg, tnt) now goes through them so a tick landing inside a
+  held lock defers to the cooperative path.  After the fix the same
+  stress ran 62,000+ times crash- and hang-free on the 96-vCPU host.
 
-  Remaining arches (aarch64, ...): the mechanism is identical, only the
+  aarch64 (AAPCS64): the trampoline is preempt_trampoline_aarch64.S,
+  the identical Go-style PC redirect adapted to arm64 (no red zone;
+  orig_pc staged in a 16-aligned scratch slot below the interrupted
+  sp).  It saves x0-x30, NZCV, and the full v0-v31 + FPSR/FPCR file,
+  and restores all of them exactly except ONE register: aarch64 has no
+  instruction that restores every GP register AND redirects PC+SP with
+  zero free registers, so exactly one scratch is unavoidable.  We
+  sacrifice only x16 (IP0), the ABI's intra-procedure-call temporary
+  that the compiler treats as clobbered across any call -- the same
+  minimal tradeoff Go's arm64 async preemption makes.  Validated on a
+  64-vCPU Graviton3: peers advance during a pure tight loop (true
+  preemption), 54,000+ pathological-stress runs crash- and hang-free
+  (an x16+x17 first cut showed 1 crash in 19k; restoring x17 and
+  sacrificing only x16 eliminated it), full make check green.
+
+  Status: SUPPORTED but OPT-IN and EXPERIMENTAL on x86-64 and aarch64.
+  Enabled only by an explicit xtc_preempt_set_involuntary(1) (off by
+  default; Phase 1 cooperative is the default).  The earlier rare hang
+  is fixed (see above); the remaining honest caveat is the aarch64 x16
+  sacrifice, which has not produced an observed failure across 54k+
+  stress runs but is documented as a theoretical residue.  Untrusted
+  pure-CPU work can also use xtc_osproc (an OS thread the kernel
+  preempts), and every cooperating fiber is covered by Phase 1.
+
+  Remaining arches beyond x86-64 + aarch64 (ppc64le, riscv64, ...): the
+  mechanism is identical, only the
   per-arch mcontext register names (.pc/.sp) and trampoline asm differ;
   a bounded follow-up.

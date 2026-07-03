@@ -156,7 +156,8 @@ __coro_entry(void)
 int
 __xtc_coro_preempt_effective(void)
 {
-#if defined(__x86_64__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
+#if (defined(__x86_64__) || defined(__aarch64__)) && \
+    !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
 	return 1;
 #else
 	return 0;
@@ -259,6 +260,45 @@ __xtc_coro_preempt(void *uctx)
 	uc->uc_mcontext.gregs[REG_RSP] = new_sp;
 	uc->uc_mcontext.gregs[REG_RIP] =
 	    (greg_t)(uintptr_t)&__xtc_preempt_trampoline;
+	return 1;   /* armed: sigreturn lands in the trampoline */
+#elif defined(__aarch64__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
+	/*
+	 * Phase 2b-arch, AArch64 (AAPCS64): the same Go-style PC redirect
+	 * as x86-64.  aarch64 has no red zone, so we place orig_pc in a
+	 * 16-aligned scratch slot just below the interrupted sp and set the
+	 * trampoline's entry sp there; the trampoline recovers orig_pc and
+	 * orig_sp from that slot on resume.  See
+	 * preempt_trampoline_aarch64.S for the register-file save/restore
+	 * and the x16/x17 caveat.
+	 */
+	extern void __xtc_preempt_trampoline(void);
+	extern void __xtc_preempt_trampoline_end(void);
+	ucontext_t *uc = (ucontext_t *)uctx;
+	unsigned long orig_pc, orig_sp, scratch;
+
+	if (__xtc_current_coro == NULL)
+		return 0;
+	if (g_in_preempt > 0)
+		return 0;
+
+	orig_pc = (unsigned long)uc->uc_mcontext.pc;
+	orig_sp = (unsigned long)uc->uc_mcontext.sp;
+
+	if (orig_pc >= (unsigned long)(uintptr_t)&__xtc_preempt_trampoline &&
+	    orig_pc <  (unsigned long)(uintptr_t)&__xtc_preempt_trampoline_end)
+		return 0;
+
+	/* 16-aligned scratch below the interrupted sp; stash orig_pc there.
+	 * orig_sp is already 16-aligned per AAPCS64, so orig_sp - 16 is
+	 * 16-aligned.  The trampoline reads orig_pc from [scratch] and
+	 * recovers orig_sp == scratch + 16. */
+	scratch = orig_sp - 16;
+	*(unsigned long *)(uintptr_t)scratch = orig_pc;
+
+	g_in_preempt++;
+	uc->uc_mcontext.sp = (unsigned long long)scratch;
+	uc->uc_mcontext.pc =
+	    (unsigned long long)(uintptr_t)&__xtc_preempt_trampoline;
 	return 1;   /* armed: sigreturn lands in the trampoline */
 #else
 	/*
