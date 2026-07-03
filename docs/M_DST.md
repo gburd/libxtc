@@ -181,9 +181,13 @@ clock / replay / invariant checks already in place:
   point in REAL runtime code that, once-per-run-per-site (a seeded coin
   cached on first reach), lets the code take a legal-but-pessimal path;
   combined with a per-call xtc_sim_fault coin it fires on a fraction of
-  occurrences.  First planted at proc.mbox.spurious_full (xtc_send
-  reports a soft-cap full early), exercising every sender's
-  backpressure-retry path.  Deterministic + replayable; off in
+  occurrences.  Now planted at THREE sites: proc.mbox.spurious_full
+  (xtc_send reports a soft-cap full early), chan.mpsc.spurious_full
+  (xtc_chan_mpsc_try_send reports full with room to spare), and
+  sched.steal.skip_near (the work-stealing scheduler skips a NUMA-near
+  victim that has stealable work).  test_sim_buggify covers the mailbox
+  site; test_sim_buggify2 covers the channel + steal sites over a
+  work-stealing task workload.  Deterministic + replayable; off in
   production and when disabled.  Expand by planting more sites in the
   WAL / buffer-pool / recovery paths.
 
@@ -194,6 +198,24 @@ the capstone -- a full sqlxtc-under-sim WAL+recovery test with seeded
 crashes.
 
 Known gaps and why:
+
+- Work-stealing completion ORDER is not yet bit-identical under replay.
+  Discovered by test_sim_buggify2 (2026-07): when 400 plain tasks are
+  spawned on one loop and stolen by three idle peers, the COMPLETION
+  SET and the buggify activation count replay identically from a seed,
+  but an ORDER-SENSITIVE hash of the completion sequence diverged
+  across two runs of the same seed (a commutative hash is stable).  The
+  seeded SCHED stream picks which loop steps and the seeded STEAL
+  stream picks each thief's victim start, so the choice inputs are
+  captured -- yet the exact steal interleaving is not fully pinned.
+  When tasks are DISTRIBUTED across loops (test_sim_sched) each loop
+  runs its own queue and an order-sensitive hash DOES replay, so the
+  gap is specific to the steal path.  Root cause not yet isolated
+  (candidate: __sim_loop_runnable's steal-readiness interacting with
+  __xtc_exec_try_steal's two-pass victim walk, or the deque top/bottom
+  snapshot across steps).  Full bit-identical steal-order replay is
+  required for FDB parity; the progress + set-determinism invariants
+  hold today.
 
 - Lock manager + deadlock detector (lock_mgr.c): NOT DST-able as built.
   A contended xtc_lock_get blocks via pthread_cond_wait (an OS-thread

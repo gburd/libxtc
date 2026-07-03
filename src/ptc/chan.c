@@ -9,6 +9,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_sim.h"       /* XTC_SIM_BUGGIFY: DST pessimal-path injection */
 #include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_chan.h"
 
@@ -204,7 +205,15 @@ xtc_chan_mpsc_try_send(xtc_chan_mpsc_t *c, void *msg)
 	for (;;) {
 		head = atomic_load_explicit(&c->head, memory_order_relaxed);
 		tail = atomic_load_explicit(&c->tail, memory_order_acquire);
-		if (XTC_UNLIKELY(head - tail >= c->cap)) {
+		if (XTC_UNLIKELY(head - tail >= c->cap) ||
+		    /* Buggify: under DST, occasionally report a not-yet-full
+		     * channel as full.  A legal pessimal choice -- try_send is
+		     * documented to return XTC_E_AGAIN and callers must retry --
+		     * that stresses the backpressure/retry path deterministically
+		     * (a fresh per-call fault draw so senders retry rather than
+		     * permanently fail; the site coin gates whether it is live). */
+		    (XTC_SIM_BUGGIFY("chan.mpsc.spurious_full") &&
+		     xtc_sim_fault(250))) {
 			if (c->res != NULL)
 				xtc_res_release(c->res, XTC_RES_CHAN_SLOTS, 1);
 			return XTC_E_AGAIN;
