@@ -188,7 +188,16 @@ running partial sums with no lost/double update, quiescence + replay --
 surfaced + fixed a real xtc_svr_join use-after-free, see below),
 test_sim_chan (the L3 channels chan.c beyond mpsc: mpmc exactly-once
 delivery, watch no-regress latest-value, broadcast full-ordered
-delivery, all replayed), test_sim_buggify3 (the two newest Buggify
+delivery, all replayed), test_sim_sync (the blocking M9 sync
+primitives sync.c -- semaphore / barrier / gate -- driven under the
+new fiber-park path: no over-admission past a counting semaphore's
+count, all barrier parties released together, gate open/close/drain
+correctness, all replayed; a sync.sem.spurious_timeout buggify holds
+the invariant), test_sim_reg (the process registry reg.c:
+register/whereis/unregister races across loops resolve
+deterministically -- at-most-one holder per name, no lost/duplicate
+registration, exact unregister, replayed; a reg.whereis.transient_miss
+buggify exercises the caller retry), test_sim_buggify3 (the two newest Buggify
 sites -- chan.mpmc.spurious_full + svr.recv.delay_dispatch -- progress +
 activation + replay + disabled=>zero), test_sim_crash_recover (the WAL
 crash-recovery capstone, see below), and test_sim_swarm (a shardable
@@ -211,7 +220,15 @@ sequences dispatched by a server proc, deterministic reply values +
 quiescence + replay -- test_sim_svr), the L3 channels beyond the mpsc
 buggify site (chan.c mpmc / watch / broadcast: exactly-once delivery,
 no-regress latest-value, full ordered broadcast, all replayed --
-test_sim_chan), and -- a first slice of storage-engine DST -- the
+test_sim_chan), the blocking M9 sync primitives (sync.c semaphore /
+barrier / gate / notify: a fiber-park path lets a fiber blocking on one
+PARK instead of freezing the sim thread -- no over-admission past a
+counting semaphore's count, all barrier parties released together,
+gate open/close/drain correctness, all replayed -- test_sim_sync), the
+process registry (reg.c: register/whereis/unregister races across loops
+resolve deterministically -- at-most-one holder per name, no
+lost/duplicate registration, exact unregister, replayed --
+test_sim_reg), and -- a first slice of storage-engine DST -- the
 sqlxtc buffer manager (the storage concurrency layer: fixes, striped
 page-table locks, cooling-stage eviction, and background cool/flush all
 run under the deterministic scheduler with seeded page-I/O completion
@@ -226,18 +243,16 @@ Still OUTSIDE sim's reach BY DESIGN (not a coverage gap to close):
   different fibers would corrupt each other's nesting count) and
   sched_yield() does not yield to the DST scheduler (so a writer
   spinning in synchronize() would never let a reader advance the epoch).
-  Bringing RCU under DST would require a per-FIBER reader slot and a
-  fiber-yield shim in synchronize() -- a real rcu.c change, deferred.
-  RCU's thread-path correctness stays the domain of TSan / stress tests.
-- The semaphore / gate / barrier primitives (sync.c) block a waiter in
-  raw pthread_cond_wait with NO fiber-yield path (unlike xtc_amutex /
-  xtc_arwlock, which park the fiber -- covered by test_sim_latch).  A
-  fiber that must block on a sem/gate/barrier under the single-thread
-  sim would freeze the whole scheduler (no other OS thread can signal
-  it).  Only the NON-blocking variants (xtc_sem_try_acquire, etc.) are
-  sim-safe today; the blocking paths need the same one-line "yield-and-
-  recheck if on a fiber" shim the roadmap notes for barrier/sem, which
-  is deferred.
+  Bringing RCU under DST would require KEYING the reader slot on the
+  current fiber/task rather than the OS thread (a real restructuring of
+  __rcu_register / read_lock / read_unlock / synchronize, not a one-line
+  shim) PLUS a fiber-yield shim in synchronize().  Getting the reader
+  slot rework subtly wrong risks a use-after-free in a reclamation path
+  (data-integrity-adjacent), so -- per the "get the clean ones solid,
+  do not ship a racy park" discipline that landed sem/gate/barrier --
+  RCU is DEFERRED rather than forced.  Its thread-path correctness stays
+  the domain of TSan / stress tests.  (The sem/gate/barrier deferral
+  that used to sit here is now CLOSED -- see test_sim_sync above.)
 
 ## FoundationDB parity
 
@@ -294,27 +309,40 @@ clock / replay / invariant checks already in place:
   point in REAL runtime code that, once-per-run-per-site (a seeded coin
   cached on first reach), lets the code take a legal-but-pessimal path;
   combined with a per-call xtc_sim_fault coin it fires on a fraction of
-  occurrences.  Now planted at FIVE sites: proc.mbox.spurious_full
+  occurrences.  Now planted at SEVEN sites: proc.mbox.spurious_full
   (xtc_send reports a soft-cap full early), chan.mpsc.spurious_full
   (xtc_chan_mpsc_try_send reports full with room to spare),
   sched.steal.skip_near (the work-stealing scheduler skips a NUMA-near
   victim that has stealable work), chan.mpmc.spurious_full
   (xtc_chan_mpmc_try_send reports full with room to spare -- the mpmc
-  twin of the mpsc site), and svr.recv.delay_dispatch (the gen_server
+  twin of the mpsc site), svr.recv.delay_dispatch (the gen_server
   yields AFTER receiving a message but BEFORE dispatching it -- the
   message is in hand, not re-queued, so it cannot be lost; a legal
   pessimal delay that lets other procs interleave in the recv/dispatch
   window, and MAY push a slow call past its caller's timeout, a legal
-  XTC_E_AGAIN outcome).  test_sim_buggify covers the mailbox site;
+  XTC_E_AGAIN outcome), sync.sem.spurious_timeout (a fiber acquiring a
+  semaphore with a finite timeout occasionally reports a spurious
+  XTC_E_AGAIN even though the count was satisfiable -- a documented
+  timeout outcome the caller must retry; a fresh per-call fault draw so
+  a retrying caller succeeds), and reg.whereis.transient_miss
+  (xtc_reg_whereis reports a registered name as transiently NOT FOUND --
+  a lookup is a hint that may race a concurrent unregister, so callers
+  already retry).  test_sim_buggify covers the mailbox site;
   test_sim_buggify2 covers the channel(mpsc) + steal sites over a
-  work-stealing task workload; test_sim_buggify3 covers the two new
-  sites (chan.mpmc.spurious_full over an mpmc producer/consumer workload
-  asserting every item is still delivered exactly once, and
-  svr.recv.delay_dispatch over a gen_server call workload asserting
-  replies+timeouts == total with no lost/duplicated reply).
-  Deterministic + replayable; off in production and when disabled.
-  Expand by planting more sites in the WAL / buffer-pool / recovery
-  paths.
+  work-stealing task workload; test_sim_buggify3 covers the
+  chan.mpmc + svr.recv sites (chan.mpmc.spurious_full over an mpmc
+  producer/consumer workload asserting every item is still delivered
+  exactly once, and svr.recv.delay_dispatch over a gen_server call
+  workload asserting
+  replies+timeouts == total with no lost/duplicated reply).  The
+  sync.sem.spurious_timeout site is exercised by test_sim_sync (a
+  semaphore-contention workload asserting no over-admission past the
+  count despite the spurious timeouts, retried to completion), and
+  reg.whereis.transient_miss by test_sim_reg (a register/whereis/
+  unregister churn asserting every lookup eventually resolves to its
+  own registration).  Deterministic + replayable; off in production and
+  when disabled.  Expand by planting more sites in the WAL / buffer-pool
+  / recovery paths.
 
 - gen_server under DST (DONE, test_sim_svr): the L4 gen_server (svr.c)
   is an xtc_proc that dispatches each envelope to handle_call /
@@ -378,6 +406,62 @@ clock / replay / invariant checks already in place:
   reorders while holding the invariant.  Footprint is small (few
   producers/consumers, tiny counts, per-run free) so the suite stays
   memory-bounded.
+
+- Blocking sync primitives under DST (DONE, test_sim_sync): the M9
+  semaphore / barrier / gate / notify (sync.c) blocked a waiter in raw
+  pthread_cond_wait with NO fiber-yield path (unlike xtc_amutex /
+  xtc_arwlock).  A fiber-park path was added -- PURELY ADDITIVE and
+  gated on __xtc_current_task() != NULL, exactly mirroring the
+  xtc_amutex / lock-manager discipline: a caller running inside a fiber
+  arms a waker, enqueues on a FIFO fiber wait queue, drops the internal
+  lock, xtc_yield()s to the loop (parking on a timer when the timeout is
+  finite, cancelled on exit so no orphan timer advances the sim clock),
+  and re-checks its predicate on wake (a wake without the predicate met
+  simply re-parks -- wake-and-recheck, not direct hand-off, since a
+  count / generation is not a single ownable token).  A post / leave /
+  close / signal (or the barrier's last arrival) wakes BOTH kinds of
+  waiter (broadcast the condvar for threads, wake every queued fiber
+  waker).  A caller NOT on a loop (cur == NULL: OS threads, the blocking
+  pool, tooling) takes the ORIGINAL pthread_cond_wait /
+  pthread_cond_timedwait path BYTE FOR BYTE -- test/m9/test_sync (the
+  thread-path suite) still passes unchanged, incl. under ASan+UBSan.
+  test_sim_sync drives three workloads across N loops: a counting
+  semaphore contended by more fibers than its capacity (INVARIANT: peak
+  concurrent holders <= CAP -- NO over-admission past the count; every
+  worker acquires+releases exactly once), a barrier rendezvous of P
+  fiber parties for R rounds (INVARIANT: no party PASSES round k until
+  all P have entered it -- parties released TOGETHER), and a gate that a
+  closer closes + drains while workers enter/leave (INVARIANT: no worker
+  admitted AFTER close, drain returns with count 0).  Each asserts
+  quiescence (rc == XTC_OK, no hang) + its invariant + byte-identical
+  replay (app hash + sim state hash) + a different seed reorders while
+  holding the invariant.  A sync.sem.spurious_timeout buggify (a fiber
+  acquire with a finite timeout occasionally declines a satisfiable
+  count and reports XTC_E_AGAIN -- a documented outcome the caller
+  retries) is exercised for progress + activation + replay; the sem
+  invariant holds under it.  No sync bug was found -- the clean
+  primitives (sem/gate/barrier/notify) all park and re-grant correctly.
+
+- Process registry under DST (DONE, test_sim_reg): the registry
+  (reg.c, name -> xtc_pid_t under a single mutex) never blocks (no
+  cond_wait), so it is sim-safe as-is -- no shim needed; the seeded
+  scheduler simply owns the register-vs-register / register-vs-
+  unregister / lookup-vs-both interleaving.  N worker fibers across N
+  loops RACE to register their own pid under a shared name set, look it
+  up, and unregister it.  INVARIANTS: for each name, register succeeds
+  AT MOST once at a time (a duplicate returns XTC_E_INVAL -- no
+  lost/duplicate registration); a whereis by the winner resolves to ITS
+  OWN pid (DETERMINISTIC resolution -- never a stale/other pid); after
+  the run the registry count is 0 (every registration was
+  unregistered).  A second churn workload over private names asserts
+  register/unregister pair up exactly.  Each asserts quiescence + the
+  invariant + byte-identical replay (an order-sensitive resolution hash
+  + sim state hash) + a different seed reorders while staying
+  consistent.  A reg.whereis.transient_miss buggify (a registered name
+  reported transiently NOT FOUND -- a lookup is a hint that may race a
+  concurrent unregister) is exercised for progress + activation +
+  replay; the caller retries and every lookup eventually resolves.  No
+  registry bug was found.
 
 - Storage-engine concurrency under DST (FIRST SLICE DONE,
   test_sim_bufmgr): the sqlxtc buffer manager -- the storage engine's

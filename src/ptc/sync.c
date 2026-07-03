@@ -15,6 +15,7 @@
 #include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_sync.h"
 #include "xtc_proc.h"
+#include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
 #include "loop_int.h"
 #include "coro_int.h"
 
@@ -57,12 +58,90 @@ cv_wait_until(pthread_cond_t *cv, pthread_mutex_t *lock,
 	return pthread_cond_timedwait(cv, lock, ts) == 0 ? 0 : 1;
 }
 
+/* -------------------------------------------------------------------------
+ * Fiber-park path for the blocking primitives (semaphore / gate / barrier
+ * / notify).
+ *
+ * A caller running inside a fiber on a loop (__xtc_current_task() != NULL)
+ * MUST NOT block the OS thread on a condvar: under the single-thread DST
+ * scheduler that would freeze every other fiber (no other thread can
+ * signal it), and in production it wedges the loop.  Instead such a caller
+ * PARKS the fiber -- it arms a waker, enqueues on the primitive's fiber
+ * wait queue, drops the primitive's lock, and xtc_yield()s to the loop --
+ * and is re-woken when a post / leave / close / signal (or the barrier's
+ * last arrival) wakes its waker.  On wake it re-acquires the lock and
+ * re-tests its own predicate; a wake without the predicate met (spurious /
+ * timer) simply re-parks.  This mirrors the xtc_amutex / lock-manager
+ * fiber-park discipline exactly.
+ *
+ * The path is PURELY ADDITIVE and gated on __xtc_current_task() != NULL:
+ * a caller NOT on a loop (OS threads, the blocking pool, tooling) takes
+ * the ORIGINAL pthread_cond_wait / pthread_cond_timedwait path byte for
+ * byte.  A signaller wakes BOTH kinds of waiter (broadcast the condvar for
+ * threads, wake every queued fiber waker), so mixed waiters are correct.
+ *
+ * Unlike the amutex hand-off queue, these waiters use wake-and-recheck
+ * (no direct grant): the shared state (a count, a generation) is not a
+ * single ownable token, so a woken fiber simply re-evaluates its predicate
+ * under the lock.  A queued waker is unlinked before its stack frame goes
+ * away (on grant or timeout), so a later wake never touches a dead frame.
+ * ----------------------------------------------------------------------- */
+struct fiber_waiter {
+	xtc_waker_t          waker;
+	struct fiber_waiter *next;
+};
+
+/* Enqueue w at the tail of a FIFO fiber wait queue (under the lock). */
+static void
+fw_enqueue(struct fiber_waiter **head, struct fiber_waiter **tail,
+    struct fiber_waiter *w)
+{
+	w->next = NULL;
+	if (*tail != NULL) (*tail)->next = w;
+	else *head = w;
+	*tail = w;
+}
+
+/* Unlink w from the queue if still present (under the lock). */
+static void
+fw_remove(struct fiber_waiter **head, struct fiber_waiter **tail,
+    struct fiber_waiter *w)
+{
+	struct fiber_waiter *p = *head, *prev = NULL;
+	while (p != NULL) {
+		if (p == w) {
+			if (prev != NULL) prev->next = p->next;
+			else *head = p->next;
+			if (*tail == p) *tail = prev;
+			return;
+		}
+		prev = p;
+		p = p->next;
+	}
+}
+
+/* Detach the whole queue and wake every waker.  Caller passes a detached
+ * list (already spliced out under the lock) so the wakes can fire after
+ * the lock is dropped -- each waiter's stack frame stays alive until it
+ * re-acquires the lock to unlink itself. */
+static void
+fw_wake_all(struct fiber_waiter *list)
+{
+	while (list != NULL) {
+		struct fiber_waiter *n = list->next;
+		(void)xtc_waker_wake(&list->waker);
+		list = n;
+	}
+}
+
 /* ----- notify ----------------------------------------------------- */
 
 struct xtc_notify {
 	pthread_mutex_t lock;
 	pthread_cond_t  cv;
 	int             stored;       /* one-shot stored signal */
+	struct fiber_waiter *wq_head; /* fiber waiters, FIFO */
+	struct fiber_waiter *wq_tail;
 };
 
 int
@@ -91,11 +170,15 @@ xtc_notify_destroy(xtc_notify_t *n)
 int
 xtc_notify_signal(xtc_notify_t *n)
 {
+	struct fiber_waiter *woke;
 	if (n == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&n->lock);
 	n->stored = 1;
 	(void)pthread_cond_broadcast(&n->cv);
+	woke = n->wq_head;
+	n->wq_head = n->wq_tail = NULL;
 	(void)__xtc_mtx_unlock(&n->lock);
+	fw_wake_all(woke);
 	return XTC_OK;
 }
 
@@ -103,6 +186,7 @@ int
 xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 {
 	int rc = XTC_OK;
+	xtc_task_t *cur;
 	if (n == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&n->lock);
 	if (n->stored) {
@@ -114,6 +198,50 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 		(void)__xtc_mtx_unlock(&n->lock);
 		return XTC_E_AGAIN;
 	}
+
+	cur = __xtc_current_task();
+	if (cur != NULL) {
+		/* Fiber waiter: park and re-check on wake (purely additive). */
+		struct fiber_waiter w;
+		void *proc_ctx;
+		int64_t deadline = -1;
+		(void)xtc_task_waker(cur, &w.waker);
+		w.next = NULL;
+		fw_enqueue(&n->wq_head, &n->wq_tail, &w);
+		if (timeout_ns > 0) {
+			int64_t now;
+			(void)__os_clock_mono(&now);
+			deadline = now + timeout_ns;
+		}
+		for (;;) {
+			int64_t now;
+			if (n->stored) { n->stored = 0; rc = XTC_OK; break; }
+			if (deadline >= 0) {
+				(void)__os_clock_mono(&now);
+				if (now >= deadline) { rc = XTC_E_AGAIN; break; }
+				if (cur->park_timer != NULL) {
+					(void)xtc_timer_cancel(cur->park_timer);
+					cur->park_timer = NULL;
+				}
+				(void)xtc_task_park_on_timer(cur, deadline - now);
+			} else {
+				cur->park_requested = 1;
+			}
+			(void)__xtc_mtx_unlock(&n->lock);
+			proc_ctx = __xtc_proc_ctx_save();
+			xtc_yield();
+			__xtc_proc_ctx_restore(proc_ctx);
+			(void)__xtc_mtx_lock(&n->lock);
+		}
+		fw_remove(&n->wq_head, &n->wq_tail, &w);
+		if (cur->park_timer != NULL) {
+			(void)xtc_timer_cancel(cur->park_timer);
+			cur->park_timer = NULL;
+		}
+		(void)__xtc_mtx_unlock(&n->lock);
+		return rc;
+	}
+
 	if (timeout_ns < 0) {
 		while (!n->stored)
 			(void)pthread_cond_wait(&n->cv, &n->lock);
@@ -139,6 +267,8 @@ struct xtc_sem {
 	pthread_mutex_t lock;
 	pthread_cond_t  cv;
 	unsigned        count;
+	struct fiber_waiter *wq_head;   /* fiber waiters, FIFO */
+	struct fiber_waiter *wq_tail;
 };
 
 int
@@ -168,11 +298,17 @@ xtc_sem_destroy(xtc_sem_t *s)
 int
 xtc_sem_post(xtc_sem_t *s, unsigned n)
 {
+	struct fiber_waiter *woke;
 	if (s == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&s->lock);
 	s->count += n;
 	(void)pthread_cond_broadcast(&s->cv);
+	/* Wake every parked fiber; each re-checks count under the lock and
+	 * re-parks if it lost the race, so no over-admission past count. */
+	woke = s->wq_head;
+	s->wq_head = s->wq_tail = NULL;
 	(void)__xtc_mtx_unlock(&s->lock);
+	fw_wake_all(woke);
 	return XTC_OK;
 }
 
@@ -191,13 +327,78 @@ int
 xtc_sem_acquire(xtc_sem_t *s, unsigned n, int64_t timeout_ns)
 {
 	int rc = XTC_OK;
+	xtc_task_t *cur;
 	if (s == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&s->lock);
-	if (timeout_ns == 0) {
-		if (s->count < n) { rc = XTC_E_AGAIN; goto out; }
-		s->count -= n;
+	if (s->count >= n) { s->count -= n; goto out; }
+	if (timeout_ns == 0) { rc = XTC_E_AGAIN; goto out; }
+
+	cur = __xtc_current_task();
+	if (cur != NULL) {
+		/* Fiber waiter: park (yield to the loop) and re-check on wake,
+		 * never blocking the OS thread.  Purely additive; gated on
+		 * running inside a fiber. */
+		struct fiber_waiter w;
+		void *proc_ctx;
+		int64_t deadline = -1;
+		(void)xtc_task_waker(cur, &w.waker);
+		w.next = NULL;
+		fw_enqueue(&s->wq_head, &s->wq_tail, &w);
+		if (timeout_ns > 0) {
+			int64_t now;
+			(void)__os_clock_mono(&now);
+			deadline = now + timeout_ns;
+		}
+		for (;;) {
+			int64_t now;
+			if (s->count >= n) {
+				/* Buggify: under DST, occasionally decline a
+				 * satisfiable acquire and report a spurious
+				 * timeout instead -- a legal pessimal outcome
+				 * ONLY when the caller passed a finite timeout
+				 * (XTC_E_AGAIN is documented there and the
+				 * caller must retry).  A fresh per-call fault
+				 * draw so a retrying caller eventually
+				 * succeeds; the site coin gates liveness. */
+				if (deadline >= 0 &&
+				    XTC_SIM_BUGGIFY("sync.sem.spurious_timeout") &&
+				    xtc_sim_fault(250)) {
+					rc = XTC_E_AGAIN;
+					break;
+				}
+				s->count -= n; rc = XTC_OK; break;
+			}
+			if (deadline >= 0) {
+				(void)__os_clock_mono(&now);
+				if (now >= deadline) { rc = XTC_E_AGAIN; break; }
+				/* Re-arm a fresh timer each park; cancel a
+				 * prior one first (else park_on_timer returns
+				 * INVAL and the orphan advances the sim clock),
+				 * mirroring lock_mgr.c. */
+				if (cur->park_timer != NULL) {
+					(void)xtc_timer_cancel(cur->park_timer);
+					cur->park_timer = NULL;
+				}
+				(void)xtc_task_park_on_timer(cur, deadline - now);
+			} else {
+				cur->park_requested = 1;
+			}
+			(void)__xtc_mtx_unlock(&s->lock);
+			proc_ctx = __xtc_proc_ctx_save();
+			xtc_yield();
+			__xtc_proc_ctx_restore(proc_ctx);
+			(void)__xtc_mtx_lock(&s->lock);
+		}
+		/* Unlink and cancel any lingering timer before returning. */
+		fw_remove(&s->wq_head, &s->wq_tail, &w);
+		if (cur->park_timer != NULL) {
+			(void)xtc_timer_cancel(cur->park_timer);
+			cur->park_timer = NULL;
+		}
 		goto out;
 	}
+
+	/* Off-loop: block the OS thread on the condvar, as before. */
 	if (timeout_ns < 0) {
 		while (s->count < n)
 			(void)pthread_cond_wait(&s->cv, &s->lock);
@@ -944,6 +1145,8 @@ struct xtc_barrier {
 	unsigned        target;
 	unsigned        arrived;
 	unsigned        generation;
+	struct fiber_waiter *wq_head; /* fiber parties, FIFO */
+	struct fiber_waiter *wq_tail;
 };
 
 int
@@ -973,18 +1176,48 @@ int
 xtc_barrier_wait(xtc_barrier_t *b)
 {
 	unsigned gen;
+	xtc_task_t *cur;
 	if (b == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&b->lock);
 	gen = b->generation;
 	b->arrived++;
 	if (b->arrived == b->target) {
+		/* Last party: release everyone (all parties together). */
+		struct fiber_waiter *woke;
 		b->arrived = 0;
 		b->generation++;
 		(void)pthread_cond_broadcast(&b->cv);
-	} else {
-		while (gen == b->generation)
-			(void)pthread_cond_wait(&b->cv, &b->lock);
+		woke = b->wq_head;
+		b->wq_head = b->wq_tail = NULL;
+		(void)__xtc_mtx_unlock(&b->lock);
+		fw_wake_all(woke);
+		return XTC_OK;
 	}
+
+	cur = __xtc_current_task();
+	if (cur != NULL) {
+		/* Fiber party: park until the generation advances (purely
+		 * additive; the barrier has no timeout, so no park timer). */
+		struct fiber_waiter w;
+		void *proc_ctx;
+		(void)xtc_task_waker(cur, &w.waker);
+		w.next = NULL;
+		fw_enqueue(&b->wq_head, &b->wq_tail, &w);
+		while (gen == b->generation) {
+			cur->park_requested = 1;
+			(void)__xtc_mtx_unlock(&b->lock);
+			proc_ctx = __xtc_proc_ctx_save();
+			xtc_yield();
+			__xtc_proc_ctx_restore(proc_ctx);
+			(void)__xtc_mtx_lock(&b->lock);
+		}
+		fw_remove(&b->wq_head, &b->wq_tail, &w);
+		(void)__xtc_mtx_unlock(&b->lock);
+		return XTC_OK;
+	}
+
+	while (gen == b->generation)
+		(void)pthread_cond_wait(&b->cv, &b->lock);
 	(void)__xtc_mtx_unlock(&b->lock);
 	return XTC_OK;
 }
@@ -996,6 +1229,8 @@ struct xtc_gate {
 	pthread_cond_t  cv;
 	int             count;
 	int             closed;
+	struct fiber_waiter *wq_head; /* fiber drainers, FIFO */
+	struct fiber_waiter *wq_tail;
 };
 
 int
@@ -1035,23 +1270,34 @@ xtc_gate_enter(xtc_gate_t *g)
 int
 xtc_gate_leave(xtc_gate_t *g)
 {
+	struct fiber_waiter *woke = NULL;
 	if (g == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&g->lock);
 	if (g->count > 0) g->count--;
-	if (g->closed && g->count == 0)
+	if (g->closed && g->count == 0) {
 		(void)pthread_cond_broadcast(&g->cv);
+		woke = g->wq_head;
+		g->wq_head = g->wq_tail = NULL;
+	}
 	(void)__xtc_mtx_unlock(&g->lock);
+	fw_wake_all(woke);
 	return XTC_OK;
 }
 
 int
 xtc_gate_close(xtc_gate_t *g)
 {
+	struct fiber_waiter *woke = NULL;
 	if (g == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&g->lock);
 	g->closed = 1;
 	(void)pthread_cond_broadcast(&g->cv);
+	if (g->count == 0) {                 /* already drained */
+		woke = g->wq_head;
+		g->wq_head = g->wq_tail = NULL;
+	}
 	(void)__xtc_mtx_unlock(&g->lock);
+	fw_wake_all(woke);
 	return XTC_OK;
 }
 
@@ -1059,13 +1305,61 @@ int
 xtc_gate_drain(xtc_gate_t *g, int64_t timeout_ns)
 {
 	int rc = XTC_OK;
+	xtc_task_t *cur;
 	if (g == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&g->lock);
+	if (g->count == 0) { (void)__xtc_mtx_unlock(&g->lock); return XTC_OK; }
+	if (timeout_ns == 0) {
+		(void)__xtc_mtx_unlock(&g->lock);
+		return XTC_E_AGAIN;
+	}
+
+	cur = __xtc_current_task();
+	if (cur != NULL) {
+		/* Fiber drainer: park until count hits 0 (purely additive). */
+		struct fiber_waiter w;
+		void *proc_ctx;
+		int64_t deadline = -1;
+		(void)xtc_task_waker(cur, &w.waker);
+		w.next = NULL;
+		fw_enqueue(&g->wq_head, &g->wq_tail, &w);
+		if (timeout_ns > 0) {
+			int64_t now;
+			(void)__os_clock_mono(&now);
+			deadline = now + timeout_ns;
+		}
+		for (;;) {
+			int64_t now;
+			if (g->count == 0) { rc = XTC_OK; break; }
+			if (deadline >= 0) {
+				(void)__os_clock_mono(&now);
+				if (now >= deadline) { rc = XTC_E_AGAIN; break; }
+				if (cur->park_timer != NULL) {
+					(void)xtc_timer_cancel(cur->park_timer);
+					cur->park_timer = NULL;
+				}
+				(void)xtc_task_park_on_timer(cur, deadline - now);
+			} else {
+				cur->park_requested = 1;
+			}
+			(void)__xtc_mtx_unlock(&g->lock);
+			proc_ctx = __xtc_proc_ctx_save();
+			xtc_yield();
+			__xtc_proc_ctx_restore(proc_ctx);
+			(void)__xtc_mtx_lock(&g->lock);
+		}
+		fw_remove(&g->wq_head, &g->wq_tail, &w);
+		if (cur->park_timer != NULL) {
+			(void)xtc_timer_cancel(cur->park_timer);
+			cur->park_timer = NULL;
+		}
+		(void)__xtc_mtx_unlock(&g->lock);
+		return rc;
+	}
+
 	if (timeout_ns < 0) {
 		while (g->count > 0)
 			(void)pthread_cond_wait(&g->cv, &g->lock);
-	} else if (timeout_ns == 0) {
-		if (g->count > 0) rc = XTC_E_AGAIN;
 	} else {
 		struct timespec ts;
 		deadline_from_timeout(timeout_ns, &ts);
