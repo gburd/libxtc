@@ -126,6 +126,13 @@ mailbox -- is reused unmodified.
   a mixed cross-loop ping/pong + timer-sleeper workload; asserts every
   seed reaches quiescence, replays identically, holds invariants, and
   that the sweep explores many distinct schedules).  DONE.
+- Phase 7: machine-death + swarm fleet (test_sim_machine_death: a
+  seeded xtc_exit_pid kill mid-run, exit propagation to linked/monitored
+  peers + deterministic supervisor restart, quiescence + replay;
+  test_sim_swarm: a shardable seed sweep over partition + latency +
+  buggify + machine-death, bounded default and a manual 100k+ sweep).
+  DONE (surfaced + fixed a net-latency deferred-delivery use-after-free;
+  see the swarm entry under FoundationDB parity).
 
 ## A real defect Phase 6 surfaced
 
@@ -172,7 +179,12 @@ sim backend's deferred, seeded-latency AIO; the run reaches quiescence
 (the last worker stops the periodic provider so its timer stops spinning
 the clock), every pinned read matches its canonical content, and the run
 replays byte-identically -- same content + engine state hash -- a first
-slice of storage-engine DST).
+slice of storage-engine DST), test_sim_machine_death (a seeded
+xtc_exit_pid kill mid-run: exit propagation to a linked ('E') +
+monitored ('D') peer, deterministic one_for_one supervisor restart of
+the killed child, quiescence + replay), and test_sim_swarm (a
+shardable seed sweep combining partition + latency + buggify +
+machine-death, bounded 300-seed default and a manual 100k+ sweep).
 
 ## Feature coverage progress (toward modelling all of libxtc)
 
@@ -282,8 +294,74 @@ clock / replay / invariant checks already in place:
   exercises the concurrency layer (fixes, striped page-table locks,
   cooling-stage eviction, background writeback), NOT durability.
 
-Still to reach full FDB parity: machine-death simulation (kill a loop's
-procs mid-run) and a swarm/soak fleet (millions of seeds).
+Still to reach full FDB parity: (nothing structural remains from the
+original gap list -- machine-death and the swarm/soak fleet below are
+now DONE; the honest scope limits noted per-feature -- raw-socket
+cross-machine transport, physical memory-ordering -- remain out of
+sim's reach by design).
+
+- Machine-death / proc-kill simulation (DONE, test_sim_machine_death):
+  FoundationDB's "kill a machine mid-run" at the granularity xtc's sim
+  models.  A seeded reaper proc, after a seeded virtual-time delay,
+  kills a victim via xtc_exit_pid (proc.c) -- the BEAM-style async kill:
+  the victim raises its exit at the next yield/recv and runs the real
+  __notify_links_and_monitors path, so nothing is sim-specific except
+  the SEEDED choice of victim + timing (drawn from the APP stream, which
+  never perturbs the SCHED/STEAL streams, so a kill replays regardless).
+  The test verifies the system reacts DETERMINISTICALLY on two fronts:
+    * PART A -- exit PROPAGATION.  Workers across loops; an observer
+      links AND monitors the victim.  When the reaper kills it the exit
+      propagates cross-loop through __mbox_deliver: the observer receives
+      the 'E' link-exit signal and the 'D' monitor DOWN.  The run reaches
+      QUIESCENCE (no hang -- a killed proc must not stall the sim) and
+      REPLAYS (signal count + order-sensitive hash + sim state hash).
+    * PART B -- SUPERVISOR RESTART.  A one_for_one supervisor owns N
+      permanent children across loops.  The reaper kills a seeded child
+      mid-run; the supervisor observes the DOWN and RESTARTS it (the
+      deterministic restart -- restart count replays).  A watcher-reaper
+      then stops the supervisor after a settle and the run winds down;
+      the supervisor handle is joined + freed so the struct is reclaimed
+      (no leak under ASan -- see the wind-down note in Known gaps: the
+      settle + stop + join drains the async shutdown before quiescence).
+  A DIFFERENT seed kills a DIFFERENT victim/child at a DIFFERENT time and
+  stays consistent.  Runs clean under ASan.
+
+- Swarm / soak fleet (DONE default-bounded, large-sweep MANUAL,
+  test_sim_swarm): a large, SHARDABLE seed sweep over the rich fault set
+  the sim now models, extending test_sim_soak.  Each seed runs a mixed
+  workload (cross-loop ping/pong + timer sleepers) under a SEEDED
+  combination of the scenarios -- network partition, seeded delivery
+  latency, Buggify, and a machine-death kill -- chosen from the seed
+  itself, so the seed fully determines both scenario and schedule.  Per
+  seed it asserts QUIESCENCE (rc == XTC_OK -- no hang / livelock /
+  deadlock), the per-step structural invariants (xtc_sim_exec_run
+  returns XTC_E_INTERNAL on violation), and REPLAY (two runs -> identical
+  sim state hash + app result); across the sweep the seeds must explore
+  many distinct schedules.  Memory discipline: every run builds a fresh
+  exec, spawns a BOUNDED proc set, and frees all per-run state
+  (exec_fini + partition/buggify cleared) so a large sweep stays
+  memory-bounded (RSS flat across seeds -- measured ~2.4 MB at 3000
+  seeds).  Invocation:
+    * test_sim_swarm                 -- bounded default (300 seeds),
+      the committed suite / CI job (~0.35 s, a few MB RSS).
+    * test_sim_swarm <count>         -- sweep <count> seeds from base 0.
+    * test_sim_swarm <count> <base>  -- shard: <count> seeds from <base>,
+      disjoint per shard, for a nightly/manual 100k+ sweep (~90 s per
+      100k shard).  This is the FDB "millions of seeds" fleet, run
+      manually/nightly rather than in the fast committed suite.
+  A REAL DEFECT the swarm surfaced (and fixed): combining machine-death
+  with net-latency exposed a use-after-free in the sim net-latency
+  DEFERRED-DELIVERY path (proc.c __mbox_deferred_run).  A cross-loop
+  send under a latency window defers the delivery to now + a seeded
+  latency, capturing the target's proc pointer; if the target EXITS
+  (normally or killed) inside that deferral window it is reaped/freed,
+  and the deferred callback then dereferenced the freed proc.  Fix: the
+  deferred delivery now captures the target's PID, not a raw pointer,
+  and re-resolves it via __resolve at fire time (the generation check
+  also rejects a reused slot), DROPPING the message if the target is
+  gone.  Sim-only (the whole net-latency block is gated on
+  __xtc_sim_active()); production is unchanged.  Confirmed with a
+  minimal ASan reproducer and the full swarm now runs clean under ASan.
 
 WAL crash-recovery under DST: DONE (test_sim_crash_recover).  N worker
 fibers across several loops commit transactions through xstore + the
@@ -370,11 +448,15 @@ Known gaps and why:
   declares quiescence before that async shutdown drains -- so the
   supervisor struct is not reclaimed within one sim run (a leak under
   ASan that does NOT occur under the real xtc_loop_run, which keeps
-  stepping until truly idle).  A faithful supervisor DST test needs the
-  sim scheduler to drain async-service shutdown (continue stepping a
-  bounded number of steps after the last app proc exits, until the
-  service procs reach their at-exit free) before declaring quiescence.
-  Tracked; not shipped to avoid a leaky test.
+  stepping until truly idle).  RESOLVED IN PRACTICE by
+  test_sim_machine_death PART B: rather than change the scheduler, the
+  test's reaper stops the supervisor after a bounded settle and the
+  workload continues stepping until the supervisor's async shutdown
+  drains, then joins + frees the handle -- so a supervisor-under-kill
+  DST test reaches quiescence and runs clean under ASan.  (A general
+  "drain async-service shutdown before declaring quiescence" scheduler
+  option is still tracked as a nicety, but is no longer needed for a
+  faithful supervisor DST test.)
 
 - File AIO under the sim I/O backend with seeded completion ordering
   (the XTC_SIM_RNG_IO stream): DONE.  xtc_sim_io_faults_enable(lat_min,
