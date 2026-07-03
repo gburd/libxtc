@@ -295,3 +295,56 @@ default (Increment 2) until 6a's small-pool sim test is green.
     (pool = 1024 frames = no eviction = NO-STEAL/NO-FORCE loss model).
   - Design rationale: docs/M_SQLXTC_BDB.md sections S3, S4, S5 and the
     2.8 scorecard.
+
+## Verification outcome (2026-07): OUTCOME B -- in-place STEAL recovery is NOT torn-base-safe
+
+The bounded first-increment probe was built (a small-pool DST test that
+forces genuine page-level STEAL, then recovers the torn base in place
+via xstore_recover_inplace and asserts the durability/atomicity/no-leak
+invariants).  It reproduced the boundary decisively -- more severely
+than the documented ~13%-rows-lost torn-non-split-leaf case:
+
+  xstore_recover_inplace on a genuinely TORN STEAL base has MULTIPLE
+  unbounded-allocation vulnerabilities.  It trusts length/id fields
+  read from possibly-torn records and allocates on them, so a partially
+  written tail record drives a multi-GB allocation (observed: a sudden
+  ~1.3-2.1 GB balloon after a flat ~5 MB workload, OOM-killing the
+  process).  At least three distinct sites participate:
+    1. wal_scan / wal_scan_tail realloc(len) on the 4-byte record length
+       (a torn tail reads up to ~4 GiB).  FIXED (see below).
+    2. bm_apply_page_image -> bm_fix_pid on a page id parsed from a torn
+       XL_PAGE record extends the base file to pid*page_size for a
+       garbage pid.  (A naive "reject pid past EOF" guard is WRONG -- it
+       breaks the legitimate page-EXTEND redo that test_redo_page
+       exercises, where redo validly creates a page past the current
+       EOF.  A correct guard needs a physiological "this record extends
+       the file by one page" contract, i.e. Increment 1's per-page
+       logging, not an EOF check.)
+    3. at least one further site downstream (same balloon signature
+       after the first two are bounded).
+
+This is why the default crash path uses xstore_recover (LOGICAL rebuild
+from the clean-durable-frontier WAL), never xstore_recover_inplace, and
+why the crash-recovery capstone (test_sim_crash_recover) runs with a
+pool large enough that NO eviction occurs (pure NO-STEAL/NO-FORCE).
+The default path is torn-base-safe precisely because it never trusts a
+torn base.
+
+CONCLUSION (confirms the recommendation above): do NOT enable page-level
+STEAL / flip the live default to in-place recovery.  Full page-STEAL
+would require hardening every torn-record-trusting site in
+xstore_recover_inplace (Increment 1's physiological per-page logging is
+the prerequisite, not an ad-hoc bound), and the payoff -- surviving a
+single transaction whose dirty set exceeds the buffer pool -- is
+already delivered by the spill-to-staging path (test_steal.c).
+NO-STEAL-of-versions + NO-FORCE + spill is the correct design.
+
+The OOM-ing probe was NOT added to the committed test suite (it cannot
+run safely).  One genuine, safe robustness fix from the investigation
+WAS kept: a WAL_MAX_REC (16 MiB) bound in wal_scan / wal_scan_tail so a
+torn tail record with a garbage length terminates the scan instead of
+attempting a multi-GB realloc -- correct on every path (a legitimate
+record is assembled in the 64 KiB batch buffer), verified against all
+existing recovery tests (test_recover_undo, test_redo_page,
+test_wal_recover, test_inplace_redo, test_clean_restart, test_wal,
+test_xlog, test_steal all pass).

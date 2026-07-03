@@ -46,6 +46,18 @@
 
 #define WAL_REC_HDR      12u     /* on-disk per-record: u64 lsn + u32 len */
 
+/*
+ * Upper bound on a single on-disk record body.  A legitimate record is
+ * assembled in the 64 KiB batch buffer (bcap), so anything far above
+ * that is a torn or corrupt record whose length field is garbage.
+ * Recovery must NOT realloc(garbage_len) -- a torn STEAL base can carry
+ * a partially written tail record whose 4-byte length reads as up to
+ * ~4 GiB, and blindly allocating it OOMs the process (found by the
+ * STEAL crash-recovery probe).  A record whose length exceeds this
+ * bound (or the bytes remaining in the file) is treated as a torn
+ * tail: the scan stops there, exactly as it does for a short read. */
+#define WAL_MAX_REC      (16u * 1024u * 1024u)
+
 struct wal_msg {                 /* committer -> writer */
 	uint8_t   kind;
 	xtc_pid_t reply_to;
@@ -104,6 +116,8 @@ wal_scan_tail(int fd, off_t *off_out, uint64_t *maxlsn_out)
 		if (pread(fd, hdr, WAL_REC_HDR, o) != (ssize_t)WAL_REC_HDR)
 			break;                /* EOF or torn header */
 		memcpy(&lsn, hdr, 8); memcpy(&len, hdr + 8, 4);
+		if (len > WAL_MAX_REC)
+			break;                /* garbage length: torn tail */
 		if (len > sbcap) {
 			uint8_t *nb = realloc(sb, len);
 			if (nb == NULL) break;
@@ -527,6 +541,8 @@ wal_scan(const char *path, wal_replay_cb cb, void *user)
 			break;                   /* EOF or torn header: stop at the tail */
 		memcpy(&lsn, hdr, 8);
 		memcpy(&len, hdr + 8, 4);
+		if (len > WAL_MAX_REC)
+			break;                /* garbage length: torn tail, stop */
 		if (len > bufcap) {
 			uint8_t *nb = realloc(buf, len);
 			if (nb == NULL) { rc = XTC_E_NOMEM; break; }
