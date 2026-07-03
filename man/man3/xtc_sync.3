@@ -5,17 +5,146 @@
 .Os
 .Sh NAME
 .Nm xtc_amutex ,
+.Nm xtc_amutex_create ,
+.Nm xtc_amutex_create_ex ,
+.Nm xtc_amutex_static ,
+.Nm xtc_amutex_destroy ,
+.Nm xtc_amutex_lock ,
+.Nm xtc_amutex_try_lock ,
+.Nm xtc_amutex_unlock ,
 .Nm xtc_arwlock ,
+.Nm xtc_arwlock_create ,
+.Nm xtc_arwlock_destroy ,
+.Nm xtc_arwlock_rdlock ,
+.Nm xtc_arwlock_wrlock ,
+.Nm xtc_arwlock_unlock ,
 .Nm xtc_rwlock ,
+.Nm xtc_rwlock_create ,
+.Nm xtc_rwlock_destroy ,
+.Nm xtc_rwlock_rdlock ,
+.Nm xtc_rwlock_wrlock ,
+.Nm xtc_rwlock_unlock ,
 .Nm xtc_notify ,
+.Nm xtc_notify_create ,
+.Nm xtc_notify_destroy ,
+.Nm xtc_notify_signal ,
+.Nm xtc_notify_wait ,
 .Nm xtc_sem ,
+.Nm xtc_sem_create ,
+.Nm xtc_sem_destroy ,
+.Nm xtc_sem_post ,
+.Nm xtc_sem_acquire ,
+.Nm xtc_sem_try_acquire ,
+.Nm xtc_sem_count ,
 .Nm xtc_barrier ,
+.Nm xtc_barrier_create ,
+.Nm xtc_barrier_destroy ,
+.Nm xtc_barrier_wait ,
 .Nm xtc_gate ,
-.Nm xtc_abort_source
+.Nm xtc_gate_create ,
+.Nm xtc_gate_destroy ,
+.Nm xtc_gate_enter ,
+.Nm xtc_gate_leave ,
+.Nm xtc_gate_close ,
+.Nm xtc_gate_drain ,
+.Nm xtc_gate_count ,
+.Nm xtc_abort_source ,
+.Nm xtc_abort_source_create ,
+.Nm xtc_abort_source_destroy ,
+.Nm xtc_abort_source_fire ,
+.Nm xtc_abort_source_token ,
+.Nm xtc_abort_token_is_aborted ,
+.Nm xtc_abort_token_reason
 .Nd async synchronisation primitives
 .Sh SYNOPSIS
 .In xtc.h
 .In xtc_sync.h
+.Ft int
+.Fn xtc_amutex_create "xtc_amutex_t **out"
+.Ft int
+.Fn xtc_amutex_create_ex "xtc_amutex_t **out" "unsigned flags"
+.Ft xtc_amutex_t *
+.Fn xtc_amutex_static "unsigned flags"
+.Ft void
+.Fn xtc_amutex_destroy "xtc_amutex_t *m"
+.Ft int
+.Fn xtc_amutex_lock "xtc_amutex_t *m" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_amutex_try_lock "xtc_amutex_t *m"
+.Ft int
+.Fn xtc_amutex_unlock "xtc_amutex_t *m"
+.Ft int
+.Fn xtc_arwlock_create "xtc_arwlock_t **out"
+.Ft void
+.Fn xtc_arwlock_destroy "xtc_arwlock_t *rw"
+.Ft int
+.Fn xtc_arwlock_rdlock "xtc_arwlock_t *rw" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_arwlock_wrlock "xtc_arwlock_t *rw" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_arwlock_unlock "xtc_arwlock_t *rw"
+.Ft int
+.Fn xtc_rwlock_create "xtc_rwlock_t **out"
+.Ft void
+.Fn xtc_rwlock_destroy "xtc_rwlock_t *rw"
+.Ft int
+.Fn xtc_rwlock_rdlock "xtc_rwlock_t *rw" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_rwlock_wrlock "xtc_rwlock_t *rw" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_rwlock_unlock "xtc_rwlock_t *rw"
+.Ft int
+.Fn xtc_notify_create "xtc_notify_t **out"
+.Ft void
+.Fn xtc_notify_destroy "xtc_notify_t *n"
+.Ft int
+.Fn xtc_notify_signal "xtc_notify_t *n"
+.Ft int
+.Fn xtc_notify_wait "xtc_notify_t *n" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_sem_create "unsigned initial" "xtc_sem_t **out"
+.Ft void
+.Fn xtc_sem_destroy "xtc_sem_t *s"
+.Ft int
+.Fn xtc_sem_post "xtc_sem_t *s" "unsigned n"
+.Ft int
+.Fn xtc_sem_acquire "xtc_sem_t *s" "unsigned n" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_sem_try_acquire "xtc_sem_t *s" "unsigned n"
+.Ft int
+.Fn xtc_sem_count "const xtc_sem_t *s"
+.Ft int
+.Fn xtc_barrier_create "unsigned n" "xtc_barrier_t **out"
+.Ft void
+.Fn xtc_barrier_destroy "xtc_barrier_t *b"
+.Ft int
+.Fn xtc_barrier_wait "xtc_barrier_t *b"
+.Ft int
+.Fn xtc_gate_create "xtc_gate_t **out"
+.Ft void
+.Fn xtc_gate_destroy "xtc_gate_t *g"
+.Ft int
+.Fn xtc_gate_enter "xtc_gate_t *g"
+.Ft int
+.Fn xtc_gate_leave "xtc_gate_t *g"
+.Ft int
+.Fn xtc_gate_close "xtc_gate_t *g"
+.Ft int
+.Fn xtc_gate_drain "xtc_gate_t *g" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_gate_count "const xtc_gate_t *g"
+.Ft int
+.Fn xtc_abort_source_create "xtc_abort_source_t **out"
+.Ft void
+.Fn xtc_abort_source_destroy "xtc_abort_source_t *src"
+.Ft int
+.Fn xtc_abort_source_fire "xtc_abort_source_t *src" "int reason"
+.Ft int
+.Fn xtc_abort_source_token "xtc_abort_source_t *src" "xtc_abort_token_t *tok"
+.Ft int
+.Fn xtc_abort_token_is_aborted "const xtc_abort_token_t *tok"
+.Ft int
+.Fn xtc_abort_token_reason "const xtc_abort_token_t *tok"
 .Sh DESCRIPTION
 .Nm xtc_sync
 provides async-aware synchronisation primitives that integrate
@@ -33,6 +162,22 @@ or other async I/O.  Compare with
 .Xr xtc_lwlock 3
 which uses pthread mutex underneath
 .Pq blocks the OS thread .
+.Fn xtc_amutex_create
+allocates a mutex;
+.Fn xtc_amutex_create_ex
+takes a flags word;
+.Fn xtc_amutex_static
+returns a process-static instance.
+.Fn xtc_amutex_lock
+parks until acquired or the
+.Va timeout_ns
+deadline elapses;
+.Fn xtc_amutex_try_lock
+never parks;
+.Fn xtc_amutex_unlock
+releases; and
+.Fn xtc_amutex_destroy
+frees it.
 .It Vt xtc_arwlock
 Async reader-writer latch (shared / exclusive).  Blocked acquires park
 the fiber, exactly as
@@ -42,35 +187,107 @@ parent latch across a child fix without wedging a cooperative loop.
 FIFO fairness keeps a read stream from starving a waiting writer.
 This is the reader-writer primitive a concurrent B-tree latches its
 pages with.
+.Fn xtc_arwlock_create
+and
+.Fn xtc_arwlock_destroy
+manage the object;
+.Fn xtc_arwlock_rdlock
+and
+.Fn xtc_arwlock_wrlock
+take it shared or exclusive with a
+.Va timeout_ns
+deadline;
+.Fn xtc_arwlock_unlock
+releases the current hold.
 .It Vt xtc_rwlock
 Reader-writer lock with writer priority, built on a pthread mutex and
 condition variable: a blocked acquire blocks the OS thread (it does
 NOT park the fiber).  Use
 .Vt xtc_arwlock
 instead on the hot path of an event loop.
+.Fn xtc_rwlock_create ,
+.Fn xtc_rwlock_destroy ,
+.Fn xtc_rwlock_rdlock ,
+.Fn xtc_rwlock_wrlock ,
+and
+.Fn xtc_rwlock_unlock
+mirror the async variant.
 .It Vt xtc_notify
-A 0-or-1 latch.  Producers
+A 0-or-1 latch.
+.Fn xtc_notify_create
+and
+.Fn xtc_notify_destroy
+manage the object.  Producers
 .Fn xtc_notify_signal ;
 consumers
 .Fn xtc_notify_wait
 until signalled.  Useful for one-shot ready signals.
 .It Vt xtc_sem
 Counting semaphore.
-.Fn xtc_sem_acquire / xtc_sem_release
-on a per-instance counter.
+.Fn xtc_sem_create
+takes an
+.Va initial
+count;
+.Fn xtc_sem_destroy
+frees it.
+.Fn xtc_sem_post
+adds
+.Va n
+permits;
+.Fn xtc_sem_acquire
+takes
+.Va n
+permits, parking until available or the
+.Va timeout_ns
+deadline;
+.Fn xtc_sem_try_acquire
+never parks; and
+.Fn xtc_sem_count
+reports the current permit count.
 .It Vt xtc_barrier
-Synchronisation point: N participants
+Synchronisation point:
+.Va n
+participants created by
+.Fn xtc_barrier_create
+call
 .Fn xtc_barrier_wait
 until all have arrived; then all proceed.
+.Fn xtc_barrier_destroy
+frees it.
 .It Vt xtc_gate
-A 0-or-1 latch with re-arm.  Like a notify but the barrier can be
-closed and re-opened.
+A counting gate.
+.Fn xtc_gate_create
+and
+.Fn xtc_gate_destroy
+manage the object.
+.Fn xtc_gate_enter
+and
+.Fn xtc_gate_leave
+bracket in-flight work;
+.Fn xtc_gate_close
+rejects new entrants;
+.Fn xtc_gate_drain
+parks until the in-flight count reaches zero or the
+.Va timeout_ns
+deadline; and
+.Fn xtc_gate_count
+reports the number of active occupants.
 .It Vt xtc_abort_source
-Cancellation token.  Initiator
-.Fn xtc_abort
-to signal cancellation; participants check
-.Fn xtc_abort_check
-periodically.  Used to wire timeout / shutdown into long-running
+Cancellation token.
+.Fn xtc_abort_source_create
+and
+.Fn xtc_abort_source_destroy
+manage the source.  Initiator calls
+.Fn xtc_abort_source_fire
+with a
+.Va reason
+to signal cancellation;
+.Fn xtc_abort_source_token
+hands out a token participants poll with
+.Fn xtc_abort_token_is_aborted
+and
+.Fn xtc_abort_token_reason .
+Used to wire timeout / shutdown into long-running
 operations cooperatively.
 .El
 .Pp

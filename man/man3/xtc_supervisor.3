@@ -5,6 +5,7 @@
 .Os
 .Sh NAME
 .Nm xtc_sup_start ,
+.Nm xtc_sup_add_child ,
 .Nm xtc_sup_stop ,
 .Nm xtc_sup_join ,
 .Nm xtc_sup_alive ,
@@ -16,6 +17,8 @@
 .In xtc_orc.h
 .Ft int
 .Fn xtc_sup_start "xtc_loop_t *loop" "const xtc_sup_opts_t *opts" "const xtc_child_spec_t *children" "int n_children" "xtc_supervisor_t **out_sup"
+.Ft int
+.Fn xtc_sup_add_child "xtc_supervisor_t *sup" "const xtc_child_spec_t *spec" "xtc_pid_t *out_pid"
 .Ft int
 .Fn xtc_sup_stop "xtc_supervisor_t *sup"
 .Ft int
@@ -79,6 +82,16 @@ on bad args
 empty supervisors not supported, see
 .Pa examples/06_sqlxtc/main.c
 for a one-listener-child workaround .
+.Pp
+.Fn xtc_sup_add_child
+adds one child to a running supervisor from a
+.Vt xtc_child_spec_t ,
+returning the new child's pid in
+.Fa *out_pid .
+This is the dynamic path used with a
+.Sy simple_one_for_one
+supervisor, whose children are spawned on demand rather than all
+listed up front.
 .Pp
 .Fn xtc_sup_stop
 asynchronously requests shutdown.  Children get

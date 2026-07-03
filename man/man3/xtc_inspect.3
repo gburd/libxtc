@@ -6,11 +6,13 @@
 .Sh NAME
 .Nm xtc_inspect_procs ,
 .Nm xtc_inspect_loops ,
-.Nm xtc_proc_info
+.Nm xtc_proc_info ,
+.Nm xtc_runtime_info
 .Nd live process and loop introspection
 .Sh SYNOPSIS
 .In xtc.h
 .In xtc_inspect.h
+.In xtc_runtime.h
 .Vt typedef int (*xtc_inspect_proc_fn)(const xtc_proc_info_t *info, void *user);
 .Vt typedef int (*xtc_inspect_loop_fn)(const xtc_loop_info_t *info, void *user);
 .Ft int
@@ -19,6 +21,8 @@
 .Fn xtc_inspect_loops "xtc_inspect_loop_fn cb" "void *user"
 .Ft int
 .Fn xtc_proc_info "xtc_pid_t pid" "xtc_proc_info_t *out"
+.Ft int
+.Fn xtc_runtime_info "xtc_runtime_info_t *out"
 .Sh DESCRIPTION
 .Nm xtc_inspect
 is the programmatic form of the debugger's
@@ -209,6 +213,16 @@ which runs against a stopped program; the live API reports only the
 fields that are safe to read concurrently -- the mailbox counters,
 read under the mailbox lock, and the sampled run state.
 .Sh RETURN VALUES
+.Fn xtc_runtime_info
+fills
+.Fa *out
+with a one-shot snapshot of the running configuration -- loop count,
+online / performance / efficiency CPU counts, NUMA node count, and the
+configured vs currently-accounted memory -- so a program need not
+assemble that itself.  It returns
+.Dv XTC_OK
+on success.
+.Pp
 .Fn xtc_inspect_procs
 returns the number of procs visited;
 .Fn xtc_inspect_loops

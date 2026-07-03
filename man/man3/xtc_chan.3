@@ -5,32 +5,98 @@
 .Os
 .Sh NAME
 .Nm xtc_chan_oneshot ,
+.Nm xtc_chan_oneshot_create ,
+.Nm xtc_chan_oneshot_destroy ,
+.Nm xtc_chan_oneshot_send ,
+.Nm xtc_chan_oneshot_try_recv ,
+.Nm xtc_chan_oneshot_set_waker ,
 .Nm xtc_chan_mpsc ,
+.Nm xtc_chan_mpsc_create ,
+.Nm xtc_chan_mpsc_destroy ,
+.Nm xtc_chan_mpsc_try_send ,
+.Nm xtc_chan_mpsc_try_recv ,
+.Nm xtc_chan_mpsc_set_waker ,
+.Nm xtc_chan_mpsc_close ,
+.Nm xtc_chan_mpsc_len ,
 .Nm xtc_chan_mpmc ,
+.Nm xtc_chan_mpmc_create ,
+.Nm xtc_chan_mpmc_destroy ,
+.Nm xtc_chan_mpmc_try_send ,
+.Nm xtc_chan_mpmc_try_recv ,
+.Nm xtc_chan_mpmc_close ,
+.Nm xtc_chan_mpmc_len ,
 .Nm xtc_chan_watch ,
-.Nm xtc_chan_broadcast
+.Nm xtc_chan_watch_create ,
+.Nm xtc_chan_watch_destroy ,
+.Nm xtc_chan_watch_send ,
+.Nm xtc_chan_watch_recv ,
+.Nm xtc_chan_broadcast ,
+.Nm xtc_chan_broadcast_create ,
+.Nm xtc_chan_broadcast_destroy ,
+.Nm xtc_chan_broadcast_send ,
+.Nm xtc_chan_broadcast_subscribe ,
+.Nm xtc_chan_broadcast_unsubscribe ,
+.Nm xtc_chan_broadcast_recv
 .Nd typed channels for cross-task message passing
 .Sh SYNOPSIS
 .In xtc.h
 .In xtc_chan.h
 .Ft int
 .Fn xtc_chan_oneshot_create "xtc_res_t *res" "xtc_chan_oneshot_t **out"
+.Ft void
+.Fn xtc_chan_oneshot_destroy "xtc_chan_oneshot_t *c"
 .Ft int
 .Fn xtc_chan_oneshot_send "xtc_chan_oneshot_t *c" "void *msg"
 .Ft int
 .Fn xtc_chan_oneshot_try_recv "xtc_chan_oneshot_t *c" "void **out"
 .Ft int
+.Fn xtc_chan_oneshot_set_waker "xtc_chan_oneshot_t *c" "const xtc_waker_t *w"
+.Ft int
 .Fn xtc_chan_mpsc_create "xtc_res_t *res" "size_t capacity" "xtc_chan_mpsc_t **out"
+.Ft void
+.Fn xtc_chan_mpsc_destroy "xtc_chan_mpsc_t *c"
 .Ft int
 .Fn xtc_chan_mpsc_try_send "xtc_chan_mpsc_t *c" "void *msg"
 .Ft int
 .Fn xtc_chan_mpsc_try_recv "xtc_chan_mpsc_t *c" "void **out"
 .Ft int
-.Fn xtc_chan_mpmc_create "xtc_res_t *res" "size_t capacity" "xtc_chan_mpmc_t **out"
+.Fn xtc_chan_mpsc_set_waker "xtc_chan_mpsc_t *c" "const xtc_waker_t *w"
 .Ft int
-.Fn xtc_chan_watch_create "xtc_res_t *res" "void *initial" "xtc_chan_watch_t **out"
+.Fn xtc_chan_mpsc_close "xtc_chan_mpsc_t *c"
+.Ft size_t
+.Fn xtc_chan_mpsc_len "const xtc_chan_mpsc_t *c"
+.Ft int
+.Fn xtc_chan_mpmc_create "xtc_res_t *res" "size_t capacity" "xtc_chan_mpmc_t **out"
+.Ft void
+.Fn xtc_chan_mpmc_destroy "xtc_chan_mpmc_t *c"
+.Ft int
+.Fn xtc_chan_mpmc_try_send "xtc_chan_mpmc_t *c" "void *msg"
+.Ft int
+.Fn xtc_chan_mpmc_try_recv "xtc_chan_mpmc_t *c" "void **out"
+.Ft int
+.Fn xtc_chan_mpmc_close "xtc_chan_mpmc_t *c"
+.Ft size_t
+.Fn xtc_chan_mpmc_len "const xtc_chan_mpmc_t *c"
+.Ft int
+.Fn xtc_chan_watch_create "xtc_res_t *res" "xtc_chan_watch_t **out"
+.Ft void
+.Fn xtc_chan_watch_destroy "xtc_chan_watch_t *c"
+.Ft int
+.Fn xtc_chan_watch_send "xtc_chan_watch_t *c" "void *value"
+.Ft int
+.Fn xtc_chan_watch_recv "xtc_chan_watch_t *c" "void **out"
 .Ft int
 .Fn xtc_chan_broadcast_create "xtc_res_t *res" "size_t capacity" "xtc_chan_broadcast_t **out"
+.Ft void
+.Fn xtc_chan_broadcast_destroy "xtc_chan_broadcast_t *c"
+.Ft int
+.Fn xtc_chan_broadcast_send "xtc_chan_broadcast_t *c" "void *msg"
+.Ft int
+.Fn xtc_chan_broadcast_subscribe "xtc_chan_broadcast_t *c" "xtc_chan_broadcast_recv_t **out_recv"
+.Ft void
+.Fn xtc_chan_broadcast_unsubscribe "xtc_chan_broadcast_recv_t *r"
+.Ft int
+.Fn xtc_chan_broadcast_recv "xtc_chan_broadcast_recv_t *r" "void **out" "int *lagged"
 .Sh DESCRIPTION
 .Nm xtc_chan
 provides typed channel primitives for cross-task / cross-process /
@@ -40,22 +106,79 @@ fan-in / fan-out semantics:
 .It oneshot
 A single message; one sender, one receiver.  Used for request /
 reply patterns, one-shot futures.
+.Fn xtc_chan_oneshot_create
+and
+.Fn xtc_chan_oneshot_destroy
+manage the channel;
+.Fn xtc_chan_oneshot_send
+delivers the single message;
+.Fn xtc_chan_oneshot_try_recv
+polls for it; and
+.Fn xtc_chan_oneshot_set_waker
+registers an
+.Vt xtc_waker_t
+for async readiness notification.
 .It mpsc
 Multiple producers, single consumer.  Bounded ring buffer.  Lock-
 free producer side using sequence-number CAS; consumer needs no
 synchronisation.
+.Fn xtc_chan_mpsc_create
+takes a
+.Va capacity ;
+.Fn xtc_chan_mpsc_try_send
+and
+.Fn xtc_chan_mpsc_try_recv
+move messages without parking;
+.Fn xtc_chan_mpsc_set_waker
+arms an async waker;
+.Fn xtc_chan_mpsc_close
+marks the channel closed; and
+.Fn xtc_chan_mpsc_len
+reports the queued count.
+.Fn xtc_chan_mpsc_destroy
+frees it.
 .It mpmc
 Multiple producers, multiple consumers.  Bounded ring buffer
 serialising both sides via per-slot sequence numbers
 .Pq Vyukov-style queue .
+.Fn xtc_chan_mpmc_create ,
+.Fn xtc_chan_mpmc_try_send ,
+.Fn xtc_chan_mpmc_try_recv ,
+.Fn xtc_chan_mpmc_close ,
+.Fn xtc_chan_mpmc_len ,
+and
+.Fn xtc_chan_mpmc_destroy
+mirror the MPSC entry points.
 .It watch
 Single-producer, multi-consumer of latest-value-only state.
 Useful for config that may change while readers want the current
 view.
+.Fn xtc_chan_watch_create
+and
+.Fn xtc_chan_watch_destroy
+manage the channel;
+.Fn xtc_chan_watch_send
+publishes a new latest value; and
+.Fn xtc_chan_watch_recv
+reads the current value.
 .It broadcast
 Multi-producer, multi-consumer fan-out.  Each subscribed
 consumer sees every message.  Per-consumer lag tracking; slow
 consumers see their queue fill and may drop.
+.Fn xtc_chan_broadcast_create
+and
+.Fn xtc_chan_broadcast_destroy
+manage the channel;
+.Fn xtc_chan_broadcast_send
+fans a message out;
+.Fn xtc_chan_broadcast_subscribe
+and
+.Fn xtc_chan_broadcast_unsubscribe
+add and remove a consumer cursor; and
+.Fn xtc_chan_broadcast_recv
+reads the next message for a subscriber, reporting a
+.Va lagged
+count of messages skipped when it fell behind.
 .El
 .Pp
 All channels are heap-allocated and reference-managed via the

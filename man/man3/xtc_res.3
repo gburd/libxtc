@@ -10,6 +10,9 @@
 .Nm xtc_res_release ,
 .Nm xtc_res_used ,
 .Nm xtc_res_cap ,
+.Nm xtc_res_set_cap ,
+.Nm xtc_res_high ,
+.Nm xtc_res_rejects ,
 .Nm xtc_res_set_alert ,
 .Nm xtc_res_set_alert_fn
 .Nd resource accountant with hard caps and high-water alerts
@@ -28,6 +31,12 @@
 .Fn xtc_res_used "const xtc_res_t *res" "xtc_res_kind_t kind"
 .Ft int64_t
 .Fn xtc_res_cap "const xtc_res_t *res" "xtc_res_kind_t kind"
+.Ft void
+.Fn xtc_res_set_cap "xtc_res_t *res" "xtc_res_kind_t kind" "int64_t cap"
+.Ft int64_t
+.Fn xtc_res_high "const xtc_res_t *res" "xtc_res_kind_t kind"
+.Ft int64_t
+.Fn xtc_res_rejects "const xtc_res_t *res" "xtc_res_kind_t kind"
 .Ft int
 .Fn xtc_res_set_alert "xtc_res_t *res" "xtc_res_kind_t kind" "int64_t threshold"
 .Ft int
@@ -68,6 +77,18 @@ when usage crosses
 upward, the alert fn fires.  When usage drops back below the
 threshold, the alert re-arms.  This avoids alert floods while
 ensuring each crossing fires.
+.Pp
+.Fn xtc_res_set_cap
+changes the cap for a
+.Fa kind
+at runtime.
+.Fn xtc_res_high
+returns the high-water mark of usage for a
+.Fa kind ,
+and
+.Fn xtc_res_rejects
+returns the number of acquires rejected because they would have
+exceeded the cap.
 .Pp
 This is the centerpiece of xtc's
 .Sq predictable behaviour under stress

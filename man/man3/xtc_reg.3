@@ -8,7 +8,9 @@
 .Nm xtc_reg_destroy ,
 .Nm xtc_reg_register ,
 .Nm xtc_reg_unregister ,
-.Nm xtc_reg_lookup
+.Nm xtc_reg_lookup ,
+.Nm xtc_reg_whereis ,
+.Nm xtc_reg_count
 .Nd named process registry
 .Sh SYNOPSIS
 .In xtc.h
@@ -23,6 +25,10 @@
 .Fn xtc_reg_unregister "xtc_reg_t *r" "const char *name"
 .Ft int
 .Fn xtc_reg_lookup "xtc_reg_t *r" "const char *name" "xtc_pid_t *out"
+.Ft int
+.Fn xtc_reg_whereis "xtc_reg_t *r" "const char *name" "xtc_pid_t *out_pid"
+.Ft int
+.Fn xtc_reg_count "const xtc_reg_t *r"
 .Sh DESCRIPTION
 .Nm xtc_reg
 is a name-to-pid registry.  Modeled on Erlang's
@@ -38,6 +44,16 @@ prior binding atomically.
 xtc_app owns a registry per app
 .Pq Xr xtc_app_registry 3 .
 Multiple registries are permitted for sharded namespaces.
+.Pp
+.Fn xtc_reg_whereis
+looks up the pid bound to
+.Fa name ,
+writing it to
+.Fa out_pid
+.Pq the Erlang Sq whereis No spelling of Fn xtc_reg_lookup .
+.Fn xtc_reg_count
+returns the number of live registrations in
+.Fa r .
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_reg_t *r = xtc_app_registry(app);

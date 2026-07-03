@@ -4,20 +4,40 @@
 .Dt XTC_CFG 3
 .Os
 .Sh NAME
+.Nm xtc_cfg_register ,
+.Nm xtc_cfg_unregister ,
 .Nm xtc_cfg_register_bool ,
 .Nm xtc_cfg_register_int ,
 .Nm xtc_cfg_register_int64 ,
 .Nm xtc_cfg_register_double ,
 .Nm xtc_cfg_register_string ,
 .Nm xtc_cfg_register_enum ,
-.Nm xtc_cfg_set ,
 .Nm xtc_cfg_get ,
+.Nm xtc_cfg_get_bool ,
+.Nm xtc_cfg_get_int ,
+.Nm xtc_cfg_get_int64 ,
+.Nm xtc_cfg_get_double ,
+.Nm xtc_cfg_get_string ,
+.Nm xtc_cfg_get_enum ,
+.Nm xtc_cfg_set ,
+.Nm xtc_cfg_set_bool ,
+.Nm xtc_cfg_set_int ,
+.Nm xtc_cfg_set_int64 ,
+.Nm xtc_cfg_set_double ,
+.Nm xtc_cfg_set_string ,
+.Nm xtc_cfg_set_enum ,
+.Nm xtc_cfg_count ,
+.Nm xtc_cfg_kind ,
 .Nm xtc_cfg_load_file ,
 .Nm xtc_cfg_reload
 .Nd typed runtime configuration registry
 .Sh SYNOPSIS
 .In xtc.h
 .In xtc_cfg.h
+.Ft int
+.Fn xtc_cfg_register "const xtc_cfg_spec_t *spec"
+.Ft int
+.Fn xtc_cfg_unregister "const char *name"
 .Ft int
 .Fn xtc_cfg_register_bool "const char *name" "int *out_var" "int default_v" "const char *help"
 .Ft int
@@ -30,6 +50,34 @@
 .Fn xtc_cfg_register_string "const char *name" "char *buf" "size_t buflen" "const char *default_v" "const char *help"
 .Ft int
 .Fn xtc_cfg_set "const char *name" "const char *value"
+.Ft int
+.Fn xtc_cfg_get_bool "const char *name" "int *out"
+.Ft int
+.Fn xtc_cfg_get_int "const char *name" "int *out"
+.Ft int
+.Fn xtc_cfg_get_int64 "const char *name" "int64_t *out"
+.Ft int
+.Fn xtc_cfg_get_double "const char *name" "double *out"
+.Ft int
+.Fn xtc_cfg_get_string "const char *name" "const char **out"
+.Ft int
+.Fn xtc_cfg_get_enum "const char *name" "int *out"
+.Ft int
+.Fn xtc_cfg_set_bool "const char *name" "int v"
+.Ft int
+.Fn xtc_cfg_set_int "const char *name" "int v"
+.Ft int
+.Fn xtc_cfg_set_int64 "const char *name" "int64_t v"
+.Ft int
+.Fn xtc_cfg_set_double "const char *name" "double v"
+.Ft int
+.Fn xtc_cfg_set_string "const char *name" "const char *v"
+.Ft int
+.Fn xtc_cfg_set_enum "const char *name" "int v"
+.Ft int
+.Fn xtc_cfg_count "void"
+.Ft int
+.Fn xtc_cfg_kind "const char *name" "xtc_cfg_kind_t *out"
 .Ft int
 .Fn xtc_cfg_load_file "const char *path"
 .Ft int
@@ -67,9 +115,55 @@ parses the string value to the registered type, validates against
 bounds, and updates the backing variable.  An optional on-change
 callback fires.
 .Pp
+Modules register a knob with
+.Fn xtc_cfg_register ,
+passing an
+.Vt xtc_cfg_spec_t
+that carries name, type, backing storage, default and bounds; the
+type-specific
+.Fn xtc_cfg_register_bool ,
+.Fn xtc_cfg_register_int ,
+.Fn xtc_cfg_register_int64 ,
+.Fn xtc_cfg_register_double ,
+.Fn xtc_cfg_register_string ,
+and
+.Fn xtc_cfg_register_enum
+wrappers fill that spec for one type.
+.Fn xtc_cfg_unregister
+removes a knob by name.
+.Pp
+.Fn xtc_cfg_set
+parses the string value to the registered type, validates against
+bounds, and updates the backing variable.  An optional on-change
+callback fires.  The typed setters
+.Fn xtc_cfg_set_bool ,
+.Fn xtc_cfg_set_int ,
+.Fn xtc_cfg_set_int64 ,
+.Fn xtc_cfg_set_double ,
+.Fn xtc_cfg_set_string ,
+and
+.Fn xtc_cfg_set_enum
+assign a value of the matching C type without going through the
+string parser.
+.Pp
 .Fn xtc_cfg_get
-.Pq via type-specific overloads
-reads the current value.
+.Pq via the typed accessors
+reads the current value.  Use
+.Fn xtc_cfg_get_bool ,
+.Fn xtc_cfg_get_int ,
+.Fn xtc_cfg_get_int64 ,
+.Fn xtc_cfg_get_double ,
+.Fn xtc_cfg_get_string ,
+or
+.Fn xtc_cfg_get_enum
+for the corresponding registered kind.
+.Pp
+.Fn xtc_cfg_count
+returns the number of registered knobs;
+.Fn xtc_cfg_kind
+reports the
+.Vt xtc_cfg_kind_t
+type of a named knob.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 static int g_max_clients = 1000;

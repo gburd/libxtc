@@ -9,7 +9,8 @@
 .Nm xtc_rcu_read_lock ,
 .Nm xtc_rcu_read_unlock ,
 .Nm xtc_rcu_retire ,
-.Nm xtc_rcu_synchronize
+.Nm xtc_rcu_synchronize ,
+.Nm xtc_rcu_current_epoch
 .Nd epoch-based read-copy-update
 .Sh SYNOPSIS
 .In xtc.h
@@ -26,6 +27,8 @@
 .Fn xtc_rcu_retire "void *p" "xtc_rcu_free_fn fn"
 .Ft void
 .Fn xtc_rcu_synchronize "void"
+.Ft uint64_t
+.Fn xtc_rcu_current_epoch "void"
 .Sh DESCRIPTION
 .Nm xtc_rcu
 is an epoch-based read-copy-update primitive for read-mostly data
@@ -48,6 +51,11 @@ the deferred-retire path.
 The implementation tracks per-thread epoch counters in a
 TLS-registered linked list.  Retired records bucket by epoch;
 records two epochs old are guaranteed safe to free.
+.Pp
+.Fn xtc_rcu_current_epoch
+returns the current value of the global epoch counter.  It is
+intended for diagnostics and tests -- the counter advances on each
+grace period.
 .Sh CHOOSING vs. xtc_lrlock
 Both give wait-free reads.  Trade-offs:
 .Bl -tag -width "xtc_lrlock" -offset indent
