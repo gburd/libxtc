@@ -158,7 +158,11 @@ test_sim_critsec (seeded critical-section fault points), test_sim_latch
 rwlock exclusivity + no-torn-read under contention, replayed),
 test_sim_partition (a seeded cross-loop network partition: cut groups
 drop messages, connected groups deliver, the run quiesces without a
-partitioned-peer deadlock, and replays identically).
+partitioned-peer deadlock, and replays identically), test_sim_lockmgr
+(the heavyweight lock manager lock_mgr.c: contending fibers park in the
+wait loop and are re-granted on release -- all acquire/release pairs
+complete with no hang, and a deliberately constructed cycle is detected
+with exactly one deadlock victim; both replay from seed).
 
 ## Feature coverage progress (toward modelling all of libxtc)
 
@@ -274,18 +278,27 @@ Known gaps and why:
   each run starts from the identical binding.  Sim-only (the function
   only runs under sim); production current-loop handling is unchanged.
   test_sim_buggify2 now hashes the completion sequence ORDER-sensitively
-  and asserts it replays; the full sim suite (9 tests) replays, incl.
+  and asserts it replays; the full sim suite (11 tests) replays, incl.
   under ASan+UBSan.
 
-- Lock manager + deadlock detector (lock_mgr.c): NOT DST-able as built.
-  A contended xtc_lock_get blocks via pthread_cond_wait (an OS-thread
-  wait, not a fiber yield) and the detector runs on a periodic
-  background thread -- both incompatible with the single-thread sim.
-  The seeded LOCKVIC victim stream already exists; bringing the lock
-  manager under DST needs a fiber-park wait path in xtc_lock_get and a
-  synchronous detector tick driven by the sim clock.  Tracked as future
-  work; the storage engine uses the lock manager from blocking-pool
-  threads today, where its current design is correct.
+- Lock manager + deadlock detector (lock_mgr.c): DONE for the fiber path
+  (test_sim_lockmgr), thread path unchanged.  A contended xtc_lock_get
+  now checks __xtc_current_task(): a caller running inside a fiber on a
+  loop PARKS -- it arms a waker on its lock_entry, sets is_fiber, drops
+  the partition lock, and xtc_yield()s to the loop (with a park-on-timer
+  when the timeout is positive, cancelled on exit so no orphan timer
+  advances the sim clock) -- and is re-granted when a release, downgrade,
+  release_all, or deadlock-victim abort wakes its waker.  This mirrors
+  the xtc_amutex fiber-park discipline in sync.c exactly.  A caller NOT
+  on a loop (cur == NULL: OS threads, the blocking pool, tooling) takes
+  the ORIGINAL pthread_cond_wait / pthread_cond_timedwait path
+  byte-for-byte -- the fiber path is purely additive and gated on
+  __xtc_current_task() != NULL, so the storage engine's blocking-pool
+  use is unaffected.  The detector's seeded LOCKVIC victim stream makes
+  the victim choice replay; a DST test drives DETECT_ON_BLOCK
+  (synchronous, no background thread) since the periodic detector thread
+  cannot run on the single sim thread -- the production PERIODIC path is
+  retained unchanged for threaded use.
 
 - Supervisor restart logic (sup.c): the restart behaviour itself runs
   on a loop and IS deterministic under the sim (verified locally: a
