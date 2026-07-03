@@ -140,6 +140,7 @@ clean:
 	rm -f test_inplace_redo
 	rm -f test_clean_restart
 	rm -f test_steal
+	rm -f test_steal_page
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
 	rm -f test_scan_resist
@@ -446,6 +447,12 @@ test_steal: test_steal.c engine.o db.o quack.o xstore.o xlog.o wal.o btree.o btn
 
 test-steal: test_steal
 	./test_steal
+
+test_steal_page: test_steal_page.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_steal_page.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-steal-page: test_steal_page
+	./test_steal_page
 
 # ---- B-tree node (prefix compression) unit test (standalone) ----
 test_btnode: test_btnode.c btnode.c btnode.h
