@@ -162,7 +162,17 @@ partitioned-peer deadlock, and replays identically), test_sim_lockmgr
 (the heavyweight lock manager lock_mgr.c: contending fibers park in the
 wait loop and are re-granted on release -- all acquire/release pairs
 complete with no hang, and a deliberately constructed cycle is detected
-with exactly one deadlock victim; both replay from seed).
+with exactly one deadlock victim; both replay from seed),
+test_sim_bufmgr (the sqlxtc STORAGE-ENGINE concurrency layer -- the
+LeanStore-style buffer manager, examples/06_sqlxtc/bufmgr.c -- driven
+by xtc_sim_exec_run: N worker fibers across N loops pin/read/verify a
+shared page set against a small pool that evicts, the page provider
+cools + flushes on the virtual clock, and page I/O completes via the
+sim backend's deferred, seeded-latency AIO; the run reaches quiescence
+(the last worker stops the periodic provider so its timer stops spinning
+the clock), every pinned read matches its canonical content, and the run
+replays byte-identically -- same content + engine state hash -- a first
+slice of storage-engine DST).
 
 ## Feature coverage progress (toward modelling all of libxtc)
 
@@ -174,8 +184,13 @@ cross-loop messaging (send/recv mailbox park/wake), the virtual clock
 fault points, the fiber-yielding latches (xtc_amutex, xtc_arwlock:
 mutual exclusion + rwlock exclusivity + no-torn-read under contention),
 simulated I/O faults (deferred seeded AIO completions + short/EIO
-faults), and Buggify (FoundationDB-style pessimal-path injection in
-real runtime code).
+faults), Buggify (FoundationDB-style pessimal-path injection in
+real runtime code), and -- a first slice of storage-engine DST -- the
+sqlxtc buffer manager (the storage concurrency layer: fixes, striped
+page-table locks, cooling-stage eviction, and background cool/flush all
+run under the deterministic scheduler with seeded page-I/O completion
+ordering, and replay).  WAL + crash-recovery under DST remains the
+capstone (see below).
 
 ## FoundationDB parity
 
@@ -242,9 +257,37 @@ clock / replay / invariant checks already in place:
   production and when disabled.  Expand by planting more sites in the
   WAL / buffer-pool / recovery paths.
 
+- Storage-engine concurrency under DST (FIRST SLICE DONE,
+  test_sim_bufmgr): the sqlxtc buffer manager -- the storage engine's
+  concurrency layer -- runs under xtc_sim_exec_run.  A scaled-down
+  test_bufmgr_mt workload (8 worker fibers x 4 loops over a 32-frame pool
+  holding 256 pages, so eviction churns) pins/reads/verifies pages while
+  the page provider cools + flushes; page reads/writes complete through
+  the sim I/O backend's deferred, seeded-latency AIO (faults enabled for
+  latency only -- an injected EIO would be a spurious corruption on a
+  read-back-what-you-wrote workload).  It asserts (a) QUIESCENCE
+  (xtc_sim_exec_run == XTC_OK -- no hang; the last worker calls
+  bm_provider_stop so the provider's periodic timer stops advancing the
+  virtual clock forever, which would otherwise be XTC_E_AGAIN), (b) data
+  CONSISTENCY (no torn pages / verification mismatch, plus a final
+  single-threaded sweep -- the same invariant test_bufmgr_mt checks),
+  (c) REPLAY (same seed twice -> identical content hash AND engine state
+  hash), and (d) a DIFFERENT seed -> a different schedule (state hash
+  differs) with still-consistent data.  The bufmgr already parked fibers
+  cleanly under sim -- its pool locks are audited-released before any
+  xtc_aio, its provider stops deterministically, and eviction has no
+  unseeded external nondeterminism -- so it reached quiescence and
+  replayed without a bufmgr change (the test compiles bufmgr.c into the
+  sim harness; src/ is untouched).  This is a FIRST SLICE only: it
+  exercises the concurrency layer (fixes, striped page-table locks,
+  cooling-stage eviction, background writeback), NOT durability.
+
 Still to reach full FDB parity: machine-death simulation (kill a loop's
 procs mid-run), a swarm/soak fleet (millions of seeds), and the capstone
--- a full sqlxtc-under-sim WAL+recovery test with seeded crashes.
+-- a full sqlxtc-under-sim WAL+recovery test with seeded crashes (the
+buffer manager is now under DST; layering WAL + crash-recovery on top,
+with seeded crashes and torn writes, is the remaining storage-engine
+DST work).
 (Network-partition simulation is now DONE at loop granularity -- see the
 simulated network partition entry above.)
 
