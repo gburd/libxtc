@@ -70,15 +70,39 @@ if ! $CC -std=c11 -D_GNU_SOURCE $inc -I"$bmdir" \
 	exit 1
 fi
 
+# test_sim_crash_recover drives the WHOLE native SQL engine (sx_* over
+# the shared B-tree) + the WAL + recovery under DST, so it needs the
+# ENGINE_NATIVE object set from examples/06_sqlxtc (the same set the
+# non-sim test_wal_recover links).  These depend only on the library
+# (which the sim lib provides) + the SQLXTC_HAVE_LIME parser, so compile
+# each against the sim lib into per-test objects (bufmgr.o is reused).
+engobjs="$bmobj"
+for s in engine db quack metrics vexec sql_parse sql_parse_drv sql_ast \
+	sql_parse_gen xstore xlog wal btree btnode; do
+	o="$work/$s.o"
+	# shellcheck disable=SC2086
+	if ! $CC -std=c11 -D_GNU_SOURCE -DSQLXTC_HAVE_LIME=1 $inc -I"$bmdir" \
+		-c "$bmdir/$s.c" -o "$o" 2> "$work/cc.err"; then
+		echo "  [sim] FAIL: $s.c (for test_sim_crash_recover) did not compile"
+		head -20 "$work/cc.err" >&2
+		exit 1
+	fi
+	engobjs="$engobjs $o"
+done
+
 fail=0
-for t in test_sim_sched test_sim_pingpong test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_lockmgr test_sim_iofault test_sim_buggify test_sim_buggify2 test_sim_partition test_sim_bufmgr; do
+for t in test_sim_sched test_sim_pingpong test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_lockmgr test_sim_iofault test_sim_buggify test_sim_buggify2 test_sim_partition test_sim_bufmgr test_sim_crash_recover; do
 	exe="$work/$t"
-	# test_sim_bufmgr additionally needs the bufmgr object + its include.
+	# test_sim_bufmgr additionally needs the bufmgr object + its include;
+	# test_sim_crash_recover needs the whole native engine object set.
 	extra_obj=""
 	extra_inc=""
 	if [ "$t" = test_sim_bufmgr ]; then
 		extra_obj="$bmobj"
 		extra_inc="-I$bmdir"
+	elif [ "$t" = test_sim_crash_recover ]; then
+		extra_obj="$engobjs"
+		extra_inc="-I$bmdir -DSQLXTC_HAVE_LIME=1"
 	fi
 	# inc/libs intentionally word-split (each holds several flags).
 	# shellcheck disable=SC2086
