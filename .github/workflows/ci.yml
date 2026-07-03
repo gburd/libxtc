@@ -9,6 +9,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Nightly large-scale DST swarm/soak (100k+ seeds).  02:30 UTC daily.
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      swarm_shard_seeds:
+        description: 'seeds per shard for a manual swarm run'
+        default: '25000'
+        required: false
 
 jobs:
   build-and-test:
@@ -136,6 +145,54 @@ jobs:
         run: autoreconf -i
       - name: DST sim-backend tests
         run: XTC_SRC_DIR="$PWD" CC=gcc sh test/sim/run_sim_tests.sh
+
+  sim-swarm-nightly:
+    # Large-scale DST swarm/soak: 4 disjoint shards x 25k = 100k seeds
+    # over the combined fault set (partition + latency + buggify +
+    # machine-death).  Nightly (schedule) or on demand (workflow_dispatch);
+    # NOT on every push -- the bounded 300-seed swarm in the sim-dst job
+    # already gates each commit.  See docs/M_DST.md and test/sim/README.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf pkg-config libssl-dev gawk
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Build the sim-backend library
+        run: |
+          mkdir -p build_sim
+          cd build_sim
+          ../dist/configure --with-io-backend=sim --with-tls=none \
+            --without-liburing
+          make -j"$(nproc)"
+      - name: Compile the swarm harness
+        run: |
+          gcc -std=c11 -D_GNU_SOURCE -I src/inc \
+            test/sim/test_sim_swarm.c build_sim/libxtc.a \
+            -pthread -ldl -lm -o build_sim/test_sim_swarm
+      - name: Run 100k-seed swarm (4 disjoint shards)
+        run: |
+          N='${{ github.event.inputs.swarm_shard_seeds || 25000 }}'
+          set -e
+          rc=0
+          for base in 0 $N $((N*2)) $((N*3)); do
+            ( ./build_sim/test_sim_swarm "$N" "$base" \
+                > "swarm-$base.log" 2>&1 ; echo "$? $base" > "swarm-$base.rc" ) &
+          done
+          wait
+          for base in 0 $N $((N*2)) $((N*3)); do
+            echo "--- shard base=$base ---"; tail -3 "swarm-$base.log"
+            read -r code b < "swarm-$base.rc"
+            [ "$code" = 0 ] || { echo "shard base=$base FAILED (rc=$code)"; rc=1; }
+          done
+          exit $rc
 
   sanitizers:
     runs-on: ubuntu-latest
