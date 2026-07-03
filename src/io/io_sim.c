@@ -45,6 +45,11 @@ struct __xtc_sim_ev {
 	void     *tag;        /* event tag */
 	xtc_aio_t *aio;       /* non-NULL for an AIO completion */
 	int       aio_res;    /* the result to publish on the aio at due time */
+	/* Generic deferred callback (non-NULL for a deferred cross-loop
+	 * message delivery driven by xtc_sim_net_latency): invoked when the
+	 * event becomes due instead of publishing readiness / an AIO. */
+	void    (*cb)(void *);
+	void     *cb_arg;
 	struct __xtc_sim_ev *next;
 };
 
@@ -198,6 +203,41 @@ __xtc_io_sim_next_due(xtc_io_t *io)
 	return best;
 }
 
+/* PUBLIC: int __xtc_io_sim_defer_cb __P((xtc_io_t *, int64_t, void (*)(void *), void *)); */
+/*
+ * Enqueue a generic callback to run at virtual time `due_ns` on this
+ * loop's poll drain (in due order).  Used by the cross-loop message-
+ * latency path (proc.c __mbox_deliver under xtc_sim_net_latency): the
+ * callback pushes the deferred envelope into the target mailbox and
+ * fires the receiver's waker when it becomes due.  Because the event
+ * sits on the target loop's event store, __xtc_io_sim_next_due reports
+ * it, so the sim scheduler advances the clock to it and never mistakes
+ * an in-flight delayed message for a deadlock.
+ */
+int
+__xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns, void (*fn)(void *),
+    void *arg)
+{
+	struct __xtc_sim_io *s;
+	struct __xtc_sim_ev *ev, **pp;
+	if (io == NULL || io->sim == NULL || fn == NULL)
+		return XTC_E_INVAL;
+	s = io->sim;
+	if (__os_calloc(1, sizeof *ev, (void **)&ev) != XTC_OK)
+		return XTC_E_NOMEM;
+	ev->due_ns = due_ns;
+	ev->fd = -1;
+	ev->cb = fn;
+	ev->cb_arg = arg;
+	for (pp = &s->events;
+	    *pp != NULL && (*pp)->due_ns <= ev->due_ns;
+	    pp = &(*pp)->next)
+		;
+	ev->next = *pp;
+	*pp = ev;
+	return XTC_OK;
+}
+
 int
 __xtc_io_sim_wakeup_drain(xtc_io_t *io)
 {
@@ -261,11 +301,24 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			e->aio->done = 1;
 			events[idx].tag = e->aio->tag;
 			events[idx].flags = XTC_IO_AIO;
+			idx++;
+		} else if (e->cb != NULL) {
+			/* A deferred cross-loop message delivery (net latency):
+			 * run the callback now (it pushes the envelope into the
+			 * target mailbox and fires the recv waker).  It does not
+			 * occupy a caller event slot -- the waker it fires enqueues
+			 * the parked receiver directly. */
+			void (*cb)(void *) = e->cb;
+			void *cb_arg = e->cb_arg;
+			*pp = e->next;
+			__os_free(e);
+			cb(cb_arg);
+			continue;
 		} else {
 			events[idx].tag = e->tag;
 			events[idx].flags = e->revents;
+			idx++;
 		}
-		idx++;
 		*pp = e->next;
 		__os_free(e);
 	}

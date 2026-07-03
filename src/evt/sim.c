@@ -428,6 +428,164 @@ __xtc_sim_io_should_fault(void)
 	return __xtc_sim_rng_range(XTC_SIM_RNG_IO, 1000) < g_io_fault_pct;
 }
 
+/* ---- simulated network partition + message latency (DST) ----
+ *
+ * A seeded, deterministic model of a partitioned / lossy network at the
+ * cross-LOOP message granularity xtc's sim actually models: xtc_send
+ * between procs on different loops (one exec) routes through
+ * __mbox_deliver (proc.c), the single cross-loop delivery seam.  These
+ * knobs let a DST test cut message flow between groups of loops (a
+ * partition) and/or defer each cross-loop delivery by a seeded latency
+ * (so delivery ORDER is part of the replayable schedule) -- FoundationDB
+ * network-partition testing at loop granularity.
+ *
+ * Scope (honest limitation): this covers the in-process cross-loop
+ * message path ONLY.  xtc's real cross-MACHINE transport is raw sockets
+ * (io_net.c), which cannot run under the single-thread sim; simulating
+ * sockets/TLS is a separate, larger effort and is NOT modelled here.
+ *
+ * Partition matrix: a directed adjacency of "loop i cannot reach loop
+ * j".  Loops are identified by pid.loop_id (== exec_id + 1, or 0 for a
+ * standalone loop), so the matrix is indexed by loop_id in
+ * [0, XTC_SIM_PART_MAX).  A blocked edge causes __mbox_deliver to DROP
+ * the message the same way a soft-full mailbox does (return XTC_E_AGAIN;
+ * the sender already handles that path), so a partitioned peer never
+ * deadlocks the sim.  Off by default (no edge blocked).
+ *
+ * Latency: when a [min,max] window is set, each cross-loop delivery is
+ * deferred to now + a seeded draw from the IO stream (reusing the IO
+ * stream -- not a new PRNG stream -- so enabling latency does not
+ * perturb the schedule).  Off by default (min==max==0: inline delivery).
+ */
+#define XTC_SIM_PART_MAX 64        /* == LOOP_TABLE_MAX in proc.c */
+static _Atomic int      g_part_on;
+static unsigned char    g_part_block[XTC_SIM_PART_MAX][XTC_SIM_PART_MAX];
+static _Atomic int64_t  g_net_lat_min_ns;
+static _Atomic int64_t  g_net_lat_max_ns;
+static pthread_mutex_t  g_part_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* PUBLIC: void xtc_sim_partition_set __P((int, int, int)); */
+/*
+ * Set (or clear) the directed edge src_loop_id -> dst_loop_id in the
+ * partition matrix: when `blocked` is nonzero a cross-loop message from
+ * a proc on src_loop_id to a proc on dst_loop_id is dropped under sim.
+ * loop_id is pid.loop_id (exec_id + 1; 0 == standalone).  For a
+ * symmetric cut call it both ways.  Enables the partition subsystem on
+ * first blocking edge.  Out-of-range ids are ignored.
+ */
+void
+xtc_sim_partition_set(int src_loop_id, int dst_loop_id, int blocked)
+{
+	if (src_loop_id < 0 || src_loop_id >= XTC_SIM_PART_MAX ||
+	    dst_loop_id < 0 || dst_loop_id >= XTC_SIM_PART_MAX)
+		return;
+	(void)pthread_mutex_lock(&g_part_lock);
+	g_part_block[src_loop_id][dst_loop_id] = blocked ? 1 : 0;
+	(void)pthread_mutex_unlock(&g_part_lock);
+	if (blocked)
+		atomic_store_explicit(&g_part_on, 1, memory_order_release);
+}
+
+/* PUBLIC: void xtc_sim_partition_isolate __P((int)); */
+/*
+ * Cut loop `loop_id` off from every other loop in both directions (a
+ * fully-partitioned / "dead machine" peer).  Self-delivery (same loop)
+ * is left reachable so a proc can still message peers on its own loop.
+ */
+void
+xtc_sim_partition_isolate(int loop_id)
+{
+	int j;
+	if (loop_id < 0 || loop_id >= XTC_SIM_PART_MAX)
+		return;
+	(void)pthread_mutex_lock(&g_part_lock);
+	for (j = 0; j < XTC_SIM_PART_MAX; j++) {
+		if (j == loop_id)
+			continue;
+		g_part_block[loop_id][j] = 1;
+		g_part_block[j][loop_id] = 1;
+	}
+	(void)pthread_mutex_unlock(&g_part_lock);
+	atomic_store_explicit(&g_part_on, 1, memory_order_release);
+}
+
+/* PUBLIC: void xtc_sim_partition_clear __P((void)); */
+/* Heal the network: clear every edge and disable the partition matrix
+ * (all cross-loop messages deliver again).  Also clears the latency
+ * window. */
+void
+xtc_sim_partition_clear(void)
+{
+	(void)pthread_mutex_lock(&g_part_lock);
+	memset(g_part_block, 0, sizeof g_part_block);
+	(void)pthread_mutex_unlock(&g_part_lock);
+	atomic_store_explicit(&g_part_on, 0, memory_order_release);
+	atomic_store_explicit(&g_net_lat_min_ns, 0, memory_order_relaxed);
+	atomic_store_explicit(&g_net_lat_max_ns, 0, memory_order_relaxed);
+}
+
+/* PUBLIC: int __xtc_sim_partition_blocked __P((int, int)); */
+/*
+ * 1 if a cross-loop message from src_loop_id to dst_loop_id must be
+ * dropped under the active partition; 0 otherwise / when sim or the
+ * partition matrix is inactive.  The single seam __mbox_deliver
+ * consults.  A single relaxed load in the common (no-partition) case.
+ */
+int
+__xtc_sim_partition_blocked(int src_loop_id, int dst_loop_id)
+{
+	int b;
+	if (!atomic_load_explicit(&g_part_on, memory_order_acquire))
+		return 0;
+	if (!__xtc_sim_active())
+		return 0;
+	if (src_loop_id < 0 || src_loop_id >= XTC_SIM_PART_MAX ||
+	    dst_loop_id < 0 || dst_loop_id >= XTC_SIM_PART_MAX)
+		return 0;
+	(void)pthread_mutex_lock(&g_part_lock);
+	b = g_part_block[src_loop_id][dst_loop_id];
+	(void)pthread_mutex_unlock(&g_part_lock);
+	return b;
+}
+
+/* PUBLIC: void xtc_sim_net_latency __P((int64_t, int64_t)); */
+/*
+ * Set the per-message cross-loop latency window [min,max] ns.  When
+ * nonzero, __mbox_deliver defers each surviving (not-partitioned) cross-
+ * loop delivery to now + a seeded draw in [min,max], so delivery ORDER
+ * across concurrent sends becomes part of the replayable schedule (the
+ * fiber's peer genuinely observes the message later in virtual time).
+ * min==max==0 (the default) delivers inline.  Seeded on the IO stream.
+ */
+void
+xtc_sim_net_latency(int64_t min_ns, int64_t max_ns)
+{
+	if (min_ns < 0) min_ns = 0;
+	if (max_ns < min_ns) max_ns = min_ns;
+	atomic_store_explicit(&g_net_lat_min_ns, min_ns, memory_order_relaxed);
+	atomic_store_explicit(&g_net_lat_max_ns, max_ns, memory_order_relaxed);
+}
+
+/* PUBLIC: int64_t __xtc_sim_net_latency __P((void)); */
+/* A seeded per-message latency in [min,max] ns drawn from the IO stream,
+ * or 0 when sim inactive or no latency window is set (inline delivery).
+ * __mbox_deliver consults this to decide whether to defer a delivery. */
+int64_t
+__xtc_sim_net_latency(void)
+{
+	int64_t lo, hi;
+	if (!__xtc_sim_active())
+		return 0;
+	lo = atomic_load_explicit(&g_net_lat_min_ns, memory_order_relaxed);
+	hi = atomic_load_explicit(&g_net_lat_max_ns, memory_order_relaxed);
+	if (hi <= 0)
+		return 0;
+	if (hi <= lo)
+		return lo;
+	return lo + (int64_t)__xtc_sim_rng_range(XTC_SIM_RNG_IO,
+	    (uint64_t)(hi - lo + 1));
+}
+
 /* ---- virtual clock ---- */
 
 /* PUBLIC: void xtc_sim_clock_enable __P((int64_t)); */

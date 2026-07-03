@@ -119,6 +119,37 @@ int     __xtc_sim_io_faults_active(void);
 int64_t __xtc_sim_io_latency(void);
 int     __xtc_sim_io_should_fault(void);
 
+/*
+ * Simulated network partition + message latency (DST).  A seeded,
+ * deterministic model of a partitioned / lossy / delayed network at the
+ * cross-LOOP message granularity xtc's sim models: xtc_send between
+ * procs on different loops routes through __mbox_deliver, the single
+ * cross-loop delivery seam.  These let a DST test cut message flow
+ * between loops (a partition) and/or defer each cross-loop delivery by a
+ * seeded latency so delivery ORDER is part of the replayable schedule.
+ * All OFF by default (no behaviour change in production or normal sim).
+ *
+ * Loops are identified by pid.loop_id (== exec_id + 1; 0 == standalone).
+ * A blocked edge makes __mbox_deliver DROP the message via the sender's
+ * existing soft-full path (XTC_E_AGAIN), so a partitioned peer never
+ * deadlocks the sim.  Scope: the in-process cross-loop path only -- the
+ * real cross-machine raw-socket transport (io_net.c) cannot run under
+ * the single-thread sim and is NOT modelled here.
+ *
+ * PUBLIC: void    xtc_sim_partition_set __P((int, int, int));
+ * PUBLIC: void    xtc_sim_partition_isolate __P((int));
+ * PUBLIC: void    xtc_sim_partition_clear __P((void));
+ * PUBLIC: int     __xtc_sim_partition_blocked __P((int, int));
+ * PUBLIC: void    xtc_sim_net_latency __P((int64_t, int64_t));
+ * PUBLIC: int64_t __xtc_sim_net_latency __P((void));
+ */
+void    xtc_sim_partition_set(int src_loop_id, int dst_loop_id, int blocked);
+void    xtc_sim_partition_isolate(int loop_id);
+void    xtc_sim_partition_clear(void);
+int     __xtc_sim_partition_blocked(int src_loop_id, int dst_loop_id);
+void    xtc_sim_net_latency(int64_t min_ns, int64_t max_ns);
+int64_t __xtc_sim_net_latency(void);
+
 /* Plant a critical-section fault point in runtime code.  A single
  * relaxed load in production (sim inactive); under sim with points
  * enabled it perturbs/records per the FAULT stream.  Elided entirely
