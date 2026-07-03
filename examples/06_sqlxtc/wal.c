@@ -44,7 +44,59 @@
 #define WAL_KIND_COMMIT  'C'
 #define WAL_KIND_STOP    'S'
 
-#define WAL_REC_HDR      12u     /* on-disk per-record: u64 lsn + u32 len */
+#define WAL_REC_HDR      12u     /* on-disk per-record header: u64 lsn + u32 len */
+#define WAL_REC_CRC      8u      /* on-disk per-record trailer: u64 checksum */
+
+/*
+ * Per-record on-disk layout is now [u64 lsn][u32 len][body:len][u64 crc].
+ * The trailer is a 64-bit FNV-1a hash over the header bytes (lsn+len)
+ * and the body.  It makes every record self-checking: recovery can
+ * tell a COMPLETE record from a torn one instead of decoding garbage.
+ *
+ * Torn-tail detection (Increment 1, the root fix): a crash mid-append
+ * leaves a partial trailing record whose 4-byte length may read as a
+ * plausible-but-wrong value < WAL_MAX_REC.  Without a checksum the scan
+ * trusted that length and handed the garbage body to the decoder, whose
+ * length/id fields then drove unbounded allocations (multi-GB balloon /
+ * OOM on a genuinely torn STEAL base -- see M_SQLXTC_STEAL.md).  With
+ * the trailer, wal_scan / wal_scan_tail recompute the checksum and
+ * treat a MISMATCH exactly as end-of-log: the scan stops at the torn
+ * tail and no torn record ever reaches xl_parse_*.  Both xstore_recover
+ * and xstore_recover_inplace run through this verified scan, so neither
+ * can decode a torn record.  This is the standard ARIES/Stasis
+ * technique (a log record is self-checking).
+ *
+ * Group commit: the checksum is over each LOGICAL record, not the
+ * fsync'd batch -- batch_add stamps a trailer per record before they
+ * share one pwrite+fdatasync, so a batch that is torn mid-write fails
+ * the checksum of exactly the first incomplete record and the scan
+ * stops there, keeping every complete record ahead of it.
+ *
+ * This is an example engine with no external on-disk-format compat
+ * requirement, so the format bump needs no version negotiation.
+ */
+
+/* 64-bit FNV-1a over the record header (lsn+len) and body.  Not
+ * cryptographic -- it only needs to catch a torn/partial tail record,
+ * where the trailing 8 bytes are either missing (short read) or do not
+ * match a body the writer never finished.  One pass, no table, no
+ * dependency. */
+static uint64_t
+wal_rec_crc(uint64_t lsn, uint32_t len, const void *body)
+{
+	const uint8_t *bp = body;
+	uint64_t h = 1469598103934665603ull;    /* FNV offset basis */
+	uint8_t hdr[WAL_REC_HDR];
+	uint32_t i;
+
+	memcpy(hdr, &lsn, 8);
+	memcpy(hdr + 8, &len, 4);
+	for (i = 0; i < WAL_REC_HDR; i++)
+		h = (h ^ hdr[i]) * 1099511628211ull;   /* FNV prime */
+	for (i = 0; i < len; i++)
+		h = (h ^ bp[i]) * 1099511628211ull;
+	return h;
+}
 
 /*
  * Upper bound on a single on-disk record body.  A legitimate record is
@@ -112,7 +164,9 @@ wal_scan_tail(int fd, off_t *off_out, uint64_t *maxlsn_out)
 	uint8_t *sb = NULL; size_t sbcap = 0; off_t o = 0; uint64_t maxlsn = 0;
 	for (;;) {
 		uint8_t hdr[WAL_REC_HDR];
-		uint64_t lsn; uint32_t len;
+		uint8_t trl[WAL_REC_CRC];
+		uint64_t lsn, crc, want;
+		uint32_t len;
 		if (pread(fd, hdr, WAL_REC_HDR, o) != (ssize_t)WAL_REC_HDR)
 			break;                /* EOF or torn header */
 		memcpy(&lsn, hdr, 8); memcpy(&len, hdr + 8, 4);
@@ -126,8 +180,15 @@ wal_scan_tail(int fd, off_t *off_out, uint64_t *maxlsn_out)
 		if (len > 0 &&
 		    pread(fd, sb, len, o + (off_t)WAL_REC_HDR) != (ssize_t)len)
 			break;                /* torn body: stop at the tail */
+		if (pread(fd, trl, WAL_REC_CRC,
+		    o + (off_t)WAL_REC_HDR + (off_t)len) != (ssize_t)WAL_REC_CRC)
+			break;                /* torn trailer: stop at the tail */
+		memcpy(&crc, trl, WAL_REC_CRC);
+		want = wal_rec_crc(lsn, len, sb);
+		if (crc != want)
+			break;                /* checksum mismatch: torn tail */
 		if (lsn > maxlsn) maxlsn = lsn;
-		o += (off_t)WAL_REC_HDR + (off_t)len;
+		o += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
 	}
 	free(sb);
 	*off_out = o;
@@ -197,8 +258,8 @@ static int
 batch_add(wal_t *w, const uint8_t *data, uint32_t len,
     xtc_pid_t reply_to, uint64_t txn_id)
 {
-	size_t need = WAL_REC_HDR + len;
-	uint64_t lsn;
+	size_t need = WAL_REC_HDR + len + WAL_REC_CRC;
+	uint64_t lsn, crc;
 
 	if (w->blen + need > w->bcap) {
 		size_t ncap = w->bcap * 2;
@@ -215,6 +276,8 @@ batch_add(wal_t *w, const uint8_t *data, uint32_t len,
 	memcpy(w->bbuf + w->blen, &lsn, 8);
 	memcpy(w->bbuf + w->blen + 8, &len, 4);
 	memcpy(w->bbuf + w->blen + WAL_REC_HDR, data, len);
+	crc = wal_rec_crc(lsn, len, data);
+	memcpy(w->bbuf + w->blen + WAL_REC_HDR + len, &crc, WAL_REC_CRC);
 	w->blen += need;
 	w->pend[w->pcount].reply_to = reply_to;
 	w->pend[w->pcount].txn_id = txn_id;
@@ -398,7 +461,8 @@ int
 wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 {
 	uint8_t hdr[WAL_REC_HDR];
-	uint64_t my_lsn;
+	uint8_t trl[WAL_REC_CRC];
+	uint64_t my_lsn, crc;
 	size_t done;
 	int rc = XTC_OK;
 
@@ -419,8 +483,15 @@ wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 		if (n < 0) { if (errno == EINTR) continue; rc = XTC_E_INTERNAL; goto out; }
 		done += (size_t)n;
 	}
+	/* self-checking trailer so recovery can drop a torn tail */
+	crc = wal_rec_crc(my_lsn, len, record);
+	memcpy(trl, &crc, WAL_REC_CRC);
+	if (pwrite(w->fd, trl, WAL_REC_CRC,
+	    w->off + (off_t)WAL_REC_HDR + (off_t)len) != (ssize_t)WAL_REC_CRC) {
+		rc = XTC_E_INTERNAL; goto out;
+	}
 	if (fdatasync(w->fd) != 0) { rc = XTC_E_INTERNAL; goto out; }
-	w->off += (off_t)WAL_REC_HDR + (off_t)len;
+	w->off += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
 	atomic_store_explicit(&w->durable_lsn, my_lsn, memory_order_relaxed);
 	w->s_commits++;
 	w->s_batches++;
@@ -458,17 +529,23 @@ wal_cmp_emit(void *vctx, const void *payload, uint32_t len)
 {
 	struct wal_cmp_ctx *c = vctx;
 	uint8_t hdr[WAL_REC_HDR];
+	uint8_t trl[WAL_REC_CRC];
 	uint64_t lsn = ++c->lsn;
+	uint64_t crc;
 	if (c->err)
 		return;
 	memcpy(hdr, &lsn, 8);
 	memcpy(hdr + 8, &len, 4);
+	crc = wal_rec_crc(lsn, len, payload);
+	memcpy(trl, &crc, WAL_REC_CRC);
 	if (pwrite(c->fd, hdr, WAL_REC_HDR, c->off) != (ssize_t)WAL_REC_HDR ||
-	    (len && pwrite(c->fd, payload, len, c->off + WAL_REC_HDR) != (ssize_t)len)) {
+	    (len && pwrite(c->fd, payload, len, c->off + WAL_REC_HDR) != (ssize_t)len) ||
+	    pwrite(c->fd, trl, WAL_REC_CRC,
+	    c->off + WAL_REC_HDR + len) != (ssize_t)WAL_REC_CRC) {
 		c->err = 1;
 		return;
 	}
-	c->off += (off_t)WAL_REC_HDR + (off_t)len;
+	c->off += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
 }
 
 int
@@ -534,7 +611,8 @@ wal_scan(const char *path, wal_replay_cb cb, void *user)
 		return XTC_OK;                /* no log yet: nothing to replay */
 	for (;;) {
 		uint8_t hdr[WAL_REC_HDR];
-		uint64_t lsn;
+		uint8_t trl[WAL_REC_CRC];
+		uint64_t lsn, crc, want;
 		uint32_t len;
 		ssize_t n = pread(fd, hdr, WAL_REC_HDR, off);
 		if (n != (ssize_t)WAL_REC_HDR)
@@ -551,9 +629,17 @@ wal_scan(const char *path, wal_replay_cb cb, void *user)
 		n = pread(fd, buf, len, off + (off_t)WAL_REC_HDR);
 		if (n != (ssize_t)len)
 			break;                   /* torn record body: stop (crash tail) */
+		n = pread(fd, trl, WAL_REC_CRC,
+		    off + (off_t)WAL_REC_HDR + (off_t)len);
+		if (n != (ssize_t)WAL_REC_CRC)
+			break;                   /* torn trailer: stop (crash tail) */
+		memcpy(&crc, trl, WAL_REC_CRC);
+		want = wal_rec_crc(lsn, len, buf);
+		if (crc != want)
+			break;                   /* checksum mismatch: torn tail, stop */
 		if (cb(lsn, buf, len, user) != 0)
 			break;
-		off += (off_t)WAL_REC_HDR + (off_t)len;
+		off += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
 	}
 	free(buf);
 	close(fd);

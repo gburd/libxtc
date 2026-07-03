@@ -135,6 +135,7 @@ clean:
 	rm -f test_xstore test_xstore.o xstore.o
 	rm -f test_xlog test_xlog.o xlog.o
 	rm -f test_recover_undo
+	rm -f test_steal_torn
 	rm -f test_redo_page
 	rm -f test_inplace_redo
 	rm -f test_clean_restart
@@ -361,6 +362,16 @@ test_recover_undo: test_recover_undo.c xstore.o xlog.o wal.o btree.o btnode.o bu
 
 test-recover-undo: test_recover_undo
 	./test_recover_undo
+
+# ---- torn-tail recovery safety (per-record checksum drops a torn tail) ----
+# Both recovery paths must survive a torn tail without ballooning memory
+# (caps its own RLIMIT_AS at 256 MB internally so a regression fails
+# cleanly instead of OOMing the box).  Increment 1 of M_SQLXTC_STEAL.md.
+test_steal_torn: test_steal_torn.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o
+	$(CC) $(CFLAGS) -o $@ test_steal_torn.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LDFLAGS)
+
+test-steal-torn: test_steal_torn
+	./test_steal_torn
 
 # ---- LeanStore-style buffer manager test (in-process, no daemon) ----
 test_bufmgr: test_bufmgr.c bufmgr.o

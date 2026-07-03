@@ -255,7 +255,13 @@ wal_truncate_to_durable(const char *path, uint64_t durable_lsn)
 			break;                /* EOF or torn header */
 		memcpy(&lsn, hdr, 8);
 		memcpy(&len, hdr + 8, 4);
-		end = off + (off_t)sizeof hdr + (off_t)len;
+		end = off + (off_t)sizeof hdr + (off_t)len + 8;
+		                          /* +8: the u64 per-record CRC trailer
+		                           * ([lsn][len][body][crc]); recovery's
+		                           * checksum verify (STEAL Increment 1)
+		                           * needs the record cut on this exact
+		                           * boundary or the frontier record fails
+		                           * its CRC and the scan stops early. */
 		if (fstat(fd, &sb) != 0 || sb.st_size < end)
 			break;                /* torn body: not a complete record */
 		if (lsn > durable_lsn)
