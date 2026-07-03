@@ -166,10 +166,37 @@ page LSN) and the page file trusted as the recovery base -- avoiding
 the rebuild-from-log on every restart.  That is a performance choice
 (faster cold restart for a very large database), not a correctness one:
 the log-rebuild model here is sound and bounded.  CLRs (compensation
-log records) are an ARIES UNDO device; this engine writes versions only
-at commit, so there are no loser transactions to undo and no CLRs -- the
-WAL record's reserved record types leave room for them should a STEAL
-(undo) policy ever be added.
+log records) are an ARIES UNDO device; the DEFAULT xstore engine writes
+versions only at commit, so there are no loser transactions to undo and
+no CLRs on that path.
+
+### 3.1 ARIES undo/CLR: implemented, unit-tested, dormant by policy
+
+Status note (2026-07, correcting the "redo-only, ARIES-in-progress"
+framing): the ARIES undo machinery is NOT missing.  xlog.c implements a
+general log-record format with per-record redo AND undo images plus
+compensation log records (XL_CLR, carrying undo_next_lsn), and
+xstore_recover runs the full three-phase shape -- redo winners, then
+undo losers writing one XL_CLR per reversed update and a closing XL_END.
+examples/06_sqlxtc/test_recover_undo.c exercises exactly this: it
+synthesizes the log a STEAL engine would leave (a committed winner and
+an uncommitted loser whose updates were logged) and asserts recovery
+redoes the winner and undoes the loser with correct CLRs.  It passes.
+
+What is TRUE is that this undo path is DORMANT under the default engine:
+because the default policy is NO-STEAL (uncommitted versions are
+buffered in xstore_ctx.wbuf and reach the tree only at commit,
+xstore.c), a crash never leaves a loser's data on disk, so the undo
+pass has nothing to reverse in normal operation.  The machinery is
+kept ready (and tested in isolation) for the future STEAL engine.
+
+"Full ARIES with STEAL" -- letting uncommitted dirty pages flush, gated
+by a write-ahead-enforcement hook (flush the log to page->LSN before
+writing a dirty page) and page-LSN redo gating -- is therefore a
+SCOPED FUTURE milestone (see M_SQLXTC_BDB.md, which lists the
+write-ahead-enforce hook as the one thing BDB has that the default
+sqlxtc path lacks), NOT an in-progress gap.  It is a deliberate
+buffer-management policy choice, not missing recovery code.
 
 ## 4. Why this order
 
