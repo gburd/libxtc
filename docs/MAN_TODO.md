@@ -69,19 +69,18 @@ Whole-subsystem pages that were MISSING and are now added:
 xtc_blocking(3), xtc_pkey(3), xtc_iosched(3), xtc_dio_sched(3).
 Every public header now has at least one man3 page.
 
-Known remaining gap (tracked, not yet closed): the coverage gate
-(test_man_coverage.sh) currently scans only the umbrella xtc.h, so it
-does not catch SECONDARY functions of a subsystem that has a page but
-does not list them as `.Nm`/`.Fn` entries.  A stricter gate that scans
-the full installed header set and checks each PUBLIC function is
-mentioned in some page found ~120 such functions -- e.g. the
-xtc_amutex_* / xtc_arwlock_* / xtc_sem_* / xtc_gate_* family (belongs
-in xtc_sync(3)), the xtc_cfg_get_*/set_* accessors (xtc_cfg(3)), the
-xtc_chan_* variants (xtc_chan(3)), xtc_mctx_* helpers (xtc_mctx(3)),
-xtc_lock_upgrade/downgrade/release_all (xtc_lockmgr(3)), xtc_net_udp_*
-(xtc_net(3)), etc.  These are documented at the subsystem level but
-not enumerated per-entry-point.  Closing this is a mechanical pass
-(add `.Nm` aliases + one `.Fn` per function to the existing pages),
-after which the stricter gate can be enabled to fail the build.  The
-gate rewrite is drafted; it is held back so it does not fail `make
-check` until the pages are filled in.
+SECONDARY-function enumeration: DONE.  Every PUBLIC function across the
+installed header set (372 functions) is now mentioned as an .Nm alias
+and .Fn entry in its subsystem page -- the xtc_amutex_*/arwlock_*/sem_*/
+gate_*/barrier_*/abort_*/rwlock_* family in xtc_sync(3), the xtc_cfg_*
+accessors in xtc_cfg(3), the xtc_chan_* variants in xtc_chan(3), the
+xtc_mctx_* helpers in xtc_mctx(3), xtc_lock_upgrade/downgrade/release_all
++ xtc_lockmgr_* in xtc_lockmgr(3), xtc_net_udp_*/dns_resolve in
+xtc_net(3), xtc_log_* in xtc_log(3), xtc_res_* in xtc_res(3),
+xtc_counter/gauge/hist_destroy in xtc_stats(3), xtc_sup_add_child in
+xtc_supervisor(3), xtc_runtime_info in xtc_inspect(3), and the rest.
+
+The coverage gate (test_man_coverage.sh) is now STRICT: it scans the
+full installed public header set and fails if any PUBLIC function is
+not mentioned in some man3 page (as an .Nm/.Fn token).  It passed at
+372 functions.

@@ -10,6 +10,7 @@
 .Nm xtc_app_run ,
 .Nm xtc_app_stop ,
 .Nm xtc_app_loop ,
+.Nm xtc_app_exec ,
 .Nm xtc_app_registry
 .Nd OTP-style application container
 .Sh SYNOPSIS
@@ -27,6 +28,8 @@
 .Fn xtc_app_stop "xtc_app_t *app"
 .Ft "xtc_loop_t *"
 .Fn xtc_app_loop "const xtc_app_t *app"
+.Ft "xtc_exec_t *"
+.Fn xtc_app_exec "const xtc_app_t *app"
 .Ft "xtc_reg_t *"
 .Fn xtc_app_registry "const xtc_app_t *app"
 .Sh DESCRIPTION
@@ -67,6 +70,15 @@ xtc_app_start(app, kids, 2);
 xtc_app_run(app);              /* blocks until app stops */
 xtc_app_destroy(app);
 .Ed
+.Pp
+.Fn xtc_app_loop
+returns the application's event loop and
+.Fn xtc_app_registry
+its process registry.
+.Fn xtc_app_exec
+returns the underlying
+.Xr xtc_exec 3
+executor the application runs its loop on.
 .Pp
 The current implementation is single-loop; multi-loop apps spawn
 .Xr xtc_exec 3

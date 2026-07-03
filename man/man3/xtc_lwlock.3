@@ -10,6 +10,7 @@
 .Nm xtc_lwlock_acquire_cond ,
 .Nm xtc_lwlock_release ,
 .Nm xtc_lwlock_held_by_me ,
+.Nm xtc_lwlock_held_by_me_in_mode ,
 .Nm xtc_lwlock_track_enable ,
 .Nm xtc_lwlock_track_violations ,
 .Nm xtc_lwlock_track_reset ,
@@ -30,6 +31,8 @@
 .Fn xtc_lwlock_release "xtc_lwlock_t *lock"
 .Ft int
 .Fn xtc_lwlock_held_by_me "const xtc_lwlock_t *lock"
+.Ft int
+.Fn xtc_lwlock_held_by_me_in_mode "const xtc_lwlock_t *lock" "xtc_lwlock_mode_t mode"
 .Ft void
 .Fn xtc_lwlock_track_enable "int on"
 .Ft long
@@ -108,6 +111,13 @@ returns 1 if the calling thread currently holds
 in any mode, 0 otherwise.  Useful in assertions and in code that
 needs to call a function that might or might not already hold a
 particular lock.
+.Pp
+.Fn xtc_lwlock_held_by_me_in_mode
+narrows that test to a specific
+.Fa mode :
+it returns 1 only if the calling thread holds
+.Fa lock
+in exactly that mode.
 .Sh CHOOSING BETWEEN LOCKS
 xtc ships several locks; pick by workload:
 .Bl -tag -width "xtc_lockmgr" -offset indent

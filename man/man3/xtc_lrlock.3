@@ -13,7 +13,10 @@
 .Nm xtc_lrlock_apply_op ,
 .Nm xtc_lrlock_publish ,
 .Nm xtc_lrlock_publish_full_sync ,
-.Nm xtc_lrlock_write_end
+.Nm xtc_lrlock_write_end ,
+.Nm xtc_lrlock_read_data ,
+.Nm xtc_lrlock_write_data ,
+.Nm xtc_lrlock_mark_ready
 .Nd left-right lock with wait-free reads
 .Sh SYNOPSIS
 .In xtc.h
@@ -38,6 +41,12 @@
 .Fn xtc_lrlock_publish_full_sync "xtc_lrlock_t *lr"
 .Ft void
 .Fn xtc_lrlock_write_end "xtc_lrlock_t *lr"
+.Ft "const void *"
+.Fn xtc_lrlock_read_data "xtc_lrlock_t *lr"
+.Ft "void *"
+.Fn xtc_lrlock_write_data "xtc_lrlock_t *lr"
+.Ft void
+.Fn xtc_lrlock_mark_ready "xtc_lrlock_t *lr"
 .Sh DESCRIPTION
 .Nm xtc_lrlock
 is a wait-free-read concurrency primitive that maintains two
@@ -113,6 +122,16 @@ be deterministic
 For non-deterministic mutations, use
 .Fn xtc_lrlock_publish_full_sync
 which copies the entire data block instead of replaying ops.
+.Pp
+.Fn xtc_lrlock_read_data
+and
+.Fn xtc_lrlock_write_data
+return direct pointers to the read and write copies; they are
+only safe to use while the caller holds writer ownership
+.Pq between Fn xtc_lrlock_write_begin and Fn xtc_lrlock_write_end .
+.Fn xtc_lrlock_mark_ready
+tells the lock that both copies were pre-initialised to the same
+state, skipping the first-publish full-sync.
 .Sh CHOOSING vs. xtc_lwlock
 Use
 .Nm xtc_lrlock

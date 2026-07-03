@@ -14,7 +14,11 @@
 .Nm xtc_net_unix_send_creds ,
 .Nm xtc_net_unix_recv_creds ,
 .Nm xtc_net_send_frame ,
-.Nm xtc_net_recv_frame
+.Nm xtc_net_recv_frame ,
+.Nm xtc_net_udp_socket ,
+.Nm xtc_net_udp_sendto ,
+.Nm xtc_net_udp_recvfrom ,
+.Nm xtc_dns_resolve
 .Nd networking helpers
 .Sh SYNOPSIS
 .In xtc.h
@@ -41,6 +45,14 @@
 .Fn xtc_net_send_frame "int fd" "const void *buf" "size_t len"
 .Ft int
 .Fn xtc_net_recv_frame "int fd" "void **out" "size_t *out_len" "size_t max_len" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_net_udp_socket "xtc_net_family_t fam" "const char *host" "int port" "int *out_fd"
+.Ft int
+.Fn xtc_net_udp_sendto "int fd" "const void *buf" "size_t len" "const char *host" "int port"
+.Ft int
+.Fn xtc_net_udp_recvfrom "int fd" "void *buf" "size_t buflen" "char *out_host" "size_t out_host_size" "int *out_port" "size_t *out_n"
+.Ft int
+.Fn xtc_dns_resolve "const char *hostname" "int port" "xtc_net_family_t fam" "char *out_addr" "size_t out_addr_size"
 .Sh DESCRIPTION
 .Nm xtc_net
 provides convenience wrappers around the standard networking
@@ -75,6 +87,39 @@ with
 set to NULL.
 these helpers handle socket creation, address resolution, knob
 setting, and credential passing.
+.Pp
+.Fn xtc_net_udp_socket
+opens a UDP datagram socket bound to
+.Fa host : Ns Fa port
+.Pq Fa host No NULL means wildcard, Fa port No 0 means kernel-assigned
+in non-blocking, close-on-exec mode.
+.Fn xtc_net_udp_sendto
+sends one datagram to
+.Fa host : Ns Fa port ,
+returning
+.Dv XTC_E_AGAIN
+if the kernel buffer is full.
+.Fn xtc_net_udp_recvfrom
+receives one datagram, filling
+.Fa out_host
+.Pq of Fa out_host_size No bytes ,
+.Fa out_port ,
+and
+.Fa out_n
+with the peer address and byte count.
+.Pp
+.Fn xtc_dns_resolve
+resolves
+.Fa hostname : Ns Fa port
+for family
+.Fa fam
+to a printable address string in
+.Fa out_addr
+.Pq of Fa out_addr_size No bytes .
+It uses
+.Xr getaddrinfo 3
+on a blocking thread, so run it from a proc whose thread is
+allowed to block.
 .Pp
 .Sy TCP knobs
 controlled by

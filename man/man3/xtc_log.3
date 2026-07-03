@@ -7,7 +7,12 @@
 .Nm xtc_log_create ,
 .Nm xtc_log_destroy ,
 .Nm xtc_log_write ,
+.Nm xtc_log_vwrite ,
 .Nm xtc_log_drain ,
+.Nm xtc_log_set_floor ,
+.Nm xtc_log_set_default ,
+.Nm xtc_log_default ,
+.Nm xtc_log_drop_count ,
 .Nm XTC_LOG_DEBUG_F ,
 .Nm XTC_LOG_INFO_F ,
 .Nm XTC_LOG_WARN_F ,
@@ -22,8 +27,18 @@
 .Fn xtc_log_destroy "xtc_log_t *log"
 .Ft int
 .Fn xtc_log_write "xtc_log_t *log" "xtc_log_level_t level" "const char *fmt" "..."
+.Ft void
+.Fn xtc_log_vwrite "xtc_log_t *log" "xtc_log_level_t lvl" "const char *fmt" "va_list ap"
 .Ft int
 .Fn xtc_log_drain "xtc_log_t *log"
+.Ft int
+.Fn xtc_log_set_floor "xtc_log_t *log" "xtc_log_level_t lvl"
+.Ft int
+.Fn xtc_log_set_default "xtc_log_t *log"
+.Ft "xtc_log_t *"
+.Fn xtc_log_default "void"
+.Ft int
+.Fn xtc_log_drop_count "const xtc_log_t *log"
 .Sh DESCRIPTION
 .Nm xtc_log
 is a predictable-latency logger: callers append records to an
@@ -57,6 +72,27 @@ with the right level.
 .Fn xtc_log_drain
 forces an immediate flush; called from the metrics proc on a
 timer or at process exit.
+.Pp
+.Fn xtc_log_vwrite
+is the
+.Vt va_list
+variant of
+.Fn xtc_log_write
+for callers that already hold a
+.Fa ap .
+.Fn xtc_log_set_floor
+sets a per-logger minimum level below which records are dropped
+before formatting.
+.Fn xtc_log_set_default
+installs
+.Fa log
+as the process-wide default the
+.Fn XTC_LOG_*_F
+macros route through, and
+.Fn xtc_log_default
+returns the current default.
+.Fn xtc_log_drop_count
+reports how many records were dropped because the ring was full.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_log_t *log;

@@ -8,14 +8,17 @@
 .Nm xtc_counter_inc ,
 .Nm xtc_counter_add ,
 .Nm xtc_counter_read ,
+.Nm xtc_counter_destroy ,
 .Nm xtc_gauge_create ,
 .Nm xtc_gauge_set ,
 .Nm xtc_gauge_add ,
 .Nm xtc_gauge_read ,
+.Nm xtc_gauge_destroy ,
 .Nm xtc_hist_create ,
 .Nm xtc_hist_record ,
 .Nm xtc_hist_quantile ,
 .Nm xtc_hist_count ,
+.Nm xtc_hist_destroy ,
 .Nm xtc_metrics_iterate ,
 .Nm xtc_metrics_dump_prometheus
 .Nd runtime statistics: counters, gauges, histograms
@@ -30,18 +33,24 @@
 .Fn xtc_counter_add "xtc_counter_t *c" "int64_t delta"
 .Ft uint64_t
 .Fn xtc_counter_read "const xtc_counter_t *c"
+.Ft void
+.Fn xtc_counter_destroy "xtc_counter_t *c"
 .Ft int
 .Fn xtc_gauge_create "const char *name" "xtc_gauge_t **out"
 .Ft void
 .Fn xtc_gauge_set "xtc_gauge_t *g" "int64_t v"
 .Ft int64_t
 .Fn xtc_gauge_read "const xtc_gauge_t *g"
+.Ft void
+.Fn xtc_gauge_destroy "xtc_gauge_t *g"
 .Ft int
 .Fn xtc_hist_create "const char *name" "xtc_hist_t **out"
 .Ft void
 .Fn xtc_hist_record "xtc_hist_t *h" "int64_t value_ns"
 .Ft int64_t
 .Fn xtc_hist_quantile "const xtc_hist_t *h" "double q"
+.Ft void
+.Fn xtc_hist_destroy "xtc_hist_t *h"
 .Ft int
 .Fn xtc_metrics_iterate "xtc_metric_visit_fn fn" "void *user"
 .Ft int
@@ -104,6 +113,12 @@ the telemetry layer.
 register the metric in a global registry keyed by
 .Fa name
 .Pq up to 64 chars .
+The matching
+.Fn xtc_counter_destroy ,
+.Fn xtc_gauge_destroy ,
+and
+.Fn xtc_hist_destroy
+unregister and free a metric.
 The registry supports walking via
 .Fn xtc_metrics_iterate
 or dumping in Prometheus exposition format via

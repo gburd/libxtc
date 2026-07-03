@@ -8,11 +8,17 @@
 .Nm xtc_lockmgr_destroy ,
 .Nm xtc_lockmgr_id ,
 .Nm xtc_lockmgr_id_free ,
+.Nm xtc_lockmgr_id_set_timeout ,
 .Nm xtc_lock_get ,
 .Nm xtc_lock_put ,
+.Nm xtc_lock_release_all ,
+.Nm xtc_lock_upgrade ,
+.Nm xtc_lock_downgrade ,
 .Nm xtc_lock_vec ,
 .Nm xtc_lockmgr_check_deadlocks ,
 .Nm xtc_lockmgr_stat ,
+.Nm xtc_lockmgr_n_held ,
+.Nm xtc_lockmgr_n_waiting ,
 .Nm xtc_lockmgr_failchk
 .Nd transactional lock manager with deadlock detection
 .Sh SYNOPSIS
@@ -27,15 +33,27 @@
 .Ft int
 .Fn xtc_lockmgr_id_free "xtc_lockmgr_t *m" "xtc_locker_t locker"
 .Ft int
+.Fn xtc_lockmgr_id_set_timeout "xtc_lockmgr_t *m" "xtc_locker_t l" "int64_t timeout_ns"
+.Ft int
 .Fn xtc_lock_get "xtc_lockmgr_t *m" "xtc_locker_t locker" "const void *key" "size_t key_size" "xtc_lock_mode_t mode" "int64_t timeout_ns"
 .Ft int
 .Fn xtc_lock_put "xtc_lockmgr_t *m" "xtc_locker_t locker" "const void *key" "size_t key_size"
+.Ft int
+.Fn xtc_lock_release_all "xtc_lockmgr_t *m" "xtc_locker_t locker"
+.Ft int
+.Fn xtc_lock_upgrade "xtc_lockmgr_t *m" "xtc_locker_t locker" "const void *obj" "size_t obj_size" "xtc_lock_mode_t new_mode"
+.Ft int
+.Fn xtc_lock_downgrade "xtc_lockmgr_t *m" "xtc_locker_t locker" "const void *obj" "size_t obj_size" "xtc_lock_mode_t new_mode"
 .Ft int
 .Fn xtc_lock_vec "xtc_lockmgr_t *m" "xtc_locker_t locker" "const xtc_lock_req_t *reqs" "int n_reqs" "int64_t timeout_ns"
 .Ft int
 .Fn xtc_lockmgr_check_deadlocks "xtc_lockmgr_t *m" "int *n_aborted"
 .Ft int
 .Fn xtc_lockmgr_stat "xtc_lockmgr_t *m" "xtc_lockmgr_stat_t *out"
+.Ft int
+.Fn xtc_lockmgr_n_held "const xtc_lockmgr_t *m"
+.Ft int
+.Fn xtc_lockmgr_n_waiting "const xtc_lockmgr_t *m"
 .Ft int
 .Fn xtc_lockmgr_failchk "xtc_lockmgr_t *m"
 .Sh DESCRIPTION
@@ -115,6 +133,31 @@ Bad arguments or unknown
 releases the named lock.  Order of release does not matter; the
 lockmgr tracks per-locker held lists.
 .Pp
+.Fn xtc_lockmgr_id_set_timeout
+sets a per-locker deadline: once
+.Fa l
+has held its locks past
+.Fa timeout_ns ,
+the periodic detector treats it as expired for victim selection
+under the EXPIRE policy.  A negative value disables expiry.
+.Pp
+.Fn xtc_lock_release_all
+drops every lock held by
+.Fa locker
+in one call, the normal end-of-transaction sweep.
+.Pp
+.Fn xtc_lock_upgrade
+and
+.Fn xtc_lock_downgrade
+atomically change the mode of a lock already held on
+.Fa obj
+to
+.Fa new_mode .
+Upgrade may block (returning
+.Dv XTC_E_AGAIN
+on a zero timeout); downgrade never blocks and promotes any waiters
+the weaker mode no longer conflicts with.
+.Pp
 .Fn xtc_lock_vec
 performs an atomic compound acquire.  Either all requested
 locks are granted, or none are
@@ -139,6 +182,12 @@ during the snapshot
 sweeps for crashed lockers
 .Pq those whose owning thread has exited without releasing
 and reclaims their locks.
+.Pp
+.Fn xtc_lockmgr_n_held
+and
+.Fn xtc_lockmgr_n_waiting
+return the current number of granted and blocked lock requests
+respectively -- lightweight gauges for monitoring.
 .Sh CHOOSING vs. xtc_lwlock / xtc_lrlock
 Use
 .Nm xtc_lockmgr

@@ -10,6 +10,7 @@
 .Nm xtc_inject_trigger ,
 .Nm xtc_inject_check ,
 .Nm xtc_inject_wakeup ,
+.Nm xtc_inject_n_attached ,
 .Nm XTC_INJECTION_POINT
 .Nd fault-injection points
 .Sh SYNOPSIS
@@ -27,6 +28,8 @@
 .Fn xtc_inject_check "const char *name"
 .Ft int
 .Fn xtc_inject_wakeup "const char *name"
+.Ft int
+.Fn xtc_inject_n_attached "void"
 .Sh DESCRIPTION
 .Nm xtc_inject
 is a fault-injection framework modeled on PostgreSQL's
@@ -41,6 +44,10 @@ semantics to a named point at runtime; when the point fires, the
 callback runs (or the trigger blocks until
 .Fn xtc_inject_wakeup
 is called from the test).
+.Pp
+.Fn xtc_inject_n_attached
+returns the number of injection-point names that currently have
+attachments -- a diagnostic for tests to confirm setup or teardown.
 .Pp
 .Sy Three operations :
 .Bl -tag -width "TRIGGER" -offset indent

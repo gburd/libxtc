@@ -5,18 +5,27 @@
 .Os
 .Sh NAME
 .Nm xtc_pdict_put ,
+.Nm xtc_pdict_put_with_dtor ,
 .Nm xtc_pdict_get ,
-.Nm xtc_pdict_erase
+.Nm xtc_pdict_erase ,
+.Nm xtc_pdict_count ,
+.Nm xtc_pdict_clear
 .Nd Erlang-style per-process dictionary
 .Sh SYNOPSIS
 .In xtc.h
 .In xtc_pdict.h
 .Ft int
-.Fn xtc_pdict_put "const char *key" "void *value" "xtc_pdict_dtor_fn dtor"
+.Fn xtc_pdict_put "const char *key" "void *value"
+.Ft int
+.Fn xtc_pdict_put_with_dtor "const char *key" "void *value" "xtc_pdict_dtor_fn dtor"
 .Ft "void *"
 .Fn xtc_pdict_get "const char *key"
 .Ft int
 .Fn xtc_pdict_erase "const char *key"
+.Ft int
+.Fn xtc_pdict_count "void"
+.Ft int
+.Fn xtc_pdict_clear "void"
 .Sh DESCRIPTION
 .Nm xtc_pdict
 is a per-process dictionary similar to Erlang's
@@ -36,7 +45,11 @@ binds
 .Fa key
 to
 .Fa value
-in the calling proc's dictionary.  If
+in the calling proc's dictionary.
+.Fn xtc_pdict_put_with_dtor
+is the same but takes a
+.Fa dtor
+callback.  If
 .Fa dtor
 is non-NULL, it's invoked with the prior value
 .Pq if any
@@ -48,6 +61,11 @@ returns the current value or NULL.
 .Pp
 .Fn xtc_pdict_erase
 removes the entry, invoking the dtor if registered.
+.Pp
+.Fn xtc_pdict_count
+returns the number of entries in the calling proc's dictionary;
+.Fn xtc_pdict_clear
+removes them all, invoking each registered dtor.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 static void my_dtor(void *p) { free(p); }

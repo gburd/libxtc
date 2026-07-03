@@ -5,9 +5,12 @@
 .Os
 .Sh NAME
 .Nm xtc_osproc_spawn ,
+.Nm xtc_osproc_isolated_spawn ,
 .Nm xtc_osproc_pid ,
 .Nm xtc_osproc_ctrl_fd ,
 .Nm xtc_osproc_signal ,
+.Nm xtc_osproc_call ,
+.Nm xtc_osproc_serve ,
 .Nm xtc_osproc_try_wait ,
 .Nm xtc_osproc_wait ,
 .Nm xtc_osproc_destroy
@@ -17,12 +20,18 @@
 .In xtc_osproc.h
 .Ft int
 .Fn xtc_osproc_spawn "const xtc_osproc_opts_t *opts" "xtc_osproc_t **out"
+.Ft int
+.Fn xtc_osproc_isolated_spawn "const char *name" "int (*fn)(int ctrl_fd, void *arg)" "void *arg" "xtc_osproc_t **out"
 .Ft long
 .Fn xtc_osproc_pid "const xtc_osproc_t *p"
 .Ft int
 .Fn xtc_osproc_ctrl_fd "const xtc_osproc_t *p"
 .Ft int
 .Fn xtc_osproc_signal "const xtc_osproc_t *p" "int sig"
+.Ft int
+.Fn xtc_osproc_call "xtc_osproc_t *p" "const void *req" "size_t req_len" "void **reply" "size_t *reply_len" "size_t max_reply" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_osproc_serve "int ctrl_fd" "xtc_osproc_handler_fn handler" "void *arg"
 .Ft int
 .Fn xtc_osproc_try_wait "xtc_osproc_t *p" "int *status"
 .Ft int
@@ -92,6 +101,19 @@ blocks the loop thread.
 .Fn xtc_osproc_destroy
 closes the control socket, releases the handle, and best-effort reaps
 an already-exited child; it does not kill a still-running child.
+.Pp
+.Fn xtc_osproc_isolated_spawn
+spawns a worker running
+.Fa fn
+over a control socket, the setup for the request/reply protocol.
+The parent then ships a framed request with
+.Fn xtc_osproc_call
+.Pq which parks for the reply, capped at Fa max_reply No bytes, up to Fa timeout_ns ,
+while the child loops in
+.Fn xtc_osproc_serve
+handling framed requests with its
+.Fa handler
+until the control socket closes.
 .Sh IMPLEMENTATION NOTES
 On Linux (>= 5.3) a
 .Xr pidfd 2
