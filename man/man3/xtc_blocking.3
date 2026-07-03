@@ -1,0 +1,115 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 3, 2026
+.Dt XTC_BLOCKING 3
+.Os
+.Sh NAME
+.Nm xtc_blocking_run ,
+.Nm xtc_blocking_submit ,
+.Nm xtc_blocking_pool_size ,
+.Nm xtc_blocking_shutdown
+.Nd offload blocking work to a thread pool without stalling the loop
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_blocking.h
+.Ft int
+.Fn xtc_blocking_run "int (*fn)(void *)" "void *arg" "int *out_result"
+.Ft int
+.Fn xtc_blocking_submit "int (*fn)(void *)" "void *arg"
+.Ft int
+.Fn xtc_blocking_pool_size "int nthreads"
+.Ft void
+.Fn xtc_blocking_shutdown "void"
+.Sh DESCRIPTION
+A loop thread must never block in a syscall: doing so stalls every
+other process sharing that loop.  Some work is unavoidably blocking
+however -- reads and
+.Xr fsync 2
+on regular files (which are not pollable),
+.Xr getaddrinfo 3 ,
+and third-party libraries.  The
+.Nm xtc_blocking
+facility runs such a call on a dedicated pool thread and parks the
+calling process until it finishes, so the loop keeps running other
+work meanwhile.  The wakeup reuses the runtime's existing machinery:
+the pool thread signals completion on a pipe the calling process waits
+on with
+.Fn xtc_proc_wait_fd ,
+so no new scheduler integration is required.
+.Pp
+.Fn xtc_blocking_run
+runs
+.Fa fn Ns ( Ns Fa arg Ns )
+on a pool thread and parks the caller until it completes, storing
+.Fa fn Ns 's
+return value in
+.Fa *out_result .
+It must be called from within a process or coroutine running on a
+loop; called outside that context (or where the offload cannot be set
+up) it runs
+.Fa fn
+synchronously on the current thread -- always correct, just not
+yielding.
+.Pp
+.Fn xtc_blocking_submit
+is the fire-and-forget variant: it hands
+.Fa fn Ns ( Ns Fa arg Ns )
+to the pool and returns immediately without waiting for or collecting
+the result.  It never parks, so it is callable from any context (for
+example prefetch or read-ahead).  The caller owns
+.Fa arg Ns 's
+lifetime until
+.Fa fn
+runs (or has
+.Fa fn
+free it); there is no completion signal.
+.Pp
+.Fn xtc_blocking_pool_size
+pins the pool to a fixed
+.Fa nthreads
+worker threads, overriding the automatic default.  It must be called
+before the first
+.Fn xtc_blocking_run
+or
+.Fn xtc_blocking_submit ;
+a later call returns
+.Dv XTC_E_INVAL
+(too late).  By default the pool auto-sizes: it starts with a
+CPU-scaled worker count
+.Pf ( Fn max 4 ", online CPUs" ,
+capped at 64) and grows on demand up to 64 when work queues faster
+than idle workers can take it, so the offload path is neither an
+artificial bottleneck on a large host nor over-provisioned on a small
+one.  An explicit size disables growth and fixes the pool at exactly
+that many threads.
+.Pp
+.Fn xtc_blocking_shutdown
+stops the pool, joining its threads.  It is idempotent, for orderly
+shutdown and leak-checked test runs.  A new
+.Fn xtc_blocking_run
+after shutdown restarts the pool.
+.Sh RETURN VALUES
+.Fn xtc_blocking_run
+returns
+.Dv XTC_OK
+once
+.Fa fn
+has run.
+.Fn xtc_blocking_submit
+returns
+.Dv XTC_OK
+if the work was enqueued, or a negative
+.Dv XTC_E_*
+code.
+.Fn xtc_blocking_pool_size
+returns
+.Dv XTC_OK ,
+or
+.Dv XTC_E_INVAL
+if called after the pool has started.
+.Sh SEE ALSO
+.Xr xtc_proc 3 ,
+.Xr xtc_aio 3 ,
+.Xr xtc_async 3
+.Sh AUTHORS
+.An The XTC Project .

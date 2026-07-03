@@ -62,3 +62,26 @@ page following the same template:
 
 The `dist/test_man_coverage.sh` test verifies every public-symbol
 file has a corresponding man page.
+
+## Coverage status (2026-07)
+
+Whole-subsystem pages that were MISSING and are now added:
+xtc_blocking(3), xtc_pkey(3), xtc_iosched(3), xtc_dio_sched(3).
+Every public header now has at least one man3 page.
+
+Known remaining gap (tracked, not yet closed): the coverage gate
+(test_man_coverage.sh) currently scans only the umbrella xtc.h, so it
+does not catch SECONDARY functions of a subsystem that has a page but
+does not list them as `.Nm`/`.Fn` entries.  A stricter gate that scans
+the full installed header set and checks each PUBLIC function is
+mentioned in some page found ~120 such functions -- e.g. the
+xtc_amutex_* / xtc_arwlock_* / xtc_sem_* / xtc_gate_* family (belongs
+in xtc_sync(3)), the xtc_cfg_get_*/set_* accessors (xtc_cfg(3)), the
+xtc_chan_* variants (xtc_chan(3)), xtc_mctx_* helpers (xtc_mctx(3)),
+xtc_lock_upgrade/downgrade/release_all (xtc_lockmgr(3)), xtc_net_udp_*
+(xtc_net(3)), etc.  These are documented at the subsystem level but
+not enumerated per-entry-point.  Closing this is a mechanical pass
+(add `.Nm` aliases + one `.Fn` per function to the existing pages),
+after which the stricter gate can be enabled to fail the build.  The
+gate rewrite is drafted; it is held back so it does not fail `make
+check` until the pages are filled in.

@@ -1,0 +1,121 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 3, 2026
+.Dt XTC_DIO_SCHED 3
+.Os
+.Sh NAME
+.Nm xtc_dio_sched_create ,
+.Nm xtc_dio_sched_destroy ,
+.Nm xtc_dio_sched_current ,
+.Nm xtc_dio_sched_report ,
+.Nm xtc_dio_sched_report_multi ,
+.Nm xtc_dio_sched_best ,
+.Nm xtc_dio_sched_mutation_rate ,
+.Nm xtc_dio_sched_generation
+.Nd adaptive genetic-algorithm tuner for runtime self-tuning
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_dio_sched.h
+.Ft int
+.Fn xtc_dio_sched_create "const xtc_dio_sched_spec_t *spec" "xtc_dio_sched_t **out"
+.Ft void
+.Fn xtc_dio_sched_destroy "xtc_dio_sched_t *g"
+.Ft void
+.Fn xtc_dio_sched_current "const xtc_dio_sched_t *g" "int *out_genes"
+.Ft void
+.Fn xtc_dio_sched_report "xtc_dio_sched_t *g" "double fitness"
+.Ft void
+.Fn xtc_dio_sched_report_multi "xtc_dio_sched_t *g" "const double *fitness" "int n"
+.Ft void
+.Fn xtc_dio_sched_best "const xtc_dio_sched_t *g" "int *out_genes" "double *out_fitness"
+.Ft double
+.Fn xtc_dio_sched_mutation_rate "const xtc_dio_sched_t *g"
+.Ft uint64_t
+.Fn xtc_dio_sched_generation "const xtc_dio_sched_t *g"
+.Sh DESCRIPTION
+.Nm xtc_dio_sched
+is a small genetic-algorithm tuner for runtime self-tuning of integer
+.Dq genes
+(tunables) against an observed fitness, after Jake Moilanen's genetic
+scheduler (OLS 2005).  A population of candidate gene-sets is
+evaluated, the best are bred (elitism + per-gene crossover +
+mutation), and the mutation rate
+.Em adapts :
+it falls while fitness improves (hone in) and rises when fitness drops
+(a workload shift), so the tuner re-converges quickly; it is capped at
+45% to keep it from thrashing.
+.Pp
+It is a pure, deterministic (seeded) optimiser with no I/O of its own:
+the caller reads the current candidate's genes, uses them for one
+evaluation window, and reports the fitness it observed.  The
+.Xr xtc_iosched 3
+write scheduler drives it with throughput fitness; the unit tests
+drive it with a synthetic function.
+.Pp
+.Fn xtc_dio_sched_create
+creates a tuner from
+.Fa spec :
+.Fa n_genes
+(1 ..
+.Dv XTC_DIO_SCHED_MAX_GENES ) ,
+per-gene inclusive
+.Fa min Ns / Ns Fa max
+bounds and
+.Fa init
+seed candidate, the
+.Fa population
+size (>= 2), and the PRNG
+.Fa seed .
+Optionally the genes are partitioned into
+.Fa n_phenos
+phenotypes -- gene groups each tuned by their own fitness measure via
+.Fn xtc_dio_sched_report_multi ;
+.Fa n_phenos
+<= 1 is the single-fitness case.
+.Pp
+.Fn xtc_dio_sched_current
+copies the genes of the candidate currently under evaluation into
+.Fa out_genes
+.Pf ( Fa n_genes
+ints); use these until the next report.
+.Pp
+.Fn xtc_dio_sched_report
+reports the
+.Fa fitness
+observed while using the current candidate (higher is better),
+advances to the next candidate, and -- when the whole population has
+been evaluated -- breeds the next generation and adapts the mutation
+rate.
+.Fn xtc_dio_sched_report_multi
+reports one fitness per phenotype
+.Pf ( Fa n
+must equal the configured
+.Fa n_phenos ) ;
+each phenotype advances and breeds its own genes independently.
+.Pp
+.Fn xtc_dio_sched_best
+returns the best gene-set found so far into
+.Fa out_genes
+and its fitness into
+.Fa out_fitness
+(either pointer may be
+.Dv NULL ) --
+the set to use once tuning has converged.
+.Fn xtc_dio_sched_mutation_rate
+and
+.Fn xtc_dio_sched_generation
+return the current adaptive mutation rate and generation counter for
+observability.
+.Fn xtc_dio_sched_destroy
+frees the tuner.
+.Sh RETURN VALUES
+.Fn xtc_dio_sched_create
+returns
+.Dv XTC_OK
+on success or a negative
+.Dv XTC_E_*
+code.
+.Sh SEE ALSO
+.Xr xtc_iosched 3
+.Sh AUTHORS
+.An The XTC Project .
