@@ -54,13 +54,36 @@ inc="-I$XTC_SRC_DIR/src/inc"
 lib="$build/libxtc.a"
 libs="-pthread -ldl -lm"
 
+# test_sim_bufmgr drives the sqlxtc storage-engine buffer manager
+# (examples/06_sqlxtc/bufmgr.c) under DST, so it needs that source
+# compiled in plus its header include.  bufmgr.c depends only on the
+# library (xtc_aio / xtc_stats / xtc_sync / xtc_dio_sched / os_time),
+# which the sim lib provides -- no other examples/06_sqlxtc object is
+# needed.  Compile it against the sim lib into a per-test object.
+bmdir="$XTC_SRC_DIR/examples/06_sqlxtc"
+bmobj="$work/bufmgr.o"
+# shellcheck disable=SC2086
+if ! $CC -std=c11 -D_GNU_SOURCE $inc -I"$bmdir" \
+	-c "$bmdir/bufmgr.c" -o "$bmobj" 2> "$work/cc.err"; then
+	echo "  [sim] FAIL: bufmgr.c (for test_sim_bufmgr) did not compile"
+	head -20 "$work/cc.err" >&2
+	exit 1
+fi
+
 fail=0
-for t in test_sim_sched test_sim_pingpong test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_lockmgr test_sim_iofault test_sim_buggify test_sim_buggify2 test_sim_partition; do
+for t in test_sim_sched test_sim_pingpong test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_lockmgr test_sim_iofault test_sim_buggify test_sim_buggify2 test_sim_partition test_sim_bufmgr; do
 	exe="$work/$t"
+	# test_sim_bufmgr additionally needs the bufmgr object + its include.
+	extra_obj=""
+	extra_inc=""
+	if [ "$t" = test_sim_bufmgr ]; then
+		extra_obj="$bmobj"
+		extra_inc="-I$bmdir"
+	fi
 	# inc/libs intentionally word-split (each holds several flags).
 	# shellcheck disable=SC2086
-	if ! $CC -std=c11 -D_GNU_SOURCE $inc \
-		"$XTC_SRC_DIR/test/sim/$t.c" "$lib" $libs -o "$exe" \
+	if ! $CC -std=c11 -D_GNU_SOURCE $inc $extra_inc \
+		"$XTC_SRC_DIR/test/sim/$t.c" $extra_obj "$lib" $libs -o "$exe" \
 		2> "$work/cc.err"; then
 		echo "  [sim] FAIL: $t did not compile"
 		head -20 "$work/cc.err" >&2
