@@ -7,8 +7,16 @@ orthogonal.  It calls out where sqlxtc is LESS mature (and should adopt a
 known technique), where it is MORE mature (MVCC+SSI, the buffer pool, the
 log pipeline), and from that lays out the plan to finish sqlxtc with the
 best known techniques.  The headline decision, driven by review: sqlxtc
-moves from its current redo-only model to a full **UNDO/REDO** system with
-page LSNs, physiological logging, and compensation log records (CLRs).
+adopts a full **UNDO/REDO** system with page LSNs, physiological logging,
+and compensation log records (CLRs).  Status (2026-07): the UNDO/REDO
+log-record format and the redo-winners/undo-losers/CLR recovery passes
+are IMPLEMENTED and unit-tested (xlog.c, xstore_recover,
+test_recover_undo).  They are DORMANT under the default NO-STEAL engine
+(uncommitted data never reaches disk, so there is nothing to undo after
+a crash).  What remains for "full ARIES" is the STEAL buffer policy --
+letting uncommitted dirty pages flush, gated by a write-ahead-enforce
+hook and page-LSN redo gating -- which is a scoped future milestone, not
+missing recovery code.  See M_SQLXTC_WAL.md section 3.1.
 
 Berkeley DB references below are concrete (file:function); sqlxtc
 references are to examples/06_sqlxtc.
