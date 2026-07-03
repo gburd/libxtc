@@ -1,3 +1,35 @@
+libxtc (0.9.0-1) unstable; urgency=medium
+
+  * Preemption: fixed a rare hang under pathological all-CPU load (a
+    fiber preempted while holding a pthread_mutex deadlocked the loop);
+    the whole library now dogfoods preemption-safe locks
+    (__os_mutex_* + __xtc_mtx_lock/unlock).  aarch64 involuntary-
+    preemption trampoline added (Graviton-validated).
+  * Deterministic Simulation Testing (DST) toward FoundationDB parity:
+    - seeded network-partition + message-latency simulation;
+    - lock manager parks fibers so it runs under simulation;
+    - the sqlxtc buffer manager runs under DST with byte-identical
+      replay;
+    - the WAL crash-recovery capstone: seeded crash at an arbitrary
+      point recovers exactly the durable-commit set, replayable across
+      a seed sweep (fork-per-run isolation);
+    - fixed work-stealing completion-order non-determinism under replay;
+    - more Buggify sites (channel, work-stealing) plus a steal-order gap
+      found and fixed.  The sim suite is now 13 replay-verified tests.
+  * sqlxtc: confirmed NO-STEAL + NO-FORCE is the correct recovery model
+    (ARIES undo/CLR machinery is built and tested but dormant by
+    policy); a probe proved in-place STEAL recovery is not torn-base-
+    safe.  Added a WAL_MAX_REC bound so recovery rejects a torn tail
+    record instead of allocating its garbage length.
+  * M16.1a: in-tree mock PostgreSQL backend (examples/09_pgmock) proving
+    the PG-adapter runtime seam (postmaster + backends as xtc_procs on
+    the scheduler, PG-v3 SELECT 1 round-trip, zero PG source).
+  * Docs: complete man-page enumeration (372 public functions; strict
+    coverage gate) and the four missing subsystem pages
+    (xtc_blocking/pkey/iosched/dio_sched).
+
+ -- Greg Burd <greg@burd.me>  Fri, 03 Jul 2026 14:29:56 -0400
+
 libxtc (0.8.0-1) unstable; urgency=medium
 
   * Preemption facility (native, inspired by CMU's Lightweight
