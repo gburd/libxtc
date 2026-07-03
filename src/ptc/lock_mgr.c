@@ -25,6 +25,11 @@
 #include "xtc_sim.h"
 #include "xtc_lockmgr.h"
 #include "xtc_slab.h"
+#include "xtc_loop.h"     /* xtc_task_waker / xtc_waker_wake / park-on-timer */
+#include "xtc_async.h"    /* xtc_yield */
+#include "xtc_proc.h"     /* __xtc_proc_ctx_save/restore */
+#include "coro_int.h"     /* __xtc_current_task */
+#include "loop_int.h"     /* xtc_task::park_requested */
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -60,7 +65,9 @@ static const uint8_t XTC_DEFAULT_CONFLICTS_9[9 * 9] = {
 struct lock_entry {
 	xtc_locker_t       locker;
 	xtc_lock_mode_t    mode;
-	pthread_cond_t     cv;
+	pthread_cond_t     cv;            /* thread waiter (is_fiber == 0) */
+	xtc_waker_t        waker;         /* fiber waiter (is_fiber == 1) */
+	int                is_fiber;      /* 0 = thread/cv, 1 = fiber/waker */
 	int                granted;
 	_Atomic int        aborted;
 	int                from_pool;     /* 1 = recycle to slab, 0 = free() */
@@ -192,6 +199,20 @@ __entry_release(xtc_lockmgr_t *m, struct lock_entry *e)
 {
 	(void)pthread_cond_destroy(&e->cv);
 	xtc_slab_free(m->pool.slab, e);
+}
+
+/*
+ * Wake a waiter that has just been granted or aborted, while the
+ * partition lock is held.  A fiber waiter parked via its waker (and
+ * never sits in pthread_cond_wait), so wake the waker; a thread waiter
+ * is in pthread_cond_wait, so signal its condvar.  The two are mutually
+ * exclusive per entry (decided once in the wait loop).
+ */
+static void
+__entry_wake(struct lock_entry *e)
+{
+	if (e->is_fiber) (void)xtc_waker_wake(&e->waker);
+	else             (void)pthread_cond_signal(&e->cv);
 }
 
 /* ----- locker IDs ------------------------------------------- */
@@ -457,6 +478,7 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 {
 	struct lock_entry *e, *prior;
 	struct locker_rec *lr;
+	xtc_task_t *cur;
 	int rc;
 
 	prior = __find_granted(o, locker);
@@ -512,31 +534,105 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 	}
 
 	rc = XTC_OK;
-	for (;;) {
-		if (atomic_load_explicit(&e->aborted, memory_order_acquire)) {
-			rc = XTC_E_DEADLK;
-			break;
-		}
-		if (e->granted) { rc = XTC_OK; break; }
-
-		if (timeout_ns < 0) {
-			(void)pthread_cond_wait(&e->cv, &p->lock);
-		} else {
-			struct timespec ts;
+	/*
+	 * Decide ONCE whether this waiter parks as a fiber (running inside
+	 * a coroutine on a loop) or blocks the OS thread on the condvar.
+	 * The thread path is unchanged from the original blocking design;
+	 * the fiber path is purely additive and mirrors xtc_amutex_lock in
+	 * sync.c -- it drops the partition lock, yields to the loop, and
+	 * re-acquires on wake so the single sim thread is never wedged.
+	 */
+	cur = __xtc_current_task();
+	if (cur != NULL) {
+		int64_t deadline = -1;
+		(void)xtc_task_waker(cur, &e->waker);
+		e->is_fiber = 1;
+		if (timeout_ns > 0) {
 			int64_t now;
-			int wait_rc;
-			(void)__os_clock_real(&now);
-			now += timeout_ns;
-			ts.tv_sec  = (time_t)(now / 1000000000LL);
-			ts.tv_nsec = (long)(now % 1000000000LL);
-			wait_rc = pthread_cond_timedwait(&e->cv, &p->lock, &ts);
-			if (wait_rc != 0 && !e->granted &&
-			    !atomic_load_explicit(&e->aborted,
-			        memory_order_acquire)) {
-				rc = XTC_E_AGAIN;
-				atomic_fetch_add_explicit(&m->n_timeouts, 1,
-				    memory_order_relaxed);
+			(void)__os_clock_mono(&now);
+			deadline = now + timeout_ns;
+		}
+		for (;;) {
+			void *proc_ctx;
+			int64_t now;
+			if (atomic_load_explicit(&e->aborted,
+			    memory_order_acquire)) {
+				rc = XTC_E_DEADLK;
 				break;
+			}
+			if (e->granted) { rc = XTC_OK; break; }
+			if (deadline >= 0) {
+				(void)__os_clock_mono(&now);
+				if (now >= deadline) {
+					/* Deadline reached; a grant may have
+					 * raced it (checked above), so this is
+					 * a genuine timeout. */
+					rc = XTC_E_AGAIN;
+					atomic_fetch_add_explicit(
+					    &m->n_timeouts, 1,
+					    memory_order_relaxed);
+					break;
+				}
+				/* Re-arm a fresh timer each park.  A prior
+				 * timer that the WAKER (a grant) woke us on is
+				 * still in the heap -- cancel it first, else
+				 * park_on_timer returns INVAL and the orphan
+				 * keeps advancing the sim clock (mirrors the
+				 * xtc_recv park-timer discipline in proc.c). */
+				if (cur->park_timer != NULL) {
+					(void)xtc_timer_cancel(cur->park_timer);
+					cur->park_timer = NULL;
+				}
+				(void)xtc_task_park_on_timer(cur,
+				    deadline - now);
+			} else {
+				cur->park_requested = 1;
+			}
+			/* Drop the partition lock across the park so the
+			 * releaser / detector can run and re-grant us. */
+			(void)__xtc_mtx_unlock(&p->lock);
+			proc_ctx = __xtc_proc_ctx_save();
+			xtc_yield();
+			__xtc_proc_ctx_restore(proc_ctx);
+			(void)__xtc_mtx_lock(&p->lock);
+			/* Loop: recheck granted / aborted / deadline. */
+		}
+		/* Stopped parking: cancel any timer still armed so it does
+		 * not linger in the heap and advance the sim clock. */
+		if (cur->park_timer != NULL) {
+			(void)xtc_timer_cancel(cur->park_timer);
+			cur->park_timer = NULL;
+		}
+	} else {
+		for (;;) {
+			if (atomic_load_explicit(&e->aborted,
+			    memory_order_acquire)) {
+				rc = XTC_E_DEADLK;
+				break;
+			}
+			if (e->granted) { rc = XTC_OK; break; }
+
+			if (timeout_ns < 0) {
+				(void)pthread_cond_wait(&e->cv, &p->lock);
+			} else {
+				struct timespec ts;
+				int64_t now;
+				int wait_rc;
+				(void)__os_clock_real(&now);
+				now += timeout_ns;
+				ts.tv_sec  = (time_t)(now / 1000000000LL);
+				ts.tv_nsec = (long)(now % 1000000000LL);
+				wait_rc = pthread_cond_timedwait(&e->cv,
+				    &p->lock, &ts);
+				if (wait_rc != 0 && !e->granted &&
+				    !atomic_load_explicit(&e->aborted,
+				        memory_order_acquire)) {
+					rc = XTC_E_AGAIN;
+					atomic_fetch_add_explicit(
+					    &m->n_timeouts, 1,
+					    memory_order_relaxed);
+					break;
+				}
 			}
 		}
 	}
@@ -643,7 +739,7 @@ __release_entry_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		if (o->granted) o->granted->prev = w;
 		o->granted = w;
 		w->granted = 1;
-		(void)pthread_cond_signal(&w->cv);
+		__entry_wake(w);
 	}
 
 	__obj_maybe_free(m, p, o);
@@ -700,7 +796,7 @@ xtc_lock_release_all(xtc_lockmgr_t *m, xtc_locker_t locker)
 				if (e->locker == locker) {
 					atomic_store_explicit(&e->aborted, 1,
 					    memory_order_release);
-					(void)pthread_cond_signal(&e->cv);
+					__entry_wake(e);
 				}
 			}
 			for (e = o->granted; e != NULL; e = ne) {
@@ -817,7 +913,7 @@ xtc_lock_downgrade(xtc_lockmgr_t *m, xtc_locker_t locker,
 		if (o->granted) o->granted->prev = w;
 		o->granted = w;
 		w->granted = 1;
-		(void)pthread_cond_signal(&w->cv);
+		__entry_wake(w);
 	}
 	(void)__xtc_mtx_unlock(&p->lock);
 	return XTC_OK;
@@ -1108,7 +1204,7 @@ xtc_lockmgr_check_deadlocks(xtc_lockmgr_t *m, int *n_aborted)
 						if (e->locker != vid) continue;
 						atomic_store_explicit(&e->aborted, 1,
 						    memory_order_release);
-						(void)pthread_cond_signal(&e->cv);
+						__entry_wake(e);
 					}
 					for (e = o->granted; e != NULL; e = ne) {
 						ne = e->next;
