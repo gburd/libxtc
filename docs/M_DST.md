@@ -283,11 +283,30 @@ clock / replay / invariant checks already in place:
   cooling-stage eviction, background writeback), NOT durability.
 
 Still to reach full FDB parity: machine-death simulation (kill a loop's
-procs mid-run), a swarm/soak fleet (millions of seeds), and the capstone
--- a full sqlxtc-under-sim WAL+recovery test with seeded crashes (the
-buffer manager is now under DST; layering WAL + crash-recovery on top,
-with seeded crashes and torn writes, is the remaining storage-engine
-DST work).
+procs mid-run) and a swarm/soak fleet (millions of seeds).
+
+WAL crash-recovery under DST: DONE (test_sim_crash_recover).  N worker
+fibers across several loops commit transactions through xstore + the
+group-commit WAL under xtc_sim_exec_run with seeded I/O latency; a
+seeded crash point (drawn from XTC_SIM_RNG_FAULT, tripped by a shared
+commit-attempt counter) calls xtc_exec_stop to halt the run mid-
+workload with the buffer pool unflushed (data file empty, WAL-only
+durability).  The WAL is then cut at the durable frontier
+(durable_lsn -- only fsync-confirmed records survive, the conservative
+deterministic crash boundary), a fresh B-tree is recovered via
+xstore_recover, and the test verifies DURABILITY (every acked txn fully
+present), ATOMICITY (both rows of a 2-row txn or neither -- no torn
+txn), and no fabricated/leaked row.  Each run executes in a fresh child
+process (FDB fork-per-run discipline) so the seed alone determines the
+outcome.  A 40-seed sweep crashes at many points (before any commit,
+mid-workload, at clean drain; acked 0..60 of 64) and EVERY seed
+recovers to exactly its own durable-commit set and replays
+byte-identically.  No WAL/recovery bug was found -- recovery restores
+exactly the durable-commit set.  (Fork-per-run also revealed that
+process-global engine state, chiefly the monotonic MVCC commit clock,
+accumulates across in-process runs and perturbs the schedule; fork
+isolation fixes replay with zero engine changes -- a note for any
+future single-process crash-sweep.)
 (Network-partition simulation is now DONE at loop granularity -- see the
 simulated network partition entry above.)
 
