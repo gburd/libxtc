@@ -356,6 +356,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_tls_basic \
 		  test_tls_server \
 		  test_tls_client \
+		  test_pgmock_smoke \
 		  test_inject_races
 
 TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_lrlock pbt_lwlock pbt_chan pbt_sim
@@ -1144,6 +1145,21 @@ test_preempt_p2: $(srcdir)/../test/m14/test_preempt_p2.c \
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
 		-o $@ $(srcdir)/../test/m14/test_preempt_p2.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# M16.1a: mock PostgreSQL backend runtime seam (examples/09_pgmock).
+# Compiles the mock's listener + backend + Latch glue directly, with
+# the example dir on the include path, and drives them in-process on
+# an xtc_app via a raw-socket client (no libpq, so CI needs no PG).
+test_pgmock_smoke: $(srcdir)/../test/m16/test_pgmock_smoke.c \
+		$(srcdir)/../examples/09_pgmock/listener.c \
+		$(srcdir)/../examples/09_pgmock/backend.c \
+		$(srcdir)/../examples/09_pgmock/pg_latch.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../examples/09_pgmock \
+		-o $@ $(srcdir)/../test/m16/test_pgmock_smoke.c \
+		$(srcdir)/../examples/09_pgmock/listener.c \
+		$(srcdir)/../examples/09_pgmock/backend.c \
+		$(srcdir)/../examples/09_pgmock/pg_latch.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_coverage_pump: $(srcdir)/../test/coverage/test_coverage_pump.c \
 		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB)

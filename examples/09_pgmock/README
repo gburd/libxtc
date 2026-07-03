@@ -1,0 +1,55 @@
+09_pgmock -- mock PostgreSQL backend on the xtc scheduler
+=========================================================
+
+What it proves (M16.1a)
+-----------------------
+
+The runtime seam for the future PostgreSQL adapter, with ZERO
+PostgreSQL source.  A postmaster proc accepts connections and spawns
+one backend xtc_proc per connection; each backend speaks a hand-rolled
+minimal PG v3 wire protocol -- StartupMessage handshake plus a
+"SELECT 1" round-trip -- driven entirely by the xtc scheduler:
+
+  * postmaster + N backends run as xtc_procs on one loop (no fork),
+  * the backend's socket waits go through xtc_proc_wait_fd -- the exact
+    shape of PostgreSQL's WaitLatchOrSocket (see pg_latch.h),
+  * SetLatch maps to xtc_send of a wake byte into a proc mailbox.
+
+This de-risks the real out-of-tree PG bringup (M16.1b): the Latch glue
+in pg_latch.{c,h} transfers verbatim to a PG branch, where MyLatch is
+backed by the same mailbox + xtc_proc_wait_fd.
+
+Files
+-----
+
+  main.c       standalone postmaster: xtc_app + listener child.
+  listener.c/h the postmaster proc: accept -> spawn one backend/conn.
+  backend.c/h  the backend proc: PG v3 handshake + SELECT 1 responder,
+               hand-rolled over raw recv/send + xtc_proc_wait_fd
+               (PG v3 framing is 1 type byte + a self-inclusive 4-byte
+               length, NOT xtc's pure 4-byte frame).
+  pg_latch.c/h the Latch-shaped glue (SetLatch -> xtc_send;
+               WaitLatchOrSocket -> xtc_proc_wait_fd).
+
+The smoke test test/m16/test_pgmock_smoke.c compiles listener.c +
+backend.c + pg_latch.c directly and drives them in-process on an
+xtc_app with an ephemeral TCP port, using a raw-socket client (no libpq
+dependency, so CI needs no PostgreSQL).
+
+Build and run
+-------------
+
+  cd examples/09_pgmock
+  make                       # produces ./pgmock-server
+
+  # TCP (default 127.0.0.1:15442):
+  ./pgmock-server -h 127.0.0.1 -p 15442
+  psql -h 127.0.0.1 -p 15442 -c 'select 1'
+
+  # Unix domain socket:
+  ./pgmock-server -U /tmp/pgmock.sock
+  psql -h /tmp -p <ignored> ...   # or a raw v3 client on the socket
+
+Any query text returns a single-column, single-row result "1"; the mock
+does not parse SQL.  Terminate (X) or a client disconnect exits the
+backend proc cleanly.
