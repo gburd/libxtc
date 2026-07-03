@@ -27,9 +27,11 @@
 
 #include "xtc_int.h"
 #include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
+#include "xtc_sim.h"       /* XTC_SIM_BUGGIFY: DST pessimal-path injection */
 #include "xtc_svr.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"
+#include "xtc_async.h"    /* xtc_yield: buggify delay-dispatch site */
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -92,6 +94,18 @@ __svr_entry(void *arg)
 		if (rc == XTC_E_AGAIN) continue;
 		if (rc != XTC_OK) break;
 		if (size == 0) { __os_free(msg); continue; }
+
+		/* Buggify: under DST, occasionally YIELD after receiving a
+		 * message but before dispatching it -- the message is already
+		 * in hand (not re-queued, so it cannot be lost), so this is a
+		 * strictly legal pessimal delay that lets other procs interleave
+		 * between the server's recv and its dispatch, stressing the
+		 * recv/dispatch window deterministically.  Gated on the site
+		 * coin; a fresh per-call fault draw so it fires on a fraction
+		 * of receives. */
+		if (XTC_SIM_BUGGIFY("svr.recv.delay_dispatch") &&
+		    xtc_sim_fault(200))
+			xtc_yield();
 
 		kind = ((uint8_t *)msg)[0];
 
@@ -211,8 +225,21 @@ xtc_svr_stop(xtc_svr_t *s)
 int
 xtc_svr_join(xtc_svr_t *s, int64_t timeout_ns)
 {
+	int rc;
 	if (s == NULL) return XTC_E_INVAL;
-	(void)xtc_notify_wait(s->stopped, timeout_ns);
+	rc = xtc_notify_wait(s->stopped, timeout_ns);
+	/*
+	 * Only reclaim the server if it actually stopped.  A finite
+	 * timeout can expire while the server is still running its recv
+	 * loop; freeing s then would be a use-after-free the moment the
+	 * server next reads s->stop_requested (found by DST + ASan --
+	 * see docs/M_DST.md).  On timeout, report XTC_E_AGAIN and leave
+	 * s intact so the caller can join again (the server's async stop
+	 * has not drained yet).  A blocking join (timeout_ns < 0) waits
+	 * until the server signals, so it always reclaims.
+	 */
+	if (rc != XTC_OK)
+		return rc;
 	xtc_notify_destroy(s->stopped);
 	__os_free(s);
 	return XTC_OK;
