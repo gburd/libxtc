@@ -97,6 +97,64 @@ Two distinct designs satisfy "STEAL":
       pages -- see Section 6.
 
 ------------------------------------------------------------------------------
+## Increment 1 -- DONE (per-record checksum makes recovery torn-tail-safe)
+
+The ROOT of the OUTCOME B failure (below) was that recovery could not
+tell a COMPLETE log record from a torn one, so a partially written tail
+record was decoded and its length/id fields drove unbounded allocations.
+That is now fixed at the source with the standard ARIES/Stasis technique
+-- a self-checking log record:
+
+  - Record format bumped (wal.c).  On-disk layout is now
+    `[u64 lsn][u32 len][body:len][u64 crc]`: an 8-byte trailer holding a
+    64-bit FNV-1a hash over the header bytes (lsn+len) and the body.
+    The example engine has no external on-disk-format compat
+    requirement, so no version negotiation is needed.
+  - Every write path stamps the trailer: batch_add (group commit),
+    wal_commit_sync (synchronous off-loop append), wal_cmp_emit
+    (checkpoint compaction re-emit).  The checksum is over each LOGICAL
+    record, NOT the fsync'd batch -- so a batch torn mid-write fails the
+    checksum of exactly the first incomplete record.
+  - Both readers VERIFY it: wal_scan and wal_scan_tail recompute the
+    hash and treat a MISMATCH (or a short read of the trailer) exactly
+    as end-of-log.  A torn tail record is dropped before it ever reaches
+    xl_parse_*.
+  - Both recovery drivers run through the verified scan:
+    xstore_recover (logical rebuild, the safe default) AND
+    xstore_recover_inplace (the in-place path that trusts the base).
+    Neither can decode a torn record, so none of the unbounded-alloc
+    sites listed under OUTCOME B is reachable from a torn record.
+
+Test: examples/06_sqlxtc/test_steal_torn.c (new, in the Makefile).  It
+builds a log of several committed transactions, then torns the tail
+THREE ways -- (1) a plausible-but-wrong appended record with a corrupt
+trailer, (2) a record torn before its trailer (crash mid-record), (3) a
+bit flipped in the last good record's body -- and for EACH runs BOTH
+xstore_recover and xstore_recover_inplace, asserting: recovery completes
+without ballooning; every complete committed row before the tear
+survives; the torn tail's row never leaks in.  The process caps its own
+address space with setrlimit(RLIMIT_AS, 256 MB) BEFORE any recovery
+(relaxed only under AddressSanitizer, which needs a large shadow
+mapping), so a regression that reintroduced the unbounded allocation
+fails a malloc cleanly instead of OOM-killing the box -- measured peak
+RSS ~4.5 MB, far under the cap.  Verified: the test FAILS its
+torn-tail-excluded assertion when the checksum verify is disabled (the
+regression is genuinely caught), and PASSES with it on.  All existing
+recovery tests still pass: test_recover_undo, test_redo_page,
+test_wal_recover, test_inplace_redo, test_clean_restart, test_wal,
+test_xlog, test_steal, test_bufmgr, test_bufmgr_mt (plus test_wal_compact
+and test_persist, which exercise the compaction re-emit and the
+resume/rebind paths).  ASan-clean on test_steal_torn and
+test_recover_undo.
+
+What REMAINS for full page-level STEAL (NOT done here): physiological
+XL_PAGE after-image logging of every dirtied NON-split leaf (the
+remainder of the original Increment 1 scope), so logical XL_UPDATE redo
+over a trusted base never descends a torn non-split leaf; and Increments
+2-4.  Those stay deferred per Section 5 -- the checksum work closes the
+OOM / unbounded-alloc hole, which was the data-integrity-critical part.
+
+------------------------------------------------------------------------------
 ## 3. Change set for FULL page-level STEAL (design II), ordered + bounded
 
 Only pursue this if a hard requirement demands page-level STEAL of real
@@ -110,6 +168,11 @@ test_recover_undo, test_redo_page, test_steal, test_torn_smo.
 Invariant: nothing regresses.  This increment is documentation only.
 
 ### Increment 1 -- physiological logging of every dirtied page
+
+**STATUS (2026-07): the torn-record ROOT is DONE (per-record checksum,
+see the "Increment 1 -- DONE" section below).  Full physiological
+per-page after-image logging of every NON-split leaf remains deferred.**
+
 Files: btree.c (row-write path bt_insert_fast), xstore.c
 (xs_smo_page-style emit generalized), xlog.c/xlog.h (reuse XL_PAGE).
 Today XL_PAGE is emitted ONLY on the SMO/split path (xstore.c:xs_smo_page
@@ -296,7 +359,7 @@ default (Increment 2) until 6a's small-pool sim test is green.
   - Design rationale: docs/M_SQLXTC_BDB.md sections S3, S4, S5 and the
     2.8 scorecard.
 
-## Verification outcome (2026-07): OUTCOME B -- in-place STEAL recovery is NOT torn-base-safe
+## Verification outcome (2026-07): OUTCOME B -- in-place STEAL recovery WAS NOT torn-base-safe; Increment 1 (per-record checksum) now closes the torn-record hole
 
 The bounded first-increment probe was built (a small-pool DST test that
 forces genuine page-level STEAL, then recovers the torn base in place
@@ -323,6 +386,23 @@ than the documented ~13%-rows-lost torn-non-split-leaf case:
     3. at least one further site downstream (same balloon signature
        after the first two are bounded).
 
+UPDATE (2026-07, Increment 1 DONE): all three sites are now UNREACHABLE
+from a torn record.  The root cause was that recovery could not tell a
+complete record from a torn one; the per-record checksum (see the
+"Increment 1 -- DONE" section above) fixes exactly that.  wal_scan /
+wal_scan_tail recompute an FNV-1a trailer over each record and stop at
+the first mismatch (or short-read trailer) -- the torn tail is dropped
+BEFORE decode, so no length/id from a torn record ever reaches
+xl_record_len, bm_apply_page_image/bm_fix_pid, or any downstream site.
+Both xstore_recover and xstore_recover_inplace run through the verified
+scan, so neither can be driven into the unbounded allocation.  This is
+verified safe under a 256 MB RLIMIT_AS cap by test_steal_torn (both
+recovery paths, three distinct tears), which was also shown to FAIL when
+the checksum verify is removed -- i.e. it genuinely guards the hole.
+(The WAL_MAX_REC bound remains as defense in depth on the outer length,
+but the checksum, not the bound, is what makes recovery torn-safe: a
+torn body whose length is < WAL_MAX_REC is now caught by the trailer.)
+
 This is why the default crash path uses xstore_recover (LOGICAL rebuild
 from the clean-durable-frontier WAL), never xstore_recover_inplace, and
 why the crash-recovery capstone (test_sim_crash_recover) runs with a
@@ -339,12 +419,22 @@ single transaction whose dirty set exceeds the buffer pool -- is
 already delivered by the spill-to-staging path (test_steal.c).
 NO-STEAL-of-versions + NO-FORCE + spill is the correct design.
 
-The OOM-ing probe was NOT added to the committed test suite (it cannot
-run safely).  One genuine, safe robustness fix from the investigation
-WAS kept: a WAL_MAX_REC (16 MiB) bound in wal_scan / wal_scan_tail so a
-torn tail record with a garbage length terminates the scan instead of
-attempting a multi-GB realloc -- correct on every path (a legitimate
-record is assembled in the 64 KiB batch buffer), verified against all
-existing recovery tests (test_recover_undo, test_redo_page,
+UPDATE (2026-07): Increment 1's ROOT fix -- the per-record checksum --
+IS now landed (see the "Increment 1 -- DONE" section).  It does NOT flip
+the live default; it makes BOTH recovery paths torn-tail-safe by
+excluding torn records before decode, closing the OOM / unbounded-alloc
+hole that made the earlier probe unsafe to keep.  The safe probe that
+was kept is now a committed test (test_steal_torn), running under a
+256 MB RLIMIT_AS cap so it can never balloon the machine.  What stays
+deferred is the REST of full page-STEAL (per-non-split-leaf XL_PAGE
+logging and Increments 2-4), for the same payoff reasons above.
+
+The checksum-verified scan replaces the earlier note that "the OOM-ing
+probe was NOT added to the committed test suite": the OOM is closed, and
+a safe torn-tail test now lives in the suite.  The WAL_MAX_REC (16 MiB)
+bound in wal_scan / wal_scan_tail remains as defense in depth (a garbage
+outer length still terminates the scan without a giant realloc), verified
+against all existing recovery tests (test_recover_undo, test_redo_page,
 test_wal_recover, test_inplace_redo, test_clean_restart, test_wal,
-test_xlog, test_steal all pass).
+test_xlog, test_steal all pass), now joined by the per-record checksum as
+the primary torn-record defense.
