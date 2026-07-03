@@ -47,6 +47,49 @@ test_sim_soak.c  (needs a sim build)
     schedules.  This test surfaced a real scheduler liveness bug (timer
     parks never woke -- see docs/M_DST.md).
 
+test_sim_machine_death.c  (needs a sim build)
+    Machine-death / proc-kill under DST.  A seeded reaper proc, after a
+    seeded virtual-time delay, kills a victim with xtc_exit_pid (the
+    BEAM-style async kill: the victim raises its exit at the next
+    yield/recv, running the real __notify_links_and_monitors path).
+    PART A verifies exit PROPAGATION: a linked+monitoring observer
+    receives the 'E' exit signal and the 'D' monitor DOWN, the run
+    quiesces, and it replays (signal count + order hash + sim state
+    hash).  PART B verifies SUPERVISOR RESTART: a one_for_one supervisor
+    deterministically restarts a killed permanent child (restart count
+    replays), then the supervisor is stopped + joined so the run winds
+    down cleanly (no leak under ASan).  A different seed kills a
+    different victim/child and stays consistent.
+
+test_sim_swarm.c  (needs a sim build)
+    Swarm / soak fleet: a large, SHARDABLE seed sweep over the rich set
+    of fault scenarios the sim models -- for each seed a mixed workload
+    (cross-loop ping/pong + timer sleepers) with a seeded combination of
+    network partition, seeded delivery latency, Buggify, and a
+    machine-death kill.  Each seed runs twice and must reach quiescence,
+    hold the per-step invariants, and replay (state hash + app result);
+    the sweep must explore many distinct schedules.  Every run frees all
+    per-run state (fresh exec + partition/buggify cleared) so a large
+    sweep stays memory-bounded (RSS flat across seeds).
+
+        test_sim_swarm                 -- bounded default (300 seeds),
+                                          for make check / the CI job.
+        test_sim_swarm <count>         -- sweep <count> seeds from 0.
+        test_sim_swarm <count> <base>  -- shard: <count> seeds from
+                                          <base> (disjoint per shard).
+
+    A nightly/manual 100k+ sweep runs several disjoint shards, e.g.
+
+        test_sim_swarm 100000 0      &
+        test_sim_swarm 100000 100000 &
+        test_sim_swarm 100000 200000 &   # ... etc.
+
+    (~90 s per 100k shard; a few MB RSS each.)  The swarm surfaced a
+    real use-after-free in the sim net-latency deferred-delivery path
+    (a delayed cross-loop message to a proc killed inside the deferral
+    window dereferenced the freed proc); fixed by re-resolving the
+    target by pid at fire time -- see docs/M_DST.md.
+
 Running the sim-build tests
 ---------------------------
 

@@ -673,16 +673,33 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
  * (enqueued by __mbox_deliver below).  It pushes into the mailbox via
  * __mbox_deliver_locked -- the identical production path -- so a delayed
  * message behaves exactly like an on-time one, just observed later in
- * virtual time.  Single sim thread, so no lifecycle race beyond the
- * mbox_lock the push already takes.
+ * virtual time.
+ *
+ * The target is captured by PID, not by pointer: between scheduling the
+ * deferral and it firing (a virtual-time window the seeded schedule may
+ * fill with anything) the target proc can EXIT -- normally, or killed by
+ * xtc_exit_pid -- and be reaped/freed, its slot possibly reused.  So the
+ * callback re-resolves the pid at fire time and DROPS the message (frees
+ * the envelope) if the proc is gone; the generation check in __resolve
+ * also rejects a reused slot.  Capturing a raw struct xtc_proc * here was
+ * a use-after-free (surfaced by DST machine-death + net-latency: a
+ * deferred delivery to a proc killed inside the deferral window).
  */
-struct __mbox_deferred { struct xtc_proc *p; struct envelope *e; };
+struct __mbox_deferred { xtc_pid_t pid; struct envelope *e; };
+
+/* Forward decl (definition at __resolve below): the deferred callback
+ * re-resolves the target by pid at fire time. */
+static struct xtc_proc *__resolve(xtc_pid_t pid, xtc_loop_t **out);
 
 static void
 __mbox_deferred_run(void *arg)
 {
 	struct __mbox_deferred *d = arg;
-	(void)__mbox_deliver_locked(d->p, d->e);
+	struct xtc_proc *p = __resolve(d->pid, NULL);
+	if (p != NULL)
+		(void)__mbox_deliver_locked(p, d->e);
+	else
+		__env_free(d->e);   /* target gone: drop the delayed message */
 	free(d);
 }
 
@@ -723,7 +740,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 				if (d != NULL) {
 					int64_t now = 0;
 					(void)__os_clock_mono(&now);
-					d->p = p;
+					d->pid = p->pid;
 					d->e = e;
 					if (__xtc_io_sim_defer_cb(dst->io,
 					    now + lat, __mbox_deferred_run,

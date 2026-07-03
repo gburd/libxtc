@@ -91,7 +91,7 @@ for s in engine db quack metrics vexec sql_parse sql_parse_drv sql_ast \
 done
 
 fail=0
-for t in test_sim_sched test_sim_pingpong test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_lockmgr test_sim_iofault test_sim_buggify test_sim_buggify2 test_sim_partition test_sim_bufmgr test_sim_crash_recover; do
+for t in test_sim_sched test_sim_pingpong test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_lockmgr test_sim_iofault test_sim_buggify test_sim_buggify2 test_sim_partition test_sim_machine_death test_sim_swarm test_sim_bufmgr test_sim_crash_recover; do
 	exe="$work/$t"
 	# test_sim_bufmgr additionally needs the bufmgr object + its include;
 	# test_sim_crash_recover needs the whole native engine object set.
