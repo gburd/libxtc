@@ -42,7 +42,7 @@ but not the live default, or built for a narrower case; MISSING = absent.
 |---|------------------------------|--------|--------------------------|
 | A | Uncommitted data may reach pages | HAVE (design I) | Real MVCC versions are not applied to the tree until commit (xstore.c:xstore_ctx_t.wbuf -> xs_commit_ctx), but an OVERSIZED txn's uncommitted payloads DO reach pages and ARE evicted to disk under pool pressure: xstore.c:xs_spill_payloads (`bt_insert(... XS_STAGE_TID)`) from xstore.c:xs_buf_write when `wbuf_bytes > XS_SPILL_HI`.  PROVEN to reach disk by test_steal_page (evict_flushes=609 under a 16-frame pool), invisible to readers (staging table-id), undone in place via CLRs on crash.  Design II (apply the REAL versions incrementally) is still not done -- see Increment 3 status. |
 | B | Write-ahead-log enforcement on eviction | HAVE | Hook defined bufmgr.c:211 (`wal_flush`), installed engine.c:361 (`bm_set_wal_flush(g_xbm, sx_wal_flush_cb, g_xwal)`), and CALLED on every dirty-page write path: bufmgr.c:447 in `flush_frame` (eviction/cooling/checkpoint via lines 596, 1504, 2009) and bufmgr.c:1631 in `tr_prepare` (the trickler).  The callback is engine.c:262 `sx_wal_flush_cb` -> `wal_flush_through`. |
-| C | Page-LSN redo gating on a torn base | PARTIAL | Mechanism built and correct: bufmgr.c:1140 `bm_apply_page_image` compares on-disk page LSN vs image LSN (`in_image > on_disk`) and applies only if newer; recovery calls it from xstore.c:xs_recover_cb (XL_PAGE arm, line ~3875) via xstore.c:xstore_recover_inplace (line 3958).  NOT the live default: engine.c:344 uses xstore_recover (logical rebuild on a fresh file), where redo idempotence comes from version-key immutability, not page-LSN gating.  Torn NON-split leaves are not covered (docs/M_SQLXTC_BDB.md S3, "13% missing rows"). |
+| C | Page-LSN redo gating on a torn base | HAVE (mechanism) | Mechanism built and correct: bufmgr.c:1140 `bm_apply_page_image` (and `bm_apply_page_image_at`, record-LSN gated) compares on-disk page LSN vs image LSN and applies only the newer; recovery calls it from xstore.c:xs_recover_cb (XL_PAGE arm) via xstore.c:xstore_recover_inplace, now a TWO-pass driver (images first, logical redo second).  Torn NON-split leaves ARE now covered: every plain in-leaf insert logs an XL_PAGE after-image (xstore.c:xs_leaf_page via the bt_smo_hook `leaf` callback), proven by test_steal_leaf (the 5144-lost-rows repro recovers fully in place).  NOT the live default: engine.c:sx_storage_open still uses xstore_recover (logical rebuild) -- the mechanism is proven but the live flip is deliberately deferred (Increment 3 status). |
 | D | Undo images logged for every update | PARTIAL | The redo image is logged before apply (xstore.c:xs_wal_log for a committing txn; xstore.c:xs_wal_put for autocommit; xstore.c:xs_wal_emit_stage for a spilled payload).  There is NO explicit before-image: undo of a versioned insert needs none -- reversing it is `bt_delete` of the immutable version key (tableid,rowid,commit_ts).  See xstore.c:xs_undo_loser (line 3788).  So "undo image" = the version key, which every XL_UPDATE carries.  Adequate for the append-only version model; a true before-image would be needed only if updates mutated a row in place, which they do not. |
 | E | Undo pass reverses losers via CLRs | HAVE | xstore.c:xs_undo_loser (line 3788): for each loser update newest-first, `bt_delete` the version key, emit XL_CLR with `undo_next_lsn`, then XL_END.  Driven from xstore.c:xstore_recover (line 3899) and xstore_recover_inplace (line 3958) over the ACTIVE (uncommitted) txn table (`r->n_txn`).  Proven to FIRE on a real workload by test_steal.c (asserts `xstore_undo_clrs()` increments) and by test_recover_undo.c. |
 | F | recLSN-based redo start / dirty-page table | PARTIAL | Per-page recLSN stamped on the clean->dirty edge: bufmgr.c:1067 (`frame->rec_lsn`).  Horizon query bufmgr.c:1169 `bm_min_rec_lsn` (oldest dirty recLSN), tested in test_redo_page.c.  The trickler writes oldest-recLSN-first (bufmgr.c:1567 comment; dirty_seq/rec_lsn stamped together).  NOT used to START redo: recovery scans the whole (bounded, compacted) log from the front (xstore.c:xstore_recover -> wal_scan).  Live checkpoint is O(live-data) compaction (engine.c:sx_storage_checkpoint -> xstore_checkpoint_wal), not an O(dirty) fuzzy checkpoint with mid-log truncation to the recLSN horizon (docs/M_SQLXTC_BDB.md S4, deferred). |
@@ -155,13 +155,14 @@ over a trusted base never descends a torn non-split leaf; and Increments
 OOM / unbounded-alloc hole, which was the data-integrity-critical part.
 
 ------------------------------------------------------------------------------
-## Increments 2-4 -- STATUS (2026-07): 2 DONE, 3 PARTIAL, 4 DEFERRED;
-## live default NOT flipped (proven not-yet-torn-safe)
+## Increments 2-4 -- STATUS (2026-07): 2 DONE, 3 DONE (mechanism, not
+## live default), 4 DEFERRED; live default NOT flipped (deliberate)
 
 Work done under the "implement Increments 2-4" pass.  Test-driven; every
 recovery here runs under setrlimit(RLIMIT_AS, 256 MB) so a regression
-fails cleanly instead of OOMing the box.  New native test:
-test_steal_page.c (in the Makefile).
+fails cleanly instead of OOMing the box.  New native tests:
+test_steal_page.c and test_steal_leaf.c (both in the Makefile and both
+CI examples-job lists).
 
 ### Increment 2 -- real page-level STEAL of uncommitted data: DONE
 
@@ -208,85 +209,135 @@ definition, now measured.  It sidesteps the design-II MVCC hazard
 commit timestamp a user snapshot could accept; they are invisible by
 construction, not by a new visibility rule.
 
-### Increment 3 -- flip sx_storage_open to in-place recovery: NOT DONE
-### (proven not-yet-torn-safe; the honest blocker, with reproduction)
+### Increment 3 -- physiological non-split-leaf logging: DONE (mechanism);
+### live default NOT flipped (deliberate, per Section 5 + the mandate)
 
 Increment 3 asks to (a) apply real MVCC versions incrementally under an
 uncommitted marker and (b) flip the live crash default to
 xstore_recover_inplace so STEAL is the live path -- ONLY once the tests
-prove it correct.  The tests prove it is NOT correct yet.  Two decisive
-reproductions (both under the 256 MB cap; kept as probes, not committed
-since they intentionally FAIL to demonstrate the hole):
+prove it correct.  The PREREQUISITE the plan named for a torn-base-safe
+in-place path is now BUILT and PROVEN: physiological XL_PAGE after-image
+logging of every dirtied NON-split leaf, plus a redo pass that applies
+images strictly before any logical redo descends the repaired base.
 
-  1. Torn NON-split leaf.  Commit a large txn (double_write OFF so a
-     torn leaf is not auto-repaired), hand-tear ONE committed interior
-     leaf on disk (zero it, LSN -> 0, as a lost mid-write flush would),
-     recover in place with logical redo.  Result: 856 of 6000 rows
-     survived -- 5144 committed rows LOST (far worse than the documented
-     ~13%).  Logical XL_UPDATE redo cannot repair a torn non-split leaf
-     because there is no per-non-split-leaf after-image to gate on, and
-     descending the torn leaf loses its whole key range.  Deterministic
-     across runs.  This is the exact S3 trap in docs/M_SQLXTC_BDB.md.
-  2. SMO images clobber committed pages.  With physiological SMO logging
-     ON (xstore_register_smo(1)) during a large committed txn, then
-     in-place recovery: 8 of 6000 rows survived.  The XL_PAGE images
-     captured mid-split (stale) leaf snapshots; applying them page-LSN-
-     gated on a base whose home pages were never flushed reverts leaves
-     to their split-time state, and the subsequent logical redo diverges
-     onto different page ids -- the S5 coupling.  So merely turning on
-     the existing SMO image logging makes in-place recovery WORSE, not
-     safe.
+WHAT WAS BUILT (files):
 
-The prerequisite the plan already named (Section 3, Increment 1's
-remaining scope; Section 4.1) is confirmed necessary and is NOT built:
-physiological XL_PAGE after-image logging of EVERY dirtied non-split
-leaf, so logical redo never has to navigate torn structure, together
-with a redo pass that applies images strictly and does not let stale
-images clobber newer logical state.  Until that exists, flipping
-sx_storage_open to xstore_recover_inplace would lose committed data on
-an ordinary torn-leaf crash.  Per the mandate ("an honest partial that
-is crash-safe beats a forced flip that loses data"), the live default
-remains xstore_recover (logical rebuild onto a fresh page file), which
-is torn-base-safe precisely because it never trusts a torn base.
-engine.c:sx_storage_open is UNCHANGED.
+  - btree.c / btree.h.  The SMO hook gained a `leaf` callback fired from
+    the two PLAIN (non-split) in-leaf insert sites -- bt_insert_fast (the
+    latch-free fast path) and the non-split branch of bt_insert (the SMO
+    path's upsert/re-run).  Both now bm_predirty the leaf and log its
+    full after-image, exactly as the split path already logs its pages.
+    The `page` (split) and `leaf` callbacks now RETURN the image record's
+    own WAL LSN; btree.c stamps that LSN onto the live page (bm_stamp_lsn),
+    so the on-disk page LSN equals the LSN recovery gates the apply by.
+  - xstore.c.  xs_leaf_page emits the leaf after-image as an XL_PAGE
+    (txn_id 0, no NTA -- a single-leaf change is atomic under the
+    double-write buffer) and returns its emit LSN; xstore_register_smo
+    installs it alongside the split hooks.  xs_wal_log now returns the
+    commit LSN and xs_commit_ctx stamps it (bt_set_lsn) before the apply
+    loop, so leaf images in a group-committed transaction carry a
+    well-defined page LSN.
+  - bufmgr.c / bufmgr.h.  bm_apply_page_image_at gates a page image on an
+    EXTERNAL LSN (the log record's own, monotonically-numbered LSN)
+    instead of the LSN embedded in the image bytes -- so when several
+    after-images of one leaf share an embedded commit LSN (many in-leaf
+    inserts in one group-committed txn), the LAST image (highest record
+    LSN) wins.  bm_stamp_lsn stamps a live page's LSN field in place.
+  - xstore.c: xstore_recover_inplace now runs TWO forward passes over the
+    (checksum-verified) log.  Pass 1 applies every XL_PAGE image
+    (record-LSN gated) so every torn page -- a partly-flushed SMO OR a
+    torn NON-split leaf -- is repaired from its final image BEFORE pass 2.
+    Pass 2 does the logical XL_UPDATE redo / winner-retire over the
+    repaired base (idempotent upsert on well-formed leaves), then undoes
+    losers with CLRs exactly as before.  Because pass 1 repairs the torn
+    leaf first, pass 2's logical redo never navigates torn structure --
+    which is precisely what made the earlier single-pass logical redo
+    lose a torn non-split leaf's whole key range.
 
-Increment 3(a) (apply real versions incrementally under an uncommitted
-marker) is also NOT built: it requires the new invisible-to-all-but-self
-visibility marker of Section 4.2, and it is only useful once 3(b) is
-safe.  The spill path already delivers the payoff (a single transaction
-larger than the pool) without either risk, so 3(a) buys nothing until
-the in-place default is safe.
+EVIDENCE (test_steal_leaf.c, new; under the 256 MB RLIMIT_AS cap;
+ASan-clean):
+
+  A. The 5144-lost-rows repro now RECOVERS FULLY.  Commit a large txn
+     (6000 rows, double_write OFF so a torn leaf is not auto-repaired),
+     hand-tear several committed NON-split leaves on disk (zero them,
+     LSN -> 0), recover in place.  BEFORE this increment a throwaway
+     probe on the same setup lost ~3000 of 6000 rows (pages_redone == 0:
+     no leaf image existed to repair from).  AFTER: all 6000 rows
+     reappear, a full ordered scan returns exactly the keys (no missing,
+     torn, duplicated, or misordered row), and pages_redone > 0 proves
+     the torn leaves were repaired from their images, not silently
+     rebuilt.  The torn-non-split-leaf hole named in docs/M_SQLXTC_BDB.md
+     S3 is closed for in-place recovery.
+  B. Atomicity + no-leak of a torn loser.  A committed baseline plus a
+     large uncommitted txn that SPILLS to disk (STEAL), with committed
+     leaves ALSO torn: in-place recovery repairs the committed baseline
+     whole from its images AND undoes the stolen loser via CLRs (4775
+     measured); the base holds exactly the committed baseline, no
+     uncommitted row leaks.
+
+The SMO-image-clobber hazard (the earlier repro #2, where stale mid-split
+images reverted committed leaves) is closed by the two-pass ordering and
+the record-LSN gate: images apply LAST-image-wins in pass 1, and logical
+redo runs only afterward.  test_inplace_redo (torn split pages) still
+passes -- 433 images applied, all rows recovered ordered.
+
+### Was the live default flipped?  NO -- deliberately.
+
+engine.c:sx_storage_open is UNCHANGED: the live crash default stays
+xstore_recover (logical rebuild onto a fresh page file), and
+xstore_register_smo is NOT called on the live path.  The MECHANISM for a
+torn-base-safe in-place restart is now proven correct, but flipping the
+live default is deliberately NOT done, for three reasons the plan's
+Section 5 and the mandate both call out:
+
+  1. Per-insert log volume.  Logging an XL_PAGE after-image on EVERY
+     non-split leaf insert (a full page per row write) is a large,
+     WAL-volume-heavy cost.  It earns its keep only for page-level STEAL
+     of REAL versions -- which this MVCC append-only engine does not do
+     (the spill path, Increment 2, already bounds a single oversized
+     transaction with far less overhead).
+  2. The payoff is already delivered.  Increment 2's spill + in-place
+     UNDO (test_steal_page: 609 evict_flushes, 4775 CLRs) already handles
+     the one case page-level STEAL exists to serve, without trusting a
+     torn base for EVERY crash.
+  3. A live-default flip needs the DST seeded-crash sweep
+     (test/sim/test_sim_crash_recover.c, Section 6a) to prove no
+     lost/torn/leaked row across many crash schedules -- that sweep is
+     owned separately and is the gate the mandate names before any flip.
+     Landing the proven mechanism without forcing the flip is exactly
+     "an honest partial that is crash-safe beats a forced flip."
+
+So: Increment 3's PREREQUISITE (physiological non-split-leaf logging) and
+its recovery path (two-pass, record-LSN-gated xstore_recover_inplace) are
+DONE and proven for the torn-non-split-leaf case; Increment 3(b) (the
+live-default flip) stays deferred by choice; Increment 3(a) (apply real
+versions incrementally under an invisible marker) stays deferred -- the
+spill path delivers its payoff without the MVCC-visibility risk of
+Section 4.2.
 
 ### Increment 4 -- fuzzy checkpoint + recLSN-horizon truncation: DEFERRED
 
-Increment 4 (Section 3) is "only sound once Increment 2 [meaning the
-live in-place default] trusts the base in place from that horizon."
-Since the in-place default is NOT flipped (Increment 3 blocker), the
-recLSN-horizon fuzzy checkpoint has no safe base to truncate behind, so
-it is deferred by dependency, not by choice.  The live checkpoint stays
-O(live-data) compaction (engine.c:sx_storage_checkpoint), which is
-correct for the logical-rebuild default.  The recLSN plumbing that
-Increment 4 would consume already exists (bufmgr.c:bm_min_rec_lsn,
-tested by test_redo_page); only the checkpoint policy change is
-deferred.
+Increment 4 (Section 3) is "only sound once [the live in-place default]
+trusts the base in place from that horizon."  Since the in-place default
+is NOT flipped (Increment 3(b), deliberate), the recLSN-horizon fuzzy
+checkpoint has no safe base to truncate behind, so it stays deferred by
+dependency.  The live checkpoint stays O(live-data) compaction
+(engine.c:sx_storage_checkpoint), correct for the logical-rebuild
+default.  The recLSN plumbing Increment 4 would consume already exists
+(bufmgr.c:bm_min_rec_lsn, tested by test_redo_page); only the checkpoint
+policy change is deferred.
 
-### Was the live default flipped?  NO.
+### Recovery-test pass list (all PASS).
 
-Evidence: keeping xstore_recover as the default is REQUIRED -- the
-torn-non-split-leaf reproduction above loses 5144/6000 committed rows
-under in-place recovery, and the SMO-image reproduction loses 5992/6000.
-What is provably correct and now landed: genuine page-level STEAL of
-uncommitted data to disk (evict_flushes = 609, measured), invisibility
-to concurrent readers, and in-place UNDO of the stolen loser via CLRs
-(4775 CLRs, measured, committed base intact), plus durability of a
-committed large stolen txn (6000/6000 rows survive).  All under the
-256 MB RLIMIT_AS cap; ASan-clean.
+test_recover_undo, test_redo_page, test_wal_recover, test_inplace_redo,
+test_clean_restart, test_wal, test_xlog, test_steal, test_steal_torn,
+test_steal_page, test_steal_leaf (new), test_bufmgr, test_bufmgr_mt,
+test_wal_compact, test_persist, test_torn_smo.  build_unix `make check`
+stays green.  ASan-clean on test_steal_leaf, test_recover_undo, and
+test_inplace_redo.  The new test_steal_leaf is wired into the Makefile
+`test:` target and both CI examples-job lists
+(.github/workflows/ci.yml, .forgejo/workflows/ci.yml).
 
-Full recovery-test pass list (all PASS): test_recover_undo,
-test_redo_page, test_wal_recover, test_inplace_redo, test_clean_restart,
-test_wal, test_xlog, test_steal, test_steal_torn, test_steal_page (new),
-test_bufmgr, test_bufmgr_mt, test_wal_compact, test_persist,
-test_torn_smo.  build_unix `make check` stays green.
 
 ------------------------------------------------------------------------------
 ## 3. Change set for FULL page-level STEAL (design II), ordered + bounded
@@ -304,8 +355,12 @@ Invariant: nothing regresses.  This increment is documentation only.
 ### Increment 1 -- physiological logging of every dirtied page
 
 **STATUS (2026-07): the torn-record ROOT is DONE (per-record checksum,
-see the "Increment 1 -- DONE" section below).  Full physiological
-per-page after-image logging of every NON-split leaf remains deferred.**
+see the "Increment 1 -- DONE" section below).  Physiological per-page
+after-image logging of every NON-split leaf is now ALSO DONE (btree.c
+leaf hook -> xstore.c:xs_leaf_page -> two-pass xstore_recover_inplace),
+proven by test_steal_leaf: the torn-non-split-leaf repro recovers the
+FULL committed set in place.  The live default flip stays deferred by
+choice (see the Increment 3 status above).**
 
 Files: btree.c (row-write path bt_insert_fast), xstore.c
 (xs_smo_page-style emit generalized), xlog.c/xlog.h (reuse XL_PAGE).

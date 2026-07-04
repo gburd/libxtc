@@ -457,13 +457,13 @@ bt_set_lsn(bt_t *bt, uint64_t lsn)
  * single global hook, set by the engine; NULL means no SMO logging and
  * the recovery path rebuilds logically.  See btree.h.
  */
-static bt_smo_hook_t bt_smo_hook = { NULL, NULL, NULL, NULL };
+static bt_smo_hook_t bt_smo_hook = { NULL, NULL, NULL, NULL, NULL };
 
 void
 bt_set_smo_hook(const bt_smo_hook_t *hook)
 {
 	if (hook == NULL)
-		bt_smo_hook = (bt_smo_hook_t){ NULL, NULL, NULL, NULL };
+		bt_smo_hook = (bt_smo_hook_t){ NULL, NULL, NULL, NULL, NULL };
 	else
 		bt_smo_hook = *hook;
 }
@@ -480,15 +480,21 @@ smo_begin(void)
 /* Log one finished SMO page's full after-image: physiological redo for
  * the structural change.  The caller has just bm_predirty'd the page, so
  * its LSN field already holds bm_get_lsn (the SMO's LSN); pass that same
- * LSN so recovery can gate the image apply by page LSN.  No-op without a
- * hook.  Skips page 0 (never an SMO page) defensively. */
+ * LSN so the hook can log it.  The hook returns the image record's own
+ * WAL LSN; stamp that back onto the live page so its on-disk page LSN
+ * equals the LSN recovery gates the image apply by (each image is its
+ * own monotonically-numbered record, so the last image of a page wins).
+ * No-op without a hook.  Skips page 0 (never an SMO page) defensively. */
 static void
-smo_log_page(bt_t *bt, bm_pid_t pid, const void *image)
+smo_log_page(bt_t *bt, bm_pid_t pid, void *image)
 {
+	uint64_t rlsn;
 	if (bt_smo_hook.page == NULL || pid == 0)
 		return;
-	bt_smo_hook.page(bt_smo_hook.user, pid, image, bt->page_size,
+	rlsn = bt_smo_hook.page(bt_smo_hook.user, pid, image, bt->page_size,
 	    bm_get_lsn(bt->bm));
+	if (rlsn != 0)
+		bm_stamp_lsn(bt->bm, image, rlsn);
 }
 
 /* Close the nested top action (writes the dummy CLR).  No-op without a
@@ -498,6 +504,29 @@ smo_end(uint64_t token)
 {
 	if (bt_smo_hook.end != NULL)
 		bt_smo_hook.end(bt_smo_hook.user, token);
+}
+
+/* Log a PLAIN (non-split) leaf's full after-image: physiological redo
+ * for an in-leaf insert that did NOT split.  The caller has just
+ * bm_predirty'd the leaf, so its LSN field holds the change's LSN.  The
+ * hook returns the image record's own WAL LSN; stamp that back onto the
+ * live leaf so its on-disk page LSN equals the LSN recovery gates on --
+ * so the LAST image of a leaf (the one after the final in-leaf insert)
+ * wins even when many inserts in one group-committed transaction share
+ * a commit LSN.  Not bracketed by a nested top action (a single leaf
+ * change is atomic under the double-write buffer); it just gives
+ * in-place recovery an after-image to repair a torn non-split leaf from.
+ * No-op without a hook.  Skips page 0 defensively. */
+static void
+smo_log_leaf(bt_t *bt, bm_pid_t pid, void *image)
+{
+	uint64_t rlsn;
+	if (bt_smo_hook.leaf == NULL || pid == 0)
+		return;
+	rlsn = bt_smo_hook.leaf(bt_smo_hook.user, pid, image, bt->page_size,
+	    bm_get_lsn(bt->bm));
+	if (rlsn != 0)
+		bm_stamp_lsn(bt->bm, image, rlsn);
 }
 
 /*
@@ -691,6 +720,13 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	r = btnode_insert(pg, key, klen, val, vlen);
 	if (r == 0) {
 		atomic_fetch_add(&bt->st_inserts, 1);
+		/* Physiological redo for a plain (non-split) in-leaf insert:
+		 * log the leaf's after-image so in-place recovery can repair a
+		 * torn NON-split leaf from its image (page-LSN gated) instead of
+		 * losing its key range to a logical redo that descends the torn
+		 * page.  bm_predirty stamps the leaf LSN now so the image and the
+		 * on-disk page agree.  No-op unless the leaf hook is installed. */
+		bm_predirty(bm, f); smo_log_leaf(bt, bm_frame_pid(f), pg);
 		bm_unlatch(f); bm_unfix(bm, f, 1);   /* modified -> dirty */
 		return 1;
 	}
@@ -878,6 +914,10 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		(void)btnode_remove(pg, s);
 	if (btnode_insert(pg, key, klen, val, vlen) == 0) {
 		atomic_fetch_add(&bt->st_inserts, 1);
+		/* Non-split in-leaf insert on the SMO path (an upsert, or a
+		 * fast-path miss re-run under the lock): log the leaf image too,
+		 * same physiological-redo reason as the fast path above. */
+		bm_predirty(bm, f); smo_log_leaf(bt, bm_frame_pid(f), pg);
 		bm_unlatch(f); bm_unfix(bm, f, 1);
 		rc = XTC_OK; goto unlock;
 	}

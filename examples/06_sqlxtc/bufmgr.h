@@ -137,6 +137,29 @@ int bm_apply_page_image(bm_t *bm, bm_pid_t pid, const void *image,
     uint32_t image_len);
 
 /*
+ * Physiological redo gated on an EXTERNAL LSN (the log record's own
+ * LSN), not the LSN embedded in the image bytes.  Used when successive
+ * after-images of one page share an embedded LSN (e.g. many in-leaf
+ * inserts in one group-committed transaction) but each was logged as
+ * its own monotonically-numbered WAL record: gating on the record LSN
+ * makes the LAST image win.  Applies `image` onto page `pid` only if
+ * `apply_lsn` is newer than the page's on-disk LSN, then stamps the
+ * page LSN field = `apply_lsn` (so a re-run is idempotent).  Returns 1
+ * if applied, 0 if skipped, or a negative XTC_E_*.
+ */
+int bm_apply_page_image_at(bm_t *bm, bm_pid_t pid, const void *image,
+    uint32_t image_len, uint64_t apply_lsn);
+
+/*
+ * Stamp `lsn` into the page LSN field (at lsn_off) of the page buffer
+ * `page` NOW, in place.  Used by a physiological-logging hook after it
+ * has logged the page image and learned the image record's LSN, so the
+ * live page carries the same LSN the recovery gate will use.  No-op if
+ * lsn_off < 0.
+ */
+void bm_stamp_lsn(bm_t *bm, void *page, uint64_t lsn);
+
+/*
  * The smallest recLSN among currently dirty pages -- the oldest change
  * not yet on the data file.  The log up to (but not including) this LSN
  * describes only already-written pages and may be truncated.  Returns 0

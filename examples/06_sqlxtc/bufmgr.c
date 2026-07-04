@@ -1165,6 +1165,47 @@ bm_apply_page_image(bm_t *bm, bm_pid_t pid, const void *image, uint32_t image_le
 	return 0;
 }
 
+int
+bm_apply_page_image_at(bm_t *bm, bm_pid_t pid, const void *image,
+    uint32_t image_len, uint64_t apply_lsn)
+{
+	bm_frame_t *f;
+	uint64_t on_disk;
+	int rc;
+
+	if (bm == NULL || image == NULL || bm->lsn_off < 0 ||
+	    image_len != bm->page_size)
+		return XTC_E_INVAL;
+	if ((rc = bm_fix_pid(bm, pid, &f)) != XTC_OK)
+		return rc;
+	bm_latch_exclusive(f);
+	memcpy(&on_disk, (uint8_t *)bm_page(f) + bm->lsn_off, sizeof on_disk);
+	if (apply_lsn > on_disk) {
+		memcpy(bm_page(f), image, bm->page_size);   /* redo this page */
+		/* Stamp the page LSN field = the record's LSN so a re-run gates
+		 * to a no-op and the write-ahead hook flushes through a real,
+		 * durable WAL LSN.  Also point cur_lsn there so bm_unfix's
+		 * clean->dirty edge preserves it. */
+		memcpy((uint8_t *)bm_page(f) + bm->lsn_off, &apply_lsn,
+		    sizeof apply_lsn);
+		atomic_store_explicit(&bm->cur_lsn, apply_lsn, memory_order_relaxed);
+		bm_unlatch(f);
+		bm_unfix(bm, f, 1);                          /* dirty: write it back */
+		return 1;
+	}
+	bm_unlatch(f);
+	bm_unfix(bm, f, 0);                                  /* already current */
+	return 0;
+}
+
+void
+bm_stamp_lsn(bm_t *bm, void *page, uint64_t lsn)
+{
+	if (bm == NULL || page == NULL || bm->lsn_off < 0)
+		return;
+	memcpy((uint8_t *)page + bm->lsn_off, &lsn, sizeof lsn);
+}
+
 uint64_t
 bm_min_rec_lsn(bm_t *bm)
 {

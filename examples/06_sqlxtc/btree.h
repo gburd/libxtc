@@ -83,8 +83,22 @@ void bt_set_lsn(bt_t *bt, uint64_t lsn);
  *   page(user, pid, image,   -> log one finished page's full after-image
  *        page_size, lsn)        (the bytes about to be unfixed dirty,
  *                              with `lsn` already stamped at lsn_off).
+ *                              Returns the image record's own WAL LSN
+ *                              (0 if not logged); btree.c stamps that
+ *                              onto the live page so the on-disk page
+ *                              LSN matches the LSN recovery gates on.
  *   end(user, token)        -> close the NTA (dummy CLR); the SMO is now
  *                              crash-atomic with respect to recovery.
+ *   leaf(user, pid, image,   -> log a PLAIN (non-split) leaf's full
+ *        page_size, lsn)        after-image.  Not an SMO: a single
+ *                              in-leaf insert dirties one leaf, no NTA.
+ *                              This is what lets in-place recovery repair
+ *                              a torn NON-split leaf from its image
+ *                              (record-LSN gated) instead of losing its
+ *                              whole key range to a logical redo that
+ *                              descends the torn page.  Returns the image
+ *                              record's WAL LSN (0 if not logged); may be
+ *                              NULL.
  *
  * A single global hook (the engine is process-global); the last setter
  * wins, matching bt_set_close_hook.
@@ -92,9 +106,11 @@ void bt_set_lsn(bt_t *bt, uint64_t lsn);
 typedef struct bt_smo_hook {
 	void    *user;
 	uint64_t (*begin)(void *user);
-	void     (*page)(void *user, bm_pid_t pid, const void *image,
+	uint64_t (*page)(void *user, bm_pid_t pid, const void *image,
 	                 uint32_t page_size, uint64_t lsn);
 	void     (*end)(void *user, uint64_t token);
+	uint64_t (*leaf)(void *user, bm_pid_t pid, const void *image,
+	                 uint32_t page_size, uint64_t lsn);
 } bt_smo_hook_t;
 void bt_set_smo_hook(const bt_smo_hook_t *hook);
 
