@@ -292,6 +292,25 @@ run under the deterministic scheduler with seeded page-I/O completion
 ordering, and replay).  WAL + crash-recovery under DST is DONE (the
 capstone, test_sim_crash_recover; see below).
 
+The L4 tnt (Tina) Isolate layer's deterministic actor core is also
+covered (tnt.c -- test_sim_tnt).  tnt was designed for DST: a handler
+returns a TRANSITION rather than issuing a syscall, so the shard
+scheduler is a pure function of message arrival order.  Under sim the
+shard parks via a sim-clock sleep instead of its real wake pipe
+(ADDITIVE, gated on __xtc_sim_active(); the production shard loop is
+byte-identical and test/tnt/test_tnt passes unchanged, ASan-clean).  A
+purely message-driven driver (self-KICK messages sequence the scenario;
+each phase advances only after observing the prior phase's effect)
+exercises spawn into typed arenas, exactly-once mailbox delivery,
+drop-on-full with MAILBOX_FULL feedback (flooding N into a cap-C mailbox
+in one turn drops exactly N-C, nothing silently lost), generational
+stale-handle rejection (a send to a torn-down slot's OLD handle returns
+STALE_HANDLE, never mis-delivers to a reused slot), and same-shard
+cross-type delivery -- across a seed sweep with a bit-identical result
+fingerprint on replay.  Two tnt paths are deliberately NOT in this sim
+test (see the by-design section): wall-clock TIMERS driving a poll loop,
+and CROSS-SHARD messaging.
+
 Still OUTSIDE sim's reach BY DESIGN (not a coverage gap to close):
 
 - RCU (rcu.c) is now DONE under DST -- test_sim_rcu.  The two blockers
@@ -328,6 +347,38 @@ Still OUTSIDE sim's reach BY DESIGN (not a coverage gap to close):
   but staying consistent.  (The sem/gate/barrier deferral that used to
   sit here is now CLOSED -- see test_sim_sync above.)  Every
   concurrency primitive in the tree is now under DST.
+
+- tnt (Tina) Isolate layer -- deterministic actor core DONE
+  (test_sim_tnt); two tnt paths remain OUTSIDE sim by the same wake-seam
+  reason as the cross-machine transport above:
+
+  1. Wall-clock TIMERS driving a poll loop.  A single-shot timer fires
+     fine under sim (via xtc_proc_sleep on the virtual clock).  But a
+     timer armed INSIDE a message handler that then re-parks
+     WAIT_MESSAGE -- the idiom for "wake me later to re-check a
+     condition" -- does not reliably redeliver under the sim shard
+     poll: the shard's wake is a real self-pipe write the sim does not
+     observe, so the shard only re-ticks on its next sim-clock poll and
+     the timer-completion / poll cadence can wedge on some
+     interleavings.  test_sim_tnt therefore sequences its scenario with
+     self-KICK MESSAGES (which the seeded scheduler drives
+     deterministically), not timers; the real-scheduler test
+     (test/tnt/test_tnt) covers the timer-poll idiom.
+  2. CROSS-SHARD messaging.  A cross-shard xtc_tnt_send makes the
+     target slot READY on a peer shard, but wakes that shard only via
+     the same real self-pipe.  test_sim_tnt stays single-shard (the
+     whole actor model minus the cross-core hop); the production
+     in-process test covers cross-shard delivery.
+
+  Closing (1) and (2) cleanly needs a sim-visible shard-wake seam --
+  under sim, a cross-shard deliver / timer post should make the target
+  shard fiber promptly runnable rather than poke a dead pipe.  That is
+  additive and gated, but it is a real wakeup-routing change (not a
+  test tweak), so per the project discipline it is LEFT for a focused
+  follow-up rather than shipped as a racy park.  The deterministic
+  actor core -- spawn/arena, exactly-once mailbox delivery, drop-on-full
+  feedback, generational stale-handle safety, cross-type delivery --
+  is fully covered and replay-verified today.
 
 ## FoundationDB parity
 
@@ -801,7 +852,7 @@ Known gaps and why:
   each run starts from the identical binding.  Sim-only (the function
   only runs under sim); production current-loop handling is unchanged.
   test_sim_buggify2 now hashes the completion sequence ORDER-sensitively
-  and asserts it replays; the full sim suite (29 tests) replays, incl.
+  and asserts it replays; the full sim suite (30 tests) replays, incl.
   under ASan+UBSan.
 
 - Lock manager + deadlock detector (lock_mgr.c): DONE for the fiber path

@@ -72,6 +72,7 @@
 #include "xtc_io.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "xtc_sim.h"
 #include "xtc_slab.h"
 #include "os_alloc.h"
 #include "os_time.h"
@@ -1112,6 +1113,21 @@ xtc_tnt_shard_main(void *arg)
 			continue;
 		}
 
+		/* Under deterministic simulation the shard has no real wake
+		 * pipe to park on -- the seeded scheduler re-runs every ready
+		 * fiber, and timers post via xtc_proc_sleep on the sim clock.
+		 * Sleep on the sim clock for the poll interval instead of a
+		 * real fd wait: this makes the shard non-runnable (so the run
+		 * can reach quiescence rather than busy-spinning the step
+		 * budget) yet still periodically re-check for ready work,
+		 * cross-shard sends, and the stop flag -- all a pure function
+		 * of the seed.  ADDITIVE: gated on __xtc_sim_active(); the
+		 * production path below is byte-identical. */
+		if (__xtc_sim_active()) {
+			(void)xtc_proc_sleep(1LL * 1000 * 1000);
+			continue;
+		}
+
 		/* Park on the wake pipe (couriers, timers, cross-shard sends,
 		 * and external spawns all write a byte).  Bounded timeout so
 		 * we re-check the stop flag. */
@@ -1359,6 +1375,80 @@ xtc_tnt_start(const xtc_tnt_spec_t *spec)
 
 	/* Run.  Blocks until xtc_tnt_stop / exec stop. */
 	rc = xtc_exec_run(rt->exec);
+
+	(void)xtc_exec_fini(rt->exec);
+	g_rt = NULL;
+	for (i = 0; i < rt->shard_count; i++)
+		shard_destroy(rt->shards[i]);
+	__os_free(rt);
+	return rc;
+}
+
+/*
+ * DST harness entry (internal, test-only).  Bring up exactly the same
+ * shard runtime as xtc_tnt_start, but drive the loops with the seeded
+ * deterministic simulator (xtc_sim_exec_run) instead of the production
+ * xtc_exec_run.  This exercises tnt's deterministic actor core -- spawn
+ * / arena allocation, mailbox delivery (drop-on-full, stale-handle,
+ * pool-exhausted), generational slot reuse, cross-shard send, handler
+ * transitions, budget fairness, timers (via the sim virtual clock) and
+ * crash transitions -- as a pure function of the seed, with replay.
+ *
+ * The socket courier I/O (raw recv/send) is deliberately NOT simulated:
+ * it needs a real kernel and is documented not-coverable-by-design.  A
+ * spec used with this harness must not stage real fd I/O.
+ *
+ * Returns the xtc_sim_exec_run result (XTC_OK on clean quiescence).
+ * out_stop_at, if non-NULL, receives 1 when the run stopped via
+ * xtc_tnt_stop / exec stop rather than natural quiescence.
+ *
+ * PUBLIC-TEST: int __xtc_tnt_run_sim __P((const xtc_tnt_spec_t *, uint64_t, long));
+ */
+int
+__xtc_tnt_run_sim(const xtc_tnt_spec_t *spec, uint64_t seed, long max_steps)
+{
+	xtc_tnt_runtime_t *rt = NULL;
+	int i;
+	int rc;
+
+	if (spec == NULL || spec->n_types <= 0 ||
+	    spec->n_types > XTC_TNT_MAX_TYPES)
+		return XTC_E_INVAL;
+	if (spec->shard_count <= 0 || spec->shard_count > XTC_TNT_MAX_SHARDS)
+		return XTC_E_INVAL;
+
+	if (__os_calloc(1, sizeof(*rt), (void **)&rt) != XTC_OK || rt == NULL)
+		return XTC_E_NOMEM;
+	rt->spec = spec;
+	rt->shard_count = spec->shard_count;
+	atomic_init(&rt->stop, 0);
+
+	if (xtc_exec_init(&rt->exec, spec->shard_count) != XTC_OK) {
+		__os_free(rt);
+		return XTC_E_INTERNAL;
+	}
+	xtc_exec_set_service_mode(rt->exec, 1);
+
+	for (i = 0; i < spec->shard_count; i++) {
+		if (shard_init(rt, (uint8_t)i, &rt->shards[i]) != 0) {
+			(void)xtc_exec_fini(rt->exec);
+			__os_free(rt);
+			return XTC_E_NOMEM;
+		}
+	}
+
+	g_rt = rt;
+
+	for (i = 0; i < spec->shard_count; i++) {
+		xtc_task_t *t = NULL;
+		if (xtc_exec_spawn_on(rt->exec, i, shard_bootstrap,
+		    rt->shards[i], &t) != XTC_OK) {
+			atomic_store(&rt->stop, 1);
+			break;
+		}
+	}
+
+	rc = xtc_sim_exec_run(rt->exec, seed, max_steps);
 
 	(void)xtc_exec_fini(rt->exec);
 	g_rt = NULL;
