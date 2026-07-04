@@ -353,11 +353,32 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	case XTC_AIO_PREAD:
 		n = pread(a->fd, a->buf, a->len, (off_t)a->off);  /* XTC_BLOCKING_OK: sim inline file op */
 		res = n < 0 ? -1 : (int)n;
+		/* Corrupt read: silently bit-flip one returned byte.  The
+		 * bytes on disk are fine; the caller receives one bad byte a
+		 * checksum must catch -- FDB's corrupt-read fault class. */
+		if (res > 0) {
+			int fb = __xtc_sim_io_flip_byte(res);
+			if (fb >= 0)
+				((unsigned char *)a->buf)[fb] ^= 0x40;
+		}
 		break;
-	case XTC_AIO_PWRITE:
-		n = pwrite(a->fd, a->buf, a->len, (off_t)a->off); /* XTC_BLOCKING_OK: sim inline file op */
-		res = n < 0 ? -1 : (int)n;
+	case XTC_AIO_PWRITE: {
+		/* Torn write: persist only a seeded prefix of the buffer but
+		 * still report FULL success -- exactly a torn page.  Untorn
+		 * (the default) writes the whole buffer.  Reporting a->len
+		 * keeps the caller believing the write succeeded, leaving the
+		 * missing tail bytes as whatever was on disk (latent bad data
+		 * a checksum on read-back must catch). */
+		int persist = __xtc_sim_io_torn_prefix((int)a->len);
+		n = pwrite(a->fd, a->buf, (size_t)persist, (off_t)a->off); /* XTC_BLOCKING_OK: sim inline file op */
+		if (n < 0)
+			res = -1;
+		else if (persist < (int)a->len)
+			res = (int)a->len;   /* torn: report full despite short persist */
+		else
+			res = (int)n;
 		break;
+	}
 	case XTC_AIO_FSYNC:
 		res = fsync(a->fd) == 0 ? 0 : -1;
 		break;
@@ -396,8 +417,20 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		struct __xtc_sim_ev *ev, **pp;
 		int64_t now = 0;
 		if (__os_calloc(1, sizeof *ev, (void **)&ev) == XTC_OK) {
+			int64_t extra = 0;
 			(void)__xtc_sim_vclock(&now);
-			ev->due_ns = now + __xtc_sim_io_latency();
+			/* Buggify: under DST, DEFER this AIO completion an
+			 * EXTRA tick beyond its seeded latency.  A later
+			 * completion is always legal (the fiber is parked
+			 * awaiting it and simply wakes later), so this widens
+			 * the completion-order interleaving deterministically
+			 * -- FDB's "slow disk" pessimal path.  Per-call
+			 * BUGGIFY-stream coin, so it never perturbs unrelated
+			 * tests.  A no-op in production. */
+			if (XTC_SIM_BUGGIFY("io.aio.slow_completion") &&
+			    xtc_sim_buggify_fault(250))
+				extra = 5000;   /* +5us */
+			ev->due_ns = now + __xtc_sim_io_latency() + extra;
 			ev->fd = -1;
 			ev->aio = a;
 			ev->aio_res = res;

@@ -257,8 +257,10 @@ xtc_sim_fault_points_seen(void)
  * later hit of that name returns the SAME decision that run.  So a
  * buggified site behaves consistently within a run and the whole run
  * replays from the seed.  Off (returns 0) in production and when
- * buggify is not enabled.  Drawn from the FAULT stream, so enabling
- * buggify does not perturb the scheduling streams.
+ * buggify is not enabled.  Drawn from the dedicated BUGGIFY stream, so
+ * enabling buggify does not perturb the scheduling or FAULT streams
+ * (the critical-section / fault-point tests replay against FAULT
+ * unaffected).
  */
 #define XTC_SIM_BUG_MAX 128
 static _Atomic int      g_bug_on;         /* buggify enabled */
@@ -326,7 +328,7 @@ xtc_sim_buggify(const char *name)
 	else if (g_bug_pct >= 1000)
 		decision = 1;
 	else
-		decision = __xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 1000) <
+		decision = __xtc_sim_rng_range(XTC_SIM_RNG_BUGGIFY, 1000) <
 		    g_bug_pct;
 	(void)strncpy(g_bug_name[n], name, sizeof g_bug_name[0] - 1);
 	g_bug_name[n][sizeof g_bug_name[0] - 1] = '\0';
@@ -351,6 +353,34 @@ xtc_sim_buggify_active_count(void)
 			c++;
 	(void)pthread_mutex_unlock(&g_bug_lock);
 	return c;
+}
+
+/* PUBLIC: int xtc_sim_buggify_fault __P((unsigned)); */
+/*
+ * Per-CALL buggify coin drawn from the dedicated BUGGIFY stream (NOT
+ * the FAULT stream), so a buggify site's per-call "fire this time?"
+ * draw never perturbs the FAULT-stream sequence the critical-section /
+ * fault-point tests replay against.  Returns 1 with probability
+ * pct_per_1000/1000, but ONLY when buggify is enabled and sim is active
+ * -- so a site written as
+ *     if (XTC_SIM_BUGGIFY(name) && xtc_sim_buggify_fault(250)) { ... }
+ * draws from the BUGGIFY stream exclusively when its once-per-run coin
+ * is armed AND landed 1, and draws nothing at all when buggify is off
+ * (the && short-circuits on XTC_SIM_BUGGIFY == 0).  Newer sites use
+ * this in place of xtc_sim_fault so they cannot desync unrelated tests.
+ */
+int
+xtc_sim_buggify_fault(unsigned pct_per_1000)
+{
+	if (!atomic_load_explicit(&g_bug_on, memory_order_acquire))
+		return 0;
+	if (!__xtc_sim_active())
+		return 0;
+	if (pct_per_1000 == 0)
+		return 0;
+	if (pct_per_1000 >= 1000)
+		return 1;
+	return __xtc_sim_rng_range(XTC_SIM_RNG_BUGGIFY, 1000) < pct_per_1000;
 }
 
 /* ---- simulated I/O faults (DST) ----
@@ -426,6 +456,90 @@ __xtc_sim_io_should_fault(void)
 	if (g_io_fault_pct >= 1000)
 		return 1;
 	return __xtc_sim_rng_range(XTC_SIM_RNG_IO, 1000) < g_io_fault_pct;
+}
+
+/* ---- simulated TORN / CORRUPT writes and reads (DST) ----
+ *
+ * The torn-page fault class FoundationDB models, distinct from the
+ * short-transfer / EIO faults above.  A short transfer reports fewer
+ * bytes and moves fewer bytes (the caller re-issues the remainder --
+ * clean).  A TORN WRITE instead PERSISTS only a prefix of the buffer
+ * while REPORTING full success, and a CORRUPT READ flips a byte in the
+ * returned data -- both leave latent bad bytes a checksum must catch.
+ * Off by default; seeded on the IO stream so enabling does not perturb
+ * the schedule.
+ */
+static _Atomic int g_io_corrupt_on;
+static unsigned    g_io_corrupt_pct;    /* per-1000 op corruption probability */
+
+/* PUBLIC: void xtc_sim_io_corrupt_enable __P((unsigned)); */
+void
+xtc_sim_io_corrupt_enable(unsigned corrupt_pct_per_1000)
+{
+	g_io_corrupt_pct = corrupt_pct_per_1000;
+	atomic_store_explicit(&g_io_corrupt_on, 1, memory_order_release);
+}
+
+/* PUBLIC: void xtc_sim_io_corrupt_disable __P((void)); */
+void
+xtc_sim_io_corrupt_disable(void)
+{
+	atomic_store_explicit(&g_io_corrupt_on, 0, memory_order_release);
+}
+
+/* PUBLIC: int __xtc_sim_io_corrupt_active __P((void)); */
+int
+__xtc_sim_io_corrupt_active(void)
+{
+	return atomic_load_explicit(&g_io_corrupt_on, memory_order_acquire);
+}
+
+/* Draw whether this op is corrupted (per-1000, IO stream). */
+static int
+__io_should_corrupt(void)
+{
+	if (!__xtc_sim_io_corrupt_active() || !__xtc_sim_active())
+		return 0;
+	if (g_io_corrupt_pct == 0)
+		return 0;
+	if (g_io_corrupt_pct >= 1000)
+		return 1;
+	return __xtc_sim_rng_range(XTC_SIM_RNG_IO, 1000) < g_io_corrupt_pct;
+}
+
+/* PUBLIC: int __xtc_sim_io_torn_prefix __P((int)); */
+/*
+ * For a write of full_len bytes, return the number of bytes that
+ * actually PERSIST when this write is torn: a seeded value in
+ * [1, full_len-1] (a strict prefix -- a torn write always loses at
+ * least the last byte).  Returns full_len (untorn) when corruption is
+ * off, not selected this op, or full_len < 2 (nothing to tear).  The
+ * caller writes only the returned prefix but still reports full success
+ * -- exactly a torn page.  Seeded on the IO stream.
+ */
+int
+__xtc_sim_io_torn_prefix(int full_len)
+{
+	if (full_len < 2 || !__io_should_corrupt())
+		return full_len;
+	return 1 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_IO,
+	    (uint64_t)(full_len - 1));
+}
+
+/* PUBLIC: int __xtc_sim_io_flip_byte __P((int)); */
+/*
+ * For a read that returned `len` bytes, return the index of a byte to
+ * bit-flip when this read is corrupted, or -1 for no corruption (off,
+ * not selected, or len <= 0).  The caller XORs one bit into that byte
+ * of the returned buffer -- a silent corrupt read a checksum must
+ * detect.  Seeded on the IO stream.
+ */
+int
+__xtc_sim_io_flip_byte(int len)
+{
+	if (len <= 0 || !__io_should_corrupt())
+		return -1;
+	return (int)__xtc_sim_rng_range(XTC_SIM_RNG_IO, (uint64_t)len);
 }
 
 /* ---- simulated network partition + message latency (DST) ----

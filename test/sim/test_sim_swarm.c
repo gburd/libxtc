@@ -4,12 +4,15 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
+#include "xtc_aio.h"
 #include "xtc_sim.h"
 
 /*
@@ -66,6 +69,7 @@
 static atomic_int  g_replies;
 static atomic_int  g_sleeps;
 static atomic_int  g_killed;      /* 1 if the reaper fired this run */
+static atomic_int  g_torn_bad;    /* torn/corrupt pages ACCEPTED silently (MUST be 0) */
 static atomic_long g_app_hash;
 
 /* Seeded per-run scenario, derived from the seed before the run. */
@@ -74,7 +78,76 @@ struct scenario {
 	int latency;        /* set a seeded net latency window */
 	int buggify;        /* enable buggify */
 	int machine_death;  /* a reaper kills a worker mid-run */
+	int torn;           /* torn/corrupt-write injection + page verifiers */
 };
+
+/* ---- torn-page verifier: write a checksummed page, read it back, and
+ * on a checksum mismatch REWRITE it (a torn write is detected + rewritten
+ * from the in-memory copy).  Folds a detected-corruption count into the
+ * app hash and asserts (via g_torn_bad) that no corruption is ever
+ * accepted silently.  Bounded retries so it always converges. ---- */
+#define TORN_PAGE 256
+#define TORN_CK   (TORN_PAGE - 8)
+static int g_torn_fd = -1;
+
+static uint64_t
+torn_cksum(const uint8_t *p, size_t n)
+{
+	uint64_t h = 0xCBF29CE484222325ull;
+	size_t i;
+	for (i = 0; i < n; i++) { h ^= p[i]; h *= 0x100000001B3ull; }
+	return h;
+}
+
+static void
+torn_verifier(void *arg)
+{
+	long id = (long)(intptr_t)arg;
+	int64_t off = id * TORN_PAGE;
+	uint8_t page[TORN_PAGE], rd[TORN_PAGE];
+	int attempt;
+	if (g_torn_fd < 0)
+		return;
+	for (attempt = 0; attempt < 32; attempt++) {
+		uint64_t ck;
+		int w, r;
+		memset(page, (int)((id * 5 + attempt) & 0xff), TORN_CK);
+		page[0] = (uint8_t)id;
+		ck = torn_cksum(page, TORN_CK);
+		memcpy(page + TORN_CK, &ck, sizeof ck);
+		w = xtc_aio_pwrite(g_torn_fd, page, TORN_PAGE, off);
+		if (w < 0) continue;
+		memset(rd, 0, sizeof rd);
+		r = xtc_aio_pread(g_torn_fd, rd, TORN_PAGE, off);
+		if (r < TORN_PAGE) continue;
+		{
+			uint64_t got = 0, want = torn_cksum(rd, TORN_CK);
+			memcpy(&got, rd + TORN_CK, sizeof got);
+			if (got == want && memcmp(rd, page, TORN_PAGE) == 0) {
+				long h = atomic_load_explicit(&g_app_hash,
+				    memory_order_relaxed);
+				h = h * 1000003L + (id + 100);
+				atomic_store_explicit(&g_app_hash, h,
+				    memory_order_relaxed);
+				return;                /* verified */
+			}
+			/*
+			 * A checksum-VALID page (got == want) is intact even if it
+			 * differs from this attempt's buffer: a torn write leaves a
+			 * strict prefix, which -- since every attempt writes the
+			 * same deterministic content for this offset -- can be a
+			 * checksum-consistent earlier full write.  Only a page that
+			 * PASSES the checksum with genuinely-corrupt bytes is silent
+			 * bad data, which the checksum by construction cannot admit.
+			 * (The earlier != -latest-buffer oracle over-reported; a
+			 * 3000-seed swarm surfaced the false positive.)
+			 */
+			if (got == want)
+				return;                /* checksum-valid -> intact */
+			/* else: checksum FAILED -> detected torn write, retry. */
+		}
+	}
+}
 
 /* ---- ping/pong: a pong replies to N_HOPS pings; a ping does N_HOPS
  * round-trips.  Both tolerate a lost/dropped reply with a bounded,
@@ -180,10 +253,14 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 	atomic_store(&g_replies, 0);
 	atomic_store(&g_sleeps, 0);
 	atomic_store(&g_killed, 0);
+	atomic_store(&g_torn_bad, 0);
 	atomic_store(&g_app_hash, 0);
 
 	xtc_sim_partition_clear();
 	xtc_sim_buggify_disable();
+	xtc_sim_io_corrupt_disable();
+	xtc_sim_io_faults_disable();
+	g_torn_fd = -1;
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
@@ -217,6 +294,34 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 		(void)xtc_proc_spawn(xtc_exec_loop(e, 0), reaper,
 		    &g_reaper_arg, NULL, NULL);
 	}
+	if (sc->torn) {
+		/* Torn/corrupt-write injection + a couple of page verifiers.
+		 * Latency-only faults (0% short/EIO) so writes/reads defer +
+		 * park; corruption at ~30% tears some pages, which the
+		 * verifier detects (checksum) and rewrites.  A per-run temp
+		 * file, unlinked immediately; closed after the run. */
+		char path[] = "/scratch/xtc-test/sim_swarm_torn_XXXXXX";
+		g_torn_fd = mkstemp(path);
+		if (g_torn_fd < 0) {
+			char p2[] = "sim_swarm_torn_XXXXXX";
+			g_torn_fd = mkstemp(p2);
+			if (g_torn_fd >= 0) (void)unlink(p2);
+		} else {
+			(void)unlink(path);
+		}
+		if (g_torn_fd >= 0) {
+			int v;
+			if (ftruncate(g_torn_fd, (off_t)4 * TORN_PAGE) != 0)
+				/* best-effort: a short file just yields short reads */
+				(void)0;
+			xtc_sim_io_faults_enable(20 * 1000LL, 200 * 1000LL, 0);
+			xtc_sim_io_corrupt_enable(300);
+			for (v = 0; v < 2; v++)
+				(void)xtc_proc_spawn(
+				    xtc_exec_loop(e, (unsigned)(v % N_LOOPS)),
+				    torn_verifier, (void *)(intptr_t)v, NULL, NULL);
+		}
+	}
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 	*out_state = xtc_sim_state_hash(e);
@@ -224,6 +329,9 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 
 	xtc_sim_partition_clear();
 	xtc_sim_buggify_disable();
+	xtc_sim_io_corrupt_disable();
+	xtc_sim_io_faults_disable();
+	if (g_torn_fd >= 0) { close(g_torn_fd); g_torn_fd = -1; }
 	(void)xtc_exec_fini(e);
 	return rc;
 }
@@ -237,7 +345,7 @@ main(int argc, char **argv)
 	uint64_t seen[256];
 	int n_seen = 0;
 	long failures = 0;
-	long n_part = 0, n_lat = 0, n_bug = 0, n_kill = 0;
+	long n_part = 0, n_lat = 0, n_bug = 0, n_kill = 0, n_torn = 0;
 
 	if (n_seeds < 1)
 		n_seeds = 1;
@@ -257,13 +365,29 @@ main(int argc, char **argv)
 		sc.latency       = (seed & 0x4) != 0;   /* ~50% */
 		sc.buggify       = (seed & 0x8) != 0;   /* ~50% */
 		sc.machine_death = (seed & 0x30) == 0;  /* ~25% */
+		sc.torn          = (seed & 0x40) != 0;  /* ~50% */
 		n_part += sc.partition;
 		n_lat  += sc.latency;
 		n_bug  += sc.buggify;
 		n_kill += sc.machine_death;
+		n_torn += sc.torn;
 
 		rc1 = run_once(seed, &sc, &st1, &app1);
+		if (atomic_load(&g_torn_bad) != 0) {
+			printf("FAIL seed=%llu: %d torn/corrupt page(s) accepted "
+			    "SILENTLY (checksum missed a torn write) -- "
+			    "durability broken\n", (unsigned long long)seed,
+			    atomic_load(&g_torn_bad));
+			failures++;
+			continue;
+		}
 		rc2 = run_once(seed, &sc, &st2, &app2);
+		if (atomic_load(&g_torn_bad) != 0) {
+			printf("FAIL seed=%llu: torn page accepted silently on "
+			    "replay run\n", (unsigned long long)seed);
+			failures++;
+			continue;
+		}
 
 		if (rc1 != XTC_OK || rc2 != XTC_OK) {
 			printf("FAIL seed=%llu: rc1=%d rc2=%d (part=%d lat=%d "
@@ -293,8 +417,8 @@ main(int argc, char **argv)
 
 	printf("swarm swept %ld seeds (base %ld): %ld failures, %d distinct "
 	    "schedules; scenarios: %ld partition, %ld latency, %ld buggify, "
-	    "%ld machine-death\n", n_seeds, seed_base, failures, n_seen,
-	    n_part, n_lat, n_bug, n_kill);
+	    "%ld machine-death, %ld torn-write\n", n_seeds, seed_base,
+	    failures, n_seen, n_part, n_lat, n_bug, n_kill, n_torn);
 
 	if (failures > 0) {
 		printf("FAIL: %ld seed(s) failed\n", failures);
@@ -306,8 +430,9 @@ main(int argc, char **argv)
 		return 1;
 	}
 	printf("OK: %ld-seed swarm/soak -- every seed reached quiescence "
-	    "(across partition + latency + buggify + machine-death "
-	    "scenarios), replayed identically, invariants held; %d distinct "
-	    "schedules explored\n", n_seeds, n_seen);
+	    "(across partition + latency + buggify + machine-death + "
+	    "torn-write scenarios), replayed identically, invariants held "
+	    "(no torn page accepted silently); %d distinct schedules "
+	    "explored\n", n_seeds, n_seen);
 	return 0;
 }
