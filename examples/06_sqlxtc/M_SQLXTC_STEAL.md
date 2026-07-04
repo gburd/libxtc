@@ -627,3 +627,40 @@ against all existing recovery tests (test_recover_undo, test_redo_page,
 test_wal_recover, test_inplace_redo, test_clean_restart, test_wal,
 test_xlog, test_steal all pass), now joined by the per-record checksum as
 the primary torn-record defense.
+
+## Transition status: COMPLETE (2026-07)
+
+The STEAL transition for sqlxtc is DONE.  "Transition to STEAL" meant
+gaining STEAL where it earns its keep and hardening recovery to be
+torn-safe -- NOT making page-level STEAL the live recovery default,
+which this append-only MVCC engine does not benefit from.  Settled
+state:
+
+  - Increment 1 (per-record WAL checksum -> recovery excludes torn tail
+    records before decode): DONE, live, test_steal_torn.
+  - Increment 2 (value-staging STEAL: an oversized transaction's
+    uncommitted payloads reach disk under pool pressure, invisible to
+    readers, undone via CLRs on crash): DONE, live, test_steal /
+    test_steal_page (proven reaching disk, evict_flushes>0).
+  - Increment 3 (physiological per-non-split-leaf XL_PAGE after-image
+    logging so in-place recovery of a torn leaf is exact): mechanism
+    DONE + proven (test_steal_leaf: the 5144-lost-rows torn-leaf repro
+    recovers fully in place).  KEPT READY, NOT the live default.
+  - Increment 4 (fuzzy checkpoint / recLSN-horizon log truncation):
+    DEFERRED -- it depends on trusting an in-place base from the recLSN
+    horizon, i.e. on the live flip, which we deliberately do not do.
+
+The LIVE recovery path stays NO-STEAL-of-versions + NO-FORCE +
+value-staging-STEAL + logical-rebuild-from-clean-frontier recovery.
+This is the CORRECT final design for an append-only MVCC engine (see
+Section 5): full page-level STEAL only helps when a SINGLE transaction's
+dirty set exceeds the buffer pool, which value-staging already handles;
+its cost (per-insert page-image WAL volume + the MVCC visibility of
+uncommitted versions in the tree + a torn-base-trusting live recovery
+default) buys nothing here.  The page-level mechanism is built, tested,
+and kept ready SHOULD a future workload (a non-MVCC / update-in-place
+table type) ever need it -- but enabling it is a deliberate future
+decision, not unfinished transition work.
+
+No further STEAL work is planned for sqlxtc.  This closes the STEAL
+milestone.
