@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 0.9.0"
+#       --define "version 1.0.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        0.9.0
+Version:        1.0.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,11 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Sat Jul 04 2026 Greg Burd <greg@burd.me> - 1.0.0-1
+- First stable release: FDB-class DST (all concurrency primitives under
+  simulation), native preemption, sqlxtc STEAL, and the threaded-PG
+  runtime seam.
+
 * Fri Jul 03 2026 Greg Burd <greg@burd.me> - 0.9.0-1
 - DST toward FDB parity (network partition, lock-mgr under sim, bufmgr
   + WAL crash-recovery capstone); preemption hang fix + aarch64

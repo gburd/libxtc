@@ -1,3 +1,34 @@
+libxtc (1.0.0-1) unstable; urgency=medium
+
+  * First stable release.  The public API surface is stable; semver
+    applies from here (see docs/abi-stability.md).
+  * Deterministic Simulation Testing (DST) at FoundationDB-class depth:
+    ALL concurrency primitives run under a seeded single-thread
+    simulator with bit-identical replay -- scheduler/work-stealing,
+    every lock (amutex, arwlock, lockmgr, lwlock, lrlock), sem/gate/
+    barrier/notify, channels (mpsc/mpmc/watch/broadcast), gen_server,
+    registry, RCU, mctx/slab/stats/pdict -- plus network-partition,
+    machine-death, WAL crash-recovery, torn/corrupt-write injection,
+    11 Buggify sites, per-step invariant checks, and a 100k-seed
+    nightly swarm in CI.  29 replay-verified sim tests; the effort
+    caught ~7 real concurrency bugs.
+  * Native preemption facility: cooperative-assisted (Phase 1,
+    supported) plus true signal-context involuntary preemption on
+    x86-64 and aarch64 (opt-in), with library-wide preemption-safe
+    locks.
+  * sqlxtc STEAL milestone: torn-tail WAL checksum, value-staging STEAL
+    of oversized uncommitted transactions, and physiological
+    per-non-split-leaf page logging for exact in-place torn recovery.
+    NO-STEAL + NO-FORCE remains the correct, settled default.
+  * PostgreSQL adapter (M16): the runtime seam is proven -- threaded
+    PostgreSQL client backends run as xtc_proc fibers on the xtc
+    scheduler (out-of-tree; see docs/M16_PG_ADAPTER.md).
+  * Complete man-page coverage (372 public functions, strict gate).
+  * CI: gcc + clang, ASan, UBSan, musl, coro-fctx, macOS, Windows/MSVC,
+    5 TLS backends, sim-DST, and the nightly DST swarm -- all green.
+
+ -- Greg Burd <greg@burd.me>  Sat, 04 Jul 2026 13:45:58 -0400
+
 libxtc (0.9.0-1) unstable; urgency=medium
 
   * Preemption: fixed a rare hang under pathological all-CPU load (a
