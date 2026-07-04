@@ -33,6 +33,7 @@ enum xtc_sim_stream {
 	XTC_SIM_RNG_IO      = 4,   /* simulated I/O latency / completion order */
 	XTC_SIM_RNG_FAULT   = 5,   /* fault-injection toggles */
 	XTC_SIM_RNG_APP     = 6,   /* application/test draws */
+	XTC_SIM_RNG_BUGGIFY = 7,   /* buggify per-call activation coins */
 	XTC_SIM_RNG_NSTREAMS
 };
 
@@ -120,6 +121,30 @@ int64_t __xtc_sim_io_latency(void);
 int     __xtc_sim_io_should_fault(void);
 
 /*
+ * Simulated TORN / CORRUPT writes and reads (DST) -- the torn-page fault
+ * class FoundationDB models.  Distinct from the short-transfer / EIO
+ * faults above (which report a truncated-but-clean result the caller
+ * re-issues): a torn write actually PERSISTS fewer bytes than requested
+ * while still REPORTING full success, and a corrupt read flips a byte in
+ * the returned buffer.  Both leave latent bad data a checksum must catch
+ * -- a storage engine's real durability hazard.  Off by default; seeded
+ * on the IO stream so enabling does not perturb the schedule.  A write
+ * is torn (its persisted prefix chosen) with probability corrupt_pct;
+ * likewise a read is bit-flipped with the same probability.
+ *
+ * PUBLIC: void xtc_sim_io_corrupt_enable __P((unsigned));
+ * PUBLIC: void xtc_sim_io_corrupt_disable __P((void));
+ * PUBLIC: int  __xtc_sim_io_corrupt_active __P((void));
+ * PUBLIC: int  __xtc_sim_io_torn_prefix __P((int));
+ * PUBLIC: int  __xtc_sim_io_flip_byte __P((int));
+ */
+void xtc_sim_io_corrupt_enable(unsigned corrupt_pct_per_1000);
+void xtc_sim_io_corrupt_disable(void);
+int  __xtc_sim_io_corrupt_active(void);
+int  __xtc_sim_io_torn_prefix(int full_len);
+int  __xtc_sim_io_flip_byte(int len);
+
+/*
  * Simulated network partition + message latency (DST).  A seeded,
  * deterministic model of a partitioned / lossy / delayed network at the
  * cross-LOOP message granularity xtc's sim models: xtc_send between
@@ -174,11 +199,13 @@ int64_t __xtc_sim_net_latency(void);
  * PUBLIC: void xtc_sim_buggify_disable __P((void));
  * PUBLIC: int  xtc_sim_buggify __P((const char *));
  * PUBLIC: int  xtc_sim_buggify_active_count __P((void));
+ * PUBLIC: int  xtc_sim_buggify_fault __P((unsigned));
  */
 void xtc_sim_buggify_enable(unsigned pct_per_1000);
 void xtc_sim_buggify_disable(void);
 int  xtc_sim_buggify(const char *name);
 int  xtc_sim_buggify_active_count(void);
+int  xtc_sim_buggify_fault(unsigned pct_per_1000);
 
 /* Branch on a buggify point in runtime code:
  *     if (XTC_SIM_BUGGIFY("wal.flush.tiny_batch")) { ... pessimal ... }

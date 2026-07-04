@@ -111,6 +111,10 @@ struct xtc_timer {
 	int          heap_idx;      /* current position in heap (-1 if not in) */
 	int          cancelled;
 	int          fired;
+	int          sim_late;      /* DST: 1 once a buggify late-fire bumped
+	                             * this timer's deadline (bump at most
+	                             * once so a late fire cannot spin);
+	                             * always 0 outside sim. */
 	xtc_loop_t  *loop;          /* back-pointer for cancel-by-handle */
 	struct xtc_timer *all_next; /* per-loop linked list for cleanup */
 };

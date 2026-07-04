@@ -75,13 +75,32 @@ __xtc_inbox_push(struct xtc_inbox *ib, enum xtc_inbox_kind k, xtc_task_t *t)
 int
 __xtc_inbox_drain(xtc_loop_t *loop)
 {
-	struct xtc_inbox_msg *list, *m, *n;
+	struct xtc_inbox_msg *list, *m, *n, *defer = NULL;
 	int64_t drained = 0;
 
 	(void)__os_mutex_lock(&loop->inbox.lock);
 	list = loop->inbox.head;
 	loop->inbox.head = loop->inbox.tail = NULL;
 	(void)__os_mutex_unlock(&loop->inbox.lock);
+
+	/* Buggify: under DST, process one FEWER message this turn -- hold
+	 * back the tail message and re-queue it for the next drain.  A WAKE
+	 * / PUBLISH held back simply schedules its task one step later (the
+	 * loop stays runnable because inbox.head != NULL, so the scheduler
+	 * steps it again and drains it): a legal one-turn delay that cannot
+	 * lose a message.  Only when there is more than one message (so the
+	 * loop still makes progress this turn) and never for a WAKE alone,
+	 * and only under the per-call BUGGIFY-stream coin.  A no-op in
+	 * production. */
+	if (list != NULL && list->next != NULL &&
+	    XTC_SIM_BUGGIFY("sched.inbox.drain_one_fewer") &&
+	    xtc_sim_buggify_fault(250)) {
+		struct xtc_inbox_msg *pp = list;
+		while (pp->next->next != NULL)
+			pp = pp->next;
+		defer = pp->next;      /* the last message */
+		pp->next = NULL;       /* detach it from the processed list */
+	}
 
 	for (m = list; m != NULL; m = n) {
 		n = m->next;
@@ -103,6 +122,18 @@ __xtc_inbox_drain(xtc_loop_t *loop)
 			break;
 		}
 		__os_free(m);
+	}
+	/* Re-queue the deferred message at the FRONT of the inbox (its
+	 * relative order with any newly-arrived messages does not matter --
+	 * inbox delivery is unordered across threads).  Preserve replay:
+	 * only the sim thread touches the inbox during a step. */
+	if (defer != NULL) {
+		(void)__os_mutex_lock(&loop->inbox.lock);
+		defer->next = loop->inbox.head;
+		loop->inbox.head = defer;
+		if (loop->inbox.tail == NULL)
+			loop->inbox.tail = defer;
+		(void)__os_mutex_unlock(&loop->inbox.lock);
 	}
 	if (drained > 0 && loop->res != NULL)
 		xtc_res_release(loop->res, XTC_RES_INBOX_MSGS, drained);
@@ -299,6 +330,28 @@ __xtc_loop_step(xtc_loop_t *loop)
 	/* 1. Run queue. */
 	if ((t = __queue_pop(loop)) != NULL) {
 		int verdict;
+		/* Buggify: under DST, DEFER this ready task one extra turn --
+		 * re-enqueue it and run a DIFFERENT ready task instead (the
+		 * local-run-queue twin of sched.steal.skip_near).  A task that
+		 * yields its turn is exactly XTC_TASK_RESCHED, which the loop
+		 * already tolerates, so this is a legal pessimal reordering.
+		 * Bounded against a spin: only when ANOTHER ready task exists
+		 * (so the loop still makes progress this step) and we re-pop a
+		 * DIFFERENT task; if the re-pop returns the same task (it was
+		 * the only one), run it.  Per-call BUGGIFY-stream coin, so it
+		 * never perturbs unrelated tests.  A no-op in production. */
+		if ((loop->q_head != NULL ||
+		     xtc_deque_len(&loop->deque) > 0) &&
+		    XTC_SIM_BUGGIFY("sched.runq.defer_ready") &&
+		    xtc_sim_buggify_fault(250)) {
+			xtc_task_t *other;
+			t->state = XTC_TS_SCHEDULED;
+			(void)__xtc_loop_enqueue(loop, t);
+			other = __queue_pop(loop);
+			t = (other != NULL) ? other : __queue_pop(loop);
+			if (t == NULL)
+				return XTC_OK;   /* nothing ready after all */
+		}
 		atomic_fetch_add_explicit(&loop->n_tasks_run, 1,
 		    memory_order_relaxed);
 		if (loop->yield_budget_ns > 0) {
@@ -384,6 +437,27 @@ __xtc_loop_step(xtc_loop_t *loop)
 		xtc_timer_t *due = __xtc_timer_heap_pop_due(loop, now_ns);
 		if (due == NULL) break;
 		if (!due->cancelled) {
+			/* Buggify: under DST, fire this timer slightly LATE once.
+			 * A timer firing late is always tolerated (deadlines are a
+			 * lower bound, not a promise of exact instant), so instead
+			 * of firing now, re-arm it a bounded step later and let the
+			 * scheduler advance the clock to it -- exercising the
+			 * timeout-races-work interleaving deterministically.  Bumped
+			 * at most ONCE per timer (sim_late guards re-bumping) so a
+			 * late fire can never spin; only when buggify is on and the
+			 * per-call BUGGIFY-stream coin lands (so it never perturbs
+			 * unrelated tests' FAULT/schedule streams).  A no-op in
+			 * production (XTC_SIM_BUGGIFY == 0). */
+			if (!due->sim_late &&
+			    XTC_SIM_BUGGIFY("timer.fire.late") &&
+			    xtc_sim_buggify_fault(250)) {
+				due->sim_late = 1;
+				due->deadline_ns = now_ns + 1000;   /* +1us */
+				due->heap_idx = -1;
+				if (__xtc_timer_heap_push(loop, due) == XTC_OK)
+					continue;
+				/* push failed (OOM): fall through, fire now. */
+			}
 			due->fired = 1;
 			if (due->cb != NULL) due->cb(due->user);
 			if (due->waiter != NULL) {

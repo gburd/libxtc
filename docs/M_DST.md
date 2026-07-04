@@ -100,7 +100,16 @@ mailbox -- is reused unmodified.
   integrity (0 <= bottom-top <= CAP), task-state legality, latch
   invariants (no writer&&readers; no holder underflow), mailbox
   accounting, lost-wakeup detection (quiescent with alive>0 == deadlock).
-  Run under ASan/UBSan so scheduling-boundary UAFs surface.
+  Run under ASan/UBSan so scheduling-boundary UAFs surface.  As of
+  2026-07 the implemented per-step checker (src/evt/exec.c) also asserts:
+  n_timers within [0, cap_timers] (a heap push never overran its backing
+  array), the timer min-heap ROOT invariant (timers[0] <= its two heap
+  children, so the earliest deadline is really at index 0 -- what the
+  scheduler reads to advance the virtual clock), slow-path FIFO
+  run-queue coherence (q_head NULL iff q_tail NULL -- a half-cleared
+  queue drops or duplicates a ready task), and a non-negative recycled-
+  task free-list count.  All cheap (a handful of loads per loop) so they
+  run every step.
 - Fault injection: reuse inject.c with a seeded "fault" PRNG stream;
   add io.sim.* points and a deque-CAS-window interposition point to
   exercise branches single-threaded execution never hits by chance.
@@ -218,9 +227,16 @@ between procs -- a get resolves only to the calling proc's own value
 per-CPU-sharded counters/gauges/histograms stats.c: a shared counter
 read == the exact sum of all fibers' increments, gauge net exact, hist
 count exact + quantile in range, replayed; totals schedule-independent
--- NON-blocking, no shim), test_sim_buggify3 (the two newest Buggify
+-- NON-blocking, no shim), test_sim_buggify3 (two Buggify
 sites -- chan.mpmc.spurious_full + svr.recv.delay_dispatch -- progress +
-activation + replay + disabled=>zero), test_sim_crash_recover (the WAL
+activation + replay + disabled=>zero), test_sim_buggify4 (the four newest
+scheduler/AIO-path Buggify sites -- timer.fire.late,
+sched.inbox.drain_one_fewer, sched.runq.defer_ready, io.aio.slow_completion
+-- progress + activation + replay + disabled=>zero over a ping/pong +
+timer-sleeper and a file-AIO workload), test_sim_torn (the TORN/CORRUPT-
+write fault class -- checksummed pages under torn-write + corrupt-read
+injection: every corruption caught by the checksum with zero silent bad
+data, every page recovered by rewrite, replayed), test_sim_crash_recover (the WAL
 crash-recovery capstone, see below), and test_sim_swarm (a shardable
 seed sweep combining partition + latency + buggify + machine-death,
 bounded 300-seed default and a manual 100k+ sweep).
@@ -319,7 +335,10 @@ Toward FDB-class DST, in addition to the seeded scheduler / virtual
 clock / replay / invariant checks already in place:
 
 - Simulated I/O fault injection (DONE, test_sim_iofault): deferred
-  seeded AIO completion ordering + short-transfer / EIO faults.
+  seeded AIO completion ordering + short-transfer / EIO faults.  The
+  TORN/CORRUPT-write fault class (torn write persists a prefix but
+  reports full success; corrupt read bit-flips a byte) is also modelled
+  now -- see the torn-write entry below (test_sim_torn).
 - Simulated network partition + message latency (DONE,
   test_sim_partition): a seeded, deterministic model of a partitioned /
   lossy / delayed network at the cross-LOOP message granularity the sim
@@ -367,8 +386,9 @@ clock / replay / invariant checks already in place:
 - Buggify (DONE, test_sim_buggify): xtc_sim_buggify(name) is a named
   point in REAL runtime code that, once-per-run-per-site (a seeded coin
   cached on first reach), lets the code take a legal-but-pessimal path;
-  combined with a per-call xtc_sim_fault coin it fires on a fraction of
-  occurrences.  Now planted at SEVEN sites: proc.mbox.spurious_full
+  combined with a per-call fault coin it fires on a fraction of
+  occurrences.  Now planted at ELEVEN sites.  The FOUR ORIGINAL
+  primitive-level sites: proc.mbox.spurious_full
   (xtc_send reports a soft-cap full early), chan.mpsc.spurious_full
   (xtc_chan_mpsc_try_send reports full with room to spare),
   sched.steal.skip_near (the work-stealing scheduler skips a NUMA-near
@@ -386,22 +406,107 @@ clock / replay / invariant checks already in place:
   a retrying caller succeeds), and reg.whereis.transient_miss
   (xtc_reg_whereis reports a registered name as transiently NOT FOUND --
   a lookup is a hint that may race a concurrent unregister, so callers
-  already retry).  test_sim_buggify covers the mailbox site;
+  already retry).
+
+  The FOUR NEW SCHEDULER/AIO-PATH sites (planted 2026-07 to match FDB
+  DENSITY -- pessimal paths in the REAL runtime the code already
+  tolerates, each exercised for progress + activation + replay +
+  disabled=>zero, and each VERIFIED not to perturb any other test's
+  replay):
+    * timer.fire.late (src/evt/loop.c, the due-timer drain) -- a due
+      timer is fired one scheduler turn LATE (re-armed a bounded +1us
+      later, at most ONCE per timer via a zero-initialised sim_late
+      guard on struct xtc_timer, so a late fire cannot spin).  A timer
+      firing late is always tolerated; the scheduler advances the
+      virtual clock to the re-armed deadline and fires it then.
+    * sched.inbox.drain_one_fewer (src/evt/loop.c, __xtc_inbox_drain) --
+      the cross-loop inbox drain processes one FEWER message this turn,
+      holding the tail message back (re-queued at the inbox front) for
+      the next drain.  A held WAKE/PUBLISH is NOT lost (the loop stays
+      runnable because inbox.head != NULL, so the scheduler steps it
+      again and drains it): a legal one-turn delay.  Only fires when
+      there is more than one message (so the loop still makes progress
+      this turn).
+    * sched.runq.defer_ready (src/evt/loop.c, step-1 run-queue) -- a
+      popped ready task is DEFERRED one turn (re-enqueued; a DIFFERENT
+      ready task runs instead) -- the local-run-queue twin of
+      sched.steal.skip_near.  Exactly XTC_TASK_RESCHED, which the loop
+      already tolerates.  Only fires when another ready task exists (so
+      the loop still makes progress); if the re-pop returns the same
+      task (it was the only one) it runs it -- cannot spin.
+    * io.aio.slow_completion (src/io/io_sim.c, xtc_io_aio_submit) -- a
+      deferred file-AIO completion is pushed an EXTRA +5us later.  The
+      fiber is parked awaiting it and simply wakes later: a legal
+      slow-disk delay.
+
+  ISOLATION DISCIPLINE (why the four new sites do not desync any other
+  test's replay -- the hazard that got a prototype slab.alloc site
+  DROPPED): the buggify once-per-run coin AND each new site's per-call
+  coin (xtc_sim_buggify_fault) now draw from a DEDICATED PRNG stream
+  (XTC_SIM_RNG_BUGGIFY), NOT the FAULT stream the critical-section /
+  fault-point tests replay against; and each per-call coin is reached
+  ONLY behind XTC_SIM_BUGGIFY(name) && ... so it draws NOTHING when
+  buggify is disabled (the && short-circuits).  A site on a hot shared
+  path therefore adds draws only inside tests that ENABLE buggify, and
+  those tests compare run-to-run (self-consistent replay), so replay is
+  preserved by construction.  Confirmed empirically: the full sim suite
+  (incl. test_sim_buggify / buggify2 / buggify3 / swarm, which enable
+  buggify) replays byte-identically with the four new sites present.
+
+  test_sim_buggify covers the mailbox site;
   test_sim_buggify2 covers the channel(mpsc) + steal sites over a
   work-stealing task workload; test_sim_buggify3 covers the
   chan.mpmc + svr.recv sites (chan.mpmc.spurious_full over an mpmc
   producer/consumer workload asserting every item is still delivered
   exactly once, and svr.recv.delay_dispatch over a gen_server call
   workload asserting
-  replies+timeouts == total with no lost/duplicated reply).  The
+  replies+timeouts == total with no lost/duplicated reply);
+  test_sim_buggify4 covers the FOUR new sites -- PART A drives a
+  cross-loop ping/pong + timer-sleeper workload (reaching timer.fire.late
+  / sched.inbox.drain_one_fewer / sched.runq.defer_ready) asserting every
+  ping replies and every sleeper wakes despite the pessimal delays, and
+  PART B drives a file-AIO write/read workload under seeded latency
+  (reaching io.aio.slow_completion) asserting every op completes; both
+  parts assert activation + byte-identical replay + disabled=>zero.  The
   sync.sem.spurious_timeout site is exercised by test_sim_sync (a
   semaphore-contention workload asserting no over-admission past the
   count despite the spurious timeouts, retried to completion), and
   reg.whereis.transient_miss by test_sim_reg (a register/whereis/
   unregister churn asserting every lookup eventually resolves to its
   own registration).  Deterministic + replayable; off in production and
-  when disabled.  Expand by planting more sites in the WAL / buffer-pool
-  / recovery paths.
+  when disabled.
+
+- TORN / CORRUPT-write fault class (DONE, test_sim_torn): the torn-page
+  hazard FoundationDB models, added to the sim I/O backend alongside the
+  short-transfer / EIO faults.  A short transfer reports AND moves fewer
+  bytes (clean; the caller re-issues the remainder).  A TORN WRITE
+  instead PERSISTS only a seeded PREFIX of the buffer (a strict prefix,
+  at least the last byte lost) while REPORTING full success, and a
+  CORRUPT READ bit-flips one byte in the returned buffer -- both leave
+  latent bad bytes that only a CHECKSUM can catch.  Enabled with
+  xtc_sim_io_corrupt_enable(pct); off by default; seeded on the IO
+  stream so enabling does not perturb the schedule.  The submit path
+  (io_sim.c) draws __xtc_sim_io_torn_prefix (how many bytes a torn write
+  persists) and __xtc_sim_io_flip_byte (which byte a corrupt read
+  flips).  test_sim_torn drives N fibers across loops, each owning a
+  private page whose last 8 bytes hold an FNV-1a checksum of the rest:
+  each fiber writes + fsyncs + reads-back + verifies, and on a checksum
+  mismatch (a detected torn/corrupt page) REWRITES from the in-memory
+  copy (the storage-engine recovery discipline).  It asserts (a) THE
+  DURABILITY INVARIANT -- no corruption is EVER accepted silently (a
+  page that passes the checksum but differs from what was written is
+  counted as silent bad data and MUST stay 0), (b) PROGRESS -- every
+  page eventually verifies (a rewrite recovers a torn page; the run
+  quiesces), (c) LIVE INJECTION -- at least one torn/corrupt event is
+  detected, (d) REPLAY -- the same seed corrupts the identical set of
+  pages (byte-identical detected count + order-hash + sim state hash),
+  and (e) a DIFFERENT seed corrupts a different set (a different state
+  hash) while still never accepting silent bad data.  Exercised at the
+  io_sim / self-contained-consumer level, NOT by editing
+  examples/06_sqlxtc (a parallel agent owns that).  No bug found -- the
+  checksum catches every torn write, and the rewrite recovers it.
+  Expand by planting more sites in the WAL / buffer-pool / recovery
+  paths.
 
 - gen_server under DST (DONE, test_sim_svr): the L4 gen_server (svr.c)
   is an xtc_proc that dispatches each envelope to handle_call /
@@ -605,7 +710,11 @@ no shim.
   the sim now models, extending test_sim_soak.  Each seed runs a mixed
   workload (cross-loop ping/pong + timer sleepers) under a SEEDED
   combination of the scenarios -- network partition, seeded delivery
-  latency, Buggify, and a machine-death kill -- chosen from the seed
+  latency, Buggify (which now activates the four new scheduler/AIO-path
+  sites too), a machine-death kill, and TORN/CORRUPT-write injection
+  (some seeds run a couple of extra AIO page verifiers under
+  xtc_sim_io_corrupt_enable, asserting no torn page is ever accepted
+  silently) -- chosen from the seed
   itself, so the seed fully determines both scenario and schedule.  Per
   seed it asserts QUIESCENCE (rc == XTC_OK -- no hang / livelock /
   deadlock), the per-step structural invariants (xtc_sim_exec_run
@@ -692,7 +801,7 @@ Known gaps and why:
   each run starts from the identical binding.  Sim-only (the function
   only runs under sim); production current-loop handling is unchanged.
   test_sim_buggify2 now hashes the completion sequence ORDER-sensitively
-  and asserts it replays; the full sim suite (26 tests) replays, incl.
+  and asserts it replays; the full sim suite (29 tests) replays, incl.
   under ASan+UBSan.
 
 - Lock manager + deadlock detector (lock_mgr.c): DONE for the fiber path

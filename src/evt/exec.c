@@ -502,8 +502,30 @@ xtc_sim_check(xtc_exec_t *e)
 		/* Alive count is never negative (underflow on a double-reap). */
 		if (nalive < 0)
 			return XTC_E_INTERNAL;
-		/* Timer count is never negative. */
-		if (l->n_timers < 0)
+		/* Timer count is never negative, and never exceeds capacity
+		 * (an oversized n_timers means a heap push overran its
+		 * backing array). */
+		if (l->n_timers < 0 || l->n_timers > l->cap_timers)
+			return XTC_E_INTERNAL;
+		/* The min-heap invariant at the root: the top timer's deadline
+		 * is <= its children's, so the earliest deadline sits at index
+		 * 0 (what the scheduler reads to advance the virtual clock).  A
+		 * violated root means a broken sift, which would make the
+		 * scheduler advance the clock to the wrong time. */
+		if (l->n_timers >= 2 && l->timers != NULL) {
+			int64_t top = l->timers[0]->deadline_ns;
+			if (l->timers[1]->deadline_ns < top)
+				return XTC_E_INTERNAL;
+			if (l->n_timers >= 3 &&
+			    l->timers[2]->deadline_ns < top)
+				return XTC_E_INTERNAL;
+		}
+		/* Slow-path FIFO run-queue coherence: head NULL iff tail NULL
+		 * (a half-cleared queue drops or duplicates a ready task). */
+		if ((l->q_head == NULL) != (l->q_tail == NULL))
+			return XTC_E_INTERNAL;
+		/* Recycled-task free-list count is never negative. */
+		if (l->task_free_n < 0)
 			return XTC_E_INTERNAL;
 	}
 	return XTC_OK;
