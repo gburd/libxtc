@@ -2116,7 +2116,7 @@ xs_smo_begin(void *user)
 	return wal_durable_lsn(g_xwal);
 }
 
-static void
+static uint64_t
 xs_smo_page(void *user, bm_pid_t pid, const void *image,
     uint32_t page_size, uint64_t lsn)
 {
@@ -2124,20 +2124,40 @@ xs_smo_page(void *user, bm_pid_t pid, const void *image,
 	xl_hdr_t h;
 	int n;
 	size_t cap;
+	uint64_t rlsn = 0;
 
 	(void)user;
 	if (g_xwal == NULL || image == NULL || page_size == 0 ||
 	    page_size > 0xFFFFu)
-		return;
+		return 0;
 	cap = (size_t)XL_HDR_LEN + xl_page_size((uint16_t)page_size);
 	if ((rec = malloc(cap)) == NULL)
-		return;                 /* best-effort: a missed image means the
+		return 0;               /* best-effort: a missed image means the
 		                         * torn page is repaired by rebuild instead */
 	h.type = XL_PAGE; h.txn_id = 0; h.prev_lsn = lsn;
 	if ((n = xl_enc_page(rec, cap, &h, (uint32_t)pid, image,
 	    (uint16_t)page_size)) > 0)
-		(void)xs_wal_emit(rec, (size_t)n);
+		rlsn = xs_wal_emit(rec, (size_t)n);
 	free(rec);
+	return rlsn;
+}
+
+/*
+ * Physiological after-image of a PLAIN (non-split) leaf.  Identical
+ * wire form to xs_smo_page (an XL_PAGE, gated on apply by the image
+ * record's own WAL LSN), but logged for an in-leaf insert that did NOT
+ * split -- so in-place recovery can repair a torn NON-split leaf from
+ * its image instead of a logical redo mis-descending the torn page and
+ * losing its whole key range (the docs/M_SQLXTC_BDB.md S3 trap).  No
+ * nested-top-action bracket: a single-leaf change is atomic under the
+ * double-write buffer.  txn_id 0 (the image belongs to no one txn).
+ * Returns the image record's WAL LSN so btree.c can stamp the live page.
+ */
+static uint64_t
+xs_leaf_page(void *user, bm_pid_t pid, const void *image,
+    uint32_t page_size, uint64_t lsn)
+{
+	return xs_smo_page(user, pid, image, page_size, lsn);
 }
 
 static void
@@ -2175,6 +2195,7 @@ xstore_register_smo(int enable)
 		h.begin = xs_smo_begin;
 		h.page = xs_smo_page;
 		h.end = xs_smo_end;
+		h.leaf = xs_leaf_page;   /* physiological non-split-leaf images */
 		bt_set_smo_hook(&h);
 	} else {
 		bt_set_smo_hook(NULL);
@@ -2674,9 +2695,9 @@ xs_sync(xsql_vtab *pv)
  * Logging before applying is what lets recovery redo the commit from the
  * log (idempotent -- version keys (rowid, ~commit_ts) are immutable).
  * On a loop the commit joins the group-commit batch; off a loop it
- * appends synchronously.
+ * appends synchronously.  Returns the assigned commit LSN (0 on OOM).
  */
-static void
+static uint64_t
 xs_wal_log(xstore_ctx_t *cx, uint64_t ts)
 {
 	size_t sz = XL_HDR_LEN;           /* trailing XL_COMMIT */
@@ -2684,6 +2705,7 @@ xs_wal_log(xstore_ctx_t *cx, uint64_t ts)
 	xl_hdr_t h;
 	xl_body_t b;
 	int i, n;
+	uint64_t lsn;
 
 	for (i = 0; i < cx->wn; i++) {
 		uint16_t vl = cx->wbuf[i].deleted ? 0 : (uint16_t)cx->wbuf[i].len;
@@ -2691,7 +2713,7 @@ xs_wal_log(xstore_ctx_t *cx, uint64_t ts)
 	}
 	rec = malloc(sz);
 	if (rec == NULL)
-		return;                       /* best-effort; durability lost on OOM */
+		return 0;                     /* best-effort; durability lost on OOM */
 	p = rec;
 	for (i = 0; i < cx->wn; i++) {
 		xs_wrec_t *w = &cx->wbuf[i];
@@ -2702,17 +2724,18 @@ xs_wal_log(xstore_ctx_t *cx, uint64_t ts)
 		b.flags = w->deleted ? XS_F_DELETED : 0;
 		b.redo = vl ? w->data : NULL; b.redo_len = vl;
 		if ((n = xl_enc_update(p, sz - (size_t)(p - rec), &h, &b)) < 0) {
-			free(rec); return;
+			free(rec); return 0;
 		}
 		p += n;
 	}
 	h.type = XL_COMMIT; h.txn_id = ts; h.prev_lsn = 0;
 	if ((n = xl_enc_simple(p, sz - (size_t)(p - rec), &h)) < 0) {
-		free(rec); return;
+		free(rec); return 0;
 	}
 	p += n;
-	xs_wal_emit(rec, (size_t)(p - rec));
+	lsn = xs_wal_emit(rec, (size_t)(p - rec));
 	free(rec);
+	return lsn;
 }
 
 static int
@@ -2736,8 +2759,17 @@ xs_commit_ctx(xstore_ctx_t *cx)
 			for (i = 0; i < cx->wn; i++)
 				(void)xs_wrec_ensure(cx, &cx->wbuf[i]);
 		ts = hlc_tick();     /* one timestamp for the txn */
-		if (g_xwal != NULL)
-			xs_wal_log(cx, ts);            /* durable BEFORE apply */
+		if (g_xwal != NULL) {
+			uint64_t clsn = xs_wal_log(cx, ts);   /* durable BEFORE apply */
+			/* Stamp the commit LSN onto every leaf these inserts dirty,
+			 * so a physiological leaf after-image (xs_leaf_page) carries a
+			 * monotonic page LSN recovery can gate the apply by.  Without
+			 * this the leaf image would inherit a stale cur_lsn from the
+			 * last autocommit and the page-LSN gate could refuse a newer
+			 * image or accept a stale one. */
+			if (clsn != 0)
+				bt_set_lsn(cx->bt, clsn);
+		}
 		for (i = 0; i < cx->wn; i++) {
 			uint8_t key[XS_VKLEN];
 			uint8_t buf[1 + XS_VMAX];
@@ -3725,6 +3757,8 @@ struct rec_txn {
 struct xs_recover {
 	bt_t    *bt;
 	bm_t    *bm;             /* non-NULL for in-place mode: apply XL_PAGE */
+	int      page_pass;      /* in-place pass 1: apply ONLY XL_PAGE images,
+	                          * skip logical redo (see xstore_recover_inplace) */
 	uint64_t max_ts;
 	uint64_t records;
 	uint64_t pages_redone;   /* XL_PAGE images applied (in-place mode) */
@@ -3831,6 +3865,15 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 	 * A WAL frame carries one transaction: a run of XL_UPDATE records
 	 * then XL_COMMIT, a lone XL_CHECKPOINT, or (under STEAL) part of an
 	 * in-flight transaction.  Walk its records.
+	 *
+	 * In-place recovery runs this in TWO passes (page_pass): pass 1
+	 * (page_pass == 1) applies ONLY the XL_PAGE after-images -- so every
+	 * torn NON-split leaf is repaired from its image BEFORE pass 2's
+	 * logical redo descends it -- and skips the logical work; pass 2
+	 * (page_pass == 0) does the logical XL_UPDATE redo / winner retire
+	 * over the now-repaired base and skips XL_PAGE (already applied).
+	 * Logical rebuild mode (r->bm == NULL) is single-pass with
+	 * page_pass == 0 and no XL_PAGE apply.
 	 */
 	while (off < len) {
 		xl_hdr_t h;
@@ -3840,6 +3883,34 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 			break;                    /* malformed: stop on this frame */
 		if (xl_parse_hdr(base + off, (uint32_t)rl, &h) != XTC_OK)
 			break;
+		if (r->page_pass) {
+			/*
+			 * Pass 1 (in-place only): physiological redo.  Write each
+			 * full-page after-image onto its page ONLY if the on-disk
+			 * page LSN is older (bm_apply_page_image is page-LSN gated,
+			 * hence idempotent), repairing a torn structure or a torn
+			 * NON-split leaf on the trusted base in place BEFORE any
+			 * logical redo descends it.
+			 */
+			if (h.type == XL_PAGE && r->bm != NULL) {
+				xl_hdr_t ph;
+				uint32_t pid = 0;
+				const void *image = NULL;
+				uint16_t image_len = 0;
+				/* Gate on the FRAME's LSN, not the LSN embedded in the
+				 * image bytes: each image is its own monotonically-
+				 * numbered WAL frame, so gating on the frame LSN makes
+				 * the LAST image of a page win even when several images
+				 * of one page share an embedded (commit) LSN. */
+				if (xl_parse_page(base + off, (uint32_t)rl, &ph, &pid,
+				    &image, &image_len) == XTC_OK &&
+				    bm_apply_page_image_at(r->bm, pid, image, image_len,
+				    lsn) == 1)
+					r->pages_redone++;
+			}
+			off += (uint32_t)rl;
+			continue;
+		}
 		if (h.type == XL_CHECKPOINT) {
 			uint64_t clk;
 			if (xl_parse_checkpoint(base + off, (uint32_t)rl, &clk) == XTC_OK
@@ -3868,27 +3939,10 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 					rec_txn_retire(r, &r->txn[i]);  /* winner: redo stays */
 					break;
 				}
-		} else if (h.type == XL_PAGE && r->bm != NULL) {
-			/*
-			 * Physiological redo (in-place mode only).  Write the
-			 * full-page after-image onto its page ONLY if the on-disk
-			 * page LSN is older (bm_apply_page_image is page-LSN gated,
-			 * hence idempotent).  This repairs a torn structure
-			 * modification on the trusted base in place.  In rebuild
-			 * mode (r->bm == NULL) XL_PAGE is skipped: its page ids
-			 * mean nothing on a freshly truncated page file.
-			 */
-			xl_hdr_t ph;
-			uint32_t pid = 0;
-			const void *image = NULL;
-			uint16_t image_len = 0;
-			if (xl_parse_page(base + off, (uint32_t)rl, &ph, &pid,
-			    &image, &image_len) == XTC_OK &&
-			    bm_apply_page_image(r->bm, pid, image, image_len) == 1)
-				r->pages_redone++;
 		}
-		/* XL_BEGIN / XL_ABORT / XL_CLR / XL_END: no redo action here.
-		 * XL_PAGE in rebuild mode is also a no-op (skipped above). */
+		/* XL_BEGIN / XL_ABORT / XL_CLR / XL_END: no redo action.
+		 * XL_PAGE was applied in pass 1 (in-place) or is a no-op
+		 * (rebuild mode, r->bm == NULL). */
 		off += (uint32_t)rl;
 	}
 	r->records++;
@@ -3932,27 +3986,30 @@ xstore_recover(bt_t *bt, const char *wal_path)
  * In-place crash recovery (ARIES physiological redo).  Unlike
  * xstore_recover -- which rebuilds the whole tree by replaying the
  * LOGICAL update log onto a FRESH (truncated) page file -- this trusts
- * a possibly-torn base in place: it applies every XL_PAGE full-page
- * after-image the SMO path logged, page-LSN gated (bm_apply_page_image),
- * so a structure modification that was only partly flushed before the
- * crash is repaired by its images rather than discarded.  Ordinary row
- * writes still redo logically (idempotent: version keys are immutable),
- * and losers are undone exactly as in xstore_recover.
+ * a possibly-torn base in place.  It runs in two forward passes over the
+ * (checksum-verified) log:
+ *
+ *   Pass 1 (redo images): apply every XL_PAGE full-page after-image the
+ *   engine logged -- split/merge pages (SMO) AND plain non-split leaves
+ *   (xs_leaf_page) -- page-LSN gated (bm_apply_page_image), so every
+ *   torn page (a partly-flushed SMO, or a torn NON-split leaf) is
+ *   repaired from its newest image BEFORE any logical redo descends it.
+ *   Applying images in LSN order converges to each page's final bytes.
+ *
+ *   Pass 2 (logical redo + undo): replay the logical XL_UPDATE upserts
+ *   over the now-repaired base (idempotent: version keys are immutable),
+ *   retiring committed winners, then undo the losers exactly as in
+ *   xstore_recover.  Because pass 1 already restored every torn leaf,
+ *   the logical redo never has to navigate torn structure -- which is
+ *   what made the earlier single-pass logical redo lose a torn
+ *   non-split leaf's whole key range (docs/M_SQLXTC_BDB.md S3).
  *
  * Requires `bm` to be the same buffer manager `bt` runs on, opened
- * reopen=1 (not truncated) with lsn_off >= 0.  `out_pages` (optional)
- * receives the count of page images actually applied -- nonzero proves
+ * reopen=1 (not truncated) with lsn_off >= 0, AND the engine's
+ * physiological logging installed for the build (xstore_register_smo(1),
+ * which now also logs non-split leaf images).  `out_pages` (optional)
+ * receives the count of page images applied in pass 1 -- nonzero proves
  * the physiological path repaired something rather than rebuilding.
- *
- * STATUS / SCOPE: this is the physiological-redo mechanism wired end to
- * end (emit on the SMO path -> XL_PAGE -> gated apply here); it is
- * exercised by test_inplace_redo.  It is NOT the live sx_storage_open
- * crash default, which keeps the proven logical rebuild: a fully
- * trusted in-place restart additionally needs physiological logging of
- * NON-split row writes (so logical XL_UPDATE redo never re-splits the
- * repaired base and diverges its page ids) -- the S5 coupling
- * docs/M_SQLXTC_BDB.md names.  See that doc for what is wired vs.
- * deferred.
  */
 int
 xstore_recover_inplace(bt_t *bt, bm_t *bm, const char *wal_path,
@@ -3964,6 +4021,18 @@ xstore_recover_inplace(bt_t *bt, bm_t *bm, const char *wal_path,
 	memset(&r, 0, sizeof r);
 	r.bt = bt;
 	r.bm = bm;               /* in-place mode: apply XL_PAGE images */
+
+	/* Pass 1: apply physiological page images (page-LSN gated) so torn
+	 * pages are repaired before pass 2's logical redo descends them. */
+	r.page_pass = 1;
+	rc = wal_scan(wal_path, xs_recover_cb, &r);
+	if (out_pages != NULL)
+		*out_pages = r.pages_redone;
+	if (rc != XTC_OK)
+		return rc;
+
+	/* Pass 2: logical redo + winner retire over the repaired base. */
+	r.page_pass = 0;
 	rc = wal_scan(wal_path, xs_recover_cb, &r);
 
 	if (r.n_txn > 0) {
@@ -3981,8 +4050,6 @@ xstore_recover_inplace(bt_t *bt, bm_t *bm, const char *wal_path,
 		free(r.txn[i].upd);
 	free(r.txn);
 
-	if (out_pages != NULL)
-		*out_pages = r.pages_redone;
 	if (r.max_ts >= atomic_load_explicit(&g_xclock, memory_order_relaxed))
 		atomic_store_explicit(&g_xclock, r.max_ts + 1, memory_order_relaxed);
 	return rc;

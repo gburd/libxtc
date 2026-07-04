@@ -141,6 +141,7 @@ clean:
 	rm -f test_clean_restart
 	rm -f test_steal
 	rm -f test_steal_page
+	rm -f test_steal_leaf
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
 	rm -f test_scan_resist
@@ -162,7 +163,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -453,6 +454,14 @@ test_steal_page: test_steal_page.c engine.o db.o quack.o metrics.o xstore.o xlog
 
 test-steal-page: test_steal_page
 	./test_steal_page
+
+# ---- Increment 3: physiological non-split-leaf logging -> torn-leaf
+# in-place recovery is durable + atomic ----
+test_steal_leaf: test_steal_leaf.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_steal_leaf.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-steal-leaf: test_steal_leaf
+	./test_steal_leaf
 
 # ---- B-tree node (prefix compression) unit test (standalone) ----
 test_btnode: test_btnode.c btnode.c btnode.h
