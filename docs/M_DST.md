@@ -307,9 +307,12 @@ in one turn drops exactly N-C, nothing silently lost), generational
 stale-handle rejection (a send to a torn-down slot's OLD handle returns
 STALE_HANDLE, never mis-delivers to a reused slot), and same-shard
 cross-type delivery -- across a seed sweep with a bit-identical result
-fingerprint on replay.  Two tnt paths are deliberately NOT in this sim
-test (see the by-design section): wall-clock TIMERS driving a poll loop,
-and CROSS-SHARD messaging.
+fingerprint on replay.  A sim-visible shard-wake seam (the shard parks
+on its own proc mailbox; shard_wake wakes it via xtc_send) brings
+cross-SHARD messaging and wall-clock TIMERS under sim too, so the
+test drives two shards with a cross-shard send and a timer redelivered
+around it.  Only the socket courier I/O (raw recv/send) stays outside
+sim by design (needs a real kernel).
 
 Still OUTSIDE sim's reach BY DESIGN (not a coverage gap to close):
 
@@ -349,36 +352,42 @@ Still OUTSIDE sim's reach BY DESIGN (not a coverage gap to close):
   concurrency primitive in the tree is now under DST.
 
 - tnt (Tina) Isolate layer -- deterministic actor core DONE
-  (test_sim_tnt); two tnt paths remain OUTSIDE sim by the same wake-seam
-  reason as the cross-machine transport above:
+  (test_sim_tnt), and the two paths that used to sit OUTSIDE sim here
+  are now CLOSED by a sim-visible shard-wake seam.  Under sim a shard
+  parks on its own proc mailbox and shard_wake wakes it via xtc_send
+  (the fully-modeled cross-loop park/wake path -- test_sim_pingpong),
+  so a cross-shard deliver or a timer/courier completion makes the
+  target shard runnable deterministically on the very next step rather
+  than poking a self-pipe the sim cannot observe.  ADDITIVE, gated on
+  __xtc_sim_active(); the production shard loop uses the pipe and is
+  byte-identical (test/tnt/test_tnt passes unchanged, ASan-clean).
 
-  1. Wall-clock TIMERS driving a poll loop.  A single-shot timer fires
-     fine under sim (via xtc_proc_sleep on the virtual clock).  But a
-     timer armed INSIDE a message handler that then re-parks
-     WAIT_MESSAGE -- the idiom for "wake me later to re-check a
-     condition" -- does not reliably redeliver under the sim shard
-     poll: the shard's wake is a real self-pipe write the sim does not
-     observe, so the shard only re-ticks on its next sim-clock poll and
-     the timer-completion / poll cadence can wedge on some
-     interleavings.  test_sim_tnt therefore sequences its scenario with
-     self-KICK MESSAGES (which the seeded scheduler drives
-     deterministically), not timers; the real-scheduler test
-     (test/tnt/test_tnt) covers the timer-poll idiom.
-  2. CROSS-SHARD messaging.  A cross-shard xtc_tnt_send makes the
-     target slot READY on a peer shard, but wakes that shard only via
-     the same real self-pipe.  test_sim_tnt stays single-shard (the
-     whole actor model minus the cross-core hop); the production
-     in-process test covers cross-shard delivery.
+  Closing the seam surfaced a real latent bug, fixed in the same change:
+  the ambient tnt API (xtc_tnt_send / xtc_tnt_spawn /
+  xtc_tnt_register_timer / xtc_tnt_scratch_arena) read the current
+  shard from a thread-local (tl_shard).  Under the single-thread sim all
+  shard fibers share one OS thread, and tl_shard -- set once per shard
+  at shard_main entry, not restored on yield -- can read STALE (a peer
+  shard that ran and yielded left it pointing at itself).  So a
+  cross-shard xtc_tnt_send that ran a peer fiber could leave a FOLLOWING
+  xtc_tnt_register_timer reading the wrong shard and misrouting its
+  courier onto the peer's loop + completion ring (the timer then fired
+  on the wrong shard and its completion was dropped as a stale target).
+  Fix: the ambient calls now derive the shard from the STACK-LOCAL
+  per-turn frame (tl_frame->shard), which is always correct inside a
+  handler and restored on return.  In production (one thread per shard)
+  frame->shard == tl_shard, so it is a no-op there.  This is the same
+  bug class as the RCU per-fiber-slot issue below.
 
-  Closing (1) and (2) cleanly needs a sim-visible shard-wake seam --
-  under sim, a cross-shard deliver / timer post should make the target
-  shard fiber promptly runnable rather than poke a dead pipe.  That is
-  additive and gated, but it is a real wakeup-routing change (not a
-  test tweak), so per the project discipline it is LEFT for a focused
-  follow-up rather than shipped as a racy park.  The deterministic
-  actor core -- spawn/arena, exactly-once mailbox delivery, drop-on-full
-  feedback, generational stale-handle safety, cross-type delivery --
-  is fully covered and replay-verified today.
+  test_sim_tnt now drives TWO shards: a driver on shard 0 mixes
+  self-KICK messages, a CROSS-SHARD send to a peer on shard 1, and a
+  one-shot TIMER redelivered around that cross-shard send -- proving,
+  across a seed sweep with bit-identical replay: spawn into typed
+  arenas, exactly-once mailbox delivery, drop-on-full feedback (flood N
+  into a cap-C mailbox drops exactly N-C), generational stale-handle
+  rejection, cross-shard delivery, and one-shot timer firing on the sim
+  virtual clock.  Only the socket courier I/O (raw recv/send) stays
+  outside sim -- not-coverable-by-design (needs a real kernel).
 
 ## FoundationDB parity
 

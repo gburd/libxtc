@@ -177,9 +177,22 @@ typedef struct xtc_tnt_shard {
 	pthread_mutex_t    comp_lock;
 
 	/* Self-wake pipe.  Couriers / cross-shard sends write a byte to
-	 * wake the parked shard fiber. */
+	 * wake the parked shard fiber.  Under deterministic simulation the
+	 * pipe is not observable by the sim scheduler, so the shard instead
+	 * parks on its own proc mailbox and shard_wake sends it a one-byte
+	 * message (the sim-modeled cross-loop park/wake path); self_pid is
+	 * the shard proc's own pid, captured at shard_main entry. */
 	int                wake_rd;
 	int                wake_wr;
+	xtc_pid_t          self_pid;
+	/* Coalesced wake flag: shard_wake sets it, the shard park
+	 * checks-and-clears it before parking.  Closes the lost-wakeup
+	 * window where a wake (a cross-shard deliver or a courier/timer
+	 * completion) arrives while the shard is running a tick, between
+	 * two parks.  Used on the sim park path (the production path uses
+	 * the self-wake pipe, which is level-triggered and does not have
+	 * this window). */
+	atomic_int         pending_wake;
 
 	/* Cross-shard / external spawn inbox (handle-less spawn requests).
 	 * Guarded by spawn_lock. */
@@ -286,7 +299,28 @@ static void
 shard_wake(xtc_tnt_shard_t *sh)
 {
 	uint8_t b = 1;
-	ssize_t r = write(sh->wake_wr, &b, 1);  /* XTC_BLOCKING_OK: 1 byte to a nonblocking self-wake pipe */
+	ssize_t r;
+
+	/* Under deterministic simulation the self-wake PIPE is invisible to
+	 * the sim scheduler (a byte written to a real fd is not a runnable
+	 * event the single-thread stepper can see), so the parked shard
+	 * would only re-tick on its next poll -- wedging cross-shard
+	 * delivery and timer posts.  Instead wake it via its own proc
+	 * mailbox: xtc_send to the shard's pid is the fully sim-modeled
+	 * cross-loop park/wake path (see test_sim_pingpong), so the target
+	 * shard becomes runnable deterministically on the very next step.
+	 * ADDITIVE: gated on __xtc_sim_active(); the production pipe write
+	 * below is byte-identical. */
+	if (__xtc_sim_active()) {
+		/* Record the wake so a park racing this write does not lose
+		 * it, then wake a currently-parked shard via its mailbox. */
+		atomic_store(&sh->pending_wake, 1);
+		if (sh->self_pid.gen != 0)
+			(void)xtc_send(sh->self_pid, &b, 1);
+		return;
+	}
+
+	r = write(sh->wake_wr, &b, 1);  /* XTC_BLOCKING_OK: 1 byte to a nonblocking self-wake pipe */
 	(void)r;
 }
 
@@ -573,6 +607,26 @@ xtc_tnt_self(void)
 	return tl_frame ? tl_frame->self : XTC_TNT_HANDLE_NONE;
 }
 
+/* The shard for the current ambient call.  Prefer the per-turn frame's
+ * shard (a STACK-LOCAL value, correct for the handler currently running)
+ * over the thread-local tl_shard.  Under deterministic simulation all
+ * shard fibers share one OS thread, so tl_shard -- set once per shard at
+ * shard_main entry and not restored on yield -- can read STALE (a peer
+ * shard that ran and yielded left tl_shard pointing at itself).  A
+ * cross-shard xtc_tnt_send that runs a peer fiber can therefore leave a
+ * following xtc_tnt_register_timer / xtc_tnt_spawn reading the wrong
+ * shard and misrouting its courier onto the peer's loop and completion
+ * ring.  The frame is stack-local and restored on return, so it is
+ * always right inside a handler; fall back to tl_shard only outside one
+ * (couriers etc., which never share the ambient API).  In production
+ * (one thread per shard) frame->shard == tl_shard, so this is a no-op
+ * there. */
+static xtc_tnt_shard_t *
+cur_shard(void)
+{
+	return tl_frame ? tl_frame->shard : tl_shard;
+}
+
 uint8_t
 xtc_tnt_shard_id(void)
 {
@@ -582,7 +636,7 @@ xtc_tnt_shard_id(void)
 void *
 xtc_tnt_scratch_arena(size_t size)
 {
-	xtc_tnt_shard_t *sh = tl_shard;
+	xtc_tnt_shard_t *sh = cur_shard();
 	void *p;
 	if (sh == NULL)
 		return NULL;
@@ -599,7 +653,7 @@ xtc_tnt_send_result_t
 xtc_tnt_send(xtc_tnt_handle_t to, uint16_t tag, const void *payload,
          size_t payload_size)
 {
-	xtc_tnt_shard_t *sh = tl_shard;
+	xtc_tnt_shard_t *sh = cur_shard();
 	xtc_tnt_message_t m;
 
 	if (sh == NULL)
@@ -687,7 +741,7 @@ xtc_tnt_spawn_error_t
 xtc_tnt_spawn(uint8_t type_id, const void *args, size_t args_size,
           xtc_tnt_handle_t *out_handle)
 {
-	xtc_tnt_shard_t *sh = tl_shard;
+	xtc_tnt_shard_t *sh = cur_shard();
 	xtc_tnt_arena_t *ar;
 	xtc_tnt_spawn_error_t err;
 	xtc_tnt_handle_t h;
@@ -783,7 +837,7 @@ xtc_tnt_timer_main(void *arg)
 void
 xtc_tnt_register_timer(uint64_t duration_ns, uint16_t tag)
 {
-	xtc_tnt_shard_t *sh = tl_shard;
+	xtc_tnt_shard_t *sh = cur_shard();
 	xtc_tnt_timer_arg_t *ta = NULL;
 	xtc_proc_opts_t popts = { 0 };
 	xtc_pid_t pid;
@@ -1113,18 +1167,32 @@ xtc_tnt_shard_main(void *arg)
 			continue;
 		}
 
-		/* Under deterministic simulation the shard has no real wake
-		 * pipe to park on -- the seeded scheduler re-runs every ready
-		 * fiber, and timers post via xtc_proc_sleep on the sim clock.
-		 * Sleep on the sim clock for the poll interval instead of a
-		 * real fd wait: this makes the shard non-runnable (so the run
-		 * can reach quiescence rather than busy-spinning the step
-		 * budget) yet still periodically re-check for ready work,
-		 * cross-shard sends, and the stop flag -- all a pure function
-		 * of the seed.  ADDITIVE: gated on __xtc_sim_active(); the
+		/* Under deterministic simulation the shard parks on its own
+		 * proc mailbox (a sim-modeled cross-loop park/wake) instead of
+		 * the real wake pipe: shard_wake sends a one-byte message here,
+		 * so a cross-shard deliver or a timer/courier completion makes
+		 * this shard runnable deterministically on the next step.  A
+		 * bounded timeout still lets the shard re-check the stop flag
+		 * and any ready work if no wake arrives.  All a pure function of
+		 * the seed.  ADDITIVE: gated on __xtc_sim_active(); the
 		 * production path below is byte-identical. */
 		if (__xtc_sim_active()) {
-			(void)xtc_proc_sleep(1LL * 1000 * 1000);
+			void *wm = NULL;
+			size_t wn = 0;
+			/* A wake that arrived while we were ticking (or in the
+			 * window before this park) is recorded in pending_wake;
+			 * consume it and re-tick immediately instead of parking,
+			 * so no wake is lost. */
+			if (atomic_exchange(&sh->pending_wake, 0))
+				continue;
+			/* Otherwise park on our own mailbox until shard_wake
+			 * sends a byte or the bounded timeout lets us re-check
+			 * the stop flag.  Drain the wake message (coalesced --
+			 * one tick handles all ready work). */
+			if (xtc_recv(&wm, &wn, 50LL * 1000 * 1000) == XTC_OK &&
+			    wm != NULL)
+				__os_free(wm);
+			atomic_store(&sh->pending_wake, 0);
 			continue;
 		}
 
@@ -1217,6 +1285,7 @@ shard_init(xtc_tnt_runtime_t *rt, uint8_t id, xtc_tnt_shard_t **out)
 	sh->spec = spec;
 	sh->rt = rt;
 	atomic_init(&sh->stop, 0);
+	atomic_init(&sh->pending_wake, 0);
 	pthread_mutex_init(&sh->comp_lock, NULL);
 	pthread_mutex_init(&sh->spawn_lock, NULL);
 
@@ -1273,6 +1342,10 @@ shard_bootstrap(xtc_task_t *self, void *arg)
 	sh->loop = loop;
 	popts.name = "tnt-shard";
 	(void)xtc_proc_spawn(loop, xtc_tnt_shard_main, sh, &popts, &pid);
+	/* Record the shard proc's own pid so shard_wake can wake it via its
+	 * mailbox under sim.  Captured here (not in shard_main) so it is set
+	 * before any peer shard's fiber can send to it. */
+	sh->self_pid = pid;
 	return XTC_TASK_DONE;
 }
 
