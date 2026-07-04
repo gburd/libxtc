@@ -255,7 +255,12 @@ contended acquire PARK instead of freezing the sim thread; EXCLUSIVE
 mutual exclusion + no lost update, SHARED no torn read + concurrent
 readers -- test_sim_lwlock), the wait-free-read Left-Right lock
 (lock_lr.c: concurrent readers never torn under a writer, atomic
-publish -- test_sim_lrlock), hierarchical memory contexts (mctx.c:
+publish -- test_sim_lrlock), RCU epoch reclamation (rcu.c: a per-FIBER
+reader slot -- keyed on __xtc_current_task() -- keeps overlapping
+read-sides from different fibers isolated, and a cooperative-yield
+synchronize() lets reader fibers run and drain instead of spinning
+sched_yield(); no reader ever observes a freed node, every retired
+node is reclaimed, replayed -- test_sim_rcu), hierarchical memory contexts (mctx.c:
 exact byte/chunk accounting, reset-keeps-alive, destroy cascades +
 fires every cleanup once, no leak -- test_sim_mctx), the slab +
 magazine allocator (slab.c: no double-alloc, no leak, balanced
@@ -273,26 +278,40 @@ capstone, test_sim_crash_recover; see below).
 
 Still OUTSIDE sim's reach BY DESIGN (not a coverage gap to close):
 
-- RCU (rcu.c) uses XTC_THREAD_LOCAL per-thread reader state and
-  sched_yield() in synchronize().  Under the single-thread sim every
-  fiber shares ONE __rcu_self slot (so overlapping read-sides from
-  different fibers would corrupt each other's nesting count) and
-  sched_yield() does not yield to the DST scheduler (so a writer
-  spinning in synchronize() would never let a reader advance the epoch).
-  Bringing RCU under DST would require KEYING the reader slot on the
-  current fiber/task rather than the OS thread (a real restructuring of
-  __rcu_register / read_lock / read_unlock / synchronize, not a one-line
-  shim) PLUS a fiber-yield shim in synchronize().  Getting the reader
-  slot rework subtly wrong risks a use-after-free in a reclamation path
-  (data-integrity-adjacent), so -- per the "get the clean ones solid,
-  do not ship a racy park" discipline that landed sem/gate/barrier --
-  RCU is DEFERRED rather than forced.  Its thread-path correctness stays
-  the domain of TSan / stress tests.  (The sem/gate/barrier deferral
-  that used to sit here is now CLOSED -- see test_sim_sync above.)  With
-  lwlock / lrlock / mctx / slab / pdict / stats now under DST (see the
-  coverage list above), RCU is the ONE remaining concurrency primitive
-  outside sim's reach -- and it is deferred for the reason above, not
-  for lack of coverage effort.
+- RCU (rcu.c) is now DONE under DST -- test_sim_rcu.  The two blockers
+  that used to sit here are closed PURELY ADDITIVELY, gated on
+  __xtc_current_task() != NULL, with the production OS-thread path
+  byte-identical (test/m13/test_rcu passes unchanged):
+
+  1. The reader slot was a single XTC_THREAD_LOCAL __rcu_self.  Under
+     the single-thread sim all fibers share one OS thread, so fiber A's
+     read_lock (which publishes the global epoch into active_epoch)
+     would collide with fiber B's -- corrupting the per-reader epoch
+     synchronize() scans, and freeing a node a concurrent reader still
+     holds.  FIX: on a fiber, the reader slot is keyed on the CURRENT
+     TASK -- each fiber gets its own struct rcu_tls, held in a small
+     xtc_task_t-keyed table inside rcu.c and still registered into the
+     SAME global registry synchronize scans (only WHERE the "my slot"
+     pointer lives changes).  Slots are reused by task pointer (the
+     loop recycles task structs, so the table stays bounded by peak
+     concurrent fibers, not total spawned) and freed at xtc_rcu_fini.
+
+  2. synchronize() spun sched_yield() waiting for readers to drain.
+     Under sim sched_yield does not reach the DST scheduler, so the
+     writer fiber would spin forever and the readers never run to
+     drain -- a hang.  FIX: on a fiber, synchronize() yields to the
+     loop (xtc_yield, with __current_proc saved/restored across the
+     yield) so reader fibers get scheduled and clear active_epoch.
+
+  test_sim_rcu asserts NO reader observes a freed/torn node (a sentinel
+  in each node, checked across a yield inside the read-side; a negative
+  control that disables the re-keying trips a heap-use-after-free under
+  ASan at the re-read), every retired node is reclaimed (freed count ==
+  allocated), quiescence (rc == XTC_OK, no synchronize hang), and
+  byte-identical replay from the seed with a different seed reordering
+  but staying consistent.  (The sem/gate/barrier deferral that used to
+  sit here is now CLOSED -- see test_sim_sync above.)  Every
+  concurrency primitive in the tree is now under DST.
 
 ## FoundationDB parity
 
@@ -534,18 +553,20 @@ now DONE; the honest scope limits noted per-feature -- raw-socket
 cross-machine transport, physical memory-ordering -- remain out of
 sim's reach by design).
 
-CONCURRENCY-PRIMITIVE COVERAGE IS NOW COMPLETE except RCU: every
+CONCURRENCY-PRIMITIVE COVERAGE IS NOW COMPLETE: every
 concurrency primitive in the tree is under DST -- the scheduler core,
 cross-loop messaging, the virtual clock, the fiber-yielding latches
 (amutex / arwlock), the blocking sync primitives (sem / gate /
 barrier / notify), the lock manager, the lightweight lock (lwlock),
-the wait-free-read lock (lrlock), memory contexts (mctx), the slab
+the wait-free-read lock (lrlock), RCU epoch reclamation (rcu),
+memory contexts (mctx), the slab
 allocator, the per-process dictionary (pdict), the stats
 counters/gauges/histograms, the L3 channels, the L4 gen_server, the
 process registry, plus the storage-engine slices (buffer manager, WAL
-crash-recovery).  RCU is the SOLE remaining primitive, DEFERRED for a
-recorded reason (per-OS-thread reader slots + a spinning
-synchronize() -- see the RCU note above), not for lack of coverage.
+crash-recovery).  RCU -- the last primitive to land -- came under DST
+via a per-FIBER reader slot (keyed on __xtc_current_task()) plus a
+cooperative-yield synchronize() (see the RCU note above); no primitive
+remains outside sim's reach.
 The primitives needing a fiber-park shim (a fiber blocking on a
 contended acquire PARKS instead of freezing the sim thread, gated on
 __xtc_current_task() != NULL, production thread path byte-identical)
