@@ -13,11 +13,13 @@
  *	via a sim-clock sleep (not the real wake pipe) and the seeded
  *	scheduler makes the whole run a pure function of the seed.
  *
- *	This test exercises the deterministic ACTOR CORE with a purely
- *	message-driven driver (self-sent KICK messages advance the
- *	scenario; the driver only advances a phase once it observes the
- *	prior phase's effect, so no wall-clock timers are needed to
- *	sequence it):
+ *	This test exercises the deterministic ACTOR CORE across TWO shards,
+ *	driving the sim-visible shard-wake seam: under sim the shard parks
+ *	on its own proc mailbox and shard_wake wakes it via xtc_send (the
+ *	fully-modeled cross-loop park/wake path), so cross-shard delivery
+ *	and wall-clock timers wake the target shard deterministically.
+ *	The driver mixes self-KICK messages, a cross-SHARD send to a peer
+ *	on shard 1, and a one-shot TIMER:
  *	  (a) spawn into typed arenas + every ADD applied exactly once
  *	      (no lost / duplicated message under the seeded interleaving);
  *	  (b) drop-on-full: flooding a bounded mailbox in one turn drops
@@ -26,22 +28,14 @@
  *	  (c) generational stale-handle: a send to a torn-down slot's OLD
  *	      handle returns STALE_HANDLE, never mis-delivers to a reused
  *	      slot;
- *	  (d) a same-shard send to a different isolate type is delivered;
- *	  (e) clean quiescence (XTC_OK), no deadlock / livelock;
- *	  (f) REPLAY: identical result fingerprint for a repeated seed.
+ *	  (d) a CROSS-SHARD send is delivered to a peer on another shard;
+ *	  (e) a one-shot TIMER fires (delivered on the sim virtual clock);
+ *	  (f) clean quiescence (XTC_OK), no deadlock / livelock;
+ *	  (g) REPLAY: identical result fingerprint for a repeated seed.
  *
- *	NOT covered here, deliberately:
- *	  - Wall-clock timers driving a POLL LOOP under sim: a timer armed
- *	    inside a message handler that then re-parks WAIT_MESSAGE does
- *	    not reliably redeliver under the sim shard-poll (the shard's
- *	    wake is a real pipe the sim does not observe).  A single-shot
- *	    timer fires fine (test/tnt/test_tnt.c covers timers on the real
- *	    scheduler); the sim poll-loop timer path is an open gap tracked
- *	    in docs/M_DST.md.
- *	  - Cross-SHARD messaging under sim (same open wake gap); the
- *	    production in-process test covers cross-shard delivery.
- *	  - Socket courier I/O (raw recv/send): needs a real kernel,
- *	    not-coverable-by-design.  No isolate here stages fd I/O.
+ *	NOT covered here, deliberately: the socket courier I/O (raw
+ *	recv/send) needs a real kernel, not-coverable-by-design; no isolate
+ *	here stages fd I/O.
  */
 
 #ifndef _GNU_SOURCE
@@ -69,7 +63,8 @@ typedef struct results {
 	atomic_int drop_full;      /* sends that hit MAILBOX_FULL */
 	atomic_int drop_stale;     /* sends that hit STALE_HANDLE */
 	atomic_int done_seen;      /* isolates torn down (DONE) */
-	atomic_int peer_got;       /* same-shard cross-type delivery */
+	atomic_int peer_got;       /* CROSS-SHARD delivery to shard 1 */
+	atomic_int timer_fired;    /* one-shot timer delivered */
 	atomic_int all_pass;       /* driver verdict for this run */
 } results_t;
 
@@ -170,20 +165,28 @@ driver_init(void *s, const void *a, size_t n)
 	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
+static xtc_tnt_transition_t driver_timer(driver_iso_t *d);
+
 static xtc_tnt_transition_t
 driver_handler(void *s, xtc_tnt_message_t *m)
 {
 	driver_iso_t *d = xtc_tnt_self_as(driver_iso_t, s);
 
+	if (m->tag == XTC_TNT_TAG_TIMER)
+		return driver_timer(d);
 	if (m->tag != TAG_KICK)
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 
-	/* phase 0: spawn all isolates (same shard). */
+	/* phase 0: spawn same-shard isolates; route the PEER onto shard 1
+	 * via spawn_on (asynchronous -- it materialises when shard 1 next
+	 * ticks, so we must not send to it until a barrier confirms it). */
 	if (d->phase == 0) {
 		xtc_tnt_spawn(T_COUNTER, NULL, 0, &d->counter);
 		xtc_tnt_spawn(T_SINK, NULL, 0, &d->sink);
 		xtc_tnt_spawn(T_SINK, NULL, 0, &d->fullsink);
-		xtc_tnt_spawn(T_PEER, NULL, 0, &d->peer);
+		(void)xtc_tnt_spawn_on(1, T_PEER, NULL, 0);
+		/* Deterministic peer handle: shard 1, type PEER, slot 0, gen 1. */
+		d->peer = xtc_tnt_handle_make(1, T_PEER, 0, 1);
 		d->phase = 1;
 		(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
@@ -243,43 +246,56 @@ driver_handler(void *s, xtc_tnt_message_t *m)
 		if (xtc_tnt_send(d->sink, TAG_PING, NULL, 0) ==
 		    XTC_TNT_SEND_STALE_HANDLE)
 			atomic_fetch_add(&g_res.drop_stale, 1);
-		/* same-shard send to a different isolate type. */
-		(void)xtc_tnt_send(d->peer, TAG_PEER, NULL, 0);
+		/* Arm a one-shot TIMER.  The cross-SHARD send to the peer on
+		 * shard 1 (and its retry until the async spawn_on materialises
+		 * the peer) happens in the timer handler -- so this run
+		 * exercises a timer redelivered around a cross-shard send, the
+		 * exact case the sim-visible shard-wake seam fixed. */
+		xtc_tnt_register_timer(2LL * 1000 * 1000, XTC_TNT_TAG_TIMER);
 		d->phase = 6;
-		(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
 
-	/* phase 6: poll until the peer observed the message, then verify
-	 * all invariants and stop. */
-	if (d->phase == 6) {
-		int total = 0, i;
-		if (atomic_load(&g_res.peer_got) < 1) {
-			(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
-			return XTC_TNT_TRANSITION_WAIT_MESSAGE;
-		}
+	/* phase 6 is driven by the TIMER, not a KICK -- see driver_timer. */
+	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
+}
+
+static xtc_tnt_transition_t
+driver_timer(driver_iso_t *d)
+{
+	atomic_store(&g_res.timer_fired, 1);
+	/* CROSS-SHARD send to the peer on shard 1.  spawn_on is async, so
+	 * the peer may not exist on the first attempt (STALE); retry on the
+	 * next timer tick.  The seam guarantees a successful cross-shard
+	 * send wakes shard 1 deterministically -- and this timer being
+	 * redelivered after a cross-shard send is the exact case the seam
+	 * fixed. */
+	if (atomic_load(&g_res.peer_got) < 1) {
+		(void)xtc_tnt_send(d->peer, TAG_PEER, NULL, 0);
+		xtc_tnt_register_timer(2LL * 1000 * 1000, XTC_TNT_TAG_TIMER);
+		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
+	}
+	{
+		int total = 0, i, pass = 1;
 		for (i = 1; i <= N_ADD; i++) total += i;
-		int pass = 1;
 		pass &= (atomic_load(&g_res.counter_value) == total);
 		pass &= (atomic_load(&g_res.counter_msgs) == N_ADD);
 		/* Flooding N_FLOOD into a cap-SINK_CAP mailbox in ONE turn
 		 * accepts exactly SINK_CAP and drops the rest with
 		 * MAILBOX_FULL (nothing silently lost).  The accepted ones are
 		 * then handled, but the last may still be pending when we stop,
-		 * so assert the drop count exactly and the handled count as a
-		 * bound. */
+		 * so assert the drop count exactly and handled as a bound. */
 		pass &= (atomic_load(&g_res.drop_full) == N_FLOOD - SINK_CAP);
 		pass &= (atomic_load(&g_res.sink_handled) >= 1);
 		pass &= (atomic_load(&g_res.sink_handled) <= SINK_CAP);
 		pass &= (atomic_load(&g_res.drop_stale) == 1);
 		pass &= (atomic_load(&g_res.done_seen) == 1);
 		pass &= (atomic_load(&g_res.peer_got) == 1);
+		pass &= (atomic_load(&g_res.timer_fired) == 1);
 		atomic_store(&g_res.all_pass, pass);
 		xtc_tnt_stop();
 		return XTC_TNT_TRANSITION_DONE;
 	}
-
-	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
 static const xtc_tnt_type_t test_types[] = {
@@ -315,7 +331,9 @@ run_one(uint64_t seed, int *pass_out, int *rc_out)
 	spec.name = "tnt-sim";
 	spec.types = test_types;
 	spec.n_types = 4;
-	spec.shard_count = 1;
+	spec.shard_count = 2;          /* shard 0 drives; shard 1 hosts the
+	                                * cross-shard peer -- exercises the
+	                                * sim-visible shard-wake seam. */
 	spec.scratch_size = 65536;
 	spec.recv_buf_size = 256;
 	spec.boot_type = T_DRIVER;
@@ -334,6 +352,7 @@ run_one(uint64_t seed, int *pass_out, int *rc_out)
 	MIX(atomic_load(&g_res.drop_stale));
 	MIX(atomic_load(&g_res.done_seen));
 	MIX(atomic_load(&g_res.peer_got));
+	MIX(atomic_load(&g_res.timer_fired));
 	MIX(rc);
 #undef MIX
 	return fp;
@@ -366,7 +385,7 @@ main(int argc, char **argv)
 		}
 		if (!pass) {
 			printf("  seed 0x%016llx: invariants FAIL "
-			    "(cv=%d cm=%d sh=%d df=%d ds=%d dn=%d pg=%d)\n",
+			    "(cv=%d cm=%d sh=%d df=%d ds=%d dn=%d pg=%d tf=%d)\n",
 			    (unsigned long long)seed,
 			    atomic_load(&g_res.counter_value),
 			    atomic_load(&g_res.counter_msgs),
@@ -374,7 +393,8 @@ main(int argc, char **argv)
 			    atomic_load(&g_res.drop_full),
 			    atomic_load(&g_res.drop_stale),
 			    atomic_load(&g_res.done_seen),
-			    atomic_load(&g_res.peer_got));
+			    atomic_load(&g_res.peer_got),
+			    atomic_load(&g_res.timer_fired));
 			fails++;
 			continue;
 		}
