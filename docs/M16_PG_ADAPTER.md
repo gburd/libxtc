@@ -267,3 +267,51 @@ M16.3 split 16.3a (MemoryContext shim over xtc_mctx) / 16.3b
 (CurrentMemoryContext -> __thread + N-concurrent backends -- the real
 shared-address-space reckoning, the largest chunk).  M16.4 rides R1 +
 xtc_sup_start.  M16.5 xtc_cfg + xtc_log, both present.
+
+## M16.1b spike outcome (2026-07): seam PROVEN, one fd-plumbing bug from a round-trip
+
+An out-of-tree spike ran real PostgreSQL (a throwaway xtc-m16-1b-spike
+branch of a PG master checkout; full recipe + M16_1B_FINDINGS.md live on
+that branch, NOT in this repo).  Result: the runtime seam WORKS -- a
+real backend runs as an xtc_proc fiber -- blocked on one concrete
+fd-plumbing bug, not on the deferred shared-address-space wall.
+
+What the spike proved:
+  - libxtc.a links into the PG backend (wired into src/Makefile.global
+    with -I.../src/inc, -DUSE_XTC_BACKENDS, and libxtc's -luring/-lssl/
+    -lcrypto deps).
+  - postmaster_child_launch routes B_BACKEND to xtc_pg_spawn_backend
+    (an xtc scheduler hosted in the postmaster on a dedicated pthread)
+    instead of fork_process().
+  - The backend's REAL BackendMain -> PostgresMain -> InitPostgres ->
+    StartupXLOG executes inside the fiber, reaches "connection received:
+    host=[local]", and YIELDS cooperatively to the xtc loop (the loop
+    idles in io_uring_wait, not spinning) -- the pg_latch glue
+    (SetLatch->xtc_send, WaitLatchOrSocket->xtc_proc_wait_fd) fires.
+  - Three real seam bugs found + fixed along the way: a NULL LatchWaitSet
+    crash in StartupXLOG (run only the safe subset of InitPostmasterChild
+    in the fiber); a wrong-event scan (match only WL_SOCKET_* events, not
+    the latch self-pipe fd); a busy-spin on pure-latch waits (park on the
+    latch signalfd instead of xtc_proc_wait_fd(-1,...) which returns
+    E_INVAL).
+
+The remaining blocker (fstat-proven, one bug): the fiber parks forever
+in xtc_proc_wait_fd at the startup-packet read.  A dup() workaround
+(added so the postmaster's closesocket(s.sock) in ServerLoop does not
+kill the backend's socket) made the READ fd (the dup, fd 12) diverge
+from the WAIT fd registered in the WaitEventSet (fd 3); fd 3 never
+becomes readable -> hang -> psql timeout.  Fix (in the findings file):
+drop the dup() and instead gate the postmaster's closesocket on
+child_type != B_BACKEND under USE_XTC_BACKENDS, so read and wait share
+the one true fd; then wire SetLatch -> fiber wakeup.  That should give
+the real "select 1".
+
+Assessment: M16.1b is ~one fd-fix from a first real round-trip -- the
+concept (a PG backend as an xtc_proc, cooperatively scheduled) is
+validated.  The DEEPER walls remain deferred and correctly so: single
+backend at a time only (on_shmem_exit sharing, PG process-globals),
+untested sigsetjmp/PG_exception_stack interaction with the fiber stack,
+and signal delivery to the scheduler thread -- these are the M16.3b
+(__thread-ize globals) and later work.  The spike de-risked exactly
+what it should: the runtime seam is real; the hard part is PG's globals,
+as the plan predicted.
