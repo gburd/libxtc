@@ -315,3 +315,49 @@ and signal delivery to the scheduler thread -- these are the M16.3b
 (__thread-ize globals) and later work.  The spike de-risked exactly
 what it should: the runtime seam is real; the hard part is PG's globals,
 as the plan predicted.
+
+## M16 MILESTONE (2026-07): threaded PostgreSQL runs on the xtc scheduler
+
+SUCCESS.  `psql -c "select 1"` round-trips with a real PostgreSQL backend
+running as an xtc_proc fiber whose client-socket waits are driven by
+xtc_proc_wait_fd on the xtc scheduler loop.  This is threaded PostgreSQL
+on xtc -- the M16 concept, working end to end.
+
+STRATEGY that unlocked it: the earlier fork-replacement spike (M16.1b,
+on /home/gburd/ws/postgres/master branch xtc-m16-1b-spike) proved the
+runtime seam but hit PostgreSQL's process-per-backend shared-address-
+space / global-state wall (deferred to M16.3b) plus one fd-divergence
+bug.  Rather than __thread-ize PG's globals ourselves, we START from an
+ALREADY-THREADED PostgreSQL -- Sam Willis's multithreaded-postgres
+(github.com/samwillis/multithreaded-postgres, REL_19_BETA1 + thread-per-
+session backends + a carrier-thread pool) -- which has already done that
+work, and wire the xtc scheduler in as the CARRIER for its threaded
+backends.  The globals wall is gone because the tree is already threaded;
+we change only the carrier.
+
+Location: /home/gburd/src/multithreaded-postgres, branch xtc-carrier
+(out-of-tree, throwaway; M16_XTC_CARRIER_FINDINGS.md + the recipe live
+there, NOT in this repo).  ~404 LOC over the multithreaded baseline,
+gated on USE_XTC_CARRIER:
+  - src/backend/postmaster/pg_xtc_carrier.c/.h (new) -- a single-loop
+    xtc_app on a dedicated pthread (xtc_pg_carrier_start); launches a
+    B_BACKEND as an xtc_proc fiber (backend_thread_entry) on the carrier
+    loop; a __thread xtc_in_backend_fiber flag marks the carrier path.
+  - launch_backend.c -- routes B_BACKEND to the xtc carrier.
+  - waiteventset.c -- a backend fiber's WaitEventSetWait socket waits go
+    through xtc_proc_wait_fd (park on the xtc loop) instead of blocking
+    the carrier in epoll_wait.
+  - the pg_xtc_glue Latch<->xtc mailbox/wait_fd mapping ported from the
+    prior spike / libxtc examples/09_pgmock/pg_latch.*.
+
+Proof (postmaster log): "xtc: carrier scheduler thread up", "B_BACKEND
+launched as xtc fiber (child_slot=1)", repeated "fiber wait_fd fd=34
+interest=0xd timeout_ms=-1 (via xtc_proc_wait_fd)"; psql returns the row,
+rc=0.
+
+Significance: a PostgreSQL backend is now cooperatively scheduled by
+xtc's fiber runtime -- the foundation for the threaded-PG vision (many
+backends multiplexed on a small carrier pool by the xtc scheduler,
+sharing the data plane).  Next: multiple concurrent backends on the
+carrier pool; wire SetLatch cross-backend wakeups fully; then the larger
+integration (xtc_aio for backend I/O, xtc_proc supervision of backends).
