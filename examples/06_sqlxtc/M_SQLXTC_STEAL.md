@@ -664,3 +664,41 @@ decision, not unfinished transition work.
 
 No further STEAL work is planned for sqlxtc.  This closes the STEAL
 milestone.
+
+## Academic grounding
+
+The claim "an append-only MVCC store does not need STEAL" is the
+NO-STEAL/NO-FORCE quadrant of the classic recovery taxonomy applied to a
+multiversion store:
+
+  - Haerder, T. and Reuter, A. "Principles of Transaction-Oriented
+    Database Recovery." ACM Computing Surveys 15(4), 1983.  Defines the
+    STEAL/NO-STEAL x FORCE/NO-FORCE matrix.  Theorem: a NO-STEAL buffer
+    policy needs no UNDO at recovery (uncommitted pages never reach the
+    durable image); NO-FORCE needs REDO.  sqlxtc lives in exactly the
+    NO-STEAL/NO-FORCE cell: REDO-only, no UNDO log required.
+
+  - Mohan, C. et al. "ARIES: A Transaction Recovery Method..." ACM TODS
+    17(1), 1992.  The STEAL-requires-UNDO (CLR / compensation) baseline
+    sqlxtc deliberately departs from; its undo/CLR machinery is built but
+    dormant precisely because NO-STEAL makes it unnecessary.
+
+  - Bernstein, Hadzilacos, Goodman. "Concurrency Control and Recovery in
+    Database Systems", 1987, Ch. 5-6.  Multiversion recovery: superseded
+    versions are logically superseded, not physically overwritten, so an
+    aborted transaction's versions are reclaimed by GC, never rolled back
+    in place.
+
+  - Living proof: PostgreSQL's heap is append-with-tombstone MVCC, is
+    NO-FORCE (WAL REDO), and has NO UNDO log -- aborted tuples are
+    reclaimed by VACUUM.  This is sqlxtc's model.  The pgsql-hackers
+    "zheap" (undo-based storage) work is the opposite tradeoff: you add
+    an UNDO log specifically to enable in-place update (STEAL of real
+    versions) -- the thing this engine chooses not to do.
+
+Consequence for sqlxtc: an aborted/crashed transaction's versions are
+invisible by MVCC visibility (their commit TID never became durable) and
+reclaimable by GC.  They are never in-place overwrites of committed data,
+so recovery never reconstructs a before-image.  STEAL's reason to exist
+does not arise.  This is why NO-STEAL is not a limitation here but the
+correct design.
