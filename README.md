@@ -165,9 +165,10 @@ the *what*.
 
 ## Status and stability
 
-xtc is **pre-1.0**.  The public API surface is stable in shape but
-specific signatures may shift before v1.0.  The semver / deprecation
-policy is documented in `docs/abi-stability.md`.
+xtc is **1.0**.  The public API surface is stable and semver applies
+from here: no breaking change to a documented public API without a major
+version bump.  The semver / deprecation policy is documented in
+`docs/abi-stability.md`.
 
 What's working today:
 
