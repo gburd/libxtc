@@ -35,6 +35,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>    /* sysconf(_SC_PAGESIZE) for stack-overflow detection */
 
 /* ---------- envelope ---------- */
 
@@ -786,6 +787,34 @@ __proc_entry(void *arg)
 	p->task = __xtc_current_task();
 	p->coro = __xtc_current_coro;
 
+	/*
+	 * Auto-arm a DEFAULT fault-recovery frame before running the body,
+	 * so a contained fault ANYWHERE in the proc -- including in its very
+	 * first statement, before the app calls xtc_proc_recovery_arm() --
+	 * still unwinds this one proc and delivers a DOWN to its monitors,
+	 * rather than escalating (and, as a carrier team observed, sometimes
+	 * delivering no DOWN at all for an early fault).  The app's own
+	 * xtc_proc_recovery_arm() simply re-arms this same frame with its
+	 * custom cleanup; this default is the floor.  On a fault the handler
+	 * siglongjmp's here with the (positive) signal number; we release
+	 * the proc's tracked recovery resources and record the fault as the
+	 * exit reason (the positive signal, consistent with an app that does
+	 * xtc_exit_self(sig)), then fall through to the normal exit +
+	 * monitor-notify path.  crit_depth still governs escalation: a fault
+	 * inside a critical section is NOT caught here (recovery is gated on
+	 * crit_depth == 0 in the handler), preserving PANIC semantics. */
+	{
+		int fsig = sigsetjmp(p->recovery_buf, 1);
+		if (fsig != 0) {
+			/* A contained fault fired the default frame. */
+			p->recovery_armed = 0;
+			__recov_release_all(p);
+			p->exit_reason = fsig;   /* positive signal number */
+			goto proc_exit;
+		}
+		p->recovery_armed = 1;
+	}
+
 	if ((reason = setjmp(p->exit_jb)) == 0) {
 		p->exit_jb_set = 1;
 		p->fn(p->arg);
@@ -793,6 +822,9 @@ __proc_entry(void *arg)
 	} else {
 		p->exit_reason = reason - 1;  /* offset so 0 is reachable */
 	}
+	p->recovery_armed = 0;   /* past the body; no more auto-recovery */
+
+proc_exit:
 
 	p->alive = 0;
 	/* Run the proc's at-exit callbacks (release locks, reset memory,
@@ -1627,8 +1659,34 @@ static void
 __xtc_fault_handler(int sig, siginfo_t *si, void *uctx)
 {
 	struct xtc_proc *p = __current_proc;
-	(void)si; (void)uctx;
-	if (p != NULL && p->recovery_armed && p->crit_depth == 0) {
+	struct xtc_coro *c = __xtc_current_coro;
+	int stack_overflow = 0;
+	(void)uctx;
+
+	/*
+	 * Stack-overflow detection.  A fault whose address lies in (or just
+	 * below) the running fiber's guard page is a stack overflow: the
+	 * guard is gone and the stack is unusable, so we must NOT contain
+	 * it (siglongjmp/cleanup would run on the broken stack) -- it
+	 * escalates like a critical-section fault.  Without this, the
+	 * default recovery frame auto-armed in __proc_entry would wrongly
+	 * swallow a genuine stack overflow.  The guard is the first page of
+	 * the fiber's mmap (c->stack .. c->stack + one page); a fault at or
+	 * just below it (within a page, covering a red-zone probe) is an
+	 * overflow.  Only SIGSEGV/SIGBUS carry a meaningful si_addr here. */
+	if (c != NULL && c->stack != NULL && si != NULL &&
+	    (sig == SIGSEGV || sig == SIGBUS)) {
+		long pg = sysconf(_SC_PAGESIZE);
+		uintptr_t page = (pg > 0) ? (uintptr_t)pg : 4096u;
+		uintptr_t guard_lo = (uintptr_t)c->stack;
+		uintptr_t guard_hi = guard_lo + page;
+		uintptr_t fa = (uintptr_t)si->si_addr;
+		if (fa >= guard_lo - page && fa < guard_hi)
+			stack_overflow = 1;
+	}
+
+	if (!stack_overflow && p != NULL && p->recovery_armed &&
+	    p->crit_depth == 0) {
 		/* One-shot: a fault during recovery/cleanup must escalate
 		 * rather than loop back here. */
 		p->recovery_armed = 0;
@@ -2210,8 +2268,12 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 		 * a dead process delivers an immediate DOWN rather than
 		 * failing.  Deliver it to self so the caller's normal DOWN
 		 * path runs; we missed the real exit reason (it is reaped),
-		 * so report it as abnormal/noproc, which a supervisor treats
-		 * as "re-establish if you would restart on a crash."
+		 * so report it as XTC_DOWN_NOPROC -- a DISTINCT reason (not a
+		 * signal number and not an XTC_E_ code) so a supervisor can
+		 * tell "target already gone" apart from a real fault exit
+		 * (whose reason is the positive signal number).  A supervisor
+		 * that restarts on a crash treats NOPROC as "re-establish if
+		 * you would restart" but does NOT misclassify it as SIGSEGV.
 		 */
 		uint64_t ref = atomic_fetch_add_explicit(&__mon_ref_seq, 1,
 		    memory_order_relaxed) + 1;
@@ -2221,7 +2283,7 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 			uint64_t ref;
 			xtc_pid_t pid;
 			int     reason;
-		} XTC_PACKED down = { 'D', ref, target, XTC_E_NOTFOUND };
+		} XTC_PACKED down = { 'D', ref, target, XTC_DOWN_NOPROC };
 		XTC_PACK_POP
 		(void)xtc_send(self->pid, &down, sizeof down);
 		if (out_ref) *out_ref = ref;
