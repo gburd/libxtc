@@ -17,6 +17,8 @@
 #include "xtc_proc.h"
 #include "xtc_io.h"
 #include "xtc_net.h"
+#include "xtc_sim.h"
+#include "loop_int.h"   /* __xtc_current_loop: place the sim child fiber */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -40,7 +42,50 @@ struct xtc_osproc {
 	int   pidfd;       /* Linux pidfd for pollable exit, or -1 */
 	int   reaped;      /* 1 once waitpid has collected the child */
 	int   status;      /* raw waitpid status, valid when reaped */
+
+	/* Deterministic-simulation model.  Under sim there is no real OS
+	 * process (a fork'd child runs on the real scheduler/clock, outside
+	 * the sim's control -- the same not-coverable boundary FoundationDB
+	 * hits, which is why FDB models a "process" as an in-process actor
+	 * with a simulated lifecycle rather than fork/exec'ing under sim).
+	 * We do the same: the fn-callback child runs as an xtc_proc FIBER
+	 * and its lifecycle (running -> exited-with-status, signalled) is
+	 * modelled here on the sim clock. */
+	int          is_sim;
+	_Atomic int  sim_done;     /* 1 once the fiber returned / was killed */
+	int          sim_status;   /* raw waitpid-style status when done */
+	_Atomic int  sim_signal;   /* last signal delivered (0 = none) */
 };
+
+/* Argument for the simulated child fiber. */
+struct sim_child_arg {
+	struct xtc_osproc *p;
+	int  (*fn)(int, void *);
+	void  *arg;
+};
+
+static _Atomic long g_sim_pid_next = 1;   /* synthetic sim pids */
+
+static void
+sim_child_main(void *a)
+{
+	struct sim_child_arg *ca = a;
+	struct xtc_osproc *p = ca->p;
+	int r;
+
+	/* A signal delivered before we start (or during) terminates the
+	 * child: model SIGKILL/SIGTERM/SIGINT as termination.  Otherwise run
+	 * the callback and encode its return as a normal exit status. */
+	r = ca->fn(-1, ca->arg);
+	if (atomic_load(&p->sim_signal) != 0 && !atomic_load(&p->sim_done)) {
+		/* Killed by signal: encode as WIFSIGNALED (low 7 bits = sig). */
+		p->sim_status = atomic_load(&p->sim_signal) & 0x7f;
+	} else {
+		p->sim_status = (r & 0xff) << 8;   /* WIFEXITED, code r */
+	}
+	atomic_store(&p->sim_done, 1);
+	__os_free(ca);
+}
 
 static int
 __pidfd_open(pid_t pid)
@@ -75,6 +120,46 @@ xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out)
 	p->pid = -1;
 	p->ctrl_fd = -1;
 	p->pidfd = -1;
+
+	/* Deterministic simulation: model the fn-callback child as an
+	 * in-process fiber with a simulated lifecycle (FoundationDB's
+	 * "process = actor" pattern), instead of fork()ing a real child
+	 * whose scheduling/clock the sim cannot control.  The exec (argv)
+	 * path has no in-process equivalent -- there is no real program to
+	 * run under sim -- and the live control SOCKET would need a real
+	 * kernel socketpair, so both decline cleanly under sim (a consumer
+	 * that needs them is exercising the not-coverable real-kernel tier,
+	 * matching FDB pushing real exec out to fdbmonitor).  The common
+	 * "run isolated work, collect its exit status" contract IS
+	 * modelled.  ADDITIVE: gated on __xtc_sim_active(); the production
+	 * fork path below is byte-identical. */
+	if (__xtc_sim_active()) {
+		struct sim_child_arg *ca;
+		xtc_pid_t cpid;
+		if (opts->argv != NULL || opts->ctrl_socket) {
+			__os_free(p);
+			return XTC_E_NOSYS;   /* real-kernel tier, not simulated */
+		}
+		if (__os_calloc(1, sizeof *ca, (void **)&ca) != XTC_OK) {
+			__os_free(p);
+			return XTC_E_NOMEM;
+		}
+		p->is_sim = 1;
+		p->pid = (pid_t)atomic_fetch_add(&g_sim_pid_next, 1);
+		atomic_init(&p->sim_done, 0);
+		atomic_init(&p->sim_signal, 0);
+		ca->p = p;
+		ca->fn = opts->fn;
+		ca->arg = opts->arg;
+		if (xtc_proc_spawn(__xtc_current_loop, sim_child_main, ca,
+		    NULL, &cpid) != XTC_OK) {
+			__os_free(ca);
+			__os_free(p);
+			return XTC_E_INTERNAL;
+		}
+		*out = p;
+		return XTC_OK;
+	}
 
 	if (opts->ctrl_socket) {
 		if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
@@ -144,6 +229,21 @@ xtc_osproc_signal(const xtc_osproc_t *p, int sig)
 {
 	if (p == NULL || p->pid <= 0)
 		return XTC_E_INVAL;
+	if (p->is_sim) {
+		/* Model the signal: record it, and for a terminating signal
+		 * mark the (not-yet-exited) child done with a signalled
+		 * status.  A cooperative child could also observe sim_signal. */
+		xtc_osproc_t *m = (xtc_osproc_t *)p;   /* atomics are mutable */
+		if (atomic_load(&m->sim_done))
+			return XTC_E_INVAL;             /* already exited */
+		atomic_store(&m->sim_signal, sig);
+		if (sig == 9 /*SIGKILL*/ || sig == 15 /*SIGTERM*/ ||
+		    sig == 2 /*SIGINT*/) {
+			m->sim_status = sig & 0x7f;     /* WIFSIGNALED */
+			atomic_store(&m->sim_done, 1);
+		}
+		return XTC_OK;
+	}
 	if (p->reaped)
 		return XTC_E_INVAL;             /* already exited */
 	if (kill(p->pid, sig) != 0)
@@ -159,6 +259,18 @@ xtc_osproc_try_wait(xtc_osproc_t *p, int *status)
 
 	if (p == NULL || p->pid <= 0)
 		return XTC_E_INVAL;
+	if (p->is_sim) {
+		if (p->reaped) {
+			if (status != NULL) *status = p->status;
+			return XTC_OK;
+		}
+		if (!atomic_load(&((xtc_osproc_t *)p)->sim_done))
+			return XTC_E_AGAIN;             /* still running */
+		((xtc_osproc_t *)p)->reaped = 1;
+		((xtc_osproc_t *)p)->status = p->sim_status;
+		if (status != NULL) *status = p->sim_status;
+		return XTC_OK;
+	}
 	if (p->reaped) {
 		if (status != NULL) *status = p->status;
 		return XTC_OK;
@@ -236,6 +348,13 @@ xtc_osproc_destroy(xtc_osproc_t *p)
 {
 	if (p == NULL)
 		return;
+	if (p->is_sim) {
+		/* No real fds or child; the fiber (if still running) is owned by
+		 * the executor and will complete on the sim clock.  Just free
+		 * the handle. */
+		__os_free(p);
+		return;
+	}
 	if (p->ctrl_fd >= 0)
 		(void)close(p->ctrl_fd);
 	if (p->pidfd >= 0)
