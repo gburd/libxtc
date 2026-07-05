@@ -19,6 +19,7 @@
 #include "xtc_blocking.h"
 #include "xtc_proc.h"
 #include "xtc_io.h"
+#include "xtc_sim.h"   /* __xtc_sim_active: run inline under simulation */
 
 #include "os_thread.h"
 #include "os_cpu.h"
@@ -207,6 +208,16 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 
 	if (fn == NULL)
 		return XTC_E_INVAL;
+
+	/* Under deterministic simulation there is no real thread pool to
+	 * offload to (a pool worker runs on a real OS thread outside the
+	 * sim's control, destroying determinism), so run the work
+	 * synchronously on the calling fiber -- the same result the
+	 * off-a-loop synchronous fallback already produces, and a pure
+	 * function of the seed.  ADDITIVE: gated on __xtc_sim_active(); the
+	 * production pool path below is byte-identical. */
+	if (__xtc_sim_active())
+		goto run_sync;
 
 	/* Synchronous fallback: not on a loop process (cannot park), or
 	 * the wakeup pipe / pool could not be set up. */
