@@ -31,6 +31,7 @@ test_steal_torn
 test_recover_undo
 test_redo_page
 test_inplace_redo
+test_fuzzy_checkpoint
 test_btree_delete_merge
 test_savepoint
 test_native_txn
