@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.2.0"
+#       --define "version 1.2.1"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.2.0
+Version:        1.2.1
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,10 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Sun Jul 05 2026 Greg Burd <greg@burd.me> - 1.2.1-1
+- Portability (riscv64/FreeBSD/illumos/Win11-ARM64) + carrier-reported
+  monitor-DOWN ambiguity and early-fault containment fixes.
+
 * Sun Jul 05 2026 Greg Burd <greg@burd.me> - 1.2.0-1
 - Preemption Phase 3 (xtc_launch) + Lever S1 (madvise-on-park); vectored
   scatter/gather AIO (xtc_aio_preadv/pwritev); public xtc_free packaging
