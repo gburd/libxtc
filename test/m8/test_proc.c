@@ -512,6 +512,28 @@ flt_faulter(void *arg)
 	}
 }
 
+/* Item 3 (xtc-carrier report): a proc that faults in its FIRST
+ * statement -- before it ever calls xtc_proc_recovery_arm() -- must
+ * still be contained and deliver a DOWN, thanks to the default recovery
+ * frame __proc_entry now auto-arms.  This faulter does NO arming and no
+ * work: it waits for the monitor to be established, then dereferences a
+ * wild pointer immediately. */
+static void
+flt_early_faulter(void *arg)
+{
+	struct flt_state *s = arg;
+	void *m = NULL; size_t n = 0;
+	(void)s;
+	/* Wait for the watcher's go (monitor established) with NO prior
+	 * xtc_proc_recovery_arm().  Then fault immediately. */
+	if (xtc_recv(&m, &n, 2LL * 1000 * 1000 * 1000) == XTC_OK && m)
+		__os_free(m);
+	{
+		volatile uintptr_t addr = 0x10;
+		*(volatile int *)addr = 1;     /* boom -- before arming */
+	}
+}
+
 static void
 flt_watcher(void *arg)
 {
@@ -685,6 +707,45 @@ test_fault_contain(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Item 3: a fault BEFORE the app arms its own recovery frame must still
+ * be contained and deliver a DOWN (the default frame auto-armed in
+ * __proc_entry catches it).  The DOWN reason is the positive signal
+ * number (SIGSEGV = 11), NOT swallowed and NOT escalated to a process
+ * abort. */
+static MunitResult
+test_fault_early_contain(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct flt_state s = { 0, 0, 0, 0 };
+	xtc_pid_t faulter, watcher;
+	(void)p; (void)d;
+
+#if defined(__SANITIZE_ADDRESS__)
+	return MUNIT_SKIP;
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;
+#  endif
+#endif
+
+	munit_assert_int(xtc_fault_guard_install(), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, flt_watcher, &s, NULL,
+	    &watcher), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, flt_early_faulter, &s, NULL,
+	    &faulter), ==, XTC_OK);
+	munit_assert_int(xtc_send(watcher, &faulter, sizeof faulter),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	/* The key assertion: a DOWN arrived for the early fault (Item 3
+	 * was: no DOWN at all).  Reason is the positive signal number. */
+	munit_assert_int(s.saw_down, ==, 1);
+	munit_assert_int(s.reason, ==, SIGSEGV);   /* 11 */
+	return MUNIT_OK;
+}
+
 /* Escalate path: a fault INSIDE a critical section must NOT be
  * contained -- shared state may be torn -- so it takes the whole
  * process down.  Verified in a forked child: the child arms a
@@ -788,6 +849,7 @@ static MunitTest tests[] = {
 	{ "/mailbox_stats",     test_mailbox_stats,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/save_queue_cap",    test_save_queue_cap,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fault_contain",     test_fault_contain,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fault_early_contain", test_fault_early_contain, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recovery_registry", test_recovery_registry, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fault_escalate",    test_fault_escalate,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/proc_at_exit",      test_proc_at_exit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

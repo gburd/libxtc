@@ -243,10 +243,45 @@ int       xtc_exit_self(int reason);
 int       xtc_link(xtc_pid_t other);
 int       xtc_unlink(xtc_pid_t other);
 
+/* ---- Monitor DOWN reasons ------------------------------------------
+ *
+ * A monitor's DOWN carries an int `reason` describing how the target
+ * ended.  The reason space is:
+ *
+ *   0            -- clean exit (the target returned, or called
+ *                   xtc_exit_self(0)).
+ *   > 0          -- an application exit code the target passed to
+ *                   xtc_exit_self(code) (including a contained fault
+ *                   that ran xtc_exit_self(sig), which passes the
+ *                   POSITIVE signal number, e.g. 11 for SIGSEGV).
+ *   XTC_DOWN_NOPROC -- the monitor was registered on a target that had
+ *                   ALREADY exited (the monitor raced the target's
+ *                   exit), so its real exit reason was already reaped
+ *                   and is unknown.  This is NOT a crash: a short-lived
+ *                   target that a supervisor monitors just after it
+ *                   finished delivers this, and it is expected.  It is a
+ *                   distinct value (not XTC_E_NOTFOUND, and outside the
+ *                   1..255 signal-number range) precisely so a
+ *                   supervisor can tell "already gone" apart from a real
+ *                   fault exit -- a DOWN reason of, say, 11 is a
+ *                   contained SIGSEGV, whereas XTC_DOWN_NOPROC is not.
+ *
+ * xtc_down_is_noproc(reason) is the readable test for the last case.
+ */
+#define XTC_DOWN_NOPROC  (-100000)
+
+static inline int
+xtc_down_is_noproc(int reason)
+{
+	return reason == XTC_DOWN_NOPROC;
+}
+
 /* Monitor: unidirectional notification.  out_ref is filled with the
  * monitor reference; the watcher receives a DOWN message of shape
  * { uint8_t kind = 'D'; uint64_t ref; xtc_pid_t pid; int reason; }
- * when the monitored process exits. */
+ * when the monitored process exits (reason per the DOWN-reason space
+ * above).  Registering a monitor on an ALREADY-dead target is not an
+ * error: it delivers an immediate DOWN with reason XTC_DOWN_NOPROC. */
 int       xtc_monitor(xtc_pid_t target, uint64_t *out_ref);
 
 /* Snapshot a process's mailbox statistics into *out.  Returns XTC_OK,
