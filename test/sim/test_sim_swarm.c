@@ -79,6 +79,13 @@ struct scenario {
 	int buggify;        /* enable buggify */
 	int machine_death;  /* a reaper kills a worker mid-run */
 	int torn;           /* torn/corrupt-write injection + page verifiers */
+	/* Seed-varied MAGNITUDES (not just presence): a sweep must explore
+	 * a mild schedule and a brutal one, not always the same intensity. */
+	int buggify_pct;    /* per-1000 buggify activation (100..500) */
+	int corrupt_pct;    /* per-1000 torn-write corruption (100..500) */
+	int64_t lat_hi;     /* net-latency upper bound (100us..2ms) */
+	int sched_pess;     /* per-1000 pessimal (starve) scheduler pick */
+	int swizzle_pct;    /* per-1000 completion/message reorder */
 };
 
 /* ---- torn-page verifier: write a checksummed page, read it back, and
@@ -285,9 +292,15 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 		xtc_sim_partition_set(3, 1, 1);
 	}
 	if (sc->latency)
-		xtc_sim_net_latency(10 * 1000LL, 300 * 1000LL);
+		xtc_sim_net_latency(10 * 1000LL, sc->lat_hi);
 	if (sc->buggify)
-		xtc_sim_buggify_enable(300);   /* 30% per site */
+		xtc_sim_buggify_enable((unsigned)sc->buggify_pct);
+	/* Adversarial scheduler bias + completion/message swizzle, both
+	 * seed-varied in magnitude (0 for some seeds = benign uniform). */
+	if (sc->sched_pess > 0)
+		xtc_sim_sched_pessimal((unsigned)sc->sched_pess);
+	if (sc->swizzle_pct > 0)
+		xtc_sim_swizzle_enable((unsigned)sc->swizzle_pct);
 	if (sc->machine_death) {
 		g_reaper_arg.pongs = g_pongs;
 		g_reaper_arg.n = N_PAIRS;
@@ -315,7 +328,7 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 				/* best-effort: a short file just yields short reads */
 				(void)0;
 			xtc_sim_io_faults_enable(20 * 1000LL, 200 * 1000LL, 0);
-			xtc_sim_io_corrupt_enable(300);
+			xtc_sim_io_corrupt_enable((unsigned)sc->corrupt_pct);
 			for (v = 0; v < 2; v++)
 				(void)xtc_proc_spawn(
 				    xtc_exec_loop(e, (unsigned)(v % N_LOOPS)),
@@ -366,6 +379,19 @@ main(int argc, char **argv)
 		sc.buggify       = (seed & 0x8) != 0;   /* ~50% */
 		sc.machine_death = (seed & 0x30) == 0;  /* ~25% */
 		sc.torn          = (seed & 0x40) != 0;  /* ~50% */
+		/* Seed-varied MAGNITUDES from independent higher seed bits, so a
+		 * sweep spans mild to brutal.  Each maps a small bit-field to a
+		 * range; fixed for the seed (so the seed still fully determines
+		 * the scenario) and replays. */
+		sc.buggify_pct = 100 + (int)((seed >> 7) & 0x7) * 60;   /* 100..520 */
+		sc.corrupt_pct = 100 + (int)((seed >> 10) & 0x7) * 60;  /* 100..520 */
+		sc.lat_hi      = (100 + (int64_t)((seed >> 13) & 0x7) * 60) * 1000LL; /* 100us..520us */
+		/* Pessimal scheduler + swizzle: on for ~half the seeds, and when
+		 * on the magnitude also varies with the seed. */
+		sc.sched_pess  = ((seed >> 17) & 0x1) ?
+		    (200 + (int)((seed >> 18) & 0x7) * 100) : 0;   /* 0 or 200..900 */
+		sc.swizzle_pct = ((seed >> 21) & 0x1) ?
+		    (100 + (int)((seed >> 22) & 0x7) * 80) : 0;    /* 0 or 100..660 */
 		n_part += sc.partition;
 		n_lat  += sc.latency;
 		n_bug  += sc.buggify;

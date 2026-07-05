@@ -204,6 +204,37 @@ __xtc_io_sim_next_due(xtc_io_t *io)
 	return best;
 }
 
+/*
+ * Insert `ev` into the loop's due-ordered event list.  Normally this is
+ * a stable insert at the due-order position.  Under swizzle
+ * (xtc_sim_swizzle_enable), on a seeded XTC_SIM_RNG_IO coin the event is
+ * placed one slot LATER than due order -- a legal reordering (the waiter
+ * simply wakes after a sibling completion it would otherwise have
+ * preceded) that explicitly explores completion/message-order
+ * interleavings.  Deterministic: the coin is a seeded draw, so replay
+ * holds.  A no-op (plain due-order insert) when swizzle is off.
+ */
+static void
+sim_events_insert(struct __xtc_sim_io *s, struct __xtc_sim_ev *ev)
+{
+	struct __xtc_sim_ev **pp;
+	for (pp = &s->events;
+	    *pp != NULL && (*pp)->due_ns <= ev->due_ns;
+	    pp = &(*pp)->next)
+		;
+	/* pp now points at the due-order slot.  Swizzle: if there is a
+	 * following event, step one past it so `ev` is delivered after a
+	 * peer it would otherwise precede. */
+	{
+		int sw = __xtc_sim_swizzle_pct();
+		if (sw > 0 && *pp != NULL &&
+		    (int)__xtc_sim_rng_range(XTC_SIM_RNG_IO, 1000) < sw)
+			pp = &(*pp)->next;
+	}
+	ev->next = *pp;
+	*pp = ev;
+}
+
 /* PUBLIC: int __xtc_io_sim_defer_cb __P((xtc_io_t *, int64_t, void (*)(void *), void *)); */
 /*
  * Enqueue a generic callback to run at virtual time `due_ns` on this
@@ -220,7 +251,7 @@ __xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns, void (*fn)(void *),
     void *arg)
 {
 	struct __xtc_sim_io *s;
-	struct __xtc_sim_ev *ev, **pp;
+	struct __xtc_sim_ev *ev;
 	if (io == NULL || io->sim == NULL || fn == NULL)
 		return XTC_E_INVAL;
 	s = io->sim;
@@ -230,12 +261,7 @@ __xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns, void (*fn)(void *),
 	ev->fd = -1;
 	ev->cb = fn;
 	ev->cb_arg = arg;
-	for (pp = &s->events;
-	    *pp != NULL && (*pp)->due_ns <= ev->due_ns;
-	    pp = &(*pp)->next)
-		;
-	ev->next = *pp;
-	*pp = ev;
+	sim_events_insert(s, ev);
 	return XTC_OK;
 }
 
@@ -425,7 +451,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		 * order, and leave a->done == 0 so the fiber parks.  The drain
 		 * path publishes a->res = aio_res and wakes a->tag. */
 		struct __xtc_sim_io *s = io->sim;
-		struct __xtc_sim_ev *ev, **pp;
+		struct __xtc_sim_ev *ev;
 		int64_t now = 0;
 		if (__os_calloc(1, sizeof *ev, (void **)&ev) == XTC_OK) {
 			int64_t extra = 0;
@@ -445,12 +471,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 			ev->fd = -1;
 			ev->aio = a;
 			ev->aio_res = res;
-			for (pp = &s->events;
-			    *pp != NULL && (*pp)->due_ns <= ev->due_ns;
-			    pp = &(*pp)->next)
-				;
-			ev->next = *pp;
-			*pp = ev;
+			sim_events_insert(s, ev);
 			return XTC_OK;
 		}
 		/* calloc failed -- fall through to inline completion. */

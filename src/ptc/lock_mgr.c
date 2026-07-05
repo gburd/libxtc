@@ -443,12 +443,17 @@ xtc_lockmgr_destroy(xtc_lockmgr_t *m)
 			for (e = o->granted; e != NULL; e = ne) {
 				ne = e->next;
 				(void)pthread_cond_destroy(&e->cv);
-				__os_free(e);
+				/* Entries are slab-backed; xtc_slab_destroy below
+				 * reclaims the storage.  Do NOT __os_free here --
+				 * that frees a slab chunk with the OS allocator (a
+				 * bad-free).  Latent because a correct caller
+				 * releases every lock before destroy, leaving these
+				 * lists empty; an entry left granted/waiting (e.g.
+				 * a still-parked waiter) reached the bug. */
 			}
 			for (e = o->waiting; e != NULL; e = ne) {
 				ne = e->next;
 				(void)pthread_cond_destroy(&e->cv);
-				__os_free(e);
 			}
 			__os_free(o->key);
 			__os_free(o);
@@ -726,10 +731,29 @@ __release_entry_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 	}
 	__entry_release(m, e);
 
-	/* Promote head-of-line waiters that no longer conflict. */
+	/* Promote head-of-line waiters that no longer conflict.  Buggify
+	 * (lock.grant.skip_head): on a seeded coin, promote a LATER
+	 * grantable waiter before an earlier one -- a legal reordering (the
+	 * manager makes no strict-FIFO promise) that explores the pessimal
+	 * wake order where fairness/detector bugs hide.  Bounded so it can
+	 * never STARVE: we only defer waiter `w` when a strictly-later
+	 * grantable waiter exists to promote in its place, so every release
+	 * that can make progress still does -- just in a different order.
+	 * A no-op in production. */
 	for (w = o->waiting; w != NULL; w = nw) {
 		nw = w->next;
 		if (__has_conflict_granted(m, o, w->locker, w->mode)) break;
+		if (XTC_SIM_BUGGIFY("lock.grant.skip_head") &&
+		    xtc_sim_buggify_fault(250)) {
+			struct lock_entry *later;
+			int have_later = 0;
+			for (later = nw; later != NULL; later = later->next) {
+				if (!__has_conflict_granted(m, o, later->locker,
+				    later->mode)) { have_later = 1; break; }
+			}
+			if (have_later)
+				continue;   /* defer w; a later waiter promotes */
+		}
 		if (w->prev) w->prev->next = w->next;
 		else         o->waiting    = w->next;
 		if (w->next) w->next->prev = w->prev;

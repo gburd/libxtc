@@ -27,6 +27,10 @@
 static _Atomic int      g_sim_active;
 static uint64_t         g_sim_seed;
 static uint64_t         g_sim_stream[XTC_SIM_RNG_NSTREAMS];
+/* Adversarial-mode knobs (see xtc_sim.h); defined early because
+ * xtc_sim_deactivate resets them.  Both OFF (0) by default. */
+static _Atomic int      g_sched_pessimal_pct;   /* per-1000; 0 = uniform */
+static _Atomic int      g_swizzle_pct;          /* per-1000; 0 = no reorder */
 
 /* Virtual (logical) clock.  When sim is active and the clock mode is
  * VIRTUAL, __os_clock_mono returns this instead of the host monotonic
@@ -76,6 +80,11 @@ void
 xtc_sim_deactivate(void)
 {
 	atomic_store_explicit(&g_sim_active, 0, memory_order_release);
+	/* Reset adversarial-mode knobs so one run's setting does not leak
+	 * into the next in-process run (buggify/io-fault knobs are reset by
+	 * their own enable/disable; these have no such call on every run). */
+	atomic_store_explicit(&g_sched_pessimal_pct, 0, memory_order_release);
+	atomic_store_explicit(&g_swizzle_pct, 0, memory_order_release);
 }
 
 /* PUBLIC: uint64_t __xtc_sim_rng __P((int)); */
@@ -269,6 +278,50 @@ static char             g_bug_name[XTC_SIM_BUG_MAX][48];
 static signed char      g_bug_decided[XTC_SIM_BUG_MAX]; /* -1 undecided, 0/1 */
 static _Atomic int      g_bug_n;
 static pthread_mutex_t  g_bug_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Adversarial scheduler bias + completion/message swizzle (see
+ * xtc_sim.h).  State defined near the top (xtc_sim_deactivate resets
+ * it); the accessors follow. */
+
+/* PUBLIC: void xtc_sim_sched_pessimal __P((unsigned)); */
+void
+xtc_sim_sched_pessimal(unsigned pct_per_1000)
+{
+	if (pct_per_1000 > 1000) pct_per_1000 = 1000;
+	atomic_store_explicit(&g_sched_pessimal_pct, (int)pct_per_1000,
+	    memory_order_release);
+}
+
+/* PUBLIC: int __xtc_sim_sched_pessimal_pct __P((void)); */
+int
+__xtc_sim_sched_pessimal_pct(void)
+{
+	return atomic_load_explicit(&g_sched_pessimal_pct,
+	    memory_order_acquire);
+}
+
+/* PUBLIC: void xtc_sim_swizzle_enable __P((unsigned)); */
+void
+xtc_sim_swizzle_enable(unsigned pct_per_1000)
+{
+	if (pct_per_1000 > 1000) pct_per_1000 = 1000;
+	atomic_store_explicit(&g_swizzle_pct, (int)pct_per_1000,
+	    memory_order_release);
+}
+
+/* PUBLIC: void xtc_sim_swizzle_disable __P((void)); */
+void
+xtc_sim_swizzle_disable(void)
+{
+	atomic_store_explicit(&g_swizzle_pct, 0, memory_order_release);
+}
+
+/* PUBLIC: int __xtc_sim_swizzle_pct __P((void)); */
+int
+__xtc_sim_swizzle_pct(void)
+{
+	return atomic_load_explicit(&g_swizzle_pct, memory_order_acquire);
+}
 
 /* PUBLIC: void xtc_sim_buggify_enable __P((unsigned)); */
 void

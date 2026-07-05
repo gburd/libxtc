@@ -112,6 +112,7 @@
 
 #include "btree.h"
 #include "btnode.h"
+#include "xtc_sim.h"    /* XTC_SIM_BUGGIFY -- DST eager-split (no-op in prod) */
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -912,7 +913,18 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	s = btnode_search(pg, key, klen, &found);
 	if (found)
 		(void)btnode_remove(pg, s);
-	if (btnode_insert(pg, key, klen, val, vlen) == 0) {
+	/* Buggify: force a SPLIT even when the pair would fit in place.  A
+	 * B-tree may legally split a non-full node (it only wastes space --
+	 * the tree stays ordered and correct), so this deterministically
+	 * drives the SMO / separator-post / latch-coupling path far more
+	 * often than a natural fill would, where the subtle split bugs live.
+	 * Only when the node already holds >= 2 live entries, since
+	 * btnode_split needs two slots to divide.  Per-call BUGGIFY coin
+	 * (fixed per site per run, replays); a no-op in production. */
+	if (!(btnode_count(pg) >= 2 &&
+	      XTC_SIM_BUGGIFY("btree.split.eager") &&
+	      xtc_sim_buggify_fault(200)) &&
+	    btnode_insert(pg, key, klen, val, vlen) == 0) {
 		atomic_fetch_add(&bt->st_inserts, 1);
 		/* Non-split in-leaf insert on the SMO path (an upsert, or a
 		 * fast-path miss re-run under the lock): log the leaf image too,
