@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.1.0"
+#       --define "version 1.2.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.1.0
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,11 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Sun Jul 05 2026 Greg Burd <greg@burd.me> - 1.2.0-1
+- Preemption Phase 3 (xtc_launch) + Lever S1 (madvise-on-park); vectored
+  scatter/gather AIO (xtc_aio_preadv/pwritev); public xtc_free packaging
+  fix; sqlxtc fuzzy checkpoint; conformance W5.  40-test DST sim suite.
+
 * Sat Jul 04 2026 Greg Burd <greg@burd.me> - 1.1.0-1
 - DST reach extended toward FoundationDB parity: tnt actor layer
   (incl. cross-shard + timers), L4 supervision/app, resource governance,
