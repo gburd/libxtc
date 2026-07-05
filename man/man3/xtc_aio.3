@@ -6,6 +6,8 @@
 .Sh NAME
 .Nm xtc_aio_pread ,
 .Nm xtc_aio_pwrite ,
+.Nm xtc_aio_preadv ,
+.Nm xtc_aio_pwritev ,
 .Nm xtc_aio_fsync ,
 .Nm xtc_aio_fdatasync
 .Nd async file I/O for fibers
@@ -16,6 +18,10 @@
 .Fn xtc_aio_pread "int fd" "void *buf" "uint32_t len" "int64_t off"
 .Ft int
 .Fn xtc_aio_pwrite "int fd" "const void *buf" "uint32_t len" "int64_t off"
+.Ft int
+.Fn xtc_aio_preadv "int fd" "const struct iovec *iov" "int iovcnt" "int64_t off"
+.Ft int
+.Fn xtc_aio_pwritev "int fd" "const struct iovec *iov" "int iovcnt" "int64_t off"
 .Ft int
 .Fn xtc_aio_fsync "int fd"
 .Ft int
@@ -131,6 +137,51 @@ On macOS, which has no
 the data-only call falls back to
 .Fn fsync .
 None of them moves the file's seek pointer.
+.Ss Vectored (scatter/gather) I/O
+.Fn xtc_aio_preadv
+and
+.Fn xtc_aio_pwritev
+are the async-fiber analogs of
+.Xr preadv 2
+and
+.Xr pwritev 2 :
+they read into, or write from, the
+.Fa iovcnt
+buffers described by
+.Fa iov
+at file offset
+.Fa off ,
+as one positioned op, with the same fiber-parks / loop-stays-live
+semantics as the scalar calls.
+They exist for migration ergonomics: code that already assembles
+.Vt struct iovec
+arrays -- a WAL writer, PostgreSQL's
+.Sy smgr Ns / Ns Sy md
+layer, any
+.Xr readv 2 Ns / Ns Xr writev 2
+consumer -- can move to
+.Nm libxtc
+without flattening its buffers or looping.
+Where the host has
+.Sy io_uring
+the op is submitted natively
+.Pq Dv IORING_OP_READV Ns / Ns Dv WRITEV ;
+elsewhere it offloads to the blocking pool
+.Pq Xr preadv 2 Ns / Ns Xr pwritev 2 on a worker thread ,
+identical observable behavior to the scalar API.
+.Fa iovcnt
+must be in
+.Bq 1 , Dv IOV_MAX ;
+out of range returns
+.Er -EINVAL ,
+so a caller cannot force an unbounded submission.
+These two are POSIX only -- Windows lacks
+.Xr preadv 2 Ns / Ns Xr pwritev 2
+and
+.Vt struct iovec ,
+so they are not declared there; the scalar
+.Fn xtc_aio_pread Ns / Ns Fn xtc_aio_pwrite
+remain available on every platform.
 .Sh RETURN VALUES
 .Fn xtc_aio_pread
 and

@@ -130,6 +130,144 @@ test_aio_roundtrip_offload(const MunitParameter p[], void *d)
 	return run_roundtrip(1);
 }
 
+/* ---- vectored (scatter/gather) round-trip ---- */
+#include <sys/uio.h>
+
+struct vec_ctx {
+	int fd;
+	int wrote;
+	int rd;
+	int match;
+	int loop_ran;
+};
+
+/* Gather-write 3 segments, then scatter-read into 3 DIFFERENTLY sized
+ * segments (so reassembly across iovec boundaries is exercised), and
+ * verify the whole byte stream round-trips. */
+static void
+vec_proc(void *arg)
+{
+	struct vec_ctx *c = arg;
+	static unsigned char w0[1000], w1[2000], w2[1096];  /* total 4096 */
+	static unsigned char r0[2048], r1[1024], r2[1024];  /* total 4096 */
+	struct iovec wv[3], rv[3];
+	unsigned char flat_w[4096], flat_r[4096];
+	int i;
+
+	for (i = 0; i < (int)sizeof w0; i++) w0[i] = (unsigned char)(i + 1);
+	for (i = 0; i < (int)sizeof w1; i++) w1[i] = (unsigned char)(i * 3 + 5);
+	for (i = 0; i < (int)sizeof w2; i++) w2[i] = (unsigned char)(i * 5 + 9);
+	wv[0].iov_base = w0; wv[0].iov_len = sizeof w0;
+	wv[1].iov_base = w1; wv[1].iov_len = sizeof w1;
+	wv[2].iov_base = w2; wv[2].iov_len = sizeof w2;
+
+	xtc_yield();   /* let the peer run while the I/O is outstanding */
+
+	c->wrote = xtc_aio_pwritev(c->fd, wv, 3, 0);
+	(void)xtc_aio_fdatasync(c->fd);
+
+	memset(r0, 0, sizeof r0); memset(r1, 0, sizeof r1);
+	memset(r2, 0, sizeof r2);
+	rv[0].iov_base = r0; rv[0].iov_len = sizeof r0;
+	rv[1].iov_base = r1; rv[1].iov_len = sizeof r1;
+	rv[2].iov_base = r2; rv[2].iov_len = sizeof r2;
+	c->rd = xtc_aio_preadv(c->fd, rv, 3, 0);
+
+	/* Flatten both sides and compare the whole 4096-byte stream. */
+	memcpy(flat_w, w0, sizeof w0);
+	memcpy(flat_w + 1000, w1, sizeof w1);
+	memcpy(flat_w + 3000, w2, sizeof w2);
+	memcpy(flat_r, r0, sizeof r0);
+	memcpy(flat_r + 2048, r1, sizeof r1);
+	memcpy(flat_r + 3072, r2, sizeof r2);
+	c->match = (c->wrote == 4096 && c->rd == 4096 &&
+	    memcmp(flat_w, flat_r, 4096) == 0);
+	c->loop_ran = atomic_load(&g_peer_ran);
+}
+
+static MunitResult
+run_vec_roundtrip(int force_offload)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t o = { 0 };
+	xtc_pid_t a, b;
+	struct vec_ctx c;
+	char tmpl[] = "/tmp/xtc_aiov_XXXXXX";
+
+	__xtc_aio_force_offload(force_offload);
+	memset(&c, 0, sizeof c);
+	atomic_store(&g_peer_ran, 0);
+	c.fd = mkstemp(tmpl);
+	munit_assert_int(c.fd, >=, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, peer_proc, NULL, &o, &b), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, vec_proc, &c, &o, &a), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	close(c.fd);
+	unlink(tmpl);
+	__xtc_aio_force_offload(0);
+
+	munit_assert_int(c.wrote, ==, 4096);    /* all gathered bytes written */
+	munit_assert_int(c.rd, ==, 4096);       /* all scattered bytes read */
+	munit_assert_int(c.match, ==, 1);       /* stream round-tripped exactly */
+	munit_assert_int(c.loop_ran, ==, 1);    /* peer ran during the I/O */
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_aiov_roundtrip(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return run_vec_roundtrip(0);   /* native (io_uring where present) */
+}
+
+static MunitResult
+test_aiov_roundtrip_offload(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return run_vec_roundtrip(1);   /* forced blocking-pool preadv/pwritev */
+}
+
+/* Out-of-range iovcnt / NULL iov are rejected (bounded submission). */
+static struct vec_ctx g_badv;
+static void
+badv_proc(void *arg)
+{
+	struct vec_ctx *c = arg;
+	struct iovec v = { (void *)"x", 1 };
+	c->wrote = xtc_aio_pwritev(c->fd, &v, 0, 0);    /* iovcnt < 1 */
+	c->rd = xtc_aio_pwritev(c->fd, NULL, 1, 0);     /* NULL iov */
+}
+
+static MunitResult
+test_aiov_bounds(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t o = { 0 };
+	xtc_pid_t a;
+	char tmpl[] = "/tmp/xtc_aiovb_XXXXXX";
+	(void)p; (void)d;
+
+	memset(&g_badv, 0, sizeof g_badv);
+	g_badv.fd = mkstemp(tmpl);
+	munit_assert_int(g_badv.fd, >=, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, badv_proc, &g_badv, &o, &a),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	close(g_badv.fd);
+	unlink(tmpl);
+
+	munit_assert_int(g_badv.wrote, <, 0);   /* iovcnt 0 rejected */
+	munit_assert_int(g_badv.rd, <, 0);      /* NULL iov rejected */
+	return MUNIT_OK;
+}
+
 /* A short read at EOF returns the partial count, not an error. */
 static struct aio_ctx g_eof;
 static void
@@ -168,6 +306,9 @@ test_aio_short_read(const MunitParameter p[], void *d)
 static MunitTest tests[] = {
 	{ "/roundtrip",         test_aio_roundtrip,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/roundtrip_offload", test_aio_roundtrip_offload, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/vec_roundtrip",     test_aiov_roundtrip,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/vec_roundtrip_offload", test_aiov_roundtrip_offload, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/vec_bounds",        test_aiov_bounds,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/short_read",        test_aio_short_read,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

@@ -209,6 +209,16 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		io_uring_prep_write(sqe, a->fd, a->buf, a->len,
 		    (unsigned long long)a->off);
 		break;
+	case XTC_AIO_PREADV:
+		io_uring_prep_readv(sqe, a->fd,
+		    (const struct iovec *)a->iov, (unsigned)a->iovcnt,
+		    (unsigned long long)a->off);
+		break;
+	case XTC_AIO_PWRITEV:
+		io_uring_prep_writev(sqe, a->fd,
+		    (const struct iovec *)a->iov, (unsigned)a->iovcnt,
+		    (unsigned long long)a->off);
+		break;
 	case XTC_AIO_FSYNC:
 		io_uring_prep_fsync(sqe, a->fd, 0);
 		break;
