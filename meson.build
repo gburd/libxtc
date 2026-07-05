@@ -40,6 +40,8 @@ inc = include_directories('src/inc')
 lib_sources = [
   'src/xtc_version.c',
   'src/xtc_strerror.c',
+  'src/os/os_alloc.c',        # xtc_free (in xtc_strerror.c) calls __os_free
+  'src/os/os_unsafe_stub.c',  # no-op __xtc_unsafe_* (preempt.c not in the M0 lib)
 ]
 
 build_shared = get_option('shared')

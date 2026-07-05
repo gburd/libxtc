@@ -103,8 +103,10 @@ static const struct __os_alloc_hook *volatile __active_hook = &__default_hook;
  * consult __xtc_sim_vclock.  Bracketing every allocator call marks the
  * malloc/free window unsafe so the preemption timer defers a
  * signal-context yield across it (and the fault handler does not unwind
- * out of a corrupt arena).  They are always linked (preempt.c is in
- * every build); the counter is a per-thread no-op cost. */
+ * out of a corrupt arena).  In the full build (autoconf / amalgamation)
+ * preempt.c provides these.  The minimal meson M0 library does not link
+ * preempt.c; it links src/os/os_unsafe_stub.c instead, which supplies
+ * no-op fallbacks so the allocator links standalone there. */
 void __xtc_unsafe_enter(void);
 void __xtc_unsafe_leave(void);
 
