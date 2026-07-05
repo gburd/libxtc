@@ -1,0 +1,56 @@
+.\" Copyright (c) 2026, The XTC Project -- All rights reserved.
+.\" Use of this source code is governed by the ISC License.
+.Dd July 5, 2026
+.Dt XTC_FREE 3
+.Os
+.Sh NAME
+.Nm xtc_free
+.Nd free a heap buffer libxtc handed the caller to own
+.Sh SYNOPSIS
+.In xtc.h
+.Ft void
+.Fn xtc_free "void *p"
+.Sh DESCRIPTION
+.Fn xtc_free
+releases a heap buffer that a libxtc call allocated and handed to the
+caller to own.
+Several APIs return caller-owned buffers and document that they must be
+released with
+.Fn xtc_free :
+.Bl -bullet -compact
+.It
+the message buffer from
+.Xr xtc_recv 3 ,
+.Fn xtc_recv_match ,
+and
+.Fn xtc_recv_correlate ;
+.It
+the frame from
+.Fn xtc_net_recv_frame ;
+.It
+the reply buffer from
+.Fn xtc_osproc_call
+and
+.Fn xtc_svr_call .
+.El
+.Pp
+These buffers are allocated by libxtc's own allocator, which is not
+necessarily the C library
+.Xr malloc 3 Ns / Ns Xr free 3 ,
+so they must be released through
+.Fn xtc_free
+rather than plain
+.Xr free 3 .
+Passing
+.Dv NULL
+is a no-op.
+.Fn xtc_free
+is safe to call from any thread.
+.Sh RETURN VALUES
+.Fn xtc_free
+returns no value.
+.Sh SEE ALSO
+.Xr xtc_proc 3 ,
+.Xr xtc_net 3 ,
+.Xr xtc_osproc 3 ,
+.Xr xtc_svr 3

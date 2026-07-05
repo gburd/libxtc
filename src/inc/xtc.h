@@ -95,6 +95,22 @@ int xtc_version_components(int *major, int *minor, int *patch);
  */
 const char *xtc_strerror(int xtc_err);
 
+/*
+ * xtc_free --
+ *	Free a heap buffer that a libxtc call handed to the caller to own
+ *	-- notably the message buffer from xtc_recv / xtc_recv_match /
+ *	xtc_recv_correlate, the frame from xtc_net_recv_frame, the reply
+ *	from xtc_osproc_call / xtc_svr_call, and any other buffer whose
+ *	documentation says "free with xtc_free".  Those buffers are
+ *	allocated by libxtc's own allocator, which is not necessarily the
+ *	C library malloc/free, so they MUST be released through this
+ *	function rather than plain free().  Passing NULL is a no-op.
+ *
+ *	This is the public name for the library allocator's deallocation
+ *	entry point; it is safe to call from any thread.
+ */
+void xtc_free(void *p);
+
 #ifdef __cplusplus
 }
 #endif

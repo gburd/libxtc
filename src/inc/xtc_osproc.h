@@ -147,7 +147,7 @@ int xtc_osproc_isolated_spawn(const char *name,
                               xtc_osproc_t **out);
 
 /* Parent side: send a request frame to the worker and park for its
- * reply frame (allocated with the xtc allocator; free with __os_free).
+ * reply frame (allocated with the xtc allocator; free with xtc_free).
  * max_reply caps the reply (0 = uncapped).  Returns XTC_OK, XTC_E_AGAIN
  * on timeout, or XTC_E_*.  Requires a control socket.
  *
