@@ -215,7 +215,7 @@ int
 __xtc_coro_preempt_effective(void)
 {
 #if (defined(__x86_64__) || defined(__aarch64__)) && \
-    !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
+    defined(__linux__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
 	return 1;
 #else
 	return 0;
@@ -254,7 +254,7 @@ __xtc_coro_preempt_effective(void)
 int
 __xtc_coro_preempt(void *uctx)
 {
-#if defined(__x86_64__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
+#if defined(__x86_64__) && defined(__linux__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
 	/*
 	 * Phase 2b-arch, x86-64 System V: Go's async-preemption PC
 	 * redirect.  We do NOT copy the (unsound-to-reuse) signal
@@ -319,7 +319,7 @@ __xtc_coro_preempt(void *uctx)
 	uc->uc_mcontext.gregs[REG_RIP] =
 	    (greg_t)(uintptr_t)&__xtc_preempt_trampoline;
 	return 1;   /* armed: sigreturn lands in the trampoline */
-#elif defined(__aarch64__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
+#elif defined(__aarch64__) && defined(__linux__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
 	/*
 	 * Phase 2b-arch, AArch64 (AAPCS64): the same Go-style PC redirect
 	 * as x86-64.  aarch64 has no red zone, so we place orig_pc in a
