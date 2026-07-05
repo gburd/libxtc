@@ -241,6 +241,58 @@ crash-recovery capstone, see below), and test_sim_swarm (a shardable
 seed sweep combining partition + latency + buggify + machine-death,
 bounded 300-seed default and a manual 100k+ sweep).
 
+## Adversarial mode (FoundationDB-style worst-interleaving hunting)
+
+The replay/clock/invariant/crash-recovery infrastructure above is
+FDB-class, but for a long time the fault-FINDING aggressiveness was
+not: the scheduler picked uniform-random among runnable loops (benign,
+not pessimal), I/O completions were strictly due-time ordered, fault
+rates were fixed constants, and Buggify was planted only in runtime
+plumbing -- never in the WAL / btree / lock-manager paths.  Four
+seeded, opt-in levers close that gap (all OFF by default, so existing
+tests' schedules and production are byte-unchanged):
+
+- Pessimal scheduler bias -- xtc_sim_sched_pessimal(pct_per_1000): on a
+  seeded coin the executor picks the LEAST-RECENTLY-RUN runnable loop
+  instead of uniform-random, deliberately perturbing the order a
+  fiber's peer makes progress.  Per-run last-run tracking, no ABI
+  change.
+- Completion/message swizzle -- xtc_sim_swizzle_enable(pct_per_1000):
+  the io_sim event queue (normally due-time ordered) inserts an event
+  one slot LATER on a seeded coin -- a legal reorder (the waiter simply
+  wakes after a sibling completion) that explores completion- and
+  message-order interleavings the way FDB swizzles connections/disk.
+- Seed-varied fault MAGNITUDE -- the swarm now derives buggify %,
+  corrupt %, net-latency window, pessimal %, and swizzle % from
+  independent seed bits, so a sweep spans mild to brutal instead of a
+  single fixed intensity.
+- Buggify in the storage/lock paths that were bare: wal.flush.tiny_batch
+  (flush a tiny batch instead of coalescing -- more fsync/torn-tail
+  boundaries), btree.split.eager (split a non-full node -- drives the
+  SMO / separator-post / latch-coupling path far more often),
+  lock.grant.skip_head (promote a later grantable waiter first, BOUNDED
+  so it can never starve: only when a strictly-later grantable waiter
+  exists to promote in its place).
+
+test_sim_compose exercises all of it: every seed runs BOTH benign
+(uniform, no buggify) and adversarial (pessimal 700 + swizzle 500 +
+buggify 400), and the durability invariants (mutual exclusion, every
+committed row collected on the channel, self-replay) must hold in both;
+it also asserts the adversarial mode actually plants buggify sites.
+The adversarial schedule is legitimately slower, so a worker's bounded
+lock-acquire can time out and skip a commit -- the invariant is
+committed == received (no lost or torn report), not the full quota.
+
+Real bug the adversarial mode found on its first run:
+xtc_lockmgr_destroy freed granted/waiting lock_entry objects with
+__os_free, but entries are slab-backed and xtc_slab_destroy already
+reclaims them -- an OS-free of a slab chunk (a bad-free, confirmed by
+AddressSanitizer).  Latent because a correct caller releases every
+lock before destroy, leaving those lists empty; the lock.grant.skip_head
+buggify left a waiter parked at destroy time and reached it.  Fixed:
+destroy only pthread_cond_destroy()s each entry and lets
+xtc_slab_destroy reclaim the storage.
+
 ## Feature coverage progress (toward modelling all of libxtc)
 
 Goal: the DST sim should drive every libxtc concurrency feature so a
