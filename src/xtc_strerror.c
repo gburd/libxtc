@@ -13,6 +13,7 @@
 #include <stddef.h>
 
 #include "xtc.h"
+#include "os_alloc.h"
 
 /*
  * PUBLIC: const char *xtc_strerror __P((int));
@@ -36,4 +37,17 @@ xtc_strerror(int e)
 	case XTC_E_IO:		return "I/O error";
 	}
 	return "unknown";
+}
+
+/*
+ * Public deallocation entry point for buffers libxtc hands the caller
+ * to own (xtc_recv / xtc_net_recv_frame / xtc_osproc_call / xtc_svr_call
+ * results, etc.).  A thin wrapper over the library allocator so the
+ * caller need not (and must not) reach the internal __os_free directly.
+ * NULL is a no-op.  Declared in xtc.h (the umbrella public header).
+ */
+void
+xtc_free(void *p)
+{
+	__os_free(p);
 }

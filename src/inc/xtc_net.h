@@ -144,7 +144,7 @@ int xtc_dns_resolve(const char *hostname, int port,
  * for the loop-friendly behaviour.
  *
  * xtc_net_recv_frame allocates the frame with the xtc allocator (free
- * it with __os_free) and rejects a claimed length above max_len
+ * it with xtc_free) and rejects a claimed length above max_len
  * (max_len 0 = no cap) with XTC_E_RANGE -- so a peer cannot force an
  * unbounded allocation.  Returns XTC_E_AGAIN on timeout, XTC_E_INVAL
  * if the peer closed mid-frame.  A zero-length frame returns XTC_OK

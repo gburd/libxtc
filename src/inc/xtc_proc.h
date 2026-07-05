@@ -152,8 +152,9 @@ int       xtc_send(xtc_pid_t to, const void *data, size_t size);
 
 /*
  * Receive the next envelope from this process's mailbox.  Allocates
- * a new buffer for the caller via __os_malloc; the caller frees with
- * __os_free.  Blocks (yields the coroutine) up to timeout_ns; -1 is
+ * a new buffer for the caller (via the library allocator); the caller
+ * frees it with xtc_free.  Blocks (yields the coroutine) up to
+ * timeout_ns; -1 is
  * indefinite, 0 is non-blocking.
  *
  * Returns:
