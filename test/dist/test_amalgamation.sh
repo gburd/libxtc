@@ -85,9 +85,13 @@ EOF
 LIBS="-pthread"
 # illumos/Solaris keep the socket + name-resolver functions in
 # libsocket/libnsl, not libc -- the net code in the amalgamation
-# (getaddrinfo/recvfrom/...) needs them at link time.
+# (getaddrinfo/recvfrom/...) needs them at link time.  The POSIX
+# per-thread timer (preempt.c: timer_create/settime/delete) lives in
+# librt on the BSDs and illumos (in libc on modern glibc), so link -lrt
+# there too.
 case "$(uname -s 2>/dev/null)" in
-	SunOS) LIBS="$LIBS -lsocket -lnsl" ;;
+	SunOS) LIBS="$LIBS -lsocket -lnsl -lrt" ;;
+	FreeBSD|NetBSD|OpenBSD|DragonFly) LIBS="$LIBS -lrt" ;;
 esac
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists liburing 2>/dev/null; then
 	LIBS="$LIBS $(pkg-config --libs liburing)"
