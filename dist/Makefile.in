@@ -730,6 +730,7 @@ tests-c: $(TESTS_C)
 tests-sh: $(STATIC_LIB) tnt_echo
 	@for t in $(TESTS_SH); do \
 		echo "running shell test: $$(basename $$t)"; \
+		CC='$(CC)' \
 		XTC_BUILD_DIR=$(abs_builddir) \
 		XTC_SRC_DIR=$(abs_top_srcdir)/.. \
 		sh $$t || exit 1; \
