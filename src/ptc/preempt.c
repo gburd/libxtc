@@ -207,7 +207,30 @@ xtc_preempt_disarm(void)
 int
 xtc_preempt_supported(void)
 {
-	return 1;
+	/* Runtime probe, cached: the POSIX-timer headers may be present
+	 * (XTC_HAVE_POSIX_TIMERS) yet timer_create(CLOCK_THREAD_CPUTIME_ID)
+	 * still fail on a given host -- e.g. some FreeBSD configurations do
+	 * not back a per-thread CPU-time timer.  Probe once so
+	 * xtc_preempt_supported() and xtc_preempt_arm() agree: a compile-
+	 * time yes that arm() then refuses with NOSYS made a caller (and
+	 * test_preempt) assert on the mismatch. */
+	static _Atomic int cached = -1;   /* -1 unknown, 0 no, 1 yes */
+	int c = atomic_load_explicit(&cached, memory_order_relaxed);
+	if (c < 0) {
+		struct sigevent sev;
+		timer_t t;
+		memset(&sev, 0, sizeof sev);
+		sev.sigev_notify = SIGEV_SIGNAL;
+		sev.sigev_signo = XTC_PREEMPT_SIGNAL;
+		if (timer_create(CLOCK_THREAD_CPUTIME_ID, &sev, &t) == 0) {
+			(void)timer_delete(t);
+			c = 1;
+		} else {
+			c = 0;
+		}
+		atomic_store_explicit(&cached, c, memory_order_relaxed);
+	}
+	return c;
 }
 
 #else  /* no POSIX timers: no-op seam */
