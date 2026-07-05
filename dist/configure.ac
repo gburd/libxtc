@@ -94,6 +94,11 @@ AC_SEARCH_LIBS([pthread_create], [pthread], [],
   [AC_MSG_ERROR([xtc requires pthreads])])
 # librt for clock_gettime on older glibcs (no-op on modern ones).
 AC_SEARCH_LIBS([clock_gettime], [rt], [], [])
+# timer_create / timer_settime / timer_delete (the per-thread preemption
+# timer in preempt.c) live in librt on FreeBSD and older glibc, in libc
+# on modern glibc.  Find them wherever they are so the link does not
+# hardcode -lrt (and does not need it where they are in libc).
+AC_SEARCH_LIBS([timer_create], [rt], [], [])
 # shm_open lives in librt on older glibc, libc on modern glibc / *BSD,
 # and libc on macOS (no librt at all).  Find it wherever it is so the
 # shm test does not hardcode -lrt.
