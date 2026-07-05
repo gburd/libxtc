@@ -27,6 +27,7 @@ XTC_THREAD_LOCAL xtc_loop_t *__xtc_current_loop = NULL;
  * (proc.c) on first spawn.  NULL until then -- see loop_int.h. */
 void *(*__xtc_fiber_ctx_save)(void) = NULL;
 void  (*__xtc_fiber_ctx_restore)(void *) = NULL;
+void  (*__xtc_fiber_kill_check)(void) = NULL;
 
 /* --- inbox ---------------------------------------------------------- */
 

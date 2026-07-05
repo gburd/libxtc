@@ -635,6 +635,10 @@ xtc_yield(void)
 	(void)swapcontext(&c->ctx, &c->loop_ctx);
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 	g_in_preempt = 0;
+	/* Universal resume point: honor a kill/cancel requested while away
+	 * (e.g. an involuntary preemption of a pure CPU loop) -- xtc_launch
+	 * cancel of a runaway lands here. */
+	if (__xtc_fiber_kill_check) __xtc_fiber_kill_check();
 }
 
 xtc_task_t *

@@ -393,6 +393,11 @@ xtc_yield(void)
 	pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 	(void)__xtc_jump_fcontext(&c->fctx, g_sched_fctx, NULL);
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
+	/* Universal resume point: honor a kill/cancel requested while we
+	 * were away (e.g. an involuntary preemption of a pure CPU loop that
+	 * never reaches a cooperative kill-check).  xtc_launch's cancel
+	 * lands here for a runaway. */
+	if (__xtc_fiber_kill_check) __xtc_fiber_kill_check();
 }
 
 /* PUBLIC: int __xtc_coro_preempt __P((void *)); */

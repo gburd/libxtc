@@ -1,0 +1,120 @@
+.\" Copyright (c) 2026, The XTC Project -- All rights reserved.
+.\" Use of this source code is governed by the ISC License.
+.Dd July 5, 2026
+.Dt XTC_LAUNCH 3
+.Os
+.Sh NAME
+.Nm xtc_launch
+.Nd run a function on a fiber with a precise one-shot deadline
+.Sh SYNOPSIS
+.In xtc_launch.h
+.Ft int
+.Fo xtc_launch
+.Fa "xtc_loop_t *loop"
+.Fa "xtc_launch_fn fn"
+.Fa "void *arg"
+.Fa "int64_t timeout_ns"
+.Fa "const xtc_launch_opts_t *opts"
+.Fa "intptr_t *result"
+.Fc
+.Sh DESCRIPTION
+.Nm
+runs
+.Fa fn Ns Pf ( Fa arg )
+on a child fiber with a one-shot
+.Fa timeout_ns
+deadline, the native libxtc form of libinger's
+.Fn launch f timeout .
+It blocks (parks) the calling fiber until
+.Fa fn
+finishes or the deadline fires.
+A
+.Dv NULL
+.Fa loop
+means the loop the caller is currently running on, the natural default
+for launching from inside a fiber.
+.Pp
+If
+.Fa fn
+completes within the deadline,
+.Nm
+returns
+.Dv XTC_OK
+and, when
+.Fa result
+is non-NULL, stores
+.Fa fn Ns 's
+.Vt intptr_t
+return value.
+If
+.Fa fn
+exceeds the deadline it is cancelled at the deadline: its per-fiber
+recovery and at-exit cleanup run, so any locks, file descriptors, or
+memory contexts it registered are released with no leak, and
+.Nm
+returns
+.Dv XTC_E_AGAIN
+(the runtime's timeout / try-again code).
+If
+.Fa fn
+faults and the fault is contained by the per-fiber recovery,
+.Nm
+returns
+.Dv XTC_E_ABORTED .
+A negative
+.Fa timeout_ns
+means no deadline (a plain awaited spawn).
+.Pp
+.Fa opts ,
+if non-NULL, may set the child proc
+.Fa name
+(for logs),
+.Fa mailbox_cap ,
+and the
+.Fa loop
+index when launched on an executor loop.
+.Pp
+.Nm
+is composable: a launched function may itself call
+.Nm .
+It must be called from a fiber (it parks the caller).
+.Sh CANCELLATION AND UNCOOPERATIVE WORK
+.Nm
+bounds a
+.Em cooperating
+function precisely: one that yields, receives, sleeps, or does I/O is
+cancelled at its next such point, which for a short deadline is at the
+deadline within a bounded slop.
+This is the statement-timeout / bounded-work primitive.
+.Pp
+A purely uncooperative function -- a tight CPU loop with no yield point
+at all -- is a harder case.
+Involuntary preemption
+.Pq Xr xtc_preempt 3
+time-slices such a loop so its loop-mates make progress, and a
+resume-point kill hook honors a pending cancel the instant the fiber is
+next scheduled through a yield.
+Reliably bounding a runaway to a
+.Em specific
+deadline additionally requires the launching fiber's deadline timer to
+be serviced ahead of the re-scheduled runaway, which the single-loop
+scheduler does not currently guarantee under full monopolization.
+For unconditionally bounding untrusted pure-CPU work, offload it to an
+OS process with
+.Xr xtc_osproc 3 ,
+which the kernel preempts.
+.Sh RETURN VALUES
+.Dv XTC_OK
+on a clean finish;
+.Dv XTC_E_AGAIN
+on deadline (cancelled);
+.Dv XTC_E_ABORTED
+on a contained fault;
+.Dv XTC_E_INVAL
+for bad arguments;
+.Dv XTC_E_NOMEM
+or a spawn error otherwise.
+.Sh SEE ALSO
+.Xr xtc_preempt 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_osproc 3

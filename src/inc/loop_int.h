@@ -265,6 +265,16 @@ extern XTC_THREAD_LOCAL xtc_loop_t *__xtc_current_loop;
 extern void *(*__xtc_fiber_ctx_save)(void);
 extern void  (*__xtc_fiber_ctx_restore)(void *);
 
+/* Post-resume cancellation hook.  Installed by the process layer
+ * (proc.c).  Called at the universal fiber resume point (after a yield
+ * returns) so a fiber that had a kill/cancel requested while it was
+ * NOT at a cooperative point -- e.g. a pure CPU loop that was
+ * involuntarily preempted -- honors the kill the instant the scheduler
+ * resumes it, by unwinding via xtc_exit_self.  NULL when no process
+ * layer is present (bare coroutine use).  Returns without effect if no
+ * kill is pending. */
+extern void  (*__xtc_fiber_kill_check)(void);
+
 /* Forward declaration for back-pointer in xtc_loop. */
 struct xtc_exec;
 
