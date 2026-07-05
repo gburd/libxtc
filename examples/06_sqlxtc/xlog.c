@@ -14,7 +14,7 @@
  *	                  [flags:1][redo_len:2][redo][undo_len:2][undo]
  *	  CLR      header [undo_next_lsn:8][page_id:4][tableid:4]
  *	                  [rowid:8][commit_ts:8][flags:1][redo_len:2][redo]
- *	  CHECKPT  header [commit_clock:8]
+ *	  CHECKPT  header [commit_clock:8][start_lsn:8]
  *	  BEGIN/COMMIT/ABORT/END  header only
  */
 
@@ -138,20 +138,22 @@ xl_enc_clr(uint8_t *buf, size_t cap, const xl_hdr_t *h, const xl_body_t *b)
 }
 
 int
-xl_enc_checkpoint(uint8_t *buf, size_t cap, uint64_t commit_clock)
+xl_enc_checkpoint(uint8_t *buf, size_t cap, uint64_t commit_clock,
+    uint64_t start_lsn)
 {
 	xl_hdr_t h;
 	uint8_t *p = buf;
 
 	if (buf == NULL)
 		return XTC_E_INVAL;
-	if (cap < (size_t)XL_HDR_LEN + 8)
+	if (cap < (size_t)XL_HDR_LEN + 16)
 		return XTC_E_RANGE;
 	h.type = XL_CHECKPOINT;
 	h.txn_id = 0;
 	h.prev_lsn = 0;
 	p = enc_hdr(p, &h);
 	p = put(p, &commit_clock, 8);
+	p = put(p, &start_lsn, 8);
 	return (int)(p - buf);
 }
 
@@ -249,7 +251,8 @@ xl_parse_clr(const void *rec, uint32_t len, xl_hdr_t *h, xl_body_t *b)
 }
 
 int
-xl_parse_checkpoint(const void *rec, uint32_t len, uint64_t *commit_clock)
+xl_parse_checkpoint(const void *rec, uint32_t len, uint64_t *commit_clock,
+    uint64_t *start_lsn)
 {
 	xl_hdr_t h;
 	int rc;
@@ -258,9 +261,11 @@ xl_parse_checkpoint(const void *rec, uint32_t len, uint64_t *commit_clock)
 		return XTC_E_INVAL;
 	if ((rc = xl_parse_hdr(rec, len, &h)) != XTC_OK)
 		return rc;
-	if (h.type != XL_CHECKPOINT || len < (uint32_t)XL_HDR_LEN + 8)
+	if (h.type != XL_CHECKPOINT || len < (uint32_t)XL_HDR_LEN + 16)
 		return XTC_E_INVAL;
 	(void)get((const uint8_t *)rec + XL_HDR_LEN, commit_clock, 8);
+	if (start_lsn != NULL)
+		(void)get((const uint8_t *)rec + XL_HDR_LEN + 8, start_lsn, 8);
 	return XTC_OK;
 }
 
@@ -302,7 +307,7 @@ xl_record_len(const void *rec, uint32_t avail)
 		total = XL_HDR_LEN;
 		break;
 	case XL_CHECKPOINT:
-		total = XL_HDR_LEN + 8;
+		total = XL_HDR_LEN + 16;
 		break;
 	case XL_UPDATE:
 		if (avail < (uint32_t)XL_HDR_LEN + XL_UPD_FIXED)

@@ -73,6 +73,58 @@ loop keeps serving.  This is Stasis `groupForce.c:stasis_log_group_force`
 process) `wal_commit_sync` appends + fsyncs synchronously under a mutex;
 both paths share the on-disk format, so `wal_scan` replays either.
 
+### 2.2.1 Pager as a proc: the single WAL-writer owner (DONE)
+
+The scale-out plan (M_SQLXTC_HARDFORK.md, stage 4; the PLAN.md item
+"pager as a proc / explicit single WAL-writer owner") calls for the
+WAL to have exactly ONE writer that owns the log, with every other
+context handing work to it rather than writing the file itself.  This
+is ALREADY SATISFIED by the existing writer proc -- it is not a
+remaining gap:
+
+  * `wal_writer_proc` (wal.c) is a single `xtc_proc` that exclusively
+    owns the log fd.  It is spawned once per log by `wal_writer_spawn`
+    (engine.c:`sx_storage_run` spawns exactly one for the live store);
+    `wal_writer_pid` names it.
+  * Committers NEVER write the file.  `wal_commit` builds a message,
+    `xtc_send`s it to the writer, and parks on the ack.  The writer is
+    the only code that calls `pwrite`/`fdatasync` on the log (in
+    `batch_flush`), so append order -- and therefore LSN assignment
+    (`++w->next_lsn` in `batch_add`) -- is inherently serial: one
+    owner, one total order.  This is the pager-as-a-proc shape: the
+    single owner funnels all durable writes.
+  * The one alternative path, `wal_commit_sync`, is for use OFF a loop
+    with NO writer proc spawned (recovery-time CLR appends, unit tests
+    driving the log synchronously).  It is mutually exclusive with the
+    writer (its header warns "do not mix with a spawned writer on the
+    same log"), so there is still exactly one writer of a given log at
+    a time -- either the proc, or a `wal_commit_sync` caller under the
+    internal `sync_mu`, never both.
+
+Proof of single-writer total ordering: `test_wal` spawns 16 committer
+procs (on one loop, and again spread across a 4-loop executor) all
+committing concurrently at ONE writer, and asserts every commit is
+acknowledged with a UNIQUE, MONOTONIC LSN and that replaying the log
+yields the records in strict LSN order (`replay_cb` fails on any
+`lsn != expect`).  A total LSN order out of concurrent committers is
+exactly the property a single-owner writer provides; if the writer
+were not the sole serialization point the LSNs could interleave or
+repeat, which the test would catch.  So the single-owner pager for the
+WAL is done and proven.
+
+Page WRITEBACK (the other half of "a single owner funnels writes") is a
+separate owner by design, not a gap: dirty data pages go to the base
+file through the buffer manager, whose write-ahead hook
+(`bm_set_wal_flush` -> `wal_flush_through`) guarantees the log is
+durable past a page's LSN before the page is written.  The WAL writer
+owns the LOG; the buffer manager (trickler + eviction) owns the BASE.
+They are two single-purpose write paths, not one funnel, because the
+log and the base are two different files with two different ordering
+disciplines (the log is strictly append-ordered; the base is written
+in recLSN order by the trickler).  Merging them would gain nothing and
+lose the parallelism of writing base pages while the log writer parks
+on an fsync.
+
 ### 2.3 Recovery (redo)
 
 `xstore_recover` -> `wal_scan` reads the log in LSN order and re-applies
@@ -197,6 +249,69 @@ SCOPED FUTURE milestone (see M_SQLXTC_BDB.md, which lists the
 write-ahead-enforce hook as the one thing BDB has that the default
 sqlxtc path lacks), NOT an in-progress gap.  It is a deliberate
 buffer-management policy choice, not missing recovery code.
+
+### 3.2 Fuzzy checkpoint + recLSN-horizon log truncation (DONE)
+
+The checkpoint in 3.(2) above is O(live-data): it dumps every live row
+into the compacted log, so its cost scales with the database, not with
+what changed since the last checkpoint.  The ARIES answer is a FUZZY
+checkpoint that is O(dirty): flush only the dirty page set, then
+truncate the log behind the recLSN horizon (the oldest change not yet
+on the base).  Both the horizon plumbing and the fuzzy checkpoint now
+exist:
+
+  * The horizon.  Each frame carries `rec_lsn`, stamped on the
+    clean->dirty edge (bufmgr.c); `bm_min_rec_lsn` returns the smallest
+    recLSN among dirty pages -- the oldest change not yet on the base,
+    i.e. the log-truncation floor (tested in test_redo_page).
+
+  * The checkpoint.  `xstore_fuzzy_checkpoint(bt, bm, wal, path,
+    &horizon)` (xstore.c) captures the horizon, flushes the dirty set
+    to the base with `bm_checkpoint` (the O(dirty) work), then rewrites
+    the log via `wal_checkpoint` to a single CHECKPOINT record carrying
+    the redo horizon as its start-LSN followed by only the retained
+    tail (records at or after the horizon).  Because `bm_checkpoint`
+    flushes ALL dirty pages, everything logged through the current
+    durable LSN is now on the base, so the safe truncation point is the
+    post-flush durable LSN and the retained tail is normally just the
+    checkpoint record -- the log collapses to O(1).
+
+  * Recovery honors the horizon.  The XL_CHECKPOINT record gained a
+    start-LSN field (xlog.c: `[commit_clock:8][start_lsn:8]`).
+    start_lsn == 0 is the full-compaction checkpoint (the following
+    dump IS the whole live set; rebuild logically).  start_lsn != 0 is
+    a fuzzy checkpoint: the base is durable through the horizon, so
+    `xs_recover_cb` skips the logical redo of any record logged before
+    the checkpoint and recovery trusts the base in place
+    (xstore_recover_inplace), replaying only the retained tail.  Cold
+    restart is therefore O(dirty tail), not O(database).
+
+  * The full-compaction checkpoint (xstore_checkpoint_wal) is KEPT: it
+    remains the correct choice for the logical-rebuild default (it
+    carries start_lsn == 0), and the two coexist.
+
+Proof: examples/06_sqlxtc/test_fuzzy_checkpoint.c builds 4000 committed
+rows, records the row set a FULL-SCAN logical recovery yields (the
+reference), then on a second base runs a fuzzy checkpoint (log shrinks
+from ~3.7 MB to 53 bytes -- just the checkpoint record -- proving the
+truncation below the horizon), writes a 200-row post-checkpoint tail,
+and recovers IN PLACE from the truncated log.  The in-place recovery
+restores EXACTLY the same 4200 rows (count, per-key value, ordered
+gap/dup-free scan) as the full-scan recovery.  ASan-clean
+(detect_leaks=1).
+
+Note on scope: the fuzzy checkpoint trusts the flushed base in place,
+using the same physiological XL_PAGE + two-pass in-place recovery
+mechanism proven for torn structure (test_inplace_redo / test_steal_leaf,
+M_SQLXTC_STEAL.md Increment 3).  It marks the base clean at the
+checkpoint (a crash after the checkpoint recovers in place from the
+retained tail).  This is distinct from the deliberately-deferred
+decision to make in-place recovery the LIVE crash default for an
+ARBITRARILY torn base -- that flip stays deferred (M_SQLXTC_STEAL.md
+Section 5).  The fuzzy checkpoint is safe because it flushes the base
+durable and marks it clean AT the checkpoint, so the base it later
+trusts is a checkpoint-consistent base plus a bounded logged tail, not
+an arbitrary post-crash torn base.
 
 ## 4. Why this order
 

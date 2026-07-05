@@ -78,6 +78,29 @@ void xstore_register_smo(int enable);
  * of the live tree, bounding it.  Call only when commits are quiesced. */
 int xstore_checkpoint_wal(bt_t *bt, struct wal *w, const char *wal_path);
 
+/*
+ * Fuzzy (ARIES-style) checkpoint -- O(dirty), not O(live-data).  Instead
+ * of dumping the whole live tree (xstore_checkpoint_wal), this flushes
+ * the dirty page set to the base (making it durable) and truncates the
+ * log below the redo horizon.  The recLSN horizon (bm_min_rec_lsn) is
+ * the oldest change not yet on the base -- the floor a pure no-flush
+ * fuzzy checkpoint would use; because this checkpoint flushes the whole
+ * dirty set, the safe horizon advances to the post-flush durable LSN
+ * (at or above bm_min_rec_lsn).  It marks the base clean/trusted, writes
+ * a CHECKPOINT record carrying that horizon as its start-LSN, and
+ * retains only records at or after it.  Recovery of such a checkpoint
+ * trusts the base in place (xstore_recover_inplace) and replays only
+ * the retained tail, so restart cost is O(dirty), not O(database).
+ *
+ * Requires bm to be the buffer manager bt runs on, opened with
+ * lsn_off >= 0, and physiological logging installed (xstore_register_smo
+ * / non-split-leaf images) so the trusted base is torn-safe.  Call only
+ * when commits are quiesced.  `out_horizon` (optional) receives the
+ * captured horizon.  Returns XTC_OK or an error (log unchanged on error).
+ */
+int xstore_fuzzy_checkpoint(bt_t *bt, bm_t *bm, struct wal *w,
+    const char *wal_path, uint64_t *out_horizon);
+
 /* The MVCC commit clock: read it to persist at a clean shutdown,
  * restore it when trusting the base on a clean restart. */
 uint64_t xstore_clock(void);

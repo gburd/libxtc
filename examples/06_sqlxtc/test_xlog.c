@@ -111,13 +111,17 @@ main(void)
 
 	/* --- CHECKPOINT --- */
 	{
-		uint64_t clk = 0;
-		n = xl_enc_checkpoint(buf, sizeof buf, 0x0123456789ABCDEFull);
-		CK(n == XL_HDR_LEN + 8);
-		CK(xl_parse_checkpoint(buf, (uint32_t)n, &clk) == XTC_OK);
+		uint64_t clk = 0, start = 0;
+		n = xl_enc_checkpoint(buf, sizeof buf, 0x0123456789ABCDEFull,
+		    0x1122334455667788ull);
+		CK(n == XL_HDR_LEN + 16);
+		CK(xl_parse_checkpoint(buf, (uint32_t)n, &clk, &start) == XTC_OK);
+		CK(clk == 0x0123456789ABCDEFull);
+		CK(start == 0x1122334455667788ull);
+		CK(xl_parse_checkpoint(buf, (uint32_t)n, &clk, NULL) == XTC_OK);
 		CK(clk == 0x0123456789ABCDEFull);
 		CK(xl_parse_hdr(buf, (uint32_t)n, &ph) == XTC_OK && ph.type == XL_CHECKPOINT);
-		CK(xl_parse_checkpoint(buf, XL_HDR_LEN, &clk) != XTC_OK); /* missing clock */
+		CK(xl_parse_checkpoint(buf, XL_HDR_LEN, &clk, &start) != XTC_OK); /* missing clock */
 	}
 
 	/* --- too-small encode buffers are refused, never overrun --- */
@@ -127,7 +131,7 @@ main(void)
 		h.type = XL_UPDATE;
 		memset(&b, 0, sizeof b); b.redo_len = 0;
 		CK(xl_enc_update(buf, XL_HDR_LEN, &h, &b) == XTC_E_RANGE);
-		CK(xl_enc_checkpoint(buf, XL_HDR_LEN, 0) == XTC_E_RANGE);
+		CK(xl_enc_checkpoint(buf, XL_HDR_LEN, 0, 0) == XTC_E_RANGE);
 	}
 
 	/* --- cross-type parse rejects the wrong record --- */
@@ -136,7 +140,7 @@ main(void)
 		n = xl_enc_simple(buf, sizeof buf, &h);
 		CK(xl_parse_update(buf, (uint32_t)n, &ph, &pb) == XTC_E_INVAL);
 		CK(xl_parse_clr(buf, (uint32_t)n, &ph, &pb) == XTC_E_INVAL);
-		CK(xl_parse_checkpoint(buf, (uint32_t)n, &b.commit_ts) == XTC_E_INVAL);
+		CK(xl_parse_checkpoint(buf, (uint32_t)n, &b.commit_ts, NULL) == XTC_E_INVAL);
 	}
 
 	/* --- walking several records packed back to back (one WAL frame

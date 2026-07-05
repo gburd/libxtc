@@ -35,9 +35,14 @@
  *	                 still to undo -- so a crash during recovery
  *	                 resumes without re-undoing compensated work.  A
  *	                 CLR is never itself undone.
- *	  XL_CHECKPOINT  carries the persisted commit clock; the live
- *	                 state dump (a run of XL_UPDATE records) follows
- *	                 it in the compacted log.
+ *	  XL_CHECKPOINT  carries the persisted commit clock and a redo
+ *	                 start-LSN (the recLSN horizon).  start_lsn == 0
+ *	                 means "no trusted base, replay the whole log"
+ *	                 (the full-compaction checkpoint); start_lsn > 0
+ *	                 means "the base is durable through this LSN, so
+ *	                 recovery may start redo here" (the O(dirty) fuzzy
+ *	                 checkpoint).  In the compacted log the live-state
+ *	                 dump (a run of XL_UPDATE records) follows it.
  *	  XL_END         a loser's undo is complete (header only).
  *	  XL_PAGE        a full-page after-image: physiological redo for a
  *	                 structural change (a B-tree split/merge) that spans
@@ -112,7 +117,8 @@ typedef struct xl_body {
 int xl_enc_simple(uint8_t *buf, size_t cap, const xl_hdr_t *h);
 int xl_enc_update(uint8_t *buf, size_t cap, const xl_hdr_t *h, const xl_body_t *b);
 int xl_enc_clr(uint8_t *buf, size_t cap, const xl_hdr_t *h, const xl_body_t *b);
-int xl_enc_checkpoint(uint8_t *buf, size_t cap, uint64_t commit_clock);
+int xl_enc_checkpoint(uint8_t *buf, size_t cap, uint64_t commit_clock,
+    uint64_t start_lsn);
 
 /*
  * Encode a full-page after-image (XL_PAGE): page_id + image bytes.  The
@@ -139,7 +145,10 @@ size_t xl_page_size(uint16_t image_len);
 int xl_parse_hdr(const void *rec, uint32_t len, xl_hdr_t *h);
 int xl_parse_update(const void *rec, uint32_t len, xl_hdr_t *h, xl_body_t *b);
 int xl_parse_clr(const void *rec, uint32_t len, xl_hdr_t *h, xl_body_t *b);
-int xl_parse_checkpoint(const void *rec, uint32_t len, uint64_t *commit_clock);
+/* Parse an XL_CHECKPOINT.  *commit_clock is required; *start_lsn is
+ * optional (pass NULL if the caller does not need the redo horizon). */
+int xl_parse_checkpoint(const void *rec, uint32_t len, uint64_t *commit_clock,
+    uint64_t *start_lsn);
 
 /* Parse an XL_PAGE: fills *h, *page_id, and points *image into rec
  * (valid for the record's lifetime) with its length in *image_len. */
