@@ -1,0 +1,18 @@
+[package]
+name = "bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "bench_pl"
+path = "src/main_pl.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+hdrhistogram = "7"
+libc = "0.2"
+parking_lot = "0.12"
