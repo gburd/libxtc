@@ -1,0 +1,82 @@
+.\" Copyright (c) 2026, The XTC Project -- All rights reserved.
+.\" Use of this source code is governed by the ISC License.
+.Dd July 5, 2026
+.Dt XTC_STACK_RECLAIM 3
+.Os
+.Sh NAME
+.Nm xtc_stack_reclaim_enable ,
+.Nm xtc_stack_reclaim_disable ,
+.Nm xtc_stack_reclaim_enabled ,
+.Nm xtc_stack_reclaim_count
+.Nd reclaim a parked fiber's unused stack memory
+.Sh SYNOPSIS
+.In xtc_async.h
+.Ft int
+.Fn xtc_stack_reclaim_enable "size_t keep_bytes"
+.Ft void
+.Fn xtc_stack_reclaim_disable "void"
+.Ft int
+.Fn xtc_stack_reclaim_enabled "void"
+.Ft uint64_t
+.Fn xtc_stack_reclaim_count "void"
+.Sh DESCRIPTION
+A parked stackful fiber commits only the pages it has touched, but its
+mmap'd stack reserves the full configured size
+.Pq Xr xtc_set_stack_size 3 .
+With reclamation enabled, a fiber that parks
+.Pq via Fn xtc_yield , which the receive, latch, and timer park paths route through
+returns the unused tail of its stack -- the region below its current
+stack pointer, beyond a small live margin, page-aligned -- to the
+operating system with
+.Fn madvise MADV_DONTNEED .
+The pages fault back as zero-fill on resume.
+This lowers the per-parked-fiber memory floor for the many-idle-fiber
+case.
+It is predictable: no relocation, no garbage collection, no
+segmented-stack thrash.
+.Pp
+.Fn xtc_stack_reclaim_enable
+turns reclamation on process-wide;
+.Fa keep_bytes
+is the live margin left mapped below the saved stack pointer, and
+.Li 0
+selects a one-page default.
+Reclamation fires only when the reclaimable span exceeds a page, so
+shallow, frequently-woken fibers are not churned.
+.Fn xtc_stack_reclaim_disable
+turns it off;
+.Fn xtc_stack_reclaim_enabled
+reports the current state; and
+.Fn xtc_stack_reclaim_count
+reports how many reclaim calls have been made (telemetry).
+Reclamation is OFF by default: the cooperative fast path is unchanged
+unless it is enabled.
+.Sh SCOPE
+The reclaimed region is exactly
+.Bq stack_base , park_SP :
+the portion below the parked fiber's stack pointer (stacks grow down, so
+that is the not-yet-descended-into region).
+The benefit is realized for a fiber whose committed stack high-water
+sits below where it parks -- for example a handler that recurses deep
+during parsing or planning, returns, then parks shallow awaiting I/O.
+A fiber that parks at its deepest point has little below its stack
+pointer to reclaim; the pages between the park point and the stack top
+are live and are not reclaimed while parked.
+For extreme fan-in where even that floor is too much, the stackless
+Isolate layer
+.Pq Xr xtc_tnt 3
+is the better tool; the framework offers both models deliberately.
+.Sh RETURN VALUES
+.Fn xtc_stack_reclaim_enable
+returns
+.Dv XTC_OK ,
+or
+.Dv XTC_E_NOSYS
+where
+.Fn madvise MADV_DONTNEED
+is unavailable (for example Windows), where reclamation is a documented
+no-op.
+.Sh SEE ALSO
+.Xr xtc_async 3 ,
+.Xr xtc_set_stack_size 3 ,
+.Xr xtc_tnt 3
