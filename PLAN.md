@@ -3162,9 +3162,9 @@ Tier 0 is done; the rest are tracked here.
 | A5 reconcile README platform claim with reality | done | README + GitHub CI now cover Linux (gcc/clang/ASan/UBSan/fctx), macOS, and Windows/MSVC; FreeBSD/illumos verified |
 | A6 hot-path allocation claim vs xtc_send malloc | done | per-thread envelope slab pool for payloads <=256B; malloc fallback above; README claim updated; ASan-clean |
 | A7 regression tests | done | idle-CPU + sup restart-intensity already covered; added work-steal fairness test (found+fixed two real stealer bugs); lrlock churn; ASan/UBSan in CI |
-| A8 thread xtc_abort_source through xtc_svr_call | TODO | cancellation must reach every await point |
-| A9 Bitcask compaction/merge | TODO | or relabel Bitcask explicitly as a demo |
-| A10 re-audit M17 conformance for fair comparisons | partial | W4 parking_lot done; rest TODO |
+| A8 thread xtc_abort_source through xtc_svr_call | done | xtc_svr_call_abortable(pid,...,tok): the call returns XTC_E_ABORTED if the token fires before the reply; the server drops the reply for an aborted caller.  Covered by test/m10/test_svr.c + test/m9/test_sync.c |
+| A9 Bitcask compaction/merge | done | bitcask_compact() rewrites the data file keeping only live records (LWW + tombstone erase), swaps atomically, survives reopen; examples/05_rexis, covered by test_bitcask.c test_compaction |
+| A10 re-audit M17 conformance for fair comparisons | in progress | building the missing w5_rwratio (rwlock vs lrlock ratio sweep) + fairness audit; W1-W4/W6/W7 have xtc+tokio impls, W4 parking_lot done |
 | A11 document mailbox-full XTC_E_AGAIN contract | done | documented in xtc_proc.h / xtc_proc.3; cap now bounds mailbox + save queue |
 | A12 per-shard API (xtc_shard_id) | DONE | xtc_shard_id/xtc_shard_count (Seastar this_shard_id); test_exec/A12_shard_id |
 
