@@ -138,6 +138,7 @@ clean:
 	rm -f test_steal_torn
 	rm -f test_redo_page
 	rm -f test_inplace_redo
+	rm -f test_fuzzy_checkpoint
 	rm -f test_clean_restart
 	rm -f test_steal
 	rm -f test_steal_page
@@ -163,7 +164,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -404,6 +405,15 @@ test_inplace_redo: test_inplace_redo.c $(ENGINE_NATIVE)
 
 test-inplace-redo: test_inplace_redo
 	./test_inplace_redo
+
+# ---- Increment 4: fuzzy (O(dirty)) checkpoint + recLSN-horizon log
+# truncation; in-place recovery from the horizon matches a full-scan
+# recovery exactly ----
+test_fuzzy_checkpoint: test_fuzzy_checkpoint.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_fuzzy_checkpoint.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-fuzzy-checkpoint: test_fuzzy_checkpoint
+	./test_fuzzy_checkpoint
 
 bufmgr.o: bufmgr.c bufmgr.h
 

@@ -403,16 +403,66 @@ the version under the lock; a reader that observes it set restarts.
 ### 4.2 Page-table reads
 
 The page table (page id to frame) is read on every fault and every
-sibling-by-id lookup, and written only by the provider proc when it
-installs or evicts.  This is a textbook read-mostly structure, so it
-sits behind an `xtc_lrlock` in COW mode (`XTC_LRLOCK_COW`): readers
-take `xtc_lrlock_read_begin` and traverse a stable snapshot wait-free;
-the provider is the single writer, mutating the off-side copy and
-calling `xtc_lrlock_publish`.  COW keeps the steady-state memory at
-roughly one copy and pays an mmap+copy only on the first write after
-idle.  This is the same substitution `M_SQLXTC_GREENFIELD.md` names as
-the single highest-value step, applied to our own page table rather
-than SQLite's pcache.
+sibling-by-id lookup, and written on every install (fault miss) and
+every eviction.
+
+The IMPLEMENTED design (bufmgr.c) is a striped hash table: `nbucket`
+chained buckets guarded by `BM_HT_STRIPES` (256) cache-line-isolated
+`pthread_mutex_t` stripe locks, each guarding the buckets `b` with
+`(b & (BM_HT_STRIPES-1)) == stripe` (bufmgr.c:`ht_lock`).  Every table
+operation -- `ht_lookup_pin`, `ht_insert_alloc`, `ht_remove` -- touches
+exactly one bucket, so it locks exactly one stripe; operations on pages
+in different stripes proceed fully in parallel.  Every stripe lock is
+released BEFORE any I/O (a miss loads into a free frame and only then
+re-takes the stripe to publish), so no lock ever spans a page-in, which
+is why these are raw pthread mutexes rather than parking `xtc_amutex`
+(measured: ~18ns/fix pthread vs ~22ns amutex, a 24% regression on the
+hottest path in the engine, for no loop-safety gain -- see the design
+comment in bufmgr.c).
+
+RESOLUTION -- xtc_lrlock page table (CLOSED AS ANALYZED, not adopted).
+An earlier draft of this section proposed putting the page table behind
+a single `xtc_lrlock` in COW mode (wait-free reads, one writer flipping
+between two copies).  After reading the buffer-manager page-table code
+this was assessed and DELIBERATELY NOT ADOPTED, because it would be a
+large, risky change that makes read concurrency WORSE, not better, for
+this access pattern:
+
+  * lrlock is SINGLE-WRITER by construction (the writer path holds a
+    writer mutex and mutates the off-side copy).  The page table today
+    is MULTI-WRITER: the fault path installs, the evictor removes, and
+    the provider refills, all concurrently on disjoint stripes.  Moving
+    to lrlock would funnel EVERY install and eviction through one
+    writer -- replacing 256-way parallel mutation with a single
+    serialization point.  On an eviction-heavy workload (the case the
+    buffer manager exists to serve) that writer is on the hot path, so
+    the change trades wait-free reads for a serialized write path that
+    is contended exactly when the pool is under pressure.
+
+  * lrlock keeps TWO copies of the protected data and requires a
+    deterministic replay (or full-sync) of the whole table on every
+    publish.  The page table is `nbucket` chained buckets holding live
+    pins and per-frame state; duplicating it and replaying every
+    mutation deterministically is a substantial rewrite of the single
+    most correctness-critical structure in the engine (the reclamation
+    interlock in `ht_insert_alloc`/`bm_alloc_pid` that keeps the table
+    strictly single-valued is exactly the kind of invariant an lrlock
+    replay would have to reproduce byte-for-byte).
+
+  * The reads lrlock would make wait-free are already cheap and highly
+    parallel: a lookup takes ONE stripe lock, held for a pointer-chase
+    of a short bucket chain, never across I/O.  Readers on different
+    stripes never contend.  The 256-way striping already delivers the
+    read concurrency lrlock is meant to provide, without a second copy,
+    without a single writer, and without a deterministic-replay
+    obligation.
+
+So the striped-lock page table is the right design here and this item
+is closed as analyzed.  (The lrlock-COW substitution named in
+`M_SQLXTC_GREENFIELD.md` still applies to a genuinely read-mostly,
+single-writer, snapshot-friendly structure -- e.g. the schema cache --
+just not to the multi-writer page table.)  `xtc_rcu` (4.3) remains the
+deferred-reclaim safety net for frames retired out of the table.
 
 ### 4.3 Reclaiming old versions
 
@@ -463,6 +513,109 @@ split logic all depend on.  What it buys, and what it does not:
 This is real write concurrency, short of full MVCC, and the document
 states it plainly so no one mistakes B-link page latching for snapshot
 isolation.
+
+### 4.6 Fine-grained SMO locking via xtc_lockmgr (DESIGN + increment plan)
+
+Current state (assessed against btree.c, not aspirational).  The B-tree
+is ALREADY fine-grained for the common path: reads and non-splitting
+writes take only per-page `xtc_arwlock` latches with coupling and
+B-link move-right (4.1, 4.4, 4.5).  `bt_insert_fast`, `bt_delete`, and
+lookups never take any tree-wide lock; disjoint-leaf writers run fully
+in parallel.  There is NO per-tree writer mutex on the fast path.
+
+The ONE remaining coarse point is structure modification.  Every split,
+root growth, and right-merge serializes on a SINGLE tree-wide arwlock,
+`bt->smo` (btree.c: `bt_insert` SMO path line ~875, `bt_merge` line
+~1416, the authoritative `bt_delete` SMO pass line ~1638).  So two
+splits in completely disjoint subtrees still take turns.  This is a
+deliberate simplicity choice the code documents ("serialize structure
+modification on the tree's SMO lock ... unlike a root-exclusive scheme
+that blocks every descent"): it is correct and off the common path (a
+full leaf or an upsert is rare relative to plain inserts), but it caps
+concurrent SMO throughput at one at a time and is the natural target of
+a "fine-grained btree locks via xtc_lockmgr" effort (PLAN.md; the
+hard-fork doc's stage 4 targets SQLite's btree -- this section is the
+equivalent for the NATIVE btree.c).
+
+Why NOT a big-bang rewrite now.  Replacing the tree-wide SMO lock with
+true lock coupling on the split path (holding exclusive latches on the
+ancestor stack and releasing safe ancestors, Lehman-Yao style) is the
+classic B-link concurrent-SMO scheme, but it is exactly the part of the
+code where interleavings are subtle: the concurrent right-MERGE path
+already has a KNOWN, unclosed interleaving race and is disabled by
+default (see "Delete merge / page reclaim, and the concurrent-merge
+race" below).  Landing a broad fine-grained SMO rewrite before that
+race is understood would compound two hard concurrency problems.  The
+lazy-correct path is an honest design with a bounded, independently
+testable first increment, not a risky partial rewrite.
+
+Target design (xtc_lockmgr over B-tree pages, lock coupling on SMO).
+
+  * Lock object = page id.  A transaction / operation that is about to
+    modify structure acquires an `xtc_lockmgr` lock keyed by the
+    affected page id (`xtc_lock_get(mgr, locker, &pid, sizeof pid,
+    mode, timeout)`), in a STABLE order (page id ascending) so a
+    lock-order inversion cannot arise; the lockmgr's deadlock detector
+    (`XTC_LOCK_DETECT_PERIODIC`) is the backstop for any residual
+    cycle, aborting a victim rather than hanging.
+  * Lock coupling (latch crabbing) on the split path.  Descend taking
+    the page lock at each level; when a node is "safe" (has room for
+    one more entry so a split below cannot cascade into it) release
+    every ancestor lock above it -- the standard ARIES/B-link rule the
+    latch layer already applies to `xtc_arwlock` latches, lifted to the
+    lock layer so the held set is only the pages a given SMO can touch.
+    Two SMOs on disjoint subtrees then hold disjoint page-lock sets and
+    proceed in parallel; only SMOs that share an ancestor serialize,
+    and only on the shared ancestor.
+  * Root growth is the one global point: growing a new root changes
+    `bt->root_pid`, so it takes an X lock on the current root page id
+    (or a dedicated "root" lock object).  Because root growth is rare
+    (O(log n) times over the tree's life) this residual serialization
+    is negligible.
+  * The lockmgr locker id is per operation (recovery via
+    `xtc_lock_release_all` on `xtc_proc_at_exit`, matching 4.4).  The
+    physiological XL_PAGE + NTA logging (Increment 3) is unchanged: a
+    fine-grained SMO still logs its pages inside a nested-top-action
+    bracket, so crash-atomicity is orthogonal to the locking change.
+
+Increment plan (each step ships green and is independently testable):
+
+  0. Prerequisite (NOT part of this item): close or bound the
+     concurrent-merge race, OR keep merge disabled during the SMO-lock
+     work so only the SPLIT path is made fine-grained first (merge
+     stays on the tree-wide lock).  This isolates the two problems.
+
+  1. FIRST BOUNDED INCREMENT -- per-page X lock on the split, tree-wide
+     lock retained as a coarse outer guard.  Introduce an
+     `xtc_lockmgr` and, on the split path only, acquire an X lock on
+     each page the split writes (splitting leaf, new right sibling,
+     posted-into parent), page-id-ascending, INSIDE the existing
+     `bt->smo` critical section.  This changes nothing about
+     concurrency yet (the tree-wide lock still serializes SMOs) but
+     wires the lockmgr into the split path, proves the lock-object
+     keying and ascending-order acquisition are correct, and exercises
+     the deadlock detector under a concurrent-split stress.  Test: a
+     multi-writer split stress (extend test_btree_mt) asserts no
+     deadlock/hang, every committed key reachable by a from-root
+     descent, tree valid.  This is the small, safe, implementable step.
+  2. Drop the tree-wide lock for the split path; rely on lock coupling
+     (release safe ancestors) so disjoint-subtree splits parallelize.
+     Keep root growth on a single root-lock object.  Test: measure
+     concurrent-split throughput rises with disjoint key ranges; the
+     validity invariants from step 1 still hold.
+  3. Bring the merge path onto the same scheme once its interleaving
+     race is closed (prerequisite 0), so merges and splits share the
+     page-lock discipline.
+  4. Lift table-level `xtc_lockmgr` locks (4.4) and page-level SMO
+     locks into one coherent hierarchy (IX on the table, X on the
+     pages) so the deadlock detector sees the whole graph.
+
+Status: DESIGN + PLAN (this section).  Increment 1 is the identified
+small, safe, testable first step; it is NOT implemented here because
+the honest first move is to isolate it from the open concurrent-merge
+race (prerequisite 0) rather than land a partial SMO rewrite alongside
+a known unclosed race.  The tree-wide SMO lock remains the correct,
+proven default until Increment 1 lands with its stress test.
 
 ## 5. Integration and staging
 

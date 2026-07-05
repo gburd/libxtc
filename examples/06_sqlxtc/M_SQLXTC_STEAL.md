@@ -315,17 +315,64 @@ versions incrementally under an invisible marker) stays deferred -- the
 spill path delivers its payoff without the MVCC-visibility risk of
 Section 4.2.
 
-### Increment 4 -- fuzzy checkpoint + recLSN-horizon truncation: DEFERRED
+### Increment 4 -- fuzzy checkpoint + recLSN-horizon truncation: DONE
+### (checkpoint-consistent variant; does NOT require the live-default flip)
 
-Increment 4 (Section 3) is "only sound once [the live in-place default]
-trusts the base in place from that horizon."  Since the in-place default
-is NOT flipped (Increment 3(b), deliberate), the recLSN-horizon fuzzy
-checkpoint has no safe base to truncate behind, so it stays deferred by
-dependency.  The live checkpoint stays O(live-data) compaction
-(engine.c:sx_storage_checkpoint), correct for the logical-rebuild
-default.  The recLSN plumbing Increment 4 would consume already exists
-(bufmgr.c:bm_min_rec_lsn, tested by test_redo_page); only the checkpoint
-policy change is deferred.
+Earlier status held Increment 4 as DEFERRED on the reasoning that a
+recLSN-horizon fuzzy checkpoint "is only sound once [the live in-place
+default] trusts the base in place from that horizon," and the in-place
+default is deliberately not flipped.  That reasoning conflated two
+different things: trusting an ARBITRARILY torn post-crash base (the
+deferred live-default flip) versus trusting a CHECKPOINT-CONSISTENT base
+the checkpoint itself just flushed durable and marked clean.  The
+second needs no flip and is now implemented:
+
+  * xstore_fuzzy_checkpoint(bt, bm, wal, path, &horizon) (xstore.c):
+    captures the recLSN horizon (bm_min_rec_lsn), flushes the dirty set
+    to the base with bm_checkpoint (the O(dirty) work -- NOT a dump of
+    the live tree), then rewrites the log to a single XL_CHECKPOINT
+    record carrying the redo horizon as its start-LSN plus only the
+    retained tail (records at/after the horizon).  Because bm_checkpoint
+    flushes ALL dirty pages, everything through the current durable LSN
+    is on the base, the safe truncation point is the post-flush durable
+    LSN, and the retained tail is normally just the checkpoint record --
+    the log collapses to O(1).
+
+  * XL_CHECKPOINT gained a start-LSN field (xlog.c:
+    [commit_clock:8][start_lsn:8]).  start_lsn == 0 == the existing
+    full-compaction checkpoint (xstore_checkpoint_wal, KEPT: the
+    following dump IS the whole live set, rebuild logically).
+    start_lsn != 0 == fuzzy: the base is durable through the horizon,
+    so xs_recover_cb skips the logical redo of any record logged before
+    the checkpoint and recovery trusts the base in place
+    (xstore_recover_inplace), replaying only the retained tail.
+
+  * Safety: the fuzzy checkpoint marks the base clean AT the checkpoint
+    (bt_set_meta(1, clock) + bm_sync), so the base it later trusts is a
+    checkpoint-consistent base plus a bounded logged tail -- exactly the
+    kind of trusted base the CLEAN-restart fast path already trusts
+    (test_clean_restart), NOT an arbitrary torn post-crash base.  It
+    uses the same physiological XL_PAGE + two-pass in-place recovery
+    proven for torn structure (Increment 3, test_steal_leaf).
+
+EVIDENCE (examples/06_sqlxtc/test_fuzzy_checkpoint.c, new, in the
+Makefile test target; ASan-clean, detect_leaks=1): build 4000 committed
+rows; record the row set a FULL-SCAN logical recovery yields (the
+reference); on a second base run a fuzzy checkpoint (log shrinks from
+~3.7 MB to 53 bytes -- just the checkpoint record -- proving truncation
+below the horizon), write a 200-row post-checkpoint tail, recover IN
+PLACE from the truncated log; the in-place recovery restores EXACTLY the
+same 4200 rows (count, per-key value, ordered gap/dup-free scan) as the
+full-scan recovery.
+
+What is STILL deferred (unchanged): making xstore_recover_inplace the
+LIVE crash default for an ARBITRARILY torn base (Increment 3(b) / the
+Section 5 flip).  The fuzzy checkpoint does not need it -- it trusts
+only a base it flushed and marked clean, not a base torn by a crash.
+The live crash default (engine.c:sx_storage_open) remains the logical
+rebuild; wiring sx_storage_checkpoint to prefer the O(dirty) fuzzy
+checkpoint on the live server is a follow-on (the mechanism and its test
+are landed).
 
 ### Recovery-test pass list (all PASS).
 

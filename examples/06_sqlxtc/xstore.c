@@ -3762,6 +3762,9 @@ struct xs_recover {
 	uint64_t max_ts;
 	uint64_t records;
 	uint64_t pages_redone;   /* XL_PAGE images applied (in-place mode) */
+	uint64_t redo_start;     /* fuzzy checkpoint horizon: skip logical redo
+	                          * of records below this LSN (already durable
+	                          * on the trusted base); 0 == replay from front */
 	struct rec_txn *txn;     /* ACTIVE (uncommitted) transactions only */
 	int      n_txn, cap_txn;
 };
@@ -3912,13 +3915,36 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 			continue;
 		}
 		if (h.type == XL_CHECKPOINT) {
-			uint64_t clk;
-			if (xl_parse_checkpoint(base + off, (uint32_t)rl, &clk) == XTC_OK
-			    && clk > r->max_ts)
-				r->max_ts = clk;
+			uint64_t clk, start = 0;
+			if (xl_parse_checkpoint(base + off, (uint32_t)rl, &clk,
+			    &start) == XTC_OK) {
+				if (clk > r->max_ts)
+					r->max_ts = clk;
+				/*
+				 * Fuzzy checkpoint (start_lsn != 0): the base is
+				 * durable through the recLSN horizon this record
+				 * carries, so every change logged BEFORE this
+				 * checkpoint is already on the trusted base -- skip
+				 * its logical redo.  The checkpoint's own frame LSN
+				 * is the boundary in the (possibly re-numbered) log;
+				 * records at or after it are redone in place.  A
+				 * full-compaction checkpoint carries start_lsn == 0
+				 * and imposes no skip (the following dump IS the
+				 * whole live set).
+				 */
+				if (start != 0 && lsn > r->redo_start)
+					r->redo_start = lsn;
+			}
 		} else if (h.type == XL_UPDATE) {
 			xl_hdr_t uh;
 			xl_body_t b;
+			/* Below the fuzzy-checkpoint boundary the change is already
+			 * on the trusted base -- skip its logical redo (and its
+			 * loser tracking: a pre-checkpoint txn is resolved). */
+			if (r->redo_start && lsn < r->redo_start) {
+				off += (uint32_t)rl;
+				continue;
+			}
 			if (xl_parse_update(base + off, (uint32_t)rl, &uh, &b) == XTC_OK) {
 				uint8_t key[XS_VKLEN];
 				uint8_t buf[1 + XS_VMAX];
@@ -4075,11 +4101,11 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 	bt_t *bt = dc->bt;
 	bt_cursor_t *cur = NULL;
 	uint8_t startk[XS_VKLEN];
-	uint8_t ck[XL_HDR_LEN + 8];
+	uint8_t ck[XL_HDR_LEN + 16];
 	uint32_t last_tid = 0; int64_t last_rid = 0; int have_last = 0;
 	int cn;
 
-	if ((cn = xl_enc_checkpoint(ck, sizeof ck, dc->clock)) > 0)
+	if ((cn = xl_enc_checkpoint(ck, sizeof ck, dc->clock, 0)) > 0)
 		emit(ectx, ck, (uint32_t)cn);
 
 	enc_vkey(0, INT64_MIN, ~(uint64_t)0, startk);   /* before every key */
@@ -4140,4 +4166,102 @@ xstore_checkpoint_wal(bt_t *bt, struct wal *w, const char *wal_path)
 	dc.bt = bt;
 	dc.clock = atomic_load_explicit(&g_xclock, memory_order_relaxed);
 	return wal_checkpoint((wal_t *)w, wal_path, xs_dump_tree, &dc);
+}
+
+/*
+ * Fuzzy-checkpoint dump: emit the CHECKPOINT record carrying the redo
+ * horizon as its start-LSN (nonzero => "trust the base in place"),
+ * then re-emit every existing WAL frame at or after the horizon.  The
+ * pre-horizon records are dropped: their changes are already durable on
+ * the flushed base, so recovery-in-place does not need them.  The
+ * retained tail is re-numbered by the emit path; recovery replays it in
+ * place over the trusted base.  This layer reads the OLD log at
+ * fc->path (wal_checkpoint writes the compacted log to path.compact, so
+ * the source is intact during the dump).
+ */
+struct xs_fuzzy_ctx {
+	const char *path;
+	uint64_t    clock;
+	uint64_t    horizon;
+	wal_emit_fn emit;
+	void       *ectx;
+};
+
+static int
+xs_fuzzy_tail_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
+{
+	struct xs_fuzzy_ctx *fc = user;
+	if (lsn >= fc->horizon)
+		fc->emit(fc->ectx, rec, len);   /* retain: at/after the horizon */
+	return 0;
+}
+
+static void
+xs_dump_fuzzy(wal_emit_fn emit, void *ectx, void *user)
+{
+	struct xs_fuzzy_ctx *fc = user;
+	uint8_t ck[XL_HDR_LEN + 16];
+	int cn;
+
+	fc->emit = emit;
+	fc->ectx = ectx;
+	/* start_lsn == horizon (nonzero): fuzzy checkpoint, base trusted. */
+	if ((cn = xl_enc_checkpoint(ck, sizeof ck, fc->clock, fc->horizon)) > 0)
+		emit(ectx, ck, (uint32_t)cn);
+	(void)wal_scan(fc->path, xs_fuzzy_tail_cb, fc);
+}
+
+int
+xstore_fuzzy_checkpoint(bt_t *bt, bm_t *bm, struct wal *w,
+    const char *wal_path, uint64_t *out_horizon)
+{
+	struct xs_fuzzy_ctx fc;
+	uint64_t horizon;
+	int rc;
+
+	(void)bt;
+	if (bm == NULL || w == NULL || wal_path == NULL)
+		return XTC_E_INVAL;
+
+	/*
+	 * recLSN horizon.  bm_min_rec_lsn(bm) is the oldest change not yet on
+	 * the base -- the truncation floor a PURE (no-flush) fuzzy checkpoint
+	 * would carry, pinned near the front by any long-lived dirty page
+	 * (the root/interior nodes stay dirty across a whole build, so it
+	 * barely advances on its own).  This checkpoint instead does the
+	 * O(dirty) work of FLUSHING the whole dirty set (below), which makes
+	 * every change through the current durable LSN redundant with the
+	 * base and advances the safe truncation point to the post-flush
+	 * durable LSN -- strictly at or above bm_min_rec_lsn, so it is sound
+	 * and truncates far more.  That post-flush durable LSN is the horizon
+	 * carried in the checkpoint record.
+	 */
+
+	/* Flush the dirty set to the base (O(dirty)) and fsync.  After this
+	 * every change logged so far is on the base. */
+	if ((rc = bm_checkpoint(bm)) != XTC_OK)
+		return rc;
+
+	/*
+	 * The base is now durable through the current durable LSN, so every
+	 * record at or below it is redundant -- truncate below it.  Retain
+	 * only records strictly after it (concurrent commits; none at a
+	 * quiesced checkpoint, so the retained tail is normally empty and the
+	 * log becomes just the checkpoint record).  horizon > 0 marks this a
+	 * fuzzy checkpoint so recovery trusts the base in place.
+	 */
+	horizon = wal_durable_lsn((wal_t *)w) + 1;
+
+	/* Compact the log: keep only the tail at/after the horizon, led by a
+	 * fuzzy CHECKPOINT record.  Atomic rename + rebind (wal_checkpoint). */
+	fc.path = wal_path;
+	fc.clock = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	fc.horizon = horizon;
+	fc.emit = NULL; fc.ectx = NULL;
+	if ((rc = wal_checkpoint((wal_t *)w, wal_path, xs_dump_fuzzy, &fc)) != XTC_OK)
+		return rc;
+
+	if (out_horizon != NULL)
+		*out_horizon = horizon;
+	return XTC_OK;
 }
