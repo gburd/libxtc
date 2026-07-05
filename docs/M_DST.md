@@ -389,6 +389,73 @@ Still OUTSIDE sim's reach BY DESIGN (not a coverage gap to close):
   virtual clock.  Only the socket courier I/O (raw recv/send) stays
   outside sim -- not-coverable-by-design (needs a real kernel).
 
+- L4 orchestration + cross-primitive composition (DONE): the L4
+  application/supervision layer and a multi-primitive composition are
+  now under DST.
+
+  * SUPERVISOR strategy matrix (test_sim_sup_strategy): beyond the
+    single-child one_for_one restart that test_sim_machine_death
+    already covers, this drives ONE_FOR_ALL (crashing one child
+    restarts every child), REST_FOR_ONE (crashing child i restarts i
+    and every child started after it, none before), the restart
+    POLICIES (permanent restarts on any exit, transient only on
+    abnormal exit, temporary never), and restart INTENSITY (more than
+    max_restarts crashes in period_ns makes the supervisor give up and
+    exit).  Crash timing is seeded, so the spawn counts and
+    supervisor-alive outcome are a pure function of the seed and
+    replay.
+
+  * APPLICATION lifecycle (test_sim_app): a multi-loop xtc_app is
+    brought up (xtc_app_create + xtc_app_start) and driven with
+    xtc_sim_exec_run instead of xtc_app_run, so the whole lifecycle is
+    seeded.  A server child registers a well-known name in the app
+    registry; client children on other loops resolve it by name and do
+    a request/reply; the app stops cleanly once they finish.  Proves
+    the registry + cross-loop request/reply + ordered startup/shutdown
+    interoperate across the app lifecycle, replayed.
+
+  * BLOCKING offload (test_sim_blocking): the production offload path
+    hands work to a real pthread pool (a pool worker runs on a real OS
+    thread outside the sim -- not-coverable-by-design, like raw
+    sockets).  What IS coverable is the caller-side contract; under sim
+    xtc_blocking_run runs the work synchronously on the calling fiber
+    (ADDITIVE, gated on __xtc_sim_active(); the same result the
+    off-a-loop synchronous fallback already produces in production), so
+    many fibers offloading concurrently each get their own fn(arg)
+    result with no cross-talk or lost completion, replayed.
+
+  * COMPOSITION (test_sim_compose): the highest-leverage test -- the
+    lock manager, the sqlxtc storage engine (xstore + WAL), an mpsc
+    channel, and cross-loop scheduling run TOGETHER in one seeded run,
+    where cross-primitive bugs hide.  Supervised workers take an
+    EXCLUSIVE lockmgr lock on a shared key, commit a uniquely-keyed row
+    durably under the lock, release, then report the row on the
+    channel; a collector drains the channel.  The global invariant --
+    lockmgr mutual exclusion held (never two holders), every commit
+    durable, every channel report collected, count == workers*quota --
+    holds and replays across the whole primitive stack at once.
+
+- Byte-STREAM connection abstraction (DONE, test_sim_stream): the piece
+  the message-level partition sim does not model.  It does NOT
+  reimplement kernel TCP (raw sockets stay outside sim); it models the
+  ordered bidirectional byte-stream a connection presents ABOVE the
+  socket, with a deterministic in-process wire (a pair of ordered
+  byte-chunk channels) that fragments and paces each write by a seeded
+  schedule.  A length-prefixed request/response protocol runs over it
+  and the reader must reassemble frames across arbitrary chunk
+  boundaries -- the exact frame-reassembly a real xtc_net_recv_frame
+  consumer does -- proving ordered, lossless byte delivery under a
+  fragmenting wire, replayed.
+
+  Still not-coverable-by-design in this area: the OS SUBPROCESS layer
+  (osproc.c -- real fork/execvp/waitpid on real pids and fds) and the
+  raw-socket/TLS wire, for the same reason as the blocking POOL thread
+  above -- a real child process or kernel socket runs outside the
+  single-thread sim's control, so there is nothing deterministic to
+  simulate.  The library-side completion-delivery logic around them (a
+  fiber parking on an fd/AIO completion) is already exercised by
+  test_sim_iofault.
+
 ## FoundationDB parity
 
 Toward FDB-class DST, in addition to the seeded scheduler / virtual
@@ -861,7 +928,7 @@ Known gaps and why:
   each run starts from the identical binding.  Sim-only (the function
   only runs under sim); production current-loop handling is unchanged.
   test_sim_buggify2 now hashes the completion sequence ORDER-sensitively
-  and asserts it replays; the full sim suite (30 tests) replays, incl.
+  and asserts it replays; the full sim suite (35 tests) replays, incl.
   under ASan+UBSan.
 
 - Lock manager + deadlock detector (lock_mgr.c): DONE for the fiber path
