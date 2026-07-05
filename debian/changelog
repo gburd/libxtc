@@ -1,3 +1,40 @@
+libxtc (1.1.0-1) unstable; urgency=medium
+
+  * Deterministic Simulation Testing reach extended toward
+    FoundationDB parity: the sim suite grows from 29 to 38
+    replay-verified tests.
+    - The L4 tnt (Tina) stackless-Isolate actor layer runs under DST,
+      including cross-shard messaging and wall-clock timers via a
+      sim-visible shard-wake seam (the shard parks on its own proc
+      mailbox; a cross-shard deliver or timer wakes it deterministically
+      through xtc_send).  Closing that seam surfaced and fixed a latent
+      thread-local staleness bug in the ambient tnt API.
+    - The L4 orchestration layer is covered: the supervisor restart-
+      strategy matrix (one_for_all, rest_for_one, permanent/transient/
+      temporary policies, restart intensity) and the xtc_app lifecycle
+      (registry + cross-loop request/reply + clean shutdown).
+    - Resource governance (used never exceeds cap, exact conservation),
+      the blocking-offload caller contract, and a byte-stream connection
+      abstraction (ordered frame reassembly under a fragmenting wire).
+    - OS-subprocess LIFECYCLE under DST using FoundationDB's
+      "process = in-process actor with a simulated lifecycle" pattern:
+      the fn-callback child runs as a fiber; exit-status, signalled
+      termination, and reap are modelled on the sim clock.  The real
+      exec-a-program and live control-socket paths remain the
+      not-coverable real-kernel tier by design.
+    - A multi-primitive COMPOSITION test (lock manager + storage engine
+      + WAL + channel + supervision in one seeded run) and its capstone,
+      CRASH RECOVERY under composition: every acked commit stays durable
+      through lock + WAL + recovery under a seeded mid-workload crash.
+  * All new coverage is additive and gated on __xtc_sim_active(); the
+    production code paths are byte-identical (verified) and the public
+    API is unchanged, so this is a backward-compatible feature release.
+  * Qualified: make check, the 38-test DST sim suite, the amalgamation,
+    and full make check clean under both AddressSanitizer and
+    UndefinedBehaviorSanitizer.
+
+ -- Greg Burd <greg@burd.me>  Sat, 04 Jul 2026 22:52:04 -0400
+
 libxtc (1.0.0-1) unstable; urgency=medium
 
   * First stable release.  The public API surface is stable; semver
