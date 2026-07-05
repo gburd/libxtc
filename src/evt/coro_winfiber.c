@@ -216,6 +216,7 @@ xtc_yield(void)
 	pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 	(void)SwitchToFiber(c->loop_fiber);
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
+	if (__xtc_fiber_kill_check) __xtc_fiber_kill_check();
 }
 
 /* Lever S1 (stack reclaim on park): a no-op on the Win32-fiber

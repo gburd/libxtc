@@ -432,6 +432,7 @@ struct xtc_proc_table {
 
 /* Each loop carries one of these (lazy-allocated on first proc spawn). */
 static XTC_THREAD_LOCAL struct xtc_proc *__current_proc = NULL;
+static void __xtc_proc_kill_check(void);   /* installed as the resume kill hook */
 
 /*
  * The table lives in a side struct hung off xtc_loop->user_data... but
@@ -836,6 +837,7 @@ xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	 * layer has no other mandatory entry point. */
 	__xtc_fiber_ctx_save = __xtc_proc_ctx_save;
 	__xtc_fiber_ctx_restore = __xtc_proc_ctx_restore;
+	__xtc_fiber_kill_check = __xtc_proc_kill_check;
 
 	if (XTC_UNLIKELY((tbl = __table_for(loop, 1)) == NULL)) return XTC_E_NOMEM;
 
@@ -916,6 +918,31 @@ void
 __xtc_proc_ctx_restore(void *ctx)
 {
 	__current_proc = (struct xtc_proc *)ctx;
+}
+
+/*
+ * Post-resume kill check (installed as __xtc_fiber_kill_check).  Called
+ * from xtc_yield's resume point: if the current proc had a kill/cancel
+ * requested while it was away from a cooperative point -- notably a
+ * pure CPU loop that was involuntarily preempted, whose trampoline
+ * yield resumes here -- honor it now by unwinding via xtc_exit_self.
+ * This is what lets xtc_launch's deadline cancel a runaway fn: the
+ * preemption slice yields, the launcher's xtc_exit_pid set kill_pending,
+ * and on the fiber's next resume (which the slice guarantees) this
+ * fires.  No-op when nothing is pending or off a proc.  Never called
+ * inside a critical section (xtc_yield is not; and a kill inside one is
+ * already deferred by the recovery gate).
+ */
+static void
+__xtc_proc_kill_check(void)
+{
+	struct xtc_proc *self = __current_proc;
+	int kp;
+	if (self == NULL)
+		return;
+	kp = atomic_load_explicit(&self->kill_pending, memory_order_acquire);
+	if (kp != 0)
+		xtc_exit_self(kp - 1);
 }
 
 /* PUBLIC: int xtc_proc_sleep __P((int64_t)); */
