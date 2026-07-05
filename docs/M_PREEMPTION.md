@@ -375,3 +375,45 @@ default-on land in the following release.
   mechanism is identical, only the
   per-arch mcontext register names (.pc/.sp) and trampoline asm differ;
   a bounded follow-up.
+
+- Lever S1 (madvise-on-park, stack-memory reclamation): DONE (mechanism),
+  OFF by default, opt-in via xtc_stack_reclaim_enable().  On park
+  (xtc_yield, which the recv / latch / timer park paths all route
+  through), a fiber returns the unused tail of its stack --
+  [stack_base + guard, current_SP - keep_margin), page-aligned inward --
+  to the OS with madvise(MADV_DONTNEED); it faults back zero-fill on
+  resume.  Implemented in all three coro substrates: coro_uctx.c and
+  coro_fctx.c do the real reclaim (gated on MADV_DONTNEED availability),
+  coro_winfiber.c is a no-op (OS-owned fiber stacks).  The reclaim
+  region is bounded by the guard page below and a live margin (default
+  one page) below the SP, and only fires when the reclaimable span
+  exceeds a page (no fault churn on shallow fibers).
+
+  Correctness: test/m14/test_stack_reclaim.c stamps a deep live frame,
+  parks (tail reclaimed), resumes, and verifies the live frame survived
+  and the refaulted tail is usable again -- across many park/resume
+  cycles, for several fibers, with reclaim off (count stays 0) and on
+  (count rises, all sentinels intact).  make check + ASan + UBSan clean.
+  Under AddressSanitizer the reclaim safely DECLINES (ASan relocates
+  fiber frames to a heap fake-stack, so the running SP is outside the
+  fiber's mmap'd stack and the geometry check finds nothing to reclaim);
+  the test asserts correctness there but not a fire count.
+
+  HONEST SCOPE: the reclaim is exactly [stack_base, park_SP) -- the
+  region BELOW the parked fiber's stack pointer (stacks grow down, so
+  that is the unused-so-far region).  The win is therefore realized for
+  a fiber whose committed stack HIGH-WATER lies below where it parks
+  (e.g. a handler that recurses deep during parse/plan, returns, then
+  parks shallow awaiting I/O -- the deep pages are reclaimed).  A fiber
+  that parks AT its deepest point has little below its SP to reclaim.
+  This is a narrower guarantee than "shrink every parked fiber to one
+  page": the structural per-parked-fiber floor (the pages between the
+  park SP and stack_top, plus the coro struct) is NOT reclaimable while
+  parked, because those pages are live from the stack's perspective.
+  For extreme fan-in where even that floor is too much, the stackless
+  tnt Isolate layer (Lever S2) remains the right tool -- the duality is
+  deliberate.  A clean synthetic RSS-drop microbenchmark proved elusive
+  (compiler frame-collapse under -O2 kept transient deep stack from
+  staying committed long enough to sample), so no headline bytes/task
+  number is claimed here; the mechanism's reclaim region and safety are
+  what is verified.

@@ -89,6 +89,37 @@ size_t   xtc_stack_size(void);
 int      xtc_set_stack_size(size_t bytes);
 
 /*
+ * Stack-memory reclamation on park (Lever S1, M_PREEMPTION section 8).
+ *
+ * A parked stackful fiber commits only the pages it touched but its
+ * mmap'd stack RESERVES the full configured size.  With reclaim ON, a
+ * fiber that parks (xtc_yield / recv / a latch or timer wait) returns
+ * the UNUSED tail of its stack -- the region above its current stack
+ * pointer, beyond a small live margin -- to the OS with
+ * madvise(MADV_DONTNEED); it faults back as zero-fill on resume.  This
+ * cuts the per-parked-fiber RAM floor for the many-idle-connection case
+ * (measure with bench/bench_mem_per_task).  Predictable: no relocation,
+ * no segmented-stack thrash.
+ *
+ * Portable: a no-op where madvise/MADV_DONTNEED is unavailable
+ * (Windows) and on the Win32-fiber substrate (whose stacks the OS
+ * owns).  OFF by default (the cooperative fast path is unchanged); a
+ * process-wide opt-in.  keep_bytes is the live margin left mapped below
+ * the saved SP (0 selects a sensible default of one page); the reclaim
+ * only fires when the reclaimable tail exceeds a page, to avoid fault
+ * churn on shallow, frequently-woken fibers.
+ *
+ * PUBLIC: int  xtc_stack_reclaim_enable __P((size_t));
+ * PUBLIC: void xtc_stack_reclaim_disable __P((void));
+ * PUBLIC: int  xtc_stack_reclaim_enabled __P((void));
+ * PUBLIC: uint64_t xtc_stack_reclaim_count __P((void));
+ */
+int      xtc_stack_reclaim_enable(size_t keep_bytes);
+void     xtc_stack_reclaim_disable(void);
+int      xtc_stack_reclaim_enabled(void);
+uint64_t xtc_stack_reclaim_count(void);
+
+/*
  * XTC_COOP_REGION { ... } --
  *	A block that is guaranteed to run to completion without the
  *	scheduler interleaving another task between its statements.

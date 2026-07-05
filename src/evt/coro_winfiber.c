@@ -218,6 +218,15 @@ xtc_yield(void)
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 }
 
+/* Lever S1 (stack reclaim on park): a no-op on the Win32-fiber
+ * substrate -- fiber stacks are owned by the OS, not mmap'd by us, so
+ * there is no unused tail we may madvise away.  The API is present so
+ * callers need not ifdef. */
+int      xtc_stack_reclaim_enable(size_t k) { (void)k; return XTC_E_NOSYS; }
+void     xtc_stack_reclaim_disable(void) { }
+int      xtc_stack_reclaim_enabled(void) { return 0; }
+uint64_t xtc_stack_reclaim_count(void) { return 0; }
+
 /* PUBLIC: int __xtc_coro_preempt __P((void *)); */
 /* Windows-fiber substrate declines signal-context preemption (Windows
  * has no POSIX signal timer; a later phase adds a timer-queue variant).

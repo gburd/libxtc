@@ -45,6 +45,8 @@
 #include "coro_int.h"
 
 #include <string.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -63,6 +65,92 @@ XTC_THREAD_LOCAL struct xtc_coro *__xtc_current_coro = NULL;
 /* Per-thread scheduler resume point.  Set by __xtc_coro_step's jump
  * into a coroutine; the coroutine jumps back here to yield/await/finish. */
 static XTC_THREAD_LOCAL void *g_sched_fctx = NULL;
+
+/* ---- Lever S1: stack-memory reclamation on park -------------------
+ *
+ * OFF by default.  When enabled, a parking fiber returns the unused
+ * tail of its stack (everything below its current SP, beyond a live
+ * margin, page-aligned, above the guard) to the OS with
+ * madvise(MADV_DONTNEED); it faults back zero-filled on resume.  See
+ * xtc_async.h. */
+#if defined(MADV_DONTNEED)
+static _Atomic int      g_reclaim_on = 0;
+static _Atomic size_t   g_reclaim_keep = 0;      /* live margin below SP */
+static _Atomic uint64_t g_reclaim_count = 0;     /* madvise calls made */
+
+int
+xtc_stack_reclaim_enable(size_t keep_bytes)
+{
+	long pg = sysconf(_SC_PAGESIZE);
+	size_t page = (pg > 0) ? (size_t)pg : 4096u;
+	if (keep_bytes == 0)
+		keep_bytes = page;      /* default live margin: one page */
+	atomic_store(&g_reclaim_keep, keep_bytes);
+	atomic_store(&g_reclaim_on, 1);
+	return XTC_OK;
+}
+
+void
+xtc_stack_reclaim_disable(void)
+{
+	atomic_store(&g_reclaim_on, 0);
+}
+
+int
+xtc_stack_reclaim_enabled(void)
+{
+	return atomic_load(&g_reclaim_on);
+}
+
+uint64_t
+xtc_stack_reclaim_count(void)
+{
+	return atomic_load(&g_reclaim_count);
+}
+
+/*
+ * Reclaim the unused tail of the current fiber's stack.  Called from a
+ * PARK path with `sp` = the fiber's current stack pointer (a stack
+ * address captured by the caller just before it jumps to the
+ * scheduler).  Stacks grow DOWN, so the unused region is
+ * [stack_base + guard, sp - keep), page-aligned inward.  No-op unless
+ * the reclaimable span exceeds one page (avoids fault churn on shallow
+ * fibers).
+ */
+static void
+coro_stack_shrink(struct xtc_coro *c, void *sp)
+{
+	long pgl;
+	size_t page, keep;
+	uintptr_t lo, hi, guard, base;
+
+	if (c == NULL || c->stack == NULL || !atomic_load(&g_reclaim_on))
+		return;
+	pgl = sysconf(_SC_PAGESIZE);
+	page = (pgl > 0) ? (size_t)pgl : 4096u;
+	guard = page;                    /* one guard page at the base */
+	keep = atomic_load(&g_reclaim_keep);
+
+	base = (uintptr_t)c->stack + guard;      /* first usable byte */
+	hi = (uintptr_t)sp;
+	if (hi <= base + keep)
+		return;                  /* SP too close to the base */
+	/* Reclaimable tail: [base, hi - keep), rounded to whole pages so we
+	 * never touch a partially-live page. */
+	hi = (hi - keep) & ~(uintptr_t)(page - 1);   /* round DOWN */
+	lo = (base + page - 1) & ~(uintptr_t)(page - 1); /* round UP */
+	if (hi <= lo || hi - lo < page)
+		return;                  /* nothing worth a syscall */
+	if (madvise((void *)lo, (size_t)(hi - lo), MADV_DONTNEED) == 0)
+		(void)atomic_fetch_add(&g_reclaim_count, 1);
+}
+#else  /* no MADV_DONTNEED: reclaim is a no-op */
+int      xtc_stack_reclaim_enable(size_t k) { (void)k; return XTC_E_NOSYS; }
+void     xtc_stack_reclaim_disable(void) { }
+int      xtc_stack_reclaim_enabled(void) { return 0; }
+uint64_t xtc_stack_reclaim_count(void) { return 0; }
+#define coro_stack_shrink(c, sp)  ((void)(c), (void)(sp))
+#endif
 
 /* Default stack size; configurable via xtc_set_stack_size(). */
 static size_t __xtc_stack_size = 64 * 1024;
@@ -293,7 +381,11 @@ xtc_yield(void)
 {
 	struct xtc_coro *c = __xtc_current_coro;
 	void *pctx;
+	volatile char probe;     /* address approximates the current SP */
 	if (c == NULL) return;
+	/* S1: return the unused stack tail below our SP to the OS before we
+	 * park.  &probe is a live local, so the reclaim never crosses it. */
+	coro_stack_shrink(c, (void *)&probe);
 	/* Preserve the process layer's per-fiber TLS across the yield:
 	 * the scheduler runs other fibers (which overwrite it) before we
 	 * resume.  Without this a proc resumes running as whatever proc
