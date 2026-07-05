@@ -1,3 +1,41 @@
+libxtc (1.2.1-1) unstable; urgency=medium
+
+  * Portability + bug-fix release.  Qualified by building and running
+    the full test suite on riscv64 (Ubuntu, gcc + clang), x86_64
+    (NixOS, gcc), FreeBSD/amd64 (clang), illumos/sparc64 (gcc, big
+    endian), and Windows 11 ARM64 (MSVC 2022 and 2026 smoke test) --
+    which surfaced several latent portability bugs, all fixed here.
+  * Two issues reported by the multithreaded-PostgreSQL carrier team,
+    both fixed:
+    - Monitor DOWN ambiguity: a monitor registered on an already-dead
+      target delivered reason XTC_E_NOTFOUND (-11), which collides with
+      -SIGSEGV, so a clean short-lived backend looked like a crash.  It
+      now delivers a distinct XTC_DOWN_NOPROC, with a documented
+      DOWN-reason contract and an xtc_down_is_noproc() helper so a
+      supervisor can tell "already gone" from a real fault.
+    - Early-fault containment: a fault before a fiber armed its own
+      recovery frame delivered no DOWN.  xtc_proc now auto-arms a
+      default recovery frame at proc entry, so ANY contained fault
+      delivers a DOWN (reason = the signal number).  A stack-overflow
+      fault still escalates (the guard page is gone), and a
+      critical-section fault still aborts -- PANIC semantics preserved.
+  * Portability fixes: gate the involuntary-preemption ucontext redirect
+    on __linux__ (glibc-only gregs/REG_RIP) so FreeBSD/illumos build;
+    link -lrt for timer_create where the POSIX timers live in librt;
+    xtc_preempt_supported() is now a runtime probe (some FreeBSD hosts
+    lack a per-thread CPU-time timer); portable [[:space:]] in s_cfg
+    (BSD/illumos sed has no \s); export CC to the shell tests (illumos
+    has gcc but no cc); link os_alloc + a no-op unsafe-bracket stub into
+    the minimal meson M0 library; exclude that stub from the MSVC build.
+  * Also confirms the intended public deallocator: xtc_free() (v1.2.0)
+    is the stable free for all "free with xtc_free" buffers; the older
+    __os_free references in comments were corrected.
+  * DST sim suite grows to 41 tests (added a monitored N-loop clean-
+    teardown test that reproduced the DOWN-ambiguity diagnosis).  Full
+    make check clean under AddressSanitizer and UndefinedBehaviorSanitizer.
+
+ -- Greg Burd <greg@burd.me>  Sun, 05 Jul 2026 15:26:06 -0400
+
 libxtc (1.2.0-1) unstable; urgency=medium
 
   * Preemption Phase 3 -- xtc_launch(fn, arg, timeout_ns): the libinger
