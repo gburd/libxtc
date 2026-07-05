@@ -43,7 +43,12 @@ rem        self-guard to empty translation units on Windows. ---
 echo [2/4] cl compiling sources
 set SRCS=
 for %%D in (os io evt ptc orc) do (
-  for %%F in ("%XTC_SRC%\src\%%D\*.c") do set SRCS=!SRCS! "%%F"
+  for %%F in ("%XTC_SRC%\src\%%D\*.c") do (
+    rem os_unsafe_stub.c is a meson-M0-only no-op; the full MSVC build
+    rem links preempt.c which provides the real __xtc_unsafe_* -- skip
+    rem the stub to avoid a duplicate-symbol (LNK4006).
+    if /I not "%%~nxF"=="os_unsafe_stub.c" set SRCS=!SRCS! "%%F"
+  )
 )
 set SRCS=!SRCS! "%XTC_SRC%\src\xtc_version.c" "%XTC_SRC%\src\xtc_strerror.c"
 
