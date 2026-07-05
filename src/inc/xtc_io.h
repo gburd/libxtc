@@ -53,17 +53,25 @@ enum {
 	XTC_AIO_PREAD     = 0,
 	XTC_AIO_PWRITE    = 1,
 	XTC_AIO_FSYNC     = 2,    /* full sync: data + metadata */
-	XTC_AIO_FDATASYNC = 3     /* data only (fsync on macOS, which lacks it) */
+	XTC_AIO_FDATASYNC = 3,    /* data only (fsync on macOS, which lacks it) */
+	XTC_AIO_PREADV    = 4,    /* vectored read (iov/iovcnt) */
+	XTC_AIO_PWRITEV   = 5     /* vectored write (iov/iovcnt) */
 };
 typedef struct xtc_aio {
 	int       fd;
 	int       op;         /* XTC_AIO_* */
-	void     *buf;        /* read/write buffer (ignored for FSYNC) */
-	uint32_t  len;        /* byte count (ignored for FSYNC) */
+	void     *buf;        /* read/write buffer (scalar ops; NULL for FSYNC/V) */
+	uint32_t  len;        /* byte count (scalar ops) */
 	int64_t   off;        /* file offset (ignored for FSYNC) */
 	void     *tag;        /* woken on completion (an xtc_task_t *) */
 	int       done;       /* 0 until the completion is reaped */
 	int32_t   res;        /* bytes transferred, or -errno */
+	/* Vectored ops (PREADV / PWRITEV): iov points at the caller's
+	 * iovec array (struct iovec *, kept opaque here to avoid a
+	 * <sys/uio.h> dependency in this header) and iovcnt is its count.
+	 * Zero/NULL for the scalar and sync ops. */
+	void     *iov;        /* const struct iovec * */
+	int       iovcnt;
 } xtc_aio_t;
 
 /*

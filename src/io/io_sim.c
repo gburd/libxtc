@@ -24,6 +24,7 @@
 
 #include "io_int.h"
 #include "xtc_aio.h"
+#include <sys/uio.h>
 #include "xtc_sim.h"
 
 #include <string.h>
@@ -388,6 +389,16 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 #else
 		res = fdatasync(a->fd) == 0 ? 0 : -1;
 #endif
+		break;
+	case XTC_AIO_PREADV:
+		n = preadv(a->fd, (const struct iovec *)a->iov, a->iovcnt,
+		    (off_t)a->off);  /* XTC_BLOCKING_OK: sim inline file op */
+		res = n < 0 ? -1 : (int)n;
+		break;
+	case XTC_AIO_PWRITEV:
+		n = pwritev(a->fd, (const struct iovec *)a->iov, a->iovcnt,
+		    (off_t)a->off); /* XTC_BLOCKING_OK: sim inline file op */
+		res = n < 0 ? -1 : (int)n;
 		break;
 	default:
 		return XTC_E_INVAL;
