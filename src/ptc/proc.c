@@ -804,15 +804,14 @@ __proc_entry(void *arg)
 	 * inside a critical section is NOT caught here (recovery is gated on
 	 * crit_depth == 0 in the handler), preserving PANIC semantics. */
 	{
-		int fsig = sigsetjmp(p->recovery_buf, 1);
+		int fsig = xtc_proc_recovery_arm();   /* POSIX sigsetjmp / Win CONTEXT */
 		if (fsig != 0) {
 			/* A contained fault fired the default frame. */
 			p->recovery_armed = 0;
 			__recov_release_all(p);
-			p->exit_reason = fsig;   /* positive signal number */
+			p->exit_reason = fsig;   /* positive signal / exception code */
 			goto proc_exit;
 		}
-		p->recovery_armed = 1;
 	}
 
 	if ((reason = setjmp(p->exit_jb)) == 0) {
