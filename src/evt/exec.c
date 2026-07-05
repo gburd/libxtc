@@ -585,6 +585,7 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 	 * cap simply are not starve-tracked and fall back to uniform. */
 #define XTC_SIM_MAX_TRACKED_LOOPS 256
 	long last_run[XTC_SIM_MAX_TRACKED_LOOPS];
+	int pinned = -1;   /* pessimal: the loop currently monopolizing */
 	{
 		int li;
 		for (li = 0; li < XTC_SIM_MAX_TRACKED_LOOPS; li++)
@@ -664,10 +665,15 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 
 		/* Seeded pick among the runnable loops.  Default: uniform over
 		 * the SCHED stream.  Adversarial (xtc_sim_sched_pessimal): on a
-		 * seeded coin, pick the LEAST-RECENTLY-RUN runnable loop --
-		 * deliberately starving whichever loop most wants to run, to
-		 * hunt the pessimal interleaving.  last_run[] is a per-run local
-		 * keyed by loop index (sim-only; no struct/ABI change). */
+		 * seeded coin take the PESSIMAL pick -- keep running the pinned
+		 * loop as long as it stays runnable, monopolizing the executor
+		 * and STARVING every peer (the classic worst interleaving: a
+		 * fiber that holds a resource a peer is blocked on never yields
+		 * the scheduler).  Only when the pin cannot run do we pin a new
+		 * runnable loop -- the least-recently-run one, so over a long run
+		 * every loop eventually gets starved in turn rather than one
+		 * fixed loop always winning.  last_run[]/pinned are per-run
+		 * locals keyed by loop index (sim-only; no struct/ABI change). */
 		pick = (int)__xtc_sim_rng_range(XTC_SIM_RNG_SCHED,
 		    (uint64_t)n_runnable);
 		{
@@ -675,18 +681,29 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 			if (pess > 0 &&
 			    (int)__xtc_sim_rng_range(XTC_SIM_RNG_SCHED, 1000) <
 			        pess) {
-				/* Least-recently-run runnable loop (starve). */
-				long oldest = -1;
-				chosen = -1;
-				for (i = 0; i < e->n_loops; i++) {
-					if (!__sim_loop_runnable(e->loops[i], now,
-					    __sim_peer_stealable(e, i)))
-						continue;
-					if (oldest < 0 ||
-					    last_run[i] < oldest) {
-						oldest = last_run[i];
-						chosen = i;
+				/* Prefer the pinned loop if it is still runnable
+				 * (monopolize/starve). */
+				if (pinned >= 0 && pinned < e->n_loops &&
+				    __sim_loop_runnable(e->loops[pinned], now,
+				    __sim_peer_stealable(e, pinned))) {
+					chosen = pinned;
+				} else {
+					/* Pin a new victim: least-recently-run
+					 * runnable loop, so starvation rotates. */
+					long oldest = -1;
+					chosen = -1;
+					for (i = 0; i < e->n_loops; i++) {
+						if (!__sim_loop_runnable(
+						    e->loops[i], now,
+						    __sim_peer_stealable(e, i)))
+							continue;
+						if (oldest < 0 ||
+						    last_run[i] < oldest) {
+							oldest = last_run[i];
+							chosen = i;
+						}
 					}
+					pinned = chosen;
 				}
 			}
 		}
