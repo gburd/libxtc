@@ -580,6 +580,16 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 {
 	long steps = 0;
 	xtc_loop_t *saved;
+	/* Per-run last-run-step per loop, for the pessimal (starve) pick.
+	 * A fixed cap keeps it a stack local (no alloc); loops beyond the
+	 * cap simply are not starve-tracked and fall back to uniform. */
+#define XTC_SIM_MAX_TRACKED_LOOPS 256
+	long last_run[XTC_SIM_MAX_TRACKED_LOOPS];
+	{
+		int li;
+		for (li = 0; li < XTC_SIM_MAX_TRACKED_LOOPS; li++)
+			last_run[li] = 0;
+	}
 	if (e == NULL) return XTC_E_INVAL;
 
 	/* Save the caller's current-loop binding.  __xtc_loop_step (called
@@ -652,18 +662,47 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 			continue;
 		}
 
-		/* Seeded pick among the runnable loops (the SCHED stream). */
+		/* Seeded pick among the runnable loops.  Default: uniform over
+		 * the SCHED stream.  Adversarial (xtc_sim_sched_pessimal): on a
+		 * seeded coin, pick the LEAST-RECENTLY-RUN runnable loop --
+		 * deliberately starving whichever loop most wants to run, to
+		 * hunt the pessimal interleaving.  last_run[] is a per-run local
+		 * keyed by loop index (sim-only; no struct/ABI change). */
 		pick = (int)__xtc_sim_rng_range(XTC_SIM_RNG_SCHED,
 		    (uint64_t)n_runnable);
-		for (i = 0; i < e->n_loops; i++) {
-			if (__sim_loop_runnable(e->loops[i], now,
-			    __sim_peer_stealable(e, i))) {
-				if (pick == 0) { chosen = i; break; }
-				pick--;
+		{
+			int pess = __xtc_sim_sched_pessimal_pct();
+			if (pess > 0 &&
+			    (int)__xtc_sim_rng_range(XTC_SIM_RNG_SCHED, 1000) <
+			        pess) {
+				/* Least-recently-run runnable loop (starve). */
+				long oldest = -1;
+				chosen = -1;
+				for (i = 0; i < e->n_loops; i++) {
+					if (!__sim_loop_runnable(e->loops[i], now,
+					    __sim_peer_stealable(e, i)))
+						continue;
+					if (oldest < 0 ||
+					    last_run[i] < oldest) {
+						oldest = last_run[i];
+						chosen = i;
+					}
+				}
+			}
+		}
+		if (chosen < 0) {
+			for (i = 0; i < e->n_loops; i++) {
+				if (__sim_loop_runnable(e->loops[i], now,
+				    __sim_peer_stealable(e, i))) {
+					if (pick == 0) { chosen = i; break; }
+					pick--;
+				}
 			}
 		}
 		if (chosen < 0)
 			continue;   /* raced to empty (shouldn't, single thread) */
+		if (chosen < XTC_SIM_MAX_TRACKED_LOOPS)
+			last_run[chosen] = steps;
 
 		rc = __xtc_loop_step_once(e->loops[chosen]);
 		steps++;

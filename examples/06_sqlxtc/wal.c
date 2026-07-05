@@ -28,6 +28,7 @@
 #include "wal.h"
 
 #include "xtc_aio.h"
+#include "xtc_sim.h"      /* XTC_SIM_BUGGIFY -- DST pessimal batching (no-op in prod) */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -359,6 +360,16 @@ wal_writer_proc(void *arg)
 		 * commit), while under load many commits coalesce per fsync.
 		 */
 		while (w->pcount < w->max_batch) {
+			/* Buggify: flush a TINY batch instead of coalescing all
+			 * queued commits.  Group commit makes no maximal-batching
+			 * promise -- each committer is still durably fsync'd -- so
+			 * stopping the drain early is legal, and it stresses
+			 * crash-recovery with more, smaller batches (more fsync /
+			 * torn-tail boundaries).  Per-call BUGGIFY coin (fixed per
+			 * site per run, replays); a no-op in production. */
+			if (XTC_SIM_BUGGIFY("wal.flush.tiny_batch") &&
+			    xtc_sim_buggify_fault(300))
+				break;
 			m = NULL; n = 0;
 			if (xtc_recv(&m, &n, 0) != XTC_OK || m == NULL)
 				break;               /* nothing more queued right now */

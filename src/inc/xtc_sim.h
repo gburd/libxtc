@@ -255,4 +255,46 @@ int      xtc_sim_exec_run(struct xtc_exec *e, uint64_t seed, long max_steps);
 int      xtc_sim_check(struct xtc_exec *e);
 uint64_t xtc_sim_state_hash(struct xtc_exec *e);
 
+/*
+ * Adversarial scheduler bias (FoundationDB "hunt the worst interleaving"
+ * rather than a benign uniform-random order).  When enabled, the sim
+ * scheduler, on a seeded XTC_SIM_RNG_SCHED coin, picks the
+ * LEAST-RECENTLY-RUN runnable loop instead of a uniform-random one --
+ * deliberately starving whichever loop most wants to run, so a fiber
+ * that depends on a peer making timely progress is stress-tested
+ * against the pessimal order.  pct_per_1000 is how often the biased
+ * pick is taken (0 disables; e.g. 500 = half the picks are pessimal,
+ * half uniform, so both orders are still explored across a seed sweep).
+ * OFF by default -- the default uniform pick keeps existing tests'
+ * schedules stable; opt in from an adversarial test / swarm.  A no-op
+ * outside a sim run.
+ *
+ * PUBLIC: void xtc_sim_sched_pessimal __P((unsigned));
+ * PUBLIC: int  __xtc_sim_sched_pessimal_pct __P((void));
+ */
+void xtc_sim_sched_pessimal(unsigned pct_per_1000);
+int  __xtc_sim_sched_pessimal_pct(void);
+
+/*
+ * Completion / message SWIZZLE (reorder), independent of latency.  The
+ * sim I/O event queue is normally due-time ordered; a deferred AIO
+ * completion or a cross-loop message is delivered in due order, so
+ * reordering only happens as a side effect of latency jitter.  When
+ * swizzle is enabled, on a seeded XTC_SIM_RNG_IO coin an event is
+ * inserted one slot LATER than its due order would place it -- a
+ * legal reordering (the waiter simply wakes after a sibling completion
+ * it would otherwise have preceded), which explicitly explores
+ * completion/message-order interleavings the way FoundationDB swizzles
+ * connection and disk completions.  pct_per_1000 is the per-insert
+ * reorder probability (0 disables).  OFF by default.  A no-op outside
+ * a sim run.
+ *
+ * PUBLIC: void xtc_sim_swizzle_enable __P((unsigned));
+ * PUBLIC: void xtc_sim_swizzle_disable __P((void));
+ * PUBLIC: int  __xtc_sim_swizzle_pct __P((void));
+ */
+void xtc_sim_swizzle_enable(unsigned pct_per_1000);
+void xtc_sim_swizzle_disable(void);
+int  __xtc_sim_swizzle_pct(void);
+
 #endif /* XTC_SIM_H */

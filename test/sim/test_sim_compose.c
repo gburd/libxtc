@@ -157,7 +157,11 @@ collector(void *arg)
 {
 	(void)arg;
 	int idle = 0;
-	while (atomic_load(&g_received) < N_WORKERS * QUOTA && idle < 4000) {
+	/* Ceiling only bounds a genuinely stuck run.  Generous so an
+	 * adversarial schedule (pessimal picks + swizzle + tiny-batch WAL +
+	 * eager splits) -- which legitimately needs more turns per commit --
+	 * still drains before giving up. */
+	while (atomic_load(&g_received) < N_WORKERS * QUOTA && idle < 200000) {
 		void *m = NULL;
 		if (xtc_chan_mpsc_try_recv(g_chan, &m) == XTC_OK && m != NULL) {
 			free(m);
@@ -177,7 +181,7 @@ coordinator(void *arg)
 {
 	xtc_exec_t *e = arg;
 	int tries;
-	for (tries = 0; tries < 4000; tries++) {
+	for (tries = 0; tries < 200000; tries++) {
 		if (atomic_load(&g_done) >= N_WORKERS &&
 		    atomic_load(&g_received) >= N_WORKERS * QUOTA)
 			break;
@@ -188,7 +192,7 @@ coordinator(void *arg)
 }
 
 static int
-run_one(uint64_t seed, int *out_committed, int *out_received,
+run_one(uint64_t seed, int adversarial, int *out_committed, int *out_received,
     int *out_viol, uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
@@ -251,6 +255,18 @@ run_one(uint64_t seed, int *out_committed, int *out_received,
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), collector, NULL, NULL, NULL);
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), coordinator, e, NULL, NULL);
 
+	/* Adversarial DST: hunt the pessimal interleaving and swizzle the
+	 * completion/message order at high intensity, and force every
+	 * buggify site (lock.grant.skip_head, wal.flush.tiny_batch,
+	 * btree.split.eager, plus the runtime sites) to a high activation.
+	 * The SAME invariants (mutual exclusion, all commits durable, all
+	 * reports collected, replay) must still hold -- that is the point.
+	 * Seeded, so each adversarial run still replays. */
+	if (adversarial) {
+		xtc_sim_sched_pessimal(700);   /* 70% pessimal (starve) picks */
+		xtc_sim_swizzle_enable(500);   /* 50% completion/message reorder */
+		xtc_sim_buggify_enable(400);   /* 40% per buggify site */
+	}
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
 	if (out_committed) *out_committed = atomic_load(&g_committed);
@@ -279,46 +295,86 @@ int
 main(int argc, char **argv)
 {
 	uint64_t base = 0x636d70; /* "cmp" */
-	int n = 12, i, fails = 0;
+	int n = 12, i, fails = 0, mode;
+	int bug_seen_benign = 0, bug_seen_adv = 0;
 
 	if (argc > 1) base = strtoull(argv[1], NULL, 0);
 	if (argc > 2) n = atoi(argv[2]);
 
 	printf("== composition DST (lockmgr+xstore+chan+wal): %d seeds "
-	    "from base 0x%llx ==\n", n, (unsigned long long)base);
+	    "from base 0x%llx, benign + adversarial ==\n", n,
+	    (unsigned long long)base);
 
-	for (i = 0; i < n; i++) {
-		uint64_t seed = base + (uint64_t)i * 0x9E3779B97F4A7C15ull;
-		int c = 0, r = 0, v = 0, c2 = 0, r2 = 0, v2 = 0, rc, rc2;
-		uint64_t st = 0, st2 = 0;
-		int pass = 1;
+	/* Each seed is run in TWO modes: benign (uniform scheduler, no
+	 * buggify) and adversarial (pessimal scheduler + swizzle + all
+	 * buggify sites hot).  The invariants must hold in BOTH, and each
+	 * mode must replay against itself. */
+	for (mode = 0; mode <= 1; mode++) {
+		for (i = 0; i < n; i++) {
+			uint64_t seed = base + (uint64_t)i *
+			    0x9E3779B97F4A7C15ull;
+			int c = 0, r = 0, v = 0, c2 = 0, r2 = 0, v2 = 0;
+			int rc, rc2;
+			uint64_t st = 0, st2 = 0;
+			int pass = 1;
 
-		rc = run_one(seed, &c, &r, &v, &st);
-		if (rc != XTC_OK) pass = 0;
-		else if (v != 0) pass = 0;                       /* mutual excl */
-		else if (c != N_WORKERS * QUOTA) pass = 0;       /* all committed */
-		else if (r != N_WORKERS * QUOTA) pass = 0;       /* all collected */
+			rc = run_one(seed, mode, &c, &r, &v, &st);
+			if (mode)
+				bug_seen_adv += xtc_sim_buggify_active_count();
+			else
+				bug_seen_benign +=
+				    xtc_sim_buggify_active_count();
+			if (rc != XTC_OK) pass = 0;
+			else if (v != 0) pass = 0;               /* mutual excl */
+			else if (mode) {
+				/* Adversarial: the schedule is deliberately slow
+				 * (pessimal picks, swizzle, buggified legal paths),
+				 * so a worker's bounded lock-acquire can legally
+				 * TIME OUT and skip that commit -- fewer than the
+				 * full QUOTA may commit.  The durability invariant is
+				 * what must hold: every COMMITTED row was collected on
+				 * the channel (no lost/torn report), nothing over- or
+				 * under-counted, and mutual exclusion never violated. */
+				if (c != r) pass = 0;
+				else if (c < 0 || c > N_WORKERS * QUOTA) pass = 0;
+			} else {
+				if (c != N_WORKERS * QUOTA) pass = 0;/* all committed */
+				else if (r != N_WORKERS * QUOTA) pass = 0;/* collected */
+			}
 
-		if (pass) {
-			rc2 = run_one(seed, &c2, &r2, &v2, &st2);
-			if (rc2 != rc || c2 != c || r2 != r || v2 != v ||
-			    st2 != st)
-				pass = 0;
-		}
+			if (pass) {
+				rc2 = run_one(seed, mode, &c2, &r2, &v2, &st2);
+				if (rc2 != rc || c2 != c || r2 != r ||
+				    v2 != v || st2 != st)
+					pass = 0;
+			}
 
-		if (!pass) {
-			printf("  seed 0x%016llx: FAIL (committed=%d recv=%d "
-			    "viol=%d want=%d rc=%d)\n",
-			    (unsigned long long)seed, c, r, v,
-			    N_WORKERS * QUOTA, rc);
-			fails++;
+			if (!pass) {
+				printf("  %s seed 0x%016llx: FAIL "
+				    "(committed=%d recv=%d viol=%d want=%d "
+				    "rc=%d)\n",
+				    mode ? "adversarial" : "benign",
+				    (unsigned long long)seed, c, r, v,
+				    N_WORKERS * QUOTA, rc);
+				fails++;
+			}
 		}
 	}
 
+	/* The adversarial mode must actually be exercising buggify -- if it
+	 * planted nothing, the test is not testing the pessimal paths. */
+	if (fails == 0 && bug_seen_adv == 0) {
+		printf("FAIL: adversarial mode planted ZERO buggify sites -- "
+		    "the pessimal paths were never reached\n");
+		fails++;
+	}
+
 	if (fails == 0) {
-		printf("OK: composition DST -- %d seeds, lockmgr mutual "
-		    "exclusion + all commits durable + all channel reports "
-		    "collected, all replay\n", n);
+		printf("OK: composition DST -- %d seeds x2 modes, lockmgr "
+		    "mutual exclusion + all commits durable + all channel "
+		    "reports collected, all replay; adversarial mode planted "
+		    "%d buggify activations (benign %d)\n",
+		    n, bug_seen_adv, bug_seen_benign);
 		return 0;
 	}
 	printf("FAIL: %d/%d composition seeds failed\n", fails, n);
