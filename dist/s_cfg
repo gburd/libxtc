@@ -31,7 +31,7 @@ emit_warn() { echo "  [s_cfg] warn: $1" >&2; }
 # call begins with the name as a literal string in the first arg.
 registered=$(grep -rnE 'xtc_cfg_register_(bool|int|int64|double|string|enum)\(' \
 	"$SRC" --include='*.c' 2>/dev/null \
-	| sed -nE 's/.*xtc_cfg_register_[a-z0-9]+\(\s*"([a-zA-Z0-9_.]+)".*/\1/p' \
+	| sed -nE 's/.*xtc_cfg_register_[a-z0-9]+\([[:space:]]*"([a-zA-Z0-9_.]+)".*/\1/p' \
 	| sort -u)
 
 if [ ! -f "$CFG_DOC" ]; then
