@@ -258,16 +258,17 @@ uint64_t xtc_sim_state_hash(struct xtc_exec *e);
 /*
  * Adversarial scheduler bias (FoundationDB "hunt the worst interleaving"
  * rather than a benign uniform-random order).  When enabled, the sim
- * scheduler, on a seeded XTC_SIM_RNG_SCHED coin, picks the
- * LEAST-RECENTLY-RUN runnable loop instead of a uniform-random one --
- * deliberately starving whichever loop most wants to run, so a fiber
- * that depends on a peer making timely progress is stress-tested
- * against the pessimal order.  pct_per_1000 is how often the biased
- * pick is taken (0 disables; e.g. 500 = half the picks are pessimal,
- * half uniform, so both orders are still explored across a seed sweep).
- * OFF by default -- the default uniform pick keeps existing tests'
- * schedules stable; opt in from an adversarial test / swarm.  A no-op
- * outside a sim run.
+ * scheduler, on a seeded XTC_SIM_RNG_SCHED coin, takes the PESSIMAL
+ * pick: it keeps running one pinned loop as long as that loop stays
+ * runnable -- monopolizing the executor and starving every peer (the
+ * classic worst order: a fiber holding a resource a peer is blocked on
+ * never yields).  When the pin parks, a new victim is pinned (the
+ * least-recently-run runnable loop, so starvation rotates over a long
+ * run).  pct_per_1000 is how often the pessimal pick is taken (0
+ * disables; e.g. 500 = half the picks monopolize, half uniform, so
+ * both orders are still explored across a seed sweep).  OFF by default
+ * -- the default uniform pick keeps existing tests' schedules stable;
+ * opt in from an adversarial test / swarm.  A no-op outside a sim run.
  *
  * PUBLIC: void xtc_sim_sched_pessimal __P((unsigned));
  * PUBLIC: int  __xtc_sim_sched_pessimal_pct __P((void));
