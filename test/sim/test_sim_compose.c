@@ -196,6 +196,7 @@ run_one(uint64_t seed, int *out_committed, int *out_received,
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
 	xtc_lockmgr_opts_t lo = XTC_LOCKMGR_OPTS_DEFAULT;
+	lo.detect_mode = XTC_LOCK_DETECT_ON_BLOCK;   /* no detector thread under sim */
 	sx_db *ddl = NULL;
 	struct worker_arg wa[N_WORKERS];
 	char logp[] = "/tmp/xtc-compose-wal-XXXXXX";

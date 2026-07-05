@@ -447,13 +447,53 @@ Still OUTSIDE sim's reach BY DESIGN (not a coverage gap to close):
   consumer does -- proving ordered, lossless byte delivery under a
   fragmenting wire, replayed.
 
-  Still not-coverable-by-design in this area: the OS SUBPROCESS layer
-  (osproc.c -- real fork/execvp/waitpid on real pids and fds) and the
-  raw-socket/TLS wire, for the same reason as the blocking POOL thread
-  above -- a real child process or kernel socket runs outside the
-  single-thread sim's control, so there is nothing deterministic to
-  simulate.  The library-side completion-delivery logic around them (a
-  fiber parking on an fd/AIO completion) is already exercised by
+- OS SUBPROCESS lifecycle (DONE, test_sim_osproc): using FoundationDB's
+  "process = in-process actor with a simulated lifecycle" pattern.  FDB
+  never fork/exec's under simulation; its Sim2 models a process
+  (ISimulator::ProcessInfo) as a cooperatively-scheduled actor with a
+  simulated lifecycle (spawn / kill / reboot keyed by KillType) and
+  pushes REAL subprocess spawning out to fdbmonitor, which the
+  simulated code path never crosses.  xtc_osproc does the same: under
+  sim the fn-callback child runs as an xtc_proc FIBER and its lifecycle
+  -- running, exit-with-status, signalled termination, wait / try_wait
+  / reap -- is modelled on the sim clock (ADDITIVE, gated on
+  __xtc_sim_active(); the production fork path is byte-identical,
+  test_osproc unchanged).  The exec (argv) path and the live control
+  SOCKET have no in-process equivalent and decline with XTC_E_NOSYS
+  under sim -- a consumer needing them is on the not-coverable
+  real-kernel tier, exactly as FDB's real exec lives in fdbmonitor
+  outside the simulator.  The common "run isolated work, collect its
+  exit status" contract IS modelled and replays.
+
+- CRASH RECOVERY under a MULTI-PRIMITIVE composition (DONE,
+  test_sim_compose_crash): the FoundationDB signature test ("kill a
+  process mid-transaction, verify the durability invariant survives"),
+  now spanning the full stack.  The composition workload (lockmgr +
+  xstore/WAL + channel + supervision) runs, and at a SEEDED step
+  mid-workload the run crashes (xtc_exec_stop, pool unflushed); the WAL
+  is cut at the durable frontier and replayed into a fresh tree.
+  Invariant: every row whose COMMIT returned SX_OK before the crash
+  (acked, observed while holding the lock) is present after recovery,
+  and lockmgr mutual exclusion held up to the crash -- across the whole
+  primitive stack, forked-per-run for exact replay of the process-global
+  MVCC clock.
+
+- RESOURCE governance (DONE, test_sim_res): many fibers across loops
+  concurrently acquire/release a small-capped resource; the lock-free
+  CAS accountant must hold used <= cap at every observation, conserve
+  exactly (final used == 0), and account every attempt (successes +
+  rejects == attempts) -- a lost-update or torn cap-check would show as
+  a used>cap observation or nonzero final used.  Replayed.
+
+  Still not-coverable-by-design in this area: the exec (argv)
+  subprocess path (a real program image xtc_osproc would execvp -- no
+  in-process equivalent), the live control-SOCKET request/reply over a
+  real kernel socketpair, the raw-socket/TLS wire, and the blocking
+  POOL thread -- a real child image, kernel socket, or OS thread runs
+  outside the single-thread sim's control, so there is nothing
+  deterministic to simulate (this is exactly why FDB keeps real exec in
+  fdbmonitor).  The library-side completion-delivery logic around them
+  (a fiber parking on an fd/AIO completion) is already exercised by
   test_sim_iofault.
 
 ## FoundationDB parity
@@ -928,7 +968,7 @@ Known gaps and why:
   each run starts from the identical binding.  Sim-only (the function
   only runs under sim); production current-loop handling is unchanged.
   test_sim_buggify2 now hashes the completion sequence ORDER-sensitively
-  and asserts it replays; the full sim suite (35 tests) replays, incl.
+  and asserts it replays; the full sim suite (38 tests) replays, incl.
   under ASan+UBSan.
 
 - Lock manager + deadlock detector (lock_mgr.c): DONE for the fiber path

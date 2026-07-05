@@ -91,7 +91,7 @@ for s in engine db quack metrics vexec sql_parse sql_parse_drv sql_ast \
 done
 
 fail=0
-for t in test_sim_sched test_sim_pingpong test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_lockmgr test_sim_lwlock test_sim_lrlock test_sim_rcu test_sim_iofault test_sim_torn test_sim_buggify test_sim_buggify2 test_sim_buggify3 test_sim_buggify4 test_sim_partition test_sim_machine_death test_sim_svr test_sim_chan test_sim_sync test_sim_reg test_sim_mctx test_sim_slab test_sim_pdict test_sim_stats test_sim_tnt test_sim_sup_strategy test_sim_app test_sim_blocking test_sim_stream test_sim_swarm test_sim_bufmgr test_sim_crash_recover test_sim_compose; do
+for t in test_sim_sched test_sim_pingpong test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_lockmgr test_sim_lwlock test_sim_lrlock test_sim_rcu test_sim_iofault test_sim_torn test_sim_buggify test_sim_buggify2 test_sim_buggify3 test_sim_buggify4 test_sim_partition test_sim_machine_death test_sim_svr test_sim_chan test_sim_sync test_sim_reg test_sim_mctx test_sim_slab test_sim_pdict test_sim_stats test_sim_tnt test_sim_sup_strategy test_sim_app test_sim_blocking test_sim_osproc test_sim_res test_sim_stream test_sim_swarm test_sim_bufmgr test_sim_crash_recover test_sim_compose test_sim_compose_crash; do
 	exe="$work/$t"
 	# test_sim_bufmgr additionally needs the bufmgr object + its include;
 	# test_sim_crash_recover needs the whole native engine object set.
@@ -100,7 +100,7 @@ for t in test_sim_sched test_sim_pingpong test_sim_fault test_sim_soak test_sim_
 	if [ "$t" = test_sim_bufmgr ]; then
 		extra_obj="$bmobj"
 		extra_inc="-I$bmdir"
-	elif [ "$t" = test_sim_crash_recover ] || [ "$t" = test_sim_compose ]; then
+	elif [ "$t" = test_sim_crash_recover ] || [ "$t" = test_sim_compose ] || [ "$t" = test_sim_compose_crash ]; then
 		extra_obj="$engobjs"
 		extra_inc="-I$bmdir -DSQLXTC_HAVE_LIME=1"
 	fi
