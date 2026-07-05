@@ -1,3 +1,45 @@
+libxtc (1.2.0-1) unstable; urgency=medium
+
+  * Preemption Phase 3 -- xtc_launch(fn, arg, timeout_ns): the libinger
+    launch(f, timeout) model, native to libxtc.  Run a function on a
+    child fiber with a one-shot deadline; on a clean finish deliver its
+    result, on the deadline cancel it (its recovery + at-exit cleanup
+    releases held resources) and return XTC_E_AGAIN.  Composable; a NULL
+    loop means the caller's current loop.  A universal resume-point
+    cancellation hook lets a fiber honor a pending cancel the instant it
+    is next scheduled.  DST-covered (test_sim_launch) + ASan/UBSan.
+  * Preemption Lever S1 -- madvise-on-park: an opt-in
+    (xtc_stack_reclaim_enable) that returns a parked fiber's unused
+    stack tail to the OS with madvise(MADV_DONTNEED), lowering the
+    per-parked-fiber memory floor.  OFF by default; the production fast
+    path is unchanged.
+  * Vectored (scatter/gather) async file I/O -- xtc_aio_preadv /
+    xtc_aio_pwritev: the async-fiber analog of preadv(2)/pwritev(2), so
+    code that already builds struct iovec arrays (a WAL writer,
+    PostgreSQL's smgr/md layer) adopts libxtc without flattening or
+    looping.  Native on io_uring, offloaded elsewhere, DST-covered under
+    the sim I/O backend (test_sim_aiov) + ASan/UBSan.
+  * Packaging fix: a public xtc_free(void *) for the caller-owned
+    buffers returned by xtc_recv / xtc_net_recv_frame / xtc_osproc_call /
+    xtc_svr_call.  Previously the free function (__os_free) was declared
+    only in a non-installed header, so a consumer of the installed
+    header set had no prototype for it; xtc_free closes that gap and the
+    __os_* namespace stays internal.
+  * sqlxtc storage engine: fuzzy checkpoint / recLSN-horizon truncation
+    (Increment 4), plus documented resolutions for the page-cache,
+    single-writer-pager, and fine-grained-btree-lock items.
+  * Conformance: the missing W5 workload (rwlock vs lrlock ratio sweep)
+    and a fairness re-audit of the suite (A10).
+  * The deterministic-simulation suite now stands at 40 replay-verified
+    tests; every new feature is exercised under DST where it has
+    concurrency semantics.
+  * Qualified: make check, the 40-test DST sim suite, the amalgamation
+    (1.2.0), and full make check clean under both AddressSanitizer and
+    UndefinedBehaviorSanitizer.  Public API additions are backward-
+    compatible (semver minor).
+
+ -- Greg Burd <greg@burd.me>  Sun, 05 Jul 2026 08:08:08 -0400
+
 libxtc (1.1.0-1) unstable; urgency=medium
 
   * Deterministic Simulation Testing reach extended toward
