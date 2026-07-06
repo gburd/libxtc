@@ -341,6 +341,95 @@ run_part_b(uint64_t seed, int *out_restarts, int *out_spawns,
 	return rc;
 }
 
+/* ---- PART C: reboot / incarnation.  A killed proc's slot may be
+ * REUSED by a replacement, but the replacement gets a distinct pid
+ * generation, so a stale pid minted before the "reboot" is rejected
+ * (never delivered to the reincarnation).  This is the local face of
+ * FoundationDB's node-incarnation (creation) guarantee, integrated with
+ * the machine-death model rather than a separate subsystem. ---- */
+
+static atomic_int  g_reboot_ok;      /* 1 if the incarnation guarantee held */
+static atomic_int  g_reboot_rx;      /* messages the replacement received */
+
+static void
+reboot_child(void *arg)
+{
+	(void)arg;
+	/* Receive one message then exit; used to prove the NEW pid delivers
+	 * while the OLD (stale) pid does not. */
+	void *m = NULL; size_t n = 0;
+	if (xtc_recv(&m, &n, 50 * 1000 * 1000LL) == XTC_OK && m != NULL) {
+		atomic_fetch_add(&g_reboot_rx, 1);
+		xtc_free(m);
+	}
+}
+
+static void
+reboot_driver(void *arg)
+{
+	xtc_exec_t *e = arg;
+	xtc_loop_t *l = xtc_exec_loop(e, 0);
+	xtc_pid_t old_pid = {0}, new_pid = {0};
+	int msg = 42, ok = 1;
+
+	/* Spawn a child, capture its pid, kill it, and wait for it to be
+	 * reaped (monitor DOWN). */
+	if (xtc_proc_spawn(l, reboot_child, NULL, NULL, &old_pid) != XTC_OK) {
+		atomic_store(&g_reboot_ok, 0); (void)xtc_exec_stop(e); return;
+	}
+	(void)xtc_monitor(old_pid, NULL);
+	(void)xtc_exit_pid(old_pid, 9);   /* kill it */
+	{
+		void *m = NULL; size_t n = 0;
+		(void)xtc_recv(&m, &n, 5LL * 1000 * 1000 * 1000);  /* the DOWN */
+		if (m) xtc_free(m);
+	}
+
+	/* A send to the now-dead OLD pid must be REJECTED (stale), not
+	 * delivered to whatever reuses the slot. */
+	if (xtc_send(old_pid, &msg, sizeof msg) == XTC_OK)
+		ok = 0;   /* a stale pid should not deliver */
+
+	/* Spawn the replacement (the "reboot") on the same loop -- it may
+	 * reuse old_pid's slot, but with a bumped generation. */
+	if (xtc_proc_spawn(l, reboot_child, NULL, NULL, &new_pid) != XTC_OK)
+		ok = 0;
+	/* If the slot was reused, the gen MUST differ so the two pids are
+	 * distinguishable (the incarnation guarantee). */
+	if (new_pid.loop_id == old_pid.loop_id &&
+	    new_pid.local_id == old_pid.local_id &&
+	    new_pid.gen == old_pid.gen)
+		ok = 0;   /* slot reused with the SAME gen -- stale pid ambiguous */
+	/* The NEW pid must deliver. */
+	if (xtc_send(new_pid, &msg, sizeof msg) != XTC_OK)
+		ok = 0;
+	/* And a second send to the OLD pid still must not deliver. */
+	if (xtc_send(old_pid, &msg, sizeof msg) == XTC_OK)
+		ok = 0;
+
+	atomic_store(&g_reboot_ok, ok);
+	(void)xtc_exec_stop(e);
+}
+
+static int
+run_part_c(uint64_t seed, int *out_ok, int *out_rx, uint64_t *out_state)
+{
+	xtc_exec_t *e = NULL;
+	int rc;
+	atomic_store(&g_reboot_ok, -1);
+	atomic_store(&g_reboot_rx, 0);
+	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+		return -1;
+	xtc_exec_set_service_mode(e, 1);
+	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), reboot_driver, e, NULL, NULL);
+	rc = xtc_sim_exec_run(e, seed, 5000000);
+	if (out_ok)    *out_ok = atomic_load(&g_reboot_ok);
+	if (out_rx)    *out_rx = atomic_load(&g_reboot_rx);
+	if (out_state) *out_state = xtc_sim_state_hash(e);
+	(void)xtc_exec_fini(e);
+	return rc;
+}
+
 int
 main(void)
 {
@@ -442,11 +531,40 @@ main(void)
 		return 1;
 	}
 
+	/* PART C: reboot / incarnation -- a killed proc's reused slot gets a
+	 * distinct gen, and a stale pid to the pre-reboot proc is rejected. */
+	{
+		int c_ok1 = -1, c_rx1 = 0, c_ok2 = -1, c_rx2 = 0;
+		uint64_t sc1 = 0, sc2 = 0;
+		int rc_c1 = run_part_c(0x2EB007, &c_ok1, &c_rx1, &sc1);
+		int rc_c2 = run_part_c(0x2EB007, &c_ok2, &c_rx2, &sc2);
+		printf("PART C run1: rc=%d incarnation_ok=%d rx=%d "
+		    "state=%016llx\n", rc_c1, c_ok1, c_rx1,
+		    (unsigned long long)sc1);
+		if (rc_c1 != XTC_OK || rc_c2 != XTC_OK) {
+			printf("FAIL: PART C did not quiesce (rc %d/%d)\n",
+			    rc_c1, rc_c2);
+			return 1;
+		}
+		if (c_ok1 != 1) {
+			printf("FAIL: incarnation guarantee broken -- a stale "
+			    "pre-reboot pid delivered, or the reused slot kept "
+			    "the same gen (incarnation_ok=%d)\n", c_ok1);
+			return 1;
+		}
+		if (c_ok1 != c_ok2 || c_rx1 != c_rx2 || sc1 != sc2) {
+			printf("FAIL: PART C did not replay\n");
+			return 1;
+		}
+	}
+
 	printf("OK: machine-death under DST -- a seeded kill (xtc_exit_pid) "
 	    "propagates to linked ('E') and monitored ('D') peers, a "
 	    "one_for_one supervisor deterministically restarts the killed "
 	    "child, the run quiesces (no hang) and replays identically from "
 	    "the seed; a different seed kills a different victim/child and "
-	    "stays consistent\n");
+	    "stays consistent; and a reboot (kill + slot-reusing respawn) "
+	    "gives the replacement a distinct pid generation so a stale "
+	    "pre-reboot pid is rejected (the incarnation guarantee)\n");
 	return 0;
 }
