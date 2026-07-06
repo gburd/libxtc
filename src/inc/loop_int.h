@@ -70,8 +70,13 @@ struct xtc_task {
 	 * by the parker on resume (e.g. xtc_proc_wait_fd).  Encodes
 	 * XTC_IO_* flags from the dispatched event plus the synthetic
 	 * XTC_WAIT_MAILBOX (set by __mbox_deliver) and XTC_WAIT_TIMEOUT
-	 * (set by the timer callback). */
-	uint32_t     wake_revents;
+	 * (set by the timer callback).  Atomic: a cross-thread xtc_send
+	 * ORs XTC_WAIT_MAILBOX in from a FOREIGN thread (proc.c) while the
+	 * owning loop ORs/reads/zeros it (task.c/loop.c/proc.c), so a plain
+	 * uint32_t RMW here is a data race (TSan-reportable).  All accesses
+	 * use relaxed atomics -- ordering is provided by the waker/mailbox
+	 * lock; the atomic only makes the OR itself race-free. */
+	_Atomic uint32_t wake_revents;
 
 	/* Doubly linked into loop->all_tasks so a completed task can be
 	 * unlinked in O(1) and recycled to the loop's task_slab (instead of
