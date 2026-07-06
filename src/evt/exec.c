@@ -652,11 +652,22 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 					alive += atomic_load_explicit(
 					    &e->loops[i]->n_alive,
 					    memory_order_relaxed);
-				e->started = 0;
+					e->started = 0;
 				xtc_sim_clock_disable();
-				xtc_sim_deactivate();
 				__xtc_current_loop = saved;
-				return alive > 0 ? XTC_E_DEADLK : XTC_OK;
+				if (alive > 0) {
+					xtc_sim_deactivate();
+					return XTC_E_DEADLK;
+				}
+				/* Clean quiescence: run the optional semantic
+				 * consistency check while the sim is still active
+				 * (so it may inspect sim-visible state), THEN
+				 * deactivate. */
+				{
+					int crc = __xtc_sim_run_consistency_check();
+					xtc_sim_deactivate();
+					return crc;
+				}
 			}
 			if (dl > now)
 				xtc_sim_clock_set(dl);

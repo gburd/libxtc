@@ -359,6 +359,21 @@ main(int argc, char **argv)
 	int n_seen = 0;
 	long failures = 0;
 	long n_part = 0, n_lat = 0, n_bug = 0, n_kill = 0, n_torn = 0;
+	/* Fault-space coverage (FoundationDB-style): the buggify sites we
+	 * expect a full sweep to activate, and how many seeds hit each.  A
+	 * site that stays 0 across the whole sweep is unreachable (dead code
+	 * or a workload gap) and worth investigating. */
+	static const char *const known_sites[] = {
+		"proc.mbox.spurious_full", "chan.mpsc.spurious_full",
+		"chan.mpmc.spurious_full", "sync.sem.spurious_timeout",
+		"sched.steal.skip_near", "timer.fire.late",
+		"sched.inbox.drain_one_fewer", "sched.runq.defer_ready",
+		"io.aio.slow_completion", "lock.grant.skip_head",
+		"svr.recv.delay_dispatch", "reg.whereis.transient_miss",
+		"wal.flush.tiny_batch", "btree.split.eager"
+	};
+	const int n_known = (int)(sizeof known_sites / sizeof known_sites[0]);
+	long cov_activated[64] = {0};   /* seeds that ACTIVATED each site */
 
 	if (n_seeds < 1)
 		n_seeds = 1;
@@ -399,6 +414,24 @@ main(int argc, char **argv)
 		n_torn += sc.torn;
 
 		rc1 = run_once(seed, &sc, &st1, &app1);
+		/* Accumulate fault-space coverage from this seed's reached
+		 * buggify sites (state persists past run_once's deactivate
+		 * until the next buggify_enable). */
+		{
+			int nr = xtc_sim_buggify_reached_count();
+			int bi;
+			for (bi = 0; bi < nr; bi++) {
+				char nm[48]; int act = 0, ki;
+				if (xtc_sim_buggify_site(bi, nm, sizeof nm, &act)
+				    != XTC_OK)
+					continue;
+				for (ki = 0; ki < n_known; ki++)
+					if (strcmp(nm, known_sites[ki]) == 0) {
+						if (act) cov_activated[ki]++;
+						break;
+					}
+			}
+		}
 		if (atomic_load(&g_torn_bad) != 0) {
 			printf("FAIL seed=%llu: %d torn/corrupt page(s) accepted "
 			    "SILENTLY (checksum missed a torn write) -- "
@@ -445,6 +478,26 @@ main(int argc, char **argv)
 	    "schedules; scenarios: %ld partition, %ld latency, %ld buggify, "
 	    "%ld machine-death, %ld torn-write\n", n_seeds, seed_base,
 	    failures, n_seen, n_part, n_lat, n_bug, n_kill, n_torn);
+
+	/* Fault-space coverage.  Note the swarm's own workload is ping/pong
+	 * + timers + a torn file, so it only reaches the buggify sites on
+	 * THOSE paths; the lock/WAL/btree/channel/server sites are reached
+	 * by the targeted tests (test_sim_compose, _lockmgr, _crash_recover,
+	 * _chan, _svr), not here.  This report tells you which sites THIS
+	 * sweep exercised -- run it per targeted test to build the full
+	 * fault-space picture. */
+	{
+		int ki, hit = 0;
+		printf("buggify coverage (this workload): ");
+		for (ki = 0; ki < n_known; ki++)
+			if (cov_activated[ki] > 0) {
+				printf("%s=%ld ", known_sites[ki],
+				    cov_activated[ki]);
+				hit++;
+			}
+		printf("(%d/%d known sites activated by this sweep's "
+		    "workload)\n", hit, n_known);
+	}
 
 	if (failures > 0) {
 		printf("FAIL: %ld seed(s) failed\n", failures);

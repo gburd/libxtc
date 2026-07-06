@@ -199,12 +199,17 @@ int64_t __xtc_sim_net_latency(void);
  * PUBLIC: void xtc_sim_buggify_disable __P((void));
  * PUBLIC: int  xtc_sim_buggify __P((const char *));
  * PUBLIC: int  xtc_sim_buggify_active_count __P((void));
+ * PUBLIC: int  xtc_sim_buggify_reached_count __P((void));
+ * PUBLIC: int  xtc_sim_buggify_site __P((int, char *, size_t, int *));
  * PUBLIC: int  xtc_sim_buggify_fault __P((unsigned));
  */
 void xtc_sim_buggify_enable(unsigned pct_per_1000);
 void xtc_sim_buggify_disable(void);
 int  xtc_sim_buggify(const char *name);
 int  xtc_sim_buggify_active_count(void);
+int  xtc_sim_buggify_reached_count(void);
+int  xtc_sim_buggify_site(int idx, char *buf, size_t buflen,
+         int *out_activated);
 int  xtc_sim_buggify_fault(unsigned pct_per_1000);
 
 /* Branch on a buggify point in runtime code:
@@ -297,5 +302,23 @@ int  __xtc_sim_sched_pessimal_pct(void);
 void xtc_sim_swizzle_enable(unsigned pct_per_1000);
 void xtc_sim_swizzle_disable(void);
 int  __xtc_sim_swizzle_pct(void);
+
+/*
+ * Semantic consistency check (FoundationDB's end-of-test consistency
+ * workload).  Install a callback that the sim runs ONCE at quiescence,
+ * after all the seeded faults/chaos, to assert a GLOBAL application
+ * invariant a per-step structural state hash cannot see -- e.g. "the
+ * B-tree is still well formed and holds exactly the acked-commit set".
+ * The callback returns XTC_OK if the invariant holds, nonzero otherwise;
+ * the sim propagates a nonzero result as the run's failure.  NULL (the
+ * default) means no check.  Set it before each run.  A no-op in
+ * production.
+ *
+ * PUBLIC: void xtc_sim_set_consistency_check __P((xtc_sim_consistency_fn, void *));
+ * PUBLIC: int  __xtc_sim_run_consistency_check __P((void));
+ */
+typedef int (*xtc_sim_consistency_fn)(void *arg);
+void xtc_sim_set_consistency_check(xtc_sim_consistency_fn fn, void *arg);
+int  __xtc_sim_run_consistency_check(void);
 
 #endif /* XTC_SIM_H */
