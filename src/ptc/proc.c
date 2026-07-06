@@ -239,6 +239,8 @@ __trace_active(void)
 	return atomic_load_explicit(&__trace_on, memory_order_relaxed) != 0;
 }
 
+static _Atomic uint64_t __mon_ref_seq = 0;
+
 static struct link_entry *
 __link_alloc(void)
 {
@@ -343,6 +345,7 @@ struct xtc_proc {
 	jmp_buf     exit_jb;
 	int         exit_jb_set;
 	int         exit_reason;
+	int         exit_kind;   /* xtc_down_kind_t: 0 clean, 1 exit, 2 signal */
 
 	/* R1 fault containment: a recovery frame the proc arms with
 	 * xtc_proc_recovery_arm().  A per-process SIGSEGV/SIGBUS handler,
@@ -811,6 +814,7 @@ __proc_entry(void *arg)
 			p->recovery_armed = 0;
 			__recov_release_all(p);
 			p->exit_reason = fsig;   /* positive signal / exception code */
+			p->exit_kind = 2;        /* XTC_DOWN_KIND_SIGNAL */
 			goto proc_exit;
 		}
 	}
@@ -819,8 +823,13 @@ __proc_entry(void *arg)
 		p->exit_jb_set = 1;
 		p->fn(p->arg);
 		p->exit_reason = 0;        /* normal */
+		p->exit_kind = 0;          /* XTC_DOWN_KIND_CLEAN */
 	} else {
 		p->exit_reason = reason - 1;  /* offset so 0 is reachable */
+		/* xtc_exit_self(0) is a clean exit; any nonzero code is an
+		 * app EXIT status, kept in a field distinct from a signal so
+		 * a monitor never confuses xtc_exit_self(1) with SIGHUP. */
+		p->exit_kind = (p->exit_reason == 0) ? 0 : 1;
 	}
 	p->recovery_armed = 0;   /* past the body; no more auto-recovery */
 
@@ -845,6 +854,10 @@ proc_exit:
 	return reason;
 }
 
+static int __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
+    const xtc_proc_opts_t *opts, xtc_pid_t *out_pid, int rel,
+    uint64_t *out_ref);
+
 /*
  * PUBLIC: int xtc_proc_spawn __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));
  */
@@ -852,15 +865,39 @@ int
 xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
                const xtc_proc_opts_t *opts, xtc_pid_t *out_pid)
 {
+	return __proc_spawn_core(loop, fn, arg, opts, out_pid, 0, NULL);
+}
+
+/*
+ * Shared spawn core.  `rel` selects the parent<->child relationship
+ * established ATOMICALLY, before the child is enqueued and can run:
+ *   0 -- none (plain spawn)
+ *   1 -- link (bidirectional fate, like Erlang spawn_link)
+ *   2 -- monitor (unidirectional DOWN to the caller, like spawn_monitor)
+ * For rel != 0 the caller MUST be a process (__current_proc != NULL);
+ * the relationship is installed on both the child's and the parent's
+ * lists while we still hold the child `p` and its slot, so there is no
+ * window in which the child exists but is not yet linked/monitored --
+ * closing the race that a spawn-then-link idiom leaves open.
+ * out_ref (rel == 2) receives the monitor reference.
+ */
+static int
+__proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
+               const xtc_proc_opts_t *opts, xtc_pid_t *out_pid,
+               int rel, uint64_t *out_ref)
+{
 	struct xtc_proc *p;
 	struct xtc_proc_table *tbl;
 	xtc_task_t *t;
 	xtc_pid_t spawned_pid;
+	struct xtc_proc *self = (rel != 0) ? __current_proc : NULL;
 	uint16_t local;
 	uint32_t gen;
 	int rc;
 
 	if (XTC_UNLIKELY(loop == NULL || fn == NULL)) return XTC_E_INVAL;
+	/* link/monitor require a calling process to be the other end. */
+	if (rel != 0 && self == NULL) return XTC_E_INVAL;
 
 	/* Install the fiber-context preservation hooks so a yield/await
 	 * inside a proc keeps __current_proc pointing at this proc on
@@ -906,11 +943,79 @@ xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	 * out_pid afterward would be a use-after-free. */
 	spawned_pid = p->pid;
 
+	/*
+	 * ATOMIC link/monitor: establish the parent<->child relationship
+	 * NOW, before xtc_async makes the child runnable.  We hold p and
+	 * its slot, and self is the calling process; adding to both lists
+	 * here means that even if the child runs and exits the instant it
+	 * is enqueued, its __notify_links_and_monitors already sees the
+	 * link/monitor and delivers the EXIT/DOWN -- no XTC_DOWN_NOPROC
+	 * race, unlike spawn-then-link.  Best-effort on the entry allocs:
+	 * a NULL alloc degrades to a one-sided or missing relationship
+	 * (same failure mode as xtc_link), never a crash.
+	 */
+	if (rel == 1) {   /* link: symmetric on both link lists */
+		struct link_entry *lc = __link_alloc();  /* on child */
+		struct link_entry *lp = __link_alloc();  /* on parent */
+		if (lc != NULL) {
+			lc->peer = self->pid;
+			lc->next = p->links;
+			p->links = lc;
+		}
+		if (lp != NULL) {
+			lp->peer = spawned_pid;
+			lp->next = self->links;
+			self->links = lp;
+		}
+	} else if (rel == 2) {   /* monitor: DOWN flows child -> parent */
+		uint64_t ref = atomic_fetch_add_explicit(&__mon_ref_seq, 1,
+		    memory_order_relaxed) + 1;
+		struct mon_entry *mw = __mon_alloc();  /* on watcher (parent) */
+		struct mon_entry *mt = __mon_alloc();  /* on target (child) */
+		if (mw != NULL) {
+			mw->ref = ref;
+			mw->target = spawned_pid;
+			mw->watcher = self->pid;
+			mw->next = self->monitors;
+			self->monitors = mw;
+		}
+		if (mt != NULL) {
+			mt->ref = ref;
+			mt->target = spawned_pid;
+			mt->watcher = self->pid;
+			mt->next = p->monitored_by;
+			p->monitored_by = mt;
+		}
+		if (out_ref) *out_ref = ref;
+	}
+
 	/* Spawn the underlying coroutine.  Once xtc_async enqueues the
 	 * task it may run immediately on another loop's thread, so we must
 	 * NOT touch p afterward: the proc binds itself to its task/coro in
 	 * __proc_entry (see there).  Touching p here would race a reap. */
 	if ((rc = xtc_async(loop, __proc_entry, p, &t)) != XTC_OK) {
+		/* Undo the parent-side link/monitor we added above; the
+		 * child-side entries die with p.  Remove by the child pid
+		 * (spawned_pid) which never got to run. */
+		if (rel == 1) {
+			struct link_entry **pp = &self->links;
+			while (*pp != NULL) {
+				if (xtc_pid_eq((*pp)->peer, spawned_pid)) {
+					struct link_entry *e = *pp;
+					*pp = e->next; __link_free(e); break;
+				}
+				pp = &(*pp)->next;
+			}
+		} else if (rel == 2) {
+			struct mon_entry **pp = &self->monitors;
+			while (*pp != NULL) {
+				if (xtc_pid_eq((*pp)->target, spawned_pid)) {
+					struct mon_entry *e = *pp;
+					*pp = e->next; __mon_free(e); break;
+				}
+				pp = &(*pp)->next;
+			}
+		}
 		__table_release(tbl, local);
 		(void)pthread_mutex_destroy(&p->mbox_lock);
 		__os_free(p);
@@ -920,6 +1025,23 @@ xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 
 	if (out_pid) *out_pid = spawned_pid;
 	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_proc_spawn_link __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *)); */
+int
+xtc_proc_spawn_link(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
+                    const xtc_proc_opts_t *opts, xtc_pid_t *out_pid)
+{
+	return __proc_spawn_core(loop, fn, arg, opts, out_pid, 1, NULL);
+}
+
+/* PUBLIC: int xtc_proc_spawn_monitor __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *, uint64_t *)); */
+int
+xtc_proc_spawn_monitor(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
+                       const xtc_proc_opts_t *opts, xtc_pid_t *out_pid,
+                       uint64_t *out_ref)
+{
+	return __proc_spawn_core(loop, fn, arg, opts, out_pid, 2, out_ref);
 }
 
 /* PUBLIC: xtc_pid_t xtc_self __P((void)); */
@@ -2130,6 +2252,89 @@ xtc_down_decode(const void *msg, size_t len, xtc_pid_t *out_pid,
 	return XTC_OK;
 }
 
+/* PUBLIC: int xtc_down_decode_ex __P((const void *, size_t, xtc_down_info_t *)); */
+int
+xtc_down_decode_ex(const void *msg, size_t len, xtc_down_info_t *out)
+{
+	const uint8_t *k = msg;
+	XTC_PACK_PUSH
+	struct dmsg {
+		uint8_t   kind;
+		uint64_t  ref;
+		xtc_pid_t pid;
+		int       reason;
+		uint8_t   exit_kind;
+	} XTC_PACKED;
+	struct emsg {
+		uint8_t   kind;
+		int       reason;
+		xtc_pid_t pid;
+		uint8_t   exit_kind;
+	} XTC_PACKED;
+	XTC_PACK_POP
+	xtc_down_info_t info;
+	int ek;
+
+	if (msg == NULL || len < 1 || out == NULL)
+		return XTC_E_INVAL;
+	memset(&info, 0, sizeof info);
+
+	if (*k == 'D') {
+		struct dmsg d;
+		/* Accept both the current layout (with exit_kind) and an
+		 * older/shorter DOWN without it: if the extra byte is absent
+		 * we derive the kind from the reason value. */
+		size_t base = offsetof(struct dmsg, exit_kind);
+		if (len < base) return XTC_E_INVAL;
+		memset(&d, 0, sizeof d);
+		memcpy(&d, msg, len < sizeof d ? len : sizeof d);
+		info.pid    = d.pid;
+		info.reason = d.reason;
+		info.ref    = d.ref;
+		ek = (len >= sizeof d) ? d.exit_kind : -1;
+	} else if (*k == 'E') {
+		struct emsg e;
+		size_t base = offsetof(struct emsg, exit_kind);
+		if (len < base) return XTC_E_INVAL;
+		memset(&e, 0, sizeof e);
+		memcpy(&e, msg, len < sizeof e ? len : sizeof e);
+		info.pid    = e.pid;
+		info.reason = e.reason;
+		info.ref    = 0;   /* a link EXIT carries no monitor ref */
+		ek = (len >= sizeof e) ? e.exit_kind : -1;
+	} else {
+		return XTC_E_INVAL;
+	}
+
+	/* Map the on-wire exit_kind byte (or a derived value for an older
+	 * sender) to the classified fields. */
+	if (xtc_down_is_noproc(info.reason)) {
+		info.kind = XTC_DOWN_KIND_NOPROC;
+	} else if (ek == 2) {
+		info.kind = XTC_DOWN_KIND_SIGNAL;
+		info.signal = info.reason;
+	} else if (ek == 1) {
+		info.kind = XTC_DOWN_KIND_EXIT;
+		info.exit_code = info.reason;
+	} else if (ek == 0) {
+		info.kind = XTC_DOWN_KIND_CLEAN;
+	} else {
+		/* No exit_kind byte (older sender): fall back to the legacy
+		 * numeric convention so a downgraded peer still classifies. */
+		if (info.reason == 0)
+			info.kind = XTC_DOWN_KIND_CLEAN;
+		else if (info.reason >= 1 && info.reason <= 255) {
+			info.kind = XTC_DOWN_KIND_SIGNAL;
+			info.signal = info.reason;
+		} else {
+			info.kind = XTC_DOWN_KIND_EXIT;
+			info.exit_code = info.reason;
+		}
+	}
+	*out = info;
+	return XTC_OK;
+}
+
 /*
  * Cross-loop link/monitor safety.
  *
@@ -2251,8 +2456,6 @@ xtc_unlink(xtc_pid_t other)
 	return XTC_OK;
 }
 
-static _Atomic uint64_t __mon_ref_seq = 0;
-
 /* PUBLIC: int xtc_monitor __P((xtc_pid_t, uint64_t *)); */
 int
 xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
@@ -2286,7 +2489,8 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 			uint64_t ref;
 			xtc_pid_t pid;
 			int     reason;
-		} XTC_PACKED down = { 'D', ref, target, XTC_DOWN_NOPROC };
+			uint8_t exit_kind;
+		} XTC_PACKED down = { 'D', ref, target, XTC_DOWN_NOPROC, 3 };
 		XTC_PACK_POP
 		(void)xtc_send(self->pid, &down, sizeof down);
 		if (out_ref) *out_ref = ref;
@@ -2325,14 +2529,17 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		uint8_t kind;
 		int     reason;
 		xtc_pid_t pid;
+		uint8_t exit_kind;
 	} XTC_PACKED exit_signal = {
-		.kind = 'E', .reason = p->exit_reason, .pid = p->pid
+		.kind = 'E', .reason = p->exit_reason, .pid = p->pid,
+		.exit_kind = (uint8_t)p->exit_kind
 	};
 	struct {
 		uint8_t kind;
 		uint64_t ref;
 		xtc_pid_t pid;
 		int     reason;
+		uint8_t exit_kind;
 	} XTC_PACKED down_signal;
 	XTC_PACK_POP
 	struct link_entry *links;
@@ -2377,6 +2584,7 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		down_signal.ref  = me->ref;
 		down_signal.pid  = p->pid;
 		down_signal.reason = p->exit_reason;
+		down_signal.exit_kind = (uint8_t)p->exit_kind;
 		(void)xtc_send(me->watcher, &down_signal, sizeof down_signal);
 		__mon_free(me);
 	}

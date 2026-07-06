@@ -5,6 +5,8 @@
 .Os
 .Sh NAME
 .Nm xtc_proc_spawn ,
+.Nm xtc_proc_spawn_link ,
+.Nm xtc_proc_spawn_monitor ,
 .Nm xtc_self ,
 .Nm xtc_send ,
 .Nm xtc_recv ,
@@ -23,12 +25,17 @@
 .Nm xtc_proc_critical_enter ,
 .Nm xtc_proc_at_exit ,
 .Nm xtc_down_decode
+.Nm xtc_down_decode_ex
 .Nd BEAM-style lightweight processes with mailboxes
 .Sh SYNOPSIS
 .In xtc.h
 .In xtc_proc.h
 .Ft int
 .Fn xtc_proc_spawn "xtc_loop_t *loop" "xtc_proc_fn fn" "void *arg" "const xtc_proc_opts_t *opts" "xtc_pid_t *out_pid"
+.Ft int
+.Fn xtc_proc_spawn_link "xtc_loop_t *loop" "xtc_proc_fn fn" "void *arg" "const xtc_proc_opts_t *opts" "xtc_pid_t *out_pid"
+.Ft int
+.Fn xtc_proc_spawn_monitor "xtc_loop_t *loop" "xtc_proc_fn fn" "void *arg" "const xtc_proc_opts_t *opts" "xtc_pid_t *out_pid" "uint64_t *out_ref"
 .Ft xtc_pid_t
 .Fn xtc_self "void"
 .Ft int
@@ -71,6 +78,8 @@
 .Fn xtc_proc_mctx "void"
 .Ft int
 .Fn xtc_down_decode "const void *msg" "size_t len" "xtc_pid_t *out_pid" "int *out_reason"
+.Ft int
+.Fn xtc_down_decode_ex "const void *msg" "size_t len" "xtc_down_info_t *out"
 .Sh DESCRIPTION
 xtc processes are BEAM-style lightweight actors: each has an
 identity
@@ -101,10 +110,45 @@ only raw
 tasks are stealable.  Embedders that pin a worker to one loop (e.g. a
 PostgreSQL backend per loop) can rely on it.
 .Pp
+.Fn xtc_proc_spawn_link
+and
+.Fn xtc_proc_spawn_monitor
+are the atomic spawn-and-relate primitives, mirroring Erlang's
+.Fn spawn_link
+and
+.Fn spawn_monitor .
+They behave exactly like
+.Fn xtc_proc_spawn ,
+except that the parent<->child relationship is established BEFORE the
+child is made runnable, so there is no window in which the child
+exists but is not yet linked or monitored.  Even a child that runs and
+exits immediately therefore delivers its
+.Sq EXIT
+(link) or
+.Sq DOWN
+(monitor) to the parent, never the
+.Dv XTC_DOWN_NOPROC
+"monitor raced a dead target" outcome that a
+.Fn xtc_proc_spawn
+followed by a separate
+.Fn xtc_link
+or
+.Fn xtc_monitor
+can hit.
+.Fn xtc_proc_spawn_link
+establishes a bidirectional link (as if
+.Fn xtc_link
+were called on the child the instant it is born);
+.Fn xtc_proc_spawn_monitor
+establishes a unidirectional monitor and returns its reference in
+.Fa out_ref .
+Both require the CALLER to be a process
+.Pq Fn xtc_self No != Dv XTC_PID_NONE
+and return
+.Dv XTC_E_INVAL
+otherwise.
+.Pp
 .Fn xtc_self
-returns the calling process's pid, or
-.Dv XTC_PID_NONE
-if called outside a process context.
 .Pp
 .Fn xtc_send
 appends an envelope holding a copy of
@@ -288,6 +332,16 @@ faults
 and
 .Dv SIGILL
 on an alternate signal stack.
+.Pp
+Fault containment is PER-OS-THREAD:
+.Fn xtc_fault_guard_install
+must have run on every OS thread that hosts a loop before a fiber
+fault on that thread can be contained and turned into a DOWN.  A
+common idiom is to install it at the entry of one long-lived fiber per
+loop thread (a supervisor); the call is idempotent, so repeated
+installs are harmless.  A loop thread on which the guard was never
+installed lets a fiber fault take down the whole process rather than
+containing it.
 .Fn xtc_proc_recovery_arm
 arms a recovery frame for the calling process (used like
 .Xr sigsetjmp 3 :
