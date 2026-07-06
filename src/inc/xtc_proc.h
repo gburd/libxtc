@@ -96,6 +96,8 @@ typedef struct xtc_mailbox_stats {
 
 /*
  * PUBLIC: int       xtc_proc_spawn __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));
+ * PUBLIC: int       xtc_proc_spawn_link __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));
+ * PUBLIC: int       xtc_proc_spawn_monitor __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *, uint64_t *));
  * PUBLIC: xtc_pid_t xtc_self __P((void));
  * PUBLIC: int       xtc_send __P((xtc_pid_t, const void *, size_t));
  * PUBLIC: int       xtc_recv __P((void **, size_t *, int64_t));
@@ -112,6 +114,29 @@ typedef struct xtc_mailbox_stats {
 
 int       xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
                           const xtc_proc_opts_t *opts, xtc_pid_t *out_pid);
+
+/*
+ * Atomic spawn + link / spawn + monitor (Erlang spawn_link /
+ * spawn_monitor).  Identical to xtc_proc_spawn, but the parent<->child
+ * relationship is established BEFORE the child is made runnable, so
+ * there is no window in which the child exists but is not yet
+ * linked/monitored -- even if the child runs and exits immediately,
+ * its EXIT/DOWN is delivered (no XTC_DOWN_NOPROC race that a
+ * spawn-then-link/monitor idiom can hit).  The CALLER MUST be a
+ * process (xtc_self() != NONE); returns XTC_E_INVAL otherwise.
+ *
+ * _link:    bidirectional fate, exactly like calling xtc_link(child)
+ *           the instant the child is born -- an abnormal exit on either
+ *           side raises an EXIT on the other.
+ * _monitor: unidirectional; the caller receives a DOWN (with *out_ref
+ *           as the monitor reference) when the child exits, exactly
+ *           like xtc_monitor(child).
+ */
+int       xtc_proc_spawn_link(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
+                          const xtc_proc_opts_t *opts, xtc_pid_t *out_pid);
+int       xtc_proc_spawn_monitor(xtc_loop_t *loop, xtc_proc_fn fn,
+                          void *arg, const xtc_proc_opts_t *opts,
+                          xtc_pid_t *out_pid, uint64_t *out_ref);
 
 /* From inside a process, return its pid; from outside, returns NONE. */
 /*
@@ -488,6 +513,58 @@ void xtc_proc_recovery_cleanup(void);
  * is a DOWN, XTC_E_INVAL otherwise.  out_pid / out_reason may be NULL. */
 int       xtc_down_decode(const void *msg, size_t len,
                           xtc_pid_t *out_pid, int *out_reason);
+
+/*
+ * Self-describing DOWN classification (requested by embedders whose
+ * app exit codes and signal numbers would otherwise share the single
+ * `reason` integer: a bare xtc_exit_self(1) was indistinguishable from
+ * a signal-1 (SIGHUP) contained fault).  xtc_down_decode_ex fills an
+ * xtc_down_info_t whose `kind` says HOW the target ended, with the
+ * signal number and the app exit code in SEPARATE fields that never
+ * collide.  The legacy single-integer xtc_down_decode still works and
+ * returns the same `reason` it always did.
+ */
+typedef enum {
+	XTC_DOWN_KIND_CLEAN  = 0,  /* target returned or xtc_exit_self(0) */
+	XTC_DOWN_KIND_EXIT   = 1,  /* xtc_exit_self(code), code in .exit_code */
+	XTC_DOWN_KIND_SIGNAL = 2,  /* R1 contained fault, signal in .signal */
+	XTC_DOWN_KIND_NOPROC = 3   /* monitor raced a dead target (benign) */
+} xtc_down_kind_t;
+
+typedef struct {
+	xtc_pid_t       pid;        /* the target that went DOWN */
+	xtc_down_kind_t kind;       /* how it ended (never ambiguous) */
+	int             signal;     /* signal number iff kind == SIGNAL, else 0 */
+	int             exit_code;  /* app code iff kind == EXIT, else 0 */
+	int             reason;     /* the legacy xtc_down_decode reason value */
+	uint64_t        ref;        /* the monitor reference (0 for a link EXIT) */
+} xtc_down_info_t;
+
+/*
+ * Decode a DOWN or EXIT signal into a fully-classified xtc_down_info_t.
+ * Accepts both the monitor DOWN ('D') and the link EXIT ('E') signal
+ * shapes.  Returns XTC_OK on either, XTC_E_INVAL for any other message.
+ * A monitor need no longer know the producer's encoding convention:
+ * kind + signal + exit_code are unambiguous by construction.
+ *
+ * PUBLIC: int xtc_down_decode_ex __P((const void *, size_t, xtc_down_info_t *));
+ */
+int       xtc_down_decode_ex(const void *msg, size_t len,
+                             xtc_down_info_t *out);
+
+/* Predicate + accessor helpers over a legacy `reason` integer, for
+ * callers that keep using xtc_down_decode.  A signal-N fault and a
+ * bare xtc_exit_self(N) are STILL not distinguishable from `reason`
+ * alone (that is the whole reason to prefer xtc_down_decode_ex); these
+ * helpers only classify the two unambiguous sentinels. */
+static inline int xtc_down_is_signal_reason(int reason)
+{
+	return reason >= 1 && reason <= 255;
+}
+static inline int xtc_down_is_exit_reason(int reason)
+{
+	return reason == 0 || reason >= 256;
+}
 
 /* Internal: save / restore the current-proc context across a yield
  * done by a lower-level primitive (e.g. xtc_amutex parking the

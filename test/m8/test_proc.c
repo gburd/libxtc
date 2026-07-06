@@ -229,6 +229,168 @@ test_monitor(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- atomic spawn_monitor / spawn_link ---------- */
+
+static void
+instant_child(void *arg)
+{
+	(void)arg;
+	(void)xtc_exit_self(42);
+}
+
+struct sm_state { int saw_down; int reason; int link_saw_exit; xtc_loop_t *loop; };
+
+static void
+sm_parent(void *arg)
+{
+	struct sm_state *s = arg;
+	void *msg = NULL; size_t sz = 0;
+	struct { uint8_t kind; uint64_t ref; xtc_pid_t pid; int reason; }
+	    __attribute__((packed)) *down;
+	xtc_pid_t child;
+	uint64_t ref = 0;
+	if (xtc_proc_spawn_monitor(s->loop, instant_child,
+	    NULL, NULL, &child, &ref) != XTC_OK)
+		return;
+	(void)child;
+	if (xtc_recv(&msg, &sz, 5LL * 1000 * 1000 * 1000) != XTC_OK) return;
+	if (sz >= sizeof *down) {
+		down = msg;
+		if (down->kind == 'D') { s->saw_down = 1; s->reason = down->reason; }
+	}
+	xtc_free(msg);
+}
+
+static MunitResult
+test_spawn_monitor_atomic(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	struct sm_state s = {0, 0, 0, NULL};
+	xtc_pid_t parent;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	s.loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, sm_parent, &s, NULL, &parent),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(s.saw_down, ==, 1);
+	munit_assert_int(s.reason, ==, 42);
+	munit_assert_int(xtc_down_is_noproc(s.reason), ==, 0);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+static void
+sl_bad_child(void *arg) { (void)arg; (void)xtc_exit_self(9); }
+
+static void
+sl_parent(void *arg)
+{
+	struct sm_state *s = arg;
+	void *msg = NULL; size_t sz = 0;
+	/* Link EXIT signal layout is { kind='E', reason, pid } -- distinct
+	 * from the monitor DOWN { kind='D', ref, pid, reason }. */
+	struct { uint8_t kind; int reason; xtc_pid_t pid; }
+	    __attribute__((packed)) *ex;
+	xtc_pid_t child;
+	if (xtc_proc_spawn_link(s->loop, sl_bad_child,
+	    NULL, NULL, &child) != XTC_OK)
+		return;
+	(void)child;
+	if (xtc_recv(&msg, &sz, 5LL * 1000 * 1000 * 1000) != XTC_OK) return;
+	if (sz >= sizeof *ex) {
+		ex = msg;
+		if (ex->kind == 'E') {
+			s->link_saw_exit = 1;
+			s->reason = ex->reason;
+		}
+	}
+	xtc_free(msg);
+}
+
+static MunitResult
+test_spawn_link_atomic(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	struct sm_state s = {0, 0, 0, NULL};
+	xtc_pid_t parent;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	s.loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, sl_parent, &s, NULL, &parent),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(s.link_saw_exit, ==, 1);
+	munit_assert_int(s.reason, ==, 9);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_spawn_rel_needs_proc(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_pid_t pid; uint64_t ref;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn_link(loop, instant_child, NULL, NULL,
+	    &pid), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_proc_spawn_monitor(loop, instant_child, NULL,
+	    NULL, &pid, &ref), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* ---- self-describing DOWN: xtc_exit_self(1) is an EXIT code 1, NOT a
+ *      signal-1 fault (the carrier team's sharp edge). ---- */
+static void
+exit1_child(void *arg) { (void)arg; (void)xtc_exit_self(1); }
+
+struct dinfo_state { int kind; int signal; int exit_code; int got; xtc_loop_t *loop; };
+
+static void
+dinfo_parent(void *arg)
+{
+	struct dinfo_state *s = arg;
+	void *msg = NULL; size_t sz = 0;
+	xtc_pid_t child;
+	uint64_t ref = 0;
+	xtc_down_info_t info;
+	if (xtc_proc_spawn_monitor(s->loop, exit1_child, NULL, NULL,
+	    &child, &ref) != XTC_OK)
+		return;
+	if (xtc_recv(&msg, &sz, 5LL * 1000 * 1000 * 1000) != XTC_OK) return;
+	if (xtc_down_decode_ex(msg, sz, &info) == XTC_OK) {
+		s->got = 1;
+		s->kind = (int)info.kind;
+		s->signal = info.signal;
+		s->exit_code = info.exit_code;
+	}
+	xtc_free(msg);
+}
+
+static MunitResult
+test_down_decode_ex_exit_vs_signal(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	struct dinfo_state s = {0, 0, 0, 0, NULL};
+	xtc_pid_t parent;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	s.loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, dinfo_parent, &s, NULL,
+	    &parent), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(s.got, ==, 1);
+	/* The decisive assertion: xtc_exit_self(1) is an EXIT (code 1),
+	 * NOT a signal-1 fault. */
+	munit_assert_int(s.kind, ==, XTC_DOWN_KIND_EXIT);
+	munit_assert_int(s.exit_code, ==, 1);
+	munit_assert_int(s.signal, ==, 0);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 /* Infinite-wait recv must PARK (not busy-reschedule): a waiter blocks
  * on xtc_recv(timeout = -1) while a sender, after parking ~120 ms on
  * a timer, sends one message.  The whole run consumes far less CPU
@@ -845,6 +1007,10 @@ static MunitTest tests[] = {
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/selective_receive", test_selective_receive,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/monitor",           test_monitor,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/spawn_monitor_atomic", test_spawn_monitor_atomic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/spawn_link_atomic",  test_spawn_link_atomic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/spawn_rel_needs_proc", test_spawn_rel_needs_proc, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/down_decode_ex",      test_down_decode_ex_exit_vs_signal, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recv_inf_parks",    test_recv_inf_parks,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mailbox_stats",     test_mailbox_stats,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/save_queue_cap",    test_save_queue_cap,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
