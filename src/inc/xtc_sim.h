@@ -68,6 +68,21 @@ void     __xtc_sim_nondeterminism(const char *what);
 void     xtc_sim_strict(int on);
 int      xtc_sim_nondeterminism_count(void);
 
+/* Clock skew (FoundationDB "the clock is not perfect").  The scheduler
+ * still schedules timers against the true virtual clock, but a fiber
+ * that reads the clock (xtc_proc time, timeout math) observes
+ * true + offset (+/- a seeded jitter), so its notion of elapsed time can
+ * disagree with when its timers actually fire -- stressing code that
+ * assumes wall time equals scheduler time.  Seeded and bounded, so it
+ * replays; applied only on the observation seam, so it can never desync
+ * the scheduler.  offset_ns is a fixed per-run offset; jitter_ns (>=0)
+ * is the +/- band of a seeded per-read wobble (0 = none).  Off by
+ * default; reset on deactivate.
+ *
+ * PUBLIC: void xtc_sim_clock_skew __P((int64_t, int));
+ */
+void     xtc_sim_clock_skew(int64_t offset_ns, int jitter_ns);
+
 /* Activate sim with a root seed (also resets every stream).  Idempotent
  * re-activation re-seeds.  Test-only; never called in production. */
 void     xtc_sim_activate(uint64_t seed);
