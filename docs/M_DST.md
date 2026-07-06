@@ -293,6 +293,62 @@ buggify left a waiter parked at destroy time and reached it.  Fixed:
 destroy only pthread_cond_destroy()s each entry and lets
 xtc_slab_destroy reclaim the storage.
 
+## DST coverage of the public-API surface (measured 2026-07-06)
+
+Measured line/branch coverage of the core public-API-serving source
+(src/evt, src/ptc, src/orc) under the 44-test DST sim suite alone
+(gcov, sim backend, --coverage), to see how much of the runtime the
+deterministic simulation actually exercises:
+
+    reg.c        92% / 100%     pdict.c      93% / 97%
+    rcu.c        78% /  84%     loop.c       75% /  84%
+    task.c       75% /  80%     stats.c      75% /  84%
+    mctx.c       75% /  76%     app.c        69% /  71%
+    timer.c      69% /  73%     aio.c        68% /  80%
+    lock_mgr.c   67% /  68%     lock_lr.c    66% /  70%
+    lock_lw.c    63% /  69%     chan.c       64% /  68%
+    sup.c        63% /  79%     exec.c       61% /  72%
+    svr.c        57% /  68%     res.c        53% /  56%
+    proc.c       48% /  51%     sync.c       44% /  40%
+    slab.c       42% /  48%     blocking.c    8% /  10%
+
+The target is >85% of the code that serves a public API AND is
+DST-reachable.  The raw numbers above UNDERCOUNT that target, because a
+large fraction of the low-coverage code is deliberately NOT DST-reachable
+and is covered by OTHER test tiers:
+
+- blocking.c (8%): the whole module IS the real OS thread pool that DST
+  declines by design (sim runs the offloaded work inline).  Covered by
+  test/m9/test_blocking (a real-thread test).  Not a DST gap.
+- slab.c (42%): the SHARED_MEMORY / cross-process mmap paths need real
+  mmap; covered by test/m11/test_slab_shm.  The in-process slab IS
+  DST-exercised.
+- sync.c (44%): roughly half is the THREAD rwlock (xtc_rwlock_*), a
+  thread primitive, not a fiber one -- covered by test/m9/test_sync.
+  The FIBER primitives (xtc_amutex / xtc_arwlock) are DST-covered by
+  test_sim_latch; the remaining DST-reachable gaps are
+  xtc_amutex_try_lock, the abort-token API, and gate_drain edge paths.
+- aio.c (68%): the native io_uring/IOCP/kqueue completion paths are not
+  the sim backend (sim has its own deferred-completion model); covered
+  on real backends by test/m4/test_aio.
+- proc.c (48%): the largest genuinely-improvable file -- error/edge
+  paths (mailbox cap, watermark, recovery-track variants, wait_fd
+  timeout combinations) that the current sim workloads do not drive.
+
+HONEST PLAN to reach >85% of the DST-reachable public surface:
+  1. Add error/edge-path coverage to the DST-reachable files that are
+     genuinely low on reachable code -- proc.c, svr.c, res.c, and the
+     sim-reachable half of sync.c (amutex_try/abort-token/gate) -- by
+     extending the existing targeted sim tests to drive the untested
+     branches (cap hits, timeouts, aborts, recovery variants).
+  2. Track coverage in CI's sim-dst job so a regression that drops
+     DST-reachable coverage is visible (the fault-space coverage report
+     already lands; add line/branch of the DST-reachable set).
+  3. Do NOT force thread-only / real-kernel / native-backend code to 85%
+     UNDER DST -- that would be dishonest; those tiers have their own
+     tests (m9 threads, m11 shm, m4 native AIO).  The claim is
+     ">85% of the DST-reachable public-API code", stated precisely.
+
 ## FoundationDB parity: where we stand (2026-07-06)
 
 After a gap analysis against FDB's DST arsenal, the single-node-parity
