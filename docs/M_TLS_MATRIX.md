@@ -52,7 +52,7 @@ suite is backend-agnostic.
 | Backend             | Build | tls_server (5) | tls_client (2) | Notes |
 |---------------------|:-----:|:--------------:|:--------------:|-------|
 | OpenSSL 3.x         |  OK   |      5/5       |     2/2        | Linux Nix; default |
-| LibreSSL 4.x        |  OK   |      5/5       |     2/2        | OpenSSL-API; same source |
+| LibreSSL 4.x        |  OK   |      5/5       |     2/2        | OpenSSL-API; re-verified against LibreSSL 4.2.1 (2026-07-06) -- full client<->server handshake + verify + bad-CA reject all pass |
 | BoringSSL (2026-05) |  OK   |      5/5       |     2/2        | OpenSSL-API; SSL_read_ex shim; static libssl.a + -lstdc++ |
 | mbedTLS 3.x         |  OK   |      5/5       |     2/2        | native backend; client needs mbedtls_ssl_set_hostname(NULL) |
 | GnuTLS 3.x          |  OK   |      5/5       |     2/2        | native backend |
