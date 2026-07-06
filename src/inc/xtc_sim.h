@@ -173,6 +173,19 @@ int  __xtc_sim_io_torn_prefix(int full_len);
 int  __xtc_sim_io_flip_byte(int len);
 
 /*
+ * Disk-full (ENOSPC) injection: a seeded coin makes a WRITE fail with a
+ * hard out-of-space error mid-workload -- the whole op fails and nothing
+ * persists, distinct from a short transfer or a torn write -- so a
+ * storage engine's graceful-degradation path is exercised.  Off by
+ * default; reset via enable(0).  A no-op outside a sim run.
+ *
+ * PUBLIC: void xtc_sim_io_enospc_enable __P((unsigned));
+ * PUBLIC: int  __xtc_sim_io_enospc __P((void));
+ */
+void xtc_sim_io_enospc_enable(unsigned pct_per_1000);
+int  __xtc_sim_io_enospc(void);
+
+/*
  * Simulated network partition + message latency (DST).  A seeded,
  * deterministic model of a partitioned / lossy / delayed network at the
  * cross-LOOP message granularity xtc's sim models: xtc_send between

@@ -29,6 +29,7 @@
 
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 
 /* Per-fd registration (tag map) for readiness simulation. */
 struct __xtc_sim_reg {
@@ -390,6 +391,14 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		}
 		break;
 	case XTC_AIO_PWRITE: {
+		/* Disk-full: on a seeded coin the whole write fails ENOSPC
+		 * (nothing persists), before the torn-write model -- a hard
+		 * error the caller must degrade on, not a silent short tail. */
+		if (__xtc_sim_io_enospc()) {
+			res = -1;
+			errno = ENOSPC;
+			break;
+		}
 		/* Torn write: persist only a seeded prefix of the buffer but
 		 * still report FULL success -- exactly a torn page.  Untorn
 		 * (the default) writes the whole buffer.  Reporting a->len

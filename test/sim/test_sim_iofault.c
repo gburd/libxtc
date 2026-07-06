@@ -69,7 +69,7 @@ io_worker(void *arg)
 	/* Write our region (may be reported short under fault injection). */
 	w = xtc_aio_pwrite(g_fd, buf, REGION, off);
 	fold(w);
-	if (w >= 0 && w < REGION)
+	if (w < 0 || (w >= 0 && w < REGION))
 		atomic_fetch_add_explicit(&g_faults_seen, 1, memory_order_relaxed);
 
 	/* Durability barrier (may be reported as EIO under fault). */
@@ -118,8 +118,12 @@ run_once(uint64_t seed, int *out_done, long *out_rhash, int *out_faults,
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { close(g_fd); return -1; }
 
-	/* Enable I/O faults: 100us-2ms seeded latency, ~12% op fault rate. */
+	/* Enable I/O faults: 100us-2ms seeded latency, ~12% op fault rate.
+	 * Also inject ENOSPC on ~8% of writes: a hard disk-full error the
+	 * worker must handle (it counts the failed write) without hanging or
+	 * corrupting -- the run must still quiesce and replay. */
 	xtc_sim_io_faults_enable(100 * 1000LL, 2 * 1000 * 1000LL, 120);
+	xtc_sim_io_enospc_enable(80);
 
 	for (i = 0; i < N_WORKERS; i++) {
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
@@ -134,6 +138,7 @@ run_once(uint64_t seed, int *out_done, long *out_rhash, int *out_faults,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 
 	xtc_sim_io_faults_disable();
+	xtc_sim_io_enospc_enable(0);
 	(void)xtc_exec_fini(e);
 	close(g_fd);
 	g_fd = -1;

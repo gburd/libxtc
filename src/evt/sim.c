@@ -614,6 +614,34 @@ __xtc_sim_io_faults_active(void)
 	return atomic_load_explicit(&g_io_faults_on, memory_order_acquire);
 }
 
+/* Disk-full (ENOSPC) injection: a seeded coin makes a WRITE fail with a
+ * hard out-of-space error mid-workload (distinct from a short transfer
+ * or a torn write -- the whole op fails, nothing persists), exercising a
+ * storage engine's graceful-degradation path.  FoundationDB's disk-full
+ * fault class.  Off by default. */
+static _Atomic int g_io_enospc_pct;   /* per-1000 write ENOSPC probability */
+
+/* PUBLIC: void xtc_sim_io_enospc_enable __P((unsigned)); */
+void
+xtc_sim_io_enospc_enable(unsigned pct_per_1000)
+{
+	if (pct_per_1000 > 1000) pct_per_1000 = 1000;
+	atomic_store_explicit(&g_io_enospc_pct, (int)pct_per_1000,
+	    memory_order_release);
+}
+
+/* PUBLIC: int __xtc_sim_io_enospc __P((void)); */
+/* 1 on a seeded coin (from the IO stream) when a write should fail with
+ * ENOSPC; 0 otherwise / when disabled or sim inactive. */
+int
+__xtc_sim_io_enospc(void)
+{
+	int pct = atomic_load_explicit(&g_io_enospc_pct, memory_order_acquire);
+	if (pct <= 0 || !__xtc_sim_active())
+		return 0;
+	return (int)__xtc_sim_rng_range(XTC_SIM_RNG_IO, 1000) < pct;
+}
+
 /* PUBLIC: int64_t __xtc_sim_io_latency __P((void)); */
 /* A seeded I/O latency in [lat_min, lat_max] ns from the IO stream.
  * 0 when I/O faults are off. */
