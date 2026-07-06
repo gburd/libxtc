@@ -12,6 +12,7 @@
 #include "xtc_int.h"
 #include "xtc_inject.h"
 #include "xtc_sim.h"
+#include "xtc_dst_inject.h"
 #include "xtc_proc.h"
 #include "xtc_loop.h"
 #include "xtc_async.h"
@@ -668,7 +669,9 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
 		if (p->task != NULL)
 			atomic_fetch_or_explicit(&p->task->wake_revents,
 			    XTC_WAIT_MAILBOX, memory_order_relaxed);
+#if !XTC_DST_BUG(XTC_DST_BUG_LOSTWAKE)
 		(void)xtc_waker_wake(&p->recv_waker);
+#endif   /* planted bug LOSTWAKE: drop this wake -> parked receiver hangs */
 	}
 	return XTC_OK;
 }

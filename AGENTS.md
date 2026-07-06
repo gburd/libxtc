@@ -96,6 +96,54 @@ Call in `suite_setup`, `unlink()` in `suite_teardown`.
 cd build_unix && make -j$(nproc) && make check
 ```
 
+## DST is the point -- measure it by the RIGHT yardsticks
+
+libxtc's north star is to be as trustworthy as FoundationDB and
+TigerBeetle: DST-first, 100% deterministic simulation.  Do NOT judge
+that by code-coverage percentage.  Coverage is a hygiene FLOOR for the
+DST-reachable code, not the goal, and it undercounts on purpose (the
+thread pool, cross-process mmap, native AIO backends, and real TLS wire
+are deliberately NOT DST-reachable and are covered by other test tiers
+-- m9 threads, m11 shm, m4 native AIO, m18 TLS).  The real yardsticks,
+in priority order:
+
+1. DETERMINISM: 100%, ENFORCED (binary, not a percent).  Same seed +
+   same config => byte-identical execution, every time.  Enforced by
+   the determinism guard (__xtc_sim_nondeterminism traps any
+   sim-reachable real clock / unseeded RNG / env read / raw thread id)
+   plus xtc_sim_exec_run refusing XTC_OK if a run hit one -- so every
+   sim test proves its own determinism.  Any new sim-reachable
+   nondeterministic primitive MUST call the guard.  Never regress this.
+
+2. VOLUME SURVIVED: seeds x fault-classes run with ZERO invariant
+   violation.  This is the trust-building number and it grows over
+   time -- the swarm/soak sweeps report it; run them at scale nightly.
+   "N seeds across M fault classes, no durability/safety violation" is
+   the honest confidence statement, not a coverage figure.
+
+3. FAULT-SPACE COVERAGE: which faults / buggify sites the sweep
+   actually ACTIVATED (not which lines executed).  The question is
+   "did we inject a partition WHILE a commit was in flight WHILE the
+   disk was slow," not "did we run this line."  xtc_sim_buggify_site /
+   _reached_count expose it; the swarm reports it; a sweep that does
+   not hit enough is a gap to fix.
+
+4. BUG-DETECTION LATENCY (the killer metric): plant a KNOWN
+   durability/safety bug behind a compile flag and prove DST catches
+   it within K seeds, deterministically, with a replayable trace.
+   "If you break it, the simulator finds it fast and hands you the
+   exact seed" is what lets us truthfully claim FDB/TigerBeetle-grade
+   testing.  See test/sim/test_sim_bug_inject.c and
+   scripts/dst-bug-inject.sh.  When you add a new safety invariant,
+   add a planted-bug case that DST must catch.
+
+Line coverage of the DST-REACHABLE public-API code is still a useful
+floor (catches "this whole branch is never exercised"); measure and
+track it, but state the claim precisely as ">85% of the DST-reachable
+public surface," and never force thread-only / real-kernel / native-
+backend code to a coverage number UNDER DST -- that is dishonest.  See
+docs/M_DST.md for the measured baseline and the reachability breakdown.
+
 ## Continuous integration -- always check after pushing
 
 The repository lives on Codeberg (`origin`,
@@ -147,3 +195,5 @@ are a matched pair in the allocator vtable.
 
 BSD KNF as encoded in `.clang-format`.  ASCII-only in source, docs,
 comments, and commit messages.
+
+See .agent-steering-domains.md for domain-specific steering (local).

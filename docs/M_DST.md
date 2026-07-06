@@ -293,6 +293,46 @@ buggify left a waiter parked at destroy time and reached it.  Fixed:
 destroy only pthread_cond_destroy()s each entry and lets
 xtc_slab_destroy reclaim the storage.
 
+## The right DST metric, and the bug-injection harness (2026-07-06)
+
+FoundationDB and TigerBeetle do NOT judge DST by code-coverage percent.
+Coverage is a hygiene floor; the confidence-building yardsticks are:
+(1) determinism -- 100%, enforced (same seed => byte-identical run);
+(2) volume survived -- seeds x fault-classes with zero invariant
+violation; (3) fault-space coverage -- which faults the sweep actually
+activated; and (4) BUG-DETECTION LATENCY -- plant a known safety bug and
+prove the simulator catches it within a small seed count.  These are
+recorded in AGENTS.md as the project's steering.
+
+Yardstick (4) is now concrete.  src/inc/xtc_dst_inject.h defines planted
+bugs behind -DXTC_DST_INJECT_BUG=<id> (absent => every site compiles to
+0, so production and the default build are byte-unchanged), and
+scripts/dst-bug-inject.sh builds with each bug and asserts the DST test
+whose invariant should catch it FAILS:
+
+  1 LOSTWAKE  -- proc.c drops a mailbox waker fire; test_sim_pingpong's
+                 quiescence / lost-wakeup invariant fires (XTC_E_DEADLK).
+  2 LOCKEXCL  -- lock_mgr.c grants a conflicting lock; test_sim_compose's
+                 mutual-exclusion witness (held count <= 1) fires.
+  3 NODURABLE -- wal.c skips the fdatasync and acks without advancing the
+                 durable frontier; test_sim_compose_crash's durability
+                 invariant (every acked commit present after recovery)
+                 fires.
+
+All 3 are caught (3/3).  Building this harness IMMEDIATELY earned its
+keep: the first NODURABLE formulation (skip only the fdatasync, still
+advance durable_lsn) was NOT caught, because the sim writes to a real
+temp file and the crash model ties durability to durable_lsn, not to a
+fsync-confirmed flag.  That is a real, documented DST-coverage gap: the
+crash tests prove recovery restores the durable-LSN frontier correctly,
+but do NOT independently prove a commit is acked only AFTER its fsync
+completes (the ack-before-fsync ordering).  Closing that gap -- a crash
+model that counts a record durable only when fsync actually completed --
+is tracked future work; the planted bug is currently formulated so the
+existing durable-frontier invariant catches it.  When a new safety
+invariant is added, add a planted-bug id + a case to the script so DST
+must prove it catches it.
+
 ## DST coverage of the public-API surface (measured 2026-07-06)
 
 Measured line/branch coverage of the core public-API-serving source

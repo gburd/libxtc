@@ -29,6 +29,7 @@
 
 #include "xtc_aio.h"
 #include "xtc_sim.h"      /* XTC_SIM_BUGGIFY -- DST pessimal batching (no-op in prod) */
+#include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -307,11 +308,23 @@ batch_flush(wal_t *w)
 	 * fdatasync ride the same ring with no pool thread involved.
 	 */
 	rc = xtc_aio_pwrite(w->fd, w->bbuf, (uint32_t)w->blen, (int64_t)w->off);
+#if XTC_DST_BUG(XTC_DST_BUG_NODURABLE)
+	(void)rc;   /* planted bug: skip the fdatasync but still ack below ->
+	             * an acked commit is not durable across a crash */
+#else
 	rc = (rc == (int)w->blen) ? xtc_aio_fdatasync(w->fd) : -1;
+#endif
 	(void)rc;                            /* a real engine would surface I/O errors */
 
 	w->off += (off_t)w->blen;
+#if XTC_DST_BUG(XTC_DST_BUG_NODURABLE)
+	/* planted bug: fdatasync was skipped above, so these records are
+	 * NOT durable -- but we (buggily) still ACK the committers below
+	 * without advancing durable_lsn to reflect a real fsync.  A crash
+	 * now loses an ACKED commit: the durability invariant must fire. */
+#else
 	atomic_store_explicit(&w->durable_lsn, w->pend[w->pcount - 1].lsn, memory_order_relaxed);
+#endif
 	w->s_batches++;
 	w->s_commits += w->pcount;
 	if (w->pcount > w->s_maxbatch)
