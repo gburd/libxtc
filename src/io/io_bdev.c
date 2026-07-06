@@ -68,7 +68,11 @@ errno_to_xtc(int e)
 #include <sys/types.h>
 #if defined(__linux__)
 #include <sys/ioctl.h>
-#include <linux/fs.h>            /* BLKSSZGET, BLKPBSZGET, BLKGETSIZE64 */
+/* The BLK* ioctls live in <sys/mount.h> on both glibc and musl; the
+ * kernel header <linux/fs.h> is not shipped by musl.  Each BLK* use
+ * below is #if defined()-guarded, so if a libc exposes neither, the
+ * probe cleanly falls back to fstat (regular-file geometry). */
+#include <sys/mount.h>
 #endif
 #if defined(__FreeBSD__) || defined(__APPLE__) || defined(__NetBSD__) || \
     defined(__OpenBSD__) || defined(__DragonFly__)
