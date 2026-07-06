@@ -86,6 +86,42 @@ smoke_aio_proc(void *arg)
 	(void)xtc_exit_self(0);
 }
 
+static const int s_sel_sent[5] = { 1, 2, 42, 3, 4 };
+static int s_sel_seen[5];
+static int s_sel_n;
+static int
+smoke_match_42(const void *data, size_t size, void *user)
+{
+	(void)size; (void)user;
+	return *(const int *)data == 42;
+}
+static int
+smoke_match_any(const void *data, size_t size, void *user)
+{
+	(void)data; (void)size; (void)user;
+	return 1;
+}
+static void
+smoke_selective_proc(void *arg)
+{
+	void *msg; size_t sz; int rc;
+	(void)arg;
+	/* Pick 42 specifically first, even though it is third in the
+	 * mailbox, then drain the rest in arrival order. */
+	rc = xtc_recv_match(smoke_match_42, NULL, &msg, &sz,
+	    1000LL * 1000 * 1000);
+	if (rc != XTC_OK) { (void)xtc_exit_self(1); return; }
+	s_sel_seen[s_sel_n++] = *(int *)msg;
+	xtc_free(msg);
+	while (s_sel_n < 5) {
+		rc = xtc_recv_match(smoke_match_any, NULL, &msg, &sz,
+		    100LL * 1000 * 1000);
+		if (rc != XTC_OK) break;
+		s_sel_seen[s_sel_n++] = *(int *)msg;
+		xtc_free(msg);
+	}
+}
+
 int
 main(void)
 {
@@ -226,6 +262,35 @@ main(void)
 		CHECK(xtc_fs_exists(tmpl) == 0);
 		printf("  ok   xtc_fs: tmpdir + mkstemp + pwrite/pread + stat +"
 		    " unlink round-trip\n");
+	}
+
+	/* Selective receive on the IOCP wakeup path (KNOWN_ISSUES: this
+	 * flaked on Windows historically; confirm the round-2 IOCP rewrite
+	 * fixed it).  Send 5 before running the loop; the proc pulls 42
+	 * first via xtc_recv_match, then drains 1,2,3,4 in arrival order. */
+	{
+		xtc_loop_t *loop = NULL;
+		xtc_pid_t pid;
+		xtc_proc_opts_t po; memset(&po, 0, sizeof po);
+		int i;
+		s_sel_n = 0;
+		memset(s_sel_seen, 0, sizeof s_sel_seen);
+		CHECK(xtc_loop_init(&loop) == XTC_OK);
+		CHECK(xtc_proc_spawn(loop, smoke_selective_proc, NULL, &po,
+		    &pid) == XTC_OK);
+		for (i = 0; i < 5; i++)
+			CHECK(xtc_send(pid, &s_sel_sent[i], sizeof(int))
+			    == XTC_OK);
+		CHECK(xtc_loop_run(loop) == XTC_OK);
+		(void)xtc_loop_fini(loop);
+		CHECK(s_sel_n == 5);
+		CHECK(s_sel_seen[0] == 42);
+		CHECK(s_sel_seen[1] == 1);
+		CHECK(s_sel_seen[2] == 2);
+		CHECK(s_sel_seen[3] == 3);
+		CHECK(s_sel_seen[4] == 4);
+		printf("  ok   selective_receive: 42 first, then 1,2,3,4 in"
+		    " order (IOCP wakeup path)\n");
 	}
 
 	printf("All MSVC smoke checks passed.\n");

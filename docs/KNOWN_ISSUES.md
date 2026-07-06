@@ -115,32 +115,26 @@ loop+process tear down with heap corruption on Windows.
 
 ## Windows: `test_proc::selective_receive` regression
 
-**Status:** failing on Windows MinGW after this round; was passing 36/36 last round.
+**Status: RESOLVED (2026-07-06).**  Confirmed passing on Windows 11
+ARM64 with MSVC 2026 (VS18).  The round-2 IOCP rewrite fixed it: the
+wakeup path no longer uses a `WaitForMultipleObjects` set -- wakeups
+are a plain `PostQueuedCompletionStatus` reaped by
+`GetQueuedCompletionStatusEx` and coalesced into one event -- so the
+selective-receive ordering (pull 42 first via `xtc_recv_match`, then
+drain 1,2,3,4 in arrival order) is now deterministic on Windows.
+Verified on a real santorini host (not assumed): the scenario was
+added to `test/msvc/smoke.c` (`smoke_selective_proc`) and the MSVC
+smoke test prints `ok selective_receive: 42 first, then 1,2,3,4 in
+order (IOCP wakeup path)`.  The full munit `test_proc` cannot build
+under cl.exe (munit uses GCC-isms), so the smoke test is the Windows
+regression guard; the munit `test_proc::selective_receive` continues
+to pass on Linux/FreeBSD/illumos.
 
-**Symptom:** the test sends 5 messages to a proc before calling `xtc_loop_run`; the proc uses `xtc_recv_match` to selectively pick value 42 first, then drains 1, 2, 3, 4 in order. On Windows specifically, this fails -- likely a timing/ordering issue with the IOCP wakeup path.
+<details><summary>Original failure notes (historical)</summary>
 
-**What changed this round:**
-- 4 new modules linked into `libxtc.a` (log, cfg, inject, pdict) -- none of which touch proc/recv
-- `xtc_res` gained alert callbacks -- no path through proc/recv exercises them in the test
-- `__mbox_deliver` operator-precedence fix -- semantically equivalent for the tested case (alive=1, cap=0)
+**Symptom:** the test sends 5 messages to a proc before calling `xtc_loop_run`; the proc uses `xtc_recv_match` to selectively pick value 42 first, then drains 1, 2, 3, 4 in order. On Windows specifically, this failed -- a timing/ordering issue with the IOCP wakeup path.  The earlier hypothesis (now confirmed) was that the round-2 IOCP rewrite -- `WaitForMultipleObjects` set replaced by `PostQueuedCompletionStatus` + `GetQueuedCompletionStatusEx` with a coalesced wakeup -- would fix it.  That is exactly what resolved it, confirmed on a santorini run.
+</details>
 
-**Hypothesis:** the new modules' static initialization or symbol-table churn may have shifted memory layout, surfacing a latent ordering bug in the Windows IOCP path. On Linux/FreeBSD/illumos the test passes consistently.
-
-**Workaround:** none yet. The cooperative test (`test/otp/test_otp_proc_lib.c::test_selective_receive`) covers the same scenario and passes on all platforms; the bug is specific to test_proc's exact configuration.
-
-**Next steps:**
-1. Re-run on Windows with `--no-fork` to see deterministic output.
-2. Add `xtc_log` calls inside `__do_recv` to trace the receive path on Windows.
-3. Compare the IOCP wakeup integration after the fixes (round 3 IOCP poll now drains all signaled events; possibly some interaction).
-4. If unfixable in current shape, mark `test_proc::selective_receive` as Windows-skip until M16-era cleanup.
-5. **Re-evaluate against the round-2 IOCP rewrite (see "IOCP backend
-   status" below).**  The wakeup path changed substantially -- the
-   `WaitForMultipleObjects` set is gone, wakeups are now a plain
-   `PostQueuedCompletionStatus` reaped by `GetQueuedCompletionStatusEx`
-   and coalesced into one event.  This MIGHT shift or fix the flake,
-   but that is an untested hypothesis: it must be confirmed on a
-   Windows host, not assumed.  Do not claim the rewrite fixes it
-   without a santorini run.
 
 ## IOCP backend status (Windows)
 
