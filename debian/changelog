@@ -1,3 +1,54 @@
+libxtc (1.4.0-1) unstable; urgency=medium
+
+  * Feature release, focused on the DST-first goal: make libxtc's
+    deterministic simulation as trustworthy as FoundationDB / TigerBeetle
+    -- 100% deterministic, mechanically enforced, and adversarial.
+  * Determinism ENFORCEMENT (the north star made concrete): a guard traps
+    any sim-reachable primitive that would break seed replay (a real wall
+    clock, an unseeded RNG, an environment read, a raw thread id) via
+    __xtc_sim_nondeterminism(); in strict mode (default) it aborts naming
+    the source, and xtc_sim_exec_run refuses to return success if any
+    violation was seen -- so every one of the DST tests now PROVES its
+    run touched nothing nondeterministic.  A new test proves the guard
+    fires and enforces.  Nondeterminism is now impossible to introduce
+    silently.
+  * FoundationDB-parity fault model, waves 1-3:
+    - fault-space COVERAGE tracking (which buggify sites a sweep hit);
+    - a semantic end-of-run CONSISTENCY check
+      (xtc_sim_set_consistency_check) beyond per-step state hashes -- the
+      composition test now scans the whole B-tree for a valid, complete
+      structure after the full adversarial gauntlet;
+    - asymmetric (one-way) network partition;
+    - CLOCK SKEW (xtc_sim_clock_skew): a fiber's observed time disagrees
+      with when its timers fire, applied only on the observation seam so
+      it never desyncs the scheduler;
+    - disk-full ENOSPC write injection (xtc_sim_io_enospc_enable);
+    - general STALE-DATA reads (xtc_sim_io_stale_enable): a read returns a
+      structurally-valid-but-out-of-date prior version -- a fd+offset
+      model reusable by any storage code, with a test proving a version
+      check catches it (a bare checksum cannot);
+    - REBOOT / incarnation: a rebooted proc's reused pid slot gets a
+      distinct generation, so a stale pre-reboot pid is rejected (the
+      local analogue of a node incarnation counter).
+    The adversarial mode found and fixed a real xtc_lockmgr_destroy
+    bad-free during this work.
+  * Process API: atomic spawn_link / spawn_monitor (Erlang parity, no
+    spawn-then-relate race) and a self-describing DOWN (xtc_down_decode_ex)
+    that separates a signal number from an app exit code -- both from
+    v1.3.0, reaffirmed here.
+  * Portable block-device layer (xtc_bdev): sector-aligned positioned I/O
+    over the async xtc_aio path, native geometry probe per OS with a
+    regular-file fallback.
+  * Design (no code): distributed spawn/link/monitor over network
+    connections (docs/M_DISTRIBUTED.md) -- an Erlang-style feature set on
+    libxtc's existing substrate, recommended as an optional in-tree
+    module, deterministically testable to FDB grade.
+  * DST sim suite grows to 45 tests.  Full make check clean under
+    AddressSanitizer and UndefinedBehaviorSanitizer; qualified on
+    riscv64, x86_64, FreeBSD, illumos, Windows 11 ARM64, and musl.
+
+ -- Greg Burd <greg@burd.me>  Mon, 06 Jul 2026 14:30:59 -0400
+
 libxtc (1.3.0-1) unstable; urgency=medium
 
   * Feature release.
