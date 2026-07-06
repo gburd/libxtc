@@ -70,6 +70,7 @@
 static xtc_lockmgr_t   *g_mgr;
 static bt_t            *g_bt;
 static wal_t           *g_wal;
+static int              g_wal_fd = -1;
 static xtc_chan_mpsc_t *g_chan;
 static xtc_exec_t      *g_exec;
 
@@ -200,7 +201,8 @@ collector(void *arg)
 /* Cut the WAL at the durable frontier: keep only fsync-confirmed
  * records (lsn <= durable_lsn), matching the crash-recover crash model. */
 static int
-wal_truncate_to_durable(const char *path, uint64_t durable_lsn)
+wal_truncate_to_durable(const char *path, uint64_t durable_lsn,
+    uint64_t durable_bytes, int wb_armed)
 {
 	int fd = open(path, O_RDWR);
 	off_t off = 0, keep = 0;
@@ -214,6 +216,13 @@ wal_truncate_to_durable(const char *path, uint64_t durable_lsn)
 		memcpy(&len, hdr + 8, 4);
 		end = off + (off_t)sizeof hdr + (off_t)len + 8;  /* +8 CRC */
 		if (lsn > durable_lsn)
+			break;
+		/* Also honour the sim's fsync frontier: a record whose bytes
+		 * were written but never fdatasync-confirmed is lost on crash,
+		 * even if the writer advanced durable_lsn past it.  When the
+		 * write-back model is armed, durable_bytes is authoritative
+		 * (0 legitimately means "nothing was fsync'd" -> keep nothing). */
+		if (wb_armed && (uint64_t)end > durable_bytes)
 			break;
 		keep = end;
 		off = end;
@@ -239,6 +248,7 @@ run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered)
 	char btB[]  = "/tmp/xtc-ccrash-btB-XXXXXX";
 	xtc_pid_t wp;
 	uint64_t dlsn = 0, h = 1469598103934665603ull;
+	uint64_t durable_bytes = 0;
 	int i, w, fd, rc = -1, recovered = 0;
 
 	memset(g_acked, 0, sizeof g_acked);
@@ -255,6 +265,12 @@ run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered)
 
 	wo.path = logp; wo.window_ns = 500000; wo.max_batch = 256;
 	if (wal_open(&wo, &g_wal) != XTC_OK) goto files;
+	/* Arm the sim write-back crash model on the WAL fd: a crash loses
+	 * bytes past the last fdatasync, so durability is tied to fsync
+	 * (not to the WAL's self-reported durable_lsn).  This is what makes
+	 * an ack-before-fsync bug detectable. */
+	xtc_sim_io_wb_enable(1);
+	g_wal_fd = wal_fd(g_wal);
 	bo.path = btA; bo.page_size = PAGE_SZ; bo.n_frames = 1024;
 	if (bm_create(&bo, &bm) != XTC_OK) { wal_close(g_wal); goto files; }
 	if (bt_open(bm, &g_bt) != XTC_OK) { bm_destroy(bm); wal_close(g_wal); goto files; }
@@ -283,6 +299,14 @@ run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered)
 
 	rc = xtc_sim_exec_run(g_exec, seed, 20000000);
 	dlsn = wal_durable_lsn(g_wal);
+	/* Capture the TRUE durable byte frontier from the sim write-back
+	 * model (last fdatasync-confirmed byte on the WAL fd) BEFORE the
+	 * WAL is closed.  A crash loses everything past it -- including a
+	 * record the writer acked but did not fsync.  This is stricter than
+	 * trusting dlsn: if the writer advanced durable_lsn without a real
+	 * fsync, durable_bytes will be BEHIND it and recovery loses that
+	 * acked commit, tripping the durability invariant below. */
+	durable_bytes = xtc_sim_io_durable_end(g_wal_fd);
 
 	if (out_viol) *out_viol = g_lock_viol;
 
@@ -292,6 +316,7 @@ run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered)
 	bm_destroy(bm); bm = NULL;
 	wal_close(g_wal); g_wal = NULL;
 	xtc_sim_io_faults_disable();
+	xtc_sim_io_wb_enable(0);
 	if (g_chan) { void *m; while (xtc_chan_mpsc_try_recv(g_chan,&m)==XTC_OK && m) free(m); xtc_chan_mpsc_destroy(g_chan); g_chan = NULL; }
 	(void)xtc_exec_fini(g_exec); g_exec = NULL;
 	/* Do NOT gracefully destroy the lockmgr here: the crash
@@ -302,7 +327,7 @@ run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered)
 	 * child _exit reclaims g_mgr's memory -- exactly the crash model
 	 * (the "machine" is gone).  Leaving it is correct, not a leak. */
 	g_mgr = NULL;
-	if (wal_truncate_to_durable(logp, dlsn) != 0) { rc = -1; goto files; }
+	if (wal_truncate_to_durable(logp, dlsn, durable_bytes, 1) != 0) { rc = -1; goto files; }
 
 	/* ---- recover into a fresh tree ---- */
 	b2.path = btB; b2.page_size = PAGE_SZ; b2.n_frames = 256;

@@ -105,6 +105,12 @@ int  wal_truncate(wal_t *w);
 /* The highest LSN on stable storage (fsync'd).  Monotonic. */
 uint64_t wal_durable_lsn(const wal_t *w);
 
+/* The underlying WAL file descriptor.  Exposed for the DST crash tests,
+ * which arm the sim write-back model on it (a crash loses bytes past the
+ * last fsync) to verify durability is tied to fsync, not just to the
+ * writer's self-reported LSN.  Returns -1 if the WAL is closed. */
+int wal_fd(const wal_t *w);
+
 /* Ensure the log is durable through `lsn`: XTC_OK if it already is,
  * XTC_E_AGAIN if not yet (the buffer manager then defers writing a page
  * whose LSN is past the durable point -- the write-ahead rule). */
