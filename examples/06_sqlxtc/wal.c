@@ -317,14 +317,7 @@ batch_flush(wal_t *w)
 	(void)rc;                            /* a real engine would surface I/O errors */
 
 	w->off += (off_t)w->blen;
-#if XTC_DST_BUG(XTC_DST_BUG_NODURABLE)
-	/* planted bug: fdatasync was skipped above, so these records are
-	 * NOT durable -- but we (buggily) still ACK the committers below
-	 * without advancing durable_lsn to reflect a real fsync.  A crash
-	 * now loses an ACKED commit: the durability invariant must fire. */
-#else
 	atomic_store_explicit(&w->durable_lsn, w->pend[w->pcount - 1].lsn, memory_order_relaxed);
-#endif
 	w->s_batches++;
 	w->s_commits += w->pcount;
 	if (w->pcount > w->s_maxbatch)
@@ -691,6 +684,12 @@ wal_durable_lsn(const wal_t *w)
 	if (w == NULL)
 		return 0;
 	return atomic_load_explicit(&w->durable_lsn, memory_order_relaxed);
+}
+
+int
+wal_fd(const wal_t *w)
+{
+	return (w == NULL) ? -1 : w->fd;
 }
 
 int

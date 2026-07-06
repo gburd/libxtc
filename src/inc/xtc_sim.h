@@ -203,6 +203,29 @@ void __xtc_sim_io_stale_record(int fd, uint64_t off, const void *buf, int len);
 int  __xtc_sim_io_stale_read(int fd, uint64_t off, void *buf, int len);
 
 /*
+ * Write-back cache crash model (FoundationDB's simulated disk): pwrite
+ * lands in a volatile per-fd cache (tracked as the written high-water),
+ * fsync/fdatasync promotes the written extent to durable, and a crash
+ * loses everything past the last fsync.  This lets a crash-recovery test
+ * catch a writer that ACKs a commit WITHOUT fsyncing it -- the sim
+ * writes to a real temp file, so without this model the bytes survive a
+ * crash regardless of fsync, hiding an ack-before-durable bug.  A test
+ * arms it, and after the crash asks xtc_sim_io_durable_end(fd) for the
+ * true post-crash frontier (last fsync-confirmed byte) to truncate to,
+ * instead of trusting the writer's self-reported durable point.  Off
+ * unless armed; bounded fd table.
+ *
+ * PUBLIC: void     xtc_sim_io_wb_enable __P((int));
+ * PUBLIC: void     __xtc_sim_io_wb_wrote __P((int, uint64_t));
+ * PUBLIC: void     __xtc_sim_io_wb_synced __P((int));
+ * PUBLIC: uint64_t xtc_sim_io_durable_end __P((int));
+ */
+void     xtc_sim_io_wb_enable(int on);
+void     __xtc_sim_io_wb_wrote(int fd, uint64_t end_off);
+void     __xtc_sim_io_wb_synced(int fd);
+uint64_t xtc_sim_io_durable_end(int fd);
+
+/*
  * Simulated network partition + message latency (DST).  A seeded,
  * deterministic model of a partitioned / lossy / delayed network at the
  * cross-LOOP message granularity xtc's sim models: xtc_send between

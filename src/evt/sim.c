@@ -734,6 +734,110 @@ __xtc_sim_io_stale_read(int fd, uint64_t off, void *buf, int len)
 	return hit;
 }
 
+/*
+ * Write-back cache crash model (FoundationDB's simulated disk).  The
+ * problem it closes: the sim writes to a REAL temp file, so bytes reach
+ * the file on pwrite regardless of whether fsync was called -- meaning a
+ * crash-recovery test that trusts the writer's self-reported durable
+ * point cannot catch a writer that ACKs a commit WITHOUT fsyncing it.
+ * This models the disk honestly: pwrite lands in a volatile write-back
+ * cache (tracked as the per-fd high-water WRITTEN offset); only fsync
+ * promotes the written extent to the DURABLE offset; a crash loses
+ * everything past the last fsync.  A recovery test asks
+ * __xtc_sim_io_durable_end(fd) for the true post-crash durable frontier
+ * (the last fsync-confirmed byte) instead of trusting the writer.
+ *
+ * Bounded to a small fixed table of fds (a test opens one or two WAL
+ * files); reset per run in xtc_sim_activate.  Off unless armed, so it is
+ * zero-overhead when a test does not use it.
+ */
+#define XTC_SIM_WB_FDS 8
+struct sim_wb_ent { int fd; uint64_t written_end; uint64_t durable_end; };
+static struct sim_wb_ent g_wb[XTC_SIM_WB_FDS];
+static _Atomic int g_wb_on;
+static pthread_mutex_t g_wb_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* PUBLIC: void xtc_sim_io_wb_enable __P((int)); */
+/* Arm (nonzero) or disarm the write-back crash model, resetting the fd
+ * table.  A test arms it before the run and reads durable_end after. */
+void
+xtc_sim_io_wb_enable(int on)
+{
+	(void)pthread_mutex_lock(&g_wb_lock);
+	if (on) {
+		int k;
+		for (k = 0; k < XTC_SIM_WB_FDS; k++) {
+			g_wb[k].fd = -1;
+			g_wb[k].written_end = 0;
+			g_wb[k].durable_end = 0;
+		}
+	}
+	atomic_store_explicit(&g_wb_on, on ? 1 : 0, memory_order_release);
+	(void)pthread_mutex_unlock(&g_wb_lock);
+}
+
+static struct sim_wb_ent *
+wb_slot_locked(int fd)
+{
+	int k, free_k = -1;
+	for (k = 0; k < XTC_SIM_WB_FDS; k++) {
+		if (g_wb[k].fd == fd) return &g_wb[k];
+		if (free_k < 0 && g_wb[k].fd < 0) free_k = k;
+	}
+	if (free_k >= 0) { g_wb[free_k].fd = fd; return &g_wb[free_k]; }
+	return NULL;   /* table full: this fd is not tracked (bounded) */
+}
+
+/* PUBLIC: void __xtc_sim_io_wb_wrote __P((int, uint64_t)); */
+/* Record that a pwrite reached [.., end_off) on fd -- it is in the
+ * volatile cache now, durable only after a subsequent fsync. */
+void
+__xtc_sim_io_wb_wrote(int fd, uint64_t end_off)
+{
+	struct sim_wb_ent *e;
+	if (!atomic_load_explicit(&g_wb_on, memory_order_acquire))
+		return;
+	(void)pthread_mutex_lock(&g_wb_lock);
+	e = wb_slot_locked(fd);
+	if (e != NULL && end_off > e->written_end)
+		e->written_end = end_off;
+	(void)pthread_mutex_unlock(&g_wb_lock);
+}
+
+/* PUBLIC: void __xtc_sim_io_wb_synced __P((int)); */
+/* An fsync/fdatasync on fd promoted everything WRITTEN so far to
+ * durable. */
+void
+__xtc_sim_io_wb_synced(int fd)
+{
+	struct sim_wb_ent *e;
+	if (!atomic_load_explicit(&g_wb_on, memory_order_acquire))
+		return;
+	(void)pthread_mutex_lock(&g_wb_lock);
+	e = wb_slot_locked(fd);
+	if (e != NULL)
+		e->durable_end = e->written_end;
+	(void)pthread_mutex_unlock(&g_wb_lock);
+}
+
+/* PUBLIC: uint64_t xtc_sim_io_durable_end __P((int)); */
+/* The last fsync-confirmed byte offset on fd -- what survives a crash.
+ * A recovery test truncates the file here.  Returns 0 for an untracked
+ * fd or when the model is disarmed. */
+uint64_t
+xtc_sim_io_durable_end(int fd)
+{
+	struct sim_wb_ent *e;
+	uint64_t d = 0;
+	if (!atomic_load_explicit(&g_wb_on, memory_order_acquire))
+		return 0;
+	(void)pthread_mutex_lock(&g_wb_lock);
+	e = wb_slot_locked(fd);
+	if (e != NULL) d = e->durable_end;
+	(void)pthread_mutex_unlock(&g_wb_lock);
+	return d;
+}
+
 /* PUBLIC: int64_t __xtc_sim_io_latency __P((void)); */
 /* A seeded I/O latency in [lat_min, lat_max] ns from the IO stream.
  * 0 when I/O faults are off. */

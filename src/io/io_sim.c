@@ -427,6 +427,8 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		 * a checksum on read-back must catch). */
 		int persist = __xtc_sim_io_torn_prefix((int)a->len);
 		n = pwrite(a->fd, a->buf, (size_t)persist, (off_t)a->off); /* XTC_BLOCKING_OK: sim inline file op */
+		if (n > 0)
+			__xtc_sim_io_wb_wrote(a->fd, a->off + (uint64_t)n);
 		if (n < 0)
 			res = -1;
 		else if (persist < (int)a->len)
@@ -437,6 +439,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	}
 	case XTC_AIO_FSYNC:
 		res = fsync(a->fd) == 0 ? 0 : -1;
+		if (res == 0) __xtc_sim_io_wb_synced(a->fd);
 		break;
 	case XTC_AIO_FDATASYNC:
 #if defined(__APPLE__)
@@ -444,6 +447,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 #else
 		res = fdatasync(a->fd) == 0 ? 0 : -1;
 #endif
+		if (res == 0) __xtc_sim_io_wb_synced(a->fd);
 		break;
 	case XTC_AIO_PREADV:
 		n = preadv(a->fd, (const struct iovec *)a->iov, a->iovcnt,
