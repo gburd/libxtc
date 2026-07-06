@@ -140,8 +140,7 @@ xtc_sim_activate(uint64_t seed)
 		uint64_t t = s + (uint64_t)(i + 1) * 0x9E3779B97F4A7C15ull;
 		g_sim_stream[i] = splitmix64(&t);
 	}
-	atomic_store_explicit(&g_nondet_count, 0, memory_order_relaxed);
-	atomic_store_explicit(&g_sim_active, 1, memory_order_release);
+	atomic_store_explicit(&g_nondet_count, 0, memory_order_relaxed);	atomic_store_explicit(&g_sim_active, 1, memory_order_release);
 }
 
 /* PUBLIC: void xtc_sim_deactivate __P((void)); */
@@ -640,6 +639,99 @@ __xtc_sim_io_enospc(void)
 	if (pct <= 0 || !__xtc_sim_active())
 		return 0;
 	return (int)__xtc_sim_rng_range(XTC_SIM_RNG_IO, 1000) < pct;
+}
+
+/*
+ * Stale-data reads (FoundationDB's "the disk returns an OLD durable
+ * version").  Distinct from a torn write (silent short tail) or a
+ * corrupt read (bit flip): the bytes are STRUCTURALLY VALID but OUT OF
+ * DATE -- a page durably written, then overwritten, and on a seeded
+ * read the disk hands back the PREVIOUS contents.  Catches recovery /
+ * cache code that fails to validate a version or LSN and silently
+ * accepts stale-but-well-formed data.  General (fd+offset level, not
+ * tied to sqlxtc): a small bounded ring records recent write payloads;
+ * a stale read at a matching offset returns a prior one.  The ring is
+ * process-global, reset per run in xtc_sim_activate, and bounded in
+ * count AND per-entry size so memory is fixed regardless of workload.
+ */
+#define XTC_SIM_STALE_RING   32
+#define XTC_SIM_STALE_MAXLEN 4096
+struct sim_stale_ent {
+	int      fd;
+	uint64_t off;
+	int      len;
+	unsigned char buf[XTC_SIM_STALE_MAXLEN];
+};
+static struct sim_stale_ent g_stale[XTC_SIM_STALE_RING];
+static _Atomic int g_stale_head;
+static _Atomic int g_stale_pct;
+static pthread_mutex_t g_stale_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* PUBLIC: void xtc_sim_io_stale_enable __P((unsigned)); */
+void
+xtc_sim_io_stale_enable(unsigned pct_per_1000)
+{
+	if (pct_per_1000 > 1000) pct_per_1000 = 1000;
+	/* Reset the ring so each run's stale history is fully determined by
+	 * its seed (this is the per-run arming point, like the other io
+	 * fault knobs). */
+	(void)pthread_mutex_lock(&g_stale_lock);
+	atomic_store_explicit(&g_stale_head, 0, memory_order_relaxed);
+	{
+		int k;
+		for (k = 0; k < XTC_SIM_STALE_RING; k++)
+			g_stale[k].len = 0;
+	}
+	(void)pthread_mutex_unlock(&g_stale_lock);
+	atomic_store_explicit(&g_stale_pct, (int)pct_per_1000,
+	    memory_order_release);
+}
+
+/* PUBLIC: void __xtc_sim_io_stale_record __P((int, uint64_t, const void *, int)); */
+void
+__xtc_sim_io_stale_record(int fd, uint64_t off, const void *buf, int len)
+{
+	int h, cp;
+	if (atomic_load_explicit(&g_stale_pct, memory_order_acquire) <= 0 ||
+	    !__xtc_sim_active() || buf == NULL || len <= 0)
+		return;
+	cp = len < XTC_SIM_STALE_MAXLEN ? len : XTC_SIM_STALE_MAXLEN;
+	(void)pthread_mutex_lock(&g_stale_lock);
+	h = atomic_load_explicit(&g_stale_head, memory_order_relaxed);
+	g_stale[h].fd = fd;
+	g_stale[h].off = off;
+	g_stale[h].len = cp;
+	memcpy(g_stale[h].buf, buf, (size_t)cp);
+	atomic_store_explicit(&g_stale_head, (h + 1) % XTC_SIM_STALE_RING,
+	    memory_order_relaxed);
+	(void)pthread_mutex_unlock(&g_stale_lock);
+}
+
+/* PUBLIC: int __xtc_sim_io_stale_read __P((int, uint64_t, void *, int)); */
+int
+__xtc_sim_io_stale_read(int fd, uint64_t off, void *buf, int len)
+{
+	int pct, i, h, hit = 0;
+	if ((pct = atomic_load_explicit(&g_stale_pct, memory_order_acquire))
+	    <= 0 || !__xtc_sim_active() || buf == NULL || len <= 0)
+		return 0;
+	if ((int)__xtc_sim_rng_range(XTC_SIM_RNG_IO, 1000) >= pct)
+		return 0;
+	(void)pthread_mutex_lock(&g_stale_lock);
+	h = atomic_load_explicit(&g_stale_head, memory_order_relaxed);
+	for (i = 0; i < XTC_SIM_STALE_RING; i++) {
+		int idx = (h - 1 - i + 2 * XTC_SIM_STALE_RING) %
+		    XTC_SIM_STALE_RING;
+		if (g_stale[idx].fd == fd && g_stale[idx].off == off &&
+		    g_stale[idx].len > 0) {
+			int cp = g_stale[idx].len < len ? g_stale[idx].len : len;
+			memcpy(buf, g_stale[idx].buf, (size_t)cp);
+			hit = 1;
+			break;
+		}
+	}
+	(void)pthread_mutex_unlock(&g_stale_lock);
+	return hit;
 }
 
 /* PUBLIC: int64_t __xtc_sim_io_latency __P((void)); */

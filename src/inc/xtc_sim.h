@@ -186,6 +186,23 @@ void xtc_sim_io_enospc_enable(unsigned pct_per_1000);
 int  __xtc_sim_io_enospc(void);
 
 /*
+ * Stale-data reads (FoundationDB's "the disk returns an OLD durable
+ * version").  On a seeded coin a read at an offset that was written,
+ * then overwritten, returns the PRIOR (structurally valid but out of
+ * date) contents -- catching recovery/cache code that skips a
+ * version/LSN check.  General (fd+offset level): a bounded ring
+ * snapshots superseded write payloads.  Off by default; enable(pct)
+ * arms it and resets the ring for the run.  A no-op outside a sim run.
+ *
+ * PUBLIC: void xtc_sim_io_stale_enable __P((unsigned));
+ * PUBLIC: void __xtc_sim_io_stale_record __P((int, uint64_t, const void *, int));
+ * PUBLIC: int  __xtc_sim_io_stale_read __P((int, uint64_t, void *, int));
+ */
+void xtc_sim_io_stale_enable(unsigned pct_per_1000);
+void __xtc_sim_io_stale_record(int fd, uint64_t off, const void *buf, int len);
+int  __xtc_sim_io_stale_read(int fd, uint64_t off, void *buf, int len);
+
+/*
  * Simulated network partition + message latency (DST).  A seeded,
  * deterministic model of a partitioned / lossy / delayed network at the
  * cross-LOOP message granularity xtc's sim models: xtc_send between

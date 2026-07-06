@@ -381,6 +381,12 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	case XTC_AIO_PREAD:
 		n = pread(a->fd, a->buf, a->len, (off_t)a->off);  /* XTC_BLOCKING_OK: sim inline file op */
 		res = n < 0 ? -1 : (int)n;
+		/* Stale read: on a seeded coin, replace the just-read bytes
+		 * with a PRIOR durable version of this exact (fd,off) -- the
+		 * bytes are well-formed but out of date, so recovery/cache
+		 * code that skips a version/LSN check accepts stale data. */
+		if (res > 0)
+			(void)__xtc_sim_io_stale_read(a->fd, a->off, a->buf, res);
 		/* Corrupt read: silently bit-flip one returned byte.  The
 		 * bytes on disk are fine; the caller receives one bad byte a
 		 * checksum must catch -- FDB's corrupt-read fault class. */
@@ -398,6 +404,20 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 			res = -1;
 			errno = ENOSPC;
 			break;
+		}
+		/* Stale-data model: before overwriting, snapshot the CURRENT
+		 * (about-to-be-superseded) bytes at this offset into the ring,
+		 * so a later seeded stale read can return this now-prior
+		 * version.  Cheap no-op unless stale injection is armed. */
+		{
+			unsigned char old[4096];
+			int want = (int)a->len < (int)sizeof old ?
+			    (int)a->len : (int)sizeof old;
+			ssize_t on = pread(a->fd, old, (size_t)want,
+			    (off_t)a->off);  /* XTC_BLOCKING_OK: sim snapshot */
+			if (on > 0)
+				__xtc_sim_io_stale_record(a->fd, a->off, old,
+				    (int)on);
 		}
 		/* Torn write: persist only a seeded prefix of the buffer but
 		 * still report FULL success -- exactly a torn page.  Untorn
