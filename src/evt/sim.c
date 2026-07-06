@@ -33,6 +33,8 @@ static uint64_t         g_sim_stream[XTC_SIM_RNG_NSTREAMS];
  * xtc_sim_deactivate resets them.  Both OFF (0) by default. */
 static _Atomic int      g_sched_pessimal_pct;   /* per-1000; 0 = uniform */
 static _Atomic int      g_swizzle_pct;          /* per-1000; 0 = no reorder */
+static _Atomic int64_t  g_clock_skew_ns;        /* observer clock offset */
+static _Atomic int      g_clock_skew_jitter;    /* +/- ns seeded wobble */
 
 /* Semantic consistency check (FoundationDB's end-of-test consistency
  * workload): an optional callback the sim runs at quiescence, AFTER all
@@ -152,6 +154,8 @@ xtc_sim_deactivate(void)
 	 * their own enable/disable; these have no such call on every run). */
 	atomic_store_explicit(&g_sched_pessimal_pct, 0, memory_order_release);
 	atomic_store_explicit(&g_swizzle_pct, 0, memory_order_release);
+	atomic_store_explicit(&g_clock_skew_ns, 0, memory_order_release);
+	atomic_store_explicit(&g_clock_skew_jitter, 0, memory_order_release);
 	g_consistency_fn = NULL;
 	g_consistency_arg = NULL;
 }
@@ -936,5 +940,63 @@ __xtc_sim_vclock(int64_t *out_ns)
 	if (out_ns != NULL)
 		*out_ns = atomic_load_explicit(&g_vclock_ns,
 		    memory_order_relaxed);
+	return 1;
+}
+
+/*
+ * Clock skew (FoundationDB "the clock is not perfect").  The SCHEDULER
+ * schedules timers against the true virtual clock (via __xtc_sim_vclock
+ * above), but a FIBER that reads the clock for its own timeout math
+ * observes a SKEWED value -- so "has my deadline passed?" as the fiber
+ * computes it can disagree with when its timer actually fires.  This is
+ * where clock-assumption bugs hide (code that assumes elapsed wall time
+ * equals scheduler time, or that the clock is monotonic to the ns).
+ *
+ * The skew is seeded and bounded, so it replays: a per-run fixed offset
+ * plus, when jitter is enabled, a seeded per-read wobble within the
+ * band.  Applied ONLY on the observation seam (__os_clock_mono ->
+ * __xtc_sim_vclock_observed), never to the scheduler's timer math, so a
+ * skewed clock can never desync the scheduler or break quiescence -- it
+ * only stresses the OBSERVER.  Off by default.
+ */
+
+/* PUBLIC: void xtc_sim_clock_skew __P((int64_t, int)); */
+void
+xtc_sim_clock_skew(int64_t offset_ns, int jitter_ns)
+{
+	atomic_store_explicit(&g_clock_skew_ns, offset_ns,
+	    memory_order_release);
+	atomic_store_explicit(&g_clock_skew_jitter,
+	    jitter_ns < 0 ? 0 : jitter_ns, memory_order_release);
+}
+
+/* PUBLIC: int __xtc_sim_vclock_observed __P((int64_t *)); */
+/* The observation seam __os_clock_mono uses under sim: the true virtual
+ * clock plus the seeded skew.  Monotonic within a run per observer
+ * (the fixed offset is constant; the jitter is a bounded seeded draw,
+ * added to the base, so successive reads can wobble but the sequence is
+ * fully determined by the seed).  Falls back to the unskewed value when
+ * skew is off. */
+int
+__xtc_sim_vclock_observed(int64_t *out_ns)
+{
+	int64_t base, off;
+	int jit;
+	if (!atomic_load_explicit(&g_vclock_on, memory_order_acquire))
+		return 0;
+	base = atomic_load_explicit(&g_vclock_ns, memory_order_relaxed);
+	off = atomic_load_explicit(&g_clock_skew_ns, memory_order_relaxed);
+	jit = atomic_load_explicit(&g_clock_skew_jitter, memory_order_relaxed);
+	if (jit > 0 && __xtc_sim_active()) {
+		/* Seeded wobble in [-jit, +jit] from the IO stream (an
+		 * observation draw, distinct from scheduler decisions). */
+		int64_t w = (int64_t)(__xtc_sim_rng_range(XTC_SIM_RNG_IO,
+		    (uint64_t)(2 * jit + 1))) - jit;
+		off += w;
+	}
+	if (out_ns != NULL) {
+		int64_t v = base + off;
+		*out_ns = v < 0 ? 0 : v;   /* never report a negative clock */
+	}
 	return 1;
 }

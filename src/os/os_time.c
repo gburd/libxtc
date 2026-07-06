@@ -22,6 +22,7 @@
  * libxtc, so the symbol always resolves; the check is a single relaxed
  * atomic load and is dormant in production. */
 int __xtc_sim_vclock(int64_t *out_ns);
+int __xtc_sim_vclock_observed(int64_t *out_ns);
 int __xtc_sim_active(void);
 void __xtc_sim_nondeterminism(const char *what);
 
@@ -43,7 +44,7 @@ __os_clock_mono(int64_t *out)
 	LARGE_INTEGER c, f;
 	if (out == NULL)
 		return XTC_E_INVAL;
-	if (__xtc_sim_vclock(out))
+	if (__xtc_sim_vclock_observed(out))
 		return XTC_OK;
 	if (__xtc_sim_active())
 		__xtc_sim_nondeterminism("real clock (QueryPerformanceCounter)");
@@ -142,7 +143,7 @@ __os_clock_mono(int64_t *out)
 	uint64_t ns;
 	if (out == NULL)
 		return XTC_E_INVAL;
-	if (__xtc_sim_vclock(out))
+	if (__xtc_sim_vclock_observed(out))
 		return XTC_OK;
 	if (__xtc_sim_active())
 		__xtc_sim_nondeterminism("real clock (clock_gettime_nsec_np)");
@@ -159,7 +160,7 @@ __os_clock_mono(int64_t *out)
 	struct timespec ts;
 	if (out == NULL)
 		return XTC_E_INVAL;
-	if (__xtc_sim_vclock(out))
+	if (__xtc_sim_vclock_observed(out))
 		return XTC_OK;
 	if (__xtc_sim_active())
 		__xtc_sim_nondeterminism("real clock (clock_gettime CLOCK_MONOTONIC)");

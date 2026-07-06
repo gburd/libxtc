@@ -101,7 +101,8 @@ sleeper(void *arg)
 
 /* Build + run the workload once with `seed`. */
 static int
-run_once(uint64_t seed, uint64_t *out_state, long *out_app, int *out_done)
+run_once(uint64_t seed, int skew, uint64_t *out_state, long *out_app,
+    int *out_done)
 {
 	xtc_exec_t *e = NULL;
 	int i, rc;
@@ -111,6 +112,16 @@ run_once(uint64_t seed, uint64_t *out_state, long *out_app, int *out_done)
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
+
+	/* Clock skew: a fiber that reads the clock for its timeout math
+	 * observes a skewed time, so its sense of elapsed time disagrees
+	 * with when its timers actually fire.  The sleepers + ping/pong must
+	 * STILL all complete and the run must quiesce + replay -- a skewed
+	 * observer must not lose a timer wakeup.  Seeded offset + jitter. */
+	if (skew) {
+		int64_t off = (int64_t)((seed >> 8) & 0x3ff) * 1000LL; /* 0..1ms */
+		xtc_sim_clock_skew(off, 5000);   /* +/-5us seeded wobble */
+	}
 
 	for (i = 0; i < N_PAIRS; i++) {
 		xtc_loop_t *lp = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
@@ -156,9 +167,12 @@ main(int argc, char **argv)
 		uint64_t st1 = 0, st2 = 0;
 		long app1 = 0, app2 = 0;
 		int done1 = 0, done2 = 0, rc1, rc2, i;
+		/* Exercise clock skew on ~half the seeds (a seed bit); both
+		 * runs of a seed use the SAME skew setting so they replay. */
+		int skew = (int)((seed >> 3) & 1);
 
-		rc1 = run_once(seed, &st1, &app1, &done1);
-		rc2 = run_once(seed, &st2, &app2, &done2);
+		rc1 = run_once(seed, skew, &st1, &app1, &done1);
+		rc2 = run_once(seed, skew, &st2, &app2, &done2);
 
 		if (rc1 != XTC_OK || rc2 != XTC_OK) {
 			printf("FAIL seed=%llu: rc1=%d rc2=%d (invariant "
