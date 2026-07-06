@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.4.0"
+#       --define "version 1.4.1"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.4.0
+Version:        1.4.1
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,10 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Mon Jul 06 2026 Greg Burd <greg@burd.me> - 1.4.1-1
+- DST bug-injection harness + right-yardsticks steering; M17 both-framings
+  fairness; measured DST coverage baseline.
+
 * Mon Jul 06 2026 Greg Burd <greg@burd.me> - 1.4.0-1
 - DST-first: determinism enforcement + FDB-parity fault waves (clock skew,
   ENOSPC, stale-data, reboot/incarnation, coverage + consistency checks);
