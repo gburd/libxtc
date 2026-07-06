@@ -99,8 +99,34 @@ fn cpu_us() -> u64 {
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// Tokio worker-thread count for a FAIR comparison against xtc.  Read
+/// from BENCH_WORKERS so the harness can run two framings symmetrically:
+///   BENCH_WORKERS=1  -- single-core / per-core-efficiency framing, the
+///                       fair default vs xtc's 1-loop driver;
+///   BENCH_WORKERS=N  -- full-parallelism / scaling framing, matched to
+///                       xtc running an N-loop executor on the same N
+///                       pinned cores.
+/// Absent or unparsable => 1 (do NOT silently default to all cores,
+/// which is the asymmetry the fairness re-audit flagged).
+fn bench_workers() -> usize {
+    std::env::var("BENCH_WORKERS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1)
+}
+
+fn main() {
+    let workers = bench_workers();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .expect("tokio runtime init");
+    rt.block_on(run());
+}
+
+async fn run() {
     let args: Vec<String> = std::env::args().collect();
     let n = parse_n(&args);
 
