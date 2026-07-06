@@ -23,6 +23,7 @@
 #include "xtc_int.h"
 #include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_sim.h"
+#include "xtc_dst_inject.h"
 #include "xtc_lockmgr.h"
 #include "xtc_slab.h"
 #include "xtc_loop.h"     /* xtc_task_waker / xtc_waker_wake / park-on-timer */
@@ -340,6 +341,10 @@ __has_conflict_granted(xtc_lockmgr_t *m, struct lock_obj *o,
                        xtc_locker_t locker, xtc_lock_mode_t mode)
 {
 	struct lock_entry *e;
+#if XTC_DST_BUG(XTC_DST_BUG_LOCKEXCL)
+	return 0;   /* planted bug: never see a conflict -> grant over a held
+	             * conflicting lock, breaking mutual exclusion */
+#endif
 	for (e = o->granted; e != NULL; e = e->next) {
 		if (e->locker == locker) continue;
 		if (__conflicts(m, e->mode, mode)) return 1;
