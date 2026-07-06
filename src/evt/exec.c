@@ -665,6 +665,15 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 				 * deactivate. */
 				{
 					int crc = __xtc_sim_run_consistency_check();
+					/* Determinism proof: if any nondeterministic
+					 * primitive was hit on the executed path,
+					 * this run cannot be trusted to replay --
+					 * fail it.  (In strict mode the guard has
+					 * already aborted; this covers count-only
+					 * mode and makes the guarantee explicit.) */
+					if (crc == XTC_OK &&
+					    xtc_sim_nondeterminism_count() > 0)
+						crc = XTC_E_INTERNAL;
 					xtc_sim_deactivate();
 					return crc;
 				}

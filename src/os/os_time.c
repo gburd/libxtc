@@ -22,6 +22,8 @@
  * libxtc, so the symbol always resolves; the check is a single relaxed
  * atomic load and is dormant in production. */
 int __xtc_sim_vclock(int64_t *out_ns);
+int __xtc_sim_active(void);
+void __xtc_sim_nondeterminism(const char *what);
 
 #if defined(_WIN32)
 
@@ -43,6 +45,8 @@ __os_clock_mono(int64_t *out)
 		return XTC_E_INVAL;
 	if (__xtc_sim_vclock(out))
 		return XTC_OK;
+	if (__xtc_sim_active())
+		__xtc_sim_nondeterminism("real clock (QueryPerformanceCounter)");
 	if (!QueryPerformanceCounter(&c) || !QueryPerformanceFrequency(&f)
 	    || f.QuadPart == 0)
 		return XTC_E_INTERNAL;
@@ -140,6 +144,8 @@ __os_clock_mono(int64_t *out)
 		return XTC_E_INVAL;
 	if (__xtc_sim_vclock(out))
 		return XTC_OK;
+	if (__xtc_sim_active())
+		__xtc_sim_nondeterminism("real clock (clock_gettime_nsec_np)");
 	ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 	if (ns == 0)
 		return XTC_E_INTERNAL;
@@ -155,6 +161,8 @@ __os_clock_mono(int64_t *out)
 		return XTC_E_INVAL;
 	if (__xtc_sim_vclock(out))
 		return XTC_OK;
+	if (__xtc_sim_active())
+		__xtc_sim_nondeterminism("real clock (clock_gettime CLOCK_MONOTONIC)");
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
 		return XTC_E_INTERNAL;
 	return __ts_to_ns(&ts, out);

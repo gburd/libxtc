@@ -43,6 +43,9 @@ enum xtc_sim_stream {
  * sites branch on this to decide between seeded and ad-hoc randomness.
  *
  * PUBLIC: int      __xtc_sim_active __P((void));
+ * PUBLIC: void     __xtc_sim_nondeterminism __P((const char *));
+ * PUBLIC: void     xtc_sim_strict __P((int));
+ * PUBLIC: int      xtc_sim_nondeterminism_count __P((void));
  * PUBLIC: void     xtc_sim_activate __P((uint64_t));
  * PUBLIC: void     xtc_sim_deactivate __P((void));
  * PUBLIC: uint64_t __xtc_sim_rng __P((int));
@@ -54,6 +57,16 @@ enum xtc_sim_stream {
  * PUBLIC: int      __xtc_sim_vclock __P((int64_t *));
  */
 int      __xtc_sim_active(void);
+
+/* Determinism guard.  A sim-reachable primitive that would break seed
+ * replay (real clock, unseeded RNG, env read, raw thread id) calls
+ * __xtc_sim_nondeterminism(what); during a sim run it records the
+ * violation and, in strict mode (default), aborts naming the source.
+ * xtc_sim_strict toggles abort-vs-count; xtc_sim_nondeterminism_count
+ * lets a harness assert zero to PROVE a run was fully deterministic. */
+void     __xtc_sim_nondeterminism(const char *what);
+void     xtc_sim_strict(int on);
+int      xtc_sim_nondeterminism_count(void);
 
 /* Activate sim with a root seed (also resets every stream).  Idempotent
  * re-activation re-seeds.  Test-only; never called in production. */
