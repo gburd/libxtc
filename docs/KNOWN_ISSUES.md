@@ -244,7 +244,39 @@ The offload fallback makes "write storage code once as if AIO is always
 available" hold on all of these today; the follow-ups only remove the
 thread hop.
 
-## Portable block-device I/O layer (not yet built)
+**Decision (2026-07-06): native non-Linux AIO stays offload-backed for
+now, deliberately.**  Assessment of the three targets:
+- Linux without io_uring (epoll/poll/select): the only ZERO-THREAD
+  clean form is libaio (io_submit + an eventfd via IOCB_FLAG_RESFD),
+  which adds a dependency; POSIX AIO with SIGEV_SIGNAL is
+  signal-safety-hazardous and SIGEV_THREAD reintroduces the very thread
+  hop this would remove.  On Linux the zero-thread answer already exists
+  and is native: io_uring.  So this target has near-zero value.
+- illumos event ports (SIGEV_PORT -> PORT_SOURCE_AIO on the existing
+  port): genuinely clean and worth doing, BUT it is completion plumbing
+  that MUST be validated on a real illumos host in the test loop.  A
+  prior blind attempt at native AIO shipped a subtle bug; doing this one
+  without an illumos host in the loop would repeat that mistake.
+- AIX aio_*: no test host at all.
+Because the offload path is CORRECT and COMPLETE (native AIO is a pure
+performance optimisation that removes a thread hop, not a correctness
+gap), and because doing the illumos path safely needs host-in-the-loop
+testing, this is deferred as an explicitly host-gated task rather than
+shipped untested.  When the illumos host is in the loop, implement
+xtc_io_aio_submit in io_solaris.c with SIGEV_PORT + a PORT_SOURCE_AIO
+case in the port_getn drain (aio_return -> publish a->res -> wake
+a->tag), gated behind a config flag with offload as the proven fallback.
+
+## Portable block-device I/O layer -- DONE (v1.4.0)
+
+Implemented as xtc_bdev (src/io/io_bdev.c, xtc_bdev.h): open a raw
+device / partition (or a regular file), query logical+physical sector
+size and capacity via the native per-OS ioctl (BLKSSZGET/BLKGETSIZE64,
+DIOCGSECTORSIZE/DIOCGMEDIASIZE, DKIOCGMEDIAINFO, the Windows drive
+geometry IOCTL) with a fstat fallback, aligned pread/pwrite through the
+xtc_aio path, and flush via xtc_aio_fsync.  See xtc_bdev(3).
+
+## Portable block-device I/O layer (historical note -- superseded above)
 
 A portable block-device abstraction (open a raw device / partition,
 query logical+physical sector size and capacity, aligned read/write
