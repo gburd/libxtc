@@ -293,6 +293,60 @@ buggify left a waiter parked at destroy time and reached it.  Fixed:
 destroy only pthread_cond_destroy()s each entry and lets
 xtc_slab_destroy reclaim the storage.
 
+## FoundationDB parity: where we stand (2026-07-06)
+
+After a gap analysis against FDB's DST arsenal, the single-node-parity
+work landed in two waves.  libxtc is NOT a distributed database, so the
+distributed-only FDB techniques (multi-datacenter failover, quorum
+replication, cross-region sync) do not apply and are not claimed.  For
+a single-node async runtime the goal is parity of RIGOR per concurrency
+primitive, which these close:
+
+DONE (wave 1-2):
+- Fault-space coverage tracking -- xtc_sim_buggify_reached_count() +
+  xtc_sim_buggify_site() let a sweep enumerate which buggify sites a
+  seed reached and activated.  test_sim_swarm reports its activation
+  map; this immediately made honest that the swarm's own workload
+  (ping/pong + timers + torn file) reaches only its own sites, while the
+  lock/WAL/btree/channel/server sites are covered by the targeted tests.
+- Semantic consistency check -- xtc_sim_set_consistency_check() runs a
+  GLOBAL application invariant at quiescence, after all chaos, that a
+  per-step structural state hash cannot see.  test_sim_compose installs
+  one that scans the whole B-tree and asserts strictly-ascending keys +
+  row-count == committed-count under the full pessimal+swizzle+buggify
+  gauntlet -- catching a malformed tree or a lost/duplicated row.
+- Asymmetric (one-way) network partition -- the matrix was already
+  directed; test_sim_partition now exercises a one-way A->B cut (B->A
+  replies still flow) and asserts quiescence + replay, the harder
+  failure mode that exposes asymmetric-timeout bugs.
+- Adversarial scheduler (pessimal monopolize/starve) + completion
+  swizzle + seed-varied fault magnitude (see the section above), which
+  on landing found and fixed a real xtc_lockmgr_destroy bad-free.
+
+HONEST REMAINING GAPS (ranked; not yet done):
+- Stale-data acceptance: the I/O model injects torn + corrupt reads but
+  not a page that is structurally valid yet OUT OF DATE (an old durable
+  version re-read).  Would catch recovery code that fails to validate a
+  version/LSN.  MEDIUM value, MEDIUM effort (io_sim.c version ring).
+- Clock skew / rate: the virtual clock is perfect (advances exactly to
+  the next deadline).  A slow/fast/occasionally-non-monotonic clock
+  would exercise timeout code that assumes a clock rate.  MEDIUM.
+- ENOSPC / partial-write-success mid-workload: io_sim models short
+  transfers + EIO but not disk-full.  MEDIUM.
+- Process REBOOT vs kill (restart-from-checkpoint) and per-seed fault-
+  recipe logging: LOW value for a single-node runtime.
+
+Claim, honestly stated: libxtc's DST is a seeded deterministic
+scheduler with replay, per-step invariant checking + a semantic
+end-of-run consistency check, fault-space coverage tracking, and
+diverse composable fault injection (I/O faults, torn/corrupt writes,
+symmetric AND asymmetric partition, machine death, an adversarial
+pessimal scheduler + swizzle + Buggify) -- FDB-class rigor for
+single-node async concurrency.  Whether it FINDS as many bugs as FDB's
+swarm on a comparable codebase over a year is unknowable without
+running both; we do not claim it, and the remaining fault modes above
+are tracked, not hidden.
+
 ## Feature coverage progress (toward modelling all of libxtc)
 
 Goal: the DST sim should drive every libxtc concurrency feature so a
