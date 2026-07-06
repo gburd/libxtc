@@ -207,7 +207,7 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 	 * bounded and the on-stack `a` is never touched after we return. */
 	while (!a.done) {
 		t->park_requested = 1;
-		t->wake_revents = 0;
+		atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
 		xtc_yield();
 	}
 	return a.res;
@@ -303,7 +303,7 @@ aio_do_v(int op, int fd, const struct iovec *iov, int iovcnt, int64_t off)
 
 	while (!a.done) {
 		t->park_requested = 1;
-		t->wake_revents = 0;
+		atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
 		xtc_yield();
 	}
 	return a.res;

@@ -663,7 +663,8 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
 		/* Record the wake cause so xtc_proc_wait_fd / etc. can
 		 * tell why we resumed. */
 		if (p->task != NULL)
-			p->task->wake_revents |= XTC_WAIT_MAILBOX;
+			atomic_fetch_or_explicit(&p->task->wake_revents,
+			    XTC_WAIT_MAILBOX, memory_order_relaxed);
 		(void)xtc_waker_wake(&p->recv_waker);
 	}
 	return XTC_OK;
@@ -1494,7 +1495,8 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	 * xtc_task_park_on_fd / _on_timer because those wrappers reject
 	 * having both set; for wait_fd we need fd + timer + waker
 	 * simultaneously. */
-	self->task->wake_revents = 0;
+	atomic_store_explicit(&self->task->wake_revents, 0,
+	    memory_order_relaxed);
 
 	/*
 	 * Register on the loop this fiber is RUNNING on, not its home loop.
@@ -1568,8 +1570,10 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 
 	/* Sample wake_revents.  The dispatcher / mbox_deliver / timer cb
 	 * have set the bits we care about. */
-	revents = self->task->wake_revents;
-	self->task->wake_revents = 0;
+	revents = atomic_load_explicit(&self->task->wake_revents,
+	    memory_order_relaxed);
+	atomic_store_explicit(&self->task->wake_revents, 0,
+	    memory_order_relaxed);
 
 	/* Cleanup: unregister fd if still parked, cancel timer.  Use wl (the
 	 * loop we registered on), not the home loop. */
