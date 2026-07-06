@@ -1,3 +1,37 @@
+libxtc (1.4.1-1) unstable; urgency=medium
+
+  * DST-metrics + benchmark-fairness release (no public API change).
+  * The RIGHT DST yardsticks are now recorded in the steering docs
+    (AGENTS.md) and backed by machinery, so libxtc's "as trustworthy as
+    FoundationDB / TigerBeetle" goal is measured correctly rather than by
+    code-coverage percentage: (1) determinism, 100% and enforced;
+    (2) volume survived; (3) fault-space coverage; (4) bug-detection
+    latency.
+  * Bug-injection harness (yardstick 4): src/inc/xtc_dst_inject.h defines
+    planted safety bugs behind -DXTC_DST_INJECT_BUG=<id> (absent in every
+    normal build, so production is byte-unchanged), and
+    scripts/dst-bug-inject.sh asserts the DST test whose invariant should
+    catch each one FAILS.  Three planted bugs -- a dropped mailbox waker,
+    a granted-over-conflict lock, and an ack-without-durable-fsync -- are
+    all caught (3/3), wired into the sim-dst CI job so every push proves
+    DST still catches them.  Building it exposed and documented a real
+    DST-coverage gap (the crash tests tie durability to the durable-LSN
+    frontier, not to a fsync-confirmed flag).
+  * Measured DST line/branch coverage of the public-API-serving source
+    and recorded it in docs/M_DST.md with an honest reachability
+    breakdown (blocking pool, shared-memory slab, thread rwlock, and
+    native AIO backends are covered by other test tiers, not DST).
+    test_sim_spawn_rel now exercises xtc_down_decode_ex under DST.
+  * M17 conformance fairness: the W1/W3/W7 Tokio drivers no longer
+    silently size to all cores.  They read BENCH_WORKERS, and the suite
+    runs two symmetric framings -- single-core (per-core efficiency, the
+    fair default, and the only meaningful framing for the serial W3) and
+    full-parallelism (matched N workers/loops, for W1/W7).
+  * Full make check clean under AddressSanitizer and
+    UndefinedBehaviorSanitizer; 45-test DST sim suite; amalgamation 1.4.1.
+
+ -- Greg Burd <greg@burd.me>  Mon, 06 Jul 2026 18:50:32 -0400
+
 libxtc (1.4.0-1) unstable; urgency=medium
 
   * Feature release, focused on the DST-first goal: make libxtc's
