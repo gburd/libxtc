@@ -1,0 +1,177 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 6, 2026
+.Dt XTC_BDEV 3
+.Os
+.Sh NAME
+.Nm xtc_bdev_open ,
+.Nm xtc_bdev_close ,
+.Nm xtc_bdev_logical_sector ,
+.Nm xtc_bdev_physical_sector ,
+.Nm xtc_bdev_capacity ,
+.Nm xtc_bdev_pread ,
+.Nm xtc_bdev_pwrite ,
+.Nm xtc_bdev_flush
+.Nd portable block-device I/O over async fibers
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_bdev.h
+.Ft int
+.Fn xtc_bdev_open "const char *path" "int flags" "xtc_bdev_t **out"
+.Ft void
+.Fn xtc_bdev_close "xtc_bdev_t *b"
+.Ft uint32_t
+.Fn xtc_bdev_logical_sector "const xtc_bdev_t *b"
+.Ft uint32_t
+.Fn xtc_bdev_physical_sector "const xtc_bdev_t *b"
+.Ft uint64_t
+.Fn xtc_bdev_capacity "const xtc_bdev_t *b"
+.Ft ssize_t
+.Fn xtc_bdev_pread "xtc_bdev_t *b" "void *buf" "size_t n" "uint64_t off"
+.Ft ssize_t
+.Fn xtc_bdev_pwrite "xtc_bdev_t *b" "const void *buf" "size_t n" "uint64_t off"
+.Ft int
+.Fn xtc_bdev_flush "xtc_bdev_t *b"
+.Sh DESCRIPTION
+These provide a small, uniform surface for reading and writing a raw
+block device -- or a regular file treated as one -- with
+sector-aligned positioned I/O that suspends the calling fiber and
+resumes it on completion, keeping the fiber's loop live for other work
+while the I/O is outstanding.  They are built directly on
+.Xr xtc_aio 3
+and inherit its
+.Em write once, runs as AIO everywhere
+model: the read and write hot path routes through
+.Fn xtc_aio_pread
+and
+.Fn xtc_aio_pwrite ,
+and the flush through
+.Fn xtc_aio_fsync .
+.Pp
+.Fn xtc_bdev_open
+opens
+.Fa path
+and probes its geometry, storing the handle in
+.Fa out .
+.Fa flags
+is a mask of
+.Dv XTC_BDEV_READ
+and
+.Dv XTC_BDEV_WRITE .
+The probe uses the host's native query:
+.Bl -bullet -offset indent -compact
+.It
+Linux:
+.Dv BLKSSZGET
+(logical sector),
+.Dv BLKPBSZGET
+(physical sector),
+.Dv BLKGETSIZE64
+(capacity); a real device is opened
+.Dv O_DIRECT
+so transfers bypass the page cache.
+.It
+FreeBSD and macOS:
+.Dv DIOCGSECTORSIZE
+and
+.Dv DIOCGMEDIASIZE
+.Pq the Darwin block-size / block-count IOCTLs on macOS .
+.It
+illumos and Solaris:
+.Dv DKIOCGMEDIAINFO .
+.It
+Windows:
+.Dv IOCTL_DISK_GET_DRIVE_GEOMETRY_EX
+.Pq presently a defaults-returning stub .
+.It
+Fallback -- a regular file or an unqueryable target: logical 512,
+physical 4096, capacity from
+.Xr fstat 2 ,
+buffered I/O.
+.El
+.Pp
+.Fn xtc_bdev_close
+closes the device and frees the handle;
+.Dv NULL
+is a no-op.
+.Pp
+.Fn xtc_bdev_logical_sector ,
+.Fn xtc_bdev_physical_sector ,
+and
+.Fn xtc_bdev_capacity
+report the probed logical sector size, physical sector size, and total
+capacity in bytes.
+.Pp
+.Fn xtc_bdev_pread
+reads
+.Fa n
+bytes into
+.Fa buf ,
+and
+.Fn xtc_bdev_pwrite
+writes
+.Fa n
+bytes from
+.Fa buf ,
+at absolute byte offset
+.Fa off .
+Both
+.Fa off
+and
+.Fa n
+must be multiples of the logical sector size; a misaligned request
+returns
+.Er XTC_E_INVAL
+before any I/O is issued.
+.Fn xtc_bdev_flush
+flushes the device's data and metadata durably.
+.Sh RETURN VALUES
+.Fn xtc_bdev_pread
+and
+.Fn xtc_bdev_pwrite
+return the number of bytes transferred
+.Pq Ar >= 0 ;
+a short read at end of device returns the partial count.  On failure
+they return a negative
+.Dv XTC_E_
+code.
+.Fn xtc_bdev_open
+and
+.Fn xtc_bdev_flush
+return
+.Dv XTC_OK
+or a negative
+.Dv XTC_E_
+code.
+The size accessors return 0 on a
+.Dv NULL
+handle.
+.Sh CONTEXT
+Call
+.Fn xtc_bdev_pread ,
+.Fn xtc_bdev_pwrite ,
+and
+.Fn xtc_bdev_flush
+from a fiber running on a loop for the async path; off a loop they run
+synchronously on the calling thread, as with
+.Xr xtc_aio 3 .
+.Sh EXAMPLES
+Open a device, write and read back one logical sector:
+.Bd -literal -offset indent
+xtc_bdev_t *b;
+if (xtc_bdev_open("/dev/sdb", XTC_BDEV_READ | XTC_BDEV_WRITE, &b) != XTC_OK)
+	return -1;
+uint32_t s = xtc_bdev_logical_sector(b);
+if (xtc_bdev_pwrite(b, buf, s, 0) != (ssize_t)s) return -1;
+if (xtc_bdev_flush(b) != XTC_OK) return -1;
+if (xtc_bdev_pread(b, buf, s, 0) != (ssize_t)s) return -1;
+xtc_bdev_close(b);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_aio 3 ,
+.Xr xtc_fs 3 ,
+.Xr xtc_loop 3
+.Sh AUTHORS
+The
+.Nm xtc
+project.
