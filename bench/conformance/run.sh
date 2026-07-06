@@ -36,6 +36,17 @@ set -eu
 LC_ALL=C
 export LC_ALL
 
+# Fairness: the Tokio W1/W3/W7 drivers size their runtime to BENCH_WORKERS
+# (not the old silent all-cores default), so this harness compares like
+# with like against xtc.  Two framings, selected by the caller:
+#   BENCH_WORKERS=1  (default) -- single-core / per-core-efficiency, the
+#                     fair comparison vs xtc's 1-loop drivers;
+#   BENCH_WORKERS=N  -- full-parallelism / scaling, matched to an N-loop
+#                     xtc executor and the same N pinned cores.
+# Honour a caller-set value; default to the single-core framing.
+BENCH_WORKERS="${BENCH_WORKERS:-1}"
+export BENCH_WORKERS
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------

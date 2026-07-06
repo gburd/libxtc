@@ -84,8 +84,28 @@ async fn pong_task(mut rx: mpsc::Receiver<u64>, tx: mpsc::Sender<u64>) {
 /* main                                                                       */
 /* ------------------------------------------------------------------------- */
 
-#[tokio::main]
-async fn main() {
+fn bench_workers() -> usize {
+    std::env::var("BENCH_WORKERS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1)
+}
+
+// Tokio worker threads read from BENCH_WORKERS for a fair comparison
+// against xtc: =1 is the single-core / per-core-efficiency framing (the
+// fair default vs xtc's 1-loop driver); =N is the parallelism / scaling
+// framing matched to an N-loop xtc executor.  Never silently all-cores.
+fn main() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(bench_workers())
+        .enable_all()
+        .build()
+        .expect("tokio runtime init");
+    rt.block_on(run());
+}
+
+async fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let n = parse_n(&args);
 

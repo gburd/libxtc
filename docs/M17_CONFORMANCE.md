@@ -136,17 +136,39 @@ Findings:
   per-thread sample-window stagger (`idx*97+1`), and the merged-
   histogram + percentile reporting are identical across runtimes.
 
-- **Tokio runtime thread count is the one systematic asymmetry.**
+- **Tokio runtime thread count is the one systematic asymmetry --
+  NOW NORMALISED (both framings).**
   W4 and W5 Tokio pin `worker_threads(n_tasks)` to match the
-  intended contention level; but W1, W3, and W7 Tokio use
+  intended contention level; W1, W3, and W7 Tokio previously used
   `#[tokio::main]`, which defaults to a multi-thread runtime sized
   to *all* available cores, while the xtc W1/W3/W7 sides run on a
-  single cooperative loop.  For W1 (task-creation cost) and W3
-  (an inherently serial 2-actor ping-pong) this does not hand Tokio
-  a throughput advantage that changes the conclusion, but it should
-  be normalised (pin Tokio's worker_threads, or run xtc on an
-  N-loop executor) before publishing headline numbers.  Tracked as
-  a follow-up for the W1/W3/W7 owners; W4/W5 are already correct.
+  single cooperative loop.  Fixed: the W1/W3/W7 Tokio drivers now
+  size their runtime from the BENCH_WORKERS environment variable
+  (never the silent all-cores default), and run.sh sets it, so the
+  suite is run in two SYMMETRIC framings:
+
+    (A) SINGLE-CORE / per-core-efficiency (BENCH_WORKERS=1, the
+        default): Tokio on a 1-worker runtime vs xtc on its 1 loop,
+        both on one core.  This is the primary fair comparison for
+        W1/W3/W7 -- it measures the runtime's per-core efficiency
+        with no parallelism confound.  W3 (an inherently serial
+        2-actor ping-pong) is ONLY meaningful in this framing:
+        parallelism does not apply to a two-party exchange, so 1 core
+        is the correct and fair setting.
+
+    (B) FULL-PARALLELISM / scaling (BENCH_WORKERS=N, matched to N
+        pinned cores and, where the workload parallelises, an N-loop
+        xtc executor): Tokio on N workers vs xtc on N loops.  This
+        measures scaling and applies to W1 (independent task spawn)
+        and W7 (independent timers); it is not applied to the serial
+        W3.
+
+  Illustrative single-host numbers (W1, N=10000, this dev box):
+  BENCH_WORKERS=1 Tokio ~6.5 ms / 138 MB RSS; BENCH_WORKERS=4 Tokio
+  ~7.7 ms / 341 MB RSS -- confirming the old all-cores default was
+  NOT free (more workers cost RSS and, for pure spawn, time), which
+  is exactly why the single-core framing is the honest default.
+  Headline numbers must state which framing they were taken under.
 
 - **W5 (owned here) is fair by construction.** Both xtc primitives
   and both Tokio primitives run the identical ratio-phased loop
