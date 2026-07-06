@@ -147,8 +147,14 @@ run_once(uint64_t seed, int partition, int *out_arrived, long *out_hash,
 		for (i = 0; i < N_LOOPS; i++) {
 			if (i == j)
 				continue;
-			if (partition && GROUP_OF(i) != GROUP_OF(j))
+			if (partition == 2) {
+				/* Asymmetric: only A->B cut; a send i->j is
+				 * dropped iff i in group 0 and j in group 1. */
+				if (GROUP_OF(i) == 0 && GROUP_OF(j) == 1)
+					continue;
+			} else if (partition && GROUP_OF(i) != GROUP_OF(j)) {
 				continue;        /* this edge will be cut */
+			}
 			expect++;
 		}
 		g_recv_arg[j].expect = expect;
@@ -170,8 +176,23 @@ run_once(uint64_t seed, int partition, int *out_arrived, long *out_hash,
 	if (partition) {
 		for (i = 0; i < N_LOOPS; i++)
 			for (j = 0; j < N_LOOPS; j++)
-				if (GROUP_OF(i) != GROUP_OF(j))
-					xtc_sim_partition_set(i + 1, j + 1, 1);
+				if (GROUP_OF(i) != GROUP_OF(j)) {
+					if (partition == 2) {
+						/* Asymmetric: cut only A->B
+						 * (group 0 -> group 1); leave
+						 * B->A open.  A one-way cut is
+						 * harder: B still hears from A?
+						 * no -- A cannot reach B, but B
+						 * can reach A, so replies flow
+						 * one way only. */
+						if (GROUP_OF(i) == 0)
+							xtc_sim_partition_set(
+							    i + 1, j + 1, 1);
+					} else {
+						xtc_sim_partition_set(i + 1,
+						    j + 1, 1);
+					}
+				}
 		/* Seeded per-message latency so delivery ORDER across the
 		 * surviving pairs is part of the replayable schedule. */
 		xtc_sim_net_latency(10 * 1000LL, 500 * 1000LL);
@@ -253,9 +274,37 @@ main(void)
 		return 1;
 	}
 
+	/* (e) ASYMMETRIC one-way partition: cut only A->B, leave B->A open.
+	 * The 4 A->B sends drop; the 4 B->A and 4 within-group sends land
+	 * (8/12).  The run must still quiesce (an asymmetric cut must not
+	 * hang a peer waiting on a reply that can never arrive) and replay. */
+	{
+		int aa1 = 0, aa2 = 0, rca1, rca2;
+		long ha1 = 0, ha2 = 0;
+		uint64_t sa1 = 0, sa2 = 0;
+		rca1 = run_once(0x9A27, 2, &aa1, &ha1, &sa1);
+		rca2 = run_once(0x9A27, 2, &aa2, &ha2, &sa2);
+		if (rca1 != XTC_OK || rca2 != XTC_OK) {
+			printf("FAIL: asymmetric-partition run did not quiesce "
+			    "(rc %d/%d) -- a one-way cut must not deadlock\n",
+			    rca1, rca2);
+			return 1;
+		}
+		if (aa1 != 8) {
+			printf("FAIL: asymmetric A->B cut delivered %d, expected "
+			    "8 (only the 4 A->B sends drop)\n", aa1);
+			return 1;
+		}
+		if (aa1 != aa2 || ha1 != ha2 || sa1 != sa2) {
+			printf("FAIL: asymmetric-partition run did not replay\n");
+			return 1;
+		}
+	}
+
 	printf("OK: simulated network partition under DST -- A|B cut drops "
 	    "cross-group messages (4/12 land, connected groups intact), the "
 	    "run quiesces (no partitioned-peer deadlock) and replays "
-	    "identically from seed; healed, all 12 deliver\n");
+	    "identically from seed; healed, all 12 deliver; an asymmetric "
+	    "one-way A->B cut lands 8/12 and still quiesces + replays\n");
 	return 0;
 }

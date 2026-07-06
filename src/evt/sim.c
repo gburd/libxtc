@@ -712,9 +712,13 @@ static pthread_mutex_t  g_part_lock = PTHREAD_MUTEX_INITIALIZER;
  * Set (or clear) the directed edge src_loop_id -> dst_loop_id in the
  * partition matrix: when `blocked` is nonzero a cross-loop message from
  * a proc on src_loop_id to a proc on dst_loop_id is dropped under sim.
- * loop_id is pid.loop_id (exec_id + 1; 0 == standalone).  For a
- * symmetric cut call it both ways.  Enables the partition subsystem on
- * first blocking edge.  Out-of-range ids are ignored.
+ * loop_id is pid.loop_id (exec_id + 1; 0 == standalone).  The edge is
+ * DIRECTED: block only src->dst for a one-way (asymmetric) partition --
+ * where src cannot reach dst but dst's replies to src still flow, the
+ * harder failure mode that exposes asymmetric-timeout bugs.  For a
+ * symmetric cut call it both ways (or use xtc_sim_partition_isolate).
+ * Enables the partition subsystem on first blocking edge.  Out-of-range
+ * ids are ignored.
  */
 void
 xtc_sim_partition_set(int src_loop_id, int dst_loop_id, int blocked)
