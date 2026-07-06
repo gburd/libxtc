@@ -83,6 +83,7 @@ examples/07_kaka/test_partition
 examples/07_kaka/test_broker
 examples/07_kaka/test_group
 build_unix/test_inject_races
+test/m2/test_bdev
 
 # LSP compile database (generated)
 compile_commands.json

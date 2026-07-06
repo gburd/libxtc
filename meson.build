@@ -72,6 +72,7 @@ install_headers(
   'src/inc/xtc_alloc_audit.h',
   'src/inc/xtc_app.h',
   'src/inc/xtc_async.h',
+  'src/inc/xtc_bdev.h',
   'src/inc/xtc_blocking.h',
   'src/inc/xtc_cfg.h',
   'src/inc/xtc_chan.h',

@@ -72,6 +72,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/os/os_backtrace.c \
 	$(srcdir)/../src/os/os_file.c \
 	$(srcdir)/../src/io/io_common.c \
+	$(srcdir)/../src/io/io_bdev.c \
 	$(srcdir)/../src/io/io_net.c \
 	$(srcdir)/../src/io/io_poll.c \
 	$(srcdir)/../src/io/io_epoll.c \
@@ -145,6 +146,7 @@ LIB_OBJS	= \
 	os_backtrace.o \
 	os_file.o \
 	io_common.o \
+	io_bdev.o \
 	io_net.o \
 	io_poll.o \
 	io_epoll.o \
@@ -219,6 +221,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_alloc_audit.h \
 	$(srcdir)/../src/inc/xtc_app.h \
 	$(srcdir)/../src/inc/xtc_async.h \
+	$(srcdir)/../src/inc/xtc_bdev.h \
 	$(srcdir)/../src/inc/xtc_blocking.h \
 	$(srcdir)/../src/inc/xtc_cfg.h \
 	$(srcdir)/../src/inc/xtc_chan.h \
@@ -310,6 +313,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_dio \
 		  test_pkey \
 		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_net test_net_udp test_net_frame \
+		  test_bdev \
 		  test_loop test_task test_waker test_timer test_io_integration \
 		  test_async \
 		  test_aio \
@@ -461,6 +465,9 @@ os_mutex.o: $(srcdir)/../src/os/os_mutex.c xtc_config.h
 
 io_common.o: $(srcdir)/../src/io/io_common.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_common.c
+
+io_bdev.o: $(srcdir)/../src/io/io_bdev.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_bdev.c
 
 io_net.o: $(srcdir)/../src/io/io_net.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/io_net.c
@@ -827,6 +834,12 @@ test_mutex: $(srcdir)/../test/m1/test_mutex.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M2 tests.
+test_bdev: $(srcdir)/../test/m2/test_bdev.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
+		-o $@ $(srcdir)/../test/m2/test_bdev.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_io_lifecycle: $(srcdir)/../test/m2/test_io_lifecycle.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
