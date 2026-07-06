@@ -109,20 +109,39 @@ supervisor(void *arg)
 			if (n >= 1 && *k == 'D') {
 				int reason = 0;
 				xtc_pid_t dpid;
+				xtc_down_info_t di;
 				if (xtc_down_decode(m, n, &dpid, &reason)
 				    == XTC_OK) {
 					seen++;
-					if (xtc_down_is_noproc(reason))
-						atomic_fetch_add(&g_mon_noproc, 1);
-					else if (reason == 0)
-						atomic_fetch_add(&g_mon_ok, 1);
-					else
+					/* Also classify via the self-describing
+					 * decode: a clean child (reason 0) must be
+					 * KIND_CLEAN, and it must never disagree
+					 * with the legacy reason.  Exercises
+					 * xtc_down_decode_ex under DST. */
+					if (xtc_down_decode_ex(m, n, &di) != XTC_OK)
+						atomic_fetch_add(&g_mon_bad, 1);
+					else if (xtc_down_is_noproc(reason)) {
+						if (di.kind != XTC_DOWN_KIND_NOPROC)
+							atomic_fetch_add(&g_mon_bad, 1);
+						else
+							atomic_fetch_add(&g_mon_noproc, 1);
+					} else if (reason == 0) {
+						if (di.kind != XTC_DOWN_KIND_CLEAN)
+							atomic_fetch_add(&g_mon_bad, 1);
+						else
+							atomic_fetch_add(&g_mon_ok, 1);
+					} else
 						atomic_fetch_add(&g_mon_bad, 1);
 				}
 			} else if (n >= sizeof(struct exit_sig) && *k == 'E') {
 				const struct exit_sig *ex = m;
+				xtc_down_info_t di;
 				seen++;
-				if (ex->reason == 7)
+				/* The link EXIT (reason 7) must decode as KIND_EXIT
+				 * with exit_code 7 via the self-describing path. */
+				if (xtc_down_decode_ex(m, n, &di) == XTC_OK &&
+				    di.kind == XTC_DOWN_KIND_EXIT &&
+				    di.exit_code == 7 && ex->reason == 7)
 					atomic_fetch_add(&g_link_ok, 1);
 				else
 					atomic_fetch_add(&g_link_bad, 1);
