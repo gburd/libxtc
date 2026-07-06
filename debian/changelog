@@ -1,3 +1,50 @@
+libxtc (1.3.0-1) unstable; urgency=medium
+
+  * Feature release.
+  * Process API -- atomic spawn + link / monitor (Erlang spawn_link /
+    spawn_monitor parity): xtc_proc_spawn_link() and
+    xtc_proc_spawn_monitor() establish the parent<->child relationship
+    BEFORE the child is made runnable, closing the window a
+    spawn-then-link/monitor idiom leaves open.  Even a child that runs
+    and exits immediately delivers its EXIT or DOWN -- never the
+    XTC_DOWN_NOPROC "monitor raced a dead target" outcome.
+  * Process API -- self-describing DOWN (requested by the
+    multithreaded-PostgreSQL carrier team): the DOWN reason integer
+    previously overloaded a signal number (1..255) and a bare app exit
+    code from xtc_exit_self(code), so xtc_exit_self(1) was
+    indistinguishable from a signal-1 (SIGHUP) contained fault.  A proc
+    now records its exit kind and carries it in the DOWN/EXIT envelope;
+    the new xtc_down_decode_ex() fills an xtc_down_info_t whose kind
+    (XTC_DOWN_KIND_CLEAN / EXIT / SIGNAL / NOPROC) plus separate signal
+    and exit_code fields never collide.  The legacy xtc_down_decode()
+    is unchanged and still returns the same reason.
+  * Deterministic Simulation Testing -- adversarial upgrades toward
+    FoundationDB parity: a pessimal scheduler (xtc_sim_sched_pessimal,
+    which monopolizes one loop to starve its peers -- the worst
+    interleaving), a completion/message swizzle (xtc_sim_swizzle_enable,
+    a legal reorder of the io_sim event queue), seed-varied fault
+    magnitudes in the swarm, and Buggify planted in the storage/lock
+    paths that were bare (wal.flush.tiny_batch, btree.split.eager,
+    lock.grant.skip_head).  The adversarial mode found and fixed a real
+    latent bug: xtc_lockmgr_destroy freed slab-backed lock entries with
+    the OS allocator (a bad-free reachable only with a lock still held
+    at destroy).  DST sim suite grows to 43 tests.
+  * Concurrency fix -- a cross-thread xtc_send ORed a wake flag into the
+    target task's wake_revents from a foreign thread while the owning
+    loop also touched it: a non-atomic RMW data race (the only known
+    open race in the runtime).  wake_revents is now atomic; verified
+    with ThreadSanitizer reporting zero warnings.
+  * Windows -- the test_proc::selective_receive regression is resolved
+    by the round-2 IOCP rewrite (confirmed on a real Windows 11 ARM64 /
+    MSVC 2026 host, added as a smoke-test guard).
+  * Documentation -- the man page records that fault containment is
+    per-OS-thread: xtc_fault_guard_install() must run on every thread
+    that hosts a loop (carrier-team request).
+  * Full make check clean under AddressSanitizer and
+    UndefinedBehaviorSanitizer; amalgamation builds at 1.3.0.
+
+ -- Greg Burd <greg@burd.me>  Mon, 06 Jul 2026 07:29:07 -0400
+
 libxtc (1.2.1-1) unstable; urgency=medium
 
   * Portability + bug-fix release.  Qualified by building and running
