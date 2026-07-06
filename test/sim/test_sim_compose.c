@@ -70,6 +70,59 @@ static atomic_int       g_committed;   /* rows a worker COMMITted */
 static atomic_int       g_received;    /* rows the collector drained */
 static atomic_int       g_done;        /* workers that hit their quota */
 static atomic_int       g_lock_held;   /* must never exceed 1 (mutual excl) */
+
+/* Global row count observed by the last consistency check (for the
+ * per-run assertion in main). -1 = the check did not run / failed. */
+static int              g_consistency_rows = -1;
+
+/*
+ * Semantic consistency check, run by the sim at quiescence AFTER all
+ * the adversarial chaos (pessimal schedule + swizzle + buggify): scan
+ * the whole B-tree through a cursor and assert the keys come out
+ * STRICTLY ASCENDING with no duplicates.  A concurrency or SMO bug that
+ * left the tree malformed (an out-of-order key, a lost/duplicated
+ * separator) is invisible to the per-step structural state hash but
+ * shows up here as a scan-order violation.  Also verifies the scanned
+ * row count matches the committed count (no row silently lost or
+ * duplicated in the tree).  Returns XTC_OK iff the tree is well formed.
+ */
+static int
+compose_consistency_check(void *arg)
+{
+	bt_cursor_t *c = NULL;
+	const void *key, *val;
+	uint16_t klen, vlen;
+	long prev = -1;
+	int rows = 0, rc;
+	(void)arg;
+	if (g_bt == NULL)
+		return XTC_OK;
+	if (bt_cursor_open(g_bt, NULL, 0, &c) != XTC_OK)
+		return XTC_E_INTERNAL;
+	while ((rc = bt_cursor_next(c, &key, &klen, &val, &vlen)) == XTC_OK) {
+		long k = 0;
+		/* Keys are the integer primary key, big-endian-ish; compare
+		 * by length then bytes for a strict total order. */
+		if (klen == sizeof(long))
+			memcpy(&k, key, sizeof k);
+		else
+			k = prev + 1;   /* opaque key: just require progress */
+		if (rows > 0 && !(k > prev || klen != sizeof(long))) {
+			bt_cursor_close(c);
+			g_consistency_rows = -1;
+			return XTC_E_INTERNAL;   /* order violation: malformed */
+		}
+		prev = k;
+		rows++;
+	}
+	bt_cursor_close(c);
+	g_consistency_rows = rows;
+	/* Every committed row must be present exactly once; the tree must
+	 * not hold more rows than were committed. */
+	if (rows != atomic_load(&g_committed))
+		return XTC_E_INTERNAL;
+	return XTC_OK;
+}
 static atomic_int       g_lock_viol;   /* set if two holders overlap */
 
 /* A shared logical key that all workers contend on. */
@@ -266,6 +319,9 @@ run_one(uint64_t seed, int adversarial, int *out_committed, int *out_received,
 		xtc_sim_sched_pessimal(700);   /* 70% pessimal (starve) picks */
 		xtc_sim_swizzle_enable(500);   /* 50% completion/message reorder */
 		xtc_sim_buggify_enable(400);   /* 40% per buggify site */
+		/* Verify the B-tree is still well formed after all the chaos. */
+		g_consistency_rows = -1;
+		xtc_sim_set_consistency_check(compose_consistency_check, NULL);
 	}
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 

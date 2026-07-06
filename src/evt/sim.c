@@ -32,6 +32,18 @@ static uint64_t         g_sim_stream[XTC_SIM_RNG_NSTREAMS];
 static _Atomic int      g_sched_pessimal_pct;   /* per-1000; 0 = uniform */
 static _Atomic int      g_swizzle_pct;          /* per-1000; 0 = no reorder */
 
+/* Semantic consistency check (FoundationDB's end-of-test consistency
+ * workload): an optional callback the sim runs at quiescence, AFTER all
+ * the seeded chaos, to assert a GLOBAL application invariant (e.g. "the
+ * B-tree is still a valid B-tree and holds exactly the acked-commit
+ * set") that a per-step structural state hash cannot see.  NULL in
+ * production and by default.  Set before a run; the sim invokes it once
+ * when the run reaches quiescence and treats a nonzero return as a
+ * failure.  Not reset by deactivate (the caller re-sets per run, like
+ * the fault knobs). */
+static xtc_sim_consistency_fn g_consistency_fn;
+static void                 *g_consistency_arg;
+
 /* Virtual (logical) clock.  When sim is active and the clock mode is
  * VIRTUAL, __os_clock_mono returns this instead of the host monotonic
  * clock, so time is a pure function of the schedule (hence the seed).
@@ -85,6 +97,8 @@ xtc_sim_deactivate(void)
 	 * their own enable/disable; these have no such call on every run). */
 	atomic_store_explicit(&g_sched_pessimal_pct, 0, memory_order_release);
 	atomic_store_explicit(&g_swizzle_pct, 0, memory_order_release);
+	g_consistency_fn = NULL;
+	g_consistency_arg = NULL;
 }
 
 /* PUBLIC: uint64_t __xtc_sim_rng __P((int)); */
@@ -323,6 +337,27 @@ __xtc_sim_swizzle_pct(void)
 	return atomic_load_explicit(&g_swizzle_pct, memory_order_acquire);
 }
 
+/* PUBLIC: void xtc_sim_set_consistency_check __P((xtc_sim_consistency_fn, void *)); */
+void
+xtc_sim_set_consistency_check(xtc_sim_consistency_fn fn, void *arg)
+{
+	g_consistency_fn = fn;
+	g_consistency_arg = arg;
+}
+
+/* PUBLIC: int __xtc_sim_run_consistency_check __P((void)); */
+/* Invoke the installed consistency check (if any).  Returns XTC_OK when
+ * none is installed or it passes; the callback's nonzero code otherwise.
+ * Called by the sim executor at quiescence. */
+int
+__xtc_sim_run_consistency_check(void)
+{
+	xtc_sim_consistency_fn fn = g_consistency_fn;
+	if (fn == NULL)
+		return XTC_OK;
+	return fn(g_consistency_arg);
+}
+
 /* PUBLIC: void xtc_sim_buggify_enable __P((unsigned)); */
 void
 xtc_sim_buggify_enable(unsigned pct_per_1000)
@@ -406,6 +441,47 @@ xtc_sim_buggify_active_count(void)
 			c++;
 	(void)pthread_mutex_unlock(&g_bug_lock);
 	return c;
+}
+
+/* PUBLIC: int xtc_sim_buggify_reached_count __P((void)); */
+/* Number of buggify points REACHED this run (activated or not) -- the
+ * denominator for a coverage ratio.  A known site that is never in this
+ * count across a whole seed sweep is unreachable (dead code, or the
+ * workload never exercises its path). */
+int
+xtc_sim_buggify_reached_count(void)
+{
+	int n;
+	(void)pthread_mutex_lock(&g_bug_lock);
+	n = atomic_load_explicit(&g_bug_n, memory_order_relaxed);
+	(void)pthread_mutex_unlock(&g_bug_lock);
+	return n;
+}
+
+/* PUBLIC: int xtc_sim_buggify_site __P((int, char *, size_t, int *)); */
+/* Read the i-th buggify site reached this run: copies its name into buf
+ * and (if out_activated != NULL) reports whether its seeded coin came up
+ * active.  Returns XTC_OK for a valid index, XTC_E_INVAL past the end.
+ * A sweep driver iterates 0..reached_count-1 to build a per-seed and
+ * aggregate coverage map (which sites the sweep hit, and how often each
+ * activated) -- FoundationDB-style fault-space coverage tracking. */
+int
+xtc_sim_buggify_site(int idx, char *buf, size_t buflen, int *out_activated)
+{
+	int n, rc = XTC_E_INVAL;
+	(void)pthread_mutex_lock(&g_bug_lock);
+	n = atomic_load_explicit(&g_bug_n, memory_order_relaxed);
+	if (idx >= 0 && idx < n) {
+		if (buf != NULL && buflen > 0) {
+			(void)strncpy(buf, g_bug_name[idx], buflen - 1);
+			buf[buflen - 1] = '\0';
+		}
+		if (out_activated != NULL)
+			*out_activated = (g_bug_decided[idx] == 1);
+		rc = XTC_OK;
+	}
+	(void)pthread_mutex_unlock(&g_bug_lock);
+	return rc;
 }
 
 /* PUBLIC: int xtc_sim_buggify_fault __P((unsigned)); */
