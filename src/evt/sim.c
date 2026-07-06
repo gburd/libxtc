@@ -21,6 +21,8 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /* Activation state is process-global and read on hot paths, so it is a
  * relaxed atomic flag rather than a lock. */
@@ -71,6 +73,58 @@ __xtc_sim_active(void)
 	return atomic_load_explicit(&g_sim_active, memory_order_relaxed);
 }
 
+/*
+ * Determinism guard (FoundationDB/TigerBeetle discipline: nondeterminism
+ * must be impossible to introduce SILENTLY, not merely avoided by
+ * convention).  A primitive that would break seed replay -- a real wall
+ * clock, an unseeded RNG, an environment read, a raw thread id -- calls
+ * __xtc_sim_nondeterminism(what) from its sim-reachable path.  Outside a
+ * sim run it is a no-op.  DURING a sim run it records the violation and,
+ * in STRICT mode (the default under sim, and always in test builds via
+ * xtc_sim_strict_enable), aborts loudly with the offending source named,
+ * so a regression that adds nondeterminism to a sim-reachable path fails
+ * a test rather than silently corrupting replay.  The count is queryable
+ * so a harness can assert zero.
+ */
+static _Atomic int g_nondet_count;
+static _Atomic int g_nondet_strict = 1;   /* abort on violation by default */
+
+/* PUBLIC: void __xtc_sim_nondeterminism __P((const char *)); */
+void
+__xtc_sim_nondeterminism(const char *what)
+{
+	if (!__xtc_sim_active())
+		return;
+	atomic_fetch_add_explicit(&g_nondet_count, 1, memory_order_relaxed);
+	if (atomic_load_explicit(&g_nondet_strict, memory_order_relaxed)) {
+		fprintf(stderr, "xtc DST determinism violation: %s called on a "
+		    "sim-reachable path (breaks seed replay)\n",
+		    what ? what : "(unknown)");
+		abort();
+	}
+}
+
+/* PUBLIC: void xtc_sim_strict __P((int)); */
+/* Toggle strict mode: nonzero aborts on a determinism violation (the
+ * default), zero only counts them (for a diagnostic sweep that wants to
+ * enumerate every violation rather than die on the first). */
+void
+xtc_sim_strict(int on)
+{
+	atomic_store_explicit(&g_nondet_strict, on ? 1 : 0,
+	    memory_order_relaxed);
+}
+
+/* PUBLIC: int xtc_sim_nondeterminism_count __P((void)); */
+/* Number of determinism violations seen since the last activate.  A
+ * harness asserts this is 0 after a run to PROVE the run was fully
+ * deterministic (nothing on the executed path could break replay). */
+int
+xtc_sim_nondeterminism_count(void)
+{
+	return atomic_load_explicit(&g_nondet_count, memory_order_relaxed);
+}
+
 /* PUBLIC: void xtc_sim_activate __P((uint64_t)); */
 void
 xtc_sim_activate(uint64_t seed)
@@ -84,6 +138,7 @@ xtc_sim_activate(uint64_t seed)
 		uint64_t t = s + (uint64_t)(i + 1) * 0x9E3779B97F4A7C15ull;
 		g_sim_stream[i] = splitmix64(&t);
 	}
+	atomic_store_explicit(&g_nondet_count, 0, memory_order_relaxed);
 	atomic_store_explicit(&g_sim_active, 1, memory_order_release);
 }
 
