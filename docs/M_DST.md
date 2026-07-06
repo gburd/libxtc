@@ -323,18 +323,42 @@ DONE (wave 1-2):
   swizzle + seed-varied fault magnitude (see the section above), which
   on landing found and fixed a real xtc_lockmgr_destroy bad-free.
 
+DONE (wave 3, 2026-07-06):
+- Determinism ENFORCEMENT (the DST-first north star made mechanical):
+  __xtc_sim_nondeterminism() traps any sim-reachable real clock /
+  unseeded RNG / env read / raw thread id; xtc_sim_exec_run refuses
+  XTC_OK if any violation was seen, so every sim test proves its run was
+  fully deterministic.  test_sim_determinism proves the guard fires and
+  enforces.  This is the concrete backing for the "100% deterministic
+  simulation" claim -- nondeterminism is now impossible to introduce
+  silently, as in FoundationDB/TigerBeetle.
+- Clock skew (xtc_sim_clock_skew): a fiber that reads the clock observes
+  true + a seeded offset (+/- jitter) while the scheduler schedules
+  timers against the true clock, so the observer's sense of elapsed time
+  disagrees with when its timers fire -- applied only on the observation
+  seam so it never desyncs the scheduler.  test_sim_soak exercises it on
+  ~half its seeds; timers still fire, quiescence + replay hold.
+- Disk-full ENOSPC (xtc_sim_io_enospc_enable): a seeded coin fails a
+  write hard mid-workload; test_sim_iofault exercises graceful
+  degradation + quiescence + replay.
+
 HONEST REMAINING GAPS (ranked; not yet done):
 - Stale-data acceptance: the I/O model injects torn + corrupt reads but
   not a page that is structurally valid yet OUT OF DATE (an old durable
   version re-read).  Would catch recovery code that fails to validate a
-  version/LSN.  MEDIUM value, MEDIUM effort (io_sim.c version ring).
-- Clock skew / rate: the virtual clock is perfect (advances exactly to
-  the next deadline).  A slow/fast/occasionally-non-monotonic clock
-  would exercise timeout code that assumes a clock rate.  MEDIUM.
-- ENOSPC / partial-write-success mid-workload: io_sim models short
-  transfers + EIO but not disk-full.  MEDIUM.
-- Process REBOOT vs kill (restart-from-checkpoint) and per-seed fault-
-  recipe logging: LOW value for a single-node runtime.
+  version/LSN.  DEFERRED with rationale: the generic-fd io_sim path has
+  no logical-page identity to key a per-page version ring on; a faithful
+  model belongs at the sqlxtc pager layer (which already has checksum +
+  torn-page verification in test_sim_torn), not in the generic AIO
+  simulator.  Land it as a pager-level fault when the version ring has a
+  natural home.
+- Process REBOOT vs kill (restart-from-checkpoint): DEFERRED to pair
+  with the distributed module -- reboot is the local face of an
+  incarnation (creation) change (see M_DISTRIBUTED.md), so building the
+  incarnation counter once, for both, avoids two divergent models.
+  test_sim_machine_death already covers clean kill + supervisor restart.
+- Per-seed fault-recipe logging: LOW value; the swarm already reports
+  its scenario mix and buggify coverage.
 
 Claim, honestly stated: libxtc's DST is a seeded deterministic
 scheduler with replay, per-step invariant checking + a semantic
