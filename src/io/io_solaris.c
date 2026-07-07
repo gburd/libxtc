@@ -213,13 +213,21 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		fd = (int)evs[i].portev_object;
 
 		if (tag == io) {
+			/* Re-arm the one-shot wakeup pipe association BEFORE
+			 * draining it.  Same fix as the io_uring backend (carrier
+			 * idle-loop wake miss, 2026-07-06): draining first and
+			 * re-associating after leaves a window where a foreign
+			 * xtc_io_wakeup write finds no armed association and is
+			 * missed, hanging the idle loop.  Re-associating first
+			 * keeps the pipe watched across the drain; port_associate
+			 * on a pipe that still has a byte fires immediately
+			 * (level POLLIN), which the next port_getn coalesces. */
+			(void)port_associate(io->epfd, PORT_SOURCE_FD,
+			    (uintptr_t)fd, POLLIN, io);
 			(void)__xtc_io_drain_wakeup(io);
 			events[out_idx].tag = NULL;
 			events[out_idx].flags = XTC_IO_WAKEUP;
 			out_idx++;
-			/* Re-arm the wakeup pipe (one-shot). */
-			(void)port_associate(io->epfd, PORT_SOURCE_FD,
-			    (uintptr_t)fd, POLLIN, io);
 			continue;
 		}
 
