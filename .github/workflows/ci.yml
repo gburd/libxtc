@@ -46,6 +46,9 @@ jobs:
           cd build_ci
           CC=${{ matrix.compiler }} ../dist/configure --with-tls=auto
 
+      - name: API discipline gate (fast fail before the build)
+        run: XTC_SRC_DIR="$PWD" sh test/dist/test_api_discipline.sh
+
       - name: Build
         run: make -C build_ci -j"$(nproc)"
 

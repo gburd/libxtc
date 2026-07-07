@@ -175,7 +175,7 @@ main(int argc, char **argv)
 	if (parse_args(argc, argv, &cfg) != 0)
 		return 1;
 
-	if (__os_calloc(1, sizeof *b, (void **)&b) != XTC_OK || b == NULL) {
+	if ((b = xtc_calloc(1, sizeof *b)) == NULL) {
 		fprintf(stderr, "oom\n");
 		return 1;
 	}
@@ -245,6 +245,6 @@ main(int argc, char **argv)
 	xtc_app_destroy(b->app);
 	if (log != NULL)
 		xtc_log_destroy(log);
-	__os_free(b);
+	xtc_free(b);
 	return 0;
 }

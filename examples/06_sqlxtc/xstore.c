@@ -62,7 +62,6 @@
 #include "xtc.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"
-#include "os_time.h"
 
 /*
  * Process-global engine locks.  These were pthread mutexes; they are
@@ -118,9 +117,9 @@ static _Atomic uint64_t g_xclock = 1;
 static uint64_t
 hlc_phys_ms(void)
 {
-	int64_t ns = 0;
+	int64_t ns = xtc_clock_real();
 
-	if (__os_clock_real(&ns) != 0 || ns < 0)
+	if (ns < 0)
 		ns = 0;
 	return (uint64_t)ns / 1000000ULL;
 }

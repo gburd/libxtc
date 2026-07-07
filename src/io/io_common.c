@@ -263,14 +263,16 @@ xtc_io_backend_name(void)
 
 #if !defined(XTC_IO_BACKEND_URING) && !defined(XTC_IO_BACKEND_IOCP) && \
     !defined(XTC_IO_BACKEND_SIM) && \
-    !defined(XTC_IO_BACKEND_KQUEUE)
+    !defined(XTC_IO_BACKEND_KQUEUE) && \
+    !defined(XTC_IO_BACKEND_SOLARIS)
 /* PUBLIC: int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *)); */
 /*
- * Backends other than io_uring / IOCP / kqueue have no native file-
- * completion engine (a regular file is not pollable), so there is no
- * async file op to submit -- the caller (xtc_aio_*) offloads to the
- * blocking pool instead.  io_uring, IOCP, and kqueue (POSIX AIO +
- * EVFILT_AIO) provide the real implementations.
+ * Backends other than io_uring / IOCP / kqueue / solaris (illumos event
+ * ports) have no native file-completion engine (a regular file is not
+ * pollable), so there is no async file op to submit -- the caller
+ * (xtc_aio_*) offloads to the blocking pool instead.  io_uring, IOCP,
+ * kqueue (POSIX AIO + EVFILT_AIO), and solaris (POSIX AIO + SIGEV_PORT)
+ * provide the real implementations.
  */
 int
 xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)

@@ -25,7 +25,6 @@
 
 #include "xtc.h"
 #include "xtc_svr.h"
-#include "os_time.h"     /* __os_clock_mono */
 
 /* ---- hybrid logical clock (per shard / per coordinator) ---- */
 /* High 48 bits: physical microseconds.  Low 16 bits: logical counter.
@@ -34,7 +33,7 @@ static uint64_t
 hlc_phys_us(void)
 {
 	int64_t ns = 0;
-	(void)__os_clock_mono(&ns);   /* portable monotonic clock */
+	ns = xtc_clock_mono();   /* portable monotonic clock */
 	return (uint64_t)ns / 1000u;
 }
 

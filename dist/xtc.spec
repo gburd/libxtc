@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.4.1"
+#       --define "version 1.4.2"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.4.1
+Version:        1.4.2
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,10 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Tue Jul 07 2026 Greg Burd <greg@burd.me> - 1.4.2-1
+- Lost-wakeup + signal-mask + allocator-discipline fixes; public alloc/time/atomic
+  API; API-discipline gate; DST additions (stale-data, ENOSPC, bug-injection).
+
 * Mon Jul 06 2026 Greg Burd <greg@burd.me> - 1.4.1-1
 - DST bug-injection harness + right-yardsticks steering; M17 both-framings
   fairness; measured DST coverage baseline.

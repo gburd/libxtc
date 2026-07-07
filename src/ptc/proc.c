@@ -130,12 +130,15 @@ __proc_slabs_ensure(void)
 static struct envelope *
 __env_alloc(size_t size)
 {
+	void *p = NULL;
 	if (size <= ENV_POOL_PAYLOAD) {
 		__proc_slabs_ensure();
 		if (XTC_LIKELY(__env_slab != NULL))
 			return xtc_slab_alloc(__env_slab);
 	}
-	return malloc(sizeof(struct envelope) + size);
+	if (__os_malloc(sizeof(struct envelope) + size, &p) != XTC_OK)
+		return NULL;
+	return p;
 }
 
 /* Free an envelope, routing by its payload size (the same predicate
@@ -147,7 +150,7 @@ __env_free(struct envelope *e)
 	if (e->size <= ENV_POOL_PAYLOAD && __env_slab != NULL)
 		xtc_slab_free(__env_slab, e);
 	else
-		free(e);
+		__os_free(e);
 }
 
 /* ---------- causal tracing + hybrid logical clock (xtc_trace.h) ---------- */
@@ -481,10 +484,10 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 					tbl->slots[k].proc = NULL;
 				}
 			}
-			free(tbl->slots);
+			__os_free(tbl->slots);
 		}
 		(void)pthread_mutex_destroy(&tbl->lock);
-		free(tbl);
+		__os_free(tbl);
 	}
 }
 
@@ -498,7 +501,8 @@ __table_for(xtc_loop_t *loop, int create)
 		if (__lt[i].loop == loop) { t = __lt[i].tbl; goto out; }
 	}
 	if (!create) goto out;
-	if ((t = calloc(1, sizeof *t)) == NULL) goto out;
+	if (__os_calloc(1, sizeof *t, (void **)&t) != XTC_OK)
+		goto out;
 	(void)pthread_mutex_init(&t->lock, NULL);
 	t->inited = 1;
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
@@ -508,7 +512,7 @@ __table_for(xtc_loop_t *loop, int create)
 			goto out;
 		}
 	}
-	free(t); t = NULL;
+	__os_free(t); t = NULL;
 out:
 	(void) __proc_mtx_unlock(&__lt_lock);
 	return t;
@@ -520,6 +524,8 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 {
 	size_t i;
 	int rc = XTC_OK;
+	size_t new_cap, idx;
+	struct xtc_proc_slot *ns = NULL;
 	(void) __proc_mtx_lock(&t->lock);
 	for (i = 0; i < t->cap; i++) {
 		if (t->slots[i].proc == NULL) {
@@ -531,25 +537,23 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 		}
 	}
 	/* Grow. */
-	{
-		size_t new_cap = t->cap == 0 ? 16 : t->cap * 2;
-		struct xtc_proc_slot *ns = realloc(t->slots,
-		    new_cap * sizeof *ns);
-		if (ns == NULL) { rc = XTC_E_NOMEM; goto out; }
-		for (i = t->cap; i < new_cap; i++) {
-			ns[i].proc = NULL;
-			ns[i].gen = 0;
-		}
-		t->slots = ns;
-		t->cap = new_cap;
+	new_cap = t->cap == 0 ? 16 : t->cap * 2;
+	if (__os_realloc(t->slots, new_cap * sizeof *ns,
+	    (void **)&ns) != XTC_OK || ns == NULL) {
+		rc = XTC_E_NOMEM; goto out;
 	}
-	{
-		size_t idx = t->n_used;     /* first new slot */
-		t->slots[idx].proc = p;
-		*out_local = (uint16_t)idx;
-		*out_gen   = ++t->slots[idx].gen;
-		t->n_used++;
+	for (i = t->cap; i < new_cap; i++) {
+		ns[i].proc = NULL;
+		ns[i].gen = 0;
 	}
+	t->slots = ns;
+	t->cap = new_cap;
+
+	idx = t->n_used;     /* first new slot */
+	t->slots[idx].proc = p;
+	*out_local = (uint16_t)idx;
+	*out_gen   = ++t->slots[idx].gen;
+	t->n_used++;
 out:
 	(void) __proc_mtx_unlock(&t->lock);
 	return rc;
@@ -709,7 +713,7 @@ __mbox_deferred_run(void *arg)
 		(void)__mbox_deliver_locked(p, d->e);
 	else
 		__env_free(d->e);   /* target gone: drop the delayed message */
-	free(d);
+	__os_free(d);
 }
 
 static int
@@ -745,8 +749,8 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 		if (cross && dst->io != NULL) {
 			int64_t lat = __xtc_sim_net_latency();
 			if (lat > 0) {
-				struct __mbox_deferred *d = malloc(sizeof *d);
-				if (d != NULL) {
+				struct __mbox_deferred *d = NULL;
+				if (__os_malloc(sizeof *d, (void **)&d) == XTC_OK) {
 					int64_t now = 0;
 					(void)__os_clock_mono(&now);
 					d->pid = p->pid;
@@ -755,7 +759,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 					    now + lat, __mbox_deferred_run,
 					    d) == XTC_OK)
 						return XTC_OK;
-					free(d);
+					__os_free(d);
 				}
 				/* alloc/defer failed: deliver inline (correct,
 				 * just not delayed). */
@@ -1471,8 +1475,11 @@ deliver:
 	{
 		void *buf = NULL;
 		if (e->size > 0) {
-			buf = malloc(e->size);
-			if (buf == NULL) {
+			/* Handed to the caller as *out; the recv contract says free
+			 * it with xtc_free (== __os_free == the installed alloc
+			 * hook), so it MUST be __os_malloc'd or an embedder with a
+			 * custom allocator hits a mismatched free. */
+			if (__os_malloc(e->size, &buf) != XTC_OK) {
 				/* Put it back at the head of save queue
 				 * to preserve ordering. */
 				e->next = self->save_head;

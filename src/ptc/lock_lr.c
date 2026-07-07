@@ -43,7 +43,7 @@
 #  define MAP_ANONYMOUS 0
 #  define mmap(addr, sz, prot, flags, fd, off)  \
      ((void)(addr),(void)(prot),(void)(flags),(void)(fd),(void)(off), \
-      malloc(sz))
+      malloc(sz))   /* XTC_RAW_OK: mmap shim on a no-mmap platform */
 #  define munmap(p, sz)  ((void)(sz), free(p), 0)
 #  define madvise(p, sz, adv)  ((void)(p),(void)(sz),(void)(adv), 0)
 #else

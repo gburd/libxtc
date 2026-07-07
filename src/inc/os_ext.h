@@ -29,6 +29,7 @@ int __os_ncpus_perf __P((void));
 int __os_numa_current_node __P((void));
 int __os_numa_nnodes __P((void));
 int __os_numa_node_of_cpu __P((int));
+int __os_pthread_create_masked __P((pthread_t *, void *(*)(void *), void *));
 int __os_realloc __P((void *, size_t, void **));
 int __os_rwlock_destroy __P((__os_rwlock_t *));
 int __os_rwlock_init __P((__os_rwlock_t *));

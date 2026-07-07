@@ -121,7 +121,7 @@ rate_limit_init(server_t *s)
 	if (s->cfg.max_iops > 0) {
 		atomic_store(&s->iops_tokens, s->cfg.max_iops);
 		s->iops_refill_ns = 1000000000LL;
-		(void)__os_clock_mono(&s->iops_last_refill);
+		s->iops_last_refill = xtc_clock_mono();
 	}
 }
 
@@ -130,7 +130,7 @@ rate_limit_refill(server_t *s)
 {
 	int64_t now;
 	if (s->cfg.max_iops <= 0) return;
-	(void)__os_clock_mono(&now);
+	now = xtc_clock_mono();
 	if (now - s->iops_last_refill >= s->iops_refill_ns) {
 		atomic_store(&s->iops_tokens, s->cfg.max_iops);
 		s->iops_last_refill = now;
@@ -238,7 +238,7 @@ listener_proc(void *arg)
 			    &revents);
 			if (revents & XTC_WAIT_MAILBOX) {
 				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
-					if (msg) __os_free(msg);
+					if (msg) xtc_free(msg);
 				}
 			}
 		}

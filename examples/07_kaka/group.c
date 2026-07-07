@@ -19,7 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "xtc_int.h"          /* __os_free */
+#include "xtc_int.h"          /* xtc_free */
 #include "xtc_proc.h"
 #include "partition.h"        /* plog_* for durable offset commits */
 
@@ -193,9 +193,9 @@ coordinator_proc(void *arg)
 
 		if (xtc_recv(&msg, &mlen, -1) != XTC_OK || msg == NULL)
 			break;
-		if (mlen < sizeof req) { __os_free(msg); continue; }
+		if (mlen < sizeof req) { xtc_free(msg); continue; }
 		memcpy(&req, msg, sizeof req);
-		__os_free(msg);
+		xtc_free(msg);
 
 		if (req.op == GRP_SHUTDOWN) {
 			memset(&rep, 0, sizeof rep);
@@ -282,7 +282,7 @@ grp_call(xtc_pid_t coord, const struct grp_req *req, struct grp_reply *rep)
 		return -1;
 	if (mlen >= sizeof *rep)
 		memcpy(rep, msg, sizeof *rep);
-	__os_free(msg);
+	xtc_free(msg);
 	return 0;
 }
 

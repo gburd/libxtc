@@ -77,6 +77,15 @@ typedef void  (*__os_tls_dtor)(void *);
  * PUBLIC: int  __os_thread_set_affinity __P((int));
  */
 int  __os_thread_create(__os_thread_t *thr, __os_thread_fn fn, void *arg);
+
+/* Create a raw pthread with all signals blocked (mask restored after),
+ * for the few call sites that hold a raw pthread_t rather than an
+ * __os_thread_t (the PSI slab thread, the deadlock detector).  Keeps
+ * every runtime thread from inheriting a permissive signal mask.
+ * Declared with a pthread_t; callers already include <pthread.h>. */
+#include <pthread.h>
+int  __os_pthread_create_masked(pthread_t *out, void *(*fn)(void *),
+         void *arg);
 int  __os_thread_join(__os_thread_t *thr, void **retval);
 int  __os_thread_detach(__os_thread_t *thr);
 int  __os_thread_self(__os_thread_t *out);

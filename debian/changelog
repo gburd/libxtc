@@ -1,3 +1,53 @@
+libxtc (1.4.2-1) unstable; urgency=medium
+
+  * Correctness + API-discipline release, from three carrier-team reports
+    and a systematic wrapper audit.
+  * Cross-thread wake of an idle loop (lost wakeup): a fiber spawned or a
+    mailbox message sent onto a loop parked idle in the io_uring wait
+    could be missed.  The io_uring wakeup poll now re-arms before
+    draining; audited all eight I/O backends and fixed the identical
+    latent bug in the illumos event-ports backend; the level-triggered
+    backends (epoll/poll/select), kqueue (EV_CLEAR), and IOCP (posted
+    packet) were already safe.  Guarded by a native reproducer and a
+    deterministic test_sim_wake_park.
+  * Runtime threads are created with all signals blocked
+    (__os_pthread_create_masked at every creation site: scheduler, loop,
+    worker, blocking pool, deadlock detector, PSI thread), so a runtime
+    thread does not inherit a permissive signal mask -- addressing the
+    carrier's process-directed SIGCHLD reaching a scheduler thread.  The
+    mask primitive is verified correct in isolation; one integration case
+    is still under investigation (docs/KNOWN_ISSUES.md).
+  * Allocation discipline: every internal allocation now goes through the
+    __os_* wrappers (allocator hook + preemption bracket + portability),
+    fixing several buffers that were raw-malloc'd but handed to callers
+    who free them with xtc_free -- a mismatched free / heap corruption
+    under a custom allocator (the class of bug an embedder like
+    PostgreSQL hits).  __os_malloc/_calloc/_realloc now guarantee a
+    non-NULL pointer on XTC_OK.
+  * New PUBLIC allocation / time / atomic API so a consumer never needs
+    the internal __os_* surface: xtc_malloc, xtc_calloc, xtc_realloc,
+    xtc_aligned_alloc, xtc_aligned_free, xtc_clock_mono, xtc_clock_real,
+    xtc_sleep_ns, xtc_atomic_i64_load, xtc_atomic_i64_add (complementing
+    the existing xtc_free).  All shipped examples were migrated off __os_*
+    onto this public surface.
+  * New merge/release gate + CI step (test/dist/test_api_discipline.sh)
+    enforcing: library uses the __os_* wrappers, __os_ alloc returns are
+    checked (never voided, no dead NULL double-check), consumers use only
+    xtc_*, and no naked-block-scoped variables.  Rules recorded in
+    AGENTS.md.
+  * DST: general stale-data (out-of-date read) fault, disk-full ENOSPC,
+    clock skew, reboot/incarnation, a write-back crash model that ties
+    durability to fsync completion, a determinism-enforcement guard, and
+    a bug-injection harness (plant a known safety bug, prove DST catches
+    it) -- 46-test sim suite.
+  * Known issue documented: xtc_exec_fini can leak a cross-thread-spawned
+    proc's task+coro at abnormal teardown (LeakSanitizer; masked on the CI
+    runner where LSan is restricted).  See docs/KNOWN_ISSUES.md.
+  * Full make check clean under AddressSanitizer and
+    UndefinedBehaviorSanitizer; amalgamation builds at 1.4.2.
+
+ -- Greg Burd <greg@burd.me>  Tue, 07 Jul 2026 16:20:43 -0400
+
 libxtc (1.4.1-1) unstable; urgency=medium
 
   * DST-metrics + benchmark-fairness release (no public API change).

@@ -45,9 +45,9 @@
 #include "db.h"
 #include "proto.h"
 
-/* Local helper: xtc __os_clock_mono uses out-param style. */
+/* Local helper wrapping xtc_clock_mono(). */
 static inline int64_t xtc_now_ns(void) {
-	int64_t t; (void)__os_clock_mono(&t); return t;
+	int64_t t; t = xtc_clock_mono(); return t;
 }
 
 /* Forward declarations */
@@ -115,7 +115,7 @@ rate_limit_init(server_t *srv)
 	if (srv->cfg.max_iops > 0) {
 		atomic_store(&srv->iops_tokens, srv->cfg.max_iops);
 		srv->iops_refill_ns = 1000000000LL;  /* 1 second */
-		(void)__os_clock_mono(&srv->iops_last_refill);
+		srv->iops_last_refill = xtc_clock_mono();
 	}
 }
 
@@ -126,7 +126,7 @@ rate_limit_refill(server_t *srv)
 		return;
 
 	int64_t now;
-	(void)__os_clock_mono(&now);
+	now = xtc_clock_mono();
 	if (now - srv->iops_last_refill >= srv->iops_refill_ns) {
 		/* Refill tokens */
 		atomic_store(&srv->iops_tokens, srv->cfg.max_iops);
@@ -241,7 +241,7 @@ listener_proc(void *arg)
 			if (revents & XTC_WAIT_MAILBOX) {
 				void *msg; size_t msg_len;
 				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
-					if (msg) __os_free(msg);
+					if (msg) xtc_free(msg);
 				}
 			}
 		}
@@ -416,8 +416,7 @@ main(int argc, char **argv)
 	}
 
 	/* Setup resource governor */
-	if (__os_calloc(1, sizeof(*srv->res), (void **)&srv->res) != XTC_OK ||
-	    srv->res == NULL) {
+	if ((srv->res = xtc_calloc(1, sizeof(*srv->res))) == NULL) {
 		fprintf(stderr, "failed to allocate resource state\n");
 		return 1;
 	}
@@ -512,7 +511,7 @@ main(int argc, char **argv)
 	close(srv->listen_fd);
 	db_destroy(srv->db);
 	xtc_app_destroy(srv->app);
-	__os_free(srv->res);
+	xtc_free(srv->res);
 	xtc_log_destroy(log);
 
 	return 0;

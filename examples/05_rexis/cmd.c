@@ -22,9 +22,9 @@ extern xtc_counter_t *rexis_stat_cmd_total;
 extern xtc_counter_t *rexis_stat_unknown_cmd;
 extern xtc_hist_t    *rexis_stat_cmd_latency;
 
-/* Local helper: xtc __os_clock_mono uses out-param style. */
+/* Local helper wrapping xtc_clock_mono(). */
 static inline int64_t xtc_now_ns(void) {
-	int64_t t; (void)__os_clock_mono(&t); return t;
+	int64_t t; t = xtc_clock_mono(); return t;
 }
 
 /* Case-insensitive compare */

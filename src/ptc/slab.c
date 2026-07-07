@@ -57,8 +57,8 @@
 #  define PROT_WRITE 0
 #  define MAP_PRIVATE   0
 #  define MAP_ANONYMOUS 0
-static void *__win_chunk_alloc(size_t sz) { return malloc(sz); }
-static int   __win_chunk_free(void *p, size_t sz) { (void)sz; free(p); return 0; }
+static void *__win_chunk_alloc(size_t sz) { return malloc(sz); }   /* XTC_RAW_OK: mmap shim on Windows */
+static int   __win_chunk_free(void *p, size_t sz) { (void)sz; free(p); return 0; }   /* XTC_RAW_OK: mmap shim */
 #  define mmap(addr, sz, prot, flags, fd, off)  \
      ((void)(addr),(void)(prot),(void)(flags),(void)(fd),(void)(off), \
       __win_chunk_alloc(sz))
@@ -593,15 +593,15 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 	}
 
 	if (s->opts.flags & XTC_SLAB_AUDIT) {
-		(void)__os_calloc(XTC_AUDIT_N, sizeof *s->audit_ring,
-		    (void **)&s->audit_ring);
+		if (__os_calloc(XTC_AUDIT_N, sizeof *s->audit_ring,
+		    (void **)&s->audit_ring) != XTC_OK)
+			s->audit_ring = NULL;   /* audit disabled if it can't alloc */
 	}
 
 	/* Register globally for reap_all / pressure broadcasts. */
 	{
 		struct slab_registry_entry *re = NULL;
-		(void)__os_calloc(1, sizeof *re, (void **)&re);
-		if (re != NULL) {
+		if (__os_calloc(1, sizeof *re, (void **)&re) == XTC_OK) {
 			(void)pthread_mutex_lock(&__slab_reg_lock);
 			re->slab = s;
 			re->next = __registry;
@@ -1134,7 +1134,7 @@ xtc_slab_pressure_listen_ex(const char *psi_path,
 	l->stop_fd = pipefd[0];
 	l->stop_wfd = pipefd[1];   /* write a byte + close to signal stop */
 	l->fn = fn; l->user = user;
-	if (pthread_create(&l->th, NULL, __psi_thread, l) != 0) {
+	if (__os_pthread_create_masked(&l->th, __psi_thread, l) != 0) {
 		(void)close(fd); (void)close(pipefd[0]); (void)close(pipefd[1]);
 		__os_free(l);
 		return XTC_E_INTERNAL;

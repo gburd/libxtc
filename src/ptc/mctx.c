@@ -131,11 +131,11 @@ __free_chunks_and_cleanups(xtc_mctx_t *m)
 	while ((ce = m->cleanups) != NULL) {
 		m->cleanups = ce->next;
 		ce->fn(ce->user);
-		free(ce);
+		__os_free(ce);
 	}
 	for (c = m->first_chunk; c != NULL; c = next) {
 		next = c->next;
-		free(c);
+		__os_free(c);
 	}
 	m->first_chunk = NULL;
 	m->n_chunks = 0;
@@ -198,8 +198,8 @@ xtc_mctx_alloc(xtc_mctx_t *m, size_t size)
 	if (m == NULL) return NULL;
 	/* Overflow guard: CHUNK_HDR_SIZE + size must not wrap. */
 	if (size > SIZE_MAX - CHUNK_HDR_SIZE) return NULL;
-	c = malloc(CHUNK_HDR_SIZE + size);
-	if (c == NULL) return NULL;
+	if (__os_malloc(CHUNK_HDR_SIZE + size, (void **)&c) != XTC_OK ||
+	    c == NULL) return NULL;
 	c->owner = m;
 	c->size  = size;
 
@@ -252,7 +252,7 @@ xtc_mctx_free(xtc_mctx_t *m, void *p)
 	m->n_chunks--;
 	m->n_bytes -= c->size;
 	__unlock(m);
-	free(c);
+	__os_free(c);
 }
 
 /* ----- cleanup callbacks ----------------------------------------- */

@@ -309,8 +309,8 @@ __obj_get(xtc_lockmgr_t *m, struct lock_partition *p, const void *key,
 	if (o != NULL || !create) return o;
 	if (__os_calloc(1, sizeof *o, (void **)&o) != XTC_OK) return NULL;
 	if (key_size > 0) {
-		o->key = malloc(key_size);
-		if (o->key == NULL) { __os_free(o); return NULL; }
+		o->key = NULL;
+		if (__os_malloc(key_size, &o->key) != XTC_OK) { __os_free(o); return NULL; }
 		memcpy(o->key, key, key_size);
 	}
 	o->key_size = key_size;
@@ -420,7 +420,7 @@ xtc_lockmgr_create(const xtc_lockmgr_opts_t *opts, xtc_lockmgr_t **out)
 		(void)pthread_mutex_init(&m->parts[i].lock, NULL);
 
 	if (m->opts.detect_mode == XTC_LOCK_DETECT_PERIODIC) {
-		if (pthread_create(&m->detector_thread, NULL,
+		if (__os_pthread_create_masked(&m->detector_thread,
 		    __detector_thread, m) == 0)
 			m->detector_running = 1;
 	}

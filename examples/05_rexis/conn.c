@@ -61,9 +61,8 @@ conn_try_read(conn_state_t *st)
 		char *new_buf;
 		if (new_cap > st->max_read_buf)
 			return -1;
-		new_buf = NULL;
-		if (__os_realloc(st->read_buf, new_cap, (void **)&new_buf) != XTC_OK ||
-		    !new_buf)
+		new_buf = xtc_realloc(st->read_buf, new_cap);
+		if (new_buf == NULL)
 			return -1;
 		st->read_buf = new_buf;
 		st->read_cap = new_cap;
@@ -130,12 +129,12 @@ conn_process_commands(conn_state_t *st)
 	while (!st->quit && !st->closed) {
 		/* Check rate limit */
 		if (st->iops_cap > 0 && st->iops_tokens) {
-			int64_t tokens = __os_atomic_load_i64(st->iops_tokens);
+			int64_t tokens = xtc_atomic_i64_load(st->iops_tokens);
 			if (tokens <= 0) {
 				/* Rate limited - wait for tokens */
 				break;
 			}
-			__os_atomic_fetch_add_i64(st->iops_tokens, -1);
+			xtc_atomic_i64_add(st->iops_tokens, -1);
 		}
 
 		rc = resp_parse_command(&parser, argv, MAX_ARGS, &argc, &consumed);
@@ -236,7 +235,7 @@ conn_proc(void *arg)
 			    &revents);
 			if (revents & XTC_WAIT_MAILBOX) {
 				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
-					if (msg) __os_free(msg);
+					if (msg) xtc_free(msg);
 				}
 			}
 		}
@@ -261,9 +260,9 @@ conn_proc(void *arg)
 
 	/* Cleanup */
 	close(st->fd);
-	__os_free(st->read_buf);
-	__os_free(st->write_buf);
-	__os_free(st);
+	xtc_free(st->read_buf);
+	xtc_free(st->write_buf);
+	xtc_free(st);
 }
 
 int
@@ -272,7 +271,7 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	conn_state_t *st;
 	xtc_proc_opts_t proc_opts = { 0 };
 
-	if (__os_calloc(1, sizeof(*st), (void **)&st) != XTC_OK || !st)
+	if ((st = xtc_calloc(1, sizeof(*st))) == NULL)
 		return XTC_E_NOMEM;
 
 	st->fd = opts->fd;
@@ -280,9 +279,8 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	st->res = opts->res;
 
 	st->read_cap = DEFAULT_READ_BUF;
-	if (__os_malloc(st->read_cap, (void **)&st->read_buf) != XTC_OK ||
-	    !st->read_buf) {
-		__os_free(st);
+	if ((st->read_buf = xtc_malloc(st->read_cap)) == NULL) {
+		xtc_free(st);
 		return XTC_E_NOMEM;
 	}
 	st->read_len = 0;
@@ -290,10 +288,9 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	                   (1024 * 1024);
 
 	st->write_cap = DEFAULT_WRITE_BUF;
-	if (__os_malloc(st->write_cap, (void **)&st->write_buf) != XTC_OK ||
-	    !st->write_buf) {
-		__os_free(st->read_buf);
-		__os_free(st);
+	if ((st->write_buf = xtc_malloc(st->write_cap)) == NULL) {
+		xtc_free(st->read_buf);
+		xtc_free(st);
 		return XTC_E_NOMEM;
 	}
 	st->write_len = 0;

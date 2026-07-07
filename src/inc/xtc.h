@@ -19,6 +19,7 @@ extern "C" {
 #endif
 
 #include <stddef.h>
+#include <stdint.h>   /* int64_t for the public clock / atomic helpers */
 
 /*
  * Compile-time version macros.
@@ -110,6 +111,64 @@ const char *xtc_strerror(int xtc_err);
  *	entry point; it is safe to call from any thread.
  */
 void xtc_free(void *p);
+
+/*
+ * xtc_malloc / xtc_calloc / xtc_realloc --
+ *	Allocate through libxtc's own allocator (the same one xtc_free
+ *	releases and that xtc_alloc_set_hook can override), so a consumer
+ *	never needs the internal __os_* surface.  Return the pointer
+ *	directly (NULL on failure), matching the C idiom; the result is
+ *	released with xtc_free.  xtc_calloc zero-fills; xtc_realloc grows
+ *	/ shrinks an xtc_malloc/xtc_calloc/xtc_realloc block (NULL p acts
+ *	like xtc_malloc).  A zero size yields a unique freeable pointer,
+ *	not NULL.  Safe from any thread.  These are the public complement
+ *	to xtc_free -- library CONSUMERS use only the xtc_* API, never the
+ *	internal __os_* wrappers.
+ */
+void *xtc_malloc(size_t size);
+void *xtc_calloc(size_t n, size_t size);
+void *xtc_realloc(void *p, size_t size);
+
+/*
+ * xtc_aligned_alloc / xtc_aligned_free --
+ *	Allocate `size` bytes aligned to `align` (a power of two, e.g.
+ *	XTC_CACHE_LINE) through libxtc's allocator; release ONLY with
+ *	xtc_aligned_free (never xtc_free -- an aligned block may carry
+ *	header/padding a plain free would mishandle).  Returns NULL on
+ *	failure.  For a struct with an over-aligned member.
+ */
+void *xtc_aligned_alloc(size_t align, size_t size);
+void  xtc_aligned_free(void *p);
+
+/*
+ * xtc_clock_mono / xtc_clock_real --
+ *	Read the monotonic (never goes backward; for intervals/timeouts)
+ *	or real (wall-clock; for timestamps) clock in NANOSECONDS.  Return
+ *	the time directly (0 on the rare query failure).  These are the
+ *	public clocks a consumer uses instead of raw clock_gettime.
+ */
+int64_t xtc_clock_mono(void);
+int64_t xtc_clock_real(void);
+
+/*
+ * xtc_sleep_ns --
+ *	Sleep the CALLING OS THREAD for at least `ns` nanoseconds.  This
+ *	is a THREAD sleep (blocking); inside a fiber use xtc_proc_sleep
+ *	instead, which parks the fiber and keeps the loop live.  Provided
+ *	so a consumer never needs raw nanosleep.  Returns XTC_OK, or a
+ *	negative XTC_E_* on interruption/error.
+ */
+int xtc_sleep_ns(int64_t ns);
+
+/*
+ * xtc_atomic_i64_load / xtc_atomic_i64_add --
+ *	Relaxed atomic load, and atomic fetch-add (returns the PRIOR
+ *	value), on a shared int64_t.  The minimal public atomic surface a
+ *	consumer needs for a shared counter / token bucket without reaching
+ *	for the internal __os_atomic_* macros or a compiler builtin.
+ */
+int64_t xtc_atomic_i64_load(const int64_t *p);
+int64_t xtc_atomic_i64_add(int64_t *p, int64_t delta);
 
 #ifdef __cplusplus
 }

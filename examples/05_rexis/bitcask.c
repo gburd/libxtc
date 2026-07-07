@@ -31,7 +31,7 @@
 
 #include "bitcask.h"
 
-#include "os_time.h"     /* __os_clock_mono: portable monotonic clock */
+#include "xtc.h"     /* public clock + alloc API */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -106,7 +106,7 @@ now_ns(void)
 	/* Portable monotonic nanoseconds: clock_gettime(CLOCK_MONOTONIC)
 	 * on POSIX, mach_continuous_time on macOS, QueryPerformanceCounter
 	 * on Windows -- libxtc smooths the platform difference. */
-	(void)__os_clock_mono(&ns);
+	ns = xtc_clock_mono();
 	return ns;
 }
 
