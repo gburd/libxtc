@@ -161,6 +161,22 @@ xtc_preempt_arm(int64_t interval_ns)
 
 	ensure_handler_installed();
 
+	/* Unblock the preemption signal on THIS thread.  Runtime threads are
+	 * created with all signals blocked (__os_pthread_create_masked) so a
+	 * process-directed signal never lands on them; but a thread that
+	 * EXPLICITLY arms preemption wants its own per-thread timer signal
+	 * delivered, so it opts back in here.  Without this the SIGVTALRM
+	 * from the CPU-time timer would stay blocked and preemption never
+	 * fires. */
+#if !defined(_WIN32)
+	{
+		sigset_t s;
+		sigemptyset(&s);
+		sigaddset(&s, XTC_PREEMPT_SIGNAL);
+		(void)pthread_sigmask(SIG_UNBLOCK, &s, NULL);
+	}
+#endif
+
 	/* A CPU-time (per-thread) timer: SIGEV_THREAD_ID would target this
 	 * thread, but the portable form is a per-thread CLOCK using
 	 * SIGEV_SIGNAL delivered to the process and steered by the timer
