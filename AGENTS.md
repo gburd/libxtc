@@ -191,6 +191,43 @@ to arrays whose element type is over-aligned (the array base must be
 aligned or element 0 is misaligned).  `aligned()` and `aligned_free()`
 are a matched pair in the allocator vtable.
 
+## API discipline (merge gate: test/dist/test_api_discipline.sh, in make check + CI)
+
+Four rules, enforced by the gate.  A rare, justified exception on a
+single line carries a `/* XTC_RAW_OK: reason */` (or the existing
+`XTC_BLOCKING_OK`) marker.
+
+1. LIBRARY code uses the `__os_*` wrappers, never the raw wrapped
+   primitives (malloc/calloc/realloc/free/strdup, pthread_create,
+   clock_gettime/gettimeofday/nanosleep/usleep).  The wrappers add the
+   allocator hook (embedder accounting), the async-signal-unsafe
+   bracket, and portability; raw calls bypass all three (and a raw
+   malloc handed to a caller who frees it with xtc_free/__os_free is a
+   mismatched free / heap corruption under a custom allocator).  The
+   ONLY place the raw primitive is allowed is inside the wrapper's own
+   implementation (src/os/*) or a marked platform shim.
+
+2. Never `(void)__os_malloc(...)` (or _calloc/_realloc); always check
+   `!= XTC_OK`.  And do NOT double-check the rc AND the pointer
+   `== NULL`: `__os_malloc/_calloc/_realloc` guarantee a NON-NULL
+   pointer on XTC_OK (even for size 0), so the NULL half is dead code.
+
+3. CONSUMERS use only the public `xtc_*` API, never the internal
+   `__os_*` / `__xtc_*` surface.  The examples are the consumer
+   exemplar and must stay clean -- if a consumer needs a primitive, add
+   the public `xtc_*` for it (this is why xtc_malloc/_calloc/_realloc/
+   _aligned_alloc/_aligned_free, xtc_clock_mono/_real, xtc_sleep_ns,
+   xtc_atomic_i64_load/_add exist).  Inside a fiber use xtc_proc_sleep,
+   not xtc_sleep_ns (which blocks the OS thread).
+
+4. No NAKED block-scoped variables: a bare `{ ... }` introduced only to
+   scope a variable is forbidden.  Block-scoped declarations are fine in
+   if/while/for/do/switch bodies; otherwise declare at the nearest real
+   enclosing block (usually the function top).
+
+Before cutting a release, run the gate (it is in make check, and CI runs
+it); it must print `[api] OK`.
+
 ## Code Style
 
 BSD KNF as encoded in `.clang-format`.  ASCII-only in source, docs,

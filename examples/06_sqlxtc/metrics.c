@@ -50,7 +50,7 @@ metrics_proc(void *arg)
 	void *msg; size_t msg_len;
 	for (;;) {
 		(void)xtc_recv(&msg, &msg_len, METRICS_INTERVAL_NS);
-		if (msg) __os_free(msg);
+		if (msg) xtc_free(msg);
 
 		if (sqlxtc_stat_connections != NULL)
 			xtc_gauge_set(sqlxtc_stat_connections,

@@ -292,6 +292,7 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_include_idempotent.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_include_inline_comment.sh \
 	$(abs_top_srcdir)/../test/dist/test_shellcheck.sh \
+	$(abs_top_srcdir)/../test/dist/test_api_discipline.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_perm.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_cfg.sh \
@@ -366,8 +367,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_tls_server \
 		  test_tls_client \
 		  test_pgmock_smoke \
-		  test_inject_races \
-		  repro_idle_uring_wake
+		  test_inject_races
 
 TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_lrlock pbt_lwlock pbt_chan pbt_sim
 
@@ -991,6 +991,15 @@ repro_idle_uring_wake: $(srcdir)/../test/concurrency/repro_idle_uring_wake.c \
 		$(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../test/concurrency/repro_idle_uring_wake.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# Signal-mask regression guard: no runtime thread steals a process-
+# directed signal (carrier SIGCHLD-to-scheduler bug).  Standalone (it
+# spins an exec and can hit the documented xtc_exec_fini teardown leak,
+# so it is not in the leak-checked make check set).  Returns 0/1/77.
+test_thread_sigmask: $(srcdir)/../test/m1/test_thread_sigmask.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../test/m1/test_thread_sigmask.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M7 tests.

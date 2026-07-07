@@ -37,9 +37,9 @@ extern xtc_counter_t *sqlxtc_stat_query_total;
 extern xtc_counter_t *sqlxtc_stat_query_errors;
 extern xtc_hist_t    *sqlxtc_stat_query_latency;
 
-/* Local helper: __os_clock_mono uses an out-param. */
+/* Local helper wrapping xtc_clock_mono(). */
 static inline int64_t xtc_now_ns(void) {
-	int64_t t; (void)__os_clock_mono(&t); return t;
+	int64_t t; t = xtc_clock_mono(); return t;
 }
 
 /* Case-insensitive match of the SQL text -- trimmed of leading and
@@ -273,13 +273,13 @@ process_lines(conn_state_t *st)
 			}
 			/* Rate limit */
 			if (st->iops_cap > 0 && st->iops_tokens) {
-				int64_t t = __os_atomic_load_i64(st->iops_tokens);
+				int64_t t = xtc_atomic_i64_load(st->iops_tokens);
 				if (t <= 0) {
 					quack_emit_err(&st->wbuf,
 					    "OVER_LIMIT");
 					break;
 				}
-				__os_atomic_fetch_add_i64(st->iops_tokens,
+				xtc_atomic_i64_add(st->iops_tokens,
 				                          -1);
 			}
 			/* Memory check */
@@ -358,7 +358,7 @@ conn_proc(void *arg)
 			    &revents);
 			if (revents & XTC_WAIT_MAILBOX) {
 				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
-					if (msg) __os_free(msg);
+					if (msg) xtc_free(msg);
 				}
 			}
 		}
@@ -372,7 +372,7 @@ conn_proc(void *arg)
 			if (st->wbuf.len > st->wpos) {
 				(void)xtc_recv(&msg, &msg_len,
 				    5LL * 1000 * 1000);
-				if (msg) __os_free(msg);
+				if (msg) xtc_free(msg);
 			}
 			spins++;
 		}

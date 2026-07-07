@@ -409,11 +409,11 @@ xtc_osproc_serve(int ctrl_fd, xtc_osproc_handler_fn handler, void *arg)
 		hr = handler(req, req_len, &reply, &reply_len, arg);
 		__os_free(req);
 		if (hr != XTC_OK) {
-			free(reply);
+			free(reply);   /* XTC_RAW_OK: reply is malloc'd by the user handler (see xtc_osproc.h), freed with the matching free */
 			return hr;
 		}
 		rc = xtc_net_send_frame(ctrl_fd, reply, reply_len);
-		free(reply);
+		free(reply);   /* XTC_RAW_OK: user-handler-malloc'd reply */
 		if (rc != XTC_OK)
 			return rc;
 	}

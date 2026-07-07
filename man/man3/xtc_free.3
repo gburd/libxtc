@@ -4,13 +4,47 @@
 .Dt XTC_FREE 3
 .Os
 .Sh NAME
-.Nm xtc_free
-.Nd free a heap buffer libxtc handed the caller to own
+.Nm xtc_free ,
+.Nm xtc_malloc ,
+.Nm xtc_calloc ,
+.Nm xtc_realloc ,
+.Nm xtc_aligned_alloc ,
+.Nm xtc_aligned_free ,
+.Nm xtc_clock_mono ,
+.Nm xtc_clock_real ,
+.Nm xtc_sleep_ns ,
+.Nm xtc_atomic_i64_load ,
+.Nm xtc_atomic_i64_add
+.Nd public allocation, clock, sleep, and atomic helpers
 .Sh SYNOPSIS
 .In xtc.h
 .Ft void
 .Fn xtc_free "void *p"
+.Ft void *
+.Fn xtc_malloc "size_t size"
+.Ft void *
+.Fn xtc_calloc "size_t n" "size_t size"
+.Ft void *
+.Fn xtc_realloc "void *p" "size_t size"
+.Ft void *
+.Fn xtc_aligned_alloc "size_t align" "size_t size"
+.Ft void
+.Fn xtc_aligned_free "void *p"
+.Ft int64_t
+.Fn xtc_clock_mono "void"
+.Ft int64_t
+.Fn xtc_clock_real "void"
+.Ft int
+.Fn xtc_sleep_ns "int64_t ns"
+.Ft int64_t
+.Fn xtc_atomic_i64_load "const int64_t *p"
+.Ft int64_t
+.Fn xtc_atomic_i64_add "int64_t *p" "int64_t delta"
 .Sh DESCRIPTION
+These are the public complement to the library's internal portability
+layer: a CONSUMER of libxtc uses only these
+.Fn xtc_* No entry points and never the internal Fn __os_* No wrappers.
+.Pp
 .Fn xtc_free
 releases a heap buffer that a libxtc call allocated and handed to the
 caller to own.
@@ -46,9 +80,61 @@ Passing
 is a no-op.
 .Fn xtc_free
 is safe to call from any thread.
+.Pp
+.Fn xtc_malloc , Fn xtc_calloc , No and Fn xtc_realloc No allocate through
+libxtc's allocator (the same one
+.Fn xtc_free
+releases, overridable via the allocator hook), returning the pointer
+directly and
+.Dv NULL
+on failure; the result is released with
+.Fn xtc_free .
+A zero size yields a unique freeable pointer, not
+.Dv NULL .
+.Fn xtc_aligned_alloc
+returns memory aligned to
+.Fa align
+(a power of two), released ONLY with
+.Fn xtc_aligned_free
+(never
+.Fn xtc_free ) .
+.Pp
+.Fn xtc_clock_mono
+and
+.Fn xtc_clock_real
+read the monotonic and real clocks in nanoseconds (returning 0 on the
+rare query failure).
+.Fn xtc_sleep_ns
+sleeps the calling OS THREAD; inside a fiber use
+.Xr xtc_proc_sleep 3
+instead, which parks the fiber without blocking the loop.
+.Fn xtc_atomic_i64_load
+and
+.Fn xtc_atomic_i64_add
+(which returns the prior value) are the minimal public atomics for a
+shared 64-bit counter.
 .Sh RETURN VALUES
 .Fn xtc_free
-returns no value.
+and
+.Fn xtc_aligned_free
+return no value.
+.Fn xtc_malloc , Fn xtc_calloc , Fn xtc_realloc , No and
+.Fn xtc_aligned_alloc
+return the allocated pointer, or
+.Dv NULL
+on failure.
+.Fn xtc_clock_mono No and Fn xtc_clock_real No return a nanosecond count
+(0 on failure).
+.Fn xtc_sleep_ns
+returns
+.Dv XTC_OK
+or a negative
+.Dv XTC_E_*
+code.
+.Fn xtc_atomic_i64_load
+returns the current value;
+.Fn xtc_atomic_i64_add
+returns the value before the add.
 .Sh SEE ALSO
 .Xr xtc_proc 3 ,
 .Xr xtc_net 3 ,

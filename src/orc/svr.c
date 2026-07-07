@@ -290,8 +290,9 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		size_t    msg_size = 14 + req_size;
 		int       rc;
 
-		buf = malloc(msg_size);
-		if (buf == NULL) return XTC_E_NOMEM;
+		buf = NULL;
+		if (__os_malloc(msg_size, (void **)&buf) != XTC_OK)
+			return XTC_E_NOMEM;
 		buf[0] = 'C';
 		buf[1] = 'p';
 		memcpy(buf + 2, &self_pid, 8);
@@ -299,7 +300,7 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		if (req_size > 0) memcpy(buf + 14, req, req_size);
 
 		rc = xtc_send(target, buf, msg_size);
-		free(buf);
+		__os_free(buf);
 		if (rc != XTC_OK) return rc;
 
 		return __recv_reply_for_tag(tag, out_reply, out_size,
@@ -321,8 +322,8 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		slot.rc = XTC_E_AGAIN;
 
 		msg_size = 10 + req_size;
-		buf = malloc(msg_size);
-		if (buf == NULL) {
+		buf = NULL;
+		if (__os_malloc(msg_size, (void **)&buf) != XTC_OK) {
 			xtc_notify_destroy(slot.done);
 			(void)pthread_mutex_destroy(&slot.lock);
 			return XTC_E_NOMEM;
@@ -335,7 +336,7 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		if (req_size > 0) memcpy(buf + 10, req, req_size);
 
 		rc = xtc_send(target, buf, msg_size);
-		free(buf);
+		__os_free(buf);
 		if (rc != XTC_OK) {
 			xtc_notify_destroy(slot.done);
 			(void)pthread_mutex_destroy(&slot.lock);
@@ -371,7 +372,7 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 				*out_reply = slot.data;
 				*out_size  = slot.size;
 			} else {
-				if (slot.data) free(slot.data);
+				if (slot.data) __os_free(slot.data);
 			}
 		}
 		(void)__xtc_mtx_unlock(&slot.lock);
@@ -408,12 +409,12 @@ xtc_svr_cast(xtc_pid_t target, const void *msg, size_t size)
 	if (size > 0 && msg == NULL) return XTC_E_INVAL;
 	/* Overflow guard: size + 1 must not wrap (see xtc_svr_call). */
 	if (size > SIZE_MAX - 1) return XTC_E_INVAL;
-	buf = malloc(size + 1);
-	if (buf == NULL) return XTC_E_NOMEM;
+	buf = NULL;
+	if (__os_malloc(size + 1, (void **)&buf) != XTC_OK) return XTC_E_NOMEM;
 	buf[0] = 'X';
 	if (size > 0) memcpy(buf + 1, msg, size);
 	rc = xtc_send(target, buf, size + 1);
-	free(buf);
+	__os_free(buf);
 	return rc;
 }
 
@@ -428,8 +429,15 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 		struct __svr_reply_slot *slot = call->slot;
 		void *copy = NULL;
 		if (size > 0) {
-			copy = malloc(size);
-			if (copy == NULL) return XTC_E_NOMEM;
+			/* Handed to the xtc_svr_call caller as *out_reply, which
+			 * the contract says to release with xtc_free (== __os_free
+			 * == the installed alloc hook).  It MUST therefore be
+			 * allocated with __os_malloc, or an embedder with a custom
+			 * allocator (e.g. PostgreSQL) frees a libc-malloc'd pointer
+			 * with the hook's free -- a mismatched free / heap
+			 * corruption. */
+			if (__os_malloc(size, &copy) != XTC_OK)
+				return XTC_E_NOMEM;
 			memcpy(copy, reply, size);
 		}
 		(void)__xtc_mtx_lock(&slot->lock);
@@ -443,12 +451,13 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 		/* Encode reply for in-proc caller: tag (4 bytes) + payload. */
 		uint8_t *buf;
 		size_t msg_size = 4 + size;
-		buf = malloc(msg_size);
-		if (buf == NULL) return XTC_E_NOMEM;
+		buf = NULL;
+		if (__os_malloc(msg_size, (void **)&buf) != XTC_OK)
+			return XTC_E_NOMEM;
 		memcpy(buf, &call->reply_tag, 4);
 		if (size > 0) memcpy(buf + 4, reply, size);
 		rc = xtc_send(call->reply_pid, buf, msg_size);
-		free(buf);
+		__os_free(buf);
 	}
 
 	/* A handle from xtc_svr_call_save outlived its handle_call and is
@@ -516,8 +525,10 @@ __recv_reply_for_tag(uint32_t tag, void **out, size_t *out_size,
 	/* Strip the 4-byte tag prefix. */
 	*out_size = size - 4;
 	if (*out_size > 0) {
-		void *copy = malloc(*out_size);
-		if (copy == NULL) { __os_free(msg); return XTC_E_NOMEM; }
+		void *copy = NULL;
+		if (__os_malloc(*out_size, &copy) != XTC_OK) {
+			__os_free(msg); return XTC_E_NOMEM;
+		}
 		memcpy(copy, (uint8_t *)msg + 4, *out_size);
 		*out = copy;
 	} else {

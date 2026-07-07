@@ -460,7 +460,7 @@ xtc_tnt_commit_one_io(xtc_tnt_shard_t *sh, xtc_tnt_handle_t target, xtc_tnt_stag
 	xtc_proc_opts_t popts = { 0 };
 	xtc_pid_t pid;
 
-	if (__os_calloc(1, sizeof(*ca), (void **)&ca) != XTC_OK || ca == NULL)
+	if (__os_calloc(1, sizeof(*ca), (void **)&ca) != XTC_OK)
 		return;
 	ca->shard = sh;
 	ca->target = target;
@@ -527,7 +527,7 @@ xtc_tnt_courier_main(void *arg)
 		ssize_t n;
 		uint32_t cap = sh->spec->recv_buf_size
 		    ? sh->spec->recv_buf_size : XTC_TNT_DEFAULT_RECVBUF;
-		if (__os_malloc(cap, (void **)&buf) != XTC_OK || buf == NULL) {
+		if (__os_malloc(cap, (void **)&buf) != XTC_OK) {
 			c.result = -ENOMEM;
 			goto post;
 		}
@@ -716,7 +716,7 @@ xtc_tnt_deliver(xtc_tnt_shard_t *sh, xtc_tnt_handle_t to, const xtc_tnt_message_
 	if (meta->mbox_depth >= ar->type->mailbox_capacity)
 		return XTC_TNT_SEND_MAILBOX_FULL;   /* drop-on-full */
 
-	if (__os_malloc(sizeof(*e), (void **)&e) != XTC_OK || e == NULL)
+	if (__os_malloc(sizeof(*e), (void **)&e) != XTC_OK)
 		return XTC_TNT_SEND_POOL_EXHAUSTED;
 	e->next = NULL;
 	e->msg = *m;
@@ -844,7 +844,7 @@ xtc_tnt_register_timer(uint64_t duration_ns, uint16_t tag)
 
 	if (sh == NULL)
 		return;
-	if (__os_calloc(1, sizeof(*ta), (void **)&ta) != XTC_OK || ta == NULL)
+	if (__os_calloc(1, sizeof(*ta), (void **)&ta) != XTC_OK)
 		return;
 	ta->shard = sh;
 	ta->target = xtc_tnt_self();
@@ -1279,7 +1279,7 @@ shard_init(xtc_tnt_runtime_t *rt, uint8_t id, xtc_tnt_shard_t **out)
 	int pfd[2];
 	uint32_t scratch_cap;
 
-	if (__os_calloc(1, sizeof(*sh), (void **)&sh) != XTC_OK || sh == NULL)
+	if (__os_calloc(1, sizeof(*sh), (void **)&sh) != XTC_OK)
 		return -1;
 	sh->id = id;
 	sh->spec = spec;
@@ -1412,7 +1412,7 @@ xtc_tnt_start(const xtc_tnt_spec_t *spec)
 	if (spec->shard_count <= 0 || spec->shard_count > XTC_TNT_MAX_SHARDS)
 		return XTC_E_INVAL;
 
-	if (__os_calloc(1, sizeof(*rt), (void **)&rt) != XTC_OK || rt == NULL)
+	if (__os_calloc(1, sizeof(*rt), (void **)&rt) != XTC_OK)
 		return XTC_E_NOMEM;
 	rt->spec = spec;
 	rt->shard_count = spec->shard_count;
@@ -1490,7 +1490,7 @@ __xtc_tnt_run_sim(const xtc_tnt_spec_t *spec, uint64_t seed, long max_steps)
 	if (spec->shard_count <= 0 || spec->shard_count > XTC_TNT_MAX_SHARDS)
 		return XTC_E_INVAL;
 
-	if (__os_calloc(1, sizeof(*rt), (void **)&rt) != XTC_OK || rt == NULL)
+	if (__os_calloc(1, sizeof(*rt), (void **)&rt) != XTC_OK)
 		return XTC_E_NOMEM;
 	rt->spec = spec;
 	rt->shard_count = spec->shard_count;

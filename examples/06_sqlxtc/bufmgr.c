@@ -27,7 +27,6 @@
 #include "xtc_stats.h"
 #include "xtc_sync.h"
 #include "xtc_dio_sched.h"
-#include "os_time.h"
 #include <fcntl.h>
 
 #include <pthread.h>
@@ -369,7 +368,7 @@ dw_recover(bm_t *bm)
 
 	if (bm->dw_fd < 0)
 		return;
-	if (__os_malloc(bm->page_size, (void **)&pg) != XTC_OK)
+	if ((pg = xtc_malloc(bm->page_size)) == NULL)
 		return;
 	for (i = 0; i < bm->dw_slots; i++) {
 		uint8_t hdr[BM_DW_HDR];
@@ -403,7 +402,7 @@ dw_recover(bm_t *bm)
 		(void)fdatasync(bm->fd);
 	if (ftruncate(bm->dw_fd, 0) != 0)
 		{ /* best-effort: a stale ring is re-applied idempotently next time */ }
-	__os_free(pg);
+	xtc_free(pg);
 }
 
 /* Write a dirty page out, off the loop.  Returns 1 if it is clean
@@ -434,7 +433,7 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
 		return 1;                       /* raced with another flush */
 	}
-	if (__os_aligned_alloc(4096, bm->page_size, (void **)&snap) != XTC_OK) {
+	if ((snap = xtc_aligned_alloc(4096, bm->page_size)) == NULL) {
 		xtc_arwlock_unlock(f->latch);
 		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
 		return 0;
@@ -448,7 +447,7 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 		uint64_t plsn;
 		memcpy(&plsn, (uint8_t *)snap + bm->lsn_off, sizeof plsn);
 		if (bm->wal_flush(bm->wal_ctx, plsn) != XTC_OK) {
-			__os_aligned_free(snap);
+			xtc_aligned_free(snap);
 			xtc_arwlock_unlock(f->latch);
 			atomic_store_explicit(&f->io_busy, 0, memory_order_release);
 			return 0;
@@ -462,7 +461,7 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 	xtc_arwlock_unlock(f->latch);
 	dw_protect(bm, f->pid, snap);       /* full-page log, durable, BEFORE the final write */
 	(void)do_io(bm, snap, f->pid, 1);
-	__os_aligned_free(snap);
+	xtc_aligned_free(snap);
 	atomic_store_explicit(&f->io_busy, 0, memory_order_release);
 	atomic_fetch_add_explicit(&bm->s_flushed, 1, memory_order_relaxed);
 	return 1;
@@ -717,8 +716,8 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	if (opts == NULL || out == NULL || opts->page_size < 64 ||
 	    opts->n_frames < 2)
 		return XTC_E_INVAL;
-	if ((rc = __os_calloc(1, sizeof *bm, (void **)&bm)) != XTC_OK)
-		return rc;
+	if ((bm = xtc_calloc(1, sizeof *bm)) == NULL)
+		return XTC_E_NOMEM;
 	bm->page_size = opts->page_size;
 	bm->n_frames = opts->n_frames;
 	bm->cool_target = opts->n_frames * (opts->cool_pct ? opts->cool_pct : 10)
@@ -735,7 +734,7 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 
 	bm->fd = open(opts->path ? opts->path : "/tmp/sqlxtc-bm.tmp",
 	    opts->reopen ? (O_RDWR | O_CREAT) : (O_RDWR | O_CREAT | O_TRUNC), 0644);
-	if (bm->fd < 0) { __os_free(bm); return XTC_E_INVAL; }
+	if (bm->fd < 0) { xtc_free(bm); return XTC_E_INVAL; }
 
 	bm->direct = opts->direct ? 1 : 0;
 	bm->adaptive_writeback = opts->adaptive_writeback ? 1 : 0;
@@ -775,35 +774,35 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 		}
 	}
 
-	if ((rc = __os_calloc(bm->n_frames, sizeof *bm->frames,
-	    (void **)&bm->frames)) != XTC_OK) { close(bm->fd); __os_free(bm); return rc; }
-	if ((rc = __os_aligned_alloc(4096,
-	    (size_t)bm->n_frames * bm->page_size, (void **)&bm->pool)) != XTC_OK) {
-		__os_free(bm->frames); close(bm->fd); __os_free(bm); return rc;
+	if ((bm->frames = xtc_calloc(bm->n_frames, sizeof *bm->frames))
+	    == NULL) { close(bm->fd); xtc_free(bm); return XTC_E_NOMEM; }
+	if ((bm->pool = xtc_aligned_alloc(4096,
+	    (size_t)bm->n_frames * bm->page_size)) == NULL) {
+		xtc_free(bm->frames); close(bm->fd); xtc_free(bm); return XTC_E_NOMEM;
 	}
 	for (i = 0; i < bm->n_frames; i++) {
 		bm->frames[i].page = bm->pool + (size_t)i * bm->page_size;
 		if ((rc = xtc_arwlock_create(&bm->frames[i].latch)) != XTC_OK) {
-			__os_aligned_free(bm->pool); __os_free(bm->frames);
-			close(bm->fd); __os_free(bm); return rc;
+			xtc_aligned_free(bm->pool); xtc_free(bm->frames);
+			close(bm->fd); xtc_free(bm); return rc;
 		}
 		free_push(bm, &bm->frames[i]);
 	}
 	/* page table: next pow2 >= 2*n_frames */
 	bm->nbucket = 16;
 	while (bm->nbucket < bm->n_frames * 2u) bm->nbucket <<= 1;
-	if ((rc = __os_calloc(BM_HT_STRIPES, sizeof *bm->ht_locks,
-	    (void **)&bm->ht_locks)) != XTC_OK) {
-		__os_aligned_free(bm->pool); __os_free(bm->frames);
-		close(bm->fd); __os_free(bm); return rc;
+	if ((bm->ht_locks = xtc_calloc(BM_HT_STRIPES, sizeof *bm->ht_locks))
+	    == NULL) {
+		xtc_aligned_free(bm->pool); xtc_free(bm->frames);
+		close(bm->fd); xtc_free(bm); return XTC_E_NOMEM;
 	}
 	for (i = 0; i < (int)BM_HT_STRIPES; i++)
 		(void)pthread_mutex_init(&bm->ht_locks[i].m, NULL);
-	if ((rc = __os_calloc(bm->nbucket, sizeof *bm->buckets,
-	    (void **)&bm->buckets)) != XTC_OK) {
-		__os_free(bm->ht_locks);
-		__os_aligned_free(bm->pool); __os_free(bm->frames);
-		close(bm->fd); __os_free(bm); return rc;
+	if ((bm->buckets = xtc_calloc(bm->nbucket, sizeof *bm->buckets))
+	    == NULL) {
+		xtc_free(bm->ht_locks);
+		xtc_aligned_free(bm->pool); xtc_free(bm->frames);
+		close(bm->fd); xtc_free(bm); return XTC_E_NOMEM;
 	}
 	bm->next_pid = 1;          /* pid 0 reserved as "none" / superblock */
 	bm->free_pids = NULL;      /* page-id reclaim freelist (grown on demand) */
@@ -846,14 +845,14 @@ bm_destroy(bm_t *bm)
 		for (i = 0; i < BM_HT_STRIPES; i++)
 			(void)pthread_mutex_destroy(&bm->ht_locks[i].m);
 	}
-	__os_free(bm->ht_locks);
-	__os_free(bm->buckets);
-	__os_free(bm->free_pids);
-	__os_free(bm->quar_pids);
-	__os_free(bm->quar_set);
-	__os_aligned_free(bm->pool);
-	__os_free(bm->frames);
-	__os_free(bm);
+	xtc_free(bm->ht_locks);
+	xtc_free(bm->buckets);
+	xtc_free(bm->free_pids);
+	xtc_free(bm->quar_pids);
+	xtc_free(bm->quar_set);
+	xtc_aligned_free(bm->pool);
+	xtc_free(bm->frames);
+	xtc_free(bm);
 }
 
 /* ---- quarantine membership set (the reclamation interlock) ----
@@ -870,7 +869,7 @@ quar_set_resize(bm_t *bm, uint32_t newcap)
 	bm_pid_t *ns;
 	uint32_t i;
 
-	if (__os_calloc(newcap, sizeof *ns, (void **)&ns) != XTC_OK)
+	if ((ns = xtc_calloc(newcap, sizeof *ns)) == NULL)
 		return XTC_E_NOMEM;
 	for (i = 0; i < bm->quar_set_cap; i++) {
 		bm_pid_t p = bm->quar_set[i];
@@ -882,7 +881,7 @@ quar_set_resize(bm_t *bm, uint32_t newcap)
 			h = (h + 1) & (newcap - 1);
 		ns[h] = p;
 	}
-	__os_free(bm->quar_set);
+	xtc_free(bm->quar_set);
 	bm->quar_set = ns;
 	bm->quar_set_cap = newcap;
 	return XTC_OK;
@@ -1272,6 +1271,7 @@ bm_free_pid(bm_t *bm, bm_pid_t pid)
 {
 	uint32_t cap;
 	int rc = XTC_OK;
+	void *nb;
 
 	if (bm == NULL || pid == BM_PID_NONE)
 		return XTC_E_INVAL;
@@ -1292,12 +1292,13 @@ bm_free_pid(bm_t *bm, bm_pid_t pid)
 	}
 	if (bm->quar_pids_n == bm->quar_pids_cap) {
 		cap = bm->quar_pids_cap ? bm->quar_pids_cap * 2u : 64u;
-		if (__os_realloc(bm->quar_pids,
-		    (size_t)cap * sizeof *bm->quar_pids,
-		    (void **)&bm->quar_pids) != XTC_OK) {
+		nb = xtc_realloc(bm->quar_pids,
+		    (size_t)cap * sizeof *bm->quar_pids);
+		if (nb == NULL) {
 			(void)pthread_mutex_unlock(&bm->pid_mu);
 			return XTC_E_NOMEM;   /* page leaked, never double-allocated */
 		}
+		bm->quar_pids = nb;
 		bm->quar_pids_cap = cap;
 	}
 	bm->quar_pids[bm->quar_pids_n++] = pid;   /* parked, not yet reusable */
@@ -1347,14 +1348,15 @@ bm_reclaim_quarantine(bm_t *bm)
 		cap = bm->free_pids_cap ? bm->free_pids_cap : 64u;
 		while (cap < need)
 			cap *= 2u;
-		if (__os_realloc(bm->free_pids,
-		    (size_t)cap * sizeof *bm->free_pids,
-		    (void **)&bm->free_pids) != XTC_OK) {
+		grow = xtc_realloc(bm->free_pids,
+		    (size_t)cap * sizeof *bm->free_pids);
+		if (grow == NULL) {
 			/* Out of memory: leave them quarantined (still safe;
 			 * the pages stay leaked until a later drain). */
 			(void)pthread_mutex_unlock(&bm->pid_mu);
 			return;
 		}
+		bm->free_pids = grow;
 		bm->free_pids_cap = cap;
 	}
 	grow = bm->free_pids;
@@ -1527,7 +1529,7 @@ pp_proc(void *arg)
 	struct pp_arg *pa = arg;
 	bm_t *bm = pa->bm;
 	int64_t interval = pa->interval;
-	__os_free(pa);
+	xtc_free(pa);
 
 	while (atomic_load_explicit(&bm->pp_running, memory_order_acquire)) {
 		uint32_t i, cool_clean = 0, need;
@@ -1585,14 +1587,14 @@ bm_provider_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
 	xtc_proc_opts_t opts = { 0 };
 	int rc;
 	if (bm == NULL || loop == NULL) return XTC_E_INVAL;
-	if ((rc = __os_calloc(1, sizeof *pa, (void **)&pa)) != XTC_OK) return rc;
+	if ((pa = xtc_calloc(1, sizeof *pa)) == NULL) return XTC_E_NOMEM;
 	pa->bm = bm;
 	pa->interval = interval_ns > 0 ? interval_ns : 5LL * 1000 * 1000;
 	atomic_store_explicit(&bm->pp_running, 1, memory_order_release);
 	atomic_store_explicit(&bm->pp_alive, 1, memory_order_release);
 	opts.name = "bm-provider";
 	rc = xtc_proc_spawn(loop, pp_proc, pa, &opts, &bm->pp_pid);
-	if (rc != XTC_OK) { atomic_store_explicit(&bm->pp_running, 0, memory_order_release); atomic_store_explicit(&bm->pp_alive, 0, memory_order_release); __os_free(pa); return rc; }
+	if (rc != XTC_OK) { atomic_store_explicit(&bm->pp_running, 0, memory_order_release); atomic_store_explicit(&bm->pp_alive, 0, memory_order_release); xtc_free(pa); return rc; }
 	if (out_pid) *out_pid = bm->pp_pid;
 	return XTC_OK;
 }
@@ -1774,19 +1776,18 @@ tr_proc(void *arg)
 	int max_batch = bm->adaptive_writeback ? (cap < 1 ? 1 : cap) : TR_BATCH;
 	uint8_t *wbuf = NULL;
 	bm_frame_t **run_f = NULL;
-	__os_free(ta);
+	xtc_free(ta);
 	if (max_batch < 1) max_batch = 1;
-	if (__os_calloc(bm->n_frames, sizeof *cand, (void **)&cand) != XTC_OK)
+	if ((cand = xtc_calloc(bm->n_frames, sizeof *cand)) == NULL)
 		return;
 	/* Gather buffer for coalesced multi-page writes (direct-I/O aligned)
 	 * plus per-run frame scratch. */
-	if (__os_aligned_alloc(4096, (size_t)max_batch * bm->page_size,
-	    (void **)&wbuf) != XTC_OK ||
-	    __os_calloc((size_t)max_batch, sizeof *run_f, (void **)&run_f)
-	    != XTC_OK) {
-		__os_aligned_free(wbuf);
-		__os_free(run_f);
-		__os_free(cand);
+	wbuf = xtc_aligned_alloc(4096, (size_t)max_batch * bm->page_size);
+	run_f = xtc_calloc((size_t)max_batch, sizeof *run_f);
+	if (wbuf == NULL || run_f == NULL) {
+		xtc_aligned_free(wbuf);
+		xtc_free(run_f);
+		xtc_free(cand);
 		return;
 	}
 	if (bm->adaptive_writeback) {
@@ -1844,11 +1845,11 @@ tr_proc(void *arg)
 		qsort(cand, (size_t)n, sizeof *cand, tr_cmp);   /* priority select */
 		nsel = n < batch ? n : batch;
 		if (nsel > max_batch) nsel = max_batch;         /* guard wbuf */
-		(void)__os_clock_mono(&t0);
+		t0 = xtc_clock_mono();
 		/* Elevator-ordered, write-coalesced flush of the selected batch. */
 		w = tr_flush_batch(bm, cand, nsel, wbuf, run_f);
 		atomic_fetch_add_explicit(&bm->s_trickled, w, memory_order_relaxed);
-		(void)__os_clock_mono(&t1);
+		t1 = xtc_clock_mono();
 		/* Adaptive pacing, GATED by backlog.  When the trickler is
 		 * comfortably keeping up (few dirty frames), the backlog-based
 		 * fitness signal has no gradient, so letting the GA run just
@@ -1918,9 +1919,9 @@ tr_proc(void *arg)
 		if (xtc_proc_sleep(iv) != XTC_OK)
 			break;
 	}
-	__os_free(cand);
-	__os_aligned_free(wbuf);
-	__os_free(run_f);
+	xtc_free(cand);
+	xtc_aligned_free(wbuf);
+	xtc_free(run_f);
 	xtc_dio_sched_destroy(tuner);
 	atomic_store_explicit(&bm->tr_alive, 0, memory_order_release);
 }
@@ -1933,14 +1934,14 @@ bm_trickler_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
 	xtc_proc_opts_t opts = { 0 };
 	int rc;
 	if (bm == NULL || loop == NULL) return XTC_E_INVAL;
-	if ((rc = __os_calloc(1, sizeof *ta, (void **)&ta)) != XTC_OK) return rc;
+	if ((ta = xtc_calloc(1, sizeof *ta)) == NULL) return XTC_E_NOMEM;
 	ta->bm = bm;
 	ta->interval = interval_ns > 0 ? interval_ns : 2LL * 1000 * 1000;
 	atomic_store_explicit(&bm->tr_running, 1, memory_order_release);
 	atomic_store_explicit(&bm->tr_alive, 1, memory_order_release);
 	opts.name = "bm-trickler";
 	rc = xtc_proc_spawn(loop, tr_proc, ta, &opts, &bm->tr_pid);
-	if (rc != XTC_OK) { atomic_store_explicit(&bm->tr_running, 0, memory_order_release); atomic_store_explicit(&bm->tr_alive, 0, memory_order_release); __os_free(ta); return rc; }
+	if (rc != XTC_OK) { atomic_store_explicit(&bm->tr_running, 0, memory_order_release); atomic_store_explicit(&bm->tr_alive, 0, memory_order_release); xtc_free(ta); return rc; }
 	if (out_pid) *out_pid = bm->tr_pid;
 	return XTC_OK;
 }

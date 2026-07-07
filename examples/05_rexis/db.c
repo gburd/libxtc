@@ -13,9 +13,9 @@
 #include "db.h"
 #include "xtc_int.h"
 
-/* Local helper: xtc __os_clock_mono uses out-param style. */
+/* Local helper wrapping xtc_clock_mono(). */
 static inline int64_t xtc_now_ns(void) {
-	int64_t t; (void)__os_clock_mono(&t); return t;
+	int64_t t; t = xtc_clock_mono(); return t;
 }
 
 /* FNV-1a hash */
@@ -61,9 +61,7 @@ db_malloc(db_t *db, db_table_t *tbl, size_t sz)
 		                    (int64_t)sz) != XTC_OK)
 			return NULL;
 	}
-	p = NULL;
-	if (__os_malloc(sz, &p) != XTC_OK || p == NULL)
-		p = NULL;
+	p = xtc_malloc(sz);
 	if (p)
 		tbl->mem_used += sz;
 	else if (db->opts.res)
@@ -76,7 +74,7 @@ db_free(db_t *db, db_table_t *tbl, void *p, size_t sz)
 {
 	if (!p)
 		return;
-	__os_free(p);
+	xtc_free(p);
 	if (tbl->mem_used >= sz)
 		tbl->mem_used -= sz;
 	if (db->opts.res)
@@ -228,7 +226,7 @@ db_create(const db_opts_t *opts, db_t **out)
 	if (!out)
 		return XTC_E_INVAL;
 
-	if (__os_calloc(1, sizeof(*db), (void **)&db) != XTC_OK || !db)
+	if ((db = xtc_calloc(1, sizeof(*db))) == NULL)
 		return XTC_E_NOMEM;
 
 	db->opts = opts ? *opts : (db_opts_t)DB_OPTS_DEFAULT;
@@ -241,7 +239,7 @@ db_create(const db_opts_t *opts, db_t **out)
 	lr_opts.sync_fn = db_sync;
 
 	if (xtc_lrlock_create_ex(&lr_opts, &db->lr) != XTC_OK) {
-		__os_free(db);
+		xtc_free(db);
 		return XTC_E_NOMEM;
 	}
 
@@ -251,11 +249,10 @@ db_create(const db_opts_t *opts, db_t **out)
 	tbl->n_keys = 0;
 	tbl->mem_used = 0;
 	bucket_bytes = tbl->n_buckets * sizeof(db_entry_t *);
-	if (__os_calloc(tbl->n_buckets, sizeof(db_entry_t *),
-	                (void **)&tbl->buckets) != XTC_OK || !tbl->buckets) {
+	if ((tbl->buckets = xtc_calloc(tbl->n_buckets, sizeof(db_entry_t *))) == NULL) {
 		xtc_lrlock_write_end(db->lr);
 		xtc_lrlock_destroy(db->lr);
-		__os_free(db);
+		xtc_free(db);
 		return XTC_E_NOMEM;
 	}
 	tbl->mem_used = bucket_bytes;
@@ -266,12 +263,11 @@ db_create(const db_opts_t *opts, db_t **out)
 	tbl = xtc_lrlock_write_begin(db->lr);
 	/* After full_sync the read copy has buckets = NULL; we need to
 	 * allocate separately for the now-write copy. */
-	if (__os_calloc(tbl->n_buckets, sizeof(db_entry_t *),
-	                (void **)&tbl->buckets) != XTC_OK || !tbl->buckets) {
+	if ((tbl->buckets = xtc_calloc(tbl->n_buckets, sizeof(db_entry_t *))) == NULL) {
 		xtc_lrlock_write_end(db->lr);
 		/* Clean up the other copy's buckets */
 		xtc_lrlock_destroy(db->lr);
-		__os_free(db);
+		xtc_free(db);
 		return XTC_E_NOMEM;
 	}
 	xtc_lrlock_publish_full_sync(db->lr);
@@ -283,7 +279,7 @@ db_create(const db_opts_t *opts, db_t **out)
 	if (db->opts.persist_dir != NULL) {
 		if (bitcask_open(db->opts.persist_dir, &db->bc) != 0) {
 			xtc_lrlock_destroy(db->lr);
-			__os_free(db);
+			xtc_free(db);
 			return XTC_E_INTERNAL;
 		}
 		/* Replay live keys from the bitcask into the in-memory
@@ -317,13 +313,13 @@ db_destroy(db_t *db)
 				db_free(db, tbl, e, entry_size(e->key_len));
 			}
 		}
-		__os_free(tbl->buckets);
+		xtc_free(tbl->buckets);
 	}
 	xtc_lrlock_write_end(db->lr);
 
 	xtc_lrlock_destroy(db->lr);
 	if (db->bc != NULL) bitcask_close(db->bc);
-	__os_free(db);
+	xtc_free(db);
 }
 
 void db_read_begin(db_t *db) { (void)xtc_lrlock_read_begin(db->lr); }

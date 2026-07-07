@@ -124,7 +124,7 @@ producer_proc(void *arg)
 			r.card = deck_next(&d);
 			(void)xtc_send(m->reply_to, &r, sizeof r);
 		}
-		if (msg) __os_free(msg);
+		if (msg) xtc_free(msg);
 	}
 }
 
@@ -144,7 +144,7 @@ deck_get(void)
 	if (xtc_recv(&reply, &sz, 1000LL * 1000 * 1000) != XTC_OK) return 0;
 	if (reply && sz == sizeof(struct producer_reply))
 		card = ((struct producer_reply *)reply)->card;
-	if (reply) __os_free(reply);
+	if (reply) xtc_free(reply);
 	return card;
 }
 
@@ -233,7 +233,7 @@ txn_a(void *arg)
 	xtc_locker_t l = *(xtc_locker_t *)arg;
 	int rc;
 	(void)xtc_lock_get(g_mgr, l, "A", 1, XTC_LOCK_X, 0);
-	(void)__os_sleep_ns(100 * 1000 * 1000);   /* hold the lock, force the cycle */
+	(void)xtc_sleep_ns(100 * 1000 * 1000);   /* hold the lock, force the cycle */
 	rc = xtc_lock_get(g_mgr, l, "B", 1, XTC_LOCK_X,
 	    5LL * 1000 * 1000 * 1000);
 	atomic_store(&g_a_rc, rc);
@@ -250,7 +250,7 @@ txn_b(void *arg)
 	xtc_locker_t l = *(xtc_locker_t *)arg;
 	int rc;
 	(void)xtc_lock_get(g_mgr, l, "B", 1, XTC_LOCK_X, 0);
-	(void)__os_sleep_ns(100 * 1000 * 1000);   /* hold the lock, force the cycle */
+	(void)xtc_sleep_ns(100 * 1000 * 1000);   /* hold the lock, force the cycle */
 	rc = xtc_lock_get(g_mgr, l, "A", 1, XTC_LOCK_X,
 	    5LL * 1000 * 1000 * 1000);
 	atomic_store(&g_b_rc, rc);

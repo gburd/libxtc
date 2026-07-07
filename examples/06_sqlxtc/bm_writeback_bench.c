@@ -27,7 +27,6 @@
 #include "bufmgr.h"
 #include "xtc.h"
 #include "xtc_loop.h"
-#include "os_time.h"     /* __os_clock_mono */
 #include "xtc_proc.h"
 
 static bm_t       *g_bm;
@@ -45,7 +44,7 @@ static int64_t
 now_ns(void)
 {
 	int64_t ns = 0;
-	(void)__os_clock_mono(&ns);   /* portable monotonic clock */
+	ns = xtc_clock_mono();   /* portable monotonic clock */
 	return ns;
 }
 

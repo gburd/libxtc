@@ -77,7 +77,7 @@ pgmock_listener_proc(void *arg)
 			if (revents & XTC_WAIT_MAILBOX) {
 				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
 					if (msg != NULL)
-						__os_free(msg);
+						xtc_free(msg);
 				}
 			}
 		}

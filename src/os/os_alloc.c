@@ -129,9 +129,14 @@ __os_malloc(size_t sz, void **out)
 	if (out == NULL)
 		return XTC_E_INVAL;
 	__xtc_unsafe_enter();
-	p = __hook()->malloc(sz);
+	/* Request at least 1 byte so a 0-size allocation still yields a
+	 * unique, non-NULL, freeable pointer.  This makes the invariant
+	 * UNCONDITIONAL: __os_malloc returning XTC_OK always sets *out to
+	 * non-NULL, so callers check only the return code -- never both the
+	 * rc and *out == NULL. */
+	p = __hook()->malloc(sz != 0 ? sz : 1);
 	__xtc_unsafe_leave();
-	if (p == NULL && sz != 0)
+	if (p == NULL)
 		return XTC_E_NOMEM;
 	*out = p;
 	return XTC_OK;
@@ -149,9 +154,11 @@ __os_calloc(size_t n, size_t sz, void **out)
 	if (n != 0 && sz > (size_t)-1 / n)
 		return XTC_E_RANGE;
 	__xtc_unsafe_enter();
-	p = __hook()->calloc(n, sz);
+	/* At least one element of one byte, so XTC_OK always yields a
+	 * non-NULL pointer (see __os_malloc). */
+	p = __hook()->calloc(n != 0 ? n : 1, sz != 0 ? sz : 1);
 	__xtc_unsafe_leave();
-	if (p == NULL && n != 0 && sz != 0)
+	if (p == NULL)
 		return XTC_E_NOMEM;
 	*out = p;
 	return XTC_OK;
@@ -167,9 +174,10 @@ __os_realloc(void *p, size_t sz, void **out)
 	if (out == NULL)
 		return XTC_E_INVAL;
 	__xtc_unsafe_enter();
-	q = __hook()->realloc(p, sz);
+	/* At least 1 byte so XTC_OK always yields a non-NULL pointer. */
+	q = __hook()->realloc(p, sz != 0 ? sz : 1);
 	__xtc_unsafe_leave();
-	if (q == NULL && sz != 0)
+	if (q == NULL)
 		return XTC_E_NOMEM;
 	*out = q;
 	return XTC_OK;

@@ -29,8 +29,84 @@
 #include <poll.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <aio.h>
+#include <string.h>
+#include <stdlib.h>
 
 extern int __xtc_io_drain_wakeup(xtc_io_t *io);
+
+/*
+ * Native async file I/O via POSIX AIO + SIGEV_PORT.  illumos delivers an
+ * aio_read/aio_write/aio_fsync completion as a PORT_SOURCE_AIO event on
+ * the same event port the loop already waits on, so file AIO integrates
+ * with no thread hop (unlike the blocking-pool offload other readiness-
+ * only backends fall back to).  Verified on illumos-31d3d510d0.
+ *
+ * Each submission carries a heap sol_aio whose aiocb AND port_notify_t
+ * MUST outlive the async call (a stack-local port_notify was the cause
+ * of the initial EINVAL during bring-up); portnfy_user points back at
+ * the sol_aio so the drain recovers the xtc_aio_t, publishes its result,
+ * and frees the sol_aio.  If submission fails (e.g. no AIO support),
+ * xtc_io_aio_submit returns XTC_E_NOSYS and xtc_aio falls back to the
+ * blocking pool -- the offload path stays the proven default.
+ */
+struct sol_aio {
+	struct aiocb   cb;
+	port_notify_t  pn;
+	xtc_aio_t     *a;
+};
+
+/* PUBLIC: int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *)); */
+int
+xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
+{
+	struct sol_aio *s;
+	int rc;
+	if (io == NULL || a == NULL || a->fd < 0)
+		return XTC_E_INVAL;
+	/* Vectored ops have no lio_listio-with-port form here; decline them
+	 * so xtc_aio offloads (preadv/pwritev via the pool). */
+	if (a->op != XTC_AIO_PREAD && a->op != XTC_AIO_PWRITE &&
+	    a->op != XTC_AIO_FSYNC && a->op != XTC_AIO_FDATASYNC)
+		return XTC_E_NOSYS;
+	if ((rc = __os_calloc(1, sizeof *s, (void **)&s)) != XTC_OK)
+		return XTC_E_NOSYS;   /* let the caller offload */
+	s->a = a;
+	s->pn.portnfy_port = io->epfd;
+	s->pn.portnfy_user = s;
+	s->cb.aio_fildes = a->fd;
+	s->cb.aio_reqprio = 0;
+	s->cb.aio_sigevent.sigev_notify = SIGEV_PORT;
+	s->cb.aio_sigevent.sigev_value.sival_ptr = &s->pn;
+	switch (a->op) {
+	case XTC_AIO_PREAD:
+		s->cb.aio_buf = a->buf;
+		s->cb.aio_nbytes = a->len;
+		s->cb.aio_offset = (off_t)a->off;
+		rc = aio_read(&s->cb);
+		break;
+	case XTC_AIO_PWRITE:
+		s->cb.aio_buf = a->buf;
+		s->cb.aio_nbytes = a->len;
+		s->cb.aio_offset = (off_t)a->off;
+		rc = aio_write(&s->cb);
+		break;
+	case XTC_AIO_FSYNC:
+		rc = aio_fsync(O_SYNC, &s->cb);
+		break;
+	case XTC_AIO_FDATASYNC:
+		rc = aio_fsync(O_DSYNC, &s->cb);
+		break;
+	default:
+		rc = -1;
+		break;
+	}
+	if (rc != 0) {
+		__os_free(s);
+		return XTC_E_NOSYS;   /* AIO unavailable: offload instead */
+	}
+	return XTC_OK;
+}
 
 /* Translate xtc interest -> POLL* events. */
 static int
@@ -209,22 +285,48 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		int      fd;
 		void    *tag = evs[i].portev_user;
 
+		/* Native AIO completion: a PORT_SOURCE_AIO event's portev_user
+		 * is the sol_aio we submitted.  Publish the result onto the
+		 * xtc_aio_t, emit an XTC_IO_AIO event so the loop wakes the
+		 * parked fiber (a->tag), and free the sol_aio. */
+		if (evs[i].portev_source == PORT_SOURCE_AIO) {
+			struct sol_aio *s = evs[i].portev_user;
+			if (s != NULL) {
+				xtc_aio_t *a = s->a;
+				int aerr = aio_error(&s->cb);
+				ssize_t ares = aio_return(&s->cb);
+				if (a != NULL) {
+					a->res = (aerr == 0)
+					    ? (int32_t)ares : -(int32_t)aerr;
+					a->done = 1;
+					if (out_idx < max) {
+						events[out_idx].tag = a->tag;
+						events[out_idx].flags = XTC_IO_AIO;
+						out_idx++;
+					}
+				}
+				__os_free(s);
+			}
+			continue;
+		}
+
 		if (evs[i].portev_source != PORT_SOURCE_FD) continue;
 		fd = (int)evs[i].portev_object;
 
 		if (tag == io) {
-			/* Re-arm the one-shot wakeup pipe association BEFORE
-			 * draining it.  Same fix as the io_uring backend (carrier
-			 * idle-loop wake miss, 2026-07-06): draining first and
-			 * re-associating after leaves a window where a foreign
-			 * xtc_io_wakeup write finds no armed association and is
-			 * missed, hanging the idle loop.  Re-associating first
-			 * keeps the pipe watched across the drain; port_associate
-			 * on a pipe that still has a byte fires immediately
-			 * (level POLLIN), which the next port_getn coalesces. */
+			/* Wakeup pipe: drain it, then re-associate (one-shot).
+			 * This ordering is lost-wakeup-free on event ports: a
+			 * foreign xtc_io_wakeup write landing in the drain->rearm
+			 * window leaves a byte in the pipe, and port_associate on
+			 * a pipe that already has data delivers a POLLIN event
+			 * immediately (on the next port_getn) -- so the wakeup is
+			 * seen, not lost.  A write after the re-associate fires
+			 * the freshly-armed association.  Draining before the
+			 * re-arm also keeps the W3 coalesce contract (no stale
+			 * wakeup reported once the pipe is empty). */
+			(void)__xtc_io_drain_wakeup(io);
 			(void)port_associate(io->epfd, PORT_SOURCE_FD,
 			    (uintptr_t)fd, POLLIN, io);
-			(void)__xtc_io_drain_wakeup(io);
 			events[out_idx].tag = NULL;
 			events[out_idx].flags = XTC_IO_WAKEUP;
 			out_idx++;

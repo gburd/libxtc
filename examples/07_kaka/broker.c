@@ -137,11 +137,11 @@ partition_proc(void *arg)
 		if (xtc_recv(&msg, &msg_len, -1) != XTC_OK)
 			continue;
 		if (msg == NULL || msg_len < sizeof req) {
-			if (msg) __os_free(msg);
+			if (msg) xtc_free(msg);
 			continue;
 		}
 		memcpy(&req, msg, sizeof req);
-		__os_free(msg);
+		xtc_free(msg);
 
 		memset(&rep, 0, sizeof rep);
 		rep.tag = req.tag;
@@ -157,7 +157,7 @@ partition_proc(void *arg)
 			int64_t t0 = 0;
 			uint32_t n_ok = 0, n_rej = 0;
 			size_t bytes = 0;
-			(void)__os_clock_mono(&t0);
+			t0 = xtc_clock_mono();
 			while ((got = kaka_produce_next_record(&req.produce,
 			    &r)) == 1) {
 				int64_t need = (int64_t)r.key_len + r.value_len;
@@ -182,7 +182,7 @@ partition_proc(void *arg)
 			rep.hwm = plog_high_water(log);
 			{
 				int64_t t1 = 0;
-				(void)__os_clock_mono(&t1);
+				t1 = xtc_clock_mono();
 				kaka_metrics_produce(n_ok, bytes,
 				    t0 ? t1 - t0 : -1, n_rej);
 			}
@@ -194,7 +194,7 @@ partition_proc(void *arg)
 			uint32_t n = 0;
 			size_t used = 17;     /* header reserved (5 + 12) */
 			int64_t t0 = 0;
-			(void)__os_clock_mono(&t0);
+			t0 = xtc_clock_mono();
 			if (buf != NULL) {
 				kaka_record_t r;
 				while (off < plog_high_water(log)) {
@@ -218,7 +218,7 @@ partition_proc(void *arg)
 			rep.hwm = plog_high_water(log);
 			{
 				int64_t t1 = 0;
-				(void)__os_clock_mono(&t1);
+				t1 = xtc_clock_mono();
 				kaka_metrics_fetch(n, used,
 				    t0 ? t1 - t0 : -1);
 			}
@@ -408,7 +408,7 @@ conn_proc(void *arg)
 			{
 				struct part_reply rep;
 				memcpy(&rep, reply_msg, sizeof rep);
-				__os_free(reply_msg);
+				xtc_free(reply_msg);
 
 				if (type == KAKA_PRODUCE) {
 					uint8_t ack[13];
@@ -527,7 +527,7 @@ selftest_client(void *arg)
 	if (xtc_recv(&msg, &mlen, 2000LL*1000000) != XTC_OK || msg == NULL) {
 		st->result = 3; goto done;
 	}
-	memcpy(&rep, msg, sizeof rep); __os_free(msg);
+	memcpy(&rep, msg, sizeof rep); xtc_free(msg);
 	if (!rep.ok || rep.base_offset != 0 || rep.hwm != 3) { st->result = 4; goto done; }
 
 	/* FETCH from offset 0. */
@@ -538,7 +538,7 @@ selftest_client(void *arg)
 	if (xtc_recv(&msg, &mlen, 2000LL*1000000) != XTC_OK || msg == NULL) {
 		st->result = 6; goto done;
 	}
-	memcpy(&rep, msg, sizeof rep); __os_free(msg);
+	memcpy(&rep, msg, sizeof rep); xtc_free(msg);
 	if (!rep.ok || rep.records == NULL) { st->result = 7; goto done; }
 	{
 		uint8_t type; const uint8_t *fb; size_t fl;
@@ -558,7 +558,7 @@ done:
 	memset(&req, 0, sizeof req);
 	req.op = REQ_SHUTDOWN; req.reply = xtc_self(); req.tag = 99;
 	if (xtc_send(st->part, &req, sizeof req) == XTC_OK)
-		(void)xtc_recv(&msg, &mlen, 1000LL*1000000), (msg ? __os_free(msg) : (void)0);
+		(void)xtc_recv(&msg, &mlen, 1000LL*1000000), (msg ? xtc_free(msg) : (void)0);
 }
 
 int
@@ -669,7 +669,7 @@ credit_producer(void *arg)
 		{
 			struct part_reply rep;
 			memcpy(&rep, msg, sizeof rep);
-			__os_free(msg);
+			xtc_free(msg);
 			if (!rep.ok) { st->result = 4; goto done; }
 			if (rep.tag < CREDIT_BUDGET) slot_busy[rep.tag] = 0;
 			in_flight--; acked++;
@@ -684,7 +684,7 @@ done:
 		req.op = REQ_SHUTDOWN; req.reply = xtc_self(); req.tag = 999;
 		if (xtc_send(st->part, &req, sizeof req) == XTC_OK)
 			(void)xtc_recv(&msg, &mlen, 1000LL * 1000000),
-			    (msg ? __os_free(msg) : (void)0);
+			    (msg ? xtc_free(msg) : (void)0);
 	}
 }
 
@@ -763,7 +763,7 @@ metrics_produce_one(xtc_pid_t part, uint32_t seq)
 	if (xtc_recv(&msg, &mlen, 2000LL * 1000000) != XTC_OK || msg == NULL)
 		return -1;
 	memcpy(&rep, msg, sizeof rep);
-	__os_free(msg);
+	xtc_free(msg);
 	return rep.ok ? 1 : 0;
 }
 
@@ -793,7 +793,7 @@ metrics_client(void *arg)
 		    msg == NULL) { st->result = 3; goto done; }
 		memcpy(&rep, msg, sizeof rep);
 		if (rep.records != NULL) free(rep.records);
-		__os_free(msg);
+		xtc_free(msg);
 	}
 	st->result = 0;
 done:
@@ -801,7 +801,7 @@ done:
 	req.op = REQ_SHUTDOWN; req.reply = xtc_self(); req.tag = 999;
 	if (xtc_send(st->part, &req, sizeof req) == XTC_OK) {
 		if (xtc_recv(&msg, &mlen, 1000LL * 1000000) == XTC_OK && msg)
-			__os_free(msg);
+			xtc_free(msg);
 	}
 }
 

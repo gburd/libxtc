@@ -61,7 +61,7 @@ metrics_proc(void *arg)
 	for (;;) {
 		(void)xtc_recv(&msg, &msg_len, METRICS_INTERVAL_NS);
 		if (msg)
-			__os_free(msg);
+			xtc_free(msg);
 
 		/* Update gauges from authoritative state. */
 		if (rexis_stat_db_keys != NULL)
@@ -107,7 +107,7 @@ metrics_spawn(xtc_loop_t *loop, db_t *db, xtc_res_t *res,
 
 	metrics_register();
 
-	if (__os_malloc(sizeof(*st), (void **)&st) != XTC_OK || !st)
+	if ((st = xtc_malloc(sizeof(*st))) == NULL)
 		return XTC_E_NOMEM;
 
 	st->db = db;

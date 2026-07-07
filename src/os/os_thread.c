@@ -17,6 +17,9 @@
 #include <pthread.h>
 #include <sched.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <signal.h>        /* pthread_sigmask -- block signals on spawned threads */
+#endif
 #if defined(__FreeBSD__) || defined(__DragonFly__)
 #include <sys/param.h>
 #include <sys/cpuset.h>
@@ -49,18 +52,47 @@ int
 __os_thread_create(__os_thread_t *thr, __os_thread_fn fn, void *arg)
 {
 	struct __os_thread_state *st;
-	int rc;
+	int rc, cr;
 
 	if (thr == NULL || fn == NULL)
 		return XTC_E_INVAL;
 	if ((rc = __os_malloc(sizeof(*st), (void **)&st)) != XTC_OK)
 		return rc;
-	if (pthread_create(&st->pth, NULL, fn, arg) != 0) {
+	cr = __os_pthread_create_masked(&st->pth, fn, arg);
+	if (cr != 0) {
 		__os_free(st);
 		return XTC_E_INTERNAL;
 	}
 	thr->opaque = st;
 	return XTC_OK;
+}
+
+/*
+ * PUBLIC: int __os_pthread_create_masked __P((pthread_t *, void *(*)(void *), void *));
+ *
+ * Create a pthread with ALL signals blocked, restoring the caller's mask
+ * afterward.  Returns the pthread_create errno (0 on success), so raw
+ * pthread_t call sites (the PSI slab thread, the deadlock detector) can
+ * use it directly.  See the rationale in __os_thread_create: a runtime
+ * thread must never inherit a permissive mask, or a process-directed
+ * signal can land on it instead of the embedder's designated handler
+ * thread (the carrier SIGCHLD-to-scheduler bug).  POSIX blocks; on
+ * Windows (no signal mask) this is a plain pthread_create.
+ */
+int
+__os_pthread_create_masked(pthread_t *out, void *(*fn)(void *), void *arg)
+{
+	int cr;
+#if !defined(_WIN32)
+	sigset_t all, prev;
+	sigfillset(&all);
+	(void)pthread_sigmask(SIG_SETMASK, &all, &prev);
+#endif
+	cr = pthread_create(out, NULL, fn, arg);
+#if !defined(_WIN32)
+	(void)pthread_sigmask(SIG_SETMASK, &prev, NULL);
+#endif
+	return cr;
 }
 
 /*

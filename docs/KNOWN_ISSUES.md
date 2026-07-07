@@ -1,5 +1,67 @@
 # Known issues -- pending investigation
 
+## Runtime-thread signal mask: primitive fixed, an integration case remains
+
+**Status:** partial.  The carrier reported a process-directed SIGCHLD
+delivered to a libxtc scheduler thread (where MyProcPid == 0).  libxtc
+now creates every thread with all signals blocked via
+__os_pthread_create_masked (used by __os_thread_create and the two raw
+pthread_create sites: the PSI slab thread and the deadlock detector).
+The primitive is VERIFIED correct in isolation -- a thread created
+through it has the signal blocked -- so the embedder's
+block-signals-across-bringup workaround plus this change cover the
+reported case.
+
+HOWEVER, an integration test (test/m1/test_thread_sigmask.c) that makes
+the main thread the only SIGUSR1-unblocked thread and fires many
+process-directed SIGUSR1s still observes occasional deliveries to a
+libxtc thread (consistently the same one or two tids per run).  The
+offending thread reports the signal blocked in its mask, which should
+prevent delivery -- so the remaining case is subtle (a creation path or
+startup window not yet identified, or a platform delivery nuance).  The
+test is run STANDALONE and is NOT yet a gating test; root-causing the
+remaining deliveries is tracked.  The mask primitive itself is a real
+improvement and is kept.
+
+## xtc_exec_fini leaks cross-thread-spawned procs' task+coro (LSan)
+
+**Status:** open, pre-existing, edge-case.  Surfaced 2026-07 while adding
+the cross-thread idle-loop wake regression test (test/concurrency/
+repro_idle_uring_wake.c).
+
+**Symptom:** procs spawned CROSS-THREAD (xtc_proc_spawn from an OS thread
+that is not on the target loop) onto a service-mode executor, which run
+their body and xtc_exit_self cleanly, are not always fully reclaimed by
+xtc_exec_fini -- LeakSanitizer reports the task+coro (xtc_async ->
+__os_calloc, coro_uctx.c) as leaked at teardown.  A minimal 50-proc
+reproducer leaks ~half.
+
+**Likely cause:** the cross-thread spawn path pushes an XTC_INB_PUBLISH
+message carrying a not-yet-run task into the target loop's MPSC inbox.
+__xtc_inbox_fini frees the message envelope but NOT the carried task /
+its coro; and the proc-table / task reaping on clean exit races the
+service-mode teardown so some exited procs' structures are still
+referenced from the inbox or run queue (not yet linked to all_tasks,
+which xtc_loop_fini does walk + free) when fini runs.
+
+**Why it was not caught earlier:** (a) the leak is only visible with a
+WORKING LeakSanitizer -- GitHub's containerized CI runner restricts the
+ptrace LSan needs, so LSan silently no-ops there and the ASan job stays
+green; (b) it needs the specific cross-thread-spawn + abnormal (stop
+mid-flight) teardown shape, which no prior test exercised.  Production
+single-loop / drain-to-idle shutdown does not hit it.
+
+**Fix direction:** __xtc_inbox_fini should, for an undrained
+XTC_INB_PUBLISH, free the carried task via the same cleanup a drained
+PUBLISH uses (task + coro), and/or xtc_exec_fini should drain each loop's
+inbox + run queue and reap pending tasks before xtc_loop_fini.  Needs
+careful coro/task lifetime ordering; tracked, not yet done.
+
+**Guard:** the lost-wakeup guarantee the reproducer checks is covered
+leak-clean under DST by test/sim/test_sim_wake_park.c; the native
+reproducer is run standalone (not in the leak-checked make check set)
+until this teardown leak is fixed.
+
 ## Platform runtime-verification status (1.x readiness, B2)
 
 For an honest 1.x stance, here is exactly which platforms run at

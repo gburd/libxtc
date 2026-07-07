@@ -11,9 +11,12 @@
  */
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "xtc.h"
 #include "os_alloc.h"
+#include "os_time.h"
+#include "os_atomic.h"
 
 /*
  * PUBLIC: const char *xtc_strerror __P((int));
@@ -50,4 +53,80 @@ void
 xtc_free(void *p)
 {
 	__os_free(p);
+}
+
+void *
+xtc_malloc(size_t size)
+{
+	void *p = NULL;
+	if (__os_malloc(size, &p) != XTC_OK)
+		return NULL;
+	return p;
+}
+
+void *
+xtc_calloc(size_t n, size_t size)
+{
+	void *p = NULL;
+	if (__os_calloc(n, size, &p) != XTC_OK)
+		return NULL;
+	return p;
+}
+
+void *
+xtc_realloc(void *p, size_t size)
+{
+	void *q = NULL;
+	if (__os_realloc(p, size, &q) != XTC_OK)
+		return NULL;
+	return q;
+}
+
+void *
+xtc_aligned_alloc(size_t align, size_t size)
+{
+	void *p = NULL;
+	if (__os_aligned_alloc(align, size, &p) != XTC_OK)
+		return NULL;
+	return p;
+}
+
+void
+xtc_aligned_free(void *p)
+{
+	__os_aligned_free(p);
+}
+
+int64_t
+xtc_clock_mono(void)
+{
+	int64_t ns = 0;
+	(void)__os_clock_mono(&ns);
+	return ns;
+}
+
+int64_t
+xtc_clock_real(void)
+{
+	int64_t ns = 0;
+	(void)__os_clock_real(&ns);
+	return ns;
+}
+
+int
+xtc_sleep_ns(int64_t ns)
+{
+	return __os_sleep_ns(ns);
+}
+
+int64_t
+xtc_atomic_i64_load(const int64_t *p)
+{
+	return __os_atomic_load_i64((int64_t *)p);
+}
+
+int64_t
+xtc_atomic_i64_add(int64_t *p, int64_t delta)
+{
+	return __os_atomic_fetch_add_i64(p, delta);
 }
