@@ -366,7 +366,8 @@ TESTS_C		= test_version test_header test_errors \
 		  test_tls_server \
 		  test_tls_client \
 		  test_pgmock_smoke \
-		  test_inject_races
+		  test_inject_races \
+		  repro_idle_uring_wake
 
 TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_lrlock pbt_lwlock pbt_chan pbt_sim
 
@@ -731,7 +732,9 @@ check: tests-c tests-pbt tests-sh
 tests-c: $(TESTS_C)
 	@for t in $(TESTS_C); do \
 		echo "running C test: $$t"; \
-		./$$t || exit 1; \
+		./$$t; rc=$$?; \
+		if [ $$rc -eq 77 ]; then echo "  SKIP: $$t (rc=77)"; \
+		elif [ $$rc -ne 0 ]; then exit 1; fi; \
 	done
 
 tests-sh: $(STATIC_LIB) tnt_echo
@@ -980,6 +983,15 @@ test_inject_races: $(srcdir)/../test/concurrency/test_inject_races.c \
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m5 \
 		-o $@ $(srcdir)/../test/concurrency/test_inject_races.c \
 		$(srcdir)/../test/m5/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# Native (real-backend) regression guard for the cross-thread wake of an
+# idle io_uring / event-port loop (carrier lost-wakeup, 2026-07-06).
+# Plain-main test (returns 0 pass / 1 fail / 77 skip), no munit.
+repro_idle_uring_wake: $(srcdir)/../test/concurrency/repro_idle_uring_wake.c \
+		$(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../test/concurrency/repro_idle_uring_wake.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M7 tests.
 test_chan: $(srcdir)/../test/m7/test_chan.c \

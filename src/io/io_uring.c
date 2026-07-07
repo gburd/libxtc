@@ -80,7 +80,15 @@ __submit_poll_add(xtc_io_t *io, struct __xtc_uring_fd *uf)
 	 * the internal wakeup pipe so we can coalesce trivially: each
 	 * drain re-arms exactly once, regardless of how many bytes the
 	 * pipe carried.
-	 */
+	/*
+	 * MULTISHOT for user fds (continuous notification, epoll-EPOLLET /
+	 * kqueue-EV_CLEAR semantics).  Single-shot for the internal wakeup
+	 * pipe so a drained poll reports no stale wakeup on the next poll
+	 * (the W3 coalesce contract).  The lost-wakeup window a naive
+	 * single-shot has (drain-then-rearm: a cross-thread write landing
+	 * between draining the pipe and re-arming is missed) is closed in
+	 * the drain path by RE-ARMING BEFORE draining -- see the wakeup
+	 * branch of xtc_io_poll. */
 	if (uf->is_wakeup)
 		io_uring_prep_poll_add(sqe, uf->fd,
 		    __interest_to_pollmask(uf->interest));
@@ -364,6 +372,21 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		}
 		if (uf != NULL) {
 			if (uf->is_wakeup) {
+				/* Re-arm the single-shot wakeup poll BEFORE draining
+				 * the pipe.  Ordering is the fix for the cross-thread
+				 * idle-loop wake miss (carrier report 2026-07-06): if
+				 * we drained first and re-armed after, a foreign
+				 * xtc_io_wakeup write landing in that window would
+				 * find no armed poll and be missed, hanging the idle
+				 * loop forever.  Re-arming first means the poll is
+				 * always armed across the drain, so any write -- before
+				 * or after the drain -- surfaces a CQE and breaks the
+				 * next io_uring_wait.  (A write between re-arm and
+				 * drain is caught by the already-armed poll; a byte
+				 * still present at re-arm fires the poll immediately
+				 * -- level-triggered -- which the next poll coalesces.) */
+				(void)__submit_poll_add(io, uf);
+				(void)io_uring_submit(&io->ring);
 				if (!wakeup_emitted) {
 					int drc = __xtc_io_drain_wakeup(io);
 					if (drc != XTC_OK) {
@@ -377,9 +400,6 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 					}
 					wakeup_emitted = 1;
 				}
-				/* Re-arm single-shot poll on the wakeup pipe. */
-				(void)__submit_poll_add(io, uf);
-				(void)io_uring_submit(&io->ring);
 			} else {
 				if (cqe->res < 0) {
 					if (got < max) {

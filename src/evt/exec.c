@@ -418,7 +418,17 @@ __sim_loop_runnable(xtc_loop_t *l, int64_t now_ns, int64_t peer_stealable)
 	if (xtc_deque_len(&l->deque) > 0)
 		return 1;
 	if (l->inbox.head != NULL)
-		return 1;
+		return 1;   /* ANTI-LOST-WAKEUP INVARIANT: a loop with a pending
+	             * cross-thread enqueue (spawn PUBLISH / mailbox WAKE) is
+	             * ALWAYS runnable.  Unlike the real backends -- which
+	             * rely on a wakeup-fd nudge whose re-arm ordering can race
+	             * the park (the io_uring / event-port idle-loop wake miss,
+	             * carrier report 2026-07-06) -- the sim decides runnability
+	             * by DIRECTLY inspecting the inbox, so a foreign enqueue
+	             * can never be lost here.  This makes DST a structural
+	             * guard for the lost-wakeup class: a message enqueued onto
+	             * a parked loop is deterministically scheduled, or the run
+	             * fails quiescence.  See test_sim_wake_park. */
 	dl = __xtc_timer_heap_next_deadline(l);
 	if (dl >= 0 && dl <= now_ns)
 		return 1;
