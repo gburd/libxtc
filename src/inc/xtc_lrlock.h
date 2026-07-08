@@ -142,4 +142,32 @@ void       *xtc_lrlock_write_data(xtc_lrlock_t *lr);
  * Skips the first-publish full-sync. */
 void  xtc_lrlock_mark_ready(xtc_lrlock_t *lr);
 
+/* ---- fiber-aware (async) left-right lock ------------------------------
+ *
+ * xtc_alrlock_* is the same left-right lock, named to make the
+ * fiber-awareness explicit at the call site.  Reads are wait-free and
+ * never block, so there is nothing to make async on the read side; the
+ * ONE place a left-right lock waits is the WRITER's publish, which must
+ * wait for in-flight readers to advance past the version swap.  When the
+ * writer runs inside a fiber (on an xtc loop), that wait yields the
+ * FIBER back to its loop instead of spinning the OS thread -- so the
+ * reader fibers get to run and the loop keeps serving other work.
+ *
+ * This behavior is automatic in xtc_lrlock_publish already; the
+ * xtc_alrlock_* names exist so a consumer building on fibers can express
+ * intent ("I want the fiber-aware left-right lock") and read back the
+ * guarantee.  They are exact aliases -- an object created with either
+ * create function works with either family's calls.
+ *
+ * PUBLIC: int   xtc_alrlock_create __P((size_t, xtc_lrlock_apply_fn, xtc_lrlock_sync_fn, const char *, xtc_lrlock_t **));
+ * PUBLIC: int   xtc_alrlock_create_ex __P((const xtc_lrlock_opts_t *, xtc_lrlock_t **));
+ */
+int   xtc_alrlock_create(size_t data_size,
+                         xtc_lrlock_apply_fn apply_fn,
+                         xtc_lrlock_sync_fn  sync_fn,
+                         const char *name,
+                         xtc_lrlock_t **out);
+int   xtc_alrlock_create_ex(const xtc_lrlock_opts_t *opts,
+                            xtc_lrlock_t **out);
+
 #endif /* XTC_LRLOCK_H */

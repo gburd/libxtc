@@ -16,7 +16,9 @@
 .Nm xtc_lrlock_write_end ,
 .Nm xtc_lrlock_read_data ,
 .Nm xtc_lrlock_write_data ,
-.Nm xtc_lrlock_mark_ready
+.Nm xtc_lrlock_mark_ready ,
+.Nm xtc_alrlock_create ,
+.Nm xtc_alrlock_create_ex
 .Nd left-right lock with wait-free reads
 .Sh SYNOPSIS
 .In xtc.h
@@ -25,6 +27,10 @@
 .Fn xtc_lrlock_create "size_t data_size" "xtc_lrlock_apply_fn apply_fn" "xtc_lrlock_sync_fn sync_fn" "const char *name" "xtc_lrlock_t **out"
 .Ft int
 .Fn xtc_lrlock_create_ex "const xtc_lrlock_opts_t *opts" "xtc_lrlock_t **out"
+.Ft int
+.Fn xtc_alrlock_create "size_t data_size" "xtc_lrlock_apply_fn apply_fn" "xtc_lrlock_sync_fn sync_fn" "const char *name" "xtc_lrlock_t **out"
+.Ft int
+.Fn xtc_alrlock_create_ex "const xtc_lrlock_opts_t *opts" "xtc_lrlock_t **out"
 .Ft void
 .Fn xtc_lrlock_destroy "xtc_lrlock_t *lr"
 .Ft "const void *"
@@ -111,6 +117,22 @@ flags
 which lazily allocates the second copy and
 .Xr madvise 2 's
 it back to the OS after each publish in COW mode .
+.Pp
+.Fn xtc_alrlock_create
+and
+.Fn xtc_alrlock_create_ex
+are exact aliases of the corresponding
+.Fn xtc_lrlock_create
+functions, named to make fiber-awareness explicit at the call site.
+Reads are wait-free and never block, so only the writer's publish waits
+(for in-flight readers to advance past the version swap); when the
+writer runs inside a fiber on an
+.Xr xtc_loop 3 ,
+that wait yields the fiber back to its loop instead of spinning the OS
+thread, so reader fibers get to run and the loop keeps serving other
+work.  This behavior is already automatic in
+.Fn xtc_lrlock_publish ;
+an object created with either family works with either family's calls.
 .Pp
 .Fn xtc_lrlock_apply_op
 records a deterministic operation and applies it immediately to
