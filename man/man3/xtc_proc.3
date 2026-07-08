@@ -16,6 +16,7 @@
 .Nm xtc_proc_sleep ,
 .Nm xtc_exit_self ,
 .Nm xtc_exit_pid ,
+.Nm xtc_proc_wake ,
 .Nm xtc_link ,
 .Nm xtc_unlink ,
 .Nm xtc_monitor ,
@@ -54,6 +55,8 @@
 .Fn xtc_exit_self "int reason"
 .Ft int
 .Fn xtc_exit_pid "xtc_pid_t pid" "int reason"
+.Ft int
+.Fn xtc_proc_wake "xtc_pid_t pid"
 .Ft int
 .Fn xtc_link "xtc_pid_t other"
 .Ft int
@@ -264,6 +267,36 @@ terminates another process by pid.  Asynchronous; the target
 notices on its next yield or
 .Fn xtc_recv
 parking point.
+.Pp
+.Fn xtc_proc_wake
+resumes a process parked in
+.Fn xtc_proc_wait_fd
+or
+.Fn xtc_recv ,
+from ANY OS thread -- including one libxtc does not manage (an
+embedder's I/O-worker thread, a foreign carrier).  It is the explicit
+"poke the target loop" primitive: after a foreign thread makes a watched
+condition true (writes a self-pipe an fd-park watches, sets an embedder
+latch, completes an async read), calling
+.Fn xtc_proc_wake
+nudges the target loop out of its I/O wait so the parked proc
+re-evaluates its condition.  It delivers no message and asserts no wake
+cause; the woken proc simply re-checks (its
+.Fn xtc_proc_wait_fd
+re-checks fd readiness and the mailbox, its
+.Fn xtc_recv
+re-checks the mailbox), so a spurious wake is always safe.  Relying on
+fd readiness alone to wake a loop is correct for a condition libxtc
+itself produces, but when the readiness is produced by a fully foreign
+thread an embedder should pair it with
+.Fn xtc_proc_wake
+for a guaranteed, race-free resume.  Returns
+.Dv XTC_OK
+(including the no-op cases: the target is not parked, already runnable,
+or gone), or
+.Dv XTC_E_INVAL
+for
+.Dv XTC_PID_NONE .
 .Pp
 .Fn xtc_link
 creates a bidirectional link.  If either end exits with a

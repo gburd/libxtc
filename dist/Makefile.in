@@ -314,7 +314,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_thread test_tls test_mutex test_fs \
 		  test_dio \
 		  test_pkey \
-		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_net test_net_udp test_net_frame \
+		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_io_common_edge test_net test_net_udp test_net_frame \
 		  test_bdev \
 		  test_loop test_task test_waker test_timer test_io_integration \
 		  test_async \
@@ -326,6 +326,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_chan test_chan_mpmc_bcast \
 		  test_proc \
 		  test_proc_wait_fd \
+		  test_proc_wake_crossthread \
 		  test_proc_link_race \
 		  test_recv_correlate \
 		  test_sync \
@@ -335,7 +336,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_blocking test_alloc_audit \
 		  test_sup \
 		  test_reg \
-		  test_svr \
+		  test_svr test_svr_edge \
 		  test_app \
 		  test_tnt \
 		  test_osproc \
@@ -874,6 +875,12 @@ test_io_fault_inject: $(srcdir)/../test/m2/test_io_fault_inject.c \
 		-o $@ $(srcdir)/../test/m2/test_io_fault_inject.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_io_common_edge: $(srcdir)/../test/m2/test_io_common_edge.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
+		-o $@ $(srcdir)/../test/m2/test_io_common_edge.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_net: $(srcdir)/../test/m2/test_net.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
@@ -994,6 +1001,15 @@ repro_idle_uring_wake: $(srcdir)/../test/concurrency/repro_idle_uring_wake.c \
 		-o $@ $(srcdir)/../test/concurrency/repro_idle_uring_wake.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+# xtc_proc_wake cross-thread regression guard (the PG cross-thread-latch
+# wake-miss): a foreign OS thread makes an fd readable AND pokes the
+# parked fiber's loop via xtc_proc_wake; the fiber must resume.
+test_proc_wake_crossthread: $(srcdir)/../test/concurrency/test_proc_wake_crossthread.c \
+		$(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../test/concurrency/test_proc_wake_crossthread.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 # Signal-mask regression guard: no runtime thread steals a process-
 # directed signal (carrier SIGCHLD-to-scheduler bug).  Standalone (it
 # spins an exec and can hit the documented xtc_exec_fini teardown leak,
@@ -1096,6 +1112,12 @@ test_svr: $(srcdir)/../test/m10/test_svr.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
 		-o $@ $(srcdir)/../test/m10/test_svr.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_svr_edge: $(srcdir)/../test/m10/test_svr_edge.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_svr_edge.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_app: $(srcdir)/../test/m10/test_app.c \
