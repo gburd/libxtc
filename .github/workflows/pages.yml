@@ -86,7 +86,7 @@ jobs:
 
       - name: Build Jekyll site
         working-directory: docs
-        run: bundle exec jekyll build --destination _site
+        run: bundle exec jekyll build --baseurl "" --destination _site
 
       - name: Check links with lychee
         uses: lycheeverse/lychee-action@v2
@@ -94,6 +94,7 @@ jobs:
           args: >-
             --config docs/lychee.toml
             --no-progress
+            --root-dir ${{ github.workspace }}/docs/_site
             docs/_site/**/*.html
             README.md
           fail: true
