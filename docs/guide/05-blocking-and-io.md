@@ -121,4 +121,4 @@ programs, read the [Examples]({{ '/examples/' | relative_url }}).
 ---
 
 &larr; [Links, monitors, and supervisors]({{ '/guide/04-supervision/' | relative_url }}) &middot;
-Next: [Thinking in libxtc]({{ '/guide/transitioning/' | relative_url }}) &rarr;
+Next: [Resource limits]({{ '/guide/06-resource-limits/' | relative_url }}) &rarr;

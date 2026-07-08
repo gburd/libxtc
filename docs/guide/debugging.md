@@ -1,7 +1,7 @@
 ---
 title: Debugging and observing
 parent: Guide
-nav_order: 7
+nav_order: 8
 lede: >-
   Finding bugs in the message-passing model with GDB/LLDB and the runtime's own introspection.
 permalink: /guide/debugging/
@@ -59,6 +59,82 @@ vital signs:
   * **state** -- SCHEDULED / RUNNING / PARKED(reason) / DONE.  The park
     reason (fd, timer, mailbox) tells you what the proc is waiting for.
   * **lnk/mon** -- links and monitors, for tracing supervision.
+
+## The commands, with example output
+
+Every command works on a live process (run / attach / breakpoint) and on
+a core dump; run them while stopped so the registry symbols resolve.
+This is what each prints (addresses will differ; the shape is the
+point). The LLDB commands are identical.
+
+### `xtc-loops` -- the scheduler at a glance
+
+    (gdb) xtc-loops
+    loop 0x555555b8e2a0  [running]  procs=3  alive=3  tasks_run=1408  steals=12
+    loop 0x555555b9f100  [idle]     procs=1  alive=1  tasks_run=530   steals=9
+
+One line per loop (one per core under the executor). `tasks_run` is how
+much work each loop has done; a large `steals` skew means one loop is
+feeding the others (uneven placement).
+
+### `xtc-procs` -- the observer process table
+
+    (gdb) xtc-procs
+    proc               pid        mbox  peak  save state              lnk/mon
+    0x555555b8f420     <0.1.1>       0     4     0 parked(fd)          0/1
+    0x555555b8fae0     <0.2.1>    2043  2043     0 parked(mailbox)     1/0
+    0x555555b90200     <0.3.1>       0     1     0 running             0/0
+    (3 procs)
+
+The columns are the vital signs. Here `<0.2.1>` has a mailbox of 2043
+with a matching peak -- a consumer that fell behind its producers. Pass a
+loop address to scope the listing: `xtc-procs 0x555555b9f100`.
+
+### `xtc-proc ADDR` -- one process in detail
+
+    (gdb) xtc-proc 0x555555b8fae0
+    proc 0x555555b8fae0  pid=<0.2.1>  loop=0x555555b8e2a0
+      state        : parked(mailbox)
+      alive        : 1   kill_pending=0
+      mailbox      : depth=2043 peak=2043 cap=4096 saved=0 recv_total=118 drop_total=0
+      wm           : lvl=0 fired=0
+      links        : 1   monitors=0  monitored_by=0
+      recovery     : armed=1 fired=0 crit_depth=0
+      entry fn     : 0x555555559abc <consumer_body>
+
+`recv_total` against `depth` tells the story: 118 received, 2043 still
+waiting -- the producer is far ahead. `entry fn` names the body, so you
+know which proc this is without a name registry.
+
+### `xtc-mailbox ADDR` -- who is queued, and from whom
+
+    (gdb) xtc-mailbox 0x555555b8fae0
+      [  0] env 0x7ffff0001200  from=<0.4.1>  size=64
+      [  1] env 0x7ffff0001260  from=<0.4.1>  size=64
+      [  2] env 0x7ffff00012c0  from=<0.5.1>  size=64
+      ...
+      2043 message(s); save-queue=0
+
+The `from=` column identifies the producers -- here two of them
+(`<0.4.1>` and `<0.5.1>`) are flooding one consumer.
+
+### `xtc-self` -- map a thread back to its proc
+
+    (gdb) thread 3
+    [Switching to thread 3 (LWP 12807)]
+    (gdb) xtc-self
+    proc 0x555555b90200  pid=<0.3.1>  loop=0x555555b8e2a0
+      state        : running
+      ...
+
+Use it after `thread apply all bt` shows a thread you want to tie back
+to a libxtc process.
+
+### `xtc-trace` -- the causal message trace
+
+Covered in full in the causal-trace recipe below; it prints the
+send/receive ring in happens-before (HLC) order so you can follow which
+message caused which.
 
 ## Recipe: the whole program hangs
 

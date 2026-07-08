@@ -21,10 +21,13 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y doxygen ruby-full build-essential
+          sudo apt-get install -y doxygen mandoc ruby-full build-essential
 
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Generate API reference from man pages
+        run: sh docs/gen_api_reference.sh
 
       - name: Build Jekyll site
         working-directory: docs
@@ -62,6 +65,12 @@ jobs:
             | tar xz lychee
           ./lychee --config lychee.toml --no-progress \
             --root-dir "$PWD/_site_check" '_site_check/**/*.html' ../README.md
+
+      - name: Check mermaid diagrams
+        run: |
+          # npx (bundled with Node) fetches mermaid-cli on demand.
+          command -v npx >/dev/null 2>&1 || sudo apt-get install -y nodejs npm
+          sh docs/check_mermaid.sh
 
       - name: Deploy to Codeberg Pages
         uses: https://codeberg.org/git-pages/action@v2

@@ -51,6 +51,12 @@ kramdown:
 # just-the-docs nav ordering uses front-matter `nav_order`.
 heading_anchors: true
 
+# Footer: a back-to-top link; the nav-panel footer links (Codeberg /
+# GitHub) come from _includes/nav_footer_custom.html, which also removes
+# the theme's default "Just the Docs" attribution line.
+back_to_top: true
+back_to_top_text: "Back to top"
+
 # Footer / repo links (rendered by the theme).
 aux_links:
   "Source (Codeberg)":

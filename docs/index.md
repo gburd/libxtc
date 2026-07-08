@@ -14,7 +14,7 @@ monitors, supervisors, and deterministic simulation testing.
 {: .fs-6 .fw-300 }
 
 [Get started]({{ '/guide/01-getting-started/' | relative_url }}){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
-[API reference](https://codeberg.org/gregburd/libxtc/src/branch/main/man){: .btn .fs-5 .mb-4 .mb-md-0 }
+[API reference]({{ '/api/' | relative_url }}){: .btn .fs-5 .mb-4 .mb-md-0 }
 
 ---
 
