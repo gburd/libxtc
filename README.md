@@ -189,7 +189,7 @@ What's working today:
 | L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written x86_64 fcontext (~7.6 ns/swap) + 7 more arches + ucontext fallback. |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
-| L5 PG adapter | Designed (`docs/M16_PG_ADAPTER.md`); not yet implemented. |
+| L5 PG adapter | Designed; not yet implemented. |
 | TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/M_TLS_MATRIX.md`); SChannel (Windows) is compile-only. |
 
 Test coverage today: **412 munit test cases + 23 hegel-c property
