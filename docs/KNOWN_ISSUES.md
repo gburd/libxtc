@@ -73,9 +73,11 @@ RUNTIME (the full test suite executes) versus which only COMPILE:
   (2026-06, full gmake check passes, including the native kqueue
   file-AIO path).  Not in per-commit CI.
 - illumos (SunOS 5.11, UltraSPARC v9 / sparcv9 big-endian, gcc, event
-  ports): re-verified against the current tree (2026-06, full gmake
+  ports): re-verified against the current tree (2026-07, full gmake
   check passes -- including the property suites on big-endian SPARC,
-  with OpenSSL 3).  Not in per-commit CI.
+  with OpenSSL 3, and the native event-port file-AIO path
+  (SIGEV_PORT -> PORT_SOURCE_AIO) incl. /aio/roundtrip).  Not in
+  per-commit CI.
 - Windows: the IOCP runtime (AFD socket poll, cross-thread wakeup,
   file AIO) was RUNTIME-verified on a Windows host with MinGW (2026-06
   -- see "IOCP backend status" below; three bugs found and fixed).
@@ -290,6 +292,15 @@ completion is implemented and validated on:
     `aio_fsync`) with `SIGEV_KEVENT` -> `EVFILT_AIO`.  CI `macos` job
     compiles and runs `test_aio` against it (green).
 
+  - **illumos / Solaris event ports** (SunOS 5.11): POSIX AIO
+    (`aio_read`/`aio_write`/`aio_fsync`) with `SIGEV_PORT` posting the
+    completion as a `PORT_SOURCE_AIO` event on the loop's existing event
+    port, reaped in the `port_getn` drain (`aio_return` -> publish
+    `a->res` -> wake `a->tag`).  Implemented in `src/io/io_solaris.c`
+    (`xtc_io_aio_submit` + `struct sol_aio`); RUNTIME-verified on the
+    illumos/OpenIndiana host (sun) -- full `gmake check` passes,
+    including the native `/aio/roundtrip` case.
+
 Still offloaded to the blocking pool (native AIO is a follow-up with
 platform-specific completion plumbing -- they are DIFFERENT mechanisms,
 not one shared path):
@@ -298,16 +309,15 @@ not one shared path):
     would need POSIX AIO with `SIGEV_SIGNAL` delivered to a self-pipe /
     signalfd the loop already watches (epoll has no AIO filter).  A new
     shared `io_posixaio.c` submodule.
-  - **Solaris / illumos event ports**: POSIX AIO with `SIGEV_PORT`
-    posting completions to the existing event port.
   - **AIX**: AIX `aio_*` (or the legacy LIO interface).
 
 The offload fallback makes "write storage code once as if AIO is always
 available" hold on all of these today; the follow-ups only remove the
 thread hop.
 
-**Decision (2026-07-06): native non-Linux AIO stays offload-backed for
-now, deliberately.**  Assessment of the three targets:
+**Decision (updated 2026-07): illumos native AIO is now DONE and
+verified; epoll/poll/select and AIX stay offload-backed deliberately.**
+Assessment of the remaining targets:
 - Linux without io_uring (epoll/poll/select): the only ZERO-THREAD
   clean form is libaio (io_submit + an eventfd via IOCB_FLAG_RESFD),
   which adds a dependency; POSIX AIO with SIGEV_SIGNAL is
@@ -315,19 +325,14 @@ now, deliberately.**  Assessment of the three targets:
   hop this would remove.  On Linux the zero-thread answer already exists
   and is native: io_uring.  So this target has near-zero value.
 - illumos event ports (SIGEV_PORT -> PORT_SOURCE_AIO on the existing
-  port): genuinely clean and worth doing, BUT it is completion plumbing
-  that MUST be validated on a real illumos host in the test loop.  A
-  prior blind attempt at native AIO shipped a subtle bug; doing this one
-  without an illumos host in the loop would repeat that mistake.
-- AIX aio_*: no test host at all.
-Because the offload path is CORRECT and COMPLETE (native AIO is a pure
-performance optimisation that removes a thread hop, not a correctness
-gap), and because doing the illumos path safely needs host-in-the-loop
-testing, this is deferred as an explicitly host-gated task rather than
-shipped untested.  When the illumos host is in the loop, implement
-xtc_io_aio_submit in io_solaris.c with SIGEV_PORT + a PORT_SOURCE_AIO
-case in the port_getn drain (aio_return -> publish a->res -> wake
-a->tag), gated behind a config flag with offload as the proven fallback.
+  port): DONE.  It was implemented WITH the illumos host in the loop
+  (the bring-up did surface an EINVAL from a stack-local port_notify_t;
+  fixed by heap-allocating the notify+aiocb in struct sol_aio so they
+  outlive the async call) and now passes the full suite on sun.
+- AIX aio_*: no test host at all; remains offload-backed.
+The offload path is CORRECT and COMPLETE on the still-offloaded targets
+(native AIO is a pure performance optimisation that removes a thread
+hop, not a correctness gap).
 
 ## Portable block-device I/O layer -- DONE (v1.4.0)
 
@@ -337,16 +342,6 @@ size and capacity via the native per-OS ioctl (BLKSSZGET/BLKGETSIZE64,
 DIOCGSECTORSIZE/DIOCGMEDIASIZE, DKIOCGMEDIAINFO, the Windows drive
 geometry IOCTL) with a fstat fallback, aligned pread/pwrite through the
 xtc_aio path, and flush via xtc_aio_fsync.  See xtc_bdev(3).
-
-## Portable block-device I/O layer (historical note -- superseded above)
-
-A portable block-device abstraction (open a raw device / partition,
-query logical+physical sector size and capacity, aligned read/write
-through the xtc_aio path, flush/barrier) is requested but not yet
-implemented.  It would sit at L1 over xtc_aio + a thin per-OS device
-layer (Linux `BLKSSZGET`/`BLKGETSIZE64` + `O_DIRECT`; the BSDs
-`DIOCGSECTORSIZE`/`DIOCGMEDIASIZE`; Windows `IOCTL_DISK_GET_*` +
-`FILE_FLAG_NO_BUFFERING`).  A separate effort.
 
 ## test_alloc M7 skipped on Windows
 
@@ -679,20 +674,22 @@ dropped.  Fixed by registering/timing/cleaning up on __xtc_current_loop
 (the running loop).  test_server_storage 30/30; the WAL/double-write
 xtc_aio conversion is now unblocked.
 
-## macOS build break: sigev_notify_kqueue (io_kqueue.c) -- SDK drift (2026-06)
+## RESOLVED: macOS build break: sigev_notify_kqueue (io_kqueue.c)
 
-As of a 2026-06 macOS CI runner image, the build fails in
-src/io/io_kqueue.c with "no member named 'sigev_notify_kqueue' in
-'struct sigevent'".  This is the native-file-AIO path added in ce0cacc;
-the member is the SIGEV_KEVENT contract on BSD/macOS, but the current
-macOS SDK no longer exposes it under the default feature macros (it is
-gated behind a Darwin-private define).  The #if guard
-(defined(EVFILT_AIO) && defined(SIGEV_KEVENT)) passes, but the struct
-member is absent -> compile error.
+**Status:** FIXED.  A 2026-06 macOS SDK image dropped the BSD
+`struct sigevent` member `sigev_notify_kqueue`, so the native-file-AIO
+path added in ce0cacc failed to compile on macOS with "no member named
+'sigev_notify_kqueue'".  The `#if` guard
+(`defined(EVFILT_AIO) && defined(SIGEV_KEVENT)`) passed, but the member
+was absent under the current SDK.
 
-This is unrelated to the sqlxtc / sqlite3.c excision work (which never
-touches io_kqueue.c; the examples CI job is green).  The fix is a
-configure-time check for the sigevent.sigev_notify_kqueue member (and
-fall back to the generic NOSYS AIO path when absent), or compiling
-io_kqueue.c with -D_DARWIN_C_SOURCE.  Tracked separately from the
-excision.
+**Fix:** the native kqueue file-AIO path is now restricted to the
+platforms that actually provide the member AND honor SIGEV_KEVENT
+completion for regular files -- FreeBSD and DragonFly
+(`#if ... && (defined(__FreeBSD__) || defined(__DragonFly__))` in
+src/io/io_kqueue.c).  macOS is deliberately excluded and falls through
+to the blocking-pool offload (the XTC_E_NOSYS path), which is correct
+and never blocks the loop -- Darwin's POSIX AIO does not reliably
+support SIGEV_KEVENT completion on regular files anyway.  The macOS CI
+job (macos-latest, Apple Silicon) builds and runs the full C suite
+green on every commit.

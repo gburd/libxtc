@@ -175,7 +175,7 @@ What's working today:
 | Layer | Status |
 |---|---|
 | L0 OS substrate | Linux, FreeBSD, illumos runtime-verified; Windows (MinGW/Clang64/MSVC) and macOS OS-layer ports build; AIX builds, awaits a test host. |
-| L1 I/O | io_uring, epoll, kqueue, poll, select, and illumos event-ports (port_*) runtime-verified (the last on big-endian sparcv9).  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); AIX pollset COMPILES and is code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux + macOS at runtime; Windows CI is a build-only smoke. |
+| L1 I/O | io_uring, epoll, kqueue, poll, select, and illumos event-ports (port_*) runtime-verified (the last on big-endian sparcv9, including its native SIGEV_PORT file-AIO path).  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); AIX pollset COMPILES and is code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux + macOS at runtime; Windows CI is a build-only smoke. |
 | L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written x86_64 fcontext (~7.6 ns/swap) + 7 more arches + ucontext fallback. |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
@@ -192,13 +192,16 @@ was re-verified against the current tree (full gmake check passes,
 including the native kqueue file-AIO path); the Windows IOCP runtime
 was runtime-verified on a host with MinGW.  illumos (SunOS 5.11,
 UltraSPARC v9 / big-endian sparcv9, gcc) was also re-verified against
-the current tree (full gmake check, OpenSSL 3).  None of
+the current tree (full gmake check, OpenSSL 3, native event-port
+file-AIO).  None of
 FreeBSD/illumos/Windows-runtime is in per-commit CI yet.  Windows also
 passes ~233 munit under MinGW and 48/48 of the buildable binaries
 under Clang64 in prior runs.
 
 Honest gaps and known issues live in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
-The full milestone roadmap is in [PLAN.md](PLAN.md).
+The original design plan (a historical bring-up document) is in
+[PLAN.md](PLAN.md); it predates the implementation and does not track
+current status -- the live status is this table plus KNOWN_ISSUES.
 
 ## Building
 
