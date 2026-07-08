@@ -206,9 +206,23 @@ to pass on Linux/FreeBSD/illumos.
 
 ## IOCP backend status (Windows)
 
-**Status:** round-2 native rewrite landed and COMPILES, but is NOT
-runtime-verified -- the round-1 santorini results below no longer
-describe the current source.
+**Status:** round-2 native rewrite; the smoke test now runtime-verifies
+more of it on santorini (VS18, ARM64).  As of 2026-07 the MSVC smoke
+gate passes: version, strerror, clocks, slab, lwlock, SEH fault
+containment, xtc_fs, selective_receive (IOCP wakeup ordering),
+single-op AND multi-op native file AIO (overlapped pwrite/pread reaped
+from the port), and cross-thread wakeup coalescing (256 foreign
+xtc_send via PostQueuedCompletionStatus) all pass on the real host.
+
+ONE scenario is not yet green and is intentionally a SKIP (not a gate):
+the loopback-socket connect/accept/echo over the AFD poll path
+(smoke_sock_server / smoke_sock_client) -- the echo does not complete on
+santorini (s_sock_srv_ok stays 0), which points at the AFD-poll
+level-triggered re-arm being incomplete.  This is the socket-readiness
+corner still under investigation; the smoke prints a visible `skip
+loopback socket echo` line rather than failing, so a genuine AFD-poll
+bug surfaces without blocking the two proven IOCP additions.  Chasing
+the AFD echo to green is the remaining IOCP runtime-verification item.
 
 ### Round 2 (current source): native completion port + AFD poll
 
