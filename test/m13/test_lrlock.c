@@ -472,6 +472,37 @@ test_lrlock_max_readers(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+static MunitResult
+test_alrlock_alias(const MunitParameter p[], void *d)
+{
+	/* xtc_alrlock_* is an exact alias of xtc_lrlock_*: create with the
+	 * alias, write+publish, and read back through the plain family. */
+	xtc_lrlock_t *lr;
+	const struct dict *rd;
+	void *w;
+	struct op_set s = { 7, 42 };
+	(void)p; (void)d;
+
+	munit_assert_int(
+	    xtc_alrlock_create(sizeof(struct dict), apply_set, sync_dict,
+	        "a", &lr), ==, XTC_OK);
+
+	w = xtc_lrlock_write_begin(lr);
+	munit_assert_not_null(w);
+	xtc_lrlock_apply_op(lr, &s, sizeof s);
+	xtc_lrlock_publish(lr);        /* fiber-aware wait when in a fiber */
+	xtc_lrlock_write_end(lr);
+
+	rd = xtc_lrlock_read_begin(lr);
+	munit_assert_not_null(rd);
+	munit_assert_int(rd->n, ==, 1);
+	munit_assert_int(rd->items[0].value, ==, 42);
+	xtc_lrlock_read_end(lr);
+
+	xtc_lrlock_destroy(lr);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/lrlock_basic",      test_lrlock_basic,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lrlock_concurrent", test_lrlock_concurrent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -481,6 +512,7 @@ static MunitTest tests[] = {
 	{ "/lrlock_cow_concurrent", test_lrlock_cow_concurrent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lrlock_oplog_grow", test_lrlock_oplog_grow, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lrlock_max_readers", test_lrlock_max_readers, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/alrlock_alias", test_alrlock_alias, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lrlock_thread_churn", test_lrlock_thread_churn, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

@@ -25,6 +25,8 @@
 #include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_inject.h"
 #include "xtc_lrlock.h"
+#include "coro_int.h"      /* __xtc_current_task: fiber-aware publish wait */
+#include "xtc_async.h"     /* xtc_yield */
 
 #include <pthread.h>
 #include <sched.h>
@@ -301,6 +303,16 @@ __wait_for_readers(xtc_lrlock_t *lr)
 		if (XTC_LIKELY(spin < XTC_LRLOCK_SPIN_LIMIT)) {
 			spin++;
 			__os_cpu_relax();      /* x86 PAUSE / ARM YIELD / barrier */
+		} else if (__xtc_current_task() != NULL) {
+			/* Fiber-aware publish wait (the xtc_alrlock contract):
+			 * a writer running inside a fiber yields the FIBER back
+			 * to its loop rather than the OS thread, so the reader
+			 * fibers that must advance their epoch actually get to
+			 * run and the loop keeps serving everyone else.  Purely
+			 * additive and gated on fiber context; a writer on a
+			 * plain OS thread keeps the sched_yield path below, so
+			 * production (non-fiber) behavior is byte-identical. */
+			xtc_yield();
 		} else {
 			(void)sched_yield();
 		}
@@ -428,6 +440,23 @@ fail:
 	if (lr->name) __os_free(lr->name);
 	__os_free(lr);
 	return rc;
+}
+
+/* Fiber-aware aliases.  The left-right lock's only wait -- the writer's
+ * publish -- is already fiber-aware (see __wait_for_readers), so these
+ * are exact aliases that let a fiber-based consumer express intent. */
+int
+xtc_alrlock_create(size_t data_size, xtc_lrlock_apply_fn apply_fn,
+                   xtc_lrlock_sync_fn sync_fn, const char *name,
+                   xtc_lrlock_t **out)
+{
+	return xtc_lrlock_create(data_size, apply_fn, sync_fn, name, out);
+}
+
+int
+xtc_alrlock_create_ex(const xtc_lrlock_opts_t *opts, xtc_lrlock_t **out)
+{
+	return xtc_lrlock_create_ex(opts, out);
 }
 
 void

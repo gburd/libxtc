@@ -290,6 +290,13 @@ tables, schema caches, and routing tables.
 `xtc_lrlock_t` admits writes from concurrent threads only via
 its single writer mutex; it is not lock-free for writers.
 
+When the writer runs inside a fiber, its publish wait yields the
+*fiber* back to the loop rather than spinning the OS thread, so reader
+fibers advance and the loop keeps serving other work.  This is
+automatic; the `xtc_alrlock_create` / `xtc_alrlock_create_ex` aliases
+name that fiber-awareness explicitly at the call site (an object created
+with either family works with either family's calls).
+
 ### `xtc_rcu_t`  --  read-copy-update with epoch reclamation
 
 Wait-free reads, copy-on-write for updates, deferred reclamation

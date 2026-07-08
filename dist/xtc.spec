@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.5.0"
+#       --define "version 1.6.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.5.0
+Version:        1.6.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,10 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Wed Jul 08 2026 Greg Burd <greg@burd.me> - 1.6.0-1
+- Fiber-aware left-right lock (xtc_alrlock_create/_ex); large docs-site expansion
+  (in-site API reference, Testing + Benchmarking sections, more diagrams).
+
 * Wed Jul 08 2026 Greg Burd <greg@burd.me> - 1.5.0-1
 - Documentation release: Jekyll docs site (GitHub + Codeberg Pages), tested-snippet
   release gate, CI link checker, hero styling + mermaid diagrams.  No code change.
