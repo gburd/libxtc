@@ -71,10 +71,12 @@ hold for all inputs -- a round-trip, an invariant, a contract -- and the
 framework generates hundreds of randomized cases and **shrinks** any
 failure to a minimal reproducer.
 
-libxtc uses [**Hegel**](https://github.com/gburd/hegel-c) (the maintainer's
-own property-based-testing library for C,
-[`hegel-c`](https://github.com/gburd/hegel-c)) as a first-class testing
-tool. The `test/pbt/` suite states properties across the layers:
+libxtc uses [**Hegel**](https://hegel.dev), a property-based-testing
+library based on [Hypothesis](https://github.com/hypothesisworks/hypothesis),
+as a first-class testing tool. The PBT suite links against the official
+C binding, [`hegel-c`](https://github.com/hegeldev/hegel-c), driven by
+the `hegel` protocol server. The `test/pbt/` suite states properties
+across the layers:
 
 - deque and run-queue: never lose or duplicate an item under random
   push/steal sequences;
@@ -87,7 +89,10 @@ tool. The `test/pbt/` suite states properties across the layers:
 - lrlock / lwlock / atomics / timers / slab / allocator: their core
   invariants under generated load.
 
-PBT is a build-time option (`--with-hegel`); the same test files compile
+PBT is a build-time option (`--with-hegel=PATH`, pointing at a built
+[`hegel-c`](https://github.com/hegeldev/hegel-c) tree; it links
+`libhegel` plus its `libcbor` and `zlib` dependencies and runs against
+the `hegel` server). The same test files compile
 to no-ops without it, so the suite is always present and turns on where
 Hegel is available. The commitment to PBT is recorded in
 [ADR 0002](https://codeberg.org/gregburd/libxtc/src/branch/main/docs/adr/0002-hegel-pbt-first-class.md).

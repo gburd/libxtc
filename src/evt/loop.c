@@ -46,7 +46,24 @@ __xtc_inbox_fini(struct xtc_inbox *ib)
 {
 	struct xtc_inbox_msg *m, *n;
 	if (!ib->inited) return;
-	for (m = ib->head; m != NULL; m = n) { n = m->next; __os_free(m); }
+	for (m = ib->head; m != NULL; m = n) {
+		n = m->next;
+		/* An undrained XTC_INB_PUBLISH carries a task that was spawned
+		 * cross-thread but never ran, so it was never linked into the
+		 * loop's all_tasks list and thus was NOT freed by xtc_loop_fini's
+		 * all_tasks walk.  Reclaim it here exactly as that walk does:
+		 * run its cleanup (the coroutine layer's callback releases the
+		 * fiber stack + coro struct) then free the task struct.  An
+		 * XTC_INB_WAKE, by contrast, references a task that IS already
+		 * tracked (parked, on all_tasks) and already freed, so we must
+		 * NOT touch its task here. */
+		if (m->kind == XTC_INB_PUBLISH && m->task != NULL) {
+			if (m->task->cleanup != NULL)
+				m->task->cleanup(m->task->cleanup_arg);
+			__os_free(m->task);
+		}
+		__os_free(m);
+	}
 	(void)__os_mutex_destroy(&ib->lock);
 	ib->head = ib->tail = NULL;
 	ib->inited = 0;

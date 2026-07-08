@@ -29,44 +29,42 @@ test is run STANDALONE and is NOT yet a gating test; root-causing the
 remaining deliveries is tracked.  The mask primitive itself is a real
 improvement and is kept.
 
-## xtc_exec_fini leaks cross-thread-spawned procs' task+coro (LSan)
+## xtc_exec_fini cross-thread-spawn teardown leak (LSan) -- largely fixed
 
-**Status:** open, pre-existing, edge-case.  Surfaced 2026-07 while adding
-the cross-thread idle-loop wake regression test (test/concurrency/
-repro_idle_uring_wake.c).
+**Status:** the primary path is FIXED; a small, timing-dependent
+residual remains only on abrupt mid-flight teardown.  Surfaced 2026-07
+via test/concurrency/repro_idle_uring_wake.c.
 
 **Symptom:** procs spawned CROSS-THREAD (xtc_proc_spawn from an OS thread
-that is not on the target loop) onto a service-mode executor, which run
-their body and xtc_exit_self cleanly, are not always fully reclaimed by
-xtc_exec_fini -- LeakSanitizer reports the task+coro (xtc_async ->
-__os_calloc, coro_uctx.c) as leaked at teardown.  A minimal 50-proc
-reproducer leaks ~half.
+that is not on the target loop) onto a service-mode executor that is
+stopped mid-flight (xtc_exec_stop while spawns are still in flight) were
+not fully reclaimed by xtc_exec_fini -- LeakSanitizer reported the
+task+coro (xtc_async -> __os_calloc, coro_uctx.c) as leaked.
 
-**Likely cause:** the cross-thread spawn path pushes an XTC_INB_PUBLISH
-message carrying a not-yet-run task into the target loop's MPSC inbox.
-__xtc_inbox_fini frees the message envelope but NOT the carried task /
-its coro; and the proc-table / task reaping on clean exit races the
-service-mode teardown so some exited procs' structures are still
-referenced from the inbox or run queue (not yet linked to all_tasks,
-which xtc_loop_fini does walk + free) when fini runs.
+**Fix applied:** __xtc_inbox_fini now, for each undrained
+XTC_INB_PUBLISH message, runs the carried task's cleanup (the coroutine
+layer's callback releases the fiber stack + coro struct) and frees the
+task -- exactly as xtc_loop_fini's all_tasks walk does for tasks that
+were drained.  An XTC_INB_WAKE references an already-tracked (and
+already-freed) task and is deliberately left untouched.  This eliminates
+the leak for procs left sitting in a loop's inbox at fini, which is the
+bulk of it: a normal drain-to-idle shutdown is fully leak-clean, and the
+whole ASan `make check` passes with detect_leaks=1.
 
-**Why it was not caught earlier:** (a) the leak is only visible with a
+**Residual:** on an *abrupt* xtc_exec_stop (workers halted while spawns
+are mid-flight), a small, run-to-run-variable number of procs whose task
+had been drained from the inbox into a loop's run queue but had not yet
+run -- and whose proc-control struct was therefore never bound/owned by
+__proc_entry -- can still leak.  This is the abnormal-teardown corner
+(production drain-to-idle does not hit it); the native reproducer stays
+standalone (not in the leak-gated make check set).  Root-causing the
+last run-queue case is tracked.
+
+**Why it was not caught earlier:** the leak is only visible with a
 WORKING LeakSanitizer -- GitHub's containerized CI runner restricts the
-ptrace LSan needs, so LSan silently no-ops there and the ASan job stays
-green; (b) it needs the specific cross-thread-spawn + abnormal (stop
-mid-flight) teardown shape, which no prior test exercised.  Production
-single-loop / drain-to-idle shutdown does not hit it.
-
-**Fix direction:** __xtc_inbox_fini should, for an undrained
-XTC_INB_PUBLISH, free the carried task via the same cleanup a drained
-PUBLISH uses (task + coro), and/or xtc_exec_fini should drain each loop's
-inbox + run queue and reap pending tasks before xtc_loop_fini.  Needs
-careful coro/task lifetime ordering; tracked, not yet done.
-
-**Guard:** the lost-wakeup guarantee the reproducer checks is covered
-leak-clean under DST by test/sim/test_sim_wake_park.c; the native
-reproducer is run standalone (not in the leak-checked make check set)
-until this teardown leak is fixed.
+ptrace LSan needs, so LSan silently no-ops there.  The lost-wakeup
+guarantee the reproducer checks is covered leak-clean under DST by
+test/sim/test_sim_wake_park.c.
 
 ## Platform runtime-verification status (1.x readiness, B2)
 

@@ -93,6 +93,7 @@ pbt_run_all(const char *suite_name, const pbt_entry_t *tests)
  * conditional ifdefs everywhere.
  */
 typedef int hegel_test_case;
+typedef struct hegel_generator hegel_generator;
 typedef void (*hegel_test_fn)(hegel_test_case *tc, void *user_data);
 typedef struct pbt_entry {
 	const char     *name;
@@ -118,17 +119,22 @@ pbt_run_all(const char *suite_name, const pbt_entry_t *tests)
 		return pbt_run_all((SUITE), (TESTS));			\
 	}
 
-/* Stub generators so files compile.  Bodies are unreachable. */
-static inline int hegel_draw_int(hegel_test_case *tc, void *gen)
+/* Stub generators so files compile.  Bodies are unreachable.  These
+ * mirror the official hegel-c signatures (int64_t draws, generators
+ * return hegel_generator *) so the same pbt_*.c compiles both ways. */
+#include <stdint.h>
+static inline int64_t hegel_draw_int(hegel_test_case *tc, hegel_generator *gen)
 	{ (void)tc; (void)gen; return 0; }
-static inline void *hegel_integers(long lo, long hi)
+static inline hegel_generator *hegel_integers(int64_t lo, int64_t hi)
 	{ (void)lo; (void)hi; return NULL; }
-static inline void *hegel_booleans(void)
+static inline hegel_generator *hegel_booleans(void)
 	{ return NULL; }
-static inline int hegel_draw_bool(hegel_test_case *tc, void *gen)
+static inline int hegel_draw_bool(hegel_test_case *tc, hegel_generator *gen)
 	{ (void)tc; (void)gen; return 0; }
 static inline void hegel_assume(int cond)
 	{ (void)cond; }
+static inline void hegel_generator_free(hegel_generator *gen)
+	{ (void)gen; }
 
 #endif /* XTC_HAVE_HEGEL */
 
