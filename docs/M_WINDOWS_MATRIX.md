@@ -1,3 +1,9 @@
+---
+title: Windows toolchain matrix
+parent: Reference
+nav_order: 12
+---
+
 # Windows build matrix
 
 xtc supports multiple Windows toolchains.  This document records

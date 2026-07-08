@@ -1,3 +1,9 @@
+---
+title: ABI stability
+parent: Reference
+nav_order: 6
+---
+
 # ABI Stability and Deprecation Policy
 
 This document is the **contract** xtc makes with its users about

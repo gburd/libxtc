@@ -1,3 +1,9 @@
+---
+title: Locks and synchronization
+parent: Reference
+nav_order: 4
+---
+
 # Locks and synchronization in libxtc
 
 This reference documents every locking and synchronization
