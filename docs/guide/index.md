@@ -3,20 +3,19 @@ title: Guide
 nav_order: 2
 has_children: true
 permalink: /guide/
+lede: >-
+  Read in order the first time: from your first coroutine to a supervised, multi-core, message-passing program.
 ---
-
-# Guide
-
 The guide is written to be read in order the first time. It walks from
 your first coroutine to a supervised, multi-core, message-passing
 program, explaining the model as it goes and calling out the
 alternatives that were considered and set aside.
 
-- [1. Getting started](01-getting-started)
-- [2. Fibers and the event loop](02-fibers-and-the-loop)
-- [3. Processes and messages](03-processes-and-messages)
-- [4. Links, monitors, and supervisors](04-supervision)
-- [5. Blocking work and I/O](05-blocking-and-io)
-- [Thinking in libxtc](transitioning) -- the mental shifts and
+- [1. Getting started]({{ '/guide/01-getting-started/' | relative_url }})
+- [2. Fibers and the event loop]({{ '/guide/02-fibers-and-the-loop/' | relative_url }})
+- [3. Processes and messages]({{ '/guide/03-processes-and-messages/' | relative_url }})
+- [4. Links, monitors, and supervisors]({{ '/guide/04-supervision/' | relative_url }})
+- [5. Blocking work and I/O]({{ '/guide/05-blocking-and-io/' | relative_url }})
+- [Thinking in libxtc]({{ '/guide/transitioning/' | relative_url }}) -- the mental shifts and
   anti-patterns
-- [Debugging and observing](debugging)
+- [Debugging and observing]({{ '/guide/debugging/' | relative_url }})

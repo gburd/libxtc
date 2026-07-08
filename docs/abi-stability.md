@@ -2,13 +2,13 @@
 title: ABI stability
 parent: Reference
 nav_order: 6
+lede: >-
+  What stays fixed across releases, and the deprecation policy.
+permalink: /reference/abi-stability/
 ---
-
-# ABI Stability and Deprecation Policy
-
 This document is the **contract** xtc makes with its users about
 what changes between releases and what doesn't.  The full rationale
-is in [`../PLAN.md`](../PLAN.md) (S)18; this is the operational summary.
+is in [`../PLAN.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) (S)18; this is the operational summary.
 
 ## SemVer with explicit ABI promise
 
@@ -161,7 +161,7 @@ We commit (informally for now, formally once we hit 1.0):
 
 ## See also
 
-- [`../PLAN.md`](../PLAN.md) (S)18 -- full longevity discussion.
+- [`../PLAN.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) (S)18 -- full longevity discussion.
 - [`adr/`](adr/) -- architecture decision records.
-- [`../M0_CLAIMS.md`](../M0_CLAIMS.md) [D3] -- the test that asserts
+- [`../M0_CLAIMS.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) [D3] -- the test that asserts
   this document covers SemVer + the five-stage deprecation cycle.

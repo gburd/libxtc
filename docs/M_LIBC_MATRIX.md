@@ -2,10 +2,10 @@
 title: libc matrix
 parent: Reference
 nav_order: 13
+lede: >-
+  Supported libc implementations and their quirks.
+permalink: /reference/libc-matrix/
 ---
-
-# libc matrix
-
 xtc is C11.  The OS layer (m0/m1) is portable across libc
 implementations; the higher layers depend on POSIX-extension surface
 area that varies.  This document records what's been verified.
@@ -80,7 +80,7 @@ suite passes and is ASan/UBSan clean on the forced fcontext build,
 matching the ucontext build exactly.
 
 Estimated effort: 1-2 days.  Tracked in
-[PLAN.md](../PLAN.md) under the libc-matrix work item.  Not
+[PLAN.md](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) under the libc-matrix work item.  Not
 blocking any user shipping libxtc on glibc / FreeBSD / illumos
 hosts (the entire production target set so far).
 

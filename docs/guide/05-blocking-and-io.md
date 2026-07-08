@@ -2,12 +2,10 @@
 title: Blocking work and I/O
 parent: Guide
 nav_order: 5
-permalink: /guide/05-blocking-and-io
+permalink: /guide/05-blocking-and-io/
+lede: >-
+  Files, sockets, timers, and blocking C libraries -- without ever stalling the loop.
 ---
-
-# Blocking work and I/O
-{: .no_toc }
-
 1. TOC
 {:toc}
 
@@ -26,7 +24,7 @@ For sockets and timers, libxtc suspends the fiber and lets the OS poller
 wake it. You do not manage readiness yourself:
 
 - **Timers:** `xtc_proc_sleep(ns)` parks the fiber; the loop wakes it
-  when the timer fires (see [chapter 2](02-fibers-and-the-loop)).
+  when the timer fires (see [chapter 2]({{ '/guide/02-fibers-and-the-loop/' | relative_url }})).
 - **Sockets:** the `xtc_net_*` API
   ([`xtc_net(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_net.3))
   does non-blocking connect / accept / read / write and suspends the
@@ -117,10 +115,10 @@ the `test/sim/` suite and the deterministic-testing notes.
 
 That completes the guide. For the mental-model shift from
 threads-and-locks thinking, read
-[Thinking in libxtc](transitioning); to see it all assembled into real
-programs, read the [Examples](../examples/).
+[Thinking in libxtc]({{ '/guide/transitioning/' | relative_url }}); to see it all assembled into real
+programs, read the [Examples]({{ '/examples/' | relative_url }}).
 
 ---
 
-&larr; [Links, monitors, and supervisors](04-supervision) &middot;
-Next: [Thinking in libxtc](transitioning) &rarr;
+&larr; [Links, monitors, and supervisors]({{ '/guide/04-supervision/' | relative_url }}) &middot;
+Next: [Thinking in libxtc]({{ '/guide/transitioning/' | relative_url }}) &rarr;

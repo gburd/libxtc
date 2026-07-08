@@ -2,10 +2,10 @@
 title: PostgreSQL adapter (design)
 parent: Reference
 nav_order: 20
+lede: >-
+  How a threaded PostgreSQL would sit on the libxtc runtime.
+permalink: /reference/pg-adapter/
 ---
-
-# M16 -- PostgreSQL adapter (design sketch)
-
 **Status:** research; not yet implemented.  This document defines the
 contract between xtc and a future threaded PostgreSQL backend, the
 phased path to land it, and the integration risks.

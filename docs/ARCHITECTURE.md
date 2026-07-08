@@ -2,17 +2,29 @@
 title: Architecture
 parent: Reference
 nav_order: 2
+lede: >-
+  The layer model, L0 through L5, and what each layer owns.
+permalink: /reference/architecture/
 ---
-
-# Architecture
-
-This document is the short reference for the xtc layering.  The
-authoritative long-form design is in [`../PLAN.md`](../PLAN.md);
-read that for rationale, alternatives considered, and open
-questions.  This document is what you read when you want a
-five-minute orientation.
+This document is the short reference for the xtc layering.  It is what
+you read when you want a five-minute orientation; the per-layer man
+pages ([`xtc(7)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man7/xtc.7)
+and the `xtc_*(3)` pages) are the detail.
 
 ## The six layers
+
+```mermaid
+flowchart TD
+    APP(["your program"]) --> L5
+    L5["L5  pg/ &mdash; PostgreSQL adapter (design)"] --> L4
+    L4["L4  orc/ &mdash; supervisors, gen_server, app, registry"] --> L3
+    L3["L3  ptc/ &mdash; processes, mailboxes, channels, locks, RCU"] --> L2
+    L2["L2  evt/ &mdash; event loop, run queue, work-stealing, fibers, timers"] --> L1
+    L1["L1  io/ &mdash; io_uring / epoll / kqueue / IOCP / poll, async file+socket"] --> L0
+    L0["L0  os/ &mdash; alloc, atomics, time, threads, mutex, TLS, signals"]
+```
+
+The same layering in full detail:
 
 ```
 +---------------------------------------------------------------------+
@@ -49,10 +61,10 @@ binary under `test/`.
 
 ## Reading order for new contributors
 
-1. [`../PLAN.md`](../PLAN.md) (S)0 -- guiding principles.
-2. [`../PLAN.md`](../PLAN.md) (S)2 -- the six layers in detail.
-3. [`../PLAN.md`](../PLAN.md) (S)14 -- the worked SQL-query example.
-4. [`abi-stability.md`](abi-stability.md) -- the longevity contract.
+1. [`../PLAN.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) (S)0 -- guiding principles.
+2. [`../PLAN.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) (S)2 -- the six layers in detail.
+3. [`../PLAN.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) (S)14 -- the worked SQL-query example.
+4. [`abi-stability.md`]({{ '/reference/abi-stability/' | relative_url }}) -- the longevity contract.
 5. The current milestone's `M*_CLAIMS.md`.
 
 ## Key design choices (with links into the plan)

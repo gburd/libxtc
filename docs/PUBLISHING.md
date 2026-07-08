@@ -43,7 +43,7 @@ When adding a new user-facing guide:
   1. Write it as `docs/<name>.md` with a leading `# Heading`.
   2. Add the path to the `INPUT` list in `docs/Doxyfile`.
   3. Cross-link other guides with relative `.md` paths
-     (`[architecture](ARCHITECTURE.md)`); Doxygen rewrites these to
+     (`[architecture]({{ '/reference/architecture/' | relative_url }})`); Doxygen rewrites these to
      the generated page.
 
 ## Warning backlog

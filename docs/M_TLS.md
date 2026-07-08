@@ -2,10 +2,10 @@
 title: TLS support
 parent: Reference
 nav_order: 10
+lede: >-
+  The Transport Layer Security design and backend strategy.
+permalink: /reference/tls/
 ---
-
-# M_TLS -- Transport Layer Security design
-
 **Status:** implemented.  TLS 1.2/1.3 over `xtc_io` sockets with the
 same async, single-threaded event-loop discipline as the rest of xtc.
 A single internal `xtc_tls` seam fronts several configure-time-selected

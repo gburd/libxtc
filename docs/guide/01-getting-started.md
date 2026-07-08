@@ -2,12 +2,10 @@
 title: Getting started
 parent: Guide
 nav_order: 1
-permalink: /guide/01-getting-started
+permalink: /guide/01-getting-started/
+lede: >-
+  From an empty directory to a running libxtc program -- and every line of it explained.
 ---
-
-# Getting started
-{: .no_toc }
-
 1. TOC
 {:toc}
 
@@ -38,14 +36,14 @@ sudo make install          # libxtc.a, headers, and man pages
 
 There is also a single-file **amalgamation** (`xtc.c` + `xtc.h`) for
 dropping the whole library into another build with no configure step;
-see [Architecture](../ARCHITECTURE) for when to prefer it.
+see [Architecture]({{ '/reference/architecture/' | relative_url }}) for when to prefer it.
 
 {: .note }
 > If `make check` reports a failure in `test_io_lifecycle` about
 > `xtc_io_init` on a machine with a low `ulimit -l`, configure with
 > `--with-io-backend=epoll` -- that is a memlock-limit quirk of
 > io_uring on the host, not a library fault. See
-> [Known issues](../KNOWN_ISSUES).
+> [Known issues]({{ '/reference/known-issues/' | relative_url }}).
 
 ## Your first coroutine
 
@@ -101,7 +99,7 @@ reads the `intptr_t` the coroutine returned.
 > between fibers is a function call plus a register swap -- no syscall.
 > That is what lets a single loop hold hundreds of thousands of
 > concurrent activities. Chapter
-> [Fibers and the event loop](02-fibers-and-the-loop) measures the
+> [Fibers and the event loop]({{ '/guide/02-fibers-and-the-loop/' | relative_url }}) measures the
 > difference.
 
 {: .not_chosen }
@@ -113,17 +111,17 @@ reads the `intptr_t` the coroutine returned.
 > the variables on the stack; you pay a small per-fiber memory cost
 > instead of a large readability cost. Where you genuinely want an
 > explicit state machine, libxtc still offers one -- see the
-> [tnt example](../examples/) -- but it is opt-in, not the default.
+> [tnt example]({{ '/examples/' | relative_url }}) -- but it is opt-in, not the default.
 
 ## The shape of every libxtc program
 
 Nearly every program follows the same skeleton:
 
 1. **Create** a loop (or, for the multi-core case, an *executor* of
-   several loops -- see [Blocking work and I/O](05-blocking-and-io)).
+   several loops -- see [Blocking work and I/O]({{ '/guide/05-blocking-and-io/' | relative_url }})).
 2. **Spawn** the initial work with `xtc_async` (for a bare coroutine) or
    `xtc_proc_spawn` (for a supervised, message-passing process --
-   [Processes and messages](03-processes-and-messages)).
+   [Processes and messages]({{ '/guide/03-processes-and-messages/' | relative_url }})).
 3. **Run** the loop.
 4. **Tear down** with `xtc_loop_fini`.
 
@@ -133,4 +131,4 @@ computed value.
 
 ---
 
-Next: [Fibers and the event loop](02-fibers-and-the-loop) &rarr;
+Next: [Fibers and the event loop]({{ '/guide/02-fibers-and-the-loop/' | relative_url }}) &rarr;

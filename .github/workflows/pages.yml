@@ -68,8 +68,38 @@ jobs:
         with:
           path: docs/_site
 
-  deploy:
+  link-check:
+    # Documentation link checker: build the site and verify every link
+    # (internal cross-links, anchors, and external URLs) resolves.
+    # Broken links block the deploy.
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          working-directory: docs
+          bundler-cache: true
+
+      - name: Build Jekyll site
+        working-directory: docs
+        run: bundle exec jekyll build --destination _site
+
+      - name: Check links with lychee
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --config docs/lychee.toml
+            --no-progress
+            docs/_site/**/*.html
+            README.md
+          fail: true
+
+  deploy:
+    needs: [build, link-check]
     runs-on: ubuntu-latest
     environment:
       name: github-pages

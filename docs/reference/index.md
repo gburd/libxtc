@@ -3,15 +3,14 @@ title: Reference
 nav_order: 3
 has_children: true
 permalink: /reference/
+lede: >-
+  Reference material to use after the guide.
 ---
+Reference material to use after the [Guide]({{ '/guide/' | relative_url }}):
 
-# Reference
-
-Reference material to use after the [Guide](../guide/):
-
-- [Architecture and the layer model](../ARCHITECTURE)
-- [The public API](../API)
-- [Locks and synchronization](../locks)
-- [Manual pages](man-pages)
-- [ABI stability](../abi-stability)
-- [Known issues](../KNOWN_ISSUES)
+- [Architecture and the layer model]({{ '/reference/architecture/' | relative_url }})
+- [The public API]({{ '/reference/api/' | relative_url }})
+- [Locks and synchronization]({{ '/reference/locks/' | relative_url }})
+- [Manual pages]({{ '/reference/man-pages/' | relative_url }})
+- [ABI stability]({{ '/reference/abi-stability/' | relative_url }})
+- [Known issues]({{ '/reference/known-issues/' | relative_url }})

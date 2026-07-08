@@ -2,18 +2,16 @@
 title: Fibers and the event loop
 parent: Guide
 nav_order: 2
-permalink: /guide/02-fibers-and-the-loop
+permalink: /guide/02-fibers-and-the-loop/
+lede: >-
+  What a fiber really is, how the loop schedules it, and why a fiber is not a thread.
 ---
-
-# Fibers and the event loop
-{: .no_toc }
-
 1. TOC
 {:toc}
 
 ---
 
-In [Getting started](01-getting-started) you ran a coroutine that
+In [Getting started]({{ '/guide/01-getting-started/' | relative_url }}) you ran a coroutine that
 yielded once and returned a value. This chapter explains what a fiber
 *is*, how the loop schedules it, and how to suspend on real work (a
 timer, I/O) instead of a bare `xtc_yield`.
@@ -43,11 +41,24 @@ interleave hundreds of thousands of fibers.
 > slower. libxtc ships assembly for x86-64, AArch64, ppc64le, riscv64,
 > arm, s390x, and sparc64, and falls back to `ucontext` (and Win32
 > fibers on Windows) only where it must. See
-> [Architecture](../ARCHITECTURE) for the substrate matrix.
+> [Architecture]({{ '/reference/architecture/' | relative_url }}) for the substrate matrix.
 
 ## The loop's job
 
 `xtc_loop_run` is a scheduler. Its cycle is:
+
+```mermaid
+flowchart TD
+    A["run queue<br/>has a ready fiber?"] -->|yes| B["switch into fiber"]
+    B --> C{"fiber<br/>suspends or<br/>finishes?"}
+    C -->|suspends: yield / await / recv| A
+    C -->|finishes| A
+    A -->|no| D{"anything parked<br/>on I/O or timers?"}
+    D -->|yes| E["ask the OS poller<br/>(io_uring / epoll /<br/>kqueue / IOCP)<br/>wait for the next event"]
+    E --> F["wake the fiber<br/>the event belongs to"]
+    F --> A
+    D -->|no| G(["return from<br/>xtc_loop_run"])
+```
 
 1. Pop a ready fiber from the run queue and switch into it.
 2. The fiber runs until it *suspends* (yields, awaits I/O, receives a
@@ -73,7 +84,7 @@ nanoseconds while the loop keeps running everything else.
 > ordinary thread code; `xtc_proc_sleep` is the fiber-friendly form.
 > This distinction -- a blocking call vs. a suspending call -- is the
 > single most important habit in libxtc, and
-> [Blocking work and I/O](05-blocking-and-io) is entirely about it.
+> [Blocking work and I/O]({{ '/guide/05-blocking-and-io/' | relative_url }}) is entirely about it.
 
 ## Awaiting a value across fibers
 
@@ -94,9 +105,9 @@ fan work out and join it back without threads or callbacks.
 
 The bare coroutine is the foundation. The next layer up gives each unit
 of work an identity and a mailbox, so units can be addressed and can
-fail independently: [processes](03-processes-and-messages).
+fail independently: [processes]({{ '/guide/03-processes-and-messages/' | relative_url }}).
 
 ---
 
-&larr; [Getting started](01-getting-started) &middot;
-Next: [Processes and messages](03-processes-and-messages) &rarr;
+&larr; [Getting started]({{ '/guide/01-getting-started/' | relative_url }}) &middot;
+Next: [Processes and messages]({{ '/guide/03-processes-and-messages/' | relative_url }}) &rarr;
