@@ -38,14 +38,14 @@ PostgreSQL source.
 ```mermaid
 flowchart TD
     subgraph PG["PostgreSQL"]
-        PM1["postmaster"] -->|fork()| B1["backend process 1"]
-        PM1 -->|fork()| B2["backend process 2"]
-        B1 -.WaitLatchOrSocket.-> OS1["OS process wait"]
+        PM1["postmaster"] -->|"fork()"| B1["backend process 1"]
+        PM1 -->|"fork()"| B2["backend process 2"]
+        B1 -.->|WaitLatchOrSocket| OS1["OS process wait"]
     end
     subgraph pgmock["pgmock on libxtc"]
         PM2["postmaster proc"] -->|xtc_proc_spawn| BX1["backend proc 1"]
         PM2 -->|xtc_proc_spawn| BX2["backend proc 2"]
-        BX1 -.xtc_proc_wait_fd.-> LOOP["one loop, many procs"]
+        BX1 -.->|xtc_proc_wait_fd| LOOP["one loop, many procs"]
     end
 ```
 

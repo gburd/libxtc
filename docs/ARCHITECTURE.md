@@ -3,104 +3,125 @@ title: Architecture
 parent: Reference
 nav_order: 2
 lede: >-
-  The layer model, L0 through L5, and what each layer owns.
+  The layer model, L0 through L4, and what each layer owns.
 permalink: /reference/architecture/
 ---
-This document is the short reference for the xtc layering.  It is what
-you read when you want a five-minute orientation; the per-layer man
-pages ([`xtc(7)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man7/xtc.7)
-and the `xtc_*(3)` pages) are the detail.
 
-## The six layers
+1. TOC
+{:toc}
+
+---
+
+This is the short reference for the libxtc layering -- a five-minute
+orientation. The per-layer man pages
+([`xtc(7)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man7/xtc.7)
+and the [API reference]({{ '/reference/api/' | relative_url }})) are the
+detail. libxtc is built in strict layers: each layer knows only the ones
+below it, has its own internal header, its own subdirectory under
+`src/`, and its own test binary under `test/`.
+
+## The five layers
 
 ```mermaid
 flowchart TD
-    APP(["your program"]) --> L5
-    L5["L5  pg/ &mdash; PostgreSQL adapter (design)"] --> L4
-    L4["L4  orc/ &mdash; supervisors, gen_server, app, registry"] --> L3
-    L3["L3  ptc/ &mdash; processes, mailboxes, channels, locks, RCU"] --> L2
-    L2["L2  evt/ &mdash; event loop, run queue, work-stealing, fibers, timers"] --> L1
-    L1["L1  io/ &mdash; io_uring / epoll / kqueue / IOCP / poll, async file+socket"] --> L0
-    L0["L0  os/ &mdash; alloc, atomics, time, threads, mutex, TLS, signals"]
+    APP(["your program"]):::app --> L4
+    L4["<b>L4 &nbsp;orc/</b><br/>orchestration"]:::layer --> L3
+    L3["<b>L3 &nbsp;ptc/</b><br/>processes, channels, locks"]:::layer --> L2
+    L2["<b>L2 &nbsp;evt/</b><br/>event loop, fibers, executor"]:::layer --> L1
+    L1["<b>L1 &nbsp;io/</b><br/>pollable I/O + async file/socket"]:::layer --> L0
+    L0["<b>L0 &nbsp;os/</b><br/>OS substrate (__os_*)"]:::base
+    classDef app fill:#dfe9ff,stroke:#4066c0,stroke-width:2px;
+    classDef layer fill:#eef4ff,stroke:#4066c0;
+    classDef base fill:#e6f6ec,stroke:#2e9e57,stroke-width:2px;
 ```
 
-The same layering in full detail:
+Lower layers know nothing of upper layers. A program links the whole
+stack but writes to whichever layer it needs -- most use L3/L4 (processes
+and supervisors); a few reach down to L2 (bare fibers and the loop).
 
+## What each layer owns, in detail
+
+```mermaid
+flowchart TD
+    subgraph L4["L4 &mdash; orc/ &mdash; orchestration"]
+        direction LR
+        A4["supervisors<br/>(4 strategies)"]
+        B4["xtc_svr<br/>(gen_server)"]
+        C4["xtc_app<br/>(lifecycle)"]
+        D4["xtc_reg<br/>(registry)"]
+        E4["tnt<br/>(Isolate layer)"]
+    end
+    subgraph L3["L3 &mdash; ptc/ &mdash; processes, threads, channels"]
+        direction LR
+        A3["PIDs, mailboxes,<br/>selective receive"]
+        B3["links + monitors"]
+        C3["channels,<br/>dispatch/reply"]
+        D3["locks: RCU, lwlock,<br/>lrlock, lock mgr"]
+        E3["log, cfg,<br/>observability,<br/>blocking contract"]
+    end
+    subgraph L2["L2 &mdash; evt/ &mdash; event runtime"]
+        direction LR
+        A2["per-thread reactor,<br/>run queue"]
+        B2["work-stealing deque,<br/>executor"]
+        C2["task lifecycle,<br/>wakers, timer wheel"]
+        D2["coroutine substrate<br/>(fcontext + protothreads)"]
+    end
+    subgraph L1["L1 &mdash; io/ &mdash; pollable I/O"]
+        direction LR
+        A1["io_uring / epoll /<br/>kqueue / IOCP /<br/>event ports / poll"]
+        B1["async file, socket,<br/>timer registration"]
+    end
+    subgraph L0["L0 &mdash; os/ &mdash; OS substrate (__os_*)"]
+        direction LR
+        A0["threads, mutex,<br/>atomics, TLS"]
+        B0["time, files, shm,<br/>mmap, signals"]
+        C0["allocator hook,<br/>CPU/NUMA topology"]
+        D0["errno -> xtc_err,<br/>rng, env, dlopen"]
+    end
+    L4 --> L3 --> L2 --> L1 --> L0
+    classDef grp fill:#eef4ff,stroke:#4066c0;
 ```
-+---------------------------------------------------------------------+
-| L5  pg/   PostgreSQL adapter (subsumes src/backend/storage/aio,     |
-|           latch, signal/CFI, MemoryContext, GUC bridge)             |
-+---------------------------------------------------------------------+
-| L4  orc/  Orchestration: supervisors, xtc_svr (gen_server),         |
-|           xtc_fsm (gen_statem), xtc_app, xtc_reg                    |
-+---------------------------------------------------------------------+
-| L3  ptc/  Processes / Threads / Channels: PIDs, mailboxes (with     |
-|           selective receive), links, monitors, channels, futures,   |
-|           sync primitives (incl. RCU, LRLock, LWLock, lock mgr),    |
-|           dispatch()/reply(), async()/await(), xtc_yield(),         |
-|           xtc_log, xtc_cfg, observability, blocking-call contract,  |
-|           hooks framework                                           |
-+---------------------------------------------------------------------+
-| L2  evt/  Event loop: per-thread reactor, run queues, work-         |
-|           stealing deque, task lifecycle, wakers, timer wheel,      |
-|           coroutine substrate (fiber + Duff's-device)               |
-+---------------------------------------------------------------------+
-| L1  io/   Pollable I/O abstraction: epoll/kqueue/IOCP/io_uring/     |
-|           poll wrapper, async file/socket/timer registration        |
-+---------------------------------------------------------------------+
-| L0  os/   __os_*: threads, processes, shm, mmap, mutex, atomics,    |
-|           time, file ops, signals, errno -> xtc_err mapping,        |
-|           allocator hook, TLS, CPU/NUMA topology, dynamic loading,  |
-|           rng, locale, env, dlerror, getopt_long                    |
-+---------------------------------------------------------------------+
-```
 
-Lower layers know nothing of upper layers.  Each layer has its own
-internal header, its own subdirectory under `src/`, and its own test
-binary under `test/`.
+## Key design choices
 
-## Reading order for new contributors
-
-1. [`../PLAN.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) (S)0 -- guiding principles.
-2. [`../PLAN.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) (S)2 -- the six layers in detail.
-3. [`../PLAN.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) (S)14 -- the worked SQL-query example.
-4. [`abi-stability.md`]({{ '/reference/abi-stability/' | relative_url }}) -- the longevity contract.
-5. The current milestone's `M*_CLAIMS.md`.
-
-## Key design choices (with links into the plan)
-
-- **Shared-nothing reactors by default; cross-loop only by explicit
-  channel/mailbox/shared-buffer handle.**  See PLAN.md (S)0.2, (S)2.3.
-- **Configure-time backend selection, never runtime.**  No vtable
-  on the hot path.  See PLAN.md (S)0.7, (S)2.2.
-- **C11 dialect.**  PG18 raised the floor; PG19 inherits.  See
-  PLAN.md (S)0.9.
-- **Graceful degradation to single-thread + `poll(2)` + Duff's-
-  device protothreads** when the platform is too constrained for
-  fibers and async I/O.  See PLAN.md (S)3.6.
-- **BDB/DBSQL conventions throughout** -- `__os_*`, `__xtc_*`,
-  `xtc_*`, `XTC_E_*`, `PUBLIC:` markers, `dist/s_*` generators,
-  out-of-source build enforced.  See PLAN.md (S)8.
-- **Test-first, claim-driven.**  Every claim in code or
-  documentation has a test.  See `M*_CLAIMS.md` per milestone.
-- **Mechanical change as doctrine.**  Structural change goes
-  through `dist/s_*` generators.  See PLAN.md (S)18.3.
+- **Shared-nothing reactors by default.** Cross-loop communication is
+  only ever explicit -- a channel, a mailbox, or a shared-buffer handle.
+  There is no implicit shared mutable state between loops.
+- **Configure-time backend selection, never runtime.** The I/O backend
+  and coroutine substrate are chosen when you build, so there is no
+  vtable dispatch on the hot path.
+- **C11 dialect**, portable across Linux, the BSDs, macOS, illumos, and
+  Windows.
+- **Graceful degradation** to single-thread + `poll(2)` +
+  Duff's-device protothreads when a platform is too constrained for
+  fibers and async I/O.
+- **[BDB](https://github.com/berkeleydb/libdb) conventions throughout**
+  -- the `__os_*` OS-abstraction wrappers, the `__xtc_*` / `xtc_*` /
+  `XTC_E_*` naming, `PUBLIC:` markers, the `dist/s_*` mechanical
+  generators, and an enforced out-of-source build -- a discipline
+  borrowed from Berkeley DB, where it kept a large C codebase portable
+  and reviewable for decades.
+- **Test-first, claim-driven.** Every claim in code or documentation has
+  a test; see [Testing]({{ '/testing/' | relative_url }}).
+- **Mechanical change as doctrine.** Structural edits (the public-symbol
+  extern lists, the amalgamation) go through the `dist/s_*` generators
+  rather than by hand.
 
 ## Module status
 
 | Layer | Status |
 |---|---|
-| L0 `os/` | **M1 complete** for the core six modules (alloc, atomic, time, thread, tls, mutex/rwlock/cond/sem) + M5.5 NUMA topology probe + Windows-aware `_aligned_*` and `GetSystemInfo`. Remaining modules (signals, dynamic loading, network, files, dirs, shm, proc, cpu-extras, rng, env, locale, errno, getopt) land in M1.5+. |
-| L1 `io/` | **M2 + M6 complete** -- `xtc_io` with poll/epoll/io_uring/kqueue tested green on Linux+FreeBSD; **illumos `port_*` event ports complete (132/132 tests pass)**; **Windows IOCP round-1 with `PostQueuedCompletionStatus` wakeup + `WSAEventSelect` readiness emulation (30/35 tests pass)**; AIX `pollset_*` stub awaiting host. |
-| L2 `evt/` | **M3 single-thread + M4 coroutines + M4.5 fcontext asm + M5 multi-loop + M5.5 NUMA-aware steal complete + Windows fiber substrate (`coro_winfiber.c`)** -- `xtc_loop` driving the run queue, min-heap timer, task / waker / park-on-{timer,fd}; stackful fibers (ucontext on POSIX, Win32 fibers on Windows); `async()`/`await()`/`xtc_yield()`, `XTC_COOP_REGION` marker, header-only protothreads; `xtc_exec` multi-loop executor with Chase-Lev work-stealing deque, MPSC inbox, cross-thread wakers; per-arch fcontext asm at ~7 ns/swap. |
-| L3 `ptc/` | **M7 + M7.5 channels (oneshot/mpsc/mpmc/watch/broadcast) + xtc_res governance + M8 processes/mailboxes/links/monitors/`xtc_exit_pid` + M9 + M9.5 sync + M11 xtc_mctx + M13a xtc_rcu + M13b xtc_lrlock + M13c xtc_lockmgr (full 9-mode BDB-parity: configurable matrix, lock-vec, upgrade/downgrade, 8 victim policies, per-locker timeouts, statistics, failchk, slab pool)**. |
-| L4 `orc/` | **M10 supervisor (4 strategies + restart intensity) + M10.5 xtc_reg (process registry) + xtc_svr (gen_server) + xtc_app (root sup + lifecycle)** complete. |
-| L5 `pg/` | not started (M16). |
+| L0 `os/` | Complete: hookable allocator (BDB out-parameter convention), atomics, monotonic + wall clock, threads / TLS / mutex / rwlock / cond / sem, signals, files, shm, NUMA topology, and the rest of the OS substrate. |
+| L1 `io/` | Complete: `xtc_io` over io_uring / epoll / poll / select (Linux), kqueue (BSD, macOS), event ports (illumos), IOCP (Windows); async file and socket registration; AIX `pollset` compiled, awaiting a host. |
+| L2 `evt/` | Complete: `xtc_loop` (run queue, timer wheel, task / waker / park); stackful fibers (hand-written `fcontext` asm on the common arches, `ucontext` fallback, Win32 fibers on Windows) plus header-only protothreads; `async` / `await` / `xtc_yield`; `xtc_exec` multi-loop work-stealing executor. |
+| L3 `ptc/` | Complete: channels (oneshot / mpsc / mpmc / watch / broadcast); processes, mailboxes with selective receive, links and monitors; sync primitives; `xtc_mctx`; RCU; left-right locks; and a full nine-mode lock manager with deadlock detection, victim policies, and per-locker timeouts. |
+| L4 `orc/` | Complete: supervisor (4 strategies + restart intensity), process registry, `xtc_svr` gen_server, `xtc_app` lifecycle, and the optional [Isolate layer]({{ '/tnt/' | relative_url }}). |
 
-M1 lands the building blocks that everything else depends on:
-8 cycle-counted hot-path atomic primitives (load/store/CAS/fetch_add
-for four widths plus pointer), a hookable allocator with the BDB
-out-parameter convention, monotonic + wall clock, threads / TLS /
-mutex / rwlock / cond / sem.  The full surface is documented in
-`man3/__os_*.3` and asserted by the M1 test suite
-.Pq see Pa M1_CLAIMS.md .
+## Reading order for a new contributor
+
+1. This page, for the layer map.
+2. The [Guide]({{ '/guide/' | relative_url }}), read in order.
+3. [ABI stability]({{ '/reference/abi-stability/' | relative_url }}) --
+   the longevity contract.
+4. The [API reference]({{ '/reference/api/' | relative_url }}) for the
+   layer you are working in.

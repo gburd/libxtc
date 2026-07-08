@@ -31,8 +31,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Doxygen
-        run: sudo apt-get update && sudo apt-get install -y doxygen
+      - name: Install Doxygen + mandoc
+        run: sudo apt-get update && sudo apt-get install -y doxygen mandoc
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
@@ -40,6 +40,9 @@ jobs:
           ruby-version: '3.3'
           working-directory: docs
           bundler-cache: true
+
+      - name: Generate API reference from man pages
+        run: sh docs/gen_api_reference.sh
 
       - name: Build Jekyll site
         working-directory: docs
@@ -84,6 +87,9 @@ jobs:
           working-directory: docs
           bundler-cache: true
 
+      - name: Generate API reference from man pages
+        run: sudo apt-get update && sudo apt-get install -y mandoc && sh docs/gen_api_reference.sh
+
       - name: Build Jekyll site
         working-directory: docs
         run: bundle exec jekyll build --baseurl "" --destination _site
@@ -99,8 +105,22 @@ jobs:
             README.md
           fail: true
 
+  diagram-check:
+    # Validate every ```mermaid diagram in the docs through the real
+    # mermaid parser.  A malformed diagram renders as an error box on
+    # the site, so it blocks the deploy.
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Check mermaid diagrams
+        run: sh docs/check_mermaid.sh
+
   deploy:
-    needs: [build, link-check]
+    needs: [build, link-check, diagram-check]
     runs-on: ubuntu-latest
     environment:
       name: github-pages

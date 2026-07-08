@@ -45,7 +45,7 @@ flowchart TD
         P1 --> V1["bytecode VDBE<br/>(row-at-a-time)"]
         V1 --> B1["B-tree + pager"]
         B1 --> VFS["synchronous VFS"]
-        L1["big connection mutex"] -.serializes.-> V1
+        L1["big connection mutex"] -.->|serializes| V1
     end
     subgraph sqlxtc
         Q2["SQL text"] --> P2["Lime parser"]
@@ -54,7 +54,7 @@ flowchart TD
         VX --> BM["buffer pool + B-link tree"]
         BM --> WAL["WAL + double-write"]
         WAL --> AIO["xtc_aio<br/>(parks a fiber, not a thread)"]
-        LR["lrlock / RCU / lock mgr"] -.page concurrency.-> BM
+        LR["lrlock / RCU / lock mgr"] -.->|page concurrency| BM
     end
 ```
 

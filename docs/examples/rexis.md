@@ -48,7 +48,7 @@ flowchart LR
         P1["conn proc 1"] --> KS[("keyspace")]
         P2["conn proc 2"] --> KS
         PN["conn proc N"] --> KS
-        EX["executor:<br/>one loop per core,<br/>work-stealing"] -.runs.-> P1 & P2 & PN
+        EX["executor:<br/>one loop per core,<br/>work-stealing"] -.->|runs| P1 & P2 & PN
     end
 ```
 

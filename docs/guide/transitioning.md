@@ -1,7 +1,7 @@
 ---
 title: Thinking in libxtc
 parent: Guide
-nav_order: 6
+nav_order: 7
 lede: >-
   The mental shifts a C, C++, or Rust programmer must make -- and the anti-patterns that bite.
 permalink: /guide/transitioning/

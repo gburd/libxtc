@@ -110,3 +110,6 @@ docs/_site/
 docs/.jekyll-cache/
 docs/.jekyll-metadata
 docs/vendor/
+
+# Generated API-reference pages (from man pages, at docs build time)
+docs/reference/api/

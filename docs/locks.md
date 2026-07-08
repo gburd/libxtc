@@ -528,33 +528,44 @@ Do not use the lock manager when:
 
 ## Choosing a primitive
 
-The decision tree below covers the common cases.  Read it as a
-flowchart; each leaf points to the recommended primitive.
+The decision tree below covers the common cases; each leaf is the
+recommended primitive.
 
-  Q: Does the critical section yield, await, or block on async
-     I/O?
-     -> Yes -> Q: Are multiple lock objects involved with
-                  user-driven ordering?
-                  -> Yes -> xtc_lockmgr
-                  -> No  -> Q: Is the workload read-heavy?
-                                -> Yes -> xtc_lwlock or xtc_lrlock
-                                -> No  -> xtc_amutex
-     -> No  -> Q: Are multiple lock objects involved with
-                  user-driven ordering?
-                  -> Yes -> xtc_lockmgr
-                  -> No  -> __os_mutex_t
+```mermaid
+flowchart TD
+    Start(["I need mutual exclusion"]) --> Y{"Does the critical section<br/>yield / await / block<br/>on async I/O?"}
+    Y -->|Yes| YM{"Multiple lock objects<br/>with user-driven<br/>ordering?"}
+    Y -->|No| NM{"Multiple lock objects<br/>with user-driven<br/>ordering?"}
+    YM -->|Yes| LM1["xtc_lockmgr"]:::leaf
+    YM -->|No| RH{"Read-heavy<br/>workload?"}
+    RH -->|Yes| RW["xtc_lwlock<br/>or xtc_lrlock"]:::leaf
+    RH -->|No| AM["xtc_amutex"]:::leaf
+    NM -->|Yes| LM2["xtc_lockmgr"]:::leaf
+    NM -->|No| OM["__os_mutex_t"]:::leaf
+    classDef leaf fill:#e6f6ec,stroke:#2e9e57,stroke-width:2px;
+```
 
-For signalling rather than mutual exclusion:
+For **signalling** rather than mutual exclusion:
 
-  one-shot edge      -> xtc_notify
-  counting           -> xtc_sem
-  cancellation tree  -> xtc_abort_source
+```mermaid
+flowchart TD
+    S(["I need to signal, not lock"]) --> K{"What shape?"}
+    K -->|one-shot edge| N["xtc_notify"]:::leaf
+    K -->|counting| SE["xtc_sem"]:::leaf
+    K -->|cancellation tree| AB["xtc_abort_source"]:::leaf
+    classDef leaf fill:#e6f6ec,stroke:#2e9e57,stroke-width:2px;
+```
 
-For the special case of "pointer that updates rarely, readers
-must not block ever":
+For the special case of "a pointer that updates rarely, where readers
+must never block":
 
-  fits-in-two-buffers   -> xtc_lrlock
-  graph with reclamation -> xtc_rcu
+```mermaid
+flowchart TD
+    P(["rarely-updated shared data,<br/>never-blocking readers"]) --> Q{"Shape of the data?"}
+    Q -->|fits in two buffers| LR["xtc_lrlock"]:::leaf
+    Q -->|graph needing reclamation| RC["xtc_rcu"]:::leaf
+    classDef leaf fill:#e6f6ec,stroke:#2e9e57,stroke-width:2px;
+```
 
 ---
 
