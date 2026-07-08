@@ -34,11 +34,24 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(_WIN32)
-typedef long long xtc_ssize_t;   /* Win32 CRT lacks ssize_t */
-#define ssize_t xtc_ssize_t
+/* The pread/pwrite return values use the standard POSIX `ssize_t`.  We
+ * provide it portably WITHOUT a namespace-polluting #define of the name
+ * and WITHOUT redefining it where the platform already has it:
+ *   - POSIX: <sys/types.h> defines the real ssize_t; we just use it.
+ *   - MinGW/Cygwin on Windows: same -- their <sys/types.h> defines
+ *     ssize_t and sets _SSIZE_T_DEFINED.
+ *   - MSVC: the CRT has no ssize_t, so we typedef it from SSIZE_T,
+ *     guarded by _SSIZE_T_DEFINED (the de-facto sentinel) so a consumer
+ *     header that already defined it wins, and a later include of ours
+ *     cannot double-define. */
+#if defined(_WIN32) && defined(_MSC_VER)
+#  ifndef _SSIZE_T_DEFINED
+#    define _SSIZE_T_DEFINED
+#    include <BaseTsd.h>          /* SSIZE_T */
+typedef SSIZE_T ssize_t;
+#  endif
 #else
-#include <sys/types.h>           /* ssize_t */
+#  include <sys/types.h>         /* real ssize_t (POSIX, MinGW, Cygwin) */
 #endif
 
 /* Open flags for xtc_bdev_open (subset of xtc_fs flags that make sense
