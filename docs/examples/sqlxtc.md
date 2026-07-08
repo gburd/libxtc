@@ -99,6 +99,57 @@ textbook ones SQLite also uses.
   crash recovery (redo/undo), all validated under the deterministic
   simulator.
 
+## How libxtc concepts are applied
+
+The SQLite-vs-sqlxtc diagram above is drawn as boxes, but every box is
+really libxtc machinery. Here is the runtime shape:
+
+```mermaid
+flowchart TD
+    APP(["xtc_app + root supervisor"]):::sup --> SVR["xtc_svr listener<br/>(gen_server)"]
+    SVR -->|xtc_proc_spawn per client| C1["conn proc (fiber)"]
+    SVR -->|xtc_proc_spawn per client| C2["conn proc (fiber)"]
+    EX["xtc_exec: one loop per core,<br/>work-stealing"]:::run -.->|runs| C1 & C2
+    C1 -->|parse + plan| VX["vectorized executor<br/>(runs on the conn fiber)"]
+    VX -->|descend, fix pages| BT["B-link tree<br/>(latch-coupled on the fiber)"]
+    BT --> BM["buffer pool"]
+    BM -->|latch-free reads| LR["lrlock / RCU"]:::lock
+    BM -->|ordered page locks| LM["lock manager"]:::lock
+    BM -->|page I/O| AIO["xtc_aio: a miss parks<br/>the fiber, not the thread"]:::run
+    C1 -->|memory budget| RES["xtc_res caps"]
+    classDef sup fill:#e8f0ff,stroke:#36b;
+    classDef run fill:#e6f6ec,stroke:#2e9e57;
+    classDef lock fill:#fff3e0,stroke:#e08a00;
+```
+
+- **Supervision.** The server is an `xtc_app` with a root supervisor; the
+  connection front door is an `xtc_svr` gen_server. A connection proc
+  that crashes is contained and does not take the server down --
+  [let it crash]({{ '/philosophy/let-it-crash/' | relative_url }}) at the
+  connection granularity.
+- **The executor and the B-tree run on fibers, not threads.** Each
+  connection is a fiber (`xtc_proc_spawn`) on the multi-loop `xtc_exec`
+  executor; the vectorized executor and the B-link-tree descent run
+  *on that fiber*. A page fix that misses does not block a thread -- it
+  parks the fiber via `xtc_aio` and the loop serves other connections
+  until the read completes. This is the whole reason to build on libxtc:
+  storage-engine code reads like straight-line synchronous C yet never
+  stalls a core.
+- **Data sharing.** The buffer pool and B-link tree are the *shared*
+  structures (the deliberate
+  [compromise]({{ '/philosophy/message-passing/' | relative_url }}) away
+  from pure message passing, because copying pages through mailboxes
+  would be absurd). Reads go latch-free through `lrlock` / RCU; ordered
+  multi-page access uses the deadlock-detecting lock manager. Connection
+  *state*, by contrast, is private to each conn fiber -- shared-nothing
+  where it can be, shared-with-discipline where it must be.
+- **Locking.** Latch-coupling on the B-link tree uses short page latches;
+  the lock manager handles the cases that need ordered locks with
+  deadlock detection -- the thing hand-rolled `pthread_mutex` ordering
+  cannot give you.
+- **Resource limits.** `xtc_res` caps bound memory and in-flight work so
+  a query storm degrades instead of OOMing.
+
 ## Advantages of building it on libxtc
 
 - **Every layer is fiber-aware.** A page miss parks the requesting fiber

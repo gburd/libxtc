@@ -25,6 +25,10 @@ headers. This section is the prose contract for each function.
 
 ## Categories
 
+- [Foundational basics]({{ '/reference/api/basics/' | relative_url }}) --
+  allocation, clocks, sleep, atomics, stats, logging, error strings,
+  config, version: the pieces that smooth POSIX/libc's rough edges for
+  concurrent code.
 - [Event runtime (L2)]({{ '/reference/api/event/' | relative_url }}) --
   the loop, the executor, async/await.
 - [Processes and messaging (L3)]({{ '/reference/api/proc/' | relative_url }}) --
@@ -36,13 +40,11 @@ headers. This section is the prose contract for each function.
 - [I/O, files, and network (L1)]({{ '/reference/api/io/' | relative_url }}) --
   the reactor, async file I/O, sockets, TLS, block devices, schedulers.
 - [Memory and resources]({{ '/reference/api/mem/' | relative_url }}) --
-  allocation, slabs, memory contexts, resource caps, configuration.
+  slabs, memory contexts, resource caps, the blocking-pool contract.
 - [Observability and debugging]({{ '/reference/api/obs/' | relative_url }}) --
-  stats, live inspection, causal trace, dumps, logging, proc dictionary.
+  live inspection, causal trace, dumps, proc dictionary, alloc audit.
 - [Testing and fault injection]({{ '/reference/api/test/' | relative_url }}) --
   fault points, preemption, stack reclaim.
-- [Version and errors]({{ '/reference/api/ver/' | relative_url }}) --
-  version, error strings, the blocking-pool contract.
 
 ## Environment variables
 

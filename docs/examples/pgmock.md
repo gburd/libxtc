@@ -74,6 +74,23 @@ the postmaster's accept loop becomes a supervised process.
 There is **zero PostgreSQL code** here; pgmock only mimics the wire
 protocol closely enough to prove the multiplexing and waiting model.
 
+## How libxtc concepts are applied
+
+- **Supervision.** The postmaster is a supervised proc; each backend it
+  spawns is its own proc, so a backend that fails is contained to that
+  one connection.
+- **Data sharing.** Each backend proc owns its connection state
+  privately. The point of the exercise is that backends could share
+  process memory (no fork) when a real adapter needs shared buffers --
+  the [compromise]({{ '/philosophy/message-passing/' | relative_url }})
+  between isolation and sharing, decided per structure.
+- **Waiting.** The wait primitive maps directly:
+  `WaitLatchOrSocket` becomes `xtc_proc_wait_fd`, so a backend parks its
+  fiber on a latch or socket without a thread blocked.
+- **Signals.** libxtc creates its runtime threads with signals blocked,
+  so a process-directed signal lands only on a thread the embedder
+  designates -- essential for a codebase that leans on signals.
+
 ## Advantages of building it on libxtc
 
 - **No fork, one address space.** Backends are lightweight processes on

@@ -1,5 +1,30 @@
 // docs/_sass/custom/custom.scss -- libxtc site overrides on just-the-docs.
 
+// ---- Tighten the left navigation ------------------------------------
+// The default side nav is wide and airy; narrow it and tighten the line
+// spacing so it takes less room and shows more at a glance.
+$nav-width: 232px !default;
+
+.side-bar {
+  width: $nav-width;
+}
+@media (min-width: 66.5rem) {
+  .side-bar {
+    width: $nav-width;
+  }
+  .main {
+    margin-left: $nav-width;
+  }
+}
+.nav-list .nav-list-item {
+  font-size: 0.75rem;
+  .nav-list-link {
+    padding-top: 0.15rem;
+    padding-bottom: 0.15rem;
+    line-height: 1.3;
+  }
+}
+
 // ---- Code-block line spacing ----------------------------------------
 // just-the-docs' default line-height on <pre>/<code> blocks reads as
 // oddly airy.  Tighten it so snippets look like code, not double-spaced
