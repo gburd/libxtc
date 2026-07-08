@@ -31,17 +31,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y doxygen ruby-full build-essential
+      - name: Install Doxygen
+        run: sudo apt-get update && sudo apt-get install -y doxygen
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          working-directory: docs
+          bundler-cache: true
 
       - name: Build Jekyll site
         working-directory: docs
         env:
           JEKYLL_ENV: production
-        run: |
-          gem install bundler --no-document
-          bundle install
-          bundle exec jekyll build --destination _site
+        run: bundle exec jekyll build --destination _site
 
       - name: Build Doxygen API reference
         working-directory: docs

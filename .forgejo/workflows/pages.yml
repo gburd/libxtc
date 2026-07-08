@@ -30,8 +30,9 @@ jobs:
         working-directory: docs
         env:
           JEKYLL_ENV: production
+          BUNDLE_PATH: vendor/bundle
         run: |
-          gem install bundler --no-document
+          bundle config set --local path vendor/bundle
           bundle install
           bundle exec jekyll build --destination _site
 
