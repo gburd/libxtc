@@ -78,6 +78,15 @@ struct xtc_task {
 	 * lock; the atomic only makes the OR itself race-free. */
 	_Atomic uint32_t wake_revents;
 
+	/* Latched cross-thread wake that arrived while this task was NOT yet
+	 * PARKED (the prepare/park race: a foreign xtc_waker_wake fires
+	 * between the parker arming its waker and the loop transitioning it
+	 * to PARKED on yield).  The WAKE-drain sets this instead of dropping
+	 * the wake; the RUNNING->PARKED transition consumes it and
+	 * re-schedules rather than parking, so the wake is never lost.
+	 * Set cross-thread, consumed on the owning loop's thread. */
+	_Atomic int wake_pending;
+
 	/* Doubly linked into loop->all_tasks so a completed task can be
 	 * unlinked in O(1) and recycled to the loop's task_slab (instead of
 	 * lingering until loop_fini).  all_prev == NULL means the head. */

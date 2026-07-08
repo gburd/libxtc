@@ -128,6 +128,15 @@ __xtc_inbox_drain(xtc_loop_t *loop)
 			if (m->task->state == XTC_TS_PARKED) {
 				m->task->state = XTC_TS_SCHEDULED;
 				(void)__xtc_loop_enqueue(loop, m->task);
+			} else {
+				/* The wake raced the park: the task is still
+				 * RUNNING (between arming its waker and yielding
+				 * to PARKED).  Latch it so the RUNNING->PARKED
+				 * transition re-schedules instead of parking --
+				 * otherwise a cross-thread wake fired in that
+				 * window would be lost (the prepare/park race). */
+				atomic_store_explicit(&m->task->wake_pending, 1,
+				    memory_order_release);
 			}
 			break;
 		case XTC_INB_PUBLISH:
@@ -416,7 +425,21 @@ __xtc_loop_step(xtc_loop_t *loop)
 			(void)__xtc_loop_enqueue(loop, t);
 			break;
 		case XTC_TASK_PENDING:
-			t->state = XTC_TS_PARKED;
+			/* A cross-thread wake that raced this park (arrived while
+			 * the task was still RUNNING) latched wake_pending in the
+			 * inbox drain.  Consume it and re-schedule instead of
+			 * parking, so the wake is not lost -- the task will run
+			 * again and re-evaluate its condition (fd readiness /
+			 * mailbox).  Without this, a foreign wake fired in the
+			 * prepare/park window would leave the task PARKED with no
+			 * further wakeup pending -> a hang. */
+			if (atomic_exchange_explicit(&t->wake_pending, 0,
+			    memory_order_acquire)) {
+				t->state = XTC_TS_SCHEDULED;
+				(void)__xtc_loop_enqueue(loop, t);
+			} else {
+				t->state = XTC_TS_PARKED;
+			}
 			break;
 		default:
 			return XTC_E_INTERNAL;

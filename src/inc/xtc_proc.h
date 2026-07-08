@@ -107,6 +107,7 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int       xtc_proc_sleep __P((int64_t));
  * PUBLIC: int       xtc_exit_self __P((int));
  * PUBLIC: int       xtc_exit_pid __P((xtc_pid_t, int));
+ * PUBLIC: int       xtc_proc_wake __P((xtc_pid_t));
  * PUBLIC: int       xtc_link __P((xtc_pid_t));
  * PUBLIC: int       xtc_unlink __P((xtc_pid_t));
  * PUBLIC: int       xtc_monitor __P((xtc_pid_t, uint64_t *));
@@ -146,6 +147,20 @@ int       xtc_proc_spawn_monitor(xtc_loop_t *loop, xtc_proc_fn fn,
  * Returns XTC_E_INVAL if the target is unknown or already dead.
  */
 int xtc_exit_pid(xtc_pid_t target, int reason);
+
+/*
+ * Resume a process parked in xtc_proc_wait_fd / xtc_recv, from ANY OS
+ * thread (including a thread libxtc does not manage).  The explicit
+ * "poke the target loop" primitive: after a foreign thread makes a
+ * watched condition true (writes a self-pipe an fd-park watches, sets
+ * an embedder latch, completes an async read), xtc_proc_wake(pid)
+ * nudges the target loop out of its I/O wait so the parked proc
+ * re-checks its condition.  It delivers no message; the woken proc just
+ * re-evaluates, so a spurious wake is always safe.  Returns XTC_OK
+ * (including when the target is not parked, already runnable, or gone),
+ * XTC_E_INVAL for XTC_PID_NONE.
+ */
+int xtc_proc_wake(xtc_pid_t target);
 
 xtc_pid_t xtc_self(void);
 

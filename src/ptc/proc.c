@@ -1295,6 +1295,57 @@ xtc_exit_pid(xtc_pid_t target, int reason)
 	return XTC_OK;
 }
 
+/*
+ * PUBLIC: int xtc_proc_wake __P((xtc_pid_t));
+ *
+ * Resume a process parked in xtc_proc_wait_fd / xtc_recv, from ANY OS
+ * thread -- including a thread libxtc knows nothing about (an embedder's
+ * I/O-worker thread, a foreign carrier).  This is the explicit "poke the
+ * target loop" primitive: after a foreign thread does something that
+ * makes a watched condition true (writes a self-pipe an fd-park watches,
+ * sets an embedder latch, completes an async read), calling
+ * xtc_proc_wake(pid) guarantees the target proc's loop is nudged out of
+ * its I/O wait and the parked proc re-checks its condition.
+ *
+ * It fires the proc's receive waker, which -- when the caller is not on
+ * the owning loop's thread -- posts to that loop's MPSC inbox and pings
+ * its I/O backend (the wakeup fd), so a loop blocked in epoll_wait /
+ * io_uring / kqueue / IOCP wait returns and re-polls.  It does NOT
+ * deliver a message; the woken proc simply resumes and re-evaluates
+ * (its wait_fd re-checks fd readiness, its recv re-checks the mailbox).
+ * Spurious wakes are therefore always safe.
+ *
+ * Relying on fd readiness alone to wake a loop is correct for a
+ * condition libxtc itself produces, but when the readiness is produced
+ * by a fully foreign thread an embedder should pair it with
+ * xtc_proc_wake for a guaranteed, race-free resume.  Returns XTC_OK
+ * (including the no-op cases: target not parked, already runnable, or
+ * gone), XTC_E_INVAL for XTC_PID_NONE.
+ */
+int
+xtc_proc_wake(xtc_pid_t target)
+{
+	struct xtc_proc *p;
+
+	if (XTC_UNLIKELY(xtc_pid_is_none(target)))
+		return XTC_E_INVAL;
+	p = __resolve(target, NULL);
+	if (p == NULL || !p->alive)
+		return XTC_OK;   /* gone or exited: a wake is a harmless no-op */
+
+	(void) __proc_mtx_lock(&p->mbox_lock);
+	if (p->waker_armed) {
+		/* Fire the waker without asserting a specific cause: the woken
+		 * proc re-evaluates its own condition on resume (wait_fd
+		 * re-checks fd readiness + the mailbox; recv re-checks the
+		 * mailbox), so a spurious wake simply re-parks.  Setting a false
+		 * MAILBOX/fd bit here would mislead out_revents. */
+		xtc_waker_wake(&p->recv_waker);
+	}
+	(void) __proc_mtx_unlock(&p->mbox_lock);
+	return XTC_OK;
+}
+
 /* ---------- receive ---------- */
 
 static int

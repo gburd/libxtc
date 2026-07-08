@@ -247,6 +247,39 @@ as `src/io/io_aix.c`.  This rewrite is the suspected fix territory for
 the `test_proc::selective_receive` flake (the wakeup ordering changed),
 but that cannot be confirmed without the host.
 
+**Smoke coverage WRITTEN, awaiting a santorini run (NOT yet verified):**
+`test/msvc/smoke.c` now drives four IOCP-runtime scenarios beyond the
+already-verified strerror/clocks/slab/lwlock/fault-containment set.
+They COMPILE (cross-checked with mingw-w64 gcc 14.3.0 `-std=c11 -Wall
+-Wextra -fsyntax-only` against the real Windows headers, with the MSVC
+pthread shim forced into its `_MSC_VER` path) but have NOT been built
+or run under cl.exe on a Windows host:
+
+  - `smoke_aio_proc` (pre-existing): a single overlapped pwrite+pread
+    round-trip at offset 0 -- the file-AIO port round-trip.
+  - `smoke_aio_multi_proc` (new): several positioned overlapped
+    pwrite/pread ops at distinct offsets in one loop run, so more than
+    one AIO completion is reaped from the port per run (the reap loop,
+    not just a single completion).
+  - `smoke_xt_worker` + `smoke_xt_sender` (new): a foreign OS thread
+    bursts `xtc_send` at a batch of parked worker procs, exercising the
+    cross-thread `PostQueuedCompletionStatus` wakeup and its coalescing
+    (`__xtc_io_iocp_wakeup_post`); the loop must reap every delivery and
+    return once all workers exit.
+  - `smoke_sock_server` + `smoke_sock_client` (new): a 127.0.0.1
+    connect/accept/echo driven entirely by `xtc_proc_wait_fd` on the
+    raw Winsock socket fds -- the AFD poll fast path and its
+    level-triggered re-arm (WRITABLE for connect completion, READABLE
+    for accept, then READABLE/WRITABLE for the echo).  Send/recv is raw
+    Winsock in the test so its error handling does not depend on any
+    errno mapping in the library net helpers; if a listen port cannot
+    be bound on the runner the scenario SKIPS rather than fails.
+
+These are the runtime scenarios the "What is NOT verified" list above
+names; the smoke test is the intended Windows regression guard for
+them once santorini runs `dist/build_msvc.bat` and reports the `ok`
+lines.  Until that run they remain COMPILED-NOT-RUNTIME-VERIFIED.
+
 ### Round 1 (historical): WSAEventSelect emulation -- SUPERSEDED
 
 The round-1 backend (WSAEventSelect + WaitForMultipleObjects,
