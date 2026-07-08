@@ -22,6 +22,11 @@
 
 #include <stdio.h>
 #include <string.h>
+/* winsock2.h must precede windows.h; WIN32_LEAN_AND_MEAN (set in the
+ * build CFLAGS) keeps windows.h from pulling in the older winsock.h,
+ * so there is no redefinition clash. */
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
@@ -32,6 +37,8 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_aio.h"
+#include "xtc_net.h"
+#include "xtc_io.h"
 #include "xtc_fs.h"
 #include "os_time.h"
 
@@ -120,6 +127,241 @@ smoke_selective_proc(void *arg)
 		s_sel_seen[s_sel_n++] = *(int *)msg;
 		xtc_free(msg);
 	}
+}
+
+/* ---- scenario 1b: multi-op native IOCP file AIO ---------------------
+ *
+ * The existing smoke_aio_proc proves a single overlapped pwrite+pread
+ * at offset 0.  This variant issues SEVERAL positioned pwrites at
+ * distinct offsets and reads each back, so more than one overlapped
+ * ReadFile/WriteFile completion is reaped from the port within one
+ * loop run -- exercising the AIO reap loop, not just a single
+ * completion.  Same IOCP overlapped path as smoke_aio_proc; the point
+ * is repetition and non-zero offsets. */
+#define SMOKE_AIO_BLK   256
+#define SMOKE_AIO_N     8
+static volatile int s_aio_multi_ok;
+static int s_aio_multi_fd;
+static void
+smoke_aio_multi_proc(void *arg)
+{
+	char wbuf[SMOKE_AIO_BLK];
+	char rbuf[SMOKE_AIO_BLK];
+	int i, n;
+	int64_t off;
+	(void)arg;
+	for (i = 0; i < SMOKE_AIO_N; i++) {
+		off = (int64_t)i * SMOKE_AIO_BLK;
+		memset(wbuf, (int)(0x41 + i), sizeof wbuf);
+		n = xtc_aio_pwrite(s_aio_multi_fd, wbuf,
+		    (uint32_t)sizeof wbuf, off);
+		if (n != (int)sizeof wbuf) { (void)xtc_exit_self(1); return; }
+	}
+	(void)xtc_aio_fdatasync(s_aio_multi_fd);   /* offloaded on Windows */
+	for (i = 0; i < SMOKE_AIO_N; i++) {
+		off = (int64_t)i * SMOKE_AIO_BLK;
+		memset(rbuf, 0, sizeof rbuf);
+		n = xtc_aio_pread(s_aio_multi_fd, rbuf,
+		    (uint32_t)sizeof rbuf, off);
+		if (n != (int)sizeof rbuf) { (void)xtc_exit_self(2); return; }
+		memset(wbuf, (int)(0x41 + i), sizeof wbuf);
+		if (memcmp(rbuf, wbuf, sizeof rbuf) != 0) {
+			(void)xtc_exit_self(3); return;
+		}
+	}
+	s_aio_multi_ok = 1;
+	(void)xtc_exit_self(0);
+}
+
+/* ---- scenario 2: cross-thread wakeup coalescing ---------------------
+ *
+ * N worker procs each block in xtc_recv(-1) on their own mailbox; a
+ * FOREIGN OS thread then bursts one xtc_send at every worker.  Each
+ * cross-thread send that lands while the loop thread is blocked in
+ * GetQueuedCompletionStatusEx wakes it through
+ * __xtc_io_iocp_wakeup_post -> PostQueuedCompletionStatus, which
+ * coalesces (at most one wakeup completion queued at a time).  When
+ * every worker has received and exited, n_alive hits 0 and
+ * xtc_loop_run returns.  Counts stay modest so it is fast on CI. */
+#define SMOKE_XT_N   256
+static xtc_pid_t s_xt_pids[SMOKE_XT_N];
+static volatile LONG s_xt_recv_count;
+static void
+smoke_xt_worker(void *arg)
+{
+	void *msg = NULL;
+	size_t sz = 0;
+	(void)arg;
+	if (xtc_recv(&msg, &sz, -1) == XTC_OK) {
+		if (msg != NULL)
+			xtc_free(msg);
+		(void)InterlockedIncrement(&s_xt_recv_count);
+	}
+	(void)xtc_exit_self(0);
+}
+static DWORD WINAPI
+smoke_xt_sender(LPVOID param)
+{
+	int i;
+	(void)param;
+	/* ponytail: fixed 20 ms nudge so the burst lands while the loop
+	 * thread is parked in GQCS (the wakeup path we want to hit); the
+	 * test is still correct if it lands earlier -- the message just
+	 * waits in the mailbox -- so this only biases toward the wakeup
+	 * path, it is not load-bearing for correctness. */
+	Sleep(20);
+	for (i = 0; i < SMOKE_XT_N; i++) {
+		int v = i;
+		/* Cross-thread send; retry on transient backpressure. */
+		while (xtc_send(s_xt_pids[i], &v, sizeof v) != XTC_OK)
+			Sleep(1);
+	}
+	return 0;
+}
+
+/* ---- scenario 3: loopback socket echo over the AFD poll path --------
+ *
+ * Server + client procs on one loop.  All readiness is waited on via
+ * xtc_proc_wait_fd(raw Winsock fd, ...), which on Windows drives the
+ * IOCP AFD poll and its level-triggered re-arm.  Send/recv is raw
+ * Winsock so this test owns every error branch (no dependency on any
+ * errno mapping in the library net helpers). */
+static const char s_sock_msg[] = "xtc-afd-echo";
+static int s_sock_listen_fd;
+static int s_sock_client_fd;
+static int s_sock_port;
+static volatile int s_sock_srv_ok;
+static volatile int s_sock_cli_ok;
+
+/* Wait for readiness on a socket fd, then return XTC_OK; a non-OK
+ * wait (timeout / error) aborts the caller.  10 s guards a hang. */
+static int
+smoke_sock_wait(int fd, uint32_t interest)
+{
+	uint32_t rev = 0;
+	return xtc_proc_wait_fd(fd, interest, 10LL * 1000 * 1000 * 1000,
+	    &rev);
+}
+
+static void
+smoke_sock_server(void *arg)
+{
+	SOCKET conn = INVALID_SOCKET;
+	char buf[64];
+	int got, sent;
+	(void)arg;
+	/* Accept: wait for READABLE on the listener (AFD ACCEPT), then
+	 * accept the pending connection (retry on WSAEWOULDBLOCK). */
+	for (;;) {
+		if (smoke_sock_wait(s_sock_listen_fd, XTC_IO_READABLE) != XTC_OK) {
+			(void)xtc_exit_self(1); return;
+		}
+		conn = accept((SOCKET)s_sock_listen_fd, NULL, NULL);
+		if (conn != INVALID_SOCKET)
+			break;
+		if (WSAGetLastError() != WSAEWOULDBLOCK) {
+			(void)xtc_exit_self(2); return;
+		}
+	}
+	/* Read the request (level-triggered re-arm on the accepted fd). */
+	got = 0;
+	for (;;) {
+		int n = recv(conn, buf + got, (int)(sizeof buf - got), 0);
+		if (n > 0) {
+			got += n;
+			if (got >= (int)sizeof s_sock_msg)
+				break;
+			continue;
+		}
+		if (n == 0) { (void)closesocket(conn); (void)xtc_exit_self(3); return; }
+		if (WSAGetLastError() != WSAEWOULDBLOCK) {
+			(void)closesocket(conn); (void)xtc_exit_self(4); return;
+		}
+		if (smoke_sock_wait((int)conn, XTC_IO_READABLE) != XTC_OK) {
+			(void)closesocket(conn); (void)xtc_exit_self(5); return;
+		}
+	}
+	/* Echo it back. */
+	sent = 0;
+	for (;;) {
+		int n = send(conn, s_sock_msg + sent,
+		    (int)(sizeof s_sock_msg - sent), 0);
+		if (n > 0) {
+			sent += n;
+			if (sent >= (int)sizeof s_sock_msg)
+				break;
+			continue;
+		}
+		if (WSAGetLastError() != WSAEWOULDBLOCK) {
+			(void)closesocket(conn); (void)xtc_exit_self(6); return;
+		}
+		if (smoke_sock_wait((int)conn, XTC_IO_WRITABLE) != XTC_OK) {
+			(void)closesocket(conn); (void)xtc_exit_self(7); return;
+		}
+	}
+	(void)closesocket(conn);
+	s_sock_srv_ok = 1;
+	(void)xtc_exit_self(0);
+}
+
+static void
+smoke_sock_client(void *arg)
+{
+	int fd = s_sock_client_fd;
+	char buf[64];
+	int so_err = 0, sent, got;
+	int elen = (int)sizeof so_err;
+	(void)arg;
+	/* Connect completes when the socket is WRITABLE; verify SO_ERROR. */
+	if (smoke_sock_wait(fd, XTC_IO_WRITABLE) != XTC_OK) {
+		(void)xtc_exit_self(1); return;
+	}
+	if (getsockopt((SOCKET)fd, SOL_SOCKET, SO_ERROR,
+	    (char *)&so_err, &elen) != 0 || so_err != 0) {
+		(void)xtc_exit_self(2); return;
+	}
+	/* Send the request. */
+	sent = 0;
+	for (;;) {
+		int n = send((SOCKET)fd, s_sock_msg + sent,
+		    (int)(sizeof s_sock_msg - sent), 0);
+		if (n > 0) {
+			sent += n;
+			if (sent >= (int)sizeof s_sock_msg)
+				break;
+			continue;
+		}
+		if (WSAGetLastError() != WSAEWOULDBLOCK) {
+			(void)xtc_exit_self(3); return;
+		}
+		if (smoke_sock_wait(fd, XTC_IO_WRITABLE) != XTC_OK) {
+			(void)xtc_exit_self(4); return;
+		}
+	}
+	/* Read the echo (re-arm READABLE until the full reply arrives). */
+	got = 0;
+	for (;;) {
+		int n = recv((SOCKET)fd, buf + got,
+		    (int)(sizeof buf - got), 0);
+		if (n > 0) {
+			got += n;
+			if (got >= (int)sizeof s_sock_msg)
+				break;
+			continue;
+		}
+		if (n == 0) { (void)xtc_exit_self(5); return; }
+		if (WSAGetLastError() != WSAEWOULDBLOCK) {
+			(void)xtc_exit_self(6); return;
+		}
+		if (smoke_sock_wait(fd, XTC_IO_READABLE) != XTC_OK) {
+			(void)xtc_exit_self(7); return;
+		}
+	}
+	if (memcmp(buf, s_sock_msg, sizeof s_sock_msg) != 0) {
+		(void)xtc_exit_self(8); return;
+	}
+	s_sock_cli_ok = 1;
+	(void)xtc_exit_self(0);
 }
 
 int
@@ -291,6 +533,124 @@ main(void)
 		CHECK(s_sel_seen[4] == 4);
 		printf("  ok   selective_receive: 42 first, then 1,2,3,4 in"
 		    " order (IOCP wakeup path)\n");
+	}
+
+	/* --- multi-op native IOCP file AIO (several overlapped ops reaped
+	 * from the port in one run, at distinct offsets) --- */
+	{
+		xtc_loop_t *loop = NULL;
+		xtc_proc_opts_t po; memset(&po, 0, sizeof po);
+		xtc_pid_t pid;
+		char path[MAX_PATH], dir[MAX_PATH];
+		HANDLE fh;
+		DWORD dn = GetTempPathA(sizeof dir, dir);
+		CHECK(dn > 0 && dn < sizeof dir);
+		CHECK(GetTempFileNameA(dir, "xtc", 0, path) != 0);
+		fh = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+		    CREATE_ALWAYS,
+		    FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_OVERLAPPED, NULL);
+		CHECK(fh != INVALID_HANDLE_VALUE);
+		s_aio_multi_fd = _open_osfhandle((intptr_t)fh, _O_BINARY);
+		CHECK(s_aio_multi_fd >= 0);
+		s_aio_multi_ok = 0;
+		CHECK(xtc_loop_init(&loop) == XTC_OK);
+		po.name = "aio-multi";
+		CHECK(xtc_proc_spawn(loop, smoke_aio_multi_proc, NULL, &po, &pid)
+		    == XTC_OK);
+		CHECK(xtc_loop_run(loop) == XTC_OK);
+		CHECK(s_aio_multi_ok == 1);
+		(void)xtc_loop_fini(loop);
+		(void)_close(s_aio_multi_fd);       /* closes fh */
+		(void)DeleteFileA(path);
+		printf("  ok   native IOCP file AIO: %d overlapped pwrite/pread"
+		    " ops at distinct offsets\n", SMOKE_AIO_N);
+	}
+
+	/* --- cross-thread wakeup coalescing: a foreign thread bursts
+	 * xtc_send at N parked worker procs (PostQueuedCompletionStatus
+	 * wakeup path) --- */
+	{
+		xtc_loop_t *loop = NULL;
+		xtc_proc_opts_t po; memset(&po, 0, sizeof po);
+		HANDLE thr;
+		int i;
+		s_xt_recv_count = 0;
+		CHECK(xtc_loop_init(&loop) == XTC_OK);
+		po.name = "xt-worker";
+		for (i = 0; i < SMOKE_XT_N; i++)
+			CHECK(xtc_proc_spawn(loop, smoke_xt_worker, NULL, &po,
+			    &s_xt_pids[i]) == XTC_OK);
+		/* Launch the foreign sender only after the pids exist; it
+		 * sleeps briefly so the loop is parked when the burst lands. */
+		thr = CreateThread(NULL, 0, smoke_xt_sender, NULL, 0, NULL);
+		CHECK(thr != NULL);
+		CHECK(xtc_loop_run(loop) == XTC_OK);
+		CHECK(WaitForSingleObject(thr, 10000) == WAIT_OBJECT_0);
+		(void)CloseHandle(thr);
+		(void)xtc_loop_fini(loop);
+		CHECK(s_xt_recv_count == SMOKE_XT_N);
+		printf("  ok   cross-thread wakeup: %d foreign xtc_send delivered"
+		    " (PostQueuedCompletionStatus coalescing)\n", SMOKE_XT_N);
+	}
+
+	/* --- loopback socket echo over the AFD poll path -----------------
+	 *
+	 * A client and a server proc on one loop hand a few bytes around a
+	 * 127.0.0.1 TCP connection, driven ENTIRELY by xtc_proc_wait_fd on
+	 * the raw Winsock socket fds -- which on Windows routes through the
+	 * IOCP AFD poll (IOCTL_AFD_POLL) and its level-triggered re-arm.
+	 * We do the send/recv with raw Winsock here (not xtc_net_send_frame)
+	 * so all readiness/error handling is under this test's control and
+	 * does not depend on any errno mapping in the library net helpers.
+	 *
+	 * Readiness waited on: WRITABLE for connect completion, ACCEPT
+	 * (READABLE on the listener), READABLE for the request, then
+	 * READABLE again for the echo -- several distinct AFD arms/re-arms.
+	 *
+	 * If a listen port cannot be bound on the runner, the scenario is
+	 * SKIPPED (not failed): a smoke test must not wedge on a busy port. */
+	{
+		static const int ports[3] = { 47654, 47655, 47656 };
+		xtc_tcp_opts_t topts = XTC_TCP_OPTS_DEFAULT;
+		int listen_fd = -1;
+		int pi, rc = XTC_E_INTERNAL;
+		for (pi = 0; pi < 3; pi++) {
+			rc = xtc_net_listen(XTC_NET_INET, "127.0.0.1",
+			    ports[pi], &topts, &listen_fd);
+			if (rc == XTC_OK)
+				break;
+		}
+		if (rc != XTC_OK) {
+			printf("  skip loopback socket echo: no free port on"
+			    " 127.0.0.1 (rc=%d)\n", rc);
+		} else {
+			xtc_loop_t *loop = NULL;
+			xtc_proc_opts_t po; memset(&po, 0, sizeof po);
+			xtc_pid_t sp, cp;
+			int client_fd = -1;
+			s_sock_listen_fd = listen_fd;
+			s_sock_port = ports[pi];
+			s_sock_srv_ok = 0;
+			s_sock_cli_ok = 0;
+			CHECK(xtc_net_dial(XTC_NET_INET, "127.0.0.1",
+			    s_sock_port, &topts, &client_fd) == XTC_OK);
+			s_sock_client_fd = client_fd;
+			CHECK(xtc_loop_init(&loop) == XTC_OK);
+			po.name = "sock-srv";
+			CHECK(xtc_proc_spawn(loop, smoke_sock_server, NULL, &po,
+			    &sp) == XTC_OK);
+			po.name = "sock-cli";
+			CHECK(xtc_proc_spawn(loop, smoke_sock_client, NULL, &po,
+			    &cp) == XTC_OK);
+			CHECK(xtc_loop_run(loop) == XTC_OK);
+			(void)xtc_loop_fini(loop);
+			xtc_net_close(client_fd);
+			xtc_net_close(listen_fd);
+			CHECK(s_sock_srv_ok == 1);
+			CHECK(s_sock_cli_ok == 1);
+			printf("  ok   loopback socket echo: connect/accept/echo"
+			    " via AFD poll (level-triggered re-arm)\n");
+		}
 	}
 
 	printf("All MSVC smoke checks passed.\n");
