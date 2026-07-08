@@ -1,3 +1,38 @@
+libxtc (1.5.0-1) unstable; urgency=medium
+
+  * Documentation release: no library code change.  The public API,
+    ABI, and behavior are identical to 1.4.2.
+  * New documentation site (docs/, Jekyll + just-the-docs) that reads as
+    a BerkeleyDB-reference + O'Reilly-guide hybrid and deploys to both
+    GitHub Pages (https://gburd.github.io/libxtc/) and Codeberg Pages.
+    A guide (getting-started, fibers-and-the-loop, processes-and-
+    messages, supervision, blocking-and-io, plus thinking-in-libxtc and
+    debugging), a reference (architecture, API, locks, ABI, known
+    issues, and a generated man-page index), an Examples section
+    documenting each examples/* program with its design decisions and
+    trade-offs, and two philosophy essays (why libxtc exists; choices
+    and roads not taken).
+  * Documentation code is now a release gate.  Every code block in the
+    book is a real file under docs/_includes/snippets/ that
+    test/docs/test_doc_snippets.sh compiles and runs in make check and
+    CI -- a snippet that stops building, or a doc that drifts from the
+    API, fails the build.
+  * CI documentation link checker (lychee) verifies every internal
+    cross-link, anchor, and external URL; the Pages deploy is gated on
+    it.
+  * Consistent hero styling across all pages and mermaid diagrams for
+    the loop cycle, message passing, the supervision tree, and the
+    layer model.
+  * README carries CI / docs / sanitizer / license / release / C11
+    badges and links to the site.
+  * Internal design/status memos moved out of Git into .agent/ (they
+    were never shipped documentation); the accuracy audit corrected
+    several stale docs (illumos native AIO is done and verified; the
+    macOS kqueue-AIO build break is resolved; xtc_cfg config-file
+    parsing and SIGHUP reload are done).
+
+ -- Greg Burd <greg@burd.me>  Wed, 08 Jul 2026 09:46:27 -0400
+
 libxtc (1.4.2-1) unstable; urgency=medium
 
   * Correctness + API-discipline release, from three carrier-team reports
