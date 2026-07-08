@@ -1,3 +1,9 @@
+---
+title: TLS support
+parent: Reference
+nav_order: 10
+---
+
 # M_TLS -- Transport Layer Security design
 
 **Status:** implemented.  TLS 1.2/1.3 over `xtc_io` sockets with the

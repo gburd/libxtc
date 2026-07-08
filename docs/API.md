@@ -1,3 +1,9 @@
+---
+title: The public API
+parent: Reference
+nav_order: 3
+---
+
 # Public API Reference
 
 This document is the reference for every public xtc symbol.  The

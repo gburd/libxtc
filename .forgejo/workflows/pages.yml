@@ -1,8 +1,7 @@
 name: Deploy Codeberg Pages
 
-# Builds the libxtc documentation site with Doxygen and deploys it
-# to Codeberg Pages, which is the canonical home for the rendered
-# docs.  GitHub is a validate-only mirror (.github/workflows/pages.yml).
+# Builds the Jekyll documentation site (docs/) plus the Doxygen API
+# reference (into /api) and deploys to Codeberg Pages.
 
 on:
   push:
@@ -10,6 +9,7 @@ on:
     paths:
       - 'src/inc/**'
       - 'docs/**'
+      - 'man/**'
       - 'README.md'
       - '.forgejo/workflows/pages.yml'
   workflow_dispatch:
@@ -21,35 +21,38 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y doxygen
+          sudo apt-get install -y doxygen ruby-full build-essential
 
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
-      - name: Generate Doxygen docs
+      - name: Build Jekyll site
         working-directory: docs
-        run: doxygen Doxyfile 2>../doxygen-warnings.txt
-
-      - name: Report doxygen warning count
-        # Surface the count without failing on the existing
-        # undocumented-symbol backlog.  Flip Doxyfile WARN_AS_ERROR
-        # to YES once the public headers carry full doc comments.
+        env:
+          JEKYLL_ENV: production
         run: |
-          count=$(wc -l < doxygen-warnings.txt)
-          echo "Doxygen produced ${count} warning lines"
-          if [ "${count}" -gt 0 ]; then
-            echo "First 20:"
-            head -20 doxygen-warnings.txt
-          fi
+          gem install bundler --no-document
+          bundle install
+          bundle exec jekyll build --destination _site
 
-      - name: Stage site directory
+      - name: Build Doxygen API reference
+        working-directory: docs
         run: |
-          mkdir -p _site
-          cp -r docs/api/html/* _site/
+          doxygen Doxyfile 2>../doxygen-warnings.txt || true
+          echo "Doxygen produced $(wc -l < ../doxygen-warnings.txt) warning lines"
+          mkdir -p _site/api
+          if [ -d api/html ]; then cp -r api/html/* _site/api/; fi
+
+      - name: Verify site contents
+        working-directory: docs
+        run: |
+          test -s _site/index.html
+          grep -q -i 'libxtc' _site/index.html
+          echo "Jekyll site built ($(find _site -type f | wc -l) files)"
 
       - name: Deploy to Codeberg Pages
         uses: https://codeberg.org/git-pages/action@v2
         with:
           site: 'https://${{ forge.repository_owner }}.codeberg.page/libxtc/'
           token: ${{ forge.token }}
-          source: _site/
+          source: docs/_site/

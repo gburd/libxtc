@@ -1,3 +1,9 @@
+---
+title: Debugging and observing
+parent: Guide
+nav_order: 7
+---
+
 # Debugging and observing libxtc programs
 
 This guide is task-oriented: a libxtc program is misbehaving, and you

@@ -2,6 +2,16 @@
 
 **A concurrency runtime for serious C programs.**
 
+[![CI](https://github.com/gburd/libxtc/actions/workflows/ci.yml/badge.svg)](https://github.com/gburd/libxtc/actions/workflows/ci.yml)
+[![Docs](https://github.com/gburd/libxtc/actions/workflows/pages.yml/badge.svg)](https://gburd.github.io/libxtc/)
+[![Sanitizers](https://img.shields.io/badge/tested-ASan%20%2B%20UBSan-brightgreen)](https://github.com/gburd/libxtc/actions/workflows/ci.yml)
+[![License: ISC](https://img.shields.io/badge/license-ISC-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/badge/release-v1.4.2-informational)](https://codeberg.org/gregburd/libxtc/releases)
+[![C11](https://img.shields.io/badge/C-11-blue.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
+
+**[Read the documentation &rarr;](https://gburd.github.io/libxtc/)**
+(mirror: <https://gregburd.codeberg.page/libxtc/>)
+
 xtc gives C the same asynchronous, fault-tolerant, predictable-latency
 foundation that Tokio gives Rust, that the BEAM gives Erlang, and that
 Seastar gives C++.  It is a single library you can link against to write

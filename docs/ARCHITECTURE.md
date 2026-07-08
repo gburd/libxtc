@@ -1,3 +1,9 @@
+---
+title: Architecture
+parent: Reference
+nav_order: 2
+---
+
 # Architecture
 
 This document is the short reference for the xtc layering.  The

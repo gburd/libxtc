@@ -1,3 +1,9 @@
+---
+title: PostgreSQL adapter (design)
+parent: Reference
+nav_order: 20
+---
+
 # M16 -- PostgreSQL adapter (design sketch)
 
 **Status:** research; not yet implemented.  This document defines the

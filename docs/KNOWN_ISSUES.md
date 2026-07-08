@@ -1,3 +1,9 @@
+---
+title: Known issues
+parent: Reference
+nav_order: 7
+---
+
 # Known issues -- pending investigation
 
 ## Runtime-thread signal mask: primitive fixed, an integration case remains

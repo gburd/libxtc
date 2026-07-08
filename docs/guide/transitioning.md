@@ -1,3 +1,9 @@
+---
+title: Thinking in libxtc
+parent: Guide
+nav_order: 6
+---
+
 # Thinking in libxtc: a guide for C, C++, and Rust programmers
 
 You are good at C, C++, or Rust.  That skill is necessary here and not
