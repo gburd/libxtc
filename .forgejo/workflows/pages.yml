@@ -54,11 +54,14 @@ jobs:
       - name: Check documentation links (lychee)
         working-directory: docs
         run: |
-          # Install the lychee link checker (static binary).
+          # Build a copy with an empty baseurl so root-relative links
+          # resolve locally, then check every link and anchor.
+          bundle exec jekyll build --baseurl "" --destination _site_check
           LYCHEE_VER=v0.15.1
           curl -sSL "https://github.com/lycheeverse/lychee/releases/download/${LYCHEE_VER}/lychee-x86_64-unknown-linux-gnu.tar.gz" \
             | tar xz lychee
-          ./lychee --config lychee.toml --no-progress '_site/**/*.html' ../README.md
+          ./lychee --config lychee.toml --no-progress \
+            --root-dir "$PWD/_site_check" '_site_check/**/*.html' ../README.md
 
       - name: Deploy to Codeberg Pages
         uses: https://codeberg.org/git-pages/action@v2
