@@ -236,6 +236,101 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: make -C build_san check
 
+  valgrind:
+    # Run the runtime under Valgrind's memcheck + Helgrind + DRD over a
+    # curated, fast subset of the C unit tests.  The full munit suite is
+    # far too slow under Valgrind, so each tool sees only a handful of
+    # binaries chosen to exercise allocation and real threads without
+    # needing many cores or real sockets.
+    #
+    # Substrate choices that matter for Valgrind:
+    #   * epoll I/O backend (NOT io_uring -- Valgrind does not model
+    #     io_uring and the runner may lack it).
+    #   * ucontext coroutine substrate (configure's default on glibc):
+    #     Valgrind's stack-change tracking copes with ucontext far
+    #     better than with the raw fcontext assembly.
+    #
+    # Gating policy:
+    #   * memcheck GATES the job (--error-exitcode=1): a leak or invalid
+    #     access is a real bug and must go red.  Its subset deliberately
+    #     excludes tests that fault on purpose (e.g. test_proc's
+    #     flt_faulter writes to a null-ish address to drive crash
+    #     recovery -- a genuine invalid write memcheck rightly flags).
+    #   * Helgrind and DRD are INFORMATIONAL (report printed, job not
+    #     failed).  They mis-model the work-stealing executor's and lock
+    #     manager's atomic lifecycle handshakes and report benign
+    #     teardown races; a small suppressions file (.github/valgrind.supp)
+    #     silences the understood ones, and the rest are surfaced for a
+    #     human to read rather than used to gate.  Flip the `|| true`
+    #     below to make them gate once the runtime is annotated for the
+    #     race detectors.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            valgrind gcc make autoconf automake pkg-config libssl-dev gawk
+
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+
+      - name: Configure (epoll backend, ucontext substrate)
+        run: |
+          mkdir -p build_vg
+          cd build_vg
+          ../dist/configure --with-tls=auto --with-io-backend=epoll
+
+      - name: Build the memcheck + race-detector test subsets
+        run: |
+          make -C build_vg -j"$(nproc)" \
+            test_chan test_mctx test_timer test_loop test_svr \
+            test_sync test_lockmgr test_exec test_cross_wake
+
+      - name: memcheck (leak + error gate)
+        working-directory: build_vg
+        run: |
+          set -e
+          # Curated subset: allocation- and concurrency-heavy tests that
+          # do not deliberately fault.  Gated: any error fails the job.
+          for t in test_chan test_mctx test_timer test_loop test_svr \
+                   test_sync test_lockmgr; do
+            echo "===== memcheck $t ====="
+            valgrind --tool=memcheck \
+              --suppressions=../.github/valgrind.supp \
+              --leak-check=full \
+              --show-leak-kinds=definite,indirect \
+              --errors-for-leak-kinds=definite \
+              --track-origins=yes \
+              --error-exitcode=1 \
+              ./$t
+          done
+
+      - name: Helgrind (data-race detector, informational)
+        working-directory: build_vg
+        run: |
+          # Smaller, genuinely multi-threaded subset.  Informational:
+          # the report is printed but does not gate (see job comment).
+          for t in test_exec test_cross_wake test_sync test_lockmgr; do
+            echo "===== helgrind $t ====="
+            valgrind --tool=helgrind \
+              --suppressions=../.github/valgrind.supp \
+              ./$t || echo "helgrind $t reported issues (informational)"
+          done
+
+      - name: DRD (data-race detector, informational)
+        working-directory: build_vg
+        run: |
+          for t in test_exec test_cross_wake test_sync test_lockmgr; do
+            echo "===== drd $t ====="
+            valgrind --tool=drd \
+              --suppressions=../.github/valgrind.supp \
+              ./$t || echo "drd $t reported issues (informational)"
+          done
+
   examples:
     # Build the examples and run their in-process tests (no daemons,
     # so nothing hangs CI).  The examples exercise the public API

@@ -1,0 +1,49 @@
+# libxtc Valgrind suppressions -- known-benign runtime internals.
+#
+# These are NOT bugs.  Valgrind's race detectors (Helgrind, DRD) cannot
+# see through the runtime's atomic lifecycle handshakes, so a small set
+# of teardown patterns are reported as data races.  Each entry below is
+# a specific, understood false positive -- not a blanket silence.
+#
+# memcheck runs with an EMPTY-effect against this file (no memcheck
+# entries here): the leak/error gate is meant to stay honest, so if
+# memcheck ever fires we want it red.  Helgrind/DRD are informational
+# (they do not gate the job) but still load this file so their report
+# is signal rather than noise.
+#
+# To regenerate/extend: run under a tool with --gen-suppressions=all
+# and paste the emitted stanza here with a comment explaining WHY it is
+# benign.
+
+# --- Helgrind ---------------------------------------------------------
+
+# lock_mgr's deadlock-detector thread reads a lockmgr field while the
+# owning thread tears the manager down.  The detector is joined/stopped
+# as part of destroy; the read is on a copy that is race-free in program
+# order, but Helgrind cannot see the stop handshake.  Benign teardown.
+{
+   xtc_lockmgr_detector_teardown_helgrind
+   Helgrind:Race
+   fun:__detector_thread
+}
+{
+   xtc_lockmgr_destroy_teardown_helgrind
+   Helgrind:Race
+   fun:xtc_lockmgr_destroy
+   fun:test_deadlock
+}
+
+# --- DRD --------------------------------------------------------------
+
+# Same lock_mgr detector-thread teardown pattern as above, seen by DRD.
+{
+   xtc_lockmgr_detector_teardown_drd
+   drd:ConflictingAccess
+   fun:__detector_thread
+}
+{
+   xtc_lockmgr_destroy_teardown_drd
+   drd:ConflictingAccess
+   fun:xtc_lockmgr_destroy
+   fun:test_deadlock
+}

@@ -1,0 +1,82 @@
+name: Release
+
+# Triggered by pushing a tag matching v* (e.g. v1.7.0).  Confirms the
+# tag builds, produces three artifacts (source tarball, single-file
+# amalgamation, man-page bundle), and attaches them to a GitHub
+# Release for the tag.  Does not touch ci.yml or pages.yml.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make autoconf automake libtool \
+            pkg-config libssl-dev liburing-dev gawk python3
+
+      - name: Derive version
+        id: ver
+        run: echo "version=$(cat dist/version.in)" >> "$GITHUB_OUTPUT"
+
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+
+      - name: Build (confirm the tag compiles)
+        run: |
+          mkdir -p build_rel
+          cd build_rel
+          ../dist/configure --with-tls=auto
+          make -j"$(nproc)"
+          test -f libxtc.a
+
+      - name: Source tarball
+        run: |
+          ver='${{ steps.ver.outputs.version }}'
+          git archive --format=tar.gz --prefix="libxtc-$ver/" \
+            "${GITHUB_REF_NAME}" > "libxtc-$ver.tar.gz"
+
+      - name: Amalgamation bundle (xtc.c + xtc.h)
+        run: |
+          ver='${{ steps.ver.outputs.version }}'
+          python3 dist/mkamalgamation.py --root "$PWD" --out amalg
+          test -s amalg/xtc.c && test -s amalg/xtc.h
+          tar -czf "libxtc-amalgamation-$ver.tar.gz" -C amalg xtc.c xtc.h
+
+      - name: Man-page bundle
+        run: |
+          ver='${{ steps.ver.outputs.version }}'
+          tar -czf "libxtc-man-$ver.tar.gz" man/
+
+      - name: Release notes from changelog
+        run: |
+          ver='${{ steps.ver.outputs.version }}'
+          awk -v v="$ver" '
+            $0 ~ "^libxtc \\("v {p=1}
+            p && /^libxtc \(/ && $0 !~ v {exit}
+            p {print}
+          ' debian/changelog > notes.md
+          if [ ! -s notes.md ]; then
+            echo "libxtc $ver" > notes.md
+          fi
+
+      - name: Create GitHub Release and upload artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: notes.md
+          files: |
+            libxtc-${{ steps.ver.outputs.version }}.tar.gz
+            libxtc-amalgamation-${{ steps.ver.outputs.version }}.tar.gz
+            libxtc-man-${{ steps.ver.outputs.version }}.tar.gz
