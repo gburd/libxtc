@@ -2,10 +2,10 @@
 title: Debugging and observing
 parent: Guide
 nav_order: 7
+lede: >-
+  Finding bugs in the message-passing model with GDB/LLDB and the runtime's own introspection.
+permalink: /guide/debugging/
 ---
-
-# Debugging and observing libxtc programs
-
 This guide is task-oriented: a libxtc program is misbehaving, and you
 want to find out why.  It pairs the native-debugger tooling
 (`tools/gdb/xtc-gdb.py`, `tools/lldb/xtc_lldb.py`) with the

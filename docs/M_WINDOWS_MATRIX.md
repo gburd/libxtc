@@ -2,10 +2,10 @@
 title: Windows toolchain matrix
 parent: Reference
 nav_order: 12
+lede: >-
+  Windows toolchains and what is verified on each.
+permalink: /reference/windows-matrix/
 ---
-
-# Windows build matrix
-
 xtc supports multiple Windows toolchains.  This document records
 which compile and test combinations are exercised on Windows hosts.
 
@@ -288,7 +288,7 @@ MinGW64 with `CC=clang`:
 
 The 47 that build pass 48/48 (the 2 TLS handshake cases SKIP, same
 reason as MinGW64).  Tracking the three Windows ports in
-[PLAN.md](../PLAN.md).
+[PLAN.md](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md).
 
 ## MSVC cl.exe
 

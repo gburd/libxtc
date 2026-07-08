@@ -2,11 +2,10 @@
 title: Choices and roads not taken
 parent: Philosophy
 nav_order: 2
-permalink: /philosophy/choices
+permalink: /philosophy/choices/
+lede: >-
+  The alternatives libxtc considered and deliberately rejected, with the reasoning.
 ---
-
-# Choices and roads not taken
-
 Every design is defined as much by what it rejects as by what it adopts.
 This page collects the significant alternatives libxtc considered and
 deliberately did *not* choose, with the reasoning. The guide chapters
@@ -22,7 +21,7 @@ structs. libxtc uses fibers so the code stays linear and the variables
 stay on the stack; the cost is a small per-fiber stack instead of a
 large readability tax. Where an explicit state machine is genuinely
 wanted -- vast numbers of tiny uniform entities -- libxtc offers the
-stackless [Isolate layer](../examples/) as an opt-in, not as the
+stackless [Isolate layer]({{ '/examples/' | relative_url }}) as an opt-in, not as the
 default.
 
 ## Shared-nothing processes, not shared state behind a mutex
@@ -33,7 +32,7 @@ compose: every invariant adds a lock, lock order becomes a global proof
 obligation, and a holder that dies wedges everyone. libxtc's default is
 the shared-nothing process, where state has exactly one owner and
 failure is contained. The lock primitives still ship
-([Locks](../locks)) for the cases that truly want shared memory -- they
+([Locks]({{ '/reference/locks/' | relative_url }})) for the cases that truly want shared memory -- they
 are the exception, chosen deliberately.
 
 ## Let it crash, not defensive error handling everywhere
@@ -94,5 +93,5 @@ your program, not the other way around.
 
 ---
 
-Back to [Why libxtc exists](why) &middot; on to the
-[Guide](../guide/) or the [Examples](../examples/).
+Back to [Why libxtc exists]({{ '/philosophy/why/' | relative_url }}) &middot; on to the
+[Guide]({{ '/guide/' | relative_url }}) or the [Examples]({{ '/examples/' | relative_url }}).

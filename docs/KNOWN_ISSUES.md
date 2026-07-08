@@ -2,10 +2,10 @@
 title: Known issues
 parent: Reference
 nav_order: 7
+lede: >-
+  Honest caveats, workarounds, and the platform-verification status.
+permalink: /reference/known-issues/
 ---
-
-# Known issues -- pending investigation
-
 ## Runtime-thread signal mask: primitive fixed, an integration case remains
 
 **Status:** partial.  The carrier reported a process-directed SIGCHLD

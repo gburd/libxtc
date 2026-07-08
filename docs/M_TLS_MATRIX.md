@@ -2,10 +2,10 @@
 title: TLS backend matrix
 parent: Reference
 nav_order: 11
+lede: >-
+  Which TLS backends build and pass the suite, on which platforms.
+permalink: /reference/tls-matrix/
 ---
-
-# TLS backend matrix
-
 xtc's TLS layer (`xtc_tls`) is one internal seam fronted by several
 configure-time-selected backends.  The OpenSSL-API backend
 (`src/io/tls_openssl.c`) compiles unchanged against any

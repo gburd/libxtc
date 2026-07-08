@@ -18,6 +18,18 @@ lang: en
 # both Pages builders and a local `bundle exec jekyll build` resolve it.
 theme: just-the-docs
 
+# Diagrams: just-the-docs renders ```mermaid fenced blocks client-side.
+mermaid:
+  version: "10.9.1"
+
+# Default page layout: our hero-styled wrapper (big title + lede), so
+# every content page carries the landing-page look.
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: content
+
 # Site-relative base path.  Both GitHub Pages (user.github.io/libxtc)
 # and Codeberg Pages (user.codeberg.page/libxtc) serve under /libxtc.
 baseurl: "/libxtc"

@@ -2,12 +2,10 @@
 title: Processes and messages
 parent: Guide
 nav_order: 3
-permalink: /guide/03-processes-and-messages
+permalink: /guide/03-processes-and-messages/
+lede: >-
+  Addressable, mailbox-owning units with private state -- the Erlang/BEAM model, in C.
 ---
-
-# Processes and messages
-{: .no_toc }
-
 1. TOC
 {:toc}
 
@@ -30,6 +28,21 @@ process's mailbox, and `xtc_recv(&buf, &size, timeout_ns)` blocks
 Here is a two-process ping/pong. `pong` waits for a number and replies
 with one more; `ping` kicks it off and bounces the number back until it
 reaches a limit.
+
+```mermaid
+sequenceDiagram
+    participant P as ping
+    participant Q as pong
+    P->>Q: {from: ping, n: 0}
+    Q->>P: {from: pong, n: 1}
+    P->>Q: {from: ping, n: 2}
+    Q->>P: {from: pong, n: 3}
+    P->>Q: {from: ping, n: 4}
+    Note over Q: n >= ROUNDS, done
+```
+
+Each arrow is one `xtc_send` into the target's mailbox; each process
+sits in `xtc_recv` until a message arrives. No shared memory, no locks.
 
 {% include snippet.html file="03_ping_pong.c" region="full" %}
 
@@ -67,7 +80,7 @@ plain byte queue and lets you design your own protocols on top.
 > everyone. The process model trades a little copy cost for the property
 > that state has exactly one owner and failure is contained to that
 > owner. libxtc still ships mutexes, rwlocks, RCU, and a lock manager
-> ([Locks and synchronization](../locks)) for the cases that genuinely
+> ([Locks and synchronization]({{ '/reference/locks/' | relative_url }})) for the cases that genuinely
 > want shared memory -- but the *default* unit of concurrency is the
 > shared-nothing process.
 
@@ -92,9 +105,9 @@ unrelated traffic. See
 
 Processes let things run independently. The next chapter is about what
 happens when one of them *fails*, and how to build systems that recover:
-[links, monitors, and supervisors](04-supervision).
+[links, monitors, and supervisors]({{ '/guide/04-supervision/' | relative_url }}).
 
 ---
 
-&larr; [Fibers and the event loop](02-fibers-and-the-loop) &middot;
-Next: [Links, monitors, and supervisors](04-supervision) &rarr;
+&larr; [Fibers and the event loop]({{ '/guide/02-fibers-and-the-loop/' | relative_url }}) &middot;
+Next: [Links, monitors, and supervisors]({{ '/guide/04-supervision/' | relative_url }}) &rarr;

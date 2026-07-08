@@ -2,12 +2,10 @@
 title: Links, monitors, and supervisors
 parent: Guide
 nav_order: 4
-permalink: /guide/04-supervision
+permalink: /guide/04-supervision/
+lede: >-
+  Let it crash, detect it, and recover at a higher level: links, monitors, and supervisors.
 ---
-
-# Links, monitors, and supervisors
-{: .no_toc }
-
 1. TOC
 {:toc}
 
@@ -73,6 +71,24 @@ processes, monitor them, and restart them according to a **strategy**
 when they die. You describe the children and the policy; the supervisor
 runs the "let it crash, then recover" loop for you.
 
+```mermaid
+flowchart TD
+    root(["root supervisor<br/>one_for_all"]) --> db["db supervisor<br/>one_for_one"]
+    root --> net["listener process"]
+    db --> w1["worker 1"]
+    db --> w2["worker 2"]
+    db --> w3["worker 3"]
+    w2 -. crashes .-> db
+    db -. restarts just w2 .-> w2
+    classDef sup fill:#e8f0ff,stroke:#3b6;
+    class root,db sup;
+```
+
+When `worker 2` crashes, its `one_for_one` supervisor restarts only that
+child. Had the supervisor been `one_for_all`, all three workers would
+restart together. A crash the `db` supervisor cannot contain (its
+restart budget is exhausted) escalates to the root supervisor.
+
 libxtc's `xtc_sup_*` API
 ([`xtc_supervisor(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_supervisor.3))
 offers the classic OTP strategies:
@@ -90,7 +106,7 @@ and escalates to *its* supervisor. This is the tree that makes BEAM
 systems self-heal, and
 [`examples/03_supervised_app.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/03_supervised_app.c)
 shows a whole application built as one -- walked through in the
-[Examples](../examples/) section.
+[Examples]({{ '/examples/' | relative_url }}) section.
 
 {: .not_chosen }
 > **Defensive error handling everywhere.** The alternative to
@@ -116,9 +132,9 @@ shows a whole application built as one -- walked through in the
 You now have the whole process model: spawn, message, and supervise. The
 last guide chapter is about the outside world -- files, sockets, and
 blocking C libraries -- without giving up the single-threaded-loop
-simplicity: [Blocking work and I/O](05-blocking-and-io).
+simplicity: [Blocking work and I/O]({{ '/guide/05-blocking-and-io/' | relative_url }}).
 
 ---
 
-&larr; [Processes and messages](03-processes-and-messages) &middot;
-Next: [Blocking work and I/O](05-blocking-and-io) &rarr;
+&larr; [Processes and messages]({{ '/guide/03-processes-and-messages/' | relative_url }}) &middot;
+Next: [Blocking work and I/O]({{ '/guide/05-blocking-and-io/' | relative_url }}) &rarr;

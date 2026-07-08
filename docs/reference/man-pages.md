@@ -2,11 +2,10 @@
 title: Manual pages
 parent: Reference
 nav_order: 1
-permalink: /reference/man-pages
+permalink: /reference/man-pages/
+lede: >-
+  Every public function has a manual page -- coverage is a release gate.
 ---
-
-# Manual pages
-
 Every public function ships a manual page (`man xtc_loop`, etc.).
 Coverage is enforced by a release gate: a public `xtc_*` symbol without
 a man page fails the build. The pages below link to their source in the

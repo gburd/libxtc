@@ -2,18 +2,18 @@
 title: The public API
 parent: Reference
 nav_order: 3
+lede: >-
+  The shape of the public xtc_* surface.
+permalink: /reference/api/
 ---
-
-# Public API Reference
-
 This document is the reference for every public xtc symbol.  The
 authoritative declarations live in
-[`../src/inc/xtc.h`](../src/inc/xtc.h); this document is the
+[`../src/inc/xtc.h`](https://codeberg.org/gregburd/libxtc/src/branch/main/src/inc/xtc.h); this document is the
 human-readable counterpart, kept in sync by the discipline that
 every entry here corresponds to a man page in `../man/man3/`
 (asserted by `M0_CLAIMS.md` [D4]).
 
-For background, read [`../PLAN.md`](../PLAN.md) (S)0 first.
+For background, read [`../PLAN.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) (S)0 first.
 
 ## M0 surface
 
@@ -60,7 +60,7 @@ the known set return `"unknown"`; the function never returns NULL.
 
 The exact message text for known codes is part of the API contract
 and changes only on a major version bump.  See
-[`abi-stability.md`](abi-stability.md).
+[`abi-stability.md`]({{ '/reference/abi-stability/' | relative_url }}).
 
 See `xtc_strerror(3)`.
 
@@ -108,8 +108,8 @@ Per `M0_CLAIMS.md`:
 
 ## See also
 
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) -- the layered design.
-- [`abi-stability.md`](abi-stability.md) -- what we promise across
+- [`ARCHITECTURE.md`]({{ '/reference/architecture/' | relative_url }}) -- the layered design.
+- [`abi-stability.md`]({{ '/reference/abi-stability/' | relative_url }}) -- what we promise across
   versions.
 - `xtc(7)` -- man-page overview.
 - `../PLAN.md` -- full design with all 21 sections.

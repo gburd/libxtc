@@ -2,10 +2,10 @@
 title: Locks and synchronization
 parent: Reference
 nav_order: 4
+lede: >-
+  Which synchronization primitive to reach for, and when.
+permalink: /reference/locks/
 ---
-
-# Locks and synchronization in libxtc
-
 This reference documents every locking and synchronization
 primitive xtc provides, organized by the layer that hosts it.
 The audience is a programmer choosing a primitive for a particular
@@ -594,11 +594,11 @@ implications of this design:
 
 ## See also
 
-  * [`xtc_lwlock(3)`](../man/man3/xtc_lwlock.3) -- LWLock manual page.
-  * [`xtc_lrlock(3)`](../man/man3/xtc_lrlock.3) -- LRLock manual page.
-  * [`xtc_lockmgr(3)`](../man/man3/xtc_lockmgr.3) -- Lock manager manual page.
-  * [`xtc_sync(3)`](../man/man3/xtc_sync.3) -- Sync primitives manual page.
-  * [`xtc_rcu(3)`](../man/man3/xtc_rcu.3) -- RCU manual page.
+  * [`xtc_lwlock(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_lwlock.3) -- LWLock manual page.
+  * [`xtc_lrlock(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_lrlock.3) -- LRLock manual page.
+  * [`xtc_lockmgr(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_lockmgr.3) -- Lock manager manual page.
+  * [`xtc_sync(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_sync.3) -- Sync primitives manual page.
+  * [`xtc_rcu(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_rcu.3) -- RCU manual page.
 
 The Berkeley DB locking subsystem documentation, available in
 the BDB source tree, is the canonical reference for the

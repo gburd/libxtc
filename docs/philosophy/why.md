@@ -2,11 +2,10 @@
 title: Why libxtc exists
 parent: Philosophy
 nav_order: 1
-permalink: /philosophy/why
+permalink: /philosophy/why/
+lede: >-
+  The problem C never got a library for, and the shape of the answer.
 ---
-
-# Why libxtc exists
-
 C is where the systems that everything else runs on are written:
 databases, kernels, network servers, language runtimes. Yet C has no
 native answer to the problem every one of those systems faces --
@@ -58,7 +57,7 @@ has resisted threading for decades and giving it a runtime that makes
 threading tractable. That goal drives the requirements: real
 portability, an allocator hook an embedder controls, signal-mask
 correctness, blocking-call escape hatches, and above all *testability*
-under adversarial scheduling. The [example programs](../examples/) --
+under adversarial scheduling. The [example programs]({{ '/examples/' | relative_url }}) --
 especially the from-scratch SQL engine -- are the proving ground: if a
 real server cannot be written cleanly on libxtc, that is a bug in
 libxtc, not in the server.
@@ -69,7 +68,7 @@ Two commitments run through the whole project:
 
 1. **Honesty over marketing.** Every claim in this manual is backed by a
    test or a runnable snippet; every gap is written down in
-   [Known issues](../KNOWN_ISSUES) rather than papered over. A
+   [Known issues]({{ '/reference/known-issues/' | relative_url }}) rather than papered over. A
    documented limitation is worth more than an undocumented surprise.
 2. **The default is safe; the escape hatch is explicit.** Shared-nothing
    processes, suspending I/O, and supervised failure are the defaults.
@@ -79,4 +78,4 @@ Two commitments run through the whole project:
 
 If you have written Go, Tokio, Seastar, or Erlang and wished you had it
 in C, that is the gap libxtc fills. The next essay is about the
-[choices and roads not taken](choices) that gave it this shape.
+[choices and roads not taken]({{ '/philosophy/choices/' | relative_url }}) that gave it this shape.

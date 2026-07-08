@@ -3,9 +3,9 @@ title: Examples
 nav_order: 4
 has_children: false
 permalink: /examples/
+lede: >-
+  Complete, buildable programs -- each explained, with its design decisions and trade-offs.
 ---
-
-# The example programs
 {: .no_toc }
 
 1. TOC
@@ -34,14 +34,14 @@ cd examples/05_rexis && make XTC_BUILD=../../build
 A ~30-line program that spawns one coroutine, yields once, and awaits
 the result. It exists to prove the async/await contract end to end and
 to be the first thing a newcomer reads. It is the basis of
-[Getting started](guide/01-getting-started).
+[Getting started]({{ '/guide/01-getting-started/' | relative_url }}).
 
 ### 02_proc_pingpong -- message passing
 Two processes bounce a counter back and forth. It shows that the
 `xtc_send` / `xtc_recv` surface is enough to build request/reply RPC,
 and it establishes the idiom of encoding the reply-to pid in the
 payload (libxtc deliberately does not attach an implicit sender --
-[why](guide/03-processes-and-messages)).
+[why]({{ '/guide/03-processes-and-messages/' | relative_url }})).
 
 ### 03_supervised_app -- an OTP application
 An `xtc_app` with a root supervisor (`one_for_all`), two workers, and an
@@ -54,7 +54,7 @@ This is the skeleton of a real service.
 Two transactions deadlock on a heavyweight lock manager; the detector
 finds the circular wait and aborts the younger transaction. It is the
 counterpoint to the process model: when you *do* want shared,
-lock-ordered state, [the lock manager](locks) provides it -- with
+lock-ordered state, [the lock manager]({{ '/reference/locks/' | relative_url }}) provides it -- with
 deadlock detection, which hand-rolled `pthread_mutex` ordering does not.
 
 ## The servers (05--09)
@@ -119,7 +119,7 @@ transitions rather than owning a fiber stack.
 - **Trade-off:** stackless code is less linear than fiber code (you
   write transitions, not straight-line logic) in exchange for a much
   smaller per-entity footprint. It is the counter-example the guide's
-  [not-chosen callouts](guide/01-getting-started) point at: fibers are
+  [not-chosen callouts]({{ '/guide/01-getting-started/' | relative_url }}) point at: fibers are
   the default, but the state-machine style is a first-class option here.
 
 ### 09_pgmock -- a mock PostgreSQL backend
@@ -128,11 +128,11 @@ per client, each speaking a minimal PostgreSQL v3 wire handshake and
 `SELECT 1` -- with **zero PostgreSQL source**. It proves the runtime
 seam for the future PG adapter: no-fork connection multiplexing, and
 `WaitLatchOrSocket` mapped onto `xtc_proc_wait_fd`. See
-[the PG adapter design](M16_PG_ADAPTER).
+[the PG adapter design]({{ '/reference/pg-adapter/' | relative_url }}).
 
 ## Reading suggestion
 
-Read **01--04** alongside the [Guide](guide/) -- each maps to a chapter.
+Read **01--04** alongside the [Guide]({{ '/guide/' | relative_url }}) -- each maps to a chapter.
 Then read **05_rexis** for a complete, approachable server, and
 **06_sqlxtc** when you want to see libxtc under real storage-engine
 pressure.

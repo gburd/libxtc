@@ -2,10 +2,10 @@
 title: Thinking in libxtc
 parent: Guide
 nav_order: 6
+lede: >-
+  The mental shifts a C, C++, or Rust programmer must make -- and the anti-patterns that bite.
+permalink: /guide/transitioning/
 ---
-
-# Thinking in libxtc: a guide for C, C++, and Rust programmers
-
 You are good at C, C++, or Rust.  That skill is necessary here and not
 sufficient.  libxtc asks you to give up a few habits that are correct
 everywhere else and that, kept, will produce deadlocks, stalls, and
