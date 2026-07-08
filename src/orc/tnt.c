@@ -4,7 +4,7 @@
  *
  * src/orc/tnt.c
  *	tnt scheduler + effect interpreter.  See xtc_tnt.h and
- *	docs/M_TINA_LAYER.md.
+ *	the Tina design (see man xtc_tnt).
  *
  *	ARCHITECTURE.  One long-lived xtc_proc per shard (one per
  *	xtc_exec loop).  That shard proc owns:

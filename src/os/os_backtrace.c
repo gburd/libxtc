@@ -50,8 +50,8 @@
  *	   length 0.  The dump facility degrades to "no C stack, but full
  *	   proc/loop/mailbox state" rather than failing.
  *
- *	See src/inc/os_backtrace.h, docs/M_PORT.md, and docs/guide/
- *	debugging.md for the per-platform symbolization matrix.
+ *	See src/inc/os_backtrace.h and docs/guide/debugging.md for the
+ *	per-platform symbolization matrix.
  */
 
 /*

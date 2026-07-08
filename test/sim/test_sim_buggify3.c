@@ -246,7 +246,7 @@ b_winder(void *arg)
 	(void)xtc_svr_stop(g_bsvr);
 	/* Reclaim after the run (non-blocking join), not here: xtc_svr_join
 	 * blocks on a pthread notify with no fiber-yield shim, which would
-	 * freeze the sim thread.  See test_sim_svr / docs/M_DST.md. */
+	 * freeze the sim thread.  See test_sim_svr / the design notes. */
 }
 
 static int

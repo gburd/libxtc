@@ -15,7 +15,7 @@
  *	impractical; the virtual-table seam is the supported mechanism.
  *
  *	MVCC model (see
- *	docs/M_SQLXTC_MVCC_SQL.md).  Each row VERSION is stored under the
+ *	the design notes).  Each row VERSION is stored under the
  *	B-tree key (rowid, commit_ts), with versions of one rowid
  *	clustered and ordered newest-first (the timestamp half is stored
  *	bit-inverted so a forward scan visits the highest commit_ts
@@ -43,7 +43,7 @@
  *	enforced: xs_sync (2PC phase 1) calls ssi_in_conflict and returns
  *	SX_BUSY on a dangerous rw-antidependency pivot, rolling the
  *	transaction back -- with predicate (range) locking so disjoint
- *	readers do not falsely conflict.  See docs/M_SQLXTC_MVCC_SQL.md and
+ *	readers do not falsely conflict.  See the design notes and
  *	the scenario_serializable / SSI-range tests in test_xstore.c.
  */
 
@@ -2101,7 +2101,7 @@ xs_wal_emit_stage(uint64_t steal_txn, int64_t stage_id, const void *val, uint16_
  * replays the XL_PAGE images (page-LSN gated, idempotent) to repair the
  * torn structure in place; the dummy CLR records that a completed SMO is
  * redone to completion and never half-undone (Stasis NTA model,
- * docs/M_SQLXTC_BDB.md sec 2.7).  No-op without a log.
+ * the design notes sec 2.7).  No-op without a log.
  */
 static uint64_t
 xs_smo_begin(void *user)
@@ -2147,7 +2147,7 @@ xs_smo_page(void *user, bm_pid_t pid, const void *image,
  * record's own WAL LSN), but logged for an in-leaf insert that did NOT
  * split -- so in-place recovery can repair a torn NON-split leaf from
  * its image instead of a logical redo mis-descending the torn page and
- * losing its whole key range (the docs/M_SQLXTC_BDB.md S3 trap).  No
+ * losing its whole key range (the the design notes S3 trap).  No
  * nested-top-action bracket: a single-leaf change is atomic under the
  * double-write buffer.  txn_id 0 (the image belongs to no one txn).
  * Returns the image record's WAL LSN so btree.c can stamp the live page.
@@ -2675,7 +2675,7 @@ xs_sync(xsql_vtab *pv)
 	/*
 	 * Serializable validation, in xSync (2PC phase 1) so a failure
 	 * rolls the transaction back -- xCommit (phase 2) is too late.
-	 * See docs/M_SQLXTC_MVCC_SQL.md.
+	 *
 	 */
 	return xs_ssi_validate(((xstore_vtab_t *)pv)->ctx);
 }
@@ -4027,7 +4027,7 @@ xstore_recover(bt_t *bt, const char *wal_path)
  *   xstore_recover.  Because pass 1 already restored every torn leaf,
  *   the logical redo never has to navigate torn structure -- which is
  *   what made the earlier single-pass logical redo lose a torn
- *   non-split leaf's whole key range (docs/M_SQLXTC_BDB.md S3).
+ *   non-split leaf's whole key range (the design notes S3).
  *
  * Requires `bm` to be the same buffer manager `bt` runs on, opened
  * reopen=1 (not truncated) with lsn_off >= 0, AND the engine's

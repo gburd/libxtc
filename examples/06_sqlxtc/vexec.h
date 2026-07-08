@@ -8,7 +8,7 @@
  *	Vectorized execution engine -- V0/V1 (recognizer + fallback + a
  *	single-pipeline scan/filter/project executor with a compiled,
  *	vectorized scalar expression evaluator).  See
- *	docs/M_SQLXTC_VEXEC.md.
+ *	the design notes.
  *
  *	The engine intercepts a query: a RECOGNIZER inspects the Lime AST
  *	and, if it matches the P1/P2 template (single-table scan,

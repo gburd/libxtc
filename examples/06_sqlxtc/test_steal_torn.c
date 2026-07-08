@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/test_steal_torn.c
- *	Torn-tail safety of crash recovery (Increment 1 of M_SQLXTC_STEAL.md).
+ *	Torn-tail safety of crash recovery (Increment 1 of the design notes).
  *
  *	A crash mid-append leaves a partially written trailing record.  A
  *	prior STEAL probe showed that when recovery TRUSTED the length/id

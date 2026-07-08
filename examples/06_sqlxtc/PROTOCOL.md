@@ -120,6 +120,6 @@ and closes the connection.
 A real production wire protocol would be binary, length-prefixed, and
 versioned.  We use newline JSON for two reasons: (1) it is trivial to
 test from `nc` and python; (2) the example is about xtc, not about the
-n-th wire protocol.  See `docs/M_LIBXTC_PG_BOUNDARY.md` for why a real
+n-th wire protocol.  See `the design notes` for why a real
 server would put the wire protocol on the application side of the
 boundary.

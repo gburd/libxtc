@@ -22,7 +22,7 @@
  * __mbox_deliver (proc.c), the single cross-loop delivery seam that the
  * partition/latency knobs hook.  (The real cross-machine raw-socket
  * transport is NOT modelled -- it cannot run under the single-thread
- * sim; see docs/M_DST.md.)
+ * sim;.)
  *
  * Topology: 4 loops split into two groups, A = {loop 0, loop 1} and
  * B = {loop 2, loop 3}.  One receiver proc per loop.  A sender proc for

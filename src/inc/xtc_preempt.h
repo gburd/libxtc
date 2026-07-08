@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_preempt.h
- *	Per-worker preemption timer seam.  See docs/M_PREEMPTION.md.
+ *	Per-worker preemption timer seam.
  *
  *	Phase 0 (this): a per-thread CPU-time interval timer whose handler
  *	records a tick.  No preemption yet -- the seam later phases build

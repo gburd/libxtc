@@ -23,7 +23,7 @@
 #
 # Output format (per run):
 #   Each binary must write exactly one key=value line to stdout; see
-#   docs/M17_RESULTS_FORMAT.md for the full specification.
+#   the design notes for the full specification.
 #
 # CSV columns produced:
 #   workload, runtime, params, elapsed_ns, cpu_us, rss_kb,

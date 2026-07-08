@@ -15,9 +15,6 @@
  *	internal __os_* topology surface (os_cpu.h) or stitch together
  *	xtc_exec_n_loops + xtc_app_exec by hand; xtc_runtime_info()
  *	collects it all into one struct.
- *
- *	See docs/M_SQLXTC_XTC_GAPS.md ("a single runtime-introspection
- *	call") and docs/M_OBSERVABILITY.md.
  */
 
 #ifndef XTC_RUNTIME_H

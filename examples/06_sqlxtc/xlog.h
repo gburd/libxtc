@@ -57,7 +57,7 @@
  *	and writes go through memcpy, matching the rest of the engine.
  *
  *	This is the format the redo/undo recovery driver consumes; see
- *	docs/M_SQLXTC_BDB.md stages S2 (logging) and S3 (recovery).
+ *	the design notes stages S2 (logging) and S3 (recovery).
  */
 
 #ifndef SQLXTC_XLOG_H

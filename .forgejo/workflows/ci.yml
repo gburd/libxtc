@@ -120,7 +120,7 @@ jobs:
   sim-dst:
     # Deterministic Simulation Testing: sim I/O backend + the multi-loop
     # deterministic scheduler + cross-loop park/wake replay tests.
-    # See docs/M_DST.md and test/sim/.
+    # See test/sim/ for the deterministic scheduler + replay tests.
     runs-on: codeberg-small
     steps:
       - name: Install dependencies

@@ -4,7 +4,7 @@
  *
  * src/os/asm/preempt_trampoline_x86_64.S
  *	Involuntary-preemption resume trampoline for x86-64 System V
- *	(Linux, *BSD, illumos).  Phase 2b-arch of docs/M_PREEMPTION.md.
+ *	(Linux, *BSD, illumos).  Phase 2b-arch of the preemption facility.
  *
  *	Go's async-preemption mechanism.  When the per-thread CPU timer
  *	fires inside a running fiber at a SAFE point (crit_depth == 0,

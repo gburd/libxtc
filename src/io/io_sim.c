@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/io/io_sim.c
- *	Deterministic-simulation (DST) I/O backend.  See docs/M_DST.md.
+ *	Deterministic-simulation (DST) I/O backend.
  *
  *	There is no kernel poller: readiness for registered fds and file-
  *	AIO completions come from a scripted, in-process event store the

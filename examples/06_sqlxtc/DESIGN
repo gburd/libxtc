@@ -9,11 +9,11 @@ why the pieces are shaped the way they are.
 
 Three companion deep-dives live in ../../docs/:
 
-    M_SQLXTC_STORAGE.md    the from-scratch storage engine
-    M_SQLXTC_VEXEC.md      the vectorized executor
-    M_SQLXTC_MVCC_SQL.md   MVCC, isolation, and SSI
-    M_SQLXTC_WAL.md        the write-ahead log and ARIES recovery
-    M_SQLXTC_GREENFIELD.md the clean-slate direction this example took
+    the design notes    the from-scratch storage engine
+    the design notes      the vectorized executor
+    the design notes   MVCC, isolation, and SSI
+    the design notes        the write-ahead log and ARIES recovery
+    the design notes the clean-slate direction this example took
     M_SQLXTC_EXCISION_PLAN.md  the record of removing SQLite
 
 

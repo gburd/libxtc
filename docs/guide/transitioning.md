@@ -121,7 +121,7 @@ Two procs on two cores do not have a shared clock.  A message you sent
 
   * **Anti-pattern: assuming arrival order equals causal order.**  If
     you need causality, carry it explicitly (a logical clock; see
-    `M_CAUSALITY.md`).  The sqlxtc sharded test makes this visible: a
+    the per-shard hybrid logical clock).  The sqlxtc sharded test makes this visible: a
     global timestamp source still produced dozens of cross-core
     "reorderings" per run, because logical order and arrival order are
     different things.

@@ -243,7 +243,7 @@ options and behaviour.
 
 * `examples/` -- start here.  Five working programs from "hello async" to "Redis-compat server with budgets".
 * `docs/getting-started.md` -- step-by-step beginner walkthrough, from "just cloned" to an async TCP server.
-* `man/man3/` and `man/man7/` -- per-API reference.  Coverage is partial; see `docs/MAN_TODO.md` for the gap list.
+* `man/man3/` and `man/man7/` -- per-API reference.  Every public `xtc_*` symbol has a man page (coverage is gate-enforced in `make check`).
 * `PLAN.md` -- the full design rationale.  Long but exhaustive.
 * `docs/ARCHITECTURE.md` -- the layer diagram, the principles, the why.
 * `docs/abi-stability.md` -- semver and deprecation policy.

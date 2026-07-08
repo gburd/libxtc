@@ -20,7 +20,7 @@
  *	checkpoint, losing every still-dirty page) and recovers: reopen
  *	the partial base, replay the WAL, checkpoint.
  *
- *	Claim under test (the engine's recovery model, M_SQLXTC_WAL.md):
+ *	Claim under test (the engine's recovery model, the design notes):
  *	because versions are immutable and append-only and logical redo is
  *	idempotent, replaying the whole post-checkpoint log onto the torn
  *	base reconstructs a correct, complete tree.  Every committed row

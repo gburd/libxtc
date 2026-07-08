@@ -6,7 +6,7 @@
  *
  * examples/06_sqlxtc/mvcc.c
  *	Snapshot-isolation MVCC + 2PC over the share-nothing shards.
- *	See mvcc.h and docs/M_SQLXTC_STAGE4.md.
+ *	See mvcc.h and the design notes.
  *
  *	Shards and the coordinator are xtc_svr processes.  The
  *	coordinator's commit path is the canonical user of the

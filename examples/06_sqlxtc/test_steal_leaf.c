@@ -11,7 +11,7 @@
  *	Before this increment, logical XL_UPDATE redo over a trusted base
  *	descended a torn (zeroed) NON-split leaf and lost its whole key
  *	range: tearing ONE committed non-split leaf lost ~3000 of 6000
- *	committed rows (the docs/M_SQLXTC_BDB.md S3 trap, reproduced by
+ *	committed rows (the the design notes S3 trap, reproduced by
  *	the probe this test replaces).  There was no per-non-split-leaf
  *	after-image to gate a repair on -- only split pages were logged.
  *

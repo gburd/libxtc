@@ -28,8 +28,7 @@ In scope:
     assignment.
   * Segmented log storage with offset indexing, reusing the Bitcask
     record/CRC discipline from the rexis example.
-  * Bounded memory under producer flood -- the property the review
-    (docs/M_CRITICAL_REVIEW.md, section 4) identified as the real
+  * Bounded memory under producer flood -- the property that is the real
     test of an actor runtime.
 
 Out of scope (documented, not built):

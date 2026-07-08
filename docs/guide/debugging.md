@@ -268,9 +268,7 @@ for that you still need the debugger's `xtc-proc`, which runs against a
 stopped program.  See `xtc_inspect(3)`.
 
 The causal message trace (libxtc's `seq_trace`) is shipped and opt-in;
-see the recipe above and `xtc_trace(3)`.  The roadmap to a live
-`xtc-top` and to per-loop lock-free trace rings is in
-`docs/M_OBSERVABILITY.md`.
+see the recipe above and `xtc_trace(3)`.
 
 ## In-process dumps without a debugger (xtc_dump / XTC_PANIC)
 
@@ -305,8 +303,7 @@ addresses-only, and on a platform with no backend at all the
 dump prints `thread backtrace: unavailable (no backtrace backend; attach
 a debugger to a core)` and still reports the full proc/loop/mailbox
 state.  The Windows DbgHelp backend is compiled and reviewed but has not
-yet been runtime-verified on a Windows host.  See `docs/M_PORT.md` for
-the per-platform matrix.
+yet been runtime-verified on a Windows host.
 
 To abort with that dump on a failed invariant, use the panic/assert
 macros (always compiled in -- they are diagnostics, not debug-only):

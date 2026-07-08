@@ -121,7 +121,7 @@ AC_ARG_WITH([liburing],
 # is a heavyweight L2 poll-mode-driver stack (EAL, hugepages) only worth
 # pulling in for a dedicated userspace-networking deployment.  This
 # probe just DETECTS libdpdk via pkg-config and defines XTC_HAVE_DPDK so
-# a future DPDK I/O backend (see docs/M_DPDK.md) can be wired; the
+# a future DPDK I/O backend can be wired; the
 # default build neither needs nor links it.  --with-dpdk=yes requires it.
 AC_ARG_WITH([dpdk],
   [AS_HELP_STRING([--with-dpdk=auto|yes|no|PATH],

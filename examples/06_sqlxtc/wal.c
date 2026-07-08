@@ -6,7 +6,7 @@
  *
  * examples/06_sqlxtc/wal.c
  *	Write-ahead log with a group-commit writer process.  See wal.h
- *	and docs/M_SQLXTC_SCALEOUT.md (stage 1).
+ *	and the design notes (stage 1).
  *
  *	The writer owns the file; committers send records and park on an
  *	ack.  A batch is drained from the mailbox -- the first record
@@ -22,7 +22,7 @@
  *	xtc_svr, because group commit is the gen_server:reply/2 pattern
  *	(stash the requester, reply later, reply to many) and xtc_svr has
  *	no deferred reply -- its xtc_svr_call_t is stack-scoped to one
- *	handle_call.  See docs/M_SQLXTC_XTC_GAPS.md.
+ *	handle_call.
  */
 
 #include "wal.h"
@@ -60,7 +60,7 @@
  * plausible-but-wrong value < WAL_MAX_REC.  Without a checksum the scan
  * trusted that length and handed the garbage body to the decoder, whose
  * length/id fields then drove unbounded allocations (multi-GB balloon /
- * OOM on a genuinely torn STEAL base -- see M_SQLXTC_STEAL.md).  With
+ * OOM on a genuinely torn STEAL base).  With
  * the trailer, wal_scan / wal_scan_tail recompute the checksum and
  * treat a MISMATCH exactly as end-of-log: the scan stops at the torn
  * tail and no torn record ever reaches xl_parse_*.  Both xstore_recover

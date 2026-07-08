@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * test/m14/test_unsafe_depth.c
- *	Phase 2a of the preemption plan (docs/M_PREEMPTION.md): the
+ *	Phase 2a of the preemption plan: the
  *	async-signal-unsafe-region depth counter.  The preemption timer
  *	(Phase 2b) will consult it so a signal-context involuntary yield
  *	never fires inside malloc/free or a latch's internal lock.  This

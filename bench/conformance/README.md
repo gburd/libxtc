@@ -3,11 +3,10 @@
 This directory contains the benchmark infrastructure and workload
 implementations for the **M17 conformance suite**: xtc vs Tokio vs Erlang.
 
-See [docs/M17_CONFORMANCE.md](../../docs/M17_CONFORMANCE.md) for the full
-design rationale, conformance criteria, and effort estimates.
+This directory holds the reference driver implementations and the
+conformance criteria for the suite.
 
-See [docs/M17_RESULTS_FORMAT.md](../../docs/M17_RESULTS_FORMAT.md) for the
-exact stdout format every benchmark binary must emit.
+Each benchmark binary emits a fixed stdout format consumed by run.sh.
 
 ---
 
@@ -62,7 +61,7 @@ its runtime subdirectory.  `run.sh` discovers executables at
 1. Create `w<N>_<name>/<runtime>/` and add source files.
 2. Build to produce an executable named `bench` in that directory.
 3. The binary must write exactly one key=value line to stdout; see
-   [docs/M17_RESULTS_FORMAT.md](../../docs/M17_RESULTS_FORMAT.md).
+   the fixed stdout format run.sh consumes.
 4. Run `./bench/conformance/run.sh` -- the new result appears automatically.
 
 ---

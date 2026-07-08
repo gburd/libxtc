@@ -370,7 +370,7 @@ __xtc_coro_preempt(void *uctx)
 	 * swapcontext).  The correct method is per-architecture: extract
 	 * PC/SP from the signal mcontext and redirect the interrupted PC
 	 * to an on-stack trampoline that does a normal cooperative switch
-	 * (see the x86-64 path above and docs/M_PREEMPTION.md).
+	 * (see the x86-64 path above).
 	 */
 	(void)uctx;
 	return 0;

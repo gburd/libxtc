@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * test/m14/test_preempt_p1.c
- *	Phase 1 of the preemption plan (docs/M_PREEMPTION.md):
+ *	Phase 1 of the preemption plan:
  *	cooperative-assisted preemption.  With the per-worker preemption
  *	timer enabled (xtc_exec_set_preempt) and NO manual yield budget, a
  *	long compute fiber that calls xtc_yield_if_due() periodically is

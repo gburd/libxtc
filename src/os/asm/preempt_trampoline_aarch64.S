@@ -4,8 +4,8 @@
  *
  * src/os/asm/preempt_trampoline_aarch64.S
  *	Involuntary-preemption resume trampoline for AArch64 (ARM64)
- *	AAPCS64.  Linux, *BSD ELF.  Phase 2b-arch of docs/M_PREEMPTION.md,
- *	the aarch64 counterpart of preempt_trampoline_x86_64.S.
+ *	AAPCS64.  Linux, *BSD ELF.  Phase 2b-arch of the preemption
+ *	facility, the aarch64 counterpart of preempt_trampoline_x86_64.S.
  *
  *	Go's async-preemption mechanism.  When the per-thread CPU timer
  *	fires inside a running fiber at a SAFE point (crit_depth == 0,
