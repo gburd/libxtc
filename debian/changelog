@@ -1,3 +1,23 @@
+libxtc (1.7.0-1) unstable; urgency=medium
+
+  * Property-based testing migrated to the official hegel-c
+    (github.com/hegeldev/hegel-c).  The test/pbt/ suite links against the
+    upstream libhegel (with its libcbor + zlib deps) and runs against the
+    hegel protocol server; the 26-property suite was verified green
+    end-to-end.  The stub path (default build, no --with-hegel) still
+    compiles the same sources to SKIP so a tree without hegel stays
+    green.
+  * Fixed the primary xtc_exec_fini teardown leak: __xtc_inbox_fini now
+    reclaims the task + coroutine of an undrained cross-thread
+    XTC_INB_PUBLISH message (running the coroutine layer's cleanup, as
+    xtc_loop_fini's all_tasks walk does).  A full AddressSanitizer
+    make check with leak detection is clean; a small timing-dependent
+    residual remains only on abrupt mid-flight executor stop and is
+    documented in docs/KNOWN_ISSUES.md.
+  * No public API change since 1.6.0.
+
+ -- Greg Burd <greg@burd.me>  Wed, 08 Jul 2026 15:51:27 -0400
+
 libxtc (1.6.0-1) unstable; urgency=medium
 
   * New public API: xtc_alrlock_create / xtc_alrlock_create_ex -- the
