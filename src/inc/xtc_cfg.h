@@ -25,9 +25,11 @@
  *	    of vars; M11.5 swaps in xtc_chash for thousands).
  *	  - Each var holds its declared type + current value via union.
  *
- *	Not yet implemented: per-session/per-database scoping,
- *	configuration-file parsing, SIGHUP-driven reload.
- *	See docs/KNOWN_ISSUES.md for tracking.
+ *	Not yet implemented: per-session/per-database scoping (an
+ *	override-stack model that needs the M16 session layer).
+ *	Configuration-file parsing (xtc_cfg_load_file) and SIGHUP-driven
+ *	reload (xtc_cfg_reload) are done.  See docs/KNOWN_ISSUES.md for
+ *	tracking.
  */
 
 #ifndef XTC_CFG_H
