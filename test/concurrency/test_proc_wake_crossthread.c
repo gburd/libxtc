@@ -18,6 +18,23 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+
+/* This guard exercises the cross-thread wake using a Linux epoll fd as
+ * the watched descriptor (the PG shape).  epoll is Linux-only; on every
+ * other platform the test compiles to a clean SKIP so it stays in the
+ * portable TESTS_C set without breaking macOS / *BSD / Windows builds.
+ * The wake fix itself (xtc_proc_wake + the prepare/park race latch) is
+ * backend-agnostic and covered on those platforms by make check. */
+#if !defined(__linux__)
+#include <stdio.h>
+int
+main(void)
+{
+	printf("SKIP: test_proc_wake_crossthread needs Linux epoll\n");
+	return 77;
+}
+#else
+
 #include <sys/epoll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -139,3 +156,5 @@ main(void)
 	printf("%d/%d rounds lost the wake\n", miss, ROUNDS);
 	return miss ? 1 : 0;
 }
+
+#endif /* __linux__ */
