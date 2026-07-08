@@ -126,7 +126,7 @@ got an empty C backtrace in `xtc_dump` / the panic+crash handler.
   - Platforms with neither execinfo nor libunwind still get the honest
     no-op stub (`__os_backtrace_supported()` returns 0).
 
-See `docs/M_PORT.md` for the per-platform symbolization matrix.
+See `docs/guide/debugging.md` for the per-platform symbolization matrix.
 
 ## RESOLVED: xtc_slab SHARED_MEMORY mode cross-process support
 
@@ -209,8 +209,8 @@ describe the current source.
 ### Round 2 (current source): native completion port + AFD poll
 
 `src/io/io_iocp.c` was rewritten from the round-1 readiness emulation
-to a native completion-port design (details and the full test plan in
-`docs/M_WINDOWS_MATRIX.md` and `docs/M_PORT.md`):
+to a native completion-port design (details in
+`docs/M_WINDOWS_MATRIX.md`):
 
   - `CreateIoCompletionPort` + `GetQueuedCompletionStatusEx` is the
     only wait primitive; the round-1 64-handle

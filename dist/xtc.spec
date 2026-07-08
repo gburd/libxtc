@@ -125,7 +125,7 @@ make check
   trampoline; M16.1a mock PG backend; full man-page coverage.
 
 * Wed Jul 01 2026 Greg Burd <greg@burd.me> - 0.8.0-1
-- Native preemption facility (docs/M_PREEMPTION.md): per-worker
+- Native preemption facility: per-worker
   CPU-time timer seam; a per-thread async-signal-unsafe-region depth
   counter around the allocator; cooperative-assisted preemption
   (xtc_exec_set_preempt) as the supported mode; signal-context
@@ -138,7 +138,7 @@ make check
 - Concurrent B-link node merge enabled by default (correct under
   concurrent latch-free deletes; churn-gone gate + ASan + 32/32 oracle).
 - Cooperative-assisted preemption (xtc_exec_set_preempt + a per-worker
-  CPU-time timer); see docs/M_PREEMPTION.md.
+  CPU-time timer).
 - Stackless Isolate layer promoted to a supported API (xtc_tnt_*).
 - musl CI qualification (builtin _Unwind_Backtrace, no libunwind);
   optional DPDK (--with-dpdk); O(1) chained-hash process registry.

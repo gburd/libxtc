@@ -40,7 +40,7 @@ This is a direct, honest proxy for the project's actual goal:
     demonstrator remains in-memory.
 
 These are stated plainly so results are not over-claimed; the project's
-discipline (see `../../docs/M_SQLXTC_XTC_GAPS.md`) is honest, tested,
+discipline (see `../../the design notes`) is honest, tested,
 CI-verified work.
 
 ## The headline result so far: a real bug, found and fixed

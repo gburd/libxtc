@@ -23,9 +23,8 @@
  *	us duplicate-detection for the M2 contract.
  *
  *	NOTE: This file builds on AIX (xlc or gcc-aix) but has not yet
- *	run on a live AIX host.  See docs/M_AIX_KVM.md for the plan to
- *	obtain AIX testing infrastructure.  Structural correctness was
- *	reviewed against IBM's pollset man pages.
+ *	run on a live AIX host.  Structural correctness was reviewed
+ *	against IBM's pollset man pages.
  */
 
 #include "xtc_int.h"

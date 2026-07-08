@@ -46,7 +46,7 @@
  *	xtc-specific extensions:
  *	  - XTC_LRLOCK_COW: lazy second-copy allocation + MADV_FREE
  *	    after publish.  Idle steady state ~= 1x memory; first write
- *	    after idle pays an mmap+memcpy.  See docs/M_LRLOCK_COW.md.
+ *	    after idle pays an mmap+memcpy.
  */
 
 #ifndef XTC_LRLOCK_H

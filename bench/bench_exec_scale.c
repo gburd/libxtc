@@ -4,7 +4,7 @@
  *
  * bench/bench_exec_scale.c
  *	Multi-loop executor scaling benchmark, corrected to isolate the
- *	scheduler from benchmark artifacts (see docs/M_EC2_SCALE.md).
+ *	scheduler from benchmark artifacts.
  *
  *	The naive first cut folded every task's completion into ONE global
  *	atomic counter; that single cache line ping-ponged across all

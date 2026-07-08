@@ -593,9 +593,6 @@ implications of this design:
   * [`xtc_lockmgr(3)`](../man/man3/xtc_lockmgr.3) -- Lock manager manual page.
   * [`xtc_sync(3)`](../man/man3/xtc_sync.3) -- Sync primitives manual page.
   * [`xtc_rcu(3)`](../man/man3/xtc_rcu.3) -- RCU manual page.
-  * `docs/M_LRLOCK_COW.md` -- design notes on lrlock COW mode.
-  * `docs/M_BEAM_LESSONS.md` -- discussion of supervisor / locker
-    interaction lessons drawn from BEAM.
 
 The Berkeley DB locking subsystem documentation, available in
 the BDB source tree, is the canonical reference for the

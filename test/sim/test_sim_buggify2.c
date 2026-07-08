@@ -48,7 +48,7 @@
  * took, seeding a different initial deque distribution and thus a
  * different (still valid) steal schedule.  xtc_sim_exec_run now saves
  * and restores __xtc_current_loop, so this test hashes ORDER-sensitively
- * and asserts the sequence replays.  See docs/M_DST.md.
+ * and asserts the sequence replays.
  */
 
 #define N_LOOPS 4

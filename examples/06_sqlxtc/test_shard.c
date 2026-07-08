@@ -6,7 +6,7 @@
  *
  * examples/06_sqlxtc/test_shard.c
  *	Share-nothing sharded key/value store -- the Variant C scale-out
- *	slice (docs/M_SQLXTC_SCALEOUT.md), dogfooded end to end.
+ *	slice, dogfooded end to end.
  *
  *	  - Each SHARD is one xtc_svr that exclusively owns its slice of
  *	    the key space (an in-memory open-addressing table).  Because
@@ -28,7 +28,7 @@
  *
  *	Dogfood: xtc_exec, cross-loop xtc_svr_call routing, a shard
  *	handle_call that PARKS (the allocator round-trip) mid-call, and
- *	the singleton control-plane proc.  See docs/M_SQLXTC_XTC_GAPS.md.
+ *	the singleton control-plane proc.
  */
 
 #include <assert.h>

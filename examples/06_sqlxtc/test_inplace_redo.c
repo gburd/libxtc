@@ -36,7 +36,7 @@
  *	     scan returns exactly the inserted keys -- the torn SMO was
  *	     repaired physiologically, in place, with no rebuild.
  *
- *	Scope note (docs/M_SQLXTC_BDB.md): a fully in-place crash restart
+ *	Scope note: a fully in-place crash restart
  *	from an ARBITRARILY torn base -- where NON-split row writes are
  *	also lost -- additionally needs physiological logging of those row
  *	writes, so logical XL_UPDATE redo never has to navigate torn

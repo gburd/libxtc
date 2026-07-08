@@ -20,7 +20,7 @@
  *     -rdynamic), we additionally require at least one of our own chain
  *     frames to be named.  On an addresses-only platform no names appear
  *     and we assert the frame count alone, exactly as documented in
- *     docs/M_PORT.md.
+ *     the design notes.
  */
 
 #define _GNU_SOURCE

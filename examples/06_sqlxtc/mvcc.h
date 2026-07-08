@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/mvcc.h
- *	Stage 4 of the scale-out plan (docs/M_SQLXTC_STAGE4.md): snapshot-
+ *	Stage 4 of the scale-out plan: snapshot-
  *	isolation MVCC over the share-nothing shards, with cross-shard
  *	transactions committed by a two-phase-commit coordinator.
  *

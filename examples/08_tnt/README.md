@@ -18,7 +18,7 @@ It reproduces the developer experience of [Tina](https://github.com/pmbanugo/tin
 (Odin) on libxtc's machinery, at ~hundreds of bytes per Isolate (a dense
 typed arena struct) rather than ~4 KiB per stackful fiber -- only the
 shard is a fiber.  The design and feasibility verdict are in
-[`docs/M_TINA_LAYER.md`](../../docs/M_TINA_LAYER.md), which is
+the Tina layer design notes, which are
 authoritative.
 
 This directory, `examples/08_tnt/`, is now just the **canonical demo**:
@@ -84,7 +84,7 @@ Isolate per connection (round-robin across shards) via
 
 ## Architecture
 
-The decisive choice (per `M_TINA_LAYER.md`) is to map a **Shard to one
+The decisive choice (per `the design notes`) is to map a **Shard to one
 long-lived libxtc proc** per `xtc_exec` loop -- NOT an Isolate to a
 proc.
 
@@ -141,7 +141,7 @@ APIs (`xtc_proc_*`, `xtc_io_*`, `xtc_net_*`).
 
 ## What is honestly NOT done here (the asterisks)
 
-Carried straight from `M_TINA_LAYER.md`:
+Carried straight from `the design notes`:
 
 1. **DST (deterministic simulation testing) is layer-built, not done
    here.** The transition model keeps the "handlers only return

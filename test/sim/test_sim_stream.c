@@ -11,7 +11,7 @@
  *	(io_net.c), which cannot run under the single-thread sim (a real
  *	socket's send/recv touch the kernel outside the sim's control) --
  *	the same not-coverable-by-design boundary documented in
- *	docs/M_DST.md.  This test does NOT reimplement kernel TCP.  Instead
+ *	the design notes.  This test does NOT reimplement kernel TCP.  Instead
  *	it models the CONNECTION ABSTRACTION that sits above it -- an
  *	ordered, bidirectional byte stream between a client and a server
  *	fiber -- with a deterministic in-process "wire" (a pair of mpsc

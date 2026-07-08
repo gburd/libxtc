@@ -44,7 +44,7 @@
  * quiesces, (d) replay is byte-identical, (e) a different seed reorders
  * the replies but preserves the invariant + final total.
  *
- * DRAIN NOTE (see docs/M_DST.md, "Supervisor restart"): a gen_server's
+ * DRAIN NOTE (, "Supervisor restart"): a gen_server's
  * xtc_svr_stop is an ASYNC stop-kick; the server self-terminates on a
  * later mailbox poll.  So after the clients finish we settle, stop the
  * server, and JOIN it with a BLOCKING join (timeout -1) inside the sim

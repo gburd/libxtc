@@ -4,11 +4,10 @@
  *
  * src/inc/xtc_tnt.h
  *	tnt -- a Tina-faithful, stackless Isolate layer (L4) built on
- *	top of the libxtc
- *	concurrency runtime.  See docs/M_TINA_LAYER.md (authoritative)
- *	and the Tina reference at github.com/pmbanugo/tina.
+ *	top of the libxtc concurrency runtime.  See the Tina reference at
+ *	github.com/pmbanugo/tina.
  *
- *	The decisive architectural choice (M_TINA_LAYER.md) is to map
+ *	The decisive architectural choice is to map
  *	a Shard to one long-lived libxtc proc per xtc_exec loop, NOT an
  *	Isolate to a proc.  The shard proc owns a dense typed arena of
  *	stackless Isolate structs and runs Tina's dispatch loop:

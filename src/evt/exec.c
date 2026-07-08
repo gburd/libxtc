@@ -376,7 +376,7 @@ xtc_exec_run(xtc_exec_t *e)
  * work-stealing / cross-loop / shared-latch CODE runs (via
  * __xtc_loop_step_once); only WHICH runnable loop advances next, and
  * when virtual time advances, are decided by the seed -- so the whole
- * run replays byte-for-byte from (seed, config).  See docs/M_DST.md.
+ * run replays byte-for-byte from (seed, config).
  *
  * Requires a sim build (XTC_IO_BACKEND_SIM): the sim I/O backend's
  * xtc_io_poll never blocks, so __xtc_loop_step_once always returns

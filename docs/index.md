@@ -46,30 +46,6 @@ Lower-level material organized by topic:
   * [Debugging and observing](guide/debugging.md) -- task-oriented
     recipes with the GDB/LLDB tools (`tools/`) and the runtime
     introspection APIs.
-  * [Observability plan](M_OBSERVABILITY.md) -- how BEAM systems are
-    observed and the staged plan to give libxtc the same, in native
-    debuggers.
-  * [Causality](M_CAUSALITY.md) -- version vectors vs dotted variants
-    vs hybrid logical clocks vs interval tree clocks, and what the
-    distributed sqlxtc actually needs.
-  * [SQLite scale-out](M_SQLXTC_SCALEOUT.md) -- the combined
-    sharding + proc-pipeline + durable-MVCC architecture.
-  * [BEAM lessons](M_BEAM_LESSONS.md) -- production
-    synchronization issues observed in the BEAM/OTP fleet, and
-    libxtc's posture against each.
-  * [LRLock COW mode](M_LRLOCK_COW.md) -- copy-on-write design
-    for left-right locks where the protected data is large.
-  * [Multi-headed receive analysis](M_MULTI_HEAD_RECV.md) --
-    why libxtc rejects general multi-head match in `xtc_recv` and
-    what to use instead.
-  * [SQLite hard-fork plan](M_SQLXTC_HARDFORK.md) -- staged plan
-    for breaking SQLite's monolithic mutex.
-  * [SQLite reimagined on libxtc](M_SQLXTC_GREENFIELD.md) -- a
-    clean-slate design: how a server-class SQL engine would be built
-    if its authors had started with libxtc.
-  * [libxtc / PostgreSQL boundary](M_LIBXTC_PG_BOUNDARY.md) --
-    layering rules for the eventual PG adapter.
-
 ## Build and platform matrices
 
   * [Windows toolchains](M_WINDOWS_MATRIX.md)

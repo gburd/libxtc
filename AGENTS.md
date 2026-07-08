@@ -27,6 +27,20 @@ Project-specific rules for AI agents (Claude Code, Kiro CLI, Pi, Maki).
    source (e.g. the SQLite amalgamation) is allowed; compiled output
    never is.
 
+5. **Internal design/status memos.**  Agent working notes -- design
+   explorations, milestone claim logs, status/readiness reviews,
+   host-bring-up scratch, per-feature investigation write-ups -- are
+   NOT shipped documentation.  They live in `.agent/` (gitignored),
+   never in `docs/` or anywhere else in Git.  `docs/` holds ONLY
+   consumer-facing documentation: the ones an API user or packager
+   reads (API.md, ARCHITECTURE.md, KNOWN_ISSUES.md, abi-stability.md,
+   getting-started.md, guide/, locks.md, index.md, PUBLISHING.md, the
+   ADRs, Doxyfile) plus reference matrices a shipped man page / README
+   legitimately cites.  A file named `M_*.md` is the tell of an agent
+   memo: it belongs in `.agent/`.  When moving one out of `docs/`,
+   fix or drop every shipped reference to it (README, man pages, source
+   header comments, index.md) rather than leaving a dead link.
+
 ## Recovering from a bad commit (history rewrite)
 
 If a core dump, build artifact, or secret reaches the remote, it must
@@ -141,8 +155,7 @@ Line coverage of the DST-REACHABLE public-API code is still a useful
 floor (catches "this whole branch is never exercised"); measure and
 track it, but state the claim precisely as ">85% of the DST-reachable
 public surface," and never force thread-only / real-kernel / native-
-backend code to a coverage number UNDER DST -- that is dishonest.  See
-docs/M_DST.md for the measured baseline and the reachability breakdown.
+backend code to a coverage number UNDER DST -- that is dishonest.
 
 ## Continuous integration -- always check after pushing
 

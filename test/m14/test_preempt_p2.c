@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * test/m14/test_preempt_p2.c
- *	Phase 2 of the preemption plan (docs/M_PREEMPTION.md): TRUE
+ *	Phase 2 of the preemption plan: TRUE
  *	signal-context involuntary yield.  A fiber in a PURE tight loop
  *	with NO yield points at all is preempted by the timer so its
  *	loop-mates make progress -- the case Phase 1 (cooperative-

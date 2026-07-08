@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * test/m14/test_preempt.c
- *	Phase 0 of the preemption plan (docs/M_PREEMPTION.md): the
+ *	Phase 0 of the preemption plan: the
  *	per-worker preemption timer SEAM.  No preemption happens yet --
  *	this proves the timer arms, fires on this thread's CPU time, and
  *	the tick counter + pending flag work, and that it is OFF by

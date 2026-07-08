@@ -274,11 +274,11 @@ the B-link-tree latches rather than at any global handle mutex.
 DESIGN is the in-depth architecture document for this example.  The
 companion deep-dives live in ../../docs/:
 
-    M_SQLXTC_STORAGE.md       the storage engine design
-    M_SQLXTC_VEXEC.md         the vectorized executor
-    M_SQLXTC_WAL.md           the write-ahead log and recovery
-    M_SQLXTC_MVCC_SQL.md      MVCC, isolation, and SSI
-    M_SQLXTC_GREENFIELD.md    the from-scratch (greenfield) direction
+    the design notes       the storage engine design
+    the design notes         the vectorized executor
+    the design notes           the write-ahead log and recovery
+    the design notes      MVCC, isolation, and SSI
+    the design notes    the from-scratch (greenfield) direction
     M_SQLXTC_EXCISION_PLAN.md the record of removing SQLite
 
 

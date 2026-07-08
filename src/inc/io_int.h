@@ -114,7 +114,7 @@ struct __xtc_uring_fd {
 /* Deterministic-simulation backend (DST): no kernel poller.  Readiness
  * and file-AIO completions come from a scripted in-process event store
  * driven against the virtual clock; the wakeup is an in-process flag.
- * See src/io/io_sim.c and docs/M_DST.md. */
+ * See src/io/io_sim.c. */
 #else
 # error "M2 build expects XTC_IO_BACKEND_{POLL,EPOLL,URING,KQUEUE,IOCP,SOLARIS,AIX,SELECT,SIM} to be defined"
 #endif

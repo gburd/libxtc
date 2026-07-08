@@ -1,7 +1,5 @@
 Deterministic Simulation Testing (DST) tests
-=============================================
-
-See docs/M_DST.md for the design.  DST runs the REAL multi-loop,
+=============================================  DST runs the REAL multi-loop,
 work-stealing executor and shared-everything, fiber-yielding-latch data
 plane deterministically by serializing the N loops as N cooperatively-
 scheduled entities on ONE OS thread under a seed-determined
@@ -45,7 +43,7 @@ test_sim_soak.c  (needs a sim build)
     replays identically (state hash + application result), holds the
     per-step invariants, and that the sweep explores many distinct
     schedules.  This test surfaced a real scheduler liveness bug (timer
-    parks never woke -- see docs/M_DST.md).
+    parks never woke).
 
 test_sim_machine_death.c  (needs a sim build)
     Machine-death / proc-kill under DST.  A seeded reaper proc, after a
@@ -88,7 +86,7 @@ test_sim_swarm.c  (needs a sim build)
     real use-after-free in the sim net-latency deferred-delivery path
     (a delayed cross-loop message to a proc killed inside the deferral
     window dereferenced the freed proc); fixed by re-resolving the
-    target by pid at fire time -- see docs/M_DST.md.
+    target by pid at fire time.
 
 Running the sim-build tests
 ---------------------------

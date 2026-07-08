@@ -15,7 +15,7 @@
  *	after).  Callbacks run AFTER all internal locks are released, so
  *	they may freely call back into the proc/loop APIs.
  *
- *	See docs/M_OBSERVABILITY.md (stage 2) and docs/guide/debugging.md.
+ *	See docs/guide/debugging.md.
  */
 
 #ifndef XTC_INSPECT_H

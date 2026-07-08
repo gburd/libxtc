@@ -244,7 +244,7 @@ test-admin: test_admin
 # Many committer procs drive concurrent commits at one writer; proves
 # fsync coalescing, durable monotonic LSNs, and log replay -- on a
 # single loop and on a 4-loop executor.  Storage-engine stage 1
-# (docs/M_SQLXTC_SCALEOUT.md).
+#.
 test_wal: test_wal.c wal.c wal.h
 	$(CC) $(CFLAGS) -o $@ test_wal.c wal.c $(LDFLAGS)
 
@@ -273,7 +273,7 @@ test-wal-compact: test_wal_compact
 # ---- share-nothing sharded store + control plane (executor; no daemon) ----
 # N shard servers (one xtc_svr each, share-nothing) + a global
 # timestamp allocator; clients route by key-hash.  Scale-out stage 2/3
-# (docs/M_SQLXTC_SCALEOUT.md): single loop and 4-loop executor.
+#: single loop and 4-loop executor.
 test_shard: test_shard.c
 	$(CC) $(CFLAGS) -o $@ test_shard.c $(LDFLAGS)
 
@@ -283,7 +283,7 @@ test-shard: test_shard
 # ---- MVCC + cross-shard 2PC (executor; no daemon) ----
 # Snapshot-isolation versioned shards + a deferred-reply 2PC
 # coordinator + per-shard HLC.  Scale-out stage 4
-# (docs/M_SQLXTC_STAGE4.md): snapshot isolation, cross-shard
+#: snapshot isolation, cross-shard
 # atomicity, and write-write conflict detection on a 4-loop executor.
 test_mvcc: test_mvcc.c mvcc.c mvcc.h
 	$(CC) $(CFLAGS) -o $@ test_mvcc.c mvcc.c $(LDFLAGS)
@@ -294,7 +294,7 @@ test-mvcc: test_mvcc
 # ---- SQL on the libxtc-native storage via the xstore vtable ----
 # SQLite's VDBE runs SQL; rows live in our btree/bufmgr (larger than
 # RAM).  Off-loop and on-loop (VDBE parks on offloaded page I/O
-# mid-statement).  See docs/M_SQLXTC_MVCC_SQL.md.
+# mid-statement).
 test_xstore: test_xstore.c $(ENGINE_NATIVE)
 	$(CC) $(CFLAGS) -o $@ test_xstore.c $(ENGINE_NATIVE) $(LDFLAGS)
 
@@ -369,7 +369,7 @@ test-recover-undo: test_recover_undo
 # ---- torn-tail recovery safety (per-record checksum drops a torn tail) ----
 # Both recovery paths must survive a torn tail without ballooning memory
 # (caps its own RLIMIT_AS at 256 MB internally so a regression fails
-# cleanly instead of OOMing the box).  Increment 1 of M_SQLXTC_STEAL.md.
+# cleanly instead of OOMing the box).  Increment 1 of the design notes.
 test_steal_torn: test_steal_torn.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o
 	$(CC) $(CFLAGS) -o $@ test_steal_torn.c xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LDFLAGS)
 

@@ -398,12 +398,6 @@ By layer of complexity:
 For deep architecture: read `PLAN.md`.  For specific topics:
 
 * `docs/M_TLS.md` -- TLS support strategy.
-* `docs/M_BEAM_LESSONS.md` -- 12 BEAM/OTP production issues and
-  how libxtc handles each.
-* `docs/M_SQLXTC_HARDFORK.md` -- the plan for breaking SQLite into
-  concurrent xtc procs.
-* `docs/M_MULTI_HEAD_RECV.md` -- when not to add a feature, with
-  research from the literature.
 
 For API reference:
 

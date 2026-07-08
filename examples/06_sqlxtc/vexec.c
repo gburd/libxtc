@@ -6,7 +6,7 @@
  *
  * examples/06_sqlxtc/vexec.c
  *	Vectorized execution engine -- V1.  See vexec.h and
- *	docs/M_SQLXTC_VEXEC.md.
+ *	the design notes.
  *
  *	V1 recognizes the P2 query shape (single base table, projection of
  *	scalar expressions, optional WHERE of a scalar boolean expression)

@@ -232,8 +232,8 @@ xtc_svr_join(xtc_svr_t *s, int64_t timeout_ns)
 	 * Only reclaim the server if it actually stopped.  A finite
 	 * timeout can expire while the server is still running its recv
 	 * loop; freeing s then would be a use-after-free the moment the
-	 * server next reads s->stop_requested (found by DST + ASan --
-	 * see docs/M_DST.md).  On timeout, report XTC_E_AGAIN and leave
+	 * server next reads s->stop_requested (found by DST + ASan).
+	 * On timeout, report XTC_E_AGAIN and leave
 	 * s intact so the caller can join again (the server's async stop
 	 * has not drained yet).  A blocking join (timeout_ns < 0) waits
 	 * until the server signals, so it always reclaims.

@@ -16,7 +16,7 @@
  *	a send's stamp is always less than the stamp of the receive it
  *	causes; a RECV record also carries the originating SEND's stamp
  *	in `cause`, so the causal edge is explicit.  (A per-shard HLC for
- *	the MVCC data path -- docs/M_CAUSALITY.md -- is a separate, later
+ *	the MVCC data path is a separate, later
  *	use of the same idea.)
  *
  *	Tracing is OFF by default and costs a single relaxed atomic load
@@ -24,7 +24,7 @@
  *	ring writes under a lock; enable it to debug, as with recon/dbg
  *	in the BEAM, not as an always-on production tax.
  *
- *	See docs/M_OBSERVABILITY.md (stage 3) and docs/guide/debugging.md.
+ *	See docs/guide/debugging.md.
  */
 
 #ifndef XTC_TRACE_H

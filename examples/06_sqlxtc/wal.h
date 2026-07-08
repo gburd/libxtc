@@ -22,7 +22,7 @@
  *	is parked on disk.  This is the canonical place a database trades
  *	one fsync per commit for one fsync per batch.
  *
- *	See docs/M_SQLXTC_SCALEOUT.md (stage 1).
+ *	See the design notes (stage 1).
  */
 
 #ifndef SQLXTC_WAL_H

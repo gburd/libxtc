@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/evt/sim.c
- *	Deterministic Simulation Testing (DST) core.  See docs/M_DST.md.
+ *	Deterministic Simulation Testing (DST) core.
  *
  *	Phase 0: the seeded PRNG tree.  Later phases add the virtual clock
  *	and the single-thread deterministic scheduler that drives the N

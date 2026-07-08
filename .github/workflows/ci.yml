@@ -135,7 +135,7 @@ jobs:
     # Deterministic Simulation Testing: build with the sim I/O backend
     # and run the multi-loop deterministic scheduler + cross-loop
     # park/wake replay tests (the REAL work-stealing executor, made
-    # deterministic with a seed).  See docs/M_DST.md and test/sim/.
+    # deterministic with a seed).  See test/sim/ for the deterministic scheduler + replay tests.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -157,7 +157,7 @@ jobs:
     # over the combined fault set (partition + latency + buggify +
     # machine-death).  Nightly (schedule) or on demand (workflow_dispatch);
     # NOT on every push -- the bounded 300-seed swarm in the sim-dst job
-    # already gates each commit.  See docs/M_DST.md and test/sim/README.
+    # already gates each commit.  See test/sim/README.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:

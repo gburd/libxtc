@@ -3,7 +3,7 @@
 Drop-in extensions that give a libxtc program the kind of live process
 view BEAM programmers get from `observer` / `recon`, inside the
 debugger you already use.  See `docs/guide/debugging.md` for recipes
-and `docs/M_OBSERVABILITY.md` for the full plan.
+and `the design notes` for the full plan.
 
 ## GDB
 
@@ -42,6 +42,6 @@ stopped so the file-static registry symbols resolve.
 ## MSVC / WinDbg
 
 Native MSVC support (a NatVis file for the value views plus an
-enumeration extension) is stage 4 of `docs/M_OBSERVABILITY.md`.  VS
+enumeration extension) is stage 4 of `the design notes`.  VS
 Code on Windows using the MS C/C++ extension with a GDB/LLDB backend
 can use the scripts above today.

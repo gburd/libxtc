@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_sim.h
- *	Deterministic Simulation Testing (DST) seams.  See docs/M_DST.md.
+ *	Deterministic Simulation Testing (DST) seams.
  *
  *	Phase 0 is the seeded PRNG tree: a single root seed splits into
  *	per-stream sub-streams so a draw at one decision site (steal
@@ -112,7 +112,7 @@ int      xtc_sim_fault(unsigned pct_per_1000);
  * sensitive critical section; under sim, when points are enabled,
  * reaching one draws from the FAULT stream and, on a hit, records the
  * fire.  Enable with a per-1000 fire probability; query coverage with
- * the fires/seen accessors.  See docs/M_DST.md.  Production never
+ * the fires/seen accessors.  Production never
  * reaches a fire (sim inactive); the call is a single relaxed load.
  *
  * PUBLIC: void     xtc_sim_fault_points_enable __P((unsigned));
