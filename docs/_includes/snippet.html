@@ -1,0 +1,35 @@
+{%- comment -%}
+  Embed a tested code snippet from docs/snippets/ into a page.
+
+  Usage:
+    {% include snippet.html file="01_hello_async.c" region="full" %}
+
+  It reads the file, extracts the lines between
+    /* !region NAME */  and  /* !endregion NAME */
+  (or the whole file when region is omitted or "full" and no markers
+  are present), strips the marker lines, and renders a highlighted C
+  block plus a link to the real, tested source in the repo.
+
+  The source is compiled and run by test/docs/test_doc_snippets.sh
+  (a release gate), so what is shown here is guaranteed to build.
+{%- endcomment -%}
+{%- assign _f = include.file -%}
+{%- assign _region = include.region | default: "full" -%}
+{%- capture _raw -%}{%- include snippets/{{ _f }} -%}{%- endcapture -%}
+{%- assign _begin = "/* !region " | append: _region | append: " */" -%}
+{%- assign _end = "/* !endregion " | append: _region | append: " */" -%}
+{%- if _raw contains _begin -%}
+  {%- assign _after = _raw | split: _begin | last -%}
+  {%- assign _body = _after | split: _end | first -%}
+{%- else -%}
+  {%- assign _body = _raw -%}
+{%- endif -%}
+{%- comment -%} drop any stray region markers and leading/trailing blank lines {%- endcomment -%}
+{%- assign _lines = _body | split: "
+" -%}
+```c
+{% for _l in _lines %}{% unless _l contains "!region" or _l contains "!endregion" %}{{ _l }}
+{% endunless %}{% endfor %}```
+{: .fs-3 }
+
+[Tested source: `docs/_includes/snippets/{{ _f }}`](https://codeberg.org/gregburd/libxtc/src/branch/main/docs/_includes/snippets/{{ _f }}){: .text-grey-dk-000 .fs-2 }

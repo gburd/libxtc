@@ -1,65 +1,91 @@
-# libxtc documentation
+---
+title: Home
+layout: default
+nav_order: 1
+---
 
-libxtc is a C11 library that provides async concurrency primitives
-in the Tokio + Seastar + BEAM tradition.  This site is the rendered
-documentation tree.
+# libxtc
+{: .fs-9 }
 
-## Reading order
+Asynchronous concurrency for C, in the tradition of Tokio, Seastar, and
+the BEAM: fibers, an event loop, lightweight processes with links and
+monitors, supervisors, and deterministic simulation testing.
+{: .fs-6 .fw-300 }
 
-For a programmer new to libxtc:
+[Get started](guide/01-getting-started){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
+[API reference](https://codeberg.org/gregburd/libxtc/src/branch/main/man){: .btn .fs-5 .mb-4 .mb-md-0 }
 
-  1. [Architecture](ARCHITECTURE.md) -- the layer model and what
-     each layer is responsible for.
-  2. [Getting started](getting-started.md) -- build, smallest
-     working program, walkthrough of the channel and process APIs.
-  3. [Thinking in libxtc](guide/transitioning.md) -- the mental
-     shifts a C/C++/Rust programmer must make, and the anti-patterns
-     that bite if they do not.  Read this before writing real code.
-  4. [Locks and synchronization](locks.md) -- which primitive to
-     reach for and when.
-  5. [Debugging and observing](guide/debugging.md) -- finding bugs
-     in the message-passing model with GDB/LLDB and the runtime's
-     introspection.
-  6. [API reference](API.md) -- the full public surface.
+---
 
-For a programmer porting code in:
+libxtc gives a C program the concurrency model that made Go, Rust/Tokio,
+Seastar, and Erlang/OTP productive -- without asking you to leave C.
+You write ordinary straight-line functions; libxtc runs them on fibers
+over an event loop, so a call that would block instead *yields*, and one
+OS thread drives thousands of concurrent activities. On top of that sit
+Erlang-style *processes* that own their state and communicate only by
+message, with links, monitors, and supervisors for failure handling.
 
-  * [Locks and synchronization](locks.md) -- reading the existing
-    code's lock decisions against xtc's primitive set.
-  * [Known issues](KNOWN_ISSUES.md) -- workarounds and caveats.
-  * [ABI stability](abi-stability.md) -- what is and isn't
-    guaranteed to remain unchanged.
+This manual is written to be read front to back the first time -- like
+an O'Reilly guide -- and used as a reference afterward, like the
+BerkeleyDB manual. Every code block on these pages is a real file under
+[`docs/_includes/snippets/`](https://codeberg.org/gregburd/libxtc/src/branch/main/docs/snippets)
+that is compiled and run as part of the test suite, so nothing you copy
+from here can silently rot against the API.
 
-For an operator deploying libxtc:
+## The book
 
-  * [Architecture](ARCHITECTURE.md) -- to understand resource
-    consumption.
-  * The TLS, libc, and Windows matrices below.
+### Part I -- Guide (read in order)
 
-## Topic guides
+1. [Getting started](guide/01-getting-started) -- install, build, and
+   run your first coroutine; the anatomy of a libxtc program.
+2. [Fibers and the event loop](guide/02-fibers-and-the-loop) -- how
+   `xtc_async`, `xtc_yield`, and `xtc_await` actually work, and why
+   a fiber is not a thread.
+3. [Processes and messages](guide/03-processes-and-messages) -- spawn,
+   send, receive; the shared-nothing discipline.
+4. [Links, monitors, and supervisors](guide/04-supervision) -- letting
+   things crash, and cleaning up when they do.
+5. [Blocking work and I/O](guide/05-blocking-and-io) -- files, sockets,
+   timers, and how to call a blocking C API without stalling the loop.
+6. [Thinking in libxtc](guide/transitioning) -- the mental shifts for a
+   C/C++/Rust programmer, and the anti-patterns that bite.
 
-Lower-level material organized by topic:
+### Part II -- Reference
 
-  * [Thinking in libxtc](guide/transitioning.md) -- mental-model
-    transition for C/C++/Rust programmers and the anti-patterns to
-    avoid.
-  * [Debugging and observing](guide/debugging.md) -- task-oriented
-    recipes with the GDB/LLDB tools (`tools/`) and the runtime
-    introspection APIs.
+- [Architecture and the layer model](ARCHITECTURE) -- L0 through L5 and
+  what each layer owns.
+- [The public API](API) -- the shape of the `xtc_*` surface.
+- [Locks and synchronization](locks) -- which primitive to reach for.
+- [Manual pages](reference/man-pages) -- every `xtc_*` function, by
+  section.
+- [Debugging and observing](guide/debugging) -- GDB/LLDB recipes and
+  runtime introspection.
+- [ABI stability](abi-stability) -- what stays fixed across releases.
+- [Known issues](KNOWN_ISSUES) -- honest caveats and workarounds.
+
+### Part III -- The example programs
+
+The [`examples/`](examples/) directory ships whole programs -- a Redis
+work-alike, a Kafka-shaped log broker, a from-scratch SQL engine -- each
+built on libxtc. The [Examples](examples/) section explains what each
+one is, the design decisions behind it, and the trade-offs it makes.
+
+### Part IV -- Philosophy
+
+- [Why libxtc exists](philosophy/why) -- the problem, and the shape of
+  the answer.
+- [Choices and roads not taken](philosophy/choices) -- the alternatives
+  we deliberately did not choose, and why.
+
 ## Build and platform matrices
 
-  * [Windows toolchains](M_WINDOWS_MATRIX.md)
-  * [TLS backends](M_TLS_MATRIX.md)
-  * [libc implementations](M_LIBC_MATRIX.md)
+- [Windows toolchains](M_WINDOWS_MATRIX)
+- [TLS backends](M_TLS_MATRIX)
+- [libc implementations](M_LIBC_MATRIX)
 
-## Manual pages
+## Source and license
 
-The shipping man pages are in the source tree at `man/man3/` and
-`man/man7/`.  They are not currently rendered to HTML in this
-site; install libxtc and use `man xtc_lwlock` (etc.) on the
-target system.
-
-## Source
-
-  * Git repository: <https://codeberg.org/gregburd/libxtc>
-  * License: ISC.  See [LICENSE](https://codeberg.org/gregburd/libxtc/src/branch/main/LICENSE).
+- Git: <https://codeberg.org/gregburd/libxtc> (mirror:
+  <https://github.com/gburd/libxtc>)
+- License: ISC. See
+  [LICENSE](https://codeberg.org/gregburd/libxtc/src/branch/main/LICENSE).

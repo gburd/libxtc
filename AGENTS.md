@@ -241,6 +241,31 @@ single line carries a `/* XTC_RAW_OK: reason */` (or the existing
 Before cutting a release, run the gate (it is in make check, and CI runs
 it); it must print `[api] OK`.
 
+## Documentation site (docs/, Jekyll, both Pages)
+
+The docs/ tree is a Jekyll site that builds and deploys to BOTH GitHub
+Pages and Codeberg Pages.  It reads as a BerkeleyDB-reference-manual +
+O'Reilly Getting-Started hybrid: narrative that walks a newcomer into
+the code AND the philosophy, with many worked snippets (short to long,
+easy to complex), demonstrating benefits and calling out the
+alternatives deliberately NOT chosen.  It cross-links to the man pages
+and into the source.  A separate "Examples" section documents each
+./examples/* program (what it is, the design decisions, the trade-offs).
+
+Every code snippet in the docs MUST compile and run -- doc code is a
+RELEASE GATE.  Snippets live as real files under docs/_includes/snippets/ and are
+built+run by test/docs/test_doc_snippets.sh (wired into make check and
+CI).  A snippet that will not build or a doc that promises behavior the
+snippet does not demonstrate is a release blocker, exactly like the API
+discipline gate.  Never paste code into a doc page that is not backed by
+a tested snippet file.
+
+DEFERRED (revisit later, do NOT attempt now): the in-page live,
+editable, re-runnable WASM playground, and making WASM a tested libxtc
+target.  Recorded 2026-07; explicitly out of scope for the current docs
+work.  When revisited it is its own phase (emscripten + Asyncify + the
+sim backend + a wasm CI job) BEFORE any in-browser editor.
+
 ## Code Style
 
 BSD KNF as encoded in `.clang-format`.  ASCII-only in source, docs,
