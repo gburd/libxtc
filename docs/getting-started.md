@@ -395,7 +395,7 @@ By layer of complexity:
    protocol.  Multi-client, embedded SQLite executor, all I/O
    through xtc.
 
-For deep architecture: read `PLAN.md`.  For specific topics:
+For specific topics:
 
 * `docs/M_TLS.md` -- TLS support strategy.
 

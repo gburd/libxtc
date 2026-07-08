@@ -76,6 +76,23 @@ expressed with lightweight processes instead of OS threads.
   in-process test drives budget 4 against 200 records and confirms peak
   in-flight stays at 4.
 
+## How libxtc concepts are applied
+
+- **Supervision.** The broker and its partition/coordinator procs run
+  under a supervisor, so a partition proc that fails is restarted from
+  its durable log rather than taking the broker down.
+- **Data sharing.** There is almost none, by design: each partition proc
+  *solely owns* its log, and the coordinator *solely owns* committed
+  offsets. Single ownership is the pure-message-passing ideal --
+  per-partition ordering and lock-free offset commit both fall out of it,
+  no shared structure required.
+- **Locking.** None on the hot paths. The coordinator being the sole
+  writer of offsets means the busiest coordination point in a log broker
+  has no lock at all.
+- **Backpressure.** Credit accounting lives in each partition proc's
+  private state; a producer fiber parks when out of credit and resumes
+  when credit returns -- flow control with no condition variables.
+
 ## Advantages of building it on libxtc
 
 - **Ordering for free.** Per-partition order is a consequence of a

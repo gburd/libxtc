@@ -23,15 +23,15 @@ mkdir -p "$OUT"
 # Categories: each is "slug|Title|space-separated man3 basenames (no .3)".
 # A page not listed in any category lands in "other".
 cat_defs='
+basics|Foundational basics|xtc_free xtc_stats xtc_log xtc_strerror xtc_cfg xtc_version_string xtc_version_components
 event|Event runtime (L2)|xtc_loop xtc_exec xtc_async
 proc|Processes and messaging (L3)|xtc_proc xtc_chan xtc_svr xtc_osproc
 sync|Synchronization and locks (L3)|xtc_sync xtc_lwlock xtc_lrlock xtc_lockmgr xtc_rcu
 orc|Orchestration (L4)|xtc_supervisor xtc_app xtc_reg xtc_launch xtc_tnt
 io|I/O, files, and network (L1)|xtc_io xtc_aio xtc_net xtc_fs xtc_bdev xtc_tls xtc_pkey xtc_iosched xtc_dio_sched
-mem|Memory and resources|xtc_free xtc_slab xtc_mctx xtc_res xtc_cfg
-obs|Observability and debugging|xtc_stats xtc_inspect xtc_trace xtc_dump xtc_log xtc_pdict xtc_alloc_audit
+mem|Memory and resources|xtc_slab xtc_mctx xtc_res xtc_blocking
+obs|Observability and debugging|xtc_inspect xtc_trace xtc_dump xtc_pdict xtc_alloc_audit
 test|Testing and fault injection|xtc_inject xtc_preempt xtc_stack_reclaim
-ver|Version and errors|xtc_version_string xtc_version_components xtc_strerror xtc_blocking
 '
 
 # Render one man file to an HTML fragment on stdout.

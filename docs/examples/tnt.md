@@ -79,6 +79,22 @@ The scheduler batches Isolates by type in their arena, references them by
 generational handle (so a stale handle to a reclaimed slot is caught),
 and commits their staged I/O through libxtc's reactor.
 
+## How libxtc concepts are applied
+
+- **Supervision / let-it-crash.** An Isolate that hits an error returns a
+  *crash* transition; the scheduler reclaims its arena slot and
+  generational handle. Failure is contained to one Isolate at essentially
+  zero cost -- [let it crash]({{ '/philosophy/let-it-crash/' | relative_url }})
+  at the finest possible granularity.
+- **Data sharing.** Pure shared-nothing per shard: each Isolate's state
+  lives in its shard's private arena, and shards communicate only by
+  message. This is the message-passing ideal taken to its extreme.
+- **Locking.** None -- a shard is single-threaded over its Isolates, so
+  there is no intra-shard lock, and cross-shard is by message.
+- **The runtime underneath.** Only the shard is a libxtc fiber; it uses
+  libxtc's reactor, timers, and I/O directly, so tnt is a scheduler over
+  libxtc, not a second runtime.
+
 ## Advantages of building it on libxtc
 
 - **Massive populations cheaply.** Hundreds of bytes per Isolate instead

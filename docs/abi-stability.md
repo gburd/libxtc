@@ -7,8 +7,7 @@ lede: >-
 permalink: /reference/abi-stability/
 ---
 This document is the **contract** xtc makes with its users about
-what changes between releases and what doesn't.  The full rationale
-is in [`../PLAN.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) (S)18; this is the operational summary.
+what changes between releases and what doesn't.
 
 ## SemVer with explicit ABI promise
 
@@ -161,7 +160,5 @@ We commit (informally for now, formally once we hit 1.0):
 
 ## See also
 
-- [`../PLAN.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) (S)18 -- full longevity discussion.
 - [`adr/`](adr/) -- architecture decision records.
-- [`../M0_CLAIMS.md`](https://codeberg.org/gregburd/libxtc/src/branch/main/PLAN.md) [D3] -- the test that asserts
-  this document covers SemVer + the five-stage deprecation cycle.
+- [Testing]({{ '/testing/' | relative_url }}) -- how stability is verified.

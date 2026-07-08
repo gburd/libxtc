@@ -81,6 +81,22 @@ without stalling other clients.
   the server to OOM -- something Redis controls with `maxmemory` and an
   eviction policy.
 
+## How libxtc concepts are applied
+
+- **Supervision.** The listener runs under a supervisor; a connection
+  proc that crashes on a malformed command is contained and reaped
+  without touching other clients or the keyspace.
+- **Data sharing.** Connection state (parse buffer, in-flight command) is
+  private to each conn proc -- shared-nothing. The keyspace is the one
+  deliberately shared structure; rexis keeps its sharing model simple and
+  explicit rather than smearing locks across the code.
+- **Locking.** Because each connection is its own proc, there is no
+  shared connection table to lock -- the most common lock in a
+  hand-rolled C server simply does not exist here.
+- **Resource limits.** `xtc_res` caps bound memory so a client flood is
+  rejected at the cap instead of OOMing -- the property Redis approximates
+  with `maxmemory` + eviction.
+
 ## Advantages of building it on libxtc
 
 - **Concurrency without a lock graph.** Each connection's state is
