@@ -1,0 +1,114 @@
+name: Release
+
+# Triggered by pushing a tag matching v* (e.g. v1.7.0).  Confirms the
+# tag builds, produces three artifacts (source tarball, single-file
+# amalgamation, man-page bundle), and attaches them to a Forgejo /
+# Codeberg Release for the tag via the release API.  Does not touch
+# ci.yml or pages.yml.
+#
+# I/O backend: forced to epoll because the Codeberg hosted runners run
+# in containers whose seccomp profile blocks the io_uring_* syscalls
+# (same reason ci.yml forces it) -- the auto-selected uring backend
+# would fail io_uring_queue_init at runtime.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: codeberg-small
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make autoconf automake libtool \
+            pkg-config libssl-dev liburing-dev gawk python3 curl jq
+
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Derive version
+        id: ver
+        run: echo "version=$(cat dist/version.in)" >> "$GITHUB_OUTPUT"
+
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+
+      - name: Build (confirm the tag compiles)
+        run: |
+          mkdir -p build_rel
+          cd build_rel
+          ../dist/configure --with-tls=auto --with-io-backend=epoll
+          make -j"$(nproc)"
+          test -f libxtc.a
+
+      - name: Source tarball
+        run: |
+          ver='${{ steps.ver.outputs.version }}'
+          git archive --format=tar.gz --prefix="libxtc-$ver/" \
+            "${GITHUB_REF_NAME}" > "libxtc-$ver.tar.gz"
+
+      - name: Amalgamation bundle (xtc.c + xtc.h)
+        run: |
+          ver='${{ steps.ver.outputs.version }}'
+          python3 dist/mkamalgamation.py --root "$PWD" --out amalg
+          test -s amalg/xtc.c && test -s amalg/xtc.h
+          tar -czf "libxtc-amalgamation-$ver.tar.gz" -C amalg xtc.c xtc.h
+
+      - name: Man-page bundle
+        run: |
+          ver='${{ steps.ver.outputs.version }}'
+          tar -czf "libxtc-man-$ver.tar.gz" man/
+
+      - name: Release notes from changelog
+        run: |
+          ver='${{ steps.ver.outputs.version }}'
+          awk -v v="$ver" '
+            $0 ~ "^libxtc \\("v {p=1}
+            p && /^libxtc \(/ && $0 !~ v {exit}
+            p {print}
+          ' debian/changelog > notes.md
+          if [ ! -s notes.md ]; then
+            echo "libxtc $ver" > notes.md
+          fi
+
+      - name: Create Forgejo Release and upload assets
+        env:
+          # Forgejo injects the API server URL and a scoped token.
+          FORGE_API: ${{ forge.server_url }}/api/v1
+          FORGE_TOKEN: ${{ forge.token }}
+          REPO: ${{ forge.repository }}
+          TAG: ${{ github.ref_name }}
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -eu
+          # Create the release (idempotent: reuse if it already exists).
+          body="$(jq -Rs . < notes.md)"
+          rel_id="$(curl -sS -X POST \
+            -H "Authorization: token ${FORGE_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            "${FORGE_API}/repos/${REPO}/releases" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":${body}}" \
+            | jq -r '.id // empty')"
+          if [ -z "$rel_id" ]; then
+            rel_id="$(curl -sS \
+              -H "Authorization: token ${FORGE_TOKEN}" \
+              "${FORGE_API}/repos/${REPO}/releases/tags/${TAG}" \
+              | jq -r '.id')"
+          fi
+          test -n "$rel_id" && test "$rel_id" != "null"
+          for f in \
+            "libxtc-${VER}.tar.gz" \
+            "libxtc-amalgamation-${VER}.tar.gz" \
+            "libxtc-man-${VER}.tar.gz"; do
+            curl -sS -X POST \
+              -H "Authorization: token ${FORGE_TOKEN}" \
+              -H 'Content-Type: multipart/form-data' \
+              "${FORGE_API}/repos/${REPO}/releases/${rel_id}/assets?name=${f}" \
+              -F "attachment=@${f}" >/dev/null
+            echo "uploaded ${f}"
+          done
