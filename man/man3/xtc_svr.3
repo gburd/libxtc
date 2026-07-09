@@ -11,6 +11,7 @@
 .Nm xtc_svr_call_abortable ,
 .Nm xtc_svr_cast ,
 .Nm xtc_svr_reply ,
+.Nm xtc_svr_continue ,
 .Nm xtc_svr_call_save ,
 .Nm xtc_svr_pid
 .Nd gen_server-style request/reply server abstraction
@@ -31,6 +32,8 @@
 .Fn xtc_svr_cast "xtc_pid_t target" "const void *msg" "size_t size"
 .Ft int
 .Fn xtc_svr_reply "xtc_svr_call_t *call" "const void *reply" "size_t size"
+.Ft int
+.Fn xtc_svr_continue "void *cont"
 .Ft xtc_svr_call_t *
 .Fn xtc_svr_call_save "const xtc_svr_call_t *call"
 .Ft xtc_pid_t
@@ -90,6 +93,23 @@ discarded.
 .Pp
 .Fn xtc_svr_cast
 fires-and-forgets a message.  Returns immediately.
+.Pp
+.Fn xtc_svr_continue ,
+called from within a callback
+.Pq Va init No or a Va handle_* ,
+arms a continuation:
+.Va handle_continue Ns Pq Fa state , Fa cont
+runs before the server's next
+.Fn xtc_recv .
+This lets
+.Va init
+return quickly, unblocking the supervisor and the
+.Fn xtc_svr_start
+caller, then finish expensive setup before the first message is
+processed -- without a self-send that could race an incoming message.
+A
+.Va handle_continue
+may itself arm another continuation.
 .Pp
 .Fn xtc_svr_reply
 sent from inside

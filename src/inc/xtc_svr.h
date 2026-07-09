@@ -50,6 +50,14 @@ typedef struct xtc_svr_callbacks {
 	                     xtc_svr_call_t *call);                     /* required if calls used */
 	int  (*handle_cast) (void *state, const void *msg, size_t size); /* OK to be NULL */
 	int  (*handle_info) (void *state, const void *msg, size_t size); /* OK to be NULL */
+	/* Runs before the next recv when a callback armed a continuation via
+	 * xtc_svr_continue(cont); `cont` is that argument.  Lets init (or a
+	 * handler) return fast -- unblocking the caller / the supervisor --
+	 * and finish expensive work off the critical path, race-free (no
+	 * self-send that could race an incoming message).  A handle_continue
+	 * may itself arm another continuation.  OK to be NULL (an armed
+	 * continuation with no handler is dropped). */
+	int  (*handle_continue)(void *state, void *cont);               /* OK to be NULL */
 	void (*terminate)   (void *state, int reason);                  /* OK to be NULL */
 } xtc_svr_callbacks_t;
 
@@ -68,6 +76,7 @@ typedef struct xtc_svr_opts {
  * PUBLIC: int       xtc_svr_call_abortable __P((xtc_pid_t, const void *, size_t, void **, size_t *, int64_t, xtc_abort_token_t *));
  * PUBLIC: int       xtc_svr_cast __P((xtc_pid_t, const void *, size_t));
  * PUBLIC: int       xtc_svr_reply __P((xtc_svr_call_t *, const void *, size_t));
+ * PUBLIC: int       xtc_svr_continue __P((void *));
  * PUBLIC: xtc_svr_call_t *xtc_svr_call_save __P((const xtc_svr_call_t *));
  */
 
@@ -112,6 +121,16 @@ int xtc_svr_cast(xtc_pid_t target, const void *msg, size_t size);
  * Each call must be replied exactly once. */
 int xtc_svr_reply(xtc_svr_call_t *call,
                   const void *reply, size_t size);
+
+/*
+ * Arm a continuation from within a server callback (init or a handle_*):
+ * handle_continue(state, cont) runs before the server's next recv.  Use
+ * it to return from init quickly (unblocking the supervisor / the
+ * xtc_svr_start caller) and finish expensive setup before the first
+ * message, without the self-send that races an incoming message.
+ * Returns XTC_E_INVAL if called outside a server callback.
+ */
+int xtc_svr_continue(void *cont);
 
 /*
  * Deferred reply (gen_server:reply/2).  The xtc_svr_call_t passed to
