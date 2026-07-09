@@ -408,7 +408,7 @@ test_pool_max_children(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(st.live_at_cap, ==, 2);
 	munit_assert_int(st.over_cap_rc, ==, XTC_E_RESOURCE);
-	(void)xtc_sup_stop(sup);
+	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
