@@ -1,3 +1,36 @@
+libxtc (1.9.0-1) unstable; urgency=medium
+
+  * Three open concurrency bugs resolved, all in the cross-thread
+    coroutine-lifecycle / signal-mask family:
+    - Signal-mask residual: the ucontext coroutine substrate restored a
+      fiber's captured (possibly permissive) uc_sigmask onto whatever
+      runtime thread ran the fiber, letting a process-directed signal
+      (e.g. SIGCHLD) land on a scheduler thread.  The fiber uc_sigmask
+      now blocks process-directed signals but exempts SIGVTALRM
+      (preemption) and the synchronous fault signals SIGSEGV/SIGBUS/
+      SIGFPE/SIGILL/SIGABRT (so R1 fault containment still works); a
+      fork'ed child resets its own mask.  test_thread_sigmask is now a
+      gating test.
+    - xtc_exec_fini cross-thread-spawn coro leak (run-queue case): a
+      short-lived cross-thread-spawned coro could reach DONE before the
+      spawner stored t->cleanup, causing recycle-as-plain that leaked
+      the coro and set up a latent use-after-free.  Fixed by keying the
+      recycle path on t->fn != __xtc_coro_step.
+    - epoll test_bufmgr_mt lost-wakeup residual: closed by the v1.8.0
+      cross-thread prepare/park wake fix (130/130 clean on epoll).
+  * New public API: xtc_env_get / xtc_env_set (thread-safe environment
+    access), xtc_rand_u64 / xtc_rand_seed (per-thread seedable PRNG),
+    xtc_strlcpy / xtc_strlcat (always-NUL-terminating bounded copy) --
+    three POSIX/libc sharp-edge smoothers.  See xtc_env(3) and the
+    guide's sharp-edges chapter.
+  * New release gate [C6]: installed public headers may only define
+    XTC_-namespaced macros -- never a standard name (guards the
+    ssize_t-macro namespace-pollution class).
+  * xtc_bdev.h ssize_t is provided portably without a #define
+    (carried from 1.8.0 groundwork).
+
+ -- Greg Burd <greg@burd.me>  Thu, 09 Jul 2026 10:22:17 -0400
+
 libxtc (1.8.0-1) unstable; urgency=medium
 
   * New public API: xtc_proc_wake(pid) -- resume a process parked in
