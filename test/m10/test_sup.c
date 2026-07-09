@@ -355,12 +355,71 @@ test_simple_one_for_one(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Bounded pool: max_children caps live dynamic children.  A manager
+ * spawns long-lived (permanent, blocking) children up to the cap, then
+ * one more, which must be rejected with XTC_E_RESOURCE. */
+static _Atomic int g_pool_alive;
+static void
+pool_worker(void *arg)
+{
+	void *m; size_t n;
+	(void)arg;
+	atomic_fetch_add(&g_pool_alive, 1);
+	(void)xtc_recv(&m, &n, 10LL * 1000 * 1000 * 1000);  /* block, stay alive */
+	atomic_fetch_sub(&g_pool_alive, 1);
+}
+struct pool_state { xtc_supervisor_t *sup; int over_cap_rc; int live_at_cap; };
+static void
+pool_manager(void *arg)
+{
+	struct pool_state *s = arg;
+	xtc_child_spec_t spec;
+	xtc_pid_t pid;
+	int i, rc;
+	memset(&spec, 0, sizeof spec);
+	spec.name = "pw";
+	spec.fn = pool_worker;
+	spec.policy = XTC_RESTART_PERMANENT;
+	for (i = 0; i < 2; i++)
+		(void)xtc_sup_add_child(s->sup, &spec, &pid);   /* fill the cap (2) */
+	xtc_proc_sleep(20LL * 1000 * 1000);                 /* let them go alive */
+	s->live_at_cap = xtc_sup_n_alive(s->sup);
+	rc = xtc_sup_add_child(s->sup, &spec, &pid);        /* over the cap */
+	s->over_cap_rc = rc;
+	(void)xtc_sup_stop(s->sup);
+}
+static MunitResult
+test_pool_max_children(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_supervisor_t *sup = NULL;
+	struct pool_state st = { NULL, XTC_OK, 0 };
+	xtc_proc_opts_t popts = { 0 };
+	(void)p; (void)d;
+	atomic_store(&g_pool_alive, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.strategy = XTC_SUP_SIMPLE_OFO;
+	opts.max_children = 2;
+	munit_assert_int(xtc_sup_start(loop, &opts, NULL, 0, &sup), ==, XTC_OK);
+	st.sup = sup;
+	munit_assert_int(xtc_proc_spawn(loop, pool_manager, &st, &popts, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(st.live_at_cap, ==, 2);
+	munit_assert_int(st.over_cap_rc, ==, XTC_E_RESOURCE);
+	(void)xtc_sup_stop(sup);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/one_for_all",           test_one_for_all,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/rest_for_one",          test_rest_for_one,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/intensity_exceeded",    test_intensity_exceeded,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/simple_one_for_one",    test_simple_one_for_one,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/pool_max_children",     test_pool_max_children,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10/sup", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

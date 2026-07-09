@@ -154,6 +154,19 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 	memset(&rep, 0, sizeof rep);
 	rep.tag = a->tag;
 	(void)__xtc_mtx_lock(&sup->lock);
+	/* Bounded dynamic pool: enforce max_children (0 = unbounded).  Count
+	 * only live children so a slot freed by a DOWN can be reused. */
+	if (sup->opts.max_children > 0) {
+		int live = 0, i;
+		for (i = 0; i < sup->n_children; i++)
+			if (sup->children[i].alive) live++;
+		if (live >= sup->opts.max_children) {
+			(void)__xtc_mtx_unlock(&sup->lock);
+			rep.ok = 2;   /* at cap -> XTC_E_RESOURCE */
+			(void)xtc_send(a->reply, &rep, sizeof rep);
+			return;
+		}
+	}
 	if (__os_realloc(sup->children,
 	    (size_t)(sup->n_children + 1) * sizeof(struct child), &nc)
 	    != XTC_OK) {
@@ -470,6 +483,7 @@ xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 			memcpy(&rep, msg, sizeof rep);
 			__os_free(msg);
 			if (rep.tag != a.tag) continue;   /* not our reply */
+			if (rep.ok == 2) return XTC_E_RESOURCE;   /* pool at max_children */
 			if (!rep.ok) return XTC_E_NOMEM;
 			if (out_pid != NULL) *out_pid = rep.pid;
 			return XTC_OK;
@@ -518,6 +532,15 @@ xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns)
 
 int xtc_sup_n_children(const xtc_supervisor_t *sup) {
 	return sup ? sup->n_children : 0;
+}
+int xtc_sup_n_alive(const xtc_supervisor_t *sup) {
+	int live = 0, i;
+	if (sup == NULL) return 0;
+	(void)__xtc_mtx_lock(&((xtc_supervisor_t *)sup)->lock);
+	for (i = 0; i < sup->n_children; i++)
+		if (sup->children[i].alive) live++;
+	(void)__xtc_mtx_unlock(&((xtc_supervisor_t *)sup)->lock);
+	return live;
 }
 int xtc_sup_n_restarts(const xtc_supervisor_t *sup) {
 	return sup ? atomic_load_explicit(&((xtc_supervisor_t *)sup)->n_restarts_total,
