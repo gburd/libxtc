@@ -164,6 +164,7 @@ test_fsm_basic(const MunitParameter p[], void *data)
 	munit_assert_int(sc.call_reply_state, ==, S_OPEN);
 	munit_assert_int(d.opens, >=, 2);   /* opened directly, and via replay */
 
+	(void)xtc_fsm_join(sc.fsm, 0);   /* reclaim the handle (proc already gone) */
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
@@ -285,6 +286,7 @@ test_fsm_state_timeout(const MunitParameter p[], void *data)
 	munit_assert_int(t.timeouts, >=, 1);      /* the state timeout fired */
 	munit_assert_int(t.reached_done, ==, 1);  /* and drove the transition */
 
+	(void)xtc_fsm_join(s.fsm, 0);   /* reclaim the handle */
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
