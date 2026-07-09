@@ -18,16 +18,14 @@
  * itself a process-directed SIGUSR1 many times, and asserts EVERY
  * delivery was handled on the main thread -- never on a libxtc thread.
  *
- * STATUS (2026-07): root-caused, fix still open.  The residual is the
- * ucontext coroutine substrate restoring a signal mask when switching
- * INTO a fiber (getcontext captures the creating thread's mask;
- * swapcontext restores uc_sigmask on every switch), so a fiber created
- * from a thread with a signal unblocked can unblock it on whatever
- * runtime thread later runs the fiber.  Forcing the fiber uc_sigmask to
- * all-blocked fixes THIS test but propagates the block into fork/exec
- * children (hangs test_osproc), so it was reverted; a correctly-scoped
- * fix is open (see docs/KNOWN_ISSUES.md).  Run STANDALONE; NOT a gating
- * test -- it can show a few deliveries to a libxtc thread under load.
+ * STATUS (2026-07): RESOLVED and gating.  Root cause was the ucontext
+ * substrate restoring a fiber's captured (possibly permissive)
+ * uc_sigmask onto a runtime thread on every swapcontext.  Fixed in
+ * coro_uctx.c (fiber uc_sigmask blocks process-directed signals but
+ * exempts SIGVTALRM/SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGABRT so preemption
+ * and R1 fault containment still work) plus a child-side mask reset in
+ * xtc_osproc after fork.  0 deliveries to a libxtc thread, 20/20 under
+ * load; fault containment + fork/exec + preemption all still pass.
  */
 
 #include "xtc.h"

@@ -6,41 +6,44 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
-## Runtime-thread signal mask: root-caused, a correct fix still needed
+## RESOLVED: runtime-thread signal mask (process-directed signal on a scheduler thread)
 
-**Status:** primitive fixed; the ucontext residual is now ROOT-CAUSED
-but not yet safely fixed.  The carrier reported a process-directed
-SIGCHLD delivered to a libxtc scheduler thread (where MyProcPid == 0)
-instead of the thread the embedder designated.
+**Status:** RESOLVED.  The carrier reported a process-directed SIGCHLD
+delivered to a libxtc scheduler thread (where MyProcPid == 0) instead of
+the thread the embedder designated.
 
-What is fixed: every runtime thread is created with all signals blocked
-via __os_pthread_create_masked (used by __os_thread_create and the two
-raw pthread_create sites).  Verified in isolation -- a thread created
-through it has every signal blocked at entry.
+Three layers:
 
-The residual, now understood: the ucontext coroutine substrate restores
-a signal mask when switching INTO a fiber.  getcontext captures the
-CREATING thread's mask, and swapcontext restores uc_sigmask on every
-switch, so a fiber created from a thread that had a signal unblocked
-(e.g. a proc spawned from the embedder's main thread) unblocks that
-signal on whatever runtime loop/worker thread later runs the fiber --
-letting a process-directed signal land there.  An integration test
-(test/m1/test_thread_sigmask.c) reproduces it: under load a few of 200
-process-directed SIGUSR1s land on a libxtc thread.  (The hand-written
-fcontext substrate does NOT save/restore the signal mask, so it is
-immune -- which is why the forced-fcontext CI job never caught this.)
+1. Every runtime thread is created with all signals blocked
+   (__os_pthread_create_masked).
 
-Why it is not yet fixed: the obvious fix -- force the fiber's
-uc_sigmask to block all signals (sigfillset, exempting SIGVTALRM for
-preemption) -- makes the sigmask test pass, BUT it propagates an
-all-blocked mask into fork/exec children (a proc that forks inherits
-the fiber's mask), which hangs test_osproc.  A correct fix must keep
-process-directed signals off runtime SCHEDULER threads WITHOUT blocking
-signals a forked child (or an app fiber that legitimately waits on a
-signal) needs.  That scoping is the open work.  The embedder's
-block-signals-across-bringup workaround plus the masked-thread-creation
-primitive cover the reported case in practice; the test is run
-standalone and is NOT a gating test.
+2. The real residual: the ucontext coroutine substrate restores
+   uc_sigmask on every swapcontext, and getcontext captured the CREATING
+   thread's mask -- so a fiber created from a thread with a signal
+   unblocked (a proc spawned from the embedder's main thread) unblocked
+   that signal on whatever runtime loop/worker thread later ran the
+   fiber.  (The hand-written fcontext substrate does not touch the
+   signal mask, so it was immune -- which is why the forced-fcontext CI
+   never caught this.)  Fixed in src/evt/coro_uctx.c: the fiber's
+   uc_sigmask blocks process-directed signals but EXEMPTS SIGVTALRM
+   (preemption), the synchronous fault signals SIGSEGV/SIGBUS/SIGFPE/
+   SIGILL (which the R1 fault guard must catch -- blocking a
+   hardware-generated fault is undefined behavior anyway), and SIGABRT
+   (assert/panic).
+
+3. A proc fiber's uc_sigmask is inherited across fork(); xtc_osproc's
+   child path now resets its own mask to empty immediately after fork so
+   the child (and any exec'd image) starts clean, not with the runtime
+   mask.
+
+**Evidence:** test/m1/test_thread_sigmask.c (main is the only
+SIGUSR1-unblocked thread; multi-loop executor + blocking pool + 200
+process-directed SIGUSR1s) reports 0 deliveries to any libxtc thread,
+20/20 under CPU load and in the gated parallel make check; R1 fault
+containment (test_proc fault_contain/fault_early_contain/
+recovery_registry) passes; fork/exec (test_osproc) passes; the three
+preemption tests pass; ASan make check is clean.  test_thread_sigmask is
+now in the gated make check set.
 
 ## RESOLVED: xtc_exec_fini cross-thread-spawn teardown leak (LSan)
 
