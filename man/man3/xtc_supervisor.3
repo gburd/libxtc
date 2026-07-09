@@ -10,6 +10,7 @@
 .Nm xtc_sup_join ,
 .Nm xtc_sup_alive ,
 .Nm xtc_sup_n_children ,
+.Nm xtc_sup_n_alive ,
 .Nm xtc_sup_n_restarts
 .Nd OTP-style supervisor trees
 .Sh SYNOPSIS
@@ -27,6 +28,8 @@
 .Fn xtc_sup_alive "const xtc_supervisor_t *sup"
 .Ft int
 .Fn xtc_sup_n_children "const xtc_supervisor_t *sup"
+.Ft int
+.Fn xtc_sup_n_alive "const xtc_supervisor_t *sup"
 .Ft int
 .Fn xtc_sup_n_restarts "const xtc_supervisor_t *sup"
 .Sh DESCRIPTION
@@ -69,6 +72,23 @@ restarts within
 .Va opts.period_ns
 exhausts the supervisor; it gives up and exits.  Default:
 1 in 5 seconds.
+.Pp
+.Sy Bounded dynamic pool:
+for the
+.Dv XTC_SUP_SIMPLE_OFO
+strategy, set
+.Va opts.max_children No > 0
+to cap the number of live dynamic children;
+.Fn xtc_sup_add_child
+returns
+.Dv XTC_E_RESOURCE
+once the cap is reached (a slot freed by a child's DOWN is reusable).
+.Va opts.max_children No == 0
+is unbounded.
+.Fn xtc_sup_n_children
+returns the total child-slot count;
+.Fn xtc_sup_n_alive
+returns only the currently-live children (pool utilization).
 .Pp
 .Fn xtc_sup_start
 spawns the supervisor and its initial children.  Returns

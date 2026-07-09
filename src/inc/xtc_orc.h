@@ -27,7 +27,8 @@
 /*
  * Restart strategies.  M10 implements ONE_FOR_ONE; the others have
  * named slots so callers can configure for the future and get a
- * clear XTC_E_NOSYS today.
+ * clear XTC_E_NOSYS for an unrecognized strategy value.  All four
+ * strategies below are implemented.
  */
 typedef enum xtc_restart_strategy {
 	XTC_SUP_ONE_FOR_ONE  = 0,
@@ -66,13 +67,20 @@ typedef struct xtc_sup_opts {
 	                                          * across its loops and stop
 	                                          * it when the supervisor exits;
 	                                          * NULL = single-loop */
+	int                    max_children;     /* 0 = unbounded; > 0 caps the
+	                                          * dynamic child count
+	                                          * (xtc_sup_add_child returns
+	                                          * XTC_E_RESOURCE at the cap) --
+	                                          * the simple_one_for_one pool
+	                                          * bound */
 } xtc_sup_opts_t;
 
 #define XTC_SUP_OPTS_DEFAULT { \
 	.strategy     = XTC_SUP_ONE_FOR_ONE, \
 	.max_restarts = 3, \
 	.period_ns    = 5LL * 1000 * 1000 * 1000, \
-	.exec         = NULL \
+	.exec         = NULL, \
+	.max_children = 0 \
 }
 
 typedef struct xtc_supervisor xtc_supervisor_t;
@@ -82,6 +90,7 @@ typedef struct xtc_supervisor xtc_supervisor_t;
  * PUBLIC: int  xtc_sup_add_child __P((xtc_supervisor_t *, const xtc_child_spec_t *, xtc_pid_t *));
  * PUBLIC: int  xtc_sup_stop __P((xtc_supervisor_t *));
  * PUBLIC: int  xtc_sup_n_children __P((const xtc_supervisor_t *));
+ * PUBLIC: int  xtc_sup_n_alive __P((const xtc_supervisor_t *));
  * PUBLIC: int  xtc_sup_n_restarts __P((const xtc_supervisor_t *));
  * PUBLIC: int  xtc_sup_alive __P((const xtc_supervisor_t *));
  */
@@ -120,6 +129,7 @@ int  xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 int  xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns);
 
 int  xtc_sup_n_children(const xtc_supervisor_t *sup);
+int  xtc_sup_n_alive(const xtc_supervisor_t *sup);
 int  xtc_sup_n_restarts(const xtc_supervisor_t *sup);
 int  xtc_sup_alive(const xtc_supervisor_t *sup);
 
