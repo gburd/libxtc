@@ -170,6 +170,58 @@ int xtc_sleep_ns(int64_t ns);
 int64_t xtc_atomic_i64_load(const int64_t *p);
 int64_t xtc_atomic_i64_add(int64_t *p, int64_t delta);
 
+/*
+ * xtc_env_get / xtc_env_set --
+ *	a THREAD-SAFE wrapper over getenv/setenv, which are NOT safe
+ *	against each other (a setenv from one thread can reallocate the
+ *	environ block a getenv on another thread is reading).  Both
+ *	serialize on a process-wide lock.
+ *
+ *	xtc_env_get returns a pointer to the variable's value, or NULL if
+ *	it is unset.  The value is copied into a small PER-THREAD buffer,
+ *	so the pointer is valid until the NEXT xtc_env_get call ON THE
+ *	SAME THREAD (and never invalidated by a setenv from another
+ *	thread); copy it if you need to keep it.  A value longer than the
+ *	thread buffer is truncated (but always NUL-terminated).
+ *
+ *	xtc_env_set sets `name` to `value`; when overwrite == 0 an existing
+ *	variable is left unchanged.  Returns XTC_OK, or a negative XTC_E_*
+ *	(XTC_E_INVAL for a NULL/empty/'='-containing name, XTC_E_NOMEM if
+ *	the environment cannot grow).
+ */
+const char *xtc_env_get(const char *name);
+int         xtc_env_set(const char *name, const char *value, int overwrite);
+
+/*
+ * xtc_rand_u64 / xtc_rand_seed --
+ *	a THREAD-SAFE, seedable pseudo-random source.  rand(3)/random(3)
+ *	share process-global state and are not thread-safe; this is a
+ *	PER-THREAD splitmix64 stream, so every thread draws from its own
+ *	state with no shared-state race and no contention.
+ *
+ *	xtc_rand_u64 returns the next 64-bit value for the calling thread.
+ *	xtc_rand_seed makes the calling thread's stream reproducible: the
+ *	same seed yields the same sequence.  An un-seeded thread auto-seeds
+ *	from the clock, so distinct threads get distinct default streams.
+ *	This is NOT a cryptographic generator; do not use it for keys or
+ *	security tokens.
+ */
+uint64_t xtc_rand_u64(void);
+void     xtc_rand_seed(uint64_t seed);
+
+/*
+ * xtc_strlcpy / xtc_strlcat --
+ *	bounded string copy/cat with BSD (OpenBSD) semantics, avoiding the
+ *	strncpy footgun (it does not NUL-terminate when the source fills
+ *	the buffer).  These ALWAYS NUL-terminate when dstsize > 0, and
+ *	return the total length they TRIED to create -- strlen(src) for
+ *	xtc_strlcpy, and the initial strlen(dst) plus strlen(src) for
+ *	xtc_strlcat.  A return value >= dstsize means the result was
+ *	truncated.  Pure; no allocation.
+ */
+size_t xtc_strlcpy(char *dst, const char *src, size_t dstsize);
+size_t xtc_strlcat(char *dst, const char *src, size_t dstsize);
+
 #ifdef __cplusplus
 }
 #endif

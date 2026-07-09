@@ -41,6 +41,9 @@ lib_sources = [
   'src/xtc_version.c',
   'src/xtc_strerror.c',
   'src/os/os_alloc.c',        # xtc_free (in xtc_strerror.c) calls __os_free
+  'src/os/os_env.c',          # xtc_env_get/_set (in xtc_strerror.c)
+  'src/os/os_rand.c',         # xtc_rand_u64/_seed (in xtc_strerror.c)
+  'src/os/os_str.c',          # xtc_strlcpy/_strlcat (in xtc_strerror.c)
   'src/os/os_time.c',         # xtc_clock_mono/_real/_sleep_ns (in xtc_strerror.c)
   'src/os/os_unsafe_stub.c',  # no-op __xtc_unsafe_* (preempt.c not in the M0 lib)
 ]

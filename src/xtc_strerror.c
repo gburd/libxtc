@@ -17,6 +17,8 @@
 #include "os_alloc.h"
 #include "os_time.h"
 #include "os_atomic.h"
+#include "os_thread.h"   /* XTC_THREAD_LOCAL */
+#include "os_sharp.h"
 
 /*
  * PUBLIC: const char *xtc_strerror __P((int));
@@ -129,4 +131,51 @@ int64_t
 xtc_atomic_i64_add(int64_t *p, int64_t delta)
 {
 	return __os_atomic_fetch_add_i64(p, delta);
+}
+
+/*
+ * Per-thread return buffer for xtc_env_get: the value is copied here
+ * under the environment lock so the pointer cannot be invalidated by a
+ * setenv from another thread.  Valid until the next xtc_env_get on the
+ * same thread.  1024 bytes covers PATH-sized values; longer values are
+ * truncated (still NUL-terminated).
+ */
+static XTC_THREAD_LOCAL char xtc_env_buf[1024];
+
+const char *
+xtc_env_get(const char *name)
+{
+	if (__os_env_get(name, xtc_env_buf, sizeof xtc_env_buf) != XTC_OK)
+		return NULL;
+	return xtc_env_buf;
+}
+
+int
+xtc_env_set(const char *name, const char *value, int overwrite)
+{
+	return __os_env_set(name, value, overwrite);
+}
+
+uint64_t
+xtc_rand_u64(void)
+{
+	return __os_rand_u64();
+}
+
+void
+xtc_rand_seed(uint64_t seed)
+{
+	__os_rand_seed(seed);
+}
+
+size_t
+xtc_strlcpy(char *dst, const char *src, size_t dstsize)
+{
+	return __os_strlcpy(dst, src, dstsize);
+}
+
+size_t
+xtc_strlcat(char *dst, const char *src, size_t dstsize)
+{
+	return __os_strlcat(dst, src, dstsize);
 }

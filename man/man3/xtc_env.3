@@ -1,0 +1,162 @@
+.\" Copyright (c) 2026, The XTC Project -- All rights reserved.
+.\" Use of this source code is governed by the ISC License.
+.Dd July 9, 2026
+.Dt XTC_ENV 3
+.Os
+.Sh NAME
+.Nm xtc_env_get ,
+.Nm xtc_env_set ,
+.Nm xtc_rand_u64 ,
+.Nm xtc_rand_seed ,
+.Nm xtc_strlcpy ,
+.Nm xtc_strlcat
+.Nd thread-safe environment access, per-thread PRNG, and bounded string copy
+.Sh SYNOPSIS
+.In xtc.h
+.Ft const char *
+.Fn xtc_env_get "const char *name"
+.Ft int
+.Fn xtc_env_set "const char *name" "const char *value" "int overwrite"
+.Ft uint64_t
+.Fn xtc_rand_u64 "void"
+.Ft void
+.Fn xtc_rand_seed "uint64_t seed"
+.Ft size_t
+.Fn xtc_strlcpy "char *dst" "const char *src" "size_t dstsize"
+.Ft size_t
+.Fn xtc_strlcat "char *dst" "const char *src" "size_t dstsize"
+.Sh DESCRIPTION
+These entry points smooth three well-known threaded-C footguns in the
+C library.
+A CONSUMER of libxtc uses only these
+.Fn xtc_* No functions and never the internal Fn __os_* No wrappers.
+.Ss Thread-safe environment
+.Xr getenv 3
+and
+.Xr setenv 3
+are not safe against one another: a
+.Xr setenv 3
+from one thread can reallocate the
+.Va environ
+block that a concurrent
+.Xr getenv 3
+on another thread is reading.
+.Fn xtc_env_get
+and
+.Fn xtc_env_set
+serialize every access on a single process-wide lock.
+.Pp
+.Fn xtc_env_get
+returns a pointer to the value of
+.Fa name ,
+or
+.Dv NULL
+if the variable is unset (or
+.Fa name
+is
+.Dv NULL ) .
+The value is copied into a small PER-THREAD buffer under the lock, so
+the returned pointer cannot be invalidated by a
+.Fn xtc_env_set
+from another thread; it is valid until the next
+.Fn xtc_env_get
+call ON THE SAME THREAD.
+Copy it if you need to keep it.
+A value longer than the thread buffer is truncated but always
+NUL-terminated.
+.Pp
+.Fn xtc_env_set
+sets
+.Fa name
+to
+.Fa value ;
+when
+.Fa overwrite
+is 0 an existing variable is left unchanged.
+.Ss Per-thread seedable PRNG
+.Xr rand 3
+and
+.Xr random 3
+share process-global state and are not thread-safe.
+.Fn xtc_rand_u64
+draws the next 64-bit value from a PER-THREAD
+.Em splitmix64
+stream, so every thread has its own state with no shared-state race
+and no contention.
+.Fn xtc_rand_seed
+makes the calling thread's stream reproducible: seeding with the same
+.Fa seed
+yields the same sequence.
+A thread that has not been seeded auto-seeds from the monotonic clock on
+first draw, so distinct threads get distinct default streams.
+This is NOT a cryptographic generator; do not use it for keys or
+security tokens.
+.Ss Bounded string copy
+.Xr strncpy 3
+does not NUL-terminate when the source is at least as long as the
+buffer.
+.Fn xtc_strlcpy
+copies
+.Fa src
+into
+.Fa dst
+and
+.Fn xtc_strlcat
+appends
+.Fa src
+to the string already in
+.Fa dst ,
+both following the BSD (OpenBSD) contract: they ALWAYS NUL-terminate
+when
+.Fa dstsize
+is greater than 0, and they return the total length they TRIED to
+create.
+A return value greater than or equal to
+.Fa dstsize
+means the result was truncated.
+Both are pure and perform no allocation.
+.Sh RETURN VALUES
+.Fn xtc_env_get
+returns a pointer to the variable's value (valid until the next
+.Fn xtc_env_get
+on the same thread), or
+.Dv NULL
+if the variable is unset.
+.Fn xtc_env_set
+returns
+.Dv XTC_OK ,
+or a negative
+.Dv XTC_E_*
+code:
+.Dv XTC_E_INVAL
+for a
+.Dv NULL ,
+empty, or
+.Sq =
+.No -containing Fa name ,
+and
+.Dv XTC_E_NOMEM
+if the environment cannot grow.
+.Pp
+.Fn xtc_rand_u64
+returns the next 64-bit pseudo-random value for the calling thread.
+.Fn xtc_rand_seed
+returns no value.
+.Pp
+.Fn xtc_strlcpy
+returns
+.Fn strlen Fa src ,
+and
+.Fn xtc_strlcat
+returns the initial
+.Fn strlen Fa dst
+plus
+.Fn strlen Fa src ;
+a return value greater than or equal to
+.Fa dstsize
+indicates truncation.
+.Sh SEE ALSO
+.Xr xtc_free 3 ,
+.Xr getenv 3 ,
+.Xr setenv 3 ,
+.Xr strlcpy 3

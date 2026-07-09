@@ -63,6 +63,9 @@ LIB_SRCS	= \
 	$(srcdir)/../src/xtc_version.c \
 	$(srcdir)/../src/xtc_strerror.c \
 	$(srcdir)/../src/os/os_alloc.c \
+	$(srcdir)/../src/os/os_env.c \
+	$(srcdir)/../src/os/os_rand.c \
+	$(srcdir)/../src/os/os_str.c \
 	$(srcdir)/../src/os/os_time.c \
 	$(srcdir)/../src/os/os_thread.c \
 	$(srcdir)/../src/os/os_tls.c \
@@ -137,6 +140,9 @@ LIB_OBJS	= \
 	xtc_version.o \
 	xtc_strerror.o \
 	os_alloc.o \
+	os_env.o \
+	os_rand.o \
+	os_str.o \
 	os_time.o \
 	os_thread.o \
 	os_tls.o \
@@ -310,6 +316,7 @@ TESTS_SH	= \
 
 TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
+		  test_sharp_edges \
 		  test_cpu \
 		  test_thread test_tls test_mutex test_fs \
 		  test_dio \
@@ -453,6 +460,15 @@ xtc_strerror.o: $(srcdir)/../src/xtc_strerror.c $(LIB_HDR_PUBLIC) xtc_config.h
 
 os_alloc.o: $(srcdir)/../src/os/os_alloc.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_alloc.c
+
+os_env.o: $(srcdir)/../src/os/os_env.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_env.c
+
+os_rand.o: $(srcdir)/../src/os/os_rand.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_rand.c
+
+os_str.o: $(srcdir)/../src/os/os_str.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_str.c
 
 os_time.o: $(srcdir)/../src/os/os_time.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_time.c
@@ -788,6 +804,12 @@ test_alloc: $(srcdir)/../test/m1/test_alloc.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
 		-o $@ $(srcdir)/../test/m1/test_alloc.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_sharp_edges: $(srcdir)/../test/m1/test_sharp_edges.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_sharp_edges.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_time: $(srcdir)/../test/m1/test_time.c \
