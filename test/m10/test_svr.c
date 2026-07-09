@@ -321,10 +321,78 @@ test_svr_deferred_reply(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* handle_continue: init returns fast after arming a continuation; the
+ * continuation runs before the first message and marks state ready. */
+struct cont_state { _Atomic int inited; _Atomic int continued; _Atomic int order_bad; };
+static int
+cont_init(void *st)
+{
+	struct cont_state *s = st;
+	atomic_store(&s->inited, 1);
+	/* the continuation must not have run yet */
+	if (atomic_load(&s->continued)) atomic_store(&s->order_bad, 1);
+	return xtc_svr_continue(s);   /* arm; returns XTC_OK */
+}
+static int
+cont_continue(void *st, void *cont)
+{
+	struct cont_state *s = st;
+	(void)cont;   /* == s */
+	if (!atomic_load(&s->inited)) atomic_store(&s->order_bad, 1);
+	atomic_store(&s->continued, 1);
+	return XTC_OK;
+}
+static int
+cont_call(void *st, const void *req, size_t n, xtc_svr_call_t *call)
+{
+	struct cont_state *s = st;
+	int ready = atomic_load(&s->continued);   /* must be 1 by first call */
+	(void)req; (void)n;
+	(void)xtc_svr_reply(call, &ready, sizeof ready);
+	return XTC_SVR_CONTINUE;
+}
+static const xtc_svr_callbacks_t CONT_CB = {
+	cont_init, cont_call, NULL, NULL, cont_continue, NULL
+};
+struct cont_drv { xtc_svr_t *svr; int reply_ready; };
+static void
+cont_driver(void *arg)
+{
+	struct cont_drv *d = arg;
+	void *rep = NULL; size_t rn = 0;
+	if (xtc_svr_call(xtc_svr_pid(d->svr), "go", 2, &rep, &rn,
+	    1000LL * 1000 * 1000) == XTC_OK && rn == sizeof(int))
+		memcpy(&d->reply_ready, rep, sizeof(int));
+	if (rep) xtc_free(rep);
+	(void)xtc_svr_stop(d->svr);
+}
+static MunitResult
+test_svr_handle_continue(const MunitParameter p[], void *dp)
+{
+	xtc_loop_t *loop = NULL;
+	struct cont_state st;
+	struct cont_drv d;
+	(void)p; (void)dp;
+	memset(&st, 0, sizeof st); memset(&d, 0, sizeof d);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &CONT_CB, &st, NULL, &d.svr), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, cont_driver, &d, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&st.continued), ==, 1);
+	munit_assert_int(atomic_load(&st.order_bad), ==, 0);  /* init before continue before call */
+	munit_assert_int(d.reply_ready, ==, 1);               /* continuation ran before first call */
+	(void)xtc_svr_join(d.svr, 0);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/svr_basic", test_svr_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_abortable", test_svr_call_abortable, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/deferred_reply", test_svr_deferred_reply, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/handle_continue", test_svr_handle_continue, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/svr", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

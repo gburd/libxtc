@@ -49,7 +49,18 @@ struct xtc_svr {
 	xtc_notify_t         *stopped;
 	_Atomic int           stop_requested;
 	_Atomic int           alive;
+	/* handle_continue: a callback may arm a continuation via
+	 * xtc_svr_continue(); the server runs handle_continue(state, cont)
+	 * before its next recv, so it can finish expensive init/post-work
+	 * off the caller's critical path, race-free. */
+	int                   cont_pending;
+	void                 *cont_arg;
 };
+
+/* The server whose callback is currently running on this thread, so
+ * xtc_svr_continue() can find it.  A server proc runs its callbacks
+ * only on its own loop thread, so a plain TLS pointer is correct. */
+static XTC_THREAD_LOCAL struct xtc_svr *__svr_cur;
 
 /* Reply slot -- owned by the caller of xtc_svr_call.  Lives on the
  * caller's stack (or heap); the server-side reply path accesses it
@@ -72,6 +83,26 @@ struct xtc_svr_call {
 
 /* ----- entry ----------------------------------------------------- */
 
+/* Run any pending continuation(s): a callback armed one via
+ * xtc_svr_continue(), and handle_continue may itself arm another.
+ * Runs on the server's own loop thread, before the next recv. */
+static void
+__svr_run_continue(struct xtc_svr *s)
+{
+	while (s->cont_pending && s->cb.handle_continue != NULL &&
+	    !atomic_load_explicit(&s->stop_requested, memory_order_acquire)) {
+		void *cont = s->cont_arg;
+		s->cont_pending = 0;
+		s->cont_arg = NULL;
+		__svr_cur = s;
+		(void)s->cb.handle_continue(s->state, cont);
+		__svr_cur = NULL;
+	}
+	/* If no handle_continue is set, drop a stray arm. */
+	s->cont_pending = 0;
+	s->cont_arg = NULL;
+}
+
 static void
 __svr_entry(void *arg)
 {
@@ -79,9 +110,13 @@ __svr_entry(void *arg)
 	s->pid = xtc_self();
 
 	if (s->cb.init != NULL) {
-		int rc = s->cb.init(s->state);
+		int rc;
+		__svr_cur = s;
+		rc = s->cb.init(s->state);
+		__svr_cur = NULL;
 		if (rc != XTC_OK) goto out;
 	}
+	__svr_run_continue(s);   /* init may have armed a continuation */
 
 	while (!atomic_load_explicit(&s->stop_requested, memory_order_acquire)) {
 		void  *msg = NULL;
@@ -124,6 +159,7 @@ __svr_entry(void *arg)
 			 */
 			struct xtc_svr_call call = {0};
 			call.svr = s;
+			__svr_cur = s;   /* for xtc_svr_continue() during the callback */
 			if (size >= 10 && ((uint8_t *)msg)[1] == 's') {
 				uint64_t enc = 0;
 				int i;
@@ -151,6 +187,7 @@ __svr_entry(void *arg)
 				}
 			}
 		} else if (kind == 'X') {
+			__svr_cur = s;
 			if (s->cb.handle_cast != NULL) {
 				cont = s->cb.handle_cast(s->state,
 				    (uint8_t *)msg + 1, size - 1);
@@ -158,12 +195,15 @@ __svr_entry(void *arg)
 				cont = s->cb.handle_info(s->state, msg, size);
 			}
 		} else {
+			__svr_cur = s;
 			if (s->cb.handle_info != NULL)
 				cont = s->cb.handle_info(s->state, msg, size);
 		}
 
+		__svr_cur = NULL;
 		__os_free(msg);
 		if (cont == XTC_SVR_STOP) break;
+		__svr_run_continue(s);   /* a handler may have armed a continuation */
 	}
 
 out:
@@ -416,6 +456,20 @@ xtc_svr_cast(xtc_pid_t target, const void *msg, size_t size)
 	rc = xtc_send(target, buf, size + 1);
 	__os_free(buf);
 	return rc;
+}
+
+/* PUBLIC: int xtc_svr_continue __P((void *)); */
+int
+xtc_svr_continue(void *cont)
+{
+	/* Arm a continuation to run before the server's next recv.  Must be
+	 * called from within a server callback (init / handle_*), which runs
+	 * on the server's own loop thread; __svr_cur identifies it. */
+	struct xtc_svr *s = __svr_cur;
+	if (s == NULL) return XTC_E_INVAL;
+	s->cont_pending = 1;
+	s->cont_arg = cont;
+	return XTC_OK;
 }
 
 int
