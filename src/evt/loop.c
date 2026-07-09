@@ -413,8 +413,29 @@ __xtc_loop_step(xtc_loop_t *loop)
 			 * for fini (correct, just not recycled -- a bounded,
 			 * rare case).  Coro-backed tasks (cleanup != NULL) keep
 			 * the cleanup-at-fini path so fiber-stack teardown is
-			 * unchanged. */
-			if (t->cleanup == NULL && t->loop == loop) {
+			 * unchanged.
+			 *
+			 * The `t->fn != __xtc_coro_step` guard closes a
+			 * cross-thread-spawn teardown leak: xtc_async sets
+			 * t->cleanup only AFTER __xtc_task_spawn_ex makes the
+			 * task visible (it pushes an XTC_INB_PUBLISH to the
+			 * target loop's inbox for a foreign spawn).  A short-
+			 * lived coro can therefore be drained, run, and reach
+			 * DONE on the target loop's thread while the spawning
+			 * thread has not yet stored t->cleanup -- so cleanup
+			 * reads NULL here and we would wrongly recycle the task
+			 * as plain, freeing the task struct without ever
+			 * releasing its fiber stack + coro (the coro leaks) and
+			 * leaving the spawner's pending t->cleanup store to land
+			 * on freed memory (a latent UAF).  t->fn is set before
+			 * the task is published and never changes, so keying on
+			 * it is race-free: any coro-backed task (fn ==
+			 * __xtc_coro_step) is left on all_tasks for the fini
+			 * walk, which runs its (by-then-stored) cleanup exactly
+			 * once.  Plain pinned tasks (xtc_exec_spawn_on) still
+			 * recycle. */
+			if (t->cleanup == NULL && t->loop == loop &&
+			    t->fn != __xtc_coro_step) {
 				extern void __xtc_task_free(xtc_task_t *);
 				__xtc_task_free(t);
 				t = NULL;
