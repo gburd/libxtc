@@ -94,6 +94,43 @@ reads the already-computed result. Called from *inside* another fiber,
 it suspends that fiber until the awaited task completes -- letting you
 fan work out and join it back without threads or callbacks.
 
+## Suspending from inside a foreign call chain
+
+Here is the property that a callback runtime cannot match. Because a
+libxtc fiber is *stackful* -- it owns a real C call stack -- a suspension
+point can live arbitrarily deep in a chain of ordinary C calls,
+**including inside a library function that knows nothing about libxtc.**
+
+The classic shape is a library routine that calls back into your code:
+`qsort` calling your comparator, `bsearch`, a parser calling a callback
+per token. If that callback yields, libxtc freezes the *entire* stack --
+the library's frame included -- and restores it intact on resume. The
+library never notices.
+
+{% include snippet.html file="06_qsort_yield.c" region="full" %}
+
+```
+sorted correctly through 20 in-qsort yields: yes
+```
+
+{: .rationale }
+> **Why this needs a stackful fiber.** When the comparator yields,
+> `qsort`'s frame is mid-partition on the fiber's stack. A register swap
+> saves the whole stack and returns to the loop; the resume lands right
+> back inside the comparator and `qsort` continues. A callback or
+> stackless runtime has no stack to put down at that point, so it cannot
+> suspend from inside `qsort` at all -- you would have to rewrite the
+> sort as a state machine. This is the concrete payoff of the
+> [fiber-over-callbacks choice](01-getting-started).
+
+{: .warning }
+> The switch is cheap (a register swap), but note the *cost model*: a
+> comparator that yields on every compare turns an O(n log n) sort into
+> O(n log n) scheduler round-trips, and the fiber holds `qsort`'s stack
+> for the whole sort. That is correct and fine -- just be deliberate
+> about whether a given callback should yield. A pure CPU comparator
+> that never yields runs at full speed with zero runtime overhead.
+
 ## What you have learned
 
 - A fiber is a suspendable call stack; switching is a user-space
