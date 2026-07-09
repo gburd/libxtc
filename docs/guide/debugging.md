@@ -1,7 +1,7 @@
 ---
 title: Debugging and observing
 parent: Guide
-nav_order: 8
+nav_order: 9
 lede: >-
   Finding bugs in the message-passing model with GDB/LLDB and the runtime's own introspection.
 permalink: /guide/debugging/
