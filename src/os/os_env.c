@@ -78,10 +78,21 @@ __os_env_set(const char *name, const char *value, int overwrite)
 		return XTC_E_INVAL;
 
 	ENV_LOCK();
+#if defined(_WIN32)
+	/* MSVC's CRT has no setenv(3); _putenv_s is the equivalent.  Honor
+	 * the POSIX `overwrite` flag by leaving an existing value in place
+	 * when overwrite == 0 (getenv-check under the same lock). */
+	if (overwrite == 0 && getenv(name) != NULL) {   /* XTC_RAW_OK: __os wrapper */
+		e = 0;
+	} else {
+		e = _putenv_s(name, value);
+	}
+#else
 	e = setenv(name, value, overwrite);   /* XTC_RAW_OK: this IS the wrapper */
+#endif
 	ENV_UNLOCK();
 
 	if (e != 0)
-		return XTC_E_NOMEM;   /* setenv fails only with ENOMEM here */
+		return XTC_E_NOMEM;   /* setenv/_putenv_s fail only with ENOMEM/EINVAL here */
 	return XTC_OK;
 }
