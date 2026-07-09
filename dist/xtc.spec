@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.7.0"
+#       --define "version 1.8.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.7.0
+Version:        1.8.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,10 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Wed Jul 08 2026 Greg Burd <greg@burd.me> - 1.8.0-1
+- xtc_proc_wake + cross-thread prepare/park wake-miss fix; ssize_t namespace fix;
+  Valgrind CI + tag-triggered release workflows.
+
 * Wed Jul 08 2026 Greg Burd <greg@burd.me> - 1.7.0-1
 - Migrate PBT to the official hegel-c; fix the primary xtc_exec_fini teardown leak.
 

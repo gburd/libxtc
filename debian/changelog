@@ -1,3 +1,37 @@
+libxtc (1.8.0-1) unstable; urgency=medium
+
+  * New public API: xtc_proc_wake(pid) -- resume a process parked in
+    xtc_proc_wait_fd or xtc_recv from ANY OS thread, including one libxtc
+    does not manage.  The explicit "poke the target loop" primitive an
+    embedder calls after a foreign thread makes a watched condition true
+    (writes a self-pipe an fd-park watches, sets a latch, completes an
+    async read).  Delivers no message; the woken proc re-evaluates, so a
+    spurious wake is always safe.  See xtc_proc(3).
+  * Fixed a cross-thread wake miss (prepare/park race) in the runtime: a
+    cross-thread wake that arrived while the target task was still
+    RUNNING -- between arming its waker and the loop transitioning it to
+    PARKED on yield -- was dropped by the inbox WAKE drain.  The drain
+    now latches a pending-wake when the task is not yet parked, and the
+    RUNNING->PARKED transition consumes it and re-schedules instead of
+    parking, so a wake in that window is never lost.  Verified on both
+    epoll and io_uring.  This is the cross-thread fd/latch wake miss the
+    PostgreSQL carrier reported.
+  * xtc_bdev.h no longer leaks a bare "#define ssize_t" into consumers:
+    an installed public header must never redefine a standard name.  It
+    now uses the standard ssize_t directly, provided portably without a
+    #define and without redefining it where the platform already has it.
+  * CI hardening: a Valgrind job (memcheck gates a curated subset;
+    Helgrind and DRD run informationally), coverage tests for svr.c and
+    io_common.c edge paths, and tag-triggered release workflows on both
+    GitHub and Codeberg that build and attach the source tarball, the
+    single-file amalgamation, and the man-page bundle.
+  * Windows IOCP: the MSVC smoke test now runtime-verifies multi-op
+    native file AIO and cross-thread wakeup coalescing on the reference
+    host; the loopback-socket AFD-poll echo remains an open item
+    (documented in docs/KNOWN_ISSUES.md).
+
+ -- Greg Burd <greg@burd.me>  Wed, 08 Jul 2026 19:31:34 -0400
+
 libxtc (1.7.0-1) unstable; urgency=medium
 
   * Property-based testing migrated to the official hegel-c
