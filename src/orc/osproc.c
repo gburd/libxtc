@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <pthread.h>   /* pthread_sigmask: reset the child's mask post-fork */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -178,6 +179,20 @@ xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out)
 	if (pid == 0) {
 		/* ---- child ---- async-signal-safe only until exec/fn ---- */
 		int child_fd = -1;
+		/* Reset the signal mask to a clean default.  The parent was a
+		 * proc fiber, whose ucontext uc_sigmask blocks all signals
+		 * (except the preemption timer) so process-directed signals do
+		 * not land on runtime scheduler threads; that mask is inherited
+		 * across fork and would leave this child (and any image it
+		 * exec's) with everything blocked -- breaking its own signal
+		 * handling and any wait that relies on delivery.  A fresh child
+		 * process must start from an empty mask.  pthread_sigmask is
+		 * async-signal-safe. */
+		{
+			sigset_t empty;
+			sigemptyset(&empty);
+			(void)pthread_sigmask(SIG_SETMASK, &empty, NULL);
+		}
 		if (opts->ctrl_socket) {
 			(void)close(sv[0]);     /* parent end */
 			child_fd = sv[1];

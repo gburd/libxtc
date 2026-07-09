@@ -521,6 +521,34 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 	c->ctx.uc_stack.ss_size = c->stack_sz;
 	c->ctx.uc_link = NULL;       /* end-of-coroutine returns via swap */
 
+	/*
+	 * Block process-directed signals in the fiber's context so they do
+	 * not land on a runtime scheduler thread, but EXEMPT the signals
+	 * that must stay deliverable:
+	 *   - SIGVTALRM: the involuntary-preemption timer, delivered to a
+	 *     running fiber that armed preemption.
+	 *   - SIGSEGV/SIGBUS/SIGFPE/SIGILL: synchronous, thread-directed
+	 *     hardware faults.  libxtc's fault guard catches these for R1
+	 *     containment; blocking them would prevent containment and is
+	 *     undefined behavior per POSIX for a hardware-generated fault.
+	 *   - SIGABRT: the assert/panic path must be able to fire.
+	 *
+	 * Rationale: swapcontext restores uc_sigmask on every switch, and
+	 * getcontext captured the CREATING thread's mask -- which may have a
+	 * process-directed signal unblocked (a proc spawned from the
+	 * embedder's main thread).  Restoring that on a loop/worker thread
+	 * would let a process-directed signal (e.g. SIGCHLD) land on a
+	 * scheduler thread instead of the embedder's designated handler.
+	 * A proc that fork()s resets its own mask in the child (xtc_osproc).
+	 */
+	sigfillset(&c->ctx.uc_sigmask);
+	sigdelset(&c->ctx.uc_sigmask, SIGVTALRM);
+	sigdelset(&c->ctx.uc_sigmask, SIGSEGV);
+	sigdelset(&c->ctx.uc_sigmask, SIGBUS);
+	sigdelset(&c->ctx.uc_sigmask, SIGFPE);
+	sigdelset(&c->ctx.uc_sigmask, SIGILL);
+	sigdelset(&c->ctx.uc_sigmask, SIGABRT);
+
 	/* The trampoline reads __xtc_current_coro on entry; that cursor is
 	 * set by __xtc_coro_step when the loop first runs us, so we don't
 	 * need to touch it here.  Critically, we must NOT clobber the
