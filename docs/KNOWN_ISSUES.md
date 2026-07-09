@@ -475,9 +475,32 @@ the listener thread, closes its fds, and frees it.  Plain
 
 ## epoll backend: rare lost blocking-I/O-completion wakeup under heavy churn
 
-**Status:** Primary root cause FOUND and FIXED (see (A) below); a rarer,
-separate, epoll-only residual remains under investigation in the
-buffer-manager stress test.
+**Status:** RESOLVED (pending continued monitoring).  The primary causes
+were fixed earlier (see (A)/(A-residual)/(B) below); the last remaining
+epoll-only residual in the buffer-manager stress test appears CLOSED by
+the v1.8.0 cross-thread prepare/park wake fix.
+
+**The closing fix (v1.8.0):** the residual was the same lost-wake class
+as the PostgreSQL carrier's cross-thread fd/latch wake miss -- a
+cross-thread wake (here, the blocking pool completing an offloaded fsync
+and waking the parked evictor) arriving while the target task was still
+RUNNING, between arming its waker and the loop transitioning it to
+PARKED on yield, was DROPPED by the XTC_INB_WAKE drain (which only
+enqueued PARKED tasks).  The fix latches task->wake_pending when the
+task is not yet PARKED and the RUNNING->PARKED transition consumes it
+and re-schedules instead of parking (see src/evt/loop.c).
+
+**Evidence:** test_bufmgr_mt, which historically hung ~3-7% of runs on
+epoll, now passes 130/130 consecutive runs on the epoll backend with
+zero hangs, and the reproducer test/concurrency/repro_blocking_epoll.c
+(which hung 8/8 at its worst) passes 10/10.  test_bufmgr_mt is no longer
+gated off epoll: it runs on the Codeberg (epoll) CI as well as the
+io_uring CI.  Kept in this document (rather than deleted) so the
+long investigation and the several rejected approaches below stay on
+record; if any epoll wake-miss recurs, this is the history to read
+first.
+
+<details><summary>Historical investigation (the fixes that led here)</summary>
 
 ### (A) FIXED -- xtc_yield / xtc_await did not preserve __current_proc
 
@@ -724,6 +747,8 @@ the POLL_ADD went to a ring this thread does not own and was silently
 dropped.  Fixed by registering/timing/cleaning up on __xtc_current_loop
 (the running loop).  test_server_storage 30/30; the WAL/double-write
 xtc_aio conversion is now unblocked.
+
+</details>
 
 ## RESOLVED: macOS build break: sigev_notify_kqueue (io_kqueue.c)
 
