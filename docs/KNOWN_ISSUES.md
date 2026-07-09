@@ -6,59 +6,83 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
-## Runtime-thread signal mask: primitive fixed, an integration case remains
+## Runtime-thread signal mask: root-caused, a correct fix still needed
 
-**Status:** partial.  The carrier reported a process-directed SIGCHLD
-delivered to a libxtc scheduler thread (where MyProcPid == 0).  libxtc
-now creates every thread with all signals blocked via
-__os_pthread_create_masked (used by __os_thread_create and the two raw
-pthread_create sites: the PSI slab thread and the deadlock detector).
-The primitive is VERIFIED correct in isolation -- a thread created
-through it has the signal blocked -- so the embedder's
-block-signals-across-bringup workaround plus this change cover the
-reported case.
+**Status:** primitive fixed; the ucontext residual is now ROOT-CAUSED
+but not yet safely fixed.  The carrier reported a process-directed
+SIGCHLD delivered to a libxtc scheduler thread (where MyProcPid == 0)
+instead of the thread the embedder designated.
 
-HOWEVER, an integration test (test/m1/test_thread_sigmask.c) that makes
-the main thread the only SIGUSR1-unblocked thread and fires many
-process-directed SIGUSR1s still observes occasional deliveries to a
-libxtc thread (consistently the same one or two tids per run).  The
-offending thread reports the signal blocked in its mask, which should
-prevent delivery -- so the remaining case is subtle (a creation path or
-startup window not yet identified, or a platform delivery nuance).  The
-test is run STANDALONE and is NOT yet a gating test; root-causing the
-remaining deliveries is tracked.  The mask primitive itself is a real
-improvement and is kept.
+What is fixed: every runtime thread is created with all signals blocked
+via __os_pthread_create_masked (used by __os_thread_create and the two
+raw pthread_create sites).  Verified in isolation -- a thread created
+through it has every signal blocked at entry.
 
-## xtc_exec_fini cross-thread-spawn teardown leak (LSan) -- largely fixed
+The residual, now understood: the ucontext coroutine substrate restores
+a signal mask when switching INTO a fiber.  getcontext captures the
+CREATING thread's mask, and swapcontext restores uc_sigmask on every
+switch, so a fiber created from a thread that had a signal unblocked
+(e.g. a proc spawned from the embedder's main thread) unblocks that
+signal on whatever runtime loop/worker thread later runs the fiber --
+letting a process-directed signal land there.  An integration test
+(test/m1/test_thread_sigmask.c) reproduces it: under load a few of 200
+process-directed SIGUSR1s land on a libxtc thread.  (The hand-written
+fcontext substrate does NOT save/restore the signal mask, so it is
+immune -- which is why the forced-fcontext CI job never caught this.)
 
-**Status:** the primary path is FIXED; a small, timing-dependent
-residual remains only on abrupt mid-flight teardown.  Surfaced 2026-07
-via test/concurrency/repro_idle_uring_wake.c.
+Why it is not yet fixed: the obvious fix -- force the fiber's
+uc_sigmask to block all signals (sigfillset, exempting SIGVTALRM for
+preemption) -- makes the sigmask test pass, BUT it propagates an
+all-blocked mask into fork/exec children (a proc that forks inherits
+the fiber's mask), which hangs test_osproc.  A correct fix must keep
+process-directed signals off runtime SCHEDULER threads WITHOUT blocking
+signals a forked child (or an app fiber that legitimately waits on a
+signal) needs.  That scoping is the open work.  The embedder's
+block-signals-across-bringup workaround plus the masked-thread-creation
+primitive cover the reported case in practice; the test is run
+standalone and is NOT a gating test.
+
+## RESOLVED: xtc_exec_fini cross-thread-spawn teardown leak (LSan)
+
+**Status:** RESOLVED.  Surfaced 2026-07 via
+test/concurrency/repro_idle_uring_wake.c.
 
 **Symptom:** procs spawned CROSS-THREAD (xtc_proc_spawn from an OS thread
 that is not on the target loop) onto a service-mode executor that is
-stopped mid-flight (xtc_exec_stop while spawns are still in flight) were
-not fully reclaimed by xtc_exec_fini -- LeakSanitizer reported the
-task+coro (xtc_async -> __os_calloc, coro_uctx.c) as leaked.
+stopped mid-flight were not fully reclaimed by xtc_exec_fini --
+LeakSanitizer reported the task+coro (xtc_async -> __os_calloc,
+coro_uctx.c) as leaked, run-to-run variable (~3-7%).
 
-**Fix applied:** __xtc_inbox_fini now, for each undrained
-XTC_INB_PUBLISH message, runs the carried task's cleanup (the coroutine
-layer's callback releases the fiber stack + coro struct) and frees the
-task -- exactly as xtc_loop_fini's all_tasks walk does for tasks that
-were drained.  An XTC_INB_WAKE references an already-tracked (and
-already-freed) task and is deliberately left untouched.  This eliminates
-the leak for procs left sitting in a loop's inbox at fini, which is the
-bulk of it: a normal drain-to-idle shutdown is fully leak-clean, and the
-whole ASan `make check` passes with detect_leaks=1.
+**Fix, in two parts:**
 
-**Residual:** on an *abrupt* xtc_exec_stop (workers halted while spawns
-are mid-flight), a small, run-to-run-variable number of procs whose task
-had been drained from the inbox into a loop's run queue but had not yet
-run -- and whose proc-control struct was therefore never bound/owned by
-__proc_entry -- can still leak.  This is the abnormal-teardown corner
-(production drain-to-idle does not hit it); the native reproducer stays
-standalone (not in the leak-gated make check set).  Root-causing the
-last run-queue case is tracked.
+1. __xtc_inbox_fini now, for each undrained XTC_INB_PUBLISH message,
+   runs the carried task's cleanup (releasing the fiber stack + coro
+   struct) and frees the task -- exactly as xtc_loop_fini's all_tasks
+   walk does for drained tasks.  XTC_INB_WAKE references an
+   already-tracked task and is left untouched.  This reclaimed procs
+   left sitting in a loop's inbox at fini (the bulk).
+
+2. THE RESIDUAL (the run-queue case) root cause: xtc_async stores
+   t->cleanup only AFTER __xtc_task_spawn_ex makes the task visible (it
+   pushes an XTC_INB_PUBLISH for a foreign spawn).  A short-lived
+   cross-thread-spawned coro can be drained, run, and reach DONE on the
+   target loop's thread while the spawning thread has not yet stored
+   t->cleanup -- so the DONE path read cleanup==NULL, recycled the task
+   as a PLAIN task (freeing the task struct without releasing its
+   coro/fiber-stack -> the coro leaked), and left the spawner's pending
+   t->cleanup store to land on freed memory (a latent UAF).  Fixed in
+   __xtc_loop_step: the recycle-as-plain path now also requires
+   t->fn != __xtc_coro_step.  t->fn is set before the task is published
+   and never changes, so it is a race-free discriminator: any
+   coro-backed task is left on all_tasks for the fini walk (which runs
+   its by-then-stored cleanup exactly once); only genuinely plain
+   pinned tasks recycle.
+
+**Evidence:** repro_idle_uring_wake under ASan leak-detection goes to
+0 leaks across 70+ consecutive runs on both epoll and io_uring (was
+~3-7%); the full proc/sup/svr/tnt suites pass under ASan with no
+use-after-free or double-free; a drain-to-idle shutdown was already
+leak-clean and stays so.
 
 **Why it was not caught earlier:** the leak is only visible with a
 WORKING LeakSanitizer -- GitHub's containerized CI runner restricts the

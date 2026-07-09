@@ -18,12 +18,16 @@
  * itself a process-directed SIGUSR1 many times, and asserts EVERY
  * delivery was handled on the main thread -- never on a libxtc thread.
  *
- * STATUS (2026-07): the mask primitive is verified correct in isolation
- * (a thread created via __os_pthread_create_masked has SIGUSR1 blocked),
- * and every libxtc creation site now routes through it, but this
- * integration test still observes occasional deliveries to a libxtc
- * thread -- a subtle remaining case under investigation (see
- * docs/KNOWN_ISSUES.md).  Run standalone; NOT yet a gating test.
+ * STATUS (2026-07): root-caused, fix still open.  The residual is the
+ * ucontext coroutine substrate restoring a signal mask when switching
+ * INTO a fiber (getcontext captures the creating thread's mask;
+ * swapcontext restores uc_sigmask on every switch), so a fiber created
+ * from a thread with a signal unblocked can unblock it on whatever
+ * runtime thread later runs the fiber.  Forcing the fiber uc_sigmask to
+ * all-blocked fixes THIS test but propagates the block into fork/exec
+ * children (hangs test_osproc), so it was reverted; a correctly-scoped
+ * fix is open (see docs/KNOWN_ISSUES.md).  Run STANDALONE; NOT a gating
+ * test -- it can show a few deliveries to a libxtc thread under load.
  */
 
 #include "xtc.h"
