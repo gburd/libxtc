@@ -1,0 +1,134 @@
+.\" Copyright (c) 2026, The XTC Project -- All rights reserved.
+.\" Use of this source code is governed by the ISC License.
+.Dd July 9, 2026
+.Dt XTC_FSM 3
+.Os
+.Sh NAME
+.Nm xtc_fsm_start ,
+.Nm xtc_fsm_stop ,
+.Nm xtc_fsm_join ,
+.Nm xtc_fsm_pid ,
+.Nm xtc_fsm_send ,
+.Nm xtc_fsm_call ,
+.Nm xtc_fsm_reply
+.Nd gen_statem-style finite state machine as a process
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_fsm.h
+.Ft int
+.Fn xtc_fsm_start "xtc_loop_t *loop" "const xtc_fsm_callbacks_t *cb" "void *state" "int initial_state" "const xtc_fsm_opts_t *opts" "xtc_fsm_t **out"
+.Ft int
+.Fn xtc_fsm_stop "xtc_fsm_t *fsm"
+.Ft int
+.Fn xtc_fsm_join "xtc_fsm_t *fsm" "int64_t timeout_ns"
+.Ft xtc_pid_t
+.Fn xtc_fsm_pid "const xtc_fsm_t *fsm"
+.Ft int
+.Fn xtc_fsm_send "xtc_pid_t target" "const void *ev" "size_t len"
+.Ft int
+.Fn xtc_fsm_call "xtc_pid_t target" "const void *req" "size_t req_size" "void **out_reply" "size_t *out_size" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_fsm_reply "xtc_fsm_call_t *call" "const void *reply" "size_t size"
+.Sh DESCRIPTION
+The
+.Nm xtc_fsm
+family is a
+.Xr gen_statem 3 Ns -style
+finite state machine that runs as its own
+.Xr xtc_proc 3 :
+a disciplined loop over
+.Fn xtc_recv
+that dispatches each event to the caller's
+.Fn event
+callback for the current state and acts on the returned
+.Vt xtc_fsm_result_t .
+It standardizes the three features hand-rolled C switch machines almost
+always get wrong:
+.Bl -bullet -compact
+.It
+.Sy state_enter :
+the
+.Fn enter
+callback runs on every state change, so entry actions live in one place.
+.It
+.Sy postponed events :
+an event returned as
+.Dv XTC_FSM_POSTPONE
+is stashed and REPLAYED, oldest first, after the next
+.Dv XTC_FSM_NEXT
+transition, ahead of fresh events.
+.It
+.Sy state timeouts :
+a result with
+.Va state_timeout_ns No > 0
+arms a timeout for the resulting state; if it fires first a synthetic
+state-timeout event is delivered to
+.Fn event
+with
+.Fa msg No == NULL
+and
+.Fa len No == 0
+.Pq Dv XTC_FSM_IS_STATE_TIMEOUT .
+Any real event cancels a pending state timeout.
+.El
+.Pp
+.Fn xtc_fsm_start
+spawns the machine on
+.Fa loop
+in
+.Fa initial_state
+.Pq Fn enter No is called for it first
+and returns a handle in
+.Fa out .
+.Fn xtc_fsm_stop
+asks the machine to stop (non-blocking; runs
+.Fn terminate ,
+then the proc exits);
+.Fn xtc_fsm_join
+waits for exit and frees the handle.
+.Fn xtc_fsm_pid
+returns the machine's pid.
+.Pp
+.Fn xtc_fsm_send
+delivers an asynchronous, fire-and-forget event (arrives with
+.Fa call No == NULL ) .
+.Fn xtc_fsm_call
+delivers a synchronous request and blocks until the machine replies or
+.Fa timeout_ns
+elapses; on success
+.Fa out_reply
+receives a heap buffer the caller releases with
+.Xr xtc_free 3 .
+Inside
+.Fn event ,
+when
+.Fa call
+is non-NULL the callback answers it exactly once with
+.Fn xtc_fsm_reply .
+.Sh RETURN VALUES
+All functions returning
+.Vt int
+return
+.Dv XTC_OK
+on success or a negative
+.Dv XTC_E_*
+code;
+.Fn xtc_fsm_call
+returns
+.Dv XTC_E_AGAIN
+on timeout and must be called from within a process.
+.Fn xtc_fsm_join
+returns
+.Dv XTC_E_AGAIN
+on timeout, leaving the handle valid to join again.
+.Fn xtc_fsm_pid
+returns the machine's pid, or
+.Dv XTC_PID_NONE
+for a NULL handle.
+.Sh SEE ALSO
+.Xr xtc_svr 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_supervisor 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 1.10.
