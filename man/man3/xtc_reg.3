@@ -14,6 +14,9 @@
 .Nm xtc_reg_register_dup ,
 .Nm xtc_reg_unregister_pid ,
 .Nm xtc_reg_drop_pid ,
+.Nm xtc_reg_reaper ,
+.Nm xtc_reg_register_mon ,
+.Nm xtc_svr_call_name ,
 .Nm xtc_reg_members
 .Nd named process registry
 .Sh SYNOPSIS
@@ -39,6 +42,12 @@
 .Fn xtc_reg_unregister_pid "xtc_reg_t *r" "const char *key" "xtc_pid_t pid"
 .Ft int
 .Fn xtc_reg_drop_pid "xtc_reg_t *r" "xtc_pid_t pid"
+.Ft void
+.Fn xtc_reg_reaper "void *reg"
+.Ft int
+.Fn xtc_reg_register_mon "xtc_reg_t *r" "const char *name" "xtc_pid_t pid"
+.Ft int
+.Fn xtc_svr_call_name "xtc_reg_t *r" "const char *name" "const void *req" "size_t req_size" "void **out_reply" "size_t *out_size" "int64_t timeout_ns"
 .Ft int
 .Fn xtc_reg_members "xtc_reg_t *r" "const char *key" "int (*fn)(xtc_pid_t, void *)" "void *user"
 .Sh DESCRIPTION
@@ -86,6 +95,33 @@ from EVERY key it appears under (unique names and all duplicate-key
 groups) and returns the number of entries removed -- the "process left
 everything" cleanup an embedder calls when a process exits or a
 connection closes.
+.Pp
+.Fn xtc_reg_reaper
+is the CRASH-AWARE registry: spawn one process with this body and the
+registry as its argument
+.Pq Fn xtc_proc_spawn loop xtc_reg_reaper reg ... .
+It registers itself, then monitors every pid registered via
+.Fn xtc_reg_register_mon
+and calls
+.Fn xtc_reg_drop_pid
+automatically when such a pid goes DOWN -- the automatic form of the
+manual cleanup.  It runs until its loop is torn down.
+.Fn xtc_reg_register_mon
+registers
+.Fa name No -> Fa pid
+like
+.Fn xtc_reg_register
+and, when a reaper is running, arranges the entry to be auto-dropped on
+the pid's DOWN; with no reaper it is exactly
+.Fn xtc_reg_register .
+.Pp
+.Fn xtc_svr_call_name
+is via-dispatch: it looks up
+.Fa name No -> No pid and then Fn xtc_svr_call No it,
+letting a client address a gen_server by registered name instead of
+holding its pid.  It returns
+.Dv XTC_E_NOTFOUND
+if the name is not registered.
 .Fn xtc_reg_members
 visits every pid registered under
 .Fa key ;

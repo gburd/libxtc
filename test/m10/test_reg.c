@@ -7,8 +7,13 @@
 
 #include "munit.h"
 #include "xtc.h"
+#include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_reg.h"
+#include "xtc_int.h"
+
+#include <stdatomic.h>
+#include <string.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -244,11 +249,86 @@ test_reg_dup_keys(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- crash-aware registry (reaper auto-drops on DOWN) ---------- */
+
+struct ca_ctx {
+	xtc_reg_t  *reg;
+	xtc_loop_t *loop;               /* checker stops it when done */
+	_Atomic int worker_gone_seen;   /* checker: entry absent after crash */
+};
+
+/* A worker that registers itself for monitored cleanup, then exits
+ * (simulating a crash -- the entry must be auto-dropped). */
+static void
+ca_worker(void *arg)
+{
+	struct ca_ctx *c = arg;
+	(void)xtc_reg_register_mon(c->reg, "worker", xtc_self());
+	/* exit immediately; the reaper's monitor -> DOWN -> drop_pid */
+}
+
+/* Checker: waits for the reaper to process the monitor request and the
+ * worker's DOWN, then verifies "worker" is no longer resolvable. */
+static void
+ca_checker(void *arg)
+{
+	struct ca_ctx *c = arg;
+	xtc_pid_t pid;
+	int i;
+	/* Poll: the reaper must (a) receive+arm the monitor, (b) receive the
+	 * DOWN, (c) drop_pid.  Give it several scheduler turns. */
+	for (i = 0; i < 200; i++) {
+		if (xtc_reg_whereis(c->reg, "worker", &pid) != XTC_OK) {
+			atomic_store(&c->worker_gone_seen, 1);
+			break;
+		}
+		xtc_proc_sleep(5LL * 1000 * 1000);   /* 5ms */
+	}
+	(void)xtc_loop_stop(c->loop);   /* let the blocked reaper's loop exit */
+}
+
+static MunitResult
+test_reg_crash_aware(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_reg_t *r = NULL;
+	struct ca_ctx c;
+	xtc_pid_t reaper;
+	(void)p; (void)d;
+
+	memset(&c, 0, sizeof c);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
+	c.reg = r;
+	c.loop = loop;
+
+	/* Spawn the reaper first so it publishes its pid before the worker
+	 * registers-for-monitoring. */
+	munit_assert_int(xtc_proc_spawn(loop, xtc_reg_reaper, r, NULL,
+	    &reaper), ==, XTC_OK);
+	/* Let the reaper register itself. */
+	munit_assert_int(xtc_proc_spawn(loop, ca_worker, &c, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, ca_checker, &c, NULL, NULL),
+	    ==, XTC_OK);
+
+	/* The reaper loops forever (recv -1); the checker stops the loop
+	 * once it has its answer, so xtc_loop_run returns. */
+	(void)xtc_loop_run(loop);
+
+	munit_assert_int(atomic_load(&c.worker_gone_seen), ==, 1);
+
+	xtc_reg_destroy(r);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/reg_basic", test_reg_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_collisions", test_reg_collisions, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_scale", test_reg_scale, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_dup_keys", test_reg_dup_keys, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reg_crash_aware", test_reg_crash_aware, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/reg", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

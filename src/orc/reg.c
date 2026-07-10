@@ -16,6 +16,8 @@
 #include "xtc_int.h"
 #include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
 #include "xtc_reg.h"
+#include "xtc_proc.h"      /* reaper proc: monitor + recv + drop-on-DOWN */
+#include "xtc_svr.h"       /* xtc_svr_call_name via-dispatch */
 #include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
 
 #include <pthread.h>
@@ -46,7 +48,17 @@ struct xtc_reg {
 	pthread_mutex_t   lock;
 	struct reg_node **buckets;      /* REG_NBUCKETS heads, zeroed */
 	int               n;            /* live entry count */
+	_Atomic int       has_reaper;   /* 1 once a reaper proc has registered */
+	xtc_pid_t         reaper;       /* the reaper's pid (valid if has_reaper) */
 };
+
+/* Wire message a caller sends to the reaper proc: "monitor `pid`; when
+ * it goes DOWN, drop it from every key."  Fixed layout, sent by value. */
+struct reg_reaper_msg {
+	uint32_t  tag;                  /* REG_REAPER_MONITOR */
+	xtc_pid_t pid;
+};
+#define REG_REAPER_MONITOR 0x9E1u
 
 /* FNV-1a over a NUL-terminated name; same constants as lock_mgr.c.
  * 0 is a fine result -- the bucket index masks it. */
@@ -326,4 +338,105 @@ xtc_reg_members(xtc_reg_t *r, const char *key,
 	}
 	(void)__xtc_mtx_unlock(&r->lock);
 	return count;
+}
+
+/* ===== crash-aware registry: reaper proc + monitored registration ===== */
+
+/*
+ * The reaper is a small proc the embedder spawns once with
+ * xtc_reg_reaper as the body and the registry as the argument.  It
+ * registers its own pid in the registry (so xtc_reg_register_mon can
+ * find it), then loops: each REG_REAPER_MONITOR request arms an
+ * xtc_monitor on the named pid; every DOWN it receives (a monitored
+ * pid exited) triggers xtc_reg_drop_pid so the dead pid leaves every
+ * key it held.  This is the automatic form of the manual
+ * xtc_reg_drop_pid cleanup -- the crash-aware registry.
+ */
+void
+xtc_reg_reaper(void *arg)
+{
+	struct xtc_reg *r = arg;
+	if (r == NULL) return;
+
+	/* Publish the reaper's pid so xtc_reg_register_mon can reach it. */
+	(void)__xtc_mtx_lock(&r->lock);
+	r->reaper = xtc_self();
+	atomic_store_explicit(&r->has_reaper, 1, memory_order_release);
+	(void)__xtc_mtx_unlock(&r->lock);
+
+	for (;;) {
+		void *msg = NULL;
+		size_t len = 0;
+		xtc_pid_t down_pid;
+		int reason;
+
+		if (xtc_recv(&msg, &len, -1) != XTC_OK)
+			break;               /* loop torn down */
+		if (msg == NULL)
+			continue;
+
+		/* A monitor request from xtc_reg_register_mon. */
+		if (len == sizeof(struct reg_reaper_msg)) {
+			struct reg_reaper_msg m;
+			memcpy(&m, msg, sizeof m);
+			if (m.tag == REG_REAPER_MONITOR) {
+				/* Monitor the pid; a DOWN (immediate if it is
+				 * already gone) comes back to us. */
+				(void)xtc_monitor(m.pid, NULL);
+				xtc_free(msg);
+				continue;
+			}
+		}
+
+		/* Otherwise it should be a DOWN for a pid we monitor. */
+		if (xtc_down_decode(msg, len, &down_pid, &reason) == XTC_OK) {
+			(void)reason;
+			(void)xtc_reg_drop_pid(r, down_pid);
+		}
+		xtc_free(msg);
+	}
+
+	/* Reaper exiting: clear the published pid so later _register_mon
+	 * calls fall back to a plain register rather than sending into a
+	 * dead mailbox. */
+	(void)__xtc_mtx_lock(&r->lock);
+	atomic_store_explicit(&r->has_reaper, 0, memory_order_release);
+	(void)__xtc_mtx_unlock(&r->lock);
+}
+
+int
+xtc_reg_register_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
+{
+	int rc;
+	if (r == NULL || name == NULL) return XTC_E_INVAL;
+	if ((rc = xtc_reg_register(r, name, pid)) != XTC_OK)
+		return rc;
+	/* If a reaper is running, ask it to monitor pid so the entry is
+	 * auto-dropped on DOWN.  If none, this behaves as a plain register
+	 * (the caller may still xtc_reg_drop_pid manually). */
+	if (atomic_load_explicit(&r->has_reaper, memory_order_acquire)) {
+		struct reg_reaper_msg m;
+		xtc_pid_t reaper;
+		(void)__xtc_mtx_lock(&r->lock);
+		reaper = r->reaper;
+		(void)__xtc_mtx_unlock(&r->lock);
+		m.tag = REG_REAPER_MONITOR;
+		m.pid = pid;
+		(void)xtc_send(reaper, &m, sizeof m);
+	}
+	return XTC_OK;
+}
+
+int
+xtc_svr_call_name(xtc_reg_t *r, const char *name,
+                  const void *req, size_t req_size,
+                  void **out_reply, size_t *out_size, int64_t timeout_ns)
+{
+	xtc_pid_t pid;
+	int rc;
+	if (r == NULL || name == NULL) return XTC_E_INVAL;
+	if ((rc = xtc_reg_whereis(r, name, &pid)) != XTC_OK)
+		return XTC_E_NOTFOUND;
+	return xtc_svr_call(pid, req, req_size, out_reply, out_size,
+	    timeout_ns);
 }
