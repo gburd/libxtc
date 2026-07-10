@@ -182,4 +182,65 @@ void xtc_chan_broadcast_unsubscribe(xtc_chan_broadcast_recv_t *r);
 int  xtc_chan_broadcast_recv(xtc_chan_broadcast_recv_t *r,
                               void **out, int *lagged);
 
+/* ----- demand (pull-based / GenStage backpressure) ----------------- */
+
+typedef struct xtc_chan_demand xtc_chan_demand_t;
+
+/*
+ * Demand-driven channel: the GenStage / reactive-streams backpressure
+ * primitive.  A consumer explicitly ASKS for N items with
+ * xtc_chan_demand_ask; the producer's xtc_chan_demand_send succeeds
+ * only while there is outstanding demand, so a fast producer cannot
+ * outrun a slow consumer -- backpressure is expressed as demand, not as
+ * a fixed buffer that silently drops or blocks.  Delivered items still
+ * buffer (up to `capacity`) so the consumer pulls at its own pace.
+ *
+ * xtc_chan_demand_send returns XTC_E_AGAIN when demand is exhausted (the
+ * producer should stop until the consumer asks again -- register a
+ * waker to be told when demand is granted).  The consumer drains with
+ * xtc_chan_demand_recv, which does NOT itself grant demand; the
+ * consumer decides its own high-water policy by calling _ask.
+ *
+ * PUBLIC: int    xtc_chan_demand_create __P((xtc_res_t *, size_t, xtc_chan_demand_t **));
+ * PUBLIC: void   xtc_chan_demand_destroy __P((xtc_chan_demand_t *));
+ * PUBLIC: int    xtc_chan_demand_ask __P((xtc_chan_demand_t *, size_t));
+ * PUBLIC: int    xtc_chan_demand_send __P((xtc_chan_demand_t *, void *));
+ * PUBLIC: int    xtc_chan_demand_try_recv __P((xtc_chan_demand_t *, void **));
+ * PUBLIC: size_t xtc_chan_demand_outstanding __P((const xtc_chan_demand_t *));
+ * PUBLIC: size_t xtc_chan_demand_len __P((const xtc_chan_demand_t *));
+ * PUBLIC: int    xtc_chan_demand_set_producer_waker __P((xtc_chan_demand_t *, const xtc_waker_t *));
+ * PUBLIC: int    xtc_chan_demand_set_consumer_waker __P((xtc_chan_demand_t *, const xtc_waker_t *));
+ * PUBLIC: int    xtc_chan_demand_close __P((xtc_chan_demand_t *));
+ */
+int    xtc_chan_demand_create(xtc_res_t *res, size_t capacity,
+                              xtc_chan_demand_t **out);
+void   xtc_chan_demand_destroy(xtc_chan_demand_t *c);
+
+/* Grant `n` units of demand.  Wakes the producer's waker if set. */
+int    xtc_chan_demand_ask(xtc_chan_demand_t *c, size_t n);
+
+/* Send an item, consuming one unit of demand.  XTC_E_AGAIN if demand is
+ * exhausted or the buffer is full; XTC_E_INVAL if closed. */
+int    xtc_chan_demand_send(xtc_chan_demand_t *c, void *msg);
+
+/* Non-blocking receive.  XTC_E_AGAIN if empty.  Does not grant demand. */
+int    xtc_chan_demand_try_recv(xtc_chan_demand_t *c, void **out);
+
+/* Outstanding (un-consumed) demand. */
+size_t xtc_chan_demand_outstanding(const xtc_chan_demand_t *c);
+
+/* Buffered items not yet received. */
+size_t xtc_chan_demand_len(const xtc_chan_demand_t *c);
+
+/* Producer waker: fired when the consumer grants demand (xtc_chan_demand_ask). */
+int    xtc_chan_demand_set_producer_waker(xtc_chan_demand_t *c,
+                                          const xtc_waker_t *w);
+
+/* Consumer waker: fired when the producer sends an item. */
+int    xtc_chan_demand_set_consumer_waker(xtc_chan_demand_t *c,
+                                          const xtc_waker_t *w);
+
+/* Close the channel; subsequent sends fail, buffered items still drain. */
+int    xtc_chan_demand_close(xtc_chan_demand_t *c);
+
 #endif /* XTC_CHAN_H */

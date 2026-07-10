@@ -173,12 +173,68 @@ test_res_caps(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+static MunitResult
+test_demand_backpressure(const MunitParameter p[], void *d)
+{
+	xtc_chan_demand_t *c = NULL;
+	int items[5] = { 10, 11, 12, 13, 14 };
+	void *out = NULL;
+	int i;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_chan_demand_create(NULL, 4, &c), ==, XTC_OK);
+
+	/* No demand yet: a send is refused (backpressure). */
+	munit_assert_int(xtc_chan_demand_send(c, &items[0]), ==, XTC_E_AGAIN);
+	munit_assert_size(xtc_chan_demand_outstanding(c), ==, 0);
+
+	/* Consumer asks for 2; producer may send exactly 2. */
+	munit_assert_int(xtc_chan_demand_ask(c, 2), ==, XTC_OK);
+	munit_assert_size(xtc_chan_demand_outstanding(c), ==, 2);
+	munit_assert_int(xtc_chan_demand_send(c, &items[0]), ==, XTC_OK);
+	munit_assert_int(xtc_chan_demand_send(c, &items[1]), ==, XTC_OK);
+	/* Demand exhausted: the third send is refused. */
+	munit_assert_int(xtc_chan_demand_send(c, &items[2]), ==, XTC_E_AGAIN);
+	munit_assert_size(xtc_chan_demand_outstanding(c), ==, 0);
+	munit_assert_size(xtc_chan_demand_len(c), ==, 2);
+
+	/* Consumer drains -- recv does NOT itself grant demand. */
+	munit_assert_int(xtc_chan_demand_try_recv(c, &out), ==, XTC_OK);
+	munit_assert_ptr_equal(out, &items[0]);
+	munit_assert_int(xtc_chan_demand_try_recv(c, &out), ==, XTC_OK);
+	munit_assert_ptr_equal(out, &items[1]);
+	munit_assert_int(xtc_chan_demand_try_recv(c, &out), ==, XTC_E_AGAIN);
+	/* Still no demand, so still no send. */
+	munit_assert_int(xtc_chan_demand_send(c, &items[2]), ==, XTC_E_AGAIN);
+
+	/* Ask for more than the buffer holds: demand accrues but the
+	 * buffer cap (4) still bounds in-flight items. */
+	munit_assert_int(xtc_chan_demand_ask(c, 10), ==, XTC_OK);
+	for (i = 0; i < 4; i++)
+		munit_assert_int(xtc_chan_demand_send(c, &items[i]), ==, XTC_OK);
+	/* Buffer full (4) even though demand remains (6). */
+	munit_assert_int(xtc_chan_demand_send(c, &items[4]), ==, XTC_E_AGAIN);
+	munit_assert_size(xtc_chan_demand_len(c), ==, 4);
+	munit_assert_size(xtc_chan_demand_outstanding(c), ==, 6);
+
+	/* Close: buffered items still drain, then XTC_E_INVAL. */
+	munit_assert_int(xtc_chan_demand_close(c), ==, XTC_OK);
+	munit_assert_int(xtc_chan_demand_send(c, &items[4]), ==, XTC_E_INVAL);
+	for (i = 0; i < 4; i++)
+		munit_assert_int(xtc_chan_demand_try_recv(c, &out), ==, XTC_OK);
+	munit_assert_int(xtc_chan_demand_try_recv(c, &out), ==, XTC_E_INVAL);
+
+	xtc_chan_demand_destroy(c);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/oneshot_basic",       test_oneshot_basic,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mpsc_basic",          test_mpsc_basic,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mpsc_concurrent",     test_mpsc_concurrent,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/watch_latest_wins",   test_watch_latest_wins,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/res_caps",            test_res_caps,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/demand_backpressure", test_demand_backpressure, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m7/chan", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
