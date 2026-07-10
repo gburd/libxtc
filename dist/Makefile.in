@@ -121,6 +121,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/orc/pool.c \
 	$(srcdir)/../src/orc/stream.c \
 	$(srcdir)/../src/orc/credit.c \
+	$(srcdir)/../src/orc/xproc.c \
 	$(srcdir)/../src/orc/launch.c \
 	$(srcdir)/../src/orc/app.c \
 	$(srcdir)/../src/orc/tnt.c \
@@ -203,6 +204,7 @@ LIB_OBJS	= \
 	pool.o \
 	stream.o \
 	credit.o \
+	xproc.o \
 	launch.o \
 	app.o \
 	tnt.o \
@@ -273,6 +275,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_pool.h \
 	$(srcdir)/../src/inc/xtc_stream.h \
 	$(srcdir)/../src/inc/xtc_credit.h \
+	$(srcdir)/../src/inc/xtc_xproc.h \
 	$(srcdir)/../src/inc/xtc_launch.h \
 	$(srcdir)/../src/inc/xtc_sync.h \
 	$(srcdir)/../src/inc/xtc_tailcall.h \
@@ -365,6 +368,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_pool \
 		  test_stream \
 		  test_credit \
+		  test_xproc \
 		  test_app \
 		  test_tnt \
 		  test_osproc \
@@ -655,6 +659,9 @@ stream.o: $(srcdir)/../src/orc/stream.c xtc_config.h
 
 credit.o: $(srcdir)/../src/orc/credit.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/credit.c
+
+xproc.o: $(srcdir)/../src/orc/xproc.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/xproc.c
 
 launch.o: $(srcdir)/../src/orc/launch.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/launch.c
@@ -1205,6 +1212,12 @@ test_credit: $(srcdir)/../test/m10/test_credit.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
 		-o $@ $(srcdir)/../test/m10/test_credit.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_xproc: $(srcdir)/../test/m10/test_xproc.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_xproc.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_svr_edge: $(srcdir)/../test/m10/test_svr_edge.c \

@@ -1,0 +1,126 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 10, 2026
+.Dt XTC_XPROC 3
+.Os
+.Sh NAME
+.Nm xtc_xspawn ,
+.Nm xtc_xproc_destroy ,
+.Nm xtc_xproc_os_pid ,
+.Nm xtc_xsend ,
+.Nm xtc_xmonitor ,
+.Nm xtc_xproc_child_main
+.Nd cross-fork spawn, send, and monitor
+.Sh LIBRARY
+.Lb libxtc
+.Sh SYNOPSIS
+.In xtc_xproc.h
+.Ft int
+.Fn xtc_xspawn "xtc_loop_t *loop" "const char *name" "xtc_xproc_root_fn root_fn" "const void *arg" "size_t arg_len" "xtc_xproc_t **out"
+.Ft void
+.Fn xtc_xproc_destroy "xtc_xproc_t *p"
+.Ft long
+.Fn xtc_xproc_os_pid "const xtc_xproc_t *p"
+.Ft int
+.Fn xtc_xsend "xtc_xproc_t *p" "const void *msg" "size_t len"
+.Ft int
+.Fn xtc_xmonitor "xtc_xproc_t *p" "uint64_t *out_ref"
+.Ft int
+.Fn xtc_xproc_child_main "int ctrl_fd" "xtc_xproc_root_fn root_fn" "void *arg"
+.Sh DESCRIPTION
+These extend the Erlang-style process relations across a
+.Xr fork 2
+boundary: a parent spawns a child that runs its OWN xtc runtime, and can
+send to it and monitor it as if it were a local process.  This is the
+single-host subset of the (unbuilt) distributed design -- a stepping
+stone toward cluster support, built over a local socketpair rather than
+TCP.
+.Pp
+.Fn xtc_xspawn
+forks a child running
+.Fa root_fn ,
+which receives a private copy of the
+.Fa arg / Fa arg_len
+bytes the parent passed.  The parent gets an
+.Vt xtc_xproc_t
+handle in
+.Fa *out .
+It must be called from a fiber on
+.Fa loop
+(the monitor relay lives there).  On a platform without
+.Xr fork 2
+it returns
+.Dv XTC_E_NOSYS .
+.Pp
+.Fn xtc_xsend
+sends a byte payload (copied) to the child's root proc; it arrives in
+that proc's mailbox as an ordinary
+.Fn xtc_recv
+message.
+.Pp
+.Fn xtc_xmonitor
+monitors the child from the calling fiber.  When the child exits,
+crashes, or its control channel dies, the caller receives a normal xtc
+DOWN message (decode with
+.Fn xtc_down_decode_ex ) .
+The DOWN's
+.Va reason
+carries the child's exit code, or the signal number if the child was
+killed by a signal, or
+.Dv XTC_DOWN_KIND_NOCONNECTION
+if the channel died before a clean exit was seen.  Internally the child's
+fate is mirrored into a local shadow proc, so all the ordinary
+monitor/DOWN machinery applies unchanged.
+.Pp
+.Fn xtc_xproc_os_pid
+returns the child's OS pid (for logging), or -1.
+.Fn xtc_xproc_destroy
+signals and reaps the child if still running, closes the channel, and
+frees the handle; it is idempotent.
+.Pp
+.Fn xtc_xproc_child_main
+is the child-side entry that
+.Fn xtc_xspawn
+arranges automatically; it is public so a re-exec'd child (a future
+extension) can re-enter its runtime.
+.Sh RETURN VALUES
+.Fn xtc_xspawn ,
+.Fn xtc_xsend ,
+and
+.Fn xtc_xmonitor
+return
+.Dv XTC_OK
+or a negative
+.Dv XTC_E_*
+code (notably
+.Dv XTC_E_NOSYS
+where
+.Xr fork 2
+is unavailable).
+.Fn xtc_xproc_os_pid
+returns the OS pid or -1.
+.Fn xtc_xproc_child_main
+returns the child's exit code.
+.Pp
+.Fn xtc_xproc_destroy
+returns no value.
+.Sh NOTES
+POSIX only; the Windows build declines every entry point with
+.Dv XTC_E_NOSYS .
+.Pp
+Because cross-fork spawn uses a real
+.Xr fork 2
+and
+.Xr waitpid 2 ,
+it is deliberately NOT reachable by the deterministic simulator (the sim
+is single-process and cannot observe a real child's schedule) -- the same
+boundary that keeps native AIO and the thread pool out of the sim.  It is
+covered by the unit test tier
+.Pq test/m10/test_xproc.c ;
+a future DST model would run both sides as loops over a simulated
+socketpair, as the distributed design describes.
+.Sh SEE ALSO
+.Xr xtc_osproc 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_net 3 ,
+.Xr xtc 7
