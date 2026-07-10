@@ -1,3 +1,39 @@
+libxtc (1.10.0-1) unstable; urgency=medium
+
+  * OTP-behaviour build-out, part 1 (from the OTP-patterns survey).  New
+    optional, opt-in orchestration behaviours; all shared-nothing-safe
+    and buildable on the existing proc/supervisor primitives.
+  * New xtc_fsm: a gen_statem-style finite state machine running as a
+    process.  Standardizes the three things hand-rolled C switch machines
+    get wrong -- state_enter (enter callback on every transition),
+    postponed events (XTC_FSM_POSTPONE stashes and replays them oldest-
+    first after the next transition), and state timeouts (a synthetic
+    timeout event, cancelled by any real event).  Async events via
+    xtc_fsm_send, synchronous request/reply via xtc_fsm_call /
+    xtc_fsm_reply, lifecycle via start/stop/join/pid.  See xtc_fsm(3).
+  * Supervisor: bounded dynamic pool.  xtc_sup_opts_t.max_children caps
+    the live child count for the simple_one_for_one strategy;
+    xtc_sup_add_child returns XTC_E_RESOURCE at the cap (a slot freed by
+    a child DOWN is reusable) -- the connection-pool pattern.  New
+    xtc_sup_n_alive (live count vs xtc_sup_n_children total).  The
+    one_for_all / rest_for_one / simple_one_for_one strategies were
+    already implemented; the header comment is corrected.
+  * gen_server handle_continue: a callback arms a continuation with
+    xtc_svr_continue(cont), and handle_continue(state, cont) runs before
+    the server's next receive -- so init can return fast (unblocking the
+    supervisor and the start caller) and finish expensive setup before
+    the first message, without a self-send that races an incoming
+    message.  See xtc_svr(3).
+  * Docs: a fibers-chapter section (and tested snippet) showing the
+    stackful-fiber advantage -- suspending from inside a foreign C call
+    chain such as qsort()'s comparator, which a callback runtime cannot
+    do.
+  * No behavior change to existing APIs; xtc_svr_callbacks_t gains a
+    handle_continue field before terminate (recompile embedders that use
+    a positional initializer).
+
+ -- Greg Burd <greg@burd.me>  Fri, 10 Jul 2026 07:35:39 -0400
+
 libxtc (1.9.0-1) unstable; urgency=medium
 
   * Three open concurrency bugs resolved, all in the cross-thread
