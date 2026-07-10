@@ -543,7 +543,11 @@ typedef enum {
 	XTC_DOWN_KIND_CLEAN  = 0,  /* target returned or xtc_exit_self(0) */
 	XTC_DOWN_KIND_EXIT   = 1,  /* xtc_exit_self(code), code in .exit_code */
 	XTC_DOWN_KIND_SIGNAL = 2,  /* R1 contained fault, signal in .signal */
-	XTC_DOWN_KIND_NOPROC = 3   /* monitor raced a dead target (benign) */
+	XTC_DOWN_KIND_NOPROC = 3,  /* monitor raced a dead target (benign) */
+	XTC_DOWN_KIND_NOCONNECTION = 4  /* the cross-process channel died
+	                                 * before a clean exit was seen
+	                                 * (xtc_xproc: the fork'd child's
+	                                 * control socket closed) */
 } xtc_down_kind_t;
 
 typedef struct {
