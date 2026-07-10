@@ -109,6 +109,7 @@ install_headers(
   'src/inc/xtc_svr.h',
   'src/inc/xtc_fsm.h',
   'src/inc/xtc_pg.h',
+  'src/inc/xtc_pool.h',
   'src/inc/xtc_sync.h',
   'src/inc/xtc_tailcall.h',
   'src/inc/xtc_tls.h',
