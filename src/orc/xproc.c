@@ -26,10 +26,11 @@
 #include "xtc_net.h"
 #include "xtc_proc.h"
 
-#include <sys/wait.h>
 #include <string.h>
 
 #if !defined(_WIN32)
+
+#include <sys/wait.h>
 
 struct xtc_xproc {
 	xtc_loop_t   *loop;
