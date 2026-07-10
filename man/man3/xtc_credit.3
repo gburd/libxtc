@@ -1,0 +1,138 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 10, 2026
+.Dt XTC_CREDIT 3
+.Os
+.Sh NAME
+.Nm xtc_credit_create ,
+.Nm xtc_credit_destroy ,
+.Nm xtc_credit_acquire ,
+.Nm xtc_credit_try_acquire ,
+.Nm xtc_credit_release ,
+.Nm xtc_credit_in_flight ,
+.Nm xtc_credit_peak ,
+.Nm xtc_credit_window
+.Nd sliding-window credit regulator (in-flight flow control)
+.Sh LIBRARY
+.Lb libxtc
+.Sh SYNOPSIS
+.In xtc_credit.h
+.Ft int
+.Fn xtc_credit_create "unsigned window" "xtc_credit_t **out"
+.Ft void
+.Fn xtc_credit_destroy "xtc_credit_t *c"
+.Ft int
+.Fn xtc_credit_acquire "xtc_credit_t *c" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_credit_try_acquire "xtc_credit_t *c"
+.Ft int
+.Fn xtc_credit_release "xtc_credit_t *c"
+.Ft unsigned
+.Fn xtc_credit_in_flight "const xtc_credit_t *c"
+.Ft unsigned
+.Fn xtc_credit_peak "const xtc_credit_t *c"
+.Ft unsigned
+.Fn xtc_credit_window "const xtc_credit_t *c"
+.Sh DESCRIPTION
+A credit regulator caps the number of operations a producer keeps IN
+FLIGHT -- issued but not yet acknowledged -- at once.  Take a credit
+before issuing an operation with
+.Fn xtc_credit_acquire ,
+return it when the operation's acknowledgement comes back with
+.Fn xtc_credit_release ;
+when credits are exhausted a further
+.Fn xtc_credit_acquire
+blocks the calling fiber until an ack frees one.
+.Pp
+This is the credit-based flow-control pattern, and it is
+transport-agnostic: it works over a request/reply RPC to another
+process, over socket writes, over disk operations -- anywhere a fast
+issuer can outrun a slower acknowledger.  The demand channel
+.Pq Xr xtc_chan 3
+is its producer/consumer-channel sibling; this regulator is for the
+request-issue / ack-return sliding window.
+.Pp
+There is direct precedent in the Erlang/OTP ecosystem: the
+.Ql :jobs
+regulator, RabbitMQ's
+.Ql credit_flow ,
+and GenStage's
+.Ql max_demand Ns / Ns Ql min_demand
+all express exactly this window.  OTP has no single named behaviour for
+it -- it is a gen_server plus an integer counter -- which is what this
+regulator packages, adding the peak-in-flight high-water mark the
+hand-rolled version usually drops.
+.Pp
+.Fn xtc_credit_create
+sizes the window
+.Pq maximum in flight ;
+.Fn window
+must be greater than zero.
+.Fn xtc_credit_acquire
+takes one credit, blocking up to
+.Fa timeout_ns
+(0 tries once, a negative value blocks indefinitely);
+.Fn xtc_credit_try_acquire
+takes one only if immediately available.
+.Fn xtc_credit_release
+returns a credit and wakes one waiter.
+.Pp
+.Fn xtc_credit_in_flight
+reports the operations currently outstanding;
+.Fn xtc_credit_peak
+reports the high-water mark since creation (useful for tuning the
+window); and
+.Fn xtc_credit_window
+returns the configured window size.
+.Pp
+Built on
+.Xr xtc_sync 3
+semaphores, so a producer running inside a fiber parks its fiber -- not
+the OS thread -- while waiting for a credit.
+.Sh RETURN VALUES
+.Fn xtc_credit_create ,
+.Fn xtc_credit_acquire ,
+.Fn xtc_credit_try_acquire ,
+and
+.Fn xtc_credit_release
+return
+.Dv XTC_OK
+or a negative
+.Dv XTC_E_*
+code;
+.Fn xtc_credit_acquire
+and
+.Fn xtc_credit_try_acquire
+return
+.Dv XTC_E_AGAIN
+when no credit is available, and
+.Fn xtc_credit_release
+returns
+.Dv XTC_E_INVAL
+on a release with no matching acquire.
+.Pp
+.Fn xtc_credit_in_flight ,
+.Fn xtc_credit_peak ,
+and
+.Fn xtc_credit_window
+return counts.
+.Pp
+.Fn xtc_credit_destroy
+returns no value.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_credit_t *cw;
+xtc_credit_create(4, &cw);            /* at most 4 in flight */
+
+/* Issue side: take a credit, send a request. */
+xtc_credit_acquire(cw, -1);
+send_request(peer, req);              /* reply carries the credit back */
+
+/* Ack side: when a reply arrives, return the credit. */
+xtc_credit_release(cw);               /* unblocks a waiting issuer */
+.Ed
+.Sh SEE ALSO
+.Xr xtc_chan 3 ,
+.Xr xtc_sync 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc 7

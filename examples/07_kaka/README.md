@@ -82,6 +82,14 @@ layers credit-based flow control on top of the mailbox:
      to the producer (a small control message), which resumes
      reading.
 
+The in-flight credit window is expressed with libxtc's
+`xtc_credit` regulator (`broker_credit_selftest` in broker.c): the
+producer takes a credit before each PRODUCE and returns it on each
+reply, so at most N requests are ever outstanding, and
+`xtc_credit_peak` reports the observed high-water for tuning.  This is
+the Erlang `:jobs` / RabbitMQ `credit_flow` / GenStage
+`max_demand` sliding-window pattern packaged as a primitive.
+
 The result is end-to-end backpressure: a slow disk slows the producer
 through TCP flow control, with bounded broker memory at every hop.
 This is the property to benchmark -- "broker RSS stays flat under a
