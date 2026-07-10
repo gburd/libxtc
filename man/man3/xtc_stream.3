@@ -1,0 +1,127 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 10, 2026
+.Dt XTC_STREAM 3
+.Os
+.Sh NAME
+.Nm xtc_stream_create ,
+.Nm xtc_stream_destroy ,
+.Nm xtc_stream_next ,
+.Nm xtc_stream_map ,
+.Nm xtc_stream_filter ,
+.Nm xtc_stream_for_each ,
+.Nm xtc_stream_from_demand
+.Nd lazy pull-based async streams with combinators
+.Sh LIBRARY
+.Lb libxtc
+.Sh SYNOPSIS
+.In xtc_stream.h
+.Ft int
+.Fn xtc_stream_create "xtc_stream_next_fn next" "void *ctx" "xtc_stream_t **out"
+.Ft void
+.Fn xtc_stream_destroy "xtc_stream_t *s"
+.Ft int
+.Fn xtc_stream_next "xtc_stream_t *s" "void **out"
+.Ft int
+.Fn xtc_stream_map "xtc_stream_t *s" "void *(*fn)(void *, void *)" "void *user" "xtc_stream_t **out"
+.Ft int
+.Fn xtc_stream_filter "xtc_stream_t *s" "int (*pred)(void *, void *)" "void *user" "xtc_stream_t **out"
+.Ft int
+.Fn xtc_stream_for_each "xtc_stream_t *s" "int (*fn)(void *, void *)" "void *user"
+.Ft int
+.Fn xtc_stream_from_demand "xtc_chan_demand_t *ch" "xtc_stream_t **out"
+.Sh DESCRIPTION
+An async stream is a lazy, pull-based sequence of values -- the Elixir
+.Ql Stream
+and Rust
+.Ql Iterator
+shape.  A stream is just a
+.Fn next
+function that yields the next value or signals end-of-stream, wrapped
+so combinators can layer transformations without materializing the
+whole sequence.  Pull-based composition means a slow downstream stage
+exerts backpressure simply by pulling more slowly, which pairs directly
+with the demand channel
+.Pq Xr xtc_chan 3 .
+.Pp
+Values are
+.Vt void * ;
+the stream never copies or frees them.  A combinator's transform decides
+ownership.
+.Pp
+.Fn xtc_stream_create
+builds a base stream from a
+.Fn next
+function and its context.
+.Fn xtc_stream_next
+pulls one value: it writes
+.Fa *out
+and returns
+.Dv XTC_OK ,
+.Dv XTC_E_NOTFOUND
+at end-of-stream,
+.Dv XTC_E_AGAIN
+if no value is ready yet but the stream is not finished (retry), or
+another
+.Dv XTC_E_*
+on error.
+.Pp
+.Fn xtc_stream_map
+returns a stream in which each pulled value
+.Fa v
+becomes
+.Fn fn v user ;
+.Fn xtc_stream_filter
+returns a stream that skips values for which
+.Fn pred v user
+is 0.  Both are lazy and both OWN the source stream, so destroying the
+combinator destroys the source; destroy only the outermost stream.
+.Pp
+.Fn xtc_stream_for_each
+drains a stream, calling
+.Fn fn v user
+for each value until end-of-stream.  A nonzero
+.Fn fn
+return stops early and is returned; an
+.Dv XTC_E_AGAIN
+from the source is retried, so use
+.Fn xtc_stream_for_each
+only with a source that will eventually produce or finish.
+.Pp
+.Fn xtc_stream_from_demand
+adapts a demand channel into a stream: each pull grants one unit of
+demand and returns the next buffered item.  It does not own the channel.
+.Sh RETURN VALUES
+All functions except
+.Fn xtc_stream_destroy
+return
+.Dv XTC_OK
+or a negative
+.Dv XTC_E_*
+code (see
+.Fn xtc_stream_next
+for its stream-specific codes).
+.Pp
+.Fn xtc_stream_destroy
+returns no value; it recursively destroys any wrapped source stream but
+never touches the demand channel of a
+.Fn xtc_stream_from_demand
+stream.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+/* double the even numbers coming off a demand channel */
+static int is_even(void *v, void *u) { (void)u; return (*(int*)v & 1)==0; }
+static void *dbl(void *v, void *u) { (void)u; *(int*)v *= 2; return v; }
+static int print_it(void *v, void *u) { (void)u; printf("%d\\n",*(int*)v); return 0; }
+
+xtc_stream_t *s, *f, *m;
+xtc_stream_from_demand(ch, &s);
+xtc_stream_filter(s, is_even, NULL, &f);
+xtc_stream_map(f, dbl, NULL, &m);
+xtc_stream_for_each(m, print_it, NULL);
+xtc_stream_destroy(m);   /* frees m -> f -> s */
+.Ed
+.Sh SEE ALSO
+.Xr xtc_chan 3 ,
+.Xr xtc_launch 3 ,
+.Xr xtc 7
