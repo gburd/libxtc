@@ -119,6 +119,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/orc/fsm.c \
 	$(srcdir)/../src/orc/pg.c \
 	$(srcdir)/../src/orc/pool.c \
+	$(srcdir)/../src/orc/stream.c \
 	$(srcdir)/../src/orc/launch.c \
 	$(srcdir)/../src/orc/app.c \
 	$(srcdir)/../src/orc/tnt.c \
@@ -199,6 +200,7 @@ LIB_OBJS	= \
 	fsm.o \
 	pg.o \
 	pool.o \
+	stream.o \
 	launch.o \
 	app.o \
 	tnt.o \
@@ -267,6 +269,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_fsm.h \
 	$(srcdir)/../src/inc/xtc_pg.h \
 	$(srcdir)/../src/inc/xtc_pool.h \
+	$(srcdir)/../src/inc/xtc_stream.h \
 	$(srcdir)/../src/inc/xtc_launch.h \
 	$(srcdir)/../src/inc/xtc_sync.h \
 	$(srcdir)/../src/inc/xtc_tailcall.h \
@@ -357,6 +360,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_fsm \
 		  test_pg \
 		  test_pool \
+		  test_stream \
 		  test_app \
 		  test_tnt \
 		  test_osproc \
@@ -641,6 +645,9 @@ pg.o: $(srcdir)/../src/orc/pg.c xtc_config.h
 
 pool.o: $(srcdir)/../src/orc/pool.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/pool.c
+
+stream.o: $(srcdir)/../src/orc/stream.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/stream.c
 
 launch.o: $(srcdir)/../src/orc/launch.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/launch.c
@@ -1179,6 +1186,12 @@ test_pool: $(srcdir)/../test/m10/test_pool.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
 		-o $@ $(srcdir)/../test/m10/test_pool.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_stream: $(srcdir)/../test/m10/test_stream.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_stream.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_svr_edge: $(srcdir)/../test/m10/test_svr_edge.c \
