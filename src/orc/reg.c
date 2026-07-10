@@ -268,6 +268,38 @@ xtc_reg_unregister_pid(xtc_reg_t *r, const char *key, xtc_pid_t pid)
 }
 
 /*
+ * Remove `pid` from every key it appears under -- the "process left
+ * everything" cleanup.  O(buckets + entries); called once when a
+ * process exits or a connection closes.  Returns the count removed.
+ */
+int
+xtc_reg_drop_pid(xtc_reg_t *r, xtc_pid_t pid)
+{
+	uint32_t b;
+	int removed = 0;
+	if (r == NULL) return 0;
+	(void)__xtc_mtx_lock(&r->lock);
+	for (b = 0; b < REG_NBUCKETS; b++) {
+		struct reg_node **link = &r->buckets[b], *node;
+		while ((node = *link) != NULL) {
+			if (xtc_pid_eq(node->pid, pid)) {
+				*link = node->next;
+				__os_free(node->name);
+				__os_free(node);
+				r->n--;
+				removed++;
+				/* do not advance link: it now points at
+				 * the next node */
+			} else {
+				link = &node->next;
+			}
+		}
+	}
+	(void)__xtc_mtx_unlock(&r->lock);
+	return removed;
+}
+
+/*
  * Visit every pid registered under `key` (both the unique entry and all
  * duplicate-key members).  The callback runs UNDER the registry lock, so
  * it must be brief and must not call back into the registry; copy pids

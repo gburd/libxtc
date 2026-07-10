@@ -215,6 +215,7 @@ listener_proc(void *arg)
 			opts.db = srv->db;
 			opts.res = srv->res;
 			opts.server = srv;
+			opts.pubsub = xtc_app_registry(srv->app);
 			if (srv->cfg.max_iops > 0) {
 				opts.iops_tokens = (int64_t *)&srv->iops_tokens;
 				opts.iops_cap = srv->cfg.max_iops;

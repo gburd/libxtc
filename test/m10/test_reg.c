@@ -229,6 +229,17 @@ test_reg_dup_keys(const MunitParameter p[], void *d)
 	/* Leaving a non-member is XTC_E_INVAL. */
 	munit_assert_int(xtc_reg_unregister_pid(r, "grp", b), ==, XTC_E_INVAL);
 
+	/* drop_pid: a pid in several groups + a unique name is removed from
+	 * all of them in one call. */
+	munit_assert_int(xtc_reg_register_dup(r, "g2", a), ==, XTC_OK);
+	munit_assert_int(xtc_reg_register(r, "uniqueA", a), ==, XTC_OK);
+	/* a is now in: grp, g2, and the unique name uniqueA (3 entries). */
+	munit_assert_int(xtc_reg_drop_pid(r, a), ==, 3);
+	/* c remains in grp. */
+	n = 0;
+	munit_assert_int(xtc_reg_members(r, "grp", count_cb, &n), ==, 1);
+	munit_assert_int(xtc_reg_drop_pid(r, a), ==, 0);   /* idempotent */
+
 	xtc_reg_destroy(r);
 	return MUNIT_OK;
 }

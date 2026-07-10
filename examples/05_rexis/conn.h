@@ -17,6 +17,7 @@
 #include "xtc_proc.h"
 #include "xtc_res.h"
 #include "xtc_slab.h"
+#include "xtc_reg.h"
 
 #include "db.h"
 
@@ -31,6 +32,7 @@ typedef struct conn_opts {
 	xtc_slab_t     *read_slab;     /* for read buffers */
 	xtc_slab_t     *write_slab;    /* for write buffers */
 	struct server  *server;        /* back-pointer for stats */
+	xtc_reg_t      *pubsub;        /* shared pub/sub channel registry */
 
 	/* Rate limiting */
 	int64_t        *iops_tokens;

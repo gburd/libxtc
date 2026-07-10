@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "cmd.h"
+#include "xtc_pg.h"
 #include "xtc_int.h"
 #include "xtc_stats.h"
 
@@ -648,6 +649,134 @@ cmd_cluster(cmd_ctx_t *ctx)
 	return 0;
 }
 
+/* ----- Pub/Sub (backed by xtc_pg process groups) ----- */
+
+/* Build a channel-group key "ch:<name>" into buf (NUL-terminated).
+ * Returns the key, or NULL if the channel name is too long. */
+static const char *
+pubsub_key(char *buf, size_t cap, const char *name, size_t len)
+{
+	if (len + 4 >= cap) return NULL;
+	memcpy(buf, "ch:", 3);
+	memcpy(buf + 3, name, len);
+	buf[3 + len] = '\0';
+	return buf;
+}
+
+/*
+ * SUBSCRIBE ch [ch ...]: join this connection's pid to each channel's
+ * process group.  Redis replies with one 3-element array per channel:
+ * ["subscribe", channel, total-subscribed-count].
+ */
+static int
+cmd_subscribe(cmd_ctx_t *ctx)
+{
+	char keybuf[256];
+	int i;
+	if (ctx->pubsub == NULL) {
+		resp_write_error(ctx->out, "pub/sub unavailable");
+		return 0;
+	}
+	for (i = 1; i < ctx->argc; i++) {
+		const char *ch = ctx->argv[i].u.str.data;
+		size_t clen = ctx->argv[i].u.str.len;
+		const char *key = pubsub_key(keybuf, sizeof keybuf, ch, clen);
+		if (key == NULL) {
+			resp_write_error(ctx->out, "channel name too long");
+			continue;
+		}
+		if (xtc_pg_join(ctx->pubsub, key, ctx->self) == XTC_OK)
+			(*ctx->sub_count)++;
+		resp_write_array(ctx->out, 3);
+		resp_write_bulk(ctx->out, "subscribe", 9);
+		resp_write_bulk(ctx->out, ch, clen);
+		resp_write_int(ctx->out, *ctx->sub_count);
+	}
+	return 0;
+}
+
+/*
+ * UNSUBSCRIBE ch [ch ...]: leave each channel's group.  Reply mirrors
+ * SUBSCRIBE with "unsubscribe".
+ */
+static int
+cmd_unsubscribe(cmd_ctx_t *ctx)
+{
+	char keybuf[256];
+	int i;
+	if (ctx->pubsub == NULL) {
+		resp_write_error(ctx->out, "pub/sub unavailable");
+		return 0;
+	}
+	for (i = 1; i < ctx->argc; i++) {
+		const char *ch = ctx->argv[i].u.str.data;
+		size_t clen = ctx->argv[i].u.str.len;
+		const char *key = pubsub_key(keybuf, sizeof keybuf, ch, clen);
+		if (key != NULL &&
+		    xtc_pg_leave(ctx->pubsub, key, ctx->self) == XTC_OK &&
+		    *ctx->sub_count > 0)
+			(*ctx->sub_count)--;
+		resp_write_array(ctx->out, 3);
+		resp_write_bulk(ctx->out, "unsubscribe", 11);
+		resp_write_bulk(ctx->out, ch, clen);
+		resp_write_int(ctx->out, *ctx->sub_count);
+	}
+	return 0;
+}
+
+/*
+ * PUBLISH ch message: fan the message out to every subscriber of `ch`.
+ * Each subscriber receives (in its mailbox) a RESP push frame
+ * ["message", channel, payload]; the connection proc appends it to that
+ * subscriber's socket.  Reply is the integer number of subscribers the
+ * message reached.
+ */
+static int
+cmd_publish(cmd_ctx_t *ctx)
+{
+	char keybuf[256];
+	const char *ch = ctx->argv[1].u.str.data;
+	size_t clen = ctx->argv[1].u.str.len;
+	const char *payload = ctx->argv[2].u.str.data;
+	size_t plen = ctx->argv[2].u.str.len;
+	const char *key;
+	char *frame;
+	size_t cap;
+	resp_buf_t fb;
+	int n;
+
+	if (ctx->pubsub == NULL) {
+		resp_write_error(ctx->out, "pub/sub unavailable");
+		return 0;
+	}
+	key = pubsub_key(keybuf, sizeof keybuf, ch, clen);
+	if (key == NULL) {
+		resp_write_error(ctx->out, "channel name too long");
+		return 0;
+	}
+
+	/* Build the RESP push frame in a heap buffer; xtc_pg_send copies it
+	 * into each subscriber's mailbox, so we free our copy afterward.
+	 * Sizing: array header + "message" + channel + payload, each bulk
+	 * costs len + a small envelope ("$<len>\r\n...\r\n"). */
+	cap = 64 + clen + plen;
+	if ((frame = xtc_malloc(cap)) == NULL) {
+		resp_write_int(ctx->out, 0);
+		return 0;
+	}
+	resp_buf_init(&fb, frame, cap);
+	resp_write_array(&fb, 3);
+	resp_write_bulk(&fb, "message", 7);
+	resp_write_bulk(&fb, ch, clen);
+	resp_write_bulk(&fb, payload, plen);
+
+	n = xtc_pg_send(ctx->pubsub, key, frame, fb.len);
+	xtc_free(frame);
+
+	resp_write_int(ctx->out, n);
+	return 0;
+}
+
 /* ----- Command table ----- */
 
 static cmd_entry_t g_commands[] = {
@@ -698,6 +827,11 @@ static cmd_entry_t g_commands[] = {
 	{ "INFO",      cmd_info,      1, 2,  CMD_READONLY | CMD_ADMIN },
 	{ "COMMAND",   cmd_command,   1, -1, CMD_READONLY | CMD_ADMIN },
 	{ "CLUSTER",   cmd_cluster,   2, -1, CMD_READONLY | CMD_ADMIN },
+
+	/* Pub/Sub (backed by xtc_pg process groups) */
+	{ "SUBSCRIBE",   cmd_subscribe,   2, -1, CMD_READONLY },
+	{ "UNSUBSCRIBE", cmd_unsubscribe, 2, -1, CMD_READONLY },
+	{ "PUBLISH",     cmd_publish,     3, 3,  CMD_READONLY | CMD_FAST },
 
 	{ NULL,        NULL,          0, 0,  0 }
 };

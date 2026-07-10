@@ -16,6 +16,7 @@
 #include "cmd.h"
 #include "xtc_io.h"
 #include "xtc_inject.h"
+#include "xtc_pg.h"
 #include "xtc_int.h"
 
 #define DEFAULT_READ_BUF   (64 * 1024)
@@ -43,6 +44,15 @@ typedef struct conn_state {
 	/* Rate limiting */
 	int64_t    *iops_tokens;
 	int64_t     iops_cap;
+
+	/* Pub/sub: this connection's own pid + the shared channel registry
+	 * (an xtc_reg_t used as a duplicate-key process-group set).  A
+	 * SUBSCRIBE joins st->self to a channel group; a PUBLISH from any
+	 * connection fans a message out to every subscriber's mailbox, which
+	 * the conn proc drains and writes to its socket. */
+	xtc_pid_t   self;
+	xtc_reg_t  *pubsub;
+	int         sub_count;   /* channels this connection is subscribed to */
 
 	/* Flags */
 	int         quit;
@@ -112,6 +122,29 @@ conn_try_write(conn_state_t *st)
 	}
 }
 
+/* Append `len` bytes to the write buffer, growing it up to max_write_buf.
+ * Used to enqueue a pub/sub push message for delivery to this
+ * subscriber's socket.  On overflow the bytes are dropped (a slow
+ * subscriber must not let the server buffer without bound). */
+static void
+conn_append_write(conn_state_t *st, const void *data, size_t len)
+{
+	if (st->write_len + len > st->write_cap) {
+		size_t new_cap = st->write_cap ? st->write_cap : DEFAULT_WRITE_BUF;
+		char *nb;
+		while (new_cap < st->write_len + len && new_cap <= st->max_write_buf)
+			new_cap *= 2;
+		if (new_cap > st->max_write_buf)
+			return;   /* would exceed the cap: drop (backpressure) */
+		if ((nb = xtc_realloc(st->write_buf, new_cap)) == NULL)
+			return;
+		st->write_buf = nb;
+		st->write_cap = new_cap;
+	}
+	memcpy(st->write_buf + st->write_len, data, len);
+	st->write_len += len;
+}
+
 static int
 conn_process_commands(conn_state_t *st)
 {
@@ -163,6 +196,9 @@ conn_process_commands(conn_state_t *st)
 		ctx.quit_flag = &st->quit;
 		ctx.iops_tokens = st->iops_tokens;
 		ctx.iops_cap = st->iops_cap;
+		ctx.self = st->self;
+		ctx.pubsub = st->pubsub;
+		ctx.sub_count = &st->sub_count;
 
 		XTC_INJECTION_POINT("rexis:before_cmd");
 		(void)cmd_execute(&ctx);
@@ -200,6 +236,8 @@ conn_proc(void *arg)
 	void *msg;
 	size_t msg_len;
 
+	st->self = xtc_self();   /* for pub/sub group membership */
+
 	while (!st->quit && !st->closed) {
 		uint32_t interest = XTC_IO_READABLE;
 
@@ -235,6 +273,12 @@ conn_proc(void *arg)
 			    &revents);
 			if (revents & XTC_WAIT_MAILBOX) {
 				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
+					/* A published message: append its RESP
+					 * bytes to the write buffer so the next
+					 * loop iteration flushes it to the
+					 * subscriber's socket. */
+					if (msg != NULL && msg_len > 0)
+						conn_append_write(st, msg, msg_len);
 					if (msg) xtc_free(msg);
 				}
 			}
@@ -259,6 +303,11 @@ conn_proc(void *arg)
 	}
 
 	/* Cleanup */
+	/* Leave every pub/sub channel this connection subscribed to, so a
+	 * closed subscriber does not linger in the groups (the registry has
+	 * no automatic monitor-on-DOWN yet). */
+	if (st->pubsub != NULL && st->sub_count > 0)
+		(void)xtc_reg_drop_pid(st->pubsub, st->self);
 	close(st->fd);
 	xtc_free(st->read_buf);
 	xtc_free(st->write_buf);
@@ -277,6 +326,7 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	st->fd = opts->fd;
 	st->db = opts->db;
 	st->res = opts->res;
+	st->pubsub = opts->pubsub;
 
 	st->read_cap = DEFAULT_READ_BUF;
 	if ((st->read_buf = xtc_malloc(st->read_cap)) == NULL) {
