@@ -1,0 +1,102 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 10, 2026
+.Dt XTC_PG 3
+.Os
+.Sh NAME
+.Nm xtc_pg_join ,
+.Nm xtc_pg_leave ,
+.Nm xtc_pg_members ,
+.Nm xtc_pg_send
+.Nd process groups (pub/sub and fan-out)
+.Sh LIBRARY
+.Lb libxtc
+.Sh SYNOPSIS
+.In xtc_pg.h
+.Ft int
+.Fn xtc_pg_join "xtc_reg_t *reg" "const char *group" "xtc_pid_t pid"
+.Ft int
+.Fn xtc_pg_leave "xtc_reg_t *reg" "const char *group" "xtc_pid_t pid"
+.Ft int
+.Fn xtc_pg_members "xtc_reg_t *reg" "const char *group" "int (*fn)(xtc_pid_t, void *)" "void *user"
+.Ft int
+.Fn xtc_pg_send "xtc_reg_t *reg" "const char *group" "const void *msg" "size_t size"
+.Sh DESCRIPTION
+A process group is a named membership set of pids -- the Erlang
+.Ql pg ,
+Phoenix
+.Ql PubSub ,
+and Discord-presence pattern.  A group is a duplicate-key entry in an
+.Xr xtc_reg 3
+registry
+.Pq see Fn xtc_reg_register_dup ,
+so many pids share one key.
+.Pp
+.Fn xtc_pg_join
+adds
+.Fa pid
+to
+.Fa group
+(idempotent -- a pid already in the group is not added twice).  A
+process typically joins itself with
+.Fn xtc_self .
+.Pp
+.Fn xtc_pg_leave
+removes
+.Fa pid
+from
+.Fa group ,
+returning
+.Dv XTC_E_INVAL
+if it was not a member.
+.Pp
+.Fn xtc_pg_members
+visits every member pid.  The callback runs UNDER the registry lock, so
+it must be brief and must not re-enter the registry; copy pids out if
+more work is needed.  A nonzero callback return stops the walk.
+.Pp
+.Fn xtc_pg_send
+broadcasts
+.Fa msg
+(a copy) to every current member.  It collects the member pids under the
+registry lock and then sends OUTSIDE the lock, so a bounded-mailbox park
+never happens with the registry lock held.  A send to an
+already-dead member fails harmlessly and is skipped.
+.Sh RETURN VALUES
+.Fn xtc_pg_join
+and
+.Fn xtc_pg_leave
+return
+.Dv XTC_OK
+on success or a negative
+.Dv XTC_E_*
+code.
+.Fn xtc_pg_members
+returns the number of members visited.
+.Fn xtc_pg_send
+returns the number of members the message was successfully sent to.
+.Sh NOTES
+Single node only.  Cross-node process groups need the distributed
+module, which is not built.  Until the registry gains a monitor that
+auto-unregisters a member on its DOWN, a crashed member lingers in the
+group until something calls
+.Fn xtc_pg_leave
+for it; a stale-member
+.Fn xtc_pg_send
+is a harmless no-op.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_reg_t *r = xtc_app_registry(app);
+
+/* Each subscriber joins the topic. */
+xtc_pg_join(r, "chat:lobby", xtc_self());
+
+/* A publisher fans a message out to all subscribers. */
+int n = xtc_pg_send(r, "chat:lobby", line, len);
+/* n = number of subscribers that received it */
+.Ed
+.Sh SEE ALSO
+.Xr xtc_reg 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_app 3 ,
+.Xr xtc 7
