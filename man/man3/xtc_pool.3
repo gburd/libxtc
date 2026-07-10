@@ -1,0 +1,118 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 10, 2026
+.Dt XTC_POOL 3
+.Os
+.Sh NAME
+.Nm xtc_pool_create ,
+.Nm xtc_pool_destroy ,
+.Nm xtc_pool_add ,
+.Nm xtc_pool_checkout ,
+.Nm xtc_pool_checkin ,
+.Nm xtc_pool_available ,
+.Nm xtc_pool_capacity
+.Nd bounded resource pool (checkout / return)
+.Sh LIBRARY
+.Lb libxtc
+.Sh SYNOPSIS
+.In xtc_pool.h
+.Ft int
+.Fn xtc_pool_create "size_t capacity" "xtc_pool_t **out"
+.Ft void
+.Fn xtc_pool_destroy "xtc_pool_t *p"
+.Ft int
+.Fn xtc_pool_add "xtc_pool_t *p" "void *resource"
+.Ft int
+.Fn xtc_pool_checkout "xtc_pool_t *p" "int64_t timeout_ns" "void **out"
+.Ft int
+.Fn xtc_pool_checkin "xtc_pool_t *p" "void *resource"
+.Ft size_t
+.Fn xtc_pool_available "const xtc_pool_t *p"
+.Ft size_t
+.Fn xtc_pool_capacity "const xtc_pool_t *p"
+.Sh DESCRIPTION
+A resource pool tracks a fixed set of caller-owned resources
+(connections, buffers, handles) that fibers check out and return.  A
+checkout blocks the calling fiber when all resources are busy, so the
+pool doubles as a concurrency limiter.  This is the checkout / return
+half of the connection-pool pattern; the supervisor's bounded dynamic
+pool
+.Pq Va xtc_sup_opts_t.max_children
+is the spawn-workers half.
+.Pp
+The pool does not create or own the resources.
+.Fn xtc_pool_create
+sizes a pool for
+.Fa capacity
+resources.
+.Fn xtc_pool_add
+registers a resource (as free);
+.Dv XTC_E_RESOURCE
+is returned once
+.Fa capacity
+resources have been added.
+.Pp
+.Fn xtc_pool_checkout
+returns a free resource in
+.Fa *out ,
+blocking the calling fiber until one is free or
+.Fa timeout_ns
+elapses.
+.Fa timeout_ns
+of 0 tries once (returning
+.Dv XTC_E_AGAIN
+immediately if none is free); a negative value blocks indefinitely.
+.Fn xtc_pool_checkin
+returns a checked-out resource, waking one waiter.
+.Pp
+.Fn xtc_pool_available
+returns the number of resources currently free;
+.Fn xtc_pool_capacity
+returns the number added (free plus checked out).
+.Pp
+.Fn xtc_pool_destroy
+releases the pool.  It does NOT free the resources -- the caller owns
+them and must not destroy a pool with resources still checked out.
+.Sh RETURN VALUES
+.Fn xtc_pool_create ,
+.Fn xtc_pool_add ,
+and
+.Fn xtc_pool_checkin
+return
+.Dv XTC_OK
+or a negative
+.Dv XTC_E_*
+code.
+.Fn xtc_pool_checkout
+returns
+.Dv XTC_OK ,
+or
+.Dv XTC_E_AGAIN
+if no resource became free within
+.Fa timeout_ns .
+.Fn xtc_pool_available
+and
+.Fn xtc_pool_capacity
+return counts.
+.Pp
+.Fn xtc_pool_destroy
+returns no value.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_pool_t *pool;
+xtc_pool_create(8, &pool);              /* 8 connections */
+for (int i = 0; i < 8; i++)
+    xtc_pool_add(pool, open_conn());
+
+/* A worker fiber: */
+void *conn;
+if (xtc_pool_checkout(pool, 1000000000LL, &conn) == XTC_OK) {
+    use_conn(conn);
+    xtc_pool_checkin(pool, conn);
+}
+.Ed
+.Sh SEE ALSO
+.Xr xtc_sync 3 ,
+.Xr xtc_supervisor 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc 7
