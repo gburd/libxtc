@@ -113,6 +113,7 @@ install_headers(
   'src/inc/xtc_stream.h',
   'src/inc/xtc_credit.h',
   'src/inc/xtc_xproc.h',
+  'src/inc/xtc_tail.h',
   'src/inc/xtc_sync.h',
   'src/inc/xtc_tailcall.h',
   'src/inc/xtc_tls.h',
