@@ -14,6 +14,8 @@
 
 #include "proto.h"
 #include "db.h"
+#include "xtc_proc.h"
+#include "xtc_reg.h"
 
 /* Command context passed to handlers */
 typedef struct cmd_ctx {
@@ -28,6 +30,13 @@ typedef struct cmd_ctx {
 
 	/* Connection state */
 	int         *quit_flag;
+
+	/* Pub/sub: this connection's pid, the shared channel registry (an
+	 * xtc_reg_t used as a process-group set), and a pointer to the
+	 * connection's subscription counter. */
+	xtc_pid_t    self;
+	xtc_reg_t   *pubsub;
+	int         *sub_count;
 } cmd_ctx_t;
 
 /* Command flags */

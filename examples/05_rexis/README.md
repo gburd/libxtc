@@ -39,17 +39,26 @@ redis-cli -p 16379 GET hello
 | Keys | EXPIRE, TTL, KEYS, FLUSHDB, DBSIZE |
 | Lists | LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE |
 | Hashes | HSET, HGET, HDEL, HKEYS, HVALS, HGETALL, HLEN |
+| Pub/Sub | SUBSCRIBE, UNSUBSCRIBE, PUBLISH |
 | Connection | PING, ECHO, QUIT, AUTH, SELECT |
 | Admin | INFO, COMMAND, CLUSTER NODES |
 
 Both RESP2 (Redis 1.x-5.x) and RESP3 (Redis 6+) protocols are accepted.
 
+Pub/Sub is built on libxtc process groups (`xtc_pg`, over the
+duplicate-key registry `xtc_reg_register_dup`): SUBSCRIBE joins the
+connection's pid to a channel group, PUBLISH fans a RESP push frame out
+to every subscriber's mailbox (which the connection proc appends to its
+socket), and a closing connection calls `xtc_reg_drop_pid` to leave every
+channel it joined.  See the pubsub walkthrough in the docs example page.
+
 ## What's NOT supported (deliberately)
 
-Out of scope for a 2k-LOC example.  No Pub/Sub, no Streams, no scripting
+Out of scope for a 2k-LOC example.  No Streams, no scripting
 (EVAL/Lua), no cluster mode, no modules, no replication, no persistence
 (no AOF, no RDB), no transactions (MULTI/EXEC), no Sorted Sets (ZADD/ZRANGE).
-A full Redis would add another 30k LOC.
+A full Redis would add another 30k LOC.  Pub/Sub keyspace notifications
+and pattern subscriptions (PSUBSCRIBE) are also out of scope.
 
 ## Resource budget enforcement
 

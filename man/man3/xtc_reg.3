@@ -10,7 +10,11 @@
 .Nm xtc_reg_unregister ,
 .Nm xtc_reg_lookup ,
 .Nm xtc_reg_whereis ,
-.Nm xtc_reg_count
+.Nm xtc_reg_count ,
+.Nm xtc_reg_register_dup ,
+.Nm xtc_reg_unregister_pid ,
+.Nm xtc_reg_drop_pid ,
+.Nm xtc_reg_members
 .Nd named process registry
 .Sh SYNOPSIS
 .In xtc.h
@@ -29,6 +33,14 @@
 .Fn xtc_reg_whereis "xtc_reg_t *r" "const char *name" "xtc_pid_t *out_pid"
 .Ft int
 .Fn xtc_reg_count "const xtc_reg_t *r"
+.Ft int
+.Fn xtc_reg_register_dup "xtc_reg_t *r" "const char *key" "xtc_pid_t pid"
+.Ft int
+.Fn xtc_reg_unregister_pid "xtc_reg_t *r" "const char *key" "xtc_pid_t pid"
+.Ft int
+.Fn xtc_reg_drop_pid "xtc_reg_t *r" "xtc_pid_t pid"
+.Ft int
+.Fn xtc_reg_members "xtc_reg_t *r" "const char *key" "int (*fn)(xtc_pid_t, void *)" "void *user"
 .Sh DESCRIPTION
 .Nm xtc_reg
 is a name-to-pid registry.  Modeled on Erlang's
@@ -67,6 +79,13 @@ twice is idempotent.
 removes one
 .Pq Fa key , Fa pid
 member (a group leave).
+.Fn xtc_reg_drop_pid
+removes
+.Fa pid
+from EVERY key it appears under (unique names and all duplicate-key
+groups) and returns the number of entries removed -- the "process left
+everything" cleanup an embedder calls when a process exits or a
+connection closes.
 .Fn xtc_reg_members
 visits every pid registered under
 .Fa key ;
