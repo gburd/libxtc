@@ -20,6 +20,7 @@ make examples
 | `07_kaka/` | **Kafka-shaped log broker** (Phase 0 scaffold): partitioned append-only logs with credit-based backpressure.  See its README for the design. |
 | `08_tnt/` | **The canonical echo demo for libxtc's Tina-faithful Isolate layer** (now a SUPPORTED library API: `src/orc/tnt.c`, `<xtc_tnt.h>`, `man xtc_tnt`).  Thread-per-core, shared-nothing, stackless state machines that return transitions; generational handles, drop-on-full mailboxes, stage-then-commit I/O.  TCP echo server.  See man xtc_tnt(3). |
 | `09_pgmock/` | **Mock PostgreSQL backend on the xtc scheduler** (M16.1a): a postmaster proc accepts and spawns one backend xtc_proc per connection, each speaking a hand-rolled minimal PG v3 wire handshake + `SELECT 1` -- ZERO PostgreSQL source.  Proves the runtime seam (no-fork multiplexing, `WaitLatchOrSocket` -> `xtc_proc_wait_fd`) for the future PG adapter.  See docs/M16_PG_ADAPTER.md. |
+| `10_circuit_breaker.c` | **The circuit-breaker pattern as an `xtc_fsm` (gen_statem)**: CLOSED/OPEN/HALF_OPEN, tripping after N consecutive failures, failing fast while open, and half-opening after a cooldown *state timeout*.  Shows `state_enter`, state timeouts, and synchronous `xtc_fsm_call`/`xtc_fsm_reply` -- the three things hand-rolled breakers get wrong. |
 
 ## What each example proves
 
@@ -37,6 +38,15 @@ external watcher proc can request orderly shutdown via `xtc_app_stop`.
 **04** -- the M13c lock manager detects real deadlocks
 (circular wait), aborts a victim per policy, and surfaces stats.
 
+**10** -- the L4 gen_statem (`xtc_fsm`) is enough to express a real
+protective control machine.  The circuit breaker leans on all three
+gen_statem features: the OPEN cooldown is a *state timeout* (armed in
+one place), the CLOSED/OPEN/HALF_OPEN transitions each run `enter()`,
+and "may I proceed?" is a synchronous `xtc_fsm_call` answered by
+`xtc_fsm_reply`.  Note the subtlety the example calls out: a real event
+cancels a pending state timeout, so a fail-fast query while OPEN must
+re-arm the cooldown -- exactly the gen_statem trap.
+
 **05** -- the flagship demonstration: a Redis-compatible server
 implementing RESP2/RESP3 protocol with hard resource budgets
 enforced via `xtc_res`. Demonstrates the full xtc API surface:
@@ -49,7 +59,7 @@ Supports ~35 Redis commands including strings, lists, and hashes.
 The Makefile target `examples` is built by:
 
 ```
-make 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo
+make 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker
 cd 05_rexis && make
 ```
 
