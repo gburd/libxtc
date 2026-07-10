@@ -36,7 +36,17 @@
 .Nm xtc_chan_broadcast_send ,
 .Nm xtc_chan_broadcast_subscribe ,
 .Nm xtc_chan_broadcast_unsubscribe ,
-.Nm xtc_chan_broadcast_recv
+.Nm xtc_chan_broadcast_recv ,
+.Nm xtc_chan_demand_create ,
+.Nm xtc_chan_demand_destroy ,
+.Nm xtc_chan_demand_ask ,
+.Nm xtc_chan_demand_send ,
+.Nm xtc_chan_demand_try_recv ,
+.Nm xtc_chan_demand_outstanding ,
+.Nm xtc_chan_demand_len ,
+.Nm xtc_chan_demand_set_producer_waker ,
+.Nm xtc_chan_demand_set_consumer_waker ,
+.Nm xtc_chan_demand_close
 .Nd typed channels for cross-task message passing
 .Sh SYNOPSIS
 .In xtc.h
@@ -97,6 +107,26 @@
 .Fn xtc_chan_broadcast_unsubscribe "xtc_chan_broadcast_recv_t *r"
 .Ft int
 .Fn xtc_chan_broadcast_recv "xtc_chan_broadcast_recv_t *r" "void **out" "int *lagged"
+.Ft int
+.Fn xtc_chan_demand_create "xtc_res_t *res" "size_t capacity" "xtc_chan_demand_t **out"
+.Ft void
+.Fn xtc_chan_demand_destroy "xtc_chan_demand_t *c"
+.Ft int
+.Fn xtc_chan_demand_ask "xtc_chan_demand_t *c" "size_t n"
+.Ft int
+.Fn xtc_chan_demand_send "xtc_chan_demand_t *c" "void *msg"
+.Ft int
+.Fn xtc_chan_demand_try_recv "xtc_chan_demand_t *c" "void **out"
+.Ft size_t
+.Fn xtc_chan_demand_outstanding "const xtc_chan_demand_t *c"
+.Ft size_t
+.Fn xtc_chan_demand_len "const xtc_chan_demand_t *c"
+.Ft int
+.Fn xtc_chan_demand_set_producer_waker "xtc_chan_demand_t *c" "const xtc_waker_t *w"
+.Ft int
+.Fn xtc_chan_demand_set_consumer_waker "xtc_chan_demand_t *c" "const xtc_waker_t *w"
+.Ft int
+.Fn xtc_chan_demand_close "xtc_chan_demand_t *c"
 .Sh DESCRIPTION
 .Nm xtc_chan
 provides typed channel primitives for cross-task / cross-process /
@@ -179,6 +209,36 @@ add and remove a consumer cursor; and
 reads the next message for a subscriber, reporting a
 .Va lagged
 count of messages skipped when it fell behind.
+.It demand
+Pull-based, the reactive-streams / GenStage backpressure primitive.  The
+consumer explicitly ASKS for
+.Fa n
+items with
+.Fn xtc_chan_demand_ask ;
+the producer's
+.Fn xtc_chan_demand_send
+succeeds only while there is outstanding demand (returning
+.Dv XTC_E_AGAIN
+when demand is exhausted or the buffer is full), so a fast producer
+cannot outrun a slow consumer -- backpressure is expressed as demand,
+not as a fixed buffer that drops or blocks.  Delivered items still
+buffer up to
+.Fa capacity ,
+and the consumer drains them with
+.Fn xtc_chan_demand_try_recv ,
+which does NOT itself grant demand -- the consumer sets its own
+high-water policy by calling
+.Fn xtc_chan_demand_ask .
+.Fn xtc_chan_demand_outstanding
+and
+.Fn xtc_chan_demand_len
+report the un-consumed demand and the buffered item count.
+.Fn xtc_chan_demand_set_producer_waker
+fires when the consumer grants demand;
+.Fn xtc_chan_demand_set_consumer_waker
+fires when the producer sends an item;
+.Fn xtc_chan_demand_close
+closes the channel (buffered items still drain).
 .El
 .Pp
 All channels are heap-allocated and reference-managed via the

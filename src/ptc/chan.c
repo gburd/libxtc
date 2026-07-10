@@ -614,3 +614,202 @@ xtc_chan_broadcast_recv(xtc_chan_broadcast_recv_t *r, void **out, int *lagged)
 	(void)__xtc_mtx_unlock(&c->lock);
 	return XTC_OK;
 }
+
+/* ===== demand (pull-based / GenStage backpressure) ================= */
+
+/*
+ * A bounded ring like mpsc, but the producer's send is gated by demand
+ * the consumer explicitly grants.  demand counts items the consumer has
+ * asked for and the producer has not yet delivered; each send consumes
+ * one unit.  This is the reactive-streams / GenStage semantic: a fast
+ * producer cannot outrun a slow consumer because it runs out of demand.
+ */
+struct xtc_chan_demand {
+	xtc_res_t       *res;
+	pthread_mutex_t  lock;
+	void           **slots;      /* [cap] ring buffer */
+	size_t           cap;
+	size_t           head;       /* next recv index */
+	size_t           tail;       /* next send index */
+	size_t           n;          /* buffered items */
+	size_t           demand;     /* outstanding, un-consumed demand */
+	int              closed;
+	xtc_waker_t      prod_waker; /* fired when demand is granted */
+	xtc_waker_t      cons_waker; /* fired when an item is sent */
+	_Atomic int      has_prod_waker;
+	_Atomic int      has_cons_waker;
+};
+
+int
+xtc_chan_demand_create(xtc_res_t *res, size_t capacity,
+                       xtc_chan_demand_t **out)
+{
+	struct xtc_chan_demand *c = NULL;
+	int rc;
+	if (out == NULL || capacity == 0) return XTC_E_INVAL;
+	*out = NULL;
+	if (res != NULL) {
+		if ((rc = xtc_res_acquire(res, XTC_RES_CHANNELS, 1)) != XTC_OK)
+			return rc;
+	}
+	if ((rc = __os_calloc(1, sizeof *c, (void **)&c)) != XTC_OK) {
+		if (res != NULL) xtc_res_release(res, XTC_RES_CHANNELS, 1);
+		return rc;
+	}
+	if ((rc = __os_calloc(capacity, sizeof *c->slots,
+	    (void **)&c->slots)) != XTC_OK) {
+		if (res != NULL) xtc_res_release(res, XTC_RES_CHANNELS, 1);
+		__os_free(c);
+		return rc;
+	}
+	(void)pthread_mutex_init(&c->lock, NULL);
+	c->res = res;
+	c->cap = capacity;
+	atomic_store_explicit(&c->has_prod_waker, 0, memory_order_relaxed);
+	atomic_store_explicit(&c->has_cons_waker, 0, memory_order_relaxed);
+	*out = c;
+	return XTC_OK;
+}
+
+void
+xtc_chan_demand_destroy(xtc_chan_demand_t *c)
+{
+	if (c == NULL) return;
+	if (c->res != NULL)
+		xtc_res_release(c->res, XTC_RES_CHANNELS, 1);
+	(void)pthread_mutex_destroy(&c->lock);
+	__os_free(c->slots);
+	__os_free(c);
+}
+
+int
+xtc_chan_demand_ask(xtc_chan_demand_t *c, size_t n)
+{
+	int fire = 0;
+	if (c == NULL) return XTC_E_INVAL;
+	if (n == 0) return XTC_OK;
+	(void)__xtc_mtx_lock(&c->lock);
+	if (c->closed) { (void)__xtc_mtx_unlock(&c->lock); return XTC_E_INVAL; }
+	c->demand += n;
+	fire = 1;
+	(void)__xtc_mtx_unlock(&c->lock);
+	/* Tell the producer there is demand to satisfy. */
+	if (fire && atomic_load_explicit(&c->has_prod_waker,
+	    memory_order_acquire))
+		(void)xtc_waker_wake(&c->prod_waker);
+	return XTC_OK;
+}
+
+int
+xtc_chan_demand_send(xtc_chan_demand_t *c, void *msg)
+{
+	int rc = XTC_OK, fire = 0;
+	if (c == NULL) return XTC_E_INVAL;
+	(void)__xtc_mtx_lock(&c->lock);
+	if (c->closed) { rc = XTC_E_INVAL; goto out; }
+	if (c->demand == 0 || c->n == c->cap) { rc = XTC_E_AGAIN; goto out; }
+	if (c->res != NULL) {
+		rc = xtc_res_acquire(c->res, XTC_RES_CHAN_SLOTS, 1);
+		if (rc != XTC_OK) goto out;
+	}
+	c->slots[c->tail] = msg;
+	c->tail = (c->tail + 1) % c->cap;
+	c->n++;
+	c->demand--;
+	fire = 1;
+out:
+	(void)__xtc_mtx_unlock(&c->lock);
+	if (fire && atomic_load_explicit(&c->has_cons_waker,
+	    memory_order_acquire))
+		(void)xtc_waker_wake(&c->cons_waker);
+	return rc;
+}
+
+int
+xtc_chan_demand_try_recv(xtc_chan_demand_t *c, void **out)
+{
+	int rc = XTC_OK;
+	if (c == NULL || out == NULL) return XTC_E_INVAL;
+	*out = NULL;
+	(void)__xtc_mtx_lock(&c->lock);
+	if (c->n == 0) {
+		rc = c->closed ? XTC_E_INVAL : XTC_E_AGAIN;
+		goto out;
+	}
+	*out = c->slots[c->head];
+	c->head = (c->head + 1) % c->cap;
+	c->n--;
+	if (c->res != NULL)
+		xtc_res_release(c->res, XTC_RES_CHAN_SLOTS, 1);
+out:
+	(void)__xtc_mtx_unlock(&c->lock);
+	return rc;
+}
+
+size_t
+xtc_chan_demand_outstanding(const xtc_chan_demand_t *c)
+{
+	size_t d;
+	if (c == NULL) return 0;
+	(void)__xtc_mtx_lock((pthread_mutex_t *)&c->lock);
+	d = c->demand;
+	(void)__xtc_mtx_unlock((pthread_mutex_t *)&c->lock);
+	return d;
+}
+
+size_t
+xtc_chan_demand_len(const xtc_chan_demand_t *c)
+{
+	size_t n;
+	if (c == NULL) return 0;
+	(void)__xtc_mtx_lock((pthread_mutex_t *)&c->lock);
+	n = c->n;
+	(void)__xtc_mtx_unlock((pthread_mutex_t *)&c->lock);
+	return n;
+}
+
+int
+xtc_chan_demand_set_producer_waker(xtc_chan_demand_t *c, const xtc_waker_t *w)
+{
+	int wake_now = 0;
+	if (c == NULL || w == NULL) return XTC_E_INVAL;
+	(void)__xtc_mtx_lock(&c->lock);
+	c->prod_waker = *w;
+	atomic_store_explicit(&c->has_prod_waker, 1, memory_order_release);
+	if (c->demand > 0) wake_now = 1;   /* demand already waiting */
+	(void)__xtc_mtx_unlock(&c->lock);
+	if (wake_now)
+		(void)xtc_waker_wake(&c->prod_waker);
+	return XTC_OK;
+}
+
+int
+xtc_chan_demand_set_consumer_waker(xtc_chan_demand_t *c, const xtc_waker_t *w)
+{
+	int wake_now = 0;
+	if (c == NULL || w == NULL) return XTC_E_INVAL;
+	(void)__xtc_mtx_lock(&c->lock);
+	c->cons_waker = *w;
+	atomic_store_explicit(&c->has_cons_waker, 1, memory_order_release);
+	if (c->n > 0) wake_now = 1;        /* items already buffered */
+	(void)__xtc_mtx_unlock(&c->lock);
+	if (wake_now)
+		(void)xtc_waker_wake(&c->cons_waker);
+	return XTC_OK;
+}
+
+int
+xtc_chan_demand_close(xtc_chan_demand_t *c)
+{
+	int fire = 0;
+	if (c == NULL) return XTC_E_INVAL;
+	(void)__xtc_mtx_lock(&c->lock);
+	c->closed = 1;
+	fire = 1;
+	(void)__xtc_mtx_unlock(&c->lock);
+	/* Wake a parked consumer so it observes close and drains/exits. */
+	if (fire && atomic_load_explicit(&c->has_cons_waker,
+	    memory_order_acquire))
+		(void)xtc_waker_wake(&c->cons_waker);
+	return XTC_OK;
+}
