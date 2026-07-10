@@ -194,10 +194,50 @@ test_reg_scale(const MunitParameter p[], void *d)
 #undef NSCALE
 }
 
+static int
+count_cb(xtc_pid_t pid, void *user)
+{
+	int *n = user;
+	(void)pid;
+	(*n)++;
+	return 0;
+}
+
+static MunitResult
+test_reg_dup_keys(const MunitParameter p[], void *d)
+{
+	xtc_reg_t *r = NULL;
+	xtc_pid_t a = { 0, 1, 1 }, b = { 0, 2, 1 }, c = { 0, 3, 1 };
+	int n;
+	(void)p; (void)d;
+	munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
+
+	/* Three pids join one group key. */
+	munit_assert_int(xtc_reg_register_dup(r, "grp", a), ==, XTC_OK);
+	munit_assert_int(xtc_reg_register_dup(r, "grp", b), ==, XTC_OK);
+	munit_assert_int(xtc_reg_register_dup(r, "grp", c), ==, XTC_OK);
+	/* Idempotent re-add. */
+	munit_assert_int(xtc_reg_register_dup(r, "grp", a), ==, XTC_OK);
+	n = 0;
+	munit_assert_int(xtc_reg_members(r, "grp", count_cb, &n), ==, 3);
+	munit_assert_int(n, ==, 3);
+
+	/* Leave one. */
+	munit_assert_int(xtc_reg_unregister_pid(r, "grp", b), ==, XTC_OK);
+	n = 0;
+	munit_assert_int(xtc_reg_members(r, "grp", count_cb, &n), ==, 2);
+	/* Leaving a non-member is XTC_E_INVAL. */
+	munit_assert_int(xtc_reg_unregister_pid(r, "grp", b), ==, XTC_E_INVAL);
+
+	xtc_reg_destroy(r);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/reg_basic", test_reg_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_collisions", test_reg_collisions, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_scale", test_reg_scale, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reg_dup_keys", test_reg_dup_keys, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/reg", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

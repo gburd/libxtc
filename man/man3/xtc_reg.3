@@ -54,6 +54,25 @@ writing it to
 .Fn xtc_reg_count
 returns the number of live registrations in
 .Fa r .
+.Pp
+.Fn xtc_reg_register_dup
+registers a DUPLICATE-KEY entry: unlike
+.Fn xtc_reg_register
+(one pid per unique name), many pids may share one key, so a key names
+a GROUP -- the substrate for pub/sub and process groups.  Registering
+the same
+.Pq Fa key , Fa pid
+twice is idempotent.
+.Fn xtc_reg_unregister_pid
+removes one
+.Pq Fa key , Fa pid
+member (a group leave).
+.Fn xtc_reg_members
+visits every pid registered under
+.Fa key ;
+the callback runs UNDER the registry lock (keep it brief; do not
+re-enter the registry), a nonzero return stops the walk, and the return
+value is the number of members visited.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_reg_t *r = xtc_app_registry(app);
