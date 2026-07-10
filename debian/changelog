@@ -1,3 +1,38 @@
+libxtc (1.12.0-1) unstable; urgency=medium
+
+  * Crash-aware registry (the R5 remainder).  xtc_reg_reaper is a proc
+    the embedder spawns once with the registry as its argument; it
+    monitors every pid registered via xtc_reg_register_mon and
+    auto-drops it (xtc_reg_drop_pid) when that pid goes DOWN -- the
+    automatic form of the manual cleanup.  xtc_svr_call_name adds
+    via-dispatch: address a gen_server by registered name instead of by
+    pid (the Erlang {via, ...} / global-name pattern).  See xtc_reg(3).
+  * Cross-fork spawn / send / monitor: xtc_xproc.  Extends the
+    Erlang-style process relations across a fork() boundary -- a parent
+    xtc_xspawn()s a child running its own xtc runtime, then xtc_xsend()s
+    to it and xtc_xmonitor()s it as if it were a local process.  A child
+    crash or exit surfaces as a normal, fully-classified xtc DOWN (exit
+    code / signal decoded from the child's waitpid status), or
+    XTC_DOWN_KIND_NOCONNECTION if the control channel dies first.  The
+    single-host subset of the distributed design, over an xtc_osproc
+    control socketpair rather than TCP.  POSIX only (Windows declines
+    with XTC_E_NOSYS).  See xtc_xproc(3).
+  * xtc_tail runtime microscope (phase 1).  A dial9-inspired recorder of
+    individual runtime events tied to a precise instant -- the
+    event-level complement to xtc_stats (aggregates) and xtc_trace
+    (causal message trace).  Phase 1 ships the SCHED source (proc spawn
+    / exit), an in-process read visitor, and a versioned binary dump for
+    a future offline viewer.  OFF by default and one branch when a
+    source is disabled, so it is safe to compile into production.  The
+    MSG / IO / OS sources, on-disk spill, and viewer are staged
+    follow-ons.  See xtc_tail(3).
+  * New XTC_DOWN_KIND_NOCONNECTION down-kind (cross-process channel
+    death).  New installed headers xtc_xproc.h, xtc_tail.h.  New DST
+    coverage: test_sim_reg gains a dup-key membership + drop_pid
+    scenario (deterministic, replay-identical).
+
+ -- Greg Burd <greg@burd.me>  Fri, 10 Jul 2026 18:57:22 -0400
+
 libxtc (1.11.0-1) unstable; urgency=medium
 
   * OTP-behaviour build-out, part 2 (patterns R5-R10 from the survey),
