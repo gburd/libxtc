@@ -340,8 +340,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive   # the Lime submodule, for the parser staleness check
+      - name: Fetch the Lime submodule (best-effort)
+        # The Lime submodule lives on Codeberg and is used only by the
+        # sqlxtc parser-staleness check, which already no-ops when it is
+        # absent.  Fetch it in its own non-fatal step so a Codeberg
+        # outage (504 at checkout) does not fail the whole examples job
+        # -- the parser check simply skips, everything else still runs.
+        continue-on-error: true
+        run: git submodule update --init --recursive || true
       - name: Install dependencies
         run: |
           sudo apt-get update
