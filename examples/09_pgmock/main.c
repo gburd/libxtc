@@ -8,7 +8,7 @@
  *	pgmock-server: a standalone mock PostgreSQL postmaster on the
  *	xtc scheduler.  Proves the M16.1a runtime seam -- postmaster +
  *	N backends as xtc_procs doing a PG-v3 "SELECT 1" round-trip
- *	with ZERO PostgreSQL source.  See docs/M16_PG_ADAPTER.md.
+ *	with ZERO PostgreSQL source.  See the 09_pgmock README.
  *
  *	Usage:
  *	    pgmock-server [-h host] [-p port]      (TCP, default 127.0.0.1:15442)
