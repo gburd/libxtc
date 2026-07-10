@@ -239,11 +239,104 @@ run_churn(uint64_t seed, int use_buggify, int *out_done, int *out_ok,
 	return rc;
 }
 
+/* ================= pg: dup-key membership + drop_pid ================= */
+
+#define PG_WORK   8
+
+static xtc_reg_t  *g_preg;
+static atomic_int   g_pg_bad;      /* a lost/duplicate membership (bug) */
+static atomic_int   g_pg_done;
+static atomic_long  g_pg_hash;     /* order-sensitive membership fold */
+
+static int
+pg_count_cb(xtc_pid_t pid, void *user)
+{
+	(void)user;
+	/* fold the member pids so the final membership is replay-checkable */
+	long h = atomic_load_explicit(&g_pg_hash, memory_order_relaxed);
+	h = h * 1000003L + (long)pid.local_id + 1;
+	atomic_store_explicit(&g_pg_hash, h, memory_order_relaxed);
+	return 0;
+}
+
+static void
+pg_worker(void *arg)
+{
+	int id = (int)(intptr_t)arg;
+	xtc_pid_t self = { .loop_id = 1, .local_id = (uint32_t)(id + 1),
+	    .gen = 1 };
+	int i;
+
+	/* Join a shared group idempotently (double-join must not double-add). */
+	(void)xtc_reg_register_dup(g_preg, "grp", self);
+	(void)xtc_reg_register_dup(g_preg, "grp", self);
+	xtc_yield();
+
+	/* Half the workers leave; the other half stay.  A worker also joins
+	 * a second group to exercise multi-key membership. */
+	(void)xtc_reg_register_dup(g_preg, "grp2", self);
+	xtc_yield();
+
+	if (id % 2 == 0) {
+		/* Even ids leave grp explicitly. */
+		int rc = xtc_reg_unregister_pid(g_preg, "grp", self);
+		/* Leaving a member must succeed exactly once. */
+		if (rc != XTC_OK)
+			atomic_fetch_add_explicit(&g_pg_bad, 1,
+			    memory_order_relaxed);
+		/* A second leave must fail (no phantom membership). */
+		if (xtc_reg_unregister_pid(g_preg, "grp", self) == XTC_OK)
+			atomic_fetch_add_explicit(&g_pg_bad, 1,
+			    memory_order_relaxed);
+	} else if (id == 1) {
+		/* One worker drops itself from EVERY key (simulates the
+		 * reaper's crash cleanup).  After this, id 1 must be in no
+		 * group. */
+		xtc_yield();
+		(void)xtc_reg_drop_pid(g_preg, self);
+	}
+	for (i = 0; i < 3; i++) xtc_yield();
+	atomic_fetch_add_explicit(&g_pg_done, 1, memory_order_relaxed);
+}
+
+static int
+run_pg(uint64_t seed, int *out_done, int *out_bad, long *out_hash,
+       uint64_t *out_state, int *out_grp, int *out_grp2)
+{
+	xtc_exec_t *e = NULL;
+	int i, rc;
+
+	atomic_store(&g_pg_bad, 0);
+	atomic_store(&g_pg_done, 0);
+	atomic_store(&g_pg_hash, 0);
+
+	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return XTC_E_NOMEM;
+	if (xtc_reg_create(&g_preg) != XTC_OK) {
+		(void)xtc_exec_fini(e); return XTC_E_NOMEM;
+	}
+	for (i = 0; i < PG_WORK; i++)
+		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
+		    pg_worker, (void *)(intptr_t)i, NULL, NULL);
+
+	rc = xtc_sim_exec_run(e, seed, 5000000);
+
+	/* Fold the final membership of both groups deterministically. */
+	*out_grp = xtc_reg_members(g_preg, "grp", pg_count_cb, NULL);
+	*out_grp2 = xtc_reg_members(g_preg, "grp2", pg_count_cb, NULL);
+	*out_done = atomic_load(&g_pg_done);
+	*out_bad = atomic_load(&g_pg_bad);
+	*out_hash = atomic_load(&g_pg_hash);
+	if (out_state) *out_state = xtc_sim_state_hash(e);
+	xtc_reg_destroy(g_preg);
+	g_preg = NULL;
+	(void)xtc_exec_fini(e);
+	return rc;
+}
+
 int
 main(void)
 {
 	int rc;
-
 	/* ---- contend: at-most-one holder, deterministic resolve, replay ---- */
 	{
 		int d1 = 0, w1 = 0, br1 = 0, bd1 = 0, c1 = 0;
@@ -326,8 +419,55 @@ main(void)
 		}
 	}
 
+	/* ---- pg: dup-key membership + drop_pid, invariant + replay ---- */
+	{
+		int d1 = 0, bad1 = 0, g1 = 0, g21 = 0;
+		int d2 = 0, bad2 = 0, g2 = 0, g22 = 0;
+		int d3 = 0, bad3 = 0, g3 = 0, g23 = 0;
+		long h1 = 0, h2 = 0, h3 = 0;
+		uint64_t s1 = 0, s2 = 0, s3 = 0;
+
+		rc = run_pg(0x9C0FE, &d1, &bad1, &h1, &s1, &g1, &g21);
+		if (rc != XTC_OK) {
+			printf("FAIL: reg pg rc=%d (hang?)\n", rc); return 1;
+		}
+		(void)run_pg(0x9C0FE, &d2, &bad2, &h2, &s2, &g2, &g22);
+		rc = run_pg(0x5A11D, &d3, &bad3, &h3, &s3, &g3, &g23);
+		if (rc != XTC_OK) {
+			printf("FAIL: reg pg diff-seed rc=%d\n", rc); return 1;
+		}
+		printf("pg run1: done=%d bad=%d grp=%d grp2=%d hash=%ld "
+		    "state=%016llx\n", d1, bad1, g1, g21, h1,
+		    (unsigned long long)s1);
+		if (d1 != PG_WORK) {
+			printf("FAIL: not all pg workers finished (done=%d "
+			    "want %d)\n", d1, PG_WORK); return 1;
+		}
+		if (bad1 != 0) {
+			printf("FAIL: %d lost/duplicate pg memberships\n",
+			    bad1); return 1;
+		}
+		/* grp: 8 joined; the 4 even ids left; id 1 (odd) dropped
+		 * itself from all keys -> 3 remain (ids 3,5,7). */
+		if (g1 != 3) {
+			printf("FAIL: grp membership=%d want 3\n", g1);
+			return 1;
+		}
+		/* grp2: all 8 joined; only id 1 dropped itself -> 7 remain. */
+		if (g21 != 7) {
+			printf("FAIL: grp2 membership=%d want 7\n", g21);
+			return 1;
+		}
+		if (d1 != d2 || bad1 != bad2 || g1 != g2 || g21 != g22 ||
+		    h1 != h2 || s1 != s2) {
+			printf("FAIL: reg pg did not replay byte-identically\n");
+			return 1;
+		}
+	}
+
 	printf("OK: registry at-most-one-holder + deterministic whereis + "
 	    "exact unregister (empty after run), replayed; transient-miss "
-	    "retry buggify holds the invariant and replays\n");
+	    "retry buggify holds the invariant and replays; dup-key "
+	    "membership + drop_pid deterministic and replay-identical\n");
 	return 0;
 }
