@@ -733,7 +733,7 @@ bench_fairness: $(srcdir)/../bench/bench_fairness.c $(STATIC_LIB)
 # -------------------------------------------------------------------------
 # Examples -- self-contained demos.
 # -------------------------------------------------------------------------
-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo tnt_echo
+examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo
 
 01_hello: $(srcdir)/../examples/01_hello_async.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
@@ -753,6 +753,11 @@ examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo tnt_echo
 04_lockmgr_demo: $(srcdir)/../examples/04_lockmgr_demo.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../examples/04_lockmgr_demo.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+10_circuit_breaker: $(srcdir)/../examples/10_circuit_breaker.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../examples/10_circuit_breaker.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # The canonical tnt example: a TCP echo server.  Links the in-library
