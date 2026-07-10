@@ -18,6 +18,7 @@
 #include "xtc_async.h"
 #include "xtc_exec.h"
 #include "loop_int.h"
+#include "xtc_tail.h"     /* __xtc_tail_emit SCHED source (spawn/exit) */
 #include "coro_int.h"
 #include "xtc_tailcall.h"
 #include "xtc_slab.h"
@@ -855,6 +856,8 @@ proc_exit:
 	 * exit reason before the call -- reading p->exit_reason after it
 	 * is a use-after-free. */
 	reason = p->exit_reason;
+	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_EXIT, p->pid,
+	    (uint64_t)(unsigned)reason);
 	__notify_links_and_monitors(p);
 
 	__current_proc = NULL;
@@ -1030,6 +1033,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	}
 	(void)t;   /* p->task / p->coro are set by __proc_entry, not here */
 
+	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SPAWN, spawned_pid, 0);
 	if (out_pid) *out_pid = spawned_pid;
 	return XTC_OK;
 }

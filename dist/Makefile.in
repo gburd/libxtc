@@ -104,6 +104,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/pdict.c \
 	$(srcdir)/../src/ptc/preempt.c \
 	$(srcdir)/../src/ptc/stats.c \
+	$(srcdir)/../src/ptc/tail.c \
 	$(srcdir)/../src/ptc/slab.c \
 	$(srcdir)/../src/ptc/blocking.c \
 	$(srcdir)/../src/ptc/alloc_audit.c \
@@ -187,6 +188,7 @@ LIB_OBJS	= \
 	pdict.o \
 	preempt.o \
 	stats.o \
+	tail.o \
 	slab.o \
 	blocking.o \
 	alloc_audit.o \
@@ -269,6 +271,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_res.h \
 	$(srcdir)/../src/inc/xtc_slab.h \
 	$(srcdir)/../src/inc/xtc_stats.h \
+	$(srcdir)/../src/inc/xtc_tail.h \
 	$(srcdir)/../src/inc/xtc_svr.h \
 	$(srcdir)/../src/inc/xtc_fsm.h \
 	$(srcdir)/../src/inc/xtc_pg.h \
@@ -368,6 +371,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_pool \
 		  test_stream \
 		  test_credit \
+		  test_tail \
 		  test_xproc \
 		  test_app \
 		  test_tnt \
@@ -614,6 +618,9 @@ preempt.o: $(srcdir)/../src/ptc/preempt.c xtc_config.h
 
 stats.o: $(srcdir)/../src/ptc/stats.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/stats.c
+
+tail.o: $(srcdir)/../src/ptc/tail.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/tail.c
 
 slab.o: $(srcdir)/../src/ptc/slab.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/slab.c
@@ -1398,6 +1405,12 @@ test_stats: $(srcdir)/../test/m12/test_stats.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
 		-o $@ $(srcdir)/../test/m12/test_stats.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_tail: $(srcdir)/../test/m12/test_tail.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
+		-o $@ $(srcdir)/../test/m12/test_tail.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_dump: $(srcdir)/../test/m12/test_dump.c \
