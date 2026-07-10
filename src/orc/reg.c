@@ -39,6 +39,7 @@ struct reg_node {
 	uint32_t         hash;          /* cached FNV-1a, fast chain reject */
 	xtc_pid_t        pid;
 	char            *name;          /* __os_strdup'd, owned by node */
+	int              dup;           /* 1 = duplicate-key (pub/sub) entry */
 };
 
 struct xtc_reg {
@@ -195,4 +196,102 @@ xtc_reg_count(const xtc_reg_t *r)
 	n = r->n;
 	(void)__xtc_mtx_unlock((pthread_mutex_t *)&r->lock);
 	return n;
+}
+
+/*
+ * Duplicate-key (pub/sub, group-membership) registration: unlike
+ * xtc_reg_register, many pids may share one key.  This is the substrate
+ * for process groups (xtc_pg).  Registering the same (key, pid) twice is
+ * idempotent (returns XTC_OK without adding a second node).
+ */
+int
+xtc_reg_register_dup(xtc_reg_t *r, const char *key, xtc_pid_t pid)
+{
+	struct reg_node *node;
+	uint32_t h, b;
+	int rc = XTC_OK;
+	if (r == NULL || key == NULL) return XTC_E_INVAL;
+	h = __reg_hash(key);
+	b = h & (REG_NBUCKETS - 1);
+	(void)__xtc_mtx_lock(&r->lock);
+	/* Idempotent: skip if this exact (key, pid) is already present. */
+	for (node = r->buckets[b]; node != NULL; node = node->next)
+		if (node->hash == h && node->dup &&
+		    strcmp(node->name, key) == 0 &&
+		    xtc_pid_eq(node->pid, pid)) {
+			goto out;   /* already a member */
+		}
+	if ((rc = __os_calloc(1, sizeof *node, (void **)&node)) != XTC_OK)
+		goto out;
+	if ((rc = __os_strdup(key, &node->name)) != XTC_OK) {
+		__os_free(node);
+		goto out;
+	}
+	node->hash = h;
+	node->pid = pid;
+	node->dup = 1;
+	node->next = r->buckets[b];
+	r->buckets[b] = node;
+	r->n++;
+out:
+	(void)__xtc_mtx_unlock(&r->lock);
+	return rc;
+}
+
+/*
+ * Remove one (key, pid) duplicate-key entry (a group leave).  Returns
+ * XTC_OK if removed, XTC_E_INVAL if not a member.
+ */
+int
+xtc_reg_unregister_pid(xtc_reg_t *r, const char *key, xtc_pid_t pid)
+{
+	struct reg_node **link, *node;
+	uint32_t h;
+	int rc = XTC_E_INVAL;
+	if (r == NULL || key == NULL) return XTC_E_INVAL;
+	h = __reg_hash(key);
+	(void)__xtc_mtx_lock(&r->lock);
+	for (link = &r->buckets[h & (REG_NBUCKETS - 1)];
+	    (node = *link) != NULL; link = &node->next) {
+		if (node->hash == h && strcmp(node->name, key) == 0 &&
+		    xtc_pid_eq(node->pid, pid)) {
+			*link = node->next;
+			__os_free(node->name);
+			__os_free(node);
+			r->n--;
+			rc = XTC_OK;
+			break;
+		}
+	}
+	(void)__xtc_mtx_unlock(&r->lock);
+	return rc;
+}
+
+/*
+ * Visit every pid registered under `key` (both the unique entry and all
+ * duplicate-key members).  The callback runs UNDER the registry lock, so
+ * it must be brief and must not call back into the registry; copy pids
+ * out if more work is needed.  A nonzero callback return stops the walk.
+ * Returns the number of members visited.
+ */
+int
+xtc_reg_members(xtc_reg_t *r, const char *key,
+                int (*fn)(xtc_pid_t pid, void *user), void *user)
+{
+	struct reg_node *node;
+	uint32_t h;
+	int count = 0;
+	if (r == NULL || key == NULL || fn == NULL) return 0;
+	h = __reg_hash(key);
+	(void)__xtc_mtx_lock(&r->lock);
+	for (node = r->buckets[h & (REG_NBUCKETS - 1)]; node != NULL;
+	    node = node->next) {
+		if (node->hash == h && strcmp(node->name, key) == 0) {
+			count++;
+			if (fn(node->pid, user) != 0)
+				break;
+		}
+	}
+	(void)__xtc_mtx_unlock(&r->lock);
+	return count;
 }
