@@ -1,3 +1,56 @@
+libxtc (1.11.0-1) unstable; urgency=medium
+
+  * OTP-behaviour build-out, part 2 (patterns R5-R10 from the survey),
+    completing the R1-R10 program begun in 1.10.0.  All optional,
+    opt-in, single-node, and built on the existing proc / registry /
+    channel primitives.
+  * Registry duplicate-key membership (xtc_reg_register_dup,
+    xtc_reg_unregister_pid, xtc_reg_members): many pids may share one
+    key, so a key names a group -- the substrate for pub/sub.  (The
+    monitor-proc auto-unregister-on-DOWN half remains a tracked
+    follow-on.)
+  * xtc_pg process groups: xtc_pg_join / xtc_pg_leave / xtc_pg_members /
+    xtc_pg_send over the duplicate-key registry -- the Erlang pg /
+    Phoenix PubSub / Discord-presence pattern.  Broadcast collects
+    members under the registry lock and sends outside it, so no
+    bounded-mailbox park happens with the lock held.  See xtc_pg(3).
+  * xtc_pool bounded resource pool: xtc_pool_create / _add / _checkout /
+    _checkin / _available / _capacity.  Fibers check resources out and
+    return them; checkout blocks (with timeout) when all are busy, so
+    the pool is also a concurrency limiter -- the checkout/return half
+    of the connection-pool pattern.  Built on a counting semaphore.
+    See xtc_pool(3).
+  * examples/10_circuit_breaker.c: the CLOSED/OPEN/HALF_OPEN circuit
+    breaker as an xtc_fsm, demonstrating state_enter, a cooldown state
+    timeout, and synchronous call/reply -- and the gen_statem trap that
+    a real event cancels a pending state timeout.
+  * xtc_chan_demand demand-driven channel: the reactive-streams /
+    GenStage backpressure primitive.  A consumer asks for N items; the
+    producer's send succeeds only while demand is outstanding.  See
+    xtc_chan(3).
+  * xtc_stream async streams: a lazy pull-based sequence with map /
+    filter / for_each combinators and an xtc_stream_from_demand adapter
+    over the demand channel -- the Elixir Stream / Rust Iterator shape.
+    See xtc_stream(3).
+  * xtc_reg_drop_pid: remove a pid from EVERY key it appears under -- the
+    "process left everything" cleanup an embedder calls when a process
+    exits or a connection closes (the honest partial answer to the
+    not-yet-built automatic monitor-on-DOWN).
+  * xtc_credit sliding-window regulator: cap operations kept in flight
+    (acquire before issue, release on ack; acquire parks the fiber when
+    the window is full), with a peak-in-flight high-water mark.  The
+    transport-agnostic request-issue/ack-return sibling of the demand
+    channel -- the Erlang :jobs / RabbitMQ credit_flow / GenStage
+    max_demand pattern packaged as a primitive.  See xtc_credit(3).
+  * Examples put the new blocks to work: rexis gains real Redis Pub/Sub
+    (SUBSCRIBE / UNSUBSCRIBE / PUBLISH) on xtc_pg, leaving all channels
+    via xtc_reg_drop_pid on disconnect; kaka's credit-window self-test
+    is refactored onto xtc_credit.
+  * New installed headers xtc_pg.h, xtc_pool.h, xtc_stream.h,
+    xtc_credit.h.  No behavior change to existing APIs.
+
+ -- Greg Burd <greg@burd.me>  Fri, 10 Jul 2026 09:28:20 -0400
+
 libxtc (1.10.0-1) unstable; urgency=medium
 
   * OTP-behaviour build-out, part 1 (from the OTP-patterns survey).  New

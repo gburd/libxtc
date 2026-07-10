@@ -10,6 +10,7 @@ int xtc_sup_join __P((xtc_supervisor_t *, int64_t));
 int xtc_sup_stop __P((xtc_supervisor_t *));
 int xtc_svr_call __P((xtc_pid_t, const void *, size_t, void **, size_t *, int64_t));
 int xtc_svr_call_abortable __P((xtc_pid_t, const void *, size_t, void **, size_t *, int64_t, xtc_abort_token_t *));
+int xtc_svr_continue __P((void *));
 int xtc_tnt_start __P((const xtc_tnt_spec_t *));
 uint8_t xtc_tnt_shard_id __P((void));
 void *xtc_tnt_scratch_arena __P((size_t));

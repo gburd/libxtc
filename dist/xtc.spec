@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.10.0"
+#       --define "version 1.11.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.10.0
+Version:        1.11.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,10 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Fri Jul 10 2026 Greg Burd <greg@burd.me> - 1.11.0-1
+- OTP behaviours R5-R10: registry dup-keys, xtc_pg, xtc_pool, circuit-breaker example, xtc_chan_demand, xtc_stream.
+- Plus xtc_reg_drop_pid, xtc_credit sliding-window regulator; rexis Pub/Sub on xtc_pg; kaka credit self-test on xtc_credit.
+
 * Fri Jul 10 2026 Greg Burd <greg@burd.me> - 1.10.0-1
 - OTP behaviours: xtc_fsm (gen_statem), bounded supervisor pool + handle_continue.
 
