@@ -47,6 +47,7 @@
 #include "xtc_log.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "xtc_credit.h"
 
 #include "broker.h"
 #include "frame.h"
@@ -620,24 +621,34 @@ credit_producer(void *arg)
 	 * once its reply (credit) comes back. */
 	static uint8_t slot_buf[CREDIT_BUDGET][64];
 	int slot_busy[CREDIT_BUDGET];
-	int in_flight = 0, sent = 0, acked = 0;
+	int sent = 0, acked = 0;
 	int i;
 	void *msg; size_t mlen;
+	xtc_credit_t *cw = NULL;
 
 	for (i = 0; i < CREDIT_BUDGET; i++) slot_busy[i] = 0;
+
+	/* The sliding window is an xtc_credit regulator: at most
+	 * CREDIT_BUDGET PRODUCE requests outstanding.  Taking a credit
+	 * before each send and returning it on each reply is the whole
+	 * flow-control policy -- no hand-rolled in-flight counter. */
+	if (xtc_credit_create(CREDIT_BUDGET, &cw) != XTC_OK) {
+		st->result = 5; return;
+	}
 
 	/* Build a one-record PRODUCE body for record number `n` into buf. */
 	/* topic "t", partition 0, 1 record, key="", value=<n as 4 bytes>. */
 	for (;;) {
-		/* Fill every free credit slot, up to the budget, while
+		/* Fill every free credit slot, up to the window, while
 		 * there is work left to send. */
-		while (in_flight < CREDIT_BUDGET && sent < CREDIT_TOTAL) {
+		while (sent < CREDIT_TOTAL &&
+		    xtc_credit_try_acquire(cw) == XTC_OK) {
 			int s = -1, k;
 			uint8_t *p;
 			struct part_req req;
 			for (k = 0; k < CREDIT_BUDGET; k++)
 				if (!slot_busy[k]) { s = k; break; }
-			if (s < 0) break;
+			/* A credit was acquired, so a slot is guaranteed free. */
 			p = slot_buf[s];
 			kaka_put_u16(p, 1); p += 2; *p++ = 't';
 			kaka_put_u32(p, 0); p += 4;          /* partition */
@@ -657,9 +668,7 @@ credit_producer(void *arg)
 				st->result = 2; goto done;
 			}
 			slot_busy[s] = 1;
-			in_flight++; sent++;
-			if (in_flight > st->max_in_flight)
-				st->max_in_flight = in_flight;
+			sent++;
 		}
 		if (acked == CREDIT_TOTAL) break;
 
@@ -672,11 +681,15 @@ credit_producer(void *arg)
 			xtc_free(msg);
 			if (!rep.ok) { st->result = 4; goto done; }
 			if (rep.tag < CREDIT_BUDGET) slot_busy[rep.tag] = 0;
-			in_flight--; acked++;
-			st->hwm = rep.hwm;
+			st->hwm = rep.hwm;              /* partition high-water */
+			(void)xtc_credit_release(cw);   /* return the credit */
+			acked++;
 		}
 	}
 done:
+	/* Report the observed peak in flight (never exceeds the window). */
+	st->max_in_flight = (int)xtc_credit_peak(cw);
+	xtc_credit_destroy(cw);
 	{
 		/* Shut the partition down so the loop can terminate. */
 		struct part_req req;
