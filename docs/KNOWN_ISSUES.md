@@ -425,15 +425,22 @@ xtc_aio path, and flush via xtc_aio_fsync.  See xtc_bdev(3).
 
 **Status:** intentional -- `_aligned_malloc` returns memory that requires `_aligned_free`, not plain `free`. The hook surface uses a single free path. Keeping the M7 case Windows-skipped is correct.
 
-## svr.c branch coverage 50.78%
+## svr.c branch coverage
 
-**Status:** improved this round with `test_otp_gen_server_phase2.c` (+10 cases). Audit re-run needed to measure.
+**Status:** ~68% branch / ~79% line as of the R4 (handle_continue) round
+(measured with gcovr over the full make-check suite; the exact figure
+drifts test-to-test, so treat it as approximate).  The uncovered lines
+are error and edge paths, not mainline behavior.
 
 **Targets remaining:** call-after-stop edge, reply-when-server-already-stopped, OOM during reply path.
 
-## io_common.c at 65.71% line / 42.86% branch
+## io_common.c coverage
 
-**Status:** error-cleanup paths and ENOMEM/EAGAIN edges in `xtc_io_init`/`xtc_io_fini` not exercised. Adding fault-injection tests (use `xtc_inject_attach_wait` + a hook that returns ENOMEM) is the cleanest fix.
+**Status:** ~71% branch as of this round.  The uncovered branches are
+error-cleanup paths and ENOMEM/EAGAIN edges in `xtc_io_init`/`xtc_io_fini`
+not exercised by the happy-path tests.  Adding fault-injection tests
+(use `xtc_inject_attach_wait` + a hook that returns ENOMEM) is the
+cleanest fix.
 
 ## AIX runtime untested
 

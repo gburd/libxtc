@@ -22,7 +22,7 @@
  *	raw recv/send + xtc_proc_wait_fd (PG's WaitLatchOrSocket).
  *
  *	No PostgreSQL source, no PG globals -- this proves only the
- *	runtime seam (M16.1a).  See docs/M16_PG_ADAPTER.md.
+ *	runtime seam (M16.1a).  See the 09_pgmock README.
  */
 
 #ifndef _GNU_SOURCE
