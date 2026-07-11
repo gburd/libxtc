@@ -69,6 +69,17 @@ xtc_tail_enable(unsigned source_mask)
 	    memory_order_release);
 }
 
+/* Fast predicate for hook points that must do extra work (e.g. read a
+ * clock) ONLY when a source is enabled -- so a disabled tail is a single
+ * relaxed load + branch and perturbs nothing (crucially, it keeps the
+ * clock-reads out of the deterministic-sim recv path unless tail is on). */
+int
+__xtc_tail_on(unsigned source)
+{
+	return (atomic_load_explicit(&__tail_mask, memory_order_relaxed)
+	    & source) != 0;
+}
+
 void
 xtc_tail_disable(void)
 {

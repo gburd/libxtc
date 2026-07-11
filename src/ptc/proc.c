@@ -1497,7 +1497,30 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			 * delivery cannot be lost against this park. */
 			self->task->park_requested = 1;
 		}
-		xtc_yield();
+		{
+			/* xtc_tail SCHED: record the park, and on resume the
+			 * park->run latency (the off-CPU-while-blocked signal
+			 * that exposes lost/late wakeups and long stalls).  Gated
+			 * on the source being enabled so a disabled tail is one
+			 * branch and reads no clock -- keeping the sim recv path
+			 * side-effect-free by default. */
+			int __tail_sched = __xtc_tail_on(XTC_TAIL_SCHED);
+			int64_t __park_ns = 0;
+			if (__tail_sched) {
+				__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_PARK,
+				    self->pid, 0);
+				(void)__os_clock_mono(&__park_ns);
+			}
+			xtc_yield();
+			if (__tail_sched) {
+				int64_t __run_ns = 0;
+				(void)__os_clock_mono(&__run_ns);
+				__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_RUN,
+				    self->pid,
+				    (uint64_t)(__run_ns > __park_ns ?
+				    __run_ns - __park_ns : 0));
+			}
+		}
 		/*
 		 * On resume we may have run inside another proc's fiber
 		 * (which clobbered __current_proc).  Restore our pointer
