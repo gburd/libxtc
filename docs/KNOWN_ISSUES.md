@@ -443,23 +443,33 @@ cross-thread teardown race (below), which would make CI intermittently
 red.  SUAR=1 is fully usable locally and by embedders today; the CI flip
 waits on the teardown-race fix.
 
-## __notify_links_and_monitors DOWN-send vs proc-teardown race (rare, ASan+SUAR)
+## __notify_links_and_monitors DOWN-send vs proc-teardown race (RESOLVED)
 
-**Status:** OPEN, timing-dependent, surfaced by the fiber-switch
-annotations under `detect_stack_use_after_return=1` (which shifts
-scheduling enough to widen the window).  When a proc exits,
-`__notify_links_and_monitors` sends a DOWN to each monitoring proc via
-`xtc_send`; if a monitor proc is concurrently being torn down on another
-thread, the delivery in `__mbox_deliver_locked` (proc.c:630) can touch a
-mailbox envelope that the monitor's own teardown path (proc.c:2700) just
-freed -- a heap-use-after-free.  Does NOT reproduce in `test_proc`
-standalone (8/8 clean under SUAR=1); only intermittently under the full
-concurrent suite.  This is the same CLASS as the blocking-pool wake UAF
-below (a peer holds a pointer to a proc that exits and is freed the
-instant its fate is observed).  Fix is deferred rather than rushed: the
-correct resolution is a teardown epoch / refcount on the proc struct so a
-DOWN send cannot outlive the target, which is a focused change to make
-safely in its own right.
+**Status:** RESOLVED (v1.13.0) by a teardown refcount on the proc struct.
+Surfaced by the fiber-switch annotations under
+`detect_stack_use_after_return=1` (which shifts scheduling enough to
+widen the window): when a proc exited, `__notify_links_and_monitors`
+sent a DOWN to each monitoring proc via `xtc_send`; a monitor proc
+concurrently torn down on another thread could be freed between
+`__resolve` returning its pointer and `__mbox_deliver_locked` touching
+its mailbox -- a heap-use-after-free.  This was the SAME root cause as
+the blocking-pool wake UAF and (suspected) the macOS sqlxtc MT-load
+flake: `__resolve` handed out a `struct xtc_proc *` after releasing the
+table lock, with no lifetime guarantee.
+
+**Fix:** an atomic `refs` on `struct xtc_proc`.  `__table_lookup` takes a
+reference WHILE HOLDING the owning table lock -- atomic with the detach
+in the teardown path -- so a resolver either pins a live proc or sees
+NULL, never a freed pointer.  The owner (spawn) holds one ref; teardown
+detaches from the table then drops the owner ref, and the struct's
+mailbox-drain / lock-destroy / free happen in `__proc_free` only when the
+last ref (owner + any in-flight resolver) is released.  Every `__resolve`
+caller (`xtc_send`, `xtc_exit_pid`, `xtc_proc_wake`, the deferred-delivery
+callback, link/monitor push, `xtc_proc_mailbox_stats`) releases its ref.
+CI now runs the ASan job with `detect_stack_use_after_return=1`;
+validated by 5 clean full-`make-check` runs under ASan+SUAR (0 UAF, 0
+leaks).  A DST test (test_sim_proc_teardown) models the resolve-vs-exit
+race deterministically.
 
 ## svr.c branch coverage
 
