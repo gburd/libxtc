@@ -33,6 +33,28 @@ Or in `~/.lldbinit`:
     xtc-self           the proc running on the selected thread
     xtc-trace          the causal message trace, HLC-ordered (SEND/
                        RECV/SPAWN/EXIT, with cause edges) -- seq_trace
+    xtc-tail-dump F    write the live xtc_tail runtime-microscope ring
+                       to file F in the compact portable format, for
+                       the offline viewer below
+
+## Offline trace viewer (xtc_tail)
+
+`tools/xtc-tail.py` reads a trace captured with `xtc_tail_dump(fd)` (or
+`xtc-tail-dump` from the debugger) and lets an operator read, filter,
+step through, and summarize what the runtime did after the fact -- the
+BEAM-observer/recon experience for a captured trace.  The format is
+self-describing and portable, so the viewer runs anywhere regardless of
+the host that produced the trace.
+
+    xtc-tail.py TRACE                 # human-readable event timeline
+    xtc-tail.py TRACE --summary       # per-pid / per-kind rollup
+    xtc-tail.py TRACE --pid L.I.G     # only one process's events
+    xtc-tail.py TRACE --kind RUN,EXIT # only these event kinds
+    xtc-tail.py TRACE --source SCHED  # only one source (SCHED|MSG|IO|OS)
+    xtc-tail.py TRACE --wake-latency  # RUN events by park->run ns (worst
+                                      # first -- finds lost/late wakeups)
+    xtc-tail.py TRACE --around T[:W]  # events within +/-W ns of time T
+    xtc-tail.py TRACE --step          # interactive: one event per Enter
 
 Build with `-g` (the default build does).  The tools work on a live
 process (run / attach / breakpoint) and on a core dump.  Run them while
