@@ -627,7 +627,13 @@ __mbox_push_locked(struct xtc_proc *p, struct envelope *e)
 	if (p->mbox_tail == NULL) p->mbox_head = p->mbox_tail = e;
 	else { p->mbox_tail->next = e; p->mbox_tail = e; }
 	p->mbox_n++;
-	if (p->mbox_n > p->mbox_peak) p->mbox_peak = p->mbox_n;
+	if (p->mbox_n > p->mbox_peak) {
+		p->mbox_peak = p->mbox_n;
+		/* xtc_tail MSG source: a new mailbox depth high-water -- the
+		 * signal that a consumer is falling behind its producers. */
+		__xtc_tail_emit(XTC_TAIL_MSG, XTC_TAIL_MBOX_HWM, p->pid,
+		    (uint64_t)p->mbox_peak);
+	}
 	p->mbox_recv_total++;
 }
 
@@ -1298,6 +1304,10 @@ xtc_send(xtc_pid_t to, const void *data, size_t size)
 		e->hlc = 0;
 	}
 
+	/* xtc_tail MSG source: record the send (target pid, payload bytes).
+	 * One relaxed mask load when the source is off. */
+	__xtc_tail_emit(XTC_TAIL_MSG, XTC_TAIL_SEND, to, (uint64_t)size);
+
 	rc = __mbox_deliver(p, e);
 	__proc_release(p);
 	return rc;
@@ -1624,6 +1634,9 @@ deliver:
 			__trace_record(XTC_TRACE_RECV, self->pid, e->from, rs,
 			    e->hlc, (uint32_t)e->size);
 		}
+		/* xtc_tail MSG source: record the receive (receiver pid, bytes). */
+		__xtc_tail_emit(XTC_TAIL_MSG, XTC_TAIL_RECV, self->pid,
+		    (uint64_t)e->size);
 		__env_free(e);
 	}
 	return XTC_OK;

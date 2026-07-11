@@ -47,11 +47,12 @@ while diagnosing.
 turns on the named event sources -- a bitwise OR of
 .Dv XTC_TAIL_SCHED
 (proc spawn / exit / wake / run),
-.Dv XTC_TAIL_MSG ,
+.Dv XTC_TAIL_MSG
+(message send / receive / mailbox depth high-water),
 .Dv XTC_TAIL_IO ,
 and
 .Dv XTC_TAIL_OS
-(the latter three reserved for the staged build-out).  The mask REPLACES
+(the latter two reserved for the staged build-out).  The mask REPLACES
 the current one and the previous mask is returned.
 .Fn xtc_tail_disable
 turns off all recording.
@@ -103,11 +104,12 @@ returns the buffered record count.
 .Fn xtc_tail_disable
 returns no value.
 .Sh NOTES
-Phase 1 implements the SCHED source (proc spawn and exit), the
-in-process read, and the binary dump.  The MSG / IO / OS sources, an
-on-disk spill with rotation, and the offline viewer are staged
-follow-ons; the record layout and the source mask are stable so they
-extend the format without a break.
+Phase 1 implements the SCHED source (proc spawn / exit / park / run with
+wake-to-run latency) and the MSG source (send / receive / mailbox-depth
+high-water), the in-process read, and the compact portable binary dump.
+The IO and OS sources, an on-disk spill with rotation, and the offline
+viewer are staged follow-ons; the record layout and the source mask are
+stable so they extend the format without a break.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_tail_enable(XTC_TAIL_SCHED);

@@ -48,7 +48,12 @@ enum xtc_tail_kind {
 	XTC_TAIL_WAKE     = 2,   /* a parked proc was woken (armed) */
 	XTC_TAIL_RUN      = 3,   /* a proc began running after a wake
 	                          * (detail = wake-to-run latency, ns) */
-	XTC_TAIL_PARK     = 4    /* a proc parked (blocked on recv/timer/fd) */
+	XTC_TAIL_PARK     = 4,   /* a proc parked (blocked on recv/timer/fd) */
+	/* MSG source: */
+	XTC_TAIL_SEND     = 5,   /* pid sent a message (detail = payload bytes) */
+	XTC_TAIL_RECV     = 6,   /* pid received a message (detail = bytes) */
+	XTC_TAIL_MBOX_HWM = 7    /* pid's mailbox depth reached a new high-water
+	                          * (detail = the new peak depth) */
 };
 
 /* One recorded event.  Fixed layout; the binary dump writes it verbatim
