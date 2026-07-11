@@ -1,3 +1,55 @@
+libxtc (1.13.0-1) unstable; urgency=medium
+
+  * Proc-teardown refcount: closes a use-after-free RACE CLASS at its
+    shared root.  __resolve() handed out a struct xtc_proc * after
+    releasing the table lock, so a concurrent exit could free it
+    mid-delivery (a DOWN send, a cross-thread wake, a mailbox-stats
+    read).  An atomic refcount taken while the table lock is held pins
+    the proc across every resolve->deliver; the struct is freed only
+    when the last reference drops.  Validated by the CI ASan job, which
+    now runs with detect_stack_use_after_return=1 (previously blocked by
+    this race).  New DST test test_sim_proc_teardown models the race
+    deterministically.
+  * Sanitizer fiber-switch annotations: both coro substrates (fcontext
+    and ucontext) now call __sanitizer_start/finish_switch_fiber around
+    every stack switch, so ASan/TSan/LSan track libxtc's user-space
+    fiber switches instead of mis-attributing stack memory.  The full
+    fiber runtime passes ASan with detect_stack_use_after_return=1 on
+    both substrates -- previously impossible.  Zero cost / zero symbols
+    in a non-sanitized build.  Requested by the threaded-PostgreSQL
+    integration.
+  * Windows cross-process spawn/monitor (xtc_xproc): a real port, no
+    longer an XTC_E_NOSYS decline.  A portable child-entry registry
+    (xtc_xproc_register_entry + xtc_xspawn_entry) addresses the child by
+    a registered NAME the identical binary resolves in parent and child,
+    bridging the absence of fork(); the Windows path re-execs via
+    CreateProcess, uses a hardened loopback-TCP control channel (Winsock
+    has no socketpair) with a per-spawn nonce, monitors exit via
+    RegisterWaitForSingleObject, and maps the unhandled-exception
+    NTSTATUS to a POSIX signal so a Windows crash surfaces as the same
+    SIGNAL-kind DOWN as POSIX.  xtc_xproc_win_child_maybe() is wired into
+    the embedder's main().
+  * xtc_xlink: bidirectional cross-fork fate (xtc_link across the fork
+    boundary), rounding out the xtc_xproc relation set.
+  * xtc_tail runtime microscope: (a) the binary dump format is now
+    compact AND portable -- a little-endian header + LEB128 delta-encoded
+    events (~9 bytes/event vs a 32-byte struct), byte-identical across
+    endianness and padding, matching dial9's space discipline; (b) the
+    MSG source records send / receive / mailbox-depth high-water
+    alongside the existing SCHED source; (c) a new offline viewer,
+    tools/xtc-tail.py, reads / filters / steps / summarizes a captured
+    trace (including --wake-latency to find lost/late wakeups), and the
+    gdb xtc-tail-dump command writes a live program's ring for it.
+  * Docs: a consolidated, honest Windows-vs-POSIX model-gap section
+    (no fork, no socketpair, the int-fd Unix-ism, the DLL-export gap,
+    unlink-of-open-file) in the Windows matrix.
+  * New public API: xtc_xproc_register_entry, xtc_xspawn_entry,
+    xtc_xlink, xtc_xproc_win_child_maybe; xtc_tail SEND/RECV/MBOX_HWM
+    event kinds; XTC_DOWN_KIND_NOCONNECTION (from 1.12.0).  Sim suite
+    grows to 51 deterministic tests.
+
+ -- Greg Burd <greg@burd.me>  Sat, 11 Jul 2026 16:27:48 -0400
+
 libxtc (1.12.0-1) unstable; urgency=medium
 
   * Crash-aware registry (the R5 remainder).  xtc_reg_reaper is a proc
