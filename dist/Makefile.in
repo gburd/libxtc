@@ -753,6 +753,11 @@ bench_exec_scale: $(srcdir)/../bench/bench_exec_scale.c $(STATIC_LIB)
 		-o $@ $(srcdir)/../bench/bench_exec_scale.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+bench_xproc_fanout: $(srcdir)/../bench/bench_xproc_fanout.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_xproc_fanout.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 bench_fairness: $(srcdir)/../bench/bench_fairness.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_fairness.c \
