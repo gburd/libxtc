@@ -275,6 +275,62 @@ class XtcTrace(gdb.Command):
         print("(%d events)" % n)
 
 
+class XtcTailDump(gdb.Command):
+    """xtc-tail-dump FILE: write the live xtc_tail ring to FILE in the
+    compact portable format, for the offline viewer (tools/xtc-tail.py)."""
+    def __init__(self):
+        super().__init__("xtc-tail-dump", gdb.COMMAND_USER)
+
+    def _leb128(self, out, v):
+        while True:
+            b = v & 0x7F
+            v >>= 7
+            if v:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                break
+
+    def invoke(self, arg, from_tty):
+        path = arg.strip()
+        if not path:
+            print("usage: xtc-tail-dump FILE")
+            return
+        seq = _sym("__tail_seq")
+        ring = _sym("__tail_ring")
+        if seq is None or ring is None:
+            print("no xtc_tail ring (built -g? library linked? tail enabled?)")
+            return
+        seq = int(seq)
+        cap = int(ring.type.range()[1]) + 1
+        n = seq if seq < cap else cap
+        start = 0 if seq < cap else seq % cap
+        recs = [ring[(start + i) % cap] for i in range(n)]
+        base = int(recs[0]["ts_ns"]) if recs else 0
+        # header: magic "XTCL", version 2, flags LE(1), count, base_ts u64
+        import struct
+        blob = bytearray()
+        blob += struct.pack("<IIII", 0x5854434C, 2, 1, n)
+        blob += struct.pack("<Q", base)
+        prev = base
+        for r in recs:
+            ts = int(r["ts_ns"])
+            dts = ts - prev if ts >= prev else 0
+            prev = ts
+            pid = r["pid"]
+            blob.append(int(r["kind"]) & 0xFF)
+            blob.append(int(r["source"]) & 0xFF)
+            self._leb128(blob, dts)
+            self._leb128(blob, int(pid["loop_id"]))
+            self._leb128(blob, int(pid["local_id"]))
+            self._leb128(blob, int(pid["gen"]))
+            self._leb128(blob, int(r["detail"]))
+        with open(path, "wb") as f:
+            f.write(blob)
+        print("wrote %d events (%d bytes) to %s -- view with "
+              "tools/xtc-tail.py %s" % (n, len(blob), path, path))
+
+
 class XtcHelp(gdb.Command):
     """xtc-help: list xtc debugger commands."""
     def __init__(self):
@@ -293,6 +349,7 @@ XtcProc()
 XtcMailbox()
 XtcSelf()
 XtcTrace()
+XtcTailDump()
 XtcHelp()
 print("xtc-gdb loaded: xtc-loops, xtc-procs, xtc-proc, xtc-mailbox, "
-      "xtc-self, xtc-trace, xtc-help")
+      "xtc-self, xtc-trace, xtc-tail-dump, xtc-help")
