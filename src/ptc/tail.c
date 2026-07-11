@@ -166,24 +166,73 @@ __tail_write_all(int fd, const void *buf, size_t len)
 	return XTC_OK;
 }
 
+/* Append an unsigned value as LEB128 varint to buf[*off].  buf must have
+ * room for 10 bytes.  1 byte for values < 128, growing 7 bits at a time. */
+static void
+__leb128(uint8_t *buf, size_t *off, uint64_t v)
+{
+	do {
+		uint8_t b = (uint8_t)(v & 0x7Fu);
+		v >>= 7;
+		if (v != 0) b |= 0x80u;
+		buf[(*off)++] = b;
+	} while (v != 0);
+}
+
+/* Store a u32/u64 little-endian into buf. */
+static void
+__tail_le32(uint8_t *b, uint32_t v)
+{
+	b[0] = (uint8_t)v; b[1] = (uint8_t)(v >> 8);
+	b[2] = (uint8_t)(v >> 16); b[3] = (uint8_t)(v >> 24);
+}
+static void
+__tail_le64(uint8_t *b, uint64_t v)
+{
+	__tail_le32(b, (uint32_t)v);
+	__tail_le32(b + 4, (uint32_t)(v >> 32));
+}
+
 int
 xtc_tail_dump(int fd)
 {
 	xtc_tail_rec_t *snap = NULL;
-	size_t n = 0;
-	xtc_tail_hdr_t hdr;
+	size_t n = 0, i;
+	uint8_t hdr[24];   /* magic4 + version4 + flags4 + count4 + base_ts8 */
+	uint64_t prev_ts = 0;
 	int rc;
 
 	if (fd < 0) return XTC_E_INVAL;
 	if ((rc = __tail_snapshot(&snap, &n)) != XTC_OK) return rc;
 
-	hdr.magic = XTC_TAIL_MAGIC;
-	hdr.version = XTC_TAIL_VERSION;
-	hdr.rec_size = (uint32_t)sizeof(xtc_tail_rec_t);
-	hdr.count = (uint32_t)n;
-	rc = __tail_write_all(fd, &hdr, sizeof hdr);
-	if (rc == XTC_OK && n > 0)
-		rc = __tail_write_all(fd, snap, n * sizeof(xtc_tail_rec_t));
+	/* Portable little-endian header (no struct memcpy). */
+	__tail_le32(hdr + 0, XTC_TAIL_MAGIC);
+	__tail_le32(hdr + 4, XTC_TAIL_VERSION);
+	__tail_le32(hdr + 8, XTC_TAIL_FLAG_LE);
+	__tail_le32(hdr + 12, (uint32_t)n);
+	__tail_le64(hdr + 16, n > 0 ? snap[0].ts_ns : 0);
+	rc = __tail_write_all(fd, hdr, sizeof hdr);
+	if (rc != XTC_OK) goto out;
+
+	prev_ts = n > 0 ? snap[0].ts_ns : 0;
+	for (i = 0; i < n; i++) {
+		/* Worst case per event: 2 fixed bytes + 5 varints * 10 = 52. */
+		uint8_t buf[64];
+		size_t off = 0;
+		uint64_t dts = snap[i].ts_ns >= prev_ts ?
+		    snap[i].ts_ns - prev_ts : 0;
+		prev_ts = snap[i].ts_ns;
+		buf[off++] = (uint8_t)snap[i].kind;
+		buf[off++] = (uint8_t)snap[i].source;
+		__leb128(buf, &off, dts);
+		__leb128(buf, &off, (uint64_t)snap[i].pid.loop_id);
+		__leb128(buf, &off, (uint64_t)snap[i].pid.local_id);
+		__leb128(buf, &off, (uint64_t)snap[i].pid.gen);
+		__leb128(buf, &off, snap[i].detail);
+		if ((rc = __tail_write_all(fd, buf, off)) != XTC_OK)
+			goto out;
+	}
+out:
 	if (snap != NULL) __os_free(snap);
 	return rc;
 }

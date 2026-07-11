@@ -98,13 +98,18 @@ test_tail_disabled(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-/* Binary dump: header magic/version/rec_size/count round-trip via a pipe. */
+/* Binary dump: portable LE header + LEB128 events round-trip via a pipe. */
+static uint64_t
+rd_le32(const uint8_t *b) { return (uint64_t)b[0] | ((uint64_t)b[1]<<8) |
+    ((uint64_t)b[2]<<16) | ((uint64_t)b[3]<<24); }
+
 static MunitResult
 test_tail_dump(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	int fds[2];
-	xtc_tail_hdr_t hdr;
+	uint8_t hdr[24];
+	uint8_t body[512];
 	size_t n;
 	ssize_t r;
 	(void)p; (void)d;
@@ -123,20 +128,22 @@ test_tail_dump(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_tail_dump(fds[1]), ==, XTC_OK);
 	close(fds[1]);
 
-	r = read(fds[0], &hdr, sizeof hdr);
+	r = read(fds[0], hdr, sizeof hdr);
 	munit_assert_int((int)r, ==, (int)sizeof hdr);
-	munit_assert_uint(hdr.magic, ==, XTC_TAIL_MAGIC);
-	munit_assert_uint(hdr.version, ==, XTC_TAIL_VERSION);
-	munit_assert_uint(hdr.rec_size, ==, (uint32_t)sizeof(xtc_tail_rec_t));
-	munit_assert_uint(hdr.count, ==, (uint32_t)n);
+	munit_assert_uint((unsigned)rd_le32(hdr + 0), ==, XTC_TAIL_MAGIC);
+	munit_assert_uint((unsigned)rd_le32(hdr + 4), ==, XTC_TAIL_VERSION);
+	munit_assert_uint((unsigned)rd_le32(hdr + 8), ==, XTC_TAIL_FLAG_LE);
+	munit_assert_uint((unsigned)rd_le32(hdr + 12), ==, (unsigned)n);
 
-	/* First record body decodes as a real event. */
-	{
-		xtc_tail_rec_t rec;
-		r = read(fds[0], &rec, sizeof rec);
-		munit_assert_int((int)r, ==, (int)sizeof rec);
-		munit_assert_uint(rec.source, ==, XTC_TAIL_SCHED);
-	}
+	/* First event body decodes: kind byte, source byte == SCHED. */
+	r = read(fds[0], body, sizeof body);
+	munit_assert_int((int)r, >, 2);   /* at least the two fixed bytes + varints */
+	munit_assert_uint(body[1], ==, (uint8_t)XTC_TAIL_SCHED);  /* source */
+
+	/* Compactness: the whole event stream must be far under the raw
+	 * 32-byte-per-record size (portable varint encoding). */
+	munit_assert_int((int)r, <, (int)(n * sizeof(xtc_tail_rec_t)));
+
 	close(fds[0]);
 	xtc_tail_disable();
 	return MUNIT_OK;

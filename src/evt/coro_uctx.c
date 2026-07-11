@@ -61,6 +61,52 @@ typedef int __xtc_coro_uctx_unused;
 # define MAP_ANONYMOUS MAP_ANON
 #endif
 
+/*
+ * Sanitizer fiber-switch annotations (ASan / TSan / LSan) -- see the
+ * matching block in coro_fctx.c for the rationale.  Compiled to nothing
+ * in an ordinary build.  The scheduler and each coro keep SEPARATE
+ * fake-stack save slots (a coro overwrites its slot when it parks;
+ * mixing the scheduler's token with it crashes finish()). */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    (defined(__has_feature) && (__has_feature(address_sanitizer) || \
+                                __has_feature(thread_sanitizer)))
+#  include <sanitizer/common_interface_defs.h>
+#  define XTC_FIBER_SWITCH_ANNOTATE 1
+#endif
+
+#if defined(XTC_FIBER_SWITCH_ANNOTATE)
+static XTC_THREAD_LOCAL const void *__san_sched_bottom;
+static XTC_THREAD_LOCAL size_t      __san_sched_size;
+static XTC_THREAD_LOCAL void       *__san_sched_fake;
+
+static inline void
+__san_switch_to(void **save_slot, const void *to_bottom, size_t to_size)
+{
+	__sanitizer_start_switch_fiber(save_slot, to_bottom, to_size);
+}
+static inline void
+__san_switch_done(void *saved)
+{
+	const void *ob = NULL;
+	size_t os = 0;
+	__sanitizer_finish_switch_fiber(saved, &ob, &os);
+	if (__san_sched_bottom == NULL && ob != NULL) {
+		__san_sched_bottom = ob;
+		__san_sched_size = os;
+	}
+}
+static const void *
+__san_coro_bottom(const struct xtc_coro *c)
+{
+	long pg = sysconf(_SC_PAGESIZE);
+	size_t guard = pg > 0 ? (size_t)pg : 4096u;
+	return (const void *)((uintptr_t)c->stack + guard);
+}
+#else
+#  define __san_switch_to(save_slot, to_bottom, to_size) ((void)0)
+#  define __san_switch_done(saved)                        ((void)0)
+#endif
+
 /* Per-thread cursor -- the coroutine currently executing on this thread. */
 XTC_THREAD_LOCAL struct xtc_coro *__xtc_current_coro = NULL;
 
@@ -196,9 +242,12 @@ __coro_entry(void)
 	 * and never be sliced.
 	 */
 	g_in_preempt = 0;
+	__san_switch_done(c->san_fake_stack);   /* arrived on the coro stack */
 	c->result = c->fn(c->arg);
 	c->done = 1;
-	/* Return to the loop's context. */
+	/* Return to the loop's context.  We will not be resumed, so the
+	 * outgoing fake stack is discarded (save slot NULL). */
+	__san_switch_to(NULL, __san_sched_bottom, __san_sched_size);
 	SAFE_SWAPCONTEXT(&c->ctx, &c->loop_ctx);
 }
 
@@ -405,8 +454,10 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	saved = __xtc_current_coro;
 	__xtc_current_coro = c;
 
+	__san_switch_to(&__san_sched_fake, __san_coro_bottom(c), c->stack_sz);
 	(void)swapcontext(&c->loop_ctx, &c->ctx);
 	g_in_preempt = 0;
+	__san_switch_done(__san_sched_fake);   /* back on the scheduler stack */
 
 	__xtc_current_coro = saved;
 
@@ -630,7 +681,10 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 		void *pctx;
 		g_in_preempt = 1;
 		pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
+		__san_switch_to(&me->san_fake_stack, __san_sched_bottom,
+		    __san_sched_size);
 		(void)swapcontext(&me->ctx, &me->loop_ctx);
+		__san_switch_done(me->san_fake_stack);   /* resumed on our stack */
 		if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 		g_in_preempt = 0;
 	}
@@ -660,7 +714,9 @@ xtc_yield(void)
 	 * has fully landed. */
 	g_in_preempt = 1;
 	pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
+	__san_switch_to(&c->san_fake_stack, __san_sched_bottom, __san_sched_size);
 	(void)swapcontext(&c->ctx, &c->loop_ctx);
+	__san_switch_done(c->san_fake_stack);   /* resumed on our stack */
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 	g_in_preempt = 0;
 	/* Universal resume point: honor a kill/cancel requested while away

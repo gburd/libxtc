@@ -425,6 +425,42 @@ xtc_aio path, and flush via xtc_aio_fsync.  See xtc_bdev(3).
 
 **Status:** intentional -- `_aligned_malloc` returns memory that requires `_aligned_free`, not plain `free`. The hook surface uses a single free path. Keeping the M7 case Windows-skipped is correct.
 
+## Fiber-switch sanitizer annotations enable detect_stack_use_after_return=1
+
+**Status:** SHIPPED (v1.13.0).  The fcontext and ucontext coro substrates
+now call `__sanitizer_start_switch_fiber` / `__sanitizer_finish_switch_fiber`
+around every stack switch, so ASan/TSan/LSan track the user-space fiber
+switches instead of mis-attributing stack memory.  The full fiber runtime
+(test_fctx/proc/async/svr/fsm) passes ASan with
+`detect_stack_use_after_return=1` on BOTH substrates -- the capability the
+PG-integration team requested (they previously had to run
+`detect_stack_use_after_return=0`).  Compiled to nothing in a
+non-sanitized build (0 sanitizer references).
+
+**Caveat -- CI is NOT yet flipped to SUAR=1.**  Enabling it globally in
+the shared ASan CI job exposes a separate, pre-existing, timing-dependent
+cross-thread teardown race (below), which would make CI intermittently
+red.  SUAR=1 is fully usable locally and by embedders today; the CI flip
+waits on the teardown-race fix.
+
+## __notify_links_and_monitors DOWN-send vs proc-teardown race (rare, ASan+SUAR)
+
+**Status:** OPEN, timing-dependent, surfaced by the fiber-switch
+annotations under `detect_stack_use_after_return=1` (which shifts
+scheduling enough to widen the window).  When a proc exits,
+`__notify_links_and_monitors` sends a DOWN to each monitoring proc via
+`xtc_send`; if a monitor proc is concurrently being torn down on another
+thread, the delivery in `__mbox_deliver_locked` (proc.c:630) can touch a
+mailbox envelope that the monitor's own teardown path (proc.c:2700) just
+freed -- a heap-use-after-free.  Does NOT reproduce in `test_proc`
+standalone (8/8 clean under SUAR=1); only intermittently under the full
+concurrent suite.  This is the same CLASS as the blocking-pool wake UAF
+below (a peer holds a pointer to a proc that exits and is freed the
+instant its fate is observed).  Fix is deferred rather than rushed: the
+correct resolution is a teardown epoch / refcount on the proc struct so a
+DOWN send cannot outlive the target, which is a focused change to make
+safely in its own right.
+
 ## svr.c branch coverage
 
 **Status:** ~68% branch / ~79% line as of the R4 (handle_continue) round
