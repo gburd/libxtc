@@ -54,6 +54,75 @@
 # define MAP_ANONYMOUS MAP_ANON
 #endif
 
+/*
+ * Sanitizer fiber-switch annotations (ASan / TSan / LSan).  The
+ * sanitizer runtimes track one "current stack" per OS thread and do not
+ * know a user-space context switch moved us onto another stack; without
+ * a notification at each switch they mis-attribute stack memory (false
+ * stack-use-after-return, a false happens-before graph under TSan).
+ * The compiler runtime ships an official API for cooperative schedulers
+ * to fix this, used by Boost.Context et al.  Compiled to nothing in an
+ * ordinary build, so release binaries are byte-for-byte unchanged.
+ */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    (defined(__has_feature) && (__has_feature(address_sanitizer) || \
+                                __has_feature(thread_sanitizer)))
+#  include <sanitizer/common_interface_defs.h>
+#  define XTC_FIBER_SWITCH_ANNOTATE 1
+#endif
+
+/*
+ * Per-thread saved "scheduler stack" bounds, captured the first time a
+ * coro switch returns control to the scheduler stack.  finish() needs
+ * the stack we ARRIVE on; on the way into a coro that is the coro's
+ * stack (known), on the way back it is the scheduler's (captured here).
+ */
+#if defined(XTC_FIBER_SWITCH_ANNOTATE)
+static XTC_THREAD_LOCAL const void *__san_sched_bottom;
+static XTC_THREAD_LOCAL size_t      __san_sched_size;
+static XTC_THREAD_LOCAL void       *__san_sched_fake;   /* scheduler's own
+                                                         * fake-stack token */
+
+/* About to jump onto `to_bottom`/`to_size`; save the outgoing coro's
+ * fake stack into *save_slot (NULL if it will never resume, so the fake
+ * stack is discarded). */
+static inline void
+__san_switch_to(void **save_slot, const void *to_bottom, size_t to_size)
+{
+	__sanitizer_start_switch_fiber(save_slot, to_bottom, to_size);
+}
+
+/* Arrived on a new stack; restore this side's fake stack and (first
+ * time) learn the scheduler stack bounds for the return trip. */
+static inline void
+__san_switch_done(void *saved)
+{
+	const void *ob = NULL;
+	size_t os = 0;
+	__sanitizer_finish_switch_fiber(saved, &ob, &os);
+	if (__san_sched_bottom == NULL && ob != NULL) {
+		__san_sched_bottom = ob;
+		__san_sched_size = os;
+	}
+}
+#else
+#  define __san_switch_to(save_slot, to_bottom, to_size) ((void)0)
+#  define __san_switch_done(saved)                        ((void)0)
+#endif
+
+/* A coro's usable stack low address, for the sanitizer bottom arg.  The
+ * mapping is [stack, stack+guard+stack_sz); the usable region begins one
+ * guard page in.  Kept simple: pass the coro's own stack base + a page. */
+#if defined(XTC_FIBER_SWITCH_ANNOTATE)
+static const void *
+__san_coro_bottom(const struct xtc_coro *c)
+{
+	long pg = sysconf(_SC_PAGESIZE);
+	size_t guard = pg > 0 ? (size_t)pg : 4096u;
+	return (const void *)((uintptr_t)c->stack + guard);
+}
+#endif
+
 /* The fcontext primitives (src/os/asm/fctx_x86_64_sysv.S). */
 extern void *__xtc_make_fcontext(void *stack_top, size_t size,
                                  void (*fn)(void *transfer));
@@ -185,11 +254,14 @@ static void
 __coro_entry(void *transfer)
 {
 	struct xtc_coro *c = (struct xtc_coro *)transfer;
+	__san_switch_done(c->san_fake_stack);   /* arrived on the coro stack */
 	__xtc_current_coro = c;
 	c->result = c->fn(c->arg);
 	c->done = 1;
-	/* Final jump back to the scheduler.  We will not be resumed, so
-	 * the saved-sp slot is irrelevant; reuse c->fctx. */
+	/* Final jump back to the scheduler.  We will not be resumed, so the
+	 * outgoing fake stack is discarded (save slot NULL) and the
+	 * destination is the scheduler stack. */
+	__san_switch_to(NULL, __san_sched_bottom, __san_sched_size);
 	(void)__xtc_jump_fcontext(&c->fctx, g_sched_fctx, NULL);
 }
 
@@ -209,10 +281,12 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	saved = __xtc_current_coro;
 	__xtc_current_coro = c;
 
-	/* Save our (scheduler) sp into g_sched_fctx and jump into the
-	 * coroutine.  `c` is the transfer arg; on the coroutine's first
-	 * run it lands in __coro_entry(transfer == c). */
+	/* Save OUR (scheduler) fake stack into the per-thread slot -- NOT
+	 * into c->san_fake_stack, which the coro overwrites when it parks;
+	 * mixing the two crashes finish().  Jump into the coro. */
+	__san_switch_to(&__san_sched_fake, __san_coro_bottom(c), c->stack_sz);
 	(void)__xtc_jump_fcontext(&g_sched_fctx, c->fctx, c);
+	__san_switch_done(__san_sched_fake);   /* back on the scheduler stack */
 
 	__xtc_current_coro = saved;
 
@@ -365,7 +439,10 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 	me->_parked_on = target;
 	{
 		void *pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
+		__san_switch_to(&me->san_fake_stack, __san_sched_bottom,
+		    __san_sched_size);
 		(void)__xtc_jump_fcontext(&me->fctx, g_sched_fctx, NULL);
+		__san_switch_done(me->san_fake_stack);   /* resumed on our stack */
 		if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 	}
 	/* Resumed: target->done is now true. */
@@ -391,7 +468,9 @@ xtc_yield(void)
 	 * resume.  Without this a proc resumes running as whatever proc
 	 * ran last, then registers I/O and parks the WRONG task. */
 	pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
+	__san_switch_to(&c->san_fake_stack, __san_sched_bottom, __san_sched_size);
 	(void)__xtc_jump_fcontext(&c->fctx, g_sched_fctx, NULL);
+	__san_switch_done(c->san_fake_stack);   /* resumed on our stack */
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 	/* Universal resume point: honor a kill/cancel requested while we
 	 * were away (e.g. an involuntary preemption of a pure CPU loop that

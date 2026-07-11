@@ -56,6 +56,16 @@ struct xtc_coro {
 	 * RESCHED and PENDING.
 	 */
 	struct xtc_coro *_parked_on;
+
+	/*
+	 * Sanitizer fiber-switch save token (ASan/TSan/LSan).  Holds this
+	 * coro's "fake stack" across a park so __sanitizer_start/finish_
+	 * switch_fiber can track the user-space stack switch and stop
+	 * mis-attributing stack memory.  Unused (always NULL) in a
+	 * non-sanitized build.  See XTC_FIBER_SWITCH_ANNOTATE in
+	 * coro_fctx.c / coro_uctx.c.
+	 */
+	void        *san_fake_stack;
 };
 
 /* Shared by loop.c -- the currently-running coroutine on this loop.  */
