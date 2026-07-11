@@ -11,6 +11,7 @@
 .Nm xtc_xproc_os_pid ,
 .Nm xtc_xsend ,
 .Nm xtc_xmonitor ,
+.Nm xtc_xlink ,
 .Nm xtc_xproc_child_main ,
 .Nm xtc_xproc_win_child_maybe
 .Nd cross-fork spawn, send, and monitor
@@ -32,6 +33,8 @@
 .Fn xtc_xsend "xtc_xproc_t *p" "const void *msg" "size_t len"
 .Ft int
 .Fn xtc_xmonitor "xtc_xproc_t *p" "uint64_t *out_ref"
+.Ft int
+.Fn xtc_xlink "xtc_xproc_t *p"
 .Ft int
 .Fn xtc_xproc_child_main "int ctrl_fd" "xtc_xproc_root_fn root_fn" "void *arg"
 .Ft int
@@ -105,6 +108,17 @@ killed by a signal, or
 if the channel died before a clean exit was seen.  Internally the child's
 fate is mirrored into a local shadow proc, so all the ordinary
 monitor/DOWN machinery applies unchanged.
+.Pp
+.Fn xtc_xlink
+is the bidirectional form (like
+.Xr xtc_link 3
+across the fork boundary): the child's exit delivers an EXIT signal to
+the linking fiber, and if the linking fiber / parent process dies the
+child observes its control channel close and shuts down.  It links to
+the same shadow proc
+.Fn xtc_xmonitor
+uses, so the intra-process link machinery extends across the fork
+unchanged.
 .Pp
 .Fn xtc_xproc_os_pid
 returns the child's OS pid (for logging), or -1.

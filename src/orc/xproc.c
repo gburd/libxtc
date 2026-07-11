@@ -372,31 +372,51 @@ xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len)
 	return xtc_net_send_frame(p->ctrl_fd, msg, len);
 }
 
-int
-xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref)
+/* Ensure the local shadow proc (mirroring the child's fate) is spawned.
+ * Idempotent.  The caller then xtc_monitor or xtc_link's p->shadow. */
+static int
+__xproc_ensure_shadow(xtc_xproc_t *p)
 {
 	struct shadow_ctx *s = NULL;
 	int rc;
-
-	if (p == NULL || p->os == NULL) return XTC_E_INVAL;
-	if (p->have_shadow)
-		return xtc_monitor(p->shadow, out_ref);   /* re-monitor */
-
+	if (p->have_shadow) return XTC_OK;
 	if ((rc = __os_calloc(1, sizeof *s, (void **)&s)) != XTC_OK)
 		return rc;
 	s->os = p->os;
 	s->ctrl_fd = p->ctrl_fd;
-	/* Spawn the shadow; monitor it BEFORE it can exit (spawn-then-
-	 * monitor on the same loop is race-free: the shadow cannot run
-	 * until the caller yields).  The shadow frees `s` itself before it
-	 * exits (it runs exactly once). */
+	/* Spawn the shadow; the caller binds to it BEFORE it can run
+	 * (spawn-then-monitor/link on the same loop is race-free: the shadow
+	 * cannot execute until the caller yields).  The shadow frees `s`
+	 * itself before it exits (it runs exactly once). */
 	if ((rc = xtc_proc_spawn(p->loop, shadow_proc, s, NULL,
 	    &p->shadow)) != XTC_OK) {
 		__os_free(s);
 		return rc;
 	}
 	p->have_shadow = 1;
+	return XTC_OK;
+}
+
+int
+xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref)
+{
+	int rc;
+	if (p == NULL || p->os == NULL) return XTC_E_INVAL;
+	if ((rc = __xproc_ensure_shadow(p)) != XTC_OK) return rc;
 	return xtc_monitor(p->shadow, out_ref);
+}
+
+int
+xtc_xlink(xtc_xproc_t *p)
+{
+	int rc;
+	if (p == NULL || p->os == NULL) return XTC_E_INVAL;
+	if ((rc = __xproc_ensure_shadow(p)) != XTC_OK) return rc;
+	/* Link the caller to the shadow: the shadow mirrors the child's
+	 * exit, so linking to it binds the caller's fate to the child.  The
+	 * reverse direction (child dies when the parent/link dies) is
+	 * handled by the child pump exiting on control-channel close. */
+	return xtc_link(p->shadow);
 }
 
 #else /* _WIN32 -- no fork; a real re-exec + loopback-control port. */
@@ -666,15 +686,13 @@ xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len)
 	return xtc_net_send_frame(p->ctrl_fd, msg, len);
 }
 
-int
-xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref)
+/* Ensure the exit-wait + shadow proc are armed (Windows).  Idempotent. */
+static int
+__xproc_ensure_shadow_win(xtc_xproc_t *p)
 {
 	struct win_shadow_ctx *s = NULL;
 	int rc;
-	if (p == NULL || p->proc == NULL) return XTC_E_INVAL;
-	if (p->have_shadow) return xtc_monitor(p->shadow, out_ref);
-
-	/* Arm the exit wait (thread pool -> __xproc_exit_cb sets p->exited). */
+	if (p->have_shadow) return XTC_OK;
 	if (p->wait == NULL) {
 		if (!RegisterWaitForSingleObject(&p->wait, p->proc,
 		    __xproc_exit_cb, p, INFINITE, WT_EXECUTEONLYONCE))
@@ -687,7 +705,25 @@ xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref)
 		__os_free(s); return rc;
 	}
 	p->have_shadow = 1;
+	return XTC_OK;
+}
+
+int
+xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref)
+{
+	int rc;
+	if (p == NULL || p->proc == NULL) return XTC_E_INVAL;
+	if ((rc = __xproc_ensure_shadow_win(p)) != XTC_OK) return rc;
 	return xtc_monitor(p->shadow, out_ref);
+}
+
+int
+xtc_xlink(xtc_xproc_t *p)
+{
+	int rc;
+	if (p == NULL || p->proc == NULL) return XTC_E_INVAL;
+	if ((rc = __xproc_ensure_shadow_win(p)) != XTC_OK) return rc;
+	return xtc_link(p->shadow);
 }
 
 int

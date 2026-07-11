@@ -64,6 +64,7 @@ typedef void (*xtc_xproc_root_fn)(void *arg);
  * PUBLIC: long xtc_xproc_os_pid __P((const xtc_xproc_t *));
  * PUBLIC: int  xtc_xsend __P((xtc_xproc_t *, const void *, size_t));
  * PUBLIC: int  xtc_xmonitor __P((xtc_xproc_t *, uint64_t *));
+ * PUBLIC: int  xtc_xlink __P((xtc_xproc_t *));
  * PUBLIC: int  xtc_xproc_child_main __P((int, xtc_xproc_root_fn, void *));
  * PUBLIC: int  xtc_xproc_win_child_maybe __P((int, char **));
  */
@@ -130,6 +131,17 @@ int  xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len);
  * non-NULL) receives the monitor reference.  Must be called from a fiber.
  */
 int  xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref);
+
+/*
+ * Bidirectionally LINK the calling fiber to the child (like xtc_link,
+ * across the fork boundary): if the child exits or crashes the linking
+ * fiber receives an EXIT signal (decode with xtc_down_decode_ex), and if
+ * the linking fiber / parent process dies the child observes its control
+ * channel close and shuts down.  Must be called from a fiber.  Use
+ * xtc_xmonitor instead when you want a one-way DOWN without binding the
+ * caller's own fate to the child.
+ */
+int  xtc_xlink(xtc_xproc_t *p);
 
 /*
  * Child-side entry.  Call this from the child body (the process the fork
