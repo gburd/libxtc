@@ -698,8 +698,9 @@ xtc_xproc_register_entry(const char *name, xtc_xproc_root_fn fn);   /* portable,
  * nonce, receives the arg frame, looks up the entry, runs
  * xtc_xproc_child_main, and _exit()s with its result -- never returning.
  * Otherwise it is a no-op and returns 0 (normal startup continues).
- *
- * PUBLIC: int xtc_xproc_win_child_maybe __P((int, char **)); */
+ * (Declared in xtc_xproc.h, like the rest of the xtc_xproc surface; no
+ * PUBLIC marker here so s_include does not also emit it into orc_ext.h.)
+ */
 int
 xtc_xproc_win_child_maybe(int argc, char **argv)
 {
