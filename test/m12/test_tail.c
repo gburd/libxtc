@@ -26,12 +26,18 @@ exit7_proc(void *arg)
 	xtc_exit_self(7);
 }
 
-struct counts { int spawn; int exit; int exit7; int park; int run; int run_latency_seen; };
+struct counts { int spawn; int exit; int exit7; int park; int run; int run_latency_seen; int send; int recv; int hwm; };
 
 static int
 count_cb(const xtc_tail_rec_t *r, void *user)
 {
 	struct counts *c = user;
+	if (r->source == XTC_TAIL_MSG) {
+		if (r->kind == XTC_TAIL_SEND) c->send++;
+		if (r->kind == XTC_TAIL_RECV) c->recv++;
+		if (r->kind == XTC_TAIL_MBOX_HWM) c->hwm++;
+		return 0;
+	}
 	if (r->source != XTC_TAIL_SCHED) return 0;
 	if (r->kind == XTC_TAIL_SPAWN) c->spawn++;
 	if (r->kind == XTC_TAIL_EXIT) {
@@ -202,10 +208,58 @@ test_tail_wake_latency(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* MSG source: a receiver that drains several messages, so SEND, RECV,
+ * and a mailbox high-water are all recorded. */
+struct msgr_state { int got; };
+static void
+msg_receiver(void *a)
+{
+	struct msgr_state *s = a;
+	int i;
+	for (i = 0; i < 4; i++) {
+		void *m = NULL; size_t n = 0;
+		if (xtc_recv(&m, &n, 1000LL * 1000 * 1000) != XTC_OK) break;
+		s->got++;
+		if (m) xtc_free(m);
+	}
+}
+
+static MunitResult
+test_tail_msg(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct msgr_state st = { 0 };
+	xtc_pid_t rpid;
+	struct counts cnt;
+	int i, v = 1;
+	(void)p; (void)d;
+
+	(void)xtc_tail_reset();
+	(void)xtc_tail_enable(XTC_TAIL_MSG);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, msg_receiver, &st, NULL, &rpid),
+	    ==, XTC_OK);
+	/* Send 4 before running: they queue (mailbox depth rises -> HWM). */
+	for (i = 0; i < 4; i++)
+		munit_assert_int(xtc_send(rpid, &v, sizeof v), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	munit_assert_int(st.got, ==, 4);
+	memset(&cnt, 0, sizeof cnt);
+	munit_assert_int(xtc_tail_read(count_cb, &cnt), ==, XTC_OK);
+	munit_assert_int(cnt.send, ==, 4);   /* four sends recorded */
+	munit_assert_int(cnt.recv, ==, 4);   /* four receives recorded */
+	munit_assert_int(cnt.hwm,  >=, 1);   /* mailbox depth high-water(s) */
+	xtc_tail_disable();
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/sched",        test_tail_sched,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/disabled",     test_tail_disabled,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/dump",         test_tail_dump,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/msg",          test_tail_msg,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wake_latency", test_tail_wake_latency, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
