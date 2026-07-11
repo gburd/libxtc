@@ -29,6 +29,10 @@
 #include "xtc_async.h"
 #include "xtc_preempt.h"
 
+#if !defined(__has_feature)
+#  define __has_feature(x) 0
+#endif
+
 static atomic_int  g_peer;          /* peer progress while the runaway runs */
 static atomic_int  g_runaway_done;
 static volatile uint64_t g_sink;
@@ -70,6 +74,20 @@ test_p2_preempt_tight_loop(const MunitParameter p[], void *d)
 
 	if (!xtc_preempt_supported())
 		return MUNIT_OK;   /* no per-thread CPU-time timers; skip */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	/* Involuntary (signal-context) preemption rewrites the interrupted
+	 * fiber's machine context and redirects it through an out-of-band
+	 * cooperative switch.  That nests inside the sanitizer fiber-switch
+	 * annotations (ASan/TSan) -- "starting fiber switch while in fiber
+	 * switch" -- because the interrupted fiber may be mid-annotation.
+	 * Preempting under a sanitizer is not a production scenario (you do
+	 * not run the timer-driven involuntary preemptor under ASan), so
+	 * skip this sub-behavior when instrumented.  The cooperative
+	 * preemption path (Phase 1) and all other fiber switches remain
+	 * fully sanitizer-checked. */
+	return MUNIT_OK;
+#endif
 
 	atomic_store(&g_peer, 0);
 	atomic_store(&g_runaway_done, 0);

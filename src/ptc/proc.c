@@ -407,6 +407,18 @@ struct xtc_proc {
 	/* Lifecycle. */
 	int         alive;
 
+	/*
+	 * Teardown-safety refcount.  A resolver (__table_lookup) takes a
+	 * ref WHILE HOLDING the owning table lock -- atomic with the
+	 * detach in __notify_links_and_monitors -- so a proc cannot be
+	 * freed out from under an in-flight cross-thread send / wake / DOWN
+	 * delivery.  The owner (spawn) holds one ref; __notify drops it
+	 * after detaching from the table, and the struct is freed only when
+	 * the count reaches zero (see __proc_ref / __proc_release).  This
+	 * closes the resolve-then-deliver use-after-free race class
+	 * (KNOWN_ISSUES: DOWN-send vs teardown, blocking-pool wake). */
+	_Atomic int refs;
+
 	/* Links & monitors. */
 	struct link_entry *links;
 	struct mon_entry  *monitors;     /* monitors WE created (we are watcher) */
@@ -560,6 +572,19 @@ out:
 	return rc;
 }
 
+static void
+__proc_free(struct xtc_proc *p);   /* final teardown; see __notify_links_and_monitors */
+
+/* Drop a reference; free the struct when the last one goes.  Safe to
+ * call from any thread. */
+static void
+__proc_release(struct xtc_proc *p)
+{
+	if (p == NULL) return;
+	if (atomic_fetch_sub_explicit(&p->refs, 1, memory_order_acq_rel) == 1)
+		__proc_free(p);
+}
+
 static struct xtc_proc *
 __table_lookup(struct xtc_proc_table *t, uint16_t local_id, uint32_t gen)
 {
@@ -567,8 +592,15 @@ __table_lookup(struct xtc_proc_table *t, uint16_t local_id, uint32_t gen)
 	(void) __proc_mtx_lock(&t->lock);
 	if (local_id < t->cap &&
 	    t->slots[local_id].proc != NULL &&
-	    t->slots[local_id].gen == gen)
+	    t->slots[local_id].gen == gen) {
 		p = t->slots[local_id].proc;
+		/* Take a ref WHILE the table lock is held.  The teardown path
+		 * detaches the slot (proc = NULL) under this same lock before
+		 * dropping the owner ref, so a resolver either sees the live
+		 * proc and pins it here, or sees NULL -- never a freed pointer
+		 * in between.  The caller must __proc_release when done. */
+		atomic_fetch_add_explicit(&p->refs, 1, memory_order_relaxed);
+	}
 	(void) __proc_mtx_unlock(&t->lock);
 	return p;
 }
@@ -710,9 +742,10 @@ __mbox_deferred_run(void *arg)
 {
 	struct __mbox_deferred *d = arg;
 	struct xtc_proc *p = __resolve(d->pid, NULL);
-	if (p != NULL)
+	if (p != NULL) {
 		(void)__mbox_deliver_locked(p, d->e);
-	else
+		__proc_release(p);
+	} else
 		__env_free(d->e);   /* target gone: drop the delayed message */
 	__os_free(d);
 }
@@ -927,6 +960,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	p->fn = fn;
 	p->arg = arg;
 	p->alive = 1;
+	atomic_store_explicit(&p->refs, 1, memory_order_relaxed);   /* owner ref */
 	p->mbox_cap = (opts != NULL && opts->mailbox_cap > 0)
 	    ? opts->mailbox_cap : 4096;
 	/* Watermark level: a percent of cap (rounded down), clamped so a
@@ -1163,6 +1197,7 @@ xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out)
 	out->recv_total = p->mbox_recv_total;
 	out->drop_total = p->mbox_drop_total;
 	(void) __proc_mtx_unlock(&p->mbox_lock);
+	__proc_release(p);
 	return XTC_OK;
 }
 
@@ -1226,21 +1261,27 @@ xtc_send(xtc_pid_t to, const void *data, size_t size)
 	struct xtc_proc *p;
 	xtc_loop_t *target;
 	struct envelope *e;
+	int rc;
 
 	if (XTC_UNLIKELY(size > 0 && data == NULL)) return XTC_E_INVAL;
 	if (XTC_UNLIKELY(xtc_pid_is_none(to))) return XTC_E_INVAL;
 
 	p = __resolve(to, &target);
-	if (XTC_UNLIKELY(p == NULL || !p->alive)) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(p == NULL)) return XTC_E_INVAL;
+	/* p is pinned by the resolver ref; release on every exit below so a
+	 * concurrent exit cannot free it mid-delivery. */
+	if (XTC_UNLIKELY(!p->alive)) { __proc_release(p); return XTC_E_INVAL; }
 
 	/* Guard against size_t overflow in the envelope allocation:
 	 * a size near SIZE_MAX would wrap sizeof *e + size to a small
 	 * value, malloc would succeed, and the memcpy below would
 	 * overflow the heap.  Reject before allocating. */
-	if (XTC_UNLIKELY(size > SIZE_MAX - sizeof *e)) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(size > SIZE_MAX - sizeof *e)) {
+		__proc_release(p); return XTC_E_INVAL;
+	}
 
 	e = __env_alloc(size);
-	if (XTC_UNLIKELY(e == NULL)) return XTC_E_NOMEM;
+	if (XTC_UNLIKELY(e == NULL)) { __proc_release(p); return XTC_E_NOMEM; }
 	e->next = NULL;
 	e->from = xtc_self();
 	e->size = size;
@@ -1257,7 +1298,9 @@ xtc_send(xtc_pid_t to, const void *data, size_t size)
 		e->hlc = 0;
 	}
 
-	return __mbox_deliver(p, e);
+	rc = __mbox_deliver(p, e);
+	__proc_release(p);
+	return rc;
 }
 
 /* PUBLIC: int xtc_exit_pid __P((xtc_pid_t, int)); */
@@ -1279,7 +1322,8 @@ xtc_exit_pid(xtc_pid_t target, int reason)
 	int expected = 0, desired;
 	if (XTC_UNLIKELY(xtc_pid_is_none(target))) return XTC_E_INVAL;
 	p = __resolve(target, NULL);
-	if (XTC_UNLIKELY(p == NULL || !p->alive)) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(p == NULL)) return XTC_E_INVAL;
+	if (XTC_UNLIKELY(!p->alive)) { __proc_release(p); return XTC_E_INVAL; }
 
 	/* Encode reason so 0 means "no kill pending".  Negative reasons
 	 * are clamped to -1 so the encoded value stays nonzero. */
@@ -1296,6 +1340,7 @@ xtc_exit_pid(xtc_pid_t target, int reason)
 		p->waker_armed = 0;
 	}
 	(void) __proc_mtx_unlock(&p->mbox_lock);
+	__proc_release(p);
 	return XTC_OK;
 }
 
@@ -1334,8 +1379,8 @@ xtc_proc_wake(xtc_pid_t target)
 	if (XTC_UNLIKELY(xtc_pid_is_none(target)))
 		return XTC_E_INVAL;
 	p = __resolve(target, NULL);
-	if (p == NULL || !p->alive)
-		return XTC_OK;   /* gone or exited: a wake is a harmless no-op */
+	if (p == NULL) return XTC_OK;   /* gone: a wake is a harmless no-op */
+	if (!p->alive) { __proc_release(p); return XTC_OK; }
 
 	(void) __proc_mtx_lock(&p->mbox_lock);
 	if (p->waker_armed) {
@@ -1347,6 +1392,7 @@ xtc_proc_wake(xtc_pid_t target)
 		xtc_waker_wake(&p->recv_waker);
 	}
 	(void) __proc_mtx_unlock(&p->mbox_lock);
+	__proc_release(p);
 	return XTC_OK;
 }
 
@@ -2456,9 +2502,9 @@ __peer_push_link(xtc_pid_t peer_pid, struct link_entry *e)
 	struct xtc_proc *peer;
 	int pushed = 0;
 	peer = __resolve(peer_pid, &lp);
-	if (peer == NULL || lp == NULL) return 0;
+	if (peer == NULL || lp == NULL) { if (peer) __proc_release(peer); return 0; }
 	tbl = __table_for(lp, 0);
-	if (tbl == NULL) return 0;
+	if (tbl == NULL) { __proc_release(peer); return 0; }
 	(void) __proc_mtx_lock(&tbl->lock);
 	if (peer_pid.local_id < tbl->cap &&
 	    tbl->slots[peer_pid.local_id].proc == peer &&
@@ -2469,6 +2515,7 @@ __peer_push_link(xtc_pid_t peer_pid, struct link_entry *e)
 		pushed = 1;
 	}
 	(void) __proc_mtx_unlock(&tbl->lock);
+	__proc_release(peer);
 	return pushed;
 }
 
@@ -2480,9 +2527,9 @@ __peer_push_monitored_by(xtc_pid_t peer_pid, struct mon_entry *m)
 	struct xtc_proc *peer;
 	int pushed = 0;
 	peer = __resolve(peer_pid, &lp);
-	if (peer == NULL || lp == NULL) return 0;
+	if (peer == NULL || lp == NULL) { if (peer) __proc_release(peer); return 0; }
 	tbl = __table_for(lp, 0);
-	if (tbl == NULL) return 0;
+	if (tbl == NULL) { __proc_release(peer); return 0; }
 	(void) __proc_mtx_lock(&tbl->lock);
 	if (peer_pid.local_id < tbl->cap &&
 	    tbl->slots[peer_pid.local_id].proc == peer &&
@@ -2493,6 +2540,7 @@ __peer_push_monitored_by(xtc_pid_t peer_pid, struct mon_entry *m)
 		pushed = 1;
 	}
 	(void) __proc_mtx_unlock(&tbl->lock);
+	__proc_release(peer);
 	return pushed;
 }
 
@@ -2505,7 +2553,9 @@ xtc_link(xtc_pid_t other)
 	struct link_entry *le;
 	if (self == NULL) return XTC_E_INVAL;
 	peer = __resolve(other, NULL);
-	if (peer == NULL || !peer->alive) return XTC_E_INVAL;
+	if (peer == NULL || !peer->alive) { if (peer) __proc_release(peer); return XTC_E_INVAL; }
+	__proc_release(peer);   /* only liveness was needed; the symmetric
+	                         * push below re-resolves under the peer lock */
 	le = __link_alloc();
 	if (le == NULL) return XTC_E_NOMEM;
 	le->peer = other;
@@ -2582,8 +2632,12 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 		XTC_PACK_POP
 		(void)xtc_send(self->pid, &down, sizeof down);
 		if (out_ref) *out_ref = ref;
+		if (peer) __proc_release(peer);
 		return XTC_OK;
 	}
+	/* Liveness confirmed; the symmetric push below re-resolves under the
+	 * peer's table lock, so we no longer need to pin peer here. */
+	__proc_release(peer);
 	me = __mon_alloc();
 	if (me == NULL) return XTC_E_NOMEM;
 	me->ref = atomic_fetch_add_explicit(&__mon_ref_seq, 1,
@@ -2682,20 +2736,30 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		__mon_free(me);
 	}
 
-	/* Drain mailbox + save queue. */
-	{
-		struct envelope *e, *n;
-		(void) __proc_mtx_lock(&p->mbox_lock);
-		for (e = p->mbox_head; e != NULL; e = n) { n = e->next; __env_free(e); }
-		p->mbox_head = p->mbox_tail = NULL;
-		(void) __proc_mtx_unlock(&p->mbox_lock);
-		for (e = p->save_head; e != NULL; e = n) { n = e->next; __env_free(e); }
-		p->save_head = p->save_tail = NULL;
-	}
+	/* The slot was already released (under the table lock) above, so no
+	 * NEW resolver can find this proc.  Drop the owner ref: if an
+	 * in-flight cross-thread send / wake still holds a ref (took one in
+	 * __table_lookup before we detached), the actual teardown -- mailbox
+	 * drain, mbox_lock destroy, free -- is deferred to __proc_free when
+	 * that last ref is released, so the sender never touches freed
+	 * memory or a destroyed lock. */
+	__proc_release(p);
+}
 
-	/* The slot was already released (under the table lock) when the
-	 * peer-visible lists were detached above, so a concurrent linker
-	 * can no longer resolve this proc.  Just tear down and free. */
+/* Final proc teardown, run when the last reference is dropped (owner +
+ * any in-flight resolver refs).  Drains the mailbox, destroys the lock,
+ * frees the struct.  See the refcount discussion on struct xtc_proc. */
+static void
+__proc_free(struct xtc_proc *p)
+{
+	struct envelope *e, *n;
+	(void) __proc_mtx_lock(&p->mbox_lock);
+	for (e = p->mbox_head; e != NULL; e = n) { n = e->next; __env_free(e); }
+	p->mbox_head = p->mbox_tail = NULL;
+	(void) __proc_mtx_unlock(&p->mbox_lock);
+	for (e = p->save_head; e != NULL; e = n) { n = e->next; __env_free(e); }
+	p->save_head = p->save_tail = NULL;
+
 	(void)pthread_mutex_destroy(&p->mbox_lock);
 	__os_free(p);
 }
