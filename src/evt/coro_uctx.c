@@ -67,9 +67,11 @@ typedef int __xtc_coro_uctx_unused;
  * in an ordinary build.  The scheduler and each coro keep SEPARATE
  * fake-stack save slots (a coro overwrites its slot when it parks;
  * mixing the scheduler's token with it crashes finish()). */
+#if !defined(__has_feature)
+#  define __has_feature(x) 0     /* non-clang: the sanitizer probes are 0 */
+#endif
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
-    (defined(__has_feature) && (__has_feature(address_sanitizer) || \
-                                __has_feature(thread_sanitizer)))
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 #  include <sanitizer/common_interface_defs.h>
 #  define XTC_FIBER_SWITCH_ANNOTATE 1
 #endif

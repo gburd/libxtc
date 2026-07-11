@@ -64,9 +64,11 @@
  * to fix this, used by Boost.Context et al.  Compiled to nothing in an
  * ordinary build, so release binaries are byte-for-byte unchanged.
  */
+#if !defined(__has_feature)
+#  define __has_feature(x) 0     /* non-clang: the sanitizer probes are 0 */
+#endif
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
-    (defined(__has_feature) && (__has_feature(address_sanitizer) || \
-                                __has_feature(thread_sanitizer)))
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 #  include <sanitizer/common_interface_defs.h>
 #  define XTC_FIBER_SWITCH_ANNOTATE 1
 #endif
