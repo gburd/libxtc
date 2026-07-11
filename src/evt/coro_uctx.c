@@ -167,6 +167,39 @@ static XTC_THREAD_LOCAL volatile int g_in_preempt;
 	g_in_preempt = 0;                                              \
 } while (0)
 
+/* ---- Fiber-stack pool (per-thread) --------------------------------
+ * Recycle freed fiber stacks so a spawn skips the mmap + the
+ * mmap_lock-serializing mprotect(guard).  See the matching block in
+ * coro_fctx.c for the full rationale (the EC2 192-core spawn ceiling).
+ * Thread-local, bounded, single-size. */
+#define XTC_STACK_POOL_MAX 64
+struct stack_pool {
+	void   *slots[XTC_STACK_POOL_MAX];
+	size_t  size;
+	int     n;
+};
+static XTC_THREAD_LOCAL struct stack_pool __stack_pool;
+
+static void *
+__stack_pool_get(size_t stack_sz)
+{
+	struct stack_pool *p = &__stack_pool;
+	if (p->n > 0 && p->size == stack_sz)
+		return p->slots[--p->n];
+	return NULL;
+}
+
+static int
+__stack_pool_put(void *base, size_t stack_sz)
+{
+	struct stack_pool *p = &__stack_pool;
+	if (p->n == 0) p->size = stack_sz;
+	if (p->size != stack_sz || p->n == XTC_STACK_POOL_MAX)
+		return 0;
+	p->slots[p->n++] = base;
+	return 1;
+}
+
 /* ---- Lever S1: stack-memory reclamation on park (see xtc_async.h) -- */
 #if defined(MADV_DONTNEED)
 #include <stdatomic.h>
@@ -510,7 +543,8 @@ __coro_destroy(struct xtc_coro *c)
 	if (c->stack != NULL) {
 		long pg = sysconf(_SC_PAGESIZE);
 		size_t total = c->stack_sz + (pg > 0 ? (size_t)pg : 4096);
-		(void)munmap(c->stack, total);
+		if (!__stack_pool_put(c->stack, c->stack_sz))
+			(void)munmap(c->stack, total);
 	}
 	__os_free(c);
 }
@@ -548,17 +582,20 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 	c->stack_sz = __xtc_stack_size;
 	total = c->stack_sz + guard;
 
-	base = mmap(NULL, total, PROT_READ | PROT_WRITE,
-	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (base == MAP_FAILED) {
-		__os_free(c);
-		return XTC_E_NOMEM;
-	}
-	/* The first page is the guard.  Make it inaccessible. */
-	if (mprotect(base, guard, PROT_NONE) != 0) {
-		(void)munmap(base, total);
-		__os_free(c);
-		return XTC_E_INTERNAL;
+	base = __stack_pool_get(c->stack_sz);
+	if (base == NULL) {
+		base = mmap(NULL, total, PROT_READ | PROT_WRITE,
+		    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (base == MAP_FAILED) {
+			__os_free(c);
+			return XTC_E_NOMEM;
+		}
+		/* The first page is the guard (installed once per mapping). */
+		if (mprotect(base, guard, PROT_NONE) != 0) {
+			(void)munmap(base, total);
+			__os_free(c);
+			return XTC_E_INTERNAL;
+		}
 	}
 	c->stack = base;
 	c->fn = fn;

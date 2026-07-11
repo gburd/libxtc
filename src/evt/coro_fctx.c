@@ -137,6 +137,52 @@ XTC_THREAD_LOCAL struct xtc_coro *__xtc_current_coro = NULL;
  * into a coroutine; the coroutine jumps back here to yield/await/finish. */
 static XTC_THREAD_LOCAL void *g_sched_fctx = NULL;
 
+/* ---- Fiber-stack pool (per-thread) --------------------------------
+ *
+ * Every fresh fiber stack costs an mmap + an mprotect(PROT_NONE) for its
+ * guard page, and mprotect write-locks the process-wide address-space
+ * lock (mmap_lock) -- so many threads spawning fibers concurrently
+ * serialize in the kernel, capping spawn throughput far below the core
+ * count (EC2 192-core finding: spawn flat ~7 M/s while the scheduler
+ * scales to 249 M/s).  A per-thread free list recycles freed stacks --
+ * the guard page is already installed, so a reused stack skips BOTH the
+ * mmap and the mprotect, and the list is thread-local so the hot path
+ * takes no lock.  Bounded so idle threads do not hoard memory.
+ *
+ * Stacks are pooled only at the current __xtc_stack_size; a stack freed
+ * at a different size (after xtc_set_stack_size) is munmap'd, not
+ * pooled, so the pool never hands back a wrong-sized stack. */
+#define XTC_STACK_POOL_MAX 64
+struct stack_pool {
+	void   *slots[XTC_STACK_POOL_MAX];
+	size_t  size;                 /* stack_sz these were allocated at */
+	int     n;
+};
+static XTC_THREAD_LOCAL struct stack_pool __stack_pool;
+
+/* Pop a cached stack of `stack_sz` (guard already installed), or NULL. */
+static void *
+__stack_pool_get(size_t stack_sz)
+{
+	struct stack_pool *p = &__stack_pool;
+	if (p->n > 0 && p->size == stack_sz)
+		return p->slots[--p->n];
+	return NULL;
+}
+
+/* Return a stack to the pool if it fits (same size, room left); else the
+ * caller munmaps.  Returns 1 if pooled, 0 if the caller must free it. */
+static int
+__stack_pool_put(void *base, size_t stack_sz)
+{
+	struct stack_pool *p = &__stack_pool;
+	if (p->n == 0) p->size = stack_sz;   /* first entry sets the pool size */
+	if (p->size != stack_sz || p->n == XTC_STACK_POOL_MAX)
+		return 0;
+	p->slots[p->n++] = base;
+	return 1;
+}
+
 /* ---- Lever S1: stack-memory reclamation on park -------------------
  *
  * OFF by default.  When enabled, a parking fiber returns the unused
@@ -328,7 +374,11 @@ __coro_destroy(struct xtc_coro *c)
 	if (c->stack != NULL) {
 		long pg = sysconf(_SC_PAGESIZE);
 		size_t total = c->stack_sz + (pg > 0 ? (size_t)pg : 4096);
-		(void)munmap(c->stack, total);
+		/* Recycle the stack (guard page intact) into the per-thread
+		 * pool so the next spawn skips mmap+mprotect; munmap only if
+		 * the pool is full or the size no longer matches. */
+		if (!__stack_pool_put(c->stack, c->stack_sz))
+			(void)munmap(c->stack, total);
 	}
 	__os_free(c);
 }
@@ -364,17 +414,22 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 	c->stack_sz = __xtc_stack_size;
 	total = c->stack_sz + guard;
 
-	base = mmap(NULL, total, PROT_READ | PROT_WRITE,
-	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (base == MAP_FAILED) {
-		__os_free(c);
-		return XTC_E_NOMEM;
-	}
-	/* First page is the guard. */
-	if (mprotect(base, guard, PROT_NONE) != 0) {
-		(void)munmap(base, total);
-		__os_free(c);
-		return XTC_E_INTERNAL;
+	/* Fast path: reuse a pooled stack (guard page already installed),
+	 * skipping the mmap + the mmap_lock-serializing mprotect. */
+	base = __stack_pool_get(c->stack_sz);
+	if (base == NULL) {
+		base = mmap(NULL, total, PROT_READ | PROT_WRITE,
+		    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (base == MAP_FAILED) {
+			__os_free(c);
+			return XTC_E_NOMEM;
+		}
+		/* First page is the guard (installed once per mapping). */
+		if (mprotect(base, guard, PROT_NONE) != 0) {
+			(void)munmap(base, total);
+			__os_free(c);
+			return XTC_E_INTERNAL;
+		}
 	}
 	c->stack = base;
 	c->fn = fn;
