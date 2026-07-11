@@ -67,11 +67,16 @@ returns how many records are buffered.
 .Fn xtc_tail_dump
 writes the buffer to
 .Fa fd
-as a versioned binary trace -- an
+as a versioned, compact, PORTABLE binary trace: an
 .Vt xtc_tail_hdr_t
 header
-.Pq magic, version, record size, count
-followed by the records verbatim -- for a separate offline tool to
+.Pq magic, version, endianness flag, count, base timestamp
+written little-endian, followed by one varint/delta-encoded frame per
+event (kind, source, LEB128 timestamp delta, pid, and detail).  The
+delta-encoded timestamps and varint fields keep it to a handful of
+bytes per event -- and being explicit little-endian with no struct
+padding, a trace dumps and decodes identically across architectures --
+for a separate offline tool to
 render.
 .Pp
 Each
