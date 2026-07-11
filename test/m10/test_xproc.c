@@ -164,9 +164,62 @@ test_xproc_entry(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Link path: the linking fiber binds its fate to the child via
+ * xtc_xlink; the child's exit delivers an EXIT signal (link semantics),
+ * which the linker receives and decodes. */
+struct link_ctx { xtc_loop_t *loop; int exit_seen; int exit_reason; int rc; };
+
+static void
+linker_fiber(void *a)
+{
+	struct link_ctx *m = a;
+	xtc_xproc_t *child = NULL;
+	int init_code = 3, exit_code = 55;
+	void *msg = NULL; size_t n = 0;
+
+	m->rc = xtc_xspawn_entry(m->loop, "lk", "root", &init_code,
+	    sizeof init_code, &child);
+	if (m->rc != XTC_OK) return;
+	if (xtc_xlink(child) != XTC_OK) { xtc_xproc_destroy(child); return; }
+	(void)xtc_xsend(child, &exit_code, sizeof exit_code);
+	/* A link EXIT arrives as a decodable signal in our mailbox. */
+	if (xtc_recv(&msg, &n, 3000LL * 1000 * 1000) == XTC_OK) {
+		xtc_down_info_t di;
+		if (xtc_down_decode_ex(msg, n, &di) == XTC_OK) {
+			m->exit_seen = 1;
+			m->exit_reason = di.reason;
+		}
+	}
+	if (msg) xtc_free(msg);
+	xtc_xproc_destroy(child);
+}
+
+static MunitResult
+test_xproc_link(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct link_ctx m;
+	(void)p; (void)d;
+	munit_assert_int(xtc_xproc_register_entry("root", child_root), ==,
+	    XTC_OK);
+	memset(&m, 0, sizeof m);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	m.loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, linker_fiber, &m, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	if (m.rc == XTC_E_NOSYS) return MUNIT_SKIP;
+	munit_assert_int(m.rc, ==, XTC_OK);
+	munit_assert_int(m.exit_seen, ==, 1);       /* link EXIT delivered */
+	munit_assert_int(m.exit_reason, ==, 55);    /* the code we sent */
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/monitor_exit", test_xproc_monitor_exit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/entry",        test_xproc_entry,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/link",         test_xproc_link,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 
