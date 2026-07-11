@@ -61,6 +61,7 @@ child_root(void *arg)
  * then recv the DOWN and record the decoded reason. */
 struct mon_ctx {
 	xtc_loop_t *loop;
+	int    use_entry;        /* 1 = xtc_xspawn_entry, 0 = xtc_xspawn */
 	int    down_seen;
 	int    down_reason;
 	int    xspawn_rc;
@@ -77,8 +78,11 @@ monitor_fiber(void *a)
 	uint64_t ref = 0;
 	void *msg = NULL; size_t n = 0;
 
-	m->xspawn_rc = xtc_xspawn(loop, "xchild", child_root,
-	    &init_code, sizeof init_code, &child);
+	m->xspawn_rc = m->use_entry
+	    ? xtc_xspawn_entry(loop, "xchild", "root",
+	        &init_code, sizeof init_code, &child)
+	    : xtc_xspawn(loop, "xchild", child_root,
+	        &init_code, sizeof init_code, &child);
 	if (m->xspawn_rc != XTC_OK)
 		return;
 
@@ -125,8 +129,44 @@ test_xproc_monitor_exit(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Entry-registry path (portable form; the only form that works on
+ * Windows).  Registers child_root under a name, then spawns via
+ * xtc_xspawn_entry.  On POSIX this forks + resolves the name; the
+ * monitored child exit surfaces as the same DOWN. */
+static MunitResult
+test_xproc_entry(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct mon_ctx m;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_xproc_register_entry("root", child_root), ==,
+	    XTC_OK);
+	/* An unknown entry is rejected. */
+	munit_assert_int(xtc_xspawn_entry(loop, "x", "nope", NULL, 0, NULL),
+	    ==, XTC_E_INVAL);   /* NULL loop/out caught first */
+
+	memset(&m, 0, sizeof m);
+	m.use_entry = 1;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	m.loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, monitor_fiber, &m, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	if (m.xspawn_rc == XTC_E_NOSYS)
+		return MUNIT_SKIP;
+	munit_assert_int(m.xspawn_rc, ==, XTC_OK);
+	munit_assert_int(m.down_seen, ==, 1);
+	munit_assert_int(m.down_reason, ==, 42);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/monitor_exit", test_xproc_monitor_exit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/entry",        test_xproc_entry,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 

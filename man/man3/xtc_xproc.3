@@ -5,11 +5,14 @@
 .Os
 .Sh NAME
 .Nm xtc_xspawn ,
+.Nm xtc_xproc_register_entry ,
+.Nm xtc_xspawn_entry ,
 .Nm xtc_xproc_destroy ,
 .Nm xtc_xproc_os_pid ,
 .Nm xtc_xsend ,
 .Nm xtc_xmonitor ,
-.Nm xtc_xproc_child_main
+.Nm xtc_xproc_child_main ,
+.Nm xtc_xproc_win_child_maybe
 .Nd cross-fork spawn, send, and monitor
 .Sh LIBRARY
 .Lb libxtc
@@ -17,6 +20,10 @@
 .In xtc_xproc.h
 .Ft int
 .Fn xtc_xspawn "xtc_loop_t *loop" "const char *name" "xtc_xproc_root_fn root_fn" "const void *arg" "size_t arg_len" "xtc_xproc_t **out"
+.Ft int
+.Fn xtc_xproc_register_entry "const char *name" "xtc_xproc_root_fn fn"
+.Ft int
+.Fn xtc_xspawn_entry "xtc_loop_t *loop" "const char *name" "const char *entry" "const void *arg" "size_t arg_len" "xtc_xproc_t **out"
 .Ft void
 .Fn xtc_xproc_destroy "xtc_xproc_t *p"
 .Ft long
@@ -27,6 +34,8 @@
 .Fn xtc_xmonitor "xtc_xproc_t *p" "uint64_t *out_ref"
 .Ft int
 .Fn xtc_xproc_child_main "int ctrl_fd" "xtc_xproc_root_fn root_fn" "void *arg"
+.Ft int
+.Fn xtc_xproc_win_child_maybe "int argc" "char **argv"
 .Sh DESCRIPTION
 These extend the Erlang-style process relations across a
 .Xr fork 2
@@ -50,7 +59,32 @@ It must be called from a fiber on
 (the monitor relay lives there).  On a platform without
 .Xr fork 2
 it returns
-.Dv XTC_E_NOSYS .
+.Dv XTC_E_NOSYS ,
+because a raw function pointer does not survive process creation there
+(a Windows child is a fresh image, not a clone of the parent) -- use
+.Fn xtc_xspawn_entry
+there, and portably.
+.Pp
+.Fn xtc_xproc_register_entry
+registers a child root function under a NAME in a process-global table.
+The same binary -- parent and any re-exec'd child -- resolves the name
+to the same function, which is the portable bridge for platforms where a
+function pointer cannot cross process creation.  Call it once, early, in
+code that runs in BOTH the parent and the child image.
+.Fn xtc_xspawn_entry
+spawns a child running the function registered under
+.Fa entry :
+on
+.Xr fork 2
+platforms it forks and resolves the name in the child; on Windows it
+re-execs this binary, which resolves the name in its own copy of the
+registry.  It is otherwise identical to
+.Fn xtc_xspawn
+(monitor, send, destroy all behave the same) and returns
+.Dv XTC_E_NOTFOUND
+if
+.Fa entry
+is not registered.  This is the portable and Windows-capable spawn form.
 .Pp
 .Fn xtc_xsend
 sends a byte payload (copied) to the child's root proc; it arrives in
@@ -81,8 +115,20 @@ frees the handle; it is idempotent.
 .Fn xtc_xproc_child_main
 is the child-side entry that
 .Fn xtc_xspawn
-arranges automatically; it is public so a re-exec'd child (a future
-extension) can re-enter its runtime.
+arranges automatically; it is public so a re-exec'd child can re-enter
+its runtime.
+.Pp
+.Fn xtc_xproc_win_child_maybe
+is wired as the first statement of
+.Fn main
+in a binary that hosts
+.Fn xtc_xspawn_entry
+children.  On Windows, if the cross-process-child sentinel argv is
+present it connects the control channel, receives its arg, runs the
+registered entry, and exits without returning; otherwise it is a no-op
+and normal startup continues.  On
+.Xr fork 2
+platforms it is always a no-op (the child is fork'd, not re-exec'd).
 .Sh RETURN VALUES
 .Fn xtc_xspawn ,
 .Fn xtc_xsend ,

@@ -58,11 +58,14 @@ typedef void (*xtc_xproc_root_fn)(void *arg);
 
 /*
  * PUBLIC: int  xtc_xspawn __P((xtc_loop_t *, const char *, xtc_xproc_root_fn, const void *, size_t, xtc_xproc_t **));
+ * PUBLIC: int  xtc_xproc_register_entry __P((const char *, xtc_xproc_root_fn));
+ * PUBLIC: int  xtc_xspawn_entry __P((xtc_loop_t *, const char *, const char *, const void *, size_t, xtc_xproc_t **));
  * PUBLIC: void xtc_xproc_destroy __P((xtc_xproc_t *));
  * PUBLIC: long xtc_xproc_os_pid __P((const xtc_xproc_t *));
  * PUBLIC: int  xtc_xsend __P((xtc_xproc_t *, const void *, size_t));
  * PUBLIC: int  xtc_xmonitor __P((xtc_xproc_t *, uint64_t *));
  * PUBLIC: int  xtc_xproc_child_main __P((int, xtc_xproc_root_fn, void *));
+ * PUBLIC: int  xtc_xproc_win_child_maybe __P((int, char **));
  */
 
 /*
@@ -70,13 +73,41 @@ typedef void (*xtc_xproc_root_fn)(void *arg);
  * the library; root_fn receives, as its arg, a pointer to a copy of the
  * `arg`/`arg_len` bytes the parent passed (or NULL if arg_len == 0).
  * The parent gets an xtc_xproc handle in *out.  Must be called from a
- * fiber on `loop` (it registers a monitor-relay proc there).  Returns
- * XTC_E_NOSYS on platforms without fork.
+ * fiber on `loop` (it registers a monitor-relay proc there).
+ *
+ * POSIX ONLY (fork preserves the address space, so a raw function
+ * pointer is meaningful in the child).  Returns XTC_E_NOSYS on Windows,
+ * where a child is a fresh process image and a function pointer does not
+ * survive -- use xtc_xspawn_entry there (and portably).
  */
 int  xtc_xspawn(xtc_loop_t *loop, const char *name,
                 xtc_xproc_root_fn root_fn,
                 const void *arg, size_t arg_len,
                 xtc_xproc_t **out);
+
+/*
+ * Register a child root function under a name in a process-global table.
+ * The SAME binary (parent and any re-exec'd child) resolves the name to
+ * the same function, so this is the portable bridge that works where a
+ * raw function pointer cannot survive process creation (Windows).  Call
+ * it once, early, in code that runs in BOTH the parent and the child
+ * image (e.g. before parsing argv in main, or a constructor).  Names are
+ * short strings; re-registering a name replaces the binding.  Returns
+ * XTC_OK, XTC_E_INVAL, or XTC_E_RESOURCE if the table is full.
+ */
+int  xtc_xproc_register_entry(const char *name, xtc_xproc_root_fn fn);
+
+/*
+ * Spawn a child that runs the root function registered under `entry`
+ * (see xtc_xproc_register_entry).  Portable: on POSIX it forks and looks
+ * the name up in the child; on Windows it CreateProcess-es a re-exec of
+ * this binary, which looks the name up in its own copy of the registry.
+ * `arg`/`arg_len` are copied and delivered to the root function as its
+ * arg.  Otherwise identical to xtc_xspawn (monitor, send, destroy all
+ * work the same).  Returns XTC_E_NOTFOUND if `entry` is not registered.
+ */
+int  xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
+                      const void *arg, size_t arg_len, xtc_xproc_t **out);
 
 /* Tear down the handle: signal + reap the child if still running, close
  * the channel, free the handle.  Idempotent. */
@@ -110,5 +141,17 @@ int  xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref);
  * is public so a re-exec'd child (a future extension) can re-enter.
  */
 int  xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg);
+
+/*
+ * Windows only.  The re-exec'd child image calls this early in main():
+ * if the cross-process-child sentinel argv is present it connects the
+ * control channel, receives its arg, runs the registered entry, and
+ * _exit()s -- never returning.  Otherwise it is a no-op returning 0 and
+ * normal startup continues.  On POSIX it is a no-op that returns 0 (the
+ * child is fork'd, not re-exec'd, so there is no sentinel to detect).
+ * Wire it as the first statement of main() in a binary that will host
+ * xtc_xspawn_entry children.
+ */
+int  xtc_xproc_win_child_maybe(int argc, char **argv);
 
 #endif /* XTC_XPROC_H */
