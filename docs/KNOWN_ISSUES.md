@@ -425,6 +425,32 @@ xtc_aio path, and flush via xtc_aio_fsync.  See xtc_bdev(3).
 
 **Status:** intentional -- `_aligned_malloc` returns memory that requires `_aligned_free`, not plain `free`. The hook surface uses a single free path. Keeping the M7 case Windows-skipped is correct.
 
+## xtc_xproc end-to-end spawn+monitor on Windows (compiles + child path OK, monitor WIP)
+
+**Status:** OPEN (documented SKIP in test/msvc/smoke.c).  Validated on
+an EC2 x86_64 Windows Server 2022 box (MSVC 2022 Build Tools -- the first
+x86_64-Windows validation of libxtc; prior MSVC was ARM64/santorini
+only):
+
+- The whole tree, including the Windows xtc_xproc port, compiles + links
+  with MSVC x86_64, and all other MSVC smoke checks pass (fault
+  containment, IOCP AIO, cross-thread wakeup, selective receive, fs).
+- The xtc_xproc CHILD path works: CreateProcess re-exec of the binary,
+  the `--xtc-xproc-child` sentinel parse, and the loopback-TCP control
+  connect + nonce all run.
+- The END-TO-END parent spawn+monitor does NOT yet complete: the driver
+  reaches xtc_xspawn_entry (child re-exec confirmed) but xtc_xmonitor
+  does not deliver the child's DOWN (the decoded reason stays at the
+  initial sentinel).  The Windows monitor path -- win_shadow_proc
+  polling `p->exited` (set by the RegisterWaitForSingleObject exit
+  callback) then xtc_exit_self so the local monitor sees a DOWN -- has a
+  runtime wiring bug (the exit latch or the parent->child xtc_xsend that
+  makes the child exit is not observed).  POSIX xtc_xproc
+  (fork/waitpid) works and is tested (test_xproc, test_sim_xproc,
+  bench_xproc_fanout at 1000 children).  The Windows e2e needs a
+  dedicated debug session on a Windows host; until then it is a
+  documented SKIP, not a shipped guarantee.
+
 ## Fiber-switch sanitizer annotations enable detect_stack_use_after_return=1
 
 **Status:** SHIPPED (v1.13.0).  The fcontext and ucontext coro substrates

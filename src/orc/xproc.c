@@ -749,12 +749,12 @@ xtc_xproc_win_child_maybe(int argc, char **argv)
 	size_t alen = 0;
 	int i, r;
 
-	for (i = 1; i + 3 < argc + 1 && i < argc; i++)
-		if (strcmp(argv[i], "--xtc-xproc-child") == 0 && i + 3 < argc + 1)
+	/* Find the child sentinel: --xtc-xproc-child <entry> <port> <nonce>. */
+	for (i = 1; i < argc; i++)
+		if (strcmp(argv[i], "--xtc-xproc-child") == 0)
 			break;
-	if (i >= argc || strcmp(argv[i], "--xtc-xproc-child") != 0 ||
-	    i + 3 >= argc + 1 || argc - i < 4)
-		return 0;   /* not a child launch */
+	if (i >= argc || (argc - i) < 4)
+		return 0;   /* not a child launch (or missing args) */
 	entry = argv[i + 1];
 	port = (unsigned)strtoul(argv[i + 2], NULL, 10);
 	nonce = (unsigned)strtoul(argv[i + 3], NULL, 10);
