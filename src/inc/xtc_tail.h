@@ -108,14 +108,37 @@ void __xtc_tail_emit(unsigned source, unsigned kind, xtc_pid_t pid,
  * branch and has no side effects. */
 int  __xtc_tail_on(unsigned source);
 
-/* On-disk binary dump header (also used by the offline reader). */
+/* On-disk binary dump header (also used by the offline reader).
+ *
+ * Format v2 is COMPACT and PORTABLE (dial9-style): all header fields are
+ * written as explicit little-endian bytes (no struct memcpy, so it is
+ * byte-identical across endianness and padding), and each event is
+ * varint/delta encoded rather than a fixed 32-byte record:
+ *
+ *   header:  magic[4]="XTCL"  version(LE u32)=2  flags(LE u32)
+ *            count(LE u32)  base_ts_ns(LE u64)
+ *     flags bit0 = 1 -> little-endian canonical stream (always set today)
+ *   per event (oldest first):
+ *     kind    : 1 byte
+ *     source  : 1 byte
+ *     ts_delta: LEB128 varint, ns since the previous event (base for the
+ *               first) -- monotonic timestamps make this 1-2 bytes
+ *     loop_id : LEB128 varint (pid.loop_id)
+ *     local_id: LEB128 varint (pid.local_id)
+ *     gen     : LEB128 varint (pid.gen)
+ *     detail  : LEB128 varint (EXIT reason / RUN latency ns)
+ *
+ * Typical ~6-12 bytes/event vs 32 for the raw struct, and portable.
+ * xtc_tail_read (in-process) still hands back the fixed xtc_tail_rec_t. */
 #define XTC_TAIL_MAGIC   0x5854434Cu   /* "XTCL" */
-#define XTC_TAIL_VERSION 1u
+#define XTC_TAIL_VERSION 2u
+#define XTC_TAIL_FLAG_LE 1u            /* little-endian canonical stream */
 typedef struct xtc_tail_hdr {
 	uint32_t magic;      /* XTC_TAIL_MAGIC */
 	uint32_t version;    /* XTC_TAIL_VERSION */
-	uint32_t rec_size;   /* sizeof(xtc_tail_rec_t) -- guards layout skew */
-	uint32_t count;      /* number of records that follow */
+	uint32_t flags;      /* XTC_TAIL_FLAG_* (endianness marker) */
+	uint32_t count;      /* number of events that follow */
+	uint64_t base_ts_ns; /* timestamp of the first event (deltas from here) */
 } xtc_tail_hdr_t;
 
 #endif /* XTC_TAIL_H */
