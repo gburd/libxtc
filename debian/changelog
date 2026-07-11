@@ -1,3 +1,40 @@
+libxtc (1.14.0-1) unstable; urgency=medium
+
+  * Fiber-stack pool (both coro substrates): a per-thread, bounded pool
+    recycles freed fiber stacks so a spawn skips the mmap AND the
+    guard-page mprotect.  Found on an EC2 192-core box: the exec-scale
+    spawn path was flat at ~7 M/s regardless of core count while the
+    scheduler / work-stealing / message paths scaled to 249 M/s, and
+    perf showed 56% of spawn time in mprotect -> the process-wide
+    mmap_lock.  The pool removes that syscall + lock from every
+    steady-state spawn (perf-verified 56% -> 0.78%).  Honest framing: it
+    is a syscall/lock elimination, not a throughput number on the
+    current benchmarks -- those are only mprotect-bound under a
+    pathological all-live-at-once burst the pool cannot help, and
+    realistic workloads already scale.  Kept for the latency/scalability
+    win at near-zero cost.
+  * bench_xproc_fanout: a cross-fork spawn/monitor scale probe (forks N
+    children, monitors each, collects every DOWN).  1000 real
+    forked+monitored children verified correct on the EC2 box.
+  * First x86_64-Windows validation (EC2 Windows Server 2022, MSVC 2022
+    Build Tools; prior MSVC coverage was ARM64/santorini only): the
+    entire tree -- including the Windows xtc_xproc port, the stack-pool
+    coro substrates, and xtc_tail -- compiles + links with MSVC x86_64,
+    and every MSVC smoke check passes.  The xtc_xproc CHILD path
+    (CreateProcess re-exec + sentinel + loopback control) works; the
+    end-to-end parent monitor round-trip is a documented WIP SKIP (POSIX
+    xtc_xproc is fully tested).  Fixed a brittle argv sentinel scan in
+    xtc_xproc_win_child_maybe.
+  * DST coverage: test_sim_pg (process-group broadcast fan-out to N
+    subscribers, deterministic + replay-identical), completing DST for
+    the recent orchestration features.  The sim suite is now 52
+    deterministic tests.
+  * Internal: EC2 scale-benchmark findings recorded (Intel Sapphire
+    Rapids vs Graviton4 -- the mprotect spawn ceiling is markedly worse
+    on Intel; the scheduler scales to 192 cores on both).
+
+ -- Greg Burd <greg@burd.me>  Sat, 11 Jul 2026 19:18:50 -0400
+
 libxtc (1.13.0-1) unstable; urgency=medium
 
   * Proc-teardown refcount: closes a use-after-free RACE CLASS at its
