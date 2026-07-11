@@ -368,3 +368,80 @@ Land it under c:\scratch and extract:
           tar xzf /c/scratch/xtc-snap.tgz\""'
 
 Run the matrix script (see `dist/santorini-matrix.sh`).
+
+## Windows vs POSIX: the model gaps and how libxtc bridges them (2026-07)
+
+This section is the honest, consolidated statement of where the Windows
+model differs from POSIX, what libxtc does about each, and what is a
+deliberate decline vs a real port.  No cover-ups.
+
+### fork() -- there is none; xtc_xproc uses re-exec
+
+Windows has no `fork()`.  A child is created with `CreateProcess`, which
+loads a FRESH image (spawn semantics), not a clone of the parent's
+address space.  So a child cannot run an in-memory function pointer the
+parent passed -- the pointer is meaningless in a fresh image.
+
+libxtc's cross-process spawn/monitor (`xtc_xproc`) bridges this the way
+libuv and the BEAM do:
+
+  - The portable `xtc_xproc_register_entry(name, fn)` + `xtc_xspawn_entry`
+    address the child body by a REGISTERED NAME the identical binary
+    resolves the same way in parent and child.  This is the form that
+    works on Windows (and portably).  The pointer form `xtc_xspawn`
+    stays POSIX-only and returns `XTC_E_NOSYS` on Windows.
+  - Windows spawn re-execs `GetModuleFileNameW(NULL)` with a sentinel
+    argv; the embedder wires `xtc_xproc_win_child_maybe(argc, argv)` as
+    the first statement of `main()` (a no-op on POSIX) to detect it.
+  - Exit monitoring: `RegisterWaitForSingleObject` on the process HANDLE
+    -> `GetExitCodeProcess`.  There are no signals; an unhandled-exception
+    exit (an NTSTATUS like `0xC0000005` ACCESS_VIOLATION) is mapped to a
+    POSIX signal number via the Cygwin de-facto table, so a Windows crash
+    surfaces as the same SIGNAL-kind DOWN as a POSIX `WIFSIGNALED`.
+
+Prior art consulted: Cygwin's WriteProcessMemory fork emulation
+(rejected -- rebase/ASLR fragility), libuv's uv_spawn +
+RegisterWaitForSingleObject, and the BEAM's CreateProcess +
+WaitForMultipleObjects port driver.
+
+### socketpair(AF_UNIX) -- Winsock has none; loopback-TCP with a nonce
+
+Winsock has no `socketpair()`, and even Windows-10 AF_UNIX offers no
+`socketpair` and no `SCM_RIGHTS`.  The xtc_xproc control channel uses the
+hardened loopback-TCP pair (the ZeroMQ make_fdpair technique): listen on
+`127.0.0.1:0`, the child connects, and both ends exchange a per-spawn
+random nonce so a local process cannot hijack the ephemeral port between
+`listen` and `accept`.  `TCP_NODELAY` is set.
+
+### int fd in the public API -- a Unix-ism (documented, not yet abstracted)
+
+`xtc_net_*` and `xtc_proc_wait_fd` expose a raw `int fd`.  On Windows a
+socket is a `SOCKET` (an opaque `UINT_PTR`, not a small int) and a kernel
+object is a `HANDLE`.  The IOCP backend bridges this internally, and
+xtc_xproc casts its control SOCKET to int for the framing helpers, but
+the PUBLIC `int fd` contract is a Unix assumption.  A future `xtc_fd_t`
+abstraction would close this; for now it is a known, documented Unix-ism,
+not a hidden one.
+
+### Shared-library (DLL) symbol export -- a real gap
+
+The meson `both_libraries` build produces a `.dll` on Windows, but the
+library has no `__declspec(dllexport)` / `-fvisibility` machinery and no
+`.def` file, so MSVC exports NOTHING from the DLL by default -- a Windows
+SHARED build is currently unusable (the STATIC `xtc.lib` is what the MSVC
+smoke build and the santorini matrix exercise).  Adding an export
+mechanism (a generated `.def` from the public symbol set, or an
+XTC_API `__declspec` macro on every public prototype) is tracked as
+future work; today the honest statement is "Windows = static lib only."
+
+### unlink() of a file with open handles
+
+POSIX lets you `unlink()` a file another handle still has open and
+readers keep reading (the WAL / rename-over pattern relies on this).
+Windows requires `FILE_SHARE_DELETE` (+ `FILE_FLAG_POSIX_SEMANTICS` /
+`FILE_DISPOSITION_POSIX_SEMANTICS` on recent Windows) to approximate it;
+a plain open blocks deletion.  libxtc's file layer is Unix-first (the
+DST/sqlxtc storage runs on POSIX); the one place it already handles a
+Windows delete is a stale AF_UNIX path (`DeleteFileA` before rebind, see
+io_net.c).  A general Windows file layer honoring POSIX unlink semantics
+is future work, not a shipped guarantee.
