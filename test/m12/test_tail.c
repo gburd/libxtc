@@ -26,7 +26,7 @@ exit7_proc(void *arg)
 	xtc_exit_self(7);
 }
 
-struct counts { int spawn; int exit; int exit7; };
+struct counts { int spawn; int exit; int exit7; int park; int run; int run_latency_seen; };
 
 static int
 count_cb(const xtc_tail_rec_t *r, void *user)
@@ -37,6 +37,11 @@ count_cb(const xtc_tail_rec_t *r, void *user)
 	if (r->kind == XTC_TAIL_EXIT) {
 		c->exit++;
 		if (r->detail == 7) c->exit7++;
+	}
+	if (r->kind == XTC_TAIL_PARK) c->park++;
+	if (r->kind == XTC_TAIL_RUN) {
+		c->run++;
+		if (r->detail > 0) c->run_latency_seen++;   /* park->run ns */
 	}
 	return 0;
 }
@@ -137,10 +142,64 @@ test_tail_dump(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Wake-latency: a receiver parks in recv; a sender sleeps then sends, so
+ * the receiver's RUN event carries a real park->run latency. */
+struct wl_ctx { xtc_pid_t recv_pid; int recv_got; };
+
+static void
+wl_receiver(void *a)
+{
+	struct wl_ctx *c = a;
+	void *m = NULL; size_t n = 0;
+	if (xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK)
+		c->recv_got = 1;
+	if (m) xtc_free(m);
+}
+
+static void
+wl_sender(void *a)
+{
+	struct wl_ctx *c = a;
+	int msg = 1;
+	xtc_proc_sleep(30LL * 1000 * 1000);   /* 30ms: receiver parks first */
+	(void)xtc_send(c->recv_pid, &msg, sizeof msg);
+}
+
+static MunitResult
+test_tail_wake_latency(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct wl_ctx c;
+	struct counts cnt;
+	(void)p; (void)d;
+
+	memset(&c, 0, sizeof c);
+	(void)xtc_tail_reset();
+	(void)xtc_tail_enable(XTC_TAIL_SCHED);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, wl_receiver, &c, NULL,
+	    &c.recv_pid), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, wl_sender, &c, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	munit_assert_int(c.recv_got, ==, 1);
+	memset(&cnt, 0, sizeof cnt);
+	munit_assert_int(xtc_tail_read(count_cb, &cnt), ==, XTC_OK);
+	munit_assert_int(cnt.park, >=, 1);              /* receiver parked */
+	munit_assert_int(cnt.run,  >=, 1);              /* and resumed */
+	munit_assert_int(cnt.run_latency_seen, >=, 1);  /* with real latency */
+
+	xtc_tail_disable();
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
-	{ "/sched",    test_tail_sched,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-	{ "/disabled", test_tail_disabled, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-	{ "/dump",     test_tail_dump,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/sched",        test_tail_sched,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/disabled",     test_tail_disabled,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/dump",         test_tail_dump,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wake_latency", test_tail_wake_latency, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m12/tail", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

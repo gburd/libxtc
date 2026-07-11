@@ -103,6 +103,11 @@ size_t   xtc_tail_count(void);
 void __xtc_tail_emit(unsigned source, unsigned kind, xtc_pid_t pid,
                      uint64_t detail);
 
+/* Internal: 1 if `source` is currently enabled.  A hook point uses this
+ * to guard extra work (e.g. a clock read) so a disabled tail costs one
+ * branch and has no side effects. */
+int  __xtc_tail_on(unsigned source);
+
 /* On-disk binary dump header (also used by the offline reader). */
 #define XTC_TAIL_MAGIC   0x5854434Cu   /* "XTCL" */
 #define XTC_TAIL_VERSION 1u
