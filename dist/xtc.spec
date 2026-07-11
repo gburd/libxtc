@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.12.0"
+#       --define "version 1.13.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.12.0
+Version:        1.13.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,9 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Sat Jul 11 2026 Greg Burd <greg@burd.me> - 1.13.0-1
+- Proc-teardown refcount (UAF race class fixed), sanitizer fiber-switch annotations, Windows xtc_xproc port, xtc_xlink, xtc_tail compact-portable format + MSG source + offline viewer.
+
 * Fri Jul 10 2026 Greg Burd <greg@burd.me> - 1.12.0-1
 - Crash-aware registry (reaper + register_mon + svr_call_name), cross-fork xtc_xproc, xtc_tail microscope (phase 1).
 
