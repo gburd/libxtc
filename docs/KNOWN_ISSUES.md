@@ -729,6 +729,13 @@ so the bug is purely in the library primitive.  Findings:
        fixes the hang but ASan reports a heap-use-after-free -- the
        proc can return from xtc_blocking_run and exit the instant its
        result is read, racing a wake that holds its task pointer.
+       NOTE (v1.13.0): this is the SAME root cause as the now-fixed
+       resolve-then-deliver UAF (see "proc-teardown race RESOLVED"
+       above).  The proc-teardown refcount makes it safe for a peer to
+       hold a proc reference across the wake; revisiting this approach
+       with the refcount taken around the pool wake is the likely clean
+       fix for the lost-wakeup, and should be tried in the dedicated
+       session.
 
     2. *Timer-poll* (proc polls a done flag via xtc_proc_sleep):
        memory-safe and fixes the pure reproducer, but its added
