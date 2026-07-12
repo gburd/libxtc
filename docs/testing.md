@@ -109,8 +109,19 @@ UBSan misalignment once rotted this project's CI for weeks, which is why
 the sanitizer jobs are gating, not advisory.
 
 ThreadSanitizer is run on the cross-thread paths (the wake path is
-TSan-clean); Valgrind memcheck is a documented gap on the roadmap, not a
-claim we make today.
+TSan-clean).  Because the runtime is a cooperative fiber scheduler, TSan
+needs each coroutine represented as a TSan *fiber object* (via
+`__tsan_create_fiber` / `__tsan_switch_to_fiber` / `__tsan_destroy_fiber`)
+so happens-before is tracked per fiber instead of collapsing every
+coroutine into one confused thread.  The coro substrates emit those
+calls under `-fsanitize=thread` (guarded by `XTC_TSAN_FIBERS`), so a
+full `clang -fsanitize=thread` build of libxtc runs the fiber suite
+(`test_fctx`, `test_async`, `test_proc`, `test_svr`, `test_chan`) with
+zero TSan warnings.  This is **clang-only**: the fiber-identity API is a
+clang compiler-rt feature; gcc's `libtsan` does not implement it, so a
+gcc TSan build emits no fiber annotations (and the ASan stack-switch
+API, a distinct model, is used only under AddressSanitizer).  Valgrind
+memcheck is a documented gap on the roadmap, not a claim we make today.
 
 ## Claim-driven, test-first
 

@@ -67,10 +67,37 @@
 #if !defined(__has_feature)
 #  define __has_feature(x) 0     /* non-clang: the sanitizer probes are 0 */
 #endif
-#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
-    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+
+/*
+ * TSan uses a DIFFERENT fiber model than ASan, and the two are mutually
+ * exclusive per build.  Decide TSan FIRST: under ThreadSanitizer we use
+ * ONLY the fiber-IDENTITY API (__tsan_create/switch/destroy_fiber, clang
+ * compiler-rt only) and must NOT emit the ASan stack-switch calls
+ * (__sanitizer_*_switch_fiber), which the TSan runtime does not provide
+ * (they link-fail under -fsanitize=thread).  Under ASan/LSan we use the
+ * stack-switch API.  Compiled to nothing in an ordinary build.
+ */
+#if defined(__has_feature) && __has_feature(thread_sanitizer)
+#  include <sanitizer/tsan_interface.h>
+#  define XTC_TSAN_FIBERS 1
+#elif defined(__SANITIZE_ADDRESS__) || \
+    __has_feature(address_sanitizer)
 #  include <sanitizer/common_interface_defs.h>
 #  define XTC_FIBER_SWITCH_ANNOTATE 1
+#endif
+
+#if defined(XTC_TSAN_FIBERS)
+/* The scheduler thread's own fiber, captured once per thread on first
+ * use so __tsan_switch_to_fiber has a valid "back to the scheduler"
+ * target. */
+static XTC_THREAD_LOCAL void *__tsan_sched_fiber;
+
+static inline void
+__tsan_sched_capture(void)
+{
+	if (__tsan_sched_fiber == NULL)
+		__tsan_sched_fiber = __tsan_get_current_fiber();
+}
 #endif
 
 /*
@@ -110,6 +137,23 @@ __san_switch_done(void *saved)
 #else
 #  define __san_switch_to(save_slot, to_bottom, to_size) ((void)0)
 #  define __san_switch_done(saved)                        ((void)0)
+#endif
+
+/* TSan fiber-identity switch helpers.  Placed alongside every
+ * __san_switch_to; __tsan_switch_into(c) targets the coro's fiber,
+ * __tsan_switch_out() targets the (once-captured) scheduler fiber.
+ * No-ops unless built with clang -fsanitize=thread. */
+#if defined(XTC_TSAN_FIBERS)
+#  define __tsan_switch_into(c)  do { \
+	__tsan_sched_capture(); \
+	if ((c)->tsan_fiber != NULL) __tsan_switch_to_fiber((c)->tsan_fiber, 0); \
+   } while (0)
+#  define __tsan_switch_out()    do { \
+	if (__tsan_sched_fiber != NULL) __tsan_switch_to_fiber(__tsan_sched_fiber, 0); \
+   } while (0)
+#else
+#  define __tsan_switch_into(c)  ((void)0)
+#  define __tsan_switch_out()    ((void)0)
 #endif
 
 /* A coro's usable stack low address, for the sanitizer bottom arg.  The
@@ -310,6 +354,7 @@ __coro_entry(void *transfer)
 	 * outgoing fake stack is discarded (save slot NULL) and the
 	 * destination is the scheduler stack. */
 	__san_switch_to(NULL, __san_sched_bottom, __san_sched_size);
+	__tsan_switch_out();
 	(void)__xtc_jump_fcontext(&c->fctx, g_sched_fctx, NULL);
 }
 
@@ -333,6 +378,7 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	 * into c->san_fake_stack, which the coro overwrites when it parks;
 	 * mixing the two crashes finish().  Jump into the coro. */
 	__san_switch_to(&__san_sched_fake, __san_coro_bottom(c), c->stack_sz);
+	__tsan_switch_into(c);
 	(void)__xtc_jump_fcontext(&g_sched_fctx, c->fctx, c);
 	__san_switch_done(__san_sched_fake);   /* back on the scheduler stack */
 
@@ -371,6 +417,9 @@ static void
 __coro_destroy(struct xtc_coro *c)
 {
 	if (c == NULL) return;
+#if defined(XTC_TSAN_FIBERS)
+	if (c->tsan_fiber != NULL) __tsan_destroy_fiber(c->tsan_fiber);
+#endif
 	if (c->stack != NULL) {
 		long pg = sysconf(_SC_PAGESIZE);
 		size_t total = c->stack_sz + (pg > 0 ? (size_t)pg : 4096);
@@ -436,6 +485,9 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 	c->arg = arg;
 	c->done = 0;
 	c->waiter = NULL;
+#if defined(XTC_TSAN_FIBERS)
+	c->tsan_fiber = __tsan_create_fiber(0);
+#endif
 
 	/* The usable stack is [base+guard, base+guard+stack_sz); stacks
 	 * grow down, so make_fcontext takes the HIGH end as stack_top. */
@@ -498,6 +550,7 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 		void *pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 		__san_switch_to(&me->san_fake_stack, __san_sched_bottom,
 		    __san_sched_size);
+		__tsan_switch_out();
 		(void)__xtc_jump_fcontext(&me->fctx, g_sched_fctx, NULL);
 		__san_switch_done(me->san_fake_stack);   /* resumed on our stack */
 		if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
@@ -526,6 +579,7 @@ xtc_yield(void)
 	 * ran last, then registers I/O and parks the WRONG task. */
 	pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 	__san_switch_to(&c->san_fake_stack, __san_sched_bottom, __san_sched_size);
+	__tsan_switch_out();
 	(void)__xtc_jump_fcontext(&c->fctx, g_sched_fctx, NULL);
 	__san_switch_done(c->san_fake_stack);   /* resumed on our stack */
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
