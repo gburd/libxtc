@@ -687,7 +687,7 @@ xtc_dns_resolve(const char *hostname, int port,
  * but call up into the proc layer for the cooperative wait.  Off a
  * loop they fall back to poll(2) (POSIX).
  */
-#include "xtc_proc.h"
+#include "xtc_proc.h"   /* XTC_LAYER_OK: cooperative-wait frame helpers; poll(2) off-loop (see Layering note above) */
 #include "xtc_io.h"
 #include "os_time.h"
 #if !defined(_WIN32)

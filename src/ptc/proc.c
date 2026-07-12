@@ -956,6 +956,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	__xtc_fiber_ctx_save = __xtc_proc_ctx_save;
 	__xtc_fiber_ctx_restore = __xtc_proc_ctx_restore;
 	__xtc_fiber_kill_check = __xtc_proc_kill_check;
+	__xtc_loop_fini_hook = __xtc_proc_loop_unregister;
 
 	if (XTC_UNLIKELY((tbl = __table_for(loop, 1)) == NULL)) return XTC_E_NOMEM;
 

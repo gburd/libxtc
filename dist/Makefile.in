@@ -106,6 +106,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/stats.c \
 	$(srcdir)/../src/ptc/tail.c \
 	$(srcdir)/../src/ptc/slab.c \
+	$(srcdir)/../src/ptc/slab_reaper.c \
 	$(srcdir)/../src/ptc/blocking.c \
 	$(srcdir)/../src/ptc/alloc_audit.c \
 	$(srcdir)/../src/ptc/mctx.c \
@@ -190,6 +191,7 @@ LIB_OBJS	= \
 	stats.o \
 	tail.o \
 	slab.o \
+	slab_reaper.o \
 	blocking.o \
 	alloc_audit.o \
 	mctx.o \
@@ -322,6 +324,7 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_api_discipline.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_perm.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
+	$(abs_top_srcdir)/../test/dist/test_s_layer.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_cfg.sh \
 	$(abs_top_srcdir)/../test/dist/test_m17_smoke.sh \
 	$(abs_top_srcdir)/../test/security/test_alloc_overflow_sweep.sh \
@@ -624,6 +627,8 @@ tail.o: $(srcdir)/../src/ptc/tail.c xtc_config.h
 
 slab.o: $(srcdir)/../src/ptc/slab.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/slab.c
+slab_reaper.o: $(srcdir)/../src/ptc/slab_reaper.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/slab_reaper.c
 
 blocking.o: $(srcdir)/../src/ptc/blocking.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/blocking.c
