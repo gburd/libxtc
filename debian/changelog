@@ -1,3 +1,30 @@
+libxtc (1.16.0-1) unstable; urgency=medium
+
+  * Windows xtc_xproc: fixed a cross-thread deadlock in the exit-latch
+    callback (it took the proc-table lock, an SRWLock, while the loop
+    thread held it inside xtc_monitor).  The callback now only nudges
+    the loop via xtc_io_wakeup; the shadow proc observes the exit latch
+    on the loop thread.  The control channel reads on a dedicated OS
+    thread.  The end-to-end monitor is still gated behind a separate,
+    ASan-confirmed Win32-fiber-substrate memory-safety bug (documented);
+    POSIX xtc_xproc remains fully tested.
+  * Portability layer (from the pg_threads.h review, ahead of the
+    Windows os_thread port): split the rwlock unlock into
+    __os_rwlock_rdunlock / _wrunlock (the Windows SRWLock has no
+    mode-agnostic release); static lock initializers XTC_OS_MUTEX_INIT /
+    XTC_OS_RWLOCK_INIT; __os_call_once / __os_once_t over pthread_once /
+    InitOnceExecuteOnce; and __os_thread_atexit for cleanup on threads
+    libxtc did not create (interop with host / carrier threads).  New
+    m1 tests, man pages, and docs; no DST applies (OS threading
+    primitives are not sim-reachable).
+  * Docs: correct the stale "CI not flipped to SUAR=1" caveat (flipped
+    since v1.13.0); record plainly that Windows multi-core scalability
+    is NOT claimed and is gated behind the Win32-fiber-substrate fix.
+  * No change to the public xtc_* API from 1.15.0; the new __os_*
+    primitives are the internal L0 portability surface.
+
+ -- Greg Burd <greg@burd.me>  Sun, 12 Jul 2026 08:55:09 -0400
+
 libxtc (1.15.0-1) unstable; urgency=medium
 
   * Windows xtc_xproc control channel now uses a dedicated reader thread.
