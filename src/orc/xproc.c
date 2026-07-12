@@ -425,6 +425,8 @@ xtc_xlink(xtc_xproc_t *p)
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <stdio.h>
+#include "loop_int.h"   /* struct xtc_loop { xtc_io_t *io; } for the exit-cb wakeup */
+#include "xtc_io.h"     /* xtc_io_wakeup -- cross-thread-safe loop nudge */
 
 /*
  * Windows cross-process spawn/monitor.  There is no fork(): a child is
@@ -555,12 +557,24 @@ __xproc_exit_cb(PVOID ctx, BOOLEAN timedout)
 	if (GetExitCodeProcess(p->proc, &code))
 		p->exit_code = code;
 	atomic_store(&p->exited, 1);
+	/* This runs on a thread-pool thread, NOT the loop thread.  It must
+	 * NOT touch the proc table (xtc_send/__resolve take tbl->lock, which
+	 * the loop thread also holds inside xtc_monitor -- a cross-thread
+	 * deadlock observed on Windows EC2).  Nudge only the loop's I/O
+	 * backend, which is cross-thread-safe (a coalesced
+	 * PostQueuedCompletionStatus) and touches no proc state; the shadow
+	 * proc, running on the loop thread, then observes the latch. */
+	if (p->loop != NULL && p->loop->io != NULL)
+		(void)xtc_io_wakeup(p->loop->io);
 }
 
-/* Shadow proc: poll the exit latch (the wait callback runs on a pool
- * thread), then exit with the decoded reason so a local monitor sees a
- * normal DOWN.  Polls with a short fiber sleep -- correct and simple;
- * an IOCP-posted completion is the later optimization. */
+/* Shadow proc: wait for the child's exit latch (set by the thread-pool
+ * callback above), then exit with the decoded reason so a local monitor
+ * sees a normal DOWN.  Parks in short recv timeouts and re-checks the
+ * latch; the exit callback's loop wakeup cuts the wait short.  No
+ * cross-thread proc touch and no busy spin.  The bounded recv cap also
+ * covers the case where the child exited before the shadow first
+ * parked. */
 struct win_shadow_ctx { struct xtc_xproc *p; };
 static void
 win_shadow_proc(void *a)
@@ -568,8 +582,12 @@ win_shadow_proc(void *a)
 	struct win_shadow_ctx *s = a;
 	struct xtc_xproc *p = s->p;
 	int reason, sig;
-	while (!atomic_load(&p->exited))
-		xtc_proc_sleep(5LL * 1000 * 1000);   /* 5 ms */
+	void *m = NULL; size_t n = 0;
+	while (!atomic_load(&p->exited)) {
+		if (xtc_recv(&m, &n, 20LL * 1000 * 1000) == XTC_OK && m) {
+			xtc_free(m); m = NULL;
+		}
+	}
 	sig = __ntstatus_to_signal(p->exit_code);
 	reason = (sig != 0) ? sig : (int)(p->exit_code & 0xff);
 	__os_free(s);
@@ -693,16 +711,20 @@ __xproc_ensure_shadow_win(xtc_xproc_t *p)
 	struct win_shadow_ctx *s = NULL;
 	int rc;
 	if (p->have_shadow) return XTC_OK;
-	if (p->wait == NULL) {
-		if (!RegisterWaitForSingleObject(&p->wait, p->proc,
-		    __xproc_exit_cb, p, INFINITE, WT_EXECUTEONLYONCE))
-			return XTC_E_IO;
-	}
 	if ((rc = __os_calloc(1, sizeof *s, (void **)&s)) != XTC_OK) return rc;
 	s->p = p;
+	/* Spawn the shadow and publish p->shadow BEFORE arming the wait, so
+	 * the shadow is parked and ready when the exit callback wakes the
+	 * loop; the shadow's recv re-check covers the residual race. */
 	if ((rc = xtc_proc_spawn(p->loop, win_shadow_proc, s, NULL,
 	    &p->shadow)) != XTC_OK) {
 		__os_free(s); return rc;
+	}
+	if (p->wait == NULL) {
+		if (!RegisterWaitForSingleObject(&p->wait, p->proc,
+		    __xproc_exit_cb, p, INFINITE, WT_EXECUTEONLYONCE)) {
+			return XTC_E_IO;
+		}
 	}
 	p->have_shadow = 1;
 	return XTC_OK;

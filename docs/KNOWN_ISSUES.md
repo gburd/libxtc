@@ -447,25 +447,36 @@ only):
   arbitrary socket's readability (the AFD-poll path is unfinished -- the
   same limitation as the skipped socket-echo smoke), so the child never
   received the parent's xtc_xsend and never exited.
-- FIX IMPLEMENTED (control channel) + SHARPER DIAGNOSIS (v1.15.0 EC2
-  us-east-1 session): the Windows child now reads its control socket on
-  a dedicated OS thread (win_reader_thread, blocking recv) forwarding
-  frames to the root proc via cross-thread xtc_send -- this is correct
-  and needed (the child + reader run; verified the child re-exec, the
-  loopback connect, and the reader all start).  However the END-TO-END
-  monitor still does not complete: instrumented traces on the box show
-  the PARENT driver hangs inside xtc_xmonitor -> __xproc_ensure_shadow_win
-  precisely at xtc_proc_spawn(win_shadow_proc) (the "spawn shadow" trace
-  prints, the "spawned, done" trace never does), so the driver never
-  reaches xtc_xsend/xtc_recv and no DOWN is produced.  xtc_proc_spawn
-  itself works for every other proc in the smoke, so the suspect is the
-  shadow proc's body (win_shadow_proc's xtc_proc_sleep poll loop, or a
-  fault in it caught+unwound by SEH containment) rather than spawn.
-  This is a focused, well-localized Windows-runtime bug for a dedicated
-  follow-up.  POSIX xtc_xproc is fully tested (test_xproc,
-  test_sim_xproc, bench_xproc_fanout at 1000 children); the reader-thread
-  control channel is kept; the MSVC-smoke xproc check stays a documented
-  SKIP until the shadow-proc path is fixed and re-run on a Windows box.
+- FIX IMPLEMENTED (control channel) + ASAN-CONFIRMED ROOT CAUSE
+  (v1.16.0 EC2 us-east-1 session): the Windows child reads its control
+  socket on a dedicated OS thread (win_reader_thread, blocking recv)
+  forwarding frames to the root proc via a cross-thread xtc_send, and
+  the exit-latch callback nudges the loop with xtc_io_wakeup (NOT a
+  cross-thread xtc_send/__resolve, which deadlocked on tbl->lock -- an
+  SRWLOCK -- against the loop thread's own xtc_monitor).  These are both
+  correct and needed and are kept.
+- The remaining blocker is a SEPARATE, now ASan-CONFIRMED memory-safety
+  bug in the Win32-FIBER coro substrate (src/evt/coro_winfiber.c), NOT
+  in the xproc wiring.  Built with MSVC /fsanitize=address on the box,
+  the e2e run reproducibly reports either an access-violation in
+  xtc_slab_alloc (a near-NULL slab pointer, addr 0x78) reached from
+  xtc_send -> __notify_links_and_monitors -> __proc_entry -> __coro_entry
+  (i.e. a proc EXITING and notifying its monitors, running ON a Win32
+  fiber), or a stack-buffer-overflow (a ~360-byte memset from
+  ntdll->kernel32 landing on a fiber stack).  The nondeterministic
+  crash site + corrupt slab global point to fiber-stack / thread-local
+  corruption in the Win32-fiber substrate under a Win32 API call, not to
+  xtc_xproc.  /GT (fiber-safe TLS) and a 512 KiB stack were both tried
+  and did NOT fix it, so it is not simple TLS-address caching nor raw
+  stack size.  Next step (its own focused session): iterate the MSVC
+  ASan build against coro_winfiber.c -- likely move the per-fiber coro
+  identity off __declspec(thread) onto FlsAlloc (fiber-local storage) and
+  audit every Win32 call made from a fiber for stack-buffer sizing.
+  POSIX xtc_xproc is fully tested (test_xproc, test_sim_xproc,
+  bench_xproc_fanout at 1000 children) and the fcontext/ucontext
+  substrates pass ASan with detect_stack_use_after_return=1; the
+  MSVC-smoke xproc check stays a documented SKIP until the winfiber
+  substrate bug is fixed and the e2e re-runs green on a Windows box.
 
 ## Fiber-switch sanitizer annotations enable detect_stack_use_after_return=1
 
