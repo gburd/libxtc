@@ -1,3 +1,26 @@
+libxtc (1.18.0-1) unstable; urgency=medium
+
+  * Code-quality cleanup (no functional change; net -225 lines).  From a
+    read-only audit against DRY/KISS/SRP/Clean-Code, three verified,
+    behavior-preserving refactors:
+    - Extracted the fiber-stack pool and the S1 stack-reclaim lever
+      (previously duplicated near-identically between the fcontext and
+      ucontext coroutine substrates) into a new internal
+      src/inc/coro_common.h that both mmap-based substrates include.
+      Verified byte-faithful across default(uctx), forced-fctx, ASan
+      (detect_stack_use_after_return=1), and clang ThreadSanitizer.
+    - Factored the repeated "cancel park timer + clear field" idiom
+      (10 inline copies across sync.c, lock_mgr.c, proc.c) into
+      __xtc_task_cancel_park_timer().
+    - Consistency: fsm.c/reg.c/xproc.c freed library-allocated recv
+      buffers with xtc_free; converted to __os_free to match the rest
+      of the library (xtc_free is the consumer alias, literally
+      { __os_free(p); }, so this is pure consistency, not behavior).
+      Renamed sync.c's __rd_ready/__wr_ready to __can_grant_read/write.
+  * No public xtc_* API change from 1.17.0.
+
+ -- Greg Burd <greg@burd.me>  Sun, 12 Jul 2026 13:02:39 -0400
+
 libxtc (1.17.0-1) unstable; urgency=medium
 
   * ThreadSanitizer support for the cooperative-fiber runtime (requested
