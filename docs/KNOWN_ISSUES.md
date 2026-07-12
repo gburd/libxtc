@@ -575,20 +575,28 @@ race deterministically.
 
 ## svr.c branch coverage
 
-**Status:** ~68% branch / ~79% line as of the R4 (handle_continue) round
-(measured with gcovr over the full make-check suite; the exact figure
-drifts test-to-test, so treat it as approximate).  The uncovered lines
-are error and edge paths, not mainline behavior.
+**Status:** improved this round with NULL/invalid-argument guard tests
+(test/coverage/test_fault_inject.c `/svr/null_guards`), which exercise
+the early-return XTC_E_INVAL edges across xtc_svr_start/stop/join/reply/
+call/cast that the happy-path server tests skipped.  The remaining
+uncovered lines are deeper error paths (OOM during the reply-frame
+alloc, call-after-stop) that need a fault-injection point rather than a
+plain guard test; they are error handling, not mainline behavior.
 
-**Targets remaining:** call-after-stop edge, reply-when-server-already-stopped, OOM during reply path.
+**Targets remaining:** reply-when-server-already-stopped, OOM during the
+reply/framing path (inject XTC_E_NOMEM at the __os_malloc sites).
 
 ## io_common.c coverage
 
-**Status:** ~71% branch as of this round.  The uncovered branches are
-error-cleanup paths and ENOMEM/EAGAIN edges in `xtc_io_init`/`xtc_io_fini`
-not exercised by the happy-path tests.  Adding fault-injection tests
-(use `xtc_inject_attach_wait` + a hook that returns ENOMEM) is the
-cleanest fix.
+**Status:** improved this round.  The four `io.init.*` fault-injection
+points (calloc/pipe/fcntl/backend fail) were already tested; added
+`/io/null_guards` (xtc_io_init/fini/wakeup reject NULL with
+XTC_E_INVAL) and `/io/wakeup_roundtrip` (the live xtc_io_wakeup post +
+coalesced second post) in test/coverage/test_fault_inject.c.  The
+remaining uncovered branches are backend-specific cleanup edges in
+`xtc_io_fini` and the ENOMEM/EAGAIN corners only reachable on a
+particular backend; a per-backend fault-injection sweep is the way to
+close them further.
 
 ## AIX runtime untested
 
