@@ -1,3 +1,35 @@
+libxtc (1.19.0-1) unstable; urgency=medium
+
+  * Layering: fixed the L2->L3 upward dependencies and added a
+    machine-enforced gate.  The slab core is now a layer-neutral
+    allocator (only __os_*); its one proc-dependent convenience
+    (xtc_slab_reaper_spawn) moved to src/ptc/slab_reaper.c, so the L2
+    event loop's use of the slab for the per-loop timer objects is no
+    longer an upward call.  xtc_loop_fini's direct proc-table
+    unregister became a hook (__xtc_loop_fini_hook) the L3 proc layer
+    installs.  New dist/s_layer lint (in make check + CI) forbids any
+    .c from including a strictly-higher layer's header, with one
+    documented XTC_LAYER_OK exception (io_net.c cooperative-wait).
+  * Removed the L5 PostgreSQL adapter (milestone M16) from the plan:
+    libxtc is a general-purpose async runtime (L0-L4) that ships the
+    primitives, not a downstream adapter.  PLAN.md and docs updated;
+    PostgreSQL survives only as illustrative motivation.
+  * Windows scalability fast path: the slab per-thread magazine is now
+    backed by Fiber Local Storage (FlsAlloc) on Windows -- an FLS slot
+    correctly follows a fiber across SwitchToFiber, unlike the
+    __declspec(thread) static TLS that had to be disabled earlier.
+    Win32 FLS API usage MinGW-verified; full MSVC re-measurement awaits
+    a Windows host (EC2 benchmark parked; the Windows AFD socket-echo
+    remains host-blocked, documented).
+  * CI: added a FreeBSD job (vmactions/freebsd-vm, full gmake check) and
+    a RISC-V 64 job (qemu-user cross-arch build + unit/property suites).
+    Both also re-verified by hand this round (FreeBSD 15, RISC-V 64
+    native).  illumos-in-CI intentionally not added (no runner; nested
+    QEMU too slow per commit) -- stays periodic manual re-verify.
+  * No public xtc_* API change from 1.18.0.
+
+ -- Greg Burd <greg@burd.me>  Sun, 12 Jul 2026 15:50:33 -0400
+
 libxtc (1.18.0-1) unstable; urgency=medium
 
   * Code-quality cleanup (no functional change; net -225 lines).  From a
