@@ -731,18 +731,15 @@ main(int argc, char **argv)
 		    == XTC_OK);
 		CHECK(xtc_loop_run(loop) == XTC_OK);
 		/* The child (a re-exec of smoke.exe) exits with the 42 we
-		 * sent; the parent's monitor should deliver a DOWN decoding to
-		 * it.  The re-exec + sentinel + loopback connect all work
-		 * (verified), but the end-to-end monitor/exit wiring on Windows
-		 * is still being brought up -- so this is a documented SKIP, not
-		 * a hard gate, matching the AFD-poll socket-echo SKIP. */
-		if (s_xproc_reason == 42)
-			printf("  ok   xtc_xproc: re-exec child spawn+send+monitor, "
-			    "DOWN reason=42\n");
-		else
-			printf("  skip xtc_xproc e2e monitor: reason=%d (child "
-			    "re-exec+connect work; monitor/exit wiring WIP)\n",
-			    s_xproc_reason);
+		 * sent; the parent's monitor delivers a DOWN decoding to it.
+		 * The full path -- re-exec + sentinel + loopback control
+		 * connect + dedicated reader thread + shadow-proc monitor +
+		 * exit-latch loop wakeup -- works end to end on Windows as of
+		 * the coro_winfiber stack-reserve fix + the slab Win32-fiber
+		 * magazine fix, so this is now a HARD GATE, not a SKIP. */
+		CHECK(s_xproc_reason == 42);
+		printf("  ok   xtc_xproc: re-exec child spawn+send+monitor, "
+		    "DOWN reason=42\n");
 		(void)xtc_loop_fini(loop);
 	}
 
