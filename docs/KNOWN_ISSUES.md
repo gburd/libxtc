@@ -447,18 +447,25 @@ only):
   arbitrary socket's readability (the AFD-poll path is unfinished -- the
   same limitation as the skipped socket-echo smoke), so the child never
   received the parent's xtc_xsend and never exited.
-- FIX IMPLEMENTED (pending Windows runtime re-validation): the Windows
-  xtc_xproc_child_main now reads the control socket on a DEDICATED OS
-  THREAD with a blocking recv (win_reader_thread), forwarding each frame
-  to the root proc with a cross-thread xtc_send -- mirroring the BEAM's
-  Windows port reader threads and sidestepping the IOCP socket-readiness
-  gap entirely.  A win_rootmon_proc watches the root and stops the loop
-  on its exit.  POSIX xtc_xproc (fork/waitpid) is fully tested
-  (test_xproc, test_sim_xproc, bench_xproc_fanout at 1000 children); the
-  Windows reader-thread path compiles clean (MinGW syntax check) but
-  awaits an EC2 Windows box for end-to-end validation (the account's VPC
-  describe was unavailable at fix time).  Still a documented SKIP in
-  smoke.c until validated.
+- FIX IMPLEMENTED (control channel) + SHARPER DIAGNOSIS (v1.15.0 EC2
+  us-east-1 session): the Windows child now reads its control socket on
+  a dedicated OS thread (win_reader_thread, blocking recv) forwarding
+  frames to the root proc via cross-thread xtc_send -- this is correct
+  and needed (the child + reader run; verified the child re-exec, the
+  loopback connect, and the reader all start).  However the END-TO-END
+  monitor still does not complete: instrumented traces on the box show
+  the PARENT driver hangs inside xtc_xmonitor -> __xproc_ensure_shadow_win
+  precisely at xtc_proc_spawn(win_shadow_proc) (the "spawn shadow" trace
+  prints, the "spawned, done" trace never does), so the driver never
+  reaches xtc_xsend/xtc_recv and no DOWN is produced.  xtc_proc_spawn
+  itself works for every other proc in the smoke, so the suspect is the
+  shadow proc's body (win_shadow_proc's xtc_proc_sleep poll loop, or a
+  fault in it caught+unwound by SEH containment) rather than spawn.
+  This is a focused, well-localized Windows-runtime bug for a dedicated
+  follow-up.  POSIX xtc_xproc is fully tested (test_xproc,
+  test_sim_xproc, bench_xproc_fanout at 1000 children); the reader-thread
+  control channel is kept; the MSVC-smoke xproc check stays a documented
+  SKIP until the shadow-proc path is fixed and re-run on a Windows box.
 
 ## Fiber-switch sanitizer annotations enable detect_stack_use_after_return=1
 
