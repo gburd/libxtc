@@ -784,21 +784,87 @@ xtc_xproc_win_child_maybe(int argc, char **argv)
 	return r;   /* unreached */
 }
 
-/* Child runtime pump (Windows).  The ctrl fd is a Winsock SOCKET cast
- * to int; xtc_net_* framing handles it.  Shares the child_root_proc /
- * child_pump_proc bodies with POSIX (hoisted above the platform split). */
+/* Windows control-socket reader thread.  The IOCP loop cannot yet wait
+ * on an arbitrary socket's readability (the AFD-poll path is unfinished
+ * -- see KNOWN_ISSUES), so the child cannot park a fiber on recv_frame
+ * as POSIX does.  Instead a dedicated OS thread does a BLOCKING recv on
+ * the control socket and forwards each frame into the root proc's
+ * mailbox with a cross-thread xtc_send (which nudges the loop via its
+ * IOCP wakeup).  This mirrors the BEAM's Windows port reader threads.
+ * Runs until the socket closes (parent gone) or the root proc exits. */
+struct win_reader_ctx {
+	SOCKET     sock;
+	xtc_pid_t  root;
+	_Atomic int stop;
+};
+
+static DWORD WINAPI
+win_reader_thread(LPVOID a)
+{
+	struct win_reader_ctx *r = a;
+	for (;;) {
+		uint32_t be = 0;
+		size_t off = 0, len;
+		char *buf;
+		if (atomic_load(&r->stop)) break;
+		/* 4-byte big-endian length prefix (the xtc_net_frame layout). */
+		while (off < 4) {
+			int n = recv(r->sock, (char *)&be + off, (int)(4 - off), 0); /* XTC_BLOCKING_OK: dedicated reader thread */
+			if (n <= 0) goto done;
+			off += (size_t)n;
+		}
+		len = (size_t)ntohl(be);
+		if (len == 0) continue;             /* keepalive / zero frame */
+		if (len > (16u * 1024 * 1024)) break;  /* sanity cap */
+		if (__os_malloc(len, (void **)&buf) != XTC_OK) break;
+		off = 0;
+		while (off < len) {
+			int n = recv(r->sock, buf + off, (int)(len - off), 0); /* XTC_BLOCKING_OK */
+			if (n <= 0) { __os_free(buf); goto done; }
+			off += (size_t)n;
+		}
+		/* Deliver to the root proc (cross-thread; wakes its loop). */
+		(void)xtc_send(r->root, buf, len);
+		__os_free(buf);
+	}
+done:
+	/* Socket closed: nudge the root so it can observe end-of-input if it
+	 * is waiting (a zero-length poke is a harmless spurious wake). */
+	(void)xtc_proc_wake(r->root);
+	return 0;
+}
+
+/* Monitor proc: watch the root, stop the loop when it exits. */
+struct win_rootmon_ctx { xtc_pid_t root; xtc_loop_t *loop; int *exit_code; };
+static void
+win_rootmon_proc(void *a)
+{
+	struct win_rootmon_ctx *m = a;
+	void *msg = NULL; size_t n = 0;
+	uint64_t ref = 0;
+	(void)xtc_monitor(m->root, &ref);
+	if (xtc_recv(&msg, &n, -1) == XTC_OK) {
+		xtc_down_info_t di;
+		if (xtc_down_decode_ex(msg, n, &di) == XTC_OK && m->exit_code)
+			*m->exit_code = di.reason;
+	}
+	if (msg) xtc_free(msg);
+	(void)xtc_loop_stop(m->loop);
+}
+
 int
 xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 {
 	xtc_loop_t *loop = NULL;
 	struct child_root_ctx rctx;
-	struct child_pump_ctx pctx;
+	struct win_rootmon_ctx mctx;
+	struct win_reader_ctx *rctxp = NULL;
 	xtc_pid_t root;
+	HANDLE reader = NULL;
 	int exit_code = 0;
 
 	if (root_fn == NULL) return 2;
 	if (xtc_loop_init(&loop) != XTC_OK) return 3;
-	(void)xtc_net_setnonblock(ctrl_fd);
 
 	rctx.root_fn = root_fn;
 	rctx.arg = arg;
@@ -806,14 +872,30 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 		(void)xtc_loop_fini(loop);
 		return 4;
 	}
-	pctx.ctrl_fd = ctrl_fd;
-	pctx.root = root;
-	pctx.exit_code = &exit_code;
-	if (xtc_proc_spawn(loop, child_pump_proc, &pctx, NULL, NULL) != XTC_OK) {
+	/* Monitor the root so the loop stops when it exits. */
+	mctx.root = root; mctx.loop = loop; mctx.exit_code = &exit_code;
+	if (xtc_proc_spawn(loop, win_rootmon_proc, &mctx, NULL, NULL) != XTC_OK) {
 		(void)xtc_loop_fini(loop);
 		return 5;
 	}
+	/* Start the blocking control-socket reader on its own OS thread. */
+	if (__os_calloc(1, sizeof *rctxp, (void **)&rctxp) != XTC_OK) {
+		(void)xtc_loop_fini(loop);
+		return 6;
+	}
+	rctxp->sock = (SOCKET)ctrl_fd;
+	rctxp->root = root;
+	reader = CreateThread(NULL, 0, win_reader_thread, rctxp, 0, NULL);
+
 	(void)xtc_loop_run(loop);
+
+	/* Root exited: stop the reader (close the socket unblocks its recv). */
+	if (rctxp) atomic_store(&rctxp->stop, 1);
+	if (reader != NULL) {
+		(void)WaitForSingleObject(reader, 1000);
+		CloseHandle(reader);
+	}
+	if (rctxp) __os_free(rctxp);
 	(void)xtc_loop_fini(loop);
 	return exit_code;
 }

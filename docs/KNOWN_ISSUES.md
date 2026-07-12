@@ -441,15 +441,24 @@ only):
 - The END-TO-END parent spawn+monitor does NOT yet complete: the driver
   reaches xtc_xspawn_entry (child re-exec confirmed) but xtc_xmonitor
   does not deliver the child's DOWN (the decoded reason stays at the
-  initial sentinel).  The Windows monitor path -- win_shadow_proc
-  polling `p->exited` (set by the RegisterWaitForSingleObject exit
-  callback) then xtc_exit_self so the local monitor sees a DOWN -- has a
-  runtime wiring bug (the exit latch or the parent->child xtc_xsend that
-  makes the child exit is not observed).  POSIX xtc_xproc
-  (fork/waitpid) works and is tested (test_xproc, test_sim_xproc,
-  bench_xproc_fanout at 1000 children).  The Windows e2e needs a
-  dedicated debug session on a Windows host; until then it is a
-  documented SKIP, not a shipped guarantee.
+  initial sentinel).  ROOT-CAUSED (v1.14.0 EC2 session): the child's
+  pump proc waited for control-socket frames via xtc_net_recv_frame ->
+  xtc_proc_wait_fd, but the Windows IOCP loop cannot yet wait on an
+  arbitrary socket's readability (the AFD-poll path is unfinished -- the
+  same limitation as the skipped socket-echo smoke), so the child never
+  received the parent's xtc_xsend and never exited.
+- FIX IMPLEMENTED (pending Windows runtime re-validation): the Windows
+  xtc_xproc_child_main now reads the control socket on a DEDICATED OS
+  THREAD with a blocking recv (win_reader_thread), forwarding each frame
+  to the root proc with a cross-thread xtc_send -- mirroring the BEAM's
+  Windows port reader threads and sidestepping the IOCP socket-readiness
+  gap entirely.  A win_rootmon_proc watches the root and stops the loop
+  on its exit.  POSIX xtc_xproc (fork/waitpid) is fully tested
+  (test_xproc, test_sim_xproc, bench_xproc_fanout at 1000 children); the
+  Windows reader-thread path compiles clean (MinGW syntax check) but
+  awaits an EC2 Windows box for end-to-end validation (the account's VPC
+  describe was unavailable at fix time).  Still a documented SKIP in
+  smoke.c until validated.
 
 ## Fiber-switch sanitizer annotations enable detect_stack_use_after_return=1
 
