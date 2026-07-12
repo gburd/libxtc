@@ -1,3 +1,31 @@
+libxtc (1.17.0-1) unstable; urgency=medium
+
+  * ThreadSanitizer support for the cooperative-fiber runtime (requested
+    by the PG-integration team).  The coro substrates now emit the TSan
+    fiber-IDENTITY API (__tsan_create_fiber / __tsan_switch_to_fiber /
+    __tsan_destroy_fiber) under clang -fsanitize=thread, so TSan tracks
+    per-fiber happens-before across cooperative switches instead of
+    collapsing every coroutine into one confused thread.  This is
+    DISTINCT from and mutually exclusive with the ASan stack-switch
+    annotations (v1.13.0): a TSan build emits only the identity calls,
+    an ASan build only the stack-switch calls, so a TSan build no longer
+    link-fails on __sanitizer_start_switch_fiber (which the TSan runtime
+    does not provide).  clang-only by design (gcc libtsan has no fiber
+    support).  A full clang TSan build runs the fiber suite
+    (test_fctx/async/proc/svr/chan) with zero TSan warnings; a new CI
+    job (tsan-fibers) keeps it green.  Zero cost / zero symbols in a
+    non-sanitized build.
+  * Test coverage: closed the documented io_common.c and svr.c
+    branch-coverage gaps with targeted guard tests (io_init/fini/wakeup
+    NULL guards, the live wakeup+coalesce path, and the xtc_svr
+    start/stop/join/reply/call/cast XTC_E_INVAL edges).
+  * Docs: corrected the stale "CI not flipped to SUAR=1" caveat (flipped
+    since v1.13.0); recorded that Windows multi-core scalability is not
+    claimed and is gated behind the Win32-fiber-substrate fix.
+  * No public xtc_* API change from 1.16.0.
+
+ -- Greg Burd <greg@burd.me>  Sun, 12 Jul 2026 10:06:55 -0400
+
 libxtc (1.16.0-1) unstable; urgency=medium
 
   * Windows xtc_xproc: fixed a cross-thread deadlock in the exit-latch
