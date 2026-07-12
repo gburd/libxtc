@@ -13,7 +13,8 @@
 .Nm __os_rwlock_destroy ,
 .Nm __os_rwlock_rdlock ,
 .Nm __os_rwlock_wrlock ,
-.Nm __os_rwlock_unlock ,
+.Nm __os_rwlock_rdunlock ,
+.Nm __os_rwlock_wrunlock ,
 .Nm __os_cond_init ,
 .Nm __os_cond_destroy ,
 .Nm __os_cond_wait ,
@@ -48,7 +49,9 @@
 .Ft int
 .Fn __os_rwlock_wrlock "__os_rwlock_t *r"
 .Ft int
-.Fn __os_rwlock_unlock "__os_rwlock_t *r"
+.Fn __os_rwlock_rdunlock "__os_rwlock_t *r"
+.Ft int
+.Fn __os_rwlock_wrunlock "__os_rwlock_t *r"
 .Pp
 .Ft int
 .Fn __os_cond_init "__os_cond_t *c"
@@ -108,6 +111,30 @@ loop.
 .Pp
 .Fn __os_sem_*
 implements an unnamed in-process semaphore.
+.Pp
+The read/write lock has SEPARATE unlock entry points:
+.Fn __os_rwlock_rdunlock
+releases a lock taken with
+.Fn __os_rwlock_rdlock ,
+and
+.Fn __os_rwlock_wrunlock
+releases one taken with
+.Fn __os_rwlock_wrlock .
+The caller must pair the unlock to the mode it acquired.
+POSIX
+.Fn pthread_rwlock_unlock
+is mode-agnostic, but the Windows SRWLock has no mode-agnostic release
+.Pq ReleaseSRWLockShared versus ReleaseSRWLockExclusive are distinct ,
+so the split keeps the surface portable to the Windows backing without
+per-lock held-mode tracking.
+.Pp
+A file-scope-static mutex or rwlock may be initialised without an
+.Fn __os_mutex_init
+call using the static initializers
+.Dv XTC_OS_MUTEX_INIT
+and
+.Dv XTC_OS_RWLOCK_INIT ;
+the run-time init remains for heap-allocated locks.
 .Sh RETURN VALUES
 .Dv XTC_OK
 on success;

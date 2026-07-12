@@ -54,6 +54,20 @@ struct __os_rwlock { _Alignas(long long) unsigned char storage[256]; };
 struct __os_cond   { _Alignas(long long) unsigned char storage[64];  };
 struct __os_sem    { _Alignas(long long) unsigned char storage[64];  };
 
+/*
+ * Static initializers for file-scope-static locks (no _init() call).
+ * POSIX has PTHREAD_MUTEX_INITIALIZER / PTHREAD_RWLOCK_INITIALIZER; on
+ * the coming Win32 backing the mutex is an SRWLock (which HAS a static
+ * initializer, SRWLOCK_INIT -- unlike CRITICAL_SECTION), so this shape
+ * stays portable.  Storage is zero-padded after the pthread type; both
+ * POSIX initializers are all-zero on the platforms libxtc targets, so
+ * a braced-zero initializer is correct and also matches SRWLOCK_INIT
+ * (a zeroed pointer).  A run-time __os_mutex_init remains available and
+ * is required where a mutex is heap-allocated or needs attributes.
+ */
+#define XTC_OS_MUTEX_INIT   { { 0 } }
+#define XTC_OS_RWLOCK_INIT  { { 0 } }
+
 typedef struct __os_thread  __os_thread_t;
 typedef struct __os_mutex   __os_mutex_t;
 typedef struct __os_rwlock  __os_rwlock_t;
@@ -63,6 +77,24 @@ typedef unsigned long       __os_tls_key_t;
 
 typedef void *(*__os_thread_fn)(void *);
 typedef void  (*__os_tls_dtor)(void *);
+
+/*
+ * One-time initialization.  __os_once_t is a flag with a static
+ * initializer (XTC_OS_ONCE_INIT); __os_call_once runs fn exactly once
+ * across all threads racing on the same flag.  POSIX maps to
+ * pthread_once; Windows to InitOnceExecuteOnce.  Replaces hand-rolled
+ * set-once guards (sig_atomic_t + double-checked stores) with one
+ * portable, race-free primitive.
+ */
+#if defined(_WIN32)
+/* INIT_ONCE is a single pointer-sized slot; keep the header pthread-free. */
+typedef void *__os_once_t;
+#define XTC_OS_ONCE_INIT  NULL
+#else
+#include <pthread.h>
+typedef pthread_once_t __os_once_t;
+#define XTC_OS_ONCE_INIT  PTHREAD_ONCE_INIT
+#endif
 
 /*
  * --- Threads ---
@@ -108,6 +140,28 @@ int   __os_tls_set(__os_tls_key_t key, void *value);
 void *__os_tls_get(__os_tls_key_t key);
 
 /*
+ * Register fn(arg) to run when the CALLING thread exits -- including
+ * threads libxtc did NOT create (an embedding host's threads, or
+ * PostgreSQL's pg_threads.h carrier threads).  This is the narrow
+ * "clean up my thread_local resources on the way out" contract, built
+ * on the same pthread_key_t / FlsAlloc destructor mechanism as TLS but
+ * without exposing a full key.  Multiple registrations on one thread
+ * are all run, in reverse order of registration (last-registered
+ * first), the way C atexit composes.  Returns XTC_OK, or XTC_E_NOMEM
+ * if the per-thread record could not be allocated.
+ *
+ * PUBLIC: int __os_thread_atexit __P((void (*)(void *), void *));
+ */
+int __os_thread_atexit(void (*fn)(void *), void *arg);
+
+/*
+ * --- One-time init ---
+ *
+ * PUBLIC: int __os_call_once __P((__os_once_t *, void (*)(void)));
+ */
+int __os_call_once(__os_once_t *once, void (*fn)(void));
+
+/*
  * --- Mutex ---
  *
  * PUBLIC: int  __os_mutex_init __P((__os_mutex_t *));
@@ -125,17 +179,26 @@ int __os_mutex_unlock(__os_mutex_t *m);
 /*
  * --- RWLock ---
  *
+ * unlock is SPLIT into read/write forms: POSIX pthread_rwlock_unlock is
+ * mode-agnostic, but Windows SRWLock has NO mode-agnostic release --
+ * ReleaseSRWLockShared vs ReleaseSRWLockExclusive are distinct calls
+ * chosen by how the lock was taken.  Callers already know which lock
+ * they hold, so the split keeps the surface portable to the coming
+ * Win32 backing without per-lock held-mode tracking.
+ *
  * PUBLIC: int __os_rwlock_init __P((__os_rwlock_t *));
  * PUBLIC: int __os_rwlock_destroy __P((__os_rwlock_t *));
  * PUBLIC: int __os_rwlock_rdlock __P((__os_rwlock_t *));
  * PUBLIC: int __os_rwlock_wrlock __P((__os_rwlock_t *));
- * PUBLIC: int __os_rwlock_unlock __P((__os_rwlock_t *));
+ * PUBLIC: int __os_rwlock_rdunlock __P((__os_rwlock_t *));
+ * PUBLIC: int __os_rwlock_wrunlock __P((__os_rwlock_t *));
  */
 int __os_rwlock_init(__os_rwlock_t *r);
 int __os_rwlock_destroy(__os_rwlock_t *r);
 int __os_rwlock_rdlock(__os_rwlock_t *r);
 int __os_rwlock_wrlock(__os_rwlock_t *r);
-int __os_rwlock_unlock(__os_rwlock_t *r);
+int __os_rwlock_rdunlock(__os_rwlock_t *r);
+int __os_rwlock_wrunlock(__os_rwlock_t *r);
 
 /*
  * --- Condition variable ---

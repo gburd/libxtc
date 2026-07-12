@@ -50,12 +50,18 @@ cannot wake other coroutines on the same thread.
 ### `__os_mutex_t`
 
 Plain mutual-exclusion lock.  On POSIX, a `pthread_mutex_t`; on
-Windows, a `CRITICAL_SECTION`.
+Windows, an SRWLock in exclusive-only mode (chosen over
+`CRITICAL_SECTION` because SRWLock has a static initializer,
+`SRWLOCK_INIT`, and needs no explicit destroy).
 
     int  __os_mutex_init   (__os_mutex_t *mu);
     int  __os_mutex_lock   (__os_mutex_t *mu);
     int  __os_mutex_unlock (__os_mutex_t *mu);
     int  __os_mutex_destroy(__os_mutex_t *mu);
+
+A file-scope-static mutex may skip the init call by using the
+static initializer `XTC_OS_MUTEX_INIT` (and `XTC_OS_RWLOCK_INIT`
+for an rwlock).
 
 The mutex is non-recursive; locking it from a thread that
 already holds it is undefined.  The mutex is not interruptible;
@@ -95,12 +101,19 @@ an SRWLock.
     int  __os_rwlock_init        (__os_rwlock_t *rw);
     int  __os_rwlock_rdlock      (__os_rwlock_t *rw);
     int  __os_rwlock_wrlock      (__os_rwlock_t *rw);
-    int  __os_rwlock_unlock      (__os_rwlock_t *rw);
+    int  __os_rwlock_rdunlock    (__os_rwlock_t *rw);
+    int  __os_rwlock_wrunlock    (__os_rwlock_t *rw);
     int  __os_rwlock_destroy     (__os_rwlock_t *rw);
 
 The rules are the same as for `__os_mutex_t` regarding yielding.
 The fairness policy is the platform default; xtc does not
-enforce a writer-preference policy at this layer.
+enforce a writer-preference policy at this layer.  Note the
+**split unlock**: release a read lock with `__os_rwlock_rdunlock`
+and a write lock with `__os_rwlock_wrunlock`.  POSIX has a single
+mode-agnostic `pthread_rwlock_unlock`, but the Windows SRWLock has
+no such call (`ReleaseSRWLockShared` and `ReleaseSRWLockExclusive`
+are distinct), so the API is split to stay portable without
+tracking the held mode per lock.
 
 `__os_rwlock_t` exists for completeness and for code that ports
 from a system that uses pthread rwlocks.  In new xtc code it is
