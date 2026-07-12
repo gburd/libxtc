@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.15.0"
+#       --define "version 1.16.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.15.0
+Version:        1.16.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,9 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Sun Jul 12 2026 Greg Burd <greg@burd.me> - 1.16.0-1
+- Windows xproc deadlock fix + pg_threads.h portability layer (rwlock split, call_once, thread_atexit, static lock initializers).
+
 * Sat Jul 11 2026 Greg Burd <greg@burd.me> - 1.15.0-1
 - Windows xtc_xproc control channel via a dedicated reader thread (IOCP socket-readiness workaround); benchmark placement-artifact note.
 
