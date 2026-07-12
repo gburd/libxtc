@@ -425,6 +425,39 @@ xtc_aio path, and flush via xtc_aio_fsync.  See xtc_bdev(3).
 
 **Status:** intentional -- `_aligned_malloc` returns memory that requires `_aligned_free`, not plain `free`. The hook surface uses a single free path. Keeping the M7 case Windows-skipped is correct.
 
+## Windows multi-core scalability: NOT established (gated on the fiber-substrate fix)
+
+**Status:** OPEN and explicitly NOT claimed.  libxtc makes no
+Seastar/Tokio-parity scalability claim on Windows/MSVC, and none should
+be made until two prerequisites are met:
+
+1. **The Win32-fiber substrate memory-safety bug must be fixed first**
+   (see "xtc_xproc end-to-end ... on Windows" below).  ASan on a real
+   MSVC build shows `coro_winfiber.c` corrupting the slab allocator when
+   a proc exits on a fiber.  A throughput/scalability number measured on
+   a runtime whose core fiber substrate faults nondeterministically
+   under proc churn would be meaningless, so scale testing is BLOCKED
+   behind that fix -- not merely undone.
+
+2. **The benchmark suite does not build under MSVC.**  `dist/build_msvc.bat`
+   produces `xtc.lib` + the smoke test only; `bench/*` (bench_exec_scale,
+   bench_million_tasks, bench_mem_per_task, bench_net, bench_disk, the
+   conformance harness) use POSIX `unistd.h` / `clock_gettime` /
+   pthreads and are not compiled or run on Windows.  Establishing
+   Windows scalability requires porting the bench harness to the
+   `xtc_*` public clock/thread API (or a small Win32 shim) and adding a
+   Windows bench job.
+
+What IS verified on Windows/MSVC today is CORRECTNESS of a subset (the
+MSVC smoke gate: version/strerror/clocks/slab/lwlock/SEH-fault/IOCP file
+AIO/selective-receive/cross-thread-wakeup, plus the xproc child path),
+NOT scalability limits (CPU cores, RAM-per-task, disk/network
+throughput).  On POSIX, scalability WAS measured at scale (EC2 Phase B:
+Intel m7i.metal-48xl 192 vCPU + Graviton4 m8g.metal-48xl -- scheduler /
+steal / message paths scale to 192 cores; see .agent/PHASE_B_BENCH).
+The Windows equivalent is future work, sequenced AFTER the winfiber
+substrate fix.
+
 ## xtc_xproc end-to-end spawn+monitor on Windows (compiles + child path OK, monitor WIP)
 
 **Status:** OPEN (documented SKIP in test/msvc/smoke.c).  Validated on
