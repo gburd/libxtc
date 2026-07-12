@@ -54,9 +54,10 @@ Some surfaces are committed frozen ahead of a consumer's release so a
 libxtc point release cannot break them.  These are checked by name on
 every release tag, not just diffed:
 
-- **The lock layer (frozen for the PostgreSQL adapter, Phase 1).**
-  PostgreSQL backs its LWLock / LockManager with these behind
-  unchanged PG APIs, so an ABI wobble is expensive.  Frozen as of
+- **The lock layer (frozen -- the widest-consumed surface).**
+  Downstream integrations back their LWLock / LockManager equivalents
+  with these behind unchanged APIs, so an ABI wobble is expensive.
+  Frozen as of
   0.4.0, before PG Phase 1 ships:
     - `xtc_lwlock_t` and `xtc_lwlock_mode_t`, and the `xtc_lwlock_*`
       entry points in `xtc_lwlock.h`.

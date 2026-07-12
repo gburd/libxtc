@@ -53,7 +53,7 @@ from here can silently rot against the API.
 
 ### Part II -- Reference
 
-- [Architecture and the layer model]({{ '/reference/architecture/' | relative_url }}) -- L0 through L5 and
+- [Architecture and the layer model]({{ '/reference/architecture/' | relative_url }}) -- L0 through L4 and
   what each layer owns.
 - [The public API]({{ '/reference/api/' | relative_url }}) -- the shape of the `xtc_*` surface.
 - [Locks and synchronization]({{ '/reference/locks/' | relative_url }}) -- which primitive to reach for.
