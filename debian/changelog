@@ -1,3 +1,27 @@
+libxtc (1.20.0-1) unstable; urgency=medium
+
+  * Windows IOCP AFD socket poll: three real bugs fixed on an MSVC
+    Windows host.  (1) The AFD poll IOCTL code was wrong
+    (CTL_CODE(0x12,9,...)=0x00120024 was rejected with
+    STATUS_INVALID_DEVICE_REQUEST); use the wepoll/libuv literal
+    0x00012024.  (2) A stale-GetLastError check made an empty 0 ms poll
+    wrongly return XTC_E_INTERNAL and kill the loop; treat n_done==0 as
+    a timeout.  (3) Synchronous AFD completions (accept-ready,
+    connect-complete) were never reaped; post a self-completion for the
+    sync case.  Accept + connect readiness now flow.  The async
+    data-ready completion remains open (the loopback echo stalls after
+    the client send) and is documented; the socket-echo smoke stays a
+    clean SKIP, and every other IOCP path (file AIO, cross-thread
+    wakeup, selective receive, xtc_xproc) passes on the host.
+  * Windows slab FlsAlloc magazine validated on MSVC: a microbench shows
+    every alloc hits the fiber-local fast path (fast=2,000,000 slow=256,
+    26.3 M ops/s).  The spawn-scale curve is unchanged by it -- the
+    spawn bottleneck past 4 loops is cross-loop work-steal cache thrash,
+    not allocation (an honest, measured finding).
+  * No public xtc_* API change from 1.19.0.
+
+ -- Greg Burd <greg@burd.me>  Sun, 12 Jul 2026 19:50:23 -0400
+
 libxtc (1.19.0-1) unstable; urgency=medium
 
   * Layering: fixed the L2->L3 upward dependencies and added a
