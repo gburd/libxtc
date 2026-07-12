@@ -127,6 +127,32 @@ test_io_init_happy(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* NULL-argument guards: every io_common entry point rejects NULL with
+ * XTC_E_INVAL rather than dereferencing it. */
+static MunitResult
+test_io_null_guards(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	munit_assert_int(xtc_io_init(NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_io_fini(NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_io_wakeup(NULL), ==, XTC_E_INVAL);
+	return MUNIT_OK;
+}
+
+/* The wakeup path on a live io: post a wakeup and confirm XTC_OK; a
+ * second post is coalesced and also XTC_OK. */
+static MunitResult
+test_io_wakeup_roundtrip(const MunitParameter p[], void *d)
+{
+	xtc_io_t *io = NULL;
+	(void)p; (void)d;
+	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_wakeup(io), ==, XTC_OK);
+	munit_assert_int(xtc_io_wakeup(io), ==, XTC_OK);
+	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 /* ----- xtc_svr reply-path edges --------------------------------- */
 
 static MunitResult
@@ -200,6 +226,36 @@ test_svr_no_handler_empty_reply(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* NULL / invalid-argument guards across the xtc_svr entry points -- the
+ * early-return XTC_E_INVAL edges the happy-path server tests skip. */
+static MunitResult
+test_svr_null_guards(const MunitParameter p[], void *d)
+{
+	xtc_pid_t none = { 0 };
+	void *reply = NULL; size_t rsize = 0;
+	char req = 'x';
+	(void)p; (void)d;
+	/* start with NULL out / NULL callbacks */
+	munit_assert_int(xtc_svr_start(NULL, NULL, NULL, NULL, NULL),
+	    ==, XTC_E_INVAL);
+	/* stop / join / pid on NULL */
+	munit_assert_int(xtc_svr_stop(NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_svr_join(NULL, 0), ==, XTC_E_INVAL);
+	/* reply on a NULL call */
+	munit_assert_int(xtc_svr_reply(NULL, NULL, 0), ==, XTC_E_INVAL);
+	/* call with NULL out-params is rejected before any send */
+	munit_assert_int(xtc_svr_call(none, &req, sizeof req, NULL, &rsize,
+	    0), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_svr_call(none, &req, sizeof req, &reply, NULL,
+	    0), ==, XTC_E_INVAL);
+	/* non-NULL req_size with NULL req */
+	munit_assert_int(xtc_svr_call(none, NULL, 4, &reply, &rsize, 0),
+	    ==, XTC_E_INVAL);
+	/* cast with non-NULL size but NULL msg */
+	munit_assert_int(xtc_svr_cast(none, NULL, 4), ==, XTC_E_INVAL);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/io_init/calloc_fail", test_io_init_calloc_fail, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
@@ -214,10 +270,16 @@ static MunitTest tests[] = {
 #endif
 	{ "/io_init/happy", test_io_init_happy, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/io/null_guards", test_io_null_guards, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/io/wakeup_roundtrip", test_io_wakeup_roundtrip, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/svr/reply_null_call", test_svr_reply_null_call, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/svr/no_handler_empty_reply", test_svr_no_handler_empty_reply,
 	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/svr/null_guards", test_svr_null_guards, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 
