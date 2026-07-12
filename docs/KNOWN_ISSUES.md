@@ -646,7 +646,7 @@ stale entries.  Fix: added `__xtc_proc_loop_unregister(loop)` called from
 ## xtc_cfg: missing features
 
 **Status:** Config-file parsing and reload DONE; per-session scoping
-remains M16.
+is out of scope (it belongs to a downstream consumer, not the runtime).
 
 - Configuration-file parsing (postgresql.conf reader): DONE --
   `xtc_cfg_load_file()` reads `name = value` lines (comments, quotes,
@@ -654,8 +654,9 @@ remains M16.
 - SIGHUP-driven reload: DONE as a mechanism -- `xtc_cfg_reload()`
   re-reads the last loaded file.  The app wires SIGHUP to it from the
   event loop (the function is not async-signal-safe, by documentation).
-- Per-session/per-database scoping (PostgreSQL-specific): still M16 --
-  it needs a session/override-stack model that does not exist yet.
+- Per-session/per-database scoping: out of scope for xtc -- it needs a
+  session/override-stack model that is a downstream consumer's concern,
+  not the general-purpose runtime's.
 
 ## xtc_slab_pressure_stop API incomplete
 

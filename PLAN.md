@@ -133,8 +133,6 @@ hegel test binary.
 
 ```
 +---------------------------------------------------------------------+
-| L5  pg/   PostgreSQL adapter (subsumes src/backend/storage/aio,     |
-|           latch, signal/CFI, MemoryContext, GUC bridge)             |
 |----------------------------------------------------------------------|
 | L4  orc/  "Orchestration": supervisors, xtc_svr (gen_server),       |
 |           xtc_fsm (gen_statem), xtc_app, xtc_reg                    |
@@ -502,28 +500,6 @@ before the supervisor itself exits up the tree.
 `xtc_reg` is a per-executor concurrent hash table with epoch-based
 reclamation, so steady-state `whereis` is lock-free.
 
-### 2.6 L5 -- `pg/` (PostgreSQL adapter)
-
-The end-game.  This layer **subsumes** several PG subsystems:
-
-| PG subsystem | xtc replacement |
-|---|---|
-| `src/backend/storage/aio/` (whole tree) | `xtc_io` + `xtc_future` per-IO; `pgaio_io_acquire` -> `xtc_io_acquire`; `PgAioWaitRef` -> `xtc_future_t *`; `method_io_uring.c`, `method_worker.c`, `method_sync.c` -> already covered by L1 |
-| `src/backend/storage/ipc/latch.c` | `xtc_notify` |
-| `CHECK_FOR_INTERRUPTS()` | abort-token check at every `await` point |
-| `MemoryContext` / palloc | `xtc_alloc` ownership domains (see (S)5) |
-| `src/backend/storage/ipc/shm_mq.c` | `xtc_chan_*` over shared-buffer handles |
-| `src/backend/storage/ipc/procsignal.c` | `xtc_signal` -> mailbox messages |
-| `src/backend/postmaster/`'s ad-hoc fork-and-exec | `xtc_proc_spawn` (threaded) + opt-in `xtc_proc_fork_spawn` |
-| Startup / GUC tunables | Bridge to `xtc_cfg_*` |
-
-Forked-backend compatibility: a forked process hosts exactly one
-event loop.  Cross-process messaging reuses PG's existing
-shared-memory channels under the same `xtc_send` API; the dispatch
-implementation is selected at process boundary.
-
-L5 is the *only* PG-specific code; L0-L4 are general-purpose.
-
 ---
 
 ## 3. Platform matrix (matches PG18/19 supported-platforms)
@@ -863,7 +839,7 @@ xtc/
 |   |       \--- vec.c                 <- atomic-batch "lock vector"
 |   |--- orc/
 |   |   |--- supervisor.c, svr.c, fsm.c, app.c, reg.c
-|   \--- pg/                           <- optional, --with-postgres
+|   \--- (no PG-specific layer: xtc is a general-purpose runtime)
 |       |--- pg_aio.c                  <- subsumes src/backend/storage/aio
 |       |--- pg_latch.c
 |       |--- pg_palloc.c
@@ -1079,7 +1055,6 @@ OpenBSD, DragonFlyBSD).
 | **M13c** | Lock manager | Port from `~/ws/libdb` + `~/ws/noxu`; 9-mode matrix, intent locks, promotion, sharded tables, incremental + periodic deadlock detector with all victim policies, resource caps from (S)13.5; full (S)13.8 test/bench/scale/exhaust suite. |
 | **M14** | `xtc_cfg` + `xtc_log` + `dist/s_async` + `dist/s_cfg` | Function-call config API, per-loop logging, prototype-generation tools. |
 | **M15** | L1 Solaris + AIX + select | Tier-2 platform completeness. |
-| **M16** | L5 PG adapter | Subsumes `src/backend/storage/aio`; latch/signal/CFI/MemoryContext bridges; example threaded backend. |
 | **M17** | Conformance + benchmarks | Cross-runtime conformance vs Tokio + Erlang; published p99 numbers. |
 
 ---
@@ -1096,7 +1071,7 @@ These remain for your sign-off.  Defaults given are my recommendation.
 | Q4 | Cancellation propagation | **`xtc_abort_source` (cooperative) + `xtc_exit` (kill).** No implicit structured concurrency. |
 | Q5 | Allocator | **Pluggable + per-task arena + slab caches + ownership domains** (libumem-shaped). |
 | Q6 | OTP scope | Yes: supervisor, svr, fsm, app, reg.  No (for now): distribution, hot reload, ETS. |
-| Q7 | Multi-process from L0 | **L0 has the primitives, L1-L4 don't use them in v1.** PG L5 is the only multi-process consumer. |
+| Q7 | Multi-process from L0 | **L0 has the primitives, L1-L4 don't use them in v1.** Cross-fork spawn/link/monitor (xtc_xproc) is the one opt-in multi-process consumer. |
 | Q8 | License | **ISC license.** |
 | Q9 (new) | Configure-time vs runtime backend selection | **Configure-time only.** No vtable on hot path. |
 | Q10 (new) | Default loop count | **`__os_ncpus()`**, configurable down to 1 for the strict-degraded build. |
@@ -1126,22 +1101,15 @@ These remain for your sign-off.  Defaults given are my recommendation.
    trick; implement on day 1.
 6. **Two build systems drifting.**  `dist/srcfiles.in` is the SoT;
    CI runs both.
-7. **PG AIO subsumption is contentious.**  PG just landed
-   `method_io_uring.c`; replacing it with xtc requires careful
-   API matching.  Mitigation: in M16 we *wrap* PG's AIO API
-   surface around xtc internals first, ship that, and only later
-   propose replacing the underlying `method_*.c`.
-8. **Threaded PG is a multi-year upstream effort.**  Mitigation:
-   xtc must be useful standalone for greenfield C servers.  But also:
-   the v20->v21 PG roadmap ((S)14) is concrete and short enough that
-   xtc *as-designed* matches every primitive on that list.  We
-   should pitch xtc not as a research project but as the toolbox
-   v20 is going to need anyway.
-9. **Predictable p99 is hard.**  Even one slow path (e.g. an
+7. **Staying useful standalone.**  xtc must be useful on its own
+   for greenfield C servers, not tied to any single downstream
+   consumer.  Mitigation: every layer L0-L4 is general-purpose,
+   tested and shipped independently of any adapter.
+8. **Predictable p99 is hard.**  Even one slow path (e.g. an
    accidental kernel call in the steady-state) wrecks tail
    latency.  Mitigation: latency-histogram tests in `make soak`
    that fail the build if p99 regresses.
-10. **LRLock under threaded mode may behave differently than under
+9. **LRLock under threaded mode may behave differently than under
    processes.**  The 8-core data was inconclusive; threaded mode
    amplifies cache-line bouncing because there's no kernel
    boundary.  Mitigation: re-benchmark `xtc_lrlock` and
@@ -1716,8 +1684,9 @@ milestones -- see the revised table in (S)9.
 
 The pitch is concrete only when we trace what actually happens.
 Below we follow one ordinary OLTP query end-to-end through xtc.
-This is hypothetical -- the PG adapter is M16 -- but every step is
-backed by a primitive already designed.
+This is an illustrative walkthrough of a database server built on
+xtc -- hypothetical, but every step is backed by a primitive
+already designed.
 
 ### 14.1 The query
 
@@ -2404,7 +2373,7 @@ change management.
 A **hook** is a named, typed extension point with a defined
 signature, a defined ordering policy, and a defined termination
 policy.  Extensions register handlers; the runtime calls the
-chain.  Examples (for L5 PG):
+chain.  Examples (for a database server built on xtc):
 
 - `pg.executor.run` -- called per query, decorate-style (each
   handler may modify the running state, all are called).
@@ -2523,24 +2492,7 @@ attributes:
 Queryable via `xtc_stat_extensions()`.  Lets ops disable a
 slow extension based on data, not folklore.
 
-### 17.7 Bridging to PG hooks
-
-For every PG hook (`ExecutorRun_hook`, `planner_hook`, etc.) the
-L5 adapter:
-
-1. Defines an `xtc_hook_h_t` with a typed signature.
-2. Implements the legacy `_hook` global as a thin shim that
-   calls `xtc_hook_call` with the right policy.
-3. Provides `XTC_HOOK_TO_PG_*` macros so existing extensions
-   that set the global pointer keep working through a
-   compatibility shim until they are migrated.
-
-This is one of the two killer features of L5 (the other being
-the AIO subsumption from (S)2.6).  It lets us deliver the
-hardening (priority, ordering, isolation, accounting) *without*
-breaking every existing extension on day one.
-
-### 17.8 Where this lives, milestone
+### 17.7 Where this lives, milestone
 
 ```
 src/ptc/hook/
@@ -2556,8 +2508,7 @@ dist/s_hooks                      <- generates hooks/*.h from *.in declarations
 ```
 
 Lands in **M9** (basic API + decorate/replace/observe policies)
-and **M13a** (RCU integration + isolation + versioning).  The PG
-hook bridging is **M16**.
+and **M13a** (RCU integration + isolation + versioning).
 
 ---
 
@@ -2906,63 +2857,6 @@ Beyond bounded channels:
   documented error code and a Retry-After-style hint.
 - Per-class CPU shares for the data plane vs admin plane.
 
-### 19.8 LLVM JIT (M16)
-
-PG uses LLVM for expression JIT.  `LLVMContext` is *not*
-thread-safe; IR modules can't move between contexts.  L5
-provides `xtc_jit_ctx` per-loop with IR caching keyed on the
-plan tree shape.  Cache eviction is per-loop LRU.  Cross-loop
-migration of a JIT-using task forces re-JIT (or, optionally,
-bouncing to a JIT-pinned reactor).  M16.
-
-### 19.9 Replication (walsender/walreceiver, logical, slots) (M16)
-
-Each is a long-running supervised `xtc_proc`:
-
-- `walsender` per replica connection.
-- `walreceiver` for standby ingestion.
-- Logical decoding as an `xtc_io_stream` over WAL.
-- Synchronous-standby commit coordination via `xtc_barrier`.
-- Slot management as an `xtc_lrlock`-protected catalog.
-
-### 19.10 Parallel query workers (M16)
-
-Leader-worker cohort: leader is the user `xtc_proc`, workers
-are children spawned by `xtc_proc_spawn` with shared
-`xtc_alloc_ctx` for tuple-store handoff.  Tuple queues are
-`xtc_chan_mpsc`.  Crash of a worker is observed via monitor;
-leader cancels the rest via `xtc_abort_source`.  This warrants
-its own (S)14-style worked example in `docs/parallel-query.md`
-at M16.
-
-### 19.11 `pgstat` / activity monitoring (M16)
-
-An `xtc_svr` (gen_server) consumer of stat-delta messages from
-backends.  Snapshots produced by `xtc_stat_dump` at the xtc
-layer; PG-specific stats layered on top.  Maps the existing
-`pg_stat_*` views to xtc snapshot output.  M16.
-
-### 19.12 Autovacuum (M16)
-
-A supervisor with a pool of vacuum-worker `xtc_proc`s, each
-holding a worktable lock for an extended period.  Excellent
-stress test for the lock manager and the priority-inheritance
-implementation.  M16.
-
-### 19.13 Foreign data wrappers (M16)
-
-The canonical "makes blocking C calls into other databases"
-case.  FDWs *must* live in the blocking pool ((S)16) or yield
-through a documented async API.  An `xtc_fdw_t` interface that
-makes the choice explicit in the FDW author's contract.  M16.
-
-### 19.14 TOAST / large object streaming (M16)
-
-Streaming tuple support; touches memory contexts, the I/O
-streamer, the lock manager, and backpressure.  Not viable as
-"all-at-once" in a threaded server with thousands of sessions.
-M16.
-
 ### 19.15 Container / cgroup awareness (M0)
 
 `__os_ncpus()` reads cgroup v2 `cpu.max` first, falling back to
@@ -3064,8 +2958,8 @@ workplan calls for.
 | PG workplan item | What it asks for | xtc primitive |
 |---|---|---|
 | Thread per backend / socket / session | Per-connection async dispatch on a fixed thread pool | `xtc_proc_spawn` per connection; one process per session, mailbox-driven |
-| `multithreading` GUC (on/off, runtime) | Build that supports both modes; switch at startup | `xtc_app` config flag (configure-time) + per-session adapter (runtime); see (S)2.6 |
-| Cutover to threaded-only by v21 | Underpinning that is *production* by v20 | xtc M16 (PG adapter) targets v20 dev cycle; M13a/b/c (RCU + LRLock + lock manager) lands the new primitives in time |
+| `multithreading` GUC (on/off, runtime) | Build that supports both modes; switch at startup | `xtc_app` config flag (configure-time) + per-session adapter (runtime) |
+| Cutover to threaded-only by v21 | Underpinning that is *production* by v20 | the M13a/b/c primitives (RCU + LRLock + lock manager) are production-ready; a downstream PG integration is out of scope for xtc itself (xtc ships the primitives, not the adapter) |
 | Heikki's TLS branch | Find globals via `__thread` annotations as verification harness | `XTC_TLS(type, name)` ((S)4.3); used as the verification harness, then converted to `XTC_PERLOOP` or moved into `xtc_proc` state |
 | Session struct (long-term) | One struct holding all per-session state | `xtc_proc` already *is* the session struct: per-process arena, mailbox, name in `xtc_reg`.  Each PG subsystem's globals become fields on the `xtc_proc` user-data struct. |
 | Function-static memory audit | Find/redact every `static T x = init;` in a function | `XTC_FN_STATIC` macro ((S)4.3) + `dist/s_globals` lint forbidding bare `static`/`_Thread_local` outside `os/` |
@@ -3086,14 +2980,14 @@ workplan calls for.
 | `getopt_long` replacement | Re-entrant CLI parsing | `os_getopt.c` (`__os_getopt_long`) |
 | `dlerror` review | Thread-safe dynamic-load error path | `os_dl.c` (`__os_dlerror_r`) |
 | `getenv`/`setenv` audit | No racy environment writes | `os_env.c`: read-only after `xtc_app_start()`, lint-enforced |
-| `PG_THREADSAFE_EXTENSION` macro | Self-declaration of thread safety | `XTC_THREADSAFE_MODULE` macro on the L5 boundary; `_PG_thread_init`/`_PG_thread_fini` map to `xtc_proc` per-spawn hooks |
+| `PG_THREADSAFE_EXTENSION` macro | Self-declaration of thread safety | `XTC_THREADSAFE_MODULE` macro on the module boundary; `_PG_thread_init`/`_PG_thread_fini` map to `xtc_proc` per-spawn hooks |
 | `xtc_supervisor` ((S)2.5) | `xtc_lock_dd_*` victim signal goes via `xtc_send`; supervisors handle the abort-and-retry envelope just like any other crash |
 | Tooling: lints for new globals / statics / signals / sync | CI hard-fail on regressions | `dist/s_globals`, `dist/s_signals`, `dist/s_async`, `dist/s_cfg` -- all in (S)6.4 / (S)6.1 |
 | Buildfarm threaded animals | Linux x86_64, Linux aarch64, macOS, threaded mode | xtc CI matrix in (S)3.5 -- Linux x86_64 glibc, Linux aarch64 musl, FreeBSD amd64, Windows MSVC, macOS arm64 gating; full PG-buildfarm mirror nightly |
 | TSan in CI from CF1 | Threaded mode TSan-clean | `--enable-sanitize=thread` build profile; gating on every PR per (S)6.2 |
 | LTO build profile | Link-time optimization | `--enable-lto` / `-Db_lto=true`; in (S)6.4 toolchain matrix |
 | `THREADING.md` for core contributors | One doc on annotations, lints, GUC API, latches | `docs/threading.md` (xtc's; suitable to be lifted into `src/backend/THREADING.md`) |
-| Migration guide for extension authors | Wiki page + blog post | `docs/extensions.md` covers the L5 boundary contract |
+| Migration guide for extension authors | Wiki page + blog post | `docs/extensions.md` covers the module boundary contract |
 
 **Read this table as the deliverable list.**  Each row is something
 xtc will do for the PG threading effort.  If a row looks weak when
@@ -3181,7 +3075,7 @@ SQL/WAL/fmgr.
 | R3 | supervised OS-process child (`xtc_osproc_spawn`) under xtc_supervisor | accept supervision unification; marshalling stays in PG glue | M10.7 (new); F7 |
 | R4 | supervisor strategies (SIMPLE_OFO, REST_FOR_ONE, ONE_FOR_ALL) | DONE: all four strategies implemented + tested; SIMPLE_ONE_FOR_ONE via new xtc_sup_add_child (0-child pool grows on demand, TEMPORARY children reclaimed); test_sup 5/5, ASan-clean | M10.5 |
 | R5 | per-proc loop affinity (pinned, never stolen) | confirmed already true: procs spawn pinned via xtc_async; documenting in xtc_proc.3 | done (confirm) |
-| R6 | freeze the lock + glue ABI before PG Phase 1 | accept; name the exact lock structs on the (S)18 stable-symbol list | abi-stability.md, M16_PG_ADAPTER.md |
+| R6 | freeze the lock + glue ABI before a downstream integration | accept; name the exact lock structs on the (S)18 stable-symbol list | abi-stability.md |
 
 Build order: R1 (gating, smallest design, biggest payoff) -> R4
 SIMPLE_OFO -> R2 framing -> R3 osproc.  R1 and R3 get a design review
@@ -3237,9 +3131,9 @@ Kafka-shaped log broker; design in `examples/07_kaka/README.md`.
    `dist/s_async` ((S)6.4) generating typed prototypes.
 7. Confirm the **milestone order** -- particularly that M13a/b/c
    (RCU / LRLock / LWLock / lock manager benchmarking under
-   threaded contention) lands *before* M16 (PG adapter) so we
-   don't bake in a primitive that loses to the alternative
-   under real PG-shaped contention.
+   threaded contention) is validated *before* any downstream
+   integration relies on it, so we don't bake in a primitive that
+   loses to the alternative under real threaded contention.
 8. Confirm the **(S)20 mapping** -- that we are explicitly framing xtc
    as the toolbox the PG v20/v21 threading effort is going to need,
    and that any gap in the table is a redesign trigger for xtc.
