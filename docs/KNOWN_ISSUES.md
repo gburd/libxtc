@@ -490,11 +490,13 @@ PG-integration team requested (they previously had to run
 `detect_stack_use_after_return=0`).  Compiled to nothing in a
 non-sanitized build (0 sanitizer references).
 
-**Caveat -- CI is NOT yet flipped to SUAR=1.**  Enabling it globally in
-the shared ASan CI job exposes a separate, pre-existing, timing-dependent
-cross-thread teardown race (below), which would make CI intermittently
-red.  SUAR=1 is fully usable locally and by embedders today; the CI flip
-waits on the teardown-race fix.
+**Caveat -- CI is NOW flipped to SUAR=1 (as of v1.13.0).**  The
+separate cross-thread teardown race that previously blocked this (the
+`__notify_links_and_monitors` DOWN-send vs proc-teardown UAF, below) was
+fixed by the proc-struct teardown refcount, so the shared ASan CI job
+now runs `detect_stack_use_after_return=1` on every commit
+(`.github/workflows/ci.yml`).  SUAR=1 is fully usable locally, by
+embedders, and in CI.
 
 ## __notify_links_and_monitors DOWN-send vs proc-teardown race (RESOLVED)
 
