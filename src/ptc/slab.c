@@ -171,7 +171,66 @@ struct tls_mag {
 	struct magazine  mag;
 };
 
+#if defined(_WIN32)
+/*
+ * Windows: the runtime is a cooperative Win32-fiber scheduler, and
+ * __declspec(thread) (static TLS) is NOT fiber-safe -- the compiler may
+ * cache the static-TLS base across a SwitchToFiber, so a magazine
+ * pointer handed out on one fiber can dereference a stale block after a
+ * switch (traced on Windows EC2 to a hang at mag->slots[--mag->n]).
+ * Fiber Local Storage (FlsAlloc/FlsGetValue/FlsSetValue) is the Win32
+ * mechanism designed for exactly this: an Fls slot follows the fiber
+ * across SwitchToFiber.  Each fiber lazily allocates its own
+ * struct tls_mag[TLS_MAGS]; the FlsAlloc callback frees it on fiber
+ * exit (the analogue of the pthread_key destructor below).
+ */
+#include <windows.h>
+static DWORD __slab_fls_index = FLS_OUT_OF_INDEXES;
+static pthread_once_t __slab_fls_once = PTHREAD_ONCE_INIT;
+
+static void WINAPI
+__slab_fls_free(void *p)
+{
+	struct tls_mag *mags = p;
+	int i;
+	if (mags == NULL) return;
+	for (i = 0; i < TLS_MAGS; i++)
+		if (mags[i].mag.slots != NULL)
+			__os_free(mags[i].mag.slots);
+	__os_free(mags);
+}
+
+static void
+__slab_fls_init(void)
+{
+	__slab_fls_index = FlsAlloc(__slab_fls_free);
+}
+
+/* Return this fiber's tls_mag array (allocated on first use), or NULL
+ * if FLS or the allocation is unavailable (caller falls back to the
+ * locked slow path). */
+static struct tls_mag *
+__win_fiber_mags(void)
+{
+	struct tls_mag *mags;
+	(void)pthread_once(&__slab_fls_once, __slab_fls_init);
+	if (__slab_fls_index == FLS_OUT_OF_INDEXES)
+		return NULL;
+	mags = (struct tls_mag *)FlsGetValue(__slab_fls_index);
+	if (mags == NULL) {
+		if (__os_calloc(TLS_MAGS, sizeof *mags, (void **)&mags)
+		    != XTC_OK)
+			return NULL;
+		if (!FlsSetValue(__slab_fls_index, mags)) {
+			__os_free(mags);
+			return NULL;
+		}
+	}
+	return mags;
+}
+#else
 static XTC_THREAD_LOCAL struct tls_mag __tls_mags[TLS_MAGS];
+#endif
 
 /*
  * Thread-exit reclamation for per-thread magazines.  Each thread
@@ -191,6 +250,7 @@ static pthread_once_t __slab_tls_once = PTHREAD_ONCE_INIT;
 static void
 __slab_tls_cleanup(void *unused)
 {
+#if !defined(_WIN32)
 	int i;
 	(void)unused;
 	for (i = 0; i < TLS_MAGS; i++) {
@@ -200,6 +260,11 @@ __slab_tls_cleanup(void *unused)
 		}
 		__tls_mags[i].cache = NULL;
 	}
+#else
+	/* Windows frees per-fiber magazines via the FlsAlloc callback
+	 * (__slab_fls_free); this pthread-key destructor is a no-op. */
+	(void)unused;
+#endif
 }
 
 static void
@@ -223,21 +288,19 @@ __tls_mag_for(xtc_slab_t *cache)
 {
 	int i, free_slot = -1;
 #if defined(_WIN32)
-	/*
-	 * Win32-fiber hazard: __tls_mags is __declspec(thread) (static
-	 * TLS).  The runtime is a cooperative Win32-fiber scheduler; the
-	 * compiler may cache the static-TLS base across a SwitchToFiber,
-	 * so a magazine pointer handed to xtc_slab_alloc can dereference a
-	 * stale TLS block on a resumed fiber (traced on Windows EC2 to a
-	 * hang/corruption at mag->slots[--mag->n]).  Disable the per-thread
-	 * magazine on Windows and take the locked slow path, which touches
-	 * no __declspec(thread) state and is correct on a fiber.
-	 * (Performance-only: the lock path is the same one every platform
-	 * uses on a magazine miss; Windows is not the throughput target
-	 * yet, and a fiber-local-storage magazine is a later optimization.)
-	 */
-	(void)cache; (void)i; (void)free_slot;
-	return NULL;
+	/* Fiber-safe per-fiber magazine via FlsAlloc (see __win_fiber_mags):
+	 * an FLS slot follows the fiber across SwitchToFiber, unlike
+	 * __declspec(thread) static TLS. */
+	struct tls_mag *mags = __win_fiber_mags();
+	if (mags == NULL) return NULL;   /* FLS unavailable: slow path */
+	for (i = 0; i < TLS_MAGS; i++) {
+		if (mags[i].cache == cache) return &mags[i].mag;
+		if (mags[i].cache == NULL && free_slot == -1)
+			free_slot = i;
+	}
+	if (free_slot < 0) return NULL;     /* fall back to slow path */
+	mags[free_slot].cache = cache;
+	return &mags[free_slot].mag;
 #else
 	for (i = 0; i < TLS_MAGS; i++) {
 		if (__tls_mags[i].cache == cache) return &__tls_mags[i].mag;
@@ -640,6 +703,18 @@ xtc_slab_destroy(xtc_slab_t *s)
 	if (s == NULL) return;
 
 	/* Drop our magazine entries. */
+#if defined(_WIN32)
+	{
+		struct tls_mag *mags = __win_fiber_mags();
+		if (mags != NULL)
+			for (i = 0; i < TLS_MAGS; i++)
+				if (mags[i].cache == s) {
+					__os_free(mags[i].mag.slots);
+					mags[i].cache = NULL;
+					memset(&mags[i].mag, 0, sizeof mags[i].mag);
+				}
+	}
+#else
 	for (i = 0; i < TLS_MAGS; i++) {
 		if (__tls_mags[i].cache == s) {
 			__os_free(__tls_mags[i].mag.slots);
@@ -647,6 +722,7 @@ xtc_slab_destroy(xtc_slab_t *s)
 			memset(&__tls_mags[i].mag, 0, sizeof __tls_mags[i].mag);
 		}
 	}
+#endif
 
 	/* Run dtors on every still-live object?  We don't track which
 	 * are in-use vs free per se; for simplicity, run dtor on all
@@ -930,6 +1006,24 @@ xtc_slab_reap(xtc_slab_t *s)
 	if (s == NULL) return 0;
 
 	/* Drain magazines associated with this thread. */
+#if defined(_WIN32)
+	{
+		struct tls_mag *mags = __win_fiber_mags();
+		if (mags != NULL)
+			for (i = 0; i < TLS_MAGS; i++)
+				if (mags[i].cache == s) {
+					struct magazine *mag = &mags[i].mag;
+					(void)pthread_mutex_lock(&s->lock);
+					while (mag->n > 0) {
+						__push_slot_locked(s, mag->slots[--mag->n]);
+						atomic_fetch_add_explicit(&s->s_n_free, 1,
+						    memory_order_relaxed);
+						reaped++;
+					}
+					(void)pthread_mutex_unlock(&s->lock);
+				}
+	}
+#else
 	for (i = 0; i < TLS_MAGS; i++) {
 		if (__tls_mags[i].cache == s) {
 			struct magazine *mag = &__tls_mags[i].mag;
@@ -943,6 +1037,7 @@ xtc_slab_reap(xtc_slab_t *s)
 			(void)pthread_mutex_unlock(&s->lock);
 		}
 	}
+#endif
 
 	/* Release empty chunks. */
 	(void)pthread_mutex_lock(&s->lock);

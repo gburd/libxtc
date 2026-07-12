@@ -100,15 +100,26 @@ RUNTIME (the full test suite executes) versus which only COMPILE:
 
 - Linux (epoll + io_uring), macOS (kqueue): runtime-verified on every
   commit in CI.
-- FreeBSD 15 (clang, kqueue): re-verified against the current tree
-  (2026-06, full gmake check passes, including the native kqueue
-  file-AIO path).  Not in per-commit CI.
+- FreeBSD 15 (clang, kqueue): NOW in per-commit CI via a FreeBSD VM
+  on the Linux runner (vmactions/freebsd-vm) -- full gmake check.  Also
+  re-verified by hand on the FreeBSD host (nuc, 2026-07, gmake check
+  passes).
+- RISC-V 64 (Linux, gcc): NOW in per-commit CI via QEMU user-mode
+  emulation (riscv64-qemu job: cross-arch build + C unit + property
+  suites) -- catches width/endian/atomics bugs.  Also re-verified on a
+  native RISC-V host (rv, 2026-07, full make check passes).
 - illumos (SunOS 5.11, UltraSPARC v9 / sparcv9 big-endian, gcc, event
-  ports): re-verified against the current tree (2026-07, full gmake
-  check passes -- including the property suites on big-endian SPARC,
-  with OpenSSL 3, and the native event-port file-AIO path
-  (SIGEV_PORT -> PORT_SOURCE_AIO) incl. /aio/roundtrip).  Not in
-  per-commit CI.
+  ports): re-verified against the tree (2026-07 host was unreachable
+  this round; last full gmake check passed 2026-07, including the
+  property suites on big-endian SPARC, OpenSSL 3, and the native
+  event-port file-AIO path (SIGEV_PORT -> PORT_SOURCE_AIO) incl.
+  /aio/roundtrip).  NOT in per-commit CI -- deliberately: there is no
+  GitHub illumos runner, and running OmniOS/OpenIndiana in a nested
+  QEMU VM on the Linux runner is slow and flaky enough that it is not
+  worth the per-commit cost (unlike FreeBSD's mature vmactions VM or
+  RISC-V's fast qemu-user).  illumos stays a periodic manual
+  re-verification (an x86_64 illumos-in-CI experiment is a possible
+  future item, but not "easy").
 - Windows: the IOCP runtime (AFD socket poll, cross-thread wakeup,
   file AIO) was RUNTIME-verified on a Windows host with MinGW (2026-06
   -- see "IOCP backend status" below; three bugs found and fixed).
@@ -250,6 +261,18 @@ corner still under investigation; the smoke prints a visible `skip
 loopback socket echo` line rather than failing, so a genuine AFD-poll
 bug surfaces without blocking the two proven IOCP additions.  Chasing
 the AFD echo to green is the remaining IOCP runtime-verification item.
+
+**Status note (2026-07):** this is HOST-BLOCKED, not code-deferred.  The
+failure is a runtime behavior of the `\Device\Afd` `IOCTL_AFD_POLL`
+interface (the completion arrives, or the re-arm timing, differs from
+the wepoll/libuv reference in a way that only shows on a real Windows
+kernel) -- it cannot be blind-fixed or verified from a cross-compile;
+it needs an interactive MSVC Windows host to observe the poll_out
+events and the re-arm ordering.  A speculative change to the AFD path
+is deliberately NOT made, because the file-AIO and cross-thread-wakeup
+IOCP paths that share this file DO pass on Windows and must not be
+regressed by an unverifiable edit.  Deferred to the next Windows-host
+session (the burner-account credentials were unavailable at this time).
 
 ### Round 2 (current source): native completion port + AFD poll
 
@@ -445,13 +468,20 @@ per_loop=30000, all runs done==total, fail=0):
 
 Two honest findings:
 
-1. **Spawn throughput peaks at 4 loops and regresses past it.**  Root
-   cause: the slab per-thread magazine is DISABLED on Windows (the
-   fiber-TLS fix takes the locked slow path), so every proc-struct /
-   mailbox / monitor-entry allocation contends on the slab's global
-   lock; past ~4 loops that lock is the bottleneck.  A FlsAlloc-backed
-   fiber-local magazine would restore the fast path and is the
-   single highest-value Windows scalability follow-up.
+1. **Spawn throughput peaks at 4 loops and regresses past it** (as
+   measured at the time).  Root cause: the slab per-thread magazine
+   had been DISABLED on Windows (the interim fiber-TLS fix took the
+   locked slow path), so every proc-struct / mailbox / monitor-entry
+   allocation contended on the slab's global lock; past ~4 loops that
+   lock was the bottleneck.  FIXED: the slab magazine is now backed by
+   Fiber Local Storage (FlsAlloc/FlsGetValue/FlsSetValue) on Windows --
+   an FLS slot correctly follows the fiber across SwitchToFiber, unlike
+   __declspec(thread) static TLS (which was the original corruption
+   cause).  The FlsAlloc callback frees each fiber's magazine on fiber
+   exit.  IMPLEMENTED and MinGW-API-verified; the re-measurement of the
+   scaling curve on the fast path awaits an MSVC Windows host (deferred:
+   the EC2 benchmark is parked, and the burner-account credentials were
+   unavailable at implementation time).
 
 2. **A high-volume ceiling was found AND fixed.**  At per_loop=50000 x
    16 loops (800 K short-lived procs) only ~422 K children ran

@@ -556,6 +556,54 @@ jobs:
           make XTC_BUILD=../../build_ci sqlxtc-server
           bash ../../test/sqlxtc/test_sqlxtc_mt.sh
 
+  freebsd:
+    # FreeBSD runtime coverage in a VM on the Linux runner
+    # (vmactions/freebsd-vm).  Exercises the kqueue I/O backend + the
+    # ucontext substrate under clang -- the same combination re-verified
+    # by hand on the FreeBSD host, now on every push.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build + test in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y gmake autoconf automake pkgconf gawk
+          run: |
+            cd dist && autoreconf -i && cd ..
+            mkdir -p build_bsd && cd build_bsd
+            ../dist/configure --with-tls=none
+            gmake -j$(sysctl -n hw.ncpu)
+            gmake check
+
+  riscv64-qemu:
+    # RISC-V 64 cross-arch coverage via QEMU user-mode emulation.
+    # Catches width/endian/atomics bugs the x86/arm CI would miss.
+    # Builds with the riscv64 cross-gcc and runs the C unit + property
+    # suites under binfmt/qemu-user (registered by the docker/setup-qemu
+    # action).  The full shell/dist tests stay on native Linux.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Register qemu-user binfmt (riscv64)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: riscv64
+      - name: Build + test under riscv64 emulation
+        run: |
+          docker run --rm --platform linux/riscv64 \
+            -v "$PWD":/src -w /src riscv64/ubuntu:24.04 \
+            bash -c '
+              apt-get update &&
+              apt-get install -y gcc make autoconf automake pkg-config gawk &&
+              cd dist && autoreconf -i && cd .. &&
+              mkdir -p build_rv && cd build_rv &&
+              ../dist/configure --with-io-backend=epoll --with-tls=none --without-liburing &&
+              make -j"$(nproc)" &&
+              make tests-c tests-pbt
+            '
+
   windows-msvc:
     # Windows / MSVC: builds xtc.lib from src (cl + ml64 for the
     # MASM fcontext port) and runs the smoke test.  The full munit
