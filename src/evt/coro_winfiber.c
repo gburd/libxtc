@@ -92,19 +92,25 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 	c->arg = arg;
 	/*
 	 * CreateFiberEx(dwStackCommitSize, dwStackReserveSize, ...).
-	 * Reserve MUST exceed commit so the stack has growth headroom: a
-	 * Win32 API called from the fiber (exception dispatch, the loader,
-	 * a CRT helper) can push far more than the committed page count,
-	 * and a fiber whose reserve == commit has no room for the guard-
-	 * page-driven auto-grow, so a deep call chain (a proc's exit
-	 * teardown -> xtc_send -> slab, seen faulting under ASan) overflows
-	 * the fiber stack and corrupts adjacent memory.  Commit the
-	 * requested working size; reserve generously (at least 1 MiB, the
-	 * default thread reserve, or 16x the commit, whichever is larger)
-	 * so the OS can grow the stack normally. */
+	 * Commit only a small initial amount and let the OS grow the stack
+	 * on demand up to the reserve.  This matters at scale: completed
+	 * coros are not freed until loop_fini (see __xtc_coro_step /
+	 * loop.c), so a spawn-heavy workload of short-lived procs
+	 * accumulates live fibers; committing the full working size per
+	 * fiber (64 KiB x hundreds of thousands) exhausts the process
+	 * commit charge (measured: ~422 K fibers -> ~27 GiB commit ->
+	 * spawn failures on a 30 GiB box).  A small commit keeps the charge
+	 * proportional to actual stack use.  Reserve must still exceed a
+	 * deep call chain + a Win32 API callback (a proc's exit teardown
+	 * -> xtc_send -> slab, plus the ~360-byte ntdll memset seen under
+	 * ASan) so the auto-grow never hits the reserve limit and faults;
+	 * reserve >= 1 MiB (the default thread reserve) or 16x the working
+	 * size. */
 	{
-		SIZE_T commit = (SIZE_T)c->stack_sz;
-		SIZE_T reserve = commit * 16;
+		SIZE_T work = (SIZE_T)c->stack_sz;
+		SIZE_T commit = 16u * 1024;               /* small initial commit */
+		SIZE_T reserve = work * 16;
+		if (commit > work) commit = work;
 		if (reserve < (1u << 20)) reserve = (1u << 20);   /* >= 1 MiB */
 		c->fiber = CreateFiberEx(commit, reserve, 0, __coro_entry, c);
 	}

@@ -48,6 +48,8 @@ dist/xtc_config.h.in~
 # Bench compiled binaries
 bench/audit/false_sharing_mpsc
 bench/audit/false_sharing_proc
+bench/bench_win_scale
+bench/bench_win_scale.exe
 bench/conformance/w*/tokio/target/
 
 # rexis (Redis-protocol-compatible) example binary

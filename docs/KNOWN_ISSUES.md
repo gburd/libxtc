@@ -425,31 +425,54 @@ xtc_aio path, and flush via xtc_aio_fsync.  See xtc_bdev(3).
 
 **Status:** intentional -- `_aligned_malloc` returns memory that requires `_aligned_free`, not plain `free`. The hook surface uses a single free path. Keeping the M7 case Windows-skipped is correct.
 
-## Windows multi-core scalability: not yet measured (fiber substrate now fixed)
+## Windows multi-core scalability: first datapoint measured (spawn path)
 
-**Status:** OPEN but UNBLOCKED as of the coro_winfiber + slab Win32-fiber
-fixes (above).  The prior hard blocker -- a Win32-fiber-substrate memory
-corruption that made any Windows throughput number meaningless -- is
-RESOLVED (40/40 non-ASan + 3/3 MSVC-ASan clean).  What remains before a
-Seastar/Tokio-style comparison on Windows:
+**Status:** MEASURED on EC2 x86_64 Windows Server 2022 (c7i.4xlarge, 16
+vCPU, MSVC 2022, IOCP backend) via bench/bench_win_scale.c -- a
+portable spawn-throughput probe buildable under cl.exe (public xtc_*
+API + xtc_clock_mono only, no POSIX headers).  The Win32-fiber
+substrate corruption blocker is fixed (above), so these numbers are on
+a sound runtime.
 
-1. **The benchmark suite does not build under MSVC.**  `dist/build_msvc.bat`
-   produces `xtc.lib` + the smoke test only; `bench/*` (bench_exec_scale,
-   bench_million_tasks, bench_mem_per_task, bench_net, bench_disk, the
-   conformance harness) use POSIX `unistd.h` / `clock_gettime` /
-   pthreads.  Porting the harness to the `xtc_*` public clock/thread API
-   (or a small Win32 shim) + adding a Windows bench job is the remaining
-   work.
-2. **The slab magazine is disabled on Windows** (the fiber-TLS fix takes
-   the locked slow path), so a Windows scalability run measures the
-   lock-path allocator, not the magazine fast path.  A FlsAlloc-backed
-   fiber-local magazine would restore the fast path before a serious
-   Windows scale claim.
+Spawn throughput (spawn + immediate-exit child, per-loop drivers,
+per_loop=30000, all runs done==total, fail=0):
 
-CORRECTNESS on Windows/MSVC is now broad (the smoke gate incl. the
-xtc_xproc e2e monitor).  POSIX scalability WAS measured at scale (EC2
-Phase B: Intel m7i.metal-48xl 192 vCPU + Graviton4 m8g.metal-48xl); the
-Windows equivalent is the next step now that the substrate is sound.
+    loops= 1   77 K spawns/s
+    loops= 2  102 K spawns/s
+    loops= 4  127 K spawns/s   <- peak
+    loops= 8   91 K spawns/s
+    loops=16   82 K spawns/s
+
+Two honest findings:
+
+1. **Spawn throughput peaks at 4 loops and regresses past it.**  Root
+   cause: the slab per-thread magazine is DISABLED on Windows (the
+   fiber-TLS fix takes the locked slow path), so every proc-struct /
+   mailbox / monitor-entry allocation contends on the slab's global
+   lock; past ~4 loops that lock is the bottleneck.  A FlsAlloc-backed
+   fiber-local magazine would restore the fast path and is the
+   single highest-value Windows scalability follow-up.
+
+2. **A high-volume ceiling was found AND fixed.**  At per_loop=50000 x
+   16 loops (800 K short-lived procs) only ~422 K children ran
+   (deterministic), because completed coros are not freed until
+   loop_fini (see __xtc_coro_step / loop.c -- true on all platforms)
+   and each accumulated Win32 fiber COMMITTED its full 64 KiB working
+   stack, exhausting the process commit charge (~27 GiB on a 30 GiB
+   box).  Fixed in coro_winfiber.c: CreateFiberEx now commits only a
+   small initial 16 KiB and lets the OS grow the stack up to a >= 1 MiB
+   reserve, so the commit charge is proportional to actual stack use;
+   800 K x 16 loops now completes done==total.  The deeper item --
+   eagerly freeing completed coros instead of accumulating them until
+   loop_fini -- remains a cross-platform improvement (Windows just hit
+   the wall first because of the fiber commit).
+
+A Seastar/Tokio comparison on Windows is now UNBLOCKED but not yet run:
+it wants (a) the FlsAlloc magazine so the fast path is measured, and
+(b) message-throughput + tasks/sec workloads added to
+bench_win_scale.c.  POSIX scalability was measured at scale (EC2 Phase
+B, 192 vCPU); the Windows curve above is the first cross-platform
+datapoint.
 
 ## xtc_xproc end-to-end spawn+monitor on Windows -- RESOLVED
 
