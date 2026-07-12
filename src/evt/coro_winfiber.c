@@ -90,8 +90,24 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 	c->stack_sz = __xtc_stack_size;
 	c->fn = fn;
 	c->arg = arg;
-	c->fiber = CreateFiberEx(c->stack_sz, c->stack_sz, 0,
-	    __coro_entry, c);
+	/*
+	 * CreateFiberEx(dwStackCommitSize, dwStackReserveSize, ...).
+	 * Reserve MUST exceed commit so the stack has growth headroom: a
+	 * Win32 API called from the fiber (exception dispatch, the loader,
+	 * a CRT helper) can push far more than the committed page count,
+	 * and a fiber whose reserve == commit has no room for the guard-
+	 * page-driven auto-grow, so a deep call chain (a proc's exit
+	 * teardown -> xtc_send -> slab, seen faulting under ASan) overflows
+	 * the fiber stack and corrupts adjacent memory.  Commit the
+	 * requested working size; reserve generously (at least 1 MiB, the
+	 * default thread reserve, or 16x the commit, whichever is larger)
+	 * so the OS can grow the stack normally. */
+	{
+		SIZE_T commit = (SIZE_T)c->stack_sz;
+		SIZE_T reserve = commit * 16;
+		if (reserve < (1u << 20)) reserve = (1u << 20);   /* >= 1 MiB */
+		c->fiber = CreateFiberEx(commit, reserve, 0, __coro_entry, c);
+	}
 	if (c->fiber == NULL) {
 		__os_free(c);
 		return XTC_E_INTERNAL;

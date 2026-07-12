@@ -425,91 +425,73 @@ xtc_aio path, and flush via xtc_aio_fsync.  See xtc_bdev(3).
 
 **Status:** intentional -- `_aligned_malloc` returns memory that requires `_aligned_free`, not plain `free`. The hook surface uses a single free path. Keeping the M7 case Windows-skipped is correct.
 
-## Windows multi-core scalability: NOT established (gated on the fiber-substrate fix)
+## Windows multi-core scalability: not yet measured (fiber substrate now fixed)
 
-**Status:** OPEN and explicitly NOT claimed.  libxtc makes no
-Seastar/Tokio-parity scalability claim on Windows/MSVC, and none should
-be made until two prerequisites are met:
+**Status:** OPEN but UNBLOCKED as of the coro_winfiber + slab Win32-fiber
+fixes (above).  The prior hard blocker -- a Win32-fiber-substrate memory
+corruption that made any Windows throughput number meaningless -- is
+RESOLVED (40/40 non-ASan + 3/3 MSVC-ASan clean).  What remains before a
+Seastar/Tokio-style comparison on Windows:
 
-1. **The Win32-fiber substrate memory-safety bug must be fixed first**
-   (see "xtc_xproc end-to-end ... on Windows" below).  ASan on a real
-   MSVC build shows `coro_winfiber.c` corrupting the slab allocator when
-   a proc exits on a fiber.  A throughput/scalability number measured on
-   a runtime whose core fiber substrate faults nondeterministically
-   under proc churn would be meaningless, so scale testing is BLOCKED
-   behind that fix -- not merely undone.
-
-2. **The benchmark suite does not build under MSVC.**  `dist/build_msvc.bat`
+1. **The benchmark suite does not build under MSVC.**  `dist/build_msvc.bat`
    produces `xtc.lib` + the smoke test only; `bench/*` (bench_exec_scale,
    bench_million_tasks, bench_mem_per_task, bench_net, bench_disk, the
    conformance harness) use POSIX `unistd.h` / `clock_gettime` /
-   pthreads and are not compiled or run on Windows.  Establishing
-   Windows scalability requires porting the bench harness to the
-   `xtc_*` public clock/thread API (or a small Win32 shim) and adding a
-   Windows bench job.
+   pthreads.  Porting the harness to the `xtc_*` public clock/thread API
+   (or a small Win32 shim) + adding a Windows bench job is the remaining
+   work.
+2. **The slab magazine is disabled on Windows** (the fiber-TLS fix takes
+   the locked slow path), so a Windows scalability run measures the
+   lock-path allocator, not the magazine fast path.  A FlsAlloc-backed
+   fiber-local magazine would restore the fast path before a serious
+   Windows scale claim.
 
-What IS verified on Windows/MSVC today is CORRECTNESS of a subset (the
-MSVC smoke gate: version/strerror/clocks/slab/lwlock/SEH-fault/IOCP file
-AIO/selective-receive/cross-thread-wakeup, plus the xproc child path),
-NOT scalability limits (CPU cores, RAM-per-task, disk/network
-throughput).  On POSIX, scalability WAS measured at scale (EC2 Phase B:
-Intel m7i.metal-48xl 192 vCPU + Graviton4 m8g.metal-48xl -- scheduler /
-steal / message paths scale to 192 cores; see .agent/PHASE_B_BENCH).
-The Windows equivalent is future work, sequenced AFTER the winfiber
-substrate fix.
+CORRECTNESS on Windows/MSVC is now broad (the smoke gate incl. the
+xtc_xproc e2e monitor).  POSIX scalability WAS measured at scale (EC2
+Phase B: Intel m7i.metal-48xl 192 vCPU + Graviton4 m8g.metal-48xl); the
+Windows equivalent is the next step now that the substrate is sound.
 
-## xtc_xproc end-to-end spawn+monitor on Windows (compiles + child path OK, monitor WIP)
+## xtc_xproc end-to-end spawn+monitor on Windows -- RESOLVED
 
-**Status:** OPEN (documented SKIP in test/msvc/smoke.c).  Validated on
-an EC2 x86_64 Windows Server 2022 box (MSVC 2022 Build Tools -- the first
-x86_64-Windows validation of libxtc; prior MSVC was ARM64/santorini
-only):
+**Status:** RESOLVED (2026-07, EC2 x86_64 Windows Server 2022 + MSVC
+2022).  The full cross-process path now works end to end on Windows:
+CreateProcess re-exec + `--xtc-xproc-child` sentinel + loopback-TCP
+control connect (nonce) + dedicated reader thread + shadow-proc monitor
++ exit-latch loop wakeup deliver a normal DOWN with the child's exit
+reason.  The MSVC smoke test `xtc_xproc: re-exec child
+spawn+send+monitor, DOWN reason=42` is now a HARD GATE (was a SKIP);
+40/40 non-ASan runs pass and 3/3 MSVC-ASan runs are clean.
 
-- The whole tree, including the Windows xtc_xproc port, compiles + links
-  with MSVC x86_64, and all other MSVC smoke checks pass (fault
-  containment, IOCP AIO, cross-thread wakeup, selective receive, fs).
-- The xtc_xproc CHILD path works: CreateProcess re-exec of the binary,
-  the `--xtc-xproc-child` sentinel parse, and the loopback-TCP control
-  connect + nonce all run.
-- The END-TO-END parent spawn+monitor does NOT yet complete: the driver
-  reaches xtc_xspawn_entry (child re-exec confirmed) but xtc_xmonitor
-  does not deliver the child's DOWN (the decoded reason stays at the
-  initial sentinel).  ROOT-CAUSED (v1.14.0 EC2 session): the child's
-  pump proc waited for control-socket frames via xtc_net_recv_frame ->
-  xtc_proc_wait_fd, but the Windows IOCP loop cannot yet wait on an
-  arbitrary socket's readability (the AFD-poll path is unfinished -- the
-  same limitation as the skipped socket-echo smoke), so the child never
-  received the parent's xtc_xsend and never exited.
-- FIX IMPLEMENTED (control channel) + ASAN-CONFIRMED ROOT CAUSE
-  (v1.16.0 EC2 us-east-1 session): the Windows child reads its control
-  socket on a dedicated OS thread (win_reader_thread, blocking recv)
-  forwarding frames to the root proc via a cross-thread xtc_send, and
-  the exit-latch callback nudges the loop with xtc_io_wakeup (NOT a
-  cross-thread xtc_send/__resolve, which deadlocked on tbl->lock -- an
-  SRWLOCK -- against the loop thread's own xtc_monitor).  These are both
-  correct and needed and are kept.
-- The remaining blocker is a SEPARATE, now ASan-CONFIRMED memory-safety
-  bug in the Win32-FIBER coro substrate (src/evt/coro_winfiber.c), NOT
-  in the xproc wiring.  Built with MSVC /fsanitize=address on the box,
-  the e2e run reproducibly reports either an access-violation in
-  xtc_slab_alloc (a near-NULL slab pointer, addr 0x78) reached from
-  xtc_send -> __notify_links_and_monitors -> __proc_entry -> __coro_entry
-  (i.e. a proc EXITING and notifying its monitors, running ON a Win32
-  fiber), or a stack-buffer-overflow (a ~360-byte memset from
-  ntdll->kernel32 landing on a fiber stack).  The nondeterministic
-  crash site + corrupt slab global point to fiber-stack / thread-local
-  corruption in the Win32-fiber substrate under a Win32 API call, not to
-  xtc_xproc.  /GT (fiber-safe TLS) and a 512 KiB stack were both tried
-  and did NOT fix it, so it is not simple TLS-address caching nor raw
-  stack size.  Next step (its own focused session): iterate the MSVC
-  ASan build against coro_winfiber.c -- likely move the per-fiber coro
-  identity off __declspec(thread) onto FlsAlloc (fiber-local storage) and
-  audit every Win32 call made from a fiber for stack-buffer sizing.
-  POSIX xtc_xproc is fully tested (test_xproc, test_sim_xproc,
-  bench_xproc_fanout at 1000 children) and the fcontext/ucontext
-  substrates pass ASan with detect_stack_use_after_return=1; the
-  MSVC-smoke xproc check stays a documented SKIP until the winfiber
-  substrate bug is fixed and the e2e re-runs green on a Windows box.
+Two substrate bugs were the blocker (both fixed), found via MSVC
+AddressSanitizer on the box:
+
+1. **coro_winfiber.c fiber stack was undersized.**  `CreateFiberEx` was
+   called with `dwStackCommitSize == dwStackReserveSize == 64 KiB`,
+   leaving zero growth headroom.  A proc's exit teardown
+   (`__proc_entry -> __notify_links_and_monitors -> xtc_send -> slab`)
+   plus a Win32 API callback (a ~360-byte ntdll memset seen under ASan)
+   overflowed the fiber stack and corrupted adjacent memory (the
+   near-NULL slab-pointer AV).  Fix: reserve generously (>= 1 MiB, or
+   16x the committed working size) so the OS grows the stack normally,
+   committing only the requested size.
+
+2. **The slab per-thread magazine used `__declspec(thread)` (static
+   TLS), which is unsafe under Win32 fibers.**  The compiler may cache
+   the static-TLS base across a `SwitchToFiber`, so a magazine pointer
+   handed to `xtc_slab_alloc` dereferenced a stale TLS block on a
+   resumed fiber -- traced to a hang/corruption at
+   `mag->slots[--mag->n]` inside `__mon_alloc` (the monitor entry
+   allocation), which is exactly the path xtc_xmonitor drives.  Fix:
+   `__tls_mag_for` returns NULL on Windows, so every alloc/free takes
+   the locked slow path (touches no `__declspec(thread)` state, correct
+   on a fiber).  Performance-only tradeoff -- a fiber-local-storage
+   (FlsAlloc) magazine is a later optimization; Windows is not the
+   throughput target yet.
+
+POSIX xtc_xproc (fork/waitpid) and the fcontext/ucontext substrates are
+unchanged.  The reader-thread control channel and the io_wakeup
+exit-callback (which fixed the earlier proc-table-SRWLock deadlock) are
+kept.
 
 ## Fiber-switch sanitizer annotations enable detect_stack_use_after_return=1
 

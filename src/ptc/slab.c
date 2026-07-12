@@ -222,6 +222,23 @@ static struct magazine *
 __tls_mag_for(xtc_slab_t *cache)
 {
 	int i, free_slot = -1;
+#if defined(_WIN32)
+	/*
+	 * Win32-fiber hazard: __tls_mags is __declspec(thread) (static
+	 * TLS).  The runtime is a cooperative Win32-fiber scheduler; the
+	 * compiler may cache the static-TLS base across a SwitchToFiber,
+	 * so a magazine pointer handed to xtc_slab_alloc can dereference a
+	 * stale TLS block on a resumed fiber (traced on Windows EC2 to a
+	 * hang/corruption at mag->slots[--mag->n]).  Disable the per-thread
+	 * magazine on Windows and take the locked slow path, which touches
+	 * no __declspec(thread) state and is correct on a fiber.
+	 * (Performance-only: the lock path is the same one every platform
+	 * uses on a magazine miss; Windows is not the throughput target
+	 * yet, and a fiber-local-storage magazine is a later optimization.)
+	 */
+	(void)cache; (void)i; (void)free_slot;
+	return NULL;
+#else
 	for (i = 0; i < TLS_MAGS; i++) {
 		if (__tls_mags[i].cache == cache) return &__tls_mags[i].mag;
 		if (__tls_mags[i].cache == NULL && free_slot == -1)
@@ -230,6 +247,7 @@ __tls_mag_for(xtc_slab_t *cache)
 	if (free_slot < 0) return NULL;     /* fall back to slow path */
 	__tls_mags[free_slot].cache = cache;
 	return &__tls_mags[free_slot].mag;
+#endif
 }
 
 /* ---- chunks and slabs ---- */
