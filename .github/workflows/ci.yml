@@ -236,6 +236,50 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: make -C build_san check
 
+  tsan-fibers:
+    # ThreadSanitizer over the cooperative-fiber runtime.  TSan needs
+    # each coroutine as a TSan fiber object (__tsan_create/switch/destroy
+    # _fiber), a clang-only compiler-rt feature the coro substrates emit
+    # under XTC_TSAN_FIBERS.  This job proves the fiber suite runs TSan-
+    # clean with clang; gcc TSan has no fiber support (documented), so
+    # this job is clang-only by design.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang make autoconf pkg-config libssl-dev liburing-dev gawk
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure with clang ThreadSanitizer
+        run: |
+          mkdir -p build_tsan
+          cd build_tsan
+          CC=clang \
+          CFLAGS="-fsanitize=thread -fno-omit-frame-pointer -g -O1" \
+          LDFLAGS="-fsanitize=thread" \
+            ../dist/configure --with-io-backend=epoll --with-tls=auto
+      - name: Build
+        run: make -C build_tsan -j"$(nproc)"
+      - name: Fiber suite under TSan (zero warnings required)
+        env:
+          TSAN_OPTIONS: halt_on_error=1:exitcode=66
+        run: |
+          cd build_tsan
+          rc=0
+          for t in test_fctx test_async test_proc test_svr test_chan; do
+            make "$t" >/dev/null 2>&1 || continue
+            echo "=== $t ==="
+            ./"$t" 2>&1 | tee "tsan_$t.log"
+            if grep -q "WARNING: ThreadSanitizer" "tsan_$t.log"; then
+              echo "TSan warning in $t"; rc=1
+            fi
+          done
+          exit $rc
+
   valgrind:
     # Run the runtime under Valgrind's memcheck + Helgrind + DRD over a
     # curated, fast subset of the C unit tests.  The full munit suite is

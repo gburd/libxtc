@@ -66,6 +66,20 @@ struct xtc_coro {
 	 * coro_fctx.c / coro_uctx.c.
 	 */
 	void        *san_fake_stack;
+
+	/*
+	 * TSan fiber-IDENTITY token (clang ThreadSanitizer only).  TSan
+	 * does NOT implement __sanitizer_*_switch_fiber; it needs each
+	 * coroutine represented as a TSan "fiber object" (__tsan_create_
+	 * fiber at create, __tsan_switch_to_fiber at every switch,
+	 * __tsan_destroy_fiber at teardown) so it can carry per-fiber
+	 * happens-before across cooperative switches instead of seeing
+	 * them as one confused thread.  Distinct from san_fake_stack (the
+	 * two sanitizer models are mutually exclusive per build).  Always
+	 * NULL unless built with clang -fsanitize=thread.  See
+	 * XTC_TSAN_FIBERS in coro_fctx.c / coro_uctx.c.
+	 */
+	void        *tsan_fiber;
 };
 
 /* Shared by loop.c -- the currently-running coroutine on this loop.  */

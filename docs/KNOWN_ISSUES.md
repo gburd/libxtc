@@ -513,23 +513,37 @@ only):
 
 ## Fiber-switch sanitizer annotations enable detect_stack_use_after_return=1
 
-**Status:** SHIPPED (v1.13.0).  The fcontext and ucontext coro substrates
-now call `__sanitizer_start_switch_fiber` / `__sanitizer_finish_switch_fiber`
-around every stack switch, so ASan/TSan/LSan track the user-space fiber
-switches instead of mis-attributing stack memory.  The full fiber runtime
-(test_fctx/proc/async/svr/fsm) passes ASan with
-`detect_stack_use_after_return=1` on BOTH substrates -- the capability the
-PG-integration team requested (they previously had to run
-`detect_stack_use_after_return=0`).  Compiled to nothing in a
-non-sanitized build (0 sanitizer references).
+**Status:** SHIPPED (v1.13.0 for ASan; TSan fiber-identity added
+v1.17.0).  The fcontext and ucontext coro substrates annotate every
+user-space stack switch for the sanitizers, using the CORRECT,
+mutually-exclusive API for each:
+  - **ASan/LSan** (`XTC_FIBER_SWITCH_ANNOTATE`, `__SANITIZE_ADDRESS__` /
+    `__has_feature(address_sanitizer)`): the stack-switch API
+    `__sanitizer_start_switch_fiber` / `__sanitizer_finish_switch_fiber`
+    around every switch, so ASan tracks the fiber stacks instead of
+    mis-attributing stack memory.  The full fiber runtime
+    (test_fctx/proc/async/svr/fsm) passes ASan with
+    `detect_stack_use_after_return=1` on BOTH substrates.
+  - **TSan** (`XTC_TSAN_FIBERS`, clang `__has_feature(thread_sanitizer)`
+    only): the fiber-IDENTITY API -- `__tsan_create_fiber` at coro
+    create, `__tsan_switch_to_fiber` at every switch (into a coro, and
+    back to the once-captured scheduler fiber), `__tsan_destroy_fiber`
+    at teardown -- so TSan carries per-fiber happens-before across
+    cooperative switches instead of seeing one confused thread.  TSan
+    does NOT provide `__sanitizer_*_switch_fiber`, so the two guards are
+    mutually exclusive (TSan decided first; a TSan build emits ONLY the
+    identity calls, an ASan build ONLY the stack-switch calls).  A full
+    `clang -fsanitize=thread` libxtc build runs test_fctx/async/proc/
+    svr/chan with ZERO TSan warnings.  clang-only by design: gcc's
+    libtsan has no fiber support, so a gcc TSan build emits no fiber
+    annotations (documented; not a gcc-buildable TSan-with-fibers
+    configuration).  Requested by the PG-integration team and delivered.
 
-**Caveat -- CI is NOW flipped to SUAR=1 (as of v1.13.0).**  The
-separate cross-thread teardown race that previously blocked this (the
-`__notify_links_and_monitors` DOWN-send vs proc-teardown UAF, below) was
-fixed by the proc-struct teardown refcount, so the shared ASan CI job
-now runs `detect_stack_use_after_return=1` on every commit
-(`.github/workflows/ci.yml`).  SUAR=1 is fully usable locally, by
-embedders, and in CI.
+Compiled to nothing in a non-sanitized build (0 sanitizer references,
+verified: `nm libxtc.a | grep __tsan_` is empty).
+
+**CI:** the shared ASan job runs with `detect_stack_use_after_return=1`
+on every commit.
 
 ## __notify_links_and_monitors DOWN-send vs proc-teardown race (RESOLVED)
 
