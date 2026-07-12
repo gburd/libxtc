@@ -383,7 +383,7 @@ xtc_reg_reaper(void *arg)
 				/* Monitor the pid; a DOWN (immediate if it is
 				 * already gone) comes back to us. */
 				(void)xtc_monitor(m.pid, NULL);
-				xtc_free(msg);
+				__os_free(msg);
 				continue;
 			}
 		}
@@ -393,7 +393,7 @@ xtc_reg_reaper(void *arg)
 			(void)reason;
 			(void)xtc_reg_drop_pid(r, down_pid);
 		}
-		xtc_free(msg);
+		__os_free(msg);
 	}
 
 	/* Reaper exiting: clear the published pid so later _register_mon

@@ -219,10 +219,7 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 			if (deadline >= 0) {
 				(void)__os_clock_mono(&now);
 				if (now >= deadline) { rc = XTC_E_AGAIN; break; }
-				if (cur->park_timer != NULL) {
-					(void)xtc_timer_cancel(cur->park_timer);
-					cur->park_timer = NULL;
-				}
+				__xtc_task_cancel_park_timer(cur);
 				(void)xtc_task_park_on_timer(cur, deadline - now);
 			} else {
 				cur->park_requested = 1;
@@ -234,10 +231,7 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 			(void)__xtc_mtx_lock(&n->lock);
 		}
 		fw_remove(&n->wq_head, &n->wq_tail, &w);
-		if (cur->park_timer != NULL) {
-			(void)xtc_timer_cancel(cur->park_timer);
-			cur->park_timer = NULL;
-		}
+		__xtc_task_cancel_park_timer(cur);
 		(void)__xtc_mtx_unlock(&n->lock);
 		return rc;
 	}
@@ -375,10 +369,7 @@ xtc_sem_acquire(xtc_sem_t *s, unsigned n, int64_t timeout_ns)
 				 * prior one first (else park_on_timer returns
 				 * INVAL and the orphan advances the sim clock),
 				 * mirroring lock_mgr.c. */
-				if (cur->park_timer != NULL) {
-					(void)xtc_timer_cancel(cur->park_timer);
-					cur->park_timer = NULL;
-				}
+				__xtc_task_cancel_park_timer(cur);
 				(void)xtc_task_park_on_timer(cur, deadline - now);
 			} else {
 				cur->park_requested = 1;
@@ -391,10 +382,7 @@ xtc_sem_acquire(xtc_sem_t *s, unsigned n, int64_t timeout_ns)
 		}
 		/* Unlink and cancel any lingering timer before returning. */
 		fw_remove(&s->wq_head, &s->wq_tail, &w);
-		if (cur->park_timer != NULL) {
-			(void)xtc_timer_cancel(cur->park_timer);
-			cur->park_timer = NULL;
-		}
+		__xtc_task_cancel_park_timer(cur);
 		goto out;
 	}
 
@@ -1091,10 +1079,10 @@ __rwlock_wait(xtc_rwlock_t *r, int64_t timeout_ns,
 	}
 }
 
-static int __rd_ready(xtc_rwlock_t *r) {
+static int __can_grant_read(xtc_rwlock_t *r) {
 	return !r->writer && r->waiting_writers == 0;
 }
-static int __wr_ready(xtc_rwlock_t *r) {
+static int __can_grant_write(xtc_rwlock_t *r) {
 	return !r->writer && r->readers == 0;
 }
 
@@ -1104,7 +1092,7 @@ xtc_rwlock_rdlock(xtc_rwlock_t *r, int64_t timeout_ns)
 	int rc;
 	if (r == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&r->lock);
-	rc = __rwlock_wait(r, timeout_ns, __rd_ready);
+	rc = __rwlock_wait(r, timeout_ns, __can_grant_read);
 	if (rc == XTC_OK) r->readers++;
 	(void)__xtc_mtx_unlock(&r->lock);
 	return rc;
@@ -1117,7 +1105,7 @@ xtc_rwlock_wrlock(xtc_rwlock_t *r, int64_t timeout_ns)
 	if (r == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&r->lock);
 	r->waiting_writers++;
-	rc = __rwlock_wait(r, timeout_ns, __wr_ready);
+	rc = __rwlock_wait(r, timeout_ns, __can_grant_write);
 	r->waiting_writers--;
 	if (rc == XTC_OK) r->writer = 1;
 	else (void)pthread_cond_broadcast(&r->cv); /* let other readers in */
@@ -1334,10 +1322,7 @@ xtc_gate_drain(xtc_gate_t *g, int64_t timeout_ns)
 			if (deadline >= 0) {
 				(void)__os_clock_mono(&now);
 				if (now >= deadline) { rc = XTC_E_AGAIN; break; }
-				if (cur->park_timer != NULL) {
-					(void)xtc_timer_cancel(cur->park_timer);
-					cur->park_timer = NULL;
-				}
+				__xtc_task_cancel_park_timer(cur);
 				(void)xtc_task_park_on_timer(cur, deadline - now);
 			} else {
 				cur->park_requested = 1;
@@ -1349,10 +1334,7 @@ xtc_gate_drain(xtc_gate_t *g, int64_t timeout_ns)
 			(void)__xtc_mtx_lock(&g->lock);
 		}
 		fw_remove(&g->wq_head, &g->wq_tail, &w);
-		if (cur->park_timer != NULL) {
-			(void)xtc_timer_cancel(cur->park_timer);
-			cur->park_timer = NULL;
-		}
+		__xtc_task_cancel_park_timer(cur);
 		(void)__xtc_mtx_unlock(&g->lock);
 		return rc;
 	}
