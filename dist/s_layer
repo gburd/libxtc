@@ -1,0 +1,93 @@
+#!/bin/sh
+# dist/s_layer
+# Lint tool: enforce the libxtc layering.  Layers, low to high:
+#   L0 src/os/   L1 src/io/   L2 src/evt/   L3 src/ptc/   L4 src/orc/
+# A .c file in a given layer must NOT #include a header OWNED BY A
+# STRICTLY-HIGHER layer.  (Same-layer and downward includes are fine;
+# the public umbrella xtc.h and internal xtc_int.h are layer-neutral.)
+#
+# Header ownership (by the layer that implements it):
+#   L1 io  : xtc_io.h xtc_net.h xtc_aio.h xtc_bdev.h xtc_iosched.h io_int.h io_ext.h
+#   L2 evt : xtc_loop.h xtc_async.h xtc_exec.h loop_int.h coro_int.h coro_common.h
+#   L3 ptc : xtc_proc.h xtc_chan.h xtc_sync.h xtc_lockmgr.h xtc_lrlock.h
+#            xtc_lwlock.h xtc_rcu.h xtc_mctx.h xtc_blocking.h xtc_pdict.h xtc_res.h
+#   L4 orc : xtc_svr.h xtc_supervisor.h xtc_reg.h xtc_pg.h xtc_fsm.h xtc_stream.h
+#            xtc_credit.h xtc_pool.h xtc_app.h xtc_launch.h xtc_xproc.h
+#            xtc_osproc.h xtc_tnt.h
+#
+# NOT layer-owned (deliberately usable from any layer >= L1):
+#   xtc_slab.h  -- the slab CORE is an allocator primitive that depends
+#                  only on the __os_* substrate (the L3-dependent
+#                  reaper convenience lives in src/ptc/slab_reaper.c).
+#                  The L2 event loop uses it for the per-loop timer
+#                  slab; that is by design, not a violation.
+#
+# Justified single-line exceptions carry a `/* XTC_LAYER_OK: reason */`
+# marker ON the #include line.  The one standing exception is
+# src/io/io_net.c including xtc_proc.h for the cooperative-wait frame
+# helpers (documented "Layering note" in that file; off a loop they
+# fall back to poll(2)).
+#
+# Returns non-zero on any unjustified upward include.
+
+set -eu
+
+DIST_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$DIST_DIR/.." && pwd)
+SRC="$ROOT/src"
+
+# Space-separated header lists per layer.
+L1_HDRS='xtc_io.h xtc_net.h xtc_aio.h xtc_bdev.h xtc_iosched.h io_int.h io_ext.h'
+L2_HDRS='xtc_loop.h xtc_async.h xtc_exec.h loop_int.h coro_int.h coro_common.h'
+L3_HDRS='xtc_proc.h xtc_chan.h xtc_sync.h xtc_lockmgr.h xtc_lrlock.h xtc_lwlock.h xtc_rcu.h xtc_mctx.h xtc_blocking.h xtc_pdict.h xtc_res.h'
+L4_HDRS='xtc_svr.h xtc_supervisor.h xtc_reg.h xtc_pg.h xtc_fsm.h xtc_stream.h xtc_credit.h xtc_pool.h xtc_app.h xtc_launch.h xtc_xproc.h xtc_osproc.h xtc_tnt.h'
+
+VIOL_FILE=$(mktemp)
+trap 'rm -f "$VIOL_FILE"' EXIT
+
+# For a layer number, echo the space-joined headers of every STRICTLY
+# HIGHER layer (the set a file in that layer must not include).
+higher_hdrs() {
+	case "$1" in
+	0) echo "$L1_HDRS $L2_HDRS $L3_HDRS $L4_HDRS" ;;
+	1) echo "$L2_HDRS $L3_HDRS $L4_HDRS" ;;
+	2) echo "$L3_HDRS $L4_HDRS" ;;
+	3) echo "$L4_HDRS" ;;
+	4) echo "" ;;
+	esac
+}
+
+check_layer() {
+	dir="$1"; num="$2"
+	forbidden=$(higher_hdrs "$num")
+	[ -n "$forbidden" ] || return 0
+	find "$SRC/$dir" -name '*.c' -type f 2>/dev/null | while IFS= read -r f; do
+		for h in $forbidden; do
+			# Match an #include "h" line without an XTC_LAYER_OK marker.
+			grep -n "#[ 	]*include[ 	]*\"$h\"" "$f" 2>/dev/null | \
+			while IFS= read -r line; do
+				case "$line" in
+				*XTC_LAYER_OK*) : ;;   # justified exception
+				*) printf '%s: L%s file includes higher-layer %s\n' \
+					"${f#"$ROOT"/}" "$num" "$h" >> "$VIOL_FILE" ;;
+				esac
+			done
+		done
+	done
+}
+
+check_layer os  0
+check_layer io  1
+check_layer evt 2
+check_layer ptc 3
+check_layer orc 4
+
+if [ -s "$VIOL_FILE" ]; then
+	echo "[layer] FAIL: upward include(s) violate the L0<-L1<-L2<-L3<-L4 layering:" >&2
+	cat "$VIOL_FILE" >&2
+	echo "  (a rare justified case carries /* XTC_LAYER_OK: reason */ on the #include line)" >&2
+	exit 1
+fi
+
+echo "[layer] OK: no unjustified upward includes across the five layers"
+exit 0
