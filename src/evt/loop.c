@@ -29,6 +29,11 @@ void *(*__xtc_fiber_ctx_save)(void) = NULL;
 void  (*__xtc_fiber_ctx_restore)(void *) = NULL;
 void  (*__xtc_fiber_kill_check)(void) = NULL;
 
+/* Loop-fini hook; installed by the process layer (proc.c) so the loop
+ * can release its per-loop proc table at fini without depending on the
+ * L3 proc layer directly.  NULL until a process is spawned. */
+void  (*__xtc_loop_fini_hook)(xtc_loop_t *loop) = NULL;
+
 /* --- inbox ---------------------------------------------------------- */
 
 int
@@ -221,7 +226,8 @@ xtc_loop_fini(xtc_loop_t *loop)
 
 	if (loop == NULL) return XTC_E_INVAL;
 
-	__xtc_proc_loop_unregister(loop);
+	if (__xtc_loop_fini_hook != NULL)
+		__xtc_loop_fini_hook(loop);
 
 	for (t = loop->all_tasks; t != NULL; t = next_t) {
 		next_t = t->all_next;

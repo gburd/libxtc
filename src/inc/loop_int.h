@@ -255,7 +255,6 @@ int  __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev);
  * proc-table side struct hashed against this loop pointer.  Must be
  * idempotent. */
 void __xtc_proc_loop_unregister(xtc_loop_t *loop);
-
 /* Inbox API.  Producer-side functions are thread-safe. */
 int  __xtc_inbox_init(struct xtc_inbox *ib);
 void __xtc_inbox_fini(struct xtc_inbox *ib);
@@ -289,6 +288,14 @@ extern void  (*__xtc_fiber_ctx_restore)(void *);
  * layer is present (bare coroutine use).  Returns without effect if no
  * kill is pending. */
 extern void  (*__xtc_fiber_kill_check)(void);
+
+/* Loop-fini hook.  Installed by the process layer (proc.c) on first
+ * spawn; lets xtc_loop_fini release the loop's per-loop proc table
+ * without the L2 loop depending on the L3 proc layer directly (the
+ * loop calls the hook, proc.c points it at __xtc_proc_loop_unregister).
+ * NULL when no process layer is in use, so a bare-coroutine loop has
+ * nothing to clean up. */
+extern void  (*__xtc_loop_fini_hook)(xtc_loop_t *loop);
 
 /* Forward declaration for back-pointer in xtc_loop. */
 struct xtc_exec;
