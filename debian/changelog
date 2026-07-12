@@ -1,3 +1,31 @@
+libxtc (1.15.0-1) unstable; urgency=medium
+
+  * Windows xtc_xproc control channel now uses a dedicated reader thread.
+    Root-caused the v1.14.0 Windows end-to-end monitor hang: the child's
+    pump proc waited for control-socket frames via xtc_proc_wait_fd, but
+    the Windows IOCP loop cannot yet wait on an arbitrary socket's
+    readability (the AFD-poll path is unfinished), so the child never
+    received the parent's message and never exited.  Fix: the Windows
+    child reads the control socket on a dedicated OS thread (blocking
+    recv) and forwards frames to the root proc via a cross-thread
+    xtc_send, sidestepping the socket-readiness gap -- the same approach
+    the BEAM uses for Windows port I/O.  POSIX xtc_xproc is unchanged and
+    fully tested; the Windows reader-thread path compiles clean (MinGW +
+    MSVC in CI) and awaits an EC2 Windows box for end-to-end
+    re-validation, so the MSVC-smoke xproc check stays a documented SKIP
+    (KNOWN_ISSUES records it as implemented-pending-validation).
+  * Benchmark note (not a code change): the reuse-mode loops=1->4
+    throughput dip observed on the EC2 192-core box is a placement
+    artifact, not a runtime bug -- libxtc deliberately does not pin loop
+    threads (the embedder pins), so at low core counts the OS floats the
+    reschedule-heavy threads across both NUMA sockets and work-stealing
+    thrashes cross-socket cache.  Documented; numactl pinning is the
+    benchmark-side fix.
+  * No public API change from 1.14.0; a Windows-only internal
+    reorganization of the xtc_xproc child runtime.
+
+ -- Greg Burd <greg@burd.me>  Sat, 11 Jul 2026 21:43:35 -0400
+
 libxtc (1.14.0-1) unstable; urgency=medium
 
   * Fiber-stack pool (both coro substrates): a per-thread, bounded pool
