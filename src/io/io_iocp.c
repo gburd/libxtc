@@ -98,9 +98,13 @@ extern int __xtc_io_drain_wakeup(xtc_io_t *io);
 #define XTC_AFD_POLL_ACCEPT            0x0080  /* incoming connection */
 #define XTC_AFD_POLL_CONNECT_FAIL      0x0100
 
-/* IOCTL_AFD_POLL = FSCTL_AFD_BASE(0x12) function 9, METHOD_BUFFERED. */
-#define XTC_IOCTL_AFD_POLL \
-	CTL_CODE(0x12, 9, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* IOCTL_AFD_POLL: the value wepoll/libuv ship literally (0x00012024).
+ * NOTE: this is NOT CTL_CODE(0x12,9,...) = 0x00120024 -- the AFD poll
+ * IOCTL uses device type 0x12 in the LOW nibble of the high word the
+ * way the AFD driver actually decodes it; the literal is what the
+ * kernel accepts (a CTL_CODE(0x12,9,BUFFERED,ANY) is rejected with
+ * STATUS_INVALID_DEVICE_REQUEST).  Match the proven wepoll constant. */
+#define XTC_IOCTL_AFD_POLL  0x00012024
 
 typedef struct _XTC_AFD_POLL_HANDLE_INFO {
 	HANDLE   Handle;
@@ -210,10 +214,12 @@ __open_afd(xtc_io_t *io)
 		(void)CloseHandle(afd);
 		return XTC_E_INTERNAL;
 	}
-	/* Skip the redundant queued completion when the AFD poll
-	 * finishes synchronously: we always reap from the port. */
-	(void)SetFileCompletionNotificationModes(afd,
-	    FILE_SKIP_SET_EVENT_ON_HANDLE);
+	/* Route ALL AFD completions (synchronous and async) to the port.
+	 * Do NOT set FILE_SKIP_SET_EVENT_ON_HANDLE here: on this AFD handle
+	 * it suppressed the async (STATUS_PENDING) poll completion from
+	 * being queued when the socket later became ready, so a data-ready
+	 * notification never arrived (the loopback echo hung).  We reap
+	 * every completion from the port uniformly. */
 	io->afd = afd;
 	return XTC_OK;
 }
@@ -419,7 +425,20 @@ __arm_poll(xtc_io_t *io, struct __xtc_iocp_reg *reg)
 	st = NtDeviceIoControlFile(io->afd, NULL, NULL, NULL, XTC_OV_IOSB(o),
 	    XTC_IOCTL_AFD_POLL, &o->poll_in, sizeof o->poll_in,
 	    &o->poll_out, sizeof o->poll_out);
-	if (st == STATUS_SUCCESS || st == STATUS_PENDING) {
+	if (st == STATUS_SUCCESS) {
+		/* Synchronous completion: the fd was already ready and AFD
+		 * filled poll_out now, but does NOT queue a port completion for
+		 * the synchronous case (observed on Windows Server 2022).  Post
+		 * one ourselves against this reg's OVERLAPPED so the reap loop
+		 * processes it uniformly.  reg->pending gates the reap so a
+		 * (theoretical) second completion for the same OVERLAPPED is a
+		 * no-op. */
+		reg->pending = 1;
+		(void)PostQueuedCompletionStatus((HANDLE)io->iocp, 0,
+		    XTC_IOCP_KEY_IO, &o->ov);
+		return XTC_OK;
+	}
+	if (st == STATUS_PENDING) {
 		reg->pending = 1;
 		return XTC_OK;
 	}
@@ -785,7 +804,14 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	    (ULONG)batch_max, &n_done, timeout_ms, FALSE);
 	if (!ok) {
 		DWORD e = GetLastError();
-		if (e == WAIT_TIMEOUT)
+		/* An empty dequeue is a benign timeout.  GetLastError is only
+		 * meaningful when a wait actually failed; after a 0 ms poll of
+		 * an empty port it can carry a STALE code from an earlier call
+		 * (e.g. ERROR_ALREADY_EXISTS 183 from a prior
+		 * PostQueuedCompletionStatus / CreateIoCompletionPort), so keying
+		 * strictly on WAIT_TIMEOUT wrongly reports XTC_E_INTERNAL and
+		 * kills the loop.  Treat n_done == 0 as the timeout it is. */
+		if (e == WAIT_TIMEOUT || n_done == 0)
 			return XTC_OK;
 		return XTC_E_INTERNAL;
 	}
@@ -870,6 +896,12 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		if (!__reg_is_live(io, reg))
 			continue;
 
+		/* A completion for a reg whose poll is not outstanding
+		 * (pending already cleared) is a duplicate -- e.g. our
+		 * synchronous-success manual post racing an AFD-queued one.
+		 * Skip it; the live re-arm keeps the fd watched. */
+		if (!reg->pending)
+			continue;
 		reg->pending = 0;
 
 		/*

@@ -262,17 +262,40 @@ loopback socket echo` line rather than failing, so a genuine AFD-poll
 bug surfaces without blocking the two proven IOCP additions.  Chasing
 the AFD echo to green is the remaining IOCP runtime-verification item.
 
-**Status note (2026-07):** this is HOST-BLOCKED, not code-deferred.  The
-failure is a runtime behavior of the `\Device\Afd` `IOCTL_AFD_POLL`
-interface (the completion arrives, or the re-arm timing, differs from
-the wepoll/libuv reference in a way that only shows on a real Windows
-kernel) -- it cannot be blind-fixed or verified from a cross-compile;
-it needs an interactive MSVC Windows host to observe the poll_out
-events and the re-arm ordering.  A speculative change to the AFD path
-is deliberately NOT made, because the file-AIO and cross-thread-wakeup
-IOCP paths that share this file DO pass on Windows and must not be
-regressed by an unverifiable edit.  Deferred to the next Windows-host
-session (the burner-account credentials were unavailable at this time).
+**Status note (2026-07):** substantial progress on an MSVC Windows host
+(Windows Server 2022, EC2); THREE real bugs found and fixed, one
+remains:
+1. FIXED -- the AFD poll IOCTL code was wrong.  It was built as
+   CTL_CODE(0x12, 9, METHOD_BUFFERED, FILE_ANY_ACCESS) = 0x00120024;
+   the AFD driver rejected every poll with STATUS_INVALID_DEVICE_REQUEST
+   (0xC0000010).  The value the kernel accepts is the wepoll/libuv
+   literal 0x00012024.  After the fix NtDeviceIoControlFile returns
+   STATUS_SUCCESS/PENDING.
+2. FIXED -- a stale-GetLastError loop-killer.  On an empty 0 ms poll,
+   GetQueuedCompletionStatusEx returns FALSE with n_done == 0 but
+   GetLastError can carry a STALE code (e.g. ERROR_ALREADY_EXISTS 183)
+   rather than WAIT_TIMEOUT, so xtc_io_poll wrongly returned
+   XTC_E_INTERNAL and killed the loop.  Now treats n_done == 0 as the
+   benign timeout it is.
+3. FIXED -- synchronous AFD completions.  When the fd is already ready
+   the poll IOCTL returns STATUS_SUCCESS and does NOT queue a port
+   completion, so accept-ready / connect-complete were never reaped.
+   The arm now posts a self-completion for the synchronous case; a
+   reg->pending guard makes a duplicate a no-op.  Accept and connect
+   readiness now flow (verified: the server accepts, the client
+   connects + sends).
+4. STILL OPEN -- the ASYNC (STATUS_PENDING) AFD poll does not complete
+   when the socket LATER becomes ready.  The loopback echo gets as far
+   as accept + connect + the client's send, then the server's PENDING
+   READABLE poll on the accepted socket never fires on data arrival, so
+   the echo does not complete (the smoke stays a clean SKIP, not a
+   failure -- all other IOCP paths pass).  This is the remaining
+   AFD-internals piece (the data-ready notification on an outstanding
+   async poll) and needs deeper reverse-engineering of the wepoll
+   AFD_POLL_INFO / base-handle handling; it is NOT blind-fixable.  The
+   three fixes above are real improvements and are kept; the file-AIO,
+   cross-thread-wakeup, selective-receive, and xtc_xproc IOCP paths all
+   still pass on the host.
 
 ### Round 2 (current source): native completion port + AFD poll
 
@@ -469,19 +492,23 @@ per_loop=30000, all runs done==total, fail=0):
 Two honest findings:
 
 1. **Spawn throughput peaks at 4 loops and regresses past it** (as
-   measured at the time).  Root cause: the slab per-thread magazine
-   had been DISABLED on Windows (the interim fiber-TLS fix took the
-   locked slow path), so every proc-struct / mailbox / monitor-entry
-   allocation contended on the slab's global lock; past ~4 loops that
-   lock was the bottleneck.  FIXED: the slab magazine is now backed by
-   Fiber Local Storage (FlsAlloc/FlsGetValue/FlsSetValue) on Windows --
-   an FLS slot correctly follows the fiber across SwitchToFiber, unlike
-   __declspec(thread) static TLS (which was the original corruption
-   cause).  The FlsAlloc callback frees each fiber's magazine on fiber
-   exit.  IMPLEMENTED and MinGW-API-verified; the re-measurement of the
-   scaling curve on the fast path awaits an MSVC Windows host (deferred:
-   the EC2 benchmark is parked, and the burner-account credentials were
-   unavailable at implementation time).
+   measured).  This is NOT the slab allocator: the FlsAlloc fiber-local
+   magazine (below) is validated engaging (a slab alloc/free microbench
+   on the MSVC host shows fast=2,000,000 slow=256 -- every op hits the
+   fast path -- at 26.3 M ops/s), and re-measuring the spawn curve WITH
+   the magazine active gives the SAME shape (74K->129K peak at 4 loops
+   ->83K at 16).  So the spawn bottleneck past 4 loops is cross-loop
+   work-steal cache thrash + OS thread placement (the same NUMA/steal
+   placement characteristic documented for the Linux reuse benchmark),
+   not allocation.  All runs correct (spawn_ok==done, fail=0).
+   The slab magazine is now FlsAlloc-backed on Windows and VALIDATED on
+   an MSVC host (Windows Server 2022, c7i.4xlarge): FlsAlloc/
+   FlsGetValue/FlsSetValue give each fiber its own tls_mag array that
+   correctly follows the fiber across SwitchToFiber, unlike the
+   __declspec(thread) static TLS (the original corruption cause); the
+   FlsAlloc callback frees it on fiber exit.  The MSVC smoke
+   (slab round-trip + the xtc_xproc DOWN-reason=42 path, which drives
+   __mon_alloc through the slab on a fiber) passes with no crash/hang.
 
 2. **A high-volume ceiling was found AND fixed.**  At per_loop=50000 x
    16 loops (800 K short-lived procs) only ~422 K children ran
