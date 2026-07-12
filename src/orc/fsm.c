@@ -224,19 +224,19 @@ fsm_entry(void *arg)
 		}
 		if (rc != XTC_OK)
 			break;
-		if (size == 0) { xtc_free(msg); continue; }
+		if (size == 0) { __os_free(msg); continue; }
 
 		kind = ((uint8_t *)msg)[0];
 
 		if (size == 1 && kind == 'S') {   /* stop kick */
-			xtc_free(msg);
+			__os_free(msg);
 			break;
 		}
 
 		if (kind == 'E') {
 			const void *pl = size > 1 ? (uint8_t *)msg + 1 : NULL;
 			running = fsm_dispatch(r, pl, size - 1, NULL, &stop_reason);
-			xtc_free(msg);
+			__os_free(msg);
 		} else if (kind == 'C' && size >= 13) {
 			struct xtc_fsm_call call;
 			const void *pl;
@@ -249,9 +249,9 @@ fsm_entry(void *arg)
 			 * gets an empty reply so the caller does not hang. */
 			if (!call.replied)
 				(void)xtc_fsm_reply(&call, NULL, 0);
-			xtc_free(msg);
+			__os_free(msg);
 		} else {
-			xtc_free(msg);   /* malformed */
+			__os_free(msg);   /* malformed */
 		}
 	}
 
@@ -422,7 +422,7 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 					if (out_reply != NULL && plen > 0) {
 						void *copy;
 						if (__os_malloc(plen, &copy) != XTC_OK) {
-							xtc_free(rmsg);
+							__os_free(rmsg);
 							return XTC_E_NOMEM;
 						}
 						memcpy(copy, (uint8_t *)rmsg + 4, plen);
@@ -431,13 +431,13 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 						*out_reply = NULL;
 					}
 					if (out_size != NULL) *out_size = plen;
-					xtc_free(rmsg);
+					__os_free(rmsg);
 					return XTC_OK;
 				}
 			}
 			/* Not our reply -- drop it (fsm callers do not multiplex
 			 * unrelated traffic on the calling proc). */
-			xtc_free(rmsg);
+			__os_free(rmsg);
 		}
 	}
 }

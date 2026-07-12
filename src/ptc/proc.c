@@ -1602,10 +1602,7 @@ deliver:
 	 * or has already fired.  Without this, a recv that was woken by
 	 * the waker leaves a stale timer in the heap, keeping the loop
 	 * alive until the deadline (a needless wait of up to timeout_ns). */
-	if (self->task->park_timer != NULL) {
-		(void)xtc_timer_cancel(self->task->park_timer);
-		self->task->park_timer = NULL;
-	}
+	__xtc_task_cancel_park_timer(self->task);
 	{
 		void *buf = NULL;
 		if (e->size > 0) {

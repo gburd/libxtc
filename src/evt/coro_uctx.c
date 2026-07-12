@@ -197,96 +197,9 @@ static XTC_THREAD_LOCAL volatile int g_in_preempt;
 	g_in_preempt = 0;                                              \
 } while (0)
 
-/* ---- Fiber-stack pool (per-thread) --------------------------------
- * Recycle freed fiber stacks so a spawn skips the mmap + the
- * mmap_lock-serializing mprotect(guard).  See the matching block in
- * coro_fctx.c for the full rationale (the EC2 192-core spawn ceiling).
- * Thread-local, bounded, single-size. */
-#define XTC_STACK_POOL_MAX 64
-struct stack_pool {
-	void   *slots[XTC_STACK_POOL_MAX];
-	size_t  size;
-	int     n;
-};
-static XTC_THREAD_LOCAL struct stack_pool __stack_pool;
-
-static void *
-__stack_pool_get(size_t stack_sz)
-{
-	struct stack_pool *p = &__stack_pool;
-	if (p->n > 0 && p->size == stack_sz)
-		return p->slots[--p->n];
-	return NULL;
-}
-
-static int
-__stack_pool_put(void *base, size_t stack_sz)
-{
-	struct stack_pool *p = &__stack_pool;
-	if (p->n == 0) p->size = stack_sz;
-	if (p->size != stack_sz || p->n == XTC_STACK_POOL_MAX)
-		return 0;
-	p->slots[p->n++] = base;
-	return 1;
-}
-
-/* ---- Lever S1: stack-memory reclamation on park (see xtc_async.h) -- */
-#if defined(MADV_DONTNEED)
-#include <stdatomic.h>
-#include <stdint.h>
-static _Atomic int      g_reclaim_on = 0;
-static _Atomic size_t   g_reclaim_keep = 0;
-static _Atomic uint64_t g_reclaim_count = 0;
-
-int
-xtc_stack_reclaim_enable(size_t keep_bytes)
-{
-	long pg = sysconf(_SC_PAGESIZE);
-	size_t page = (pg > 0) ? (size_t)pg : 4096u;
-	if (keep_bytes == 0)
-		keep_bytes = page;
-	atomic_store(&g_reclaim_keep, keep_bytes);
-	atomic_store(&g_reclaim_on, 1);
-	return XTC_OK;
-}
-
-void     xtc_stack_reclaim_disable(void) { atomic_store(&g_reclaim_on, 0); }
-int      xtc_stack_reclaim_enabled(void) { return atomic_load(&g_reclaim_on); }
-uint64_t xtc_stack_reclaim_count(void)   { return atomic_load(&g_reclaim_count); }
-
-/* Reclaim the unused tail below `sp` (stacks grow down); see the
- * coro_fctx.c twin for the geometry rationale. */
-static void
-coro_stack_shrink(struct xtc_coro *c, void *sp)
-{
-	long pgl;
-	size_t page, keep;
-	uintptr_t lo, hi, guard, base;
-
-	if (c == NULL || c->stack == NULL || !atomic_load(&g_reclaim_on))
-		return;
-	pgl = sysconf(_SC_PAGESIZE);
-	page = (pgl > 0) ? (size_t)pgl : 4096u;
-	guard = page;
-	keep = atomic_load(&g_reclaim_keep);
-	base = (uintptr_t)c->stack + guard;
-	hi = (uintptr_t)sp;
-	if (hi <= base + keep)
-		return;
-	hi = (hi - keep) & ~(uintptr_t)(page - 1);
-	lo = (base + page - 1) & ~(uintptr_t)(page - 1);
-	if (hi <= lo || hi - lo < page)
-		return;
-	if (madvise((void *)lo, (size_t)(hi - lo), MADV_DONTNEED) == 0)
-		(void)atomic_fetch_add(&g_reclaim_count, 1);
-}
-#else
-int      xtc_stack_reclaim_enable(size_t k) { (void)k; return XTC_E_NOSYS; }
-void     xtc_stack_reclaim_disable(void) { }
-int      xtc_stack_reclaim_enabled(void) { return 0; }
-uint64_t xtc_stack_reclaim_count(void) { return 0; }
-#define coro_stack_shrink(c, sp)  ((void)(c), (void)(sp))
-#endif
+/* Fiber-stack pool + S1 stack-reclaim lever: shared with coro_fctx.c
+ * (both mmap their stacks).  See src/inc/coro_common.h. */
+#include "coro_common.h"
 
 /*
  * The trampoline that runs as the fiber's entry point.  We pull the

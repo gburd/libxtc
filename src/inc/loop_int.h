@@ -248,6 +248,7 @@ int  __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 int  __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t);
 xtc_timer_t *__xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns);
 int64_t      __xtc_timer_heap_next_deadline(xtc_loop_t *loop);
+void __xtc_task_cancel_park_timer(xtc_task_t *self);
 int  __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev);
 
 /* Implemented in proc.c.  Called from loop_fini to release the

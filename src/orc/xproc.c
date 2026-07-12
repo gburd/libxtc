@@ -139,7 +139,7 @@ child_pump_proc(void *a)
 			if (frame != NULL && flen > 0)
 				(void)xtc_send(pp->root, frame, flen);
 			if (frame != NULL)
-				xtc_free(frame);
+				__os_free(frame);
 			continue;
 		}
 		if (frc == XTC_E_AGAIN) {
@@ -151,13 +151,13 @@ child_pump_proc(void *a)
 				if (xtc_down_decode_ex(m, mn, &di) == XTC_OK &&
 				    pp->exit_code != NULL)
 					*pp->exit_code = di.reason;
-				if (m) xtc_free(m);
+				if (m) __os_free(m);
 				return;   /* root gone -> stop pumping */
 			}
 			continue;
 		}
 		/* Channel closed (parent went away): stop. */
-		if (frame != NULL) xtc_free(frame);
+		if (frame != NULL) __os_free(frame);
 		return;
 	}
 }
@@ -585,7 +585,7 @@ win_shadow_proc(void *a)
 	void *m = NULL; size_t n = 0;
 	while (!atomic_load(&p->exited)) {
 		if (xtc_recv(&m, &n, 20LL * 1000 * 1000) == XTC_OK && m) {
-			xtc_free(m); m = NULL;
+			__os_free(m); m = NULL;
 		}
 	}
 	sig = __ntstatus_to_signal(p->exit_code);
@@ -800,7 +800,7 @@ xtc_xproc_win_child_maybe(int argc, char **argv)
 	if (fn == NULL) { closesocket(c); return 4; }
 
 	r = xtc_xproc_child_main((int)c, fn, arg);
-	if (arg != NULL) xtc_free(arg);
+	if (arg != NULL) __os_free(arg);
 	closesocket(c);
 	_exit(r & 0xff);
 	return r;   /* unreached */
@@ -870,7 +870,7 @@ win_rootmon_proc(void *a)
 		if (xtc_down_decode_ex(msg, n, &di) == XTC_OK && m->exit_code)
 			*m->exit_code = di.reason;
 	}
-	if (msg) xtc_free(msg);
+	if (msg) __os_free(msg);
 	(void)xtc_loop_stop(m->loop);
 }
 

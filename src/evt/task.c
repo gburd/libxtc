@@ -302,6 +302,22 @@ xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 }
 
 /*
+ * Cancel a task's park timer if one is armed, and clear the field.  A
+ * no-op if none is armed.  Consolidates the cancel-and-NULL idiom that
+ * every re-parking waiter loop (sync.c notify/sem/gate, lock_mgr.c
+ * acquire, proc.c recv) would otherwise repeat inline.  Declared in
+ * loop_int.h (internal; park_timer is a task-struct internal).
+ */
+void
+__xtc_task_cancel_park_timer(xtc_task_t *self)
+{
+	if (self != NULL && self->park_timer != NULL) {
+		(void)xtc_timer_cancel(self->park_timer);
+		self->park_timer = NULL;
+	}
+}
+
+/*
  * PUBLIC: int xtc_task_park_on_fd __P((xtc_task_t *, int, uint32_t));
  *
  * The tag we hand to xtc_io is the task pointer itself; the loop's

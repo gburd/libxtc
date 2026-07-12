@@ -589,10 +589,7 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 				 * park_on_timer returns INVAL and the orphan
 				 * keeps advancing the sim clock (mirrors the
 				 * xtc_recv park-timer discipline in proc.c). */
-				if (cur->park_timer != NULL) {
-					(void)xtc_timer_cancel(cur->park_timer);
-					cur->park_timer = NULL;
-				}
+				__xtc_task_cancel_park_timer(cur);
 				(void)xtc_task_park_on_timer(cur,
 				    deadline - now);
 			} else {
@@ -609,10 +606,7 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		}
 		/* Stopped parking: cancel any timer still armed so it does
 		 * not linger in the heap and advance the sim clock. */
-		if (cur->park_timer != NULL) {
-			(void)xtc_timer_cancel(cur->park_timer);
-			cur->park_timer = NULL;
-		}
+		__xtc_task_cancel_park_timer(cur);
 	} else {
 		for (;;) {
 			if (atomic_load_explicit(&e->aborted,
