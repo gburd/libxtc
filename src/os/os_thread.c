@@ -280,3 +280,19 @@ __os_thread_set_affinity(int cpu)
 	return XTC_E_NOSYS;
 #endif
 }
+
+/*
+ * Run fn exactly once across all threads racing on *once.  pthread_once
+ * is the POSIX mechanism (InitOnceExecuteOnce on the coming Win32
+ * backing, via the same __os_once_t shape).  Replaces hand-rolled
+ * set-once guards with one race-free primitive.
+ *
+ * PUBLIC: int __os_call_once __P((__os_once_t *, void (*)(void)));
+ */
+int
+__os_call_once(__os_once_t *once, void (*fn)(void))
+{
+	if (once == NULL || fn == NULL)
+		return XTC_E_INVAL;
+	return pthread_once(once, fn) == 0 ? XTC_OK : XTC_E_INTERNAL;
+}

@@ -7,6 +7,7 @@
 
 #include "munit.h"
 #include "xtc_int.h"
+#include <stdint.h>   /* intptr_t for the atexit arg round-trip */
 
 /* [Mu1] basic */
 static MunitResult
@@ -101,9 +102,9 @@ test_rwlock_excludes_writer(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	munit_assert_int(__os_rwlock_init(&r), ==, XTC_OK);
 	munit_assert_int(__os_rwlock_rdlock(&r), ==, XTC_OK);
-	munit_assert_int(__os_rwlock_unlock(&r), ==, XTC_OK);
+	munit_assert_int(__os_rwlock_rdunlock(&r), ==, XTC_OK);
 	munit_assert_int(__os_rwlock_wrlock(&r), ==, XTC_OK);
-	munit_assert_int(__os_rwlock_unlock(&r), ==, XTC_OK);
+	munit_assert_int(__os_rwlock_wrunlock(&r), ==, XTC_OK);
 	munit_assert_int(__os_rwlock_destroy(&r), ==, XTC_OK);
 	return MUNIT_OK;
 }
@@ -159,6 +160,64 @@ test_sem_post_wait(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* [Mu7] call_once: fn runs exactly once across N racing threads. */
+static __os_once_t mu7_once = XTC_OS_ONCE_INIT;
+static int         mu7_count;
+static void mu7_init(void) { mu7_count++; }
+static void *mu7_worker(void *arg) {
+	(void)arg;
+	(void)__os_call_once(&mu7_once, mu7_init);
+	return NULL;
+}
+static MunitResult
+test_call_once(const MunitParameter p[], void *d)
+{
+	__os_thread_t t[8];
+	int i;
+	(void)p; (void)d;
+	mu7_count = 0;
+	for (i = 0; i < 8; i++)
+		munit_assert_int(__os_thread_create(&t[i], mu7_worker, NULL),
+		    ==, XTC_OK);
+	for (i = 0; i < 8; i++)
+		munit_assert_int(__os_thread_join(&t[i], NULL), ==, XTC_OK);
+	munit_assert_int(mu7_count, ==, 1);   /* ran exactly once */
+	return MUNIT_OK;
+}
+
+/* [Mu8] thread_atexit: callbacks run on thread exit, LIFO order. */
+static __os_mutex_t mu8_lock = XTC_OS_MUTEX_INIT;   /* static-initializer smoke */
+static int          mu8_seq[4];
+static int          mu8_n;
+static void mu8_cb(void *arg) {
+	(void)__os_mutex_lock(&mu8_lock);
+	mu8_seq[mu8_n++] = (int)(intptr_t)arg;
+	(void)__os_mutex_unlock(&mu8_lock);
+}
+static void *mu8_worker(void *arg) {
+	(void)arg;
+	/* Register three; LIFO means they fire 3,2,1 at exit. */
+	(void)__os_thread_atexit(mu8_cb, (void *)(intptr_t)1);
+	(void)__os_thread_atexit(mu8_cb, (void *)(intptr_t)2);
+	(void)__os_thread_atexit(mu8_cb, (void *)(intptr_t)3);
+	return NULL;
+}
+static MunitResult
+test_thread_atexit(const MunitParameter p[], void *d)
+{
+	__os_thread_t thr = {0};
+	(void)p; (void)d;
+	mu8_n = 0;
+	munit_assert_int(__os_thread_create(&thr, mu8_worker, NULL), ==, XTC_OK);
+	munit_assert_int(__os_thread_join(&thr, NULL), ==, XTC_OK);
+	/* join guarantees the exiting thread's key destructor has run. */
+	munit_assert_int(mu8_n, ==, 3);
+	munit_assert_int(mu8_seq[0], ==, 3);   /* LIFO */
+	munit_assert_int(mu8_seq[1], ==, 2);
+	munit_assert_int(mu8_seq[2], ==, 1);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Mu1_basic",           test_mutex_basic,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Mu2_trylock",         test_mutex_trylock,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -166,6 +225,8 @@ static MunitTest tests[] = {
 	{ "/Mu4_rwlock",          test_rwlock_excludes_writer, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Mu5_cond_signal",     test_cond_signal,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Mu6_sem",             test_sem_post_wait,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Mu7_call_once",       test_call_once,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Mu8_thread_atexit",   test_thread_atexit,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m1/mutex", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

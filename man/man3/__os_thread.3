@@ -11,7 +11,9 @@
 .Nm __os_thread_yield ,
 .Nm __os_thread_setname ,
 .Nm __os_thread_set_affinity ,
-.Nm __os_thread_apply_default_qos
+.Nm __os_thread_apply_default_qos ,
+.Nm __os_thread_atexit ,
+.Nm __os_call_once
 .Nd OS-thread primitives
 .Sh SYNOPSIS
 .In os_thread.h
@@ -31,6 +33,10 @@
 .Fn __os_thread_set_affinity "int cpu"
 .Ft void
 .Fn __os_thread_apply_default_qos "void"
+.Ft int
+.Fn __os_thread_atexit "void (*fn)(void *)" "void *arg"
+.Ft int
+.Fn __os_call_once "__os_once_t *once" "void (*fn)(void)"
 .Sh DESCRIPTION
 The
 .Nm __os_thread_*
@@ -101,6 +107,40 @@ cores rather than the efficiency
 .Pq E
 cores; on platforms with no QoS concept it is a no-op.
 It never fails and returns no value.
+.Pp
+.Fn __os_thread_atexit
+registers
+.Fa fn
+to be called with
+.Fa arg
+when the CALLING thread exits, including threads that libxtc did not
+create (an embedding host's threads, or a
+.Xr pg_threads 3 Ns -style
+carrier thread).
+It is the narrow
+.Dq clean up my thread-local resources on the way out
+contract, built on the same key-destructor mechanism as
+.Xr __os_tls 3
+.Pq pthread_key_t / FlsAlloc
+without exposing a full key.
+Multiple registrations on one thread all run, in reverse order of
+registration, the way C
+.Xr atexit 3
+composes.
+.Pp
+.Fn __os_call_once
+runs
+.Fa fn
+exactly once across every thread that races on the same
+.Fa once
+flag, which must be statically initialized with
+.Dv XTC_OS_ONCE_INIT .
+It maps to
+.Xr pthread_once 3
+on POSIX and
+.Fn InitOnceExecuteOnce
+on Windows, and replaces hand-rolled set-once guards with one race-free
+primitive.
 .Sh RETURN VALUES
 .Dv XTC_OK
 on success;

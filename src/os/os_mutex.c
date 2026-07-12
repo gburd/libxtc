@@ -132,8 +132,13 @@ int __os_rwlock_wrlock(__os_rwlock_t *r) {
 	if (r == NULL) return XTC_E_INVAL;
 	return pthread_rwlock_wrlock(RW(r)) == 0 ? XTC_OK : XTC_E_INTERNAL;
 }
-/* PUBLIC: int __os_rwlock_unlock __P((__os_rwlock_t *)); */
-int __os_rwlock_unlock(__os_rwlock_t *r) {
+/* PUBLIC: int __os_rwlock_rdunlock __P((__os_rwlock_t *)); */
+int __os_rwlock_rdunlock(__os_rwlock_t *r) {
+	if (r == NULL) return XTC_E_INVAL;
+	return pthread_rwlock_unlock(RW(r)) == 0 ? XTC_OK : XTC_E_INTERNAL;
+}
+/* PUBLIC: int __os_rwlock_wrunlock __P((__os_rwlock_t *)); */
+int __os_rwlock_wrunlock(__os_rwlock_t *r) {
 	if (r == NULL) return XTC_E_INVAL;
 	return pthread_rwlock_unlock(RW(r)) == 0 ? XTC_OK : XTC_E_INTERNAL;
 }
