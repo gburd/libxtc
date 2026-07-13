@@ -21,6 +21,36 @@
  *	    writable, hung up, or errored, the AFD poll completes through
  *	    the port and we re-arm it (level-triggered emulation matching
  *	    the epoll/kqueue contract).  This is the wepoll/libuv design.
+ *
+ *	    KNOWN AFD BUG (workaround, not a design choice -- see
+ *	    docs/KNOWN_ISSUES.md "Windows AFD async data-ready completion"
+ *	    for the full diagnosis): a poll armed while the socket is NOT
+ *	    yet ready returns STATUS_PENDING, and on this driver/version
+ *	    (confirmed via a standalone repro with no libxtc code, Windows
+ *	    Server 2022) that pending poll never completes when the socket
+ *	    LATER becomes ready -- AFD only ever answers with the CURRENT
+ *	    state at arm time, synchronously; it does not track a future
+ *	    edge through our handle.  Cancelling a stuck pending poll also
+ *	    does not post a port completion (NtCancelIoFileEx finalizes the
+ *	    IOSB, STATUS_CANCELLED, synchronously in-process, but nothing
+ *	    reaches GetQueuedCompletionStatusEx -- the same "synchronous
+ *	    completions are not queued" pattern already fixed for the
+ *	    ready-at-arm-time case).  The workaround is
+ *	    __xtc_iocp_repoll_sweep: xtc_io_poll re-checks every PENDING
+ *	    registration older than XTC_IOCP_REPOLL_NS with a BATCHED,
+ *	    zero-timeout, throwaway AFD poll covering up to
+ *	    XTC_IOCP_REPOLL_BATCH overdue sockets in ONE syscall (confirmed
+ *	    by direct experiment: a second independent poll on a socket
+ *	    that already has its own long-pending poll outstanding does not
+ *	    disturb it), and only cancels + re-arms the individual
+ *	    registrations the probe actually flags ready.  This bounds
+ *	    readiness latency to XTC_IOCP_REPOLL_NS instead of hanging
+ *	    forever, at O(overdue / XTC_IOCP_REPOLL_BATCH) syscalls per
+ *	    sweep rather than O(overdue) -- a per-socket cancel+rearm design
+ *	    was tried first and measured 50-98% CPU with 1000-5000 idle
+ *	    pending sockets; the batched probe measures near-zero CPU at
+ *	    the same scale.  A normal completion -- accept, connect,
+ *	    wakeup, AIO -- still short-circuits the workaround immediately.
  *	  - The cross-thread wakeup is a PostQueuedCompletionStatus with
  *	    completion-key XTC_IOCP_KEY_WAKEUP -- no synthetic event, no
  *	    self-pipe.
@@ -92,6 +122,29 @@
 
 #define XTC_IOCP_KEY_WAKEUP   ((ULONG_PTR)1)
 #define XTC_IOCP_KEY_IO       ((ULONG_PTR)0)   /* socket poll + file AIO */
+
+/* Bounded re-poll interval for the AFD async-completion workaround
+ * above: how long a PENDING socket poll is trusted before xtc_io_poll
+ * force-refreshes it by cancel + re-arm.  8 ms keeps p99 wakeup
+ * latency for a newly-readable socket close to what a real completion
+ * would have given, without turning idle sockets into a busy loop (the
+ * sweep is O(registrations overdue), and a socket with no traffic is
+ * only ever refreshed, never spun on).
+ *
+ * MEASURED CAVEAT: GetQueuedCompletionStatusEx's millisecond timeout
+ * is quantized to the process's current timer resolution, which
+ * defaults to ~15.6 ms (the classic Windows 64 Hz system tick) unless
+ * something has raised it.  On a default Windows Server 2022 host
+ * this constant's actual observed floor was ~15.6 ms, not 8 ms;
+ * calling timeBeginPeriod(1) (any process on the system doing so is
+ * enough) measured ~3-5 ms instead, tracking this constant closely.
+ * libxtc does NOT call timeBeginPeriod itself -- that raises the
+ * SYSTEM's timer resolution for every process for as long as this one
+ * runs, a global side effect this project does not impose on an
+ * embedder's behalf (the same reasoning as not pinning threads to
+ * cores).  An application that wants tighter Windows socket-readiness
+ * latency than the default tick can call timeBeginPeriod(1) itself. */
+#define XTC_IOCP_REPOLL_NS   (8LL * 1000 * 1000)
 
 extern int __xtc_io_drain_wakeup(xtc_io_t *io);
 
@@ -463,16 +516,151 @@ __arm_poll(xtc_io_t *io, struct __xtc_iocp_reg *reg)
 		 * (theoretical) second completion for the same OVERLAPPED is a
 		 * no-op. */
 		reg->pending = 1;
+		(void)__os_clock_mono(&reg->armed_at_ns);
 		(void)PostQueuedCompletionStatus((HANDLE)io->iocp, 0,
 		    XTC_IOCP_KEY_IO, &o->ov);
 		return XTC_OK;
 	}
 	if (st == STATUS_PENDING) {
 		reg->pending = 1;
+		(void)__os_clock_mono(&reg->armed_at_ns);
 		return XTC_OK;
 	}
 	reg->pending = 0;
 	return XTC_E_INTERNAL;
+}
+
+/*
+ * Workaround for the AFD async-completion bug documented at the top of
+ * this file: a poll that has been PENDING for at least
+ * XTC_IOCP_REPOLL_NS is force-refreshed by a THROWAWAY, ZERO-TIMEOUT,
+ * BATCHED probe (one NtDeviceIoControlFile call covering up to
+ * XTC_IOCP_REPOLL_BATCH overdue registrations' sockets at once,
+ * confirmed by direct experiment to work correctly and NOT disturb
+ * each socket's own individually-armed pending poll) -- only the
+ * sockets the probe actually reports ready are canceled and re-armed
+ * on their real registration OVERLAPPED.  This is O(batches) syscalls
+ * per sweep, not O(overdue registrations): the earlier per-socket
+ * cancel+rearm design measured 50-98% CPU with 1000-5000 idle pending
+ * sockets (every syscall pair repeated every interval for every
+ * outstanding registration, whether or not it had anything to report);
+ * the batched probe measured near-zero CPU at the same scale because a
+ * probe that finds nothing ready costs one syscall for up to 64
+ * sockets, not one syscall pair PER socket.
+ *
+ * Cheap by construction even when many sockets are pending: a probe
+ * that finds nothing ready is one cheap syscall per XTC_IOCP_REPOLL_BATCH
+ * registrations; only registrations the probe actually flags ready
+ * pay the individual cancel+rearm cost.  Called once per xtc_io_poll
+ * before waiting on the port, so a real completion that arrives
+ * promptly (all the paths this bug does NOT affect) is unaffected --
+ * this only tops up the one broken case.
+ */
+#define XTC_IOCP_REPOLL_BATCH  64
+
+struct __xtc_iocp_probe_batch {
+	LARGE_INTEGER            Timeout;
+	ULONG                    NumberOfHandles;
+	ULONG                    Exclusive;
+	XTC_AFD_POLL_HANDLE_INFO Handles[XTC_IOCP_REPOLL_BATCH];
+};
+
+static void
+__xtc_iocp_repoll_sweep(xtc_io_t *io)
+{
+	struct __xtc_iocp_probe_batch probe_in, probe_out;
+	struct __xtc_iocp_reg *overdue[XTC_IOCP_REPOLL_BATCH];
+	int64_t now_ns = 0;
+	int i, n_overdue;
+	OVERLAPPED throwaway_ov;
+	NTSTATUS st;
+
+	if (io->n_reg == 0)
+		return;
+	(void)__os_clock_mono(&now_ns);
+
+	n_overdue = 0;
+	for (i = 0; i < io->n_reg && n_overdue < XTC_IOCP_REPOLL_BATCH; i++) {
+		struct __xtc_iocp_reg *reg = io->reg_iocp[i];
+
+		if (!reg->pending || reg->dead)
+			continue;
+		if (now_ns - reg->armed_at_ns < XTC_IOCP_REPOLL_NS)
+			continue;
+		overdue[n_overdue++] = reg;
+	}
+	if (n_overdue == 0)
+		return;
+
+	memset(&throwaway_ov, 0, sizeof throwaway_ov);
+	memset(&probe_in, 0, sizeof probe_in);
+	memset(&probe_out, 0, sizeof probe_out);
+	probe_in.Timeout.QuadPart = 0;      /* immediate: report current state only */
+	probe_in.NumberOfHandles = (ULONG)n_overdue;
+	probe_in.Exclusive = FALSE;
+	for (i = 0; i < n_overdue; i++) {
+		probe_in.Handles[i].Handle = (HANDLE)overdue[i]->base;
+		probe_in.Handles[i].Events = __interest_to_afd(overdue[i]->interest);
+	}
+
+	st = NtDeviceIoControlFile(io->afd, NULL, NULL, NULL,
+	    (PIO_STATUS_BLOCK)&throwaway_ov, XTC_IOCTL_AFD_POLL,
+	    &probe_in,
+	    (ULONG)(sizeof(LARGE_INTEGER) + 2 * sizeof(ULONG) +
+	        (size_t)n_overdue * sizeof(XTC_AFD_POLL_HANDLE_INFO)),
+	    &probe_out,
+	    (ULONG)(sizeof(LARGE_INTEGER) + 2 * sizeof(ULONG) +
+	        (size_t)n_overdue * sizeof(XTC_AFD_POLL_HANDLE_INFO)));
+
+	/* Any registration the sweep decided to probe gets a fresh
+	 * armed_at_ns regardless of outcome, so a socket that stays
+	 * unready keeps waiting its full interval again rather than being
+	 * re-probed on every subsequent poll call. */
+	for (i = 0; i < n_overdue; i++)
+		(void)__os_clock_mono(&overdue[i]->armed_at_ns);
+
+	/* A Timeout=0 poll is documented and observed (this repo's own
+	 * standalone AFD experiments) to always resolve SYNCHRONOUSLY --
+	 * there is nothing to wait for at zero timeout.  Guard the
+	 * unexpected case anyway: throwaway_ov is stack-allocated, and if
+	 * AFD ever returned STATUS_PENDING the kernel would hold a pointer
+	 * into this stack frame past the return -- cancel it immediately
+	 * (synchronous per the same NtCancelIoFileEx contract this file
+	 * relies on elsewhere) rather than ever leave it outstanding. */
+	if (st == STATUS_PENDING) {
+		IO_STATUS_BLOCK c;
+		memset(&c, 0, sizeof c);
+		(void)NtCancelIoFileEx(io->afd, (PIO_STATUS_BLOCK)&throwaway_ov, &c);
+		return;
+	}
+	if (st != STATUS_SUCCESS)
+		return;         /* nothing ready (or a transient error); try again later */
+
+	/* Only the sockets AFD actually flagged get canceled + re-armed on
+	 * their real registration OVERLAPPED, which self-posts the ready
+	 * event through the existing synchronous-arm path in __arm_poll --
+	 * this throwaway probe's own OVERLAPPED needed no port association
+	 * (it was never armed asynchronously; it only ever returns
+	 * synchronously or is dropped) and needs no cleanup. */
+	for (i = 0; i < (int)probe_out.NumberOfHandles; i++) {
+		HANDLE ready_handle = probe_out.Handles[i].Handle;
+		int j;
+
+		for (j = 0; j < n_overdue; j++) {
+			struct __xtc_iocp_reg *reg = overdue[j];
+			struct __xtc_iocp_overlapped *o;
+			IO_STATUS_BLOCK c;
+
+			if ((HANDLE)reg->base != ready_handle)
+				continue;
+			o = (struct __xtc_iocp_overlapped *)reg->ovp;
+			memset(&c, 0, sizeof c);
+			(void)NtCancelIoFileEx(io->afd, XTC_OV_IOSB(o), &c);
+			reg->pending = 0;
+			(void)__arm_poll(io, reg);
+			break;
+		}
+	}
 }
 
 static int
@@ -558,18 +746,23 @@ xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	reg->interest = interest;
 	reg->tag = tag;
 	/*
-	 * Cancel the in-flight poll (if any); the canceled completion is
-	 * reaped in xtc_io_poll and triggers the re-arm with the new
-	 * interest mask.  We cannot re-submit on the same OVERLAPPED while
-	 * it is still owned by the kernel, so the re-arm waits for the
-	 * cancel's completion.  If nothing was armed, arm now.
+	 * Cancel the in-flight poll (if any) and re-arm immediately with
+	 * the new interest mask.  NtCancelIoFileEx is confirmed
+	 * synchronous here (it finalizes the IRP's IOSB in-process,
+	 * STATUS_CANCELLED, before returning) but -- like every other
+	 * synchronous AFD/cancel outcome on this driver -- does NOT queue
+	 * a port completion, so waiting for one (the original design)
+	 * would leave the OLD interest mask armed until the
+	 * __xtc_iocp_repoll_sweep workaround eventually notices.  Re-arm
+	 * right here instead: cheaper and gives the new mask effect
+	 * immediately rather than up to XTC_IOCP_REPOLL_NS later.
 	 */
 	if (reg->pending) {
 		IO_STATUS_BLOCK c;
 		memset(&c, 0, sizeof c);
 		(void)NtCancelIoFileEx(io->afd,
 		    XTC_OV_IOSB((struct __xtc_iocp_overlapped *)reg->ovp), &c);
-		return XTC_OK;
+		reg->pending = 0;
 	}
 	return __arm_poll(io, reg);
 }
@@ -829,6 +1022,20 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	else                       timeout_ms =
 	    (DWORD)((timeout_ns + 999999) / 1000000);
 
+	/* Cap the actual wait to the repoll interval whenever any socket is
+	 * registered: with the AFD async-completion bug, a caller-requested
+	 * INFINITE (or merely long) wait could otherwise block forever on a
+	 * pending poll that will never complete on its own.  This bounds
+	 * every registered socket's worst-case readiness latency to
+	 * XTC_IOCP_REPOLL_NS regardless of the requested timeout; a real
+	 * completion still returns immediately, this only shortens an
+	 * otherwise-unbounded wait. */
+	if (io->n_reg > 0) {
+		DWORD repoll_ms = (DWORD)(XTC_IOCP_REPOLL_NS / 1000000);
+		if (timeout_ms > repoll_ms)
+			timeout_ms = repoll_ms;
+	}
+
 	ok = GetQueuedCompletionStatusEx((HANDLE)io->iocp, batch,
 	    (ULONG)batch_max, &n_done, timeout_ms, FALSE);
 	if (!ok) {
@@ -840,8 +1047,10 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		 * PostQueuedCompletionStatus / CreateIoCompletionPort), so keying
 		 * strictly on WAIT_TIMEOUT wrongly reports XTC_E_INTERNAL and
 		 * kills the loop.  Treat n_done == 0 as the timeout it is. */
-		if (e == WAIT_TIMEOUT || n_done == 0)
+		if (e == WAIT_TIMEOUT || n_done == 0) {
+			__xtc_iocp_repoll_sweep(io);
 			return XTC_OK;
+		}
 		return XTC_E_INTERNAL;
 	}
 
@@ -954,6 +1163,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	}
 
 	*n_out = out_idx;
+	__xtc_iocp_repoll_sweep(io);
 	return XTC_OK;
 }
 
