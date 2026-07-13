@@ -294,5 +294,15 @@ __os_call_once(__os_once_t *once, void (*fn)(void))
 {
 	if (once == NULL || fn == NULL)
 		return XTC_E_INVAL;
+#if defined(_WIN32)
+	/* __os_once_t is a pointer-sized slot (void *) layout-compatible
+	 * with INIT_ONCE (whose sole member is a void *Ptr) and its
+	 * all-zero INIT_ONCE_STATIC_INIT == XTC_OS_ONCE_INIT (NULL); cast
+	 * to the compat pthread_once_t (== INIT_ONCE) so the header need
+	 * not pull <windows.h>. */
+	return pthread_once((pthread_once_t *)once, fn) == 0
+	    ? XTC_OK : XTC_E_INTERNAL;
+#else
 	return pthread_once(once, fn) == 0 ? XTC_OK : XTC_E_INTERNAL;
+#endif
 }

@@ -103,7 +103,7 @@ child_ping(int ctrl_fd, void *arg)
 	const char *msg = "PING";
 	(void)arg;
 	if (ctrl_fd >= 0)
-		(void)write(ctrl_fd, msg, 4);
+		{ ssize_t wr = write(ctrl_fd, msg, 4); (void)wr; }
 	return 7;
 }
 

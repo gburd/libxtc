@@ -662,7 +662,7 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 					alive += atomic_load_explicit(
 					    &e->loops[i]->n_alive,
 					    memory_order_relaxed);
-					e->started = 0;
+				e->started = 0;
 				xtc_sim_clock_disable();
 				__xtc_current_loop = saved;
 				if (alive > 0) {

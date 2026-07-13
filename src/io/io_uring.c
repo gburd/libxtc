@@ -75,12 +75,6 @@ __submit_poll_add(xtc_io_t *io, struct __xtc_uring_fd *uf)
 		if (sqe == NULL) return XTC_E_AGAIN;
 	}
 	/*
-	 * MULTISHOT for user fds (continuous notification matching
-	 * epoll-EPOLLET / kqueue-EV_CLEAR semantics).  Single-shot for
-	 * the internal wakeup pipe so we can coalesce trivially: each
-	 * drain re-arms exactly once, regardless of how many bytes the
-	 * pipe carried.
-	/*
 	 * MULTISHOT for user fds (continuous notification, epoll-EPOLLET /
 	 * kqueue-EV_CLEAR semantics).  Single-shot for the internal wakeup
 	 * pipe so a drained poll reports no stale wakeup on the next poll

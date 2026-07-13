@@ -432,7 +432,7 @@ xtc_lrlock_create_ex(const xtc_lrlock_opts_t *opts, xtc_lrlock_t **out)
 fail:
 	if (lr->oplog) __os_free(lr->oplog);
 	if (lr->last_seen_epochs) __os_free(lr->last_seen_epochs);
-	if (lr->active_mask) __os_free(lr->active_mask);
+	if (lr->active_mask) __os_free((void *)lr->active_mask);
 	if (lr->epochs) __os_free(lr->epochs);
 	if (lr->data[1]) __munmap_data(lr->data[1], lr->data_alloc[1]);
 	if (lr->data[0]) __munmap_data(lr->data[0], lr->data_alloc[0]);
@@ -465,7 +465,7 @@ xtc_lrlock_destroy(xtc_lrlock_t *lr)
 	if (lr == NULL) return;
 	__os_free(lr->oplog);
 	__os_free(lr->last_seen_epochs);
-	__os_free(lr->active_mask);
+	__os_free((void *)lr->active_mask);
 	__os_free(lr->epochs);
 	__munmap_data(lr->data[1], lr->data_alloc[1]);
 	__munmap_data(lr->data[0], lr->data_alloc[0]);

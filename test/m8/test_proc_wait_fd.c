@@ -45,7 +45,7 @@ rdbl_writer(void *arg)
 	int wfd = (int)(intptr_t)arg;
 	struct timespec ts = { 0, 50LL * 1000 * 1000 };
 	nanosleep(&ts, NULL);
-	(void)write(wfd, "x", 1);
+	{ ssize_t wr = write(wfd, "x", 1); (void)wr; }
 	return NULL;
 }
 

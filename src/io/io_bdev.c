@@ -16,7 +16,9 @@
 #endif
 #if !defined(_WIN32)
 #define _POSIX_C_SOURCE 200809L
+#ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
+#endif
 #endif
 
 #include "xtc_int.h"
@@ -111,15 +113,18 @@ probe_posix(int fd, uint32_t *logical, uint32_t *physical,
 
 #if defined(__linux__) && defined(BLKSSZGET)
 	{
-		int lz = 0, pz = 0;
+		int lz = 0;
 		uint64_t bytes = 0;
 		if (ioctl(fd, BLKSSZGET, &lz) == 0 && lz > 0)
 			*logical = (uint32_t)lz;
 #if defined(BLKPBSZGET)
-		if (ioctl(fd, BLKPBSZGET, &pz) == 0 && pz > 0)
-			*physical = (uint32_t)pz;
-		else
-			*physical = *logical;
+		{
+			int pz = 0;
+			if (ioctl(fd, BLKPBSZGET, &pz) == 0 && pz > 0)
+				*physical = (uint32_t)pz;
+			else
+				*physical = *logical;
+		}
 #else
 		*physical = *logical;
 #endif
