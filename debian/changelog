@@ -1,3 +1,21 @@
+libxtc (1.20.1-1) unstable; urgency=medium
+
+  * Build hygiene: libxtc now compiles with ZERO warnings on every build
+    target and platform, and CI enforces it (warnings are build
+    failures) so it stays that way.  Fixed 7 library + 8 test warnings
+    under gcc/clang (-Wall -Wextra -Wpedantic) and 79 -> 0 under MSVC
+    /W3.  The MSVC set included one real portability-layer type mismatch
+    (__os_call_once passing __os_once_t* where the Windows compat
+    pthread_once wants INIT_ONCE*); the rest were comment/macro/cast
+    hygiene (dropped <ntstatus.h> which re-defined ~65 SDK macros,
+    Winsock length casts, _Atomic-drop-on-free casts, an LLP64 sentinel
+    widen, a pipe-macro redefine).
+  * Enforcement: the gcc + clang CI build now uses CFLAGS=-Werror, and
+    dist/build_msvc.bat adds /WX, so any new warning fails CI.
+  * No public xtc_* API change and no behavior change from 1.20.0.
+
+ -- Greg Burd <greg@burd.me>  Mon, 13 Jul 2026 06:48:58 -0400
+
 libxtc (1.20.0-1) unstable; urgency=medium
 
   * Windows IOCP AFD socket poll: three real bugs fixed on an MSVC
