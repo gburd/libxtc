@@ -17,6 +17,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_tail.h"
+#include "xtc_sim.h"
 
 /* A proc that exits with a fixed reason so EXIT.detail is predictable. */
 static void
@@ -255,12 +256,64 @@ test_tail_msg(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+static int
+tail_sim_cb(const xtc_tail_rec_t *r, void *user)
+{
+	int *found = user;
+	if (r->source == XTC_TAIL_SIM && r->kind == XTC_TAIL_BUGGIFY)
+		*found = 1;
+	return 0;
+}
+
+/* SIM source: xtc_sim_buggify's first activation of a site fires the
+ * __xtc_sim_buggify_hook, which xtc_tail_enable installs while
+ * XTC_TAIL_SIM is set -- verifies the cross-module hook wiring (the
+ * hook lives in xtc_sim.h/sim.c, layer-neutral; tail.c installs it to
+ * avoid an L1/L2 file ever needing to #include the L3 xtc_tail.h). */
+static MunitResult
+test_tail_sim(const MunitParameter p[], void *d)
+{
+	int saw_buggify = 0;
+	(void)p; (void)d;
+
+	(void)xtc_tail_reset();
+	(void)xtc_tail_enable(XTC_TAIL_SIM);
+	xtc_sim_activate(1);
+	xtc_sim_clock_enable(1000000);  /* virtual clock: keeps __os_clock_mono
+	                                  * deterministic while sim is active,
+	                                  * matching every other sim-reachable
+	                                  * tail-emit call site */
+	xtc_sim_buggify_enable(1000);   /* always activate */
+	munit_assert_int(xtc_sim_buggify("test.tail.sim_hook"), ==, 1);
+	xtc_sim_buggify_disable();
+	xtc_sim_clock_disable();
+	xtc_sim_deactivate();
+
+	munit_assert_int(xtc_tail_read(tail_sim_cb, &saw_buggify), ==, XTC_OK);
+	munit_assert_int(saw_buggify, ==, 1);
+
+	/* Disabling the SIM source uninstalls the hook: a later activation
+	 * must not be recorded. */
+	(void)xtc_tail_reset();
+	xtc_tail_disable();
+	xtc_sim_activate(2);
+	xtc_sim_clock_enable(1000000);
+	xtc_sim_buggify_enable(1000);
+	munit_assert_int(xtc_sim_buggify("test.tail.sim_hook_off"), ==, 1);
+	xtc_sim_buggify_disable();
+	xtc_sim_clock_disable();
+	xtc_sim_deactivate();
+	munit_assert_size(xtc_tail_count(), ==, 0);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/sched",        test_tail_sched,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/disabled",     test_tail_disabled,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/dump",         test_tail_dump,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/msg",          test_tail_msg,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wake_latency", test_tail_wake_latency, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/sim",          test_tail_sim,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m12/tail", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
