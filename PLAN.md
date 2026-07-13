@@ -2945,6 +2945,75 @@ xtc_palloc, slab alloc) inside such files.  Files initially
 annotated: `evt_loop.c`, `evt_deque.c`, `evt_timer.c`,
 `io_uring.c`, `lock/lr.c`, `lock/lw.c`'s fast paths.
 
+### 19.24 macOS/Apple Silicon parity (from a 2026-07-13 external review)
+
+Correctness on macOS/arm64 is not in question (full suite, DST, and a
+1M-fiber run all pass there).  These are performance/developer-
+experience gaps, tracked, not started (details in
+`.agent/ROADMAP_2026-07.md` and `.agent/AFD_ASYNC_COMPLETION_2026-07.md`
+for the related Windows work):
+
+- **Mach-O arm64 fcontext substrate.**  `fctx_aarch64_aapcs.S` is
+  ELF-only; Apple Silicon always falls back to the ucontext substrate,
+  which pays a `sigprocmask` syscall per fiber switch (~31 us/switch
+  measured on an M3 Pro, vs low tens of ns for fcontext on Linux). Add
+  a Mach-O AAPCS64 variant (boost.context ships a working reference)
+  and make it the default substrate on Apple arm64, or at minimum let
+  `XTC_CORO_FORCE_FCTX` build+link on macOS so it can be CI'd.
+- **A macOS timer source for involuntary preemption.**  `xtc_preempt`
+  Phase 2 needs a per-thread CPU-time signal; macOS has neither
+  `timer_create`/`CLOCK_THREAD_CPUTIME_ID` nor a usable per-thread
+  `setitimer`.  Investigate a GCD dispatch timer source or a per-worker
+  kqueue `EVFILT_TIMER` to drive the tick.  Until this lands, `xtc_preempt`
+  correctly and honestly degrades to cooperative-only on macOS (now
+  documented in KNOWN_ISSUES.md and `xtc_preempt.3`).
+- **Split `src/ptc/proc.c` by concern.**  ~100 KB / 50 public functions;
+  builds and tests clean but is a maintenance/review hotspot.  Split
+  mailbox/envelope, links-and-monitors, and spawn/lifecycle into
+  separate translation units under the same public header, no behavior
+  change; re-run the full suite (unit + DST + sanitizers) before/after
+  to prove nothing moved.
+
+### 19.25 DST maturity vs. FoundationDB/TigerBeetle + an optional GUI monitor
+
+Full gap analysis in `.agent/DST_MATURITY_2026-07.md`.  Summary: the
+core mechanism (mechanically-enforced determinism, a real fault
+taxonomy, CI-gated swarms) is sound and arguably ahead of typical
+practice, but BREADTH and TOOLING lag FDB/TigerBeetle's bar.  Tracked,
+not started:
+
+- **Backfill the planted-bug catalog** from 3 cases to one per asserted
+  DST safety invariant (target 20-30).  Wire each into
+  `scripts/dst-bug-inject.sh`.
+- **Enforce buggify fault-space coverage as a release gate**: assert
+  the swarm activates every named `XTC_SIM_BUGGIFY` site (14 today) at
+  least once per run; fail the build if a site goes cold.
+- **A failing-seed corpus** (`test/sim/corpus/`) that pins every seed a
+  swarm/CI run ever caught as a permanent replayed regression case, so
+  a fixed bug cannot silently regress.
+- **Seed minimization/shrinking** for a failing swarm run: delta-debug
+  the schedule down to the smallest reproducer (fewest procs/messages/
+  reorderings) instead of handing back only the raw seed.
+- **Combinatorial fault-coverage reporting**: the swarm summary should
+  report which fault COMBINATIONS (not just individual faults) were
+  exercised per invariant class.
+- **A public "bugs DST caught" ledger**: curate the DST-found entries
+  already in KNOWN_ISSUES.md into one place framed explicitly as
+  evidence, cross-linked from docs/testing.md.
+- **Gate: fold the above into `make check-dst` (or a stricter variant)
+  once it lands, with no future-regression exceptions** -- matches the
+  "once we get there, hold the line" requirement.
+- **Optional graphical DST monitor** (`tools/sim-monitor/`,
+  TigerBeetle-VOPR-inspired): a vendored-raylib viewer that animates
+  simulated loops/tasks/messages/buggify-activations from a recorded
+  `xtc_tail` SIM trace source.  Strictly optional (own directory, never
+  wired into `make check`, `libxtc.a`, or the default build/meson
+  target) and portable macOS+Linux.  Phase 1: live/recorded "watch it
+  run" viewer.  Phase 2 (harder): scrubbable replay stepping a
+  deterministic seed run backward/forward, VOPR-style.  Never claimed
+  as a correctness mechanism -- the sim + its assertions remain that;
+  the viewer is a debugging aid layered on top.
+
 ---
 
 ## 20. PostgreSQL multithreading roadmap -> xtc primitive map
@@ -3009,7 +3078,7 @@ are in progress; `BLOCKED` items list their gating dependency.
 | Linux musl      | full pass   | coro_fctx.c (fcontext substrate) covers the missing ucontext; full coroutine stack runs + passes |
 | FreeBSD 15      | full pass   | Re-verified against the current tree: 283/283 munit (clang 19, kqueue, ucontext, OpenSSL); two mdoc errors that FreeBSD mandoc caught were fixed |
 | illumos         | full pass   | Re-verified: 51/52 C suites pass, 0 fail (SunOS 5.11, gcc 13.4, solaris port backend, ucontext, OpenSSL); the earlier TLS-link drift is gone with --with-tls=auto |
-| macOS           | not yet     | Awaiting host; KVM runbook in `docs/M_MACOS_KVM.md` |
+| macOS           | full pass   | In per-commit CI (macos-latest, Apple Silicon): kqueue backend, ucontext coroutines, full munit + DST suite. Correctness verified; the ucontext substrate is a real performance gap on Apple Silicon (no Mach-O arm64 fcontext yet, see PLAN.md 19.24) |
 | AIX             | not yet     | Awaiting host; KVM runbook in `docs/M_AIX_KVM.md` |
 
 ### Windows toolchains (santorini host)
