@@ -13,6 +13,11 @@ set -eu
 : "${XTC_SRC_DIR:?XTC_SRC_DIR must be set by the caller}"
 SRC="$XTC_SRC_DIR"
 
+if ! command -v autoreconf >/dev/null 2>&1; then
+	echo "  [oos] SKIP: autoreconf not available"
+	exit 0
+fi
+
 tmp=$(mktemp -d)
 # cd out of $tmp before removing it: some rm implementations (illumos)
 # refuse to remove a directory that is an ancestor of the current

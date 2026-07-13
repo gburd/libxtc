@@ -61,6 +61,17 @@ typedef int __xtc_coro_uctx_unused;
 # define MAP_ANONYMOUS MAP_ANON
 #endif
 
+/* Apple deprecated getcontext/makecontext/swapcontext (no replacement
+ * offered) years ago; they still work and are the only portable stackful
+ * substrate on Darwin until a Mach-O arm64 fcontext lands (see
+ * KNOWN_ISSUES).  Silence the deprecation warning for just this TU so
+ * the zero-warning policy stays honest on macOS without hiding a real
+ * issue anywhere else. */
+#if defined(__APPLE__)
+# pragma clang diagnostic push
+# pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+
 /*
  * Sanitizer fiber-switch annotations (ASan / TSan / LSan) -- see the
  * matching block in coro_fctx.c for the rationale.  Compiled to nothing
@@ -722,5 +733,9 @@ __xtc_current_task(void)
 {
 	return __xtc_current_coro != NULL ? __xtc_current_coro->self : NULL;
 }
+
+#if defined(__APPLE__)
+# pragma clang diagnostic pop
+#endif
 
 #endif /* !_WIN32 */

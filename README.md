@@ -128,8 +128,10 @@ That's a one-process actor system in 25 lines.
 
 ## Where it shines
 
-`examples/05_rexis/` is a working Redis-protocol server in ~2,000 LOC.
-It uses every major xtc subsystem and stays inside hard `--max-memory`,
+`examples/05_rexis/` is a working Redis-protocol server in ~4,800 LOC
+(command handling, storage, connections, expiry, metrics; excludes
+tests). It uses every major xtc subsystem and stays inside hard
+`--max-memory`,
 `--max-keys`, `--max-clients`, `--max-iops`, and `--cores` caps under
 load.  Run it with:
 
@@ -227,6 +229,16 @@ make -j$(nproc)
 <!-- M0_CLAIMS:B1_END -->
 make check                              # full test suite
 sudo make install                       # libxtc.a + headers + man pages
+```
+
+`make check` builds and runs the unit/PBT/shell-gate suite (fast, minutes).
+It does NOT include the DST suite -- that needs a separate
+`--with-io-backend=sim` build.  Run it explicitly:
+
+```sh
+make check-dst                          # 52+ deterministic-simulation tests
+                                         # (test/sim/); the project's
+                                         # strongest correctness tier
 ```
 
 ```sh

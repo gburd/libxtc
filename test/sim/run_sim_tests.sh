@@ -47,12 +47,15 @@ mkdir -p "$build"
 	cd "$build"
 	"$XTC_SRC_DIR/dist/configure" --with-io-backend=sim \
 		--with-tls=none --without-liburing >/dev/null 2>&1
-	make -j"$(nproc 2>/dev/null || echo 2)" >/dev/null 2>&1
+	make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)" >/dev/null 2>&1
 ) || { echo "  [sim] FAIL: sim-backend build errored"; exit 1; }
 
 inc="-I$XTC_SRC_DIR/src/inc"
 lib="$build/libxtc.a"
-libs="-pthread -ldl -lm"
+case "$(uname -s)" in
+Darwin) libs="-pthread -lm" ;;
+*)      libs="-pthread -ldl -lm" ;;
+esac
 
 # test_sim_bufmgr drives the sqlxtc storage-engine buffer manager
 # (examples/06_sqlxtc/bufmgr.c) under DST, so it needs that source

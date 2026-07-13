@@ -687,6 +687,45 @@ semaphores, _SC_NPROCESSORS_ONLN, hardcoded -lrt, lrlock slot
 reclamation teardown order).
 
 
+## Apple Silicon (macOS arm64) always uses the ucontext coroutine substrate
+
+**Status:** documented trade-off, not a bug.  Correctness on this
+platform is not in question -- the full suite including DST and
+`bench/bench_million_tasks.c` (1,000,000/1,000,000 fibers) pass -- but
+the PERFORMANCE profile differs from x86-64/Linux and should not
+surprise anyone reading the `~7.6 ns/switch` fcontext figure elsewhere
+in the docs.
+
+`src/os/asm/fctx_aarch64_aapcs.S` guards its hand-written AAPCS64
+context switch with `!defined(__APPLE__)`: the assembly is ELF-dialect
+(`.type`, `.note.GNU-stack`) and does not assemble/link under Mach-O, so
+there is no `__xtc_make_fcontext`/`__xtc_jump_fcontext` on Apple Silicon
+and `src/evt/coro_fctx.c` is compiled out there.  Every macOS build --
+x86-64 or arm64 -- therefore uses `src/evt/coro_uctx.c`
+(`swapcontext`/`getcontext`/`makecontext`), which restores the signal
+mask on every switch (a `sigprocmask` syscall).  Measured on Apple M3
+Pro: ~31 us/task-switch under `bench_million_tasks.c` (4 yields/fiber),
+versus low tens of ns for fcontext on Linux/x86-64.  The scheduler paths
+that do not pay a full coroutine switch (spawn/reuse/churn in
+`bench_exec_scale.c`) are unaffected and measure comparably fast on both
+platforms.
+
+Involuntary preemption (`src/ptc/preempt.c`, Phase 2) is ALSO Linux-only
+today: it needs a per-thread `SIGVTALRM`-class timer
+(`timer_create`/`CLOCK_THREAD_CPUTIME_ID`), which macOS does not offer
+(`ITIMER_VIRTUAL` is process-wide, not per-thread).  On macOS,
+`xtc_preempt` degrades to cooperative-only: a fiber that never calls a
+yield point will not be involuntarily interrupted.  See
+`man/man3/xtc_preempt.3` for the per-platform statement.
+
+**Planned fix (tracked in PLAN.md):** a Mach-O arm64 fcontext variant
+(`fctx_aarch64_aapcs_macho.S`, boost.context ships a working reference)
+to make fctx the default substrate on Apple Silicon, and a GCD
+dispatch-timer or kqueue `EVFILT_TIMER` per-worker tick to give Phase-2
+preemption a real signal source on macOS.  Neither changes correctness;
+both are throughput/fairness improvements.
+
+
 ## sqlxtc multi-thread load test flakes on the macOS CI runner
 
 **Status:** KNOWN FLAKE (transient, re-run passes).  The

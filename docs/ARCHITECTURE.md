@@ -117,6 +117,20 @@ flowchart TD
 | L3 `ptc/` | Complete: channels (oneshot / mpsc / mpmc / watch / broadcast); processes, mailboxes with selective receive, links and monitors; sync primitives; `xtc_mctx`; RCU; left-right locks; and a full nine-mode lock manager with deadlock detection, victim policies, and per-locker timeouts. |
 | L4 `orc/` | Complete: supervisor (4 strategies + restart intensity), process registry, `xtc_svr` gen_server, `xtc_app` lifecycle, and the optional [Isolate layer]({{ '/tnt/' | relative_url }}). |
 
+## Core vs. examples
+
+The layers above (`src/os` through `src/orc`, L0-L4) ARE the library --
+everything `libxtc.a`/`libxtc.so` exports, and the only surface a
+consumer's own build should link against or include headers from.
+`examples/` (rexis, kaka, sqlxtc, tnt, pgmock, the circuit breaker) are
+demonstrations BUILT ON that surface using only the public `xtc_*` API
+(enforced by `test/dist/test_api_discipline.sh`) -- they are proof the
+primitives compose into real systems, not part of the runtime itself.
+When sizing what you are actually depending on, count L0-L4; an example
+being large (rexis is ~4,800 LOC, sqlxtc's storage engine considerably
+more) says something about what the primitives can build, not about the
+size of the dependency you are taking on.
+
 ## Reading order for a new contributor
 
 1. This page, for the layer map.

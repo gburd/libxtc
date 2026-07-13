@@ -89,6 +89,20 @@ livelock has been observed under pathological all-CPU-bound load;
 untrusted pure-CPU work can alternatively run on
 .Xr xtc_osproc 3 ,
 an operating-system thread the kernel preempts.
+.Pp
+On macOS the involuntary path has no timer source: the platform offers
+no per-thread
+.Fn timer_create
+/
+.Dv CLOCK_THREAD_CPUTIME_ID ,
+and process-wide
+.Fn setitimer
+is unsuitable for per-thread accounting.  On this platform
+.Nm
+degrades to the cooperative path only -- a fiber that never reaches a
+yield point will not be involuntarily interrupted.  This is a real
+limitation, not merely an untested corner; do not rely on fairness
+guarantees for uncooperative CPU-bound work on macOS.
 .Sh SEE ALSO
 .Xr xtc_async 3 ,
 .Xr xtc_exec 3 ,
