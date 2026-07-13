@@ -252,15 +252,15 @@ single-op AND multi-op native file AIO (overlapped pwrite/pread reaped
 from the port), and cross-thread wakeup coalescing (256 foreign
 xtc_send via PostQueuedCompletionStatus) all pass on the real host.
 
-ONE scenario is not yet green and is intentionally a SKIP (not a gate):
-the loopback-socket connect/accept/echo over the AFD poll path
-(smoke_sock_server / smoke_sock_client) -- the echo does not complete on
-santorini (s_sock_srv_ok stays 0), which points at the AFD-poll
-level-triggered re-arm being incomplete.  This is the socket-readiness
-corner still under investigation; the smoke prints a visible `skip
-loopback socket echo` line rather than failing, so a genuine AFD-poll
-bug surfaces without blocking the two proven IOCP additions.  Chasing
-the AFD echo to green is the remaining IOCP runtime-verification item.
+ONE scenario was a SKIP through v1.20.1 and is now FIXED (with a
+documented workaround, not a root-cause fix in the AFD driver itself --
+see item 4 below): the loopback-socket connect/accept/echo over the AFD
+poll path (smoke_sock_server / smoke_sock_client) now passes on an EC2
+Windows Server 2022 host, verified across 5+ consecutive smoke runs, a
+ASan build (7/8 clean; the 1/8 failure is a pre-existing, unrelated
+flake documented separately below), and a dedicated CPU-scale test at
+1,000/2,000/5,000/10,000 idle pending sockets (0.00% measured CPU at
+every size).
 
 **Status note (2026-07):** substantial progress on an MSVC Windows host
 (Windows Server 2022, EC2); THREE real bugs found and fixed, one
@@ -284,50 +284,100 @@ remains:
    reg->pending guard makes a duplicate a no-op.  Accept and connect
    readiness now flow (verified: the server accepts, the client
    connects + sends).
-4. STILL OPEN -- the ASYNC (STATUS_PENDING) AFD poll does not complete
-   when the socket LATER becomes ready.  The loopback echo gets as far
-   as accept + connect + the client's send, then the server's PENDING
-   READABLE poll on the accepted socket never fires on data arrival, so
-   the echo does not complete (the smoke stays a clean SKIP, not a
-   failure -- all other IOCP paths pass).
-   Further narrowed (v1.20.1 session, MSVC host trace): instrumenting
-   the completion-port reap confirmed that the two READABLE polls armed
-   STATUS_PENDING (with their OVERLAPPED addresses logged) and NO
-   completion for those OVERLAPPEDs is EVER dequeued after the client
-   sends -- so AFD genuinely does not post the data-ready completion for
-   the outstanding async poll, and a wakeup storm (key=1, NULL
-   OVERLAPPED) spins the loop in the meantime.  The accepted socket's
-   base handle was moved to SIO_BSP_HANDLE_POLL (wepoll's resolution
-   order: BSP_HANDLE_POLL, then BASE_HANDLE, then the fd) -- the correct
-   handle for IOCTL_AFD_POLL on accepted/layered sockets -- which is a
-   real improvement and is KEPT, but it alone did NOT make the async
-   poll complete.  The remaining suspect is a mismatch in the AFD poll
-   re-arm/completion contract vs wepoll (the IOSB/OVERLAPPED aliasing,
-   or the need to check current readiness on the base handle at arm
-   time rather than trusting the async completion) -- a focused
-   byte-for-byte diff against wepoll's afd_poll is the next step.  It is
-   NOT blind-fixable and needs continued interactive iteration on a
-   Windows host.  The file-AIO, cross-thread-wakeup, selective-receive,
-   and xtc_xproc IOCP paths all still pass.
+4. WORKED AROUND (2026-07-13) -- the ASYNC (STATUS_PENDING) AFD poll
+   does not complete when the socket LATER becomes ready.  Root cause
+   confirmed with a standalone reproducer that has NO libxtc code in
+   it: a ~150-line program opens \Device\Afd directly, arms one async
+   IOCTL_AFD_POLL for AFD_POLL_RECEIVE on a not-yet-readable accepted
+   socket, sends from the client, and waits on the port -- the poll
+   returns STATUS_PENDING and NEVER completes, even though the socket
+   is genuinely readable afterward.  A follow-up experiment proved AFD
+   CAN always answer with CURRENT readiness synchronously (arming a
+   poll on a socket that already has data waiting returns
+   STATUS_SUCCESS with the correct event bits, reliably, every time)
+   but never notifies of a FUTURE readiness change through this
+   driver/version's \Device\Afd handle.  Cancelling a stuck pending
+   poll does not help either: NtCancelIoFileEx finalizes the IRP's
+   IOSB in-process (STATUS_CANCELLED) but, like every other
+   synchronous AFD outcome on this driver, does not post a port
+   completion.  This rules out libxtc's IOCP reap loop, registration
+   lifetime, base-handle resolution (SIO_BSP_HANDLE_POLL resolves
+   correctly and identically every time), and the IOSB/OVERLAPPED
+   aliasing as causes -- the defect is in the AFD driver's future-edge
+   tracking for this handle, upstream of anything libxtc controls.
 
-   2026-07-13 update: isolated in a standalone reproducer, no libxtc
-   code involved.  A ~150-line C program (open \Device\Afd directly,
-   loopback TCP pair, arm one async IOCTL_AFD_POLL for AFD_POLL_RECEIVE
-   on the not-yet-readable accepted socket, send() from the client, wait
-   on the port) reproduces the exact symptom: NtDeviceIoControlFile
-   returns STATUS_PENDING (0x103), and GetQueuedCompletionStatus times
-   out -- no completion ever arrives, even though the socket is
-   genuinely readable afterward.  This proves the bug is in the AFD
-   poll CONTRACT/usage itself, not in libxtc's IOCP reap loop,
-   registration lifetime, or the wakeup-storm side effect (which is a
-   symptom of the loop never blocking, not the cause).  Leading
-   hypothesis for the next session: the bare NtCreateFile on
-   \Device\Afd\<name> may need the AFD EXTENDED-ATTRIBUTE open packet
-   (the AfdOpenPacket EA that wepoll/afd.c passes via the EaBuffer
-   argument) to arm a real future-edge watch -- a handle opened without
-   it may only be able to report CURRENT readiness (consistent with why
-   the synchronous-ready case already works).  Full repro harness +
-   AWS/SSH recipe recorded in .agent/AFD_ASYNC_COMPLETION_2026-07.md.
+   The workaround (`__xtc_iocp_repoll_sweep` in src/io/io_iocp.c):
+   xtc_io_poll periodically re-checks every PENDING registration older
+   than XTC_IOCP_REPOLL_NS (8 ms) with a single BATCHED, zero-timeout,
+   throwaway AFD poll covering up to 64 overdue sockets per syscall
+   (confirmed by direct experiment: a second, independent poll on a
+   socket that already has its own long-pending poll outstanding does
+   not disturb it, and Timeout=0 always resolves synchronously with
+   the true current state).  Only the sockets the probe actually
+   flags ready are canceled and re-armed on their real registration
+   OVERLAPPED, which self-posts through the existing synchronous-arm
+   path.  A first per-socket (not batched) version of this workaround
+   measured 50%, 90%, and 98% CPU with 1,000, 2,000, and 5,000 idle
+   pending sockets respectively (one cancel+rearm syscall pair per
+   socket per interval, regardless of readiness); the batched redesign
+   measured 0.00% CPU at 1,000/2,000/5,000/10,000 idle pending sockets
+   (one cheap syscall per up-to-64 sockets when nothing is ready).
+
+   Latency caveat (measured, not theoretical): GetQueuedCompletionStatusEx's
+   millisecond timeout is quantized to the process's current Windows
+   timer resolution, which defaults to ~15.6 ms (the classic 64 Hz
+   system tick) unless something has raised it.  On the EC2 host used
+   for this work the observed worst-case echo latency was ~15.6 ms
+   regardless of the 8 ms constant; calling timeBeginPeriod(1) (from
+   ANY process on the system, not necessarily this one) measured
+   ~3-5 ms instead.  libxtc does not call timeBeginPeriod itself -- it
+   would raise the SYSTEM's timer resolution for as long as this
+   process runs, a global side effect this project does not impose on
+   an embedder's behalf (the same reasoning as not pinning threads to
+   cores).  An application that wants tighter Windows socket-readiness
+   latency than the default tick can call timeBeginPeriod(1) itself.
+
+   This is a workaround, not a fix to the AFD driver's own behavior --
+   if a future Windows version or driver starts posting the completion
+   correctly, the sweep still works (it only ever refreshes sockets
+   that are ALREADY overdue; a socket whose real completion arrives
+   promptly never reaches the sweep).  Full repro harness, the batching
+   experiments, and the AWS/SSH recipe are recorded in
+   .agent/AFD_ASYNC_COMPLETION_2026-07.md.
+
+
+## MSVC ASan: pre-existing, rare thread-startup flake (not the AFD workaround)
+
+**Status:** KNOWN FLAKE, pre-existing, unrelated to any libxtc code.
+While validating the AFD workaround above under an MSVC
+`/fsanitize=address` build (2026-07-13, EC2 Windows Server 2022), the
+smoke test's overall pass rate was 7/8 clean runs; the 1/8 failure
+reproduces identically with EVERY libxtc change reverted (confirmed by
+building and running the unmodified pre-workaround baseline the same
+number of times, which flaked at the same ~1-in-6-to-8 rate with the
+identical signature):
+
+```
+AddressSanitizer: stack-buffer-overflow ... WRITE of size 360
+    #0 _asan_wrap_memset (clang_rt.asan_dynamic-x86_64.dll)
+    #1 RtlInitializeResource+0x759 (ntdll.dll)
+    #2 BaseThreadInitThunk+0xf (KERNEL32.DLL)
+    #3 RtlUserThreadStart+0x2a (ntdll.dll)
+```
+
+The fault is inside `RtlInitializeResource`, called from a brand-new
+OS thread's startup (`BaseThreadInitThunk` -> `RtlUserThreadStart`),
+before any libxtc code on that thread runs -- ASan's own
+`__asan_handle_no_return`/stack-switch interposition on Windows
+fibers/threads is a documented rough edge
+(https://github.com/google/sanitizers/issues/189, which the smoke
+test's own "ASan is ignoring requested __asan_handle_no_return"
+warning already references).  Always occurs, when it occurs, AFTER the
+loopback socket echo check has already printed `ok` -- it is a
+teardown/thread-creation-path artifact, not a data-path bug.  Non-ASan
+MSVC builds (the `/WX` zero-warning gate) and the plain smoke run never
+exhibit it.  Tracked as a documented flake, not a release blocker;
+re-running the smoke binary passes.
 
 ### Round 2 (current source): native completion port + AFD poll
 

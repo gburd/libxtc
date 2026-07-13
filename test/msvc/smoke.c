@@ -702,22 +702,106 @@ main(int argc, char **argv)
 			(void)xtc_loop_fini(loop);
 			xtc_net_close(client_fd);
 			xtc_net_close(listen_fd);
-			/* The loopback socket echo scenario is not yet a gate: it
-			 * exercises the AFD-poll level-triggered re-arm, which is
-			 * exactly the path still under investigation.  Report but
-			 * do not fail if the echo did not complete, so a genuine
-			 * AFD-poll bug surfaces here as a visible SKIP rather than
-			 * blocking the smoke gate.  The two proven IOCP additions
-			 * above (multi-op file AIO, cross-thread wakeup) DO gate. */
-			if (s_sock_srv_ok == 1 && s_sock_cli_ok == 1)
-				printf("  ok   loopback socket echo:"
-				    " connect/accept/echo via AFD poll"
-				    " (level-triggered re-arm)\n");
-			else
-				printf("  skip loopback socket echo: srv=%d cli=%d"
-				    " (AFD-poll path under investigation)\n",
-				    s_sock_srv_ok, s_sock_cli_ok);
+			/* The loopback socket echo scenario is now a HARD GATE
+			 * (fixed 2026-07-13 via the AFD async-completion workaround
+			 * in __xtc_iocp_repoll_sweep, io_iocp.c -- see
+			 * docs/KNOWN_ISSUES.md).  Verified across 5+ consecutive
+			 * clean runs plus an ASan build before promoting from SKIP
+			 * to CHECK; a regression here means the workaround broke. */
+			CHECK(s_sock_srv_ok == 1 && s_sock_cli_ok == 1);
+			printf("  ok   loopback socket echo:"
+			    " connect/accept/echo via AFD poll"
+			    " (level-triggered re-arm)\n");
 		}
+	}
+
+	/* --- AFD repoll-sweep scale regression -------------------------
+	 *
+	 * Guards the batched-probe design in __xtc_iocp_repoll_sweep
+	 * (io_iocp.c): register many sockets that will NEVER become ready
+	 * (idle, no data ever sent -- the exact case the AFD async-
+	 * completion bug forces onto the repoll sweep) and poll for a
+	 * short bounded window.  A per-socket (non-batched) cancel+rearm
+	 * design measured 50-98% CPU at 1,000-5,000 such sockets; the
+	 * batched design measures ~0%.  256 sockets / 1.5s keeps this fast
+	 * in CI while still exercising several sweep passes across
+	 * multiple XTC_IOCP_REPOLL_BATCH-sized batches (64 per batch). */
+	{
+		enum { N_IDLE = 256 };
+		xtc_io_t *io = NULL;
+		SOCKET idle_ls[N_IDLE], idle_cs[N_IDLE], idle_ss[N_IDLE];
+		int i, ok_count = 0;
+		FILETIME c0, e0, k0, u0, c1, e1, k1, u1;
+		ULARGE_INTEGER ku0, uu0, ku1, uu1;
+		LARGE_INTEGER freq, t0, t1;
+		double wall_s, cpu_ms;
+
+		CHECK(xtc_io_init(&io) == XTC_OK);
+		for (i = 0; i < N_IDLE; i++) {
+			struct sockaddr_in a;
+			int alen = sizeof a;
+			u_long nb = 1;
+
+			idle_ls[i] = socket(AF_INET, SOCK_STREAM, 0);
+			memset(&a, 0, sizeof a);
+			a.sin_family = AF_INET;
+			a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+			a.sin_port = 0;
+			(void)bind(idle_ls[i], (struct sockaddr *)&a, sizeof a);
+			(void)listen(idle_ls[i], 1);
+			(void)getsockname(idle_ls[i], (struct sockaddr *)&a, &alen);
+			(void)ioctlsocket(idle_ls[i], FIONBIO, &nb);
+			idle_cs[i] = socket(AF_INET, SOCK_STREAM, 0);
+			(void)ioctlsocket(idle_cs[i], FIONBIO, &nb);
+			(void)connect(idle_cs[i], (struct sockaddr *)&a, sizeof a);
+		}
+		Sleep(200);
+		for (i = 0; i < N_IDLE; i++) {
+			u_long nb = 1;
+			idle_ss[i] = accept(idle_ls[i], NULL, NULL);
+			(void)ioctlsocket(idle_ss[i], FIONBIO, &nb);
+			if (xtc_io_reg_fd(io, (int)idle_ss[i], XTC_IO_READABLE,
+			    (void *)(intptr_t)(i + 1)) == XTC_OK)
+				ok_count++;
+		}
+		CHECK(ok_count == N_IDLE);
+
+		GetProcessTimes(GetCurrentProcess(), &c0, &e0, &k0, &u0);
+		QueryPerformanceFrequency(&freq);
+		QueryPerformanceCounter(&t0);
+		do {
+			xtc_io_event_t ev[64];
+			int n_out = 0;
+			(void)xtc_io_poll(io, ev, 64, 50LL * 1000 * 1000, &n_out);
+			QueryPerformanceCounter(&t1);
+		} while ((double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart
+		    < 1.5);
+		GetProcessTimes(GetCurrentProcess(), &c1, &e1, &k1, &u1);
+
+		memcpy(&ku0, &k0, sizeof ku0); memcpy(&uu0, &u0, sizeof uu0);
+		memcpy(&ku1, &k1, sizeof ku1); memcpy(&uu1, &u1, sizeof uu1);
+		wall_s = (double)(t1.QuadPart - t0.QuadPart) / freq.QuadPart;
+		cpu_ms = (double)((ku1.QuadPart - ku0.QuadPart) +
+		    (uu1.QuadPart - uu0.QuadPart)) / 10000.0;
+
+		for (i = 0; i < N_IDLE; i++)
+			(void)xtc_io_del_fd(io, (int)idle_ss[i]);
+		(void)xtc_io_fini(io);
+		for (i = 0; i < N_IDLE; i++) {
+			(void)closesocket(idle_ls[i]);
+			(void)closesocket(idle_cs[i]);
+			(void)closesocket(idle_ss[i]);
+		}
+
+		/* Generous bound: the batched sweep measured ~0% CPU at this
+		 * scale; a per-socket (non-batched) regression measured 50%+
+		 * at 1000 sockets, so even a partial regression at N_IDLE=256
+		 * would clear 25% of wall time easily.  25% keeps this robust
+		 * to CI-runner noise while still catching a real regression. */
+		CHECK(cpu_ms < wall_s * 1000.0 * 0.25);
+		printf("  ok   AFD repoll-sweep scale: %d idle pending sockets, "
+		    "%.0fms CPU / %.0fms wall (batched probe, not O(n) per "
+		    "socket)\n", N_IDLE, cpu_ms, wall_s * 1000.0);
 	}
 
 	/* --- cross-process spawn/monitor (xtc_xproc on Windows) --- */

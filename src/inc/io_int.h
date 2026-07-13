@@ -67,6 +67,10 @@ struct __xtc_iocp_reg {
 	void     *tag;
 	int       pending;          /* 1 while an AFD poll is armed in the kernel */
 	int       dead;             /* deregistered; awaiting terminal completion */
+	int64_t   armed_at_ns;      /* __os_clock_mono() when this arm was issued;
+	                             * drives the bounded re-poll workaround for
+	                             * the AFD async-completion bug (see io_iocp.c
+	                             * __xtc_iocp_repoll_sweep) */
 };
 /* A file AIO (pread/pwrite) in flight on the IOCP backend.  The
  * file HANDLE is associated with the completion port, so the

@@ -445,3 +445,33 @@ DST/sqlxtc storage runs on POSIX); the one place it already handles a
 Windows delete is a stale AF_UNIX path (`DeleteFileA` before rebind, see
 io_net.c).  A general Windows file layer honoring POSIX unlink semantics
 is future work, not a shipped guarantee.
+
+## AFD socket-poll async-completion bug: root-caused and worked around (2026-07)
+
+The loopback socket echo (`smoke_sock_server`/`smoke_sock_client` in
+test/msvc/smoke.c) was the one remaining SKIP in the round-2 IOCP
+verification above.  Root cause: this AFD driver/version reliably
+answers a socket's CURRENT readiness synchronously (confirmed correct
+every time -- accept/connect and the sync-arm path all work) but never
+posts a completion for an async (`STATUS_PENDING`) poll when the socket
+LATER becomes ready, and cancelling a stuck poll also does not post a
+completion.  Isolated in 8 standalone reproducers with zero libxtc code
+(no other explanation fit: base-handle resolution, the IOSB/OVERLAPPED
+aliasing, and the reap loop were all independently verified correct).
+
+Fix: `__xtc_iocp_repoll_sweep` in src/io/io_iocp.c bounds every pending
+poll's readiness latency to XTC_IOCP_REPOLL_NS (8 ms) via a single
+BATCHED zero-timeout throwaway probe per sweep (up to 64 overdue
+sockets per syscall -- AFD_POLL_INFO.Handles[] genuinely supports
+batching independent sockets, confirmed to N=256), canceling and
+re-arming only the sockets the probe actually flags ready.  Measured
+0.00% CPU at 1,000-10,000 idle pending sockets (a naive per-socket,
+non-batched first draft measured 50-98% CPU at the same scale -- the
+batching is not an optimization, it is required for this to be usable).
+The loopback socket echo is now a HARD GATE in smoke.c, not a SKIP.
+
+Full experiment log, the AWS EC2 recipe, and the batching proofs are in
+.agent/AFD_ASYNC_COMPLETION_2026-07.md.  Latency/CPU tradeoff, the
+pre-existing unrelated ASan thread-startup flake found while verifying
+this, and the design rationale for not calling timeBeginPeriod from
+inside the library are in docs/KNOWN_ISSUES.md.
