@@ -293,6 +293,17 @@ int  xtc_sim_buggify_site(int idx, char *buf, size_t buflen,
          int *out_activated);
 int  xtc_sim_buggify_fault(unsigned pct_per_1000);
 
+/* Optional trace hook for xtc_sim_buggify's FIRST activation of each
+ * site (fires exactly once per name per run, at the moment the seeded
+ * coin decides 1) -- NULL by default (zero cost, one branch).  Defined
+ * here (xtc_sim.h is deliberately layer-neutral, like xtc_slab.h) so
+ * any layer's buggify call site can be observed without an upward
+ * #include; installed by src/ptc/tail.c's XTC_TAIL_SIM source, which
+ * is the only consumer today (see docs/testing.md and
+ * tools/sim-monitor/).  A DST run never calls this itself; the
+ * runtime calls it FOR the run when a site activates. */
+extern void (*__xtc_sim_buggify_hook)(const char *name);
+
 /* Branch on a buggify point in runtime code:
  *     if (XTC_SIM_BUGGIFY("wal.flush.tiny_batch")) { ... pessimal ... }
  * A single relaxed load in production; elided with XTC_INJECT_DISABLE. */

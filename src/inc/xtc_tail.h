@@ -39,7 +39,10 @@
 #define XTC_TAIL_MSG    (1u << 1)   /* reserved: send/recv/mailbox depth */
 #define XTC_TAIL_IO     (1u << 2)   /* reserved: fd reg/del/completion */
 #define XTC_TAIL_OS     (1u << 3)   /* reserved: per-loop CPU/RSS sampling */
-#define XTC_TAIL_ALL    (XTC_TAIL_SCHED | XTC_TAIL_MSG | XTC_TAIL_IO | XTC_TAIL_OS)
+#define XTC_TAIL_SIM    (1u << 4)   /* DST events: buggify/partition/machine-death
+                                     * (drives tools/sim-monitor, the optional
+                                     * VOPR-style visualizer; see docs/testing.md) */
+#define XTC_TAIL_ALL    (XTC_TAIL_SCHED | XTC_TAIL_MSG | XTC_TAIL_IO | XTC_TAIL_OS | XTC_TAIL_SIM)
 
 /* Event kinds recorded by the SCHED source. */
 enum xtc_tail_kind {
@@ -52,8 +55,17 @@ enum xtc_tail_kind {
 	/* MSG source: */
 	XTC_TAIL_SEND     = 5,   /* pid sent a message (detail = payload bytes) */
 	XTC_TAIL_RECV     = 6,   /* pid received a message (detail = bytes) */
-	XTC_TAIL_MBOX_HWM = 7    /* pid's mailbox depth reached a new high-water
+	XTC_TAIL_MBOX_HWM = 7,   /* pid's mailbox depth reached a new high-water
 	                          * (detail = the new peak depth) */
+	/* SIM source: */
+	XTC_TAIL_BUGGIFY       = 8,  /* a buggify point activated (detail = a
+	                              * hash of the site name; the viewer
+	                              * resolves it back via xtc_sim_buggify_site) */
+	XTC_TAIL_PARTITION     = 9,  /* a network partition edge was cut/healed
+	                              * (pid.loop_id = group A, detail = group B
+	                              * << 1 | healed) */
+	XTC_TAIL_MACHINE_DEATH = 10  /* a seeded machine-death kill (detail = 1)
+	                              * or reboot-respawn (detail = 0) */
 };
 
 /* One recorded event.  Fixed layout; the binary dump writes it verbatim
