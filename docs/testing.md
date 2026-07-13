@@ -76,7 +76,7 @@ failure to a minimal reproducer.
 libxtc uses [**Hegel**](https://hegel.dev), a property-based-testing
 library based on [Hypothesis](https://github.com/hypothesisworks/hypothesis),
 as a first-class testing tool. The PBT suite links against the official
-C binding, [`hegel-c`](https://github.com/hegeldev/hegel-c), driven by
+C binding, [`hegel-c`](https://github.com/gburd/hegel-c), driven by
 the `hegel` protocol server. The `test/pbt/` suite states properties
 across the layers:
 
@@ -92,7 +92,7 @@ across the layers:
   invariants under generated load.
 
 PBT is a build-time option (`--with-hegel=PATH`, pointing at a built
-[`hegel-c`](https://github.com/hegeldev/hegel-c) tree; it links
+[`hegel-c`](https://github.com/gburd/hegel-c) tree; it links
 `libhegel` plus its `libcbor` and `zlib` dependencies and runs against
 the `hegel` server). The same test files compile
 to no-ops without it, so the suite is always present and turns on where
