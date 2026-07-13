@@ -351,8 +351,6 @@ static signed char      g_bug_decided[XTC_SIM_BUG_MAX]; /* -1 undecided, 0/1 */
 static _Atomic int      g_bug_n;
 static pthread_mutex_t  g_bug_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void (*__xtc_sim_buggify_hook)(const char *name) = NULL;
-
 /* Adversarial scheduler bias + completion/message swizzle (see
  * xtc_sim.h).  State defined near the top (xtc_sim_deactivate resets
  * it); the accessors follow. */
@@ -483,11 +481,6 @@ xtc_sim_buggify(const char *name)
 	g_bug_decided[n] = (signed char)decision;
 	atomic_store_explicit(&g_bug_n, n + 1, memory_order_relaxed);
 	(void)pthread_mutex_unlock(&g_bug_lock);
-	/* Fire the trace hook OUTSIDE the lock (it may call into other
-	 * runtime code, e.g. xtc_tail's emit path) and only on the site's
-	 * first, defining activation -- exactly once per name per run. */
-	if (decision && __xtc_sim_buggify_hook != NULL)
-		__xtc_sim_buggify_hook(name);
 	return decision;
 }
 
