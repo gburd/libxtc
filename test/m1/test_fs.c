@@ -69,7 +69,7 @@ test_file_io(const MunitParameter p[], void *d)
 static MunitResult
 test_namespace(const MunitParameter p[], void *d)
 {
-	char dir[512], a[600], b[600];
+	char dir[512], a[600], b[620];
 	int fd = -1;
 	size_t done = 0;
 	xtc_fs_stat_t st;

@@ -501,8 +501,8 @@ __xproc_wsa_init(void)
 }
 
 /* Hardened loopback-TCP pair: returns a connected (listener-side) SOCKET
- * in *server and the ephemeral port + nonce the child must use in
- * *port/*nonce.  The child connects and echoes the nonce; the server
+ * in *server and the ephemeral port + nonce the child must use (via the
+ * out params).  The child connects and echoes the nonce; the server
  * accepts and verifies it, defeating the port-hijack race. */
 static int
 __xproc_listen(SOCKET *listener, unsigned short *port, uint32_t *nonce)

@@ -63,8 +63,11 @@
 #include "io_int.h"
 
 /* winsock2.h MUST precede windows.h on MinGW.  WIN32_NO_STATUS keeps
- * windows.h from defining the STATUS_* macros that ntstatus.h owns,
- * then we pull ntstatus.h for the full set. */
+ * windows.h from defining the STATUS_ macros, then winternl.h supplies
+ * the NT types.  We do NOT pull <ntstatus.h>: it redefines dozens of
+ * DBG_ and STATUS_ macros that winnt.h / winternl.h already define (65
+ * C4005 macro-redefinition warnings under MSVC), and this backend uses
+ * only the four NTSTATUS values below -- defined here explicitly. */
 #define WIN32_NO_STATUS
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -73,7 +76,15 @@
 #include <winioctl.h>     /* CTL_CODE, METHOD_BUFFERED, FILE_ANY_ACCESS (AFD poll IOCTL) */
 #include <winternl.h>
 #undef WIN32_NO_STATUS
-#include <ntstatus.h>
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS               ((NTSTATUS)0x00000000L)
+#endif
+#ifndef STATUS_PENDING
+#define STATUS_PENDING               ((NTSTATUS)0x00000103L)
+#endif
+#ifndef STATUS_INVALID_DEVICE_REQUEST
+#define STATUS_INVALID_DEVICE_REQUEST ((NTSTATUS)0xC0000010L)
+#endif
 #include <io.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -51,7 +51,7 @@ static int parker_read(xtc_task_t *self, void *u) {
 		return XTC_TASK_PENDING;
 	}
 	/* Drain so the next loop step doesn't observe readiness again. */
-	{ char b; test_read(c->rfd, &b, 1); }
+	{ char b; int rd = test_read(c->rfd, &b, 1); (void)rd; }
 	return XTC_TASK_DONE;
 }
 

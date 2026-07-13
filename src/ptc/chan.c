@@ -183,7 +183,7 @@ xtc_chan_mpsc_destroy(xtc_chan_mpsc_t *c)
 		xtc_res_release(c->res, XTC_RES_CHAN_SLOTS, (int64_t)inflight);
 		xtc_res_release(c->res, XTC_RES_CHANNELS, 1);
 	}
-	__os_free(c->slots);
+	__os_free((void *)c->slots);
 	__os_aligned_free(c);
 }
 

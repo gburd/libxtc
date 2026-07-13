@@ -737,11 +737,11 @@ xtc_slab_destroy(xtc_slab_t *s)
 			((void **)(p + (size_t)j * s->slot_size))[1] =
 			    (void *)0;   /* repurpose; we'll restore */
 		for (fh = c->free_head; fh != NULL; fh = *(void **)fh)
-			((void **)fh)[1] = (void *)0xfeedf00dUL;
+			((void **)fh)[1] = (void *)(uintptr_t)0xfeedf00dUL;
 		if (s->opts.dtor != NULL) {
 			for (j = 0; j < s->objs_per_chunk; j++) {
 				void *slot = p + (size_t)j * s->slot_size;
-				if (((void **)slot)[1] != (void *)0xfeedf00dUL) {
+				if (((void **)slot)[1] != (void *)(uintptr_t)0xfeedf00dUL) {
 					void *obj = __obj_from_slot(s, slot);
 					s->opts.dtor(obj, s->opts.cb_user);
 				}

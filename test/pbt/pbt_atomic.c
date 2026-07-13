@@ -17,6 +17,8 @@
 #include "pbt_common.h"
 #include "xtc_int.h"
 
+#if defined(XTC_HAVE_HEGEL)
+
 /* ----- shared workload helpers ----- */
 
 struct fa_args {
@@ -49,8 +51,6 @@ static void *cas_worker(void *p) {
 }
 
 /* ----- properties ----- */
-
-#if defined(XTC_HAVE_HEGEL)
 
 /*
  * P1: For any (n_threads, iters) drawn in a sane range, the sum of

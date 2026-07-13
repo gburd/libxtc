@@ -44,7 +44,10 @@ jobs:
         run: |
           mkdir -p build_ci
           cd build_ci
-          CC=${{ matrix.compiler }} ../dist/configure --with-tls=auto
+          # -Werror: warnings are build failures (the library and all
+          # tests compile clean under gcc and clang; keep it that way).
+          CC=${{ matrix.compiler }} CFLAGS="-Werror" \
+            ../dist/configure --with-tls=auto
 
       - name: API discipline gate (fast fail before the build)
         run: XTC_SRC_DIR="$PWD" sh test/dist/test_api_discipline.sh

@@ -66,7 +66,7 @@ waiter(void *arg)
 	atomic_store(&g_ready, 1);
 	if (xtc_proc_wait_fd(g_epfd, XTC_IO_READABLE, -1, &rev) == XTC_OK)
 		atomic_fetch_add(&g_woke, 1);
-	(void)read(g_pr, buf, sizeof buf);   /* drain the pipe */
+	{ ssize_t rd = read(g_pr, buf, sizeof buf); (void)rd; }   /* drain the pipe */
 	(void)xtc_exec_stop(g_e);
 }
 

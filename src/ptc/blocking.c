@@ -38,6 +38,7 @@
 #include <fcntl.h>
 static __inline int xtc__blk_pipe(int fds[2])
 { return _pipe(fds, 4096, _O_BINARY); }
+#undef pipe
 #define pipe(fds) xtc__blk_pipe(fds)
 #endif
 

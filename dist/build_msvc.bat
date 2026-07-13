@@ -22,7 +22,7 @@ echo XTC_SRC=%XTC_SRC%
 
 set INC=/I"%XTC_SRC%\src\inc" /I"%XTC_SRC%\src\inc\compat" /I.
 rem /experimental:c11atomics enables _Atomic on VS2022 17.5+ / VS2026.
-set CFLAGS=/nologo /std:c11 /experimental:c11atomics /W3 /O2 /MT /D_WIN32 /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS %INC%
+set CFLAGS=/nologo /std:c11 /experimental:c11atomics /W3 /WX /O2 /MT /D_WIN32 /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS %INC%
 
 rem --- 1. Assemble the fcontext primitives with the right assembler
 rem        for the target arch.  ml64 assembles the x86-64 MASM file;

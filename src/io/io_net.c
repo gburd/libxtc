@@ -15,7 +15,9 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
+#ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE        /* SO_REUSEPORT, SCM_CREDENTIALS */
+#endif
 #define _GNU_SOURCE             /* struct ucred on Linux glibc */
 
 #include "xtc_int.h"
@@ -585,7 +587,7 @@ xtc_net_udp_sendto(int fd, const void *buf, size_t len,
 	snprintf(portbuf, sizeof portbuf, "%d", port);
 	rc = getaddrinfo(host, portbuf, &hints, &res);
 	if (rc != 0 || res == NULL) return XTC_E_INVAL;
-	n = sendto(fd, buf, len, 0, res->ai_addr, res->ai_addrlen);
+	n = sendto(fd, buf, (int)len, 0, res->ai_addr, (int)res->ai_addrlen);
 	freeaddrinfo(res);
 	if (n < 0) {
 #if defined(_WIN32)
@@ -608,7 +610,7 @@ xtc_net_udp_recvfrom(int fd, void *buf, size_t buflen,
 	socklen_t slen = sizeof ss;
 	ssize_t n;
 	if (buf == NULL || out_n == NULL) return XTC_E_INVAL;
-	n = recvfrom(fd, buf, buflen, 0, (struct sockaddr *)&ss, &slen);
+	n = recvfrom(fd, buf, (int)buflen, 0, (struct sockaddr *)&ss, &slen);
 	if (n < 0) {
 #if defined(_WIN32)
 		int we = WSAGetLastError();
@@ -737,7 +739,7 @@ xtc_net_send_frame(int fd, const void *buf, size_t len)
 	hdr[0] = (uint8_t)(len >> 24); hdr[1] = (uint8_t)(len >> 16);
 	hdr[2] = (uint8_t)(len >> 8);  hdr[3] = (uint8_t)(len);
 	for (off = 0; off < 4; ) {
-		ssize_t w = send(fd, (const char *)hdr + off, 4 - off, 0);
+		ssize_t w = send(fd, (const char *)hdr + off, (int)(4 - off), 0);
 		if (w > 0) { off += (size_t)w; continue; }
 		if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
 			if (__net_wait_fd(fd, XTC_IO_WRITABLE, -1) != 0)
@@ -748,7 +750,7 @@ xtc_net_send_frame(int fd, const void *buf, size_t len)
 		return XTC_E_INTERNAL;
 	}
 	for (off = 0; off < len; ) {
-		ssize_t w = send(fd, (const char *)p + off, len - off, 0);
+		ssize_t w = send(fd, (const char *)p + off, (int)(len - off), 0);
 		if (w > 0) { off += (size_t)w; continue; }
 		if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
 			if (__net_wait_fd(fd, XTC_IO_WRITABLE, -1) != 0)
@@ -778,7 +780,7 @@ xtc_net_recv_frame(int fd, void **out, size_t *out_len, size_t max_len,
 		deadline = now + timeout_ns;
 	}
 	for (off = 0; off < 4; ) {
-		ssize_t r = recv(fd, (char *)hdr + off, 4 - off, 0);
+		ssize_t r = recv(fd, (char *)hdr + off, (int)(4 - off), 0);
 		if (r > 0) { off += (size_t)r; continue; }
 		if (r == 0) return XTC_E_INVAL;        /* peer closed */
 		if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -796,7 +798,7 @@ xtc_net_recv_frame(int fd, void **out, size_t *out_len, size_t max_len,
 	if (len == 0) return XTC_OK;               /* valid empty frame */
 	if (__os_malloc(len, (void **)&frame) != XTC_OK) return XTC_E_NOMEM;
 	for (off = 0; off < len; ) {
-		ssize_t r = recv(fd, (char *)frame + off, len - off, 0);
+		ssize_t r = recv(fd, (char *)frame + off, (int)(len - off), 0);
 		if (r > 0) { off += (size_t)r; continue; }
 		if (r == 0) { __os_free(frame); return XTC_E_INVAL; }
 		if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
