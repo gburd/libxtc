@@ -415,7 +415,7 @@ TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt
 # -------------------------------------------------------------------------
 # Default goal.
 # -------------------------------------------------------------------------
-.PHONY: all check tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation
+.PHONY: all check check-sim check-dst tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation
 
 all: $(STATIC_LIB) $(SHARED_LIB_TARGETS) compile_commands.json
 
@@ -835,6 +835,15 @@ tests-pbt: $(TESTS_PBT)
 		HEGEL_SERVER_COMMAND="$(XTC_HEGEL_SERVER_COMMAND)" \
 		./$$t || exit 1; \
 	done
+
+# check-sim / check-dst: the full DST suite (test/sim/, 52+ tests) built
+# against a separate --with-io-backend=sim configuration.  NOT part of
+# plain `make check` (it configures+builds a second copy of the library),
+# so run it explicitly -- this is the project's strongest test tier and
+# a normal `make check` alone does not exercise it.
+check-sim: check-dst
+check-dst:
+	XTC_SRC_DIR=$(abs_top_srcdir)/.. sh $(abs_top_srcdir)/../test/sim/run_sim_tests.sh
 
 # Build C tests.  Each links against the static lib.
 test_version: $(srcdir)/../test/m0/test_version.c \

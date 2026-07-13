@@ -35,6 +35,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_async.h"
@@ -44,13 +48,18 @@
 static atomic_int g_parked;
 static xtc_loop_t *g_loop;
 
-/* A fiber that signals it is live, then parks forever (until the loop
- * tears down).  All N are simultaneously resident, so RSS reflects N
- * live fiber stacks. */
+/* A fiber that signals it is live, touches its stack near the top (so
+ * the page is actually committed -- on macOS/BSD an untouched fiber
+ * stack page is allocated lazily and never counted in RSS, which makes
+ * an otherwise-honest measurement read as a broken zero), then parks
+ * forever (until the loop tears down). */
 static void
 parker(void *arg)
 {
+	volatile char touch[256];
+
 	(void)arg;
+	memset((void *)touch, 0x5a, sizeof touch);
 	atomic_fetch_add_explicit(&g_parked, 1, memory_order_relaxed);
 	/* Park indefinitely: recv with no sender ever -- the loop will be
 	 * torn down to release us.  This keeps the stack live + minimal. */
@@ -64,6 +73,15 @@ parker(void *arg)
 static long
 rss_kib(void)
 {
+#if defined(__APPLE__)
+	struct task_basic_info info;
+	mach_msg_type_number_t cnt = TASK_BASIC_INFO_COUNT;
+
+	if (task_info(mach_task_self(), TASK_BASIC_INFO,
+	    (task_info_t)&info, &cnt) != KERN_SUCCESS)
+		return -1;
+	return (long)(info.resident_size / 1024);
+#else
 	FILE *f = fopen("/proc/self/status", "r");
 	char line[256];
 	long kib = -1;
@@ -76,6 +94,7 @@ rss_kib(void)
 		}
 	(void)fclose(f);
 	return kib;
+#endif
 }
 
 static void

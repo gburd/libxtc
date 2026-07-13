@@ -42,9 +42,11 @@ out and [TigerBeetle](https://tigerbeetle.com/) made a headline feature;
 stackless runtime. libxtc treats it as the primary defense, not an
 extra:
 
-- **46 simulation tests** (`test/sim/`) run every commit in CI over the
+- **52+ simulation tests** (`test/sim/`) run every commit in CI over the
   sim I/O backend, plus a nightly 100,000-seed swarm across the combined
-  fault set.
+  fault set. Run the full DST suite locally with `make check-dst` (a
+  separate `--with-io-backend=sim` build; not part of plain `make check`
+  since it configures and builds a second copy of the library).
 - **The right metric is bug-detection latency, not coverage.** A
   bug-injection harness (`scripts/dst-bug-inject.sh`) plants a known
   safety bug -- a dropped wakeup, a skipped fsync, a lock-conflict error
