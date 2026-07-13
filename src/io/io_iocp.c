@@ -366,12 +366,30 @@ __base_socket(int fd, HANDLE *out)
 {
 	SOCKET base = INVALID_SOCKET;
 	DWORD  got = 0;
+	/* The handle to hand IOCTL_AFD_POLL is the socket's BASE service
+	 * provider handle.  On a plain socket SIO_BASE_HANDLE gives it, but
+	 * on an ACCEPTED or layered socket (LSP/WFP present) the poll must
+	 * target SIO_BSP_HANDLE_POLL -- SIO_BASE_HANDLE can return a handle
+	 * whose AFD poll never completes on data arrival (observed: the
+	 * loopback echo's accepted socket armed PENDING and was never woken).
+	 * wepoll's resolution order: BSP_HANDLE_POLL, then BASE_HANDLE, then
+	 * the fd itself. */
+#ifndef SIO_BSP_HANDLE_POLL
+#define SIO_BSP_HANDLE_POLL 0x4800001DUL   /* _WSAIORW(IOC_WS2, 29) */
+#endif
+	if (WSAIoctl((SOCKET)fd, SIO_BSP_HANDLE_POLL, NULL, 0, &base,
+	    sizeof base, &got, NULL, NULL) == 0 && base != INVALID_SOCKET) {
+		*out = (HANDLE)base;
+		return XTC_OK;
+	}
+	base = INVALID_SOCKET; got = 0;
 	if (WSAIoctl((SOCKET)fd, SIO_BASE_HANDLE, NULL, 0, &base,
-	    sizeof base, &got, NULL, NULL) != 0)
-		return XTC_E_INTERNAL;
-	if (base == INVALID_SOCKET)
-		return XTC_E_INTERNAL;
-	*out = (HANDLE)base;
+	    sizeof base, &got, NULL, NULL) == 0 && base != INVALID_SOCKET) {
+		*out = (HANDLE)base;
+		return XTC_OK;
+	}
+	/* Last resort: poll the fd directly (non-layered stacks). */
+	*out = (HANDLE)(SOCKET)fd;
 	return XTC_OK;
 }
 
