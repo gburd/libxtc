@@ -34,18 +34,15 @@ import argparse
 MAGIC = 0x5854434C          # "XTCL"
 FLAG_LE = 1
 
-SOURCES = {1: "SCHED", 2: "MSG", 4: "IO", 8: "OS", 16: "SIM"}
+SOURCES = {1: "SCHED", 2: "MSG", 4: "IO", 8: "OS"}
 KINDS = {
     0: "SPAWN", 1: "EXIT", 2: "WAKE", 3: "RUN", 4: "PARK",
     5: "SEND", 6: "RECV", 7: "MBOX_HWM",
-    8: "BUGGIFY", 9: "PARTITION", 10: "MACHINE_DEATH",
 }
 # detail-field meaning per kind, for the human column
 DETAIL = {
     "EXIT": "reason", "RUN": "wake->run ns", "SEND": "bytes",
     "RECV": "bytes", "MBOX_HWM": "peak depth",
-    "BUGGIFY": "site name hash (FNV-1a)",
-    "PARTITION": "group B << 1 | healed", "MACHINE_DEATH": "1=kill 0=reboot",
 }
 
 

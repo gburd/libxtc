@@ -65,17 +65,6 @@ wake race, buffer-manager pin races in the sqlxtc example. Those are in
 [Known issues]({{ '/reference/known-issues/' | relative_url }}), documented
 rather than buried.
 
-### Watching a DST run (optional)
-
-`tools/xtc-tail.py` renders a recorded `xtc_tail` trace as a text
-timeline (`--source SIM` shows buggify activations alongside the
-SCHED/MSG events). `tools/sim-monitor/` is a separate, playful,
-**strictly optional** graphical sibling in the spirit of TigerBeetle's
-VOPR visualizer: lanes = simulated loops, flashes = scheduler events,
-a red flash = a named buggify site activating. Needs raylib
-(`nix develop .#sim-monitor`); never required to build the library or
-run `make check`. See `tools/sim-monitor/README.md`.
-
 ## Property-based testing (PBT)
 
 Where DST hunts *interleavings*, property-based testing hunts *inputs*.

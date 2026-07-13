@@ -16,7 +16,6 @@
 #include "xtc_int.h"
 #include "xtc_tail.h"
 #include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock */
-#include "xtc_sim.h"        /* __xtc_sim_buggify_hook (SIM source) */
 #include "os_time.h"
 
 #include <pthread.h>
@@ -29,8 +28,6 @@ static _Atomic unsigned __tail_mask;    /* enabled sources; 0 = off */
 static pthread_mutex_t  __tail_lock = PTHREAD_MUTEX_INITIALIZER;
 static xtc_tail_rec_t   __tail_ring[XTC_TAIL_RING];
 static uint64_t         __tail_seq;     /* total records ever written */
-
-static void __xtc_tail_on_buggify(const char *name);
 
 static uint64_t
 __tail_now_ns(void)
@@ -68,17 +65,8 @@ __xtc_tail_emit(unsigned source, unsigned kind, xtc_pid_t pid, uint64_t detail)
 unsigned
 xtc_tail_enable(unsigned source_mask)
 {
-	unsigned prev, want = source_mask & XTC_TAIL_ALL;
-
-	prev = atomic_exchange_explicit(&__tail_mask, want, memory_order_release);
-	/* Install/uninstall the buggify trace hook to match the SIM bit --
-	 * this is the only place a source needs a hook into another module
-	 * rather than a hook point calling __xtc_tail_emit directly (a named
-	 * buggify site can activate from ANY layer, L1 through L4; routing
-	 * through xtc_sim.h's layer-neutral hook keeps xtc_tail.h -- an L3
-	 * header, xtc_pid_t-typed -- out of L1/L2 files). */
-	__xtc_sim_buggify_hook = (want & XTC_TAIL_SIM) ? __xtc_tail_on_buggify : NULL;
-	return prev;
+	return atomic_exchange_explicit(&__tail_mask, source_mask & XTC_TAIL_ALL,
+	    memory_order_release);
 }
 
 /* Fast predicate for hook points that must do extra work (e.g. read a
@@ -92,41 +80,10 @@ __xtc_tail_on(unsigned source)
 	    & source) != 0;
 }
 
-/* A stable 64-bit hash of a buggify site NAME, so the SIM source's
- * fixed-width xtc_tail_rec_t.detail field can carry it without
- * widening the record format; an offline viewer that wants the name
- * back resolves the hash against xtc_sim_buggify_site's live table
- * (or, for a recorded trace replayed later, against a name->hash map
- * captured at record time -- tools/sim-monitor's concern, not this
- * module's).  FNV-1a: simple, well-distributed, no dependency. */
-static uint64_t
-__tail_hash_name(const char *name)
-{
-	uint64_t h = 0xcbf29ce484222325ULL;
-	const unsigned char *p = (const unsigned char *)name;
-
-	while (*p != '\0') {
-		h ^= (uint64_t)*p++;
-		h *= 0x100000001b3ULL;
-	}
-	return h;
-}
-
-/* Installed as __xtc_sim_buggify_hook while XTC_TAIL_SIM is enabled;
- * uninstalled (set back to NULL) otherwise, so a disabled SIM source
- * costs sim.c nothing beyond the one NULL check it already has. */
-static void
-__xtc_tail_on_buggify(const char *name)
-{
-	__xtc_tail_emit(XTC_TAIL_SIM, XTC_TAIL_BUGGIFY, XTC_PID_NONE,
-	    __tail_hash_name(name));
-}
-
 void
 xtc_tail_disable(void)
 {
 	atomic_store_explicit(&__tail_mask, 0u, memory_order_release);
-	__xtc_sim_buggify_hook = NULL;
 }
 
 int

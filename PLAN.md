@@ -3004,15 +3004,27 @@ not started:
   once it lands, with no future-regression exceptions** -- matches the
   "once we get there, hold the line" requirement.
 - **Optional graphical DST monitor** (`tools/sim-monitor/`,
-  TigerBeetle-VOPR-inspired): a vendored-raylib viewer that animates
-  simulated loops/tasks/messages/buggify-activations from a recorded
-  `xtc_tail` SIM trace source.  Strictly optional (own directory, never
-  wired into `make check`, `libxtc.a`, or the default build/meson
-  target) and portable macOS+Linux.  Phase 1: live/recorded "watch it
-  run" viewer.  Phase 2 (harder): scrubbable replay stepping a
-  deterministic seed run backward/forward, VOPR-style.  Never claimed
-  as a correctness mechanism -- the sim + its assertions remain that;
-  the viewer is a debugging aid layered on top.
+  TigerBeetle-VOPR-inspired): DEFERRED, LOW PRIORITY, not critical path
+  (2026-07-13 -- built a real Phase-1 prototype in-session: an
+  XTC_TAIL_SIM trace source, a recorder, and a raylib viewer
+  redesigned as a Defender/Marco-Polo game -- ships=procs, colored
+  balls=in-flight messages, a red "Marco" hunter=a buggify activation
+  the runtime dodges by retrying.  The trace-recording/parsing data
+  path was proven correct end-to-end; the on-screen rendering could
+  not be visually verified in that session's sandbox for reasons
+  unrelated to the code (Wayland/EGL vs X11/GLX GLFW backend
+  selection, then a chain of screenshot-tooling/protocol/permission
+  failures) and the user tabled it as non-critical.  Reverted cleanly
+  from main; see .agent/GUI_VIEWER_PARKED_2026-07.md for the full
+  postmortem, the environment gotchas to avoid next time, and where to
+  find the reverted source if picked back up).  If revisited: same
+  shape as before -- own directory, never wired into `make check`,
+  `libxtc.a`, or the default build/meson target, portable macOS+Linux.
+  Phase 1: live/recorded "watch it run" viewer.  Phase 2 (harder):
+  scrubbable replay stepping a deterministic seed run backward/
+  forward, VOPR-style.  Never claimed as a correctness mechanism --
+  the sim + its assertions remain that; the viewer is a debugging aid
+  layered on top.
 
 ---
 
