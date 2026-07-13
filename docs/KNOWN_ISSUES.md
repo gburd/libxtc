@@ -289,13 +289,26 @@ remains:
    as accept + connect + the client's send, then the server's PENDING
    READABLE poll on the accepted socket never fires on data arrival, so
    the echo does not complete (the smoke stays a clean SKIP, not a
-   failure -- all other IOCP paths pass).  This is the remaining
-   AFD-internals piece (the data-ready notification on an outstanding
-   async poll) and needs deeper reverse-engineering of the wepoll
-   AFD_POLL_INFO / base-handle handling; it is NOT blind-fixable.  The
-   three fixes above are real improvements and are kept; the file-AIO,
-   cross-thread-wakeup, selective-receive, and xtc_xproc IOCP paths all
-   still pass on the host.
+   failure -- all other IOCP paths pass).
+   Further narrowed (v1.20.1 session, MSVC host trace): instrumenting
+   the completion-port reap confirmed that the two READABLE polls armed
+   STATUS_PENDING (with their OVERLAPPED addresses logged) and NO
+   completion for those OVERLAPPEDs is EVER dequeued after the client
+   sends -- so AFD genuinely does not post the data-ready completion for
+   the outstanding async poll, and a wakeup storm (key=1, NULL
+   OVERLAPPED) spins the loop in the meantime.  The accepted socket's
+   base handle was moved to SIO_BSP_HANDLE_POLL (wepoll's resolution
+   order: BSP_HANDLE_POLL, then BASE_HANDLE, then the fd) -- the correct
+   handle for IOCTL_AFD_POLL on accepted/layered sockets -- which is a
+   real improvement and is KEPT, but it alone did NOT make the async
+   poll complete.  The remaining suspect is a mismatch in the AFD poll
+   re-arm/completion contract vs wepoll (the IOSB/OVERLAPPED aliasing,
+   or the need to check current readiness on the base handle at arm
+   time rather than trusting the async completion) -- a focused
+   byte-for-byte diff against wepoll's afd_poll is the next step.  It is
+   NOT blind-fixable and needs continued interactive iteration on a
+   Windows host.  The file-AIO, cross-thread-wakeup, selective-receive,
+   and xtc_xproc IOCP paths all still pass.
 
 ### Round 2 (current source): native completion port + AFD poll
 
