@@ -95,5 +95,23 @@
             echo "  meson setup build_meson && meson test -C build_meson"
           '';
         };
+
+        # Optional: tools/sim-monitor/, the VOPR-inspired DST trace
+        # viewer.  NOT part of the default dev shell (it pulls in a
+        # GUI toolkit -- raylib -- most contributors building the
+        # library itself do not need) and NOT a dependency of the
+        # library, make check, or the default build in any way; see
+        # tools/sim-monitor/README.md.  Enter with:
+        #   nix develop .#sim-monitor
+        devShells.sim-monitor = pkgs.mkShell {
+          packages = with pkgs; [
+            gcc14 pkg-config gnumake
+            raylib
+          ];
+          shellHook = ''
+            echo "xtc sim-monitor dev shell ready (raylib $(pkg-config --modversion raylib))"
+            echo "  cd tools/sim-monitor && make"
+          '';
+        };
       });
 }

@@ -60,6 +60,20 @@ Build with `-g` (the default build does).  The tools work on a live
 process (run / attach / breakpoint) and on a core dump.  Run them while
 stopped so the file-static registry symbols resolve.
 
+## Graphical DST trace viewer (tools/sim-monitor/)
+
+`tools/sim-monitor/` is a separate, **strictly optional** graphical
+viewer for the same `xtc_tail` trace format, in the spirit of
+TigerBeetle's VOPR visualizer: it animates a recorded deterministic-
+simulation run (lanes = loops, flashes = scheduler events and buggify
+activations) instead of printing a timeline. Needs raylib
+(`nix develop .#sim-monitor`); not required to build the library, not
+wired into `make check`. See `tools/sim-monitor/README.md`. The
+SCHED/MSG/IO/OS sources above now have a fifth sibling, `SIM`
+(`XTC_TAIL_SIM`), covering DST-specific events -- currently buggify
+activations (`xtc-tail.py TRACE --source SIM`); the graphical viewer
+consumes the same source.
+
 ## MSVC / WinDbg
 
 Native MSVC support (a NatVis file for the value views plus an
