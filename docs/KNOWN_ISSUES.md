@@ -310,6 +310,25 @@ remains:
    Windows host.  The file-AIO, cross-thread-wakeup, selective-receive,
    and xtc_xproc IOCP paths all still pass.
 
+   2026-07-13 update: isolated in a standalone reproducer, no libxtc
+   code involved.  A ~150-line C program (open \Device\Afd directly,
+   loopback TCP pair, arm one async IOCTL_AFD_POLL for AFD_POLL_RECEIVE
+   on the not-yet-readable accepted socket, send() from the client, wait
+   on the port) reproduces the exact symptom: NtDeviceIoControlFile
+   returns STATUS_PENDING (0x103), and GetQueuedCompletionStatus times
+   out -- no completion ever arrives, even though the socket is
+   genuinely readable afterward.  This proves the bug is in the AFD
+   poll CONTRACT/usage itself, not in libxtc's IOCP reap loop,
+   registration lifetime, or the wakeup-storm side effect (which is a
+   symptom of the loop never blocking, not the cause).  Leading
+   hypothesis for the next session: the bare NtCreateFile on
+   \Device\Afd\<name> may need the AFD EXTENDED-ATTRIBUTE open packet
+   (the AfdOpenPacket EA that wepoll/afd.c passes via the EaBuffer
+   argument) to arm a real future-edge watch -- a handle opened without
+   it may only be able to report CURRENT readiness (consistent with why
+   the synchronous-ready case already works).  Full repro harness +
+   AWS/SSH recipe recorded in .agent/AFD_ASYNC_COMPLETION_2026-07.md.
+
 ### Round 2 (current source): native completion port + AFD poll
 
 `src/io/io_iocp.c` was rewritten from the round-1 readiness emulation
