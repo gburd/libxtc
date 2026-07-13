@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.20.0"
+#       --define "version 1.20.1"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.20.0
+Version:        1.20.1
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,9 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Mon Jul 13 2026 Greg Burd <greg@burd.me> - 1.20.1-1
+- Zero-warning build on all targets (gcc/clang/musl/MSVC/sanitizers) + -Werror//WX enforcement.
+
 * Sun Jul 12 2026 Greg Burd <greg@burd.me> - 1.20.0-1
 - Windows IOCP AFD poll: IOCTL-code + stale-errno + sync-completion fixes; FlsAlloc slab magazine validated on MSVC.
 
