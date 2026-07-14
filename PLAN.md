@@ -2855,47 +2855,55 @@ Not strictly needed for v1; right abstraction for replication
 coordination, distributed transactions, complex extension flows.
 M14.
 
-### 19.5b Cross-thread wake path contention (proc.c) -- DONE (option 1); option 2 DEFERRED
+### 19.5b Cross-thread wake path contention (proc.c __lt_lock) -- DONE (correct, but NOT the PG bottleneck; see 19.5c)
 
-A fiber-per-session server (the PostgreSQL fiber-carrier build being the
-motivating case) funnels every cross-thread `xtc_proc_wake()` /
-`xtc_send()` through `__resolve`.  Reported plateau: ~2.3x below the
-process baseline, machine ~83% idle, carriers blocked in `futex_wait`,
-with the serial section identified as the single process-global
-`__lt_lock` scanned on every wake (Strategy 2 in `__resolve`), plus the
-per-target `mbox_lock`.  See /tmp/libxtc-wake-path-contention-report.md
-and .agent/WAKE_PATH_CONTENTION_2026-07.md.
+The cross-thread `xtc_proc_wake()` / main-thread `xtc_send()` path resolved
+the target through a single process-global `__lt_lock` (Strategy 2 in
+`__resolve`), a real global serial section for topologies that fan wakes
+across execs.  FIXED: the loop registry `__lt[]` slots are now atomic
+(`_Atomic loop`/`tbl`); `__resolve`'s Strategy-2 scan and `__table_for`'s
+existing-table lookup are LOCK-FREE (acquire loads).  Only loop
+create/destroy take the lock, publishing via release stores.  Verified:
+full DST 52/52, test_proc_wake_crossthread 0/100 lost wakes x20, TSan-clean
+(clang+fibers).  See .agent/WAKE_PATH_CONTENTION_2026-07.md.
 
-DONE (option 1, the identified primary contention): the loop registry
-`__lt[]` slots are now atomic (`_Atomic loop`/`tbl`); `__resolve`'s
-Strategy-2 scan and `__table_for`'s existing-table lookup are LOCK-FREE
-(acquire loads), so a cross-thread wake to a loop outside the caller's
-exec no longer serializes on `__lt_lock`.  Only loop create/destroy
-(rare) take the lock, publishing via release stores (tbl-before-loop on
-insert, loop-cleared-first on remove) so a racing reader never sees a
-live loop with a NULL/freed table.  Verified: full DST suite green
-(incl. the new test_sim_chash and every proc/reg/svr sim test), 20x +
-TSan-clean under the CI clang+fiber configuration on
-test_proc_wake_crossthread / test_proc / test_svr / test_chan
-(0/100 lost wakes every run).
+IMPORTANT CORRECTION: the PG fiber-carrier team's follow-up MEASUREMENT
+FALSIFIED this as their bottleneck.  Uprobe under load: xtc_proc_wake =
+0-1 calls/10s, xtc_proc_wait_fd = 39/10s -- the carrier cycles resumable
+backends in USERSPACE, so the wake/park path (hence __lt_lock) is off
+their hot path entirely.  This fix stays (it is correct and removes a
+genuine global serial section for cross-exec fan-out), but it does NOT
+move the fiber-per-session PG plateau.  The real bottleneck is 19.5c.
 
-DEFERRED (option 2, needs its own session + a planted lost-wakeup DST
-case): making `xtc_proc_wake` fire the armed waker WITHOUT taking the
-target's `mbox_lock` (a lock-free "set-pending + wake" path).  `mbox_lock`
-is sharded per-target-proc (N targets => N locks, not one global), so it
-is far less contended than `__lt_lock` was; and a lock-free wake races
-the park path's arm/disarm of `waker_armed` -- a lost wakeup here is a
-hang, exactly the class of bug (idle-loop / cross-fd wake-miss) this
-codebase has been bitten by before.  It must land with a DST test that
-plants a lost-wakeup and proves the simulator catches it fast.  NOT a
-release blocker; option 1 recovers the dominant serial section.
+### 19.5c Per-loop proc-table lock (t->lock) on the common send cycle -- NOT DONE (the actual PG bottleneck)
 
-DROPPED (option 3, loop-affinity guidance): the PG team confirmed they
-do not need it; it would have been docs-only.  Note for the record:
-`__resolve` Strategy 1 already takes the lock-free fast path when the
-target is on the caller's own loop OR a sibling loop in the same
-`xtc_exec` -- co-locating a session's fiber and its waker in one exec
-skips the registry entirely.
+Root-caused from the PG team's verified evidence (heap-allocated
+pthread_mutex, ~367k __lll_lock_wait_private/10s, on the common
+cooperative cycle with zero wake/park syscalls, flat in carrier count,
+absent at -c1): the contended lock is `t->lock`, the per-LOOP
+`xtc_proc_table` mutex (proc.c ~570), shared by EVERY fiber/proc on a
+carrier.  Every `xtc_send` -- including a same-loop fiber-to-fiber
+hand-off -- calls `__resolve` -> `__table_lookup` (proc.c ~649), which
+takes `t->lock` to read the slot and pin the target with a refcount.  In
+a fiber-per-session server the per-command reader->backend->reply
+hand-off is one-or-more such sends, so every fiber on a carrier
+serializes on that one per-loop lock; throughput is bounded by
+per-carrier-lock throughput => flat in carrier count.  See
+/tmp/libxtc-proc-mutex-contention-reply.md (reply to the team) and
+.agent/WAKE_PATH_CONTENTION_2026-07.md.
+
+Fix (its own session, NOT this release): make `__table_lookup`'s READ
+lock-free (RCU/seqlock) against the existing teardown protocol -- the
+slot detach + owner-ref-drop happen under this same lock precisely so a
+resolver sees live-and-pins-or-NULL, never a freed pointer; the lock-free
+version must preserve that (pin-then-recheck-under-RCU, the same
+discipline xtc_rcu/xtc_chash already use here) or it reintroduces a
+use-after-free on proc exit.  MUST land with a DST test: a seeded
+resume-vs-exit race that stays UAF-clean and replay-identical.  Secondary:
+the per-proc `mbox_lock` on the same-loop mailbox hand-off (lighter, do
+after the t->lock A/B confirms the ceiling moves).  Ship the release
+build with -g3 -fno-omit-frame-pointer so the team can resolve
+__lll_lock_wait_private to __table_lookup themselves.
 
 ### 19.6 Priority inheritance through the lock manager (M13c) -- NOT DONE (three subagent attempts failed to land code; see .agent/TEAM_DISPATCH_2026-07-13.md; lead to implement directly)
 
