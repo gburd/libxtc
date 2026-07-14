@@ -128,6 +128,16 @@ __cgroup_cpu_quota_ncpus(int hw_ncpus)
 	if (period <= 0)
 		return -1;
 
+	/* Guard the ceil() arithmetic against a maliciously-huge quota
+	 * (a local user who can write the cgroup file): quota+period-1
+	 * could overflow long long (signed overflow is UB).  The result is
+	 * only ever a CPU count clamped to [1, hw_ncpus], so if quota/period
+	 * already meets or exceeds hw_ncpus, just return hw_ncpus.  The
+	 * comparison uses division (never multiplication or addition) so it
+	 * cannot itself overflow. */
+	if (quota / period >= (long long)hw_ncpus)
+		return hw_ncpus;
+
 	n = (int)((quota + period - 1) / period);   /* ceil(quota/period) */
 	if (n < 1) n = 1;
 	if (n > hw_ncpus) n = hw_ncpus;

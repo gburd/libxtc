@@ -22,6 +22,8 @@
 #include "xtc_int.h"
 #include "xtc_saga.h"
 
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 
 struct saga_step {
@@ -77,6 +79,13 @@ xtc_saga_step(xtc_saga_t *s, xtc_saga_fn action, xtc_saga_fn compensate,
 	if (s->n_steps == s->cap) {
 		int newcap = s->cap == 0 ? 4 : s->cap * 2;
 		void *np = NULL;
+		/* Overflow guard (defense-in-depth): cap*2 as int would wrap
+		 * negative past INT_MAX/2, and the size arithmetic below would
+		 * then be wrong.  A saga with hundreds of millions of steps is
+		 * not a real workload; refuse rather than misbehave. */
+		if (s->cap > INT_MAX / 2 ||
+		    (size_t)newcap > SIZE_MAX / sizeof *s->steps)
+			return XTC_E_RANGE;
 		if ((rc = __os_realloc(s->steps,
 		    (size_t)newcap * sizeof *s->steps, &np)) != XTC_OK)
 			return rc;
