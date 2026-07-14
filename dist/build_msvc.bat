@@ -86,39 +86,44 @@ echo.
 echo BUILD OK: xtc.lib + smoke.exe
 smoke.exe
 
-rem --- 5. (best-effort) Build + run a curated set of REAL munit-suite
-rem        tests, now that MUNIT_ARRAY_PARAM no longer expands to a
+rem --- 5. Build + run a curated set of REAL munit-suite tests under
+rem        cl.exe, now that MUNIT_ARRAY_PARAM no longer expands to a
 rem        VLA-typed array parameter (test/m0/munit.h) -- that was the
 rem        GCC-ism blocking cl.exe.  The set is the POSIX-CLEAN munit
 rem        tests: they exercise only the public xtc_* API + the harness,
 rem        with no direct pthread.h / unistd.h / sys-header use, so they
-rem        are the portion of the suite that can compile under UCRT.
+rem        are the portion of the suite that compiles under UCRT.
 rem        (Tests that use POSIX threads/sockets directly stay Linux/CI-
-rem        validated; porting those is the separate Clang64 work.)
+rem        validated; porting those is the separate Clang64 work.
+rem        test_tls is excluded: no TLS backend is wired into the MSVC
+rem        build.)
 rem
-rem        This whole step is best-effort: a build/run failure for any
-rem        single test does NOT fail the job, because the full set has
-rem        not yet been confirmed on a real cl.exe.  It prints a
-rem        pass/fail TALLY so Windows CI surfaces the true state; once
-rem        the tally is all-pass on CI, promote it to a hard gate
-rem        (drop the ver-reset fallbacks and add 'exit /b 1' on any
-rem        fail).  See docs/M_WINDOWS_MATRIX.md. ---
+rem        This is now a HARD GATE: confirmed all-pass on Windows CI
+rem        (16/16), so any build/run failure in the set fails the job.
+rem        See docs/M_WINDOWS_MATRIX.md. ---
 echo.
 echo [5/5] cl real munit suite (POSIX-clean subset, best-effort)
 set MUNIT_PASS=0
 set MUNIT_FAIL=0
 set MUNIT_FAILED_LIST=
-rem  space-separated MS:TN pairs (colon-delimited so no backslash parsing)
-set MUNIT_TESTS=m0:test_version m0:test_errors m0:test_header m1:test_atomic m1:test_alloc m1:test_time m1:test_crypto m1:test_tls m11:test_mctx m10:test_credit m10:test_fsm m10:test_pool m10:test_reg m10:test_stream m14:test_launch m14:test_unsafe_depth m14:test_stack_reclaim
+rem  space-separated MS:TN pairs (colon-delimited so no backslash parsing).
+rem  test_tls is deliberately EXCLUDED: the MSVC build wires no TLS
+rem  backend (XTC_TLS_BACKEND_* undefined in compat/xtc_config.h), so
+rem  test_tls references TLS symbols not in xtc.lib and cannot link.
+set MUNIT_TESTS=m0:test_version m0:test_errors m0:test_header m1:test_atomic m1:test_alloc m1:test_time m1:test_crypto m11:test_mctx m10:test_credit m10:test_fsm m10:test_pool m10:test_reg m10:test_stream m14:test_launch m14:test_unsafe_depth m14:test_stack_reclaim
 for %%P in (%MUNIT_TESTS%) do (
   for /f "tokens=1,2 delims=:" %%a in ("%%P") do call :run_munit %%a %%b
 )
 echo.
-echo [5/5] munit subset tally: !MUNIT_PASS! passed, !MUNIT_FAIL! failed (best-effort, not gating)
-if not "!MUNIT_FAILED_LIST!"=="" echo [5/5] munit failing: !MUNIT_FAILED_LIST!
+echo [5/5] munit subset tally: !MUNIT_PASS! passed, !MUNIT_FAIL! failed
+if not "!MUNIT_FAILED_LIST!"=="" (
+  echo [5/5] munit FAILING:!MUNIT_FAILED_LIST!
+  echo [5/5] MSVC munit subset gate FAILED
+  goto :fail
+)
+echo [5/5] MSVC munit subset OK -- !MUNIT_PASS! POSIX-clean munit tests
 
-rem  Main flow ends here -- explicitly succeed so it can NEVER fall
-rem  through into :fail (this whole step-5 block is best-effort).
+rem  Explicit success so control never falls into :fail below.
 exit /b 0
 
 rem --- :run_munit <milestone> <testname>  (best-effort build+run of
