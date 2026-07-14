@@ -1231,18 +1231,27 @@ arena_init(xtc_tnt_shard_t *sh, int idx, const xtc_tnt_type_t *type)
 
 	/* Defense-in-depth: slot_count and stride are caller-supplied type
 	 * config (not wire input, so this is a misconfiguration guard, not
-	 * a remote CVE).  Reject a type whose arena-sizing products
-	 * (slot_count * stride, slot_count * sizeof(slot_t), slot_count *
-	 * sizeof(uint32_t)) would overflow size_t before we hand them to
-	 * the allocator, where the wrap would under-allocate and every
-	 * subsequent slot index become an out-of-bounds write. */
+	 * a remote CVE).  Reject a type whose arena-sizing product
+	 * slot_count * per_slot_bytes would overflow size_t before we hand
+	 * it to the allocator, where the wrap would under-allocate and
+	 * every subsequent slot index become an out-of-bounds write.  The
+	 * largest per-slot multiplier is max(stride, sizeof(slot_t),
+	 * sizeof(uint32_t)); guarding against that one bound covers all
+	 * three products.  (On a 64-bit size_t a uint32_t * a small const
+	 * cannot overflow, so only the stride term is live there; on a
+	 * 32-bit size_t all three matter.) */
 	if (ar->slot_count == 0)
 		return -1;
-	if (type->stride != 0 &&
-	    (size_t)ar->slot_count > SIZE_MAX / type->stride)
-		return -1;
-	if ((size_t)ar->slot_count > SIZE_MAX / sizeof(xtc_tnt_slot_t))
-		return -1;
+	{
+		size_t per_slot = type->stride;
+		if (sizeof(xtc_tnt_slot_t) > per_slot)
+			per_slot = sizeof(xtc_tnt_slot_t);
+		if (sizeof(uint32_t) > per_slot)
+			per_slot = sizeof(uint32_t);
+		if (per_slot != 0 &&
+		    (size_t)ar->slot_count > SIZE_MAX / per_slot)
+			return -1;
+	}
 
 	/* Carve the metadata + Isolate-store arrays from boot-time slab
 	 * caches sized for the whole arena.  We allocate the arrays as one
