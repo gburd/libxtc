@@ -115,3 +115,6 @@ docs/vendor/
 
 # Generated API-reference pages (from man pages, at docs build time)
 docs/reference/api/
+
+.envrc
+
