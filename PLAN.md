@@ -2949,14 +2949,26 @@ context support, capability dropping helpers.  Address-sanitization
 at process boundary (CFI, shadow stacks, Intel CET) where the
 toolchain supports it.  M14.
 
-### 19.18 Hash tables and other concurrent data structures (M13a/b) -- PARTIAL: xtc_chash DONE (unit-tested); xtc_cskip NOT STARTED; chash DST/PBT/bench pending
+### 19.18 Hash tables and other concurrent data structures (M13a/b) -- xtc_chash DONE (all tiers); xtc_cskip DONE (all tiers); bloom/HLL NOT STARTED
 
 - RCU-protected concurrent hash table (`xtc_chash`) --
-  primary RCU consumer.  M13a.
-- Concurrent skiplist (`xtc_cskip`, vendoring `~/ws/skiplist`).
-  M13b.
+  primary RCU consumer.  M13a.  DONE: unit + DST
+  (test_sim_chash: RCU-reclamation UAF-safety, replay-identical) +
+  PBT (model equivalence) + bench.  No longer provisional.
+- Concurrent ordered map / skiplist (`xtc_cskip`).  M13b.  DONE:
+  a Pugh skiplist on xtc_rcu, lock-free readers + single writer
+  mutex (v1; fine-grained writer locking deferred), min/floor
+  ordered queries.  Reviewed against the mature lock-free
+  reference at ~/ws/skiplist (Fraser/Harris + EBR + splay); the
+  single-writer design deliberately avoids marked-pointer
+  help-unlink since writers are mutually exclusive.  Full tiers:
+  unit (incl. concurrent + TSan), DST (test_sim_cskip:
+  UAF-safety + ordered-query consistency, replay-identical), PBT,
+  bench, man page.  Its concurrent stress surfaced a PRE-EXISTING
+  RCU double-checked-locking race (__rcu_slabs_ensure), now fixed
+  (both slab pointers _Atomic, acquire/release).
 - Bloom filter, HyperLogLog (small library; mostly numerical).
-  M14.
+  M14.  NOT STARTED.
 
 ### 19.19 Compositional property tests (M11) -- NOT STARTED (groundwork read; see .agent/TEAM_DISPATCH_2026-07-13.md)
 
