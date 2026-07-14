@@ -115,25 +115,38 @@ __rcu_ftbl_hash(const xtc_task_t *t)
 	return (size_t)(x % XTC_RCU_FTBL_SIZE);
 }
 
-/* M11.5b: pools for rcu_tls registry entries and retired records. */
-static xtc_slab_t   *__rcu_tls_slab     = NULL;
-static xtc_slab_t   *__rcu_retired_slab = NULL;
+/* M11.5b: pools for rcu_tls registry entries and retired records.
+ * These are published exactly once under __rcu_slab_init_lock; they are
+ * _Atomic so the double-checked fast path in __rcu_slabs_ensure (and
+ * every other reader below) loads them race-free with acquire ordering
+ * rather than a plain read that TSan (correctly) flags as a data race
+ * against the release store under the lock. */
+static _Atomic(xtc_slab_t *) __rcu_tls_slab     = NULL;
+static _Atomic(xtc_slab_t *) __rcu_retired_slab = NULL;
 static pthread_mutex_t __rcu_slab_init_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void
 __rcu_slabs_ensure(void)
 {
-	if (__rcu_tls_slab != NULL && __rcu_retired_slab != NULL) return;
+	if (atomic_load_explicit(&__rcu_tls_slab, memory_order_acquire) != NULL &&
+	    atomic_load_explicit(&__rcu_retired_slab, memory_order_acquire) != NULL)
+		return;
 	(void)__xtc_mtx_lock(&__rcu_slab_init_lock);
-	if (__rcu_tls_slab == NULL) {
+	if (atomic_load_explicit(&__rcu_tls_slab, memory_order_relaxed) == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_t *sl = NULL;
 		o.name = "rcu.tls"; o.obj_size = sizeof(struct rcu_tls);
-		(void)xtc_slab_create(&o, &__rcu_tls_slab);
+		if (xtc_slab_create(&o, &sl) == XTC_OK)
+			atomic_store_explicit(&__rcu_tls_slab, sl,
+			    memory_order_release);
 	}
-	if (__rcu_retired_slab == NULL) {
+	if (atomic_load_explicit(&__rcu_retired_slab, memory_order_relaxed) == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_t *sl = NULL;
 		o.name = "rcu.retired"; o.obj_size = sizeof(struct retired);
-		(void)xtc_slab_create(&o, &__rcu_retired_slab);
+		if (xtc_slab_create(&o, &sl) == XTC_OK)
+			atomic_store_explicit(&__rcu_retired_slab, sl,
+			    memory_order_release);
 	}
 	(void)__xtc_mtx_unlock(&__rcu_slab_init_lock);
 }
