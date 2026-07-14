@@ -462,7 +462,24 @@ static void __xtc_proc_kill_check(void);   /* installed as the resume kill hook 
  * is fine; M9 adds a proper field.
  */
 #define LOOP_TABLE_MAX 64
-struct lt_entry { xtc_loop_t *loop; struct xtc_proc_table *tbl; };
+/*
+ * Loop registry.  Read-mostly: written only when a loop is created or
+ * finalized (rare), read on EVERY cross-thread wake/send that falls to
+ * __resolve's Strategy 2 (hot -- one per command boundary under a
+ * fiber-per-session server).  The slot's `loop` and `tbl` pointers are
+ * therefore ATOMIC so the read path scans them lock-free with acquire
+ * loads; only the writers (register/unregister, which also mutate the
+ * table contents and free memory) serialize on __lt_lock.  A reader
+ * that races a concurrent unregister either sees the old loop pointer
+ * (and then finds its table, or a NULL slot) or the NULL -- never a
+ * torn pointer; the proc-header refcount + generation check on the
+ * resolved proc handles the rest of the lifetime race, exactly as it
+ * did when this scan held the lock.
+ */
+struct lt_entry {
+	_Atomic(xtc_loop_t *)            loop;
+	_Atomic(struct xtc_proc_table *) tbl;
+};
 static pthread_mutex_t __lt_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct lt_entry __lt[LOOP_TABLE_MAX];
 
@@ -475,10 +492,22 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 	struct xtc_proc_table *tbl = NULL;
 	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
-		if (__lt[i].loop == loop) {
-			tbl = __lt[i].tbl;
-			__lt[i].loop = NULL;
-			__lt[i].tbl = NULL;
+		if (atomic_load_explicit(&__lt[i].loop,
+		    memory_order_relaxed) == loop) {
+			tbl = atomic_load_explicit(&__lt[i].tbl,
+			    memory_order_relaxed);
+			/* Publish the slot vacancy with release stores so a
+			 * lock-free reader sees loop==NULL (skip) rather than a
+			 * live loop with a NULL/freed tbl.  Clear loop FIRST so
+			 * a concurrent reader that still sees the old loop then
+			 * reads tbl gets the (still-valid-until-freed-below)
+			 * table; the actual free happens after the unlock, and
+			 * the contract is that a loop being finalized has no
+			 * live procs and no in-flight wakes to it. */
+			atomic_store_explicit(&__lt[i].loop, NULL,
+			    memory_order_release);
+			atomic_store_explicit(&__lt[i].tbl, NULL,
+			    memory_order_release);
 			break;
 		}
 	}
@@ -509,19 +538,47 @@ __table_for(xtc_loop_t *loop, int create)
 {
 	int i;
 	struct xtc_proc_table *t = NULL;
+
+	/* Lock-free fast path: an existing loop's table is found by an
+	 * acquire scan of the atomic slots -- no __lt_lock.  This is the
+	 * path every cross-thread wake/send takes (the table already
+	 * exists), so it must not serialize on the global lock. */
+	for (i = 0; i < LOOP_TABLE_MAX; i++) {
+		if (atomic_load_explicit(&__lt[i].loop,
+		    memory_order_acquire) == loop) {
+			return atomic_load_explicit(&__lt[i].tbl,
+			    memory_order_acquire);
+		}
+	}
+	if (!create) return NULL;
+
+	/* Slow path: create + register a new table.  Serialized on
+	 * __lt_lock (rare -- first proc spawned on a loop).  Re-scan under
+	 * the lock in case another thread created it between our lock-free
+	 * scan and acquiring the lock. */
 	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
-		if (__lt[i].loop == loop) { t = __lt[i].tbl; goto out; }
+		if (atomic_load_explicit(&__lt[i].loop,
+		    memory_order_relaxed) == loop) {
+			t = atomic_load_explicit(&__lt[i].tbl,
+			    memory_order_relaxed);
+			goto out;
+		}
 	}
-	if (!create) goto out;
 	if (__os_calloc(1, sizeof *t, (void **)&t) != XTC_OK)
 		goto out;
 	(void)pthread_mutex_init(&t->lock, NULL);
 	t->inited = 1;
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
-		if (__lt[i].loop == NULL) {
-			__lt[i].loop = loop;
-			__lt[i].tbl = t;
+		if (atomic_load_explicit(&__lt[i].loop,
+		    memory_order_relaxed) == NULL) {
+			/* Publish tbl BEFORE loop (release), so a lock-free
+			 * reader that sees a non-NULL loop is guaranteed to
+			 * then see the fully-initialized table, never NULL. */
+			atomic_store_explicit(&__lt[i].tbl, t,
+			    memory_order_release);
+			atomic_store_explicit(&__lt[i].loop, loop,
+			    memory_order_release);
 			goto out;
 		}
 	}
@@ -1234,15 +1291,18 @@ __resolve(xtc_pid_t pid, xtc_loop_t **out_loop_for_send)
 
 	/*
 	 * Strategy 2 (fallback for senders called from the main thread
-	 * before xtc_loop_run): walk the global loop table to find the
-	 * loop whose encoded ID matches this pid.  Linear in number of
-	 * loops, which is small (<=64 in M8).
+	 * before xtc_loop_run, or a cross-thread wake to a loop outside
+	 * the caller's exec): scan the global loop table for the loop
+	 * whose encoded ID matches this pid.  LOCK-FREE: the slots are
+	 * atomic, read with acquire loads (see struct lt_entry) -- this is
+	 * the hot cross-thread-wake path and must not serialize on
+	 * __lt_lock.  Linear in number of loops (<=64).
 	 */
 	if (target_loop == NULL) {
 		int i;
-		(void) __proc_mtx_lock(&__lt_lock);
 		for (i = 0; i < LOOP_TABLE_MAX; i++) {
-			xtc_loop_t *l = __lt[i].loop;
+			xtc_loop_t *l = atomic_load_explicit(&__lt[i].loop,
+			    memory_order_acquire);
 			uint16_t lid;
 			if (l == NULL) continue;
 			lid = (uint16_t)(l->exec_id < 0 ? 0 : l->exec_id + 1);
@@ -1251,7 +1311,6 @@ __resolve(xtc_pid_t pid, xtc_loop_t **out_loop_for_send)
 				break;
 			}
 		}
-		(void) __proc_mtx_unlock(&__lt_lock);
 	}
 
 	if (target_loop == NULL) return NULL;
@@ -2837,9 +2896,11 @@ xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user)
 	 */
 	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
-		struct xtc_proc_table *tbl = __lt[i].tbl;
+		struct xtc_proc_table *tbl = atomic_load_explicit(&__lt[i].tbl,
+		    memory_order_relaxed);
 		size_t s;
-		if (__lt[i].loop == NULL || tbl == NULL)
+		if (atomic_load_explicit(&__lt[i].loop,
+		    memory_order_relaxed) == NULL || tbl == NULL)
 			continue;
 		(void) __proc_mtx_lock(&tbl->lock);
 		for (s = 0; s < tbl->cap; s++) {
@@ -2885,8 +2946,10 @@ xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 
 	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
-		struct xtc_proc_table *tbl = __lt[i].tbl;
-		xtc_loop_t *loop = __lt[i].loop;
+		struct xtc_proc_table *tbl = atomic_load_explicit(&__lt[i].tbl,
+		    memory_order_relaxed);
+		xtc_loop_t *loop = atomic_load_explicit(&__lt[i].loop,
+		    memory_order_relaxed);
 		size_t s, procs = 0;
 		if (loop == NULL || tbl == NULL)
 			continue;
@@ -2923,9 +2986,11 @@ xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 
 	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX && !found; i++) {
-		struct xtc_proc_table *tbl = __lt[i].tbl;
+		struct xtc_proc_table *tbl = atomic_load_explicit(&__lt[i].tbl,
+		    memory_order_relaxed);
 		size_t s;
-		if (__lt[i].loop == NULL || tbl == NULL)
+		if (atomic_load_explicit(&__lt[i].loop,
+		    memory_order_relaxed) == NULL || tbl == NULL)
 			continue;
 		(void) __proc_mtx_lock(&tbl->lock);
 		for (s = 0; s < tbl->cap; s++) {

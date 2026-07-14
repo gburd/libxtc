@@ -2855,6 +2855,48 @@ Not strictly needed for v1; right abstraction for replication
 coordination, distributed transactions, complex extension flows.
 M14.
 
+### 19.5b Cross-thread wake path contention (proc.c) -- DONE (option 1); option 2 DEFERRED
+
+A fiber-per-session server (the PostgreSQL fiber-carrier build being the
+motivating case) funnels every cross-thread `xtc_proc_wake()` /
+`xtc_send()` through `__resolve`.  Reported plateau: ~2.3x below the
+process baseline, machine ~83% idle, carriers blocked in `futex_wait`,
+with the serial section identified as the single process-global
+`__lt_lock` scanned on every wake (Strategy 2 in `__resolve`), plus the
+per-target `mbox_lock`.  See /tmp/libxtc-wake-path-contention-report.md
+and .agent/WAKE_PATH_CONTENTION_2026-07.md.
+
+DONE (option 1, the identified primary contention): the loop registry
+`__lt[]` slots are now atomic (`_Atomic loop`/`tbl`); `__resolve`'s
+Strategy-2 scan and `__table_for`'s existing-table lookup are LOCK-FREE
+(acquire loads), so a cross-thread wake to a loop outside the caller's
+exec no longer serializes on `__lt_lock`.  Only loop create/destroy
+(rare) take the lock, publishing via release stores (tbl-before-loop on
+insert, loop-cleared-first on remove) so a racing reader never sees a
+live loop with a NULL/freed table.  Verified: full DST suite green
+(incl. the new test_sim_chash and every proc/reg/svr sim test), 20x +
+TSan-clean under the CI clang+fiber configuration on
+test_proc_wake_crossthread / test_proc / test_svr / test_chan
+(0/100 lost wakes every run).
+
+DEFERRED (option 2, needs its own session + a planted lost-wakeup DST
+case): making `xtc_proc_wake` fire the armed waker WITHOUT taking the
+target's `mbox_lock` (a lock-free "set-pending + wake" path).  `mbox_lock`
+is sharded per-target-proc (N targets => N locks, not one global), so it
+is far less contended than `__lt_lock` was; and a lock-free wake races
+the park path's arm/disarm of `waker_armed` -- a lost wakeup here is a
+hang, exactly the class of bug (idle-loop / cross-fd wake-miss) this
+codebase has been bitten by before.  It must land with a DST test that
+plants a lost-wakeup and proves the simulator catches it fast.  NOT a
+release blocker; option 1 recovers the dominant serial section.
+
+DROPPED (option 3, loop-affinity guidance): the PG team confirmed they
+do not need it; it would have been docs-only.  Note for the record:
+`__resolve` Strategy 1 already takes the lock-free fast path when the
+target is on the caller's own loop OR a sibling loop in the same
+`xtc_exec` -- co-locating a session's fiber and its waker in one exec
+skips the registry entirely.
+
 ### 19.6 Priority inheritance through the lock manager (M13c) -- NOT DONE (three subagent attempts failed to land code; see .agent/TEAM_DISPATCH_2026-07-13.md; lead to implement directly)
 
 When a low-priority locker holds a lock that a high-priority
