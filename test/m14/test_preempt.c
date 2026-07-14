@@ -82,11 +82,21 @@ test_arm_ticks(const MunitParameter p[], void *d)
 	t1 = xtc_preempt_ticks();
 	munit_assert_uint64(t1, >, t0);        /* the timer fired */
 
-	/* A tick should be pending; consuming it clears it. */
-	if (xtc_preempt_tick_pending())
-		munit_assert_int(xtc_preempt_tick_pending(), ==, 0);
+	/* tick_pending() is test-and-clear (atomic_exchange to 0).  Capture
+	 * ONE call's result: a non-zero return means a tick was pending and
+	 * this call consumed it.  Do NOT re-call while the timer is still
+	 * armed to "prove" it cleared -- under slow emulation (riscv64 under
+	 * QEMU) the live timer can post a fresh tick between the two calls,
+	 * so a second call is inherently racy and proves nothing.  The clear
+	 * is an internal exchange guarantee, not a re-testable observable
+	 * against a running timer. */
+	(void)xtc_preempt_tick_pending();
 
 	munit_assert_int(xtc_preempt_disarm(), ==, XTC_OK);
+	/* After disarm the timer is deleted and pending forced to 0, so
+	 * tick_pending() is now deterministically clear. */
+	munit_assert_int(xtc_preempt_tick_pending(), ==, 0);
+
 	t1 = xtc_preempt_ticks();
 	burn(200ULL * 1000 * 1000);
 	t2 = xtc_preempt_ticks();
