@@ -34,6 +34,18 @@ xtc_res_init(xtc_res_t *r, const xtc_res_caps_t *caps)
 	if (r == NULL) return XTC_E_INVAL;
 	if (caps == NULL) {
 		xtc_res_caps_t d = XTC_RES_CAPS_DEFAULT;
+		/* Container/cgroup awareness (PLAN.md 19.15): never let the
+		 * default tracked-allocation cap exceed what the process can
+		 * actually use.  __os_mem_max reports cgroup v2 memory.max on a
+		 * confined container, not the host's raw physical RAM, so a
+		 * small container gets a correspondingly smaller default cap
+		 * instead of one sized for hardware it does not have.  Only
+		 * applies to the DEFAULT (caps == NULL); an explicit caps
+		 * struct is the caller's deliberate choice and is never
+		 * second-guessed here. */
+		int64_t mem_max = __os_mem_max();
+		if (mem_max > 0 && mem_max < d.mem_bytes)
+			d.mem_bytes = mem_max;
 		r->caps = d;
 	} else {
 		r->caps = *caps;

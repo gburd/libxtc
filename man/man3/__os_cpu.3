@@ -1,0 +1,132 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 13, 2026
+.Dt __OS_CPU 3
+.Os
+.Sh NAME
+.Nm __os_ncpus ,
+.Nm __os_ncpus_perf ,
+.Nm __os_ncpus_effic ,
+.Nm __os_numa_nnodes ,
+.Nm __os_numa_node_of_cpu ,
+.Nm __os_numa_current_node ,
+.Nm __os_mem_max
+.Nd CPU/NUMA topology and container-aware resource probes
+.Sh SYNOPSIS
+.In os_cpu.h
+.Ft int
+.Fn __os_ncpus "void"
+.Ft int
+.Fn __os_ncpus_perf "void"
+.Ft int
+.Fn __os_ncpus_effic "void"
+.Ft int
+.Fn __os_numa_nnodes "void"
+.Ft int
+.Fn __os_numa_node_of_cpu "int cpu"
+.Ft int
+.Fn __os_numa_current_node "void"
+.Ft int64_t
+.Fn __os_mem_max "void"
+.Sh DESCRIPTION
+.Fn __os_ncpus
+returns the number of logical CPUs usable by the process.
+On Linux it first consults the cgroup v2
+.Pa cpu.max
+control file
+.Pq Pa /sys/fs/cgroup/cpu.max :
+when it holds a numeric
+.Sq quota
+and
+.Sq period
+(microseconds), the effective count is
+.Fn ceil quota/period ,
+clamped to at least 1 and at most the real hardware count from
+.Fn sysconf _SC_NPROCESSORS_ONLN .
+This makes the default reactor/thread-pool sizing correct inside a
+Kubernetes pod or Docker container with a CPU limit, instead of
+sizing for cores the process cannot actually schedule on.
+A missing or unreadable
+.Pa cpu.max ,
+or a
+.Sq max
+(unlimited) quota, falls back to the uncapped host count on every
+platform.
+.Pp
+.Fn __os_ncpus_perf
+and
+.Fn __os_ncpus_effic
+report the performance- and efficiency-core counts on asymmetric
+hardware (Apple Silicon); elsewhere every CPU is a "performance" CPU
+and the efficiency count is 0.
+.Pp
+.Fn __os_numa_nnodes ,
+.Fn __os_numa_node_of_cpu ,
+and
+.Fn __os_numa_current_node
+report NUMA topology on Linux (single-node elsewhere).
+.Pp
+.Fn __os_mem_max
+returns the usable memory cap in bytes.
+On Linux it consults cgroup v2's
+.Pa memory.max
+.Pq Pa /sys/fs/cgroup/memory.max :
+a numeric value is returned directly; a
+.Sq max
+(unlimited) value, or a missing/unreadable file, falls back to the
+host's total physical memory
+.Pf ( Fn sysconf _SC_PHYS_PAGES
+times
+.Fn sysconf _SC_PAGESIZE ) .
+Other platforms always report the host total.
+.Pp
+Both cgroup file paths may be redirected to a fixture file with the
+internal test-only hooks
+.Fn __xtc_os_cgroup_cpu_path_override
+and
+.Fn __xtc_os_cgroup_mem_path_override
+(Linux only; declared in
+.In os_cpu.h ) ,
+so the cgroup-parsing logic is unit-testable without root or a real
+cgroup.
+Pass NULL to restore the real
+.Pa /sys/fs/cgroup
+path.
+Not part of the stable API.
+.Sh RETURN VALUES
+.Fn __os_ncpus ,
+.Fn __os_ncpus_perf ,
+and
+.Fn __os_ncpus_effic
+return a count of at least 1 (0 for
+.Fn __os_ncpus_effic
+on symmetric hardware).
+.Fn __os_numa_nnodes
+returns a count of at least 1.
+.Fn __os_numa_node_of_cpu
+and
+.Fn __os_numa_current_node
+return a NUMA node index (0 if indeterminate).
+.Fn __os_mem_max
+returns a positive byte count, or 0 if even the host-total fallback
+could not be determined.
+.Sh THREAD SAFETY
+All functions are safe to call concurrently from any thread.
+The test-only path-override hooks are not: they are for single-
+threaded unit tests only.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+int ncpu = __os_ncpus();               /* container-aware CPU count */
+int64_t mem = __os_mem_max();          /* container-aware memory cap */
+printf("usable: %d cpus, %lld bytes\en", ncpu, (long long)mem);
+.Ed
+.Sh SEE ALSO
+.Xr __os_time 3 ,
+.Xr xtc_res 3 ,
+.Xr xtc 7
+.Sh HISTORY
+.Fn __os_ncpus
+and the NUMA probes first appeared in xtc 0.0.1 (M1).
+Cgroup v2 awareness and
+.Fn __os_mem_max
+were added under PLAN.md 19.15 (M0).
