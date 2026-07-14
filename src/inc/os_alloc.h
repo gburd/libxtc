@@ -11,6 +11,8 @@
 #ifndef XTC_OS_ALLOC_H
 #define XTC_OS_ALLOC_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 
 /*
@@ -54,15 +56,15 @@ struct __os_alloc_hook {
  * PUBLIC: int  __os_alloc_set_hook __P((const struct __os_alloc_hook *));
  * PUBLIC: int  __os_alloc_get_hook __P((struct __os_alloc_hook *));
  */
-int  __os_malloc(size_t sz, void **out);
-int  __os_calloc(size_t n, size_t sz, void **out);
-int  __os_realloc(void *p, size_t sz, void **out);
-size_t __os_msize(void *p);
-void __os_free(void *p);
-int  __os_strdup(const char *s, char **out);
-int  __os_aligned_alloc(size_t align, size_t sz, void **out);
-void __os_aligned_free(void *p);
-int  __os_alloc_set_hook(const struct __os_alloc_hook *hook);
-int  __os_alloc_get_hook(struct __os_alloc_hook *out);
+XTC_API int  __os_malloc(size_t sz, void **out);
+XTC_API int  __os_calloc(size_t n, size_t sz, void **out);
+XTC_API int  __os_realloc(void *p, size_t sz, void **out);
+XTC_API size_t __os_msize(void *p);
+XTC_API void __os_free(void *p);
+XTC_API int  __os_strdup(const char *s, char **out);
+XTC_API int  __os_aligned_alloc(size_t align, size_t sz, void **out);
+XTC_API void __os_aligned_free(void *p);
+XTC_API int  __os_alloc_set_hook(const struct __os_alloc_hook *hook);
+XTC_API int  __os_alloc_get_hook(struct __os_alloc_hook *out);
 
 #endif /* XTC_OS_ALLOC_H */

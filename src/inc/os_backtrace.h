@@ -29,6 +29,8 @@
 #ifndef XTC_OS_BACKTRACE_H
 #define XTC_OS_BACKTRACE_H
 
+#include "xtc_export.h"
+
 /*
  * PUBLIC: int  __os_backtrace __P((void **, int));
  * PUBLIC: void __os_backtrace_emit __P((int, void *const *, int));
@@ -37,14 +39,14 @@
 
 /* Capture up to `max` return addresses of the calling thread into
  * `frames`.  Returns the number captured (0 if unsupported). */
-int __os_backtrace(void **frames, int max);
+XTC_API int __os_backtrace(void **frames, int max);
 
 /* Symbolize `n` frames (as returned by __os_backtrace) and write them,
  * one per line, to `fd`.  Best-effort and async-signal-safe; writes
  * nothing when unsupported. */
-void __os_backtrace_emit(int fd, void *const *frames, int n);
+XTC_API void __os_backtrace_emit(int fd, void *const *frames, int n);
 
 /* 1 if a real backtrace backend is compiled in, 0 if the stub. */
-int __os_backtrace_supported(void);
+XTC_API int __os_backtrace_supported(void);
 
 #endif /* XTC_OS_BACKTRACE_H */

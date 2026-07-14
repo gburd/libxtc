@@ -32,6 +32,8 @@
 #ifndef XTC_XPROC_H
 #define XTC_XPROC_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -81,10 +83,10 @@ typedef void (*xtc_xproc_root_fn)(void *arg);
  * where a child is a fresh process image and a function pointer does not
  * survive -- use xtc_xspawn_entry there (and portably).
  */
-int  xtc_xspawn(xtc_loop_t *loop, const char *name,
-                xtc_xproc_root_fn root_fn,
-                const void *arg, size_t arg_len,
-                xtc_xproc_t **out);
+XTC_API int  xtc_xspawn(xtc_loop_t *loop, const char *name,
+                        xtc_xproc_root_fn root_fn,
+                        const void *arg, size_t arg_len,
+                        xtc_xproc_t **out);
 
 /*
  * Register a child root function under a name in a process-global table.
@@ -96,7 +98,7 @@ int  xtc_xspawn(xtc_loop_t *loop, const char *name,
  * short strings; re-registering a name replaces the binding.  Returns
  * XTC_OK, XTC_E_INVAL, or XTC_E_RESOURCE if the table is full.
  */
-int  xtc_xproc_register_entry(const char *name, xtc_xproc_root_fn fn);
+XTC_API int  xtc_xproc_register_entry(const char *name, xtc_xproc_root_fn fn);
 
 /*
  * Spawn a child that runs the root function registered under `entry`
@@ -107,20 +109,20 @@ int  xtc_xproc_register_entry(const char *name, xtc_xproc_root_fn fn);
  * arg.  Otherwise identical to xtc_xspawn (monitor, send, destroy all
  * work the same).  Returns XTC_E_NOTFOUND if `entry` is not registered.
  */
-int  xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
-                      const void *arg, size_t arg_len, xtc_xproc_t **out);
+XTC_API int  xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
+                              const void *arg, size_t arg_len, xtc_xproc_t **out);
 
 /* Tear down the handle: signal + reap the child if still running, close
  * the channel, free the handle.  Idempotent. */
-void xtc_xproc_destroy(xtc_xproc_t *p);
+XTC_API void xtc_xproc_destroy(xtc_xproc_t *p);
 
 /* The child's OS pid (for logging), or -1. */
-long xtc_xproc_os_pid(const xtc_xproc_t *p);
+XTC_API long xtc_xproc_os_pid(const xtc_xproc_t *p);
 
 /* Send a byte payload (copied) to the child's root proc.  It arrives in
  * the child root's mailbox as an ordinary xtc_recv message.  Returns
  * XTC_E_INVAL if the channel is closed. */
-int  xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len);
+XTC_API int  xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len);
 
 /*
  * Monitor the child from the calling fiber: when the child exits or
@@ -130,7 +132,7 @@ int  xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len);
  * or XTC_DOWN_KIND_NOCONNECTION if the channel died first.  *out_ref (if
  * non-NULL) receives the monitor reference.  Must be called from a fiber.
  */
-int  xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref);
+XTC_API int  xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref);
 
 /*
  * Bidirectionally LINK the calling fiber to the child (like xtc_link,
@@ -141,7 +143,7 @@ int  xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref);
  * xtc_xmonitor instead when you want a one-way DOWN without binding the
  * caller's own fate to the child.
  */
-int  xtc_xlink(xtc_xproc_t *p);
+XTC_API int  xtc_xlink(xtc_xproc_t *p);
 
 /*
  * Child-side entry.  Call this from the child body (the process the fork
@@ -152,7 +154,7 @@ int  xtc_xlink(xtc_xproc_t *p);
  * not call this directly -- xtc_xspawn arranges the child side -- but it
  * is public so a re-exec'd child (a future extension) can re-enter.
  */
-int  xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg);
+XTC_API int  xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg);
 
 /*
  * Windows only.  The re-exec'd child image calls this early in main():
@@ -164,6 +166,6 @@ int  xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg);
  * Wire it as the first statement of main() in a binary that will host
  * xtc_xspawn_entry children.
  */
-int  xtc_xproc_win_child_maybe(int argc, char **argv);
+XTC_API int  xtc_xproc_win_child_maybe(int argc, char **argv);
 
 #endif /* XTC_XPROC_H */

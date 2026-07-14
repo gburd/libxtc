@@ -23,6 +23,8 @@
 #ifndef XTC_SVR_H
 #define XTC_SVR_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -80,15 +82,15 @@ typedef struct xtc_svr_opts {
  * PUBLIC: xtc_svr_call_t *xtc_svr_call_save __P((const xtc_svr_call_t *));
  */
 
-int       xtc_svr_start(xtc_loop_t *loop,
-                        const xtc_svr_callbacks_t *cb,
-                        void *state,
-                        const xtc_svr_opts_t *opts,
-                        xtc_svr_t **out);
+XTC_API int       xtc_svr_start(xtc_loop_t *loop,
+                                const xtc_svr_callbacks_t *cb,
+                                void *state,
+                                const xtc_svr_opts_t *opts,
+                                xtc_svr_t **out);
 
-int       xtc_svr_stop(xtc_svr_t *svr);
-int       xtc_svr_join(xtc_svr_t *svr, int64_t timeout_ns);
-xtc_pid_t xtc_svr_pid(const xtc_svr_t *svr);
+XTC_API int       xtc_svr_stop(xtc_svr_t *svr);
+XTC_API int       xtc_svr_join(xtc_svr_t *svr, int64_t timeout_ns);
+XTC_API xtc_pid_t xtc_svr_pid(const xtc_svr_t *svr);
 
 /* Synchronous call: send `req`, wait for reply, copy reply into a
  * heap-allocated buffer that the caller must xtc_free.  Returns:
@@ -96,10 +98,10 @@ xtc_pid_t xtc_svr_pid(const xtc_svr_t *svr);
  *   XTC_E_AGAIN     -- timeout
  *   XTC_E_INVAL     -- bad pid / not a server
  */
-int xtc_svr_call(xtc_pid_t target,
-                 const void *req, size_t req_size,
-                 void **out_reply, size_t *out_size,
-                 int64_t timeout_ns);
+XTC_API int xtc_svr_call(xtc_pid_t target,
+                         const void *req, size_t req_size,
+                         void **out_reply, size_t *out_size,
+                         int64_t timeout_ns);
 
 /* Like xtc_svr_call, but cancellable: while waiting for the reply the
  * abort token is polled, and the call returns XTC_E_ABORTED if it
@@ -108,19 +110,19 @@ int xtc_svr_call(xtc_pid_t target,
  * primitive (e.g. a statement timeout delivering a cancel at the next
  * wait point).  Cancellation stops only the caller's wait; the
  * server keeps processing and a late reply is discarded. */
-int xtc_svr_call_abortable(xtc_pid_t target,
-                           const void *req, size_t req_size,
-                           void **out_reply, size_t *out_size,
-                           int64_t timeout_ns, xtc_abort_token_t *tok);
+XTC_API int xtc_svr_call_abortable(xtc_pid_t target,
+                                   const void *req, size_t req_size,
+                                   void **out_reply, size_t *out_size,
+                                   int64_t timeout_ns, xtc_abort_token_t *tok);
 
 /* Fire-and-forget: send `msg` to the server.  Server's handle_cast
  * (if non-NULL) will see it; if NULL, falls through to handle_info. */
-int xtc_svr_cast(xtc_pid_t target, const void *msg, size_t size);
+XTC_API int xtc_svr_cast(xtc_pid_t target, const void *msg, size_t size);
 
 /* From inside handle_call, send the reply and release the call.
  * Each call must be replied exactly once. */
-int xtc_svr_reply(xtc_svr_call_t *call,
-                  const void *reply, size_t size);
+XTC_API int xtc_svr_reply(xtc_svr_call_t *call,
+                          const void *reply, size_t size);
 
 /*
  * Arm a continuation from within a server callback (init or a handle_*):
@@ -130,7 +132,7 @@ int xtc_svr_reply(xtc_svr_call_t *call,
  * message, without the self-send that races an incoming message.
  * Returns XTC_E_INVAL if called outside a server callback.
  */
-int xtc_svr_continue(void *cont);
+XTC_API int xtc_svr_continue(void *cont);
 
 /*
  * Deferred reply (gen_server:reply/2).  The xtc_svr_call_t passed to
@@ -149,6 +151,6 @@ int xtc_svr_continue(void *cont);
  * slot, so the caller must remain blocked in xtc_svr_call (not time
  * out) until the deferred reply is sent.
  */
-xtc_svr_call_t *xtc_svr_call_save(const xtc_svr_call_t *call);
+XTC_API xtc_svr_call_t *xtc_svr_call_save(const xtc_svr_call_t *call);
 
 #endif /* XTC_SVR_H */

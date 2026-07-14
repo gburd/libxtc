@@ -35,6 +35,8 @@
 #ifndef XTC_CFG_H
 #define XTC_CFG_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -110,25 +112,25 @@ typedef struct xtc_cfg_spec {
  * PUBLIC: int  xtc_cfg_reload __P((void));
  */
 
-int  xtc_cfg_register(const xtc_cfg_spec_t *spec);
-int  xtc_cfg_unregister(const char *name);
+XTC_API int  xtc_cfg_register(const xtc_cfg_spec_t *spec);
+XTC_API int  xtc_cfg_unregister(const char *name);
 
-int  xtc_cfg_get_bool(const char *name, int *out);
-int  xtc_cfg_get_int(const char *name, int *out);
-int  xtc_cfg_get_int64(const char *name, int64_t *out);
-int  xtc_cfg_get_double(const char *name, double *out);
-int  xtc_cfg_get_string(const char *name, const char **out);
-int  xtc_cfg_get_enum(const char *name, int *out);
+XTC_API int  xtc_cfg_get_bool(const char *name, int *out);
+XTC_API int  xtc_cfg_get_int(const char *name, int *out);
+XTC_API int  xtc_cfg_get_int64(const char *name, int64_t *out);
+XTC_API int  xtc_cfg_get_double(const char *name, double *out);
+XTC_API int  xtc_cfg_get_string(const char *name, const char **out);
+XTC_API int  xtc_cfg_get_enum(const char *name, int *out);
 
-int  xtc_cfg_set_bool(const char *name, int v);
-int  xtc_cfg_set_int(const char *name, int v);
-int  xtc_cfg_set_int64(const char *name, int64_t v);
-int  xtc_cfg_set_double(const char *name, double v);
-int  xtc_cfg_set_string(const char *name, const char *v);
-int  xtc_cfg_set_enum(const char *name, int v);
+XTC_API int  xtc_cfg_set_bool(const char *name, int v);
+XTC_API int  xtc_cfg_set_int(const char *name, int v);
+XTC_API int  xtc_cfg_set_int64(const char *name, int64_t v);
+XTC_API int  xtc_cfg_set_double(const char *name, double v);
+XTC_API int  xtc_cfg_set_string(const char *name, const char *v);
+XTC_API int  xtc_cfg_set_enum(const char *name, int v);
 
-int  xtc_cfg_count(void);
-int  xtc_cfg_kind(const char *name, xtc_cfg_kind_t *out);
+XTC_API int  xtc_cfg_count(void);
+XTC_API int  xtc_cfg_kind(const char *name, xtc_cfg_kind_t *out);
 
 /* Load a postgresql.conf-style `name = value` file: per-line, with `#`
  * comments and optional quotes; each value parsed per the variable's
@@ -136,13 +138,13 @@ int  xtc_cfg_kind(const char *name, xtc_cfg_kind_t *out);
  * apply).  Unknown names and bad values are skipped.  Returns the
  * count applied (>= 0), XTC_E_INVAL (NULL path), or XTC_E_IO (open
  * failed).  Remembers the path for xtc_cfg_reload. */
-int  xtc_cfg_load_file(const char *path);
+XTC_API int  xtc_cfg_load_file(const char *path);
 
 /* Re-read the file last loaded by xtc_cfg_load_file.  Meant to back a
  * SIGHUP handler, but is NOT async-signal-safe (uses stdio and the
  * registry lock): set a flag in the handler and call this from the
  * event loop.  Returns the applied count, XTC_E_INVAL (no file loaded),
  * or XTC_E_IO. */
-int  xtc_cfg_reload(void);
+XTC_API int  xtc_cfg_reload(void);
 
 #endif /* XTC_CFG_H */

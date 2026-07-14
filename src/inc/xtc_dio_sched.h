@@ -22,6 +22,8 @@
 #ifndef XTC_DIO_SCHED_H
 #define XTC_DIO_SCHED_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 
 #include "xtc.h"
@@ -58,18 +60,18 @@ typedef struct xtc_dio_sched_spec {
  * PUBLIC: double xtc_dio_sched_mutation_rate __P((const xtc_dio_sched_t *));
  * PUBLIC: uint64_t xtc_dio_sched_generation __P((const xtc_dio_sched_t *));
  */
-int  xtc_dio_sched_create(const xtc_dio_sched_spec_t *spec, xtc_dio_sched_t **out);
-void xtc_dio_sched_destroy(xtc_dio_sched_t *g);
+XTC_API int  xtc_dio_sched_create(const xtc_dio_sched_spec_t *spec, xtc_dio_sched_t **out);
+XTC_API void xtc_dio_sched_destroy(xtc_dio_sched_t *g);
 
 /* Copy the genes of the candidate currently under evaluation into
  * out_genes (n_genes ints).  Use these until the next report. */
-void xtc_dio_sched_current(const xtc_dio_sched_t *g, int *out_genes);
+XTC_API void xtc_dio_sched_current(const xtc_dio_sched_t *g, int *out_genes);
 
 /* Report the fitness observed while using the current candidate (higher
  * is better).  Advances to the next candidate; when the whole
  * population has been evaluated, breeds the next generation and adapts
  * the mutation rate. */
-void xtc_dio_sched_report(xtc_dio_sched_t *g, double fitness);
+XTC_API void xtc_dio_sched_report(xtc_dio_sched_t *g, double fitness);
 
 /* Report one fitness per phenotype (n must equal the configured
  * n_phenos; for a single phenotype this is equivalent to
@@ -80,9 +82,9 @@ void xtc_dio_sched_report_multi(xtc_dio_sched_t *g, const double *fitness,
 
 /* Best gene-set found so far and its fitness.  Either pointer may be
  * NULL.  This is the set to use once tuning has converged / frozen. */
-void xtc_dio_sched_best(const xtc_dio_sched_t *g, int *out_genes, double *out_fitness);
+XTC_API void xtc_dio_sched_best(const xtc_dio_sched_t *g, int *out_genes, double *out_fitness);
 
-double   xtc_dio_sched_mutation_rate(const xtc_dio_sched_t *g);
-uint64_t xtc_dio_sched_generation(const xtc_dio_sched_t *g);
+XTC_API double   xtc_dio_sched_mutation_rate(const xtc_dio_sched_t *g);
+XTC_API uint64_t xtc_dio_sched_generation(const xtc_dio_sched_t *g);
 
 #endif /* XTC_DIO_SCHED_H */

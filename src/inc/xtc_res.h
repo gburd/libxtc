@@ -19,6 +19,8 @@
 #ifndef XTC_RES_H
 #define XTC_RES_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 #include <stdatomic.h>
 
@@ -83,7 +85,7 @@ typedef struct xtc_res {
  * PUBLIC: int64_t xtc_res_rejects __P((const xtc_res_t *, xtc_res_kind_t));
  * PUBLIC: void xtc_res_set_cap __P((xtc_res_t *, xtc_res_kind_t, int64_t));
  */
-int  xtc_res_init(xtc_res_t *r, const xtc_res_caps_t *caps);
+XTC_API int  xtc_res_init(xtc_res_t *r, const xtc_res_caps_t *caps);
 
 /*
  * Try to charge `n` units of `kind` to `r`.  Returns:
@@ -93,18 +95,18 @@ int  xtc_res_init(xtc_res_t *r, const xtc_res_caps_t *caps);
  *
  * Atomic and lock-free.
  */
-int  xtc_res_acquire(xtc_res_t *r, xtc_res_kind_t k, int64_t n);
+XTC_API int  xtc_res_acquire(xtc_res_t *r, xtc_res_kind_t k, int64_t n);
 
 /*
  * Release `n` units.  Never fails; clamps at zero on underflow
  * (treated as a programming error in debug builds).
  */
-void xtc_res_release(xtc_res_t *r, xtc_res_kind_t k, int64_t n);
+XTC_API void xtc_res_release(xtc_res_t *r, xtc_res_kind_t k, int64_t n);
 
-int64_t xtc_res_used(const xtc_res_t *r, xtc_res_kind_t k);
-int64_t xtc_res_high(const xtc_res_t *r, xtc_res_kind_t k);
-int64_t xtc_res_rejects(const xtc_res_t *r, xtc_res_kind_t k);
-void xtc_res_set_cap(xtc_res_t *r, xtc_res_kind_t k, int64_t cap);
+XTC_API int64_t xtc_res_used(const xtc_res_t *r, xtc_res_kind_t k);
+XTC_API int64_t xtc_res_high(const xtc_res_t *r, xtc_res_kind_t k);
+XTC_API int64_t xtc_res_rejects(const xtc_res_t *r, xtc_res_kind_t k);
+XTC_API void xtc_res_set_cap(xtc_res_t *r, xtc_res_kind_t k, int64_t cap);
 
 /* Configure a high-water alert.  Fires `fn(kind, used, cap, user)`
  * once when `used >= pct * cap` for the named resource; re-arms
@@ -114,9 +116,9 @@ void xtc_res_set_cap(xtc_res_t *r, xtc_res_kind_t k, int64_t cap);
  * PUBLIC: int  xtc_res_set_alert __P((xtc_res_t *, xtc_res_kind_t, double));
  * PUBLIC: int  xtc_res_set_alert_fn __P((xtc_res_t *, void (*)(xtc_res_kind_t, int64_t, int64_t, void *), void *));
  */
-int  xtc_res_set_alert(xtc_res_t *r, xtc_res_kind_t k, double pct);
-int  xtc_res_set_alert_fn(xtc_res_t *r,
-                          void (*fn)(xtc_res_kind_t, int64_t, int64_t, void *),
-                          void *user);
+XTC_API int  xtc_res_set_alert(xtc_res_t *r, xtc_res_kind_t k, double pct);
+XTC_API int  xtc_res_set_alert_fn(xtc_res_t *r,
+                                  void (*fn)(xtc_res_kind_t, int64_t, int64_t, void *),
+                                  void *user);
 
 #endif /* XTC_RES_H */

@@ -25,6 +25,8 @@
 #ifndef XTC_AIO_H
 #define XTC_AIO_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 #if !defined(_WIN32)
 #include <sys/uio.h>     /* struct iovec (POSIX scatter/gather) */
@@ -37,8 +39,8 @@
  * PUBLIC: int xtc_aio_fdatasync __P((int));
  */
 
-int xtc_aio_pread(int fd, void *buf, uint32_t len, int64_t off);
-int xtc_aio_pwrite(int fd, const void *buf, uint32_t len, int64_t off);
+XTC_API int xtc_aio_pread(int fd, void *buf, uint32_t len, int64_t off);
+XTC_API int xtc_aio_pwrite(int fd, const void *buf, uint32_t len, int64_t off);
 
 #if !defined(_WIN32)
 /*
@@ -68,12 +70,12 @@ int xtc_aio_pwrite(int fd, const void *buf, uint32_t len, int64_t off);
  * declared there.  The scalar xtc_aio_pread/pwrite remain available on
  * every platform.
  */
-int xtc_aio_preadv(int fd, const struct iovec *iov, int iovcnt, int64_t off);
-int xtc_aio_pwritev(int fd, const struct iovec *iov, int iovcnt, int64_t off);
+XTC_API int xtc_aio_preadv(int fd, const struct iovec *iov, int iovcnt, int64_t off);
+XTC_API int xtc_aio_pwritev(int fd, const struct iovec *iov, int iovcnt, int64_t off);
 #endif /* !_WIN32 */
 
-int xtc_aio_fsync(int fd);       /* full sync: data + metadata */
-int xtc_aio_fdatasync(int fd);   /* data only (the page/WAL flush hot path) */
+XTC_API int xtc_aio_fsync(int fd);       /* full sync: data + metadata */
+XTC_API int xtc_aio_fdatasync(int fd);   /* data only (the page/WAL flush hot path) */
 
 /*
  * Internal / test hook: force the blocking-pool offload path even on a

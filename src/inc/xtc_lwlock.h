@@ -36,6 +36,8 @@
 #ifndef XTC_LWLOCK_H
 #define XTC_LWLOCK_H
 
+#include "xtc_export.h"
+
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -87,24 +89,24 @@ typedef struct xtc_lwlock {
  * PUBLIC: void xtc_lwlock_track_set_handler __P((xtc_lwlock_track_fn, void *));
  */
 
-int   xtc_lwlock_init(xtc_lwlock_t *lock, uint16_t tranche);
-void  xtc_lwlock_destroy(xtc_lwlock_t *lock);
+XTC_API int   xtc_lwlock_init(xtc_lwlock_t *lock, uint16_t tranche);
+XTC_API void  xtc_lwlock_destroy(xtc_lwlock_t *lock);
 
 /* Acquire blocks until the lock is held in `mode`.  Returns XTC_OK. */
-int   xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode);
+XTC_API int   xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode);
 
 /* Conditional acquire -- non-blocking.  Returns XTC_OK on success,
  * XTC_E_AGAIN if the lock would block. */
-int   xtc_lwlock_acquire_cond(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode);
+XTC_API int   xtc_lwlock_acquire_cond(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode);
 
 /* Release the lock.  Mode is recorded in the per-thread held-list,
  * so the caller doesn't have to pass it back. */
-void  xtc_lwlock_release(xtc_lwlock_t *lock);
+XTC_API void  xtc_lwlock_release(xtc_lwlock_t *lock);
 
 /* Diagnostics. */
-int   xtc_lwlock_held_by_me(const xtc_lwlock_t *lock);
-int   xtc_lwlock_held_by_me_in_mode(const xtc_lwlock_t *lock,
-                                    xtc_lwlock_mode_t mode);
+XTC_API int   xtc_lwlock_held_by_me(const xtc_lwlock_t *lock);
+XTC_API int   xtc_lwlock_held_by_me_in_mode(const xtc_lwlock_t *lock,
+                                            xtc_lwlock_mode_t mode);
 
 /*
  * Optional lock-order (WITNESS) tracker.  Off by default; enable in
@@ -118,9 +120,9 @@ int   xtc_lwlock_held_by_me_in_mode(const xtc_lwlock_t *lock,
  */
 typedef void (*xtc_lwlock_track_fn)(uint16_t held_tranche,
                                     uint16_t acquired_tranche, void *user);
-void  xtc_lwlock_track_enable(int on);
-long  xtc_lwlock_track_violations(void);
-void  xtc_lwlock_track_reset(void);
-void  xtc_lwlock_track_set_handler(xtc_lwlock_track_fn fn, void *user);
+XTC_API void  xtc_lwlock_track_enable(int on);
+XTC_API long  xtc_lwlock_track_violations(void);
+XTC_API void  xtc_lwlock_track_reset(void);
+XTC_API void  xtc_lwlock_track_set_handler(xtc_lwlock_track_fn fn, void *user);
 
 #endif /* XTC_LWLOCK_H */

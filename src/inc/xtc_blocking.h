@@ -23,6 +23,8 @@
 #ifndef XTC_BLOCKING_H
 #define XTC_BLOCKING_H
 
+#include "xtc_export.h"
+
 #include "xtc.h"
 
 /*
@@ -36,7 +38,7 @@
  *
  * PUBLIC: int  xtc_blocking_run __P((int (*)(void *), void *, int *));
  */
-int xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result);
+XTC_API int xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result);
 
 /*
  * Fire-and-forget variant: hand fn(arg) to the offload pool and return
@@ -47,7 +49,7 @@ int xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result);
  *
  * PUBLIC: int  xtc_blocking_submit __P((int (*)(void *), void *));
  */
-int xtc_blocking_submit(int (*fn)(void *), void *arg);
+XTC_API int xtc_blocking_submit(int (*fn)(void *), void *arg);
 
 /*
  * Pin the pool to a fixed size (worker threads), overriding the
@@ -63,7 +65,7 @@ int xtc_blocking_submit(int (*fn)(void *), void *arg);
  *
  * PUBLIC: int  xtc_blocking_pool_size __P((int));
  */
-int xtc_blocking_pool_size(int nthreads);
+XTC_API int xtc_blocking_pool_size(int nthreads);
 
 /*
  * Stop the pool, joining its threads.  Idempotent; for orderly
@@ -72,6 +74,6 @@ int xtc_blocking_pool_size(int nthreads);
  *
  * PUBLIC: void xtc_blocking_shutdown __P((void));
  */
-void xtc_blocking_shutdown(void);
+XTC_API void xtc_blocking_shutdown(void);
 
 #endif /* XTC_BLOCKING_H */

@@ -18,6 +18,8 @@
 #ifndef XTC_ORC_H
 #define XTC_ORC_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 
 #include "xtc.h"
@@ -100,18 +102,18 @@ typedef struct xtc_supervisor xtc_supervisor_t;
  * The supervisor itself runs as a process; the returned handle lets
  * callers query/stop it from outside.
  */
-int  xtc_sup_start(xtc_loop_t *loop,
-                   const xtc_sup_opts_t *opts,
-                   const xtc_child_spec_t *children,
-                   int n_children,
-                   xtc_supervisor_t **out_sup);
+XTC_API int  xtc_sup_start(xtc_loop_t *loop,
+                           const xtc_sup_opts_t *opts,
+                           const xtc_child_spec_t *children,
+                           int n_children,
+                           xtc_supervisor_t **out_sup);
 
 /* Ask the supervisor to terminate.  Non-blocking; returns immediately
  * after setting the flag and sending a kick.  Children get DOWN'd as
  * the supervisor processes its mailbox; supervisor exits.
  *
  * Safe to call from any thread, multiple times. */
-int  xtc_sup_stop(xtc_supervisor_t *sup);
+XTC_API int  xtc_sup_stop(xtc_supervisor_t *sup);
 
 /* Dynamically add a child to a running supervisor (the
  * SIMPLE_ONE_FOR_ONE pattern: a pool of identical children spawned on
@@ -119,8 +121,8 @@ int  xtc_sup_stop(xtc_supervisor_t *sup);
  * monitor; returns the new child's pid.  Must be called from within a
  * proc (it awaits the supervisor's reply).  Keep spec->name alive for
  * the child's lifetime. */
-int  xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
-                       xtc_pid_t *out_pid);
+XTC_API int  xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
+                               xtc_pid_t *out_pid);
 
 /* Wait for the supervisor to actually exit, then free its handle.
  * Must be called from outside the supervisor's loop thread.
@@ -128,9 +130,9 @@ int  xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
  * the handle is invalid. */
 int  xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns);
 
-int  xtc_sup_n_children(const xtc_supervisor_t *sup);
-int  xtc_sup_n_alive(const xtc_supervisor_t *sup);
-int  xtc_sup_n_restarts(const xtc_supervisor_t *sup);
-int  xtc_sup_alive(const xtc_supervisor_t *sup);
+XTC_API int  xtc_sup_n_children(const xtc_supervisor_t *sup);
+XTC_API int  xtc_sup_n_alive(const xtc_supervisor_t *sup);
+XTC_API int  xtc_sup_n_restarts(const xtc_supervisor_t *sup);
+XTC_API int  xtc_sup_alive(const xtc_supervisor_t *sup);
 
 #endif /* XTC_ORC_H */

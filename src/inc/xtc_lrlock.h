@@ -52,6 +52,8 @@
 #ifndef XTC_LRLOCK_H
 #define XTC_LRLOCK_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -99,16 +101,16 @@ typedef struct xtc_lrlock_opts {
  */
 
 /* Convenience wrapper: max_readers=64, oplog_capacity=4096, no flags. */
-int   xtc_lrlock_create(size_t data_size,
-                        xtc_lrlock_apply_fn apply_fn,
-                        xtc_lrlock_sync_fn  sync_fn,
-                        const char *name,
-                        xtc_lrlock_t **out);
+XTC_API int   xtc_lrlock_create(size_t data_size,
+                                xtc_lrlock_apply_fn apply_fn,
+                                xtc_lrlock_sync_fn  sync_fn,
+                                const char *name,
+                                xtc_lrlock_t **out);
 
-int   xtc_lrlock_create_ex(const xtc_lrlock_opts_t *opts,
-                           xtc_lrlock_t **out);
+XTC_API int   xtc_lrlock_create_ex(const xtc_lrlock_opts_t *opts,
+                                   xtc_lrlock_t **out);
 
-void  xtc_lrlock_destroy(xtc_lrlock_t *lr);
+XTC_API void  xtc_lrlock_destroy(xtc_lrlock_t *lr);
 
 /* ---- reader (wait-free) ----
  *
@@ -120,27 +122,27 @@ void  xtc_lrlock_destroy(xtc_lrlock_t *lr);
  * treat NULL as "retry later" (a thread that cannot get a slot should
  * back off, not dereference).  In practice size max_readers to the
  * expected concurrent-reader-thread count. */
-const void *xtc_lrlock_read_begin(xtc_lrlock_t *lr);
-void        xtc_lrlock_read_end(xtc_lrlock_t *lr);
+XTC_API const void *xtc_lrlock_read_begin(xtc_lrlock_t *lr);
+XTC_API void        xtc_lrlock_read_end(xtc_lrlock_t *lr);
 
 /* ---- writer (mutex-serialized) ---- */
-void *xtc_lrlock_write_begin(xtc_lrlock_t *lr);
-void  xtc_lrlock_apply_op(xtc_lrlock_t *lr, const void *op, size_t op_size);
-void  xtc_lrlock_publish(xtc_lrlock_t *lr);
+XTC_API void *xtc_lrlock_write_begin(xtc_lrlock_t *lr);
+XTC_API void  xtc_lrlock_apply_op(xtc_lrlock_t *lr, const void *op, size_t op_size);
+XTC_API void  xtc_lrlock_publish(xtc_lrlock_t *lr);
 
 /* Like publish, but unconditionally full-syncs (use when the writer
  * mutated data directly, bypassing apply_op). */
-void  xtc_lrlock_publish_full_sync(xtc_lrlock_t *lr);
+XTC_API void  xtc_lrlock_publish_full_sync(xtc_lrlock_t *lr);
 
-void  xtc_lrlock_write_end(xtc_lrlock_t *lr);
+XTC_API void  xtc_lrlock_write_end(xtc_lrlock_t *lr);
 
 /* Direct accessors (only safe during writer ownership). */
-const void *xtc_lrlock_read_data(xtc_lrlock_t *lr);
-void       *xtc_lrlock_write_data(xtc_lrlock_t *lr);
+XTC_API const void *xtc_lrlock_read_data(xtc_lrlock_t *lr);
+XTC_API void       *xtc_lrlock_write_data(xtc_lrlock_t *lr);
 
 /* Tell the lock both copies are pre-initialized to the same state.
  * Skips the first-publish full-sync. */
-void  xtc_lrlock_mark_ready(xtc_lrlock_t *lr);
+XTC_API void  xtc_lrlock_mark_ready(xtc_lrlock_t *lr);
 
 /* ---- fiber-aware (async) left-right lock ------------------------------
  *
@@ -162,12 +164,12 @@ void  xtc_lrlock_mark_ready(xtc_lrlock_t *lr);
  * PUBLIC: int   xtc_alrlock_create __P((size_t, xtc_lrlock_apply_fn, xtc_lrlock_sync_fn, const char *, xtc_lrlock_t **));
  * PUBLIC: int   xtc_alrlock_create_ex __P((const xtc_lrlock_opts_t *, xtc_lrlock_t **));
  */
-int   xtc_alrlock_create(size_t data_size,
-                         xtc_lrlock_apply_fn apply_fn,
-                         xtc_lrlock_sync_fn  sync_fn,
-                         const char *name,
-                         xtc_lrlock_t **out);
-int   xtc_alrlock_create_ex(const xtc_lrlock_opts_t *opts,
-                            xtc_lrlock_t **out);
+XTC_API int   xtc_alrlock_create(size_t data_size,
+                                 xtc_lrlock_apply_fn apply_fn,
+                                 xtc_lrlock_sync_fn  sync_fn,
+                                 const char *name,
+                                 xtc_lrlock_t **out);
+XTC_API int   xtc_alrlock_create_ex(const xtc_lrlock_opts_t *opts,
+                                    xtc_lrlock_t **out);
 
 #endif /* XTC_LRLOCK_H */

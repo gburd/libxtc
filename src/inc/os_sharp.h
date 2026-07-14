@@ -15,6 +15,8 @@
 #ifndef XTC_OS_SHARP_H
 #define XTC_OS_SHARP_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -39,8 +41,8 @@
  * PUBLIC: int __os_env_get __P((const char *, char *, size_t));
  * PUBLIC: int __os_env_set __P((const char *, const char *, int));
  */
-int __os_env_get(const char *name, char *buf, size_t bufsize);
-int __os_env_set(const char *name, const char *value, int overwrite);
+XTC_API int __os_env_get(const char *name, char *buf, size_t bufsize);
+XTC_API int __os_env_set(const char *name, const char *value, int overwrite);
 
 /*
  * --- Per-thread seedable PRNG ---
@@ -61,8 +63,8 @@ int __os_env_set(const char *name, const char *value, int overwrite);
  * PUBLIC: void __os_rand_seed __P((uint64_t));
  * PUBLIC: uint64_t __os_rand_u64 __P((void));
  */
-void     __os_rand_seed(uint64_t seed);
-uint64_t __os_rand_u64(void);
+XTC_API void     __os_rand_seed(uint64_t seed);
+XTC_API uint64_t __os_rand_u64(void);
 
 /*
  * --- Bounded string copy/cat (BSD strlcpy/strlcat semantics) ---
@@ -78,7 +80,7 @@ uint64_t __os_rand_u64(void);
  * PUBLIC: size_t __os_strlcpy __P((char *, const char *, size_t));
  * PUBLIC: size_t __os_strlcat __P((char *, const char *, size_t));
  */
-size_t __os_strlcpy(char *dst, const char *src, size_t dstsize);
-size_t __os_strlcat(char *dst, const char *src, size_t dstsize);
+XTC_API size_t __os_strlcpy(char *dst, const char *src, size_t dstsize);
+XTC_API size_t __os_strlcat(char *dst, const char *src, size_t dstsize);
 
 #endif /* XTC_OS_SHARP_H */

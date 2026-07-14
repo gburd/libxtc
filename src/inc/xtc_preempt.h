@@ -14,6 +14,8 @@
 #ifndef XTC_PREEMPT_H
 #define XTC_PREEMPT_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 #include <pthread.h>
 
@@ -33,10 +35,10 @@
  * PUBLIC: uint64_t xtc_preempt_ticks __P((void));
  * PUBLIC: int      xtc_preempt_tick_pending __P((void));
  */
-int      xtc_preempt_arm(int64_t interval_ns);
+XTC_API int      xtc_preempt_arm(int64_t interval_ns);
 
 /* Stop + delete this thread's preemption timer.  Safe if not armed. */
-int      xtc_preempt_disarm(void);
+XTC_API int      xtc_preempt_disarm(void);
 
 /* Enable (on != 0) / disable signal-context involuntary yield (Phase
  * 2).  When on and the timer is armed, a tick preempts the running
@@ -47,19 +49,19 @@ int      xtc_preempt_disarm(void);
  *
  * PUBLIC: void xtc_preempt_set_involuntary __P((int));
  */
-void     xtc_preempt_set_involuntary(int on);
+XTC_API void     xtc_preempt_set_involuntary(int on);
 
 /* 1 if per-thread CPU-time preemption timers are available on this
  * platform, 0 otherwise (arm returns NOSYS then). */
-int      xtc_preempt_supported(void);
+XTC_API int      xtc_preempt_supported(void);
 
 /* Total timer ticks this thread has observed since arming (Phase 0
  * seam-works metric / telemetry). */
-uint64_t xtc_preempt_ticks(void);
+XTC_API uint64_t xtc_preempt_ticks(void);
 
 /* 1 if a timer tick fired and is unconsumed; consumes (clears) it.
  * Phase 1 consults this at safe points to decide whether to yield. */
-int      xtc_preempt_tick_pending(void);
+XTC_API int      xtc_preempt_tick_pending(void);
 
 /*
  * Async-signal-unsafe-region depth (Phase 2 prerequisite).  A per-thread
@@ -75,9 +77,9 @@ int      xtc_preempt_tick_pending(void);
  * PUBLIC: void __xtc_unsafe_leave __P((void));
  * PUBLIC: int  __xtc_unsafe_depth __P((void));
  */
-void __xtc_unsafe_enter(void);
-void __xtc_unsafe_leave(void);
-int  __xtc_unsafe_depth(void);
+XTC_API void __xtc_unsafe_enter(void);
+XTC_API void __xtc_unsafe_leave(void);
+XTC_API int  __xtc_unsafe_depth(void);
 
 /*
  * Preemption-safe raw-pthread mutex brackets.  A fiber that holds a

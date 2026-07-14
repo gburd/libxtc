@@ -30,6 +30,8 @@
 #ifndef XTC_CREDIT_H
 #define XTC_CREDIT_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -50,30 +52,30 @@ typedef struct xtc_credit xtc_credit_t;
 
 /* Create a regulator with a window of `window` credits (max operations
  * in flight).  window must be > 0. */
-int  xtc_credit_create(unsigned window, xtc_credit_t **out);
-void xtc_credit_destroy(xtc_credit_t *c);
+XTC_API int  xtc_credit_create(unsigned window, xtc_credit_t **out);
+XTC_API void xtc_credit_destroy(xtc_credit_t *c);
 
 /* Take one credit before issuing an operation, blocking the calling
  * fiber until one is free or `timeout_ns` elapses (XTC_E_AGAIN).
  * timeout_ns == 0 tries once; a negative timeout blocks indefinitely. */
-int  xtc_credit_acquire(xtc_credit_t *c, int64_t timeout_ns);
+XTC_API int  xtc_credit_acquire(xtc_credit_t *c, int64_t timeout_ns);
 
 /* Take one credit if immediately available (XTC_E_AGAIN otherwise). */
-int  xtc_credit_try_acquire(xtc_credit_t *c);
+XTC_API int  xtc_credit_try_acquire(xtc_credit_t *c);
 
 /* Return one credit when an operation's acknowledgement arrives,
  * unblocking one waiter.  XTC_E_INVAL if it would exceed the window
  * (a release without a matching acquire is a bug in the caller). */
-int  xtc_credit_release(xtc_credit_t *c);
+XTC_API int  xtc_credit_release(xtc_credit_t *c);
 
 /* Operations currently in flight (acquired but not yet released). */
-unsigned xtc_credit_in_flight(const xtc_credit_t *c);
+XTC_API unsigned xtc_credit_in_flight(const xtc_credit_t *c);
 
 /* Peak in-flight observed since creation (the high-water mark; useful
  * for tuning the window). */
-unsigned xtc_credit_peak(const xtc_credit_t *c);
+XTC_API unsigned xtc_credit_peak(const xtc_credit_t *c);
 
 /* The configured window size. */
-unsigned xtc_credit_window(const xtc_credit_t *c);
+XTC_API unsigned xtc_credit_window(const xtc_credit_t *c);
 
 #endif /* XTC_CREDIT_H */

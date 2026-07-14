@@ -29,6 +29,8 @@
 #ifndef XTC_MCTX_H
 #define XTC_MCTX_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -62,35 +64,35 @@ typedef void (*xtc_mctx_cleanup_fn)(void *user);
 
 /* Create a child context.  parent==NULL produces a root context.
  * name is copied for diagnostics.  flags = bitmask of XTC_MCTX_*. */
-int     xtc_mctx_create(xtc_mctx_t *parent, const char *name,
-                        unsigned flags, xtc_mctx_t **out);
+XTC_API int     xtc_mctx_create(xtc_mctx_t *parent, const char *name,
+                                unsigned flags, xtc_mctx_t **out);
 
 /* Destroy a context: recursively destroys children, runs cleanups
  * bottom-up, frees all chunks.  Detaches from parent. */
-void    xtc_mctx_destroy(xtc_mctx_t *m);
+XTC_API void    xtc_mctx_destroy(xtc_mctx_t *m);
 
 /* Free all allocations and run cleanups, but keep the context (and
  * its children) usable.  Useful for per-iteration scratch contexts. */
-void    xtc_mctx_reset(xtc_mctx_t *m);
+XTC_API void    xtc_mctx_reset(xtc_mctx_t *m);
 
 /* Allocate within the context.  Returns NULL on failure. */
-void   *xtc_mctx_alloc(xtc_mctx_t *m, size_t size);
-void   *xtc_mctx_calloc(xtc_mctx_t *m, size_t n, size_t size);
+XTC_API void   *xtc_mctx_alloc(xtc_mctx_t *m, size_t size);
+XTC_API void   *xtc_mctx_calloc(xtc_mctx_t *m, size_t n, size_t size);
 
 /* Strdup into the context.  Lives until reset/destroy. */
-void   *xtc_mctx_strdup(xtc_mctx_t *m, const char *s);
+XTC_API void   *xtc_mctx_strdup(xtc_mctx_t *m, const char *s);
 
 /* Free a single allocation early.  Optional -- most code just lets
  * destroy/reset reclaim. */
-void    xtc_mctx_free(xtc_mctx_t *m, void *p);
+XTC_API void    xtc_mctx_free(xtc_mctx_t *m, void *p);
 
 /* Register a cleanup callback.  Runs at destroy/reset time, before
  * the chunks are freed.  Multiple callbacks run in LIFO order. */
-int     xtc_mctx_register_cleanup(xtc_mctx_t *m,
-                                  xtc_mctx_cleanup_fn fn, void *user);
+XTC_API int     xtc_mctx_register_cleanup(xtc_mctx_t *m,
+                                          xtc_mctx_cleanup_fn fn, void *user);
 
-const char *xtc_mctx_name(const xtc_mctx_t *m);
-size_t      xtc_mctx_total_bytes(const xtc_mctx_t *m);
-size_t      xtc_mctx_total_chunks(const xtc_mctx_t *m);
+XTC_API const char *xtc_mctx_name(const xtc_mctx_t *m);
+XTC_API size_t      xtc_mctx_total_bytes(const xtc_mctx_t *m);
+XTC_API size_t      xtc_mctx_total_chunks(const xtc_mctx_t *m);
 
 #endif /* XTC_MCTX_H */

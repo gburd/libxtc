@@ -30,6 +30,8 @@
 #ifndef XTC_LAUNCH_H
 #define XTC_LAUNCH_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 
 #include "xtc.h"
@@ -76,9 +78,9 @@ typedef struct xtc_launch_opts {
  *
  * PUBLIC: int xtc_launch __P((xtc_loop_t *, xtc_launch_fn, void *, int64_t, const xtc_launch_opts_t *, intptr_t *));
  */
-int xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
-               int64_t timeout_ns, const xtc_launch_opts_t *opts,
-               intptr_t *result);
+XTC_API int xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
+                       int64_t timeout_ns, const xtc_launch_opts_t *opts,
+                       intptr_t *result);
 
 #ifdef __cplusplus
 }

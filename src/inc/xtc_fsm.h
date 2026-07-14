@@ -38,6 +38,8 @@
 #ifndef XTC_FSM_H
 #define XTC_FSM_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -134,43 +136,43 @@ typedef struct xtc_fsm_opts {
  * first event).  The returned handle lets a caller query/stop/join it
  * from outside.
  */
-int       xtc_fsm_start(xtc_loop_t *loop,
-                        const xtc_fsm_callbacks_t *cb,
-                        void *state,
-                        int initial_state,
-                        const xtc_fsm_opts_t *opts,
-                        xtc_fsm_t **out);
+XTC_API int       xtc_fsm_start(xtc_loop_t *loop,
+                                const xtc_fsm_callbacks_t *cb,
+                                void *state,
+                                int initial_state,
+                                const xtc_fsm_opts_t *opts,
+                                xtc_fsm_t **out);
 
 /* Ask the machine to stop.  Non-blocking; sets a flag and kicks the
  * proc's recv.  terminate() runs, then the proc exits.  Safe from any
  * thread, multiple times. */
-int       xtc_fsm_stop(xtc_fsm_t *fsm);
+XTC_API int       xtc_fsm_stop(xtc_fsm_t *fsm);
 
 /* Wait for the machine to exit, then free its handle.  timeout_ns < 0
  * waits forever, 0 polls once.  On XTC_OK the handle is invalid; on
  * XTC_E_AGAIN (timeout) it is left intact so the caller may join
  * again. */
-int       xtc_fsm_join(xtc_fsm_t *fsm, int64_t timeout_ns);
+XTC_API int       xtc_fsm_join(xtc_fsm_t *fsm, int64_t timeout_ns);
 
 /* The machine's pid, for use with xtc_fsm_send / xtc_fsm_call. */
-xtc_pid_t xtc_fsm_pid(const xtc_fsm_t *fsm);
+XTC_API xtc_pid_t xtc_fsm_pid(const xtc_fsm_t *fsm);
 
 /* Asynchronous event: deliver `ev` to the machine and return without
  * waiting.  The event lands in event() with call == NULL. */
-int       xtc_fsm_send(xtc_pid_t target, const void *ev, size_t len);
+XTC_API int       xtc_fsm_send(xtc_pid_t target, const void *ev, size_t len);
 
 /* Synchronous event: deliver `req`, block until the machine replies or
  * timeout_ns elapses.  On XTC_OK, *out_reply / *out_size receive a
  * heap buffer the caller must xtc_free.  Returns XTC_E_AGAIN on
  * timeout, XTC_E_INVAL on bad arguments. */
-int       xtc_fsm_call(xtc_pid_t target,
-                       const void *req, size_t req_size,
-                       void **out_reply, size_t *out_size,
-                       int64_t timeout_ns);
+XTC_API int       xtc_fsm_call(xtc_pid_t target,
+                               const void *req, size_t req_size,
+                               void **out_reply, size_t *out_size,
+                               int64_t timeout_ns);
 
 /* From inside event() when `call` is non-NULL, send the reply and
  * release the call handle.  Each call must be replied exactly once. */
-int       xtc_fsm_reply(xtc_fsm_call_t *call,
-                        const void *reply, size_t size);
+XTC_API int       xtc_fsm_reply(xtc_fsm_call_t *call,
+                                const void *reply, size_t size);
 
 #endif /* XTC_FSM_H */

@@ -22,6 +22,8 @@
 #ifndef XTC_PKEY_H
 #define XTC_PKEY_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 
 #include "xtc.h"
@@ -35,22 +37,22 @@
  */
 
 /* 1 if protection keys are usable on this host right now, else 0. */
-int xtc_pkey_supported(void);
+XTC_API int xtc_pkey_supported(void);
 
 /* Allocate a protection key (initially full access).  XTC_OK + *out,
  * or XTC_E_NOSYS / XTC_E_INVAL. */
-int xtc_pkey_alloc(int *out_key);
+XTC_API int xtc_pkey_alloc(int *out_key);
 
 /* Tag [addr,addr+len) (page-aligned) with key, keeping read+write
  * protection bits.  Access is then gated by the key's per-thread
  * rights (xtc_pkey_set_access). */
-int xtc_pkey_protect(void *addr, size_t len, int key);
+XTC_API int xtc_pkey_protect(void *addr, size_t len, int key);
 
 /* Set the CALLING thread's rights for key: allow_read/allow_write
  * (0 disables).  Disabling read implies disabling write. */
-int xtc_pkey_set_access(int key, int allow_read, int allow_write);
+XTC_API int xtc_pkey_set_access(int key, int allow_read, int allow_write);
 
 /* Release a key. */
-int xtc_pkey_free(int key);
+XTC_API int xtc_pkey_free(int key);
 
 #endif /* XTC_PKEY_H */

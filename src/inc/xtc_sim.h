@@ -21,6 +21,8 @@
 #ifndef XTC_SIM_H
 #define XTC_SIM_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 
 /* Well-known PRNG streams.  Each scheduler-relevant random draw site
@@ -56,7 +58,7 @@ enum xtc_sim_stream {
  * PUBLIC: void     xtc_sim_clock_set __P((int64_t));
  * PUBLIC: int      __xtc_sim_vclock __P((int64_t *));
  */
-int      __xtc_sim_active(void);
+XTC_API int      __xtc_sim_active(void);
 
 /* Determinism guard.  A sim-reachable primitive that would break seed
  * replay (real clock, unseeded RNG, env read, raw thread id) calls
@@ -64,9 +66,9 @@ int      __xtc_sim_active(void);
  * violation and, in strict mode (default), aborts naming the source.
  * xtc_sim_strict toggles abort-vs-count; xtc_sim_nondeterminism_count
  * lets a harness assert zero to PROVE a run was fully deterministic. */
-void     __xtc_sim_nondeterminism(const char *what);
-void     xtc_sim_strict(int on);
-int      xtc_sim_nondeterminism_count(void);
+XTC_API void     __xtc_sim_nondeterminism(const char *what);
+XTC_API void     xtc_sim_strict(int on);
+XTC_API int      xtc_sim_nondeterminism_count(void);
 
 /* Clock skew (FoundationDB "the clock is not perfect").  The scheduler
  * still schedules timers against the true virtual clock, but a fiber
@@ -81,21 +83,21 @@ int      xtc_sim_nondeterminism_count(void);
  *
  * PUBLIC: void xtc_sim_clock_skew __P((int64_t, int));
  */
-void     xtc_sim_clock_skew(int64_t offset_ns, int jitter_ns);
+XTC_API void     xtc_sim_clock_skew(int64_t offset_ns, int jitter_ns);
 
 /* Activate sim with a root seed (also resets every stream).  Idempotent
  * re-activation re-seeds.  Test-only; never called in production. */
-void     xtc_sim_activate(uint64_t seed);
-void     xtc_sim_deactivate(void);
+XTC_API void     xtc_sim_activate(uint64_t seed);
+XTC_API void     xtc_sim_deactivate(void);
 
 /* Draw the next 64-bit value from stream `s` (0..XTC_SIM_RNG_NSTREAMS-1).
  * Deterministic given the activation seed.  Undefined if sim inactive
  * (callers must gate on __xtc_sim_active()). */
-uint64_t __xtc_sim_rng(int s);
+XTC_API uint64_t __xtc_sim_rng(int s);
 
 /* Convenience: a uniform value in [0, bound) from stream `s`.  bound==0
  * returns 0. */
-uint64_t __xtc_sim_rng_range(int s, uint64_t bound);
+XTC_API uint64_t __xtc_sim_rng_range(int s, uint64_t bound);
 
 /* Deterministic fault toggle: returns 1 with probability
  * pct_per_1000/1000, drawn from the dedicated FAULT stream (so enabling
@@ -105,7 +107,7 @@ uint64_t __xtc_sim_rng_range(int s, uint64_t bound);
  *
  * PUBLIC: int xtc_sim_fault __P((unsigned));
  */
-int      xtc_sim_fault(unsigned pct_per_1000);
+XTC_API int      xtc_sim_fault(unsigned pct_per_1000);
 
 /*
  * Critical-section fault points.  A fault point marks an interleaving-
@@ -121,11 +123,11 @@ int      xtc_sim_fault(unsigned pct_per_1000);
  * PUBLIC: uint64_t xtc_sim_fault_point_fires __P((const char *));
  * PUBLIC: int      xtc_sim_fault_points_seen __P((void));
  */
-void     xtc_sim_fault_points_enable(unsigned pct_per_1000);
-void     xtc_sim_fault_points_disable(void);
-int      xtc_sim_fault_point(const char *name);
-uint64_t xtc_sim_fault_point_fires(const char *name);
-int      xtc_sim_fault_points_seen(void);
+XTC_API void     xtc_sim_fault_points_enable(unsigned pct_per_1000);
+XTC_API void     xtc_sim_fault_points_disable(void);
+XTC_API int      xtc_sim_fault_point(const char *name);
+XTC_API uint64_t xtc_sim_fault_point_fires(const char *name);
+XTC_API int      xtc_sim_fault_points_seen(void);
 
 /*
  * Simulated I/O faults (DST).  When enabled, the sim I/O backend defers
@@ -141,12 +143,12 @@ int      xtc_sim_fault_points_seen(void);
  * PUBLIC: int64_t __xtc_sim_io_latency __P((void));
  * PUBLIC: int     __xtc_sim_io_should_fault __P((void));
  */
-void    xtc_sim_io_faults_enable(int64_t lat_min_ns, int64_t lat_max_ns,
-            unsigned fault_pct_per_1000);
-void    xtc_sim_io_faults_disable(void);
-int     __xtc_sim_io_faults_active(void);
-int64_t __xtc_sim_io_latency(void);
-int     __xtc_sim_io_should_fault(void);
+XTC_API void    xtc_sim_io_faults_enable(int64_t lat_min_ns, int64_t lat_max_ns,
+                    unsigned fault_pct_per_1000);
+XTC_API void    xtc_sim_io_faults_disable(void);
+XTC_API int     __xtc_sim_io_faults_active(void);
+XTC_API int64_t __xtc_sim_io_latency(void);
+XTC_API int     __xtc_sim_io_should_fault(void);
 
 /*
  * Simulated TORN / CORRUPT writes and reads (DST) -- the torn-page fault
@@ -166,11 +168,11 @@ int     __xtc_sim_io_should_fault(void);
  * PUBLIC: int  __xtc_sim_io_torn_prefix __P((int));
  * PUBLIC: int  __xtc_sim_io_flip_byte __P((int));
  */
-void xtc_sim_io_corrupt_enable(unsigned corrupt_pct_per_1000);
-void xtc_sim_io_corrupt_disable(void);
-int  __xtc_sim_io_corrupt_active(void);
-int  __xtc_sim_io_torn_prefix(int full_len);
-int  __xtc_sim_io_flip_byte(int len);
+XTC_API void xtc_sim_io_corrupt_enable(unsigned corrupt_pct_per_1000);
+XTC_API void xtc_sim_io_corrupt_disable(void);
+XTC_API int  __xtc_sim_io_corrupt_active(void);
+XTC_API int  __xtc_sim_io_torn_prefix(int full_len);
+XTC_API int  __xtc_sim_io_flip_byte(int len);
 
 /*
  * Disk-full (ENOSPC) injection: a seeded coin makes a WRITE fail with a
@@ -182,8 +184,8 @@ int  __xtc_sim_io_flip_byte(int len);
  * PUBLIC: void xtc_sim_io_enospc_enable __P((unsigned));
  * PUBLIC: int  __xtc_sim_io_enospc __P((void));
  */
-void xtc_sim_io_enospc_enable(unsigned pct_per_1000);
-int  __xtc_sim_io_enospc(void);
+XTC_API void xtc_sim_io_enospc_enable(unsigned pct_per_1000);
+XTC_API int  __xtc_sim_io_enospc(void);
 
 /*
  * Stale-data reads (FoundationDB's "the disk returns an OLD durable
@@ -198,9 +200,9 @@ int  __xtc_sim_io_enospc(void);
  * PUBLIC: void __xtc_sim_io_stale_record __P((int, uint64_t, const void *, int));
  * PUBLIC: int  __xtc_sim_io_stale_read __P((int, uint64_t, void *, int));
  */
-void xtc_sim_io_stale_enable(unsigned pct_per_1000);
-void __xtc_sim_io_stale_record(int fd, uint64_t off, const void *buf, int len);
-int  __xtc_sim_io_stale_read(int fd, uint64_t off, void *buf, int len);
+XTC_API void xtc_sim_io_stale_enable(unsigned pct_per_1000);
+XTC_API void __xtc_sim_io_stale_record(int fd, uint64_t off, const void *buf, int len);
+XTC_API int  __xtc_sim_io_stale_read(int fd, uint64_t off, void *buf, int len);
 
 /*
  * Write-back cache crash model (FoundationDB's simulated disk): pwrite
@@ -220,10 +222,10 @@ int  __xtc_sim_io_stale_read(int fd, uint64_t off, void *buf, int len);
  * PUBLIC: void     __xtc_sim_io_wb_synced __P((int));
  * PUBLIC: uint64_t xtc_sim_io_durable_end __P((int));
  */
-void     xtc_sim_io_wb_enable(int on);
-void     __xtc_sim_io_wb_wrote(int fd, uint64_t end_off);
-void     __xtc_sim_io_wb_synced(int fd);
-uint64_t xtc_sim_io_durable_end(int fd);
+XTC_API void     xtc_sim_io_wb_enable(int on);
+XTC_API void     __xtc_sim_io_wb_wrote(int fd, uint64_t end_off);
+XTC_API void     __xtc_sim_io_wb_synced(int fd);
+XTC_API uint64_t xtc_sim_io_durable_end(int fd);
 
 /*
  * Simulated network partition + message latency (DST).  A seeded,
@@ -249,12 +251,12 @@ uint64_t xtc_sim_io_durable_end(int fd);
  * PUBLIC: void    xtc_sim_net_latency __P((int64_t, int64_t));
  * PUBLIC: int64_t __xtc_sim_net_latency __P((void));
  */
-void    xtc_sim_partition_set(int src_loop_id, int dst_loop_id, int blocked);
-void    xtc_sim_partition_isolate(int loop_id);
-void    xtc_sim_partition_clear(void);
-int     __xtc_sim_partition_blocked(int src_loop_id, int dst_loop_id);
-void    xtc_sim_net_latency(int64_t min_ns, int64_t max_ns);
-int64_t __xtc_sim_net_latency(void);
+XTC_API void    xtc_sim_partition_set(int src_loop_id, int dst_loop_id, int blocked);
+XTC_API void    xtc_sim_partition_isolate(int loop_id);
+XTC_API void    xtc_sim_partition_clear(void);
+XTC_API int     __xtc_sim_partition_blocked(int src_loop_id, int dst_loop_id);
+XTC_API void    xtc_sim_net_latency(int64_t min_ns, int64_t max_ns);
+XTC_API int64_t __xtc_sim_net_latency(void);
 
 /* Plant a critical-section fault point in runtime code.  A single
  * relaxed load in production (sim inactive); under sim with points
@@ -284,14 +286,14 @@ int64_t __xtc_sim_net_latency(void);
  * PUBLIC: int  xtc_sim_buggify_site __P((int, char *, size_t, int *));
  * PUBLIC: int  xtc_sim_buggify_fault __P((unsigned));
  */
-void xtc_sim_buggify_enable(unsigned pct_per_1000);
-void xtc_sim_buggify_disable(void);
-int  xtc_sim_buggify(const char *name);
-int  xtc_sim_buggify_active_count(void);
-int  xtc_sim_buggify_reached_count(void);
-int  xtc_sim_buggify_site(int idx, char *buf, size_t buflen,
-         int *out_activated);
-int  xtc_sim_buggify_fault(unsigned pct_per_1000);
+XTC_API void xtc_sim_buggify_enable(unsigned pct_per_1000);
+XTC_API void xtc_sim_buggify_disable(void);
+XTC_API int  xtc_sim_buggify(const char *name);
+XTC_API int  xtc_sim_buggify_active_count(void);
+XTC_API int  xtc_sim_buggify_reached_count(void);
+XTC_API int  xtc_sim_buggify_site(int idx, char *buf, size_t buflen,
+                 int *out_activated);
+XTC_API int  xtc_sim_buggify_fault(unsigned pct_per_1000);
 
 /* Branch on a buggify point in runtime code:
  *     if (XTC_SIM_BUGGIFY("wal.flush.tiny_batch")) { ... pessimal ... }
@@ -305,14 +307,14 @@ int  xtc_sim_buggify_fault(unsigned pct_per_1000);
 /* Virtual (logical) clock.  When enabled, __os_clock_mono returns the
  * virtual time instead of the host monotonic clock, so time is a pure
  * function of the schedule.  Test/scheduler-only. */
-void     xtc_sim_clock_enable(int64_t start_ns);
-void     xtc_sim_clock_disable(void);
-void     xtc_sim_clock_advance(int64_t delta_ns);
-void     xtc_sim_clock_set(int64_t ns);
+XTC_API void     xtc_sim_clock_enable(int64_t start_ns);
+XTC_API void     xtc_sim_clock_disable(void);
+XTC_API void     xtc_sim_clock_advance(int64_t delta_ns);
+XTC_API void     xtc_sim_clock_set(int64_t ns);
 
 /* Query the virtual clock: returns 1 and writes *out_ns when active,
  * 0 otherwise.  The single seam __os_clock_mono consults. */
-int      __xtc_sim_vclock(int64_t *out_ns);
+XTC_API int      __xtc_sim_vclock(int64_t *out_ns);
 
 /*
  * Run an executor's loops deterministically (DST scheduler).  Activates
@@ -328,7 +330,7 @@ int      __xtc_sim_vclock(int64_t *out_ns);
  * PUBLIC: int xtc_sim_exec_run __P((struct xtc_exec *, uint64_t, long));
  */
 struct xtc_exec;
-int      xtc_sim_exec_run(struct xtc_exec *e, uint64_t seed, long max_steps);
+XTC_API int      xtc_sim_exec_run(struct xtc_exec *e, uint64_t seed, long max_steps);
 
 /* Structural invariant checker (run after each sim step): returns
  * XTC_OK if all per-loop invariants hold, XTC_E_INTERNAL on the first
@@ -338,8 +340,8 @@ int      xtc_sim_exec_run(struct xtc_exec *e, uint64_t seed, long max_steps);
  * PUBLIC: int      xtc_sim_check __P((struct xtc_exec *));
  * PUBLIC: uint64_t xtc_sim_state_hash __P((struct xtc_exec *));
  */
-int      xtc_sim_check(struct xtc_exec *e);
-uint64_t xtc_sim_state_hash(struct xtc_exec *e);
+XTC_API int      xtc_sim_check(struct xtc_exec *e);
+XTC_API uint64_t xtc_sim_state_hash(struct xtc_exec *e);
 
 /*
  * Adversarial scheduler bias (FoundationDB "hunt the worst interleaving"
@@ -359,8 +361,8 @@ uint64_t xtc_sim_state_hash(struct xtc_exec *e);
  * PUBLIC: void xtc_sim_sched_pessimal __P((unsigned));
  * PUBLIC: int  __xtc_sim_sched_pessimal_pct __P((void));
  */
-void xtc_sim_sched_pessimal(unsigned pct_per_1000);
-int  __xtc_sim_sched_pessimal_pct(void);
+XTC_API void xtc_sim_sched_pessimal(unsigned pct_per_1000);
+XTC_API int  __xtc_sim_sched_pessimal_pct(void);
 
 /*
  * Completion / message SWIZZLE (reorder), independent of latency.  The
@@ -380,9 +382,9 @@ int  __xtc_sim_sched_pessimal_pct(void);
  * PUBLIC: void xtc_sim_swizzle_disable __P((void));
  * PUBLIC: int  __xtc_sim_swizzle_pct __P((void));
  */
-void xtc_sim_swizzle_enable(unsigned pct_per_1000);
-void xtc_sim_swizzle_disable(void);
-int  __xtc_sim_swizzle_pct(void);
+XTC_API void xtc_sim_swizzle_enable(unsigned pct_per_1000);
+XTC_API void xtc_sim_swizzle_disable(void);
+XTC_API int  __xtc_sim_swizzle_pct(void);
 
 /*
  * Semantic consistency check (FoundationDB's end-of-test consistency
@@ -399,7 +401,7 @@ int  __xtc_sim_swizzle_pct(void);
  * PUBLIC: int  __xtc_sim_run_consistency_check __P((void));
  */
 typedef int (*xtc_sim_consistency_fn)(void *arg);
-void xtc_sim_set_consistency_check(xtc_sim_consistency_fn fn, void *arg);
-int  __xtc_sim_run_consistency_check(void);
+XTC_API void xtc_sim_set_consistency_check(xtc_sim_consistency_fn fn, void *arg);
+XTC_API int  __xtc_sim_run_consistency_check(void);
 
 #endif /* XTC_SIM_H */

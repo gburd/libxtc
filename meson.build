@@ -51,9 +51,16 @@ lib_sources = [
 build_shared = get_option('shared')
 
 if build_shared
+  # -DXTC_BUILDING_DLL marks every compiled object as "I am the
+  # library" for the XTC_API export macro (src/inc/xtc_export.h).
+  # A no-op on non-Windows (gcc/clang already export everything from
+  # a .so); on a Windows target it selects __declspec(dllexport) so
+  # the shared_library half of both_libraries actually exports
+  # symbols, closing the gap in docs/M_WINDOWS_MATRIX.md.
   xtc_lib = both_libraries('xtc',
     sources : lib_sources,
     include_directories : inc,
+    c_args : ['-DXTC_BUILDING_DLL'],
     version : meson.project_version(),
     soversion : ver_parts[0],
     install : true,

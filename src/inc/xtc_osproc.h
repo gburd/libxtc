@@ -54,6 +54,8 @@
 #ifndef XTC_OSPROC_H
 #define XTC_OSPROC_H
 
+#include "xtc_export.h"
+
 #include "xtc.h"
 
 #include <stdint.h>
@@ -88,28 +90,28 @@ typedef struct xtc_osproc_opts {
  *
  * PUBLIC: int  xtc_osproc_spawn __P((const xtc_osproc_opts_t *, xtc_osproc_t **));
  */
-int  xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out);
+XTC_API int  xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out);
 
 /* The child's OS process id, or -1.
  * PUBLIC: long xtc_osproc_pid __P((const xtc_osproc_t *)); */
-long xtc_osproc_pid(const xtc_osproc_t *p);
+XTC_API long xtc_osproc_pid(const xtc_osproc_t *p);
 
 /* The parent end of the control socket (O_NONBLOCK, O_CLOEXEC), or -1
  * if no control socket was requested.  Owned by the handle; do not
  * close it directly -- xtc_osproc_destroy does.
  * PUBLIC: int  xtc_osproc_ctrl_fd __P((const xtc_osproc_t *)); */
-int  xtc_osproc_ctrl_fd(const xtc_osproc_t *p);
+XTC_API int  xtc_osproc_ctrl_fd(const xtc_osproc_t *p);
 
 /* Send signal `sig` to the child (e.g. SIGTERM graceful, SIGKILL hard,
  * SIGINT cancel).  Returns XTC_OK, XTC_E_INVAL, or XTC_E_INTERNAL.
  * PUBLIC: int  xtc_osproc_signal __P((const xtc_osproc_t *, int)); */
-int  xtc_osproc_signal(const xtc_osproc_t *p, int sig);
+XTC_API int  xtc_osproc_signal(const xtc_osproc_t *p, int sig);
 
 /* Non-blocking reap.  If the child has exited, returns XTC_OK and (when
  * status != NULL) stores the raw waitpid status; if still running,
  * returns XTC_E_AGAIN.  After XTC_OK the child is reaped (no zombie).
  * PUBLIC: int  xtc_osproc_try_wait __P((xtc_osproc_t *, int *)); */
-int  xtc_osproc_try_wait(xtc_osproc_t *p, int *status);
+XTC_API int  xtc_osproc_try_wait(xtc_osproc_t *p, int *status);
 
 /* Cooperative wait: park the calling fiber until the child exits (or
  * timeout_ns elapses; < 0 = forever), reap it, and store the raw
@@ -117,14 +119,14 @@ int  xtc_osproc_try_wait(xtc_osproc_t *p, int *status);
  * XTC_OK (exited), XTC_E_AGAIN (timeout), or XTC_E_*.  Must be called
  * from a loop fiber (it parks); off a fiber it polls-and-sleeps.
  * PUBLIC: int  xtc_osproc_wait __P((xtc_osproc_t *, int *, int64_t)); */
-int  xtc_osproc_wait(xtc_osproc_t *p, int *status, int64_t timeout_ns);
+XTC_API int  xtc_osproc_wait(xtc_osproc_t *p, int *status, int64_t timeout_ns);
 
 /* Close the control socket + pidfd and free the handle.  Does NOT kill
  * or reap a still-running child (signal + wait first for a clean
  * shutdown); if the child already exited it is reaped here so it does
  * not linger as a zombie.
  * PUBLIC: void xtc_osproc_destroy __P((xtc_osproc_t *)); */
-void xtc_osproc_destroy(xtc_osproc_t *p);
+XTC_API void xtc_osproc_destroy(xtc_osproc_t *p);
 
 /* ---- isolated-worker ergonomics ------------------------------------
  *
@@ -142,9 +144,9 @@ void xtc_osproc_destroy(xtc_osproc_t *p);
  *
  * PUBLIC: int xtc_osproc_isolated_spawn __P((const char *, int (*)(int, void *), void *, xtc_osproc_t **));
  */
-int xtc_osproc_isolated_spawn(const char *name,
-                              int (*fn)(int ctrl_fd, void *arg), void *arg,
-                              xtc_osproc_t **out);
+XTC_API int xtc_osproc_isolated_spawn(const char *name,
+                                      int (*fn)(int ctrl_fd, void *arg), void *arg,
+                                      xtc_osproc_t **out);
 
 /* Parent side: send a request frame to the worker and park for its
  * reply frame (allocated with the xtc allocator; free with xtc_free).
@@ -153,9 +155,9 @@ int xtc_osproc_isolated_spawn(const char *name,
  *
  * PUBLIC: int xtc_osproc_call __P((xtc_osproc_t *, const void *, size_t, void **, size_t *, size_t, int64_t));
  */
-int xtc_osproc_call(xtc_osproc_t *p, const void *req, size_t req_len,
-                    void **reply, size_t *reply_len, size_t max_reply,
-                    int64_t timeout_ns);
+XTC_API int xtc_osproc_call(xtc_osproc_t *p, const void *req, size_t req_len,
+                            void **reply, size_t *reply_len, size_t max_reply,
+                            int64_t timeout_ns);
 
 /* Child-side handler: given a request, produce a reply.  Set *reply
  * (malloc'd, or NULL for an empty reply) and *reply_len; return XTC_OK
@@ -171,7 +173,7 @@ typedef int (*xtc_osproc_handler_fn)(const void *req, size_t req_len,
  *
  * PUBLIC: int xtc_osproc_serve __P((int, xtc_osproc_handler_fn, void *));
  */
-int xtc_osproc_serve(int ctrl_fd, xtc_osproc_handler_fn handler, void *arg);
+XTC_API int xtc_osproc_serve(int ctrl_fd, xtc_osproc_handler_fn handler, void *arg);
 
 #ifdef __cplusplus
 }

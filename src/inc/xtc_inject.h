@@ -32,6 +32,8 @@
 #ifndef XTC_INJECT_H
 #define XTC_INJECT_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -53,30 +55,30 @@ typedef void (*xtc_inject_fn)(const char *name, void *user);
 
 /* Attach a callback.  Multiple attaches accumulate (up to 4 per
  * name).  Returns XTC_E_RESOURCE if the slot table is full. */
-int  xtc_inject_attach(const char *name, xtc_inject_fn fn, void *user);
+XTC_API int  xtc_inject_attach(const char *name, xtc_inject_fn fn, void *user);
 
 /* Attach "wait" semantics: when the point fires, block until
  * xtc_inject_wakeup(name) is called.  Useful for racing tests. */
-int  xtc_inject_attach_wait(const char *name);
+XTC_API int  xtc_inject_attach_wait(const char *name);
 
 /* Detach all attachments for a name. */
-int  xtc_inject_detach(const char *name);
+XTC_API int  xtc_inject_detach(const char *name);
 
 /* Trigger from production code.  Internal -- usually called via the
  * INJECTION_POINT() macro below, which compiles to a no-op when
  * XTC_INJECT_DISABLE is set. */
-void xtc_inject_trigger(const char *name);
+XTC_API void xtc_inject_trigger(const char *name);
 
 /* Release a "wait" attachment so the triggering thread can proceed. */
-int  xtc_inject_wakeup(const char *name);
+XTC_API int  xtc_inject_wakeup(const char *name);
 
 /* Diagnostics: how many names currently have attachments. */
-int  xtc_inject_n_attached(void);
+XTC_API int  xtc_inject_n_attached(void);
 
 /* Lock-free check: 1 if `name` has any attachments, 0 otherwise.
  * Hot-path-friendly: when no inject points are attached anywhere,
  * this returns 0 immediately via an atomic load. */
-int  xtc_inject_check(const char *name);
+XTC_API int  xtc_inject_check(const char *name);
 
 /* The macro production code uses.  In PG-style this is INJECTION_POINT;
  * we use XTC_INJECTION_POINT so caller code reading a stack trace

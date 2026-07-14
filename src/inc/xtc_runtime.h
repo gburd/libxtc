@@ -20,6 +20,8 @@
 #ifndef XTC_RUNTIME_H
 #define XTC_RUNTIME_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 
 #include "xtc.h"
@@ -83,6 +85,6 @@ typedef struct xtc_runtime_info {
  *	quota reflected should read its xtc_res_t directly with
  *	xtc_res_used(r, XTC_RES_MEM_BYTES) against r->caps.mem_bytes.
  */
-int xtc_runtime_info(xtc_runtime_info_t *out);
+XTC_API int xtc_runtime_info(xtc_runtime_info_t *out);
 
 #endif /* XTC_RUNTIME_H */

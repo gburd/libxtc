@@ -22,6 +22,8 @@
 #ifndef XTC_IOSCHED_H
 #define XTC_IOSCHED_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 
 #include "xtc.h"
@@ -53,19 +55,19 @@ typedef struct xtc_iosched_stats {
  * PUBLIC: int  xtc_iosched_flush __P((xtc_iosched_t *));
  * PUBLIC: void xtc_iosched_get_stats __P((const xtc_iosched_t *, xtc_iosched_stats_t *));
  */
-int  xtc_iosched_create(const xtc_iosched_opts_t *opts, xtc_iosched_t **out);
-void xtc_iosched_destroy(xtc_iosched_t *s);
+XTC_API int  xtc_iosched_create(const xtc_iosched_opts_t *opts, xtc_iosched_t **out);
+XTC_API void xtc_iosched_destroy(xtc_iosched_t *s);
 
 /* Queue a write at off.  The buffer must remain valid until the next
  * flush completes.  When the queue reaches the current batch size an
  * implicit flush runs (issuing the batch and possibly parking the
  * writer fiber).  Returns XTC_OK, or a negative errno from a flush. */
-int  xtc_iosched_write(xtc_iosched_t *s, const void *buf, uint32_t len,
-                       int64_t off);
+XTC_API int  xtc_iosched_write(xtc_iosched_t *s, const void *buf, uint32_t len,
+                               int64_t off);
 
 /* Issue all queued writes now.  Returns XTC_OK or a negative errno. */
-int  xtc_iosched_flush(xtc_iosched_t *s);
+XTC_API int  xtc_iosched_flush(xtc_iosched_t *s);
 
-void xtc_iosched_get_stats(const xtc_iosched_t *s, xtc_iosched_stats_t *out);
+XTC_API void xtc_iosched_get_stats(const xtc_iosched_t *s, xtc_iosched_stats_t *out);
 
 #endif /* XTC_IOSCHED_H */

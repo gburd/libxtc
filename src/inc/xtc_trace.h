@@ -30,6 +30,8 @@
 #ifndef XTC_TRACE_H
 #define XTC_TRACE_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -63,16 +65,16 @@ typedef int (*xtc_trace_fn)(const xtc_trace_rec_t *rec, void *user);
  */
 
 /* Turn tracing on (on != 0) or off.  Returns the previous state. */
-int xtc_trace_enable(int on);
+XTC_API int xtc_trace_enable(int on);
 
 /* Drop all buffered trace records.  Returns XTC_OK. */
-int xtc_trace_reset(void);
+XTC_API int xtc_trace_reset(void);
 
 /* Visit buffered records in causal (HLC-ascending) order.  Returns the
  * number visited, or a negative XTC_E_* on error. */
-int xtc_trace_dump(xtc_trace_fn cb, void *user);
+XTC_API int xtc_trace_dump(xtc_trace_fn cb, void *user);
 
 /* The current global HLC value (for tests and display). */
-uint64_t xtc_hlc_now(void);
+XTC_API uint64_t xtc_hlc_now(void);
 
 #endif /* XTC_TRACE_H */

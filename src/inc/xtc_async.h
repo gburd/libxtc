@@ -13,6 +13,8 @@
 #ifndef XTC_ASYNC_H
 #define XTC_ASYNC_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 
 #include "xtc_loop.h"
@@ -45,8 +47,8 @@ typedef intptr_t (*xtc_coro_fn)(void *arg);
  *	with the task handle in *out_task.  The fiber starts in the
  *	scheduled state and runs on the next loop step.
  */
-int      xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg,
-                   xtc_task_t **out_task);
+XTC_API int      xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg,
+                           xtc_task_t **out_task);
 
 /*
  * xtc_await --
@@ -56,14 +58,14 @@ int      xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg,
  *
  *	Returns XTC_OK on success.
  */
-int      xtc_await(xtc_task_t *t, intptr_t *result);
+XTC_API int      xtc_await(xtc_task_t *t, intptr_t *result);
 
 /*
  * xtc_yield --
  *	From inside a coroutine, return control to the loop.  The next
  *	loop step resumes at the line after the call.
  */
-void     xtc_yield(void);
+XTC_API void     xtc_yield(void);
 
 /*
  * Cooperative yield watchdog.  xtc has no forcible preemption, so a
@@ -76,17 +78,17 @@ void     xtc_yield(void);
  * xtc_yield_due_count() reports how many times a task went over
  * budget on the loop (telemetry).  All are no-ops / 0 off a loop.
  */
-void     xtc_yield_set_budget(xtc_loop_t *loop, int64_t budget_ns);
-int      xtc_yield_check(void);
-int      xtc_yield_if_due(void);
-uint64_t xtc_yield_due_count(const xtc_loop_t *loop);
+XTC_API void     xtc_yield_set_budget(xtc_loop_t *loop, int64_t budget_ns);
+XTC_API int      xtc_yield_check(void);
+XTC_API int      xtc_yield_if_due(void);
+XTC_API uint64_t xtc_yield_due_count(const xtc_loop_t *loop);
 
 /*
  * Default fiber stack size in bytes.  Configurable per process via
  * xtc_set_stack_size().  M4 default: 64 KiB.
  */
-size_t   xtc_stack_size(void);
-int      xtc_set_stack_size(size_t bytes);
+XTC_API size_t   xtc_stack_size(void);
+XTC_API int      xtc_set_stack_size(size_t bytes);
 
 /*
  * Stack-memory reclamation on park (Lever S1, M_PREEMPTION section 8).
@@ -114,10 +116,10 @@ int      xtc_set_stack_size(size_t bytes);
  * PUBLIC: int  xtc_stack_reclaim_enabled __P((void));
  * PUBLIC: uint64_t xtc_stack_reclaim_count __P((void));
  */
-int      xtc_stack_reclaim_enable(size_t keep_bytes);
-void     xtc_stack_reclaim_disable(void);
-int      xtc_stack_reclaim_enabled(void);
-uint64_t xtc_stack_reclaim_count(void);
+XTC_API int      xtc_stack_reclaim_enable(size_t keep_bytes);
+XTC_API void     xtc_stack_reclaim_disable(void);
+XTC_API int      xtc_stack_reclaim_enabled(void);
+XTC_API uint64_t xtc_stack_reclaim_count(void);
 
 /*
  * XTC_COOP_REGION { ... } --
