@@ -1,5 +1,38 @@
 # Cross-thread wake-path contention (proc.c __lt_lock) -- 2026-07
 
+## UPDATE 2026-07-14: the __lt_lock fix was NOT the PG bottleneck
+
+The PG team's follow-up (/tmp/libxtc-proc-mutex-contention-report.md)
+MEASUREMENT-FALSIFIED the wake-path hypothesis. Uprobe under load:
+  xtc_proc_wake    = 0-1 calls / 10s   (essentially never)
+  xtc_proc_wait_fd = 39 calls  / 10s
+The fiber carrier cycles resumable backends in USERSPACE -- no
+syscall-park, no cross-thread wake per command -- so __resolve Strategy 2
+/ __lt_lock / xtc_proc_wake are all OFF their hot path. The __lt_lock
+fix below (commit 76e7844) is still correct and stays (it removes a real
+global serial section for cross-exec wake fan-out), but it does NOT move
+the fiber-per-session PG plateau.
+
+REAL bottleneck, root-caused from their 5 verified observations
+(heap-allocated pthread_mutex, ~367k __lll_lock_wait_private/10s, on the
+common cooperative cycle with ZERO wake/park syscalls, flat in carrier
+count, absent at -c1): `t->lock`, the per-LOOP xtc_proc_table mutex
+(proc.c ~570), shared by every fiber/proc on a carrier. Every xtc_send
+-- including a same-loop fiber-to-fiber hand-off -- calls __resolve ->
+__table_lookup (proc.c ~649), which takes t->lock to read the slot +
+pin the target with a refcount. Per-command reader->backend->reply
+hand-off => >=1 such send => every fiber on a carrier serializes on that
+one per-loop lock => flat in carrier count. Reply written to the team:
+/tmp/libxtc-proc-mutex-contention-reply.md. Tracked as PLAN.md 19.5c.
+The real fix (lock-free __table_lookup via RCU against the teardown
+protocol + a resume-vs-exit UAF DST test) is its OWN session, NOT this
+release -- an RCU change to a per-command hot path with a live UAF
+protocol will not be rushed onto a release eve.
+
+---
+
+## Original report (superseded above for the PG case)
+
 ## Source
 /tmp/libxtc-wake-path-contention-report.md (PG fiber-carrier team,
 libxtc v1.20.1, EC2 m6id.8xlarge, pgbench -M prepared -S -c16 -j16).
