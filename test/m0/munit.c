@@ -21,8 +21,10 @@
  * SOFTWARE.
  */
 
+#if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
+#endif
 
 /*** Configuration ***/
 
@@ -884,7 +886,7 @@ munit_clock_get_elapsed(struct PsnipClockTimespec *start,
 #elif defined(HAVE_STDATOMIC)
 #include <stdatomic.h>
 #define ATOMIC_UINT32_T _Atomic uint32_t
-#define ATOMIC_UINT32_INIT(x) ATOMIC_VAR_INIT(x)
+#define ATOMIC_UINT32_INIT(x) (x)
 #elif defined(HAVE_CLANG_ATOMICS)
 #define ATOMIC_UINT32_T _Atomic uint32_t
 #define ATOMIC_UINT32_INIT(x) (x)
@@ -2257,4 +2259,6 @@ munit_suite_main(const MunitSuite *suite, void *user_data, int argc,
   return munit_suite_main_custom(suite, user_data, argc, argv, NULL);
 }
 
+#if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
+#endif
