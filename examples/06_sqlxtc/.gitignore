@@ -38,6 +38,7 @@ test_native_txn
 test_isolation
 test_bufmgr_dio
 bm_writeback_bench
+bt_merge_bench
 /sql_grammar.c
 /sql_grammar.h
 sql_grammar.out

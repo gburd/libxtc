@@ -345,6 +345,89 @@ test_collapse_to_root(void)
 	(void)unlink(path);
 }
 
+/* ---- additional scenario: multi-level merge cascade ---- *
+ *
+ * The doc's test plan (section 7.1) calls for an explicit cascade test
+ * that forces underflow at TWO OR MORE levels at once: build a tree
+ * deep enough that deleting down to a sparse survivor set collapses
+ * more than one internal level in a single delete-driven pass, and
+ * assert (a) height actually drops by >= 2, (b) every survivor is
+ * reachable by a fresh root-to-leaf DESCENT (bt_lookup), not merely a
+ * leaf-chain scan -- the descent path is exactly what the internal-
+ * split hi-fence bug (M_SQLXTC_BTREE_MERGE.md STEP 2 RESULT) broke,
+ * so this is the regression gate for that class of bug specifically.
+ */
+static int
+alive_every_nth(int i)
+{
+	return (i % 500) == 0;
+}
+
+static void
+test_cascade_multilevel(void)
+{
+	char path[64];
+	const uint32_t PAGE_SZ = 512;
+	const int N = 12000;
+	bm_t *bm = make_bm(path, PAGE_SZ, 64);
+	bt_t *bt = NULL;
+	bt_stats_t s_built, s_after;
+	int i, survivors, expect;
+
+	CHECK(bt_open(bm, &bt) == XTC_OK, "bt_open cascade");
+
+	for (i = 0; i < N; i++) {
+		char k[16], v[32];
+
+		make_key(k, sizeof k, i);
+		make_val(v, sizeof v, i);
+		CHECK(bt_insert(bt, k, 9, v, (uint16_t)strlen(v)) == XTC_OK,
+		    "cascade insert %d", i);
+	}
+	bt_get_stats(bt, &s_built);
+	CHECK(s_built.height >= 4, "built deep enough for a multi-level "
+	    "cascade (height=%llu)", (unsigned long long)s_built.height);
+
+	/* Delete all but a very sparse survivor set (1-in-500): almost
+	 * every leaf and most internal nodes underflow, forcing the
+	 * merge cascade through two or more levels in one pass. */
+	for (i = 0; i < N; i++) {
+		char k[16];
+
+		if (alive_every_nth(i))
+			continue;
+		make_key(k, sizeof k, i);
+		CHECK(bt_delete(bt, k, 9) == XTC_OK, "cascade delete %d", i);
+	}
+	bt_get_stats(bt, &s_after);
+
+	/* GATE 1: the cascade collapsed more than one level. */
+	CHECK(s_built.height - s_after.height >= 2,
+	    "cascade dropped >= 2 levels (built=%llu after=%llu)",
+	    (unsigned long long)s_built.height,
+	    (unsigned long long)s_after.height);
+
+	/* GATE 2: every survivor is reachable by a fresh root-to-leaf
+	 * DESCENT (bt_lookup), the exact path the internal-merge
+	 * hi-fence bug broke, plus a full ordered scan agrees. */
+	survivors = scan_count_check(bt, N, alive_every_nth);
+	expect = 0;
+	for (i = 0; i < N; i++)
+		if (alive_every_nth(i))
+			expect++;
+	CHECK(survivors == expect, "cascade survivor count %d == %d",
+	    survivors, expect);
+
+	printf("  test_cascade_multilevel: ok (%d keys, height %llu -> %llu, "
+	    "%d survivors all descent-reachable)\n", N,
+	    (unsigned long long)s_built.height,
+	    (unsigned long long)s_after.height, survivors);
+
+	bt_close(bt);
+	bm_destroy(bm);
+	(void)unlink(path);
+}
+
 /* ---- scenario 3: interleaved delete/insert must not bloat ---- */
 static void
 test_no_bloat_churn(void)
@@ -656,6 +739,7 @@ main(void)
 	printf("btree delete/merge + page reclaim tests\n");
 	test_shrink_and_reclaim();
 	test_collapse_to_root();
+	test_cascade_multilevel();
 	test_no_bloat_churn();
 	test_concurrent_merge();
 	printf("ALL PASS (%d checks)\n", g_checks);
