@@ -1,0 +1,302 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd Jul 13, 2026
+.Dt __OS_CRYPTO 3
+.Os
+.Sh NAME
+.Nm __os_crypto_sha256 ,
+.Nm __os_crypto_hmac_sha256 ,
+.Nm __os_crypto_aes_gcm_encrypt ,
+.Nm __os_crypto_aes_gcm_decrypt ,
+.Nm __os_csprng_init ,
+.Nm __os_csprng_bytes ,
+.Nm __os_csprng_destroy
+.Nd cryptography building blocks (hashing, AEAD, CSPRNG)
+.Sh SYNOPSIS
+.In os_crypto.h
+.Ft int
+.Fn __os_crypto_sha256 "const void *data" "size_t len" "uint8_t out[32]"
+.Ft int
+.Fn __os_crypto_hmac_sha256 "const void *key" "size_t keylen" "const void *data" "size_t len" "uint8_t out[32]"
+.Ft int
+.Fn __os_crypto_aes_gcm_encrypt "const uint8_t key[32]" "const uint8_t iv[12]" "const void *aad" "size_t aadlen" "const void *plaintext" "size_t len" "void *ciphertext_out" "uint8_t tag_out[16]"
+.Ft int
+.Fn __os_crypto_aes_gcm_decrypt "const uint8_t key[32]" "const uint8_t iv[12]" "const void *aad" "size_t aadlen" "const void *ciphertext" "size_t len" "const uint8_t tag[16]" "void *plaintext_out"
+.Ft int
+.Fn __os_csprng_init "__os_csprng_t **out"
+.Ft int
+.Fn __os_csprng_bytes "__os_csprng_t *rng" "void *buf" "size_t len"
+.Ft void
+.Fn __os_csprng_destroy "__os_csprng_t *rng"
+.Sh DESCRIPTION
+.Nm __os_crypto_*
+and
+.Nm __os_csprng_*
+are the L0 cryptography building blocks (PLAN.md 19.2), scoped to the
+two stated v1 use cases: checksums/hashing for WAL integrity, and a
+per-loop cryptographically secure pseudorandom number generator
+(CSPRNG).  This is a
+.Em library-internal
+primitive; there is no public
+.Nm xtc_*
+wrapper in this pass, because no consumer needs direct access yet.
+.Pp
+The implementation is backed
+.Em only
+by OpenSSL, guarded by the same preprocessor macro
+.Dv XTC_TLS_BACKEND_OPENSSL
+that
+.Xr xtc_tls 3 Ns 's
+OpenSSL backend
+.Pq Pa src/io/tls_openssl.c
+uses to detect that OpenSSL was selected at configure time via
+.Fl -with-tls .
+This file needs
+.Em no
+new configure flag: it is compiled unconditionally (like
+.Pa src/os/os_rand.c ) ,
+and its behavior follows whichever TLS backend the build already
+chose.
+.Sh NOSYS BEHAVIOR
+When the build was configured with a TLS backend other than OpenSSL
+(including
+.Fl -with-tls Ns = Ns Cm none ) ,
+.Dv XTC_TLS_BACKEND_OPENSSL
+is undefined and every function below still
+.Em links
+(the public symbols are always present, exactly like
+.Xr xtc_tls 3 Ns 's
+.Pa tls_none.c
+stub backend), but returns
+.Dv XTC_E_NOSYS
+at runtime after performing the same argument validation the real
+implementation performs.  A caller can safely call these functions on
+any build configuration and branch on the return value; only a
+misconfigured or absent OpenSSL turns a would-be
+.Dv XTC_OK
+into
+.Dv XTC_E_NOSYS ,
+never a link error.
+.Sh HASHING
+.Fn __os_crypto_sha256
+writes the 32-byte SHA-256 digest of
+.Fa data
+.Bq Li 0.. Ns Fa len
+to
+.Fa out .
+.Fn __os_crypto_hmac_sha256
+writes the 32-byte HMAC-SHA256 of
+.Fa data
+under
+.Fa key
+to
+.Fa out .
+Both are intended for WAL-record and general checksum integrity, not
+password storage (there is deliberately no HKDF or password-hashing
+primitive in v1; see
+.Sx DEFERRED ) .
+.Pp
+A
+.Dv NULL
+.Fa out ,
+or a
+.Dv NULL
+.Fa data Ns / Ns Fa key
+with a nonzero length, returns
+.Dv XTC_E_INVAL .
+An unexpected OpenSSL failure returns
+.Dv XTC_E_INTERNAL
+(an invariant violation, not an expected runtime condition).
+.Sh AUTHENTICATED ENCRYPTION
+.Fn __os_crypto_aes_gcm_encrypt
+and
+.Fn __os_crypto_aes_gcm_decrypt
+are a one-shot AES-256-GCM AEAD pair.
+.Fa key
+is 32 bytes.
+.Fa iv
+is 12 bytes, the standard 96-bit GCM nonce length (also OpenSSL's
+default IV length for
+.Fn EVP_aes_256_gcm ,
+so no
+.Dv EVP_CTRL_AEAD_SET_IVLEN
+call is needed).
+.Fa aad
+may be
+.Dv NULL Ns / Ns Li 0
+for no additional authenticated data.
+.Fa tag
+is 16 bytes.
+.Pp
+.Sy Reusing an
+.Pq Fa key , Fa iv
+.Sy pair for two different plaintexts is a catastrophic
+confidentiality break.
+Draw a fresh
+.Fa iv
+per encryption, e.g. from
+.Fn __os_csprng_bytes .
+.Pp
+.Fn __os_crypto_aes_gcm_decrypt
+verifies the GCM tag
+.Em before
+trusting the recovered bytes.  On a tag mismatch it returns
+.Dv XTC_E_INVAL
+and does
+.Em not
+leave the original plaintext in
+.Fa plaintext_out :
+any bytes already written by the underlying decrypt-update step are
+explicitly zeroed before returning, so a caller who forgets to check
+the return value cannot accidentally observe unauthenticated data.
+This is a code distinct from both
+.Dv XTC_OK
+and
+.Dv XTC_E_INTERNAL
+(an OpenSSL invariant violation unrelated to tag verification), so a
+caller can never confuse "the ciphertext was tampered with" with
+"something else went wrong."
+.Sh CSPRNG
+.Fn __os_csprng_init
+allocates a per-handle CSPRNG object; the caller owns the handle and
+must release it with
+.Fn __os_csprng_destroy
+(a
+.Dv NULL
+argument is a no-op, like
+.Xr __os_alloc 3 Ns 's
+.Fn __os_free ) .
+.Fn __os_csprng_bytes
+streams
+.Fa len
+cryptographically-strong pseudorandom bytes into
+.Fa buf .
+.Pp
+.Sy Design note :
+rather than hand-roll a second DRBG, the v1 implementation delegates
+generation directly to OpenSSL's own default
+.Fn RAND_bytes .
+OpenSSL 3.x's default generator is already a properly-seeded,
+continuously-reseeded, thread-safe CSPRNG (seeded from the OS entropy
+source on first use); duplicating that machinery would add real
+complexity (parameter plumbing, reseed policy, provider fetch/free
+lifetime) for no security benefit in the stated v1 use case (per-loop
+nonces/keys/jitter, not FIPS-mode determinism).
+.Fn __os_csprng_init
+mixes
+.Fn __os_rand_u64
+draws
+.Pq see Pa src/inc/os_sharp.h ; Pa src/os/os_rand.c
+into OpenSSL's entropy pool via
+.Fn RAND_add
+as
+.Em additional
+entropy, per the "reuse the existing primitive as the seed source, do
+not invent a new one" discipline; it does not replace OpenSSL's own
+seeding.
+.Pp
+This is a
+.Em real
+CSPRNG: two calls to
+.Fn __os_csprng_bytes
+are expected to differ, and there is deliberately no seed/replay
+determinism contract (contrast with the DST seeded PRNG tree in
+.Pa src/evt/sim.c Ns 's
+.Fn __xtc_sim_rng ,
+which
+.Em is
+required to replay identically for a given seed).  This primitive is
+NOT wired into the deterministic-simulation
+.Fn __xtc_sim_active
+guard: it is meant for real per-loop nonce/jitter generation outside
+the scheduler's replay-sensitive path, not for anything a DST run
+observes.  A future task that makes the CSPRNG reachable from
+sim-controlled code must add an
+.Fn __xtc_sim_nondeterminism
+call at the point of use, mirroring
+.Pa src/os/os_time.c Ns 's
+real-clock guard.
+.Sh RETURN VALUES
+On success,
+.Dv XTC_OK
+.Pq 0 .
+On error, a negative
+.Dv XTC_E_* :
+.Dv XTC_E_INVAL
+(bad argument),
+.Dv XTC_E_RANGE
+(a length exceeds
+.Dv INT_MAX ,
+which OpenSSL's API takes as
+.Vt int ) ,
+.Dv XTC_E_NOMEM
+( Fn __os_csprng_init
+allocation failure),
+.Dv XTC_E_INTERNAL
+(an OpenSSL invariant violation), or
+.Dv XTC_E_NOSYS
+(OpenSSL is not the selected TLS backend; see
+.Sx NOSYS BEHAVIOR ) .
+.Fn __os_crypto_aes_gcm_decrypt
+additionally returns
+.Dv XTC_E_INVAL
+on a tag-verification failure (see
+.Sx AUTHENTICATED ENCRYPTION ) .
+.Fn __os_csprng_destroy
+has no failure mode.
+.Sh THREAD SAFETY
+All operations are safe to call from any thread.  OpenSSL's default
+RNG (which
+.Fn __os_csprng_bytes
+delegates to) is internally thread-safe.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+uint8_t digest[XTC_CRYPTO_SHA256_LEN];
+if (__os_crypto_sha256(record, record_len, digest) != XTC_OK)
+        abort();          /* or XTC_E_NOSYS: OpenSSL not selected */
+
+__os_csprng_t *rng = NULL;
+uint8_t key[XTC_CRYPTO_AES_KEY_LEN], iv[XTC_CRYPTO_AES_IV_LEN];
+if (__os_csprng_init(&rng) == XTC_OK) {
+        (void)__os_csprng_bytes(rng, key, sizeof(key));
+        (void)__os_csprng_bytes(rng, iv, sizeof(iv));
+}
+
+uint8_t tag[XTC_CRYPTO_AES_TAG_LEN];
+uint8_t ciphertext[sizeof(plaintext)];
+if (__os_crypto_aes_gcm_encrypt(key, iv, NULL, 0, plaintext,
+    sizeof(plaintext), ciphertext, tag) != XTC_OK)
+        abort();
+
+uint8_t recovered[sizeof(plaintext)];
+int rc = __os_crypto_aes_gcm_decrypt(key, iv, NULL, 0, ciphertext,
+    sizeof(ciphertext), tag, recovered);
+if (rc == XTC_E_INVAL)
+        abort();          /* tampered: recovered is zeroed, not trusted */
+
+__os_csprng_destroy(rng);
+.Ed
+.Sh DEFERRED
+The following are deliberately
+.Em not
+in v1 and are tracked as future work, not oversights:
+.Bl -bullet -compact
+.It
+ChaCha20-Poly1305 (a second AEAD cipher; AES-256-GCM alone covers the
+stated use case).
+.It
+SHA-3 and BLAKE3 (a second and third hash family; SHA-256 alone
+covers WAL/checksum integrity).
+.It
+HKDF (key derivation; no v1 consumer derives sub-keys yet).
+.It
+Alternative backends -- libsodium, BoringSSL, SChannel, CommonCrypto
+(OpenSSL is already a build dependency for TLS; v1 does not add a
+second cryptography dependency).
+.El
+.Sh SEE ALSO
+.Xr __os_alloc 3 ,
+.Xr xtc_tls 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 0.0.1, v1 scope (PLAN.md 19.2).
