@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.21.0"
+#       --define "version 1.22.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.21.0
+Version:        1.22.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,9 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Tue Jul 14 2026 Greg Burd <greg@burd.me> - 1.22.0-1
+- Striped per-loop proc-table lock (PG fiber-per-session bottleneck, 19.5c); fixed two lazy-slab-init DCL data races (rcu + proc pools); compositional DST test + proc-table stress; backend-portable cross-thread-wake guard (kqueue coverage); MSVC munit subset (16 tests) promoted to a hard CI gate.
+
 * Tue Jul 14 2026 Greg Burd <greg@burd.me> - 1.21.0-1
 - New xtc_cskip (RCU ordered map/skiplist, lock-free readers, min/floor); xtc_chash DST/PBT/bench (no longer provisional); lock-free cross-thread wake resolver; rcu.c lazy-slab-init data-race fix; pre-release security audit + 2 hardening fixes; riscv64/QEMU preempt de-flake.
 
