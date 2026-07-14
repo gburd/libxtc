@@ -1,3 +1,29 @@
+libxtc (1.22.0-1) unstable; urgency=medium
+
+  * Performance: the per-loop proc table lock is now STRIPED (16
+    stripes keyed by local_id, like xtc_chash), so concurrent xtc_send
+    to procs with different local_ids no longer serialize on one
+    per-carrier mutex -- the measured PostgreSQL fiber-per-session
+    bottleneck (PLAN.md 19.5c).
+  * Fixes: two pre-existing double-checked-locking data races in the
+    lazy slab-pool init (xtc_rcu and the proc envelope/link/mon pools),
+    both surfaced by new concurrent stress tests; the pool pointers are
+    now _Atomic with acquire/release.
+  * Testing: new compositional DST test (test_sim_composition) that
+    draws random spawn/monitor/link/send/exit scripts and asserts
+    system-wide invariants (every monitor fires, every link fires, no
+    orphaned procs, byte-identical replay).  New proc-table stress
+    test.  The cross-thread-wake regression guard is now
+    backend-portable and runs on kqueue (macOS/*BSD), closing a
+    coverage gap where only the Linux epoll wake path was exercised.
+  * Windows: a curated 16-test POSIX-clean munit subset now builds and
+    runs under real MSVC cl.exe as a HARD CI GATE (was one best-effort
+    test); fixed a stale/inconsistent version in the MSVC compat
+    config.
+  * No breaking xtc_* API change.
+
+ -- Greg Burd <greg@burd.me>  Tue, 14 Jul 2026 15:02:14 -0400
+
 libxtc (1.21.0-1) unstable; urgency=medium
 
   * New concurrent ordered map, xtc_cskip: an RCU-protected skiplist
