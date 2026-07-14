@@ -86,39 +86,59 @@ echo.
 echo BUILD OK: xtc.lib + smoke.exe
 smoke.exe
 
-rem --- 5. (best-effort) Build + run ONE real munit-suite test, now
-rem        that MUNIT_ARRAY_PARAM no longer expands to a VLA-typed
-rem        array parameter (test/m0/munit.h) -- that was the only GCC-ism
-rem        blocking cl.exe.  This step is NOT gated behind :fail: a
-rem        failure here does not fail the overall build, because it has
-rem        not yet been verified on a real cl.exe (only cross-checked on
-rem        Linux/clang in MSVC-compatibility mode).  Once this is
-rem        confirmed green on Windows CI / a real host, promote it to a
-rem        required step (add its own "if errorlevel 1 goto :fail") and
-rem        widen SRCS to the rest of test/m*. ---
+rem --- 5. (best-effort) Build + run a curated set of REAL munit-suite
+rem        tests, now that MUNIT_ARRAY_PARAM no longer expands to a
+rem        VLA-typed array parameter (test/m0/munit.h) -- that was the
+rem        GCC-ism blocking cl.exe.  The set is the POSIX-CLEAN munit
+rem        tests: they exercise only the public xtc_* API + the harness,
+rem        with no direct pthread.h / unistd.h / sys-header use, so they
+rem        are the portion of the suite that can compile under UCRT.
+rem        (Tests that use POSIX threads/sockets directly stay Linux/CI-
+rem        validated; porting those is the separate Clang64 work.)
+rem
+rem        This whole step is best-effort: a build/run failure for any
+rem        single test does NOT fail the job, because the full set has
+rem        not yet been confirmed on a real cl.exe.  It prints a
+rem        pass/fail TALLY so Windows CI surfaces the true state; once
+rem        the tally is all-pass on CI, promote it to a hard gate
+rem        (drop the ver-reset fallbacks and add 'exit /b 1' on any
+rem        fail).  See docs/M_WINDOWS_MATRIX.md. ---
 echo.
-echo [5/5] cl test_atomic.exe (real munit suite, best-effort)
-cl %CFLAGS% /Fe:test_atomic.exe ^
-   /I"%XTC_SRC%\test\m1" ^
-   "%XTC_SRC%\test\m1\test_atomic.c" ^
-   "%XTC_SRC%\test\m1\munit.c" ^
-   xtc.lib ws2_32.lib ntdll.lib dbghelp.lib
-if errorlevel 1 (
-  echo [5/5] test_atomic.exe build FAILED -- not yet verified on cl.exe, see docs/M_WINDOWS_MATRIX.md
-  rem Force success: this step is explicitly best-effort (see the
-  rem comment above) and must never fail the overall build/job.
-  ver >nul
-) else (
-  test_atomic.exe
-  if errorlevel 1 (
-    echo [5/5] test_atomic.exe BUILT but a test FAILED
-    ver >nul
-  ) else (
-    echo [5/5] test_atomic.exe OK -- real munit suite runs under MSVC
-  )
-)
+echo [5/5] cl real munit suite (POSIX-clean subset, best-effort)
+set MUNIT_PASS=0
+set MUNIT_FAIL=0
+set MUNIT_TESTS=m0\test_version m0\test_errors m0\test_header m1\test_atomic m1\test_alloc m1\test_time m1\test_crypto m1\test_tls m11\test_mctx m10\test_credit m10\test_fsm m10\test_pool m10\test_reg m10\test_stream m14\test_launch m14\test_unsafe_depth m14\test_stack_reclaim
+for %%T in (%MUNIT_TESTS%) do call :run_munit %%T
+echo.
+echo [5/5] munit subset tally: %MUNIT_PASS% passed, %MUNIT_FAIL% failed (best-effort, not gating)
 
 goto :eof
+
+rem --- :run_munit <milestone>\<test>  (best-effort build+run of one
+rem     munit test; updates MUNIT_PASS / MUNIT_FAIL; never aborts) ---
+:run_munit
+setlocal enabledelayedexpansion
+set T=%~1
+for /f "tokens=1,2 delims=\" %%a in ("%T%") do (
+  set MS=%%a
+  set TN=%%b
+)
+cl %CFLAGS% /Fe:!TN!.exe ^
+   /I"%XTC_SRC%\test\!MS!" ^
+   "%XTC_SRC%\test\!MS!\!TN!.c" ^
+   "%XTC_SRC%\test\!MS!\munit.c" ^
+   xtc.lib ws2_32.lib ntdll.lib dbghelp.lib >nul 2>&1
+if errorlevel 1 (
+  echo   [munit] !MS!\!TN! BUILD FAILED
+  endlocal ^& set /a MUNIT_FAIL+=1 ^& goto :eof
+)
+!TN!.exe >nul 2>&1
+if errorlevel 1 (
+  echo   [munit] !MS!\!TN! TEST FAILED
+  endlocal ^& set /a MUNIT_FAIL+=1 ^& goto :eof
+)
+echo   [munit] !MS!\!TN! OK
+endlocal ^& set /a MUNIT_PASS+=1 ^& goto :eof
 
 :fail
 echo.
