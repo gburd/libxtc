@@ -20,7 +20,18 @@ CC		= @CC@
 # installed /usr/local/include/xtc.h would shadow the source tree and
 # build against a stale API.
 XTC_INCLUDES	= -I. -I$(srcdir)/../src/inc
-CFLAGS		= $(XTC_INCLUDES) @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@ @XTC_TLS_CFLAGS@
+# -DXTC_BUILDING_DLL marks every library object as "I am the library,
+# not a consumer" for the XTC_API export macro (src/inc/xtc_export.h).
+# It is unconditional -- always on, on every platform -- because the
+# macro itself is gated on _WIN32: on Linux/macOS/BSD (gcc/clang,
+# where a .so already exports everything by default) this define is
+# read by the preprocessor and then does nothing, so there is no
+# separate static-vs-shared compile path to maintain here.  It only
+# takes effect if this Makefile is ever configured for a Windows
+# target (mingw/cygwin; configure.ac already has cases for those),
+# where it selects __declspec(dllexport) instead of the dllimport a
+# consumer would request via -DXTC_DLL.
+CFLAGS		= $(XTC_INCLUDES) @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread -DXTC_BUILDING_DLL @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@ @XTC_TLS_CFLAGS@
 CPPFLAGS	= @CPPFLAGS@ $(XTC_INCLUDES)
 LDFLAGS		= @LDFLAGS@ -pthread
 LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@ @XTC_TLS_LIBS@ @XTC_LIBUNWIND_LIBS@
@@ -71,6 +82,8 @@ LIB_SRCS	= \
 	$(srcdir)/../src/os/os_tls.c \
 	$(srcdir)/../src/os/os_mutex.c \
 	$(srcdir)/../src/os/os_cpu.c \
+	$(srcdir)/../src/os/os_tuning.c \
+	$(srcdir)/../src/os/os_crypto.c \
 	$(srcdir)/../src/os/os_pkey.c \
 	$(srcdir)/../src/os/os_backtrace.c \
 	$(srcdir)/../src/os/os_file.c \
@@ -111,6 +124,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/alloc_audit.c \
 	$(srcdir)/../src/ptc/mctx.c \
 	$(srcdir)/../src/ptc/rcu.c \
+	$(srcdir)/../src/ptc/chash.c \
 	$(srcdir)/../src/ptc/dio_sched.c \
 	$(srcdir)/../src/ptc/iosched.c \
 	$(srcdir)/../src/ptc/dump.c \
@@ -119,6 +133,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/orc/reg.c \
 	$(srcdir)/../src/orc/svr.c \
 	$(srcdir)/../src/orc/fsm.c \
+	$(srcdir)/../src/orc/saga.c \
 	$(srcdir)/../src/orc/pg.c \
 	$(srcdir)/../src/orc/pool.c \
 	$(srcdir)/../src/orc/stream.c \
@@ -156,6 +171,8 @@ LIB_OBJS	= \
 	os_tls.o \
 	os_mutex.o \
 	os_cpu.o \
+	os_tuning.o \
+	os_crypto.o \
 	os_pkey.o \
 	os_backtrace.o \
 	os_file.o \
@@ -196,6 +213,7 @@ LIB_OBJS	= \
 	alloc_audit.o \
 	mctx.o \
 	rcu.o \
+	chash.o \
 	dio_sched.o \
 	iosched.o \
 	dump.o \
@@ -204,6 +222,7 @@ LIB_OBJS	= \
 	reg.o \
 	svr.o \
 	fsm.o \
+	saga.o \
 	pg.o \
 	pool.o \
 	stream.o \
@@ -269,6 +288,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_pkey.h \
 	$(srcdir)/../src/inc/xtc_proc.h \
 	$(srcdir)/../src/inc/xtc_rcu.h \
+	$(srcdir)/../src/inc/xtc_chash.h \
 	$(srcdir)/../src/inc/xtc_reg.h \
 	$(srcdir)/../src/inc/xtc_res.h \
 	$(srcdir)/../src/inc/xtc_slab.h \
@@ -276,6 +296,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_tail.h \
 	$(srcdir)/../src/inc/xtc_svr.h \
 	$(srcdir)/../src/inc/xtc_fsm.h \
+	$(srcdir)/../src/inc/xtc_saga.h \
 	$(srcdir)/../src/inc/xtc_pg.h \
 	$(srcdir)/../src/inc/xtc_pool.h \
 	$(srcdir)/../src/inc/xtc_stream.h \
@@ -342,6 +363,9 @@ TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
 		  test_sharp_edges \
 		  test_cpu \
+		  test_cpu_cgroup \
+		  test_tuning \
+		  test_crypto \
 		  test_thread test_tls test_mutex test_fs \
 		  test_dio \
 		  test_pkey \
@@ -370,6 +394,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_reg \
 		  test_svr test_svr_edge \
 		  test_fsm \
+		  test_saga \
 		  test_pg \
 		  test_pool \
 		  test_stream \
@@ -384,6 +409,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_slab \
 		  test_slab_shm \
 		  test_rcu \
+		  test_chash \
 		  test_lrlock \
 		  test_lwlock \
 		  test_lockmgr \
@@ -577,6 +603,12 @@ sim.o: $(srcdir)/../src/evt/sim.c xtc_config.h
 os_cpu.o: $(srcdir)/../src/os/os_cpu.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_cpu.c
 
+os_tuning.o: $(srcdir)/../src/os/os_tuning.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_tuning.c
+
+os_crypto.o: $(srcdir)/../src/os/os_crypto.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_crypto.c
+
 os_pkey.o: $(srcdir)/../src/os/os_pkey.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_pkey.c
 
@@ -642,6 +674,9 @@ mctx.o: $(srcdir)/../src/ptc/mctx.c xtc_config.h
 rcu.o: $(srcdir)/../src/ptc/rcu.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/rcu.c
 
+chash.o: $(srcdir)/../src/ptc/chash.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/chash.c
+
 dio_sched.o: $(srcdir)/../src/ptc/dio_sched.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/dio_sched.c
 
@@ -659,6 +694,9 @@ svr.o: $(srcdir)/../src/orc/svr.c xtc_config.h
 
 fsm.o: $(srcdir)/../src/orc/fsm.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/fsm.c
+
+saga.o: $(srcdir)/../src/orc/saga.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/saga.c
 
 pg.o: $(srcdir)/../src/orc/pg.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/orc/pg.c
@@ -896,6 +934,24 @@ test_cpu: $(srcdir)/../test/m1/test_cpu.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
 		-o $@ $(srcdir)/../test/m1/test_cpu.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_cpu_cgroup: $(srcdir)/../test/m1/test_cpu_cgroup.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_cpu_cgroup.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_tuning: $(srcdir)/../test/m1/test_tuning.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_tuning.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_crypto: $(srcdir)/../test/m1/test_crypto.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_crypto.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_fs: $(srcdir)/../test/m1/test_fs.c \
@@ -1216,6 +1272,12 @@ test_fsm: $(srcdir)/../test/m10/test_fsm.c \
 		-o $@ $(srcdir)/../test/m10/test_fsm.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_saga: $(srcdir)/../test/m10/test_saga.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_saga.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_pg: $(srcdir)/../test/m10/test_pg.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
@@ -1300,6 +1362,12 @@ test_rcu: $(srcdir)/../test/m13/test_rcu.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
 		-o $@ $(srcdir)/../test/m13/test_rcu.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_chash: $(srcdir)/../test/m13/test_chash.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
+		-o $@ $(srcdir)/../test/m13/test_chash.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_lrlock: $(srcdir)/../test/m13/test_lrlock.c \
