@@ -71,9 +71,9 @@ struct link_entry { struct link_entry *next; xtc_pid_t peer; };
 struct mon_entry  { struct mon_entry *next; uint64_t ref; xtc_pid_t target; xtc_pid_t watcher; };
 
 /* M11.5b: pools for link_entry / mon_entry (fixed-size, hot path). */
-static xtc_slab_t      *__link_slab     = NULL;
-static xtc_slab_t      *__mon_slab      = NULL;
-static xtc_slab_t      *__env_slab      = NULL;
+static _Atomic(xtc_slab_t *) __link_slab     = NULL;
+static _Atomic(xtc_slab_t *) __mon_slab      = NULL;
+static _Atomic(xtc_slab_t *) __env_slab      = NULL;
 static pthread_mutex_t  __proc_slab_init_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /*
@@ -104,24 +104,40 @@ static pthread_mutex_t  __proc_slab_init_lock = PTHREAD_MUTEX_INITIALIZER;
 static void
 __proc_slabs_ensure(void)
 {
-	if (__link_slab != NULL && __mon_slab != NULL && __env_slab != NULL)
+	/* Double-checked lazy init.  The pointers are _Atomic so the
+	 * fast-path check loads them race-free (acquire) rather than a
+	 * plain read that TSan flags against the release store under the
+	 * lock -- the same fix applied to xtc_rcu's slab init.  Each pool
+	 * is published exactly once. */
+	if (atomic_load_explicit(&__link_slab, memory_order_acquire) != NULL &&
+	    atomic_load_explicit(&__mon_slab, memory_order_acquire) != NULL &&
+	    atomic_load_explicit(&__env_slab, memory_order_acquire) != NULL)
 		return;
 	(void) __proc_mtx_lock(&__proc_slab_init_lock);
-	if (__link_slab == NULL) {
+	if (atomic_load_explicit(&__link_slab, memory_order_relaxed) == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_t *sl = NULL;
 		o.name = "proc.link"; o.obj_size = sizeof(struct link_entry);
-		(void)xtc_slab_create(&o, &__link_slab);
+		if (xtc_slab_create(&o, &sl) == XTC_OK)
+			atomic_store_explicit(&__link_slab, sl,
+			    memory_order_release);
 	}
-	if (__mon_slab == NULL) {
+	if (atomic_load_explicit(&__mon_slab, memory_order_relaxed) == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_t *sl = NULL;
 		o.name = "proc.mon"; o.obj_size = sizeof(struct mon_entry);
-		(void)xtc_slab_create(&o, &__mon_slab);
+		if (xtc_slab_create(&o, &sl) == XTC_OK)
+			atomic_store_explicit(&__mon_slab, sl,
+			    memory_order_release);
 	}
-	if (__env_slab == NULL) {
+	if (atomic_load_explicit(&__env_slab, memory_order_relaxed) == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_t *sl = NULL;
 		o.name = "proc.env";
 		o.obj_size = sizeof(struct envelope) + ENV_POOL_PAYLOAD;
-		(void)xtc_slab_create(&o, &__env_slab);
+		if (xtc_slab_create(&o, &sl) == XTC_OK)
+			atomic_store_explicit(&__env_slab, sl,
+			    memory_order_release);
 	}
 	(void) __proc_mtx_unlock(&__proc_slab_init_lock);
 }
@@ -443,13 +459,55 @@ struct xtc_proc_slot {
 	struct xtc_proc *proc;       /* NULL if free */
 	uint32_t         gen;
 };
+
+/*
+ * Write striping for the per-loop proc table (PLAN.md 19.5c).  The old
+ * design had ONE mutex per table (t->lock), so every xtc_send to any
+ * proc on a carrier -- including same-carrier fiber-to-fiber hand-offs,
+ * the PG fiber-per-session hot path -- serialized on it (measured
+ * ~367k futex-waits/10s, flat in carrier count).  A key's stripe is
+ * derived from its local_id ONLY (stripe = local_id & (NSTRIPES-1)),
+ * so a lookup and the matching detach/teardown for the SAME proc always
+ * take the SAME stripe -- mandatory for the "see-live-and-pin OR
+ * see-NULL, never a freed pointer" atomicity between __table_lookup and
+ * __table_release.  Two procs with different local_ids that share a
+ * stripe only pay a false-sharing serialization, never a correctness
+ * bug.  A grow (slot-array realloc) or a whole-table scan claims ALL
+ * stripes in ASCENDING order (the sole multi-stripe hold -> the one
+ * deadlock-avoidance rule), exactly as xtc_chash does.
+ */
+#define XTC_PT_NSTRIPES  16u
+
 struct xtc_proc_table {
 	struct xtc_proc_slot *slots;
 	size_t                cap;
 	size_t                n_used;
-	pthread_mutex_t       lock;
+	pthread_mutex_t       stripes[XTC_PT_NSTRIPES];
 	int                   inited;
 };
+
+static inline unsigned
+__pt_stripe(uint16_t local_id)
+{
+	return (unsigned)local_id & (XTC_PT_NSTRIPES - 1u);
+}
+
+/* Lock/unlock EVERY stripe (ascending / descending), for a grow or a
+ * whole-table scan.  Ascending lock order is the only deadlock rule. */
+static void
+__pt_lock_all(struct xtc_proc_table *t)
+{
+	unsigned s;
+	for (s = 0; s < XTC_PT_NSTRIPES; s++)
+		(void) __proc_mtx_lock(&t->stripes[s]);
+}
+static void
+__pt_unlock_all(struct xtc_proc_table *t)
+{
+	unsigned s;
+	for (s = XTC_PT_NSTRIPES; s-- > 0; )
+		(void) __proc_mtx_unlock(&t->stripes[s]);
+}
 
 /* Each loop carries one of these (lazy-allocated on first proc spawn). */
 static XTC_THREAD_LOCAL struct xtc_proc *__current_proc = NULL;
@@ -528,7 +586,12 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 			}
 			__os_free(tbl->slots);
 		}
-		(void)pthread_mutex_destroy(&tbl->lock);
+		(void)pthread_mutex_destroy(&tbl->stripes[0]);
+		{
+			unsigned s;
+			for (s = 1; s < XTC_PT_NSTRIPES; s++)
+				(void)pthread_mutex_destroy(&tbl->stripes[s]);
+		}
 		__os_free(tbl);
 	}
 }
@@ -567,7 +630,11 @@ __table_for(xtc_loop_t *loop, int create)
 	}
 	if (__os_calloc(1, sizeof *t, (void **)&t) != XTC_OK)
 		goto out;
-	(void)pthread_mutex_init(&t->lock, NULL);
+	{
+		unsigned s;
+		for (s = 0; s < XTC_PT_NSTRIPES; s++)
+			(void)pthread_mutex_init(&t->stripes[s], NULL);
+	}
 	t->inited = 1;
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
 		if (atomic_load_explicit(&__lt[i].loop,
@@ -596,7 +663,11 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 	int rc = XTC_OK;
 	size_t new_cap, idx;
 	struct xtc_proc_slot *ns = NULL;
-	(void) __proc_mtx_lock(&t->lock);
+	/* Spawn path: may grow (realloc) the slot array, so it claims ALL
+	 * stripes -- no lookup/release on any local_id can be mid-flight
+	 * while the array base moves.  Spawns are far rarer than sends, so
+	 * serializing them is fine. */
+	__pt_lock_all(t);
 	for (i = 0; i < t->cap; i++) {
 		if (t->slots[i].proc == NULL) {
 			t->slots[i].proc = p;
@@ -625,7 +696,7 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 	*out_gen   = ++t->slots[idx].gen;
 	t->n_used++;
 out:
-	(void) __proc_mtx_unlock(&t->lock);
+	__pt_unlock_all(t);
 	return rc;
 }
 
@@ -646,33 +717,36 @@ static struct xtc_proc *
 __table_lookup(struct xtc_proc_table *t, uint16_t local_id, uint32_t gen)
 {
 	struct xtc_proc *p = NULL;
-	(void) __proc_mtx_lock(&t->lock);
+	unsigned st = __pt_stripe(local_id);
+	(void) __proc_mtx_lock(&t->stripes[st]);
 	if (local_id < t->cap &&
 	    t->slots[local_id].proc != NULL &&
 	    t->slots[local_id].gen == gen) {
 		p = t->slots[local_id].proc;
-		/* Take a ref WHILE the table lock is held.  The teardown path
-		 * detaches the slot (proc = NULL) under this same lock before
-		 * dropping the owner ref, so a resolver either sees the live
-		 * proc and pins it here, or sees NULL -- never a freed pointer
-		 * in between.  The caller must __proc_release when done. */
+		/* Take a ref WHILE this local_id's stripe is held.  The
+		 * teardown path (__table_release) detaches the slot
+		 * (proc = NULL) under the SAME stripe before dropping the
+		 * owner ref, so a resolver either sees the live proc and pins
+		 * it here, or sees NULL -- never a freed pointer in between.
+		 * The caller must __proc_release when done. */
 		atomic_fetch_add_explicit(&p->refs, 1, memory_order_relaxed);
 	}
-	(void) __proc_mtx_unlock(&t->lock);
+	(void) __proc_mtx_unlock(&t->stripes[st]);
 	return p;
 }
 
 static void
 __table_release(struct xtc_proc_table *t, uint16_t local_id)
 {
-	(void) __proc_mtx_lock(&t->lock);
+	unsigned st = __pt_stripe(local_id);
+	(void) __proc_mtx_lock(&t->stripes[st]);
 	if (local_id < t->cap) {
 		if (t->slots[local_id].proc != NULL) {
 			t->slots[local_id].proc = NULL;
 			t->n_used--;
 		}
 	}
-	(void) __proc_mtx_unlock(&t->lock);
+	(void) __proc_mtx_unlock(&t->stripes[st]);
 }
 
 /* ---------- mailbox plumbing ---------- */
@@ -2575,7 +2649,7 @@ __peer_push_link(xtc_pid_t peer_pid, struct link_entry *e)
 	if (peer == NULL || lp == NULL) { if (peer) __proc_release(peer); return 0; }
 	tbl = __table_for(lp, 0);
 	if (tbl == NULL) { __proc_release(peer); return 0; }
-	(void) __proc_mtx_lock(&tbl->lock);
+	(void) __proc_mtx_lock(&tbl->stripes[__pt_stripe(peer_pid.local_id)]);
 	if (peer_pid.local_id < tbl->cap &&
 	    tbl->slots[peer_pid.local_id].proc == peer &&
 	    tbl->slots[peer_pid.local_id].gen == peer_pid.gen &&
@@ -2584,7 +2658,7 @@ __peer_push_link(xtc_pid_t peer_pid, struct link_entry *e)
 		peer->links = e;
 		pushed = 1;
 	}
-	(void) __proc_mtx_unlock(&tbl->lock);
+	(void) __proc_mtx_unlock(&tbl->stripes[__pt_stripe(peer_pid.local_id)]);
 	__proc_release(peer);
 	return pushed;
 }
@@ -2600,7 +2674,7 @@ __peer_push_monitored_by(xtc_pid_t peer_pid, struct mon_entry *m)
 	if (peer == NULL || lp == NULL) { if (peer) __proc_release(peer); return 0; }
 	tbl = __table_for(lp, 0);
 	if (tbl == NULL) { __proc_release(peer); return 0; }
-	(void) __proc_mtx_lock(&tbl->lock);
+	(void) __proc_mtx_lock(&tbl->stripes[__pt_stripe(peer_pid.local_id)]);
 	if (peer_pid.local_id < tbl->cap &&
 	    tbl->slots[peer_pid.local_id].proc == peer &&
 	    tbl->slots[peer_pid.local_id].gen == peer_pid.gen &&
@@ -2609,7 +2683,7 @@ __peer_push_monitored_by(xtc_pid_t peer_pid, struct mon_entry *m)
 		peer->monitored_by = m;
 		pushed = 1;
 	}
-	(void) __proc_mtx_unlock(&tbl->lock);
+	(void) __proc_mtx_unlock(&tbl->stripes[__pt_stripe(peer_pid.local_id)]);
 	__proc_release(peer);
 	return pushed;
 }
@@ -2770,7 +2844,8 @@ __notify_links_and_monitors(struct xtc_proc *p)
 	 */
 	{
 		struct xtc_proc_table *tbl = __table_for(p->loop, 0);
-		if (tbl != NULL) (void) __proc_mtx_lock(&tbl->lock);
+		unsigned pst = __pt_stripe(p->pid.local_id);
+		if (tbl != NULL) (void) __proc_mtx_lock(&tbl->stripes[pst]);
 		links = p->links;               p->links = NULL;
 		monitored_by = p->monitored_by; p->monitored_by = NULL;
 		monitors = p->monitors;         p->monitors = NULL;
@@ -2780,7 +2855,7 @@ __notify_links_and_monitors(struct xtc_proc *p)
 				tbl->slots[p->pid.local_id].proc = NULL;
 				tbl->n_used--;
 			}
-			(void) __proc_mtx_unlock(&tbl->lock);
+			(void) __proc_mtx_unlock(&tbl->stripes[pst]);
 		}
 	}
 
@@ -2902,7 +2977,7 @@ xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user)
 		if (atomic_load_explicit(&__lt[i].loop,
 		    memory_order_relaxed) == NULL || tbl == NULL)
 			continue;
-		(void) __proc_mtx_lock(&tbl->lock);
+		(void) __pt_lock_all(tbl);
 		for (s = 0; s < tbl->cap; s++) {
 			struct xtc_proc *p = tbl->slots[s].proc;
 			if (p == NULL)
@@ -2912,7 +2987,7 @@ xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user)
 				xtc_proc_info_t *nb;
 				if (__os_realloc(buf, ncap * sizeof *nb,
 				    (void **)&nb) != XTC_OK) {
-					(void) __proc_mtx_unlock(&tbl->lock);
+					(void) __pt_unlock_all(tbl);
 					(void) __proc_mtx_unlock(&__lt_lock);
 					__os_free(buf);
 					return XTC_E_NOMEM;
@@ -2923,7 +2998,7 @@ xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user)
 			__fill_proc_info(p, &buf[n]);
 			n++;
 		}
-		(void) __proc_mtx_unlock(&tbl->lock);
+		(void) __pt_unlock_all(tbl);
 	}
 	(void) __proc_mtx_unlock(&__lt_lock);
 
@@ -2953,11 +3028,11 @@ xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 		size_t s, procs = 0;
 		if (loop == NULL || tbl == NULL)
 			continue;
-		(void) __proc_mtx_lock(&tbl->lock);
+		(void) __pt_lock_all(tbl);
 		for (s = 0; s < tbl->cap; s++)
 			if (tbl->slots[s].proc != NULL)
 				procs++;
-		(void) __proc_mtx_unlock(&tbl->lock);
+		(void) __pt_unlock_all(tbl);
 		infos[n].loop_id = loop->exec_id < 0 ? 0 : loop->exec_id + 1;
 		infos[n].n_procs = (int)procs;
 		infos[n].n_alive =
@@ -2992,7 +3067,7 @@ xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 		if (atomic_load_explicit(&__lt[i].loop,
 		    memory_order_relaxed) == NULL || tbl == NULL)
 			continue;
-		(void) __proc_mtx_lock(&tbl->lock);
+		(void) __pt_lock_all(tbl);
 		for (s = 0; s < tbl->cap; s++) {
 			struct xtc_proc *p = tbl->slots[s].proc;
 			if (p != NULL && xtc_pid_eq(p->pid, pid)) {
@@ -3001,7 +3076,7 @@ xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 				break;
 			}
 		}
-		(void) __proc_mtx_unlock(&tbl->lock);
+		(void) __pt_unlock_all(tbl);
 	}
 	(void) __proc_mtx_unlock(&__lt_lock);
 	return found ? XTC_OK : XTC_E_NOTFOUND;
