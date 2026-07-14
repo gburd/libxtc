@@ -23,6 +23,8 @@
 #ifndef XTC_APP_H
 #define XTC_APP_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 
 #include "xtc.h"
@@ -44,13 +46,20 @@ typedef struct xtc_app_opts {
 	                                * = single loop.  Ignored when `loop`
 	                                * is supplied. */
 	xtc_sup_opts_t  sup;           /* root-supervisor settings */
+	int             no_tuning_check; /* 1 = skip the __os_tuning_check()
+	                                * power/kernel-tuning advisor probe
+	                                * xtc_app_start runs by default
+	                                * (PLAN.md 19.21); additive field,
+	                                * appended last -- see
+	                                * docs/abi-stability.md. */
 } xtc_app_opts_t;
 
 #define XTC_APP_OPTS_DEFAULT { \
 	.name = NULL, \
 	.loop = NULL, \
 	.n_loops = 1, \
-	.sup  = XTC_SUP_OPTS_DEFAULT \
+	.sup  = XTC_SUP_OPTS_DEFAULT, \
+	.no_tuning_check = 0 \
 }
 
 /*
@@ -64,28 +73,28 @@ typedef struct xtc_app_opts {
  * PUBLIC: xtc_reg_t  *xtc_app_registry __P((const xtc_app_t *));
  */
 
-int        xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out);
-void       xtc_app_destroy(xtc_app_t *app);
+XTC_API int        xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out);
+XTC_API void       xtc_app_destroy(xtc_app_t *app);
 
 /* Start the root supervisor with `n_children` initial children. */
-int        xtc_app_start(xtc_app_t *app,
-                         const xtc_child_spec_t *children,
-                         int n_children);
+XTC_API int        xtc_app_start(xtc_app_t *app,
+                                 const xtc_child_spec_t *children,
+                                 int n_children);
 
 /* Run the loop until the supervisor exits or xtc_app_stop is called.
  * On return, xtc_app_destroy may be called. */
-int        xtc_app_run(xtc_app_t *app);
+XTC_API int        xtc_app_run(xtc_app_t *app);
 
 /* Asynchronously request the app to stop (kicks the root sup). */
-int        xtc_app_stop(xtc_app_t *app);
+XTC_API int        xtc_app_stop(xtc_app_t *app);
 
-xtc_loop_t *xtc_app_loop(const xtc_app_t *app);
+XTC_API xtc_loop_t *xtc_app_loop(const xtc_app_t *app);
 
 /* The executor backing a multi-loop app (n_loops > 1), or NULL for a
  * single-loop app.  Children use it to spawn work across loops -- e.g.
  * a listener spawning a proc per connection round-robin. */
-xtc_exec_t *xtc_app_exec(const xtc_app_t *app);
+XTC_API xtc_exec_t *xtc_app_exec(const xtc_app_t *app);
 
-xtc_reg_t  *xtc_app_registry(const xtc_app_t *app);
+XTC_API xtc_reg_t  *xtc_app_registry(const xtc_app_t *app);
 
 #endif /* XTC_APP_H */

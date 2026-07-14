@@ -10,6 +10,7 @@
 #include "xtc_int.h"
 #include "xtc_app.h"
 #include "xtc_exec.h"
+#include "os_tuning.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -23,6 +24,7 @@ struct xtc_app {
 	xtc_reg_t         *reg;
 	xtc_supervisor_t  *root;
 	xtc_sup_opts_t     sup_opts;
+	int                no_tuning_check;   /* PLAN.md 19.21 */
 };
 
 int
@@ -61,6 +63,7 @@ xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 
 	a->sup_opts = opts->sup;
 	a->sup_opts.exec = a->exec;   /* NULL for single-loop; drives stop */
+	a->no_tuning_check = opts->no_tuning_check;
 	*out = a;
 	return XTC_OK;
 
@@ -78,6 +81,8 @@ xtc_app_start(xtc_app_t *a, const xtc_child_spec_t *children, int n)
 {
 	if (a == NULL) return XTC_E_INVAL;
 	if (a->root != NULL) return XTC_E_INVAL;     /* already started */
+	if (!a->no_tuning_check)
+		__os_tuning_check();   /* PLAN.md 19.21: advisory NOTICE(s) */
 	return xtc_sup_start(a->loop, &a->sup_opts, children, n, &a->root);
 }
 

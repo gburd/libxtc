@@ -1,0 +1,180 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 13, 2026
+.Dt __OS_TUNING 3
+.Os
+.Sh NAME
+.Nm __os_tuning_check
+.Nd power/kernel-tuning advisor: cheap, read-only startup probes
+.Sh SYNOPSIS
+.In os_tuning.h
+.Ft void
+.Fn __os_tuning_check "void"
+.Sh DESCRIPTION
+.Fn __os_tuning_check
+runs a battery of cheap, READ-ONLY probes against Linux
+.Pa /proc
+and
+.Pa /sys
+knobs known to affect a latency-sensitive, thread-per-core runtime
+(PLAN.md 19.21), and emits one advisory log line
+.Pf ( Dv XTC_LOG_INFO ,
+via the default logger in
+.In xtc_log.h )
+per probe that is
+.Em not
+already in its recommended state.
+A well-tuned host produces no output at all: this is an advisor, not
+a monitor, and must never spam an operator who already did the work.
+.Pp
+.Fn __os_tuning_check
+is called once by
+.Fn xtc_app_start
+(unless
+.Va xtc_app_opts_t.no_tuning_check
+is set); it is meaningful only on Linux and is a complete no-op on
+every other platform.
+It never writes to any
+.Pa /proc
+or
+.Pa /sys
+file.
+Every probe FAILS SAFE: a source file that is missing or unreadable
+(not present on this kernel, hidden inside a container without
+access, wrong architecture) is skipped with
+.Em no
+log line and
+.Em no
+error -- "unknown" is not treated as "a finding".
+.Pp
+The six probes and their recommendation thresholds:
+.Bl -tag -width "sched_autogroup"
+.It Sy cpufreq governor
+Reads
+.Pa /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor .
+Recommends
+.Sq performance
+if the active governor is anything else.
+Skipped if the file does not exist (no cpufreq driver, e.g. inside
+many VMs/containers).
+.It Sy intel_pstate
+Reads
+.Pa /sys/devices/system/cpu/intel_pstate/status .
+Recommends switching back to
+.Sq active
+only when the status is
+.Sq passive :
+passive mode hands control to a generic cpufreq governor and gives
+up intel_pstate's HWP-aware autonomous boost management, which is
+worse for the throughput/latency workloads this runtime targets.
+If the status file does not exist at all -- non-Intel CPU, driver not
+built into the kernel, or deliberately disabled via
+.Sq intel_pstate=disable
+on the kernel command line -- the probe skips silently and makes NO
+recommendation.
+A disabled intel_pstate is usually a deliberate choice (e.g.
+cycle-accurate MSR-level frequency pinning for microbenchmarking) and
+this advisor has no business second-guessing it; there is
+deliberately no separate
+.Pa /proc/cmdline
+check for
+.Sq intel_pstate=disable ,
+because by the time the sysfs status file has already answered
+everything actionable, a cmdline check would only ever reach the
+same "nothing to say" verdict.
+.It Sy transparent_hugepage
+Reads
+.Pa /sys/kernel/mm/transparent_hugepage/enabled ,
+a line of the form
+.Sq "always [madvise] never"
+where the bracketed word is the active setting.
+Recommends
+.Sq madvise
+if the active setting is
+.Sq always
+or
+.Sq never :
+both extremes risk compaction stalls or latency spikes that
+.Sq madvise
+avoids by only using THP where an application explicitly opted in.
+.It Sy vm.swappiness
+Reads
+.Pa /proc/sys/vm/swappiness .
+Recommends a lower value if it is
+.Em above 10 :
+10 is the commonly recommended ceiling for a database/latency-
+sensitive server (the kernel default is 60); above that the kernel
+starts reclaiming anonymous pages under mild memory pressure well
+before it needs to, trading throughput for headroom this kind of
+workload does not want.
+Exactly 10 is already tuned and produces no line.
+.It Sy kernel.sched_autogroup_enabled
+Reads
+.Pa /proc/sys/kernel/sched_autogroup_enabled .
+Recommends disabling it (0) for a latency-sensitive server workload
+when it reads 1: autogrouping optimizes desktop interactive fairness
+by lumping a process's threads into a scheduling group, which is not
+what a server wants deciding CPU time between reactor threads.
+.It Sy io_uring under seccomp
+Attempts a real, minimal
+.Xr io_uring_setup 2
+syscall (a single-entry ring) and immediately closes the resulting
+fd on success; on failure it inspects
+.Va errno .
+.Er EPERM
+specifically means seccomp (or an LSM) is blocking the syscall, and
+is reported: xtc falls back to epoll, which costs throughput/latency
+under load.
+Any other failure
+.Pf ( Er ENOSYS
+on a pre-5.1 kernel,
+.Er EINVAL ,
+.Er EFAULT )
+means "not applicable here", not "a finding", and is skipped.
+No liburing or
+.In linux/io_uring.h
+dependency: the probe carries a local ABI mirror of the kernel's
+.Vt struct io_uring_params
+(stable UAPI layout since Linux 5.1).
+.El
+.Pp
+Every probe path may be redirected to a fixture file with the
+internal test-only hooks
+.Fn __xtc_os_tuning_governor_path_override ,
+.Fn __xtc_os_tuning_pstate_status_path_override ,
+.Fn __xtc_os_tuning_thp_path_override ,
+.Fn __xtc_os_tuning_swappiness_path_override ,
+and
+.Fn __xtc_os_tuning_autogroup_path_override
+(Linux only; declared in
+.In os_tuning.h ) ,
+and the io_uring probe's verdict can be forced with
+.Fn __xtc_os_tuning_uring_force
+(0 = real probe, 1 = force "blocked", -1 = force "usable"), so every
+probe's threshold logic is unit-testable without root or a real
+kernel-tuning knob.
+Pass NULL to restore the real path.
+Not part of the stable API.
+.Sh RETURN VALUES
+None; this is a diagnostic side effect (log lines), not a value-
+returning probe.
+.Sh THREAD SAFETY
+Safe to call concurrently; each probe is an independent read.
+The test-only override hooks are not: they are for single-threaded
+unit tests only.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+/* Called automatically by xtc_app_start(); to opt out: */
+xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+opts.no_tuning_check = 1;
+xtc_app_create(&opts, &app);
+.Ed
+.Sh SEE ALSO
+.Xr io_uring_setup 2 ,
+.Xr __os_cpu 3 ,
+.Xr xtc_app_start 3 ,
+.Xr xtc_log 3 ,
+.Xr xtc 7
+.Sh HISTORY
+.Fn __os_tuning_check
+first appeared in xtc under PLAN.md 19.21 (M14).
