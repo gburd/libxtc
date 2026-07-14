@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.20.1"
+#       --define "version 1.21.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.20.1
+Version:        1.21.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,9 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Tue Jul 14 2026 Greg Burd <greg@burd.me> - 1.21.0-1
+- New xtc_cskip (RCU ordered map/skiplist, lock-free readers, min/floor); xtc_chash DST/PBT/bench (no longer provisional); lock-free cross-thread wake resolver; rcu.c lazy-slab-init data-race fix; pre-release security audit + 2 hardening fixes; riscv64/QEMU preempt de-flake.
+
 * Mon Jul 13 2026 Greg Burd <greg@burd.me> - 1.20.1-1
 - Zero-warning build on all targets (gcc/clang/musl/MSVC/sanitizers) + -Werror//WX enforcement.
 
