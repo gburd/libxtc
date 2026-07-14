@@ -47,11 +47,62 @@
 #define N_FRAMES    24
 #define PAGE_SZ     4096
 
+/* Deleter/churner procs: insert then delete a disjoint stride of their
+ * OWN keys, repeated -- so deletes (and the merges they trigger) race
+ * continuously against the writers' inserts (and the splits they
+ * trigger) and the readers' shared-coupling lookups, on the SAME
+ * multi-loop executor.  This is the doc's test-plan extension
+ * (M_SQLXTC_BTREE_MERGE.md section 7.2): "add deleter procs alongside
+ * the writers so inserts (splits) and deletes (merges) race
+ * continuously".  Churn keys are disjoint from the writer keyspace
+ * (a distinct prefix) so they never collide with the missing/wrong
+ * gate below; every churn key must be ABSENT at quiescence. */
+#define N_CHURNERS   4
+#define CHURN_PER    150
+#define CHURN_ROUNDS 2
+
 static bm_t       *g_bm;
 static bt_t       *g_bt;
 static _Atomic int g_writers_left;
+static _Atomic int g_churners_left;
+static _Atomic int g_workers_active;   /* writers + churners still running;
+                                         * the last one stops the provider */
 static _Atomic long g_read_hits;
 static _Atomic long g_read_mismatch;   /* found a key with the wrong value */
+
+static void
+churn_kv(int idx, char *k, char *v)
+{
+	snprintf(k, 24, "chn-%07d", idx);
+	snprintf(v, 32, "chv-%07d-data", idx);
+}
+
+static void
+churner_proc(void *arg)
+{
+	long w = (long)arg;
+	int r, i;
+	char k[24], v[32];
+
+	for (r = 0; r < CHURN_ROUNDS; r++) {
+		for (i = 0; i < CHURN_PER; i++) {
+			int idx = i * N_CHURNERS + (int)w;
+			churn_kv(idx, k, v);
+			(void)bt_insert(g_bt, k, (uint16_t)strlen(k), v,
+			    (uint16_t)strlen(v));
+		}
+		for (i = 0; i < CHURN_PER; i++) {
+			int idx = i * N_CHURNERS + (int)w;
+			churn_kv(idx, k, v);
+			(void)bt_delete(g_bt, k, (uint16_t)strlen(k));
+		}
+	}
+	atomic_fetch_sub(&g_churners_left, 1);
+	/* See writer_proc: the last of (writers + churners) to finish stops
+	 * the provider. */
+	if (atomic_fetch_sub(&g_workers_active, 1) == 1)
+		bm_provider_stop(g_bm);
+}
 
 static void mkkv(int idx, char *k, char *v)
 {
@@ -79,9 +130,11 @@ writer_proc(void *arg)
 		(void)bt_insert(g_bt, k, (uint16_t)strlen(k), v, (uint16_t)strlen(v));
 	}
 	atomic_fetch_sub(&g_writers_left, 1);
-	/* The writer that drops the count to zero stops the provider so the
-	 * executor can observe a globally idle state and return. */
-	if (atomic_load(&g_writers_left) == 0)
+	/* The last of (writers + churners) to finish stops the provider so
+	 * the executor can observe a globally idle state and return -- a
+	 * churner still running after the writers finish still needs page
+	 * I/O. */
+	if (atomic_fetch_sub(&g_workers_active, 1) == 1)
 		bm_provider_stop(g_bm);
 }
 
@@ -93,9 +146,9 @@ reader_proc(void *arg)
 	uint16_t vl;
 	int spins = 0;
 
-	/* Probe random keys while writers run.  A found key must be
+	/* Probe random keys while writers/churners run.  A found key must be
 	 * correct; a not-yet-inserted key simply misses (no assertion). */
-	while (atomic_load(&g_writers_left) > 0 && spins < 200000) {
+	while (atomic_load(&g_workers_active) > 0 && spins < 200000) {
 		int idx;
 		rng = rng * 6364136223846793005ull + 1442695040888963407ull;
 		idx = (int)((rng >> 33) % N_KEYS);
@@ -135,6 +188,8 @@ main(void)
 	if (bt_open(g_bm, &g_bt) != XTC_OK) { fprintf(stderr, "bt_open\n"); return 1; }
 
 	atomic_store(&g_writers_left, N_WRITERS);
+	atomic_store(&g_churners_left, N_CHURNERS);
+	atomic_store(&g_workers_active, N_WRITERS + N_CHURNERS);
 	atomic_store(&g_read_hits, 0);
 	atomic_store(&g_read_mismatch, 0);
 
@@ -142,14 +197,22 @@ main(void)
 	l0 = xtc_exec_loop(exec, 0);
 	if (bm_provider_spawn(g_bm, l0, 1LL * 1000 * 1000, NULL) != XTC_OK) return 1;
 
-	/* Spread writers and readers across the loops (== OS threads). */
+	/* Spread writers, churners (deleters), and readers across the loops
+	 * (== OS threads). */
 	{
-		long w, r;
+		long w, r, c;
 		for (w = 0; w < N_WRITERS; w++) {
 			xtc_loop_t *lp = xtc_exec_loop(exec, (int)(w % N_LOOPS));
 			xtc_proc_opts_t po = { .name = "wr" };
 			xtc_pid_t pid;
 			if (xtc_proc_spawn(lp, writer_proc, (void *)w, &po, &pid) != XTC_OK)
+				return 1;
+		}
+		for (c = 0; c < N_CHURNERS; c++) {
+			xtc_loop_t *lp = xtc_exec_loop(exec, (int)(c % N_LOOPS));
+			xtc_proc_opts_t po = { .name = "chn" };
+			xtc_pid_t pid;
+			if (xtc_proc_spawn(lp, churner_proc, (void *)c, &po, &pid) != XTC_OK)
 				return 1;
 		}
 		for (r = 0; r < N_READERS; r++) {
@@ -175,6 +238,29 @@ main(void)
 		}
 	}
 
+	/* Churn-gone gate: every churned key must be ABSENT now that the
+	 * churners are done -- a surviving churn key is a lost delete under
+	 * a merge racing the writers' concurrent splits (the exact bug
+	 * M_SQLXTC_BTREE_MERGE.md diagnoses and fixes). */
+	{
+		int churn_surv = 0;
+		int total_churn = N_CHURNERS * CHURN_PER;
+		for (i = 0; i < total_churn; i++) {
+			char ck[24], cv[32];
+			churn_kv(i, ck, cv);
+			if (bt_lookup(g_bt, ck, (uint16_t)strlen(ck), buf, sizeof buf,
+			    &vl) == XTC_OK)
+				churn_surv++;
+		}
+		if (churn_surv != 0) {
+			fprintf(stderr, "FAIL: %d/%d churn key(s) survived (lost "
+			    "delete under concurrent merge)\n", churn_surv,
+			    total_churn);
+			bt_close(g_bt); bm_destroy(g_bm); unlink(path);
+			return 1;
+		}
+	}
+
 	bm_get_stats(g_bm, &bs);
 	bt_get_stats(g_bt, &ts);
 	bt_close(g_bt); bm_destroy(g_bm); unlink(path);
@@ -192,10 +278,12 @@ main(void)
 	}
 
 	printf("  ok   %d parallel writers (interleaved keys, no writer lock) + "
-	    "%d readers on %d OS threads: all %d keys present + correct "
-	    "(height=%llu splits=%llu)\n",
-	    N_WRITERS, N_READERS, N_LOOPS, N_KEYS,
-	    (unsigned long long)ts.height, (unsigned long long)ts.splits);
+	    "%d deleter/churners (merge-vs-split race) + %d readers on %d OS "
+	    "threads: all %d keys present + correct, all churn keys gone "
+	    "(height=%llu splits=%llu merges=%llu)\n",
+	    N_WRITERS, N_CHURNERS, N_READERS, N_LOOPS, N_KEYS,
+	    (unsigned long long)ts.height, (unsigned long long)ts.splits,
+	    (unsigned long long)ts.merges);
 	printf("  ok   %ld concurrent shared-coupling reads, 0 wrong values; tree paged "
 	    "through the pool (loads=%llu evicted=%llu flushed=%llu resident=%llu)\n",
 	    atomic_load(&g_read_hits), (unsigned long long)bs.loads,

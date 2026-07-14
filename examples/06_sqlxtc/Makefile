@@ -392,6 +392,9 @@ test-bufmgr-dio: test_bufmgr_dio
 bm_writeback_bench: bm_writeback_bench.c bufmgr.o
 	$(CC) $(CFLAGS) -o $@ bm_writeback_bench.c bufmgr.o $(LDFLAGS)
 
+bt_merge_bench: bt_merge_bench.c btree.c bufmgr.o btnode.c
+	$(CC) $(CFLAGS) -o $@ bt_merge_bench.c btree.c bufmgr.o btnode.c $(LDFLAGS)
+
 # ---- physiological redo apply (page-LSN gated image write) ----
 test_redo_page: test_redo_page.c bufmgr.o
 	$(CC) $(CFLAGS) -o $@ test_redo_page.c bufmgr.o $(LDFLAGS)
