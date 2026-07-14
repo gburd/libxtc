@@ -1,0 +1,201 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd Jul 13, 2026
+.Dt XTC_CHASH 3
+.Os
+.Sh NAME
+.Nm xtc_chash_create ,
+.Nm xtc_chash_destroy ,
+.Nm xtc_chash_get ,
+.Nm xtc_chash_insert ,
+.Nm xtc_chash_remove ,
+.Nm xtc_chash_size
+.Nd RCU-protected concurrent hash table
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_chash.h
+.In xtc_rcu.h
+.Ft int
+.Fn xtc_chash_create "xtc_chash_cmp_fn cmp" "xtc_chash_hash_fn hash" "size_t initial_capacity" "xtc_chash_t **out"
+.Ft void
+.Fn xtc_chash_destroy "xtc_chash_t *h"
+.Ft int
+.Fn xtc_chash_get "xtc_chash_t *h" "const void *key" "void **out_value"
+.Ft int
+.Fn xtc_chash_insert "xtc_chash_t *h" "void *key" "void *value" "void **out_old_value"
+.Ft int
+.Fn xtc_chash_remove "xtc_chash_t *h" "const void *key" "void **out_value"
+.Ft size_t
+.Fn xtc_chash_size "const xtc_chash_t *h"
+.Sh DESCRIPTION
+.Nm xtc_chash
+is a chained hash table built on
+.Xr xtc_rcu 3
+so that lookups are wait-free -- no lock, no atomic
+compare-exchange, just acquire-ordered loads down a bucket chain --
+while inserts and removes still support many concurrent writers.
+It is the primary consumer motivating
+.Nm xtc_rcu Ns 's
+existence in this tree.
+.Pp
+Keys and values are caller-owned
+.Vt void *
+pointers stored verbatim, the same convention as
+.Xr xtc_chan 3
+and
+.Xr xtc_pdict 3 :
+the table never copies a key or value and never frees one.  A
+caller-supplied comparator
+.Fa cmp
+(the
+.Xr qsort 3
+convention -- only the
+.Dv == 0
+vs.\&
+.Dv != 0
+distinction matters here) and hash function
+.Fa hash
+make the table key-type-agnostic.
+.Pp
+.Fn xtc_chash_create
+allocates a table with
+.Fa initial_capacity
+buckets, rounded up to the next power of two
+.Pq 0 defaults to 16 .
+.Fn xtc_chash_destroy
+frees the table's own bookkeeping; it does not free caller-owned
+keys/values and is not safe to call concurrently with any other
+call on the same table -- quiesce first, exactly as
+.Xr xtc_rcu 3 Ns 's
+.Fn xtc_rcu_fini
+requires.
+.Pp
+.Fn xtc_chash_get
+must be called inside the caller's own
+.Fn xtc_rcu_read_lock Ns / Ns Fn xtc_rcu_read_unlock
+bracket
+.Pq nesting is fine, see Xr xtc_rcu 3 .
+On a hit it writes the value pointer to
+.Fa *out_value
+and returns
+.Dv XTC_OK ;
+the pointer is valid only until the caller's read-side ends.  On a
+miss it returns
+.Dv XTC_E_NOTFOUND .
+.Pp
+.Fn xtc_chash_insert
+and
+.Fn xtc_chash_remove
+take the read-side internally for their own traversal; the caller
+does not need an outer read-side to call them, though nesting inside
+one is harmless.
+.Fn xtc_chash_insert
+replaces any existing entry for an equal key, writing the old value
+pointer to
+.Fa *out_old_value
+.Pq NULL for a fresh insert; the argument itself may be NULL .
+It may trigger a grow-only resize.
+.Fn xtc_chash_remove
+writes the removed value pointer to
+.Fa *out_value
+.Pq may be NULL
+and returns
+.Dv XTC_E_NOTFOUND
+on a miss.
+.Pp
+.Fn xtc_chash_size
+returns the approximate live entry count -- exact with no concurrent
+writers, a fresh-enough estimate otherwise.
+.Sh CONCURRENCY AND RECLAMATION
+Writers serialize through a fixed set of 64 stripe mutexes; a key's
+stripe is derived from its bucket index in the CURRENT array (so two
+keys in the same bucket always take the same stripe lock -- a
+correctness requirement, not just an optimisation), and two writers
+touching different buckets that happen to share a stripe only pay a
+false-sharing serialization cost, never a correctness one.
+.Pp
+A removed node is unlinked by overwriting its predecessor's link with
+a single release-ordered store of the removed node's own
+.Pq unchanged
+successor -- the node's own
+.Va next
+field is never touched, so a reader already parked inside it can
+finish walking the rest of the chain exactly as it stood when it
+arrived.  The node itself is handed to
+.Fn xtc_rcu_retire ,
+never freed synchronously: a concurrent reader that already loaded a
+pointer to it keeps a fully valid node until it leaves its
+read-side.
+.Pp
+A grow claims every stripe lock
+.Pq blocking writers, never readers ,
+duplicates every live node into a freshly allocated, larger array,
+publishes the new array with a release store, and retires the old
+array and its original nodes via
+.Fn xtc_rcu_retire .
+A reader that loaded the old array before the swap keeps working
+against a fully valid, if smaller, table until it leaves its
+read-side.
+.Pp
+This module never calls
+.Fn xtc_rcu_synchronize
+itself; as with every other
+.Xr xtc_rcu 3
+consumer, actual reclamation of retired nodes happens on the
+caller's, a test's, or an application-installed reaper's schedule.
+.Sh RESIZE
+.Nm xtc_chash
+is
+.Em grow-only .
+The table doubles its bucket array past a 75% load factor and never
+shrinks; a table that grows to a high-water mark and then drains
+stays at that array size until
+.Fn xtc_chash_destroy .
+A real shrink would need the same RCU-swap machinery run in reverse
+plus a low-load-factor trigger; deferred until a workload needs it.
+.Sh RETURN VALUES
+.Dv XTC_OK
+on success;
+.Dv XTC_E_INVAL
+for a NULL table/key or missing comparator/hash at create;
+.Dv XTC_E_NOTFOUND
+on a get/remove miss;
+.Dv XTC_E_NOMEM
+on allocation failure.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+static int
+str_cmp(const void *a, const void *b)
+{
+	return strcmp((const char *)a, (const char *)b);
+}
+
+static uint64_t
+str_hash(const void *key)
+{
+	const char *s = key;
+	uint64_t h = 1469598103934665603ULL;
+	for (; *s != '\e0'; s++) { h ^= (uint8_t)*s; h *= 1099511628211ULL; }
+	return h;
+}
+
+xtc_chash_t *h;
+xtc_chash_create(str_cmp, str_hash, 64, &h);
+xtc_chash_insert(h, "answer", (void *)(intptr_t)42, NULL);
+
+xtc_rcu_read_lock();
+void *v;
+if (xtc_chash_get(h, "answer", &v) == XTC_OK)
+	printf("%ld\en", (intptr_t)v);
+xtc_rcu_read_unlock();
+
+xtc_chash_destroy(h);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_rcu 3 ,
+.Xr xtc_cskip 3 ,
+.Xr xtc_chan 3 ,
+.Xr xtc_pdict 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1, M13a.
