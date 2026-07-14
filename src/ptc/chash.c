@@ -112,9 +112,19 @@ __chash_stripe(size_t bucket_idx)
 static size_t
 __chash_next_pow2(size_t v)
 {
+	/* Largest power-of-two bucket count whose byte size still fits in
+	 * size_t with 4x headroom -- portable across 32- and 64-bit.  A
+	 * caller-supplied huge initial_capacity must never hang the
+	 * doubling loop (p <<= 1 past the top bit becomes 0, so 0 < v
+	 * would loop forever) or overflow the callers' size arithmetic.
+	 * A bucket is a single atomic pointer; sizeof(void *) is a safe
+	 * conservative stand-in here (the struct is defined below this
+	 * function) and only ever makes the cap smaller, never larger. */
 	size_t p = 1;
+	size_t cap_max = (SIZE_MAX / 4) / sizeof(void *);
 	if (v <= 1) return 1;
-	while (p < v) p <<= 1;
+	while (p < v && (p << 1) != 0 && (p << 1) <= cap_max)
+		p <<= 1;
 	return p;
 }
 
@@ -423,6 +433,16 @@ __chash_grow(xtc_chash_t *h)
 
 	old_arr = atomic_load_explicit(&h->arr, memory_order_acquire);
 	new_n = old_arr->n * 2;
+
+	/* Refuse to grow past the size the pow2 cap already enforces, so
+	 * the size arithmetic below cannot overflow (defense-in-depth; a
+	 * table this large is not a real workload -- stay at current size
+	 * rather than misbehave). */
+	if (new_n <= old_arr->n ||
+	    new_n > (SIZE_MAX / 2) / sizeof(struct chash_bucket)) {
+		ok = 0;
+		goto done;
+	}
 
 	if (__os_calloc(1, sizeof(struct chash_arr) +
 	    new_n * sizeof(struct chash_bucket), (void **)&new_arr) !=
