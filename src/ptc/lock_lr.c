@@ -476,6 +476,14 @@ xtc_lrlock_destroy(xtc_lrlock_t *lr)
 
 /* ---- reader API ---- */
 
+/* XTC_NOALLOC_BEGIN: left-right reader fast path (PLAN.md 19.23) --
+ * xtc_lrlock_read_begin/read_end are the wait-free reader hot path
+ * (per PLAN.md: "reads are absolutely on the hot path"); they touch
+ * only per-slot atomics and __slot_for's TLS-cached slot (itself
+ * allocation-free -- its slot-recycling free list is a fixed static
+ * array).  The writer API just below (write_begin / apply_op /
+ * publish) is deliberately OUTSIDE this region: it legitimately
+ * mmaps a COW write copy and grows the oplog. */
 const void *
 xtc_lrlock_read_begin(xtc_lrlock_t *lr)
 {
@@ -535,6 +543,7 @@ xtc_lrlock_read_end(xtc_lrlock_t *lr)
 		    ~((uint64_t)1 << (slot & 63u)), memory_order_release);
 	}
 }
+/* XTC_NOALLOC_END */
 
 /* ---- writer API ---- */
 

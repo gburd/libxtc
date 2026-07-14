@@ -284,6 +284,13 @@ xtc_loop_stop(xtc_loop_t *loop)
 
 /* --- run-queue ops -------------------------------------------------- */
 
+/* XTC_NOALLOC_BEGIN: scheduler run-queue + main step (PLAN.md 19.23) --
+ * the per-tick dispatch path (__xtc_loop_enqueue, __queue_pop,
+ * __xtc_loop_step, __xtc_loop_step_once) must never touch the
+ * allocator; task and timer structs are pre-allocated (task free-
+ * list in evt/task.c, timer slab in evt/timer.c) precisely so this
+ * hot path stays allocation-free per PLAN.md 19.23. */
+
 /*
  * Owner-side enqueue.  When the loop is part of an executor (i.e.,
  * exposed for work stealing), push into the Chase-Lev deque so peers
@@ -647,6 +654,8 @@ __xtc_loop_step_once(xtc_loop_t *loop)
 	rc = __xtc_loop_step(loop);
 	return rc < 0 ? rc : 1;
 }
+
+/* XTC_NOALLOC_END */
 
 /* ---- cooperative yield watchdog ---------------------------------- *
  *
