@@ -2855,6 +2855,24 @@ Not strictly needed for v1; right abstraction for replication
 coordination, distributed transactions, complex extension flows.
 M14.
 
+### 19.5a Whole-library security/CVE audit (pre-1.21.0) -- DONE
+
+Source audit of src/ prioritizing network-facing parse paths, then the
+send-path / allocator size arithmetic / Windows-IOCP-SChannel / signal
+paths.  Headline: NO remote CVE-class bug -- the framed transport
+bounds its claimed length, the SChannel decrypt consume-underflow is
+already guarded, TLS record parsing is delegated to the TLS library.
+Two defense-in-depth fixes landed (commit 3f325a6): F1 an int-cast
+truncation in xtc_net_recv/send_frame's I/O loops (a >2 GiB span
+overflowed the (int) cast; reachable only on the library-internal
+subprocess control channels), clamped to a 1 GiB per-syscall chunk;
+F2 a config-overflow in tnt arena_init (slot_count*stride from Isolate
+type registration could wrap size_t), guarded.  Also fixed the rcu.c
+lazy-slab-init data race (commit e7908e9) found by the cskip TSan
+stress.  Full artifact + reviewed-and-sound list:
+.agent/SECURITY_AUDIT_2026-07.md.  Verified: security-sweep gate,
+ASan+UBSan on the network + new-code tests, 53-test DST suite, -Werror.
+
 ### 19.5b Cross-thread wake path contention (proc.c __lt_lock) -- DONE (correct, but NOT the PG bottleneck; see 19.5c)
 
 The cross-thread `xtc_proc_wake()` / main-thread `xtc_send()` path resolved
