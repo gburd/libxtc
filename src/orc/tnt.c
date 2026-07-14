@@ -1229,6 +1229,21 @@ arena_init(xtc_tnt_shard_t *sh, int idx, const xtc_tnt_type_t *type)
 	ar->slot_count = type->slot_count;
 	ar->cursor = 0;
 
+	/* Defense-in-depth: slot_count and stride are caller-supplied type
+	 * config (not wire input, so this is a misconfiguration guard, not
+	 * a remote CVE).  Reject a type whose arena-sizing products
+	 * (slot_count * stride, slot_count * sizeof(slot_t), slot_count *
+	 * sizeof(uint32_t)) would overflow size_t before we hand them to
+	 * the allocator, where the wrap would under-allocate and every
+	 * subsequent slot index become an out-of-bounds write. */
+	if (ar->slot_count == 0)
+		return -1;
+	if (type->stride != 0 &&
+	    (size_t)ar->slot_count > SIZE_MAX / type->stride)
+		return -1;
+	if ((size_t)ar->slot_count > SIZE_MAX / sizeof(xtc_tnt_slot_t))
+		return -1;
+
 	/* Carve the metadata + Isolate-store arrays from boot-time slab
 	 * caches sized for the whole arena.  We allocate the arrays as one
 	 * big object each (chunk_size grown to fit) so it is a single

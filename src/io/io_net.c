@@ -24,10 +24,30 @@
 #include "xtc_net.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/*
+ * Per-syscall I/O chunk cap.  A frame length is a size_t (up to ~4 GiB
+ * from the 4-byte wire prefix), but recv(2)/send(2) take an `int`
+ * length, so passing (int)(len - off) directly would sign-overflow to a
+ * negative value for any single outstanding span above INT_MAX -- a
+ * possible short/failed I/O or, worse, an implementation-defined length
+ * handed to the kernel.  Cap each individual syscall's byte count to a
+ * value that always fits a positive int; the surrounding loop makes
+ * progress across as many chunks as the full frame needs.  Root-cause
+ * guard shared by both recv_frame and send_frame's payload loops. */
+#define XTC_NET_IO_CHUNK (1 << 30)   /* 1 GiB, comfortably < INT_MAX */
+
+static inline int
+__net_io_chunk(size_t remaining)
+{
+	return remaining > (size_t)XTC_NET_IO_CHUNK
+	    ? XTC_NET_IO_CHUNK : (int)remaining;
+}
 
 #if defined(_WIN32)
 #  include <winsock2.h>
@@ -750,7 +770,8 @@ xtc_net_send_frame(int fd, const void *buf, size_t len)
 		return XTC_E_INTERNAL;
 	}
 	for (off = 0; off < len; ) {
-		ssize_t w = send(fd, (const char *)p + off, (int)(len - off), 0);
+		ssize_t w = send(fd, (const char *)p + off,
+		    __net_io_chunk(len - off), 0);
 		if (w > 0) { off += (size_t)w; continue; }
 		if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
 			if (__net_wait_fd(fd, XTC_IO_WRITABLE, -1) != 0)
@@ -798,7 +819,8 @@ xtc_net_recv_frame(int fd, void **out, size_t *out_len, size_t max_len,
 	if (len == 0) return XTC_OK;               /* valid empty frame */
 	if (__os_malloc(len, (void **)&frame) != XTC_OK) return XTC_E_NOMEM;
 	for (off = 0; off < len; ) {
-		ssize_t r = recv(fd, (char *)frame + off, (int)(len - off), 0);
+		ssize_t r = recv(fd, (char *)frame + off,
+		    __net_io_chunk(len - off), 0);
 		if (r > 0) { off += (size_t)r; continue; }
 		if (r == 0) { __os_free(frame); return XTC_E_INVAL; }
 		if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
