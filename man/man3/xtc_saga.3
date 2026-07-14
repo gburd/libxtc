@@ -1,0 +1,212 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 13, 2026
+.Dt XTC_SAGA 3
+.Os
+.Sh NAME
+.Nm xtc_saga_create ,
+.Nm xtc_saga_destroy ,
+.Nm xtc_saga_step ,
+.Nm xtc_saga_run ,
+.Nm xtc_saga_n_steps ,
+.Nm xtc_saga_n_completed ,
+.Nm xtc_saga_failed_step ,
+.Nm xtc_saga_last_error ,
+.Nm xtc_saga_compensate_failed
+.Nd multi-step coordination with compensation (sagas)
+.Sh LIBRARY
+.Lb libxtc
+.Sh SYNOPSIS
+.In xtc_saga.h
+.Ft int
+.Fn xtc_saga_create "xtc_saga_t **out"
+.Ft void
+.Fn xtc_saga_destroy "xtc_saga_t *s"
+.Ft int
+.Fn xtc_saga_step "xtc_saga_t *s" "xtc_saga_fn action" "xtc_saga_fn compensate" "void *ctx"
+.Ft int
+.Fn xtc_saga_run "xtc_saga_t *s"
+.Ft int
+.Fn xtc_saga_n_steps "const xtc_saga_t *s"
+.Ft int
+.Fn xtc_saga_n_completed "const xtc_saga_t *s"
+.Ft int
+.Fn xtc_saga_failed_step "const xtc_saga_t *s"
+.Ft int
+.Fn xtc_saga_last_error "const xtc_saga_t *s"
+.Ft int
+.Fn xtc_saga_compensate_failed "const xtc_saga_t *s"
+.Sh DESCRIPTION
+A
+.Nm saga
+is a sequence of
+.Pq forward action , compensating action
+pairs run in order, on the calling fiber, as ordinary
+synchronous-looking C functions.  If a forward action fails, every
+already-completed step's compensation runs in REVERSE order, undoing
+the work the saga had done so far, and
+.Fn xtc_saga_run
+returns the ORIGINAL failing step's error code.  If every forward
+action succeeds,
+.Fn xtc_saga_run
+returns
+.Dv XTC_OK
+and no compensation ever runs.
+.Pp
+This is the distributed-transaction
+.Dq saga
+pattern: no lock is held across steps and there is no two-phase-commit
+coordinator, just a forward action and a hand-written undo per step.
+It is the natural fit for a multi-step workflow where each step
+already has an obvious inverse
+.Pq e.g. Dq reserve inventory No / Dq release inventory ,
+.Dq debit account No / Dq credit account back .
+.Pp
+Each step's action and compensate function has the signature
+.Bd -literal -offset indent
+typedef int (*xtc_saga_fn)(void *ctx);
+.Ed
+.Pp
+and returns the usual
+.Dv XTC_OK
+/ negative
+.Dv XTC_E_*
+convention used everywhere else in this library.
+.Fa ctx
+is whatever the caller passed to
+.Fn xtc_saga_step
+(typically per-step state: a request payload, an id to undo, a handle
+to release).  A step's
+.Fa compensate
+may be
+.Dv NULL
+for a step with no undo
+.Pq e.g. a pure read ;
+.Fn xtc_saga_run
+then skips compensating it.
+.Pp
+.Fn xtc_saga_create
+allocates an empty saga.
+.Fn xtc_saga_step
+appends one step; steps run in the order added.  Steps cannot be
+added once
+.Fn xtc_saga_run
+has started.
+.Fn xtc_saga_run
+runs the saga
+.Pq at most once; create a new one to run again .
+.Fn xtc_saga_destroy
+frees the saga handle; it does not touch step
+.Fa ctx
+pointers, which remain caller-owned.
+.Pp
+.Sy Unrecoverable saga :
+if a compensation itself returns an error while the reverse walk is
+undoing completed steps, that is a documented failure mode this
+library does not silently swallow.
+.Fn xtc_saga_run
+logs it loudly
+.Pq to stderr, naming the step and both error codes ,
+continues running the REMAINING compensations in reverse order
+regardless
+.Pq one broken undo must not also skip cleanup further back ,
+and the overall return value becomes
+.Dv XTC_E_INTERNAL
+instead of the original step's error code, so a caller can always tell
+.Dq a step failed and every compensation ran cleanly
+apart from
+.Dq a step failed AND compensation itself is broken .
+.Fn xtc_saga_compensate_failed
+reports the latter case after a run;
+.Fn xtc_saga_last_error
+still reports the ORIGINAL forward failure's code for diagnostics even
+when the overall return value was overridden to
+.Dv XTC_E_INTERNAL .
+.Pp
+.Fn xtc_saga_n_steps ,
+.Fn xtc_saga_n_completed ,
+and
+.Fn xtc_saga_failed_step
+are introspection helpers, primarily for tests and logging: the total
+step count, how many actions completed successfully on the last run,
+and the
+.Pq 0-based
+index of the step whose action failed
+.Pq -1 if none has failed .
+.Sh RETURN VALUES
+.Fn xtc_saga_create
+and
+.Fn xtc_saga_step
+return
+.Dv XTC_OK
+or a negative
+.Dv XTC_E_*
+code
+.Pq Dv XTC_E_INVAL No for a bad argument or a step added after
+.Fn xtc_saga_run
+started; Dv XTC_E_NOMEM No on allocation failure .
+.Pp
+.Fn xtc_saga_run
+returns
+.Dv XTC_OK
+if every step succeeded;
+.Dv XTC_E_INVAL
+if
+.Fa s
+is
+.Dv NULL
+or the saga was already run; the FAILING STEP'S error code if a step
+failed and every triggered compensation succeeded; or
+.Dv XTC_E_INTERNAL
+if a step failed AND at least one compensation also failed
+.Pq the unrecoverable-saga condition .
+.Pp
+.Fn xtc_saga_destroy
+returns no value.  The remaining functions return the queried count /
+index / code
+.Pq 0 No or -1 No on a Dv NULL No saga, per field .
+.Sh EXAMPLES
+.Bd -literal -offset indent
+int reserve_inventory(void *ctx);
+int release_inventory(void *ctx);
+int charge_card(void *ctx);
+int refund_card(void *ctx);
+int ship_order(void *ctx);      /* no compensate: shipping cannot be undone */
+
+xtc_saga_t *s;
+int rc;
+
+xtc_saga_create(&s);
+xtc_saga_step(s, reserve_inventory, release_inventory, &order);
+xtc_saga_step(s, charge_card,       refund_card,        &order);
+xtc_saga_step(s, ship_order,        NULL,               &order);
+
+rc = xtc_saga_run(s);
+if (rc == XTC_E_INTERNAL) {
+	/* A compensation itself failed; already logged.  Escalate --
+	 * this order needs a human, xtc_saga_last_error(s) has the
+	 * original failure and xtc_saga_failed_step(s) the step index. */
+} else if (rc != XTC_OK) {
+	/* A step failed but every compensation ran cleanly; nothing
+	 * from this order is left in a partially-applied state. */
+}
+xtc_saga_destroy(s);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_async 3 ,
+.Xr xtc_fsm 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_supervisor 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1, per PLAN.md section 19.5.
+.Sh CAVEATS
+A saga action runs synchronously on the calling fiber; it does not
+itself provide concurrency or timeouts.  A step that needs to await
+asynchronous work
+.Pq an RPC, a spawned sub-task
+does so internally using the existing primitives
+.Pq Xr xtc_async 3 Ns 's Fn xtc_await , Xr xtc_proc 3 Ns 's Fn xtc_recv
+and simply blocks the calling fiber until that work resolves before
+returning -- a saga step is an ordinary function, not a new async
+abstraction.
