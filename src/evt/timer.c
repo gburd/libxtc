@@ -29,6 +29,9 @@ __timer_slab_ensure(xtc_loop_t *loop)
 
 /* --- Heap manipulation. -------------------------------------------- */
 
+/* XTC_NOALLOC_BEGIN: heap swap helper (PLAN.md 19.23) -- shared by
+ * both the insert-side sift-up and the per-tick dequeue-side
+ * sift-down; never itself allocates. */
 static void
 __swap(xtc_timer_t **a, xtc_timer_t **b)
 {
@@ -38,6 +41,7 @@ __swap(xtc_timer_t **a, xtc_timer_t **b)
 	*a = *b; (*a)->heap_idx = idx_a;
 	*b = tmp; (*b)->heap_idx = idx_b;
 }
+/* XTC_NOALLOC_END */
 
 static void
 __sift_up(xtc_timer_t **h, int i)
@@ -91,6 +95,15 @@ __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t)
 	return XTC_OK;
 }
 
+/* XTC_NOALLOC_BEGIN: per-tick timer dequeue/peek path (PLAN.md 19.23) --
+ * __xtc_loop_step calls __xtc_timer_heap_pop_due and
+ * __xtc_timer_heap_next_deadline every scheduler tick; none of
+ * __heap_top_unsafe / __heap_pop_unsafe / __sift_down (reused from
+ * the insert side above, itself allocation-free) / the two public
+ * pop/peek entry points may allocate.  __grow and
+ * __xtc_timer_heap_push (the INSERT side, called from xtc_timer_set,
+ * not from the per-tick step) are deliberately left OUTSIDE this
+ * region -- __grow calls __os_realloc to grow the heap array. */
 static xtc_timer_t *
 __heap_top_unsafe(xtc_loop_t *loop)
 {
@@ -142,6 +155,7 @@ __xtc_timer_heap_next_deadline(xtc_loop_t *loop)
 		(void)__heap_pop_unsafe(loop);
 	return loop->n_timers == 0 ? -1 : loop->timers[0]->deadline_ns;
 }
+/* XTC_NOALLOC_END */
 
 /* --- Public API. --------------------------------------------------- */
 

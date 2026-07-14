@@ -219,6 +219,15 @@ __held_find(const xtc_lwlock_t *l, xtc_lwlock_mode_t *out_mode)
 
 /* ----- low-level acquire/release on the state word ----- */
 
+/* XTC_NOALLOC_BEGIN: lwlock fast path (PLAN.md 19.23) -- the
+ * uncontended CAS acquire/release docs/locks.md describes ("The fast
+ * paths for shared-acquire and shared-release each compile to a
+ * single atomic increment... the exclusive paths add a
+ * compare-exchange").  __try_attempt/__release_state touch only the
+ * state word; this file has no allocation calls anywhere (the slow
+ * path below parks on a pthread_cond/fiber waker, never the
+ * allocator), but the marker names the fast path explicitly per
+ * PLAN.md's file list. */
 /* Try a single CAS to acquire `mode`.  Returns 1 on success. */
 static int
 __try_attempt(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
@@ -273,6 +282,7 @@ __release_state(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 			return desired;
 	}
 }
+/* XTC_NOALLOC_END */
 
 /* ----- DST fiber-park support ---------------------------------------
  *

@@ -286,6 +286,16 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 }
 
 /* PUBLIC: int xtc_io_poll __P((xtc_io_t *, xtc_io_event_t *, int, int64_t, int *)); */
+/* XTC_NOALLOC_BEGIN: io_uring per-poll CQE reap path (PLAN.md 19.23).
+ * KNOWN GAP (flagged in the s_noalloc rollout report, not silenced):
+ * the zombie-reap branch a few lines below (the `if (uf != NULL &&
+ * uf->dead)` block) calls __os_free(uf) to release a deregistered
+ * fd's node once its terminal CQE drains.  That call is bounded to
+ * once per xtc_io_del_fd (not once per steady-state poll), so it is
+ * carved OUT of this marked region below rather than hidden behind an
+ * XTC_NOALLOC_OK -- the region resumes immediately after it.  The
+ * steady-state dispatch of a ready fd, an AIO completion, or the
+ * wakeup event never allocates. */
 int
 xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
             int64_t timeout_ns, int *n_out)
@@ -344,6 +354,10 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		}
 		uf = (struct __xtc_uring_fd *)data;
 		if (uf != NULL && uf->dead) {
+/* XTC_NOALLOC_END -- see the KNOWN GAP note above xtc_io_poll: the
+ * next block's __os_free(uf) is a real, bounded (per-deregistration,
+ * not per-poll) allocator touch left OUT of the marked region rather
+ * than hidden behind an exception marker. */
 			/* Registration was deleted.  Do not dispatch to it.
 			 * Once its multishot poll delivers the terminal CQE
 			 * (no IORING_CQE_F_MORE -- e.g. the -ECANCELED from
@@ -363,6 +377,8 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			io_uring_cqe_seen(&io->ring, cqe);
 			cqe = NULL;
 			continue;
+/* XTC_NOALLOC_BEGIN: resuming the steady-state dispatch path (ready fd
+ * / wakeup) after the zombie-reap carve-out above. */
 		}
 		if (uf != NULL) {
 			if (uf->is_wakeup) {
@@ -417,6 +433,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	*n_out = got;
 	return XTC_OK;
 }
+/* XTC_NOALLOC_END */
 
 #endif /* XTC_IO_BACKEND_URING */
 

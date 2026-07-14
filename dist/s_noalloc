@@ -1,0 +1,99 @@
+#!/bin/sh
+# dist/s_noalloc
+# Lint tool: enforce the XTC_NOALLOC discipline (PLAN.md 19.23).  A
+# hot-path region brackets itself with a paired marker, exactly like
+# dist/s_async's XTC_BLOCKING_REGION precedent but explicit BEGIN/END
+# (a hot path is usually a handful of functions inside a bigger file,
+# not the whole file, so a single top-of-file marker would either miss
+# the lifecycle code that legitimately allocates or force it to be
+# moved to another file):
+#
+#   /* XTC_NOALLOC_BEGIN: <short label for the hot path> */
+#   ... function(s) that must never allocate ...
+#   /* XTC_NOALLOC_END */
+#
+# Any reference to malloc, calloc, realloc, free, the __os_* alloc
+# wrappers, the public xtc_malloc/calloc/realloc/free/aligned_alloc
+# family, or a slab-alloc call (xtc_slab_alloc/xtc_slab_create/
+# xtc_slab_free) found on a line inside such a region is a violation
+# UNLESS that line carries a `/* XTC_NOALLOC_OK: reason */` marker
+# (mirroring the existing XTC_BLOCKING_OK / XTC_LAYER_OK exception-
+# marker convention exactly).  A commented-out line is not a call.
+#
+# This lint only checks files that carry at least one XTC_NOALLOC_BEGIN
+# marker -- there is no fixed file list, so a newly annotated file is
+# picked up automatically.
+#
+# Returns non-zero on any unjustified allocation-symbol reference
+# inside a marked region, or on an unbalanced BEGIN/END pair.
+
+set -eu
+
+DIST_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$DIST_DIR/.." && pwd)
+SRC="$ROOT/src"
+
+ALLOC_SYMS='malloc calloc realloc free __os_malloc __os_calloc __os_realloc __os_free xtc_malloc xtc_calloc xtc_realloc xtc_free xtc_aligned_alloc xtc_slab_alloc xtc_slab_free xtc_slab_create'
+
+VIOL_FILE=$(mktemp)
+FILES_FILE=$(mktemp)
+trap 'rm -f "$VIOL_FILE" "$FILES_FILE"' EXIT
+
+find "$SRC" -name '*.c' -type f 2>/dev/null | sort > "$FILES_FILE"
+
+n_checked=0
+while IFS= read -r f; do
+	grep -q 'XTC_NOALLOC_BEGIN' "$f" 2>/dev/null || continue
+	n_checked=$((n_checked + 1))
+	awk -v syms="$ALLOC_SYMS" '
+	BEGIN {
+		nsym = split(syms, S, " ")
+		in_region = 0
+		unbalanced = 0
+	}
+	{
+		line = $0
+		if (index(line, "XTC_NOALLOC_BEGIN") > 0) {
+			if (in_region) {
+				printf "%s:%d: XTC_NOALLOC_BEGIN nested inside an already-open region\n", FILENAME, FNR
+				unbalanced = 1
+			}
+			in_region = 1
+			next
+		}
+		if (index(line, "XTC_NOALLOC_END") > 0) {
+			if (!in_region) {
+				printf "%s:%d: XTC_NOALLOC_END with no matching BEGIN\n", FILENAME, FNR
+				unbalanced = 1
+			}
+			in_region = 0
+			next
+		}
+		if (!in_region) next
+		# Skip comment-only lines (same heuristic as dist/s_async).
+		if (line ~ /^[ \t]*(\/\/|\*|\/\*)/) next
+		if (index(line, "XTC_NOALLOC_OK") > 0) next
+		for (i = 1; i <= nsym; i++) {
+			sym = S[i]
+			pat = "(^|[^A-Za-z0-9_])" sym "\\("
+			if (match(line, pat))
+				printf "%s:%d: %s() inside an XTC_NOALLOC region without XTC_NOALLOC_OK\n", FILENAME, FNR, sym
+		}
+	}
+	END {
+		if (in_region) {
+			printf "%s: XTC_NOALLOC_BEGIN with no matching XTC_NOALLOC_END\n", FILENAME
+		}
+	}
+	' "$f" >> "$VIOL_FILE"
+done < "$FILES_FILE"
+
+if [ -s "$VIOL_FILE" ]; then
+	while IFS= read -r v; do
+		echo "  [s_noalloc] $v" >&2
+	done < "$VIOL_FILE"
+	nv=$(wc -l < "$VIOL_FILE" | awk '{print $1}')
+	echo "  [s_noalloc] $nv violation(s) across $n_checked annotated file(s)" >&2
+	exit 1
+fi
+echo "  [s_noalloc] OK ($n_checked file(s) carrying an XTC_NOALLOC_BEGIN region)"
