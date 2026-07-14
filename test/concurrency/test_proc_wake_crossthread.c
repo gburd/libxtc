@@ -4,38 +4,46 @@
  *
  * test/concurrency/test_proc_wake_crossthread.c
  *	Regression guard for xtc_proc_wake(): a fiber parked in
- *	xtc_proc_wait_fd on an epoll fd, with the readiness produced by a
- *	FOREIGN OS thread, must be reliably resumed when that thread pairs
- *	the readiness with xtc_proc_wake(pid).  This is the PostgreSQL
- *	cross-thread-latch shape (a foreign I/O-worker thread SetLatches a
- *	backend fiber): the waker makes a self-pipe watched by the loop's
- *	epoll readable AND pokes the loop via xtc_proc_wake.
+ *	xtc_proc_wait_fd on a plain pipe, with the readiness produced by
+ *	a FOREIGN OS thread, must be reliably resumed when that thread
+ *	pairs the readiness with xtc_proc_wake(pid).  This is the
+ *	PostgreSQL cross-thread-latch shape (a foreign I/O-worker thread
+ *	SetLatches a backend fiber): the waker makes the watched fd
+ *	readable AND pokes the loop via xtc_proc_wake.
  *
- *	Standalone (exit 0 = every round woke; exit 1 = a lost wake caught
- *	by the alarm; exit 77 = environment skip).  Not munit: it needs a
- *	real foreign pthread + an alarm-based hang detector.
+ *	PORTABLE ACROSS BACKENDS.  The watched descriptor is a plain
+ *	pipe read-end, which xtc_proc_wait_fd can watch through ANY I/O
+ *	backend (epoll, io_uring, kqueue, poll, select).  This matters
+ *	because the cross-thread loop-wake that xtc_proc_wake relies on
+ *	is a DIFFERENT mechanism per backend -- a self-pipe/eventfd on
+ *	epoll, an EVFILT_USER + NOTE_TRIGGER event on kqueue -- so
+ *	running this guard on macOS / *BSD (kqueue) exercises a genuinely
+ *	distinct code path from the Linux (epoll) one.  An earlier
+ *	version used an epoll fd and SKIPped everywhere but Linux, which
+ *	left the kqueue cross-thread wake path uncovered by this guard.
+ *
+ *	Standalone (exit 0 = every round woke; exit 1 = a lost wake
+ *	caught by the alarm; exit 77 = environment skip).  Not munit: it
+ *	needs a real foreign pthread + an alarm-based hang detector.
+ *	Windows uses a different (IOCP) wake path and no POSIX pipe/
+ *	pthread here, so it SKIPs; its wake path is covered by the MSVC
+ *	smoke + the loopback echo in test/msvc.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 
-/* This guard exercises the cross-thread wake using a Linux epoll fd as
- * the watched descriptor (the PG shape).  epoll is Linux-only; on every
- * other platform the test compiles to a clean SKIP so it stays in the
- * portable TESTS_C set without breaking macOS / *BSD / Windows builds.
- * The wake fix itself (xtc_proc_wake + the prepare/park race latch) is
- * backend-agnostic and covered on those platforms by make check. */
-#if !defined(__linux__)
+#if defined(_WIN32)
 #include <stdio.h>
 int
 main(void)
 {
-	printf("SKIP: test_proc_wake_crossthread needs Linux epoll\n");
+	printf("SKIP: test_proc_wake_crossthread uses POSIX pipe/pthread; "
+	    "the Windows IOCP wake path is covered by test/msvc\n");
 	return 77;
 }
 #else
 
-#include <sys/epoll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -49,7 +57,7 @@ main(void)
 
 #define ROUNDS 100
 
-static int          g_epfd = -1, g_pr = -1, g_pw = -1;
+static int          g_pr = -1, g_pw = -1;
 static xtc_exec_t  *g_e;
 static atomic_int   g_woke;
 static atomic_int   g_ready;
@@ -64,9 +72,11 @@ waiter(void *arg)
 	(void)arg;
 	g_waiter = xtc_self();
 	atomic_store(&g_ready, 1);
-	if (xtc_proc_wait_fd(g_epfd, XTC_IO_READABLE, -1, &rev) == XTC_OK)
+	/* Park on the pipe read-end through whatever I/O backend this
+	 * platform built with (epoll / io_uring / kqueue / poll / select). */
+	if (xtc_proc_wait_fd(g_pr, XTC_IO_READABLE, -1, &rev) == XTC_OK)
 		atomic_fetch_add(&g_woke, 1);
-	{ ssize_t rd = read(g_pr, buf, sizeof buf); (void)rd; }   /* drain the pipe */
+	{ ssize_t rd = read(g_pr, buf, sizeof buf); (void)rd; }   /* drain */
 	(void)xtc_exec_stop(g_e);
 }
 
@@ -80,7 +90,9 @@ foreign(void *arg)
 		;
 	nanosleep(&ts, NULL);
 	/* Make the watched fd readable (as an embedder latch would) AND
-	 * poke the target loop -- the guaranteed cross-thread resume. */
+	 * poke the target loop -- the guaranteed cross-thread resume.
+	 * The loop-poke goes through the active backend's wakeup
+	 * primitive (epoll self-pipe or kqueue EVFILT_USER). */
 	if (write(g_pw, "x", 1) != 1)
 		perror("write");
 	(void)xtc_proc_wake(g_waiter);
@@ -99,19 +111,11 @@ one_round(void)
 {
 	pthread_t th;
 	int pfd[2];
-	struct epoll_event ev;
 
 	if (pipe(pfd) != 0)
 		return 77;
 	g_pr = pfd[0];
 	g_pw = pfd[1];
-	g_epfd = epoll_create1(EPOLL_CLOEXEC);
-	if (g_epfd < 0)
-		return 77;
-	ev.events = EPOLLIN;
-	ev.data.fd = g_pr;
-	if (epoll_ctl(g_epfd, EPOLL_CTL_ADD, g_pr, &ev) != 0)
-		return 77;
 
 	atomic_store(&g_woke, 0);
 	atomic_store(&g_ready, 0);
@@ -127,7 +131,6 @@ one_round(void)
 	(void)xtc_exec_run(g_e);
 	pthread_join(th, NULL);
 	(void)xtc_exec_fini(g_e);
-	close(g_epfd);
 	close(g_pr);
 	close(g_pw);
 	return atomic_load(&g_woke) ? 0 : 1;
@@ -157,4 +160,4 @@ main(void)
 	return miss ? 1 : 0;
 }
 
-#endif /* __linux__ */
+#endif /* _WIN32 */
