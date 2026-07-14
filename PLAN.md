@@ -2893,7 +2893,22 @@ their hot path entirely.  This fix stays (it is correct and removes a
 genuine global serial section for cross-exec fan-out), but it does NOT
 move the fiber-per-session PG plateau.  The real bottleneck is 19.5c.
 
-### 19.5c Per-loop proc-table lock (t->lock) on the common send cycle -- NOT DONE (the actual PG bottleneck)
+### 19.5c Per-loop proc-table lock (t->lock) on the common send cycle -- DONE (striped, option B; waker race tracked separately)
+
+DONE 2026-07 (commit 39afc9d): replaced the single per-loop t->lock
+with 16 stripe mutexes keyed by local_id (same scheme as xtc_chash), so
+sends to procs with different local_ids no longer serialize; grow +
+whole-table scans claim all stripes ascending.  Chose striping
+(option B) over the full lock-free-reader RCU rework (option A) per
+.agent/PROC_TABLE_LOCK_2026-07.md.  Also fixed a pre-existing DCL race
+in __proc_slabs_ensure.  New test_proc_table_stress (16000 concurrent
+sends, exact conservation, ASan-clean); DST replay-identical, messaging
+tests TSan-clean, gcc -Werror clean.  FOLLOW-UP: the stress surfaced a
+separate pre-existing benign waker register/wake race
+(.agent/WAKER_RACE_2026-07.md), fix by making xtc_waker_t.{loop,task}
+_Atomic in its own session.  Original analysis below.
+
+### 19.5c-orig Per-loop proc-table lock (t->lock) -- root-cause analysis
 
 Root-caused from the PG team's verified evidence (heap-allocated
 pthread_mutex, ~367k __lll_lock_wait_private/10s, on the common
