@@ -257,6 +257,7 @@ LIB_HDR_PUBLIC	= $(srcdir)/../src/inc/xtc.h
 # with the public surface enumerated by dist/mkamalgamation.py.
 LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc.h \
+	$(srcdir)/../src/inc/xtc_export.h \
 	$(srcdir)/../src/inc/xtc_runtime.h \
 	$(srcdir)/../src/inc/xtc_aio.h \
 	$(srcdir)/../src/inc/xtc_alloc_audit.h \

@@ -78,6 +78,7 @@ endif
 # LIB_HDRS_PUBLIC and the surface in dist/mkamalgamation.py.
 install_headers(
   'src/inc/xtc.h',
+  'src/inc/xtc_export.h',
   'src/inc/xtc_runtime.h',
   'src/inc/xtc_aio.h',
   'src/inc/xtc_alloc_audit.h',
