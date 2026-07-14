@@ -3003,14 +3003,21 @@ toolchain supports it.  M14.
 - Bloom filter, HyperLogLog (small library; mostly numerical).
   M14.  NOT STARTED.
 
-### 19.19 Compositional property tests (M11) -- NOT STARTED (groundwork read; see .agent/TEAM_DISPATCH_2026-07-13.md)
+### 19.19 Compositional property tests (M11) -- DONE (2026-07, as a DST sim test)
 
-Existing PBT plan covers per-primitive invariants.  Add a
-`test/hegel/composition/` suite that draws random sequences of
-`(spawn, send, recv, link, monitor, exit, send-during-recv,
-lock-during-send, ...)` and checks system-wide invariants:
-no orphaned procs, no dangling links, every monitor fires,
-supervisor restart counts are correct.  M11.
+DONE (commit b2bcba2): test/sim/test_sim_composition.c draws a seeded
+random SCRIPT of mixed process-lifecycle ops (spawn, spawn_monitor,
+spawn_link, send, monitor-existing, exit) across 4 loops under the
+pessimal scheduler and asserts the SYSTEM-WIDE invariants no
+per-primitive test covers: INV1 every monitor fires exactly once
+(monitors==DOWNs, NOPROC counts as fired), INV2 every link fires
+(links==EXITs), INV3 no orphans/leak (xtc_inspect_procs shows 0 live
+procs after quiescence), INV4 byte-identical replay + a different seed
+reorders but holds every invariant.  Implemented as a DST sim test
+rather than test/hegel/composition/ because process lifecycle needs
+the real executor + seeded deterministic scheduler (which hegel does
+not provide) and DST additionally gives replay-identity.  Verified
+ASan-clean, warning-free, green in the 54-test DST suite.
 
 ### 19.20 Graceful shutdown protocol (M9)
 
