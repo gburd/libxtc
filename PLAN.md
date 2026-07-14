@@ -2763,34 +2763,52 @@ shape of the surrounding code.
 
 ### 19.1 Networking depth (M7 / M9 / M14)
 
+(Status 2026-07: most of this section has SHIPPED -- TLS/mTLS,
+SO_REUSEPORT, unix-socket credential passing, and DNS resolution are
+all in the tree and CI; the notes below are kept for the design
+rationale but are no longer a to-do list.)
+
 - **TLS / mTLS** via configure-time-picked OpenSSL /
   BoringSSL / wolfSSL / SChannel / macOS Network framework.
-  An `xtc_tls_t` over `xtc_io`.  M9.
+  An `xtc_tls_t` over `xtc_io`.  M9.  DONE: src/io/tls_openssl.c
+  (also LibreSSL), tls_gnutls.c, tls_mbedtls.c, tls_wolfssl.c,
+  tls_schannel.c -- all in the tls-backends CI job.
 - **DNS resolver.**  Sync `__os_getaddrinfo` (in the blocking
   pool) plus a cancellable async resolver (c-ares-shaped).
-  M9.
+  M9.  DONE (sync): xtc_dns_resolve / getaddrinfo in io_net.c; the
+  cancellable async c-ares-shaped resolver remains future work.
 - **Connection pool** (`xtc_pool`) for backend-to-backend.
-  M14.
+  M14.  DONE: src/inc/xtc_pool.h.
 - **Unix domain sockets** with credential passing
   (`SO_PASSCRED`, `getpeereid`, Windows pipe equivalent).
-  M7.
+  M7.  DONE (POSIX): SCM_CREDENTIALS / SO_PEERCRED / LOCAL_PEERCRED
+  in io_net.c; Windows-pipe equivalent remains future work.
 - **Accept scaling.**  `SO_REUSEPORT` accept distribution,
   BSD accept filters, Linux `SO_INCOMING_CPU` to pin
-  accepted connections to the accepting reactor.  M7.
+  accepted connections to the accepting reactor.  M7.  DONE
+  (SO_REUSEPORT via xtc_tcp_opts_t.reuseport); accept filters +
+  SO_INCOMING_CPU remain future work.
 - **TCP knobs.**  `TCP_NODELAY`, `TCP_CORK`, keepalive,
   `TCP_USER_TIMEOUT`, congestion algorithm selection.
   Documented in `os_net.c`.
 
 ### 19.2 Cryptography building blocks (M14)
 
+(Status 2026-07: the v1 core SHIPPED -- src/os/os_crypto.c has
+SHA-256, HMAC-SHA256, AES-256-GCM, and an OpenSSL-backed CSPRNG,
+reusing the OpenSSL TLS backend, NOSYS under other backends. The
+remaining algorithms below are deliberately deferred until a concrete
+consumer needs them.)
+
 `__os_crypto_*` shim over:
 
-- AES-GCM, ChaCha20-Poly1305 (auth-encrypt for TDE).
-- SHA-2 family, SHA-3, BLAKE3 (hashing for checksums and
-  WAL).
-- HMAC, HKDF.
-- A `__os_csprng_t` per-loop ChaCha20 streaming RNG seeded
-  from `__os_rand_bytes` and reseeded per-cycle.
+- AES-GCM (DONE), ChaCha20-Poly1305 (deferred; auth-encrypt for TDE).
+- SHA-2 family (SHA-256 DONE), SHA-3, BLAKE3 (deferred; hashing for
+  checksums and WAL).
+- HMAC (HMAC-SHA256 DONE), HKDF (deferred).
+- A `__os_csprng_t` per-loop CSPRNG seeded from `__os_rand_*` (DONE,
+  OpenSSL-backed rather than the originally-sketched hand-rolled
+  ChaCha20 stream).
 
 Backed by libsodium / OpenSSL / BoringSSL / SChannel /
 CommonCrypto.
@@ -2821,7 +2839,7 @@ Enabled by configure flag `--enable-fault-injection`; compiled
 out of release builds by default.  Lands in M5 because the
 multi-loop work is the first thing that *needs* it.
 
-### 19.5 Sagas / multi-step coordination (M14)
+### 19.5 Sagas / multi-step coordination (M14) -- DONE (2026-07)
 
 A small library on top of `xtc_future`:
 
@@ -2837,7 +2855,7 @@ Not strictly needed for v1; right abstraction for replication
 coordination, distributed transactions, complex extension flows.
 M14.
 
-### 19.6 Priority inheritance through the lock manager (M13c)
+### 19.6 Priority inheritance through the lock manager (M13c) -- NOT DONE (three subagent attempts failed to land code; see .agent/TEAM_DISPATCH_2026-07-13.md; lead to implement directly)
 
 When a low-priority locker holds a lock that a high-priority
 locker needs, the holder temporarily inherits the requester's
@@ -2857,7 +2875,7 @@ Beyond bounded channels:
   documented error code and a Retry-After-style hint.
 - Per-class CPU shares for the data plane vs admin plane.
 
-### 19.15 Container / cgroup awareness (M0)
+### 19.15 Container / cgroup awareness (M0) -- DONE (2026-07, cgroup v2)
 
 `__os_ncpus()` reads cgroup v2 `cpu.max` first, falling back to
 `/proc/cpuinfo`.  `__os_mem_max()` reads `memory.max`.  OOM
@@ -2881,7 +2899,7 @@ context support, capability dropping helpers.  Address-sanitization
 at process boundary (CFI, shadow stacks, Intel CET) where the
 toolchain supports it.  M14.
 
-### 19.18 Hash tables and other concurrent data structures (M13a/b)
+### 19.18 Hash tables and other concurrent data structures (M13a/b) -- PARTIAL: xtc_chash DONE (unit-tested); xtc_cskip NOT STARTED; chash DST/PBT/bench pending
 
 - RCU-protected concurrent hash table (`xtc_chash`) --
   primary RCU consumer.  M13a.
@@ -2890,7 +2908,7 @@ toolchain supports it.  M14.
 - Bloom filter, HyperLogLog (small library; mostly numerical).
   M14.
 
-### 19.19 Compositional property tests (M11)
+### 19.19 Compositional property tests (M11) -- NOT STARTED (groundwork read; see .agent/TEAM_DISPATCH_2026-07-13.md)
 
 Existing PBT plan covers per-primitive invariants.  Add a
 `test/hegel/composition/` suite that draws random sequences of
@@ -2915,7 +2933,7 @@ Documented multi-stage drain orchestrated by `xtc_app_shutdown`:
 Responds correctly to SIGTERM (graceful), SIGINT (graceful with
 shorter deadline), SIGQUIT (immediate).  M9.
 
-### 19.21 Power / kernel-tuning advisor (M14)
+### 19.21 Power / kernel-tuning advisor (M14) -- DONE (2026-07)
 
 `xtc_app_start` runs a battery of cheap probes:
 
@@ -2930,14 +2948,14 @@ Each "off" emits a NOTICE with a recommendation.  Operators
 don't want to hunt through tuning guides to learn their kernel
 is fighting them.  M14.
 
-### 19.22 IOCP-vs-readiness worked example (M6)
+### 19.22 IOCP-vs-readiness worked example (M6) -- DONE (2026-07, docs/io-models.md)
 
 A documented translation table in `docs/io-models.md` showing
 the same `xtc_io_op` pattern under epoll, io_uring, kqueue, and
 IOCP, side by side, with a worked example per backend.  Lands
 with M6 (the milestone that adds the non-Linux backends).
 
-### 19.23 The `XTC_NOALLOC` discipline (M14)
+### 19.23 The `XTC_NOALLOC` discipline (M14) -- DONE (2026-07, dist/s_noalloc)
 
 Annotation on files where the hot path runs.  `dist/s_noalloc`
 lint forbids any allocation symbol reference (malloc, palloc,
@@ -3110,8 +3128,8 @@ Full writeup in `docs/M_TLS_MATRIX.md`.
 | Backend            | Status      | Notes |
 |--------------------|-------------|-------|
 | OpenSSL 3.0.10     | full pass   | 16/16 |
-| LibreSSL 4.2.1     | partial     | Builds clean against OpenSSL backend; tls_basic + tls_server pass (14/16); tls_client handshake fails -- LibreSSL 4.x cipher policy interaction in non-blocking poll loop, deferred |
-| GnuTLS / mbedTLS / wolfSSL | not yet | Each requires a separate `tls_<backend>.c` (~1 person-day each) |
+| LibreSSL 4.2.1     | full pass   | tls_basic 9/9, tls_server 5/5, tls_client 2/2 -- the earlier "cipher policy" hypothesis was wrong; root cause was the test harness's cert-generation shelling out to `openssl req` with no `-config`, which LibreSSL's CLI (unlike OpenSSL's) has no default for and aborts on. Fixed by writing an explicit inline `[req]`/`[dn]` config before calling `openssl req`; re-verified 2026-07 with 40x stress repeats, 0 failures |
+| GnuTLS / mbedTLS / wolfSSL | full pass | each has its own `tls_<backend>.c`; all three run in per-commit CI (tls-backends job) |
 
 ### libc matrix
 
@@ -3139,7 +3157,7 @@ Tier 0 is done; the rest are tracked here.
 | A7 regression tests | done | idle-CPU + sup restart-intensity already covered; added work-steal fairness test (found+fixed two real stealer bugs); lrlock churn; ASan/UBSan in CI |
 | A8 thread xtc_abort_source through xtc_svr_call | done | xtc_svr_call_abortable(pid,...,tok): the call returns XTC_E_ABORTED if the token fires before the reply; the server drops the reply for an aborted caller.  Covered by test/m10/test_svr.c + test/m9/test_sync.c |
 | A9 Bitcask compaction/merge | done | bitcask_compact() rewrites the data file keeping only live records (LWW + tombstone erase), swaps atomically, survives reopen; examples/05_rexis, covered by test_bitcask.c test_compaction |
-| A10 re-audit M17 conformance for fair comparisons | in progress | building the missing w5_rwratio (rwlock vs lrlock ratio sweep) + fairness audit; W1-W4/W6/W7 have xtc+tokio impls, W4 parking_lot done |
+| A10 re-audit M17 conformance for fair comparisons | done | w5_rwratio (rwlock vs lrlock ratio sweep) exists in bench/conformance/; W1-W7 all have xtc+tokio impls, W4 parking_lot done |
 | A11 document mailbox-full XTC_E_AGAIN contract | done | documented in xtc_proc.h / xtc_proc.3; cap now bounds mailbox + save queue |
 | A12 per-shard API (xtc_shard_id) | DONE | xtc_shard_id/xtc_shard_count (Seastar this_shard_id); test_exec/A12_shard_id |
 
@@ -3153,10 +3171,10 @@ SQL/WAL/fmgr.
 |-----|------|--------|-------|
 | R1 | per-fiber fault capture + single-fiber unwind (contain vs escalate) | DONE (first cut): `xtc_fault_guard_install`/`xtc_proc_recovery_arm`/`xtc_proc_critical_enter/leave`; SIGSEGV/BUS/FPE/ILL; verified glibc+musl+MSVC+UBSan; SEH + lock-release-on-exit open | M10.6 |
 | R2 | length-framed transport helper (`xtc_net_send_frame`/`recv_frame`) | DONE: 4-byte BE length + payload, loop-aware (yields via wait_fd) with poll fallback; max_len OOM guard (XTC_E_RANGE); test_net_frame | io/net |
-| R3 | supervised OS-process child (`xtc_osproc_spawn`) under xtc_supervisor | accept supervision unification; marshalling stays in PG glue | M10.7 (new); F7 |
+| R3 | supervised OS-process child (`xtc_osproc_spawn`) under xtc_supervisor | accept supervision unification; marshalling stays in PG glue | done: xtc_osproc_spawn shipped in src/inc/xtc_osproc.h |
 | R4 | supervisor strategies (SIMPLE_OFO, REST_FOR_ONE, ONE_FOR_ALL) | DONE: all four strategies implemented + tested; SIMPLE_ONE_FOR_ONE via new xtc_sup_add_child (0-child pool grows on demand, TEMPORARY children reclaimed); test_sup 5/5, ASan-clean | M10.5 |
 | R5 | per-proc loop affinity (pinned, never stolen) | confirmed already true: procs spawn pinned via xtc_async; documenting in xtc_proc.3 | done (confirm) |
-| R6 | freeze the lock + glue ABI before a downstream integration | accept; name the exact lock structs on the (S)18 stable-symbol list | abi-stability.md |
+| R6 | freeze the lock + glue ABI before a downstream integration | accept; name the exact lock structs on the (S)18 stable-symbol list | done: abi-stability.md's "lock layer (frozen)" section names xtc_lwlock_t/_mode_t, xtc_lrlock_t, xtc_lockmgr_t/xtc_locker_t/xtc_lock_mode_t/etc. |
 
 Build order: R1 (gating, smallest design, biggest payoff) -> R4
 SIMPLE_OFO -> R2 framing -> R3 osproc.  R1 and R3 get a design review
