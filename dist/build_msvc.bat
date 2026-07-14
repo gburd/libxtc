@@ -107,38 +107,46 @@ echo.
 echo [5/5] cl real munit suite (POSIX-clean subset, best-effort)
 set MUNIT_PASS=0
 set MUNIT_FAIL=0
-set MUNIT_TESTS=m0\test_version m0\test_errors m0\test_header m1\test_atomic m1\test_alloc m1\test_time m1\test_crypto m1\test_tls m11\test_mctx m10\test_credit m10\test_fsm m10\test_pool m10\test_reg m10\test_stream m14\test_launch m14\test_unsafe_depth m14\test_stack_reclaim
-for %%T in (%MUNIT_TESTS%) do call :run_munit %%T
-echo.
-echo [5/5] munit subset tally: %MUNIT_PASS% passed, %MUNIT_FAIL% failed (best-effort, not gating)
-
-goto :eof
-
-rem --- :run_munit <milestone>\<test>  (best-effort build+run of one
-rem     munit test; updates MUNIT_PASS / MUNIT_FAIL; never aborts) ---
-:run_munit
-setlocal enabledelayedexpansion
-set T=%~1
-for /f "tokens=1,2 delims=\" %%a in ("%T%") do (
-  set MS=%%a
-  set TN=%%b
+set MUNIT_FAILED_LIST=
+rem  space-separated MS:TN pairs (colon-delimited so no backslash parsing)
+set MUNIT_TESTS=m0:test_version m0:test_errors m0:test_header m1:test_atomic m1:test_alloc m1:test_time m1:test_crypto m1:test_tls m11:test_mctx m10:test_credit m10:test_fsm m10:test_pool m10:test_reg m10:test_stream m14:test_launch m14:test_unsafe_depth m14:test_stack_reclaim
+for %%P in (%MUNIT_TESTS%) do (
+  for /f "tokens=1,2 delims=:" %%a in ("%%P") do call :run_munit %%a %%b
 )
-cl %CFLAGS% /Fe:!TN!.exe ^
-   /I"%XTC_SRC%\test\!MS!" ^
-   "%XTC_SRC%\test\!MS!\!TN!.c" ^
-   "%XTC_SRC%\test\!MS!\munit.c" ^
+echo.
+echo [5/5] munit subset tally: !MUNIT_PASS! passed, !MUNIT_FAIL! failed (best-effort, not gating)
+if not "!MUNIT_FAILED_LIST!"=="" echo [5/5] munit failing: !MUNIT_FAILED_LIST!
+
+rem  Main flow ends here -- explicitly succeed so it can NEVER fall
+rem  through into :fail (this whole step-5 block is best-effort).
+exit /b 0
+
+rem --- :run_munit <milestone> <testname>  (best-effort build+run of
+rem     one munit test; bumps MUNIT_PASS / MUNIT_FAIL; always returns) ---
+:run_munit
+set MS=%~1
+set TN=%~2
+cl %CFLAGS% /Fe:%TN%.exe ^
+   /I"%XTC_SRC%\test\%MS%" ^
+   "%XTC_SRC%\test\%MS%\%TN%.c" ^
+   "%XTC_SRC%\test\%MS%\munit.c" ^
    xtc.lib ws2_32.lib ntdll.lib dbghelp.lib >nul 2>&1
 if errorlevel 1 (
-  echo   [munit] !MS!\!TN! BUILD FAILED
-  endlocal ^& set /a MUNIT_FAIL+=1 ^& goto :eof
+  echo   [munit] %MS%\%TN% BUILD FAILED
+  set /a MUNIT_FAIL+=1
+  set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
+  goto :eof
 )
-!TN!.exe >nul 2>&1
+%TN%.exe >nul 2>&1
 if errorlevel 1 (
-  echo   [munit] !MS!\!TN! TEST FAILED
-  endlocal ^& set /a MUNIT_FAIL+=1 ^& goto :eof
+  echo   [munit] %MS%\%TN% TEST FAILED
+  set /a MUNIT_FAIL+=1
+  set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
+  goto :eof
 )
-echo   [munit] !MS!\!TN! OK
-endlocal ^& set /a MUNIT_PASS+=1 ^& goto :eof
+echo   [munit] %MS%\%TN% OK
+set /a MUNIT_PASS+=1
+goto :eof
 
 :fail
 echo.

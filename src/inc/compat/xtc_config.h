@@ -19,10 +19,16 @@
 #ifndef XTC_CONFIG_H
 #define XTC_CONFIG_H
 
-#define XTC_VERSION_MAJOR  0
-#define XTC_VERSION_MINOR  4
+/* Version.  This compat header is hand-maintained (the MSVC build does
+ * not run configure, which is what fills dist/xtc_config.h from
+ * version.in on the autoconf path).  Keep these FOUR macros mutually
+ * consistent -- STRING must be exactly "MAJOR.MINOR.PATCH" -- and in
+ * step with dist/version.in, or test/m0/test_version's consistency
+ * check (strncmp(string, "maj.min.patch")) fails under MSVC. */
+#define XTC_VERSION_MAJOR  1
+#define XTC_VERSION_MINOR  21
 #define XTC_VERSION_PATCH  0
-#define XTC_VERSION_STRING "0.5.0"
+#define XTC_VERSION_STRING "1.21.0"
 
 /* Completion-based I/O backend for Windows. */
 #define XTC_IO_BACKEND_IOCP 1
