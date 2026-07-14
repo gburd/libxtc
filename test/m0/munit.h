@@ -131,12 +131,18 @@ extern "C" {
 #define MUNIT_UNUSED
 #endif
 
-#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 199901L) && \
-  !defined(__PGI)
-#define MUNIT_ARRAY_PARAM(name) name
-#else
+/* Was conditionally "name" (a VLA-typed array-parameter bound, e.g.
+ * char *const argv[MUNIT_ARRAY_PARAM(argc + 1)]) on GCC/clang.  An
+ * array function parameter decays to a pointer regardless of any
+ * bound expression in the brackets, so dropping the bound changes
+ * nothing observable (same calling convention, same semantics) --
+ * it only removed a compile-time size-mismatch diagnostic hint on
+ * GCC/clang.  MSVC's cl.exe (all versions, including /std:c11 and
+ * /std:c17) has never implemented C99/C11 variable-length arrays,
+ * including VLA-typed parameters, so the old "name" branch made
+ * every MUNIT_ARRAY_PARAM call site a hard compile error under cl.
+ * Always expanding to nothing is the portable, standard-C11 form. */
 #define MUNIT_ARRAY_PARAM(name)
-#endif
 
 #if !defined(_WIN32)
 #define MUNIT_SIZE_MODIFIER "z"
