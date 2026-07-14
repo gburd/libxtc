@@ -125,6 +125,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/mctx.c \
 	$(srcdir)/../src/ptc/rcu.c \
 	$(srcdir)/../src/ptc/chash.c \
+	$(srcdir)/../src/ptc/cskip.c \
 	$(srcdir)/../src/ptc/dio_sched.c \
 	$(srcdir)/../src/ptc/iosched.c \
 	$(srcdir)/../src/ptc/dump.c \
@@ -214,6 +215,7 @@ LIB_OBJS	= \
 	mctx.o \
 	rcu.o \
 	chash.o \
+	cskip.o \
 	dio_sched.o \
 	iosched.o \
 	dump.o \
@@ -290,6 +292,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_proc.h \
 	$(srcdir)/../src/inc/xtc_rcu.h \
 	$(srcdir)/../src/inc/xtc_chash.h \
+	$(srcdir)/../src/inc/xtc_cskip.h \
 	$(srcdir)/../src/inc/xtc_reg.h \
 	$(srcdir)/../src/inc/xtc_res.h \
 	$(srcdir)/../src/inc/xtc_slab.h \
@@ -412,6 +415,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_slab_shm \
 		  test_rcu \
 		  test_chash \
+		  test_cskip \
 		  test_lrlock \
 		  test_lwlock \
 		  test_lockmgr \
@@ -438,7 +442,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_pgmock_smoke \
 		  test_inject_races
 
-TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_chash pbt_lrlock pbt_lwlock pbt_chan pbt_sim
+TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_chash pbt_cskip pbt_lrlock pbt_lwlock pbt_chan pbt_sim
 
 # -------------------------------------------------------------------------
 # Default goal.
@@ -678,6 +682,9 @@ rcu.o: $(srcdir)/../src/ptc/rcu.c xtc_config.h
 
 chash.o: $(srcdir)/../src/ptc/chash.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/chash.c
+
+cskip.o: $(srcdir)/../src/ptc/cskip.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/cskip.c
 
 dio_sched.o: $(srcdir)/../src/ptc/dio_sched.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/dio_sched.c
@@ -1372,6 +1379,12 @@ test_chash: $(srcdir)/../test/m13/test_chash.c \
 		-o $@ $(srcdir)/../test/m13/test_chash.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_cskip: $(srcdir)/../test/m13/test_cskip.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
+		-o $@ $(srcdir)/../test/m13/test_cskip.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_lrlock: $(srcdir)/../test/m13/test_lrlock.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
@@ -1569,6 +1582,9 @@ pbt_slab: $(srcdir)/../test/pbt/pbt_slab.c $(STATIC_LIB)
 
 pbt_chash: $(srcdir)/../test/pbt/pbt_chash.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_chash.c $(PBT_LIBS)
+
+pbt_cskip: $(srcdir)/../test/pbt/pbt_cskip.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_cskip.c $(PBT_LIBS)
 
 pbt_lrlock: $(srcdir)/../test/pbt/pbt_lrlock.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_lrlock.c $(PBT_LIBS)

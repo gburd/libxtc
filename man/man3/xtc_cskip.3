@@ -1,0 +1,213 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd Jul 14, 2026
+.Dt XTC_CSKIP 3
+.Os
+.Sh NAME
+.Nm xtc_cskip_create ,
+.Nm xtc_cskip_destroy ,
+.Nm xtc_cskip_get ,
+.Nm xtc_cskip_insert ,
+.Nm xtc_cskip_remove ,
+.Nm xtc_cskip_min ,
+.Nm xtc_cskip_floor ,
+.Nm xtc_cskip_size
+.Nd RCU-protected concurrent ordered map (skiplist)
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_cskip.h
+.In xtc_rcu.h
+.Ft int
+.Fn xtc_cskip_create "xtc_cskip_cmp_fn cmp" "xtc_cskip_t **out"
+.Ft void
+.Fn xtc_cskip_destroy "xtc_cskip_t *s"
+.Ft int
+.Fn xtc_cskip_get "xtc_cskip_t *s" "const void *key" "void **out_value"
+.Ft int
+.Fn xtc_cskip_insert "xtc_cskip_t *s" "void *key" "void *value" "void **out_old_value"
+.Ft int
+.Fn xtc_cskip_remove "xtc_cskip_t *s" "const void *key" "void **out_value"
+.Ft int
+.Fn xtc_cskip_min "xtc_cskip_t *s" "void **out_key" "void **out_value"
+.Ft int
+.Fn xtc_cskip_floor "xtc_cskip_t *s" "const void *key" "void **out_key" "void **out_value"
+.Ft size_t
+.Fn xtc_cskip_size "const xtc_cskip_t *s"
+.Sh DESCRIPTION
+.Nm xtc_cskip
+is a concurrent ordered map -- a skiplist
+.Pq Pugh 1990
+built on
+.Xr xtc_rcu 3
+so that lookups are lock-free, walking the tower with acquire-ordered
+loads and no lock at all, while writers still support concurrent
+readers.  It is the
+.Em ordered
+sibling of
+.Xr xtc_chash 3 :
+where the hash table answers only
+.Dq is this exact key present ,
+.Nm xtc_cskip
+additionally keeps keys in sorted order, so it answers
+.Dq what is the smallest key
+.Pq Fn xtc_cskip_min
+and
+.Dq what is the largest key <= K
+.Pq Fn xtc_cskip_floor ,
+the predecessor / range queries an unordered hash table cannot serve.
+.Pp
+Keys and values are caller-owned
+.Vt void *
+pointers stored verbatim, the same convention as
+.Xr xtc_chash 3 ,
+.Xr xtc_chan 3 ,
+and
+.Xr xtc_pdict 3 :
+the map never copies or frees a key or value.  A caller-supplied
+comparator
+.Fa cmp
+imposes the ordering; unlike
+.Xr xtc_chash 3 ,
+which only tests equality,
+.Nm xtc_cskip
+uses the FULL
+.Xr qsort 3
+ordering
+.Pq <0 , 0 , >0 ,
+so
+.Fa cmp
+MUST be a total order over the key space.
+.Pp
+.Fn xtc_cskip_create
+allocates an empty map.
+.Fn xtc_cskip_destroy
+frees the map's own node bookkeeping; it does not free caller-owned
+keys/values and is not safe to call concurrently with any other call
+on the same map -- quiesce first, exactly as
+.Xr xtc_rcu 3 Ns 's
+.Fn xtc_rcu_fini
+requires.
+.Pp
+.Fn xtc_cskip_get ,
+.Fn xtc_cskip_min ,
+and
+.Fn xtc_cskip_floor
+must be called inside the caller's own
+.Fn xtc_rcu_read_lock Ns / Ns Fn xtc_rcu_read_unlock
+bracket
+.Pq nesting is fine .
+Each writes its result pointer(s) on a hit and returns
+.Dv XTC_OK ,
+or returns
+.Dv XTC_E_NOTFOUND
+on a miss / empty map; the returned pointers are valid only until the
+caller's read-side ends.
+.Fn xtc_cskip_min
+reports the entry with the smallest key;
+.Fn xtc_cskip_floor
+reports the entry with the largest key
+.Fa <= key
+.Pq and Dv XTC_E_NOTFOUND if no key is <= Fa key .
+Any of the
+.Fa out_*
+arguments may be NULL if the caller does not want that half.
+.Pp
+.Fn xtc_cskip_insert
+and
+.Fn xtc_cskip_remove
+take the read-side internally; the caller does not need an outer
+read-side.
+.Fn xtc_cskip_insert
+replaces any existing entry for an equal key, writing the old value
+pointer to
+.Fa *out_old_value
+.Pq NULL for a fresh insert; the argument itself may be NULL .
+.Fn xtc_cskip_remove
+writes the removed value pointer to
+.Fa *out_value
+.Pq may be NULL
+and returns
+.Dv XTC_E_NOTFOUND
+on a miss.
+.Pp
+.Fn xtc_cskip_size
+returns the approximate live entry count -- exact with no concurrent
+writers.
+.Sh CONCURRENCY AND RECLAMATION
+Readers are lock-free.  Writers
+.Pq Fn xtc_cskip_insert , Fn xtc_cskip_remove
+serialize on a single per-map mutex in this version -- the reader path
+is the one that must scale, and it takes no lock.  A finer-grained
+per-node writer lock is a deliberate deferred optimization
+.Pq recorded in the source ;
+it is not needed until a workload shows writer contention.
+.Pp
+An insert links its new node bottom-up, level 0 first: the base level
+is the source of truth for membership, so the node is present the
+instant its level-0 link is published
+.Pq a single release store ,
+and the upper levels are only a search accelerator a reader tolerates
+seeing half-built.  A remove unlinks top-down by overwriting each
+predecessor's forward pointer with a release store of the removed
+node's own
+.Pq unchanged
+successor, then hands the node to
+.Fn xtc_rcu_retire
+-- never freed synchronously.  A reader already parked on the node
+keeps walking its untouched forward pointers until it leaves its
+read-side; RCU reclaims the node only after every such reader has
+drained.
+.Pp
+This module never calls
+.Fn xtc_rcu_synchronize
+itself; as with every other
+.Xr xtc_rcu 3
+consumer, reclamation of retired nodes happens on the caller's, a
+test's, or an application-installed reaper's schedule.
+.Sh RETURN VALUES
+.Dv XTC_OK
+on success;
+.Dv XTC_E_INVAL
+for a NULL map/key or a missing comparator at create;
+.Dv XTC_E_NOTFOUND
+on a get/remove/min/floor miss;
+.Dv XTC_E_NOMEM
+on allocation failure.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+static int
+i64_cmp(const void *a, const void *b)
+{
+	int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+	return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+int64_t k1 = 10, k2 = 20, k3 = 30;
+xtc_cskip_t *s;
+xtc_cskip_create(i64_cmp, &s);
+xtc_cskip_insert(s, &k3, "thirty", NULL);
+xtc_cskip_insert(s, &k1, "ten", NULL);
+xtc_cskip_insert(s, &k2, "twenty", NULL);
+
+xtc_rcu_read_lock();
+void *mk, *mv;
+if (xtc_cskip_min(s, &mk, &mv) == XTC_OK)
+	printf("min key %ld -> %s\en", (long)*(int64_t *)mk, (char *)mv);
+int64_t q = 25;
+void *fk, *fv;
+if (xtc_cskip_floor(s, &q, &fk, &fv) == XTC_OK)
+	printf("floor(25) -> %ld=%s\en", (long)*(int64_t *)fk, (char *)fv);
+xtc_rcu_read_unlock();
+
+xtc_cskip_destroy(s);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_rcu 3 ,
+.Xr xtc_chash 3 ,
+.Xr xtc_chan 3 ,
+.Xr xtc_pdict 3 ,
+.Xr xtc 7
+.Sh HISTORY
+The
+.Nm xtc_cskip
+ordered map first appeared in libxtc 1.21.
