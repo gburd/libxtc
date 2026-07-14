@@ -34,6 +34,8 @@
 #ifndef XTC_DUMP_H
 #define XTC_DUMP_H
 
+#include "xtc_export.h"
+
 #include "xtc.h"
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -51,18 +53,18 @@
 /* Write a best-effort runtime-state dump to file descriptor `fd`
  * (commonly STDERR_FILENO).  Never allocates; safe to call at any
  * time.  Does not abort -- callers decide what to do next. */
-void xtc_dump(int fd);
+XTC_API void xtc_dump(int fd);
 
 /* Emit `fmt`/... as a panic banner, then xtc_dump(STDERR_FILENO), then
  * abort().  Use the XTC_PANIC macro rather than calling directly. */
-void xtc_panic(const char *file, int line, const char *fmt, ...) XTC_NORETURN;
+XTC_API void xtc_panic(const char *file, int line, const char *fmt, ...) XTC_NORETURN;
 
 /* Install a fatal-signal handler (SIGSEGV, SIGBUS, SIGABRT, SIGFPE,
  * SIGILL) that emits a backtrace + best-effort runtime dump to stderr,
  * then re-raises the signal with the default disposition (so a core is
  * still produced).  Returns XTC_OK, or XTC_E_NOSYS where unsupported.
  * Idempotent.  Does NOT install SIGCHLD/SIGTERM/etc. -- only faults. */
-int xtc_crash_handler_install(void);
+XTC_API int xtc_crash_handler_install(void);
 
 /* Log `fmt`/..., dump runtime state, and abort. */
 #define XTC_PANIC(...) xtc_panic(__FILE__, __LINE__, __VA_ARGS__)

@@ -10,6 +10,8 @@
 #ifndef XTC_LOOP_H
 #define XTC_LOOP_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 
 #include "xtc_io.h"
@@ -63,10 +65,10 @@ typedef void (*xtc_timer_fn)(void *user);
  * PUBLIC: int  xtc_timer_set __P((xtc_loop_t *, int64_t, xtc_timer_fn, void *, xtc_timer_t **));
  * PUBLIC: int  xtc_timer_cancel __P((xtc_timer_t *));
  */
-int  xtc_loop_init(xtc_loop_t **out);
-int  xtc_loop_fini(xtc_loop_t *loop);
-int  xtc_loop_run(xtc_loop_t *loop);
-int  xtc_loop_stop(xtc_loop_t *loop);
+XTC_API int  xtc_loop_init(xtc_loop_t **out);
+XTC_API int  xtc_loop_fini(xtc_loop_t *loop);
+XTC_API int  xtc_loop_run(xtc_loop_t *loop);
+XTC_API int  xtc_loop_stop(xtc_loop_t *loop);
 
 /*
  * Borrow the loop's resource accountant.  Non-NULL after init.
@@ -76,17 +78,17 @@ int  xtc_loop_stop(xtc_loop_t *loop);
  * PUBLIC: struct xtc_res *xtc_loop_res __P((xtc_loop_t *));
  */
 struct xtc_res;
-struct xtc_res *xtc_loop_res(xtc_loop_t *loop);
+XTC_API struct xtc_res *xtc_loop_res(xtc_loop_t *loop);
 
-int  xtc_task_spawn(xtc_loop_t *loop, xtc_task_fn fn, void *user,
-                    xtc_task_t **out_task);
-int  xtc_task_waker(xtc_task_t *task, xtc_waker_t *out);
+XTC_API int  xtc_task_spawn(xtc_loop_t *loop, xtc_task_fn fn, void *user,
+                            xtc_task_t **out_task);
+XTC_API int  xtc_task_waker(xtc_task_t *task, xtc_waker_t *out);
 
 /*
  * Park the calling task on a timer.  The task's fn returned PENDING
  * (or is about to); after delay_ns elapses, the loop will re-run fn.
  */
-int  xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns);
+XTC_API int  xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns);
 
 /*
  * Park the calling task on fd readiness.  When the fd becomes ready
@@ -97,12 +99,12 @@ int  xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns);
  * moment; a second park while the first is in flight returns
  * XTC_E_INVAL.
  */
-int  xtc_task_park_on_fd(xtc_task_t *self, int fd, uint32_t interest);
+XTC_API int  xtc_task_park_on_fd(xtc_task_t *self, int fd, uint32_t interest);
 
-int  xtc_waker_wake(const xtc_waker_t *w);
+XTC_API int  xtc_waker_wake(const xtc_waker_t *w);
 
-int  xtc_timer_set(xtc_loop_t *loop, int64_t delay_ns,
-                   xtc_timer_fn fn, void *user, xtc_timer_t **out_timer);
-int  xtc_timer_cancel(xtc_timer_t *timer);
+XTC_API int  xtc_timer_set(xtc_loop_t *loop, int64_t delay_ns,
+                           xtc_timer_fn fn, void *user, xtc_timer_t **out_timer);
+XTC_API int  xtc_timer_cancel(xtc_timer_t *timer);
 
 #endif /* XTC_LOOP_H */

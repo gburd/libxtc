@@ -17,6 +17,8 @@
 #ifndef XTC_SYNC_H
 #define XTC_SYNC_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 
 #include "xtc.h"
@@ -32,18 +34,18 @@ typedef struct xtc_notify xtc_notify_t;
  * PUBLIC: int  xtc_notify_signal __P((xtc_notify_t *));
  * PUBLIC: int  xtc_notify_wait __P((xtc_notify_t *, int64_t));
  */
-int  xtc_notify_create(xtc_notify_t **out);
-void xtc_notify_destroy(xtc_notify_t *n);
+XTC_API int  xtc_notify_create(xtc_notify_t **out);
+XTC_API void xtc_notify_destroy(xtc_notify_t *n);
 
 /* Wake one waiter.  If no one is waiting, the signal is "stored"
  * and the next wait returns immediately.  Subsequent signals
  * before a wait collapse into one. */
-int  xtc_notify_signal(xtc_notify_t *n);
+XTC_API int  xtc_notify_signal(xtc_notify_t *n);
 
 /* Block (yield) the calling task until a signal arrives.  timeout_ns
  * < 0 = forever; 0 = non-blocking; > 0 = bounded.  Returns XTC_E_AGAIN
  * on timeout, XTC_OK on signal received. */
-int  xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns);
+XTC_API int  xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns);
 
 /* ----- semaphore -------------------------------------------------- */
 
@@ -57,19 +59,19 @@ typedef struct xtc_sem xtc_sem_t;
  * PUBLIC: int  xtc_sem_try_acquire __P((xtc_sem_t *, unsigned));
  * PUBLIC: int  xtc_sem_count __P((const xtc_sem_t *));
  */
-int  xtc_sem_create(unsigned initial, xtc_sem_t **out);
-void xtc_sem_destroy(xtc_sem_t *s);
+XTC_API int  xtc_sem_create(unsigned initial, xtc_sem_t **out);
+XTC_API void xtc_sem_destroy(xtc_sem_t *s);
 
 /* Add `n` units. */
-int  xtc_sem_post(xtc_sem_t *s, unsigned n);
+XTC_API int  xtc_sem_post(xtc_sem_t *s, unsigned n);
 
 /* Take `n` units, blocking up to timeout_ns. */
-int  xtc_sem_acquire(xtc_sem_t *s, unsigned n, int64_t timeout_ns);
+XTC_API int  xtc_sem_acquire(xtc_sem_t *s, unsigned n, int64_t timeout_ns);
 
 /* Take `n` units, returning XTC_E_AGAIN immediately if not enough. */
-int  xtc_sem_try_acquire(xtc_sem_t *s, unsigned n);
+XTC_API int  xtc_sem_try_acquire(xtc_sem_t *s, unsigned n);
 
-int  xtc_sem_count(const xtc_sem_t *s);
+XTC_API int  xtc_sem_count(const xtc_sem_t *s);
 
 /* ----- abort_source ----------------------------------------------- */
 
@@ -88,15 +90,15 @@ typedef struct xtc_abort_token  xtc_abort_token_t;
  * PUBLIC: int  xtc_abort_token_is_aborted __P((const xtc_abort_token_t *));
  * PUBLIC: int  xtc_abort_token_reason __P((const xtc_abort_token_t *));
  */
-int  xtc_abort_source_create(xtc_abort_source_t **out);
-void xtc_abort_source_destroy(xtc_abort_source_t *s);
+XTC_API int  xtc_abort_source_create(xtc_abort_source_t **out);
+XTC_API void xtc_abort_source_destroy(xtc_abort_source_t *s);
 
 /* Atomically fire the source with a reason code.  All current and
  * future tokens see is_aborted=true. */
-int  xtc_abort_source_fire(xtc_abort_source_t *s, int reason);
+XTC_API int  xtc_abort_source_fire(xtc_abort_source_t *s, int reason);
 
 /* Mint a token bound to the source. */
-int  xtc_abort_source_token(xtc_abort_source_t *s, xtc_abort_token_t *out);
+XTC_API int  xtc_abort_source_token(xtc_abort_source_t *s, xtc_abort_token_t *out);
 
 /*
  * Public token shape (so callers can keep one on the stack).  The
@@ -106,8 +108,8 @@ struct xtc_abort_token {
 	xtc_abort_source_t *src;
 };
 
-int  xtc_abort_token_is_aborted(const xtc_abort_token_t *t);
-int  xtc_abort_token_reason(const xtc_abort_token_t *t);
+XTC_API int  xtc_abort_token_is_aborted(const xtc_abort_token_t *t);
+XTC_API int  xtc_abort_token_reason(const xtc_abort_token_t *t);
 
 /* ----- mutex ------------------------------------------------------ */
 
@@ -131,7 +133,7 @@ typedef struct xtc_amutex xtc_amutex_t;
  * PUBLIC: int  xtc_amutex_try_lock __P((xtc_amutex_t *));
  * PUBLIC: int  xtc_amutex_unlock __P((xtc_amutex_t *));
  */
-int  xtc_amutex_create(xtc_amutex_t **out);
+XTC_API int  xtc_amutex_create(xtc_amutex_t **out);
 
 /*
  * Recursive variant: with XTC_AMUTEX_RECURSIVE the same owner may
@@ -143,7 +145,7 @@ int  xtc_amutex_create(xtc_amutex_t **out);
  * across loops.
  */
 #define XTC_AMUTEX_RECURSIVE 0x1u
-int  xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags);
+XTC_API int  xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags);
 
 /*
  * Process-global static mutexes.  Returns a stable, lazily-created
@@ -153,12 +155,12 @@ int  xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags);
  * need named, never-freed mutexes.
  */
 #define XTC_AMUTEX_STATIC_MAX 32u
-xtc_amutex_t *xtc_amutex_static(unsigned slot);
+XTC_API xtc_amutex_t *xtc_amutex_static(unsigned slot);
 
-void xtc_amutex_destroy(xtc_amutex_t *m);
-int  xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns);
-int  xtc_amutex_try_lock(xtc_amutex_t *m);
-int  xtc_amutex_unlock(xtc_amutex_t *m);
+XTC_API void xtc_amutex_destroy(xtc_amutex_t *m);
+XTC_API int  xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns);
+XTC_API int  xtc_amutex_try_lock(xtc_amutex_t *m);
+XTC_API int  xtc_amutex_unlock(xtc_amutex_t *m);
 
 /* ----- arwlock (parking reader/writer latch) --------------------- */
 
@@ -181,11 +183,11 @@ typedef struct xtc_arwlock xtc_arwlock_t;
  * PUBLIC: int  xtc_arwlock_wrlock __P((xtc_arwlock_t *, int64_t));
  * PUBLIC: int  xtc_arwlock_unlock __P((xtc_arwlock_t *));
  */
-int  xtc_arwlock_create(xtc_arwlock_t **out);
-void xtc_arwlock_destroy(xtc_arwlock_t *r);
-int  xtc_arwlock_rdlock(xtc_arwlock_t *r, int64_t timeout_ns);
-int  xtc_arwlock_wrlock(xtc_arwlock_t *r, int64_t timeout_ns);
-int  xtc_arwlock_unlock(xtc_arwlock_t *r);
+XTC_API int  xtc_arwlock_create(xtc_arwlock_t **out);
+XTC_API void xtc_arwlock_destroy(xtc_arwlock_t *r);
+XTC_API int  xtc_arwlock_rdlock(xtc_arwlock_t *r, int64_t timeout_ns);
+XTC_API int  xtc_arwlock_wrlock(xtc_arwlock_t *r, int64_t timeout_ns);
+XTC_API int  xtc_arwlock_unlock(xtc_arwlock_t *r);
 
 /* ----- rwlock ----------------------------------------------------- */
 
@@ -200,11 +202,11 @@ typedef struct xtc_rwlock xtc_rwlock_t;
  * PUBLIC: int  xtc_rwlock_wrlock __P((xtc_rwlock_t *, int64_t));
  * PUBLIC: int  xtc_rwlock_unlock __P((xtc_rwlock_t *));
  */
-int  xtc_rwlock_create(xtc_rwlock_t **out);
-void xtc_rwlock_destroy(xtc_rwlock_t *r);
-int  xtc_rwlock_rdlock(xtc_rwlock_t *r, int64_t timeout_ns);
-int  xtc_rwlock_wrlock(xtc_rwlock_t *r, int64_t timeout_ns);
-int  xtc_rwlock_unlock(xtc_rwlock_t *r);
+XTC_API int  xtc_rwlock_create(xtc_rwlock_t **out);
+XTC_API void xtc_rwlock_destroy(xtc_rwlock_t *r);
+XTC_API int  xtc_rwlock_rdlock(xtc_rwlock_t *r, int64_t timeout_ns);
+XTC_API int  xtc_rwlock_wrlock(xtc_rwlock_t *r, int64_t timeout_ns);
+XTC_API int  xtc_rwlock_unlock(xtc_rwlock_t *r);
 
 /* ----- barrier ---------------------------------------------------- */
 
@@ -218,9 +220,9 @@ typedef struct xtc_barrier xtc_barrier_t;
  * PUBLIC: void xtc_barrier_destroy __P((xtc_barrier_t *));
  * PUBLIC: int  xtc_barrier_wait __P((xtc_barrier_t *));
  */
-int  xtc_barrier_create(unsigned n, xtc_barrier_t **out);
-void xtc_barrier_destroy(xtc_barrier_t *b);
-int  xtc_barrier_wait(xtc_barrier_t *b);
+XTC_API int  xtc_barrier_create(unsigned n, xtc_barrier_t **out);
+XTC_API void xtc_barrier_destroy(xtc_barrier_t *b);
+XTC_API int  xtc_barrier_wait(xtc_barrier_t *b);
 
 /* ----- gate ------------------------------------------------------- */
 
@@ -247,12 +249,12 @@ typedef struct xtc_gate xtc_gate_t;
  * PUBLIC: int  xtc_gate_drain __P((xtc_gate_t *, int64_t));
  * PUBLIC: int  xtc_gate_count __P((const xtc_gate_t *));
  */
-int  xtc_gate_create(xtc_gate_t **out);
-void xtc_gate_destroy(xtc_gate_t *g);
-int  xtc_gate_enter(xtc_gate_t *g);
-int  xtc_gate_leave(xtc_gate_t *g);
-int  xtc_gate_close(xtc_gate_t *g);
-int  xtc_gate_drain(xtc_gate_t *g, int64_t timeout_ns);
-int  xtc_gate_count(const xtc_gate_t *g);
+XTC_API int  xtc_gate_create(xtc_gate_t **out);
+XTC_API void xtc_gate_destroy(xtc_gate_t *g);
+XTC_API int  xtc_gate_enter(xtc_gate_t *g);
+XTC_API int  xtc_gate_leave(xtc_gate_t *g);
+XTC_API int  xtc_gate_close(xtc_gate_t *g);
+XTC_API int  xtc_gate_drain(xtc_gate_t *g, int64_t timeout_ns);
+XTC_API int  xtc_gate_count(const xtc_gate_t *g);
 
 #endif /* XTC_SYNC_H */

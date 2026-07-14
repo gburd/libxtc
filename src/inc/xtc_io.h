@@ -17,6 +17,8 @@
 #ifndef XTC_IO_H
 #define XTC_IO_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 
 typedef struct xtc_io xtc_io_t;
@@ -87,14 +89,14 @@ typedef struct xtc_aio {
  */
 
 /* Lifecycle. */
-int          xtc_io_init(xtc_io_t **out);
-int          xtc_io_fini(xtc_io_t *io);
-const char  *xtc_io_backend_name(void);
+XTC_API int          xtc_io_init(xtc_io_t **out);
+XTC_API int          xtc_io_fini(xtc_io_t *io);
+XTC_API const char  *xtc_io_backend_name(void);
 
 /* Registration. */
-int          xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag);
-int          xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag);
-int          xtc_io_del_fd(xtc_io_t *io, int fd);
+XTC_API int          xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag);
+XTC_API int          xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag);
+XTC_API int          xtc_io_del_fd(xtc_io_t *io, int fd);
 
 /*
  * xtc_io_poll --
@@ -107,14 +109,14 @@ int          xtc_io_del_fd(xtc_io_t *io, int fd);
  *		<  0  -> wait indefinitely (until an fd becomes ready or
  *		         xtc_io_wakeup is called)
  */
-int          xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
-                         int64_t timeout_ns, int *n_out);
+XTC_API int          xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
+                                 int64_t timeout_ns, int *n_out);
 
 /* Submit an async file op.  XTC_OK if queued (the caller parks until
  * the completion event with tag a->tag arrives, then reads a->res);
  * XTC_E_NOSYS if the backend has no native file completion (caller
  * should offload instead). */
-int          xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a);
+XTC_API int          xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a);
 
 /*
  * xtc_io_wakeup --
@@ -122,6 +124,6 @@ int          xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a);
  *	this io to return.  Safe to call concurrently from many threads;
  *	multiple wakeups before the next poll coalesce into one event.
  */
-int          xtc_io_wakeup(xtc_io_t *io);
+XTC_API int          xtc_io_wakeup(xtc_io_t *io);
 
 #endif /* XTC_IO_H */

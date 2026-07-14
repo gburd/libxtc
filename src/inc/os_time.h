@@ -10,6 +10,8 @@
 #ifndef XTC_OS_TIME_H
 #define XTC_OS_TIME_H
 
+#include "xtc_export.h"
+
 #include <stdint.h>
 
 #define XTC_NS_PER_SEC  1000000000LL
@@ -21,8 +23,8 @@
  * PUBLIC: int __os_clock_real __P((int64_t *));
  * PUBLIC: int __os_sleep_ns __P((int64_t));
  */
-int __os_clock_mono(int64_t *out_ns);
-int __os_clock_real(int64_t *out_ns);
-int __os_sleep_ns(int64_t ns);
+XTC_API int __os_clock_mono(int64_t *out_ns);
+XTC_API int __os_clock_real(int64_t *out_ns);
+XTC_API int __os_sleep_ns(int64_t ns);
 
 #endif /* XTC_OS_TIME_H */

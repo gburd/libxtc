@@ -22,6 +22,8 @@
 #ifndef XTC_STREAM_H
 #define XTC_STREAM_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 
 #include "xtc.h"
@@ -48,41 +50,41 @@ typedef int (*xtc_stream_next_fn)(void *ctx, void **out);
  */
 
 /* Create a stream from a next() function and its context. */
-int  xtc_stream_create(xtc_stream_next_fn next, void *ctx,
-                       xtc_stream_t **out);
+XTC_API int  xtc_stream_create(xtc_stream_next_fn next, void *ctx,
+                               xtc_stream_t **out);
 
 /* Destroy a stream.  Destroying a combinator stream (map/filter) also
  * destroys the source stream it wraps, recursively; destroy only the
  * outermost stream.  Does not touch the underlying demand channel of a
  * from_demand stream (the caller owns that). */
-void xtc_stream_destroy(xtc_stream_t *s);
+XTC_API void xtc_stream_destroy(xtc_stream_t *s);
 
 /* Pull the next value.  See xtc_stream_next_fn for the return codes. */
-int  xtc_stream_next(xtc_stream_t *s, void **out);
+XTC_API int  xtc_stream_next(xtc_stream_t *s, void **out);
 
 /* map: each pulled value v becomes fn(v, user).  Lazy: fn runs only when
  * the resulting stream is pulled.  The new stream OWNS `s`. */
-int  xtc_stream_map(xtc_stream_t *s,
-                    void *(*fn)(void *v, void *user), void *user,
-                    xtc_stream_t **out);
+XTC_API int  xtc_stream_map(xtc_stream_t *s,
+                            void *(*fn)(void *v, void *user), void *user,
+                            xtc_stream_t **out);
 
 /* filter: values for which pred(v, user) returns 0 are skipped.  The new
  * stream OWNS `s`. */
-int  xtc_stream_filter(xtc_stream_t *s,
-                       int (*pred)(void *v, void *user), void *user,
-                       xtc_stream_t **out);
+XTC_API int  xtc_stream_filter(xtc_stream_t *s,
+                               int (*pred)(void *v, void *user), void *user,
+                               xtc_stream_t **out);
 
 /* Drain the stream, calling fn(v, user) for each value until
  * end-of-stream.  A nonzero fn return stops early and is returned.  An
  * XTC_E_AGAIN from the source is treated as "retry": for_each spins on
  * it, so use it only with a source that will eventually produce or
  * finish (e.g. a fully-buffered demand channel that has been closed). */
-int  xtc_stream_for_each(xtc_stream_t *s,
-                         int (*fn)(void *v, void *user), void *user);
+XTC_API int  xtc_stream_for_each(xtc_stream_t *s,
+                                 int (*fn)(void *v, void *user), void *user);
 
 /* Adapt a demand channel into a stream: each pull grants one unit of
  * demand and returns the next buffered item (XTC_E_AGAIN until one
  * arrives, XTC_E_NOTFOUND once the channel is closed and drained). */
-int  xtc_stream_from_demand(xtc_chan_demand_t *ch, xtc_stream_t **out);
+XTC_API int  xtc_stream_from_demand(xtc_chan_demand_t *ch, xtc_stream_t **out);
 
 #endif /* XTC_STREAM_H */

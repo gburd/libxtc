@@ -21,6 +21,8 @@
 #ifndef XTC_CHAN_H
 #define XTC_CHAN_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -39,25 +41,25 @@ typedef struct xtc_chan_oneshot xtc_chan_oneshot_t;
  * PUBLIC: int  xtc_chan_oneshot_try_recv __P((xtc_chan_oneshot_t *, void **));
  * PUBLIC: int  xtc_chan_oneshot_set_waker __P((xtc_chan_oneshot_t *, const xtc_waker_t *));
  */
-int  xtc_chan_oneshot_create(xtc_res_t *res, xtc_chan_oneshot_t **out);
-void xtc_chan_oneshot_destroy(xtc_chan_oneshot_t *c);
+XTC_API int  xtc_chan_oneshot_create(xtc_res_t *res, xtc_chan_oneshot_t **out);
+XTC_API void xtc_chan_oneshot_destroy(xtc_chan_oneshot_t *c);
 
 /*
  * Send the single message.  Idempotent on a closed channel: a second
  * send returns XTC_E_INVAL.  Always succeeds in the open case (the
  * slot has capacity 1).  If a waker has been registered, fires it.
  */
-int  xtc_chan_oneshot_send(xtc_chan_oneshot_t *c, void *msg);
+XTC_API int  xtc_chan_oneshot_send(xtc_chan_oneshot_t *c, void *msg);
 
 /* Non-blocking receive.  Returns XTC_E_AGAIN if nothing yet. */
-int  xtc_chan_oneshot_try_recv(xtc_chan_oneshot_t *c, void **out);
+XTC_API int  xtc_chan_oneshot_try_recv(xtc_chan_oneshot_t *c, void **out);
 
 /*
  * Register a waker to fire when send happens.  Replaces any prior
  * waker.  The receiver pattern: register waker, return PENDING from
  * the task; when waker fires, try_recv.
  */
-int  xtc_chan_oneshot_set_waker(xtc_chan_oneshot_t *c, const xtc_waker_t *w);
+XTC_API int  xtc_chan_oneshot_set_waker(xtc_chan_oneshot_t *c, const xtc_waker_t *w);
 
 /* ----- mpsc bounded ------------------------------------------------ */
 
@@ -72,9 +74,9 @@ typedef struct xtc_chan_mpsc xtc_chan_mpsc_t;
  * PUBLIC: int  xtc_chan_mpsc_close __P((xtc_chan_mpsc_t *));
  * PUBLIC: size_t xtc_chan_mpsc_len __P((const xtc_chan_mpsc_t *));
  */
-int    xtc_chan_mpsc_create(xtc_res_t *res, size_t capacity,
-                            xtc_chan_mpsc_t **out);
-void   xtc_chan_mpsc_destroy(xtc_chan_mpsc_t *c);
+XTC_API int    xtc_chan_mpsc_create(xtc_res_t *res, size_t capacity,
+                                    xtc_chan_mpsc_t **out);
+XTC_API void   xtc_chan_mpsc_destroy(xtc_chan_mpsc_t *c);
 
 /*
  * Try to send.  Returns:
@@ -85,21 +87,21 @@ void   xtc_chan_mpsc_destroy(xtc_chan_mpsc_t *c);
  *   XTC_E_INVAL       closed channel
  *   XTC_E_RESOURCE    global slot cap (xtc_res XTC_RES_CHAN_SLOTS) hit
  */
-int    xtc_chan_mpsc_try_send(xtc_chan_mpsc_t *c, void *msg);
+XTC_API int    xtc_chan_mpsc_try_send(xtc_chan_mpsc_t *c, void *msg);
 
 /* Non-blocking receive.  Returns XTC_E_AGAIN on empty. */
-int    xtc_chan_mpsc_try_recv(xtc_chan_mpsc_t *c, void **out);
+XTC_API int    xtc_chan_mpsc_try_recv(xtc_chan_mpsc_t *c, void **out);
 
 /* Register the consumer's waker.  Fired on every successful send. */
-int    xtc_chan_mpsc_set_waker(xtc_chan_mpsc_t *c, const xtc_waker_t *w);
+XTC_API int    xtc_chan_mpsc_set_waker(xtc_chan_mpsc_t *c, const xtc_waker_t *w);
 
 /*
  * Close the channel.  Subsequent sends fail; pending receives drain
  * the buffer then return XTC_E_INVAL on the next call.
  */
-int    xtc_chan_mpsc_close(xtc_chan_mpsc_t *c);
+XTC_API int    xtc_chan_mpsc_close(xtc_chan_mpsc_t *c);
 
-size_t xtc_chan_mpsc_len(const xtc_chan_mpsc_t *c);
+XTC_API size_t xtc_chan_mpsc_len(const xtc_chan_mpsc_t *c);
 
 /* ----- watch (latest-value-wins) ----------------------------------- */
 
@@ -111,10 +113,10 @@ typedef struct xtc_chan_watch xtc_chan_watch_t;
  * PUBLIC: int  xtc_chan_watch_send __P((xtc_chan_watch_t *, void *));
  * PUBLIC: int  xtc_chan_watch_recv __P((xtc_chan_watch_t *, void **));
  */
-int  xtc_chan_watch_create(xtc_res_t *res, xtc_chan_watch_t **out);
-void xtc_chan_watch_destroy(xtc_chan_watch_t *c);
-int  xtc_chan_watch_send(xtc_chan_watch_t *c, void *value);
-int  xtc_chan_watch_recv(xtc_chan_watch_t *c, void **out);
+XTC_API int  xtc_chan_watch_create(xtc_res_t *res, xtc_chan_watch_t **out);
+XTC_API void xtc_chan_watch_destroy(xtc_chan_watch_t *c);
+XTC_API int  xtc_chan_watch_send(xtc_chan_watch_t *c, void *value);
+XTC_API int  xtc_chan_watch_recv(xtc_chan_watch_t *c, void **out);
 
 /* ----- mpmc bounded ----------------------------------------------- */
 
@@ -134,13 +136,13 @@ typedef struct xtc_chan_mpmc xtc_chan_mpmc_t;
  * PUBLIC: int    xtc_chan_mpmc_close __P((xtc_chan_mpmc_t *));
  * PUBLIC: size_t xtc_chan_mpmc_len __P((const xtc_chan_mpmc_t *));
  */
-int    xtc_chan_mpmc_create(xtc_res_t *res, size_t capacity,
-                            xtc_chan_mpmc_t **out);
-void   xtc_chan_mpmc_destroy(xtc_chan_mpmc_t *c);
-int    xtc_chan_mpmc_try_send(xtc_chan_mpmc_t *c, void *msg);
-int    xtc_chan_mpmc_try_recv(xtc_chan_mpmc_t *c, void **out);
-int    xtc_chan_mpmc_close(xtc_chan_mpmc_t *c);
-size_t xtc_chan_mpmc_len(const xtc_chan_mpmc_t *c);
+XTC_API int    xtc_chan_mpmc_create(xtc_res_t *res, size_t capacity,
+                                    xtc_chan_mpmc_t **out);
+XTC_API void   xtc_chan_mpmc_destroy(xtc_chan_mpmc_t *c);
+XTC_API int    xtc_chan_mpmc_try_send(xtc_chan_mpmc_t *c, void *msg);
+XTC_API int    xtc_chan_mpmc_try_recv(xtc_chan_mpmc_t *c, void **out);
+XTC_API int    xtc_chan_mpmc_close(xtc_chan_mpmc_t *c);
+XTC_API size_t xtc_chan_mpmc_len(const xtc_chan_mpmc_t *c);
 
 /* ----- broadcast --------------------------------------------------- */
 
@@ -165,13 +167,13 @@ typedef struct xtc_chan_broadcast_recv xtc_chan_broadcast_recv_t;
  * PUBLIC: void xtc_chan_broadcast_unsubscribe __P((xtc_chan_broadcast_recv_t *));
  * PUBLIC: int  xtc_chan_broadcast_recv __P((xtc_chan_broadcast_recv_t *, void **, int *));
  */
-int  xtc_chan_broadcast_create(xtc_res_t *res, size_t capacity,
-                                xtc_chan_broadcast_t **out);
-void xtc_chan_broadcast_destroy(xtc_chan_broadcast_t *c);
-int  xtc_chan_broadcast_send(xtc_chan_broadcast_t *c, void *msg);
-int  xtc_chan_broadcast_subscribe(xtc_chan_broadcast_t *c,
-                                   xtc_chan_broadcast_recv_t **out_recv);
-void xtc_chan_broadcast_unsubscribe(xtc_chan_broadcast_recv_t *r);
+XTC_API int  xtc_chan_broadcast_create(xtc_res_t *res, size_t capacity,
+                                        xtc_chan_broadcast_t **out);
+XTC_API void xtc_chan_broadcast_destroy(xtc_chan_broadcast_t *c);
+XTC_API int  xtc_chan_broadcast_send(xtc_chan_broadcast_t *c, void *msg);
+XTC_API int  xtc_chan_broadcast_subscribe(xtc_chan_broadcast_t *c,
+                                           xtc_chan_broadcast_recv_t **out_recv);
+XTC_API void xtc_chan_broadcast_unsubscribe(xtc_chan_broadcast_recv_t *r);
 
 /*
  * Receive the next message visible to this subscriber.  On success
@@ -179,8 +181,8 @@ void xtc_chan_broadcast_unsubscribe(xtc_chan_broadcast_recv_t *r);
  * messages because we fell behind).  XTC_E_AGAIN if the cursor is
  * caught up; XTC_E_INVAL if r is NULL.
  */
-int  xtc_chan_broadcast_recv(xtc_chan_broadcast_recv_t *r,
-                              void **out, int *lagged);
+XTC_API int  xtc_chan_broadcast_recv(xtc_chan_broadcast_recv_t *r,
+                                      void **out, int *lagged);
 
 /* ----- demand (pull-based / GenStage backpressure) ----------------- */
 
@@ -212,35 +214,35 @@ typedef struct xtc_chan_demand xtc_chan_demand_t;
  * PUBLIC: int    xtc_chan_demand_set_consumer_waker __P((xtc_chan_demand_t *, const xtc_waker_t *));
  * PUBLIC: int    xtc_chan_demand_close __P((xtc_chan_demand_t *));
  */
-int    xtc_chan_demand_create(xtc_res_t *res, size_t capacity,
-                              xtc_chan_demand_t **out);
-void   xtc_chan_demand_destroy(xtc_chan_demand_t *c);
+XTC_API int    xtc_chan_demand_create(xtc_res_t *res, size_t capacity,
+                                      xtc_chan_demand_t **out);
+XTC_API void   xtc_chan_demand_destroy(xtc_chan_demand_t *c);
 
 /* Grant `n` units of demand.  Wakes the producer's waker if set. */
-int    xtc_chan_demand_ask(xtc_chan_demand_t *c, size_t n);
+XTC_API int    xtc_chan_demand_ask(xtc_chan_demand_t *c, size_t n);
 
 /* Send an item, consuming one unit of demand.  XTC_E_AGAIN if demand is
  * exhausted or the buffer is full; XTC_E_INVAL if closed. */
-int    xtc_chan_demand_send(xtc_chan_demand_t *c, void *msg);
+XTC_API int    xtc_chan_demand_send(xtc_chan_demand_t *c, void *msg);
 
 /* Non-blocking receive.  XTC_E_AGAIN if empty.  Does not grant demand. */
-int    xtc_chan_demand_try_recv(xtc_chan_demand_t *c, void **out);
+XTC_API int    xtc_chan_demand_try_recv(xtc_chan_demand_t *c, void **out);
 
 /* Outstanding (un-consumed) demand. */
-size_t xtc_chan_demand_outstanding(const xtc_chan_demand_t *c);
+XTC_API size_t xtc_chan_demand_outstanding(const xtc_chan_demand_t *c);
 
 /* Buffered items not yet received. */
-size_t xtc_chan_demand_len(const xtc_chan_demand_t *c);
+XTC_API size_t xtc_chan_demand_len(const xtc_chan_demand_t *c);
 
 /* Producer waker: fired when the consumer grants demand (xtc_chan_demand_ask). */
-int    xtc_chan_demand_set_producer_waker(xtc_chan_demand_t *c,
-                                          const xtc_waker_t *w);
+XTC_API int    xtc_chan_demand_set_producer_waker(xtc_chan_demand_t *c,
+                                                  const xtc_waker_t *w);
 
 /* Consumer waker: fired when the producer sends an item. */
-int    xtc_chan_demand_set_consumer_waker(xtc_chan_demand_t *c,
-                                          const xtc_waker_t *w);
+XTC_API int    xtc_chan_demand_set_consumer_waker(xtc_chan_demand_t *c,
+                                                  const xtc_waker_t *w);
 
 /* Close the channel; subsequent sends fail, buffered items still drain. */
-int    xtc_chan_demand_close(xtc_chan_demand_t *c);
+XTC_API int    xtc_chan_demand_close(xtc_chan_demand_t *c);
 
 #endif /* XTC_CHAN_H */

@@ -24,6 +24,8 @@
 #ifndef XTC_PDICT_H
 #define XTC_PDICT_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 
 #include "xtc.h"
@@ -42,18 +44,18 @@ typedef void (*xtc_pdict_dtor_fn)(void *value);
 /* All operations apply to the calling proc's dict.  When called
  * outside any proc, all return XTC_E_INVAL. */
 
-int  xtc_pdict_put(const char *key, void *value);
-int  xtc_pdict_put_with_dtor(const char *key, void *value,
-                             xtc_pdict_dtor_fn dtor);
+XTC_API int  xtc_pdict_put(const char *key, void *value);
+XTC_API int  xtc_pdict_put_with_dtor(const char *key, void *value,
+                                     xtc_pdict_dtor_fn dtor);
 
 /* Retrieve.  Sets *value if found; returns XTC_E_INVAL if no entry. */
-int  xtc_pdict_get(const char *key, void **value);
+XTC_API int  xtc_pdict_get(const char *key, void **value);
 
 /* Remove (and run destructor if any).  Returns XTC_OK if erased,
  * XTC_E_INVAL if absent. */
-int  xtc_pdict_erase(const char *key);
+XTC_API int  xtc_pdict_erase(const char *key);
 
-int  xtc_pdict_count(void);
-int  xtc_pdict_clear(void);
+XTC_API int  xtc_pdict_count(void);
+XTC_API int  xtc_pdict_clear(void);
 
 #endif /* XTC_PDICT_H */

@@ -30,6 +30,8 @@
 #ifndef XTC_LOG_H
 #define XTC_LOG_H
 
+#include "xtc_export.h"
+
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -84,16 +86,16 @@ typedef struct xtc_log_opts {
  * PUBLIC: int  xtc_log_drop_count __P((const xtc_log_t *));
  */
 
-int  xtc_log_create(const xtc_log_opts_t *opts, xtc_log_t **out);
-void xtc_log_destroy(xtc_log_t *log);
+XTC_API int  xtc_log_create(const xtc_log_opts_t *opts, xtc_log_t **out);
+XTC_API void xtc_log_destroy(xtc_log_t *log);
 
-int  xtc_log_set_floor(xtc_log_t *log, xtc_log_level_t lvl);
+XTC_API int  xtc_log_set_floor(xtc_log_t *log, xtc_log_level_t lvl);
 
 /* Set the process-wide default logger.  Subsequent macro-driven
  * calls (XTC_LOG_INFO, etc.) route here.  Returns the prior default
  * (or NULL if none). */
-int  xtc_log_set_default(xtc_log_t *log);
-xtc_log_t *xtc_log_default(void);
+XTC_API int  xtc_log_set_default(xtc_log_t *log);
+XTC_API xtc_log_t *xtc_log_default(void);
 
 /* Append a record to the ring.  Non-blocking; if the ring is full
  * the oldest record is dropped and a counter is bumped. */
@@ -102,20 +104,20 @@ xtc_log_t *xtc_log_default(void);
 #else
 #  define XTC_LOG_PRINTF_FMT   /* MSVC: no prototype format attribute */
 #endif
-void xtc_log_write(xtc_log_t *log, xtc_log_level_t lvl,
-                   const char *fmt, ...)
+XTC_API void xtc_log_write(xtc_log_t *log, xtc_log_level_t lvl,
+                           const char *fmt, ...)
     XTC_LOG_PRINTF_FMT;
-void xtc_log_vwrite(xtc_log_t *log, xtc_log_level_t lvl,
-                    const char *fmt, va_list ap);
+XTC_API void xtc_log_vwrite(xtc_log_t *log, xtc_log_level_t lvl,
+                            const char *fmt, va_list ap);
 
 /* Drain the ring synchronously: read every queued record and write
  * it to the sink.  Returns the number of records drained.  Useful
  * for tests; in production a dedicated consumer thread/proc would
  * call this periodically. */
-int  xtc_log_drain(xtc_log_t *log);
+XTC_API int  xtc_log_drain(xtc_log_t *log);
 
 /* Number of records dropped because the ring was full. */
-int  xtc_log_drop_count(const xtc_log_t *log);
+XTC_API int  xtc_log_drop_count(const xtc_log_t *log);
 
 /* Convenience macros: pass through the default logger.  Calls below
  * the default-logger's floor are eliminated cheaply via a runtime

@@ -31,6 +31,8 @@
 #ifndef XTC_BDEV_H
 #define XTC_BDEV_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -69,14 +71,14 @@ typedef struct xtc_bdev xtc_bdev_t;
  * XTC_BDEV_READ / XTC_BDEV_WRITE.  On success stores the handle in *out
  * and returns XTC_OK; otherwise a negative XTC_E_* code.
  */
-int xtc_bdev_open(const char *path, int flags, xtc_bdev_t **out);
+XTC_API int xtc_bdev_open(const char *path, int flags, xtc_bdev_t **out);
 
 /*
  * PUBLIC: void xtc_bdev_close __P((xtc_bdev_t *));
  *
  * Close the device and free the handle.  NULL is a no-op.
  */
-void xtc_bdev_close(xtc_bdev_t *b);
+XTC_API void xtc_bdev_close(xtc_bdev_t *b);
 
 /*
  * PUBLIC: uint32_t xtc_bdev_logical_sector __P((const xtc_bdev_t *));
@@ -87,9 +89,9 @@ void xtc_bdev_close(xtc_bdev_t *b);
  * capacity in bytes.  Offsets and lengths passed to pread/pwrite must be
  * multiples of the logical sector size.
  */
-uint32_t xtc_bdev_logical_sector(const xtc_bdev_t *b);
-uint32_t xtc_bdev_physical_sector(const xtc_bdev_t *b);
-uint64_t xtc_bdev_capacity(const xtc_bdev_t *b);
+XTC_API uint32_t xtc_bdev_logical_sector(const xtc_bdev_t *b);
+XTC_API uint32_t xtc_bdev_physical_sector(const xtc_bdev_t *b);
+XTC_API uint64_t xtc_bdev_capacity(const xtc_bdev_t *b);
 
 /*
  * PUBLIC: ssize_t xtc_bdev_pread __P((xtc_bdev_t *, void *, size_t, uint64_t));
@@ -102,8 +104,8 @@ uint64_t xtc_bdev_capacity(const xtc_bdev_t *b);
  * transferred (>= 0); a short read at end of device returns the partial
  * count.  On failure returns a negative XTC_E_* code.
  */
-ssize_t xtc_bdev_pread(xtc_bdev_t *b, void *buf, size_t n, uint64_t off);
-ssize_t xtc_bdev_pwrite(xtc_bdev_t *b, const void *buf, size_t n, uint64_t off);
+XTC_API ssize_t xtc_bdev_pread(xtc_bdev_t *b, void *buf, size_t n, uint64_t off);
+XTC_API ssize_t xtc_bdev_pwrite(xtc_bdev_t *b, const void *buf, size_t n, uint64_t off);
 
 /*
  * PUBLIC: int xtc_bdev_flush __P((xtc_bdev_t *));
@@ -111,6 +113,6 @@ ssize_t xtc_bdev_pwrite(xtc_bdev_t *b, const void *buf, size_t n, uint64_t off);
  * Flush the device's data and metadata durably via xtc_aio_fsync.
  * Returns XTC_OK or a negative XTC_E_* code.
  */
-int xtc_bdev_flush(xtc_bdev_t *b);
+XTC_API int xtc_bdev_flush(xtc_bdev_t *b);
 
 #endif /* XTC_BDEV_H */

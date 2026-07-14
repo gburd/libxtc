@@ -44,6 +44,8 @@
 #ifndef XTC_LOCKMGR_H
 #define XTC_LOCKMGR_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -174,56 +176,56 @@ typedef struct xtc_lockmgr_stat {
  * PUBLIC: int  xtc_lockmgr_n_waiting __P((const xtc_lockmgr_t *));
  */
 
-int  xtc_lockmgr_create(const xtc_lockmgr_opts_t *opts, xtc_lockmgr_t **out);
-void xtc_lockmgr_destroy(xtc_lockmgr_t *mgr);
+XTC_API int  xtc_lockmgr_create(const xtc_lockmgr_opts_t *opts, xtc_lockmgr_t **out);
+XTC_API void xtc_lockmgr_destroy(xtc_lockmgr_t *mgr);
 
-int  xtc_lockmgr_id(xtc_lockmgr_t *mgr, xtc_locker_t *out);
-int  xtc_lockmgr_id_free(xtc_lockmgr_t *mgr, xtc_locker_t l);
+XTC_API int  xtc_lockmgr_id(xtc_lockmgr_t *mgr, xtc_locker_t *out);
+XTC_API int  xtc_lockmgr_id_free(xtc_lockmgr_t *mgr, xtc_locker_t l);
 
 /* Set a deadline for this locker.  When DETECT_PERIODIC fires, lockers
  * past their timeout are considered "expired" and get higher victim
  * priority under VICTIM_EXPIRE policy.  timeout_ns < 0 = no expiry. */
-int  xtc_lockmgr_id_set_timeout(xtc_lockmgr_t *mgr, xtc_locker_t l,
-                                int64_t timeout_ns);
+XTC_API int  xtc_lockmgr_id_set_timeout(xtc_lockmgr_t *mgr, xtc_locker_t l,
+                                        int64_t timeout_ns);
 
 /* Single acquire.  timeout_ns: -1 = forever, 0 = NOWAIT.  Returns
  * XTC_OK / XTC_E_AGAIN / XTC_E_DEADLK / XTC_E_INVAL / XTC_E_NOMEM. */
-int  xtc_lock_get(xtc_lockmgr_t *mgr, xtc_locker_t locker,
-                  const void *obj, size_t obj_size,
-                  xtc_lock_mode_t mode, int64_t timeout_ns);
+XTC_API int  xtc_lock_get(xtc_lockmgr_t *mgr, xtc_locker_t locker,
+                          const void *obj, size_t obj_size,
+                          xtc_lock_mode_t mode, int64_t timeout_ns);
 
-int  xtc_lock_put(xtc_lockmgr_t *mgr, xtc_locker_t locker,
-                  const void *obj, size_t obj_size);
+XTC_API int  xtc_lock_put(xtc_lockmgr_t *mgr, xtc_locker_t locker,
+                          const void *obj, size_t obj_size);
 
-int  xtc_lock_release_all(xtc_lockmgr_t *mgr, xtc_locker_t locker);
+XTC_API int  xtc_lock_release_all(xtc_lockmgr_t *mgr, xtc_locker_t locker);
 
 /* Atomic mode change on a held lock.  Upgrade may block (returns AGAIN
  * on NOWAIT-style timeout=0).  Downgrade is always non-blocking and
  * promotes any waiters that the new (weaker) mode no longer conflicts
  * with. */
-int  xtc_lock_upgrade(xtc_lockmgr_t *mgr, xtc_locker_t locker,
-                      const void *obj, size_t obj_size,
-                      xtc_lock_mode_t new_mode);
-int  xtc_lock_downgrade(xtc_lockmgr_t *mgr, xtc_locker_t locker,
-                        const void *obj, size_t obj_size,
-                        xtc_lock_mode_t new_mode);
+XTC_API int  xtc_lock_upgrade(xtc_lockmgr_t *mgr, xtc_locker_t locker,
+                              const void *obj, size_t obj_size,
+                              xtc_lock_mode_t new_mode);
+XTC_API int  xtc_lock_downgrade(xtc_lockmgr_t *mgr, xtc_locker_t locker,
+                                const void *obj, size_t obj_size,
+                                xtc_lock_mode_t new_mode);
 
 /* Atomic compound: all ops are validated, then executed.  If any
  * GET would block in the middle, the prior GETs are NOT rolled back;
  * set timeout_ns=0 in every req for
  * fully-atomic semantics.  *out_executed receives the number of
  * ops that succeeded. */
-int  xtc_lock_vec(xtc_lockmgr_t *mgr, xtc_locker_t locker,
-                  xtc_lock_req_t *reqs, int n_reqs, int *out_executed);
+XTC_API int  xtc_lock_vec(xtc_lockmgr_t *mgr, xtc_locker_t locker,
+                          xtc_lock_req_t *reqs, int n_reqs, int *out_executed);
 
-int  xtc_lockmgr_check_deadlocks(xtc_lockmgr_t *mgr, int *n_aborted);
+XTC_API int  xtc_lockmgr_check_deadlocks(xtc_lockmgr_t *mgr, int *n_aborted);
 
 /* Mark a locker as "failed" (typically because the owning thread
  * died).  Releases all its locks and aborts any waits. */
-int  xtc_lockmgr_failchk(xtc_lockmgr_t *mgr, xtc_locker_t locker);
+XTC_API int  xtc_lockmgr_failchk(xtc_lockmgr_t *mgr, xtc_locker_t locker);
 
-int  xtc_lockmgr_stat(const xtc_lockmgr_t *mgr, xtc_lockmgr_stat_t *out);
-int  xtc_lockmgr_n_held(const xtc_lockmgr_t *mgr);
-int  xtc_lockmgr_n_waiting(const xtc_lockmgr_t *mgr);
+XTC_API int  xtc_lockmgr_stat(const xtc_lockmgr_t *mgr, xtc_lockmgr_stat_t *out);
+XTC_API int  xtc_lockmgr_n_held(const xtc_lockmgr_t *mgr);
+XTC_API int  xtc_lockmgr_n_waiting(const xtc_lockmgr_t *mgr);
 
 #endif /* XTC_LOCKMGR_H */

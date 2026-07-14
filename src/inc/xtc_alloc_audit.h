@@ -14,6 +14,8 @@
 #ifndef XTC_ALLOC_AUDIT_H
 #define XTC_ALLOC_AUDIT_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -32,18 +34,18 @@ extern "C" {
 /* Enable (on != 0) or disable the auditor.  Enabling wraps the
  * current allocator hook; disabling restores it.  Returns XTC_OK, or
  * XTC_E_NOMEM if the tracking table could not be allocated. */
-int  xtc_alloc_audit_enable(int on);
+XTC_API int  xtc_alloc_audit_enable(int on);
 
 /* Total live (unfreed) allocations and their byte sum across all
  * owners.  Either pointer may be NULL. */
-void xtc_alloc_audit_stats(size_t *out_count, size_t *out_bytes);
+XTC_API void xtc_alloc_audit_stats(size_t *out_count, size_t *out_bytes);
 
 /* Live allocations still attributed to process `pid` (allocations
  * made off a process are attributed to the none pid).  Either output
  * pointer may be NULL.  This is the per-proc leak check: call it from
  * the process's xtc_proc_at_exit hook or after it is reaped. */
-void xtc_alloc_audit_proc_leaks(xtc_pid_t pid, size_t *out_count,
-                                size_t *out_bytes);
+XTC_API void xtc_alloc_audit_proc_leaks(xtc_pid_t pid, size_t *out_count,
+                                        size_t *out_bytes);
 
 #ifdef __cplusplus
 }

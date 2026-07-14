@@ -18,6 +18,8 @@
 #ifndef XTC_PROC_H
 #define XTC_PROC_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -113,8 +115,8 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int       xtc_monitor __P((xtc_pid_t, uint64_t *));
  */
 
-int       xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
-                          const xtc_proc_opts_t *opts, xtc_pid_t *out_pid);
+XTC_API int       xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
+                                  const xtc_proc_opts_t *opts, xtc_pid_t *out_pid);
 
 /*
  * Atomic spawn + link / spawn + monitor (Erlang spawn_link /
@@ -133,11 +135,11 @@ int       xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
  *           as the monitor reference) when the child exits, exactly
  *           like xtc_monitor(child).
  */
-int       xtc_proc_spawn_link(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
-                          const xtc_proc_opts_t *opts, xtc_pid_t *out_pid);
-int       xtc_proc_spawn_monitor(xtc_loop_t *loop, xtc_proc_fn fn,
-                          void *arg, const xtc_proc_opts_t *opts,
-                          xtc_pid_t *out_pid, uint64_t *out_ref);
+XTC_API int       xtc_proc_spawn_link(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
+                                  const xtc_proc_opts_t *opts, xtc_pid_t *out_pid);
+XTC_API int       xtc_proc_spawn_monitor(xtc_loop_t *loop, xtc_proc_fn fn,
+                                  void *arg, const xtc_proc_opts_t *opts,
+                                  xtc_pid_t *out_pid, uint64_t *out_ref);
 
 /* From inside a process, return its pid; from outside, returns NONE. */
 /*
@@ -146,7 +148,7 @@ int       xtc_proc_spawn_monitor(xtc_loop_t *loop, xtc_proc_fn fn,
  * point with the supplied reason.  Idempotent (first call wins).
  * Returns XTC_E_INVAL if the target is unknown or already dead.
  */
-int xtc_exit_pid(xtc_pid_t target, int reason);
+XTC_API int xtc_exit_pid(xtc_pid_t target, int reason);
 
 /*
  * Resume a process parked in xtc_proc_wait_fd / xtc_recv, from ANY OS
@@ -160,9 +162,9 @@ int xtc_exit_pid(xtc_pid_t target, int reason);
  * (including when the target is not parked, already runnable, or gone),
  * XTC_E_INVAL for XTC_PID_NONE.
  */
-int xtc_proc_wake(xtc_pid_t target);
+XTC_API int xtc_proc_wake(xtc_pid_t target);
 
-xtc_pid_t xtc_self(void);
+XTC_API xtc_pid_t xtc_self(void);
 
 /*
  * Send a message.  Copies `size` bytes from `data` into a mailbox
@@ -188,7 +190,7 @@ xtc_pid_t xtc_self(void);
  *   - treat it as fatal for a must-deliver path.
  * Ignoring the return is a bug, not a shortcut.
  */
-int       xtc_send(xtc_pid_t to, const void *data, size_t size);
+XTC_API int       xtc_send(xtc_pid_t to, const void *data, size_t size);
 
 /*
  * Receive the next envelope from this process's mailbox.  Allocates
@@ -202,16 +204,16 @@ int       xtc_send(xtc_pid_t to, const void *data, size_t size);
  *   XTC_E_AGAIN       timeout fired with no message
  *   XTC_E_INVAL       called outside a process
  */
-int       xtc_recv(void **out, size_t *out_size, int64_t timeout_ns);
+XTC_API int       xtc_recv(void **out, size_t *out_size, int64_t timeout_ns);
 
 /*
  * Selective receive.  match_fn is called for each envelope in
  * arrival order; the first one for which match_fn returns 1 is
  * delivered.  Non-matching envelopes are kept in the save queue.
  */
-int       xtc_recv_match(xtc_match_fn match_fn, void *user_data,
-                          void **out, size_t *out_size,
-                          int64_t timeout_ns);
+XTC_API int       xtc_recv_match(xtc_match_fn match_fn, void *user_data,
+                                  void **out, size_t *out_size,
+                                  int64_t timeout_ns);
 
 /*
  * Receive `n_expected` messages whose leading `corr_size` bytes
@@ -236,11 +238,11 @@ typedef struct xtc_msg {
 	size_t  size;
 } xtc_msg_t;
 
-int       xtc_recv_correlate(const void *corr_value, size_t corr_size,
-                              int n_expected,
-                              xtc_msg_t *out_msgs,
-                              int *out_n,
-                              int64_t timeout_ns);
+XTC_API int       xtc_recv_correlate(const void *corr_value, size_t corr_size,
+                                      int n_expected,
+                                      xtc_msg_t *out_msgs,
+                                      int *out_n,
+                                      int64_t timeout_ns);
 
 /*
  * Wait until ANY of the following becomes true:
@@ -266,22 +268,22 @@ int       xtc_recv_correlate(const void *corr_value, size_t corr_size,
 #define XTC_WAIT_MAILBOX  0x10000u   /* in out_revents only */
 #define XTC_WAIT_TIMEOUT  0x20000u   /* in out_revents only */
 
-int       xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
-                            uint32_t *out_revents);
+XTC_API int       xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
+                                    uint32_t *out_revents);
 
 /* Sleep the calling process for at least ns nanoseconds by parking it
  * on a timer (the loop runs other work meanwhile -- it does not block
  * the thread).  Unlike a timed xtc_recv it does not touch the mailbox.
  * Returns XTC_E_INVAL if not called from a process. */
-int       xtc_proc_sleep(int64_t ns);
+XTC_API int       xtc_proc_sleep(int64_t ns);
 
 /* Explicit exit from inside a process; reason is delivered via
  * EXIT/DOWN signals to linked / monitoring procs. */
-int       xtc_exit_self(int reason);
+XTC_API int       xtc_exit_self(int reason);
 
 /* Link / unlink: bidirectional fate. */
-int       xtc_link(xtc_pid_t other);
-int       xtc_unlink(xtc_pid_t other);
+XTC_API int       xtc_link(xtc_pid_t other);
+XTC_API int       xtc_unlink(xtc_pid_t other);
 
 /* ---- Monitor DOWN reasons ------------------------------------------
  *
@@ -322,7 +324,7 @@ xtc_down_is_noproc(int reason)
  * when the monitored process exits (reason per the DOWN-reason space
  * above).  Registering a monitor on an ALREADY-dead target is not an
  * error: it delivers an immediate DOWN with reason XTC_DOWN_NOPROC. */
-int       xtc_monitor(xtc_pid_t target, uint64_t *out_ref);
+XTC_API int       xtc_monitor(xtc_pid_t target, uint64_t *out_ref);
 
 /* Snapshot a process's mailbox statistics into *out.  Returns XTC_OK,
  * or XTC_E_INVAL if the pid is dead / unknown.  Safe to call from any
@@ -568,8 +570,8 @@ typedef struct {
  *
  * PUBLIC: int xtc_down_decode_ex __P((const void *, size_t, xtc_down_info_t *));
  */
-int       xtc_down_decode_ex(const void *msg, size_t len,
-                             xtc_down_info_t *out);
+XTC_API int       xtc_down_decode_ex(const void *msg, size_t len,
+                                     xtc_down_info_t *out);
 
 /* Predicate + accessor helpers over a legacy `reason` integer, for
  * callers that keep using xtc_down_decode.  A signal-N fault and a

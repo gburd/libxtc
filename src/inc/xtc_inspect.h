@@ -21,6 +21,8 @@
 #ifndef XTC_INSPECT_H
 #define XTC_INSPECT_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -93,15 +95,15 @@ typedef int (*xtc_inspect_loop_fn)(const xtc_loop_info_t *info, void *user);
 
 /* Invoke `cb` once per live proc (across all loops).  Returns the
  * number of procs visited, or a negative XTC_E_* on error. */
-int xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user);
+XTC_API int xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user);
 
 /* Invoke `cb` once per registered loop.  Returns the loop count or a
  * negative XTC_E_*. */
-int xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user);
+XTC_API int xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user);
 
 /* Snapshot one proc by pid into *out.  XTC_OK on success,
  * XTC_E_NOTFOUND if no live proc has that pid, XTC_E_INVAL on a NULL
  * out-pointer. */
-int xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out);
+XTC_API int xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out);
 
 #endif /* XTC_INSPECT_H */

@@ -31,6 +31,8 @@
 #ifndef XTC_STATS_H
 #define XTC_STATS_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -74,25 +76,25 @@ typedef int (*xtc_metric_visit_fn)(const char *name,
  * PUBLIC: int       xtc_metrics_dump_prometheus __P((int));
  */
 
-int       xtc_counter_create(const char *name, xtc_counter_t **out);
-void      xtc_counter_destroy(xtc_counter_t *c);
-void      xtc_counter_inc(xtc_counter_t *c);
-void      xtc_counter_add(xtc_counter_t *c, int64_t delta);
-uint64_t  xtc_counter_read(const xtc_counter_t *c);
+XTC_API int       xtc_counter_create(const char *name, xtc_counter_t **out);
+XTC_API void      xtc_counter_destroy(xtc_counter_t *c);
+XTC_API void      xtc_counter_inc(xtc_counter_t *c);
+XTC_API void      xtc_counter_add(xtc_counter_t *c, int64_t delta);
+XTC_API uint64_t  xtc_counter_read(const xtc_counter_t *c);
 
-int       xtc_gauge_create(const char *name, xtc_gauge_t **out);
-void      xtc_gauge_destroy(xtc_gauge_t *g);
-void      xtc_gauge_set(xtc_gauge_t *g, int64_t v);
-void      xtc_gauge_add(xtc_gauge_t *g, int64_t delta);
-int64_t   xtc_gauge_read(const xtc_gauge_t *g);
+XTC_API int       xtc_gauge_create(const char *name, xtc_gauge_t **out);
+XTC_API void      xtc_gauge_destroy(xtc_gauge_t *g);
+XTC_API void      xtc_gauge_set(xtc_gauge_t *g, int64_t v);
+XTC_API void      xtc_gauge_add(xtc_gauge_t *g, int64_t delta);
+XTC_API int64_t   xtc_gauge_read(const xtc_gauge_t *g);
 
-int       xtc_hist_create(const char *name, xtc_hist_t **out);
-void      xtc_hist_destroy(xtc_hist_t *h);
-void      xtc_hist_record(xtc_hist_t *h, int64_t value_ns);
-int64_t   xtc_hist_quantile(const xtc_hist_t *h, double q);
-uint64_t  xtc_hist_count(const xtc_hist_t *h);
+XTC_API int       xtc_hist_create(const char *name, xtc_hist_t **out);
+XTC_API void      xtc_hist_destroy(xtc_hist_t *h);
+XTC_API void      xtc_hist_record(xtc_hist_t *h, int64_t value_ns);
+XTC_API int64_t   xtc_hist_quantile(const xtc_hist_t *h, double q);
+XTC_API uint64_t  xtc_hist_count(const xtc_hist_t *h);
 
-int       xtc_metrics_iterate(xtc_metric_visit_fn fn, void *user);
-int       xtc_metrics_dump_prometheus(int fd);
+XTC_API int       xtc_metrics_iterate(xtc_metric_visit_fn fn, void *user);
+XTC_API int       xtc_metrics_dump_prometheus(int fd);
 
 #endif /* XTC_STATS_H */

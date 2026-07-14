@@ -20,6 +20,8 @@
 #ifndef XTC_NET_H
 #define XTC_NET_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -71,55 +73,55 @@ typedef struct xtc_tcp_opts {
 /* TCP listen socket.  `host` may be NULL/"" for any-address.  Returns
  * the listening fd; caller registers it with xtc_io_reg_fd for accept
  * readiness.  Backlog defaults to 128 if 0. */
-int xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
-                   const xtc_tcp_opts_t *opts, int *out_fd);
+XTC_API int xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
+                           const xtc_tcp_opts_t *opts, int *out_fd);
 
 /* TCP connect to host:port.  Returns the fd in out_fd.  The connect
  * is non-blocking; caller polls for writability to detect completion. */
-int xtc_net_dial(xtc_net_family_t fam, const char *host, int port,
-                 const xtc_tcp_opts_t *opts, int *out_fd);
+XTC_API int xtc_net_dial(xtc_net_family_t fam, const char *host, int port,
+                         const xtc_tcp_opts_t *opts, int *out_fd);
 
 /* Apply TCP knobs to an already-open socket. */
-int xtc_net_apply_tcp_opts(int fd, const xtc_tcp_opts_t *opts);
+XTC_API int xtc_net_apply_tcp_opts(int fd, const xtc_tcp_opts_t *opts);
 
 /* Set O_NONBLOCK + FD_CLOEXEC. */
-int xtc_net_setnonblock(int fd);
+XTC_API int xtc_net_setnonblock(int fd);
 
 /* Close (always succeeds). */
-void xtc_net_close(int fd);
+XTC_API void xtc_net_close(int fd);
 
 /* Unix domain sockets -- SOCK_STREAM. */
-int xtc_net_unix_listen(const char *path, int *out_fd);
-int xtc_net_unix_dial  (const char *path, int *out_fd);
+XTC_API int xtc_net_unix_listen(const char *path, int *out_fd);
+XTC_API int xtc_net_unix_dial  (const char *path, int *out_fd);
 
 /* Send a message + the sender's credentials (uid/gid/pid) over a
  * UNIX socket via SCM_CREDENTIALS / LOCAL_PEERCRED.  The receiver
  * extracts the credentials with xtc_net_unix_recv_creds. */
-int xtc_net_unix_send_creds(int fd, const void *buf, size_t buflen);
-int xtc_net_unix_recv_creds(int fd, void *buf, size_t buflen,
-                            uint32_t *out_uid, uint32_t *out_gid,
-                            size_t *out_n);
+XTC_API int xtc_net_unix_send_creds(int fd, const void *buf, size_t buflen);
+XTC_API int xtc_net_unix_recv_creds(int fd, void *buf, size_t buflen,
+                                    uint32_t *out_uid, uint32_t *out_gid,
+                                    size_t *out_n);
 
 /* ---- UDP ----------------------------------------------------- */
 
 /* Open a UDP datagram socket bound to (host, port).  host=NULL
  * means INADDR_ANY / in6addr_any.  port=0 means kernel-assigned.
  * Returns the fd in non-blocking + cloexec mode. */
-int xtc_net_udp_socket(xtc_net_family_t fam, const char *host,
-                       int port, int *out_fd);
+XTC_API int xtc_net_udp_socket(xtc_net_family_t fam, const char *host,
+                               int port, int *out_fd);
 
 /* Send a single datagram to host:port.  Returns XTC_OK on full
  * send, XTC_E_AGAIN if the kernel buffer is full (caller should
  * poll for writability). */
-int xtc_net_udp_sendto(int fd, const void *buf, size_t len,
-                       const char *host, int port);
+XTC_API int xtc_net_udp_sendto(int fd, const void *buf, size_t len,
+                               const char *host, int port);
 
 /* Receive a single datagram.  out_host/out_host_size receive the
  * peer's address as a printable string.  out_port and out_n are
  * filled in.  Returns XTC_OK or XTC_E_AGAIN. */
-int xtc_net_udp_recvfrom(int fd, void *buf, size_t buflen,
-                         char *out_host, size_t out_host_size,
-                         int *out_port, size_t *out_n);
+XTC_API int xtc_net_udp_recvfrom(int fd, void *buf, size_t buflen,
+                                 char *out_host, size_t out_host_size,
+                                 int *out_port, size_t *out_n);
 
 /* ---- DNS resolution ------------------------------------------
  *
@@ -131,9 +133,9 @@ int xtc_net_udp_recvfrom(int fd, void *buf, size_t buflen,
  * thread is allowed to block.  A future revision will integrate
  * a c-ares-style fully async resolver.
  */
-int xtc_dns_resolve(const char *hostname, int port,
-                    xtc_net_family_t fam,
-                    char *out_addr, size_t out_addr_size);
+XTC_API int xtc_dns_resolve(const char *hostname, int port,
+                            xtc_net_family_t fam,
+                            char *out_addr, size_t out_addr_size);
 
 /* ---- length-framed transport --------------------------------
  *

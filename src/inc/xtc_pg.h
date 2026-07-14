@@ -20,6 +20,8 @@
 #ifndef XTC_PG_H
 #define XTC_PG_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 
 #include "xtc.h"
@@ -35,22 +37,22 @@
 
 /* Add `pid` to group `group` (idempotent).  Typically the caller joins
  * itself with xtc_self(). */
-int xtc_pg_join(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
+XTC_API int xtc_pg_join(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
 
 /* Remove `pid` from `group`.  XTC_E_INVAL if not a member. */
-int xtc_pg_leave(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
+XTC_API int xtc_pg_leave(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
 
 /* Visit every member pid of `group` (callback runs under the registry
  * lock -- keep it brief; do not re-enter the registry).  A nonzero
  * callback return stops the walk.  Returns the member count. */
-int xtc_pg_members(xtc_reg_t *reg, const char *group,
-                   int (*fn)(xtc_pid_t pid, void *user), void *user);
+XTC_API int xtc_pg_members(xtc_reg_t *reg, const char *group,
+                           int (*fn)(xtc_pid_t pid, void *user), void *user);
 
 /* Broadcast `msg` (a copy) to every current member of `group`.  Returns
  * the number of members the message was sent to.  A send to an
  * already-dead member is a harmless no-op (its DOWN reaping is the
  * embedder's responsibility until the registry monitor lands). */
-int xtc_pg_send(xtc_reg_t *reg, const char *group,
-                const void *msg, size_t size);
+XTC_API int xtc_pg_send(xtc_reg_t *reg, const char *group,
+                        const void *msg, size_t size);
 
 #endif /* XTC_PG_H */

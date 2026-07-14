@@ -59,6 +59,8 @@
 #ifndef XTC_TLS_H
 #define XTC_TLS_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include "xtc.h"
 
@@ -192,9 +194,9 @@ typedef struct xtc_tls_opts {
  *	  XTC_E_NOMEM   on allocation failure
  *	  XTC_E_NOSYS   if TLS support was not compiled in
  */
-int  xtc_tls_ctx_create(xtc_tls_role_t role,
-                        const xtc_tls_opts_t *opts,
-                        xtc_tls_ctx_t **out);
+XTC_API int  xtc_tls_ctx_create(xtc_tls_role_t role,
+                                const xtc_tls_opts_t *opts,
+                                xtc_tls_ctx_t **out);
 
 /*
  * xtc_tls_ctx_destroy --
@@ -202,7 +204,7 @@ int  xtc_tls_ctx_create(xtc_tls_role_t role,
  *	Must not be called while any xtc_tls_t created from it is live.
  *	ctx may be NULL (no-op).
  */
-void xtc_tls_ctx_destroy(xtc_tls_ctx_t *ctx);
+XTC_API void xtc_tls_ctx_destroy(xtc_tls_ctx_t *ctx);
 
 /* -------------------------------------------------------------------------
  * Per-connection lifecycle.
@@ -231,7 +233,7 @@ void xtc_tls_ctx_destroy(xtc_tls_ctx_t *ctx);
  *	  XTC_E_NOMEM   on allocation failure
  *	  XTC_E_NOSYS   if TLS support was not compiled in
  */
-int  xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out);
+XTC_API int  xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out);
 
 /*
  * xtc_tls_destroy --
@@ -240,7 +242,7 @@ int  xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out);
  *	shutdown is needed.
  *	tls may be NULL (no-op).
  */
-void xtc_tls_destroy(xtc_tls_t *tls);
+XTC_API void xtc_tls_destroy(xtc_tls_t *tls);
 
 /* -------------------------------------------------------------------------
  * Handshake.
@@ -266,7 +268,7 @@ void xtc_tls_destroy(xtc_tls_t *tls);
  *	  XTC_E_NOSYS   TLS not compiled in
  *	  (other)       backend-specific hard error; connection must be torn down
  */
-int  xtc_tls_handshake(xtc_tls_t *tls);
+XTC_API int  xtc_tls_handshake(xtc_tls_t *tls);
 
 /* -------------------------------------------------------------------------
  * Encrypted I/O.
@@ -286,7 +288,7 @@ int  xtc_tls_handshake(xtc_tls_t *tls);
  *	On XTC_E_INVAL tls, buf, or out_n is NULL.
  *	On XTC_E_NOSYS TLS was not compiled in.
  */
-int  xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n);
+XTC_API int  xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n);
 
 /*
  * xtc_tls_write --
@@ -297,8 +299,8 @@ int  xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n);
  *	On XTC_E_INVAL tls, buf, or out_n is NULL.
  *	On XTC_E_NOSYS TLS was not compiled in.
  */
-int  xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen,
-                   size_t *out_n);
+XTC_API int  xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen,
+                           size_t *out_n);
 
 /* -------------------------------------------------------------------------
  * Readiness queries.
@@ -310,7 +312,7 @@ int  xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen,
  *	for the underlying fd to become readable.  The caller should arm
  *	a POLLIN/XTC_IO_READABLE watch and retry.
  */
-int  xtc_tls_wants_read(const xtc_tls_t *tls);
+XTC_API int  xtc_tls_wants_read(const xtc_tls_t *tls);
 
 /*
  * xtc_tls_wants_write --
@@ -318,7 +320,7 @@ int  xtc_tls_wants_read(const xtc_tls_t *tls);
  *	for the underlying fd to become writable.  The caller should arm
  *	a POLLOUT/XTC_IO_WRITABLE watch and retry.
  */
-int  xtc_tls_wants_write(const xtc_tls_t *tls);
+XTC_API int  xtc_tls_wants_write(const xtc_tls_t *tls);
 
 /* -------------------------------------------------------------------------
  * Graceful shutdown.
@@ -339,7 +341,7 @@ int  xtc_tls_wants_write(const xtc_tls_t *tls);
  *	  XTC_E_INVAL   tls is NULL
  *	  XTC_E_NOSYS   TLS not compiled in
  */
-int  xtc_tls_shutdown(xtc_tls_t *tls);
+XTC_API int  xtc_tls_shutdown(xtc_tls_t *tls);
 
 #ifdef __cplusplus
 }

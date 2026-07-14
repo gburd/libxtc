@@ -79,6 +79,8 @@
 #ifndef XTC_SLAB_H
 #define XTC_SLAB_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -195,22 +197,22 @@ typedef struct xtc_slab_stats {
  * PUBLIC: int  xtc_slab_reap_all __P((void));
  */
 
-int   xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out);
-void  xtc_slab_destroy(xtc_slab_t *slab);
+XTC_API int   xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out);
+XTC_API void  xtc_slab_destroy(xtc_slab_t *slab);
 
-void *xtc_slab_alloc(xtc_slab_t *slab);
-void  xtc_slab_free(xtc_slab_t *slab, void *obj);
+XTC_API void *xtc_slab_alloc(xtc_slab_t *slab);
+XTC_API void  xtc_slab_free(xtc_slab_t *slab, void *obj);
 
 /* Drop all magazines + return empty slabs to the OS. */
-int   xtc_slab_reap(xtc_slab_t *slab);
+XTC_API int   xtc_slab_reap(xtc_slab_t *slab);
 
-int   xtc_slab_stat(const xtc_slab_t *slab, xtc_slab_stats_t *out);
+XTC_API int   xtc_slab_stat(const xtc_slab_t *slab, xtc_slab_stats_t *out);
 
 /* Shared-memory helpers -- convert between process-local pointer
  * and a stable offset.  In PROCESS_LOCAL mode these are still
  * meaningful but only valid within this process. */
-xtc_slab_off_t xtc_slab_offset(const xtc_slab_t *slab, const void *p);
-void          *xtc_slab_resolve(const xtc_slab_t *slab, xtc_slab_off_t off);
+XTC_API xtc_slab_off_t xtc_slab_offset(const xtc_slab_t *slab, const void *p);
+XTC_API void          *xtc_slab_resolve(const xtc_slab_t *slab, xtc_slab_off_t off);
 
 /* Install a process-wide memory-pressure listener.  On Linux, opens
  * /proc/pressure/memory in poll mode at the "some" trigger (>10 ms
@@ -218,28 +220,28 @@ void          *xtc_slab_resolve(const xtc_slab_t *slab, xtc_slab_off_t off);
  * pressure fires, all registered slab caches receive a reap call.
  * `psi_path` is "/proc/pressure/memory" by default (NULL = use it).
  */
-int   xtc_slab_pressure_listen(const char *psi_path,
-                               xtc_slab_pressure_fn fn,
-                               void *user);
+XTC_API int   xtc_slab_pressure_listen(const char *psi_path,
+                                       xtc_slab_pressure_fn fn,
+                                       void *user);
 
 /* Like xtc_slab_pressure_listen, but returns an opaque handle so the
  * listener can be stopped (its background thread joined and its fds
  * closed) with xtc_slab_pressure_stop.  On platforms without PSI,
  * returns XTC_E_NOSYS and leaves *out NULL.  *out must be non-NULL. */
-int   xtc_slab_pressure_listen_ex(const char *psi_path,
-                                  xtc_slab_pressure_fn fn,
-                                  void *user,
-                                  xtc_slab_pressure_t **out);
+XTC_API int   xtc_slab_pressure_listen_ex(const char *psi_path,
+                                          xtc_slab_pressure_fn fn,
+                                          void *user,
+                                          xtc_slab_pressure_t **out);
 
 /* Stop a listener created by xtc_slab_pressure_listen_ex: signal its
  * thread, join it, close its fds, and free the handle.  Idempotent on
  * NULL (returns XTC_E_INVAL).  After this returns the handle is
  * invalid. */
-int   xtc_slab_pressure_stop(xtc_slab_pressure_t *handle);
+XTC_API int   xtc_slab_pressure_stop(xtc_slab_pressure_t *handle);
 
 /* Fan a reap across every cache currently registered.  Returns the
  * total number of objects reaped. */
-int   xtc_slab_reap_all(void);
+XTC_API int   xtc_slab_reap_all(void);
 
 /* Spawn an xtc_proc that calls xtc_slab_reap_all() every
  * `interval_ns` and logs the count via xtc_log.  The proc runs

@@ -12,6 +12,8 @@
 #ifndef XTC_OS_THREAD_H
 #define XTC_OS_THREAD_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -108,7 +110,7 @@ typedef pthread_once_t __os_once_t;
  * PUBLIC: void __os_thread_apply_default_qos __P((void));
  * PUBLIC: int  __os_thread_set_affinity __P((int));
  */
-int  __os_thread_create(__os_thread_t *thr, __os_thread_fn fn, void *arg);
+XTC_API int  __os_thread_create(__os_thread_t *thr, __os_thread_fn fn, void *arg);
 
 /* Create a raw pthread with all signals blocked (mask restored after),
  * for the few call sites that hold a raw pthread_t rather than an
@@ -118,13 +120,13 @@ int  __os_thread_create(__os_thread_t *thr, __os_thread_fn fn, void *arg);
 #include <pthread.h>
 int  __os_pthread_create_masked(pthread_t *out, void *(*fn)(void *),
          void *arg);
-int  __os_thread_join(__os_thread_t *thr, void **retval);
-int  __os_thread_detach(__os_thread_t *thr);
-int  __os_thread_self(__os_thread_t *out);
-void __os_thread_yield(void);
-int  __os_thread_setname(const char *name);
-void __os_thread_apply_default_qos(void);
-int  __os_thread_set_affinity(int cpu);
+XTC_API int  __os_thread_join(__os_thread_t *thr, void **retval);
+XTC_API int  __os_thread_detach(__os_thread_t *thr);
+XTC_API int  __os_thread_self(__os_thread_t *out);
+XTC_API void __os_thread_yield(void);
+XTC_API int  __os_thread_setname(const char *name);
+XTC_API void __os_thread_apply_default_qos(void);
+XTC_API int  __os_thread_set_affinity(int cpu);
 
 /*
  * --- TLS ---
@@ -134,10 +136,10 @@ int  __os_thread_set_affinity(int cpu);
  * PUBLIC: int   __os_tls_set __P((__os_tls_key_t, void *));
  * PUBLIC: void *__os_tls_get __P((__os_tls_key_t));
  */
-int   __os_tls_create(__os_tls_key_t *key, __os_tls_dtor dtor);
-int   __os_tls_destroy(__os_tls_key_t key);
-int   __os_tls_set(__os_tls_key_t key, void *value);
-void *__os_tls_get(__os_tls_key_t key);
+XTC_API int   __os_tls_create(__os_tls_key_t *key, __os_tls_dtor dtor);
+XTC_API int   __os_tls_destroy(__os_tls_key_t key);
+XTC_API int   __os_tls_set(__os_tls_key_t key, void *value);
+XTC_API void *__os_tls_get(__os_tls_key_t key);
 
 /*
  * Register fn(arg) to run when the CALLING thread exits -- including
@@ -152,14 +154,14 @@ void *__os_tls_get(__os_tls_key_t key);
  *
  * PUBLIC: int __os_thread_atexit __P((void (*)(void *), void *));
  */
-int __os_thread_atexit(void (*fn)(void *), void *arg);
+XTC_API int __os_thread_atexit(void (*fn)(void *), void *arg);
 
 /*
  * --- One-time init ---
  *
  * PUBLIC: int __os_call_once __P((__os_once_t *, void (*)(void)));
  */
-int __os_call_once(__os_once_t *once, void (*fn)(void));
+XTC_API int __os_call_once(__os_once_t *once, void (*fn)(void));
 
 /*
  * --- Mutex ---
@@ -170,11 +172,11 @@ int __os_call_once(__os_once_t *once, void (*fn)(void));
  * PUBLIC: int  __os_mutex_trylock __P((__os_mutex_t *));
  * PUBLIC: int  __os_mutex_unlock __P((__os_mutex_t *));
  */
-int __os_mutex_init(__os_mutex_t *m);
-int __os_mutex_destroy(__os_mutex_t *m);
-int __os_mutex_lock(__os_mutex_t *m);
-int __os_mutex_trylock(__os_mutex_t *m);
-int __os_mutex_unlock(__os_mutex_t *m);
+XTC_API int __os_mutex_init(__os_mutex_t *m);
+XTC_API int __os_mutex_destroy(__os_mutex_t *m);
+XTC_API int __os_mutex_lock(__os_mutex_t *m);
+XTC_API int __os_mutex_trylock(__os_mutex_t *m);
+XTC_API int __os_mutex_unlock(__os_mutex_t *m);
 
 /*
  * --- RWLock ---
@@ -193,12 +195,12 @@ int __os_mutex_unlock(__os_mutex_t *m);
  * PUBLIC: int __os_rwlock_rdunlock __P((__os_rwlock_t *));
  * PUBLIC: int __os_rwlock_wrunlock __P((__os_rwlock_t *));
  */
-int __os_rwlock_init(__os_rwlock_t *r);
-int __os_rwlock_destroy(__os_rwlock_t *r);
-int __os_rwlock_rdlock(__os_rwlock_t *r);
-int __os_rwlock_wrlock(__os_rwlock_t *r);
-int __os_rwlock_rdunlock(__os_rwlock_t *r);
-int __os_rwlock_wrunlock(__os_rwlock_t *r);
+XTC_API int __os_rwlock_init(__os_rwlock_t *r);
+XTC_API int __os_rwlock_destroy(__os_rwlock_t *r);
+XTC_API int __os_rwlock_rdlock(__os_rwlock_t *r);
+XTC_API int __os_rwlock_wrlock(__os_rwlock_t *r);
+XTC_API int __os_rwlock_rdunlock(__os_rwlock_t *r);
+XTC_API int __os_rwlock_wrunlock(__os_rwlock_t *r);
 
 /*
  * --- Condition variable ---
@@ -209,11 +211,11 @@ int __os_rwlock_wrunlock(__os_rwlock_t *r);
  * PUBLIC: int __os_cond_signal __P((__os_cond_t *));
  * PUBLIC: int __os_cond_broadcast __P((__os_cond_t *));
  */
-int __os_cond_init(__os_cond_t *c);
-int __os_cond_destroy(__os_cond_t *c);
-int __os_cond_wait(__os_cond_t *c, __os_mutex_t *m);
-int __os_cond_signal(__os_cond_t *c);
-int __os_cond_broadcast(__os_cond_t *c);
+XTC_API int __os_cond_init(__os_cond_t *c);
+XTC_API int __os_cond_destroy(__os_cond_t *c);
+XTC_API int __os_cond_wait(__os_cond_t *c, __os_mutex_t *m);
+XTC_API int __os_cond_signal(__os_cond_t *c);
+XTC_API int __os_cond_broadcast(__os_cond_t *c);
 
 /*
  * --- Semaphore (counting; unnamed, in-process) ---
@@ -224,10 +226,10 @@ int __os_cond_broadcast(__os_cond_t *c);
  * PUBLIC: int __os_sem_wait __P((__os_sem_t *));
  * PUBLIC: int __os_sem_trywait __P((__os_sem_t *));
  */
-int __os_sem_init(__os_sem_t *s, unsigned initial);
-int __os_sem_destroy(__os_sem_t *s);
-int __os_sem_post(__os_sem_t *s);
-int __os_sem_wait(__os_sem_t *s);
-int __os_sem_trywait(__os_sem_t *s);
+XTC_API int __os_sem_init(__os_sem_t *s, unsigned initial);
+XTC_API int __os_sem_destroy(__os_sem_t *s);
+XTC_API int __os_sem_post(__os_sem_t *s);
+XTC_API int __os_sem_wait(__os_sem_t *s);
+XTC_API int __os_sem_trywait(__os_sem_t *s);
 
 #endif /* XTC_OS_THREAD_H */

@@ -26,6 +26,8 @@
 #ifndef XTC_TAIL_H
 #define XTC_TAIL_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -82,24 +84,24 @@ typedef int (*xtc_tail_fn)(const xtc_tail_rec_t *rec, void *user);
 /* Enable the named sources (a bitwise-OR of XTC_TAIL_*).  Returns the
  * previously enabled mask.  Enabling is idempotent; call with the full
  * mask you want each time (it replaces, not ORs). */
-unsigned xtc_tail_enable(unsigned source_mask);
+XTC_API unsigned xtc_tail_enable(unsigned source_mask);
 
 /* Disable all recording (equivalent to xtc_tail_enable(0)). */
-void     xtc_tail_disable(void);
+XTC_API void     xtc_tail_disable(void);
 
 /* Drop all buffered records.  Returns XTC_OK. */
-int      xtc_tail_reset(void);
+XTC_API int      xtc_tail_reset(void);
 
 /* Visit every buffered record oldest-first (a stable snapshot). */
-int      xtc_tail_read(xtc_tail_fn cb, void *user);
+XTC_API int      xtc_tail_read(xtc_tail_fn cb, void *user);
 
 /* Write the buffered records to `fd` as a versioned binary trace:
  * a small header (magic, version, record count, record size) followed
  * by the records verbatim.  A separate offline tool renders it. */
-int      xtc_tail_dump(int fd);
+XTC_API int      xtc_tail_dump(int fd);
 
 /* Number of records currently buffered. */
-size_t   xtc_tail_count(void);
+XTC_API size_t   xtc_tail_count(void);
 
 /* Internal: record one event from a runtime hook point (proc spawn/exit,
  * etc.).  Not part of the public API -- callers use xtc_tail_enable to

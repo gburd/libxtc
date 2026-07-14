@@ -24,6 +24,8 @@
 #ifndef XTC_RCU_H
 #define XTC_RCU_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -47,11 +49,11 @@ typedef void (*xtc_rcu_free_fn)(void *p);
 /* Initialise the RCU subsystem.  Idempotent.  Called automatically by
  * the first read_lock or retire; explicit init lets callers fail
  * early if storage allocation fails. */
-int  xtc_rcu_init(void);
+XTC_API int  xtc_rcu_init(void);
 
 /* Finalise: drain all pending callbacks and free per-thread state.
  * Safe to call only when no readers are active. */
-void xtc_rcu_fini(void);
+XTC_API void xtc_rcu_fini(void);
 
 /* Mark the start / end of a read-side critical section.  Reads
  * between lock and unlock see a consistent snapshot of any
@@ -59,19 +61,19 @@ void xtc_rcu_fini(void);
  *
  * Lock/unlock are nestable on the same thread (refcount-style).
  * No system call, no atomic compare-exchange on the fast path. */
-void xtc_rcu_read_lock(void);
-void xtc_rcu_read_unlock(void);
+XTC_API void xtc_rcu_read_lock(void);
+XTC_API void xtc_rcu_read_unlock(void);
 
 /* Schedule `p` to be freed (via fn(p)) after every reader currently
  * inside a read-side has finished.  The actual free happens lazily
  * on the next epoch advance + a writer's synchronize call. */
-void xtc_rcu_retire(void *p, xtc_rcu_free_fn fn);
+XTC_API void xtc_rcu_retire(void *p, xtc_rcu_free_fn fn);
 
 /* Advance the global epoch and reclaim everything that's now safe.
  * Safe to call from any thread.  Blocks briefly while waiting for
  * readers in the previous epoch to drain. */
-void xtc_rcu_synchronize(void);
+XTC_API void xtc_rcu_synchronize(void);
 
-uint64_t xtc_rcu_current_epoch(void);
+XTC_API uint64_t xtc_rcu_current_epoch(void);
 
 #endif /* XTC_RCU_H */
