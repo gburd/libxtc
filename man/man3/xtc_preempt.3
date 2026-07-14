@@ -25,27 +25,34 @@
 .Sh DESCRIPTION
 These functions manage a per-thread preemption timer -- the seam the
 libxtc preemption facility is built on (see the preemption design in the
-project docs).  The timer measures the calling thread's own CPU time,
-so a busy fiber accrues ticks while an idle worker does not.
+project docs).  On most platforms (Linux, the BSDs, illumos, AIX) the
+timer measures the calling thread's own CPU time, so a busy fiber
+accrues ticks while an idle worker does not; on macOS the tick source is
+instead wall-clock (see the macOS paragraph below for why and the
+consequence).
 .Pp
 .Fn xtc_preempt_arm
 arms a timer on the calling thread that fires every
 .Fa interval_ns
-of that thread's CPU time, delivering an internal signal to the thread.
-Re-arming re-sets the interval.  It returns
+of the underlying tick source (that thread's CPU time on most
+platforms; wall-clock time on macOS), delivering an internal signal to
+the thread.  Re-arming re-sets the interval.  It returns
 .Dv XTC_OK ,
 .Dv XTC_E_INVAL
 for a non-positive interval, or
 .Dv XTC_E_NOSYS
-where per-thread CPU-time timers are unavailable.
+where no tick source is available.
 .Pp
 .Fn xtc_preempt_disarm
 stops and deletes the calling thread's timer; it is safe to call when no
 timer is armed.
 .Pp
 .Fn xtc_preempt_supported
-returns non-zero where the platform provides per-thread CPU-time timers
-(Linux, the BSDs, illumos, AIX) and zero otherwise, in which case
+returns non-zero where the platform provides a tick source --
+per-thread CPU-time timers on Linux, the BSDs, illumos, and AIX, or a
+kqueue
+.Dv EVFILT_TIMER
+on macOS (see below) -- and zero otherwise, in which case
 .Fn xtc_preempt_arm
 returns
 .Dv XTC_E_NOSYS .
@@ -90,19 +97,46 @@ untrusted pure-CPU work can alternatively run on
 .Xr xtc_osproc 3 ,
 an operating-system thread the kernel preempts.
 .Pp
-On macOS the involuntary path has no timer source: the platform offers
-no per-thread
+On macOS the involuntary path (Phase 2, the signal-context redirect)
+remains Linux-only: it needs the fiber's interrupted machine state
+rewritten via an on-stack trampoline
+(see
+.Sx SEE ALSO ) ,
+and that redirect is gated inside the active coroutine substrate, which
+declines on
+.Dv __APPLE__ .
+The Phase 1 cooperative-assisted tick source, however, DOES now work on
+macOS: since there is no per-thread
 .Fn timer_create
 /
-.Dv CLOCK_THREAD_CPUTIME_ID ,
-and process-wide
+.Dv CLOCK_THREAD_CPUTIME_ID
+(process-wide
 .Fn setitimer
-is unsuitable for per-thread accounting.  On this platform
+is unsuitable for per-thread accounting), macOS instead drives
+.Fn xtc_preempt_arm
+with a kqueue
+.Dv EVFILT_TIMER
+on a small private per-thread kqueue: a dedicated helper thread blocks
+in
+.Fn kevent
+and, on every timer fire, delivers the SAME internal signal a
+POSIX-timer platform's kernel would, driving the identical tick
+counter and pending flag this page documents above.  The one real,
+user-visible difference: kqueue has no CPU-time filter, so the macOS
+tick source is WALL-CLOCK, not CPU-time -- an idle macOS worker still
+ticks, where an idle Linux/BSD worker does not.  Net effect: on macOS
 .Nm
-degrades to the cooperative path only -- a fiber that never reaches a
-yield point will not be involuntarily interrupted.  This is a real
-limitation, not merely an untested corner; do not rely on fairness
-guarantees for uncooperative CPU-bound work on macOS.
+correctly drives Phase 1 cooperative-assisted preemption (a fiber that
+calls a yield point periodically IS time-sliced), but still degrades to
+the cooperative path only for Phase 2 -- a fiber that never reaches a
+yield point will not be involuntarily interrupted on macOS.  This
+Phase-2 gap is a real limitation, not merely an untested corner; do not
+rely on involuntary fairness for uncooperative CPU-bound work on macOS.
+The Phase 1 kqueue tick source has been reviewed and cross-compiled for
+macOS but not yet runtime-verified on real Apple hardware by the change
+that introduced it; see
+.Pa docs/KNOWN_ISSUES.md
+for the current verification status.
 .Sh SEE ALSO
 .Xr xtc_async 3 ,
 .Xr xtc_exec 3 ,

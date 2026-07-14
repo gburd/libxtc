@@ -109,12 +109,98 @@ test_rearm(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * macOS-only: exercise the kqueue EVFILT_TIMER tick source directly
+ * (src/ptc/preempt.c's XTC_HAVE_KQUEUE_TIMER branch).  On every other
+ * platform this is a clean no-op MUNIT_SKIP, matching this codebase's
+ * existing convention for a platform-gated test (see e.g.
+ * test/m18/test_tls_client.c's skip_test when XTC_TLS_ENABLED is
+ * absent, or test/m4/test_fctx.c's HAVE_FCTX gate).
+ *
+ * This test calls ONLY the public xtc_preempt_* API -- it does not
+ * reach into preempt.c's static kq_timer_helper/g_kqt internals -- so
+ * it validates the seam's OBSERVABLE behavior (arm succeeds, ticks
+ * accrue, disarm stops them), exactly like test_arm_ticks above does
+ * for the POSIX-timer platforms.  It is written and compiles cleanly
+ * under a macOS cross-compile (verified on this Linux host via
+ * "zig cc -target arm64-apple-macos-none" / "x86_64-macos-none",
+ * syntax/type-check only -- see the implementer's report); it has NOT
+ * been RUN on real macOS by this change.  It will run for real the
+ * next time the macos-latest CI job (.github/workflows/ci.yml)
+ * executes "make tests-c" after this change is pushed.
+ */
+#if defined(__APPLE__)
+static MunitResult
+test_macos_kqueue_timer(const MunitParameter p[], void *d)
+{
+	uint64_t t0, t1, t2;
+	int rc;
+	(void)p; (void)d;
+
+	/* On macOS xtc_preempt_supported() probes a real kqueue(2), which
+	 * should always succeed on a sane host; if it somehow does not,
+	 * treat that as the documented "platform lacks the tick source"
+	 * case rather than a hard failure -- the same shape test_arm_ticks
+	 * uses above for the POSIX-timer platforms. */
+	if (!xtc_preempt_supported()) {
+		munit_assert_int(xtc_preempt_arm(1 * 1000 * 1000LL), ==,
+		    XTC_E_NOSYS);
+		return MUNIT_OK;
+	}
+
+	rc = xtc_preempt_arm(1 * 1000 * 1000LL);   /* 1 ms interval */
+	munit_assert_int(rc, ==, XTC_OK);
+
+	t0 = xtc_preempt_ticks();
+	/* The kqueue tick source is WALL-CLOCK (EVFILT_TIMER has no
+	 * CPU-time filter), unlike the POSIX per-thread CPU-time timer --
+	 * so ticks accrue on elapsed time whether or not this thread is
+	 * busy.  A bounded sleep-poll loop (not a CPU burn) is therefore
+	 * the correct way to observe it, and cannot hang: xtc_sleep_ns is
+	 * the public thread-sleep wrapper (see xtc.h), never a raw
+	 * nanosleep. */
+	{
+		int tries = 0;
+		while (xtc_preempt_ticks() == t0 && tries < 200) {
+			(void)xtc_sleep_ns(5 * 1000 * 1000LL);   /* 5 ms */
+			tries++;
+		}
+	}
+	t1 = xtc_preempt_ticks();
+	munit_assert_uint64(t1, >, t0);        /* the kqueue timer fired */
+
+	if (xtc_preempt_tick_pending())
+		munit_assert_int(xtc_preempt_tick_pending(), ==, 0);
+
+	munit_assert_int(xtc_preempt_disarm(), ==, XTC_OK);
+	t1 = xtc_preempt_ticks();
+	(void)xtc_sleep_ns(50 * 1000 * 1000LL);   /* 50 ms: well past disarm */
+	t2 = xtc_preempt_ticks();
+	munit_assert_uint64(t2, ==, t1);       /* disarm stopped the helper */
+
+	return MUNIT_OK;
+}
+#else
+static MunitResult
+test_macos_kqueue_timer(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	/* Not Apple: the kqueue EVFILT_TIMER tick source does not exist on
+	 * this platform (preempt.c's XTC_HAVE_KQUEUE_TIMER is Apple-only).
+	 * Clean skip, same convention as every other platform-gated test in
+	 * this suite. */
+	return MUNIT_SKIP;
+}
+#endif
+
 static MunitTest tests[] = {
 	{ "/off_by_default", test_off_by_default, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/arm_ticks", test_arm_ticks, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/rearm", test_rearm, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/macos_kqueue_timer", test_macos_kqueue_timer, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 

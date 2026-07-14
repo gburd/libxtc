@@ -18,10 +18,41 @@
  *	path is byte-unchanged in a normal build/run.
  *
  *	Portability: POSIX timers (Linux/BSD/illumos).  On a platform
- *	without them (Windows, macOS lacks CPU-time POSIX timers cleanly)
- *	the arm/disarm are no-ops and xtc_preempt_supported() returns 0;
- *	a later phase adds a timer-queue / watchdog-thread variant.
+ *	without them (Windows) the arm/disarm are no-ops and
+ *	xtc_preempt_supported() returns 0.
+ *
+ *	macOS (__APPLE__): there is no per-thread CPU-time timer_create, so
+ *	Phase 1 (the tick source) is instead driven by a dedicated kqueue
+ *	EVFILT_TIMER on a private per-thread kqueue (see
+ *	XTC_HAVE_KQUEUE_TIMER below): xtc_preempt_arm spins up one small
+ *	helper thread that blocks in kevent() and, on every timer fire,
+ *	pthread_kill()s the ARMING thread with XTC_PREEMPT_SIGNAL -- so the
+ *	EXISTING preempt_handler below (unchanged, already fully portable
+ *	POSIX signal-handler code) runs on the arming thread exactly as it
+ *	does on Linux, updating the same g_pt.ticks / g_pt.pending state.
+ *	Every consumer above this file (exec.c's xtc_yield_check,
+ *	xtc_preempt_ticks/tick_pending) therefore needs zero macOS-specific
+ *	code.  One real, documented behavior difference: kqueue has no
+ *	CPU-time filter, so the macOS tick source is WALL-CLOCK, not
+ *	CPU-time -- an idle macOS worker still ticks, where an idle
+ *	Linux/BSD worker does not (see xtc_preempt.3).  Phase 2 (the
+ *	signal-context involuntary yield) stays Linux-only: it is gated
+ *	inside the coroutine substrate (coro_uctx.c's __xtc_coro_preempt,
+ *	owned by a different layer than this file), which already declines
+ *	on __APPLE__, so a tick delivered this way on macOS always falls
+ *	back to Phase 1 cooperative-assisted preemption -- correct, and no
+ *	new gating needed here.
  */
+
+/* Define the Darwin feature macro before any system header (including
+ * xtc_int.h, which transitively pulls in stddef.h/stdint.h and thus
+ * <sys/cdefs.h> -- the macOS feature-macro gate only takes effect if
+ * set before THAT first inclusion) so the full BSD <sys/event.h>
+ * surface (NOTE_NSECONDS et al.) is visible later in this file.  Same
+ * pattern, same rationale, as src/io/io_kqueue.c. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 
 #include "xtc_int.h"
 #include "xtc_preempt.h"
@@ -36,6 +67,27 @@
     defined(__OpenBSD__) || defined(__DragonFly__) || defined(__sun) || \
     defined(_AIX)
 # define XTC_HAVE_POSIX_TIMERS 1
+#endif
+
+/* macOS: no per-thread CPU-time timer_create.  The tick source is a
+ * kqueue EVFILT_TIMER on a private per-thread kqueue instead (see the
+ * big block comment above and the XTC_HAVE_KQUEUE_TIMER branch below).
+ * kqueue is already the L1 io backend on macOS/BSD (src/io/io_kqueue.c)
+ * -- this reuses that same OS facility rather than introducing GCD or
+ * any other second event mechanism.  Deliberately Apple-only: the
+ * other kqueue platforms (FreeBSD/NetBSD/OpenBSD/DragonFly) already
+ * have real per-thread CPU-time POSIX timers via XTC_HAVE_POSIX_TIMERS
+ * above, so they never need this fallback.  (_DARWIN_C_SOURCE, which
+ * exposes NOTE_NSECONDS and the rest of the BSD <sys/event.h> surface
+ * on the macOS SDK headers, is defined above -- before xtc_int.h's
+ * transitive first system-header pull -- exactly as io_kqueue.c does
+ * it.) */
+#if defined(__APPLE__)
+# define XTC_HAVE_KQUEUE_TIMER 1
+# include <sys/event.h>
+# include <sys/time.h>
+# include <errno.h>
+# include <unistd.h>
 #endif
 
 /*
@@ -87,7 +139,19 @@ extern int __xtc_proc_crit_depth(void);
  * this same thread (a transient value only ever errs toward "defer"). */
 static XTC_THREAD_LOCAL volatile int g_unsafe_depth;
 
-#if defined(XTC_HAVE_POSIX_TIMERS)
+#if defined(XTC_HAVE_POSIX_TIMERS) || defined(XTC_HAVE_KQUEUE_TIMER)
+
+/*
+ * preempt_handler / ensure_handler_installed are SHARED by every tick
+ * source (the POSIX per-thread CPU-time timer below, and the macOS
+ * kqueue EVFILT_TIMER branch further down): whichever source delivers
+ * XTC_PREEMPT_SIGNAL to this thread, it runs this same handler and
+ * updates the same g_pt state.  Widening this guard to also compile
+ * under XTC_HAVE_KQUEUE_TIMER (Apple-only) does not change what is
+ * compiled on Linux/BSD/illumos/AIX at all -- XTC_HAVE_KQUEUE_TIMER is
+ * never defined there, so the condition reduces to exactly
+ * XTC_HAVE_POSIX_TIMERS, unchanged.
+ */
 
 /*
  * The timer handler.  Async-signal-safe: it only does relaxed atomic
@@ -146,6 +210,10 @@ ensure_handler_installed(void)
 	(void)sigemptyset(&sa.sa_mask);
 	(void)sigaction(XTC_PREEMPT_SIGNAL, &sa, NULL);
 }
+
+#endif /* XTC_HAVE_POSIX_TIMERS || XTC_HAVE_KQUEUE_TIMER */
+
+#if defined(XTC_HAVE_POSIX_TIMERS)
 
 /* PUBLIC: int xtc_preempt_arm __P((int64_t)); */
 int
@@ -249,7 +317,208 @@ xtc_preempt_supported(void)
 	return c;
 }
 
-#else  /* no POSIX timers: no-op seam */
+#elif defined(XTC_HAVE_KQUEUE_TIMER)  /* macOS: kqueue EVFILT_TIMER tick source */
+
+/*
+ * macOS has no per-thread CPU-time timer_create, so the Phase 1 tick
+ * source is a kqueue EVFILT_TIMER instead (see the file-header comment
+ * for the full rationale).  Design, spelled out:
+ *
+ *   - xtc_preempt_arm creates a PRIVATE kqueue (kqueue(2)) plus one
+ *     periodic EVFILT_TIMER registered on it (NOTE_NSECONDS so the
+ *     interval matches the ns-granularity public API exactly), then
+ *     spawns one small helper pthread that just blocks in kevent() and
+ *     pthread_kill()s the ARMING thread with XTC_PREEMPT_SIGNAL every
+ *     time the timer fires.
+ *   - The signal lands on the arming thread and runs the EXACT SAME
+ *     preempt_handler() defined above (shared, unchanged): it bumps
+ *     g_pt.ticks and (Phase 2, if enabled) tries __xtc_coro_preempt.
+ *     coro_uctx.c's __xtc_coro_preempt already declines on __APPLE__
+ *     (see its own #if), so this always falls back to the Phase 1
+ *     pending flag on macOS -- correct, no new gating needed here.
+ *   - A dedicated kqueue per armed thread (not the loop's own L1 io
+ *     kqueue) keeps this seam decoupled from xtc_io_t's lifecycle: the
+ *     timer thread outlives individual io-poll calls and is torn down
+ *     independently by xtc_preempt_disarm.  This is the same choice
+ *     the file already makes on Linux (its own timer_t, not tied to
+ *     any io object).
+ *
+ *   Behavior difference from the POSIX-timer path (documented in the
+ *   file header and xtc_preempt.3): EVFILT_TIMER counts WALL-CLOCK
+ *   time, not this thread's CPU time (kqueue has no CPU-time filter).
+ *   An idle macOS worker still ticks; ticks are therefore a weaker
+ *   "time slice elapsed" signal there than on Linux/BSD's "CPU time
+ *   consumed" signal.  Phase 1 (xtc_yield_check) treats a tick the
+ *   same way regardless of source, so this is purely a documented
+ *   fairness/telemetry nuance, not a correctness gap.
+ */
+
+/* Per-thread kqueue-timer state, alongside preempt_tls_t's `armed`
+ * flag.  Kept in its own struct (not folded into preempt_tls_t) so the
+ * POSIX-timer branch's layout above is completely untouched -- that
+ * struct's #if defined(XTC_HAVE_POSIX_TIMERS) member is compiled out
+ * here since XTC_HAVE_POSIX_TIMERS is never defined together with
+ * XTC_HAVE_KQUEUE_TIMER. */
+typedef struct {
+	int        kq;          /* the private kqueue fd, or -1 */
+	pthread_t  helper;      /* the timer-poll helper thread */
+	int        have_helper; /* 1 if `helper` was created */
+	pthread_t  target;      /* the arming thread: pthread_kill's target */
+} kq_timer_tls_t;
+
+static XTC_THREAD_LOCAL kq_timer_tls_t g_kqt = { -1, 0, 0, 0 };
+
+/* Two disjoint EVFILT_TIMER/EVFILT_USER idents on the SAME private
+ * kqueue -- the pattern io_kqueue.c also uses (a fixed EVFILT_USER
+ * ident alongside per-fd EVFILT_READ/WRITE registrations) to fold a
+ * cross-thread wakeup into one kevent() namespace: EVFILT_TIMER and
+ * EVFILT_USER are separate filter namespaces in kqueue, so these two
+ * idents never collide even though both equal small integers. */
+#define XTC_KQ_TIMER_IDENT ((uintptr_t)1)
+#define XTC_KQ_STOP_IDENT  ((uintptr_t)2)
+
+/*
+ * The helper thread: blocks in kevent() on the private kqueue for
+ * EITHER the periodic EVFILT_TIMER or the EVFILT_USER stop event:
+ *   - on a timer fire, pthread_kill()s the arming thread;
+ *   - on the stop event (posted by xtc_preempt_disarm via NOTE_TRIGGER,
+ *     the same live-kqueue wakeup idiom __xtc_io_kqueue_wakeup_post
+ *     uses in io_kqueue.c), returns.
+ * Waking via an EVFILT_USER NOTE_TRIGGER rather than closing the
+ * kqueue out from under a blocked kevent() call avoids a close-vs-
+ * blocked-syscall race: the fd stays open and valid for the helper's
+ * entire lifetime, and disarm only closes it AFTER the join.
+ */
+static void *
+kq_timer_helper(void *arg)
+{
+	kq_timer_tls_t *st = (kq_timer_tls_t *)arg;
+	for (;;) {
+		struct kevent ev;
+		int n = kevent(st->kq, NULL, 0, &ev, 1, NULL);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			break;              /* kqueue gone: exit defensively */
+		}
+		if (n == 0)
+			continue;
+		if (ev.filter == EVFILT_USER && ev.ident == XTC_KQ_STOP_IDENT)
+			break;
+		if (ev.filter == EVFILT_TIMER)
+			(void)pthread_kill(st->target, XTC_PREEMPT_SIGNAL);
+	}
+	return NULL;
+}
+
+/* PUBLIC: int xtc_preempt_arm __P((int64_t)); */
+int
+xtc_preempt_arm(int64_t interval_ns)
+{
+	struct kevent kev[2];
+
+	if (interval_ns <= 0)
+		return XTC_E_INVAL;
+	if (g_pt.armed)
+		(void)xtc_preempt_disarm();
+
+	ensure_handler_installed();
+
+	/* Same rationale as the POSIX-timer branch: opt this thread's mask
+	 * back in for XTC_PREEMPT_SIGNAL, since runtime threads start with
+	 * every signal blocked. */
+	{
+		sigset_t s;
+		sigemptyset(&s);
+		sigaddset(&s, XTC_PREEMPT_SIGNAL);
+		(void)pthread_sigmask(SIG_UNBLOCK, &s, NULL);
+	}
+
+	g_kqt.kq = kqueue();
+	if (g_kqt.kq < 0)
+		return XTC_E_NOSYS;
+
+	/* NOTE_NSECONDS: register the interval in the same ns unit the
+	 * public API takes, no lossy us/ms rounding.  EV_ADD with no
+	 * EV_ONESHOT/EV_DISPATCH -- the default kqueue timer is periodic,
+	 * re-firing every `interval_ns` until EV_DELETE or the kqueue is
+	 * closed.  The EVFILT_USER stop event is armed alongside it
+	 * (EV_CLEAR: it auto-resets after delivery -- the same shape
+	 * io_kqueue.c's own wakeup event uses). */
+	EV_SET(&kev[0], XTC_KQ_TIMER_IDENT, EVFILT_TIMER, EV_ADD | EV_ENABLE,
+	    NOTE_NSECONDS, (intptr_t)interval_ns, NULL);
+	EV_SET(&kev[1], XTC_KQ_STOP_IDENT, EVFILT_USER, EV_ADD | EV_CLEAR,
+	    0, 0, NULL);
+	if (kevent(g_kqt.kq, kev, 2, NULL, 0, NULL) < 0) {
+		(void)close(g_kqt.kq);
+		g_kqt.kq = -1;
+		return XTC_E_NOSYS;
+	}
+
+	g_kqt.target = pthread_self();
+	if (__os_pthread_create_masked(&g_kqt.helper, kq_timer_helper, &g_kqt)
+	    != 0) {
+		(void)close(g_kqt.kq);
+		g_kqt.kq = -1;
+		return XTC_E_NOSYS;
+	}
+	g_kqt.have_helper = 1;
+
+	g_pt.armed = 1;
+	atomic_store_explicit(&g_pt.pending, 0, memory_order_relaxed);
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_preempt_disarm __P((void)); */
+int
+xtc_preempt_disarm(void)
+{
+	if (g_kqt.have_helper) {
+		/* Wake the helper's blocked kevent() with the EVFILT_USER stop
+		 * event (NOTE_TRIGGER) rather than closing the kqueue fd out from
+		 * under it -- the same live-kqueue wakeup idiom
+		 * __xtc_io_kqueue_wakeup_post uses in io_kqueue.c, and it avoids a
+		 * close()-races-with-a-blocked-syscall hazard entirely. */
+		struct kevent kev;
+		EV_SET(&kev, XTC_KQ_STOP_IDENT, EVFILT_USER, 0, NOTE_TRIGGER,
+		    0, NULL);
+		(void)kevent(g_kqt.kq, &kev, 1, NULL, 0, NULL);
+		(void)pthread_join(g_kqt.helper, NULL);  /* XTC_BLOCKING_OK: joining the kqueue timer helper thread on teardown, not on a loop */
+		g_kqt.have_helper = 0;
+	}
+	if (g_kqt.kq >= 0) {
+		(void)close(g_kqt.kq);
+		g_kqt.kq = -1;
+	}
+	g_pt.armed = 0;
+	atomic_store_explicit(&g_pt.pending, 0, memory_order_relaxed);
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_preempt_supported __P((void)); */
+int
+xtc_preempt_supported(void)
+{
+	/* Runtime probe, cached, mirroring the POSIX-timer branch: kqueue()
+	 * itself can fail (e.g. an fd-table limit), so probe once rather
+	 * than assume the compile-time XTC_HAVE_KQUEUE_TIMER guarantees a
+	 * live kqueue at runtime. */
+	static _Atomic int cached = -1;
+	int c = atomic_load_explicit(&cached, memory_order_relaxed);
+	if (c < 0) {
+		int kq = kqueue();
+		if (kq >= 0) {
+			(void)close(kq);
+			c = 1;
+		} else {
+			c = 0;
+		}
+		atomic_store_explicit(&cached, c, memory_order_relaxed);
+	}
+	return c;
+}
+
+#else  /* no POSIX timers and no kqueue timer: no-op seam */
 
 /* PUBLIC: int xtc_preempt_arm __P((int64_t)); */
 int
