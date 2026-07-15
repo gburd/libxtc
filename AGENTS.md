@@ -27,6 +27,21 @@ Project-specific rules for AI agents (Claude Code, Kiro CLI, Pi, Maki).
    source (e.g. the SQLite amalgamation) is allowed; compiled output
    never is.
 
+   GENERATED-BUT-COMMITTED SOURCE -- allowed, but ONLY these two, and
+   they are the complete list as of 2026-07 (do not add more without a
+   note here):
+     - `dist/configure` -- the autotools-generated configure script,
+       committed so a consumer/packager can build WITHOUT autoconf
+       installed (the tarball convention; `test/dist/test_install_headers.sh`
+       and the macOS no-autoconf path rely on it).
+     - `examples/06_sqlxtc/sql_parse_gen.c` -- the Lemon/Lime-generated
+       SQL parser, committed like SQLite commits its lemon output
+       (regenerating needs the Lime submodule built; the sqlxtc
+       Makefile documents it as "the committed generated file").
+   These are generated SOURCE, not compiled OUTPUT -- the line the rule
+   above draws.  Anything else generated (a `.o`, a lib, a second
+   generated `.c`) is an artifact and must be gitignored, not committed.
+
 5. **Internal design/status memos.**  Agent working notes -- design
    explorations, milestone claim logs, status/readiness reviews,
    host-bring-up scratch, per-feature investigation write-ups -- are
@@ -40,6 +55,13 @@ Project-specific rules for AI agents (Claude Code, Kiro CLI, Pi, Maki).
    memo: it belongs in `.agent/`.  When moving one out of `docs/`,
    fix or drop every shipped reference to it (README, man pages, source
    header comments, index.md) rather than leaving a dead link.
+
+   `.agent/` is gitignored (`.gitignore` line 39).  NEVER `git add -f`
+   a file under `.agent/` -- the `-f` overrides the ignore and is
+   exactly how six memos leaked into Git in 2026-07 (removed in
+   `4969eda`).  Agent tracking notes stay local-only, full stop; if a
+   note's content deserves to ship, it becomes consumer-facing docs
+   under `docs/` on its own merits, not a force-added `.agent/` file.
 
 ## Recovering from a bad commit (history rewrite)
 

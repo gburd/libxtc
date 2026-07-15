@@ -36,6 +36,9 @@ TAGS
 result
 result-*
 .direnv/
+# Agent working notes -- local-only, NEVER committed (AGENTS.md rule 5).
+# Do NOT `git add -f` anything under here; that override leaked 6 memos
+# into Git in 2026-07 (removed in 4969eda).
 .agent/
 NOTES
 
