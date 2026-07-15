@@ -384,6 +384,40 @@ case "$host_os" in
 esac
 AC_SUBST([XTC_PLATFORM_LIBS], [$xtc_extra_libs])
 
+# Shared-library link style.  Darwin's ld64 rejects the ELF/SysV flags
+# (-shared, -soname, --version-script) and names shared objects
+# libNAME.VERSION.dylib, so it needs -dynamiclib, -install_name,
+# versioned .dylib names, and an -exported_symbols_list in place of the
+# ELF version script.  Decide this at CONFIGURE time and AC_SUBST the
+# pieces, so dist/Makefile.in stays free of GNU-make-only constructs
+# (no $(shell)/ifeq) -- the Makefile must parse under BSD make too (the
+# distclean gate's inner build invokes bare `make`, which is BSD make
+# on FreeBSD).
+case "$host_os" in
+  *darwin*)
+    xtc_shlib_linkname='libxtc.dylib'
+    xtc_shlib_soname='libxtc.$(XTC_VERSION_MAJOR).dylib'
+    xtc_shlib_real='libxtc.$(XTC_VERSION_FULL).dylib'
+    xtc_shlib_deps='$(LIB_OBJS) libxtc.exp'
+    xtc_shlib_ldflags='-dynamiclib -fPIC -install_name $(libdir)/libxtc.$(XTC_VERSION_MAJOR).dylib -compatibility_version $(XTC_VERSION_MAJOR).0 -current_version $(XTC_VERSION_FULL) -Wl,-exported_symbols_list,libxtc.exp'
+    xtc_shlib_style='darwin'
+    ;;
+  *)
+    xtc_shlib_linkname='libxtc.so'
+    xtc_shlib_soname='libxtc.so.$(XTC_VERSION_MAJOR)'
+    xtc_shlib_real='libxtc.so.$(XTC_VERSION_FULL)'
+    xtc_shlib_deps='$(LIB_OBJS) $(VERSION_SCRIPT)'
+    xtc_shlib_ldflags='-shared -fPIC -Wl,-soname,libxtc.so.$(XTC_VERSION_MAJOR) -Wl,--version-script=$(VERSION_SCRIPT)'
+    xtc_shlib_style='elf'
+    ;;
+esac
+AC_SUBST([XTC_SHLIB_LINKNAME], [$xtc_shlib_linkname])
+AC_SUBST([XTC_SHLIB_SONAME],   [$xtc_shlib_soname])
+AC_SUBST([XTC_SHLIB_REAL],     [$xtc_shlib_real])
+AC_SUBST([XTC_SHLIB_DEPS],     [$xtc_shlib_deps])
+AC_SUBST([XTC_SHLIB_LDFLAGS],  [$xtc_shlib_ldflags])
+AC_SUBST([XTC_SHLIB_STYLE],    [$xtc_shlib_style])
+
 AS_CASE([$xtc_io_backend],
   [epoll],   [AC_DEFINE([XTC_IO_BACKEND_EPOLL],   1, [Linux epoll backend])],
   [poll],    [AC_DEFINE([XTC_IO_BACKEND_POLL],    1, [POSIX poll backend])],
