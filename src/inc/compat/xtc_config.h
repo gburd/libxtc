@@ -27,8 +27,8 @@
  * check (strncmp(string, "maj.min.patch")) fails under MSVC. */
 #define XTC_VERSION_MAJOR  1
 #define XTC_VERSION_MINOR  22
-#define XTC_VERSION_PATCH  0
-#define XTC_VERSION_STRING "1.22.0"
+#define XTC_VERSION_PATCH  1
+#define XTC_VERSION_STRING "1.22.1"
 
 /* Completion-based I/O backend for Windows. */
 #define XTC_IO_BACKEND_IOCP 1
