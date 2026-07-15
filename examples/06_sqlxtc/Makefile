@@ -395,6 +395,9 @@ bm_writeback_bench: bm_writeback_bench.c bufmgr.o
 bt_merge_bench: bt_merge_bench.c btree.c bufmgr.o btnode.c
 	$(CC) $(CFLAGS) -o $@ bt_merge_bench.c btree.c bufmgr.o btnode.c $(LDFLAGS)
 
+bench_btree_concurrent: bench_btree_concurrent.c btree.c bufmgr.o btnode.c
+	$(CC) $(CFLAGS) -o $@ bench_btree_concurrent.c btree.c bufmgr.o btnode.c $(LDFLAGS)
+
 # ---- physiological redo apply (page-LSN gated image write) ----
 test_redo_page: test_redo_page.c bufmgr.o
 	$(CC) $(CFLAGS) -o $@ test_redo_page.c bufmgr.o $(LDFLAGS)

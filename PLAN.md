@@ -3324,7 +3324,15 @@ the named bottleneck with a cross-loop benchmark BEFORE building the
 fix, so we do not add OCC machinery that buys nothing on this runtime.
 
 1. **Optimistic Lock Coupling (OLC) on the B-link tree** (Leis et al.)
-   -- the highest value-for-effort item.  Keep the existing tree;
+   -- the highest value-for-effort item.  MEASURE-FIRST GATE: PASSED
+   (2026-07, examples/06_sqlxtc/bench_btree_concurrent.c).  A pure
+   read-only-tree, random-lookup, cross-loop read-scaling sweep shows
+   throughput DEGRADES with more loops instead of scaling: 1 loop
+   1.56M reads/s -> 8 loops 1.27M (efficiency 100% -> 10%), the
+   textbook signature of cross-core contention on a shared write on
+   the read DESCENT path (no splits -- read-only tree), i.e. the
+   per-frame shared xtc_arwlock latch.  So OLC IS warranted on this
+   runtime, and 1.56M(1 loop)/1.27M(8 loops) is its before-number.  Keep the existing tree;
    replace the fiber R/W latches with optimistic version-locks: a
    READ validates a per-node version counter (seqlock: read version,
    read node, re-read version, retry on change / locked bit), a WRITE
