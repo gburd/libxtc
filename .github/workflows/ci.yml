@@ -579,6 +579,30 @@ jobs:
           printf '%s\n' '#include <stdio.h>' '#include "xtc.h"' '#include "xtc_loop.h"' 'int main(void){printf("libxtc %s\n", xtc_version_string());return 0;}' > /tmp/xtc_consumer.c
           cc $(pkg-config --cflags xtc) /tmp/xtc_consumer.c $(pkg-config --libs --static xtc) -o /tmp/xtc_consumer
           /tmp/xtc_consumer
+      - name: Shared-library build + dynamic-link smoke (Darwin dylib branch)
+        # Validates the macOS --enable-shared path (Makefile Darwin
+        # branch: -dynamiclib / -install_name / -exported_symbols_list).
+        # Build a real .dylib, install it, link a consumer with plain
+        # -lxtc, and confirm via otool -L that it binds the DYLIB (not
+        # the static archive), then run it.
+        run: |
+          mkdir -p build_shared && cd build_shared
+          PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig" \
+            CFLAGS="-Werror" \
+            ../dist/configure --enable-shared --with-tls=auto --prefix="$HOME/xtc-inst"
+          make -j3
+          ls -l libxtc.*.dylib libxtc.dylib
+          # Install to the REAL prefix (a throwaway runner dir): the
+          # Darwin dylib records an absolute -install_name of
+          # $(libdir)/libxtc.MAJOR.dylib, so the consumer must find it
+          # there at runtime -- staging to a DESTDIR would leave the
+          # install_name pointing at an unwritten path.
+          make install
+          inc="$HOME/xtc-inst/include"; lib="$HOME/xtc-inst/lib"
+          printf '%s\n' '#include <stdio.h>' '#include "xtc.h"' 'int main(void){printf("libxtc %s\n", xtc_version_string());return 0;}' > /tmp/xtc_dyn.c
+          cc -I"$inc" /tmp/xtc_dyn.c -L"$lib" -lxtc -o /tmp/xtc_dyn
+          otool -L /tmp/xtc_dyn | grep -q 'libxtc\..*dylib' && echo "consumer binds the dylib: OK"
+          /tmp/xtc_dyn
       - name: sqlxtc multi-thread load (one loop per CPU; cross-loop regression)
         working-directory: examples/06_sqlxtc
         run: |
