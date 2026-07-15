@@ -256,6 +256,78 @@ test_svr_null_guards(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* xtc_svr_reply OOM path: with the svr.reply.oom injection point armed,
+ * a reply carrying a non-empty payload must fail with XTC_E_NOMEM (the
+ * __os_malloc for the reply copy is forced to fail) rather than
+ * crashing or delivering a torn reply.  A handler replies a non-empty
+ * payload and records the rc; the driver then stops the server. */
+static xtc_svr_t *g_oom_svr;
+static xtc_pid_t  g_oom_target;
+static int        g_oom_reply_rc = -99;
+
+static int
+oom_handle_call(void *state, const void *req, size_t req_size,
+    xtc_svr_call_t *call)
+{
+	static const char payload[8] = "reply!!";
+	(void)state; (void)req; (void)req_size;
+	/* Non-empty reply -> hits the __os_malloc copy path, which the
+	 * armed injection point forces to XTC_E_NOMEM. */
+	g_oom_reply_rc = xtc_svr_reply(call, payload, sizeof payload);
+	return XTC_SVR_CONTINUE;
+}
+
+static void
+oom_driver(void *arg)
+{
+	void *reply = NULL;
+	size_t rsize = (size_t)-1;
+	uint8_t req = 1;
+	(void)arg;
+	/* The call itself may time out or return an error because the
+	 * reply failed to allocate -- we only care that xtc_svr_reply
+	 * reported NOMEM (recorded in g_oom_reply_rc). */
+	(void)xtc_svr_call(g_oom_target, &req, sizeof req, &reply, &rsize,
+	    500LL * 1000 * 1000);
+	if (reply != NULL)
+		__os_free(reply);
+	(void)xtc_svr_stop(g_oom_svr);
+}
+
+static MunitResult
+test_svr_reply_oom(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_svr_t *svr = NULL;
+	xtc_svr_callbacks_t cb = {0};
+	xtc_svr_opts_t opts = { .name = "oom", .mailbox_cap = 0 };
+	xtc_pid_t dpid;
+	(void)p; (void)d;
+
+	cb.handle_call = oom_handle_call;
+	g_oom_reply_rc = -99;
+
+	munit_assert_int(xtc_inject_attach("svr.reply.oom", noop_inject, NULL),
+	    ==, XTC_OK);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cb, NULL, &opts, &svr),
+	    ==, XTC_OK);
+	g_oom_svr = svr;
+	g_oom_target = xtc_svr_pid(svr);
+	munit_assert_int(xtc_proc_spawn(loop, oom_driver, NULL, NULL, &dpid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	(void)xtc_inject_detach("svr.reply.oom");
+
+	/* The handler's non-empty reply hit the forced-OOM path. */
+	munit_assert_int(g_oom_reply_rc, ==, XTC_E_NOMEM);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/io_init/calloc_fail", test_io_init_calloc_fail, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
@@ -275,6 +347,8 @@ static MunitTest tests[] = {
 	{ "/io/wakeup_roundtrip", test_io_wakeup_roundtrip, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/svr/reply_null_call", test_svr_reply_null_call, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/svr/reply_oom", test_svr_reply_oom, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/svr/no_handler_empty_reply", test_svr_no_handler_empty_reply,
 	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

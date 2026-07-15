@@ -722,13 +722,17 @@ race deterministically.
 **Status:** improved this round with NULL/invalid-argument guard tests
 (test/coverage/test_fault_inject.c `/svr/null_guards`), which exercise
 the early-return XTC_E_INVAL edges across xtc_svr_start/stop/join/reply/
-call/cast that the happy-path server tests skipped.  The remaining
-uncovered lines are deeper error paths (OOM during the reply-frame
-alloc, call-after-stop) that need a fault-injection point rather than a
-plain guard test; they are error handling, not mainline behavior.
+call/cast that the happy-path server tests skipped, PLUS the reply-path
+OOM edge (`/svr/reply_oom`): a new `svr.reply.oom` injection point at
+the top of xtc_svr_reply forces the non-empty-reply allocation to fail,
+covering the XTC_E_NOMEM return on BOTH reply branches (the synchronous
+slot path and the in-proc reply_pid tag+payload path) -- ASan-clean, no
+leak on the failure path.
 
-**Targets remaining:** reply-when-server-already-stopped, OOM during the
-reply/framing path (inject XTC_E_NOMEM at the __os_malloc sites).
+**Targets remaining:** the deeper call-after-stop timing edge (a call
+that races xtc_svr_stop) still needs a scheduler-ordering harness
+rather than a plain injection point; it is error handling, not mainline
+behavior.
 
 ## io_common.c coverage
 
