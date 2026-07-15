@@ -1,3 +1,30 @@
+libxtc (1.23.0-1) unstable; urgency=medium
+
+  * macOS/Apple-Silicon: --enable-shared now builds a proper Mach-O
+    dylib (the Darwin -dynamiclib / -install_name / -exported_symbols_list
+    branch, selected at configure time); previously only the static
+    archive built on macOS.  A hand-written Mach-O arm64 fcontext
+    coroutine substrate is available opt-in (-DXTC_CORO_FORCE_FCTX);
+    the default substrate on Apple Silicon stays ucontext until the
+    fcontext path is promoted.
+  * Fix: the intermittent macOS/arm64 SIGBUS in xtc_dump() -- the
+    system backtrace() could walk a fiber stack past its guard-paged
+    top into unmapped memory.  The Darwin backtrace now walks the
+    frame-pointer chain bounded by the current stack's mapped VM region
+    (mach_vm_region), so it cannot over-walk; other platforms unchanged.
+  * Packaging/build: the Debian -dev package now ships all public
+    headers (was only xtc.h -- an uncompilable package); the shell test
+    gates skip cleanly without autoconf (make check is green on a stock
+    macOS box); the Makefile is BSD-make-parseable again (Darwin
+    detection moved to configure); the meson build is correctly
+    described as an M0-subset work in progress.
+  * CI: the macOS job now runs full make check + -Werror + an install/
+    consumer-link smoke + an --enable-shared dylib smoke, so macOS
+    build/packaging regressions are caught in CI.
+  * No breaking xtc_* API change.
+
+ -- Greg Burd <greg@burd.me>  Wed, 15 Jul 2026 13:05:16 -0400
+
 libxtc (1.22.1-1) unstable; urgency=medium
 
   * Fix: closed a pre-existing cross-thread data race on the receive
