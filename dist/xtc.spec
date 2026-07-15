@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.23.0"
+#       --define "version 1.23.1"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.23.0
+Version:        1.23.1
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,9 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Wed Jul 15 2026 Greg Burd <greg@burd.me> - 1.23.1-1
+- macOS/Apple-Silicon now defaults to the Mach-O arm64 fcontext coroutine substrate (was ucontext), removing the per-switch sigprocmask syscall; override with -DXTC_CORO_FORCE_UCONTEXT. Amalgamation + macOS x86-64 keep ucontext.
+
 * Wed Jul 15 2026 Greg Burd <greg@burd.me> - 1.23.0-1
 - macOS/Apple-Silicon: --enable-shared builds a Mach-O dylib (Darwin branch, configure-selected); opt-in Mach-O arm64 fcontext substrate; fixed the intermittent xtc_dump() SIGBUS (fiber-stack-bounded backtrace). Packaging: Debian -dev ships all headers; shell gates skip without autoconf; BSD-make-parseable Makefile; deeper macOS CI (make check + -Werror + install/shared smoke).
 

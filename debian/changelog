@@ -1,3 +1,16 @@
+libxtc (1.23.1-1) unstable; urgency=medium
+
+  * macOS/Apple-Silicon now DEFAULTS to the hand-written Mach-O arm64
+    fcontext coroutine substrate instead of ucontext, removing the
+    per-switch sigprocmask syscall (~34us -> ~23us/task-switch at 1M
+    fibers; larger per-switch win at smaller scale).  Override with
+    -DXTC_CORO_FORCE_UCONTEXT.  macOS x86-64 keeps ucontext (no Mach-O
+    x86-64 fcontext assembly); the single-file amalgamation also keeps
+    ucontext (it cannot carry the external .S).
+  * No API change; a coroutine-substrate default change on one platform.
+
+ -- Greg Burd <greg@burd.me>  Wed, 15 Jul 2026 14:25:56 -0400
+
 libxtc (1.23.0-1) unstable; urgency=medium
 
   * macOS/Apple-Silicon: --enable-shared now builds a proper Mach-O
