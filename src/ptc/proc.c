@@ -789,6 +789,7 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
 	int armed;
 	int wm_fire = 0;
 	size_t wm_depth = 0, wm_cap = 0;
+	xtc_waker_t wk = { 0 };
 	(void) __proc_mtx_lock(&p->mbox_lock);
 	/* Reject if proc is dead, or capped and full.
 	 * Note: precedence bug fix -- the original used
@@ -834,6 +835,13 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
 		wm_cap = p->mbox_cap;
 	}
 	armed = p->waker_armed;
+	/* Copy the waker OUT under the lock: xtc_waker_wake itself must run
+	 * OUTSIDE mbox_lock (it may re-enter proc/loop APIs), but reading
+	 * p->recv_waker after unlocking races the receiver re-arming it on
+	 * its next recv cycle.  A local copy taken under the lock is
+	 * race-free and the wake fires from the copy. */
+	if (armed)
+		wk = p->recv_waker;
 	(void) __proc_mtx_unlock(&p->mbox_lock);
 	if (wm_fire)
 		p->mbox_wm_fn(p->pid, wm_depth, wm_cap, p->mbox_wm_user);
@@ -844,7 +852,7 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
 			atomic_fetch_or_explicit(&p->task->wake_revents,
 			    XTC_WAIT_MAILBOX, memory_order_relaxed);
 #if !XTC_DST_BUG(XTC_DST_BUG_LOSTWAKE)
-		(void)xtc_waker_wake(&p->recv_waker);
+		(void)xtc_waker_wake(&wk);
 #endif   /* planted bug LOSTWAKE: drop this wake -> parked receiver hangs */
 	}
 	return XTC_OK;
@@ -1627,10 +1635,6 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			link = &e->next;
 		}
 
-		/* Register the waker struct before the final drain so we can
-		 * arm it UNDER the same lock that confirms the mailbox empty. */
-		(void)xtc_task_waker(self->task, &self->recv_waker);
-
 		/* Pull from mailbox; for each, match or move to save. */
 		(void) __proc_mtx_lock(&self->mbox_lock);
 		for (;;) {
@@ -1648,9 +1652,25 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 				 * message and stalled to its timeout.  Benign on a
 				 * single loop (no concurrent sender in the gap),
 				 * fatal to throughput across loops.
+				 *
+				 * Populate recv_waker HERE too, under the SAME lock,
+				 * immediately before waker_armed = 1.  The wake side
+				 * (__mbox_deliver) reads waker_armed under mbox_lock
+				 * and only then, after unlocking, reads recv_waker to
+				 * fire it; writing recv_waker before setting the flag
+				 * (both under the lock) makes the write happen-before
+				 * that read (release on our unlock, acquire on the
+				 * sender's lock), so there is no data race on
+				 * recv_waker.  (recv_waker's value is always the same
+				 * fixed self->task/loop, so the old lockless write was
+				 * benign in VALUE, but it was still a C11 data race
+				 * TSan rightly flagged.)
 				 */
-				if (timeout_ns != 0)
+				if (timeout_ns != 0) {
+					(void)xtc_task_waker(self->task,
+					    &self->recv_waker);
 					self->waker_armed = 1;
+				}
 				(void) __proc_mtx_unlock(&self->mbox_lock);
 				break;
 			}
@@ -1948,8 +1968,13 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		had_timer = 1;
 	}
 
-	(void)xtc_task_waker(self->task, &self->recv_waker);
 	(void) __proc_mtx_lock(&self->mbox_lock);
+	/* Populate recv_waker + set waker_armed together under mbox_lock so
+	 * the cross-thread wake (which reads waker_armed under this lock,
+	 * then reads recv_waker after unlocking) sees a fully-written
+	 * recv_waker with no data race -- see the matching note in
+	 * __do_recv's park point. */
+	(void)xtc_task_waker(self->task, &self->recv_waker);
 	self->waker_armed = 1;
 	(void) __proc_mtx_unlock(&self->mbox_lock);
 
