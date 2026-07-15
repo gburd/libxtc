@@ -3302,6 +3302,98 @@ Design in `docs/M_SQLXTC_GREENFIELD.md` (clean-slate) and
 
 ---
 
+### sqlxtc concurrency & indexing research track (from a 2026-07 Silo / Masstree review) -- NOT STARTED
+
+Grounded in the current engine: a shared, buffer-managed B-LINK tree
+(Lehman-Yao) with fiber-yielding latch-coupling (xtc_arwlock per frame)
+plus a move-right recovery step, snapshot-isolation MVCC + SSI
+(version chains, commit-ts clock, GC by low-water horizon), and a
+separate share-nothing sharded MVCC/2PC experiment (mvcc.c).  The
+latch-coupling read descent and the global commit-timestamp counter
+are the two structural scalability walls versus WiredTiger; an LSM
+(TidesDB) write-ingest gap is architectural and OUT of scope for these
+items.  Reviewed papers: Silo (SOSP'13), Masstree (EuroSys'12), and
+their successors (Bw-tree, TicToc, Cicada, OLC, the VLDB'17 in-memory
+MVCC survey).
+
+MEASURE-FIRST discipline applies to every item below: the fiber model
+means these techniques help ONLY where sqlxtc runs multi-loop with
+cross-loop data sharing (the shared-btree path); under the
+share-nothing mvcc.c model there is no contention to remove.  Confirm
+the named bottleneck with a cross-loop benchmark BEFORE building the
+fix, so we do not add OCC machinery that buys nothing on this runtime.
+
+1. **Optimistic Lock Coupling (OLC) on the B-link tree** (Leis et al.)
+   -- the highest value-for-effort item.  Keep the existing tree;
+   replace the fiber R/W latches with optimistic version-locks: a
+   READ validates a per-node version counter (seqlock: read version,
+   read node, re-read version, retry on change / locked bit), a WRITE
+   takes the actual lock.  Reads then do NO shared writes on the
+   descent path -- the read-scalability win.  sqlxtc is structurally
+   ~80% there: the B-link right-link + move-right recovery already
+   makes a lockless descent safe against a concurrent split (a stale
+   reader follows the right-link); the missing piece is the per-node
+   version to validate + retry.  This is the Masstree optimistic
+   read path applied incrementally, without the trie rewrite (the
+   trie layout is NOT adopted -- its payoff is variable-length keys,
+   not worth the rewrite here).  Directly targets the read gap vs WT.
+
+2. **Epoch / data-driven commit-TID for the shared MVCC path**
+   (Silo epoch commit; evaluate TicToc as the successor that needs
+   NO global counter).  The global commit-timestamp counter is the
+   write-scalability wall as loop count grows.  Silo stamps commits
+   with a coarse epoch (one thread bumps it; everyone reads it
+   relaxed) so serialization order = (epoch, TID) with no contended
+   counter -- and libxtc ALREADY ships the epoch primitive (xtc_rcu)
+   and a per-loop-tick cadence, an unusually good fit.  TicToc derives
+   the commit TID from the read/write set and removes even the epoch
+   counter; SSI already tracks a read-set, so the bookkeeping partly
+   exists.  MEASURE FIRST: confirm the global commit-ts counter is
+   actually the bottleneck under a cross-loop write benchmark (the
+   share-nothing mvcc.c may already sidestep it) before committing.
+   Narrows (does not erase) the write gap vs WT; also enables
+   epoch group-commit (batch fsync per epoch) on the WAL path.
+
+3. **Additional index types (the runtime already ships the primitives)**
+   -- sqlxtc is an example, so the bar is teaching value + runtime
+   fit, not shipping every index.  In fit order:
+     - **Skiplist ordered index over xtc_cskip** -- nearly free; the
+       RCU ordered structure already exists (added this arc).  Shows
+       an alternative to the B-tree for the ordered role.
+     - **Hash secondary index over xtc_chash** -- also nearly free;
+       the RCU hash table exists (added this arc).  Exercises it in a
+       real storage context.  The open-addressing-without-reordering
+       optimal bound (arXiv 2501.02305) is a later refinement, not
+       needed for a first cut.
+     - **ART (Adaptive Radix Tree), paired with OLC** -- the flagship
+       modern in-memory index; ART+OLC is a well-known combination
+       and pairs with item 1.  A fundamentally different structure
+       than the B-link tree; high teaching value, well-bounded.
+     - **Bitmap index over gburd/sparsemap (Codeberg)** -- stretch /
+       distinctive: the right tool for low-cardinality columns,
+       underrepresented in teaching codebases, and a first-party
+       library so licensing/fit is clean.  Larger effort (planner
+       must learn to use it).
+
+4. **Research spike (NOT a build commitment): latch-free B-tree**
+   -- evaluate whether a Bw-tree storage option is worth it GIVEN
+   libxtc already provides epoch reclamation (xtc_rcu) and CAS
+   primitives (the mapping table + delta records fit).  REQUIRED
+   reading first: "Building a Bw-tree Takes More Than Just Buzz
+   Words" (SIGMOD'18), which documents how hard it is to get right
+   and may well argue FOR OLC (item 1) OVER a Bw-tree for this
+   codebase.  Also survey TicToc / Cicada (OCC successors) and the
+   VLDB'17 in-memory-MVCC evaluation to inform items 1-2.  Deliver a
+   design note + recommendation, not code.
+
+Sequencing: do NOT start until the macOS fixes land and a stable
+version ships.  Then, by value-for-effort: item 1 (OLC) first, item 3
+skiplist+hash indexes (cheap, showcase the new primitives), item 4
+spike to inform item 2, then item 2 behind its measure-first gate,
+then ART, then bitmap.
+
+---
+
 ### kaka example (examples/07_kaka)
 
 Kafka-shaped log broker; design in `examples/07_kaka/README.md`.
