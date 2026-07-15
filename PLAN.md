@@ -3348,7 +3348,24 @@ fix, so we do not add OCC machinery that buys nothing on this runtime.
 
 2. **Epoch / data-driven commit-TID for the shared MVCC path**
    (Silo epoch commit; evaluate TicToc as the successor that needs
-   NO global counter).  The global commit-timestamp counter is the
+   NO global counter).  MEASURE-FIRST GATE: NOT WARRANTED YET (2026-07,
+   design read of xstore.c's commit path).  The btree-backed engine
+   DOES have a global commit clock (g_xclock, an HLC advanced by a CAS
+   loop in hlc_tick) -- but on the commit path (xs_commit_ctx) that CAS
+   is NOT the heaviest shared-state touch: a commit also runs
+   xs_ssi_validate over the shared g_ssi[] array UNDER a global SSI
+   mutex (xs_ssi_lock / XS_LK_SSI) and appends to the single WAL, both
+   of which serialize commits more than a single-word CAS does.  The
+   share-nothing mvcc.c experiment already uses PER-SHARD HLCs (no
+   global counter at all -- the Silo/TicToc goal, reached another way),
+   so it has nothing to remove either.  Conclusion: removing the
+   counter (epoch/TicToc) would buy little while the global SSI lock +
+   WAL append dominate the commit path -- do NOT build it yet.  If a
+   write-scaling bench later shows the SSI lock / WAL as the wall,
+   those are the targets (finer-grained SSI, group commit); the
+   commit-TID counter is a distant third.  (This is the measure-first
+   discipline working: the premise did not hold here, so we skip the
+   OCC machinery rather than add it speculatively.)  The global commit-timestamp counter is the
    write-scalability wall as loop count grows.  Silo stamps commits
    with a coarse epoch (one thread bumps it; everyone reads it
    relaxed) so serialization order = (epoch, TID) with no contended
