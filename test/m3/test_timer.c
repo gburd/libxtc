@@ -181,6 +181,70 @@ test_park_on_timer(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Tm11: a timer must fire even when the run queue NEVER empties.
+ * A busy task that keeps returning XTC_TASK_RESCHED (the yield/spin
+ * shape) used to starve the timer drain, because the loop only expired
+ * timers once the run queue drained.  The scheduler now drains due
+ * timers on the IO-fairness quantum under load too.
+ *
+ * The busy task stops ONLY when the timer fires -- there is no
+ * self-draining escape (a spin cap that returns DONE would let the run
+ * queue empty and the timer fire late, masking the bug).  A wall-clock
+ * safety bound records failure + stops the loop if the timer is starved
+ * far past its deadline, so the test FAILS (loudly) instead of hanging
+ * forever when the fix is absent. */
+static int busy_timer_fired;
+static int busy_starved;             /* set if the timer was starved past the bound */
+static int64_t busy_start_ns;
+static void busy_timer_cb(void *u) { (void)u; busy_timer_fired = 1; }
+static int busy_task(xtc_task_t *self, void *u) {
+	xtc_loop_t *loop = u;   /* the loop, passed via user arg */
+	int64_t now = 0;
+	(void)self;
+	if (busy_timer_fired)
+		return XTC_TASK_DONE;              /* timer fired promptly -> stop */
+	(void)__os_clock_mono(&now);
+	/* The timer deadline is 5ms; if 2s of pure spinning has elapsed and
+	 * it STILL has not fired, it is starved -- the bug.  Record it and
+	 * stop the loop so the test fails cleanly rather than hangs. */
+	if (now - busy_start_ns > 2LL * XTC_NS_PER_SEC) {
+		busy_starved = 1;
+		xtc_loop_stop(loop);
+		return XTC_TASK_DONE;
+	}
+	return XTC_TASK_RESCHED;                  /* keep the run queue busy */
+}
+
+static MunitResult
+test_timer_under_busy_runqueue(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_timer_t *t;
+	int64_t before, after;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	busy_timer_fired = 0;
+	busy_starved = 0;
+	munit_assert_int(__os_clock_mono(&before), ==, XTC_OK);
+	busy_start_ns = before;
+	munit_assert_int(xtc_timer_set(loop, 5 * XTC_NS_PER_MS,
+	    busy_timer_cb, NULL, &t), ==, XTC_OK);
+	munit_assert_int(xtc_task_spawn(loop, busy_task, loop, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(__os_clock_mono(&after), ==, XTC_OK);
+	/* The timer fired despite the never-empty run queue, and was NOT
+	 * starved to the 2s bound (before the fix it would spin the full 2s
+	 * and set busy_starved). */
+	munit_assert_int(busy_starved, ==, 0);
+	munit_assert_int(busy_timer_fired, ==, 1);
+	/* And it fired reasonably promptly -- well under the starvation
+	 * bound (a loose 500ms ceiling; the deadline is 5ms). */
+	munit_assert_int64(after - before, <, 500 * XTC_NS_PER_MS);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Tm5_basic",            test_timer_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm6_order",            test_order,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -188,6 +252,7 @@ static MunitTest tests[] = {
 	{ "/Tm8_cancel_after",     test_cancel_after_fire,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm9_many",             test_many_timers,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm10_park_on_timer",   test_park_on_timer,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Tm11_timer_under_busy_runqueue", test_timer_under_busy_runqueue, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m3/timer", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

@@ -343,6 +343,63 @@ __queue_pop(xtc_loop_t *loop)
 	return (xtc_task_t *)xtc_deque_pop(&loop->deque);
 }
 
+/*
+ * Fire every timer whose deadline has passed.  Allocation-free (the
+ * dispatch-path contract); safe to call from both the run-queue-empty
+ * step-2 path AND the busy-run-queue IO-fairness path.  Draining due
+ * timers under a busy run queue is the timer analogue of the I/O
+ * fairness poll: a run queue that never empties (fibers that keep
+ * rescheduling -- e.g. a busy reader busy-yielding) would otherwise
+ * never let step 2 run, starving a xtc_proc_sleep / recv-timeout /
+ * any deadline indefinitely.  Returns XTC_OK, or a clock error.
+ */
+static int
+__xtc_drain_due_timers(xtc_loop_t *loop)
+{
+	int64_t now_ns;
+	int rc;
+
+	if ((rc = __os_clock_mono(&now_ns)) != XTC_OK) return rc;
+	for (;;) {
+		xtc_timer_t *due = __xtc_timer_heap_pop_due(loop, now_ns);
+		if (due == NULL) break;
+		if (!due->cancelled) {
+			/* Buggify: under DST, fire this timer slightly LATE once.
+			 * A timer firing late is always tolerated (deadlines are a
+			 * lower bound, not a promise of exact instant), so instead
+			 * of firing now, re-arm it a bounded step later and let the
+			 * scheduler advance the clock to it -- exercising the
+			 * timeout-races-work interleaving deterministically.  Bumped
+			 * at most ONCE per timer (sim_late guards re-bumping) so a
+			 * late fire can never spin; only when buggify is on and the
+			 * per-call BUGGIFY-stream coin lands (so it never perturbs
+			 * unrelated tests' FAULT/schedule streams).  A no-op in
+			 * production (XTC_SIM_BUGGIFY == 0). */
+			if (!due->sim_late &&
+			    XTC_SIM_BUGGIFY("timer.fire.late") &&
+			    xtc_sim_buggify_fault(250)) {
+				due->sim_late = 1;
+				due->deadline_ns = now_ns + 1000;   /* +1us */
+				due->heap_idx = -1;
+				if (__xtc_timer_heap_push(loop, due) == XTC_OK)
+					continue;
+				/* push failed (OOM): fall through, fire now. */
+			}
+			due->fired = 1;
+			if (due->cb != NULL) due->cb(due->user);
+			if (due->waiter != NULL) {
+				xtc_waker_t w = { loop, due->waiter };
+				atomic_fetch_or_explicit(
+				    &due->waiter->wake_revents,
+				    XTC_WAIT_TIMEOUT, memory_order_relaxed);
+				(void)xtc_waker_wake(&w);
+				due->waiter->park_timer = NULL;
+			}
+		}
+	}
+	return XTC_OK;
+}
+
 /* --- main step ------------------------------------------------------ */
 
 static int
@@ -502,52 +559,28 @@ __xtc_loop_step(xtc_loop_t *loop)
 				for (fi = 0; fi < fn_out; fi++)
 					(void)__xtc_loop_dispatch_event(loop,
 					    &fevs[fi]);
+			/* Same fairness for TIMERS: a busy run queue never
+			 * empties, so step 2 (below) never runs -- fire due
+			 * timers here too, or a xtc_proc_sleep / recv-timeout /
+			 * any deadline is starved indefinitely under load.
+			 * (Symmetric with the I/O poll above; found via a
+			 * busy-yielding-reader bench that hung a timer on a
+			 * saturated single loop.) */
+			(void)__xtc_drain_due_timers(loop);
 		}
 		return XTC_OK;
 	}
 
 	/* 2. Drain due timers. */
-	if ((rc = __os_clock_mono(&now_ns)) != XTC_OK) return rc;
-	for (;;) {
-		xtc_timer_t *due = __xtc_timer_heap_pop_due(loop, now_ns);
-		if (due == NULL) break;
-		if (!due->cancelled) {
-			/* Buggify: under DST, fire this timer slightly LATE once.
-			 * A timer firing late is always tolerated (deadlines are a
-			 * lower bound, not a promise of exact instant), so instead
-			 * of firing now, re-arm it a bounded step later and let the
-			 * scheduler advance the clock to it -- exercising the
-			 * timeout-races-work interleaving deterministically.  Bumped
-			 * at most ONCE per timer (sim_late guards re-bumping) so a
-			 * late fire can never spin; only when buggify is on and the
-			 * per-call BUGGIFY-stream coin lands (so it never perturbs
-			 * unrelated tests' FAULT/schedule streams).  A no-op in
-			 * production (XTC_SIM_BUGGIFY == 0). */
-			if (!due->sim_late &&
-			    XTC_SIM_BUGGIFY("timer.fire.late") &&
-			    xtc_sim_buggify_fault(250)) {
-				due->sim_late = 1;
-				due->deadline_ns = now_ns + 1000;   /* +1us */
-				due->heap_idx = -1;
-				if (__xtc_timer_heap_push(loop, due) == XTC_OK)
-					continue;
-				/* push failed (OOM): fall through, fire now. */
-			}
-			due->fired = 1;
-			if (due->cb != NULL) due->cb(due->user);
-			if (due->waiter != NULL) {
-				xtc_waker_t w = { loop, due->waiter };
-				atomic_fetch_or_explicit(
-				    &due->waiter->wake_revents,
-				    XTC_WAIT_TIMEOUT, memory_order_relaxed);
-				(void)xtc_waker_wake(&w);
-				due->waiter->park_timer = NULL;
-			}
-		}
-	}
+	if ((rc = __xtc_drain_due_timers(loop)) != XTC_OK) return rc;
 	if (loop->q_head != NULL || xtc_deque_len(&loop->deque) > 0)
 		return XTC_OK;
 
+	/* Run queue empty: block in xtc_io_poll until the next timer
+	 * deadline (or an I/O event).  Re-read the clock -- the timer drain
+	 * above may have fired callbacks that took measurable time -- so the
+	 * poll timeout below is computed against now, not a stale sample. */
+	if ((rc = __os_clock_mono(&now_ns)) != XTC_OK) return rc;
 	next_deadline_ns = __xtc_timer_heap_next_deadline(loop);
 	if (next_deadline_ns < 0 &&
 	    atomic_load_explicit(&loop->n_alive, memory_order_relaxed) == 0)
