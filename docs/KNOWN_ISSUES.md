@@ -789,43 +789,40 @@ semaphores, _SC_NPROCESSORS_ONLN, hardcoded -lrt, lrlock slot
 reclamation teardown order).
 
 
-## Apple Silicon (macOS arm64) always uses the ucontext coroutine substrate
+## Apple Silicon (macOS arm64): now defaults to the fcontext substrate (macOS x86-64 still ucontext)
 
-**Status:** documented trade-off, not a bug.  Correctness on this
-platform is not in question -- the full suite including DST and
-`bench/bench_million_tasks.c` (1,000,000/1,000,000 fibers) pass -- but
-the PERFORMANCE profile differs from x86-64/Linux and should not
-surprise anyone reading the `~7.6 ns/switch` fcontext figure elsewhere
-in the docs.
+**Status:** RESOLVED for Apple Silicon as of 1.23.x -- macOS/arm64 now
+defaults to the hand-written fcontext coroutine substrate, closing the
+per-switch performance gap.  macOS *x86-64* still uses ucontext (there
+is no Mach-O x86-64 fcontext assembly), and involuntary preemption
+remains Linux-only everywhere on macOS (see below).
 
-`src/os/asm/fctx_aarch64_aapcs.S` guards its hand-written AAPCS64
-context switch with `!defined(__APPLE__)`: the assembly is ELF-dialect
-(`.type`, `.note.GNU-stack`) and does not assemble/link under Mach-O, so
-there is no `__xtc_make_fcontext`/`__xtc_jump_fcontext` on Apple Silicon
-and `src/evt/coro_fctx.c` is compiled out there.  Every macOS build --
-x86-64 or arm64 -- therefore uses `src/evt/coro_uctx.c`
-(`swapcontext`/`getcontext`/`makecontext`), which restores the signal
-mask on every switch (a `sigprocmask` syscall).  Measured on Apple M3
-Pro: ~31 us/task-switch under `bench_million_tasks.c` (4 yields/fiber),
-versus low tens of ns for fcontext on Linux/x86-64.  The scheduler paths
-that do not pay a full coroutine switch (spawn/reuse/churn in
-`bench_exec_scale.c`) are unaffected and measure comparably fast on both
-platforms.
+`src/os/asm/fctx_aarch64_aapcs_macho.S` provides the AAPCS64
+make/jump_fcontext in the Mach-O assembler dialect (leading-underscore
+symbols, `.p2align`, no ELF-only directives), byte-identical in register
+discipline to the ELF variant.  `src/evt/coro_fctx.c` and
+`src/evt/coro_uctx.c` select it as the default on `__APPLE__ &&
+__aarch64__` (equivalent to `-DXTC_CORO_FORCE_FCTX`); build with
+`-DXTC_CORO_FORCE_UCONTEXT` to fall back to `swapcontext`.  This removes
+the per-switch `sigprocmask` syscall (measured on Apple M-series:
+~34 us/task-switch on ucontext under `bench_million_tasks.c` at 1M
+fibers -> ~23 us there, with a larger per-switch win masked by memory
+pressure at that scale; a 2-fiber micro-bench shows the true delta).
+The fcontext path on macOS declines involuntary preemption, so it falls
+back to Phase-1 cooperative preemption there.
 
-Involuntary preemption (`src/ptc/preempt.c`, Phase 2) is ALSO Linux-only
-today: it needs a per-thread `SIGVTALRM`-class timer
+Involuntary preemption (`src/ptc/preempt.c`, Phase 2) is STILL
+Linux-only: it needs a per-thread `SIGVTALRM`-class timer
 (`timer_create`/`CLOCK_THREAD_CPUTIME_ID`), which macOS does not offer
 (`ITIMER_VIRTUAL` is process-wide, not per-thread).  On macOS,
 `xtc_preempt` degrades to cooperative-only: a fiber that never calls a
 yield point will not be involuntarily interrupted.  See
 `man/man3/xtc_preempt.3` for the per-platform statement.
 
-**Planned fix (tracked in PLAN.md):** a Mach-O arm64 fcontext variant
-(`fctx_aarch64_aapcs_macho.S`, boost.context ships a working reference)
-to make fctx the default substrate on Apple Silicon, and a GCD
-dispatch-timer or kqueue `EVFILT_TIMER` per-worker tick to give Phase-2
-preemption a real signal source on macOS.  Neither changes correctness;
-both are throughput/fairness improvements.
+**Remaining:** a macOS x86-64 Mach-O fcontext variant (low priority --
+Apple has moved to arm64), and a GCD dispatch-timer or kqueue
+`EVFILT_TIMER` per-worker tick to give Phase-2 preemption a real signal
+source on macOS (tracked in PLAN.md).  Neither changes correctness.
 
 
 ## sqlxtc multi-thread load test flakes on the macOS CI runner

@@ -37,6 +37,20 @@
 
 #include "xtc_int.h"
 
+/*
+ * Apple Silicon default: prefer the hand-written fcontext substrate.
+ * macOS ships ucontext (so XTC_HAVE_UCONTEXT is defined), but its
+ * swapcontext does a sigprocmask syscall per switch -- microseconds vs
+ * the low tens of ns of fcontext.  On arm64 we have the Mach-O
+ * make/jump_fcontext (src/os/asm/fctx_aarch64_aapcs_macho.S), so make
+ * fcontext the DEFAULT there (equivalent to XTC_CORO_FORCE_FCTX).
+ * Apple x86-64 keeps ucontext (no Mach-O x86-64 fcontext .S).
+ */
+#if defined(__APPLE__) && defined(__aarch64__) && \
+    !defined(XTC_CORO_FORCE_UCONTEXT) && !defined(XTC_CORO_FORCE_FCTX)
+#  define XTC_CORO_FORCE_FCTX 1
+#endif
+
 #if !defined(_WIN32) && \
     (!defined(XTC_HAVE_UCONTEXT) || defined(XTC_CORO_FORCE_FCTX))
 
