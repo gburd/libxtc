@@ -3397,25 +3397,47 @@ fix, so we do not add OCC machinery that buys nothing on this runtime.
    epoch group-commit (batch fsync per epoch) on the WAL path.
 
 3. **Additional index types (the runtime already ships the primitives)**
-   -- sqlxtc is an example, so the bar is teaching value + runtime
-   fit, not shipping every index.  In fit order:
-     - **Skiplist ordered index over xtc_cskip** -- nearly free; the
-       RCU ordered structure already exists (added this arc).  Shows
-       an alternative to the B-tree for the ordered role.
-     - **Hash secondary index over xtc_chash** -- also nearly free;
-       the RCU hash table exists (added this arc).  Exercises it in a
-       real storage context.  The open-addressing-without-reordering
-       optimal bound (arXiv 2501.02305) is a later refinement, not
-       needed for a first cut.
-     - **ART (Adaptive Radix Tree), paired with OLC** -- the flagship
-       modern in-memory index; ART+OLC is a well-known combination
-       and pairs with item 1.  A fundamentally different structure
-       than the B-link tree; high teaching value, well-bounded.
-     - **Bitmap index over gburd/sparsemap (Codeberg)** -- stretch /
-       distinctive: the right tool for low-cardinality columns,
-       underrepresented in teaching codebases, and a first-party
-       library so licensing/fit is clean.  Larger effort (planner
-       must learn to use it).
+   -- SCOPE REASSESSED (2026-07): NOT "nearly free."  A design read
+   found CREATE INDEX is PARSED BUT IGNORED in sqlxtc (no handler in
+   xstore/engine/vexec) and there is NO index-type abstraction -- the
+   B-link tree is hardwired as the sole storage.  So adding a usable
+   cskip/chash/ART/bitmap index is not a showcase drop-in; it requires
+   a whole secondary-index subsystem: a catalog entry per index, index
+   MAINTENANCE on every insert/update/delete, and PLANNER integration
+   to actually route a query through the index (xBestIndex/vexec).
+   That is a large feature, and it is speculative (no measured need) --
+   lower value than the MEASURED residual in item 1a below.  Deferred
+   until either an index abstraction is built for another reason or a
+   concrete workload needs a non-btree index.  The structures
+   themselves (xtc_cskip, xtc_chash) already exist and are tested; only
+   the sqlxtc-integration cost is what makes this expensive.  Original
+   per-structure fit notes retained below for when it is picked up.
+     - **Skiplist ordered index over xtc_cskip** -- the RCU ordered
+       structure exists (added this arc); alternative to the B-tree
+       for the ordered role.
+     - **Hash secondary index over xtc_chash** -- the RCU hash table
+       exists; open-addressing-without-reordering bound (arXiv
+       2501.02305) a later refinement.
+     - **ART (Adaptive Radix Tree), paired with OLC** -- flagship
+       modern in-memory index; ART+OLC pairs with item 1.
+     - **Bitmap index over gburd/sparsemap (Codeberg)** -- stretch;
+       right for low-cardinality columns.
+
+1a. **Buffer-manager frame-table lock on the read hit path** -- the
+   MEASURED residual after OLC (item 1), and now the read-scaling
+   ceiling.  bench_btree_concurrent still plateaus ~1.8M (efficiency
+   drops to 12% at 8 loops) even with the content latch gone.  Root:
+   bm_fix_pid -> ht_lookup_pin takes a PER-BUCKET pthread_mutex on
+   every frame lookup (bufmgr.c ~538), and the ROOT frame sits in one
+   fixed bucket, so every reader on every core serializes on that one
+   bucket mutex to pin the root each descent -- a contended cache-line
+   bounce, plus the per-frame pin atomic RMW.  Fix (its own session,
+   comparable in size to OLC): make the frame-table HIT path lock-free
+   / optimistic (RCU or a seqlock/striped-read hash over the bucket
+   chains), the same technique OLC used for the content latch.  Keep
+   the bucket mutex for inserts/evictions (rare vs lookups).  This is
+   the higher-value next target than item 3 because it is MEASURED,
+   not speculative, and directly extends the OLC read-scaling win.
 
 4. **Research spike (NOT a build commitment): latch-free B-tree**
    -- evaluate whether a Bw-tree storage option is worth it GIVEN
