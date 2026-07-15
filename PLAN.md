@@ -3332,7 +3332,24 @@ fix, so we do not add OCC machinery that buys nothing on this runtime.
    textbook signature of cross-core contention on a shared write on
    the read DESCENT path (no splits -- read-only tree), i.e. the
    per-frame shared xtc_arwlock latch.  So OLC IS warranted on this
-   runtime, and 1.56M(1 loop)/1.27M(8 loops) is its before-number.  Keep the existing tree;
+   runtime, and 1.56M(1 loop)/1.27M(8 loops) is its before-number.
+   IMPLEMENTED (2026-07): a per-frame version SEQLOCK in bufmgr
+   (bm_frame.version, odd while an exclusive holder mutates the page;
+   bm_read_begin/bm_read_valid), a latch-free bt_lookup_optimistic
+   descent that reads each node under the version bracket and validates
+   (falls back to the latched descend_shared on repeated conflict --
+   OLC is a fast path, never a correctness dependency), and OOB-safe
+   btnode reads (btnode_get / node_lower_bound bounds-guard every
+   offset so an optimistic read of a torn page cannot fault).  RESULT:
+   the anti-scaling is GONE and throughput rose at every loop count --
+   AFTER: 1 loop 1.89M, 8 loops 1.76M (was 1.27M) = +39% at 8 cores,
+   and it no longer DROPS as cores are added.  Full DST 55/55
+   replay-identical, ASan+UBSan clean under the concurrent MT stress
+   (0 wrong values on 6562 reads vs live writers; torn-page reads never
+   OOB), test_btree/test_btree_mt/test_btree_delete_merge all pass.
+   Residual sub-linear scaling is NOT the read latch anymore (removed)
+   -- likely the shared bufmgr frame-table / pin counters, a separate
+   future target.  Keep the existing tree;
    replace the fiber R/W latches with optimistic version-locks: a
    READ validates a per-node version counter (seqlock: read version,
    read node, re-read version, retry on change / locked bit), a WRITE

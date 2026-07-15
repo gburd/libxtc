@@ -71,6 +71,13 @@ struct bm_frame {
 	void             *page;       /* page_size bytes (into the pool) */
 	struct bm_frame  *next_free;
 	xtc_arwlock_t    *latch;      /* content latch (fiber-yielding) */
+	_Atomic uint64_t  version;    /* OLC seqlock: EVEN when stable, ODD while
+	                               * an exclusive holder is mutating the page.
+	                               * An optimistic reader samples it before and
+	                               * after reading the page and retries if it
+	                               * changed or is odd -- so a lockless read
+	                               * never observes a torn mid-write page and
+	                               * takes no shared-latch write of its own. */
 };
 
 /*
@@ -1517,8 +1524,71 @@ bm_dbg_dup_pid(bm_t *bm)
 }
 
 void bm_latch_shared(bm_frame_t *f)    { if (f) (void)xtc_arwlock_rdlock(f->latch, -1); }
-void bm_latch_exclusive(bm_frame_t *f) { if (f) (void)xtc_arwlock_wrlock(f->latch, -1); }
-void bm_unlatch(bm_frame_t *f)         { if (f) (void)xtc_arwlock_unlock(f->latch); }
+void bm_latch_exclusive(bm_frame_t *f)
+{
+	if (f) {
+		(void)xtc_arwlock_wrlock(f->latch, -1);
+		/* Enter the write section: make the version ODD so a
+		 * concurrent optimistic reader that samples it now retries. */
+		atomic_fetch_add_explicit(&f->version, 1, memory_order_release);
+	}
+}
+void bm_unlatch(bm_frame_t *f)
+{
+	if (!f) return;
+	/* If this was an EXCLUSIVE hold the version is odd; bump it back to
+	 * even (write section complete) with release ordering so an
+	 * optimistic reader that then samples an even version is guaranteed
+	 * to see all the page writes.  A shared-latch release finds it even
+	 * already -- no-op.  (Only the holder unlatches, so this read of
+	 * version is not racing another writer on this frame.) */
+	if ((atomic_load_explicit(&f->version, memory_order_relaxed) & 1u) != 0)
+		atomic_fetch_add_explicit(&f->version, 1, memory_order_release);
+	(void)xtc_arwlock_unlock(f->latch);
+}
+
+/* ---- OLC (optimistic latch coupling) read-side helpers ----
+ *
+ * A reader that only READS a resident, pinned page can avoid the shared
+ * content latch (whose acquire/release is a contended write to the
+ * latch word -- the read-scalability wall measured by
+ * bench_btree_concurrent).  Instead it brackets the read with the
+ * frame's version seqlock:
+ *
+ *   uint64_t v;
+ *   if (!bm_read_begin(f, &v)) { take the shared latch (writer active) }
+ *   ... read page bytes into a LOCAL copy ...
+ *   if (!bm_read_valid(f, v)) { retry / fall back to the shared latch }
+ *
+ * bm_read_begin fails (returns 0) when a writer currently holds the
+ * frame (odd version); the caller then falls back to the blocking
+ * shared latch rather than spin.  bm_read_valid returns 1 iff the
+ * version is unchanged since bm_read_begin -- i.e. no writer mutated
+ * the page during the read, so the bytes the reader saw are a
+ * consistent snapshot.  The reader MUST still hold a pin on the frame
+ * across the read (so it cannot be evicted); OLC removes only the
+ * content latch, not the pin. */
+int
+bm_read_begin(const bm_frame_t *f, uint64_t *out_v)
+{
+	uint64_t v;
+	if (f == NULL) return 0;
+	v = atomic_load_explicit(&((bm_frame_t *)f)->version,
+	    memory_order_acquire);
+	if ((v & 1u) != 0)
+		return 0;               /* a writer holds it: caller latches */
+	*out_v = v;
+	return 1;
+}
+
+int
+bm_read_valid(const bm_frame_t *f, uint64_t v)
+{
+	if (f == NULL) return 0;
+	/* acquire so the version re-read is ordered after the page reads. */
+	return atomic_load_explicit(&((bm_frame_t *)f)->version,
+	    memory_order_acquire) == v;
+}
 
 /* ---- page-provider process ---- */
 struct pp_arg { bm_t *bm; int64_t interval; };

@@ -1081,6 +1081,133 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 	return XTC_OK;
 }
 
+/*
+ * OLC (optimistic latch coupling) read path for bt_lookup.
+ *
+ * The measured read-scalability wall (bench_btree_concurrent) is the
+ * SHARED content latch taken at every frame during descend_shared: a
+ * shared-latch acquire/release is a contended WRITE to the latch word,
+ * so pure reads bounce that cache line across cores and do not scale.
+ * This path descends taking NO content latch -- it reads each node
+ * under the frame's version seqlock (bm_read_begin/bm_read_valid) and
+ * retries if a writer intervened -- so concurrent reads issue no shared
+ * writes on the descent.  The node reads are OOB-safe on a torn page
+ * (btnode_get / node_lower_bound bounds-guard every offset), so an
+ * optimistic read of a page a writer is mutating produces a garbage
+ * (but in-bounds) result the version re-check then discards.
+ *
+ * Frames are still PINNED across the read (OLC removes the latch, not
+ * the pin -- a pinned frame cannot be evicted).  On repeated version
+ * conflict, or any structural ambiguity the optimistic path cannot
+ * resolve, the caller falls back to the latched descend_shared, which
+ * is unconditionally correct -- OLC is a fast path, never a correctness
+ * dependency.
+ *
+ * Returns XTC_OK (found, value copied), XTC_E_NOTFOUND (conclusive
+ * miss), or XTC_E_AGAIN (optimism failed -- caller should fall back).
+ */
+#define BT_OLC_RETRIES 3
+static int
+bt_lookup_optimistic(bt_t *bt, const void *key, uint16_t klen,
+    void *buf, uint16_t cap, uint16_t *vlen)
+{
+	bm_t *bm = bt->bm;
+	int attempt;
+
+	for (attempt = 0; attempt < BT_OLC_RETRIES; attempt++) {
+		bm_pid_t pid = atomic_load(&bt->root_pid);
+		bm_frame_t *f;
+		int depth = 0;
+		int conflict = 0;
+
+		if (bm_fix_pid(bm, pid, &f) != XTC_OK)
+			return XTC_E_AGAIN;
+
+		for (;;) {
+			void *pg = bm_page(f);
+			uint64_t v;
+			uint32_t rsib = 0;
+			int is_leaf, beyond_hi, dead, below_lo;
+			bm_pid_t child = BM_PID_NONE;
+			int found = 0;
+			uint16_t vl = 0, copied = 0;
+			uint8_t vcopy[BT_MAX_KEY];
+
+			if (++depth > BT_MAX_HEIGHT + 4) { conflict = 1; break; }
+
+			if (!bm_read_begin(f, &v)) {   /* writer active */
+				conflict = 1; break;
+			}
+			/* read the node under the version bracket */
+			dead = btnode_is_dead(pg);
+			below_lo = btnode_below_lo_fence(pg, key, klen);
+			beyond_hi = btnode_beyond_hi_fence(pg, key, klen);
+			if (beyond_hi)
+				rsib = btnode_right_sibling(pg);
+			is_leaf = btnode_is_leaf(pg);
+			if (!beyond_hi && !dead && !below_lo) {
+				if (is_leaf) {
+					int s = btnode_search(pg, key, klen,
+					    &found);
+					if (found) {
+						const void *vp = NULL;
+						uint16_t gl = 0;
+						if (btnode_get(pg, s, NULL,
+						    NULL, &vp, &gl) == 0 &&
+						    vp != NULL) {
+							vl = gl;
+							copied = gl < sizeof vcopy
+							    ? gl
+							    : (uint16_t)sizeof vcopy;
+							memcpy(vcopy, vp, copied);
+						}
+					}
+				} else {
+					child = child_for_key(pg, key, klen);
+				}
+			}
+			/* validate: did a writer touch the frame? */
+			if (!bm_read_valid(f, v)) { conflict = 1; break; }
+
+			if (dead || below_lo) { conflict = 1; break; }
+			if (beyond_hi) {
+				bm_frame_t *nf;
+				if (rsib == 0) { conflict = 1; break; }
+				if (bm_fix_pid(bm, (bm_pid_t)rsib, &nf)
+				    != XTC_OK) { conflict = 1; break; }
+				bm_unfix(bm, f, 0);
+				f = nf;
+				continue;              /* B-link hop */
+			}
+			if (is_leaf) {
+				bm_unfix(bm, f, 0);
+				if (!found)
+					return XTC_E_NOTFOUND;
+				if (vlen != NULL) *vlen = vl;
+				if (buf != NULL && cap > 0) {
+					uint16_t n = copied < cap
+					    ? copied : cap;
+					memcpy(buf, vcopy, n);
+				}
+				return XTC_OK;
+			}
+			if (child == BM_PID_NONE) { conflict = 1; break; }
+			{
+				bm_frame_t *cf;
+				if (bm_fix_pid(bm, child, &cf) != XTC_OK) {
+					conflict = 1; break;
+				}
+				bm_unfix(bm, f, 0);
+				f = cf;
+			}
+		}
+		bm_unfix(bm, f, 0);
+		if (conflict)
+			continue;
+	}
+	return XTC_E_AGAIN;       /* optimism exhausted: caller falls back */
+}
+
 /* Search a shared-latched leaf for `key`, copy the value on a hit, and
  * release the leaf.  Returns XTC_OK on a hit, XTC_E_NOTFOUND else. */
 static int
@@ -1119,6 +1246,18 @@ bt_lookup(bt_t *bt, const void *key, uint16_t klen, void *buf, uint16_t cap,
 	if (bt == NULL || key == NULL)
 		return XTC_E_INVAL;
 	atomic_fetch_add(&bt->st_lookups, 1);
+
+	/*
+	 * OLC fast path: descend + read the leaf with no content latch,
+	 * validated by the per-frame version seqlock.  This is the
+	 * read-scalability path (no shared-latch cache-line bounce).  On
+	 * XTC_E_AGAIN (a writer kept conflicting, or a structural
+	 * ambiguity) fall back to the unconditionally-correct latched
+	 * descent below -- so correctness never depends on the optimism.
+	 */
+	rc = bt_lookup_optimistic(bt, key, klen, buf, cap, vlen);
+	if (rc != XTC_E_AGAIN)
+		return rc;
 
 	/*
 	 * Shared latch-coupling descent.  Coupling holds the parent's
