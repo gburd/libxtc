@@ -1,4 +1,4 @@
-usr/include/xtc.h
+usr/include/*.h
 usr/lib/*/libxtc.a
 usr/lib/*/libxtc.so
 usr/lib/*/pkgconfig/xtc.pc

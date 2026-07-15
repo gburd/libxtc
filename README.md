@@ -194,8 +194,8 @@ What's working today:
 | L5 PG adapter | Designed; not yet implemented. |
 | TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/M_TLS_MATRIX.md`); SChannel (Windows) is compile-only. |
 
-Test coverage today: **412 munit test cases + 23 hegel-c property
-tests on Linux** (the munit total spans the L0-L5 suites plus the 35
+Test coverage today: **480+ munit test cases + 23 hegel-c property
+tests on Linux** (the munit total spans the L0-L4 suites plus the 35
 OTP/gen_server cases), clean under AddressSanitizer and UBSan in CI.
 GitHub CI also runs the full C munit suite on **macOS** (Apple Silicon:
 kqueue + ucontext + GCD dispatch semaphores) and an **MSVC** xtc.lib +

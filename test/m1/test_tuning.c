@@ -402,11 +402,19 @@ static MunitTest tests[] = {
 static const MunitSuite suite = { "/m1/tuning", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
 int main(int argc, char *argv[]) { return munit_suite_main(&suite, NULL, argc, argv); }
 
-#else /* !__linux__: no tuning seam; nothing to test here. */
+#else /* !__linux__: the kernel-tuning advisor is Linux-only (cpu
+       * governor, THP, NUMA balancing, etc. have no cross-platform
+       * equivalent), so there is no seam to test here.  Print an
+       * explicit SKIP rather than exiting silently, so this is not
+       * mistaken for a no-op test. */
+
+#include <stdio.h>
 
 int
 main(void)
 {
+	printf("SKIP: xtc tuning advisor is Linux-only; nothing to test on "
+	    "this platform\n");
 	return 0;
 }
 

@@ -9,6 +9,13 @@
 set -eu
 
 : "${XTC_SRC_DIR:?XTC_SRC_DIR must be set}"
+# This gate regenerates the build system with autoreconf; on a host
+# without autoconf/automake (e.g. a stock macOS box) skip cleanly
+# rather than abort `make check` under set -e.
+if ! command -v autoreconf >/dev/null 2>&1; then
+	echo "  [readme-build] SKIP: autoreconf not available"
+	exit 0
+fi
 README="$XTC_SRC_DIR/README.md"
 
 if [ ! -f "$README" ]; then

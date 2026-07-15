@@ -8,6 +8,14 @@
 set -eu
 : "${XTC_SRC_DIR:?}"
 
+# This gate regenerates the build system with autoreconf; on a host
+# without autoconf/automake (e.g. a stock macOS box) there is nothing
+# to verify -- skip cleanly rather than abort `make check` under set -e.
+if ! command -v autoreconf >/dev/null 2>&1; then
+	echo "  [distclean] SKIP: autoreconf not available"
+	exit 0
+fi
+
 tmp=$(mktemp -d)
 trap 'cd / 2>/dev/null; rm -rf "$tmp"' EXIT
 cp -r "$XTC_SRC_DIR/." "$tmp/"
