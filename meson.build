@@ -30,10 +30,18 @@ configure_file(
 # -----------------------------------------------------------------------------
 # Library.
 #
+# WORK IN PROGRESS -- NOT AT PARITY WITH THE AUTOTOOLS BUILD.  This meson
+# build currently compiles only the M0 subset (the OS/portability layer),
+# NOT the full runtime (loop/proc/exec/orc/...).  The autoconf build
+# (dist/configure) is the reference and the only complete build; meson
+# is not exercised in CI.  To reach parity the source list below must be
+# grown to track dist/Makefile.in's LIB_SRCS (~76 files) plus the same
+# configure-time backend/coro/TLS selection logic.  Until then, a
+# consumer must use the autotools build for a usable libxtc.
+#
 # meson installs a pkg-config xtc.pc and (with -Dshared=true) a versioned
-# shared object alongside the static archive.  The autoconf build is the
-# reference; this mirrors its installed file set for the M0 subset that
-# meson currently compiles.
+# shared object alongside the static archive.  This mirrors the installed
+# file set for the M0 subset that meson currently compiles.
 # -----------------------------------------------------------------------------
 inc = include_directories('src/inc')
 
