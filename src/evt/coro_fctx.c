@@ -45,8 +45,12 @@
  * make/jump_fcontext (src/os/asm/fctx_aarch64_aapcs_macho.S), so make
  * fcontext the DEFAULT there (equivalent to XTC_CORO_FORCE_FCTX).
  * Apple x86-64 keeps ucontext (no Mach-O x86-64 fcontext .S).
+ * EXCLUDED in the amalgamation: the single-file xtc.c drops coro_fctx.c
+ * (it cannot carry the external .S), so it must keep coro_uctx.c live
+ * even on Apple arm64.
  */
 #if defined(__APPLE__) && defined(__aarch64__) && \
+    !defined(XTC_AMALGAMATION) && \
     !defined(XTC_CORO_FORCE_UCONTEXT) && !defined(XTC_CORO_FORCE_FCTX)
 #  define XTC_CORO_FORCE_FCTX 1
 #endif

@@ -49,6 +49,7 @@
  * override with -DXTC_CORO_FORCE_UCONTEXT.  Apple x86-64 keeps ucontext.
  */
 #if defined(__APPLE__) && defined(__aarch64__) && \
+    !defined(XTC_AMALGAMATION) && \
     !defined(XTC_CORO_FORCE_UCONTEXT) && !defined(XTC_CORO_FORCE_FCTX)
 #  define XTC_CORO_FORCE_FCTX 1
 #endif
