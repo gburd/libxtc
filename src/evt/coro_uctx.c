@@ -41,6 +41,18 @@
  * targeting musl must either accept that higher-layer tests don't link
  * (the OS layer alone still builds and tests cleanly) or use a glibc
  * toolchain. */
+/*
+ * Apple Silicon default: fcontext, not ucontext.  macOS has ucontext,
+ * but its swapcontext costs a sigprocmask syscall per switch; on arm64
+ * we ship a Mach-O make/jump_fcontext, so fcontext is the default and
+ * this ucontext TU is empty there.  Mirrors the force in coro_fctx.c;
+ * override with -DXTC_CORO_FORCE_UCONTEXT.  Apple x86-64 keeps ucontext.
+ */
+#if defined(__APPLE__) && defined(__aarch64__) && \
+    !defined(XTC_CORO_FORCE_UCONTEXT) && !defined(XTC_CORO_FORCE_FCTX)
+#  define XTC_CORO_FORCE_FCTX 1
+#endif
+
 #if defined(_WIN32) || !defined(XTC_HAVE_UCONTEXT) || defined(XTC_CORO_FORCE_FCTX)
 typedef int __xtc_coro_uctx_unused;
 #else
