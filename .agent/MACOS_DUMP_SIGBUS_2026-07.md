@@ -27,19 +27,51 @@ scan now takes __pt_lock_all).  BUT:
     clean.  Apple-Silicon SIGBUS on an access Linux tolerates usually
     means an alignment assumption.
 
-## Leading hypotheses (for a macOS-host investigation)
-1. A pre-existing macOS flake in test_dump unrelated to 19.5c (the
-   test exercises the crash/panic path -- KNOWN_ISSUES.md 153 -- and
-   xtc_dump is signal-safety-sensitive; a race between the driver's
-   dump and loop teardown could read a half-freed proc/loop only on
-   the ucontext-substrate macOS scheduling order).
-2. An over-aligned member (_Alignas(XTC_CACHE_LINE)) in a proc/loop/
-   table struct read by the inspect path, mis-handled on arm64 under
-   the specific alloc path -- the exact class AGENTS.md warns about
-   (must use __os_aligned_alloc, not __os_calloc, for over-aligned
-   structs).  Worth auditing struct xtc_proc_table / xtc_proc for a
-   cache-line-aligned member now that the table struct grew a
-   16-mutex array.
+## REFINED root-cause hypothesis (2026-07, after reading the dump path)
+
+STRONGEST candidate: __os_backtrace() -> system backtrace() (execinfo)
+walking a UCONTEXT FIBER STACK on arm64.  test_dump/basic calls
+xtc_dump(fd) from INSIDE a live proc (dump_driver, a fiber), so the
+backtrace runs on a small swapped-in ucontext stack.  macOS's
+backtrace() follows the frame-pointer chain; on a fiber stack that
+chain can run past the (small, guard-paged) stack top into unmapped
+memory -> SIGBUS.  Evidence FOR:
+  - test_dump/basic (dump from a live fiber) SIGBUSes; test_dump/panic/
+    aborts (also calls xtc_dump, but from the panic/abort context, not
+    a live fiber body) passed in the same run.
+  - SIGBUS = bad access (walking off the stack), matches.
+  - macOS/arm64 only; Linux backtrace (EH-ABI unwinder / execinfo)
+    terminates cleanly on the same fiber stacks; ruled out alignment
+    (struct xtc_proc_table has no over-aligned member).
+  - Intermittent because it depends on what garbage sits just past the
+    fiber stack top and whether it dereferences to a mapped page.
+
+## Confirming experiment (needs a macOS/arm64 host)
+1. On macOS, run test_dump under lldb; on the SIGBUS, `bt` -- expect
+   the crash inside backtrace()/__os_backtrace, walking frames beyond
+   the fiber stack.
+2. Quick confirmation without lldb: temporarily make xtc_dump skip the
+   backtrace section (n = 0 branch) and see if /dump/dump/basic goes
+   reliably green on macOS across a seed sweep.  If yes -> confirmed.
+
+## Candidate fix (implement ONLY after the experiment confirms it)
+A fiber-stack-aware frame walker for the dump backtrace: the runtime
+knows the current coro's stack bounds (__xtc_current_coro->stack +
+guard/size, see coro_common.h).  Walk the FP chain manually and STOP
+when the next frame pointer leaves [stack_lo, stack_hi) -- never
+dereference off the fiber stack.  Fall back to system backtrace() only
+when not on a fiber (__xtc_current_coro == NULL).  This is macOS-arm64-
+specific and MUST be validated on a real host; NOT blind-patched (the
+system backtrace works fine on Linux and on the main thread, and a
+wrong guard could silently degrade the diagnostic everywhere).
+
+## Status: NOT a release blocker (intermittent, diagnostic-only path,
+## green on most runs); tracked for a macOS-host session.  The dump's
+## backtrace is a debugging nicety, not a correctness mechanism.
+
+---
+(original note below)
+
 
 ## Action
 - NOT a release blocker on its own IF it re-runs green (intermittent),
