@@ -59,6 +59,32 @@ SHARED_LIB_SONAME   = libxtc.so.$(XTC_VERSION_MAJOR)
 SHARED_LIB_REAL     = libxtc.so.$(XTC_VERSION_FULL)
 VERSION_SCRIPT      = $(srcdir)/libxtc.map
 
+# Platform shared-library style.  Darwin's linker (ld64) rejects the
+# ELF/SysV flags (-shared, -soname, --version-script) and names shared
+# objects libNAME.VERSION.dylib, so it needs -dynamiclib, -install_name,
+# versioned .dylib names, and an -exported_symbols_list (a flat file of
+# leading-underscore symbol names) in place of the ELF version script.
+# Detected at make time via uname so no configure/autoreconf regen is
+# needed.  Every non-Darwin target keeps the ELF path unchanged.
+XTC_UNAME_S := $(shell uname -s 2>/dev/null)
+ifeq ($(XTC_UNAME_S),Darwin)
+SHARED_LIB_LINKNAME = libxtc.dylib
+SHARED_LIB_SONAME   = libxtc.$(XTC_VERSION_MAJOR).dylib
+SHARED_LIB_REAL     = libxtc.$(XTC_VERSION_FULL).dylib
+DARWIN_EXPORTS      = libxtc.exp
+SHLIB_LDFLAGS = -dynamiclib -fPIC \
+	-install_name $(libdir)/$(SHARED_LIB_SONAME) \
+	-compatibility_version $(XTC_VERSION_MAJOR).0 \
+	-current_version $(XTC_VERSION_FULL) \
+	-Wl,-exported_symbols_list,$(DARWIN_EXPORTS)
+SHARED_LIB_DEPS = $(LIB_OBJS) $(DARWIN_EXPORTS)
+else
+SHLIB_LDFLAGS = -shared -fPIC \
+	-Wl,-soname,$(SHARED_LIB_SONAME) \
+	-Wl,--version-script=$(VERSION_SCRIPT)
+SHARED_LIB_DEPS = $(LIB_OBJS) $(VERSION_SCRIPT)
+endif
+
 # -------------------------------------------------------------------------
 # M0 sources.
 # -------------------------------------------------------------------------
@@ -490,13 +516,19 @@ $(STATIC_LIB): $(LIB_OBJS)
 # the exported ABI; the SONAME carries only the SemVer major.  We build
 # the fully-versioned real file (libxtc.so.X.Y.Z) and create the SONAME
 # and bare-name symlinks beside it for the linker and runtime loader.
-$(SHARED_LIB_REAL): $(LIB_OBJS) $(VERSION_SCRIPT)
-	$(CC) -shared -fPIC \
-		-Wl,-soname,$(SHARED_LIB_SONAME) \
-		-Wl,--version-script=$(VERSION_SCRIPT) \
+$(SHARED_LIB_REAL): $(SHARED_LIB_DEPS)
+	$(CC) $(SHLIB_LDFLAGS) \
 		-o $@ $(LIB_OBJS) $(LDFLAGS) $(LIBS)
 	ln -sf $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME)
 	ln -sf $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
+
+# Darwin export list: the Mach-O equivalent of dist/libxtc.map -- the
+# public xtc_* / __xtc_* symbols, each with the leading underscore the
+# Mach-O ABI adds (xtc_foo -> _xtc_foo, __xtc_foo -> ___xtc_foo).
+# Everything else (the __os_* layer) stays hidden, matching the ELF map.
+$(DARWIN_EXPORTS): $(STATIC_LIB)
+	nm -gj $(STATIC_LIB) 2>/dev/null | \
+		grep -E '^_xtc_|^___xtc_' | sort -u > $@
 
 tls_openssl.o: $(srcdir)/../src/io/tls_openssl.c $(srcdir)/../src/inc/xtc_tls.h $(srcdir)/../src/io/tls_common.h xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_openssl.c
@@ -1659,6 +1691,7 @@ uninstall:
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
+	$(RM) libxtc.exp
 	rm -rf *.dSYM
 
 distclean: clean
