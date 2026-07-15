@@ -258,8 +258,11 @@ Configure flags worth knowing:
 | `--with-liburing=PATH` | Use a specific liburing install |
 | `--with-hegel=PATH` | Enable property-based tests via the hegel-c framework |
 
-A meson build is also provided (`meson.build`), with the same
-options and behaviour.
+A meson build is also provided (`meson.build`), but it currently
+compiles only the M0 subset of the library (the OS/portability layer),
+not the full runtime -- it is a work in progress.  For a complete
+libxtc build use the autotools path above; meson is not yet at parity
+and is not exercised in CI.
 
 ## Documentation
 
