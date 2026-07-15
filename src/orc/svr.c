@@ -32,6 +32,7 @@
 #include "xtc_proc.h"
 #include "xtc_sync.h"
 #include "xtc_async.h"    /* xtc_yield: buggify delay-dispatch site */
+#include "xtc_inject.h"   /* svr.reply.oom fault-injection point */
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -478,6 +479,14 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 	int rc = XTC_E_INVAL;
 
 	if (call == NULL) return XTC_E_INVAL;
+
+	/* Fault-injection: force the reply-copy allocation to fail on the
+	 * non-empty-payload path, whichever branch (slot or in-proc
+	 * reply_pid) this call uses.  Covers the XTC_E_NOMEM edge in both. */
+	if (size > 0 && xtc_inject_check("svr.reply.oom")) {
+		xtc_inject_trigger("svr.reply.oom");
+		return XTC_E_NOMEM;
+	}
 
 	if (call->slot != NULL) {
 		struct __svr_reply_slot *slot = call->slot;
