@@ -1,3 +1,22 @@
+libxtc (1.22.1-1) unstable; urgency=medium
+
+  * Fix: closed a pre-existing cross-thread data race on the receive
+    waker (recv_waker).  __mbox_deliver read recv_waker after unlocking
+    mbox_lock -- to fire the wake outside the lock -- while the woken
+    receiver re-armed recv_waker under its own lock on its next recv
+    cycle.  Benign in value (recv_waker is always the proc's own fixed
+    task/loop) but a real C11 data race on every cross-thread xtc_send,
+    surfaced under ThreadSanitizer by a new proc-table stress test.
+    The wake now copies the waker out under the lock and fires from the
+    copy (still outside the lock, no reentrancy).
+  * Testing: the proc-table stress test is now part of the tsan-fibers
+    CI gate, making the fix a permanent regression guard; added
+    fault-injection coverage for the xtc_svr_reply OOM path (both
+    reply branches).
+  * No API change.
+
+ -- Greg Burd <greg@burd.me>  Wed, 15 Jul 2026 08:04:20 -0400
+
 libxtc (1.22.0-1) unstable; urgency=medium
 
   * Performance: the per-loop proc table lock is now STRIPED (16

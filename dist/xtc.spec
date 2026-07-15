@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.22.0"
+#       --define "version 1.22.1"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.22.0
+Version:        1.22.1
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,9 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Wed Jul 15 2026 Greg Burd <greg@burd.me> - 1.22.1-1
+- Fixed a pre-existing cross-thread data race on the receive waker (recv_waker read outside mbox_lock in __mbox_deliver, racing the receiver re-arm); the wake now copies the waker under the lock. Added the proc-table stress test to the tsan-fibers CI gate + fault-injection coverage for the xtc_svr_reply OOM path.
+
 * Tue Jul 14 2026 Greg Burd <greg@burd.me> - 1.22.0-1
 - Striped per-loop proc-table lock (PG fiber-per-session bottleneck, 19.5c); fixed two lazy-slab-init DCL data races (rcu + proc pools); compositional DST test + proc-table stress; backend-portable cross-thread-wake guard (kqueue coverage); MSVC munit subset (16 tests) promoted to a hard CI gate.
 
