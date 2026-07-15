@@ -72,6 +72,81 @@
 #include <execinfo.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+/*
+ * macOS/arm64 (and x86-64) fiber-stack-safe backtrace.
+ *
+ * The system backtrace() follows the frame-pointer chain and, when it is
+ * called from inside a libxtc fiber (a small, guard-paged mmap stack --
+ * e.g. xtc_dump() from a live proc), can run PAST the fiber stack top
+ * into unmapped memory and SIGBUS.  (Linux/BSD execinfo terminate
+ * cleanly on the same stacks, so only Darwin needs this.)  We instead
+ * walk the chain ourselves and never dereference outside the mapped VM
+ * region that holds the current stack -- mach_vm_region queries the
+ * task's VM map, not the memory, so bounding the walk this way cannot
+ * itself fault.  No coroutine-layer coupling: the active stack (fiber
+ * mmap or OS-thread stack) is discovered at call time from its own SP.
+ */
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+
+static int
+apple_stack_region(uintptr_t addr, uintptr_t *lo, uintptr_t *hi)
+{
+	mach_vm_address_t a = (mach_vm_address_t)addr;
+	mach_vm_size_t sz = 0;
+	vm_region_basic_info_data_64_t info;
+	mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+	mach_port_t obj = MACH_PORT_NULL;
+
+	if (mach_vm_region(mach_task_self(), &a, &sz,
+	    VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt,
+	    &obj) != KERN_SUCCESS)
+		return 0;
+	/* mach_vm_region returns the region at or above addr; require it to
+	 * actually contain addr (true for any live stack slot). */
+	if ((uintptr_t)a > addr)
+		return 0;
+	*lo = (uintptr_t)a;
+	*hi = (uintptr_t)a + (uintptr_t)sz;
+	return 1;
+}
+
+/* PUBLIC: int __os_backtrace __P((void **, int)); */
+int
+__os_backtrace(void **frames, int max)
+{
+	uintptr_t fp, lo, hi;
+	int n = 0;
+
+	if (frames == NULL || max <= 0)
+		return 0;
+	fp = (uintptr_t)__builtin_frame_address(0);
+	if (!apple_stack_region(fp, &lo, &hi))
+		return backtrace(frames, max);
+	/*
+	 * arm64 and x86-64 both store the frame record as
+	 * {saved FP, return addr} at [fp]; walk outward (ascending
+	 * addresses) recording each return address.  Stop the moment the
+	 * next slot would leave the mapped region, is misaligned, or does
+	 * not ascend -- so an over-walk past a guard-paged fiber stack top
+	 * can never touch an unmapped page.
+	 */
+	while (n < max && fp >= lo &&
+	    fp + 2 * sizeof(uintptr_t) <= hi &&
+	    (fp & (sizeof(uintptr_t) - 1)) == 0) {
+		uintptr_t next = ((uintptr_t *)fp)[0];
+		uintptr_t ret  = ((uintptr_t *)fp)[1];
+
+		if (ret != 0)
+			frames[n++] = (void *)ret;
+		if (next <= fp)
+			break;
+		fp = next;
+	}
+	return n;
+}
+#else /* non-Apple execinfo (Linux glibc, the BSDs) */
 /* PUBLIC: int __os_backtrace __P((void **, int)); */
 int
 __os_backtrace(void **frames, int max)
@@ -80,6 +155,7 @@ __os_backtrace(void **frames, int max)
 		return 0;
 	return backtrace(frames, max);
 }
+#endif /* __APPLE__ */
 
 /* PUBLIC: void __os_backtrace_emit __P((int, void *const *, int)); */
 void
