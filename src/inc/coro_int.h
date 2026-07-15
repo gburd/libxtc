@@ -11,7 +11,9 @@
 
 #if defined(_WIN32)
 # include <windows.h>
-#elif defined(XTC_HAVE_UCONTEXT) && !defined(XTC_CORO_FORCE_FCTX)
+#elif defined(XTC_HAVE_UCONTEXT) && !defined(XTC_CORO_FORCE_FCTX) && \
+    !(defined(__APPLE__) && defined(__aarch64__) && \
+      !defined(XTC_CORO_FORCE_UCONTEXT) && !defined(XTC_AMALGAMATION))
 # include <ucontext.h>
 #endif
 
@@ -26,7 +28,9 @@ struct xtc_coro {
 #if defined(_WIN32)
 	LPVOID       fiber;         /* the coroutine's own Win32 fiber */
 	LPVOID       loop_fiber;    /* return-to-loop fiber pointer */
-#elif defined(XTC_HAVE_UCONTEXT) && !defined(XTC_CORO_FORCE_FCTX)
+#elif defined(XTC_HAVE_UCONTEXT) && !defined(XTC_CORO_FORCE_FCTX) && \
+    !(defined(__APPLE__) && defined(__aarch64__) && \
+      !defined(XTC_CORO_FORCE_UCONTEXT) && !defined(XTC_AMALGAMATION))
 	ucontext_t   ctx;          /* the coroutine's own machine state */
 	ucontext_t   loop_ctx;     /* return-to-loop context (set on resume) */
 #else
