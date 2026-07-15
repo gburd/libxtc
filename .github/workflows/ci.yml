@@ -534,8 +534,12 @@ jobs:
   macos:
     # macOS runtime coverage: kqueue I/O backend + ucontext coroutine
     # substrate (the x86-64 fcontext .S files self-gate to empty on
-    # macOS / Apple Silicon).  Runs the C (munit) suite; the shell
-    # tests are GNU-tooling-sensitive and are covered on Linux.
+    # macOS / Apple Silicon).  Runs the FULL `make check` (an external
+    # Apple-Silicon reviewer confirmed it is green on a stock macOS box
+    # once the autoreconf skip-guards landed), under -Werror, plus a
+    # make-install + consumer-link smoke -- so macOS-only build/
+    # packaging regressions (a warning, a shell gate, an install-header
+    # gap) are caught in CI instead of by a human on a Mac.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -548,11 +552,33 @@ jobs:
         run: |
           mkdir -p build_ci && cd build_ci
           PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig" \
+            CFLAGS="-Werror" \
             ../dist/configure --with-tls=auto
       - name: Build
         run: make -C build_ci -j3
-      - name: Test (C / munit suite)
-        run: make -C build_ci tests-c
+      - name: Check (full C + shell suite)
+        run: make -C build_ci check
+      - name: Install + consumer-link smoke
+        # Prove `make install` ships a usable header+lib+pkg-config set
+        # on macOS: install into a DESTDIR, then compile+link+run a tiny
+        # consumer against ONLY the installed headers, resolving link
+        # flags through the installed xtc.pc via pkg-config --static
+        # (the way a real consumer links -- this also validates that
+        # xtc.pc's Libs.private is correct on macOS).  Install
+        # locations are read back from the Makefile, not hard-coded.
+        run: |
+          dest="$(mktemp -d)"
+          make -C build_ci install DESTDIR="$dest"
+          lib="$dest$(make -C build_ci -s print-libdir 2>/dev/null || echo /usr/local/lib)"
+          # PKG_CONFIG_SYSROOT_DIR prepends the DESTDIR to xtc.pc's
+          # ${includedir}/${libdir}; PKG_CONFIG_PATH also carries the
+          # Homebrew openssl .pc so the TLS transitive deps resolve.
+          export PKG_CONFIG_SYSROOT_DIR="$dest"
+          export PKG_CONFIG_PATH="$lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig"
+          echo "xtc.pc resolves to:"; pkg-config --cflags --libs --static xtc
+          printf '%s\n' '#include <stdio.h>' '#include "xtc.h"' '#include "xtc_loop.h"' 'int main(void){printf("libxtc %s\n", xtc_version_string());return 0;}' > /tmp/xtc_consumer.c
+          cc $(pkg-config --cflags xtc) /tmp/xtc_consumer.c $(pkg-config --libs --static xtc) -o /tmp/xtc_consumer
+          /tmp/xtc_consumer
       - name: sqlxtc multi-thread load (one loop per CPU; cross-loop regression)
         working-directory: examples/06_sqlxtc
         run: |

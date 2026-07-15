@@ -448,7 +448,7 @@ TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt
 # -------------------------------------------------------------------------
 # Default goal.
 # -------------------------------------------------------------------------
-.PHONY: all check check-sim check-dst tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation
+.PHONY: all check check-sim check-dst tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation print-includedir print-libdir
 
 all: $(STATIC_LIB) $(SHARED_LIB_TARGETS) compile_commands.json
 
@@ -1608,6 +1608,14 @@ pbt_deque: $(srcdir)/../test/pbt/pbt_deque.c $(STATIC_LIB)
 # -------------------------------------------------------------------------
 # Install.
 # -------------------------------------------------------------------------
+
+# Report the configured install directories (for packagers and the CI
+# install smoke).  -s recommended: `make -s print-libdir`.
+print-includedir:
+	@echo $(includedir)
+print-libdir:
+	@echo $(libdir)
+
 install: all
 	$(INSTALL) -d $(DESTDIR)$(libdir)
 	$(INSTALL) -d $(DESTDIR)$(libdir)/pkgconfig
