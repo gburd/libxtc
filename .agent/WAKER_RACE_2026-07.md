@@ -1,4 +1,43 @@
-# Waker register/wake data race (pre-existing) -- found 2026-07
+# Waker register/wake data race (pre-existing) -- FIXED 2026-07
+
+## STATUS: FIXED (commit follows this doc).  6/6 TSan runs of
+## test_proc_table_stress now clean; messaging suite TSan+ASan clean;
+## DST 55/55 replay-identical; gcc -Werror clean.
+
+## Root cause (the real one -- deeper than the first hypothesis)
+The race was NOT just the lockless ARM in __do_recv (that was one write
+site).  The decisive bug was the READ side: __mbox_deliver reads
+p->waker_armed UNDER mbox_lock, UNLOCKS, then reads p->recv_waker
+OUTSIDE the lock to fire the wake (the wake must run outside the lock
+to avoid proc/loop reentrancy).  Meanwhile the woken receiver, on its
+NEXT recv cycle, RE-ARMS recv_waker under its own lock.  So the
+sender's post-unlock read of recv_waker raced the receiver's re-arm
+write -- a genuine C11 data race (benign in value, since recv_waker is
+always the same fixed self->task/loop, but real UB).
+
+## Fix (two parts)
+1. Arm recv_waker together with waker_armed=1, both UNDER mbox_lock, at
+   the park points in __do_recv and xtc_proc_wait_fd (was written
+   lockless just before).
+2. In __mbox_deliver, COPY recv_waker into a local while still holding
+   mbox_lock (guarded by `armed`), then fire xtc_waker_wake(&local)
+   after unlocking.  The wake still runs outside the lock (no
+   reentrancy), but the struct READ is now under the lock, so it can
+   never race the receiver's re-arm.
+The other wake sites (xtc_exit_pid / kill at proc.c ~1482, ~1530)
+already read recv_waker INSIDE mbox_lock, so they were race-free and
+are unchanged.
+
+## Why the first attempt (arm-under-lock alone) was insufficient
+Moving only the arm under the lock left the sender's post-unlock read
+racing the NEXT re-arm; 4/5 TSan runs still tripped.  Reading the waker
+under the lock (part 2) is what actually closes it.
+
+## test disposition
+test_proc_table_stress is now a CLEAN TSan gate for the waker path.
+
+---
+(historical analysis below)
 
 ## What
 test/concurrency/test_proc_table_stress (the new striped-proc-table
