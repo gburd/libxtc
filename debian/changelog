@@ -1,3 +1,19 @@
+libxtc (1.23.3-1) unstable; urgency=medium
+
+  * Fix (scheduler): drain due timers under a busy run queue.  A loop
+    that never emptied its run queue (a fiber that keeps rescheduling
+    -- a busy xtc_yield / XTC_TASK_RESCHED spin) starved timer-based
+    wakeups indefinitely: xtc_proc_sleep, a recv timeout, or any
+    deadline would never fire, because the loop only expired timers
+    once the run queue drained.  The scheduler now drains due timers on
+    the IO-fairness quantum under load too (symmetric with the existing
+    I/O-completion poll).  Surfaced by a cross-loop btree benchmark;
+    the buggify "fire late" logic and DST replay-determinism are
+    preserved.
+  * No API change.
+
+ -- Greg Burd <greg@burd.me>  Wed, 15 Jul 2026 19:24:43 -0400
+
 libxtc (1.23.2-1) unstable; urgency=medium
 
   * Fix (macOS/arm64): the 1.23.1 fcontext-default flip selected the
