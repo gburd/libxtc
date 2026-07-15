@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.23.1"
+#       --define "version 1.23.2"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.23.1
+Version:        1.23.2
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,9 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Wed Jul 15 2026 Greg Burd <greg@burd.me> - 1.23.2-1
+- Fix (macOS/arm64): unify the fcontext-default substrate guard across all four sites (coro_fctx.c, coro_uctx.c, coro_int.h include + struct member) so struct xtc_coro's layout cannot drift between translation units; the 1.23.1 flip updated only two sites. Non-Apple targets + amalgamation byte-unchanged.
+
 * Wed Jul 15 2026 Greg Burd <greg@burd.me> - 1.23.1-1
 - macOS/Apple-Silicon now defaults to the Mach-O arm64 fcontext coroutine substrate (was ucontext), removing the per-switch sigprocmask syscall; override with -DXTC_CORO_FORCE_UCONTEXT. Amalgamation + macOS x86-64 keep ucontext.
 

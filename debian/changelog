@@ -1,3 +1,18 @@
+libxtc (1.23.2-1) unstable; urgency=medium
+
+  * Fix (macOS/arm64): the 1.23.1 fcontext-default flip selected the
+    substrate in only two of four guard sites, leaving coro_int.h's
+    struct xtc_coro definition on the ucontext members while
+    coro_fctx.c used the fctx member -- a struct-layout mismatch
+    between translation units on Apple Silicon.  Unified the identical
+    guard clause across all four sites (coro_fctx.c, coro_uctx.c, and
+    coro_int.h's <ucontext.h> include + struct-member selection) so
+    every TU agrees on the layout.  Caught by an external macOS
+    reviewer; non-Apple targets and the amalgamation are byte-unchanged.
+  * No API change.
+
+ -- Greg Burd <greg@burd.me>  Wed, 15 Jul 2026 15:20:03 -0400
+
 libxtc (1.23.1-1) unstable; urgency=medium
 
   * macOS/Apple-Silicon now DEFAULTS to the hand-written Mach-O arm64
