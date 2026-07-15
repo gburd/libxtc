@@ -187,7 +187,24 @@ node_lower_bound(const void *page, const uint8_t *key, uint16_t key_len,
 	if (found != NULL)
 		*found = 0;
 
-	if (pl > 0) {
+	/* OLC bounds guards.  Under optimistic reads this may run on a page
+	 * a writer is mid-mutating, so no header field can be trusted to be
+	 * in-range.  Clamp the slot count so the binary search never reads
+	 * a slot past the page, and skip the prefix compare if the lo-fence
+	 * bytes would fall outside the page.  A torn read produces a
+	 * meaningless (but in-bounds) result; the OLC caller re-validates
+	 * the frame version and retries.  Well-formed pages are unaffected. */
+	{
+		size_t max_slots = ((size_t)h->page_size > sizeof(*h))
+		    ? ((size_t)h->page_size - sizeof(*h)) /
+		      sizeof(struct btnode_slot)
+		    : 0;
+		if ((size_t)hi > max_slots)
+			hi = (uint16_t)max_slots;
+	}
+
+	if (pl > 0 &&
+	    (size_t)h->lo_fence_off + pl <= (size_t)h->page_size) {
 		const uint8_t *pref = p + h->lo_fence_off;
 		uint16_t cl = key_len < pl ? key_len : pl;
 		int c = cl ? memcmp(key, pref, cl) : 0;
@@ -195,7 +212,7 @@ node_lower_bound(const void *page, const uint8_t *key, uint16_t key_len,
 		if (c < 0)
 			return 0;
 		if (c > 0)
-			return (int)h->count;
+			return (int)hi;
 		if (key_len < pl)
 			return 0; /* key is a strict prefix; sorts first */
 	}
@@ -225,7 +242,19 @@ node_lower_bound(const void *page, const uint8_t *key, uint16_t key_len,
 			}
 		} else {
 			const uint8_t *mkey = p + s[mid].offset;
-			int c = cmp_bytes(skey, sklen, mkey, s[mid].key_len);
+			int c;
+			/* OLC bounds guard: on a torn page a stale offset/key_len
+			 * could put this key's bytes outside the page buffer; a
+			 * mis-sized memcmp would read OOB.  Treat an out-of-page
+			 * cell as "greater" so the search stays in-bounds and
+			 * terminates; the OLC caller re-validates the version and
+			 * retries.  A well-formed slot always lies in-page. */
+			if ((size_t)s[mid].offset + s[mid].key_len >
+			    (size_t)h->page_size) {
+				hi = mid;
+				continue;
+			}
+			c = cmp_bytes(skey, sklen, mkey, s[mid].key_len);
 
 			if (c < 0) {
 				hi = mid;
@@ -339,6 +368,19 @@ btnode_get(const void *page, int slot, const void **key_suffix,
 	const uint8_t *p = page;
 
 	if (slot < 0 || slot >= (int)h->count)
+		return -1;
+	/* Bounds guard.  Under OLC (optimistic latch coupling) a reader may
+	 * call this on a page a writer is concurrently mutating -- a torn
+	 * slot could carry a stale/garbage offset that would make the
+	 * key/val pointers below point OUTSIDE the page buffer (offset,
+	 * key_len, val_len are each uint16_t, so their sum can exceed a
+	 * 4 KB page).  Dereferencing that is an out-of-bounds read.  Reject
+	 * a cell that does not lie wholly within the page; the OLC caller
+	 * then sees a version conflict on re-validate and retries (or the
+	 * latched caller never hits this on a well-formed page).  A
+	 * correctly-formed slot always passes. */
+	if ((size_t)s[slot].offset + s[slot].key_len + s[slot].val_len >
+	    (size_t)h->page_size)
 		return -1;
 	if (key_suffix != NULL)
 		*key_suffix = p + s[slot].offset;

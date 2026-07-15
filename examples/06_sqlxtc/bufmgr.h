@@ -228,6 +228,18 @@ void bm_latch_shared(bm_frame_t *frame);
 void bm_latch_exclusive(bm_frame_t *frame);
 void bm_unlatch(bm_frame_t *frame);
 
+/* OLC (optimistic latch coupling) read side: read a resident+pinned
+ * page WITHOUT the shared content latch, validating with the frame's
+ * version seqlock.  bm_read_begin returns 1 and writes the current
+ * (even) version to *out_v when no writer holds the frame, or 0 when a
+ * writer is active (caller should fall back to bm_latch_shared).
+ * bm_read_valid returns 1 iff the version is unchanged since
+ * bm_read_begin -- i.e. the page bytes read in between are a consistent
+ * snapshot; 0 means a writer intervened, so retry or fall back.  The
+ * caller must hold a pin on the frame across the read. */
+int bm_read_begin(const bm_frame_t *frame, uint64_t *out_v);
+int bm_read_valid(const bm_frame_t *frame, uint64_t v);
+
 /* Spawn the page-provider process on `loop`: it proactively cools and
  * flushes pages so free frames stay available.  Optional -- demand
  * eviction works without it.  Stop it with bm_provider_stop. */
