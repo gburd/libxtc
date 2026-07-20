@@ -3,10 +3,12 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/os_errno.h
- *	Canonical POSIX errno -> XTC_E_* translation for the OS layer,
- *	plus an embedder hook so a consumer that shims the underlying
- *	syscalls (a custom VFS, a hosted/sandboxed libc) can override the
- *	mapping.  See M1_CLAIMS.md, Tm-errno.
+ *	Canonical POSIX errno -> XTC_E_* translation for the OS layer
+ *	(INTERNAL, __os_* surface), plus an internal override hook whose
+ *	eventual audience is an embedder that shims the underlying
+ *	syscalls (a custom VFS, a hosted/sandboxed libc); that hook gets a
+ *	public xtc_* wrapper if/when a real embedder needs it (see the
+ *	hook comment below).  See M1_CLAIMS.md, Tm-errno.
  *
  *	The rest of the runtime works exclusively in the XTC_E_* error
  *	space; this module is the ONE place a raw errno crosses into it.
@@ -37,11 +39,21 @@
 XTC_API int __os_errno_map(int posix_errno);
 
 /*
- * Embedder hook.  fn receives the raw errno and returns an XTC_E_*
- * code, or 0 to fall through to the built-in table.  Installing NULL
- * restores the default (built-in table only).  Thread-safe: the swap
- * is a single atomic pointer store, so it may be called at any time,
- * though embedders normally set it once at startup.
+ * Translation-override hook (INTERNAL, __os_* surface).  fn receives the
+ * raw errno and returns an XTC_E_* code, or 0 to fall through to the
+ * built-in table.  Installing NULL restores the default (built-in table
+ * only).  Thread-safe: the swap is a single atomic pointer store.
+ *
+ * Audience note: the eventual audience for overriding the errno mapping
+ * is an EMBEDDER that shims the underlying syscalls (a custom VFS, a
+ * hosted/sandboxed libc).  That is a consumer action, and consumers use
+ * only the public xtc_* API (never __os_*), so when a real embedder
+ * needs this it gets a thin public wrapper (xtc_errno_set_hook /
+ * _get_hook) in an installed header -- exactly the pattern the
+ * allocator hook (__os_alloc_set_hook) follows.  Until then this stays
+ * __os_*-internal rather than shipping a public API with no caller
+ * (YAGNI); __os_errno_map itself is unconditionally internal (library
+ * OS wrappers call it directly).
  *
  * PUBLIC: void __os_errno_set_hook __P((int (*)(int)));
  * PUBLIC: int  (*__os_errno_get_hook __P((void)))(int);
