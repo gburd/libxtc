@@ -25,6 +25,7 @@
 #include "xtc_bdev.h"
 #include "xtc_aio.h"
 #include "xtc_fs.h"
+#include "os_errno.h"
 
 #include <errno.h>
 #include <string.h>
@@ -51,16 +52,13 @@ struct xtc_bdev {
 #define BDEV_DEFAULT_LOGICAL   512u
 #define BDEV_DEFAULT_PHYSICAL  4096u
 
-/* Map a negative errno (the xtc_aio convention) to a stable XTC_E_ code. */
+/* Map a positive errno (see call sites; the negative-errno aio
+ * convention is negated to positive before we get here) to a stable
+ * XTC_E_ code via the canonical OS-layer mapper. */
 static int
 errno_to_xtc(int e)
 {
-	switch (e) {
-	case EINVAL:	return XTC_E_INVAL;
-	case ENOMEM:	return XTC_E_NOMEM;
-	case ENOENT:	return XTC_E_NOTFOUND;
-	default:	return XTC_E_IO;
-	}
+	return __os_errno_map(e);
 }
 
 #if !defined(_WIN32)

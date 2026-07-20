@@ -16,6 +16,7 @@
 
 #include "xtc_int.h"
 #include "xtc_fs.h"
+#include "os_errno.h"
 
 #include <errno.h>
 #include <stdio.h>      /* rename, snprintf */
@@ -332,13 +333,7 @@ void __xtc_dio_unregister(int fd);
 static int
 err_map(int e)
 {
-	switch (e) {
-	case ENOENT:	return XTC_E_NOTFOUND;
-	case ENOMEM:	return XTC_E_NOMEM;
-	case EINVAL:	return XTC_E_INVAL;
-	case EEXIST:	return XTC_E_INVAL;
-	default:	return XTC_E_IO;
-	}
+	return __os_errno_map(e);
 }
 
 int

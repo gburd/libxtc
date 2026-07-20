@@ -1,0 +1,129 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 15, 2026
+.Dt __OS_ERRNO 3
+.Os
+.Sh NAME
+.Nm __os_errno_map ,
+.Nm __os_errno_set_hook ,
+.Nm __os_errno_get_hook
+.Nd canonical errno to XTC_E_* translation with an embedder hook
+.Sh SYNOPSIS
+.In os_errno.h
+.Ft int
+.Fn __os_errno_map "int posix_errno"
+.Ft void
+.Fn __os_errno_set_hook "int (*fn)(int posix_errno)"
+.Ft "int (*)(int)"
+.Fn __os_errno_get_hook void
+.Sh DESCRIPTION
+The XTC runtime works exclusively in the
+.Dv XTC_E_*
+error space.
+This module is the one place a raw POSIX
+.Va errno
+crosses into it: OS-layer wrappers call
+.Fn __os_errno_map
+at the syscall boundary instead of hand-rolling a per-file switch.
+.Pp
+.Fn __os_errno_map
+translates
+.Fa posix_errno
+into a stable
+.Dv XTC_E_*
+code.
+It is only ever consulted on a known failure, so an unrecognized value,
+or 0, maps to
+.Dv XTC_E_IO
+.Pq an I/O-class error the runtime does not further distinguish ,
+never a success code.
+Callers that need
+.Dv XTC_OK
+check the syscall return value
+.Em before
+calling this.
+The built-in table maps, among others,
+.Dv EINVAL
+and
+.Dv EEXIST
+to
+.Dv XTC_E_INVAL ,
+.Dv ENOMEM
+to
+.Dv XTC_E_NOMEM ,
+.Dv ENOENT
+to
+.Dv XTC_E_NOTFOUND ,
+.Dv EAGAIN
+and
+.Dv EWOULDBLOCK
+to
+.Dv XTC_E_AGAIN ,
+.Dv ECANCELED
+to
+.Dv XTC_E_ABORTED ,
+.Dv ENOSYS
+to
+.Dv XTC_E_NOSYS ,
+and
+.Dv ERANGE
+to
+.Dv XTC_E_RANGE .
+.Pp
+.Fn __os_errno_set_hook
+installs an optional embedder hook, consulted by
+.Fn __os_errno_map
+.Em before
+the built-in table.
+An embedder that shims the underlying syscalls
+.Pq a custom VFS, a hosted or sandboxed libc
+uses this to override the translation.
+The hook receives the raw
+.Fa errno
+and returns an
+.Dv XTC_E_*
+code, or 0 to fall through to the built-in table.
+Installing
+.Dv NULL
+restores the default
+.Pq built-in table only .
+.Pp
+.Fn __os_errno_get_hook
+returns the currently installed hook, or
+.Dv NULL
+if none.
+.Sh RETURN VALUES
+.Fn __os_errno_map
+returns an
+.Dv XTC_E_*
+code
+.Pq always negative or, by convention, never Dv XTC_OK .
+.Sh THREAD SAFETY
+All three functions are safe to call concurrently from any thread; the
+hook pointer is published with a single atomic store.
+Embedders normally install the hook once at startup, before other
+threads run.
+.Sh EXAMPLES
+Translate a failed
+.Fn open :
+.Bd -literal -offset indent
+int fd = open(path, O_RDONLY);
+if (fd < 0)
+        return __os_errno_map(errno);
+.Ed
+.Pp
+Override the mapping from a sandbox shim:
+.Bd -literal -offset indent
+static int my_map(int e) {
+        if (e == EACCES)
+                return XTC_E_RESOURCE;  /* sandbox denial */
+        return 0;                       /* defer to the built-in table */
+}
+__os_errno_set_hook(my_map);
+.Ed
+.Sh SEE ALSO
+.Xr __os_alloc 3 ,
+.Xr xtc_strerror 3 ,
+.Xr xtc 7
+.Sh HISTORY
+First appeared in xtc 1.24.0 (M1.5).

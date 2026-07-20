@@ -83,6 +83,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/xtc_strerror.c \
 	$(srcdir)/../src/os/os_alloc.c \
 	$(srcdir)/../src/os/os_env.c \
+	$(srcdir)/../src/os/os_errno.c \
 	$(srcdir)/../src/os/os_rand.c \
 	$(srcdir)/../src/os/os_str.c \
 	$(srcdir)/../src/os/os_time.c \
@@ -174,6 +175,7 @@ LIB_OBJS	= \
 	xtc_strerror.o \
 	os_alloc.o \
 	os_env.o \
+	os_errno.o \
 	os_rand.o \
 	os_str.o \
 	os_time.o \
@@ -376,6 +378,7 @@ TESTS_SH	= \
 
 TESTS_C		= test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
+		  test_errno \
 		  test_sharp_edges \
 		  test_cpu \
 		  test_cpu_cgroup \
@@ -543,6 +546,8 @@ xtc_strerror.o: $(srcdir)/../src/xtc_strerror.c $(LIB_HDR_PUBLIC) xtc_config.h
 
 os_alloc.o: $(srcdir)/../src/os/os_alloc.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_alloc.c
+os_errno.o: $(srcdir)/../src/os/os_errno.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_errno.c
 
 os_env.o: $(srcdir)/../src/os/os_env.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_env.c
@@ -959,6 +964,12 @@ test_time: $(srcdir)/../test/m1/test_time.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
 		-o $@ $(srcdir)/../test/m1/test_time.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_errno: $(srcdir)/../test/m1/test_errno.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_errno.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_cpu: $(srcdir)/../test/m1/test_cpu.c \

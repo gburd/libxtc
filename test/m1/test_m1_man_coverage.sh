@@ -9,7 +9,7 @@ set -eu
 MANDIR="$XTC_SRC_DIR/man/man3"
 
 # Map module -> header.
-for mod in os_atomic os_alloc os_thread os_tls os_mutex os_time; do
+for mod in os_atomic os_alloc os_thread os_tls os_mutex os_time os_errno; do
 	# Atomics, tls live in os_atomic.h or os_thread.h respectively;
 	# we group them: one man page per logical group.
 	case "$mod" in
@@ -19,6 +19,7 @@ for mod in os_atomic os_alloc os_thread os_tls os_mutex os_time; do
 		os_tls)    hdr="$XTC_SRC_DIR/src/inc/os_thread.h" ;;
 		os_mutex)  hdr="$XTC_SRC_DIR/src/inc/os_thread.h" ;;
 		os_time)   hdr="$XTC_SRC_DIR/src/inc/os_time.h"   ;;
+		os_errno)  hdr="$XTC_SRC_DIR/src/inc/os_errno.h"  ;;
 	esac
 
 	page="$MANDIR/__$mod.3"
@@ -53,6 +54,9 @@ for mod in os_atomic os_alloc os_thread os_tls os_mutex os_time; do
 			;;
 		os_time)
 			fns=$(grep -oE '__os_(clock_mono|clock_real|sleep_ns)' "$hdr" | sort -u)
+			;;
+		os_errno)
+			fns=$(grep -oE '__os_errno_(map|set_hook|get_hook)' "$hdr" | sort -u)
 			;;
 	esac
 
