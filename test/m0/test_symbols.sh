@@ -160,3 +160,55 @@ if [ -n "$c7_bad" ]; then
 	exit 1
 fi
 echo "  [C7] OK: no internal __ symbol declared in an installed public header"
+
+# [C8]: the SHARED library's exported ABI must be exactly the public
+# surface -- xtc_* plus only the __ symbols a public macro in an
+# installed header expands to (the same allowlist [C7] permits, i.e. the
+# recovery-frame seam in xtc_proc.h).  Guards against the version script
+# (dist/libxtc.map) drifting back to a broad "__xtc_*" glob that leaks
+# ~80 internals into the ABI.  Only meaningful when a shared library was
+# built; the static archive legitimately contains every internal, so it
+# is out of scope here.
+SO=$(find "$XTC_BUILD_DIR" -maxdepth 1 \( -name 'libxtc.so*' -o \
+		-name 'libxtc.*.dylib' -o -name 'libxtc.dylib' \) 2>/dev/null \
+		| head -1 || true)
+if [ -z "$SO" ]; then
+	echo "  [C8] SKIP: no shared library built (static-only configure)"
+else
+	# The allowlist: every __ symbol referenced (in code, not comments)
+	# by an installed public header -- computed the same way [C7]
+	# derives its exceptions, so the two cannot disagree.  Concatenate
+	# the comment-stripped headers first, then grep once, so a single
+	# header with no __ reference cannot abort the loop under set -e.
+	allow=$(for h in $hdrs; do
+			[ -f "$INC/$h" ] || continue
+			awk '{l=$0}
+				inb{if(l~/\*\//){sub(/.*\*\//,"",l);inb=0}else next}
+				{sub(/\/\/.*/,"",l); while(l~/\/\*.*\*\//)sub(/\/\*.*\*\//,"",l); if(l~/\/\*/){sub(/\/\*.*/,"",l);inb=1} print l}' \
+				"$INC/$h" 2>/dev/null
+		done | grep -oE '(__xtc_|__os_)[A-Za-z0-9_]+' \
+			| grep -vE '__attribute__|__declspec|__has_include|__extension__|__builtin_' \
+			| sort -u || true)
+	# exported dynamic symbols that are internal-looking (__ prefix).
+	# ELF nm -D shows __xtc_...; Mach-O prepends one underscore so it
+	# shows ___xtc_... (and _xtc_ for public).  Match a __ or ___ prefix
+	# and normalize a Mach-O triple-underscore back to the source __.
+	exported=$(nm -D --defined-only "$SO" 2>/dev/null \
+		| awk '$2 ~ /^[TWDBR]$/ {print $3}' \
+		| grep -E '^(__|___)[a-z]' \
+		| sed -E 's/^___/__/' \
+		| sort -u || true)
+	c8_bad=""
+	for s in $exported; do
+		echo "$allow" | grep -qx "$s" || c8_bad="$c8_bad $s"
+	done
+	if [ -n "$c8_bad" ]; then
+		echo "  [C8] FAIL: shared library exports internal __ symbols not" >&2
+		echo "        backed by a public macro (narrow dist/libxtc.map /" >&2
+		echo "        the Darwin libxtc.exp filter):" >&2
+		for s in $c8_bad; do echo "    $s" >&2; done
+		exit 1
+	fi
+	exp_n=$(echo "$exported" | grep -c '.' || true)
+	echo "  [C8] OK: shared library exports xtc_* + $exp_n macro-backed __ symbol(s), no internal leak"
+fi

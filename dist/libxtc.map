@@ -8,15 +8,29 @@
  * It is passed to the linker via -Wl,--version-script=libxtc.map
  * when configure was run with --enable-shared.
  *
- * Export policy (matches test/m0/test_symbols.sh [C5]):
+ * Export policy (matches test/m0/test_symbols.sh [C5]/[C7]):
  *   global:  xtc_*    -- the documented public API.
- *            __xtc_*  -- internal hooks referenced by PUBLIC macros in
- *                        the installed headers (e.g. the proc recovery
- *                        and fcontext seams in src/inc/xtc_proc.h); they
- *                        must remain callable from inlined user code.
- *   local:   everything else, notably the __os_* OS-abstraction layer,
- *            which is an internal implementation detail and must not
- *            leak into the ABI.
+ *            __xtc_proc_recovery_slot, __xtc_recovery_prep,
+ *            __xtc_recovery_ctx, __xtc_recovery_result -- the ONLY
+ *            internal symbols a PUBLIC macro in an installed header
+ *            (xtc_proc_recovery_arm() in src/inc/xtc_proc.h) expands
+ *            to, so they must stay callable from inlined consumer
+ *            code.  (POSIX uses __xtc_proc_recovery_slot via
+ *            sigsetjmp; the other three are the Windows RtlCaptureContext
+ *            path -- listed so the allowlist is complete and
+ *            platform-independent.)
+ *   local:   EVERYTHING else -- the whole __os_* OS-abstraction layer
+ *            AND every other __xtc_* internal (sim hooks, the
+ *            async-signal-unsafe bracket, tail hook points, fcontext
+ *            seams, ...).  None of these is public API, so none leaks
+ *            into the shared-library ABI.
+ *
+ * This is an explicit allowlist, NOT a "__xtc_* glob": after internal
+ * __ decls were moved out of the installed headers (see the *_int.h
+ * split + the [C7] gate), a broad __xtc_* export would leak ~80 pure
+ * internals.  Keep this list in sync with the macro-backed exception
+ * the [C7] gate allows -- test/m0/test_symbols.sh [C8] asserts the two
+ * agree.
  *
  * The single unnamed version node keeps the SONAME's symbols
  * unversioned (plain global symbols), which is what a C library that
@@ -28,7 +42,10 @@
 {
 	global:
 		xtc_*;
-		__xtc_*;
+		__xtc_proc_recovery_slot;
+		__xtc_recovery_prep;
+		__xtc_recovery_ctx;
+		__xtc_recovery_result;
 	local:
 		*;
 };
