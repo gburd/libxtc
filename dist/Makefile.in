@@ -517,7 +517,8 @@ $(SHARED_LIB_REAL): $(SHARED_LIB_DEPS)
 # darwin shared-lib style; harmless elsewhere.
 libxtc.exp: $(STATIC_LIB)
 	nm -gj $(STATIC_LIB) 2>/dev/null | \
-		grep -E '^_xtc_|^___xtc_' | sort -u > $@
+		grep -E '^_xtc_|^___xtc_(proc_recovery_slot|recovery_prep|recovery_ctx|recovery_result)$$' | \
+		sort -u > $@
 
 tls_openssl.o: $(srcdir)/../src/io/tls_openssl.c $(srcdir)/../src/inc/xtc_tls.h $(srcdir)/../src/io/tls_common.h xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/io/tls_openssl.c
