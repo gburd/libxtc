@@ -1,3 +1,30 @@
+libxtc (1.24.0-1) unstable; urgency=medium
+
+  * TLS: expand xtc_tls_* for PostgreSQL adoption (the enabler for
+    unpinning TLS-bearing backend fibers off directly-driven OpenSSL).
+    Additive, backend-neutral in the public header; fully implemented
+    in the OpenSSL backend, stubbed (XTC_E_NOSYS) in the others.
+    - New xtc_tls_opts_t fields (a zeroed struct is byte-identical to
+      the old behavior): verify_peer_mode (tri-state
+      none/request/require -- request-but-not-require is PG's default),
+      cipher_list, ciphersuites_13, groups, crl_file, crl_dir,
+      prefer_server_ciphers, passphrase_cb + passphrase_userdata.
+    - Server hardening as documented defaults: no renegotiation, no
+      compression, session tickets + cache off, moving-write-buffer on.
+    - New post-handshake introspection: xtc_tls_get_version,
+      _get_cipher, _get_cipher_bits, _get_alpn_selected,
+      _has_peer_cert, _get_peer_subject_dn, _get_peer_common_name
+      (embedded-NUL rejected), _get_peer_issuer_dn, _get_peer_serial,
+      and _get_server_cert_hash (RFC 5929 tls-server-end-point, the
+      input SCRAM channel binding needs).
+  * OS: dedicated errno abstraction (M1.5).  __os_errno_map(errno) ->
+    XTC_E_* as the one canonical translation, with an embedder hook
+    (__os_errno_set_hook / _get_hook) for consumers that shim the
+    underlying syscalls; consolidates two duplicated per-file tables.
+  * No breaking API changes (all additions).
+
+ -- Greg Burd <greg@burd.me>  Mon, 20 Jul 2026 13:51:27 -0400
+
 libxtc (1.23.3-1) unstable; urgency=medium
 
   * Fix (scheduler): drain due timers under a busy run queue.  A loop
