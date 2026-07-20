@@ -523,4 +523,6 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 	return map_again(tls, rc);
 }
 
+XTC_TLS_DEFINE_INTROSPECT_STUBS   /* introspection not yet ported to GnuTLS */
+
 #endif /* XTC_TLS_BACKEND_GNUTLS */

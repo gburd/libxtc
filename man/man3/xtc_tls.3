@@ -13,7 +13,17 @@
 .Nm xtc_tls_write ,
 .Nm xtc_tls_shutdown ,
 .Nm xtc_tls_wants_read ,
-.Nm xtc_tls_wants_write
+.Nm xtc_tls_wants_write ,
+.Nm xtc_tls_get_version ,
+.Nm xtc_tls_get_cipher ,
+.Nm xtc_tls_get_cipher_bits ,
+.Nm xtc_tls_get_alpn_selected ,
+.Nm xtc_tls_has_peer_cert ,
+.Nm xtc_tls_get_peer_subject_dn ,
+.Nm xtc_tls_get_peer_common_name ,
+.Nm xtc_tls_get_peer_issuer_dn ,
+.Nm xtc_tls_get_peer_serial ,
+.Nm xtc_tls_get_server_cert_hash
 .Nd TLS over async sockets
 .Sh SYNOPSIS
 .In xtc.h
@@ -75,13 +85,74 @@ PEM CA bundle for verifying the peer.
 .It Va verify_peer
 .Dv 1
 to require + validate the peer's cert.
+.It Va verify_peer_mode
+Tri-state peer verification, taking precedence over
+.Va verify_peer
+when not
+.Dv XTC_TLS_VERIFY_DEFAULT :
+.Dv XTC_TLS_VERIFY_NONE ,
+.Dv XTC_TLS_VERIFY_REQUEST
+(request a client certificate but complete the handshake if none is
+presented), or
+.Dv XTC_TLS_VERIFY_REQUIRE .
 .It Va alpn_protos
 ALPN wire-form list.
 .It Va min_version , max_version
 .Dv XTC_TLS_VER_12
 or
 .Dv XTC_TLS_VER_13 .
+.It Va cipher_list , ciphersuites_13 , groups
+TLS 1.2 cipher list, TLS 1.3 ciphersuites, and key-exchange groups.
+.It Va crl_file , crl_dir
+CRL file / hashed directory; either enables full-chain revocation checking.
+.It Va prefer_server_ciphers
+Honor the server's cipher order over the client's.
+.It Va passphrase_cb , passphrase_userdata
+Supply the passphrase for an encrypted
+.Va key_file
+without an interactive prompt.
 .El
+.Pp
+A server context is hardened by default (documented defaults, not knobs):
+TLS renegotiation and compression are disabled, session tickets and the
+session cache are off, and the moving-write-buffer mode required for
+correct non-blocking sends is enabled.
+.Sh INTROSPECTION
+Valid only after
+.Fn xtc_tls_handshake
+returns
+.Dv XTC_OK .
+.Fn xtc_tls_get_version
+and
+.Fn xtc_tls_get_cipher
+return the negotiated protocol version and cipher name (or
+.Dv NULL ) ;
+.Fn xtc_tls_get_cipher_bits
+the symmetric key strength;
+.Fn xtc_tls_get_alpn_selected
+the negotiated ALPN protocol.
+.Fn xtc_tls_has_peer_cert
+reports whether the peer presented a certificate that passed
+verification;
+.Fn xtc_tls_get_peer_subject_dn ,
+.Fn xtc_tls_get_peer_common_name ,
+.Fn xtc_tls_get_peer_issuer_dn ,
+and
+.Fn xtc_tls_get_peer_serial
+read the peer certificate (RFC 2253 DN, commonName, issuer DN, decimal
+serial), rejecting an embedded NUL with
+.Dv XTC_E_INVAL .
+.Fn xtc_tls_get_server_cert_hash
+returns the RFC 5929
+.Sy tls-server-end-point
+hash of the local certificate for SCRAM channel binding (MD5/SHA-1
+signatures are hashed with SHA-256, otherwise the digest matching the
+certificate's signature algorithm).
+A backend that has not implemented these returns
+.Dv NULL ,
+.Dv 0 ,
+or
+.Dv XTC_E_NOSYS .
 .Sh SEE ALSO
 .Xr xtc_io 3 ,
 .Xr xtc_net 3 ,

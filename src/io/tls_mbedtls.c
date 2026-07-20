@@ -585,4 +585,6 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 	return map_want(tls, rc);
 }
 
+XTC_TLS_DEFINE_INTROSPECT_STUBS   /* introspection not yet ported to mbedTLS */
+
 #endif /* XTC_TLS_BACKEND_MBEDTLS */
