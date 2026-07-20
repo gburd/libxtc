@@ -587,11 +587,9 @@ static inline int xtc_down_is_exit_reason(int reason)
 	return reason == 0 || reason >= 256;
 }
 
-/* Internal: save / restore the current-proc context across a yield
- * done by a lower-level primitive (e.g. xtc_amutex parking the
- * fiber), so the proc still sees itself on resume.  Opaque to the
- * caller. */
-void     *__xtc_proc_ctx_save(void);
-void      __xtc_proc_ctx_restore(void *ctx);
+/* The internal current-proc context save/restore across a yield
+ * (__xtc_proc_ctx_save / __xtc_proc_ctx_restore) is library-internal
+ * (the __ prefix) and lives in "proc_int.h", not in this installed
+ * public header. */
 
 #endif /* XTC_PROC_H */

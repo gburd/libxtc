@@ -33,11 +33,12 @@
  */
 
 #include "xtc_int.h"
-#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
+#include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_rcu.h"
 #include "xtc_slab.h"
 #include "xtc_async.h"     /* xtc_yield (DST drain) */
 #include "xtc_proc.h"      /* __xtc_proc_ctx_save/restore */
+#include "proc_int.h"   /* __xtc_proc_ctx_save/restore (internal) */
 #include "coro_int.h"      /* __xtc_current_task */
 
 #include <pthread.h>

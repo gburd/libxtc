@@ -98,3 +98,65 @@ if [ -n "$c6_bad" ]; then
 	exit 1
 fi
 echo "  [C6] OK: $c6_n public headers, no namespace-polluting macros"
+
+# [C7]: installed public headers must not DECLARE a __-prefixed function
+# (the __ prefix marks a symbol library-internal; a consumer header must
+# not expose it).  Exceptions, both principled:
+#   - compiler builtins / keywords (__attribute__, __declspec,
+#     __has_include, __extension__, __builtin_*) -- not xtc symbols;
+#   - a __ symbol a PUBLIC macro in the SAME header expands to (e.g.
+#     xtc_proc_recovery_arm() -> __xtc_recovery_prep()): the macro can
+#     only expand to a symbol declared in the consumer's TU, so the
+#     declaration must live in the installed header.  Allow a __ decl
+#     iff its name appears in a #define body in that same header.
+# Regressions here are exactly what let __xtc_unsafe_*/__xtc_tail_*/
+# __xtc_aio_force_offload leak before they were moved to *_int.h.
+c7_bad=""
+for h in $hdrs; do
+	[ -f "$INC/$h" ] || continue
+	# candidate __ decls: a line whose first token (after an optional
+	# XTC_API and a return type) begins a __xtc_/__os_ function -- i.e.
+	# the identifier is immediately followed by '('.  Strip comments
+	# first so prose mentions do not count: awk drops whole-line and
+	# block-comment (/* ... */, including ' * ' continuation) content,
+	# leaving only real code.
+	decls=$(awk '
+		{ line = $0 }
+		inblock {
+			if (line ~ /\*\//) { sub(/.*\*\//, "", line); inblock = 0 }
+			else next
+		}
+		{
+			sub(/\/\/.*/, "", line)
+			while (line ~ /\/\*.*\*\//) sub(/\/\*.*\*\//, "", line)
+			if (line ~ /\/\*/) { sub(/\/\*.*/, "", line); inblock = 1 }
+			print line
+		}' "$INC/$h" 2>/dev/null \
+		| grep -E '(^|[[:space:]*])(__xtc_|__os_)[A-Za-z0-9_]+[[:space:]]*\(' \
+		| grep -vE '__attribute__|__declspec|__has_include|__extension__|__builtin_' \
+		| grep -oE '(__xtc_|__os_)[A-Za-z0-9_]+' | sort -u)
+	# names referenced by a #define body in this header (macro-backed).
+	macro_syms=$(grep -E '^[[:space:]]*#[[:space:]]*define' "$INC/$h" 2>/dev/null \
+		| grep -oE '(__xtc_|__os_)[A-Za-z0-9_]+' | sort -u)
+	# also count symbols used in a continued macro body (backslash lines
+	# after a #define) -- approximate by scanning the whole header's
+	# define-region names is over-broad; instead accept any __ symbol
+	# that appears on a line ending in '\' or immediately after one.
+	cont=$(awk '/^[[:space:]]*#[[:space:]]*define/{ind=1}
+		     ind{print}
+		     ind && !/\\[[:space:]]*$/{ind=0}' "$INC/$h" 2>/dev/null \
+		| grep -oE '(__xtc_|__os_)[A-Za-z0-9_]+' | sort -u)
+	allowed=$(printf '%s\n%s\n' "$macro_syms" "$cont" | sort -u)
+	for d in $decls; do
+		echo "$allowed" | grep -qx "$d" || c7_bad="$c7_bad $h:$d"
+	done
+done
+
+if [ -n "$c7_bad" ]; then
+	echo "  [C7] FAIL: installed public headers declare internal __ symbols" >&2
+	echo "        (move them to a *_int.h; a __ decl is allowed only when a" >&2
+	echo "         public macro in the same header expands to it):" >&2
+	for entry in $c7_bad; do echo "    $entry" >&2; done
+	exit 1
+fi
+echo "  [C7] OK: no internal __ symbol declared in an installed public header"

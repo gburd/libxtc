@@ -15,7 +15,8 @@
 
 #include "xtc_int.h"
 #include "xtc_tail.h"
-#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock */
+#include "tail_int.h"        /* __xtc_tail_emit / __xtc_tail_on (internal) */
+#include "preempt_int.h"   /* __xtc_mtx_lock/unlock */
 #include "os_time.h"
 
 #include <pthread.h>

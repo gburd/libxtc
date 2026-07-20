@@ -18,6 +18,7 @@
 
 #include "xtc_int.h"
 #include "xtc_aio.h"
+#include "aio_int.h"     /* __xtc_aio_force_offload (internal test hook) */
 #include "xtc_io.h"
 #include "xtc_fs.h"
 #include "xtc_blocking.h"

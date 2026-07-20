@@ -78,12 +78,11 @@ XTC_API int xtc_aio_fsync(int fd);       /* full sync: data + metadata */
 XTC_API int xtc_aio_fdatasync(int fd);   /* data only (the page/WAL flush hot path) */
 
 /*
- * Internal / test hook: force the blocking-pool offload path even on a
- * host with a native completion engine (io_uring / IOCP).  Lets the
- * portable fallback be exercised and proven identical to the native
- * path where the tests run.  Also reads XTC_AIO_FORCE_OFFLOAD=1 on
- * first use.  Not part of the stable API.
+ * The internal / test hook __xtc_aio_force_offload (force the
+ * blocking-pool offload path even on a host with a native completion
+ * engine) is library-internal (the __ prefix) and not part of the
+ * stable API; it lives in "aio_int.h", not in this installed public
+ * header.
  */
-void __xtc_aio_force_offload(int on);
 
 #endif /* XTC_AIO_H */

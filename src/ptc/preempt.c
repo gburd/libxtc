@@ -56,6 +56,7 @@
 
 #include "xtc_int.h"
 #include "xtc_preempt.h"
+#include "preempt_int.h"
 
 #include <signal.h>
 #include <pthread.h>

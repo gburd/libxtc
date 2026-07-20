@@ -22,7 +22,7 @@
  */
 
 #include "xtc_int.h"
-#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
+#include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_inject.h"
 #include "xtc_lrlock.h"
 #include "coro_int.h"      /* __xtc_current_task: fiber-aware publish wait */

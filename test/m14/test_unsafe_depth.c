@@ -18,6 +18,7 @@
 #include "xtc.h"
 #include "xtc_int.h"       /* __os_malloc / __os_free */
 #include "xtc_preempt.h"
+#include "preempt_int.h"    /* __xtc_unsafe_enter/leave/depth (internal) */
 
 /* Outside any allocator call, the unsafe depth is 0. */
 static MunitResult

@@ -81,7 +81,7 @@
  */
 
 #include "xtc_int.h"
-#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
+#include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_chash.h"
 #include "xtc_rcu.h"
 

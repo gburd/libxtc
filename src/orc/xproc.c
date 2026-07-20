@@ -25,7 +25,7 @@
 #include "xtc_osproc.h"
 #include "xtc_net.h"
 #include "xtc_proc.h"
-#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock for the entry registry */
+#include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 
 #include <string.h>
 #include <pthread.h>
