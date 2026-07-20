@@ -3,7 +3,8 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/os/os_errno.c
- *	Canonical POSIX errno -> XTC_E_* translation + embedder hook.
+ *	Canonical POSIX errno -> XTC_E_* translation + internal override
+ *	hook (public xtc_* wrapper added on demand; see os_errno.h).
  *	See src/inc/os_errno.h and M1_CLAIMS.md, Tm-errno.
  */
 
@@ -14,7 +15,9 @@
 #include <stdatomic.h>
 
 /*
- * Optional embedder hook.  A function pointer swapped atomically.
+ * Optional override hook (internal __os_* surface; a public xtc_*
+ * wrapper is added if a real embedder needs it -- see os_errno.h).
+ * A function pointer swapped atomically.
  * ISO C forbids round-tripping a function pointer through void* (so the
  * object-pointer atomics in os_atomic.h are not usable here); a C11
  * _Atomic function-pointer type is the standard-clean way to publish it

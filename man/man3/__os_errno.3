@@ -7,7 +7,7 @@
 .Nm __os_errno_map ,
 .Nm __os_errno_set_hook ,
 .Nm __os_errno_get_hook
-.Nd canonical errno to XTC_E_* translation with an embedder hook
+.Nd canonical errno to XTC_E_* translation with an internal override hook
 .Sh SYNOPSIS
 .In os_errno.h
 .Ft int
@@ -71,13 +71,24 @@ to
 .Dv XTC_E_RANGE .
 .Pp
 .Fn __os_errno_set_hook
-installs an optional embedder hook, consulted by
+installs an optional override hook, consulted by
 .Fn __os_errno_map
 .Em before
 the built-in table.
-An embedder that shims the underlying syscalls
-.Pq a custom VFS, a hosted or sandboxed libc
-uses this to override the translation.
+This is an internal
+.Pq Sy __os_*
+entry point.
+Its eventual audience is an embedder that shims the underlying syscalls
+.Pq a custom VFS, a hosted or sandboxed libc ,
+which would override the translation; because library consumers use only
+the public
+.Sy xtc_*
+API, a public
+.Fn xtc_errno_set_hook
+wrapper is added if and when a real embedder needs it (the pattern the
+allocator hook
+.Fn __os_alloc_set_hook
+follows).
 The hook receives the raw
 .Fa errno
 and returns an
