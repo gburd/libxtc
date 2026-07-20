@@ -419,6 +419,55 @@ casts the message to its own unpacked mirror struct misreads the
 fields (the
 .Va reason
 in particular).  Use this helper rather than hand-rolling the layout.
+.Sh MIGRATION
+By default a proc's coroutine is
+.Em pinned
+to the loop it was spawned on: it is never work-stolen, and
+.Fn xtc_self
+and the recovery frame always run on that one carrier thread.
+Setting
+.Fa migratable
+to 1 in
+.Vt xtc_proc_opts_t
+makes the coroutine work-stealable: on a multi-loop
+.Xr xtc_exec 3
+executor, an idle loop may steal a
+.Em parked or scheduled
+proc to rebalance runnable work across cores.
+A proc is stolen only at a yield/park point, never mid-instruction, so
+no statement ever runs half on one loop and half on another.
+.Pp
+A zeroed
+.Vt xtc_proc_opts_t
+leaves
+.Fa migratable
+at 0 (pinned) -- byte-identical to the historical behavior.
+.Pp
+Migration preserves everything that defines the proc: its
+.Fa pid ,
+.Fn xtc_self ,
+its links / monitors and the
+.Dv DOWN
+signal, its recovery frame, and its mailbox.
+The carrier loop can change, and only at a yield point.
+This is proven under the deterministic simulator
+.Pq test_sim_migratable :
+migratable procs are stolen across loops while
+.Fn xtc_self
+identity and
+.Dv DOWN
+delivery are asserted to survive every migration, with byte-identical
+replay.
+.Pp
+The one caller obligation: a migratable proc must not hold
+thread-affine state across a yield and then assume it is still on the
+same OS thread after resuming.
+The runtime carries the proc's own identity across the move; it cannot
+know about
+.Em your
+thread-local or CPU-affine state.
+If the proc reads no such state across a yield (the common case), it is
+unconditionally safe to make migratable.
 .Sh RETURN VALUES
 All entry points return
 .Dv XTC_OK

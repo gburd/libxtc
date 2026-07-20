@@ -1184,8 +1184,16 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	/* Spawn the underlying coroutine.  Once xtc_async enqueues the
 	 * task it may run immediately on another loop's thread, so we must
 	 * NOT touch p afterward: the proc binds itself to its task/coro in
-	 * __proc_entry (see there).  Touching p here would race a reap. */
-	if ((rc = xtc_async(loop, __proc_entry, p, &t)) != XTC_OK) {
+	 * __proc_entry (see there).  Touching p here would race a reap.
+	 *
+	 * pinned = !migratable: a migratable proc's coro goes on the
+	 * stealable deque so an idle loop can rebalance it (Phase 1 wires
+	 * the mechanism; the migration-safety guarantees are proven by the
+	 * cross-loop-steal DST test).  Default (opts == NULL or
+	 * migratable == 0) stays pinned -- byte-identical to prior
+	 * behavior. */
+	int pinned = (opts != NULL && opts->migratable) ? 0 : 1;
+	if ((rc = __xtc_async_ex(loop, __proc_entry, p, pinned, &t)) != XTC_OK) {
 		/* Undo the parent-side link/monitor we added above; the
 		 * child-side entries die with p.  Remove by the child pid
 		 * (spawned_pid) which never got to run. */

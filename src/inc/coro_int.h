@@ -92,6 +92,17 @@ extern XTC_THREAD_LOCAL struct xtc_coro *__xtc_current_coro;
 /* Forward declarations for the dispatch glue.  */
 int  __xtc_coro_step(xtc_task_t *self, void *user);
 
+/*
+ * Internal spawn with an explicit pin flag.  The public xtc_async wraps
+ * this with pinned=1 (the long-standing default: a coro's task is not
+ * work-stealable).  pinned=0 places the task on the stealable deque so
+ * it can migrate across loops -- used by the proc layer when
+ * xtc_proc_opts_t.migratable is set.  Every coro backend
+ * (coro_fctx/uctx/winfiber) defines it.
+ */
+int  __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
+                    xtc_task_t **out_task);
+
 /* The task wrapping the currently-running coroutine on this thread,
  * or NULL when not running inside a coroutine.  Lets lower-level
  * primitives (e.g. xtc_amutex) find the current task to park it. */

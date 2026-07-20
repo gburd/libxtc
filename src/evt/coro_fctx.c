@@ -327,7 +327,8 @@ __coro_task_cleanup(void *coro)
  * PUBLIC: int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
  */
 int
-xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
+__xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
+    xtc_task_t **out_task)
 {
 	struct xtc_coro *c;
 	xtc_task_t *t;
@@ -384,7 +385,7 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 		return XTC_E_INTERNAL;
 	}
 
-	if ((rc = __xtc_task_spawn_ex(loop, __xtc_coro_step, c, 1, &t)) != XTC_OK) {
+	if ((rc = __xtc_task_spawn_ex(loop, __xtc_coro_step, c, pinned, &t)) != XTC_OK) {
 		__coro_destroy(c);
 		return rc;
 	}
@@ -394,6 +395,21 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 
 	if (out_task) *out_task = t;
 	return XTC_OK;
+}
+
+/*
+ * PUBLIC: int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
+ *
+ * The public entry: spawns a PINNED coroutine (its underlying task is
+ * not work-stealable), preserving the long-standing default.  Internal
+ * callers that want a migratable (stealable) coro -- notably the proc
+ * layer when xtc_proc_opts_t.migratable is set -- use __xtc_async_ex
+ * with pinned=0.
+ */
+int
+xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
+{
+	return __xtc_async_ex(loop, fn, arg, 1, out_task);
 }
 
 /*

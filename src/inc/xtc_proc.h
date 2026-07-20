@@ -83,6 +83,17 @@ typedef struct xtc_proc_opts {
 	void      (*mailbox_watermark_fn)(xtc_pid_t self, size_t depth,
 	                                  size_t cap, void *user);
 	void       *mailbox_watermark_user;
+	/*
+	 * Work-stealing: 0 (default) pins the proc's coroutine to its
+	 * spawn loop -- today's behavior, and what a zeroed opts gives.
+	 * 1 makes the coroutine work-stealable: an idle loop may steal it
+	 * (only while parked/scheduled, never mid-instruction) to rebalance
+	 * runnable work across a multi-loop executor.  The proc's identity
+	 * (pid), supervision (links/monitors/DOWN), recovery frame, and
+	 * mailbox are unaffected -- only the carrier loop can change, and
+	 * only at a yield point.  See xtc_proc(3) MIGRATION.
+	 */
+	int         migratable;
 } xtc_proc_opts_t;
 
 /* Mailbox statistics snapshot (see xtc_proc_mailbox_stats). */
