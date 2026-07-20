@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.23.3"
+#       --define "version 1.24.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.23.3
+Version:        1.24.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,11 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Mon Jul 20 2026 Greg Burd <greg@burd.me> - 1.24.0-1
+- TLS: expand xtc_tls_* for PostgreSQL adoption -- tri-state verify_peer_mode, cipher_list/ciphersuites_13/groups, crl_file/crl_dir, prefer_server_ciphers, passphrase_cb; server hardening as defaults; post-handshake introspection (version/cipher/bits/ALPN/peer-cert DN+CN+issuer+serial) incl. RFC 5929 tls-server-end-point channel-binding hash. Additive; OpenSSL backend fully implemented, others stubbed.
+- OS: dedicated errno abstraction (M1.5) -- __os_errno_map + embedder hook (__os_errno_set_hook/_get_hook), consolidating duplicated per-file errno->XTC_E_ tables.
+- No breaking API changes.
+
 * Wed Jul 15 2026 Greg Burd <greg@burd.me> - 1.23.3-1
 - Fix (scheduler): drain due timers under a busy run queue -- a never-empty run queue (a busy xtc_yield / RESCHED spin) could starve xtc_proc_sleep / recv-timeout / any deadline indefinitely; timers now fire on the IO-fairness quantum under load. No API change.
 
