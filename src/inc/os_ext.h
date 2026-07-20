@@ -4,6 +4,7 @@
 #ifndef OS_EXT_H
 #define OS_EXT_H
 
+int (*__os_errno_get_hook __P((void)))(int);
 int __os_aligned_alloc __P((size_t, size_t, void **));
 int __os_alloc_get_hook __P((struct __os_alloc_hook *));
 int __os_alloc_set_hook __P((const struct __os_alloc_hook *));
@@ -26,6 +27,7 @@ int __os_csprng_bytes __P((__os_csprng_t *, void *, size_t));
 int __os_csprng_init __P((__os_csprng_t **));
 int __os_env_get __P((const char *, char *, size_t));
 int __os_env_set __P((const char *, const char *, int));
+int __os_errno_map __P((int));
 int __os_malloc __P((size_t, void **));
 int __os_mutex_destroy __P((__os_mutex_t *));
 int __os_mutex_init __P((__os_mutex_t *));
@@ -93,6 +95,7 @@ void *__os_tls_get __P((__os_tls_key_t));
 void __os_aligned_free __P((void *));
 void __os_backtrace_emit __P((int, void *const *, int));
 void __os_csprng_destroy __P((__os_csprng_t *));
+void __os_errno_set_hook __P((int (*)(int)));
 void __os_free __P((void *));
 void __os_rand_seed __P((uint64_t));
 void __os_thread_apply_default_qos __P((void));
