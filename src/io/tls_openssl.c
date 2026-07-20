@@ -370,6 +370,15 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	if (opts->cipher_list != NULL &&
 	    SSL_CTX_set_cipher_list(c->ssl_ctx, opts->cipher_list) != 1)
 		goto cfg_fail;
+	/*
+	 * BoringSSL manages TLS 1.3 ciphersuites internally and omits
+	 * SSL_CTX_set_ciphersuites; SSL_CTX_set1_groups_list is likewise an
+	 * OpenSSL-family API BoringSSL spells differently.  Guard both so
+	 * the OpenSSL backend still links against BoringSSL (a caller
+	 * targeting BoringSSL just cannot set these two, which is fine --
+	 * BoringSSL's defaults are already modern).
+	 */
+#if !defined(OPENSSL_IS_BORINGSSL)
 #ifdef TLS1_3_VERSION
 	if (opts->ciphersuites_13 != NULL &&
 	    SSL_CTX_set_ciphersuites(c->ssl_ctx, opts->ciphersuites_13) != 1)
@@ -378,6 +387,9 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	if (opts->groups != NULL &&
 	    SSL_CTX_set1_groups_list(c->ssl_ctx, opts->groups) != 1)
 		goto cfg_fail;
+#else
+	(void)0;   /* ciphersuites_13 / groups not settable on BoringSSL */
+#endif
 
 	/* ---- CRL-based revocation checking ---- */
 	if (opts->crl_file != NULL || opts->crl_dir != NULL) {
