@@ -900,9 +900,17 @@ xtc_tls_get_server_cert_hash(const xtc_tls_t *tls,
 	 * RFC 5929 tls-server-end-point: hash with the certificate's
 	 * signature-algorithm digest, EXCEPT MD5 or SHA-1 are upgraded to
 	 * SHA-256.  Fall back to SHA-256 if the signature digest is unknown.
+	 *
+	 * X509_get_signature_info is OpenSSL 1.1.1+ and absent from
+	 * BoringSSL; derive the digest NID portably from the signature
+	 * algorithm NID via OBJ_find_sigid_algs, which both provide.
 	 */
-	if (X509_get_signature_info(cert, &md_nid, NULL, NULL, NULL) != 1)
-		md_nid = NID_undef;
+	{
+		int sig_alg_nid = X509_get_signature_nid(cert);
+		if (sig_alg_nid == NID_undef ||
+		    OBJ_find_sigid_algs(sig_alg_nid, &md_nid, NULL) != 1)
+			md_nid = NID_undef;
+	}
 	sig_nid = md_nid;
 	if (sig_nid == NID_undef || sig_nid == NID_md5 || sig_nid == NID_sha1)
 		md = EVP_sha256();

@@ -463,41 +463,55 @@ test_server_extended_opts(const MunitParameter params[], void *data)
     rc = poll_until_done(tls, sv[0], xtc_tls_handshake, 5000);
     munit_assert_int(rc, ==, XTC_OK);
 
-    /* --- introspection accessors (server side, post-handshake) --- */
+    /*
+     * --- introspection accessors (server side, post-handshake) ---
+     * Only the OpenSSL backend implements these; the others stub them
+     * to NULL / XTC_E_NOSYS.  Detect which contract applies from one
+     * accessor and assert accordingly, so this test is meaningful on
+     * OpenSSL and still passes (verifying the stub contract) elsewhere.
+     */
     ver = xtc_tls_get_version(tls);
-    munit_assert_ptr_not_null(ver);
-    munit_assert_true(strncmp(ver, "TLS", 3) == 0);
+    if (ver == NULL) {
+        /* Backend without introspection: assert the stub contract. */
+        munit_assert_ptr_null((void *)xtc_tls_get_cipher(tls));
+        munit_assert_int(xtc_tls_get_cipher_bits(tls), ==, 0);
+        munit_assert_int(xtc_tls_get_server_cert_hash(tls, hash,
+            sizeof(hash), &hlen), ==, XTC_E_NOSYS);
+    } else {
+        munit_assert_true(strncmp(ver, "TLS", 3) == 0);
 
-    cip = xtc_tls_get_cipher(tls);
-    munit_assert_ptr_not_null(cip);
-    munit_assert_size(strlen(cip), >, 0);
+        cip = xtc_tls_get_cipher(tls);
+        munit_assert_ptr_not_null(cip);
+        munit_assert_size(strlen(cip), >, 0);
 
-    munit_assert_int(xtc_tls_get_cipher_bits(tls), >=, 128);
+        munit_assert_int(xtc_tls_get_cipher_bits(tls), >=, 128);
 
-    /* The client presented no cert (REQUEST, not REQUIRE), so there is
-     * no peer cert on the server side -- the query must say so, not
-     * crash. */
-    munit_assert_int(xtc_tls_has_peer_cert(tls), ==, 0);
+        /* The client presented no cert (REQUEST, not REQUIRE), so there
+         * is no peer cert on the server side -- the query must say so,
+         * not crash. */
+        munit_assert_int(xtc_tls_has_peer_cert(tls), ==, 0);
 
-    /* Channel binding: the server hashes its OWN certificate.  Must
-     * succeed and produce a plausible digest length. */
-    rc = xtc_tls_get_server_cert_hash(tls, hash, sizeof(hash), &hlen);
-    munit_assert_int(rc, ==, XTC_OK);
-    munit_assert_size(hlen, >=, 32);   /* >= SHA-256 */
-    munit_assert_size(hlen, <=, sizeof(hash));
+        /* Channel binding: the server hashes its OWN certificate.  Must
+         * succeed and produce a plausible digest length. */
+        rc = xtc_tls_get_server_cert_hash(tls, hash, sizeof(hash), &hlen);
+        munit_assert_int(rc, ==, XTC_OK);
+        munit_assert_size(hlen, >=, 32);   /* >= SHA-256 */
+        munit_assert_size(hlen, <=, sizeof(hash));
 
-    /* A too-small buffer is a clean XTC_E_RANGE, not an overflow. */
-    {
-        unsigned char tiny[4];
-        size_t tl = 0;
-        munit_assert_int(
-            xtc_tls_get_server_cert_hash(tls, tiny, sizeof(tiny), &tl),
-            ==, XTC_E_RANGE);
+        /* A too-small buffer is a clean XTC_E_RANGE, not an overflow. */
+        {
+            unsigned char tiny[4];
+            size_t tl = 0;
+            munit_assert_int(
+                xtc_tls_get_server_cert_hash(tls, tiny, sizeof(tiny), &tl),
+                ==, XTC_E_RANGE);
+        }
+
+        /* NULL-arg guards. */
+        munit_assert_ptr_null((void *)xtc_tls_get_version(NULL));
+        munit_assert_int(xtc_tls_get_alpn_selected(tls, NULL, NULL),
+            ==, XTC_E_INVAL);
     }
-
-    /* NULL-arg guards. */
-    munit_assert_ptr_null(xtc_tls_get_version(NULL));
-    munit_assert_int(xtc_tls_get_alpn_selected(tls, NULL, NULL), ==, XTC_E_INVAL);
 
     /* Data still flows after all the introspection. */
     rc = tls_write_all(tls, sv[0], "hello", CLIENT_MSG_LEN, 5000);
