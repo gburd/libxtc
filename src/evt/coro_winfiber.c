@@ -79,7 +79,8 @@ __coro_task_cleanup(void *coro)
  * PUBLIC: int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
  */
 int
-xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
+__xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
+    xtc_task_t **out_task)
 {
 	struct xtc_coro *c;
 	xtc_task_t *t;
@@ -118,7 +119,7 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 		__os_free(c);
 		return XTC_E_INTERNAL;
 	}
-	if ((rc = __xtc_task_spawn_ex(loop, __xtc_coro_step, c, 1, &t)) != XTC_OK) {
+	if ((rc = __xtc_task_spawn_ex(loop, __xtc_coro_step, c, pinned, &t)) != XTC_OK) {
 		__coro_destroy(c);
 		return rc;
 	}
@@ -129,6 +130,18 @@ xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 	t->cleanup_arg = c;
 	if (out_task) *out_task = t;
 	return XTC_OK;
+}
+
+/*
+ * PUBLIC: int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
+ *
+ * Public entry: spawns a PINNED coroutine (default, unchanged).
+ * Internal callers wanting a migratable coro use __xtc_async_ex.
+ */
+int
+xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
+{
+	return __xtc_async_ex(loop, fn, arg, 1, out_task);
 }
 
 /* Step function: called by the loop runtime to give the coroutine
