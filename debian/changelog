@@ -1,3 +1,27 @@
+libxtc (1.25.0-1) unstable; urgency=medium
+
+  * proc: xtc_proc_opts_t.migratable (opt-in, default 0 = pinned,
+    unchanged).  A migratable proc's coroutine is work-stealable: on a
+    multi-loop executor an idle loop may steal a parked/scheduled proc
+    (never mid-instruction) to rebalance runnable work.  The proc's
+    identity (pid/xtc_self), supervision (links/monitors/DOWN), recovery
+    frame, and mailbox all survive the carrier change -- proven under
+    the deterministic simulator (test_sim_migratable: forced
+    cross-loop steals with identity + DOWN asserted, byte-identical
+    replay).  Unblocks work-stealing for supervised backend procs.
+  * inc: internal __-prefixed declarations moved out of the installed
+    public headers into *_int.h internal headers (only a public macro's
+    backing symbol may remain, e.g. the proc recovery seam); a new
+    [C7] gate enforces it.
+  * abi: the shared library now exports exactly the public surface --
+    xtc_* plus only the macro-backed recovery symbols; the whole __os_*
+    layer and every other __xtc_* internal are hidden from the .so ABI
+    (previously a broad __xtc_* glob leaked ~80 internals).  A new [C8]
+    gate keeps the version script from drifting.
+  * No breaking API changes (all additions / internal-only).
+
+ -- Greg Burd <greg@burd.me>  Mon, 20 Jul 2026 17:48:34 -0400
+
 libxtc (1.24.0-1) unstable; urgency=medium
 
   * TLS: expand xtc_tls_* for PostgreSQL adoption (the enabler for
