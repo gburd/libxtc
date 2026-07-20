@@ -21,7 +21,7 @@
  */
 
 #include "xtc_int.h"
-#include "xtc_preempt.h"   /* __xtc_mtx_lock/unlock: preemption-safe locks */
+#include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_sim.h"
 #include "xtc_dst_inject.h"
 #include "xtc_lockmgr.h"
@@ -29,6 +29,7 @@
 #include "xtc_loop.h"     /* xtc_task_waker / xtc_waker_wake / park-on-timer */
 #include "xtc_async.h"    /* xtc_yield */
 #include "xtc_proc.h"     /* __xtc_proc_ctx_save/restore */
+#include "proc_int.h"   /* __xtc_proc_ctx_save/restore (internal) */
 #include "coro_int.h"     /* __xtc_current_task */
 #include "loop_int.h"     /* xtc_task::park_requested */
 

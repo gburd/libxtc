@@ -103,17 +103,10 @@ XTC_API int      xtc_tail_dump(int fd);
 /* Number of records currently buffered. */
 XTC_API size_t   xtc_tail_count(void);
 
-/* Internal: record one event from a runtime hook point (proc spawn/exit,
- * etc.).  Not part of the public API -- callers use xtc_tail_enable to
- * turn recording on and the read/dump/count functions to consume it.
- * A no-op fast path (one branch) when `source` is disabled. */
-void __xtc_tail_emit(unsigned source, unsigned kind, xtc_pid_t pid,
-                     uint64_t detail);
-
-/* Internal: 1 if `source` is currently enabled.  A hook point uses this
- * to guard extra work (e.g. a clock read) so a disabled tail costs one
- * branch and has no side effects. */
-int  __xtc_tail_on(unsigned source);
+/* The internal hook-point primitives __xtc_tail_emit / __xtc_tail_on
+ * are library-internal (the __ prefix) and live in "tail_int.h", not in
+ * this installed public header.  Consumers use the public xtc_tail_*
+ * API (enable + read/dump/count) below. */
 
 /* On-disk binary dump header (also used by the offline reader).
  *

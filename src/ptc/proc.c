@@ -14,11 +14,13 @@
 #include "xtc_sim.h"
 #include "xtc_dst_inject.h"
 #include "xtc_proc.h"
+#include "proc_int.h"   /* __xtc_proc_ctx_save/restore (internal) */
 #include "xtc_loop.h"
 #include "xtc_async.h"
 #include "xtc_exec.h"
 #include "loop_int.h"
 #include "xtc_tail.h"     /* __xtc_tail_emit SCHED source (spawn/exit) */
+#include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on (internal) */
 #include "coro_int.h"
 #include "xtc_tailcall.h"
 #include "xtc_slab.h"
@@ -29,7 +31,7 @@
 #include "xtc_slab.h"
 #include "xtc_mctx.h"
 #include "xtc_fs.h"     /* xtc_fs_close: portable fd close for recovery */
-#include "xtc_preempt.h" /* __xtc_unsafe_enter/leave: preemption-safe lock brackets */
+#include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include <stdio.h>
 #include <pthread.h>
 #include <setjmp.h>

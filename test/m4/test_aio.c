@@ -23,6 +23,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_aio.h"
+#include "aio_int.h"        /* __xtc_aio_force_offload (internal test hook) */
 
 #define AIO_LEN 8192
 
