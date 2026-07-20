@@ -123,6 +123,36 @@ typedef enum xtc_tls_role {
 #define XTC_TLS_VER_13  0x0304   /* TLS 1.3 (RFC 8446) */
 
 /* -------------------------------------------------------------------------
+ * Peer-verification mode (tri-state).
+ *
+ * The legacy opts.verify_peer int is a two-state on/off.  A TLS server
+ * often needs the third, middle behavior: REQUEST a client certificate
+ * but still complete the handshake if the client presents none (PG's
+ * default -- certificate auth is then optional, decided per-hba-line
+ * after the handshake).  opts.verify_peer_mode expresses all three.
+ * See the compatibility note on opts.verify_peer below.
+ * ----------------------------------------------------------------------- */
+
+typedef enum xtc_tls_verify_mode {
+	XTC_TLS_VERIFY_DEFAULT = 0,  /* defer to legacy opts.verify_peer */
+	XTC_TLS_VERIFY_NONE,         /* do not request a peer certificate */
+	XTC_TLS_VERIFY_REQUEST,      /* request; accept a handshake with none */
+	XTC_TLS_VERIFY_REQUIRE       /* require a valid peer certificate */
+} xtc_tls_verify_mode_t;
+
+/* -------------------------------------------------------------------------
+ * Passphrase callback for an encrypted private key.
+ *
+ * Mirrors OpenSSL's pem_password_cb: write up to size bytes of the
+ * passphrase into buf and return the number written, or <= 0 to fail
+ * (which fails key load).  userdata is opts.passphrase_userdata.  When
+ * no callback is set and the key is encrypted, key load fails rather
+ * than prompting interactively -- a server must never block on a tty.
+ * ----------------------------------------------------------------------- */
+
+typedef int (*xtc_tls_passphrase_cb_t)(char *buf, int size, void *userdata);
+
+/* -------------------------------------------------------------------------
  * Options.
  * ----------------------------------------------------------------------- */
 
@@ -158,15 +188,58 @@ typedef enum xtc_tls_role {
  *
  *   max_version  Maximum TLS version to offer.  0 means "backend
  *                default" (typically TLS 1.3).
+ *
+ * Additions (all optional; a zeroed opts behaves exactly as before):
+ *
+ *   verify_peer_mode  Tri-state peer verification (see
+ *                xtc_tls_verify_mode_t).  When XTC_TLS_VERIFY_DEFAULT
+ *                (0), the legacy verify_peer int is used.  Any other
+ *                value takes precedence over verify_peer.
+ *
+ *   cipher_list       TLS 1.2 cipher list (OpenSSL SSL_CTX_set_cipher_list
+ *                syntax).  NULL = backend default.
+ *   ciphersuites_13   TLS 1.3 ciphersuites.  NULL = backend default.
+ *   groups            Key-exchange groups / curves, e.g.
+ *                "X25519:prime256v1".  NULL = backend default.
+ *
+ *   crl_file          PEM CRL file for revocation checking.  NULL = none.
+ *   crl_dir           Hashed CRL directory.  NULL = none.  When either
+ *                crl_file or crl_dir is set, full-chain CRL checking is
+ *                enabled.
+ *
+ *   prefer_server_ciphers  Non-zero: honor the server's cipher order
+ *                over the client's (SSL_OP_CIPHER_SERVER_PREFERENCE).
+ *
+ *   passphrase_cb / passphrase_userdata  Supply the passphrase for an
+ *                encrypted key_file without an interactive prompt.
+ *
+ * Server hardening applied by default (no knob; a DB-server-safe posture
+ * the request asked to be a documented default rather than a field):
+ * TLS renegotiation is disabled, TLS compression is disabled, session
+ * tickets and the session cache are off, and the moving-write-buffer
+ * mode required for correct non-blocking sends is enabled.
  */
 typedef struct xtc_tls_opts {
 	const char *cert_file;
 	const char *key_file;
 	const char *ca_file;
-	int         verify_peer;
+	int         verify_peer;   /* legacy on/off; see verify_peer_mode */
 	const char *alpn_protos;
 	int         min_version;
 	int         max_version;
+
+	/* additions (v1.24.0) -- a zeroed struct is byte-for-byte the old
+	 * behavior, so this grows the struct without breaking callers that
+	 * only set the original fields. */
+	xtc_tls_verify_mode_t   verify_peer_mode;
+	const char             *cipher_list;
+	const char             *ciphersuites_13;
+	const char             *groups;
+	const char             *crl_file;
+	const char             *crl_dir;
+	int                     prefer_server_ciphers;
+	xtc_tls_passphrase_cb_t passphrase_cb;
+	void                   *passphrase_userdata;
 } xtc_tls_opts_t;
 
 /* -------------------------------------------------------------------------
@@ -342,6 +415,82 @@ XTC_API int  xtc_tls_wants_write(const xtc_tls_t *tls);
  *	  XTC_E_NOSYS   TLS not compiled in
  */
 XTC_API int  xtc_tls_shutdown(xtc_tls_t *tls);
+
+/* -------------------------------------------------------------------------
+ * Post-handshake introspection.
+ *
+ * Valid only after xtc_tls_handshake has returned XTC_OK.  These back a
+ * consumer's connection logging / statistics, certificate-based auth,
+ * and SCRAM channel binding.  On an unconnected handle, a backend that
+ * does not implement the accessor, or --with-tls=none, the const char *
+ * getters return NULL, the int getters return 0 or XTC_E_NOSYS, and the
+ * buffer-filling getters return XTC_E_NOSYS.
+ * ----------------------------------------------------------------------- */
+
+/*
+ * PUBLIC: const char *xtc_tls_get_version __P((const xtc_tls_t *));
+ * PUBLIC: const char *xtc_tls_get_cipher __P((const xtc_tls_t *));
+ * PUBLIC: int  xtc_tls_get_cipher_bits __P((const xtc_tls_t *));
+ * PUBLIC: int  xtc_tls_get_alpn_selected __P((const xtc_tls_t *,
+ * PUBLIC:                              const unsigned char **, unsigned int *));
+ * PUBLIC: int  xtc_tls_has_peer_cert __P((const xtc_tls_t *));
+ * PUBLIC: int  xtc_tls_get_peer_subject_dn __P((const xtc_tls_t *, char *, size_t));
+ * PUBLIC: int  xtc_tls_get_peer_common_name __P((const xtc_tls_t *, char *, size_t));
+ * PUBLIC: int  xtc_tls_get_peer_issuer_dn __P((const xtc_tls_t *, char *, size_t));
+ * PUBLIC: int  xtc_tls_get_peer_serial __P((const xtc_tls_t *, char *, size_t));
+ * PUBLIC: int  xtc_tls_get_server_cert_hash __P((const xtc_tls_t *,
+ * PUBLIC:                              unsigned char *, size_t, size_t *));
+ */
+
+/* Negotiated protocol version string, e.g. "TLSv1.3".  NULL if none. */
+XTC_API const char *xtc_tls_get_version(const xtc_tls_t *tls);
+
+/* Negotiated cipher suite name.  NULL if none. */
+XTC_API const char *xtc_tls_get_cipher(const xtc_tls_t *tls);
+
+/* Symmetric key strength in bits of the negotiated cipher, or 0. */
+XTC_API int  xtc_tls_get_cipher_bits(const xtc_tls_t *tls);
+
+/*
+ * ALPN protocol actually selected.  On XTC_OK *out points to the
+ * selected protocol bytes (owned by the connection, valid until
+ * destroy) and *len is its length.  XTC_E_NOTFOUND if none was
+ * negotiated; XTC_E_INVAL on a NULL argument; XTC_E_NOSYS if
+ * unsupported.
+ */
+XTC_API int  xtc_tls_get_alpn_selected(const xtc_tls_t *tls,
+                const unsigned char **out, unsigned int *len);
+
+/* Non-zero if the peer presented a certificate that passed verification. */
+XTC_API int  xtc_tls_has_peer_cert(const xtc_tls_t *tls);
+
+/*
+ * Peer certificate subject / issuer distinguished name in RFC 2253
+ * form, and the subject commonName, written NUL-terminated into buf.
+ * A DN containing an embedded NUL is rejected with XTC_E_INVAL (guards
+ * the CVE-2009-4034 truncation class).  XTC_E_NOTFOUND if there is no
+ * peer certificate; XTC_E_RANGE if buf is too small; XTC_E_NOSYS if
+ * unsupported.
+ */
+XTC_API int  xtc_tls_get_peer_subject_dn(const xtc_tls_t *tls, char *buf, size_t len);
+XTC_API int  xtc_tls_get_peer_common_name(const xtc_tls_t *tls, char *buf, size_t len);
+XTC_API int  xtc_tls_get_peer_issuer_dn(const xtc_tls_t *tls, char *buf, size_t len);
+
+/* Peer certificate serial number as a decimal string. */
+XTC_API int  xtc_tls_get_peer_serial(const xtc_tls_t *tls, char *buf, size_t len);
+
+/*
+ * Server-certificate hash for RFC 5929 tls-server-end-point channel
+ * binding (the input SCRAM-SHA-256-PLUS needs).  Writes the hash into
+ * buf; *out_len receives its length.  The digest follows RFC 5929: a
+ * certificate signed with MD5 or SHA-1 is hashed with SHA-256,
+ * otherwise the hash matching the certificate's signature algorithm is
+ * used.  XTC_E_RANGE if buf is too small (SHA-512 needs 64 bytes),
+ * XTC_E_NOTFOUND if there is no certificate, XTC_E_NOSYS if
+ * unsupported.
+ */
+XTC_API int  xtc_tls_get_server_cert_hash(const xtc_tls_t *tls,
+                unsigned char *buf, size_t buflen, size_t *out_len);
 
 #ifdef __cplusplus
 }

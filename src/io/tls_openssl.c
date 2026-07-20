@@ -95,6 +95,8 @@ struct xtc_tls_ctx {
 	SSL_CTX         *ssl_ctx;
 	unsigned char   *alpn_protos;      /* wire-form copy; NULL if unset */
 	unsigned int     alpn_protos_len;  /* byte count of alpn_protos */
+	xtc_tls_passphrase_cb_t passphrase_cb;   /* NULL if unset */
+	void            *passphrase_userdata;
 };
 
 struct xtc_tls {
@@ -148,6 +150,27 @@ alpn_select_cb(SSL *ssl,
 		return SSL_TLSEXT_ERR_OK;
 
 	return SSL_TLSEXT_ERR_NOACK;
+}
+
+/* -------------------------------------------------------------------------
+ * Passphrase callback shim.
+ *
+ * OpenSSL's pem_password_cb hands us (buf, size, rwflag, userdata); we
+ * route to the caller's xtc_tls_passphrase_cb_t.  userdata is the ctx,
+ * from which we read the caller's cb + userdata (set via
+ * SSL_CTX_set_default_passwd_cb_userdata).  With no caller cb we return
+ * 0 (empty passphrase) rather than prompting -- a server must not block
+ * on a tty.
+ * ----------------------------------------------------------------------- */
+
+static int
+passphrase_shim(char *buf, int size, int rwflag, void *userdata)
+{
+	struct xtc_tls_ctx *c = (struct xtc_tls_ctx *)userdata;
+	(void)rwflag;
+	if (c == NULL || c->passphrase_cb == NULL)
+		return 0;
+	return c->passphrase_cb(buf, size, c->passphrase_userdata);
 }
 
 /* -------------------------------------------------------------------------
@@ -215,6 +238,38 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	if (opts == NULL)
 		goto done;
 
+	/*
+	 * ---- Server-safe hardening (applied unconditionally; documented
+	 * defaults, not knobs) ----
+	 *   - No TLS compression (CRIME).
+	 *   - No renegotiation (a DB server never needs it; disabling it
+	 *     removes a DoS / attack surface).  SSL_OP_NO_RENEGOTIATION
+	 *     exists on OpenSSL 1.1.0h+; guard it so older headers build.
+	 *   - Moving-write-buffer mode: required for correct non-blocking
+	 *     SSL_write, where a retry may present the buffer at a new
+	 *     address.
+	 *   - Session tickets and the session cache off: a server that does
+	 *     not resume keeps no such state.
+	 */
+	SSL_CTX_set_options(c->ssl_ctx, SSL_OP_NO_COMPRESSION);
+#ifdef SSL_OP_NO_RENEGOTIATION
+	SSL_CTX_set_options(c->ssl_ctx, SSL_OP_NO_RENEGOTIATION);
+#endif
+	SSL_CTX_set_mode(c->ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+	SSL_CTX_set_session_cache_mode(c->ssl_ctx, SSL_SESS_CACHE_OFF);
+#ifdef SSL_OP_NO_TICKET
+	SSL_CTX_set_options(c->ssl_ctx, SSL_OP_NO_TICKET);
+#endif
+
+	/* ---- Passphrase callback for an encrypted key (must be set before
+	 * the key load below). ---- */
+	if (opts->passphrase_cb != NULL) {
+		c->passphrase_cb       = opts->passphrase_cb;
+		c->passphrase_userdata = opts->passphrase_userdata;
+		SSL_CTX_set_default_passwd_cb(c->ssl_ctx, passphrase_shim);
+		SSL_CTX_set_default_passwd_cb_userdata(c->ssl_ctx, c);
+	}
+
 	/* ---- Certificate (PEM chain file) ---- */
 	if (opts->cert_file != NULL) {
 		if (SSL_CTX_use_certificate_chain_file(c->ssl_ctx,
@@ -270,19 +325,75 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 			__os_free(c);
 			return XTC_E_INVAL;
 		}
+		/*
+		 * A server that verifies clients sends the trusted-CA names
+		 * in its CertificateRequest so the client can pick a matching
+		 * cert (derived from ca_file automatically -- no separate
+		 * opts field needed).
+		 */
+		if (role == XTC_TLS_SERVER) {
+			STACK_OF(X509_NAME) *cal =
+			    SSL_load_client_CA_file(opts->ca_file);
+			if (cal != NULL)
+				SSL_CTX_set_client_CA_list(c->ssl_ctx, cal);
+		}
 	}
 
-	if (opts->verify_peer) {
-		/*
-		 * CLIENT: SSL_VERIFY_PEER makes the client verify the server
-		 * certificate.  SERVER mTLS adds FAIL_IF_NO_PEER_CERT to
-		 * require the client to present a certificate.
-		 */
-		int mode = SSL_VERIFY_PEER;
-		if (role == XTC_TLS_SERVER)
-			mode |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
-		SSL_CTX_set_verify(c->ssl_ctx, mode, NULL);
+	/*
+	 * Peer verification.  verify_peer_mode (tri-state) takes precedence
+	 * when set to a non-DEFAULT value; otherwise the legacy verify_peer
+	 * int decides (0 = none, non-zero = require).
+	 */
+	{
+		xtc_tls_verify_mode_t vm = opts->verify_peer_mode;
+		if (vm == XTC_TLS_VERIFY_DEFAULT)
+			vm = opts->verify_peer ? XTC_TLS_VERIFY_REQUIRE
+			                       : XTC_TLS_VERIFY_NONE;
+		if (vm != XTC_TLS_VERIFY_NONE) {
+			/*
+			 * CLIENT: SSL_VERIFY_PEER makes the client verify the
+			 * server certificate.  SERVER: SSL_VERIFY_PEER requests
+			 * a client cert; REQUIRE adds FAIL_IF_NO_PEER_CERT so a
+			 * client that presents none is rejected.  REQUEST omits
+			 * it, so the handshake completes without a client cert
+			 * (certificate auth then optional, decided later).
+			 */
+			int mode = SSL_VERIFY_PEER;
+			if (role == XTC_TLS_SERVER &&
+			    vm == XTC_TLS_VERIFY_REQUIRE)
+				mode |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+			SSL_CTX_set_verify(c->ssl_ctx, mode, NULL);
+		}
 	}
+
+	/* ---- Cipher / group selection ---- */
+	if (opts->cipher_list != NULL &&
+	    SSL_CTX_set_cipher_list(c->ssl_ctx, opts->cipher_list) != 1)
+		goto cfg_fail;
+#ifdef TLS1_3_VERSION
+	if (opts->ciphersuites_13 != NULL &&
+	    SSL_CTX_set_ciphersuites(c->ssl_ctx, opts->ciphersuites_13) != 1)
+		goto cfg_fail;
+#endif
+	if (opts->groups != NULL &&
+	    SSL_CTX_set1_groups_list(c->ssl_ctx, opts->groups) != 1)
+		goto cfg_fail;
+
+	/* ---- CRL-based revocation checking ---- */
+	if (opts->crl_file != NULL || opts->crl_dir != NULL) {
+		X509_STORE *store = SSL_CTX_get_cert_store(c->ssl_ctx);
+		if (store == NULL ||
+		    X509_STORE_load_locations(store, opts->crl_file,
+		                              opts->crl_dir) != 1)
+			goto cfg_fail;
+		X509_STORE_set_flags(store,
+		    X509_V_FLAG_CRL_CHECK | X509_V_FLAG_CRL_CHECK_ALL);
+	}
+
+	/* ---- Server cipher preference ---- */
+	if (opts->prefer_server_ciphers)
+		SSL_CTX_set_options(c->ssl_ctx,
+		    SSL_OP_CIPHER_SERVER_PREFERENCE);
 
 	/* ---- ALPN protocol list ---- */
 	if (opts->alpn_protos != NULL && opts->alpn_protos[0] != '\0') {
@@ -319,6 +430,13 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 done:
 	*out = c;
 	return XTC_OK;
+
+cfg_fail:
+	if (c->alpn_protos != NULL)
+		__os_free(c->alpn_protos);
+	SSL_CTX_free(c->ssl_ctx);
+	__os_free(c);
+	return XTC_E_INVAL;
 }
 
 void
@@ -541,6 +659,269 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 	default:
 		return XTC_E_INTERNAL;
 	}
+}
+
+/* -------------------------------------------------------------------------
+ * Post-handshake introspection.
+ *
+ * PUBLIC: const char *xtc_tls_get_version __P((const xtc_tls_t *));
+ * PUBLIC: const char *xtc_tls_get_cipher __P((const xtc_tls_t *));
+ * PUBLIC: int  xtc_tls_get_cipher_bits __P((const xtc_tls_t *));
+ * PUBLIC: int  xtc_tls_get_alpn_selected __P((const xtc_tls_t *,
+ * PUBLIC:                              const unsigned char **, unsigned int *));
+ * PUBLIC: int  xtc_tls_has_peer_cert __P((const xtc_tls_t *));
+ * PUBLIC: int  xtc_tls_get_peer_subject_dn __P((const xtc_tls_t *, char *, size_t));
+ * PUBLIC: int  xtc_tls_get_peer_common_name __P((const xtc_tls_t *, char *, size_t));
+ * PUBLIC: int  xtc_tls_get_peer_issuer_dn __P((const xtc_tls_t *, char *, size_t));
+ * PUBLIC: int  xtc_tls_get_peer_serial __P((const xtc_tls_t *, char *, size_t));
+ * PUBLIC: int  xtc_tls_get_server_cert_hash __P((const xtc_tls_t *,
+ * PUBLIC:                              unsigned char *, size_t, size_t *));
+ * ----------------------------------------------------------------------- */
+
+const char *
+xtc_tls_get_version(const xtc_tls_t *tls)
+{
+	return (tls != NULL && tls->ssl != NULL)
+	    ? SSL_get_version(tls->ssl) : NULL;
+}
+
+const char *
+xtc_tls_get_cipher(const xtc_tls_t *tls)
+{
+	const SSL_CIPHER *ci;
+	if (tls == NULL || tls->ssl == NULL)
+		return NULL;
+	ci = SSL_get_current_cipher(tls->ssl);
+	return ci != NULL ? SSL_CIPHER_get_name(ci) : NULL;
+}
+
+int
+xtc_tls_get_cipher_bits(const xtc_tls_t *tls)
+{
+	const SSL_CIPHER *ci;
+	int bits = 0;
+	if (tls == NULL || tls->ssl == NULL)
+		return 0;
+	ci = SSL_get_current_cipher(tls->ssl);
+	if (ci != NULL)
+		(void)SSL_CIPHER_get_bits(ci, &bits);
+	return bits;
+}
+
+int
+xtc_tls_get_alpn_selected(const xtc_tls_t *tls,
+    const unsigned char **out, unsigned int *len)
+{
+	if (tls == NULL || tls->ssl == NULL || out == NULL || len == NULL)
+		return XTC_E_INVAL;
+	*out = NULL;
+	*len = 0;
+	SSL_get0_alpn_selected(tls->ssl, out, len);
+	return (*out != NULL && *len > 0) ? XTC_OK : XTC_E_NOTFOUND;
+}
+
+int
+xtc_tls_has_peer_cert(const xtc_tls_t *tls)
+{
+	X509 *cert;
+	if (tls == NULL || tls->ssl == NULL)
+		return 0;
+	if (SSL_get_verify_result(tls->ssl) != X509_V_OK)
+		return 0;
+	cert = SSL_get_peer_certificate(tls->ssl);
+	if (cert == NULL)
+		return 0;
+	X509_free(cert);
+	return 1;
+}
+
+/*
+ * Render an X509_NAME into buf as an RFC 2253 string, rejecting an
+ * embedded NUL (the CVE-2009-4034 truncation class).  Returns XTC_OK,
+ * XTC_E_RANGE (buf too small), XTC_E_INVAL (embedded NUL / bad args),
+ * or XTC_E_INTERNAL.
+ */
+static int
+name_to_rfc2253(X509_NAME *nm, char *buf, size_t len)
+{
+	BIO *bio;
+	long n;
+	char *data = NULL;
+	int rc = XTC_OK;
+
+	if (nm == NULL || buf == NULL || len == 0)
+		return XTC_E_INVAL;
+	bio = BIO_new(BIO_s_mem());
+	if (bio == NULL)
+		return XTC_E_NOMEM;
+	if (X509_NAME_print_ex(bio, nm, 0, XN_FLAG_RFC2253) < 0) {
+		BIO_free(bio);
+		return XTC_E_INTERNAL;
+	}
+	n = BIO_get_mem_data(bio, &data);
+	if (n < 0 || data == NULL) {
+		BIO_free(bio);
+		return XTC_E_INTERNAL;
+	}
+	if (memchr(data, '\0', (size_t)n) != NULL)   /* embedded NUL */
+		rc = XTC_E_INVAL;
+	else if ((size_t)n + 1 > len)
+		rc = XTC_E_RANGE;
+	else {
+		memcpy(buf, data, (size_t)n);
+		buf[n] = '\0';
+	}
+	BIO_free(bio);
+	return rc;
+}
+
+static int
+peer_name_dn(const xtc_tls_t *tls, int issuer, char *buf, size_t len)
+{
+	X509 *cert;
+	X509_NAME *nm;
+	int rc;
+	if (tls == NULL || tls->ssl == NULL || buf == NULL || len == 0)
+		return XTC_E_INVAL;
+	cert = SSL_get_peer_certificate(tls->ssl);
+	if (cert == NULL)
+		return XTC_E_NOTFOUND;
+	nm = issuer ? X509_get_issuer_name(cert)
+	            : X509_get_subject_name(cert);
+	rc = name_to_rfc2253(nm, buf, len);
+	X509_free(cert);
+	return rc;
+}
+
+int
+xtc_tls_get_peer_subject_dn(const xtc_tls_t *tls, char *buf, size_t len)
+{
+	return peer_name_dn(tls, 0, buf, len);
+}
+
+int
+xtc_tls_get_peer_issuer_dn(const xtc_tls_t *tls, char *buf, size_t len)
+{
+	return peer_name_dn(tls, 1, buf, len);
+}
+
+int
+xtc_tls_get_peer_common_name(const xtc_tls_t *tls, char *buf, size_t len)
+{
+	X509 *cert;
+	X509_NAME *nm;
+	int idx, dlen, rc = XTC_OK;
+	X509_NAME_ENTRY *e;
+	ASN1_STRING *as;
+	unsigned char *utf8 = NULL;
+
+	if (tls == NULL || tls->ssl == NULL || buf == NULL || len == 0)
+		return XTC_E_INVAL;
+	cert = SSL_get_peer_certificate(tls->ssl);
+	if (cert == NULL)
+		return XTC_E_NOTFOUND;
+	nm = X509_get_subject_name(cert);
+	idx = X509_NAME_get_index_by_NID(nm, NID_commonName, -1);
+	if (idx < 0) { X509_free(cert); return XTC_E_NOTFOUND; }
+	e = X509_NAME_get_entry(nm, idx);
+	as = X509_NAME_ENTRY_get_data(e);
+	if (as == NULL) { X509_free(cert); return XTC_E_NOTFOUND; }
+	dlen = ASN1_STRING_to_UTF8(&utf8, as);
+	if (dlen < 0 || utf8 == NULL) { X509_free(cert); return XTC_E_INTERNAL; }
+	if (memchr(utf8, '\0', (size_t)dlen) != NULL)   /* embedded NUL */
+		rc = XTC_E_INVAL;
+	else if ((size_t)dlen + 1 > len)
+		rc = XTC_E_RANGE;
+	else {
+		memcpy(buf, utf8, (size_t)dlen);
+		buf[dlen] = '\0';
+	}
+	OPENSSL_free(utf8);
+	X509_free(cert);
+	return rc;
+}
+
+int
+xtc_tls_get_peer_serial(const xtc_tls_t *tls, char *buf, size_t len)
+{
+	X509 *cert;
+	ASN1_INTEGER *ai;
+	BIGNUM *bn;
+	char *dec;
+	int rc = XTC_OK;
+
+	if (tls == NULL || tls->ssl == NULL || buf == NULL || len == 0)
+		return XTC_E_INVAL;
+	cert = SSL_get_peer_certificate(tls->ssl);
+	if (cert == NULL)
+		return XTC_E_NOTFOUND;
+	ai = X509_get_serialNumber(cert);
+	bn = (ai != NULL) ? ASN1_INTEGER_to_BN(ai, NULL) : NULL;
+	if (bn == NULL) { X509_free(cert); return XTC_E_INTERNAL; }
+	dec = BN_bn2dec(bn);
+	if (dec == NULL) { BN_free(bn); X509_free(cert); return XTC_E_INTERNAL; }
+	if (strlen(dec) + 1 > len)
+		rc = XTC_E_RANGE;
+	else
+		memcpy(buf, dec, strlen(dec) + 1);
+	OPENSSL_free(dec);
+	BN_free(bn);
+	X509_free(cert);
+	return rc;
+}
+
+int
+xtc_tls_get_server_cert_hash(const xtc_tls_t *tls,
+    unsigned char *buf, size_t buflen, size_t *out_len)
+{
+	X509 *cert;
+	const EVP_MD *md;
+	int sig_nid = 0, md_nid = 0;
+	unsigned int dlen = 0;
+
+	if (tls == NULL || tls->ssl == NULL || buf == NULL || out_len == NULL)
+		return XTC_E_INVAL;
+	/*
+	 * The LOCAL certificate: tls-server-end-point binds to the cert
+	 * the server presented, which on the server side is our own cert
+	 * and on the client side is the peer's.
+	 */
+	if (tls->ctx != NULL && tls->ctx->role == XTC_TLS_SERVER) {
+		cert = SSL_get_certificate(tls->ssl);
+		if (cert != NULL)
+			X509_up_ref(cert);
+	} else {
+		cert = SSL_get_peer_certificate(tls->ssl);
+	}
+	if (cert == NULL)
+		return XTC_E_NOTFOUND;
+
+	/*
+	 * RFC 5929 tls-server-end-point: hash with the certificate's
+	 * signature-algorithm digest, EXCEPT MD5 or SHA-1 are upgraded to
+	 * SHA-256.  Fall back to SHA-256 if the signature digest is unknown.
+	 */
+	if (X509_get_signature_info(cert, &md_nid, NULL, NULL, NULL) != 1)
+		md_nid = NID_undef;
+	sig_nid = md_nid;
+	if (sig_nid == NID_undef || sig_nid == NID_md5 || sig_nid == NID_sha1)
+		md = EVP_sha256();
+	else
+		md = EVP_get_digestbynid(sig_nid);
+	if (md == NULL)
+		md = EVP_sha256();
+
+	if (buflen < (size_t)EVP_MD_size(md)) {
+		X509_free(cert);
+		return XTC_E_RANGE;
+	}
+	if (X509_digest(cert, md, buf, &dlen) != 1) {
+		X509_free(cert);
+		return XTC_E_INTERNAL;
+	}
+	*out_len = dlen;
+	X509_free(cert);
+	return XTC_OK;
 }
 
 #endif /* XTC_TLS_BACKEND_OPENSSL */

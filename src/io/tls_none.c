@@ -23,6 +23,8 @@
 
 #include "xtc_int.h"
 #include "xtc_tls.h"
+#define XTC_TLS_NO_STRUCT   /* opaque struct here; skip the struct-dependent inline */
+#include "tls_common.h"
 
 #if defined(XTC_TLS_BACKEND_NONE)
 
@@ -108,5 +110,7 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 		return XTC_E_INVAL;
 	return XTC_E_NOSYS;
 }
+
+XTC_TLS_DEFINE_INTROSPECT_STUBS
 
 #endif /* XTC_TLS_BACKEND_NONE */

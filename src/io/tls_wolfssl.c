@@ -484,4 +484,6 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 	return map_want(tls, err);
 }
 
+XTC_TLS_DEFINE_INTROSPECT_STUBS   /* introspection not yet ported to wolfSSL */
+
 #endif /* XTC_TLS_BACKEND_WOLFSSL */

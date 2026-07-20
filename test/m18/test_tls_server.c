@@ -408,6 +408,115 @@ test_server_tls_create_bad_args(const MunitParameter params[], void *data)
  * test_server_bad_cert_path:
  *   xtc_tls_ctx_create with non-existent cert returns XTC_E_INVAL.
  * ----------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------
+ * test_server_extended_opts:
+ *   Create a SERVER ctx using the v1.24.0 additions (cipher_list,
+ *   ciphersuites_13, groups, prefer_server_ciphers, verify_peer_mode
+ *   REQUEST), run a full loopback handshake, then exercise every
+ *   post-handshake introspection accessor on the connected server side.
+ * ----------------------------------------------------------------------- */
+static MunitResult
+test_server_extended_opts(const MunitParameter params[], void *data)
+{
+    xtc_tls_opts_t  opts;
+    xtc_tls_ctx_t  *ctx   = NULL;
+    xtc_tls_t      *tls   = NULL;
+    struct client_args ca;
+    pthread_t       tid;
+    int             sv[2];
+    int             rc;
+    char            rbuf[CLIENT_MSG_LEN + 1];
+    const char     *ver, *cip;
+    unsigned char   hash[64];
+    size_t          hlen = 0;
+
+    (void)params;
+    (void)data;
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cert_file        = TEST_CERT_PATH;
+    opts.key_file         = TEST_KEY_PATH;
+    opts.min_version      = XTC_TLS_VER_12;
+    /* tri-state: request a client cert but do not require one */
+    opts.verify_peer_mode = XTC_TLS_VERIFY_REQUEST;
+    opts.cipher_list      = "HIGH:!aNULL:!MD5";
+    opts.ciphersuites_13  = "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256";
+    opts.groups           = "X25519:prime256v1";
+    opts.prefer_server_ciphers = 1;
+
+    rc = xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_ptr_not_null(ctx);
+
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(set_nonblock(sv[1]), ==, 0);
+
+    rc = xtc_tls_create(ctx, sv[0], &tls);
+    munit_assert_int(rc, ==, XTC_OK);
+
+    memset(&ca, 0, sizeof(ca));
+    ca.fd = sv[1];
+    ca.rc = 1;
+    munit_assert_int(pthread_create(&tid, NULL, client_thread, &ca), ==, 0);
+
+    rc = poll_until_done(tls, sv[0], xtc_tls_handshake, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+
+    /* --- introspection accessors (server side, post-handshake) --- */
+    ver = xtc_tls_get_version(tls);
+    munit_assert_ptr_not_null(ver);
+    munit_assert_true(strncmp(ver, "TLS", 3) == 0);
+
+    cip = xtc_tls_get_cipher(tls);
+    munit_assert_ptr_not_null(cip);
+    munit_assert_size(strlen(cip), >, 0);
+
+    munit_assert_int(xtc_tls_get_cipher_bits(tls), >=, 128);
+
+    /* The client presented no cert (REQUEST, not REQUIRE), so there is
+     * no peer cert on the server side -- the query must say so, not
+     * crash. */
+    munit_assert_int(xtc_tls_has_peer_cert(tls), ==, 0);
+
+    /* Channel binding: the server hashes its OWN certificate.  Must
+     * succeed and produce a plausible digest length. */
+    rc = xtc_tls_get_server_cert_hash(tls, hash, sizeof(hash), &hlen);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_size(hlen, >=, 32);   /* >= SHA-256 */
+    munit_assert_size(hlen, <=, sizeof(hash));
+
+    /* A too-small buffer is a clean XTC_E_RANGE, not an overflow. */
+    {
+        unsigned char tiny[4];
+        size_t tl = 0;
+        munit_assert_int(
+            xtc_tls_get_server_cert_hash(tls, tiny, sizeof(tiny), &tl),
+            ==, XTC_E_RANGE);
+    }
+
+    /* NULL-arg guards. */
+    munit_assert_ptr_null(xtc_tls_get_version(NULL));
+    munit_assert_int(xtc_tls_get_alpn_selected(tls, NULL, NULL), ==, XTC_E_INVAL);
+
+    /* Data still flows after all the introspection. */
+    rc = tls_write_all(tls, sv[0], "hello", CLIENT_MSG_LEN, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+    memset(rbuf, 0, sizeof(rbuf));
+    rc = tls_read_exact(tls, sv[0], rbuf, CLIENT_MSG_LEN, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_memory_equal(CLIENT_MSG_LEN, rbuf, "hello");
+
+    (void)xtc_tls_shutdown(tls);
+    pthread_join(tid, NULL);
+
+    xtc_tls_destroy(tls);
+    xtc_tls_ctx_destroy(ctx);
+    close(sv[0]);
+    close(sv[1]);
+    return MUNIT_OK;
+}
+
 static MunitResult
 test_server_bad_cert_path(const MunitParameter params[], void *data)
 {
@@ -465,6 +574,8 @@ static MunitTest tests[] = {
     { "/tls_create_bad_args",  test_server_tls_create_bad_args, suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
     { "/bad_cert_path",        test_server_bad_cert_path,       NULL, NULL,
+      MUNIT_TEST_OPTION_NONE, NULL },
+    { "/extended_opts",        test_server_extended_opts,       suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
