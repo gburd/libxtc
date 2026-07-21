@@ -8,6 +8,8 @@
 .Nm xtc_proc_spawn_link ,
 .Nm xtc_proc_spawn_monitor ,
 .Nm xtc_self ,
+.Nm xtc_proc_set_userdata ,
+.Nm xtc_proc_userdata ,
 .Nm xtc_send ,
 .Nm xtc_recv ,
 .Nm xtc_recv_match ,
@@ -468,6 +470,32 @@ know about
 thread-local or CPU-affine state.
 If the proc reads no such state across a yield (the common case), it is
 unconditionally safe to make migratable.
+.Pp
+When a consumer DOES keep per-proc state that must track the running
+proc across a migration, hang it off the proc itself with
+.Fn xtc_proc_set_userdata
+(read back with
+.Fn xtc_proc_userdata ) :
+the pointer belongs to the proc, not the loop or OS thread, so it
+rides along across a carrier change exactly like the mailbox and
+.Fn xtc_self .
+Both operate on the calling proc (keyed implicitly by
+.Fn xtc_self ) ,
+are O(1), allocation-free, and lock-free.
+The pointer is NULL by default; the runtime never dereferences or frees
+it (the consumer owns whatever it points to, the same lifetime contract
+as
+.Fn xtc_proc_at_exit Ap s
+.Fa arg ) ;
+it is dropped when the proc exits.
+.Fn xtc_proc_set_userdata
+returns
+.Dv XTC_E_INVAL
+when called off a proc, and
+.Fn xtc_proc_userdata
+returns
+.Dv NULL
+there.
 .Sh RETURN VALUES
 All entry points return
 .Dv XTC_OK

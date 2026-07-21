@@ -163,6 +163,51 @@ test_self(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- xtc_proc_userdata ---------- */
+
+struct ud_state {
+	int  set_rc;      /* xtc_proc_set_userdata rc, in-proc */
+	void *got;        /* xtc_proc_userdata after set, in-proc */
+	void *got_default;/* xtc_proc_userdata BEFORE set (must be NULL) */
+};
+static void
+ud_proc(void *arg)
+{
+	struct ud_state *s = arg;
+	s->got_default = xtc_proc_userdata();        /* NULL by default */
+	s->set_rc = xtc_proc_set_userdata((void *)(uintptr_t)0xABCD1234);
+	s->got = xtc_proc_userdata();                /* reads back the set value */
+}
+
+static MunitResult
+test_userdata(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	struct ud_state s = { -1, (void *)1, (void *)1 };
+	xtc_pid_t pid;
+	(void)p; (void)d;
+
+	/* Off a proc: set returns XTC_E_INVAL, get returns NULL. */
+	munit_assert_int(xtc_proc_set_userdata((void *)1), ==, XTC_E_INVAL);
+	munit_assert_ptr_null(xtc_proc_userdata());
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, ud_proc, &s, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* In-proc: default NULL, set succeeds, get returns exactly what
+	 * was set. */
+	munit_assert_ptr_null(s.got_default);
+	munit_assert_int(s.set_rc, ==, XTC_OK);
+	munit_assert_ptr_equal(s.got, (void *)(uintptr_t)0xABCD1234);
+
+	/* Still off a proc after the loop finishes. */
+	munit_assert_ptr_null(xtc_proc_userdata());
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 /* ---------- monitor ---------- */
 
 struct mon_state { int saw_down; int reason; };
@@ -1005,6 +1050,7 @@ test_proc_at_exit(const MunitParameter p[], void *d)
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/userdata",          test_userdata,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/selective_receive", test_selective_receive,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/monitor",           test_monitor,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/spawn_monitor_atomic", test_spawn_monitor_atomic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
