@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.25.0"
+#       --define "version 1.26.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.25.0
+Version:        1.26.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,12 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Tue Jul 21 2026 Greg Burd <greg@burd.me> - 1.26.0-1
+- proc: public per-proc userdata (xtc_proc_set_userdata/_userdata) -- opaque void* on the calling proc, survives work-stealing migration; unblocks the PostgreSQL migration case.
+- preempt: involuntary preemption (Phase 2b) now works on the fcontext substrate too (not just ucontext) -- available on every Linux target regardless of substrate, incl. musl and forced-fcontext, x86_64 + aarch64.
+- fix: macOS/arm64 xtc_dump() from a live fiber no longer risks SIGBUS (fiber-stack-aware walker never falls back to the unbounded backtrace()).
+- No breaking API changes.
+
 * Mon Jul 20 2026 Greg Burd <greg@burd.me> - 1.25.0-1
 - proc: xtc_proc_opts_t.migratable (opt-in; default pinned/unchanged) -- a migratable proc's coroutine is work-stealable across loops on a multi-loop executor; identity/supervision/recovery/mailbox survive the carrier change, proven under DST (test_sim_migratable). Unblocks work-stealing for supervised backend procs.
 - inc: internal __ decls moved out of installed public headers into *_int.h (enforced by a new [C7] gate).
