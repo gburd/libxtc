@@ -47,6 +47,16 @@ struct xtc_exec {
 	                                    * cooperative-assisted preemption:
 	                                    * a tick makes xtc_yield_if_due
 	                                    * callers yield). */
+	_Atomic int   eager_rebalance;     /* 0 = off (default): steal only when
+	                                    * fully idle.  1 = a run-queue-empty
+	                                    * loop steals before blocking, and
+	                                    * enqueuing migratable work nudges an
+	                                    * idle peer.  See
+	                                    * xtc_exec_set_eager_rebalance. */
+	_Atomic int   n_idle;              /* workers currently in their idle
+	                                    * poll; lets a producer cheaply tell
+	                                    * whether any peer is worth nudging
+	                                    * (no thundering herd if all busy). */
 };
 
 /*
@@ -159,8 +169,15 @@ __xtc_exec_worker(void *arg)
 			 */
 			xtc_io_event_t evs[8];
 			int n_out;
+			/* Mark this worker idle across the poll so a peer
+			 * producing migratable work can nudge us (eager
+			 * rebalance); cleared the instant we wake. */
+			atomic_fetch_add_explicit(&exec->n_idle, 1,
+			    memory_order_relaxed);
 			(void)xtc_io_poll(loop->io, evs, 8,
 			    1 * 1000 * 1000LL /* 1ms */, &n_out);
+			atomic_fetch_sub_explicit(&exec->n_idle, 1,
+			    memory_order_relaxed);
 			(void)__xtc_inbox_drain(loop);
 			/* Loop again; if exec stopped or no real work
 			 * appeared, we'll exit on the next iteration. */
@@ -278,6 +295,62 @@ xtc_exec_set_service_mode(xtc_exec_t *e, int on)
 {
 	if (e != NULL)
 		e->service_mode = on ? 1 : 0;
+}
+
+/* PUBLIC: void xtc_exec_set_eager_rebalance __P((xtc_exec_t *, int)); */
+void
+xtc_exec_set_eager_rebalance(xtc_exec_t *e, int on)
+{
+	if (e != NULL)
+		atomic_store_explicit(&e->eager_rebalance, on ? 1 : 0,
+		    memory_order_relaxed);
+}
+
+/*
+ * Internal helpers for the eager-rebalance path (called from loop.c,
+ * which sees struct xtc_exec only as an opaque forward decl).
+ */
+
+/* Is eager rebalance enabled for the executor this loop belongs to?
+ * 0 for a standalone loop (exec == NULL) or when off. */
+int
+__xtc_exec_eager(xtc_loop_t *me)
+{
+	xtc_exec_t *e = me->exec;
+	return (e != NULL) &&
+	    atomic_load_explicit(&e->eager_rebalance, memory_order_relaxed);
+}
+
+/*
+ * A migratable task was just pushed to `producer`'s stealable deque.
+ * Under eager rebalance, nudge ONE idle peer loop (via its poller
+ * wakeup) so it re-checks and steals promptly instead of waiting for a
+ * poll edge.  Bounded to a single wake and only when a peer is actually
+ * idle (n_idle > 0), so there is no thundering herd and no cost when
+ * every loop is busy.  No-op off an executor or when eager is off.
+ */
+void
+__xtc_exec_nudge_idle_peer(xtc_loop_t *producer)
+{
+	xtc_exec_t *e = producer->exec;
+	int i, n, start;
+
+	if (e == NULL ||
+	    !atomic_load_explicit(&e->eager_rebalance, memory_order_relaxed))
+		return;
+	if (atomic_load_explicit(&e->n_idle, memory_order_relaxed) <= 0)
+		return;   /* no idle peer worth waking */
+
+	n = e->n_loops;
+	/* Start the scan just past the producer so we don't always nudge
+	 * loop 0; wake the first peer other than ourselves. */
+	start = producer->exec_id + 1;
+	for (i = 0; i < n; i++) {
+		int idx = (start + i) % n;
+		if (idx == producer->exec_id) continue;
+		(void)xtc_io_wakeup(e->loops[idx]->io);
+		return;   /* one wake is enough; the woken loop steals */
+	}
 }
 
 /* PUBLIC: int xtc_exec_set_preempt __P((xtc_exec_t *, int64_t)); */

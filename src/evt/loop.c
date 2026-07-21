@@ -313,6 +313,13 @@ __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t)
 			 * is immediately visible to thieves on other loops. */
 			XTC_SIM_FAULT_POINT("sched.enqueue.post_deque_push");
 			t->q_next = NULL;
+			/* Eager rebalance: nudge one idle peer so it steals this
+			 * promptly instead of waiting for its poll edge (no-op
+			 * unless eager rebalance is on and a peer is idle). */
+			{
+				extern void __xtc_exec_nudge_idle_peer(xtc_loop_t *);
+				__xtc_exec_nudge_idle_peer(loop);
+			}
 			return XTC_OK;
 		}
 		/* pinned, or deque full -- fall through to the owner-only
@@ -575,6 +582,30 @@ __xtc_loop_step(xtc_loop_t *loop)
 	if ((rc = __xtc_drain_due_timers(loop)) != XTC_OK) return rc;
 	if (loop->q_head != NULL || xtc_deque_len(&loop->deque) > 0)
 		return XTC_OK;
+
+	/*
+	 * Run queue empty (but we may still own parked fibers or timers, so
+	 * n_alive > 0).  Under eager rebalance, try to steal a sibling's
+	 * runnable migratable proc BEFORE blocking in the poller on our own
+	 * fds -- this is what lets a loop whose backends are all parked on
+	 * sockets run a peer's runnable query instead of idling.  Without
+	 * eager rebalance a loop steals only when FULLY idle (the branch
+	 * below), so a loop that owns parked fibers never rebalances.
+	 */
+	if (loop->exec != NULL) {
+		extern int __xtc_exec_eager(xtc_loop_t *);
+		if (__xtc_exec_eager(loop)) {
+			extern void *__xtc_exec_try_steal(xtc_loop_t *me);
+			xtc_task_t *stolen = __xtc_exec_try_steal(loop);
+			if (stolen != NULL) {
+				atomic_fetch_add_explicit(&loop->n_steals, 1,
+				    memory_order_relaxed);
+				stolen->q_next = NULL;
+				(void)__xtc_loop_enqueue(loop, stolen);
+				return XTC_OK;   /* run it next step */
+			}
+		}
+	}
 
 	/* Run queue empty: block in xtc_io_poll until the next timer
 	 * deadline (or an I/O event).  Re-read the clock -- the timer drain

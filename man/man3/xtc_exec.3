@@ -8,6 +8,7 @@
 .Nm xtc_exec_fini ,
 .Nm xtc_exec_run ,
 .Nm xtc_exec_set_service_mode ,
+.Nm xtc_exec_set_eager_rebalance ,
 .Nm xtc_exec_set_preempt ,
 .Nm xtc_exec_stop ,
 .Nm xtc_exec_n_loops ,
@@ -31,6 +32,8 @@
 .Fn xtc_exec_run "xtc_exec_t *exec"
 .Ft void
 .Fn xtc_exec_set_service_mode "xtc_exec_t *exec" "int on"
+.Ft void
+.Fn xtc_exec_set_eager_rebalance "xtc_exec_t *exec" "int on"
 .Ft int
 .Fn xtc_exec_set_preempt "xtc_exec_t *exec" "int64_t interval_ns"
 .Ft int
@@ -120,6 +123,24 @@ to
 .Sy poll .
 M5 uses a random victim policy; NUMA-near steal ordering arrives in
 M5.5.
+.Pp
+.Fn xtc_exec_set_eager_rebalance
+(OFF by default) controls WHEN a loop steals a migratable
+.Pq Xr xtc_proc 3 , Fa migratable
+peer proc.  By default a loop steals only when FULLY idle -- its run
+queue empty AND no parked fibers or timers -- and discovers a
+sibling's stealable work only on its next poll edge.  Under a load
+where every loop owns parked fibers (e.g. many server backends parked
+on client sockets while a peer loop has a runnable query), no loop is
+ever fully idle, so migratable work sits on the stealable deque and is
+never taken.  With eager rebalance ON, a loop whose RUN QUEUE is empty
+(even if it owns parked fibers or timers) steals before it blocks in
+the poller, and enqueuing a migratable task nudges one idle peer to
+steal it promptly.  This trades some cross-loop migration (and its
+cache/NUMA cost) for reclaiming idle capacity under partial load; only
+migratable tasks are ever moved, so pinned work (the default) is
+unaffected either way.  A supervised server whose backends park on
+sockets opts in; a cache-locality-bound workload leaves it off.
 .Sh SPAWN PLACEMENT
 .Fn xtc_exec_spawn
 puts the new task on a loop chosen by a round-robin counter.
