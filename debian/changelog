@@ -1,3 +1,19 @@
+libxtc (1.27.0-1) unstable; urgency=medium
+
+  * exec: xtc_exec_set_eager_rebalance (opt-in, OFF by default) -- makes
+    migratable procs actually rebalance under a realistic load.  By
+    default a loop steals only when FULLY idle, so under a load where
+    every loop owns parked fibers (server backends parked on sockets
+    while a peer has a runnable query) no steal ever happens and
+    migratable=1 is inert.  Eager rebalance lets a run-queue-empty (but
+    fd/timer-parked) loop steal before blocking, and nudges an idle
+    peer when migratable work is produced.  Only migratable tasks move;
+    pinned work is unaffected.  Unblocks the PostgreSQL work-stealing
+    idle-reclamation case.
+  * No breaking API changes (additive, default off).
+
+ -- Greg Burd <greg@burd.me>  Tue, 21 Jul 2026 15:44:46 -0400
+
 libxtc (1.26.0-1) unstable; urgency=medium
 
   * proc: public per-proc userdata (xtc_proc_set_userdata /

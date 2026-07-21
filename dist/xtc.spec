@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.26.0"
+#       --define "version 1.27.0"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.26.0
+Version:        1.27.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,10 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Tue Jul 21 2026 Greg Burd <greg@burd.me> - 1.27.0-1
+- exec: xtc_exec_set_eager_rebalance (opt-in, off by default) -- makes migratable procs rebalance under a realistic parked-fiber load (a run-queue-empty loop steals before blocking + an idle-peer nudge on migratable-work production). Only migratable tasks move; pinned work unaffected. Unblocks the PostgreSQL work-stealing idle-reclamation case.
+- No breaking API changes.
+
 * Tue Jul 21 2026 Greg Burd <greg@burd.me> - 1.26.0-1
 - proc: public per-proc userdata (xtc_proc_set_userdata/_userdata) -- opaque void* on the calling proc, survives work-stealing migration; unblocks the PostgreSQL migration case.
 - preempt: involuntary preemption (Phase 2b) now works on the fcontext substrate too (not just ucontext) -- available on every Linux target regardless of substrate, incl. musl and forced-fcontext, x86_64 + aarch64.
