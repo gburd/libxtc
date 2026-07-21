@@ -74,6 +74,7 @@ void __xtc_sim_io_wb_synced __P((int));
 void __xtc_sim_io_wb_wrote __P((int, uint64_t));
 void __xtc_sim_nondeterminism __P((const char *));
 void __xtc_task_free __P((xtc_task_t *));
+void xtc_exec_set_eager_rebalance __P((xtc_exec_t *, int));
 void xtc_exec_set_service_mode __P((xtc_exec_t *, int));
 void xtc_sim_activate __P((uint64_t));
 void xtc_sim_buggify_disable __P((void));

@@ -28,6 +28,7 @@ typedef struct xtc_exec xtc_exec_t;
  * PUBLIC: int  xtc_exec_fini __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_run __P((xtc_exec_t *));
  * PUBLIC: void xtc_exec_set_service_mode __P((xtc_exec_t *, int));
+ * PUBLIC: void xtc_exec_set_eager_rebalance __P((xtc_exec_t *, int));
  * PUBLIC: int  xtc_exec_stop __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_n_loops __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_loop_id __P((void));
@@ -58,6 +59,37 @@ XTC_API int  xtc_exec_run(xtc_exec_t *exec);
  * until xtc_exec_stop is called.  Used by a supervised xtc_app, which is
  * a long-running service rather than a finite work pool. */
 XTC_API void xtc_exec_set_service_mode(xtc_exec_t *exec, int on);
+
+/*
+ * Eager work-stealing rebalance (OFF by default).
+ *
+ * By default a loop steals a migratable (xtc_proc_opts_t.migratable)
+ * peer proc only when it is FULLY idle -- its own run queue empty AND
+ * no parked fibers or timers -- and it discovers a sibling's stealable
+ * work only on its next poll edge.  Under a load where every loop owns
+ * parked fibers (e.g. many backends parked on client sockets while a
+ * peer loop has a runnable query), no loop is ever "fully idle", so
+ * migratable work sits on the stealable deque and is never taken.
+ *
+ * When eager rebalance is ON, two things change:
+ *   - a loop whose RUN QUEUE is empty (even if it owns parked fibers or
+ *     timers) attempts a steal before it blocks in the poller, so it
+ *     can run a sibling's runnable proc instead of idling on its own
+ *     fds; and
+ *   - enqueuing a migratable task nudges one idle peer loop (via the
+ *     poller wakeup) so it re-checks and steals promptly rather than
+ *     waiting for a poll edge.
+ *
+ * This trades some cross-loop migration (and the cache/NUMA cost that
+ * comes with it) for reclaiming idle capacity under partial load.  A
+ * consumer that runs supervised, migratable procs and wants them
+ * rebalanced under load (e.g. a threaded server whose backends park on
+ * sockets) opts in; a latency-sensitive, cache-locality-bound workload
+ * leaves it off.  Only migratable tasks are ever moved; pinned work
+ * (the default) is unaffected either way.
+ */
+XTC_API void xtc_exec_set_eager_rebalance(xtc_exec_t *exec, int on);
+
 int  xtc_exec_set_preempt(xtc_exec_t *exec, int64_t interval_ns);
 XTC_API int  xtc_exec_stop(xtc_exec_t *exec);
 
