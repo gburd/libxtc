@@ -437,6 +437,15 @@ struct xtc_proc {
 	 * (KNOWN_ISSUES: DOWN-send vs teardown, blocking-pool wake). */
 	_Atomic int refs;
 
+	/* Consumer-owned opaque per-proc pointer (xtc_proc_set_userdata /
+	 * xtc_proc_userdata).  NULL by default (the struct is calloc'd).
+	 * Rides with the proc, so it survives work-stealing migration
+	 * exactly like the mailbox and __current_proc.  The runtime never
+	 * dereferences or frees it -- same lifetime contract as
+	 * xtc_proc_at_exit's arg (the consumer owns whatever it points to);
+	 * it is simply dropped when the proc is freed. */
+	void             *userdata;
+
 	/* Links & monitors. */
 	struct link_entry *links;
 	struct mon_entry  *monitors;     /* monitors WE created (we are watcher) */
@@ -1250,6 +1259,34 @@ xtc_pid_t
 xtc_self(void)
 {
 	return __current_proc != NULL ? __current_proc->pid : XTC_PID_NONE;
+}
+
+/* PUBLIC: int   xtc_proc_set_userdata __P((void *)); */
+/* PUBLIC: void *xtc_proc_userdata __P((void)); */
+/*
+ * Consumer-owned opaque per-proc pointer, on the CALLING proc.  Set
+ * once, read from any context on that proc; it rides with the proc
+ * across work-stealing migration (it lives on the proc struct, like the
+ * mailbox and __current_proc), so a migrated proc reading it always
+ * sees its own value regardless of which loop it resumed on.  O(1),
+ * allocation-free, lock-free (a plain field write/read on the calling
+ * proc, which by definition is running on this thread).  The runtime
+ * never dereferences or frees the pointer -- same contract as
+ * xtc_proc_at_exit's arg.
+ */
+int
+xtc_proc_set_userdata(void *ud)
+{
+	if (__current_proc == NULL)
+		return XTC_E_INVAL;   /* not on a proc */
+	__current_proc->userdata = ud;
+	return XTC_OK;
+}
+
+void *
+xtc_proc_userdata(void)
+{
+	return __current_proc != NULL ? __current_proc->userdata : NULL;
 }
 
 /*

@@ -112,6 +112,8 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int       xtc_proc_spawn_link __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));
  * PUBLIC: int       xtc_proc_spawn_monitor __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *, uint64_t *));
  * PUBLIC: xtc_pid_t xtc_self __P((void));
+ * PUBLIC: int   xtc_proc_set_userdata __P((void *));
+ * PUBLIC: void *xtc_proc_userdata __P((void));
  * PUBLIC: int       xtc_send __P((xtc_pid_t, const void *, size_t));
  * PUBLIC: int       xtc_recv __P((void **, size_t *, int64_t));
  * PUBLIC: int       xtc_recv_match __P((xtc_match_fn, void *, void **, size_t *, int64_t));
@@ -176,6 +178,31 @@ XTC_API int xtc_exit_pid(xtc_pid_t target, int reason);
 XTC_API int xtc_proc_wake(xtc_pid_t target);
 
 XTC_API xtc_pid_t xtc_self(void);
+
+/*
+ * Per-proc opaque consumer pointer, on the CALLING proc.
+ *
+ * xtc_proc_set_userdata stores an opaque `void *` on the calling proc
+ * (NULL by default); xtc_proc_userdata reads it back.  The pointer
+ * belongs to the proc, not the loop or OS thread, so it SURVIVES
+ * work-stealing migration -- a migratable proc
+ * (xtc_proc_opts_t.migratable) that resumes on a different loop still
+ * reads its own value.  This is the supported way to associate
+ * per-proc consumer state that must track the running proc across a
+ * carrier change (keyed implicitly by xtc_self()).
+ *
+ * O(1), allocation-free, lock-free: a plain field access on the
+ * calling proc, which is running on this thread by definition.  The
+ * runtime never dereferences or frees the pointer -- the consumer owns
+ * whatever it points to (the same lifetime contract as
+ * xtc_proc_at_exit's arg); it is simply dropped when the proc exits.
+ *
+ * xtc_proc_set_userdata returns XTC_OK, or XTC_E_INVAL when called off
+ * a proc (xtc_self() == XTC_PID_NONE).  xtc_proc_userdata returns NULL
+ * off a proc.
+ */
+XTC_API int   xtc_proc_set_userdata(void *ud);
+XTC_API void *xtc_proc_userdata(void);
 
 /*
  * Send a message.  Copies `size` bytes from `data` into a mailbox

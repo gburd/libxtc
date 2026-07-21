@@ -50,6 +50,8 @@
 
 static atomic_int  g_self_ok;       /* xtc_self()==own pid checks that passed */
 static atomic_int  g_self_bad;      /* ... that FAILED (must stay 0) */
+static atomic_int  g_ud_ok;         /* xtc_proc_userdata()==own value passed */
+static atomic_int  g_ud_bad;        /* ... that FAILED (must stay 0) */
 static atomic_int  g_migrations;    /* observed carrier-loop changes */
 static atomic_int  g_downs;         /* DOWN messages the monitor received */
 static atomic_int  g_workers_done;
@@ -65,7 +67,10 @@ worker(void *arg)
 	xtc_pid_t me = xtc_self();
 	xtc_loop_t *last_loop = __xtc_current_loop;
 	int i;
-	(void)id;
+	/* A unique per-proc userdata value; must read back identically on
+	 * every resume, even after migrating to another loop (INV5). */
+	void *my_ud = (void *)(uintptr_t)(0xD000UL + (unsigned long)id);
+	(void)xtc_proc_set_userdata(my_ud);
 
 	for (i = 0; i < N_YIELDS; i++) {
 		xtc_yield();
@@ -76,6 +81,14 @@ worker(void *arg)
 			    memory_order_relaxed);
 		else
 			atomic_fetch_add_explicit(&g_self_bad, 1,
+			    memory_order_relaxed);
+
+		/* INV5: per-proc userdata survived the resume too. */
+		if (xtc_proc_userdata() == my_ud)
+			atomic_fetch_add_explicit(&g_ud_ok, 1,
+			    memory_order_relaxed);
+		else
+			atomic_fetch_add_explicit(&g_ud_bad, 1,
 			    memory_order_relaxed);
 
 		/* INV2: did the carrier loop change? (a real migration) */
@@ -135,6 +148,8 @@ run_once(uint64_t seed, int migratable, uint64_t *out_state_hash,
 
 	atomic_store(&g_self_ok, 0);
 	atomic_store(&g_self_bad, 0);
+	atomic_store(&g_ud_ok, 0);
+	atomic_store(&g_ud_bad, 0);
 	atomic_store(&g_migrations, 0);
 	atomic_store(&g_downs, 0);
 	atomic_store(&g_workers_done, 0);
@@ -171,10 +186,13 @@ main(void)
 	uint64_t s1 = 0, s2 = 0;
 	int mig1 = 0, mig2 = 0, ok1 = 0, ok2 = 0, bad1 = 0, bad2 = 0;
 	int down1 = 0, down2 = 0, done1 = 0, done2 = 0;
+	int ud_ok1, ud_bad1, ud_ok2, ud_bad2;
 
 	/* Two runs, same seed -> must replay byte-identically. */
 	run_once(0xA11CEULL, 1, &s1, &mig1, &ok1, &bad1, &down1, &done1);
+	ud_ok1 = atomic_load(&g_ud_ok); ud_bad1 = atomic_load(&g_ud_bad);
 	run_once(0xA11CEULL, 1, &s2, &mig2, &ok2, &bad2, &down2, &done2);
+	ud_ok2 = atomic_load(&g_ud_ok); ud_bad2 = atomic_load(&g_ud_bad);
 
 	printf("run1: self_ok=%d self_bad=%d migrations=%d downs=%d done=%d "
 	    "state=%016llx\n", ok1, bad1, mig1, down1, done1,
@@ -188,6 +206,18 @@ main(void)
 		printf("FAIL[INV1]: xtc_self() wrong after a resume "
 		    "(bad=%d,%d) -- migration corrupted proc identity\n",
 		    bad1, bad2);
+		return 1;
+	}
+	/* INV5: per-proc userdata never wrong across migration. */
+	if (ud_bad1 != 0 || ud_bad2 != 0) {
+		printf("FAIL[INV5]: xtc_proc_userdata() wrong after a resume "
+		    "(bad=%d,%d) -- migration did not carry per-proc userdata\n",
+		    ud_bad1, ud_bad2);
+		return 1;
+	}
+	if (ud_ok1 != N_WORKERS * N_YIELDS || ud_ok2 != N_WORKERS * N_YIELDS) {
+		printf("FAIL[INV5]: userdata-check count wrong (%d,%d, want %d)\n",
+		    ud_ok1, ud_ok2, N_WORKERS * N_YIELDS);
 		return 1;
 	}
 	/* All workers ran to completion and did all their identity checks. */
@@ -224,7 +254,8 @@ main(void)
 	}
 
 	printf("OK: migratable procs work-stolen across loops -- identity "
-	    "(xtc_self) and supervision (DOWN) survive every migration; "
+	    "(xtc_self), per-proc userdata, and supervision (DOWN) survive "
+	    "every migration; "
 	    "%d migrations observed, %d identity checks all correct, "
 	    "%d/%d DOWNs delivered, byte-identical replay\n",
 	    mig1, ok1, down1, N_WORKERS);

@@ -4,6 +4,7 @@
 #ifndef PTC_EXT_H
 #define PTC_EXT_H
 
+int   xtc_proc_set_userdata __P((void *));
 int  xtc_cfg_load_file __P((const char *));
 int  xtc_cfg_reload __P((void));
 int __xtc_proc_crit_depth __P((void));
@@ -59,6 +60,7 @@ struct xtc_mctx *xtc_proc_mctx __P((void));
 uint64_t xtc_preempt_ticks __P((void));
 void  __xtc_proc_ctx_restore __P((void *));
 void *__xtc_proc_ctx_save __P((void));
+void *xtc_proc_userdata __P((void));
 void __xtc_unsafe_enter __P((void));
 void __xtc_unsafe_leave __P((void));
 void xtc_alloc_audit_proc_leaks __P((xtc_pid_t, size_t *, size_t *));
