@@ -1,3 +1,28 @@
+libxtc (1.26.0-1) unstable; urgency=medium
+
+  * proc: public per-proc userdata (xtc_proc_set_userdata /
+    xtc_proc_userdata) -- an opaque void* on the calling proc, NULL by
+    default, O(1)/allocation-free/lock-free, that SURVIVES work-stealing
+    migration (it rides with the proc like the mailbox/__current_proc).
+    The supported way to associate per-proc consumer state that must
+    track the running proc across a carrier change; unblocks the
+    PostgreSQL work-stealing migration case.
+  * preempt: involuntary preemption (Phase 2b) now works on the
+    fcontext coroutine substrate too, not just ucontext -- so it is
+    available on EVERY Linux target regardless of substrate, including
+    musl (fcontext-only) and forced-fcontext builds, x86_64 and
+    aarch64.  The redirect is substrate-independent (it rewrites only
+    the kernel signal frame); the delicate rewrite is now a single
+    shared helper.  Documented Phase-1 cooperative fallback elsewhere,
+    unchanged.
+  * fix: macOS/arm64 xtc_dump() from a live fiber no longer risks
+    SIGBUS -- the fiber-stack-aware backtrace walker never falls back
+    to the unbounded system backtrace() (returns no frames if the stack
+    region cannot be bounded).
+  * No breaking API changes (all additions / internal-only).
+
+ -- Greg Burd <greg@burd.me>  Tue, 21 Jul 2026 05:03:44 -0400
+
 libxtc (1.25.0-1) unstable; urgency=medium
 
   * proc: xtc_proc_opts_t.migratable (opt-in, default 0 = pinned,
