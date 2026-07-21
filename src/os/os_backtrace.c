@@ -122,8 +122,19 @@ __os_backtrace(void **frames, int max)
 	if (frames == NULL || max <= 0)
 		return 0;
 	fp = (uintptr_t)__builtin_frame_address(0);
-	if (!apple_stack_region(fp, &lo, &hi))
-		return backtrace(frames, max);
+	if (!apple_stack_region(fp, &lo, &hi)) {
+		/*
+		 * Could not bound the current stack's VM region.  We must
+		 * NOT fall back to the system backtrace() here: it walks the
+		 * FP chain unbounded and, on a guard-paged fiber stack, can
+		 * run past the top into unmapped memory and SIGBUS -- the
+		 * exact fault this walker exists to prevent.  A missing
+		 * region is rare (mach_vm_region essentially always resolves
+		 * a live SP), so returning no frames (the dump prints
+		 * "backtrace unavailable") is the safe, non-faulting choice.
+		 */
+		return 0;
+	}
 	/*
 	 * arm64 and x86-64 both store the frame record as
 	 * {saved FP, return addr} at [fp]; walk outward (ascending

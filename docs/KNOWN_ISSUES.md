@@ -746,34 +746,43 @@ remaining uncovered branches are backend-specific cleanup edges in
 particular backend; a per-backend fault-injection sweep is the way to
 close them further.
 
-## macOS/arm64: xtc_dump() can intermittently SIGBUS when called from a live fiber
+## RESOLVED: macOS/arm64 xtc_dump() SIGBUS when called from a live fiber
 
-**Status:** open, diagnostic-path only, intermittent (rare), macOS/arm64
-specific.  Not a release blocker; disclosed here so it is visible.
+**Status:** RESOLVED (fiber-stack-aware backtrace walker, `8034f93`;
+fallback hardened so it can never reach the unbounded system
+`backtrace()` from a fiber).
 
-`xtc_dump()` captures a C backtrace of the calling thread via the
-system `backtrace()` (execinfo).  On macOS/arm64, when `xtc_dump()` is
-called from inside a running fiber (a live `xtc_proc` body, as opposed
-to the top-of-thread panic/abort path), `backtrace()` walks the
-frame-pointer chain of the small guard-paged ucontext fiber stack and
-can run past the stack top into unmapped memory, raising SIGBUS.  It is
-intermittent -- it depends on what lies just past the fiber stack and
-whether that address is mapped -- and does not reproduce reliably (a
-500-run loop on an Apple-Silicon host caught it 0 times), which is why
-it surfaces only occasionally in CI's `test_dump/basic`.
+`xtc_dump()` captures a C backtrace of the calling thread.  On
+macOS/arm64, when called from inside a running fiber (a live `xtc_proc`
+body, not the top-of-thread panic/abort path), the system `backtrace()`
+walks the frame-pointer chain of the small guard-paged fiber stack and
+could run past the stack top into unmapped memory, raising SIGBUS --
+intermittently (it depended on what lay just past the fiber stack and
+whether that address was mapped), which is why it surfaced only
+occasionally in CI's `test_dump/basic`.
 
-Other platforms are unaffected: Linux uses the EH-ABI unwinder
-(`_Unwind_Backtrace`), which terminates cleanly on a fiber stack, and
-the panic/abort path (not on a fiber) is fine everywhere.  Only the
-BACKTRACE section of the dump is affected; the loop/proc/mailbox state
-the dump prints is unaffected.
+**Fix:** `src/os/os_backtrace.c` now uses a fiber-stack-aware frame
+walker on Apple targets instead of the system `backtrace()`.  It
+discovers the active stack's VM region at call time from its own SP
+(`mach_vm_region` -- a query of the task's VM map, which cannot itself
+fault) and walks the FP chain manually, stopping the instant the next
+frame record would leave the mapped region, is misaligned, or does not
+ascend -- so an over-walk past a guard-paged fiber stack top can never
+touch an unmapped page.  No coroutine-layer coupling: the bound is
+derived from the running SP, so it works whether the caller is on a
+fiber mmap or an OS-thread stack.  If the region cannot be resolved (a
+rare `mach_vm_region` failure), the walker returns NO frames rather
+than falling back to the unbounded system `backtrace()` -- the dump
+then prints "backtrace unavailable", which is strictly better than a
+SIGBUS.  The symbolization step (`backtrace_symbols_fd`) only resolves
+the already-captured, in-bounds return addresses (a dladdr-style
+lookup, not a stack walk), so it does not fault.
 
-**Fix (planned):** a fiber-stack-aware frame walker for the dump
-backtrace -- the runtime knows the current coroutine's stack bounds, so
-it can walk the FP chain manually and stop at the stack boundary, and
-fall back to the system `backtrace()` only when not running on a fiber.
-Tracked for a macOS-host session (the confirming experiment and the
-candidate fix are recorded internally).
+Other platforms were never affected: Linux uses the EH-ABI unwinder
+(`_Unwind_Backtrace`), which terminates cleanly on a fiber stack.
+`test_dump/basic` exercises the from-a-fiber path (its `dump_driver`
+runs as an `xtc_proc` and calls `xtc_dump`), so the macOS CI runner
+covers the fixed path per commit.
 
 ## AIX runtime untested
 
