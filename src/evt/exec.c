@@ -532,14 +532,29 @@ __sim_loop_runnable(xtc_loop_t *l, int64_t now_ns, int64_t peer_stealable)
 	iod = (l->io != NULL) ? __xtc_io_sim_next_due(l->io) : -1;
 	if (iod >= 0 && iod <= now_ns)
 		return 1;
-	/* Idle locally with NO pending timer or I/O, but a peer has
+	/*
+	 * Idle locally with NO pending timer or I/O, but a peer has
 	 * stealable work and this loop is part of an executor -> runnable
 	 * (its step_once will reach the steal branch and take the work).
 	 * The "no pending timer/io" guard ensures the step actually reaches
 	 * steal (a loop with a future wakeup takes the clock-wait branch
-	 * instead, so marking it runnable-to-steal would spin). */
-	if (peer_stealable > 0 && l->exec != NULL && dl < 0 && iod < 0)
-		return 1;
+	 * instead, so marking it runnable-to-steal would spin) -- UNLESS
+	 * eager rebalance is on, in which case __xtc_loop_step's real
+	 * run-queue-empty steal-before-block branch (loop.c) reaches steal
+	 * regardless of a pending timer/io (that is the whole point: a loop
+	 * whose fibers are all parked on a timer/fd should still steal a
+	 * peer's runnable work instead of waiting out its own deadline).
+	 * This mirrors that exactly, so the sim reaches the same real code
+	 * path the real executor does under eager rebalance, and can
+	 * observe steals it otherwise never would (the PG-reported gap). */
+	if (peer_stealable > 0 && l->exec != NULL) {
+		if (dl < 0 && iod < 0)
+			return 1;
+		/* l's own run queue is already known empty here (the earlier
+		 * q_head/deque checks above would have returned 1 otherwise). */
+		if (__xtc_exec_eager(l))
+			return 1;
+	}
 	return 0;
 }
 
