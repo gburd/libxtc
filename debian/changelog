@@ -1,3 +1,35 @@
+libxtc (1.28.0-1) unstable; urgency=medium
+
+  * exec: xtc_exec_get_service_mode / xtc_exec_get_eager_rebalance --
+    paired getters for the existing setters, plus a documented POLICY
+    KNOB CONVENTION in xtc_exec(3) for future per-executor scheduler
+    knobs.
+  * docs: xtc_proc(3) MIGRATION documents xtc_exec_loop_id() as the
+    supported migration-detection idiom for a consumer with
+    carrier-affine cached state (capture it before a yield, compare
+    after) -- no new API needed.
+  * test: closed a DST-coverage gap for eager rebalance -- the
+    deterministic simulator's own runnability model was more
+    conservative than the real policy for a loop with parked fibers;
+    fixed so xtc_sim_exec_run now drives the real production steal
+    path under a seed.
+  * REVERTED: the fcontext involuntary-preemption support added in
+    v1.26.0 (Phase 2b on the fcontext substrate) is reverted.  It
+    introduced an intermittent memory-corruption bug under concurrent
+    migratable-proc work-stealing on the fcontext substrate (default on
+    Apple Silicon macOS and musl-Linux), caught by CI once steal
+    traffic became frequent.  Root cause not fully confirmed; reverting
+    is the safe choice.  Involuntary preemption remains available on
+    the ucontext substrate (glibc default) as before v1.26.0; fcontext
+    correctly falls back to Phase 1 cooperative-assisted preemption,
+    unchanged from v1.25.0 and earlier.  See
+    .agent/T2_FCTX_PREEMPT_REGRESSION_REVERT_2026-07.md for the full
+    investigation (not shipped; local notes).
+  * No breaking API changes (additions + one revert of a same-cycle
+    addition).
+
+ -- Greg Burd <greg@burd.me>  Wed, 22 Jul 2026 09:45:02 -0400
+
 libxtc (1.27.0-1) unstable; urgency=medium
 
   * exec: xtc_exec_set_eager_rebalance (opt-in, OFF by default) -- makes
