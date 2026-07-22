@@ -53,6 +53,8 @@ static atomic_int  g_self_bad;      /* ... that FAILED (must stay 0) */
 static atomic_int  g_ud_ok;         /* xtc_proc_userdata()==own value passed */
 static atomic_int  g_ud_bad;        /* ... that FAILED (must stay 0) */
 static atomic_int  g_migrations;    /* observed carrier-loop changes */
+static atomic_int  g_loopid_mismatch; /* xtc_exec_loop_id() disagreed with
+                                       * __xtc_current_loop (must stay 0) */
 static atomic_int  g_downs;         /* DOWN messages the monitor received */
 static atomic_int  g_workers_done;
 
@@ -97,6 +99,16 @@ worker(void *arg)
 			    memory_order_relaxed);
 			last_loop = __xtc_current_loop;
 		}
+
+		/* INV6: the PUBLIC migration-detection idiom (xtc_proc(3)
+		 * MIGRATION: capture xtc_exec_loop_id() before a yield, compare
+		 * after) must agree with the internal carrier pointer -- i.e.
+		 * it is a faithful, sufficient substitute a consumer can
+		 * actually use (no internal access needed). */
+		if ((__xtc_current_loop != NULL ? __xtc_current_loop->exec_id : -1)
+		    != xtc_exec_loop_id())
+			atomic_fetch_add_explicit(&g_loopid_mismatch, 1,
+			    memory_order_relaxed);
 	}
 	atomic_fetch_add_explicit(&g_workers_done, 1, memory_order_relaxed);
 }
@@ -151,6 +163,7 @@ run_once(uint64_t seed, int migratable, uint64_t *out_state_hash,
 	atomic_store(&g_ud_ok, 0);
 	atomic_store(&g_ud_bad, 0);
 	atomic_store(&g_migrations, 0);
+	atomic_store(&g_loopid_mismatch, 0);
 	atomic_store(&g_downs, 0);
 	atomic_store(&g_workers_done, 0);
 
@@ -187,12 +200,15 @@ main(void)
 	int mig1 = 0, mig2 = 0, ok1 = 0, ok2 = 0, bad1 = 0, bad2 = 0;
 	int down1 = 0, down2 = 0, done1 = 0, done2 = 0;
 	int ud_ok1, ud_bad1, ud_ok2, ud_bad2;
+	int mismatch1, mismatch2;
 
 	/* Two runs, same seed -> must replay byte-identically. */
 	run_once(0xA11CEULL, 1, &s1, &mig1, &ok1, &bad1, &down1, &done1);
 	ud_ok1 = atomic_load(&g_ud_ok); ud_bad1 = atomic_load(&g_ud_bad);
+	mismatch1 = atomic_load(&g_loopid_mismatch);
 	run_once(0xA11CEULL, 1, &s2, &mig2, &ok2, &bad2, &down2, &done2);
 	ud_ok2 = atomic_load(&g_ud_ok); ud_bad2 = atomic_load(&g_ud_bad);
+	mismatch2 = atomic_load(&g_loopid_mismatch);
 
 	printf("run1: self_ok=%d self_bad=%d migrations=%d downs=%d done=%d "
 	    "state=%016llx\n", ok1, bad1, mig1, down1, done1,
@@ -218,6 +234,17 @@ main(void)
 	if (ud_ok1 != N_WORKERS * N_YIELDS || ud_ok2 != N_WORKERS * N_YIELDS) {
 		printf("FAIL[INV5]: userdata-check count wrong (%d,%d, want %d)\n",
 		    ud_ok1, ud_ok2, N_WORKERS * N_YIELDS);
+		return 1;
+	}
+	/* INV6: the public migration-detection idiom (xtc_exec_loop_id
+	 * before/after a yield) must agree with the internal carrier every
+	 * time -- proves xtc_proc(3) MIGRATION's documented pattern is a
+	 * faithful substitute a consumer can actually rely on. */
+	if (mismatch1 != 0 || mismatch2 != 0) {
+		printf("FAIL[INV6]: xtc_exec_loop_id() disagreed with the "
+		    "internal carrier (mismatch=%d,%d) -- the documented "
+		    "migration-detection idiom is not trustworthy\n",
+		    mismatch1, mismatch2);
 		return 1;
 	}
 	/* All workers ran to completion and did all their identity checks. */

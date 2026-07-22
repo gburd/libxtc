@@ -496,6 +496,32 @@ when called off a proc, and
 returns
 .Dv NULL
 there.
+.Pp
+A consumer that caches CARRIER-AFFINE state across a yield -- e.g. an
+fd/eventfd added to a wait set that is itself per-loop, so the
+registration must be re-armed if the fiber resumes elsewhere -- detects
+a migration with
+.Xr xtc_exec 3 Ns 's
+.Fn xtc_exec_loop_id :
+it reads the CURRENT resume's carrier
+.Pq re-established every resume, like Fn xtc_self ,
+so capturing it before a yield and comparing after tells the consumer
+whether it moved:
+.Bd -literal -offset indent
+int before = xtc_exec_loop_id();
+xtc_yield();                      /* may resume on a different loop */
+if (xtc_exec_loop_id() != before)
+        /* re-arm any per-loop wait registration here */
+.Ed
+.Pp
+This needs no dedicated "you migrated" callback: the carrier id is
+already a plain, O(1), thread-local read, so the check costs one
+comparison at exactly the safe points a consumer already controls (its
+own yield/park call sites) -- there is no separate hook to remember to
+wire up, and no case where a resume can happen without the consumer's
+own code running first.  A proc that never registers carrier-affine
+state (the common case, and true of the mailbox, userdata, and
+recovery frame this section covers) needs no such check at all.
 .Sh RETURN VALUES
 All entry points return
 .Dv XTC_OK
