@@ -83,21 +83,17 @@ unchanged when unused.
 .Pp
 The involuntary path (enabled by
 .Fn xtc_preempt_set_involuntary )
-is EXPERIMENTAL and off by default.  On Linux x86-64 and aarch64 it
-performs a true resumable involuntary yield -- a fiber in a pure CPU
-loop with no cooperative yield points is time-sliced so its loop-mates
-make progress -- using an on-stack trampoline that the signal handler
-redirects the interrupted instruction pointer to (Go's async-preemption
-method).  This works with BOTH coroutine substrates: the redirect only
-rewrites the kernel signal frame (never the coroutine's saved context),
-so it is substrate-independent, and the ucontext (default on glibc) and
-fcontext (default on musl and Apple Silicon) builds both provide it on
-Linux.  On non-Linux targets (macOS, the BSDs, illumos), the Windows
-fiber substrate, and the single-file amalgamation it declines and falls
-back to the cooperative path (the signal mcontext layout it rewrites is
-glibc/Linux-specific).  It is opt-in because a rare livelock has been
-observed under pathological all-CPU-bound load; untrusted pure-CPU work
-can alternatively run on
+is EXPERIMENTAL and off by default.  On x86-64 with the ucontext
+coroutine substrate (the default build on glibc) it performs a true
+resumable involuntary yield -- a fiber in a pure CPU loop with no
+cooperative yield points is time-sliced so its loop-mates make progress
+-- using an on-stack trampoline that the signal handler redirects the
+interrupted instruction pointer to (Go's async-preemption method).  On
+other substrates (the fcontext substrate used on musl, the Windows
+fiber substrate) and in the single-file amalgamation it declines and
+falls back to the cooperative path.  It is opt-in because a rare
+livelock has been observed under pathological all-CPU-bound load;
+untrusted pure-CPU work can alternatively run on
 .Xr xtc_osproc 3 ,
 an operating-system thread the kernel preempts.
 .Pp
@@ -106,10 +102,9 @@ remains Linux-only: it needs the fiber's interrupted machine state
 rewritten via an on-stack trampoline
 (see
 .Sx SEE ALSO ) ,
-and that redirect declines on
-.Dv __APPLE__
-(the Darwin signal mcontext differs from the glibc layout, and macOS
-has no per-thread CPU-time timer anyway -- see below).
+and that redirect is gated inside the active coroutine substrate, which
+declines on
+.Dv __APPLE__ .
 The Phase 1 cooperative-assisted tick source, however, DOES now work on
 macOS: since there is no per-thread
 .Fn timer_create
