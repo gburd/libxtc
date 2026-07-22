@@ -8,7 +8,9 @@
 .Nm xtc_exec_fini ,
 .Nm xtc_exec_run ,
 .Nm xtc_exec_set_service_mode ,
+.Nm xtc_exec_get_service_mode ,
 .Nm xtc_exec_set_eager_rebalance ,
+.Nm xtc_exec_get_eager_rebalance ,
 .Nm xtc_exec_set_preempt ,
 .Nm xtc_exec_stop ,
 .Nm xtc_exec_n_loops ,
@@ -32,8 +34,12 @@
 .Fn xtc_exec_run "xtc_exec_t *exec"
 .Ft void
 .Fn xtc_exec_set_service_mode "xtc_exec_t *exec" "int on"
+.Ft int
+.Fn xtc_exec_get_service_mode "xtc_exec_t *exec"
 .Ft void
 .Fn xtc_exec_set_eager_rebalance "xtc_exec_t *exec" "int on"
+.Ft int
+.Fn xtc_exec_get_eager_rebalance "xtc_exec_t *exec"
 .Ft int
 .Fn xtc_exec_set_preempt "xtc_exec_t *exec" "int64_t interval_ns"
 .Ft int
@@ -141,6 +147,60 @@ cache/NUMA cost) for reclaiming idle capacity under partial load; only
 migratable tasks are ever moved, so pinned work (the default) is
 unaffected either way.  A supervised server whose backends park on
 sockets opts in; a cache-locality-bound workload leaves it off.
+.Pp
+.Fn xtc_exec_get_service_mode
+and
+.Fn xtc_exec_get_eager_rebalance
+read back the current setting (0 for a NULL exec).
+.Sh POLICY KNOB CONVENTION
+Every per-
+.Vt xtc_exec_t
+scheduler policy
+.Pq service mode, eager rebalance, and any future addition -- steal
+policy, NUMA affinity mode, migration eagerness, etc.
+follows one shape:
+.Bl -bullet -compact
+.It
+Named
+.Fn xtc_exec_set_ Ns Ar name
+/
+.Fn xtc_exec_get_ Ns Ar name ;
+a boolean knob takes/returns a plain
+.Vt int
+(0/1).
+.It
+Takes effect immediately; no re-init needed, and safe to call from any
+thread at any time (each knob is a single atomic field on the
+executor).
+.It
+Documented with its COST as well as its effect -- a policy that trades
+CPU or syscalls for responsiveness
+.Pq like eager rebalance
+says so, so a caller can judge whether to opt in.
+.El
+.Pp
+This is deliberately distinct from two other things that look similar:
+.Bl -tag -width indent
+.It Xr xtc_proc 3 Ns 's Va migratable
+is a per-PROC ELIGIBILITY bit decided once at spawn
+.Pq can this proc's coro be moved at all ,
+not an executor-wide policy
+.Pq how hard the executor tries to move eligible work .
+Keeping eligibility and policy separate means a consumer who wants some
+procs movable does not pay an executor-wide policy's runtime cost, and
+vice versa.
+.It Xr xtc_preempt 3 Ns 's Fn xtc_preempt_set_involuntary
+is a PROCESS-WIDE toggle
+.Pq no Vt xtc_exec_t argument
+governing the signal-context preemption redirect, not scoped to one
+executor.
+.It Xr xtc_cfg 3
+is a separate, PROCESS-GLOBAL named-tunable registry
+.Pq log levels, backpressure thresholds, ops-facing settings meant to
+survive a config-file reload
+with no per-instance scoping yet, so it does not back a per-exec knob
+like these -- the two mechanisms serve different scopes on purpose.
+.El
 .Sh SPAWN PLACEMENT
 .Fn xtc_exec_spawn
 puts the new task on a loop chosen by a round-robin counter.

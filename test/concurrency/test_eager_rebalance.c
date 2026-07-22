@@ -150,8 +150,34 @@ int
 main(void)
 {
 	uint64_t steals_off, steals_on;
+	xtc_exec_t *ge = NULL;
 
 	alarm(60);
+
+	/* Getter/setter round-trip + default-off, on a throwaway exec. */
+	if (xtc_exec_init(&ge, 1) == XTC_OK) {
+		if (xtc_exec_get_eager_rebalance(ge) != 0 ||
+		    xtc_exec_get_service_mode(ge) != 0) {
+			printf("FAIL: eager_rebalance/service_mode not 0 by "
+			    "default\n");
+			return 1;
+		}
+		xtc_exec_set_eager_rebalance(ge, 1);
+		xtc_exec_set_service_mode(ge, 1);
+		if (xtc_exec_get_eager_rebalance(ge) != 1 ||
+		    xtc_exec_get_service_mode(ge) != 1) {
+			printf("FAIL: getter did not reflect the setter\n");
+			return 1;
+		}
+		xtc_exec_set_eager_rebalance(ge, 0);
+		xtc_exec_set_service_mode(ge, 0);
+		if (xtc_exec_get_eager_rebalance(ge) != 0 ||
+		    xtc_exec_get_service_mode(ge) != 0) {
+			printf("FAIL: getter did not reflect the setter turned off\n");
+			return 1;
+		}
+		(void)xtc_exec_fini(ge);
+	}
 
 	if (__os_ncpus() < 2) {
 		/* Single-core: work-stealing has nowhere to steal to. */

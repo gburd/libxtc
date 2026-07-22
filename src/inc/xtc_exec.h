@@ -28,7 +28,9 @@ typedef struct xtc_exec xtc_exec_t;
  * PUBLIC: int  xtc_exec_fini __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_run __P((xtc_exec_t *));
  * PUBLIC: void xtc_exec_set_service_mode __P((xtc_exec_t *, int));
+ * PUBLIC: int  xtc_exec_get_service_mode __P((xtc_exec_t *));
  * PUBLIC: void xtc_exec_set_eager_rebalance __P((xtc_exec_t *, int));
+ * PUBLIC: int  xtc_exec_get_eager_rebalance __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_stop __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_n_loops __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_loop_id __P((void));
@@ -55,10 +57,42 @@ XTC_API int  xtc_exec_init(xtc_exec_t **out, int n_loops);
 XTC_API int  xtc_exec_fini(xtc_exec_t *exec);
 XTC_API int  xtc_exec_run(xtc_exec_t *exec);
 
+/*
+ * POLICY CONVENTION for every per-xtc_exec_t scheduler knob below
+ * (service mode, eager rebalance, and any future addition -- steal
+ * policy, NUMA affinity mode, migration eagerness, ...):
+ *
+ *   - Named xtc_exec_set_<name> / xtc_exec_get_<name>, boolean knobs
+ *     take/return a plain `int` (0/1).
+ *   - Takes effect immediately; no xtc_exec_init/_fini needed to
+ *     change it, and it is safe to call from any thread at any time
+ *     (each knob is a single atomic field on the exec).
+ *   - The doc comment states not just the EFFECT but the COST: a
+ *     policy that trades CPU/syscalls for responsiveness (like eager
+ *     rebalance) says so, so a caller can judge whether to opt in.
+ *   - Distinct from xtc_proc_opts_t.migratable, which is a per-PROC
+ *     ELIGIBILITY bit decided once at spawn (can this proc's coro be
+ *     moved at all), not an executor-wide policy (how hard the
+ *     executor tries to move eligible work).  Keeping eligibility and
+ *     policy as separate knobs means a consumer who wants some procs
+ *     movable does not have to pay an executor-wide policy's runtime
+ *     cost, and vice versa.
+ *   - Distinct from xtc_preempt_set_involuntary, which is a
+ *     PROCESS-WIDE toggle (no xtc_exec_t argument) governing the
+ *     signal-context preemption redirect, not scoped to one executor.
+ *
+ * xtc_cfg (xtc_cfg.h) is a separate, PROCESS-GLOBAL named-tunable
+ * registry (log levels, backpressure thresholds, ops-facing settings
+ * meant to survive a config-file reload) with no per-instance scoping
+ * yet, so it is not used to back a per-exec knob like these; the two
+ * mechanisms serve different scopes on purpose.
+ */
+
 /* Service mode: when set, xtc_exec_run does not idle-auto-stop and runs
  * until xtc_exec_stop is called.  Used by a supervised xtc_app, which is
- * a long-running service rather than a finite work pool. */
+ * a long-running service rather than a finite work pool.  Default 0. */
 XTC_API void xtc_exec_set_service_mode(xtc_exec_t *exec, int on);
+XTC_API int  xtc_exec_get_service_mode(xtc_exec_t *exec);
 
 /*
  * Eager work-stealing rebalance (OFF by default).
@@ -89,6 +123,7 @@ XTC_API void xtc_exec_set_service_mode(xtc_exec_t *exec, int on);
  * (the default) is unaffected either way.
  */
 XTC_API void xtc_exec_set_eager_rebalance(xtc_exec_t *exec, int on);
+XTC_API int  xtc_exec_get_eager_rebalance(xtc_exec_t *exec);
 
 int  xtc_exec_set_preempt(xtc_exec_t *exec, int64_t interval_ns);
 XTC_API int  xtc_exec_stop(xtc_exec_t *exec);
