@@ -37,10 +37,13 @@ struct xtc_exec {
 	__os_thread_t *workers;
 	_Atomic int   stop_flag;
 	int           started;
-	int           service_mode;    /* 1: run until xtc_exec_stop, never
+	_Atomic int   service_mode;    /* 1: run until xtc_exec_stop, never
 	                                * idle-auto-stop (a supervised app is
 	                                * a long-running service, not a finite
-	                                * work pool that drains and exits). */
+	                                * work pool that drains and exits).
+	                                * _Atomic: xtc_exec_set_service_mode may
+	                                * be called from any thread while
+	                                * xtc_exec_run's idle check reads it. */
 	int64_t       preempt_interval_ns; /* 0 = off (default); >0 arms a
 	                                    * per-worker preemption timer at
 	                                    * this CPU-time interval (Phase 1
@@ -294,7 +297,16 @@ void
 xtc_exec_set_service_mode(xtc_exec_t *e, int on)
 {
 	if (e != NULL)
-		e->service_mode = on ? 1 : 0;
+		atomic_store_explicit(&e->service_mode, on ? 1 : 0,
+		    memory_order_relaxed);
+}
+
+/* PUBLIC: int  xtc_exec_get_service_mode __P((xtc_exec_t *)); */
+int
+xtc_exec_get_service_mode(xtc_exec_t *e)
+{
+	return (e != NULL) &&
+	    atomic_load_explicit(&e->service_mode, memory_order_relaxed);
 }
 
 /* PUBLIC: void xtc_exec_set_eager_rebalance __P((xtc_exec_t *, int)); */
@@ -304,6 +316,14 @@ xtc_exec_set_eager_rebalance(xtc_exec_t *e, int on)
 	if (e != NULL)
 		atomic_store_explicit(&e->eager_rebalance, on ? 1 : 0,
 		    memory_order_relaxed);
+}
+
+/* PUBLIC: int  xtc_exec_get_eager_rebalance __P((xtc_exec_t *)); */
+int
+xtc_exec_get_eager_rebalance(xtc_exec_t *e)
+{
+	return (e != NULL) &&
+	    atomic_load_explicit(&e->eager_rebalance, memory_order_relaxed);
 }
 
 /*
@@ -417,7 +437,8 @@ xtc_exec_run(xtc_exec_t *e)
 		if (atomic_load_explicit(&e->stop_flag,
 		    memory_order_relaxed))
 			break;
-		if (!e->service_mode && !__exec_has_work(e)) {
+		if (!atomic_load_explicit(&e->service_mode, memory_order_relaxed) &&
+		    !__exec_has_work(e)) {
 			/*
 			 * Confirm with a small re-check window: a worker
 			 * might be mid-step.  Sleep ~1 ms, then re-check.

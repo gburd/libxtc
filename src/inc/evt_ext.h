@@ -4,6 +4,8 @@
 #ifndef EVT_EXT_H
 #define EVT_EXT_H
 
+int  xtc_exec_get_eager_rebalance __P((xtc_exec_t *));
+int  xtc_exec_get_service_mode __P((xtc_exec_t *));
 int __xtc_coro_preempt __P((void *));
 int __xtc_coro_preempt_effective __P((void));
 int __xtc_sim_active __P((void));
