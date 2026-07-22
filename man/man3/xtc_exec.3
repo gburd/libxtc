@@ -233,6 +233,14 @@ most one re-queue per yielded run.
 returns the executor index of the loop the calling task is running
 on, or -1 from a thread that is not a worker.  Tests use this to
 verify spawn placement and steal behaviour.
+It is also the migration-detection idiom: because it re-reads the
+CURRENT resume's carrier every call (like
+.Xr xtc_self 3 ) ,
+a proc that captures it before a yield and compares after learns
+whether it was work-stolen to a different loop in between -- see
+.Xr xtc_proc 3
+MIGRATION for the pattern a consumer with carrier-affine cached state
+(e.g.\& a per-loop wait-set registration) should use.
 .Pp
 .Fn xtc_shard_id
 and
