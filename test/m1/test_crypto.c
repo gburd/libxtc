@@ -33,6 +33,22 @@
 # define HAVE_CRYPTO 0
 #endif
 
+/*
+ * SHA-3 is provided by real OpenSSL but NOT by BoringSSL (which ships
+ * no SHA-3 at all), where __os_crypto_sha3_* returns XTC_E_NOSYS.  The
+ * test cannot see OPENSSL_IS_BORINGSSL (it includes only os_crypto.h),
+ * so the SHA-3 KAT cases are backend-contract-aware: on a build with
+ * crypto, accept EITHER the correct digest (real OpenSSL) OR NOSYS
+ * (BoringSSL); with no crypto backend, require NOSYS. */
+#define SHA3_ASSERT(rc, out, expect)                                       \
+	do {                                                               \
+		if (HAVE_CRYPTO && (rc) == XTC_OK)                         \
+			munit_assert_memory_equal(sizeof(expect), (out),   \
+			    (expect));                                     \
+		else                                                       \
+			munit_assert_int((rc), ==, XTC_E_NOSYS);           \
+	} while (0)
+
 /* Hex-decode helper for test vectors. */
 static void
 hex2bin(const char *hex, uint8_t *out, size_t outlen)
@@ -149,12 +165,7 @@ test_sha3_256_empty(const MunitParameter p[], void *d)
 	hex2bin("a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
 	    expect, sizeof(expect));
 	rc = __os_crypto_sha3_256("", 0, out);
-#if HAVE_CRYPTO
-	munit_assert_int(rc, ==, XTC_OK);
-	munit_assert_memory_equal(sizeof(expect), out, expect);
-#else
-	munit_assert_int(rc, ==, XTC_E_NOSYS);
-#endif
+	SHA3_ASSERT(rc, out, expect);
 	return MUNIT_OK;
 }
 
@@ -171,12 +182,7 @@ test_sha3_256_abc(const MunitParameter p[], void *d)
 	hex2bin("3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
 	    expect, sizeof(expect));
 	rc = __os_crypto_sha3_256("abc", 3, out);
-#if HAVE_CRYPTO
-	munit_assert_int(rc, ==, XTC_OK);
-	munit_assert_memory_equal(sizeof(expect), out, expect);
-#else
-	munit_assert_int(rc, ==, XTC_E_NOSYS);
-#endif
+	SHA3_ASSERT(rc, out, expect);
 	return MUNIT_OK;
 }
 
@@ -195,12 +201,7 @@ test_sha3_512_abc(const MunitParameter p[], void *d)
 	    "10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0",
 	    expect, sizeof(expect));
 	rc = __os_crypto_sha3_512("abc", 3, out);
-#if HAVE_CRYPTO
-	munit_assert_int(rc, ==, XTC_OK);
-	munit_assert_memory_equal(sizeof(expect), out, expect);
-#else
-	munit_assert_int(rc, ==, XTC_E_NOSYS);
-#endif
+	SHA3_ASSERT(rc, out, expect);
 	return MUNIT_OK;
 }
 

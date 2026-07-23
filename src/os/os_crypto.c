@@ -386,8 +386,21 @@ __os_crypto_blake3(const void *data, size_t len,
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
+#if defined(OPENSSL_IS_BORINGSSL)
+/*
+ * BoringSSL does not implement OpenSSL 3.x's EVP_KDF / OSSL_PARAM
+ * provider API (no <openssl/kdf.h> EVP_KDF, no core_names.h); it
+ * exposes HKDF through the older, simpler <openssl/hkdf.h> one-shot
+ * functions instead.  The HKDF implementation below branches on
+ * OPENSSL_IS_BORINGSSL to use whichever the backend actually provides.
+ */
+#include <openssl/hkdf.h>
+#include <openssl/digest.h>
+#include <openssl/aead.h>   /* EVP_aead_chacha20_poly1305 (BoringSSL) */
+#else
 #include <openssl/kdf.h>
 #include <openssl/core_names.h>
+#endif
 
 struct __os_csprng {
 	int unused;   /* opaque; state lives in OpenSSL's own default RNG */
@@ -443,9 +456,19 @@ __os_crypto_sha3_256(const void *data, size_t len,
 	if ((data == NULL && len != 0) || out == NULL)
 		return XTC_E_INVAL;
 
+#if defined(OPENSSL_IS_BORINGSSL)
+	/* BoringSSL does not implement SHA-3 at all (no EVP_sha3_*, no
+	 * Keccak in its EVP surface).  Rather than carry a portable Keccak
+	 * reimplementation for a deferred-until-needed primitive on one
+	 * backend, follow the module's "always linkable, NOSYS when the
+	 * backend cannot provide it" convention. */
+	(void)outlen;
+	return XTC_E_NOSYS;
+#else
 	if (EVP_Digest(data, len, out, &outlen, EVP_sha3_256(), NULL) != 1)
 		return XTC_E_INTERNAL;
 	return XTC_OK;
+#endif
 }
 
 /*
@@ -460,9 +483,14 @@ __os_crypto_sha3_512(const void *data, size_t len,
 	if ((data == NULL && len != 0) || out == NULL)
 		return XTC_E_INVAL;
 
+#if defined(OPENSSL_IS_BORINGSSL)
+	(void)outlen;
+	return XTC_E_NOSYS;   /* no SHA-3 in BoringSSL (see sha3_256) */
+#else
 	if (EVP_Digest(data, len, out, &outlen, EVP_sha3_512(), NULL) != 1)
 		return XTC_E_INTERNAL;
 	return XTC_OK;
+#endif
 }
 
 /*
@@ -493,7 +521,7 @@ __os_crypto_aes_gcm_encrypt(
 	if ((ctx = EVP_CIPHER_CTX_new()) == NULL)
 		return XTC_E_INTERNAL;
 
-	if (EVP_EncryptInit_ex2(ctx, EVP_aes_256_gcm(), key, iv, NULL) != 1) {
+	if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, iv) != 1) {
 		EVP_CIPHER_CTX_free(ctx);
 		return XTC_E_INTERNAL;
 	}
@@ -560,7 +588,7 @@ __os_crypto_aes_gcm_decrypt(
 	if ((ctx = EVP_CIPHER_CTX_new()) == NULL)
 		return XTC_E_INTERNAL;
 
-	if (EVP_DecryptInit_ex2(ctx, EVP_aes_256_gcm(), key, iv, NULL) != 1) {
+	if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, iv) != 1) {
 		EVP_CIPHER_CTX_free(ctx);
 		return XTC_E_INTERNAL;
 	}
@@ -620,11 +648,6 @@ __os_crypto_chacha20_poly1305_encrypt(
     const void *plaintext, size_t len,
     void *ciphertext_out, uint8_t tag_out[XTC_CRYPTO_CHACHA_TAG_LEN])
 {
-	EVP_CIPHER_CTX *ctx;
-	unsigned char final_scratch[EVP_MAX_BLOCK_LENGTH];
-	unsigned char *cout = ciphertext_out;
-	int outl, tmplen;
-
 	if (key == NULL || nonce == NULL || tag_out == NULL)
 		return XTC_E_INVAL;
 	if ((plaintext == NULL || ciphertext_out == NULL) && len != 0)
@@ -634,14 +657,56 @@ __os_crypto_chacha20_poly1305_encrypt(
 	if (len > (size_t)INT_MAX || aadlen > (size_t)INT_MAX)
 		return XTC_E_RANGE;
 
+#if defined(OPENSSL_IS_BORINGSSL)
+	{
+		/* BoringSSL exposes ChaCha20-Poly1305 only via EVP_AEAD, not
+		 * the EVP_CIPHER interface (no EVP_chacha20_poly1305 /
+		 * EVP_EncryptInit_ex2).  The AEAD seal writes ciphertext||tag
+		 * contiguously, so seal into a scratch layout and split. */
+		const EVP_AEAD *aead = EVP_aead_chacha20_poly1305();
+		EVP_AEAD_CTX *actx;
+		unsigned char stackbuf[512];
+		unsigned char *sealbuf = stackbuf;
+		size_t sealed = 0, need = len + XTC_CRYPTO_CHACHA_TAG_LEN;
+		int ok = 0;
+
+		if (need > sizeof stackbuf &&
+		    __os_malloc(need, (void **)&sealbuf) != XTC_OK)
+			return XTC_E_NOMEM;
+		actx = EVP_AEAD_CTX_new(aead, key, XTC_CRYPTO_CHACHA_KEY_LEN,
+		    XTC_CRYPTO_CHACHA_TAG_LEN);
+		if (actx != NULL &&
+		    EVP_AEAD_CTX_seal(actx, sealbuf, &sealed, need,
+		        nonce, XTC_CRYPTO_CHACHA_NONCE_LEN,
+		        plaintext, len, aad, aadlen) == 1 &&
+		    sealed == need) {
+			if (len > 0 && ciphertext_out != NULL)
+				memcpy(ciphertext_out, sealbuf, len);
+			memcpy(tag_out, sealbuf + len,
+			    XTC_CRYPTO_CHACHA_TAG_LEN);
+			ok = 1;
+		}
+		if (actx != NULL)
+			EVP_AEAD_CTX_free(actx);
+		if (sealbuf != stackbuf)
+			__os_free(sealbuf);
+		return ok ? XTC_OK : XTC_E_INTERNAL;
+	}
+#else
+	{
+	EVP_CIPHER_CTX *ctx;
+	unsigned char final_scratch[EVP_MAX_BLOCK_LENGTH];
+	unsigned char *cout = ciphertext_out;
+	int outl, tmplen;
+
 	if ((ctx = EVP_CIPHER_CTX_new()) == NULL)
 		return XTC_E_INTERNAL;
 
 	/* The RFC 8439 12-byte nonce is EVP_chacha20_poly1305's default IV
 	 * length, so no EVP_CTRL_AEAD_SET_IVLEN is needed (same as the
 	 * AES-GCM path above). */
-	if (EVP_EncryptInit_ex2(ctx, EVP_chacha20_poly1305(),
-	    key, nonce, NULL) != 1) {
+	if (EVP_EncryptInit_ex(ctx, EVP_chacha20_poly1305(), NULL,
+	    key, nonce) != 1) {
 		EVP_CIPHER_CTX_free(ctx);
 		return XTC_E_INTERNAL;
 	}
@@ -673,6 +738,8 @@ __os_crypto_chacha20_poly1305_encrypt(
 
 	EVP_CIPHER_CTX_free(ctx);
 	return XTC_OK;
+	}
+#endif
 }
 
 /*
@@ -687,10 +754,7 @@ __os_crypto_chacha20_poly1305_decrypt(
     const uint8_t tag[XTC_CRYPTO_CHACHA_TAG_LEN],
     void *plaintext_out)
 {
-	EVP_CIPHER_CTX *ctx;
-	unsigned char final_scratch[EVP_MAX_BLOCK_LENGTH];
 	unsigned char *pout = plaintext_out;
-	int outl, tmplen, rc;
 
 	if (key == NULL || nonce == NULL || tag == NULL)
 		return XTC_E_INVAL;
@@ -701,11 +765,52 @@ __os_crypto_chacha20_poly1305_decrypt(
 	if (len > (size_t)INT_MAX || aadlen > (size_t)INT_MAX)
 		return XTC_E_RANGE;
 
+#if defined(OPENSSL_IS_BORINGSSL)
+	{
+		/* BoringSSL EVP_AEAD open: the sealed input is
+		 * ciphertext||tag contiguous, so stitch them into one buffer,
+		 * open (which verifies the tag), and on failure wipe any
+		 * provisional output and return XTC_E_INVAL. */
+		const EVP_AEAD *aead = EVP_aead_chacha20_poly1305();
+		EVP_AEAD_CTX *actx;
+		unsigned char stackbuf[512];
+		unsigned char *inbuf = stackbuf;
+		size_t got = 0, need = len + XTC_CRYPTO_CHACHA_TAG_LEN;
+		int rc = XTC_E_INVAL;
+
+		if (need > sizeof stackbuf &&
+		    __os_malloc(need, (void **)&inbuf) != XTC_OK)
+			return XTC_E_NOMEM;
+		if (len > 0 && ciphertext != NULL)
+			memcpy(inbuf, ciphertext, len);
+		memcpy(inbuf + len, tag, XTC_CRYPTO_CHACHA_TAG_LEN);
+		actx = EVP_AEAD_CTX_new(aead, key, XTC_CRYPTO_CHACHA_KEY_LEN,
+		    XTC_CRYPTO_CHACHA_TAG_LEN);
+		if (actx != NULL &&
+		    EVP_AEAD_CTX_open(actx, pout, &got, len,
+		        nonce, XTC_CRYPTO_CHACHA_NONCE_LEN,
+		        inbuf, need, aad, aadlen) == 1 && got == len) {
+			rc = XTC_OK;
+		} else if (len > 0 && pout != NULL) {
+			memset(pout, 0, len);
+		}
+		if (actx != NULL)
+			EVP_AEAD_CTX_free(actx);
+		if (inbuf != stackbuf)
+			__os_free(inbuf);
+		return rc;
+	}
+#else
+	{
+	EVP_CIPHER_CTX *ctx;
+	unsigned char final_scratch[EVP_MAX_BLOCK_LENGTH];
+	int outl, tmplen, rc;
+
 	if ((ctx = EVP_CIPHER_CTX_new()) == NULL)
 		return XTC_E_INTERNAL;
 
-	if (EVP_DecryptInit_ex2(ctx, EVP_chacha20_poly1305(),
-	    key, nonce, NULL) != 1) {
+	if (EVP_DecryptInit_ex(ctx, EVP_chacha20_poly1305(), NULL,
+	    key, nonce) != 1) {
 		EVP_CIPHER_CTX_free(ctx);
 		return XTC_E_INTERNAL;
 	}
@@ -747,6 +852,8 @@ __os_crypto_chacha20_poly1305_decrypt(
 		return XTC_E_INVAL;
 	}
 	return XTC_OK;
+	}
+#endif
 }
 
 /*
@@ -755,16 +862,65 @@ __os_crypto_chacha20_poly1305_decrypt(
  * public entry points below (extract, expand, combined) are thin
  * wrappers over it.
  */
+
+/* Backend-neutral HKDF mode selector (the OpenSSL-3.x EVP_KDF_HKDF_MODE_*
+ * and BoringSSL paths both key off these, so callers never name a
+ * backend-specific constant). */
+#define XTC_HKDF_MODE_EXTRACT_AND_EXPAND  0
+#define XTC_HKDF_MODE_EXTRACT_ONLY        1
+#define XTC_HKDF_MODE_EXPAND_ONLY         2
+
 static int
 hkdf_run(int mode, const void *ikm, size_t ikmlen,
     const void *salt, size_t saltlen, const void *info, size_t infolen,
     unsigned char *out, size_t outlen)
 {
+#if defined(OPENSSL_IS_BORINGSSL)
+	/*
+	 * BoringSSL: use the one-shot <openssl/hkdf.h> functions.
+	 * EXTRACT_ONLY -> HKDF_extract (out is the PRK, outlen == HashLen);
+	 * EXPAND_ONLY  -> HKDF_expand (ikm is the PRK);
+	 * EXTRACT_AND_EXPAND -> HKDF (the full one-shot).
+	 */
+	const EVP_MD *md = EVP_sha256();
+
+	if (ikmlen > (size_t)INT_MAX || saltlen > (size_t)INT_MAX ||
+	    infolen > (size_t)INT_MAX)
+		return XTC_E_RANGE;
+
+	switch (mode) {
+	case XTC_HKDF_MODE_EXTRACT_ONLY: {
+		size_t prklen = 0;
+		if (HKDF_extract(out, &prklen, md, ikm, ikmlen,
+		    salt, saltlen) != 1)
+			return XTC_E_INTERNAL;
+		return XTC_OK;
+	}
+	case XTC_HKDF_MODE_EXPAND_ONLY:
+		if (HKDF_expand(out, outlen, md, ikm, ikmlen,
+		    info, infolen) != 1)
+			return XTC_E_INTERNAL;
+		return XTC_OK;
+	case XTC_HKDF_MODE_EXTRACT_AND_EXPAND:
+	default:
+		if (HKDF(out, outlen, md, ikm, ikmlen, salt, saltlen,
+		    info, infolen) != 1)
+			return XTC_E_INTERNAL;
+		return XTC_OK;
+	}
+#else
+	/* OpenSSL 3.x: the EVP_KDF / OSSL_PARAM provider API. */
+	static const int evp_mode[] = {
+		[XTC_HKDF_MODE_EXTRACT_AND_EXPAND] =
+		    EVP_KDF_HKDF_MODE_EXTRACT_AND_EXPAND,
+		[XTC_HKDF_MODE_EXTRACT_ONLY] = EVP_KDF_HKDF_MODE_EXTRACT_ONLY,
+		[XTC_HKDF_MODE_EXPAND_ONLY]  = EVP_KDF_HKDF_MODE_EXPAND_ONLY,
+	};
 	EVP_KDF     *kdf;
 	EVP_KDF_CTX *kctx;
 	OSSL_PARAM   params[6], *p = params;
 	char         digest[] = "SHA256";
-	int          m = mode;
+	int          m = evp_mode[mode];
 	int          rc = XTC_E_INTERNAL;
 
 	if (ikmlen > (size_t)INT_MAX || saltlen > (size_t)INT_MAX ||
@@ -797,6 +953,7 @@ hkdf_run(int mode, const void *ikm, size_t ikmlen,
 	EVP_KDF_CTX_free(kctx);
 	EVP_KDF_free(kdf);
 	return rc;
+#endif
 }
 
 /*
@@ -809,7 +966,7 @@ __os_crypto_hkdf_extract(const void *salt, size_t saltlen,
 	if (prk_out == NULL || (ikm == NULL && ikmlen != 0) ||
 	    (salt == NULL && saltlen != 0))
 		return XTC_E_INVAL;
-	return hkdf_run(EVP_KDF_HKDF_MODE_EXTRACT_ONLY, ikm, ikmlen,
+	return hkdf_run(XTC_HKDF_MODE_EXTRACT_ONLY, ikm, ikmlen,
 	    salt, saltlen, NULL, 0, prk_out, XTC_CRYPTO_SHA256_LEN);
 }
 
@@ -826,7 +983,7 @@ __os_crypto_hkdf_expand(const uint8_t prk[XTC_CRYPTO_SHA256_LEN],
 	if (outlen == 0 || outlen > 255 * (size_t)XTC_CRYPTO_SHA256_LEN)
 		return XTC_E_INVAL;
 	/* Expand-only takes the PRK via the "key" param. */
-	return hkdf_run(EVP_KDF_HKDF_MODE_EXPAND_ONLY, prk,
+	return hkdf_run(XTC_HKDF_MODE_EXPAND_ONLY, prk,
 	    XTC_CRYPTO_SHA256_LEN, NULL, 0, info, infolen, out, outlen);
 }
 
@@ -843,7 +1000,7 @@ __os_crypto_hkdf(const void *ikm, size_t ikmlen,
 		return XTC_E_INVAL;
 	if (outlen == 0 || outlen > 255 * (size_t)XTC_CRYPTO_SHA256_LEN)
 		return XTC_E_INVAL;
-	return hkdf_run(EVP_KDF_HKDF_MODE_EXTRACT_AND_EXPAND, ikm, ikmlen,
+	return hkdf_run(XTC_HKDF_MODE_EXTRACT_AND_EXPAND, ikm, ikmlen,
 	    salt, saltlen, info, infolen, out, outlen);
 }
 

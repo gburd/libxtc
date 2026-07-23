@@ -78,9 +78,14 @@ XTC_API int __os_crypto_hmac_sha256(const void *key, size_t keylen,
  *
  * __os_crypto_sha3_256 / _sha3_512 write the 32- resp. 64-byte SHA-3
  * (FIPS 202, Keccak) digest of data[0..len) to out.  Same return
- * codes and NULL-argument contract as __os_crypto_sha256; OpenSSL is
- * the only backend, so both return XTC_E_NOSYS when OpenSSL is not the
- * selected TLS backend.
+ * codes and NULL-argument contract as __os_crypto_sha256.  Return
+ * XTC_E_NOSYS when OpenSSL is not the selected TLS backend AND on
+ * BoringSSL, which -- despite defining XTC_TLS_BACKEND_OPENSSL --
+ * ships no SHA-3 (no EVP_sha3_*, no Keccak in its EVP surface).  A
+ * portable Keccak reimplementation was judged not worth carrying for
+ * a deferred-until-needed primitive on one backend; BLAKE3 (which
+ * OpenSSL lacks too) IS carried portably because it was the primary
+ * hashing target.
  *
  * PUBLIC: int __os_crypto_sha3_256 __P((const void *, size_t, uint8_t *));
  * PUBLIC: int __os_crypto_sha3_512 __P((const void *, size_t, uint8_t *));
