@@ -1,3 +1,19 @@
+libxtc (1.30.0-1) unstable; urgency=medium
+
+  * feat: xtc_accel -- attached-compute (GPU/NPU) fiber-parking bridge.
+    xtc_accel_probe enumerates present GPU (render node) and NPU (accel
+    subsystem) devices; xtc_accel_wait_fence parks a fiber on a
+    completion fence fd (sync_file / dma-fence) via the loop-readiness
+    path with no OS thread held; xtc_accel_run_blocking is the
+    xtc_blocking fallback for fence-less runtimes.  GPU and NPU are one
+    abstraction (both DRM devices with the same fence-fd completion);
+    libxtc links no vendor runtime -- the consumer submits and supplies
+    the fence.  Configure with --with-accel=auto|yes|no (default auto:
+    on where the Linux DRM/accel subsystem is present; --without-accel
+    to disable).
+
+ -- Greg Burd <greg@burd.me>  Thu, 23 Jul 2026 13:00:00 +0000
+
 libxtc (1.29.0-1) unstable; urgency=medium
 
   * feat: xtc_prob -- new public probabilistic-data-structures module:
