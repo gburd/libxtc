@@ -1,3 +1,30 @@
+libxtc (1.29.0-1) unstable; urgency=medium
+
+  * feat: xtc_prob -- new public probabilistic-data-structures module:
+    Bloom filter (xtc_bloom_*) and HyperLogLog (xtc_hll_*).
+    Single-threaded, no -lm dependency (PLAN 19.18, M14).
+  * feat: xtc_chash gains opt-in auto-shrink (xtc_chash_set_auto_shrink /
+    _get_auto_shrink, default off), the symmetric inverse of grow with a
+    4x-dead-band hysteresis so it cannot oscillate.  RCU-safe, DST
+    byte-identical replay proven (PLAN 19.18).
+  * feat (internal): os_crypto adds ChaCha20-Poly1305, SHA-3 (256/512),
+    a portable BLAKE3, and HKDF-SHA256 (PLAN 19.2).  Internal __os_crypto_*
+    surface only; built ahead of TDE/WAL-encryption need, KAT-verified.
+  * test/dst: planted-bug catalog backfilled 3 -> 9 (one deliberate,
+    compile-flag-gated safety-invariant violation per catching sim test,
+    all proven caught) plus a pinned failing-seed regression corpus
+    (test/sim/corpus/, scripts/dst-corpus.sh) wired into CI -- AGENTS.md
+    tenet 4, the bug-detection-latency metric.
+  * perf (example): sqlxtc buffer manager gains a lock-free hit path,
+    +43% read throughput at 8 loops (PLAN item 1a; sqlxtc example only,
+    not libxtc.a).
+  * test: harden test_eager_rebalance against a CI timing flake.
+  * docs: re-scope PLAN 19.6 (priority inheritance has no scheduler
+    substrate to inherit into; split into a lock-manager-local grant/
+    victim-ordering piece and a true cross-layer milestone).
+
+ -- Greg Burd <greg@burd.me>  Thu, 23 Jul 2026 07:00:00 +0000
+
 libxtc (1.28.1-1) unstable; urgency=high
 
   * fix: xtc_task_waker() now names the loop a task is CURRENTLY
