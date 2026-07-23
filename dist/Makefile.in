@@ -135,6 +135,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/rcu.c \
 	$(srcdir)/../src/ptc/chash.c \
 	$(srcdir)/../src/ptc/cskip.c \
+	$(srcdir)/../src/ptc/prob.c \
 	$(srcdir)/../src/ptc/dio_sched.c \
 	$(srcdir)/../src/ptc/iosched.c \
 	$(srcdir)/../src/ptc/dump.c \
@@ -227,6 +228,7 @@ LIB_OBJS	= \
 	rcu.o \
 	chash.o \
 	cskip.o \
+	prob.o \
 	dio_sched.o \
 	iosched.o \
 	dump.o \
@@ -305,6 +307,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_rcu.h \
 	$(srcdir)/../src/inc/xtc_chash.h \
 	$(srcdir)/../src/inc/xtc_cskip.h \
+	$(srcdir)/../src/inc/xtc_prob.h \
 	$(srcdir)/../src/inc/xtc_reg.h \
 	$(srcdir)/../src/inc/xtc_res.h \
 	$(srcdir)/../src/inc/xtc_slab.h \
@@ -432,6 +435,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_rcu \
 		  test_chash \
 		  test_cskip \
+		  test_prob \
 		  test_lrlock \
 		  test_lwlock \
 		  test_lockmgr \
@@ -710,6 +714,9 @@ rcu.o: $(srcdir)/../src/ptc/rcu.c xtc_config.h
 chash.o: $(srcdir)/../src/ptc/chash.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/chash.c
 
+prob.o: $(srcdir)/../src/ptc/prob.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/prob.c
+
 cskip.o: $(srcdir)/../src/ptc/cskip.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/cskip.c
 
@@ -833,6 +840,11 @@ bench_mem_per_task: $(srcdir)/../bench/bench_mem_per_task.c $(STATIC_LIB)
 bench_exec_scale: $(srcdir)/../bench/bench_exec_scale.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_exec_scale.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+bench_proc_table: $(srcdir)/../bench/bench_proc_table.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_proc_table.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 bench_xproc_fanout: $(srcdir)/../bench/bench_xproc_fanout.c $(STATIC_LIB)
@@ -1437,6 +1449,12 @@ test_cskip: $(srcdir)/../test/m13/test_cskip.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
 		-o $@ $(srcdir)/../test/m13/test_cskip.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_prob: $(srcdir)/../test/m13/test_prob.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
+		-o $@ $(srcdir)/../test/m13/test_prob.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_lrlock: $(srcdir)/../test/m13/test_lrlock.c \
