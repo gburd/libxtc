@@ -56,6 +56,10 @@
 /* Define to enable runtime diagnostic assertions. */
 #undef XTC_DIAGNOSTIC
 
+/* Define to 1 if the platform has the DRM/accel subsystem for
+   attached-compute (GPU/NPU) fence-wait + device probe support */
+#undef XTC_HAVE_ACCEL
+
 /* Define to 1 to use the builtin _Unwind_Backtrace backend */
 #undef XTC_HAVE_BUILTIN_UNWIND
 
@@ -71,6 +75,10 @@
 
 /* hegel-c property tests enabled */
 #undef XTC_HAVE_HEGEL
+
+/* Define to 1 if libdrm is available (optional enhancement for the accel
+   fence path; the base sync_file poll path does not need it) */
+#undef XTC_HAVE_LIBDRM
 
 /* Define to 1 to use the libunwind stack-backtrace backend */
 #undef XTC_HAVE_LIBUNWIND

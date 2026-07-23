@@ -1,0 +1,183 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 23, 2026
+.Dt XTC_ACCEL 3
+.Os
+.Sh NAME
+.Nm xtc_accel_probe ,
+.Nm xtc_accel_wait_fence ,
+.Nm xtc_accel_run_blocking
+.Nd park a fiber on a GPU/NPU completion; enumerate accelerators
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_accel.h
+.Ft int
+.Fn xtc_accel_probe "xtc_accel_dev_t *out" "int max" "int *out_n"
+.Ft int
+.Fn xtc_accel_wait_fence "int fence_fd" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_accel_run_blocking "int (*fn)(void *)" "void *arg" "int *out_result"
+.Sh DESCRIPTION
+An accelerator -- a GPU or an NPU (neural / vision processing unit,
+also called a VPU) -- is, at the layer a concurrency runtime cares
+about, an asynchronous I/O device: the caller submits an opaque
+command buffer or compiled graph, the coprocessor runs it, and it
+signals completion through a fence.  On Linux both device kinds are
+DRM devices
+.Pq Pa /dev/dri/renderD* No for a render GPU , Pa /dev/accel/accel* No for an NPU
+whose completions are the same kernel object -- a
+.Vt dma-fence
+exported as a pollable
+.Vt sync_file
+file descriptor, the identical readiness event the loop already
+multiplexes for sockets and pipes.  A GPU fence fd and an NPU fence fd
+are indistinguishable to
+.Xr poll 2 ,
+so they are handled by one API here.
+.Pp
+The
+.Nm xtc_accel
+facility does exactly one thing: it parks the calling fiber on such a
+completion and wakes it when the device is done.  It is
+.Em not
+a tensor library, a device-memory allocator, or a vendor-SDK
+portability layer.
+.Nm libxtc
+links no GPU/NPU runtime
+.Pq Xr Level Zero , CUDA , Vulkan , OpenVINO , ...\& :
+the consumer links whichever runtime drives the device, submits the
+work, and hands
+.Nm
+the resulting fence fd.  The abstraction stops at the fence; submission
+and the compute itself live above it.
+.Pp
+.Fn xtc_accel_probe
+enumerates the accelerator devices present on the host into
+.Fa out Ns Bq 0 .. Ns Fa max ,
+writing the total number found to
+.Fa *out_n
+(which may exceed
+.Fa max
+if the buffer was too small; only the first
+.Fa max
+are written).  Each
+.Vt xtc_accel_dev_t
+reports a
+.Fa kind
+.Pq Dv XTC_ACCEL_KIND_GPU No or Dv XTC_ACCEL_KIND_NPU ,
+a short
+.Fa name ,
+the device
+.Fa node
+path, and the backing kernel
+.Fa driver
+name if cheaply known (for example
+.Ql xe
+or
+.Ql intel_vpu ) .
+These are for device selection and observability by the consumer and
+its runtime;
+.Nm libxtc
+opens none of them.  The device kind is a tag only -- it never changes
+how a fence is waited on.  Probing opens and submits nothing.
+.Pp
+.Fn xtc_accel_wait_fence
+parks the calling fiber until the completion fence
+.Fa fence_fd
+signals or
+.Fa timeout_ns
+elapses
+.Pq negative waits forever .
+The fence fd is a pollable
+.Vt sync_file
+the consumer's runtime produced when it submitted work (from a
+.Xr Level Zero
+event or fence, an exported DRM sync object, a
+.Dv VK_KHR_external_fence_fd
+Vulkan fence, a CUDA event bridged to an
+.Xr eventfd 2 ,
+and so on).  While waiting the fiber holds no OS thread -- the wait
+rides the loop's normal readiness path via
+.Xr xtc_proc_wait_fd 3 .
+.Nm libxtc
+does not own, duplicate, or close
+.Fa fence_fd ;
+the caller retains ownership.  It must be called from within a fiber.
+.Pp
+.Fn xtc_accel_run_blocking
+runs the synchronous accelerator call
+.Fa fn Ns ( Ns Fa arg Ns )
+on the
+.Xr xtc_blocking 3
+thread pool, parking the calling fiber until it returns and storing
+.Fa fn Ns 's
+return value in
+.Fa *out_result
+.Pq may be Dv NULL .
+It is the fallback for runtimes that expose only a blocking
+submit-and-wait with no pollable fence.  It holds one pool thread for
+the duration of
+.Fa fn ,
+so it suits coarse-grained inference rather than thousands of tiny
+operations per second; prefer
+.Fn xtc_accel_wait_fence
+when a fence fd is available.
+.Sh RETURN VALUES
+.Fn xtc_accel_probe
+returns
+.Dv XTC_OK
+on success, including when zero devices are found (absence is not an
+error), or
+.Dv XTC_E_INVAL
+on a bad argument.
+.Pp
+.Fn xtc_accel_wait_fence
+returns
+.Dv XTC_OK
+when the fence signals,
+.Dv XTC_E_AGAIN
+on timeout (the fence never fired),
+.Dv XTC_E_INVAL
+on a bad file descriptor, or
+.Dv XTC_E_NOSYS
+when the library was built without accelerator support.
+.Pp
+.Fn xtc_accel_run_blocking
+returns
+.Dv XTC_OK
+.Pq Fa fn No ran; see Fa *out_result ,
+.Dv XTC_E_INVAL
+for a
+.Dv NULL
+.Fa fn ,
+or an
+.Xr xtc_blocking 3
+error if the work could not be dispatched.  It works regardless of
+whether accelerator support was built in.
+.Sh AVAILABILITY
+Accelerator support is selected at configure time with
+.Fl -with-accel Ns = Ns Ar auto Ns | Ns Ar yes Ns | Ns Ar no
+(default
+.Ar auto :
+enabled where the Linux DRM/accel subsystem is present).  When it is
+not built in,
+.Fn xtc_accel_probe
+reports zero devices and
+.Fn xtc_accel_wait_fence
+returns
+.Dv XTC_E_NOSYS ,
+following the same
+.Dq always linkable, NOSYS when unsupported
+convention as the TLS and cryptography modules;
+.Fn xtc_accel_run_blocking
+is unaffected.
+.Sh SEE ALSO
+.Xr xtc_blocking 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_io 3
+.Sh HISTORY
+The
+.Nm xtc_accel
+facility appeared in
+.Nm libxtc
+1.30.
