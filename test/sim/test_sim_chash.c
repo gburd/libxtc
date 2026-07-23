@@ -39,19 +39,24 @@
  *   poisoned first) only via a retire callback the writer schedules
  *   AFTER a grace period, mirroring how a real consumer would reclaim
  *   a chash value's own storage.  WRITER fibers each own a disjoint
- *   key stride: insert every key, then remove every other one (and
- *   retire the removed value).  READER fibers repeatedly: rcu_read_lock,
+ *   key stride: insert every key, then remove 3 of every 4 (keeping
+ *   off%4==0) and retire each removed value.  With auto-shrink ENABLED
+ *   this delete-heavy phase drops ~75% of the table and forces one or
+ *   more RCU SHRINKS -- the grow path in reverse -- exercised
+ *   deterministically here.  READER fibers repeatedly: rcu_read_lock,
  *   get a key, if present remember value->sentinel and value->key,
  *   YIELD (holding the read-side), then RE-CHECK the sentinel and key
- *   -- the value MUST still be live and unchanged.
+ *   -- the value MUST still be live and unchanged even across a
+ *   concurrent shrink that swaps the bucket array under the reader.
  *
  * Asserts: (a) NO reader observed a freed/torn value (uaf == 0),
  * (b) the final table contents exactly equal the reference model (the
- * odd-stride survivors present with their expected value, the
- * even-stride removed absent), (c) quiescence (rc == XTC_OK), (d)
- * byte-identical replay from the seed (app hash + sim state hash),
- * (e) a different seed reorders but stays consistent.  An RLIMIT_AS
- * cap bounds memory so a reclamation bug cannot OOM the box.
+ * off%4==0 survivors present with their expected value, the rest
+ * removed), (c) quiescence (rc == XTC_OK), (d) byte-identical replay
+ * from the seed (app hash + sim state hash) -- shrink is as
+ * deterministic as grow given the same op sequence, (e) a different
+ * seed reorders but stays consistent.  An RLIMIT_AS cap bounds memory
+ * so a reclamation bug cannot OOM the box.
  */
 
 #define N_LOOPS 4
@@ -148,12 +153,17 @@ ch_writer(void *arg)
 		ch_fold((long)(key * 3));
 		xtc_yield();
 	}
-	/* Remove every other key, retiring the removed value (freed a
-	 * grace period later -- a reader mid-lookup keeps a live value). */
-	for (i = 0; i < CH_PER_W; i += 2) {
+	/* Delete-heavy phase: remove 3 of every 4 keys (keep off%4==0),
+	 * retiring the removed value (freed a grace period later -- a
+	 * reader mid-lookup keeps a live value).  Dropping ~75% of the
+	 * table with auto-shrink ON forces one or more RCU shrinks under
+	 * DST, exercised deterministically. */
+	for (i = 0; i < CH_PER_W; i++) {
 		int64_t key = base + i;
 		struct ikey lookup;
 		void *removed = NULL;
+		if (i % 4 == 0)
+			continue;   /* survivor */
 		lookup.v = key;
 		if (xtc_chash_remove(g_h, &lookup, &removed) == XTC_OK &&
 		    removed != NULL)
@@ -222,6 +232,9 @@ run_chash(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
 		xtc_rcu_fini();
 		return -1;
 	}
+	/* Opt in to auto-shrink so the delete-heavy phase exercises the
+	 * RCU shrink path deterministically under DST. */
+	xtc_chash_set_auto_shrink(g_h, 1);
 	for (i = 0; i < CH_KEYSPACE; i++) {
 		g_keyptrs[i] = malloc(sizeof(struct ikey));
 		g_valptrs[i] = malloc(sizeof(struct val));
@@ -309,11 +322,11 @@ main(void)
 		uint64_t s1 = 0, s2 = 0, s3 = 0;
 		int expect_survivors = 0, i;
 
-		/* Reference model: every odd-stride key of each writer's
-		 * range survives; every even-stride key is removed. */
+		/* Reference model: every key with off%4==0 in each writer's
+		 * range survives; the other 3-in-4 are removed. */
 		for (i = 0; i < CH_KEYSPACE; i++) {
 			int64_t off = i % CH_PER_W;
-			if (off % 2 != 0) expect_survivors++;
+			if (off % 4 == 0) expect_survivors++;
 		}
 
 		rc = run_chash(0x5C0FF, &rd1, &wr1, &uaf1, &sz1, &h1, &s1);

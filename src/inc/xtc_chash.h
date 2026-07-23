@@ -18,13 +18,14 @@
  *	equality via == 0).
  *
  *	Concurrency model:
- *	  - Bucket array is RCU-protected: a resize (grow-only, v1)
- *	    allocates a new, larger array, rehashes every live node
- *	    into it, publishes the new array pointer, and retires the
- *	    old array via xtc_rcu_retire.  A reader that loaded the old
- *	    array pointer before the swap keeps working against a
- *	    fully valid (if smaller) table until it leaves its
- *	    read-side; nothing under it moves.
+ *	  - Bucket array is RCU-protected: a resize (grow always-on;
+ *	    shrink opt-in) allocates a new array of the new size,
+ *	    rehashes every live node into it, publishes the new array
+ *	    pointer, and retires the old array via xtc_rcu_retire.  A
+ *	    reader that loaded the old array pointer before the swap
+ *	    keeps working against a fully valid table (larger or smaller
+ *	    than the new one) until it leaves its read-side; nothing
+ *	    under it moves.
  *	  - Node removal: unlinked from its bucket chain under that
  *	    bucket's mutex, then handed to xtc_rcu_retire -- NEVER
  *	    freed directly.  A concurrent reader that already read a
@@ -51,11 +52,20 @@
  *	the mutable part; callers do not need an outer read-side for
  *	them.
  *
- *	Grow-only: xtc_chash never shrinks its bucket array.  A table
- *	that grows to a high-water mark and then drains stays at that
- *	array size until destroy.  Acceptable for v1; a real shrink
- *	would need the same RCU-swap machinery in reverse plus a
- *	load-factor-low policy, deferred until a workload needs it.
+ *	Resize: xtc_chash grows automatically past a 75% load factor
+ *	and, IF auto-shrink is enabled (xtc_chash_set_auto_shrink,
+ *	default OFF), shrinks automatically once the load factor drops
+ *	below 18.75% -- never below the initial/minimum bucket count.
+ *	Grow is always-on because memory then tracks the true working-
+ *	set peak monotonically; shrink is opt-in because it adds a
+ *	rehash to the remove path and reclaims memory a user may have
+ *	wanted stable.  Enable it if your workload has large delete
+ *	phases and you want memory reclaimed.  The wide gap between the
+ *	grow (0.75) and shrink (0.1875) triggers is deliberate
+ *	hysteresis: a table hovering near a boundary cannot thrash
+ *	grow<->shrink (a shrink halves the array, doubling the load
+ *	factor to <0.375, so re-growing needs a 2x count increase).
+ *	Both directions use the identical RCU-swap machinery.
  */
 
 #ifndef XTC_CHASH_H
@@ -87,6 +97,8 @@ typedef uint64_t (*xtc_chash_hash_fn)(const void *key);
  * PUBLIC: int    xtc_chash_insert __P((xtc_chash_t *, void *, void *, void **));
  * PUBLIC: int    xtc_chash_remove __P((xtc_chash_t *, const void *, void **));
  * PUBLIC: size_t xtc_chash_size __P((const xtc_chash_t *));
+ * PUBLIC: void   xtc_chash_set_auto_shrink __P((xtc_chash_t *, int));
+ * PUBLIC: int    xtc_chash_get_auto_shrink __P((const xtc_chash_t *));
  */
 
 /*
@@ -126,7 +138,7 @@ XTC_API int    xtc_chash_get(xtc_chash_t *h, const void *key, void **out_value);
  * does not care) and the old key/value pointers are the caller's
  * responsibility to free (this table never frees caller payloads).
  * On a fresh insert, *out_old_value (if non-NULL) is set to NULL.
- * May trigger a grow-only resize.  Returns XTC_OK or XTC_E_NOMEM.
+ * May trigger a resize (a grow).  Returns XTC_OK or XTC_E_NOMEM.
  */
 XTC_API int    xtc_chash_insert(xtc_chash_t *h, void *key, void *value,
                                 void **out_old_value);
@@ -145,5 +157,24 @@ XTC_API int    xtc_chash_remove(xtc_chash_t *h, const void *key, void **out_valu
  * instant with no concurrent writers, a fresh-enough estimate
  * otherwise). */
 XTC_API size_t xtc_chash_size(const xtc_chash_t *h);
+
+/*
+ * Enable (on != 0) or disable (on == 0) automatic shrink; default OFF.
+ * When enabled, xtc_chash_remove may halve the bucket array once the
+ * load factor drops below 18.75%, never below the initial capacity
+ * passed to xtc_chash_create (minimum 16).  Shrink uses the same
+ * RCU-swap machinery as grow: it takes every stripe lock, rehashes
+ * every live node into the smaller array, publishes it with a release
+ * store, and retires the old array via xtc_rcu_retire, so a concurrent
+ * reader mid-lookup on the old array stays correct until its read-side
+ * ends.  The 0.75-grow / 0.1875-shrink gap is deliberate hysteresis --
+ * a table near a boundary cannot thrash grow<->shrink.  Enable it if
+ * your workload has large delete phases and you want the memory
+ * reclaimed; leave it OFF (the default) if you want stable memory and
+ * a lighter remove path.  Takes effect immediately and is safe to call
+ * from any thread (a single atomic flag).
+ */
+XTC_API void   xtc_chash_set_auto_shrink(xtc_chash_t *h, int on);
+XTC_API int    xtc_chash_get_auto_shrink(const xtc_chash_t *h);
 
 #endif /* XTC_CHASH_H */

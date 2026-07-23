@@ -97,6 +97,12 @@ prop_model_equivalence(hegel_test_case *tc, void *u)
 	memset(&ref, 0, sizeof ref);
 	hegel_assume(xtc_rcu_init() == XTC_OK);
 	hegel_assume(xtc_chash_create(box_cmp, box_hash, 4, &h) == XTC_OK);
+	/* Auto-shrink ON so a random insert/remove sequence exercises
+	 * BOTH resize directions (grow past 0.75, shrink below 0.1875)
+	 * while the model-equivalence invariant below must still hold --
+	 * a resize in either direction must never lose, duplicate, or
+	 * corrupt an entry. */
+	xtc_chash_set_auto_shrink(h, 1);
 
 	nops = (int)hegel_draw_int(tc, hegel_integers(1, 200));
 	for (i = 0; i < nops; i++) {
