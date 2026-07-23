@@ -8,6 +8,7 @@
 
 #include "xtc_int.h"
 #include "xtc_res.h"
+#include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
 #include <string.h>
 
@@ -76,7 +77,13 @@ xtc_res_acquire(xtc_res_t *r, xtc_res_kind_t k, int64_t n)
 	for (;;) {
 		cur = atomic_load_explicit(&r->used[k], memory_order_relaxed);
 		next = cur + n;
+#if XTC_DST_BUG(XTC_DST_BUG_RESOVER)
+		/* planted bug: skip the cap check -> used can exceed the cap
+		 * (test_sim_res observes used > CAP). */
+		if (0 && cap > 0 && next > cap) {
+#else
 		if (cap > 0 && next > cap) {
+#endif
 			(void)atomic_fetch_add_explicit(&r->rejects[k], 1,
 			    memory_order_relaxed);
 			return XTC_E_RESOURCE;
@@ -117,6 +124,11 @@ xtc_res_release(xtc_res_t *r, xtc_res_kind_t k, int64_t n)
 	int64_t cap;
 	if (r == NULL || n <= 0 || (int)k < 0 || (int)k >= XTC_RES__COUNT)
 		return;
+#if XTC_DST_BUG(XTC_DST_BUG_RESLEAK)
+	/* planted bug: drop the decrement -> every acquire leaks its units,
+	 * so `used` never returns to zero (test_sim_res conservation). */
+	return;
+#endif
 	prev = atomic_fetch_sub_explicit(&r->used[k], n,
 	    memory_order_relaxed);
 	if (prev < n) {

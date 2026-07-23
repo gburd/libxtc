@@ -15,6 +15,7 @@
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_sync.h"
 #include "xtc_credit.h"
+#include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
 #include <pthread.h>
 
@@ -104,6 +105,12 @@ xtc_credit_release(xtc_credit_t *c)
 	c->in_flight--;
 	(void)__xtc_mtx_unlock(&c->lock);
 	(void)xtc_sem_post(c->sem, 1);   /* free one credit, wake a waiter */
+#if XTC_DST_BUG(XTC_DST_BUG_CREDITWIN)
+	/* planted bug: post a SECOND free credit -> the window admits one
+	 * extra acquire, so in-flight can exceed the window (test_sim_credit
+	 * observes used > WINDOW). */
+	(void)xtc_sem_post(c->sem, 1);
+#endif
 	return XTC_OK;
 }
 

@@ -155,6 +155,9 @@ jobs:
       - name: DST bug-injection (prove DST catches planted safety bugs)
         run: CC=gcc TMPDIR="${RUNNER_TEMP:-/tmp}" sh scripts/dst-bug-inject.sh
 
+      - name: DST regression corpus (pinned failing seeds cannot silently regress)
+        run: CC=gcc TMPDIR="${RUNNER_TEMP:-/tmp}" sh scripts/dst-corpus.sh
+
   sim-swarm-nightly:
     # Large-scale DST swarm/soak: 4 disjoint shards x 25k = 100k seeds
     # over the combined fault set (partition + latency + buggify +
