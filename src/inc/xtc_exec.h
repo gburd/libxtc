@@ -31,6 +31,8 @@ typedef struct xtc_exec xtc_exec_t;
  * PUBLIC: int  xtc_exec_get_service_mode __P((xtc_exec_t *));
  * PUBLIC: void xtc_exec_set_eager_rebalance __P((xtc_exec_t *, int));
  * PUBLIC: int  xtc_exec_get_eager_rebalance __P((xtc_exec_t *));
+ * PUBLIC: void xtc_exec_set_steal_backoff __P((xtc_exec_t *, int));
+ * PUBLIC: int  xtc_exec_get_steal_backoff __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_stop __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_n_loops __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_loop_id __P((void));
@@ -124,6 +126,8 @@ XTC_API int  xtc_exec_get_service_mode(xtc_exec_t *exec);
  */
 XTC_API void xtc_exec_set_eager_rebalance(xtc_exec_t *exec, int on);
 XTC_API int  xtc_exec_get_eager_rebalance(xtc_exec_t *exec);
+XTC_API void xtc_exec_set_steal_backoff(xtc_exec_t *exec, int on);
+XTC_API int  xtc_exec_get_steal_backoff(xtc_exec_t *exec);
 
 int  xtc_exec_set_preempt(xtc_exec_t *exec, int64_t interval_ns);
 XTC_API int  xtc_exec_stop(xtc_exec_t *exec);

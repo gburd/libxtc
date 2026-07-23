@@ -60,6 +60,18 @@ struct xtc_exec {
 	                                    * poll; lets a producer cheaply tell
 	                                    * whether any peer is worth nudging
 	                                    * (no thundering herd if all busy). */
+	_Atomic int   steal_backoff;       /* 0 = off (default): an idle worker
+	                                    * re-scans/polls on a fixed 1ms tick.
+	                                    * 1 = after a streak of idle turns a
+	                                    * worker grows its idle-poll timeout
+	                                    * exponentially (1ms..cap), so an
+	                                    * idle-heavy executor stops burning
+	                                    * CPU on repeated empty steal scans
+	                                    * (the 8.71% try_steal cost PG saw on
+	                                    * tiny read-only work at 89%% idle).
+	                                    * Any real work resets it.  A real-
+	                                    * thread idle policy only (no sim
+	                                    * analog), like eager_rebalance. */
 };
 
 /*
@@ -137,6 +149,7 @@ __xtc_exec_worker(void *arg)
 {
 	xtc_loop_t *loop = arg;
 	xtc_exec_t *exec = loop->exec;
+	int idle_streak = 0;   /* consecutive no-work turns (steal-backoff) */
 
 	__xtc_current_loop = loop;
 	/* Bias this reactor thread onto the performance (P) cores on
@@ -152,6 +165,11 @@ __xtc_exec_worker(void *arg)
 	if (exec->preempt_interval_ns > 0)
 		(void)xtc_preempt_arm(exec->preempt_interval_ns);
 
+	/* Idle-poll backoff state: when steal_backoff is on, consecutive
+	 * idle turns grow the poll timeout from 1ms up to a 32ms cap, so an
+	 * idle-heavy worker stops re-scanning peers every millisecond. */
+	{
+	int64_t idle_poll_ns;
 	for (;;) {
 		int rc;
 		if (atomic_load_explicit(&exec->stop_flag,
@@ -172,13 +190,28 @@ __xtc_exec_worker(void *arg)
 			 */
 			xtc_io_event_t evs[8];
 			int n_out;
+			/* Backoff: default 1ms; if enabled, grow toward 32ms
+			 * across an idle streak (idle_streak counts turns that
+			 * produced no work).  Any real work resets the streak. */
+			if (atomic_load_explicit(&exec->steal_backoff,
+			    memory_order_relaxed) && idle_streak > 4) {
+				int shift = idle_streak - 4;
+				if (shift > 5) shift = 5;   /* cap the growth */
+				idle_poll_ns = (1LL << shift) * 1000 * 1000LL;
+				if (idle_poll_ns > 32 * 1000 * 1000LL)
+					idle_poll_ns = 32 * 1000 * 1000LL;
+			} else {
+				idle_poll_ns = 1 * 1000 * 1000LL;   /* 1ms */
+			}
+			if (idle_streak < (1 << 30))
+				idle_streak++;
 			/* Mark this worker idle across the poll so a peer
 			 * producing migratable work can nudge us (eager
 			 * rebalance); cleared the instant we wake. */
 			atomic_fetch_add_explicit(&exec->n_idle, 1,
 			    memory_order_relaxed);
 			(void)xtc_io_poll(loop->io, evs, 8,
-			    1 * 1000 * 1000LL /* 1ms */, &n_out);
+			    idle_poll_ns, &n_out);
 			atomic_fetch_sub_explicit(&exec->n_idle, 1,
 			    memory_order_relaxed);
 			(void)__xtc_inbox_drain(loop);
@@ -187,7 +220,10 @@ __xtc_exec_worker(void *arg)
 			if (atomic_load_explicit(&exec->stop_flag,
 			    memory_order_relaxed))
 				break;
+		} else {
+			idle_streak = 0;   /* real work: reset the backoff */
 		}
+	}
 	}
 
 	if (exec->preempt_interval_ns > 0)
@@ -324,6 +360,23 @@ xtc_exec_get_eager_rebalance(xtc_exec_t *e)
 {
 	return (e != NULL) &&
 	    atomic_load_explicit(&e->eager_rebalance, memory_order_relaxed);
+}
+
+/* PUBLIC: void xtc_exec_set_steal_backoff __P((xtc_exec_t *, int)); */
+void
+xtc_exec_set_steal_backoff(xtc_exec_t *e, int on)
+{
+	if (e != NULL)
+		atomic_store_explicit(&e->steal_backoff, on ? 1 : 0,
+		    memory_order_relaxed);
+}
+
+/* PUBLIC: int  xtc_exec_get_steal_backoff __P((xtc_exec_t *)); */
+int
+xtc_exec_get_steal_backoff(xtc_exec_t *e)
+{
+	return (e != NULL) &&
+	    atomic_load_explicit(&e->steal_backoff, memory_order_relaxed);
 }
 
 /*
