@@ -30,6 +30,8 @@ sync|Synchronization and locks (L3)|xtc_sync xtc_lwlock xtc_lrlock xtc_lockmgr x
 orc|Orchestration (L4)|xtc_supervisor xtc_app xtc_reg xtc_launch xtc_tnt xtc_fsm xtc_pg xtc_pool xtc_xproc
 io|I/O, files, and network (L1)|xtc_io xtc_aio xtc_net xtc_fs xtc_bdev xtc_tls xtc_pkey xtc_iosched xtc_dio_sched
 mem|Memory and resources|xtc_slab xtc_mctx xtc_res xtc_blocking
+ds|Concurrent data structures|xtc_chash xtc_cskip xtc_prob
+accel|Attached compute (GPU/NPU)|xtc_accel
 obs|Observability and debugging|xtc_inspect xtc_trace xtc_dump xtc_pdict xtc_alloc_audit xtc_tail
 test|Testing and fault injection|xtc_inject xtc_preempt xtc_stack_reclaim
 '
