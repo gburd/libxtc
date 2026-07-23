@@ -1,3 +1,21 @@
+libxtc (1.28.1-1) unstable; urgency=high
+
+  * fix: xtc_task_waker() now names the loop a task is CURRENTLY
+    runnable on, not the loop it was spawned on.  A migratable
+    (xtc_proc_opts_t.migratable=1) proc's waker previously kept naming
+    its stale spawn-time loop after being work-stolen; a wake
+    (xtc_proc_wake / xtc_waker_wake) then targeted the wrong loop.
+    Usually self-healing (the misdirected task sits on the wrong
+    loop's stealable deque and a later steal picks it back up), so the
+    symptom was intermittent -- but a PERMANENT strand under fast
+    shutdown, when every worker can observe the stop signal and exit
+    before anyone steals the entry back.  Silent by design
+    (xtc_proc_wake treats a cross-thread wake as fire-and-forget).
+    Confirmed and adversarially proven with a regression test.  No API
+    change; migratable/work-stealing consumers should update.
+
+ -- Greg Burd <greg@burd.me>  Wed, 22 Jul 2026 22:32:19 -0400
+
 libxtc (1.28.0-1) unstable; urgency=medium
 
   * exec: xtc_exec_get_service_mode / xtc_exec_get_eager_rebalance --

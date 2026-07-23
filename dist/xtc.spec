@@ -6,13 +6,13 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.28.0"
+#       --define "version 1.28.1"
 # (or set Version: below and point Source0 at a release tarball).
 
 %global sover 0
 
 Name:           libxtc
-Version:        1.28.0
+Version:        1.28.1
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,9 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Wed Jul 22 2026 Greg Burd <greg@burd.me> - 1.28.1-1
+- fix: xtc_task_waker() names the CURRENT loop, not the stale spawn loop -- a migratable proc's waker previously kept naming its spawn-time loop after being work-stolen, so a wake could target the wrong loop; usually self-healing but a permanent strand under fast shutdown. Confirmed + adversarially-proven regression test. No API change.
+
 * Wed Jul 22 2026 Greg Burd <greg@burd.me> - 1.28.0-1
 - exec: xtc_exec_get_service_mode/_get_eager_rebalance getters + a documented policy-knob convention.
 - docs: xtc_proc(3) documents xtc_exec_loop_id() as the migration-detection idiom.
