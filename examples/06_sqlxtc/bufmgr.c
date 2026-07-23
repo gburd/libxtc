@@ -66,8 +66,21 @@ struct bm_frame {
 	_Atomic uint64_t  dirty_seq;  /* order it was dirtied (recLSN proxy) */
 	_Atomic uint64_t  rec_lsn;    /* WAL LSN that first dirtied it since clean
 	                               * (the ARIES recLSN; log truncation horizon) */
-	bm_pid_t          pid;
-	struct bm_frame  *hnext;     /* page-table hash chain */
+	/*
+	 * pid and hnext are _Atomic so a HIT re-pin of an already-resident
+	 * frame can walk the bucket chain lock-free (see ht_lookup_pin_fast):
+	 * the writer side (insert on a miss, remove on evict/drop) still
+	 * holds the bucket's stripe mutex while it mutates the chain, but
+	 * publishes with a release store; a lock-free reader loads with
+	 * acquire and re-validates pid after pinning (the same
+	 * pin-then-recheck discipline the OLC content-version seqlock above
+	 * uses for page bytes).  Frames are never freed -- only recycled in
+	 * place across the fixed-size pool -- so a lock-free reader mid-walk
+	 * can safely dereference a frame that was just unlinked; it can only
+	 * ever observe a STALE pid there (caught by the recheck), never
+	 * invalid memory. */
+	_Atomic bm_pid_t  pid;
+	_Atomic(struct bm_frame *) hnext;   /* page-table hash chain */
 	void             *page;       /* page_size bytes (into the pool) */
 	struct bm_frame  *next_free;
 	xtc_arwlock_t    *latch;      /* content latch (fiber-yielding) */
@@ -169,8 +182,17 @@ struct bm {
 	_Atomic uint32_t  clock;       /* round-robin victim cursor */
 
 	/* page table (pid mode): pid -> resident frame */
-	bm_htlock_t      *ht_locks;    /* BM_HT_STRIPES striped bucket locks */
-	bm_frame_t      **buckets;
+	bm_htlock_t      *ht_locks;    /* BM_HT_STRIPES striped bucket locks;
+	                                * still taken for INSERT/REMOVE (the
+	                                * chain-structure mutation), but no
+	                                * longer for a HIT re-pin -- see
+	                                * ht_lookup_pin_fast. */
+	_Atomic(bm_frame_t *) *buckets;  /* bucket HEADS: atomic so a lock-free
+	                                  * reader's chain walk sees a
+	                                  * consistent, in-order-published
+	                                  * list (release-published by
+	                                  * insert, acquire-read by the
+	                                  * fast-path walk). */
 	uint32_t          nbucket;
 
 	/* page-provider */
@@ -296,6 +318,14 @@ free_push(bm_t *bm, bm_frame_t *f)
 	 * that is mid-scan sees a non-COOL state and never reserves a frame
 	 * that is on its way to the free list. */
 	atomic_store_explicit(&f->state, BM_FREE, memory_order_release);
+	/* Terminate the hash link so a lock-free fast-path walker that
+	 * loaded a stale pointer to this frame (from a chain it was unlinked
+	 * from) cannot wander into an unrelated bucket chain: a freed frame
+	 * ends any lost-race walk cleanly at NULL.  (Safe either way -- the
+	 * walker rechecks pid after pinning -- but this keeps a wandering
+	 * walk bounded rather than relying on chains never forming a cycle
+	 * across recycling.) */
+	atomic_store_explicit(&f->hnext, NULL, memory_order_release);
 	atomic_store_explicit(&f->pin, 0, memory_order_release);   /* clear any reservation */
 	(void)pthread_mutex_lock(&bm->free_mu);
 	f->next_free = bm->free_head;
@@ -513,8 +543,12 @@ ht_insert_alloc(bm_t *bm, bm_frame_t *f)
 		(void)pthread_mutex_unlock(lk);
 		return e;                 /* dup found: reuse, do not publish f */
 	}
-	f->hnext = bm->buckets[b];
-	bm->buckets[b] = f;
+	/* Publish: f->pid/f->hnext must be fully written before any
+	 * lock-free reader can observe f via the bucket head -- the release
+	 * store on the head is what provides that ordering (paired with the
+	 * fast path's acquire load in ht_lookup_pin_fast). */
+	f->hnext = atomic_load_explicit(&bm->buckets[b], memory_order_relaxed);
+	atomic_store_explicit(&bm->buckets[b], f, memory_order_release);
 	(void)pthread_mutex_unlock(lk);
 	return NULL;
 }
@@ -523,10 +557,33 @@ ht_remove(bm_t *bm, bm_frame_t *f)
 {
 	uint32_t b = (uint32_t)(f->pid % bm->nbucket);
 	pthread_mutex_t *lk = ht_lock(bm, b);
-	bm_frame_t **pp;
+	bm_frame_t *cur, *prev = NULL;
 	(void)pthread_mutex_lock(lk);
-	for (pp = &bm->buckets[b]; *pp != NULL; pp = &(*pp)->hnext)
-		if (*pp == f) { *pp = f->hnext; break; }
+	/*
+	 * The **pp idiom doesn't typecheck against an _Atomic(bm_frame_t *)
+	 * link (an atomic field's address is not a plain bm_frame_t **), so
+	 * unlink with explicit prev/cur tracking instead.  Removal is a
+	 * release store too: once a lock-free reader's acquire load of the
+	 * head/hnext chain can no longer reach f, no later fast-path walk
+	 * observes it (an in-flight walk that already loaded f is still
+	 * safe -- f is never freed, and the pid recheck after pinning
+	 * catches a since-reissued frame; see ht_lookup_pin_fast). */
+	cur = atomic_load_explicit(&bm->buckets[b], memory_order_relaxed);
+	while (cur != NULL) {
+		bm_frame_t *next = atomic_load_explicit(&cur->hnext,
+		    memory_order_relaxed);
+		if (cur == f) {
+			if (prev == NULL)
+				atomic_store_explicit(&bm->buckets[b], next,
+				    memory_order_release);
+			else
+				atomic_store_explicit(&prev->hnext, next,
+				    memory_order_release);
+			break;
+		}
+		prev = cur;
+		cur = next;
+	}
 	(void)pthread_mutex_unlock(lk);
 }
 /* Look up pid; if resident, pin it and return the frame (caller holds
@@ -550,6 +607,62 @@ ht_lookup_pin(bm_t *bm, bm_pid_t pid)
 	}
 	(void)pthread_mutex_unlock(lk);
 	return NULL;
+}
+
+/*
+ * Lock-free HIT fast path: walk the bucket chain WITHOUT the stripe
+ * mutex, using acquire loads on the atomic bucket head / hnext links
+ * (published with a release store by the insert/remove paths below),
+ * try_pin (already a lock-free CAS), then RE-VALIDATE pid after
+ * pinning.
+ *
+ * Why the recheck is required and sufficient: a frame is never freed
+ * (only recycled across the fixed-size pool), so a concurrent walker
+ * can safely dereference ANY frame reachable from a head/hnext load,
+ * even one just unlinked -- the only hazard is pinning a frame that,
+ * between our pid compare and our successful pin, got reissued to a
+ * DIFFERENT pid (unlinked, evicted, and re-published for someone
+ * else's fix, all while we were mid-CAS).  Re-checking pid after the
+ * pin closes that window: if it no longer matches, we unpin and treat
+ * this as a miss, exactly like the OLC read path re-validates a page's
+ * version after an optimistic read.  A false miss here just falls back
+ * to the mutex-holding ht_lookup_pin, which is always correct; this
+ * fast path is a pure latency/scalability optimization, never a
+ * correctness dependency.
+ *
+ * Returns the pinned frame on a genuine hit, or NULL (miss OR a raced
+ * reissue -- indistinguishable to the caller, which is fine: NULL just
+ * means "take the slow path").
+ */
+static bm_frame_t *
+ht_lookup_pin_fast(bm_t *bm, bm_pid_t pid)
+{
+	uint32_t b = (uint32_t)(pid % bm->nbucket);
+	bm_frame_t *f = atomic_load_explicit(&bm->buckets[b], memory_order_acquire);
+
+	while (f != NULL) {
+		if (atomic_load_explicit(&f->pid, memory_order_acquire) == pid) {
+			if (!try_pin(f)) {
+				/* Reserved for eviction right now: fall back to the
+				 * mutex path rather than treat this as a hard miss --
+				 * ht_lookup_pin's identical break-on-reserved behavior
+				 * is what production already relies on here. */
+				return NULL;
+			}
+			/* Re-validate: did this frame get reissued to a DIFFERENT
+			 * pid between our compare and our pin winning? */
+			if (atomic_load_explicit(&f->pid, memory_order_acquire) != pid) {
+				(void)atomic_fetch_sub_explicit(&f->pin, 1,
+				    memory_order_release);
+				return NULL;    /* raced a reissue; caller retries slow */
+			}
+			if (atomic_load_explicit(&f->state, memory_order_acquire) == BM_COOL)
+				atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
+			return f;
+		}
+		f = atomic_load_explicit(&f->hnext, memory_order_acquire);
+	}
+	return NULL;   /* not resident (or a lock-free walk that lost a race) */
 }
 
 /* Try to drive one unpinned frame all the way to FREE.  Returns 1 if a
@@ -1007,7 +1120,7 @@ drop_resident(bm_t *bm, bm_pid_t pid)
 {
 	uint32_t b = (uint32_t)(pid % bm->nbucket);
 	pthread_mutex_t *lk = ht_lock(bm, b);
-	bm_frame_t *f, **pp;
+	bm_frame_t *f, *cur, *prev;
 	int pinned;
 
 	(void)pthread_mutex_lock(lk);
@@ -1022,9 +1135,27 @@ drop_resident(bm_t *bm, bm_pid_t pid)
 	 * resurrect stale bytes). */
 	atomic_store_explicit(&f->dirty, 0, memory_order_release);
 	/* Remove from the table under the bucket lock so no NEW fixer (which
-	 * looks up under the same lock) can reach this frame again. */
-	for (pp = &bm->buckets[b]; *pp != NULL; pp = &(*pp)->hnext)
-		if (*pp == f) { *pp = f->hnext; break; }
+	 * looks up under the same lock) can reach this frame again; release
+	 * store so the lock-free fast path stops seeing it too (an in-flight
+	 * fast-path walk that already reached f is caught by its post-pin
+	 * pid recheck; see ht_lookup_pin_fast). */
+	prev = NULL;
+	cur = atomic_load_explicit(&bm->buckets[b], memory_order_relaxed);
+	while (cur != NULL) {
+		bm_frame_t *next = atomic_load_explicit(&cur->hnext,
+		    memory_order_relaxed);
+		if (cur == f) {
+			if (prev == NULL)
+				atomic_store_explicit(&bm->buckets[b], next,
+				    memory_order_release);
+			else
+				atomic_store_explicit(&prev->hnext, next,
+				    memory_order_release);
+			break;
+		}
+		prev = cur;
+		cur = next;
+	}
 	atomic_fetch_sub_explicit(&bm->resident, 1, memory_order_relaxed);
 	/* Try to reserve it (pin 0 -> -1).  Success means it is unpinned and
 	 * we own it now: free it directly.  Failure means a worker holds a
@@ -1241,7 +1372,7 @@ bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid)
 	bm_frame_t *f, *dup;
 	if (bm == NULL || out_frame == NULL) return XTC_E_INVAL;
 	if ((f = get_free_frame(bm)) == NULL) return XTC_E_RESOURCE;
-	f->pid = next_pid(bm);
+	atomic_store_explicit(&f->pid, next_pid(bm), memory_order_release);
 	atomic_store_explicit(&f->pin, 1, memory_order_relaxed);
 	atomic_store_explicit(&f->dirty, 1, memory_order_relaxed);
 	atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
@@ -1388,6 +1519,18 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 	if (bm == NULL || out_frame == NULL || pid == BM_PID_NONE)
 		return XTC_E_INVAL;
 	for (;;) {
+		/* Lock-free hit path first (no bucket-stripe mutex): this is
+		 * what removes the read-scaling ceiling item 1a measured --
+		 * re-pinning an already-resident (especially hot/root) frame
+		 * no longer serializes every reader on that page's bucket
+		 * stripe.  Falls back to the mutex-holding slow path on a
+		 * genuine miss OR a raced reissue (rare; always correct
+		 * either way -- see ht_lookup_pin_fast's comment). */
+		if ((f = ht_lookup_pin_fast(bm, pid)) != NULL) {
+			atomic_fetch_add_explicit(&bm->s_hits, 1, memory_order_relaxed);
+			*out_frame = f;
+			return XTC_OK;
+		}
 		if ((f = ht_lookup_pin(bm, pid)) != NULL) {
 			atomic_fetch_add_explicit(&bm->s_hits, 1, memory_order_relaxed);
 			*out_frame = f;
@@ -1412,7 +1555,7 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 		 * of the pin is safe here. */
 		atomic_store_explicit(&f->pin, 1, memory_order_release);
 		atomic_store_explicit(&f->state, BM_LOADED, memory_order_relaxed);
-		f->pid = pid;
+		atomic_store_explicit(&f->pid, pid, memory_order_release);
 		atomic_store_explicit(&f->dirty, 0, memory_order_relaxed);
 		atomic_store_explicit(&f->doomed, 0, memory_order_relaxed);
 		atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
@@ -1453,8 +1596,12 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 				free_push(bm, f);
 				return XTC_E_AGAIN;
 			}
-			f->hnext = bm->buckets[b];
-			bm->buckets[b] = f;
+			/* Publish: f->pid was stored before this (see above), and
+			 * the release store on the bucket head orders it before any
+			 * lock-free reader can observe f (ht_lookup_pin_fast). */
+			f->hnext = atomic_load_explicit(&bm->buckets[b],
+			    memory_order_relaxed);
+			atomic_store_explicit(&bm->buckets[b], f, memory_order_release);
 			/* Probationary admission: a demand-loaded page enters
 			 * COOL (LeanStore cooling stage / 2Q A1), promoted to
 			 * HOT only on a second access (ht_lookup_pin rescue).

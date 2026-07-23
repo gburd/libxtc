@@ -3424,20 +3424,33 @@ fix, so we do not add OCC machinery that buys nothing on this runtime.
        right for low-cardinality columns.
 
 1a. **Buffer-manager frame-table lock on the read hit path** -- the
-   MEASURED residual after OLC (item 1), and now the read-scaling
-   ceiling.  bench_btree_concurrent still plateaus ~1.8M (efficiency
-   drops to 12% at 8 loops) even with the content latch gone.  Root:
-   bm_fix_pid -> ht_lookup_pin takes a PER-BUCKET pthread_mutex on
-   every frame lookup (bufmgr.c ~538), and the ROOT frame sits in one
-   fixed bucket, so every reader on every core serializes on that one
-   bucket mutex to pin the root each descent -- a contended cache-line
-   bounce, plus the per-frame pin atomic RMW.  Fix (its own session,
-   comparable in size to OLC): make the frame-table HIT path lock-free
-   / optimistic (RCU or a seqlock/striped-read hash over the bucket
-   chains), the same technique OLC used for the content latch.  Keep
-   the bucket mutex for inserts/evictions (rare vs lookups).  This is
-   the higher-value next target than item 3 because it is MEASURED,
-   not speculative, and directly extends the OLC read-scaling win.
+   MEASURED residual after OLC (item 1), and the read-scaling ceiling.
+   **DONE (2026-07).**  bench_btree_concurrent plateaued ~1.6-1.8M at
+   L=8 (efficiency ~15%, and the L=8 value COLLAPSED below the L=4
+   peak) even with the content latch gone.  Root confirmed: bm_fix_pid
+   -> ht_lookup_pin took a PER-BUCKET pthread_mutex on every frame
+   lookup, and the ROOT frame sits in one fixed bucket (256-way stripe
+   locks already existed but do nothing for repeated re-pins of the
+   SAME hot page -- same bucket, same stripe), so every reader on every
+   core serialized on that one bucket mutex to pin the root each
+   descent.  Fix: a lock-free HIT fast path (ht_lookup_pin_fast) that
+   walks the bucket chain WITHOUT the stripe mutex, using acquire loads
+   on now-_Atomic bucket-head / hnext links (release-published by
+   insert/remove under the mutex), try_pin (already a lock-free CAS),
+   then RE-VALIDATES pid after pinning -- the same optimistic
+   pin-then-recheck discipline OLC uses for page bytes.  Frames are
+   never freed (recycled in place across the fixed pool), so a
+   mid-walk reader can safely dereference a just-unlinked frame; the
+   worst case is a stale pid caught by the recheck (falls back to the
+   always-correct mutex path).  Bucket mutex retained for inserts/
+   evicts (rare vs lookups).  Result at L=8: ~1.64M -> ~2.35M reads/sec
+   (+43%), scaling 1.17x-and-dropping -> 1.50x-and-climbing.  Verified:
+   test_bufmgr_mt (32000 pinned reads, 0 mismatches; 30231 evictions
+   exercise the reissue-race path), test_btree_mt (3090 concurrent
+   reads, 0 wrong values), ASan/UBSan 15/15 clean, TSan clean, full
+   sqlxtc suite green.  bufmgr.c: struct bm_frame.pid/.hnext and
+   struct bm.buckets[] made _Atomic; ht_lookup_pin_fast added;
+   insert/remove/free paths publish with release stores.
 
 4. **Research spike (NOT a build commitment): latch-free B-tree**
    -- evaluate whether a Bw-tree storage option is worth it GIVEN
