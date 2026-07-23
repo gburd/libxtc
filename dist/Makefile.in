@@ -31,10 +31,10 @@ XTC_INCLUDES	= -I. -I$(srcdir)/../src/inc
 # target (mingw/cygwin; configure.ac already has cases for those),
 # where it selects __declspec(dllexport) instead of the dllimport a
 # consumer would request via -DXTC_DLL.
-CFLAGS		= $(XTC_INCLUDES) @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread -DXTC_BUILDING_DLL @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@ @XTC_TLS_CFLAGS@
+CFLAGS		= $(XTC_INCLUDES) @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread -DXTC_BUILDING_DLL @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@ @XTC_TLS_CFLAGS@ @XTC_ACCEL_CFLAGS@
 CPPFLAGS	= @CPPFLAGS@ $(XTC_INCLUDES)
 LDFLAGS		= @LDFLAGS@ -pthread
-LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@ @XTC_TLS_LIBS@ @XTC_LIBUNWIND_LIBS@
+LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@ @XTC_TLS_LIBS@ @XTC_LIBUNWIND_LIBS@ @XTC_ACCEL_LIBS@
 XTC_HEGEL_CFLAGS = @XTC_HEGEL_CFLAGS@
 XTC_HEGEL_LIBS	 = @XTC_HEGEL_LIBS@
 XTC_HEGEL_PBT	 = @XTC_HEGEL_PBT@
@@ -130,6 +130,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/slab.c \
 	$(srcdir)/../src/ptc/slab_reaper.c \
 	$(srcdir)/../src/ptc/blocking.c \
+	$(srcdir)/../src/ptc/accel.c \
 	$(srcdir)/../src/ptc/alloc_audit.c \
 	$(srcdir)/../src/ptc/mctx.c \
 	$(srcdir)/../src/ptc/rcu.c \
@@ -223,6 +224,7 @@ LIB_OBJS	= \
 	slab.o \
 	slab_reaper.o \
 	blocking.o \
+	accel.o \
 	alloc_audit.o \
 	mctx.o \
 	rcu.o \
@@ -281,6 +283,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_async.h \
 	$(srcdir)/../src/inc/xtc_bdev.h \
 	$(srcdir)/../src/inc/xtc_blocking.h \
+	$(srcdir)/../src/inc/xtc_accel.h \
 	$(srcdir)/../src/inc/xtc_cfg.h \
 	$(srcdir)/../src/inc/xtc_chan.h \
 	$(srcdir)/../src/inc/xtc_dio_sched.h \
@@ -436,6 +439,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_chash \
 		  test_cskip \
 		  test_prob \
+		  test_accel \
 		  test_lrlock \
 		  test_lwlock \
 		  test_lockmgr \
@@ -701,6 +705,9 @@ slab_reaper.o: $(srcdir)/../src/ptc/slab_reaper.c xtc_config.h
 
 blocking.o: $(srcdir)/../src/ptc/blocking.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/blocking.c
+
+accel.o: $(srcdir)/../src/ptc/accel.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/accel.c
 
 alloc_audit.o: $(srcdir)/../src/ptc/alloc_audit.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/alloc_audit.c
@@ -1455,6 +1462,12 @@ test_prob: $(srcdir)/../test/m13/test_prob.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
 		-o $@ $(srcdir)/../test/m13/test_prob.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_accel: $(srcdir)/../test/m13/test_accel.c \
+		$(srcdir)/../test/m13/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
+		-o $@ $(srcdir)/../test/m13/test_accel.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_lrlock: $(srcdir)/../test/m13/test_lrlock.c \

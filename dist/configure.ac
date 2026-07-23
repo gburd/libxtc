@@ -154,6 +154,59 @@ AS_IF([test "x$have_dpdk" = xyes],
 AC_SUBST([XTC_DPDK_CFLAGS], [$dpdk_cflags])
 AC_SUBST([XTC_DPDK_LIBS],   [$dpdk_libs])
 
+# ------------------------------------------------------------------
+# Attached-compute (GPU / NPU) support -- the xtc_accel fiber-parking
+# bridge over accelerator completion fences (src/ptc/accel.c).
+#
+# This needs NO vendor SDK and NO device library to build: the device
+# probe scans /dev/dri + /dev/accel via POSIX opendir + sysfs, and the
+# fence wait parks a fiber on a pollable sync_file fd through the
+# existing loop-readiness path.  So the only thing that gates it is
+# whether the platform HAS the Linux DRM/accel subsystem (the sync_file
+# / dma-fence fd + the /dev/dri, /dev/accel node convention).  We key
+# that off the Linux DRM uapi header; auto-detected, default on where
+# present, and forceable off with --without-accel.
+#
+# If libdrm is additionally available (pkg-config) we record it
+# (XTC_HAVE_LIBDRM) so a future richer fence path can use it -- but the
+# base sync_file poll path deliberately does not require it, so a
+# missing libdrm never disables accel support.
+AC_ARG_WITH([accel],
+  [AS_HELP_STRING([--with-accel=auto|yes|no],
+    [Attached-compute (GPU/NPU) fence-wait + device probe support
+     (default: auto -- on where the Linux DRM/accel subsystem is
+     present).])],
+  [xtc_with_accel=$withval], [xtc_with_accel=auto])
+have_accel=no
+have_libdrm=no
+accel_cflags=
+accel_libs=
+AS_IF([test "x$xtc_with_accel" != xno],
+  [AC_CHECK_HEADER([linux/dma-buf.h],
+     [have_accel=yes],
+     [AC_CHECK_HEADER([drm/drm.h], [have_accel=yes],
+        [AC_CHECK_HEADER([libdrm/drm.h], [have_accel=yes], [have_accel=no])])])
+   AS_IF([test "x$xtc_with_accel" = xyes && test "x$have_accel" = xno],
+     [AC_MSG_ERROR([--with-accel=yes: no Linux DRM/accel uapi header found (this platform has no GPU/NPU subsystem support)])])
+   # Optional libdrm enhancement (never required for the sync_file path).
+   AS_IF([test "x$have_accel" = xyes],
+     [AC_PATH_PROG([PKG_CONFIG], [pkg-config], [no])
+      AS_IF([test "x$PKG_CONFIG" != xno && $PKG_CONFIG --exists libdrm 2>/dev/null],
+        [have_libdrm=yes
+         accel_cflags=`$PKG_CONFIG --cflags libdrm`
+         accel_libs=`$PKG_CONFIG --libs libdrm`])])])
+AS_IF([test "x$have_accel" = xyes],
+  [AC_DEFINE([XTC_HAVE_ACCEL], 1,
+     [Define to 1 if the platform has the DRM/accel subsystem for
+      attached-compute (GPU/NPU) fence-wait + device probe support])])
+AS_IF([test "x$have_libdrm" = xyes],
+  [AC_DEFINE([XTC_HAVE_LIBDRM], 1,
+     [Define to 1 if libdrm is available (optional enhancement for the
+      accel fence path; the base sync_file poll path does not need it)])])
+AC_SUBST([XTC_ACCEL_CFLAGS], [$accel_cflags])
+AC_SUBST([XTC_ACCEL_LIBS],   [$accel_libs])
+AC_SUBST([XTC_HAVE_ACCEL],   [$have_accel])
+
 have_epoll=no
 have_kqueue=no
 have_uring=no

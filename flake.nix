@@ -88,7 +88,22 @@
           ]
           # DPDK is Linux-only; make it available in the dev shell so
           # `configure --with-dpdk` can find it.  liburing too.
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ liburing dpdk ];
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ liburing dpdk ]
+          # Attached-compute (GPU/NPU) dev resources, Linux-only.  The
+          # xtc_accel base path needs none of these at build time (the
+          # device probe is POSIX opendir + sysfs and the fence wait is
+          # a sync_file poll), but they are present in the dev shell so
+          # (a) libdrm is found for the optional --with-accel enhancement
+          # path, and (b) a developer can exercise a REAL fence against
+          # this box's Intel GPU (xe) + NPU (intel_vpu) via Level Zero --
+          # the single most-efficient userspace that drives both.
+          # libxtc itself links none of these; they are for the consumer
+          # side of a local end-to-end test.
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            libdrm
+            level-zero            # oneAPI ze: drives xe GPU + intel_vpu NPU
+            intel-compute-runtime # the xe/NEO userspace ze/OpenCL driver
+          ];
           shellHook = ''
             echo "xtc dev shell ready."
             echo "  cd dist && autoreconf -i && cd .. && mkdir -p build_unix && cd build_unix && ../dist/configure && make check"
