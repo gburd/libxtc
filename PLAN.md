@@ -3334,6 +3334,29 @@ with the requester before their API freezes.
 Design in `docs/M_SQLXTC_GREENFIELD.md` (clean-slate) and
 `docs/M_SQLXTC_HARDFORK.md` (forking the existing engine).
 
+**NOTE (re-scoped 2026-07):** the table below originally tracked the
+DEAD SQLite-hardfork architecture (sqlite3_pcache_methods2,
+sqlite3_vfs, SQLITE_CONFIG_SERIALIZED, "forking the btree").  That
+fork was excised; the live engine is the NATIVE engine
+(btree.c / bufmgr.c / xstore.c / wal.c) that sqlxtc-server links.  The
+three concerns the old "TODO" rows named -- read concurrency, a single
+WAL-writer owner, and fine-grained btree locks -- were all SOLVED in
+the native engine, by different (better) means than the hardfork plan
+assumed.  Rows are re-scoped to native-engine reality:
+
+| Concern | Native-engine status | Notes |
+|---------|----------------------|-------|
+| read concurrency (was "COW page table") | DONE, via OLC not COW | The native bufmgr has optimistic lock coupling (bm_read_begin / per-frame version seqlock) + a lock-free hit path (ht_lookup_pin_fast, v1.29.0 item 1a): readers descend latch-free and re-validate, so a COW page table is unnecessary -- OLC gives the read concurrency the COW plan was chasing, without the copy cost.  +43% read throughput at 8 loops measured. |
+| single WAL-writer owner (was "pager as a proc") | DONE | wal.c runs a dedicated wal_writer_proc (wal_writer_spawn / _pid / _stop): one xtc_proc owns WAL append, exactly the "pager as a proc" intent.  Writers hand records to it; it is the single serialization point for the log. |
+| fine-grained btree locks | DONE, native | btree.c uses top-down latch coupling with fiber-yielding per-frame content latches (xtc_arwlock) + B-link right-links + parallel writers; there is no global btree lock and no "fork the btree" step (that was the hardfork).  Delete/merge and split SMOs are latch-coupled and torn-write-safe (test_btree_delete_merge, test_torn_smo). |
+| async VFS via xtc_io | superseded | The old sqlite3_vfs shim is gone.  Native file I/O goes through bufmgr's do_io -> xtc_aio / the xtc_blocking pool; the async-completion path is the xtc_accel/aio fence model.  No VFS layer to make async. |
+
+The remaining OPEN native-engine perf items are tracked in the research
+track below (items 1a done; 2/3/4 open); there is no separate hardfork
+storage TODO anymore.
+
+<details><summary>Historical (DEAD hardfork storage TODO table -- kept for provenance)</summary>
+
 | Step | Status | Scope |
 |------|--------|-------|
 | session-as-proc + pure parser | done | one xtc_proc per connection; Lime pre-parse |
@@ -3344,6 +3367,8 @@ Design in `docs/M_SQLXTC_GREENFIELD.md` (clean-slate) and
 | async VFS via xtc_io | partial | xtc_blocking pool landed (offload file I/O, park the calling process) -- the mechanism xv_read/xv_write/xv_sync will use; server-wide wiring waits on a fiber-yielding lock or per-connection handles (deadlock analysis in greenfield doc) |
 | pager as a proc | TODO | explicit single WAL-writer owner |
 | fine-grained btree locks via xtc_lockmgr | TODO | requires forking the btree (see hard-fork doc) |
+
+</details>
 
 ---
 
