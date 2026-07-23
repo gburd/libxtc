@@ -6,6 +6,7 @@
 
 int  xtc_exec_get_eager_rebalance __P((xtc_exec_t *));
 int  xtc_exec_get_service_mode __P((xtc_exec_t *));
+int  xtc_exec_get_steal_backoff __P((xtc_exec_t *));
 int __xtc_coro_preempt __P((void *));
 int __xtc_coro_preempt_effective __P((void));
 int __xtc_sim_active __P((void));
@@ -78,6 +79,7 @@ void __xtc_sim_nondeterminism __P((const char *));
 void __xtc_task_free __P((xtc_task_t *));
 void xtc_exec_set_eager_rebalance __P((xtc_exec_t *, int));
 void xtc_exec_set_service_mode __P((xtc_exec_t *, int));
+void xtc_exec_set_steal_backoff __P((xtc_exec_t *, int));
 void xtc_sim_activate __P((uint64_t));
 void xtc_sim_buggify_disable __P((void));
 void xtc_sim_buggify_enable __P((unsigned));
