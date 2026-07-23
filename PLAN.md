@@ -2938,13 +2938,58 @@ after the t->lock A/B confirms the ceiling moves).  Ship the release
 build with -g3 -fno-omit-frame-pointer so the team can resolve
 __lll_lock_wait_private to __table_lookup themselves.
 
-### 19.6 Priority inheritance through the lock manager (M13c) -- NOT DONE (three subagent attempts failed to land code; see .agent/TEAM_DISPATCH_2026-07-13.md; lead to implement directly)
+### 19.6 Priority inheritance through the lock manager (M13c) -- RE-SCOPED (2026-07): the feature AS WRITTEN is premature; there is NO priority substrate to inherit into.
 
-When a low-priority locker holds a lock that a high-priority
-locker needs, the holder temporarily inherits the requester's
-priority for the duration.  The `xtc_lock_dd` graph is the
-structure we need; the priority is on the `xtc_proc`.  Wire it
-through `xtc_lock_get_async`'s wait path.  M13c.
+Investigated directly (2026-07) after three failed subagent attempts.
+The root cause of those failures is now clear and is NOT an execution
+problem: **the scheduler and proc layer have NO priority concept at
+all** (grep confirms zero priority/prio fields in src/evt/*, proc.c,
+xtc_proc.h, xtc_loop.h, xtc_exec.h; the run queue is plain FIFO +
+work-stealing).  Classic priority inheritance exists to prevent
+PRIORITY INVERSION -- a high-priority task blocked on a lock held by a
+low-priority task that the scheduler won't run.  With no priority
+scheduler there is no inversion to prevent, so "the holder inherits the
+requester's priority" has nothing to inherit INTO and nothing to act on.
+The prior notes framed this as "small side-table + tie-breaker logic,"
+but a tie-breaker is meaningless without a scheduler that breaks ties by
+priority.  The three subagents were asked to build on a substrate that
+does not exist.
+
+TWO honest paths (pick when a real consumer needs it -- measure-first):
+
+  (a) LOCK-MANAGER-LOCAL priority (the useful, self-contained piece,
+      and what BDB's lock manager actually has): an OPTIONAL per-locker
+      priority integer (new xtc_locker_set_priority, ABI-additive,
+      mirroring the existing xtc_lockmgr_id_set_timeout attribute
+      setter -- NOT a scheduler priority).  Use it for (1) WAIT-QUEUE
+      ORDERING: when the lock frees, grant the highest-priority
+      compatible waiter first instead of strict FIFO; (2) DEADLOCK
+      VICTIM SELECTION: prefer to abort the lowest-priority locker in a
+      cycle (the detector already walks the wait-for graph; this is a
+      comparison change in victim choice).  Fully contained to
+      lock_mgr.c + one new public setter.  This is real value and
+      implementable today; it is NOT "priority inheritance" (no
+      transitive priority donation), it is priority-ordered granting +
+      victim selection.  Deliver this if a consumer asks for fairer
+      grant ordering under contention.
+
+  (b) TRUE priority inheritance -- requires FIRST building a
+      priority-aware scheduler (per-proc priority field + a run queue
+      that honors it + preemption/reordering when a higher-priority
+      proc becomes runnable), THEN donating a blocked high-priority
+      waiter's priority to the holder proc for the hold duration.  This
+      is a large, cross-layer feature (scheduler + proc + lock mgr),
+      NOT a lock_mgr.c-only change, and should be its own milestone
+      with its own DST proof (plant a priority-inversion, prove the
+      donation resolves it deterministically).  Do NOT attempt as a
+      bolt-on.
+
+DECISION: neither is started; both are correctly deferred-until-needed.
+The PLAN entry previously implied (b) was a small wiring task -- it is
+not.  If asked to "do 19.6," clarify which: (a) is a focused session,
+(b) is a milestone.  Lead implements whichever directly (not a
+subagent -- the substrate confusion is exactly what tripped three
+attempts).
 
 ### 19.7 Backpressure protocol (M9)
 
