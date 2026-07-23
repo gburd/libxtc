@@ -202,7 +202,31 @@ xtc_task_waker(xtc_task_t *task, xtc_waker_t *out)
 {
 	if (task == NULL || out == NULL)
 		return XTC_E_INVAL;
-	out->loop = task->loop;
+	/*
+	 * The waker must name the loop the task is ACTUALLY runnable on
+	 * right now, not task->loop (the loop it was spawned/counted on --
+	 * an accounting field never updated by a steal; see loop.c's
+	 * n_alive/xtc_res bookkeeping, which deliberately keys off the
+	 * ORIGINAL loop and must not change).  Every caller of this
+	 * function arms a waker for ITSELF (task == the running task), so
+	 * __xtc_current_loop -- the thread-local set by whichever loop is
+	 * presently stepping this task -- is always the correct answer,
+	 * including after a migratable proc's coro has been work-stolen to
+	 * a different loop than the one it was spawned on.
+	 *
+	 * Before this fix, a migrated task's waker still named its STALE
+	 * spawn-time loop: xtc_waker_wake would push the wake into that
+	 * loop's inbox, which enqueues the task on the WRONG loop (the
+	 * inbox dispatcher has no way to know the task moved -- see
+	 * __xtc_inbox_drain's XTC_INB_WAKE case) while the task is actually
+	 * parked and expected on the loop it migrated to.  The task then
+	 * never gets re-run there: a permanently stranded fiber, silent
+	 * because xtc_proc_wake treats a resolve/enqueue as fire-and-forget
+	 * (a cross-thread wake is a harmless best-effort by design).  Fall
+	 * back to task->loop only for the (currently nonexistent, but
+	 * defensively supported) case of arming a waker for a task from
+	 * off any loop. */
+	out->loop = __xtc_current_loop != NULL ? __xtc_current_loop : task->loop;
 	out->task = task;
 	return XTC_OK;
 }

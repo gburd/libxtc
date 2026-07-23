@@ -403,6 +403,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_proc_wake_crossthread \
 		  test_proc_table_stress \
 		  test_eager_rebalance \
+		  test_wake_after_migration \
 		  test_proc_link_race \
 		  test_recv_correlate \
 		  test_sync \
@@ -1216,6 +1217,12 @@ test_eager_rebalance: $(srcdir)/../test/concurrency/test_eager_rebalance.c \
 		$(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../test/concurrency/test_eager_rebalance.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_wake_after_migration: $(srcdir)/../test/concurrency/test_wake_after_migration.c \
+		$(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../test/concurrency/test_wake_after_migration.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # Signal-mask regression guard: no runtime thread steals a process-

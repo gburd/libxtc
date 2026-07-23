@@ -105,6 +105,18 @@ fills a
 that the caller may store and later use to re-queue the parked task
 via
 .Fn xtc_waker_wake .
+The waker names the loop the task is CURRENTLY runnable on at the
+moment
+.Fn xtc_task_waker
+is called -- for a work-stealable task
+.Pq Xr xtc_proc 3 Ns 's Va migratable ,
+this is correct even after the task has migrated to a different loop
+than the one it was spawned on: the waker always reflects the present,
+not the task's original loop.
+Arm it fresh (call
+.Fn xtc_task_waker
+again) before each park, from the task itself, so a waker used across
+multiple park/resume cycles never goes stale.
 A waker may be fired any number of times: only the first transition
 from
 .Dv XTC_TASK_PENDING
