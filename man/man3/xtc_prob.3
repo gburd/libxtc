@@ -1,0 +1,187 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd Jul 23, 2026
+.Dt XTC_PROB 3
+.Os
+.Sh NAME
+.Nm xtc_bloom_init ,
+.Nm xtc_bloom_add ,
+.Nm xtc_bloom_maybe_contains ,
+.Nm xtc_bloom_fini ,
+.Nm xtc_hll_init ,
+.Nm xtc_hll_add ,
+.Nm xtc_hll_count ,
+.Nm xtc_hll_merge ,
+.Nm xtc_hll_fini
+.Nd Bloom filter and HyperLogLog cardinality estimator
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_prob.h
+.Ft int
+.Fn xtc_bloom_init "xtc_bloom_t **out" "size_t n_expected" "double fp_rate"
+.Ft void
+.Fn xtc_bloom_add "xtc_bloom_t *b" "const void *key" "size_t len"
+.Ft int
+.Fn xtc_bloom_maybe_contains "const xtc_bloom_t *b" "const void *key" "size_t len"
+.Ft void
+.Fn xtc_bloom_fini "xtc_bloom_t *b"
+.Ft int
+.Fn xtc_hll_init "xtc_hll_t **out" "int precision"
+.Ft void
+.Fn xtc_hll_add "xtc_hll_t *h" "const void *key" "size_t len"
+.Ft uint64_t
+.Fn xtc_hll_count "const xtc_hll_t *h"
+.Ft int
+.Fn xtc_hll_merge "xtc_hll_t *dst" "const xtc_hll_t *src"
+.Ft void
+.Fn xtc_hll_fini "xtc_hll_t *h"
+.Sh DESCRIPTION
+.Nm xtc_prob
+provides two probabilistic sketches that trade a small, bounded,
+tunable error for memory that stays flat no matter how many distinct
+keys pass through: a Bloom filter for approximate set membership and a
+HyperLogLog for approximate distinct-count estimation.
+Keys are opaque byte spans
+.Pq Fa key , Fa len ,
+hashed internally, so any key type works with no caller-supplied hash
+or comparator; nothing is copied or retained, so a key buffer may be
+freed the moment the call returns.
+.Pp
+Both structures are
+.Em single-threaded
+in this version: unlike
+.Xr xtc_chash 3
+and
+.Xr xtc_cskip 3
+there is no internal locking and no RCU.  Concurrent
+.Fn xtc_bloom_add
+or
+.Fn xtc_hll_add
+on one instance is a data race.  Serialize externally, or give each
+thread its own instance and
+.Pq for HLL
+combine them with
+.Fn xtc_hll_merge ,
+which is an exact register-wise maximum.
+.Ss Bloom filter
+A bit array of
+.Va m
+bits probed by
+.Va k
+hash functions.
+.Fn xtc_bloom_init
+derives the optimal
+.Va m
+and
+.Va k
+from the expected element count
+.Fa n_expected
+and the target false-positive rate
+.Fa fp_rate
+.Pq strictly between 0 and 1 :
+.Va m No = ceil(-n*ln(p) / (ln2)^2)
+and
+.Va k No = round((m/n)*ln2) .
+.Fn xtc_bloom_add
+sets the
+.Va k
+bits for a key
+.Pq adding the same key twice is idempotent .
+.Fn xtc_bloom_maybe_contains
+returns 1 if the key MAY be present and 0 if it is DEFINITELY absent:
+there are NO false negatives
+.Pq every added key returns 1 ,
+and a 1 result carries the configured false-positive probability once
+the filter holds about
+.Fa n_expected
+elements.  The filter does not resize; loading it well past
+.Fa n_expected
+raises the false-positive rate, so size it for the true expected load.
+.Fn xtc_bloom_fini
+frees it.
+.Ss HyperLogLog
+.Fn xtc_hll_init
+allocates 2^ Ns Fa precision
+registers;
+.Fa precision
+must be in the range 4 to 18
+.Pq 16 to 262144 registers .
+Each register holds the maximum leading-zero run seen for the hashes
+that fall in its bucket.
+.Fn xtc_hll_add
+folds a key in.
+.Fn xtc_hll_count
+returns the estimated number of DISTINCT keys added, using the
+bias-corrected harmonic-mean estimator with the standard small-range
+.Pq linear-counting
+and large-range corrections; the relative standard error is about
+1.04/sqrt(2^ Ns Fa precision Ns ) -- roughly 1.6% at precision 12 and
+well under 1% at precision 16 -- in a few kilobytes regardless of the
+true cardinality.
+.Fn xtc_hll_merge
+takes the register-wise max of
+.Fa src
+into
+.Fa dst ,
+so
+.Fa dst
+afterward estimates the cardinality of the UNION of the two key sets
+with no error added by the merge; both sketches must have the same
+precision.
+.Fn xtc_hll_fini
+frees it.
+.Sh RETURN VALUES
+.Fn xtc_bloom_init ,
+.Fn xtc_hll_init ,
+and
+.Fn xtc_hll_merge
+return
+.Dv XTC_OK
+on success,
+.Dv XTC_E_INVAL
+for a NULL out-pointer, an
+.Fa fp_rate
+not in the open interval
+.Pq 0,1 ,
+an out-of-range
+.Fa precision ,
+or mismatched precisions at merge, and
+.Dv XTC_E_NOMEM
+on allocation failure.
+.Fn xtc_bloom_maybe_contains
+returns 1 (maybe present) or 0 (definitely absent; also 0 for a NULL
+filter).
+.Fn xtc_hll_count
+returns the estimated distinct-key count
+.Pq 0 for a NULL sketch .
+.Fn xtc_bloom_add ,
+.Fn xtc_hll_add ,
+.Fn xtc_bloom_fini ,
+and
+.Fn xtc_hll_fini
+have no return value and treat a NULL instance as a no-op.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+xtc_bloom_t *b;
+xtc_bloom_init(&b, 100000, 0.01);      /* 1% false positives */
+xtc_bloom_add(b, "answer", 6);
+if (xtc_bloom_maybe_contains(b, "answer", 6))
+	printf("maybe present\en");     /* always true for an added key */
+if (!xtc_bloom_maybe_contains(b, "nope", 4))
+	printf("definitely absent\en"); /* usually true */
+xtc_bloom_fini(b);
+
+xtc_hll_t *h;
+xtc_hll_init(&h, 14);                    /* 2^14 registers */
+for (int i = 0; i < 1000000; i++)
+	xtc_hll_add(h, &i, sizeof i);
+printf("~%llu distinct\en",
+    (unsigned long long)xtc_hll_count(h));
+xtc_hll_fini(h);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_chash 3 ,
+.Xr xtc_cskip 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1, M14.
