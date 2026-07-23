@@ -18,6 +18,9 @@
 #include "xtc_chash.h"
 #include "xtc_rcu.h"
 
+/* Test-only internal accessor (see src/ptc/chash.c). */
+extern size_t __xtc_chash_nbuckets(const xtc_chash_t *h);
+
 /* ----- key/value helpers: int64_t key boxed on the heap ----- */
 
 struct ikey { int64_t v; };
@@ -187,6 +190,165 @@ test_resize(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- shrink: grow up, enable auto-shrink, delete down, and prove
+ * (a) survivors still findable/correct after each shrink, (b) the
+ * bucket count actually decreased, (c) no oscillation across a
+ * boundary, (d) shrink never goes below the floor. --------------- */
+
+#define SHRINK_N 4000
+
+static MunitResult
+test_shrink(const MunitParameter p[], void *d)
+{
+	xtc_chash_t *h;
+	struct ikey **keys;
+	int64_t i;
+	size_t peak_buckets, floor_buckets;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
+	/* Floor = 16 (initial rounds up to 16). */
+	munit_assert_int(xtc_chash_create(ikey_cmp, ikey_hash, 16, &h), ==,
+	    XTC_OK);
+	floor_buckets = __xtc_chash_nbuckets(h);
+	munit_assert_size(floor_buckets, ==, 16);
+
+	/* Default: auto-shrink OFF. */
+	munit_assert_int(xtc_chash_get_auto_shrink(h), ==, 0);
+
+	keys = malloc(SHRINK_N * sizeof *keys);
+	munit_assert_not_null(keys);
+	for (i = 0; i < SHRINK_N; i++) {
+		keys[i] = mkkey(i);
+		munit_assert_int(xtc_chash_insert(h, keys[i],
+		    (void *)(intptr_t)(i * 2 + 1), NULL), ==, XTC_OK);
+	}
+	peak_buckets = __xtc_chash_nbuckets(h);
+	munit_assert_size(peak_buckets, >, floor_buckets); /* grew */
+
+	/* With auto-shrink OFF, draining does NOT shrink. */
+	for (i = 0; i < SHRINK_N; i++) {
+		void *v;
+		munit_assert_int(xtc_chash_remove(h, keys[i], &v), ==,
+		    XTC_OK);
+	}
+	munit_assert_size(__xtc_chash_nbuckets(h), ==, peak_buckets);
+	munit_assert_size(xtc_chash_size(h), ==, 0);
+	xtc_rcu_synchronize();
+	xtc_rcu_synchronize();
+	xtc_rcu_synchronize();
+
+	/* Re-fill, then enable auto-shrink and drain: now it shrinks. */
+	for (i = 0; i < SHRINK_N; i++)
+		munit_assert_int(xtc_chash_insert(h, keys[i],
+		    (void *)(intptr_t)(i * 2 + 1), NULL), ==, XTC_OK);
+	peak_buckets = __xtc_chash_nbuckets(h);
+
+	xtc_chash_set_auto_shrink(h, 1);
+	munit_assert_int(xtc_chash_get_auto_shrink(h), ==, 1);
+
+	/* Delete keys from the top down, keeping the low quarter as
+	 * survivors, watching the bucket count drop.  Draining ~75% of a
+	 * table that was at LF ~0.49 pushes it below the 0.1875 low-water
+	 * and forces one or more shrinks.  After each observed shrink,
+	 * EVERY surviving key must still resolve to its exact value. */
+	{
+		int64_t survivors = SHRINK_N / 4;   /* keep [0, survivors) */
+		for (i = SHRINK_N - 1; i >= survivors; i--) {
+			void *v;
+			size_t before = __xtc_chash_nbuckets(h);
+			munit_assert_int(xtc_chash_remove(h, keys[i], &v), ==,
+			    XTC_OK);
+			munit_assert_int((int)(intptr_t)v, ==,
+			    (int)(i * 2 + 1));
+			if (__xtc_chash_nbuckets(h) != before) {
+				/* A shrink just happened -- survivors intact? */
+				int64_t j;
+				munit_assert_size(__xtc_chash_nbuckets(h), <,
+				    before);
+				for (j = 0; j < survivors; j++) {
+					struct ikey lk;
+					void *vv;
+					lk.v = j;
+					xtc_rcu_read_lock();
+					munit_assert_int(xtc_chash_get(h,
+					    &lk, &vv), ==, XTC_OK);
+					munit_assert_int((int)(intptr_t)vv,
+					    ==, (int)(j * 2 + 1));
+					xtc_rcu_read_unlock();
+				}
+			}
+		}
+		munit_assert_size(xtc_chash_size(h), ==, (size_t)survivors);
+		/* (b) the array shrank from its peak. */
+		munit_assert_size(__xtc_chash_nbuckets(h), <, peak_buckets);
+
+		/* Delete the survivors too; (d) never below the floor. */
+		for (i = 0; i < survivors; i++) {
+			void *v;
+			munit_assert_int(xtc_chash_remove(h, keys[i], &v), ==,
+			    XTC_OK);
+			munit_assert_size(__xtc_chash_nbuckets(h), >=,
+			    floor_buckets);
+		}
+	}
+	munit_assert_size(xtc_chash_size(h), ==, 0);
+	munit_assert_size(__xtc_chash_nbuckets(h), ==, floor_buckets);
+
+	/* (c) NO OSCILLATION: interleave insert/remove of the SAME key
+	 * right at a load-factor boundary and assert the bucket count is
+	 * rock-steady -- a thrashing table would resize on nearly every
+	 * op.  Fill to just under a grow, then toggle one key 2000 times. */
+	{
+		size_t stable, n0;
+		int64_t base = SHRINK_N;   /* fresh keys, disjoint range */
+		struct ikey *toggle;
+		int t;
+		/* Bring the table to a moderate fill so the toggle key sits
+		 * near neither trigger; count is 0 now, so insert a batch. */
+		int64_t fill = 200;
+		struct ikey **fk = malloc((size_t)fill * sizeof *fk);
+		munit_assert_not_null(fk);
+		for (i = 0; i < fill; i++) {
+			fk[i] = mkkey(base + 1 + i);
+			munit_assert_int(xtc_chash_insert(h, fk[i],
+			    (void *)(intptr_t)1, NULL), ==, XTC_OK);
+		}
+		n0 = __xtc_chash_nbuckets(h);
+		toggle = mkkey(base);
+		stable = n0;
+		for (t = 0; t < 2000; t++) {
+			void *v;
+			munit_assert_int(xtc_chash_insert(h, toggle,
+			    (void *)(intptr_t)1, NULL), ==, XTC_OK);
+			munit_assert_int(xtc_chash_remove(h, toggle, &v), ==,
+			    XTC_OK);
+			/* One insert+one remove returns to the same count, so
+			 * the array must never move: no oscillation. */
+			munit_assert_size(__xtc_chash_nbuckets(h), ==, stable);
+		}
+		for (i = 0; i < fill; i++) {
+			void *v;
+			(void)xtc_chash_remove(h, fk[i], &v);
+		}
+		free(toggle);
+		xtc_rcu_synchronize();
+		xtc_rcu_synchronize();
+		xtc_rcu_synchronize();
+		for (i = 0; i < fill; i++) free(fk[i]);
+		free(fk);
+	}
+
+	xtc_rcu_synchronize();
+	xtc_rcu_synchronize();
+	xtc_rcu_synchronize();
+	for (i = 0; i < SHRINK_N; i++) free(keys[i]);
+	free(keys);
+	xtc_chash_destroy(h);
+	xtc_rcu_fini();
+	return MUNIT_OK;
+}
+
 /* ----- concurrent stress: N writer threads insert/remove disjoint
  * key ranges while M reader threads hammer xtc_chash_get on the
  * whole live key space.  ASan/TSan must be clean; the reference
@@ -227,15 +389,19 @@ stress_writer(void *arg)
 		atomic_store_explicit(&g_present[key], 1,
 		    memory_order_release);
 	}
-	/* Remove every other key we inserted, to exercise concurrent
-	 * remove alongside concurrent readers and other writers.  The
-	 * KEY pointer stays valid (chash's node is retired, but the
-	 * caller-owned key/value it pointed at is untouched) -- freed
-	 * once, after the run, from g_keyptrs. */
-	for (i = 0; i < STRESS_PER_W; i += 2) {
+	/* Remove 3 of every 4 keys we inserted (keep i%4==0), to exercise
+	 * concurrent remove -- and, with auto-shrink enabled below, a
+	 * concurrent SHRINK swapping the bucket array -- alongside
+	 * concurrent readers and other writers.  The KEY pointer stays
+	 * valid (chash's node is retired, but the caller-owned key/value
+	 * it pointed at is untouched) -- freed once, after the run, from
+	 * g_keyptrs. */
+	for (i = 0; i < STRESS_PER_W; i++) {
 		int64_t key = base + i;
 		struct ikey lookup;
 		void *v;
+		if (i % 4 == 0)
+			continue;   /* survivor */
 		lookup.v = key;
 		atomic_store_explicit(&g_present[key], 0,
 		    memory_order_release);
@@ -282,6 +448,9 @@ test_concurrent_stress(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
 	munit_assert_int(xtc_chash_create(ikey_cmp, ikey_hash, 8, &g_h), ==,
 	    XTC_OK);
+	/* Opt in to auto-shrink so the delete-heavy writers exercise a
+	 * concurrent RCU shrink (array swap) against live readers. */
+	xtc_chash_set_auto_shrink(g_h, 1);
 	for (i = 0; i < STRESS_KEYSPACE; i++)
 		atomic_store(&g_present[i], 0);
 	atomic_store(&g_reader_stop, 0);
@@ -300,9 +469,10 @@ test_concurrent_stress(const MunitParameter p[], void *d)
 
 	munit_assert_int64(atomic_load(&g_reader_iters), >, 0);
 
-	/* Final consistency: every odd-index key of each writer's range
-	 * (the survivors) is present with the right value; every
-	 * even-index key is gone. */
+	/* Final consistency: every key with i%4==0 (the survivors) is
+	 * present with the right value; every other key is gone.
+	 * STRESS_PER_W is a multiple of 4, so the per-writer i%4==0
+	 * survivor stride is also i%4==0 globally. */
 	for (i = 0; i < STRESS_KEYSPACE; i++) {
 		struct ikey lookup;
 		void *v;
@@ -311,15 +481,15 @@ test_concurrent_stress(const MunitParameter p[], void *d)
 		xtc_rcu_read_lock();
 		rc = xtc_chash_get(g_h, &lookup, &v);
 		xtc_rcu_read_unlock();
-		if (i % 2 == 0) {
-			munit_assert_int(rc, ==, XTC_E_NOTFOUND);
-		} else {
+		if (i % 4 == 0) {
 			munit_assert_int(rc, ==, XTC_OK);
 			munit_assert_int((int)(intptr_t)v, ==, i + 1);
+		} else {
+			munit_assert_int(rc, ==, XTC_E_NOTFOUND);
 		}
 	}
 	munit_assert_size(xtc_chash_size(g_h), ==,
-	    (size_t)(STRESS_KEYSPACE / 2));
+	    (size_t)(STRESS_KEYSPACE / 4));
 
 	xtc_rcu_synchronize();
 	xtc_rcu_synchronize();
@@ -337,6 +507,7 @@ test_concurrent_stress(const MunitParameter p[], void *d)
 static MunitTest tests[] = {
 	{ "/basic",              test_basic,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/resize",              test_resize,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/shrink",              test_shrink,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent_stress",   test_concurrent_stress,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

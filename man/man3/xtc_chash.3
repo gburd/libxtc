@@ -9,7 +9,9 @@
 .Nm xtc_chash_get ,
 .Nm xtc_chash_insert ,
 .Nm xtc_chash_remove ,
-.Nm xtc_chash_size
+.Nm xtc_chash_size ,
+.Nm xtc_chash_set_auto_shrink ,
+.Nm xtc_chash_get_auto_shrink
 .Nd RCU-protected concurrent hash table
 .Sh SYNOPSIS
 .In xtc.h
@@ -27,6 +29,10 @@
 .Fn xtc_chash_remove "xtc_chash_t *h" "const void *key" "void **out_value"
 .Ft size_t
 .Fn xtc_chash_size "const xtc_chash_t *h"
+.Ft void
+.Fn xtc_chash_set_auto_shrink "xtc_chash_t *h" "int on"
+.Ft int
+.Fn xtc_chash_get_auto_shrink "const xtc_chash_t *h"
 .Sh DESCRIPTION
 .Nm xtc_chash
 is a chained hash table built on
@@ -94,7 +100,7 @@ replaces any existing entry for an equal key, writing the old value
 pointer to
 .Fa *out_old_value
 .Pq NULL for a fresh insert; the argument itself may be NULL .
-It may trigger a grow-only resize.
+It may trigger a resize (a grow).
 .Fn xtc_chash_remove
 writes the removed value pointer to
 .Fa *out_value
@@ -106,6 +112,21 @@ on a miss.
 .Fn xtc_chash_size
 returns the approximate live entry count -- exact with no concurrent
 writers, a fresh-enough estimate otherwise.
+.Pp
+.Fn xtc_chash_set_auto_shrink
+enables
+.Pq Fa on No non-zero
+or disables
+.Pq Fa on No zero
+automatic shrink on the table
+.Fa h ;
+it is OFF by default.
+.Fn xtc_chash_get_auto_shrink
+returns the current setting as 0 or 1.
+Both take effect immediately and are safe to call from any thread
+.Pq the flag is a single atomic field .
+See
+.Sx RESIZE .
 .Sh CONCURRENCY AND RECLAMATION
 Writers serialize through a fixed set of 64 stripe mutexes; a key's
 stripe is derived from its bucket index in the CURRENT array (so two
@@ -127,15 +148,15 @@ never freed synchronously: a concurrent reader that already loaded a
 pointer to it keeps a fully valid node until it leaves its
 read-side.
 .Pp
-A grow claims every stripe lock
+A resize claims every stripe lock
 .Pq blocking writers, never readers ,
-duplicates every live node into a freshly allocated, larger array,
-publishes the new array with a release store, and retires the old
-array and its original nodes via
+duplicates every live node into a freshly allocated array of the new
+size, publishes the new array with a release store, and retires the
+old array and its original nodes via
 .Fn xtc_rcu_retire .
 A reader that loaded the old array before the swap keeps working
-against a fully valid, if smaller, table until it leaves its
-read-side.
+against a fully valid table -- larger or smaller than the new one --
+until it leaves its read-side.
 .Pp
 This module never calls
 .Fn xtc_rcu_synchronize
@@ -145,14 +166,39 @@ consumer, actual reclamation of retired nodes happens on the
 caller's, a test's, or an application-installed reaper's schedule.
 .Sh RESIZE
 .Nm xtc_chash
-is
-.Em grow-only .
-The table doubles its bucket array past a 75% load factor and never
-shrinks; a table that grows to a high-water mark and then drains
-stays at that array size until
-.Fn xtc_chash_destroy .
-A real shrink would need the same RCU-swap machinery run in reverse
-plus a low-load-factor trigger; deferred until a workload needs it.
+always GROWS: it doubles its bucket array past a 75% load factor.
+It SHRINKS only when auto-shrink is enabled via
+.Fn xtc_chash_set_auto_shrink
+.Pq OFF by default ,
+in which case a
+.Fn xtc_chash_remove
+that drops the load factor below 18.75% halves the bucket array --
+never below the initial capacity passed to
+.Fn xtc_chash_create
+.Pq minimum 16 .
+Shrink runs the identical RCU-swap machinery as grow, only in reverse
+.Pq two old buckets merge into one, deterministic because sizes are
+powers of two ,
+so every invariant above holds in both directions.
+.Pp
+The wide gap between the grow trigger
+.Pq 0.75
+and the shrink trigger
+.Pq 0.1875
+is deliberate hysteresis.  A shrink halves the array, which doubles
+the load factor to below 0.375; climbing back to a grow then needs a
+roughly 2x increase in live entries and dropping back to another
+shrink a further roughly 2x decrease, so no single
+.Fn xtc_chash_insert
+or
+.Fn xtc_chash_remove
+near a boundary can make the table thrash grow<->shrink.
+.Pp
+Grow is always-on because memory then tracks the true working-set
+peak monotonically.  Shrink is opt-in because it adds a rehash to the
+remove path and reclaims memory a caller may have wanted stable:
+enable it if the workload has large delete phases and you want the
+memory reclaimed.
 .Sh RETURN VALUES
 .Dv XTC_OK
 on success;

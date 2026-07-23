@@ -30,18 +30,38 @@
  *	  never a torn pointer -- because every writer publishes with
  *	  ONE release-ordered store of a fully-formed node/pointer.
  *
- *	  Grow-only resize.  A grow claims ALL stripe locks (ascending
- *	  order -- the only place more than one stripe lock is held at
- *	  once, so this order is the sole deadlock-avoidance rule to
- *	  keep), which blocks every writer but NO reader.  It then
- *	  duplicates every live node into a freshly allocated, larger
- *	  bucket array (never mutating an OLD node's own `next` field,
- *	  since a concurrent reader might be mid-walk through it),
- *	  publishes the new array with a release store, and retires
- *	  the old array AND every one of its (now unreachable) original
- *	  nodes via xtc_rcu_retire -- never freed synchronously.  A
- *	  reader that loaded the OLD array before the swap keeps a
- *	  fully valid, if smaller, table until it leaves its read-side.
+ *	  Resize (grow AND shrink).  A resize claims ALL stripe locks
+ *	  (ascending order -- the only place more than one stripe lock
+ *	  is held at once, so this order is the sole deadlock-avoidance
+ *	  rule to keep), which blocks every writer but NO reader.  It
+ *	  then duplicates every live node into a freshly allocated
+ *	  bucket array of the new size (never mutating an OLD node's
+ *	  own `next` field, since a concurrent reader might be mid-walk
+ *	  through it), publishes the new array with a release store,
+ *	  and retires the old array AND every one of its (now
+ *	  unreachable) original nodes via xtc_rcu_retire -- never freed
+ *	  synchronously.  A reader that loaded the OLD array before the
+ *	  swap keeps a fully valid table (larger or smaller than the
+ *	  new one) until it leaves its read-side.  Grow and shrink are
+ *	  the exact same mechanism run with new_n = old_n*2 vs old_n/2;
+ *	  because bucket counts are powers of two, a shrink's new mask
+ *	  is just the old mask minus its top bit, so every node's new
+ *	  bucket is idx & new_mask -- deterministic, total, no node
+ *	  can be lost or duplicated (two old buckets merge into one).
+ *
+ *	  Shrink is OPT-IN (default OFF; xtc_chash_set_auto_shrink).
+ *	  Grow is always-on because memory then tracks the true
+ *	  working-set peak monotonically.  Shrink adds a rehash to the
+ *	  remove path and reclaims memory a user may have wanted stable,
+ *	  so a workload with large delete phases asks for it explicitly.
+ *	  Hysteresis (see __chash_maybe_shrink) keeps a table hovering
+ *	  near a boundary from thrashing grow<->shrink: the grow high-
+ *	  water is LF > 0.75 and the shrink low-water is LF < 0.1875,
+ *	  and because a shrink halves n (doubling LF), the post-shrink
+ *	  LF is < 0.375 -- exactly half the grow trigger, so climbing
+ *	  back to a grow needs a 2x count increase and dropping back to
+ *	  another shrink needs a further ~2x decrease.  No single
+ *	  insert/remove can re-cross the opposite boundary.
  *
  *	  Node removal.  Unlinked by overwriting its PREDECESSOR's link
  *	  (the bucket head or a sibling node's `next`) with a release
@@ -151,7 +171,9 @@ struct xtc_chash {
 	_Atomic(struct chash_arr *)  arr;
 	pthread_mutex_t              stripe_locks[XTC_CHASH_NSTRIPES];
 	_Atomic size_t               count;
-	_Atomic int                  resizing;   /* 0 idle, 1 grow in progress */
+	_Atomic int                  resizing;   /* 0 idle, 1 resize in progress */
+	size_t                       min_n;      /* shrink floor: never below this */
+	_Atomic int                  auto_shrink;/* opt-in; default 0 (OFF) */
 };
 
 static void
@@ -197,6 +219,8 @@ xtc_chash_create(xtc_chash_cmp_fn cmp, xtc_chash_hash_fn hash_fn,
 	atomic_init(&h->arr, arr);
 	atomic_init(&h->count, (size_t)0);
 	atomic_init(&h->resizing, 0);
+	h->min_n = n;
+	atomic_init(&h->auto_shrink, 0);
 	for (i = 0; i < XTC_CHASH_NSTRIPES; i++)
 		(void)pthread_mutex_init(&h->stripe_locks[i], NULL);
 
@@ -255,8 +279,10 @@ xtc_chash_get(xtc_chash_t *h, const void *key, void **out_value)
 	return XTC_E_NOTFOUND;
 }
 
-/* Forward decl: called with no locks held, after a fresh insert. */
+/* Forward decls: called with no locks held, after a fresh insert /
+ * after a remove decrements the count. */
 static void __chash_grow(xtc_chash_t *h);
+static void __chash_maybe_shrink(xtc_chash_t *h, size_t cnt);
 
 int
 xtc_chash_insert(xtc_chash_t *h, void *key, void *value, void **out_old_value)
@@ -387,7 +413,13 @@ xtc_chash_remove(xtc_chash_t *h, const void *key, void **out_value)
 		*out_value = atomic_load_explicit(&n->value,
 		    memory_order_relaxed);
 	xtc_rcu_retire(n, __chash_node_free_cb);
-	atomic_fetch_sub_explicit(&h->count, 1, memory_order_relaxed);
+	{
+		size_t cnt = atomic_fetch_sub_explicit(&h->count, 1,
+		    memory_order_relaxed) - 1;
+		if (atomic_load_explicit(&h->auto_shrink,
+		    memory_order_relaxed))
+			__chash_maybe_shrink(h, cnt);
+	}
 	return XTC_OK;
 }
 
@@ -399,25 +431,72 @@ xtc_chash_size(const xtc_chash_t *h)
 	    memory_order_relaxed);
 }
 
+void
+xtc_chash_set_auto_shrink(xtc_chash_t *h, int on)
+{
+	if (h == NULL) return;
+	atomic_store_explicit(&h->auto_shrink, on ? 1 : 0,
+	    memory_order_relaxed);
+}
+
+int
+xtc_chash_get_auto_shrink(const xtc_chash_t *h)
+{
+	if (h == NULL) return 0;
+	return atomic_load_explicit(
+	    &((xtc_chash_t *)(uintptr_t)h)->auto_shrink,
+	    memory_order_relaxed);
+}
+
+/* Test-only (not PUBLIC): current bucket-array size, so a test can
+ * assert a grow/shrink actually changed the array.  Not part of the
+ * shipped API surface. */
+size_t
+__xtc_chash_nbuckets(const xtc_chash_t *h)
+{
+	struct chash_arr *arr;
+	if (h == NULL) return 0;
+	arr = atomic_load_explicit(
+	    &((xtc_chash_t *)(uintptr_t)h)->arr, memory_order_acquire);
+	return arr->n;
+}
+
 /*
- * Double the bucket array.  Claims every stripe lock (ascending order:
- * the only place more than one is held at once) so no writer can be
- * mid-mutation on ANY bucket while we rehash; readers are never
- * blocked.  Duplicates every live node into the new array rather than
- * relinking the original in place, because an original node's `next`
- * field may be mid-walk by a concurrent reader on the OLD array right
- * now -- mutating it out from under that reader would be a bug.  On
- * OOM mid-rehash, unwinds everything allocated so far and leaves the
- * old array in place (no data lost, just no headroom gained yet).
+ * Rebuild the bucket array at new_n buckets (a power of two).  Shared
+ * by grow (new_n = old_n*2) and shrink (new_n = old_n/2).  Claims
+ * every stripe lock (ascending order: the only place more than one is
+ * held at once) so no writer can be mid-mutation on ANY bucket while
+ * we rehash; readers are never blocked.  Duplicates every live node
+ * into the new array rather than relinking the original in place,
+ * because an original node's `next` field may be mid-walk by a
+ * concurrent reader on the OLD array right now -- mutating it out from
+ * under that reader would be a bug.  On OOM mid-rehash, unwinds
+ * everything allocated so far and leaves the old array in place (no
+ * data lost, just no size change).
+ *
+ * new_n is recomputed by the CALLER's want-callback against the live
+ * array (re-read here under all locks), so a resize that raced in
+ * between is honoured: want returns 0 to abort if the decision no
+ * longer holds against the current array.  This is what makes the
+ * heuristic count snapshot in insert/remove safe -- the real decision
+ * is made here, under the locks, against the array we are about to
+ * replace.
+ *
+ * Shrink correctness: sizes are powers of two, so new_mask = old_mask
+ * with its top bit cleared; every node's new bucket is
+ * hash & new_mask, which maps two old buckets onto one new bucket --
+ * total and deterministic, no node lost or duplicated.  It is the
+ * exact inverse of the grow split.
  *
  * ponytail: one xtc_rcu_retire call per old node (no batch-retire API
- * on xtc_rcu); fine for the "rare, amortised" grow this is, revisit if
- * a workload greater than a few hundred thousand live keys makes grow
- * pauses (all stripes blocked for the O(n) rehash) show up in a
+ * on xtc_rcu); fine for the "rare, amortised" resize this is, revisit
+ * if a workload greater than a few hundred thousand live keys makes
+ * resize pauses (all stripes blocked for the O(n) rehash) show up in a
  * latency profile.
  */
 static void
-__chash_grow(xtc_chash_t *h)
+__chash_resize(xtc_chash_t *h, size_t (*want_new_n)(const struct chash_arr *,
+    const xtc_chash_t *))
 {
 	struct chash_arr *old_arr, *new_arr;
 	size_t new_n, i;
@@ -426,20 +505,17 @@ __chash_grow(xtc_chash_t *h)
 
 	if (!atomic_compare_exchange_strong_explicit(&h->resizing, &expect, 1,
 	    memory_order_acq_rel, memory_order_relaxed))
-		return;   /* someone else is already growing */
+		return;   /* someone else is already resizing */
 
 	for (s = 0; s < XTC_CHASH_NSTRIPES; s++)
 		(void)__xtc_mtx_lock(&h->stripe_locks[s]);
 
 	old_arr = atomic_load_explicit(&h->arr, memory_order_acquire);
-	new_n = old_arr->n * 2;
+	new_n = want_new_n(old_arr, h);
 
-	/* Refuse to grow past the size the pow2 cap already enforces, so
-	 * the size arithmetic below cannot overflow (defense-in-depth; a
-	 * table this large is not a real workload -- stay at current size
-	 * rather than misbehave). */
-	if (new_n <= old_arr->n ||
-	    new_n > (SIZE_MAX / 2) / sizeof(struct chash_bucket)) {
+	/* want_new_n returns 0 to abort (decision no longer holds against
+	 * the live array, or would over/underflow / cross the floor). */
+	if (new_n == 0 || new_n == old_arr->n) {
 		ok = 0;
 		goto done;
 	}
@@ -519,4 +595,83 @@ done:
 		(void)__xtc_mtx_unlock(&h->stripe_locks[s]);
 	atomic_store_explicit(&h->resizing, 0, memory_order_release);
 	(void)ok;
+}
+
+/* Grow want-callback: double, refusing past the pow2 cap so the size
+ * arithmetic cannot overflow (defense-in-depth; a table this large is
+ * not a real workload -- stay put rather than misbehave). */
+static size_t
+__chash_want_grow(const struct chash_arr *old_arr, const xtc_chash_t *h)
+{
+	size_t new_n = old_arr->n * 2;
+	(void)h;
+	if (new_n <= old_arr->n ||
+	    new_n > (SIZE_MAX / 2) / sizeof(struct chash_bucket))
+		return 0;
+	return new_n;
+}
+
+/* Shrink want-callback: halve, but only if the LIVE load factor is
+ * still below the low-water mark and the halved size stays at or above
+ * the floor.  Re-checking the count HERE (under all stripe locks,
+ * against the array we are about to replace) is what defeats a race
+ * where a concurrent insert pushed the table back up between the
+ * remove-path trigger and this callback -- we simply abort (return 0)
+ * and leave the array as is. */
+static size_t
+__chash_want_shrink(const struct chash_arr *old_arr, const xtc_chash_t *h)
+{
+	size_t new_n = old_arr->n / 2;
+	size_t cnt = atomic_load_explicit(
+	    &((xtc_chash_t *)(uintptr_t)h)->count, memory_order_relaxed);
+	if (new_n < h->min_n)
+		return 0;
+	/* Low-water LF < 0.1875 (cnt*16 < n*3).  See __chash_maybe_shrink
+	 * for the no-oscillation argument. */
+	if (cnt * 16 >= old_arr->n * 3)
+		return 0;
+	return new_n;
+}
+
+static void
+__chash_grow(xtc_chash_t *h)
+{
+	__chash_resize(h, __chash_want_grow);
+}
+
+/*
+ * Shrink trigger, called from the remove path (only when auto-shrink
+ * is enabled).  Halve the array once the load factor has dropped below
+ * the LOW-water mark, never below the initial/min bucket count.
+ *
+ * Hysteresis / no-oscillation.  The grow high-water is LF > 0.75
+ * (insert: cnt*4 > n*3).  The shrink low-water is LF < 0.1875
+ * (cnt*16 < n*3), well below HALF the grow trigger.  A shrink halves
+ * n, which DOUBLES the load factor, so immediately after a shrink the
+ * LF is < 0.375 -- exactly half the grow trigger and twice the shrink
+ * trigger.  Consequences:
+ *   - to grow again the count must climb from <0.375*n to >0.75*n, a
+ *     ~2x increase in live entries;
+ *   - to shrink again it must fall from <0.375*n back below 0.1875*n,
+ *     a further ~2x decrease.
+ * The dead band between the two triggers (0.1875..0.75) is a 4x count
+ * swing, so no single insert or remove near either boundary can
+ * re-cross the OPPOSITE boundary: the table cannot thrash
+ * grow<->shrink.  The floor (min_n) additionally pins small tables so
+ * a nearly empty table never churns at the bottom.
+ *
+ * cnt is the caller's post-decrement snapshot -- a heuristic gate;
+ * the authoritative low-water re-check happens in __chash_want_shrink
+ * under all stripe locks against the live array.
+ */
+static void
+__chash_maybe_shrink(xtc_chash_t *h, size_t cnt)
+{
+	struct chash_arr *arr = atomic_load_explicit(&h->arr,
+	    memory_order_acquire);
+	if (arr->n / 2 < h->min_n)
+		return;
+	if (cnt * 16 >= arr->n * 3)
+		return;
+	__chash_resize(h, __chash_want_shrink);
 }
