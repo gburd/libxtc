@@ -1,3 +1,23 @@
+libxtc (1.31.0-1) unstable; urgency=medium
+
+  * feat: xtc_future -- futures and promises (PLAN.md 2.4.1, M7).
+    xtc_future_new_pair / xtc_promise_set / xtc_promise_drop /
+    xtc_future_await (fiber) / xtc_future_wait (thread or fiber) /
+    xtc_future_ready, plus combinators map / then / when_all /
+    when_any / with_timeout.  The "task that returns a value"
+    primitive; built on the xtc_notify park/wake core.
+  * feat: xtc_io_set_iowq_max_workers -- cap the per-ring io_uring
+    io-wq kernel worker pool (default: bounded=4/ring).  Prevents an
+    N-carrier executor on an M-core box from accumulating N*M idle
+    io-wq kernel threads (measured: 4000+ threads / 10%% CFS-balancer
+    tax under the PG multithreaded runtime; now bounded).
+  * feat: xtc_exec_set_steal_backoff / _get_steal_backoff -- opt-in
+    (default off) exponential idle-poll backoff so an idle-heavy
+    executor stops burning CPU on repeated empty steal scans.
+    Complements eager_rebalance.
+
+ -- Greg Burd <greg@burd.me>  Thu, 23 Jul 2026 18:30:00 +0000
+
 libxtc (1.30.0-1) unstable; urgency=medium
 
   * feat: xtc_accel -- attached-compute (GPU/NPU) fiber-parking bridge.
