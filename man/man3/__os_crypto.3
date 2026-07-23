@@ -6,12 +6,20 @@
 .Sh NAME
 .Nm __os_crypto_sha256 ,
 .Nm __os_crypto_hmac_sha256 ,
+.Nm __os_crypto_sha3_256 ,
+.Nm __os_crypto_sha3_512 ,
+.Nm __os_crypto_blake3 ,
 .Nm __os_crypto_aes_gcm_encrypt ,
 .Nm __os_crypto_aes_gcm_decrypt ,
+.Nm __os_crypto_chacha20_poly1305_encrypt ,
+.Nm __os_crypto_chacha20_poly1305_decrypt ,
+.Nm __os_crypto_hkdf_extract ,
+.Nm __os_crypto_hkdf_expand ,
+.Nm __os_crypto_hkdf ,
 .Nm __os_csprng_init ,
 .Nm __os_csprng_bytes ,
 .Nm __os_csprng_destroy
-.Nd cryptography building blocks (hashing, AEAD, CSPRNG)
+.Nd cryptography building blocks (hashing, AEAD, KDF, CSPRNG)
 .Sh SYNOPSIS
 .In os_crypto.h
 .Ft int
@@ -19,9 +27,25 @@
 .Ft int
 .Fn __os_crypto_hmac_sha256 "const void *key" "size_t keylen" "const void *data" "size_t len" "uint8_t out[32]"
 .Ft int
+.Fn __os_crypto_sha3_256 "const void *data" "size_t len" "uint8_t out[32]"
+.Ft int
+.Fn __os_crypto_sha3_512 "const void *data" "size_t len" "uint8_t out[64]"
+.Ft int
+.Fn __os_crypto_blake3 "const void *data" "size_t len" "uint8_t out[32]"
+.Ft int
 .Fn __os_crypto_aes_gcm_encrypt "const uint8_t key[32]" "const uint8_t iv[12]" "const void *aad" "size_t aadlen" "const void *plaintext" "size_t len" "void *ciphertext_out" "uint8_t tag_out[16]"
 .Ft int
 .Fn __os_crypto_aes_gcm_decrypt "const uint8_t key[32]" "const uint8_t iv[12]" "const void *aad" "size_t aadlen" "const void *ciphertext" "size_t len" "const uint8_t tag[16]" "void *plaintext_out"
+.Ft int
+.Fn __os_crypto_chacha20_poly1305_encrypt "const uint8_t key[32]" "const uint8_t nonce[12]" "const void *aad" "size_t aadlen" "const void *plaintext" "size_t len" "void *ciphertext_out" "uint8_t tag_out[16]"
+.Ft int
+.Fn __os_crypto_chacha20_poly1305_decrypt "const uint8_t key[32]" "const uint8_t nonce[12]" "const void *aad" "size_t aadlen" "const void *ciphertext" "size_t len" "const uint8_t tag[16]" "void *plaintext_out"
+.Ft int
+.Fn __os_crypto_hkdf_extract "const void *salt" "size_t saltlen" "const void *ikm" "size_t ikmlen" "uint8_t prk_out[32]"
+.Ft int
+.Fn __os_crypto_hkdf_expand "const uint8_t prk[32]" "const void *info" "size_t infolen" "void *out" "size_t outlen"
+.Ft int
+.Fn __os_crypto_hkdf "const void *ikm" "size_t ikmlen" "const void *salt" "size_t saltlen" "const void *info" "size_t infolen" "void *out" "size_t outlen"
 .Ft int
 .Fn __os_csprng_init "__os_csprng_t **out"
 .Ft int
@@ -91,10 +115,32 @@ under
 .Fa key
 to
 .Fa out .
-Both are intended for WAL-record and general checksum integrity, not
-password storage (there is deliberately no HKDF or password-hashing
-primitive in v1; see
-.Sx DEFERRED ) .
+.Fn __os_crypto_sha3_256
+and
+.Fn __os_crypto_sha3_512
+write the 32- resp. 64-byte SHA-3 (FIPS 202, Keccak) digest, and
+.Fn __os_crypto_blake3
+writes the 32-byte (default-length) BLAKE3 digest.  These are
+intended for WAL-record and general checksum integrity, not
+password storage.
+.Pp
+.Fn __os_crypto_blake3
+is special: OpenSSL does not provide BLAKE3, so it is a small
+self-contained
+.Em portable
+reimplementation compiled directly into
+.Pa src/os/os_crypto.c
+(an independent from-spec rewrite following the public-domain
+BLAKE3 specification, in BSD KNF).  It is therefore available on
+.Em every
+build regardless of the selected TLS backend and
+.Em never
+returns
+.Dv XTC_E_NOSYS ;
+the SHA-2 and SHA-3 digests, by contrast, are OpenSSL-backed and
+follow the
+.Sx NOSYS BEHAVIOR
+above.
 .Pp
 A
 .Dv NULL
@@ -112,6 +158,11 @@ An unexpected OpenSSL failure returns
 and
 .Fn __os_crypto_aes_gcm_decrypt
 are a one-shot AES-256-GCM AEAD pair.
+.Fn __os_crypto_chacha20_poly1305_encrypt
+and
+.Fn __os_crypto_chacha20_poly1305_decrypt
+are a second AEAD pair with an identical API shape (ChaCha20-Poly1305,
+RFC 8439).
 .Fa key
 is 32 bytes.
 .Fa iv
@@ -133,16 +184,18 @@ is 16 bytes.
 .Sy pair for two different plaintexts is a catastrophic
 confidentiality break.
 Draw a fresh
-.Fa iv
+.Fa iv Ns / Ns Fa nonce
 per encryption, e.g. from
 .Fn __os_csprng_bytes .
 .Pp
 .Fn __os_crypto_aes_gcm_decrypt
-verifies the GCM tag
+and
+.Fn __os_crypto_chacha20_poly1305_decrypt
+verify the AEAD tag
 .Em before
-trusting the recovered bytes.  On a tag mismatch it returns
+trusting the recovered bytes.  On a tag mismatch they return
 .Dv XTC_E_INVAL
-and does
+and do
 .Em not
 leave the original plaintext in
 .Fa plaintext_out :
@@ -156,6 +209,41 @@ and
 (an OpenSSL invariant violation unrelated to tag verification), so a
 caller can never confuse "the ciphertext was tampered with" with
 "something else went wrong."
+.Sh KEY DERIVATION
+.Fn __os_crypto_hkdf_extract ,
+.Fn __os_crypto_hkdf_expand ,
+and
+.Fn __os_crypto_hkdf
+are HKDF-SHA256 (RFC 5869).
+.Fn __os_crypto_hkdf_extract
+computes the 32-byte pseudorandom key
+.Pq PRK No = HMAC-SHA256( Ns Fa salt , Fa ikm )
+and writes it to
+.Fa prk_out ;
+.Fa salt
+may be
+.Dv NULL Ns / Ns Li 0
+(RFC 5869 then uses a string of HashLen zero bytes).
+.Fn __os_crypto_hkdf_expand
+derives
+.Fa outlen
+bytes of output key material from
+.Fa prk
+and the optional
+.Fa info
+into
+.Fa out ;
+.Fa outlen
+must be in
+.Bq 1 , No 255*32
+per RFC 5869 (a larger request returns
+.Dv XTC_E_INVAL ) .
+.Fn __os_crypto_hkdf
+is the common combined case: Extract then Expand in one call.  All
+three are OpenSSL-backed (via the EVP_KDF "HKDF" provider) and follow
+the
+.Sx NOSYS BEHAVIOR
+above.
 .Sh CSPRNG
 .Fn __os_csprng_init
 allocates a per-handle CSPRNG object; the caller owns the handle and
@@ -279,20 +367,13 @@ __os_csprng_destroy(rng);
 .Sh DEFERRED
 The following are deliberately
 .Em not
-in v1 and are tracked as future work, not oversights:
+provided yet and are tracked as future work, not oversights:
 .Bl -bullet -compact
 .It
-ChaCha20-Poly1305 (a second AEAD cipher; AES-256-GCM alone covers the
-stated use case).
-.It
-SHA-3 and BLAKE3 (a second and third hash family; SHA-256 alone
-covers WAL/checksum integrity).
-.It
-HKDF (key derivation; no v1 consumer derives sub-keys yet).
-.It
 Alternative backends -- libsodium, BoringSSL, SChannel, CommonCrypto
-(OpenSSL is already a build dependency for TLS; v1 does not add a
-second cryptography dependency).
+(OpenSSL is already a build dependency for TLS and covers the
+OpenSSL-backed primitives here; BLAKE3 is provided by a portable
+reimplementation, so it needs no backend at all).
 .El
 .Sh SEE ALSO
 .Xr __os_alloc 3 ,

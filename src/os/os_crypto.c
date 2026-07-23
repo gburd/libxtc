@@ -12,6 +12,13 @@
  *	AES-256-GCM for authenticated encryption, and a per-loop CSPRNG),
  *	backed ONLY by OpenSSL.
  *
+ *	Extended past the original v1 scope for future TDE/WAL-encryption
+ *	work: ChaCha20-Poly1305 (a second AEAD), SHA-3 256/512, BLAKE3,
+ *	and HKDF-SHA256.  ChaCha20-Poly1305, SHA-3, and HKDF are
+ *	OpenSSL-backed (NOSYS otherwise); BLAKE3 is a portable
+ *	self-contained reimplementation (below, ahead of the backend
+ *	guard) and is available on every build.
+ *
  *	This file is ALWAYS compiled into libxtc.a, exactly like
  *	src/os/os_rand.c.  It is guarded internally by
  *	XTC_TLS_BACKEND_OPENSSL -- the SAME macro src/io/tls_openssl.c
@@ -67,14 +74,320 @@
 #include "os_crypto.h"
 #include "os_sharp.h"   /* __os_rand_u64: seed source for the CSPRNG */
 
+#include <string.h>
+
+/*
+ * ===================================================================
+ * BLAKE3 (portable reimplementation)
+ * ===================================================================
+ *
+ * OpenSSL does not provide BLAKE3, so this is a small self-contained
+ * PORTABLE reimplementation of the BLAKE3 hash, following the
+ * public-domain BLAKE3 specification and reference implementation
+ * (the reference is dual-licensed CC0-1.0 / Apache-2.0; this is an
+ * independent from-spec rewrite in BSD KNF, not a copy).  It is
+ * one-shot only (no keyed/derive-key modes, no incremental update)
+ * and emits the default 32-byte digest -- exactly what
+ * __os_crypto_blake3 needs.  Because it depends on nothing but the C
+ * standard library it is compiled into EVERY build regardless of the
+ * selected TLS backend, and therefore never returns XTC_E_NOSYS.
+ *
+ * Structure mirrors the spec: a 7-round compression function over a
+ * 16-word state; inputs are split into 1024-byte chunks, each chunk
+ * hashed block-by-block (64-byte blocks) with CHUNK_START/CHUNK_END
+ * domain flags; chunk chaining values are combined by a binary tree
+ * of PARENT nodes; the final (root) node is compressed with the ROOT
+ * flag and squeezed for the output.
+ */
+
+#define B3_BLOCK_LEN  64
+#define B3_CHUNK_LEN  1024
+
+#define B3_CHUNK_START (1u << 0)
+#define B3_CHUNK_END   (1u << 1)
+#define B3_PARENT      (1u << 2)
+#define B3_ROOT        (1u << 3)
+
+static const uint32_t b3_iv[8] = {
+	0x6A09E667u, 0xBB67AE85u, 0x3C6EF372u, 0xA54FF53Au,
+	0x510E527Fu, 0x9B05688Cu, 0x1F83D9ABu, 0x5BE0CD19u,
+};
+
+/* Per-round message-word permutation schedule. */
+static const uint8_t b3_perm[7][16] = {
+	{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
+	{ 2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8 },
+	{ 3, 4, 10, 12, 13, 2, 7, 14, 6, 5, 9, 0, 11, 15, 8, 1 },
+	{ 10, 7, 12, 9, 14, 3, 13, 15, 4, 0, 11, 2, 5, 8, 1, 6 },
+	{ 12, 13, 9, 11, 15, 10, 14, 8, 7, 2, 5, 3, 0, 1, 6, 4 },
+	{ 9, 14, 11, 5, 8, 12, 15, 1, 13, 3, 0, 10, 2, 6, 4, 7 },
+	{ 11, 15, 5, 0, 1, 9, 8, 6, 14, 10, 2, 12, 3, 4, 7, 13 },
+};
+
+static uint32_t
+b3_rotr(uint32_t w, int c)
+{
+	return (w >> c) | (w << (32 - c));
+}
+
+static uint32_t
+b3_load32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+	    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void
+b3_store32(uint8_t *p, uint32_t w)
+{
+	p[0] = (uint8_t)w;
+	p[1] = (uint8_t)(w >> 8);
+	p[2] = (uint8_t)(w >> 16);
+	p[3] = (uint8_t)(w >> 24);
+}
+
+static void
+b3_g(uint32_t *s, int a, int b, int c, int d, uint32_t x, uint32_t y)
+{
+	s[a] = s[a] + s[b] + x;
+	s[d] = b3_rotr(s[d] ^ s[a], 16);
+	s[c] = s[c] + s[d];
+	s[b] = b3_rotr(s[b] ^ s[c], 12);
+	s[a] = s[a] + s[b] + y;
+	s[d] = b3_rotr(s[d] ^ s[a], 8);
+	s[c] = s[c] + s[d];
+	s[b] = b3_rotr(s[b] ^ s[c], 7);
+}
+
+static void
+b3_round(uint32_t st[16], const uint32_t m[16], int r)
+{
+	const uint8_t *s = b3_perm[r];
+
+	b3_g(st, 0, 4, 8, 12, m[s[0]], m[s[1]]);
+	b3_g(st, 1, 5, 9, 13, m[s[2]], m[s[3]]);
+	b3_g(st, 2, 6, 10, 14, m[s[4]], m[s[5]]);
+	b3_g(st, 3, 7, 11, 15, m[s[6]], m[s[7]]);
+	b3_g(st, 0, 5, 10, 15, m[s[8]], m[s[9]]);
+	b3_g(st, 1, 6, 11, 12, m[s[10]], m[s[11]]);
+	b3_g(st, 2, 7, 8, 13, m[s[12]], m[s[13]]);
+	b3_g(st, 3, 4, 9, 14, m[s[14]], m[s[15]]);
+}
+
+static void
+b3_compress(const uint32_t cv[8], const uint8_t block[B3_BLOCK_LEN],
+    uint8_t block_len, uint64_t counter, uint32_t flags, uint32_t out[16])
+{
+	uint32_t st[16];
+	uint32_t m[16];
+	int      i;
+
+	for (i = 0; i < 16; i++)
+		m[i] = b3_load32(block + 4 * i);
+
+	for (i = 0; i < 8; i++)
+		st[i] = cv[i];
+	st[8] = b3_iv[0]; st[9] = b3_iv[1]; st[10] = b3_iv[2];
+	st[11] = b3_iv[3];
+	st[12] = (uint32_t)counter;
+	st[13] = (uint32_t)(counter >> 32);
+	st[14] = (uint32_t)block_len;
+	st[15] = flags;
+
+	for (i = 0; i < 7; i++)
+		b3_round(st, m, i);
+
+	for (i = 0; i < 8; i++) {
+		out[i] = st[i] ^ st[i + 8];
+		out[i + 8] = st[i + 8] ^ cv[i];
+	}
+}
+
+/*
+ * An "output node": the inputs to a final compression, deferred so the
+ * ROOT flag and arbitrary-length squeeze can be applied to the
+ * eventual top-of-tree node.
+ */
+struct b3_output {
+	uint32_t cv[8];
+	uint8_t  block[B3_BLOCK_LEN];
+	uint8_t  block_len;
+	uint64_t counter;
+	uint32_t flags;
+};
+
+static void
+b3_output_root(const struct b3_output *o, uint8_t *out, size_t outlen)
+{
+	uint64_t counter = 0;
+
+	while (outlen > 0) {
+		uint32_t words[16];
+		uint8_t  wide[B3_BLOCK_LEN];
+		size_t   take;
+		int      i;
+
+		b3_compress(o->cv, o->block, o->block_len, counter,
+		    o->flags | B3_ROOT, words);
+		for (i = 0; i < 16; i++)
+			b3_store32(wide + 4 * i, words[i]);
+
+		take = (outlen < B3_BLOCK_LEN) ? outlen : B3_BLOCK_LEN;
+		memcpy(out, wide, take);
+		out += take;
+		outlen -= take;
+		counter++;
+	}
+}
+
+/* Compress one chunk (<= 1024 bytes) into its (deferred) output node. */
+static struct b3_output
+b3_chunk_output(const uint8_t *chunk, size_t len, uint64_t chunk_counter)
+{
+	struct b3_output o;
+	uint32_t cv[8];
+	size_t   pos = 0;
+	int      i;
+
+	for (i = 0; i < 8; i++)
+		cv[i] = b3_iv[i];
+
+	while (len - pos > B3_BLOCK_LEN) {
+		uint32_t words[16];
+		uint32_t f = (pos == 0) ? B3_CHUNK_START : 0;
+		b3_compress(cv, chunk + pos, B3_BLOCK_LEN, chunk_counter,
+		    f, words);
+		for (i = 0; i < 8; i++)
+			cv[i] = words[i];
+		pos += B3_BLOCK_LEN;
+	}
+
+	for (i = 0; i < 8; i++)
+		o.cv[i] = cv[i];
+	memset(o.block, 0, sizeof(o.block));
+	o.block_len = (uint8_t)(len - pos);
+	memcpy(o.block, chunk + pos, o.block_len);
+	o.counter = chunk_counter;
+	o.flags = B3_CHUNK_END | ((pos == 0) ? B3_CHUNK_START : 0);
+	return o;
+}
+
+static void
+b3_output_cv(const struct b3_output *o, uint32_t out_cv[8])
+{
+	uint32_t words[16];
+	int      i;
+
+	b3_compress(o->cv, o->block, o->block_len, o->counter, o->flags,
+	    words);
+	for (i = 0; i < 8; i++)
+		out_cv[i] = words[i];
+}
+
+static struct b3_output
+b3_parent_output(const uint32_t left[8], const uint32_t right[8])
+{
+	struct b3_output o;
+	int i;
+
+	for (i = 0; i < 8; i++)
+		o.cv[i] = b3_iv[i];
+	for (i = 0; i < 8; i++)
+		b3_store32(o.block + 4 * i, left[i]);
+	for (i = 0; i < 8; i++)
+		b3_store32(o.block + 32 + 4 * i, right[i]);
+	o.block_len = B3_BLOCK_LEN;
+	o.counter = 0;
+	o.flags = B3_PARENT;
+	return o;
+}
+
+static void
+b3_parent_cv(const uint32_t left[8], const uint32_t right[8], uint32_t out[8])
+{
+	struct b3_output o = b3_parent_output(left, right);
+	b3_output_cv(&o, out);
+}
+
+static void
+b3_hash(const uint8_t *data, size_t len, uint8_t *out, size_t outlen)
+{
+	/* 54 levels covers 2^54 chunks (~2^64 bytes), the BLAKE3 max. */
+	uint32_t cv_stack[54][8];
+	uint64_t cv_stack_len = 0;
+	uint64_t chunk_counter = 0;
+	size_t   pos = 0;
+	struct b3_output final;
+
+	if (len <= B3_CHUNK_LEN) {
+		final = b3_chunk_output(data, len, 0);
+		b3_output_root(&final, out, outlen);
+		return;
+	}
+
+	/* Absorb every chunk EXCEPT the last, pushing each chunk's CV and
+	 * merging complete equal-height subtrees per the trailing-zero
+	 * rule.  The last chunk stays an output node (not CV'd) so
+	 * finalize can apply ROOT to whichever node ends up on top. */
+	while (len - pos > B3_CHUNK_LEN) {
+		struct b3_output co;
+		uint32_t new_cv[8];
+		uint64_t total;
+
+		co = b3_chunk_output(data + pos, B3_CHUNK_LEN, chunk_counter);
+		b3_output_cv(&co, new_cv);
+		pos += B3_CHUNK_LEN;
+		chunk_counter++;
+
+		total = chunk_counter;
+		while ((total & 1) == 0) {
+			uint32_t merged[8];
+			cv_stack_len--;
+			b3_parent_cv(cv_stack[cv_stack_len], new_cv, merged);
+			memcpy(new_cv, merged, sizeof(merged));
+			total >>= 1;
+		}
+		memcpy(cv_stack[cv_stack_len], new_cv, sizeof(new_cv));
+		cv_stack_len++;
+	}
+
+	/* Finalize: the last chunk is the current output node.  Fold the
+	 * stack into it right-to-left; each popped entry is the left
+	 * child, the running node's CV the right child.  The topmost
+	 * parent stays an output node so ROOT is applied there. */
+	final = b3_chunk_output(data + pos, len - pos, chunk_counter);
+	while (cv_stack_len > 0) {
+		uint32_t rcv[8];
+		cv_stack_len--;
+		b3_output_cv(&final, rcv);
+		final = b3_parent_output(cv_stack[cv_stack_len], rcv);
+	}
+	b3_output_root(&final, out, outlen);
+}
+
+/*
+ * PUBLIC: int __os_crypto_blake3 __P((const void *, size_t, uint8_t *));
+ */
+int
+__os_crypto_blake3(const void *data, size_t len,
+    uint8_t out[XTC_CRYPTO_BLAKE3_LEN])
+{
+	if ((data == NULL && len != 0) || out == NULL)
+		return XTC_E_INVAL;
+
+	b3_hash((const uint8_t *)data, len, out, XTC_CRYPTO_BLAKE3_LEN);
+	return XTC_OK;
+}
+
 #if defined(XTC_TLS_BACKEND_OPENSSL)
 
 #include <limits.h>
-#include <string.h>
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
+#include <openssl/kdf.h>
+#include <openssl/core_names.h>
 
 struct __os_csprng {
 	int unused;   /* opaque; state lives in OpenSSL's own default RNG */
@@ -114,6 +427,40 @@ __os_crypto_hmac_sha256(const void *key, size_t keylen,
 
 	if (HMAC(EVP_sha256(), key, (int)keylen, data, len, out, &outlen) ==
 	    NULL)
+		return XTC_E_INTERNAL;
+	return XTC_OK;
+}
+
+/*
+ * PUBLIC: int __os_crypto_sha3_256 __P((const void *, size_t, uint8_t *));
+ */
+int
+__os_crypto_sha3_256(const void *data, size_t len,
+    uint8_t out[XTC_CRYPTO_SHA3_256_LEN])
+{
+	unsigned int outlen;
+
+	if ((data == NULL && len != 0) || out == NULL)
+		return XTC_E_INVAL;
+
+	if (EVP_Digest(data, len, out, &outlen, EVP_sha3_256(), NULL) != 1)
+		return XTC_E_INTERNAL;
+	return XTC_OK;
+}
+
+/*
+ * PUBLIC: int __os_crypto_sha3_512 __P((const void *, size_t, uint8_t *));
+ */
+int
+__os_crypto_sha3_512(const void *data, size_t len,
+    uint8_t out[XTC_CRYPTO_SHA3_512_LEN])
+{
+	unsigned int outlen;
+
+	if ((data == NULL && len != 0) || out == NULL)
+		return XTC_E_INVAL;
+
+	if (EVP_Digest(data, len, out, &outlen, EVP_sha3_512(), NULL) != 1)
 		return XTC_E_INTERNAL;
 	return XTC_OK;
 }
@@ -263,6 +610,244 @@ __os_crypto_aes_gcm_decrypt(
 }
 
 /*
+ * PUBLIC: int __os_crypto_chacha20_poly1305_encrypt __P((const uint8_t *, const uint8_t *, const void *, size_t, const void *, size_t, void *, uint8_t *));
+ */
+int
+__os_crypto_chacha20_poly1305_encrypt(
+    const uint8_t key[XTC_CRYPTO_CHACHA_KEY_LEN],
+    const uint8_t nonce[XTC_CRYPTO_CHACHA_NONCE_LEN],
+    const void *aad, size_t aadlen,
+    const void *plaintext, size_t len,
+    void *ciphertext_out, uint8_t tag_out[XTC_CRYPTO_CHACHA_TAG_LEN])
+{
+	EVP_CIPHER_CTX *ctx;
+	unsigned char final_scratch[EVP_MAX_BLOCK_LENGTH];
+	unsigned char *cout = ciphertext_out;
+	int outl, tmplen;
+
+	if (key == NULL || nonce == NULL || tag_out == NULL)
+		return XTC_E_INVAL;
+	if ((plaintext == NULL || ciphertext_out == NULL) && len != 0)
+		return XTC_E_INVAL;
+	if (aad == NULL && aadlen != 0)
+		return XTC_E_INVAL;
+	if (len > (size_t)INT_MAX || aadlen > (size_t)INT_MAX)
+		return XTC_E_RANGE;
+
+	if ((ctx = EVP_CIPHER_CTX_new()) == NULL)
+		return XTC_E_INTERNAL;
+
+	/* The RFC 8439 12-byte nonce is EVP_chacha20_poly1305's default IV
+	 * length, so no EVP_CTRL_AEAD_SET_IVLEN is needed (same as the
+	 * AES-GCM path above). */
+	if (EVP_EncryptInit_ex2(ctx, EVP_chacha20_poly1305(),
+	    key, nonce, NULL) != 1) {
+		EVP_CIPHER_CTX_free(ctx);
+		return XTC_E_INTERNAL;
+	}
+
+	if (aadlen > 0 &&
+	    EVP_EncryptUpdate(ctx, NULL, &outl, aad, (int)aadlen) != 1) {
+		EVP_CIPHER_CTX_free(ctx);
+		return XTC_E_INTERNAL;
+	}
+
+	outl = 0;
+	if (len > 0 && EVP_EncryptUpdate(ctx, cout, &outl,
+	    plaintext, (int)len) != 1) {
+		EVP_CIPHER_CTX_free(ctx);
+		return XTC_E_INTERNAL;
+	}
+
+	if (EVP_EncryptFinal_ex(ctx,
+	    (cout != NULL) ? cout + outl : final_scratch, &tmplen) != 1) {
+		EVP_CIPHER_CTX_free(ctx);
+		return XTC_E_INTERNAL;
+	}
+
+	if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG,
+	    XTC_CRYPTO_CHACHA_TAG_LEN, tag_out) != 1) {
+		EVP_CIPHER_CTX_free(ctx);
+		return XTC_E_INTERNAL;
+	}
+
+	EVP_CIPHER_CTX_free(ctx);
+	return XTC_OK;
+}
+
+/*
+ * PUBLIC: int __os_crypto_chacha20_poly1305_decrypt __P((const uint8_t *, const uint8_t *, const void *, size_t, const void *, size_t, const uint8_t *, void *));
+ */
+int
+__os_crypto_chacha20_poly1305_decrypt(
+    const uint8_t key[XTC_CRYPTO_CHACHA_KEY_LEN],
+    const uint8_t nonce[XTC_CRYPTO_CHACHA_NONCE_LEN],
+    const void *aad, size_t aadlen,
+    const void *ciphertext, size_t len,
+    const uint8_t tag[XTC_CRYPTO_CHACHA_TAG_LEN],
+    void *plaintext_out)
+{
+	EVP_CIPHER_CTX *ctx;
+	unsigned char final_scratch[EVP_MAX_BLOCK_LENGTH];
+	unsigned char *pout = plaintext_out;
+	int outl, tmplen, rc;
+
+	if (key == NULL || nonce == NULL || tag == NULL)
+		return XTC_E_INVAL;
+	if ((ciphertext == NULL || plaintext_out == NULL) && len != 0)
+		return XTC_E_INVAL;
+	if (aad == NULL && aadlen != 0)
+		return XTC_E_INVAL;
+	if (len > (size_t)INT_MAX || aadlen > (size_t)INT_MAX)
+		return XTC_E_RANGE;
+
+	if ((ctx = EVP_CIPHER_CTX_new()) == NULL)
+		return XTC_E_INTERNAL;
+
+	if (EVP_DecryptInit_ex2(ctx, EVP_chacha20_poly1305(),
+	    key, nonce, NULL) != 1) {
+		EVP_CIPHER_CTX_free(ctx);
+		return XTC_E_INTERNAL;
+	}
+
+	if (aadlen > 0 &&
+	    EVP_DecryptUpdate(ctx, NULL, &outl, aad, (int)aadlen) != 1) {
+		EVP_CIPHER_CTX_free(ctx);
+		return XTC_E_INTERNAL;
+	}
+
+	outl = 0;
+	if (len > 0 && EVP_DecryptUpdate(ctx, pout, &outl,
+	    ciphertext, (int)len) != 1) {
+		EVP_CIPHER_CTX_free(ctx);
+		if (len > 0)
+			memset(pout, 0, len);
+		return XTC_E_INTERNAL;
+	}
+
+	/* Cast away const on the tag: EVP_CTRL_AEAD_SET_TAG's third arg is
+	 * void * even though it only reads (same as the AES-GCM path). */
+	if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG,
+	    XTC_CRYPTO_CHACHA_TAG_LEN, (void *)tag) != 1) {
+		EVP_CIPHER_CTX_free(ctx);
+		if (len > 0)
+			memset(pout, 0, len);
+		return XTC_E_INTERNAL;
+	}
+
+	/* Poly1305 tag is verified HERE.  On mismatch, wipe any
+	 * provisional plaintext and return XTC_E_INVAL (distinct from
+	 * XTC_OK and XTC_E_INTERNAL), exactly like the AES-GCM path. */
+	rc = EVP_DecryptFinal_ex(ctx,
+	    (pout != NULL) ? pout + outl : final_scratch, &tmplen);
+	EVP_CIPHER_CTX_free(ctx);
+	if (rc != 1) {
+		if (len > 0)
+			memset(pout, 0, len);
+		return XTC_E_INVAL;
+	}
+	return XTC_OK;
+}
+
+/*
+ * HKDF-SHA256 (RFC 5869) via OpenSSL 3.x's EVP_KDF "HKDF" provider.
+ * hkdf_run drives one EVP_KDF_derive in the requested mode; the three
+ * public entry points below (extract, expand, combined) are thin
+ * wrappers over it.
+ */
+static int
+hkdf_run(int mode, const void *ikm, size_t ikmlen,
+    const void *salt, size_t saltlen, const void *info, size_t infolen,
+    unsigned char *out, size_t outlen)
+{
+	EVP_KDF     *kdf;
+	EVP_KDF_CTX *kctx;
+	OSSL_PARAM   params[6], *p = params;
+	char         digest[] = "SHA256";
+	int          m = mode;
+	int          rc = XTC_E_INTERNAL;
+
+	if (ikmlen > (size_t)INT_MAX || saltlen > (size_t)INT_MAX ||
+	    infolen > (size_t)INT_MAX)
+		return XTC_E_RANGE;
+
+	if ((kdf = EVP_KDF_fetch(NULL, "HKDF", NULL)) == NULL)
+		return XTC_E_INTERNAL;
+	if ((kctx = EVP_KDF_CTX_new(kdf)) == NULL) {
+		EVP_KDF_free(kdf);
+		return XTC_E_INTERNAL;
+	}
+
+	*p++ = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST,
+	    digest, 0);
+	*p++ = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_MODE, &m);
+	*p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
+	    (void *)ikm, ikmlen);
+	if (salt != NULL)
+		*p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT,
+		    (void *)salt, saltlen);
+	if (info != NULL)
+		*p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
+		    (void *)info, infolen);
+	*p = OSSL_PARAM_construct_end();
+
+	if (EVP_KDF_derive(kctx, out, outlen, params) == 1)
+		rc = XTC_OK;
+
+	EVP_KDF_CTX_free(kctx);
+	EVP_KDF_free(kdf);
+	return rc;
+}
+
+/*
+ * PUBLIC: int __os_crypto_hkdf_extract __P((const void *, size_t, const void *, size_t, uint8_t *));
+ */
+int
+__os_crypto_hkdf_extract(const void *salt, size_t saltlen,
+    const void *ikm, size_t ikmlen, uint8_t prk_out[XTC_CRYPTO_SHA256_LEN])
+{
+	if (prk_out == NULL || (ikm == NULL && ikmlen != 0) ||
+	    (salt == NULL && saltlen != 0))
+		return XTC_E_INVAL;
+	return hkdf_run(EVP_KDF_HKDF_MODE_EXTRACT_ONLY, ikm, ikmlen,
+	    salt, saltlen, NULL, 0, prk_out, XTC_CRYPTO_SHA256_LEN);
+}
+
+/*
+ * PUBLIC: int __os_crypto_hkdf_expand __P((const uint8_t *, const void *, size_t, void *, size_t));
+ */
+int
+__os_crypto_hkdf_expand(const uint8_t prk[XTC_CRYPTO_SHA256_LEN],
+    const void *info, size_t infolen, void *out, size_t outlen)
+{
+	if (prk == NULL || out == NULL || (info == NULL && infolen != 0))
+		return XTC_E_INVAL;
+	/* RFC 5869: expand output is at most 255*HashLen. */
+	if (outlen == 0 || outlen > 255 * (size_t)XTC_CRYPTO_SHA256_LEN)
+		return XTC_E_INVAL;
+	/* Expand-only takes the PRK via the "key" param. */
+	return hkdf_run(EVP_KDF_HKDF_MODE_EXPAND_ONLY, prk,
+	    XTC_CRYPTO_SHA256_LEN, NULL, 0, info, infolen, out, outlen);
+}
+
+/*
+ * PUBLIC: int __os_crypto_hkdf __P((const void *, size_t, const void *, size_t, const void *, size_t, void *, size_t));
+ */
+int
+__os_crypto_hkdf(const void *ikm, size_t ikmlen,
+    const void *salt, size_t saltlen, const void *info, size_t infolen,
+    void *out, size_t outlen)
+{
+	if (out == NULL || (ikm == NULL && ikmlen != 0) ||
+	    (salt == NULL && saltlen != 0) || (info == NULL && infolen != 0))
+		return XTC_E_INVAL;
+	if (outlen == 0 || outlen > 255 * (size_t)XTC_CRYPTO_SHA256_LEN)
+		return XTC_E_INVAL;
+	return hkdf_run(EVP_KDF_HKDF_MODE_EXTRACT_AND_EXPAND, ikm, ikmlen,
+	    salt, saltlen, info, infolen, out, outlen);
+}
+
+/*
  * PUBLIC: int __os_csprng_init __P((__os_csprng_t **));
  */
 int
@@ -350,6 +935,24 @@ __os_crypto_hmac_sha256(const void *key, size_t keylen,
 }
 
 int
+__os_crypto_sha3_256(const void *data, size_t len,
+    uint8_t out[XTC_CRYPTO_SHA3_256_LEN])
+{
+	if ((data == NULL && len != 0) || out == NULL)
+		return XTC_E_INVAL;
+	return XTC_E_NOSYS;
+}
+
+int
+__os_crypto_sha3_512(const void *data, size_t len,
+    uint8_t out[XTC_CRYPTO_SHA3_512_LEN])
+{
+	if ((data == NULL && len != 0) || out == NULL)
+		return XTC_E_INVAL;
+	return XTC_E_NOSYS;
+}
+
+int
 __os_crypto_aes_gcm_encrypt(
     const uint8_t key[XTC_CRYPTO_AES_KEY_LEN],
     const uint8_t iv[XTC_CRYPTO_AES_IV_LEN],
@@ -380,6 +983,75 @@ __os_crypto_aes_gcm_decrypt(
 	if ((ciphertext == NULL || plaintext_out == NULL) && len != 0)
 		return XTC_E_INVAL;
 	if (aad == NULL && aadlen != 0)
+		return XTC_E_INVAL;
+	return XTC_E_NOSYS;
+}
+
+int
+__os_crypto_chacha20_poly1305_encrypt(
+    const uint8_t key[XTC_CRYPTO_CHACHA_KEY_LEN],
+    const uint8_t nonce[XTC_CRYPTO_CHACHA_NONCE_LEN],
+    const void *aad, size_t aadlen,
+    const void *plaintext, size_t len,
+    void *ciphertext_out, uint8_t tag_out[XTC_CRYPTO_CHACHA_TAG_LEN])
+{
+	if (key == NULL || nonce == NULL || tag_out == NULL)
+		return XTC_E_INVAL;
+	if ((plaintext == NULL || ciphertext_out == NULL) && len != 0)
+		return XTC_E_INVAL;
+	if (aad == NULL && aadlen != 0)
+		return XTC_E_INVAL;
+	return XTC_E_NOSYS;
+}
+
+int
+__os_crypto_chacha20_poly1305_decrypt(
+    const uint8_t key[XTC_CRYPTO_CHACHA_KEY_LEN],
+    const uint8_t nonce[XTC_CRYPTO_CHACHA_NONCE_LEN],
+    const void *aad, size_t aadlen,
+    const void *ciphertext, size_t len,
+    const uint8_t tag[XTC_CRYPTO_CHACHA_TAG_LEN],
+    void *plaintext_out)
+{
+	if (key == NULL || nonce == NULL || tag == NULL)
+		return XTC_E_INVAL;
+	if ((ciphertext == NULL || plaintext_out == NULL) && len != 0)
+		return XTC_E_INVAL;
+	if (aad == NULL && aadlen != 0)
+		return XTC_E_INVAL;
+	return XTC_E_NOSYS;
+}
+
+int
+__os_crypto_hkdf_extract(const void *salt, size_t saltlen,
+    const void *ikm, size_t ikmlen, uint8_t prk_out[XTC_CRYPTO_SHA256_LEN])
+{
+	if (prk_out == NULL || (ikm == NULL && ikmlen != 0) ||
+	    (salt == NULL && saltlen != 0))
+		return XTC_E_INVAL;
+	return XTC_E_NOSYS;
+}
+
+int
+__os_crypto_hkdf_expand(const uint8_t prk[XTC_CRYPTO_SHA256_LEN],
+    const void *info, size_t infolen, void *out, size_t outlen)
+{
+	if (prk == NULL || out == NULL || (info == NULL && infolen != 0))
+		return XTC_E_INVAL;
+	if (outlen == 0 || outlen > 255 * (size_t)XTC_CRYPTO_SHA256_LEN)
+		return XTC_E_INVAL;
+	return XTC_E_NOSYS;
+}
+
+int
+__os_crypto_hkdf(const void *ikm, size_t ikmlen,
+    const void *salt, size_t saltlen, const void *info, size_t infolen,
+    void *out, size_t outlen)
+{
+	if (out == NULL || (ikm == NULL && ikmlen != 0) ||
+	    (salt == NULL && saltlen != 0) || (info == NULL && infolen != 0))
+		return XTC_E_INVAL;
+	if (outlen == 0 || outlen > 255 * (size_t)XTC_CRYPTO_SHA256_LEN)
 		return XTC_E_INVAL;
 	return XTC_E_NOSYS;
 }
