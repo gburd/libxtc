@@ -1,0 +1,177 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd July 23, 2026
+.Dt XTC_FUTURE 3
+.Os
+.Sh NAME
+.Nm xtc_future_new_pair ,
+.Nm xtc_promise_set ,
+.Nm xtc_promise_drop ,
+.Nm xtc_future_await ,
+.Nm xtc_future_wait ,
+.Nm xtc_future_ready ,
+.Nm xtc_future_map ,
+.Nm xtc_future_then ,
+.Nm xtc_future_when_all ,
+.Nm xtc_future_when_any ,
+.Nm xtc_future_with_timeout
+.Nd one-shot awaitable values (futures and promises)
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_future.h
+.Ft int
+.Fn xtc_future_new_pair "xtc_promise_t **out_prom" "xtc_future_t **out_fut"
+.Ft int
+.Fn xtc_promise_set "xtc_promise_t *prom" "intptr_t value" "int status"
+.Ft void
+.Fn xtc_promise_drop "xtc_promise_t *prom"
+.Ft int
+.Fn xtc_future_await "xtc_future_t *fut" "intptr_t *out"
+.Ft int
+.Fn xtc_future_wait "xtc_future_t *fut" "intptr_t *out" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_future_ready "xtc_future_t *fut" "int *is_ready"
+.Ft int
+.Fn xtc_future_map "xtc_future_t *src" "xtc_future_map_fn fn" "void *user" "xtc_future_t **out_fut"
+.Ft int
+.Fn xtc_future_then "xtc_future_t *src" "xtc_future_then_fn fn" "void *user" "xtc_future_t **out_fut"
+.Ft int
+.Fn xtc_future_when_all "xtc_future_t **futs" "int n" "xtc_future_t **out_fut"
+.Ft int
+.Fn xtc_future_when_any "xtc_future_t **futs" "int n" "xtc_future_t **out_fut"
+.Ft int
+.Fn xtc_future_with_timeout "xtc_future_t *src" "int64_t timeout_ns" "xtc_future_t **out_fut"
+.Sh DESCRIPTION
+A future is a one-shot awaitable value with a write half
+.Pq Vt xtc_promise_t
+and a read half
+.Pq Vt xtc_future_t .
+It is the
+.Dq task that returns a value
+primitive, distinct from
+.Xr xtc_proc 3
+(a task with identity and a mailbox): code that needs only one
+asynchronous result -- a query answer, a lock grant, a computed value
+-- uses a future at near-zero overhead instead of standing up a whole
+process.
+.Pp
+A future carries an
+.Vt intptr_t
+value and an
+.Vt int
+status (an
+.Dv XTC_OK
+or
+.Dv XTC_E_*
+code).  The promise is set exactly once; the future is then ready
+forever and every awaiter observes the same
+.Pq value , status .
+.Pp
+.Fn xtc_future_new_pair
+creates a linked pair sharing one reference-counted cell.
+.Pp
+.Fn xtc_promise_set
+completes the promise with
+.Fa value
+and
+.Fa status
+and wakes every awaiter; it may be called from any thread.  A promise
+is set once -- a second set returns
+.Dv XTC_E_INVAL .
+Setting consumes the promise handle (do not use or drop it afterward).
+.Pp
+.Fn xtc_promise_drop
+abandons a promise without setting it: the future completes with
+.Dv XTC_E_ABORTED ,
+so an awaiter never hangs on a broken promise.
+.Pp
+.Fn xtc_future_await
+parks the calling fiber cooperatively until the promise is set, then
+resumes and writes the value to
+.Fa out
+.Pq may be Dv NULL ,
+returning the status.  It consumes the future.  It must be called from
+within a fiber; off a loop, use
+.Fn xtc_future_wait .
+.Pp
+.Fn xtc_future_wait
+is usable from a fiber or a plain OS thread and is bounded by
+.Fa timeout_ns
+.Pq negative waits forever, 0 polls .
+On completion it writes
+.Fa out ,
+returns the status, and consumes the future; on wait-timeout it returns
+.Dv XTC_E_AGAIN
+and does
+.Em not
+consume the future (it may be awaited again).  A wait-timeout is
+distinct from a future that legitimately completed with status
+.Dv XTC_E_AGAIN :
+the former does not consume, the latter does.
+.Pp
+.Fn xtc_future_ready
+sets
+.Fa *is_ready
+to 1 if the promise is already set, without blocking or consuming.
+.Pp
+The combinators each consume their input future(s) and return a new
+future for the chained result:
+.Fn xtc_future_map
+transforms the value through
+.Fa fn ;
+.Fn xtc_future_then
+chains to a second future produced by
+.Fa fn
+when the source completes;
+.Fn xtc_future_when_all
+completes when all
+.Fa n
+inputs complete (value is the count; status is the first non-OK
+observed, else
+.Dv XTC_OK ) ;
+.Fn xtc_future_when_any
+completes as soon as any one input completes, carrying its result;
+.Fn xtc_future_with_timeout
+completes with the source's result if it arrives within
+.Fa timeout_ns ,
+else with
+.Dv XTC_E_AGAIN
+.Pq requires a running loop -- it arms a timer .
+.Sh RETURN VALUES
+The
+.Ft int
+functions return
+.Dv XTC_OK
+on success,
+.Dv XTC_E_INVAL
+on a bad argument (NULL handle, already-set promise, or
+.Fn xtc_future_await
+called outside a fiber),
+.Dv XTC_E_NOMEM
+on allocation failure, or -- for
+.Fn xtc_future_await
+and
+.Fn xtc_future_wait
+-- the promise's stored status once completed.
+.Sh EXAMPLES
+Await a producer's result from within a fiber:
+.Bd -literal -offset indent
+xtc_promise_t *prom;
+xtc_future_t  *fut;
+xtc_future_new_pair(&prom, &fut);
+/* ... hand prom to a producer (another fiber or thread) ... */
+intptr_t v;
+if (xtc_future_await(fut, &v) == XTC_OK)
+	use(v);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_proc 3 ,
+.Xr xtc_async 3 ,
+.Xr xtc_sync 3 ,
+.Xr xtc_chan 3
+.Sh HISTORY
+The
+.Nm xtc_future
+facility appeared in
+.Nm libxtc
+1.31.
