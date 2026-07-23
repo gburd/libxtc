@@ -12,6 +12,7 @@
 #include "xtc_sim.h"       /* XTC_SIM_BUGGIFY: DST pessimal-path injection */
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_chan.h"
+#include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -446,6 +447,20 @@ xtc_chan_mpmc_try_recv(xtc_chan_mpmc_t *c, void **out)
 		c->tail = (c->tail + 1) % c->cap;
 		c->n--;
 		rc = XTC_OK;
+#if XTC_DST_BUG(XTC_DST_BUG_CHANDROP)
+		/* planted bug (CHANDROP): on the Nth successful recv, consume
+		 * the slot (tail already advanced) but report EMPTY -- the
+		 * message is silently DROPPED.  The single-threaded sim makes
+		 * this counter deterministic, so exactly one item is lost per
+		 * run and test_sim_chan's exactly-once mpmc invariant fires. */
+		{
+			static int drop_ctr;
+			if (++drop_ctr == 3) {
+				*out = NULL;
+				rc = XTC_E_AGAIN;
+			}
+		}
+#endif
 	} else if (c->closed) {
 		rc = XTC_E_INVAL;
 	}

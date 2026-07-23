@@ -135,6 +135,12 @@ jobs:
       - name: DST sim-backend tests
         run: XTC_SRC_DIR="$PWD" CC=gcc sh test/sim/run_sim_tests.sh
 
+      - name: DST bug-injection (prove DST catches planted safety bugs)
+        run: CC=gcc sh scripts/dst-bug-inject.sh
+
+      - name: DST regression corpus (pinned failing seeds cannot silently regress)
+        run: CC=gcc sh scripts/dst-corpus.sh
+
   sim-swarm-nightly:
     # Large-scale DST swarm/soak: 4 disjoint shards x 25k = 100k seeds
     # over the combined fault set (partition + latency + buggify +

@@ -19,6 +19,7 @@
 #include "xtc_proc.h"      /* reaper proc: monitor + recv + drop-on-DOWN */
 #include "xtc_svr.h"       /* xtc_svr_call_name via-dispatch */
 #include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
+#include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
 #include <pthread.h>
 #include <stdint.h>
@@ -131,7 +132,14 @@ xtc_reg_register(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 	h = __reg_hash(name);
 	b = h & (REG_NBUCKETS - 1);
 	(void)__xtc_mtx_lock(&r->lock);
+#if XTC_DST_BUG(XTC_DST_BUG_REGDUP)
+	/* planted bug (REGDUP): skip the already-registered check -> a
+	 * second pid can register a name a first still holds, so two winners
+	 * hold one name at once and test_sim_reg's at-most-one-holder
+	 * invariant fires (g_bad_dup). */
+#else
 	if (__reg_find_locked(r, name, h) != NULL) { rc = XTC_E_INVAL; goto out; }
+#endif
 	if ((rc = __os_calloc(1, sizeof *node, (void **)&node)) != XTC_OK)
 		goto out;
 	if ((rc = __os_strdup(name, &node->name)) != XTC_OK) {

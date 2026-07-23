@@ -25,11 +25,41 @@ INC="-I$ROOT/src/inc"
 BMDIR="$ROOT/examples/06_sqlxtc"
 
 # bug-id : catching-test : sqlxtc-engine-needed(0/1)
+#
+# Each planted bug (src/inc/xtc_dst_inject.h) is a compile-flag-gated
+# violation of ONE asserted DST safety invariant; the paired test's
+# invariant checker must FAIL when the bug is active.  One line per bug
+# names the invariant it plants against.
 CASES="
 1:test_sim_pingpong:0
 2:test_sim_compose:1
 3:test_sim_compose_crash:1
+4:test_sim_credit:0
+5:test_sim_res:0
+6:test_sim_res:0
+7:test_sim_chan:0
+8:test_sim_reg:0
+9:test_sim_saga:0
 "
+# 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
+# 2  LOCKEXCL   lock_mgr.c grants a conflict    -> mutual exclusion (lock held <= 1)
+# 3  NODURABLE  wal.c skips fdatasync, acks     -> durability (acked commit present)
+# 4  CREDITWIN  credit.c double-posts a credit  -> window never exceeded (in-flight <= window)
+# 5  RESLEAK    res.c drops the release decr    -> conservation (final used == 0)
+# 6  RESOVER    res.c skips the acquire cap chk -> safety (used never > cap)
+# 7  CHANDROP   chan.c drops an mpmc message    -> exactly-once delivery (no drop/dup)
+# 8  REGDUP     reg.c allows a duplicate reg    -> at-most-one-holder (no double registration)
+# 9  SAGAORDER  saga.c compensates forward      -> exact reverse-order compensation
+#
+# NOT plantable (recorded, not a gap in effort): the xtc_amutex
+# mutual-exclusion and lost-wakeup invariants (test_sim_latch).  Its
+# critical section is yield-free so the cooperative sim runs it
+# atomically (a double-grant never interleaves a lost update), and a
+# dropped hand-off wake is invisible because the sim reschedules a
+# parked fiber from its state, not a wake fd (see test_sim_wake_park),
+# with unlock setting granted under the lock.  Both were built and
+# confirmed to pass the test both ways -> dropped, not faked.  Mutual
+# exclusion is proven by bug 2 (LOCKEXCL) against the lock manager.
 
 work=$(mktemp -d "$TMPDIR/dstbug.XXXXXX") || exit 1
 fails=0
@@ -83,12 +113,10 @@ for _case in $CASES; do
 	# The test MUST fail (nonzero) -- the planted bug tripped its
 	# invariant.  A pass means DST did not catch the bug: a hole.
 	if "$exe" >/dev/null 2>&1; then
-		echo "  [bug $bug] HOLE: $test_c PASSED with bug $bug planted "\
-"-- DST did not catch it"
+		echo "  [bug $bug] HOLE: $test_c PASSED with bug $bug planted -- DST did not catch it"
 		fails=$((fails + 1))
 	else
-		echo "  [bug $bug] OK: $test_c caught planted bug $bug "\
-"(invariant fired / no quiescence)"
+		echo "  [bug $bug] OK: $test_c caught planted bug $bug (invariant fired / no quiescence)"
 		caught=$((caught + 1))
 	fi
 done

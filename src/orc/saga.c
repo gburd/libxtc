@@ -21,6 +21,7 @@
 
 #include "xtc_int.h"
 #include "xtc_saga.h"
+#include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
 #include <limits.h>
 #include <stdint.h>
@@ -118,6 +119,24 @@ xtc_saga_run(xtc_saga_t *s)
 		/* Forward failure at step i: undo steps [0, i-1] in reverse. */
 		s->failed_step = i;
 		s->last_error = rc;
+#if XTC_DST_BUG(XTC_DST_BUG_SAGAORDER)
+		/* planted bug (SAGAORDER): compensate the completed prefix
+		 * FORWARD (0..failed_step-1) instead of in reverse.  The undo
+		 * ordering is wrong; test_sim_saga's exact-reverse-order
+		 * invariant fires. */
+		{
+			int j;
+			for (j = 0; j < s->failed_step; j++) {
+				int crc;
+				if (s->steps[j].compensate == NULL)
+					continue;
+				crc = s->steps[j].compensate(s->steps[j].ctx);
+				if (crc != XTC_OK)
+					s->compensate_failed = 1;
+			}
+			return s->compensate_failed ? XTC_E_INTERNAL : rc;
+		}
+#endif
 		for (i--; i >= 0; i--) {
 			int crc;
 			if (s->steps[i].compensate == NULL)

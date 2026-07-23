@@ -1,0 +1,32 @@
+# DST regression corpus -- pinned (test, seed) pairs.
+# Format: <sim_test_name> <seed> <count> <description>
+#   seed/count of "-" means: run the test with no argv (its built-in
+#   seeds).  See README.md.
+#
+# ==== planted-bug regression guards ====
+# Each seed FAILS its test under -DXTC_DST_INJECT_BUG=<N> (proven by
+# scripts/dst-bug-inject.sh) and MUST pass on the clean build re-run
+# here -- the fixed-bug-cannot-regress gate.
+#
+# bug 4 CREDITWIN -- window never exceeded (in-flight <= WINDOW)
+test_sim_credit         -          -   bug4 CREDITWIN: credit window never exceeded
+# bug 5 RESLEAK / bug 6 RESOVER -- conservation + used<=cap (res, argv-seeded)
+test_sim_res            0x726573   4   bug5/6 RESLEAK+RESOVER: conservation + used<=cap
+test_sim_res            12345      2   bug5/6 RESLEAK+RESOVER: distinct seed
+# bug 7 CHANDROP -- mpmc exactly-once (no drop/dup)
+test_sim_chan           -          -   bug7 CHANDROP: mpmc delivers every item exactly once
+# bug 8 REGDUP -- at-most-one-holder (no duplicate registration)
+test_sim_reg            -          -   bug8 REGDUP: registry at-most-one-holder per name
+# bug 9 SAGAORDER -- exact reverse-order compensation
+test_sim_saga           -          -   bug9 SAGAORDER: saga compensates in exact reverse
+#
+# ==== known-good smoke seeds ====
+# Ordinary seeds that exercise the invariant checkers; a fast,
+# seed-explicit smoke of the sim suite on the clean build.
+test_sim_res            0xC0FFEE   3   smoke: resource governance
+test_sim_sup_strategy   0x5570     4   smoke: supervisor restart strategies
+test_sim_sup_strategy   42         2   smoke: supervisor, distinct seed
+test_sim_swarm          0          20  smoke: combined fault-set swarm, base 0
+test_sim_swarm          1000       20  smoke: combined fault-set swarm, base 1000
+test_sim_wake_park      -          -   smoke: cross-loop wake-of-parked-loop
+test_sim_lockmgr        -          -   smoke: lock-manager mutual exclusion + deadlock
