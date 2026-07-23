@@ -2797,15 +2797,16 @@ rationale but are no longer a to-do list.)
 (Status 2026-07: the v1 core SHIPPED -- src/os/os_crypto.c has
 SHA-256, HMAC-SHA256, AES-256-GCM, and an OpenSSL-backed CSPRNG,
 reusing the OpenSSL TLS backend, NOSYS under other backends. The
-remaining algorithms below are deliberately deferred until a concrete
-consumer needs them.)
+remaining algorithms below shipped in v1.29.0 -- built ahead of a
+concrete TDE/WAL-encryption consumer, each KAT-verified.)
 
 `__os_crypto_*` shim over:
 
-- AES-GCM (DONE), ChaCha20-Poly1305 (deferred; auth-encrypt for TDE).
-- SHA-2 family (SHA-256 DONE), SHA-3, BLAKE3 (deferred; hashing for
+- AES-GCM (DONE), ChaCha20-Poly1305 (DONE v1.29.0; auth-encrypt for TDE).
+- SHA-2 family (SHA-256 DONE), SHA-3 (DONE v1.29.0), BLAKE3 (DONE
+  v1.29.0, portable reimpl -- OpenSSL/BoringSSL lack it; hashing for
   checksums and WAL).
-- HMAC (HMAC-SHA256 DONE), HKDF (deferred).
+- HMAC (HMAC-SHA256 DONE), HKDF (DONE v1.29.0, HKDF-SHA256).
 - A `__os_csprng_t` per-loop CSPRNG seeded from `__os_rand_*` (DONE,
   OpenSSL-backed rather than the originally-sketched hand-rolled
   ChaCha20 stream).
@@ -3027,7 +3028,7 @@ context support, capability dropping helpers.  Address-sanitization
 at process boundary (CFI, shadow stacks, Intel CET) where the
 toolchain supports it.  M14.
 
-### 19.18 Hash tables and other concurrent data structures (M13a/b) -- xtc_chash DONE (all tiers); xtc_cskip DONE (all tiers); bloom/HLL NOT STARTED
+### 19.18 Hash tables and other concurrent data structures (M13a/b) -- xtc_chash DONE (all tiers); xtc_cskip DONE (all tiers); bloom/HLL DONE (xtc_prob, v1.29.0)
 
 - RCU-protected concurrent hash table (`xtc_chash`) --
   primary RCU consumer.  M13a.  DONE: unit + DST
@@ -3046,7 +3047,12 @@ toolchain supports it.  M14.
   RCU double-checked-locking race (__rcu_slabs_ensure), now fixed
   (both slab pointers _Atomic, acquire/release).
 - Bloom filter, HyperLogLog (small library; mostly numerical).
-  M14.  NOT STARTED.
+  M14.  DONE (v1.29.0): xtc_prob module (src/ptc/prob.c,
+  src/inc/xtc_prob.h).  xtc_bloom_* (Kirsch-Mitzenmacher double-hashing,
+  sized from a target false-positive rate) + xtc_hll_* (bias-corrected
+  estimator with small-range linear counting + large-range 2^32
+  correction, plus merge).  Single-threaded, no -lm dependency
+  (hand-rolled ln).  KAT/statistically tested; man xtc_prob(3).
 
 ### 19.19 Compositional property tests (M11) -- DONE (2026-07, as a DST sim test)
 
