@@ -73,6 +73,45 @@ xtc_blocking_run(hash_a_big_buffer, buf, &result);
 > every departure from the single-threaded model. It is the same
 > philosophy as `unsafe` in Rust: not forbidden, but marked.
 
+## 4. Attached compute: GPUs and NPUs
+
+An accelerator -- a GPU, or an NPU (the neural/vision engine on a
+modern laptop or server) -- is, from the loop's point of view, just
+another async device: you submit opaque work, it runs on a coprocessor,
+and it signals completion through a **fence**. On Linux a fence is a
+pollable file descriptor (a `sync_file` / dma-fence), which is exactly
+the kind of readiness event the loop already waits on for sockets. So
+libxtc parks a fiber on a GPU/NPU completion the same way it parks one
+on a socket read
+([`xtc_accel(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_accel.3)):
+
+```c
+/* inside a fiber: the consumer's runtime submitted work and gave us a
+ * completion fence fd; park until the device is done -- no OS thread
+ * held while we wait. */
+int fence_fd = submit_inference(model, input);   /* your runtime */
+if (xtc_accel_wait_fence(fence_fd, -1) == XTC_OK)
+	use_result();
+```
+
+`xtc_accel_probe` enumerates the GPUs and NPUs present; GPU and NPU are
+the **same abstraction** here (both DRM devices whose completions are
+the same kind of fence fd), so one API covers both and the device kind
+is just a tag. For a runtime that only offers a blocking
+submit-and-wait, `xtc_accel_run_blocking` routes it through the pool
+above instead.
+
+{: .rationale }
+> **The abstraction stops at the fence.** libxtc links no GPU/NPU
+> runtime -- not Level Zero, CUDA, Vulkan, or OpenVINO -- and owns no
+> tensors, no device memory, no model format. Your code (or the vendor
+> runtime it links) submits the work and produces the fence;
+> libxtc's job is only to park a fiber on that fence and wake it,
+> deterministically-testable under the [simulator]({{ '/testing/' | relative_url }}).
+> That boundary is what keeps this a concurrency primitive rather than
+> a compute-runtime shim. Built only where the platform has the
+> DRM/accel subsystem (auto-detected; `--without-accel` to force off).
+
 ## Scaling across cores: the executor
 
 One loop uses one core. To use all of them, run an **executor** -- N
