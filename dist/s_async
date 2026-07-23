@@ -8,6 +8,9 @@
 #                                   syscall-shaped)
 #   - src/ptc/sync.c               (the async-mutex/condvar/sem etc.
 #                                   primitives ARE pthread wrappers)
+#   - src/ptc/future.c             (futures/promises: the same
+#                                   condvar-backed one-shot wait as
+#                                   sync.c, for the thread-context half)
 #   - src/ptc/lock_lr.c, lock_lw.c,
 #     lock_mgr.c                   (lock-primitive implementations)
 #   - src/ptc/inject.c             (injection-point wait semantics)
@@ -26,7 +29,7 @@ DIST_DIR=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$DIST_DIR/.." && pwd)
 SRC="$ROOT/src"
 
-ALLOWLIST_RE='/(os|io)/|/(ptc/(sync|blocking|lock_lr|lock_lw|lock_mgr|inject|proc))\.c'
+ALLOWLIST_RE='/(os|io)/|/(ptc/(sync|future|blocking|lock_lr|lock_lw|lock_mgr|inject|proc))\.c'
 
 BLOCKING_CALLS='read write recv send accept connect sleep usleep nanosleep flock fcntl getaddrinfo gethostbyname pthread_cond_wait pthread_cond_timedwait pthread_join wait waitpid'
 
