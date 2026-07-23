@@ -30,13 +30,27 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/eventfd.h>
 
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_accel.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+
+/*
+ * The fence-fd wait tests stand a real accelerator completion fence in
+ * with an eventfd -- both are pollable fds that become readable when
+ * signalled.  eventfd is Linux-only; on other platforms (where
+ * XTC_HAVE_ACCEL is also off, since the DRM/accel subsystem is
+ * Linux-only) those tests SKIP and we exercise probe + run_blocking +
+ * the NOSYS contract only.  Guarding the include AND use keeps the
+ * file compiling everywhere. */
+#if defined(__linux__)
+#include <sys/eventfd.h>
+#define HAVE_EVENTFD 1
+#else
+#define HAVE_EVENTFD 0
+#endif
 
 /* True iff this build has accelerator (fence-wait) support. */
 #if defined(XTC_HAVE_ACCEL)
@@ -73,6 +87,7 @@ test_probe(const MunitParameter p[], void *d)
 }
 
 /* ---- wait_fence: park a fiber on an eventfd "fence", signal it ---- */
+#if HAVE_EVENTFD
 static _Atomic int g_wait_rc;
 static int         g_fence_fd;
 
@@ -98,14 +113,11 @@ signaller_proc(void *arg)
 	if (write(fd, &one, sizeof one) != (ssize_t)sizeof one)
 		atomic_store(&g_wait_rc, -99);   /* signal write failed */
 }
+#endif /* HAVE_EVENTFD */
 
 static MunitResult
 test_wait_fence_signalled(const MunitParameter p[], void *d)
 {
-	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
-	xtc_pid_t w, s;
-	int fd;
 	(void)p; (void)d;
 
 	if (!ACCEL_BUILT) {
@@ -113,6 +125,12 @@ test_wait_fence_signalled(const MunitParameter p[], void *d)
 		munit_assert_int(xtc_accel_wait_fence(0, 0), ==, XTC_E_NOSYS);
 		return MUNIT_SKIP;
 	}
+#if HAVE_EVENTFD
+	{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t w, s;
+	int fd;
 
 	fd = eventfd(0, EFD_NONBLOCK);
 	munit_assert_int(fd, >=, 0);
@@ -133,9 +151,14 @@ test_wait_fence_signalled(const MunitParameter p[], void *d)
 	munit_assert_int(atomic_load(&g_wait_rc), ==, XTC_OK);
 	(void)close(fd);
 	return MUNIT_OK;
+	}
+#else
+	return MUNIT_SKIP;   /* no eventfd stand-in for the fence here */
+#endif
 }
 
 /* ---- wait_fence: never-signalled fd times out ---- */
+#if HAVE_EVENTFD
 static _Atomic int g_to_rc;
 
 static void
@@ -146,18 +169,21 @@ timeout_proc(void *arg)
 	int rc = xtc_accel_wait_fence(fd, 50 * 1000 * 1000); /* 50ms */
 	atomic_store(&g_to_rc, rc);
 }
+#endif
 
 static MunitResult
 test_wait_fence_timeout(const MunitParameter p[], void *d)
 {
-	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
-	xtc_pid_t t;
-	int fd;
 	(void)p; (void)d;
 
 	if (!ACCEL_BUILT)
 		return MUNIT_SKIP;
+#if HAVE_EVENTFD
+	{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t t;
+	int fd;
 
 	fd = eventfd(0, EFD_NONBLOCK);
 	munit_assert_int(fd, >=, 0);
@@ -173,6 +199,10 @@ test_wait_fence_timeout(const MunitParameter p[], void *d)
 	munit_assert_int(atomic_load(&g_to_rc), ==, XTC_E_AGAIN);
 	(void)close(fd);
 	return MUNIT_OK;
+	}
+#else
+	return MUNIT_SKIP;
+#endif
 }
 
 /* ---- wait_fence bad fd ---- */
