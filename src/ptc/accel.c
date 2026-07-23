@@ -61,7 +61,9 @@ read_driver(const char *cls, const char *dev, char *drv, size_t drvsz)
 	target[n] = '\0';
 	base = strrchr(target, '/');
 	base = (base != NULL) ? base + 1 : target;
-	(void)snprintf(drv, drvsz, "%s", base);
+	/* Bounded copy; precision (drvsz-1) satisfies -Wformat-truncation
+	 * regardless of optimization level -- driver names are short. */
+	(void)snprintf(drv, drvsz, "%.*s", (int)(drvsz - 1), base);
 }
 
 /*
