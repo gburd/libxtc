@@ -28,6 +28,49 @@
 
 #define WAKEUP_INTEREST  POLLIN
 
+/*
+ * io-wq worker cap.  Each io_uring ring has a kernel io-wq worker pool
+ * (bounded + unbounded); with flags=0 and no cap the BOUNDED pool
+ * defaults to ~max(nr_online_cpus, 4) workers PER RING.  A libxtc
+ * executor creates one ring per carrier loop, so on a big box
+ * (N carriers x M cores) the process accumulates N*M kernel io-wq
+ * threads -- thousands on a 192-core host -- which sit idle but still
+ * cost the CFS load balancer (update_sg_lb_stats) real CPU walking
+ * their runqueues.  A carrier ring does socket poll + a bounded amount
+ * of file AIO; it does not need per-cpu io-wq breadth.  Cap it.
+ *
+ * values[0] = bounded max, values[1] = unbounded max (0 = leave the
+ * kernel default for that class).  Process-global, read once per ring
+ * at init; settable before the executor starts via
+ * xtc_io_set_iowq_max_workers.  0 for a field means "leave kernel
+ * default"; the shipped default caps the BOUNDED pool (the one that
+ * scales with nr_cpus) to a small value and leaves unbounded alone.
+ * On kernels without the register op (< 5.15) the call returns ENOSYS
+ * and we silently keep the old behavior.
+ */
+#define XTC_IOWQ_BOUND_DEFAULT   4u   /* per-ring bounded io-wq cap */
+static _Atomic unsigned __xtc_iowq_bound   = XTC_IOWQ_BOUND_DEFAULT;
+static _Atomic unsigned __xtc_iowq_unbound = 0u;   /* 0 = kernel default */
+
+/*
+ * PUBLIC: void xtc_io_set_iowq_max_workers __P((unsigned, unsigned));
+ *
+ * Set the per-ring io_uring io-wq worker caps applied to every ring
+ * created afterward: bound = bounded-work workers (the ones that scale
+ * with nr_cpus and cause the thread explosion on big boxes), unbound =
+ * unbounded-work workers.  0 for either leaves the kernel default for
+ * that class.  Must be called before xtc_exec_run / xtc_loop_run
+ * creates the rings.  A no-op effect on kernels lacking the register
+ * operation.
+ */
+XTC_API void
+xtc_io_set_iowq_max_workers(unsigned bound, unsigned unbound)
+{
+	atomic_store_explicit(&__xtc_iowq_bound, bound, memory_order_relaxed);
+	atomic_store_explicit(&__xtc_iowq_unbound, unbound,
+	    memory_order_relaxed);
+}
+
 extern int __xtc_io_drain_wakeup(xtc_io_t *io);
 
 static struct __xtc_uring_fd *
@@ -114,6 +157,22 @@ __xtc_io_backend_init(xtc_io_t *io)
 	if (rc < 0) {
 		errno = -rc;
 		return XTC_E_INTERNAL;
+	}
+	/*
+	 * Cap this ring's kernel io-wq worker pool so N carriers on an
+	 * M-core box do not accumulate N*M idle io-wq threads (see the
+	 * XTC_IOWQ_BOUND_DEFAULT comment).  Best-effort: an older kernel
+	 * without the register op returns -ENOSYS -- ignore it and keep
+	 * the previous (uncapped) behavior. */
+	{
+		unsigned vals[2];
+		vals[0] = atomic_load_explicit(&__xtc_iowq_bound,
+		    memory_order_relaxed);
+		vals[1] = atomic_load_explicit(&__xtc_iowq_unbound,
+		    memory_order_relaxed);
+		if (vals[0] != 0u || vals[1] != 0u)
+			(void)io_uring_register_iowq_max_workers(&io->ring,
+			    vals);
 	}
 	io->fds = NULL;
 	io->zombies = NULL;

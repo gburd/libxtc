@@ -54,6 +54,7 @@
 
 static atomic_int g_workers_done;
 static xtc_exec_t *g_exec;
+static atomic_int g_backoff;   /* set steal_backoff on the run's exec */
 
 /* A migratable worker: a short yielding compute loop.  The yields are
  * the park points at which its coro can be stolen onto another loop. */
@@ -131,6 +132,7 @@ run_once(int eager)
 	g_exec = e;
 	xtc_exec_set_service_mode(e, 1);         /* stop only via _stop */
 	xtc_exec_set_eager_rebalance(e, eager);
+	xtc_exec_set_steal_backoff(e, atomic_load(&g_backoff));
 
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), spawner, e, NULL, NULL);
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), watcher, NULL, NULL, NULL);
@@ -175,6 +177,21 @@ main(void)
 		if (xtc_exec_get_eager_rebalance(ge) != 0 ||
 		    xtc_exec_get_service_mode(ge) != 0) {
 			printf("FAIL: getter did not reflect the setter turned off\n");
+			return 1;
+		}
+		/* steal_backoff knob: same convention, default off. */
+		if (xtc_exec_get_steal_backoff(ge) != 0) {
+			printf("FAIL: steal_backoff not 0 by default\n");
+			return 1;
+		}
+		xtc_exec_set_steal_backoff(ge, 1);
+		if (xtc_exec_get_steal_backoff(ge) != 1) {
+			printf("FAIL: steal_backoff getter did not reflect setter\n");
+			return 1;
+		}
+		xtc_exec_set_steal_backoff(ge, 0);
+		if (xtc_exec_get_steal_backoff(ge) != 0) {
+			printf("FAIL: steal_backoff getter did not reflect off\n");
 			return 1;
 		}
 		(void)xtc_exec_fini(ge);
@@ -232,5 +249,25 @@ main(void)
 	printf("OK: eager rebalance rebalances migratable work under a "
 	    "parked-fiber load (%llu steals; default policy got %llu)\n",
 	    (unsigned long long)steals_on, (unsigned long long)steals_off);
+
+	/*
+	 * steal_backoff liveness: turn it ON (with eager on) and run the
+	 * same workload.  The invariant is not a steal count -- it is that
+	 * the run still COMPLETES (all workers finish, the exec stops):
+	 * backoff must never starve pending work.  run_once returns
+	 * (uint64_t)-1 on a run error / non-completion.
+	 */
+	atomic_store(&g_backoff, 1);
+	{
+		uint64_t bk = run_once(1);
+		atomic_store(&g_backoff, 0);
+		if (bk == (uint64_t)-1) {
+			printf("FAIL: run with steal_backoff did not complete "
+			    "(work starved?)\n");
+			return 1;
+		}
+		printf("OK: steal_backoff run completed (%llu steals)\n",
+		    (unsigned long long)bk);
+	}
 	return 0;
 }

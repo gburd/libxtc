@@ -11,6 +11,8 @@
 .Nm xtc_exec_get_service_mode ,
 .Nm xtc_exec_set_eager_rebalance ,
 .Nm xtc_exec_get_eager_rebalance ,
+.Nm xtc_exec_set_steal_backoff ,
+.Nm xtc_exec_get_steal_backoff ,
 .Nm xtc_exec_set_preempt ,
 .Nm xtc_exec_stop ,
 .Nm xtc_exec_n_loops ,
@@ -40,6 +42,10 @@
 .Fn xtc_exec_set_eager_rebalance "xtc_exec_t *exec" "int on"
 .Ft int
 .Fn xtc_exec_get_eager_rebalance "xtc_exec_t *exec"
+.Ft void
+.Fn xtc_exec_set_steal_backoff "xtc_exec_t *exec" "int on"
+.Ft int
+.Fn xtc_exec_get_steal_backoff "xtc_exec_t *exec"
 .Ft int
 .Fn xtc_exec_set_preempt "xtc_exec_t *exec" "int64_t interval_ns"
 .Ft int
@@ -148,9 +154,26 @@ migratable tasks are ever moved, so pinned work (the default) is
 unaffected either way.  A supervised server whose backends park on
 sockets opts in; a cache-locality-bound workload leaves it off.
 .Pp
-.Fn xtc_exec_get_service_mode
+.Fn xtc_exec_set_steal_backoff
+(OFF by default) controls how hard an IDLE loop scans for work.  By
+default an idle worker re-polls (and re-attempts a steal) on a fixed
+1 ms tick, so on a large executor that is mostly idle -- many carriers,
+tiny or infrequent work -- the aggregate cost of repeated empty steal
+scans is visible even though the machine is nearly idle.  With steal
+backoff ON, a worker that has taken no work for several consecutive
+turns grows its idle poll timeout exponentially (from 1 ms toward a
+32 ms cap); any real work resets it immediately.  This cuts the
+idle-scan CPU of an over-provisioned executor at the cost of a few
+extra milliseconds of worst-case latency before a deeply-idle loop
+notices stealable work (a cross-thread enqueue still nudges it at once
+when eager rebalance is also on).  It is complementary to eager
+rebalance: eager controls WHEN an idle-but-not-drained loop steals;
+backoff controls how often a fully-idle loop bothers to look.
+.Pp
+.Fn xtc_exec_get_service_mode ,
+.Fn xtc_exec_get_eager_rebalance ,
 and
-.Fn xtc_exec_get_eager_rebalance
+.Fn xtc_exec_get_steal_backoff
 read back the current setting (0 for a NULL exec).
 .Sh POLICY KNOB CONVENTION
 Every per-

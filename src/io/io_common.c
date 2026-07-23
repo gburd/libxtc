@@ -282,3 +282,19 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	return XTC_E_NOSYS;
 }
 #endif
+
+#if !defined(XTC_IO_BACKEND_URING)
+/*
+ * PUBLIC: void xtc_io_set_iowq_max_workers __P((unsigned, unsigned));
+ *
+ * io-wq worker caps are an io_uring-specific concept; on every other
+ * backend this is a linkable no-op (there is no kernel io-wq pool to
+ * cap).  The real implementation lives in io_uring.c.
+ */
+void
+xtc_io_set_iowq_max_workers(unsigned bound, unsigned unbound)
+{
+	(void)bound;
+	(void)unbound;
+}
+#endif

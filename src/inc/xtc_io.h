@@ -86,6 +86,8 @@ typedef struct xtc_aio {
  * PUBLIC: int          xtc_io_poll __P((xtc_io_t *, xtc_io_event_t *, int, int64_t, int *));
  * PUBLIC: int          xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *));
  * PUBLIC: int          xtc_io_wakeup __P((xtc_io_t *));
+ *
+ * PUBLIC: void         xtc_io_set_iowq_max_workers __P((unsigned, unsigned));
  */
 
 /* Lifecycle. */
@@ -125,5 +127,15 @@ XTC_API int          xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a);
  *	multiple wakeups before the next poll coalesce into one event.
  */
 XTC_API int          xtc_io_wakeup(xtc_io_t *io);
+
+/*
+ * Cap the per-ring io_uring io-wq kernel worker pool (Linux io_uring
+ * backend only; a no-op on other backends).  See the implementation
+ * comment in io_uring.c: prevents N carriers on an M-core box from
+ * accumulating N*M idle io-wq kernel threads.  Call before the
+ * executor/loop creates its rings.
+ */
+XTC_API void         xtc_io_set_iowq_max_workers(unsigned bound,
+                                                 unsigned unbound);
 
 #endif /* XTC_IO_H */

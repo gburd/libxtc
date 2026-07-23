@@ -12,7 +12,8 @@
 .Nm xtc_io_del_fd ,
 .Nm xtc_io_poll ,
 .Nm xtc_io_aio_submit ,
-.Nm xtc_io_wakeup
+.Nm xtc_io_wakeup ,
+.Nm xtc_io_set_iowq_max_workers
 .Nd L1 event-notification engine
 .Sh SYNOPSIS
 .In xtc_io.h
@@ -35,6 +36,8 @@
 .Fn xtc_io_aio_submit "xtc_io_t *io" "xtc_aio_t *a"
 .Ft int
 .Fn xtc_io_wakeup "xtc_io_t *io"
+.Ft void
+.Fn xtc_io_set_iowq_max_workers "unsigned bound" "unsigned unbound"
 .Sh DESCRIPTION
 .Nm xtc_io
 is the L1 readiness-notification engine.
@@ -205,6 +208,26 @@ for (int i = 0; i < n; i++) {
         else                              handle(evs[i].tag, evs[i].flags);
 }
 .Ed
+.Pp
+.Fn xtc_io_set_iowq_max_workers
+caps the per-ring
+.Xr io_uring 7
+kernel io-wq worker pool applied to every ring created afterward:
+.Fa bound
+limits the bounded-work workers (the class that scales with the online
+CPU count and, uncapped, makes an
+N Ns -carrier executor accumulate
+N Ns \(mu Ns Ar ncpu
+idle io-wq kernel threads on a large host -- costing the kernel CFS
+load balancer real CPU),
+.Fa unbound
+the unbounded-work workers; 0 for either leaves the kernel default for
+that class.  Call it before the executor or loop creates its rings.
+It is a Linux
+.Xr io_uring 7
+backend concern only -- a linkable no-op on every other backend, and a
+no-op on kernels lacking the register operation.  The shipped default
+caps the bounded pool to a small value.
 .Sh SEE ALSO
 .Xr __os_thread 3 ,
 .Xr __os_atomic 3 ,
