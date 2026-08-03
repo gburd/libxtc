@@ -180,6 +180,67 @@ test_dump_prometheus(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Prometheus dump including a histogram (the XTC_METRIC_HIST arm). */
+static MunitResult
+test_dump_prometheus_hist(const MunitParameter p[], void *d)
+{
+	xtc_hist_t *h;
+	int pipefd[2];
+	char buf[1024] = {0};
+	ssize_t n;
+	int i;
+	(void)p; (void)d;
+	munit_assert_int(pipe(pipefd), ==, 0);
+	munit_assert_int(xtc_hist_create("prom.h", &h), ==, XTC_OK);
+	for (i = 1; i <= 100; i++)
+		xtc_hist_record(h, i);
+
+	munit_assert_int(xtc_metrics_dump_prometheus(pipefd[1]), >, 0);
+	close(pipefd[1]);
+	n = read(pipefd[0], buf, sizeof buf - 1);
+	munit_assert_size((size_t)n, >, 0);
+	munit_assert_ptr_not_null(strstr(buf, "prom.h_count"));
+	munit_assert_ptr_not_null(strstr(buf, "prom.h_p50"));
+	munit_assert_ptr_not_null(strstr(buf, "prom.h_p99"));
+	close(pipefd[0]);
+	xtc_hist_destroy(h);
+	return MUNIT_OK;
+}
+
+/* Histogram edge values: small (base < sub-bits), an empty quantile,
+ * and a very large value push the bucket-bound math through its arms. */
+static MunitResult
+test_hist_edges(const MunitParameter p[], void *d)
+{
+	xtc_hist_t *h;
+	int i;
+	(void)p; (void)d;
+	munit_assert_int(xtc_hist_create("edge.h", &h), ==, XTC_OK);
+
+	/* Empty histogram: quantile is well-defined (0), count is 0. */
+	munit_assert_uint64(xtc_hist_count(h), ==, 0);
+	munit_assert_int64(xtc_hist_quantile(h, 0.5), >=, 0);
+
+	/* Small values (1..8) live in low base buckets -- exercises the
+	 * small-base bucket-index and lower-bound arms. */
+	for (i = 1; i <= 8; i++)
+		xtc_hist_record(h, i);
+	/* A negative value is clamped to bucket 0, not a crash. */
+	xtc_hist_record(h, -5);
+	/* A very large value lands in the top bucket. */
+	xtc_hist_record(h, (int64_t)1 << 60);
+	munit_assert_uint64(xtc_hist_count(h), ==, 10);
+
+	/* Quantiles across the range are monotonic and in bounds. */
+	munit_assert_int64(xtc_hist_quantile(h, 0.0), >=, 0);
+	munit_assert_int64(xtc_hist_quantile(h, 0.5), >=, 0);
+	munit_assert_int64(xtc_hist_quantile(h, 1.0), >=,
+	    xtc_hist_quantile(h, 0.5));
+	xtc_hist_destroy(h);
+	xtc_hist_destroy(NULL);   /* NULL no-op */
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/counter_basic",      test_counter_basic,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/counter_concurrent", test_counter_concurrent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -187,6 +248,8 @@ static MunitTest tests[] = {
 	{ "/hist_basic",         test_hist_basic,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/iterate",            test_iterate,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/dump_prometheus",    test_dump_prometheus,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/dump_prom_hist",     test_dump_prometheus_hist, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/hist_edges",         test_hist_edges,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = {

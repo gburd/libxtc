@@ -169,9 +169,53 @@ test_credit_sliding_window(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- blocking acquire (xtc_credit_acquire) inside a fiber ----- */
+static _Atomic int g_ba_ok;
+
+static void
+blocking_acquire_proc(void *arg)
+{
+	xtc_credit_t *c = NULL;
+	(void)arg;
+	if (xtc_credit_create(2, &c) != XTC_OK) return;
+
+	/* Two blocking acquires succeed immediately (window has room). */
+	if (xtc_credit_acquire(c, 100LL * 1000000) != XTC_OK) goto out;
+	if (xtc_credit_acquire(c, 100LL * 1000000) != XTC_OK) goto out;
+	/* Window full: a timed acquire gives up with XTC_E_AGAIN. */
+	if (xtc_credit_acquire(c, 20LL * 1000000) != XTC_E_AGAIN) goto out;
+	/* timeout_ns == 0 is the non-blocking try path -- also XTC_E_AGAIN. */
+	if (xtc_credit_acquire(c, 0) != XTC_E_AGAIN) goto out;
+	/* NULL guard. */
+	if (xtc_credit_acquire(NULL, 0) != XTC_E_INVAL) goto out;
+	/* Release one, then a blocking acquire succeeds again. */
+	if (xtc_credit_release(c) != XTC_OK) goto out;
+	if (xtc_credit_acquire(c, 100LL * 1000000) != XTC_OK) goto out;
+	atomic_store(&g_ba_ok, 1);
+out:
+	xtc_credit_destroy(c);
+}
+
+static MunitResult
+test_credit_blocking_acquire(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t pid;
+	(void)p; (void)d;
+	atomic_store(&g_ba_ok, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, blocking_acquire_proc, NULL, NULL,
+	    &pid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_ba_ok), ==, 1);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/accounting",     test_credit_accounting,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/sliding_window", test_credit_sliding_window, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/blocking_acquire", test_credit_blocking_acquire, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.9/credit", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
