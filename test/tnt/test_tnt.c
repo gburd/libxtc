@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "xtc.h"        /* XTC_E_NOSYS */
 #include "xtc_tnt.h"
 
 /* ---- Shared results -------------------------------------------------
@@ -320,6 +321,16 @@ main(void)
 	                              * shard 0; its init kicks the scenario */
 
 	rc = xtc_tnt_start(&spec);
+	if (rc == XTC_E_NOSYS) {
+		/* tnt is a POSIX feature: its I/O couriers use raw sockets,
+		 * so xtc_tnt_start is a NOSYS stub on non-POSIX targets
+		 * (Windows -- see the #else in src/orc/tnt.c).  The runtime
+		 * never runs, so the scenario counters would all be zero;
+		 * that is not a failure, it is "unsupported here".  Skip. */
+		printf("SKIP: xtc_tnt is not supported on this platform "
+		    "(xtc_tnt_start -> XTC_E_NOSYS)\n");
+		return 77;
+	}
 	(void)rc;
 
 	/* Report. */
