@@ -1022,37 +1022,63 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	else                       timeout_ms =
 	    (DWORD)((timeout_ns + 999999) / 1000000);
 
-	/* Cap the actual wait to the repoll interval whenever any socket is
-	 * registered: with the AFD async-completion bug, a caller-requested
-	 * INFINITE (or merely long) wait could otherwise block forever on a
-	 * pending poll that will never complete on its own.  This bounds
-	 * every registered socket's worst-case readiness latency to
-	 * XTC_IOCP_REPOLL_NS regardless of the requested timeout; a real
-	 * completion still returns immediately, this only shortens an
-	 * otherwise-unbounded wait. */
-	if (io->n_reg > 0) {
-		DWORD repoll_ms = (DWORD)(XTC_IOCP_REPOLL_NS / 1000000);
-		if (timeout_ms > repoll_ms)
-			timeout_ms = repoll_ms;
-	}
-
-	ok = GetQueuedCompletionStatusEx((HANDLE)io->iocp, batch,
-	    (ULONG)batch_max, &n_done, timeout_ms, FALSE);
-	if (!ok) {
-		DWORD e = GetLastError();
-		/* An empty dequeue is a benign timeout.  GetLastError is only
-		 * meaningful when a wait actually failed; after a 0 ms poll of
-		 * an empty port it can carry a STALE code from an earlier call
-		 * (e.g. ERROR_ALREADY_EXISTS 183 from a prior
-		 * PostQueuedCompletionStatus / CreateIoCompletionPort), so keying
-		 * strictly on WAIT_TIMEOUT wrongly reports XTC_E_INTERNAL and
-		 * kills the loop.  Treat n_done == 0 as the timeout it is. */
-		if (e == WAIT_TIMEOUT || n_done == 0) {
-			__xtc_iocp_repoll_sweep(io);
-			return XTC_OK;
+	/*
+	 * AFD async-completion workaround (see the file header + the
+	 * XTC_IOCP_REPOLL_NS note): a poll armed while the socket was NOT
+	 * yet ready never completes on its own when the socket LATER
+	 * becomes ready, so a single GetQueuedCompletionStatusEx slice can
+	 * return zero events even though data has arrived.  To honour the
+	 * caller's timeout contract ("return the event if it becomes ready
+	 * within timeout_ns"), cap each wait slice at the repoll interval
+	 * and LOOP -- sweeping (cancel + re-arm every overdue poll) between
+	 * slices -- until an event is emitted, a wakeup fires, or the
+	 * caller's real deadline elapses.  A zero timeout still does
+	 * exactly one slice; a negative (INFINITE) timeout loops until an
+	 * event arrives.  On epoll/kqueue one slice suffices; this loop is
+	 * only load-bearing on the IOCP/AFD path.
+	 */
+	{
+		int64_t deadline_ns = 0;
+		int have_deadline = (timeout_ns > 0);
+		if (have_deadline) {
+			int64_t now_ns = 0;
+			(void)__os_clock_mono(&now_ns);
+			deadline_ns = now_ns + timeout_ns;
 		}
-		return XTC_E_INTERNAL;
-	}
+
+		for (;;) {
+			DWORD slice_ms = timeout_ms;
+
+			/* Cap the actual wait to the repoll interval whenever any
+			 * socket is registered: with the AFD async-completion bug a
+			 * caller-requested INFINITE (or merely long) wait could
+			 * otherwise block forever on a pending poll that will never
+			 * complete on its own.  Bounds every registered socket's
+			 * worst-case readiness latency to XTC_IOCP_REPOLL_NS. */
+			if (io->n_reg > 0) {
+				DWORD repoll_ms = (DWORD)(XTC_IOCP_REPOLL_NS / 1000000);
+				if (slice_ms > repoll_ms)
+					slice_ms = repoll_ms;
+			}
+
+			out_idx = 0;
+			wakeup_emitted = 0;
+			n_done = 0;
+			ok = GetQueuedCompletionStatusEx((HANDLE)io->iocp, batch,
+			    (ULONG)batch_max, &n_done, slice_ms, FALSE);
+			if (!ok) {
+				DWORD e = GetLastError();
+				/* An empty dequeue is a benign timeout.  GetLastError is
+				 * only meaningful when a wait actually failed; after a
+				 * 0 ms poll of an empty port it can carry a STALE code
+				 * from an earlier call, so keying strictly on
+				 * WAIT_TIMEOUT wrongly reports XTC_E_INTERNAL.  Treat
+				 * n_done == 0 as the timeout it is. */
+				if (e == WAIT_TIMEOUT || n_done == 0) {
+					goto slice_done;
+				}
+				return XTC_E_INTERNAL;
+			}
 
 	/*
 	 * Process EVERY dequeued completion -- the kernel already removed
@@ -1162,9 +1188,29 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		(void)__arm_poll(io, reg);
 	}
 
-	*n_out = out_idx;
-	__xtc_iocp_repoll_sweep(io);
-	return XTC_OK;
+slice_done:
+			/* One slice processed.  Return as soon as we have
+			 * something for the caller (a readiness/AIO event or a
+			 * wakeup), or the caller did not want to block (0 ms), or
+			 * the caller's real deadline has elapsed.  Otherwise sweep
+			 * the AFD workaround and take another slice. */
+			if (out_idx > 0 || wakeup_emitted || timeout_ms == 0) {
+				*n_out = out_idx;
+				__xtc_iocp_repoll_sweep(io);
+				return XTC_OK;
+			}
+			if (have_deadline) {
+				int64_t now_ns = 0;
+				(void)__os_clock_mono(&now_ns);
+				if (now_ns >= deadline_ns) {
+					*n_out = 0;
+					__xtc_iocp_repoll_sweep(io);
+					return XTC_OK;
+				}
+			}
+			__xtc_iocp_repoll_sweep(io);
+		}
+	}
 }
 
 #endif /* XTC_IO_BACKEND_IOCP */
