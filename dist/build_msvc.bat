@@ -131,10 +131,19 @@ rem     one munit test; bumps MUNIT_PASS / MUNIT_FAIL; always returns) ---
 :run_munit
 set MS=%~1
 set TN=%~2
+rem munit.h / munit.c live for real only in test\m0; every other
+rem milestone dir carries them as git SYMLINKS (mode 120000).  On
+rem Windows those symlinks check out as plain text files containing the
+rem link target unless core.symlinks is on with Developer Mode -- so
+rem cl.exe would compile the path string as C and fail with a syntax
+rem error.  Reference the REAL m0 munit directly (source + include
+rem path) so the MSVC build never depends on the consumer's git symlink
+rem handling.
 cl %CFLAGS% /Fe:%TN%.exe ^
    /I"%XTC_SRC%\test\%MS%" ^
+   /I"%XTC_SRC%\test\m0" ^
    "%XTC_SRC%\test\%MS%\%TN%.c" ^
-   "%XTC_SRC%\test\%MS%\munit.c" ^
+   "%XTC_SRC%\test\m0\munit.c" ^
    xtc.lib ws2_32.lib ntdll.lib dbghelp.lib >nul 2>&1
 if errorlevel 1 (
   echo   [munit] %MS%\%TN% BUILD FAILED
