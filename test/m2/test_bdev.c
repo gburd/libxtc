@@ -134,7 +134,7 @@ suite_setup(const MunitParameter p[], void *ud)
 	char tmpdir[512];
 	(void)p; (void)ud;
 	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
-	snprintf(g_tmpl, sizeof g_tmpl, "%s/xtc_bdev_XXXXXX", tmpdir);
+	snprintf(g_tmpl, sizeof g_tmpl, "%.500s/xtc_bdev_XXXXXX", tmpdir);
 	g_fd = mkstemp(g_tmpl);
 	munit_assert_int(g_fd, >=, 0);
 	/* Pre-size the file to LEN so the fstat capacity fallback has a

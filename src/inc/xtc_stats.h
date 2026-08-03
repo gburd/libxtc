@@ -74,6 +74,8 @@ typedef int (*xtc_metric_visit_fn)(const char *name,
  *
  * PUBLIC: int       xtc_metrics_iterate __P((xtc_metric_visit_fn, void *));
  * PUBLIC: int       xtc_metrics_dump_prometheus __P((int));
+ *
+ * PUBLIC: void      xtc_tuning_check __P((void));
  */
 
 XTC_API int       xtc_counter_create(const char *name, xtc_counter_t **out);
@@ -96,5 +98,25 @@ XTC_API uint64_t  xtc_hist_count(const xtc_hist_t *h);
 
 XTC_API int       xtc_metrics_iterate(xtc_metric_visit_fn fn, void *user);
 XTC_API int       xtc_metrics_dump_prometheus(int fd);
+
+/*
+ * Run libxtc's host-tuning advisor: a battery of cheap, read-only
+ * probes (CPU governor, intel_pstate, transparent hugepages, vm
+ * swappiness, sched autogroup, io_uring-under-seccomp) that each log
+ * one XTC_LOG_INFO line to the xtc_log_default() sink when the host is
+ * NOT in the recommended state for a low-latency runtime.  Silent on a
+ * well-tuned host; Linux-only (a no-op elsewhere); never writes /proc
+ * or /sys.
+ *
+ * This is the ONE diagnostic libxtc itself emits through xtc_log, and
+ * it is the intended way to get those lines into an application's log
+ * sink on the xtc_exec / xtc_loop bring-up path (xtc_app_start already
+ * calls it by default; a consumer that stands up carriers via
+ * xtc_exec_init should call xtc_tuning_check() once at startup, after
+ * installing its xtc_log_set_default sink, to receive the advisories).
+ * Otherwise xtc_log is application-fill: libxtc streams no other
+ * internal log lines today.  Safe to call more than once.
+ */
+XTC_API void      xtc_tuning_check(void);
 
 #endif /* XTC_STATS_H */

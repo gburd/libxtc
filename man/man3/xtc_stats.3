@@ -20,7 +20,8 @@
 .Nm xtc_hist_count ,
 .Nm xtc_hist_destroy ,
 .Nm xtc_metrics_iterate ,
-.Nm xtc_metrics_dump_prometheus
+.Nm xtc_metrics_dump_prometheus ,
+.Nm xtc_tuning_check
 .Nd runtime statistics: counters, gauges, histograms
 .Sh SYNOPSIS
 .In xtc.h
@@ -55,6 +56,8 @@
 .Fn xtc_metrics_iterate "xtc_metric_visit_fn fn" "void *user"
 .Ft int
 .Fn xtc_metrics_dump_prometheus "int fd"
+.Ft void
+.Fn xtc_tuning_check "void"
 .Sh DESCRIPTION
 .Nm xtc_stats
 is the runtime telemetry layer.  Three metric kinds:
@@ -161,6 +164,40 @@ A trivial scrape server reads
 and forwards to HTTP.  See
 .Pa examples/05_rexis/metrics.c
 for an example dump-on-timer pattern.
+.Pp
+.Fn xtc_tuning_check
+runs libxtc's host-tuning advisor: cheap, read-only probes (CPU
+governor, intel_pstate, transparent hugepages, vm swappiness, sched
+autogroup, io_uring-under-seccomp) that each log one
+.Dv XTC_LOG_INFO
+line to the
+.Xr xtc_log 3
+default sink when the host is not in the recommended state for a
+low-latency runtime.  It is silent on a well-tuned host, Linux-only (a
+no-op elsewhere), and never writes
+.Pa /proc
+or
+.Pa /sys .
+This is the one diagnostic libxtc itself emits through
+.Xr xtc_log 3 :
+.Xr xtc_app_start 3
+calls it by default, but a consumer that brings carriers up directly
+via
+.Xr xtc_exec 3
+should call
+.Fn xtc_tuning_check
+once at startup, after installing its
+.Fn xtc_log_set_default
+sink, to receive the advisories.  Otherwise
+.Xr xtc_log 3
+is application-fill -- libxtc streams no other internal log lines --
+and
+.Nm xtc_metrics
+is likewise a registry the application populates; libxtc registers no
+internal metrics (use
+.Xr xtc_exec 3 Ns 's
+.Fn xtc_exec_loop_stats
+for per-carrier internals).
 .Sh SEE ALSO
 .Xr xtc_log 3 ,
 .Xr xtc_cfg 3 ,
