@@ -243,7 +243,7 @@ make check-dst                          # 52+ deterministic-simulation tests
 
 ```sh
 <!-- M0_CLAIMS:B2_BEGIN -->
-meson setup build_meson
+meson setup build_meson -Dtls=openssl
 meson compile -C build_meson
 <!-- M0_CLAIMS:B2_END -->
 meson test -C build_meson
@@ -258,11 +258,23 @@ Configure flags worth knowing:
 | `--with-liburing=PATH` | Use a specific liburing install |
 | `--with-hegel=PATH` | Enable property-based tests via the hegel-c framework |
 
-A meson build is also provided (`meson.build`), but it currently
-compiles only the M0 subset of the library (the OS/portability layer),
-not the full runtime -- it is a work in progress.  For a complete
-libxtc build use the autotools path above; meson is not yet at parity
-and is not exercised in CI.
+The meson build (`meson.build` + `meson_options.txt`) is at parity with
+the autotools build: it compiles the full static (and, with
+`-Dshared=true`, shared) library from the same source list, with the
+same io-backend / coroutine / TLS selection, and `meson test` runs the
+same C munit suite (109 tests) as `make check`'s C tier.  The exported
+`xtc_*` / `__xtc_*` symbol set is byte-for-byte identical to the
+autotools `libxtc.a` at the same optimization level.  Its options mirror
+the `./configure` flags:  `-Dio-backend=` (auto/poll/epoll/uring/kqueue/
+iocp/solaris/aix/select/sim), `-Dtls=` (auto/openssl/libressl/boringssl/
+mbedtls/gnutls/wolfssl/schannel/none), `-Daccel=` (auto/yes/no),
+`-Dliburing=PATH`, `-Dshared=`, and `-Ddiagnostic=`.  configure.ac /
+dist/Makefile.in remain the reference for WHAT is built; meson tracks
+them.  Not yet wired here: the shell-gate tests (`TESTS_SH`), the
+property-based tier (`TESTS_PBT`, needs `--with-hegel`), and the
+deterministic-simulation tier (`make check-dst`) still run via the
+autotools `make check`; and meson is not yet exercised in CI (a
+follow-up).
 
 ## Documentation
 

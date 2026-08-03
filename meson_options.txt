@@ -2,8 +2,40 @@
 #
 # Copyright (c) 2026, The XTC Project
 # Use of this source code is governed by the ISC License.
+#
+# These mirror the ./configure flags in dist/configure.ac so the meson
+# and autotools builds are interchangeable.  configure.ac is the source
+# of truth; keep the choices here in step with it.
+
+option('io-backend',
+  type : 'combo',
+  choices : ['auto', 'poll', 'epoll', 'uring', 'kqueue', 'iocp', 'solaris', 'aix', 'select', 'sim'],
+  value : 'auto',
+  description : 'L1 I/O backend (mirrors --with-io-backend; auto detects like configure.ac).')
+
+option('tls',
+  type : 'combo',
+  choices : ['auto', 'openssl', 'libressl', 'boringssl', 'mbedtls', 'gnutls', 'wolfssl', 'schannel', 'none'],
+  value : 'auto',
+  description : 'TLS backend (mirrors --with-tls; auto tries OpenSSL, else none).')
+
+option('accel',
+  type : 'combo',
+  choices : ['auto', 'yes', 'no'],
+  value : 'auto',
+  description : 'Attached-compute (GPU/NPU) fence-wait support (mirrors --with-accel).')
+
+option('liburing',
+  type : 'string',
+  value : '',
+  description : 'Path to a liburing install prefix (mirrors --with-liburing=PATH; empty = pkg-config/auto).')
 
 option('shared',
   type : 'boolean',
   value : false,
-  description : 'Also build and install a shared libxtc.so (mirrors the autoconf --enable-shared).')
+  description : 'Also build and install a shared libxtc.so (mirrors --enable-shared).')
+
+option('diagnostic',
+  type : 'boolean',
+  value : false,
+  description : 'Enable runtime DIAGNOSTIC assertions (mirrors --enable-diagnostic).')
