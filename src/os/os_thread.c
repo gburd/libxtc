@@ -275,6 +275,20 @@ __os_thread_set_affinity(int cpu)
 		    (thread_policy_t)&pol, THREAD_AFFINITY_POLICY_COUNT);
 		return XTC_OK;   /* advisory; ignored on Apple Silicon */
 	}
+#elif defined(_WIN32)
+	{
+		/* Windows: SetThreadAffinityMask pins the calling thread to
+		 * the single logical CPU (a hard pin, like Linux).  The mask
+		 * is a KAFFINITY bit per processor within the caller's
+		 * processor group; cpu >= 64 would need group-affinity APIs,
+		 * out of scope here -- reject it rather than silently wrap. */
+		if (cpu >= 64)
+			return XTC_E_INVAL;
+		if (SetThreadAffinityMask(GetCurrentThread(),
+		    (DWORD_PTR)1 << cpu) == 0)
+			return XTC_E_INTERNAL;
+		return XTC_OK;
+	}
 #else
 	(void)cpu;
 	return XTC_E_NOSYS;
