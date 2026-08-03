@@ -36,9 +36,32 @@ static __inline ssize_t xtc__write(int fd, const void *buf, size_t n)
 static __inline int xtc__pipe(int fds[2])
 { return _pipe(fds, 4096, _O_BINARY); }
 
+/* usleep: POSIX microsecond sleep over Win32.  Sleep()'s 1 ms floor
+ * bounds the resolution; rounds up so a sub-ms request is not a no-op.
+ * Test-thread pacing (the only reach here) tolerates the coarsening. */
+#include <windows.h>
+static __inline int xtc__usleep(unsigned usec)
+{ Sleep((DWORD)((usec + 999) / 1000)); return 0; }
+
+/* mkstemp: POSIX atomic temp-file create+open over Win32.  _mktemp_s
+ * fills the trailing XXXXXX in place (mutating the caller's template,
+ * as mkstemp does), then _open with _O_CREAT|_O_EXCL gives the same
+ * create-if-not-exists semantics.  Returns an open fd or -1. */
+#include <string.h>
+#include <sys/stat.h>
+static __inline int xtc__mkstemp(char *tmpl)
+{
+	if (_mktemp_s(tmpl, strlen(tmpl) + 1) != 0)
+		return -1;
+	return _open(tmpl, _O_RDWR | _O_CREAT | _O_EXCL | _O_BINARY,
+	    _S_IREAD | _S_IWRITE);
+}
+
 #define read(fd, buf, n)   xtc__read((fd), (buf), (n))
 #define write(fd, buf, n)  xtc__write((fd), (buf), (n))
 #define close(fd)          _close(fd)
 #define pipe(fds)          xtc__pipe(fds)
+#define usleep(usec)       xtc__usleep((usec))
+#define mkstemp(tmpl)      xtc__mkstemp((tmpl))
 
 #endif /* XTC_COMPAT_UNISTD_H */
