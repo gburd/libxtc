@@ -317,7 +317,7 @@ test_pool_grows(const MunitParameter p[], void *d)
 	xtc_proc_opts_t opts = { 0 };
 	xtc_pid_t pid;
 	int64_t t1 = 0;
-	long elapsed_ms;
+	int64_t elapsed_ms;
 	int i;
 	(void)p; (void)d;
 
