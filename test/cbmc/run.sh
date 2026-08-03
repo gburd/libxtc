@@ -61,6 +61,8 @@ rcu_harness        --unwind 6
 refcount_harness   --unwind 6
 wakepark_harness   --unwind 6
 chash_resize_harness --unwind 6
+res_harness        --unwind 3
+hlc_harness        --unwind 4
 '
 
 want="${*:-}"

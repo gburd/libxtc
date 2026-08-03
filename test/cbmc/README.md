@@ -36,6 +36,8 @@ are exposed at 2-3 concurrent actors, which is well within reach.
 | `refcount_harness.c`   | proc teardown refcount       | resolver pins a live object OR sees gone -- never a UAF | u6 | faithful model |
 | `wakepark_harness.c`   | `src/evt/loop.c` park latch  | the RUNNING->PARKED wake race never loses a wake (v1.8.0) | u6 | faithful model |
 | `chash_resize_harness.c`| `src/ptc/chash.c` resize     | no key lost; table stays single-valued across a resize | u6 | essential model |
+| `res_harness.c`         | `src/ptc/res.c` accountant   | `used` never exceeds `cap` under concurrent acquire (no over-admission) | u3 | verbatim CAS core |
+| `hlc_harness.c`         | `src/ptc/proc.c` HLC         | hybrid logical clock is monotonic + causal (update > remote stamp) under concurrent tick/update | u4 | verbatim __hlc_tick/_update |
 
 Every harness above VERIFIES SUCCESSFUL at the listed bound; each also has
 a negative check (injecting the classic bug makes CBMC report the
