@@ -77,6 +77,7 @@ void xtc_proc_recovery_cleanup __P((void));
 void xtc_proc_recovery_disarm __P((void));
 void xtc_res_release __P((xtc_res_t *, xtc_res_kind_t, int64_t));
 void xtc_res_set_cap __P((xtc_res_t *, xtc_res_kind_t, int64_t));
+void xtc_tuning_check __P((void));
 xtc_pid_t xtc_self __P((void));
 
 #endif /* PTC_EXT_H */
