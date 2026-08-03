@@ -22,6 +22,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#else
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #endif
 
 /* Portable 1ms-granularity sleep for the UDP receive retry loop.

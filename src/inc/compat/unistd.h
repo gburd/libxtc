@@ -26,11 +26,36 @@
 #include <BaseTsd.h>     /* SSIZE_T */
 
 typedef SSIZE_T ssize_t;
+typedef __int64 off_t;   /* POSIX file offset; matches _lseeki64's range */
 
 static __inline ssize_t xtc__read(int fd, void *buf, size_t n)
 { return _read(fd, buf, (unsigned)n); }
 static __inline ssize_t xtc__write(int fd, const void *buf, size_t n)
 { return _write(fd, buf, (unsigned)n); }
+
+/* pread/pwrite: positional I/O over Win32.  The CRT has no positional
+ * read/write, so seek-then-read; NOT atomic w.r.t. the file's shared
+ * position (unlike POSIX pread), which is fine for the single-threaded
+ * per-fd test use that reaches this shim.  Restores the prior position
+ * so an interleaved sequential caller is not disturbed. */
+static __inline ssize_t xtc__pread(int fd, void *buf, size_t n, off_t off)
+{
+	__int64 prev = _lseeki64(fd, 0, SEEK_CUR);
+	ssize_t r;
+	if (_lseeki64(fd, off, SEEK_SET) < 0) return -1;
+	r = _read(fd, buf, (unsigned)n);
+	(void)_lseeki64(fd, prev, SEEK_SET);
+	return r;
+}
+static __inline ssize_t xtc__pwrite(int fd, const void *buf, size_t n, off_t off)
+{
+	__int64 prev = _lseeki64(fd, 0, SEEK_CUR);
+	ssize_t r;
+	if (_lseeki64(fd, off, SEEK_SET) < 0) return -1;
+	r = _write(fd, buf, (unsigned)n);
+	(void)_lseeki64(fd, prev, SEEK_SET);
+	return r;
+}
 /* POSIX pipe(fds) -> a binary CRT pipe; the blocking pool's wakeup
  * channel.  4 KiB is ample for the single wakeup byte it carries. */
 static __inline int xtc__pipe(int fds[2])
@@ -60,6 +85,8 @@ static __inline int xtc__mkstemp(char *tmpl)
 
 #define read(fd, buf, n)   xtc__read((fd), (buf), (n))
 #define write(fd, buf, n)  xtc__write((fd), (buf), (n))
+#define pread(fd, buf, n, off)   xtc__pread((fd), (buf), (n), (off))
+#define pwrite(fd, buf, n, off)  xtc__pwrite((fd), (buf), (n), (off))
 #define close(fd)          _close(fd)
 #define pipe(fds)          xtc__pipe(fds)
 #define usleep(usec)       xtc__usleep((usec))

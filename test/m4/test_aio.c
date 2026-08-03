@@ -20,6 +20,7 @@
 
 #include "munit.h"
 #include "xtc.h"
+#include "xtc_fs.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_aio.h"
@@ -78,12 +79,14 @@ run_roundtrip(int force_offload)
 	xtc_proc_opts_t o = { 0 };
 	xtc_pid_t a, b;
 	struct aio_ctx c;
-	char tmpl[] = "/tmp/xtc_aio_XXXXXX";
+	char tmpdir[512], tmpl[600];
 
 	__xtc_aio_force_offload(force_offload);
 
 	memset(&c, 0, sizeof c);
 	atomic_store(&g_peer_ran, 0);
+	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
+	snprintf(tmpl, sizeof tmpl, "%s/xtc_aio_XXXXXX", tmpdir);
 	c.fd = mkstemp(tmpl);
 	munit_assert_int(c.fd, >=, 0);
 
@@ -132,6 +135,11 @@ test_aio_roundtrip_offload(const MunitParameter p[], void *d)
 }
 
 /* ---- vectored (scatter/gather) round-trip ---- */
+/* preadv/pwritev + struct iovec are POSIX-only (see xtc_aio.h: Windows
+ * lacks them, a WSABUF/OVERLAPPED-scatter port is future work), so the
+ * vectored cases and their fixtures compile only off Windows.  The
+ * scalar pread/pwrite AIO cases below run everywhere. */
+#if !defined(_WIN32)
 #include <sys/uio.h>
 
 struct vec_ctx {
@@ -268,6 +276,7 @@ test_aiov_bounds(const MunitParameter p[], void *d)
 	munit_assert_int(g_badv.rd, <, 0);      /* NULL iov rejected */
 	return MUNIT_OK;
 }
+#endif /* !_WIN32 -- vectored AIO */
 
 /* A short read at EOF returns the partial count, not an error. */
 static struct aio_ctx g_eof;
@@ -285,10 +294,12 @@ test_aio_short_read(const MunitParameter p[], void *d)
 	xtc_loop_t *loop = NULL;
 	xtc_proc_opts_t o = { 0 };
 	xtc_pid_t a;
-	char tmpl[] = "/tmp/xtc_aio2_XXXXXX";
+	char tmpdir[512], tmpl[600];
 	(void)p; (void)d;
 
 	memset(&g_eof, 0, sizeof g_eof);
+	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
+	snprintf(tmpl, sizeof tmpl, "%s/xtc_aio2_XXXXXX", tmpdir);
 	g_eof.fd = mkstemp(tmpl);
 	munit_assert_int(g_eof.fd, >=, 0);
 	munit_assert_int((int)write(g_eof.fd, "0123456789", 10), ==, 10);
@@ -307,9 +318,11 @@ test_aio_short_read(const MunitParameter p[], void *d)
 static MunitTest tests[] = {
 	{ "/roundtrip",         test_aio_roundtrip,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/roundtrip_offload", test_aio_roundtrip_offload, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#if !defined(_WIN32)
 	{ "/vec_roundtrip",     test_aiov_roundtrip,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/vec_roundtrip_offload", test_aiov_roundtrip_offload, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/vec_bounds",        test_aiov_bounds,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#endif
 	{ "/short_read",        test_aio_short_read,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
