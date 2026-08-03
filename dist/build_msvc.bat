@@ -23,7 +23,7 @@ setlocal enabledelayedexpansion
 if "%XTC_SRC%"=="" set XTC_SRC=%~dp0..
 echo XTC_SRC=%XTC_SRC%
 
-set INC=/I"%XTC_SRC%\src\inc" /I"%XTC_SRC%\src\inc\compat" /I.
+set INC=/I"%XTC_SRC%\src\inc" /I"%XTC_SRC%\src\inc\compat" /I"%XTC_SRC%\test\include" /I.
 rem /experimental:c11atomics enables _Atomic on VS2022 17.5+ / VS2026.
 rem /DXTC_BUILDING_DLL marks these objects as "I am the library" for
 rem the XTC_API export macro (src/inc/xtc_export.h): it selects
@@ -98,19 +98,28 @@ rem        validated; porting those is the separate Clang64 work.
 rem        test_tls is excluded: no TLS backend is wired into the MSVC
 rem        build.)
 rem
-rem        This is now a HARD GATE: confirmed all-pass on Windows CI
-rem        (16/16), so any build/run failure in the set fails the job.
+rem        This is now a HARD GATE: confirmed all-pass on a real EC2
+rem        Windows Server 2022 / MSVC 2022 host (100/100), so any
+rem        build/run failure in the set fails the job.
 rem        See docs/M_WINDOWS_MATRIX.md. ---
 echo.
-echo [5/5] cl real munit suite (POSIX-clean subset, best-effort)
+echo [5/5] cl real munit suite (Windows-runnable set)
 set MUNIT_PASS=0
 set MUNIT_FAIL=0
 set MUNIT_FAILED_LIST=
 rem  space-separated MS:TN pairs (colon-delimited so no backslash parsing).
-rem  test_tls is deliberately EXCLUDED: the MSVC build wires no TLS
-rem  backend (XTC_TLS_BACKEND_* undefined in compat/xtc_config.h), so
-rem  test_tls references TLS symbols not in xtc.lib and cannot link.
-set MUNIT_TESTS=m0:test_version m0:test_errors m0:test_header m1:test_atomic m1:test_alloc m1:test_time m1:test_crypto m11:test_mctx m10:test_credit m10:test_fsm m10:test_pool m10:test_reg m10:test_stream m14:test_launch m14:test_unsafe_depth m14:test_stack_reclaim
+rem  This list is the full set proven to build+run green on a real EC2
+rem  Windows Server 2022 / MSVC 2022 host by the per-test sweep
+rem  (dist/probe_all.bat) -- 100 of the ~111 TESTS_C.  The rest are
+rem  legitimately POSIX-only (fork / socketpair / AF_UNIX / getrusage /
+rem  signals / raw-socket MSG_NOSIGNAL / xtc_osproc which is XTC_E_NOSYS
+rem  on Windows) or need a TLS backend the MSVC build does not wire
+rem  (test_tls_basic); test_tnt is a real cross-shard-wake bug still
+rem  under investigation.  See docs/M_WINDOWS_MATRIX.md for the honest
+rem  per-test status.  test_proc_wake_crossthread is EXCLUDED here even
+rem  though it runs: it deliberately exits 77 (SKIP) on Windows, and
+rem  this gate treats a nonzero exit as failure.
+set MUNIT_TESTS=m0:test_version m0:test_header m0:test_errors m1:test_atomic m1:test_alloc m1:test_time m1:test_errno m1:test_sharp_edges m1:test_cpu m1:test_cpu_cgroup m1:test_tuning m1:test_crypto m1:test_thread m1:test_tls m1:test_mutex m1:test_fs m1:test_dio m1:test_pkey m2:test_io_lifecycle m2:test_io_register m2:test_io_events m2:test_io_wakeup m2:test_io_fault_inject m2:test_io_common_edge m2:test_net m2:test_net_udp m2:test_bdev m3:test_loop m3:test_waker m3:test_timer m3:test_io_integration m4:test_async m4:test_aio m4:test_fctx m4:test_stack_guard m5:test_exec m5:test_cross_wake m5:test_deque m5:test_steal sim:test_sim_rng m7:test_chan m7:test_chan_mpmc_bcast m7:test_res m7:test_future concurrency:test_proc_table_stress concurrency:test_eager_rebalance concurrency:test_wake_after_migration m8:test_proc_link_race m8:test_recv_correlate m9:test_sync m9:test_amutex_xloop m9:test_dio_sched m9:test_iosched m9:test_blocking m9:test_alloc_audit m10:test_sup m10:test_reg m10:test_svr m10:test_svr_edge m10:test_fsm m10:test_saga m10:test_pg m10:test_pool m10:test_stream m10:test_credit m12:test_tail m10:test_xproc m10:test_app m10:test_isolated m11:test_mctx m11:test_slab m11:test_slab_shm m13:test_rcu m13:test_chash m13:test_cskip m13:test_prob m13:test_accel m13:test_lrlock m13:test_lwlock m13:test_lockmgr m14:test_preempt m14:test_preempt_p1 m14:test_preempt_p2 m14:test_launch m14:test_cfg m14:test_stack_reclaim m14:test_unsafe_depth coverage:test_coverage_pump coverage:test_fault_inject otp:test_otp_proc_lib otp:test_otp_gen_server otp:test_otp_gen_server_phase2 otp:test_otp_supervisor m12:test_observability m12:test_runtime m12:test_stats m12:test_backtrace m18:test_tls_server m18:test_tls_client concurrency:test_inject_races
 for %%P in (%MUNIT_TESTS%) do (
   for /f "tokens=1,2 delims=:" %%a in ("%%P") do call :run_munit %%a %%b
 )
