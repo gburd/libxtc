@@ -94,4 +94,31 @@ static __inline int xtc__mkstemp(char *tmpl)
 #define mkstemp(tmpl)      xtc__mkstemp((tmpl))
 #define getpid()           _getpid()
 
+/* alarm(sec): POSIX SIGALRM-after-sec has no Win32 analogue, but every
+ * caller that reaches this shim uses it purely as a hang-guard watchdog
+ * ("abort the process if the test runs longer than sec seconds").
+ * Emulate exactly that: a one-shot background thread that waits sec
+ * seconds then aborts.  A healthy test exits normally long before the
+ * guard fires (the thread just dies with the process).  alarm(0) is a
+ * no-op cancel -- no shim caller re-arms or inspects the remaining
+ * time, matching how the tests use it. */
+static __inline unsigned long __stdcall xtc__alarm_thread(void *arg)
+{
+	unsigned sec = (unsigned)(uintptr_t)arg;
+	Sleep(sec * 1000UL);
+	_exit(3);   /* SIGALRM default action is terminate */
+	return 0;
+}
+static __inline unsigned xtc__alarm(unsigned sec)
+{
+	if (sec != 0) {
+		HANDLE h = CreateThread(NULL, 0,
+		    (LPTHREAD_START_ROUTINE)xtc__alarm_thread,
+		    (void *)(uintptr_t)sec, 0, NULL);
+		if (h != NULL) CloseHandle(h);
+	}
+	return 0;
+}
+#define alarm(sec)         xtc__alarm((sec))
+
 #endif /* XTC_COMPAT_UNISTD_H */
