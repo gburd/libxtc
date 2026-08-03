@@ -104,7 +104,7 @@ test_tcp_knobs(const MunitParameter p[], void *d)
 	int v;
 	socklen_t l;
 	(void)p; (void)d;
-	fd = socket(AF_INET, SOCK_STREAM, 0);
+	fd = (int)socket(AF_INET, SOCK_STREAM, 0);
 	munit_assert_int(fd, >=, 0);
 	opts.nodelay = 1; opts.reuseaddr = 1; opts.keepalive = 1;
 	munit_assert_int(xtc_net_apply_tcp_opts(fd, &opts), ==, XTC_OK);
@@ -165,7 +165,7 @@ test_setnonblock(const MunitParameter p[], void *d)
 {
 	int fd;
 	(void)p; (void)d;
-	fd = socket(AF_INET, SOCK_STREAM, 0);
+	fd = (int)socket(AF_INET, SOCK_STREAM, 0);
 	munit_assert_int(fd, >=, 0);
 	munit_assert_int(xtc_net_setnonblock(fd), ==, XTC_OK);
 	close(fd);

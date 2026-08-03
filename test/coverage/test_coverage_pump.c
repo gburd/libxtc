@@ -437,11 +437,11 @@ test_exec_full_api(const MunitParameter p[], void *d)
 	munit_assert_null(xtc_exec_loop(e, 99));
 
 	/* Spawn via async (coroutine) and async_on. */
-	munit_assert_int(xtc_exec_async(e, exec_simple_coro, &counter, &t),
+	munit_assert_int(xtc_exec_async(e, exec_simple_coro, (void *)&counter, &t),
 	    ==, XTC_OK);
-	munit_assert_int(xtc_exec_async_on(e, 0, exec_simple_coro, &counter, &t),
+	munit_assert_int(xtc_exec_async_on(e, 0, exec_simple_coro, (void *)&counter, &t),
 	    ==, XTC_OK);
-	munit_assert_int(xtc_exec_async_on(e, 99, exec_simple_coro, &counter, &t),
+	munit_assert_int(xtc_exec_async_on(e, 99, exec_simple_coro, (void *)&counter, &t),
 	    ==, XTC_E_INVAL);
 
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
