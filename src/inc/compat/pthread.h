@@ -232,4 +232,9 @@ static __inline int pthread_equal(pthread_t a, pthread_t b)
 static __inline int pthread_setname_np(pthread_t th, const char *name)
 { (void)th; (void)name; return 0; }
 
+/* Tests that pull in <pthread.h> for the thread primitives also reach
+ * for sched_yield()/nanosleep() (thread pacing); surface the sched
+ * shim here so a test including only <pthread.h> links. */
+#include <sched.h>
+
 #endif /* XTC_COMPAT_PTHREAD_H */
