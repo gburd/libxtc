@@ -1,0 +1,74 @@
+{
+  "_comment": "Microbenchmark regression baseline -- MACHINE-RELATIVE. Regenerate on the target host with 'BENCH_UPDATE=1 bench/micro/check.sh'. See bench/micro/README.md. Values are median ns/op; 'tolerance' is the allowed fractional slowdown.",
+  "default_tolerance": 1.0,
+  "benchmarks": {
+    "amutex_lock": {
+      "ns_per_op": 26.29,
+      "tolerance": 1.0
+    },
+    "chan_mpmc": {
+      "ns_per_op": 27.61,
+      "tolerance": 1.0
+    },
+    "chan_mpsc": {
+      "ns_per_op": 21.45,
+      "tolerance": 1.0
+    },
+    "chash_get": {
+      "ns_per_op": 15.74,
+      "tolerance": 1.0
+    },
+    "chash_insert": {
+      "ns_per_op": 25.91,
+      "tolerance": 1.0
+    },
+    "cskip_get": {
+      "ns_per_op": 96.83,
+      "tolerance": 1.0
+    },
+    "cskip_insert": {
+      "ns_per_op": 105.81,
+      "tolerance": 1.0
+    },
+    "deque_push_pop": {
+      "ns_per_op": 23.73,
+      "tolerance": 1.0
+    },
+    "deque_steal": {
+      "ns_per_op": 22.08,
+      "tolerance": 1.0
+    },
+    "fiber_switch": {
+      "ns_per_op": 656.27,
+      "tolerance": 1.0
+    },
+    "lrlock_read": {
+      "ns_per_op": 47.67,
+      "tolerance": 1.0
+    },
+    "lwlock_excl": {
+      "ns_per_op": 29.52,
+      "tolerance": 1.0
+    },
+    "lwlock_shared": {
+      "ns_per_op": 30.41,
+      "tolerance": 1.0
+    },
+    "malloc_free": {
+      "ns_per_op": 6.53,
+      "tolerance": 1.0
+    },
+    "proc_send_recv": {
+      "ns_per_op": 1799.04,
+      "tolerance": 1.0
+    },
+    "slab_alloc_free": {
+      "ns_per_op": 37.04,
+      "tolerance": 1.0
+    },
+    "timer_set_fire": {
+      "ns_per_op": 1579.47,
+      "tolerance": 1.0
+    }
+  }
+}
