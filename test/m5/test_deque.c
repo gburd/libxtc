@@ -168,7 +168,7 @@ test_no_double_take(const MunitParameter p[], void *d)
 	for (i = 0; i < DQ4_ITEMS; i++)
 		munit_assert_int((int)atomic_load_explicit(&seen[i],
 		    memory_order_relaxed), ==, 1);
-	free(seen);
+	free((void *)seen);
 	return MUNIT_OK;
 }
 

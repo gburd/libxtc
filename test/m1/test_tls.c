@@ -72,7 +72,7 @@ static void *
 l5_worker(void *arg)
 {
 	(void)arg;
-	(void)__os_tls_set(l5_key, (void *)0xdeadbeef);
+	(void)__os_tls_set(l5_key, (void *)(uintptr_t)0xdeadbeefULL);
 	return NULL;
 }
 

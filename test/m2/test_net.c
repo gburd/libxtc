@@ -64,7 +64,7 @@ test_tcp_listen_dial(const MunitParameter p[], void *d)
 
 	/* Pick a free port: bind to port 0 via raw socket then close. */
 	{
-		int probe = socket(AF_INET, SOCK_STREAM, 0);
+		int probe = (int)socket(AF_INET, SOCK_STREAM, 0);
 		struct sockaddr_in s; memset(&s, 0, sizeof s);
 		socklen_t l = sizeof s;
 		s.sin_family = AF_INET; s.sin_port = 0;
@@ -85,7 +85,7 @@ test_tcp_listen_dial(const MunitParameter p[], void *d)
 	/* Spin a bit so the connect lands in the listen queue. */
 	(void)nanosleep(&sleep10ms, NULL);
 
-	accept_fd = accept(listen_fd, (struct sockaddr *)&sa, &salen);
+	accept_fd = (int)accept(listen_fd, (struct sockaddr *)&sa, &salen);
 	munit_assert_int(accept_fd, >=, 0);
 
 	xtc_net_close(accept_fd);
@@ -129,7 +129,7 @@ test_uds_listen_dial(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_net_unix_listen(path, &listen_fd), ==, XTC_OK);
 	munit_assert_int(xtc_net_unix_dial(path, &client_fd), ==, XTC_OK);
 	(void)nanosleep(&sleep10ms, NULL);
-	accept_fd = accept(listen_fd, NULL, NULL);
+	accept_fd = (int)accept(listen_fd, NULL, NULL);
 	munit_assert_int(accept_fd, >=, 0);
 
 	/* Echo a tiny message across. */
