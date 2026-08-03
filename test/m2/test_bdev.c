@@ -20,6 +20,7 @@
 
 #include "munit.h"
 #include "xtc.h"
+#include "xtc_fs.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_bdev.h"
@@ -30,7 +31,7 @@
 #define BLKS 8
 #define LEN  (SECT * BLKS)
 
-static char g_tmpl[] = "/tmp/xtc_bdev_XXXXXX";
+static char g_tmpl[520] = "/tmp/xtc_bdev_XXXXXX";
 static int  g_fd = -1;
 
 struct ctx {
@@ -130,7 +131,10 @@ static void *
 suite_setup(const MunitParameter p[], void *ud)
 {
 	unsigned char zero[LEN];
+	char tmpdir[512];
 	(void)p; (void)ud;
+	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
+	snprintf(g_tmpl, sizeof g_tmpl, "%s/xtc_bdev_XXXXXX", tmpdir);
 	g_fd = mkstemp(g_tmpl);
 	munit_assert_int(g_fd, >=, 0);
 	/* Pre-size the file to LEN so the fstat capacity fallback has a

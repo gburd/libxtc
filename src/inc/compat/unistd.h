@@ -49,6 +49,7 @@ static __inline int xtc__usleep(unsigned usec)
  * create-if-not-exists semantics.  Returns an open fd or -1. */
 #include <string.h>
 #include <sys/stat.h>
+#include <process.h>     /* _getpid */
 static __inline int xtc__mkstemp(char *tmpl)
 {
 	if (_mktemp_s(tmpl, strlen(tmpl) + 1) != 0)
@@ -63,5 +64,6 @@ static __inline int xtc__mkstemp(char *tmpl)
 #define pipe(fds)          xtc__pipe(fds)
 #define usleep(usec)       xtc__usleep((usec))
 #define mkstemp(tmpl)      xtc__mkstemp((tmpl))
+#define getpid()           _getpid()
 
 #endif /* XTC_COMPAT_UNISTD_H */

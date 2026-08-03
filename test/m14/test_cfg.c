@@ -24,6 +24,7 @@
 
 #include "munit.h"
 #include "xtc.h"
+#include "xtc_fs.h"
 #include "xtc_cfg.h"
 
 /* ---- register / duplicate / unregister / count / kind ---- */
@@ -299,13 +300,15 @@ static MunitResult
 test_load_file(const MunitParameter p[], void *d)
 {
 	xtc_cfg_spec_t s = { 0 };
-	char path[] = "/tmp/xtc_cfg_test_XXXXXX";
+	char tmpdir[512], path[600];
 	int fd, iv, b, ev;
 	int64_t i64;
 	double dv;
 	const char *sv;
 	FILE *f;
 	(void)p; (void)d;
+	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
+	snprintf(path, sizeof path, "%s/xtc_cfg_test_XXXXXX", tmpdir);
 
 	/* Register one var of each kind. */
 	s.name = "f.int";    s.kind = XTC_CFG_INT;    s.dflt.d_int = 0;
@@ -393,10 +396,12 @@ static MunitResult
 test_load_enum_numeric(const MunitParameter p[], void *d)
 {
 	xtc_cfg_spec_t s = { 0 };
-	char path[] = "/tmp/xtc_cfg_enum_XXXXXX";
+	char tmpdir[512], path[600];
 	int fd, ev;
 	FILE *f;
 	(void)p; (void)d;
+	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
+	snprintf(path, sizeof path, "%s/xtc_cfg_enum_XXXXXX", tmpdir);
 
 	s.name = "e.lvl";
 	s.kind = XTC_CFG_ENUM;
@@ -426,11 +431,13 @@ static MunitResult
 test_load_parse_variants(const MunitParameter p[], void *d)
 {
 	xtc_cfg_spec_t s = { 0 };
-	char path[] = "/tmp/xtc_cfg_parse_XXXXXX";
+	char tmpdir[512], path[600];
 	int fd, b, iv;
 	const char *sv;
 	FILE *f;
 	(void)p; (void)d;
+	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
+	snprintf(path, sizeof path, "%s/xtc_cfg_parse_XXXXXX", tmpdir);
 
 	s.name = "v.bool"; s.kind = XTC_CFG_BOOL; s.dflt.d_bool = 1;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);

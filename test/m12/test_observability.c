@@ -18,6 +18,7 @@
 
 #include "munit.h"
 #include "xtc.h"
+#include "xtc_fs.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_log.h"
@@ -228,13 +229,15 @@ test_cfg_load_file(const MunitParameter p[], void *d)
 {
 	xtc_cfg_spec_t spec = {0};
 	static const char *levels[] = { "quiet", "normal", "loud" };
-	char path[64];
+	char tmpdir[512];
+	char path[640];
 	int iv = 0, bv = 0, ev = 0;
 	const char *sv = NULL;
 	FILE *f;
 	(void)p; (void)d;
 
-	snprintf(path, sizeof path, "/tmp/xtc-cfg-test-%ld.conf",
+	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
+	snprintf(path, sizeof path, "%s/xtc-cfg-test-%ld.conf", tmpdir,
 	    (long)getpid());
 
 	spec.name = "t.workers"; spec.kind = XTC_CFG_INT;
