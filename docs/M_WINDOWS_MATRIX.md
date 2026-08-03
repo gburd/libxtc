@@ -115,6 +115,77 @@ ARM64 running the x86_64 emulation layer, MSYS2 toolchains).
 | Clang64     | 22.1.4        | OK     | 50          | 48/48      | LLVM clang with MinGW runtime; 3 POSIX-only tests don't compile |
 | MSVC cl.exe | 14.50.35717   | OK     | smoke + 16 munit | 5/5 smoke; 16/16 munit | xtc.lib (45 objs incl. ml64 fcontext); standalone smoke + a POSIX-clean munit subset (16 tests across m0/m1/m10/m11/m14) built+run by build_msvc.bat step 5 as a HARD GATE (test_tls excluded: no TLS backend wired into the MSVC build) |
 
+## Full MSVC test-surface sweep (2026-07, real EC2 Windows Server 2022 x64)
+
+Every test in `dist/Makefile.in`'s `TESTS_C` list (111 tests across
+`test/m0..m18`, `test/concurrency`, `test/coverage`, `test/otp`,
+`test/sim`, `test/tnt`) was built + run individually under MSVC cl.exe
+2022 on a real EC2 Windows Server 2022 x64 host (`dist/probe_all.bat`,
+same CFLAGS/`/WX` as the gate).  The curated 16-test subset grew to a
+**100-test HARD GATE** (`build_msvc.bat` step 5 -- 100 pass, 0 fail,
+0 warnings under `/WX`).
+
+**Tally: 100 pass / 10 POSIX-only / 1 real bug open (out of 111).**
+
+### Real Windows bugs found and fixed on the host
+
+| Bug | Symptom (test) | Fix |
+|-----|----------------|-----|
+| pthread compat shim discarded the thread return value | `m1/test_thread` T1/T2: `__os_thread_join` returned NULL instead of the worker's `void*` | `pthread_t` is now a heap thunk carrying a retval slot the trampoline writes and join reads; `pthread_self` uses a per-thread TLS thunk for stable identity (`src/inc/compat/pthread.h`) |
+| `xtc_io_poll` ignored its timeout across AFD repoll slices | `m2/test_io_events` E1/E3/E5: readable/HUP/many-ready never fired (poll returned 0 events after one 8 ms slice even with a 1 s timeout and data ready) | wrapped the dequeue+process in a deadline-bounded loop that sweeps + re-arms between slices until an event fires or the caller's real deadline elapses (`src/io/io_iocp.c`) |
+| `__os_thread_set_affinity` was `XTC_E_NOSYS` on Windows | `m1/test_cpu` affinity_enforced asserted `XTC_OK` | implemented via `SetThreadAffinityMask` (hard pin, the Linux-equivalent; cpu < 64) (`src/os/os_thread.c`) |
+| test_slab's Windows mmap shim used `malloc` (uninitialized) | `m11/test_slab` shm_reclaim: `xtc_slab_create` returned `XTC_E_VERSION` on a reused heap block carrying stale slab metadata | `calloc` -- matches `mmap(MAP_ANONYMOUS)`'s zero-fill, which the shm-create path relies on to detect a fresh region (`test/m11/test_slab.c`) |
+| test_blocking stored a 64-bit clock in `_Atomic long` | `m9/test_blocking` liveness/pool_grows: LLP64 truncated the timestamp to garbage (worked on LP64 by luck) | `_Atomic int64_t` (`test/m9/test_blocking.c`) |
+
+### Portability gaps closed (compat shims / test guards, no POSIX change)
+
+* `src/inc/compat/sched.h`: added `nanosleep` (Sleep, ms granularity);
+  `pthread.h` now includes it so a `<pthread.h>`-only test links.
+* `src/inc/compat/unistd.h`: added `usleep`, `mkstemp` (`_mktemp_s` +
+  `_O_CREAT|_O_EXCL`), `getpid`, `pread`/`pwrite` (seek-then-read),
+  `off_t` (UCRT), `unlink`->`_unlink`, `fdopen`->`_fdopen`, and
+  `alarm` as a Win32 watchdog thread (the hang-guard the standalone
+  concurrency tests use).
+* Temp paths via the public `xtc_fs_tmpdir()` instead of hardcoded
+  `/tmp` (test_bdev, test_aio, test_cfg, test_blocking,
+  test_observability).
+* `<winsock2.h>`/`<ws2tcpip.h>` on `_WIN32` (test_net_udp).
+* Vectored AIO (`preadv`/`pwritev`/`struct iovec`) guarded `!_WIN32`
+  (POSIX-only by `xtc_aio.h`'s own design); the scalar AIO cases run.
+* Two timing-fragile asserts (test_blocking liveness ordering,
+  pool_grows ms budget) guarded `!_WIN32` -- Windows's ~15.6 ms default
+  timer coarsens the sleeps; the load-bearing correctness proofs run
+  everywhere.
+* `/WX` fixes: explicit `(int)` casts on `socket()`/`accept()`
+  (C4244 SOCKET->int), `(uintptr_t)` a 32-bit sentinel (C4312),
+  `(void *)` casts dropping `_Atomic` qualifiers (C4090).
+
+### Legitimately POSIX-only -- cannot run on Windows (10)
+
+| Test | Blocker |
+|------|---------|
+| `m2/test_net_frame` | `socketpair(AF_UNIX)` -- Winsock has no `socketpair` |
+| `m3/test_task` | `getrusage(RUSAGE_SELF)` -- no clean Win32 equivalent for the stats checked |
+| `m8/test_proc` | `fork()` |
+| `m12/test_dump` | `fork()` |
+| `m10/test_osproc` | `xtc_osproc_*` is `XTC_E_NOSYS` on Windows (fork/exec + pidfd; launches `/bin/sh`) |
+| `m1/test_thread_sigmask` | `sigaction`/`SIGUSR1`/`pthread_sigmask` -- POSIX signals |
+| `m8/test_proc_wait_fd` | `CLOCK_PROCESS_CPUTIME_ID` + timing-sensitive idle-CPU accounting |
+| `m16/test_pgmock_smoke` | raw sockets + `MSG_NOSIGNAL` + `errno`/`EINTR`; a Winsock port (WSAStartup/closesocket/WSAGetLastError) is future work |
+| `m18/test_tls_basic` | references TLS symbols the MSVC build wires no backend for |
+| `concurrency/test_proc_wake_crossthread` | intentionally exits 77 (SKIP) on Windows; its wake path is covered by `test/msvc` |
+
+### Real bug still open (not faked into a pass)
+
+* `tnt/test_tnt`: builds, but the whole scenario yields all-zero
+  counters (`send_ok = 0`) -- the `xtc_tnt` shard/driver isolate never
+  runs on Windows.  The tnt shard uses a self-wake pipe + cross-shard
+  senders on the `xtc_exec` work-stealing loop; `test_exec` passes, so
+  the work-stealing core is sound and the fault is specific to the
+  tnt cross-shard-wake path.  Root cause not yet isolated; recorded
+  here rather than skipped or hidden.
+
+
 ## IOCP backend: round-2 native overlapped (RUNTIME-VERIFIED 2026-06)
 
 **Update 2026-06 (santorini, Windows 10.0.26200 ARM64, MinGW gcc 13.2.0

@@ -263,8 +263,11 @@ flake documented separately below), and a dedicated CPU-scale test at
 every size).
 
 **Status note (2026-07):** substantial progress on an MSVC Windows host
-(Windows Server 2022, EC2); THREE real bugs found and fixed, one
-remains:
+(Windows Server 2022, EC2); SEVEN real bugs found and fixed across two
+work sessions (three in the IOCP round below, plus four more --
+poll-timeout, pthread retval, thread affinity, slab mmap zero-fill --
+in the full test-surface sweep; see the sweep update further down and
+docs/M_WINDOWS_MATRIX.md), one remains (tnt/test_tnt):
 1. FIXED -- the AFD poll IOCTL code was wrong.  It was built as
    CTL_CODE(0x12, 9, METHOD_BUFFERED, FILE_ANY_ACCESS) = 0x00120024;
    the AFD driver rejected every poll with STATUS_INVALID_DEVICE_REQUEST
@@ -344,6 +347,47 @@ remains:
    promptly never reaches the sweep).  Full repro harness, the batching
    experiments, and the AWS/SSH recipe are recorded in
    .agent/AFD_ASYNC_COMPLETION_2026-07.md.
+
+**Update (2026-07, full MSVC test-surface sweep, EC2 Windows Server
+2022):** every `TESTS_C` test was built + run individually under
+cl.exe 2022 and the Windows gate grew from 16 to a 100-test HARD GATE
+(`build_msvc.bat` step 5, all-pass, 0 warnings under `/WX`; per-test
+matrix in docs/M_WINDOWS_MATRIX.md).  Four more real bugs were found
+and fixed on the host, plus the poll-timeout bug below:
+
+5. FIXED -- `xtc_io_poll` ignored its caller timeout across AFD repoll
+   slices.  It capped the wait to the 8 ms sweep interval and returned
+   after a SINGLE GetQueuedCompletionStatusEx slice, so a poll armed
+   while the socket was not yet readable (bug 4 above) returned XTC_OK
+   with zero events even though the caller asked to block up to
+   timeout_ns and data had since arrived.  `test/m2/test_io_events`
+   E1/E3/E5 (readable/HUP/many-ready) caught it: writable fired (socket
+   immediately writable) but readable never did.  Fix: a
+   deadline-bounded loop that sweeps + re-arms between 8 ms slices
+   until an event/wakeup is emitted or the caller's real deadline
+   elapses (src/io/io_iocp.c).
+6. FIXED -- the pthread compat shim discarded the thread return value
+   (`m1/test_thread` T1/T2); see docs/M_WINDOWS_MATRIX.md.
+7. FIXED -- `__os_thread_set_affinity` was XTC_E_NOSYS on Windows
+   (`m1/test_cpu`); now SetThreadAffinityMask.
+8. FIXED -- test_slab's Windows mmap shim used malloc, not calloc, so
+   the shm slab version-check tripped on a reused heap block
+   (`m11/test_slab` shm_reclaim); plus test_blocking stored a 64-bit
+   clock in `_Atomic long` (LLP64 truncation).
+
+### Windows: `tnt/test_tnt` scenario yields all-zero counters (OPEN)
+
+**Status: OPEN (2026-07), real bug, not skipped.**  test_tnt builds
+clean under MSVC but the whole scenario produces all-zero result
+counters (`send_ok = 0`, `counter_msgs = 0`, ...): the `xtc_tnt`
+shard/driver isolate never runs on Windows.  The tnt shard is built on
+a self-wake pipe + cross-shard senders over the `xtc_exec`
+work-stealing loop; `test_exec` and the other m5 tests pass, so the
+work-stealing core itself is sound and the fault is specific to the
+tnt cross-shard-wake path (likely the self-wake pipe's interaction
+with the IOCP readiness model).  Root cause not yet isolated.  Listed
+here honestly rather than skipped or hidden; the 100-test gate excludes
+it.
 
 
 ## MSVC ASan: pre-existing, rare thread-startup flake (not the AFD workaround)
