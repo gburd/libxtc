@@ -77,6 +77,17 @@ test_proc_leaks(const MunitParameter p[], void *d)
 	munit_assert_size(cnt, ==, 3);
 	munit_assert_size(bytes, ==, 3 * 64);
 
+	/* Global stats: at least the leaker's three live buffers are
+	 * counted (other subsystems may hold live allocations too).  Both
+	 * out-pointers optional -- exercise the NULL path too. */
+	{
+		size_t gcnt = 0, gbytes = 0;
+		xtc_alloc_audit_stats(&gcnt, &gbytes);
+		munit_assert_size(gcnt, >=, 3);
+		munit_assert_size(gbytes, >=, 3 * 64);
+		xtc_alloc_audit_stats(NULL, NULL);   /* no crash */
+	}
+
 	cnt = bytes = 1;
 	xtc_alloc_audit_proc_leaks(s.clean_pid, &cnt, &bytes);
 	munit_assert_size(cnt, ==, 0);

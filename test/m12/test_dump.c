@@ -106,6 +106,17 @@ test_assert_pass(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- /crash_handler: install is idempotent, returns XTC_OK ---- */
+static MunitResult
+test_crash_handler(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	/* Installs SIGSEGV/SIGABRT/etc fault handlers; idempotent. */
+	munit_assert_int(xtc_crash_handler_install(), ==, XTC_OK);
+	munit_assert_int(xtc_crash_handler_install(), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 /* ---------- /panic/aborts: XTC_PANIC dumps + aborts (forked) ---------- */
 
 static MunitResult
@@ -165,6 +176,7 @@ test_panic_aborts(const MunitParameter p[], void *d)
 
 static MunitTest tests[] = {
 	{ "/dump/basic",    test_dump_basic,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/crash_handler", test_crash_handler, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/assert/pass",   test_assert_pass,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/panic/aborts",  test_panic_aborts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

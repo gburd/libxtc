@@ -65,6 +65,7 @@ struct mon_ctx {
 	int    down_seen;
 	int    down_reason;
 	int    xspawn_rc;
+	long   child_os_pid;
 };
 
 static void
@@ -86,6 +87,8 @@ monitor_fiber(void *a)
 	if (m->xspawn_rc != XTC_OK)
 		return;
 
+	/* The child's OS pid is a real, positive pid on POSIX. */
+	m->child_os_pid = xtc_xproc_os_pid(child);
 	/* Monitor first, then tell the child to exit with 42. */
 	if (xtc_xmonitor(child, &ref) != XTC_OK) {
 		xtc_xproc_destroy(child);
@@ -124,6 +127,7 @@ test_xproc_monitor_exit(const MunitParameter p[], void *d)
 	munit_assert_int(m.xspawn_rc, ==, XTC_OK);
 	munit_assert_int(m.down_seen, ==, 1);        /* got the DOWN */
 	munit_assert_int(m.down_reason, ==, 42);     /* the code we sent */
+	munit_assert_int64(m.child_os_pid, >, 0);    /* a real child pid */
 
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;

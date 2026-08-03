@@ -500,6 +500,30 @@ test_alrlock_alias(const MunitParameter p[], void *d)
 	xtc_lrlock_read_end(lr);
 
 	xtc_lrlock_destroy(lr);
+
+	/* Also exercise the opts-taking alias xtc_alrlock_create_ex. */
+	{
+		xtc_lrlock_t *lr2;
+		xtc_lrlock_opts_t o = { 0 };
+		const struct dict *rd2;
+		struct op_set s2 = { 3, 99 };
+		void *w2;
+		o.name = "aex";
+		o.data_size = sizeof(struct dict);
+		o.apply_fn = apply_set;
+		o.sync_fn = sync_dict;
+		munit_assert_int(xtc_alrlock_create_ex(&o, &lr2), ==, XTC_OK);
+		w2 = xtc_lrlock_write_begin(lr2);
+		munit_assert_not_null(w2);
+		xtc_lrlock_apply_op(lr2, &s2, sizeof s2);
+		xtc_lrlock_publish(lr2);
+		xtc_lrlock_write_end(lr2);
+		rd2 = xtc_lrlock_read_begin(lr2);
+		munit_assert_not_null(rd2);
+		munit_assert_int(rd2->items[0].value, ==, 99);
+		xtc_lrlock_read_end(lr2);
+		xtc_lrlock_destroy(lr2);
+	}
 	return MUNIT_OK;
 }
 

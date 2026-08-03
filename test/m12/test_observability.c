@@ -7,6 +7,7 @@
  */
 
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -91,6 +92,59 @@ test_log_drop_on_full(const MunitParameter p[], void *d)
 		xtc_log_write(log, XTC_LOG_INFO, "msg %d", i);
 	munit_assert_int(xtc_log_drop_count(log), >, 0);
 	(void)xtc_log_drain(log);
+	xtc_log_destroy(log);
+	return MUNIT_OK;
+}
+
+/* xtc_log_default / xtc_log_set_default / xtc_log_set_floor / xtc_log_vwrite */
+static void
+log_via_vwrite(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	xtc_log_vwrite(log, lvl, fmt, ap);
+	va_end(ap);
+}
+
+static MunitResult
+test_log_default_vwrite(const MunitParameter p[], void *d)
+{
+	xtc_log_t *log, *saved;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	(void)p; (void)d;
+
+	/* Save the current process default (may be NULL: no auto-default). */
+	saved = xtc_log_default();
+
+	g_log_n = 0;
+	opts.sink = sink_capture;
+	opts.sink_fd = -1;
+	opts.floor = XTC_LOG_INFO;
+	munit_assert_int(xtc_log_create(&opts, &log), ==, XTC_OK);
+
+	/* Install as the default; xtc_log_default now returns it. */
+	munit_assert_int(xtc_log_set_default(log), ==, XTC_OK);
+	munit_assert_ptr_equal(xtc_log_default(), log);
+
+	/* vwrite: one above the floor is kept, one below is dropped. */
+	log_via_vwrite(log, XTC_LOG_ERROR, "boom %d", 9);
+	log_via_vwrite(log, XTC_LOG_TRACE, "noise");   /* below floor */
+	munit_assert_int(xtc_log_drain(log), ==, 1);
+	munit_assert_not_null(strstr(g_log_buf, "boom 9"));
+	munit_assert_null(strstr(g_log_buf, "noise"));
+
+	/* Raise the floor so INFO is now dropped. */
+	munit_assert_int(xtc_log_set_floor(log, XTC_LOG_ERROR), ==, XTC_OK);
+	g_log_n = 0;
+	log_via_vwrite(log, XTC_LOG_INFO, "info gone");
+	munit_assert_int(xtc_log_drain(log), ==, 0);
+	munit_assert_null(strstr(g_log_buf, "info gone"));
+
+	/* NULL-arg guards. */
+	munit_assert_int(xtc_log_set_floor(NULL, XTC_LOG_INFO), ==, XTC_E_INVAL);
+
+	/* Restore the process default before destroying ours. */
+	munit_assert_int(xtc_log_set_default(saved), ==, XTC_OK);
 	xtc_log_destroy(log);
 	return MUNIT_OK;
 }
@@ -591,6 +645,49 @@ test_trace_causal(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* xtc_pdict_put_with_dtor: the dtor runs on erase/clear/replace. */
+static _Atomic int g_dtor_calls;
+static void
+pdict_free_dtor(void *v)
+{
+	(void)v;
+	atomic_fetch_add(&g_dtor_calls, 1);
+}
+
+static _Atomic int g_pdict_dtor_ok;
+static void
+pdict_dtor_user(void *arg)
+{
+	(void)arg;
+	/* put_with_dtor, then replace (dtor fires for the old value). */
+	if (xtc_pdict_put_with_dtor("k", (void *)(uintptr_t)1,
+	    pdict_free_dtor) != XTC_OK) return;
+	if (xtc_pdict_put_with_dtor("k", (void *)(uintptr_t)2,
+	    pdict_free_dtor) != XTC_OK) return;
+	if (atomic_load(&g_dtor_calls) != 1) return;   /* old value freed */
+	/* erase fires the dtor for the current value. */
+	if (xtc_pdict_erase("k") != XTC_OK) return;
+	if (atomic_load(&g_dtor_calls) != 2) return;
+	atomic_store(&g_pdict_dtor_ok, 1);
+}
+
+static MunitResult
+test_pdict_dtor(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_pid_t pid;
+	(void)p; (void)d;
+	atomic_store(&g_dtor_calls, 0);
+	atomic_store(&g_pdict_dtor_ok, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, pdict_dtor_user, NULL, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_pdict_dtor_ok), ==, 1);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/pdict/basic",          test_pdict_basic,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inspect/procs",        test_inspect_procs,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -598,12 +695,14 @@ static MunitTest tests[] = {
 	{ "/trace/causal",         test_trace_causal,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/basic",            test_log_basic,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/drop_on_full",     test_log_drop_on_full,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/log/default_vwrite",   test_log_default_vwrite,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/int",              test_cfg_int,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/string",           test_cfg_string,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/load_file",        test_cfg_load_file,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inject/callback",      test_inject_callback,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inject/wait",          test_inject_wait,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pdict/outside_proc",   test_pdict_outside_proc,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/pdict/dtor",           test_pdict_dtor,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/res/alert",            test_res_alert,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

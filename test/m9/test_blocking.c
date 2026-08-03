@@ -343,12 +343,55 @@ test_pool_grows(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Explicitly pin the pool size (must precede the first pool start after a
+ * shutdown); a bad size is rejected, and pinning once the pool is live
+ * (started by a real fiber offload) is rejected as too-late. */
+static void
+pool_size_offload_proc(void *arg)
+{
+	int out = -1;
+	(void)arg;
+	(void)xtc_blocking_run(sleep_fn, (void *)(intptr_t)1, &out);
+}
+
+static MunitResult
+test_pool_size(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	(void)p; (void)d;
+
+	/* Reset the pool so pool_size is "before first start" again. */
+	xtc_blocking_shutdown();
+	/* Out-of-range sizes rejected. */
+	munit_assert_int(xtc_blocking_pool_size(0), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_blocking_pool_size(100000), ==, XTC_E_INVAL);
+	/* A valid pin succeeds. */
+	munit_assert_int(xtc_blocking_pool_size(2), ==, XTC_OK);
+
+	/* Start the pool for real via a fiber that offloads. */
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "off";
+	munit_assert_int(xtc_proc_spawn(loop, pool_size_offload_proc, NULL,
+	    &opts, &pid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	/* Too late now: the pool is live, so pinning is rejected. */
+	munit_assert_int(xtc_blocking_pool_size(4), ==, XTC_E_INVAL);
+
+	xtc_blocking_shutdown();
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/fallback",   test_fallback,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/submit",     test_submit_fire_forget, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/liveness",   test_in_proc_liveness, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent", test_concurrent,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pool_grows", test_pool_grows,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/pool_size",  test_pool_size,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/file_offload", test_file_offload,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shutdown",   test_shutdown,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
