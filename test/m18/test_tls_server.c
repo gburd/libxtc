@@ -58,6 +58,8 @@
 
 #define TEST_CERT_PATH  "/tmp/xtc-tls2-test-cert.pem"
 #define TEST_KEY_PATH   "/tmp/xtc-tls2-test-key.pem"
+#define TEST_CLI_CERT   "/tmp/xtc-tls2-cli-cert.pem"
+#define TEST_CLI_KEY    "/tmp/xtc-tls2-cli-key.pem"
 
 /* Generate a self-signed RSA-2048 cert+key via the openssl CLI.
  * Returns 0 on success. */
@@ -230,6 +232,45 @@ client_thread(void *arg)
     a->echoed[CLIENT_MSG_LEN] = '\0';
     a->rc = 0;
 
+done:
+    if (tls != NULL) xtc_tls_destroy(tls);
+    if (ctx != NULL) xtc_tls_ctx_destroy(ctx);
+    return arg;
+}
+
+/* Client that PRESENTS a certificate (mutual TLS), so the server side can
+ * read the peer-cert introspection accessors. */
+static void *
+client_thread_with_cert(void *arg)
+{
+    struct client_args *a   = (struct client_args *)arg;
+    xtc_tls_opts_t      opts;
+    xtc_tls_ctx_t      *ctx = NULL;
+    xtc_tls_t          *tls = NULL;
+    char                buf[CLIENT_MSG_LEN];
+
+    a->rc = 1;
+
+    memset(&opts, 0, sizeof(opts));
+    opts.verify_peer = 0;                 /* self-signed server cert */
+    opts.min_version = XTC_TLS_VER_12;
+    opts.cert_file   = TEST_CLI_CERT;     /* present our client cert */
+    opts.key_file    = TEST_CLI_KEY;
+
+    if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &opts, &ctx) != XTC_OK)
+        goto done;
+    if (xtc_tls_create(ctx, a->fd, &tls) != XTC_OK)
+        goto done;
+    if (poll_until_done(tls, a->fd, xtc_tls_handshake, 5000) != XTC_OK)
+        goto done;
+    if (tls_read_exact(tls, a->fd, buf, CLIENT_MSG_LEN, 5000) != XTC_OK)
+        goto done;
+    if (tls_write_all(tls, a->fd, buf, CLIENT_MSG_LEN, 5000) != XTC_OK)
+        goto done;
+    (void)xtc_tls_shutdown(tls);
+    memcpy(a->echoed, buf, CLIENT_MSG_LEN);
+    a->echoed[CLIENT_MSG_LEN] = '\0';
+    a->rc = 0;
 done:
     if (tls != NULL) xtc_tls_destroy(tls);
     if (ctx != NULL) xtc_tls_ctx_destroy(ctx);
@@ -551,6 +592,108 @@ test_server_bad_cert_path(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* -------------------------------------------------------------------------
+ * test_server_peer_cert: mutual TLS.  A client that presents a cert with a
+ * known CN lets the server read the peer-cert introspection accessors
+ * (common name, subject DN, issuer DN, serial).  On a non-OpenSSL backend
+ * these stub out; detect via xtc_tls_get_version like extended_opts does.
+ * ----------------------------------------------------------------------- */
+static MunitResult
+test_server_peer_cert(const MunitParameter params[], void *data)
+{
+    xtc_tls_opts_t  opts;
+    xtc_tls_ctx_t  *ctx = NULL;
+    xtc_tls_t      *tls = NULL;
+    struct client_args ca;
+    pthread_t       tid;
+    int             sv[2];
+    int             rc;
+    char            rbuf[CLIENT_MSG_LEN + 1];
+
+    (void)params; (void)data;
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cert_file        = TEST_CERT_PATH;
+    opts.key_file         = TEST_KEY_PATH;
+    opts.min_version      = XTC_TLS_VER_12;
+    opts.verify_peer_mode = XTC_TLS_VERIFY_REQUEST;   /* request client cert */
+    /* Trust the client's self-signed cert as its own CA so REQUEST
+     * verification passes and the peer cert is captured. */
+    opts.ca_file          = TEST_CLI_CERT;
+
+    rc = xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx);
+    munit_assert_int(rc, ==, XTC_OK);
+
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(set_nonblock(sv[1]), ==, 0);
+
+    rc = xtc_tls_create(ctx, sv[0], &tls);
+    munit_assert_int(rc, ==, XTC_OK);
+
+    memset(&ca, 0, sizeof(ca));
+    ca.fd = sv[1];
+    ca.rc = 1;
+    munit_assert_int(pthread_create(&tid, NULL, client_thread_with_cert,
+        &ca), ==, 0);
+
+    rc = poll_until_done(tls, sv[0], xtc_tls_handshake, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+
+    if (xtc_tls_get_version(tls) == NULL) {
+        /* Backend without introspection: assert the stub contract, then
+         * still drain the echo so the client thread completes. */
+        char cn[256];
+        munit_assert_int(
+            xtc_tls_get_peer_common_name(tls, cn, sizeof cn),
+            ==, XTC_E_NOSYS);
+    } else {
+        char cn[256], sub[512], iss[512], ser[128];
+        /* The client presented a cert with CN=xtc-client. */
+        munit_assert_int(xtc_tls_has_peer_cert(tls), ==, 1);
+        munit_assert_int(
+            xtc_tls_get_peer_common_name(tls, cn, sizeof cn), ==, XTC_OK);
+        munit_assert_string_equal(cn, "xtc-client");
+        munit_assert_int(
+            xtc_tls_get_peer_subject_dn(tls, sub, sizeof sub), ==, XTC_OK);
+        munit_assert_ptr_not_null(strstr(sub, "xtc-client"));
+        munit_assert_int(
+            xtc_tls_get_peer_issuer_dn(tls, iss, sizeof iss), ==, XTC_OK);
+        munit_assert_size(strlen(iss), >, 0);
+        munit_assert_int(
+            xtc_tls_get_peer_serial(tls, ser, sizeof ser), ==, XTC_OK);
+        munit_assert_size(strlen(ser), >, 0);
+
+        /* NULL / zero-length guards. */
+        munit_assert_int(
+            xtc_tls_get_peer_common_name(NULL, cn, sizeof cn),
+            ==, XTC_E_INVAL);
+        munit_assert_int(
+            xtc_tls_get_peer_common_name(tls, NULL, sizeof cn),
+            ==, XTC_E_INVAL);
+        munit_assert_int(
+            xtc_tls_get_peer_common_name(tls, cn, 0), ==, XTC_E_INVAL);
+    }
+
+    /* Echo still flows. */
+    rc = tls_write_all(tls, sv[0], "hello", CLIENT_MSG_LEN, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+    memset(rbuf, 0, sizeof(rbuf));
+    rc = tls_read_exact(tls, sv[0], rbuf, CLIENT_MSG_LEN, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_memory_equal(CLIENT_MSG_LEN, rbuf, "hello");
+
+    (void)xtc_tls_shutdown(tls);
+    pthread_join(tid, NULL);
+    munit_assert_int(ca.rc, ==, 0);
+
+    xtc_tls_destroy(tls);
+    xtc_tls_ctx_destroy(ctx);
+    close(sv[0]);
+    close(sv[1]);
+    return MUNIT_OK;
+}
+
 /* =========================================================================
  * Suite setup / teardown -- write/remove temp PEM files.
  * ======================================================================= */
@@ -563,6 +706,9 @@ suite_setup(const MunitParameter params[], void *user_data)
 
     if (generate_cert(TEST_CERT_PATH, TEST_KEY_PATH, "localhost") != 0)
         return NULL;
+    /* Client cert (distinct CN) for the mutual-TLS peer-cert test. */
+    if (generate_cert(TEST_CLI_CERT, TEST_CLI_KEY, "xtc-client") != 0)
+        return NULL;
     return (void *)(uintptr_t)1;   /* non-NULL: setup succeeded */
 }
 
@@ -572,6 +718,8 @@ suite_teardown(void *fixture)
     (void)fixture;
     unlink(TEST_CERT_PATH);
     unlink(TEST_KEY_PATH);
+    unlink(TEST_CLI_CERT);
+    unlink(TEST_CLI_KEY);
 }
 
 /* =========================================================================
@@ -590,6 +738,8 @@ static MunitTest tests[] = {
     { "/bad_cert_path",        test_server_bad_cert_path,       NULL, NULL,
       MUNIT_TEST_OPTION_NONE, NULL },
     { "/extended_opts",        test_server_extended_opts,       suite_setup, suite_teardown,
+      MUNIT_TEST_OPTION_NONE, NULL },
+    { "/peer_cert",            test_server_peer_cert,           suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
