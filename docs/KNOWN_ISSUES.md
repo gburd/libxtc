@@ -416,7 +416,21 @@ as `src/io/io_aix.c`.  This rewrite is the suspected fix territory for
 the `test_proc::selective_receive` flake (the wakeup ordering changed),
 but that cannot be confirmed without the host.
 
-**Smoke coverage WRITTEN, awaiting a santorini run (NOT yet verified):**
+**RUNTIME-VERIFIED (2026-08, EC2 Windows Server 2022, c5.2xlarge, MSVC
+2022 Build Tools):** the four IOCP-runtime smoke scenarios below ALL
+PASS on real Windows -- native IOCP file AIO (8 overlapped pwrite/pread
+at distinct offsets), cross-thread wakeup (256 foreign xtc_send via
+PostQueuedCompletionStatus coalescing), loopback socket echo via AFD
+poll (level-triggered re-arm), and the AFD repoll-sweep scale (256 idle
+pending sockets, batched probe, not O(n)/socket).  Additionally the
+MSVC munit subset (16 tests across m0/m1/m10/m11/m14) builds and passes
+16/16 (after fixing the per-milestone munit git-symlink checkout on
+Windows -- see dist/build_msvc.bat), and the DbgHelp backtrace backend
+is runtime-verified (test/m12/test_backtrace_win.c: 5 frames captured,
+SymFromAddr resolved a known function name).  The historical
+"awaiting a santorini run" text is kept below for provenance.
+
+**(historical) Smoke coverage WRITTEN, awaiting a santorini run (NOT yet verified):**
 `test/msvc/smoke.c` now drives four IOCP-runtime scenarios beyond the
 already-verified strerror/clocks/slab/lwlock/fault-containment set.
 They COMPILE (cross-checked with mingw-w64 gcc 14.3.0 `-std=c11 -Wall
