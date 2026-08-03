@@ -69,8 +69,10 @@ faults, and stay inside a fixed resource budget on commodity hardware.
   with all three of MinGW, Clang64, and MSVC.  The IOCP runtime (AFD
   socket poll, cross-thread wakeup, file AIO) was runtime-verified on a
   Windows host with MinGW (loop/task/timer/waker/net + file-AIO); the
-  per-commit Windows CI remains an MSVC xtc.lib + smoke build.  macOS and
-  AIX have OS-layer ports; AIX awaits a test host.  See
+  per-commit Windows CI remains an MSVC xtc.lib + smoke build.  macOS
+  has an OS-layer port.  (An AIX/ppc64 OS-layer port exists in-tree and
+  compiles, but AIX is NOT a supported or maintained target -- it is
+  unverified and off the roadmap; see docs/KNOWN_ISSUES.md.)  See
   `docs/M_WINDOWS_MATRIX.md`,
   `docs/M_LIBC_MATRIX.md`, and PLAN.md for the per-platform status.
 
@@ -186,7 +188,7 @@ What's working today:
 
 | Layer | Status |
 |---|---|
-| L0 OS substrate | Linux, FreeBSD, illumos runtime-verified; Windows (MinGW/Clang64/MSVC) and macOS OS-layer ports build; AIX builds, awaits a test host. |
+| L0 OS substrate | Linux, FreeBSD, illumos runtime-verified; Windows (MinGW/Clang64/MSVC) and macOS OS-layer ports build.  (An AIX/ppc64 OS-layer port compiles in-tree but AIX is NOT supported/maintained -- unverified, off the roadmap.) |
 | L1 I/O | io_uring, epoll, kqueue, poll, select, and illumos event-ports (port_*) runtime-verified (the last on big-endian sparcv9, including its native SIGEV_PORT file-AIO path).  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); AIX pollset COMPILES and is code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux + macOS at runtime; Windows CI is a build-only smoke. |
 | L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written x86_64 fcontext (~7.6 ns/swap) + 7 more arches + ucontext fallback. |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
