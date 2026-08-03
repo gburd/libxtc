@@ -110,7 +110,8 @@ xtc_cfg_register(const xtc_cfg_spec_t *spec)
 	if (__cfg_find_locked(spec->name) != NULL) {
 		(void)__xtc_mtx_unlock(&__cfg_lock);
 		__os_free(v->name); __os_free(v->desc);
-		if (v->cur.v_string) __os_free(v->cur.v_string);
+		if (v->kind == XTC_CFG_STRING && v->cur.v_string)
+			__os_free(v->cur.v_string);
 		__os_free(v);
 		return XTC_E_INVAL;
 	}
