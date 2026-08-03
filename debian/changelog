@@ -1,3 +1,31 @@
+libxtc (1.32.0-1) unstable; urgency=medium
+
+  * feat: xtc_tuning_check() -- public entry to the host-tuning advisor,
+    so consumers on the xtc_exec/xtc_loop bring-up path can route its
+    diagnostics to their xtc_log_default sink (addresses the PG
+    log-emitter-gap report).
+  * test: CBMC bounded-model-checking tier (test/cbmc/) -- 12 concurrent
+    algorithms verified against their real/faithfully-modelled source
+    (Chase-Lev deque, lwlock, lrlock, RCU, refcount teardown, wake/park
+    latch, MPSC mailbox, credit window, OLC seqlock, chash resize, res
+    accountant, HLC), each with a negative + non-vacuity check.  New
+    verification tier (CBMC 5.95.1), separate from make check.
+  * test: microbenchmark regression suite (bench/micro/) -- 17 hot-path
+    benchmarks with a baseline + regression gate.
+  * build: meson build brought to full parity with autotools (identical
+    exported symbol set; meson test runs the C suite).
+  * test: Windows/MSVC coverage expanded 16 -> 100 passing tests on a
+    real Windows Server 2022 host; IOCP backend + DbgHelp backtrace
+    runtime-verified; 5 real Windows bugs fixed (incl. an IOCP poll
+    timeout-contract violation).  test_tnt SKIPs on Windows (tnt is a
+    POSIX feature).
+  * test: coverage raised (functions 87.5%->90.5%, branches
+    54.8%->58.4%); found+fixed a real xtc_cfg union double-free.
+  * docs: AIX marked unsupported / off the roadmap (in-tree ppc64 port
+    left as-is but unverified, never in CI).
+
+ -- Greg Burd <greg@burd.me>  Sun, 03 Aug 2026 12:00:00 +0000
+
 libxtc (1.31.0-1) unstable; urgency=medium
 
   * feat: xtc_future -- futures and promises (PLAN.md 2.4.1, M7).
