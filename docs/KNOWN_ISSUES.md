@@ -842,9 +842,19 @@ Other platforms were never affected: Linux uses the EH-ABI unwinder
 runs as an `xtc_proc` and calls `xtc_dump`), so the macOS CI runner
 covers the fixed path per commit.
 
-## AIX runtime untested
+## AIX: not a supported target (off the roadmap)
 
-**Status:** code-complete, awaiting host. No way to verify without one.
+**Status:** UNSUPPORTED / UNMAINTAINED.  An AIX/ppc64 OS-layer port
+(os_thread/os_mutex/os_tls + an io_aix.c pollset backend + POSIX AIO
+offload) exists in-tree and compiles, but AIX is deliberately NOT a
+supported platform: it is never built or run in CI, has no runtime
+verification, and is off the roadmap.  AIX is IBM-proprietary
+(ppc64-only; PostgreSQL itself dropped AIX in v16), the install media
+is licensed, and emulating it under QEMU/TCG is impractical for a
+reliable CI gate.  The in-tree port is left in place (it is harmless
+and compiles cleanly) but carries no support commitment -- treat any
+AIX behavior as unverified.  Do not file AIX as a gap; it is a
+decision, not a TODO.
 
 ## RESOLVED: macOS now in CI
 
