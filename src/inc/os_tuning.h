@@ -12,10 +12,6 @@
 #include "xtc_export.h"
 
 /*
- * PUBLIC: void __os_tuning_check __P((void));
- */
-
-/*
  * Run a battery of cheap, read-only host-tuning probes and log one
  * NOTICE-level (XTC_LOG_INFO, the closest level this logger has) line
  * per probe that is NOT already in its recommended state.  Silent on
@@ -25,8 +21,14 @@
  * container) is skipped silently -- that is "unknown", not "a
  * finding".  Safe to call more than once (each call re-probes); meant
  * to be called once, at startup.
+ *
+ * INTERNAL: this is the __os_* implementation.  The public entry is
+ * xtc_tuning_check() (xtc_stats.h), a thin wrapper -- so consumers on
+ * the xtc_exec / xtc_loop path can reach the advisor.  Not exported
+ * (no XTC_API): the __os_* symbol stays library-local per the ABI
+ * gate; xtc_app_start and stats.c's xtc_tuning_check call it directly.
  */
-XTC_API void __os_tuning_check(void);
+void __os_tuning_check(void);
 
 #if defined(__linux__)
 /*

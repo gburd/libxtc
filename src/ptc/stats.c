@@ -32,6 +32,7 @@
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_stats.h"
+#include "os_tuning.h"   /* __os_tuning_check: xtc_tuning_check wraps it */
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -456,4 +457,19 @@ xtc_metrics_dump_prometheus(int fd)
 {
 	if (fd < 0) return XTC_E_INVAL;
 	return xtc_metrics_iterate(__dump_prom_visit, (void *)(intptr_t)fd);
+}
+
+/*
+ * PUBLIC: void xtc_tuning_check __P((void));
+ *
+ * Public entry to the host-tuning advisor.  Thin wrapper over the
+ * internal __os_tuning_check so a consumer on the xtc_exec / xtc_loop
+ * bring-up path can trigger the advisory probes (and route their
+ * XTC_LOG_INFO output to its installed xtc_log_default sink) without
+ * going through xtc_app_start.  See xtc_stats.h.
+ */
+void
+xtc_tuning_check(void)
+{
+	__os_tuning_check();
 }
