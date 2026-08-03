@@ -23,10 +23,11 @@
 
 #include <io.h>          /* _read, _write, _close, _pipe */
 #include <fcntl.h>       /* _O_BINARY for the pipe shim */
+#include <stdio.h>       /* SEEK_SET / SEEK_CUR for the pread/pwrite shim */
+#include <sys/types.h>   /* off_t (UCRT provides it -- do not redefine) */
 #include <BaseTsd.h>     /* SSIZE_T */
 
 typedef SSIZE_T ssize_t;
-typedef __int64 off_t;   /* POSIX file offset; matches _lseeki64's range */
 
 static __inline ssize_t xtc__read(int fd, void *buf, size_t n)
 { return _read(fd, buf, (unsigned)n); }
