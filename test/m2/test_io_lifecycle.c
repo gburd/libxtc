@@ -56,10 +56,26 @@ test_backend_name(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+static MunitResult
+test_iowq_hint(const MunitParameter p[], void *d)
+{
+	xtc_io_t *io = NULL;
+	(void)p; (void)d;
+	/* Best-effort io-wq worker cap hint (a uring tunable; a no-op on
+	 * other backends).  Setting it must not perturb normal init/fini. */
+	xtc_io_set_iowq_max_workers(8, 16);
+	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	/* Zero means "kernel default" -- also accepted. */
+	xtc_io_set_iowq_max_workers(0, 0);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/I1_init_fini",          test_init_fini,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/I2_init_fini_repeat",   test_init_fini_repeat, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/I3_backend_name",       test_backend_name,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/iowq_hint",             test_iowq_hint,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m2/io_lifecycle", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

@@ -16,6 +16,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_svr.h"
+#include "xtc_reg.h"
 #include "xtc_int.h"
 
 /* A trivial counter-server: cast to increment, call to read. */
@@ -388,8 +389,97 @@ test_svr_handle_continue(const MunitParameter p[], void *dp)
 	return MUNIT_OK;
 }
 
+/* ---- xtc_svr_call_name: address the server by registered name via a
+ * registry, instead of by pid (the {via, ...}/global-name pattern). ---- */
+static xtc_reg_t  *g_cn_reg;
+static xtc_svr_t  *g_cn_svr;
+
+struct call_name_args {
+	_Atomic int result;
+	_Atomic int miss_rc;
+};
+
+static void
+call_name_driver(void *arg)
+{
+	struct call_name_args *a = arg;
+	void  *reply = NULL;
+	size_t reply_size = 0;
+	int    val = -1, rc;
+
+	/* Bump the counter so the read returns something nonzero. */
+	{
+		xtc_pid_t p;
+		if (xtc_reg_whereis(g_cn_reg, "counter.named", &p) == XTC_OK) {
+			(void)xtc_svr_cast(p, NULL, 0);
+			(void)xtc_svr_cast(p, NULL, 0);
+		}
+	}
+	/* Let the casts drain. */
+	{ void *m; size_t s; (void)xtc_recv(&m, &s, 50 * 1000 * 1000);
+	  if (m) __os_free(m); }
+
+	/* Call by name. */
+	rc = xtc_svr_call_name(g_cn_reg, "counter.named", NULL, 0,
+	    &reply, &reply_size, 1000LL * 1000 * 1000);
+	if (rc == XTC_OK && reply_size == sizeof(int)) {
+		memcpy(&val, reply, sizeof val);
+		__os_free(reply);
+	}
+	atomic_store(&a->result, val);
+
+	/* Unknown name -> XTC_E_NOTFOUND (registry miss). */
+	atomic_store(&a->miss_rc,
+	    xtc_svr_call_name(g_cn_reg, "no.such.server", NULL, 0,
+	        &reply, &reply_size, 1000LL * 1000 * 1000));
+
+	(void)xtc_svr_stop(g_cn_svr);
+}
+
+static MunitResult
+test_svr_call_name(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_svr_callbacks_t cb = {
+		.init        = NULL,
+		.handle_call = counter_handle_call,
+		.handle_cast = counter_handle_cast,
+		.handle_info = counter_handle_info,
+		.terminate   = NULL
+	};
+	xtc_svr_opts_t opts = { .name = "counter.named", .mailbox_cap = 0 };
+	struct counter_state state = { 0 };
+	struct call_name_args a;
+	xtc_pid_t dpid;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_reg_create(&g_cn_reg), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cb, &state, &opts, &g_cn_svr),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_reg_register(g_cn_reg, "counter.named",
+	    xtc_svr_pid(g_cn_svr)), ==, XTC_OK);
+
+	atomic_store(&a.result, -2);
+	atomic_store(&a.miss_rc, 12345);
+	munit_assert_int(xtc_proc_spawn(loop, call_name_driver, &a, NULL,
+	    &dpid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* Two casts -> counter == 2, read back by name. */
+	munit_assert_int(atomic_load(&a.result), ==, 2);
+	munit_assert_int(atomic_load(&a.miss_rc), ==, XTC_E_NOTFOUND);
+
+	munit_assert_int(xtc_svr_join(g_cn_svr, 1LL * 1000 * 1000 * 1000),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_reg_destroy(g_cn_reg);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/svr_basic", test_svr_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/call_name", test_svr_call_name, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_abortable", test_svr_call_abortable, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/deferred_reply", test_svr_deferred_reply, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/handle_continue", test_svr_handle_continue, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

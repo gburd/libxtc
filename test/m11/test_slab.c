@@ -207,6 +207,10 @@ test_reap(const MunitParameter p[], void *d)
 	for (i = 0; i < 200; i++) xtc_slab_free(s, objs[i]);
 	(void)xtc_slab_stat(s, &st_before);
 
+	/* Reap every registered slab (this one included); returns the
+	 * total chunks reclaimed across the registry (>= 0). */
+	munit_assert_int(xtc_slab_reap_all(), >=, 0);
+
 	(void)xtc_slab_reap(s);
 
 	(void)xtc_slab_stat(s, &st_after);
