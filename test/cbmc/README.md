@@ -24,18 +24,32 @@ are exposed at 2-3 concurrent actors, which is well within reach.
 
 ## What is modelled (each maps to a real source algorithm)
 
-| harness                | source under test            | invariant |
-|------------------------|------------------------------|-----------|
-| `deque_harness.c`      | `src/inc/deque.h` (Chase-Lev)| no task lost or duplicated across owner push/pop + concurrent steal |
-| `lwlock_harness.c`     | `src/ptc/lock_lw.c` model    | mutual exclusion: never two writers, no deadlock |
-| `lrlock_harness.c`     | `src/ptc/lock_lr.c` model    | left-right: a reader never blocks; writer sees a quiescent side |
-| `rcu_harness.c`        | `src/ptc/rcu.c` model        | a reader in a read-side never observes a reclaimed object |
-| `refcount_harness.c`   | proc teardown refcount       | resolver pins a live object OR sees gone -- never a UAF |
-| `wakepark_harness.c`   | loop.c prepare/park latch    | the RUNNING->PARKED wake race never loses a wake |
-| `mpsc_harness.c`       | proc mailbox MPSC            | no message lost/duplicated; per-sender FIFO |
-| `credit_harness.c`     | `src/orc/credit.c` window    | in-flight count never exceeds the window |
-| `seqlock_harness.c`    | bufmgr OLC version seqlock   | a reader never accepts a torn (mid-write) sample |
-| `chash_resize_harness.c`| chash grow/shrink           | no key lost; table stays single-valued across a resize |
+| harness                | source under test            | invariant | bound | source? |
+|------------------------|------------------------------|-----------|-------|---------|
+| `deque_harness.c`      | `src/inc/deque.h` (Chase-Lev)| no task lost or duplicated across owner push/pop + concurrent steal | u4 | REAL header |
+| `lwlock_harness.c`     | `src/ptc/lock_lw.c`          | mutual exclusion: never two writers; no shared holder while exclusive held | u4 | verbatim CAS core |
+| `credit_harness.c`     | `src/orc/credit.c` window    | in-flight count never exceeds the window | u8 | faithful model |
+| `seqlock_harness.c`    | bufmgr OLC version seqlock   | a reader never accepts a torn (mid-write) sample | u6 | REAL bm_read_begin/valid |
+| `mpsc_harness.c`       | proc mailbox MPSC            | no message lost/duplicated/fabricated; per-sender FIFO | u5 | verbatim splice, index FIFO |
+| `lrlock_harness.c`     | `src/ptc/lock_lr.c`          | writer mutates only the inactive side; reader sees a stable snapshot | u6 | faithful model |
+| `rcu_harness.c`        | `src/ptc/rcu.c`              | a reader in a read-side never observes a reclaimed object | u6 | faithful model |
+| `refcount_harness.c`   | proc teardown refcount       | resolver pins a live object OR sees gone -- never a UAF | u6 | faithful model |
+| `wakepark_harness.c`   | `src/evt/loop.c` park latch  | the RUNNING->PARKED wake race never loses a wake (v1.8.0) | u6 | faithful model |
+| `chash_resize_harness.c`| `src/ptc/chash.c` resize     | no key lost; table stays single-valued across a resize | u6 | essential model |
+
+Every harness above VERIFIES SUCCESSFUL at the listed bound; each also has
+a negative check (injecting the classic bug makes CBMC report the
+counterexample) and a non-vacuity check (the asserted path is reachable).
+Where a harness models the algorithm rather than including the real source,
+the top-of-file comment says so precisely and explains why the real source
+does not compile standalone under CBMC (it drags in the executor, RCU,
+slab, pthread/fiber waits, etc. that do not bear on the property) -- the
+model is a faithful transcription of the same steps/atomics/ordering, so
+drift from the intended algorithm is still caught.
+
+Full-suite wall time is about 3.5 minutes on an idle 16-core box; `mpsc`
+(~2 min) and `credit`/`lwlock` (tens of seconds) dominate, the rest are
+sub-second.
 
 ## Running
 
@@ -46,6 +60,12 @@ make -C build_unix cbmc            # or: cd test/cbmc && ./run.sh
 Requires `cbmc` on PATH (`nix-shell -p cbmc`).  Not part of the default
 `make check` (CBMC runs are minutes, not seconds); it is a separate
 verification tier + a release gate, like `make check-dst`.
+
+**Use a CBMC 5.x release** (e.g. 5.95.1).  CBMC 6.x aborts with
+`pointer handling for concurrency is unsound` (exit 6) on the
+concurrent-pointer harnesses; 5.x emits the same note as a warning and
+completes to a verdict.  A static 5.x binary can be extracted from the
+project's Ubuntu `.deb` release asset and run on any recent glibc.
 
 ## Reading a failure
 
