@@ -28,8 +28,14 @@
 /*
  * Capacity must be a power of two.  256 is generous for a per-loop
  * run queue; PG-style backends typically have <128 in flight.
+ * Overridable (bounded model checking builds it small -- the
+ * algorithm is capacity-agnostic, indices are unbounded and masked at
+ * access, so a small cap exercises identical logic in a tractable
+ * state space; see test/cbmc/deque_harness.c).
  */
+#ifndef XTC_DEQUE_CAP
 #define XTC_DEQUE_CAP 256
+#endif
 #define XTC_DEQUE_MASK (XTC_DEQUE_CAP - 1)
 
 typedef struct xtc_deque {
