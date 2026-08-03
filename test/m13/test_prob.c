@@ -53,6 +53,37 @@ test_bloom_basic(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- Bloom sizing edge cases: tiny n, extreme fp_rate (k caps) ---- */
+static MunitResult
+test_bloom_sizing_edges(const MunitParameter p[], void *d)
+{
+	xtc_bloom_t *b;
+	(void)p; (void)d;
+
+	/* n_expected == 0 is bumped to 1 internally (no divide-by-zero). */
+	munit_assert_int(xtc_bloom_init(&b, 0, 0.01), ==, XTC_OK);
+	xtc_bloom_add(b, "a", 1);
+	munit_assert_int(xtc_bloom_maybe_contains(b, "a", 1), ==, 1);
+	xtc_bloom_fini(b);
+
+	/* fp_rate very close to 1: m_opt tiny (clamped to >=1), k clamped
+	 * to >=1.  Still no false negatives. */
+	munit_assert_int(xtc_bloom_init(&b, 1, 0.999), ==, XTC_OK);
+	xtc_bloom_add(b, "a", 1);
+	munit_assert_int(xtc_bloom_maybe_contains(b, "a", 1), ==, 1);
+	xtc_bloom_fini(b);
+
+	/* fp_rate extremely small with a huge n: k would exceed 64, so it
+	 * is capped at 64.  A handful of keys still test present. */
+	munit_assert_int(xtc_bloom_init(&b, 1000000, 1e-18), ==, XTC_OK);
+	xtc_bloom_add(b, "a", 1);
+	xtc_bloom_add(b, "b", 1);
+	munit_assert_int(xtc_bloom_maybe_contains(b, "a", 1), ==, 1);
+	munit_assert_int(xtc_bloom_maybe_contains(b, "b", 1), ==, 1);
+	xtc_bloom_fini(b);
+	return MUNIT_OK;
+}
+
 static MunitResult
 test_bloom_stats(const MunitParameter p[], void *d)
 {
@@ -137,6 +168,30 @@ test_hll_basic(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Low precisions 4/5/6 hit the special-cased alpha constants (m ==
+ * 16/32/64).  A small distinct set still estimates in a sane range. */
+static MunitResult
+test_hll_low_precision(const MunitParameter p[], void *d)
+{
+	int prec;
+	(void)p; (void)d;
+
+	for (prec = 4; prec <= 6; prec++) {
+		xtc_hll_t *h;
+		uint64_t i, est;
+		munit_assert_int(xtc_hll_init(&h, prec), ==, XTC_OK);
+		for (i = 0; i < 50; i++)
+			xtc_hll_add(h, &i, sizeof i);
+		est = xtc_hll_count(h);
+		/* p in [4,6] is coarse; just assert a sane, non-degenerate
+		 * estimate (small-range linear counting keeps it positive). */
+		munit_assert_uint64(est, >=, 20);
+		munit_assert_uint64(est, <=, 120);
+		xtc_hll_fini(h);
+	}
+	return MUNIT_OK;
+}
+
 static MunitResult
 test_hll_accuracy(const MunitParameter p[], void *d)
 {
@@ -191,8 +246,10 @@ test_hll_merge(const MunitParameter p[], void *d)
 
 static MunitTest tests[] = {
 	{ "/bloom_basic",    test_bloom_basic,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/bloom_sizing",   test_bloom_sizing_edges, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/bloom_stats",    test_bloom_stats,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/hll_basic",      test_hll_basic,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/hll_low_prec",   test_hll_low_precision, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/hll_accuracy",   test_hll_accuracy,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/hll_merge",      test_hll_merge,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

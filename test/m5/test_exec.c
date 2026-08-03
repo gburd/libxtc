@@ -12,7 +12,6 @@
 #include "xtc_loop.h"
 #include "xtc_exec.h"
 #include "xtc_int.h"
-
 /* [Ex1, Ex2] init/fini round-trip. */
 static MunitResult
 test_init_fini(const MunitParameter p[], void *d)
@@ -181,6 +180,111 @@ test_shard_id(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Policy knobs: set/get round-trip and NULL-guards. */
+static MunitResult
+test_policy_knobs(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e = NULL;
+	(void)p; (void)d;
+
+	/* NULL exec: setters are no-ops, getters return 0 (never crash). */
+	xtc_exec_set_service_mode(NULL, 1);
+	xtc_exec_set_eager_rebalance(NULL, 1);
+	xtc_exec_set_steal_backoff(NULL, 1);
+	munit_assert_int(xtc_exec_get_service_mode(NULL), ==, 0);
+	munit_assert_int(xtc_exec_get_eager_rebalance(NULL), ==, 0);
+	munit_assert_int(xtc_exec_get_steal_backoff(NULL), ==, 0);
+
+	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+
+	/* Each knob toggles and reads back both states. */
+	munit_assert_int(xtc_exec_get_service_mode(e), ==, 0);
+	xtc_exec_set_service_mode(e, 1);
+	munit_assert_int(xtc_exec_get_service_mode(e), ==, 1);
+	xtc_exec_set_service_mode(e, 0);
+	munit_assert_int(xtc_exec_get_service_mode(e), ==, 0);
+
+	munit_assert_int(xtc_exec_get_eager_rebalance(e), ==, 0);
+	xtc_exec_set_eager_rebalance(e, 1);
+	munit_assert_int(xtc_exec_get_eager_rebalance(e), ==, 1);
+	xtc_exec_set_eager_rebalance(e, 0);
+	munit_assert_int(xtc_exec_get_eager_rebalance(e), ==, 0);
+
+	munit_assert_int(xtc_exec_get_steal_backoff(e), ==, 0);
+	xtc_exec_set_steal_backoff(e, 1);
+	munit_assert_int(xtc_exec_get_steal_backoff(e), ==, 1);
+	xtc_exec_set_steal_backoff(e, 0);
+	munit_assert_int(xtc_exec_get_steal_backoff(e), ==, 0);
+
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* Accessors and error paths: loop, loop_stats, n_loops, spawn/async NULL
+ * and out-of-range branches. */
+static int noop_task(xtc_task_t *self, void *u)
+{ (void)self; (void)u; return XTC_TASK_DONE; }
+static intptr_t noop_coro(void *arg) { (void)arg; return 0; }
+
+static MunitResult
+test_accessors_errors(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e = NULL;
+	xtc_loop_stats_t st;
+	(void)p; (void)d;
+
+	/* NULL exec on every accessor. */
+	munit_assert_int(xtc_exec_n_loops(NULL), ==, 0);
+	munit_assert_null(xtc_exec_loop(NULL, 0));
+	munit_assert_int(xtc_exec_loop_stats(NULL, 0, &st), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_stop(NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_spawn(NULL, noop_task, NULL, NULL),
+	    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_spawn_on(NULL, 0, noop_task, NULL, NULL),
+	    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_async(NULL, noop_coro, NULL, NULL),
+	    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_async_on(NULL, 0, noop_coro, NULL, NULL),
+	    ==, XTC_E_INVAL);
+
+	munit_assert_int(xtc_exec_init(&e, 3), ==, XTC_OK);
+
+	/* loop: valid idx returns non-NULL, out-of-range returns NULL. */
+	munit_assert_not_null(xtc_exec_loop(e, 0));
+	munit_assert_not_null(xtc_exec_loop(e, 2));
+	munit_assert_null(xtc_exec_loop(e, -1));
+	munit_assert_null(xtc_exec_loop(e, 3));
+
+	/* loop_stats: NULL out, out-of-range idx, then a valid read. */
+	munit_assert_int(xtc_exec_loop_stats(e, 0, NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_loop_stats(e, -1, &st), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_loop_stats(e, 3, &st), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_loop_stats(e, 1, &st), ==, XTC_OK);
+	/* Fresh executor: both counters start at zero. */
+	munit_assert_uint64(st.tasks_run, ==, 0);
+	munit_assert_uint64(st.steals, ==, 0);
+
+	/* spawn_on / async_on out-of-range idx rejected. */
+	munit_assert_int(xtc_exec_spawn_on(e, -1, noop_task, NULL, NULL),
+	    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_spawn_on(e, 3, noop_task, NULL, NULL),
+	    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_async_on(e, -1, noop_coro, NULL, NULL),
+	    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_async_on(e, 3, noop_coro, NULL, NULL),
+	    ==, XTC_E_INVAL);
+
+	/* Valid default-placement spawn + async, then run drains them. */
+	munit_assert_int(xtc_exec_spawn(e, noop_task, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_async(e, noop_coro, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_async_on(e, 1, noop_coro, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -189,6 +293,8 @@ static MunitTest tests[] = {
 	{ "/Sp2_spawn_on",            test_spawn_on,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Sp3_n_spawned_sum",       test_n_spawned_sum,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/A12_shard_id",            test_shard_id,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/policy_knobs",            test_policy_knobs,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/accessors_errors",        test_accessors_errors,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/exec", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

@@ -8,10 +8,12 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_chan.h"
+#include "xtc_loop.h"
 #include "xtc_int.h"
 
 /* ----- oneshot ---------------------------------------------------- */
@@ -58,6 +60,28 @@ test_mpsc_basic(const MunitParameter p[], void *d)
 		munit_assert_ptr(out, ==, &items[i]);   /* FIFO */
 	}
 	munit_assert_int(xtc_chan_mpsc_try_recv(c, &out), ==, XTC_E_AGAIN);
+	xtc_chan_mpsc_destroy(c);
+	return MUNIT_OK;
+}
+
+/* mpsc set_waker: NULL guards + the wake_now branch (a message already
+ * buffered when the waker is registered) + close firing the waker. */
+static MunitResult
+test_mpsc_set_waker(const MunitParameter p[], void *d)
+{
+	xtc_chan_mpsc_t *c;
+	xtc_waker_t inert = { NULL, NULL };
+	int item = 3;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_chan_mpsc_create(NULL, 4, &c), ==, XTC_OK);
+	munit_assert_int(xtc_chan_mpsc_set_waker(NULL, &inert), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_chan_mpsc_set_waker(c, NULL), ==, XTC_E_INVAL);
+	/* Buffer a message, then register the waker -> wake_now branch. */
+	munit_assert_int(xtc_chan_mpsc_try_send(c, &item), ==, XTC_OK);
+	munit_assert_int(xtc_chan_mpsc_set_waker(c, &inert), ==, XTC_OK);
+	/* Close fires the registered waker too. */
+	munit_assert_int(xtc_chan_mpsc_close(c), ==, XTC_OK);
 	xtc_chan_mpsc_destroy(c);
 	return MUNIT_OK;
 }
@@ -228,13 +252,148 @@ test_demand_backpressure(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * Demand-channel wakers.  Two fibers on one loop:
+ *   - the CONSUMER parks after registering its consumer waker on an
+ *     empty channel (deferred: no immediate wake), then asks for demand
+ *     via its own waker so the producer can send; when the producer
+ *     sends, the consumer's waker fires and it drains + finishes.
+ *   - the PRODUCER parks after registering its producer waker on a
+ *     channel with no demand; when the consumer asks, the producer
+ *     waker fires and it sends, consuming the demand.
+ * This drives the deferred branch of both set_*_waker (wake_now == 0)
+ * and both wake paths (ask -> producer waker, send -> consumer waker).
+ */
+struct demand_pair {
+	xtc_chan_demand_t *c;
+	xtc_waker_t        prod_waker;
+	xtc_waker_t        cons_waker;
+	int                prod_runs;
+	int                cons_runs;
+	int                got;          /* item value the consumer received */
+	int                item;
+};
+
+static int
+demand_producer(xtc_task_t *self, void *u)
+{
+	struct demand_pair *dp = u;
+	dp->prod_runs++;
+	if (dp->prod_runs == 1) {
+		/* No demand yet: register producer waker (deferred) and park. */
+		(void)xtc_task_waker(self, &dp->prod_waker);
+		munit_assert_int(
+		    xtc_chan_demand_set_producer_waker(dp->c, &dp->prod_waker),
+		    ==, XTC_OK);
+		return XTC_TASK_PENDING;
+	}
+	/* Woken by the consumer's ask: demand is available, send one. */
+	munit_assert_int(xtc_chan_demand_send(dp->c, &dp->item), ==, XTC_OK);
+	return XTC_TASK_DONE;
+}
+
+static int
+demand_consumer(xtc_task_t *self, void *u)
+{
+	struct demand_pair *dp = u;
+	void *out = NULL;
+	dp->cons_runs++;
+	if (dp->cons_runs == 1) {
+		/* Empty channel: register consumer waker (deferred), grant
+		 * demand (wakes the parked producer), then park for the item. */
+		(void)xtc_task_waker(self, &dp->cons_waker);
+		munit_assert_int(
+		    xtc_chan_demand_set_consumer_waker(dp->c, &dp->cons_waker),
+		    ==, XTC_OK);
+		munit_assert_int(xtc_chan_demand_ask(dp->c, 1), ==, XTC_OK);
+		return XTC_TASK_PENDING;
+	}
+	/* Woken by the producer's send: drain it. */
+	munit_assert_int(xtc_chan_demand_try_recv(dp->c, &out), ==, XTC_OK);
+	dp->got = *(int *)out;
+	return XTC_TASK_DONE;
+}
+
+static MunitResult
+test_demand_wakers(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct demand_pair dp;
+	xtc_chan_demand_t *c = NULL;
+	(void)p; (void)d;
+
+	/* NULL-arg guards on both setters. */
+	munit_assert_int(xtc_chan_demand_create(NULL, 4, &c), ==, XTC_OK);
+	munit_assert_int(xtc_chan_demand_set_producer_waker(NULL, NULL),
+	    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_chan_demand_set_producer_waker(c, NULL),
+	    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_chan_demand_set_consumer_waker(NULL, NULL),
+	    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_chan_demand_set_consumer_waker(c, NULL),
+	    ==, XTC_E_INVAL);
+	xtc_chan_demand_destroy(c);
+
+	memset(&dp, 0, sizeof dp);
+	dp.item = 77;
+	munit_assert_int(xtc_chan_demand_create(NULL, 4, &dp.c), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	/* Spawn producer first so it parks before the consumer asks. */
+	munit_assert_int(xtc_task_spawn(loop, demand_producer, &dp, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_task_spawn(loop, demand_consumer, &dp, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	munit_assert_int(dp.prod_runs, ==, 2);   /* park + resume */
+	munit_assert_int(dp.cons_runs, ==, 2);   /* park + resume */
+	munit_assert_int(dp.got, ==, 77);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_chan_demand_destroy(dp.c);
+	return MUNIT_OK;
+}
+
+/*
+ * Immediate (wake_now) branch of both setters: registering a producer
+ * waker while demand already exists, or a consumer waker while items are
+ * already buffered, fires the waker synchronously inside the setter.
+ * We exercise that branch with an inert waker ({NULL,NULL}, which
+ * xtc_waker_wake treats as a harmless no-op) -- no loop needed; the
+ * point is the wake_now path in the setter, and that the return is
+ * still XTC_OK.
+ */
+static MunitResult
+test_demand_waker_wake_now(const MunitParameter p[], void *d)
+{
+	xtc_chan_demand_t *c = NULL;
+	xtc_waker_t inert = { NULL, NULL };
+	int item = 5;
+	(void)p; (void)d;
+
+	/* Producer waker registered while demand > 0 -> wake_now branch. */
+	munit_assert_int(xtc_chan_demand_create(NULL, 4, &c), ==, XTC_OK);
+	munit_assert_int(xtc_chan_demand_ask(c, 2), ==, XTC_OK);
+	munit_assert_int(xtc_chan_demand_set_producer_waker(c, &inert),
+	    ==, XTC_OK);
+	/* Consumer waker registered while an item is buffered -> wake_now. */
+	munit_assert_int(xtc_chan_demand_send(c, &item), ==, XTC_OK);
+	munit_assert_int(xtc_chan_demand_set_consumer_waker(c, &inert),
+	    ==, XTC_OK);
+	xtc_chan_demand_destroy(c);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/oneshot_basic",       test_oneshot_basic,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mpsc_basic",          test_mpsc_basic,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/mpsc_set_waker",      test_mpsc_set_waker,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mpsc_concurrent",     test_mpsc_concurrent,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/watch_latest_wins",   test_watch_latest_wins,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/res_caps",            test_res_caps,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/demand_backpressure", test_demand_backpressure, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/demand_wakers",       test_demand_wakers,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/demand_waker_wake_now", test_demand_waker_wake_now, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m7/chan", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
