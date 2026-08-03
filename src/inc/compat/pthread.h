@@ -163,17 +163,20 @@ pthread_once(pthread_once_t *once, void (*init)(void))
 
 /* ---- threads ------------------------------------------------------ */
 
-typedef HANDLE pthread_t;
+/* A void* return value cannot survive a round-trip through a Win32
+ * DWORD thread exit code on LLP64, so the thunk (kept alive for the
+ * lifetime of the thread) carries the retval slot the trampoline
+ * writes and pthread_join reads back.  pthread_t is a pointer to it,
+ * not the raw HANDLE, so join can recover the value POSIX promises. */
+struct xtc__thunk { void *(*fn)(void *); void *arg; void *ret; HANDLE h; };
+typedef struct xtc__thunk *pthread_t;
 typedef int    pthread_attr_t;
-
-struct xtc__thunk { void *(*fn)(void *); void *arg; };
 
 static unsigned __stdcall
 xtc__thread_trampoline(void *p)
 {
-	struct xtc__thunk t = *(struct xtc__thunk *)p;
-	free(p);
-	(void)t.fn(t.arg);
+	struct xtc__thunk *t = (struct xtc__thunk *)p;
+	t->ret = t->fn(t->arg);
 	return 0;
 }
 static __inline int
@@ -185,26 +188,44 @@ pthread_create(pthread_t *th, const pthread_attr_t *a,
 	(void)a;
 	t = (struct xtc__thunk *)malloc(sizeof *t);
 	if (t == NULL) return EAGAIN;
-	t->fn = fn; t->arg = arg;
+	t->fn = fn; t->arg = arg; t->ret = NULL;
 	h = _beginthreadex(NULL, 0, xtc__thread_trampoline, t, 0, NULL);
 	if (h == 0) { free(t); return EAGAIN; }
-	*th = (HANDLE)h;
+	t->h = (HANDLE)h;
+	*th = t;
 	return 0;
 }
 static __inline int
 pthread_join(pthread_t th, void **retval)
 {
-	WaitForSingleObject(th, INFINITE);
-	CloseHandle(th);
-	if (retval != NULL) *retval = NULL;
+	WaitForSingleObject(th->h, INFINITE);
+	CloseHandle(th->h);
+	if (retval != NULL) *retval = th->ret;
+	free(th);
 	return 0;
 }
 static __inline int pthread_detach(pthread_t th)
-{ CloseHandle(th); return 0; }
+{ CloseHandle(th->h); free(th); return 0; }
+/* pthread_self: threads not created via pthread_create (e.g. the main
+ * thread, or a raw OS thread) have no thunk, so a per-thread thunk is
+ * lazily allocated in TLS and its h holds a real handle to self.  Its
+ * id (GetThreadId) is what pthread_equal compares, so identity is
+ * stable regardless of which thread allocated the peer's thunk. */
 static __inline pthread_t pthread_self(void)
-{ return GetCurrentThread(); }
+{
+	static __declspec(thread) struct xtc__thunk self_slot;
+	static __declspec(thread) int have_self;
+	if (!have_self) {
+		DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+		    GetCurrentProcess(), &self_slot.h, 0, FALSE,
+		    DUPLICATE_SAME_ACCESS);
+		self_slot.fn = NULL; self_slot.arg = NULL; self_slot.ret = NULL;
+		have_self = 1;
+	}
+	return &self_slot;
+}
 static __inline int pthread_equal(pthread_t a, pthread_t b)
-{ return GetThreadId(a) == GetThreadId(b); }
+{ return GetThreadId(a->h) == GetThreadId(b->h); }
 
 /* pthread_setname_np: best-effort, no-op (SetThreadDescription needs a
  * wide string and a recent SDK; naming threads is cosmetic). */
