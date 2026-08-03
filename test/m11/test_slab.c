@@ -22,6 +22,12 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)
+/* No mmap on Windows: back MAP_ANONYMOUS with calloc so the region is
+ * ZERO-FILLED, matching mmap(MAP_ANONYMOUS)'s contract.  The slab
+ * shm-create path detects a fresh region by its zeroed header, so a
+ * plain (uninitialized) malloc here made a reused heap block look like
+ * a stale slab and create returned XTC_E_VERSION -- caught by
+ * shm_reclaim_single_process on the real Windows host. */
 #  include <malloc.h>
 #  define MAP_FAILED ((void *)-1)
 #  define PROT_READ 0
@@ -30,7 +36,7 @@
 #  define MAP_ANONYMOUS 0
 #  define mmap(addr, sz, prot, flags, fd, off) \
      ((void)(addr),(void)(prot),(void)(flags),(void)(fd),(void)(off), \
-      malloc(sz))
+      calloc(1, (sz)))
 #  define munmap(p, sz)  ((void)(sz), free(p), 0)
 #else
 #  include <sys/mman.h>
