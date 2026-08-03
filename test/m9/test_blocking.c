@@ -24,6 +24,7 @@
 
 #include "munit.h"
 #include "xtc.h"
+#include "xtc_fs.h"
 #include "xtc_blocking.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
@@ -193,12 +194,14 @@ test_file_offload(const MunitParameter p[], void *d)
 	xtc_loop_t *loop = NULL;
 	xtc_proc_opts_t opts = { 0 };
 	xtc_pid_t pid;
-	char path[] = "/tmp/xtc-blk-file-XXXXXX";
+	char tmpdir[512], path[600];
 	char pattern[512];
 	int fd;
 	(void)p; (void)d;
 
 	atomic_store(&g_file_ok, 0);
+	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
+	snprintf(path, sizeof path, "%s/xtc-blk-file-XXXXXX", tmpdir);
 	fd = mkstemp(path);
 	munit_assert_int(fd, >=, 0);
 	memset(pattern, 'Z', sizeof pattern);
