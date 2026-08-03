@@ -451,6 +451,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_preempt_p1 \
 		  test_preempt_p2 \
 		  test_launch \
+		  test_cfg \
 		  test_stack_reclaim \
 		  test_unsafe_depth \
 		  test_coverage_pump \
@@ -475,7 +476,7 @@ TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt
 # -------------------------------------------------------------------------
 # Default goal.
 # -------------------------------------------------------------------------
-.PHONY: all check check-sim check-dst tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation print-includedir print-libdir
+.PHONY: all check check-sim check-dst tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation print-includedir print-libdir bench-micro
 
 all: $(STATIC_LIB) $(SHARED_LIB_TARGETS) compile_commands.json
 
@@ -870,6 +871,23 @@ bench_fairness: $(srcdir)/../bench/bench_fairness.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_fairness.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# -------------------------------------------------------------------------
+# Microbenchmark regression suite (bench/micro).  Separate from `make
+# check` on purpose -- too noisy/slow for per-commit -- it is an
+# on-demand + release-time gate.  `make bench-micro` builds the driver
+# and runs the checker, which compares to the committed baseline and
+# EXITS NONZERO on a regression beyond tolerance.  Baselines are
+# MACHINE-RELATIVE (see bench/micro/README.md); run on a consistent host.
+# -------------------------------------------------------------------------
+bench_micro: $(srcdir)/../bench/micro/bench_micro.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/micro/bench_micro.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+bench-micro: bench_micro
+	BENCH_MICRO_BIN=./bench_micro \
+	    $(srcdir)/../bench/micro/check.sh $(srcdir)/../bench/micro/baseline.json
 
 # -------------------------------------------------------------------------
 # Examples -- self-contained demos.
@@ -1500,6 +1518,12 @@ test_lockmgr: $(srcdir)/../test/m13/test_lockmgr.c \
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m13 \
 		-o $@ $(srcdir)/../test/m13/test_lockmgr.c \
 		$(srcdir)/../test/m13/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_cfg: $(srcdir)/../test/m14/test_cfg.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
+		-o $@ $(srcdir)/../test/m14/test_cfg.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_preempt: $(srcdir)/../test/m14/test_preempt.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
