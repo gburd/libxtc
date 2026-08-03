@@ -55,7 +55,7 @@ test_fallback(const MunitParameter p[], void *d)
 }
 
 /* ---- in-proc offload + loop liveness ---- */
-static _Atomic long g_t_start, g_t_end, g_t_b;
+static _Atomic int64_t g_t_start, g_t_end, g_t_b;
 static _Atomic int  g_a_ok, g_b_ran;
 
 static void
@@ -65,10 +65,10 @@ proc_a(void *arg)
 	int64_t t0 = 0, t1 = 0;
 	(void)arg;
 	(void)__os_clock_mono(&t0);
-	atomic_store(&g_t_start, (long)t0);
+	atomic_store(&g_t_start, t0);
 	(void)xtc_blocking_run(sleep_fn, (void *)(intptr_t)60, &out);
 	(void)__os_clock_mono(&t1);
-	atomic_store(&g_t_end, (long)t1);
+	atomic_store(&g_t_end, t1);
 	atomic_store(&g_a_ok, out == 120 ? 1 : 0);
 }
 
@@ -78,7 +78,7 @@ proc_b(void *arg)
 	int64_t t = 0;
 	(void)arg;
 	(void)__os_clock_mono(&t);
-	atomic_store(&g_t_b, (long)t);
+	atomic_store(&g_t_b, t);
 	atomic_store(&g_b_ran, 1);
 }
 
@@ -279,7 +279,7 @@ test_submit_fire_forget(const MunitParameter p[], void *d)
 #define NGROW 32
 #define GROW_MS 80
 static _Atomic int   g_grow_ok;
-static _Atomic long  g_grow_wall_start, g_grow_wall_end;
+static _Atomic int64_t  g_grow_wall_start, g_grow_wall_end;
 
 static void
 grow_proc(void *arg)
@@ -297,7 +297,7 @@ grow_timer_proc(void *arg)
 	int64_t t = 0;
 	(void)arg;
 	(void)__os_clock_mono(&t);
-	atomic_store(&g_grow_wall_start, (long)t);
+	atomic_store(&g_grow_wall_start, t);
 }
 
 static MunitResult
@@ -328,7 +328,7 @@ test_pool_grows(const MunitParameter p[], void *d)
 	}
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	(void)__os_clock_mono(&t1);
-	atomic_store(&g_grow_wall_end, (long)t1);
+	atomic_store(&g_grow_wall_end, t1);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
 	/* All offloads returned correctly. */
