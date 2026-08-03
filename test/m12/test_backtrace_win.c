@@ -24,6 +24,7 @@
 #if defined(_WIN32)
 #include <io.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #endif
 
 #define MAXF 64
