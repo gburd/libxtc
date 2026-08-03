@@ -4,7 +4,7 @@ rem Emits one line per test: PROBE <ms>/<tn> <BUILD_FAIL|RUN_FAIL|OK>
 rem Assumes xtc.lib already built in %CD% (C:\xtcbuild).
 setlocal enabledelayedexpansion
 if "%XTC_SRC%"=="" set XTC_SRC=C:\libxtc
-set INC=/I"%XTC_SRC%\src\inc" /I"%XTC_SRC%\src\inc\compat" /I.
+set INC=/I"%XTC_SRC%\src\inc" /I"%XTC_SRC%\src\inc\compat" /I"%XTC_SRC%\test\include" /I.
 set CFLAGS=/nologo /std:c11 /experimental:c11atomics /W3 /O2 /MT /D_WIN32 /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS /DXTC_BUILDING_DLL %INC%
 set LIBS=xtc.lib ws2_32.lib ntdll.lib dbghelp.lib
 
