@@ -1,0 +1,5 @@
+# Build output for the microbench driver (never commit compiled binaries).
+# The canonical build puts bench_micro in the build dir; this covers an
+# in-place compile too.
+bench_micro
+*.o
