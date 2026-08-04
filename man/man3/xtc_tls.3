@@ -7,6 +7,9 @@
 .Nm xtc_tls_ctx_create ,
 .Nm xtc_tls_ctx_destroy ,
 .Nm xtc_tls_create ,
+.Nm xtc_tls_create_transport ,
+.Nm xtc_tls_ctx_set_sni_cb ,
+.Nm xtc_tls_set_hostname ,
 .Nm xtc_tls_destroy ,
 .Nm xtc_tls_handshake ,
 .Nm xtc_tls_read ,
@@ -117,6 +120,50 @@ A server context is hardened by default (documented defaults, not knobs):
 TLS renegotiation and compression are disabled, session tickets and the
 session cache are off, and the moving-write-buffer mode required for
 correct non-blocking sends is enabled.
+.Sh SNI AND CUSTOM TRANSPORT
+.Fn xtc_tls_ctx_set_sni_cb "ctx" "cb" "userdata"
+installs a Server Name Indication selection callback on a
+.Dv XTC_TLS_SERVER
+context.  During the handshake, after the ClientHello is parsed, the
+callback fires with the requested
+.Va server_name
+(or NULL if the client sent none) and may return a DIFFERENT,
+pre-created server
+.Vt xtc_tls_ctx_t
+whose certificate, key, CA, and verify mode are used for the rest of
+that handshake -- the multi-tenant / multi-host TLS case (mirrors
+OpenSSL's
+.Fn SSL_CTX_set_client_hello_cb
+plus
+.Fn SSL_set_SSL_CTX ) .
+Returning NULL keeps the current context.  Registering on a client
+context, or on a backend that cannot swap mid-handshake, returns
+.Dv XTC_E_NOSYS .
+.Pp
+.Fn xtc_tls_set_hostname "tls" "name"
+is the client-side half: called before the handshake on a client
+connection, it sends
+.Va name
+in the ClientHello SNI extension and enables RFC 6125 hostname
+verification against the server certificate.  A NULL or empty name
+clears it; it is a no-op on a server connection.
+.Pp
+.Fn xtc_tls_create_transport "ctx" "transport" "&out"
+wraps the TLS state machine around caller-supplied
+.Va read_cb
+and
+.Va write_cb
+callbacks instead of an fd, so the consumer owns the underlying
+recv/send -- to feed bytes already read off the socket before deciding
+to negotiate TLS (pushback), to weave the I/O into its own interrupt /
+cancellation / fiber-yield discipline, or to handle a platform signal
+window.  The callbacks are BIO-like: return the byte count, 0 for a
+clean EOF, or
+.Dv XTC_E_AGAIN
+to signal would-block (the caller then drives its own readiness and
+retries the TLS op).  These are OpenSSL-backend features; other
+backends return
+.Dv XTC_E_NOSYS .
 .Sh INTROSPECTION
 Valid only after
 .Fn xtc_tls_handshake

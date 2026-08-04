@@ -8,7 +8,9 @@ const char *xtc_io_backend_name __P((void));
 const char *xtc_tls_get_cipher __P((const xtc_tls_t *));
 const char *xtc_tls_get_version __P((const xtc_tls_t *));
 int  xtc_tls_create  __P((xtc_tls_ctx_t *, int, xtc_tls_t **));
+int  xtc_tls_create_transport __P((xtc_tls_ctx_t *, const xtc_tls_transport_t *, xtc_tls_t **));
 int  xtc_tls_ctx_create __P((xtc_tls_role_t, const xtc_tls_opts_t *, xtc_tls_ctx_t **));
+int  xtc_tls_ctx_set_sni_cb __P((xtc_tls_ctx_t *, xtc_tls_sni_cb_t, void *));
 int  xtc_tls_get_alpn_selected __P((const xtc_tls_t *, const unsigned char **, unsigned int *));
 int  xtc_tls_get_cipher_bits __P((const xtc_tls_t *));
 int  xtc_tls_get_peer_common_name __P((const xtc_tls_t *, char *, size_t));
@@ -19,6 +21,7 @@ int  xtc_tls_get_server_cert_hash __P((const xtc_tls_t *, unsigned char *, size_
 int  xtc_tls_handshake __P((xtc_tls_t *));
 int  xtc_tls_has_peer_cert __P((const xtc_tls_t *));
 int  xtc_tls_read  __P((xtc_tls_t *, void *, size_t, size_t *));
+int  xtc_tls_set_hostname __P((xtc_tls_t *, const char *));
 int  xtc_tls_shutdown __P((xtc_tls_t *));
 int  xtc_tls_wants_read  __P((const xtc_tls_t *));
 int  xtc_tls_wants_write __P((const xtc_tls_t *));
