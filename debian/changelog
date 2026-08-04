@@ -1,3 +1,14 @@
+libxtc (1.33.0-1) unstable; urgency=medium
+
+  * feat(tls): SNI/ClientHello context-selection callback
+    (xtc_tls_ctx_set_sni_cb) + client-side SNI host
+    (xtc_tls_set_hostname) for multi-tenant TLS servers, and a
+    custom-transport hook (xtc_tls_create_transport) letting the caller
+    own recv/send via BIO-like read/write callbacks.  OpenSSL backend;
+    XTC_E_NOSYS on the others.  Addresses the PG server-TLS-swap request.
+
+ -- Greg Burd <greg@burd.me>  Mon, 04 Aug 2026 12:00:00 +0000
+
 libxtc (1.32.0-1) unstable; urgency=medium
 
   * feat: xtc_tuning_check() -- public entry to the host-tuning advisor,
