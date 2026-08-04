@@ -804,6 +804,14 @@ test_server_sni_select(const MunitParameter params[], void *data)
     rc = xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx);
     munit_assert_int(rc, ==, XTC_OK);
     rc = xtc_tls_ctx_set_sni_cb(ctx, sni_selector, NULL);
+    if (rc == XTC_E_NOSYS) {
+        /* Backend without ClientHello context selection (only OpenSSL
+         * implements it); nothing to exercise here. */
+        xtc_tls_ctx_destroy(ctx);
+        xtc_tls_ctx_destroy(g_sni_alt_ctx);
+        g_sni_alt_ctx = NULL;
+        return MUNIT_SKIP;
+    }
     munit_assert_int(rc, ==, XTC_OK);
     /* Registering on a CLIENT context is refused. */
     {
@@ -933,9 +941,18 @@ test_server_transport_roundtrip(const MunitParameter params[], void *data)
     munit_assert_int(set_nonblock(sv[0]), ==, 0);
     munit_assert_int(set_nonblock(sv[1]), ==, 0);
 
-    /* Bad-arg guards on the new entry point. */
-    munit_assert_int(xtc_tls_create_transport(NULL, &xt, &tls), ==, XTC_E_INVAL);
+    /* Bad-arg guards on the new entry point.  A backend that does not
+     * implement custom transport returns XTC_E_NOSYS for every call;
+     * detect that and skip. */
     memset(&xt, 0, sizeof(xt));
+    rc = xtc_tls_create_transport(NULL, &xt, &tls);
+    if (rc == XTC_E_NOSYS) {
+        xtc_tls_ctx_destroy(ctx);
+        close(sv[0]);
+        close(sv[1]);
+        return MUNIT_SKIP;
+    }
+    munit_assert_int(rc, ==, XTC_E_INVAL);
     munit_assert_int(xtc_tls_create_transport(ctx, &xt, &tls), ==, XTC_E_INVAL);
 
     memset(&x, 0, sizeof(x));
