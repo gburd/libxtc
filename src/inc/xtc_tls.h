@@ -308,6 +308,106 @@ XTC_API void xtc_tls_ctx_destroy(xtc_tls_ctx_t *ctx);
  */
 XTC_API int  xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out);
 
+/* -------------------------------------------------------------------------
+ * SNI / ClientHello context-selection callback (multi-tenant servers).
+ *
+ * A server that presents different certificates for different requested
+ * host names (SNI) registers a selection callback on the SERVER context.
+ * During the handshake, after the ClientHello is parsed but before the
+ * certificate is chosen, the callback fires with the requested
+ * server_name (the SNI host, or NULL if the client sent none) and may
+ * return a DIFFERENT, pre-created xtc_tls_ctx_t whose certificate / key /
+ * CA / verify-mode is then used for the rest of THIS handshake -- exactly
+ * OpenSSL's SSL_CTX_set_client_hello_cb + SSL_set_SSL_CTX shape.
+ *
+ * Contract:
+ *   - Return a pointer to one of your pre-created SERVER xtc_tls_ctx_t to
+ *     swap it in for this connection, or
+ *   - Return NULL (or the same ctx) to keep the current context.
+ *   - The returned context MUST outlive the connection and MUST have
+ *     been created with role XTC_TLS_SERVER; returning a CLIENT context
+ *     or a destroyed one is undefined.
+ *   - server_name points at backend-owned memory valid only for the
+ *     duration of the callback; copy it if you need it later.
+ *   - The callback runs on the carrier driving the handshake (the same
+ *     thread as xtc_tls_handshake); it must not block.
+ *
+ * userdata is passed through unchanged.  Registering on a CLIENT context
+ * or on a backend that cannot swap the context mid-handshake returns
+ * XTC_E_NOSYS.
+ * ----------------------------------------------------------------------- */
+
+typedef xtc_tls_ctx_t *(*xtc_tls_sni_cb_t)(xtc_tls_t *tls,
+                                           const char *server_name,
+                                           void *userdata);
+
+/*
+ * PUBLIC: int  xtc_tls_ctx_set_sni_cb __P((xtc_tls_ctx_t *,
+ * PUBLIC:                              xtc_tls_sni_cb_t, void *));
+ */
+XTC_API int  xtc_tls_ctx_set_sni_cb(xtc_tls_ctx_t *ctx,
+                                    xtc_tls_sni_cb_t cb, void *userdata);
+
+/* -------------------------------------------------------------------------
+ * Custom transport (caller owns recv/send instead of an fd).
+ *
+ * xtc_tls_create binds an fd and does its own recv/send.  A consumer that
+ * must control the underlying transport -- to feed bytes it already read
+ * off the socket before deciding to negotiate TLS (pushback), to weave
+ * the read/write into its own interrupt / cancellation / fiber-yield
+ * discipline, or to handle a platform signal window -- supplies a
+ * transport instead, the same way OpenSSL's BIO lets an application own
+ * the wire.  Only the TLS state machine lives in xtc_tls; every byte to
+ * or from the network flows through the caller's callbacks.
+ *
+ * Callback contract (BIO-like):
+ *   read_cb:  read up to len bytes into buf.  Return >0 = bytes read;
+ *             0 = clean EOF (peer closed); XTC_E_AGAIN = would block
+ *             (arm a readable watch and retry the TLS op); any other
+ *             negative xtc error = hard failure.
+ *   write_cb: write up to len bytes from buf.  Return >0 = bytes
+ *             written; XTC_E_AGAIN = would block (arm a writable watch);
+ *             other negative = hard failure.  A short write is fine.
+ *   userdata: the transport's userdata, passed to both callbacks.
+ *
+ * The caller retains ownership of whatever the transport wraps;
+ * xtc_tls_destroy does not touch it.  There is no fd, so
+ * xtc_tls_wants_read/_write still report the direction the stall is in,
+ * but the caller drives its own transport readiness.
+ * ----------------------------------------------------------------------- */
+
+typedef struct xtc_tls_transport {
+	int  (*read_cb)(void *userdata, void *buf, size_t len);
+	int  (*write_cb)(void *userdata, const void *buf, size_t len);
+	void  *userdata;
+} xtc_tls_transport_t;
+
+/*
+ * PUBLIC: int  xtc_tls_create_transport __P((xtc_tls_ctx_t *,
+ * PUBLIC:                              const xtc_tls_transport_t *,
+ * PUBLIC:                              xtc_tls_t **));
+ */
+XTC_API int  xtc_tls_create_transport(xtc_tls_ctx_t *ctx,
+                                      const xtc_tls_transport_t *transport,
+                                      xtc_tls_t **out);
+
+/* -------------------------------------------------------------------------
+ * Client-side SNI / hostname (the other half of SNI).
+ *
+ * A CLIENT connection calls this before the handshake to send the
+ * requested host in the ClientHello's SNI extension (so a multi-tenant
+ * server's selection callback can pick the right certificate) and to
+ * enable RFC 6125 hostname verification against the server certificate
+ * when the context verifies peers.  name is copied; NULL or "" clears
+ * it.  Must be called before xtc_tls_handshake.  Ignored (harmless) on
+ * a SERVER connection; XTC_E_NOSYS on a backend that cannot set it.
+ * ----------------------------------------------------------------------- */
+
+/*
+ * PUBLIC: int  xtc_tls_set_hostname __P((xtc_tls_t *, const char *));
+ */
+XTC_API int  xtc_tls_set_hostname(xtc_tls_t *tls, const char *name);
+
 /*
  * xtc_tls_destroy --
  *	Release per-connection TLS state.  Does not close the underlying fd,

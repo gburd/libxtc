@@ -80,6 +80,8 @@
             # Build systems
             autoconf automake libtool gnumake
             meson ninja pkg-config
+            # TLS backend (default --with-tls=auto picks openssl)
+            openssl
             # Test / lint / doc
             shellcheck mandoc
             valgrind gdb lcov gcovr

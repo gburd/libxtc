@@ -367,6 +367,35 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 	return XTC_OK;
 }
 
+/* SNI context-selection callback + custom transport + client SNI host:
+ * not supported on this backend (see the OpenSSL backend for the full
+ * implementation).  Uniform API -> XTC_E_NOSYS, matching the accessor
+ * stubs. */
+int
+xtc_tls_ctx_set_sni_cb(xtc_tls_ctx_t *ctx, xtc_tls_sni_cb_t cb, void *userdata)
+{
+	(void)ctx; (void)cb; (void)userdata;
+	return XTC_E_NOSYS;
+}
+
+int
+xtc_tls_create_transport(xtc_tls_ctx_t *ctx,
+                         const xtc_tls_transport_t *transport,
+                         xtc_tls_t **out)
+{
+	(void)ctx; (void)transport;
+	if (out != NULL)
+		*out = NULL;
+	return XTC_E_NOSYS;
+}
+
+int
+xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
+{
+	(void)tls; (void)name;
+	return XTC_E_NOSYS;
+}
+
 void
 xtc_tls_destroy(xtc_tls_t *tls)
 {

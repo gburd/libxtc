@@ -60,6 +60,10 @@
 #define TEST_KEY_PATH   "/tmp/xtc-tls2-test-key.pem"
 #define TEST_CLI_CERT   "/tmp/xtc-tls2-cli-cert.pem"
 #define TEST_CLI_KEY    "/tmp/xtc-tls2-cli-key.pem"
+/* Second SERVER cert with a distinct CN, selected via the SNI callback. */
+#define TEST_SNI_CERT   "/tmp/xtc-tls2-sni-cert.pem"
+#define TEST_SNI_KEY    "/tmp/xtc-tls2-sni-key.pem"
+#define SNI_HOSTNAME    "tenant.example"
 
 /* Generate a self-signed RSA-2048 cert+key via the openssl CLI.
  * Returns 0 on success. */
@@ -698,6 +702,276 @@ test_server_peer_cert(const MunitParameter params[], void *data)
  * Suite setup / teardown -- write/remove temp PEM files.
  * ======================================================================= */
 
+/* -------------------------------------------------------------------------
+ * SNI-sending client thread: sets the SNI host via xtc_tls_set_hostname
+ * so the server's ClientHello callback fires with SNI_HOSTNAME.
+ * ----------------------------------------------------------------------- */
+static void *
+client_thread_sni(void *arg)
+{
+    struct client_args *a   = (struct client_args *)arg;
+    xtc_tls_opts_t      opts;
+    xtc_tls_ctx_t      *ctx = NULL;
+    xtc_tls_t          *tls = NULL;
+    char                buf[CLIENT_MSG_LEN];
+
+    a->rc = 1;
+    memset(&opts, 0, sizeof(opts));
+    opts.verify_peer = 0;                 /* self-signed server cert */
+    opts.min_version = XTC_TLS_VER_12;
+
+    if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &opts, &ctx) != XTC_OK)
+        goto done;
+    if (xtc_tls_create(ctx, a->fd, &tls) != XTC_OK)
+        goto done;
+    if (xtc_tls_set_hostname(tls, SNI_HOSTNAME) != XTC_OK)
+        goto done;
+    if (poll_until_done(tls, a->fd, xtc_tls_handshake, 5000) != XTC_OK)
+        goto done;
+    if (tls_read_exact(tls, a->fd, buf, CLIENT_MSG_LEN, 5000) != XTC_OK)
+        goto done;
+    if (tls_write_all(tls, a->fd, buf, CLIENT_MSG_LEN, 5000) != XTC_OK)
+        goto done;
+    (void)xtc_tls_shutdown(tls);
+    memcpy(a->echoed, buf, CLIENT_MSG_LEN);
+    a->echoed[CLIENT_MSG_LEN] = '\0';
+    a->rc = 0;
+done:
+    if (tls != NULL) xtc_tls_destroy(tls);
+    if (ctx != NULL) xtc_tls_ctx_destroy(ctx);
+    return arg;
+}
+
+/* The SNI selector: fires with the requested host, returns the alternate
+ * server context so the handshake presents the SNI cert.  Records the
+ * host it saw so the test can assert the callback actually ran. */
+static char        g_sni_seen[256];
+static int         g_sni_fired;
+static xtc_tls_ctx_t *g_sni_alt_ctx;
+
+static xtc_tls_ctx_t *
+sni_selector(xtc_tls_t *tls, const char *server_name, void *userdata)
+{
+    (void)tls;
+    (void)userdata;
+    g_sni_fired = 1;
+    g_sni_seen[0] = '\0';
+    if (server_name != NULL) {
+        strncpy(g_sni_seen, server_name, sizeof(g_sni_seen) - 1);
+        g_sni_seen[sizeof(g_sni_seen) - 1] = '\0';
+        if (strcmp(server_name, SNI_HOSTNAME) == 0)
+            return g_sni_alt_ctx;   /* swap to the tenant cert */
+    }
+    return NULL;   /* keep the default cert */
+}
+
+/* -------------------------------------------------------------------------
+ * test_server_sni_select:
+ *   Client sends SNI = SNI_HOSTNAME; the server's ClientHello callback
+ *   fires, sees the host, and swaps in the alternate context.  Assert
+ *   the callback ran with the right host and the handshake completed.
+ * ----------------------------------------------------------------------- */
+static MunitResult
+test_server_sni_select(const MunitParameter params[], void *data)
+{
+    xtc_tls_opts_t  opts, alt_opts;
+    xtc_tls_ctx_t  *ctx = NULL;
+    xtc_tls_t      *tls = NULL;
+    struct client_args ca;
+    pthread_t       tid;
+    int             sv[2], rc;
+    char            rbuf[CLIENT_MSG_LEN + 1];
+
+    (void)params;
+    (void)data;
+
+    g_sni_fired = 0;
+    g_sni_seen[0] = '\0';
+
+    /* Alternate (tenant) context. */
+    memset(&alt_opts, 0, sizeof(alt_opts));
+    alt_opts.cert_file   = TEST_SNI_CERT;
+    alt_opts.key_file    = TEST_SNI_KEY;
+    alt_opts.min_version = XTC_TLS_VER_12;
+    rc = xtc_tls_ctx_create(XTC_TLS_SERVER, &alt_opts, &g_sni_alt_ctx);
+    munit_assert_int(rc, ==, XTC_OK);
+
+    /* Default context, with the SNI selector installed. */
+    memset(&opts, 0, sizeof(opts));
+    opts.cert_file   = TEST_CERT_PATH;
+    opts.key_file    = TEST_KEY_PATH;
+    opts.min_version = XTC_TLS_VER_12;
+    rc = xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx);
+    munit_assert_int(rc, ==, XTC_OK);
+    rc = xtc_tls_ctx_set_sni_cb(ctx, sni_selector, NULL);
+    munit_assert_int(rc, ==, XTC_OK);
+    /* Registering on a CLIENT context is refused. */
+    {
+        xtc_tls_ctx_t *cli = NULL;
+        xtc_tls_opts_t co; memset(&co, 0, sizeof(co));
+        munit_assert_int(xtc_tls_ctx_create(XTC_TLS_CLIENT, &co, &cli), ==, XTC_OK);
+        munit_assert_int(xtc_tls_ctx_set_sni_cb(cli, sni_selector, NULL),
+                         ==, XTC_E_NOSYS);
+        xtc_tls_ctx_destroy(cli);
+    }
+
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(set_nonblock(sv[1]), ==, 0);
+
+    rc = xtc_tls_create(ctx, sv[0], &tls);
+    munit_assert_int(rc, ==, XTC_OK);
+
+    memset(&ca, 0, sizeof(ca));
+    ca.fd = sv[1];
+    ca.rc = 1;
+    munit_assert_int(pthread_create(&tid, NULL, client_thread_sni, &ca), ==, 0);
+
+    rc = poll_until_done(tls, sv[0], xtc_tls_handshake, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+    rc = tls_write_all(tls, sv[0], "hello", CLIENT_MSG_LEN, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+    memset(rbuf, 0, sizeof(rbuf));
+    rc = tls_read_exact(tls, sv[0], rbuf, CLIENT_MSG_LEN, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_memory_equal(CLIENT_MSG_LEN, rbuf, "hello");
+    (void)xtc_tls_shutdown(tls);
+    pthread_join(tid, NULL);
+    munit_assert_int(ca.rc, ==, 0);
+
+    /* The callback fired with exactly the client's SNI host. */
+    munit_assert_int(g_sni_fired, ==, 1);
+    munit_assert_string_equal(g_sni_seen, SNI_HOSTNAME);
+
+    xtc_tls_destroy(tls);
+    xtc_tls_ctx_destroy(ctx);
+    xtc_tls_ctx_destroy(g_sni_alt_ctx);
+    g_sni_alt_ctx = NULL;
+    close(sv[0]);
+    close(sv[1]);
+    return MUNIT_OK;
+}
+
+/* -------------------------------------------------------------------------
+ * Custom-transport plumbing: a caller-owned fd wrapped in read/write
+ * callbacks, exactly the shape a consumer uses to own recv/send.  A
+ * pre-TLS pushback buffer is prepended to the read stream to exercise
+ * the "bytes already read off the socket" case.
+ * ----------------------------------------------------------------------- */
+struct xport {
+    int    fd;
+    const unsigned char *pushback;   /* bytes to feed before the socket */
+    size_t pushback_len;
+    size_t pushback_off;
+};
+
+static int
+xport_read(void *ud, void *buf, size_t len)
+{
+    struct xport *x = (struct xport *)ud;
+    ssize_t n;
+    /* Drain the pushback buffer first (the pre-TLS raw_buf case). */
+    if (x->pushback_off < x->pushback_len) {
+        size_t avail = x->pushback_len - x->pushback_off;
+        size_t take  = len < avail ? len : avail;
+        memcpy(buf, x->pushback + x->pushback_off, take);
+        x->pushback_off += take;
+        return (int)take;
+    }
+    n = read(x->fd, buf, len);
+    if (n > 0)
+        return (int)n;
+    if (n == 0)
+        return 0;   /* EOF */
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return XTC_E_AGAIN;
+    return XTC_E_INTERNAL;
+}
+
+static int
+xport_write(void *ud, const void *buf, size_t len)
+{
+    struct xport *x = (struct xport *)ud;
+    ssize_t n = write(x->fd, buf, len);
+    if (n > 0)
+        return (int)n;
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        return XTC_E_AGAIN;
+    return XTC_E_INTERNAL;
+}
+
+/* -------------------------------------------------------------------------
+ * test_server_transport_roundtrip:
+ *   The server drives its TLS state machine through a caller-supplied
+ *   transport (BIO callbacks) instead of an fd, and completes a full
+ *   handshake + echo against a normal xtc_tls client.
+ * ----------------------------------------------------------------------- */
+static MunitResult
+test_server_transport_roundtrip(const MunitParameter params[], void *data)
+{
+    xtc_tls_opts_t  opts;
+    xtc_tls_ctx_t  *ctx = NULL;
+    xtc_tls_t      *tls = NULL;
+    struct client_args ca;
+    struct xport    x;
+    xtc_tls_transport_t xt;
+    pthread_t       tid;
+    int             sv[2], rc;
+    char            rbuf[CLIENT_MSG_LEN + 1];
+
+    (void)params;
+    (void)data;
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cert_file   = TEST_CERT_PATH;
+    opts.key_file    = TEST_KEY_PATH;
+    opts.min_version = XTC_TLS_VER_12;
+    rc = xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx);
+    munit_assert_int(rc, ==, XTC_OK);
+
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(set_nonblock(sv[1]), ==, 0);
+
+    /* Bad-arg guards on the new entry point. */
+    munit_assert_int(xtc_tls_create_transport(NULL, &xt, &tls), ==, XTC_E_INVAL);
+    memset(&xt, 0, sizeof(xt));
+    munit_assert_int(xtc_tls_create_transport(ctx, &xt, &tls), ==, XTC_E_INVAL);
+
+    memset(&x, 0, sizeof(x));
+    x.fd = sv[0];
+    xt.read_cb  = xport_read;
+    xt.write_cb = xport_write;
+    xt.userdata = &x;
+    rc = xtc_tls_create_transport(ctx, &xt, &tls);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_ptr_not_null(tls);
+
+    memset(&ca, 0, sizeof(ca));
+    ca.fd = sv[1];
+    ca.rc = 1;
+    munit_assert_int(pthread_create(&tid, NULL, client_thread, &ca), ==, 0);
+
+    rc = poll_until_done(tls, sv[0], xtc_tls_handshake, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+    rc = tls_write_all(tls, sv[0], "hello", CLIENT_MSG_LEN, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+    memset(rbuf, 0, sizeof(rbuf));
+    rc = tls_read_exact(tls, sv[0], rbuf, CLIENT_MSG_LEN, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_memory_equal(CLIENT_MSG_LEN, rbuf, "hello");
+    (void)xtc_tls_shutdown(tls);
+    pthread_join(tid, NULL);
+    munit_assert_int(ca.rc, ==, 0);
+    munit_assert_memory_equal(CLIENT_MSG_LEN, ca.echoed, "hello");
+
+    xtc_tls_destroy(tls);
+    xtc_tls_ctx_destroy(ctx);
+    close(sv[0]);
+    close(sv[1]);
+    return MUNIT_OK;
+}
+
 static void *
 suite_setup(const MunitParameter params[], void *user_data)
 {
@@ -708,6 +982,9 @@ suite_setup(const MunitParameter params[], void *user_data)
         return NULL;
     /* Client cert (distinct CN) for the mutual-TLS peer-cert test. */
     if (generate_cert(TEST_CLI_CERT, TEST_CLI_KEY, "xtc-client") != 0)
+        return NULL;
+    /* Second SERVER cert (CN = SNI host) for the SNI-selection test. */
+    if (generate_cert(TEST_SNI_CERT, TEST_SNI_KEY, SNI_HOSTNAME) != 0)
         return NULL;
     return (void *)(uintptr_t)1;   /* non-NULL: setup succeeded */
 }
@@ -720,6 +997,8 @@ suite_teardown(void *fixture)
     unlink(TEST_KEY_PATH);
     unlink(TEST_CLI_CERT);
     unlink(TEST_CLI_KEY);
+    unlink(TEST_SNI_CERT);
+    unlink(TEST_SNI_KEY);
 }
 
 /* =========================================================================
@@ -740,6 +1019,10 @@ static MunitTest tests[] = {
     { "/extended_opts",        test_server_extended_opts,       suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
     { "/peer_cert",            test_server_peer_cert,           suite_setup, suite_teardown,
+      MUNIT_TEST_OPTION_NONE, NULL },
+    { "/sni_select",           test_server_sni_select,          suite_setup, suite_teardown,
+      MUNIT_TEST_OPTION_NONE, NULL },
+    { "/transport_roundtrip",  test_server_transport_roundtrip, suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

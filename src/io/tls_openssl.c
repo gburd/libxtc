@@ -97,6 +97,8 @@ struct xtc_tls_ctx {
 	unsigned int     alpn_protos_len;  /* byte count of alpn_protos */
 	xtc_tls_passphrase_cb_t passphrase_cb;   /* NULL if unset */
 	void            *passphrase_userdata;
+	xtc_tls_sni_cb_t sni_cb;           /* NULL if unset (SERVER only) */
+	void            *sni_userdata;
 };
 
 struct xtc_tls {
@@ -105,6 +107,9 @@ struct xtc_tls {
 	SSL             *ssl;
 	int              wants_read;
 	int              wants_write;
+	/* Custom transport (xtc_tls_create_transport); zeroed for fd mode. */
+	xtc_tls_transport_t transport;
+	int              have_transport;   /* 1 = transport, 0 = fd */
 };
 
 #include "tls_common.h"   /* after struct xtc_tls: shared want-flag accessors */
@@ -171,6 +176,196 @@ passphrase_shim(char *buf, int size, int rwflag, void *userdata)
 	if (c == NULL || c->passphrase_cb == NULL)
 		return 0;
 	return c->passphrase_cb(buf, size, c->passphrase_userdata);
+}
+
+/* -------------------------------------------------------------------------
+ * ClientHello callback shim (SNI context selection).
+ *
+ * Registered via SSL_CTX_set_client_hello_cb on a SERVER context that
+ * has an xtc_tls_sni_cb.  Parses the requested server_name out of the
+ * ClientHello's SNI extension, calls the caller's selector, and if it
+ * returns a different SERVER xtc_tls_ctx_t, swaps it in for the rest of
+ * the handshake with SSL_set_SSL_CTX (which re-selects cert/key/CA/
+ * verify from the new context).  Returns SSL_CLIENT_HELLO_SUCCESS to
+ * let the handshake proceed.
+ *
+ * The xtc_tls_t is recovered from SSL app-data (set in the create
+ * paths) so the caller's selector receives it.
+ * ----------------------------------------------------------------------- */
+
+/* App-data index for the owning xtc_tls_t on each SSL. */
+static int s_ssl_appdata_idx = -1;
+static pthread_once_t s_appdata_once = PTHREAD_ONCE_INIT;
+
+static void
+appdata_idx_init(void)
+{
+	s_ssl_appdata_idx = SSL_get_ex_new_index(0, NULL, NULL, NULL, NULL);
+}
+
+/*
+ * Extract the SNI host name from the ClientHello into a NUL-terminated
+ * caller buffer.  Returns 1 if a name was found (and copied), 0 if the
+ * client sent no SNI, <0 on a malformed extension.  Follows the
+ * server_name extension wire format (RFC 6066): a 2-byte server-name-
+ * list length, then entries of {1-byte type, 2-byte length, name};
+ * type 0 == host_name.
+ */
+static int
+clienthello_sni(SSL *ssl, char *out, size_t outsz)
+{
+	const unsigned char *ext;
+	size_t               extlen;
+	size_t               name_len, off;
+
+	if (out == NULL || outsz == 0)
+		return -1;
+	out[0] = '\0';
+
+	if (SSL_client_hello_get0_ext(ssl, TLSEXT_TYPE_server_name,
+	                              &ext, &extlen) != 1)
+		return 0;   /* no SNI extension */
+	if (extlen < 5)
+		return -1;
+
+	if (ext[2] != TLSEXT_NAMETYPE_host_name)
+		return 0;   /* not a host_name entry */
+	name_len = ((size_t)ext[3] << 8) | ext[4];
+	if (name_len == 0 || 5 + name_len > extlen)
+		return -1;
+	if (name_len >= outsz)
+		name_len = outsz - 1;   /* truncate defensively */
+	for (off = 0; off < name_len; off++)
+		out[off] = (char)ext[5 + off];
+	out[name_len] = '\0';
+	return 1;
+}
+
+static int
+client_hello_cb(SSL *ssl, int *al, void *arg)
+{
+	struct xtc_tls_ctx *c = (struct xtc_tls_ctx *)arg;
+	struct xtc_tls     *t;
+	xtc_tls_ctx_t      *chosen;
+	char                name[256];
+	int                 have_name;
+
+	(void)al;
+	if (c == NULL || c->sni_cb == NULL)
+		return SSL_CLIENT_HELLO_SUCCESS;
+
+	t = (s_ssl_appdata_idx >= 0)
+	    ? (struct xtc_tls *)SSL_get_ex_data(ssl, s_ssl_appdata_idx)
+	    : NULL;
+
+	have_name = clienthello_sni(ssl, name, sizeof(name));
+	if (have_name < 0)
+		return SSL_CLIENT_HELLO_SUCCESS;  /* malformed; let stack handle */
+
+	chosen = c->sni_cb(t, have_name > 0 ? name : NULL, c->sni_userdata);
+	if (chosen != NULL && chosen != c && chosen->ssl_ctx != NULL) {
+		/* Swap the context for the rest of this handshake.  This
+		 * re-derives cert/key/chain from the new SSL_CTX; verify
+		 * mode does NOT follow SSL_set_SSL_CTX in all OpenSSL
+		 * versions, so re-apply it explicitly from the new ctx. */
+		int vmode = SSL_CTX_get_verify_mode(chosen->ssl_ctx);
+		if (SSL_set_SSL_CTX(ssl, chosen->ssl_ctx) == NULL)
+			return SSL_CLIENT_HELLO_SUCCESS;  /* keep current */
+		SSL_set_options(ssl, SSL_CTX_get_options(chosen->ssl_ctx));
+		SSL_set_verify(ssl, vmode, NULL);
+	}
+	return SSL_CLIENT_HELLO_SUCCESS;
+}
+
+/* -------------------------------------------------------------------------
+ * Custom transport BIO (xtc_tls_create_transport).
+ *
+ * A minimal source/sink BIO that routes OpenSSL's wire reads/writes to
+ * the caller's read_cb/write_cb.  We set the retry flag on XTC_E_AGAIN
+ * so SSL_get_error reports WANT_READ / WANT_WRITE and the caller drives
+ * its own readiness, exactly as with an fd BIO.
+ * ----------------------------------------------------------------------- */
+
+static int
+transport_bio_read(BIO *b, char *buf, int len)
+{
+	struct xtc_tls *t = (struct xtc_tls *)BIO_get_data(b);
+	int             rc;
+
+	BIO_clear_retry_flags(b);
+	if (t == NULL || !t->have_transport || t->transport.read_cb == NULL)
+		return -1;
+	if (len <= 0)
+		return 0;
+	rc = t->transport.read_cb(t->transport.userdata, buf, (size_t)len);
+	if (rc > 0)
+		return rc;
+	if (rc == 0)
+		return 0;   /* EOF */
+	if (rc == XTC_E_AGAIN) {
+		BIO_set_retry_read(b);
+		return -1;
+	}
+	return -1;  /* hard error */
+}
+
+static int
+transport_bio_write(BIO *b, const char *buf, int len)
+{
+	struct xtc_tls *t = (struct xtc_tls *)BIO_get_data(b);
+	int             rc;
+
+	BIO_clear_retry_flags(b);
+	if (t == NULL || !t->have_transport || t->transport.write_cb == NULL)
+		return -1;
+	if (len <= 0)
+		return 0;
+	rc = t->transport.write_cb(t->transport.userdata, buf, (size_t)len);
+	if (rc > 0)
+		return rc;
+	if (rc == XTC_E_AGAIN) {
+		BIO_set_retry_write(b);
+		return -1;
+	}
+	return -1;  /* hard error */
+}
+
+static long
+transport_bio_ctrl(BIO *b, int cmd, long num, void *ptr)
+{
+	(void)b; (void)num; (void)ptr;
+	switch (cmd) {
+	case BIO_CTRL_FLUSH:      /* SSL_write flush -- nothing buffered here */
+	case BIO_CTRL_PUSH:
+	case BIO_CTRL_POP:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int transport_bio_create(BIO *b) { BIO_set_init(b, 1); return 1; }
+static int transport_bio_destroy(BIO *b) { (void)b; return 1; }
+
+/*
+ * The custom BIO_METHOD, built once.  BIO_get_new_index gives a unique
+ * type id so we never collide with OpenSSL's built-in BIO types.
+ */
+static BIO_METHOD    *s_transport_method;
+static pthread_once_t s_transport_method_once = PTHREAD_ONCE_INIT;
+
+static void
+transport_method_init(void)
+{
+	int type = BIO_get_new_index() | BIO_TYPE_SOURCE_SINK;
+	s_transport_method = BIO_meth_new(type, "xtc_tls_transport");
+	if (s_transport_method == NULL)
+		return;
+	BIO_meth_set_read(s_transport_method, transport_bio_read);
+	BIO_meth_set_write(s_transport_method, transport_bio_write);
+	BIO_meth_set_ctrl(s_transport_method, transport_bio_ctrl);
+	BIO_meth_set_create(s_transport_method, transport_bio_create);
+	BIO_meth_set_destroy(s_transport_method, transport_bio_destroy);
 }
 
 /* -------------------------------------------------------------------------
@@ -440,6 +635,16 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	}
 
 done:
+	/*
+	 * SERVER contexts get the ClientHello callback registered so a
+	 * later xtc_tls_ctx_set_sni_cb takes effect; the shim no-ops
+	 * while sni_cb is NULL, so this is free until SNI is used.
+	 */
+	if (role == XTC_TLS_SERVER) {
+		pthread_once(&s_appdata_once, appdata_idx_init); /* XTC_BLOCKING_OK */
+		SSL_CTX_set_client_hello_cb(c->ssl_ctx, client_hello_cb, c);
+	}
+
 	*out = c;
 	return XTC_OK;
 
@@ -497,6 +702,9 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 		return XTC_E_INTERNAL;
 	}
 
+	if (s_ssl_appdata_idx >= 0)
+		(void)SSL_set_ex_data(t->ssl, s_ssl_appdata_idx, t);
+
 	/*
 	 * Prime the handshake direction.  SSL_do_handshake consults the
 	 * state set here to know whether to act as client or server.
@@ -518,6 +726,109 @@ xtc_tls_destroy(xtc_tls_t *tls)
 	if (tls->ssl != NULL)
 		SSL_free(tls->ssl);
 	__os_free(tls);
+}
+
+/* -------------------------------------------------------------------------
+ * PUBLIC: int  xtc_tls_ctx_set_sni_cb __P((xtc_tls_ctx_t *,
+ * PUBLIC:                              xtc_tls_sni_cb_t, void *));
+ * ----------------------------------------------------------------------- */
+
+int
+xtc_tls_ctx_set_sni_cb(xtc_tls_ctx_t *ctx, xtc_tls_sni_cb_t cb, void *userdata)
+{
+	if (ctx == NULL)
+		return XTC_E_INVAL;
+	if (ctx->role != XTC_TLS_SERVER)
+		return XTC_E_NOSYS;   /* SNI selection is a server-side concept */
+	ctx->sni_cb       = cb;
+	ctx->sni_userdata = userdata;
+	return XTC_OK;
+}
+
+/* -------------------------------------------------------------------------
+ * PUBLIC: int  xtc_tls_create_transport __P((xtc_tls_ctx_t *,
+ * PUBLIC:                              const xtc_tls_transport_t *,
+ * PUBLIC:                              xtc_tls_t **));
+ * ----------------------------------------------------------------------- */
+
+int
+xtc_tls_create_transport(xtc_tls_ctx_t *ctx,
+                         const xtc_tls_transport_t *transport,
+                         xtc_tls_t **out)
+{
+	struct xtc_tls *t;
+	BIO            *bio;
+	int             rc;
+
+	if (ctx == NULL || transport == NULL || out == NULL ||
+	    transport->read_cb == NULL || transport->write_cb == NULL)
+		return XTC_E_INVAL;
+	*out = NULL;
+
+	pthread_once(&s_transport_method_once, transport_method_init); /* XTC_BLOCKING_OK */
+	if (s_transport_method == NULL)
+		return XTC_E_NOMEM;
+
+	if ((rc = __os_calloc(1, sizeof(*t), (void **)&t)) != XTC_OK)
+		return rc;
+
+	t->ctx            = ctx;
+	t->fd             = -1;
+	t->transport      = *transport;
+	t->have_transport = 1;
+	xtc_tls_clear_wants(t);
+
+	t->ssl = SSL_new(ctx->ssl_ctx);
+	if (t->ssl == NULL) {
+		__os_free(t);
+		return XTC_E_NOMEM;
+	}
+
+	bio = BIO_new(s_transport_method);
+	if (bio == NULL) {
+		SSL_free(t->ssl);
+		__os_free(t);
+		return XTC_E_NOMEM;
+	}
+	BIO_set_data(bio, t);
+	BIO_set_init(bio, 1);
+	/* SSL takes ownership of the BIO for both read and write. */
+	SSL_set_bio(t->ssl, bio, bio);
+
+	if (s_ssl_appdata_idx >= 0)
+		(void)SSL_set_ex_data(t->ssl, s_ssl_appdata_idx, t);
+
+	if (ctx->role == XTC_TLS_SERVER)
+		SSL_set_accept_state(t->ssl);
+	else
+		SSL_set_connect_state(t->ssl);
+
+	*out = t;
+	return XTC_OK;
+}
+
+/* -------------------------------------------------------------------------
+ * PUBLIC: int  xtc_tls_set_hostname __P((xtc_tls_t *, const char *));
+ * ----------------------------------------------------------------------- */
+
+int
+xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
+{
+	if (tls == NULL || tls->ssl == NULL)
+		return XTC_E_INVAL;
+	if (tls->ctx != NULL && tls->ctx->role != XTC_TLS_CLIENT)
+		return XTC_OK;   /* no-op on the server side */
+	if (name == NULL || name[0] == '\0') {
+		(void)SSL_set_tlsext_host_name(tls->ssl, NULL);
+		return XTC_OK;
+	}
+	/* Send SNI in the ClientHello ... */
+	if (SSL_set_tlsext_host_name(tls->ssl, name) != 1)
+		return XTC_E_INTERNAL;
+	/* ... and verify the server cert matches this host (RFC 6125).
+	 * Harmless when the context does not verify peers. */
+	(void)SSL_set1_host(tls->ssl, name);
+	return XTC_OK;
 }
 
 /* -------------------------------------------------------------------------
