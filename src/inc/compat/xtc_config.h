@@ -26,9 +26,9 @@
  * step with dist/version.in, or test/m0/test_version's consistency
  * check (strncmp(string, "maj.min.patch")) fails under MSVC. */
 #define XTC_VERSION_MAJOR  1
-#define XTC_VERSION_MINOR  32
+#define XTC_VERSION_MINOR  33
 #define XTC_VERSION_PATCH  0
-#define XTC_VERSION_STRING "1.32.0"
+#define XTC_VERSION_STRING "1.33.0"
 
 /* Completion-based I/O backend for Windows. */
 #define XTC_IO_BACKEND_IOCP 1
