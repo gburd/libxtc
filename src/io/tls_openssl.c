@@ -195,6 +195,19 @@ passphrase_shim(char *buf, int size, int rwflag, void *userdata)
 
 /* App-data index for the owning xtc_tls_t on each SSL. */
 static int s_ssl_appdata_idx = -1;
+
+/*
+ * The ClientHello context-selection callback uses SSL_CTX_set_client_
+ * hello_cb + SSL_client_hello_get0_ext, an OpenSSL 1.1.1+ API that
+ * BoringSSL does not provide (BoringSSL spells this
+ * SSL_CTX_set_select_certificate_cb over a different early-callback
+ * struct).  Compile the SNI selector only for the OpenSSL family; on
+ * BoringSSL xtc_tls_ctx_set_sni_cb returns XTC_E_NOSYS, matching the
+ * other backends.
+ */
+#if !defined(OPENSSL_IS_BORINGSSL)
+#define XTC_TLS_HAVE_CLIENT_HELLO_CB 1
+
 static pthread_once_t s_appdata_once = PTHREAD_ONCE_INIT;
 
 static void
@@ -276,6 +289,7 @@ client_hello_cb(SSL *ssl, int *al, void *arg)
 	}
 	return SSL_CLIENT_HELLO_SUCCESS;
 }
+#endif /* !OPENSSL_IS_BORINGSSL */
 
 /* -------------------------------------------------------------------------
  * Custom transport BIO (xtc_tls_create_transport).
@@ -641,8 +655,10 @@ done:
 	 * while sni_cb is NULL, so this is free until SNI is used.
 	 */
 	if (role == XTC_TLS_SERVER) {
+#if defined(XTC_TLS_HAVE_CLIENT_HELLO_CB)
 		pthread_once(&s_appdata_once, appdata_idx_init); /* XTC_BLOCKING_OK */
 		SSL_CTX_set_client_hello_cb(c->ssl_ctx, client_hello_cb, c);
+#endif
 	}
 
 	*out = c;
@@ -740,9 +756,14 @@ xtc_tls_ctx_set_sni_cb(xtc_tls_ctx_t *ctx, xtc_tls_sni_cb_t cb, void *userdata)
 		return XTC_E_INVAL;
 	if (ctx->role != XTC_TLS_SERVER)
 		return XTC_E_NOSYS;   /* SNI selection is a server-side concept */
+#if !defined(XTC_TLS_HAVE_CLIENT_HELLO_CB)
+	(void)cb; (void)userdata;
+	return XTC_E_NOSYS;   /* backend lacks the ClientHello callback */
+#else
 	ctx->sni_cb       = cb;
 	ctx->sni_userdata = userdata;
 	return XTC_OK;
+#endif
 }
 
 /* -------------------------------------------------------------------------
