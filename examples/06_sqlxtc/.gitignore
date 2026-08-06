@@ -45,3 +45,4 @@ sql_grammar.out
 sql_parse_gen.out
 bench_btree_concurrent
 numa_claim_probe
+evict_policy_proto
