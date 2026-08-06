@@ -220,6 +220,7 @@ struct bm {
 	_Atomic uint64_t  s_reissued;    /* allocations served from the freelist */
 
 	_Atomic uint32_t  clock;       /* round-robin victim cursor */
+	_Atomic uint64_t  evict_rng;   /* sampled-eviction PRNG state (stage 2) */
 
 	/* page table (pid mode): pid -> resident frame */
 	bm_htlock_t      *ht_locks;    /* BM_HT_STRIPES striped bucket locks;
@@ -366,7 +367,20 @@ free_push(bm_t *bm, bm_frame_t *f)
 	 * walk bounded rather than relying on chains never forming a cycle
 	 * across recycling.) */
 	atomic_store_explicit(&f->hnext, NULL, memory_order_release);
-	atomic_store_explicit(&f->pin, 0, memory_order_release);   /* clear any reservation */
+	/* Leave the frame UNPINNABLE (pin = -1, the eviction-reservation
+	 * sentinel) while it sits on the free list, NOT pin = 0.  A lock-free
+	 * fast-path reader (ht_lookup_pin_fast / bm_fix_pid_nopin) that loaded
+	 * a stale pointer to this just-unlinked frame must NOT be able to
+	 * try_pin it: with pin = 0 the reader's CAS(0->1) would succeed, the
+	 * pid recheck could pass (pid not yet overwritten), and the loader
+	 * that then reuses this free frame would overwrite pid+content under
+	 * the reader -> a content mismatch (observed 1-in-N under the higher
+	 * eviction churn of sampled eviction; latent with the CLOCK path too).
+	 * pin = -1 makes try_pin fail (frame reads as "reserved"), so the
+	 * racing reader cleanly takes it as a miss.  The loader clears the
+	 * sentinel by storing pin = 1 when it reuses the frame (get_free_frame
+	 * caller). */
+	atomic_store_explicit(&f->pin, -1, memory_order_release);
 	(void)pthread_mutex_lock(&bm->free_mu);
 	f->next_free = bm->free_head;
 	bm->free_head = f;
@@ -740,6 +754,172 @@ bm_fix_pid_nopin(bm_t *bm, bm_pid_t pid)
 	return NULL;
 }
 
+/*
+ * Stage 2 (numa-buffer-pool-design.md section 8.2): SAMPLED power-of-D
+ * victim selection, an alternative to the CLOCK sweep in evict_one,
+ * opt-in under -DBM_SAMPLED_EVICT.  Instead of a round-robin cursor, it
+ * draws D_SAMPLE random frames, scores each (lower = evict first) using
+ * the live per-frame signals (recency `ref`, `dirty`, HOT vs COOL), and
+ * reclaims the single worst reclaimable one -- power-of-d-choices, which
+ * approximates LRU/LFU without a global ordered list or a shared cursor
+ * write.  The class/freq/peer score terms from the design's table plug
+ * in here once the sharing-degree classifier (stages 5+) tags frames;
+ * until then the recency + dirty + state signals are what the pool
+ * actually has.  The reserve -> ht_remove -> free_push interlock is
+ * IDENTICAL to evict_one's (unchanged correctness).
+ */
+#ifdef BM_SAMPLED_EVICT
+#define BM_D_SAMPLE 16u
+
+/* Lower score = better victim.  Weights follow the design's section-13
+ * ratios, scaled to the signals available pre-classifier. */
+static int64_t
+sample_score(bm_t *bm, bm_frame_t *f)
+{
+	int64_t s = 0;
+	uint8_t st = atomic_load_explicit(&f->state, memory_order_relaxed);
+	(void)bm;
+	if (st == BM_HOT)   s += 1000;   /* HOT: keep over COOL (W_LOCAL-ish) */
+	if (atomic_load_explicit(&f->ref, memory_order_relaxed))
+		s += 1000;                   /* recently used: strongly prefer to keep */
+	if (atomic_load_explicit(&f->dirty, memory_order_relaxed))
+		s += 200;                    /* prefer clean victims (W_DIRTY) */
+	return s;
+}
+
+static int
+sample_evict_one(bm_t *bm)
+{
+	uint64_t rng = atomic_load_explicit(&bm->evict_rng, memory_order_relaxed);
+	int tries;
+
+	/*
+	 * Scan resistance (design stage 4 intent): a demand-loaded page is
+	 * admitted probationally as COOL (the load path), and eviction must
+	 * preferentially reclaim those COOL pages, NEVER cooling the HOT
+	 * working set while any COOL victim exists -- else a scan trashes the
+	 * hot set.  Random sampling alone cannot guarantee "find the sparse
+	 * COOL victim" in a small pool, so escalation to cooling a HOT frame
+	 * only happens after a bounded DETERMINISTIC sweep confirms there is
+	 * genuinely no reclaimable COOL frame (same guarantee the CLOCK path
+	 * gives via its full-sweep-before-force_cool).
+	 */
+	for (tries = 0; tries < (int)(bm->n_frames + 64u); tries++) {
+		bm_frame_t *best = NULL;
+		int64_t best_score = INT64_MAX;
+		bm_pid_t best_pid = BM_PID_NONE;
+		unsigned d;
+
+		/* Sample D COOL candidates; score; pick the worst clean one. */
+		for (d = 0; d < BM_D_SAMPLE; d++) {
+			uint32_t i;
+			bm_frame_t *f;
+			rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+			i = (uint32_t)((rng >> 33) % bm->n_frames);
+			f = &bm->frames[i];
+			if (atomic_load_explicit(&f->state, memory_order_acquire) != BM_COOL)
+				continue;            /* COOL only: never sample HOT here */
+			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
+				continue;
+			if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
+				continue;
+			if (atomic_load_explicit(&f->dirty, memory_order_acquire))
+				continue;            /* prefer clean; trickler handles dirty */
+			{
+				int64_t sc = sample_score(bm, f);
+				if (sc < best_score) {
+					best_score = sc; best = f;
+					best_pid = atomic_load_explicit(&f->pid,
+					    memory_order_acquire);
+				}
+			}
+		}
+		if (best != NULL) {
+			if (atomic_exchange_explicit(&best->ref, 0, memory_order_relaxed))
+				continue;    /* recently used COOL page: spare one round */
+			if (!try_reserve(best))
+				continue;
+			/* Between sampling `best` and reserving it, it could have been
+			 * evicted and RELOADED as a different pid (now COOL again).
+			 * try_reserve only checks pin==0, so also confirm both the
+			 * state AND the pid are unchanged -- else we would evict a
+			 * freshly-loaded, valid, different page out from under its
+			 * reader (the 1-in-N content mismatch this closes). */
+			if (atomic_load_explicit(&best->state, memory_order_acquire) != BM_COOL ||
+			    atomic_load_explicit(&best->pid, memory_order_acquire) != best_pid) {
+				release_reservation(best);
+				continue;
+			}
+			ht_remove(bm, best);
+			atomic_fetch_sub_explicit(&bm->resident, 1, memory_order_relaxed);
+			atomic_fetch_add_explicit(&bm->s_evicted, 1, memory_order_relaxed);
+			free_push(bm, best);
+			atomic_store_explicit(&bm->evict_rng, rng, memory_order_relaxed);
+			return 1;
+		}
+
+		/* No clean COOL victim in this sample.  Before escalating, do a
+		 * bounded DETERMINISTIC pass to MAKE a future clean COOL victim,
+		 * cooling exactly one eligible HOT frame (honoring its ref bit).
+		 * We never flush inline here -- flushing a frame a concurrent
+		 * fixer might re-dirty is a data race; dirty COOL pages are left
+		 * for the background trickler, exactly as the CLOCK path's
+		 * prefer-clean default does.  HOT is cooled only when the whole
+		 * sweep finds no reclaimable clean COOL page, so scan resistance
+		 * holds (a scan's probationary COOL pages are always preferred). */
+		{
+			uint32_t j;
+			int made_progress = 0;
+			/* First: cool an eligible HOT frame (honoring ref) to make a
+			 * future clean COOL victim -- scan resistance holds because a
+			 * scan's probationary COOL pages are always preferred above. */
+			for (j = 0; j < bm->n_frames; j++) {
+				bm_frame_t *f = &bm->frames[j];
+				if (atomic_load_explicit(&f->state, memory_order_acquire) != BM_HOT)
+					continue;
+				if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
+					continue;
+				if (atomic_exchange_explicit(&f->ref, 0, memory_order_relaxed))
+					continue;   /* recently used: second chance */
+				atomic_store_explicit(&f->state, BM_COOL, memory_order_release);
+				atomic_fetch_add_explicit(&bm->s_cooled, 1, memory_order_relaxed);
+				made_progress = 1;
+				break;
+			}
+			/* If no HOT frame was coolable, the only victims are dirty COOL
+			 * pages -- flush one so it becomes a clean victim next round.
+			 * flush_frame is race-safe (CAS io_busy + try-shared latch), so
+			 * it never flushes a frame a writer is mutating.  This is the
+			 * no-trickler progress guarantee, matching evict_one's
+			 * prefer_clean=0 fallback. */
+			if (!made_progress) {
+				for (j = 0; j < bm->n_frames; j++) {
+					bm_frame_t *f = &bm->frames[j];
+					if (atomic_load_explicit(&f->state, memory_order_acquire) != BM_COOL)
+						continue;
+					if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
+						continue;
+					if (!atomic_load_explicit(&f->dirty, memory_order_acquire))
+						continue;
+					if (flush_frame(bm, f)) {
+						atomic_fetch_add_explicit(&bm->s_evict_flush, 1,
+						    memory_order_relaxed);
+						made_progress = 1;
+						break;
+					}
+				}
+			}
+			if (!made_progress) {
+				atomic_store_explicit(&bm->evict_rng, rng, memory_order_relaxed);
+				return 0;   /* nothing reclaimable (all pinned / in flight) */
+			}
+		}
+	}
+	atomic_store_explicit(&bm->evict_rng, rng, memory_order_relaxed);
+	return 0;
+}
+#endif /* BM_SAMPLED_EVICT */
+
 /* Try to drive one unpinned frame all the way to FREE.  Returns 1 if a
  * frame was reclaimed.  Swip-mode frames evict by CAS-ing the parent
  * Swip to EVICTED; page-table (pid-mode) frames evict by removing the
@@ -840,7 +1020,16 @@ get_free_frame(bm_t *bm)
 	for (tries = 0; ; tries++) {
 		if ((f = free_pop(bm)) != NULL)
 			return f;
+#ifdef BM_SAMPLED_EVICT
+		/* Sampled power-of-D eviction is the scan-resistant production
+		 * policy; it deliberately preserves the hot set (COOL-first,
+		 * ref-honoring).  In LEGACY mode (scan_resist off) the pool must
+		 * keep its no-probation trashing semantics, so fall through to
+		 * the CLOCK evictor there. */
+		if (bm->scan_resist ? sample_evict_one(bm) : evict_one(bm))
+#else
 		if (evict_one(bm))
+#endif
 			continue;            /* made progress; take it next spin */
 		if (tries < 16)
 			xtc_yield();         /* fast: let a pin-holder release */
@@ -919,6 +1108,9 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	    / 100u;
 	if (bm->cool_target < 1) bm->cool_target = 1;
 	bm->scan_resist = opts->scan_resist ? 1 : 0;
+	atomic_store_explicit(&bm->evict_rng,
+	    0x9E3779B97F4A7C15ull ^ ((uint64_t)(uintptr_t)bm),
+	    memory_order_relaxed);   /* sampled-eviction PRNG seed (stage 2) */
 	bm->lsn_off = opts->lsn_off;       /* -1 disables page-LSN handling */
 	atomic_store_explicit(&bm->cur_lsn, 0, memory_order_relaxed);
 	bm->wal_flush = NULL;
@@ -1890,7 +2082,11 @@ pp_proc(void *arg)
 		/* Pass 3: keep the free list above the cool target. */
 		while (atomic_load_explicit(&bm->free_n, memory_order_relaxed)
 		    < bm->cool_target) {
+#ifdef BM_SAMPLED_EVICT
+			if (!(bm->scan_resist ? sample_evict_one(bm) : evict_one(bm))) break;
+#else
 			if (!evict_one(bm)) break;
+#endif
 		}
 		if (xtc_proc_sleep(interval) != XTC_OK)
 			break;
