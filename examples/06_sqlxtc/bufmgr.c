@@ -30,6 +30,7 @@
 #include <fcntl.h>
 
 #include <pthread.h>
+#include <stddef.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -40,8 +41,58 @@
 /* ---- frame states ---- */
 enum { BM_FREE = 0, BM_HOT, BM_COOL, BM_LOADED, BM_WRITING };
 
+/* Cache line for the descriptor split (Invariant 2).  64 on x86-64 /
+ * aarch64; harmless if a target's real line differs (only affects
+ * padding, never correctness). */
+#ifndef BM_CACHELINE
+#define BM_CACHELINE 64
+#endif
+
 struct bm_frame {
-	_Atomic uint8_t   state;
+	/*
+	 * CACHE-LINE SPLIT (numa-buffer-pool-design.md section 5, Invariant
+	 * 2: no line holds both read-mostly and write-mostly fields).  The
+	 * read fast path (ht_lookup_pin_fast + the OLC descent) reads pid /
+	 * hnext / page / version on EVERY fix of a resident page; the
+	 * evictor / writers write state / pin / dirty / ref rarely.  Keeping
+	 * them on separate lines means a reader holding line 0 in S state is
+	 * not invalidated by an evictor writing line 1 -- the false sharing
+	 * that would otherwise bounce the hottest pages' cache line on every
+	 * state write.  Independent of the epoch work; a pure layout win.
+	 */
+
+	/* ---- LINE 0: READ-MOSTLY (the fix fast path) ----
+	 * pid and hnext are _Atomic so a HIT re-pin of an already-resident
+	 * frame can walk the bucket chain lock-free (see ht_lookup_pin_fast):
+	 * the writer side (insert on a miss, remove on evict/drop) still
+	 * holds the bucket's stripe mutex while it mutates the chain, but
+	 * publishes with a release store; a lock-free reader loads with
+	 * acquire and re-validates pid after pinning (the same
+	 * pin-then-recheck discipline the OLC content-version seqlock below
+	 * uses for page bytes).  Frames are never freed -- only recycled in
+	 * place across the fixed-size pool -- so a lock-free reader mid-walk
+	 * can safely dereference a frame that was just unlinked; it can only
+	 * ever observe a STALE pid there (caught by the recheck), never
+	 * invalid memory. */
+	_Atomic bm_pid_t  pid;
+	_Atomic(struct bm_frame *) hnext;   /* page-table hash chain */
+	void             *page;       /* page_size bytes (into the pool) */
+	xtc_arwlock_t    *latch;      /* content latch (fiber-yielding) */
+	_Atomic uint64_t  version;    /* OLC seqlock: EVEN when stable, ODD while
+	                               * an exclusive holder is mutating the page.
+	                               * An optimistic reader samples it before and
+	                               * after reading the page and retries if it
+	                               * changed or is odd -- so a lockless read
+	                               * never observes a torn mid-write page and
+	                               * takes no shared-latch write of its own. */
+	struct bm_frame  *next_free;  /* free-list link; touched only when FREE */
+
+	/* ---- LINE 1: WRITE-MOSTLY (evictor / writers) ----
+	 * _Alignas(BM_CACHELINE) forces this field onto a fresh cache line,
+	 * so the compiler pads line 0 automatically -- no fragile manual
+	 * pad arithmetic, and the write-mostly group can never share a line
+	 * with the read-mostly group regardless of field sizes. */
+	_Alignas(BM_CACHELINE) _Atomic uint8_t   state;
 	_Atomic int       pin;        /* >0: a worker holds it; do not evict */
 	_Atomic int       io_busy;    /* a write is in flight */
 	_Atomic int       dirty;      /* page modified since last write */
@@ -66,32 +117,21 @@ struct bm_frame {
 	_Atomic uint64_t  dirty_seq;  /* order it was dirtied (recLSN proxy) */
 	_Atomic uint64_t  rec_lsn;    /* WAL LSN that first dirtied it since clean
 	                               * (the ARIES recLSN; log truncation horizon) */
-	/*
-	 * pid and hnext are _Atomic so a HIT re-pin of an already-resident
-	 * frame can walk the bucket chain lock-free (see ht_lookup_pin_fast):
-	 * the writer side (insert on a miss, remove on evict/drop) still
-	 * holds the bucket's stripe mutex while it mutates the chain, but
-	 * publishes with a release store; a lock-free reader loads with
-	 * acquire and re-validates pid after pinning (the same
-	 * pin-then-recheck discipline the OLC content-version seqlock above
-	 * uses for page bytes).  Frames are never freed -- only recycled in
-	 * place across the fixed-size pool -- so a lock-free reader mid-walk
-	 * can safely dereference a frame that was just unlinked; it can only
-	 * ever observe a STALE pid there (caught by the recheck), never
-	 * invalid memory. */
-	_Atomic bm_pid_t  pid;
-	_Atomic(struct bm_frame *) hnext;   /* page-table hash chain */
-	void             *page;       /* page_size bytes (into the pool) */
-	struct bm_frame  *next_free;
-	xtc_arwlock_t    *latch;      /* content latch (fiber-yielding) */
-	_Atomic uint64_t  version;    /* OLC seqlock: EVEN when stable, ODD while
-	                               * an exclusive holder is mutating the page.
-	                               * An optimistic reader samples it before and
-	                               * after reading the page and retries if it
-	                               * changed or is odd -- so a lockless read
-	                               * never observes a torn mid-write page and
-	                               * takes no shared-latch write of its own. */
+	char              _pad1[1];   /* keep the write-mostly group padded out;
+	                               * the _Alignas on `state` gives the struct
+	                               * BM_CACHELINE alignment, so sizeof rounds up
+	                               * to a multiple of the line automatically */
 };
+
+/* Invariant 2 (numa-buffer-pool-design.md section 5): the write-mostly
+ * group must start on a DIFFERENT cache line from the read-mostly group,
+ * so an evictor writing state/pin/dirty does not invalidate the line a
+ * reader holds for pid/version.  If a field is moved across the split,
+ * these fire at compile time. */
+_Static_assert(offsetof(struct bm_frame, state) == BM_CACHELINE,
+    "bm_frame write-mostly fields must begin on cache line 1");
+_Static_assert(offsetof(struct bm_frame, version) < BM_CACHELINE,
+    "bm_frame read-mostly version must stay on cache line 0");
 
 /*
  * Page-table lock striping: instead of one global mutex over all hash
@@ -894,16 +934,24 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 		}
 	}
 
-	if ((bm->frames = xtc_calloc(bm->n_frames, sizeof *bm->frames))
-	    == NULL) { close(bm->fd); xtc_free(bm); return XTC_E_NOMEM; }
+	/* bm_frame is _Alignas(BM_CACHELINE) (descriptor split, Invariant 2),
+	 * so the array base must be cache-line aligned or element 0 is
+	 * misaligned (UBSan trap; also defeats the split).  xtc_aligned_alloc
+	 * does not zero, so memset the array (the atomic fields rely on a
+	 * zero initial state -- BM_FREE == 0, pin 0, etc.).  Pair with
+	 * xtc_aligned_free everywhere. */
+	if ((bm->frames = xtc_aligned_alloc(BM_CACHELINE,
+	    (size_t)bm->n_frames * sizeof *bm->frames)) == NULL)
+		{ close(bm->fd); xtc_free(bm); return XTC_E_NOMEM; }
+	memset(bm->frames, 0, (size_t)bm->n_frames * sizeof *bm->frames);
 	if ((bm->pool = xtc_aligned_alloc(4096,
 	    (size_t)bm->n_frames * bm->page_size)) == NULL) {
-		xtc_free(bm->frames); close(bm->fd); xtc_free(bm); return XTC_E_NOMEM;
+		xtc_aligned_free(bm->frames); close(bm->fd); xtc_free(bm); return XTC_E_NOMEM;
 	}
 	for (i = 0; i < bm->n_frames; i++) {
 		bm->frames[i].page = bm->pool + (size_t)i * bm->page_size;
 		if ((rc = xtc_arwlock_create(&bm->frames[i].latch)) != XTC_OK) {
-			xtc_aligned_free(bm->pool); xtc_free(bm->frames);
+			xtc_aligned_free(bm->pool); xtc_aligned_free(bm->frames);
 			close(bm->fd); xtc_free(bm); return rc;
 		}
 		free_push(bm, &bm->frames[i]);
@@ -913,7 +961,7 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	while (bm->nbucket < bm->n_frames * 2u) bm->nbucket <<= 1;
 	if ((bm->ht_locks = xtc_calloc(BM_HT_STRIPES, sizeof *bm->ht_locks))
 	    == NULL) {
-		xtc_aligned_free(bm->pool); xtc_free(bm->frames);
+		xtc_aligned_free(bm->pool); xtc_aligned_free(bm->frames);
 		close(bm->fd); xtc_free(bm); return XTC_E_NOMEM;
 	}
 	for (i = 0; i < (int)BM_HT_STRIPES; i++)
@@ -921,7 +969,7 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	if ((bm->buckets = xtc_calloc(bm->nbucket, sizeof *bm->buckets))
 	    == NULL) {
 		xtc_free(bm->ht_locks);
-		xtc_aligned_free(bm->pool); xtc_free(bm->frames);
+		xtc_aligned_free(bm->pool); xtc_aligned_free(bm->frames);
 		close(bm->fd); xtc_free(bm); return XTC_E_NOMEM;
 	}
 	bm->next_pid = 1;          /* pid 0 reserved as "none" / superblock */
@@ -971,7 +1019,7 @@ bm_destroy(bm_t *bm)
 	xtc_free(bm->quar_pids);
 	xtc_free(bm->quar_set);
 	xtc_aligned_free(bm->pool);
-	xtc_free(bm->frames);
+	xtc_aligned_free(bm->frames);
 	xtc_free(bm);
 }
 
@@ -1518,6 +1566,15 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 	bm_frame_t *f;
 	if (bm == NULL || out_frame == NULL || pid == BM_PID_NONE)
 		return XTC_E_INVAL;
+#ifdef BM_ACCESS_PROBE
+	/* Research spike (numa-buffer-pool-design.md sharing-degree premise):
+	 * observe every page access at the single choke point.  Zero-cost
+	 * and absent unless the probe build defines BM_ACCESS_PROBE; a weak
+	 * hook the probe program supplies.  Not part of the shipped bufmgr. */
+	extern void bm_access_probe(bm_pid_t pid) __attribute__((weak));
+	if (bm_access_probe)
+		bm_access_probe(pid);
+#endif
 	for (;;) {
 		/* Lock-free hit path first (no bucket-stripe mutex): this is
 		 * what removes the read-scaling ceiling item 1a measured --

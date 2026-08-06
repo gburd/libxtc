@@ -530,3 +530,11 @@ test-sql-parse: ../../test/sqlxtc/test_sql_parse
 	$(CC) $(CFLAGS) -o $@ $< sql_parse.o $(LIME_OBJ)
 
 .PHONY: test-quack test-sql-parse-par-ord-join-run
+
+# ---- NUMA buffer-pool sharing-degree PREMISE PROBE (research spike) ----
+# Builds bufmgr with the BM_ACCESS_PROBE hook enabled and links the probe.
+bufmgr_probe.o: bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -DBM_ACCESS_PROBE=1 -c -o $@ bufmgr.c
+
+numa_claim_probe: numa_claim_probe.c btree.c bufmgr_probe.o btnode.c
+	$(CC) $(CFLAGS) -o $@ numa_claim_probe.c btree.c bufmgr_probe.o btnode.c $(LDFLAGS)
