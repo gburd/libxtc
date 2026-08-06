@@ -41,6 +41,11 @@
 /* ---- frame states ---- */
 enum { BM_FREE = 0, BM_HOT, BM_COOL, BM_LOADED, BM_WRITING };
 
+/* Stage 5 sharing-degree classes (design 7.4).  0 == TRANSIENT so a
+ * zeroed frame reads as "scan/unclassified" until the classifier tags
+ * it.  Only meaningful when built -DBM_CLASSIFY. */
+enum { BM_CLS_TRANSIENT = 0, BM_CLS_COLD, BM_CLS_LOCAL_HOT, BM_CLS_SHARED_HOT };
+
 /* Cache line for the descriptor split (Invariant 2).  64 on x86-64 /
  * aarch64; harmless if a target's real line differs (only affects
  * padding, never correctness). */
@@ -117,6 +122,11 @@ struct bm_frame {
 	_Atomic uint64_t  dirty_seq;  /* order it was dirtied (recLSN proxy) */
 	_Atomic uint64_t  rec_lsn;    /* WAL LSN that first dirtied it since clean
 	                               * (the ARIES recLSN; log truncation horizon) */
+	_Atomic uint8_t   cls_cache;  /* stage 5: cached sharing-degree class
+	                               * (BM_CLS_*), refreshed on the classify
+	                               * tick; advisory input to sample_score.
+	                               * On the write-mostly line (rare write,
+	                               * batched) -- Invariant 2 safe. */
 	char              _pad1[1];   /* keep the write-mostly group padded out;
 	                               * the _Alignas on `state` gives the struct
 	                               * BM_CACHELINE alignment, so sizeof rounds up
@@ -784,6 +794,19 @@ sample_score(bm_t *bm, bm_frame_t *f)
 		s += 1000;                   /* recently used: strongly prefer to keep */
 	if (atomic_load_explicit(&f->dirty, memory_order_relaxed))
 		s += 200;                    /* prefer clean victims (W_DIRTY) */
+#ifdef BM_CLASSIFY
+	/* Stage 5: sharing-degree class dominates the score (design 8.2 /
+	 * section-13 weights).  A SHARED_HOT page (the index root, read by
+	 * every domain) is effectively pinned; LOCAL_HOT is protected; a
+	 * TRANSIENT (scan) page is evicted first.  cls_cache is refreshed on
+	 * the classify tick; 0 (BM_CLS_TRANSIENT) until first classified. */
+	switch (atomic_load_explicit(&f->cls_cache, memory_order_relaxed)) {
+	case BM_CLS_SHARED_HOT: s += 1000000; break;
+	case BM_CLS_LOCAL_HOT:  s += 1000;    break;
+	case BM_CLS_TRANSIENT:  s -= 500;     break;
+	case BM_CLS_COLD:       default:      break;
+	}
+#endif
 	return s;
 }
 
