@@ -1120,8 +1120,25 @@ bt_lookup_optimistic(bt_t *bt, const void *key, uint16_t klen,
 		int depth = 0;
 		int conflict = 0;
 
+#ifdef BM_EPOCH_FASTPATH
+		/* Pin-free epoch descent: NO pin CAS on any hop -- zero shared
+		 * write on the read path (Invariant 1).  Safety is by the
+		 * version bracket + a pid recheck after each node read (a reload
+		 * bumps version).  The whole descent is CPU-bound with no fiber
+		 * yield (no content latch, no await), so no pin is needed to
+		 * hold residency across a park.  A miss (NULL) or any ambiguity
+		 * falls through to XTC_E_AGAIN and the pinned latched descent. */
+		f = bm_fix_pid_nopin(bm, pid);
+		if (f == NULL)
+			return XTC_E_AGAIN;
+#else
 		if (bm_fix_pid(bm, pid, &f) != XTC_OK)
 			return XTC_E_AGAIN;
+#endif
+
+#ifdef BM_EPOCH_FASTPATH
+		bm_pid_t cur_pid = pid;   /* pid of the frame `f` currently held */
+#endif
 
 		for (;;) {
 			void *pg = bm_page(f);
@@ -1168,19 +1185,34 @@ bt_lookup_optimistic(bt_t *bt, const void *key, uint16_t klen,
 			}
 			/* validate: did a writer touch the frame? */
 			if (!bm_read_valid(f, v)) { conflict = 1; break; }
+#ifdef BM_EPOCH_FASTPATH
+			/* Pin-free: also confirm the frame still names the pid we
+			 * descended to.  A reload bumps version (caught above), but
+			 * recheck pid too as belt-and-suspenders against a version
+			 * wrap -- a mismatch means the frame was reissued under us. */
+			if (bm_frame_pid(f) != cur_pid) { conflict = 1; break; }
+#endif
 
 			if (dead || below_lo) { conflict = 1; break; }
 			if (beyond_hi) {
 				bm_frame_t *nf;
 				if (rsib == 0) { conflict = 1; break; }
+#ifdef BM_EPOCH_FASTPATH
+				nf = bm_fix_pid_nopin(bm, (bm_pid_t)rsib);
+				if (nf == NULL) { conflict = 1; break; }
+				cur_pid = (bm_pid_t)rsib;
+#else
 				if (bm_fix_pid(bm, (bm_pid_t)rsib, &nf)
 				    != XTC_OK) { conflict = 1; break; }
 				bm_unfix(bm, f, 0);
+#endif
 				f = nf;
 				continue;              /* B-link hop */
 			}
 			if (is_leaf) {
+#ifndef BM_EPOCH_FASTPATH
 				bm_unfix(bm, f, 0);
+#endif
 				if (!found)
 					return XTC_E_NOTFOUND;
 				if (vlen != NULL) *vlen = vl;
@@ -1194,14 +1226,22 @@ bt_lookup_optimistic(bt_t *bt, const void *key, uint16_t klen,
 			if (child == BM_PID_NONE) { conflict = 1; break; }
 			{
 				bm_frame_t *cf;
+#ifdef BM_EPOCH_FASTPATH
+				cf = bm_fix_pid_nopin(bm, child);
+				if (cf == NULL) { conflict = 1; break; }
+				cur_pid = child;
+#else
 				if (bm_fix_pid(bm, child, &cf) != XTC_OK) {
 					conflict = 1; break;
 				}
 				bm_unfix(bm, f, 0);
+#endif
 				f = cf;
 			}
 		}
+#ifndef BM_EPOCH_FASTPATH
 		bm_unfix(bm, f, 0);
+#endif
 		if (conflict)
 			continue;
 	}

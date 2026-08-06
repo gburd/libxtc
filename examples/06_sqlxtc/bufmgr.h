@@ -240,6 +240,26 @@ void bm_unlatch(bm_frame_t *frame);
 int bm_read_begin(const bm_frame_t *frame, uint64_t *out_v);
 int bm_read_valid(const bm_frame_t *frame, uint64_t v);
 
+/*
+ * Epoch / pin-free read-hit path (NUMA buffer-pool stage 1, opt-in under
+ * -DBM_EPOCH_FASTPATH).  bm_fix_pid_nopin resolves a resident pid to its
+ * frame WITHOUT taking a pin -- ZERO shared-line write, so it does not
+ * bounce the hot page's cache line the way the pin CAS does (Invariant
+ * 1).  Safety is by RE-VALIDATION, not by holding a pin: frames are
+ * never freed (only recycled in the fixed pool), so the returned pointer
+ * is always safe to dereference; a caller reads the page bytes under a
+ * bm_read_begin/bm_read_valid version bracket AND re-checks that the
+ * frame still names `pid` (bm_frame_pid) afterward.  A reload bumps the
+ * version (+2), so an evict-and-reissue under the reader is caught by
+ * bm_read_valid; the pid recheck is the belt-and-suspenders for the
+ * (vanishingly rare) version-wrap case.  Returns the frame on a
+ * resident hit, or NULL (miss -- caller falls back to the pinned
+ * bm_fix_pid).  MUST be used only for a read that does NOT yield the
+ * fiber between the nopin fix and the validated read (the OLC lookup
+ * descent -- no content latch, no await -- qualifies).
+ */
+bm_frame_t *bm_fix_pid_nopin(bm_t *bm, bm_pid_t pid);
+
 /* Spawn the page-provider process on `loop`: it proactively cools and
  * flushes pages so free frames stay available.  Optional -- demand
  * eviction works without it.  Stop it with bm_provider_stop. */
