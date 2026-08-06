@@ -705,6 +705,41 @@ ht_lookup_pin_fast(bm_t *bm, bm_pid_t pid)
 	return NULL;   /* not resident (or a lock-free walk that lost a race) */
 }
 
+/*
+ * bm_fix_pid_nopin -- resolve a resident pid to its frame with NO pin
+ * and NO shared-line write (Invariant 1).  Same lock-free chain walk as
+ * ht_lookup_pin_fast, but WITHOUT try_pin: the caller validates safety
+ * by re-checking pid + the OLC version after reading, not by holding a
+ * pin.  Frames are never freed, so the returned pointer is always safe
+ * to dereference; the worst case is a stale/reissued frame, caught by
+ * the caller's post-read revalidation.  Returns NULL on a miss (caller
+ * falls back to the pinned path).
+ */
+bm_frame_t *
+bm_fix_pid_nopin(bm_t *bm, bm_pid_t pid)
+{
+	uint32_t b;
+	bm_frame_t *f;
+
+	if (bm == NULL || pid == BM_PID_NONE)
+		return NULL;
+	b = (uint32_t)(pid % bm->nbucket);
+	f = atomic_load_explicit(&bm->buckets[b], memory_order_acquire);
+	while (f != NULL) {
+		if (atomic_load_explicit(&f->pid, memory_order_acquire) == pid) {
+			/* Do NOT touch state (no COOL->HOT flip): that would be a
+			 * shared write on the hit path, defeating the purpose.  A
+			 * pin-free reader does not rescue a COOL page; the pinned
+			 * path (or a subsequent real fix) does.  Residency for the
+			 * duration of this read is guaranteed by revalidation, not
+			 * by keeping the page HOT. */
+			return f;
+		}
+		f = atomic_load_explicit(&f->hnext, memory_order_acquire);
+	}
+	return NULL;
+}
+
 /* Try to drive one unpinned frame all the way to FREE.  Returns 1 if a
  * frame was reclaimed.  Swip-mode frames evict by CAS-ing the parent
  * Swip to EVICTED; page-table (pid-mode) frames evict by removing the
@@ -1612,6 +1647,16 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 		 * of the pin is safe here. */
 		atomic_store_explicit(&f->pin, 1, memory_order_release);
 		atomic_store_explicit(&f->state, BM_LOADED, memory_order_relaxed);
+		/* Bump the frame version across a (re)load so the OLC seqlock
+		 * ALSO detects a content reissue, not just an in-place write.
+		 * This is what lets a PIN-FREE epoch reader
+		 * (bm_fix_pid_nopin / bt_lookup_optimistic) validate safety by
+		 * version alone: a frame evicted out from under it and reloaded
+		 * as a different pid changes version, so bm_read_valid fails and
+		 * the reader retries.  +2 keeps it even (stable) for the next
+		 * reader.  Rare path (a miss), so this write to the read-mostly
+		 * line is not on the hot hit path. */
+		atomic_fetch_add_explicit(&f->version, 2, memory_order_release);
 		atomic_store_explicit(&f->pid, pid, memory_order_release);
 		atomic_store_explicit(&f->dirty, 0, memory_order_relaxed);
 		atomic_store_explicit(&f->doomed, 0, memory_order_relaxed);
