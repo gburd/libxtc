@@ -46,6 +46,40 @@ enum { BM_FREE = 0, BM_HOT, BM_COOL, BM_LOADED, BM_WRITING };
  * it.  Only meaningful when built -DBM_CLASSIFY. */
 enum { BM_CLS_TRANSIENT = 0, BM_CLS_COLD, BM_CLS_LOCAL_HOT, BM_CLS_SHARED_HOT };
 
+#ifdef BM_CLASSIFY
+/*
+ * Sharing-degree classifier (design Planes 1-2, sections 6-7),
+ * productionised from numa_claim_probe.  Per-carrier-cpu sketches
+ * (doorkeeper Bloom + decayed count-min) fed by the access hook in
+ * bm_fix_pid -- core-private writes only (Invariant 1).  Aggregated per
+ * NUMA domain on the provider tick; classify() then tags each resident
+ * frame's cls_cache.  All heap state hangs off struct bm so multiple
+ * pools are independent.
+ */
+#include <sched.h>
+#include "os_cpu.h"                 /* __os_ncpus, __os_numa_node_of_cpu */
+#define BM_CLS_WAYS      4
+#define BM_CLS_LOG_SLOTS 15
+#define BM_CLS_SLOTS     (1u << BM_CLS_LOG_SLOTS)
+#define BM_CLS_GENS      4          /* decay ring */
+#define BM_CLS_DK_BITS   17
+#define BM_CLS_DK_WORDS  (1u << (BM_CLS_DK_BITS - 6))
+#define BM_CLS_MAXCORES  512
+#define BM_CLS_MAXDOM    8          /* coherence domains tracked */
+/* classification thresholds (design section 13) */
+#define BM_CLS_SHARE_MIN_FREQ   4   /* per-domain estimate to count a domain */
+#define BM_CLS_SHARED_DEG_MIN   2   /* domains touching => SHARED_HOT */
+#define BM_CLS_SHARED_FREQ_MIN  64
+#define BM_CLS_LOCAL_FREQ_MIN   8
+
+typedef struct {
+	uint8_t  cm[BM_CLS_GENS][BM_CLS_SLOTS];  /* 8-bit count-min per gen */
+	uint64_t dk[BM_CLS_DK_WORDS];            /* doorkeeper Bloom (cur gen) */
+	uint32_t cur_gen;
+	uint64_t last_tick;
+} bm_cls_sketch_t;
+#endif /* BM_CLASSIFY */
+
 /* Cache line for the descriptor split (Invariant 2).  64 on x86-64 /
  * aarch64; harmless if a target's real line differs (only affects
  * padding, never correctness). */
@@ -176,6 +210,17 @@ struct bm {
 	uint32_t          n_frames;
 	uint32_t          cool_target; /* keep this many frames free+cool */
 	int               scan_resist; /* probation + COOL-first eviction */
+#ifdef BM_CLASSIFY
+	/* Stage 5 classifier state (all lazily allocated).  sketch[cpu] is
+	 * core-private on the fast path; agg[dom] is the per-domain merged
+	 * count-min the classify tick reads. */
+	bm_cls_sketch_t  *cls_sketch[BM_CLS_MAXCORES];
+	uint32_t         *cls_agg[BM_CLS_MAXDOM];   /* [BM_CLS_SLOTS] each */
+	int               cls_ncores;
+	int               cls_ndom;
+	uint8_t           cls_core_dom[BM_CLS_MAXCORES];
+	_Atomic uint64_t  cls_gen_tick;
+#endif
 	bm_frame_t       *frames;
 	unsigned char    *pool;        /* n_frames * page_size, aligned */
 
@@ -764,6 +809,158 @@ bm_fix_pid_nopin(bm_t *bm, bm_pid_t pid)
 	return NULL;
 }
 
+#ifdef BM_CLASSIFY
+/* ---- sharing-degree classifier (stage 5) ---- */
+
+static inline uint64_t
+bm_cls_hash(bm_pid_t x)
+{
+	x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+	x ^= x >> 27; x *= 0x94D049BB133111EBull;
+	x ^= x >> 31;
+	return x;
+}
+
+static inline int
+bm_cls_domain_of_cpu(int cpu)
+{
+	int n = __os_numa_node_of_cpu(cpu);
+	if (n < 0) n = 0;
+	return n % BM_CLS_MAXDOM;
+}
+
+/* THE access-hook body: record one page access into THIS carrier's
+ * private sketch.  Core-private stores only -- no coherence traffic
+ * (Invariant 1).  Called from bm_fix_pid via the BM_ACCESS_PROBE seam. */
+static void
+bm_cls_record(bm_t *bm, bm_pid_t pid)
+{
+	int cpu = sched_getcpu();
+	bm_cls_sketch_t *s;
+	uint64_t h, tick;
+	int w;
+
+	if (cpu < 0) cpu = 0;
+	if (cpu >= bm->cls_ncores) cpu %= (bm->cls_ncores > 0 ? bm->cls_ncores : 1);
+	s = bm->cls_sketch[cpu];
+	if (s == NULL) return;
+
+	tick = atomic_load_explicit(&bm->cls_gen_tick, memory_order_relaxed);
+	if (tick != s->last_tick) {
+		s->last_tick = tick;
+		s->cur_gen = (s->cur_gen + 1) & (BM_CLS_GENS - 1);
+		memset(s->cm[s->cur_gen], 0, BM_CLS_SLOTS);
+		memset(s->dk, 0, sizeof(s->dk));
+	}
+
+	h = bm_cls_hash(pid);
+	{
+		uint32_t b = (uint32_t)(h >> 20) & ((1u << BM_CLS_DK_BITS) - 1);
+		uint64_t *dw = &s->dk[b >> 6];
+		uint64_t m = 1ull << (b & 63);
+		if (*dw & m) {                 /* seen before this gen: count it */
+			for (w = 0; w < BM_CLS_WAYS; w++) {
+				uint32_t i = (uint32_t)(h >> (w * 13)) & (BM_CLS_SLOTS - 1);
+				uint8_t *p = &s->cm[s->cur_gen][i];
+				if (*p < 255) (*p)++;
+			}
+		} else {
+			*dw |= m;              /* first sight: doorkeeper only (scan filter) */
+		}
+	}
+}
+
+static const uint8_t bm_cls_decay[BM_CLS_GENS] = { 8, 4, 2, 1 };
+
+static void
+bm_cls_aggregate(bm_t *bm)
+{
+	int d, c;
+	uint32_t i, age;
+	for (d = 0; d < bm->cls_ndom; d++)
+		if (bm->cls_agg[d] != NULL)
+			memset(bm->cls_agg[d], 0, sizeof(uint32_t) * BM_CLS_SLOTS);
+	for (c = 0; c < bm->cls_ncores; c++) {
+		bm_cls_sketch_t *s = bm->cls_sketch[c];
+		uint32_t *agg;
+		if (s == NULL) continue;
+		d = bm->cls_core_dom[c];
+		agg = bm->cls_agg[d];
+		if (agg == NULL) continue;
+		for (age = 0; age < BM_CLS_GENS; age++) {
+			uint32_t gi = (s->cur_gen - age) & (BM_CLS_GENS - 1);
+			uint8_t wgt = bm_cls_decay[age];
+			const uint8_t *cm = s->cm[gi];
+			for (i = 0; i < BM_CLS_SLOTS; i++)
+				agg[i] += (uint32_t)cm[i] * wgt;
+		}
+	}
+}
+
+static uint32_t
+bm_cls_estimate(bm_t *bm, int d, uint64_t h)
+{
+	uint32_t m = 0xFFFFFFFFu;
+	int w;
+	const uint32_t *agg = bm->cls_agg[d];
+	if (agg == NULL) return 0;
+	for (w = 0; w < BM_CLS_WAYS; w++) {
+		uint32_t v = agg[(uint32_t)(h >> (w * 13)) & (BM_CLS_SLOTS - 1)];
+		if (v < m) m = v;
+	}
+	return m;
+}
+
+static uint8_t
+bm_cls_classify(bm_t *bm, bm_pid_t pid)
+{
+	uint64_t h = bm_cls_hash(pid);
+	uint32_t f = 0;
+	int deg = 0, d;
+	for (d = 0; d < bm->cls_ndom; d++) {
+		uint32_t e = bm_cls_estimate(bm, d, h);
+		f += e;
+		if (e >= BM_CLS_SHARE_MIN_FREQ) deg++;
+	}
+	if (f == 0) return BM_CLS_TRANSIENT;
+	if (deg >= BM_CLS_SHARED_DEG_MIN && f >= BM_CLS_SHARED_FREQ_MIN)
+		return BM_CLS_SHARED_HOT;
+	if (f >= BM_CLS_LOCAL_FREQ_MIN) return BM_CLS_LOCAL_HOT;
+	return BM_CLS_COLD;
+}
+
+static void
+bm_cls_tick(bm_t *bm)
+{
+	uint32_t i;
+	if (bm->cls_ncores == 0) return;
+	bm_cls_aggregate(bm);
+	for (i = 0; i < bm->n_frames; i++) {
+		bm_frame_t *f = &bm->frames[i];
+		uint8_t st = atomic_load_explicit(&f->state, memory_order_acquire);
+		if (st != BM_HOT && st != BM_COOL) continue;
+		atomic_store_explicit(&f->cls_cache,
+		    bm_cls_classify(bm, atomic_load_explicit(&f->pid, memory_order_relaxed)),
+		    memory_order_relaxed);
+	}
+	atomic_fetch_add_explicit(&bm->cls_gen_tick, 1, memory_order_relaxed);
+}
+
+static void
+bm_cls_ensure(bm_t *bm)
+{
+	int cpu = sched_getcpu();
+	if (cpu < 0) cpu = 0;
+	if (cpu >= bm->cls_ncores) return;
+	if (bm->cls_sketch[cpu] == NULL) {
+		bm_cls_sketch_t *s = calloc(1, sizeof(*s));
+		if (s == NULL) return;
+		bm->cls_sketch[cpu] = s;   /* benign racy install (single per cpu) */
+		bm->cls_core_dom[cpu] = (uint8_t)bm_cls_domain_of_cpu(cpu);
+	}
+}
+#endif /* BM_CLASSIFY */
+
 /*
  * Stage 2 (numa-buffer-pool-design.md section 8.2): SAMPLED power-of-D
  * victim selection, an alternative to the CLOCK sweep in evict_one,
@@ -1134,6 +1331,25 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	atomic_store_explicit(&bm->evict_rng,
 	    0x9E3779B97F4A7C15ull ^ ((uint64_t)(uintptr_t)bm),
 	    memory_order_relaxed);   /* sampled-eviction PRNG seed (stage 2) */
+#ifdef BM_CLASSIFY
+	{
+		int nc = __os_ncpus();
+		int dd, nd = 0, cc;
+		if (nc < 1) nc = 1;
+		if (nc > BM_CLS_MAXCORES) nc = BM_CLS_MAXCORES;
+		bm->cls_ncores = nc;
+		/* domain count = distinct NUMA nodes over the cpus, capped. */
+		for (cc = 0; cc < nc; cc++) {
+			int d = bm_cls_domain_of_cpu(cc);
+			if (d + 1 > nd) nd = d + 1;
+		}
+		if (nd < 1) nd = 1;
+		if (nd > BM_CLS_MAXDOM) nd = BM_CLS_MAXDOM;
+		bm->cls_ndom = nd;
+		for (dd = 0; dd < nd; dd++)
+			bm->cls_agg[dd] = calloc(BM_CLS_SLOTS, sizeof(uint32_t));
+	}
+#endif
 	bm->lsn_off = opts->lsn_off;       /* -1 disables page-LSN handling */
 	atomic_store_explicit(&bm->cur_lsn, 0, memory_order_relaxed);
 	bm->wal_flush = NULL;
@@ -1268,6 +1484,15 @@ bm_destroy(bm_t *bm)
 	xtc_free(bm->free_pids);
 	xtc_free(bm->quar_pids);
 	xtc_free(bm->quar_set);
+#ifdef BM_CLASSIFY
+	{
+		int k;
+		for (k = 0; k < bm->cls_ncores; k++)
+			free(bm->cls_sketch[k]);
+		for (k = 0; k < bm->cls_ndom; k++)
+			free(bm->cls_agg[k]);
+	}
+#endif
 	xtc_aligned_free(bm->pool);
 	xtc_aligned_free(bm->frames);
 	xtc_free(bm);
@@ -1816,6 +2041,12 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 	bm_frame_t *f;
 	if (bm == NULL || out_frame == NULL || pid == BM_PID_NONE)
 		return XTC_E_INVAL;
+#ifdef BM_CLASSIFY
+	/* Stage 5: feed the sharing-degree classifier at the single access
+	 * choke point -- core-private sketch writes only (Invariant 1). */
+	bm_cls_ensure(bm);
+	bm_cls_record(bm, pid);
+#endif
 #ifdef BM_ACCESS_PROBE
 	/* Research spike (numa-buffer-pool-design.md sharing-degree premise):
 	 * observe every page access at the single choke point.  Zero-cost
@@ -2111,6 +2342,11 @@ pp_proc(void *arg)
 			if (!evict_one(bm)) break;
 #endif
 		}
+#ifdef BM_CLASSIFY
+		/* Stage 5: aggregate the per-carrier sketches and re-tag every
+		 * resident frame's class on the provider cadence. */
+		bm_cls_tick(bm);
+#endif
 		if (xtc_proc_sleep(interval) != XTC_OK)
 			break;
 	}
