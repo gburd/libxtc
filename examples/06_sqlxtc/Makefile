@@ -538,3 +538,11 @@ bufmgr_probe.o: bufmgr.c bufmgr.h
 
 numa_claim_probe: numa_claim_probe.c btree.c bufmgr_probe.o btnode.c
 	$(CC) $(CFLAGS) -o $@ numa_claim_probe.c btree.c bufmgr_probe.o btnode.c $(LDFLAGS)
+
+# ---- eviction-policy research prototype (standalone, no libxtc/bufmgr) ----
+# Self-contained proving ground for the NUMA buffer-pool eviction policy
+# (sampled power-of-D victim selection, reversible cooling ring, W-TinyLFU
+# admission + doorkeeper).  Pure policy module over a synthetic trace;
+# self-checks the design's key properties with plain assert().
+evict_policy_proto: evict_policy_proto.c
+	$(CC) $(CFLAGS) -o $@ evict_policy_proto.c
