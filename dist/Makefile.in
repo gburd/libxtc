@@ -466,6 +466,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_runtime \
 		  test_stats \
 		  test_dump \
+		  test_trace_causal \
 		  test_backtrace \
 		  test_tls_basic \
 		  test_tls_server \
@@ -1660,6 +1661,12 @@ test_dump: $(srcdir)/../test/m12/test_dump.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
 		-o $@ $(srcdir)/../test/m12/test_dump.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_trace_causal: $(srcdir)/../test/m12/test_trace_causal.c \
+		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
+		-o $@ $(srcdir)/../test/m12/test_trace_causal.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # Linked -rdynamic so the test's own external-linkage chain functions

@@ -15,6 +15,7 @@
 #include "xtc_int.h"
 #include "xtc_dump.h"
 #include "xtc_inspect.h"
+#include "xtc_trace.h"
 #include "os_backtrace.h"
 
 #include <stdarg.h>
@@ -92,7 +93,22 @@ park_name(int p)
 	}
 }
 
+/* A3 causal-trace boundary labels (match enum xtc_causal_kind). */
+static const char *
+causal_kind_name(int k)
+{
+	switch (k) {
+	case XTC_CAUSAL_PARK_MAILBOX: return "park:mailbox";
+	case XTC_CAUSAL_PARK_TIMER:   return "park:timer";
+	case XTC_CAUSAL_PARK_FD:      return "park:fd";
+	case XTC_CAUSAL_RESUME:       return "resume";
+	default:                      return "?";
+	}
+}
+
 /* ---- inspect callbacks: format one line per loop / proc ---- */
+
+static void dump_causal(int fd, xtc_pid_t pid);
 
 static int
 dump_loop_cb(const xtc_loop_info_t *li, void *user)
@@ -122,7 +138,45 @@ dump_proc_cb(const xtc_proc_info_t *pi, void *user)
 	    (unsigned long long)pi->mbox_drop_total,
 	    pi->kill_pending ? " KILL" : "",
 	    pi->alive ? "" : " DEAD");
+
+	/* A3 async causal trace: splice "how did this fiber get here" --
+	 * the recent park/resume chain -- onto the state line above, when
+	 * the causal trace is enabled.  When off, xtc_trace_causal_dump
+	 * visits nothing (an empty ring) and this prints no extra line, so
+	 * a default build's dump is byte-for-byte unchanged. */
+	dump_causal(fd, pi->pid);
 	return 0;
+}
+
+/* Emit one causal record onto the proc's trace line (comma-separated,
+ * oldest-first).  cb state rides in a small struct so we can print the
+ * "    causal: " prefix only on the first record. */
+struct causal_ctx { int fd; int printed; };
+
+static int
+dump_causal_cb(const xtc_causal_rec_t *rec, void *user)
+{
+	struct causal_ctx *c = user;
+	if (!c->printed) {
+		dump_str(c->fd, "    causal: ");
+		c->printed = 1;
+	} else {
+		dump_str(c->fd, " -> ");
+	}
+	dump_fmt(c->fd, "%s@%s", causal_kind_name(rec->kind),
+	    rec->site != NULL ? rec->site : "?");
+	return 0;
+}
+
+static void
+dump_causal(int fd, xtc_pid_t pid)
+{
+	struct causal_ctx c;
+	c.fd = fd;
+	c.printed = 0;
+	(void)xtc_trace_causal_dump(pid, dump_causal_cb, &c);
+	if (c.printed)
+		dump_str(fd, "\n");
 }
 
 /* ---- public: the dump ---- */

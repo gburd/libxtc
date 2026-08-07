@@ -25,4 +25,14 @@
 void     *__xtc_proc_ctx_save(void);
 void      __xtc_proc_ctx_restore(void *ctx);
 
+/*
+ * A3 async causal trace hook: record one suspend/resume boundary on the
+ * CALLING proc's per-fiber ring.  `kind` is an enum xtc_causal_kind and
+ * `site` a static string label (e.g. __func__).  A no-op fast path (one
+ * relaxed load + branch) when the causal trace is disabled or off a
+ * proc, so a default build writes nothing on the park/resume path.
+ * Single-writer / core-private: called only on the proc's own fiber.
+ */
+void      __xtc_trace_causal(int kind, const char *site);
+
 #endif /* XTC_PROC_INT_H */

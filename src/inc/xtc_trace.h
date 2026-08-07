@@ -77,4 +77,63 @@ XTC_API int xtc_trace_dump(xtc_trace_fn cb, void *user);
 /* The current global HLC value (for tests and display). */
 XTC_API uint64_t xtc_hlc_now(void);
 
+/* ---- A3: async causal trace (per-fiber suspend/resume ring) ----
+ *
+ * Cats Effect keeps a small per-fiber ring of the await/resume call
+ * sites and splices that causal chain onto a fault or fiber dump, so a
+ * dump answers not just WHAT a fiber's state is now but HOW it got here.
+ * This is libxtc's C analog.  Where xtc_trace above records the causal
+ * chain of MESSAGES between procs (seq_trace), the causal trace here
+ * records the suspend/resume chain WITHIN one proc: the ordered sites at
+ * which the fiber parked and resumed (mailbox recv, timer sleep, fd
+ * wait, ...).  xtc_dump splices each proc's recent chain onto its state
+ * line when the trace is enabled.
+ *
+ * It is OFF by default and ZERO-COST when off: the per-proc ring is
+ * written only when the trace is enabled, so a disabled trace is a
+ * single relaxed-atomic load + branch on the suspend/resume boundary and
+ * touches no memory.  The ring is per-proc and core-private -- each
+ * write is one index bump and a store on the owning fiber, no lock, no
+ * atomic on the record, no allocation after spawn.  Enable it to debug a
+ * stuck or mis-scheduled fiber, not as an always-on tax.
+ *
+ * See docs/guide/debugging.md.
+ */
+
+/* The kind of suspend/resume boundary a causal record marks.  A PARK_*
+ * value names WHY the fiber suspended; RESUME marks the matching wake. */
+enum xtc_causal_kind {
+	XTC_CAUSAL_PARK_MAILBOX = 0,   /* parked in xtc_recv* (await a message) */
+	XTC_CAUSAL_PARK_TIMER   = 1,   /* parked in xtc_proc_sleep (a delay) */
+	XTC_CAUSAL_PARK_FD      = 2,   /* parked in xtc_proc_wait_fd (I/O) */
+	XTC_CAUSAL_RESUME       = 3    /* the fiber resumed after a park */
+};
+
+/* One per-fiber causal record: the boundary kind + a static site label
+ * (the __func__ of the park site, or a caller-supplied string literal --
+ * always a static string, so the ring stores the pointer, never a copy). */
+typedef struct xtc_causal_rec {
+	int          kind;    /* enum xtc_causal_kind */
+	const char  *site;    /* static label (e.g. __func__); never freed */
+} xtc_causal_rec_t;
+
+/* Visit callback: return 0 to continue, nonzero to stop early. */
+typedef int (*xtc_causal_fn)(const xtc_causal_rec_t *rec, void *user);
+
+/*
+ * PUBLIC: int xtc_trace_causal_enable __P((int));
+ * PUBLIC: int xtc_trace_causal_dump __P((xtc_pid_t, xtc_causal_fn, void *));
+ */
+
+/* Turn the per-fiber causal trace on (on != 0) or off.  Returns the
+ * previous state (1 on, 0 off).  Off by default; when off the
+ * suspend/resume boundary pays one relaxed load + branch. */
+XTC_API int xtc_trace_causal_enable(int on);
+
+/* Visit the causal records of proc `pid` oldest-first (the fiber's
+ * recent park/resume chain).  Returns the number visited, XTC_E_NOTFOUND
+ * if no live proc has that pid, or XTC_E_INVAL on a NULL callback.  When
+ * the trace is disabled a live proc simply has an empty ring (0). */
+XTC_API int xtc_trace_causal_dump(xtc_pid_t pid, xtc_causal_fn cb, void *user);
+
 #endif /* XTC_TRACE_H */

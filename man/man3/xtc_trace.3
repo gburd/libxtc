@@ -7,8 +7,10 @@
 .Nm xtc_trace_enable ,
 .Nm xtc_trace_reset ,
 .Nm xtc_trace_dump ,
-.Nm xtc_hlc_now
-.Nd causal message tracing (libxtc's seq_trace)
+.Nm xtc_hlc_now ,
+.Nm xtc_trace_causal_enable ,
+.Nm xtc_trace_causal_dump
+.Nd causal message tracing (libxtc's seq_trace) and the per-fiber async causal trace
 .Sh LIBRARY
 libxtc
 .Sh SYNOPSIS
@@ -23,6 +25,10 @@ libxtc
 .Fn xtc_trace_dump "xtc_trace_fn cb" "void *user"
 .Ft uint64_t
 .Fn xtc_hlc_now "void"
+.Ft int
+.Fn xtc_trace_causal_enable "int on"
+.Ft int
+.Fn xtc_trace_causal_dump "xtc_pid_t pid" "xtc_causal_fn cb" "void *user"
 .Sh DESCRIPTION
 .Nm xtc_trace
 is libxtc's
@@ -182,6 +188,95 @@ is the pointer passed to
 The per-shard HLC used by the MVCC data path
 is a separate, later use of the same clock idea; it is not the global
 trace clock described here.
+.Sh ASYNC CAUSAL TRACE
+Where the message trace above records the causal chain of messages
+.Em between
+procs, the
+.Sy async causal trace
+records the suspend/resume chain
+.Em within
+one proc: the ordered call sites at which a fiber parked and resumed
+.Pq a mailbox receive, a timer sleep, an fd wait .
+It answers a different question --
+.Dq how did THIS fiber get here
+-- and complements the current-state view of
+.Xr xtc_dump 3 ,
+which reports what a proc's state is now but not the path of
+suspensions that led to it.  It is the C analog of Cats Effect's
+per-fiber async-stack-trace ring, which is spliced onto a fault or
+fiber dump.
+.Pp
+Each proc carries a small fixed-capacity ring
+.Pq 16 entries
+of records:
+.Bd -literal -offset indent
+typedef struct xtc_causal_rec {
+        int          kind;    /* enum xtc_causal_kind */
+        const char  *site;    /* static label (e.g. __func__) */
+} xtc_causal_rec_t;
+.Ed
+where
+.Va kind
+is one of
+.Dv XTC_CAUSAL_PARK_MAILBOX ,
+.Dv XTC_CAUSAL_PARK_TIMER ,
+.Dv XTC_CAUSAL_PARK_FD ,
+or
+.Dv XTC_CAUSAL_RESUME ,
+and
+.Va site
+is a static string label (never freed).  Once the ring is full the
+oldest record is overwritten, so the window holds the most recent 16
+boundaries.
+.Pp
+The async causal trace is OFF by default and ZERO-COST when off: a
+disabled trace is a single relaxed-atomic load and a branch at the
+suspend/resume boundary and touches no memory, so a default build
+records nothing.  Each recorded event is one index bump and a store on
+the owning fiber -- core-private, single-writer, no lock, no atomic on
+the record, and no allocation after spawn -- so a fiber never writes a
+shared cache line on the hot path even when the trace is on.  The
+recorder reads no clock and draws no randomness, so a run remains
+deterministic under the simulation backend with the trace enabled.
+.Pp
+.Fn xtc_trace_causal_enable
+turns the async causal trace on when
+.Fa on
+is non-zero and off when it is zero, returning the previous state
+.Pq 1 on, 0 off .
+This is a separate switch from
+.Fn xtc_trace_enable ,
+which governs the message trace above.
+.Pp
+.Fn xtc_trace_causal_dump
+visits the causal records of the proc
+.Fa pid
+oldest-first -- the fiber's recent park/resume chain -- invoking
+.Fa cb
+once per record.  The callback returns
+.Dv 0
+to continue or non-zero to stop early.  It returns the number of
+records visited,
+.Dv XTC_E_NOTFOUND
+if no live proc has that pid (a proc that has exited has been reaped),
+or
+.Dv XTC_E_INVAL
+on a
+.Dv NULL
+callback.  When the trace is disabled a live proc simply has an empty
+ring.
+.Pp
+.Xr xtc_dump 3
+splices each proc's recent causal chain onto its state line when the
+async causal trace is enabled -- a
+.Ql causal:
+line of
+.Ql kind@site
+entries, oldest-first -- so a dump answers both
+.Dq what is this fiber's state now
+and
+.Dq how did it get here
+at once.
 .Sh RETURN VALUES
 .Fn xtc_trace_enable
 returns the previous enable state: non-zero if tracing was already on,

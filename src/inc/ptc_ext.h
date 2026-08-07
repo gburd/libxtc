@@ -55,6 +55,8 @@ int xtc_res_set_alert __P((xtc_res_t *, xtc_res_kind_t, double));
 int xtc_res_set_alert_fn __P((xtc_res_t *, void (*)(xtc_res_kind_t, int64_t, int64_t, void *), void *));
 int xtc_scope_defer __P((xtc_scope_t *, xtc_finalizer_fn, void *));
 int xtc_send __P((xtc_pid_t, const void *, size_t));
+int xtc_trace_causal_dump __P((xtc_pid_t, xtc_causal_fn, void *));
+int xtc_trace_causal_enable __P((int));
 int xtc_uncancelable __P((int (*)(void *), void *));
 int xtc_unlink __P((xtc_pid_t));
 int64_t xtc_res_high __P((const xtc_res_t *, xtc_res_kind_t));
