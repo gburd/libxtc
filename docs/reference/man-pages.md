@@ -31,6 +31,7 @@ orchestration, I/O, storage, observability):
 - [`xtc_cfg(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_cfg.3) -- typed runtime configuration registry
 - [`xtc_chan(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_chan.3) -- typed channels for cross-task message passing
 - [`xtc_dio_sched(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_dio_sched.3) -- adaptive genetic-algorithm tuner for runtime self-tuning
+- [`xtc_dispatch(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_dispatch.3) -- submit an effect to the runtime from a callback or a foreign thread
 - [`xtc_dump(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_dump.3) -- crash diagnostics: runtime-state dump, panic, fatal-signal handler
 - [`xtc_exec(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_exec.3) -- L2 multi-loop work-stealing executor
 - [`xtc_free(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_free.3) -- public allocation, clock, sleep, and atomic helpers

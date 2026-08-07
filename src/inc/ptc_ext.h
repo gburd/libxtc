@@ -7,6 +7,8 @@
 int   xtc_proc_set_userdata __P((void *));
 int  xtc_cfg_load_file __P((const char *));
 int  xtc_cfg_reload __P((void));
+int  xtc_dispatch __P((xtc_loop_t *, int (*)(void *), void *, xtc_future_t **, xtc_dispatch_handle_t **));
+int  xtc_dispatch_cancel __P((xtc_dispatch_handle_t *));
 int __xtc_proc_crit_depth __P((void));
 int __xtc_unsafe_depth __P((void));
 int xtc_aio_fdatasync __P((int));
@@ -72,6 +74,7 @@ void __xtc_unsafe_enter __P((void));
 void __xtc_unsafe_leave __P((void));
 void xtc_alloc_audit_proc_leaks __P((xtc_pid_t, size_t *, size_t *));
 void xtc_alloc_audit_stats __P((size_t *, size_t *));
+void xtc_dispatch_handle_free __P((xtc_dispatch_handle_t *));
 void xtc_dump __P((int));
 void xtc_lwlock_track_enable __P((int));
 void xtc_lwlock_track_reset __P((void));

@@ -132,6 +132,46 @@ change -- it is still spawn / send / recv -- it just runs on more cores.
 > the only threads are the N loop threads plus the blocking pool. Fewer
 > threads, no cross-subsystem lock graph.
 
+## The other direction: bridging INTO the runtime
+
+The blocking pool sends work *out* of a loop. Sometimes you need the
+inverse: something *outside* the runtime -- a C library's completion
+callback, a signal handler's follow-up, an embedder's own I/O thread --
+needs to run an effect *on* a loop and get its result back. That is the
+**dispatcher**
+([`xtc_dispatch(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_dispatch.3)),
+libxtc's answer to Cats Effect's `Dispatcher`.
+
+`xtc_dispatch(loop, fn, arg, &fut, &handle)` spawns a fiber on `loop`
+that runs `fn(arg)`, and hands back a future for the result plus an
+optional cancel handle. It is safe to call from **any** OS thread,
+including one libxtc knows nothing about -- the effect body itself:
+
+{% include snippet.html file="09_dispatch.c" region="effect" %}
+
+and the submit-and-await, from a foreign thread:
+
+{% include snippet.html file="09_dispatch.c" region="submit" %}
+
+The future always resolves **exactly once**: with `fn`'s value on a
+normal return, or `XTC_E_ABORTED` if you `xtc_dispatch_cancel` the
+handle or the fiber crashes -- never lost, never doubled, never a hang.
+Cancellation is cooperative and composes with
+[`xtc_uncancelable(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_uncancelable.3)
+and
+[`xtc_scope(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_scope.3),
+so a resource acquired under a scope is still released on the
+cancellation path.
+
+{: .rationale }
+> **Why a blessed one-call front door?** Nothing here is new machinery:
+> a cross-thread `xtc_proc_spawn` already posts to the target loop's
+> MPSC inbox and pings its poller, and `xtc_promise_set` is already safe
+> from any thread. Consumers kept re-assembling exactly that pair by
+> hand at every callback boundary. `xtc_dispatch` is that composition,
+> packaged with the cancellation core so the common bridge is one call
+> that falls into the pit of success.
+
 ## Determinism: testing the whole thing
 
 Because all concurrency flows through the loop, libxtc can replace the

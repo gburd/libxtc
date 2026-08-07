@@ -49,6 +49,7 @@ fi
 # rcu_harness           u6      ~0.3s  epoch reclaim + drain
 # refcount_harness      u6      ~0.2s  stripe-locked pin
 # mask_harness          u4      ~0.2s  A2 mask vs remote kill (no loss)
+# dispatch_once_harness u3      ~0.1s  B1 future resolved exactly once
 # wakepark_harness      u6      ~0.1s  v1.8.0 wake latch
 # chash_resize_harness  u6      ~0.2s  build-then-swap publish
 HARNESSES='
@@ -61,6 +62,7 @@ lrlock_harness     --unwind 6
 rcu_harness        --unwind 6
 refcount_harness   --unwind 6
 mask_harness       --unwind 4
+dispatch_once_harness --unwind 3
 wakepark_harness   --unwind 6
 chash_resize_harness --unwind 6
 res_harness        --unwind 3
