@@ -1,3 +1,16 @@
+libxtc (1.34.1-1) unstable; urgency=medium
+
+  * fix(preempt): deliver the per-worker CPU-time preemption timer
+    signal to the ARMING thread (Linux SIGEV_THREAD_ID) instead of
+    process-directed SIGEV_SIGNAL, which the kernel could deliver to
+    the wrong thread -- so the compute fiber's yield-if-due never saw
+    "due" and never sliced (test_preempt_p1 g_yields==0 flaking per
+    host).  Bridged across libcs (glibc _sigev_un._tid / musl
+    sigev_notify_thread_id macro).  Proven on the failing EC2 c5 VM
+    (0/3 -> 5/5) and green across the full CI matrix incl. musl.
+
+ -- Greg Burd <greg@burd.me>  Thu, 07 Aug 2026 22:00:00 +0000
+
 libxtc (1.34.0-1) unstable; urgency=medium
 
   * feat: Cats-Effect-influenced structured-concurrency arc.  Resource
