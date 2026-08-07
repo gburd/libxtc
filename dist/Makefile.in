@@ -409,6 +409,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_res \
 		  test_future \
 		  test_proc \
+		  test_scope \
 		  test_proc_wait_fd \
 		  test_thread_sigmask \
 		  test_proc_wake_crossthread \
@@ -472,7 +473,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_pgmock_smoke \
 		  test_inject_races
 
-TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_slab pbt_chash pbt_cskip pbt_lrlock pbt_lwlock pbt_chan pbt_sim
+TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_scope pbt_slab pbt_chash pbt_cskip pbt_lrlock pbt_lwlock pbt_chan pbt_sim
 
 # -------------------------------------------------------------------------
 # Default goal.
@@ -861,6 +862,11 @@ bench_exec_scale: $(srcdir)/../bench/bench_exec_scale.c $(STATIC_LIB)
 bench_proc_table: $(srcdir)/../bench/bench_proc_table.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_proc_table.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+bench_timer_scale: $(srcdir)/../bench/bench_timer_scale.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_timer_scale.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 bench_xproc_fanout: $(srcdir)/../bench/bench_xproc_fanout.c $(STATIC_LIB)
@@ -1305,6 +1311,12 @@ test_proc: $(srcdir)/../test/m8/test_proc.c \
 		-o $@ $(srcdir)/../test/m8/test_proc.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_scope: $(srcdir)/../test/m8/test_scope.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
+		-o $@ $(srcdir)/../test/m8/test_scope.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_proc_wait_fd: $(srcdir)/../test/m8/test_proc_wait_fd.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
@@ -1702,6 +1714,9 @@ pbt_async: $(srcdir)/../test/pbt/pbt_async.c $(STATIC_LIB)
 
 pbt_proc: $(srcdir)/../test/pbt/pbt_proc.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_proc.c $(PBT_LIBS)
+
+pbt_scope: $(srcdir)/../test/pbt/pbt_scope.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_scope.c $(PBT_LIBS)
 
 pbt_sim: $(srcdir)/../test/pbt/pbt_sim.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_sim.c $(PBT_LIBS)

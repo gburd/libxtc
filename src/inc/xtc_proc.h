@@ -561,6 +561,93 @@ void xtc_proc_recovery_cleanup(void);
 		}                                           \
 	} while (0)
 
+/* ---- A2: cancellation masking (uncancelable / poll) ----
+ *
+ * MonadCancel's masking discipline, for C.  Structured cancellation via
+ * xtc_abort / xtc_exit_pid is cooperative -- a running fiber observes it
+ * only at a yield/recv point.  Masking makes it COMPOSABLE: inside an
+ * xtc_uncancelable() region an asynchronous kill delivered at a park
+ * point is DEFERRED, not acted on, and is observed only when the region
+ * returns (mask depth back to 0).  This is what lets a resource acquired
+ * in the region always register its release before cancellation unwinds
+ * the fiber -- the guarantee xtc_scope / xtc_bracket rely on.
+ *
+ * Run `body(ud)` with cancellation masked; returns body's return value
+ * (or XTC_E_INVAL if body is NULL).  Nests: each call bumps a per-proc
+ * mask counter.  Off a proc it simply runs body.
+ *
+ * PUBLIC: int xtc_uncancelable __P((int (*)(void *), void *));
+ */
+XTC_API int xtc_uncancelable(int (*body)(void *), void *ud);
+
+/*
+ * Cats Effect's poll: inside an xtc_uncancelable() body, run `body(ud)`
+ * with the mask temporarily lifted so cancellation IS observed for that
+ * sub-region.  A kill already deferred by the enclosing mask fires at
+ * the poll site (before body runs); the caller's mask depth is restored
+ * on return.  Outside a masked region it just runs body.  Returns body's
+ * value (or XTC_E_INVAL if body is NULL).
+ *
+ * PUBLIC: int xtc_cancel_poll __P((int (*)(void *), void *));
+ */
+XTC_API int xtc_cancel_poll(int (*body)(void *), void *ud);
+
+/*
+ * True iff cancellation is pending for the calling proc -- either an
+ * async kill has been requested (xtc_exit_pid) or one was deferred by a
+ * mask.  A cheap, allocation-free probe for a masked region that wants
+ * to unwind early and cleanly rather than wait for the park point.
+ * Returns 0 off a proc.
+ *
+ * PUBLIC: int xtc_cancel_requested __P((void));
+ */
+XTC_API int xtc_cancel_requested(void);
+
+/* ---- A1: resource scope / bracket ----
+ *
+ * A blessed, runtime-ENFORCED resource scope.  Cats Effect's
+ * Resource/bracket was, for years, a "paper door": a convention the API
+ * carroted you toward but nothing stopped you walking past, leaking a
+ * socket on the cancellation path.  xtc_scope makes
+ * "this WILL be released on EVERY exit path" a MECHANISM, not a manner.
+ *
+ * Open a scope on the calling proc, defer finalizers into it, and close
+ * it.  Finalizers run LIFO -- on the normal xtc_scope_close, AND on an
+ * error return, xtc_exit_self, an async kill (xtc_exit_pid), or a
+ * fault-guard-contained crash, because the scope is pushed as a marker
+ * on the same recovery registry that releases fds and locks on unwind.
+ * Scopes nest; an outer unwind closes inner-then-outer LIFO.
+ *
+ * xtc_scope_open returns NULL off a proc or on resource exhaustion.
+ */
+typedef struct xtc_scope xtc_scope_t;
+typedef void (*xtc_finalizer_fn)(void *arg);
+
+/*
+ * PUBLIC: xtc_scope_t *xtc_scope_open __P((void));
+ * PUBLIC: int  xtc_scope_defer __P((xtc_scope_t *, xtc_finalizer_fn, void *));
+ * PUBLIC: void xtc_scope_close __P((xtc_scope_t *));
+ */
+XTC_API xtc_scope_t *xtc_scope_open(void);
+XTC_API int  xtc_scope_defer(xtc_scope_t *s, xtc_finalizer_fn fn, void *arg);
+XTC_API void xtc_scope_close(xtc_scope_t *s);
+
+/*
+ * bracket sugar (acquire -> use -> guaranteed release), the load-bearing
+ * correctness core.  `acquire` runs abort-MASKED so `release` is always
+ * registered before cancellation can be observed; `release` then runs on
+ * EVERY exit path of `use` (normal, error, kill, crash).  acquire writes
+ * the resource through *res and returns XTC_OK (else bracket returns its
+ * code and nothing else runs); use returns a code that bracket returns;
+ * release is void.  `ud` threads a caller context through all three.
+ *
+ * PUBLIC: int xtc_bracket __P((int (*)(void **, void *), int (*)(void *, void *), void (*)(void *, void *), void *));
+ */
+XTC_API int xtc_bracket(int (*acquire)(void **res, void *ud),
+                        int (*use)(void *res, void *ud),
+                        void (*release)(void *res, void *ud),
+                        void *ud);
+
 /* Decode a DOWN signal (delivered to a monitor when its target exits)
  * into the target pid and exit reason, without hand-rolling the
  * on-wire layout.  The DOWN/EXIT signals are sent packed; a mismatched
