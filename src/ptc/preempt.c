@@ -54,6 +54,14 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 
+/* Linux: the SIGEV_THREAD_ID target LWP id (used below to deliver the
+ * preemption signal to the exact arming worker thread) is the sigevent
+ * union member _sigev_un._tid, a glibc extension gated behind
+ * _GNU_SOURCE, which must be set before the first system header. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
+
 #include "xtc_int.h"
 #include "xtc_preempt.h"
 #include "preempt_int.h"
@@ -63,6 +71,10 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <time.h>
+#if defined(__linux__)
+#include <sys/syscall.h>   /* SYS_gettid for SIGEV_THREAD_ID targeting */
+#include <unistd.h>
+#endif
 
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
     defined(__OpenBSD__) || defined(__DragonFly__) || defined(__sun) || \
@@ -246,14 +258,30 @@ xtc_preempt_arm(int64_t interval_ns)
 	}
 #endif
 
-	/* A CPU-time (per-thread) timer: SIGEV_THREAD_ID would target this
-	 * thread, but the portable form is a per-thread CLOCK using
-	 * SIGEV_SIGNAL delivered to the process and steered by the timer
-	 * being thread-CPU-clocked.  We use CLOCK_THREAD_CPUTIME_ID so the
-	 * timer measures THIS thread's CPU time. */
+	/* A CPU-time (per-thread) timer measuring THIS thread's CPU time
+	 * (CLOCK_THREAD_CPUTIME_ID).  On Linux, deliver via SIGEV_THREAD_ID
+	 * so the signal is guaranteed to land on the ARMING worker thread --
+	 * the one actually burning the CPU time -- not on an arbitrary
+	 * thread the kernel picks for a process-directed SIGEV_SIGNAL.  The
+	 * old SIGEV_SIGNAL form set the thread-local `pending` flag on
+	 * whichever thread the kernel happened to deliver to, so on a busy
+	 * single-loop run the compute thread's xtc_yield_if_due could never
+	 * see "due" (observed as test_preempt_p1's g_yields==0 flaking on
+	 * some VMs while passing on others -- a real thread-targeting bug,
+	 * not merely an environment quirk).  SIGEV_THREAD_ID makes it
+	 * deterministic.  Non-Linux keeps the portable SIGEV_SIGNAL form. */
 	memset(&sev, 0, sizeof sev);
+#if defined(__linux__) && defined(SIGEV_THREAD_ID)
+	sev.sigev_notify = SIGEV_THREAD_ID;
+	sev.sigev_signo = XTC_PREEMPT_SIGNAL;
+	/* glibc's SIGEV_THREAD_ID target LWP id is the union member
+	 * _sigev_un._tid (there is no sigev_notify_thread_id macro in this
+	 * glibc); gettid() is the calling worker thread. */
+	sev._sigev_un._tid = (int)syscall(SYS_gettid);
+#else
 	sev.sigev_notify = SIGEV_SIGNAL;
 	sev.sigev_signo = XTC_PREEMPT_SIGNAL;
+#endif
 	if (timer_create(CLOCK_THREAD_CPUTIME_ID, &sev, &g_pt.timer) != 0)
 		return XTC_E_NOSYS;
 	g_pt.have_timer = 1;
@@ -305,8 +333,14 @@ xtc_preempt_supported(void)
 		struct sigevent sev;
 		timer_t t;
 		memset(&sev, 0, sizeof sev);
+#if defined(__linux__) && defined(SIGEV_THREAD_ID)
+		sev.sigev_notify = SIGEV_THREAD_ID;
+		sev.sigev_signo = XTC_PREEMPT_SIGNAL;
+		sev._sigev_un._tid = (int)syscall(SYS_gettid);
+#else
 		sev.sigev_notify = SIGEV_SIGNAL;
 		sev.sigev_signo = XTC_PREEMPT_SIGNAL;
+#endif
 		if (timer_create(CLOCK_THREAD_CPUTIME_ID, &sev, &t) == 0) {
 			(void)timer_delete(t);
 			c = 1;
