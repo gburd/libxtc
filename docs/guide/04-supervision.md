@@ -106,7 +106,16 @@ and escalates to *its* supervisor. This is the tree that makes BEAM
 systems self-heal, and
 [`examples/03_supervised_app.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/03_supervised_app.c)
 shows a whole application built as one -- walked through in the
-[Examples]({{ '/examples/' | relative_url }}) section.
+[Examples]({{ '/examples/' | relative_url }}) section. That example also
+demonstrates the three tools a *supervised* worker needs so a restart
+cannot corrupt or leak: an
+[`xtc_scope`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_scope.3)
+whose finalizer frees the worker's scratch resource on every exit path
+(including the restart-kill), an
+[`xtc_uncancelable`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_scope.3)
+region around a two-step update so a kill cannot split it, and
+[`xtc_trace_causal_enable`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_trace.3)
+so a fault dump shows how the worker got to where it crashed.
 
 {: .not_chosen }
 > **Defensive error handling everywhere.** The alternative to
