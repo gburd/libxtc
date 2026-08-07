@@ -17,3 +17,6 @@ Essays on why libxtc is shaped the way it is:
 - [Message passing and the compromise]({{ '/philosophy/message-passing/' | relative_url }}) -- pure
   shared-nothing versus the compromise libxtc strikes, and why that is
   the reason xtc and tnt both exist.
+- [Influences and lineage]({{ '/philosophy/influences/' | relative_url }}) -- the runtimes libxtc learned
+  from (BEAM, Seastar, Tokio, Cats Effect, Scala Native), what it took
+  from each, and the lines it deliberately did not cross.
