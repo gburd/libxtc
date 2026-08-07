@@ -1,0 +1,192 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd August 8, 2026
+.Dt XTC_SCOPE 3
+.Os
+.Sh NAME
+.Nm xtc_scope ,
+.Nm xtc_scope_open ,
+.Nm xtc_scope_defer ,
+.Nm xtc_scope_close ,
+.Nm xtc_bracket ,
+.Nm xtc_uncancelable ,
+.Nm xtc_cancel_poll ,
+.Nm xtc_cancel_requested
+.Nd runtime-enforced resource scope and cancellation masking
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_proc.h
+.Ft xtc_scope_t *
+.Fn xtc_scope_open "void"
+.Ft int
+.Fn xtc_scope_defer "xtc_scope_t *s" "xtc_finalizer_fn fn" "void *arg"
+.Ft void
+.Fn xtc_scope_close "xtc_scope_t *s"
+.Ft int
+.Fn xtc_bracket "int (*acquire)(void **res, void *ud)" "int (*use)(void *res, void *ud)" "void (*release)(void *res, void *ud)" "void *ud"
+.Ft int
+.Fn xtc_uncancelable "int (*body)(void *ud)" "void *ud"
+.Ft int
+.Fn xtc_cancel_poll "int (*body)(void *ud)" "void *ud"
+.Ft int
+.Fn xtc_cancel_requested "void"
+.Sh DESCRIPTION
+These calls make resource release and cancellation
+.Em mechanisms
+rather than conventions: a finalizer registered in an open scope runs
+on
+.Em every
+exit path of the enclosing process, and cancellation is composable
+through masking.  They are the C analogue of Cats Effect's
+.Vt Resource ,
+.Fn bracket ,
+and
+.Fn MonadCancel.uncancelable .
+.Ss Resource scope
+A scope is a dynamically-scoped region on the calling process.
+.Fn xtc_scope_open
+opens one and returns a handle (or
+.Dv NULL
+off a process or on resource exhaustion).
+.Fn xtc_scope_defer
+registers a finalizer
+.Fa fn Ns Pq Fa arg
+into the scope.
+.Fn xtc_scope_close
+runs the deferred finalizers in strict LIFO order and releases the
+scope.
+.Pp
+The guarantee is that the finalizers run
+.Em on every exit path
+while the scope is open, not only on
+.Fn xtc_scope_close :
+a normal return, an
+.Xr xtc_exit_self 3 ,
+an asynchronous kill
+.Pq Xr xtc_exit_pid 3 ,
+and a fault-guard-contained crash all run them.  A scope is pushed as
+a marker on the same per-process recovery registry that releases file
+descriptors, locks, and memory contexts on an unwind
+.Pq see Xr xtc_proc 3 ,
+so the finalizers ride the same LIFO cleanup.  Scopes nest: an outer
+unwind closes the inner scopes first.
+.Ss Bracket
+.Fn xtc_bracket
+is the load-bearing acquire/use/release sugar.
+.Fa acquire
+runs abort-masked
+.Pq see Fn xtc_uncancelable
+so that
+.Fa release
+is always registered before cancellation can be observed; it writes
+the resource through
+.Fa res
+and returns
+.Dv XTC_OK
+on success (any other code aborts the bracket and nothing else runs).
+.Fa use
+then runs and its return value is returned by
+.Fn xtc_bracket .
+.Fa release
+runs on
+.Em every
+exit path of
+.Fa use
+\(em normal return, error, kill, or contained crash.
+.Fa ud
+threads a caller context through all three callbacks.
+.Ss Cancellation masking
+Cancellation in xtc is cooperative: a running fiber observes an
+asynchronous kill only at a park point
+.Pq a yield, receive, or sleep .
+.Fn xtc_uncancelable
+runs
+.Fa body Ns Pq Fa ud
+with cancellation
+.Em masked :
+a kill delivered at a park point inside the region is deferred, not
+acted on, and is observed only when the region returns.  This is what
+lets a resource acquired in the region always register its release
+before cancellation unwinds the fiber \(em without it, guaranteed
+release has a finalizer-eating race.  Masking nests
+.Pq a per-process counter .
+.Pp
+.Fn xtc_cancel_poll
+is the escape hatch
+.Pq Cats Effect's Fn poll :
+inside a masked body it runs
+.Fa body
+with the mask temporarily lifted so cancellation
+.Em is
+observed for that sub-region; a kill already deferred by the enclosing
+mask fires at the poll site before
+.Fa body
+runs.
+.Pp
+.Fn xtc_cancel_requested
+returns non-zero if cancellation is pending for the calling process
+\(em either requested and not yet delivered, or deferred by a mask \(em
+so a masked region can choose to unwind early and cleanly.
+.Sh RETURN VALUES
+.Fn xtc_scope_open
+returns a scope handle, or
+.Dv NULL
+off a process or when the recovery registry is full.
+.Fn xtc_scope_defer
+returns
+.Dv XTC_OK ,
+.Dv XTC_E_INVAL
+on a bad argument or a closed scope, or
+.Dv XTC_E_RESOURCE
+past the per-scope finalizer limit.
+.Fn xtc_bracket ,
+.Fn xtc_uncancelable ,
+and
+.Fn xtc_cancel_poll
+return the value returned by
+.Fa use
+or
+.Fa body ,
+or
+.Dv XTC_E_INVAL
+if a required callback is
+.Dv NULL .
+.Fn xtc_cancel_requested
+returns 1 if cancellation is pending, else 0
+.Pq including off a process .
+.Sh EXAMPLES
+Acquire a buffer, use it, and release it on every exit path:
+.Bd -literal -offset indent
+static int acq(void **res, void *ud) {
+	(void)ud;
+	*res = xtc_malloc(4096);
+	return *res ? XTC_OK : XTC_E_RESOURCE;
+}
+static int use(void *res, void *ud) {
+	(void)ud;
+	return do_work(res);   /* released even if this kills/faults */
+}
+static void rel(void *res, void *ud) { (void)ud; xtc_free(res); }
+
+int rc = xtc_bracket(acq, use, rel, NULL);
+.Ed
+.Sh SEE ALSO
+.Xr xtc_exit_self 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_sync 3 ,
+.Xr xtc 7
+.Sh HISTORY
+Appeared in xtc 0.1.
+.Sh CAVEATS
+Scopes and masking are per-process
+.Pq per-fiber :
+they require a running process
+.Pq Xr xtc_proc 3 .
+Off a process,
+.Fn xtc_scope_open
+returns
+.Dv NULL ,
+.Fn xtc_bracket
+still honours the acquire/use/release contract directly, and
+.Fn xtc_uncancelable
+simply runs its body.

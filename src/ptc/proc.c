@@ -422,6 +422,19 @@ struct xtc_proc {
 	 * The flag carries the reason+1 so 0 means "no kill pending". */
 	_Atomic int kill_pending;
 
+	/* A2 cancellation masking (MonadCancel uncancelable/poll).  While
+	 * mask_depth > 0 an asynchronous kill (xtc_exit_pid) delivered at a
+	 * yield/recv point is DEFERRED, not acted on: the reason+1 is latched
+	 * in mask_deferred and the unwind runs only when mask_depth falls
+	 * back to 0 (or when a poll region re-admits it).  This is what lets
+	 * a resource acquired in a masked region always register its release
+	 * before cancellation is observed -- A1's guaranteed-release has,
+	 * without it, the finalizer-eating race Cats Effect had pre-masking.
+	 * Owner-only fields (the proc reads/writes them on its own fiber),
+	 * so no atomics are needed. */
+	unsigned      mask_depth;
+	int           mask_deferred;   /* latched reason+1; 0 = none pending */
+
 	/* Lifecycle. */
 	int         alive;
 
@@ -1325,16 +1338,37 @@ __xtc_proc_ctx_restore(void *ctx)
  * inside a critical section (xtc_yield is not; and a kill inside one is
  * already deferred by the recovery gate).
  */
+/*
+ * Deliver a pending asynchronous kill to `self` at a yield/recv point,
+ * respecting the A2 cancellation mask.  If kill_pending is set:
+ *   - mask_depth == 0: unwind now via xtc_exit_self (does not return).
+ *   - mask_depth  > 0: DEFER -- latch the reason into mask_deferred and
+ *     return, so a resource acquired in a masked region can still
+ *     register its release.  The latched kill fires when the mask drops
+ *     to 0 (xtc_uncancelable / xtc_cancel_poll drain it).
+ * Owner-only: called on self's own fiber, so mask_* need no atomics.
+ */
 static void
-__xtc_proc_kill_check(void)
+__xtc_proc_kill_deliver(struct xtc_proc *self)
 {
-	struct xtc_proc *self = __current_proc;
 	int kp;
 	if (self == NULL)
 		return;
 	kp = atomic_load_explicit(&self->kill_pending, memory_order_acquire);
-	if (kp != 0)
-		xtc_exit_self(kp - 1);
+	if (kp == 0)
+		return;
+	if (self->mask_depth > 0) {
+		if (self->mask_deferred == 0)
+			self->mask_deferred = kp;   /* latch reason+1 */
+		return;
+	}
+	xtc_exit_self(kp - 1);
+}
+
+static void
+__xtc_proc_kill_check(void)
+{
+	__xtc_proc_kill_deliver(__current_proc);
 }
 
 /* PUBLIC: int xtc_proc_sleep __P((int64_t)); */
@@ -1360,12 +1394,7 @@ xtc_proc_sleep(int64_t ns)
 		xtc_yield();
 		__xtc_proc_ctx_restore(ctx);
 		__current_proc = self;
-		{
-			int kp = atomic_load_explicit(&self->kill_pending,
-			    memory_order_acquire);
-			if (kp != 0)
-				xtc_exit_self(kp - 1);
-		}
+		__xtc_proc_kill_deliver(self);
 		/* Spurious / early wake: loop until the deadline. */
 	}
 }
@@ -1626,12 +1655,7 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 	/* Asynchronous kill check.  If another proc has signalled us via
 	 * xtc_exit_pid, raise the exit now (longjmp) instead of receiving
 	 * any more messages. */
-	{
-		int kp = atomic_load_explicit(&self->kill_pending,
-		    memory_order_acquire);
-		if (kp != 0)
-			xtc_exit_self(kp - 1);
-	}
+	__xtc_proc_kill_deliver(self);
 
 	if (timeout_ns >= 0) {
 		int64_t now;
@@ -1786,12 +1810,7 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 		__current_proc = self;
 
 		/* Re-check kill flag after yielding back. */
-		{
-			int kp = atomic_load_explicit(&self->kill_pending,
-			    memory_order_acquire);
-			if (kp != 0)
-				xtc_exit_self(kp - 1);
-		}
+		__xtc_proc_kill_deliver(self);
 
 		(void) __proc_mtx_lock(&self->mbox_lock);
 		self->waker_armed = 0;
@@ -1941,11 +1960,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	*out_revents = 0;
 
 	/* Check kill-pending up front (same convention as xtc_recv). */
-	{
-		int kp = atomic_load_explicit(&self->kill_pending,
-		    memory_order_acquire);
-		if (kp != 0) xtc_exit_self(kp - 1);
-	}
+	__xtc_proc_kill_deliver(self);
 
 	/* Fast path: if a message is already queued or the fd is already
 	 * ready, just return without yielding.  We can answer the mailbox
@@ -2034,11 +2049,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	(void) __proc_mtx_unlock(&self->mbox_lock);
 
 	/* Re-check kill-pending after yielding back. */
-	{
-		int kp = atomic_load_explicit(&self->kill_pending,
-		    memory_order_acquire);
-		if (kp != 0) xtc_exit_self(kp - 1);
-	}
+	__xtc_proc_kill_deliver(self);
 
 	/* Sample wake_revents.  The dispatcher / mbox_deliver / timer cb
 	 * have set the bits we care about. */
@@ -2574,6 +2585,302 @@ xtc_proc_recovery_untrack_fd(int fd)
 		}
 	}
 	return XTC_E_NOTFOUND;
+}
+
+/* ---------- A2: cancellation masking (uncancelable / poll) ----------
+ *
+ * MonadCancel's masking discipline for C.  A per-proc mask_depth counter
+ * (owner-only) makes structured cancellation composable: an asynchronous
+ * kill (xtc_exit_pid) delivered at a yield/recv point while mask_depth>0
+ * is DEFERRED, latched in mask_deferred, and observed only when the mask
+ * drops to 0.  This is the guarantee A1's bracket leans on -- the release
+ * acquired in a masked region always gets registered before cancellation
+ * unwinds the fiber -- closing the finalizer-eating race a bare abort
+ * flag has.
+ */
+
+/* Drain a latched-deferred kill once the mask is fully lifted; does not
+ * return if one was pending (unwinds via xtc_exit_self). */
+static void
+__mask_drain(struct xtc_proc *p)
+{
+	int kp;
+	if (p == NULL || p->mask_depth > 0)
+		return;
+	kp = p->mask_deferred;
+	if (kp != 0) {
+		p->mask_deferred = 0;
+		xtc_exit_self(kp - 1);
+	}
+}
+
+/* PUBLIC: int xtc_uncancelable __P((int (*)(void *), void *)); */
+int
+xtc_uncancelable(int (*body)(void *), void *ud)
+{
+	struct xtc_proc *p = __current_proc;
+	int rc;
+	if (body == NULL)
+		return XTC_E_INVAL;
+	if (p == NULL)
+		return body(ud);        /* off a proc: nothing to mask */
+	p->mask_depth++;
+	rc = body(ud);
+	if (p->mask_depth > 0)
+		p->mask_depth--;
+	/* Fully unmasked now: honor any kill that arrived while masked. */
+	__mask_drain(p);
+	return rc;
+}
+
+/* PUBLIC: int xtc_cancel_poll __P((int (*)(void *), void *)); */
+int
+xtc_cancel_poll(int (*body)(void *), void *ud)
+{
+	struct xtc_proc *p = __current_proc;
+	unsigned saved;
+	int rc;
+	if (body == NULL)
+		return XTC_E_INVAL;
+	if (p == NULL || p->mask_depth == 0)
+		return body(ud);       /* unmasked already: just run it */
+	/* Temporarily re-admit cancellation for this sub-region: drop the
+	 * mask to 0, honoring any already-latched kill BEFORE running the
+	 * body (Cats Effect's poll observes cancellation at the poll site),
+	 * then restore the caller's mask depth. */
+	saved = p->mask_depth;
+	p->mask_depth = 0;
+	__mask_drain(p);            /* may not return */
+	rc = body(ud);
+	p->mask_depth = saved;
+	return rc;
+}
+
+/* PUBLIC: int xtc_cancel_requested __P((void)); */
+int
+xtc_cancel_requested(void)
+{
+	struct xtc_proc *p = __current_proc;
+	if (p == NULL)
+		return 0;
+	if (atomic_load_explicit(&p->kill_pending, memory_order_acquire) != 0)
+		return 1;
+	return p->mask_deferred != 0;
+}
+
+/* ---------- A1: resource scope / bracket ----------
+ *
+ * A blessed, runtime-enforced resource scope on top of the recovery
+ * registry.  Cats Effect's Resource/bracket was a "paper door": a
+ * convention a coding agent barges through.  xtc_scope makes
+ * "this WILL be released on every exit path" a MECHANISM: a scope is
+ * pushed as a recovery-registry marker (XTC_RECOV_CB), so a proc-level
+ * unwind -- normal return, xtc_exit_self, an async kill, OR a
+ * fault-guard-contained crash -- runs the same LIFO cleanup that
+ * releases fds/locks/mctx, which now includes closing every still-open
+ * scope's deferred finalizers.  xtc_scope_close on the happy path runs
+ * them and detaches the marker.  Scopes nest: each is its own marker,
+ * so an outer unwind closes inner-then-outer LIFO (the recovery stack
+ * is walked high-index-first).
+ */
+
+struct xtc_scope {
+	struct xtc_proc *owner;      /* proc this scope belongs to */
+	int              closed;     /* guards double-run */
+#define XTC_SCOPE_MAX_DEFER 32
+	struct { xtc_finalizer_fn fn; void *arg; } fin[XTC_SCOPE_MAX_DEFER];
+	int              n_fin;
+};
+
+/* Run a scope's deferred finalizers LIFO, once.  Shared by the happy-
+ * path close and the recovery-marker unwind. */
+static void
+__scope_run(struct xtc_scope *s)
+{
+	int i;
+	if (s == NULL || s->closed)
+		return;
+	s->closed = 1;
+	for (i = s->n_fin - 1; i >= 0; i--)
+		if (s->fin[i].fn != NULL)
+			s->fin[i].fn(s->fin[i].arg);
+	s->n_fin = 0;
+}
+
+/* Recovery-marker trampoline: the registry invokes fn(arg) on an
+ * unwind.  Runs the finalizers but does NOT free the scope struct --
+ * the marker's presence means the caller never reached xtc_scope_close,
+ * so the struct is freed here too (the recovery path owns it now). */
+static void
+__scope_recover_cb(void *arg)
+{
+	struct xtc_scope *s = arg;
+	if (s == NULL)
+		return;
+	__scope_run(s);
+	__os_free(s);
+}
+
+/* Drop the recovery marker that referenced `s` (happy-path close), so a
+ * later proc-level unwind does not re-run an already-closed scope.
+ * Removes the most-recent matching XTC_RECOV_CB record. */
+static void
+__scope_drop_marker(struct xtc_proc *p, struct xtc_scope *s)
+{
+	int i, j;
+	if (p == NULL)
+		return;
+	for (i = p->n_recov - 1; i >= 0; i--) {
+		if (p->recov[i].kind == XTC_RECOV_CB &&
+		    p->recov[i].fn == __scope_recover_cb &&
+		    p->recov[i].ptr == s) {
+			for (j = i; j < p->n_recov - 1; j++)
+				p->recov[j] = p->recov[j + 1];
+			p->n_recov--;
+			return;
+		}
+	}
+}
+
+/* PUBLIC: xtc_scope_t *xtc_scope_open __P((void)); */
+xtc_scope_t *
+xtc_scope_open(void)
+{
+	struct xtc_proc *p = __current_proc;
+	struct xtc_scope *s = NULL;
+	struct xtc_recov_rec r;
+	if (p == NULL)
+		return NULL;            /* scopes are per-proc */
+	if (__os_calloc(1, sizeof *s, (void **)&s) != XTC_OK)
+		return NULL;
+	s->owner = p;
+	/* Push a recovery-registry marker so a proc-level unwind (fault,
+	 * kill, exit) closes this scope LIFO alongside the standard fd/lock
+	 * cleanup.  If the registry is full the scope cannot guarantee its
+	 * release-on-crash contract, so refuse to open rather than lie. */
+	memset(&r, 0, sizeof r);
+	r.kind = XTC_RECOV_CB;
+	r.fn = __scope_recover_cb;
+	r.ptr = s;
+	if (__recov_push(p, r) != XTC_OK) {
+		__os_free(s);
+		return NULL;
+	}
+	return s;
+}
+
+/* PUBLIC: int xtc_scope_defer __P((xtc_scope_t *, xtc_finalizer_fn, void *)); */
+int
+xtc_scope_defer(xtc_scope_t *s, xtc_finalizer_fn fn, void *arg)
+{
+	if (s == NULL || fn == NULL)
+		return XTC_E_INVAL;
+	if (s->closed)
+		return XTC_E_INVAL;
+	if (s->n_fin >= XTC_SCOPE_MAX_DEFER)
+		return XTC_E_RESOURCE;
+	s->fin[s->n_fin].fn = fn;
+	s->fin[s->n_fin].arg = arg;
+	s->n_fin++;
+	return XTC_OK;
+}
+
+/* PUBLIC: void xtc_scope_close __P((xtc_scope_t *)); */
+void
+xtc_scope_close(xtc_scope_t *s)
+{
+	struct xtc_proc *p;
+	if (s == NULL)
+		return;
+	p = s->owner;
+	/* Detach the recovery marker FIRST so that if a finalizer itself
+	 * faults or exits, the unwind does not re-enter this same scope. */
+	__scope_drop_marker(p, s);
+	__scope_run(s);
+	__os_free(s);
+}
+
+/* PUBLIC: int xtc_bracket __P((int (*)(void **, void *), int (*)(void *, void *), void (*)(void *, void *), void *)); */
+struct __bracket_rel {
+	void  *res;
+	void (*release)(void *, void *);
+	void  *ud;
+};
+static void
+__bracket_release_cb(void *arg)
+{
+	struct __bracket_rel *br = arg;
+	if (br == NULL)
+		return;
+	if (br->release != NULL)
+		br->release(br->res, br->ud);
+	__os_free(br);
+}
+int
+xtc_bracket(int (*acquire)(void **res, void *ud),
+            int (*use)(void *res, void *ud),
+            void (*release)(void *res, void *ud),
+            void *ud)
+{
+	struct xtc_proc *p = __current_proc;
+	void *res = NULL;
+	int arc, urc;
+	if (acquire == NULL || use == NULL || release == NULL)
+		return XTC_E_INVAL;
+	if (p == NULL) {
+		/* Off a proc there is no scope/kill machinery: still honor the
+		 * acquire/use/guaranteed-release contract directly. */
+		if ((arc = acquire(&res, ud)) != XTC_OK)
+			return arc;
+		urc = use(res, ud);
+		release(res, ud);
+		return urc;
+	}
+	/* Acquire runs ABORT-MASKED so a kill cannot fire between the
+	 * resource becoming live and its release being registered -- the
+	 * A1+A2 pairing.  The mask is held across acquire + the defer, then
+	 * dropped for use(). */
+	p->mask_depth++;
+	arc = acquire(&res, ud);
+	if (arc != XTC_OK) {
+		if (p->mask_depth > 0)
+			p->mask_depth--;
+		__mask_drain(p);
+		return arc;
+	}
+	{
+		struct xtc_scope *s = xtc_scope_open();
+		struct __bracket_rel *br = NULL;
+		if (s == NULL) {
+			/* Cannot guarantee release via a scope; release now
+			 * (still masked) and fail rather than leak. */
+			release(res, ud);
+			if (p->mask_depth > 0)
+				p->mask_depth--;
+			__mask_drain(p);
+			return XTC_E_RESOURCE;
+		}
+		if (__os_calloc(1, sizeof *br, (void **)&br) != XTC_OK) {
+			xtc_scope_close(s);
+			release(res, ud);
+			if (p->mask_depth > 0)
+				p->mask_depth--;
+			__mask_drain(p);
+			return XTC_E_RESOURCE;
+		}
+		br->res = res;
+		br->release = release;
+		br->ud = ud;
+		(void)xtc_scope_defer(s, __bracket_release_cb, br);
+		/* Release is now registered on every exit path.  Drop the mask
+		 * (honoring a deferred kill) and run use(). */
+		if (p->mask_depth > 0)
+			p->mask_depth--;
+		__mask_drain(p);        /* if killed, scope unwind releases */
+		urc = use(res, ud);
+		xtc_scope_close(s);     /* runs release + frees br */
+		return urc;
+	}
 }
 
 /* PUBLIC: int xtc_down_decode __P((const void *, size_t, xtc_pid_t *, int *)); */

@@ -95,6 +95,57 @@ correlation (pull the reply with *your* request id) without draining
 unrelated traffic. See
 [`xtc_proc(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
 
+## Resource scope: release on every exit path
+
+A process holds resources -- a file descriptor, a buffer, a lock. The
+awkward question is *what releases them when the process does not exit
+the way you drew on the whiteboard*: an early error return, an
+`xtc_exit_self`, an asynchronous kill from a supervisor, or a contained
+fault. In plain C the answer is a maze of `goto out` labels, and every
+new exit path is a chance to leak.
+
+`xtc_scope` turns "this will be released" from a convention you have to
+remember into a mechanism the runtime enforces. Open a scope, *defer* a
+finalizer into it, and the finalizer runs in LIFO order on **every** exit
+path while the scope is open -- normal close, error, exit, abort, or a
+fault-guard-contained crash. (A scope is a marker on the same per-process
+recovery registry that already releases fds and locks on an unwind, so it
+rides the same cleanup.)
+
+{% include snippet.html file="07_resource_scope.c" region="scope" %}
+
+Most of the time you want the acquire/use/release shape, and
+`xtc_bracket` is the sugar for it. The acquire runs *cancellation-masked*
+so the release is registered before an abort can ever be observed, and
+the release then runs on every exit path of the use step:
+
+{% include snippet.html file="07_resource_scope.c" region="bracket" %}
+
+{: .not_chosen }
+> **The "paper door" this closes.** For years, effect systems shipped
+> resource lifecycles as a *convention*: the API carrots you toward
+> acquire/use/release, but nothing stops you walking past it and leaking
+> a socket on the cancellation path. A human respects the paper door; a
+> coding agent barges straight through it. `xtc_bracket` is a real door:
+> the release is wired to the unwind, so there is no exit path that
+> skips it.
+
+## Cancellation masking
+
+Cancellation in libxtc is *cooperative*: a running fiber observes an
+asynchronous kill (from `xtc_exit_pid`, a supervisor, or a deadline)
+only at a park point -- a `xtc_yield`, `xtc_recv`, or `xtc_proc_sleep`.
+That is usually what you want, but it leaves one race: if a kill lands
+*between* acquiring a resource and registering its release, the release
+is never registered. `xtc_uncancelable` closes it. It runs a body with
+cancellation **masked**: a kill delivered inside the region is deferred
+and only observed once the region returns. `xtc_bracket` uses it for you
+around the acquire; you can use it directly for any acquire-then-register
+critical step. `xtc_cancel_poll` is the escape hatch that re-admits
+cancellation for a sub-region, and `xtc_cancel_requested` lets a masked
+region notice a pending kill and unwind early and cleanly. See
+[`xtc_scope(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_scope.3).
+
 ## What you have learned
 
 - A process is an addressable, mailbox-owning coroutine with private
@@ -102,6 +153,9 @@ unrelated traffic. See
 - `xtc_send` copies; `xtc_recv` / `xtc_recv_match` receive; received
   buffers are freed with `xtc_free`.
 - Replies carry the sender pid in the payload by convention.
+- `xtc_scope` / `xtc_bracket` release resources on every exit path;
+  `xtc_uncancelable` masks cancellation so a release is never lost to a
+  mid-acquire abort.
 
 Processes let things run independently. The next chapter is about what
 happens when one of them *fails*, and how to build systems that recover:
