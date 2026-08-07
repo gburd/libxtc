@@ -228,6 +228,28 @@ conn_process_commands(conn_state_t *st)
 	return 0;
 }
 
+/*
+ * Connection teardown, run as an xtc_scope finalizer -- see conn_proc.
+ * Leaves every pub/sub channel this connection subscribed to (so a
+ * closed subscriber does not linger in the groups), closes the socket,
+ * and frees the buffers and the state.  The scope runs it exactly once,
+ * on whatever exit path the fiber takes (normal, error, or async kill).
+ */
+static void
+conn_teardown(void *arg)
+{
+	conn_state_t *st = arg;
+	if (st == NULL)
+		return;
+	if (st->pubsub != NULL && st->sub_count > 0)
+		(void)xtc_reg_drop_pid(st->pubsub, st->self);
+	if (st->fd >= 0)
+		close(st->fd);
+	xtc_free(st->read_buf);
+	xtc_free(st->write_buf);
+	xtc_free(st);
+}
+
 /* Connection proc entry point */
 static void
 conn_proc(void *arg)
@@ -235,8 +257,22 @@ conn_proc(void *arg)
 	conn_state_t *st = arg;
 	void *msg;
 	size_t msg_len;
+	xtc_scope_t *scope;
 
 	st->self = xtc_self();   /* for pub/sub group membership */
+
+	/*
+	 * Resource scope (mechanism, not manner): register the connection
+	 * teardown ONCE, up front, so it runs on EVERY exit path -- a normal
+	 * return, an error, and -- crucially -- an ASYNCHRONOUS KILL from the
+	 * supervisor while this fiber is parked in xtc_proc_wait_fd below.
+	 * Before xtc_scope, the cleanup block at the bottom of this function
+	 * was skipped on a kill, leaking the fd and both buffers; the scope
+	 * closes them LIFO no matter how the fiber leaves.  See
+	 * conn_teardown(). */
+	scope = xtc_scope_open();
+	if (scope != NULL)
+		(void)xtc_scope_defer(scope, conn_teardown, st);
 
 	while (!st->quit && !st->closed) {
 		uint32_t interest = XTC_IO_READABLE;
@@ -302,16 +338,15 @@ conn_proc(void *arg)
 		}
 	}
 
-	/* Cleanup */
-	/* Leave every pub/sub channel this connection subscribed to, so a
-	 * closed subscriber does not linger in the groups (the registry has
-	 * no automatic monitor-on-DOWN yet). */
-	if (st->pubsub != NULL && st->sub_count > 0)
-		(void)xtc_reg_drop_pid(st->pubsub, st->self);
-	close(st->fd);
-	xtc_free(st->read_buf);
-	xtc_free(st->write_buf);
-	xtc_free(st);
+	/* Normal-path teardown: closing the scope runs conn_teardown() (the
+	 * finalizer registered above) exactly once, LIFO.  On an async kill
+	 * while parked, the proc's exit path closes the still-open scope and
+	 * runs the same finalizer -- so this one call and the kill path are
+	 * the SAME cleanup, and neither can leak. */
+	if (scope != NULL)
+		xtc_scope_close(scope);
+	else
+		conn_teardown(st);   /* off a proc / scope exhausted: clean up directly */
 }
 
 int

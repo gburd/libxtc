@@ -71,6 +71,16 @@ without stalling other clients.
   connection process per client (`xtc_proc_spawn`). The process loops:
   read from the socket (parking the fiber via the reactor when the
   socket is not ready), parse a RESP command, apply it, write the reply.
+  The connection's teardown (close the socket, free both buffers, leave
+  its pub/sub groups) is registered ONCE up front on an
+  [`xtc_scope`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_scope.3):
+  it runs on *every* exit path -- a normal close and, crucially, an
+  asynchronous kill from the supervisor while the fiber is parked in
+  `xtc_proc_wait_fd`. That is the "mechanism, not manner" principle in
+  practice: before the scope, a kill skipped the cleanup block and
+  leaked the fd and buffers; the scope closes them no matter how the
+  fiber leaves. See
+  [Influences and lineage]({{ '/philosophy/influences/' | relative_url }}).
 - **`db.c`** holds the keyspace; **`expire.c`** handles TTLs;
   **`bitcask.c`** is the append-only persistence layer.
 - **`metrics.c`** exposes counters via
