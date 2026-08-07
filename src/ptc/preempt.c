@@ -82,6 +82,19 @@
 # define XTC_HAVE_POSIX_TIMERS 1
 #endif
 
+#if defined(__linux__) && defined(SIGEV_THREAD_ID)
+# define XTC_HAVE_SIGEV_THREAD_ID 1
+/* The public POSIX-ish accessor sigev_notify_thread_id exists on musl
+ * and newer glibc; older glibc (e.g. 2.40) omits the macro but exposes
+ * the same field as the union member _sigev_un._tid.  Prefer the macro,
+ * fall back to the glibc-internal spelling. */
+# ifdef sigev_notify_thread_id
+#  define XTC_SIGEV_SET_TID(sev, tid) ((sev).sigev_notify_thread_id = (tid))
+# else
+#  define XTC_SIGEV_SET_TID(sev, tid) ((sev)._sigev_un._tid = (tid))
+# endif
+#endif
+
 /* macOS: no per-thread CPU-time timer_create.  The tick source is a
  * kqueue EVFILT_TIMER on a private per-thread kqueue instead (see the
  * big block comment above and the XTC_HAVE_KQUEUE_TIMER branch below).
@@ -271,13 +284,12 @@ xtc_preempt_arm(int64_t interval_ns)
 	 * not merely an environment quirk).  SIGEV_THREAD_ID makes it
 	 * deterministic.  Non-Linux keeps the portable SIGEV_SIGNAL form. */
 	memset(&sev, 0, sizeof sev);
-#if defined(__linux__) && defined(SIGEV_THREAD_ID)
+#if defined(XTC_HAVE_SIGEV_THREAD_ID)
 	sev.sigev_notify = SIGEV_THREAD_ID;
 	sev.sigev_signo = XTC_PREEMPT_SIGNAL;
-	/* glibc's SIGEV_THREAD_ID target LWP id is the union member
-	 * _sigev_un._tid (there is no sigev_notify_thread_id macro in this
-	 * glibc); gettid() is the calling worker thread. */
-	sev._sigev_un._tid = (int)syscall(SYS_gettid);
+	/* Deliver to the exact arming worker thread (its LWP id); the field
+	 * spelling differs across libcs -- XTC_SIGEV_SET_TID bridges it. */
+	XTC_SIGEV_SET_TID(sev, (int)syscall(SYS_gettid));
 #else
 	sev.sigev_notify = SIGEV_SIGNAL;
 	sev.sigev_signo = XTC_PREEMPT_SIGNAL;
@@ -333,10 +345,10 @@ xtc_preempt_supported(void)
 		struct sigevent sev;
 		timer_t t;
 		memset(&sev, 0, sizeof sev);
-#if defined(__linux__) && defined(SIGEV_THREAD_ID)
+#if defined(XTC_HAVE_SIGEV_THREAD_ID)
 		sev.sigev_notify = SIGEV_THREAD_ID;
 		sev.sigev_signo = XTC_PREEMPT_SIGNAL;
-		sev._sigev_un._tid = (int)syscall(SYS_gettid);
+		XTC_SIGEV_SET_TID(sev, (int)syscall(SYS_gettid));
 #else
 		sev.sigev_notify = SIGEV_SIGNAL;
 		sev.sigev_signo = XTC_PREEMPT_SIGNAL;
