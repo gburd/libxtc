@@ -1,3 +1,22 @@
+libxtc (1.34.0-1) unstable; urgency=medium
+
+  * feat: Cats-Effect-influenced structured-concurrency arc.  Resource
+    scope + bracket (xtc_scope_open/defer/close, xtc_bracket) run
+    finalizers on every exit path incl. abort and contained crash --
+    resource safety as a runtime MECHANISM, not a convention.
+    Cancellation masking (xtc_uncancelable/xtc_cancel_poll/
+    xtc_cancel_requested) defers an async kill inside a masked region.
+    Async causal trace (xtc_trace_causal_enable/_dump) records a
+    per-fiber park/resume ring spliced onto xtc_dump, zero-cost when
+    off.  Dispatcher (xtc_dispatch) bridges a foreign-thread/callback
+    into the runtime with a future + cancel handle.  Each is
+    DST-gated (finalizers proven to run on abort+crash, replayable) and
+    CBMC-modelled where a concurrent invariant applies.  Docs: an
+    Influences and lineage essay; the rexis + supervised-app examples
+    demonstrate the new primitives.
+
+ -- Greg Burd <greg@burd.me>  Thu, 07 Aug 2026 16:00:00 +0000
+
 libxtc (1.33.0-1) unstable; urgency=medium
 
   * feat(tls): SNI/ClientHello context-selection callback
