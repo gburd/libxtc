@@ -1,0 +1,172 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd August 7, 2026
+.Dt XTC_DISPATCH 3
+.Os
+.Sh NAME
+.Nm xtc_dispatch ,
+.Nm xtc_dispatch_cancel ,
+.Nm xtc_dispatch_handle_free
+.Nd submit an effect to the runtime from a callback or a foreign thread
+.Sh SYNOPSIS
+.In xtc.h
+.In xtc_dispatch.h
+.Ft int
+.Fn xtc_dispatch "xtc_loop_t *loop" "int (*fn)(void *)" "void *arg" "xtc_future_t **out_future" "xtc_dispatch_handle_t **out_handle"
+.Ft int
+.Fn xtc_dispatch_cancel "xtc_dispatch_handle_t *h"
+.Ft void
+.Fn xtc_dispatch_handle_free "xtc_dispatch_handle_t *h"
+.Sh DESCRIPTION
+The dispatcher is the blessed one-call front door for crossing
+.Em into
+the runtime from an impure callback or a foreign OS thread -- a C
+library's completion callback, a signal handler's follow-up, an
+embedder's own I/O thread -- with a way to await the effect's result
+and to cancel it.  It is the inverse of
+.Xr xtc_blocking 3 ,
+which runs blocking work
+.Em off
+a loop: the dispatcher gets work
+.Em onto
+a loop from the outside.
+.Pp
+.Fn xtc_dispatch
+spawns a fiber on
+.Fa loop
+that runs
+.Fa fn Ns ( Ns Fa arg Ns )
+to completion, then completes a future with
+.Fa fn Ns 's
+return value.  On
+.Dv XTC_OK :
+.Bl -tag -width Ds
+.It Fa out_future
+receives a future that resolves with
+.Fa fn Ns 's
+return value (the value is
+.Fa "(intptr_t)fn(arg)" ,
+status
+.Dv XTC_OK )
+when
+.Fa fn
+returns, or with (value 0, status
+.Dv XTC_E_ABORTED )
+if the dispatch is cancelled or the fiber crashes first.  The caller
+owns and consumes it with
+.Xr xtc_future_await 3
+(from a fiber) or
+.Xr xtc_future_wait 3
+(from a plain OS thread), exactly like any other future.  This
+argument is required.
+.It Fa out_handle
+receives an opaque cancel handle, or may be
+.Dv NULL
+if the caller never needs to cancel (fire and await).  When non-NULL
+the caller must eventually pass the handle to
+.Fn xtc_dispatch_cancel
+or
+.Fn xtc_dispatch_handle_free
+to release it.
+.El
+.Pp
+.Fn xtc_dispatch_cancel
+requests cancellation of the dispatched fiber and releases the handle.
+Cancellation is cooperative and composes with the runtime's masking and
+scope machinery: the dispatched fiber observes it at its next
+cancellation point -- a park,
+.Xr xtc_cancel_requested 3 ,
+or the end of an
+.Xr xtc_uncancelable 3
+region -- runs any
+.Xr xtc_scope 3
+or at-exit finalizers (so a resource acquired under a scope is still
+released), and unwinds.  If the fiber has already completed this is a
+harmless no-op on the result; either way the future is guaranteed to
+resolve exactly once.
+.Pp
+.Fn xtc_dispatch_handle_free
+releases a cancel handle without cancelling, for the caller that
+decided it will never cancel this dispatch.
+.Ss Thread-safety
+.Fn xtc_dispatch
+and
+.Fn xtc_dispatch_cancel
+are safe to call from
+.Em any
+OS thread, including one libxtc does not manage.  This is not new
+machinery: the dispatcher inherits the thread-safety of
+.Xr xtc_proc_spawn 3
+(a cross-thread spawn posts to the target loop's MPSC inbox and pings
+its I/O backend) and of
+.Xr xtc_promise_set 3
+(documented safe from any thread), composed with the masking and scope
+core from
+.Xr xtc_uncancelable 3
+and
+.Xr xtc_scope 3 .
+.Ss Exactly-once resolution
+The future always resolves exactly once: with
+.Fa fn Ns 's
+value on a normal return, or with
+.Dv XTC_E_ABORTED
+if the fiber is cancelled or crashes before it returns -- never lost,
+never doubled, never a hang.  An awaiter therefore never blocks
+forever on a dispatch that was cancelled or that faulted.
+.Sh RETURN VALUES
+.Fn xtc_dispatch
+returns
+.Dv XTC_OK
+on success (with
+.Fa *out_future
+and, if requested,
+.Fa *out_handle
+written),
+.Dv XTC_E_INVAL
+for a
+.Dv NULL
+.Fa loop ,
+.Fa fn ,
+or
+.Fa out_future ,
+.Dv XTC_E_NOMEM
+on allocation failure, or a spawn error such as
+.Dv XTC_E_RESOURCE
+if the loop's proc or task caps are hit.  On any error nothing is
+spawned.
+.Pp
+.Fn xtc_dispatch_cancel
+returns
+.Dv XTC_OK ,
+or
+.Dv XTC_E_INVAL
+on a
+.Dv NULL
+handle.
+.Sh EXAMPLES
+A foreign thread submits an effect and waits for its result:
+.Bd -literal -offset indent
+static int
+compute(void *arg)
+{
+	return (int)(intptr_t)arg * 2;
+}
+
+/* On a thread that is NOT a libxtc carrier: */
+xtc_future_t *fut;
+intptr_t out;
+
+if (xtc_dispatch(loop, compute, (void *)(intptr_t)21,
+    &fut, NULL) == XTC_OK) {
+	(void)xtc_future_wait(fut, &out, -1);
+	/* out == 42 */
+}
+.Ed
+.Sh SEE ALSO
+.Xr xtc_blocking 3 ,
+.Xr xtc_future 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_scope 3 ,
+.Xr xtc_uncancelable 3
+.Sh AUTHORS
+.An The XTC Project .

@@ -121,6 +121,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/proc.c \
 	$(srcdir)/../src/ptc/sync.c \
 	$(srcdir)/../src/ptc/future.c \
+	$(srcdir)/../src/ptc/dispatch.c \
 	$(srcdir)/../src/ptc/log.c \
 	$(srcdir)/../src/ptc/cfg.c \
 	$(srcdir)/../src/ptc/inject.c \
@@ -216,6 +217,7 @@ LIB_OBJS	= \
 	proc.o \
 	sync.o \
 	future.o \
+	dispatch.o \
 	log.o \
 	cfg.o \
 	inject.o \
@@ -329,6 +331,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_launch.h \
 	$(srcdir)/../src/inc/xtc_sync.h \
 	$(srcdir)/../src/inc/xtc_future.h \
+	$(srcdir)/../src/inc/xtc_dispatch.h \
 	$(srcdir)/../src/inc/xtc_tailcall.h \
 	$(srcdir)/../src/inc/xtc_tls.h \
 	$(srcdir)/../src/inc/xtc_tnt.h \
@@ -408,6 +411,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_chan test_chan_mpmc_bcast \
 		  test_res \
 		  test_future \
+		  test_dispatch \
 		  test_proc \
 		  test_scope \
 		  test_proc_wait_fd \
@@ -687,6 +691,9 @@ sync.o: $(srcdir)/../src/ptc/sync.c xtc_config.h
 
 future.o: $(srcdir)/../src/ptc/future.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/future.c
+
+dispatch.o: $(srcdir)/../src/ptc/dispatch.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/dispatch.c
 
 log.o: $(srcdir)/../src/ptc/log.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/log.c
@@ -1297,6 +1304,12 @@ test_future: $(srcdir)/../test/m7/test_future.c \
 		$(srcdir)/../test/m7/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m7 \
 		-o $@ $(srcdir)/../test/m7/test_future.c \
+		$(srcdir)/../test/m7/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_dispatch: $(srcdir)/../test/m7/test_dispatch.c \
+		$(srcdir)/../test/m7/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m7 \
+		-o $@ $(srcdir)/../test/m7/test_dispatch.c \
 		$(srcdir)/../test/m7/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_res: $(srcdir)/../test/m7/test_res.c \
