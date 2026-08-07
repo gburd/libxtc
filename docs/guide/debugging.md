@@ -405,6 +405,50 @@ makes it strongest for the hang/wedge class above ("which proc is
 waiting on whom"); for deep per-fiber stacks attach a debugger to the
 core.  See `xtc_dump(3)`.
 
+## The async causal trace (how a fiber GOT here)
+
+The dump above tells you *what* a fiber's state is now -- parked on a
+timer, mailbox depth 2.  It does not tell you the *path of suspensions*
+that led there.  The **async causal trace** adds that: a small
+fixed-capacity ring (16 entries) per proc records each suspend/resume
+boundary -- a mailbox receive, a timer sleep, an fd wait, and the
+matching resume -- with a static site label.  It is libxtc's analog of
+Cats Effect's per-fiber async-stack-trace ring, and it complements the
+current-state dump instead of replacing it: together they answer both
+*what is this fiber doing* and *how did it get here* at once.
+
+It lives in `xtc_trace.h` alongside the causal *message* trace, but is
+a separate switch -- one records the chain of messages *between* procs,
+the other the chain of park/resume boundaries *within* one proc.  It is
+OFF by default and zero-cost when off: a disabled trace is one
+relaxed-atomic load and a branch at the suspend/resume boundary and
+touches no memory, so a default build records nothing.  Each recorded
+event is one index bump and a store on the owning fiber -- core-private,
+single-writer, no lock -- so it never writes a shared cache line on the
+hot path even when enabled.  Enable it to debug a stuck or
+mis-scheduled fiber, then turn it back off:
+
+{% include snippet.html file="08_causal_trace.c" region="enable" %}
+
+Read one proc's chain oldest-first with `xtc_trace_causal_dump`:
+
+{% include snippet.html file="08_causal_trace.c" region="cb" %}
+
+When the trace is enabled, `xtc_dump` splices each proc's recent chain
+onto its state line -- a `causal:` line of `kind@site` entries,
+oldest-first -- so a dump reads:
+
+    procs:
+      <0.0.1> parked    park=mailbox mbox=0/4096 peak=1 recv=1 drop=0
+        causal: park:mailbox@__do_recv -> resume@__do_recv -> park:mailbox@__do_recv
+
+The chain reads left-to-right, oldest-first: this fiber parked awaiting
+a message, resumed when one arrived, and parked again awaiting the
+next.  A proc that has already exited has been reaped, so
+`xtc_trace_causal_dump` returns `XTC_E_NOTFOUND` for it -- read a
+fiber's chain while it is still alive (or from the dump, which walks
+the live set).  See `xtc_trace(3)`.
+
 ## When you file a libxtc bug
 
 Include the output of `xtc-loops`, `xtc-procs`, and `thread apply all

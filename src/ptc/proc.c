@@ -435,6 +435,21 @@ struct xtc_proc {
 	unsigned      mask_depth;
 	int           mask_deferred;   /* latched reason+1; 0 = none pending */
 
+	/* A3 async causal trace: a small per-fiber ring of the recent
+	 * suspend/resume boundaries (park reason / resume) with a static
+	 * site label, so xtc_dump can splice "how did this fiber get here"
+	 * onto its current-state line.  Owner-only / core-private: the ring
+	 * is written ONLY on this proc's own fiber, one index bump + a store
+	 * per event, no lock and no atomic on the record (Invariant 1: no
+	 * shared-line write on the hot path).  Written only when the causal
+	 * trace is enabled, so a default build never touches it; a reader
+	 * (xtc_dump / xtc_trace_causal_dump) snapshots it best-effort.
+	 * ct_seq is the total events ever recorded; the live window is the
+	 * last min(ct_seq, XTC_PROC_CAUSAL_RING) entries. */
+#define XTC_PROC_CAUSAL_RING 16u
+	struct { int kind; const char *site; } ct_ring[XTC_PROC_CAUSAL_RING];
+	unsigned      ct_seq;
+
 	/* Lifecycle. */
 	int         alive;
 
@@ -1371,6 +1386,86 @@ __xtc_proc_kill_check(void)
 	__xtc_proc_kill_deliver(__current_proc);
 }
 
+/* ---------- A3: async causal trace ---------- */
+
+/*
+ * The single runtime toggle.  A relaxed atomic so the hot-path hook
+ * (__xtc_trace_causal) is one relaxed load + branch when off; a default
+ * build never records, so the per-fiber ring stays untouched.  Mirrors
+ * the xtc_tail enable/disable discipline (observability must not tax
+ * production).
+ */
+static _Atomic int __ct_enabled;   /* 0 = off (default), 1 = on */
+
+/* PUBLIC: int xtc_trace_causal_enable __P((int)); */
+int
+xtc_trace_causal_enable(int on)
+{
+	return atomic_exchange_explicit(&__ct_enabled, on ? 1 : 0,
+	    memory_order_release);
+}
+
+/*
+ * Record one suspend/resume boundary on the calling proc's ring.  A
+ * no-op fast path -- one relaxed load + branch -- when the trace is off
+ * or we are not on a proc, so a disabled trace writes nothing on the
+ * park/resume path.  Single-writer / core-private: called only on the
+ * proc's own fiber, so the index bump + store need no atomic and cannot
+ * race a reader's snapshot in a way that misreports (a reader may see a
+ * torn window, never a corrupt struct).
+ */
+void
+__xtc_trace_causal(int kind, const char *site)
+{
+	struct xtc_proc *self;
+
+	if (atomic_load_explicit(&__ct_enabled, memory_order_relaxed) == 0)
+		return;                 /* off: one branch, done */
+	self = __current_proc;
+	if (self == NULL)
+		return;                 /* not on a proc */
+	self->ct_ring[self->ct_seq % XTC_PROC_CAUSAL_RING].kind = kind;
+	self->ct_ring[self->ct_seq % XTC_PROC_CAUSAL_RING].site = site;
+	self->ct_seq++;
+}
+
+/* PUBLIC: int xtc_trace_causal_dump __P((xtc_pid_t, xtc_causal_fn, void *)); */
+int
+xtc_trace_causal_dump(xtc_pid_t pid, xtc_causal_fn cb, void *user)
+{
+	struct xtc_proc *p;
+	xtc_causal_rec_t snap[XTC_PROC_CAUSAL_RING];
+	unsigned seq, n, start, i;
+
+	if (cb == NULL)
+		return XTC_E_INVAL;
+	p = __resolve(pid, NULL);
+	if (p == NULL)
+		return XTC_E_NOTFOUND;
+
+	/*
+	 * Snapshot the ring into a local copy, then release the proc
+	 * ref and visit outside any hold (like xtc_inspect / xtc_tail).
+	 * The writer is the proc's own fiber; a concurrent write can only
+	 * make the window we copy slightly stale, never corrupt -- kind and
+	 * site are word-sized and the ring is fixed.
+	 */
+	seq = p->ct_seq;
+	n = seq < XTC_PROC_CAUSAL_RING ? seq : XTC_PROC_CAUSAL_RING;
+	start = seq < XTC_PROC_CAUSAL_RING ? 0u
+	    : seq % XTC_PROC_CAUSAL_RING;
+	for (i = 0; i < n; i++) {
+		snap[i].kind = p->ct_ring[(start + i) % XTC_PROC_CAUSAL_RING].kind;
+		snap[i].site = p->ct_ring[(start + i) % XTC_PROC_CAUSAL_RING].site;
+	}
+	__proc_release(p);
+
+	for (i = 0; i < n; i++)
+		if (cb(&snap[i], user) != 0)
+			break;
+	return (int)n;
+}
+
 /* PUBLIC: int xtc_proc_sleep __P((int64_t)); */
 int
 xtc_proc_sleep(int64_t ns)
@@ -1391,9 +1486,11 @@ xtc_proc_sleep(int64_t ns)
 			return XTC_OK;
 		(void)xtc_task_park_on_timer(self->task, deadline - now);
 		ctx = __xtc_proc_ctx_save();
+		__xtc_trace_causal(XTC_CAUSAL_PARK_TIMER, __func__);
 		xtc_yield();
 		__xtc_proc_ctx_restore(ctx);
 		__current_proc = self;
+		__xtc_trace_causal(XTC_CAUSAL_RESUME, __func__);
 		__xtc_proc_kill_deliver(self);
 		/* Spurious / early wake: loop until the deadline. */
 	}
@@ -1792,7 +1889,9 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 				    self->pid, 0);
 				(void)__os_clock_mono(&__park_ns);
 			}
+			__xtc_trace_causal(XTC_CAUSAL_PARK_MAILBOX, __func__);
 			xtc_yield();
+			__xtc_trace_causal(XTC_CAUSAL_RESUME, __func__);
 			if (__tail_sched) {
 				int64_t __run_ns = 0;
 				(void)__os_clock_mono(&__run_ns);
@@ -2040,9 +2139,11 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	self->waker_armed = 1;
 	(void) __proc_mtx_unlock(&self->mbox_lock);
 
+	__xtc_trace_causal(XTC_CAUSAL_PARK_FD, __func__);
 	xtc_yield();
 	/* Restore __current_proc -- another fiber may have clobbered it. */
 	__current_proc = self;
+	__xtc_trace_causal(XTC_CAUSAL_RESUME, __func__);
 
 	(void) __proc_mtx_lock(&self->mbox_lock);
 	self->waker_armed = 0;
