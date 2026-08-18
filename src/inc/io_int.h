@@ -161,6 +161,20 @@ struct xtc_io {
 	struct io_uring  ring;
 	struct __xtc_uring_fd *fds;
 	struct __xtc_uring_fd *zombies;  /* deleted fds awaiting terminal CQE */
+	/*
+	 * L2 ring-pointer preempt (INSPIRED BY Glommio's need_preempt():
+	 * reactor.rs / sys/uring.rs preempt_pointers).  A dedicated tiny
+	 * ring carrying ONLY a rearmed TIMEOUT SQE, so
+	 * io_uring_cq_ready(&preempt_ring) -- two relaxed/acquire loads of
+	 * that ring's own head/tail, no syscall, no signal -- means "the
+	 * preempt interval elapsed".  A separate ring (not io->ring) is
+	 * what makes the pointer test isolate the timeout: I/O CQEs on the
+	 * main ring advance its head/tail unpredictably, but this ring sees
+	 * only the timeout.  preempt_armed gates it (0 = off, the ring is
+	 * not initialised). */
+	struct io_uring  preempt_ring;
+	int              preempt_armed;
+	struct __kernel_timespec preempt_ts;   /* the rearm interval */
 #elif defined(XTC_IO_BACKEND_POLL)
 	struct pollfd *pfds;
 	void         **tags;

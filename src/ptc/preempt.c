@@ -610,6 +610,21 @@ xtc_preempt_set_involuntary(int on)
 	    memory_order_relaxed);
 }
 
+/*
+ * __xtc_preempt_involuntary_enabled: 1 if signal-context involuntary
+ * yield (Phase 2) is currently enabled.  Internal: the io_uring executor path (exec.c) consults it to decide
+ * whether it STILL needs the SIGVTALRM/kqueue timer alongside the
+ * ring-pointer preempt source -- the ring can drive the cooperative
+ * (Phase 1) yield-check with no signal, but Phase 2 involuntarily
+ * redirecting a fiber that never reaches a yield-check REQUIRES the
+ * signal handler, so the timer must be armed when this is on.
+ */
+int
+__xtc_preempt_involuntary_enabled(void)
+{
+	return atomic_load_explicit(&g_involuntary_on, memory_order_relaxed);
+}
+
 /* PUBLIC: uint64_t xtc_preempt_ticks __P((void)); */
 /* Total timer ticks this thread has observed since arming.  The Phase 0
  * signal-that-the-seam-works metric. */
