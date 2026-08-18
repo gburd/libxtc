@@ -55,4 +55,14 @@ XTC_API int  __xtc_unsafe_depth(void);
 int __xtc_mtx_lock(pthread_mutex_t *m);
 int __xtc_mtx_unlock(pthread_mutex_t *m);
 
+/*
+ * 1 if signal-context involuntary yield (Phase 2) is enabled.  Internal
+ * accessor for the io_uring executor path: the ring-pointer preempt
+ * source (L2) drives the cooperative yield-check with no signal, but
+ * Phase 2 (redirecting a fiber that never reaches a yield-check) needs
+ * the SIGVTALRM/kqueue timer, so exec.c keeps the timer armed when this
+ * is on.
+ */
+XTC_API int __xtc_preempt_involuntary_enabled(void);
+
 #endif /* XTC_PREEMPT_INT_H */

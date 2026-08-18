@@ -137,6 +137,32 @@ macOS but not yet runtime-verified on real Apple hardware by the change
 that introduced it; see
 .Pa docs/KNOWN_ISSUES.md
 for the current verification status.
+.Pp
+On the io_uring backend the executor drives the cooperative (Phase 1)
+tick source from the ring itself rather than from this per-thread
+signal timer: it arms a rearmed
+.Dv IORING_OP_TIMEOUT
+SQE on a small dedicated ring, and the
+.Dq preempt is due
+check becomes two relaxed/acquire loads of that ring's completion
+head/tail -- no signal, no syscall, and none of the wrong-thread
+signal-delivery hazard the CPU-time timer historically fought.  A long
+compute fiber that reaches a yield point is therefore time-sliced with
+NO signal delivered on that backend (measured at roughly a third the
+per-check cost of the signal-flag path).  The signal timer this page
+documents remains the portable Phase 1 source on epoll, kqueue, IOCP,
+select, and the other readiness backends, where there is no ring to
+read; and it is still armed on io_uring too whenever the involuntary
+(Phase 2) path is enabled, since redirecting a fiber that never reaches
+a yield point requires the signal handler.  This ring-pointer preempt
+mechanism is INSPIRED BY Glommio (Glauber Costa / ScyllaDB): its
+.Fn need_preempt
+(glommio
+.Pa src/reactor.rs
+and
+.Pa src/sys/uring.rs
+preempt_pointers) is likewise two loads of a dedicated latency ring's
+head/tail.
 .Sh SEE ALSO
 .Xr xtc_async 3 ,
 .Xr xtc_exec 3 ,

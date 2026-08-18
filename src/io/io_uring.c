@@ -494,6 +494,156 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 }
 /* XTC_NOALLOC_END */
 
+/*
+ * ---- L2: io_uring ring-pointer preempt ---------------------------
+ *
+ * INSPIRED BY Glommio (Glauber Costa / ScyllaDB): its need_preempt()
+ * (glommio src/reactor.rs) is just `*cq.khead != *cq.ktail` on a
+ * dedicated "latency" ring whose only traffic is a TIMEOUT SQE
+ * (glommio src/sys/uring.rs: preempt_pointers / the LatencyRing).  Two
+ * relaxed/acquire loads of the ring's own head/tail -- NO syscall, NO
+ * signal, NO async-signal-safety worry, and NO wrong-thread signal-
+ * delivery bug (the class libxtc fought in v1.34.1).
+ *
+ * libxtc keeps the per-thread CPU-time POSIX timer + SIGVTALRM path
+ * (src/ptc/preempt.c) as the PORTABLE fallback for epoll/kqueue/iocp/
+ * select, where there is no ring to read; this is an io_uring-backend
+ * OPTIMISATION, not a replacement.  On the uring backend the executor
+ * arms THIS instead of the signal timer, so a long compute fiber gets
+ * sliced with no signal delivered.
+ *
+ * We use a SEPARATE small ring (io->preempt_ring), not io->ring,
+ * deliberately: the main ring's CQ head/tail move with every I/O
+ * completion, so a pointer test there could not isolate "the timeout
+ * fired".  The preempt ring sees only the rearmed timeout, so
+ * io_uring_cq_ready(&preempt_ring) != 0 means exactly "a preempt tick
+ * is due".
+ */
+
+#define XTC_URING_PREEMPT_UD  ((__u64)0x70726d7431ULL)   /* "prmt1" */
+
+/* Submit (or resubmit) the single rearmed TIMEOUT SQE on the preempt
+ * ring.  count=0, flags=0: a relative timeout that posts one CQE after
+ * preempt_ts elapses.  We resubmit each time the CQE is reaped, so the
+ * ring carries at most one timeout in flight. */
+static int
+__preempt_arm_timeout(xtc_io_t *io)
+{
+	struct io_uring_sqe *sqe = io_uring_get_sqe(&io->preempt_ring);
+	if (sqe == NULL)
+		return XTC_E_AGAIN;
+	io_uring_prep_timeout(sqe, &io->preempt_ts, 0, 0);
+	io_uring_sqe_set_data64(sqe, XTC_URING_PREEMPT_UD);
+	if (io_uring_submit(&io->preempt_ring) < 0)
+		return XTC_E_INTERNAL;
+	return XTC_OK;
+}
+
+/*
+ * __xtc_io_uring_preempt_arm: create the dedicated preempt ring and arm
+ * the first TIMEOUT SQE at `interval_ns`.  Called by the executor
+ * worker (exec.c) on the uring backend when preemption is enabled,
+ * INSTEAD of the SIGVTALRM timer.
+ * Returns XTC_OK on success (the ring is now the preempt trigger),
+ * XTC_E_* on failure (the caller then falls back to the signal timer).
+ */
+int
+__xtc_io_uring_preempt_arm(xtc_io_t *io, int64_t interval_ns)
+{
+	int rc;
+	if (io == NULL || interval_ns <= 0)
+		return XTC_E_INVAL;
+	if (io->preempt_armed)
+		return XTC_OK;
+	/* A tiny ring -- one timeout in flight -- so 8 entries is ample. */
+	rc = io_uring_queue_init(8, &io->preempt_ring, 0);
+	if (rc < 0) {
+		errno = -rc;
+		return XTC_E_INTERNAL;
+	}
+	io->preempt_ts.tv_sec  = interval_ns / 1000000000LL;
+	io->preempt_ts.tv_nsec = interval_ns % 1000000000LL;
+	if ((rc = __preempt_arm_timeout(io)) != XTC_OK) {
+		io_uring_queue_exit(&io->preempt_ring);
+		return rc;
+	}
+	io->preempt_armed = 1;
+	return XTC_OK;
+}
+
+/*
+ * __xtc_io_uring_preempt_due: the Glommio need_preempt() check -- 1 if
+ * the preempt interval elapsed since the last consult, else 0.  The
+ * fast path is TWO relaxed/acquire loads (io_uring_cq_ready reads the
+ * ring's own khead/ktail) -- no syscall.  When it IS due we reap the
+ * timeout CQE and resubmit the next one, so the caller sees each
+ * interval exactly once; that reap + resubmit is off the hot path
+ * (only when a slice actually elapsed).
+ */
+int
+__xtc_io_uring_preempt_due(xtc_io_t *io)
+{
+	struct io_uring_cqe *cqe;
+	unsigned head, seen = 0;
+	if (io == NULL || !io->preempt_armed)
+		return 0;
+	/* Two relaxed/acquire loads of the preempt ring's head/tail. */
+	if (io_uring_cq_ready(&io->preempt_ring) == 0)
+		return 0;
+	/* Due: drain the timeout CQE(s) and rearm.  A timeout posts one
+	 * CQE per interval; drain whatever is present (normally 1) so a
+	 * caller that consulted late does not see a backlog of "due". */
+	io_uring_for_each_cqe(&io->preempt_ring, head, cqe)
+		seen++;
+	if (seen > 0)
+		io_uring_cq_advance(&io->preempt_ring, seen);
+	(void)__preempt_arm_timeout(io);
+	return 1;
+}
+
+/*
+ * __xtc_io_uring_preempt_disarm: tear down the preempt ring.  Safe if
+ * never armed.
+ */
+void
+__xtc_io_uring_preempt_disarm(xtc_io_t *io)
+{
+	if (io == NULL || !io->preempt_armed)
+		return;
+	io->preempt_armed = 0;
+	io_uring_queue_exit(&io->preempt_ring);
+}
+
 #endif /* XTC_IO_BACKEND_URING */
+
+#if !defined(XTC_IO_BACKEND_URING)
+#include "xtc_io.h"   /* xtc_io_t (io_int.h is guarded out on this backend) */
+/*
+ * Portable no-op stubs so loop.c (xtc_yield_check) and exec.c can call
+ * the ring-preempt seam unconditionally.  On every non-uring backend
+ * these report "no ring preempt available", so the SIGVTALRM/kqueue
+ * signal timer stays the preemption trigger (the portable fallback).
+ */
+int
+__xtc_io_uring_preempt_arm(xtc_io_t *io, int64_t interval_ns)
+{
+	(void)io;
+	(void)interval_ns;
+	return XTC_E_NOSYS;
+}
+
+int
+__xtc_io_uring_preempt_due(xtc_io_t *io)
+{
+	(void)io;
+	return 0;
+}
+
+void
+__xtc_io_uring_preempt_disarm(xtc_io_t *io)
+{
+	(void)io;
+}
+#endif /* !XTC_IO_BACKEND_URING */
 
 typedef int __xtc_io_uring_unused;
