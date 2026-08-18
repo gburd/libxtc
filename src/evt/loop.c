@@ -13,8 +13,11 @@
 #include "xtc_slab.h"
 #include "coro_int.h"
 #include "xtc_async.h"
+#include "xtc_exec.h"
 #include "xtc_preempt.h"
 #include "os_time.h"
+#include "os_backtrace.h"
+#include "xtc_log.h"
 #include "xtc_sim.h"
 
 #include <stdint.h>
@@ -306,6 +309,26 @@ __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t)
 	if (t->q_next != NULL || loop->q_tail == t)
 		return XTC_OK;        /* already in slow-path FIFO */
 
+	/* L1 proportional-share: a class-tagged task on a loop that has
+	 * that class goes onto the class's own ready FIFO (never the
+	 * stealable deque -- classes are an owner-side overlay).  A stolen
+	 * task whose tag index does not exist on this loop falls through to
+	 * the default path below, so cross-loop steals never lose a task.
+	 * INSPIRED BY Glommio's per-task-queue ready set. */
+	if (t->sched_class >= 0 && t->sched_class < loop->n_classes &&
+	    loop->classes[t->sched_class].in_use) {
+		struct xtc_run_class *rc = &loop->classes[t->sched_class];
+		/* Guard against a double-enqueue into a class FIFO (mirrors
+		 * the q_tail == t guard above for the default FIFO). */
+		if (rc->q_tail == t)
+			return XTC_OK;
+		t->q_next = NULL;
+		if (rc->q_tail == NULL)
+			rc->q_head = rc->q_tail = t;
+		else { rc->q_tail->q_next = t; rc->q_tail = t; }
+		return XTC_OK;
+	}
+
 	if (loop->exec != NULL) {
 		if (!t->pinned &&
 		    xtc_deque_push(&loop->deque, t) == XTC_OK) {
@@ -340,6 +363,49 @@ static xtc_task_t *
 __queue_pop(xtc_loop_t *loop)
 {
 	xtc_task_t *t;
+
+	/* L1 proportional-share: when at least one class exists, run a
+	 * min-vruntime pick over the in-use classes AND the implicit
+	 * default lane (the plain FIFO/deque, for untagged tasks, weighted
+	 * with XTC_DEFAULT_CLASS_SHARES).  Including the default lane in the
+	 * race means always-ready class work can never starve background
+	 * untagged work -- it just out-weighs it in proportion to shares.
+	 * A tiny linear scan over the few classes (no heap, no alloc -- the
+	 * dispatch-path contract).  INSPIRED BY Glommio's min-vruntime queue
+	 * pick over its task queues incl. the default queue. */
+	if (loop->n_classes > 0) {
+		int i, best = -1;    /* -1 => default lane is best so far */
+		uint64_t best_vr;
+		int default_ready = (loop->q_head != NULL ||
+		    xtc_deque_len(&loop->deque) > 0);
+
+		best_vr = default_ready ? loop->default_vruntime : 0;
+		if (!default_ready)
+			best = -2;   /* -2 => nothing chosen yet */
+		for (i = 0; i < loop->n_classes; i++) {
+			struct xtc_run_class *rc = &loop->classes[i];
+			if (!rc->in_use || rc->q_head == NULL)
+				continue;
+			if (best == -2 || rc->vruntime < best_vr) {
+				best = i;
+				best_vr = rc->vruntime;
+			}
+		}
+		if (best >= 0) {
+			struct xtc_run_class *rc = &loop->classes[best];
+			t = rc->q_head;
+			rc->q_head = t->q_next;
+			if (rc->q_head == NULL)
+				rc->q_tail = NULL;
+			t->q_next = NULL;
+			rc->runs++;
+			return t;
+		}
+		/* best == -1: default lane wins the race -> fall through to
+		 * the plain FIFO/deque pop below.  best == -2: nothing ready
+		 * at all -> that pop returns NULL. */
+	}
+
 	if (loop->q_head != NULL) {
 		t = loop->q_head;
 		loop->q_head = t->q_next;
@@ -348,6 +414,81 @@ __queue_pop(xtc_loop_t *loop)
 		return t;
 	}
 	return (xtc_task_t *)xtc_deque_pop(&loop->deque);
+}
+
+/*
+ * L1: create a run class on `loop`.  Owner-only (called from the loop's
+ * own thread, or before the loop runs).  Precomputes the reciprocal
+ * (1<<22)/shares used by the vruntime account formula (Glommio's
+ * shares.rs) and recomputes the loop's effective latency bound.
+ */
+int
+__xtc_loop_class_create(xtc_loop_t *loop, int shares, int64_t latency_ns,
+    int *out_idx)
+{
+	struct xtc_run_class *rc;
+	int idx, i;
+
+	if (loop == NULL || shares < 1 || shares > 1000 || latency_ns < 0)
+		return XTC_E_INVAL;
+	if (loop->n_classes >= XTC_LOOP_MAX_CLASSES)
+		return XTC_E_AGAIN;
+
+	idx = loop->n_classes;
+	rc = &loop->classes[idx];
+	rc->shares = shares;
+	rc->latency_ns = latency_ns;
+	/* Glommio's reciprocal_shares: (1 << 22) / shares.  vruntime then
+	 * accrues delta_ns * reciprocal >> 12, so a class with more shares
+	 * accrues virtual time more SLOWLY and is picked more often. */
+	rc->reciprocal = ((uint64_t)1 << 22) / (uint64_t)shares;
+	/* Start the new class at the current minimum vruntime so a
+	 * late-created class is not unfairly favoured (vruntime 0) nor
+	 * starved.  Matches CFS's place_entity min-vruntime seeding. */
+	{
+		uint64_t minvr = 0;
+		int have = 0;
+		for (i = 0; i < loop->n_classes; i++) {
+			if (!loop->classes[i].in_use)
+				continue;
+			if (!have || loop->classes[i].vruntime < minvr) {
+				minvr = loop->classes[i].vruntime;
+				have = 1;
+			}
+		}
+		rc->vruntime = minvr;
+	}
+	rc->q_head = rc->q_tail = NULL;
+	rc->in_use = 1;
+	loop->n_classes = idx + 1;
+
+	/* Recompute the effective latency bound: the smallest non-zero
+	 * latency over all classes (like Glommio's reevaluate_preempt_timer
+	 * picking the tightest active deadline). */
+	loop->class_latency_ns = 0;
+	for (i = 0; i < loop->n_classes; i++) {
+		int64_t l = loop->classes[i].latency_ns;
+		if (l > 0 && (loop->class_latency_ns == 0 ||
+		    l < loop->class_latency_ns))
+			loop->class_latency_ns = l;
+	}
+	/* A latency class shrinks the loop's effective yield/preempt
+	 * interval so a long-running peer cannot hold the core past the
+	 * bound: arm (or tighten) the cooperative yield watchdog to the
+	 * tightest latency bound.  Coordinates with loop->yield_budget_ns
+	 * (the existing xtc_yield_check watchdog); a cooperative fiber that
+	 * calls xtc_yield_if_due then yields within the bound, and the
+	 * min-vruntime pick runs the latency class next.  INSPIRED BY
+	 * Glommio's reevaluate_preempt_timer.  Only ever shrinks the
+	 * interval (never loosens a stricter budget the consumer set). */
+	if (loop->class_latency_ns > 0 &&
+	    (loop->yield_budget_ns == 0 ||
+	     loop->class_latency_ns < loop->yield_budget_ns))
+		loop->yield_budget_ns = loop->class_latency_ns;
+
+	if (out_idx != NULL)
+		*out_idx = idx;
+	return XTC_OK;
 }
 
 /*
@@ -458,13 +599,80 @@ __xtc_loop_step(xtc_loop_t *loop)
 		}
 		atomic_fetch_add_explicit(&loop->n_tasks_run, 1,
 		    memory_order_relaxed);
-		if (loop->yield_budget_ns > 0) {
+		/* Record this run quantum's start when any time-accounting
+		 * feature is active: the cooperative yield watchdog, the L1
+		 * proportional-share scheduler (needs elapsed to accrue
+		 * vruntime), or the L3 stall watchdog (needs elapsed to detect
+		 * an overrun).  When ALL are off (the default) this is skipped,
+		 * so the hot path takes no clock read -- unchanged. */
+		if (loop->yield_budget_ns > 0 || loop->n_classes > 0 ||
+		    loop->stall_budget_ns > 0) {
 			int64_t s = 0;
 			(void)__os_clock_mono(&s);
 			t->run_start_ns = s;   /* start of this run quantum */
 		}
 		t->state = XTC_TS_RUNNING;
 		verdict = t->fn(t, t->user);
+		/*
+		 * L1 + L3 run-end time accounting.  Read the clock ONCE at the
+		 * verdict boundary and use it for both the proportional-share
+		 * vruntime accrual and the over-budget stall check.  Guarded on
+		 * (n_classes || stall_budget): zero cost when both are off.
+		 * INSPIRED BY Glommio (account_vruntime + stall detector).
+		 */
+		if (loop->n_classes > 0 || loop->stall_budget_ns > 0) {
+			int64_t end_ns = 0, elapsed;
+			(void)__os_clock_mono(&end_ns);
+			elapsed = end_ns - t->run_start_ns;
+			if (elapsed < 0)
+				elapsed = 0;
+			/* L1: accrue weighted virtual runtime to the task's class.
+			 * Glommio's exact formula (executor/mod.rs account_vruntime
+			 * + shares.rs): vruntime += (cost_ns * reciprocal) >> 12,
+			 * where reciprocal = (1<<22)/shares.  A higher-shares class
+			 * accrues vruntime more slowly, so __queue_pop's min-vruntime
+			 * pick chooses it more often -> a proportional CPU share.
+			 *
+			 * cost_ns is the measured run time, floored to a minimum
+			 * quantum.  The floor guarantees vruntime always advances --
+			 * essential under the deterministic simulator, where the
+			 * virtual clock does not advance WITHIN a compute run (start
+			 * and end read the same virtual instant, elapsed 0) so an
+			 * unfloored accrual would leave every class at vruntime 0 and
+			 * the pick would degenerate.  With equal-cost runs the floor
+			 * makes the run ratio between classes equal their shares
+			 * ratio (reduction-style accounting), which is exactly what
+			 * the DST gate proves.  In production, a real run's elapsed
+			 * dominates the floor, so the accounting stays Glommio-
+			 * faithful (weighted by actual CPU time). */
+			int64_t cost = elapsed < XTC_VRUNTIME_MIN_QUANTUM_NS
+			    ? XTC_VRUNTIME_MIN_QUANTUM_NS : elapsed;
+			if (loop->n_classes > 0 && t->sched_class >= 0 &&
+			    t->sched_class < loop->n_classes &&
+			    loop->classes[t->sched_class].in_use) {
+				struct xtc_run_class *rc =
+				    &loop->classes[t->sched_class];
+				rc->vruntime += ((uint64_t)cost *
+				    rc->reciprocal) >> 12;
+			} else if (loop->n_classes > 0) {
+				/* Untagged (default-lane) task: accrue against the
+				 * implicit default lane so it races the classes
+				 * fairly in __queue_pop and cannot be starved. */
+				loop->default_vruntime += ((uint64_t)cost *
+				    XTC_DEFAULT_CLASS_RECIP) >> 12;
+			}
+			/* L3: over-budget stall watchdog.  When a single run
+			 * exceeded the budget, report it (callback or log) with a
+			 * backtrace of where the loop was.  See
+			 * __xtc_loop_stall_report. */
+			if (loop->stall_budget_ns > 0 &&
+			    elapsed >= loop->stall_budget_ns) {
+				extern void __xtc_loop_stall_report(xtc_loop_t *,
+				    xtc_task_t *, int64_t, int64_t);
+				__xtc_loop_stall_report(loop, t, elapsed,
+				    loop->stall_budget_ns);
+			}
+		}
 		switch (verdict) {
 		case XTC_TASK_DONE:
 			t->state = XTC_TS_DONE;
@@ -764,6 +972,20 @@ xtc_yield_check(void)
 		    memory_order_relaxed);
 		return 1;
 	}
+	/*
+	 * L2 io_uring ring-pointer preempt (INSPIRED BY Glommio's
+	 * need_preempt: reactor.rs + sys/uring.rs preempt_pointers).  On
+	 * the io_uring backend the executor arms a rearmed TIMEOUT SQE on a
+	 * dedicated ring instead of the SIGVTALRM timer; "due" is then two
+	 * relaxed/acquire loads of that ring's head/tail -- no signal, so
+	 * this slices a long compute fiber with no signal delivered.  A
+	 * no-op (returns 0) on every non-uring backend, where the signal
+	 * path above is the trigger. */
+	if (__xtc_io_uring_preempt_due(t->loop->io)) {
+		atomic_fetch_add_explicit(&t->loop->n_yield_due, 1,
+		    memory_order_relaxed);
+		return 1;
+	}
 	budget = t->loop->yield_budget_ns;
 	if (budget <= 0 || t->run_start_ns == 0)
 		return 0;                       /* watchdog disabled */
@@ -794,4 +1016,83 @@ xtc_yield_due_count(const xtc_loop_t *loop)
 	if (loop == NULL)
 		return 0;
 	return atomic_load_explicit(&loop->n_yield_due, memory_order_relaxed);
+}
+
+/* ---- L3 over-budget stall watchdog -------------------------------- *
+ *
+ * INSPIRED BY Glommio's stall detector (executor/stall.rs): when a
+ * single task run exceeds a budget, report WHICH code monopolized the
+ * core.  Glommio uses a background thread + timerfd + SIGUSR1; libxtc
+ * does the cheaper thing the plan calls for -- a wall-clock check at
+ * the run-end boundary in __xtc_loop_step (it already has run_start_ns
+ * and can read the clock at verdict time), so there is NO extra thread
+ * and NO signal, and it is a single branch on stall_budget_ns == 0 when
+ * off (proven zero-overhead by test/m14).
+ */
+
+/* PUBLIC: void xtc_loop_set_stall_budget __P((xtc_loop_t *, int64_t)); */
+void
+xtc_loop_set_stall_budget(xtc_loop_t *loop, int64_t budget_ns)
+{
+	if (loop != NULL)
+		loop->stall_budget_ns = budget_ns < 0 ? 0 : budget_ns;
+}
+
+/* PUBLIC: void xtc_loop_set_stall_cb __P((xtc_loop_t *, xtc_stall_cb, void *)); */
+void
+xtc_loop_set_stall_cb(xtc_loop_t *loop, xtc_stall_cb cb, void *user)
+{
+	if (loop != NULL) {
+		loop->stall_cb = cb;
+		loop->stall_cb_user = user;
+	}
+}
+
+/* PUBLIC: uint64_t xtc_loop_stall_count __P((const xtc_loop_t *)); */
+uint64_t
+xtc_loop_stall_count(const xtc_loop_t *loop)
+{
+	if (loop == NULL)
+		return 0;
+	return atomic_load_explicit(&loop->n_stalls, memory_order_relaxed);
+}
+
+/*
+ * Called from __xtc_loop_step's run-end boundary when a run exceeded
+ * the loop's stall budget.  Bumps the telemetry counter and reports:
+ * either the consumer callback, or (when none is set) a WARN log line
+ * plus a backtrace of the loop emitted to stderr -- "loop L, task went
+ * over-budget (ran X ms, budget Y ms), here:".  Not on the hot path
+ * unless a stall actually fired, so the symbolizing cost is paid only
+ * on an overrun.
+ */
+void
+__xtc_loop_stall_report(xtc_loop_t *loop, xtc_task_t *task, int64_t ran_ns,
+    int64_t budget_ns)
+{
+	atomic_fetch_add_explicit(&loop->n_stalls, 1, memory_order_relaxed);
+
+	if (loop->stall_cb != NULL) {
+		loop->stall_cb(loop, task, ran_ns, budget_ns,
+		    loop->stall_cb_user);
+		return;
+	}
+
+	/* Default sink: log the overrun, then dump a backtrace of where
+	 * the loop is (the offending run has returned by now, but the
+	 * loop's own frames still point at the dispatch path, and the
+	 * A3 causal trace -- if enabled -- explains how the parked/ran
+	 * proc reached here).  Reuse os_backtrace.h. */
+	xtc_log_write(xtc_log_default(), XTC_LOG_WARN,
+	    "loop %d: task %p went over-budget (ran %lld ms, budget %lld ms)",
+	    loop->exec_id, (void *)task,
+	    (long long)(ran_ns / (1000 * 1000LL)),
+	    (long long)(budget_ns / (1000 * 1000LL)));
+
+	if (__os_backtrace_supported()) {
+		void *frames[32];
+		int n = __os_backtrace(frames, 32);
+		if (n > 0)
+			__os_backtrace_emit(2 /* stderr */, frames, n);
+	}
 }

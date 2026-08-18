@@ -10,6 +10,7 @@
 .Nm xtc_self ,
 .Nm xtc_proc_set_userdata ,
 .Nm xtc_proc_userdata ,
+.Nm xtc_proc_set_class ,
 .Nm xtc_send ,
 .Nm xtc_recv ,
 .Nm xtc_recv_match ,
@@ -496,6 +497,22 @@ when called off a proc, and
 returns
 .Dv NULL
 there.
+.Pp
+.Fn xtc_proc_set_class
+places the calling proc's task in a proportional-share scheduling
+class (created with
+.Xr xtc_exec_class_create 3
+on the proc's loop), the runtime-side equivalent of setting
+.Va xtc_proc_opts_t.sched_class
+at spawn.  The class weights the proc's CPU share against the other
+classes on its loop; a
+.Dv NULL
+handle resets it to the default (implicit) class.  Returns
+.Dv XTC_E_INVAL
+called off a proc or with a handle that is not on the calling proc's
+loop.  See
+.Xr xtc_exec 3
+for the proportional-share model (INSPIRED BY Glommio).
 .Pp
 A consumer that caches CARRIER-AFFINE state across a yield -- e.g. an
 fd/eventfd added to a wait set that is itself per-loop, so the

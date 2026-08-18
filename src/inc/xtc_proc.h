@@ -26,6 +26,7 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_async.h"
+#include "xtc_exec.h"   /* xtc_exec_class_t for xtc_proc_opts_t.sched_class */
 
 /*
  * Process identifier.  Encodes the loop ID, a per-loop slot index,
@@ -94,6 +95,14 @@ typedef struct xtc_proc_opts {
 	 * only at a yield point.  See xtc_proc(3) MIGRATION.
 	 */
 	int         migratable;
+	/*
+	 * L1 proportional-share scheduler: place this proc's task in a
+	 * scheduling CLASS created with xtc_exec_class_create.  NULL (the
+	 * default, and what a zeroed opts gives) is the implicit plain-FIFO
+	 * class -- zero overhead.  A non-NULL handle weights the proc's CPU
+	 * share against the other classes on its loop.  INSPIRED BY Glommio.
+	 */
+	xtc_exec_class_t sched_class;
 } xtc_proc_opts_t;
 
 /* Mailbox statistics snapshot (see xtc_proc_mailbox_stats). */
@@ -114,6 +123,7 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: xtc_pid_t xtc_self __P((void));
  * PUBLIC: int   xtc_proc_set_userdata __P((void *));
  * PUBLIC: void *xtc_proc_userdata __P((void));
+ * PUBLIC: int   xtc_proc_set_class __P((xtc_exec_class_t));
  * PUBLIC: int       xtc_send __P((xtc_pid_t, const void *, size_t));
  * PUBLIC: int       xtc_recv __P((void **, size_t *, int64_t));
  * PUBLIC: int       xtc_recv_match __P((xtc_match_fn, void *, void **, size_t *, int64_t));
@@ -203,6 +213,17 @@ XTC_API xtc_pid_t xtc_self(void);
  */
 XTC_API int   xtc_proc_set_userdata(void *ud);
 XTC_API void *xtc_proc_userdata(void);
+
+/*
+ * L1 proportional-share scheduler: place the CALLING proc's task in the
+ * scheduling class `cls` (created with xtc_exec_class_create on the
+ * proc's loop).  The runtime-side equivalent of setting
+ * xtc_proc_opts_t.sched_class at spawn, but callable from inside a
+ * running proc so a proc can reclassify itself.  Returns XTC_OK, or
+ * XTC_E_INVAL called off a proc or with a handle that is not on the
+ * calling proc's loop.  INSPIRED BY Glommio's task-queue placement.
+ */
+XTC_API int   xtc_proc_set_class(xtc_exec_class_t cls);
 
 /*
  * Send a message.  Copies `size` bytes from `data` into a mailbox

@@ -42,6 +42,15 @@ struct xtc_task {
 	void        *user;
 	xtc_loop_t  *loop;
 	int          state;
+	/* L1 proportional-share scheduler: index into loop->classes of the
+	 * run-class this task belongs to, or -1 for the default (implicit,
+	 * plain-FIFO) class.  Set at spawn from xtc_proc_opts_t.sched_class
+	 * or xtc_proc_set_class; survives a work-steal (a stolen task keeps
+	 * its tag and is placed into the same class index on the thief).
+	 * -1 by default, so a loop with no classes created is byte-for-byte
+	 * the old FIFO+deque path.  INSPIRED BY Glommio's task-queue handle
+	 * (executor/mod.rs TaskQueue). */
+	int          sched_class;
 	/* Monotonic time (ns) this run quantum was dispatched, recorded
 	 * by the scheduler when loop->yield_budget_ns > 0.  xtc_yield_check
 	 * compares against it; 0 means not yet recorded this quantum. */
@@ -155,6 +164,57 @@ struct xtc_inbox {
 	int                   inited;
 };
 
+/*
+ * L1 proportional-share (weighted-fair) run class.  INSPIRED BY Glommio
+ * (Glauber Costa / ScyllaDB): Glommio's executor keeps a set of task
+ * queues, each with SHARES (1..1000) and a virtual runtime, and a
+ * min-vruntime pick gives each queue a weighted CPU fraction
+ * (executor/mod.rs TaskQueue + account_vruntime; shares.rs
+ * reciprocal_shares).
+ *
+ * A class is a per-loop overlay on the ready set: it carries its own
+ * ready FIFO (q_head/q_tail through the task's q_next) alongside the
+ * class's shares, virtual runtime, and the precomputed reciprocal used
+ * by the account formula.  The default (implicit) class is index -1 on
+ * a task and is NOT one of these entries -- it uses the loop's plain
+ * q_head/q_tail + deque, so a loop with zero classes runs the exact old
+ * path with zero overhead.  The vruntime pick activates only once a
+ * class has been created on the loop (loop->n_classes > 0).
+ */
+struct xtc_run_class {
+	int          shares;        /* 1..1000 (Glommio's range) */
+	int64_t      latency_ns;    /* optional latency bound; 0 = none */
+	uint64_t     reciprocal;    /* (1<<22)/shares, precomputed */
+	uint64_t     vruntime;      /* accumulated weighted runtime */
+	uint64_t     runs;          /* times a task from this class was run
+	                             * (telemetry / CPU-share observability) */
+	struct xtc_task *q_head;    /* this class's ready FIFO */
+	struct xtc_task *q_tail;
+	int          in_use;        /* 1 once created */
+};
+
+/* Max scheduling classes per loop.  Glommio apps use a handful of task
+ * queues; a small fixed array keeps __queue_pop a tiny linear scan (no
+ * heap, no alloc on the dispatch path).  Creating more than this many
+ * classes on one loop returns XTC_E_AGAIN. */
+#define XTC_LOOP_MAX_CLASSES 16
+
+/* Shares weight of the implicit default lane (untagged tasks) when it
+ * races the explicit classes in the min-vruntime pick.  Chosen at the
+ * top of Glommio's 1..1000 range so untagged/background work gets a
+ * fair-but-not-dominant slice against a small set of weighted classes;
+ * a class must be created with shares > this to out-run the default. */
+#define XTC_DEFAULT_CLASS_SHARES 100
+#define XTC_DEFAULT_CLASS_RECIP  (((uint64_t)1 << 22) / XTC_DEFAULT_CLASS_SHARES)
+
+/* Minimum per-run cost charged to a class's vruntime (reduction-style
+ * floor).  Guarantees vruntime always advances so the min-vruntime pick
+ * cannot degenerate -- essential under the deterministic simulator,
+ * where virtual time does not advance within a compute run (elapsed 0).
+ * In production a real run's elapsed exceeds this, so the accounting is
+ * Glommio-faithful (weighted by measured CPU time). */
+#define XTC_VRUNTIME_MIN_QUANTUM_NS 1000
+
 struct xtc_loop {
 	xtc_io_t *io;
 
@@ -217,6 +277,41 @@ struct xtc_loop {
 	int64_t          yield_budget_ns;
 	_Atomic uint64_t n_yield_due;
 
+	/* L1 proportional-share scheduler (opt-in).  n_classes == 0 (the
+	 * default) means no class was ever created and the scheduler uses
+	 * the plain q_head/q_tail FIFO + deque -- byte-for-byte the old
+	 * path.  Once a class exists, __queue_pop picks the min-vruntime
+	 * in-use class and pops its FIFO.  Owner-only (no lock): classes
+	 * are created and picked only on the loop's own thread. */
+	struct xtc_run_class classes[XTC_LOOP_MAX_CLASSES];
+	int              n_classes;
+	/* Virtual runtime of the IMPLICIT default lane (the plain
+	 * q_head/q_tail FIFO + deque, for tasks with sched_class == -1).
+	 * When classes exist, the default lane races in the same
+	 * min-vruntime pick as a class with fixed default shares, so
+	 * untagged/background work is never starved by always-ready class
+	 * work -- it just gets a default weight.  Unused (stays 0) until a
+	 * class is created.  INSPIRED BY Glommio's default task queue. */
+	uint64_t         default_vruntime;
+	/* Effective per-loop latency bound: the smallest latency_ns over
+	 * all in-use classes (0 = none).  Shrinks the yield/preempt
+	 * interval so a latency class is checked often, like Glommio's
+	 * reevaluate_preempt_timer.  Recomputed on class create. */
+	int64_t          class_latency_ns;
+
+	/* L3 over-budget stall watchdog (opt-in, off by default).  When
+	 * stall_budget_ns > 0 the run-end boundary in __xtc_loop_step
+	 * compares the elapsed run time against it and, on an overrun,
+	 * invokes stall_cb (or logs).  A single branch on stall_budget_ns
+	 * == 0 when off, so zero cost unless enabled.  INSPIRED BY
+	 * Glommio's stall detector (executor/stall.rs). */
+	int64_t          stall_budget_ns;
+	void           (*stall_cb)(xtc_loop_t *loop, xtc_task_t *task,
+	                          int64_t ran_ns, int64_t budget_ns,
+	                          void *user);
+	void            *stall_cb_user;
+	_Atomic uint64_t n_stalls;   /* over-budget reports (telemetry) */
+
 	int stop_requested;
 
 	/* Cross-thread inbox: wakers and remote spawns deposit here;
@@ -241,6 +336,12 @@ struct xtc_loop {
 
 /* Internal helpers shared between loop.c, task.c, timer.c. */
 int  __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t);
+/* L1: create a run class on `loop`.  shares in 1..1000; latency_ns >= 0
+ * (0 = none).  Returns the class index in *out_idx (>= 0), or an error
+ * (XTC_E_INVAL bad args, XTC_E_AGAIN if the per-loop class cap is hit).
+ * Owner-only. */
+int  __xtc_loop_class_create(xtc_loop_t *loop, int shares,
+                            int64_t latency_ns, int *out_idx);
 /* Spawn with explicit pinned-ness: pinned tasks stay on `loop` (FIFO,
  * never work-stolen); unpinned tasks may migrate via the deque. */
 int  __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
@@ -250,6 +351,17 @@ xtc_timer_t *__xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns);
 int64_t      __xtc_timer_heap_next_deadline(xtc_loop_t *loop);
 void __xtc_task_cancel_park_timer(xtc_task_t *self);
 int  __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev);
+
+/*
+ * L2 io_uring ring-pointer preempt seam (INSPIRED BY Glommio's
+ * need_preempt).  Real on the io_uring backend (src/io/io_uring.c),
+ * portable no-op stubs elsewhere, so loop.c/exec.c call them
+ * unconditionally.  _arm returns XTC_OK only when the ring is now the
+ * preempt trigger (uring backend); _due is the two-load Glommio check
+ * (1 = a preempt slice elapsed); _disarm tears the ring down. */
+int  __xtc_io_uring_preempt_arm(xtc_io_t *io, int64_t interval_ns);
+int  __xtc_io_uring_preempt_due(xtc_io_t *io);
+void __xtc_io_uring_preempt_disarm(xtc_io_t *io);
 
 /* Implemented in proc.c.  Called from loop_fini to release the
  * proc-table side struct hashed against this loop pointer.  Must be

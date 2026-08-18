@@ -12,6 +12,7 @@
 #include "xtc_exec.h"
 #include "xtc_async.h"
 #include "xtc_preempt.h"
+#include "preempt_int.h"
 #include "xtc_sim.h"
 
 #include <stdatomic.h>
@@ -159,11 +160,28 @@ __xtc_exec_worker(void *arg)
 	if (exec->loop_node != NULL)
 		exec->loop_node[loop->exec_id] = __os_numa_current_node();
 
-	/* Preemption Phase 1: if enabled, arm a per-worker CPU-time timer.
-	 * A tick makes xtc_yield_if_due callers on this worker yield (see
-	 * xtc_yield_check).  Off by default (preempt_interval_ns == 0). */
-	if (exec->preempt_interval_ns > 0)
-		(void)xtc_preempt_arm(exec->preempt_interval_ns);
+	/* Preemption Phase 1: if enabled, arm a per-worker time slice.  A
+	 * tick makes xtc_yield_if_due callers on this worker yield (see
+	 * xtc_yield_check).  Off by default (preempt_interval_ns == 0).
+	 *
+	 * L2 (INSPIRED BY Glommio's need_preempt): on the io_uring backend,
+	 * arm the ring-pointer preempt -- a rearmed TIMEOUT SQE on a
+	 * dedicated ring, read as two relaxed loads with NO signal, NO
+	 * wrong-thread-delivery bug -- as the cheap, signal-free source for
+	 * the cooperative (Phase 1) yield-check.  The SIGVTALRM/kqueue
+	 * CPU-time timer (the portable path) is still armed when EITHER the
+	 * ring is unavailable (non-uring backend, or the ring could not
+	 * init) OR signal-context involuntary yield (Phase 2) is enabled --
+	 * Phase 2 redirects a fiber that never reaches a yield-check, which
+	 * the ring cannot do; only the signal handler can.  So the common
+	 * cooperative case on uring runs signal-free, and Phase 2 keeps its
+	 * required signal. */
+	if (exec->preempt_interval_ns > 0) {
+		int ring_ok = (__xtc_io_uring_preempt_arm(loop->io,
+		    exec->preempt_interval_ns) == XTC_OK);
+		if (!ring_ok || __xtc_preempt_involuntary_enabled())
+			(void)xtc_preempt_arm(exec->preempt_interval_ns);
+	}
 
 	/* Idle-poll backoff state: when steal_backoff is on, consecutive
 	 * idle turns grow the poll timeout from 1ms up to a 32ms cap, so an
@@ -226,8 +244,10 @@ __xtc_exec_worker(void *arg)
 	}
 	}
 
-	if (exec->preempt_interval_ns > 0)
+	if (exec->preempt_interval_ns > 0) {
+		__xtc_io_uring_preempt_disarm(loop->io);
 		(void)xtc_preempt_disarm();
+	}
 	__xtc_current_loop = NULL;
 	return NULL;
 }
@@ -564,6 +584,17 @@ __sim_loop_runnable(xtc_loop_t *l, int64_t now_ns, int64_t peer_stealable)
 		return 1;
 	if (xtc_deque_len(&l->deque) > 0)
 		return 1;
+	/* L1 proportional-share: a loop with a ready task on ANY of its
+	 * run classes is runnable (the class FIFOs are the class-tagged
+	 * equivalent of q_head).  Without this the sim would mistake a loop
+	 * whose only ready work is class-tagged for quiescent/deadlocked. */
+	if (l->n_classes > 0) {
+		int ci;
+		for (ci = 0; ci < l->n_classes; ci++)
+			if (l->classes[ci].in_use &&
+			    l->classes[ci].q_head != NULL)
+				return 1;
+	}
 	if (l->inbox.head != NULL)
 		return 1;   /* ANTI-LOST-WAKEUP INVARIANT: a loop with a pending
 	             * cross-thread enqueue (spawn PUBLISH / mailbox WAKE) is
@@ -1067,4 +1098,83 @@ xtc_exec_async_on(xtc_exec_t *e, int idx, xtc_coro_fn fn, void *arg,
 	if (e == NULL) return XTC_E_INVAL;
 	if (idx < 0 || idx >= e->n_loops) return XTC_E_INVAL;
 	return xtc_async(e->loops[idx], fn, arg, out);
+}
+
+/* --- L1 proportional-share scheduling classes ---------------------- *
+ *
+ * INSPIRED BY Glommio (Glauber Costa / ScyllaDB): a scheduling class
+ * carries SHARES and an optional LATENCY bound; a CFS-style vruntime
+ * pick on the loop gives each class a weighted CPU fraction.  The
+ * mechanism lives in the run queue (src/evt/loop.c __queue_pop +
+ * __xtc_loop_class_create); these are the thin public wrappers.
+ */
+
+/* PUBLIC: int xtc_exec_class_create __P((xtc_loop_t *, int, int64_t, xtc_exec_class_t *)); */
+int
+xtc_exec_class_create(xtc_loop_t *loop, int shares, int64_t latency_ns,
+    xtc_exec_class_t *out)
+{
+	int idx, rc;
+
+	if (loop == NULL || out == NULL)
+		return XTC_E_INVAL;
+	rc = __xtc_loop_class_create(loop, shares, latency_ns, &idx);
+	if (rc != XTC_OK)
+		return rc;
+	/* The handle is the address of the per-loop class slot; the run
+	 * queue recovers its index as (handle - loop->classes).  A stable
+	 * pointer -- classes[] is a fixed array on the loop, never realloc'd
+	 * or reordered (create only ever appends). */
+	*out = &loop->classes[idx];
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_exec_class_shares __P((xtc_exec_class_t)); */
+int
+xtc_exec_class_shares(xtc_exec_class_t cls)
+{
+	return cls == NULL ? 0 : cls->shares;
+}
+
+/* PUBLIC: int64_t xtc_exec_class_latency __P((xtc_exec_class_t)); */
+int64_t
+xtc_exec_class_latency(xtc_exec_class_t cls)
+{
+	return cls == NULL ? 0 : cls->latency_ns;
+}
+
+/* PUBLIC: uint64_t xtc_exec_class_runs __P((xtc_exec_class_t)); */
+/* Number of times a task from this class was picked to run (telemetry;
+ * the CPU-share observability signal -- with equal per-run cost the run
+ * ratio between two classes equals their shares ratio).  0 on NULL. */
+uint64_t
+xtc_exec_class_runs(xtc_exec_class_t cls)
+{
+	return cls == NULL ? 0 : cls->runs;
+}
+
+/* PUBLIC: uint64_t xtc_exec_class_vruntime __P((xtc_exec_class_t)); */
+/* Accumulated weighted virtual runtime of this class (telemetry).  0 on
+ * NULL. */
+uint64_t
+xtc_exec_class_vruntime(xtc_exec_class_t cls)
+{
+	return cls == NULL ? 0 : cls->vruntime;
+}
+
+/* PUBLIC: void xtc_exec_set_stall_budget __P((xtc_exec_t *, int64_t)); */
+/*
+ * L3 convenience: arm the over-budget stall watchdog on EVERY loop of
+ * the executor at once (the per-loop primitive is
+ * xtc_loop_set_stall_budget in loop.c).  Set BEFORE xtc_exec_run.
+ * INSPIRED BY Glommio's stall detector.
+ */
+void
+xtc_exec_set_stall_budget(xtc_exec_t *e, int64_t budget_ns)
+{
+	int i;
+	if (e == NULL)
+		return;
+	for (i = 0; i < e->n_loops; i++)
+		xtc_loop_set_stall_budget(e->loops[i], budget_ns);
 }

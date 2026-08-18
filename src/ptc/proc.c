@@ -474,6 +474,13 @@ struct xtc_proc {
 	 * it is simply dropped when the proc is freed. */
 	void             *userdata;
 
+	/* L1 proportional-share scheduler: the class handle from
+	 * xtc_proc_opts_t.sched_class, stashed at spawn and applied by
+	 * __proc_entry on the proc's OWN loop thread (setting the task's
+	 * class there avoids racing a cross-loop spawn that begins running
+	 * before the spawner's next statement).  NULL = default class. */
+	xtc_exec_class_t  spawn_class;
+
 	/* Links & monitors. */
 	struct link_entry *links;
 	struct mon_entry  *monitors;     /* monitors WE created (we are watcher) */
@@ -1016,6 +1023,18 @@ __proc_entry(void *arg)
 	p->task = __xtc_current_task();
 	p->coro = __xtc_current_coro;
 
+	/* L1: apply the spawn-time scheduling class on THIS loop's thread
+	 * (the class array is per-loop; the handle was created on this same
+	 * loop by the consumer).  Recover the index and tag the task, so
+	 * the run queue places it in the class from its first reschedule. */
+	if (p->spawn_class != NULL && p->task != NULL &&
+	    p->task->loop != NULL) {
+		xtc_loop_t *l = p->task->loop;
+		ptrdiff_t ci = p->spawn_class - &l->classes[0];
+		if (ci >= 0 && ci < l->n_classes && l->classes[ci].in_use)
+			p->task->sched_class = (int)ci;
+	}
+
 	/*
 	 * Auto-arm a DEFAULT fault-recovery frame before running the body,
 	 * so a contained fault ANYWHERE in the proc -- including in its very
@@ -1145,6 +1164,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	p->fn = fn;
 	p->arg = arg;
 	p->alive = 1;
+	p->spawn_class = (opts != NULL) ? opts->sched_class : NULL;
 	atomic_store_explicit(&p->refs, 1, memory_order_relaxed);   /* owner ref */
 	p->mbox_cap = (opts != NULL && opts->mailbox_cap > 0)
 	    ? opts->mailbox_cap : 4096;
@@ -1315,6 +1335,39 @@ void *
 xtc_proc_userdata(void)
 {
 	return __current_proc != NULL ? __current_proc->userdata : NULL;
+}
+
+/* PUBLIC: int   xtc_proc_set_class __P((xtc_exec_class_t)); */
+/*
+ * L1 proportional-share scheduler: place the CALLING proc's task in the
+ * scheduling class `cls`.  Recovers the class index as (cls -
+ * loop->classes) and stores it on the task, which the run queue reads
+ * in __queue_pop / __xtc_loop_enqueue.  The handle must belong to the
+ * calling proc's loop (classes are per-loop); a foreign handle is
+ * rejected.  A NULL handle resets the proc to the default (implicit)
+ * class.  INSPIRED BY Glommio's task-queue placement.
+ */
+int
+xtc_proc_set_class(xtc_exec_class_t cls)
+{
+	struct xtc_proc *p = __current_proc;
+	xtc_loop_t *loop;
+	ptrdiff_t idx;
+
+	if (p == NULL || p->task == NULL)
+		return XTC_E_INVAL;   /* not on a proc */
+	loop = p->task->loop;
+	if (cls == NULL) {
+		p->task->sched_class = -1;
+		return XTC_OK;
+	}
+	if (loop == NULL)
+		return XTC_E_INVAL;
+	idx = cls - &loop->classes[0];
+	if (idx < 0 || idx >= loop->n_classes || !loop->classes[idx].in_use)
+		return XTC_E_INVAL;   /* handle not on this proc's loop */
+	p->task->sched_class = (int)idx;
+	return XTC_OK;
 }
 
 /*

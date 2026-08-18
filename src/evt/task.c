@@ -140,6 +140,7 @@ __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 	t->user = user;
 	t->loop = loop;
 	t->pinned = pinned;
+	t->sched_class = -1;   /* default (implicit) FIFO class */
 	t->state = XTC_TS_SCHEDULED;
 	t->q_next = NULL;
 	t->park_timer = NULL;

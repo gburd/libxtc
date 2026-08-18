@@ -4,6 +4,7 @@
 #ifndef PTC_EXT_H
 #define PTC_EXT_H
 
+int   xtc_proc_set_class __P((xtc_exec_class_t));
 int   xtc_proc_set_userdata __P((void *));
 int  xtc_cfg_load_file __P((const char *));
 int  xtc_cfg_reload __P((void));
