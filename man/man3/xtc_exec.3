@@ -24,7 +24,16 @@
 .Nm xtc_exec_spawn ,
 .Nm xtc_exec_spawn_on ,
 .Nm xtc_exec_async ,
-.Nm xtc_exec_async_on
+.Nm xtc_exec_async_on ,
+.Nm xtc_exec_class_create ,
+.Nm xtc_exec_class_shares ,
+.Nm xtc_exec_class_latency ,
+.Nm xtc_exec_class_runs ,
+.Nm xtc_exec_class_vruntime ,
+.Nm xtc_exec_set_stall_budget ,
+.Nm xtc_loop_set_stall_budget ,
+.Nm xtc_loop_set_stall_cb ,
+.Nm xtc_loop_stall_count
 .Nd L2 multi-loop work-stealing executor
 .Sh SYNOPSIS
 .In xtc_exec.h
@@ -70,6 +79,24 @@
 .Fn xtc_exec_async "xtc_exec_t *exec" "xtc_coro_fn fn" "void *arg" "xtc_task_t **out"
 .Ft int
 .Fn xtc_exec_async_on "xtc_exec_t *exec" "int idx" "xtc_coro_fn fn" "void *arg" "xtc_task_t **out"
+.Ft int
+.Fn xtc_exec_class_create "xtc_loop_t *loop" "int shares" "int64_t latency_ns" "xtc_exec_class_t *out"
+.Ft int
+.Fn xtc_exec_class_shares "xtc_exec_class_t cls"
+.Ft int64_t
+.Fn xtc_exec_class_latency "xtc_exec_class_t cls"
+.Ft uint64_t
+.Fn xtc_exec_class_runs "xtc_exec_class_t cls"
+.Ft uint64_t
+.Fn xtc_exec_class_vruntime "xtc_exec_class_t cls"
+.Ft void
+.Fn xtc_exec_set_stall_budget "xtc_exec_t *exec" "int64_t budget_ns"
+.Ft void
+.Fn xtc_loop_set_stall_budget "xtc_loop_t *loop" "int64_t budget_ns"
+.Ft void
+.Fn xtc_loop_set_stall_cb "xtc_loop_t *loop" "xtc_stall_cb cb" "void *user"
+.Ft uint64_t
+.Fn xtc_loop_stall_count "const xtc_loop_t *loop"
 .Sh DESCRIPTION
 .Nm xtc_exec
 manages
@@ -240,6 +267,69 @@ Spawn calls are safe from any thread, including before
 work queued in advance is processed when the workers start.  Spawns
 from a non-owner thread are routed through the target loop's inbox
 and surface on the loop's next step.
+.Sh PROPORTIONAL-SHARE SCHEDULING
+The run queue is a plain FIFO plus the work-stealing deque by default,
+which splits CPU roughly evenly among equally busy fibers.  The
+optional
+.Em proportional-share
+scheduler adds weighted-fair scheduling: create a scheduling
+.Em class
+with
+.Fn xtc_exec_class_create ,
+giving it
+.Fa shares
+(1..1000) and an optional
+.Fa latency_ns
+bound, then place a process's tasks in it via
+.Va xtc_proc_opts_t.sched_class
+at spawn or
+.Xr xtc_proc_set_class 3
+from inside the process.  A loop that carries more than one class picks
+the minimum-virtual-runtime class on each dispatch, so each class
+receives a CPU fraction proportional to its shares — a class with 3x
+the shares of another gets about 3x the CPU.  A non-zero
+.Fa latency_ns
+shrinks the loop's cooperative yield interval so the class is serviced
+promptly.
+.Pp
+The feature is OFF by default with ZERO overhead: a loop with no class
+created runs the exact plain-FIFO + work-stealing path, byte-for-byte,
+and the virtual-runtime accounting activates only once a class exists.
+Untagged tasks race an implicit default lane so background work is
+never starved by always-ready class work.
+.Fn xtc_exec_class_shares ,
+.Fn xtc_exec_class_latency ,
+.Fn xtc_exec_class_runs ,
+and
+.Fn xtc_exec_class_vruntime
+read a class handle's parameters and telemetry (run count, accumulated
+virtual runtime) back.
+.Pp
+This is INSPIRED BY Glommio (Glauber Costa / ScyllaDB), whose executor
+gives each task queue shares and a latency class and picks the next
+queue by a CFS-style virtual-runtime heap
+.Pq executor/mod.rs account_vruntime , shares.rs .
+The accrual formula is Glommio's:
+.Fa vruntime
++= (cost_ns * reciprocal) >> 12, where reciprocal = (1<<22)/shares.
+.Sh OVER-BUDGET STALL WATCHDOG
+When a single task run monopolizes a loop past a budget, the optional
+stall watchdog reports which task did it.  Arm a per-loop budget with
+.Fn xtc_loop_set_stall_budget
+(nanoseconds; 0 disables) or arm every loop of an executor at once with
+.Fn xtc_exec_set_stall_budget .
+Install a report sink with
+.Fn xtc_loop_set_stall_cb ;
+with no callback the runtime logs a warning and emits a backtrace of
+the loop to stderr.
+.Fn xtc_loop_stall_count
+returns the number of over-budget reports (telemetry).
+.Pp
+The check is a cheap wall-clock comparison at the run-end boundary in
+the loop step — no watcher thread, no signal — so it is a single branch
+on a disabled flag when off (zero overhead).  This is INSPIRED BY
+Glommio's stall detector
+.Pq executor/stall.rs .
 .Sh CROSS-THREAD WAKERS
 A
 .Vt xtc_waker_t

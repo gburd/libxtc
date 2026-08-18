@@ -53,6 +53,24 @@ Full-suite wall time is about 3.5 minutes on an idle 16-core box; `mpsc`
 (~2 min) and `credit`/`lwlock` (tens of seconds) dominate, the rest are
 sub-second.
 
+## Deliberately NOT modelled
+
+The L1 proportional-share scheduler and the L3 over-budget stall
+watchdog (both in `src/evt/loop.c`, INSPIRED BY Glommio) have **no CBMC
+harness on purpose**: they have no concurrent invariant to check.  The
+run classes, their virtual runtimes and ready FIFOs, the min-vruntime
+pick, the run-end accrual, and the stall check are all touched ONLY by
+the loop's own owner thread -- the run queue is single-threaded by
+design (see the `XTC_NOALLOC_BEGIN` owner-only contract).  A stolen task
+carries its class TAG (an int) across loops, but the class STATE it
+names is per-loop and read only by that loop's owner, so there is no
+cross-thread race to bound-check.  The correctness that matters --
+weighting is proportional to shares, vruntime is monotonic, the default
+lane is never starved, replay is byte-identical -- is a single-threaded
+ordering property, proved by the DST test (`test/sim/test_sim_sched_shares.c`),
+the PBT (`test/pbt/pbt_sched_shares.c`), and the unit test
+(`test/m14/test_stall.c`), not by interleaving exploration.
+
 ## Running
 
 ```sh

@@ -24,6 +24,18 @@
 typedef struct xtc_exec xtc_exec_t;
 
 /*
+ * L1 proportional-share (weighted-fair) scheduler handle.  INSPIRED BY
+ * Glommio (Glauber Costa / ScyllaDB): a scheduling CLASS carries SHARES
+ * (1..1000) and an optional LATENCY bound, and a CFS-style vruntime
+ * pick gives each class a weighted CPU fraction on its loop.  Opaque:
+ * created by xtc_exec_class_create, placed on a proc via
+ * xtc_proc_opts_t.sched_class or xtc_proc_set_class.  A NULL handle
+ * (the default) means the implicit plain-FIFO class -- zero overhead
+ * until at least one class exists on a loop.
+ */
+typedef struct xtc_run_class *xtc_exec_class_t;
+
+/*
  * PUBLIC: int  xtc_exec_init __P((xtc_exec_t **, int));
  * PUBLIC: int  xtc_exec_fini __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_run __P((xtc_exec_t *));
@@ -185,5 +197,77 @@ XTC_API int  xtc_exec_async(xtc_exec_t *exec, xtc_coro_fn fn, void *arg,
                             xtc_task_t **out_task);
 XTC_API int  xtc_exec_async_on(xtc_exec_t *exec, int loop_idx,
                                xtc_coro_fn fn, void *arg, xtc_task_t **out_task);
+
+/*
+ * L1 -- OPT-IN PROPORTIONAL-SHARE (WEIGHTED-FAIR) SCHEDULER.
+ *
+ * INSPIRED BY Glommio (Glauber Costa / ScyllaDB): Glommio's executor
+ * gives each task queue SHARES (1..1000) and a Latency class, and a
+ * CFS-style min-vruntime scheduler (account_vruntime: delta *
+ * reciprocal_shares >> 12, reciprocal_shares = (1<<22)/shares) hands
+ * each queue a weighted CPU fraction while a Latency::Matters(d) class
+ * shrinks the preempt interval so it is checked within d.  This is the
+ * one capability Glommio had that libxtc lacked.
+ *
+ * OFF BY DEFAULT WITH ZERO OVERHEAD: a loop with no class created runs
+ * the exact plain-FIFO + work-stealing-deque path, byte-for-byte.  The
+ * vruntime pick activates only once a class exists on a loop.
+ *
+ * xtc_exec_class_create tags a scheduling class on `loop` with `shares`
+ * (1..1000) and an optional `latency_ns` bound (0 = none; a non-zero
+ * bound shrinks the loop's effective yield/preempt interval so the
+ * class is serviced promptly).  Returns the handle in *out.  A proc is
+ * placed in a class via xtc_proc_opts_t.sched_class at spawn, or via
+ * xtc_proc_set_class from inside the proc.  Returns XTC_E_INVAL on bad
+ * args, XTC_E_AGAIN if the per-loop class cap is reached.
+ *
+ * xtc_exec_class_shares / _latency read a handle's parameters back
+ * (0 on a NULL handle).
+ *
+ * PUBLIC: int  xtc_exec_class_create __P((xtc_loop_t *, int, int64_t, xtc_exec_class_t *));
+ * PUBLIC: int  xtc_exec_class_shares __P((xtc_exec_class_t));
+ * PUBLIC: int64_t xtc_exec_class_latency __P((xtc_exec_class_t));
+ * PUBLIC: uint64_t xtc_exec_class_runs __P((xtc_exec_class_t));
+ * PUBLIC: uint64_t xtc_exec_class_vruntime __P((xtc_exec_class_t));
+ */
+XTC_API int  xtc_exec_class_create(xtc_loop_t *loop, int shares,
+                                   int64_t latency_ns, xtc_exec_class_t *out);
+XTC_API int  xtc_exec_class_shares(xtc_exec_class_t cls);
+XTC_API int64_t xtc_exec_class_latency(xtc_exec_class_t cls);
+XTC_API uint64_t xtc_exec_class_runs(xtc_exec_class_t cls);
+XTC_API uint64_t xtc_exec_class_vruntime(xtc_exec_class_t cls);
+
+/*
+ * L3 -- OVER-BUDGET STALL WATCHDOG (opt-in, off by default).
+ *
+ * INSPIRED BY Glommio's stall detector (executor/stall.rs): when a
+ * single task run exceeds a budget the runtime reports WHICH code
+ * monopolized the core.  libxtc does it with a cheap in-loop
+ * wall-clock check at the run-end boundary -- no watcher thread, no
+ * signal -- so it is a single branch on a disabled flag when off.
+ *
+ * The report callback shape: `loop` and `task` name where it happened,
+ * `ran_ns` is how long the run took, `budget_ns` the configured budget.
+ * When no callback is set the runtime logs a WARN line and emits a
+ * backtrace of the loop to stderr.
+ *
+ * xtc_loop_set_stall_budget arms the per-loop budget (0 = disable).
+ * xtc_loop_set_stall_cb installs the report sink (NULL = log default).
+ * xtc_exec_set_stall_budget is the convenience that arms every loop of
+ * an executor at once.  xtc_loop_stall_count reads the over-budget
+ * report count (telemetry).
+ *
+ * PUBLIC: void xtc_loop_set_stall_budget __P((xtc_loop_t *, int64_t));
+ * PUBLIC: void xtc_loop_set_stall_cb __P((xtc_loop_t *, xtc_stall_cb, void *));
+ * PUBLIC: void xtc_exec_set_stall_budget __P((xtc_exec_t *, int64_t));
+ * PUBLIC: uint64_t xtc_loop_stall_count __P((const xtc_loop_t *));
+ */
+typedef void (*xtc_stall_cb)(xtc_loop_t *loop, xtc_task_t *task,
+                             int64_t ran_ns, int64_t budget_ns, void *user);
+XTC_API void xtc_loop_set_stall_budget(xtc_loop_t *loop, int64_t budget_ns);
+XTC_API void xtc_loop_set_stall_cb(xtc_loop_t *loop, xtc_stall_cb cb,
+                                   void *user);
+XTC_API void xtc_exec_set_stall_budget(xtc_exec_t *exec, int64_t budget_ns);
+XTC_API uint64_t xtc_loop_stall_count(const xtc_loop_t *loop);
 
 #endif /* XTC_EXEC_H */

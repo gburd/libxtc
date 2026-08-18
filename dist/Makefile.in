@@ -455,9 +455,11 @@ TESTS_C		= test_version test_header test_errors \
 		  test_lockmgr \
 		  test_preempt \
 		  test_preempt_p1 \
+		  test_preempt_ring \
 		  test_preempt_p2 \
 		  test_launch \
 		  test_cfg \
+		  test_stall \
 		  test_stack_reclaim \
 		  test_unsafe_depth \
 		  test_coverage_pump \
@@ -478,7 +480,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_pgmock_smoke \
 		  test_inject_races
 
-TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_scope pbt_slab pbt_chash pbt_cskip pbt_lrlock pbt_lwlock pbt_chan pbt_sim
+TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_scope pbt_slab pbt_chash pbt_cskip pbt_lrlock pbt_lwlock pbt_chan pbt_sim pbt_sched_shares
 
 # -------------------------------------------------------------------------
 # Default goal.
@@ -852,6 +854,15 @@ bench_uring_disk: $(srcdir)/../bench/bench_uring_disk.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_uring_disk.c $(LDFLAGS) $(LIBS)
 
+bench_preempt_check: $(srcdir)/../bench/bench_preempt_check.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_preempt_check.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+bench_uring_reap: $(srcdir)/../bench/bench_uring_reap.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_uring_reap.c $(LDFLAGS) $(LIBS)
+
 bench_million_tasks: $(srcdir)/../bench/bench_million_tasks.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_million_tasks.c \
@@ -885,6 +896,11 @@ bench_xproc_fanout: $(srcdir)/../bench/bench_xproc_fanout.c $(STATIC_LIB)
 bench_fairness: $(srcdir)/../bench/bench_fairness.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_fairness.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+bench_sched_shares: $(srcdir)/../bench/bench_sched_shares.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_sched_shares.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # -------------------------------------------------------------------------
@@ -1570,6 +1586,18 @@ test_preempt_p1: $(srcdir)/../test/m14/test_preempt_p1.c \
 		-o $@ $(srcdir)/../test/m14/test_preempt_p1.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_stall: $(srcdir)/../test/m14/test_stall.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
+		-o $@ $(srcdir)/../test/m14/test_stall.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_preempt_ring: $(srcdir)/../test/m14/test_preempt_ring.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
+		-o $@ $(srcdir)/../test/m14/test_preempt_ring.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_unsafe_depth: $(srcdir)/../test/m14/test_unsafe_depth.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
@@ -1740,6 +1768,9 @@ pbt_scope: $(srcdir)/../test/pbt/pbt_scope.c $(STATIC_LIB)
 
 pbt_sim: $(srcdir)/../test/pbt/pbt_sim.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_sim.c $(PBT_LIBS)
+
+pbt_sched_shares: $(srcdir)/../test/pbt/pbt_sched_shares.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_sched_shares.c $(PBT_LIBS)
 
 pbt_slab: $(srcdir)/../test/pbt/pbt_slab.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_slab.c $(PBT_LIBS)
