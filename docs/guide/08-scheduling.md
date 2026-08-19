@@ -106,6 +106,18 @@ If your workload is a single kind of task, or you are happy with even
 sharing, leave both off -- the default FIFO + work stealing is simpler
 and faster.
 
+## Demonstrated in
+
+- [`examples/03_supervised_app.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/03_supervised_app.c)
+  -- the minimal case: two supervised children share one loop as two
+  classes (a latency-bounded foreground counter with 3x shares vs a
+  best-effort background stats printer), plus the stall watchdog.
+- [`examples/06_sqlxtc`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/06_sqlxtc)
+  -- the real case: the SQL server enables the over-budget stall
+  watchdog so a runaway query or structure-modification that hogs a
+  worker loop is logged with a backtrace instead of silently stalling
+  every other connection on that loop.
+
 ## See also
 
 - [`xtc_exec(3)`]({{ '/man/xtc_exec/' | relative_url }}) -- the class and

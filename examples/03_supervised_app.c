@@ -21,6 +21,19 @@
 
 static int g_iterations;
 
+/*
+ * L1 (proportional-share scheduling, inspired by Glommio -- Glauber
+ * Costa / ScyllaDB): two scheduling classes share the app's loop.  The
+ * counter is the latency-sensitive foreground worker (more shares AND a
+ * latency bound, so it is scheduled promptly); the stats printer is
+ * best-effort background (fewer shares).  Under the default FIFO the
+ * two interleave ~1:1 regardless of intent; with classes the counter
+ * gets the weighted CPU + latency it needs.  Created once in main,
+ * tagged onto each proc at entry via xtc_proc_set_class.  See
+ * docs/guide/08-scheduling.md. */
+static xtc_exec_class_t g_cls_fg;   /* counter: latency-sensitive foreground */
+static xtc_exec_class_t g_cls_bg;   /* stats:   best-effort background */
+
 /* A1 (resource scope): a per-worker scratch resource whose release MUST
  * run even if the supervisor kills this worker mid-loop.  Freed by
  * counter_release, registered on an xtc_scope so it runs on every exit
@@ -63,6 +76,9 @@ counter_proc(void *arg)
 	struct counter_res *res;
 	(void)arg;
 
+	if (g_cls_fg != NULL)
+		(void)xtc_proc_set_class(g_cls_fg);   /* L1: foreground class */
+
 	/* Acquire the worker's scratch resource under a scope: the release
 	 * is now a MECHANISM (runs on every exit), not a manner we must
 	 * remember to repeat on each early return / kill path. */
@@ -100,6 +116,8 @@ stats_proc(void *arg)
 {
 	int rounds = 0;
 	(void)arg;
+	if (g_cls_bg != NULL)
+		(void)xtc_proc_set_class(g_cls_bg);   /* L1: background class */
 	for (rounds = 0; rounds < g_iterations / 5; rounds++) {
 		void *m; size_t sz;
 		(void)xtc_recv(&m, &sz, 250 * 1000 * 1000);  /* 250 ms */
@@ -152,6 +170,19 @@ main(int argc, char **argv)
 
 	if (xtc_app_create(&opts, &app) != XTC_OK) return 1;
 	g_app = app;
+
+	/* L1: create the two scheduling classes on the app's loop before the
+	 * children run.  Foreground (counter) gets 3x the shares of the
+	 * background (stats) plus a 1ms latency bound; background gets 1
+	 * share, no bound.  (Glommio-inspired weighted-fair scheduling.) */
+	(void)xtc_exec_class_create(xtc_app_loop(app), 3, 1000LL * 1000, &g_cls_fg);
+	(void)xtc_exec_class_create(xtc_app_loop(app), 1, 0, &g_cls_bg);
+
+	/* L3 (over-budget stall watchdog, inspired by Glommio's stall
+	 * detector): warn (with a backtrace) if any single task runs longer
+	 * than 50ms on this loop -- catches a runaway that would starve the
+	 * others.  Off by default; opt in with a budget. */
+	xtc_loop_set_stall_budget(xtc_app_loop(app), 50LL * 1000 * 1000);
 
 	if (xtc_app_start(app, kids, 2) != XTC_OK) return 1;
 	if (xtc_proc_spawn(xtc_app_loop(app), shutdown_watcher, NULL,
