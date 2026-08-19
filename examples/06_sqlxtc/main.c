@@ -471,6 +471,19 @@ main(int argc, char **argv)
 		srv->loop = xtc_app_loop(srv->app);   /* loop 0 */
 		atomic_init(&srv->next_loop, 0);
 
+		/* L3 over-budget stall watchdog (inspired by Glommio -- Glauber
+		 * Costa / ScyllaDB -- its stall detector).  A single SQL query or
+		 * a structure-modification that runs too long would monopolize
+		 * its worker loop and stall every other connection on it; the
+		 * watchdog logs the offender (with a backtrace) if any one task
+		 * exceeds 250ms, turning "a bad query hung a core" from a silent
+		 * tail-latency mystery into an actionable warning.  Off unless a
+		 * budget is set. */
+		if (srv->exec != NULL)
+			xtc_exec_set_stall_budget(srv->exec, 250LL * 1000 * 1000);
+		else
+			xtc_loop_set_stall_budget(srv->loop, 250LL * 1000 * 1000);
+
 		memset(kids, 0, sizeof kids);
 		kids[0].name   = "listener";
 		kids[0].fn     = listener_proc;
