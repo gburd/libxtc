@@ -1,3 +1,25 @@
+libxtc (1.35.0-1) unstable; urgency=medium
+
+  * feat: Glommio-inspired scheduling arc (credit: Glauber Costa /
+    ScyllaDB).  L1 opt-in PROPORTIONAL-SHARE (weighted-fair) scheduler:
+    per-loop scheduling classes with shares + a latency bound, picked
+    by min-vruntime (Glommio's account_vruntime formula); default FIFO
+    unchanged and zero-overhead.  API: xtc_exec_class_create/_shares/
+    _latency/_runs/_vruntime, xtc_proc_set_class,
+    xtc_proc_opts_t.sched_class.  Measured FIFO 1:1 -> shares 3:1.
+    L3 opt-in over-budget STALL WATCHDOG (Glommio's stall detector):
+    warns with a backtrace when a task hogs a loop past a budget.
+    API: xtc_loop_set_stall_budget/_cb, xtc_exec_set_stall_budget,
+    xtc_loop_stall_count.  L2 io_uring RING-POINTER PREEMPT (internal):
+    on the uring backend, need-preempt reads the CQ head/tail (no
+    signal) -- 5.8ns vs 7.2ns/check and zero signals; the signal path
+    stays the portable fallback.  L4 io_uring QoS: measured NOT
+    warranted (single ring sustains 12-42M completions/s/core), not
+    built.  Each built item: unit + PBT + DST + man + docs; demonstrated
+    in examples/03_supervised_app + examples/06_sqlxtc.
+
+ -- Greg Burd <greg@burd.me>  Tue, 19 Aug 2026 04:30:00 +0000
+
 libxtc (1.34.1-1) unstable; urgency=medium
 
   * fix(preempt): deliver the per-worker CPU-time preemption timer
