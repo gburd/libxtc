@@ -305,6 +305,12 @@ docs, comments, and commit messages.  Run `dist/s_async` and
 * Tokio: <https://tokio.rs>
 * The BEAM book: <https://blog.stenmans.org/theBeamBook/>
 * Seastar: <http://seastar.io>
+* Glommio: <https://github.com/DataDog/glommio> -- thread-per-core +
+  io_uring, and the proportional-share scheduler libxtc's optional
+  weighted-fair scheduling is modeled on
+* FoundationDB and TigerBeetle -- the deterministic-simulation-first
+  testing discipline libxtc holds itself to
 * PostgreSQL's pluggable buffer manager / aio work
-* libumem, BDB, DBSQL -- where the BDB/DBSQL build conventions come from
-* The lrlck PostgreSQL branch -- where xtc_lrlock and xtc_lwlock come from
+* Jon Gjengset's left-right concurrency technique:
+  <https://github.com/jonhoo/left-right> -- the basis for `xtc_lrlock`
+  (a C implementation of it)

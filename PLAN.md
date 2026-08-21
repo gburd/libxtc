@@ -1,8 +1,17 @@
 # XTC -- Design Plan (Revision 4)
 
-**Status:** Draft for review.  Nothing in here is implemented yet.
-Revision 4 adds the full lock subsystem ((S)13) -- LRLock from
-`~/ws/postgres/lrlck`, LWLock from the same, BDB-style lock manager
+**Status (2026-08):** HISTORICAL DESIGN DOCUMENT.  This is Revision 4 of
+the original design plan; it is kept for the architecture rationale and
+the worked examples, NOT as a to-do list.  The library is IMPLEMENTED
+and shipping (v1.35.0): everything M0-M17 below is built and tested (see
+(S)9).  Where a section still reads in the future tense ("we will..."),
+read it as "we did"; sections with dated STATUS notes reflect the
+current tree.  New work since this revision is tracked in the release
+history and (S)19, not here.
+
+Revision 4 adds the full lock subsystem ((S)13) -- LRLock (an xtc_lrlock
+implementing the left-right concurrency technique of Jon Gjengset
+(<https://github.com/jonhoo/left-right>); see the attribution in (S)2), LWLock, a BDB-style lock manager
 + deadlock detector with all victim policies from `~/ws/libdb`,
 incremental waits-for graph from `~/ws/noxu`, BDB nine-mode lock
 lattice with intent locks and a promotion ladder, resource caps,
@@ -405,8 +414,11 @@ so successive receives don't re-scan from the head.
 - `xtc_rcu` -- read-copy-update for read-mostly graph data; matches
   the PG `pg_rcu.h` proposal (relcache/syscache invalidation as the
   first user).  Epoch-based reclamation; readers are wait-free.
-- `xtc_lrlock` -- left-right lock per Greg Burd's RFC: wait-free
-  reads via two-copy publish/swap.  Designed for ProcArray-style
+- `xtc_lrlock` -- a left-right lock: wait-free reads via two-copy
+  publish/swap.  The left-right concurrency TECHNIQUE is Jon Gjengset's
+  (<https://github.com/jonhoo/left-right>); `xtc_lrlock` is a C
+  implementation of it (adapting
+  it to the runtime's mutex/oplog).  Designed for ProcArray-style
   snapshot, replication-slot xmin array, buffer-mapping hash table.
   Writer side uses an inner `xtc_mutex` (per the RFC's revision
   to use LWLock-style instead of spinlock); oplog is pre-allocated
@@ -516,7 +528,13 @@ most constrained host.
 - **FreeBSD, OpenBSD, NetBSD, DragonFlyBSD**: Tier 1
 - **macOS** (recent Xcode): Tier 1
 - **Solaris, illumos**: Tier 1
-- **AIX**: Tier 2 (build, smoke tests; soak optional)
+- **AIX**: UNSUPPORTED / off the roadmap.  (An AIX/ppc64 OS-layer port
+  exists in-tree and compiles, but AIX is never built or run in CI, has
+  no runtime verification, and carries no support commitment -- see
+  docs/KNOWN_ISSUES.md "AIX: not a supported target".  The original
+  Tier-2 plan was retired: AIX is ppc64-only, its media is licensed,
+  PostgreSQL itself dropped AIX in v16, and emulating it under QEMU/TCG
+  is impractical for a reliable CI gate.)
 
 ### 3.2 CPU architectures
 
@@ -1035,6 +1053,20 @@ OpenBSD, DragonFlyBSD).
 
 ## 9. Milestones (revised)
 
+> STATUS (2026-08): M0 through M17 are ALL COMPLETE and shipped -- the
+> library is at v1.35.0, feature-complete for its purpose, with the full
+> claim-driven test suite (munit + hegel PBT + deterministic simulation
+> + CBMC model-checking) and broad per-commit CI (gcc/clang, ASan,
+> UBSan, valgrind, tsan-fibers, musl, macos, freebsd, riscv64,
+> windows-msvc, all TLS backends, sim-dst).  M15's Solaris/illumos +
+> select halves shipped; the AIX half was retired (see (S)3.1 -- AIX is
+> off the roadmap).  This table is retained as the historical build
+> order, not an open to-do list; newer work (crypto, prob, futures,
+> resource scope + cancellation masking, async causal trace, dispatcher,
+> Glommio-inspired proportional-share scheduling + stall watchdog, the
+> NUMA buffer-pool research in examples/06_sqlxtc) is tracked in the
+> release history and (S)19.
+
 | # | Milestone | Deliverable |
 |---|---|---|
 | **M0** | Repo skeleton | `dist/`, `src/inc/`, both build systems wired, `make check` runs zero tests successfully on Linux + macOS + Windows. |
@@ -1051,7 +1083,7 @@ OpenBSD, DragonFlyBSD).
 | **M11** | Memory model | `xtc_alloc_ctx`, slab caches, ownership transfer, libumem-debug flags. |
 | **M12** | Shared globals | `XTC_GLOBAL`/`XTC_PERLOOP`/`XTC_FN_STATIC`/`XTC_TLS` macros + `dist/s_globals` + `dist/s_signals` lints. |
 | **M13a** | RCU primitive | `xtc_rcu` epoch-based reclamation; PBT for read-side wait-freedom; basic benchmarks. |
-| **M13b** | LRLock + LWLock | Port from `~/ws/postgres/lrlck` to xtc style; PBT (lin-checker); micro/macro benchmarks vs `xtc_rwlock`. |
+| **M13b** | LRLock + LWLock | `xtc_lrlock` (a C left-right lock -- technique of Jon Gjengset, github.com/jonhoo/left-right) + `xtc_lwlock`; PBT (lin-checker); micro/macro benchmarks vs `xtc_rwlock`. |
 | **M13c** | Lock manager | Port from `~/ws/libdb` + `~/ws/noxu`; 9-mode matrix, intent locks, promotion, sharded tables, incremental + periodic deadlock detector with all victim policies, resource caps from (S)13.5; full (S)13.8 test/bench/scale/exhaust suite. |
 | **M14** | `xtc_cfg` + `xtc_log` + `dist/s_async` + `dist/s_cfg` | Function-call config API, per-loop logging, prototype-generation tools. |
 | **M15** | L1 Solaris + AIX + select | Tier-2 platform completeness. |
@@ -3261,8 +3293,8 @@ are in progress; `BLOCKED` items list their gating dependency.
 | Linux musl      | full pass   | coro_fctx.c (fcontext substrate) covers the missing ucontext; full coroutine stack runs + passes |
 | FreeBSD 15      | full pass   | Re-verified against the current tree: 283/283 munit (clang 19, kqueue, ucontext, OpenSSL); two mdoc errors that FreeBSD mandoc caught were fixed |
 | illumos         | full pass   | Re-verified: 51/52 C suites pass, 0 fail (SunOS 5.11, gcc 13.4, solaris port backend, ucontext, OpenSSL); the earlier TLS-link drift is gone with --with-tls=auto |
-| macOS           | full pass   | In per-commit CI (macos-latest, Apple Silicon): kqueue backend, ucontext coroutines, full munit + DST suite. Correctness verified; the ucontext substrate is a real performance gap on Apple Silicon (no Mach-O arm64 fcontext yet, see PLAN.md 19.24) |
-| AIX             | not yet     | Awaiting host; KVM runbook in `docs/M_AIX_KVM.md` |
+| macOS           | full pass   | In per-commit CI (macos-latest, Apple Silicon): kqueue backend, full munit + DST suite. macOS/arm64 defaults to the hand-written Mach-O fcontext substrate as of 1.23.x (closing the per-switch gap; see (S)19.24 / docs/KNOWN_ISSUES.md); macOS x86-64 still ucontext. |
+| AIX             | unsupported | OFF THE ROADMAP -- the in-tree ppc64 port compiles but is never built/run in CI and carries no support commitment (see (S)3.1 and docs/KNOWN_ISSUES.md). |
 
 ### Windows toolchains (santorini host)
 
@@ -3562,39 +3594,17 @@ Kafka-shaped log broker; design in `examples/07_kaka/README.md`.
 
 ---
 
-## 22. What I want from you before we start coding
+## 22. Status (this plan is built)
 
-1. Sign off (or push back) on **Q1-Q16** in (S)10.  Defaults given.
-2. Confirm the **layer renames** (`evt`, `ptc`, `orc`) and the
-   sub-renames (`xtc_svr`, `xtc_fsm`, `xtc_app`, `xtc_reg`,
-   lowercase `dispatch`/`reply`/`async`/`await`/`xtc_yield`).
-3. Confirm the **platform matrix** in (S)3 -- particularly whether
-   AIX is Tier 2 or can drop to "best-effort".
-4. Confirm **C11** as the dialect.
-5. Confirm **ISC license**.
-6. Confirm the **(S)12 strategy** for `async()/await()` -- fiber as
-   default, protothread fallback, explicit-thunk escape, with
-   `dist/s_async` ((S)6.4) generating typed prototypes.
-7. Confirm the **milestone order** -- particularly that M13a/b/c
-   (RCU / LRLock / LWLock / lock manager benchmarking under
-   threaded contention) is validated *before* any downstream
-   integration relies on it, so we don't bake in a primitive that
-   loses to the alternative under real threaded contention.
-8. Confirm the **(S)20 mapping** -- that we are explicitly framing xtc
-   as the toolbox the PG v20/v21 threading effort is going to need,
-   and that any gap in the table is a redesign trigger for xtc.
-9. Anything missing?  Other PG subsystems on the threading plan I
-   haven't mapped?
-
-Once those are settled I'll create:
-
-- the `dist/` skeleton with both build systems wired,
-- the `src/inc/` umbrella headers,
-- the `os/os_alloc.c` + `os/os_atomic.c` + `os/os_thread.c`
-  starter trio,
-- the `os/asm/fctx_x86_64_sysv.S` for fiber bring-up,
-- the munit + hegel test harness skeleton,
-- a `make check && meson test` that runs and passes against
-  a stub library on Linux/macOS/Windows CI,
-
-...and we iterate from there.
+This section was originally "What I want from you before we start
+coding" -- a Revision-4 sign-off checklist (confirm the layer names,
+C11, ISC, the milestone order, the async()/await() strategy, the
+platform matrix, etc.).  All of it was settled and built long ago.  The
+library is shipping at v1.35.0: M0-M17 complete ((S)9), both build
+systems (autotools + meson) wired and CI-verified, the layered
+os/io/evt/ptc/orc structure and the __os_*/__xtc_*/xtc_* naming
+enforced by the API-discipline merge gate, deterministic simulation as
+the correctness spine, and broad per-commit CI across the Tier-1
+platforms.  The checklist is retired; the plan above is kept for the
+architecture rationale and worked examples, and ongoing work is tracked
+in the release history and (S)19.
