@@ -16,6 +16,8 @@
 
 #include <signal.h>
 #include <stdatomic.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -90,6 +92,57 @@ test_exec_true_false(const MunitParameter p[], void *d)
 	munit_assert_int(code, ==, 0);
 	munit_assert_int(run_exec(have_env ? env_f : sh_f, &code), ==, 0);
 	munit_assert_int(code, ==, 1);
+	return MUNIT_OK;
+}
+
+/* ---- fd-leak: a non-CLOEXEC parent fd must NOT reach the exec'd child
+ * (CWE-403).  Dup the write end of a pipe to a fixed, high fd number
+ * (unlikely to be reused by the shell for its own bookkeeping), then
+ * exec a shell that attempts to write a sentinel byte to that fd.  If
+ * the fd leaked, the write succeeds and the parent reads the sentinel;
+ * with the pre-exec sweep the fd is closed, the write fails, and no
+ * sentinel arrives.  We assert nothing arrives. */
+#define XTC_LEAK_FD 250
+static MunitResult
+test_no_fd_leak(const MunitParameter p[], void *d)
+{
+	int pfd[2];
+	char arg[96];
+	char *argv[4];
+	int code = -1;
+	char rb[4];
+	ssize_t got;
+	(void)p; (void)d;
+
+	if (pipe(pfd) != 0)
+		return MUNIT_SKIP;
+	/* Move the write end to the fixed probe fd; keep read end for the
+	 * parent.  dup2 clears CLOEXEC on the target, so this fd is exactly
+	 * the kind of plain, inheritable descriptor the sweep must close. */
+	if (dup2(pfd[1], XTC_LEAK_FD) != XTC_LEAK_FD) {
+		(void)close(pfd[0]); (void)close(pfd[1]);
+		return MUNIT_SKIP;
+	}
+	(void)close(pfd[1]);
+
+	(void)snprintf(arg, sizeof arg,
+	    "echo -n LEAK >&%d 2>/dev/null; exit 0", XTC_LEAK_FD);
+	argv[0] = "/bin/sh"; argv[1] = "-c"; argv[2] = arg; argv[3] = NULL;
+
+	munit_assert_int(run_exec(argv, &code), ==, 0);
+	munit_assert_int(code, ==, 0);
+
+	/* Close our probe write-fd so the read end sees EOF rather than
+	 * blocking; then a non-blocking read must return 0 (EOF) -- i.e.
+	 * the child wrote nothing because its copy of the fd was closed. */
+	(void)close(XTC_LEAK_FD);
+	{
+		int fl = fcntl(pfd[0], F_GETFL, 0);
+		(void)fcntl(pfd[0], F_SETFL, fl | O_NONBLOCK);
+	}
+	got = read(pfd[0], rb, sizeof rb);
+	(void)close(pfd[0]);
+	munit_assert_int((int)got, <=, 0);   /* 0 = EOF, no sentinel = no leak */
 	return MUNIT_OK;
 }
 
@@ -212,6 +265,7 @@ test_signal(const MunitParameter p[], void *d)
 static MunitTest tests[] = {
 	{ "/bad_opts",     test_bad_opts,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/exec",         test_exec_true_false, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/no_fd_leak",   test_no_fd_leak,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fn_ctrl_wait", test_fn_ctrl_wait,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/signal",       test_signal,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

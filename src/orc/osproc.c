@@ -37,6 +37,49 @@
 #include <sys/syscall.h>
 #endif
 
+/* Close every file descriptor at or above `from`, EXCEPT `keep` (or -1
+ * for none), just before execvp() so the exec'd image does not inherit
+ * the parent's event-loop fds, listening/connected sockets, TLS
+ * connections, or any descriptor the embedder happened to have open
+ * (CWE-403, fd leak to child).  The runtime CLOEXEC-marks its own fds,
+ * but a general spawn primitive cannot assume the same of embedder fds,
+ * so this is defense in depth at the exec trust boundary.
+ *
+ * Must be async-signal-safe: it runs post-fork, pre-exec.  Prefers the
+ * close_range(2) syscall (Linux 5.9+, one call); otherwise a bounded
+ * close() loop.  close() and the raw syscall are async-signal-safe. */
+static void
+__child_close_fds_from(int from, int keep)
+{
+	long maxfd;
+
+#if defined(__linux__) && defined(SYS_close_range)
+	if (keep < from) {
+		/* No fd to preserve in range: one syscall closes it all. */
+		if (syscall(SYS_close_range, (unsigned)from, ~0U, 0U) == 0)
+			return;
+		/* else fall through to the portable loop (old kernel). */
+	} else {
+		/* Preserve `keep`: close [from, keep) and (keep, MAX]. */
+		if (keep > from &&
+		    syscall(SYS_close_range, (unsigned)from,
+		        (unsigned)(keep - 1), 0U) != 0)
+			goto loop;
+		if (syscall(SYS_close_range, (unsigned)(keep + 1), ~0U, 0U) == 0)
+			return;
+	}
+loop:
+#endif
+	maxfd = sysconf(_SC_OPEN_MAX);
+	if (maxfd < 0 || maxfd > 1 << 20)
+		maxfd = 1 << 20;   /* sane cap if unlimited/unknown */
+	for (long fd = from; fd < maxfd; fd++) {
+		if ((int)fd == keep)
+			continue;
+		(void)close((int)fd);
+	}
+}
+
 struct xtc_osproc {
 	pid_t pid;
 	int   ctrl_fd;     /* parent end of the control socket, or -1 */
@@ -208,6 +251,10 @@ xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out)
 			(void)snprintf(buf, sizeof buf, "%d", child_fd);
 			(void)setenv("XTC_CTRL_FD", buf, 1);
 		}
+		/* Do not leak the parent's fds (loop/epoll/uring, sockets, TLS,
+		 * embedder fds) into the exec'd image; keep only std{in,out,err}
+		 * and the control fd.  Defense in depth at the exec boundary. */
+		__child_close_fds_from(3, child_fd);
 		(void)execvp(opts->argv[0], opts->argv);
 		_exit(127);                     /* exec failed */
 	}
