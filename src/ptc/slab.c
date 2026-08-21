@@ -587,6 +587,16 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 	if (out == NULL) return XTC_E_INVAL;
 	if (opts == NULL) opts = &defaults;
 	if (opts->obj_size == 0) return XTC_E_INVAL;
+	/*
+	 * Overflow guard: slot_size is obj_size + redzones, then rounded up
+	 * to align.  Reject an obj_size so large that adding the redzones or
+	 * the align-1 rounding term in __align_up() would wrap size_t.  A
+	 * 1 GiB ceiling is far above any legitimate slab object and leaves
+	 * ample headroom for the additive terms.  Without this a hostile or
+	 * buggy obj_size could wrap slot_size to a tiny value and hand out
+	 * overlapping slots (heap corruption).
+	 */
+	if (opts->obj_size > (size_t)1 << 30) return XTC_E_INVAL;
 
 	if ((rc = __os_calloc(1, sizeof *s, (void **)&s)) != XTC_OK) return rc;
 	s->opts = *opts;
@@ -615,8 +625,11 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 			__os_free(s);
 			return XTC_E_INVAL;
 		}
-		if (s->opts.shm_size < XTC_SHM_HDR_SIZE + s->opts.chunk_size) {
-			/* Region too small for header + one chunk. */
+		if (s->opts.shm_size < XTC_SHM_HDR_SIZE ||
+		    s->opts.shm_size - XTC_SHM_HDR_SIZE < s->opts.chunk_size) {
+			/* Region too small for header + one chunk.  Written as a
+			 * subtraction so a huge chunk_size cannot wrap the
+			 * HDR + chunk_size addition past shm_size. */
 			(void)pthread_mutex_destroy(&s->lock);
 			__os_free(s);
 			return XTC_E_RESOURCE;
