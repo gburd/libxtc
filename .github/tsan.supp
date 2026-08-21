@@ -28,3 +28,17 @@ race:__exec_has_work
 # inbox.head for the same quiescence decision as __exec_has_work above,
 # same rationale.
 race:xtc_exec_run
+
+# The work-stealing enqueue/steal handoff races on the stolen task's
+# q_next scheduling-list pointer: a thief resets stolen->q_next before
+# re-enqueuing it (src/evt/loop.c __xtc_loop_step_once) while the
+# original owner's __xtc_loop_enqueue() reads t->q_next in its
+# fast-path double-enqueue guard.  The CORRECTNESS arbiter is the
+# Chase-Lev deque's seq_cst steal CAS (formally race-free for the deque
+# slot); TSan cannot carry that happens-before to the pointed-to task's
+# internal fields.  The q_next read is only a "already queued?" hint and
+# a stale read is safe -- proven by test_steal's no_loss_no_double_run
+# invariants (every task runs exactly once).  Making q_next atomic would
+# push atomic ops onto every FIFO list operation for a benign hint.
+race:__xtc_loop_enqueue
+race:__xtc_loop_step_once
