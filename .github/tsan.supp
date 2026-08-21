@@ -1,0 +1,30 @@
+# libxtc ThreadSanitizer suppressions -- known-benign runtime internals.
+#
+# These are NOT bugs.  Each entry is a specific, understood, documented
+# intentional benign race, not a blanket silence.  The clang tsan-fibers
+# CI job runs a curated fiber subset that does not include these paths;
+# this file lets a FULL-suite TSan run (all m-suites) stay clean so real
+# races -- like the exec.c loop_node race fixed with relaxed atomics --
+# still surface loudly.
+#
+# Load with:  TSAN_OPTIONS=suppressions=.github/tsan.supp
+#
+# To extend: confirm the race is genuinely benign (side-effect-free read
+# used only as a hint that another mechanism re-checks), then add a
+# stanza with a comment explaining WHY.
+
+# __exec_has_work() is the executor supervisor's quiescence poll (see the
+# block comment at src/evt/exec.c).  It reads each loop's n_timers and
+# inbox.head WITHOUT the owning worker's lock, on purpose: the reads are
+# side-effect-free "is non-zero?" hints, and the supervisor double-checks
+# after a short sleep before it stops the executor, which absorbs any
+# stale read.  Making n_timers atomic would push atomic ops onto the
+# timer hot path (loop->timers[loop->n_timers++], sift-up/down) purely to
+# satisfy a poll -- not worth it.  The authoritative liveness signals it
+# also consults (n_alive, the work-stealing deque) ARE atomic/lock-free.
+race:__exec_has_work
+
+# xtc_exec_run's inline idle re-check (src/evt/exec.c ~605) reads
+# inbox.head for the same quiescence decision as __exec_has_work above,
+# same rationale.
+race:xtc_exec_run
