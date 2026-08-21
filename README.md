@@ -238,7 +238,7 @@ It does NOT include the DST suite -- that needs a separate
 `--with-io-backend=sim` build.  Run it explicitly:
 
 ```sh
-make check-dst                          # 52+ deterministic-simulation tests
+make check-dst                          # deterministic-simulation tests
                                          # (test/sim/); the project's
                                          # strongest correctness tier
 ```

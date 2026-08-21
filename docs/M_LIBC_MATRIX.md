@@ -18,7 +18,7 @@ Configuration: a fresh out-of-source build per libc / platform.
 |-----------------|---------|:--------:|:----------:|-------|
 | glibc (Linux x86_64) | 2.40 | pass | pass | Canonical build; runtime-verified every commit in CI (gcc + clang, ASan, UBSan) |
 | musl (Linux x86_64) | 1.2.5 | pass | pass (forced-fcontext CI) | musl omits ucontext; the hand-written fcontext substrate covers it and the forced-fcontext CI job runs the suite every commit |
-| FreeBSD libc (15.0, clang, amd64) | 15.0 | pass | pass (gmake check) | Re-verified against the current tree; native kqueue file-AIO exercised |
+| FreeBSD libc (15.0, clang, amd64) | 15.0 | pass | pass (gmake check) | Native kqueue file-AIO exercised |
 | illumos libc (SunOS 5.11, gcc, UltraSPARC v9) | illumos-31d3d510d0 | pass | pass (gmake check) | Big-endian sparcv9 -- validates byte order in codecs/hashing/atomics; event-ports backend, OpenSSL 3 |
 | macOS libSystem (Apple Silicon, clang) | -- | pass | pass | kqueue + ucontext; runtime-verified every commit in CI |
 | Windows ucrt (MinGW gcc 13.2) | UCRT | pass | IOCP runtime-verified on a host | loop/task/timer/wakeup/socket-poll/file-AIO; per-commit Windows CI is an MSVC xtc.lib + smoke build |
