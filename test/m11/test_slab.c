@@ -49,6 +49,37 @@
 
 /* ----- Basic alloc/free ----------------------------------------- */
 
+/* Overflow guard: obj_size near SIZE_MAX must be rejected, not wrapped
+ * into a tiny slot_size (which would hand out overlapping slots).  Also
+ * the documented obj_size==0 rejection.  Fails if the guard in
+ * xtc_slab_create() is removed. */
+static MunitResult
+test_reject_bad_obj_size(const MunitParameter p[], void *d)
+{
+	xtc_slab_t *s = NULL;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	(void)p; (void)d;
+
+	opts.name = "bad"; opts.obj_size = 0;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_E_INVAL);
+	munit_assert_null(s);
+
+	opts.obj_size = SIZE_MAX;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_E_INVAL);
+	munit_assert_null(s);
+
+	opts.obj_size = SIZE_MAX - 32;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_E_INVAL);
+	munit_assert_null(s);
+
+	opts.obj_size = ((size_t)1 << 30) + 1;   /* just past the ceiling */
+	opts.flags = XTC_SLAB_REDZONE;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_E_INVAL);
+	munit_assert_null(s);
+
+	return MUNIT_OK;
+}
+
 static MunitResult
 test_basic_alloc_free(const MunitParameter p[], void *d)
 {
@@ -465,6 +496,7 @@ test_shm_reclaim_single_process(const MunitParameter pa[], void *d)
 
 static MunitTest tests[] = {
 	{ "/basic_alloc_free", test_basic_alloc_free, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reject_bad_obj_size", test_reject_bad_obj_size, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pressure_listen_ex_stop", test_pressure_listen_ex_stop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/magazine_fastpath", test_magazine_fastpath, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/ctor_dtor",        test_ctor_dtor,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
