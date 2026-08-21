@@ -94,3 +94,22 @@ that violate the asserted invariant.  That trace is the bug -- either
 the code drifted from the algorithm, or the algorithm was changed and
 the harness's invariant must be updated deliberately (with a note on
 why the change is sound).
+
+## Known harness issue: mask_harness (pre-existing, not a runtime bug)
+
+`mask_harness` (cancellation masking vs a remote kill) reports a
+spurious counterexample under cbmc 5.95.1: its `__CPROVER_ASYNC_1`
+remote killer can commit its release-CAS AFTER `owner()` has run every
+delivery point, so the model shows `fired == 1 && acted == 0` -- a kill
+with no subsequent park to observe it.  That is a MODELLING artifact of
+`__CPROVER_ASYNC_1` (which may schedule the async thread past the end of
+the fiber's window), NOT a defect in proc.c: the real runtime always
+reaches a next park (or its at-exit) that acquire-loads `kill_pending`,
+so a masked kill is delayed, never dropped.  Sequencing the killer
+before the owner's delivery points proves the masking LOGIC verifies
+SUCCESSFUL (acted == 1 exactly), but that ordering also loses the
+interleaving coverage that discriminates "defer while masked" from a
+bug that acts while masked, so it is not a satisfactory fix.  A faithful
+async model (bounding the killer to fire within an observed window)
+is TODO; until then treat this one harness as advisory.  The other 13
+harnesses gate.  (CBMC is a local release-tier check, not a CI gate.)
