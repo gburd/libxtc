@@ -272,7 +272,9 @@ jobs:
         run: make -C build_tsan -j"$(nproc)"
       - name: Fiber suite under TSan (zero warnings required)
         env:
-          TSAN_OPTIONS: halt_on_error=1:exitcode=66
+          # suppressions catalogues the documented-intentional benign
+          # races (executor quiescence poll); see .github/tsan.supp.
+          TSAN_OPTIONS: halt_on_error=1:exitcode=66:suppressions=${{ github.workspace }}/.github/tsan.supp
         run: |
           cd build_tsan
           rc=0
