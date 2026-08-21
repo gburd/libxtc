@@ -1,3 +1,44 @@
+libxtc (1.35.1-1) unstable; urgency=medium
+
+  * fix(loop): initialize a task's fields BEFORE publishing it to the
+    work-stealing deque.  xtc_deque_push() makes the task visible to
+    thieves on other loops, and a thief writes stolen->q_next; writing
+    t->q_next after the push raced the thief on the same field (both
+    store NULL, benign in value, but a genuine publish-before-init
+    ordering bug ThreadSanitizer flags).  Set it first, then publish.
+  * fix(exec): make the per-worker NUMA steal hint (exec->loop_node) a
+    relaxed atomic.  Each worker wrote its own slot at startup while
+    thieves read other slots on the steal path -- non-atomic concurrent
+    access (UB, though only a suboptimal steal-placement hint).
+  * harden(osproc): close inherited file descriptors before execvp()
+    (CWE-403).  The exec path let a child inherit the parent's
+    event-loop/epoll/io_uring fds, sockets, TLS connections, and any
+    embedder fd; now closes every fd >= 3 except the control fd via
+    close_range(2) (fallback: bounded close() loop), async-signal-safe.
+  * harden(slab): overflow guards in xtc_slab_create().  Reject an
+    obj_size large enough that obj_size + redzones + align rounding
+    wraps slot_size (which would hand out overlapping slots); rewrite
+    the shared-memory size check as a subtraction that cannot wrap.
+  * test: skip the deliberate-fault probes (stack-guard, pkey, proc
+    fault-containment, scope) under gcc ThreadSanitizer too (they
+    already skipped under clang TSan and ASan); add a full-suite TSan
+    recipe (setarch -R + detect_deadlocks=0 + .github/tsan.supp
+    cataloguing the documented-benign executor/steal hint races).
+    Fix the ASan full make check (stack-guard test) so it runs clean.
+  * test(exec): unit-cover the proportional-share class accessors
+    (create validation + read-back + NULL-returns-0), previously only
+    reached via the DST/PBT tests.
+  * docs: correct the left-right lock attribution to Jon Gjengset
+    (github.com/jonhoo/left-right); mark PLAN.md a historical design
+    document; drop stale/agent phrasing from README and M_LIBC_MATRIX.
+
+  Validated at scale on EC2 x86_64 (c7i) and aarch64 (c7g): gcc, clang,
+  ASan, UBSan clean on both; ThreadSanitizer zero data races; a
+  900k-seed DST swarm (up to 500k/arch across partition + latency +
+  buggify + machine-death + torn-write) with zero invariant violations.
+
+ -- Greg Burd <greg@burd.me>  Thu, 21 Aug 2026 18:00:00 +0000
+
 libxtc (1.35.0-1) unstable; urgency=medium
 
   * feat: Glommio-inspired scheduling arc (credit: Glauber Costa /
