@@ -285,6 +285,49 @@ test_accessors_errors(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Proportional-share class accessors (v1.35.0 API): the create contract
+ * (shares 1..1000, latency_ns >= 0, non-NULL loop/out) and the read-back
+ * accessors incl. their NULL-returns-0 error path.  These are exercised
+ * by the DST/PBT sched-shares tests but had no standard-make-check unit
+ * coverage. */
+static MunitResult
+test_exec_class_accessors(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e = NULL;
+	xtc_loop_t *loop;
+	xtc_exec_class_t c = NULL;
+	(void)p; (void)d;
+
+	/* Accessors are NULL-safe and return 0. */
+	munit_assert_int(xtc_exec_class_shares(NULL), ==, 0);
+	munit_assert_int64(xtc_exec_class_latency(NULL), ==, 0);
+	munit_assert_int64(xtc_exec_class_runs(NULL), ==, 0);
+	munit_assert_int64(xtc_exec_class_vruntime(NULL), ==, 0);
+
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	loop = xtc_exec_loop(e, 0);
+	munit_assert_not_null(loop);
+
+	/* create validation: NULL args, shares out of 1..1000, negative
+	 * latency all rejected. */
+	munit_assert_int(xtc_exec_class_create(NULL, 3, 0, &c), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_class_create(loop, 3, 0, NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_class_create(loop, 0, 0, &c), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_class_create(loop, 1001, 0, &c), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_class_create(loop, 3, -1, &c), ==, XTC_E_INVAL);
+
+	/* Valid create; accessors read back what was set. */
+	munit_assert_int(xtc_exec_class_create(loop, 7, 250000, &c), ==, XTC_OK);
+	munit_assert_not_null(c);
+	munit_assert_int(xtc_exec_class_shares(c), ==, 7);
+	munit_assert_int64(xtc_exec_class_latency(c), ==, 250000);
+	munit_assert_int64(xtc_exec_class_runs(c), ==, 0);      /* not run yet */
+	munit_assert_int64(xtc_exec_class_vruntime(c), ==, 0);
+
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -295,6 +338,7 @@ static MunitTest tests[] = {
 	{ "/A12_shard_id",            test_shard_id,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/policy_knobs",            test_policy_knobs,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/accessors_errors",        test_accessors_errors,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/class_accessors",         test_exec_class_accessors, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/exec", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
