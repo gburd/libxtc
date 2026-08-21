@@ -102,7 +102,10 @@ test_exec_true_false(const MunitParameter p[], void *d)
  * the fd leaked, the write succeeds and the parent reads the sentinel;
  * with the pre-exec sweep the fd is closed, the write fails, and no
  * sentinel arrives.  We assert nothing arrives. */
-#define XTC_LEAK_FD 250
+/* Single digit: dash / POSIX sh only accept single-digit fd numbers in a
+ * >&N redirect (fd >= 10 is a bash extension).  fds 8-9 are not used by
+ * the shell for its own bookkeeping, so fd 9 survives to the echo. */
+#define XTC_LEAK_FD 9
 static MunitResult
 test_no_fd_leak(const MunitParameter p[], void *d)
 {
