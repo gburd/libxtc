@@ -34,11 +34,17 @@ static inline int64_t __xtc_io_sim_next_due(xtc_io_t *io)
 struct xtc_exec {
 	int           n_loops;
 	xtc_loop_t  **loops;
-	_Atomic int  *loop_node;       /* NUMA node per loop (M5.5); relaxed --
-	                                * a steal-placement HINT, written once by
-	                                * each worker at startup and read by
-	                                * thieves; atomics only for tear-free
-	                                * defined access, no ordering needed. */
+	int          *loop_node;       /* NUMA node per loop (M5.5).  Plain
+	                                * int storage; accessed as _Atomic (see
+	                                * the (_Atomic int *) casts below) purely
+	                                * for tear-free DEFINED concurrent access
+	                                * of this steal-placement HINT -- each
+	                                * worker writes its own slot once at
+	                                * startup, thieves read others on the
+	                                * steal path; relaxed, no ordering needed.
+	                                * (Plain storage avoids passing an
+	                                * _Atomic-qualified pointer to the void*
+	                                * allocator -- MSVC C4090.) */
 	__os_thread_t *workers;
 	_Atomic int   stop_flag;
 	int           started;
@@ -95,7 +101,7 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 	n = exec->n_loops;
 	if (n <= 1) return NULL;
 	my_node = exec->loop_node ? atomic_load_explicit(
-	    &exec->loop_node[me->exec_id], memory_order_relaxed) : 0;
+	    (_Atomic int *)&exec->loop_node[me->exec_id], memory_order_relaxed) : 0;
 
 	{
 		/* Steal-victim start point.  Under a deterministic sim the
@@ -118,7 +124,8 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 		xtc_loop_t *victim;
 		void *t;
 		if (idx == me->exec_id) continue;
-		if (exec->loop_node && atomic_load_explicit(&exec->loop_node[idx],
+		if (exec->loop_node && atomic_load_explicit(
+		    (_Atomic int *)&exec->loop_node[idx],
 		    memory_order_relaxed) != my_node) continue;
 		victim = exec->loops[idx];
 		if (xtc_deque_len(&victim->deque) == 0) continue;
@@ -164,7 +171,7 @@ __xtc_exec_worker(void *arg)
 	__os_thread_apply_default_qos();
 	/* Record NUMA placement so the steal pass-1 can prefer same-node. */
 	if (exec->loop_node != NULL)
-		atomic_store_explicit(&exec->loop_node[loop->exec_id],
+		atomic_store_explicit((_Atomic int *)&exec->loop_node[loop->exec_id],
 		    __os_numa_current_node(), memory_order_relaxed);
 
 	/* Preemption Phase 1: if enabled, arm a per-worker time slice.  A
