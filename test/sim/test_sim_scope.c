@@ -361,8 +361,8 @@ main(int argc, char **argv)
 	if (argc > 1) base = strtoull(argv[1], NULL, 0);
 	if (argc > 2) n = atoi(argv[2]);
 
-#if defined(__SANITIZE_ADDRESS__)
-	printf("OK: test_sim_scope SKIP under ASan (ASan owns SIGSEGV)\n");
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+	printf("OK: test_sim_scope SKIP under sanitizer\n");
 	return 0;
 #elif defined(__has_feature)
 #  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)

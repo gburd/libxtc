@@ -161,8 +161,8 @@ test_scope_contained_crash(const MunitParameter p[], void *d)
 	xtc_loop_t *loop = NULL;
 	xtc_pid_t faulter, watcher;
 	(void)p; (void)d;
-#if defined(__SANITIZE_ADDRESS__)
-	return MUNIT_SKIP;   /* ASan owns SIGSEGV */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+	return MUNIT_SKIP;   /* sanitizer owns SIGSEGV / flags recovery alloc */
 #elif defined(__has_feature)
 #  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 	return MUNIT_SKIP;

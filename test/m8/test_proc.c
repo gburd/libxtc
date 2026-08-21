@@ -846,8 +846,8 @@ test_recovery_registry(const MunitParameter p[], void *d)
 	xtc_pid_t faulter, watcher;
 	(void)p; (void)d;
 
-#if defined(__SANITIZE_ADDRESS__)
-	return MUNIT_SKIP;   /* ASan owns SIGSEGV */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+	return MUNIT_SKIP;   /* sanitizer owns SIGSEGV / flags recovery alloc */
 #elif defined(__has_feature)
 #  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 	return MUNIT_SKIP;
@@ -886,8 +886,10 @@ test_fault_contain(const MunitParameter p[], void *d)
 	xtc_pid_t faulter, watcher;
 	(void)p; (void)d;
 
-#if defined(__SANITIZE_ADDRESS__)
-	return MUNIT_SKIP;   /* ASan owns SIGSEGV; cannot test our handler */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+	return MUNIT_SKIP;   /* the sanitizer owns SIGSEGV / flags the
+	                      * recovery alloc as signal-unsafe; cannot
+	                      * test our fault handler under it (gcc form) */
 #elif defined(__has_feature)
 #  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 	return MUNIT_SKIP;
@@ -927,7 +929,7 @@ test_fault_early_contain(const MunitParameter p[], void *d)
 	xtc_pid_t faulter, watcher;
 	(void)p; (void)d;
 
-#if defined(__SANITIZE_ADDRESS__)
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 	return MUNIT_SKIP;
 #elif defined(__has_feature)
 #  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
@@ -979,7 +981,7 @@ test_fault_escalate(const MunitParameter p[], void *d)
 	int st;
 	(void)p; (void)d;
 
-#if defined(__SANITIZE_ADDRESS__)
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 	return MUNIT_SKIP;
 #elif defined(__has_feature)
 #  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
