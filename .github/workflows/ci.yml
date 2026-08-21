@@ -272,9 +272,12 @@ jobs:
         run: make -C build_tsan -j"$(nproc)"
       - name: Fiber suite under TSan (zero warnings required)
         env:
-          # suppressions catalogues the documented-intentional benign
-          # races (executor quiescence poll); see .github/tsan.supp.
-          TSAN_OPTIONS: halt_on_error=1:exitcode=66:suppressions=${{ github.workspace }}/.github/tsan.supp
+          # detect_deadlocks=0: TSan's deadlock detector has a fixed
+          # 64-lock history cap that the RCU-resize path (many slab
+          # locks while retiring nodes) overflows -- a tool limit, not a
+          # libxtc deadlock.  suppressions catalogues the documented
+          # benign executor/steal hint races (see .github/tsan.supp).
+          TSAN_OPTIONS: halt_on_error=1:exitcode=66:detect_deadlocks=0:suppressions=${{ github.workspace }}/.github/tsan.supp
         run: |
           cd build_tsan
           rc=0
