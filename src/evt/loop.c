@@ -330,20 +330,28 @@ __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t)
 	}
 
 	if (loop->exec != NULL) {
-		if (!t->pinned &&
-		    xtc_deque_push(&loop->deque, t) == XTC_OK) {
-			/* Critical section: a task pushed to the stealable deque
-			 * is immediately visible to thieves on other loops. */
-			XTC_SIM_FAULT_POINT("sched.enqueue.post_deque_push");
+		if (!t->pinned) {
+			/* Initialize the task's fields BEFORE publishing it to the
+			 * stealable deque: once xtc_deque_push() succeeds the task
+			 * is immediately visible to thieves on other loops, and a
+			 * thief that steals it writes stolen->q_next -- so writing
+			 * t->q_next after the push races the thief on the same
+			 * field (both store NULL so harmless in value, but a real
+			 * publish-before-init ordering bug ThreadSanitizer rightly
+			 * flags).  Set it first, then publish. */
 			t->q_next = NULL;
-			/* Eager rebalance: nudge one idle peer so it steals this
-			 * promptly instead of waiting for its poll edge (no-op
-			 * unless eager rebalance is on and a peer is idle). */
-			{
-				extern void __xtc_exec_nudge_idle_peer(xtc_loop_t *);
-				__xtc_exec_nudge_idle_peer(loop);
+			if (xtc_deque_push(&loop->deque, t) == XTC_OK) {
+				XTC_SIM_FAULT_POINT("sched.enqueue.post_deque_push");
+				/* Eager rebalance: nudge one idle peer so it steals
+				 * this promptly instead of waiting for its poll edge
+				 * (no-op unless eager rebalance is on and a peer is
+				 * idle). */
+				{
+					extern void __xtc_exec_nudge_idle_peer(xtc_loop_t *);
+					__xtc_exec_nudge_idle_peer(loop);
+				}
+				return XTC_OK;
 			}
-			return XTC_OK;
 		}
 		/* pinned, or deque full -- fall through to the owner-only
 		 * FIFO, which is never work-stolen. */
