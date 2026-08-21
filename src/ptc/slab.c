@@ -625,8 +625,8 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 			__os_free(s);
 			return XTC_E_INVAL;
 		}
-		if (s->opts.shm_size < XTC_SHM_HDR_SIZE ||
-		    s->opts.shm_size - XTC_SHM_HDR_SIZE < s->opts.chunk_size) {
+		if (s->opts.shm_size < (size_t)XTC_SHM_HDR_SIZE ||
+		    s->opts.shm_size - (size_t)XTC_SHM_HDR_SIZE < s->opts.chunk_size) {
 			/* Region too small for header + one chunk.  Written as a
 			 * subtraction so a huge chunk_size cannot wrap the
 			 * HDR + chunk_size addition past shm_size. */
