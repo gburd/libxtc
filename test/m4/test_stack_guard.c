@@ -25,12 +25,14 @@ test_guard(const MunitParameter p[], void *d)
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* Detect AddressSanitizer on both gcc (__SANITIZE_ADDRESS__) and clang
- * (__has_feature(address_sanitizer)). */
-#if defined(__SANITIZE_ADDRESS__)
+/* Detect AddressSanitizer or ThreadSanitizer on both gcc
+ * (__SANITIZE_*) and clang (__has_feature).  Both intercept the
+ * deliberate stack-overflow fault with their own SEGV handler, so the
+ * guard-page probe below is skipped under either. */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 #  define XTC_TEST_ASAN 1
 #elif defined(__has_feature)
-#  if __has_feature(address_sanitizer)
+#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 #    define XTC_TEST_ASAN 1
 #  endif
 #endif

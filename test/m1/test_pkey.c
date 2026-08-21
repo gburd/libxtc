@@ -45,13 +45,16 @@ test_pkey(const MunitParameter p[], void *d)
 	 * kernels, PKU write-disable is not enforced under the ASan
 	 * shadow mapping at all).  The pkey syscalls themselves are
 	 * still exercised above; skip only the fork-fault probe under
-	 * ASan.  CI runs a non-ASan gcc/clang make check where this
+	 * ASan.  The same applies to ThreadSanitizer, which likewise
+	 * installs its own fatal-signal handler in the child and reports
+	 * the fault as a TSan SEGV rather than a clean signal exit.  CI
+	 * runs a non-sanitized gcc/clang make check where this
 	 * enforcement path is fully exercised.
 	 */
-#  if defined(__SANITIZE_ADDRESS__)
-	return MUNIT_OK;                      /* gcc/clang -fsanitize=address */
+#  if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+	return MUNIT_OK;                      /* gcc/clang -fsanitize=addr/thread */
 #  elif defined(__has_feature)
-#    if __has_feature(address_sanitizer)
+#    if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 	return MUNIT_OK;                      /* clang feature form */
 #    endif
 #  endif
