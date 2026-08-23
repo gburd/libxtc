@@ -298,13 +298,27 @@ conn_proc(void *arg)
 		if (st->quit || st->closed)
 			break;
 
-		/* Wait for the next inbound chunk (or for shutdown).  This
-		 * wakes exactly on fd readiness or mailbox traffic, not on
-		 * a polling timer. */
+		/* Flush any reply the commands just produced BEFORE parking.
+		 * Otherwise a single-request client waits for the next inbound
+		 * event -- up to the 1s re-check timeout below -- before its
+		 * reply reaches the wire (a ~1s per-round-trip stall on
+		 * un-pipelined traffic).  If the socket cannot take it all
+		 * now, ask to be woken on WRITABLE too. */
+		if (st->write_len > st->write_pos) {
+			conn_try_write(st);
+			if (st->closed)
+				break;
+			if (st->write_len > st->write_pos)
+				interest |= XTC_IO_WRITABLE;
+		}
+
+		/* Wait for the next inbound chunk (or writability if the reply
+		 * did not fully flush, or shutdown).  This wakes exactly on fd
+		 * readiness or mailbox traffic, not on a polling timer. */
 		{
 			uint32_t revents = 0;
 			(void)xtc_proc_wait_fd(st->fd,
-			    XTC_IO_READABLE | XTC_IO_HUP | XTC_IO_ERR,
+			    interest | XTC_IO_HUP | XTC_IO_ERR,
 			    1000LL * 1000 * 1000,  /* 1s timeout to re-check quit flag */
 			    &revents);
 			if (revents & XTC_WAIT_MAILBOX) {
