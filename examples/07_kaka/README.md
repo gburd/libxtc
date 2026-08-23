@@ -28,8 +28,11 @@ In scope:
     assignment.
   * Segmented log storage with offset indexing, reusing the Bitcask
     record/CRC discipline from the rexis example.
-  * Bounded memory under producer flood -- the property that is the real
-    test of an actor runtime.
+  * Credit-based backpressure that bounds the number of IN-FLIGHT
+    (un-acked) produce requests under a producer flood -- the
+    flow-control property that is the real test of an actor runtime.
+    (NOTE: this bounds in-flight WORK, not total storage.  See the
+    memory-footprint caveat below.)
 
 Out of scope (documented, not built):
 
@@ -91,10 +94,22 @@ the Erlang `:jobs` / RabbitMQ `credit_flow` / GenStage
 `max_demand` sliding-window pattern packaged as a primitive.
 
 The result is end-to-end backpressure: a slow disk slows the producer
-through TCP flow control, with bounded broker memory at every hop.
-This is the property to benchmark -- "broker RSS stays flat under a
-producer flood" -- and the one Kafka itself spends the most
-engineering on.
+through TCP flow control, bounding the in-flight (un-acked) request
+budget at every hop.  This flow-control property is the one to
+benchmark, and the one Kafka itself spends the most engineering on.
+
+**Memory-footprint caveat (measured):** the current partition log keeps
+EVERY appended record in an in-memory vector (partition.c: a growable
+slot array, one malloc'd key+value copy per record) so reads are served
+from RAM -- even records already rolled to on-disk segments are NOT
+evicted.  Resident memory therefore grows roughly linearly with the
+total number of messages appended (measured ~141 bytes of heap per
+message; a 40M-message soak reached ~5.25 GB RSS, flat only once the
+load stopped).  So the broker's memory is bounded in IN-FLIGHT work but
+NOT in cumulative stored volume.  A production design would evict
+closed-segment records from RAM and serve cold reads from disk (the
+segment files already exist); doing so is deliberately left as the next
+step for this example.
 
 ## On-disk layout
 
