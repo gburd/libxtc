@@ -158,6 +158,63 @@ test_segmented_recovery(void)
 	printf("  ok   segmented_recovery (3000 records, rolls, restart)\n");
 }
 
+/* Bounded memory under a produce flood: with persistence on, appending
+ * far more than a couple segments' worth of records must keep the
+ * IN-RAM working set bounded (records in closed segments are evicted),
+ * while high-water keeps climbing and reads of evicted offsets still
+ * succeed by falling back to the segment files.  This is the property
+ * the README advertises ("broker RSS stays bounded under a producer
+ * flood"). */
+static void
+test_bounded_memory(void)
+{
+	plog_t *l;
+	kaka_record_t r, got;
+	char dir[256], vbuf[64];
+	int i;
+	const int N = 20000;               /* >> 2 segments at a 32 KiB roll */
+	uint64_t max_resident = 0;
+
+	snprintf(dir, sizeof dir, "/tmp/kaka-bound-test-%d", (int)getpid());
+	(void)mkdir(dir, 0700);
+	ASSERT(plog_create_ex(dir, 32 * 1024 /* small roll => many segments */, &l) == 0);
+
+	for (i = 0; i < N; i++) {
+		snprintf(vbuf, sizeof vbuf, "value-%d-padded-to-force-rolls", i);
+		r = mkrec("k", vbuf);
+		ASSERT(plog_append(l, &r) == i);
+		if (plog_mem_records(l) > max_resident)
+			max_resident = plog_mem_records(l);
+	}
+
+	/* high-water reflects ALL appends... */
+	ASSERT(plog_high_water(l) == (uint64_t)N);
+	/* ...but the in-RAM window stayed BOUNDED far below N.  Each record
+	 * is ~50 B, roll is 32 KiB => ~650 records/segment; ~2 segments in
+	 * RAM => a few thousand, never the full 20000.  Assert < N/4 as a
+	 * generous bound that still fails hard if eviction regresses. */
+	ASSERT(max_resident < (uint64_t)N / 4);
+
+	/* Reads of long-evicted early offsets still succeed (served from the
+	 * segment files), returning the right bytes. */
+	for (i = 0; i < N; i += 1637) {
+		snprintf(vbuf, sizeof vbuf, "value-%d-padded-to-force-rolls", i);
+		ASSERT(plog_read(l, (uint64_t)i, &got) == 1);
+		ASSERT(got.value_len == strlen(vbuf));
+		ASSERT(memcmp(got.value, vbuf, got.value_len) == 0);
+	}
+	plog_destroy(l);
+
+	{
+		char cmd[320];
+		snprintf(cmd, sizeof cmd, "rm -f %s/*.log", dir);
+		if (system(cmd) != 0) { /* best effort */ }
+		(void)rmdir(dir);
+	}
+	printf("  ok   bounded_memory (%d appended, RAM peak %llu records, evicted reads OK)\n",
+	    N, (unsigned long long)max_resident);
+}
+
 int
 main(void)
 {
@@ -165,6 +222,7 @@ main(void)
 	test_read_by_offset();
 	test_growth();
 	test_segmented_recovery();
+	test_bounded_memory();
 	printf("All kaka partition tests passed.\n");
 	return 0;
 }

@@ -80,4 +80,11 @@ int   plog_read(plog_t *log, uint64_t offset, kaka_record_t *rec);
 /* Number of live records. */
 uint64_t plog_count(const plog_t *log);
 
+/* Number of records currently RESIDENT IN MEMORY (the in-RAM window).
+ * In persistence mode this stays bounded (~2 segments) even as
+ * plog_count / plog_high_water climb without limit, because records in
+ * closed segments are evicted from RAM.  Exposed for the bounded-memory
+ * test; equals plog_count() in pure in-memory mode. */
+uint64_t plog_mem_records(const plog_t *log);
+
 #endif /* KAKA_PARTITION_H */
