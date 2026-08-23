@@ -50,9 +50,14 @@ struct slot {
 
 struct plog {
 	struct slot *slots;
-	uint64_t     base;     /* offset of slots[0]; 0 until compaction */
-	uint64_t     count;    /* live records */
+	uint64_t     base;     /* offset of slots[0]; advances as old records
+	                        * are evicted from RAM after their segment
+	                        * rolls closed (they stay durable on disk) */
+	uint64_t     count;    /* live records IN MEMORY (slots[0..count)) */
 	uint64_t     cap;      /* slots allocated */
+	uint64_t     hw;       /* high-water: total records ever appended
+	                        * (== base + count; tracked separately so it
+	                        * survives eviction) */
 
 	/* Phase 2 persistence (NULL/-1 when in-memory only). */
 	char        *dir;
@@ -62,6 +67,11 @@ struct plog {
 	size_t       seg_roll;     /* roll threshold */
 	uint64_t     active_base;  /* base of the newest segment found in
 	                            * recovery; the one to keep appending to */
+	uint64_t     prev_seg_base;/* base of the segment before the active one;
+	                            * everything below this has rolled closed and
+	                            * may be evicted from RAM (persistence mode) */
+	uint8_t     *cold_buf;     /* scratch for __cold_read's returned bytes */
+	size_t       cold_cap;
 };
 
 /* ---- CRC32 (IEEE 802.3), same table as the rexis Bitcask ---- */
@@ -95,17 +105,17 @@ crc32(const void *data, size_t len, uint32_t init)
 	return c ^ 0xffffffffu;
 }
 
-/* ---- in-memory vector (used by both modes) ----
+/* ---- in-memory vector ----
  *
- * LIMITATION (measured): this vector retains EVERY appended record for
- * the life of the partition -- even records already rolled to on-disk
- * segments are never evicted -- so resident memory grows ~linearly with
- * total messages appended (~141 B/msg; a 40M-msg soak reached ~5.25 GB
- * RSS).  The broker's credit-based flow control bounds IN-FLIGHT work,
- * not cumulative storage.  A production design would drop closed-segment
- * records from RAM and serve cold reads from the segment files (which
- * already exist); left as the next step for this example.  See
- * README.md "Memory-footprint caveat". */
+ * In pure in-memory mode (dir == NULL) this vector holds every record
+ * for the life of the partition.  In persistence mode (dir != NULL) it
+ * is a BOUNDED WINDOW: records whose segment has rolled closed are
+ * durable on disk and get evicted from RAM (see __evict_closed), so
+ * resident memory is bounded by ~2 segments (the active one plus the
+ * one before it) regardless of how many messages have been appended.
+ * A read below the in-RAM window is served from the segment file
+ * (__cold_read).  This is what makes "broker RSS stays bounded under a
+ * producer flood" actually true (see README.md). */
 
 static int64_t
 __mem_append(plog_t *l, const kaka_record_t *rec)
@@ -132,7 +142,32 @@ __mem_append(plog_t *l, const kaka_record_t *rec)
 		memcpy(s->bytes + rec->key_len, rec->value, rec->value_len);
 	s->key_len = rec->key_len;
 	s->value_len = rec->value_len;
-	return (int64_t)(l->base + l->count++);
+	l->count++;
+	if (l->base + l->count > l->hw)
+		l->hw = l->base + l->count;
+	return (int64_t)(l->base + l->count - 1);
+}
+
+/* Evict records that live in segments strictly BELOW prev_seg_base: they
+ * have rolled closed and are durable on disk, so drop their in-RAM bytes
+ * and slide the window up, advancing `base`.  Bounds resident memory to
+ * ~2 segments in persistence mode.  No-op in pure in-memory mode
+ * (prev_seg_base stays 0) or when nothing is evictable yet. */
+static void
+__evict_closed(plog_t *l)
+{
+	uint64_t drop, i;
+	if (l->dir == NULL || l->prev_seg_base <= l->base)
+		return;
+	drop = l->prev_seg_base - l->base;   /* # of slots below the window */
+	if (drop == 0 || drop > l->count)
+		return;
+	for (i = 0; i < drop; i++)
+		free(l->slots[i].bytes);
+	memmove(l->slots, l->slots + drop,
+	    (size_t)(l->count - drop) * sizeof *l->slots);
+	l->count -= drop;
+	l->base  += drop;
 }
 
 /* ---- segment file helpers ---- */
@@ -173,6 +208,10 @@ __seg_write(plog_t *l, uint64_t offset, const kaka_record_t *rec)
 	ssize_t n;
 
 	if (l->seg_bytes > 0 && l->seg_bytes >= l->seg_roll) {
+		/* Roll: the current segment becomes the "previous" closed one
+		 * (its records are now durable and evictable); the new segment
+		 * starts at this offset. */
+		l->prev_seg_base = l->seg_base;
 		if (__seg_open(l, offset) != 0) return -1;   /* roll */
 	}
 
@@ -319,6 +358,79 @@ __recover(plog_t *l)
 
 /* ---- public API ---- */
 
+/* Cold read: an offset below the in-RAM window (evicted after its
+ * segment rolled).  Find the segment whose base is the greatest <=
+ * offset, scan it for the record, and copy it into *rec (caller owns
+ * the returned key/value via a static per-call buffer is NOT safe under
+ * concurrency, so we hand back a malloc'd buffer the caller must not
+ * hold past the next call -- matching plog_read's borrowed-pointer
+ * contract, we stash it on the log and free it on the next cold read /
+ * destroy).  Returns 1 hit, 0 miss, -1 error. */
+static int
+__cold_read(plog_t *l, uint64_t offset, kaka_record_t *rec)
+{
+	DIR *d;
+	struct dirent *de;
+	uint64_t best = 0;
+	int found = 0;
+	char path[512];
+	int fd;
+	off_t fsize, off = 0;
+
+	if (l->dir == NULL) return 0;
+	/* pick the segment whose base offset is the largest <= offset */
+	d = opendir(l->dir);
+	if (d == NULL) return -1;
+	while ((de = readdir(d)) != NULL) {
+		size_t len = strlen(de->d_name);
+		uint64_t b;
+		if (len < 5 || strcmp(de->d_name + len - 4, ".log") != 0)
+			continue;
+		b = strtoull(de->d_name, NULL, 10);
+		if (b <= offset && (!found || b > best)) { best = b; found = 1; }
+	}
+	(void)closedir(d);
+	if (!found) return 0;
+
+	__seg_path(path, sizeof path, l->dir, best);
+	fd = open(path, O_RDONLY);
+	if (fd < 0) return -1;
+	fsize = lseek(fd, 0, SEEK_END);
+	if (fsize < 0) { (void)close(fd); return -1; }
+	while ((uint64_t)fsize - (uint64_t)off >= REC_HDR) {
+		uint8_t hdr[REC_HDR];
+		uint32_t kl, vl;
+		uint64_t recoff;
+		size_t blen;
+		if (pread(fd, hdr, REC_HDR, off) != (ssize_t)REC_HDR) break;
+		recoff = ((uint64_t)hdr[4] << 56) | ((uint64_t)hdr[5] << 48) |
+		         ((uint64_t)hdr[6] << 40) | ((uint64_t)hdr[7] << 32) |
+		         ((uint64_t)hdr[8] << 24) | ((uint64_t)hdr[9] << 16) |
+		         ((uint64_t)hdr[10] << 8) | hdr[11];
+		kl = ((uint32_t)hdr[12] << 24) | ((uint32_t)hdr[13] << 16) |
+		     ((uint32_t)hdr[14] << 8) | hdr[15];
+		vl = ((uint32_t)hdr[16] << 24) | ((uint32_t)hdr[17] << 16) |
+		     ((uint32_t)hdr[18] << 8) | hdr[19];
+		if (kl > REC_MAX || vl > REC_MAX) break;
+		blen = (size_t)kl + vl;
+		if ((uint64_t)fsize - (uint64_t)off - REC_HDR < blen) break;
+		if (recoff == offset) {
+			uint8_t *buf = realloc(l->cold_buf, blen ? blen : 1);
+			if (buf == NULL) { (void)close(fd); return -1; }
+			l->cold_buf = buf; l->cold_cap = blen;
+			if (blen > 0 && pread(fd, buf, blen, off + REC_HDR)
+			    != (ssize_t)blen) { (void)close(fd); return -1; }
+			rec->key = buf; rec->key_len = kl;
+			rec->value = buf + kl; rec->value_len = vl;
+			(void)close(fd);
+			return 1;
+		}
+		off += REC_HDR + blen;
+	}
+	(void)close(fd);
+	return 0;   /* offset not in that segment (shouldn't happen) */
+}
+
 static int
 __plog_alloc(plog_t **out)
 {
@@ -372,6 +484,7 @@ plog_destroy(plog_t *l)
 	for (i = 0; i < l->count; i++)
 		free(l->slots[i].bytes);
 	free(l->slots);
+	free(l->cold_buf);
 	free(l->dir);
 	free(l);
 }
@@ -383,17 +496,22 @@ plog_append(plog_t *l, const kaka_record_t *rec)
 	if (l == NULL || rec == NULL) return -1;
 	if (rec->key_len > REC_MAX || rec->value_len > REC_MAX) return -1;
 	off = (int64_t)(l->base + l->count);
-	/* Persist first, so a successful return means it is durable. */
+	/* Persist first, so a successful return means it is durable.  This
+	 * may roll the segment (updating prev_seg_base), which then makes
+	 * older records evictable below. */
 	if (l->dir != NULL) {
 		if (__seg_write(l, (uint64_t)off, rec) != 0) return -1;
 	}
-	return __mem_append(l, rec);
+	off = __mem_append(l, rec);
+	if (off >= 0)
+		__evict_closed(l);   /* bound RAM to ~2 segments (persistence) */
+	return off;
 }
 
 uint64_t
 plog_high_water(const plog_t *l)
 {
-	return l == NULL ? 0 : l->base + l->count;
+	return l == NULL ? 0 : l->hw;
 }
 
 int
@@ -402,7 +520,9 @@ plog_read(plog_t *l, uint64_t offset, kaka_record_t *rec)
 	uint64_t idx;
 	struct slot *s;
 	if (l == NULL || rec == NULL) return -1;
-	if (offset < l->base) return -1;
+	if (offset >= l->hw) return 0;              /* not yet appended */
+	if (offset < l->base)                       /* evicted -> read from disk */
+		return __cold_read(l, offset, rec);
 	idx = offset - l->base;
 	if (idx >= l->count) return 0;
 	s = &l->slots[idx];
@@ -416,5 +536,11 @@ plog_read(plog_t *l, uint64_t offset, kaka_record_t *rec)
 uint64_t
 plog_count(const plog_t *l)
 {
-	return l == NULL ? 0 : l->count;
+	return l == NULL ? 0 : l->hw;   /* total records ever appended */
+}
+
+uint64_t
+plog_mem_records(const plog_t *l)
+{
+	return l == NULL ? 0 : l->count;   /* slots resident in RAM right now */
 }

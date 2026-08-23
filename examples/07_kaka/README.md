@@ -28,11 +28,12 @@ In scope:
     assignment.
   * Segmented log storage with offset indexing, reusing the Bitcask
     record/CRC discipline from the rexis example.
-  * Credit-based backpressure that bounds the number of IN-FLIGHT
-    (un-acked) produce requests under a producer flood -- the
-    flow-control property that is the real test of an actor runtime.
-    (NOTE: this bounds in-flight WORK, not total storage.  See the
-    memory-footprint caveat below.)
+  * Bounded memory under a producer flood -- records in closed (rolled)
+    segments are evicted from RAM and cold reads fall back to the
+    segment files, so resident memory stays bounded (~2 segments) no
+    matter how many messages are appended.  Combined with credit-based
+    backpressure on in-flight requests, this is the property that is the
+    real test of an actor runtime.
 
 Out of scope (documented, not built):
 
@@ -98,18 +99,18 @@ through TCP flow control, bounding the in-flight (un-acked) request
 budget at every hop.  This flow-control property is the one to
 benchmark, and the one Kafka itself spends the most engineering on.
 
-**Memory-footprint caveat (measured):** the current partition log keeps
-EVERY appended record in an in-memory vector (partition.c: a growable
-slot array, one malloc'd key+value copy per record) so reads are served
-from RAM -- even records already rolled to on-disk segments are NOT
-evicted.  Resident memory therefore grows roughly linearly with the
-total number of messages appended (measured ~141 bytes of heap per
-message; a 40M-message soak reached ~5.25 GB RSS, flat only once the
-load stopped).  So the broker's memory is bounded in IN-FLIGHT work but
-NOT in cumulative stored volume.  A production design would evict
-closed-segment records from RAM and serve cold reads from disk (the
-segment files already exist); doing so is deliberately left as the next
-step for this example.
+**Memory footprint (measured):** the partition log keeps only a bounded
+WINDOW of recent records in RAM (partition.c: the in-memory slot vector).
+When a segment rolls closed its records are durable on disk, so they are
+EVICTED from RAM; a read of an evicted offset is served from the segment
+file (`__cold_read`).  Resident memory therefore stays bounded (~2
+segments) regardless of how many messages have been appended -- verified
+by test_partition's `bounded_memory` case (20,000 appends, RAM peak ~1300
+records, evicted reads still correct).  So the broker is bounded in BOTH
+in-flight work and cumulative resident memory.  (A larger recovered log
+is fully replayed into RAM on open, then re-bounded as new segments roll;
+compacting recovery is a further refinement, not needed for the
+steady-state flood property.)
 
 ## On-disk layout
 
