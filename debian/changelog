@@ -1,3 +1,27 @@
+libxtc (1.35.2-1) unstable; urgency=medium
+
+  * fix(rexis): flush the reply before parking in the connection loop.
+    An un-pipelined request stalled ~1.00s because the loop parked
+    waiting for the next inbound event (1s re-check timeout) before
+    flushing the reply it had just produced.  Measured after the fix
+    (EC2 aarch64): single-request SET/GET/PING p50 18us, p99 24us (was
+    1,000,000us); redis-benchmark ~108-128k req/s.
+  * fix(kaka): bound broker memory under a producer flood.  The
+    partition log retained every appended record in RAM for the life of
+    the partition -- even records already rolled to durable on-disk
+    segments -- so RSS grew ~linearly with total messages (a 40M-message
+    soak reached ~5.25 GB, contradicting the README's "bounded memory"
+    claim).  Now records in closed segments are evicted from RAM and
+    cold reads fall back to the segment files, bounding resident memory
+    to ~2 segments; new test_partition/bounded_memory proves it (20,000
+    appends -> RAM peak ~1,300 records, evicted reads still correct).
+
+  Both bugs were found by multi-hour p99/p999 example load testing on
+  EC2 (x86_64 + aarch64).  Library core unchanged from 1.35.1; these are
+  example fixes.
+
+ -- Greg Burd <greg@burd.me>  Sat, 23 Aug 2026 09:00:00 +0000
+
 libxtc (1.35.1-1) unstable; urgency=medium
 
   * fix(loop): initialize a task's fields BEFORE publishing it to the
