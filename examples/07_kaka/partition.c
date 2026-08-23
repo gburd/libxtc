@@ -95,7 +95,17 @@ crc32(const void *data, size_t len, uint32_t init)
 	return c ^ 0xffffffffu;
 }
 
-/* ---- in-memory vector (used by both modes) ---- */
+/* ---- in-memory vector (used by both modes) ----
+ *
+ * LIMITATION (measured): this vector retains EVERY appended record for
+ * the life of the partition -- even records already rolled to on-disk
+ * segments are never evicted -- so resident memory grows ~linearly with
+ * total messages appended (~141 B/msg; a 40M-msg soak reached ~5.25 GB
+ * RSS).  The broker's credit-based flow control bounds IN-FLIGHT work,
+ * not cumulative storage.  A production design would drop closed-segment
+ * records from RAM and serve cold reads from the segment files (which
+ * already exist); left as the next step for this example.  See
+ * README.md "Memory-footprint caveat". */
 
 static int64_t
 __mem_append(plog_t *l, const kaka_record_t *rec)
