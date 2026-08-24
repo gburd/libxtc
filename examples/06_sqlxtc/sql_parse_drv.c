@@ -58,6 +58,7 @@ static const kw_t k_kws[] = {
 	{ "BETWEEN",     TK_BETWEEN },
 	{ "BY",          TK_BY },
 	{ "CASE",        TK_CASE },
+	{ "CAST",        TK_CAST },
 	{ "CHECK",       TK_CHECK },
 	{ "COMMIT",      TK_COMMIT },
 	{ "CREATE",      TK_CREATE },
