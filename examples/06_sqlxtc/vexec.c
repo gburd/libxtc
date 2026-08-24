@@ -177,12 +177,16 @@ enum vx_op {
 	                                      * st->corrsql[col] re-run per row via vx_run_p (binds
 	                                      * as VXO_CORRSUBQ), membership over its
 	                                      * single-column rows; lit.i != 0 = NOT IN */
+	VXO_EXISTS,                          /* EXISTS (correlated select): true iff
+	                                      * st->corrsql[col] re-run per row yields
+	                                      * >= 1 row; binds as VXO_CORRSUBQ */
 	VXO_FUNC                             /* builtin function (.func) */
 };
 
 enum vx_func {
 	VXF_ABS = 1, VXF_LENGTH, VXF_LOWER, VXF_UPPER, VXF_COALESCE, VXF_IFNULL,
-	VXF_TYPEOF
+	VXF_TYPEOF, VXF_SUBSTR, VXF_NULLIF, VXF_MIN, VXF_MAX, VXF_REPLACE,
+	VXF_TRIM, VXF_LTRIM, VXF_RTRIM, VXF_INSTR, VXF_ROUND, VXF_CAST
 };
 
 typedef struct vx_expr {
@@ -217,7 +221,9 @@ enum vx_agg_kind {
 	VXA_SUM,              /* sum(expr): NULL if all inputs NULL */
 	VXA_TOTAL,            /* total(expr): 0.0 if no rows; always REAL */
 	VXA_AVG,              /* avg(expr): sum/count over non-NULL, REAL */
-	VXA_MIN, VXA_MAX      /* min/max(expr): ignore NULLs */
+	VXA_MIN, VXA_MAX,     /* min/max(expr): ignore NULLs */
+	VXA_GROUP_CONCAT      /* group_concat(expr [,sep]): non-NULL inputs
+	                       * joined by sep (default ',') in scan order */
 };
 
 /* An open-chained hash set of distinct cell values, used by
@@ -245,17 +251,30 @@ typedef struct vx_acc {
 	double    rsum;       /* real running sum */
 	vx_cell_t ext;        /* MIN/MAX current extreme (when seen) */
 	vx_dset_t *dset;      /* COUNT_DISTINCT: distinct-value set (lazy) */
+	/* GROUP_CONCAT: growable text buffer in the group's htab arena.
+	 * gc_len/gc_cap track its extent; gc_sep/gc_seplen hold the
+	 * separator (default ',').  seen distinguishes the first element
+	 * (no leading separator). */
+	char     *gc_buf;
+	uint32_t  gc_len;
+	uint32_t  gc_cap;
+	const char *gc_sep;
+	uint32_t  gc_seplen;
 } vx_acc_t;
 
 /* A column of the select list under aggregation: either a GROUP BY key
  * expression (output verbatim) or an aggregate over an input expr. */
 typedef struct vx_outcol {
 	int            is_agg;
+	int            computed;  /* output is a projection over aggregates/keys
+	                          * (proj[oi] non-NULL); erow[oi] is a placeholder */
 	enum vx_agg_kind kind;   /* if is_agg */
 	vx_expr_t     *arg;      /* aggregate input expr (NULL for count(*)) */
 	vx_expr_t     *key;      /* group-key expr (if !is_agg) */
 	const sql_expr_t *ast;   /* HAVING-only agg: the AST node, so
 	                          * compile_having can match it (NULL else) */
+	const char *gc_sep;      /* GROUP_CONCAT separator bytes (NULL = ',') */
+	uint32_t    gc_seplen;
 } vx_outcol_t;
 
 typedef struct vx_aggplan {
@@ -270,6 +289,14 @@ typedef struct vx_aggplan {
 	vx_expr_t   *having;     /* HAVING predicate over the EXTENDED row
 	                          * (nout_all cells: emitted + HAVING aggs),
 	                          * cols resolve by index; NULL if no HAVING */
+	vx_expr_t  **proj;       /* per-output-column projection over the
+	                          * EXTENDED row: non-NULL only for a
+	                          * "computed" output (an expression OVER
+	                          * aggregates/keys, e.g. SUM(x)+1); NULL means
+	                          * emit erow[j] verbatim.  nout entries. */
+	int          has_proj;   /* any proj[] entry is non-NULL */
+	int          has_gc;     /* any outcol is group_concat (order-sensitive:
+	                          * runs serially so the scan order is stable) */
 } vx_aggplan_t;
 
 /* A hash-table entry: a group, its key cells, and its accumulators. */
@@ -378,6 +405,9 @@ typedef struct vx_njoinplan {
 	 * column key_local[s]. */
 	int   probe_outidx[VX_JOIN_MAX];  /* combined index of the probe value */
 	int   key_local[VX_JOIN_MAX];     /* build-side local key column */
+	int   cross[VX_JOIN_MAX];         /* side is a keyless CROSS/comma join:
+	                                   * all rows stored under one sentinel
+	                                   * key so every probe yields them all */
 } vx_njoinplan_t;
 
 /* ---- the vexec statement ----------------------------------------- */
@@ -410,6 +440,17 @@ struct vx_stmt {
 	 * bounds only skip rows that cannot match the pk constraint. */
 	int64_t       scan_lo, scan_hi;
 	int           scan_has_lo, scan_has_hi;
+
+	/* Secondary-index equality seek.  When idx_seek is set the plan does
+	 * NOT open a range scan: it point-fetches each candidate rowid in
+	 * idx_rowids[] through the normal MVCC path (so visibility and
+	 * read-your-writes still decide the row), and the WHERE filter still
+	 * runs on each fetched row.  Populated at prepare time when the WHERE
+	 * has an equality on an indexed non-PK column. */
+	int           idx_seek;
+	int64_t      *idx_rowids;    /* candidate base rowids (owned) */
+	int           idx_nrow;      /* count */
+	int           idx_cur;       /* iteration cursor into idx_rowids */
 
 	/* Bound ? parameters for this statement (1-based), used by the
 	 * compiler to turn SX_E_PARAM into a literal.  Borrowed (the caller's
@@ -718,6 +759,45 @@ expr_node(struct vx_compiler *c, enum vx_op op)
 	return e;
 }
 
+/* CAST target-type codes (SQLite affinity of the type name).  Stored in
+ * the VXF_CAST node's .col.  Derived from the type name using the same
+ * substring rules SQLite uses to assign column affinity. */
+enum vx_cast_class {
+	VX_CAST_BLOB = 0,   /* no numeric/text keyword -> BLOB affinity (no-op) */
+	VX_CAST_TEXT,
+	VX_CAST_INT,        /* INTEGER: truncate toward zero */
+	VX_CAST_REAL,
+	VX_CAST_NUMERIC     /* INT if integral, else REAL */
+};
+
+static enum vx_cast_class
+cast_type_class(const sql_str_t *ty)
+{
+	char buf[64];
+	uint32_t n = ty->len;
+	if (ty->p == NULL || n == 0) return VX_CAST_BLOB;
+	if (n >= sizeof buf) n = sizeof buf - 1;
+	memcpy(buf, ty->p, n); buf[n] = '\0';
+	/* SQLite type-affinity rules (from the type name), in order. */
+	if (str_contains_ci(buf, "INT")) return VX_CAST_INT;
+	if (str_contains_ci(buf, "CHAR") || str_contains_ci(buf, "CLOB") ||
+	    str_contains_ci(buf, "TEXT")) return VX_CAST_TEXT;
+	if (str_contains_ci(buf, "BLOB")) return VX_CAST_BLOB;
+	if (str_contains_ci(buf, "REAL") || str_contains_ci(buf, "FLOA") ||
+	    str_contains_ci(buf, "DOUB")) return VX_CAST_REAL;
+	return VX_CAST_NUMERIC;   /* NUMERIC / DECIMAL / anything else */
+}
+
+/* A compiled node that is a literal NULL (VXO_LIT of type VX_NULL).
+ * Such an operand makes arithmetic / comparison unconditionally NULL,
+ * so it is always safe past the no-coercion affinity gate (the runtime
+ * eval short-circuits a NULL operand to NULL). */
+static int
+is_null_lit(const vx_expr_t *e)
+{
+	return e != NULL && e->op == VXO_LIT && e->lit.type == VX_NULL;
+}
+
 /* Static type class of a compiled node (best-effort, conservative). */
 static enum vx_aff
 node_class(const struct vx_compiler *c, const vx_expr_t *e)
@@ -756,13 +836,27 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 		return VX_AFF_BLOB;      /* dynamic subquery result */
 	case VXO_CORRIN:
 		return VX_AFF_NUMERIC;   /* membership result is a 0/1 integer */
+	case VXO_EXISTS:
+		return VX_AFF_NUMERIC;   /* EXISTS result is a 0/1 integer */
 	case VXO_FUNC:
 		switch (e->func) {
 		case VXF_ABS:    return VX_AFF_NUMERIC;
 		case VXF_LENGTH: return VX_AFF_NUMERIC;
+		case VXF_INSTR:  return VX_AFF_NUMERIC;
+		case VXF_ROUND:  return VX_AFF_NUMERIC;
 		case VXF_LOWER: case VXF_UPPER: return VX_AFF_TEXT;
+		case VXF_SUBSTR: return VX_AFF_TEXT;
+		case VXF_REPLACE: return VX_AFF_TEXT;
+		case VXF_TRIM: case VXF_LTRIM: case VXF_RTRIM: return VX_AFF_TEXT;
 		case VXF_TYPEOF: return VX_AFF_TEXT;
-		default:         return VX_AFF_BLOB;   /* coalesce/ifnull: mixed */
+		case VXF_CAST:
+			switch ((enum vx_cast_class)e->col) {
+			case VX_CAST_TEXT: return VX_AFF_TEXT;
+			case VX_CAST_INT: case VX_CAST_REAL: case VX_CAST_NUMERIC:
+				return VX_AFF_NUMERIC;
+			default: return VX_AFF_BLOB;
+			}
+		default:         return VX_AFF_BLOB;   /* coalesce/ifnull/min/max/nullif: mixed */
 		}
 	}
 	return VX_AFF_BLOB;
@@ -788,7 +882,45 @@ is_agg_name(const sql_str_t *name)
 {
 	return name_is(name, "count") || name_is(name, "sum") ||
 	       name_is(name, "total") || name_is(name, "avg") ||
-	       name_is(name, "min") || name_is(name, "max");
+	       name_is(name, "min") || name_is(name, "max") ||
+	       name_is(name, "group_concat");
+}
+
+/* Is expression `e` an aggregate function CALL (not just a name match)?
+ * min()/max() are both an aggregate (1 arg, over rows) and a scalar
+ * (>= 2 args); disambiguate by arg count exactly as SQLite does.  Every
+ * other aggregate name is an aggregate regardless of arg count. */
+static int
+is_agg_call(const sql_expr_t *e)
+{
+	int nargs = 0;
+	const sql_exprlist_item_t *it;
+	if (e == NULL || e->op != SX_E_FUNC) return 0;
+	if (!is_agg_name(&e->name[0])) return 0;
+	if (name_is(&e->name[0], "min") || name_is(&e->name[0], "max")) {
+		for (it = e->list ? e->list->head : NULL; it; it = it->next) nargs++;
+		return nargs <= 1;   /* >= 2 args is the scalar form */
+	}
+	return 1;
+}
+
+/* Does expression `e` contain an aggregate CALL anywhere in its tree?
+ * Used to tell a plain grouping-key output from a computed expression
+ * over aggregates (SUM(x)+1). */
+static int
+expr_has_agg(const sql_expr_t *e)
+{
+	const sql_exprlist_item_t *it;
+	const sql_case_arm_t *arm;
+	if (e == NULL) return 0;
+	if (is_agg_call(e)) return 1;
+	if (expr_has_agg(e->a) || expr_has_agg(e->b) || expr_has_agg(e->c) ||
+	    expr_has_agg(e->els)) return 1;
+	for (it = e->list ? e->list->head : NULL; it; it = it->next)
+		if (expr_has_agg(it->expr)) return 1;
+	for (arm = e->arms; arm; arm = arm->next)
+		if (expr_has_agg(arm->when) || expr_has_agg(arm->then)) return 1;
+	return 0;
 }
 
 /* The 2-argument like(P,X) / glob(P,X) scalar forms, which SQLite
@@ -813,25 +945,45 @@ func_of(const sql_str_t *name, int *nargs_ok, int nargs)
 		{ "abs", VXF_ABS, 1 }, { "length", VXF_LENGTH, 1 },
 		{ "lower", VXF_LOWER, 1 }, { "upper", VXF_UPPER, 1 },
 		{ "coalesce", VXF_COALESCE, -1 }, { "ifnull", VXF_IFNULL, 2 },
-		{ "typeof", VXF_TYPEOF, 1 }
+		{ "typeof", VXF_TYPEOF, 1 },
+		{ "substr", VXF_SUBSTR, -1 }, { "substring", VXF_SUBSTR, -1 },
+		{ "nullif", VXF_NULLIF, 2 },
+		{ "min", VXF_MIN, -1 }, { "max", VXF_MAX, -1 },
+		{ "replace", VXF_REPLACE, 3 },
+		{ "trim", VXF_TRIM, -1 }, { "ltrim", VXF_LTRIM, -1 },
+		{ "rtrim", VXF_RTRIM, -1 },
+		{ "instr", VXF_INSTR, 2 }, { "round", VXF_ROUND, -1 }
 	};
 	size_t i;
 	for (i = 0; i < sizeof tbl / sizeof tbl[0]; i++) {
-		size_t ln = strlen(tbl[i].n);
-		if ((size_t)name->len == ln && str_contains_ci(name->p, tbl[i].n) &&
-		    /* exact match, not just substring: lengths already equal */
-		    1) {
-			/* case-insensitive exact compare */
-			size_t k; int ok = 1;
-			for (k = 0; k < ln; k++) {
-				char x = name->p[k]; if (x >= 'A' && x <= 'Z') x += 32;
-				if (x != tbl[i].n[k]) { ok = 0; break; }
+		if (!name_is(name, tbl[i].n)) continue;
+		/* Variadic-with-limits builtins: verify the arg count SQLite
+		 * accepts (substr 2..3; min/max scalar >=2; trim family 1..2;
+		 * round 1..2). */
+		switch (tbl[i].f) {
+		case VXF_SUBSTR:
+			if (nargs != 2 && nargs != 3) { *nargs_ok = 0; return 0; }
+			break;
+		case VXF_MIN: case VXF_MAX:
+			/* Scalar min/max requires >= 2 args (1 arg is the aggregate,
+			 * handled elsewhere). */
+			if (nargs < 2) { *nargs_ok = 0; return 0; }
+			break;
+		case VXF_TRIM: case VXF_LTRIM: case VXF_RTRIM:
+		case VXF_ROUND:
+			if (nargs != 1 && nargs != 2) { *nargs_ok = 0; return 0; }
+			break;
+		default:
+			if (tbl[i].args >= 0 && tbl[i].args != nargs) {
+				*nargs_ok = 0; return 0;
 			}
-			if (!ok) continue;
-			if (tbl[i].args >= 0 && tbl[i].args != nargs) { *nargs_ok = 0; return 0; }
-			*nargs_ok = 1;
-			return tbl[i].f;
+			if (tbl[i].f == VXF_COALESCE && nargs < 1) {
+				*nargs_ok = 0; return 0;
+			}
+			break;
 		}
+		*nargs_ok = 1;
+		return tbl[i].f;
 	}
 	*nargs_ok = 0;
 	return 0;
@@ -874,6 +1026,17 @@ static vx_expr_t *compile_expr(struct vx_compiler *c, const sql_expr_t *e);
  * Prepare is single-threaded per statement, so a file-scoped pointer is
  * safe. */
 static const char *cc_otab;
+
+/* Optional inner-table schema access for EXISTS correlation during
+ * pass-1 collect_columns and pass-2 compile: the connection's B-tree
+ * (so an inner table's columns can be looked up to classify an
+ * unqualified subquery name as an outer ref).  Set/cleared around the
+ * EXISTS collection, like cc_otab. */
+static bt_t *cc_bt;
+/* When set, corr_collect also treats an UNQUALIFIED subquery column NOT
+ * in this inner-column set as an outer reference. */
+static const char *const *cc_inner_cols;
+static int cc_inner_ncol;
 
 /* An outer-column reference inside a correlated subquery (defined with
  * its collector below); forward-declared for collect_columns. */
@@ -943,17 +1106,42 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 		 * literal list); a correlated one (cc_otab set) references the
 		 * outer table's columns -- collect those so they get srcrow slots
 		 * (the compiler later rewrites them to ? binds), exactly as the
-		 * scalar-subquery case does. */
-		if (collect_columns(nv, e->a) != 0) return -1;
+		 * scalar-subquery case does.  EXISTS (a == NULL, ival bit1) has no
+		 * operand -- only its correlated outer refs matter. */
+		if (e->a != NULL && collect_columns(nv, e->a) != 0) return -1;
 		if (cc_otab != NULL && e->sel != NULL) {
 			struct corr_ref refs[VX_CORR_MAX];
 			int nr = 0, i;
 			const sql_select_t *q = e->sel;
 			const sql_exprlist_item_t *it;
+			const char *innames[64];
+			xstore_col_t *icols = NULL;
+			int inc = 0;
+			int is_exists = (e->a == NULL && (e->ival & 2));
+			/* For EXISTS, allow unqualified outer refs by excluding the
+			 * inner table's own columns (mirrors compile_exists).  The
+			 * schema buffer is heap-allocated -- collect_columns recurses
+			 * over a small fiber stack, so a 64-entry stack array here
+			 * risks overflow on a deep expression. */
+			if (is_exists && cc_bt != NULL && q->from != NULL &&
+			    q->from->next == NULL && q->from->subquery == NULL &&
+			    q->from->table.len > 0 && q->from->table.len < 64) {
+				char itab[64];
+				icols = (xstore_col_t *)malloc(sizeof(xstore_col_t) * 64);
+				if (icols == NULL) return -1;
+				memcpy(itab, q->from->table.p, q->from->table.len);
+				itab[q->from->table.len] = '\0';
+				inc = xstore_table_schema(cc_bt, itab, icols, 64);
+				for (i = 0; i < inc && i < 64; i++) innames[i] = icols[i].name;
+				cc_inner_cols = inc > 0 ? innames : NULL;
+				cc_inner_ncol = inc;
+			}
 			for (it = q->cols ? q->cols->head : NULL; it; it = it->next)
-				if ((nr = corr_collect(it->expr, cc_otab, refs, nr)) < 0) return 0;
-			if ((nr = corr_collect(q->where, cc_otab, refs, nr)) < 0) return 0;
-			if ((nr = corr_collect(q->having, cc_otab, refs, nr)) < 0) return 0;
+				if ((nr = corr_collect(it->expr, cc_otab, refs, nr)) < 0) { cc_inner_cols = NULL; cc_inner_ncol = 0; free(icols); return 0; }
+			if ((nr = corr_collect(q->where, cc_otab, refs, nr)) < 0) { cc_inner_cols = NULL; cc_inner_ncol = 0; free(icols); return 0; }
+			if ((nr = corr_collect(q->having, cc_otab, refs, nr)) < 0) { cc_inner_cols = NULL; cc_inner_ncol = 0; free(icols); return 0; }
+			cc_inner_cols = NULL; cc_inner_ncol = 0;
+			free(icols);
 			for (i = 0; i < nr; i++)
 				if (nv_add(nv, refs[i].col) < 0) return -1;
 		}
@@ -970,6 +1158,10 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 		int nargs = 0, ok = 0;
 		if (e->ival & 3) return -1;   /* DISTINCT or func(*) */
 		for (it = e->list ? e->list->head : NULL; it; it = it->next) nargs++;
+		/* CAST(expr AS type): name[0]="cast", name[1]=type -- accept. */
+		if (e->nname == 2 && name_is(&e->name[0], "cast") && nargs == 1) {
+			return collect_columns(nv, e->list->head->expr);
+		}
 		if (likeglob_func_op(&e->name[0], nargs) == 0) {
 			(void)func_of(&e->name[0], &ok, nargs);
 			if (!ok) return -1;
@@ -981,6 +1173,27 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	default:
 		return -1;   /* BETWEEN/IN/CASE/subquery/param/bool/blob: not V1 */
 	}
+}
+
+/* If order-key expression `e` is a bare (unqualified) column reference
+ * whose name matches a SELECT-list output ALIAS (SELECT x AS q ...
+ * ORDER BY q), return that output column's 1-based position; else 0.
+ * SQLite resolves an ORDER BY name against output aliases before base
+ * columns.  Only AS-aliases are matched here (a plain column name is
+ * left to normal source-column resolution). */
+static int
+order_key_alias_pos(const sql_select_t *sel, const sql_expr_t *e)
+{
+	const sql_exprlist_item_t *it;
+	int pos = 0;
+	if (e == NULL || e->op != SX_E_COLUMN || e->nname != 1) return 0;
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
+		pos++;
+		if (it->alias.len > 0 && it->alias.len == e->name[0].len &&
+		    strncasecmp(it->alias.p, e->name[0].p, e->name[0].len) == 0)
+			return pos;
+	}
+	return 0;
 }
 
 /* Derive the output column name for a select item, matching SQLite:
@@ -1208,7 +1421,10 @@ out:
 	return ok;
 }
 
-/* Walk a subquery expression collecting outer-column references: an
+/* corr_collect's unqualified-outer-ref state (cc_inner_cols /
+ * cc_inner_ncol) is declared up near cc_otab.
+ *
+ * Walk a subquery expression collecting outer-column references: an
  * SX_E_COLUMN qualified by `otab` (the outer table name).  Appends to
  * refs[] (cap VX_CORR_MAX).  Returns the count, or -1 on overflow /
  * unsupported shape.  A column qualified by anything else is assumed to
@@ -1220,6 +1436,20 @@ corr_collect(const sql_expr_t *e, const char *otab,
 	const sql_exprlist_item_t *it;
 	const sql_case_arm_t *arm;
 	if (e == NULL) return n;
+	if (e->op == SX_E_COLUMN && e->nname == 1 && e->src && e->srclen &&
+	    cc_inner_cols != NULL) {
+		/* Unqualified column: an outer ref iff it is not an inner column. */
+		int i, inner = 0;
+		for (i = 0; i < cc_inner_ncol; i++)
+			if (str_eq_cstr(&e->name[0], cc_inner_cols[i])) { inner = 1; break; }
+		if (!inner) {
+			if (n >= VX_CORR_MAX) return -1;
+			refs[n].p = e->src; refs[n].len = e->srclen;
+			refs[n].col = &e->name[0];
+			return n + 1;
+		}
+		return n;
+	}
 	if (e->op == SX_E_COLUMN && e->nname == 2 && e->src && e->srclen) {
 		if (str_eq_cstr(&e->name[0], otab)) {
 			if (n >= VX_CORR_MAX) return -1;
@@ -1343,6 +1573,10 @@ build_corr_stmt(struct vx_compiler *c, const sql_expr_t *e,
 		vx_cell_t tb[VX_CORR_MAX];
 		vx_result_t *tr = NULL;
 		int trc, tnc;
+		const char *const *save_inner = cc_inner_cols;
+		int save_ninner = cc_inner_ncol;
+		const char *save_otab = cc_otab;
+		bt_t *save_bt = cc_bt;
 		for (i = 0; i < nref; i++) {
 			memset(&tb[i], 0, sizeof tb[i]);
 			switch (c->nv->aff[bindcol[i]]) {
@@ -1352,11 +1586,18 @@ build_corr_stmt(struct vx_compiler *c, const sql_expr_t *e,
 			default:             tb[i].type = VX_NULL; break;
 			}
 		}
+		/* The nested trial prepare must not see this frame's EXISTS
+		 * unqualified-outer-ref state (cc_inner_cols) or the outer
+		 * correlation state -- clear them across the re-entrant vx_run_p
+		 * and restore after (corr_collect, which needs them, already ran). */
+		cc_inner_cols = NULL; cc_inner_ncol = 0; cc_otab = NULL; cc_bt = NULL;
 		trc = vx_run_p(c->st->db, out, tb, nref, 1, &tr, NULL);
+		cc_inner_cols = save_inner; cc_inner_ncol = save_ninner;
+		cc_otab = save_otab; cc_bt = save_bt;
 		if (trc != 1 || tr == NULL) { if (tr) vx_result_free(tr); free(out); return -1; }
 		tnc = vx_result_ncol(tr);
 		vx_result_free(tr);
-		if (tnc != ncol_want) { free(out); return -1; }
+		if (ncol_want >= 0 && tnc != ncol_want) { free(out); return -1; }
 	}
 
 	/* Keep the parameterized text (plan-arena owned) for per-row runs. */
@@ -1434,6 +1675,54 @@ compile_corr_in_select(struct vx_compiler *c, const sql_expr_t *e)
 	n->col = idx;
 	n->lit.type = VX_INT;
 	n->lit.i = e->ival ? 1 : 0;   /* ival = NOT IN */
+	return n;
+}
+
+/* Compile EXISTS (correlated select) on the single-table read path.
+ * Reuses build_corr_stmt (rewriting outer refs to ? binds) with no
+ * required column count; the executor tests whether the per-row run
+ * yields any row.  For correlation via UNQUALIFIED outer names, the
+ * inner table's column set is provided so an unqualified subquery
+ * column that the inner table lacks is treated as an outer ref (SQLite
+ * name resolution).  Falls back (c->fail) if the subquery is not in the
+ * supported single-table shape. */
+static vx_expr_t *
+compile_exists(struct vx_compiler *c, const sql_expr_t *e)
+{
+	int idx, nref = 0, *bindcol;
+	vx_expr_t *n;
+	const char *innames[64];
+	xstore_col_t *icols = NULL;
+	int inc = 0, i, rc;
+
+	/* Gather the inner FROM table's column names (single-table inner
+	 * only) so unqualified outer refs can be recognised.  The schema
+	 * buffer is heap-allocated (not on the stack) because this runs on a
+	 * nested-prepare chain over a small fiber stack. */
+	if (e->sel != NULL && e->sel->from != NULL && e->sel->from->next == NULL &&
+	    e->sel->from->subquery == NULL && e->sel->from->table.len > 0 &&
+	    e->sel->from->table.len < 64 && c->st != NULL) {
+		char itab[64];
+		bt_t *bt = xstore_bt_of(c->st->db);
+		icols = (xstore_col_t *)malloc(sizeof(xstore_col_t) * 64);
+		if (icols == NULL) { c->fail = 1; return NULL; }
+		memcpy(itab, e->sel->from->table.p, e->sel->from->table.len);
+		itab[e->sel->from->table.len] = '\0';
+		inc = bt ? xstore_table_schema(bt, itab, icols, 64) : 0;
+		for (i = 0; i < inc && i < 64; i++) innames[i] = icols[i].name;
+	}
+
+	cc_inner_cols = inc > 0 ? innames : NULL;
+	cc_inner_ncol = inc;
+	rc = build_corr_stmt(c, e, -1, &idx, &bindcol, &nref);
+	cc_inner_cols = NULL; cc_inner_ncol = 0;
+	free(icols);
+	if (rc != 0) { c->fail = 1; return NULL; }
+	n = expr_node(c, VXO_EXISTS);
+	if (n == NULL) { c->fail = 1; return NULL; }
+	n->bindcol = bindcol;
+	n->nargs = nref;
+	n->col = idx;
 	return n;
 }
 
@@ -1662,6 +1951,10 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		return compile_corr_subquery(c, e);
 	}
 	case SX_E_IN_SELECT: {
+		/* EXISTS (select): a == NULL and ival bit1 set -- test whether the
+		 * (correlated) subquery yields any row. */
+		if (e->a == NULL && (e->ival & 2))
+			return compile_exists(c, e);
 		/* Uncorrelated first (run once, materialize a literal list); if
 		 * that fails because the subquery references an outer column,
 		 * try the correlated form (re-run per row, test membership). */
@@ -1737,9 +2030,12 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		/* Affinity safety for arithmetic and comparison. */
 		switch (op) {
 		case VXO_ADD: case VXO_SUB: case VXO_MUL: case VXO_DIV: case VXO_MOD:
-			/* Both operands must be numeric (no text->number coercion). */
-			if (node_class(c, a) != VX_AFF_NUMERIC ||
-			    node_class(c, b) != VX_AFF_NUMERIC) { c->fail = 1; return NULL; }
+			/* Both operands must be numeric (no text->number coercion) --
+			 * OR a literal NULL, which makes the whole expression NULL
+			 * regardless of the other operand (SQLite semantics). */
+			if ((node_class(c, a) != VX_AFF_NUMERIC && !is_null_lit(a)) ||
+			    (node_class(c, b) != VX_AFF_NUMERIC && !is_null_lit(b)))
+				{ c->fail = 1; return NULL; }
 			break;
 		case VXO_CONCAT:
 			/* || coerces operands to text; allow numeric or text, not blob. */
@@ -1920,6 +2216,26 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		if (e->ival & 1) { c->fail = 1; return NULL; }   /* DISTINCT agg */
 		if (e->ival & 2) { c->fail = 1; return NULL; }   /* func(*) */
 		for (it = e->list ? e->list->head : NULL; it; it = it->next) nargs++;
+		/* CAST(expr AS type): name[0]="cast", name[1]=target type, one arg. */
+		if (e->nname == 2 && name_is(&e->name[0], "cast") && nargs == 1) {
+			vx_expr_t *arg = compile_expr(c, e->list->head->expr);
+			enum vx_cast_class cc = cast_type_class(&e->name[1]);
+			if (arg == NULL) return NULL;
+			/* CAST to BLOB is left unsupported: the wire protocol base64-
+			 * encodes a BLOB result, so it cannot compare byte-equal to
+			 * SQLite's raw blob in the differential test -- reject cleanly
+			 * rather than emit a mismatched representation. */
+			if (cc == VX_CAST_BLOB) { c->fail = 1; return NULL; }
+			n = expr_node(c, VXO_FUNC);
+			if (n == NULL) return NULL;
+			n->func = VXF_CAST;
+			n->nargs = 1;
+			n->args = (vx_expr_t **)arena_alloc(&c->st->plan_arena, sizeof(vx_expr_t *));
+			if (n->args == NULL) { c->fail = 1; return NULL; }
+			n->args[0] = arg;
+			n->col = (int)cc;   /* target affinity code */
+			return n;
+		}
 		/* like(P,X) / glob(P,X): SQLite defines these as "X LIKE P" /
 		 * "X GLOB P".  Arg 0 is the pattern, arg 1 is the value; build
 		 * a VXO_LIKE/VXO_GLOB node (operand in .a, pattern in .b). */
@@ -2027,6 +2343,17 @@ coerce_numeric(vx_cell_t *v)
 	if (v->type != VX_TEXT || v->bytes == NULL) return;
 	if (n == 0 || n >= sizeof buf) return;
 	memcpy(buf, v->bytes, n); buf[n] = '\0';
+	/* SQLite numeric affinity tolerates leading AND trailing spaces
+	 * ('1.0  ' -> REAL).  strtod/strtoll skip leading whitespace but
+	 * stop at trailing, so trim the trailing run before the "whole
+	 * string consumed" check (else 'end == buf + n' spuriously fails). */
+	while (n > 0 && (buf[n - 1] == ' ' || buf[n - 1] == '\t' ||
+			 buf[n - 1] == '\n' || buf[n - 1] == '\r' ||
+			 buf[n - 1] == '\f' || buf[n - 1] == '\v')) {
+		n--;
+		buf[n] = '\0';
+	}
+	if (n == 0) return;
 	{
 		int isreal = 0; uint32_t i;
 		for (i = 0; i < n; i++)
@@ -2126,6 +2453,79 @@ sort_cmp(const vx_cell_t *a, const vx_cell_t *b)
 		if (r) return r;
 		return (int)a->nbytes - (int)b->nbytes;
 	}
+}
+
+/* CAST(text AS REAL): parse the longest leading numeric prefix as a
+ * double (SQLite consumes optional sign, digits, '.', exponent).  A
+ * string that does not start with a number yields 0.0. */
+static double
+cast_text_to_real(const uint8_t *p, uint32_t n)
+{
+	char buf[128];
+	uint32_t i = 0;
+	if (p == NULL || n == 0) return 0.0;
+	while (i < n && (p[i] == ' ' || p[i] == '\t' || p[i] == '\n' ||
+	                 p[i] == '\r' || p[i] == '\f' || p[i] == '\v')) i++;
+	if (n - i >= sizeof buf) n = i + (uint32_t)sizeof buf - 1;
+	if (n > i) memcpy(buf, p + i, n - i);
+	buf[n - i] = '\0';
+	return strtod(buf, NULL);   /* leading numeric prefix, else 0.0 */
+}
+
+/* CAST(text AS INTEGER): SQLite parses the leading numeric prefix as a
+ * real then truncates toward zero (so '3.9' -> 3, '12abc' -> 12). */
+static int64_t
+cast_text_to_int(const uint8_t *p, uint32_t n)
+{
+	return (int64_t)cast_text_to_real(p, n);
+}
+
+/* Render a non-NULL cell to TEXT bytes (SQLite text coercion of a
+ * numeric), copied into `arena`.  Returns the byte pointer and sets
+ * *n; a text/blob cell is copied verbatim.  Caller must have excluded
+ * VX_NULL (there is no text for NULL). */
+static const uint8_t *
+cell_text(const vx_cell_t *v, struct vx_arena_blk **arena, uint32_t *n)
+{
+	char tmp[64];
+	int m;
+	uint8_t *p;
+	if (v->type == VX_TEXT || v->type == VX_BLOB) {
+		*n = v->nbytes;
+		return v->bytes;
+	}
+	if (v->type == VX_INT) m = snprintf(tmp, sizeof tmp, "%lld", (long long)v->i);
+	else                   m = snprintf(tmp, sizeof tmp, "%g", v->r);
+	if (m < 0) { *n = 0; return (const uint8_t *)""; }
+	p = (uint8_t *)arena_alloc(arena, (size_t)m + 1);
+	if (p == NULL) { *n = 0; return NULL; }
+	memcpy(p, tmp, (size_t)m); p[m] = '\0';
+	*n = (uint32_t)m;
+	return p;
+}
+
+/* UTF-8 character count of a byte range (lead bytes). */
+static int64_t
+utf8_len(const uint8_t *p, uint32_t nbytes)
+{
+	uint32_t k; int64_t nc = 0;
+	for (k = 0; k < nbytes; k++)
+		if ((p[k] & 0xc0) != 0x80) nc++;
+	return nc;
+}
+
+/* Byte offset of the C-th (0-based) UTF-8 character in [p, p+nbytes);
+ * returns nbytes if c is at/after the end. */
+static uint32_t
+utf8_off(const uint8_t *p, uint32_t nbytes, int64_t c)
+{
+	uint32_t k = 0; int64_t seen = 0;
+	while (k < nbytes && seen < c) {
+		k++;
+		while (k < nbytes && (p[k] & 0xc0) == 0x80) k++;
+		seen++;
+	}
+	return k;
 }
 
 static void
@@ -2393,6 +2793,23 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		return;
 	}
 
+	case VXO_EXISTS: {
+		/* EXISTS (correlated select): bind ? from the current outer row,
+		 * run the parameterized inner, result is 1 if it yields any row
+		 * else 0.  Never NULL (SQL EXISTS is always 0/1). */
+		vx_cell_t binds[VX_CORR_MAX];
+		vx_result_t *r = NULL;
+		int i, rc;
+		for (i = 0; i < e->nargs && i < VX_CORR_MAX; i++)
+			binds[i] = row[e->bindcol[i]];
+		rc = vx_run_p(st->db, st->corrsql[e->col], binds, e->nargs, 1, &r, NULL);
+		if (rc != 1 || r == NULL) { if (r) vx_result_free(r); out->type = VX_NULL; return; }
+		out->type = VX_INT;
+		out->i = (vx_result_nrow(r) > 0) ? 1 : 0;
+		vx_result_free(r);
+		return;
+	}
+
 	case VXO_LIKE:
 	case VXO_GLOB: {
 		/* a LIKE/GLOB b: .a is the value being matched, .b is the
@@ -2509,6 +2926,275 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 			}
 			out->type = VX_NULL;
 			return;
+		}
+		case VXF_NULLIF: {
+			/* nullif(a,b): NULL when a == b, else a.  A NULL a returns NULL
+			 * (a == b is unknown, so SQLite returns a which is NULL).
+			 * Compare with numeric-affinity coercion when one side is a
+			 * number and the other numeric-looking text, matching = . */
+			vx_cell_t bcell;
+			eval(st, e->args[0], row, arena, &a);
+			if (a.type == VX_NULL) { out->type = VX_NULL; return; }
+			eval(st, e->args[1], row, arena, &bcell);
+			if (bcell.type == VX_NULL) { *out = a; return; }
+			{
+				int a_num = (a.type == VX_INT || a.type == VX_REAL);
+				int b_num = (bcell.type == VX_INT || bcell.type == VX_REAL);
+				vx_cell_t ca = a, cb = bcell;
+				if (a_num && cb.type == VX_TEXT) (void)coerce_numeric(&cb);
+				else if (b_num && ca.type == VX_TEXT) (void)coerce_numeric(&ca);
+				if (cmp_vals(&ca, &cb) == 0) { out->type = VX_NULL; return; }
+			}
+			*out = a;
+			return;
+		}
+		case VXF_MIN: case VXF_MAX: {
+			/* Scalar min/max: NULL if any argument is NULL; else the
+			 * least/greatest by SQLite comparison order. */
+			vx_cell_t best; int k, have = 0;
+			memset(&best, 0, sizeof best);
+			for (k = 0; k < e->nargs; k++) {
+				vx_cell_t v; eval(st, e->args[k], row, arena, &v);
+				if (v.type == VX_NULL) { out->type = VX_NULL; return; }
+				if (!have) { best = v; have = 1; continue; }
+				{
+					int cmp = cmp_vals(&v, &best);
+					if ((e->func == VXF_MIN && cmp < 0) ||
+					    (e->func == VXF_MAX && cmp > 0))
+						best = v;
+				}
+			}
+			if (!have) { out->type = VX_NULL; return; }
+			*out = best;
+			return;
+		}
+		case VXF_SUBSTR: {
+			/* substr(X, Y [, Z]): 1-based, character (UTF-8) semantics.
+			 * Y < 0 counts from the end; Z omitted -> to the end; Z < 0
+			 * selects |Z| chars ending just before Y (SQLite). */
+			vx_cell_t sy, sz; const uint8_t *sp; uint32_t sn; int64_t slen;
+			int64_t y, z, start, cnt; uint32_t bo, be; uint8_t *buf;
+			int to_end = 0;
+			eval(st, e->args[0], row, arena, &a);
+			if (a.type == VX_NULL) { out->type = VX_NULL; return; }
+			eval(st, e->args[1], row, arena, &sy);
+			if (sy.type == VX_NULL) { out->type = VX_NULL; return; }
+			sp = cell_text(&a, arena, &sn);
+			if (sp == NULL) { out->type = VX_NULL; return; }
+			slen = utf8_len(sp, sn);
+			{ double d; int64_t i; int ii; num_of(&sy, &d, &i, &ii); y = ii ? i : (int64_t)d; }
+			if (e->nargs >= 3) {
+				eval(st, e->args[2], row, arena, &sz);
+				if (sz.type == VX_NULL) { out->type = VX_NULL; return; }
+				{ double d; int64_t i; int ii; num_of(&sz, &d, &i, &ii); z = ii ? i : (int64_t)d; }
+			} else {
+				z = 0; to_end = 1;   /* 2-arg form always runs to the string end */
+			}
+			/* Resolve Y to a 1-based start; negative counts from end. */
+			if (y < 0) y = slen + y + 1;
+			if (to_end) {
+				/* From Y (clamped up to 1) to the end. */
+				start = y < 1 ? 1 : y;
+				cnt = slen - (start - 1);
+			} else {
+				if (z < 0) { start = y + z; cnt = -z; }
+				else { start = y; cnt = z; }
+				if (start < 1) { cnt -= (1 - start); start = 1; }
+			}
+			if (cnt < 0) cnt = 0;
+			if (start > slen || cnt == 0) {
+				out->type = VX_TEXT; out->bytes = (const uint8_t *)""; out->nbytes = 0;
+				return;
+			}
+			if (start - 1 + cnt > slen) cnt = slen - (start - 1);
+			bo = utf8_off(sp, sn, start - 1);
+			be = utf8_off(sp, sn, start - 1 + cnt);
+			buf = (uint8_t *)arena_alloc(arena, (size_t)(be - bo) + 1);
+			if (buf == NULL) { out->type = VX_NULL; return; }
+			if (be > bo) memcpy(buf, sp + bo, be - bo);
+			buf[be - bo] = '\0';
+			out->type = VX_TEXT; out->bytes = buf; out->nbytes = be - bo;
+			return;
+		}
+		case VXF_INSTR: {
+			/* instr(H, N): 1-based char position of the first N in H, else
+			 * 0.  NULL if either is NULL.  Byte substring search, converted
+			 * to a character index (SQLite counts characters). */
+			vx_cell_t nc; const uint8_t *hp, *np; uint32_t hn, nn; uint32_t k;
+			eval(st, e->args[0], row, arena, &a);
+			if (a.type == VX_NULL) { out->type = VX_NULL; return; }
+			eval(st, e->args[1], row, arena, &nc);
+			if (nc.type == VX_NULL) { out->type = VX_NULL; return; }
+			hp = cell_text(&a, arena, &hn);
+			np = cell_text(&nc, arena, &nn);
+			if (hp == NULL || np == NULL) { out->type = VX_NULL; return; }
+			out->type = VX_INT;
+			if (nn == 0) { out->i = 1; return; }   /* SQLite: empty needle -> 1 */
+			for (k = 0; k + nn <= hn; k++) {
+				if (memcmp(hp + k, np, nn) == 0) {
+					out->i = utf8_len(hp, k) + 1;
+					return;
+				}
+			}
+			out->i = 0;
+			return;
+		}
+		case VXF_REPLACE: {
+			/* replace(S, F, R): every non-overlapping F in S -> R.  NULL if
+			 * any argument is NULL; an empty F returns S unchanged. */
+			vx_cell_t fc, rc; const uint8_t *sp, *fp, *rp;
+			uint32_t sn, fn, rn, i; uint8_t *buf; size_t cap, oi;
+			eval(st, e->args[0], row, arena, &a);
+			if (a.type == VX_NULL) { out->type = VX_NULL; return; }
+			eval(st, e->args[1], row, arena, &fc);
+			if (fc.type == VX_NULL) { out->type = VX_NULL; return; }
+			eval(st, e->args[2], row, arena, &rc);
+			if (rc.type == VX_NULL) { out->type = VX_NULL; return; }
+			sp = cell_text(&a, arena, &sn);
+			fp = cell_text(&fc, arena, &fn);
+			rp = cell_text(&rc, arena, &rn);
+			if (sp == NULL || fp == NULL || rp == NULL) { out->type = VX_NULL; return; }
+			if (fn == 0) {
+				uint8_t *b2 = (uint8_t *)arena_alloc(arena, (size_t)sn + 1);
+				if (b2 == NULL) { out->type = VX_NULL; return; }
+				if (sn) memcpy(b2, sp, sn);
+				b2[sn] = '\0';
+				out->type = VX_TEXT; out->bytes = b2; out->nbytes = sn;
+				return;
+			}
+			/* Worst case: every char replaced by R (rn >= fn possible). */
+			cap = (size_t)sn * (rn > fn ? rn : 1) + rn + 1;
+			buf = (uint8_t *)arena_alloc(arena, cap);
+			if (buf == NULL) { out->type = VX_NULL; return; }
+			oi = 0;
+			for (i = 0; i < sn; ) {
+				if (i + fn <= sn && memcmp(sp + i, fp, fn) == 0) {
+					if (rn) memcpy(buf + oi, rp, rn);
+					oi += rn; i += fn;
+				} else {
+					buf[oi++] = sp[i++];
+				}
+			}
+			buf[oi] = '\0';
+			out->type = VX_TEXT; out->bytes = buf; out->nbytes = (uint32_t)oi;
+			return;
+		}
+		case VXF_TRIM: case VXF_LTRIM: case VXF_RTRIM: {
+			/* trim/ltrim/rtrim(S [, chars]): strip leading/trailing runs of
+			 * any character in `chars` (default a single space).  Byte-wise
+			 * strip against the (ASCII) trim set -- SQLite matches whole
+			 * characters but for the common single-byte trim set this is
+			 * identical. */
+			const uint8_t *sp, *cp = (const uint8_t *)" ";
+			uint32_t sn, cn = 1, lo, hi; uint8_t *buf;
+			eval(st, e->args[0], row, arena, &a);
+			if (a.type == VX_NULL) { out->type = VX_NULL; return; }
+			sp = cell_text(&a, arena, &sn);
+			if (sp == NULL) { out->type = VX_NULL; return; }
+			if (e->nargs >= 2) {
+				vx_cell_t cc; eval(st, e->args[1], row, arena, &cc);
+				if (cc.type == VX_NULL) { out->type = VX_NULL; return; }
+				cp = cell_text(&cc, arena, &cn);
+				if (cp == NULL) { out->type = VX_NULL; return; }
+			}
+			lo = 0; hi = sn;
+			if (e->func != VXF_RTRIM) {
+				while (lo < hi) {
+					uint32_t j; int hit = 0;
+					for (j = 0; j < cn; j++) if (sp[lo] == cp[j]) { hit = 1; break; }
+					if (!hit) break;
+					lo++;
+				}
+			}
+			if (e->func != VXF_LTRIM) {
+				while (hi > lo) {
+					uint32_t j; int hit = 0;
+					for (j = 0; j < cn; j++) if (sp[hi - 1] == cp[j]) { hit = 1; break; }
+					if (!hit) break;
+					hi--;
+				}
+			}
+			buf = (uint8_t *)arena_alloc(arena, (size_t)(hi - lo) + 1);
+			if (buf == NULL) { out->type = VX_NULL; return; }
+			if (hi > lo) memcpy(buf, sp + lo, hi - lo);
+			buf[hi - lo] = '\0';
+			out->type = VX_TEXT; out->bytes = buf; out->nbytes = hi - lo;
+			return;
+		}
+		case VXF_ROUND: {
+			/* round(X [, N]): round X to N decimal places (default 0).
+			 * SQLite returns a REAL.  NULL X -> NULL. */
+			vx_cell_t nc; double x, scale; int64_t nd = 0;
+			eval(st, e->args[0], row, arena, &a);
+			if (a.type == VX_NULL) { out->type = VX_NULL; return; }
+			{ double d; int64_t i; int ii; num_of(&a, &d, &i, &ii); x = d; }
+			if (e->nargs >= 2) {
+				eval(st, e->args[1], row, arena, &nc);
+				if (nc.type == VX_NULL) { out->type = VX_NULL; return; }
+				{ double d; int64_t i; int ii; num_of(&nc, &d, &i, &ii); nd = ii ? i : (int64_t)d; }
+			}
+			if (nd < 0) nd = 0;
+			if (nd > 30) nd = 30;
+			scale = pow(10.0, (double)nd);
+			/* SQLite rounds half away from zero. */
+			if (x < 0) x = -floor(-x * scale + 0.5) / scale;
+			else       x = floor(x * scale + 0.5) / scale;
+			out->type = VX_REAL; out->r = x;
+			return;
+		}
+		case VXF_CAST: {
+			/* CAST(arg AS type) -- .col holds the target class. */
+			eval(st, e->args[0], row, arena, &a);
+			if (a.type == VX_NULL) { out->type = VX_NULL; return; }
+			switch ((enum vx_cast_class)e->col) {
+			case VX_CAST_TEXT: {
+				uint32_t tn; const uint8_t *tp;
+				if (a.type == VX_TEXT) { *out = a; return; }
+				tp = cell_text(&a, arena, &tn);
+				if (tp == NULL) { out->type = VX_NULL; return; }
+				out->type = VX_TEXT; out->bytes = tp; out->nbytes = tn;
+				return;
+			}
+			case VX_CAST_INT: {
+				if (a.type == VX_INT) { *out = a; return; }
+				if (a.type == VX_REAL) {
+					out->type = VX_INT; out->i = (int64_t)a.r;   /* trunc toward zero */
+					return;
+				}
+				/* TEXT/BLOB -> integer prefix (SQLite reads the leading
+				 * numeric run; a real prefix truncates toward zero). */
+				out->type = VX_INT; out->i = cast_text_to_int(a.bytes, a.nbytes);
+				return;
+			}
+			case VX_CAST_REAL: {
+				if (a.type == VX_REAL) { *out = a; return; }
+				if (a.type == VX_INT) { out->type = VX_REAL; out->r = (double)a.i; return; }
+				out->type = VX_REAL; out->r = cast_text_to_real(a.bytes, a.nbytes);
+				return;
+			}
+			case VX_CAST_NUMERIC: {
+				/* SQLite NUMERIC: a number stays as-is; text parses its
+				 * leading numeric prefix -- INT if that prefix is integral,
+				 * else REAL ('123.5abc' -> 123.5, '12abc' -> 12). */
+				double d; int64_t iv;
+				if (a.type == VX_INT || a.type == VX_REAL) { *out = a; return; }
+				if (a.type == VX_TEXT) {
+					vx_cell_t t = a;
+					(void)coerce_numeric(&t);
+					if (t.type != VX_TEXT) { *out = t; return; }   /* fully numeric */
+				}
+				d = cast_text_to_real(a.bytes, a.nbytes);
+				iv = (int64_t)d;
+				if ((double)iv == d) { out->type = VX_INT; out->i = iv; }
+				else { out->type = VX_REAL; out->r = d; }
+				return;
+			}
+			default:   /* VX_CAST_BLOB: reject -- the wire protocol encodes a
+			           * BLOB result (base64) so it cannot compare byte-equal to
+			           * SQLite's raw blob here; leave to a clean rejection. */
+				out->type = VX_NULL;
+				return;
+			}
 		}
 		}
 		out->type = VX_NULL;
@@ -2683,6 +3369,37 @@ acc_step(vx_acc_t *a, enum vx_agg_kind kind, const vx_cell_t *v,
 		(void)dset_add(&a->dset, v, arena);
 		return;
 	}
+	if (kind == VXA_GROUP_CONCAT) {
+		/* Append the separator (except before the first element) then the
+		 * value rendered to text, into a growable arena buffer.  The
+		 * separator (gc_sep/gc_seplen) is set on the outcol before the
+		 * first step; default ',' when unset. */
+		char tmp[64]; const char *vp; uint32_t vn;
+		const char *sep = a->gc_sep ? a->gc_sep : ",";
+		uint32_t seplen = a->gc_sep ? a->gc_seplen : 1;
+		if (v->type == VX_TEXT || v->type == VX_BLOB) { vp = (const char *)v->bytes; vn = v->nbytes; }
+		else if (v->type == VX_INT) { vn = (uint32_t)snprintf(tmp, sizeof tmp, "%lld", (long long)v->i); vp = tmp; }
+		else { vn = (uint32_t)snprintf(tmp, sizeof tmp, "%g", v->r); vp = tmp; }
+		{
+			uint32_t add = (a->seen ? seplen : 0) + vn;
+			if (a->gc_len + add + 1 > a->gc_cap) {
+				uint32_t nc = a->gc_cap ? a->gc_cap * 2 : 64;
+				char *nb;
+				while (nc < a->gc_len + add + 1) nc *= 2;
+				nb = (char *)arena_alloc(arena, nc);
+				if (nb == NULL) return;
+				if (a->gc_len) memcpy(nb, a->gc_buf, a->gc_len);
+				a->gc_buf = nb; a->gc_cap = nc;
+			}
+			if (a->seen && seplen) { memcpy(a->gc_buf + a->gc_len, sep, seplen); a->gc_len += seplen; }
+			if (vn) memcpy(a->gc_buf + a->gc_len, vp, vn);
+			a->gc_len += vn;
+			a->gc_buf[a->gc_len] = '\0';
+		}
+		a->cnt++;
+		a->seen = 1;
+		return;
+	}
 	a->cnt++;
 	switch (kind) {
 	case VXA_COUNT:
@@ -2782,6 +3499,12 @@ acc_final(const vx_acc_t *a, enum vx_agg_kind kind, vx_cell_t *out)
 	case VXA_MIN: case VXA_MAX:
 		if (!a->seen) { out->type = VX_NULL; return; }
 		*out = a->ext; return;
+	case VXA_GROUP_CONCAT:
+		if (!a->seen) { out->type = VX_NULL; return; }   /* no rows -> NULL */
+		out->type = VX_TEXT;
+		out->bytes = (const uint8_t *)(a->gc_buf ? a->gc_buf : "");
+		out->nbytes = a->gc_len;
+		return;
 	default: out->type = VX_NULL; return;
 	}
 }
@@ -2815,6 +3538,7 @@ static int vx_try_prepare_derived(struct xsql *db, sql_arena_t *ast,
                                   vx_stmt_t **out, char **errmsg);
 static int vx_try_prepare_view(struct xsql *db, sql_arena_t *ast,
                                const sql_select_t *sel, const char *view_sql,
+                               const sql_str_t *rename, int nrename,
                                const vx_cell_t *binds, int nbinds,
                                vx_stmt_t **out, char **errmsg);
 static int vx_try_prepare_const(struct xsql *db, sql_arena_t *ast,
@@ -2920,6 +3644,78 @@ where_rowid_bound(const sql_expr_t *w, const char *pk,
 	}
 }
 
+/* Extract a string literal's bytes from an AST expression (SX_E_STRING),
+ * returning 1 with p / n set (bytes are the unquoted content, aliasing
+ * the AST). */
+static int
+ast_str_lit(const sql_expr_t *e, const char **p, int *n)
+{
+	if (e == NULL || e->op != SX_E_STRING) return 0;
+	*p = e->lit.p; *n = (int)e->lit.len;
+	return 1;
+}
+
+/* Find an equality "col = <literal>" on an INDEXED non-PK column among
+ * the AND-conjuncts of `w`, and if found seek the index for the matching
+ * base rowids.  Fills *out_rowids (malloc'd, caller frees) / *out_n and
+ * returns 1; returns 0 when no usable indexed equality exists (caller
+ * falls back to the range scan).  `db`/`table` locate the index; the
+ * WHERE filter still runs on each fetched row, so an over-broad match is
+ * always corrected.  Single indexed equality, first match wins. */
+static int
+where_index_seek(struct xsql *db, const char *table, const sql_expr_t *w,
+                 const vx_cell_t *binds, int nbinds,
+                 int64_t **out_rowids, int *out_n)
+{
+	bt_t *bt = xstore_bt_of(db);
+	const sql_expr_t *col = NULL, *lit = NULL;
+	char cname[64];
+	uint32_t idx_id = 0;
+	int vclass; int64_t iv = 0; double rv = 0; const char *sp = NULL; int sn = 0;
+	int cap = 4096, n;
+	int64_t *ids;
+
+	if (bt == NULL || w == NULL) return 0;
+	/* Recurse into AND to inspect each conjunct. */
+	if (w->op == SX_E_BINARY && w->op2 == TK_AND) {
+		if (where_index_seek(db, table, w->a, binds, nbinds, out_rowids, out_n)) return 1;
+		return where_index_seek(db, table, w->b, binds, nbinds, out_rowids, out_n);
+	}
+	if (w->op != SX_E_BINARY || w->op2 != TK_EQ || !w->a || !w->b) return 0;
+	/* Identify the column side and the literal side. */
+	if (w->a->op == SX_E_COLUMN && w->a->nname >= 1) { col = w->a; lit = w->b; }
+	else if (w->b->op == SX_E_COLUMN && w->b->nname >= 1) { col = w->b; lit = w->a; }
+	else return 0;
+	if (col->name[col->nname - 1].len == 0 ||
+	    col->name[col->nname - 1].len >= sizeof cname) return 0;
+	memcpy(cname, col->name[col->nname - 1].p, col->name[col->nname - 1].len);
+	cname[col->name[col->nname - 1].len] = '\0';
+	if (!xstore_index_lookup(bt, table, cname, &idx_id)) return 0;
+	/* Typed literal: an AST integer / string literal, or a bound ?
+	 * parameter (TPROC-C drives its lookups with bound params). */
+	if (lit->op == SX_E_PARAM) {
+		int ord = (int)lit->ival;
+		const vx_cell_t *v;
+		if (binds == NULL || ord < 1 || ord > nbinds) return 0;
+		v = &binds[ord - 1];
+		if (v->type == VX_INT) { vclass = XSTORE_C_INT; iv = v->i; }
+		else if (v->type == VX_TEXT) { vclass = XSTORE_C_TEXT; sp = (const char *)v->bytes; sn = (int)v->nbytes; }
+		else if (v->type == VX_BLOB) { vclass = XSTORE_C_BLOB; sp = (const char *)v->bytes; sn = (int)v->nbytes; }
+		else return 0;   /* REAL / NULL param: not seek-encoded here */
+	} else if (ast_int_lit(lit, &iv)) {
+		vclass = XSTORE_C_INT;
+	} else if (ast_str_lit(lit, &sp, &sn)) {
+		vclass = XSTORE_C_TEXT;
+	} else return 0;
+	ids = (int64_t *)malloc((size_t)cap * sizeof *ids);
+	if (ids == NULL) return 0;
+	n = xstore_index_seek_eq(bt, idx_id, vclass, iv, rv,
+	    (const uint8_t *)sp, sn, ids, cap);
+	if (n < 0) { free(ids); return 0; }   /* overflow: fall back to a scan */
+	*out_rowids = ids; *out_n = n;
+	return 1;
+}
+
 int
 vx_try_prepare(struct xsql *db, const char *sql, vx_stmt_t **out, char **errmsg)
 {
@@ -2977,8 +3773,37 @@ vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	 * allowed only on the aggregation path; ORDER BY / LIMIT / OFFSET
 	 * are allowed only on the non-aggregating path (handled below).
 	 * HAVING is allowed only on the aggregation path (gated there). */
-	if (sel->with)
-		goto fallback;
+	/* A non-recursive single CTE referenced once by name in the outer
+	 * FROM is handled by materializing its SELECT (like a view) and
+	 * renaming its output columns to the CTE's column list.  Anything
+	 * more (WITH RECURSIVE, multiple CTEs, a CTE joined/aggregated) falls
+	 * back. */
+	if (sel->with) {
+		const sql_cte_t *cte = sel->with;
+		const sql_src_t *fsrc = sel->from;
+		if (sel->with_recursive || cte->next != NULL) goto fallback;
+		if (cte->select == NULL || cte->src == NULL || cte->srclen == 0) goto fallback;
+		if (fsrc == NULL || fsrc->next != NULL || fsrc->subquery != NULL) goto fallback;
+		if (!(fsrc->table.len == cte->name.len &&
+		      strncasecmp(fsrc->table.p, cte->name.p, cte->name.len) == 0))
+			goto fallback;   /* outer FROM is not this CTE */
+		{
+			char csql[2048];
+			sql_str_t rename[32];
+			int nren = 0;
+			const sql_exprlist_item_t *ci;
+			if (cte->srclen >= sizeof csql) goto fallback;
+			memcpy(csql, cte->src, cte->srclen); csql[cte->srclen] = '\0';
+			for (ci = cte->cols ? cte->cols->head : NULL; ci; ci = ci->next) {
+				if (nren >= 32 || ci->expr == NULL ||
+				    ci->expr->op != SX_E_COLUMN) goto fallback;
+				rename[nren++] = ci->expr->name[ci->expr->nname - 1];
+			}
+			return vx_try_prepare_view(db, ast, sel, csql,
+			                           cte->cols ? rename : NULL, nren,
+			                           binds, nbinds, out, errmsg);
+		}
+	}
 	if (sel->having && sel->group == NULL) {
 		/* HAVING without GROUP BY -- only valid with an aggregate select
 		 * list, which the agg path detects below; a HAVING here that is
@@ -3009,11 +3834,17 @@ vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		 * post-collection sort over the output columns (collect_serial),
 		 * exactly like the aggregation path -- deterministic for unique
 		 * sort keys. */
-		if (src->next->next == NULL)
-			return vx_try_prepare_join(db, ast, sel, binds, nbinds, out, errmsg);
-		/* 3+ tables: INNER-only N-way pipeline (no ORDER BY yet). */
-		if (sel->order || sel->limit || sel->offset)
-			goto fallback;
+		if (src->next->next == NULL) {
+			/* Two tables: the hash-join path needs an equi-join ON; a
+			 * keyless CROSS / comma join has none, so route those to the
+			 * N-way pipeline (which does a Cartesian product). */
+			if (src->next->on != NULL)
+				return vx_try_prepare_join(db, ast, sel, binds, nbinds, out, errmsg);
+			return vx_try_prepare_njoin(db, ast, sel, binds, nbinds, out, errmsg);
+		}
+		/* 3+ tables: INNER/comma/cross N-way pipeline.  ORDER BY / LIMIT /
+		 * OFFSET are applied as a post-collection sort, like the 2-table
+		 * join (join_ordered_materialize threads st->njoin). */
 		return vx_try_prepare_njoin(db, ast, sel, binds, nbinds, out, errmsg);
 	}
 	if (src->subquery != NULL) {
@@ -3033,7 +3864,7 @@ vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	{
 		char vsql[1024];
 		if (xstore_view_sql(xstore_bt_of(db), tabbuf, vsql, (int)sizeof vsql))
-			return vx_try_prepare_view(db, ast, sel, vsql,
+			return vx_try_prepare_view(db, ast, sel, vsql, NULL, 0,
 			                           binds, nbinds, out, errmsg);
 	}
 
@@ -3043,7 +3874,7 @@ vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		int has_agg = (sel->group != NULL);
 		for (it = sel->cols ? sel->cols->head : NULL; it && !has_agg; it = it->next) {
 			const sql_expr_t *e = it->expr;
-			if (e && e->op == SX_E_FUNC && is_agg_name(&e->name[0]))
+			if (e && expr_has_agg(e))
 				has_agg = 1;
 		}
 		if (has_agg) {
@@ -3056,16 +3887,41 @@ vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	if (sel->group) goto fallback;   /* defensive: GROUP only on agg path */
 	if (sel->having) goto fallback;  /* HAVING only with aggregation */
 
-	/* Projection: either a single "*" (expand to all table columns) or a
-	 * list of scalar expressions.  Detect "*" up front. */
+	/* Projection: a list of scalar expressions, any of which may be a
+	 * bare "*" (expand to all table columns, in declared order).  A star
+	 * mixed with expressions (SELECT *, col) or repeated (SELECT *, *) is
+	 * supported: each star expands to the full schema column set.  A
+	 * qualified "t.*" is not handled here (falls back). */
+	xstore_col_t proj_scols[64];
+	int proj_nsc = 0, proj_has_star = 0;
 	{
-		const sql_exprlist_item_t *p0 = sel->cols ? sel->cols->head : NULL;
-		if (p0 && p0->expr && p0->expr->op == SX_E_STAR) {
-			if (sel->cols->n != 1) goto fallback;   /* only a bare "*" */
-			proj_star = 1;
+		const sql_exprlist_item_t *p;
+		for (p = sel->cols ? sel->cols->head : NULL; p; p = p->next) {
+			if (p->expr == NULL) goto fallback;
+			if (p->expr->op == SX_E_STAR) {
+				if (p->expr->nname > 0) goto fallback;  /* t.* not handled */
+				proj_has_star = 1;
+			}
 		}
 	}
-	if (!proj_star) {
+	if (proj_has_star) {
+		/* Fetch the schema once (needs the native xstore catalog). */
+		bt_t *sbt = xstore_bt_of(db);
+		int sc;
+		proj_nsc = sbt ? xstore_table_schema(sbt, tabbuf, proj_scols, 64) : 0;
+		if (proj_nsc <= 0) goto fallback;
+		/* Count output columns: each star -> visible schema columns,
+		 * each expression -> one. */
+		{
+			int nvis = 0;
+			for (sc = 0; sc < proj_nsc; sc++)
+				if (!proj_scols[sc].hidden) nvis++;
+			for (it = sel->cols->head; it; it = it->next)
+				nproj += (it->expr->op == SX_E_STAR) ? nvis : 1;
+		}
+		/* A single bare "*" keeps the fast identity path (proj_star). */
+		proj_star = (sel->cols->n == 1);
+	} else {
 		for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
 			if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
 			nproj++;
@@ -3100,11 +3956,12 @@ vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	 * table, so only the WHERE columns need collecting here -- but the
 	 * WHERE column names must resolve against the source columns, which
 	 * we do by name after preparing "SELECT *". */
-	if (!proj_star) {
+	if (!proj_has_star) {
 		cc_otab = st->corr_alias;   /* collect correlated-subquery outer refs */
+		cc_bt = xstore_bt_of(db);   /* inner-schema access for EXISTS refs */
 		for (it = sel->cols->head; it; it = it->next)
-			if (collect_columns(&nv, it->expr) != 0) { cc_otab = NULL; goto fallback; }
-		if (sel->where && collect_columns(&nv, sel->where) != 0) { cc_otab = NULL; goto fallback; }
+			if (collect_columns(&nv, it->expr) != 0) { cc_otab = NULL; cc_bt = NULL; goto fallback; }
+		if (sel->where && collect_columns(&nv, sel->where) != 0) { cc_otab = NULL; cc_bt = NULL; goto fallback; }
 		/* ORDER BY key columns must be in the source too.  A bare integer
 		 * key is an output-column position (collected via the output);
 		 * any other key expression is collected here. */
@@ -3112,27 +3969,41 @@ vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 			const sql_exprlist_item_t *o;
 			for (o = sel->order->head; o; o = o->next) {
 				if (o->expr && o->expr->op == SX_E_NUMBER) continue;
+				if (order_key_alias_pos(sel, o->expr)) continue;
 				if (collect_columns(&nv, o->expr) != 0) { cc_otab = NULL; goto fallback; }
 			}
 		}
 		cc_otab = NULL;   /* pass 1 done: stop collecting outer refs */
+		cc_bt = NULL;
 	} else {
-		/* SELECT *: expand to every table column (in declared order)
-		 * from the native catalog, so the source carries all of them and
-		 * the projection is the identity.  Needs the native schema (an
-		 * xstore table); a non-xstore SELECT * falls back. */
-		bt_t *sbt = xstore_bt_of(db);
-		xstore_col_t scols[64];
-		int snc = sbt ? xstore_table_schema(sbt, tabbuf, scols, 64) : 0, sc;
-		if (snc <= 0) goto fallback;
-		for (sc = 0; sc < snc; sc++) {
+		/* A star (bare "*", possibly mixed with expressions) expands to
+		 * every visible table column, in declared order, from the native
+		 * catalog.  Add them all first (so their srcrow slots come before
+		 * any extra columns referenced only by an accompanying
+		 * expression), then collect the expression / WHERE columns.  A
+		 * non-xstore SELECT * falls back. */
+		int sc;
+		for (sc = 0; sc < proj_nsc; sc++) {
 			sql_str_t s;
-			if (scols[sc].hidden) continue;  /* implicit rowid: not in * */
-			s.p = scols[sc].name; s.len = (uint32_t)strlen(scols[sc].name);
+			if (proj_scols[sc].hidden) continue;  /* implicit rowid: not in * */
+			s.p = proj_scols[sc].name; s.len = (uint32_t)strlen(proj_scols[sc].name);
 			if (nv_add(&nv, &s) < 0) goto fallback;
 		}
+		if (!proj_star) {
+			/* Mixed star + expressions: collect the non-star items too. */
+			for (it = sel->cols->head; it; it = it->next)
+				if (it->expr->op != SX_E_STAR &&
+				    collect_columns(&nv, it->expr) != 0) goto fallback;
+		}
 		if (sel->where && collect_columns(&nv, sel->where) != 0) goto fallback;
-		nproj = nv.n;
+		if (sel->order) {
+			const sql_exprlist_item_t *o;
+			for (o = sel->order->head; o; o = o->next) {
+				if (o->expr && o->expr->op == SX_E_NUMBER) continue;
+				if (order_key_alias_pos(sel, o->expr)) continue;
+				if (collect_columns(&nv, o->expr) != 0) goto fallback;
+			}
+		}
 	}
 
 	/* Storage-native source.  SELECT * is expanded above into the column
@@ -3163,6 +4034,23 @@ vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 			                  &st->scan_hi, &st->scan_has_hi);
 	}
 
+	/* Secondary-index equality seek: if the WHERE has an equality on an
+	 * indexed non-PK column (literal or bound param) AND the PK was not
+	 * already pinned to a point, seek the index for the candidate rowids
+	 * and point-fetch them instead of scanning.  The WHERE filter still
+	 * runs on each fetched row, so an index yielding extra candidates is
+	 * always corrected. */
+	if (sel->where && !(st->scan_has_lo && st->scan_has_hi &&
+	    st->scan_lo == st->scan_hi)) {
+		int64_t *ids = NULL; int nids = 0;
+		if (where_index_seek(db, tabbuf, sel->where, binds, nbinds, &ids, &nids)) {
+			st->idx_seek = 1;
+			st->idx_rowids = ids;
+			st->idx_nrow = nids;
+			st->idx_cur = 0;
+		}
+	}
+
 	st->nout = nproj;
 	if (nproj > 32) goto fallback;   /* worker out[] / result row bound */
 	st->proj = (vx_expr_t **)calloc((size_t)(nproj > 0 ? nproj : 1),
@@ -3185,6 +4073,37 @@ vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 				st->proj[k] = n;
 				snprintf(st->outname[k], sizeof st->outname[0], "%.*s",
 				         (int)(sizeof st->outname[0] - 1), nv.names[k]);
+			}
+		} else if (proj_has_star) {
+			/* Mixed star + expressions: expand each "*" to a VXO_COL per
+			 * visible schema column (resolved by name to its srcrow slot),
+			 * and compile each non-star item normally. */
+			for (it = sel->cols->head; it; it = it->next) {
+				if (it->expr->op == SX_E_STAR) {
+					int sc;
+					for (sc = 0; sc < proj_nsc; sc++) {
+						vx_expr_t *n; sql_str_t s; int idx;
+						if (proj_scols[sc].hidden) continue;
+						s.p = proj_scols[sc].name;
+						s.len = (uint32_t)strlen(proj_scols[sc].name);
+						idx = nv_add(&nv, &s);
+						if (idx < 0 || k >= nproj) goto fallback;
+						n = expr_node(&comp, VXO_COL);
+						if (n == NULL) goto oom;
+						n->col = idx;
+						st->proj[k] = n;
+						snprintf(st->outname[k], sizeof st->outname[0],
+						         "%.*s", (int)(sizeof st->outname[0] - 1),
+						         proj_scols[sc].name);
+						k++;
+					}
+				} else {
+					if (k >= nproj) goto fallback;
+					st->proj[k] = compile_expr(&comp, it->expr);
+					if (comp.fail) goto fallback;
+					item_name(it, st->outname[k], sizeof st->outname[0]);
+					k++;
+				}
 			}
 		} else {
 			for (it = sel->cols->head; it; it = it->next, k++) {
@@ -3224,6 +4143,7 @@ vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (!st->order_key || !st->order_outcol || !st->order_desc) goto oom;
 		for (o = sel->order->head; o; o = o->next, oi++) {
 			const sql_expr_t *e = o->expr;
+			int apos;
 			st->order_desc[oi] = (o->sort == 2);
 			if (e && e->op == SX_E_NUMBER) {
 				/* ORDER BY <int>: output-column position (1-based). */
@@ -3235,6 +4155,9 @@ vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 				pos = strtol(buf, NULL, 10);
 				if (pos < 1 || pos > st->nout) goto fallback;
 				st->order_outcol[oi] = (int)pos;
+			} else if ((apos = order_key_alias_pos(sel, e)) != 0) {
+				/* ORDER BY <output alias>: an output-column position. */
+				st->order_outcol[oi] = apos;
 			} else {
 				comp.fail = 0;
 				st->order_key[oi] = compile_expr(&comp, e);
@@ -3291,6 +4214,7 @@ oom:
 	rc = -1;
 fallback:
 	cc_otab = NULL;
+	cc_bt = NULL;
 	if (srcsql) free(srcsql);
 	if (ast) sql_arena_destroy(ast);
 	if (st) vx_finalize(st);
@@ -3322,6 +4246,9 @@ agg_kind_of(const sql_expr_t *e)
 	}
 	if (distinct) return 0;                    /* DISTINCT only for count */
 	if (star) return 0;                        /* sum(*) etc. invalid */
+	/* group_concat(expr [, sep]): 1 or 2 args. */
+	if (name_is(&e->name[0], "group_concat"))
+		return (nargs == 1 || nargs == 2) ? VXA_GROUP_CONCAT : 0;
 	if (nargs != 1) return 0;
 	if (name_is(&e->name[0], "sum"))   return VXA_SUM;
 	if (name_is(&e->name[0], "total")) return VXA_TOTAL;
@@ -3391,7 +4318,7 @@ having_collect_aggs(const sql_select_t *sel, const sql_expr_t *e,
 {
 	const sql_exprlist_item_t *it;
 	if (e == NULL) return 0;
-	if (e->op == SX_E_FUNC && is_agg_name(&e->name[0])) {
+	if (is_agg_call(e)) {
 		enum vx_agg_kind kk;
 		int matched = 0, oi = 0;
 		/* Already a SELECT output aggregate?  Then it reuses that accs. */
@@ -3493,6 +4420,147 @@ compile_having(struct vx_compiler *c, const sql_select_t *sel,
 	}
 }
 
+/* Compile a "computed" SELECT-list expression OVER aggregates / group
+ * keys (e.g. SUM(x)+1, MAX(v)-MIN(v), the sum of two columns' aggs) into
+ * a projection over the EXTENDED aggregation row (erow, nout_all cells).
+ * An aggregate CALL resolves to the erow slot of a matching aggregate
+ * outcol (a SELECT-output aggregate or a HAVING/computed-appended one);
+ * a group-key sub-expression resolves to its output-key slot.  Unlike
+ * compile_having, this does NOT match the whole select item (that would
+ * be a self-reference to the output slot being computed).  Falls back
+ * (c->fail) on any construct outside the supported scalar set. */
+static vx_expr_t *
+compile_agg_proj(struct vx_compiler *c, const sql_select_t *sel,
+                 const sql_expr_t *e)
+{
+	vx_aggplan_t *ap = c->st ? c->st->agg : NULL;
+	const sql_exprlist_item_t *it;
+	int oi;
+	if (c->fail || e == NULL || ap == NULL) { c->fail = 1; return NULL; }
+
+	/* An aggregate CALL: resolve to its accumulator's erow slot -- either
+	 * a SELECT-output aggregate, or one appended past nout (HAVING-only
+	 * or by another computed column). */
+	if (is_agg_call(e)) {
+		for (oi = 0; oi < ap->nout_all; oi++)
+			if (ap->out[oi].is_agg && ap->out[oi].ast != NULL &&
+			    expr_same(e, ap->out[oi].ast)) {
+				vx_expr_t *n = expr_node(c, VXO_COL);
+				if (n == NULL) return NULL;
+				n->col = oi;
+				return n;
+			}
+		/* Also match a plain SELECT-output aggregate (ast unset for those
+		 * appears as a direct out[oi] classified in pass 1). */
+		oi = 0;
+		for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next, oi++)
+			if (ap->out[oi].is_agg && expr_same(e, it->expr)) {
+				vx_expr_t *n = expr_node(c, VXO_COL);
+				if (n == NULL) return NULL;
+				n->col = oi;
+				return n;
+			}
+		c->fail = 1; return NULL;   /* aggregate not accumulated */
+	}
+
+	/* A group-key sub-expression that is itself a SELECT output key.
+	 * Exclude a COMPUTED output slot (that would be a self-reference to
+	 * the placeholder being computed). */
+	oi = 0;
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next, oi++)
+		if (!ap->out[oi].is_agg && !ap->out[oi].computed &&
+		    expr_same(e, it->expr)) {
+			vx_expr_t *n = expr_node(c, VXO_COL);
+			if (n == NULL) return NULL;
+			n->col = oi;
+			return n;
+		}
+	/* A group key that appears in GROUP BY but not as its own output
+	 * column: resolve to the first output key with the same expression. */
+	{
+		const sql_exprlist_item_t *g;
+		for (g = sel->group ? sel->group->head : NULL; g; g = g->next)
+			if (expr_same(e, g->expr)) {
+				oi = 0;
+				for (it = sel->cols->head; it; it = it->next, oi++)
+					if (!ap->out[oi].is_agg && expr_same(g->expr, it->expr)) {
+						vx_expr_t *n = expr_node(c, VXO_COL);
+						if (n == NULL) return NULL;
+						n->col = oi;
+						return n;
+					}
+				c->fail = 1; return NULL;   /* key not projected as output */
+			}
+	}
+
+	switch (e->op) {
+	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
+		return compile_literal(c, e);
+	case SX_E_PARAM:
+		return compile_param(c, e);
+	case SX_E_UNARY: {
+		vx_expr_t *n, *a;
+		if (e->op2 == TK_MINUS) {
+			a = compile_agg_proj(c, sel, e->a);
+			if (a == NULL) return NULL;
+			n = expr_node(c, VXO_NEG);
+		} else if (e->op2 == TK_NOT) {
+			a = compile_agg_proj(c, sel, e->a);
+			if (a == NULL) return NULL;
+			n = expr_node(c, VXO_NOT);
+		} else if (e->op2 == TK_PLUS) {
+			return compile_agg_proj(c, sel, e->a);
+		} else { c->fail = 1; return NULL; }
+		if (n) n->a = a;
+		return n;
+	}
+	case SX_E_BINARY: {
+		enum vx_op op;
+		vx_expr_t *n, *a, *b;
+		if (e->op2 == TK_LIKE || !tok_to_binop(e->op2, &op)) { c->fail = 1; return NULL; }
+		a = compile_agg_proj(c, sel, e->a);
+		if (a == NULL) return NULL;
+		b = compile_agg_proj(c, sel, e->b);
+		if (b == NULL) return NULL;
+		n = expr_node(c, op);
+		if (n) { n->a = a; n->b = b; }
+		return n;
+	}
+	case SX_E_IS_NULL: {
+		vx_expr_t *n = expr_node(c, e->ival ? VXO_NOTNULL : VXO_ISNULL);
+		vx_expr_t *a = compile_agg_proj(c, sel, e->a);
+		if (a == NULL) return NULL;
+		if (n) n->a = a;
+		return n;
+	}
+	case SX_E_FUNC: {
+		/* A scalar function over aggregates/keys (e.g. abs(sum(x))). */
+		int nargs = 0, ok = 0; enum vx_func f;
+		vx_expr_t *n; int k;
+		for (it = e->list ? e->list->head : NULL; it; it = it->next) nargs++;
+		f = func_of(&e->name[0], &ok, nargs);
+		if (!ok) { c->fail = 1; return NULL; }
+		n = expr_node(c, VXO_FUNC);
+		if (n == NULL) return NULL;
+		n->func = f; n->nargs = nargs;
+		n->args = (vx_expr_t **)arena_alloc(&c->st->plan_arena,
+		    sizeof(vx_expr_t *) * (size_t)(nargs > 0 ? nargs : 1));
+		if (n->args == NULL) { c->fail = 1; return NULL; }
+		k = 0;
+		for (it = e->list ? e->list->head : NULL; it; it = it->next) {
+			n->args[k] = compile_agg_proj(c, sel, it->expr);
+			if (n->args[k] == NULL) return NULL;
+			k++;
+		}
+		return n;
+	}
+	case SX_E_CASE:
+		c->fail = 1; return NULL;   /* CASE over aggregates: not yet */
+	default:
+		c->fail = 1; return NULL;
+	}
+}
+
 static int
 vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
                    const char *tabbuf, const vx_cell_t *binds, int nbinds,
@@ -3544,7 +4612,8 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	ap->out = (vx_outcol_t *)calloc((size_t)(nout + VX_HAVING_AGG_MAX),
 	                                sizeof(vx_outcol_t));
 	ap->grp = (vx_expr_t **)calloc((size_t)(ngrp > 0 ? ngrp : 1), sizeof(vx_expr_t *));
-	if (!ap->out || !ap->grp) goto oom;
+	ap->proj = (vx_expr_t **)calloc((size_t)nout, sizeof(vx_expr_t *));
+	if (!ap->out || !ap->grp || !ap->proj) goto oom;
 	st->agg = ap;
 
 	memset(&nv, 0, sizeof nv);
@@ -3560,7 +4629,7 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		for (it = sel->cols->head; it; it = it->next, oi++) {
 			const sql_expr_t *e = it->expr;
 			item_name(it, st->outname[oi], sizeof st->outname[0]);
-			if (e->op == SX_E_FUNC && is_agg_name(&e->name[0])) {
+			if (is_agg_call(e)) {
 				enum vx_agg_kind kk = agg_kind_of(e);
 				if (kk == 0) goto fallback;
 				ap->out[oi].is_agg = 1;
@@ -3569,16 +4638,42 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 					const sql_expr_t *arg = e->list->head->expr;
 					if (collect_columns(&nv, arg) != 0) goto fallback;
 				}
+				if (kk == VXA_GROUP_CONCAT) {
+					/* Capture a literal separator (2nd arg); a non-literal
+					 * separator is unsupported.  Default ',' when absent. */
+					ap->has_gc = 1;
+					if (e->list->head->next != NULL) {
+						const sql_expr_t *sp = e->list->head->next->expr;
+						if (sp == NULL || sp->op != SX_E_STRING) goto fallback;
+						ap->out[oi].gc_sep = sp->lit.p;
+						ap->out[oi].gc_seplen = sp->lit.len;
+					}
+				}
 				nagg++;
 			} else {
-				/* A grouping-key output: must match a GROUP BY key. */
+				/* Either a grouping-key output (matches a GROUP BY key) or a
+				 * COMPUTED expression over aggregates/keys (SUM(x)+1).  A key
+				 * emits erow[oi] verbatim; a computed column gets a projection
+				 * compiled in pass 2 (proj[oi]) and its aggregate leaves are
+				 * appended to the accumulator region here. */
 				const sql_exprlist_item_t *g;
 				int matched = 0;
 				for (g = sel->group ? sel->group->head : NULL; g; g = g->next)
 					if (expr_same(e, g->expr)) { matched = 1; break; }
-				if (!matched) goto fallback;   /* bare column not in GROUP BY */
-				ap->out[oi].is_agg = 0;
-				if (collect_columns(&nv, e) != 0) goto fallback;
+				if (matched) {
+					ap->out[oi].is_agg = 0;
+					if (collect_columns(&nv, e) != 0) goto fallback;
+				} else if (expr_has_agg(e)) {
+					/* Computed over aggregates.  Mark for a pass-2 projection
+					 * (the erow slot itself is a placeholder). */
+					ap->out[oi].is_agg = 0;
+					ap->out[oi].computed = 1;
+					ap->has_proj = 1;
+					if (having_collect_aggs(sel, e, ap, &nv, &nagg) != 0)
+						goto fallback;
+				} else {
+					goto fallback;   /* bare column not in GROUP BY */
+				}
 			}
 		}
 	}
@@ -3623,6 +4718,11 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 					ap->out[oi].arg = compile_expr(&comp, it->expr->list->head->expr);
 					if (comp.fail) goto fallback;
 				}
+			} else if (ap->out[oi].computed) {
+				/* Projection over aggregates/keys, compiled over the
+				 * extended row (proj[oi]); the erow[oi] slot is unused. */
+				ap->proj[oi] = compile_agg_proj(&comp, sel, it->expr);
+				if (comp.fail || ap->proj[oi] == NULL) goto fallback;
 			} else {
 				ap->out[oi].key = compile_expr(&comp, it->expr);
 				if (comp.fail) goto fallback;
@@ -3631,11 +4731,16 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 			 * are numeric; min/max take their argument's class; a group
 			 * key takes the key expr's class. */
 			if (oi < 64) {
-				if (!ap->out[oi].is_agg)
+				if (ap->out[oi].computed)
+					st->outaff[oi] = ap->proj[oi] ? node_class(&comp, ap->proj[oi]) : VX_AFF_BLOB;
+				else if (!ap->out[oi].is_agg)
 					st->outaff[oi] = ap->out[oi].key ? node_class(&comp, ap->out[oi].key) : VX_AFF_BLOB;
 				else switch (ap->out[oi].kind) {
 				case VXA_MIN: case VXA_MAX:
 					st->outaff[oi] = ap->out[oi].arg ? node_class(&comp, ap->out[oi].arg) : VX_AFF_BLOB;
+					break;
+				case VXA_GROUP_CONCAT:
+					st->outaff[oi] = VX_AFF_TEXT;
 					break;
 				default:
 					st->outaff[oi] = VX_AFF_NUMERIC;   /* count/sum/total/avg */
@@ -3743,7 +4848,7 @@ oom:
 fallback:
 	if (srcsql) free(srcsql);
 	if (ast) sql_arena_destroy(ast);
-	if (st) { free(ap ? ap->out : NULL); free(ap ? ap->grp : NULL); free(ap); st->agg = NULL; vx_finalize(st); }
+	if (st) { free(ap ? ap->out : NULL); free(ap ? ap->grp : NULL); free(ap ? ap->proj : NULL); free(ap); st->agg = NULL; vx_finalize(st); }
 	else free(ap);
 	return rc;
 }
@@ -3911,7 +5016,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	 * dedup across two tables); fall back. */
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
 		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
-		if (it->expr->op == SX_E_FUNC && is_agg_name(&it->expr->name[0])) goto fallback;
+		if (is_agg_call(it->expr)) goto fallback;
 		nproj++;
 	}
 	if (nproj == 0 || nproj > 32) goto fallback;
@@ -4123,6 +5228,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	vx_njoinplan_t *jp = NULL;
 	const sql_src_t *src[VX_JOIN_MAX];
 	const sql_expr_t *on_lhs[VX_JOIN_MAX], *on_rhs[VX_JOIN_MAX];
+	int cross_side[VX_JOIN_MAX];
 	const sql_src_t *s;
 	const sql_exprlist_item_t *it;
 	int nside = 0, nproj = 0, side, rc = 0, total = 0;
@@ -4135,21 +5241,28 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (nside >= VX_JOIN_MAX) goto fallback;
 		if (s->subquery) goto fallback;
 		if (s->table.len == 0 || s->table.len >= 64) goto fallback;
+		cross_side[nside] = 0;
+		on_lhs[nside] = on_rhs[nside] = NULL;
 		if (nside > 0) {
 			const sql_expr_t *on = s->on, *l, *r;
 			if (s->join != SX_J_INNER && s->join != SX_J_NONE &&
 			    s->join != SX_J_CROSS)
-				goto fallback;   /* outer joins: 3+ way not supported */
-			if (on == NULL || on->op != SX_E_BINARY || on->op2 != TK_EQ)
-				goto fallback;
-			l = is_col_ref(on->a); r = is_col_ref(on->b);
-			if (l == NULL || r == NULL) goto fallback;
-			on_lhs[nside] = l; on_rhs[nside] = r;
+				goto fallback;   /* outer joins: N-way not supported */
+			if (on == NULL) {
+				/* Keyless CROSS / comma join: full Cartesian product. */
+				cross_side[nside] = 1;
+			} else {
+				if (on->op != SX_E_BINARY || on->op2 != TK_EQ)
+					goto fallback;
+				l = is_col_ref(on->a); r = is_col_ref(on->b);
+				if (l == NULL || r == NULL) goto fallback;
+				on_lhs[nside] = l; on_rhs[nside] = r;
+			}
 		}
 		src[nside] = s;
 		nside++;
 	}
-	if (nside < 3) goto fallback;   /* 2-table goes to vx_try_prepare_join */
+	if (nside < 2) goto fallback;   /* single table goes elsewhere */
 
 	memset(&jc, 0, sizeof jc);
 	jc.nside = nside;
@@ -4165,7 +5278,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	/* SELECT * + aggregates fall back on the join path. */
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
 		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
-		if (it->expr->op == SX_E_FUNC && is_agg_name(&it->expr->name[0])) goto fallback;
+		if (is_agg_call(it->expr)) goto fallback;
 		nproj++;
 	}
 	if (nproj == 0 || nproj > 32) goto fallback;
@@ -4175,8 +5288,18 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (jc_collect(&jc, it->expr) != 0) goto fallback;
 	if (sel->where && jc_collect(&jc, sel->where) != 0) goto fallback;
 	for (side = 1; side < nside; side++) {
+		if (cross_side[side]) continue;   /* keyless: no ON columns */
 		if (jc_collect(&jc, on_lhs[side]) != 0) goto fallback;
 		if (jc_collect(&jc, on_rhs[side]) != 0) goto fallback;
+	}
+	/* ORDER BY key columns must also be sourced (unless a bare ordinal or
+	 * an output-column expression matched at build time). */
+	if (sel->order) {
+		const sql_exprlist_item_t *o;
+		for (o = sel->order->head; o; o = o->next) {
+			if (o->expr && o->expr->op == SX_E_NUMBER) continue;
+			if (jc_collect(&jc, o->expr) != 0) goto fallback;
+		}
 	}
 	for (side = 0; side < nside; side++)
 		if (jc.col[side].n == 0 || jc.col[side].n > 16) goto fallback;
@@ -4190,7 +5313,9 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	st->njoin = jp;
 	jp->nside = nside;
 	st->nout = nproj;
-	st->proj = (vx_expr_t **)calloc((size_t)nproj, sizeof(vx_expr_t *));
+	/* Over-allocate proj[] for ORDER-BY-only extra columns (like the
+	 * 2-table join): up to 32 total output+sort columns. */
+	st->proj = (vx_expr_t **)calloc(32, sizeof(vx_expr_t *));
 	if (!st->proj) goto oom;
 
 	/* Build each side's source SELECT, prepare it for ncol + affinity,
@@ -4225,10 +5350,18 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	 * value).  Reject anything else (e.g. both on the same side, or a
 	 * forward reference). */
 	for (side = 1; side < nside; side++) {
-		int li = jc_resolve(&jc, on_lhs[side]);
-		int ri = jc_resolve(&jc, on_rhs[side]);
-		int this_lo = jp->base[side], this_hi = jp->base[side] + jp->ncol[side];
-		int local = -1, probe = -1;
+		int li, ri, this_lo, this_hi, local = -1, probe = -1;
+		if (cross_side[side]) {
+			/* Keyless CROSS/comma side: no probe.  Every stored row
+			 * matches -- executed as an all-rows chain. */
+			jp->cross[side] = 1;
+			jp->key_local[side] = 0;
+			jp->probe_outidx[side] = 0;
+			continue;
+		}
+		li = jc_resolve(&jc, on_lhs[side]);
+		ri = jc_resolve(&jc, on_rhs[side]);
+		this_lo = jp->base[side]; this_hi = jp->base[side] + jp->ncol[side];
 		if (li < 0 || ri < 0) goto fallback;
 		if (li >= this_lo && li < this_hi) { local = li; probe = ri; }
 		else if (ri >= this_lo && ri < this_hi) { local = ri; probe = li; }
@@ -4252,6 +5385,73 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 			st->filter = compile_expr(&comp, sel->where);
 			if (comp.fail) goto fallback;
 		}
+	}
+
+	/* ORDER BY / LIMIT / OFFSET over the N-way join output, applied as a
+	 * post-collection sort (join_ordered_materialize), exactly like the
+	 * 2-table join.  Order keys reference OUTPUT columns (an ordinal, an
+	 * output alias, or a select item matched by expr_same); a key that is
+	 * not an output column is compiled as an extra sort-only projection
+	 * appended after the user columns. */
+	st->limit = -1;
+	st->offset = 0;
+	if (sel->order) {
+		const sql_exprlist_item_t *o;
+		int no = 0, oi = 0, nextra = 0;
+		for (o = sel->order->head; o; o = o->next) no++;
+		if (no == 0 || no > 16) goto fallback;
+		st->norder = no;
+		st->order_key = (vx_expr_t **)calloc((size_t)no, sizeof(vx_expr_t *));
+		st->order_outcol = (int *)calloc((size_t)no, sizeof(int));
+		st->order_desc = (int *)calloc((size_t)no, sizeof(int));
+		if (!st->order_key || !st->order_outcol || !st->order_desc) goto oom;
+		for (o = sel->order->head; o; o = o->next, oi++) {
+			const sql_expr_t *e = o->expr;
+			int apos;
+			st->order_desc[oi] = (o->sort == 2);
+			if (e && e->op == SX_E_NUMBER) {
+				char buf[32]; long pos;
+				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
+				memcpy(buf, e->lit.p, e->lit.len); buf[e->lit.len] = '\0';
+				if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+				pos = strtol(buf, NULL, 10);
+				if (pos < 1 || pos > nproj) goto fallback;
+				st->order_outcol[oi] = (int)pos;
+			} else if ((apos = order_key_alias_pos(sel, e)) != 0) {
+				st->order_outcol[oi] = apos;
+			} else {
+				const sql_exprlist_item_t *ci; int pos = 0, found = 0;
+				for (ci = sel->cols->head; ci; ci = ci->next, pos++)
+					if (expr_same(e, ci->expr)) { st->order_outcol[oi] = pos + 1; found = 1; break; }
+				if (!found) {
+					int slot = nproj + nextra;
+					if (slot >= 32) goto fallback;
+					comp.fail = 0;
+					st->proj[slot] = compile_expr(&comp, e);
+					if (comp.fail) goto fallback;
+					st->order_outcol[oi] = slot + 1;
+					nextra++;
+				}
+			}
+		}
+		if (nextra > 0)
+			st->join_emit = nproj + nextra;
+	}
+	if (sel->limit) {
+		char buf[32];
+		if (sel->limit->op != SX_E_NUMBER || sel->limit->lit.len >= sizeof buf) goto fallback;
+		memcpy(buf, sel->limit->lit.p, sel->limit->lit.len); buf[sel->limit->lit.len] = '\0';
+		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+		st->limit = strtoll(buf, NULL, 10);
+		if (st->limit < 0) st->limit = 0;
+	}
+	if (sel->offset) {
+		char buf[32];
+		if (sel->offset->op != SX_E_NUMBER || sel->offset->lit.len >= sizeof buf) goto fallback;
+		memcpy(buf, sel->offset->lit.p, sel->offset->lit.len); buf[sel->offset->lit.len] = '\0';
+		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
+		st->offset = strtoll(buf, NULL, 10);
+		if (st->offset < 0) st->offset = 0;
 	}
 
 	st->nsrc_col = total;
@@ -4311,7 +5511,7 @@ vx_try_prepare_derived(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 	/* No aggregates / STAR in the outer projection (compose later). */
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
 		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
-		if (it->expr->op == SX_E_FUNC && is_agg_name(&it->expr->name[0])) goto fallback;
+		if (is_agg_call(it->expr)) goto fallback;
 		nproj++;
 	}
 	if (nproj == 0 || nproj > 32) goto fallback;
@@ -4414,7 +5614,8 @@ fallback:
  */
 static int
 vx_try_prepare_view(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
-                    const char *view_sql, const vx_cell_t *binds, int nbinds,
+                    const char *view_sql, const sql_str_t *rename, int nrename,
+                    const vx_cell_t *binds, int nbinds,
                     vx_stmt_t **out, char **errmsg)
 {
 	struct vx_stmt *st = NULL;
@@ -4424,6 +5625,7 @@ vx_try_prepare_view(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	const sql_exprlist_item_t *it;
 	vx_result_t *ires = NULL;
 	int nproj = 0, i, rc = 0, ncol;
+	char *runsql = NULL;
 
 	if (errmsg) *errmsg = NULL;
 	if (src->next != NULL) goto fallback;       /* single (view) source only */
@@ -4432,17 +5634,42 @@ vx_try_prepare_view(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	/* No aggregates / STAR in the outer projection (compose later). */
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
 		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
-		if (it->expr->op == SX_E_FUNC && is_agg_name(&it->expr->name[0])) goto fallback;
+		if (is_agg_call(it->expr)) goto fallback;
 		nproj++;
 	}
 	if (nproj == 0 || nproj > 32) goto fallback;
 
-	/* Run the view's SELECT through vexec and materialize it. */
-	rc = vx_run(db, view_sql, 1, &ires, NULL);
+	/* Run the view's (or CTE's) SELECT through vexec and materialize it.
+	 * A CTE source text is wrapped in parens -- strip them first. */
+	{
+		const char *sp = view_sql;
+		size_t len = strlen(view_sql), lead = 0;
+		while (lead < len && (sp[lead]==' '||sp[lead]=='\t'||sp[lead]=='\n')) lead++;
+		while (len > lead && (sp[len-1]==' '||sp[len-1]=='\t'||sp[len-1]=='\n')) len--;
+		if (len - lead >= 2 && sp[lead]=='(' && sp[len-1]==')') {
+			runsql = (char *)malloc(len - lead - 1);
+			if (runsql == NULL) { rc = -1; goto fallback; }
+			memcpy(runsql, sp + lead + 1, len - lead - 2);
+			runsql[len - lead - 2] = '\0';
+		}
+	}
+	rc = vx_run(db, runsql ? runsql : view_sql, 1, &ires, NULL);
+	if (runsql) { free(runsql); runsql = NULL; }
 	if (rc != 1 || ires == NULL) { if (ires) vx_result_free(ires); rc = 0; goto fallback; }
 	rc = 0;
 	ncol = vx_result_ncol(ires);
 	if (ncol <= 0 || ncol > 32) goto fallback;
+
+	/* A CTE column-name list (WITH c(a,b) AS ...) renames the inner
+	 * output columns; the count must match. */
+	if (rename != NULL) {
+		if (nrename != ncol) goto fallback;
+		for (i = 0; i < ncol; i++) {
+			if (rename[i].len == 0 || rename[i].len >= sizeof ires->name[0]) goto fallback;
+			memcpy(ires->name[i], rename[i].p, rename[i].len);
+			ires->name[i][rename[i].len] = '\0';
+		}
+	}
 
 	/* The view's output columns are the source columns (named so the
 	 * outer projection / filter / ORDER BY resolve against them). */
@@ -4541,6 +5768,7 @@ vx_try_prepare_view(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	return 1;
 
 fallback:
+	if (runsql) free(runsql);
 	if (ires) vx_result_free(ires);
 	if (ast) sql_arena_destroy(ast);
 	if (st) { st->derived_res = NULL; vx_finalize(st); }
@@ -4569,7 +5797,7 @@ vx_try_prepare_const(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	if (errmsg) *errmsg = NULL;
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
 		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
-		if (it->expr->op == SX_E_FUNC && is_agg_name(&it->expr->name[0])) goto fallback;
+		if (is_agg_call(it->expr)) goto fallback;
 		nproj++;
 	}
 	if (nproj == 0 || nproj > 32) goto fallback;
@@ -4764,8 +5992,10 @@ next_chunk(struct vx_stmt *st, int *done)
 	if (!c->cells) { free(c); return NULL; }
 
 	/* Open the storage scan lazily on first chunk (storage path only;
-	 * the derived-table path streams st->derived_res instead). */
-	if (st->derived_res == NULL && st->scan == NULL) {
+	 * the derived-table path streams st->derived_res instead).  When an
+	 * index seek is active we do NOT open a range scan: rows are
+	 * point-fetched by candidate rowid in the loop below. */
+	if (st->derived_res == NULL && st->scan == NULL && !st->idx_seek) {
 		st->scan = xstore_scan_open_txn((struct xsql *)st->db, st->table, st->snap,
 		                            st->scan_lo, st->scan_has_lo,
 		                            st->scan_hi, st->scan_has_hi);
@@ -4774,7 +6004,27 @@ next_chunk(struct vx_stmt *st, int *done)
 
 	while (c->nrow < c->cap) {
 		int j;
-		if (st->derived_res != NULL) {
+		if (st->idx_seek) {
+			/* Index seek: point-fetch each candidate rowid through the
+			 * normal MVCC path (visibility + read-your-writes decide it). */
+			int64_t rowid; const uint8_t *rec = NULL; int reclen = 0;
+			xstore_scan_t *ps;
+			int got = 0;
+			if (st->idx_cur >= st->idx_nrow) { *done = 1; break; }
+			rowid = st->idx_rowids[st->idx_cur++];
+			ps = xstore_scan_open_txn((struct xsql *)st->db, st->table,
+			    st->snap, rowid, 1, rowid, 1);
+			if (ps != NULL) {
+				int64_t rr; const uint8_t *pr; int pl;
+				if (xstore_scan_next(ps, &rr, &pr, &pl) == 1) {
+					rec = pr; reclen = pl; rowid = rr; got = 1;
+				}
+				/* copy the row out before closing the point scan */
+				if (got) read_rec_row(st, rowid, rec, reclen, &c->arena);
+				xstore_scan_close(ps);
+			}
+			if (!got) continue;   /* rowid not visible: index entry was stale */
+		} else if (st->derived_res != NULL) {
 			/* Derived table: take the next materialized inner row into
 			 * srcrow (a shallow copy; the bytes live in the inner result's
 			 * arena, which outlives this scan via st->derived_res). */
@@ -4862,6 +6112,10 @@ agg_materialize(struct vx_stmt *st)
 				acc_step(&grp->accs[ai], VXA_COUNT_STAR, NULL, &st->ht.arena);
 			} else {
 				vx_cell_t v;
+				if (ap->out[j].kind == VXA_GROUP_CONCAT && ap->out[j].gc_sep) {
+					grp->accs[ai].gc_sep = ap->out[j].gc_sep;
+					grp->accs[ai].gc_seplen = ap->out[j].gc_seplen;
+				}
 				eval(st, ap->out[j].arg, st->srcrow, &rowarena, &v);
 				acc_step(&grp->accs[ai], ap->out[j].kind, &v, &st->ht.arena);
 			}
@@ -4894,11 +6148,16 @@ agg_materialize(struct vx_stmt *st)
 			int ki = 0, ai = 0;
 			/* Compute every outcol (emitted + HAVING-only) into erow; the
 			 * accumulator index ai advances over all is_agg outcols in
-			 * order, matching how they were stepped. */
+			 * order, matching how they were stepped.  A COMPUTED output
+			 * (a projection over aggregates) has neither an accumulator
+			 * nor a group key at its own slot -- leave erow[j] NULL (the
+			 * projection reads the appended agg slots). */
 			for (j = 0; j < ap->nout_all && j < 64; j++) {
 				if (ap->out[j].is_agg) {
 					acc_final(&g->accs[ai], ap->out[j].kind, &erow[j]);
 					ai++;
+				} else if (j < ap->nout && ap->out[j].computed) {
+					erow[j].type = VX_NULL;
 				} else {
 					erow[j] = g->keys[ki++];
 				}
@@ -4912,9 +6171,20 @@ agg_materialize(struct vx_stmt *st)
 				if (hb != 1) continue;
 			}
 			/* Emit only the first nout columns; copy TEXT/BLOB into the
-			 * chunk arena (the ht arena is freed after the chunk). */
+			 * chunk arena (the ht arena is freed after the chunk).  A
+			 * computed column is evaluated from its projection over erow. */
 			for (j = 0; j < ap->nout; j++) {
-				vx_cell_t v = erow[j];
+				vx_cell_t v;
+				if (ap->has_proj && ap->proj[j] != NULL) {
+					struct vx_arena_blk *pr = NULL;
+					eval(st, ap->proj[j], erow, &pr, &v);
+					if ((v.type == VX_TEXT || v.type == VX_BLOB) && v.nbytes)
+						(void)cell_dup(&c->arena, &v, &dst[j]);
+					else dst[j] = v;
+					arena_free(pr);
+					continue;
+				}
+				v = erow[j];
 				if ((v.type == VX_TEXT || v.type == VX_BLOB) && v.nbytes)
 					(void)cell_dup(&c->arena, &v, &dst[j]);
 				else dst[j] = v;
@@ -5414,12 +6684,22 @@ njoin_build_side(struct vx_stmt *st, int side)
 	scan = xstore_scan_open(xstore_bt_of(st->db), js->table, 0, 0, 0, 0, 0);
 	if (scan == NULL) goto done;
 	for (;;) {
+		vx_cell_t sentinel;
 		{
 			int64_t rid; const uint8_t *rec; int reclen;
 			int step = xstore_scan_next(scan, &rid, &rec, &reclen);
 			if (step == 0) break;
 			if (step != 1) goto done;
 			decode_rec_cells(js->pay, nc, rid, rec, reclen, rowcells, &tmp);
+		}
+		if (jp->cross[side]) {
+			/* Keyless side: store every row under one sentinel key so any
+			 * probe (the same sentinel) yields the whole set. */
+			memset(&sentinel, 0, sizeof sentinel);
+			sentinel.type = VX_INT; sentinel.i = 0;
+			if (jht_insert(h, &sentinel, rowcells, nc) != 0)
+				goto done;
+			continue;
 		}
 		/* INNER: a NULL key never matches, so it is never probed -- skip. */
 		if (rowcells[klocal].type == VX_NULL)
@@ -5485,7 +6765,11 @@ njoin_next_chunk(struct vx_stmt *st, int *done)
 				decode_rec_cells(jp->src[0].pay, jp->ncol[0], rid, rec, reclen,
 				                 &st->srcrow[jp->base[0]], &st->nstream_arena);
 			}
-			pv = st->srcrow[jp->probe_outidx[1]];
+			if (jp->cross[1]) {
+				memset(&pv, 0, sizeof pv); pv.type = VX_INT; pv.i = 0;
+			} else {
+				pv = st->srcrow[jp->probe_outidx[1]];
+			}
 			st->ncur[1] = (pv.type == VX_NULL) ? NULL
 			                                   : jht_find(st->njht[1], &pv);
 			if (st->ncur[1] == NULL) continue;   /* no match: next stream row */
@@ -5498,7 +6782,12 @@ njoin_next_chunk(struct vx_stmt *st, int *done)
 		side = 2;
 		while (side < jp->nside) {
 			if (st->ncur[side] == NULL) {
-				vx_cell_t pv = st->srcrow[jp->probe_outidx[side]];
+				vx_cell_t pv;
+				if (jp->cross[side]) {
+					memset(&pv, 0, sizeof pv); pv.type = VX_INT; pv.i = 0;
+				} else {
+					pv = st->srcrow[jp->probe_outidx[side]];
+				}
 				st->ncur[side] = (pv.type == VX_NULL) ? NULL
 				                 : jht_find(st->njht[side], &pv);
 				if (st->ncur[side] == NULL) {
@@ -5766,12 +7055,13 @@ vx_finalize(vx_stmt_t *st)
 {
 	if (st == NULL) return;
 	if (st->scan) xstore_scan_close(st->scan);
+	if (st->idx_rowids) free(st->idx_rowids);
 	if (st->derived_res) vx_result_free(st->derived_res);
 	if (st->chunk) chunk_free(st->chunk);
 	if (st->plan_arena) arena_free(st->plan_arena);
 	/* corrsql[] texts are plan_arena-owned (freed above); nothing else. */
 	htab_free(&st->ht);
-	if (st->agg) { free(st->agg->out); free(st->agg->grp); free(st->agg); }
+	if (st->agg) { free(st->agg->out); free(st->agg->grp); free(st->agg->proj); free(st->agg); }
 	if (st->join) {
 		if (st->jht) { arena_free(st->jht->arena); free(st->jht->buckets); free(st->jht); }
 		if (st->probe_scan) xstore_scan_close(st->probe_scan);
@@ -6040,7 +7330,9 @@ is_parallelizable_plan(const vx_stmt_t *plan)
 {
 	return plan->norder == 0 && plan->limit < 0 && plan->offset <= 0 &&
 	    plan->join == NULL && plan->bt != NULL && !plan->distinct &&
-	    (plan->agg == NULL || plan->agg->having == NULL);
+	    !plan->idx_seek &&   /* an index seek is a serial point-fetch */
+	    (plan->agg == NULL || (plan->agg->having == NULL && !plan->agg->has_proj &&
+	                           !plan->agg->has_gc));
 }
 
 /* Run an already-recognized, already-checked-parallelizable plan on the

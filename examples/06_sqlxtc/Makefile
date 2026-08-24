@@ -164,7 +164,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -307,6 +307,13 @@ test_xstore_scan: test_xstore_scan.c $(ENGINE_NATIVE)
 
 test-xstore-scan: test_xstore_scan
 	./test_xstore_scan
+
+# ---- secondary indexes (CREATE INDEX): build, DML maintenance, seek ----
+test_index: test_index.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_index.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-index: test_index
+	./test_index
 
 # ---- Lime SQL parser: differential AST oracle vs the reference engine ----
 
@@ -519,6 +526,12 @@ test-btree-delete-merge: test_btree_delete_merge
 test-quack: ../../test/sqlxtc/test_quack
 	../../test/sqlxtc/test_quack
 
+test-oracle: $(TARGET)
+	bash ../../test/sqlxtc/test_sqlxtc_oracle.sh
+
+test-compat: $(TARGET)
+	bash ../../test/sqlxtc/test_sqlxtc_compat.sh
+
 ../../test/sqlxtc/test_quack: ../../test/sqlxtc/test_quack.c quack.o
 	$(CC) $(CFLAGS) -o $@ $< quack.o
 
@@ -529,7 +542,7 @@ test-sql-parse: ../../test/sqlxtc/test_sql_parse
         sql_parse.o $(LIME_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< sql_parse.o $(LIME_OBJ)
 
-.PHONY: test-quack test-sql-parse-par-ord-join-run
+.PHONY: test-quack test-sql-parse-par-ord-join-run test-oracle test-compat
 
 # ---- NUMA buffer-pool sharing-degree PREMISE PROBE (research spike) ----
 # Builds bufmgr with the BM_ACCESS_PROBE hook enabled and links the probe.

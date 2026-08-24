@@ -47,7 +47,8 @@ enum sx_native_kind {
 	SXN_NONE = 0, SXN_SELECT, SXN_WRITE, SXN_BEGIN, SXN_COMMIT,
 	SXN_ROLLBACK, SXN_SAVEPOINT, SXN_RELEASE, SXN_ROLLBACK_TO,
 	SXN_CREATE, SXN_DROP, SXN_PRAGMA_NOP, SXN_PRAGMA_TABLE_INFO,
-	SXN_CREATE_VIEW, SXN_DROP_VIEW, SXN_ALTER
+	SXN_CREATE_VIEW, SXN_DROP_VIEW, SXN_ALTER,
+	SXN_CREATE_INDEX, SXN_DROP_INDEX
 };
 
 struct sx_stmt {
@@ -364,6 +365,11 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	 * shutdown, so leave it. */
 	if (!trusted)
 		(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path);
+	/* Secondary indexes are DERIVED data not carried by the WAL body:
+	 * load the persisted index catalog and rebuild every index's entries
+	 * from the (now durable) base rows, so a torn or trusted-but-stale
+	 * index page is never relied upon. */
+	(void)xstore_index_rebuild_all(g_xbt);
 	return SX_OK;
 }
 
@@ -622,8 +628,34 @@ sx_classify(const char *sql, int *tail_more,
 		size_t co = 0;
 		int npk = 0, implicit;
 		int ok;
-		/* CREATE VIEW name AS <select>: capture the name (namebuf) and the
-		 * verbatim SELECT text (colbuf) for the view registry. */
+		/* CREATE [UNIQUE] INDEX name ON table(col): single-column only.
+		 * namebuf = index name; colbuf = "table\0col\0unique" (packed). */
+		if (c != NULL && c->kind == SX_CR_INDEX && c->name.len > 0 &&
+		    (size_t)c->name.len < namecap && c->on_table.len > 0 &&
+		    c->index_cols != NULL && c->index_cols->head != NULL &&
+		    c->index_cols->head->next == NULL) {
+			const sql_expr_t *ce = c->index_cols->head->expr;
+			if (ce != NULL && ce->op == SX_E_COLUMN && ce->nname >= 1 &&
+			    ce->name[ce->nname - 1].len > 0) {
+				const sql_str_t *cn = &ce->name[ce->nname - 1];
+				size_t need = (size_t)c->on_table.len + 1 +
+				    (size_t)cn->len + 1 + 2;
+				if (need <= colcap) {
+					size_t o = 0;
+					memcpy(namebuf, c->name.p, c->name.len);
+					namebuf[c->name.len] = '\0';
+					memcpy(colbuf + o, c->on_table.p, c->on_table.len);
+					o += c->on_table.len; colbuf[o++] = '\0';
+					memcpy(colbuf + o, cn->p, cn->len);
+					o += cn->len; colbuf[o++] = '\0';
+					colbuf[o++] = c->unique ? '1' : '0';
+					colbuf[o] = '\0';
+					k = SXN_CREATE_INDEX;
+					break;
+				}
+			}
+			k = SXN_NONE; break;   /* multi-column / expr index: decline */
+		}
 		if (c != NULL && c->kind == SX_CR_VIEW && c->select != NULL &&
 		    c->name.len > 0 && (size_t)c->name.len < namecap &&
 		    c->select->src != NULL) {
@@ -692,6 +724,11 @@ sx_classify(const char *sql, int *tail_more,
 			memcpy(namebuf, d->name.p, d->name.len);
 			namebuf[d->name.len] = '\0';
 			k = SXN_DROP_VIEW;
+		} else if (d != NULL && d->kind == SX_DR_INDEX &&
+		           d->name.len > 0 && (size_t)d->name.len < namecap) {
+			memcpy(namebuf, d->name.p, d->name.len);
+			namebuf[d->name.len] = '\0';
+			k = SXN_DROP_INDEX;
 		} else k = SXN_NONE;
 		break;
 	}
@@ -794,6 +831,23 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 				st->ddl_cols = strdup(cols);   /* new table name */
 				if (st->ddl_cols == NULL) {
 					free(st->ddl_name); free(st->sql); free(st); return SX_NOMEM; }
+			} else if (k == SXN_CREATE_INDEX) {
+				st->ddl_name = strdup(nm);     /* index name */
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
+				/* cols is "table\0col\0unique\0"; strdup stops at the first
+				 * NUL, so copy the whole packed buffer explicitly. */
+				{
+					size_t tl = strlen(cols);
+					size_t cl = strlen(cols + tl + 1);
+					size_t total = tl + 1 + cl + 1 + 1 + 1; /* table\0col\0u\0 */
+					st->ddl_cols = (char *)malloc(total);
+					if (st->ddl_cols == NULL) {
+						free(st->ddl_name); free(st->sql); free(st); return SX_NOMEM; }
+					memcpy(st->ddl_cols, cols, total);
+				}
+			} else if (k == SXN_DROP_INDEX) {
+				st->ddl_name = strdup(nm);     /* index name to drop */
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
 			} else if (k == SXN_DROP_VIEW || k == SXN_PRAGMA_TABLE_INFO) {
 				st->ddl_name = strdup(nm);   /* view to drop / table to introspect */
 				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
@@ -985,6 +1039,18 @@ sx_step(sx_stmt *st)
 		case SXN_ALTER:
 			return xstore_rename_table(st->db, st->ddl_name, st->ddl_cols) == 0
 			    ? SX_DONE : SX_ERROR;
+		case SXN_CREATE_INDEX: {
+			/* ddl_cols packs "table\0col\0unique". */
+			const char *table = st->ddl_cols;
+			const char *col = table + strlen(table) + 1;
+			const char *uq = col + strlen(col) + 1;
+			return xstore_create_index(st->db, st->ddl_name, table, col,
+			    uq[0] == '1') ? SX_DONE : SX_ERROR;
+		}
+		case SXN_DROP_INDEX:
+			/* Idempotent: dropping an unknown index is not an error. */
+			(void)xstore_drop_index(st->db, st->ddl_name);
+			return SX_DONE;
 		case SXN_PRAGMA_NOP:
 			return SX_DONE;   /* value-setting PRAGMA: no-op, no rows */
 		default:

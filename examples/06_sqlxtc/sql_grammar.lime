@@ -195,6 +195,7 @@ struct with_clause_v { sql_cte_t *list; int rec; };
 %token TK_PLAN.     %token TK_WITH.    %token TK_RECURSIVE. %token TK_TO.
 %token TK_JOIN.     %token TK_INNER.   %token TK_OUTER.   %token TK_LEFT.
 %token TK_RIGHT.    %token TK_FULL.    %token TK_CROSS.   %token TK_NATURAL.
+%token TK_CAST.
 
 %token TK_LP.       %token TK_RP.      %token TK_COMMA.   %token TK_SEMI.
 %token TK_DOT.      %token TK_STAR.    %token TK_PLUS.    %token TK_MINUS.
@@ -418,11 +419,15 @@ cte_list(R) ::= cte_list(L) TK_COMMA cte(C). {
     else { sql_cte_t *s = L; while (s->next) s = s->next; s->next = C; R = L; }
 }
 
-cte(R) ::= TK_ID(N) TK_AS TK_LP select_stmt(S) TK_RP. {
-    R = AST(pstate, sql_cte_t); if (R) { R->name = tok_str(N); R->select = S; }
+cte(R) ::= TK_ID(N) TK_AS TK_LP(L) select_stmt(S) TK_RP(P). {
+    R = AST(pstate, sql_cte_t);
+    if (R) { R->name = tok_str(N); R->select = S;
+             R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
 }
-cte(R) ::= TK_ID(N) TK_LP id_list(IC) TK_RP TK_AS TK_LP select_stmt(S) TK_RP. {
-    R = AST(pstate, sql_cte_t); if (R) { R->name = tok_str(N); R->cols = IC; R->select = S; }
+cte(R) ::= TK_ID(N) TK_LP id_list(IC) TK_RP TK_AS TK_LP(L) select_stmt(S) TK_RP(P). {
+    R = AST(pstate, sql_cte_t);
+    if (R) { R->name = tok_str(N); R->cols = IC; R->select = S;
+             R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
 }
 
 /* ===== INSERT ===== */
@@ -849,6 +854,33 @@ expr(R) ::= TK_ID(F) TK_LP expr_list(L) TK_RP(P). {
 expr(R) ::= TK_ID(F) TK_LP TK_DISTINCT expr_list(L) TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->list = L; R->ival = 1; }
     if (R) { R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
+}
+expr(R) ::= TK_REPLACE(F) TK_LP expr_list(L) TK_RP(P). {
+    /* REPLACE is a keyword (INSERT OR REPLACE); allow it as the scalar
+     * replace(S,F,R) function too. */
+    R = mk_expr(pstate, SX_E_FUNC);
+    if (R) { R->name[0].p = "replace"; R->name[0].len = 7; R->nname = 1; R->list = L;
+             R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
+}
+expr(R) ::= TK_CAST(C) TK_LP expr(E) TK_AS type_opt(TY) TK_RP(P). {
+    /* CAST(expr AS type) -- modelled as a FUNC named "cast" with the
+     * target type in name[1] and the operand as the single list arg. */
+    sql_exprlist_t *l = AST(pstate, sql_exprlist_t);
+    sql_exprlist_item_t *item = AST(pstate, sql_exprlist_item_t);
+    R = mk_expr(pstate, SX_E_FUNC);
+    if (R && l && item) {
+        item->expr = E; l->head = item; l->n = 1;
+        R->name[0].p = "cast"; R->name[0].len = 4;
+        R->name[1] = TY; R->nname = 2; R->list = l;
+        R->src = C.p; R->srclen = (uint32_t)((P.p + P.len) - C.p);
+    }
+}
+expr(R) ::= TK_EXISTS TK_LP(L) select_stmt(Q) TK_RP(P). {
+    /* EXISTS (select) -- an IN_SELECT-style node with no operand; the
+     * executor tests whether the subquery returns any row. */
+    R = mk_expr(pstate, SX_E_IN_SELECT);
+    if (R) { R->a = NULL; R->sel = Q; R->ival = 2;   /* ival bit1 = EXISTS */
+             R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
 }
 
 case_arms(R) ::= TK_WHEN expr(W) TK_THEN expr(T). {

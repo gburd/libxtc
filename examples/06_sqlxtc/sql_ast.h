@@ -161,6 +161,8 @@ typedef struct sql_cte {
 	sql_str_t        name;
 	sql_exprlist_t  *cols;     /* optional column-name list (COLUMN exprs), or NULL */
 	sql_select_t    *select;
+	const char      *src;      /* verbatim source span of the ( select ), or NULL */
+	uint32_t         srclen;
 	struct sql_cte  *next;
 } sql_cte_t;
 

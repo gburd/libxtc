@@ -467,6 +467,16 @@ jobs:
           # functionally equivalent to SQLite, and it must keep passing
           # as sqlite3.c is excised.
           bash ../../test/sqlxtc/test_sqlxtc_oracle.sh
+      - name: sqlxtc SQL-dialect compatibility (self-contained corpus vs python sqlite3)
+        working-directory: examples/06_sqlxtc
+        run: |
+          # SQL-level compatibility differential: the supported-feature
+          # corpus must match a reference SQLite, and no supported query
+          # may return a WRONG result (an XBUG).  Unsupported features
+          # are reported, not failed.  This is NOT a run of SQLite's
+          # testfixture TCL suite -- sqlxtc is a from-scratch wire-
+          # protocol engine, so that suite does not apply.
+          bash ../../test/sqlxtc/test_sqlxtc_compat.sh
 
   tls-backends:
     # Build the library against each TLS backend and run the m18 TLS

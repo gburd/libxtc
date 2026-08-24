@@ -297,4 +297,60 @@ int xstore_create_view(struct xsql *db, const char *name, const char *select_sql
 int xstore_view_sql(bt_t *bt, const char *name, char *out, int cap);
 int xstore_drop_view(struct xsql *db, const char *name);
 
+/* ---- secondary indexes (CREATE INDEX / DROP INDEX) --------------- *
+ *
+ * A secondary index maps one indexed column's value to the base rowids
+ * carrying it, so an equality WHERE on the column seeks instead of
+ * full-scanning.  Entries live in the SAME B-tree as base rows, keyed
+ * variable-length by [value][base_rowid] under a per-index namespace;
+ * they are DERIVED data (rebuilt from the base rows at open, so a torn
+ * un-WAL'd index page is never trusted).  The index catalog itself IS
+ * persisted (WAL-durable version rows under a reserved table-id), so
+ * the set of indexes and their target columns survive a crash.
+ *
+ * Scope: single-column indexes; equality (and single-type range) seek;
+ * UNIQUE is parsed and recorded but NOT enforced (a duplicate does not
+ * error).  Multi-column indexes decline (create returns 0).
+ */
+
+/* Create index `name` on `table`(`col`).  `unique` records the UNIQUE
+ * flag (not enforced).  Persists the catalog row and builds entries by
+ * scanning the base table.  Returns 1 on success, 0 on failure /
+ * unsupported (e.g. unknown table/column).  Idempotent by name. */
+int xstore_create_index(struct xsql *db, const char *name, const char *table,
+                        const char *col, int unique);
+/* Drop index `name` (resolved to its table via the catalog).  Removes
+ * the catalog row and the index entries.  Returns 1 on success, 0 if
+ * the index is unknown. */
+int xstore_drop_index(struct xsql *db, const char *name);
+
+/* Planner support: is there an index on `table`.`col`?  On a hit fills
+ * *idx_id (the index namespace) and returns 1; else 0.  Uses the
+ * in-process index cache (populated at open / create). */
+int xstore_index_lookup(bt_t *bt, const char *table, const char *col,
+                        uint32_t *idx_id);
+
+/* Seek an equality index scan: collect up to `cap` base rowids whose
+ * indexed column equals the given typed value, into `out`.  `vclass`
+ * is one of XSTORE_C_INT / _REAL / _TEXT / _BLOB (NULL is never
+ * indexed-seekable here).  Returns the count (>= 0), or -1 on error /
+ * overflow (caller falls back to a scan).  The rowids are candidates;
+ * the caller re-fetches each through the normal MVCC point read so
+ * snapshot visibility and read-your-writes still decide the row. */
+int xstore_index_seek_eq(bt_t *bt, uint32_t idx_id, int vclass,
+                         int64_t ival, double rval,
+                         const uint8_t *bytes, int nbytes,
+                         int64_t *out, int cap);
+
+/* Count of index equality seeks served (metric / test evidence that the
+ * planner took the index seek rather than a full table scan). */
+uint64_t xstore_index_seek_count(void);
+
+/* Rebuild every catalog-recorded index for `bt` from its base rows.
+ * Called at storage open (after the base is recovered / trusted) so
+ * derived index entries are always consistent with durable base data,
+ * regardless of whether index pages were flushed before a crash.
+ * Returns 0. */
+int xstore_index_rebuild_all(bt_t *bt);
+
 #endif /* SQLXTC_XSTORE_H */

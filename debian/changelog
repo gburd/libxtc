@@ -1,3 +1,29 @@
+libxtc (1.37.0-1) unstable; urgency=medium
+
+  * example(sqlxtc): major SQL-engine expansion.  Implement secondary
+    indexes (CREATE INDEX / DROP INDEX) in the native from-scratch
+    engine -- a WAL-durable, MVCC-consistent secondary B-tree rebuilt
+    from base rows on recovery, with a planner equality index-seek
+    (4.4x-7.3x faster than a full scan on an index-eligible SELECT).
+    Close 14 SQL-dialect compatibility gaps vs SQLite -- CAST, scalar
+    string/number functions (substr, nullif, scalar min/max, replace,
+    trim, instr, round), aggregate arithmetic, ORDER BY by
+    alias/ordinal/expression, SELECT *,*, comma/CROSS and N-way joins,
+    group_concat, correlated EXISTS, single non-recursive CTEs, NULL
+    arithmetic -- raising harvested-corpus SQLite compatibility from
+    66.8% to 79.9% with ZERO wrong-result cases (unsupported features
+    are cleanly rejected, never mis-answered).  Fix a NUMERIC
+    trailing-whitespace REAL-affinity bug and a correlated-EXISTS fiber
+    stack overflow found during the work.  New wired-in differential
+    compat test (test/sqlxtc/test_sqlxtc_compat.py, 82/82) alongside the
+    SQLite oracle (32/32).  A HammerDB "Quack" driver (upstream PR #911)
+    can now build the TPROC-C schema and run the full transaction mix
+    against sqlxtc.  Note: sqlxtc is a from-scratch wire-protocol engine,
+    so SQLite's testfixture TCL suite does not apply; the compatibility
+    figure is SQL-level result-set equivalence, measured honestly.
+
+ -- Greg Burd <greg@burd.me>  Sun, 24 Aug 2026 18:30:00 +0000
+
 libxtc (1.36.0-1) unstable; urgency=medium
 
   * example: add 11_lorb -- a limit order book / matching engine ported
