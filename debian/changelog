@@ -1,3 +1,19 @@
+libxtc (1.36.0-1) unstable; urgency=medium
+
+  * example: add 11_lorb -- a limit order book / matching engine ported
+    from C++ to C on libxtc (price-time priority, partial fills,
+    Market/Limit/Stop/Stop-Limit orders).  Uses xtc_chash (with the
+    xtc_rcu read-side bracket) for the order/price maps and xtc_slab for
+    the order/level pools; AVL price-level trees + intrusive FIFO order
+    lists.  Ships a generate-and-process benchmark (throughput +
+    p50/p99/p999) and a ported unit-test suite; ~2.6-3.4M orders/s
+    locally.  Fixes the reference C++ implementation's latent
+    AVL-delete + book-edge bugs (proven by a 30-seed x 2M-op invariant
+    fuzzer and clean ASan/UBSan runs where the original crashes).  Wired
+    into the CI examples job.
+
+ -- Greg Burd <greg@burd.me>  Sun, 24 Aug 2026 09:30:00 +0000
+
 libxtc (1.35.2-1) unstable; urgency=medium
 
   * fix(rexis): flush the reply before parking in the connection loop.
