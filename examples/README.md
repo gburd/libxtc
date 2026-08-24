@@ -21,6 +21,7 @@ make examples
 | `08_tnt/` | **The canonical echo demo for libxtc's Tina-faithful Isolate layer** (now a SUPPORTED library API: `src/orc/tnt.c`, `<xtc_tnt.h>`, `man xtc_tnt`).  Thread-per-core, shared-nothing, stackless state machines that return transitions; generational handles, drop-on-full mailboxes, stage-then-commit I/O.  TCP echo server.  See man xtc_tnt(3). |
 | `09_pgmock/` | **Mock PostgreSQL backend on the xtc scheduler** (M16.1a): a postmaster proc accepts and spawns one backend xtc_proc per connection, each speaking a hand-rolled minimal PG v3 wire handshake + `SELECT 1` -- ZERO PostgreSQL source.  Proves the runtime seam (no-fork multiplexing, `WaitLatchOrSocket` -> `xtc_proc_wait_fd`) for the future PG adapter.  See its README and the docs Examples page. |
 | `10_circuit_breaker.c` | **The circuit-breaker pattern as an `xtc_fsm` (gen_statem)**: CLOSED/OPEN/HALF_OPEN, tripping after N consecutive failures, failing fast while open, and half-opening after a cooldown *state timeout*.  Shows `state_enter`, state timeouts, and synchronous `xtc_fsm_call`/`xtc_fsm_reply` -- the three things hand-rolled breakers get wrong. |
+| `11_lorb/` | **A limit order book / matching engine** ported from C++ to C on libxtc: price-time (FIFO) priority, partial fills, and Market/Limit/Stop/Stop-Limit orders (add/cancel/modify).  AVL price-level trees + intrusive FIFO order lists, with `xtc_chash` for the id/price maps and `xtc_slab` for the order/level pools.  Ships a generate-and-process benchmark (throughput + p50/p99/p999) and a ported unit-test suite.  ~2.6M orders/s locally.  See its README. |
 
 ## What each example proves
 
@@ -53,6 +54,15 @@ enforced via `xtc_res`. Demonstrates the full xtc API surface:
 `xtc_loop`, `xtc_proc`, `xtc_lrlock`, `xtc_slab`, `xtc_res`,
 `xtc_log`, `xtc_cfg`, `xtc_app`, `xtc_supervisor`, and `xtc_inject`.
 Supports ~35 Redis commands including strings, lists, and hashes.
+
+**11** -- a matching engine is a realistic non-actor workload for the
+map/pool primitives: `xtc_chash` as the order/price index (with the
+required `xtc_rcu` read-side bracket on every lookup) and `xtc_slab`
+as the order/level pools.  It also shows the discipline of porting a
+reference C++ data structure faithfully while fixing its latent
+AVL-delete and book-edge bugs, proven by an invariant fuzzer (30 seeds
+x 2M ops) and clean ASan/UBSan runs where the stock C++ original
+crashes.
 
 ## Building
 

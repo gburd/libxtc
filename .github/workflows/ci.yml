@@ -425,6 +425,11 @@ jobs:
           ./test_partition
           ./test_broker
           ./test_group
+      - name: lorb (limit order book) in-process tests
+        working-directory: examples/11_lorb
+        run: |
+          make XTC_BUILD=../../build_ci
+          ./test_lob
       - name: sqlxtc in-process tests + amalgamation
         working-directory: examples/06_sqlxtc
         run: |
