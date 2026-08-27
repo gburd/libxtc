@@ -1,3 +1,28 @@
+libxtc (1.38.0-1) unstable; urgency=medium
+
+  * fix(tls): correct the RFC 5929 tls-server-end-point channel-binding
+    hash for RSA-PSS-signed server certificates.  X509_get_signature_nid
+    yields NID_rsassaPss (the digest is in the PSS parameters, not the
+    signature OID), so the OBJ_find_sigid_algs path returned NID_undef
+    and fell back to SHA-256 -- breaking SCRAM-SHA-256-PLUS against a
+    stock OpenSSL peer for a PSS cert whose real digest is not SHA-256.
+    Prefer X509_get_signature_info() (OpenSSL 1.1.1+), matching
+    PostgreSQL; fall back on BoringSSL / LibreSSL / OpenSSL < 1.1.1.
+    Regression test added (m18 pss_channel_binding).
+  * feat(tls): new public xtc_tls_get_verify_error(tls, *x509_err, buf,
+    len) exposing the peer-cert verification result code + reason string
+    for client-cert diagnostics / log parity (OpenSSL impl; NOSYS on the
+    other backends).
+  * docs(tls): clarify that xtc_tls_get_peer_subject_dn/_issuer_dn return
+    RFC 2253 comma form (not the legacy slash form), and that a TLS ctx
+    must outlive all its connections (build-new + retire-old on config
+    reload; the ctx is not refcounted).
+
+  Addresses the PostgreSQL threaded-runtime TLS integration findings
+  (2026-08-26); the RSA-PSS hash is a correctness/interop fix.
+
+ -- Greg Burd <greg@burd.me>  Wed, 26 Aug 2026 12:00:00 +0000
+
 libxtc (1.37.0-1) unstable; urgency=medium
 
   * example(sqlxtc): major SQL-engine expansion.  Implement secondary
