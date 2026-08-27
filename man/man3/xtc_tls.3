@@ -22,6 +22,7 @@
 .Nm xtc_tls_get_cipher_bits ,
 .Nm xtc_tls_get_alpn_selected ,
 .Nm xtc_tls_has_peer_cert ,
+.Nm xtc_tls_get_verify_error ,
 .Nm xtc_tls_get_peer_subject_dn ,
 .Nm xtc_tls_get_peer_common_name ,
 .Nm xtc_tls_get_peer_issuer_dn ,
@@ -181,6 +182,14 @@ the negotiated ALPN protocol.
 .Fn xtc_tls_has_peer_cert
 reports whether the peer presented a certificate that passed
 verification;
+.Fn xtc_tls_get_verify_error
+reports the most recent peer-certificate verification result for
+diagnostics: the backend verify code
+.Pq OpenSSL Dv X509_V_* , Dv X509_V_OK No == 0 No on success
+into
+.Fa *x509_err
+and a human-readable reason string into
+.Fa buf ;
 .Fn xtc_tls_get_peer_subject_dn ,
 .Fn xtc_tls_get_peer_common_name ,
 .Fn xtc_tls_get_peer_issuer_dn ,

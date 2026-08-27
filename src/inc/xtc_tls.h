@@ -534,6 +534,8 @@ XTC_API int  xtc_tls_shutdown(xtc_tls_t *tls);
  * PUBLIC: int  xtc_tls_get_alpn_selected __P((const xtc_tls_t *,
  * PUBLIC:                              const unsigned char **, unsigned int *));
  * PUBLIC: int  xtc_tls_has_peer_cert __P((const xtc_tls_t *));
+ * PUBLIC: int  xtc_tls_get_verify_error __P((const xtc_tls_t *, long *,
+ * PUBLIC:                              char *, size_t));
  * PUBLIC: int  xtc_tls_get_peer_subject_dn __P((const xtc_tls_t *, char *, size_t));
  * PUBLIC: int  xtc_tls_get_peer_common_name __P((const xtc_tls_t *, char *, size_t));
  * PUBLIC: int  xtc_tls_get_peer_issuer_dn __P((const xtc_tls_t *, char *, size_t));
@@ -565,12 +567,29 @@ XTC_API int  xtc_tls_get_alpn_selected(const xtc_tls_t *tls,
 XTC_API int  xtc_tls_has_peer_cert(const xtc_tls_t *tls);
 
 /*
+ * Detail of the most recent peer-certificate verification result, for
+ * diagnostics/log parity (e.g. PostgreSQL's verify_cb errdetail).  On
+ * XTC_OK, *x509_err receives the backend verify-result code
+ * (OpenSSL X509_V_*; X509_V_OK == 0 means verification succeeded) and,
+ * if buf != NULL and len > 0, a human-readable reason string
+ * (OpenSSL X509_verify_cert_error_string()) is written NUL-terminated
+ * into buf (truncated to fit).  x509_err may be NULL if only the text
+ * is wanted.  XTC_E_INVAL on a NULL tls; XTC_E_NOSYS if the backend
+ * cannot report a verify result.  Note the code is per-connection and
+ * only meaningful after the handshake.
+ */
+XTC_API int  xtc_tls_get_verify_error(const xtc_tls_t *tls, long *x509_err,
+                char *buf, size_t len);
+
+/*
  * Peer certificate subject / issuer distinguished name in RFC 2253
- * form, and the subject commonName, written NUL-terminated into buf.
- * A DN containing an embedded NUL is rejected with XTC_E_INVAL (guards
- * the CVE-2009-4034 truncation class).  XTC_E_NOTFOUND if there is no
- * peer certificate; XTC_E_RANGE if buf is too small; XTC_E_NOSYS if
- * unsupported.
+ * form (e.g. "CN=x,O=y"), and the subject commonName, written
+ * NUL-terminated into buf.  (Note the RFC 2253 comma form; this is not
+ * the legacy OpenSSL slash form "/CN=x/O=y" -- a consumer that needs
+ * the slash form must reformat.)  A DN containing an embedded NUL is
+ * rejected with XTC_E_INVAL (guards the CVE-2009-4034 truncation
+ * class).  XTC_E_NOTFOUND if there is no peer certificate; XTC_E_RANGE
+ * if buf is too small; XTC_E_NOSYS if unsupported.
  */
 XTC_API int  xtc_tls_get_peer_subject_dn(const xtc_tls_t *tls, char *buf, size_t len);
 XTC_API int  xtc_tls_get_peer_common_name(const xtc_tls_t *tls, char *buf, size_t len);

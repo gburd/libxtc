@@ -63,6 +63,8 @@
 /* Second SERVER cert with a distinct CN, selected via the SNI callback. */
 #define TEST_SNI_CERT   "/tmp/xtc-tls2-sni-cert.pem"
 #define TEST_SNI_KEY    "/tmp/xtc-tls2-sni-key.pem"
+#define TEST_PSS_CERT   "/tmp/xtc-tls2-pss-cert.pem"
+#define TEST_PSS_KEY    "/tmp/xtc-tls2-pss-key.pem"
 #define SNI_HOSTNAME    "tenant.example"
 
 /* Generate a self-signed RSA-2048 cert+key via the openssl CLI.
@@ -90,6 +92,42 @@ generate_cert(const char *cert_path, const char *key_path, const char *cn)
              "-config %s -keyout %s -out %s -subj /CN=%s 2>/dev/null",
              cnf_path, key_path, cert_path, cn);
     int rc = system(cmd);
+    (void)unlink(cnf_path);
+    return rc;
+}
+
+/* Generate an RSA-PSS-signed self-signed cert whose message digest is
+ * SHA-512 (NOT SHA-256).  This is the case that exposes the
+ * channel-binding bug: X509_get_signature_nid() yields NID_rsassaPss
+ * (the digest lives in the PSS parameters, not the sig OID), so the
+ * portable OBJ_find_sigid_algs path returns NID_undef and wrongly falls
+ * back to SHA-256.  RFC 5929 requires the cert's REAL digest (SHA-512
+ * here).  Returns 0 on success, non-zero if the toolchain cannot build
+ * a PSS cert (caller then skips). */
+static int
+generate_pss_cert(const char *cert_path, const char *key_path, const char *cn)
+{
+    char cmd[1024], cnf_path[256];
+    FILE *cnf_fp;
+    int rc;
+    snprintf(cnf_path, sizeof(cnf_path), "%s.cnf", cert_path);
+    cnf_fp = fopen(cnf_path, "w");
+    if (cnf_fp != NULL) {
+        fprintf(cnf_fp,
+            "[req]\nprompt = no\ndistinguished_name = dn\n"
+            "[dn]\nCN = %s\n", cn);
+        fclose(cnf_fp);
+    }
+    /* rsa_pss_keygen_md sets the key's mandated digest; -sha512 signs
+     * the cert with SHA-512 under RSASSA-PSS. */
+    snprintf(cmd, sizeof(cmd),
+             "openssl req -x509 -newkey rsa-pss "
+             "-pkeyopt rsa_keygen_bits:2048 "
+             "-pkeyopt rsa_pss_keygen_md:sha512 "
+             "-sha512 -nodes -days 1 -config %s "
+             "-keyout %s -out %s -subj /CN=%s 2>/dev/null",
+             cnf_path, key_path, cert_path, cn);
+    rc = system(cmd);
     (void)unlink(cnf_path);
     return rc;
 }
@@ -576,6 +614,101 @@ test_server_extended_opts(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* -------------------------------------------------------------------------
+ * test_server_pss_channel_binding:
+ *   RFC 5929 tls-server-end-point with an RSA-PSS-signed server cert
+ *   whose real digest is SHA-512.  xtc_tls_get_server_cert_hash must
+ *   return the SHA-512 (64-byte) hash -- NOT fall back to SHA-256 (32).
+ *   Regression for the channel-binding bug where
+ *   OBJ_find_sigid_algs(NID_rsassaPss) returns NID_undef.  Also exercises
+ *   xtc_tls_get_verify_error's success contract.  Skips if the toolchain
+ *   cannot mint a PSS cert or the backend has no introspection.
+ * ----------------------------------------------------------------------- */
+static MunitResult
+test_server_pss_channel_binding(const MunitParameter params[], void *data)
+{
+    xtc_tls_opts_t  opts;
+    xtc_tls_ctx_t  *ctx = NULL;
+    xtc_tls_t      *tls = NULL;
+    struct client_args ca;
+    pthread_t       tid;
+    int             sv[2];
+    int             rc;
+    unsigned char   hash[64];
+    size_t          hlen = 0;
+    long            verr = 12345;
+    char            vbuf[128];
+
+    (void)params;
+    (void)data;
+
+    if (generate_pss_cert(TEST_PSS_CERT, TEST_PSS_KEY, "localhost") != 0)
+        return MUNIT_SKIP;   /* toolchain cannot build an RSA-PSS cert */
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cert_file   = TEST_PSS_CERT;
+    opts.key_file    = TEST_PSS_KEY;
+    opts.min_version = XTC_TLS_VER_12;
+
+    rc = xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx);
+    if (rc != XTC_OK) {
+        /* Some backends reject an RSA-PSS key; not this test's concern. */
+        (void)unlink(TEST_PSS_CERT); (void)unlink(TEST_PSS_KEY);
+        return MUNIT_SKIP;
+    }
+
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(set_nonblock(sv[1]), ==, 0);
+    rc = xtc_tls_create(ctx, sv[0], &tls);
+    munit_assert_int(rc, ==, XTC_OK);
+
+    memset(&ca, 0, sizeof(ca));
+    ca.fd = sv[1];
+    ca.rc = 1;
+    munit_assert_int(pthread_create(&tid, NULL, client_thread, &ca), ==, 0);
+
+    rc = poll_until_done(tls, sv[0], xtc_tls_handshake, 5000);
+    munit_assert_int(rc, ==, XTC_OK);
+
+    if (xtc_tls_get_version(tls) == NULL) {
+        /* Non-OpenSSL backend: introspection is stubbed. */
+        munit_assert_int(xtc_tls_get_server_cert_hash(tls, hash,
+            sizeof(hash), &hlen), ==, XTC_E_NOSYS);
+    } else {
+        /* THE regression assertion: the PSS cert's true digest is
+         * SHA-512, so the channel-binding hash MUST be 64 bytes.  The
+         * old OBJ_find_sigid_algs path returned NID_undef for PSS and
+         * fell back to SHA-256 (32 bytes) -- this asserts != that. */
+        rc = xtc_tls_get_server_cert_hash(tls, hash, sizeof(hash), &hlen);
+        munit_assert_int(rc, ==, XTC_OK);
+        munit_assert_size(hlen, ==, 64);   /* SHA-512, not SHA-256 */
+
+        /* verify-error accessor: no client cert requested, so the
+         * server-side verify result is X509_V_OK (0) with a readable
+         * string, and the success contract holds. */
+        rc = xtc_tls_get_verify_error(tls, &verr, vbuf, sizeof(vbuf));
+        munit_assert_int(rc, ==, XTC_OK);
+        munit_assert_long(verr, ==, 0);          /* X509_V_OK */
+        munit_assert_size(strlen(vbuf), >, 0);
+        /* NULL tls -> XTC_E_INVAL; NULL out-args are allowed. */
+        munit_assert_int(xtc_tls_get_verify_error(NULL, &verr, vbuf,
+            sizeof(vbuf)), ==, XTC_E_INVAL);
+        munit_assert_int(xtc_tls_get_verify_error(tls, NULL, NULL, 0),
+            ==, XTC_OK);
+    }
+
+    (void)xtc_tls_shutdown(tls);
+    pthread_join(tid, NULL);
+    xtc_tls_destroy(tls);
+    xtc_tls_ctx_destroy(ctx);
+    close(sv[0]);
+    close(sv[1]);
+    (void)unlink(TEST_PSS_CERT);
+    (void)unlink(TEST_PSS_KEY);
+    return MUNIT_OK;
+}
+
 static MunitResult
 test_server_bad_cert_path(const MunitParameter params[], void *data)
 {
@@ -1032,6 +1165,8 @@ static MunitTest tests[] = {
     { "/tls_create_bad_args",  test_server_tls_create_bad_args, suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
     { "/bad_cert_path",        test_server_bad_cert_path,       NULL, NULL,
+      MUNIT_TEST_OPTION_NONE, NULL },
+    { "/pss_channel_binding",  test_server_pss_channel_binding, NULL, NULL,
       MUNIT_TEST_OPTION_NONE, NULL },
     { "/extended_opts",        test_server_extended_opts,       suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
