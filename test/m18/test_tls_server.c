@@ -685,6 +685,21 @@ test_server_pss_channel_binding(const MunitParameter params[], void *data)
         (void)unlink(TEST_PSS_KEY);
         return MUNIT_SKIP;
     }
+    /* If the backend stubs introspection (get_version == NULL: GnuTLS/
+     * wolfSSL/etc. do not implement these accessors), assert the NOSYS
+     * contract and skip the PSS-specific check.  Only OpenSSL, the
+     * backend this bug concerns, exposes the real cert hash. */
+    if (xtc_tls_get_version(tls) == NULL) {
+        munit_assert_int(xtc_tls_get_server_cert_hash(tls, hash,
+            sizeof(hash), &hlen), ==, XTC_E_NOSYS);
+        (void)xtc_tls_shutdown(tls);
+        pthread_join(tid, NULL);
+        xtc_tls_destroy(tls);
+        xtc_tls_ctx_destroy(ctx);
+        close(sv[0]); close(sv[1]);
+        (void)unlink(TEST_PSS_CERT); (void)unlink(TEST_PSS_KEY);
+        return MUNIT_SKIP;
+    }
     /* THE regression assertion: the PSS cert's true digest is
      * SHA-512, so the channel-binding hash MUST be 64 bytes.  The
      * old OBJ_find_sigid_algs path returned NID_undef for PSS and
