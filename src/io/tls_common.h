@@ -92,6 +92,9 @@ xtc_tls_clear_wants(struct xtc_tls *tls)
 	{ (void)t; if (o) *o = NULL; if (l) *l = 0; return XTC_E_NOSYS; }\
 	int xtc_tls_has_peer_cert(const xtc_tls_t *t)                    \
 	{ (void)t; return 0; }                                           \
+	int xtc_tls_get_verify_error(const xtc_tls_t *t, long *e,         \
+	    char *b, size_t n)                                           \
+	{ (void)t; (void)e; (void)b; (void)n; return XTC_E_NOSYS; }      \
 	int xtc_tls_get_peer_subject_dn(const xtc_tls_t *t, char *b, size_t n) \
 	{ (void)t; (void)b; (void)n; return XTC_E_NOSYS; }               \
 	int xtc_tls_get_peer_common_name(const xtc_tls_t *t, char *b, size_t n) \

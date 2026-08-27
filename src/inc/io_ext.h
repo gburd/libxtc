@@ -18,6 +18,7 @@ int  xtc_tls_get_peer_issuer_dn __P((const xtc_tls_t *, char *, size_t));
 int  xtc_tls_get_peer_serial __P((const xtc_tls_t *, char *, size_t));
 int  xtc_tls_get_peer_subject_dn __P((const xtc_tls_t *, char *, size_t));
 int  xtc_tls_get_server_cert_hash __P((const xtc_tls_t *, unsigned char *, size_t, size_t *));
+int  xtc_tls_get_verify_error __P((const xtc_tls_t *, long *, char *, size_t));
 int  xtc_tls_handshake __P((xtc_tls_t *));
 int  xtc_tls_has_peer_cert __P((const xtc_tls_t *));
 int  xtc_tls_read  __P((xtc_tls_t *, void *, size_t, size_t *));

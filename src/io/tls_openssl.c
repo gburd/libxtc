@@ -1079,6 +1079,31 @@ xtc_tls_has_peer_cert(const xtc_tls_t *tls)
 	return 1;
 }
 
+/* -------------------------------------------------------------------------
+ * PUBLIC: int  xtc_tls_get_verify_error __P((const xtc_tls_t *, long *,
+ * PUBLIC:                              char *, size_t));
+ * ----------------------------------------------------------------------- */
+int
+xtc_tls_get_verify_error(const xtc_tls_t *tls, long *x509_err,
+    char *buf, size_t len)
+{
+	long rc;
+	const char *s;
+
+	if (tls == NULL || tls->ssl == NULL)
+		return XTC_E_INVAL;
+	rc = SSL_get_verify_result(tls->ssl);   /* X509_V_OK (0) == success */
+	if (x509_err != NULL)
+		*x509_err = rc;
+	if (buf != NULL && len > 0) {
+		s = X509_verify_cert_error_string(rc);
+		if (s == NULL)
+			s = "unknown verification error";
+		(void)snprintf(buf, len, "%s", s);
+	}
+	return XTC_OK;
+}
+
 /*
  * Render an X509_NAME into buf as an RFC 2253 string, rejecting an
  * embedded NUL (the CVE-2009-4034 truncation class).  Returns XTC_OK,
@@ -1245,16 +1270,39 @@ xtc_tls_get_server_cert_hash(const xtc_tls_t *tls,
 	 * signature-algorithm digest, EXCEPT MD5 or SHA-1 are upgraded to
 	 * SHA-256.  Fall back to SHA-256 if the signature digest is unknown.
 	 *
-	 * X509_get_signature_info is OpenSSL 1.1.1+ and absent from
-	 * BoringSSL; derive the digest NID portably from the signature
-	 * algorithm NID via OBJ_find_sigid_algs, which both provide.
+	 * Prefer X509_get_signature_info() (OpenSSL 1.1.1+): it resolves the
+	 * TRUE digest even for RSASSA-PSS, whose digest lives in the
+	 * algorithm PARAMETERS -- not the signature OID -- so the portable
+	 * OBJ_find_sigid_algs(X509_get_signature_nid(...)) path returns
+	 * NID_undef for PSS and would wrongly fall back to SHA-256, breaking
+	 * SCRAM-SHA-256-PLUS channel binding against a stock OpenSSL peer
+	 * for a PSS cert whose real digest is not SHA-256.  This matches
+	 * PostgreSQL's be_tls_get_certificate_hash().  On BoringSSL /
+	 * LibreSSL / OpenSSL < 1.1.1 (no X509_get_signature_info) derive the
+	 * digest NID from the signature-algorithm NID via OBJ_find_sigid_algs
+	 * (correct for the common RSA/ECDSA-with-SHA-x certs; PSS on those
+	 * backends still falls back to SHA-256, as before).
 	 */
+#if !defined(OPENSSL_IS_BORINGSSL) && !defined(LIBRESSL_VERSION_NUMBER) && \
+    OPENSSL_VERSION_NUMBER >= 0x10101000L
+	{
+		int sig_md_nid = NID_undef;
+		/* returns the message-digest NID (resolving PSS parameters);
+		 * NID_undef for signatures that carry no fixed digest. */
+		if (X509_get_signature_info(cert, &sig_md_nid, NULL, NULL, NULL)
+		    == 1)
+			md_nid = sig_md_nid;
+		else
+			md_nid = NID_undef;
+	}
+#else
 	{
 		int sig_alg_nid = X509_get_signature_nid(cert);
 		if (sig_alg_nid == NID_undef ||
 		    OBJ_find_sigid_algs(sig_alg_nid, &md_nid, NULL) != 1)
 			md_nid = NID_undef;
 	}
+#endif
 	sig_nid = md_nid;
 	if (sig_nid == NID_undef || sig_nid == NID_md5 || sig_nid == NID_sha1)
 		md = EVP_sha256();
