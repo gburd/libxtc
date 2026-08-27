@@ -274,8 +274,15 @@ XTC_API int  xtc_tls_ctx_create(xtc_tls_role_t role,
 /*
  * xtc_tls_ctx_destroy --
  *	Release all resources held by a TLS context.
- *	Must not be called while any xtc_tls_t created from it is live.
- *	ctx may be NULL (no-op).
+ *	Must not be called while any xtc_tls_t created from it is live:
+ *	live connections hold a raw pointer to the ctx (dereferenced e.g.
+ *	by xtc_tls_get_server_cert_hash and xtc_tls_set_hostname), so
+ *	destroying it underneath them is a use-after-free.  The ctx is NOT
+ *	refcounted.  On config reload, build the NEW ctx and point new
+ *	connections at it, but do NOT destroy the OLD ctx until all
+ *	connections created from it have been xtc_tls_destroy()'d --
+ *	retire it (e.g. to a list freed later) rather than freeing it in
+ *	place.  ctx may be NULL (no-op).
  */
 XTC_API void xtc_tls_ctx_destroy(xtc_tls_ctx_t *ctx);
 
