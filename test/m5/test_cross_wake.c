@@ -125,10 +125,65 @@ test_concurrent(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* [Cw5] xtc_loop_wake from a FOREIGN (non-xtc) OS thread.  Models the
+ * embedder scenario (a PostgreSQL pooled carrier marking a parked
+ * session runnable from a sibling carrier thread): a raw pthread that
+ * libxtc does not manage fires the parked task's waker cross-thread and
+ * then nudges the target loop with the PUBLIC xtc_loop_wake() handle
+ * API (rather than reaching into loop->io).  The parked task must
+ * resume and the run must quiesce.  Without the loop nudge a real
+ * backend could leave the loop asleep in xtc_io_poll (the reported
+ * cross-loop wake miss); the waker's own inbox-push + this nudge close
+ * it lost-wake-free. */
+struct foreign_args {
+	struct shared *s;
+	xtc_loop_t    *loop0;
+};
+
+static void *
+foreign_waker_thread(void *arg)
+{
+	struct foreign_args *a = arg;
+	/* wait until the parker has parked (init_done) */
+	while (__os_atomic_load_i32(&a->s->init_done) == 0)
+		(void)__os_sleep_ns(100 * 1000LL);
+	(void)__os_sleep_ns(2 * 1000 * 1000LL);   /* let the loop go idle in poll */
+	/* Make the condition true (fire the waker: deposits a resume on the
+	 * loop's inbox), THEN nudge the loop's poller via the public API. */
+	(void)xtc_waker_wake(&a->s->parker_waker);
+	(void)xtc_loop_wake(a->loop0);
+	return NULL;
+}
+
+static MunitResult
+test_loop_wake_foreign(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	__os_thread_t thr = {0};
+	static struct shared s;
+	struct foreign_args fa;
+	(void)p; (void)d;
+	s.parker_runs = 0; s.init_done = 0; s.max_runs = 2; s.wake_calls = 0;
+	munit_assert_int(xtc_exec_init(&e, 4), ==, XTC_OK);
+	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
+	/* NULL loop -> XTC_E_INVAL (guard). */
+	munit_assert_int(xtc_loop_wake(NULL), ==, XTC_E_INVAL);
+	fa.s = &s; fa.loop0 = xtc_exec_loop(e, 0);
+	munit_assert_ptr_not_null(fa.loop0);
+	munit_assert_int(__os_thread_create(&thr, foreign_waker_thread, &fa),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);   /* must quiesce */
+	munit_assert_int(__os_thread_join(&thr, NULL), ==, XTC_OK);
+	munit_assert_int(__os_atomic_load_i32(&s.parker_runs), ==, 2);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Cw1_Cw2_basic",   test_basic,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Cw3_after_done",  test_after_done, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Cw4_concurrent",  test_concurrent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Cw5_loop_wake_foreign", test_loop_wake_foreign, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/cross_wake", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

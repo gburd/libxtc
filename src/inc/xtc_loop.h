@@ -54,6 +54,7 @@ typedef void (*xtc_timer_fn)(void *user);
  * PUBLIC: int  xtc_loop_fini __P((xtc_loop_t *));
  * PUBLIC: int  xtc_loop_run __P((xtc_loop_t *));
  * PUBLIC: int  xtc_loop_stop __P((xtc_loop_t *));
+ * PUBLIC: int  xtc_loop_wake __P((xtc_loop_t *));
  *
  * PUBLIC: int  xtc_task_spawn __P((xtc_loop_t *, xtc_task_fn, void *, xtc_task_t **));
  * PUBLIC: int  xtc_task_waker __P((xtc_task_t *, xtc_waker_t *));
@@ -69,6 +70,36 @@ XTC_API int  xtc_loop_init(xtc_loop_t **out);
 XTC_API int  xtc_loop_fini(xtc_loop_t *loop);
 XTC_API int  xtc_loop_run(xtc_loop_t *loop);
 XTC_API int  xtc_loop_stop(xtc_loop_t *loop);
+
+/*
+ * xtc_loop_wake --
+ *	Nudge a loop's poller out of its I/O wait from ANY OS thread, so
+ *	it re-polls its registered fds and re-checks runnability.  This is
+ *	the loop-level companion to xtc_proc_wake(): use it when a foreign
+ *	thread has made a condition true for a task parked on THIS loop
+ *	(e.g. written a self-pipe / eventfd the loop's poll watches, or set
+ *	an embedder latch a task re-checks on resume) and the consumer
+ *	holds a loop handle rather than a pid -- as an xtc_exec carrier
+ *	scheduler does when it marks a session runnable on a sibling loop.
+ *
+ *	CONTRACT (important): relying on raw fd readiness alone to wake a
+ *	loop is only safe for a condition libxtc itself produces on that
+ *	loop's thread.  When the readiness is produced by a DIFFERENT
+ *	thread, that write races the target loop's park/re-arm window and
+ *	can be missed -- the loop sleeps in xtc_io_poll while the fd is
+ *	ready.  The producer MUST pair the readiness with an explicit
+ *	nudge: xtc_loop_wake(target_loop) (or xtc_proc_wake(pid) for a
+ *	parked proc).  The nudge is lost-wake-free against the pre-sleep
+ *	window -- it writes the loop's wakeup fd, which the backends keep
+ *	armed across the drain (io_uring re-arm-before-drain; epoll/kqueue
+ *	level-triggered) -- so a wake issued at any time surfaces on the
+ *	next poll.  It delivers no event; the woken loop just re-polls, so
+ *	a spurious wake is always safe.
+ *
+ *	Returns XTC_OK (including when the loop is already awake/running),
+ *	XTC_E_INVAL for a NULL loop.  Safe to call from any thread.
+ */
+XTC_API int  xtc_loop_wake(xtc_loop_t *loop);
 
 /*
  * Borrow the loop's resource accountant.  Non-NULL after init.

@@ -8,6 +8,7 @@
 .Nm xtc_loop_fini ,
 .Nm xtc_loop_run ,
 .Nm xtc_loop_stop ,
+.Nm xtc_loop_wake ,
 .Nm xtc_loop_res ,
 .Nm xtc_task_spawn ,
 .Nm xtc_task_waker ,
@@ -27,6 +28,8 @@
 .Fn xtc_loop_run "xtc_loop_t *loop"
 .Ft int
 .Fn xtc_loop_stop "xtc_loop_t *loop"
+.Ft int
+.Fn xtc_loop_wake "xtc_loop_t *loop"
 .Ft "struct xtc_res *"
 .Fn xtc_loop_res "xtc_loop_t *loop"
 .Ft int
@@ -79,6 +82,25 @@ and every pending timer has fired or been cancelled.
 .Fn xtc_loop_stop
 flips a flag that causes the loop to return after the current task
 step completes.
+.Pp
+.Fn xtc_loop_wake
+nudges a loop's poller out of its I/O wait from any OS thread, so it
+re-polls and re-checks runnability.
+It is the loop-level companion to
+.Fn xtc_proc_wake :
+when a foreign thread makes a condition true for a task parked on the
+loop (writes an fd the loop watches, sets an embedder latch), it MUST
+pair that with
+.Fn xtc_loop_wake
+(or
+.Fn xtc_proc_wake
+for a parked proc) \(em relying on raw fd readiness alone races the
+loop's park/re-arm window and can be missed, leaving the loop asleep
+in
+.Fn xtc_io_poll .
+The nudge is lost-wake-free (it writes the loop's wakeup fd, which the
+backends keep armed across the drain) and delivers no event, so a
+spurious wake is always safe.
 .Pp
 .Fn xtc_loop_fini
 frees every task ever spawned, every timer ever created (live or

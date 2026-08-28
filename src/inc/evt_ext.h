@@ -43,6 +43,7 @@ int xtc_loop_fini __P((xtc_loop_t *));
 int xtc_loop_init __P((xtc_loop_t **));
 int xtc_loop_run __P((xtc_loop_t *));
 int xtc_loop_stop __P((xtc_loop_t *));
+int xtc_loop_wake __P((xtc_loop_t *));
 int xtc_shard_count __P((void));
 int xtc_shard_id __P((void));
 int xtc_sim_buggify __P((const char *));
