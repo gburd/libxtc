@@ -19,6 +19,7 @@ int xtc_aio_preadv __P((int, const struct iovec *, int, int64_t));
 int xtc_aio_pwrite __P((int, const void *, uint32_t, int64_t));
 int xtc_aio_pwritev __P((int, const struct iovec *, int, int64_t));
 int xtc_alloc_audit_enable __P((int));
+int xtc_blocking_run_off_loop __P((int (*)(void *), void *, int *));
 int xtc_blocking_submit __P((int (*)(void *), void *));
 int xtc_bracket __P((int (*)(void **, void *), int (*)(void *, void *), void (*)(void *, void *), void *));
 int xtc_cancel_poll __P((int (*)(void *), void *));

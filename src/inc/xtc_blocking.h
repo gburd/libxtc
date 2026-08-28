@@ -41,6 +41,28 @@
 XTC_API int xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result);
 
 /*
+ * Off-loop variant of xtc_blocking_run for a plain OS thread that is NOT
+ * a libxtc fiber (xtc_self() == none): offload fn(arg) to the pool and
+ * block the CALLING thread on the completion pipe with a real read(2),
+ * instead of parking a fiber (which a bare thread cannot do).  fn runs
+ * on a pool worker, not inline on the caller.
+ *
+ * It is still synchronous from the caller's view (it blocks the calling
+ * thread until fn completes) and does NOT shorten any lock held across
+ * the call -- it moves the syscall off the caller thread, it does not
+ * let a non-fiber caller do other work meanwhile.  To keep serving
+ * other multiplexed tasks during a blocking call, make those tasks
+ * fibers on a loop and use xtc_blocking_run (which yields).  Returns
+ * XTC_E_INVAL if fn is NULL or if called from a fiber/loop process
+ * (use xtc_blocking_run there); on a pool/pipe setup failure it runs fn
+ * inline and returns XTC_OK.
+ *
+ * PUBLIC: int  xtc_blocking_run_off_loop __P((int (*)(void *), void *, int *));
+ */
+XTC_API int xtc_blocking_run_off_loop(int (*fn)(void *), void *arg,
+    int *out_result);
+
+/*
  * Fire-and-forget variant: hand fn(arg) to the offload pool and return
  * immediately, without waiting for or collecting the result.  Never
  * parks, so it is callable from any context (e.g. prefetch/read-ahead).

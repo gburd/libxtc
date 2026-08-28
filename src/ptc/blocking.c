@@ -274,6 +274,104 @@ run_sync:
 }
 
 /*
+ * PUBLIC: int xtc_blocking_run_off_loop __P((int (*)(void *), void *, int *));
+ *
+ * Like xtc_blocking_run, but the CALLER is a plain OS thread that is not
+ * a libxtc fiber/loop process (xtc_self() == none): offload `fn(arg)` to
+ * the pool and block THIS thread on the completion pipe with a real
+ * read(2), rather than parking a fiber (which a bare thread cannot do).
+ * The pool worker runs the blocking call, so `fn` no longer runs inline
+ * on the caller -- useful for a consumer that multiplexes many logical
+ * tasks onto one OS thread and wants the blocking syscall (an fsync, a
+ * getaddrinfo) to run OFF that thread on a pool worker.
+ *
+ * Contract / caveats the caller must understand:
+ *   - It STILL blocks the calling thread until the work completes (it is
+ *     synchronous from the caller's view; it just does not run `fn`
+ *     inline).  It does NOT let the caller do other work during the
+ *     call -- only a fiber on a loop gets that (use xtc_blocking_run
+ *     from a fiber for cooperative yielding).  If you multiplex N tasks
+ *     on one thread and must keep serving the other N-1 during a
+ *     blocking call, the answer is to make those tasks fibers on an
+ *     xtc loop, not this primitive.
+ *   - It does NOT shorten any lock the caller holds across the call: an
+ *     offloaded fsync under an exclusive lock holds that lock for the
+ *     same wall time.  This primitive is a building block for a
+ *     group-commit/batching design (submit once, wait once, wake many),
+ *     not a fix for lock-hold-across-blocking-syscall coupling.
+ *   - Callable ONLY off a loop.  If called from a fiber it returns
+ *     XTC_E_INVAL (use xtc_blocking_run there, which yields).
+ *
+ * Returns XTC_OK (result via out_result) on success; XTC_E_INVAL (fn
+ * NULL, or called on a loop); on a pool/pipe setup failure it degrades
+ * to running `fn` inline on the caller (same as the off-a-loop fallback)
+ * and returns XTC_OK.  Never runs under deterministic simulation on a
+ * loop (there is no bare-thread caller there).
+ */
+int
+xtc_blocking_run_off_loop(int (*fn)(void *), void *arg, int *out_result)
+{
+	struct blk_work w;
+	int pfd[2];
+	char drain[8];
+	ssize_t n;
+
+	if (fn == NULL)
+		return XTC_E_INVAL;
+	/* This entry point is for NON-fiber callers; a fiber must use
+	 * xtc_blocking_run so it yields the loop rather than blocking the
+	 * carrier thread. */
+	if (!xtc_pid_is_none(xtc_self()))
+		return XTC_E_INVAL;
+	if (pipe(pfd) != 0)
+		goto run_sync;
+
+	(void)__xtc_mtx_lock(&g_lock);
+	if (blk_start_locked() != 0) {
+		(void)__xtc_mtx_unlock(&g_lock);
+		(void)close(pfd[0]);
+		(void)close(pfd[1]);
+		goto run_sync;
+	}
+	w.fn = fn;
+	w.arg = arg;
+	atomic_store_explicit(&w.result, 0, memory_order_relaxed);
+	w.wr_fd = pfd[1];
+	w.detached = 0;        /* the caller owns w and waits */
+	w.next = NULL;
+	if (g_tail != NULL)
+		g_tail->next = &w;
+	else
+		g_head = &w;
+	g_tail = &w;
+	g_qlen++;
+	blk_grow_locked();
+	(void)pthread_cond_signal(&g_cv);
+	(void)__xtc_mtx_unlock(&g_lock);
+
+	/* Block THIS OS thread on the completion pipe (no fiber to park).
+	 * The worker writes one byte after storing the result. */
+	do {
+		n = read(pfd[0], drain, sizeof drain);  /* XTC_BLOCKING_OK */
+	} while (n < 0 && errno == EINTR);
+
+	if (out_result != NULL)
+		*out_result = atomic_load_explicit(&w.result,
+		    memory_order_acquire);
+	(void)close(pfd[0]);
+	(void)close(pfd[1]);
+	return XTC_OK;
+
+run_sync:
+	{
+		int r = fn(arg);
+		if (out_result != NULL)
+			*out_result = r;
+	}
+	return XTC_OK;
+}
+
+/*
  * PUBLIC: int xtc_blocking_submit __P((int (*)(void *), void *));
  *
  * Fire-and-forget: hand `fn(arg)` to the offload pool and return
