@@ -1,3 +1,20 @@
+libxtc (1.39.0-1) unstable; urgency=medium
+
+  * feat(loop): new public xtc_loop_wake(xtc_loop_t *) -- a lost-wake-free
+    loop-handle nudge, the loop-level companion to xtc_proc_wake().  A
+    consumer that schedules by loop handle (e.g. an xtc_exec carrier
+    scheduler like the PostgreSQL pooled-protocol carriers) can now wake
+    a specific loop's poller from any OS thread after making a condition
+    true for a task parked on it -- without reaching into the opaque
+    xtc_loop_t for loop->io.  Closes the usability gap behind the
+    PostgreSQL cross-loop wake-miss report (2026-08-28): the reported
+    stalls are the documented producer-must-nudge contract (raw foreign
+    fd readiness races the loop park/re-arm window); xtc_loop_wake is the
+    sanctioned nudge.  Documented in xtc_loop(3) and the header;
+    foreign-OS-thread wake test added (m5 cross_wake Cw5).
+
+ -- Greg Burd <greg@burd.me>  Fri, 28 Aug 2026 15:00:00 +0000
+
 libxtc (1.38.0-1) unstable; urgency=medium
 
   * fix(tls): correct the RFC 5929 tls-server-end-point channel-binding
