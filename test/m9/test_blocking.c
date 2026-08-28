@@ -283,6 +283,69 @@ test_submit_fire_forget(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- off-loop pool offload: a plain OS thread (not a fiber) offloads a
+ * blocking call to the pool and blocks on the completion pipe.  Proves
+ * (a) the result is correct, (b) fn ran on a POOL worker thread, not
+ * inline on the caller (the two pthread_self ids differ), and (c) the
+ * guards: NULL fn and a from-a-fiber call both return XTC_E_INVAL. ---- */
+static _Atomic uintptr_t g_off_caller_tid, g_off_worker_tid;
+
+static int
+off_tid_fn(void *arg)
+{
+	(void)arg;
+	atomic_store(&g_off_worker_tid, (uintptr_t)pthread_self());
+	return 4242;
+}
+
+static _Atomic int g_off_from_fiber_rc;
+
+static void
+off_from_fiber_proc(void *arg)
+{
+	(void)arg;
+	/* Called on a loop process: must be rejected (use xtc_blocking_run). */
+	atomic_store(&g_off_from_fiber_rc,
+	    xtc_blocking_run_off_loop(off_tid_fn, NULL, NULL));
+}
+
+static MunitResult
+test_off_loop(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	int out = -1;
+	(void)p; (void)d;
+
+	/* NULL fn guard. */
+	munit_assert_int(xtc_blocking_run_off_loop(NULL, NULL, NULL),
+	    ==, XTC_E_INVAL);
+
+	/* From a bare OS thread (the test runner is off any loop): offload
+	 * runs on a pool worker and returns the result. */
+	atomic_store(&g_off_caller_tid, (uintptr_t)pthread_self());
+	atomic_store(&g_off_worker_tid, 0);
+	munit_assert_int(xtc_blocking_run_off_loop(off_tid_fn, NULL, &out),
+	    ==, XTC_OK);
+	munit_assert_int(out, ==, 4242);
+	/* fn ran on the pool, NOT inline on the caller. */
+	munit_assert_uint((unsigned)atomic_load(&g_off_worker_tid), !=, 0);
+	munit_assert_ullong((unsigned long long)atomic_load(&g_off_worker_tid),
+	    !=, (unsigned long long)atomic_load(&g_off_caller_tid));
+
+	/* From a fiber it must be rejected (use xtc_blocking_run there). */
+	atomic_store(&g_off_from_fiber_rc, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "offfib";
+	munit_assert_int(xtc_proc_spawn(loop, off_from_fiber_proc, NULL,
+	    &opts, &pid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_off_from_fiber_rc), ==, XTC_E_INVAL);
+	return MUNIT_OK;
+}
+
 /* ---- on-demand pool growth: many same-duration offloads run
  * concurrently (the pool grows past its initial size), so wall-clock
  * time is ~one sleep, not (N / initial_threads) sleeps ---- */
@@ -411,6 +474,7 @@ test_pool_size(const MunitParameter p[], void *d)
 static MunitTest tests[] = {
 	{ "/fallback",   test_fallback,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/submit",     test_submit_fire_forget, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/off_loop",   test_off_loop,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/liveness",   test_in_proc_liveness, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent", test_concurrent,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pool_grows", test_pool_grows,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

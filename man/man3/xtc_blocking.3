@@ -5,6 +5,7 @@
 .Os
 .Sh NAME
 .Nm xtc_blocking_run ,
+.Nm xtc_blocking_run_off_loop ,
 .Nm xtc_blocking_submit ,
 .Nm xtc_blocking_pool_size ,
 .Nm xtc_blocking_shutdown
@@ -14,6 +15,8 @@
 .In xtc_blocking.h
 .Ft int
 .Fn xtc_blocking_run "int (*fn)(void *)" "void *arg" "int *out_result"
+.Ft int
+.Fn xtc_blocking_run_off_loop "int (*fn)(void *)" "void *arg" "int *out_result"
 .Ft int
 .Fn xtc_blocking_submit "int (*fn)(void *)" "void *arg"
 .Ft int
@@ -50,6 +53,46 @@ up) it runs
 .Fa fn
 synchronously on the current thread -- always correct, just not
 yielding.
+.Pp
+.Fn xtc_blocking_run_off_loop
+is the counterpart for a caller that is a plain OS thread and
+.Em not
+a fiber (its
+.Fn xtc_self
+is none): it offloads
+.Fa fn Ns ( Ns Fa arg Ns )
+to the pool and blocks the calling thread on the completion pipe with
+a real
+.Xr read 2 ,
+rather than parking a fiber (which a bare thread cannot do), so
+.Fa fn
+runs on a pool worker instead of inline on the caller.
+It remains synchronous from the caller's point of view -- it blocks
+the calling thread until
+.Fa fn
+completes -- and it does
+.Em not
+shorten any lock the caller holds across the call: moving a
+.Xr fsync 2
+off the caller thread does not shorten a lock held around it.
+It is a building block for a group-commit or batching design (submit
+once, wait once, wake many), not a way to let a non-fiber caller do
+other work during the call: to keep serving other multiplexed tasks
+during a blocking call, make those tasks fibers on a loop and use
+.Fn xtc_blocking_run ,
+which yields.
+It returns
+.Dv XTC_E_INVAL
+if
+.Fa fn
+is
+.Dv NULL
+or if it is called from a fiber (use
+.Fn xtc_blocking_run
+there); on a pool or pipe setup failure it runs
+.Fa fn
+inline and returns
+.Dv XTC_OK .
 .Pp
 .Fn xtc_blocking_submit
 is the fire-and-forget variant: it hands
