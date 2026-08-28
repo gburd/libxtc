@@ -1,3 +1,21 @@
+libxtc (1.40.0-1) unstable; urgency=medium
+
+  * feat(blocking): new public xtc_blocking_run_off_loop(fn, arg,
+    out_result) -- offload a blocking call to the pool from a plain OS
+    thread that is NOT a libxtc fiber, blocking the caller on the
+    completion pipe with a real read(2) instead of parking a fiber, so
+    fn runs on a pool worker rather than inline on the caller.  Answers
+    the PostgreSQL pooled-carrier blocking-fsync consult (2026-08-28):
+    a bare carrier pthread previously ran every offload inline because
+    xtc_blocking_run needs a fiber and xtc_blocking_submit gives no
+    result.  Documented honest contract (still synchronous from the
+    caller's view, does not shorten a lock held across the call; a
+    building block for group-commit offload, not a substitute for making
+    sessions fibers) in xtc_blocking(3) and the header.  Rejected
+    (XTC_E_INVAL) from a fiber.  Test: m9 blocking/off_loop.
+
+ -- Greg Burd <greg@burd.me>  Fri, 28 Aug 2026 18:00:00 +0000
+
 libxtc (1.39.0-1) unstable; urgency=medium
 
   * feat(loop): new public xtc_loop_wake(xtc_loop_t *) -- a lost-wake-free
