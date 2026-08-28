@@ -285,6 +285,21 @@ xtc_loop_stop(xtc_loop_t *loop)
 	return XTC_OK;
 }
 
+/* PUBLIC: int xtc_loop_wake __P((xtc_loop_t *)); */
+int
+xtc_loop_wake(xtc_loop_t *loop)
+{
+	if (loop == NULL) return XTC_E_INVAL;
+	/* Nudge the loop's poller out of its I/O wait so it re-polls and
+	 * re-checks runnability.  Lost-wake-free against the pre-sleep
+	 * window: xtc_io_wakeup writes the loop's wakeup fd, which the
+	 * backends keep armed across the drain (io_uring re-arm-before-drain;
+	 * epoll/kqueue level-triggered), so a wake issued at any time
+	 * surfaces on the next poll.  See the header for the cross-thread
+	 * producer-must-nudge contract. */
+	return xtc_io_wakeup(loop->io);
+}
+
 /* --- run-queue ops -------------------------------------------------- */
 
 /* XTC_NOALLOC_BEGIN: scheduler run-queue + main step (PLAN.md 19.23) --
