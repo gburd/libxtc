@@ -1,3 +1,25 @@
+libxtc (1.40.2-1) unstable; urgency=medium
+
+  * fix(blocking): close-vs-write race on the completion pipe under
+    concurrent commit.  xtc_blocking_run (the fallback path xtc_aio_*
+    takes when the native io_uring engine is absent/forced off) read +
+    closed its completion pipe on the FIRST wake from xtc_proc_wait_fd,
+    but such wakes may be spurious (cross-thread nudge, eager-rebalance
+    poke, stray xtc_proc_wake).  Under concurrent commit a spurious wake
+    resumed the fiber before the pool worker had written the pipe, so it
+    closed the fd and freed its on-stack work item while the worker was
+    still writing -- a data race (ThreadSanitizer-caught) that in
+    production (PostgreSQL sessions-as-fibers, report 2026-08-29)
+    stranded a WALWriteLock-holder fiber and wedged every committer after
+    the first burst.  Fix gates completion on a new blk_work.done flag
+    (worker stores it release AFTER its wakeup write; caller re-parks
+    until it observes done, so its read/close/free strictly follow the
+    write).  Distinct from and complementary to the v1.40.1
+    idle-poll-dispatch fix.  Regression exercise: m5
+    exec/Blk2_concurrent_commit.
+
+ -- Greg Burd <greg@burd.me>  Sat, 29 Aug 2026 20:00:00 +0000
+
 libxtc (1.40.1-1) unstable; urgency=medium
 
   * fix(exec): dispatch I/O completions reaped by the executor worker's
