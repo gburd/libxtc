@@ -130,31 +130,34 @@ blk_worker(void *unused)
 		}
 		fn_fd = w->wr_fd;
 		atomic_store_explicit(&w->result, r, memory_order_release);
-		/* Publish completion with a release store to w->done BEFORE the
-		 * wakeup write.  Ordering rationale:
+		/* Publish completion with a release store to w->done, our LAST
+		 * touch of w, BEFORE the wakeup write.  After this store the
+		 * caller may observe done, return, and free the on-stack work
+		 * item -- so the write below must use ONLY the local fn_fd and
+		 * must not touch w again (a post-write w->done store is a
+		 * stack-use-after-return, ASan-caught at blocking.c blk_worker).
+		 * Ordering rationale:
 		 *   - done-before-write is LOST-WAKE-FREE: the wake (the pipe
-		 *     byte) is what resumes the parked caller, and by the time
-		 *     any wake is observable, done is already visible -- so a
-		 *     caller that wakes and checks done never re-parks with the
-		 *     completion already delivered (the bug the other ordering
-		 *     has: wake seen, done not yet stored, re-park forever --
-		 *     which hung the Windows offloaded fdatasync).
-		 *   - the CALLER makes teardown safe by waiting for done, then
-		 *     doing a BLOCKING read of the byte before it closes: the
+		 *     byte) resumes the parked caller, and by the time any wake
+		 *     is observable done is already visible, so a woken caller
+		 *     never re-parks with the completion already delivered (the
+		 *     opposite order hangs: wake seen, done not yet stored,
+		 *     re-park forever -- which hung the Windows offloaded
+		 *     fdatasync).
+		 *   - teardown stays safe because the CALLER waits for done then
+		 *     does a BLOCKING read of the byte before it closes: the
 		 *     byte only exists after this write, so the close strictly
-		 *     follows the write -- no close-vs-write race.
-		 * The write is our LAST touch of w (and of the pipe); after it
-		 * the caller owns w and may free it. */
+		 *     follows the write. */
 		atomic_store_explicit(&w->done, 1, memory_order_release);
 		{
 			char b = 'x';
 			ssize_t nw;
 			do {
-				/* One byte into a fresh pipe never blocks. */
+				/* One byte into a fresh pipe never blocks.  Uses
+				 * only the local fn_fd -- w may already be freed. */
 				nw = write(fn_fd, &b, 1);  /* XTC_BLOCKING_OK */
 			} while (nw < 0 && errno == EINTR);
 		}
-		atomic_store_explicit(&w->done, 1, memory_order_release);
 	}
 }
 
