@@ -1,3 +1,21 @@
+libxtc (1.40.1-1) unstable; urgency=medium
+
+  * fix(exec): dispatch I/O completions reaped by the executor worker's
+    idle poll.  A fiber parked on its own I/O/blocking completion could
+    be stranded (never resumed) when it had been stolen to and parked on
+    a peer loop -- the peer's idle poll was the only site reaping its
+    completion, and that poll discarded reaped events (draining only the
+    inbox) instead of dispatching them.  Symptom (PostgreSQL "xtc"
+    sessions-as-fibers, 2026-08-29): a backend fiber holding WALWriteLock
+    across xtc_aio_fdatasync never resumed after its fsync completed,
+    wedging the server; deterministic on the forced-offload path,
+    ~1/8 on native io_uring.  Fix dispatches the events the idle poll
+    reaps, as every other poll site does.  Regression test m5
+    exec/Blk1_blocking_resume (15/15 wedge without the fix, 15/15 pass
+    with it).
+
+ -- Greg Burd <greg@burd.me>  Sat, 29 Aug 2026 12:00:00 +0000
+
 libxtc (1.40.0-1) unstable; urgency=medium
 
   * feat(blocking): new public xtc_blocking_run_off_loop(fn, arg,
