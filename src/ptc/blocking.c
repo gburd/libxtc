@@ -130,19 +130,22 @@ blk_worker(void *unused)
 		}
 		fn_fd = w->wr_fd;
 		atomic_store_explicit(&w->result, r, memory_order_release);
-		/* Wake the parked caller with a pipe byte, THEN publish
-		 * completion with a release store to w->done as our LAST touch
-		 * of w.  The caller treats w->done -- not the byte -- as the
-		 * completion token: it re-parks on a SPURIOUS wake (a
-		 * cross-thread nudge / eager-rebalance poke / stray
-		 * xtc_proc_wake) until it observes done == 1, so it can neither
-		 * read+close the pipe nor free this on-stack work item before
-		 * we are finished with it.  Because done is stored AFTER the
-		 * write, the caller's done==1 observation (acquire) strictly
-		 * follows this write, so its close cannot race the write (the
-		 * concurrent-commit strand, TSan-caught as close-vs-write on
-		 * the completion pipe).  After the done store we must not touch
-		 * w again. */
+		/* Publish completion with a release store to w->done BEFORE the
+		 * wakeup write.  Ordering rationale:
+		 *   - done-before-write is LOST-WAKE-FREE: the wake (the pipe
+		 *     byte) is what resumes the parked caller, and by the time
+		 *     any wake is observable, done is already visible -- so a
+		 *     caller that wakes and checks done never re-parks with the
+		 *     completion already delivered (the bug the other ordering
+		 *     has: wake seen, done not yet stored, re-park forever --
+		 *     which hung the Windows offloaded fdatasync).
+		 *   - the CALLER makes teardown safe by waiting for done, then
+		 *     doing a BLOCKING read of the byte before it closes: the
+		 *     byte only exists after this write, so the close strictly
+		 *     follows the write -- no close-vs-write race.
+		 * The write is our LAST touch of w (and of the pipe); after it
+		 * the caller owns w and may free it. */
+		atomic_store_explicit(&w->done, 1, memory_order_release);
 		{
 			char b = 'x';
 			ssize_t nw;
@@ -275,23 +278,27 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	(void)pthread_cond_signal(&g_cv);
 	(void)__xtc_mtx_unlock(&g_lock);
 
-	/* Park until the worker publishes completion (w.done), then drain the
-	 * wakeup byte and close.  w.done -- not the wake -- is the completion
-	 * token: xtc_proc_wait_fd may return spuriously (a cross-thread
-	 * nudge, eager-rebalance poke, or stray xtc_proc_wake are all
-	 * documented to cause spurious wakes the waiter must re-evaluate), so
-	 * we re-park until done is set.  The worker stores done with release
-	 * AFTER its wakeup write, so our acquire-observation of done==1
-	 * strictly follows that write -- the read + close below therefore
-	 * cannot race the worker's write, and w is not freed until the worker
-	 * is finished with it (the concurrent-commit strand, TSan-caught as
-	 * close-vs-write on the completion pipe). */
+	/* Park until the worker publishes completion (w.done), then do a
+	 * BLOCKING read of the wakeup byte, then close.  w.done -- not the
+	 * wake -- is the completion token: xtc_proc_wait_fd may return
+	 * spuriously (a cross-thread nudge, eager-rebalance poke, or stray
+	 * xtc_proc_wake are all documented to cause spurious wakes the
+	 * waiter must re-evaluate), so we re-park until done is set.  The
+	 * worker stores done (release) BEFORE its wakeup write, so this is
+	 * lost-wake-free: whenever a wake is observable, done is already
+	 * visible, so we never re-park with the completion already delivered.
+	 * The blocking read below then waits for the byte -- which the worker
+	 * writes AFTER the done store -- so our close strictly follows the
+	 * worker's write and cannot race it, and w is not freed until the
+	 * worker is finished with it. */
 	while (!atomic_load_explicit(&w.done, memory_order_acquire)) {
 		revents = 0;
 		(void)xtc_proc_wait_fd(pfd[0], XTC_IO_READABLE, -1, &revents);
 	}
 	do {
-		/* done implies the byte was written before it; this drains it. */
+		/* done is set; the worker's byte write follows it and this
+		 * blocking read waits for that byte, synchronizing our close
+		 * after the worker's last pipe touch. */
 		n = read(pfd[0], drain, sizeof drain);  /* XTC_BLOCKING_OK */
 	} while (n < 0 && errno == EINTR);
 
