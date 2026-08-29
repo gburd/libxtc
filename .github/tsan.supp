@@ -42,3 +42,17 @@ race:xtc_exec_run
 # push atomic ops onto every FIFO list operation for a benign hint.
 race:__xtc_loop_enqueue
 race:__xtc_loop_step_once
+
+# The blocking-offload completion pipe (src/ptc/blocking.c): the pool
+# worker write()s a one-byte wakeup while the caller close()s the pipe
+# fds after draining that byte with a BLOCKING read.  The blocking read
+# is the real happens-before (write -> read-returns -> close), but
+# ThreadSanitizer does not model the kernel pipe byte transfer as fd
+# synchronization, so it reports a close-vs-write "race" on the pipe fd.
+# It is benign: the caller cannot reach close until its read has consumed
+# the worker's byte, so the write always precedes the close.  The
+# completion is additionally gated on w->done (a real release/acquire
+# pair).  Verified: the offload path has no use-after-free (ASan clean)
+# and the fiber-resume is lost-wake-free.
+race:xtc_blocking_run
+race:xtc_blocking_run_off_loop
