@@ -221,7 +221,7 @@ __xtc_exec_worker(void *arg)
 			 * responsive to inbox arrivals.
 			 */
 			xtc_io_event_t evs[8];
-			int n_out;
+			int n_out, di;
 			/* Backoff: default 1ms; if enabled, grow toward 32ms
 			 * across an idle streak (idle_streak counts turns that
 			 * produced no work).  Any real work resets the streak. */
@@ -246,6 +246,26 @@ __xtc_exec_worker(void *arg)
 			    idle_poll_ns, &n_out);
 			atomic_fetch_sub_explicit(&exec->n_idle, 1,
 			    memory_order_relaxed);
+			/*
+			 * Dispatch the events this poll reaped.  This poll is
+			 * NOT just a sleep interrupted by the wakeup fd: a real
+			 * I/O completion for a task parked on THIS loop (an
+			 * aio/fsync CQE, or the blocking-pool completion pipe
+			 * written by a pool worker -- a foreign thread w.r.t.
+			 * this loop) can be the very event that wakes it.  If
+			 * we drop those events on the floor and only drain the
+			 * inbox, the parked fiber is never marked runnable: a
+			 * one-shot fsync CQE reaped here is gone for good (the
+			 * intermittent native wedge), and even a multishot/pipe
+			 * readiness is only recovered on a later step -- so a
+			 * fiber that parked on its own completion (e.g. holding
+			 * an LWLock across xtc_aio_fdatasync) is stranded and
+			 * everything waiting behind it wedges.  Dispatch here,
+			 * exactly as __xtc_loop_step does after its poll.
+			 */
+			for (di = 0; di < n_out; di++)
+				(void)__xtc_loop_dispatch_event(loop,
+				    &evs[di]);
 			(void)__xtc_inbox_drain(loop);
 			/* Loop again; if exec stopped or no real work
 			 * appeared, we'll exit on the next iteration. */

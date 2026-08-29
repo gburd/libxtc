@@ -6,11 +6,15 @@
  */
 
 #include <stdint.h>
+#include <stdatomic.h>
+#include <time.h>
 
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_exec.h"
+#include "xtc_proc.h"
+#include "xtc_blocking.h"
 #include "xtc_int.h"
 /* [Ex1, Ex2] init/fini round-trip. */
 static MunitResult
@@ -328,6 +332,84 @@ test_exec_class_accessors(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [Blk1] Regression: a fiber parked on a blocking-pool offload must be
+ * RESUMED when it runs on an executor loop, not only on a single
+ * xtc_loop_run.  The completion is signalled by a pool WORKER (a thread
+ * foreign to the fiber's loop) writing the loop-registered completion
+ * pipe; while the fiber is parked and the worker sleeps, that loop's
+ * exec worker sits idle in its io_poll.  If the idle poll reaps the pipe
+ * readiness but drops it (does not dispatch the event), the fiber is
+ * never marked runnable and is stranded -- the fiber-resume lost-wakeup
+ * reported 2026-08-29 (PostgreSQL sessions-as-fibers: a backend holding
+ * WALWriteLock across xtc_aio_fdatasync never resumed, wedging the
+ * server).  Each of N procs on N loops offloads a short blocking sleep;
+ * the run must quiesce and every offload must have returned its result.
+ */
+#define BLK1_N 8
+static _Atomic int g_blk1_done;
+
+static int
+blk1_sleep_fn(void *arg)
+{
+	long ms = (long)(intptr_t)arg;
+	struct timespec ts;
+	ts.tv_sec = ms / 1000;
+	ts.tv_nsec = (ms % 1000) * 1000000L;
+	(void)nanosleep(&ts, NULL);
+	return (int)(ms * 2);
+}
+
+static void
+blk1_proc(void *arg)
+{
+	int ms = (int)(intptr_t)arg;
+	int out = -1;
+	/* xtc_blocking_run from a fiber offloads to the pool and parks on
+	 * the completion pipe registered with the loop this fiber is
+	 * RUNNING on (which, when stolen, is NOT its home loop). */
+	(void)xtc_blocking_run(blk1_sleep_fn, (void *)(intptr_t)ms, &out);
+	if (out == ms * 2)
+		atomic_fetch_add(&g_blk1_done, 1);
+}
+
+static MunitResult
+test_blocking_resume_on_exec(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	int i;
+	(void)p; (void)d;
+
+	atomic_store(&g_blk1_done, 0);
+	/* More procs than loops, ALL spawned on loop 0, so the idle peer
+	 * loops steal them and run them stolen.  A stolen fiber parks its
+	 * blocking-offload completion pipe on the STEAL loop (its current
+	 * loop), while its n_alive is charged to loop 0 (home).  A steal
+	 * loop that holds only stolen-then-parked fibers has n_alive == 0,
+	 * so __xtc_loop_step_once returns idle and the worker's bounded
+	 * idle poll -- not step's blocking poll -- is what reaps the
+	 * completion pipe.  If that idle poll drops the event, the fiber is
+	 * stranded: the reported fiber-resume lost-wakeup. */
+	munit_assert_int(xtc_exec_init(&e, 4), ==, XTC_OK);
+	xtc_exec_set_eager_rebalance(e, 1);   /* force idle peers to steal */
+	for (i = 0; i < BLK1_N; i++) {
+		opts.name = "blk";
+		opts.migratable = 1;   /* stealable: may run+park on a peer loop */
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
+		    blk1_proc, (void *)(intptr_t)(5 + (i % 3)), &opts, &pid),
+		    ==, XTC_OK);
+	}
+	/* Must QUIESCE.  Before the fix this hangs: a stolen fiber parked
+	 * on its completion pipe on an n_alive==0 steal loop is never
+	 * resumed. */
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_blk1_done), ==, BLK1_N);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -339,6 +421,7 @@ static MunitTest tests[] = {
 	{ "/policy_knobs",            test_policy_knobs,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/accessors_errors",        test_accessors_errors,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/class_accessors",         test_exec_class_accessors, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Blk1_blocking_resume",    test_blocking_resume_on_exec, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/exec", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
