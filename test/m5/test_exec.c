@@ -8,9 +8,6 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <time.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdio.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -19,8 +16,6 @@
 #include "xtc_proc.h"
 #include "xtc_blocking.h"
 #include "xtc_async.h"
-#include "xtc_aio.h"
-#include "xtc_fs.h"
 #include "xtc_int.h"
 /* [Ex1, Ex2] init/fini round-trip. */
 static MunitResult
@@ -431,27 +426,36 @@ test_blocking_resume_on_exec(const MunitParameter p[], void *d)
 static _Atomic int g_blk2_done;
 static _Atomic int g_blk2_lock;   /* 0/1 spin "flush lock" */
 
+static int
+blk2_flush_fn(void *arg)
+{
+	/* A short blocking "flush" on the pool worker.  The offload path
+	 * (xtc_blocking_run) is exactly what xtc_aio_fdatasync uses when the
+	 * native engine is absent/declines, and is where the reported
+	 * concurrent-commit strand lived; exercising it directly keeps this
+	 * test portable (no raw open()/O_CREAT/unlink, which MSVC's munit
+	 * subset rejects). */
+	int ms = (int)(intptr_t)arg;
+	struct timespec ts;
+	ts.tv_sec = 0;
+	ts.tv_nsec = ms * 100000L;   /* ms*0.1ms */
+	(void)nanosleep(&ts, NULL);
+	return ms;
+}
+
 static void
 blk2_proc(void *arg)
 {
 	int iters = (int)(intptr_t)arg;
 	int k;
-	char path[256], tmpdir[200];
-	int fd;
-	static const char buf[512] = { 0 };
-
-	if (xtc_fs_tmpdir(tmpdir, sizeof tmpdir) != XTC_OK)
-		return;
-	snprintf(path, sizeof path, "%s/xtc-blk2-%p", tmpdir, (void *)&k);
-	fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0600);
-	if (fd < 0)
-		return;
 	for (k = 0; k < iters; k++) {
 		int held = 0;
+		int out = -1;
 		/* A subset of iterations grab the shared flush lock and hold
-		 * it ACROSS the aio write+fdatasync park (the WALWriteLock-
-		 * holder-across-fsync shape): if the holder is stranded
-		 * post-park, every fiber spinning for the lock wedges. */
+		 * it ACROSS the offload park (the WALWriteLock-holder-across-
+		 * fsync shape): if the holder is stranded post-park -- e.g. a
+		 * spurious wake resumes it before its completion under steal
+		 * churn -- every fiber spinning for the lock wedges. */
 		if ((k & 3) == 0) {
 			int spins = 0;
 			while (atomic_exchange_explicit(&g_blk2_lock, 1,
@@ -462,18 +466,15 @@ blk2_proc(void *arg)
 			if (held == 0) held = 1;
 		}
 		if (held < 0) break;   /* wedge guard */
-		/* Native io_uring aio: pwrite then fdatasync, each PARKS the
-		 * fiber on its own completion CQE -- the exact path the
-		 * concurrent-commit report implicates. */
-		(void)xtc_aio_pwrite(fd, buf, sizeof buf,
-		    (int64_t)k * (int64_t)sizeof buf);
-		(void)xtc_aio_fdatasync(fd);
+		/* Offload park: xtc_blocking_run parks the fiber on its
+		 * completion pipe -- the path where a spurious wake must NOT
+		 * make the fiber return before its work truly completes. */
+		(void)xtc_blocking_run(blk2_flush_fn,
+		    (void *)(intptr_t)(1 + (k & 3)), &out);
 		if (held == 1)
 			atomic_store_explicit(&g_blk2_lock, 0,
 			    memory_order_release);
 	}
-	(void)close(fd);
-	(void)unlink(path);
 	atomic_fetch_add(&g_blk2_done, 1);
 }
 
