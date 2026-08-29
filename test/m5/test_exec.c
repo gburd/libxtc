@@ -8,6 +8,9 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -15,6 +18,9 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_blocking.h"
+#include "xtc_async.h"
+#include "xtc_aio.h"
+#include "xtc_fs.h"
 #include "xtc_int.h"
 /* [Ex1, Ex2] init/fini round-trip. */
 static MunitResult
@@ -410,6 +416,95 @@ test_blocking_resume_on_exec(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [Blk2] Concurrent-commit stress: many migratable fibers, each doing
+ * REPEATED blocking-offload parks under high steal churn (eager
+ * rebalance), several contending on a shared "flush lock" held ACROSS
+ * the park -- the sessions-as-fibers WALWriteLock-holder-across-
+ * xtc_aio_fdatasync shape at concurrency.  Reproduces the reported
+ * 2026-08-29 concurrent-commit strand if any poll/dispatch site drops a
+ * completion, or the resume races the steal/rebalance transitions.  The
+ * run must QUIESCE and every fiber must complete all its iterations.
+ */
+#define BLK2_FIBERS 64
+#define BLK2_ITERS  200
+static _Atomic int g_blk2_done;
+static _Atomic int g_blk2_lock;   /* 0/1 spin "flush lock" */
+
+static void
+blk2_proc(void *arg)
+{
+	int iters = (int)(intptr_t)arg;
+	int k;
+	char path[256], tmpdir[200];
+	int fd;
+	static const char buf[512] = { 0 };
+
+	if (xtc_fs_tmpdir(tmpdir, sizeof tmpdir) != XTC_OK)
+		return;
+	snprintf(path, sizeof path, "%s/xtc-blk2-%p", tmpdir, (void *)&k);
+	fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0600);
+	if (fd < 0)
+		return;
+	for (k = 0; k < iters; k++) {
+		int held = 0;
+		/* A subset of iterations grab the shared flush lock and hold
+		 * it ACROSS the aio write+fdatasync park (the WALWriteLock-
+		 * holder-across-fsync shape): if the holder is stranded
+		 * post-park, every fiber spinning for the lock wedges. */
+		if ((k & 3) == 0) {
+			int spins = 0;
+			while (atomic_exchange_explicit(&g_blk2_lock, 1,
+			    memory_order_acquire) != 0) {
+				xtc_yield();
+				if (++spins > 100000000) { held = -1; break; }
+			}
+			if (held == 0) held = 1;
+		}
+		if (held < 0) break;   /* wedge guard */
+		/* Native io_uring aio: pwrite then fdatasync, each PARKS the
+		 * fiber on its own completion CQE -- the exact path the
+		 * concurrent-commit report implicates. */
+		(void)xtc_aio_pwrite(fd, buf, sizeof buf,
+		    (int64_t)k * (int64_t)sizeof buf);
+		(void)xtc_aio_fdatasync(fd);
+		if (held == 1)
+			atomic_store_explicit(&g_blk2_lock, 0,
+			    memory_order_release);
+	}
+	(void)close(fd);
+	(void)unlink(path);
+	atomic_fetch_add(&g_blk2_done, 1);
+}
+
+static MunitResult
+test_concurrent_commit_resume(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	int i;
+	(void)p; (void)d;
+
+	atomic_store(&g_blk2_done, 0);
+	atomic_store(&g_blk2_lock, 0);
+	munit_assert_int(xtc_exec_init(&e, 12), ==, XTC_OK);
+	xtc_exec_set_eager_rebalance(e, 1);
+	for (i = 0; i < BLK2_FIBERS; i++) {
+		opts.name = "blk2";
+		opts.migratable = 1;
+		/* Spawn across a couple loops so there is both homing and
+		 * heavy stealing. */
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, i % 3),
+		    blk2_proc, (void *)(intptr_t)BLK2_ITERS, &opts, &pid),
+		    ==, XTC_OK);
+	}
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_blk2_done), ==, BLK2_FIBERS);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -422,6 +517,7 @@ static MunitTest tests[] = {
 	{ "/accessors_errors",        test_accessors_errors,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/class_accessors",         test_exec_class_accessors, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk1_blocking_resume",    test_blocking_resume_on_exec, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Blk2_concurrent_commit",  test_concurrent_commit_resume, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/exec", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

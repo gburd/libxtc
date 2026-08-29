@@ -46,6 +46,18 @@ struct blk_work {
 	int            (*fn)(void *);
 	void            *arg;
 	_Atomic int      result;
+	_Atomic int      done;         /* set AFTER the wakeup write; the
+	                                * caller must spin-park until this is
+	                                * 1 -- a spurious wake (cross-thread
+	                                * nudge / eager rebalance / stray
+	                                * xtc_proc_wake) can resume the parked
+	                                * caller before the worker has written
+	                                * the pipe, and reading/closing then
+	                                * would race the worker's write and
+	                                * free the on-stack work item out from
+	                                * under it (TSan-caught close-vs-write
+	                                * on the completion pipe under
+	                                * concurrent commit). */
 	int              wr_fd;        /* write end of the wakeup pipe */
 	int              detached;     /* 1: fire-and-forget; worker frees it */
 	struct blk_work *next;
@@ -118,16 +130,28 @@ blk_worker(void *unused)
 		}
 		fn_fd = w->wr_fd;
 		atomic_store_explicit(&w->result, r, memory_order_release);
-		/* Wake the parked process.  After this byte is readable the
-		 * caller owns w again, so do not touch w afterwards. */
+		/* Wake the parked caller with a pipe byte, THEN publish
+		 * completion with a release store to w->done as our LAST touch
+		 * of w.  The caller treats w->done -- not the byte -- as the
+		 * completion token: it re-parks on a SPURIOUS wake (a
+		 * cross-thread nudge / eager-rebalance poke / stray
+		 * xtc_proc_wake) until it observes done == 1, so it can neither
+		 * read+close the pipe nor free this on-stack work item before
+		 * we are finished with it.  Because done is stored AFTER the
+		 * write, the caller's done==1 observation (acquire) strictly
+		 * follows this write, so its close cannot race the write (the
+		 * concurrent-commit strand, TSan-caught as close-vs-write on
+		 * the completion pipe).  After the done store we must not touch
+		 * w again. */
 		{
 			char b = 'x';
-			ssize_t n;
+			ssize_t nw;
 			do {
 				/* One byte into a fresh pipe never blocks. */
-				n = write(fn_fd, &b, 1);  /* XTC_BLOCKING_OK */
-			} while (n < 0 && errno == EINTR);
+				nw = write(fn_fd, &b, 1);  /* XTC_BLOCKING_OK */
+			} while (nw < 0 && errno == EINTR);
 		}
+		atomic_store_explicit(&w->done, 1, memory_order_release);
 	}
 }
 
@@ -237,6 +261,7 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	w.fn = fn;
 	w.arg = arg;
 	atomic_store_explicit(&w.result, 0, memory_order_relaxed);
+	atomic_store_explicit(&w.done, 0, memory_order_relaxed);
 	w.wr_fd = pfd[1];
 	w.detached = 0;        /* synchronous: the caller owns w and waits */
 	w.next = NULL;
@@ -250,10 +275,23 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	(void)pthread_cond_signal(&g_cv);
 	(void)__xtc_mtx_unlock(&g_lock);
 
-	/* Park until the worker signals completion. */
-	(void)xtc_proc_wait_fd(pfd[0], XTC_IO_READABLE, -1, &revents);
+	/* Park until the worker publishes completion (w.done), then drain the
+	 * wakeup byte and close.  w.done -- not the wake -- is the completion
+	 * token: xtc_proc_wait_fd may return spuriously (a cross-thread
+	 * nudge, eager-rebalance poke, or stray xtc_proc_wake are all
+	 * documented to cause spurious wakes the waiter must re-evaluate), so
+	 * we re-park until done is set.  The worker stores done with release
+	 * AFTER its wakeup write, so our acquire-observation of done==1
+	 * strictly follows that write -- the read + close below therefore
+	 * cannot race the worker's write, and w is not freed until the worker
+	 * is finished with it (the concurrent-commit strand, TSan-caught as
+	 * close-vs-write on the completion pipe). */
+	while (!atomic_load_explicit(&w.done, memory_order_acquire)) {
+		revents = 0;
+		(void)xtc_proc_wait_fd(pfd[0], XTC_IO_READABLE, -1, &revents);
+	}
 	do {
-		/* Readable per wait_fd above, so this does not block. */
+		/* done implies the byte was written before it; this drains it. */
 		n = read(pfd[0], drain, sizeof drain);  /* XTC_BLOCKING_OK */
 	} while (n < 0 && errno == EINTR);
 
@@ -336,6 +374,7 @@ xtc_blocking_run_off_loop(int (*fn)(void *), void *arg, int *out_result)
 	w.fn = fn;
 	w.arg = arg;
 	atomic_store_explicit(&w.result, 0, memory_order_relaxed);
+	atomic_store_explicit(&w.done, 0, memory_order_relaxed);
 	w.wr_fd = pfd[1];
 	w.detached = 0;        /* the caller owns w and waits */
 	w.next = NULL;
