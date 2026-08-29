@@ -281,7 +281,7 @@ jobs:
         run: |
           cd build_tsan
           rc=0
-          for t in test_fctx test_async test_proc test_svr test_chan test_proc_table_stress; do
+          for t in test_fctx test_async test_proc test_svr test_chan test_proc_table_stress test_blocking; do
             make "$t" >/dev/null 2>&1 || continue
             echo "=== $t ==="
             ./"$t" 2>&1 | tee "tsan_$t.log"
