@@ -180,6 +180,7 @@ __xtc_io_backend_init(xtc_io_t *io)
 	io->n_pending_del = 0;
 	io->cap_pending_del = 0;
 	atomic_store_explicit(&io->has_pending_del, 0, memory_order_relaxed);
+	atomic_store_explicit(&io->owner_set, 0, memory_order_relaxed);
 	if (pthread_mutex_init(&io->del_lock, NULL) != 0) {
 		io_uring_queue_exit(&io->ring);
 		return XTC_E_INTERNAL;
@@ -373,6 +374,19 @@ int
 __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 {
 	if (io == NULL || fd < 0) return XTC_E_INVAL;
+	/*
+	 * If we ARE the io's owning (poll) thread, unregister inline -- this
+	 * is the common case (a fiber re-parking on the same fd on its own
+	 * loop) and MUST be synchronous: deferring it would leave the old
+	 * registration in io->fds so the immediate re-register in the next
+	 * xtc_proc_wait_fd sees a duplicate and fails, stranding the fiber.
+	 * We can only cross-loop-defer when we are genuinely on a different
+	 * OS thread than the owner.  owner_tid is recorded by the owner in
+	 * xtc_io_poll; until it is set (before the loop has ever polled)
+	 * there is no concurrent poller, so inline is safe. */
+	if (!atomic_load_explicit(&io->owner_set, memory_order_acquire) ||
+	    pthread_equal(pthread_self(), io->owner_tid))
+		return xtc_io_del_fd(io, fd);
 	(void)pthread_mutex_lock(&io->del_lock);
 	if (io->n_pending_del >= io->cap_pending_del) {
 		int newcap = io->cap_pending_del ? io->cap_pending_del * 2 : 16;
@@ -455,6 +469,14 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	if (io == NULL || events == NULL || max <= 0 || n_out == NULL)
 		return XTC_E_INVAL;
 	*n_out = 0;
+
+	/* Record the owning (poll) thread on first poll, so a cross-loop
+	 * __xtc_io_defer_del_fd caller can tell whether it is us (del inline)
+	 * or a foreign thread (defer to us). */
+	if (!atomic_load_explicit(&io->owner_set, memory_order_relaxed)) {
+		io->owner_tid = pthread_self();
+		atomic_store_explicit(&io->owner_set, 1, memory_order_release);
+	}
 
 	/* Owner-thread drain of any cross-loop deferred unregisters queued
 	 * by foreign threads (see __xtc_io_defer_del_fd).  Done here so the

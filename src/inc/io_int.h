@@ -181,6 +181,8 @@ struct xtc_io {
 	int              cap_pending_del;
 	_Atomic int      has_pending_del;  /* fast, lock-free "is queue non-empty?" */
 	pthread_mutex_t  del_lock;        /* guards ONLY pending_del (not fds/ring) */
+	pthread_t        owner_tid;       /* the thread that polls this io */
+	_Atomic int      owner_set;       /* 1 once owner_tid is recorded */
 	/*
 	 * L2 ring-pointer preempt (INSPIRED BY Glommio's need_preempt():
 	 * reactor.rs / sys/uring.rs preempt_pointers).  A dedicated tiny
