@@ -97,6 +97,7 @@ struct __xtc_aix_reg {
 };
 #elif defined(XTC_IO_BACKEND_URING)
 #include <liburing.h>
+#include <pthread.h>
 /*
  * Per-fd state for the io_uring backend.  The user_data passed to
  * each POLL_ADD points at one of these.  The fd_table maps fd ->
@@ -162,6 +163,25 @@ struct xtc_io {
 	struct __xtc_uring_fd *fds;
 	struct __xtc_uring_fd *zombies;  /* deleted fds awaiting terminal CQE */
 	/*
+	 * Cross-loop deferred unregister queue.  io->fds / io->zombies and
+	 * the SQ ring are single-producer, owned by this io's loop thread.
+	 * A migratable fiber that parked on this loop but was woken via a
+	 * non-fd path (timeout / xtc_proc_wake / mailbox) and then work-
+	 * stolen resumes on ANOTHER thread with its park_fd still live, and
+	 * its xtc_proc_wait_fd cleanup would otherwise call xtc_io_del_fd on
+	 * THIS io from the wrong thread -- racing the fd list AND the SQ ring
+	 * (the native-path concurrent-commit collapse, TSan-caught
+	 * 2026-08-30).  Instead the foreign thread posts the fd here under
+	 * del_lock and nudges this loop; the owning thread drains it at the
+	 * top of xtc_io_poll and performs the real unregister on its own
+	 * ring.  del_lock guards ONLY this small queue, never the hot fds
+	 * list or the ring. */
+	int             *pending_del;    /* fds awaiting owner-thread unregister */
+	int              n_pending_del;
+	int              cap_pending_del;
+	_Atomic int      has_pending_del;  /* fast, lock-free "is queue non-empty?" */
+	pthread_mutex_t  del_lock;        /* guards ONLY pending_del (not fds/ring) */
+	/*
 	 * L2 ring-pointer preempt (INSPIRED BY Glommio's need_preempt():
 	 * reactor.rs / sys/uring.rs preempt_pointers).  A dedicated tiny
 	 * ring carrying ONLY a rearmed TIMEOUT SQE, so
@@ -195,5 +215,14 @@ struct xtc_io {
 	struct __xtc_sim_io *sim;
 #endif
 };
+
+/*
+ * Cross-loop deferred fd-unregister.  Each backend .c provides one:
+ * io_uring queues the fd and drains it on the owning thread (its fds
+ * list + SQ ring are single-owner); the other backends passthrough to
+ * xtc_io_del_fd (kernel-synchronized or their own registry).  Internal;
+ * the sole caller is xtc_proc_wait_fd's post-migration cleanup.
+ */
+int __xtc_io_defer_del_fd(xtc_io_t *io, int fd);
 
 #endif /* XTC_IO_INT_H */

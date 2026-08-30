@@ -816,6 +816,17 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 	return XTC_OK;
 }
 
+/* Non-io_uring backends: reg/del are kernel-synchronized (epoll) or
+ * this backend keeps its own registry; the cross-loop deferred-
+ * unregister that io_uring needs is a no-op passthrough here (the
+ * caller is xtc_proc_wait_fd cleanup after a migration).  Provided so
+ * the single caller links on every backend. */
+int
+__xtc_io_defer_del_fd(xtc_io_t *io, int fd)
+{
+	return xtc_io_del_fd(io, fd);
+}
+
 /* --------------------------------------------------------------- */
 /* file AIO                                                        */
 /* --------------------------------------------------------------- */

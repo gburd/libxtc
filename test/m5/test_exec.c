@@ -17,6 +17,9 @@
 #include "xtc_blocking.h"
 #include "xtc_async.h"
 #include "xtc_int.h"
+#include "os_thread.h"   /* __os_thread_* for the foreign poker thread */
+#include "os_time.h"     /* __os_sleep_ns */
+#include "io_pipe_compat.h"
 /* [Ex1, Ex2] init/fini round-trip. */
 static MunitResult
 test_init_fini(const MunitParameter p[], void *d)
@@ -506,6 +509,114 @@ test_concurrent_commit_resume(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [Blk3] Cross-loop fd-unregister under migration.  Migratable fibers
+ * park via xtc_proc_wait_fd on their own pipe fd; a FOREIGN OS thread
+ * pokes them with xtc_proc_wake (a NON-fd wake -- it does not satisfy
+ * the fd, so on resume park_fd is still live) while eager rebalance
+ * work-steals them across loops.  A woken-then-stolen fiber therefore
+ * runs its xtc_proc_wait_fd cleanup (xtc_io_del_fd) on an OS thread that
+ * is NOT the owner of the io it registered on -- the cross-loop
+ * io->fds/SQ-ring data race the PG team hit (TSan, 2026-08-30).  With
+ * the fix the unregister is deferred to the owning loop, so the run
+ * must QUIESCE and every fiber completes.  (On io_uring this exercises
+ * the deferred-unregister path; on other backends the safe
+ * passthrough.)
+ */
+#define BLK3_FIBERS 32
+#define BLK3_ITERS  40
+static _Atomic int g_blk3_done;
+static xtc_pid_t   g_blk3_pids[BLK3_FIBERS];
+static int         g_blk3_rfd[BLK3_FIBERS];
+static int         g_blk3_wfd[BLK3_FIBERS];
+static _Atomic int g_blk3_ready;
+static _Atomic int g_blk3_stop;
+
+static void *
+blk3_poker(void *arg)
+{
+	(void)arg;
+	while (atomic_load(&g_blk3_ready) < BLK3_FIBERS &&
+	    !atomic_load(&g_blk3_stop))
+		(void)__os_sleep_ns(100 * 1000LL);
+	while (!atomic_load(&g_blk3_stop)) {
+		int i;
+		for (i = 0; i < BLK3_FIBERS; i++)
+			(void)xtc_proc_wake(g_blk3_pids[i]);
+		(void)__os_sleep_ns(50 * 1000LL);
+	}
+	return NULL;
+}
+
+static void
+blk3_proc(void *arg)
+{
+	int idx = (int)(intptr_t)arg;
+	int k;
+	g_blk3_pids[idx] = xtc_self();
+	atomic_fetch_add(&g_blk3_ready, 1);
+	for (k = 0; k < BLK3_ITERS; k++) {
+		uint32_t revents = 0;
+		/* Short-timeout fd park.  A poker xtc_proc_wake resumes us
+		 * without the fd being ready (park_fd stays live); under
+		 * eager rebalance we may resume on a peer loop -> the
+		 * cleanup del_fd is cross-loop. */
+		(void)xtc_proc_wait_fd(g_blk3_rfd[idx], XTC_IO_READABLE,
+		    2 * 1000 * 1000, &revents);
+		if ((k & 7) == 0) {
+			char b = 'x';
+			char sink[8];
+			(void)xtc_test_pipe_write(g_blk3_wfd[idx], &b, 1);
+			revents = 0;
+			(void)xtc_proc_wait_fd(g_blk3_rfd[idx],
+			    XTC_IO_READABLE, -1, &revents);
+			(void)xtc_test_pipe_read(g_blk3_rfd[idx], sink,
+			    sizeof sink);
+		}
+	}
+	atomic_fetch_add(&g_blk3_done, 1);
+}
+
+static MunitResult
+test_cross_loop_del_fd(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	__os_thread_t poker = {0};
+	int i;
+	(void)p; (void)d;
+
+	atomic_store(&g_blk3_done, 0);
+	atomic_store(&g_blk3_ready, 0);
+	atomic_store(&g_blk3_stop, 0);
+	for (i = 0; i < BLK3_FIBERS; i++) {
+		g_blk3_rfd[i] = g_blk3_wfd[i] = -1;
+		if (xtc_test_make_pipe(&g_blk3_rfd[i], &g_blk3_wfd[i]) != 0)
+			return MUNIT_SKIP;   /* no pipes available */
+	}
+	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
+	xtc_exec_set_eager_rebalance(e, 1);
+	munit_assert_int(__os_thread_create(&poker, blk3_poker, NULL),
+	    ==, XTC_OK);
+	for (i = 0; i < BLK3_FIBERS; i++) {
+		opts.name = "blk3";
+		opts.migratable = 1;
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
+		    blk3_proc, (void *)(intptr_t)i, &opts, &pid), ==, XTC_OK);
+	}
+	/* Must QUIESCE: without the fix a woken-then-stolen fiber corrupts
+	 * the peer io's fd registry and a fiber is stranded. */
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	atomic_store(&g_blk3_stop, 1);
+	munit_assert_int(__os_thread_join(&poker, NULL), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_blk3_done), ==, BLK3_FIBERS);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	for (i = 0; i < BLK3_FIBERS; i++)
+		xtc_test_close_pipe(g_blk3_rfd[i], g_blk3_wfd[i]);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -519,6 +630,7 @@ static MunitTest tests[] = {
 	{ "/class_accessors",         test_exec_class_accessors, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk1_blocking_resume",    test_blocking_resume_on_exec, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk2_concurrent_commit",  test_concurrent_commit_resume, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Blk3_cross_loop_del_fd",  test_cross_loop_del_fd, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/exec", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

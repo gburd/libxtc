@@ -921,19 +921,39 @@ __xtc_loop_step_once(xtc_loop_t *loop)
 	int has_timers = __xtc_timer_heap_next_deadline(loop) >= 0;
 	if (!has_tasks && !has_timers) {
 		/*
-		 * No local work.  If this loop is part of an executor, a
-		 * peer may have stealable work -- attempt a steal before
-		 * reporting idle.  Without this an idle worker (its own
-		 * n_alive == 0) returns immediately and never steals, so
-		 * all work piles on the loop the tasks were spawned on.
-		 * On a successful steal we enqueue locally and fall through
-		 * to step (to run it); otherwise we are genuinely idle and
-		 * return 0 so the worker does its bounded poll + stop-flag
-		 * check rather than blocking in step.
+		 * No locally-homed alive task and no timer.  But this loop may
+		 * still own a PARKED fiber whose completion is pending on its
+		 * OWN io ring: a migratable fiber that submitted an
+		 * xtc_aio_* here and yielded is charged to its HOME loop's
+		 * n_alive (see loop.c DONE bookkeeping), so has_tasks reads 0
+		 * here even though this loop must reap that completion.  Reap
+		 * our own io FIRST -- a non-blocking poll that dispatches any
+		 * ready completion, making the woken owner locally runnable --
+		 * BEFORE trying to steal.  Without this, under eager rebalance
+		 * the loop busy-spins steal->run->park->steal (each stolen
+		 * fiber parks immediately, keeping has_tasks==0) and NEVER
+		 * polls its own ring, so a fiber parked here on an
+		 * xtc_aio_fdatasync -- possibly holding a lock every peer needs
+		 * (PG's WALWriteLock) -- is stranded forever (the native-path
+		 * concurrent-commit collapse, 2026-08-30).
 		 */
 		if (loop->exec != NULL) {
 			extern void *__xtc_exec_try_steal(xtc_loop_t *me);
-			xtc_task_t *stolen = __xtc_exec_try_steal(loop);
+			xtc_task_t *stolen;
+			xtc_io_event_t oevs[16];
+			int on_out = 0, oi;
+			if (xtc_io_poll(loop->io, oevs,
+			    (int)(sizeof oevs / sizeof oevs[0]), 0,
+			    &on_out) == XTC_OK && on_out > 0) {
+				for (oi = 0; oi < on_out; oi++)
+					(void)__xtc_loop_dispatch_event(loop,
+					    &oevs[oi]);
+				/* A dispatched completion enqueued the woken
+				 * owner locally; run it. */
+				rc = __xtc_loop_step(loop);
+				return rc < 0 ? rc : 1;
+			}
+			stolen = __xtc_exec_try_steal(loop);
 			if (stolen != NULL) {
 				atomic_fetch_add_explicit(&loop->n_steals, 1,
 				    memory_order_relaxed);

@@ -1230,7 +1230,7 @@ test_stack_guard: $(srcdir)/../test/m4/test_stack_guard.c \
 # M5 tests.
 test_exec: $(srcdir)/../test/m5/test_exec.c \
 		$(srcdir)/../test/m5/munit.c $(STATIC_LIB)
-	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m5 \
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m5 -I$(srcdir)/../test/include \
 		-o $@ $(srcdir)/../test/m5/test_exec.c \
 		$(srcdir)/../test/m5/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
