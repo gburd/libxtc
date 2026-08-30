@@ -176,6 +176,14 @@ __xtc_io_backend_init(xtc_io_t *io)
 	}
 	io->fds = NULL;
 	io->zombies = NULL;
+	io->pending_del = NULL;
+	io->n_pending_del = 0;
+	io->cap_pending_del = 0;
+	atomic_store_explicit(&io->has_pending_del, 0, memory_order_relaxed);
+	if (pthread_mutex_init(&io->del_lock, NULL) != 0) {
+		io_uring_queue_exit(&io->ring);
+		return XTC_E_INTERNAL;
+	}
 	return XTC_OK;
 }
 
@@ -196,6 +204,13 @@ __xtc_io_backend_fini(xtc_io_t *io)
 		__os_free(p);
 	}
 	io->zombies = NULL;
+	if (io->pending_del != NULL) {
+		__os_free(io->pending_del);
+		io->pending_del = NULL;
+	}
+	io->n_pending_del = 0;
+	io->cap_pending_del = 0;
+	(void)pthread_mutex_destroy(&io->del_lock);
 	io_uring_queue_exit(&io->ring);
 }
 
@@ -344,6 +359,79 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 	return XTC_OK;
 }
 
+/*
+ * Cross-loop deferred unregister.  Called when a fiber that parked on
+ * THIS io's loop was woken via a non-fd path and work-stolen, so its
+ * xtc_proc_wait_fd cleanup runs on a DIFFERENT OS thread than this io's
+ * owner.  Calling xtc_io_del_fd directly from that foreign thread would
+ * race the single-owner fds list AND the single-producer SQ ring.
+ * Instead, queue the fd under del_lock and nudge the owning loop; it
+ * drains this queue at the top of its next xtc_io_poll and performs the
+ * real unregister on its own thread.  Internal (declared in io_int.h).
+ */
+int
+__xtc_io_defer_del_fd(xtc_io_t *io, int fd)
+{
+	if (io == NULL || fd < 0) return XTC_E_INVAL;
+	(void)pthread_mutex_lock(&io->del_lock);
+	if (io->n_pending_del >= io->cap_pending_del) {
+		int newcap = io->cap_pending_del ? io->cap_pending_del * 2 : 16;
+		int *np = NULL;
+		if (__os_realloc(io->pending_del,
+		    (size_t)newcap * sizeof(int), (void **)&np) != XTC_OK) {
+			(void)pthread_mutex_unlock(&io->del_lock);
+			return XTC_E_NOMEM;
+		}
+		io->pending_del = np;
+		io->cap_pending_del = newcap;
+	}
+	io->pending_del[io->n_pending_del++] = fd;
+	atomic_store_explicit(&io->has_pending_del, 1, memory_order_release);
+	(void)pthread_mutex_unlock(&io->del_lock);
+	/* Nudge the owner out of its I/O wait so it drains promptly. */
+	return xtc_io_wakeup(io);
+}
+
+/*
+ * Drain the deferred-unregister queue on the OWNING loop thread (called
+ * from xtc_io_poll only).  Performs the real xtc_io_del_fd for each
+ * queued fd on this thread, so the fds list + SQ ring stay
+ * single-owner.
+ */
+static void
+__drain_pending_del(xtc_io_t *io)
+{
+	int local[32];
+	int n = 0, i;
+	if (atomic_load_explicit(&io->has_pending_del,
+	    memory_order_acquire) == 0)
+		return;
+	for (;;) {
+		(void)pthread_mutex_lock(&io->del_lock);
+		n = io->n_pending_del;
+		if (n > (int)(sizeof local / sizeof local[0]))
+			n = (int)(sizeof local / sizeof local[0]);
+		for (i = 0; i < n; i++)
+			local[i] = io->pending_del[i];
+		/* shift the remainder down */
+		if (n < io->n_pending_del) {
+			int r = io->n_pending_del - n, j;
+			for (j = 0; j < r; j++)
+				io->pending_del[j] = io->pending_del[n + j];
+			io->n_pending_del = r;
+		} else {
+			io->n_pending_del = 0;
+			atomic_store_explicit(&io->has_pending_del, 0,
+			    memory_order_relaxed);
+		}
+		(void)pthread_mutex_unlock(&io->del_lock);
+		for (i = 0; i < n; i++)
+			(void)xtc_io_del_fd(io, local[i]);
+		if (n < (int)(sizeof local / sizeof local[0]))
+			break;   /* fewer than a full batch remained -> done */
+	}
+}
+
 /* PUBLIC: int xtc_io_poll __P((xtc_io_t *, xtc_io_event_t *, int, int64_t, int *)); */
 /* XTC_NOALLOC_BEGIN: io_uring per-poll CQE reap path (PLAN.md 19.23).
  * KNOWN GAP (flagged in the s_noalloc rollout report, not silenced):
@@ -367,6 +455,11 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	if (io == NULL || events == NULL || max <= 0 || n_out == NULL)
 		return XTC_E_INVAL;
 	*n_out = 0;
+
+	/* Owner-thread drain of any cross-loop deferred unregisters queued
+	 * by foreign threads (see __xtc_io_defer_del_fd).  Done here so the
+	 * fds list + SQ ring are only ever mutated by this io's own loop. */
+	__drain_pending_del(io);
 
 	if (timeout_ns < 0) {
 		tsp = NULL;

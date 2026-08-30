@@ -2213,10 +2213,34 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	    memory_order_relaxed);
 
 	/* Cleanup: unregister fd if still parked, cancel timer.  Use wl (the
-	 * loop we registered on), not the home loop. */
-	(void)had_fd;   /* unused but documents intent */
+	 * loop we registered on), not the home loop.  If this fiber was woken
+	 * via a NON-fd path (timeout / xtc_proc_wake / mailbox -- which do
+	 * not clear park_fd, unlike the fd-completion dispatch) and then
+	 * work-stolen, it is now resuming on a DIFFERENT OS thread than wl's
+	 * owner.  Calling xtc_io_del_fd on wl->io from here would race wl's
+	 * single-owner fd registry AND its single-producer SQ ring (the
+	 * native-path concurrent-commit collapse, TSan-caught 2026-08-30).
+	 * When we have migrated off wl, defer the unregister to wl's owning
+	 * thread; when still on wl (the common case), do it directly. */
 	if (self->task->park_fd >= 0) {
-		(void)xtc_io_del_fd(wl->io, self->task->park_fd);
+		extern int __xtc_io_defer_del_fd(xtc_io_t *, int);
+		(void)had_fd;   /* documents intent: an fd was registered */
+		/*
+		 * ALWAYS route the unregister to wl->io's owning loop thread,
+		 * never inline.  __xtc_current_loop is the fiber's LOGICAL loop
+		 * binding, which is preserved across a work-steal migration
+		 * (the coro carries it) -- so __xtc_current_loop == wl does NOT
+		 * imply we are on wl's physical OS thread; a migrated fiber
+		 * resuming on a peer thread still reads __xtc_current_loop ==
+		 * wl.  Comparing them to decide "safe to del inline" is wrong
+		 * (TSan showed one io mutated inline from 6 distinct threads).
+		 * The only thread that may touch wl->io's fd registry + SQ ring
+		 * is wl's own poll thread, so defer: __xtc_io_defer_del_fd
+		 * queues the fd and nudges wl, and wl performs the real
+		 * unregister when it next drains in xtc_io_poll.  For a backend
+		 * whose registry is kernel-synchronized (epoll) the defer is a
+		 * safe passthrough. */
+		(void)__xtc_io_defer_del_fd(wl->io, self->task->park_fd);
 		self->task->park_fd = -1;
 	}
 	if (had_timer && self->task->park_timer != NULL) {

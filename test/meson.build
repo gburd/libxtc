@@ -37,7 +37,7 @@ munit_tests = [
   # M4
   ['async', 'm4'], ['aio', 'm4'], ['fctx', 'm4'], ['stack_guard', 'm4'],
   # M5
-  ['exec', 'm5'], ['cross_wake', 'm5'], ['deque', 'm5'], ['steal', 'm5'],
+  ['cross_wake', 'm5'], ['deque', 'm5'], ['steal', 'm5'],
   # sim
   ['sim_rng', 'sim'],
   # M7
@@ -79,6 +79,7 @@ io_include_tests = {
   'io_events'      : 'm2',
   'io_wakeup'      : 'm2',
   'io_integration' : 'm3',
+  'exec'           : 'm5',
 }
 
 foreach spec : munit_tests
