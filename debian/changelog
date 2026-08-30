@@ -1,3 +1,22 @@
+libxtc (1.40.3-1) unstable; urgency=medium
+
+  * fix(exec,io): close the native-path concurrent-commit collapse -- two
+    cross-loop bugs surfaced by migratable fibers under eager rebalance.
+    (1) __xtc_loop_step_once busy-steal starvation: a loop that owns a
+    parked fiber's pending completion on its own ring but reads
+    has_tasks==0 (the fiber is charged to its home loop) would spin
+    stealing+running+parking peer work and never poll its own ring,
+    stranding the parked fiber (WALWriteLock holder).  Fix: reap our own
+    io before stealing.  (2) cross-loop xtc_io_del_fd data race
+    (TSan-reported): xtc_proc_wait_fd's cleanup unregistered the park fd
+    from the resuming thread, which after a work-steal is NOT the io's
+    owner -- racing io->fds/io->zombies and the single-producer SQ ring.
+    Fix: __xtc_io_defer_del_fd routes the unregister to the owning loop
+    thread (io_uring deferred queue drained in xtc_io_poll; other
+    backends passthrough).  Regression test m5 exec/Blk3_cross_loop_del_fd.
+
+ -- Greg Burd <greg@burd.me>  Sat, 30 Aug 2026 20:00:00 +0000
+
 libxtc (1.40.2-1) unstable; urgency=medium
 
   * fix(blocking): close-vs-write race on the completion pipe under
