@@ -133,18 +133,37 @@ __xtc_inbox_drain(xtc_loop_t *loop)
 		drained++;
 		switch (m->kind) {
 		case XTC_INB_WAKE:
-			if (m->task->state == XTC_TS_PARKED) {
-				m->task->state = XTC_TS_SCHEDULED;
+			{
+			/*
+			 * CAS the PARKED->SCHEDULED transition.  This handler
+			 * runs on THIS loop's thread, but the target task may
+			 * be a migratable fiber currently being dispatched or
+			 * run on ANOTHER loop (a stale WAKE that targeted the
+			 * task's waker loop after the task was work-stolen).
+			 * A plain read-check-write of task->state would race
+			 * that peer loop's dispatch store (loop.c
+			 * t->state = XTC_TS_RUNNING) and could double-enqueue
+			 * the task.  The CAS makes the transition atomic:
+			 * exactly one PARKED->SCHEDULED winner enqueues; a task
+			 * that is already SCHEDULED/RUNNING/DONE (not PARKED)
+			 * loses the CAS and instead latches wake_pending, so
+			 * the RUNNING->PARKED verdict re-schedules rather than
+			 * losing the wake (the prepare/park race, unchanged).
+			 * A PARKED task is in no run queue, so the winning
+			 * enqueue cannot race a concurrent dispatch of the same
+			 * task. */
+			int expect = XTC_TS_PARKED;
+			if (atomic_compare_exchange_strong_explicit(
+			    &m->task->state, &expect, XTC_TS_SCHEDULED,
+			    memory_order_acq_rel, memory_order_acquire)) {
 				(void)__xtc_loop_enqueue(loop, m->task);
 			} else {
-				/* The wake raced the park: the task is still
-				 * RUNNING (between arming its waker and yielding
-				 * to PARKED).  Latch it so the RUNNING->PARKED
-				 * transition re-schedules instead of parking --
-				 * otherwise a cross-thread wake fired in that
-				 * window would be lost (the prepare/park race). */
+				/* Not PARKED (raced the park, or running on a
+				 * peer): latch so the eventual RUNNING->PARKED
+				 * verdict re-schedules instead of parking. */
 				atomic_store_explicit(&m->task->wake_pending, 1,
 				    memory_order_release);
+			}
 			}
 			break;
 		case XTC_INB_PUBLISH:
@@ -613,7 +632,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 		    XTC_SIM_BUGGIFY("sched.runq.defer_ready") &&
 		    xtc_sim_buggify_fault(250)) {
 			xtc_task_t *other;
-			t->state = XTC_TS_SCHEDULED;
+			atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
+			    memory_order_release);
 			(void)__xtc_loop_enqueue(loop, t);
 			other = __queue_pop(loop);
 			t = (other != NULL) ? other : __queue_pop(loop);
@@ -634,7 +654,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 			(void)__os_clock_mono(&s);
 			t->run_start_ns = s;   /* start of this run quantum */
 		}
-		t->state = XTC_TS_RUNNING;
+		atomic_store_explicit(&t->state, XTC_TS_RUNNING,
+		    memory_order_release);
 		verdict = t->fn(t, t->user);
 		/*
 		 * L1 + L3 run-end time accounting.  Read the clock ONCE at the
@@ -698,7 +719,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 		}
 		switch (verdict) {
 		case XTC_TASK_DONE:
-			t->state = XTC_TS_DONE;
+			atomic_store_explicit(&t->state, XTC_TS_DONE,
+			    memory_order_release);
 			/* Decrement the HOME loop's alive count (where spawn
 			 * incremented it), not the loop currently running the
 			 * task.  Under work stealing the two differ; keying on
@@ -750,7 +772,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 			}
 			break;
 		case XTC_TASK_RESCHED:
-			t->state = XTC_TS_SCHEDULED;
+			atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
+			    memory_order_release);
 			(void)__xtc_loop_enqueue(loop, t);
 			break;
 		case XTC_TASK_PENDING:
@@ -764,10 +787,12 @@ __xtc_loop_step(xtc_loop_t *loop)
 			 * further wakeup pending -> a hang. */
 			if (atomic_exchange_explicit(&t->wake_pending, 0,
 			    memory_order_acquire)) {
-				t->state = XTC_TS_SCHEDULED;
+				atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
+				    memory_order_release);
 				(void)__xtc_loop_enqueue(loop, t);
 			} else {
-				t->state = XTC_TS_PARKED;
+				atomic_store_explicit(&t->state, XTC_TS_PARKED,
+				    memory_order_release);
 			}
 			break;
 		default:

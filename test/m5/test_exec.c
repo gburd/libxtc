@@ -617,6 +617,91 @@ test_cross_loop_del_fd(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [Blk4] Cross-loop task->state + timer-heap stress.  Migratable fibers,
+ * all spawned on ONE loop so peers steal them, each looping on a short
+ * xtc_recv timeout (which arms a park timer) while a FOREIGN OS thread
+ * hammers xtc_proc_wake on all of them.  This drives (a) a stale
+ * XTC_INB_WAKE draining on a fiber's old loop while it is dispatched on
+ * the loop that stole it -- the cross-loop task->state race now closed
+ * by the atomic CAS in the inbox-WAKE handler; and (b)
+ * xtc_task_park_on_timer arming a timer on the RUNNING loop (not the
+ * home loop) -- the cross-loop timer-heap race now closed by using
+ * __xtc_current_loop.  Both were TSan-found 2026-08-30.  The run must
+ * QUIESCE and every fiber complete all iterations.
+ */
+#define BLK4_FIBERS 24
+#define BLK4_ITERS  60
+static _Atomic int g_blk4_done;
+static xtc_pid_t   g_blk4_pids[BLK4_FIBERS];
+static _Atomic int g_blk4_ready;
+static _Atomic int g_blk4_stop;
+
+static void *
+blk4_poker(void *arg)
+{
+	(void)arg;
+	while (atomic_load(&g_blk4_ready) < BLK4_FIBERS &&
+	    !atomic_load(&g_blk4_stop))
+		(void)__os_sleep_ns(100 * 1000LL);
+	while (!atomic_load(&g_blk4_stop)) {
+		int i;
+		for (i = 0; i < BLK4_FIBERS; i++)
+			(void)xtc_proc_wake(g_blk4_pids[i]);
+	}
+	return NULL;
+}
+
+static void
+blk4_proc(void *arg)
+{
+	int idx = (int)(intptr_t)arg;
+	int k;
+	g_blk4_pids[idx] = xtc_self();
+	atomic_fetch_add(&g_blk4_ready, 1);
+	for (k = 0; k < BLK4_ITERS; k++) {
+		void *msg = NULL;
+		size_t len = 0;
+		/* recv-timeout: arms a park timer on the running loop; a poker
+		 * wake resumes us (mailbox empty -> XTC_E_AGAIN) and we re-park,
+		 * re-arming on whatever loop currently runs us. */
+		if (xtc_recv(&msg, &len, 1 * 1000 * 1000 /* 1ms */) == XTC_OK)
+			xtc_free(msg);
+	}
+	atomic_fetch_add(&g_blk4_done, 1);
+}
+
+static MunitResult
+test_cross_loop_state_timer(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	__os_thread_t poker = {0};
+	int i;
+	(void)p; (void)d;
+
+	atomic_store(&g_blk4_done, 0);
+	atomic_store(&g_blk4_ready, 0);
+	atomic_store(&g_blk4_stop, 0);
+	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
+	xtc_exec_set_eager_rebalance(e, 1);
+	munit_assert_int(__os_thread_create(&poker, blk4_poker, NULL),
+	    ==, XTC_OK);
+	for (i = 0; i < BLK4_FIBERS; i++) {
+		opts.name = "blk4";
+		opts.migratable = 1;
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
+		    blk4_proc, (void *)(intptr_t)i, &opts, &pid), ==, XTC_OK);
+	}
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	atomic_store(&g_blk4_stop, 1);
+	munit_assert_int(__os_thread_join(&poker, NULL), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_blk4_done), ==, BLK4_FIBERS);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -631,6 +716,7 @@ static MunitTest tests[] = {
 	{ "/Blk1_blocking_resume",    test_blocking_resume_on_exec, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk2_concurrent_commit",  test_concurrent_commit_resume, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk3_cross_loop_del_fd",  test_cross_loop_del_fd, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Blk4_cross_loop_state_timer", test_cross_loop_state_timer, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/exec", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

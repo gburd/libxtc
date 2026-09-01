@@ -3485,7 +3485,8 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 	info->kill_pending =
 	    atomic_load_explicit(&p->kill_pending, memory_order_relaxed) ? 1 : 0;
 	if (p->task != NULL) {
-		int st = p->task->state;
+		int st = atomic_load_explicit(&p->task->state,
+		    memory_order_relaxed);   /* introspection snapshot */
 		info->run_state = st;
 		if (st == XTC_TS_PARKED) {
 			if (p->task->park_fd >= 0)
