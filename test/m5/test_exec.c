@@ -708,6 +708,80 @@ test_cross_loop_state_timer(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [Blk5] Migratable-fiber timer-park resume across migration (the
+ * fsync/WAL-commit fiber-resume strand, reported 2026-09-01).  N
+ * migratable fibers, all spawned on ONE loop so peers steal them,
+ * contend on a shared spin lock (PG's WALWriteLock shape); the holder
+ * sleeps briefly (xtc_proc_sleep) while holding it, waiters park in
+ * xtc_proc_sleep.  A migratable fiber can be resumed (work-stolen /
+ * spuriously) BEFORE its park timer fires, so on the next sleep
+ * iteration it would hit park_on_timer's "already parked" reject and
+ * re-park trusting the stale timer -- which is armed on a loop it has
+ * since left.  When that stale timer fires it wakes the fiber onto the
+ * OLD (now-idle, asleep) loop and the wake is stranded, so the lock
+ * holder never wakes to release: everyone piles up behind it and the
+ * run never quiesces.  The fix (cancel the stale timer before every
+ * re-arm, matching the sync.c/future.c/lock_mgr.c timed-wait
+ * discipline) makes the fire always wake the fiber on the loop it is
+ * actually on.  Without the fix this hangs ~100%%; with it, quiesces
+ * and every fiber completes.
+ */
+#define BLK5_FIBERS 24
+#define BLK5_ITERS  30
+static _Atomic int g_blk5_done;
+static _Atomic int g_blk5_lock;   /* 0/1 shared "WALWriteLock" */
+
+static void
+blk5_proc(void *arg)
+{
+	int idx = (int)(intptr_t)arg;
+	int k;
+	(void)idx;
+	for (k = 0; k < BLK5_ITERS; k++) {
+		int spins = 0;
+		/* Acquire the shared lock, parking (not busy-yield) so waiters
+		 * are NOT runnable -- this lets loops go genuinely idle, the
+		 * state the stranded-wake needs. */
+		while (atomic_exchange_explicit(&g_blk5_lock, 1,
+		    memory_order_acquire) != 0) {
+			(void)xtc_proc_sleep(50 * 1000LL);
+			if (++spins > 4000000) goto out;   /* defensive */
+		}
+		/* Hold the lock across a short sleep -- the holder's OWN park
+		 * timer is the one that must resume it after migration. */
+		(void)xtc_proc_sleep(20 * 1000LL);
+		atomic_store_explicit(&g_blk5_lock, 0, memory_order_release);
+	}
+out:
+	atomic_fetch_add(&g_blk5_done, 1);
+}
+
+static MunitResult
+test_migratable_timer_resume(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	int i;
+	(void)p; (void)d;
+
+	atomic_store(&g_blk5_done, 0);
+	atomic_store(&g_blk5_lock, 0);
+	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
+	xtc_exec_set_eager_rebalance(e, 1);
+	for (i = 0; i < BLK5_FIBERS; i++) {
+		opts.name = "blk5";
+		opts.migratable = 1;
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
+		    blk5_proc, (void *)(intptr_t)i, &opts, &pid), ==, XTC_OK);
+	}
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_blk5_done), ==, BLK5_FIBERS);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -723,6 +797,7 @@ static MunitTest tests[] = {
 	{ "/Blk2_concurrent_commit",  test_concurrent_commit_resume, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk3_cross_loop_del_fd",  test_cross_loop_del_fd, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk4_cross_loop_state_timer", test_cross_loop_state_timer, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Blk5_migratable_timer_resume", test_migratable_timer_resume, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/exec", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
