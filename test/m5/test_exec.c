@@ -648,6 +648,12 @@ blk4_poker(void *arg)
 		int i;
 		for (i = 0; i < BLK4_FIBERS; i++)
 			(void)xtc_proc_wake(g_blk4_pids[i]);
+		/* Throttle: a tight no-sleep wake loop livelocks the fibers
+		 * (they never complete a recv-timeout iteration because they
+		 * are re-woken instantly), which hangs on the coarse-timer
+		 * Windows runner.  A short sleep still creates the
+		 * stale-WAKE-during-dispatch window this test targets. */
+		(void)__os_sleep_ns(50 * 1000LL);
 	}
 	return NULL;
 }
