@@ -1537,6 +1537,23 @@ xtc_proc_sleep(int64_t ns)
 		(void)__os_clock_mono(&now);
 		if (now >= deadline)
 			return XTC_OK;
+		/*
+		 * Re-arm on the loop we are CURRENTLY on.  A migratable fiber
+		 * can be resumed (work-stolen and dispatched, or spuriously
+		 * woken) BEFORE its park timer fires -- so on this iteration
+		 * park_timer may still point at a live timer armed on a
+		 * DIFFERENT loop than the one now running us.  Leaving it in
+		 * place makes xtc_task_park_on_timer reject the re-arm
+		 * (park_timer != NULL) and re-park with NO timer of our own,
+		 * trusting a timer on a loop we have migrated away from: when
+		 * that stale timer fires it wakes us onto the OLD loop, which
+		 * may be idle and asleep, and the wake is stranded (the
+		 * migratable-fiber sleep/fsync-resume strand, 2026-09-01).
+		 * Cancel the stale timer (a race-free flag; the owning loop
+		 * reaps it) and arm a fresh one HERE so the fire always wakes
+		 * us on the loop we are actually on.
+		 */
+		__xtc_task_cancel_park_timer(self->task);
 		(void)xtc_task_park_on_timer(self->task, deadline - now);
 		ctx = __xtc_proc_ctx_save();
 		__xtc_trace_causal(XTC_CAUSAL_PARK_TIMER, __func__);
@@ -1919,6 +1936,14 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			int64_t now;
 			(void)__os_clock_mono(&now);
 			if (now >= deadline) return XTC_E_AGAIN;
+			/* Cancel any stale park timer before re-arming: a
+			 * migratable fiber resumed (work-stolen / spuriously) on a
+			 * different loop than it armed on would otherwise hit the
+			 * park_on_timer INVAL reject and re-park trusting a timer on
+			 * a loop it left -- the same stale-timer-across-migration
+			 * strand fixed in xtc_proc_sleep and the sync.c timed waits.
+			 * Cancel is a race-free flag; the owning loop reaps it. */
+			__xtc_task_cancel_park_timer(self->task);
 			(void)xtc_task_park_on_timer(self->task, deadline - now);
 		} else {
 			/* Infinite wait: park until a sender's waker

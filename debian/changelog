@@ -1,3 +1,23 @@
+libxtc (1.40.6-1) unstable; urgency=medium
+
+  * fix(sched): resume a migratable fiber's timer park across work-steal
+    migration.  A migratable fiber (xtc_proc_sleep, or an xtc_recv with a
+    timeout) that was work-stolen or spuriously resumed BEFORE its park
+    timer fired would hit xtc_task_park_on_timer's "already parked" reject
+    on re-park and re-park trusting the stale timer -- which is armed on a
+    loop it has since migrated away from.  When that stale timer fired it
+    woke the fiber onto the OLD (possibly idle, asleep) loop and the wake
+    was stranded; a lock the fiber held (e.g. a WAL write lock) was never
+    released and everything waiting behind it wedged (the reported
+    fsync/commit fiber-resume strand under concurrent load).  Fix: cancel
+    the stale park timer before every re-arm, matching the timed-wait
+    discipline already used in sync.c / future.c / lock_mgr.c, so the
+    fire always wakes the fiber on the loop it is actually on.  Regression
+    test m5 exec/Blk5_migratable_timer_resume (hangs ~100%% without the
+    fix, quiesces with it).
+
+ -- Greg Burd <greg@burd.me>  Tue, 01 Sep 2026 03:56:30 -0400
+
 libxtc (1.40.5-1) unstable; urgency=medium
 
   * feat(diag,dst): DIAGNOSTIC owner-thread guards + DST sim-mode make the
