@@ -242,6 +242,36 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: make -C build_san check
 
+  diagnostic:
+    # DIAGNOSTIC build: the owner-thread guards (XTC_ASSERT_LOOP_OWNER)
+    # abort deterministically if any loop-owned structure (run queue,
+    # timer heap) is mutated cross-thread by a work-stolen fiber -- the
+    # cross-loop-race category fixed across v1.40.1..v1.40.4.  This turns
+    # that category from a probabilistic eventual wedge into an immediate,
+    # located abort in the first offending test run.  Runs the full
+    # make check (which exercises the m5 exec Blk1..Blk4 cross-loop
+    # regressions, m8 proc, and every migratable-fiber path).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make autoconf pkg-config libssl-dev liburing-dev gawk
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure with --enable-diagnostic
+        run: |
+          mkdir -p build_diag
+          cd build_diag
+          ../dist/configure --with-tls=auto --enable-diagnostic
+      - name: Build
+        run: make -C build_diag -j"$(nproc)"
+      - name: Test under DIAGNOSTIC (owner-guard aborts are hard failures)
+        run: make -C build_diag check
+
   tsan-fibers:
     # ThreadSanitizer over the cooperative-fiber runtime.  TSan needs
     # each coroutine as a TSan fiber object (__tsan_create/switch/destroy

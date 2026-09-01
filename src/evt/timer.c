@@ -86,6 +86,7 @@ int
 __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t)
 {
 	int rc;
+	XTC_ASSERT_LOOP_OWNER(loop, "timer min-heap (push)");
 	if (loop->n_timers >= loop->cap_timers) {
 		if ((rc = __grow(loop)) != XTC_OK) return rc;
 	}

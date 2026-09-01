@@ -336,7 +336,49 @@ struct xtc_loop {
 	 */
 	xtc_res_t *res;
 	int        owns_res;
+
+#if defined(XTC_DIAGNOSTIC)
+	/*
+	 * DIAGNOSTIC owner-thread guard.  A loop's owner-only structures
+	 * (the Chase-Lev deque, the q_head/q_tail slow FIFO, the timer
+	 * min-heap + all_timers, the task_slab free-list) must be mutated
+	 * ONLY by the OS thread that runs this loop.  Four bugs in the
+	 * v1.40.1..v1.40.4 arc were exactly a cross-loop mutation of one of
+	 * these from a work-stolen fiber resuming on the wrong thread.
+	 * owner_tid is recorded when the loop begins running on its thread
+	 * (the exec worker, or xtc_loop_run); XTC_ASSERT_LOOP_OWNER aborts
+	 * the instant a non-owner touches an owner-only structure, turning
+	 * that whole race category from a probabilistic eventual wedge into
+	 * a deterministic, immediate, located abort in the first offending
+	 * run.  Compiled out entirely in a normal build (zero cost). */
+	pthread_t  owner_tid;
+	int        owner_set;
+#endif
 };
+
+#if defined(XTC_DIAGNOSTIC)
+/*
+ * Abort if the calling thread is not this loop's owner.  `site` names the
+ * owner-only structure being mutated, for a legible message.  A loop with
+ * no recorded owner yet (owner_set == 0: before it has started running on
+ * a thread, e.g. spawn-time init) is exempt -- there is no concurrent
+ * owner to race.  __xtc_current_loop is deliberately NOT used to decide
+ * ownership: it is the fiber's LOGICAL loop binding, preserved across a
+ * work-steal migration, so it does not identify the physical OS thread
+ * (this is the exact trap that caused a regression in the v1.40.3 fix).
+ * pthread_self() is the authoritative physical-thread identity.
+ */
+void __xtc_loop_owner_violation(const struct xtc_loop *loop, const char *site);
+#define XTC_ASSERT_LOOP_OWNER(loop, site)                                    \
+	do {                                                                 \
+		const struct xtc_loop *_l = (loop);                          \
+		if (_l != NULL && _l->owner_set &&                           \
+		    !pthread_equal(pthread_self(), _l->owner_tid))           \
+			__xtc_loop_owner_violation(_l, (site));              \
+	} while (0)
+#else
+#define XTC_ASSERT_LOOP_OWNER(loop, site)  ((void)0)
+#endif
 
 /* Internal helpers shared between loop.c, task.c, timer.c. */
 int  __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t);

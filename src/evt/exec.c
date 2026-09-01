@@ -166,6 +166,14 @@ __xtc_exec_worker(void *arg)
 	int idle_streak = 0;   /* consecutive no-work turns (steal-backoff) */
 
 	__xtc_current_loop = loop;
+#if defined(XTC_DIAGNOSTIC)
+	/* This worker thread owns `loop` for the executor's lifetime.  Record
+	 * it so XTC_ASSERT_LOOP_OWNER catches any cross-loop mutation of an
+	 * owner-only structure (deque / FIFO / timer heap / task slab) by a
+	 * work-stolen fiber resuming on the wrong thread. */
+	loop->owner_tid = pthread_self();
+	loop->owner_set = 1;
+#endif
 	/* Bias this reactor thread onto the performance (P) cores on
 	 * asymmetric hardware (Apple Silicon); no-op elsewhere. */
 	__os_thread_apply_default_qos();
