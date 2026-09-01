@@ -1,3 +1,21 @@
+libxtc (1.40.4-1) unstable; urgency=medium
+
+  * fix(sched): two more cross-loop races on the migratable-fiber path.
+    (1) task->state was a plain int written by both the owning loop's
+    dispatch and a peer loop's inbox XTC_INB_WAKE handler when a stale
+    cross-thread wake drained on a fiber's old loop while it was
+    dispatched on the loop that stole it (TSan-reported 2026-08-30);
+    now _Atomic with a CAS on the PARKED->SCHEDULED transition in both
+    the inbox-WAKE handler and xtc_waker_wake, so exactly one winner
+    enqueues and a non-PARKED task latches wake_pending instead.
+    (2) xtc_task_park_on_timer armed the park timer on the fiber's HOME
+    loop rather than the loop it is RUNNING on, so two stolen fibers
+    pushed into one loop's single-owner timer heap concurrently; now
+    arms on __xtc_current_loop, mirroring the xtc_proc_wait_fd fd fix.
+    Regression test m5 exec/Blk4_cross_loop_state_timer.
+
+ -- Greg Burd <greg@burd.me>  Sun, 31 Aug 2026 00:00:00 +0000
+
 libxtc (1.40.3-1) unstable; urgency=medium
 
   * fix(exec,io): close the native-path concurrent-commit collapse -- two
