@@ -1,3 +1,23 @@
+libxtc (1.40.5-1) unstable; urgency=medium
+
+  * feat(diag,dst): DIAGNOSTIC owner-thread guards + DST sim-mode make the
+    cross-loop-mutation bug category (v1.40.1..v1.40.4) deterministically
+    catchable, so it cannot silently resurface.  Under --enable-diagnostic
+    each loop records its owner OS thread and XTC_ASSERT_LOOP_OWNER aborts
+    (loudly, located) the instant a non-owner thread mutates a loop-owned
+    structure (run queue, timer heap).  In the single-thread DST simulator
+    the guard runs in sim-mode (aborts if a loop-owned structure is
+    mutated while a different loop is being stepped), so a seed catches
+    the whole category with no real threads and no race detector.  New CI
+    job `diagnostic` (full make check under --enable-diagnostic) and the
+    sim-dst job now builds the sim lib with --enable-diagnostic, so all
+    ~60 DST tests run under the guard.  New DST regression
+    test_sim_cross_loop_owner.  Internal/diagnostic only: no public API or
+    ABI change (the owner fields are DIAGNOSTIC-only, in an internal
+    header).
+
+ -- Greg Burd <greg@burd.me>  Mon, 01 Sep 2026 00:00:00 +0000
+
 libxtc (1.40.4-1) unstable; urgency=medium
 
   * fix(sched): two more cross-loop races on the migratable-fiber path.
