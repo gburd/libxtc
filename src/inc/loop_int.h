@@ -41,7 +41,11 @@ struct xtc_task {
 	xtc_task_fn  fn;
 	void        *user;
 	xtc_loop_t  *loop;
-	int          state;
+	_Atomic int  state;   /* xtc_task_state; atomic + CAS on PARKED->SCHEDULED
+	                       * so a cross-loop XTC_INB_WAKE drained on a peer
+	                       * loop cannot race the owning loop's dispatch
+	                       * write (the concurrent-commit task->state race,
+	                       * TSan-reported 2026-08-30). */
 	/* L1 proportional-share scheduler: index into loop->classes of the
 	 * run-class this task belongs to, or -1 for the default (implicit,
 	 * plain-FIFO) class.  Set at spawn from xtc_proc_opts_t.sched_class

@@ -141,7 +141,8 @@ __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 	t->loop = loop;
 	t->pinned = pinned;
 	t->sched_class = -1;   /* default (implicit) FIFO class */
-	t->state = XTC_TS_SCHEDULED;
+	atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
+	    memory_order_relaxed);   /* init, before the task is published */
 	t->q_next = NULL;
 	t->park_timer = NULL;
 	t->park_fd = -1;
@@ -251,16 +252,17 @@ xtc_waker_wake(const xtc_waker_t *w)
 		return XTC_E_INVAL;
 
 	if (__xtc_current_loop == w->loop) {
-		switch (w->task->state) {
-		case XTC_TS_PARKED:
-			w->task->state = XTC_TS_SCHEDULED;
+		/* Same-loop wake.  Still CAS the PARKED->SCHEDULED transition:
+		 * a migratable task can also be targeted by a cross-loop WAKE
+		 * draining on another thread concurrently, so a plain
+		 * read-check-write would race it.  Only the PARKED winner
+		 * enqueues; any other state is a no-op (already runnable). */
+		int expect = XTC_TS_PARKED;
+		if (atomic_compare_exchange_strong_explicit(
+		    &w->task->state, &expect, XTC_TS_SCHEDULED,
+		    memory_order_acq_rel, memory_order_acquire))
 			return __xtc_loop_enqueue(w->loop, w->task);
-		case XTC_TS_SCHEDULED:
-		case XTC_TS_RUNNING:
-		case XTC_TS_DONE:
-		default:
-			return XTC_OK;
-		}
+		return XTC_OK;
 	}
 
 	/* Cross-thread.  Inbox + wakeup.
@@ -313,15 +315,31 @@ xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 	t->heap_idx = -1;
 	t->cancelled = 0;
 	t->fired = 0;
-	t->loop = self->loop;
+	/*
+	 * Arm the timer on the loop this fiber is RUNNING on, not its home
+	 * loop (self->loop).  Under the multi-loop executor a migratable
+	 * fiber can run stolen on a peer loop; loop->timers / loop->all_timers
+	 * and the min-heap are single-owner (mutated by the owning loop's
+	 * __xtc_drain_due_timers and pushes), so pushing onto self->loop from
+	 * a thief thread races that home loop's owner and any other stolen
+	 * fiber homed there -- the cross-loop timer-heap race (TSan-caught
+	 * 2026-08-30, same family as the xtc_proc_wait_fd fd-registry fix).
+	 * __xtc_current_loop is the running loop; the completion (timer fire)
+	 * is drained on that same loop, which wakes the waiter.  Fall back to
+	 * self->loop only off any loop (defensive; a park needs a loop). */
+	{
+		xtc_loop_t *wl = __xtc_current_loop != NULL
+		    ? __xtc_current_loop : self->loop;
+		t->loop = wl;
 
-	if ((rc = __xtc_timer_heap_push(self->loop, t)) != XTC_OK) {
-		__os_free(t);
-		return rc;
+		if ((rc = __xtc_timer_heap_push(wl, t)) != XTC_OK) {
+			__os_free(t);
+			return rc;
+		}
+		/* Splice into all_timers so loop_fini frees it. */
+		t->all_next = wl->all_timers;
+		wl->all_timers = t;
 	}
-	/* Splice into all_timers so loop_fini frees it. */
-	t->all_next = self->loop->all_timers;
-	self->loop->all_timers = t;
 	self->park_timer = t;
 	return XTC_OK;
 }
