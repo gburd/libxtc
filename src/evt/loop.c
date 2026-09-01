@@ -26,6 +26,30 @@
 /* Per-thread cursor -- see loop_int.h. */
 XTC_THREAD_LOCAL xtc_loop_t *__xtc_current_loop = NULL;
 
+#if defined(XTC_DIAGNOSTIC)
+#include <stdio.h>
+#include <stdlib.h>
+/*
+ * DIAGNOSTIC: a non-owner thread mutated one of this loop's owner-only
+ * structures.  This is the cross-loop-race category (v1.40.1..v1.40.4);
+ * abort loudly and precisely rather than let it corrupt a list/heap and
+ * strand a fiber under load.  Compiled out in a normal build.
+ */
+void
+__xtc_loop_owner_violation(const struct xtc_loop *loop, const char *site)
+{
+	fprintf(stderr,
+	    "XTC DIAGNOSTIC: cross-loop mutation of owner-only \"%s\" on "
+	    "loop %p (exec_id=%d): touched by a thread that is not its "
+	    "owner -- a work-stolen fiber resumed on the wrong thread and "
+	    "mutated a single-owner structure.  This is the cross-loop "
+	    "race category; fix the site to route the mutation to the "
+	    "owning loop.\n",
+	    site, (const void *)loop, loop->exec_id);
+	abort();
+}
+#endif
+
 /* Fiber-context preservation hooks; installed by the process layer
  * (proc.c) on first spawn.  NULL until then -- see loop_int.h. */
 void *(*__xtc_fiber_ctx_save)(void) = NULL;
@@ -340,6 +364,7 @@ xtc_loop_wake(xtc_loop_t *loop)
 int
 __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t)
 {
+	XTC_ASSERT_LOOP_OWNER(loop, "run-queue (enqueue)");
 	if (t->q_next != NULL || loop->q_tail == t)
 		return XTC_OK;        /* already in slow-path FIFO */
 
@@ -405,6 +430,7 @@ static xtc_task_t *
 __queue_pop(xtc_loop_t *loop)
 {
 	xtc_task_t *t;
+	XTC_ASSERT_LOOP_OWNER(loop, "run-queue (pop)");
 
 	/* L1 proportional-share: when at least one class exists, run a
 	 * min-vruntime pick over the in-use classes AND the implicit
@@ -913,6 +939,13 @@ xtc_loop_run(xtc_loop_t *loop)
 
 	saved = __xtc_current_loop;
 	__xtc_current_loop = loop;
+#if defined(XTC_DIAGNOSTIC)
+	/* Standalone (single-thread) run: this thread owns the loop for the
+	 * duration.  Record it so the owner-only-structure guards fire on a
+	 * stray cross-thread mutation. */
+	loop->owner_tid = pthread_self();
+	loop->owner_set = 1;
+#endif
 
 	while (!loop->stop_requested) {
 		int has_tasks  =
