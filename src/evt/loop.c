@@ -974,6 +974,12 @@ int
 __xtc_loop_step_once(xtc_loop_t *loop)
 {
 	int rc;
+	/* Bind this thread's current-loop to `loop` up front, BEFORE the
+	 * pre-step steal below enqueues onto it -- __xtc_loop_step (called
+	 * at the end) sets it too, but the steal-enqueue happens first, and
+	 * the DIAGNOSTIC owner guard (and any code consulting the binding)
+	 * must see the correct stepping loop, not a stale prior one. */
+	__xtc_current_loop = loop;
 	int has_tasks  =
 	    atomic_load_explicit(&loop->n_alive, memory_order_relaxed) > 0;
 	int has_timers = __xtc_timer_heap_next_deadline(loop) >= 0;

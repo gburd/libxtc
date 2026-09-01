@@ -369,12 +369,30 @@ struct xtc_loop {
  * pthread_self() is the authoritative physical-thread identity.
  */
 void __xtc_loop_owner_violation(const struct xtc_loop *loop, const char *site);
+extern XTC_THREAD_LOCAL struct xtc_loop *__xtc_current_loop;
+extern int __xtc_sim_active(void);
 #define XTC_ASSERT_LOOP_OWNER(loop, site)                                    \
 	do {                                                                 \
 		const struct xtc_loop *_l = (loop);                          \
-		if (_l != NULL && _l->owner_set &&                           \
-		    !pthread_equal(pthread_self(), _l->owner_tid))           \
+		if (_l == NULL)                                              \
+			break;                                               \
+		if (__xtc_sim_active()) {                                    \
+			/* Single-thread DST: the physical-thread check can   \
+			 * never fire (one thread drives all loops), but the  \
+			 * VIOLATION still executes -- a fiber mutating a loop \
+			 * other than the one currently being stepped is the  \
+			 * exact cross-loop bug, just serialized so it cannot  \
+			 * corrupt.  __xtc_current_loop is the loop being      \
+			 * stepped, i.e. the only legitimate mutation target.  \
+			 * This makes the whole category DETERMINISTICALLY     \
+			 * reproducible under a seed. */                       \
+			if (__xtc_current_loop != NULL &&                    \
+			    __xtc_current_loop != _l)                        \
+				__xtc_loop_owner_violation(_l, (site));      \
+		} else if (_l->owner_set &&                                  \
+		    !pthread_equal(pthread_self(), _l->owner_tid)) {         \
 			__xtc_loop_owner_violation(_l, (site));              \
+		}                                                            \
 	} while (0)
 #else
 #define XTC_ASSERT_LOOP_OWNER(loop, site)  ((void)0)

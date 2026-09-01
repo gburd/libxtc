@@ -42,11 +42,17 @@ build="$work/build"
 mkdir -p "$build"
 
 # Configure + build the sim-backend library.  No TLS / liburing: the sim
-# backend has no platform deps.
+# backend has no platform deps.  --enable-diagnostic turns on the
+# XTC_ASSERT_LOOP_OWNER guards: in the single-thread sim they run in
+# sim-mode and abort deterministically if any DST test mutates a
+# loop-owned structure (run queue / timer heap) from a fiber running on a
+# DIFFERENT loop -- so the whole cross-loop-mutation bug category
+# (v1.40.1..v1.40.4) is caught by a seed in EVERY sim test, not just
+# probabilistically under real threads.
 (
 	cd "$build"
 	"$XTC_SRC_DIR/dist/configure" --with-io-backend=sim \
-		--with-tls=none --without-liburing >/dev/null 2>&1
+		--with-tls=none --without-liburing --enable-diagnostic >/dev/null 2>&1
 	make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)" >/dev/null 2>&1
 ) || { echo "  [sim] FAIL: sim-backend build errored"; exit 1; }
 
@@ -94,7 +100,7 @@ for s in engine db quack metrics vexec sql_parse sql_parse_drv sql_ast \
 done
 
 fail=0
-for t in test_sim_sched test_sim_sched_shares test_sim_pingpong test_sim_wake_park test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_lockmgr test_sim_lwlock test_sim_lrlock test_sim_rcu test_sim_iofault test_sim_torn test_sim_stale test_sim_buggify test_sim_buggify2 test_sim_buggify3 test_sim_buggify4 test_sim_partition test_sim_machine_death test_sim_svr test_sim_fsm test_sim_credit test_sim_pool test_sim_pg test_sim_proc_teardown test_sim_xproc test_sim_chan test_sim_sync test_sim_reg test_sim_mctx test_sim_slab test_sim_pdict test_sim_chash test_sim_cskip test_sim_stats test_sim_tnt test_sim_exit_teardown test_sim_spawn_rel test_sim_determinism test_sim_launch test_sim_aiov test_sim_sup_strategy test_sim_app test_sim_blocking test_sim_osproc test_sim_res test_sim_stream test_sim_swarm test_sim_bufmgr test_sim_crash_recover test_sim_compose test_sim_compose_crash test_sim_composition test_sim_migratable test_sim_eager_rebalance test_sim_scope test_sim_trace_causal test_sim_dispatch; do
+for t in test_sim_sched test_sim_cross_loop_owner test_sim_sched_shares test_sim_pingpong test_sim_wake_park test_sim_fault test_sim_soak test_sim_critsec test_sim_latch test_sim_lockmgr test_sim_lwlock test_sim_lrlock test_sim_rcu test_sim_iofault test_sim_torn test_sim_stale test_sim_buggify test_sim_buggify2 test_sim_buggify3 test_sim_buggify4 test_sim_partition test_sim_machine_death test_sim_svr test_sim_fsm test_sim_credit test_sim_pool test_sim_pg test_sim_proc_teardown test_sim_xproc test_sim_chan test_sim_sync test_sim_reg test_sim_mctx test_sim_slab test_sim_pdict test_sim_chash test_sim_cskip test_sim_stats test_sim_tnt test_sim_exit_teardown test_sim_spawn_rel test_sim_determinism test_sim_launch test_sim_aiov test_sim_sup_strategy test_sim_app test_sim_blocking test_sim_osproc test_sim_res test_sim_stream test_sim_swarm test_sim_bufmgr test_sim_crash_recover test_sim_compose test_sim_compose_crash test_sim_composition test_sim_migratable test_sim_eager_rebalance test_sim_scope test_sim_trace_causal test_sim_dispatch; do
 	exe="$work/$t"
 	# test_sim_bufmgr additionally needs the bufmgr object + its include;
 	# test_sim_crash_recover needs the whole native engine object set.
