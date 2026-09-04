@@ -166,6 +166,16 @@ __xtc_exec_worker(void *arg)
 	int idle_streak = 0;   /* consecutive no-work turns (steal-backoff) */
 
 	__xtc_current_loop = loop;
+	/*
+	 * This worker thread is the sole owner of `loop->io`.  Record it
+	 * NOW, before running any fiber, so a work-stolen fiber's
+	 * xtc_proc_wait_fd cleanup on THIS io from a peer thread always
+	 * defers (never dels inline) -- see __xtc_io_set_owner.
+	 */
+	{
+		extern void __xtc_io_set_owner(xtc_io_t *);
+		__xtc_io_set_owner(loop->io);
+	}
 #if defined(XTC_DIAGNOSTIC)
 	/* This worker thread owns `loop` for the executor's lifetime.  Record
 	 * it so XTC_ASSERT_LOOP_OWNER catches any cross-loop mutation of an

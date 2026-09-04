@@ -1,3 +1,27 @@
+libxtc (1.40.7-1) unstable; urgency=medium
+
+  * fix(io): record each loop's io-backend owner thread eagerly at
+    worker/run-loop startup (__xtc_io_set_owner) so a work-stolen fiber's
+    xtc_proc_wait_fd post-migration cleanup ALWAYS defers the cross-loop
+    fd-unregister to the owning thread, never dels inline.  Previously the
+    io's owner thread was recorded lazily on its first xtc_io_poll; a HOME
+    loop that spawned all the fibers but had them all work-stolen keeps
+    n_alive > 0 yet may never block in xtc_io_poll, so io->owner_set
+    stayed 0 -- and with owner_set == 0 every foreign fiber's cleanup
+    deleted that home io's fd INLINE.  Two migrated fibers cleaning up on
+    the same home io concurrently then raced its single-owner fds list
+    into a cycle: xtc_io_del_fd's unlink loop spun forever (a stranded
+    fiber holding a lock -- the reported xtc_proc_wait_fd "timeout never
+    fires / WaitLatch never returns" strand under concurrent load), and
+    could double-link a registration so loop teardown double-freed it.
+    The 6th surface of the "cross-loop step is unsafe" migratable-fiber
+    family.  No API/ABI change.  Regression coverage: m5
+    exec/Blk6_migratable_waitfd_resume; the race is caught by the ASan and
+    ThreadSanitizer CI jobs (the inline-del io->fds write-write race is
+    now gone).
+
+ -- Greg Burd <greg@burd.me>  Fri, 04 Sep 2026 13:00:19 +0000
+
 libxtc (1.40.6-1) unstable; urgency=medium
 
   * fix(sched): resume a migratable fiber's timer park across work-steal

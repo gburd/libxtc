@@ -370,6 +370,25 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
  * drains this queue at the top of its next xtc_io_poll and performs the
  * real unregister on its own thread.  Internal (declared in io_int.h).
  */
+/*
+ * Record the calling thread as this io's owner.  See __xtc_io_set_owner
+ * in io_int.h's rationale: called eagerly at the owning loop's worker /
+ * run-loop startup so the inline-vs-defer decision below is correct from
+ * the first cross-loop del, not only after this io's first poll (a home
+ * loop that had all its fibers work-stolen can run its own run queue for
+ * a long window without ever blocking in xtc_io_poll -- owner_set would
+ * stay 0, and every foreign del would race the fds list inline).
+ */
+void
+__xtc_io_set_owner(xtc_io_t *io)
+{
+	if (io != NULL &&
+	    !atomic_load_explicit(&io->owner_set, memory_order_relaxed)) {
+		io->owner_tid = pthread_self();
+		atomic_store_explicit(&io->owner_set, 1, memory_order_release);
+	}
+}
+
 int
 __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 {

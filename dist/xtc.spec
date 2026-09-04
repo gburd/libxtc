@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.40.6
+Version:        1.40.7
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,8 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Mon Sep 01 2026 Greg Burd <greg@burd.me> - 1.40.7-1
+- fix(io): record each loop's io-backend owner thread eagerly at worker startup (__xtc_io_set_owner) so a work-stolen fiber's xtc_proc_wait_fd cleanup always defers the cross-loop fd-unregister to the owning thread. A home loop that had all its fibers work-stolen kept io->owner_set==0 (it never blocked in xtc_io_poll), so foreign cleanups deleted its fds inline and two concurrent dels corrupted the single-owner io->fds list into a cycle -- an infinite loop in xtc_io_del_fd stranding a fiber holding a lock, plus an occasional fini double-free. The 6th cross-loop-migration surface. No API change.
 * Wed Jul 22 2026 Greg Burd <greg@burd.me> - 1.28.1-1
 - fix: xtc_task_waker() names the CURRENT loop, not the stale spawn loop -- a migratable proc's waker previously kept naming its spawn-time loop after being work-stolen, so a wake could target the wrong loop; usually self-healing but a permanent strand under fast shutdown. Confirmed + adversarially-proven regression test. No API change.
 
