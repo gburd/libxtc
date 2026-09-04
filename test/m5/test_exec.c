@@ -20,6 +20,9 @@
 #include "os_thread.h"   /* __os_thread_* for the foreign poker thread */
 #include "os_time.h"     /* __os_sleep_ns */
 #include "io_pipe_compat.h"
+#if !defined(_WIN32)
+#include <fcntl.h>       /* O_NONBLOCK for Blk6 pipe read end */
+#endif
 /* [Ex1, Ex2] init/fini round-trip. */
 static MunitResult
 test_init_fini(const MunitParameter p[], void *d)
@@ -794,6 +797,115 @@ test_migratable_timer_resume(const MunitParameter p[], void *d)
 #endif
 }
 
+/*
+ * [Blk6] Migratable-fiber xtc_proc_wait_fd(finite timeout) resume across
+ * migration (the fd-park sibling of Blk5; reported 2026-09-01).  N
+ * migratable fibers, all spawned on ONE loop so peers steal them, each
+ * parks in xtc_proc_wait_fd on the read end of its OWN pipe (never
+ * written) with a finite timeout, contending on a shared lock across the
+ * wait (PG's WALWriteLock / ProcSleep shape).  xtc_proc_wait_fd arms
+ * both an fd registration and a timeout timer on the loop the fiber is
+ * RUNNING on (wl = __xtc_current_loop); a HOME loop that spawned the
+ * work but had every fiber work-stolen keeps n_alive > 0 yet may not
+ * poll its own io for a long window -- so its io->owner_set stayed 0,
+ * and the inline-vs-defer decision let EVERY foreign fiber's cleanup del
+ * that home io's fd INLINE.  Two such cleanups racing the same home io's
+ * single-owner fds list corrupted it into a cycle (xtc_io_del_fd's
+ * unlink loop spins forever -> a stranded fiber holding the lock) and
+ * could double-link a uf (fini double-free).  The fix records the io's
+ * owner thread eagerly at worker startup (__xtc_io_set_owner), so a
+ * foreign cleanup always DEFERS the unregister to the owning thread.
+ * Without the fix this hangs (or aborts on the double-free)
+ * intermittently; with it, quiesces and every fiber completes.
+ */
+#define BLK6_FIBERS 16
+#define BLK6_ITERS  20
+#if !defined(_WIN32)
+static _Atomic int g_blk6_done;
+static _Atomic int g_blk6_lock;
+
+static int
+blk6_wait_timeout(int fd)
+{
+	uint32_t rev = 0;
+	/* Never written -> must return via timeout.  Non-blocking read end
+	 * (set by the caller) so a readable-drain never blocks the OS
+	 * thread. */
+	(void)xtc_proc_wait_fd(fd, XTC_IO_READABLE, 2 * 1000 * 1000LL, &rev);
+	if (rev & XTC_IO_READABLE) {
+		char drain[64];
+		while (xtc_test_pipe_read(fd, drain, (int)sizeof drain) > 0) { }
+	}
+	return 1;
+}
+
+static void
+blk6_proc(void *arg)
+{
+	int idx = (int)(intptr_t)arg;
+	int r = -1, w = -1;
+	int k;
+	(void)idx;
+	if (xtc_test_make_pipe(&r, &w) != 0) {
+		atomic_fetch_add(&g_blk6_done, 1);
+		return;
+	}
+	(void)fcntl(r, F_SETFL, O_NONBLOCK);
+	for (k = 0; k < BLK6_ITERS; k++) {
+		int held = 0;
+		if ((k & 1) == 0) {
+			int spins = 0;
+			while (atomic_exchange_explicit(&g_blk6_lock, 1,
+			    memory_order_acquire) != 0) {
+				(void)blk6_wait_timeout(r);
+				if (++spins > 4000000) goto out;
+			}
+			held = 1;
+		}
+		/* The wait that MUST time out; the fiber's fd+timer are armed
+		 * on whatever loop currently runs it. */
+		(void)blk6_wait_timeout(r);
+		if (held)
+			atomic_store_explicit(&g_blk6_lock, 0,
+			    memory_order_release);
+	}
+out:
+	xtc_test_close_pipe(r, w);
+	atomic_fetch_add(&g_blk6_done, 1);
+}
+#endif /* !_WIN32 */
+
+static MunitResult
+test_migratable_waitfd_resume(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+#if defined(_WIN32)
+	/* Same coarse-timer rationale as Blk5; the single-owner io->fds
+	 * list this targets is the io_uring backend's, not the Windows IOCP
+	 * registry.  Caught on Linux/macOS. */
+	return MUNIT_SKIP;
+#else
+	xtc_exec_t *e;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	int i;
+	atomic_store(&g_blk6_done, 0);
+	atomic_store(&g_blk6_lock, 0);
+	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
+	xtc_exec_set_eager_rebalance(e, 1);
+	for (i = 0; i < BLK6_FIBERS; i++) {
+		opts.name = "blk6";
+		opts.migratable = 1;
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
+		    blk6_proc, (void *)(intptr_t)i, &opts, &pid), ==, XTC_OK);
+	}
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_blk6_done), ==, BLK6_FIBERS);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+#endif
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -810,6 +922,7 @@ static MunitTest tests[] = {
 	{ "/Blk3_cross_loop_del_fd",  test_cross_loop_del_fd, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk4_cross_loop_state_timer", test_cross_loop_state_timer, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk5_migratable_timer_resume", test_migratable_timer_resume, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Blk6_migratable_waitfd_resume", test_migratable_waitfd_resume, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/exec", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

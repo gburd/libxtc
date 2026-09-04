@@ -166,6 +166,15 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
  * unregister that io_uring needs is a no-op passthrough here (the
  * caller is xtc_proc_wait_fd cleanup after a migration).  Provided so
  * the single caller links on every backend. */
+/* No-op: only io_uring has a single-owner fds list + SQ ring that needs
+ * an eagerly-recorded owner thread; this backend is kernel-synchronized
+ * or keeps its own registry.  Provided so every backend links. */
+void
+__xtc_io_set_owner(xtc_io_t *io)
+{
+	(void)io;
+}
+
 int
 __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 {

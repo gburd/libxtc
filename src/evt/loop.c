@@ -939,6 +939,13 @@ xtc_loop_run(xtc_loop_t *loop)
 
 	saved = __xtc_current_loop;
 	__xtc_current_loop = loop;
+	/* This thread owns loop->io for the duration; record it so any
+	 * cross-thread xtc_proc_wait_fd cleanup defers (see
+	 * __xtc_io_set_owner). */
+	{
+		extern void __xtc_io_set_owner(xtc_io_t *);
+		__xtc_io_set_owner(loop->io);
+	}
 #if defined(XTC_DIAGNOSTIC)
 	/* Standalone (single-thread) run: this thread owns the loop for the
 	 * duration.  Record it so the owner-only-structure guards fire on a
