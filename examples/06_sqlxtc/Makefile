@@ -549,8 +549,12 @@ test-sql-parse: ../../test/sqlxtc/test_sql_parse
 bufmgr_probe.o: bufmgr.c bufmgr.h
 	$(CC) $(CFLAGS) -DBM_ACCESS_PROBE=1 -c -o $@ bufmgr.c
 
-numa_claim_probe: numa_claim_probe.c btree.c bufmgr_probe.o btnode.c
-	$(CC) $(CFLAGS) -o $@ numa_claim_probe.c btree.c bufmgr_probe.o btnode.c $(LDFLAGS)
+# numa_claim_probe is a RESEARCH SPIKE, not shipped example code, and it
+# uses the internal __os_* topology surface deliberately -- so it lives in
+# bench/, not in examples/ (which is the consumer exemplar and must stay
+# clean under test/dist/test_api_discipline.sh).
+numa_claim_probe: ../../bench/sqlxtc/numa_claim_probe.c btree.c bufmgr_probe.o btnode.c
+	$(CC) $(CFLAGS) -o $@ ../../bench/sqlxtc/numa_claim_probe.c btree.c bufmgr_probe.o btnode.c $(LDFLAGS)
 
 # ---- eviction-policy research prototype (standalone, no libxtc/bufmgr) ----
 # Self-contained proving ground for the NUMA buffer-pool eviction policy

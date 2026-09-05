@@ -23,7 +23,6 @@
 
 #include <stdint.h>
 
-#include "os_alloc.h"
 #include "xtc_proc.h"
 
 /* A Latch is owned by the proc that waits on it; SetLatch is called
@@ -73,8 +72,11 @@ pg_reset_latch(void)
 	void *msg;
 	size_t len;
 	while (xtc_recv(&msg, &len, 0) == XTC_OK) {
-		if (msg != NULL)
-			__os_free(msg);
+		/* xtc_free is the PUBLIC name for the library allocator's
+		 * release entry point; a consumer must not reach for the
+		 * internal __os_free (AGENTS.md API-discipline rule 3).
+		 * xtc_free(NULL) is a no-op. */
+		xtc_free(msg);
 	}
 }
 

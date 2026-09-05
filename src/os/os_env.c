@@ -24,6 +24,9 @@
 
 #include "os_sharp.h"
 
+/* The DST determinism guard (no-op in production).  See os_time.c. */
+void __xtc_sim_nondeterminism(const char *what);
+
 #if !defined(_WIN32)
 #include <pthread.h>
 static pthread_mutex_t __env_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -47,6 +50,13 @@ __os_env_get(const char *name, char *buf, size_t bufsize)
 
 	if (name == NULL || (buf == NULL && bufsize != 0))
 		return XTC_E_INVAL;
+
+	/* DETERMINISM GUARD: the environment is ambient host state, so a
+	 * sim-reachable read makes the run depend on how it was launched
+	 * rather than on the seed.  Configuration a simulated run depends
+	 * on must be passed in explicitly (xtc_cfg / an argument), not read
+	 * from the environment. */
+	__xtc_sim_nondeterminism("environment read (__os_env_get)");
 
 	ENV_LOCK();
 	v = getenv(name);   /* XTC_RAW_OK: this IS the __os wrapper */

@@ -30,6 +30,13 @@
 #include "os_thread.h"   /* XTC_THREAD_LOCAL */
 #include "os_time.h"     /* __os_clock_mono */
 
+/* The DST determinism guard.  A no-op in production (a single relaxed
+ * atomic load); under a simulated run it records the violation and makes
+ * xtc_sim_exec_run refuse XTC_OK, so a nondeterministic primitive on a
+ * sim-reachable path cannot silently break seed replay.  sim.c is always
+ * linked into libxtc, so the symbol always resolves. */
+void __xtc_sim_nondeterminism(const char *what);
+
 /* Per-thread state.  seeded==0 means "auto-seed on next draw". */
 static XTC_THREAD_LOCAL uint64_t __rng_state;
 static XTC_THREAD_LOCAL int      __rng_seeded;
@@ -68,6 +75,17 @@ __os_rand_u64(void)
 {
 	if (!__rng_seeded) {
 		int64_t ns = 0;
+		/*
+		 * DETERMINISM GUARD: an auto-seeded stream is not replayable.
+		 * The seed below mixes the clock with the ADDRESS of this
+		 * thread's state cell, which is ASLR-dependent, so even a
+		 * virtual sim clock cannot make it reproducible.  A
+		 * sim-reachable draw must come from a stream the seed owns
+		 * (xtc_sim_rng_*) or from an explicitly __os_rand_seed'ed
+		 * generator.  Reported before the seeding so the trap names
+		 * the real cause rather than the clock read underneath it.
+		 */
+		__xtc_sim_nondeterminism("unseeded RNG (__os_rand_u64 auto-seed)");
 		(void)__os_clock_mono(&ns);
 		/* Mix the clock with this thread's own state address so two
 		 * threads seeding in the same nanosecond still diverge. */

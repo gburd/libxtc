@@ -38,7 +38,6 @@
 #include "xtc_proc.h"
 #include "xtc_res.h"
 #include "xtc_slab.h"
-#include "xtc_int.h"
 
 #include "cmd.h"
 #include "conn.h"

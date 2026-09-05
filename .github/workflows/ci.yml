@@ -158,6 +158,31 @@ jobs:
       - name: DST regression corpus (pinned failing seeds cannot silently regress)
         run: CC=gcc TMPDIR="${RUNNER_TEMP:-/tmp}" sh scripts/dst-corpus.sh
 
+  cbmc-nightly:
+    # Bounded model checking (test/cbmc/, 14 harnesses): proves the hard
+    # concurrent algorithms' safety invariants against their REAL source
+    # over every interleaving up to a tuned bound.  Nightly / on demand,
+    # not per-push: the tier takes minutes (mpsc alone is ~2 min).
+    #
+    # CBMC 5.x is REQUIRED and pinned via an older nixpkgs: 6.x aborts
+    # with "pointer handling for concurrency is unsound" before reaching a
+    # verdict on every concurrent harness, so it cannot verify these at
+    # all (run.sh detects that and skips).  nixos-23.11 ships 5.91.0.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Nix (for a pinned CBMC 5.x)
+        uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - name: CBMC tier (14 harnesses, must all verify)
+        run: |
+          nix shell github:NixOS/nixpkgs/nixos-23.11#cbmc --command sh -c '
+            cbmc --version | head -1
+            CBMC_TIMEOUT=1800 sh test/cbmc/run.sh
+          '
+
   sim-swarm-nightly:
     # Large-scale DST swarm/soak: 4 disjoint shards x 25k = 100k seeds
     # over the combined fault set (partition + latency + buggify +

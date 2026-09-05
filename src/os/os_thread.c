@@ -38,6 +38,9 @@
 
 #include "os_thread.h"
 
+/* The DST determinism guard (no-op in production).  See os_time.c. */
+void __xtc_sim_nondeterminism(const char *what);
+
 #include <stdlib.h>
 
 /* Heap-allocated descriptor so the pthread_t outlives the call frame. */
@@ -146,6 +149,12 @@ __os_thread_self(__os_thread_t *out)
 	int rc;
 	if (out == NULL)
 		return XTC_E_INVAL;
+	/* DETERMINISM GUARD: a RAW OS thread id is assigned by the host
+	 * scheduler and varies run to run, so branching on it (or ordering
+	 * by it) breaks seed replay.  Sim-reachable code that needs a
+	 * stable identity must use the loop/proc identity (xtc_exec_loop_id,
+	 * xtc_self) instead. */
+	__xtc_sim_nondeterminism("raw OS thread id (__os_thread_self)");
 	if ((rc = __os_malloc(sizeof(*me), (void **)&me)) != XTC_OK)
 		return rc;
 	*me = pthread_self();

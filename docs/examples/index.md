@@ -19,7 +19,11 @@ systems -- Redis, SQLite, Kafka, Seastar/Tina, PostgreSQL -- rebuilt on
 libxtc. Each server has its own page below covering **the software that
 inspired it**, how the libxtc version is **similar and different**, **how
 it works**, and the **advantages and challenges** of building it on
-libxtc. Every example is built and run in CI, so none of it rots.
+libxtc. The standalone teaching examples (01--04, 10) are built **and run**
+by `make check` itself, and the larger systems (06 sqlxtc, 07 kaka, 11 lorb)
+are built and exercised by the CI `examples` job -- so none of it rots.
+(08 tnt binds a fixed TCP port and is timing-fragile, so it is built but not
+run automatically; see its target comment in `dist/Makefile.in`.)
 
 Build them against a configured tree:
 

@@ -122,24 +122,48 @@ if [ -n "$dblchk" ]; then
 fi
 
 # ---- RULE 3: consumers (examples) using the internal surface --------------
-# NOTE: currently a WARNING, not a hard gate.  The examples still reach into
-# __os_* for allocation, clocks, sleep, and atomics because the public xtc_*
-# surface does not yet expose all of those (xtc_malloc/_calloc/_realloc/_free
-# exist; public clock/sleep/atomic/aligned-alloc are still TODO).  Once the
-# public API is complete and the examples are migrated, flip this to a hard
-# failure (set rule3_fatal=1).  Tracked in docs/KNOWN_ISSUES.md.
-rule3_fatal=0
-ex_c=$(find "$ROOT/examples" -name '*.c' 2>/dev/null)
-consumer=$(printf '%s\n' "$ex_c" | while IFS= read -r f; do
+# Now a HARD gate.  It was historically a warning because the public xtc_*
+# surface did not yet cover everything the examples needed; that is no
+# longer true -- xtc_malloc/_calloc/_realloc/_free/_aligned_*, the clocks
+# (xtc_clock_mono/_real), xtc_sleep_ns, xtc_atomic_i64_*, xtc_rand_*,
+# xtc_strlcpy/_strlcat, and the CPU/NUMA topology (xtc_ncpus,
+# xtc_numa_nnodes/_node_of_cpu/_current_node) all ship.  If a consumer
+# needs something else, the fix is to add the public xtc_* for it (AGENTS.md
+# rule 3), not to reach inside.
+#
+# Two blind spots closed at the same time (an audit found a live __os_free
+# on an xtc_recv buffer hiding in a HEADER, plus 17 dead internal-header
+# includes, all invisible to the old check):
+#   - scan .h as well as .c;
+#   - flag an #include of an INTERNAL header (xtc_int.h is not installed,
+#     and os_*.h is the internal os layer), not just symbol references.
+rule3_fatal=1
+ex_src=$(find "$ROOT/examples" -name '*.c' -o -name '*.h' 2>/dev/null)
+consumer=$(printf '%s\n' "$ex_src" | while IFS= read -r f; do
 	[ -n "$f" ] || continue
 	grep -nE '\b__os_[a-z]|\b__xtc_[a-z]' "$f" 2>/dev/null \
-	| grep -vE 'XTC_RAW_OK|/\*|//' | sed "s#^#$f:#"
+	| grep -vE 'XTC_RAW_OK|/\*|//' \
+	| grep -vE '^[0-9]+:[[:space:]]*\*' | sed "s#^#$f:#"
 done)
+inc_viol=$(printf '%s\n' "$ex_src" | while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	grep -nE '^[[:space:]]*#[[:space:]]*include[[:space:]]*"(xtc_int\.h|os_[a-z_]+\.h)"' \
+	    "$f" 2>/dev/null | sed "s#^#$f:#"
+done)
+if [ -n "$inc_viol" ]; then
+	n=$(printf '%s\n' "$inc_viol" | grep -c .)
+	echo "  [api] FAIL RULE 3: $n consumer/example file(s) #include an"
+	echo "        INTERNAL header (xtc_int.h is not installed; os_*.h is the"
+	echo "        internal os layer).  Use the public xtc_*.h headers."
+	printf '%s\n' "$inc_viol" | sed 's/^/        /'
+	fail=1
+fi
 if [ -n "$consumer" ]; then
 	n=$(printf '%s\n' "$consumer" | grep -c .)
-	echo "  [api] WARN RULE 3: $n site(s) where a consumer/example uses the"
-	echo "        internal __os_/__xtc_ surface (consumers should use only the"
-	echo "        public xtc_* API).  Non-fatal until the public API is complete."
+	echo "  [api] FAIL RULE 3: $n site(s) where a consumer/example uses the"
+	echo "        internal __os_/__xtc_ surface (consumers must use only the"
+	echo "        public xtc_* API; if one is missing, ADD it)."
+	printf '%s\n' "$consumer" | sed 's/^/        /'
 	if [ "$rule3_fatal" -eq 1 ]; then fail=1; fi
 fi
 

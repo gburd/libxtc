@@ -10,6 +10,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+
         version =
           pkgs.lib.removeSuffix "\n" (builtins.readFile ./dist/version.in);
 
@@ -85,6 +86,15 @@
             # Test / lint / doc
             shellcheck mandoc
             valgrind gdb lcov gcovr
+            # Bounded model checking (make check-cbmc / test/cbmc/run.sh).
+            # NOTE: nixpkgs ships CBMC 6.x, which ABORTS with "pointer
+            # handling for concurrency is unsound" on every concurrent
+            # harness (verified on 6.4.0/6.9.0) -- run.sh detects that and
+            # SKIPs with an explanation rather than reporting 14 false
+            # failures.  To actually VERIFY, install CBMC 5.x (5.95.1 is
+            # the validated release) and put it ahead on PATH; the
+            # per-harness bounds in run.sh were tuned against it.
+            cbmc
             # Misc
             gawk
           ]

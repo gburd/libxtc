@@ -6,6 +6,7 @@
  */
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -20,6 +21,7 @@
 #include "xtc_proc.h"
 #include "xtc_mctx.h"
 #include "xtc_int.h"
+#include "xtc_res.h"
 
 /* Helper: a "shared" pointer the test main thread uses to read out
  * results from the proc body.  Each test owns its own. */
@@ -1049,6 +1051,95 @@ test_proc_at_exit(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [A1] pid uniqueness at the local_id ceiling.
+ *
+ * xtc_pid_t.local_id is uint16_t, so slot 65536 would truncate to 0 and
+ * hand out a pid byte-identical to the live proc in slot 0 (gen is
+ * per-slot, so it cannot disambiguate either) -- wrong-proc send/wake/
+ * DOWN delivery and a release that clears someone else's slot.  Before
+ * the fix this was masked only incidentally by the default fds cap
+ * (65536) while the tasks cap defaults to 100000, i.e. ABOVE it; an
+ * embedder that legitimately raised fds hit the collision.
+ *
+ * The proc table now refuses past the ceiling with XTC_E_RESOURCE.
+ * This test raises EVERY relevant cap well past 65536 -- the exact
+ * configuration that used to collide -- and asserts that (a) spawning
+ * stops with XTC_E_RESOURCE rather than wrapping, and (b) every pid
+ * handed out is unique.
+ *
+ * Procs park forever (they only exit when released), so no slot is
+ * recycled and the run genuinely walks the table to its ceiling.
+ */
+#define A1_PROBE_TARGET 66000            /* > 65536, so we cross it */
+static _Atomic int g_a1_release;
+static void
+a1_parker(void *arg)
+{
+	(void)arg;
+	while (!atomic_load(&g_a1_release))
+		xtc_yield();
+}
+
+static MunitResult
+test_pid_local_id_ceiling(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *lp = NULL;
+	xtc_proc_opts_t o;
+	xtc_pid_t *pids;
+	struct xtc_res *res;
+	int i, n = 0, rc = XTC_OK;
+	(void)p; (void)d;
+
+	atomic_store(&g_a1_release, 0);
+	munit_assert_int(xtc_loop_init(&lp), ==, XTC_OK);
+
+	/* Raise every cap that could stop us BEFORE the pid ceiling, so the
+	 * proc table's own limit is what we are testing. */
+	res = xtc_loop_res(lp);
+	munit_assert_ptr_not_null(res);
+	xtc_res_set_cap(res, XTC_RES_TASKS,      2 * A1_PROBE_TARGET);
+	xtc_res_set_cap(res, XTC_RES_FDS,        2 * A1_PROBE_TARGET);
+	xtc_res_set_cap(res, XTC_RES_INBOX_MSGS, 2 * A1_PROBE_TARGET);
+	xtc_res_set_cap(res, XTC_RES_MEM_BYTES,  8L * 1024 * 1024 * 1024);
+
+	pids = calloc((size_t)A1_PROBE_TARGET, sizeof *pids);
+	munit_assert_ptr_not_null(pids);
+
+	for (i = 0; i < A1_PROBE_TARGET; i++) {
+		memset(&o, 0, sizeof o);
+		o.name = "a1";
+		rc = xtc_proc_spawn(lp, a1_parker, NULL, &o, &pids[i]);
+		if (rc != XTC_OK)
+			break;
+		n = i + 1;
+	}
+
+	/* (a) We must be refused -- cleanly -- rather than wrapping. */
+	munit_assert_int(rc, ==, XTC_E_RESOURCE);
+	munit_assert_int(n, <=, 65536);
+
+	/* (b) No two live pids may share (loop_id, local_id).  Check via a
+	 * direct-indexed table rather than O(n^2) comparison. */
+	{
+		unsigned char *seen = calloc(65536, 1);
+		int dup = 0;
+		munit_assert_ptr_not_null(seen);
+		for (i = 0; i < n; i++) {
+			if (seen[pids[i].local_id]) { dup = 1; break; }
+			seen[pids[i].local_id] = 1;
+		}
+		free(seen);
+		munit_assert_int(dup, ==, 0);
+	}
+
+	atomic_store(&g_a1_release, 1);
+	free(pids);
+	(void)xtc_loop_run(lp);
+	(void)xtc_loop_fini(lp);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1067,6 +1158,7 @@ static MunitTest tests[] = {
 	{ "/recovery_registry", test_recovery_registry, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fault_escalate",    test_fault_escalate,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/proc_at_exit",      test_proc_at_exit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/pid_local_id_ceiling", test_pid_local_id_ceiling, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/proc", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

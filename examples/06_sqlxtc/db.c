@@ -16,7 +16,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "xtc_int.h"
 #include "vexec.h"     /* vx_cell_t for the parametrized vexec fast path */
 
 /* Worker count for the vexec fast path on the live query path.  Serial

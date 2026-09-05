@@ -23,7 +23,6 @@
 #include "xtc_io.h"
 #include "xtc_net.h"
 #include "xtc_proc.h"
-#include "os_alloc.h"
 
 #include "backend.h"
 #include "listener.h"

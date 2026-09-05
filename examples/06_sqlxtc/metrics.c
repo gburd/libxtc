@@ -11,10 +11,10 @@
  *	them.  Dumps a p50/p99 summary on an interval.
  */
 
+#include <stdlib.h>
 #include <stdatomic.h>
 #include <stdio.h>
 
-#include "xtc_int.h"
 #include "xtc_log.h"
 #include "xtc_proc.h"
 #include "xtc_res.h"

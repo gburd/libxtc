@@ -19,6 +19,7 @@
 #include "os_atomic.h"
 #include "os_thread.h"   /* XTC_THREAD_LOCAL */
 #include "os_sharp.h"
+#include "os_cpu.h"      /* CPU/NUMA topology, exposed as xtc_* below */
 
 /*
  * PUBLIC: const char *xtc_strerror __P((int));
@@ -178,4 +179,44 @@ size_t
 xtc_strlcat(char *dst, const char *src, size_t dstsize)
 {
 	return __os_strlcat(dst, src, dstsize);
+}
+
+/*
+ * CPU / NUMA topology.
+ *
+ * Public names for the topology queries a consumer needs when it wants to
+ * shard state per core or per NUMA node (a buffer pool, a partitioned
+ * index, a per-core free list).  These exist because AGENTS.md rule 3
+ * says a consumer must use only the public xtc_* surface: before this,
+ * examples/06_sqlxtc reached into the internal __os_ncpus /
+ * __os_numa_node_of_cpu, which is exactly the "if a consumer needs a
+ * primitive, add the public xtc_* for it" case.
+ *
+ * All are cheap, cached queries and safe to call from any thread.
+ * xtc_numa_nnodes() returns 1 on a non-NUMA (or unqueryable) system, and
+ * xtc_numa_node_of_cpu() returns 0 there -- so a caller can always shard
+ * by the returned node without special-casing.
+ */
+int
+xtc_ncpus(void)
+{
+	return __os_ncpus();
+}
+
+int
+xtc_numa_nnodes(void)
+{
+	return __os_numa_nnodes();
+}
+
+int
+xtc_numa_node_of_cpu(int cpu)
+{
+	return __os_numa_node_of_cpu(cpu);
+}
+
+int
+xtc_numa_current_node(void)
+{
+	return __os_numa_current_node();
 }

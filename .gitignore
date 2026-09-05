@@ -121,3 +121,11 @@ docs/reference/api/
 
 .envrc
 
+# Coverage instrumentation + reports (scripts/coverage.sh, make coverage).
+# gcov drops .gcov.json.gz next to wherever it is invoked, and the merged
+# report tree is regenerated on every run -- none of it belongs in Git.
+*.gcda
+*.gcno
+*.gcov
+*.gcov.json.gz
+coverage-out/

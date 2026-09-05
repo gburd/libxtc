@@ -19,7 +19,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "xtc_int.h"          /* xtc_free */
 #include "xtc_proc.h"
 #include "partition.h"        /* plog_* for durable offset commits */
 

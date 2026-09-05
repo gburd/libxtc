@@ -25,7 +25,6 @@
 #include "conn.h"
 #include "quack.h"
 #include "sql_parse.h"
-#include "xtc_int.h"
 #include "xtc_io.h"
 #include "xtc_log.h"
 #include "xtc_stats.h"

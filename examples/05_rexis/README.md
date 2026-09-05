@@ -55,8 +55,10 @@ channel it joined.  See the pubsub walkthrough in the docs example page.
 ## What's NOT supported (deliberately)
 
 Out of scope for a 2k-LOC example.  No Streams, no scripting
-(EVAL/Lua), no cluster mode, no modules, no replication, no persistence
-(no AOF, no RDB), no transactions (MULTI/EXEC), no Sorted Sets (ZADD/ZRANGE).
+(EVAL/Lua), no cluster mode, no modules, no replication, no
+Redis-compatible persistence formats (no AOF, no RDB -- rexis has its
+own append-only bitcask store instead, see `--persist=DIR` below), no
+transactions (MULTI/EXEC), no Sorted Sets (ZADD/ZRANGE).
 A full Redis would add another 30k LOC.  Pub/Sub keyspace notifications
 and pattern subscriptions (PSUBSCRIBE) are also out of scope.
 
@@ -166,53 +168,63 @@ real `redis-server` is on `$PATH`, a side-by-side comparison can be run.
 ## Gaps in xtc surfaced by this example
 
 Things this example needed that xtc doesn't provide cleanly today.
-Each is an opportunity for a new xtc primitive:
+Each was an opportunity for a new xtc primitive.  **Four of the eight
+originally listed here have since shipped** -- the entries are kept, and
+marked, because the list doubles as a record of how consumer pressure
+shaped the library:
 
-1. **No built-in hash map / dict primitive.**  We rolled our own
-   FNV-1a bucket hash in `db.c` (~150 LOC).  Many xtc-based apps will
-   want this; consider an `xtc_dict` in M19.
+1. ~~**No built-in hash map / dict primitive.**~~  **SHIPPED.**  Both
+   `xtc_chash` (concurrent, RCU-protected, `<xtc_chash.h>`) and
+   `xtc_pdict` (per-proc dictionary, `<xtc_pdict.h>`) exist now.  rexis
+   still uses its own FNV-1a bucket hash in `db.c` because the example
+   predates them and the hand-rolled version is useful to read; a new
+   consumer should reach for `xtc_chash`.
 
-2. **No token-bucket rate limiter.**  The IOPS cap is implemented
-   inline with atomics; ~30 LOC.  Not an immediate priority but
-   common enough to deserve `xtc_ratelimit`.
+2. **No token-bucket rate limiter.**  Still true.  The IOPS cap is
+   implemented inline with atomics (~30 LOC).  `xtc_credit`
+   (`<xtc_credit.h>`) covers the related *windowed* flow-control case --
+   see `examples/07_kaka/broker.c` -- but not a time-based token bucket.
 
-3. **No glob pattern matcher.**  The `KEYS pattern` command needed
-   one; ~40 LOC inline.  Consider an `xtc_glob` helper.
+3. **No glob pattern matcher.**  Still true.  `KEYS pattern` needed one;
+   ~40 LOC inline.
 
-4. **No `xtc_proc` enumeration.**  We track `conn_count` with a
-   manual atomic.  An `xtc_proc_iterate` callback would let
-   `INFO clients` walk the live connection set.
+4. **No `xtc_proc` enumeration.**  Partly addressed: `xtc_inspect`
+   (`<xtc_inspect.h>`) can enumerate live procs for observability.  rexis
+   still tracks `conn_count` with a manual atomic.
 
-5. **No core-pinning API in `xtc_exec`.**  We call `sched_setaffinity(2)`
-   directly.  An `xtc_exec_pin(exec, cpu_mask)` would be portable
-   (cpuset on FreeBSD, processor_bind on illumos).
+5. **No core-pinning API in `xtc_exec`.**  Still true for pinning
+   itself, but the *topology* half now ships: `xtc_ncpus()`,
+   `xtc_numa_nnodes()`, `xtc_numa_node_of_cpu()`,
+   `xtc_numa_current_node()`.
 
-6. **No non-blocking `xtc_recv` variant.**  We use `xtc_recv` with a
-   short timeout to poll, which is wasteful.  An `xtc_try_recv`
-   that returns immediately would be cleaner for opportunistic
-   draining.
+6. ~~**No non-blocking `xtc_recv` variant.**~~  **SHIPPED (it always
+   existed -- this entry was wrong).**  `xtc_recv(&m, &sz, 0)` returns
+   immediately; a `0` timeout is documented as non-blocking in
+   `<xtc_proc.h>`.  rexis itself uses it in `conn.c`.
 
-7. **No timer inside `xtc_proc`.**  We use `xtc_recv` with a timeout
-   to implement periodic work.  An `xtc_proc_after(proc, ns, fn)`
-   would be more idiomatic.
+7. ~~**No timer inside `xtc_proc`.**~~  **SHIPPED.**  `xtc_proc_sleep()`
+   parks the fiber (without blocking the OS thread) for a bounded time;
+   a recv timeout also remains a fine way to do periodic work.
 
-8. **No async-fd readiness in `xtc_proc`.**  This is the biggest
-   gap.  The listener and per-conn procs busy-poll: they accept
-   non-blocking, then sleep briefly, then try again.  A primitive
-   like `xtc_proc_wait_fd(fd, XTC_IO_READABLE, timeout)` that
-   integrates the loop's `xtc_io_poll` readiness with `xtc_recv`
-   semantics would let connections wake exactly when there's
-   data to read.  Without it, a 10000-client server with mostly-idle
-   connections still wakes each connection every 50ms, which costs
-   real CPU at scale.  This is the highest-leverage missing piece.
+8. ~~**No async-fd readiness in `xtc_proc`** -- once "the biggest gap".~~
+   **SHIPPED, and rexis now uses it.**  `xtc_proc_wait_fd(fd, interest,
+   timeout_ns, &revents)` is exactly the primitive this entry asked for
+   by name, and the listener + per-connection procs park on it
+   (`conn.c`, `main.c`) instead of busy-polling.  The benchmark numbers
+   below predate that change and should be re-measured.
 
 ## Known limitations
 
 * Plaintext RESP only.  No TLS yet (TLS-Redis is a separate exercise;
   see `docs/M_TLS.md` and the existing `xtc_tls` API for the building
   blocks).
-* No persistence.  All data is in RAM; restart loses everything.
-  AOF + RDB would add another ~500 LOC.
+* Persistence is a log-structured **bitcask** store (`bitcask.c`), not
+  Redis's AOF/RDB formats: run with `--persist=DIR` and the keyspace is
+  durable across restart (`db.c` replays the log at startup; covered by
+  `test/m99/test_rexis_persist.sh`).  Without `--persist` rexis is
+  RAM-only.  Note the store's file I/O is currently synchronous -- see
+  the note in `bitcask.h` about why, and `examples/06_sqlxtc/wal.c` for
+  the `xtc_aio_*` alternative.
 * `KEYS pattern` is O(n) like real Redis -- documented, not a bug.
 * `INFO` output is hand-rolled and approximate; real Redis has
   hundreds of metrics; we expose ~30.
@@ -229,9 +241,13 @@ host (Linux x86_64, AMD EPYC):
 | SET ops/sec | ~110,000 | ~78,000 |
 | GET p99 latency | 12 us | 18 us |
 
-xtc is ~25% slower in steady-state, primarily due to the busy-poll
-in the per-connection proc (gap #8 above).  Once `xtc_proc_wait_fd`
-lands and the conn loop sleeps on real fd readiness, the gap should
-close.  We are NOT claiming faster than real Redis here; the value
-is in the **bounded behaviour under stress** (all 5 caps hold; real
-Redis lets you OOM the host on `maxmemory` overrun via fragmentation).
+xtc is ~25% slower in steady-state in these numbers.  **Treat the table
+as historical:** it was measured when the per-connection proc busy-polled
+(the old "gap #8"), and rexis has since been converted to park on
+`xtc_proc_wait_fd` for real fd readiness -- the exact change this note
+used to predict would close the gap.  The comparison has not been re-run
+since, so the current deficit is unknown and probably smaller.
+
+We are NOT claiming faster than real Redis here; the value is in the
+**bounded behaviour under stress** (all 5 caps hold; real Redis lets you
+OOM the host on `maxmemory` overrun via fragmentation).

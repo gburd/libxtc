@@ -14,7 +14,11 @@
 .Nm xtc_clock_real ,
 .Nm xtc_sleep_ns ,
 .Nm xtc_atomic_i64_load ,
-.Nm xtc_atomic_i64_add
+.Nm xtc_atomic_i64_add ,
+.Nm xtc_ncpus ,
+.Nm xtc_numa_nnodes ,
+.Nm xtc_numa_node_of_cpu ,
+.Nm xtc_numa_current_node
 .Nd public allocation, clock, sleep, and atomic helpers
 .Sh SYNOPSIS
 .In xtc.h
@@ -40,6 +44,14 @@
 .Fn xtc_atomic_i64_load "const int64_t *p"
 .Ft int64_t
 .Fn xtc_atomic_i64_add "int64_t *p" "int64_t delta"
+.Ft int
+.Fn xtc_ncpus "void"
+.Ft int
+.Fn xtc_numa_nnodes "void"
+.Ft int
+.Fn xtc_numa_node_of_cpu "int cpu"
+.Ft int
+.Fn xtc_numa_current_node "void"
 .Sh DESCRIPTION
 These are the public complement to the library's internal portability
 layer: a CONSUMER of libxtc uses only these
@@ -113,6 +125,27 @@ and
 .Fn xtc_atomic_i64_add
 (which returns the prior value) are the minimal public atomics for a
 shared 64-bit counter.
+.Pp
+.Fn xtc_ncpus ,
+.Fn xtc_numa_nnodes ,
+.Fn xtc_numa_node_of_cpu ,
+and
+.Fn xtc_numa_current_node
+report CPU and NUMA topology, for a consumer that shards state per core
+or per node (a buffer pool, a partitioned index, a per-core free list).
+.Fn xtc_ncpus
+is the number of usable CPUs, honoring the cgroup quota and affinity mask
+where the platform reports them, and is always at least 1.
+.Fn xtc_numa_nnodes
+returns 1 on a non-NUMA or unqueryable system, in which case
+.Fn xtc_numa_node_of_cpu
+returns 0 \(em so a caller may shard by the returned node with no special
+case.
+.Fn xtc_numa_current_node
+is the node the CALLING thread is running on at that instant; a thread
+can migrate, so treat it as a placement hint rather than a stable
+identity.
+All four are cheap cached queries and safe to call from any thread.
 .Sh RETURN VALUES
 .Fn xtc_free
 and
@@ -135,6 +168,18 @@ code.
 returns the current value;
 .Fn xtc_atomic_i64_add
 returns the value before the add.
+.Pp
+.Fn xtc_ncpus
+returns the usable CPU count (>= 1).
+.Fn xtc_numa_nnodes
+returns the NUMA node count (>= 1; 1 when not NUMA or not queryable).
+.Fn xtc_numa_node_of_cpu
+returns the node owning
+.Fa cpu ,
+or 0 when the topology is unavailable.
+.Fn xtc_numa_current_node
+returns the calling thread's current node, or 0.
+None of these fail.
 .Sh SEE ALSO
 .Xr xtc_proc 3 ,
 .Xr xtc_net 3 ,

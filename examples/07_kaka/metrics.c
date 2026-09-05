@@ -11,7 +11,6 @@
 
 #include <string.h>
 
-#include "xtc_int.h"
 #include "xtc_res.h"
 #include "xtc_stats.h"
 
