@@ -24,6 +24,7 @@ struct fr_state {
 	int  sv0, sv1;
 	int  ok;        /* receiver: count of correctly-received frames */
 	int  cap_range; /* receiver: oversized frame -> XTC_E_RANGE */
+	int  trunc_ok;  /* receiver: truncated frame rejected, no buffer */
 };
 
 /* ---- round-trip: empty, small, and a 4000-byte frame ---- */
@@ -66,10 +67,13 @@ test_frame_roundtrip(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_proc_opts_t opts = { 0 };
-	struct fr_state s = { -1, -1, 0, 0 };
+	struct fr_state s;
 	int sv[2];
 	xtc_pid_t a, b;
 	(void)p; (void)d;
+
+	memset(&s, 0, sizeof s);
+	s.sv0 = s.sv1 = -1;
 
 	munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
 	(void)xtc_net_setnonblock(sv[0]);
@@ -116,10 +120,13 @@ test_frame_cap(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_proc_opts_t opts = { 0 };
-	struct fr_state s = { -1, -1, 0, 0 };
+	struct fr_state s;
 	int sv[2];
 	xtc_pid_t a, b;
 	(void)p; (void)d;
+
+	memset(&s, 0, sizeof s);
+	s.sv0 = s.sv1 = -1;
 
 	munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
 	(void)xtc_net_setnonblock(sv[0]);
@@ -140,9 +147,92 @@ test_frame_cap(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+
+/* ---- peer closes MID-FRAME: the recv loop's cleanup paths -----------
+ *
+ * xtc_net_recv_frame reads a 4-byte length prefix and then loops on the
+ * payload.  If the peer disappears after the header but before the whole
+ * payload arrives, the loop must notice recv()==0, FREE the buffer it
+ * already allocated for the claimed length, and report the truncation
+ * rather than returning a partly-filled frame or leaking.  Neither of
+ * the existing cases reaches that: /roundtrip always completes a frame
+ * and /cap is rejected before any allocation.
+ *
+ * The sender hand-writes a header claiming more bytes than it will send,
+ * writes a short payload, then closes -- so the receiver is guaranteed
+ * to be mid-payload when the peer vanishes.  ASan/valgrind runs of this
+ * case are what prove the buffer is released on that path.
+ */
+static void
+trunc_sender(void *arg)
+{
+	struct fr_state *s = arg;
+	unsigned char hdr[4];
+	const char body[] = "only-4";
+
+	/* Claim 4096 bytes, then send 6 and hang up.  Raw send(): the point
+	 * is to emit a DELIBERATELY inconsistent frame, which the public
+	 * xtc_net_send_frame cannot (and should not) produce. */
+	hdr[0] = 0; hdr[1] = 0; hdr[2] = 0x10; hdr[3] = 0x00;   /* 4096 */
+	(void)send(s->sv0, hdr, sizeof hdr, 0);
+	(void)send(s->sv0, body, sizeof body - 1, 0);
+	xtc_net_close(s->sv0);
+	s->sv0 = -1;
+}
+
+static void
+trunc_receiver(void *arg)
+{
+	struct fr_state *s = arg;
+	void  *buf = NULL;
+	size_t len = 0;
+	int rc;
+
+	rc = xtc_net_recv_frame(s->sv1, &buf, &len, 65536,
+	    2000LL * 1000 * 1000);
+	/* Must NOT report success on a truncated frame, and must not hand
+	 * back a buffer for the caller to free. */
+	if (rc != XTC_OK && buf == NULL)
+		s->trunc_ok = 1;
+	xtc_free(buf);   /* no-op on NULL; correct even if a frame appeared */
+}
+
+static MunitResult
+test_frame_truncated(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	struct fr_state s;
+	int sv[2];
+	xtc_pid_t a, b;
+	(void)p; (void)d;
+
+	memset(&s, 0, sizeof s);
+	s.sv0 = s.sv1 = -1;
+
+	munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+	(void)xtc_net_setnonblock(sv[0]);
+	(void)xtc_net_setnonblock(sv[1]);
+	s.sv0 = sv[0]; s.sv1 = sv[1];
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "trecv";
+	munit_assert_int(xtc_proc_spawn(loop, trunc_receiver, &s, &opts, &b),
+	    ==, XTC_OK);
+	opts.name = "tsend";
+	munit_assert_int(xtc_proc_spawn(loop, trunc_sender, &s, &opts, &a),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(s.trunc_ok, ==, 1);
+	if (s.sv0 >= 0) xtc_net_close(sv[0]);
+	xtc_net_close(sv[1]);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/roundtrip", test_frame_roundtrip, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cap",       test_frame_cap,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/truncated", test_frame_truncated, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = {

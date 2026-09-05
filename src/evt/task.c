@@ -256,12 +256,41 @@ xtc_waker_wake(const xtc_waker_t *w)
 		 * a migratable task can also be targeted by a cross-loop WAKE
 		 * draining on another thread concurrently, so a plain
 		 * read-check-write would race it.  Only the PARKED winner
-		 * enqueues; any other state is a no-op (already runnable). */
+		 * enqueues. */
 		int expect = XTC_TS_PARKED;
 		if (atomic_compare_exchange_strong_explicit(
 		    &w->task->state, &expect, XTC_TS_SCHEDULED,
 		    memory_order_acq_rel, memory_order_acquire))
 			return __xtc_loop_enqueue(w->loop, w->task);
+		/*
+		 * CAS lost.  The task is NOT parked right now -- and that is
+		 * not automatically "already runnable": the dangerous case is
+		 * the PREPARE/PARK WINDOW, where the task is still RUNNING
+		 * (it has decided to park and armed its wake source, but the
+		 * scheduler has not yet applied the PARKED verdict).  A wake
+		 * delivered in that window must be REMEMBERED, or the verdict
+		 * that follows parks a task whose wake already came and went
+		 * -- a lost wakeup, with nothing left to re-deliver it.
+		 *
+		 * The cross-loop XTC_INB_WAKE handler has always latched
+		 * wake_pending here (src/evt/loop.c, and XTC_TASK_PENDING
+		 * consumes it to re-schedule instead of parking).  This
+		 * same-loop branch did not, so the two halves of the v1.40.4
+		 * CAS fix disagreed: a same-loop waker (a timer fire, an
+		 * io/aio completion dispatched by this very loop, a
+		 * same-loop xtc_proc_wake) that raced the park window dropped
+		 * the wake silently, stranding the fiber PARKED -- and with it
+		 * anything waiting on a lock it held.  Latch it, exactly as
+		 * the cross-loop path does.
+		 *
+		 * Latching when the task is genuinely RUNNING-and-not-parking
+		 * is harmless: the flag is consumed only by the PENDING
+		 * verdict, and a task that reaches RESCHED/DONE instead never
+		 * looks at it (and a stale flag is cleared by the exchange the
+		 * next time it does park).
+		 */
+		atomic_store_explicit(&w->task->wake_pending, 1,
+		    memory_order_release);
 		return XTC_OK;
 	}
 

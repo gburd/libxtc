@@ -477,12 +477,119 @@ test_svr_call_name(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+
+/* ---- xtc_svr_call from a PLAIN OS THREAD (the off-loop branch) --------
+ *
+ * xtc_svr_call routes on whether the caller is a proc:
+ *     if (!xtc_pid_is_none(xtc_self()))  -> in-proc path ('Cp' message,
+ *                                           reply delivered to the pid)
+ *     else                               -> OFF-LOOP path ('Cs' message,
+ *                                           reply handed back through a
+ *                                           condvar-guarded slot)
+ * Every existing case calls from inside a fiber, so the whole off-loop
+ * half of svr.c -- the slot construction, its mutex/notify lifecycle, the
+ * 'Cs' encoding, and the reply hand-back -- was never executed.  That is
+ * the path an embedder uses when ordinary application threads talk to a
+ * gen_server, so it is worth a real test.
+ *
+ * The loop must be RUNNING while the foreign thread calls, so the thread
+ * is started first and the server is stopped from the callback once it
+ * has served the call (otherwise xtc_loop_run would never return).
+ */
+struct offloop_args {
+	xtc_pid_t target;
+	_Atomic int rc;
+	_Atomic int value;
+	_Atomic int started;
+};
+
+static struct offloop_args *g_ol;
+static xtc_svr_t *g_ol_svr;
+
+/* Server callback: serve the value, then ask the loop to stop so the
+ * test terminates deterministically. */
+static int
+ol_handle_call(void *st, const void *req, size_t size, xtc_svr_call_t *call)
+{
+	int v = 4242;
+	(void)st; (void)req; (void)size;
+	(void)xtc_svr_reply(call, &v, sizeof v);
+	return XTC_SVR_STOP;
+}
+
+static void *
+ol_thread(void *arg)
+{
+	struct offloop_args *a = arg;
+	void  *reply = NULL;
+	size_t rsz = 0;
+	int rc;
+
+	/* Wait until the server pid is published and the loop is running. */
+	while (!atomic_load(&a->started))
+		(void)xtc_sleep_ns(1000 * 1000LL);
+
+	/* xtc_self() is NONE here (not a proc), so this takes the off-loop
+	 * branch. */
+	rc = xtc_svr_call(a->target, "q", 1, &reply, &rsz,
+	    2000LL * 1000 * 1000);
+	atomic_store(&a->rc, rc);
+	if (rc == XTC_OK && reply != NULL && rsz == sizeof(int)) {
+		int v;
+		memcpy(&v, reply, sizeof v);
+		atomic_store(&a->value, v);
+	}
+	xtc_free(reply);
+	return NULL;
+}
+
+static MunitResult
+test_svr_call_off_loop(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_svr_t  *svr = NULL;
+	xtc_svr_callbacks_t cb = {
+		.init = NULL, .handle_call = ol_handle_call,
+		.handle_cast = NULL, .handle_info = NULL, .terminate = NULL
+	};
+	xtc_svr_opts_t opts = { .name = "offloop", .mailbox_cap = 0 };
+	struct offloop_args a;
+	pthread_t th;
+	(void)p; (void)d;
+
+	memset(&a, 0, sizeof a);
+	atomic_store(&a.rc, -12345);
+	atomic_store(&a.value, 0);
+	atomic_store(&a.started, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cb, NULL, &opts, &svr),
+	    ==, XTC_OK);
+	g_ol_svr = svr;
+	a.target = xtc_svr_pid(svr);
+	g_ol = &a;
+
+	munit_assert_int(pthread_create(&th, NULL, ol_thread, &a), ==, 0);
+	atomic_store(&a.started, 1);
+
+	/* Runs until ol_handle_call returns XTC_SVR_STOP. */
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+
+	munit_assert_int(atomic_load(&a.rc), ==, XTC_OK);
+	munit_assert_int(atomic_load(&a.value), ==, 4242);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/svr_basic", test_svr_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_name", test_svr_call_name, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_abortable", test_svr_call_abortable, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/deferred_reply", test_svr_deferred_reply, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/handle_continue", test_svr_handle_continue, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/call_off_loop",  test_svr_call_off_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/svr", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

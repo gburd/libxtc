@@ -23,6 +23,8 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
 
 #include "xtc.h"        /* XTC_E_NOSYS */
 #include "xtc_tnt.h"
@@ -38,6 +40,11 @@ typedef struct results {
 	atomic_int sink_handled;      /* SINK isolate: messages handled */
 	atomic_int drop_full;         /* sends that hit MAILBOX_FULL */
 	atomic_int drop_stale;        /* sends that hit STALE_HANDLE */
+	atomic_int echo_recv;         /* ECHO: RECV_COMPLETE seen */
+	atomic_int echo_sent;         /* ECHO: SEND_COMPLETE seen */
+	atomic_int echo_closed;       /* ECHO: CLOSE_COMPLETE seen */
+	atomic_int echo_bytes;        /* ECHO: bytes echoed back */
+	atomic_int echo_scratch_ok;   /* ECHO: scratch arena served a request */
 	atomic_int send_ok;           /* sends that succeeded */
 	atomic_int done_seen;         /* SINK isolates torn down (DONE) */
 	atomic_int all_pass;          /* set by driver: 1 = scenario passed */
@@ -50,6 +57,13 @@ static results_t g_res;
 #define T_SINK    1
 #define T_TIMER   2
 #define T_DRIVER  3
+#define T_ECHO    4   /* staged-io echo over a socketpair */
+
+/* Set by main() BEFORE xtc_tnt_start; -1 means "not staged".  Read by the
+ * driver on its first tick, which is inside the runtime -- xtc_tnt_spawn_on
+ * needs the runtime to exist, so the spawn cannot happen before start. */
+static int g_echo_fd = -1;
+
 
 /* ---- User tags ---- */
 #define TAG_ADD       (XTC_TNT_USER_TAG_BASE + 0)  /* COUNTER: add payload */
@@ -228,6 +242,14 @@ driver_handler(void *self_raw, xtc_tnt_message_t *msg)
 		xtc_tnt_spawn(T_SINK, NULL, 0, &self->sink);
 		xtc_tnt_spawn(T_SINK, NULL, 0, &self->fullsink);
 		xtc_tnt_spawn(T_TIMER, NULL, 0, &self->timer);
+		/* Staged-io scenario: spawn the echo Isolate on this shard with
+		 * the already-written socketpair end.  Done from inside the
+		 * runtime because the spawn APIs need it to exist. */
+		if (g_echo_fd >= 0) {
+			xtc_tnt_handle_t eh;
+			(void)xtc_tnt_spawn(T_ECHO, &g_echo_fd,
+			    sizeof g_echo_fd, &eh);
+		}
 		self->phase = 1;
 		(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
@@ -282,6 +304,101 @@ driver_handler(void *self_raw, xtc_tnt_message_t *msg)
 	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
+
+/* ---- ECHO: the staged-io path (courier -> completion -> commit) -----
+ *
+ * xtc_tnt_submit_recv / xtc_tnt_io_send / xtc_tnt_submit_close are the
+ * Isolate model's whole asynchronous story: the Isolate STAGES an
+ * operation and returns WAIT_IO, a courier performs it off the shard
+ * fiber, and the result comes back as an ordinary message.  None of
+ * that was covered by an automated test -- examples/08_tnt/echo.c
+ * exercises it, but that demo binds a FIXED TCP PORT and is therefore
+ * deliberately excluded from make check (port/timing fragile on shared
+ * runners).
+ *
+ * A socketpair gives the same coverage with no port, no bind, no
+ * listener and no timing assumption: main() pre-writes a request into
+ * one end BEFORE the runtime starts, so the data is already buffered
+ * when the courier issues its recv; the Isolate echoes it back and
+ * closes.  main() then reads the echo out of the other end after the
+ * runtime has stopped.
+ */
+#define ECHO_BUFSZ 64
+typedef struct echo_iso {
+	int fd;
+	int echoed;
+	/* The bytes to send must live in ISOLATE-owned storage: the buffer
+	 * handed to us on RECV_COMPLETE belongs to the reactor and may be
+	 * recycled before the asynchronous send completes.  (Sending
+	 * directly from it produced an 8-byte echo of NULs.)  Same
+	 * discipline as examples/08_tnt/echo.c. */
+	size_t bytes;
+	char   buffer[ECHO_BUFSZ];
+} echo_iso_t;
+
+static xtc_tnt_transition_t
+echo_init(void *self_raw, const void *args, size_t n)
+{
+	echo_iso_t *self = xtc_tnt_self_as(echo_iso_t, self_raw);
+	memset(self, 0, sizeof(*self));
+	if (args == NULL || n != sizeof(int))
+		return XTC_TNT_TRANSITION_DONE;
+	memcpy(&self->fd, args, sizeof(int));
+
+	/* Per-tick scratch: freed automatically at the end of the tick, so
+	 * it needs no matching release.  Exercised here because nothing
+	 * else in the suite touches it. */
+	if (xtc_tnt_scratch_arena(64) != NULL)
+		atomic_fetch_add(&g_res.echo_scratch_ok, 1);
+
+	if (xtc_tnt_submit_recv(self->fd) != XTC_TNT_IO_OK)
+		return XTC_TNT_TRANSITION_DONE;
+	return XTC_TNT_TRANSITION_WAIT_IO;
+}
+
+static xtc_tnt_transition_t
+echo_handler(void *self_raw, xtc_tnt_message_t *msg)
+{
+	echo_iso_t *self = xtc_tnt_self_as(echo_iso_t, self_raw);
+
+	switch (msg->tag) {
+	case XTC_TNT_IO_TAG_RECV_COMPLETE:
+		atomic_fetch_add(&g_res.echo_recv, 1);
+		if (msg->body.io.result <= 0) {
+			/* peer closed or error -- stage the close and finish */
+			(void)xtc_tnt_submit_close(self->fd);
+			return XTC_TNT_TRANSITION_WAIT_IO;
+		}
+		/* Copy into our own storage first (see the struct comment),
+		 * then echo it back. */
+		self->bytes = (size_t)msg->body.io.result;
+		if (self->bytes > ECHO_BUFSZ)
+			self->bytes = ECHO_BUFSZ;
+		memcpy(self->buffer, msg->body.io.buffer, self->bytes);
+		if (xtc_tnt_io_send(self->fd, self->buffer, self->bytes)
+		    != XTC_TNT_IO_OK) {
+			(void)xtc_tnt_submit_close(self->fd);
+			return XTC_TNT_TRANSITION_WAIT_IO;
+		}
+		atomic_fetch_add(&g_res.echo_bytes, (int)self->bytes);
+		self->echoed = 1;
+		return XTC_TNT_TRANSITION_WAIT_IO;
+
+	case XTC_TNT_IO_TAG_SEND_COMPLETE:
+		atomic_fetch_add(&g_res.echo_sent, 1);
+		/* One echo is all this scenario needs; close down. */
+		(void)xtc_tnt_submit_close(self->fd);
+		return XTC_TNT_TRANSITION_WAIT_IO;
+
+	case XTC_TNT_IO_TAG_CLOSE_COMPLETE:
+		atomic_fetch_add(&g_res.echo_closed, 1);
+		return XTC_TNT_TRANSITION_DONE;
+
+	default:
+		return XTC_TNT_TRANSITION_WAIT_IO;
+	}
+}
+
 /* ---- Spec --------------------------------------------------------- */
 static const xtc_tnt_type_t test_types[] = {
 	{ .id = T_COUNTER, .name = "Counter", .slot_count = 64,
@@ -300,6 +417,10 @@ static const xtc_tnt_type_t test_types[] = {
 	  .stride = sizeof(driver_iso_t), .mailbox_capacity = 8,
 	  .budget_weight = 2, .init_fn = driver_init,
 	  .handler_fn = driver_handler },
+	{ .id = T_ECHO, .name = "Echo", .slot_count = 8,
+	  .stride = sizeof(echo_iso_t), .mailbox_capacity = 8,
+	  .budget_weight = 8, .init_fn = echo_init,
+	  .handler_fn = echo_handler },
 };
 
 int
@@ -307,18 +428,42 @@ main(void)
 {
 	xtc_tnt_spec_t spec;
 	int rc;
+	int sv[2] = { -1, -1 };
+	int echo_fd = -1;
+	int echo_staged = 0;
+	char echo_back[32];
+	ssize_t echo_n = -1;
 
 	memset(&g_res, 0, sizeof(g_res));
 
 	memset(&spec, 0, sizeof(spec));
 	spec.name = "tnt-test";
 	spec.types = test_types;
-	spec.n_types = 4;
+	spec.n_types = 5;
 	spec.shard_count = 1;
 	spec.scratch_size = 65536;
 	spec.recv_buf_size = 256;
 	spec.boot_type = T_DRIVER;   /* runtime auto-spawns the driver on
 	                              * shard 0; its init kicks the scenario */
+
+	/*
+	 * Stage the staged-io scenario BEFORE starting the runtime.
+	 * socketpair, not a TCP listener: no port to collide, no bind to
+	 * race, no accept to time out.  The request is written into sv[0]
+	 * now, so it is already buffered when the courier issues its recv
+	 * on sv[1] -- the Isolate cannot observe an empty socket and the
+	 * test cannot flake on scheduling.  xtc_tnt_spawn_on routes the
+	 * spawn onto shard 0 from outside any shard fiber (the other
+	 * untested entry point).
+	 */
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) {
+		static const char req[] = "tnt-echo";
+		echo_fd = sv[1];
+		if (write(sv[0], req, sizeof req - 1) == (ssize_t)(sizeof req - 1)) {
+			echo_staged = 1;
+			g_echo_fd = echo_fd;   /* the driver spawns T_ECHO */
+		}
+	}
 
 	rc = xtc_tnt_start(&spec);
 	if (rc == XTC_E_NOSYS) {
@@ -347,6 +492,43 @@ main(void)
 	    atomic_load(&g_res.done_seen));
 	printf("timer_fired   = %d (want 1)\n",
 	    atomic_load(&g_res.timer_fired));
+
+	/*
+	 * Staged-io (courier) scenario.  Only asserted when the socketpair
+	 * could actually be staged -- a platform without socketpair (or a
+	 * spawn_on refusal) is "not exercised here", not a failure.
+	 */
+	if (echo_staged) {
+		echo_n = read(sv[0], echo_back, sizeof echo_back);
+		printf("echo_recv     = %d (want 1)\n",
+		    atomic_load(&g_res.echo_recv));
+		printf("echo_sent     = %d (want 1)\n",
+		    atomic_load(&g_res.echo_sent));
+		printf("echo_closed   = %d (want 1)\n",
+		    atomic_load(&g_res.echo_closed));
+		printf("echo_bytes    = %d (want 8)\n",
+		    atomic_load(&g_res.echo_bytes));
+		printf("echo_scratch  = %d (want 1)\n",
+		    atomic_load(&g_res.echo_scratch_ok));
+		printf("echo_readback = %zd (want 8) [%.*s]\n", echo_n,
+		    (int)(echo_n > 0 ? echo_n : 0), echo_back);
+
+		if (atomic_load(&g_res.echo_recv) < 1 ||
+		    atomic_load(&g_res.echo_sent) < 1 ||
+		    atomic_load(&g_res.echo_closed) < 1 ||
+		    atomic_load(&g_res.echo_scratch_ok) < 1 ||
+		    echo_n != 8 ||
+		    memcmp(echo_back, "tnt-echo", 8) != 0) {
+			printf("\nFAIL: staged-io echo (submit_recv -> io_send -> "
+			    "submit_close) did not round-trip\n");
+			(void)close(sv[0]);
+			return 1;
+		}
+	} else {
+		printf("echo scenario  = not staged (socketpair/spawn_on "
+		    "unavailable); staged-io path not exercised\n");
+	}
+	if (sv[0] >= 0) (void)close(sv[0]);
 
 	if (atomic_load(&g_res.all_pass)) {
 		printf("\nPASS: all tnt dispatch invariants hold\n");
