@@ -381,6 +381,135 @@ test_arwlock_fiber(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+
+/* ---- Fiber timed-wait EXPIRY -----------------------------------------
+ *
+ * The suite covered only timeout 0 (poll) and -1 (infinite).  The
+ * interesting paths -- a fiber that parks on a FINITE timeout, has it
+ * actually EXPIRE, and is then unlinked from the primitive's fiber wait
+ * queue -- were never entered: sync.c's deadline re-arm loops and its
+ * __amutex_wq_remove / __arw_wq_remove waiter-cancellation helpers.
+ * Those are exactly the paths a consumer hits when a lock is contended
+ * and it does not want to wait forever, so "it compiles" is not enough.
+ *
+ * Each holder takes the lock and keeps it well past the waiter's
+ * deadline, so the waiter's timeout MUST expire.  The holder blocks in
+ * xtc_blocking_run (off the loop) rather than parking on the loop, so
+ * the waiter's timer can actually fire while the lock is held.
+ */
+static xtc_amutex_t  *g_to_m;
+static xtc_arwlock_t *g_to_rw;
+static atomic_int g_to_mutex_timedout;
+static atomic_int g_to_rd_timedout;
+static atomic_int g_to_wr_timedout;
+static atomic_int g_to_holder_done;
+
+static int
+to_hold_sleep(void *arg)
+{
+	(void)arg;
+	/* Comfortably longer than every waiter deadline below. */
+	(void)xtc_sleep_ns(120 * 1000 * 1000LL);   /* 120 ms */
+	return 0;
+}
+
+static void
+to_mutex_holder(void *arg)
+{
+	int r;
+	(void)arg;
+	if (xtc_amutex_lock(g_to_m, -1) != XTC_OK)
+		return;
+	(void)xtc_blocking_run(to_hold_sleep, NULL, &r);
+	(void)xtc_amutex_unlock(g_to_m);
+	atomic_fetch_add(&g_to_holder_done, 1);
+}
+
+static void
+to_mutex_waiter(void *arg)
+{
+	(void)arg;
+	/* Contended + finite deadline => must return XTC_E_AGAIN after the
+	 * timer fires, and must unlink itself from the wait queue. */
+	if (xtc_amutex_lock(g_to_m, 20 * 1000 * 1000LL) == XTC_E_AGAIN)
+		atomic_fetch_add(&g_to_mutex_timedout, 1);
+	else
+		(void)xtc_amutex_unlock(g_to_m);
+}
+
+static void
+to_rw_holder(void *arg)
+{
+	int r;
+	(void)arg;
+	if (xtc_arwlock_wrlock(g_to_rw, -1) != XTC_OK)
+		return;
+	(void)xtc_blocking_run(to_hold_sleep, NULL, &r);
+	(void)xtc_arwlock_unlock(g_to_rw);
+	atomic_fetch_add(&g_to_holder_done, 1);
+}
+
+static void
+to_rw_waiters(void *arg)
+{
+	(void)arg;
+	/* A writer holds it, so BOTH a reader and a writer must time out. */
+	if (xtc_arwlock_rdlock(g_to_rw, 20 * 1000 * 1000LL) == XTC_E_AGAIN)
+		atomic_fetch_add(&g_to_rd_timedout, 1);
+	else
+		(void)xtc_arwlock_unlock(g_to_rw);
+	if (xtc_arwlock_wrlock(g_to_rw, 20 * 1000 * 1000LL) == XTC_E_AGAIN)
+		atomic_fetch_add(&g_to_wr_timedout, 1);
+	else
+		(void)xtc_arwlock_unlock(g_to_rw);
+}
+
+static MunitResult
+test_fiber_timeout_expiry(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	(void)p; (void)d;
+
+	atomic_store(&g_to_mutex_timedout, 0);
+	atomic_store(&g_to_rd_timedout, 0);
+	atomic_store(&g_to_wr_timedout, 0);
+	atomic_store(&g_to_holder_done, 0);
+
+	munit_assert_int(xtc_amutex_create(&g_to_m), ==, XTC_OK);
+	munit_assert_int(xtc_arwlock_create(&g_to_rw), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+
+	/* Holders first, so they own the locks before the waiters run. */
+	opts.name = "hold-m";
+	munit_assert_int(xtc_proc_spawn(loop, to_mutex_holder, NULL, &opts,
+	    &pid), ==, XTC_OK);
+	opts.name = "wait-m";
+	munit_assert_int(xtc_proc_spawn(loop, to_mutex_waiter, NULL, &opts,
+	    &pid), ==, XTC_OK);
+	opts.name = "hold-rw";
+	munit_assert_int(xtc_proc_spawn(loop, to_rw_holder, NULL, &opts,
+	    &pid), ==, XTC_OK);
+	opts.name = "wait-rw";
+	munit_assert_int(xtc_proc_spawn(loop, to_rw_waiters, NULL, &opts,
+	    &pid), ==, XTC_OK);
+
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	munit_assert_int(atomic_load(&g_to_mutex_timedout), ==, 1);
+	munit_assert_int(atomic_load(&g_to_rd_timedout), ==, 1);
+	munit_assert_int(atomic_load(&g_to_wr_timedout), ==, 1);
+	/* Both holders must have released cleanly -- a timed-out waiter
+	 * must not corrupt the queue or strand the holder. */
+	munit_assert_int(atomic_load(&g_to_holder_done), ==, 2);
+
+	(void)xtc_loop_fini(loop);
+	xtc_amutex_destroy(g_to_m);
+	xtc_arwlock_destroy(g_to_rw);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/notify_stored",       test_notify_stored,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/notify_cross_thread", test_notify_cross_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -393,6 +522,7 @@ static MunitTest tests[] = {
 	{ "/arwlock_fiber",       test_arwlock_fiber,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/barrier",             test_barrier,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/gate",                test_gate,                NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fiber_timeout_expiry", test_fiber_timeout_expiry, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m9/sync", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

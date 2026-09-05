@@ -1140,6 +1140,134 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+
+/* ---- xtc_cancel_poll: a cancellation window inside a masked region ---
+ *
+ * xtc_uncancelable(body) defers a kill so a masked region can finish its
+ * bookkeeping.  Sometimes a long masked region wants to CHECK for a
+ * pending cancellation at a safe point without abandoning the mask
+ * wholesale -- that is xtc_cancel_poll(body, ud): it drops mask_depth to
+ * 0 for the duration of `body`, drains any deferred kill (so the fiber
+ * may not return), then restores the previous depth.
+ *
+ * It is public and man-paged and had NO test: the whole
+ * save/zero/drain/restore sequence in proc.c was unexecuted.  This
+ * covers both shapes -- polling with nothing pending (must run the body
+ * and restore the mask), and polling with a kill already deferred (must
+ * honor it, so the code after the poll never runs).
+ */
+static _Atomic int g_cp_body_ran;
+static _Atomic int g_cp_after_poll_ran;
+static _Atomic int g_cp_finalizer_ran;
+static _Atomic int g_cp_nopending_ok;
+
+static int
+cp_poll_body(void *ud)
+{
+	(void)ud;
+	atomic_fetch_add(&g_cp_body_ran, 1);
+	return 7;
+}
+
+/* Masked region that polls with NOTHING pending: the body runs, the
+ * return value passes through, and the mask is still in force after. */
+static int
+cp_nothing_pending(void *ud)
+{
+	(void)ud;
+	if (xtc_cancel_poll(cp_poll_body, NULL) == 7)
+		atomic_fetch_add(&g_cp_nopending_ok, 1);
+	/* Still masked here: a kill arriving now must not tear us down
+	 * before we record that we got this far. */
+	atomic_fetch_add(&g_cp_after_poll_ran, 1);
+	return 0;
+}
+
+static void
+cp_proc_nothing(void *arg)
+{
+	(void)arg;
+	(void)xtc_uncancelable(cp_nothing_pending, NULL);
+}
+
+/* Masked region that polls AFTER a kill has been deferred: the poll must
+ * honor the kill, so the statement after it never executes -- while the
+ * at-exit finalizer still runs (the A1+A2 guarantee). */
+static int
+cp_kill_pending(void *ud)
+{
+	void  *m = NULL;
+	size_t sz = 0;
+	(void)ud;
+	/*
+	 * Kill ourselves while masked.  xtc_exit_pid only LATCHES into
+	 * kill_pending; it becomes mask_deferred when a DELIVERY POINT
+	 * observes it while masked -- so poll a delivery point (a
+	 * zero-timeout recv) to move it into the deferred latch.  Only then
+	 * does xtc_cancel_poll's drain have something to honor.
+	 */
+	(void)xtc_exit_pid(xtc_self(), 42);
+	(void)xtc_recv(&m, &sz, 0);   /* delivery point: defers the kill */
+	xtc_free(m);
+	(void)xtc_cancel_poll(cp_poll_body, NULL);
+	/* Unreachable: the poll unmasked and drained the deferred kill. */
+	atomic_fetch_add(&g_cp_after_poll_ran, 100);
+	return 0;
+}
+
+static void
+cp_finalizer(void *ud)
+{
+	(void)ud;
+	atomic_fetch_add(&g_cp_finalizer_ran, 1);
+}
+
+static void
+cp_proc_killed(void *arg)
+{
+	(void)arg;
+	(void)xtc_proc_at_exit(cp_finalizer, NULL);
+	(void)xtc_uncancelable(cp_kill_pending, NULL);
+}
+
+static MunitResult
+test_cancel_poll(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	(void)p; (void)d;
+
+	atomic_store(&g_cp_body_ran, 0);
+	atomic_store(&g_cp_after_poll_ran, 0);
+	atomic_store(&g_cp_finalizer_ran, 0);
+	atomic_store(&g_cp_nopending_ok, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "cp-none";
+	munit_assert_int(xtc_proc_spawn(loop, cp_proc_nothing, NULL, &opts,
+	    &pid), ==, XTC_OK);
+	opts.name = "cp-kill";
+	munit_assert_int(xtc_proc_spawn(loop, cp_proc_killed, NULL, &opts,
+	    &pid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* Only the nothing-pending proc reaches the poll body: the killed
+	 * proc is torn down by the drain INSIDE xtc_cancel_poll, before it
+	 * ever calls the body. */
+	munit_assert_int(atomic_load(&g_cp_body_ran), ==, 1);
+	/* Nothing-pending: the body's value passed through and the code
+	 * after the poll still ran (mask restored, not abandoned). */
+	munit_assert_int(atomic_load(&g_cp_nopending_ok), ==, 1);
+	munit_assert_int(atomic_load(&g_cp_after_poll_ran), ==, 1);
+	/* Kill-pending: the poll honored the deferred kill, so the +100
+	 * after it never ran -- and the finalizer still did. */
+	munit_assert_int(atomic_load(&g_cp_finalizer_ran), ==, 1);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1159,6 +1287,7 @@ static MunitTest tests[] = {
 	{ "/fault_escalate",    test_fault_escalate,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/proc_at_exit",      test_proc_at_exit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pid_local_id_ceiling", test_pid_local_id_ceiling, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/cancel_poll",       test_cancel_poll,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/proc", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
