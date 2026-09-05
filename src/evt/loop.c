@@ -1094,11 +1094,28 @@ xtc_yield_check(void)
 	 * relaxed/acquire loads of that ring's head/tail -- no signal, so
 	 * this slices a long compute fiber with no signal delivered.  A
 	 * no-op (returns 0) on every non-uring backend, where the signal
-	 * path above is the trigger. */
-	if (__xtc_io_uring_preempt_due(t->loop->io)) {
-		atomic_fetch_add_explicit(&t->loop->n_yield_due, 1,
-		    memory_order_relaxed);
-		return 1;
+	 * path above is the trigger.
+	 *
+	 * Consult the loop this fiber is RUNNING on, not its HOME loop
+	 * (t->loop).  __xtc_io_uring_preempt_due is not a pure read: on a
+	 * due tick it calls io_uring_cq_advance (moving that ring's CQ head)
+	 * and re-arms the timeout SQE.  A migratable fiber that has been
+	 * work-stolen runs on a peer thread while t->loop still names its
+	 * home loop, so keying on t->loop mutated ANOTHER loop's preempt
+	 * ring -- its single-producer SQ and its CQ head -- from the wrong
+	 * thread.  That is the same cross-loop-mutation family as the
+	 * v1.40.3 fd-registry and v1.40.7 io->fds races.  The executor arms
+	 * one preempt ring per worker, so the running loop's ring is the one
+	 * that describes this thread's quantum anyway.
+	 */
+	{
+		xtc_loop_t *rl = __xtc_current_loop != NULL
+		    ? __xtc_current_loop : t->loop;
+		if (__xtc_io_uring_preempt_due(rl->io)) {
+			atomic_fetch_add_explicit(&rl->n_yield_due, 1,
+			    memory_order_relaxed);
+			return 1;
+		}
 	}
 	budget = t->loop->yield_budget_ns;
 	if (budget <= 0 || t->run_start_ns == 0)
