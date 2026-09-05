@@ -151,6 +151,26 @@ in priority order:
    sim test proves its own determinism.  Any new sim-reachable
    nondeterministic primitive MUST call the guard.  Never regress this.
 
+   The guard is hooked at exactly these primitives (test/sim/
+   test_sim_determinism_guard.c asserts each one still fires, so this
+   list cannot silently rot):
+     - real/monotonic clock  -- src/os/os_time.c (__os_clock_mono's
+       non-virtualized fallbacks, and __os_clock_real on BOTH the POSIX
+       and Windows branches; the WALL clock is never virtualized)
+     - unseeded RNG          -- src/os/os_rand.c (__os_rand_u64's
+       auto-seed path: it mixes the clock with an ASLR-dependent
+       address, so it is unreplayable even under a virtual clock)
+     - environment read      -- src/os/os_env.c (__os_env_get)
+     - raw OS thread id      -- src/os/os_thread.c (__os_thread_self)
+
+   CONSUMER-VISIBLE COROLLARY: xtc_clock_mono is virtualized by the
+   simulator and is the clock to use on any sim-reachable path;
+   xtc_clock_real is NOT virtualized.  Code that needs a wall-clock-
+   like physical component under DST must derive it from
+   xtc_clock_mono plus a single epoch offset (see hlc_phys_ms in
+   examples/06_sqlxtc/xstore.c, which does exactly this and is
+   replay-clean).
+
 2. VOLUME SURVIVED: seeds x fault-classes run with ZERO invariant
    violation.  This is the trust-building number and it grows over
    time -- the swarm/soak sweeps report it; run them at scale nightly.

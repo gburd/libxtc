@@ -46,8 +46,11 @@ counter_release(void *arg)
 	struct counter_res *r = arg;
 	if (r == NULL)
 		return;
-	free(r->scratch);
-	free(r);
+	/* Our own allocations, so either allocator would work -- but the
+	 * public xtc_* family is what a consumer should reach for, and it
+	 * routes through the same hook an embedder installs for accounting. */
+	xtc_free(r->scratch);
+	xtc_free(r);
 }
 
 /* A2 (cancellation masking): the body of a critical two-step update the
@@ -82,20 +85,23 @@ counter_proc(void *arg)
 	/* Acquire the worker's scratch resource under a scope: the release
 	 * is now a MECHANISM (runs on every exit), not a manner we must
 	 * remember to repeat on each early return / kill path. */
-	res = calloc(1, sizeof *res);
+	res = xtc_calloc(1, sizeof *res);
 	scope = xtc_scope_open();
 	if (res != NULL && scope != NULL) {
-		res->scratch = calloc(1, 4096);
+		res->scratch = xtc_calloc(1, 4096);
 		(void)xtc_scope_defer(scope, counter_release, res);
 	} else {
-		free(res);
+		xtc_free(res);
 		res = NULL;
 	}
 
 	for (count = 0; count < g_iterations; ) {
 		void *m; size_t sz;
 		(void)xtc_recv(&m, &sz, 50 * 1000 * 1000);   /* 50 ms tick */
-		if (m) free(m);
+		/* xtc_free, NOT free: an xtc_recv buffer comes from libxtc's
+		 * allocator (replaceable via the alloc hook), so plain free()
+		 * would be a mismatched free.  xtc_free(NULL) is a no-op. */
+		xtc_free(m);
 		/* Advance the counter through the masked critical section so a
 		 * restart-kill can never split the two-step update. */
 		(void)xtc_uncancelable(critical_commit, &count);
@@ -121,7 +127,7 @@ stats_proc(void *arg)
 	for (rounds = 0; rounds < g_iterations / 5; rounds++) {
 		void *m; size_t sz;
 		(void)xtc_recv(&m, &sz, 250 * 1000 * 1000);  /* 250 ms */
-		if (m) free(m);
+		xtc_free(m);   /* see the note in the foreground worker */
 		printf("stats: round %d\n", rounds);
 	}
 }
@@ -134,7 +140,7 @@ shutdown_watcher(void *arg)
 	void *m; size_t sz;
 	(void)arg;
 	(void)xtc_recv(&m, &sz, 1500 * 1000 * 1000);  /* 1.5 s */
-	if (m) free(m);
+	xtc_free(m);   /* see the note in the foreground worker */
 	printf("watcher: stopping app\n");
 	(void)xtc_app_stop(g_app);
 }
@@ -175,8 +181,20 @@ main(int argc, char **argv)
 	 * children run.  Foreground (counter) gets 3x the shares of the
 	 * background (stats) plus a 1ms latency bound; background gets 1
 	 * share, no bound.  (Glommio-inspired weighted-fair scheduling.) */
-	(void)xtc_exec_class_create(xtc_app_loop(app), 3, 1000LL * 1000, &g_cls_fg);
-	(void)xtc_exec_class_create(xtc_app_loop(app), 1, 0, &g_cls_bg);
+	/* Check these: if class creation fails, g_cls_* stay unset, every
+	 * xtc_proc_set_class below is skipped, and the program prints the
+	 * same output while demonstrating NOTHING about proportional-share
+	 * scheduling.  A silent demo-defeating failure is worse than an
+	 * error. */
+	if (xtc_exec_class_create(xtc_app_loop(app), 3, 1000LL * 1000,
+	    &g_cls_fg) != XTC_OK ||
+	    xtc_exec_class_create(xtc_app_loop(app), 1, 0,
+	    &g_cls_bg) != XTC_OK) {
+		fprintf(stderr, "could not create scheduling classes; the "
+		    "L1 proportional-share part of this demo would be a "
+		    "no-op\n");
+		return 1;
+	}
 
 	/* L3 (over-budget stall watchdog, inspired by Glommio's stall
 	 * detector): warn (with a backtrace) if any single task runs longer

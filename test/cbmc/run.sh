@@ -30,6 +30,33 @@ if ! command -v cbmc >/dev/null 2>&1; then
 	exit 0
 fi
 
+# CBMC MAJOR VERSION GATE.  6.x aborts with "pointer handling for
+# concurrency is unsound" BEFORE producing a verdict on every concurrent
+# harness here (verified on 6.4.0 and 6.9.0), so running it would report
+# all 14 harnesses as FAILED for a tool reason -- indistinguishable, to a
+# reader or a CI log, from a real invariant violation.  Skip loudly
+# instead, naming the version needed.  5.x emits the same note as a
+# warning and completes to VERIFICATION SUCCESSFUL, which is what the
+# per-harness bounds below were tuned against.
+cbmc_ver=$(cbmc --version 2>/dev/null | head -1 | sed 's/[^0-9.].*$//')
+cbmc_major=${cbmc_ver%%.*}
+case "$cbmc_major" in
+[0-9]*)
+	if [ "$cbmc_major" -ge 6 ]; then
+		echo "  [cbmc] SKIP: found cbmc $cbmc_ver, but the concurrent"
+		echo "         harnesses need CBMC 5.x (validated: 5.95.1)."
+		echo "         6.x aborts with 'pointer handling for concurrency"
+		echo "         is unsound' before reaching a verdict, so its"
+		echo "         'failures' would be a tool limitation, not a"
+		echo "         libxtc bug.  Install 5.x ahead on PATH to verify."
+		exit 0
+	fi
+	;;
+*)
+	echo "  [cbmc] WARN: could not parse 'cbmc --version'; attempting the run"
+	;;
+esac
+
 # Per-harness CBMC flags.  Each bound was tuned on an idle 16-core box
 # (cbmc 5.95.1) to reliably reach VERIFICATION SUCCESSFUL within the
 # budget; the wall time at that bound is noted.  The algorithms are

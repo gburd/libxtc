@@ -74,18 +74,36 @@ the PBT (`test/pbt/pbt_sched_shares.c`), and the unit test
 ## Running
 
 ```sh
-make -C build_unix cbmc            # or: cd test/cbmc && ./run.sh
+make -C build_unix check-cbmc      # or: make -C build_unix cbmc
+# or directly:                       cd test/cbmc && ./run.sh
+# one harness:                        ./run.sh mask_harness
+# per-harness wall budget (seconds):  CBMC_TIMEOUT=1800 ./run.sh
 ```
 
-Requires `cbmc` on PATH (`nix-shell -p cbmc`).  Not part of the default
-`make check` (CBMC runs are minutes, not seconds); it is a separate
-verification tier + a release gate, like `make check-dst`.
+Not part of the default `make check` (CBMC runs are minutes, not
+seconds); it is a separate verification tier, like `make check-dst`.
+CI runs it in the `cbmc-nightly` job (nightly + `workflow_dispatch`),
+where all 14 harnesses must verify.
 
-**Use a CBMC 5.x release** (e.g. 5.95.1).  CBMC 6.x aborts with
-`pointer handling for concurrency is unsound` (exit 6) on the
-concurrent-pointer harnesses; 5.x emits the same note as a warning and
-completes to a verdict.  A static 5.x binary can be extracted from the
-project's Ubuntu `.deb` release asset and run on any recent glibc.
+**CBMC 5.x is required** (validated: 5.91.0 and 5.95.1).  CBMC **6.x
+cannot verify these harnesses at all**: it aborts with `pointer handling
+for concurrency is unsound` *before* reaching a verdict on every
+concurrent harness, so every harness would report a failure for a tool
+reason indistinguishable from a real invariant violation.  `run.sh`
+detects a 6.x on PATH and SKIPs with an explanation rather than emitting
+14 false failures.
+
+Note that `nix develop` (this repo's dev shell) provides whatever nixpkgs
+ships, currently **6.x** -- so a plain `make check-cbmc` in the dev shell
+SKIPs.  To actually verify, put a 5.x ahead on PATH; the simplest way:
+
+```sh
+nix shell github:NixOS/nixpkgs/nixos-23.11#cbmc \
+    --command sh -c 'CBMC_TIMEOUT=1800 sh test/cbmc/run.sh'
+```
+
+(That pin ships 5.91.0.  A static 5.x binary can also be extracted from
+the project's Ubuntu `.deb` release asset and run on any recent glibc.)
 
 ## Reading a failure
 

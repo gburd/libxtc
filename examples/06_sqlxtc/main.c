@@ -27,7 +27,6 @@
 #include "xtc.h"
 #include "xtc_app.h"
 #include "xtc_exec.h"
-#include "xtc_int.h"
 #include "xtc_io.h"
 #include "xtc_log.h"
 #include "xtc_loop.h"

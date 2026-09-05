@@ -485,7 +485,7 @@ TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt
 # -------------------------------------------------------------------------
 # Default goal.
 # -------------------------------------------------------------------------
-.PHONY: all check check-sim check-dst tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation print-includedir print-libdir bench-micro
+.PHONY: all check check-sim check-dst cbmc check-cbmc check-examples coverage tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation print-includedir print-libdir bench-micro
 
 all: $(STATIC_LIB) $(SHARED_LIB_TARGETS) compile_commands.json
 
@@ -925,6 +925,26 @@ bench-micro: bench_micro
 # -------------------------------------------------------------------------
 examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo
 
+# check-examples: BUILD and RUN the standalone teaching examples as part of
+# `make check`.  Previously `make check` did not build examples at all and
+# the CI examples job covered only 06/07/11, so five programs -- including
+# all four teaching examples -- were compiled by nobody on any push, while
+# docs/examples/index.md claimed "every example is built and run in CI".
+#
+# Only the self-terminating, port-free ones run here.  Each exits non-zero
+# on failure (10_circuit_breaker and 02_pingpong assert their own observable
+# outcome), so this is a real gate, not a smoke test.  tnt_echo is excluded
+# deliberately: it binds a fixed TCP port and is timing-fragile (see its own
+# target comment).  04_lockmgr_demo runs a randomized deadlock workload and
+# takes a few seconds, which is acceptable for the coverage it buys.
+check-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker
+	@for t in 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo \
+	          10_circuit_breaker; do \
+		printf 'running example: %s\n' "$$t"; \
+		./$$t >/dev/null || { echo "  [examples] FAIL: $$t exited non-zero"; exit 1; }; \
+	done; \
+	echo "  [examples] OK: teaching examples build and run clean"
+
 01_hello: $(srcdir)/../examples/01_hello_async.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../examples/01_hello_async.c \
@@ -960,7 +980,7 @@ tnt_echo: $(srcdir)/../examples/08_tnt/echo.c $(STATIC_LIB)
 # -------------------------------------------------------------------------
 # Tests.
 # -------------------------------------------------------------------------
-check: tests-c tests-pbt tests-sh
+check: tests-c tests-pbt tests-sh check-examples
 	@echo "== M0 test summary =="
 	@echo "All tests passed."
 
@@ -982,11 +1002,27 @@ tests-sh: $(STATIC_LIB) tnt_echo
 	done
 
 tests-pbt: $(TESTS_PBT)
-	@for t in $(TESTS_PBT); do \
+	@skipped=0; ran=0; \
+	for t in $(TESTS_PBT); do \
 		echo "running PBT: $$t"; \
-		HEGEL_SERVER_COMMAND="$(XTC_HEGEL_SERVER_COMMAND)" \
-		./$$t || exit 1; \
-	done
+		out=$$(HEGEL_SERVER_COMMAND="$(XTC_HEGEL_SERVER_COMMAND)" \
+		    ./$$t 2>&1) || { printf '%s\n' "$$out"; exit 1; }; \
+		printf '%s\n' "$$out"; \
+		case "$$out" in \
+		*SKIP*) skipped=$$((skipped+1)) ;; \
+		*) ran=$$((ran+1)) ;; \
+		esac; \
+	done; \
+	if [ "$$skipped" -gt 0 ]; then \
+		echo "  [PBT] WARNING: $$skipped of $$((skipped+ran)) property suites were"; \
+		echo "        SKIPPED because hegel is not configured, so their"; \
+		echo "        properties are UNVERIFIED by this run.  A green"; \
+		echo "        \`make check\` does NOT mean the properties hold --"; \
+		echo "        configure --with-hegel=PATH to actually check them."; \
+		echo "        (See docs/adr/0002-hegel-pbt-first-class.md.)"; \
+	else \
+		echo "  [PBT] OK: all $$ran property suite(s) actually ran"; \
+	fi
 
 # check-sim / check-dst: the full DST suite (test/sim/, 52+ tests) built
 # against a separate --with-io-backend=sim configuration.  NOT part of
@@ -996,6 +1032,42 @@ tests-pbt: $(TESTS_PBT)
 check-sim: check-dst
 check-dst:
 	XTC_SRC_DIR=$(abs_top_srcdir)/.. sh $(abs_top_srcdir)/../test/sim/run_sim_tests.sh
+
+# coverage: MERGED coverage across both build configurations.
+#
+# `check` and `check-dst` are separate configurations (the DST tier builds
+# its own --with-io-backend=sim library), so a gcov run over `make check`
+# alone structurally UNDERCOUNTS: everything only the sim backend reaches
+# (evt/sim.c, the sim-only branches of evt/exec.c and evt/loop.c) reads as
+# uncovered.  Measuring one configuration and calling it "the" number is
+# how evt/sim.c came to look 16% covered while being exercised by 65 DST
+# tests.
+#
+# This target measures BOTH and merges the tracefiles, which is the only
+# honest figure to quote for "the DST-reachable public surface" that
+# AGENTS.md asks for.  Requires gcovr (in the nix dev shell).  Run it from
+# a build dir configured WITH coverage instrumentation, e.g.:
+#
+#   CFLAGS='--coverage -O0 -g' LDFLAGS='--coverage' ../dist/configure
+#   make && make coverage
+COVERAGE_OUT ?= coverage-out
+coverage:
+	@XTC_SRC_DIR=$(abs_top_srcdir)/.. CC='$(CC)' \
+		sh $(abs_top_srcdir)/../scripts/coverage.sh $(COVERAGE_OUT)
+
+# check-cbmc / cbmc: the bounded-model-checking tier (test/cbmc/, 14
+# harnesses).  Each harness proves one concurrent algorithm's safety
+# invariant against its REAL source over every interleaving up to a
+# tuned bound.  NOT part of plain `make check` (runs are minutes, not
+# seconds) -- it is a separate verification tier, like check-dst.
+#
+# Needs cbmc 5.x on PATH (`nix develop` provides it; CBMC 6.x aborts on
+# the concurrent-pointer harnesses -- see test/cbmc/README.md).  Without
+# cbmc the script SKIPs cleanly, so this target is safe to invoke
+# anywhere.  `cbmc` is an alias so the name in the README works.
+cbmc: check-cbmc
+check-cbmc:
+	sh $(abs_top_srcdir)/../test/cbmc/run.sh
 
 # Build C tests.  Each links against the static lib.
 test_version: $(srcdir)/../test/m0/test_version.c \

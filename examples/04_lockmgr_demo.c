@@ -39,7 +39,6 @@
 #include <unistd.h>
 
 #include "xtc.h"
-#include "xtc_int.h"
 #include "xtc_loop.h"
 #include "xtc_lockmgr.h"
 #include "xtc_proc.h"
@@ -84,7 +83,16 @@ deck_init(struct deck *d)
 	for (i = 0; i < DECK_N; i++) d->cards[i] = i;
 	d->pos = 0; d->deals = 0;
 	fd = open("/dev/urandom", O_RDONLY);
-	if (fd >= 0) { (void)read(fd, &seed, sizeof seed); (void)close(fd); }
+	if (fd >= 0) {
+		/* Check the read: a short/failed read leaves `seed` partly or
+		 * wholly unset, and the time(NULL) fallback below is what makes
+		 * that safe -- so treat anything but a full read as "no entropy
+		 * from urandom".  (Voiding it here is also the one warning the
+		 * example build used to emit.) */
+		if (read(fd, &seed, sizeof seed) != (ssize_t)sizeof seed)
+			seed = 0;
+		(void)close(fd);
+	}
 	if (seed == 0) seed = (uint64_t)time(NULL) * 0x9e3779b97f4a7c15ULL;
 	d->state = seed;
 	deck_shuffle(d);

@@ -17,7 +17,6 @@
 #include "xtc_io.h"
 #include "xtc_inject.h"
 #include "xtc_pg.h"
-#include "xtc_int.h"
 
 #define DEFAULT_READ_BUF   (64 * 1024)
 #define DEFAULT_WRITE_BUF  (64 * 1024)

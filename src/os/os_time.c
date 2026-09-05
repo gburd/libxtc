@@ -77,6 +77,8 @@ __os_clock_real(int64_t *out)
 	const int64_t EPOCH_DELTA_100NS = 116444736000000000LL;
 	if (out == NULL)
 		return XTC_E_INVAL;
+	/* DETERMINISM GUARD -- see the POSIX __os_clock_real. */
+	__xtc_sim_nondeterminism("real clock (GetSystemTimePreciseAsFileTime)");
 	GetSystemTimePreciseAsFileTime(&ft);
 	u.LowPart  = ft.dwLowDateTime;
 	u.HighPart = ft.dwHighDateTime;
@@ -179,6 +181,11 @@ __os_clock_real(int64_t *out)
 	struct timespec ts;
 	if (out == NULL)
 		return XTC_E_INVAL;
+	/* DETERMINISM GUARD: the WALL clock is not virtualized by the sim
+	 * (only the monotonic clock is), so a sim-reachable read of it
+	 * breaks seed replay.  Deadline math on a sim-reachable path must
+	 * use __os_clock_mono. */
+	__xtc_sim_nondeterminism("real clock (CLOCK_REALTIME)");
 	if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
 		return XTC_E_INTERNAL;
 	return __ts_to_ns(&ts, out);

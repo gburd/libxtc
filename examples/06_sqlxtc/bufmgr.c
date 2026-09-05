@@ -22,11 +22,11 @@
 
 #include "bufmgr.h"
 
-#include "xtc_int.h"
 #include "xtc_aio.h"
 #include "xtc_stats.h"
 #include "xtc_sync.h"
 #include "xtc_dio_sched.h"
+#include <stdlib.h>
 #include <fcntl.h>
 
 #include <pthread.h>
@@ -57,7 +57,6 @@ enum { BM_CLS_TRANSIENT = 0, BM_CLS_COLD, BM_CLS_LOCAL_HOT, BM_CLS_SHARED_HOT };
  * pools are independent.
  */
 #include <sched.h>
-#include "os_cpu.h"                 /* __os_ncpus, __os_numa_node_of_cpu */
 #define BM_CLS_WAYS      4
 #define BM_CLS_LOG_SLOTS 15
 #define BM_CLS_SLOTS     (1u << BM_CLS_LOG_SLOTS)
@@ -824,7 +823,7 @@ bm_cls_hash(bm_pid_t x)
 static inline int
 bm_cls_domain_of_cpu(int cpu)
 {
-	int n = __os_numa_node_of_cpu(cpu);
+	int n = xtc_numa_node_of_cpu(cpu);
 	if (n < 0) n = 0;
 	return n % BM_CLS_MAXDOM;
 }
@@ -1333,7 +1332,7 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	    memory_order_relaxed);   /* sampled-eviction PRNG seed (stage 2) */
 #ifdef BM_CLASSIFY
 	{
-		int nc = __os_ncpus();
+		int nc = xtc_ncpus();
 		int dd, nd = 0, cc;
 		if (nc < 1) nc = 1;
 		if (nc > BM_CLS_MAXCORES) nc = BM_CLS_MAXCORES;

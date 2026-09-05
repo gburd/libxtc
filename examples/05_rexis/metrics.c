@@ -20,7 +20,6 @@
 #include "xtc_proc.h"
 #include "xtc_res.h"
 #include "xtc_log.h"
-#include "xtc_int.h"
 #include "xtc_stats.h"
 
 #define METRICS_INTERVAL_NS  (5000LL * 1000 * 1000)  /* 5 seconds */

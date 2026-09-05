@@ -11,7 +11,6 @@
 #include <stdio.h>
 
 #include "db.h"
-#include "xtc_int.h"
 
 /* Local helper wrapping xtc_clock_mono(). */
 static inline int64_t xtc_now_ns(void) {

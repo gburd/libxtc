@@ -701,6 +701,27 @@ out:
 	return t;
 }
 
+/*
+ * Hard ceiling on live procs per loop, dictated by the pid ABI:
+ * xtc_pid_t.local_id is uint16_t (see <xtc_proc.h>), so slot index
+ * 65536 would truncate to 0 and hand out a pid IDENTICAL to the live
+ * proc in slot 0 -- same loop_id, same local_id, and (because gen is
+ * per-SLOT) the same gen, so the generation check cannot disambiguate
+ * them either.  Two live procs sharing a pid means xtc_send / wake /
+ * DOWN can be delivered to the wrong proc, and __table_release can
+ * clear a slot belonging to a different proc (dropping the real
+ * owner's reference).
+ *
+ * Historically this was masked only INCIDENTALLY: the default fds
+ * resource cap (XTC_RES_CAPS_DEFAULT.fds == 65536) stopped spawning at
+ * exactly 65536 first.  That is not a guard -- the tasks cap defaults
+ * to 100000, deliberately ABOVE this limit -- so an embedder that
+ * legitimately raised fds could reach the collision.  Refuse
+ * explicitly here, so the bound is a property of the proc table rather
+ * than a side effect of an unrelated cap.
+ */
+#define XTC_PROC_MAX_LOCAL_ID 65536u   /* UINT16_MAX + 1 */
+
 static int
 __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
                    uint16_t *out_local, uint32_t *out_gen)
@@ -723,8 +744,13 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 			goto out;
 		}
 	}
-	/* Grow. */
+	/* Grow -- but never past what local_id can represent. */
+	if (t->cap >= (size_t)XTC_PROC_MAX_LOCAL_ID) {
+		rc = XTC_E_RESOURCE; goto out;
+	}
 	new_cap = t->cap == 0 ? 16 : t->cap * 2;
+	if (new_cap > (size_t)XTC_PROC_MAX_LOCAL_ID)
+		new_cap = (size_t)XTC_PROC_MAX_LOCAL_ID;
 	if (__os_realloc(t->slots, new_cap * sizeof *ns,
 	    (void **)&ns) != XTC_OK || ns == NULL) {
 		rc = XTC_E_NOMEM; goto out;
@@ -737,6 +763,12 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 	t->cap = new_cap;
 
 	idx = t->n_used;     /* first new slot */
+	/* The scan above found no free slot and the grow is bounded, so
+	 * n_used is the first fresh index; assert it in range rather than
+	 * trusting the invariant blindly. */
+	if (idx >= t->cap) {
+		rc = XTC_E_RESOURCE; goto out;
+	}
 	t->slots[idx].proc = p;
 	*out_local = (uint16_t)idx;
 	*out_gen   = ++t->slots[idx].gen;

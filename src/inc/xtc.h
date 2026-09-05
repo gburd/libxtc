@@ -146,6 +146,18 @@ void  xtc_aligned_free(void *p);
  *	or real (wall-clock; for timestamps) clock in NANOSECONDS.  Return
  *	the time directly (0 on the rare query failure).  These are the
  *	public clocks a consumer uses instead of raw clock_gettime.
+ *
+ *	DETERMINISM (matters if you run under the simulator):
+ *	xtc_clock_mono is VIRTUALIZED by the deterministic simulator, so a
+ *	seeded run replays its timeline exactly -- it is the clock to use
+ *	anywhere a simulated run can reach.  xtc_clock_real reads the host
+ *	WALL clock, which the simulator does NOT virtualize; calling it on
+ *	a sim-reachable path makes the run depend on when it was launched
+ *	rather than on the seed, and the determinism guard will flag it
+ *	(xtc_sim_exec_run then refuses XTC_OK).  Use xtc_clock_real only
+ *	for human-facing timestamps outside simulated paths, or derive a
+ *	physical component from xtc_clock_mono plus a single epoch offset
+ *	sampled at startup.
  */
 int64_t xtc_clock_mono(void);
 int64_t xtc_clock_real(void);
@@ -221,6 +233,28 @@ void     xtc_rand_seed(uint64_t seed);
  */
 size_t xtc_strlcpy(char *dst, const char *src, size_t dstsize);
 size_t xtc_strlcat(char *dst, const char *src, size_t dstsize);
+
+/*
+ * xtc_ncpus / xtc_numa_nnodes / xtc_numa_node_of_cpu /
+ * xtc_numa_current_node --
+ *	CPU and NUMA topology.  Use these when sharding state per core or
+ *	per NUMA node (a buffer pool, a partitioned index, a per-core free
+ *	list) instead of hard-coding a width or reading sysfs directly.
+ *
+ *	xtc_ncpus() is the number of usable CPUs (honoring the cgroup quota
+ *	and affinity mask where the platform reports them), always >= 1.
+ *	xtc_numa_nnodes() returns 1 on a non-NUMA or unqueryable system, and
+ *	xtc_numa_node_of_cpu() then returns 0 -- so a caller can shard by
+ *	the returned node with no special case.  xtc_numa_current_node() is
+ *	the node the CALLING thread is running on right now, which can
+ *	change if the thread migrates; treat it as a placement hint.
+ *
+ *	All are cheap cached queries, safe from any thread.
+ */
+int xtc_ncpus(void);
+int xtc_numa_nnodes(void);
+int xtc_numa_node_of_cpu(int cpu);
+int xtc_numa_current_node(void);
 
 #ifdef __cplusplus
 }

@@ -13,7 +13,6 @@
 
 #include "cmd.h"
 #include "xtc_pg.h"
-#include "xtc_int.h"
 #include "xtc_stats.h"
 
 /* Per-command instrumentation.  Defined in metrics.c, set NULL if

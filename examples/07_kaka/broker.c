@@ -42,7 +42,6 @@
 #include <sys/stat.h>
 
 #include "xtc.h"
-#include "xtc_int.h"
 #include "xtc_io.h"
 #include "xtc_log.h"
 #include "xtc_loop.h"

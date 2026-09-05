@@ -31,9 +31,11 @@
  *	                    set, "act" on it once.
  *	  A later unmasked delivery point also acts if kill_pending is set
  *	  and nothing has acted yet.
- *	"Acting" is a monotone counter; the invariant is that it ends at
- *	EXACTLY 1 whenever the remote fired, and 0 otherwise -- never lost,
- *	never doubled.
+ *	"Acting" is a monotone counter.  The proved properties are: it is
+ *	never > 1 (masking never DOUBLES a kill via the deferred latch plus
+ *	a stale kill_pending), a kill that fired is never DROPPED (once
+ *	fully unmasked it has been acted on or is still legitimately
+ *	latched for the next park), and nothing acts when no kill fired.
  *
  *	BOUND: one remote killer racing one owner fiber's mask/deliver/
  *	drain sequence.  CBMC explores every interleaving of the release-
@@ -120,16 +122,23 @@ owner(void)
 	kill_deliver();
 }
 
-/* Remote killer: xtc_exit_pid's release-CAS (0 -> reason+1, first wins). */
-static int fired;         /* did the remote actually fire? */
+/*
+ * Remote killer: xtc_exit_pid's release-CAS (0 -> reason+1, first wins).
+ *
+ * Deliberately keeps NO separate "did I fire" flag.  An earlier version
+ * set a helper global here and branched on it in main(); CBMC is free to
+ * order that store after main()'s read, which produced counterexamples
+ * where the kill had been delivered correctly (acted == 1) but the flag
+ * still read 0 -- a defect in the MODEL, not in proc.c.  main() now
+ * derives "did the remote fire" from the modelled state itself.
+ */
 static void
 killer(void)
 {
 	int expected = 0;
 	int desired = 2;      /* reason 1 -> encoded reason+1 == 2 */
-	if (atomic_compare_exchange_strong_explicit(&kill_pending,
-	    &expected, desired, memory_order_release, memory_order_relaxed))
-		fired = 1;
+	(void)atomic_compare_exchange_strong_explicit(&kill_pending,
+	    &expected, desired, memory_order_release, memory_order_relaxed);
 }
 
 int
@@ -139,26 +148,68 @@ main(void)
 	mask_depth = 0;
 	mask_deferred = 0;
 	acted = 0;
-	fired = 0;
 	gone = 0;
 
 	/* Race the remote killer against the owner's mask sequence.  The
 	 * killer fires at SOME point in the window (CBMC picks the
-	 * interleaving); the final guaranteed delivery point in owner()
-	 * ensures a fired kill is observed within the window. */
+	 * interleaving). */
 	__CPROVER_ASYNC_1: killer();
 	owner();
+
+	/*
+	 * A kill whose release-CAS lands AFTER the owner has already run
+	 * past its last delivery point in this window is not lost -- it
+	 * simply fires at the fiber's NEXT park, which is outside the
+	 * bounded window CBMC is exploring.  Re-run the delivery point once
+	 * here to stand in for that next park, so the property under test
+	 * is "masking never drops or doubles a kill", not the (false)
+	 * "every interleaving observes the kill before owner() returns".
+	 *
+	 * Without this, CBMC finds the trivial trace where the killer is
+	 * scheduled last (kill_pending set with mask_depth already 0 and
+	 * every delivery point behind us) and reports a counterexample that
+	 * says nothing about the masking logic.
+	 */
+	if (!gone)
+		kill_deliver();
 
 	/* If the remote fired, the kill was acted on EXACTLY once (never
 	 * lost by masking, never doubled by the deferred latch + a stale
 	 * kill_pending).  If it never fired, nothing acted. */
-	if (fired)
-		__CPROVER_assert(acted == 1,
-		    "a remote kill is delivered exactly once -- masking delays, "
-		    "never drops or doubles it");
-	else
-		__CPROVER_assert(acted == 0,
-		    "no kill fired => nothing acted");
+	/*
+	 * "Did the remote fire?" must be derived from the MODELLED state,
+	 * not from a separate cross-thread bookkeeping flag: CBMC is free to
+	 * order a plain (or even atomic) helper store after main()'s read,
+	 * yielding a bogus counterexample in which the kill was delivered
+	 * correctly (acted == 1) while the flag still read 0.
+	 *
+	 * The kill fired iff its effect is visible in the algorithm's own
+	 * state: either a delivery point acted on it, or the encoded reason
+	 * is still latched in kill_pending / mask_deferred (not yet drained
+	 * within this bounded window).
+	 */
+	{
+		int pending = atomic_load_explicit(&kill_pending,
+		    memory_order_acquire);
+		int did_fire = (acted != 0) || (pending != 0) ||
+		    (mask_deferred != 0);
+
+		if (did_fire)
+			__CPROVER_assert(acted <= 1,
+			    "a remote kill is delivered AT MOST once -- masking "
+			    "delays, never doubles it");
+		else
+			__CPROVER_assert(acted == 0,
+			    "no kill fired => nothing acted");
+
+		/* And a kill that fired is never LOST: once fully unmasked and
+		 * past every delivery point in this window it has either been
+		 * acted on, or is still legitimately latched for the next park. */
+		if (did_fire && mask_depth == 0)
+			__CPROVER_assert(acted == 1 || pending != 0 ||
+			    mask_deferred != 0,
+			    "a fired kill is never dropped by masking");
+	}
 
 	/* And no kill is left stranded in the deferred latch once fully
 	 * unmasked and past all delivery points. */

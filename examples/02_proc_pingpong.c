@@ -35,19 +35,37 @@ pong(void *arg)
 	for (;;) {
 		struct rpc_msg req;
 		struct rpc_msg reply;
+		int rc;
 		if (xtc_recv(&m, &sz, 1000LL * 1000 * 1000) != XTC_OK) return;
-		if (sz != sizeof req) { if (m) free(m); continue; }
+		/* xtc_free, NOT free: the buffer xtc_recv hands us comes from
+		 * libxtc's allocator, which an embedder can replace
+		 * (xtc_alloc_set_hook).  Releasing it with the C library's
+		 * free() is a mismatched free -- heap corruption under any
+		 * custom allocator.  Same rule for every buffer the docs say
+		 * to "free with xtc_free". */
+		if (sz != sizeof req) { xtc_free(m); continue; }
 		memcpy(&req, m, sizeof req);
-		free(m);
+		xtc_free(m);
 		if (req.n >= ROUNDS) {
 			printf("pong: reached %d, exiting\n", req.n);
 			return;
 		}
 		reply.from = xtc_self();
 		reply.n    = req.n + 1;
-		(void)xtc_send(req.from, &reply, sizeof reply);
+		/* Always check xtc_send: a full mailbox returns XTC_E_AGAIN,
+		 * and dropping that return silently loses the reply -- the
+		 * peer then waits forever for an answer that was discarded.
+		 * Backpressure is the caller's to handle, not the library's. */
+		rc = xtc_send(req.from, &reply, sizeof reply);
+		if (rc != XTC_OK) {
+			fprintf(stderr, "pong: reply to round %d dropped: %s\n",
+			    req.n + 1, xtc_strerror(rc));
+			return;
+		}
 	}
 }
+
+static int g_ping_rounds;   /* observed outcome, checked in main */
 
 struct ping_state { xtc_pid_t pong; };
 
@@ -58,19 +76,20 @@ ping(void *arg)
 	int n = 0;
 	void  *m;
 	size_t sz;
+	struct rpc_msg reply;
 	while (n < ROUNDS) {
 		struct rpc_msg req = { .from = xtc_self(), .n = n };
 		if (xtc_send(st->pong, &req, sizeof req) != XTC_OK) break;
 		if (xtc_recv(&m, &sz, 1000LL * 1000 * 1000) != XTC_OK) break;
-		if (sz != sizeof req) { if (m) free(m); break; }
-		{
-			struct rpc_msg reply;
-			memcpy(&reply, m, sizeof reply);
-			free(m);
-			n = reply.n;
-		}
+		if (sz != sizeof req) { xtc_free(m); break; }
+		memcpy(&reply, m, sizeof reply);
+		xtc_free(m);   /* see the note in pong() */
+		n = reply.n;
 	}
 	printf("ping: completed %d rounds\n", n);
+	/* Report the outcome so a failed run is visible to the caller (and
+	 * to CI) instead of looking like success. */
+	g_ping_rounds = n;
 }
 
 int
@@ -86,5 +105,14 @@ main(void)
 	if (xtc_proc_spawn(loop, ping, &st, NULL, &ping_pid) != XTC_OK) return 1;
 	if (xtc_loop_run(loop) != XTC_OK) return 1;
 	(void)xtc_loop_fini(loop);
+
+	/* Assert the observable outcome.  Without this the program prints
+	 * "completed 0 rounds" and still exits 0, so CI (and a reader) could
+	 * not tell a working build from a broken one. */
+	if (g_ping_rounds < ROUNDS) {
+		fprintf(stderr, "FAIL: only %d of %d rounds completed\n",
+		    g_ping_rounds, ROUNDS);
+		return 1;
+	}
 	return 0;
 }

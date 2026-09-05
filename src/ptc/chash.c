@@ -292,6 +292,7 @@ xtc_chash_insert(xtc_chash_t *h, void *key, void *value, void **out_old_value)
 	struct chash_node *n, *new_node;
 	_Atomic(struct chash_node *) *head_slot;
 	size_t idx, stripe;
+	size_t n_snapshot;   /* arr->n captured inside the read-side */
 
 	if (h == NULL || key == NULL) return XTC_E_INVAL;
 	hh = h->hash_fn(key);
@@ -349,6 +350,16 @@ xtc_chash_insert(xtc_chash_t *h, void *key, void *value, void **out_old_value)
 	atomic_init(&new_node->next,
 	    atomic_load_explicit(head_slot, memory_order_relaxed));
 	atomic_store_explicit(head_slot, new_node, memory_order_release);
+	/*
+	 * Snapshot the bucket count BEFORE leaving the read-side.  `arr` is
+	 * the object __chash_resize hands to xtc_rcu_retire(); once this
+	 * thread is outside its read-side it no longer holds `arr` alive, so
+	 * a concurrent resize plus any reclaimer's xtc_rcu_synchronize may
+	 * free it -- dereferencing arr->n after the unlock is a
+	 * use-after-free read (it happens to only feed a heuristic, but it
+	 * is still UB and ASan/Valgrind flag it).
+	 */
+	n_snapshot = arr->n;
 	(void)__xtc_mtx_unlock(&h->stripe_locks[stripe]);
 	xtc_rcu_read_unlock();
 
@@ -356,10 +367,10 @@ xtc_chash_insert(xtc_chash_t *h, void *key, void *value, void **out_old_value)
 	{
 		size_t cnt = atomic_fetch_add_explicit(&h->count, 1,
 		    memory_order_relaxed) + 1;
-		/* Grow past 75% load factor.  arr->n is a snapshot from
-		 * before this insert; a heuristic trigger, not exact --
-		 * fine, since grow itself re-reads the live array. */
-		if (cnt * 4 > arr->n * 3)
+		/* Grow past 75% load factor.  n_snapshot is from before this
+		 * insert; a heuristic trigger, not exact -- fine, since grow
+		 * itself re-reads the live array. */
+		if (cnt * 4 > n_snapshot * 3)
 			__chash_grow(h);
 	}
 	return XTC_OK;
@@ -667,11 +678,27 @@ __chash_grow(xtc_chash_t *h)
 static void
 __chash_maybe_shrink(xtc_chash_t *h, size_t cnt)
 {
-	struct chash_arr *arr = atomic_load_explicit(&h->arr,
-	    memory_order_acquire);
-	if (arr->n / 2 < h->min_n)
+	struct chash_arr *arr;
+	size_t n;
+
+	/*
+	 * Take a read-side around the load AND the dereference.  h->arr is
+	 * RCU-protected: without a read-side the array we just loaded can be
+	 * retired by a concurrent resize and reclaimed by any thread's
+	 * xtc_rcu_synchronize between the load and reading arr->n -- a
+	 * use-after-free.  (Callers reach here AFTER releasing their own
+	 * read-side, so we cannot rely on theirs.)  Copy out the one field
+	 * we need and drop the read-side before calling __chash_resize,
+	 * which takes the stripe locks and re-reads the live array itself.
+	 */
+	xtc_rcu_read_lock();
+	arr = atomic_load_explicit(&h->arr, memory_order_acquire);
+	n = arr->n;
+	xtc_rcu_read_unlock();
+
+	if (n / 2 < h->min_n)
 		return;
-	if (cnt * 16 >= arr->n * 3)
+	if (cnt * 16 >= n * 3)
 		return;
 	__chash_resize(h, __chash_want_shrink);
 }

@@ -113,15 +113,48 @@
 #define HLC_LOGICAL_MASK ((1ULL << HLC_LOGICAL_BITS) - 1)
 static _Atomic uint64_t g_xclock = 1;
 
-/* Wall-clock milliseconds since the epoch, the HLC physical component. */
+/*
+ * Wall-clock milliseconds since the epoch, the HLC physical component.
+ *
+ * Derived from the MONOTONIC clock plus a one-shot epoch offset rather
+ * than from xtc_clock_real() directly, for two reasons:
+ *
+ *   1. Determinism.  xtc_clock_mono is virtualized by the deterministic
+ *      simulator (xtc_clock_real is not), so a seeded DST run replays
+ *      this engine's commit timestamps exactly.  Reading the wall clock
+ *      here made the whole native-engine composition suite
+ *      nondeterministic and tripped libxtc's determinism guard.
+ *   2. Monotonicity.  An HLC's physical component must never go
+ *      backward; the wall clock can (NTP step, operator change) while
+ *      the monotonic clock cannot.
+ *
+ * The epoch offset is sampled ONCE, so stamps remain meaningful as
+ * absolute wall-clock milliseconds while still advancing monotonically.
+ * Under the simulator the offset is sampled from the virtual clock too,
+ * so it is part of the replayable state.
+ */
 static uint64_t
 hlc_phys_ms(void)
 {
-	int64_t ns = xtc_clock_real();
+	/* mono_base/epoch_base are set together on first call.  A benign
+	 * race between two first-callers only re-samples the same pair; the
+	 * HLC CAS below is what actually orders stamps. */
+	static _Atomic int64_t epoch_off_ms;   /* wall_ms - mono_ms, once */
+	static _Atomic int     epoch_set;
+	int64_t mono_ns = xtc_clock_mono();
+	int64_t mono_ms = (mono_ns < 0 ? 0 : mono_ns) / 1000000LL;
 
-	if (ns < 0)
-		ns = 0;
-	return (uint64_t)ns / 1000000ULL;
+	if (!atomic_load_explicit(&epoch_set, memory_order_acquire)) {
+		/* One wall-clock read, outside any hot/simulated path, to
+		 * anchor the monotonic timeline to a human-meaningful epoch. */
+		int64_t wall_ns = xtc_clock_real();
+		int64_t wall_ms = (wall_ns < 0 ? 0 : wall_ns) / 1000000LL;
+		atomic_store_explicit(&epoch_off_ms, wall_ms - mono_ms,
+		    memory_order_relaxed);
+		atomic_store_explicit(&epoch_set, 1, memory_order_release);
+	}
+	return (uint64_t)(mono_ms +
+	    atomic_load_explicit(&epoch_off_ms, memory_order_relaxed));
 }
 
 /*
