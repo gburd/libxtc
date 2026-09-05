@@ -2283,20 +2283,30 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		extern int __xtc_io_defer_del_fd(xtc_io_t *, int);
 		(void)had_fd;   /* documents intent: an fd was registered */
 		/*
-		 * ALWAYS route the unregister to wl->io's owning loop thread,
-		 * never inline.  __xtc_current_loop is the fiber's LOGICAL loop
-		 * binding, which is preserved across a work-steal migration
-		 * (the coro carries it) -- so __xtc_current_loop == wl does NOT
-		 * imply we are on wl's physical OS thread; a migrated fiber
-		 * resuming on a peer thread still reads __xtc_current_loop ==
-		 * wl.  Comparing them to decide "safe to del inline" is wrong
-		 * (TSan showed one io mutated inline from 6 distinct threads).
+		 * ALWAYS route the unregister through __xtc_io_defer_del_fd,
+		 * never inline, and never gate it on a loop-identity test here.
 		 * The only thread that may touch wl->io's fd registry + SQ ring
-		 * is wl's own poll thread, so defer: __xtc_io_defer_del_fd
-		 * queues the fd and nudges wl, and wl performs the real
-		 * unregister when it next drains in xtc_io_poll.  For a backend
-		 * whose registry is kernel-synchronized (epoll) the defer is a
-		 * safe passthrough. */
+		 * is wl's own poll thread (TSan showed one io mutated inline
+		 * from 6 distinct threads before this routed through the defer
+		 * path), and the AUTHORITATIVE owner test is the one inside the
+		 * helper: pthread_equal(pthread_self(), io->owner_tid) against
+		 * an eagerly-recorded owner_tid.  It dels inline when we really
+		 * are the owner -- which it MUST, because deferring a same-
+		 * thread del would leave the stale registration in io->fds and
+		 * make the immediate re-register fail as a duplicate -- and
+		 * queues + nudges otherwise.  Do not second-guess that here.
+		 *
+		 * Specifically, do NOT substitute "__xtc_current_loop == wl" for
+		 * it.  A loop identity is not a thread identity: the binding is
+		 * a plain thread-local rebound by whichever loop a thread steps
+		 * (loop.c, __xtc_loop_step_once), not state carried by the coro.
+		 * And wl was latched BEFORE the park, so after a work-steal
+		 * migration comparing it answers the wrong question entirely.
+		 * Thread identity is the only sound basis for "may I touch this
+		 * ring", which is why the helper uses pthread_equal.
+		 *
+		 * For a backend whose registry is kernel-synchronized (epoll)
+		 * the defer is a safe passthrough. */
 		(void)__xtc_io_defer_del_fd(wl->io, self->task->park_fd);
 		self->task->park_fd = -1;
 	}

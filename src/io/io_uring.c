@@ -689,8 +689,47 @@ __xtc_io_uring_preempt_arm(xtc_io_t *io, int64_t interval_ns)
 		return XTC_E_INVAL;
 	if (io->preempt_armed)
 		return XTC_OK;
-	/* A tiny ring -- one timeout in flight -- so 8 entries is ample. */
-	rc = io_uring_queue_init(8, &io->preempt_ring, 0);
+	/* A tiny ring -- one timeout in flight -- so 8 entries is ample.
+	 *
+	 * Attach it to this loop's MAIN ring's io-wq via ATTACH_WQ so the
+	 * kernel reuses that pool instead of creating a second one for this
+	 * loop.  Today the preempt ring only ever carries TIMEOUT SQEs,
+	 * which are handled inline and never dispatch to io-wq, so the
+	 * current exposure is zero -- but that is an unenforced property of
+	 * what we happen to submit, and a per-ring default-sized pool left
+	 * unbounded is precisely the shape that produced the measured
+	 * io-wq thread explosion the main ring's cap above exists to stop
+	 * (the cap is registered on io->ring only; it never reached this
+	 * ring).  Attaching makes "one io-wq pool per loop" structural.
+	 *
+	 * ATTACH_WQ shares only the worker pool, NOT the completion queue,
+	 * so __xtc_io_uring_preempt_due's io_uring_cq_ready on this ring
+	 * still sees timeout CQEs and nothing else.
+	 *
+	 * Best-effort: a kernel without ATTACH_WQ, or a main ring that is
+	 * not attachable, fails the params init -- fall back to the plain
+	 * unattached init so behavior is byte-for-byte what it was, and
+	 * cap this ring directly in that case so it is bounded either way. */
+	{
+		struct io_uring_params p;
+		memset(&p, 0, sizeof p);
+		p.flags = IORING_SETUP_ATTACH_WQ;
+		p.wq_fd = (__u32)io->ring.ring_fd;
+		rc = io_uring_queue_init_params(8, &io->preempt_ring, &p);
+		if (rc < 0) {
+			rc = io_uring_queue_init(8, &io->preempt_ring, 0);
+			if (rc >= 0) {
+				unsigned vals[2];
+				vals[0] = atomic_load_explicit(
+				    &__xtc_iowq_bound, memory_order_relaxed);
+				vals[1] = atomic_load_explicit(
+				    &__xtc_iowq_unbound, memory_order_relaxed);
+				if (vals[0] != 0u || vals[1] != 0u)
+					(void)io_uring_register_iowq_max_workers(
+					    &io->preempt_ring, vals);
+			}
+		}
+	}
 	if (rc < 0) {
 		errno = -rc;
 		return XTC_E_INTERNAL;
