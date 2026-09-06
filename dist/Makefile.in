@@ -850,6 +850,11 @@ bench_net: $(srcdir)/../bench/bench_net.c $(STATIC_LIB)
 		-o $@ $(srcdir)/../bench/bench_net.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+bench_aio_fibers: $(srcdir)/../bench/bench_aio_fibers.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_aio_fibers.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 bench_net_compute: $(srcdir)/../bench/bench_net_compute.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_net_compute.c \
