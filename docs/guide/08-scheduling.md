@@ -36,7 +36,7 @@ cooperative `xtc_yield` between them. Under the plain FIFO run queue the
 CPU split is about **1:1**, no matter what weighting you want. There is
 no knob. That is the gap.
 
-## Proportional share: 3:1 shares -> 3:1 CPU
+## Proportional share: weighting CPU between classes
 
 Create a scheduling **class** with `xtc_exec_class_create`, give it
 `shares` in 1..1000, and place a process's tasks in it with
@@ -47,11 +47,31 @@ fraction proportional to its shares:
 
 {% include snippet.html file="10_sched_shares.c" region="full" %}
 
-Class A has 3 shares, class B has 1, so A is picked about 3x as often --
-weighted-fair CPU. The virtual-runtime accrual is Glommio's exact
-formula: `vruntime += (cost_ns * reciprocal) >> 12`, where
+Class A has 3 shares and class B has 1, so A is picked more often. The
+virtual-runtime accrual is Glommio's exact formula:
+`vruntime += (cost_ns * reciprocal) >> 12`, where
 `reciprocal = (1<<22)/shares`, so a higher-shares class accrues virtual
 time more slowly and is chosen more often.
+
+Be precise about what the snippet above prints, because the honest claim
+is narrower than "3:1 shares gives 3:1 run counts" on real hardware:
+
+- Accrual is weighted by **measured** run time, floored to a minimum
+  quantum. For a yield-only worker the real elapsed time is dominated by
+  scheduling jitter, so the observed run ratio is noisy -- it is not a
+  stable 3:1.
+- A shared work budget adds a counter-effect: the favoured class drains
+  it faster, finishes sooner, and then stops running, after which only
+  the slower class accumulates runs. A raw end-of-budget run count is
+  therefore not a clean CPU-share signal.
+
+Strict proportionality -- run ratio equal to share ratio, exactly and
+reproducibly -- is proven under the deterministic simulator, where the
+virtual clock makes every run cost exactly the floor:
+`test/sim/test_sim_sched_shares.c`. That is where the numeric guarantee
+lives. On real hardware, treat shares as a weighting that holds in
+aggregate over a sustained contended workload, not as an exact ratio you
+can assert over a few hundred dispatches.
 
 Untagged work (any task with no class) races an implicit default lane in
 the same pick, so background work is never starved by always-ready class

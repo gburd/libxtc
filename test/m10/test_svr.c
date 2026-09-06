@@ -505,6 +505,7 @@ struct offloop_args {
 
 static struct offloop_args *g_ol;
 static xtc_svr_t *g_ol_svr;
+static xtc_loop_t *g_ol_loop;
 
 /* Server callback: serve the value, then ask the loop to stop so the
  * test terminates deterministically. */
@@ -531,14 +532,12 @@ ol_thread(void *arg)
 
 	/* xtc_self() is NONE here (not a proc), so this takes the off-loop
 	 * branch. */
-	/* Generous deadline on purpose: the caller sets a->started BEFORE it
-	 * enters xtc_loop_run, so this off-loop call can be issued while the
-	 * loop is not yet running and the server proc not yet scheduled.  On
-	 * a slow/shared CI runner (and with Windows' ~15 ms timer
-	 * granularity) a tight deadline would make this a timing test rather
-	 * than the off-loop-path test it is meant to be. */
+	/* The caller sets a->started BEFORE it enters xtc_loop_run, so this
+	 * off-loop call can be issued while the loop is not yet running and
+	 * the server proc not yet scheduled -- hence a deadline generous
+	 * enough for a slow shared runner, but BOUNDED. */
 	rc = xtc_svr_call(a->target, "q", 1, &reply, &rsz,
-	    30LL * 1000 * 1000 * 1000);
+	    10LL * 1000 * 1000 * 1000);
 	atomic_store(&a->rc, rc);
 	if (rc == XTC_OK && reply != NULL && rsz == sizeof(int)) {
 		int v;
@@ -546,6 +545,13 @@ ol_thread(void *arg)
 		atomic_store(&a->value, v);
 	}
 	xtc_free(reply);
+	/* The loop is stopped by ol_handle_call returning XTC_SVR_STOP -- but
+	 * ONLY if the call actually reached the handler.  If it timed out, no
+	 * handler ran, nothing stops the loop, and xtc_loop_run would block
+	 * FOREVER: the test would hang instead of failing, which is strictly
+	 * worse (it burned a 45-minute CI job once).  Always stop the loop
+	 * from here so a failure is a clean assertion on a->rc below. */
+	(void)xtc_loop_stop(g_ol_loop);
 	return NULL;
 }
 
@@ -572,6 +578,7 @@ test_svr_call_off_loop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_svr_start(loop, &cb, NULL, &opts, &svr),
 	    ==, XTC_OK);
 	g_ol_svr = svr;
+	g_ol_loop = loop;
 	a.target = xtc_svr_pid(svr);
 	g_ol = &a;
 
