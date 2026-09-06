@@ -316,7 +316,15 @@ struct xtc_loop {
 	void            *stall_cb_user;
 	_Atomic uint64_t n_stalls;   /* over-budget reports (telemetry) */
 
-	int stop_requested;
+	/* Set by xtc_loop_stop, read by xtc_loop_run's condition.  ATOMIC
+	 * because xtc_loop_stop is a cross-thread call by construction: it
+	 * pairs the flag with xtc_io_wakeup, whose whole purpose is to nudge
+	 * a loop running on ANOTHER thread out of its I/O wait.  A plain int
+	 * here is a real data race (TSan flags it as soon as any test stops a
+	 * loop from a foreign thread), and relaxed ordering is sufficient:
+	 * the wakeup's own release/acquire provides the ordering, this flag
+	 * only has to be seen eventually and its store must not tear. */
+	_Atomic int stop_requested;
 
 	/* Cross-thread inbox: wakers and remote spawns deposit here;
 	 * the owner drains in __xtc_loop_drain_inbox. */

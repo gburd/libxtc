@@ -250,7 +250,7 @@ xtc_loop_init(xtc_loop_t **out)
 	loop->timers = NULL;
 	loop->n_timers = loop->cap_timers = 0;
 	atomic_store_explicit(&loop->n_alive, 0, memory_order_relaxed);
-	loop->stop_requested = 0;
+	atomic_store_explicit(&loop->stop_requested, 0, memory_order_relaxed);
 	loop->exec_id = -1;
 	loop->exec = NULL;
 
@@ -323,7 +323,9 @@ int
 xtc_loop_stop(xtc_loop_t *loop)
 {
 	if (loop == NULL) return XTC_E_INVAL;
-	loop->stop_requested = 1;
+	/* Store BEFORE the wakeup: the wakeup is what makes the loop re-check,
+	 * so the flag must already be visible when it does. */
+	atomic_store_explicit(&loop->stop_requested, 1, memory_order_relaxed);
 	(void)xtc_io_wakeup(loop->io);
 	return XTC_OK;
 }
@@ -954,7 +956,8 @@ xtc_loop_run(xtc_loop_t *loop)
 	loop->owner_set = 1;
 #endif
 
-	while (!loop->stop_requested) {
+	while (!atomic_load_explicit(&loop->stop_requested,
+	    memory_order_relaxed)) {
 		int has_tasks  =
 		    atomic_load_explicit(&loop->n_alive, memory_order_relaxed) > 0;
 		int has_timers =
@@ -966,7 +969,7 @@ xtc_loop_run(xtc_loop_t *loop)
 		}
 	}
 
-	loop->stop_requested = 0;
+	atomic_store_explicit(&loop->stop_requested, 0, memory_order_relaxed);
 	__xtc_current_loop = saved;
 	return XTC_OK;
 }
