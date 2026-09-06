@@ -23,6 +23,9 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#if defined(_WIN32)
+#include <malloc.h>   /* _aligned_malloc / _aligned_free */
+#endif
 #include <string.h>
 
 #include "munit.h"
@@ -370,12 +373,29 @@ static void *oom_aligned(size_t align, size_t sz)
 	void *p = NULL;
 	if (oom_should_fail())
 		return NULL;
-	if (posix_memalign(&p, align < sizeof(void *) ? sizeof(void *) : align,
-	    sz) != 0)
+	if (align < sizeof(void *))
+		align = sizeof(void *);
+#if defined(_WIN32)
+	/* MSVC has no posix_memalign; _aligned_malloc is the equivalent and
+	 * MUST be released with _aligned_free (plain free() on an
+	 * _aligned_malloc pointer corrupts the CRT heap), so the two halves
+	 * of this hook pair have to switch together. */
+	p = _aligned_malloc(sz, align);
+	return p;
+#else
+	if (posix_memalign(&p, align, sz) != 0)
 		return NULL;
 	return p;
+#endif
 }
-static void  oom_aligned_free(void *p) { free(p); }
+static void  oom_aligned_free(void *p)
+{
+#if defined(_WIN32)
+	_aligned_free(p);
+#else
+	free(p);
+#endif
+}
 
 static const struct __os_alloc_hook OOM_HOOK = {
 	oom_malloc, oom_calloc, oom_realloc, oom_free,

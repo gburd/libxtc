@@ -531,8 +531,14 @@ ol_thread(void *arg)
 
 	/* xtc_self() is NONE here (not a proc), so this takes the off-loop
 	 * branch. */
+	/* Generous deadline on purpose: the caller sets a->started BEFORE it
+	 * enters xtc_loop_run, so this off-loop call can be issued while the
+	 * loop is not yet running and the server proc not yet scheduled.  On
+	 * a slow/shared CI runner (and with Windows' ~15 ms timer
+	 * granularity) a tight deadline would make this a timing test rather
+	 * than the off-loop-path test it is meant to be. */
 	rc = xtc_svr_call(a->target, "q", 1, &reply, &rsz,
-	    2000LL * 1000 * 1000);
+	    30LL * 1000 * 1000 * 1000);
 	atomic_store(&a->rc, rc);
 	if (rc == XTC_OK && reply != NULL && rsz == sizeof(int)) {
 		int v;
