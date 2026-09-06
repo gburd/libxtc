@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.40.7
+Version:        1.41.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,18 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Fri Sep 05 2026 Greg Burd <greg@burd.me> - 1.41.0-1
+- New public API: xtc_ncpus, xtc_numa_nnodes, xtc_numa_node_of_cpu,
+  xtc_numa_current_node (minor bump).
+- fix(sched): consult the RUNNING loop's preempt ring, not the fiber's
+  home loop -- a work-stolen fiber mutated a peer loop's io_uring ring.
+- fix(evt): latch wake_pending on the same-loop wake path too, closing a
+  dropped-wake window measured at ~1 in 7200 wakes.
+- fix(evt): plug an exec->loop_node leak on the xtc_exec_init unwind.
+- Security/robustness: cap pid local ids at 65536 (uint16_t truncation),
+  bracket chash RCU reads, hook all four determinism-guard classes.
+- io(uring): attach the preempt ring's io-wq to the loop's main ring.
+
 * Mon Sep 01 2026 Greg Burd <greg@burd.me> - 1.40.7-1
 - fix(io): record each loop's io-backend owner thread eagerly at worker startup (__xtc_io_set_owner) so a work-stolen fiber's xtc_proc_wait_fd cleanup always defers the cross-loop fd-unregister to the owning thread. A home loop that had all its fibers work-stolen kept io->owner_set==0 (it never blocked in xtc_io_poll), so foreign cleanups deleted its fds inline and two concurrent dels corrupted the single-owner io->fds list into a cycle -- an infinite loop in xtc_io_del_fd stranding a fiber holding a lock, plus an occasional fini double-free. The 6th cross-loop-migration surface. No API change.
 * Wed Jul 22 2026 Greg Burd <greg@burd.me> - 1.28.1-1
