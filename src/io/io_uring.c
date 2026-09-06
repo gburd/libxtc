@@ -103,6 +103,48 @@ __pollres_to_flags(uint32_t res)
 	return f;
 }
 
+#if defined(XTC_DIAGNOSTIC)
+#include <stdio.h>     /* the single-issuer violation report below */
+#include <stdlib.h>    /* abort */
+#endif
+
+/*
+ * Every SQ submit goes through here so the DIAGNOSTIC single-issuer
+ * check lives in exactly ONE place instead of nine.
+ *
+ * The invariant: a ring is created on one thread (xtc_loop_init's
+ * caller, which for an executor is the exec-init thread) and thereafter
+ * submitted to only by its owning worker.  The creator's own submit --
+ * the wakeup POLL_ADD in __xtc_io_register_wakeup -- is legitimate
+ * because it happens BEFORE any worker exists.  What must never happen
+ * is a submit from the creator (or any other thread) once an owner has
+ * been established: the SQ is single-producer, so that is a data race,
+ * and it is the same shape as the eight fixed cross-loop defects.
+ *
+ * Zero cost in a normal build; XTC_DIAGNOSTIC turns it into an immediate,
+ * located abort.  This is what makes the ordering ENFORCED rather than
+ * merely true-for-now -- and it is why IORING_SETUP_SINGLE_ISSUER was
+ * NOT adopted: the flag would demand restructuring loop init (88 of 90
+ * xtc_loop_init callers also run the loop on the creating thread) to buy
+ * a per-SQE saving the measured reap headroom says is noise.  Assert the
+ * property instead of chasing the flag.
+ */
+static int
+__ring_submit(xtc_io_t *io)
+{
+#if defined(XTC_DIAGNOSTIC)
+	if (atomic_load_explicit(&io->owner_set, memory_order_acquire) &&
+	    !pthread_equal(pthread_self(), io->owner_tid)) {
+		fprintf(stderr, "XTC DIAGNOSTIC: io_uring SQ submit from a "
+		    "non-owner thread (io=%p): the submission queue is "
+		    "single-producer and this ring already has an owner. "
+		    "A cross-thread submit corrupts the SQ.\n", (void *)io);
+		abort();
+	}
+#endif
+	return io_uring_submit(&io->ring);
+}
+
 /*
  * Submit a POLL_ADD SQE for the given uring_fd.  POLL_MULTISHOT means
  * the kernel will keep firing CQEs as the fd becomes ready, until we
@@ -113,7 +155,7 @@ __submit_poll_add(xtc_io_t *io, struct __xtc_uring_fd *uf)
 {
 	struct io_uring_sqe *sqe = io_uring_get_sqe(&io->ring);
 	if (sqe == NULL) {
-		(void)io_uring_submit(&io->ring);
+		(void)__ring_submit(io);
 		sqe = io_uring_get_sqe(&io->ring);
 		if (sqe == NULL) return XTC_E_AGAIN;
 	}
@@ -141,7 +183,7 @@ __submit_poll_remove(xtc_io_t *io, struct __xtc_uring_fd *uf)
 {
 	struct io_uring_sqe *sqe = io_uring_get_sqe(&io->ring);
 	if (sqe == NULL) {
-		(void)io_uring_submit(&io->ring);
+		(void)__ring_submit(io);
 		sqe = io_uring_get_sqe(&io->ring);
 		if (sqe == NULL) return XTC_E_AGAIN;
 	}
@@ -176,6 +218,11 @@ __xtc_io_backend_init(xtc_io_t *io)
 	}
 	io->fds = NULL;
 	io->zombies = NULL;
+#if defined(XTC_DIAGNOSTIC)
+	/* Record who built this ring; the submit path asserts against it.
+	 * See the creator_tid comment in io_int.h. */
+	io->creator_tid = pthread_self();
+#endif
 	io->pending_del = NULL;
 	io->n_pending_del = 0;
 	io->cap_pending_del = 0;
@@ -233,7 +280,7 @@ __xtc_io_register_wakeup(xtc_io_t *io, int fd)
 		__os_free(uf);
 		return rc;
 	}
-	(void)io_uring_submit(&io->ring);
+	(void)__ring_submit(io);
 	return XTC_OK;
 }
 
@@ -260,7 +307,7 @@ xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 		__os_free(uf);
 		return rc;
 	}
-	(void)io_uring_submit(&io->ring);
+	(void)__ring_submit(io);
 	return XTC_OK;
 }
 
@@ -273,7 +320,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		return XTC_E_INVAL;
 	sqe = io_uring_get_sqe(&io->ring);
 	if (sqe == NULL) {
-		(void)io_uring_submit(&io->ring);
+		(void)__ring_submit(io);
 		sqe = io_uring_get_sqe(&io->ring);
 		if (sqe == NULL) return XTC_E_AGAIN;
 	}
@@ -309,7 +356,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	a->res = 0;
 	/* Low-bit tag distinguishes this completion from a poll-add CQE. */
 	io_uring_sqe_set_data(sqe, (void *)((uintptr_t)a | 1u));
-	(void)io_uring_submit(&io->ring);
+	(void)__ring_submit(io);
 	return XTC_OK;
 }
 
@@ -329,7 +376,7 @@ xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	uf->interest = interest;
 	uf->tag = tag;
 	if ((rc = __submit_poll_add(io, uf)) != XTC_OK) return rc;
-	(void)io_uring_submit(&io->ring);
+	(void)__ring_submit(io);
 	return XTC_OK;
 }
 
@@ -342,7 +389,7 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 	uf = __find_fd(io, fd);
 	if (uf == NULL || uf->is_wakeup) return XTC_E_INVAL;
 	(void)__submit_poll_remove(io, uf);
-	(void)io_uring_submit(&io->ring);
+	(void)__ring_submit(io);
 	for (pp = &io->fds; *pp != NULL; pp = &(*pp)->next) {
 		if (*pp == uf) { *pp = uf->next; break; }
 	}
@@ -589,7 +636,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				 * still present at re-arm fires the poll immediately
 				 * -- level-triggered -- which the next poll coalesces.) */
 				(void)__submit_poll_add(io, uf);
-				(void)io_uring_submit(&io->ring);
+				(void)__ring_submit(io);
 				if (!wakeup_emitted) {
 					int drc = __xtc_io_drain_wakeup(io);
 					if (drc != XTC_OK) {

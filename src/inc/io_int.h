@@ -183,6 +183,36 @@ struct xtc_io {
 	pthread_mutex_t  del_lock;        /* guards ONLY pending_del (not fds/ring) */
 	pthread_t        owner_tid;       /* the thread that polls this io */
 	_Atomic int      owner_set;       /* 1 once owner_tid is recorded */
+#if defined(XTC_DIAGNOSTIC)
+	/*
+	 * DIAGNOSTIC-only: the thread that CREATED this ring, recorded in
+	 * __xtc_io_backend_init.
+	 *
+	 * The ring is created by whoever calls xtc_loop_init -- for an
+	 * executor that is the exec-init thread (xtc_exec_init), not the
+	 * worker that will own and submit to it -- and the wakeup POLL_ADD
+	 * is submitted right there on the creating thread
+	 * (__xtc_io_register_wakeup).  Every later submit comes from the
+	 * owner.  So one thread touches the SQ before another takes it over.
+	 *
+	 * That is BENIGN TODAY only because of an ORDERING that nothing
+	 * enforces: creation completes before any worker starts, so the two
+	 * touches never overlap.  It is also the exact shape of eight fixed
+	 * cross-loop defects (one thread touching a structure another owns),
+	 * and it is the hard blocker for IORING_SETUP_SINGLE_ISSUER, which
+	 * requires the creator and the submitter to be the same task.
+	 *
+	 * Rather than restructure loop init to chase that flag -- 88 of the
+	 * 90 files calling xtc_loop_init also call xtc_loop_run on the SAME
+	 * thread, so deferring ring creation would churn the most-used
+	 * lifecycle in the tree for a gain the measured reap headroom says is
+	 * noise -- record the creator and ASSERT the ordering holds.  If a
+	 * future change ever submits from the creator AFTER an owner is
+	 * established, this fires immediately and locates it, instead of the
+	 * property silently rotting.
+	 */
+	pthread_t        creator_tid;
+#endif
 	/*
 	 * L2 ring-pointer preempt (INSPIRED BY Glommio's need_preempt():
 	 * reactor.rs / sys/uring.rs preempt_pointers).  A dedicated tiny
