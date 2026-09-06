@@ -579,6 +579,14 @@ test_svr_call_off_loop(const MunitParameter p[], void *d)
 	munit_assert_int(atomic_load(&a.rc), ==, XTC_OK);
 	munit_assert_int(atomic_load(&a.value), ==, 4242);
 
+	/* Reap the server before tearing down the loop: xtc_svr_join is what
+	 * releases the svr object (the handler returned XTC_SVR_STOP, so it
+	 * has already exited and this does not block).  Omitting it leaks the
+	 * svr and its state -- 216 bytes LeakSanitizer fails the run on, which
+	 * is exactly how this was caught.  Every sibling test in this file
+	 * joins; this one did not. */
+	munit_assert_int(xtc_svr_join(svr, 1LL * 1000 * 1000 * 1000), ==,
+	    XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
 }

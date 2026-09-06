@@ -1,3 +1,54 @@
+libxtc (1.41.0-1) unstable; urgency=medium
+
+  * New public API (minor bump): xtc_ncpus, xtc_numa_nnodes,
+    xtc_numa_node_of_cpu, xtc_numa_current_node -- added so consumer code
+    (the examples are the exemplar) can query CPU/NUMA topology through the
+    public surface instead of reaching for the internal __os_* layer, which
+    the API-discipline gate now treats as a fatal violation.
+  * fix(sched): xtc_yield_check consulted the fiber's HOME loop's io_uring
+    preempt ring rather than the loop actually RUNNING it.  That call is not
+    a pure read -- it advances the CQ head and re-arms a TIMEOUT SQE -- so a
+    work-stolen migratable fiber mutated a PEER loop's single-producer ring
+    from the wrong thread.  Now keyed on __xtc_current_loop.  This is the
+    eighth surface of the cross-loop bug family.
+  * fix(evt): the same-loop branch of xtc_waker_wake returned XTC_OK without
+    latching wake_pending, while the cross-loop XTC_INB_WAKE handler did
+    latch it -- so a wake delivered in the prepare/park window was silently
+    dropped.  Measured at ~1 in 7200 wakes (~0.014%) under 24 migratable
+    fibers on 8 loops, not theoretical.  Both halves of the paired
+    mechanism now behave identically.
+  * fix(evt): xtc_exec_init leaked exec->loop_node on the loop-init failure
+    unwind (64 bytes across 8 allocations), found by a new allocator-hook
+    OOM sweep under AddressSanitizer.
+  * fix(proc): cap per-process local ids at XTC_PROC_MAX_LOCAL_ID (65536).
+    The id is stored as uint16_t, so pid 0 and pid 65536 were byte-identical
+    -- reproduced -- and the collision was only incidentally masked by an
+    unrelated fd cap while the task ceiling was 100000.  Now returns
+    XTC_E_RESOURCE.
+  * fix(chash): snapshot the array length inside the RCU read-side in
+    xtc_chash_insert, and bracket __chash_maybe_shrink's load+deref in
+    xtc_rcu_read_lock/_unlock -- two use-after-free reads under concurrent
+    resize.
+  * io(uring): create the per-loop preempt ring with IORING_SETUP_ATTACH_WQ
+    against the loop's main ring so the kernel reuses one io-wq pool per
+    loop.  The worker cap added after the measured io-wq thread explosion
+    was registered on the main ring only and never reached this ring; the
+    fallback path caps it directly when ATTACH_WQ is unavailable.
+  * test: hook all four determinism-guard classes (__os_clock_real,
+    __os_rand_u64 auto-seed, __os_env_get, __os_thread_self).  Only one was
+    actually wired despite four being claimed; a probe proved five live
+    violations, the real one being consumer HLC code.  Adds a guard test
+    that calls the real primitives rather than synthetic injections.
+  * test: CBMC harnesses verify again -- 14/14 under 5.91.0, with a loud
+    SKIP on 6.x (which cannot verify the concurrent harnesses) instead of
+    14 indistinguishable false failures.  Adds check-cbmc/cbmc targets the
+    README already documented, plus a nightly CI job.
+  * test: new check-examples target builds AND runs the examples as part of
+    make check; new m14 preempt_ring/crossloop case makes the cross-loop
+    preempt path reachable for the sanitizer jobs.
+
+ -- Greg Burd <greg@burd.me>  Fri, 05 Sep 2026 12:00:00 -0400
+
 libxtc (1.40.7-1) unstable; urgency=medium
 
   * fix(io): record each loop's io-backend owner thread eagerly at
