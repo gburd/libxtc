@@ -257,8 +257,18 @@ class XtcStranded(gdb.Command):
                     wp = int(task["wake_pending"])
                 except gdb.error:
                     pass
+                # local_id 0 is the loop's own service fiber (a supervisor /
+                # acceptor that sits in xtc_recv(-1) for the process lifetime).
+                # park='-' with no latched wake is its NORMAL idle state, so
+                # counting it as a suspect buries the real ones: a consumer
+                # reported 31 of 33 "suspects" were exactly these.
+                svc = 0
+                try:
+                    svc = 1 if int(p["pid"]["local_id"]) == 0 else 0
+                except gdb.error:
+                    pass
                 rows.append((str(p), _pid_str(p["pid"]), kind, wp,
-                             int(loop)))
+                             int(loop), svc))
 
         print("proc states:")
         for k in sorted(states):
@@ -267,21 +277,34 @@ class XtcStranded(gdb.Command):
         for k in sorted(kinds):
             print("    park=%-8s %d" % (k, kinds[k]))
 
-        # The suspects: no armed wake source AND no latched wake.
-        susp = [r for r in rows if r[2] == "-" and r[3] == 0]
+        # A suspect is park='-' with no latched wake AND not a service fiber.
+        susp = [r for r in rows if r[2] == "-" and r[3] == 0 and not r[5]]
+        idle_svc = [r for r in rows if r[2] == "-" and r[3] == 0 and r[5]]
         print("")
         print("%-18s %-10s %-8s %-14s %s"
               % ("proc", "pid", "park", "wake_pending", "verdict"))
         for r in rows:
             verdict = ""
             if r[2] == "-" and r[3] == 0:
-                verdict = "<-- SUSPECT: no source, no latched wake"
+                if r[5]:
+                    verdict = "(local_id 0: service fiber, idle is normal)"
+                else:
+                    verdict = "<-- SUSPECT: no source, no latched wake"
             elif r[2] == "-" and r[3] != 0:
                 verdict = "latched wake, should resume"
             print("%-18s %-10s %-8s %-14s %s"
                   % (r[0], r[1], r[2], "SET" if r[3] else "clear", verdict))
         print("")
-        print("(%d parked, %d suspect)" % (len(rows), len(susp)))
+        print("(%d parked, %d suspect, %d idle service fiber(s) excluded)"
+              % (len(rows), len(susp), len(idle_svc)))
+        if idle_svc:
+            print("NOTE: %d proc(s) with local_id 0 park with no source and no "
+                  "latched wake.  That is the NORMAL idle state of a per-loop "
+                  "service fiber blocked in xtc_recv(..., -1), so they are "
+                  "excluded above.  If YOUR long-lived receivers have a "
+                  "non-zero local_id they will still appear as suspects -- "
+                  "check them against what you know parks forever by design."
+                  % len(idle_svc))
         if susp:
             print("For each suspect, confirm its wake source actually "
                   "completed (e.g. iou-wrk threads present for an aio "

@@ -204,6 +204,15 @@ burns no CPU; an infinite loop is also identical but pins a core. That
 pair of observations is what tells them apart, and it is the single most
 useful thing to include in a bug report.
 
+**Long-lived idle receivers look exactly like suspects.** A fiber blocked in
+`xtc_recv(..., -1)` forever -- a supervisor, an acceptor, any service fiber --
+parks with no armed source and no latched wake, which is the *same* shape as a
+lost wake. `xtc-stranded` excludes procs with `local_id == 0` (the per-loop
+service fiber) and says so in its tally, because a consumer found 31 of 33
+reported "suspects" were exactly those. But if your own service fibers have a
+non-zero `local_id`, they will still be listed: cross-check the suspects against
+what you know parks forever by design before reporting anything.
+
 One caution: a suspect is not yet a defect. Confirm the wake source
 really completed first. For an `xtc_aio` park under the io_uring backend,
 `ls /proc/<pid>/task | wc -l` and the presence of `iou-wrk-*` threads
