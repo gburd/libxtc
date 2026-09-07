@@ -64,6 +64,13 @@ operation that is merely slow:
         readable? has the deadline passed?) before suspecting the
         runtime.
 
+A long-lived idle receiver is indistinguishable from a lost wake by shape
+alone: a fiber blocked in `xtc_recv(..., -1)` parks with no source and no
+latched wake too.  Procs with `local_id == 0` (the per-loop service fiber)
+are excluded from the suspect count for that reason.  Service fibers with a
+NON-zero local_id will still be listed -- cross-check against what you know
+parks forever by design.
+
 Sample it three times about a second apart.  A real strand is identical
 every time; progress shows up as changing counts.  Pair it with
 `thread apply all bt` sampled the same way -- that is what distinguishes
