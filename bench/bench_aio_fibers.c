@@ -44,8 +44,18 @@
  *	    op: read | write | fsync | fdatasync   (default read)
  *	    iowq_cap: 0 = leave the shipped default, N = xtc_io_set_iowq_max_workers(N,0)
  *
- *	MUST run against a real block device (AGENTS.md: durable benchmarks
- *	on real NVMe/ext4, never tmpfs) or the numbers measure page cache.
+ *	MUST run against a real block device (AGENTS.md: durable benchmarks on
+ *	real NVMe, never tmpfs) or the numbers measure page cache.
+ *
+ *	ALWAYS RECORD THE FILESYSTEM with any p99 from this bench.  Measured
+ *	here: the write/sync tail is dominated by the FILESYSTEM's fsync cost,
+ *	not by libxtc or io_uring -- a plain blocking pwrite+fdatasync loop
+ *	with no io_uring and no libxtc shows p99 6.6-9.9ms on btrfs-on-LUKS,
+ *	the same order as this bench reports.  btrfs (COW + tree-log),
+ *	ext4 (journal) and XFS differ by an order of magnitude on exactly this
+ *	operation, so a p99 quoted without the filesystem is uninterpretable.
+ *	I mis-recorded it as ext4 the first time and had to correct the
+ *	conclusion; do not repeat that.
  */
 
 #define _GNU_SOURCE
