@@ -821,6 +821,46 @@ __xtc_loop_step(xtc_loop_t *loop)
 			} else {
 				atomic_store_explicit(&t->state, XTC_TS_PARKED,
 				    memory_order_release);
+				/*
+				 * NINTH SURFACE.  The exchange above and this
+				 * store are NOT one atomic step, so a waker can
+				 * land BETWEEN them and be lost:
+				 *
+				 *   this thread: exchange(wake_pending,0) -> 0
+				 *                                (decides to park)
+				 *   waker thread:  CAS(state, PARKED->SCHEDULED)
+				 *                  sees state == RUNNING, FAILS,
+				 *                  latches wake_pending = 1
+				 *   this thread: store(state, PARKED)
+				 *
+				 * The task is now PARKED with wake_pending set,
+				 * and the ONLY consumer of wake_pending is the
+				 * exchange above -- which already ran.  Nothing
+				 * re-delivers the wake, so the fiber is stranded
+				 * forever.  Both wakers behave correctly (each
+				 * latches on a lost CAS, as of the 7th-surface
+				 * fix); the defect is that the park decision was
+				 * not re-validated after the state became
+				 * visible to them.
+				 *
+				 * Re-check now that state == PARKED is published.
+				 * A waker arriving from here on WINS its CAS and
+				 * enqueues normally, so this is the last window
+				 * that needs closing.  Use the same
+				 * PARKED->SCHEDULED CAS the wakers use: whoever
+				 * wins enqueues exactly once, so a wake that
+				 * arrives concurrently with this re-check cannot
+				 * double-enqueue.
+				 */
+				if (atomic_exchange_explicit(&t->wake_pending, 0,
+				    memory_order_acquire)) {
+					int exp = XTC_TS_PARKED;
+					if (atomic_compare_exchange_strong_explicit(
+					    &t->state, &exp, XTC_TS_SCHEDULED,
+					    memory_order_acq_rel,
+					    memory_order_acquire))
+						(void)__xtc_loop_enqueue(loop, t);
+				}
 			}
 			break;
 		default:
