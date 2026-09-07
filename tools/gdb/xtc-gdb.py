@@ -115,7 +115,40 @@ def _proc_state(p):
             s += "(timer)"
         elif int(task["park_requested"]) != 0:
             s += "(mailbox)"
+    # wake_pending is THE discriminator for the cross-loop wake-loss family:
+    # a task PARKED with wake_pending set means a waker arrived in the
+    # prepare/park window, latched the flag, and the PENDING verdict has not
+    # yet consumed it -- transient and benign.  A task PARKED with
+    # wake_pending CLEAR, whose wake source has already completed, is a LOST
+    # WAKE: nothing is left to re-deliver it.  Distinguishing those two is
+    # what tells a stranded-fiber report apart from a slow one, so print it
+    # whenever it is set (and always in xtc-proc's detail view).
+    try:
+        if int(task["wake_pending"]) != 0:
+            s += " WAKE_PENDING"
+    except gdb.error:
+        pass    # older libxtc without the field
     return s
+
+
+def _park_kind(task):
+    """The park SHAPE, matching what xtc_dump's histogram reports:
+    'fd' / 'timer' / 'mailbox' / '-' (no armed source).
+
+    '-' is the interesting one for AIO: xtc_aio parks with no fd and no
+    timer, waiting only for its completion to be reaped and dispatched, so
+    a fiber stuck at park='-' with its io_uring worker present is the
+    aio-completion shape rather than a wait_fd or timer shape.
+    """
+    if int(task) == 0:
+        return "no-task"
+    if int(task["park_fd"]) >= 0:
+        return "fd"
+    if int(task["park_timer"]) != 0:
+        return "timer"
+    if int(task["park_requested"]) != 0:
+        return "mailbox"
+    return "-"
 
 
 # ---- commands ---------------------------------------------------------
@@ -167,6 +200,93 @@ class XtcProcs(gdb.Command):
                          links, mons,
                          "" if int(p["alive"]) else "  DEAD"))
         print("(%d procs)" % total)
+
+
+class XtcStranded(gdb.Command):
+    """xtc-stranded: triage a suspected stranded-fiber hang.
+
+    Prints the park-kind histogram (matching xtc_dump's) and then every
+    PARKED proc with its park shape and wake_pending, flagging the ones
+    that look stranded.
+
+    This is the one command to run when a fiber appears never to be
+    resumed.  It answers, in one shot, the question that distinguishes the
+    cross-loop wake-loss family from a merely slow operation:
+
+      park='-' + wake_pending CLEAR
+          The aio-completion shape with NO latched wake.  If the operation
+          it was waiting for has demonstrably completed (io_uring workers
+          present, the syscall finished), this is a LOST WAKE: nothing is
+          left to re-deliver it.  Report this.
+
+      park='-' + WAKE_PENDING
+          A wake arrived in the prepare/park window and was latched; the
+          PENDING verdict has not consumed it yet.  Transient.  If it
+          persists across several samples the consume path is broken,
+          which is a different bug -- say which you saw.
+
+      park='fd' / 'timer'
+          Waiting on an armed source.  Not the aio shape; check whether
+          the fd is readable / the deadline has passed before suspecting
+          libxtc.
+
+    Sample it 3x a second apart: a genuine strand is byte-identical every
+    time, while progress shows up as changing counts.
+    """
+    def __init__(self):
+        super().__init__("xtc-stranded", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        kinds = {}
+        states = {}
+        rows = []
+        for loop, tbl in _loop_tables():
+            for p in _procs_in(tbl):
+                task = p["task"]
+                if int(task) == 0:
+                    continue
+                st = int(task["state"])
+                states[TASK_STATE.get(st, "?%d" % st)] = \
+                    states.get(TASK_STATE.get(st, "?%d" % st), 0) + 1
+                if st != 2:      # only PARKED procs can be stranded
+                    continue
+                kind = _park_kind(task)
+                kinds[kind] = kinds.get(kind, 0) + 1
+                wp = 0
+                try:
+                    wp = int(task["wake_pending"])
+                except gdb.error:
+                    pass
+                rows.append((str(p), _pid_str(p["pid"]), kind, wp,
+                             int(loop)))
+
+        print("proc states:")
+        for k in sorted(states):
+            print("    %-12s %d" % (k, states[k]))
+        print("park kinds (PARKED procs only):")
+        for k in sorted(kinds):
+            print("    park=%-8s %d" % (k, kinds[k]))
+
+        # The suspects: no armed wake source AND no latched wake.
+        susp = [r for r in rows if r[2] == "-" and r[3] == 0]
+        print("")
+        print("%-18s %-10s %-8s %-14s %s"
+              % ("proc", "pid", "park", "wake_pending", "verdict"))
+        for r in rows:
+            verdict = ""
+            if r[2] == "-" and r[3] == 0:
+                verdict = "<-- SUSPECT: no source, no latched wake"
+            elif r[2] == "-" and r[3] != 0:
+                verdict = "latched wake, should resume"
+            print("%-18s %-10s %-8s %-14s %s"
+                  % (r[0], r[1], r[2], "SET" if r[3] else "clear", verdict))
+        print("")
+        print("(%d parked, %d suspect)" % (len(rows), len(susp)))
+        if susp:
+            print("For each suspect, confirm its wake source actually "
+                  "completed (e.g. iou-wrk threads present for an aio "
+                  "park) before reporting a lost wake -- a pending "
+                  "syscall is not a strand.")
 
 
 class XtcProc(gdb.Command):
@@ -339,6 +459,7 @@ class XtcHelp(gdb.Command):
     def invoke(self, arg, from_tty):
         print(__doc__ if __doc__ else "see tools/gdb/xtc-gdb.py header")
         print("  xtc-loops | xtc-procs [loop] | xtc-proc A | "
+              "xtc-stranded | "
               "xtc-mailbox A | xtc-self | xtc-trace")
 
 
@@ -346,10 +467,12 @@ gdb.pretty_printers.append(_lookup_printer)
 XtcLoops()
 XtcProcs()
 XtcProc()
+XtcStranded()
 XtcMailbox()
 XtcSelf()
 XtcTrace()
 XtcTailDump()
 XtcHelp()
-print("xtc-gdb loaded: xtc-loops, xtc-procs, xtc-proc, xtc-mailbox, "
+print("xtc-gdb loaded: xtc-loops, xtc-procs, xtc-proc, xtc-stranded, "
+      "xtc-mailbox, "
       "xtc-self, xtc-trace, xtc-tail-dump, xtc-help")

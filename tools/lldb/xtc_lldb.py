@@ -12,7 +12,8 @@
 # or add to ~/.lldbinit:
 #     command script import /path/to/libxtc/tools/lldb/xtc_lldb.py
 #
-# Commands:  xtc-loops  xtc-procs  xtc-proc ADDR  xtc-mailbox ADDR  xtc-self
+# Commands:  xtc-loops  xtc-procs  xtc-proc ADDR  xtc-stranded
+#            xtc-mailbox ADDR  xtc-self
 #            xtc-trace
 #
 # Run it while STOPPED (a breakpoint or attach), so file-static symbols
@@ -66,7 +67,32 @@ def _proc_state(p):
             s += "(timer)"
         elif _u(task.GetChildMemberWithName("park_requested")) != 0:
             s += "(mailbox)"
+    # wake_pending is the discriminator for the cross-loop wake-loss
+    # family: PARKED with it SET means a wake was latched in the
+    # prepare/park window and not yet consumed (transient); PARKED with it
+    # CLEAR, when the wake source already completed, is a LOST WAKE.
+    wp = task.GetChildMemberWithName("wake_pending")
+    if wp.IsValid() and _u(wp) != 0:
+        s += " WAKE_PENDING"
     return s
+
+
+def _park_kind(task):
+    """The park SHAPE as xtc_dump reports it: fd / timer / mailbox / '-'.
+
+    '-' is the xtc_aio completion shape: parked with no fd and no timer,
+    waiting only for a reaped completion to be dispatched.
+    """
+    if _u(task) == 0:
+        return "no-task"
+    task = task.Dereference()
+    if task.GetChildMemberWithName("park_fd").GetValueAsSigned() >= 0:
+        return "fd"
+    if _u(task.GetChildMemberWithName("park_timer")) != 0:
+        return "timer"
+    if _u(task.GetChildMemberWithName("park_requested")) != 0:
+        return "mailbox"
+    return "-"
 
 
 def _loop_tables(target):
@@ -135,6 +161,57 @@ def xtc_procs(debugger, command, result, internal_dict):
                      _u(pd.GetChildMemberWithName("mbox_saved")),
                      _proc_state(pd), links, mons, dead), file=result)
     print("(%d procs)" % total, file=result)
+
+
+def xtc_stranded(debugger, command, result, internal_dict):
+    """Triage a suspected stranded-fiber hang.  See tools/README.md."""
+    target = debugger.GetSelectedTarget()
+    kinds, states, rows = {}, {}, []
+    for loop, tbl in _loop_tables(target):
+        for p in _procs_in(target, tbl):
+            pd = p.Dereference()
+            task = pd.GetChildMemberWithName("task")
+            if _u(task) == 0:
+                continue
+            st = _u(task.Dereference().GetChildMemberWithName("state"))
+            nm = TASK_STATE.get(st, "?%d" % st)
+            states[nm] = states.get(nm, 0) + 1
+            if st != 2:
+                continue
+            kind = _park_kind(task)
+            kinds[kind] = kinds.get(kind, 0) + 1
+            wpv = task.Dereference().GetChildMemberWithName("wake_pending")
+            wp = _u(wpv) if wpv.IsValid() else 0
+            rows.append((_u(p), _pid_str(pd.GetChildMemberWithName("pid")),
+                         kind, wp))
+
+    print("proc states:", file=result)
+    for k in sorted(states):
+        print("    %-12s %d" % (k, states[k]), file=result)
+    print("park kinds (PARKED procs only):", file=result)
+    for k in sorted(kinds):
+        print("    park=%-8s %d" % (k, kinds[k]), file=result)
+    print("", file=result)
+    print("%-18s %-10s %-8s %-14s %s"
+          % ("proc", "pid", "park", "wake_pending", "verdict"), file=result)
+    susp = 0
+    for r in rows:
+        verdict = ""
+        if r[2] == "-" and r[3] == 0:
+            verdict = "<-- SUSPECT: no source, no latched wake"
+            susp += 1
+        elif r[2] == "-" and r[3] != 0:
+            verdict = "latched wake, should resume"
+        print("0x%-16x %-10s %-8s %-14s %s"
+              % (r[0], r[1], r[2], "SET" if r[3] else "clear", verdict),
+              file=result)
+    print("", file=result)
+    print("(%d parked, %d suspect)" % (len(rows), susp), file=result)
+    if susp:
+        print("Confirm each suspect's wake source actually completed "
+              "(e.g. iou-wrk threads present for an aio park) before "
+              "reporting a lost wake -- a pending syscall is not a "
+              "strand.", file=result)
 
 
 def xtc_proc(debugger, command, result, internal_dict):
@@ -238,6 +315,7 @@ def xtc_trace(debugger, command, result, internal_dict):
 
 def __lldb_init_module(debugger, internal_dict):
     for name, fn in (("xtc-loops", "xtc_loops"), ("xtc-procs", "xtc_procs"),
+                     ("xtc-stranded", "xtc_stranded"),
                      ("xtc-proc", "xtc_proc"), ("xtc-mailbox", "xtc_mailbox"),
                      ("xtc-self", "xtc_self"), ("xtc-trace", "xtc_trace")):
         debugger.HandleCommand("command script add -f %s.%s %s"

@@ -29,6 +29,10 @@ Or in `~/.lldbinit`:
     xtc-procs [loop]   every proc: pid, mailbox depth, peak, state,
                        links/monitors -- the observer process table
     xtc-proc  ADDR     one proc in detail
+    xtc-stranded       triage a suspected stranded-fiber hang: the
+                       park-kind histogram plus every PARKED proc with
+                       its park shape and wake_pending, flagging the
+                       suspects (see below)
     xtc-mailbox ADDR   the queued envelopes (sender, size)
     xtc-self           the proc running on the selected thread
     xtc-trace          the causal message trace, HLC-ordered (SEND/
@@ -36,6 +40,40 @@ Or in `~/.lldbinit`:
     xtc-tail-dump F    write the live xtc_tail runtime-microscope ring
                        to file F in the compact portable format, for
                        the offline viewer below
+
+## Diagnosing "a fiber is never resumed" (xtc-stranded)
+
+The one command to reach for when something appears parked forever.  It
+answers the question that separates a genuinely lost wake from an
+operation that is merely slow:
+
+    park='-' + wake_pending CLEAR
+        No armed wake source (not an fd, not a timer -- this is the
+        xtc_aio completion shape) AND no latched wake.  If the operation
+        it waits on has demonstrably finished, this is a LOST WAKE:
+        nothing remains to re-deliver it.
+
+    park='-' + WAKE_PENDING
+        A wake arrived in the prepare/park window and was latched; the
+        PENDING verdict has not consumed it yet.  Transient -- but if it
+        persists across samples, the consume path is broken, which is a
+        DIFFERENT bug.  Say which of the two you observed.
+
+    park='fd' / 'timer' / 'mailbox'
+        Waiting on an armed source.  Check the source (is the fd
+        readable? has the deadline passed?) before suspecting the
+        runtime.
+
+Sample it three times about a second apart.  A real strand is identical
+every time; progress shows up as changing counts.  Pair it with
+`thread apply all bt` sampled the same way -- that is what distinguishes
+a park (identical, no CPU) from an infinite loop (identical line, burning
+CPU).
+
+A suspect is not yet a bug report: confirm the wake source actually
+completed first.  For an aio park, the kernel's `iou-wrk-*` threads being
+present in `/proc/<pid>/task` shows the op was submitted and serviced; a
+still-pending syscall is not a strand.
 
 ## Offline trace viewer (xtc_tail)
 

@@ -48,6 +48,7 @@ When you do not yet know what is wrong, attach (or load the core) and:
 
     (gdb) xtc-loops      # how many loops, how busy, how many procs
     (gdb) xtc-procs      # every proc: mailbox depth, state, links
+    (gdb) xtc-stranded   # if something looks parked forever (see below)
 
 `xtc-procs` is the single most useful command.  Its columns are the
 vital signs:
@@ -163,6 +164,51 @@ Map a thread to the proc it is running: select the thread and
 
     (gdb) thread 3
     (gdb) xtc-self
+
+### When a fiber looks like it is never resumed
+
+The case above assumes the waiting proc is waiting for something you can
+name. The harder case is a proc parked on an operation that has *already
+completed* -- a lost wake. `xtc-stranded` is built for exactly that:
+
+    (gdb) xtc-stranded
+    proc states:
+        PARKED       5
+    park kinds (PARKED procs only):
+        park=-        2
+        park=timer    3
+
+    proc               pid        park     wake_pending   verdict
+    0x514810           <0.0.1>    timer    clear
+    0x517890           <0.3.1>    -        clear          <-- SUSPECT: no source, no latched wake
+    (5 parked, 2 suspect)
+
+Read it as follows.
+
+  * **`park='-'` with `wake_pending` clear.** No armed wake source -- not
+    an fd, not a timer. This is the shape a fiber has while waiting for
+    an `xtc_aio_*` completion to be reaped and dispatched. With no
+    latched wake either, and if the operation has demonstrably finished,
+    nothing remains to re-deliver the wake. Report it.
+  * **`park='-'` with `WAKE_PENDING`.** A wake arrived while the proc was
+    still deciding to park, and was latched for the scheduler to consume.
+    Transient and correct. If it *persists* across several samples, the
+    consume path is broken -- a different bug, so say which you saw.
+  * **`park='fd'` / `'timer'` / `'mailbox'`.** Waiting on a real source.
+    Check the source before suspecting the runtime: is the fd actually
+    readable, has the deadline actually passed?
+
+Sample it three times about a second apart, alongside
+`thread apply all bt`. A genuine strand is byte-identical every time and
+burns no CPU; an infinite loop is also identical but pins a core. That
+pair of observations is what tells them apart, and it is the single most
+useful thing to include in a bug report.
+
+One caution: a suspect is not yet a defect. Confirm the wake source
+really completed first. For an `xtc_aio` park under the io_uring backend,
+`ls /proc/<pid>/task | wc -l` and the presence of `iou-wrk-*` threads
+(check their `comm`) show the kernel accepted and serviced the
+submission; a still-pending syscall is not a strand.
 
 ## Recipe: a stuck or growing mailbox (the classic)
 
