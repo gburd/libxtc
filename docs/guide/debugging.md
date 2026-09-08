@@ -165,6 +165,31 @@ Map a thread to the proc it is running: select the thread and
     (gdb) thread 3
     (gdb) xtc-self
 
+### When a completion seems to have been lost
+
+If a fiber is parked on I/O that you believe finished, check whether the
+completion is sitting unreaped in the ring:
+
+    (gdb) xtc-rings
+
+The `unreaped` column is `CqTail - CqHead` -- completions the kernel has posted
+that libxtc has not consumed. Cross-check it against
+`/proc/<pid>/fdinfo/<ring_fd>`, which reports the same thing from the kernel's
+side.
+
+Sample it **three times a few seconds apart**. A single non-zero reading means
+nothing: under load, completions arrive continuously and a snapshot catches
+them mid-flight (a healthy busy loop was measured at 218 unreaped, then 1 three
+seconds later). A count that stays *pinned* while nothing progresses is the
+real signal.
+
+Once you have a persistently non-empty CQ, one inference is sound: a poller
+cannot be blocked in `io_uring_wait_cqe` on a ring whose CQ is non-empty --
+liburing checks the CQ before entering the kernel. So that loop's worker is
+somewhere other than its own poll: running a task, blocked on a peer's ring, or
+gone. Use the `io` column to join against the `io=` argument in a blocked
+thread's `xtc_io_poll` frame.
+
 ### When a fiber looks like it is never resumed
 
 The case above assumes the waiting proc is waiting for something you can

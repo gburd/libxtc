@@ -60,7 +60,15 @@ and the loop that owns that ring never drained it.
 
 Match `ring_fd` against the `fdinfo` sweep, then use `owner_tid` to find which
 thread is supposed to be polling that ring and ask what it is actually doing
-(`thread apply all bt`).
+(`thread apply all bt`).  The `io` column is what a blocked poller's
+`xtc_io_poll` frame shows as `io=`, so the join is direct.
+
+**A single sample showing `unreaped > 0` proves nothing.**  Under load,
+completions arrive continuously and any snapshot catches some in flight:
+measured on a healthy-but-busy 8-loop run, one ring read 218 unreaped and then
+1 three seconds later.  Sample at least three times a few seconds apart --
+a count that stays *pinned* while the process makes no progress is the signal;
+a count that moves means the ring is being serviced.
 
 One inference worth knowing: a poller **cannot** be blocked in
 `io_uring_wait_cqe` on a ring whose CQ is non-empty -- liburing checks the CQ
