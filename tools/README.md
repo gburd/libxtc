@@ -26,6 +26,9 @@ Or in `~/.lldbinit`:
 ## Commands (both)
 
     xtc-loops          scheduler loops + per-loop stats
+    xtc-rings          each loop -> its io_uring ring fd, the thread that
+                       polls it, and how many completions the KERNEL has
+                       posted that we have not reaped (see below)
     xtc-procs [loop]   every proc: pid, mailbox depth, peak, state,
                        links/monitors -- the observer process table
     xtc-proc  ADDR     one proc in detail
@@ -40,6 +43,34 @@ Or in `~/.lldbinit`:
     xtc-tail-dump F    write the live xtc_tail runtime-microscope ring
                        to file F in the compact portable format, for
                        the offline viewer below
+
+## Diagnosing "a completion arrived but nobody reaped it" (xtc-rings)
+
+`/proc/<pid>/fdinfo/<ring_fd>` reports `CqHead` and `CqTail`; the difference
+is the number of completions the KERNEL has already posted that userspace has
+not consumed.  A non-zero value with a stalled process means the I/O finished
+and the loop that owns that ring never drained it.
+
+`xtc-rings` maps the kernel's view back to libxtc's:
+
+    (gdb) xtc-rings
+    loop               id     ring_fd  owner_tid            unreaped  alive
+    0x5163c0           0      5        140737339500224      45        36
+    0x519840           3      14       140737314322112      21        0
+
+Match `ring_fd` against the `fdinfo` sweep, then use `owner_tid` to find which
+thread is supposed to be polling that ring and ask what it is actually doing
+(`thread apply all bt`).
+
+One inference worth knowing: a poller **cannot** be blocked in
+`io_uring_wait_cqe` on a ring whose CQ is non-empty -- liburing checks the CQ
+before entering the kernel.  So if `unreaped > 0`, that loop's worker is
+somewhere OTHER than its own poll: running a task, blocked on a different
+ring, or gone.  That distinction is usually the whole bug.
+
+Note that `alive` counts tasks HOMED on the loop, which is not the same as
+tasks it can currently run -- a loop can show `alive=0` and still hold both
+queued work and unreaped completions.
 
 ## Diagnosing "a fiber is never resumed" (xtc-stranded)
 

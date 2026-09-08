@@ -82,6 +82,38 @@ def _loop_tables():
             yield loop, tbl
 
 
+def _all_loops():
+    """Yield EVERY loop, including ones with no procs registered.
+
+    _loop_tables() only sees loops that have a proc table, so a loop whose
+    procs have all exited (or that never spawned one) is invisible to it --
+    and those are exactly the loops worth inspecting when a ring is not
+    being drained.  Start from any registered loop, hop to its executor,
+    and walk exec->loops[0..n_loops-1]; fall back to the proc-table walk
+    for a standalone loop with no executor.
+    """
+    seen = []
+    for loop, _tbl in _loop_tables():
+        ex = loop["exec"]
+        if int(ex) != 0:
+            try:
+                n = int(ex["n_loops"])
+                arr = ex["loops"]
+                for i in range(n):
+                    lp = arr[i]
+                    if int(lp) != 0 and int(lp) not in [int(x) for x in seen]:
+                        seen.append(lp)
+                if seen:
+                    for lp in seen:
+                        yield lp
+                    return
+            except gdb.error:
+                pass
+    # No executor (or the walk failed): fall back to the proc-table view.
+    for loop, _tbl in _loop_tables():
+        yield loop
+
+
 def _procs_in(tbl):
     """Yield live struct xtc_proc * in a proc table."""
     slots = tbl["slots"]
@@ -171,6 +203,76 @@ class XtcLoops(gdb.Command):
                      int(loop["n_steals"])))
         if not any_loop:
             print("no loops registered (is the program running? built -g?)")
+
+
+class XtcRings(gdb.Command):
+    """xtc-rings: map each loop to its io_uring ring fd, owner thread, and
+    how many completions are sitting UNREAPED in its CQ.
+
+    This is the command for "a ring has posted completions that nobody
+    drained".  /proc/<pid>/fdinfo/<ring_fd> gives CqTail - CqHead (the
+    kernel's own count of posted-but-unconsumed CQEs); this maps that fd
+    back to the loop that owns it, so you can then ask what THAT loop's
+    worker is doing.
+
+    Columns:
+      loop      the xtc_loop_t *
+      ring_fd   io->ring.ring_fd -- match this against fdinfo
+      owner     the pthread id recorded as the ring's polling thread
+                (0 = never polled yet)
+      unreaped  CqTail - CqHead read from the live ring memory, i.e.
+                completions the kernel posted that we have not consumed
+      alive     loop->n_alive (tasks HOMED here, incl. parked ones)
+
+    A row with unreaped > 0 is the smoking gun: the kernel completed the
+    I/O and this loop never reaped it.  Note that a poller CANNOT be
+    blocked in io_uring_wait_cqe on a ring whose CQ is non-empty --
+    liburing checks the CQ before entering the kernel -- so if you find
+    unreaped > 0, that loop's worker is somewhere OTHER than its own
+    poll: running a task, stuck in a peer's ring, or gone.
+    """
+    def __init__(self):
+        super().__init__("xtc-rings", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        print("%-18s %-6s %-8s %-20s %-9s %s"
+              % ("loop", "id", "ring_fd", "owner_tid", "unreaped", "alive"))
+        n = 0
+        for loop in _all_loops():
+            io = loop["io"]
+            if int(io) == 0:
+                continue
+            n += 1
+            fd = owner = unreaped = "?"
+            try:
+                fd = int(io["ring"]["ring_fd"])
+            except gdb.error:
+                pass
+            try:
+                owner = ("%d" % int(io["owner_tid"])
+                         if int(io["owner_set"]) else "unset")
+            except gdb.error:
+                owner = "n/a"
+            # CqTail - CqHead straight out of the mapped ring.
+            try:
+                cq = io["ring"]["cq"]
+                khead = int(cq["khead"].dereference())
+                ktail = int(cq["ktail"].dereference())
+                unreaped = "%d" % (ktail - khead)
+            except gdb.error:
+                unreaped = "?"
+            try:
+                lid = int(loop["exec_id"])
+            except gdb.error:
+                lid = -1
+            print("%-18s %-6s %-8s %-20s %-9s %s"
+                  % (str(loop), lid if lid >= 0 else "solo", fd, owner,
+                     unreaped, int(loop["n_alive"])))
+        if n == 0:
+            print("no loops with an io backend (running? built -g?)")
+        else:
+            print("(%d ring(s); unreaped > 0 means the kernel posted "
+                  "completions this loop never drained)" % n)
 
 
 class XtcProcs(gdb.Command):
@@ -481,13 +583,14 @@ class XtcHelp(gdb.Command):
 
     def invoke(self, arg, from_tty):
         print(__doc__ if __doc__ else "see tools/gdb/xtc-gdb.py header")
-        print("  xtc-loops | xtc-procs [loop] | xtc-proc A | "
+        print("  xtc-loops | xtc-rings | xtc-procs [loop] | xtc-proc A | "
               "xtc-stranded | "
               "xtc-mailbox A | xtc-self | xtc-trace")
 
 
 gdb.pretty_printers.append(_lookup_printer)
 XtcLoops()
+XtcRings()
 XtcProcs()
 XtcProc()
 XtcStranded()
@@ -496,6 +599,7 @@ XtcSelf()
 XtcTrace()
 XtcTailDump()
 XtcHelp()
-print("xtc-gdb loaded: xtc-loops, xtc-procs, xtc-proc, xtc-stranded, "
+print("xtc-gdb loaded: xtc-loops, xtc-rings, xtc-procs, xtc-proc, "
+      "xtc-stranded, "
       "xtc-mailbox, "
       "xtc-self, xtc-trace, xtc-tail-dump, xtc-help")
