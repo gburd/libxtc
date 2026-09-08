@@ -9,6 +9,8 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_tail.h"     /* SCHED: per-loop poll liveness */
+#include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on */
 #include "loop_int.h"
 #include "xtc_slab.h"
 #include "coro_int.h"
@@ -964,6 +966,27 @@ __xtc_loop_step(xtc_loop_t *loop)
 	rc = xtc_io_poll(loop->io, evs,
 	    (int)(sizeof evs / sizeof evs[0]), timeout_ns, &n_out);
 	if (rc != XTC_OK) return rc;
+
+	/*
+	 * xtc_tail SCHED: this loop completed a poll on its OWN ring.  Emitted
+	 * even when it dispatched nothing (detail = 0), because the VALUE is
+	 * liveness: a steady stream of LOOP_POLL for a loop_id proves that
+	 * loop is still turning, which is the only way to tell "the loop kept
+	 * working and skipped one parked fiber" from "the loop stopped" when a
+	 * PARK has no matching RUN.  Without it, the absence of other events
+	 * on a loop is ambiguous between a dead loop and the end of the
+	 * recording window.
+	 *
+	 * pid carries only loop_id -- a loop is not a proc.  Gated, so a
+	 * disabled tail is one branch.
+	 */
+	if (__xtc_tail_on(XTC_TAIL_SCHED)) {
+		xtc_pid_t lp;
+		memset(&lp, 0, sizeof lp);
+		lp.loop_id = (uint16_t)(loop->exec_id >= 0 ? loop->exec_id : 0);
+		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_LOOP_POLL, lp,
+		    (uint64_t)n_out);
+	}
 
 	for (i = 0; i < n_out; i++)
 		(void)__xtc_loop_dispatch_event(loop, &evs[i]);

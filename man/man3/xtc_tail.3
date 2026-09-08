@@ -139,6 +139,28 @@ a lost wakeup -- while a matching RUN whose
 .Fa detail
 (the park-to-run latency in nanoseconds) is large is a late one.
 .Pp
+.Dv XTC_TAIL_LOOP_POLL
+is emitted by the SCHED source after each completed poll of a loop's own
+I/O ring, even when the poll dispatched nothing
+.Pq Fa detail Ns " = the number of events dispatched" .
+Its
+.Fa pid
+carries only
+.Fa loop_id ;
+a loop is not a proc.  Its purpose is liveness: when a
+.Dv XTC_TAIL_PARK
+has no matching
+.Dv XTC_TAIL_RUN ,
+a continuing stream of
+.Dv XTC_TAIL_LOOP_POLL
+for that
+.Fa loop_id
+proves the loop kept turning and that one fiber was skipped, whereas the
+absence of any proves the loop itself stopped.  Those have different causes
+and different fixes, and without this event the only way to distinguish them
+is to infer from the absence of other events -- which cannot tell a dead loop
+apart from the end of the recording window.
+.Pp
 .Dv XTC_TAIL_WAKE
 is reserved and currently never emitted: the natural hook point has a
 task but no pid (there is no task-to-proc back pointer), and
