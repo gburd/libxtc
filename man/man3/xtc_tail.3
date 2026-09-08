@@ -105,11 +105,44 @@ returns the buffered record count.
 returns no value.
 .Sh NOTES
 Phase 1 implements the SCHED source (proc spawn / exit / park / run with
-wake-to-run latency) and the MSG source (send / receive / mailbox-depth
+park-to-run latency) and the MSG source (send / receive / mailbox-depth
 high-water), the in-process read, and the compact portable binary dump.
 The IO and OS sources, an on-disk spill with rotation, and the offline
 viewer are staged follow-ons; the record layout and the source mask are
 stable so they extend the format without a break.
+.Pp
+Which parks are recorded, precisely, because the coverage is not uniform:
+a
+.Dv XTC_TAIL_PARK
+/
+.Dv XTC_TAIL_RUN
+pair is emitted for a mailbox
+.Fn xtc_recv
+park and for the native async-file-I/O park inside
+.Fn xtc_aio_pread ,
+.Fn xtc_aio_pwrite ,
+.Fn xtc_aio_fsync
+and
+.Fn xtc_aio_fdatasync .
+It is
+.Em not
+emitted for an
+.Fn xtc_proc_wait_fd
+readiness park.
+.Pp
+The intended use of the pair is diagnostic: a
+.Dv XTC_TAIL_PARK
+with no matching
+.Dv XTC_TAIL_RUN
+for the same pid is a fiber that went to sleep and was never resumed --
+a lost wakeup -- while a matching RUN whose
+.Fa detail
+(the park-to-run latency in nanoseconds) is large is a late one.
+.Pp
+.Dv XTC_TAIL_WAKE
+is reserved and currently never emitted: the natural hook point has a
+task but no pid (there is no task-to-proc back pointer), and
+PARK-without-RUN answers the same question from the parked side.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_tail_enable(XTC_TAIL_SCHED);
