@@ -54,8 +54,25 @@ enum xtc_tail_kind {
 	/* MSG source: */
 	XTC_TAIL_SEND     = 5,   /* pid sent a message (detail = payload bytes) */
 	XTC_TAIL_RECV     = 6,   /* pid received a message (detail = bytes) */
-	XTC_TAIL_MBOX_HWM = 7    /* pid's mailbox depth reached a new high-water
+	XTC_TAIL_MBOX_HWM = 7,   /* pid's mailbox depth reached a new high-water
 	                          * (detail = the new peak depth) */
+	/* Loop liveness (SCHED source).  pid.loop_id identifies the loop;
+	 * local_id/gen are 0 because a LOOP is not a proc.  detail = the
+	 * number of events the poll dispatched.
+	 *
+	 * This exists to answer one question a park/run timeline cannot:
+	 * when a fiber's park has no matching RUN, did its loop KEEP WORKING
+	 * (so the loop is alive and that fiber specifically was skipped) or
+	 * did the loop stop entirely?  Those have different causes and
+	 * different fixes, and without a per-loop event the only way to tell
+	 * them apart is to infer from the absence of other pids' events --
+	 * which cannot distinguish "loop dead" from "we stopped recording",
+	 * and a consumer hit exactly that ambiguity.
+	 *
+	 * Emitted after each completed xtc_io_poll on the loop's own ring, so
+	 * a loop that is still polling produces a steady stream even when it
+	 * dispatches nothing (detail = 0). */
+	XTC_TAIL_LOOP_POLL = 8
 };
 
 /* One recorded event.  Fixed layout; the binary dump writes it verbatim
