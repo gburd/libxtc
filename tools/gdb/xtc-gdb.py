@@ -224,19 +224,42 @@ class XtcRings(gdb.Command):
                 completions the kernel posted that we have not consumed
       alive     loop->n_alive (tasks HOMED here, incl. parked ones)
 
-    A row with unreaped > 0 is the smoking gun: the kernel completed the
-    I/O and this loop never reaped it.  Note that a poller CANNOT be
-    blocked in io_uring_wait_cqe on a ring whose CQ is non-empty --
-    liburing checks the CQ before entering the kernel -- so if you find
-    unreaped > 0, that loop's worker is somewhere OTHER than its own
-    poll: running a task, stuck in a peer's ring, or gone.
+    READ THE CAVEAT BEFORE CONCLUDING ANYTHING FROM unreaped > 0.
+
+    A single sample showing unreaped > 0 proves NOTHING.  Under load,
+    completions arrive continuously and any snapshot catches some of them
+    in flight; measured on a healthy-but-busy 8-loop run, one ring read
+    218 unreaped and then 1 three seconds later.  That is a ring draining
+    normally, not a stuck one.
+
+    To show a ring is genuinely STUCK, sample it at least three times a
+    few seconds apart and show the count does NOT fall:
+
+        (gdb) xtc-rings
+        (gdb) shell sleep 3
+        (gdb) xtc-rings
+        (gdb) shell sleep 3
+        (gdb) xtc-rings
+
+    A count that stays pinned at the same value across samples, while the
+    process makes no progress, is the real signal.  A count that moves --
+    in either direction -- means that ring is being serviced.
+
+    One inference that IS sound once you have a stuck ring: a poller
+    cannot be blocked in io_uring_wait_cqe on a ring whose CQ is
+    non-empty, because liburing checks the CQ before entering the kernel.
+    So a persistently non-empty CQ means that loop's worker is somewhere
+    OTHER than its own poll -- running a task, blocked on a peer's ring,
+    or gone.  Use the `io` column to join against the `io=` argument in a
+    blocked thread's xtc_io_poll frame.
     """
     def __init__(self):
         super().__init__("xtc-rings", gdb.COMMAND_USER)
 
     def invoke(self, arg, from_tty):
-        print("%-18s %-6s %-8s %-20s %-9s %s"
-              % ("loop", "id", "ring_fd", "owner_tid", "unreaped", "alive"))
+        print("%-18s %-6s %-18s %-8s %-20s %-9s %s"
+              % ("loop", "id", "io", "ring_fd", "owner_tid", "unreaped",
+                 "alive"))
         n = 0
         for loop in _all_loops():
             io = loop["io"]
@@ -265,9 +288,12 @@ class XtcRings(gdb.Command):
                 lid = int(loop["exec_id"])
             except gdb.error:
                 lid = -1
-            print("%-18s %-6s %-8s %-20s %-9s %s"
-                  % (str(loop), lid if lid >= 0 else "solo", fd, owner,
-                     unreaped, int(loop["n_alive"])))
+            # The io pointer is what a blocked poller's xtc_io_poll frame
+            # shows as `io=`, so printing it here makes the join to
+            # `thread apply all bt` direct instead of guesswork.
+            print("%-18s %-6s %-18s %-8s %-20s %-9s %s"
+                  % (str(loop), lid if lid >= 0 else "solo", str(io), fd,
+                     owner, unreaped, int(loop["n_alive"])))
         if n == 0:
             print("no loops with an io backend (running? built -g?)")
         else:
