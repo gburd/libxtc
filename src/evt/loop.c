@@ -1020,6 +1020,61 @@ xtc_loop_run(xtc_loop_t *loop)
  *   0  - idle (no work; caller may steal or block)
  *  <0  - error
  */
+/*
+ * Does this loop hold work it can RUN RIGHT NOW (its own FIFO, its class
+ * FIFOs, or its stealable deque)?
+ *
+ * This is NOT the same question as n_alive > 0, and conflating the two is a
+ * real defect.  n_alive counts tasks HOMED here: spawn increments it and the
+ * DONE verdict decrements against t->loop, the HOME loop.  It therefore
+ * counts a PARKED fiber (correctly -- that is what keeps the executor from
+ * quiescing while a completion is outstanding) and does NOT count a
+ * foreign-homed task sitting in THIS loop's queues.  Two things put one
+ * there: a task stolen from a peer and re-enqueued locally, and a task woken
+ * by a completion reaped here (__xtc_loop_dispatch_event builds the waker
+ * with w.loop = the REAPING loop, so the enqueue targets this loop even when
+ * the task is homed elsewhere).
+ *
+ * MEASURED: 165,733 times in one 8-loop run, a loop took the "no local work"
+ * branch while its own deque was non-empty.  The consequence is not a strand
+ * -- the queued task does run on a later turn -- but reporting idle makes the
+ * executor account the worker as idle and grow its poll timeout toward the
+ * 32 ms backoff cap, so a runnable task waits on a sleep it should never
+ * have entered.  A latency bug, which is why no functional test caught it.
+ *
+ * Used ONLY to decide "may I report idle?", never to skip the !has_tasks
+ * branch itself.  That branch is load-bearing: it polls this loop's own ring
+ * before trying to steal, which is what keeps a fiber parked here on an
+ * xtc_aio_* completion from being stranded.  An earlier attempt folded the
+ * queue check into has_tasks and thereby skipped the poll; it hung
+ * m5/exec/Blk2_concurrent_commit.  Keep the two questions separate.
+ *
+ * Owner-thread call only.  q_head is owner-written; the deque indices are
+ * atomic and a stale read is harmless here -- a false "empty" costs one
+ * extra idle turn (the task is still queued and runs next turn), and a false
+ * "non-empty" costs one extra step that finds nothing.  Neither loses work.
+ */
+static int
+__runq_nonempty(const xtc_loop_t *loop)
+{
+	int i;
+
+	if (loop->q_head != NULL)
+		return 1;
+	if (atomic_load_explicit(&loop->deque.bottom, memory_order_relaxed) >
+	    atomic_load_explicit(&loop->deque.top, memory_order_relaxed))
+		return 1;
+	/* L1 proportional-share: a class-tagged task lives on its class's
+	 * own ready FIFO, never the shared deque, so those must be checked
+	 * too or a loop running only class-tagged work looks idle. */
+	for (i = 0; i < loop->n_classes; i++) {
+		if (loop->classes[i].in_use &&
+		    loop->classes[i].q_head != NULL)
+			return 1;
+	}
+	return 0;
+}
+
 int
 __xtc_loop_step_once(xtc_loop_t *loop)
 {
@@ -1073,10 +1128,14 @@ __xtc_loop_step_once(xtc_loop_t *loop)
 				    memory_order_relaxed);
 				stolen->q_next = NULL;
 				(void)__xtc_loop_enqueue(loop, stolen);
+			} else if (__runq_nonempty(loop)) {
+				/* Nothing to steal, but we DO hold runnable work --
+				 * fall through to run it rather than reporting idle
+				 * (see __runq_nonempty). */
 			} else {
 				return 0;
 			}
-		} else {
+		} else if (!__runq_nonempty(loop)) {
 			return 0;
 		}
 	}
