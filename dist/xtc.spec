@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.41.0
+Version:        1.41.1
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,20 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Sun Sep 07 2026 Greg Burd <greg@burd.me> - 1.41.1-1
+- fix(sched): do not report a loop idle while it holds runnable work
+  (n_alive counts HOMED tasks, so a foreign-homed task in this loop's
+  queue made it claim idle and enter the backoff sleep; 165,733
+  false-idle decisions measured in one 8-loop run).
+- fix(sched): re-check wake_pending after publishing PARKED, closing a
+  window where a waker latching between the consume and the state store
+  left a fiber PARKED with nobody left to consume the latch.
+- io(uring): DIAGNOSTIC assertion that all SQ submits come from the
+  ring's owner thread.
+- tail: record the aio park/resume, so a lost completion wake is visible
+  as a PARK with no matching RUN.
+- tools: new xtc-stranded and xtc-rings debugger commands.
+
 * Fri Sep 05 2026 Greg Burd <greg@burd.me> - 1.41.0-1
 - New public API: xtc_ncpus, xtc_numa_nnodes, xtc_numa_node_of_cpu,
   xtc_numa_current_node (minor bump).
