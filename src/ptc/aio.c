@@ -24,6 +24,8 @@
 #include "xtc_blocking.h"
 #include "loop_int.h"
 #include "coro_int.h"
+#include "xtc_tail.h"     /* SCHED source: the aio park/resume pair */
+#include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on (internal) */
 
 #include <errno.h>
 #include <string.h>
@@ -206,10 +208,48 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 	/* Park until THIS op completes.  The completion is the only thing
 	 * targeting this task (no other waker is armed), so the loop is
 	 * bounded and the on-stack `a` is never touched after we return. */
-	while (!a.done) {
-		t->park_requested = 1;
-		atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
-		xtc_yield();
+	{
+		/*
+		 * xtc_tail SCHED: record the park and, on resume, the
+		 * park->run latency.  This is the ONLY off-CPU window in the
+		 * native aio path, and it is exactly where a lost completion
+		 * wake shows up: a PARK with no matching RUN is a fiber that
+		 * went to sleep on an I/O completion and was never resumed.
+		 *
+		 * Without this hook, xtc_tail could not see the aio path at
+		 * all -- PARK/RUN were emitted only from the mailbox recv in
+		 * proc.c, so a consumer debugging a strand in
+		 * xtc_aio_fdatasync got no events for the very park they were
+		 * chasing.
+		 *
+		 * Gated on the source being enabled, so a disabled tail is one
+		 * branch and reads no clock (the sim path stays
+		 * side-effect-free by default, which matters because an
+		 * unconditional clock read here would be a determinism-guard
+		 * violation).
+		 */
+		int tail_on = __xtc_tail_on(XTC_TAIL_SCHED);
+		int64_t park_ns = 0;
+		xtc_pid_t self_pid = xtc_self();
+
+		if (tail_on && !a.done) {
+			__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_PARK,
+			    self_pid, (uint64_t)op);
+			(void)__os_clock_mono(&park_ns);
+		}
+		while (!a.done) {
+			t->park_requested = 1;
+			atomic_store_explicit(&t->wake_revents, 0,
+			    memory_order_relaxed);
+			xtc_yield();
+		}
+		if (tail_on && park_ns != 0) {
+			int64_t run_ns = 0;
+			(void)__os_clock_mono(&run_ns);
+			__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_RUN,
+			    self_pid, (uint64_t)(run_ns > park_ns
+			    ? run_ns - park_ns : 0));
+		}
 	}
 	return a.res;
 }
