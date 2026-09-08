@@ -1,3 +1,54 @@
+libxtc (1.41.1-1) unstable; urgency=medium
+
+  * fix(sched): do not report a loop idle while it holds runnable work.
+    __xtc_loop_step_once decided "no local work" from n_alive, which counts
+    tasks HOMED on the loop -- so it did not count a foreign-homed task
+    sitting in this loop's queues, which happens both when a task is stolen
+    from a peer and re-enqueued locally and when a task is woken by a
+    completion reaped here (the waker targets the REAPING loop).  A loop
+    holding runnable work therefore reported idle, and the executor grew its
+    poll timeout toward the 32 ms backoff cap while a runnable task waited on
+    a sleep it should never have entered.  Measured at 165,733 false-idle
+    decisions in one 8-loop run; the new path prevents 13,359 wrong idle
+    reports in 45 seconds.  A latency defect, not a strand, which is why no
+    functional test caught it.
+  * fix(sched): re-check wake_pending after publishing state=PARKED.  The
+    PENDING verdict consumed wake_pending and then stored PARKED as two
+    separate steps, so a waker that latched between them left the task PARKED
+    with the only consumer of that latch already past.  Instrumented as
+    reachable (the re-check fires 12 times across 4 runs of a 24-writer
+    aio workload).
+  * io(uring): DIAGNOSTIC assertion that every SQ submit comes from the
+    ring's recorded owner thread, routed through one __ring_submit() helper
+    instead of nine call sites.  Adopted INSTEAD of
+    IORING_SETUP_SINGLE_ISSUER, which would have required restructuring loop
+    init (88 of 90 xtc_loop_init callers also run the loop on the creating
+    thread) for a per-SQE saving the measured reap headroom says is noise.
+  * io(uring): attach the per-loop preempt ring's io-wq to the loop's main
+    ring, so the worker cap added after the measured thread explosion covers
+    it too.
+  * tail: record the native aio park/resume in the SCHED source.  PARK/RUN
+    was emitted only from the mailbox recv, so a fiber stranded in
+    xtc_aio_fdatasync produced no events for the park being investigated.  A
+    PARK with no matching RUN is now a directly visible lost completion wake,
+    and RUN carries the park-to-run latency.
+  * tools: new xtc-stranded (park-kind histogram plus per-proc park shape and
+    wake_pending, with idle service fibers excluded from the suspect count)
+    and xtc-rings (each loop's ring fd, owner thread, and the count of
+    completions the kernel posted that we have not reaped).  Both in the gdb
+    and lldb helpers, with the sampling caveat documented: a single non-zero
+    unreaped count is the normal state of a busy ring, so sample three times.
+  * bench: new bench_net_compute (mixed network + per-request compute, the
+    workload that decides whether core partitioning is warranted) and
+    bench_aio_fibers (the only libxtc path that reaches io_uring's io-wq).
+    The latter settled two proposals as measured-and-not-warranted.
+  * doc: correct the filesystem attribution of the fdatasync p99 tail -- it
+    is the substrate (a blocking pwrite+fdatasync loop with no io_uring shows
+    the same p99), not libxtc, and the test box is btrfs rather than the ext4
+    originally recorded.
+
+ -- Greg Burd <greg@burd.me>  Sun, 07 Sep 2026 12:00:00 -0400
+
 libxtc (1.41.0-1) unstable; urgency=medium
 
   * New public API (minor bump): xtc_ncpus, xtc_numa_nnodes,
