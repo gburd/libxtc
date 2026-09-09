@@ -160,13 +160,12 @@ same CFLAGS/`/WX` as the gate).  The curated 16-test subset grew to a
   (C4244 SOCKET->int), `(uintptr_t)` a 32-bit sentinel (C4312),
   `(void *)` casts dropping `_Atomic` qualifiers (C4090).
 
-### Legitimately POSIX-only -- cannot run on Windows (10)
+### Legitimately POSIX-only -- cannot run on Windows (9)
 
 | Test | Blocker |
 |------|---------|
 | `m2/test_net_frame` | `socketpair(AF_UNIX)` -- Winsock has no `socketpair` |
 | `m3/test_task` | `getrusage(RUSAGE_SELF)` -- no clean Win32 equivalent for the stats checked |
-| `m8/test_proc` | `fork()` |
 | `m12/test_dump` | `fork()` |
 | `m10/test_osproc` | `xtc_osproc_*` is `XTC_E_NOSYS` on Windows (fork/exec + pidfd; launches `/bin/sh`) |
 | `m1/test_thread_sigmask` | `sigaction`/`SIGUSR1`/`pthread_sigmask` -- POSIX signals |
@@ -175,15 +174,44 @@ same CFLAGS/`/WX` as the gate).  The curated 16-test subset grew to a
 | `m18/test_tls_basic` | references TLS symbols the MSVC build wires no backend for |
 | `concurrency/test_proc_wake_crossthread` | intentionally exits 77 (SKIP) on Windows; its wake path is covered by `test/msvc` |
 
-### Real bug still open (not faked into a pass)
+### Resolved 2026-09-09 (interactive EC2 Windows Server 2022, MSVC 19.44)
 
-* `tnt/test_tnt`: builds, but the whole scenario yields all-zero
-  counters (`send_ok = 0`) -- the `xtc_tnt` shard/driver isolate never
-  runs on Windows.  The tnt shard uses a self-wake pipe + cross-shard
-  senders on the `xtc_exec` work-stealing loop; `test_exec` passes, so
-  the work-stealing core is sound and the fault is specific to the
-  tnt cross-shard-wake path.  Root cause not yet isolated; recorded
-  here rather than skipped or hidden.
+* `tnt/test_tnt`: **was NOT a bug.**  The "all-zero counters =
+  cross-shard-wake bug" reading was wrong: `src/orc/tnt.c` is wrapped in
+  `#if !defined(_WIN32)` and its Windows half is `XTC_E_NOSYS` stubs, so
+  there is no tnt runtime on Windows to have a bug in (probe on the host:
+  `xtc_tnt_start rc=-3`).  It also did not COMPILE under MSVC after
+  `53e6ea1` added a file-scope `<sys/socket.h>`.  The POSIX body is now
+  `_WIN32`-guarded with a Windows `main()` that reports 77/SKIP, and
+  `tnt:test_tnt` is IN the gate (`MUNIT_PLAIN`, the standalone-driver
+  set) reporting SKIP.  See KNOWN_ISSUES.md.
+
+* `m8/test_proc`: **now BUILDS AND RUNS, 18/18 pass + 1 SKIP**, and is
+  in the gate.  It was never a munit GCC-ism problem; four test-side
+  portability defects blocked it (file-scope `<sys/wait.h>`, three
+  hand-rolled `__attribute__((packed))` structs where the portable
+  `XTC_PACK_PUSH`/`XTC_PACKED` trio was needed,
+  `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` where `GetProcessTimes` is
+  the clean Win32 equivalent, and an `8L * 1024^3` LLP64 overflow).
+  Only `/fault_escalate` skips (needs `fork()`).  `/selective_receive`
+  -- the historically suspect case -- PASSES.
+  Getting it to run found TWO real bugs: an 8th LIBRARY bug (the SEH
+  handler recorded the raw `EXCEPTION_ACCESS_VIOLATION` = `-1073741819`
+  as the contained-fault DOWN `reason`, violating the documented
+  positive-signal-number contract; now mapped to `SIGSEGV`/`SIGFPE`/
+  `SIGILL`) and a TEST-HARNESS bug (`close(fd) == -1` as a
+  "was it closed?" probe `__fastfail`s under the MSVC CRT; fixed with
+  `test/include/fd_probe_compat.h`).
+
+* `m1/test_alloc` M7: **un-skipped on Windows.**  The documented reason
+  was stale -- the allocator vtable has had a matched
+  `aligned()`/`aligned_free()` pair since `d10c257`.  The real blocker
+  was that the test released with `__os_free` instead of
+  `__os_aligned_free`.  Now 8/8, 0 skipped.
+
+`m8/test_proc` was removed from the POSIX-only table above (its count
+went 10 -> 9): only ONE of its cases needs `fork()`, and munit can skip a
+single case.
 
 
 ## IOCP backend: round-2 native overlapped (RUNTIME-VERIFIED 2026-06)

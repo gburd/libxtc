@@ -123,20 +123,28 @@ test_aligned(const MunitParameter p[], void *d)
 	int rc;
 	(void)p; (void)d;
 
-#if defined(_WIN32)
-	/* MinGW/MSVC's `_aligned_malloc` returns memory that must be
-	 * released via `_aligned_free`, NOT plain `free`.  xtc's hook
-	 * surface routes everything through a single free path; rather
-	 * than complicate the contract for one platform, we skip the
-	 * Windows aligned-alloc test -- the underlying mechanism is
-	 * exercised by the loop's stack-allocation path. */
-	return MUNIT_SKIP;
-#endif
-
+	/* Windows note: the historical reason this case was skipped here
+	 * ("_aligned_malloc needs _aligned_free but the hook surface has a
+	 * single free path") no longer holds -- the allocator vtable
+	 * carries a MATCHED aligned()/aligned_free() pair, and
+	 * __os_aligned_free routes to _aligned_free on Windows.  So the
+	 * case runs everywhere; it just has to release with
+	 * __os_aligned_free (the documented pair), never __os_free. */
 	rc = __os_aligned_alloc(64, 128, &q);
 	munit_assert_int(rc, ==, XTC_OK);
 	munit_assert_int((int)((uintptr_t)q & (uintptr_t)63), ==, 0);
-	__os_free(q);
+	__os_aligned_free(q);
+
+	/* A cache-line alignment stricter than max_align_t -- the case the
+	 * over-aligned-struct rule in AGENTS.md depends on. */
+	rc = __os_aligned_alloc(XTC_CACHE_LINE, 3 * XTC_CACHE_LINE, &q);
+	munit_assert_int(rc, ==, XTC_OK);
+	munit_assert_int((int)((uintptr_t)q & (uintptr_t)(XTC_CACHE_LINE - 1)),
+	    ==, 0);
+	__os_aligned_free(q);
+
+	/* aligned_free(NULL) is a no-op on both paths. */
+	__os_aligned_free(NULL);
 
 	/* Reject non-power-of-two. */
 	rc = __os_aligned_alloc(48, 128, &q);
@@ -165,10 +173,9 @@ static void *hook_aligned(size_t a, size_t s)  {
 	return p;
 }
 
-/* The hook's free path: on Windows we know the only aligned
- * allocation in this test is the one from hook_aligned, so freeing
- * it via _aligned_free is correct; we let the M7 skip do the heavy
- * lifting on Windows so this hook never runs there. */
+/* The hook's aligned path pairs with the hook's aligned_free (kept from
+ * the saved default hook below), so the M7/M8 cases release aligned
+ * memory through the matching half on every platform. */
 #define hook_aligned_already_defined 1
 
 static MunitResult

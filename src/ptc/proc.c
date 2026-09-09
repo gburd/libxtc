@@ -2495,6 +2495,39 @@ static volatile sig_atomic_t __fault_guard_installed_win;
  * inside a critical section -- EXCEPTION_CONTINUE_SEARCH preserves the
  * process's default crash disposition (PG's PANIC).
  */
+/*
+ * Map a contained Win32 EXCEPTION_* code to the POSIX signal number
+ * the R1 contract publishes.  xtc_proc_recovery_arm() and the DOWN
+ * `reason` are documented (xtc_proc.h) as carrying a POSITIVE SIGNAL
+ * NUMBER -- "e.g. 11 for SIGSEGV" -- and a supervisor is told it can
+ * distinguish a fault reason (1..255) from XTC_DOWN_NOPROC (-100000).
+ * A raw EXCEPTION_ACCESS_VIOLATION is 0xC0000005, which as a signed
+ * int is -1073741819: NEGATIVE, outside 1..255, and platform-specific,
+ * so it broke every one of those promises on Windows.  MSVC's
+ * <signal.h> defines SIGSEGV/SIGFPE/SIGILL; SIGBUS is not a Windows
+ * signal, so misalignment / in-page-error map to SIGSEGV -- which is
+ * what a POSIX kernel reports for the same faults on the architectures
+ * libxtc targets.
+ */
+static int
+__xtc_veh_code_to_signo(DWORD code)
+{
+	switch (code) {
+	case EXCEPTION_ACCESS_VIOLATION:
+	case EXCEPTION_DATATYPE_MISALIGNMENT:
+	case EXCEPTION_IN_PAGE_ERROR:
+		return SIGSEGV;
+	case EXCEPTION_INT_DIVIDE_BY_ZERO:
+	case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+		return SIGFPE;
+	case EXCEPTION_ILLEGAL_INSTRUCTION:
+	case EXCEPTION_PRIV_INSTRUCTION:
+		return SIGILL;
+	default:
+		return SIGSEGV;         /* unreachable: filtered by caller */
+	}
+}
+
 static LONG CALLBACK
 __xtc_veh(EXCEPTION_POINTERS *ep)
 {
@@ -2521,7 +2554,7 @@ __xtc_veh(EXCEPTION_POINTERS *ep)
 	p = __current_proc;
 	if (p != NULL && p->recovery_armed && p->crit_depth == 0) {
 		p->recovery_armed = 0;          /* one-shot */
-		p->fault_sig = (int)code;
+		p->fault_sig = __xtc_veh_code_to_signo(code);
 		p->recovery_fired = 1;          /* arm helper reads this */
 		/* Resume at the captured arm point: no unwind, just a
 		 * register/stack-pointer reload by the kernel. */

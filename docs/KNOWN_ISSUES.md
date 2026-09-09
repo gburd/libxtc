@@ -219,28 +219,154 @@ fixed in `coro_winfiber.c` (the done branch destroyed the coro
 eagerly *and* via the task cleanup at `loop_fini`), which had made any
 loop+process tear down with heap corruption on Windows.
 
-## Windows: `test_proc::selective_receive` regression
+## Windows: `test_proc` (incl. `selective_receive`) -- RESOLVED, now GATED
 
-**Status: RESOLVED (2026-07-06).**  Confirmed passing on Windows 11
-ARM64 with MSVC 2026 (VS18).  The round-2 IOCP rewrite fixed it: the
-wakeup path no longer uses a `WaitForMultipleObjects` set -- wakeups
-are a plain `PostQueuedCompletionStatus` reaped by
-`GetQueuedCompletionStatusEx` and coalesced into one event -- so the
-selective-receive ordering (pull 42 first via `xtc_recv_match`, then
-drain 1,2,3,4 in arrival order) is now deterministic on Windows.
-Verified on a real santorini host (not assumed): the scenario was
-added to `test/msvc/smoke.c` (`smoke_selective_proc`) and the MSVC
-smoke test prints `ok selective_receive: 42 first, then 1,2,3,4 in
-order (IOCP wakeup path)`.  The full munit `test_proc` cannot build
-under cl.exe (munit uses GCC-isms), so the smoke test is the Windows
-regression guard; the munit `test_proc::selective_receive` continues
-to pass on Linux/FreeBSD/illumos.
+**Status: RESOLVED (2026-09-09).**  The full munit `m8/test_proc` now
+BUILDS AND RUNS under MSVC and is part of the `dist/build_msvc.bat`
+hard gate: **18 of 18 cases pass, 1 skips** (`/fault_escalate` only,
+which needs `fork()`).  `/selective_receive` -- the historically
+suspect case -- passes.  Verified interactively on an EC2 Windows
+Server 2022 x86_64 host (c7i.4xlarge, MSVC 19.44.35228), not inferred
+from CI.
 
-<details><summary>Original failure notes (historical)</summary>
+The earlier note said "the full munit `test_proc` cannot build under
+cl.exe (munit uses GCC-isms)" and treated the smoke test as the only
+possible Windows guard.  That was WRONG on the cause: munit itself
+builds fine (the `MUNIT_ARRAY_PARAM` VLA fix landed long ago).  What
+actually blocked it was FOUR test-side portability defects, all fixed:
 
-**Symptom:** the test sends 5 messages to a proc before calling `xtc_loop_run`; the proc uses `xtc_recv_match` to selectively pick value 42 first, then drains 1, 2, 3, 4 in order. On Windows specifically, this failed -- a timing/ordering issue with the IOCP wakeup path.  The earlier hypothesis (now confirmed) was that the round-2 IOCP rewrite -- `WaitForMultipleObjects` set replaced by `PostQueuedCompletionStatus` + `GetQueuedCompletionStatusEx` with a coalesced wakeup -- would fix it.  That is exactly what resolved it, confirmed on a santorini run.
-</details>
+1. `#include <sys/wait.h>` at file scope, needed only by the one
+   `fork()`-based case.  Now `_WIN32`-guarded, and that single case
+   returns `MUNIT_SKIP` on Windows (its escalation half is covered by
+   the SEH driver -- see "Windows fault containment (SEH)" above).
+2. THREE hand-rolled `__attribute__((packed))` mirror structs for the
+   DOWN / EXIT signal layouts.  The tree already has the portable
+   `XTC_PACK_PUSH` / `XTC_PACKED` / `XTC_PACK_POP` trio for exactly
+   this (MSVC needs `#pragma pack`, which an attribute cannot express);
+   the test now uses it.
+3. `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` in `/recv_inf_parks` (the
+   "a parked proc burns no CPU" proof).  Windows DOES have a clean
+   equivalent -- `GetProcessTimes` (kernel+user) -- so the case now
+   runs on Windows instead of being written off as unportable.  It is
+   worth more there than elsewhere: the IOCP backend's 8 ms AFD repoll
+   sweep is exactly the kind of thing a regression could turn into a
+   spin, and this case would catch it.
+4. An LLP64 truncation: `8L * 1024 * 1024 * 1024` overflows a 32-bit
+   MSVC `long` (`C4307`).  Now `8LL`.  Same class as the documented
+   `test_blocking` `_Atomic long` bug.
 
+Two REAL bugs were found by getting the test to run -- one in the
+library, one in the test harness.  Both are documented next.
+
+## Windows: contained-fault DOWN reason was a raw `EXCEPTION_*` code (LIBRARY BUG, FIXED)
+
+**Status: FIXED (2026-09-09).**  Found by running `m8/test_proc` on a
+real Windows host for the first time: `/fault_early_contain` asserted
+`s.reason == 11` against an actual value of `-1073741819`.
+
+**Root cause:** the SEH vectored handler (`__xtc_veh` in
+`src/ptc/proc.c`) stored the raw Win32 exception code into
+`p->fault_sig`:
+
+```c
+p->fault_sig = (int)code;       /* EXCEPTION_ACCESS_VIOLATION */
+```
+
+`EXCEPTION_ACCESS_VIOLATION` is `0xC0000005`, i.e. `-1073741819` as a
+signed `int`.  That value became the proc's `exit_reason` and was
+delivered to every monitor as the DOWN `reason`.  It broke three
+documented promises at once (`src/inc/xtc_proc.h`): the reason is
+specified to be a POSITIVE signal number ("e.g. 11 for SIGSEGV"), to
+sit inside 1..255, and to be distinguishable from `XTC_DOWN_NOPROC`
+(`-100000`) precisely so a supervisor can tell a contained fault from
+"target already gone".  A negative, out-of-range, platform-specific
+value satisfies none of them -- so a supervisor written to the
+documented contract misclassified every contained Windows fault.
+
+**Fix:** a `__xtc_veh_code_to_signo()` mapping applied where the code
+is recorded, so Windows reports the same signal numbers POSIX does:
+access violation / misalignment / in-page error -> `SIGSEGV`, the two
+divide-by-zero codes -> `SIGFPE`, illegal / privileged instruction ->
+`SIGILL`.  (`SIGBUS` does not exist on Windows, hence misalignment
+folding into `SIGSEGV`, which is what a POSIX kernel reports for the
+same fault on the architectures libxtc targets.)
+
+**Evidence:** `/m8/proc/fault_early_contain` went from FAIL
+(`-1073741819`) to OK (reason 11) on the host; `/fault_contain` and
+`/recovery_registry` (whose reasons flow through the same field) pass;
+the POSIX path is untouched (19 of 19 on Linux; the change is inside
+`#if defined(_WIN32)`).
+
+## Windows: `close(fd) == -1` as a "was it closed?" probe is FATAL (TEST-HARNESS BUG, FIXED)
+
+**Status: FIXED (2026-09-09).**  `/m8/proc/recovery_registry` did not
+merely fail on Windows -- it killed the whole test binary with
+`0xC0000409` (`STATUS_STACK_BUFFER_OVERRUN`), so no later case ran.
+
+**Root cause: the TEST, not the library.**  The library closed the
+tracked fd correctly; the test proved it had, with the POSIX idiom
+
+```c
+munit_assert_int(close(g_rec.fd), ==, -1);   /* expect EBADF */
+```
+
+On Windows the MSVC CRT's `_close()` on an unused descriptor invokes
+the *invalid-parameter handler*, whose default action is
+`__fastfail(FAST_FAIL_INVALID_ARG)`: the process dies immediately and
+no assertion is ever evaluated.  Isolated with a 15-line standalone
+program (no libxtc linked): a bare double `close()` aborts with
+`0xC0000409` every time.  `_get_osfhandle()` on a closed fd was
+measured to be JUST AS FATAL, so it is not a safe alternative.
+
+**Fix:** `test/include/fd_probe_compat.h` provides
+`xtc_test_fd_is_closed(fd)` -- on POSIX a plain `close(fd) == -1`, on
+Windows the same `_close()` bracketed by a no-op thread-local
+invalid-parameter handler (`_set_thread_local_invalid_parameter_handler`
+with a REAL no-op function; passing `NULL` restores the fatal default),
+which was measured to make the CRT return `-1`/`EBADF` exactly as POSIX
+does.  A general Windows test hazard, so it lives in `test/include/`
+rather than inside one test.
+
+## Windows: `tnt/test_tnt` all-zero counters -- NOT A BUG; the module is compiled out
+
+**Status: RESOLVED as a DOCUMENTATION ERROR (2026-09-09).**  The
+previous entry called this "a real cross-shard-wake bug still under
+investigation... likely the self-wake pipe's interaction with the IOCP
+readiness model."  That diagnosis was wrong in the strongest possible
+way: **there is no tnt code on Windows to have a bug in.**
+
+`src/orc/tnt.c` is wrapped in `#if !defined(_WIN32)`; the Windows half
+of the file (from the `#else`) is nothing but `XTC_E_NOSYS` stubs, with
+the in-source comment "tnt is a POSIX feature (raw socket I/O in the
+couriers)".  There is no self-wake pipe, no shard scheduler, and no
+cross-shard sender in a Windows build.
+
+**Verified, not reasoned:** a standalone probe on the Windows host
+prints `xtc_tnt_start rc=-3` (`XTC_E_NOSYS`).  The all-zero counters
+were the arithmetic consequence of a runtime that was never compiled
+in -- exactly what a NOSYS stub is supposed to produce.
+
+Two further corrections to the record:
+
+* `test_tnt` had ALREADY grown a `rc == XTC_E_NOSYS -> return 77`
+  (SKIP) branch in commit `e41f128` (2026-08-03), so the "all-zero
+  counters" symptom the entry described was already gone before this
+  investigation; the entry had simply gone stale.
+* But that branch was UNREACHABLE on Windows, because a later commit
+  (`53e6ea1`, 2026-09-05) added `#include <sys/socket.h>` at file
+  scope for the socketpair-staged echo scenario -- so `test_tnt` did
+  not even COMPILE under MSVC (`C1083: Cannot open include file:
+  'sys/socket.h'`) and the SKIP could never be reported.
+
+**Fix:** the POSIX-only body of `test_tnt.c` is now `_WIN32`-guarded as
+a whole, with a small Windows `main()` that prints the SKIP and returns
+77.  Deciding it at COMPILE time is what lets `test_tnt` join the MSVC
+gate at all: the Windows translation unit never references
+`<sys/socket.h>`, so it builds, and it reports its status honestly
+instead of failing to compile.  `tnt/test_tnt` is now IN
+`dist/build_msvc.bat` (as a standalone, non-munit driver -- it has its
+own `main()` and no `munit.c`) and reports SKIP.  On Linux it is
+unchanged and still passes the full scenario.
 
 ## IOCP backend status (Windows)
 
@@ -267,7 +393,10 @@ every size).
 work sessions (three in the IOCP round below, plus four more --
 poll-timeout, pthread retval, thread affinity, slab mmap zero-fill --
 in the full test-surface sweep; see the sweep update further down and
-docs/M_WINDOWS_MATRIX.md), one remains (tnt/test_tnt):
+docs/M_WINDOWS_MATRIX.md); the one then-remaining item (tnt/test_tnt)
+turned out not to be a bug at all -- see the tnt entry above -- and a
+EIGHTH real bug (the raw EXCEPTION_* DOWN reason) was found in 2026-09
+by getting m8/test_proc to run on the host:
 1. FIXED -- the AFD poll IOCTL code was wrong.  It was built as
    CTL_CODE(0x12, 9, METHOD_BUFFERED, FILE_ANY_ACCESS) = 0x00120024;
    the AFD driver rejected every poll with STATUS_INVALID_DEVICE_REQUEST
@@ -374,21 +503,6 @@ and fixed on the host, plus the poll-timeout bug below:
    the shm slab version-check tripped on a reused heap block
    (`m11/test_slab` shm_reclaim); plus test_blocking stored a 64-bit
    clock in `_Atomic long` (LLP64 truncation).
-
-### Windows: `tnt/test_tnt` scenario yields all-zero counters (OPEN)
-
-**Status: OPEN (2026-07), real bug, not skipped.**  test_tnt builds
-clean under MSVC but the whole scenario produces all-zero result
-counters (`send_ok = 0`, `counter_msgs = 0`, ...): the `xtc_tnt`
-shard/driver isolate never runs on Windows.  The tnt shard is built on
-a self-wake pipe + cross-shard senders over the `xtc_exec`
-work-stealing loop; `test_exec` and the other m5 tests pass, so the
-work-stealing core itself is sound and the fault is specific to the
-tnt cross-shard-wake path (likely the self-wake pipe's interaction
-with the IOCP readiness model).  Root cause not yet isolated.  Listed
-here honestly rather than skipped or hidden; the 100-test gate excludes
-it.
-
 
 ## MSVC ASan: pre-existing, rare thread-startup flake (not the AFD workaround)
 
@@ -607,11 +721,60 @@ DIOCGSECTORSIZE/DIOCGMEDIASIZE, DKIOCGMEDIAINFO, the Windows drive
 geometry IOCTL) with a fstat fallback, aligned pread/pwrite through the
 xtc_aio path, and flush via xtc_aio_fsync.  See xtc_bdev(3).
 
-## test_alloc M7 skipped on Windows
+## test_alloc M7 -- NOW ENABLED on Windows (the skip was stale)
 
-**Status:** intentional -- `_aligned_malloc` returns memory that requires `_aligned_free`, not plain `free`. The hook surface uses a single free path. Keeping the M7 case Windows-skipped is correct.
+**Status: RESOLVED (2026-09-09); the documented reason was STALE.**  The
+previous entry read: "intentional -- `_aligned_malloc` returns memory
+that requires `_aligned_free`, not plain `free`.  The hook surface uses
+a single free path.  Keeping the M7 case Windows-skipped is correct."
 
-## Windows multi-core scalability: first datapoint measured (spawn path)
+That premise stopped being true when commit `d10c257` ("os/alloc: fix
+UBSan misalignment on cache-line-aligned allocations") gave the
+allocator vtable a MATCHED `aligned()` / `aligned_free()` PAIR.  There
+is no longer a single free path: `__os_aligned_free()` exists, routes to
+`_aligned_free` on Windows and `free` elsewhere, and `src/inc/os_alloc.h`
+documents the two as a pair that MUST be used together.  The AGENTS.md
+over-aligned-allocation rule depends on that pair existing.
+
+What actually kept M7 unrunnable on Windows was that the TEST released
+with the WRONG half -- `__os_free(q)` on memory from
+`__os_aligned_alloc()`, which is exactly the mismatched-free bug the
+pair exists to prevent and which would corrupt the heap on Windows.  So
+the skip was masking a defect IN THE TEST, and the case as written could
+never have been simply un-skipped.
+
+**Fix:** M7 releases with `__os_aligned_free()` (the documented pair)
+and runs on every platform.  It also gained the case the AGENTS.md rule
+actually cares about -- an `XTC_CACHE_LINE` alignment stricter than
+`max_align_t` -- plus an `aligned_free(NULL)` no-op check.
+
+**Evidence:** `/m1/alloc/M7_aligned` OK on the Windows host (test_alloc
+8 of 8, 0 skipped -- was 7 + 1 skip) and still OK on Linux (8 of 8).
+
+## Windows multi-core scalability: datapoint RE-MEASURED, curve reproduces
+
+**Re-measurement (2026-09-09):** re-run on the same instance shape as
+the original datapoint (EC2 x86_64 Windows Server 2022, c7i.4xlarge, 16
+vCPU, MSVC 2022, IOCP backend) with the same `per_loop=30000`, so it is
+a like-for-like comparison -- on a newer source tree (v1.43.0):
+
+| loops | 2026-07 (below) | 2026-09 run 1 | 2026-09 run 2 |
+|------:|----------------:|--------------:|--------------:|
+|     1 |            77 K |          55 K |             - |
+|     2 |           102 K |          81 K |             - |
+|     4 |     **127 K**   |   **121 K**   |   **124 K**   |
+|     8 |            91 K |          97 K |         100 K |
+|    16 |            82 K |          80 K |          90 K |
+
+Every run: `spawn_ok == done`, `fail = 0`.  **The documented shape
+holds** -- spawn throughput peaks at 4 loops and regresses past it --
+and the peak reproduces within ~5%.  The 1- and 2-loop numbers came in
+lower than 2026-07 and the 8/16-loop numbers slightly higher, which
+narrows the peak-to-tail ratio without changing the finding; repeated
+runs at the top three points show a several-percent run-to-run spread,
+so the small deltas are not worth attributing to any source change.
+The 2026-07 conclusion (the ceiling is cross-loop work-steal cache
+thrash + OS thread placement, NOT the slab allocator) stands unmodified.
 
 **Status:** MEASURED on EC2 x86_64 Windows Server 2022 (c7i.4xlarge, 16
 vCPU, MSVC 2022, IOCP backend) via bench/bench_win_scale.c -- a
