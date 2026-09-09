@@ -1,3 +1,29 @@
+libxtc (1.42.0-1) unstable; urgency=medium
+
+  * tail: new XTC_TAIL_LOOP_POLL event in the SCHED source, emitted after each
+    completed poll of a loop's own I/O ring -- including when the poll
+    dispatched nothing (detail = the number of events dispatched).  Its pid
+    carries only loop_id, because a loop is not a proc.
+    .
+    This exists to answer a question the park/run timeline could not.  When a
+    fiber's XTC_TAIL_PARK has no matching XTC_TAIL_RUN, the cause is either
+    "its loop kept working and skipped this one fiber" (a lost wake) or "the
+    loop itself stopped" -- and those need different fixes.  Previously the
+    only way to tell them apart was to infer from the ABSENCE of other events
+    on that loop, which cannot distinguish a dead loop from the end of the
+    recording window.  A consumer hit exactly that ambiguity: their capture
+    held 3533 events in a 16384-slot ring, so it had not wrapped, and "the
+    trace ends" meant "we stopped recording", not "the loop died".  A
+    continuing LOOP_POLL stream for a loop_id now proves that loop is still
+    turning.
+    .
+    Minor bump because this is a new observable event kind in an installed
+    public header.  Strictly additive: appended at the end of the enum as
+    value 8, every existing XTC_TAIL_* value unchanged, no signature change,
+    no new exported symbol.  Code compiled against 1.41.x is unaffected.
+
+ -- Greg Burd <greg@burd.me>  Mon, 08 Sep 2026 12:00:00 -0400
+
 libxtc (1.41.1-1) unstable; urgency=medium
 
   * fix(sched): do not report a loop idle while it holds runnable work.
