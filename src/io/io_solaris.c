@@ -23,6 +23,7 @@
 #if defined(XTC_IO_BACKEND_SOLARIS)
 
 #include "io_int.h"
+#include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
 
 #include <errno.h>
 #include <port.h>
@@ -318,7 +319,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				if (a != NULL) {
 					a->res = (aerr == 0)
 					    ? (int32_t)ares : -(int32_t)aerr;
-					a->done = 1;
+					__xtc_aio_done_set(a);   /* release */
 					if (out_idx < max) {
 						events[out_idx].tag = a->tag;
 						events[out_idx].flags = XTC_IO_AIO;

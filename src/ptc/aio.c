@@ -18,7 +18,7 @@
 
 #include "xtc_int.h"
 #include "xtc_aio.h"
-#include "aio_int.h"     /* __xtc_aio_force_offload (internal test hook) */
+#include "aio_int.h"     /* __xtc_aio_force_offload; __xtc_aio_done_get */
 #include "xtc_io.h"
 #include "xtc_fs.h"
 #include "xtc_blocking.h"
@@ -232,12 +232,14 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 		int64_t park_ns = 0;
 		xtc_pid_t self_pid = xtc_self();
 
-		if (tail_on && !a.done) {
+		if (tail_on && !__xtc_aio_done_get(&a)) {
 			__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_PARK,
 			    self_pid, (uint64_t)op);
 			(void)__os_clock_mono(&park_ns);
 		}
-		while (!a.done) {
+		/* Acquire on done pairs with the reaper's release store, so
+		 * a->res below is guaranteed visible once done is set. */
+		while (!__xtc_aio_done_get(&a)) {
 			t->park_requested = 1;
 			atomic_store_explicit(&t->wake_revents, 0,
 			    memory_order_relaxed);
@@ -342,7 +344,9 @@ aio_do_v(int op, int fd, const struct iovec *iov, int iovcnt, int64_t off)
 	if (rc != XTC_OK)
 		return aio_offload_v(op, fd, iov, iovcnt, off);
 
-	while (!a.done) {
+	/* Acquire on done pairs with the reaper's release store (see
+	 * __xtc_aio_done_get), so a.res below is visible once done is set. */
+	while (!__xtc_aio_done_get(&a)) {
 		t->park_requested = 1;
 		atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
 		xtc_yield();

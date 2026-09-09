@@ -66,7 +66,35 @@ typedef struct xtc_aio {
 	uint32_t  len;        /* byte count (scalar ops) */
 	int64_t   off;        /* file offset (ignored for FSYNC) */
 	void     *tag;        /* woken on completion (an xtc_task_t *) */
-	int       done;       /* 0 until the completion is reaped */
+	/*
+	 * 0 until the completion is reaped.  CONCURRENCY CONTRACT: on a
+	 * native completion backend (io_uring / IOCP / kqueue-AIO / Solaris
+	 * ports) the REAPING thread stores this and the PARKED FIBER reads it
+	 * in its wake-recheck loop, so it is a cross-thread flag.
+	 *
+	 * It is deliberately a PLAIN int, not `_Atomic int`, and the library
+	 * accesses it through the __os_atomic_{load,store}_i32 helpers in
+	 * src/inc/os_atomic.h -- which exist precisely for this shape (atomic
+	 * primitives applied to the ADDRESS of plain storage, giving the same
+	 * ordering guarantees as an _Atomic-qualified type while leaving
+	 * ordinary load/store usable on the single-threaded pre-publication
+	 * init path, where xtc_io_aio_submit clears it).
+	 *
+	 * Why not `_Atomic int` (measured, 2026-09):
+	 *   - sizeof/_Alignof/every field offset of xtc_aio_t are IDENTICAL
+	 *     either way (64/8, done@40, res@44, iov@48, iovcnt@56; gcc and
+	 *     clang, x86-64), so layout was NOT the objection.
+	 *   - but `_Atomic` is not valid C++, and this header has no
+	 *     extern "C" guard of its own (xtc.h has one; xtc_io.h is also
+	 *     includable directly).  g++ -std=c++17 compiles this header today
+	 *     and would fail outright with `'_Atomic' does not name a type`.
+	 *     Consumers allocate xtc_aio_t on the stack, so that is a source
+	 *     break for every C++ embedder, in exchange for nothing the
+	 *     helper accesses do not already provide.
+	 * The accessor route gets the well-defined cross-thread access with
+	 * no ABI change and no C++ break.  Do not "upgrade" it.
+	 */
+	int       done;
 	int32_t   res;        /* bytes transferred, or -errno */
 	/* Vectored ops (PREADV / PWRITEV): iov points at the caller's
 	 * iovec array (struct iovec *, kept opaque here to avoid a

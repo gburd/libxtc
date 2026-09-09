@@ -23,6 +23,7 @@
 #if defined(XTC_IO_BACKEND_SIM)
 
 #include "io_int.h"
+#include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
 #include "xtc_aio.h"
 #include <sys/uio.h>
 #include "xtc_sim.h"
@@ -346,7 +347,9 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			 * fault-injected) result computed at submit time and
 			 * wake the parked op. */
 			e->aio->res = e->aio_res;
-			e->aio->done = 1;
+			/* Release: publish res before the flag (uniform with the
+			 * native reapers, even though sim drains in-thread). */
+			__xtc_aio_done_set(e->aio);
 			events[idx].tag = e->aio->tag;
 			events[idx].flags = XTC_IO_AIO;
 			idx++;
@@ -531,7 +534,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	}
 
 	a->res = res;
-	a->done = 1;
+	__xtc_aio_done_set(a);
 	return XTC_OK;
 }
 

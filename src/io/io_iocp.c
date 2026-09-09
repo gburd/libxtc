@@ -91,6 +91,7 @@
 #if defined(XTC_IO_BACKEND_IOCP)
 
 #include "io_int.h"
+#include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
 
 /* winsock2.h MUST precede windows.h on MinGW.  WIN32_NO_STATUS keeps
  * windows.h from defining the STATUS_ macros, then winternl.h supplies
@@ -896,7 +897,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	ov->Offset     = (DWORD)((uint64_t)a->off & 0xFFFFFFFFu);
 	ov->OffsetHigh = (DWORD)((uint64_t)a->off >> 32);
 
-	a->done = 0;
+	a->done = 0;   /* plain: our own thread, before the op is submitted */
 	a->res = 0;
 	if (a->op == XTC_AIO_PREAD)
 		ok = ReadFile(fh, a->buf, (DWORD)a->len, NULL, ov);
@@ -913,7 +914,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		DWORD nb = 0;
 		(void)GetOverlappedResult(fh, ov, &nb, FALSE);
 		a->res = (int)nb;
-		a->done = 1;
+		a->done = 1;   /* plain: synchronous completion, our own thread */
 		__os_free(ov);
 		return XTC_OK;
 	}
@@ -925,7 +926,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 			 * so no completion will arrive on the port.  Finish it
 			 * inline as a zero-byte read. */
 			a->res = 0;
-			a->done = 1;
+			a->done = 1;   /* plain: inline EOF, our own thread */
 			__os_free(ov);
 			return XTC_OK;
 		}
@@ -1143,7 +1144,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				a->res = (int)nbytes;        /* short read at EOF */
 			else
 				a->res = -5;                 /* I/O error (~ -EIO) */
-			a->done = 1;
+			__xtc_aio_done_set(a);   /* release: res, then flag */
 			if (out_idx < max) {
 				events[out_idx].tag = a->tag;
 				events[out_idx].flags = XTC_IO_AIO;
