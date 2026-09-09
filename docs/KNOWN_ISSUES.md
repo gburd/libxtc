@@ -1420,3 +1420,39 @@ and never blocks the loop -- Darwin's POSIX AIO does not reliably
 support SIGEV_KEVENT completion on regular files anyway.  The macOS CI
 job (macos-latest, Apple Silicon) builds and runs the full C suite
 green on every commit.
+
+## pbt-hegel CI job fails on ubuntu-24.04 with no output (OPEN, advisory)
+
+**Status:** OPEN. The job is `continue-on-error: true` so it does not block
+merges; the property tier itself is verified and passing.
+
+The property tier works. All 36 properties across 17 suites build and pass
+under `--with-hegel`, verified locally in several configurations:
+
+- `--with-hegel` via pkg-config (the `nix develop` path);
+- `--with-hegel=PREFIX` with a hand-assembled prefix (header + `.so` copied
+  in), which is exactly what the CI job constructs;
+- with `LD_LIBRARY_PATH` unset, confirming `configure`'s `-Wl,-rpath` for the
+  explicit-prefix case is sufficient;
+- under CI's `-Werror -Wall -Wextra -Wpedantic`, in both the hegel-enabled
+  and default (SKIP-stub) builds.
+
+On the `ubuntu-24.04` runner, `make -C build_pbt tests-pbt` exits **2 with no
+output whatsoever** -- not a compile error, not a property failure, not a SKIP.
+The job now always prints the captured output before deciding (an earlier
+version lost it to `set -e` around `out=$(make ...)`), and there is still
+nothing to print, which suggests make itself fails before running a recipe.
+
+Unverified hypotheses, in the order worth testing:
+
+1. The `Build the library` step and this step disagree about the build
+   directory or a generated file, so make has nothing to do and errors.
+2. Something in the runner image's `make`/`sh` differs enough that the
+   `tests-pbt` recipe's `$$((...))` arithmetic or `case` fails immediately.
+3. The libhegel `.so` fetched by `curl` is fine to link against but the
+   runner's loader rejects it at first use in a way that kills make's
+   subshell without output.
+
+Anyone picking this up: reproduce on an actual ubuntu-24.04 container rather
+than a nix shell, which is where every local attempt succeeded and therefore
+where the difference is invisible.
