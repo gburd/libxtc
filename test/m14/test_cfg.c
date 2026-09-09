@@ -16,6 +16,7 @@
  *	quotes.
  */
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -479,6 +480,205 @@ test_load_parse_variants(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- kind mismatch: every typed get/set must REJECT a wrong-kind name ----
+ *
+ * Each typed getter and setter is generated from DEF_GET / DEF_SET_NUM and
+ * gates on `v && v->kind == K`.  The existing tests only ever call the
+ * accessor matching a variable's real kind, so the FOUND-BUT-WRONG-KIND arm
+ * of all ten macro expansions was never taken -- the branch that stops
+ * xtc_cfg_get_int from reinterpreting a double's bytes as an int.  That is
+ * the whole point of a typed registry, and it was untested.
+ *
+ * One STRING variable serves as the wrong kind for every numeric accessor,
+ * and one INT variable as the wrong kind for the string accessors, so the
+ * pair covers both the macro-generated and the hand-written ones.
+ */
+static MunitResult
+test_kind_mismatch(const MunitParameter p[], void *d)
+{
+	xtc_cfg_spec_t s = { 0 };
+	const char *sv;
+	int64_t i64;
+	double dv;
+	int iv;
+	(void)p; (void)d;
+
+	s.name = "k.str"; s.kind = XTC_CFG_STRING; s.dflt.d_string = "hello";
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "k.int"; s.kind = XTC_CFG_INT; s.dflt.d_int = 7;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+
+	/* Numeric getters on a STRING: found, wrong kind -> XTC_E_INVAL, and
+	 * the out-param is left untouched (no partial write). */
+	iv = -111; i64 = -111; dv = -111.0;
+	munit_assert_int(xtc_cfg_get_bool("k.str", &iv),   ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_int("k.str", &iv),    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_enum("k.str", &iv),   ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_int64("k.str", &i64), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_double("k.str", &dv), ==, XTC_E_INVAL);
+	munit_assert_int(iv, ==, -111);
+	munit_assert_int64(i64, ==, -111);
+	munit_assert_double(dv, ==, -111.0);
+
+	/* Numeric setters on a STRING: rejected, and the string is unharmed. */
+	munit_assert_int(xtc_cfg_set_bool("k.str", 1),     ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_int("k.str", 1),      ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_enum("k.str", 0),     ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_int64("k.str", 1),    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_double("k.str", 1.0), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_string("k.str", &sv), ==, XTC_OK);
+	munit_assert_string_equal(sv, "hello");
+
+	/* And the mirror: string accessors on an INT. */
+	sv = NULL;
+	munit_assert_int(xtc_cfg_get_string("k.int", &sv), ==, XTC_E_INVAL);
+	munit_assert_null(sv);
+	munit_assert_int(xtc_cfg_set_string("k.int", "nope"), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_int("k.int", &iv), ==, XTC_OK);
+	munit_assert_int(iv, ==, 7);   /* untouched */
+
+	munit_assert_int(xtc_cfg_unregister("k.str"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("k.int"), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* ---- unknown name + NULL args on every accessor ----
+ *
+ * The NOT-FOUND arm (v == NULL) is the other half of the same gate, and the
+ * NULL-argument guards are the first line of each accessor.  Cheap to cover,
+ * and they are the arms a typo'd config key hits first.
+ */
+static MunitResult
+test_unknown_and_null(const MunitParameter p[], void *d)
+{
+	xtc_cfg_kind_t k;
+	const char *sv;
+	int64_t i64;
+	double dv;
+	int iv;
+	(void)p; (void)d;
+
+	/* Unknown name: every getter and setter reports it, none crash. */
+	munit_assert_int(xtc_cfg_get_bool("no.such", &iv),   ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_int("no.such", &iv),    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_int64("no.such", &i64), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_double("no.such", &dv), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_enum("no.such", &iv),   ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_string("no.such", &sv), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_bool("no.such", 0),     ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_int("no.such", 0),      ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_int64("no.such", 0),    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_double("no.such", 0.0), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_enum("no.such", 0),     ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_string("no.such", "v"), ==, XTC_E_INVAL);
+	/* NOTE: kind/unregister report XTC_E_INVAL for an unknown name, not
+	 * XTC_E_NOTFOUND -- verified against src/ptc/cfg.c, which initialises
+	 * rc = XTC_E_INVAL and only overwrites it on a hit.  Asserted as-is so
+	 * this test pins the ACTUAL contract; do not "fix" it to NOTFOUND
+	 * without changing the implementation and the header docs together. */
+	munit_assert_int(xtc_cfg_kind("no.such", &k),     ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_unregister("no.such"),   ==, XTC_E_INVAL);
+
+	/* NULL name / NULL out on each accessor. */
+	munit_assert_int(xtc_cfg_get_bool(NULL, &iv),    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_int(NULL, &iv),     ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_int64(NULL, &i64),  ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_double(NULL, &dv),  ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_enum(NULL, &iv),    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_string(NULL, &sv),  ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_bool("x", NULL),    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_int("x", NULL),     ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_int64("x", NULL),   ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_double("x", NULL),  ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_enum("x", NULL),    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_string("x", NULL),  ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_bool(NULL, 0),      ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_int(NULL, 0),       ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_int64(NULL, 0),     ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_double(NULL, 0.0),  ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_enum(NULL, 0),      ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_string(NULL, "v"),  ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_set_string("x", NULL),  ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_kind(NULL, &k),         ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_kind("x", NULL),        ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_unregister(NULL),       ==, XTC_E_INVAL);
+	return MUNIT_OK;
+}
+
+/* ---- unbounded numerics: the min==0 && max==0 "no bounds" short-circuit ----
+ *
+ * __bounds_int_ok / __bounds_dbl_ok treat an all-zero range as "unbounded"
+ * and return early.  The existing tests register explicit bounds, so the
+ * RANGE-CHECKING half ran while the short-circuit -- the default for any spec
+ * that omits min/max, i.e. most real specs -- did not.  Extreme values must
+ * be accepted, which is exactly what distinguishes "no bounds" from
+ * "bounds [0,0]": a [0,0] range would reject every negative.
+ */
+static MunitResult
+test_unbounded(const MunitParameter p[], void *d)
+{
+	xtc_cfg_spec_t s = { 0 };
+	int64_t i64;
+	double dv;
+	int iv;
+	(void)p; (void)d;
+
+	/* min/max left 0 => unbounded. */
+	s.name = "u.int"; s.kind = XTC_CFG_INT;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "u.i64"; s.kind = XTC_CFG_INT64;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "u.dbl"; s.kind = XTC_CFG_DOUBLE;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+
+	/* Extremes accepted in BOTH directions -- a [0,0] range would reject
+	 * the negatives, so this asserts the short-circuit really was taken. */
+	munit_assert_int(xtc_cfg_set_int("u.int", INT_MAX), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_get_int("u.int", &iv), ==, XTC_OK);
+	munit_assert_int(iv, ==, INT_MAX);
+	munit_assert_int(xtc_cfg_set_int("u.int", INT_MIN), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_get_int("u.int", &iv), ==, XTC_OK);
+	munit_assert_int(iv, ==, INT_MIN);
+
+	munit_assert_int(xtc_cfg_set_int64("u.i64", INT64_MAX), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_get_int64("u.i64", &i64), ==, XTC_OK);
+	munit_assert_int64(i64, ==, INT64_MAX);
+	munit_assert_int(xtc_cfg_set_int64("u.i64", INT64_MIN), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_get_int64("u.i64", &i64), ==, XTC_OK);
+	munit_assert_int64(i64, ==, INT64_MIN);
+
+	munit_assert_int(xtc_cfg_set_double("u.dbl", -1e300), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_get_double("u.dbl", &dv), ==, XTC_OK);
+	munit_assert_double(dv, ==, -1e300);
+
+	/* Bool's check is a literal 0-or-1 test, not a bounds range: 2 is out. */
+	memset(&s, 0, sizeof s);
+	s.name = "u.bool"; s.kind = XTC_CFG_BOOL;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_set_bool("u.bool", 2),  ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_set_bool("u.bool", -1), ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_set_bool("u.bool", 1),  ==, XTC_OK);
+
+	/* Enum bounds come from n_enum_labels, not min/max. */
+	memset(&s, 0, sizeof s);
+	s.name = "u.enum"; s.kind = XTC_CFG_ENUM;
+	s.enum_labels = g_levels; s.n_enum_labels = 3;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_set_enum("u.enum", 3),  ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_set_enum("u.enum", -1), ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_set_enum("u.enum", 2),  ==, XTC_OK);
+
+	munit_assert_int(xtc_cfg_unregister("u.int"),  ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("u.i64"),  ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("u.dbl"),  ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("u.bool"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("u.enum"), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/register_basic",   test_register_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/int_bounds",       test_int_bounds,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -490,6 +690,9 @@ static MunitTest tests[] = {
 	{ "/load_file",        test_load_file,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/load_enum_num",    test_load_enum_numeric,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/load_parse_var",   test_load_parse_variants,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/kind_mismatch",    test_kind_mismatch,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/unknown_null",     test_unknown_and_null,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/unbounded",        test_unbounded,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m14/cfg", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
