@@ -23,11 +23,36 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
 
 #include "xtc.h"        /* XTC_E_NOSYS */
 #include "xtc_tnt.h"
+
+#if defined(_WIN32)
+/*
+ * xtc_tnt is POSIX-only: src/orc/tnt.c is wrapped in
+ * `#if !defined(_WIN32)` and its Windows half is a set of XTC_E_NOSYS
+ * stubs (the shard couriers need POSIX socket I/O).  This scenario
+ * needs socketpair(AF_UNIX) and unistd write/read, none of which exist
+ * on Winsock, so the whole driver reduces to the same SKIP the POSIX
+ * build reports when xtc_tnt_start answers XTC_E_NOSYS.  Deciding it
+ * at COMPILE time is what lets test_tnt be part of the MSVC gate:
+ * the source does not even reference <sys/socket.h> there, so it
+ * builds, and it reports 77/SKIP honestly instead of failing to
+ * compile (which a bare `#include <sys/socket.h>` did) or printing
+ * all-zero counters (which is what the old NOSYS runtime check did
+ * only AFTER the includes had already broken the build).
+ */
+int
+main(void)
+{
+	printf("SKIP: xtc_tnt is not supported on this platform "
+	    "(src/orc/tnt.c is POSIX-only; xtc_tnt_start -> XTC_E_NOSYS)\n");
+	return 77;
+}
+#else
+
+#include <unistd.h>
+#include <sys/socket.h>
 
 /* ---- Shared results -------------------------------------------------
  * Written by handlers (on the shard thread) and the driver; read by
@@ -537,3 +562,5 @@ main(void)
 	printf("\nFAIL: scenario did not pass\n");
 	return 1;
 }
+
+#endif /* !_WIN32 */

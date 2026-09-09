@@ -1420,7 +1420,7 @@ test_res: $(srcdir)/../test/m7/test_res.c \
 # M8 tests.
 test_proc: $(srcdir)/../test/m8/test_proc.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
-	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 -I$(srcdir)/../test/include \
 		-o $@ $(srcdir)/../test/m8/test_proc.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 

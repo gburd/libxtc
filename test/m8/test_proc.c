@@ -12,9 +12,14 @@
 #include <time.h>
 #include <unistd.h>
 #include <signal.h>
+#if defined(_WIN32)
+#include <windows.h>          /* GetProcessTimes for the park-CPU check */
+#else
 #include <sys/wait.h>
+#endif
 
 #include "munit.h"
+#include "fd_probe_compat.h"
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_async.h"
@@ -22,6 +27,31 @@
 #include "xtc_mctx.h"
 #include "xtc_int.h"
 #include "xtc_res.h"
+
+/* Process CPU seconds, portably.  POSIX: CLOCK_PROCESS_CPUTIME_ID.
+ * Windows: GetProcessTimes (kernel+user), which IS the clean Win32
+ * equivalent -- so the "a park costs no CPU" proof below runs on
+ * Windows too, where it is worth more than elsewhere (the IOCP backend
+ * has an 8 ms AFD repoll sweep that a regression could turn into a
+ * spin). */
+static double
+test_proc_cpu_secs(void)
+{
+#if defined(_WIN32)
+	FILETIME cr, ex, kt, ut;
+	ULARGE_INTEGER k, u;
+	if (!GetProcessTimes(GetCurrentProcess(), &cr, &ex, &kt, &ut))
+		return 0.0;
+	k.LowPart = kt.dwLowDateTime; k.HighPart = kt.dwHighDateTime;
+	u.LowPart = ut.dwLowDateTime; u.HighPart = ut.dwHighDateTime;
+	return (double)(k.QuadPart + u.QuadPart) / 1e7;   /* 100 ns units */
+#else
+	struct timespec ts;
+	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0)
+		return 0.0;
+	return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+#endif
+}
 
 /* Helper: a "shared" pointer the test main thread uses to read out
  * results from the proc body.  Each test owns its own. */
@@ -228,9 +258,12 @@ mon_watcher(void *arg)
 	struct mon_state *s = arg;
 	void *msg; size_t sz;
 	int rc;
-	struct {
+	XTC_PACK_PUSH
+	struct mon_down {
 		uint8_t kind; uint64_t ref; xtc_pid_t pid; int reason;
-	} __attribute__((packed)) *down;
+	} XTC_PACKED;
+	XTC_PACK_POP
+	struct mon_down *down;
 	xtc_pid_t target_pid;
 	uint64_t ref;
 
@@ -292,8 +325,11 @@ sm_parent(void *arg)
 {
 	struct sm_state *s = arg;
 	void *msg = NULL; size_t sz = 0;
-	struct { uint8_t kind; uint64_t ref; xtc_pid_t pid; int reason; }
-	    __attribute__((packed)) *down;
+	XTC_PACK_PUSH
+	struct sm_down { uint8_t kind; uint64_t ref; xtc_pid_t pid; int reason; }
+	    XTC_PACKED;
+	XTC_PACK_POP
+	struct sm_down *down;
 	xtc_pid_t child;
 	uint64_t ref = 0;
 	if (xtc_proc_spawn_monitor(s->loop, instant_child,
@@ -337,8 +373,11 @@ sl_parent(void *arg)
 	void *msg = NULL; size_t sz = 0;
 	/* Link EXIT signal layout is { kind='E', reason, pid } -- distinct
 	 * from the monitor DOWN { kind='D', ref, pid, reason }. */
-	struct { uint8_t kind; int reason; xtc_pid_t pid; }
-	    __attribute__((packed)) *ex;
+	XTC_PACK_PUSH
+	struct sl_exit { uint8_t kind; int reason; xtc_pid_t pid; }
+	    XTC_PACKED;
+	XTC_PACK_POP
+	struct sl_exit *ex;
 	xtc_pid_t child;
 	if (xtc_proc_spawn_link(s->loop, sl_bad_child,
 	    NULL, NULL, &child) != XTC_OK)
@@ -475,7 +514,7 @@ test_recv_inf_parks(const MunitParameter p[], void *d)
 	xtc_proc_opts_t opts = { 0 };
 	struct inf_state s = { XTC_PID_NONE, 0 };
 	xtc_pid_t sp;
-	struct timespec c0, c1, w0, w1;
+	double c0, c1, w0, w1;
 	double cpu, wall;
 	(void)p; (void)d;
 
@@ -487,15 +526,15 @@ test_recv_inf_parks(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, inf_sender, &s, &opts, &sp),
 	    ==, XTC_OK);
 
-	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c0);
-	clock_gettime(CLOCK_MONOTONIC, &w0);
+	c0 = test_proc_cpu_secs();
+	w0 = (double)xtc_clock_mono() / 1e9;
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	clock_gettime(CLOCK_MONOTONIC, &w1);
-	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c1);
+	w1 = (double)xtc_clock_mono() / 1e9;
+	c1 = test_proc_cpu_secs();
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
-	cpu  = (c1.tv_sec - c0.tv_sec) + (c1.tv_nsec - c0.tv_nsec) / 1e9;
-	wall = (w1.tv_sec - w0.tv_sec) + (w1.tv_nsec - w0.tv_nsec) / 1e9;
+	cpu  = c1 - c0;
+	wall = w1 - w0;
 
 	munit_assert_int(s.got, ==, 1);           /* message delivered */
 	munit_assert_double(wall, >, 0.10);        /* we really waited */
@@ -874,8 +913,11 @@ test_recovery_registry(const MunitParameter p[], void *d)
 	munit_assert_int(g_rec.cb_ran, ==, 1);
 	munit_assert_int(g_rec.lock_released, ==, 1);
 	munit_assert_int(g_rec.mctx_reset, ==, 1);
-	/* The tracked fd was closed: a second close fails with EBADF. */
-	munit_assert_int(close(g_rec.fd), ==, -1);
+	/* The tracked fd was closed: probing it reports "not a live fd".
+	 * NOT a bare `close(fd) == -1` -- on Windows that is fatal (the
+	 * MSVC CRT __fastfail's on an invalid descriptor); see
+	 * test/include/fd_probe_compat.h. */
+	munit_assert_int(xtc_test_fd_is_closed(g_rec.fd), ==, 1);
 	munit_assert_int(g_rec.saw_down, ==, 1);   /* monitor observed it */
 	return MUNIT_OK;
 }
@@ -979,6 +1021,18 @@ esc_faulter(void *arg)
 static MunitResult
 test_fault_escalate(const MunitParameter p[], void *d)
 {
+#if defined(_WIN32)
+	/* fork() has no Win32 equivalent, and the escalation contract is
+	 * observed differently there: the SEH vectored handler returns
+	 * EXCEPTION_CONTINUE_SEARCH so the process dies with
+	 * 0xC0000005.  That half is verified by a dedicated driver on a
+	 * Windows host (see KNOWN_ISSUES.md "Windows fault containment
+	 * (SEH)"), not by this fork-based case.  Skipping ONLY this case
+	 * lets the other ~40 test_proc cases -- including
+	 * /selective_receive -- build and run under MSVC. */
+	(void)p; (void)d;
+	return MUNIT_SKIP;
+#else
 	pid_t pid;
 	int st;
 	(void)p; (void)d;
@@ -1014,6 +1068,7 @@ test_fault_escalate(const MunitParameter p[], void *d)
 	munit_assert_true(WIFSIGNALED(st));
 	munit_assert_true(WTERMSIG(st) == SIGSEGV || WTERMSIG(st) == SIGBUS);
 	return MUNIT_OK;
+#endif /* !_WIN32 */
 }
 
 /* at-exit hooks run LIFO on a normal proc exit. */
@@ -1101,7 +1156,7 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 	xtc_res_set_cap(res, XTC_RES_TASKS,      2 * A1_PROBE_TARGET);
 	xtc_res_set_cap(res, XTC_RES_FDS,        2 * A1_PROBE_TARGET);
 	xtc_res_set_cap(res, XTC_RES_INBOX_MSGS, 2 * A1_PROBE_TARGET);
-	xtc_res_set_cap(res, XTC_RES_MEM_BYTES,  8L * 1024 * 1024 * 1024);
+	xtc_res_set_cap(res, XTC_RES_MEM_BYTES,  8LL * 1024 * 1024 * 1024);
 
 	pids = calloc((size_t)A1_PROBE_TARGET, sizeof *pids);
 	munit_assert_ptr_not_null(pids);

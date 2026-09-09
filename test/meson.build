@@ -43,7 +43,7 @@ munit_tests = [
   # M7
   ['chan', 'm7'], ['chan_mpmc_bcast', 'm7'], ['future', 'm7'],
   # M8
-  ['proc', 'm8'], ['proc_wait_fd', 'm8'], ['recv_correlate', 'm8'],
+  ['proc_wait_fd', 'm8'], ['recv_correlate', 'm8'],
   ['proc_link_race', 'm8'],
   # M9
   ['sync', 'm9'], ['amutex_xloop', 'm9'], ['dio_sched', 'm9'],
@@ -73,13 +73,15 @@ munit_tests = [
   ['tls_basic', 'm18'], ['tls_server', 'm18'], ['tls_client', 'm18'],
 ]
 
-# Tests that additionally need -I test/include (io backends' pipe compat).
+# Tests that additionally need -I test/include (io backends' pipe compat,
+# and m8/test_proc's fd_probe_compat.h).
 io_include_tests = {
   'io_register'    : 'm2',
   'io_events'      : 'm2',
   'io_wakeup'      : 'm2',
   'io_integration' : 'm3',
   'exec'           : 'm5',
+  'proc'           : 'm8',
 }
 
 foreach spec : munit_tests
