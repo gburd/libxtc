@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.41.1
+Version:        1.42.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,12 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Mon Sep 08 2026 Greg Burd <greg@burd.me> - 1.42.0-1
+- tail: new XTC_TAIL_LOOP_POLL event (SCHED source) -- per-loop I/O poll
+  liveness, so "a fiber's park has no matching RUN because its loop
+  stopped" is observable rather than inferred.  Additive enum value at
+  the end (8); existing values unchanged.
+
 * Sun Sep 07 2026 Greg Burd <greg@burd.me> - 1.41.1-1
 - fix(sched): do not report a loop idle while it holds runnable work
   (n_alive counts HOMED tasks, so a foreign-homed task in this loop's
