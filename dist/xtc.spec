@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.42.0
+Version:        1.43.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,18 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Tue Sep 08 2026 Greg Burd <greg@burd.me> - 1.43.0-1
+- tail: XTC_TAIL_WAKE is now EMITTED (was declared-but-unused since Phase
+  1) from the completion-dispatch hook, with detail = the task pointer as
+  a join key.  PARK/WAKE/RUN together localize a lost wakeup to either
+  side of dispatch.  Behaviour change for anyone filtering kind 2.
+- tail: new public xtc_tail_dropped() -- records evicted by ring wrap, so
+  a real zero is distinguishable from an overwritten one.
+- tail: XTC_TAIL_LOOP_POLL is now emitted only for an IDLE poll, and from
+  both the loop and executor poll sites.  It was 87-93% of the ring at 32
+  loops and evicted the events it exists to explain.
+- tools: xtc-tail.py renders kind 8; xtc-procs prints the task pointer.
+
 * Mon Sep 08 2026 Greg Burd <greg@burd.me> - 1.42.0-1
 - tail: new XTC_TAIL_LOOP_POLL event (SCHED source) -- per-loop I/O poll
   liveness, so "a fiber's park has no matching RUN because its loop
