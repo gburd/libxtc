@@ -40,7 +40,6 @@
 #define WORKERS_PER_CLASS 3
 #define ROUNDS_PER_WORKER  50
 
-static atomic_int g_total_runs;
 
 MAYBE_UNUSED static void
 worker(void *arg)
@@ -84,7 +83,6 @@ prop_higher_shares_get_more_cpu(hegel_test_case *tc, void *u)
 	lo = (int)hegel_draw_int(tc, hegel_integers(1, 1000));
 	if (hi < lo) { int t = hi; hi = lo; lo = t; }
 
-	atomic_store(&g_total_runs, 0);
 	hegel_assume(xtc_loop_init(&loop) == XTC_OK);
 	hegel_assume(xtc_exec_class_create(loop, hi, 0, &chi) == XTC_OK);
 	hegel_assume(xtc_exec_class_create(loop, lo, 0, &clo) == XTC_OK);
