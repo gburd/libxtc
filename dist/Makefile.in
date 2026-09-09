@@ -480,7 +480,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_pgmock_smoke \
 		  test_inject_races
 
-TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_scope pbt_slab pbt_chash pbt_cskip pbt_lrlock pbt_lwlock pbt_chan pbt_sim pbt_sched_shares
+TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_scope pbt_slab pbt_chash pbt_cskip pbt_lrlock pbt_lwlock pbt_chan pbt_sim pbt_sched_shares pbt_saga
 
 # -------------------------------------------------------------------------
 # Default goal.
@@ -1025,11 +1025,12 @@ tests-pbt: $(TESTS_PBT)
 	done; \
 	if [ "$$skipped" -gt 0 ]; then \
 		echo "  [PBT] WARNING: $$skipped of $$((skipped+ran)) property suites were"; \
-		echo "        SKIPPED because hegel is not configured, so their"; \
-		echo "        properties are UNVERIFIED by this run.  A green"; \
-		echo "        \`make check\` does NOT mean the properties hold --"; \
-		echo "        configure --with-hegel=PATH to actually check them."; \
-		echo "        (See docs/adr/0002-hegel-pbt-first-class.md.)"; \
+		echo "        SKIPPED, so their properties are UNVERIFIED by this run."; \
+		echo "        A green \`make check\` does NOT mean the properties hold."; \
+		echo "        This tier is currently DORMANT: --with-hegel targets the"; \
+		echo "        deprecated hegel-c API whose server protocol was removed"; \
+		echo "        upstream, so NO --with-hegel=PATH makes these run today."; \
+		echo "        (See docs/adr/0002-hegel-pbt-first-class.md, section Dormancy.)"; \
 	else \
 		echo "  [PBT] OK: all $$ran property suite(s) actually ran"; \
 	fi
@@ -1853,6 +1854,9 @@ pbt_sim: $(srcdir)/../test/pbt/pbt_sim.c $(STATIC_LIB)
 
 pbt_sched_shares: $(srcdir)/../test/pbt/pbt_sched_shares.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_sched_shares.c $(PBT_LIBS)
+
+pbt_saga: $(srcdir)/../test/pbt/pbt_saga.c $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_saga.c $(PBT_LIBS)
 
 pbt_slab: $(srcdir)/../test/pbt/pbt_slab.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_slab.c $(PBT_LIBS)
