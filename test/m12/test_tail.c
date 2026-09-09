@@ -11,9 +11,13 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <time.h>
 
 #include "munit.h"
 #include "xtc.h"
+#include "xtc_io.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_tail.h"
@@ -255,12 +259,150 @@ test_tail_msg(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * fd-readiness park: a fiber parked in xtc_proc_wait_fd must produce a
+ * balanced XTC_TAIL_PARK / XTC_TAIL_RUN pair whose PARK detail is the fd.
+ *
+ * This is the regression guard for the hook added to xtc_proc_wait_fd: the
+ * fd park is the one nearly every real workload blocks in (xtc_net,
+ * xtc_blocking_run's completion pipe, the osproc pidfd reap), and before the
+ * hook a fiber stranded there emitted NO events, so the tail timeline could
+ * not see the very park a consumer was chasing.
+ *
+ * Note it asserts PARK == RUN (balance), not just PARK >= 1: an unbalanced
+ * pair is precisely the "lost wakeup" signature the pair exists to expose,
+ * so a hook that emitted only one half would be worse than none.
+ */
+struct wfd_ctx { int rfd; int rc; uint32_t revents; };
+
+static void
+wfd_waiter(void *a)
+{
+	struct wfd_ctx *c = a;
+	c->rc = xtc_proc_wait_fd(c->rfd, XTC_IO_READABLE,
+	    2000LL * 1000 * 1000, &c->revents);
+}
+
+static void *
+wfd_writer(void *a)
+{
+	int wfd = (int)(intptr_t)a;
+	struct timespec ts = { 0, 40LL * 1000 * 1000 };   /* 40ms */
+	ssize_t wr;
+	nanosleep(&ts, NULL);
+	wr = write(wfd, "x", 1);
+	(void)wr;
+	return NULL;
+}
+
+/* Collect PARK/RUN for the fd park, keeping the PARK detail so the test can
+ * prove the fd made it into the record (not just that some park happened). */
+struct fdpark { int park; int run; int park_detail_is_fd; uint64_t run_latency; };
+
+static int
+fdpark_cb(const xtc_tail_rec_t *r, void *user)
+{
+	struct fdpark *f = user;
+	if (r->source != XTC_TAIL_SCHED) return 0;
+	if (r->kind == XTC_TAIL_PARK) {
+		f->park++;
+		if ((int)r->detail == f->park_detail_is_fd)
+			f->park_detail_is_fd = -1;   /* matched: latch it */
+	}
+	if (r->kind == XTC_TAIL_RUN) {
+		f->run++;
+		f->run_latency = r->detail;
+	}
+	return 0;
+}
+
+static MunitResult
+test_tail_park_fd(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct wfd_ctx c;
+	struct fdpark f;
+	int pipefd[2];
+	pthread_t writer;
+	(void)p; (void)d;
+
+	munit_assert_int(pipe(pipefd), ==, 0);
+	memset(&c, 0, sizeof c);
+	c.rfd = pipefd[0];
+	c.rc = -12345;
+
+	(void)xtc_tail_reset();
+	(void)xtc_tail_enable(XTC_TAIL_SCHED);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, wfd_waiter, &c, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(pthread_create(&writer, NULL, wfd_writer,
+	    (void *)(intptr_t)pipefd[1]), ==, 0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(pthread_join(writer, NULL), ==, 0);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	/* The park really happened and really woke on the fd (not a timeout):
+	 * without this the tail assertions below could pass vacuously. */
+	munit_assert_int(c.rc, ==, XTC_OK);
+	munit_assert_uint(c.revents & XTC_IO_READABLE, ==, XTC_IO_READABLE);
+
+	memset(&f, 0, sizeof f);
+	f.park_detail_is_fd = pipefd[0];
+	munit_assert_int(xtc_tail_read(fdpark_cb, &f), ==, XTC_OK);
+	munit_assert_int(f.park, ==, 1);           /* exactly the one fd park */
+	munit_assert_int(f.run,  ==, f.park);      /* pairs balance */
+	munit_assert_int(f.park_detail_is_fd, ==, -1);   /* detail carried the fd */
+	/* 40ms of real off-CPU time must show up as a nonzero latency. */
+	munit_assert_uint64(f.run_latency, >, 1000000ULL);   /* > 1ms */
+
+	close(pipefd[0]); close(pipefd[1]);
+	xtc_tail_disable();
+	return MUNIT_OK;
+}
+
+/* A disabled tail must not record the fd park either -- the gate is what
+ * keeps the clock read (a determinism-guard tripwire on the sim-reachable
+ * wait_fd path) out of the default build. */
+static MunitResult
+test_tail_park_fd_disabled(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct wfd_ctx c;
+	int pipefd[2];
+	pthread_t writer;
+	(void)p; (void)d;
+
+	munit_assert_int(pipe(pipefd), ==, 0);
+	memset(&c, 0, sizeof c);
+	c.rfd = pipefd[0];
+
+	(void)xtc_tail_reset();
+	xtc_tail_disable();
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, wfd_waiter, &c, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(pthread_create(&writer, NULL, wfd_writer,
+	    (void *)(intptr_t)pipefd[1]), ==, 0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(pthread_join(writer, NULL), ==, 0);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	munit_assert_int(c.rc, ==, XTC_OK);        /* the park did happen */
+	munit_assert_size(xtc_tail_count(), ==, 0);   /* and recorded nothing */
+
+	close(pipefd[0]); close(pipefd[1]);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/sched",        test_tail_sched,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/disabled",     test_tail_disabled,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/dump",         test_tail_dump,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/msg",          test_tail_msg,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wake_latency", test_tail_wake_latency, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/park_fd",      test_tail_park_fd,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/park_fd_off",  test_tail_park_fd_disabled, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m12/tail", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

@@ -2162,6 +2162,8 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	int had_timer = 0;
 	int had_fd = 0;
 	xtc_loop_t *wl = NULL;   /* the loop this fiber runs on (not its home) */
+	int tail_sched = 0;      /* xtc_tail SCHED enabled? (gates the clock) */
+	int64_t park_ns = 0;     /* park instant, for the park->run latency */
 
 	if (out_revents == NULL || fd < 0 || interest == 0) return XTC_E_INVAL;
 	if (self == NULL) return XTC_E_INVAL;
@@ -2249,11 +2251,44 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	self->waker_armed = 1;
 	(void) __proc_mtx_unlock(&self->mbox_lock);
 
+	/*
+	 * xtc_tail SCHED: record the readiness park and, on resume, the
+	 * park->run latency.  This is the fd-readiness off-CPU window, and it
+	 * is the one a consumer chasing a strand most often lands on: every
+	 * xtc_net accept/read/write, xtc_blocking_run's completion pipe, the
+	 * osproc pidfd reap, the tnt connector and xtc_accel_wait_fence all
+	 * park HERE.  Without the hook, a fiber stranded on an fd produced NO
+	 * park/run events at all -- xtc-procs would show it as park=fd while
+	 * the tail timeline stayed empty, which is exactly the ambiguity the
+	 * PARK/RUN pair exists to remove.
+	 *
+	 * PARK detail = the fd, so a timeline can be joined against the
+	 * xtc-procs park_fd column and against the fd in an strace/ss dump.
+	 * RUN detail = the park->run latency in ns (the kind's fixed meaning).
+	 *
+	 * Gated on the source being enabled: a disabled tail is one relaxed
+	 * load + branch and reads NO clock.  That gate is not merely about
+	 * cost -- xtc_proc_wait_fd is sim-reachable (io_sim.c), and an
+	 * unconditional real-clock read on a sim-reachable path is a
+	 * determinism-guard violation.
+	 */
+	tail_sched = __xtc_tail_on(XTC_TAIL_SCHED);
+	if (tail_sched) {
+		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_PARK, self->pid,
+		    (uint64_t)(uint32_t)fd);
+		(void)__os_clock_mono(&park_ns);
+	}
 	__xtc_trace_causal(XTC_CAUSAL_PARK_FD, __func__);
 	xtc_yield();
 	/* Restore __current_proc -- another fiber may have clobbered it. */
 	__current_proc = self;
 	__xtc_trace_causal(XTC_CAUSAL_RESUME, __func__);
+	if (tail_sched) {
+		int64_t run_ns = 0;
+		(void)__os_clock_mono(&run_ns);
+		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_RUN, self->pid,
+		    (uint64_t)(run_ns > park_ns ? run_ns - park_ns : 0));
+	}
 
 	(void) __proc_mtx_lock(&self->mbox_lock);
 	self->waker_armed = 0;

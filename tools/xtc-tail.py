@@ -44,6 +44,11 @@ DETAIL = {
     "EXIT": "reason", "RUN": "park->run ns", "SEND": "bytes",
     "RECV": "bytes", "MBOX_HWM": "peak depth",
     "LOOP_POLL": "events dispatched",
+    # PARK's detail is source-dependent: the fd for an xtc_proc_wait_fd
+    # readiness park, the aio opcode for a native async-file park, 0 for a
+    # mailbox recv park.  Label it neutrally rather than guess.
+    "PARK": "fd/op",
+    "WAKE": "task",
 }
 
 
