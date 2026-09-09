@@ -1,14 +1,18 @@
 # ADR-0002: Hegel-c property-based tests as a first-class layer
 
-- **Status:** Accepted (M3 retrofit; carried forward from M4 onward).
-- **Date:** 2026-05-25.
+- **Status:** Accepted, but **DORMANT since 2026-09** -- the upstream API
+  this ADR builds on was replaced and the tier cannot run.  See
+  "Dormancy" below.  The decision itself (properties are first-class) is
+  NOT reversed; only its implementation is stalled.
+- **Date:** 2026-05-25 (dormancy recorded 2026-09-09).
 - **Supersedes:** --
 - **Related:** [`0001-test-first-claim-driven.md`](0001-test-first-claim-driven.md).
 
 ## Context
 
 `PLAN.md` (S)7.2 commits the project to property-based tests via
-[hegel-c](https://github.com/gburd/hegel-c) for every concurrency
+[hegel-c](https://github.com/gburd/hegel-c) (**now deprecated and
+read-only** -- see "Dormancy") for every concurrency
 primitive: MPSC ordering, mailbox selective receive, deque
 linearizability, timer monotonicity, supervisor restart intensity,
 future combinators, allocator ownership, RCU, LRLock, and `xtc_cfg`.
@@ -29,6 +33,11 @@ test/pbt/
 |--- pbt_timer.c         M3 timer subsystem
 \--- pbt_run_queue.c     M3 task run queue
 ```
+
+(That was the M3 shape.  The tree has since grown to 17 suites --
+async, chan, chash, cskip, deque, lrlock, lwlock, proc, saga,
+sched_shares, scope, sim, slab in addition to the four above -- carrying
+36 property definitions in total.)
 
 Each milestone's `M*_CLAIMS.md` table now has explicit PBT-tagged
 rows alongside the munit unit-test rows.  The doctrine from ADR-0001
@@ -109,7 +118,77 @@ properties before they can ship.
 - [x] M3 timer: 1 property (`random_timers` -- fires once, in order, cancels respected)
 - [x] M3 run queue: 1 property (`each_task_runs_target_times`)
 - [x] All PBT binaries integrated into `make check` via `tests-pbt`
-- [x] Total: 8 hegel properties, 660 generated examples per run
+- [x] Total: 36 property definitions across 17 suites (measured 2026-09-09
+      by summing what each binary prints at runtime).  **All 36 are
+      currently UNVERIFIED** -- see "Dormancy" below.  Earlier revisions of
+      this ADR and of `README.md` quoted 8 and 23; both were stale counts
+      that grew without being re-measured.
+- [x] `pbt_saga` wired into `TESTS_PBT` (2026-09-09).  It had been written
+      in `2f05478` but never added to the build list, so its 1 property was
+      neither compiled nor counted -- an orphaned suite is indistinguishable
+      from a passing one, which is the same failure mode as a silently
+      skipped property.
+
+## Dormancy (recorded 2026-09-09)
+
+The tier does not run, and cannot, as written.  Recorded here because an
+ADR that keeps asserting a dead mechanism works is worse than no ADR.
+
+**What broke.**  This ADR is built on
+[gburd/hegel-c](https://github.com/gburd/hegel-c), whose model is a
+*client that forks a server*: `hegel_session_new()` pipes to a `hegel`
+subprocess (located via `HEGEL_SERVER_COMMAND` or `PATH`), then drives
+properties with `hegel_run_test()` / `hegel_test_fn` /
+`HEGEL_DEFAULT_SETTINGS`.  That repository is now deprecated and
+read-only, and its socket protocol was removed upstream.  Worse, the two
+halves never actually interoperated: the client speaks the removed socket
+protocol while `hegel-core`'s `hegel` binary speaks stdio, so every PBT
+skipped at runtime even on a machine that had both installed.  Verified
+directly on 2026-09-09: with `--with-hegel` pointed at a locally built
+hegel-c, `configure` accepts it and the suites *link*, then fail at
+`hegel: handshake failed (error -2)` -> `cannot start hegel session`.  So
+the SKIP was never merely "hegel not installed"; the mechanism was
+non-functional.
+
+**The replacement.**  [hegeldev/hegel-rust](https://github.com/hegeldev/hegel-rust)
+ships `libhegel`, a pure **in-process C-ABI shared library**: generation,
+shrinking, and the example database all live inside the `.so`.  There is
+no subprocess, no socket, and nothing to put on `PATH`.  Its shape is a
+context/run model rather than a session/test-fn model:
+`hegel_context_new` -> `hegel_run_start` -> `hegel_next_test_case` ->
+`hegel_mark_complete` -> `hegel_run_result`, with explicit paired frees
+for every handle.
+
+**What reviving it costs.**  Not a flake edit -- a harness rewrite:
+
+1. Rewrite `test/pbt/pbt_common.h` from the session/server model to the
+   context/run model.  This is the bulk of the work; the 36 property
+   bodies themselves are mostly portable since they are ordinary C using
+   `hegel_assume`, but the driver, settings, and result reporting all
+   change shape.
+2. Change `dist/configure.ac`: `--with-hegel=PATH` currently expects a
+   hegel-c *source root* containing `include/hegel/hegel.h` and
+   `build/libhegel.{a,so}`, and probes for `libcbor`/`libz`.  libhegel
+   needs neither of those transitive deps and installs a flat
+   `include/hegel.h` + `lib/libhegel.so`.  `--with-hegel-server=CMD`
+   becomes meaningless and should be retired.
+3. Add the library to `flake.nix`.  **A working model already exists**:
+   `~/ws/lime/flake.nix` consumes libhegel **0.36.5** as pinned prebuilt
+   release artifacts (`libhegel-<os>-<arch>` plus `hegel.h`), one
+   `fetchurl` hash per platform, with `patchelf` fixing the soname and a
+   generated `hegel.pc` so meson's `dependency('hegel', required: false)`
+   resolves.  It deliberately avoids `rustPlatform.buildRustPackage`
+   because that fetches ~140 crates at build time and breaks offline
+   `nix develop`.  Copy that derivation rather than re-deriving it.
+
+**Interim posture.**  The SKIP is deliberately LOUD and stays that way:
+each suite prints `N properties unverified` and `tests-pbt` prints a
+summary warning that a green `make check` does not mean the properties
+hold.  That is the honest state.  `README.md` was corrected on 2026-09-09
+to stop counting the properties as coverage; it had reported them as
+delivered test coverage, which was the actual integrity problem -- a
+skipped property that is *counted* is worse than one that is absent,
+because it inflates confidence rather than merely failing to add to it.
 
 Future milestones must add their PBT rows in the same step as
 their unit-test rows, per ADR-0001.

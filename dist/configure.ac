@@ -634,13 +634,26 @@ AC_SUBST([XTC_TLS_LIBS])
 
 # -------------------------------------------------------------------------
 # Optional: hegel-c property-based testing.
-# When enabled, links the PBT suite against the local hegel-c library
-# and forwards HEGEL_SERVER_COMMAND through `make check` so the
-# subprocess can find the hegel server.
+#
+# DORMANT as of 2026-09: this targets the DEPRECATED gburd/hegel-c client
+# API (a forked `hegel` server subprocess spoken to over pipes).  That
+# repository is read-only and its socket protocol was removed upstream, and
+# the client's socket protocol never interoperated with hegel-core's stdio
+# one -- so even a correctly-pointed --with-hegel links successfully and
+# then dies at "hegel: handshake failed (error -2)".  There is no PATH that
+# makes this flag work today.  Reviving the tier means porting
+# test/pbt/pbt_common.h to hegeldev/hegel-rust's in-process libhegel
+# (context/run model, no subprocess) and reworking the probe below, which
+# needs neither libcbor nor libz.  See
+# docs/adr/0002-hegel-pbt-first-class.md ("Dormancy") for the full path.
+#
+# Left in place rather than deleted so the 36 existing property
+# definitions keep compiling under the SKIP stub, and so the flag fails
+# with an explanation instead of vanishing.
 # -------------------------------------------------------------------------
 AC_ARG_WITH([hegel],
   [AS_HELP_STRING([--with-hegel=PATH],
-    [Enable hegel-c property-based tests; PATH is the hegel-c source root that contains include/hegel/hegel.h and build/libhegel.{a,so}.])],
+    [DORMANT/NON-FUNCTIONAL: targets the deprecated hegel-c API whose server protocol was removed upstream; links but fails at handshake. PATH is the hegel-c source root containing include/hegel/hegel.h and build/libhegel.{a,so}. See docs/adr/0002-hegel-pbt-first-class.md.])],
   [xtc_with_hegel=$withval], [xtc_with_hegel=no])
 
 AC_MSG_CHECKING([whether to build hegel-c property tests])
@@ -698,7 +711,7 @@ AC_SUBST([XTC_HEGEL_PBT],    [$xtc_hegel_pbt])
 
 AC_ARG_WITH([hegel-server],
   [AS_HELP_STRING([--with-hegel-server=CMD],
-    [Override how the test harness launches the hegel server (default: "hegel" on PATH).])],
+    [DORMANT: names the hegel server subprocess the deprecated hegel-c client forks (default: "hegel" on PATH).  The replacement libhegel is in-process and has no server, so this flag will be retired when the tier is revived.])],
   [xtc_hegel_server=$withval], [xtc_hegel_server=hegel])
 AC_SUBST([XTC_HEGEL_SERVER_COMMAND], [$xtc_hegel_server])
 

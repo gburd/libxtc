@@ -196,9 +196,17 @@ What's working today:
 | L5 PG adapter | Designed; not yet implemented. |
 | TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/M_TLS_MATRIX.md`); SChannel (Windows) is compile-only. |
 
-Test coverage today: **480+ munit test cases + 23 hegel-c property
-tests on Linux** (the munit total spans the L0-L4 suites plus the 35
-OTP/gen_server cases), clean under AddressSanitizer and UBSan in CI.
+Test coverage today: **610 munit test cases on Linux**, clean under
+AddressSanitizer and UBSan in CI.  The property-based tier is a separate
+matter: **36 hegel property definitions exist across 17 suites, and all 36
+are currently UNVERIFIED** -- they cannot run against any released hegel,
+because the `hegel-c` client API they are written against (a forked server
+process spoken to over pipes) is deprecated upstream and its socket
+protocol has been removed.  `make check` prints a loud per-suite SKIP and
+a summary warning rather than passing silently, so a green run does NOT
+mean those properties hold.  See
+[ADR-0002](docs/adr/0002-hegel-pbt-first-class.md) for the reason and the
+revival path; do not count the 36 as coverage until that lands.
 GitHub CI also runs the full C munit suite on **macOS** (Apple Silicon:
 kqueue + ucontext + GCD dispatch semaphores) and an **MSVC** xtc.lib +
 smoke build on **Windows** every commit.  FreeBSD 15 (clang, kqueue)
@@ -258,7 +266,7 @@ Configure flags worth knowing:
 | `--with-io-backend=AUTO` | Pick io_uring, epoll, kqueue, IOCP, poll, select; defaults are sensible per-OS |
 | `--with-tls=openssl|none|auto` | Build TLS support (OpenSSL only today) |
 | `--with-liburing=PATH` | Use a specific liburing install |
-| `--with-hegel=PATH` | Enable property-based tests via the hegel-c framework |
+| `--with-hegel=PATH` | Property-based tests.  **Currently non-functional** -- targets the deprecated `hegel-c` API; see [ADR-0002](docs/adr/0002-hegel-pbt-first-class.md) |
 
 The meson build (`meson.build` + `meson_options.txt`) is at parity with
 the autotools build: it compiles the full static (and, with
