@@ -310,8 +310,13 @@ class XtcProcs(gdb.Command):
         want = None
         if arg.strip():
             want = int(gdb.parse_and_eval(arg.strip()))
-        hdr = "%-18s %-10s %5s %5s %5s %-18s %s" % (
-            "proc", "pid", "mbox", "peak", "save", "state", "lnk/mon")
+        # `task` is printed because XTC_TAIL_WAKE records the dispatched
+        # task POINTER in its detail field (dispatch has a task, not a
+        # proc).  Without this column there is no way to turn a WAKE
+        # event back into a pid.
+        hdr = "%-18s %-10s %-18s %5s %5s %5s %-18s %s" % (
+            "proc", "pid", "task", "mbox", "peak", "save", "state",
+            "lnk/mon")
         print(hdr)
         total = 0
         for loop, tbl in _loop_tables():
@@ -321,8 +326,8 @@ class XtcProcs(gdb.Command):
                 total += 1
                 links = _list_len(p["links"])
                 mons = _list_len(p["monitors"])
-                print("%-18s %-10s %5d %5d %5d %-18s %d/%d%s"
-                      % (str(p), _pid_str(p["pid"]),
+                print("%-18s %-10s %-18s %5d %5d %5d %-18s %d/%d%s"
+                      % (str(p), _pid_str(p["pid"]), str(p["task"]),
                          int(p["mbox_n"]), int(p["mbox_peak"]),
                          int(p["mbox_saved"]), _proc_state(p),
                          links, mons,

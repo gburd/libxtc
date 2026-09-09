@@ -47,7 +47,23 @@
 enum xtc_tail_kind {
 	XTC_TAIL_SPAWN    = 0,   /* a proc was spawned */
 	XTC_TAIL_EXIT     = 1,   /* a proc exited (detail = reason) */
-	XTC_TAIL_WAKE     = 2,   /* a parked proc was woken (armed) */
+	XTC_TAIL_WAKE     = 2,   /* an I/O completion was DISPATCHED to a task
+	                          * (the waker side).  pid.loop_id is the
+	                          * DISPATCHING loop; local_id/gen are 0
+	                          * because dispatch has a task, not a proc.
+	                          * detail = the xtc_task_t * as an integer,
+	                          * which is the join key: match it against
+	                          * the `task` column of xtc-procs (or the
+	                          * XTC_TAIL_PARK emitted by the same fiber,
+	                          * whose detail carries its own task pointer
+	                          * for aio parks).
+	                          *
+	                          * This is the event that separates "the wake
+	                          * was never generated" from "the wake was
+	                          * generated and the task still never ran":
+	                          * a WAKE for task T with no following RUN
+	                          * for T's pid means dispatch DID run and the
+	                          * loss is after it. */
 	XTC_TAIL_RUN      = 3,   /* a proc began running after a wake
 	                          * (detail = wake-to-run latency, ns) */
 	XTC_TAIL_PARK     = 4,   /* a proc parked (blocked on recv/timer/fd) */

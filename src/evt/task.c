@@ -8,6 +8,8 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_tail.h"     /* SCHED: dispatch (WAKE) hook */
+#include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on */
 #include "loop_int.h"
 
 #include <stdint.h>
@@ -434,6 +436,27 @@ __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev)
 	if (t->park_fd >= 0) {
 		(void)xtc_io_del_fd(loop->io, t->park_fd);
 		t->park_fd = -1;
+	}
+	/*
+	 * xtc_tail SCHED: record the DISPATCH itself, keyed by the task
+	 * pointer.  A PARK-without-RUN tells you a fiber was never resumed but
+	 * not whether its wake was ever generated; this closes that gap from
+	 * the waker side.  A WAKE for task T with no subsequent RUN for T
+	 * means dispatch ran and the loss is downstream of it; no WAKE at all
+	 * means the completion never reached dispatch.
+	 *
+	 * pid carries the DISPATCHING loop id only -- dispatch has a task and
+	 * there is no task-to-proc back pointer, so the task pointer goes in
+	 * detail as the join key (match it against xtc-procs' task column, or
+	 * against the task pointer an aio PARK records).  Gated, so a disabled
+	 * tail is one branch.
+	 */
+	if (__xtc_tail_on(XTC_TAIL_SCHED)) {
+		xtc_pid_t lp;
+		memset(&lp, 0, sizeof lp);
+		lp.loop_id = (uint16_t)(loop->exec_id >= 0 ? loop->exec_id : 0);
+		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_WAKE, lp,
+		    (uint64_t)(uintptr_t)t);
 	}
 	w.loop = loop;
 	w.task = t;
