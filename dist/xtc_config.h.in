@@ -73,7 +73,7 @@
 /* Define to 1 if <execinfo.h> backtrace() is available */
 #undef XTC_HAVE_EXECINFO
 
-/* hegel-c property tests enabled */
+/* hegel property tests enabled */
 #undef XTC_HAVE_HEGEL
 
 /* Define to 1 if libdrm is available (optional enhancement for the accel
