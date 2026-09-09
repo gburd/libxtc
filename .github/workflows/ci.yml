@@ -168,30 +168,33 @@ jobs:
         run: |
           mkdir -p build_pbt && cd build_pbt
           ../dist/configure --with-tls=auto --with-hegel="$HOME/hegel"
-      - name: Build
+      - name: Build the library
         run: make -C build_pbt -j"$(nproc)"
       - name: Run every property suite (zero SKIPs allowed)
         run: |
           set -eu
-          cd build_pbt
-          fail=0
-          skipped=0
-          ran=0
-          for t in $(ls pbt_* 2>/dev/null | grep -v '\.'); do
-            out=$(LD_LIBRARY_PATH="$HOME/hegel/lib" ./"$t" 2>&1) || fail=1
-            printf '%s\n' "$out"
-            case "$out" in *SKIP*) skipped=1 ;; esac
-            ran=$((ran + 1))
-          done
-          echo "--- ran $ran suite(s) ---"
-          # A SKIP here means the tier silently stopped verifying, which is
-          # the exact failure this job exists to catch.  Treat it as fatal.
-          if [ "$skipped" -ne 0 ]; then
-            echo "FAIL: a property suite SKIPPED in the hegel-enabled job"
-            exit 1
-          fi
-          [ "$ran" -gt 0 ] || { echo "FAIL: no pbt binaries found"; exit 1; }
-          exit "$fail"
+          # `tests-pbt` is the real target: it BUILDS $(TESTS_PBT) and runs
+          # each one.  An earlier version of this job ran only `make` and
+          # then globbed for pbt_* binaries, which do not exist until this
+          # target builds them -- the job's own "no pbt binaries found"
+          # guard caught that, which is what the guard is for.
+          out=$(make -C build_pbt tests-pbt 2>&1)
+          printf '%s\n' "$out"
+          # In a hegel-ENABLED build a SKIP means the tier silently stopped
+          # verifying -- the exact rot this job exists to catch -- so it is
+          # fatal here even though `make check` only warns.
+          case "$out" in
+            *SKIP*)
+              echo "FAIL: a property suite SKIPPED in the hegel-enabled job"
+              exit 1 ;;
+          esac
+          # And prove work actually happened, so a build-system change that
+          # empties TESTS_PBT cannot pass as vacuous success.
+          case "$out" in
+            *"property suite(s) actually ran"*) ;;
+            *) echo "FAIL: tests-pbt did not report any suite running"
+               exit 1 ;;
+          esac
 
   sim-dst:
     # Deterministic Simulation Testing: build with the sim I/O backend
