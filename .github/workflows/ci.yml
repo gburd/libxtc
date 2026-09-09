@@ -134,6 +134,65 @@ jobs:
           grep -E 'define XTC_HAVE_(BUILTIN_UNWIND|LIBUNWIND) 1' build_musl/xtc_config.h \
             || echo "  (stub backtrace -- toolchain did not link an unwinder in the probe)"
 
+  pbt-hegel:
+    # Property-based tests against libhegel (hegeldev/hegel-rust), the
+    # in-process C-ABI engine.  This job exists because the tier ROTTED
+    # SILENTLY once already: it targeted the deprecated gburd/hegel-c
+    # server API, never actually ran, and every property SKIPPED at
+    # runtime for the tier's whole life while README counted 23 of them as
+    # coverage.  Nothing in CI executed a single property, so nothing
+    # noticed.  A tier that is only exercised locally is a tier that will
+    # rot again -- this makes "the 36 properties still pass" a merge gate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make autoconf pkg-config libssl-dev liburing-dev gawk
+      - name: Fetch libhegel (upstream prebuilt release artifact)
+        run: |
+          set -eu
+          V=0.36.5
+          B="https://github.com/hegeldev/hegel-rust/releases/download/v$V"
+          mkdir -p "$HOME/hegel/include" "$HOME/hegel/lib"
+          curl -fsSL "$B/hegel.h" -o "$HOME/hegel/include/hegel.h"
+          curl -fsSL "$B/libhegel-linux-amd64.so" \
+               -o "$HOME/hegel/lib/libhegel.so"
+          chmod 755 "$HOME/hegel/lib/libhegel.so"
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure with --with-hegel
+        run: |
+          mkdir -p build_pbt && cd build_pbt
+          ../dist/configure --with-tls=auto --with-hegel="$HOME/hegel"
+      - name: Build
+        run: make -C build_pbt -j"$(nproc)"
+      - name: Run every property suite (zero SKIPs allowed)
+        run: |
+          set -eu
+          cd build_pbt
+          fail=0
+          skipped=0
+          ran=0
+          for t in $(ls pbt_* 2>/dev/null | grep -v '\.'); do
+            out=$(LD_LIBRARY_PATH="$HOME/hegel/lib" ./"$t" 2>&1) || fail=1
+            printf '%s\n' "$out"
+            case "$out" in *SKIP*) skipped=1 ;; esac
+            ran=$((ran + 1))
+          done
+          echo "--- ran $ran suite(s) ---"
+          # A SKIP here means the tier silently stopped verifying, which is
+          # the exact failure this job exists to catch.  Treat it as fatal.
+          if [ "$skipped" -ne 0 ]; then
+            echo "FAIL: a property suite SKIPPED in the hegel-enabled job"
+            exit 1
+          fi
+          [ "$ran" -gt 0 ] || { echo "FAIL: no pbt binaries found"; exit 1; }
+          exit "$fail"
+
   sim-dst:
     # Deterministic Simulation Testing: build with the sim I/O backend
     # and run the multi-loop deterministic scheduler + cross-loop
