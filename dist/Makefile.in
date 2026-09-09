@@ -38,7 +38,6 @@ LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@ @XTC_TLS_LIBS@ @XTC_LIBUNWIN
 XTC_HEGEL_CFLAGS = @XTC_HEGEL_CFLAGS@
 XTC_HEGEL_LIBS	 = @XTC_HEGEL_LIBS@
 XTC_HEGEL_PBT	 = @XTC_HEGEL_PBT@
-XTC_HEGEL_SERVER_COMMAND = @XTC_HEGEL_SERVER_COMMAND@
 XTC_TLS_BACKEND	 = @XTC_TLS_BACKEND@
 XTC_TLS_LIBS	 = @XTC_TLS_LIBS@
 XTC_ENABLE_SHARED = @XTC_ENABLE_SHARED@
@@ -1015,8 +1014,8 @@ tests-pbt: $(TESTS_PBT)
 	@skipped=0; ran=0; \
 	for t in $(TESTS_PBT); do \
 		echo "running PBT: $$t"; \
-		out=$$(HEGEL_SERVER_COMMAND="$(XTC_HEGEL_SERVER_COMMAND)" \
-		    ./$$t 2>&1) || { printf '%s\n' "$$out"; exit 1; }; \
+		out=$$(./$$t 2>&1) || \
+		    { printf '%s\n' "$$out"; exit 1; }; \
 		printf '%s\n' "$$out"; \
 		case "$$out" in \
 		*SKIP*) skipped=$$((skipped+1)) ;; \
@@ -1027,10 +1026,9 @@ tests-pbt: $(TESTS_PBT)
 		echo "  [PBT] WARNING: $$skipped of $$((skipped+ran)) property suites were"; \
 		echo "        SKIPPED, so their properties are UNVERIFIED by this run."; \
 		echo "        A green \`make check\` does NOT mean the properties hold."; \
-		echo "        This tier is currently DORMANT: --with-hegel targets the"; \
-		echo "        deprecated hegel-c API whose server protocol was removed"; \
-		echo "        upstream, so NO --with-hegel=PATH makes these run today."; \
-		echo "        (See docs/adr/0002-hegel-pbt-first-class.md, section Dormancy.)"; \
+		echo "        Configure with --with-hegel to run them: libhegel is"; \
+		echo "        provided by \`nix develop\`, or install it from"; \
+		echo "        hegeldev/hegel-rust and it is found via pkg-config."; \
 	else \
 		echo "  [PBT] OK: all $$ran property suite(s) actually ran"; \
 	fi
