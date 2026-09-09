@@ -133,17 +133,46 @@ a
 .Dv XTC_TAIL_RUN
 pair is emitted for a mailbox
 .Fn xtc_recv
-park and for the native async-file-I/O park inside
+park, for the native async-file-I/O park inside
 .Fn xtc_aio_pread ,
 .Fn xtc_aio_pwrite ,
 .Fn xtc_aio_fsync
 and
-.Fn xtc_aio_fdatasync .
-It is
-.Em not
-emitted for an
+.Fn xtc_aio_fdatasync ,
+and for an
 .Fn xtc_proc_wait_fd
-readiness park.
+readiness park -- which is the one most workloads spend their off-CPU time
+in, since every
+.Xr xtc_net 3
+accept/read/write,
+.Fn xtc_blocking_run
+completion,
+.Xr xtc_osproc 3
+reap and
+.Fn xtc_accel_wait_fence
+parks through it.
+For a
+.Fn xtc_proc_wait_fd
+park the
+.Dv XTC_TAIL_PARK
+.Fa detail
+carries the file descriptor, so the event joins against the
+.Li park_fd
+column of
+.Nm xtc-procs ;
+for the other two sources it carries the aio opcode or zero.  In all cases
+the
+.Dv XTC_TAIL_RUN
+.Fa detail
+is the park-to-run latency in nanoseconds.
+.Pp
+Parks that are still
+.Em not
+recorded:
+.Fn xtc_proc_sleep
+(a pure timer park -- its wake instant is already known from the deadline)
+and the internal condition-variable waits inside
+.Xr xtc_sync 3 .
 .Pp
 The intended use of the pair is diagnostic: a
 .Dv XTC_TAIL_PARK
@@ -177,9 +206,18 @@ is to infer from the absence of other events -- which cannot tell a dead loop
 apart from the end of the recording window.
 .Pp
 .Dv XTC_TAIL_WAKE
-is reserved and currently never emitted: the natural hook point has a
-task but no pid (there is no task-to-proc back pointer), and
-PARK-without-RUN answers the same question from the parked side.
+is emitted from the completion dispatch (the waker side).  Its
+.Fa pid
+carries only the dispatching
+.Fa loop_id
+-- dispatch has a task, not a proc -- and its
+.Fa detail
+is the task pointer as an integer, which is the join key against the
+.Li task
+column of
+.Nm xtc-procs .
+It separates "the wake was never generated" from "the wake was generated
+and the task still never ran".
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_tail_enable(XTC_TAIL_SCHED);
