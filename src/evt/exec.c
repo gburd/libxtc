@@ -8,6 +8,8 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_tail.h"     /* SCHED: idle-poll liveness */
+#include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on */
 #include "loop_int.h"
 #include "xtc_exec.h"
 #include "xtc_async.h"
@@ -284,6 +286,25 @@ __xtc_exec_worker(void *arg)
 			for (di = 0; di < n_out; di++)
 				(void)__xtc_loop_dispatch_event(loop,
 				    &evs[di]);
+			/*
+			 * xtc_tail SCHED liveness for the IDLE-poll path.
+			 * A quiescent worker spends its time here, not in
+			 * __xtc_loop_step's blocking poll, so instrumenting
+			 * only that one left the most common "is this loop
+			 * still turning?" case invisible -- and this is the
+			 * path a loop takes while one of its fibers is parked
+			 * on a completion.  Idle polls only (n_out == 0): a
+			 * poll that dispatched work is already evidenced by
+			 * the events it produced.
+			 */
+			if (n_out == 0 && __xtc_tail_on(XTC_TAIL_SCHED)) {
+				xtc_pid_t lp;
+				memset(&lp, 0, sizeof lp);
+				lp.loop_id = (uint16_t)(loop->exec_id >= 0
+				    ? loop->exec_id : 0);
+				__xtc_tail_emit(XTC_TAIL_SCHED,
+				    XTC_TAIL_LOOP_POLL, lp, 0);
+			}
 			(void)__xtc_inbox_drain(loop);
 			/* Loop again; if exec stopped or no real work
 			 * appeared, we'll exit on the next iteration. */

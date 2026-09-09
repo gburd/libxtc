@@ -194,6 +194,18 @@ __tail_le64(uint8_t *b, uint64_t v)
 	__tail_le32(b + 4, (uint32_t)(v >> 32));
 }
 
+/* PUBLIC: uint64_t xtc_tail_dropped __P((void)); */
+uint64_t
+xtc_tail_dropped(void)
+{
+	uint64_t seq;
+
+	(void)__xtc_mtx_lock(&__tail_lock);
+	seq = __tail_seq;
+	(void)__xtc_mtx_unlock(&__tail_lock);
+	return seq > (uint64_t)XTC_TAIL_RING ? seq - (uint64_t)XTC_TAIL_RING : 0;
+}
+
 int
 xtc_tail_dump(int fd)
 {

@@ -37,12 +37,13 @@ FLAG_LE = 1
 SOURCES = {1: "SCHED", 2: "MSG", 4: "IO", 8: "OS"}
 KINDS = {
     0: "SPAWN", 1: "EXIT", 2: "WAKE", 3: "RUN", 4: "PARK",
-    5: "SEND", 6: "RECV", 7: "MBOX_HWM",
+    5: "SEND", 6: "RECV", 7: "MBOX_HWM", 8: "LOOP_POLL",
 }
 # detail-field meaning per kind, for the human column
 DETAIL = {
-    "EXIT": "reason", "RUN": "wake->run ns", "SEND": "bytes",
+    "EXIT": "reason", "RUN": "park->run ns", "SEND": "bytes",
     "RECV": "bytes", "MBOX_HWM": "peak depth",
+    "LOOP_POLL": "events dispatched",
 }
 
 

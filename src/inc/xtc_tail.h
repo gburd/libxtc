@@ -96,6 +96,7 @@ typedef int (*xtc_tail_fn)(const xtc_tail_rec_t *rec, void *user);
  * PUBLIC: int      xtc_tail_read __P((xtc_tail_fn, void *));
  * PUBLIC: int      xtc_tail_dump __P((int));
  * PUBLIC: size_t   xtc_tail_count __P((void));
+ * PUBLIC: uint64_t xtc_tail_dropped __P((void));
  */
 
 /* Enable the named sources (a bitwise-OR of XTC_TAIL_*).  Returns the
@@ -119,6 +120,22 @@ XTC_API int      xtc_tail_dump(int fd);
 
 /* Number of records currently buffered. */
 XTC_API size_t   xtc_tail_count(void);
+
+/*
+ * How many records have been OVERWRITTEN (evicted) because the ring
+ * wrapped -- total emitted minus what is still buffered.
+ *
+ * Check this before drawing any conclusion from the ABSENCE of an event.
+ * With a non-zero dropped count, "pid X has no events" and "loop L never
+ * polled" are unfalsifiable: the events may simply have been evicted.  A
+ * consumer reported two verdicts that were exactly this artifact -- 23 of
+ * 33 loops appeared to have stopped polling when their events had merely
+ * been overwritten -- so this accessor exists to make a real zero
+ * distinguishable from an evicted one.
+ *
+ * Conclusions drawn from events that are PRESENT stay valid regardless.
+ */
+XTC_API uint64_t xtc_tail_dropped(void);
 
 /* The internal hook-point primitives __xtc_tail_emit / __xtc_tail_on
  * are library-internal (the __ prefix) and live in "tail_int.h", not in

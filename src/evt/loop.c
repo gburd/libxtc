@@ -968,24 +968,37 @@ __xtc_loop_step(xtc_loop_t *loop)
 	if (rc != XTC_OK) return rc;
 
 	/*
-	 * xtc_tail SCHED: this loop completed a poll on its OWN ring.  Emitted
-	 * even when it dispatched nothing (detail = 0), because the VALUE is
-	 * liveness: a steady stream of LOOP_POLL for a loop_id proves that
-	 * loop is still turning, which is the only way to tell "the loop kept
-	 * working and skipped one parked fiber" from "the loop stopped" when a
-	 * PARK has no matching RUN.  Without it, the absence of other events
-	 * on a loop is ambiguous between a dead loop and the end of the
-	 * recording window.
+	 * xtc_tail SCHED: this loop completed an IDLE poll on its OWN ring
+	 * (one that dispatched nothing).  The value is liveness: a stream of
+	 * LOOP_POLL for a loop_id proves that loop is still turning, which is
+	 * the only way to tell "the loop kept working and skipped one parked
+	 * fiber" from "the loop stopped" when a PARK has no matching RUN.
+	 *
+	 * ONLY the idle poll is recorded, and that restriction is load-bearing.
+	 * The first version emitted every poll, and at 32 loops that was
+	 * 87-93% of a 16384-slot ring -- measured by a consumer across three
+	 * captures.  The ring wrapped, evicting the PARK/RUN events the
+	 * liveness answer is compared against, and 23 of 33 loops showed ZERO
+	 * polls purely because their events had been evicted.  That turned two
+	 * of their verdicts into artifacts: "count == 0" is unfalsifiable when
+	 * the event being counted is what overflowed the buffer.  An
+	 * observability event that crowds out the data it explains is worse
+	 * than none.
+	 *
+	 * A poll that DISPATCHED work needs no separate liveness record -- the
+	 * events it dispatched are themselves proof the loop ran.  The
+	 * unobservable case is precisely the poll that found nothing, so that
+	 * is the one worth a slot.  Same question answered, ~2 orders of
+	 * magnitude fewer events.
 	 *
 	 * pid carries only loop_id -- a loop is not a proc.  Gated, so a
 	 * disabled tail is one branch.
 	 */
-	if (__xtc_tail_on(XTC_TAIL_SCHED)) {
+	if (n_out == 0 && __xtc_tail_on(XTC_TAIL_SCHED)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
 		lp.loop_id = (uint16_t)(loop->exec_id >= 0 ? loop->exec_id : 0);
-		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_LOOP_POLL, lp,
-		    (uint64_t)n_out);
+		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_LOOP_POLL, lp, 0);
 	}
 
 	for (i = 0; i < n_out; i++)

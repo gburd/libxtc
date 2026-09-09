@@ -9,7 +9,8 @@
 .Nm xtc_tail_reset ,
 .Nm xtc_tail_read ,
 .Nm xtc_tail_dump ,
-.Nm xtc_tail_count
+.Nm xtc_tail_count ,
+.Nm xtc_tail_dropped
 .Nd runtime microscope (individual scheduler-event recording)
 .Sh LIBRARY
 .Lb libxtc
@@ -27,6 +28,8 @@
 .Fn xtc_tail_dump "int fd"
 .Ft size_t
 .Fn xtc_tail_count "void"
+.Ft uint64_t
+.Fn xtc_tail_dropped "void"
 .Sh DESCRIPTION
 .Nm xtc_tail
 is a runtime microscope: it records every INDIVIDUAL runtime event,
@@ -100,6 +103,18 @@ or a negative
 code.
 .Fn xtc_tail_count
 returns the buffered record count.
+.Pp
+.Fn xtc_tail_dropped
+returns how many records have been OVERWRITTEN because the ring wrapped
+(total emitted minus what is still buffered).
+.Pp
+Check it before drawing any conclusion from the ABSENCE of an event.  With a
+non-zero dropped count, "this pid has no events" and "this loop never polled"
+are unfalsifiable -- the events may simply have been evicted.  A consumer
+reported two verdicts that were exactly this artifact: 23 of 33 loops appeared
+to have stopped polling when their events had merely been overwritten by a
+higher-frequency event.  Conclusions drawn from events that are PRESENT remain
+valid regardless.
 .Pp
 .Fn xtc_tail_disable
 returns no value.
