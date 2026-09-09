@@ -14,6 +14,100 @@
         version =
           pkgs.lib.removeSuffix "\n" (builtins.readFile ./dist/version.in);
 
+        # ------------------------------------------------------------------
+        #  libhegel -- property-based testing engine (C ABI)
+        # ------------------------------------------------------------------
+        # hegeldev/hegel-rust's libhegel is the official C-ABI binding to
+        # Hegel's native engine.  It runs ENTIRELY IN-PROCESS: generation,
+        # shrinking and the example database all live inside the shared
+        # library, so there is no server process and nothing to put on PATH.
+        #
+        # This replaces gburd/hegel-c, which libxtc's PBT tier targeted
+        # until 2026-09.  That project is deprecated/read-only and its
+        # socket protocol was removed upstream: the client and the server
+        # never actually spoke, so every property SKIPPED at runtime for the
+        # tier's entire life while the README counted them as coverage.
+        #
+        # Prebuilt release artifacts rather than a source build: upstream's
+        # own flake builds via rustPlatform.buildRustPackage, which fetches
+        # ~140 crates at build time -- exactly the dependency that makes an
+        # offline or restricted-network `nix develop` fail.  The published
+        # libhegel-<os>-<arch> assets are one pinned hash each.  The
+        # tradeoff is per-platform coverage: platforms upstream does not
+        # publish for degrade to "no hegel", which configure already handles
+        # with a loud SKIP.
+        hegelVersion = "0.36.5";
+        hegelBase =
+          "https://github.com/hegeldev/hegel-rust/releases/download/v${hegelVersion}";
+
+        hegelArtifacts = {
+          "x86_64-linux" = {
+            file = "libhegel-linux-amd64.so";
+            hash = "sha256-MJzKFaazWIibe6ytz7rf9MzTLElm58/KZkXAsBb8j5I=";
+          };
+          "aarch64-linux" = {
+            file = "libhegel-linux-arm64.so";
+            hash = "sha256-U0VfJDNb7Y63H55CWHq6i/rOnPwudK1gswItglU0Lt0=";
+          };
+          "aarch64-darwin" = {
+            file = "libhegel-darwin-arm64.dylib";
+            hash = "sha256-9YHZTATM/nm6NRhvSIhHzYUqFOhWrrZ0lSx/UkRsicY=";
+          };
+        };
+
+        hegelArtifact = hegelArtifacts.${system} or null;
+
+        libhegel =
+          if hegelArtifact == null then null else
+          pkgs.stdenv.mkDerivation {
+            pname = "libhegel";
+            version = hegelVersion;
+            dontUnpack = true;
+
+            nativeBuildInputs =
+              pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.patchelf ];
+
+            header = pkgs.fetchurl {
+              url = "${hegelBase}/hegel.h";
+              hash = "sha256-iJbxepWn+55g0/8ASFROyEW+KqbtZUGreRwhnH585/k=";
+            };
+            lib = pkgs.fetchurl {
+              url = "${hegelBase}/${hegelArtifact.file}";
+              inherit (hegelArtifact) hash;
+            };
+
+            soname =
+              "libhegel${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}";
+
+            installPhase = ''
+              mkdir -p "$out/lib/pkgconfig" "$out/include"
+              cp "$header" "$out/include/hegel.h"
+              install -m755 "$lib" "$out/lib/$soname"
+            ''
+            # The released .so carries no SONAME and no RPATH, so on NixOS
+            # it would not find libgcc_s / libc at load time.
+            + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              patchelf --set-soname "$soname" \
+                --set-rpath "${pkgs.stdenv.cc.cc.lib}/lib" "$out/lib/$soname"
+            '' + pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+              install_name_tool -id "$out/lib/$soname" "$out/lib/$soname"
+            '' + ''
+              chmod 555 "$out/lib/$soname"
+              cat > "$out/lib/pkgconfig/hegel.pc" <<EOF
+              prefix=$out
+              exec_prefix=$out
+              libdir=$out/lib
+              includedir=$out/include
+
+              Name: hegel
+              Description: libhegel -- Hegel's native PBT engine (C ABI)
+              Version: ${hegelVersion}
+              Libs: -L$out/lib -lhegel -Wl,-rpath,$out/lib
+              Cflags: -I$out/include
+              EOF
+            '';
+          };
+
         # The actual library build.  xtc mandates an out-of-source build
         # driven from dist/configure; we create a build dir, configure
         # with --enable-shared, build, run the test suite, and install
@@ -75,7 +169,11 @@
         packages.xtc     = xtc;
 
         devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
+          # libhegel (property-based testing) when upstream publishes an
+          # artifact for this platform; absent elsewhere, and configure's
+          # --with-hegel then leaves the tier as a loud SKIP.
+          packages = pkgs.lib.optional (libhegel != null) libhegel
+            ++ (with pkgs; [
             # Toolchain
             gcc14 clang_18 lld
             # Build systems
@@ -115,7 +213,7 @@
             libdrm
             level-zero            # oneAPI ze: drives xe GPU + intel_vpu NPU
             intel-compute-runtime # the xe/NEO userspace ze/OpenCL driver
-          ];
+          ]);
           shellHook = ''
             echo "xtc dev shell ready."
             echo "  cd dist && autoreconf -i && cd .. && mkdir -p build_unix && cd build_unix && ../dist/configure && make check"

@@ -633,87 +633,79 @@ AC_SUBST([XTC_TLS_CFLAGS])
 AC_SUBST([XTC_TLS_LIBS])
 
 # -------------------------------------------------------------------------
-# Optional: hegel-c property-based testing.
+# Optional: hegel property-based testing (hegeldev/hegel-rust libhegel).
 #
-# DORMANT as of 2026-09: this targets the DEPRECATED gburd/hegel-c client
-# API (a forked `hegel` server subprocess spoken to over pipes).  That
-# repository is read-only and its socket protocol was removed upstream, and
-# the client's socket protocol never interoperated with hegel-core's stdio
-# one -- so even a correctly-pointed --with-hegel links successfully and
-# then dies at "hegel: handshake failed (error -2)".  There is no PATH that
-# makes this flag work today.  Reviving the tier means porting
-# test/pbt/pbt_common.h to hegeldev/hegel-rust's in-process libhegel
-# (context/run model, no subprocess) and reworking the probe below, which
-# needs neither libcbor nor libz.  See
-# docs/adr/0002-hegel-pbt-first-class.md ("Dormancy") for the full path.
+# libhegel is the official C-ABI binding to Hegel's native engine and runs
+# ENTIRELY IN-PROCESS -- generation, shrinking and the example database all
+# live inside the shared library.  There is no server process, nothing to
+# put on PATH, and no handshake to fail.
 #
-# Left in place rather than deleted so the 36 existing property
-# definitions keep compiling under the SKIP stub, and so the flag fails
-# with an explanation instead of vanishing.
+# HISTORY, so the flag's shape makes sense: this used to target
+# gburd/hegel-c, which forked a `hegel` server subprocess and spoke to it
+# over pipes.  That project is deprecated/read-only and its socket protocol
+# was removed upstream; the two halves never interoperated, so every
+# property SKIPPED at runtime for the tier's entire life while the README
+# counted them as delivered coverage.  Ported to libhegel 2026-09.
+#
+# Detection is pkg-config (libhegel ships a hegel.pc), with an explicit
+# PATH accepted for a hand-built or unpacked release artifact.  No libcbor
+# and no libz: the old probe needed both for hegel-c's CBOR wire protocol,
+# and an in-process library has no wire protocol.
 # -------------------------------------------------------------------------
 AC_ARG_WITH([hegel],
-  [AS_HELP_STRING([--with-hegel=PATH],
-    [DORMANT/NON-FUNCTIONAL: targets the deprecated hegel-c API whose server protocol was removed upstream; links but fails at handshake. PATH is the hegel-c source root containing include/hegel/hegel.h and build/libhegel.{a,so}. See docs/adr/0002-hegel-pbt-first-class.md.])],
+  [AS_HELP_STRING([--with-hegel@<:@=PATH@:>@],
+    [Enable property-based tests against libhegel (hegeldev/hegel-rust). With no PATH, found via pkg-config. PATH is a prefix containing include/hegel.h and lib/libhegel.so.])],
   [xtc_with_hegel=$withval], [xtc_with_hegel=no])
 
-AC_MSG_CHECKING([whether to build hegel-c property tests])
-AS_IF([test "x$xtc_with_hegel" = xno],
-  [AC_MSG_RESULT([no])
-   xtc_hegel_cflags=
-   xtc_hegel_libs=
-   xtc_hegel_pbt=no],
-  [test -f "$xtc_with_hegel/include/hegel/hegel.h"],
-  [AC_MSG_RESULT([yes (using $xtc_with_hegel)])
-   xtc_hegel_cflags="-I$xtc_with_hegel/include"
-   xtc_hegel_pbt=yes
+AC_MSG_CHECKING([whether to build hegel property tests])
+xtc_hegel_cflags=
+xtc_hegel_libs=
+xtc_hegel_pbt=no
 
-   # Find libcbor and libz.  We try in order:
-   #   1) the dirs already on the linker search path (system install);
-   #   2) the directory the prebuilt libhegel.so was linked against
-   #      (read off ldd output);
-   #   3) failure with a clear error.
-   xtc_extra_l=
-   xtc_extra_L=
-   for dep in cbor z; do
-     if echo 'int main(void){return 0;}' | $CC -x c - -l$dep -o /dev/null 2>/dev/null; then
-       :
-     else
-       # 1) try ldd of libhegel.so (catches libcbor)
-       lib=`ldd "$xtc_with_hegel/build/libhegel.so" 2>/dev/null \
-          | $AWK -v d=lib$dep '$1 == d ".so" || $1 ~ "^" d "\\.so\\." {print $3; exit}'`
-       if test -z "$lib" -o ! -f "$lib"; then
-         # 2) try ldd of a known-good binary (catches libz on nix)
-         for probe in /run/current-system/sw/bin/git \
-                      /run/current-system/sw/bin/curl \
-                      /usr/bin/git /usr/bin/curl ; do
-           if test -x "$probe"; then
-             lib=`ldd "$probe" 2>/dev/null \
-                | $AWK -v d=lib$dep '$1 == d ".so" || $1 ~ "^" d "\\.so\\." {print $3; exit}'`
-             if test -n "$lib" -a -f "$lib"; then break; fi
-           fi
-         done
-       fi
-       if test -n "$lib" -a -f "$lib"; then
-         libdir=`dirname "$lib"`
-         xtc_extra_L="$xtc_extra_L -L$libdir -Wl,-rpath,$libdir"
-       else
-         AC_MSG_WARN([could not find lib$dep; --with-hegel build may fail])
-       fi
-     fi
-     xtc_extra_l="$xtc_extra_l -l$dep"
-   done
-   xtc_hegel_libs="-L$xtc_with_hegel/build -Wl,-rpath,$xtc_with_hegel/build -lhegel $xtc_extra_L $xtc_extra_l"
-   AC_DEFINE([XTC_HAVE_HEGEL], 1, [hegel-c property tests enabled])],
-  [AC_MSG_ERROR([--with-hegel=$xtc_with_hegel: hegel.h not found at $xtc_with_hegel/include/hegel/hegel.h])])
+AS_IF([test "x$xtc_with_hegel" = xno],
+  [AC_MSG_RESULT([no])],
+
+  dnl --with-hegel (no path): ask pkg-config.
+  [test "x$xtc_with_hegel" = xyes],
+  [AS_IF([test -n "$PKG_CONFIG" && $PKG_CONFIG --exists hegel],
+     [xtc_hegel_cflags=`$PKG_CONFIG --cflags hegel`
+      xtc_hegel_libs=`$PKG_CONFIG --libs hegel`
+      xtc_hegel_pbt=yes
+      AC_MSG_RESULT([yes (pkg-config)])],
+     [AC_MSG_RESULT([no])
+      AC_MSG_ERROR([--with-hegel: pkg-config cannot find hegel.  Install libhegel from hegeldev/hegel-rust, or pass --with-hegel=PREFIX.])])],
+
+  dnl --with-hegel=PATH: an explicit prefix.
+  [test -f "$xtc_with_hegel/include/hegel.h"],
+  [xtc_hegel_cflags="-I$xtc_with_hegel/include"
+   xtc_hegel_libs="-L$xtc_with_hegel/lib -lhegel -Wl,-rpath,$xtc_with_hegel/lib"
+   xtc_hegel_pbt=yes
+   AC_MSG_RESULT([yes (using $xtc_with_hegel)])],
+
+  [AC_MSG_RESULT([no])
+   AC_MSG_ERROR([--with-hegel=$xtc_with_hegel: hegel.h not found at $xtc_with_hegel/include/hegel.h])])
+
+dnl Verify the in-process API is actually present, so a stale hegel-c
+dnl install fails HERE with an explanation rather than at link time.
+AS_IF([test "x$xtc_hegel_pbt" = xyes],
+  [xtc_save_CFLAGS=$CFLAGS
+   xtc_save_LIBS=$LIBS
+   CFLAGS="$CFLAGS $xtc_hegel_cflags"
+   LIBS="$LIBS $xtc_hegel_libs"
+   AC_MSG_CHECKING([for the libhegel in-process API])
+   AC_LINK_IFELSE(
+     [AC_LANG_PROGRAM([[#include <hegel.h>]],
+        [[hegel_context_t *c = hegel_context_new(); (void)hegel_context_free(c);]])],
+     [AC_MSG_RESULT([yes])
+      AC_DEFINE([XTC_HAVE_HEGEL], 1, [hegel property tests enabled])],
+     [AC_MSG_RESULT([no])
+      AC_MSG_ERROR([found hegel.h but not hegel_context_new.  This looks like the DEPRECATED gburd/hegel-c (session/server API); libxtc needs hegeldev/hegel-rust's in-process libhegel.])])
+   CFLAGS=$xtc_save_CFLAGS
+   LIBS=$xtc_save_LIBS])
+
 AC_SUBST([XTC_HEGEL_CFLAGS], [$xtc_hegel_cflags])
 AC_SUBST([XTC_HEGEL_LIBS],   [$xtc_hegel_libs])
 AC_SUBST([XTC_HEGEL_PBT],    [$xtc_hegel_pbt])
-
-AC_ARG_WITH([hegel-server],
-  [AS_HELP_STRING([--with-hegel-server=CMD],
-    [DORMANT: names the hegel server subprocess the deprecated hegel-c client forks (default: "hegel" on PATH).  The replacement libhegel is in-process and has no server, so this flag will be retired when the tier is revived.])],
-  [xtc_hegel_server=$withval], [xtc_hegel_server=hegel])
-AC_SUBST([XTC_HEGEL_SERVER_COMMAND], [$xtc_hegel_server])
 
 # Require C11.  PG18 raised the floor; PG19 inherits.
 AC_MSG_CHECKING([whether the C compiler accepts -std=c11])

@@ -1,10 +1,11 @@
-# ADR-0002: Hegel-c property-based tests as a first-class layer
+# ADR-0002: Hegel property-based tests as a first-class layer
 
-- **Status:** Accepted, but **DORMANT since 2026-09** -- the upstream API
-  this ADR builds on was replaced and the tier cannot run.  See
-  "Dormancy" below.  The decision itself (properties are first-class) is
-  NOT reversed; only its implementation is stalled.
-- **Date:** 2026-05-25 (dormancy recorded 2026-09-09).
+- **Status:** Accepted and **ACTIVE**.  Dormant 2026-09-09 (the
+  `gburd/hegel-c` API this ADR was written against had been replaced
+  upstream, and the tier had never actually run); **revived 2026-09-09** by
+  porting the harness to `hegeldev/hegel-rust`'s in-process `libhegel`.
+  All 36 properties now execute and pass.  See "Dormancy and revival".
+- **Date:** 2026-05-25 (dormancy and revival recorded 2026-09-09).
 - **Supersedes:** --
 - **Related:** [`0001-test-first-claim-driven.md`](0001-test-first-claim-driven.md).
 
@@ -119,17 +120,18 @@ properties before they can ship.
 - [x] M3 run queue: 1 property (`each_task_runs_target_times`)
 - [x] All PBT binaries integrated into `make check` via `tests-pbt`
 - [x] Total: 36 property definitions across 17 suites (measured 2026-09-09
-      by summing what each binary prints at runtime).  **All 36 are
-      currently UNVERIFIED** -- see "Dormancy" below.  Earlier revisions of
-      this ADR and of `README.md` quoted 8 and 23; both were stale counts
-      that grew without being re-measured.
+        by summing what each binary prints at runtime).  **All 36 execute and
+        pass** as of the libhegel port the same day -- see "Dormancy and
+        revival".  Earlier revisions of this ADR and of `README.md` quoted 8
+        and 23; both were stale counts that grew without being re-measured,
+        and for most of that time none of them could run at all.
 - [x] `pbt_saga` wired into `TESTS_PBT` (2026-09-09).  It had been written
-      in `2f05478` but never added to the build list, so its 1 property was
-      neither compiled nor counted -- an orphaned suite is indistinguishable
-      from a passing one, which is the same failure mode as a silently
-      skipped property.
+        in `2f05478` but never added to the build list, so its 1 property was
+        neither compiled nor counted -- an orphaned suite is indistinguishable
+        from a passing one, which is the same failure mode as a silently
+        skipped property.
 
-## Dormancy (recorded 2026-09-09)
+## Dormancy and revival (recorded 2026-09-09)
 
 The tier does not run, and cannot, as written.  Recorded here because an
 ADR that keeps asserting a dead mechanism works is worse than no ADR.
