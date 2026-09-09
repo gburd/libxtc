@@ -172,14 +172,19 @@ jobs:
         run: make -C build_pbt -j"$(nproc)"
       - name: Run every property suite (zero SKIPs allowed)
         run: |
-          set -eu
-          # `tests-pbt` is the real target: it BUILDS $(TESTS_PBT) and runs
-          # each one.  An earlier version of this job ran only `make` and
-          # then globbed for pbt_* binaries, which do not exist until this
-          # target builds them -- the job's own "no pbt binaries found"
-          # guard caught that, which is what the guard is for.
-          out=$(make -C build_pbt tests-pbt 2>&1)
+          set -u
+          # NOT `set -e` around the capture: `out=$(make ...)` under -e
+          # aborts the step the instant make returns nonzero, BEFORE the
+          # printf, so the failure output is swallowed and the log shows
+          # only "exit code 2" with no diagnostic.  That cost a debugging
+          # round trip; capture the status explicitly and ALWAYS print.
+          rc=0
+          out=$(make -C build_pbt tests-pbt 2>&1) || rc=$?
           printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL: make tests-pbt exited $rc"
+            exit "$rc"
+          fi
           # In a hegel-ENABLED build a SKIP means the tier silently stopped
           # verifying -- the exact rot this job exists to catch -- so it is
           # fatal here even though `make check` only warns.
@@ -188,7 +193,7 @@ jobs:
               echo "FAIL: a property suite SKIPPED in the hegel-enabled job"
               exit 1 ;;
           esac
-          # And prove work actually happened, so a build-system change that
+          # Prove work actually happened, so a build-system change that
           # empties TESTS_PBT cannot pass as vacuous success.
           case "$out" in
             *"property suite(s) actually ran"*) ;;
