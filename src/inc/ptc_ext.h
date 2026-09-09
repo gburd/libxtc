@@ -69,6 +69,7 @@ int64_t xtc_res_used __P((const xtc_res_t *, xtc_res_kind_t));
 long xtc_lwlock_track_violations __P((void));
 struct xtc_mctx *xtc_proc_mctx __P((void));
 uint64_t xtc_preempt_ticks __P((void));
+uint64_t xtc_tail_dropped __P((void));
 void  __xtc_proc_ctx_restore __P((void *));
 void *__xtc_proc_ctx_save __P((void));
 void *xtc_proc_userdata __P((void));
