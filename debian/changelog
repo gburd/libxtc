@@ -1,3 +1,46 @@
+libxtc (1.43.0-1) unstable; urgency=medium
+
+  * tail: XTC_TAIL_WAKE is now EMITTED.  It has been declared since Phase 1 and
+    never recorded; the stated reason was that the completion-dispatch hook has
+    a task but no pid and a task-to-proc back pointer was not worth adding for a
+    diagnostic.  That trade-off was wrong once "was the wake ever generated?"
+    became the blocking question in a consumer's lost-wakeup investigation -- and
+    the back pointer is not needed: the task pointer is itself a usable join key.
+    __xtc_loop_dispatch_event now emits WAKE with pid.loop_id = the dispatching
+    loop and detail = the xtc_task_t * as an integer.
+    .
+    With PARK and RUN this localizes a lost wakeup to one side of dispatch:
+    PARK with no WAKE and no RUN means the completion never reached dispatch;
+    PARK then WAKE but no RUN means dispatch ran and the loss is downstream of
+    it; PARK then WAKE then RUN is the normal cycle.  Verified balanced
+    (PARK=10 WAKE=10 RUN=10 for a five-op aio fiber), not merely present.
+    .
+    This is an observable BEHAVIOUR change for any consumer already filtering on
+    kind 2, which is why this is a minor bump.
+  * tail: new public xtc_tail_dropped(), returning how many records the ring
+    wrap has overwritten.  Check it before drawing any conclusion from the
+    ABSENCE of an event: with a non-zero dropped count, "this pid has no events"
+    and "this loop never polled" are unfalsifiable.  A consumer reported two
+    verdicts that were exactly this artifact -- 23 of 33 loops appeared to have
+    stopped polling when their events had merely been evicted.
+  * tail: XTC_TAIL_LOOP_POLL is now emitted only for an IDLE poll (one that
+    dispatched nothing), and from the executor's idle-poll site as well as the
+    loop's blocking poll.  As first shipped it was 87-93% of the 16384-slot ring
+    at 32 loops, wrapped, and evicted the PARK/RUN events it exists to be
+    compared against -- an observability event that crowded out the data it
+    explains.  A poll that dispatched work needs no separate liveness record
+    because the events it dispatched are themselves proof the loop ran; the
+    unobservable case is precisely the poll that found nothing.  Measured at
+    8.5% of the ring on a 16-loop/32-fiber aio workload, with the liveness
+    signal intact.  Instrumenting only the loop's blocking poll left a hole: a
+    quiescent worker sits in the executor's idle poll, so both sites emit.
+  * tools: xtc-tail.py now renders kind 8 (it was showing every LOOP_POLL as
+    "?8", which nearly produced a false "the runtime quiesced" report), and
+    corrects RUN's detail label to "park->run ns", which is what it measures.
+    xtc-procs prints a `task` column so a WAKE event's detail maps back to a pid.
+
+ -- Greg Burd <greg@burd.me>  Tue, 08 Sep 2026 12:00:00 -0400
+
 libxtc (1.42.0-1) unstable; urgency=medium
 
   * tail: new XTC_TAIL_LOOP_POLL event in the SCHED source, emitted after each
