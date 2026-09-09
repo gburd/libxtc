@@ -20,6 +20,7 @@
 #if defined(XTC_IO_BACKEND_URING)
 
 #include "io_int.h"
+#include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
 
 #include <errno.h>
 #include <unistd.h>
@@ -352,7 +353,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	default:
 		return XTC_E_INVAL;
 	}
-	a->done = 0;
+	a->done = 0;   /* plain: our own thread, before the SQE is visible */
 	a->res = 0;
 	/* Low-bit tag distinguishes this completion from a poll-add CQE. */
 	io_uring_sqe_set_data(sqe, (void *)((uintptr_t)a | 1u));
@@ -582,7 +583,10 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		if (((uintptr_t)data & 1u) != 0) {
 			xtc_aio_t *a = (xtc_aio_t *)((uintptr_t)data & ~(uintptr_t)1);
 			a->res = cqe->res;
-			a->done = 1;
+			/* Release: publish res BEFORE the done flag the parked
+			 * fiber acquires, so a fiber that sees done sees res.
+			 * We are the REAPING thread; the fiber is another. */
+			__xtc_aio_done_set(a);
 			if (got < max) {
 				events[got].tag = a->tag;
 				events[got].flags = XTC_IO_AIO;

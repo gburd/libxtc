@@ -24,6 +24,7 @@
 #if defined(XTC_IO_BACKEND_KQUEUE)
 
 #include "io_int.h"
+#include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
 
 #include <errno.h>
 #include <unistd.h>
@@ -280,7 +281,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	w->cb.aio_sigevent.sigev_notify_kqueue = io->epfd;
 	w->cb.aio_sigevent.sigev_value.sival_ptr = w;
 
-	a->done = 0;
+	a->done = 0;   /* plain: our own thread, before the op is submitted */
 	a->res = 0;
 	switch (a->op) {
 	case XTC_AIO_PREAD:  rc = aio_read(&w->cb); break;
@@ -364,7 +365,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				a->res = -err;
 			else
 				a->res = (int32_t)n;   /* bytes (0 for fsync) */
-			a->done = 1;
+			__xtc_aio_done_set(a);   /* release: res, then flag */
 			events[out_idx].tag = a->tag;
 			events[out_idx].flags = XTC_IO_AIO;
 			__os_free(w);
