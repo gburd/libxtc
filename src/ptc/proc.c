@@ -1995,6 +1995,9 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			int __tail_sched = __xtc_tail_on(XTC_TAIL_SCHED);
 			int64_t __park_ns = 0;
 			if (__tail_sched) {
+				__xtc_tail_emit(XTC_TAIL_SCHED,
+				    XTC_TAIL_PARK_TASK, self->pid,
+				    (uint64_t)(uintptr_t)self->task);
 				__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_PARK,
 				    self->pid, 0);
 				(void)__os_clock_mono(&__park_ns);
@@ -2274,6 +2277,11 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	 */
 	tail_sched = __xtc_tail_on(XTC_TAIL_SCHED);
 	if (tail_sched) {
+		/* PARK_TASK carries the task pointer (the XTC_TAIL_WAKE join
+		 * key); PARK keeps the fd in detail.  See XTC_TAIL_PARK_TASK
+		 * in xtc_tail.h for why both are needed. */
+		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_PARK_TASK, self->pid,
+		    (uint64_t)(uintptr_t)self->task);
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_PARK, self->pid,
 		    (uint64_t)(uint32_t)fd);
 		(void)__os_clock_mono(&park_ns);

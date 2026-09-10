@@ -233,6 +233,16 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 		xtc_pid_t self_pid = xtc_self();
 
 		if (tail_on && !__xtc_aio_done_get(&a)) {
+			/*
+			 * PARK_TASK first, then PARK.  PARK's detail is the OP
+			 * (a consumer uses it to tell an fdatasync park from a
+			 * read park), so the task pointer -- the key that makes
+			 * XTC_TAIL_WAKE joinable -- needs its own event rather
+			 * than displacing the op.  Same fiber, adjacent, so the
+			 * pairing is unambiguous.
+			 */
+			__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_PARK_TASK,
+			    self_pid, (uint64_t)(uintptr_t)t);
 			__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_PARK,
 			    self_pid, (uint64_t)op);
 			(void)__os_clock_mono(&park_ns);

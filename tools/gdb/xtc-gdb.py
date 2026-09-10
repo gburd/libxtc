@@ -335,6 +335,64 @@ class XtcProcs(gdb.Command):
         print("(%d procs)" % total)
 
 
+class XtcTailDropped(gdb.Command):
+    """xtc-tail-dropped: how many xtc_tail records the ring has overwritten.
+
+    Reads the ring bookkeeping directly, so it works on a HUNG process
+    where calling xtc_tail_dropped() would be awkward or unsafe.
+
+    CHECK THIS BEFORE BELIEVING ANY ABSENCE.  With a non-zero dropped
+    count, "pid X has no events", "this loop never polled" and "no WAKE
+    for this task" are all unfalsifiable -- the records may simply have
+    been evicted.  A consumer had to withdraw two verdicts that were
+    exactly this artifact.  Conclusions drawn from events that are
+    PRESENT stay valid regardless.
+    """
+    def __init__(self):
+        super().__init__("xtc-tail-dropped", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        seq = _sym("__tail_seq")
+        cap = _sym("XTC_TAIL_RING")
+        if seq is None:
+            print("no __tail_seq symbol (not linked with xtc_tail, or "
+                  "stripped -- build with -g)")
+            return
+        try:
+            n = int(seq)
+        except gdb.error:
+            print("could not read __tail_seq")
+            return
+        # XTC_TAIL_RING is a #define, so it is usually absent from the
+        # debug info; fall back to the array's own length.
+        ring = 0
+        if cap is not None:
+            try:
+                ring = int(cap)
+            except gdb.error:
+                ring = 0
+        if ring == 0:
+            arr = _sym("__tail_ring")
+            if arr is not None:
+                try:
+                    ring = int(arr.type.range()[1]) + 1
+                except gdb.error:
+                    ring = 0
+        if ring == 0:
+            print("emitted=%d  (ring capacity unknown -- cannot compute "
+                  "dropped)" % n)
+            return
+        dropped = n - ring if n > ring else 0
+        print("emitted=%d  ring=%d  buffered=%d  dropped=%d"
+              % (n, ring, n if n < ring else ring, dropped))
+        if dropped:
+            print("WARNING: %d record(s) were OVERWRITTEN.  Any claim that "
+                  "rests on an event being ABSENT is unfalsifiable for this "
+                  "capture." % dropped)
+        else:
+            print("ring did not wrap: absence claims are meaningful.")
+
+
 class XtcStranded(gdb.Command):
     """xtc-stranded: triage a suspected stranded-fiber hang.
 
@@ -625,12 +683,13 @@ XtcRings()
 XtcProcs()
 XtcProc()
 XtcStranded()
+XtcTailDropped()
 XtcMailbox()
 XtcSelf()
 XtcTrace()
 XtcTailDump()
 XtcHelp()
 print("xtc-gdb loaded: xtc-loops, xtc-rings, xtc-procs, xtc-proc, "
-      "xtc-stranded, "
+      "xtc-stranded, xtc-tail-dropped, "
       "xtc-mailbox, "
       "xtc-self, xtc-trace, xtc-tail-dump, xtc-help")

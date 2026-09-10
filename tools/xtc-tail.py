@@ -38,6 +38,7 @@ SOURCES = {1: "SCHED", 2: "MSG", 4: "IO", 8: "OS"}
 KINDS = {
     0: "SPAWN", 1: "EXIT", 2: "WAKE", 3: "RUN", 4: "PARK",
     5: "SEND", 6: "RECV", 7: "MBOX_HWM", 8: "LOOP_POLL",
+    9: "PARK_TASK",
 }
 # detail-field meaning per kind, for the human column
 DETAIL = {
@@ -48,6 +49,9 @@ DETAIL = {
     # readiness park, the aio opcode for a native async-file park, 0 for a
     # mailbox recv park.  Label it neutrally rather than guess.
     "PARK": "fd/op",
+    # Both of these carry a task POINTER and are rendered as hex (see
+    # _PTR_DETAIL): PARK_TASK is the key a WAKE joins to.
+    "PARK_TASK": "task",
     "WAKE": "task",
 }
 
@@ -129,10 +133,19 @@ def matches(ev, args):
     return True
 
 
+# Kinds whose detail is a POINTER: render hex so a WAKE and the
+# PARK_TASK it joins to are visually comparable, and so the value lines
+# up with xtc-procs' `task` column.
+_PTR_DETAIL = ("WAKE", "PARK_TASK")
+
+
 def fmt(ev, base):
     d = DETAIL.get(ev.kind_name)
-    dstr = ("  %s=%d" % (d, ev.detail)) if d else (
-        "  detail=%d" % ev.detail if ev.detail else "")
+    if ev.kind_name in _PTR_DETAIL:
+        dstr = "  %s=0x%x" % (d or "detail", ev.detail)
+    else:
+        dstr = ("  %s=%d" % (d, ev.detail)) if d else (
+            "  detail=%d" % ev.detail if ev.detail else "")
     return "%12d ns  %-5s %-9s pid=%-10s%s" % (
         ev.ts - base, ev.source_name, ev.kind_name, ev.pid, dstr)
 
