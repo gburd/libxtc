@@ -282,6 +282,7 @@ def cmd_strands(events, args):
         if e.kind_name == "PARK_TASK":
             parked[e.detail] = e
     reaped_at, waked_at, ran_at, subm_at = {}, {}, {}, {}
+    subm_loop, poll_at = {}, {}
     n_submit_fail = 0
     for e in events:
         if e.kind_name == "REAP" and e.detail:
@@ -292,6 +293,9 @@ def cmd_strands(events, args):
             ran_at.setdefault(e.pid, []).append(e.ts)
         elif e.kind_name == "SUBMIT" and e.detail:
             subm_at.setdefault(e.detail, []).append(e.ts)
+            subm_loop.setdefault(e.detail, []).append((e.ts, e.loop))
+        elif e.kind_name == "LOOP_POLL":
+            poll_at.setdefault(e.loop, []).append(e.ts)
         elif e.kind_name == "SUBMIT_FAIL":
             n_submit_fail += 1
 
@@ -349,6 +353,31 @@ def cmd_strands(events, args):
                   % (pk.pid, task, pk.ts - events[0].ts))
         if len(rows) > args.top:
             print("    ... %d more" % (len(rows) - args.top))
+        print("")
+    # For the submitted-but-never-reaped strands, the next question is whether
+    # the ring they submitted to kept being ENTERED.  A loop that submitted and
+    # then went quiet is a submit-side missing wakeup; one that kept polling and
+    # still produced no completion points at the request or the kernel.  Both
+    # are answerable from LOOP_POLL, which is already keyed by loop.
+    rows = buckets["no REAP"]
+    if rows:
+        print("--- submitted-but-never-reaped: was that ring still polled? ---")
+        for pk, task in rows[:args.top]:
+            lp = None
+            for ts, l in subm_loop.get(task, ()):
+                if ts < pk.ts and (lp is None or ts > lp[0]):
+                    lp = (ts, l)
+            if lp is None:
+                continue
+            after = sum(1 for ts in poll_at.get(lp[1], ()) if ts > pk.ts)
+            print("    pid=%-10s submitted on loop %-3d  idle polls on that "
+                  "loop after the park: %d%s"
+                  % (pk.pid, lp[1], after,
+                     "   <-- loop went QUIET" if after == 0 else ""))
+        print("    (a loop that kept polling was alive and still got no")
+        print("     completion; one that went quiet was never re-entered --")
+        print("     note an always-busy loop emits no IDLE poll either, so")
+        print("     read 0 together with that loop's other activity.)")
         print("")
     if n_submit_fail:
         print("*** %d XTC_TAIL_SUBMIT_FAIL event(s): a submission was REFUSED"
