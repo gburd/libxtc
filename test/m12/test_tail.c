@@ -9,6 +9,7 @@
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -18,6 +19,7 @@
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_io.h"
+#include "xtc_aio.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_tail.h"
@@ -436,6 +438,173 @@ test_tail_park_fd_disabled(const MunitParameter p[], void *d)
 #endif /* !_WIN32 */
 
 
+
+/*
+ * REAP: every completion the reaper consumes is recorded with the tag it
+ * resolved to, and every task that PARKed and later WOKE has a REAP for it.
+ *
+ * This is the join that answers "was the wake never generated, or generated
+ * and lost after dispatch".  The test asserts the chain is COMPLETE on a
+ * healthy run -- PARK_TASK -> REAP -> WAKE for the same task pointer -- which
+ * is what makes an incomplete chain in the field meaningful.
+ *
+ * Non-vacuity is proven out of band: planting a 1-in-3 drop of reaped
+ * completions before dispatch turns the balanced counts below into
+ * "REAP, no WAKE" strands (tools/xtc-tail.py --strands buckets them), and
+ * hangs this workload.  A gate that cannot fail is decoration.
+ */
+struct reap_ctx { int rc; };
+
+/*
+ * Bound the run.  A lost aio wake means the parked fiber never resumes and the
+ * loop never drains, so without this the test HANGS -- which in CI burns the
+ * whole job and reports nothing.  A bounded deadline plus an unconditional
+ * xtc_loop_stop turns that into a normal assertion failure with the tally
+ * still readable.  (Learned the hard way: raising a deadline once converted a
+ * bounded failure into a 45-minute hang.)
+ */
+struct reap_wd { xtc_loop_t *loop; _Atomic int done; };
+
+static void *
+reap_watchdog(void *arg)
+{
+	struct reap_wd *w = arg;
+	int i;
+	for (i = 0; i < 100; i++) {          /* <= 10s */
+		if (atomic_load(&w->done))
+			return NULL;
+		usleep(100000);
+	}
+	(void)xtc_loop_stop(w->loop);        /* unconditional: never wedge */
+	return NULL;
+}
+
+static void
+reap_worker(void *arg)
+{
+	struct reap_ctx *c = arg;
+	char buf[1024];
+	char path[] = "/tmp/xtc_tail_reapXXXXXX";
+	int fd, i;
+
+	memset(buf, 'z', sizeof buf);
+	fd = mkstemp(path);
+	if (fd < 0) { c->rc = XTC_E_INTERNAL; return; }
+	(void)unlink(path);
+	for (i = 0; i < 3; i++) {
+		if (xtc_aio_pwrite(fd, buf, sizeof buf,
+		    (int64_t)i * (int64_t)sizeof buf) < 0) {
+			c->rc = XTC_E_INTERNAL; close(fd); return;
+		}
+		if (xtc_aio_fdatasync(fd) != XTC_OK) {
+			c->rc = XTC_E_INTERNAL; close(fd); return;
+		}
+	}
+	close(fd);
+	c->rc = XTC_OK;
+}
+
+struct reap_tally {
+	size_t n_reap_tagged, n_reap_zero, n_wake, n_ptask;
+	uint64_t ptask[256], reap[512], wake[256];
+	size_t np, nr, nw;
+};
+
+static int
+reap_visit(const xtc_tail_rec_t *r, void *u)
+{
+	struct reap_tally *t = u;
+	switch (r->kind) {
+	case XTC_TAIL_REAP:
+		if (r->detail != 0) {
+			t->n_reap_tagged++;
+			if (t->nr < 512) t->reap[t->nr++] = r->detail;
+		} else
+			t->n_reap_zero++;
+		break;
+	case XTC_TAIL_WAKE:
+		t->n_wake++;
+		if (t->nw < 256) t->wake[t->nw++] = r->detail;
+		break;
+	case XTC_TAIL_PARK_TASK:
+		t->n_ptask++;
+		if (t->np < 256) t->ptask[t->np++] = r->detail;
+		break;
+	default: break;
+	}
+	return 0;
+}
+
+static MunitResult
+test_tail_reap(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	const char *backend = xtc_io_backend_name();
+	/*
+	 * XTC_TAIL_REAP records the consumption of a COMPLETION-queue entry,
+	 * which only the io_uring backend has.  Readiness backends (epoll,
+	 * kqueue, IOCP/AFD, poll, select) have no CQE to reap, so the event
+	 * cannot fire and the chain assertion below does not apply.  Skip with
+	 * the reason recorded rather than weakening the assertion.
+	 *
+	 * Checked at RUNTIME via the public backend name, not with a build
+	 * macro: the backend can fall back at init (io_uring probe failure on
+	 * an old kernel or a restricted container), so what the build selected
+	 * is not always what is running.
+	 */
+	if (backend == NULL || strcmp(backend, "uring") != 0) {
+		(void)loop; (void)p; (void)d;
+		return MUNIT_SKIP;
+	}
+	struct reap_ctx c;
+	struct reap_tally t;
+	struct reap_wd wd;
+	pthread_t wdt;
+	size_t i, j, joined_reap = 0, joined_wake = 0;
+	(void)p; (void)d;
+
+	memset(&c, 0, sizeof c);
+	(void)xtc_tail_reset();
+	xtc_tail_enable(XTC_TAIL_SCHED);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, reap_worker, &c, NULL, NULL),
+	    ==, XTC_OK);
+	wd.loop = loop;
+	atomic_store(&wd.done, 0);
+	munit_assert_int(pthread_create(&wdt, NULL, reap_watchdog, &wd), ==, 0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	atomic_store(&wd.done, 1);
+	munit_assert_int(pthread_join(wdt, NULL), ==, 0);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	/* If the watchdog had to stop the loop, the fiber never finished --
+	 * that IS the lost-wake symptom, so report it as such. */
+	munit_assert_int(c.rc, ==, XTC_OK);
+
+	memset(&t, 0, sizeof t);
+	munit_assert_int(xtc_tail_read(reap_visit, &t), ==, XTC_OK);
+
+	/* Absence is only meaningful in an unwrapped ring. */
+	munit_assert_uint64(xtc_tail_dropped(), ==, 0);
+
+	/* The aio path parked, so all three kinds must be present. */
+	munit_assert_size(t.n_ptask, >, 0);
+	munit_assert_size(t.n_reap_tagged, >, 0);
+	munit_assert_size(t.n_wake, >, 0);
+
+	/* Every parked task was reaped AND woken -- the complete chain. */
+	for (i = 0; i < t.np; i++) {
+		for (j = 0; j < t.nr; j++)
+			if (t.ptask[i] == t.reap[j]) { joined_reap++; break; }
+		for (j = 0; j < t.nw; j++)
+			if (t.ptask[i] == t.wake[j]) { joined_wake++; break; }
+	}
+	munit_assert_size(joined_reap, ==, t.np);
+	munit_assert_size(joined_wake, ==, t.np);
+
+	xtc_tail_disable();
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/sched",        test_tail_sched,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/disabled",     test_tail_disabled,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -444,6 +613,7 @@ static MunitTest tests[] = {
 	{ "/wake_latency", test_tail_wake_latency, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/park_fd",      test_tail_park_fd,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/park_fd_off",  test_tail_park_fd_disabled, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reap",         test_tail_reap,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m12/tail", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

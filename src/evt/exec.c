@@ -372,6 +372,13 @@ xtc_exec_init(xtc_exec_t **out, int n_loops)
 			return rc;
 		}
 		e->loops[i]->exec_id = i;
+		/* Label this loop's io so XTC_TAIL_REAP, emitted inside
+		 * xtc_io_poll where the loop is not visible, can name the
+		 * reaping loop.  A label only -- never used for control. */
+		if (e->loops[i]->io != NULL) {
+			extern void __xtc_io_set_tail_loop_id(xtc_io_t *, int);
+			__xtc_io_set_tail_loop_id(e->loops[i]->io, i);
+		}
 		e->loops[i]->exec = e;
 	}
 

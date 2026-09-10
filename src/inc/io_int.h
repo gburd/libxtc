@@ -181,6 +181,13 @@ struct xtc_io {
 	int              cap_pending_del;
 	_Atomic int      has_pending_del;  /* fast, lock-free "is queue non-empty?" */
 	pthread_mutex_t  del_lock;        /* guards ONLY pending_del (not fds/ring) */
+	/*
+	 * The exec-relative id of the loop that owns this io, purely as a
+	 * LABEL for XTC_TAIL_REAP (which is emitted inside xtc_io_poll, where
+	 * the reap outcome is visible but the loop is not).  -1 until the
+	 * owning loop publishes it; never used for control flow.
+	 */
+	int              tail_loop_id;
 	pthread_t        owner_tid;       /* the thread that polls this io */
 	_Atomic int      owner_set;       /* 1 once owner_tid is recorded */
 #if defined(XTC_DIAGNOSTIC)
@@ -256,5 +263,12 @@ struct xtc_io {
  * the sole caller is xtc_proc_wait_fd's post-migration cleanup.
  */
 int __xtc_io_defer_del_fd(xtc_io_t *io, int fd);
+
+/*
+ * Label an io with the exec-relative id of the loop that owns it, for
+ * XTC_TAIL_REAP.  No-op on backends that do not reap CQEs.  Label only --
+ * never used for control flow.
+ */
+void __xtc_io_set_tail_loop_id(xtc_io_t *io, int id);
 
 #endif /* XTC_IO_INT_H */

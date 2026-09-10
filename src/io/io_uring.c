@@ -20,9 +20,12 @@
 #if defined(XTC_IO_BACKEND_URING)
 
 #include "io_int.h"
+#include "xtc_tail.h"    /* xtc_pid_t, XTC_TAIL_REAP */
+#include "tail_int.h"   /* XTC_TAIL_REAP: the CQE-consumed event */
 #include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
 
 #include <errno.h>
+#include <string.h>
 #include <unistd.h>
 #include <liburing.h>
 #include <poll.h>
@@ -229,6 +232,7 @@ __xtc_io_backend_init(xtc_io_t *io)
 	io->cap_pending_del = 0;
 	atomic_store_explicit(&io->has_pending_del, 0, memory_order_relaxed);
 	atomic_store_explicit(&io->owner_set, 0, memory_order_relaxed);
+	io->tail_loop_id = -1;   /* label only; the owning loop publishes it */
 	if (pthread_mutex_init(&io->del_lock, NULL) != 0) {
 		io_uring_queue_exit(&io->ring);
 		return XTC_E_INTERNAL;
@@ -524,6 +528,27 @@ __drain_pending_del(xtc_io_t *io)
  * XTC_NOALLOC_OK -- the region resumes immediately after it.  The
  * steady-state dispatch of a ready fd, an AIO completion, or the
  * wakeup event never allocates. */
+/*
+ * Record that a CQE's life ended here, and what tag it resolved to.
+ *
+ * tag == NULL means the completion was consumed and NOT handed to dispatch.
+ * That is correct for the wakeup pipe and for a poll_remove cancel, and it is
+ * also the signature of a completion dropped because its registration was
+ * already torn down -- a timeline that cannot see the discard cannot tell a
+ * deliberate one from a bug, which is the whole reason this exists.
+ */
+static void
+__tail_reap(xtc_io_t *io, void *tag)
+{
+	xtc_pid_t lp;
+	if (!__xtc_tail_on(XTC_TAIL_SCHED))
+		return;
+	memset(&lp, 0, sizeof lp);
+	lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ? io->tail_loop_id : 0);
+	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_REAP, lp,
+	    (uint64_t)(uintptr_t)tag);
+}
+
 int
 xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
             int64_t timeout_ns, int *n_out)
@@ -592,6 +617,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				events[got].flags = XTC_IO_AIO;
 				got++;
 			}
+			__tail_reap(io, a->tag);
 			io_uring_cqe_seen(&io->ring, cqe);
 			cqe = NULL;
 			continue;
@@ -618,6 +644,11 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				}
 				__os_free(uf);
 			}
+			/* Consumed and deliberately NOT dispatched: the
+			 * registration was deleted.  Recorded with tag 0 so
+			 * the discard is VISIBLE -- an invisible drop here is
+			 * exactly the shape of a lost wake. */
+			__tail_reap(io, NULL);
 			io_uring_cqe_seen(&io->ring, cqe);
 			cqe = NULL;
 			continue;
@@ -644,6 +675,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				if (!wakeup_emitted) {
 					int drc = __xtc_io_drain_wakeup(io);
 					if (drc != XTC_OK) {
+						__tail_reap(io, NULL);
 						io_uring_cqe_seen(&io->ring, cqe);
 						return drc;
 					}
@@ -671,6 +703,11 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				}
 			}
 		}
+		/* uf==NULL is a poll_remove cancel CQE (user_data NULL by
+		 * design); the wakeup pipe has no task either.  Both report
+		 * tag 0, which is why REAP alone is not a bug signal -- it is
+		 * the JOIN that matters. */
+		__tail_reap(io, (uf != NULL && !uf->is_wakeup) ? uf->tag : NULL);
 		io_uring_cqe_seen(&io->ring, cqe);
 		cqe = NULL;
 	}

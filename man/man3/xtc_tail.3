@@ -206,7 +206,8 @@ is to infer from the absence of other events -- which cannot tell a dead loop
 apart from the end of the recording window.
 .Pp
 .Dv XTC_TAIL_WAKE
-is emitted from the completion dispatch (the waker side).  Its
+is emitted from the completion dispatch (the waker side).
+Its
 .Fa pid
 carries only the dispatching
 .Fa loop_id
@@ -215,9 +216,92 @@ carries only the dispatching
 is the task pointer as an integer, which is the join key against the
 .Li task
 column of
-.Nm xtc-procs .
-It separates "the wake was never generated" from "the wake was generated
-and the task still never ran".
+.Nm xtc-procs
+and against
+.Dv XTC_TAIL_PARK_TASK .
+.Pp
+.Em Note :
+an earlier version of this page said to join
+.Dv XTC_TAIL_WAKE
+against the
+.Fa detail
+of the aio
+.Dv XTC_TAIL_PARK ,
+claiming it carried a task pointer.
+It does not -- an aio PARK's
+.Fa detail
+is the OPCODE.
+The two key spaces do not intersect, and that instruction
+sent a consumer chasing a join that could not be performed.
+.Dv XTC_TAIL_PARK_TASK
+exists because of it.
+.Pp
+.Dv XTC_TAIL_PARK_TASK
+is emitted immediately before the
+.Dv XTC_TAIL_PARK
+it describes, from the same fiber, and carries the PARKING proc's
+.Fa pid
+with that fiber's task pointer in
+.Fa detail .
+It exists solely to make
+.Dv XTC_TAIL_WAKE
+joinable: PARK carries the pid and, for an aio park, the opcode a consumer
+needs to tell an fdatasync park from a read park, so overwriting that opcode
+with the task pointer would trade one key for the other.
+Emitting both gives
+both.
+All three park sites emit it -- aio,
+.Fn xtc_proc_wait_fd
+readiness, and mailbox recv.
+.Pp
+.Dv XTC_TAIL_REAP
+records that a completion-queue entry was consumed by a reaping loop, and what
+tag it resolved to.
+Its
+.Fa pid
+carries only the reaping
+.Fa loop_id ;
+its
+.Fa detail
+is the same task pointer the other two carry, or
+.Li 0
+when the entry was consumed WITHOUT being handed to dispatch.
+A zero is
+expected for the wakeup pipe and for a poll-remove cancel, and is also the
+signature of a completion dropped because its registration was already torn
+down -- so a zero alone is not a fault; the join is what matters.
+.Pp
+Together the four events localize a lost wakeup to one step, and the steps have
+different fixes:
+.Bl -bullet -offset indent -compact
+.It
+a
+.Dv PARK_TASK
+whose task has no
+.Dv REAP :
+the completion never came back from the ring.
+.It
+a
+.Dv REAP
+with no
+.Dv WAKE :
+the reaper consumed it and never handed it to dispatch.
+.It
+a
+.Dv WAKE
+with no
+.Dv RUN :
+dispatch ran; the loss is downstream of it.
+.El
+.Pp
+.Nm xtc-tail.py Fl -strands
+performs this classification.
+Every bucket is an ABSENCE claim, so check
+.Fn xtc_tail_dropped
+first: in a wrapped ring an absence may only mean the event was evicted.
+.Dv XTC_TAIL_REAP
+is the highest-volume event here, one per completion, so prefer a short
+capture window.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_tail_enable(XTC_TAIL_SCHED);
