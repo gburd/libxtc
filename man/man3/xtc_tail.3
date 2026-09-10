@@ -306,8 +306,16 @@ dispatch ran; the loss is downstream of it.
 records that an SQE was handed to the kernel, keyed by the task the request is
 on behalf of, and
 .Dv XTC_TAIL_SUBMIT_FAIL
-records that a submission did NOT reach it
-.Pq Fa detail " = the negated errno" .
+records that a submission did NOT reach it.
+Its
+.Fa detail
+carries the negated errno when the submit was refused, or -- for a SHORT
+submit, which has no errno -- the number of SQEs left behind, offset by
+.Dv XTC_TAIL_SHORT_SUBMIT_BASE .
+Both shapes matter: the submit call returns a NEGATIVE errno or the NUMBER of
+entries it consumed, which can be fewer than were queued, so a short submit
+looks like success to an errno-only check while an SQE never reached the
+kernel.
 Together they split the first bucket above: a completion that never came back
 may never have been ASKED for.
 .Dv XTC_TAIL_SUBMIT_FAIL

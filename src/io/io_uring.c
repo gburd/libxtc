@@ -137,6 +137,7 @@ static int
 __ring_submit(xtc_io_t *io)
 {
 	int rc;
+	unsigned queued;
 #if defined(XTC_DIAGNOSTIC)
 	if (atomic_load_explicit(&io->owner_set, memory_order_acquire) &&
 	    !pthread_equal(pthread_self(), io->owner_tid)) {
@@ -147,6 +148,7 @@ __ring_submit(xtc_io_t *io)
 		abort();
 	}
 #endif
+	queued = io_uring_sq_ready(&io->ring);
 	rc = io_uring_submit(&io->ring);
 	/*
 	 * A submit that does not reach the kernel leaves any fiber parked on
@@ -154,14 +156,32 @@ __ring_submit(xtc_io_t *io)
 	 * posted -- indistinguishable, from the reap side, from a completion
 	 * that vanished.  Every caller here historically discarded this rc.
 	 * Record the failure so the absence has an explanation.
+	 *
+	 * BOTH failure shapes count, and the second is the subtle one:
+	 * io_uring_submit returns a NEGATIVE errno, or the NUMBER of SQEs it
+	 * consumed -- which can be FEWER than were queued.  A short submit is
+	 * a positive return, so a `rc < 0` test alone reports success while
+	 * some SQE never reached the kernel.  That is precisely the state a
+	 * consumer is looking at (SUBMIT recorded, no completion, no
+	 * SUBMIT_FAIL), so leaving it invisible would let this instrument
+	 * exonerate the very path under suspicion.
 	 */
-	if (rc < 0 && __xtc_tail_on(XTC_TAIL_SCHED)) {
+	if (__xtc_tail_on(XTC_TAIL_SCHED) &&
+	    (rc < 0 || (unsigned)rc < queued)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
 		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
 		    io->tail_loop_id : 0);
+		/*
+		 * detail: the negated errno for an error, or -- for a short
+		 * submit, which has no errno -- the count left behind, offset
+		 * by XTC_TAIL_SHORT_SUBMIT_BASE so the two cannot be
+		 * confused with each other.
+		 */
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT_FAIL, lp,
-		    (uint64_t)(unsigned int)-rc);
+		    rc < 0 ? (uint64_t)(unsigned int)-rc :
+		    (uint64_t)XTC_TAIL_SHORT_SUBMIT_BASE +
+		    (uint64_t)(queued - (unsigned)rc));
 	}
 	return rc;
 }

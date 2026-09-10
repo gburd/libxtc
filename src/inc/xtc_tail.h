@@ -189,6 +189,16 @@ enum xtc_tail_kind {
 	XTC_TAIL_SUBMIT_FAIL = 12
 };
 
+/*
+ * XTC_TAIL_SUBMIT_FAIL detail encoding.  Below this value the detail is a
+ * plain errno (the submit was refused); at or above it, subtract the base to
+ * get the number of SQEs left UNSUBMITTED by a short submit, which has no
+ * errno of its own.  Two failure shapes, one field, no ambiguity: a short
+ * submit returns a POSITIVE count, so an errno-only report would call it
+ * success while an SQE never reached the kernel.
+ */
+#define XTC_TAIL_SHORT_SUBMIT_BASE 4096
+
 /* One recorded event.  Fixed layout; the binary dump writes it verbatim
  * behind a versioned header, so a reader across the wire/disk decodes it
  * without guessing. */
