@@ -120,7 +120,40 @@ enum xtc_tail_kind {
 	 * no following RUN for that pid, means dispatch ran and the loss is
 	 * downstream of it.  Those are different bugs.
 	 */
-	XTC_TAIL_PARK_TASK = 9
+	XTC_TAIL_PARK_TASK = 9,
+	/*
+	 * A CQE was REAPED from a ring and its life ended here.  pid.loop_id
+	 * is the REAPING loop; local_id/gen are 0 (the reaper holds a ring,
+	 * not a proc).  detail is the tag the CQE resolved to -- the same
+	 * xtc_task_t * that PARK_TASK and WAKE carry -- or 0 when it resolved
+	 * to no tag at all.
+	 *
+	 * This closes the LAST gap in the chain.  PARK_TASK/WAKE/RUN can prove
+	 * a completion never reached dispatch, but not WHY: the CQE might never
+	 * have been posted, or been posted and consumed by the reaper without
+	 * ever being handed on.  Those are different subsystems.  A REAP event
+	 * for task T with no WAKE for T means the reaper consumed T's
+	 * completion and dropped it; no REAP at all means the kernel never
+	 * posted it (or we never looked).
+	 *
+	 * Emitted at every point where a CQE is consumed, INCLUDING the paths
+	 * that deliberately discard one, because a deliberate discard is
+	 * indistinguishable from a bug in a timeline that cannot see it:
+	 *
+	 *   detail = <task*>  the completion was stored for dispatch
+	 *   detail = 0        consumed and NOT handed on.  Expected for the
+	 *                     wakeup-pipe CQE and for a poll_remove cancel
+	 *                     (user_data NULL by design), and the signature of
+	 *                     a completion dropped because its registration was
+	 *                     already torn down.
+	 *
+	 * Rides XTC_TAIL_SCHED like the other kinds.  It is the highest-volume
+	 * event here -- one per CQE -- so on a busy ring it WILL dominate the
+	 * buffer; check xtc_tail_dropped() before believing any absence, and
+	 * prefer a short capture window.  (The LOOP_POLL lesson: an event that
+	 * crowds out the data it explains is worse than none.)
+	 */
+	XTC_TAIL_REAP = 10
 };
 
 /* One recorded event.  Fixed layout; the binary dump writes it verbatim

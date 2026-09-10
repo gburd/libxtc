@@ -38,7 +38,7 @@ SOURCES = {1: "SCHED", 2: "MSG", 4: "IO", 8: "OS"}
 KINDS = {
     0: "SPAWN", 1: "EXIT", 2: "WAKE", 3: "RUN", 4: "PARK",
     5: "SEND", 6: "RECV", 7: "MBOX_HWM", 8: "LOOP_POLL",
-    9: "PARK_TASK",
+    9: "PARK_TASK", 10: "REAP",
 }
 # detail-field meaning per kind, for the human column
 DETAIL = {
@@ -53,6 +53,12 @@ DETAIL = {
     # _PTR_DETAIL): PARK_TASK is the key a WAKE joins to.
     "PARK_TASK": "task",
     "WAKE": "task",
+    # REAP: a CQE was consumed by the reaping loop.  detail is the tag it
+    # resolved to, or 0 when it was consumed WITHOUT being handed to dispatch
+    # (the wakeup pipe, a poll_remove cancel, or a completion dropped because
+    # its registration was already gone).  0 is common and not by itself a
+    # bug -- the signal is a REAP whose task never appears in a later WAKE.
+    "REAP": "task",
 }
 
 
@@ -136,7 +142,7 @@ def matches(ev, args):
 # Kinds whose detail is a POINTER: render hex so a WAKE and the
 # PARK_TASK it joins to are visually comparable, and so the value lines
 # up with xtc-procs' `task` column.
-_PTR_DETAIL = ("WAKE", "PARK_TASK")
+_PTR_DETAIL = ("WAKE", "PARK_TASK", "REAP")
 
 
 def fmt(ev, base):
@@ -196,6 +202,77 @@ def cmd_summary(events, args):
         print("  %-10s %s" % (pid, kinds))
 
 
+def cmd_strands(events, args):
+    """Classify every parked task by how far its wake got.
+
+    This is the branch question, automated.  A fiber that parks and never runs
+    again failed at exactly one of three steps, and the fix differs per step:
+
+      no REAP           the kernel never posted the completion (or we never
+                        looked) -- look at submission / the ring
+      REAP, no WAKE     the reaper consumed it and never handed it to dispatch
+                        -- look at the reap->dispatch path
+      WAKE, no RUN      dispatch ran; the loss is downstream, in the waker CAS
+                        or the enqueue
+
+    Doing this by hand across thousands of events is error-prone: a consumer
+    once got a decisive-looking but structurally impossible answer that way,
+    by keying the join on a pid the event does not carry.  PARK_TASK shares
+    the task pointer with both REAP and WAKE, so it is the join that holds.
+    """
+    parked = {}
+    for e in events:
+        if e.kind_name == "PARK_TASK":
+            parked[e.detail] = e
+    reaped = set(e.detail for e in events
+                 if e.kind_name == "REAP" and e.detail)
+    waked = set(e.detail for e in events if e.kind_name == "WAKE")
+    ran_after = {}
+    for e in events:
+        if e.kind_name == "RUN":
+            ran_after.setdefault(e.pid, []).append(e.ts)
+
+    order = ["no REAP", "REAP, no WAKE", "WAKE, no RUN", "resumed"]
+    buckets = dict((k, []) for k in order)
+    for task, pk in sorted(parked.items(), key=lambda kv: kv[1].ts):
+        if any(ts > pk.ts for ts in ran_after.get(pk.pid, ())):
+            buckets["resumed"].append((pk, task))
+        elif task in waked:
+            buckets["WAKE, no RUN"].append((pk, task))
+        elif task in reaped:
+            buckets["REAP, no WAKE"].append((pk, task))
+        else:
+            buckets["no REAP"].append((pk, task))
+
+    print("=== %d parked task(s), classified by how far the wake got ==="
+          % len(parked))
+    for name in order:
+        print("  %-16s %d" % (name, len(buckets[name])))
+    print("")
+    why = {
+        "no REAP": "the completion never came back from the ring",
+        "REAP, no WAKE": "consumed by the reaper, never handed to dispatch",
+        "WAKE, no RUN": "dispatch ran; the loss is after it",
+    }
+    for name in order[:3]:
+        rows = buckets[name]
+        if not rows:
+            continue
+        print("--- %s ---" % name)
+        print("    %s" % why[name])
+        for pk, task in rows[:args.top]:
+            print("    pid=%-10s task=0x%x  parked at %d ns"
+                  % (pk.pid, task, pk.ts - events[0].ts))
+        if len(rows) > args.top:
+            print("    ... %d more" % (len(rows) - args.top))
+        print("")
+    if not any(buckets[n] for n in order[:3]):
+        print("  no stranded tasks: every park was followed by a RUN")
+    print("NOTE: every bucket here is an ABSENCE claim.  Check dropped first")
+    print("      (xtc-tail-dropped, or the dump header) -- in a wrapped ring")
+    print("      an absence may only mean the event was evicted.")
+
+
 def cmd_wake_latency(events, args):
     runs = [e for e in events
             if e.kind_name == "RUN" and matches(e, args)]
@@ -219,6 +296,9 @@ def main():
     ap.add_argument("--summary", action="store_true")
     ap.add_argument("--step", action="store_true")
     ap.add_argument("--wake-latency", action="store_true")
+    ap.add_argument("--strands", action="store_true",
+                    help="classify parked tasks: no REAP / REAP,no WAKE / "
+                         "WAKE,no RUN -- the branch question, automated")
     ap.add_argument("--pid")
     ap.add_argument("--source")
     ap.add_argument("--kind", help="comma-separated: SPAWN,EXIT,RUN,...")
@@ -244,6 +324,8 @@ def main():
 
     if args.summary:
         cmd_summary(events, args)
+    elif args.strands:
+        cmd_strands(events, args)
     elif args.wake_latency:
         cmd_wake_latency(events, args)
     elif args.step:

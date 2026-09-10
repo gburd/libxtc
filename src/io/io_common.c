@@ -298,3 +298,23 @@ xtc_io_set_iowq_max_workers(unsigned bound, unsigned unbound)
 	(void)unbound;
 }
 #endif
+
+/*
+ * Publish the owning loop's exec-relative id on its io, as a LABEL for
+ * XTC_TAIL_REAP.  REAP is emitted inside xtc_io_poll, which can see the reap
+ * outcome but not the loop, so the id has to be recorded on the io itself.
+ *
+ * Only the io_uring backend carries the field (and is the only backend that
+ * reaps CQEs); everywhere else this is a no-op so callers need no #ifdef.
+ */
+void
+__xtc_io_set_tail_loop_id(xtc_io_t *io, int id)
+{
+#if defined(XTC_IO_BACKEND_URING)
+	if (io != NULL)
+		io->tail_loop_id = id;
+#else
+	(void)io;
+	(void)id;
+#endif
+}
