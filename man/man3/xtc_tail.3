@@ -278,6 +278,14 @@ different fixes:
 a
 .Dv PARK_TASK
 whose task has no
+.Dv SUBMIT :
+no SQE was ever queued for it.
+.It
+a
+.Dv PARK_TASK
+whose task has a
+.Dv SUBMIT
+but no
 .Dv REAP :
 the completion never came back from the ring.
 .It
@@ -293,6 +301,19 @@ with no
 .Dv RUN :
 dispatch ran; the loss is downstream of it.
 .El
+.Pp
+.Dv XTC_TAIL_SUBMIT
+records that an SQE was handed to the kernel, keyed by the task the request is
+on behalf of, and
+.Dv XTC_TAIL_SUBMIT_FAIL
+records that a submission did NOT reach it
+.Pq Fa detail " = the negated errno" .
+Together they split the first bucket above: a completion that never came back
+may never have been ASKED for.
+.Dv XTC_TAIL_SUBMIT_FAIL
+is the only kind here whose mere presence is a fault -- every other needs a
+join to mean anything -- because a fiber parked on a refused request can never
+be woken.
 .Pp
 .Nm xtc-tail.py Fl -strands
 performs this classification.

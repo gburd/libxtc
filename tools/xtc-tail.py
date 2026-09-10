@@ -38,7 +38,7 @@ SOURCES = {1: "SCHED", 2: "MSG", 4: "IO", 8: "OS"}
 KINDS = {
     0: "SPAWN", 1: "EXIT", 2: "WAKE", 3: "RUN", 4: "PARK",
     5: "SEND", 6: "RECV", 7: "MBOX_HWM", 8: "LOOP_POLL",
-    9: "PARK_TASK", 10: "REAP",
+    9: "PARK_TASK", 10: "REAP", 11: "SUBMIT", 12: "SUBMIT_FAIL",
 }
 # detail-field meaning per kind, for the human column
 DETAIL = {
@@ -59,6 +59,11 @@ DETAIL = {
     # its registration was already gone).  0 is common and not by itself a
     # bug -- the signal is a REAP whose task never appears in a later WAKE.
     "REAP": "task",
+    # SUBMIT carries the task the request is on behalf of (0 for the wakeup
+    # pipe).  SUBMIT_FAIL carries the negated errno and is a fault by its
+    # mere presence -- a fiber is parked on a request the kernel refused.
+    "SUBMIT": "task",
+    "SUBMIT_FAIL": "errno",
 }
 
 
@@ -142,7 +147,7 @@ def matches(ev, args):
 # Kinds whose detail is a POINTER: render hex so a WAKE and the
 # PARK_TASK it joins to are visually comparable, and so the value lines
 # up with xtc-procs' `task` column.
-_PTR_DETAIL = ("WAKE", "PARK_TASK", "REAP")
+_PTR_DETAIL = ("WAKE", "PARK_TASK", "REAP", "SUBMIT")
 
 
 def fmt(ev, base):
@@ -220,29 +225,54 @@ def cmd_strands(events, args):
     by keying the join on a pid the event does not carry.  PARK_TASK shares
     the task pointer with both REAP and WAKE, so it is the join that holds.
     """
+    # A task pointer is stable for the fiber's whole LIFE, so every one of
+    # these lookups must be time-scoped to "after the final park".  The first
+    # version scoped only the `resumed` test and used timeless sets for WAKE
+    # and REAP: any fiber with a healthy history was therefore guaranteed to
+    # be in the WAKE set (from its own earlier, successful cycles) and got
+    # filed under "WAKE, no RUN" before the REAP test was ever reached.
+    #
+    # That is self-concealing -- the MORE normal work a fiber did before
+    # stranding, the more confidently it was misclassified -- and it inverted
+    # the answer on real traces: 28 of 30 strands reported as "WAKE, no RUN"
+    # when all 30 were "no REAP".  A consumer caught it by hand-tracing one
+    # pid (699 events, 207 WAKEs, none after the strand).  The planted-bug
+    # gate missed it because its fibers have short histories.
     parked = {}
     for e in events:
         if e.kind_name == "PARK_TASK":
             parked[e.detail] = e
-    reaped = set(e.detail for e in events
-                 if e.kind_name == "REAP" and e.detail)
-    waked = set(e.detail for e in events if e.kind_name == "WAKE")
-    ran_after = {}
+    reaped_at, waked_at, ran_at, subm_at = {}, {}, {}, {}
+    n_submit_fail = 0
     for e in events:
-        if e.kind_name == "RUN":
-            ran_after.setdefault(e.pid, []).append(e.ts)
+        if e.kind_name == "REAP" and e.detail:
+            reaped_at.setdefault(e.detail, []).append(e.ts)
+        elif e.kind_name == "WAKE":
+            waked_at.setdefault(e.detail, []).append(e.ts)
+        elif e.kind_name == "RUN":
+            ran_at.setdefault(e.pid, []).append(e.ts)
+        elif e.kind_name == "SUBMIT" and e.detail:
+            subm_at.setdefault(e.detail, []).append(e.ts)
+        elif e.kind_name == "SUBMIT_FAIL":
+            n_submit_fail += 1
 
-    order = ["no REAP", "REAP, no WAKE", "WAKE, no RUN", "resumed"]
+    order = ["never submitted", "no REAP", "REAP, no WAKE", "WAKE, no RUN",
+             "resumed"]
     buckets = dict((k, []) for k in order)
     for task, pk in sorted(parked.items(), key=lambda kv: kv[1].ts):
-        if any(ts > pk.ts for ts in ran_after.get(pk.pid, ())):
+        if any(ts > pk.ts for ts in ran_at.get(pk.pid, ())):
             buckets["resumed"].append((pk, task))
-        elif task in waked:
+        elif any(ts > pk.ts for ts in waked_at.get(task, ())):
             buckets["WAKE, no RUN"].append((pk, task))
-        elif task in reaped:
+        elif any(ts > pk.ts for ts in reaped_at.get(task, ())):
             buckets["REAP, no WAKE"].append((pk, task))
-        else:
+        elif any(ts >= pk.ts for ts in subm_at.get(task, ())):
             buckets["no REAP"].append((pk, task))
+        else:
+            # No submission at or after the park: we never asked the kernel
+            # for the completion this fiber is waiting on.  Distinguished
+            # from "no REAP" because no amount of polling can fix it.
+            buckets["never submitted"].append((pk, task))
 
     print("=== %d parked task(s), classified by how far the wake got ==="
           % len(parked))
@@ -250,11 +280,12 @@ def cmd_strands(events, args):
         print("  %-16s %d" % (name, len(buckets[name])))
     print("")
     why = {
-        "no REAP": "the completion never came back from the ring",
+        "never submitted": "no SQE was queued for this park -- we never asked",
+        "no REAP": "submitted, but the completion never came back",
         "REAP, no WAKE": "consumed by the reaper, never handed to dispatch",
         "WAKE, no RUN": "dispatch ran; the loss is after it",
     }
-    for name in order[:3]:
+    for name in order[:4]:
         rows = buckets[name]
         if not rows:
             continue
@@ -266,7 +297,14 @@ def cmd_strands(events, args):
         if len(rows) > args.top:
             print("    ... %d more" % (len(rows) - args.top))
         print("")
-    if not any(buckets[n] for n in order[:3]):
+    if n_submit_fail:
+        print("*** %d XTC_TAIL_SUBMIT_FAIL event(s): a submission was REFUSED"
+              % n_submit_fail)
+        print("    by the kernel.  Any fiber parked on one of those requests")
+        print("    can never be woken; this is a fault on its own, with no")
+        print("    join required.")
+        print("")
+    if not any(buckets[n] for n in order[:4]):
         print("  no stranded tasks: every park was followed by a RUN")
     print("NOTE: every bucket here is an ABSENCE claim.  Check dropped first")
     print("      (xtc-tail-dropped, or the dump header) -- in a wrapped ring")
