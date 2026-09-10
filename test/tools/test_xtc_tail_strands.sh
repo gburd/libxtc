@@ -93,17 +93,27 @@ cases = [(0x9000, "nosubmit"), (0xA000, "submit"), (0xB000, "reap"),
 for i, (task, reached) in enumerate(cases):
     loc = i + 1
     for _ in range(150):
+        # ORDER MATTERS AND MUST MATCH THE LIBRARY: the SQE is queued FIRST,
+        # then the fiber parks waiting for its completion.  So SUBMIT is
+        # strictly EARLIER than the park it belongs to, while REAP/WAKE/RUN
+        # are strictly later.  The first version of this gate emitted SUBMIT
+        # after the park and therefore validated the classifier's own wrong
+        # assumption instead of testing it -- the bug shipped and a consumer
+        # caught it.  A synthesized trace is only a control if its shape
+        # matches what the library really produces.
+        add(SUBMIT, 3, 0, 0, task)
         add(PARK_TASK, 24, loc, 1, task)
         add(PARK, 24, loc, 1, 837)
-        add(SUBMIT, 3, 0, 0, task)
         add(REAP, 3, 0, 0, task)
         add(WAKE, 3, 0, 0, task)
         add(RUN, 24, loc, 1, 5000)
-    # the final park, after which only `reached` steps happen
-    add(PARK_TASK, 24, loc, 1, task)
-    add(PARK, 24, loc, 1, 822)
+    # The final park.  "submit" and deeper get a SUBMIT BEFORE the park;
+    # "nosubmit" gets none, which is the only honest way to represent a
+    # request that was never queued.
     if reached in ("submit", "reap", "wake", "run"):
         add(SUBMIT, 3, 0, 0, task)
+    add(PARK_TASK, 24, loc, 1, task)
+    add(PARK, 24, loc, 1, 822)
     if reached in ("reap", "wake", "run"):
         add(REAP, 3, 0, 0, task)
     if reached in ("wake", "run"):

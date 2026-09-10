@@ -63,7 +63,7 @@ DETAIL = {
     # pipe).  SUBMIT_FAIL carries the negated errno and is a fault by its
     # mere presence -- a fiber is parked on a request the kernel refused.
     "SUBMIT": "task",
-    "SUBMIT_FAIL": "errno",
+    "SUBMIT_FAIL": "errno/short",
 }
 
 
@@ -150,8 +150,22 @@ def matches(ev, args):
 _PTR_DETAIL = ("WAKE", "PARK_TASK", "REAP", "SUBMIT")
 
 
+SHORT_SUBMIT_BASE = 4096
+
+
+def _submit_fail_detail(d):
+    """Render a SUBMIT_FAIL detail as the two shapes it encodes."""
+    if d >= SHORT_SUBMIT_BASE:
+        return "SHORT submit, %d SQE(s) not taken" % (d - SHORT_SUBMIT_BASE)
+    return "errno=%d" % d
+
+
 def fmt(ev, base):
     d = DETAIL.get(ev.kind_name)
+    if ev.kind_name == "SUBMIT_FAIL":
+        return "%12d ns  %-5s %-9s pid=%-10s  %s" % (
+            ev.ts - base, ev.source_name, ev.kind_name, ev.pid,
+            _submit_fail_detail(ev.detail))
     if ev.kind_name in _PTR_DETAIL:
         dstr = "  %s=0x%x" % (d or "detail", ev.detail)
     else:
@@ -207,6 +221,31 @@ def cmd_summary(events, args):
         print("  %-10s %s" % (pid, kinds))
 
 
+def _in_window(times, lo, hi):
+    """Is there a timestamp in the half-open window (lo, hi)?
+
+    SUBMIT runs the OTHER WAY from the rest of the chain, and getting that
+    backwards was the second time-direction bug here.  WAKE, REAP and RUN all
+    happen AFTER a fiber parks, so they match with `ts > pk.ts`.  A SUBMIT
+    happens BEFORE it -- you queue the SQE, then park waiting for its
+    completion -- so its timestamp is always LESS than the park's.  The first
+    version reused `ts >= pk.ts` for SUBMIT too, which can essentially never
+    match, so every genuinely-submitted request fell through to "never
+    submitted": a blanket 33-of-33 a consumer correctly refused to publish.
+
+    A LOWER bound is needed too, and "most recent SUBMIT before the park" is
+    not enough.  A task pointer is REUSED across the fiber's cycles, so an
+    unbounded look backwards finds a SUBMIT from an earlier, healthy cycle
+    and calls a never-submitted park submitted.  `lo` fences the search at
+    the end of the fiber's previous cycle -- its last RUN before this park --
+    so only a submission that could belong to THIS park counts.
+    """
+    for ts in times:
+        if lo < ts < hi:
+            return True
+    return False
+
+
 def cmd_strands(events, args):
     """Classify every parked task by how far its wake got.
 
@@ -256,6 +295,20 @@ def cmd_strands(events, args):
         elif e.kind_name == "SUBMIT_FAIL":
             n_submit_fail += 1
 
+    def _prev_cycle_end(pk):
+        """Timestamp of this pid's last RUN before pk -- the cycle fence.
+
+        Without it, a task pointer reused across cycles lets an old SUBMIT
+        vouch for a park that never submitted anything.  0 when the fiber has
+        no prior RUN (its first park), which correctly leaves the whole
+        preceding trace in scope.
+        """
+        best = 0
+        for ts in ran_at.get(pk.pid, ()):
+            if ts < pk.ts and ts > best:
+                best = ts
+        return best
+
     order = ["never submitted", "no REAP", "REAP, no WAKE", "WAKE, no RUN",
              "resumed"]
     buckets = dict((k, []) for k in order)
@@ -266,10 +319,10 @@ def cmd_strands(events, args):
             buckets["WAKE, no RUN"].append((pk, task))
         elif any(ts > pk.ts for ts in reaped_at.get(task, ())):
             buckets["REAP, no WAKE"].append((pk, task))
-        elif any(ts >= pk.ts for ts in subm_at.get(task, ())):
+        elif _in_window(subm_at.get(task, ()), _prev_cycle_end(pk), pk.ts):
             buckets["no REAP"].append((pk, task))
         else:
-            # No submission at or after the park: we never asked the kernel
+            # Nothing was submitted for THIS park: we never asked the kernel
             # for the completion this fiber is waiting on.  Distinguished
             # from "no REAP" because no amount of polling can fix it.
             buckets["never submitted"].append((pk, task))
