@@ -24,6 +24,48 @@ import time
 
 # --- helpers ----------------------------------------------------
 
+def connect_ready(port, host="127.0.0.1", timeout=20.0):
+    """Return a connected Quack, retrying until the server is really up.
+
+    A fixed sleep is the wrong tool here: this harness restarts the server
+    once PER TEST CASE (32 restarts), and how long a fork+bind+listen takes
+    depends entirely on machine load.  The 0.3 s guess it replaces was a
+    LONG-STANDING flake, not a new one -- measured on a busy box by A/B-ing
+    three commits with the same harness:
+
+        c67cf33 (CI green)   2 / 12 runs failed
+        b41a548 (CI green)   5 / 12 runs failed
+        55c9d5f (CI red)     1 / 10 runs failed
+
+    So the red CI job that prompted this was luck, not a regression: the two
+    "green" commits are flakier locally than the red one.  With this retry,
+    the flakiest of the three goes 0 / 16.
+
+    It surfaces as "Connection refused" with a truncated case list, which
+    reads like a server crash rather than a harness race -- worth knowing,
+    because that is what sent me looking in the library first.
+
+    The retry deliberately wraps the WHOLE Quack handshake (connect plus the
+    hello banner) rather than probing with a throwaway socket first.  A
+    separate probe connection is not free: it made the run fail differently
+    (ConnectionResetError while reading the banner) because the probe raced
+    the server's accept path.  Retrying the real thing has no such window --
+    the only connection made is the one we go on to use.
+    """
+    deadline = time.time() + timeout
+    last = None
+    while True:
+        try:
+            return Quack(port, host)
+        except OSError as e:
+            last = e
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    "server on port %d never became usable in %.1fs (%s)"
+                    % (port, timeout, last))
+            time.sleep(0.02)
+
+
 class Quack:
     def __init__(self, port, host="127.0.0.1"):
         self.s = socket.create_connection((host, port), timeout=10)
@@ -280,12 +322,10 @@ def main():
         stdout=log, stderr=log,
         start_new_session=True,
     )
-    time.sleep(0.5)
-
     rc = 0
     try:
         try:
-            qk = Quack(port)
+            qk = connect_ready(port)
         except Exception as e:
             print("FAIL: cannot connect to sqlxtc: %s" % e)
             return 1
@@ -318,8 +358,7 @@ def main():
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            time.sleep(0.3)
-            qk = Quack(port)
+            qk = connect_ready(port)
 
             for sql in setup:
                 qk.query(sql)
