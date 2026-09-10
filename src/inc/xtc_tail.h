@@ -53,10 +53,15 @@ enum xtc_tail_kind {
 	                          * because dispatch has a task, not a proc.
 	                          * detail = the xtc_task_t * as an integer,
 	                          * which is the join key: match it against
-	                          * the `task` column of xtc-procs (or the
-	                          * XTC_TAIL_PARK emitted by the same fiber,
-	                          * whose detail carries its own task pointer
-	                          * for aio parks).
+	                          * the `task` column of xtc-procs, or against
+	                          * the XTC_TAIL_PARK_TASK event the parking
+	                          * fiber emits just before its PARK.
+	                          *
+	                          * NOTE: XTC_TAIL_PARK's detail is the aio OP,
+	                          * NOT a task pointer.  An earlier version of
+	                          * this comment said otherwise and sent a
+	                          * consumer chasing a join that could not be
+	                          * performed; PARK_TASK exists because of it.
 	                          *
 	                          * This is the event that separates "the wake
 	                          * was never generated" from "the wake was
@@ -88,7 +93,34 @@ enum xtc_tail_kind {
 	 * Emitted after each completed xtc_io_poll on the loop's own ring, so
 	 * a loop that is still polling produces a steady stream even when it
 	 * dispatches nothing (detail = 0). */
-	XTC_TAIL_LOOP_POLL = 8
+	XTC_TAIL_LOOP_POLL = 8,
+	/*
+	 * The identity of the task a proc is parked as.  pid is the PARKING
+	 * proc; detail is its xtc_task_t * as an integer.
+	 *
+	 * This exists purely to make XTC_TAIL_WAKE joinable.  WAKE is emitted
+	 * from completion dispatch, which holds a task and no pid (there is no
+	 * task-to-proc back pointer), so it carries the task pointer.  PARK
+	 * carries the pid and, for an aio park, the OP in detail -- which a
+	 * consumer relies on to tell an fdatasync park from a read park.
+	 * Overwriting that op with the task pointer would trade one key for
+	 * the other; emitting this alongside gives both.
+	 *
+	 * Emitted immediately before the PARK it describes, from the same
+	 * fiber, so the pairing is unambiguous:
+	 *
+	 *     PARK_TASK  pid=25.1.1  detail=<task*>
+	 *     PARK       pid=25.1.1  detail=3        (XTC_AIO_FDATASYNC)
+	 *     ...
+	 *     WAKE       pid=<loop>  detail=<task*>  <- joins on detail
+	 *     RUN        pid=25.1.1  detail=<ns>
+	 *
+	 * A PARK_TASK whose task pointer never appears in a later WAKE means
+	 * the completion never reached dispatch.  One that does appear, with
+	 * no following RUN for that pid, means dispatch ran and the loss is
+	 * downstream of it.  Those are different bugs.
+	 */
+	XTC_TAIL_PARK_TASK = 9
 };
 
 /* One recorded event.  Fixed layout; the binary dump writes it verbatim
