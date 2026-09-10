@@ -153,7 +153,40 @@ enum xtc_tail_kind {
 	 * prefer a short capture window.  (The LOOP_POLL lesson: an event that
 	 * crowds out the data it explains is worse than none.)
 	 */
-	XTC_TAIL_REAP = 10
+	XTC_TAIL_REAP = 10,
+	/*
+	 * An SQE was handed to the kernel.  pid.loop_id is the SUBMITTING loop;
+	 * local_id/gen are 0.  detail is the task pointer the submission is on
+	 * behalf of -- the same key PARK_TASK, REAP and WAKE carry -- or 0 when
+	 * the submission is not tied to a parked task.
+	 *
+	 * This separates the two halves of "no REAP", which REAP alone cannot:
+	 * a completion that never came back may never have been ASKED FOR.
+	 *
+	 *   SUBMIT then REAP        normal.
+	 *   SUBMIT, never REAPed    the kernel took the request and no
+	 *                           completion came back -- look at the ring,
+	 *                           the wait, or the request itself.
+	 *   no SUBMIT at all        we never asked.  The fiber parked for a
+	 *                           completion that was never queued, which no
+	 *                           amount of polling can deliver.
+	 */
+	XTC_TAIL_SUBMIT = 11,
+	/*
+	 * A submission did NOT reach the kernel.  pid.loop_id is the submitting
+	 * loop; detail is the negated errno, or 0 if there was none.
+	 *
+	 * This is the one kind here whose mere PRESENCE is a fault -- every
+	 * other needs a join to mean anything.  If one appears, a fiber is
+	 * parked on a request the kernel never accepted, and no reap-side or
+	 * dispatch-side investigation can explain it.
+	 *
+	 * Reachable today: io_uring_submit returns the number of SQEs consumed
+	 * or a negative errno, and every submit site in the uring backend
+	 * discarded that value, so a partial or failed submit left a fiber
+	 * parked forever with nothing in flight, silently.
+	 */
+	XTC_TAIL_SUBMIT_FAIL = 12
 };
 
 /* One recorded event.  Fixed layout; the binary dump writes it verbatim

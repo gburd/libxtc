@@ -136,6 +136,7 @@ __pollres_to_flags(uint32_t res)
 static int
 __ring_submit(xtc_io_t *io)
 {
+	int rc;
 #if defined(XTC_DIAGNOSTIC)
 	if (atomic_load_explicit(&io->owner_set, memory_order_acquire) &&
 	    !pthread_equal(pthread_self(), io->owner_tid)) {
@@ -146,7 +147,23 @@ __ring_submit(xtc_io_t *io)
 		abort();
 	}
 #endif
-	return io_uring_submit(&io->ring);
+	rc = io_uring_submit(&io->ring);
+	/*
+	 * A submit that does not reach the kernel leaves any fiber parked on
+	 * one of these SQEs waiting for a completion that will never be
+	 * posted -- indistinguishable, from the reap side, from a completion
+	 * that vanished.  Every caller here historically discarded this rc.
+	 * Record the failure so the absence has an explanation.
+	 */
+	if (rc < 0 && __xtc_tail_on(XTC_TAIL_SCHED)) {
+		xtc_pid_t lp;
+		memset(&lp, 0, sizeof lp);
+		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
+		    io->tail_loop_id : 0);
+		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT_FAIL, lp,
+		    (uint64_t)(unsigned int)-rc);
+	}
+	return rc;
 }
 
 /*
@@ -179,6 +196,17 @@ __submit_poll_add(xtc_io_t *io, struct __xtc_uring_fd *uf)
 		io_uring_prep_poll_multishot(sqe, uf->fd,
 		    __interest_to_pollmask(uf->interest));
 	io_uring_sqe_set_data(sqe, uf);
+	/* The fd-readiness ASK, keyed by the parked task (uf->tag).  The
+	 * wakeup pipe has no task and reports 0; a re-arm of an existing
+	 * multishot emits again, which is correct -- it is a fresh ask. */
+	if (__xtc_tail_on(XTC_TAIL_SCHED)) {
+		xtc_pid_t lp;
+		memset(&lp, 0, sizeof lp);
+		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
+		    io->tail_loop_id : 0);
+		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT, lp,
+		    uf->is_wakeup ? 0 : (uint64_t)(uintptr_t)uf->tag);
+	}
 	return XTC_OK;
 }
 
@@ -361,6 +389,17 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	a->res = 0;
 	/* Low-bit tag distinguishes this completion from a poll-add CQE. */
 	io_uring_sqe_set_data(sqe, (void *)((uintptr_t)a | 1u));
+	/* Record the ASK, keyed by the task, so a later "no REAP" can be told
+	 * apart from "never submitted".  Emitted before the submit: if the
+	 * submit then fails, SUBMIT_FAIL follows and the pair reads correctly. */
+	if (__xtc_tail_on(XTC_TAIL_SCHED)) {
+		xtc_pid_t lp;
+		memset(&lp, 0, sizeof lp);
+		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
+		    io->tail_loop_id : 0);
+		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT, lp,
+		    (uint64_t)(uintptr_t)a->tag);
+	}
 	(void)__ring_submit(io);
 	return XTC_OK;
 }
