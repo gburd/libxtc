@@ -19,6 +19,20 @@ libxtc (1.44.0-1) unstable; urgency=medium
     SATURATES at the CQ size and cannot see the kernel overflow list, so a
     zero there never meant "empty".  xtc-tail-dropped reads the ring
     bookkeeping from a hung process without calling into it.
+  * orc: FIX a correctness bug in the supervisor (reported).  __spawn_child
+    used xtc_proc_spawn followed by xtc_monitor -- the spawn-then-monitor
+    idiom xtc_proc.h warns against -- leaving a window in which the child was
+    runnable but unmonitored.  A child finishing inside it was reaped before
+    the monitor landed, so its DOWN arrived as XTC_DOWN_NOPROC and the real
+    reason was lost: a FAULTING child was reported as "benign" (measured
+    20/20 as reason=-100000 instead of SIGSEGV), so a supervisor could not
+    fail-stop on a crash; and because NOPROC is nonzero, the TRANSIENT policy
+    restarted children that had exited CLEANLY (measured 6 starts where 1 was
+    correct), violating OTP transient semantics.  Now uses
+    xtc_proc_spawn_monitor, which establishes the monitor before the child is
+    runnable, and XTC_DOWN_NOPROC no longer counts as abnormal for TRANSIENT.
+    Enforced structurally by test_api_discipline.sh RULE 5, because the window
+    is too narrow to catch reliably by timing.
   * test: new gate test/tools/test_xtc_tail_strands.sh, which synthesizes
     traces whose ground truth is known by construction -- including fibers
     with long healthy histories, the input that exposes a time-blind join.

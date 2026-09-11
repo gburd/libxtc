@@ -92,8 +92,14 @@ make check
 - tools: xtc-tail.py --strands classifies every parked task; xtc-rings gains
   an ovf column because unreaped saturates and cannot see the kernel overflow
   list; xtc-tail-dropped reads the ring from a hung process.
-- test: new gate test/tools/test_xtc_tail_strands.sh; de-flaked the sqlxtc
-  differential oracle (fixed sleep -> bounded connect retry).
+- orc: FIX the supervisor's spawn-then-monitor window (reported): a child
+  that faulted inside it was misreported as the "benign" XTC_DOWN_NOPROC
+  rather than a signal, and TRANSIENT children were restarted after a clean
+  exit.  __spawn_child now uses xtc_proc_spawn_monitor; NOPROC no longer
+  counts as abnormal.  Enforced by test_api_discipline.sh RULE 5.
+- test: new gates test/tools/test_xtc_tail_strands.sh and
+  test/tools/test_gdb_cqes.sh; de-flaked the sqlxtc differential oracle
+  (fixed sleep -> bounded connect retry).
 * Tue Sep 08 2026 Greg Burd <greg@burd.me> - 1.43.0-1
 - tail: XTC_TAIL_WAKE is now EMITTED (was declared-but-unused since Phase
   1) from the completion-dispatch hook, with detail = the task pointer as
