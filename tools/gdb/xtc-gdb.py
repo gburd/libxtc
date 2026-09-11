@@ -342,6 +342,126 @@ class XtcRings(gdb.Command):
             print(" ovf=1 means completions ARE pending and invisible here.)")
 
 
+class XtcCqes(gdb.Command):
+    """xtc-cqes [ring_fd|loop-addr]: dump the UNREAPED CQEs in a ring's CQ,
+    with the user_data each one carries.
+
+    This is the join that turns "a ring has N unreaped completions" into
+    "THIS fiber's completion is sitting in the CQ and the drain is not taking
+    it".  xtc-rings gives a COUNT; a count cannot name the owner, so it can
+    only ever be suggestive.  Here the user_data is decoded the same way
+    xtc_io_poll decodes it:
+
+      low bit SET    an xtc_aio_t * (the pointer with bit 0 masked off).  Its
+                     ->tag is the xtc_task_t * -- the SAME key PARK_TASK,
+                     SUBMIT, REAP and WAKE carry, so it joins straight to a
+                     strand in an xtc_tail trace.
+      low bit CLEAR  a struct __xtc_uring_fd * (an fd registration).  Its
+                     ->tag is the parked task, ->fd the descriptor.
+      NULL           a discarded cancel CQE (poll_remove sets no data).
+
+    If a stranded fiber's task pointer appears here, the completion was
+    posted by the kernel, is visible in the CQ, and was never consumed --
+    which is a DRAIN-side bug, not a lost completion.
+
+    Read it together with the ovf column from xtc-rings: this walks only the
+    VISIBLE CQ, so it cannot see a kernel overflow list either.
+    """
+
+    def __init__(self):
+        super(XtcCqes, self).__init__("xtc-cqes", gdb.COMMAND_USER)
+
+    def _dump(self, io, label):
+        try:
+            cq = io["ring"]["cq"]
+            head = int(cq["khead"].dereference())
+            tail = int(cq["ktail"].dereference())
+            mask = int(cq["ring_mask"])
+            cqes = cq["cqes"]
+        except gdb.error as e:
+            print("  %s: cannot read cq (%s)" % (label, e))
+            return
+        n = tail - head
+        print("%s  CqHead=%u CqTail=%u unreaped=%d" % (label, head, tail, n))
+        if n <= 0:
+            print("    (nothing unreaped in the visible CQ)")
+            return
+        # Bound the walk: a corrupt head/tail should not spin forever.
+        if n > 4096:
+            print("    (unreaped=%d exceeds 4096 -- refusing to walk, the "
+                  "head/tail pair looks wrong)" % n)
+            return
+        for i in range(n):
+            try:
+                cqe = cqes[(head + i) & mask]
+                ud = int(cqe["user_data"])
+                res = int(cqe["res"])
+                flags = int(cqe["flags"])
+            except gdb.error as e:
+                print("    [%d] unreadable (%s)" % (i, e))
+                continue
+            if ud == 0:
+                what = "NULL (discarded cancel CQE)"
+            elif ud & 1:
+                aio = ud & ~1
+                what = "aio 0x%x" % aio
+                try:
+                    a = gdb.Value(aio).cast(
+                        gdb.lookup_type("xtc_aio_t").pointer())
+                    what += "  task=0x%x op=%d" % (
+                        int(a["tag"]), int(a["op"]))
+                except gdb.error:
+                    what += "  (tag unreadable)"
+            else:
+                what = "uring_fd 0x%x" % ud
+                try:
+                    uf = gdb.Value(ud).cast(
+                        gdb.lookup_type("struct __xtc_uring_fd").pointer())
+                    what += "  fd=%d task=0x%x%s" % (
+                        int(uf["fd"]), int(uf["tag"]),
+                        " DEAD" if int(uf["dead"]) else "")
+                except gdb.error:
+                    what += "  (fd/tag unreadable)"
+            print("    [%2d] user_data=0x%-16x res=%-6d flags=0x%-4x %s"
+                  % (i, ud, res, flags, what))
+
+    def invoke(self, arg, from_tty):
+        arg = arg.strip()
+        want_fd = None
+        if arg:
+            try:
+                want_fd = int(arg, 0)
+            except ValueError:
+                want_fd = None
+            if want_fd is None or want_fd > 100000:
+                # treat it as a loop address
+                loop = gdb.parse_and_eval(arg)
+                self._dump(loop["io"], "loop %s" % arg)
+                return
+        n = 0
+        for loop in _all_loops():
+            io = loop["io"]
+            if int(io) == 0:
+                continue
+            try:
+                fd = int(io["ring"]["ring_fd"])
+            except gdb.error:
+                continue
+            if want_fd is not None and fd != want_fd:
+                continue
+            try:
+                lid = int(loop["exec_id"])
+            except gdb.error:
+                lid = -1
+            self._dump(io, "loop %s id=%s ring_fd=%d" % (loop, lid, fd))
+            n += 1
+        if n == 0:
+            print("no matching ring (try xtc-rings first)")
+        else:
+            print("(task=0x... joins to PARK_TASK / SUBMIT / REAP / WAKE in "
+                  "an xtc_tail trace)")
+
+
 class XtcProcs(gdb.Command):
     """xtc-procs [loop-addr]: list every proc (or one loop's)."""
     def __init__(self):
@@ -713,7 +833,7 @@ class XtcHelp(gdb.Command):
 
     def invoke(self, arg, from_tty):
         print(__doc__ if __doc__ else "see tools/gdb/xtc-gdb.py header")
-        print("  xtc-loops | xtc-rings | xtc-procs [loop] | xtc-proc A | "
+        print("  xtc-loops | xtc-rings | xtc-cqes [fd] | xtc-procs [loop] | xtc-proc A | "
               "xtc-stranded | "
               "xtc-mailbox A | xtc-self | xtc-trace")
 
@@ -721,6 +841,7 @@ class XtcHelp(gdb.Command):
 gdb.pretty_printers.append(_lookup_printer)
 XtcLoops()
 XtcRings()
+XtcCqes()
 XtcProcs()
 XtcProc()
 XtcStranded()
@@ -730,7 +851,7 @@ XtcSelf()
 XtcTrace()
 XtcTailDump()
 XtcHelp()
-print("xtc-gdb loaded: xtc-loops, xtc-rings, xtc-procs, xtc-proc, "
+print("xtc-gdb loaded: xtc-loops, xtc-rings, xtc-cqes, xtc-procs, xtc-proc, "
       "xtc-stranded, xtc-tail-dropped, "
       "xtc-mailbox, "
       "xtc-self, xtc-trace, xtc-tail-dump, xtc-help")
