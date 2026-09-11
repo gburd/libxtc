@@ -337,6 +337,18 @@ The obvious fallback of 0 was a lie: it made such a ring indistinguishable from
 the executor's REAL loop 0, and a consumer read a run of "loop 0" events as
 evidence that loop 0 owned a stranded completion.
 .Pp
+.Dv XTC_TAIL_POLL_FULL
+records a poll that drained its FULL per-call budget and so may have left
+completions behind
+.Pq Fa detail " = the budget it filled" .
+.Dv XTC_TAIL_LOOP_POLL
+covers only IDLE polls, so without this a poll that reaped some-but-not-all
+events was invisible -- and "I polled, took what I could, and left the rest"
+is exactly the state to look for when a ring holds a pinned backlog while its
+loop is demonstrably alive.
+It is low-volume by construction: it fires only when one poll hits its
+ceiling, never on every poll.
+.Pp
 .Nm xtc-tail.py Fl -strands
 performs this classification.
 Every bucket is an ABSENCE claim, so check

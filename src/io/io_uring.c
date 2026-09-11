@@ -772,6 +772,20 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		cqe = NULL;
 	}
 	*n_out = got;
+	/*
+	 * We filled the budget, so there may be more in the CQ than we took.
+	 * Recorded because LOOP_POLL only covers IDLE polls, leaving "polled
+	 * and left some behind" -- the state that explains a pinned backlog on
+	 * a live loop -- with no event at all.
+	 */
+	if (got >= max && __xtc_tail_on(XTC_TAIL_SCHED)) {
+		xtc_pid_t lp;
+		memset(&lp, 0, sizeof lp);
+		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
+		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
+		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_POLL_FULL, lp,
+		    (uint64_t)max);
+	}
 	return XTC_OK;
 }
 /* XTC_NOALLOC_END */

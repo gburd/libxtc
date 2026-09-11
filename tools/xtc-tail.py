@@ -39,6 +39,7 @@ KINDS = {
     0: "SPAWN", 1: "EXIT", 2: "WAKE", 3: "RUN", 4: "PARK",
     5: "SEND", 6: "RECV", 7: "MBOX_HWM", 8: "LOOP_POLL",
     9: "PARK_TASK", 10: "REAP", 11: "SUBMIT", 12: "SUBMIT_FAIL",
+    13: "POLL_FULL",
 }
 # detail-field meaning per kind, for the human column
 DETAIL = {
@@ -64,6 +65,8 @@ DETAIL = {
     # mere presence -- a fiber is parked on a request the kernel refused.
     "SUBMIT": "task",
     "SUBMIT_FAIL": "errno/short",
+    # a poll that filled its budget: more may have been left in the CQ
+    "POLL_FULL": "budget",
 }
 
 
