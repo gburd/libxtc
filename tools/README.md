@@ -29,6 +29,9 @@ Or in `~/.lldbinit`:
     xtc-rings          each loop -> its io_uring ring fd, the thread that
                        polls it, and how many completions the KERNEL has
                        posted that we have not reaped (see below)
+    xtc-cqes [fd]      the UNREAPED CQEs in a ring's CQ, each decoded to the
+                       aio/fd registration and the TASK it belongs to -- the
+                       join that turns a count into a named owner (see below)
     xtc-procs [loop]   every proc: pid, mailbox depth, peak, state,
                        links/monitors -- the observer process table
     xtc-proc  ADDR     one proc in detail
@@ -75,6 +78,44 @@ One inference worth knowing: a poller **cannot** be blocked in
 before entering the kernel.  So if `unreaped > 0`, that loop's worker is
 somewhere OTHER than its own poll: running a task, blocked on a different
 ring, or gone.  That distinction is usually the whole bug.
+
+**And `unreaped == 0` does not mean the ring is empty.**  This kernel reports
+`IORING_FEAT_NODROP`, so once the visible CQ fills, further completions go to a
+kernel-side *overflow list* that `CqTail - CqHead` cannot see.  Measured
+directly: with 4000 completions outstanding on a CQ of 128, the number read
+**128**.  It saturates.  The `ovf` column (the `IORING_SQ_CQ_OVERFLOW` bit)
+is printed beside it for exactly this reason -- `unreaped=0` with `ovf=1`
+means completions ARE pending and simply invisible in that number.
+
+For the record, a full CQ is *not* itself a lost-completion mechanism: a
+bounded 16-per-pass drain recovered 4000 of 4000 with no duplicates, and
+`io_uring_wait_cqe_timeout` with a backlog present returned in 0.0 ms rather
+than blocking.  Overflow is a reason to distrust the counter, not a bug.
+
+## Naming the owner of a stuck completion (xtc-cqes)
+
+`xtc-rings` gives a COUNT, and a count can never say *whose* completion it is.
+`xtc-cqes` walks the visible CQ from `CqHead` to `CqTail` and decodes each
+entry's `user_data` the way `xtc_io_poll` does:
+
+    (gdb) xtc-cqes
+    loop 0x514350 id=0 ring_fd=5  CqHead=3046 CqTail=3051 unreaped=5
+        [ 0] user_data=0x7ffff6df4c81 res=0    flags=0x0 aio 0x7ffff6df4c80  task=0x51ab90 op=3
+        [ 1] user_data=0x7ffff6dc1c81 res=4096 flags=0x0 aio 0x7ffff6dc1c80  task=0x51db00 op=1
+
+Low bit set means an `xtc_aio_t *` (the pointer with bit 0 masked off), whose
+`->tag` is the `xtc_task_t *`; low bit clear means a `struct __xtc_uring_fd *`,
+whose `->tag` is the parked task and `->fd` the descriptor; `user_data=0` is a
+discarded `poll_remove` cancel CQE.  `op` is the `XTC_AIO_*` opcode -- `3` is
+`XTC_AIO_FDATASYNC`.
+
+That `task=0x...` is the SAME key `XTC_TAIL_PARK_TASK`, `XTC_TAIL_SUBMIT`,
+`XTC_TAIL_REAP` and `XTC_TAIL_WAKE` carry, so a stranded fiber in an
+`xtc_tail` trace joins straight to the completion sitting in the ring.  If a
+strand's task pointer appears here, the kernel posted the completion, it is
+visible in the CQ, and the drain did not take it -- a **drain-side** bug, not a
+lost completion.  Like `xtc-rings`, this walks only the visible CQ, so read it
+together with `ovf`.
 
 Note that `alive` counts tasks HOMED on the loop, which is not the same as
 tasks it can currently run -- a loop can show `alive=0` and still hold both
