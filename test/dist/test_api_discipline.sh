@@ -167,8 +167,52 @@ if [ -n "$consumer" ]; then
 	if [ "$rule3_fatal" -eq 1 ]; then fail=1; fi
 fi
 
+# ---------------------------------------------------------------------------
+# RULE 5: no spawn-then-link/monitor.  Establishing the parent<->child
+# relationship AFTER the child is runnable leaves a window in which the child
+# can run, exit or FAULT unmonitored; its DOWN then arrives as
+# XTC_DOWN_NOPROC and the real reason is GONE.  Consequences measured in
+# src/orc/sup.c before this rule existed: a faulting child reported as
+# "benign" (so a supervisor cannot fail-stop on a crash), and -- because
+# NOPROC is nonzero -- TRANSIENT children restarted after a CLEAN exit.
+#
+# xtc_proc_spawn_monitor / xtc_proc_spawn_link exist precisely to close it.
+# This is a SOURCE-level rule because the window is narrow in practice: a
+# timing test passes on the buggy code most of the time (measured 10/10 and
+# 20/20 cross-loop) and only fails when the window is artificially widened.
+# A property that cannot be reliably observed at runtime has to be enforced
+# structurally or it will regress unnoticed.
+#
+# Mark a deliberate exception with XTC_SPAWN_THEN_MON_OK and a reason.
+spawn_viol=""
+for f in $(find "$ROOT/src" -name '*.c' 2>/dev/null | sort); do
+	# a spawn whose result is monitored/linked within the next 6 lines
+	hits=$(strip_comments "$f" \
+	    | grep -nA6 'xtc_proc_spawn[[:space:]]*(' 2>/dev/null \
+	    | grep -E 'xtc_monitor[[:space:]]*\(|xtc_link[[:space:]]*\(' \
+	    | sed 's/[-:].*//' | sort -u)
+	for _ln in $hits; do
+		[ -n "$_ln" ] || continue
+		sed -n "${_ln},$((_ln + 6))p" "$f" 2>/dev/null \
+		    | grep -q 'XTC_SPAWN_THEN_MON_OK' && continue
+		spawn_viol="$spawn_viol
+${f#"$ROOT"/}:$_ln: xtc_proc_spawn followed by xtc_monitor/xtc_link"
+	done
+done
+spawn_viol=$(printf '%s\n' "$spawn_viol" | grep -v '^$' || true)
+if [ -n "$spawn_viol" ]; then
+	n=$(printf '%s\n' "$spawn_viol" | grep -c .)
+	echo "  [api] FAIL RULE 5: $n site(s) spawn a proc and THEN link/monitor"
+	echo "        it, leaving an unmonitored window.  Use"
+	echo "        xtc_proc_spawn_monitor / xtc_proc_spawn_link, which"
+	echo "        establish the relationship BEFORE the child is runnable."
+	printf '%s\n' "$spawn_viol" | sed 's/^/        /'
+	fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
 	echo "  [api] OK: API discipline -- library uses __os_* wrappers (checked, "
-	echo "        never voided), no dead NULL checks, consumers use only xtc_*"
+	echo "        never voided), no dead NULL checks, consumers use only xtc_*,"
+	echo "        no spawn-then-monitor window"
 fi
 exit "$fail"
