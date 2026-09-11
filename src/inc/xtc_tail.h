@@ -186,7 +186,26 @@ enum xtc_tail_kind {
 	 * discarded that value, so a partial or failed submit left a fiber
 	 * parked forever with nothing in flight, silently.
 	 */
-	XTC_TAIL_SUBMIT_FAIL = 12
+	XTC_TAIL_SUBMIT_FAIL = 12,
+	/*
+	 * A poll drained its FULL per-call budget and therefore may have left
+	 * completions behind.  pid.loop_id is the polling loop; detail is the
+	 * budget it filled (the caller's `max`).
+	 *
+	 * This closes a blind spot in XTC_TAIL_LOOP_POLL, which is emitted only
+	 * for an IDLE poll (one that dispatched nothing).  That restriction is
+	 * deliberate -- an every-poll event crowded the ring and evicted the
+	 * data it existed to explain -- but it means a poll that reaped
+	 * some-but-not-all events is INVISIBLE, and "I polled, took what I
+	 * could, and left the rest" is exactly the state to look for when a
+	 * ring has a pinned backlog while its loop is demonstrably alive.
+	 *
+	 * Low volume by construction: it fires only when a single poll hits its
+	 * ceiling, not on every poll.  A steady stream of these for one loop_id
+	 * means that ring is receiving completions faster than one poll can
+	 * take them.
+	 */
+	XTC_TAIL_POLL_FULL = 13
 };
 
 /*
