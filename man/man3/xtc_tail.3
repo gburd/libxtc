@@ -323,6 +323,20 @@ is the only kind here whose mere presence is a fault -- every other needs a
 join to mean anything -- because a fiber parked on a refused request can never
 be woken.
 .Pp
+A ring with no exec-relative loop id -- one belonging to a loop created by a
+bare
+.Fn xtc_loop_init
+rather than as part of an executor -- reports
+.Dv XTC_TAIL_LOOP_NONE
+.Pq 0xFFFF ,
+which
+.Nm xtc-tail.py
+renders as
+.Li none .
+The obvious fallback of 0 was a lie: it made such a ring indistinguishable from
+the executor's REAL loop 0, and a consumer read a run of "loop 0" events as
+evidence that loop 0 owned a stranded completion.
+.Pp
 .Nm xtc-tail.py Fl -strands
 performs this classification.
 Every bucket is an ABSENCE claim, so check

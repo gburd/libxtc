@@ -171,7 +171,7 @@ __ring_submit(xtc_io_t *io)
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
 		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
-		    io->tail_loop_id : 0);
+		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
 		/*
 		 * detail: the negated errno for an error, or -- for a short
 		 * submit, which has no errno -- the count left behind, offset
@@ -223,7 +223,7 @@ __submit_poll_add(xtc_io_t *io, struct __xtc_uring_fd *uf)
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
 		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
-		    io->tail_loop_id : 0);
+		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT, lp,
 		    uf->is_wakeup ? 0 : (uint64_t)(uintptr_t)uf->tag);
 	}
@@ -416,7 +416,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
 		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
-		    io->tail_loop_id : 0);
+		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT, lp,
 		    (uint64_t)(uintptr_t)a->tag);
 	}
@@ -603,7 +603,8 @@ __tail_reap(xtc_io_t *io, void *tag)
 	if (!__xtc_tail_on(XTC_TAIL_SCHED))
 		return;
 	memset(&lp, 0, sizeof lp);
-	lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ? io->tail_loop_id : 0);
+	lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
+	    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
 	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_REAP, lp,
 	    (uint64_t)(uintptr_t)tag);
 }
