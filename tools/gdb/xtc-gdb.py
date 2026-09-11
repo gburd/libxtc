@@ -220,8 +220,10 @@ class XtcRings(gdb.Command):
       ring_fd   io->ring.ring_fd -- match this against fdinfo
       owner     the pthread id recorded as the ring's polling thread
                 (0 = never polled yet)
-      unreaped  CqTail - CqHead read from the live ring memory, i.e.
-                completions the kernel posted that we have not consumed
+      unreaped  CqTail - CqHead read from the live ring memory: completions
+                the kernel has PLACED IN THE VISIBLE CQ and we have not
+                consumed.  It SATURATES AT THE CQ SIZE -- see the second
+                caveat below, which cuts the other way from the first.
       alive     loop->n_alive (tasks HOMED here, incl. parked ones)
 
     READ THE CAVEAT BEFORE CONCLUDING ANYTHING FROM unreaped > 0.
@@ -231,6 +233,30 @@ class XtcRings(gdb.Command):
     in flight; measured on a healthy-but-busy 8-loop run, one ring read
     218 unreaped and then 1 three seconds later.  That is a ring draining
     normally, not a stuck one.
+
+    AND unreaped == 0 DOES NOT MEAN "NOTHING IS PENDING".
+
+    This kernel reports IORING_FEAT_NODROP, so when the visible CQ fills,
+    further completions go to a kernel-side OVERFLOW LIST rather than being
+    dropped -- and CqTail - CqHead cannot see that list.  Measured directly:
+    with 4000 completions outstanding on a CQ of 128, this number read 128,
+    not 4000.  So it saturates, and a reading of 0 taken just after a drain
+    is compatible with a backlog the kernel has not yet flushed forward.
+
+    The two caveats point in opposite directions and both matter:
+      unreaped > 0  does not prove a ring is stuck (it is the normal state
+                    of a busy ring);
+      unreaped == 0 does not prove a ring is empty (it saturates, and the
+                    overflow list is invisible to it).
+    Cross-check with io_uring_cq_has_overflow() -- or, from gdb, the
+    IORING_SQ_CQ_OVERFLOW bit in *io->ring.sq.kflags -- before treating a
+    zero as evidence of anything.
+
+    (For the record, overflow was MEASURED NOT to lose completions on this
+    kernel: a bounded 16-per-pass drain recovered 4000 of 4000 with no
+    duplicates, and io_uring_wait_cqe_timeout with a backlog present returned
+    in 0.0 ms rather than blocking.  So a full CQ is not itself a lost-wake
+    mechanism -- it is only a reason not to trust this counter.)
 
     To show a ring is genuinely STUCK, sample it at least three times a
     few seconds apart and show the count does NOT fall:
@@ -257,9 +283,9 @@ class XtcRings(gdb.Command):
         super().__init__("xtc-rings", gdb.COMMAND_USER)
 
     def invoke(self, arg, from_tty):
-        print("%-18s %-6s %-18s %-8s %-20s %-9s %s"
+        print("%-18s %-6s %-18s %-8s %-20s %-9s %-5s %s"
               % ("loop", "id", "io", "ring_fd", "owner_tid", "unreaped",
-                 "alive"))
+                 "ovf", "alive"))
         n = 0
         for loop in _all_loops():
             io = loop["io"]
@@ -284,6 +310,16 @@ class XtcRings(gdb.Command):
                 unreaped = "%d" % (ktail - khead)
             except gdb.error:
                 unreaped = "?"
+            # IORING_SQ_CQ_OVERFLOW (bit 1) in the SQ kflags.  Printed next
+            # to unreaped because it is the ONLY thing that makes a zero
+            # there meaningful: unreaped saturates at the CQ size and cannot
+            # see the kernel's overflow list, so "0" plus "ovf=1" means
+            # completions ARE pending and simply not visible here.
+            try:
+                kflags = int(io["ring"]["sq"]["kflags"].dereference())
+                ovf = "1" if (kflags & 2) else "0"
+            except gdb.error:
+                ovf = "?"
             try:
                 lid = int(loop["exec_id"])
             except gdb.error:
@@ -291,14 +327,19 @@ class XtcRings(gdb.Command):
             # The io pointer is what a blocked poller's xtc_io_poll frame
             # shows as `io=`, so printing it here makes the join to
             # `thread apply all bt` direct instead of guesswork.
-            print("%-18s %-6s %-18s %-8s %-20s %-9s %s"
+            print("%-18s %-6s %-18s %-8s %-20s %-9s %-5s %s"
                   % (str(loop), lid if lid >= 0 else "solo", str(io), fd,
-                     owner, unreaped, int(loop["n_alive"])))
+                     owner, unreaped, ovf, int(loop["n_alive"])))
         if n == 0:
             print("no loops with an io backend (running? built -g?)")
         else:
-            print("(%d ring(s); unreaped > 0 means the kernel posted "
-                  "completions this loop never drained)" % n)
+            print("(%d ring(s).  unreaped > 0 is the NORMAL state of a busy "
+                  "ring -- sample 3x before" % n)
+            print(" calling one stuck.  unreaped == 0 does NOT mean empty: it "
+                  "saturates at the CQ")
+            print(" size and cannot see the kernel overflow list, so read it "
+                  "with ovf -- 0 with")
+            print(" ovf=1 means completions ARE pending and invisible here.)")
 
 
 class XtcProcs(gdb.Command):
