@@ -301,7 +301,7 @@ __xtc_exec_worker(void *arg)
 				xtc_pid_t lp;
 				memset(&lp, 0, sizeof lp);
 				lp.loop_id = (uint16_t)(loop->exec_id >= 0
-				    ? loop->exec_id : 0);
+				    ? (unsigned)loop->exec_id : XTC_TAIL_LOOP_NONE);
 				__xtc_tail_emit(XTC_TAIL_SCHED,
 				    XTC_TAIL_LOOP_POLL, lp, 0);
 			}

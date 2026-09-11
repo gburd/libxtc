@@ -199,6 +199,20 @@ enum xtc_tail_kind {
  */
 #define XTC_TAIL_SHORT_SUBMIT_BASE 4096
 
+/*
+ * loop_id reported for a ring that has NO exec-relative loop id -- a loop
+ * created by a bare xtc_loop_init rather than as part of an executor.
+ *
+ * This exists because the obvious fallback is a lie: reporting 0 makes an
+ * unlabelled ring indistinguishable from the executor's REAL loop 0, and a
+ * consumer read a stack of "loop 0" SUBMIT/REAP events as evidence that
+ * loop 0 owned a stranded completion.  That inference may well be right, but
+ * the number they read could not distinguish the two cases, so it could not
+ * support it.  0xFFFF cannot be a real exec loop id (an exec with 65535
+ * loops is not a thing) and is visibly not an index.
+ */
+#define XTC_TAIL_LOOP_NONE 0xFFFFu
+
 /* One recorded event.  Fixed layout; the binary dump writes it verbatim
  * behind a versioned header, so a reader across the wire/disk decodes it
  * without guessing. */
