@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.43.0
+Version:        1.44.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,18 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Thu Sep 10 2026 Greg Burd <greg@burd.me> - 1.44.0-1
+- tail: complete the lost-wake instrument chain -- XTC_TAIL_PARK_TASK (9),
+  XTC_TAIL_REAP (10), XTC_TAIL_SUBMIT (11), XTC_TAIL_SUBMIT_FAIL (12), so a
+  fiber that parks and never runs can be localized to exactly one step.
+- tail: detect SHORT io_uring submits (the return is a COUNT, not just an
+  errno), which previously read as success while an SQE never reached the
+  kernel.
+- tools: xtc-tail.py --strands classifies every parked task; xtc-rings gains
+  an ovf column because unreaped saturates and cannot see the kernel overflow
+  list; xtc-tail-dropped reads the ring from a hung process.
+- test: new gate test/tools/test_xtc_tail_strands.sh; de-flaked the sqlxtc
+  differential oracle (fixed sleep -> bounded connect retry).
 * Tue Sep 08 2026 Greg Burd <greg@burd.me> - 1.43.0-1
 - tail: XTC_TAIL_WAKE is now EMITTED (was declared-but-unused since Phase
   1) from the completion-dispatch hook, with detail = the task pointer as

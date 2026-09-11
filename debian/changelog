@@ -1,3 +1,32 @@
+libxtc (1.44.0-1) unstable; urgency=medium
+
+  * tail: complete the lost-wake instrument chain.  A fiber that parks and
+    never runs again failed at exactly one step, and the steps have different
+    fixes; until now the trace could not say which.  Adds XTC_TAIL_PARK_TASK
+    (the task-pointer join key XTC_TAIL_WAKE needed), XTC_TAIL_REAP (a CQE was
+    consumed, and what tag it resolved to -- emitted at all four consume sites
+    including the two that deliberately discard, because an invisible discard
+    is indistinguishable from a bug), XTC_TAIL_SUBMIT (the ask, keyed by task)
+    and XTC_TAIL_SUBMIT_FAIL (a submission the kernel did not take -- the only
+    kind here whose mere presence is a fault).
+  * io_uring: detect SHORT submits.  io_uring_submit returns a negative errno
+    OR THE NUMBER OF SQEs IT CONSUMED, which can be fewer than were queued;
+    all nine submit sites discarded that value, so a partial submit read as
+    success while an SQE never reached the kernel and a fiber parked forever.
+  * tools: xtc-tail.py --strands classifies every parked task (never submitted
+    / no REAP / REAP,no WAKE / WAKE,no RUN) and correlates the submit ring
+    against LOOP_POLL liveness.  xtc-rings gains an ovf column: unreaped
+    SATURATES at the CQ size and cannot see the kernel overflow list, so a
+    zero there never meant "empty".  xtc-tail-dropped reads the ring
+    bookkeeping from a hung process without calling into it.
+  * test: new gate test/tools/test_xtc_tail_strands.sh, which synthesizes
+    traces whose ground truth is known by construction -- including fibers
+    with long healthy histories, the input that exposes a time-blind join.
+    De-flaked the sqlxtc differential oracle: a fixed 0.3s sleep across 32
+    server restarts became a bounded connect retry (5/12 failures -> 0/16).
+
+ -- Greg Burd <greg@burd.me>  Thu, 10 Sep 2026 18:30:00 -0400
+
 libxtc (1.43.0-1) unstable; urgency=medium
 
   * tail: XTC_TAIL_WAKE is now EMITTED.  It has been declared since Phase 1 and
