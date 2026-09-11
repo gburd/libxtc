@@ -254,6 +254,36 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 			atomic_store_explicit(&t->wake_revents, 0,
 			    memory_order_relaxed);
 			xtc_yield();
+			/*
+			 * Nudge the loop that OWNS this completion.
+			 *
+			 * The completion lands on the ring of the loop we
+			 * submitted on (`loop`), and only that loop can reap it.
+			 * A migratable fiber, though, is resumed by WHICHEVER
+			 * loop work-steals it -- which, after this yield, may not
+			 * be `loop` at all.  When they differ, nothing is
+			 * guaranteed to make the submitting loop poll its own
+			 * ring: if that loop is busy running its own homed
+			 * fibers it only polls on an I/O-fairness quantum, and if
+			 * it later sleeps it sleeps on a wait that a completion
+			 * already sitting in its CQ does not re-trigger.  The
+			 * completion can then sit unreaped indefinitely while
+			 * this fiber re-parks forever (the cross-loop
+			 * fdatasync-strand a consumer named end to end, 2026-09:
+			 * a res=0 CQE on loop 0's ring, its fiber homed on loop
+			 * 31, no REAP).
+			 *
+			 * xtc_loop_wake is lost-wake-free by construction (it
+			 * writes the loop's always-armed wakeup fd), so it breaks
+			 * the submitting loop out of any blocking wait and makes
+			 * it re-poll -- reaping this completion.  Only issued on
+			 * the migration case (running loop != submit loop) and
+			 * only while still unfinished, so the common same-loop
+			 * aio path pays nothing.
+			 */
+			if (!__xtc_aio_done_get(&a) &&
+			    __xtc_current_loop != loop)
+				(void)xtc_loop_wake(loop);
 		}
 		if (tail_on && park_ns != 0) {
 			int64_t run_ns = 0;
@@ -360,6 +390,10 @@ aio_do_v(int op, int fd, const struct iovec *iov, int iovcnt, int64_t off)
 		t->park_requested = 1;
 		atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
 		xtc_yield();
+		/* Nudge the submitting loop so a migrated fiber's completion
+		 * is reaped -- see the identical guard in aio_do. */
+		if (!__xtc_aio_done_get(&a) && __xtc_current_loop != loop)
+			(void)xtc_loop_wake(loop);
 	}
 	return a.res;
 }
