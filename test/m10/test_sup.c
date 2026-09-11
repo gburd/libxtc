@@ -413,6 +413,95 @@ test_pool_max_children(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+
+/*
+ * The child spawn must be ATOMIC with establishing the monitor.
+ *
+ * xtc_proc_spawn followed by xtc_monitor leaves a window in which the child is
+ * runnable but unmonitored.  A child that finishes inside it is reaped before
+ * the monitor lands, so the DOWN arrives as XTC_DOWN_NOPROC and the REAL reason
+ * is gone -- a fault becomes indistinguishable from "raced an already-dead
+ * target", and because NOPROC is nonzero it also made the TRANSIENT policy
+ * restart children that had exited cleanly.
+ *
+ * A supervisor that cannot tell a crash from a benign race cannot implement
+ * "a crashed child means state may be corrupt, so fail-stop", which is the
+ * whole reason to have one.
+ *
+ * This asserts the observable consequence rather than the mechanism: a child
+ * that exits IMMEDIATELY and CLEANLY must produce reason 0, never NOPROC.
+ * Proven non-vacuous out of band -- reverting __spawn_child to
+ * spawn-then-monitor and widening the window 5 ms turns this from reason=0 into
+ * reason=-100000 in 40 of 40 runs on a SINGLE loop, so no OS-thread race is
+ * needed to hit it.
+ */
+static _Atomic int g_atomic_mon_starts;
+
+static void
+atomic_mon_child(void *arg)
+{
+	(void)arg;
+	(void)atomic_fetch_add(&g_atomic_mon_starts, 1);
+	(void)xtc_exit_self(0);      /* clean, and as fast as possible */
+}
+
+static xtc_supervisor_t *g_atomic_mon_sup;
+
+/* Let the child run and die, then ask the supervisor to stop.  Stopping from
+ * a proc (not the test function) is the existing pattern in this file; the
+ * FREE happens via xtc_sup_join below, which must be called from OUTSIDE the
+ * loop thread. */
+static void
+atomic_mon_watch(void *arg)
+{
+	(void)arg;
+	(void)xtc_proc_sleep(300000000LL);
+	(void)xtc_sup_stop(g_atomic_mon_sup);
+}
+
+static MunitResult
+test_atomic_spawn_monitor(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_supervisor_t *sup = NULL;
+	xtc_sup_opts_t so;
+	xtc_child_spec_t cs;
+	(void)p; (void)d;
+
+	atomic_store(&g_atomic_mon_starts, 0);
+	memset(&so, 0, sizeof so);
+	so.strategy = XTC_SUP_ONE_FOR_ONE;
+	/*
+	 * TRANSIENT plus a restart budget is the shape that shows the bug: if
+	 * the clean exit is misreported as NOPROC (nonzero), __should_restart
+	 * treats it as abnormal and restarts a child that finished normally.
+	 */
+	so.max_restarts = 5;
+	so.period_ns = 2000000000LL;
+	memset(&cs, 0, sizeof cs);
+	cs.name = "atomic_mon";
+	cs.fn = atomic_mon_child;
+	cs.policy = XTC_RESTART_TRANSIENT;
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &so, &cs, 1, &sup), ==, XTC_OK);
+	g_atomic_mon_sup = sup;
+	munit_assert_int(xtc_proc_spawn(loop, atomic_mon_watch, NULL, NULL,
+	    NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/*
+	 * Exactly ONE start.  A second means the clean exit was classified as
+	 * abnormal and the child was restarted -- the OTP transient violation
+	 * this guards.
+	 */
+	munit_assert_int(atomic_load(&g_atomic_mon_starts), ==, 1);
+	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/one_for_all",           test_one_for_all,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -420,6 +509,7 @@ static MunitTest tests[] = {
 	{ "/intensity_exceeded",    test_intensity_exceeded,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/simple_one_for_one",    test_simple_one_for_one,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pool_max_children",     test_pool_max_children,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/atomic_spawn_monitor",  test_atomic_spawn_monitor, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10/sup", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

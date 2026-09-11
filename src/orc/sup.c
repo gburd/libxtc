@@ -85,7 +85,26 @@ __should_restart(struct xtc_supervisor *sup, const struct child *c, int reason)
 	switch (c->spec.policy) {
 	case XTC_RESTART_PERMANENT:  return 1;
 	case XTC_RESTART_TEMPORARY:  return 0;
-	case XTC_RESTART_TRANSIENT:  return reason != 0;
+	case XTC_RESTART_TRANSIENT:
+		/*
+		 * TRANSIENT restarts only on ABNORMAL termination (OTP
+		 * semantics).  "Nonzero reason" is the test for that, with one
+		 * exception: XTC_DOWN_NOPROC (-100000) means the monitor was
+		 * registered on a target that had already been reaped, so the
+		 * real reason is UNKNOWN -- it is explicitly documented as
+		 * benign, not as abnormal.  Treating it as abnormal restarts
+		 * children that exited cleanly and can fight an orderly
+		 * shutdown, with restart-intensity escalation then taking down
+		 * a healthy tree.
+		 *
+		 * __spawn_child no longer produces this (it spawns and monitors
+		 * atomically), but xtc_monitor on an already-dead target is a
+		 * public route to NOPROC, so the policy is made explicit here
+		 * rather than left to depend on the spawn path being correct.
+		 * Defence in depth: the atomicity fix removes the cause, this
+		 * removes the misclassification.
+		 */
+		return reason != 0 && reason != XTC_DOWN_NOPROC;
 	}
 	return 0;
 }
@@ -134,11 +153,43 @@ __spawn_child(struct xtc_supervisor *sup, struct child *c)
 		if (idx < 0 || idx >= n) idx = 0;
 		target = xtc_exec_loop(sup->opts.exec, idx);
 	}
-	rc = xtc_proc_spawn(target, c->spec.fn, c->spec.arg, &pop, &c->pid);
+	/*
+	 * ATOMIC spawn+monitor, not spawn-then-monitor.
+	 *
+	 * xtc_proc_spawn followed by xtc_monitor leaves a window in which the
+	 * child exists and is runnable but unmonitored.  A child that exits or
+	 * faults inside that window is reaped before the monitor lands, so
+	 * xtc_monitor delivers XTC_DOWN_NOPROC instead of the real reason --
+	 * and the real reason is gone, not merely late.  Two consequences, both
+	 * measured on this file before the fix:
+	 *
+	 *   - a child that FAULTS is reported as NOPROC (documented "benign")
+	 *     rather than a signal, so a supervisor cannot tell a segfault from
+	 *     a monitor that raced an already-dead target.  For a consumer whose
+	 *     policy is "a crashed child means shared state may be corrupt, so
+	 *     fail-stop", losing that distinction loses the fail-stop trigger.
+	 *   - XTC_DOWN_NOPROC is -100000, which is nonzero, so the TRANSIENT
+	 *     policy below ("restart on any nonzero reason") RESTARTS a child
+	 *     that in fact exited cleanly.  That violates OTP transient
+	 *     semantics and can fight an orderly shutdown.
+	 *
+	 * The window is not merely theoretical and not merely a cross-loop
+	 * thread race: widening it by 5 ms turned a clean fast-exiting child
+	 * from reason=0 into reason=-100000 in 40 of 40 runs on a SINGLE loop.
+	 * Cross-loop placement (see the comment above) widens it further,
+	 * because the child can be made runnable on another OS thread.
+	 *
+	 * xtc_proc_spawn_monitor establishes the monitor BEFORE the child is
+	 * made runnable, so there is no such window.  It requires the caller to
+	 * be a process; every path here runs inside __sup_entry (the supervisor
+	 * proc), including the restart paths and __handle_add_child, so that
+	 * holds at all call sites.
+	 */
+	rc = xtc_proc_spawn_monitor(target, c->spec.fn, c->spec.arg, &pop,
+	    &c->pid, &c->monitor_ref);
 	if (rc != XTC_OK) return rc;
 	c->alive = 1;
-	rc = xtc_monitor(c->pid, &c->monitor_ref);
-	return rc;
+	return XTC_OK;
 }
 
 /* Handle an ADD_CHILD control message inside the supervisor proc, so
@@ -423,6 +474,15 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 
 	if ((rc = xtc_notify_create(&sup->stopped)) != XTC_OK) goto fail2;
 
+	/*
+	 * Plain spawn, deliberately: nothing monitors the supervisor proc from
+	 * here, so there is no link/monitor window to close (RULE 5 in
+	 * test_api_discipline.sh matches a spawn FOLLOWED BY monitor/link, and
+	 * there is none).  xtc_proc_spawn_monitor would not even be available:
+	 * it requires the caller to be a process, and xtc_sup_start is called
+	 * from outside any proc (see the tests, which call it from the test
+	 * function).  Callers wanting the supervisor's exit use xtc_sup_join.
+	 */
 	if ((rc = xtc_proc_spawn(loop, __sup_entry, sup, NULL, &pid)) != XTC_OK)
 		goto fail3;
 	sup->sup_pid = pid;
