@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.44.0
+Version:        1.44.1
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,14 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Fri Sep 11 2026 Greg Burd <greg@burd.me> - 1.44.1-1
+- aio: FIX the cross-loop lost wake -- a migratable fiber's async-file
+  completion lands on the ring of the loop it submitted on, and if the fiber
+  then migrates away that loop could fail to poll its own ring, stranding the
+  completion (and the fiber) indefinitely.  The aio waiter now nudges the
+  submitting loop (xtc_loop_wake, lost-wake-free) whenever it resumes on a
+  different loop with the op still pending.  DST regression test
+  test_sim_aio_migrate (24 seeds, migratable fibers, cross-loop completions).
 * Thu Sep 10 2026 Greg Burd <greg@burd.me> - 1.44.0-1
 - tail: complete the lost-wake instrument chain -- XTC_TAIL_PARK_TASK (9),
   XTC_TAIL_REAP (10), XTC_TAIL_SUBMIT (11), XTC_TAIL_SUBMIT_FAIL (12), so a

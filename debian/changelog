@@ -1,3 +1,25 @@
+libxtc (1.44.1-1) unstable; urgency=medium
+
+  * aio: FIX the cross-loop lost wake that stranded PostgreSQL backends under
+    the multithreaded fiber-per-session model.  A migratable fiber's
+    async-file completion (e.g. an fdatasync commit) lands on the io_uring
+    ring of whichever loop it was RUNNING on when it submitted -- and only
+    that loop can reap it.  If the fiber is then work-stolen to another loop
+    and re-parks, nothing guaranteed the submitting loop would poll its own
+    ring: busy with its own homed fibers it polls only on an I/O-fairness
+    quantum, and asleep it does not re-wake for a completion already in its
+    CQ.  The completion could sit unreaped and the fiber park forever.  The
+    aio waiter now nudges the submitting loop via xtc_loop_wake (lost-wake-
+    free: it writes the loop's always-armed wakeup fd) whenever it resumes on
+    a loop other than the one it submitted on, with the op still pending.
+    Issued only on the migration case, so the same-loop aio path is
+    unchanged.  New DST regression test test_sim_aio_migrate proves the
+    reachable path: 24 seeds, 24 migratable fibers work-stolen across 8 loops,
+    every completion reaped and every fiber resumed (19663 cross-loop reaps
+    observed, 0 stranded), with a pinned control and byte-identical replay.
+
+ -- Greg Burd <greg@burd.me>  Fri, 11 Sep 2026 14:30:00 -0400
+
 libxtc (1.44.0-1) unstable; urgency=medium
 
   * tail: complete the lost-wake instrument chain.  A fiber that parks and
