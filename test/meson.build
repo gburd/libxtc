@@ -129,6 +129,7 @@ plain_tests = [
   ['concurrency/proc_table_stress',         'concurrency/test_proc_table_stress.c'],
   ['concurrency/eager_rebalance',           'concurrency/test_eager_rebalance.c'],
   ['concurrency/wake_after_migration',      'concurrency/test_wake_after_migration.c'],
+  ['concurrency/aio_migrate_wake',          'concurrency/test_aio_migrate_wake.c'],
   ['tnt/tnt',                               'tnt/test_tnt.c'],
 ]
 foreach spec : plain_tests
