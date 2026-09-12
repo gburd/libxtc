@@ -60,23 +60,37 @@ extern int __xtc_dio_is_direct(int fd);
  * 1 = always offload.  Resolved from XTC_AIO_FORCE_OFFLOAD on first use
  * and overridable via __xtc_aio_force_offload().
  */
-static int g_force_offload = -1;   /* -1 = unresolved */
+static _Atomic int g_force_offload = -1;   /* -1 = unresolved */
 
 /* PUBLIC (internal): set by tests / tuning to force the offload path. */
 void
 __xtc_aio_force_offload(int on)
 {
-	g_force_offload = on ? 1 : 0;
+	atomic_store_explicit(&g_force_offload, on ? 1 : 0,
+	    memory_order_relaxed);
 }
 
 static int
 aio_offload_forced(void)
 {
-	if (g_force_offload < 0) {
+	/*
+	 * Resolve once, atomically.  This is read and written by concurrent
+	 * fibers on different loop threads (a migratable aio caller runs on
+	 * whatever loop stole it), so a plain int here is a data race -- TSan
+	 * caught exactly that on the migratable-aio path.  The value is
+	 * process-global and idempotent (every thread resolves it to the same
+	 * thing), so a relaxed CAS-free resolve is sufficient: a race between
+	 * two first-callers has both compute the same result and the later
+	 * store is harmless.  Relaxed suffices -- there is no other state to
+	 * order against, only this flag's own visibility.
+	 */
+	int v = atomic_load_explicit(&g_force_offload, memory_order_relaxed);
+	if (v < 0) {
 		const char *e = getenv("XTC_AIO_FORCE_OFFLOAD");
-		g_force_offload = (e != NULL && e[0] == '1') ? 1 : 0;
+		v = (e != NULL && e[0] == '1') ? 1 : 0;
+		atomic_store_explicit(&g_force_offload, v, memory_order_relaxed);
 	}
-	return g_force_offload;
+	return v;
 }
 
 /* Blocking-pool fallback: run the op on a worker thread.  Portable

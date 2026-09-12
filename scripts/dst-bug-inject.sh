@@ -60,6 +60,24 @@ CASES="
 # with unlock setting granted under the lock.  Both were built and
 # confirmed to pass the test both ways -> dropped, not faked.  Mutual
 # exclusion is proven by bug 2 (LOCKEXCL) against the lock manager.
+#
+# ALSO NOT plantable, and this one is a real DST BLIND SPOT, not a
+# yield-free-critical-section artifact: the CROSS-LOOP aio completion
+# nudge (the v1.44.1 fix -- aio.c nudges the submitting loop when a
+# migrated fiber resumes elsewhere with the op still pending).  Planting
+# "skip the nudge" cannot be caught by DST because the sim's runnability
+# oracle (__sim_loop_runnable in exec.c) marks a loop runnable whenever a
+# completion on its ring is due, REGARDLESS of whether the owning loop was
+# nudged -- it reads the completion store directly.  In production a loop
+# does not know its ring has a completion until it is woken (its own
+# blocking poll, a nudge, or a fairness poll); a completion whose owner is
+# asleep-and-un-nudged strands, which is exactly the escaped bug.  The sim
+# cannot express "owner never learns of the completion," so a planted
+# NONUDGE would show as a HOLE, not a catch.  This class is covered
+# INSTEAD by the real-thread liveness guard test_aio_migrate_wake and,
+# decisively, by the consumer's real 32-backend workload.  Documented in
+# full in .agent/DST_GAP_ANALYSIS_2026-09-11.md -- the honest statement is
+# that DST's runnability model is one level above where this bug lives.
 
 work=$(mktemp -d "$TMPDIR/dstbug.XXXXXX") || exit 1
 fails=0
