@@ -252,6 +252,7 @@ typedef int (*xtc_tail_fn)(const xtc_tail_rec_t *rec, void *user);
  * PUBLIC: int      xtc_tail_reset __P((void));
  * PUBLIC: int      xtc_tail_read __P((xtc_tail_fn, void *));
  * PUBLIC: int      xtc_tail_dump __P((int));
+ * PUBLIC: int      xtc_tail_dump_dial9 __P((int));
  * PUBLIC: size_t   xtc_tail_count __P((void));
  * PUBLIC: uint64_t xtc_tail_dropped __P((void));
  */
@@ -274,6 +275,15 @@ XTC_API int      xtc_tail_read(xtc_tail_fn cb, void *user);
  * a small header (magic, version, record count, record size) followed
  * by the records verbatim.  A separate offline tool renders it. */
 XTC_API int      xtc_tail_dump(int fd);
+
+/* Write the buffered records to `fd` as a dial9 trace (TRC\0 wire format,
+ * version 1), so a libxtc trace opens in the dial9 GUI viewer unchanged.
+ * Each libxtc event kind is registered as a self-describing schema under a
+ * name the viewer recognizes where a Tokio analogue exists (PollStartEvent,
+ * TaskSpawnEvent, WakeEventEvent, ...) and under an Xtc* name otherwise (the
+ * io_uring reap/submit chain), which the viewer shows as a custom event.
+ * See the dial9 project for the viewer; the format is dial9's, pinned to v1. */
+XTC_API int      xtc_tail_dump_dial9(int fd);
 
 /* Number of records currently buffered. */
 XTC_API size_t   xtc_tail_count(void);

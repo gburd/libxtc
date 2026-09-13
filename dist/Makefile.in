@@ -439,6 +439,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_stream \
 		  test_credit \
 		  test_tail \
+		  test_tail_dial9 \
 		  test_xproc \
 		  test_app \
 		  test_tnt \
@@ -1787,6 +1788,11 @@ test_tail: $(srcdir)/../test/m12/test_tail.c \
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m12 \
 		-o $@ $(srcdir)/../test/m12/test_tail.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_tail_dial9: $(srcdir)/../test/m12/test_tail_dial9.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../test/m12/test_tail_dial9.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_dump: $(srcdir)/../test/m12/test_dump.c \
 		$(srcdir)/../test/m12/munit.c $(STATIC_LIB)

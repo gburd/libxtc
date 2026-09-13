@@ -9,6 +9,7 @@
 .Nm xtc_tail_reset ,
 .Nm xtc_tail_read ,
 .Nm xtc_tail_dump ,
+.Nm xtc_tail_dump_dial9 ,
 .Nm xtc_tail_count ,
 .Nm xtc_tail_dropped
 .Nd runtime microscope (individual scheduler-event recording)
@@ -26,6 +27,8 @@
 .Fn xtc_tail_read "xtc_tail_fn cb" "void *user"
 .Ft int
 .Fn xtc_tail_dump "int fd"
+.Ft int
+.Fn xtc_tail_dump_dial9 "int fd"
 .Ft size_t
 .Fn xtc_tail_count "void"
 .Ft uint64_t
@@ -76,12 +79,35 @@ as a versioned, compact, PORTABLE binary trace: an
 header
 .Pq magic, version, endianness flag, count, base timestamp
 written little-endian, followed by one varint/delta-encoded frame per
-event (kind, source, LEB128 timestamp delta, pid, and detail).  The
+event (kind, source, LEB128 timestamp delta, pid, and detail).
+The
 delta-encoded timestamps and varint fields keep it to a handful of
 bytes per event -- and being explicit little-endian with no struct
 padding, a trace dumps and decodes identically across architectures --
 for a separate offline tool to
 render.
+.Pp
+.Fn xtc_tail_dump_dial9
+writes the same buffered records to
+.Fa fd
+in the dial9 trace wire format
+.Pq Dq Li TRC\e0 , No version 1 ,
+so a libxtc trace opens in the dial9 GUI viewer with no viewer change.
+The dial9 viewer keys on a schema NAME string, so each libxtc event kind is
+registered as a self-describing schema under a name the viewer recognizes
+where a runtime analogue exists
+.Pq Dv TaskSpawnEvent , Dv TaskTerminateEvent , Dv WakeEventEvent , Dv PollStartEvent
+and under an
+.Li Xtc*
+name otherwise (the io_uring reap/submit chain), which the viewer shows as a
+generic custom event pinned to the right worker and task.
+Use whichever consumer you have: the dial9 GUI reads
+.Fn xtc_tail_dump_dial9
+output, while
+.Nm xtc-tail.py
+reads
+.Fn xtc_tail_dump
+output.
 .Pp
 Each
 .Vt xtc_tail_rec_t
@@ -94,8 +120,9 @@ wakeups).
 returns the previously enabled source mask.
 .Fn xtc_tail_reset ,
 .Fn xtc_tail_read ,
+.Fn xtc_tail_dump ,
 and
-.Fn xtc_tail_dump
+.Fn xtc_tail_dump_dial9
 return
 .Dv XTC_OK
 or a negative

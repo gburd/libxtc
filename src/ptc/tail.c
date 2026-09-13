@@ -249,3 +249,204 @@ out:
 	if (snap != NULL) __os_free(snap);
 	return rc;
 }
+
+/* ------------------------------------------------------------------ *
+ * dial9 trace format (TRC\0 v1) emission.
+ *
+ * xtc_tail_dump writes the native XTCL format for tools/xtc-tail.py.
+ * xtc_tail_dump_dial9 writes the dial9 wire format so a libxtc trace opens
+ * in the dial9 GUI viewer unchanged -- see .agent/dial9-SPEC-v1.md for the
+ * spec and .agent/XTC_TAIL_DIAL9_PLAN_2026-09-12.md for the plan.  The
+ * viewer dispatches on the SCHEMA NAME string, so we register a schema per
+ * libxtc event kind under a name the viewer recognizes where an analogue
+ * exists (PollStartEvent, TaskSpawnEvent, WakeEventEvent, ...) and under a
+ * libxtc-specific name otherwise (the io_uring reap/submit chain), which the
+ * viewer shows as a generic custom event pinned to the right thread/task.
+ *
+ * This is a streaming encoder over the SAME per-event snapshot the XTCL dump
+ * uses; no allocator on the write path beyond the one snapshot copy the XTCL
+ * path already makes.  All values little-endian, LEB128 varints, exactly as
+ * the spec requires.
+ * ------------------------------------------------------------------ */
+
+#define XTC_D9_MAGIC0 0x54  /* 'T' */
+#define XTC_D9_MAGIC1 0x52  /* 'R' */
+#define XTC_D9_MAGIC2 0x43  /* 'C' */
+#define XTC_D9_MAGIC3 0x00  /* '\0' */
+#define XTC_D9_VERSION 0x01
+
+/* Frame tags. */
+#define XTC_D9_FRAME_SCHEMA   0x01
+#define XTC_D9_FRAME_EVENT    0x02
+#define XTC_D9_FRAME_TS_RESET 0x05
+
+/* Field type tags (subset we use). */
+#define XTC_D9_FT_U8     11
+#define XTC_D9_FT_U16    12
+#define XTC_D9_FT_U32    13
+#define XTC_D9_FT_VARINT  9
+#define XTC_D9_FT_I64     1
+
+/* u24 max: the timestamp-delta ceiling before a reset frame is required. */
+#define XTC_D9_DELTA_MAX 16777215u
+
+/*
+ * The schema table.  Each libxtc event kind maps to one dial9 schema: a
+ * type_id (our own dense numbering), a viewer-facing name, and a fixed field
+ * layout.  We keep every schema to the SAME five varint payload fields
+ * (loop_id, local_id, gen, source, detail) plus the packed timestamp, so one
+ * encoder path serves them all -- the name is what the viewer keys on, and a
+ * richer per-schema field set is a later refinement (Phase 2/3).  A name of
+ * NULL means "skip this kind" (none today).
+ */
+struct xtc_d9_schema {
+	uint16_t    type_id;
+	const char *name;
+};
+
+/*
+ * Kind -> schema name.  Index is the enum xtc_tail_kind value.  Names that
+ * match dial9's built-in schemas render with the viewer's native timeline;
+ * the libxtc-specific kinds use "Xtc*" names shown as custom events.
+ */
+static const char *
+__xtc_d9_kind_name(unsigned kind)
+{
+	switch (kind) {
+	case XTC_TAIL_SPAWN:      return "TaskSpawnEvent";
+	case XTC_TAIL_EXIT:       return "TaskTerminateEvent";
+	case XTC_TAIL_WAKE:       return "WakeEventEvent";
+	case XTC_TAIL_RUN:        return "PollStartEvent";
+	case XTC_TAIL_PARK:       return "XtcParkEvent";
+	case XTC_TAIL_SEND:       return "XtcSendEvent";
+	case XTC_TAIL_RECV:       return "XtcRecvEvent";
+	case XTC_TAIL_MBOX_HWM:   return "XtcMailboxHwmEvent";
+	case XTC_TAIL_LOOP_POLL:  return "XtcLoopPollEvent";
+	case XTC_TAIL_PARK_TASK:  return "XtcParkTaskEvent";
+	case XTC_TAIL_REAP:       return "XtcReapEvent";
+	case XTC_TAIL_SUBMIT:     return "XtcSubmitEvent";
+	case XTC_TAIL_SUBMIT_FAIL:return "XtcSubmitFailEvent";
+	case XTC_TAIL_POLL_FULL:  return "XtcPollFullEvent";
+	default:                  return NULL;
+	}
+}
+
+#define XTC_D9_MAX_KIND 14   /* one past XTC_TAIL_POLL_FULL */
+
+/*
+ * Write one schema frame: tag, type_id u16, name, has_timestamp=1,
+ * field_count u16, then each field (name u16-len + bytes, type u8).
+ * Our five payload fields are fixed and shared across schemas.
+ */
+static int
+__xtc_d9_write_schema(int fd, uint16_t type_id, const char *name)
+{
+	static const struct { const char *n; uint8_t t; } fields[] = {
+		{ "loop_id",  XTC_D9_FT_U16 },
+		{ "local_id", XTC_D9_FT_U16 },
+		{ "gen",      XTC_D9_FT_U32 },
+		{ "source",   XTC_D9_FT_U8  },
+		{ "detail",   XTC_D9_FT_I64 },
+	};
+	uint8_t buf[256];
+	size_t off = 0, i;
+	size_t nlen = strlen(name);
+
+	if (nlen > 200) return XTC_E_INVAL;
+	buf[off++] = XTC_D9_FRAME_SCHEMA;
+	buf[off++] = (uint8_t)(type_id & 0xff);
+	buf[off++] = (uint8_t)(type_id >> 8);
+	buf[off++] = (uint8_t)(nlen & 0xff);
+	buf[off++] = (uint8_t)(nlen >> 8);
+	memcpy(buf + off, name, nlen); off += nlen;
+	buf[off++] = 1;   /* has_timestamp */
+	buf[off++] = (uint8_t)(sizeof fields / sizeof fields[0]);
+	buf[off++] = 0;   /* field_count high byte */
+	for (i = 0; i < sizeof fields / sizeof fields[0]; i++) {
+		size_t fl = strlen(fields[i].n);
+		buf[off++] = (uint8_t)(fl & 0xff);
+		buf[off++] = (uint8_t)(fl >> 8);
+		memcpy(buf + off, fields[i].n, fl); off += fl;
+		buf[off++] = fields[i].t;
+	}
+	return __tail_write_all(fd, buf, off);
+}
+
+/* PUBLIC: int xtc_tail_dump_dial9 __P((int)); */
+int
+xtc_tail_dump_dial9(int fd)
+{
+	xtc_tail_rec_t *snap = NULL;
+	size_t n = 0, i;
+	uint8_t hdr[5];
+	uint8_t seen[XTC_D9_MAX_KIND];   /* which schemas already written */
+	uint64_t base_ts = 0;
+	int have_base = 0;
+	int rc;
+
+	if (fd < 0) return XTC_E_INVAL;
+	if ((rc = __tail_snapshot(&snap, &n)) != XTC_OK) return rc;
+	memset(seen, 0, sizeof seen);
+
+	/* Header: TRC\0 + version. */
+	hdr[0] = XTC_D9_MAGIC0; hdr[1] = XTC_D9_MAGIC1;
+	hdr[2] = XTC_D9_MAGIC2; hdr[3] = XTC_D9_MAGIC3;
+	hdr[4] = XTC_D9_VERSION;
+	if ((rc = __tail_write_all(fd, hdr, sizeof hdr)) != XTC_OK) goto out;
+
+	for (i = 0; i < n; i++) {
+		unsigned kind = snap[i].kind;
+		const char *name;
+		uint8_t buf[96];
+		size_t off = 0;
+		uint64_t ts = snap[i].ts_ns;
+		uint64_t delta;
+
+		if (kind >= XTC_D9_MAX_KIND) continue;
+		name = __xtc_d9_kind_name(kind);
+		if (name == NULL) continue;
+
+		/* Emit the schema once, before its first event (spec MUST). */
+		if (!seen[kind]) {
+			if ((rc = __xtc_d9_write_schema(fd, (uint16_t)kind,
+			    name)) != XTC_OK) goto out;
+			seen[kind] = 1;
+		}
+
+		/* Timestamp base: reset on first event, on overflow, or on a
+		 * backward step (the spec's three reset triggers). */
+		if (!have_base || ts < base_ts ||
+		    ts - base_ts > XTC_D9_DELTA_MAX) {
+			uint8_t rst[9];
+			rst[0] = XTC_D9_FRAME_TS_RESET;
+			__tail_le64(rst + 1, ts);
+			if ((rc = __tail_write_all(fd, rst, sizeof rst))
+			    != XTC_OK) goto out;
+			base_ts = ts;
+			have_base = 1;
+		}
+		delta = ts - base_ts;
+		base_ts = ts;   /* advance base to this event (spec 3d) */
+
+		/* Event frame: tag, type_id u16, u24 delta, then the five
+		 * fields in schema order (U16 loop, U16 local, U32 gen,
+		 * U8 source, I64 detail). */
+		buf[off++] = XTC_D9_FRAME_EVENT;
+		buf[off++] = (uint8_t)(kind & 0xff);
+		buf[off++] = (uint8_t)(kind >> 8);
+		buf[off++] = (uint8_t)(delta & 0xff);
+		buf[off++] = (uint8_t)((delta >> 8) & 0xff);
+		buf[off++] = (uint8_t)((delta >> 16) & 0xff);
+		buf[off++] = (uint8_t)(snap[i].pid.loop_id & 0xff);
+		buf[off++] = (uint8_t)(snap[i].pid.loop_id >> 8);
+		buf[off++] = (uint8_t)(snap[i].pid.local_id & 0xff);
+		buf[off++] = (uint8_t)(snap[i].pid.local_id >> 8);
+		__tail_le32(buf + off, snap[i].pid.gen); off += 4;
+		buf[off++] = (uint8_t)snap[i].source;
+		__tail_le64(buf + off, snap[i].detail); off += 8;
+		if ((rc = __tail_write_all(fd, buf, off)) != XTC_OK) goto out;
+	}
+out:
+	if (snap != NULL) __os_free(snap);
+	return rc;
+}
