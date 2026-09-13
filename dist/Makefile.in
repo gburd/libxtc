@@ -32,6 +32,12 @@ XTC_INCLUDES	= -I. -I$(srcdir)/../src/inc
 # where it selects __declspec(dllexport) instead of the dllimport a
 # consumer would request via -DXTC_DLL.
 CFLAGS		= $(XTC_INCLUDES) @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread -DXTC_BUILDING_DLL @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@ @XTC_TLS_CFLAGS@ @XTC_ACCEL_CFLAGS@
+# The configure-supplied CFLAGS/LDFLAGS verbatim (this is where a
+# -fsanitize=* build carries its flag), passed to the doc-snippet gate so a
+# snippet links against a sanitizer-instrumented library with the matching
+# runtime.  Empty on a plain build.
+SNIPPET_SAN_CFLAGS  = @CFLAGS@
+SNIPPET_SAN_LDFLAGS = @LDFLAGS@
 CPPFLAGS	= @CPPFLAGS@ $(XTC_INCLUDES)
 LDFLAGS		= @LDFLAGS@ -pthread
 LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@ @XTC_TLS_LIBS@ @XTC_LIBUNWIND_LIBS@ @XTC_ACCEL_LIBS@
@@ -1011,6 +1017,8 @@ tests-sh: $(STATIC_LIB) tnt_echo
 		CC='$(CC)' \
 		XTC_BUILD_DIR=$(abs_builddir) \
 		XTC_SRC_DIR=$(abs_top_srcdir)/.. \
+		XTC_SNIPPET_CFLAGS='$(SNIPPET_SAN_CFLAGS)' \
+		XTC_SNIPPET_LDFLAGS='$(SNIPPET_SAN_LDFLAGS)' \
 		sh $$t || exit 1; \
 	done
 

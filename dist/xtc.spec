@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.44.1
+Version:        1.45.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,16 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Sat Sep 13 2026 Greg Burd <greg@burd.me> - 1.45.0-1
+- tail: xtc_tail is now a dial9-class microscope with dial9-GUI interop.
+  xtc_tail_dump_dial9 emits the dial9 trace wire format (TRC\\0 v1) with the
+  scheduler events mapped to dial9's built-in schema names (PollStartEvent,
+  TaskSpawnEvent, WakeEventEvent, ...) so a libxtc trace opens in the dial9
+  viewer with a native timeline; libxtc-specific events (the io_uring chain)
+  ride as custom events.  xtc_tail_from_env enables recording from
+  XTC_TAIL_ENABLE with no code change; xtc_tail_spill_dial9 writes a segment
+  file for a sidecar to ship off a deployed box.  New guide chapter
+  (Observing a running application) documents the deployed + GUI workflow.
 * Fri Sep 11 2026 Greg Burd <greg@burd.me> - 1.44.1-1
 - aio: FIX the cross-loop lost wake -- a migratable fiber's async-file
   completion lands on the ring of the loop it submitted on, and if the fiber
