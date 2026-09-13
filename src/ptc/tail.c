@@ -19,6 +19,7 @@
 #include "preempt_int.h"   /* __xtc_mtx_lock/unlock */
 #include "os_time.h"
 #include "os_sharp.h"    /* __os_env_get */
+#include "xtc_fs.h"       /* xtc_fs_open/close (portable file open) */
 
 #include <pthread.h>
 #include <stdio.h>
@@ -645,8 +646,6 @@ out:
  * allocates beyond the one snapshot the dump already takes.
  * ------------------------------------------------------------------ */
 
-#include <stdlib.h>       /* (env parsing helpers, if needed later) */
-#include <fcntl.h>        /* open */
 
 /* PUBLIC: unsigned xtc_tail_from_env __P((void)); */
 /*
@@ -692,17 +691,18 @@ int
 xtc_tail_spill_dial9(const char *dir)
 {
 	char path[512];
-	int fd, rc, n;
+	int fd = -1, rc, n;
 
 	if (dir == NULL) return XTC_E_INVAL;
 	n = snprintf(path, sizeof path, "%s/xtc-tail-%ld-%llu.d9",
 	    dir, (long)getpid(), (unsigned long long)__tail_now_ns());
 	if (n < 0 || (size_t)n >= sizeof path) return XTC_E_INVAL;
-	/* XTC_BLOCKING_OK: explicit user-invoked diagnostic spill to a
-	 * caller-chosen directory, off any sim-reachable path. */
-	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-	if (fd < 0) return XTC_E_INTERNAL;
+	/* Portable open via the OS file wrapper (POSIX open + Win32 _open),
+	 * so the spill compiles and runs on every target -- the raw open()
+	 * the XTCL dump avoids by taking a caller fd is not portable here. */
+	rc = xtc_fs_open(path, XTC_FS_WRITE | XTC_FS_CREATE | XTC_FS_TRUNC, &fd);
+	if (rc != XTC_OK) return rc;
 	rc = xtc_tail_dump_dial9(fd);
-	(void)close(fd);
+	(void)xtc_fs_close(fd);
 	return rc;
 }
