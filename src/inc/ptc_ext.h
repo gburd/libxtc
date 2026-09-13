@@ -60,6 +60,7 @@ int xtc_res_set_alert_fn __P((xtc_res_t *, void (*)(xtc_res_kind_t, int64_t, int
 int xtc_scope_defer __P((xtc_scope_t *, xtc_finalizer_fn, void *));
 int xtc_send __P((xtc_pid_t, const void *, size_t));
 int xtc_tail_dump_dial9 __P((int));
+int xtc_tail_spill_dial9 __P((const char *));
 int xtc_trace_causal_dump __P((xtc_pid_t, xtc_causal_fn, void *));
 int xtc_trace_causal_enable __P((int));
 int xtc_uncancelable __P((int (*)(void *), void *));
@@ -71,6 +72,7 @@ long xtc_lwlock_track_violations __P((void));
 struct xtc_mctx *xtc_proc_mctx __P((void));
 uint64_t xtc_preempt_ticks __P((void));
 uint64_t xtc_tail_dropped __P((void));
+unsigned xtc_tail_from_env __P((void));
 void  __xtc_proc_ctx_restore __P((void *));
 void *__xtc_proc_ctx_save __P((void));
 void *xtc_proc_userdata __P((void));

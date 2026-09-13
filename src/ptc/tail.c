@@ -18,8 +18,10 @@
 #include "tail_int.h"        /* __xtc_tail_emit / __xtc_tail_on (internal) */
 #include "preempt_int.h"   /* __xtc_mtx_lock/unlock */
 #include "os_time.h"
+#include "os_sharp.h"    /* __os_env_get */
 
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -257,16 +259,22 @@ out:
  * xtc_tail_dump_dial9 writes the dial9 wire format so a libxtc trace opens
  * in the dial9 GUI viewer unchanged -- see .agent/dial9-SPEC-v1.md for the
  * spec and .agent/XTC_TAIL_DIAL9_PLAN_2026-09-12.md for the plan.  The
- * viewer dispatches on the SCHEMA NAME string, so we register a schema per
- * libxtc event kind under a name the viewer recognizes where an analogue
- * exists (PollStartEvent, TaskSpawnEvent, WakeEventEvent, ...) and under a
- * libxtc-specific name otherwise (the io_uring reap/submit chain), which the
- * viewer shows as a generic custom event pinned to the right thread/task.
+ * viewer dispatches on the SCHEMA NAME string, so a libxtc event kind is
+ * registered under a dial9 BUILT-IN name where a runtime analogue exists
+ * (PollStartEvent, TaskSpawnEvent, TaskTerminateEvent, WakeEventEvent) --
+ * which lights up the viewer's native worker/poll/wake timeline -- and
+ * under a libxtc-specific Xtc* name otherwise (the io_uring reap/submit
+ * chain), which the viewer shows as a custom event pinned to the right
+ * worker and task.
  *
- * This is a streaming encoder over the SAME per-event snapshot the XTCL dump
- * uses; no allocator on the write path beyond the one snapshot copy the XTCL
- * path already makes.  All values little-endian, LEB128 varints, exactly as
- * the spec requires.
+ * Field layouts match dial9's built-ins EXACTLY (Phase 2): worker_id and
+ * task_id wire as Varint(u64), local_queue as u8, spawn_loc/runtime_name as
+ * a PooledString (u32 pool id resolved by a String Pool frame).  libxtc's
+ * proc identity {loop_id, local_id, gen} is packed into one u64 task_id so
+ * the GUI groups a proc's events; worker_id is the loop's exec id.
+ *
+ * Streams over the SAME per-event snapshot the XTCL dump takes (no extra
+ * allocator on the write path); all values little-endian, LEB128 varints.
  * ------------------------------------------------------------------ */
 
 #define XTC_D9_MAGIC0 0x54  /* 'T' */
@@ -278,98 +286,203 @@ out:
 /* Frame tags. */
 #define XTC_D9_FRAME_SCHEMA   0x01
 #define XTC_D9_FRAME_EVENT    0x02
+#define XTC_D9_FRAME_STRPOOL  0x03
 #define XTC_D9_FRAME_TS_RESET 0x05
 
-/* Field type tags (subset we use). */
-#define XTC_D9_FT_U8     11
-#define XTC_D9_FT_U16    12
-#define XTC_D9_FT_U32    13
-#define XTC_D9_FT_VARINT  9
-#define XTC_D9_FT_I64     1
+/* Field type tags (SPEC Field Types table). */
+#define XTC_D9_FT_I64          1
+#define XTC_D9_FT_BOOL         3
+#define XTC_D9_FT_POOLED_STR   7
+#define XTC_D9_FT_VARINT       9
+#define XTC_D9_FT_U8          11
+#define XTC_D9_FT_U32         13
 
-/* u24 max: the timestamp-delta ceiling before a reset frame is required. */
-#define XTC_D9_DELTA_MAX 16777215u
+#define XTC_D9_DELTA_MAX 16777215u   /* u24 max before a reset frame */
 
 /*
- * The schema table.  Each libxtc event kind maps to one dial9 schema: a
- * type_id (our own dense numbering), a viewer-facing name, and a fixed field
- * layout.  We keep every schema to the SAME five varint payload fields
- * (loop_id, local_id, gen, source, detail) plus the packed timestamp, so one
- * encoder path serves them all -- the name is what the viewer keys on, and a
- * richer per-schema field set is a later refinement (Phase 2/3).  A name of
- * NULL means "skip this kind" (none today).
+ * Dense type_id assignment.  The wire type_id is arbitrary (the viewer keys
+ * on the NAME), so we reuse the enum xtc_tail_kind value as the type_id for
+ * SCHED kinds, and reserve high ids for the framing schemas we synthesize.
  */
-struct xtc_d9_schema {
-	uint16_t    type_id;
-	const char *name;
+#define XTC_D9_TID_CLOCK_SYNC   200
+#define XTC_D9_TID_SEG_META     201
+#define XTC_D9_MAX_KIND          14   /* one past XTC_TAIL_POLL_FULL */
+
+/* One field of a schema: wire name + field-type tag. */
+struct xtc_d9_field { const char *name; uint8_t type; };
+
+/*
+ * The schema for a given kind: viewer-facing name + its field list.  Field
+ * order here is the exact wire order the event frame must follow.  The
+ * dial9 built-ins (poll/spawn/terminate/wake) match dial9's own layouts so
+ * the GUI renders them natively; the Xtc* customs carry loop_id + task_id +
+ * a kind-specific detail so they still pin to a worker/task on the timeline.
+ */
+struct xtc_d9_schema_def {
+	const char           *name;
+	const struct xtc_d9_field *fields;
+	unsigned              nfields;
 };
 
-/*
- * Kind -> schema name.  Index is the enum xtc_tail_kind value.  Names that
- * match dial9's built-in schemas render with the viewer's native timeline;
- * the libxtc-specific kinds use "Xtc*" names shown as custom events.
- */
-static const char *
-__xtc_d9_kind_name(unsigned kind)
+/* dial9 built-in field lists. */
+static const struct xtc_d9_field XTC_D9_F_POLL_START[] = {
+	{ "worker_id",   XTC_D9_FT_VARINT },
+	{ "local_queue", XTC_D9_FT_U8 },
+	{ "task_id",     XTC_D9_FT_VARINT },
+	{ "spawn_loc",   XTC_D9_FT_POOLED_STR },
+};
+static const struct xtc_d9_field XTC_D9_F_TASK_SPAWN[] = {
+	{ "task_id",      XTC_D9_FT_VARINT },
+	{ "spawn_loc",    XTC_D9_FT_POOLED_STR },
+	{ "instrumented", XTC_D9_FT_BOOL },
+};
+static const struct xtc_d9_field XTC_D9_F_TASK_TERM[] = {
+	{ "task_id", XTC_D9_FT_VARINT },
+};
+static const struct xtc_d9_field XTC_D9_F_WAKE[] = {
+	{ "waker_task_id", XTC_D9_FT_VARINT },
+	{ "woken_task_id", XTC_D9_FT_VARINT },
+	{ "target_worker", XTC_D9_FT_U8 },
+};
+/* libxtc-specific custom events: worker + task + a kind detail. */
+static const struct xtc_d9_field XTC_D9_F_XTC[] = {
+	{ "worker_id", XTC_D9_FT_VARINT },
+	{ "task_id",   XTC_D9_FT_VARINT },
+	{ "detail",    XTC_D9_FT_I64 },
+};
+/* framing schemas. */
+static const struct xtc_d9_field XTC_D9_F_CLOCK[] = {
+	{ "realtime_ns", XTC_D9_FT_VARINT },
+};
+static const struct xtc_d9_field XTC_D9_F_SEGMETA[] = {
+	{ "service",   XTC_D9_FT_POOLED_STR },
+	{ "backend",   XTC_D9_FT_POOLED_STR },
+};
+
+#define XTC_D9_NF(a) ((unsigned)(sizeof (a) / sizeof (a)[0]))
+
+/* Kind -> schema definition, or NULL to skip. */
+static const struct xtc_d9_schema_def *
+__xtc_d9_kind_schema(unsigned kind)
 {
+	static const struct xtc_d9_schema_def poll_start =
+	    { "PollStartEvent", XTC_D9_F_POLL_START, XTC_D9_NF(XTC_D9_F_POLL_START) };
+	static const struct xtc_d9_schema_def task_spawn =
+	    { "TaskSpawnEvent", XTC_D9_F_TASK_SPAWN, XTC_D9_NF(XTC_D9_F_TASK_SPAWN) };
+	static const struct xtc_d9_schema_def task_term =
+	    { "TaskTerminateEvent", XTC_D9_F_TASK_TERM, XTC_D9_NF(XTC_D9_F_TASK_TERM) };
+	static const struct xtc_d9_schema_def wake =
+	    { "WakeEventEvent", XTC_D9_F_WAKE, XTC_D9_NF(XTC_D9_F_WAKE) };
+	static const struct xtc_d9_schema_def xtc_park =
+	    { "XtcParkEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
+	static const struct xtc_d9_schema_def xtc_send =
+	    { "XtcSendEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
+	static const struct xtc_d9_schema_def xtc_recv =
+	    { "XtcRecvEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
+	static const struct xtc_d9_schema_def xtc_hwm =
+	    { "XtcMailboxHwmEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
+	static const struct xtc_d9_schema_def xtc_lp =
+	    { "XtcLoopPollEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
+	static const struct xtc_d9_schema_def xtc_pt =
+	    { "XtcParkTaskEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
+	static const struct xtc_d9_schema_def xtc_reap =
+	    { "XtcReapEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
+	static const struct xtc_d9_schema_def xtc_sub =
+	    { "XtcSubmitEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
+	static const struct xtc_d9_schema_def xtc_subf =
+	    { "XtcSubmitFailEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
+	static const struct xtc_d9_schema_def xtc_pf =
+	    { "XtcPollFullEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
 	switch (kind) {
-	case XTC_TAIL_SPAWN:      return "TaskSpawnEvent";
-	case XTC_TAIL_EXIT:       return "TaskTerminateEvent";
-	case XTC_TAIL_WAKE:       return "WakeEventEvent";
-	case XTC_TAIL_RUN:        return "PollStartEvent";
-	case XTC_TAIL_PARK:       return "XtcParkEvent";
-	case XTC_TAIL_SEND:       return "XtcSendEvent";
-	case XTC_TAIL_RECV:       return "XtcRecvEvent";
-	case XTC_TAIL_MBOX_HWM:   return "XtcMailboxHwmEvent";
-	case XTC_TAIL_LOOP_POLL:  return "XtcLoopPollEvent";
-	case XTC_TAIL_PARK_TASK:  return "XtcParkTaskEvent";
-	case XTC_TAIL_REAP:       return "XtcReapEvent";
-	case XTC_TAIL_SUBMIT:     return "XtcSubmitEvent";
-	case XTC_TAIL_SUBMIT_FAIL:return "XtcSubmitFailEvent";
-	case XTC_TAIL_POLL_FULL:  return "XtcPollFullEvent";
+	case XTC_TAIL_RUN:        return &poll_start;
+	case XTC_TAIL_SPAWN:      return &task_spawn;
+	case XTC_TAIL_EXIT:       return &task_term;
+	case XTC_TAIL_WAKE:       return &wake;
+	case XTC_TAIL_PARK:       return &xtc_park;
+	case XTC_TAIL_SEND:       return &xtc_send;
+	case XTC_TAIL_RECV:       return &xtc_recv;
+	case XTC_TAIL_MBOX_HWM:   return &xtc_hwm;
+	case XTC_TAIL_LOOP_POLL:  return &xtc_lp;
+	case XTC_TAIL_PARK_TASK:  return &xtc_pt;
+	case XTC_TAIL_REAP:       return &xtc_reap;
+	case XTC_TAIL_SUBMIT:     return &xtc_sub;
+	case XTC_TAIL_SUBMIT_FAIL:return &xtc_subf;
+	case XTC_TAIL_POLL_FULL:  return &xtc_pf;
 	default:                  return NULL;
 	}
 }
 
-#define XTC_D9_MAX_KIND 14   /* one past XTC_TAIL_POLL_FULL */
-
-/*
- * Write one schema frame: tag, type_id u16, name, has_timestamp=1,
- * field_count u16, then each field (name u16-len + bytes, type u8).
- * Our five payload fields are fixed and shared across schemas.
- */
-static int
-__xtc_d9_write_schema(int fd, uint16_t type_id, const char *name)
+/* Pack a proc pid into a single u64 task_id so the GUI groups a proc's
+ * events: gen<<48 | loop<<32 | local.  Stable and collision-free within a
+ * run (gen distinguishes reused local_ids). */
+static uint64_t
+__xtc_d9_task_id(xtc_pid_t p)
 {
-	static const struct { const char *n; uint8_t t; } fields[] = {
-		{ "loop_id",  XTC_D9_FT_U16 },
-		{ "local_id", XTC_D9_FT_U16 },
-		{ "gen",      XTC_D9_FT_U32 },
-		{ "source",   XTC_D9_FT_U8  },
-		{ "detail",   XTC_D9_FT_I64 },
-	};
-	uint8_t buf[256];
-	size_t off = 0, i;
-	size_t nlen = strlen(name);
+	return ((uint64_t)p.gen << 48) |
+	       ((uint64_t)p.loop_id << 32) |
+	       (uint64_t)p.local_id;
+}
 
-	if (nlen > 200) return XTC_E_INVAL;
+/* Append a u16-length-prefixed name (schema/field names). */
+static void
+__xtc_d9_put_name(uint8_t *buf, size_t *off, const char *s)
+{
+	size_t l = strlen(s);
+	buf[(*off)++] = (uint8_t)(l & 0xff);
+	buf[(*off)++] = (uint8_t)(l >> 8);
+	memcpy(buf + *off, s, l); *off += l;
+}
+
+/* Write a schema frame from a schema_def. */
+static int
+__xtc_d9_write_schema(int fd, uint16_t type_id,
+    const struct xtc_d9_schema_def *def)
+{
+	uint8_t buf[512];
+	size_t off = 0;
+	unsigned f;
+
 	buf[off++] = XTC_D9_FRAME_SCHEMA;
 	buf[off++] = (uint8_t)(type_id & 0xff);
 	buf[off++] = (uint8_t)(type_id >> 8);
-	buf[off++] = (uint8_t)(nlen & 0xff);
-	buf[off++] = (uint8_t)(nlen >> 8);
-	memcpy(buf + off, name, nlen); off += nlen;
-	buf[off++] = 1;   /* has_timestamp */
-	buf[off++] = (uint8_t)(sizeof fields / sizeof fields[0]);
-	buf[off++] = 0;   /* field_count high byte */
-	for (i = 0; i < sizeof fields / sizeof fields[0]; i++) {
-		size_t fl = strlen(fields[i].n);
-		buf[off++] = (uint8_t)(fl & 0xff);
-		buf[off++] = (uint8_t)(fl >> 8);
-		memcpy(buf + off, fields[i].n, fl); off += fl;
-		buf[off++] = fields[i].t;
+	__xtc_d9_put_name(buf, &off, def->name);
+	buf[off++] = 1;                              /* has_timestamp */
+	buf[off++] = (uint8_t)(def->nfields & 0xff); /* field_count u16 */
+	buf[off++] = (uint8_t)(def->nfields >> 8);
+	for (f = 0; f < def->nfields; f++) {
+		__xtc_d9_put_name(buf, &off, def->fields[f].name);
+		buf[off++] = def->fields[f].type;
 	}
 	return __tail_write_all(fd, buf, off);
+}
+
+/* Write a one-entry String Pool frame (pool_id -> string). */
+static int
+__xtc_d9_write_strpool(int fd, uint32_t pool_id, const char *s)
+{
+	uint8_t buf[256];
+	size_t off = 0, l = strlen(s);
+	if (l > 200) l = 200;
+	buf[off++] = XTC_D9_FRAME_STRPOOL;
+	__tail_le32(buf + off, 1); off += 4;         /* count */
+	__tail_le32(buf + off, pool_id); off += 4;
+	__tail_le32(buf + off, (uint32_t)l); off += 4;
+	memcpy(buf + off, s, l); off += l;
+	return __tail_write_all(fd, buf, off);
+}
+
+/* Emit the event-frame header (tag, type_id, u24 delta) into buf. */
+static size_t
+__xtc_d9_evhdr(uint8_t *buf, uint16_t type_id, uint64_t delta)
+{
+	size_t off = 0;
+	buf[off++] = XTC_D9_FRAME_EVENT;
+	buf[off++] = (uint8_t)(type_id & 0xff);
+	buf[off++] = (uint8_t)(type_id >> 8);
+	buf[off++] = (uint8_t)(delta & 0xff);
+	buf[off++] = (uint8_t)((delta >> 8) & 0xff);
+	buf[off++] = (uint8_t)((delta >> 16) & 0xff);
+	return off;
 }
 
 /* PUBLIC: int xtc_tail_dump_dial9 __P((int)); */
@@ -379,42 +492,89 @@ xtc_tail_dump_dial9(int fd)
 	xtc_tail_rec_t *snap = NULL;
 	size_t n = 0, i;
 	uint8_t hdr[5];
-	uint8_t seen[XTC_D9_MAX_KIND];   /* which schemas already written */
+	uint8_t seen[XTC_D9_MAX_KIND];
 	uint64_t base_ts = 0;
 	int have_base = 0;
 	int rc;
+	/* Pool id 1 = the spawn_loc/service string (a single interned name,
+	 * since libxtc does not carry a per-proc source location).  Pool id 2
+	 * = the backend name.  Emitted up front. */
+	const uint32_t POOL_LOC = 1, POOL_BACKEND = 2;
 
 	if (fd < 0) return XTC_E_INVAL;
 	if ((rc = __tail_snapshot(&snap, &n)) != XTC_OK) return rc;
 	memset(seen, 0, sizeof seen);
 
-	/* Header: TRC\0 + version. */
+	/* Header. */
 	hdr[0] = XTC_D9_MAGIC0; hdr[1] = XTC_D9_MAGIC1;
 	hdr[2] = XTC_D9_MAGIC2; hdr[3] = XTC_D9_MAGIC3;
 	hdr[4] = XTC_D9_VERSION;
 	if ((rc = __tail_write_all(fd, hdr, sizeof hdr)) != XTC_OK) goto out;
 
+	/* String pool: the interned strings the schemas reference. */
+	if ((rc = __xtc_d9_write_strpool(fd, POOL_LOC, "xtc-proc")) != XTC_OK)
+		goto out;
+	{
+		const char *bk = xtc_io_backend_name();
+		if ((rc = __xtc_d9_write_strpool(fd, POOL_BACKEND,
+		    bk != NULL ? bk : "unknown")) != XTC_OK) goto out;
+	}
+
+	/* ClockSync + SegmentMetadata framing at the trace base time, so the
+	 * viewer can recover wall clock and show the service/backend.  Uses
+	 * the FIRST event's monotonic stamp as the base and pairs it with a
+	 * wall-clock read (xtc_clock_real is NOT determinism-guarded, but this
+	 * dump is an explicit user call off any sim-reachable path). */
+	{
+		static const struct xtc_d9_schema_def clock_def =
+		    { "ClockSyncEvent", XTC_D9_F_CLOCK, XTC_D9_NF(XTC_D9_F_CLOCK) };
+		static const struct xtc_d9_schema_def seg_def =
+		    { "SegmentMetadataEvent", XTC_D9_F_SEGMETA, XTC_D9_NF(XTC_D9_F_SEGMETA) };
+		uint64_t t0 = (n > 0) ? snap[0].ts_ns : 0;
+		uint64_t rt = (uint64_t)xtc_clock_real();
+		uint8_t buf[64];
+		size_t off;
+		uint8_t rst[9];
+
+		if ((rc = __xtc_d9_write_schema(fd, XTC_D9_TID_CLOCK_SYNC,
+		    &clock_def)) != XTC_OK) goto out;
+		if ((rc = __xtc_d9_write_schema(fd, XTC_D9_TID_SEG_META,
+		    &seg_def)) != XTC_OK) goto out;
+		/* base the timestamp stream at t0 */
+		rst[0] = XTC_D9_FRAME_TS_RESET;
+		__tail_le64(rst + 1, t0);
+		if ((rc = __tail_write_all(fd, rst, sizeof rst)) != XTC_OK) goto out;
+		base_ts = t0; have_base = 1;
+		/* ClockSyncEvent { realtime_ns } */
+		off = __xtc_d9_evhdr(buf, XTC_D9_TID_CLOCK_SYNC, 0);
+		__leb128(buf, &off, rt);
+		if ((rc = __tail_write_all(fd, buf, off)) != XTC_OK) goto out;
+		/* SegmentMetadataEvent { service=POOL_LOC, backend=POOL_BACKEND } */
+		off = __xtc_d9_evhdr(buf, XTC_D9_TID_SEG_META, 0);
+		__tail_le32(buf + off, POOL_LOC); off += 4;
+		__tail_le32(buf + off, POOL_BACKEND); off += 4;
+		if ((rc = __tail_write_all(fd, buf, off)) != XTC_OK) goto out;
+	}
+
 	for (i = 0; i < n; i++) {
 		unsigned kind = snap[i].kind;
-		const char *name;
+		const struct xtc_d9_schema_def *def;
 		uint8_t buf[96];
-		size_t off = 0;
+		size_t off;
 		uint64_t ts = snap[i].ts_ns;
-		uint64_t delta;
+		uint64_t delta, task_id, worker_id;
 
 		if (kind >= XTC_D9_MAX_KIND) continue;
-		name = __xtc_d9_kind_name(kind);
-		if (name == NULL) continue;
+		def = __xtc_d9_kind_schema(kind);
+		if (def == NULL) continue;
 
-		/* Emit the schema once, before its first event (spec MUST). */
 		if (!seen[kind]) {
 			if ((rc = __xtc_d9_write_schema(fd, (uint16_t)kind,
-			    name)) != XTC_OK) goto out;
+			    def)) != XTC_OK) goto out;
 			seen[kind] = 1;
 		}
 
-		/* Timestamp base: reset on first event, on overflow, or on a
-		 * backward step (the spec's three reset triggers). */
+		/* Timestamp base + reset (spec's three triggers). */
 		if (!have_base || ts < base_ts ||
 		    ts - base_ts > XTC_D9_DELTA_MAX) {
 			uint8_t rst[9];
@@ -422,31 +582,127 @@ xtc_tail_dump_dial9(int fd)
 			__tail_le64(rst + 1, ts);
 			if ((rc = __tail_write_all(fd, rst, sizeof rst))
 			    != XTC_OK) goto out;
-			base_ts = ts;
-			have_base = 1;
+			base_ts = ts; have_base = 1;
 		}
 		delta = ts - base_ts;
-		base_ts = ts;   /* advance base to this event (spec 3d) */
+		base_ts = ts;
 
-		/* Event frame: tag, type_id u16, u24 delta, then the five
-		 * fields in schema order (U16 loop, U16 local, U32 gen,
-		 * U8 source, I64 detail). */
-		buf[off++] = XTC_D9_FRAME_EVENT;
-		buf[off++] = (uint8_t)(kind & 0xff);
-		buf[off++] = (uint8_t)(kind >> 8);
-		buf[off++] = (uint8_t)(delta & 0xff);
-		buf[off++] = (uint8_t)((delta >> 8) & 0xff);
-		buf[off++] = (uint8_t)((delta >> 16) & 0xff);
-		buf[off++] = (uint8_t)(snap[i].pid.loop_id & 0xff);
-		buf[off++] = (uint8_t)(snap[i].pid.loop_id >> 8);
-		buf[off++] = (uint8_t)(snap[i].pid.local_id & 0xff);
-		buf[off++] = (uint8_t)(snap[i].pid.local_id >> 8);
-		__tail_le32(buf + off, snap[i].pid.gen); off += 4;
-		buf[off++] = (uint8_t)snap[i].source;
-		__tail_le64(buf + off, snap[i].detail); off += 8;
+		task_id = __xtc_d9_task_id(snap[i].pid);
+		worker_id = (uint64_t)snap[i].pid.loop_id;
+		off = __xtc_d9_evhdr(buf, (uint16_t)kind, delta);
+
+		/* Fields in the exact schema order for this kind. */
+		switch (kind) {
+		case XTC_TAIL_RUN:   /* PollStartEvent */
+			__leb128(buf, &off, worker_id);          /* worker_id */
+			buf[off++] = 0;                          /* local_queue */
+			__leb128(buf, &off, task_id);            /* task_id */
+			__tail_le32(buf + off, POOL_LOC); off += 4; /* spawn_loc */
+			break;
+		case XTC_TAIL_SPAWN: /* TaskSpawnEvent */
+			__leb128(buf, &off, task_id);            /* task_id */
+			__tail_le32(buf + off, POOL_LOC); off += 4; /* spawn_loc */
+			buf[off++] = 0;                          /* instrumented */
+			break;
+		case XTC_TAIL_EXIT:  /* TaskTerminateEvent */
+			__leb128(buf, &off, task_id);            /* task_id */
+			break;
+		case XTC_TAIL_WAKE:  /* WakeEventEvent */
+			/* dispatch has no waker task; woken task ptr is in
+			 * detail.  Use 0 for waker, the detail as woken. */
+			__leb128(buf, &off, 0);                  /* waker_task_id */
+			__leb128(buf, &off, snap[i].detail);     /* woken_task_id */
+			buf[off++] = (uint8_t)(worker_id > 254 ? 255 :
+			    worker_id);                          /* target_worker */
+			break;
+		default:             /* Xtc* custom: worker, task, detail */
+			__leb128(buf, &off, worker_id);
+			__leb128(buf, &off, task_id);
+			__tail_le64(buf + off, snap[i].detail); off += 8;
+			break;
+		}
 		if ((rc = __tail_write_all(fd, buf, off)) != XTC_OK) goto out;
 	}
 out:
 	if (snap != NULL) __os_free(snap);
+	return rc;
+}
+
+/* ------------------------------------------------------------------ *
+ * Production deployment: env-driven enable + spill-to-directory.
+ *
+ * xtc_tail is off by default and lives in an in-memory ring; to run it in
+ * a deployed application you (a) turn it on with no code change via the
+ * XTC_TAIL_* environment (xtc_tail_from_env), and (b) get a trace off the
+ * box by spilling a dial9 segment to a directory (xtc_tail_spill_dial9),
+ * which a sidecar or scp then ships to wherever the dial9 viewer reads.
+ *
+ * Deliberately NO background thread (ponytail: a thread is only warranted
+ * once a consumer needs unattended periodic spill).  The caller decides
+ * when to spill -- at shutdown, on a signal, on a health-check trigger, or
+ * periodically from its own timer.  A crash-surviving trace is the caller
+ * spilling from a fault handler; xtc_tail_spill_dial9 only writes and never
+ * allocates beyond the one snapshot the dump already takes.
+ * ------------------------------------------------------------------ */
+
+#include <stdlib.h>       /* (env parsing helpers, if needed later) */
+#include <fcntl.h>        /* open */
+
+/* PUBLIC: unsigned xtc_tail_from_env __P((void)); */
+/*
+ * Configure xtc_tail from the environment, mirroring dial9's DIAL9_*:
+ *   XTC_TAIL_ENABLE -- "1"/"sched"/anything truthy turns on the SCHED
+ *                      source; "all" turns on every source; "0"/"off"/
+ *                      "false"/unset leaves it disabled.
+ * Returns the enabled source mask (0 if disabled).  Zero-code: a deployed
+ * binary linked against libxtc records nothing until the operator sets the
+ * variable.  Reads through the guarded __os_env_get wrapper.
+ */
+unsigned
+xtc_tail_from_env(void)
+{
+	char v[32];
+	unsigned mask = 0;
+
+	if (__os_env_get("XTC_TAIL_ENABLE", v, sizeof v) == XTC_OK &&
+	    v[0] != '\0') {
+		if (strcmp(v, "all") == 0)
+			mask = XTC_TAIL_ALL;
+		else if (strcmp(v, "0") != 0 && strcmp(v, "off") != 0 &&
+		         strcmp(v, "false") != 0)
+			mask = XTC_TAIL_SCHED;
+	}
+	if (mask != 0)
+		(void)xtc_tail_enable(mask);
+	return mask;
+}
+
+/* PUBLIC: int xtc_tail_spill_dial9 __P((const char *)); */
+/*
+ * Write the current ring to a new, uniquely-named dial9 segment file in
+ * `dir` (which must exist): xtc-tail-<pid>-<monotonic-ns>.d9, so successive
+ * spills never collide and sort by time.  Returns XTC_OK on success.
+ *
+ * Rotation/byte-budget is the operator's job (a directory plus a find/logrotate
+ * rule), matching how dial9's DiskBuffer is ultimately bounded by the
+ * deployment; the library side stays simple.  An in-library budget is a clean
+ * addition when a consumer needs it.
+ */
+int
+xtc_tail_spill_dial9(const char *dir)
+{
+	char path[512];
+	int fd, rc, n;
+
+	if (dir == NULL) return XTC_E_INVAL;
+	n = snprintf(path, sizeof path, "%s/xtc-tail-%ld-%llu.d9",
+	    dir, (long)getpid(), (unsigned long long)__tail_now_ns());
+	if (n < 0 || (size_t)n >= sizeof path) return XTC_E_INVAL;
+	/* XTC_BLOCKING_OK: explicit user-invoked diagnostic spill to a
+	 * caller-chosen directory, off any sim-reachable path. */
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (fd < 0) return XTC_E_INTERNAL;
+	rc = xtc_tail_dump_dial9(fd);
+	(void)close(fd);
 	return rc;
 }

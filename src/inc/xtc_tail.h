@@ -253,6 +253,8 @@ typedef int (*xtc_tail_fn)(const xtc_tail_rec_t *rec, void *user);
  * PUBLIC: int      xtc_tail_read __P((xtc_tail_fn, void *));
  * PUBLIC: int      xtc_tail_dump __P((int));
  * PUBLIC: int      xtc_tail_dump_dial9 __P((int));
+ * PUBLIC: unsigned xtc_tail_from_env __P((void));
+ * PUBLIC: int      xtc_tail_spill_dial9 __P((const char *));
  * PUBLIC: size_t   xtc_tail_count __P((void));
  * PUBLIC: uint64_t xtc_tail_dropped __P((void));
  */
@@ -284,6 +286,15 @@ XTC_API int      xtc_tail_dump(int fd);
  * io_uring reap/submit chain), which the viewer shows as a custom event.
  * See the dial9 project for the viewer; the format is dial9's, pinned to v1. */
 XTC_API int      xtc_tail_dump_dial9(int fd);
+
+/* Enable xtc_tail from the environment (XTC_TAIL_ENABLE=1/sched/all), for
+ * zero-code deployment.  Returns the enabled source mask (0 = off). */
+XTC_API unsigned xtc_tail_from_env(void);
+
+/* Spill the current ring to a new dial9 segment file in `dir` (which must
+ * exist), named xtc-tail-<pid>-<ns>.d9.  The way to get a trace off a
+ * deployed box; rotation/budget is the operator's (a dir + a cleanup rule). */
+XTC_API int      xtc_tail_spill_dial9(const char *dir);
 
 /* Number of records currently buffered. */
 XTC_API size_t   xtc_tail_count(void);

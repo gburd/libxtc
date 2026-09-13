@@ -18,7 +18,7 @@ set -eu
 
 here=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 SRC=${XTC_SRC_DIR:-$(unset CDPATH; cd -- "$here/../.." && pwd)}
-BUILD=${XTC_BUILD:-$SRC/build_unix}
+BUILD=${XTC_BUILD:-${XTC_BUILD_DIR:-$SRC/build_unix}}
 CC=${CC:-cc}
 LIB="$BUILD/libxtc.a"
 INC="$SRC/src/inc"
