@@ -20,6 +20,14 @@ here=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 SRC=${XTC_SRC_DIR:-$(unset CDPATH; cd -- "$here/../.." && pwd)}
 BUILD=${XTC_BUILD:-${XTC_BUILD_DIR:-$SRC/build_unix}}
 CC=${CC:-cc}
+# The library may have been built with sanitizers or other flags that its
+# object files then require at link time (e.g. -fsanitize=address pulls in the
+# ASan runtime).  A snippet linked against such a library must be built with
+# the same flags or the link fails with undefined __asan_* references.  make
+# check passes the build's CFLAGS/LDFLAGS through XTC_SNIPPET_CFLAGS /
+# XTC_SNIPPET_LDFLAGS; default to none for a plain build.
+SNIP_CFLAGS=${XTC_SNIPPET_CFLAGS:-}
+SNIP_LDFLAGS=${XTC_SNIPPET_LDFLAGS:-}
 LIB="$BUILD/libxtc.a"
 INC="$SRC/src/inc"
 SNIP="$SRC/docs/_includes/snippets"
@@ -55,8 +63,8 @@ for f in "$SNIP"/*.c; do
 	bin="$tmp/$base"
 	# $LIBS is a deliberate multi-flag string; word-splitting is intended.
 	# shellcheck disable=SC2086
-	if ! "$CC" -std=c11 -D_GNU_SOURCE -Wall -Wextra -I"$INC" \
-		-o "$bin" "$f" "$LIB" $LIBS >"$tmp/$base.log" 2>&1; then
+	if ! "$CC" -std=c11 -D_GNU_SOURCE -Wall -Wextra $SNIP_CFLAGS -I"$INC" \
+		-o "$bin" "$f" "$LIB" $SNIP_LDFLAGS $LIBS >"$tmp/$base.log" 2>&1; then
 		echo "[docs] FAIL: $base did not compile" >&2
 		sed 's/^/    /' "$tmp/$base.log" >&2
 		fail=$((fail + 1))

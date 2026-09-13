@@ -1,3 +1,31 @@
+libxtc (1.45.0-1) unstable; urgency=medium
+
+  * tail: complete xtc_tail as a dial9-class production microscope with
+    dial9 GUI interop.  xtc_tail_dump_dial9 emits the dial9 trace wire
+    format (TRC\0, version 1) directly, mapping libxtc's scheduler events
+    to dial9's built-in schema names (a proc run -> PollStartEvent, spawn ->
+    TaskSpawnEvent, exit -> TaskTerminateEvent, a dispatched completion ->
+    WakeEventEvent) with dial9's exact field layouts, so a libxtc trace
+    opens in the dial9 GUI viewer with a native Tokio-shaped timeline -- no
+    viewer change.  libxtc-specific events (the io_uring reap/submit chain
+    and the park/send/recv kinds) ride the same format as named custom
+    events (XtcReapEvent, XtcSubmitEvent, ...), pinned to the right worker
+    and task.  Every trace carries a ClockSyncEvent (wall-clock anchor) and
+    a SegmentMetadataEvent (service + I/O backend), and a String Pool frame
+    for interned names.  Validated against dial9's own decoder.
+  * tail: production deployment.  xtc_tail_from_env() enables recording from
+    the XTC_TAIL_ENABLE environment variable with no code change (for arming
+    the microscope on a running service); xtc_tail_spill_dial9(dir) writes a
+    uniquely-named dial9 segment file that a sidecar ships off the box.
+  * docs: new guide chapter "Observing a running application" covers the
+    deployed workflow, the dial9 GUI, and the schema-name mapping, backed by
+    a tested snippet (a release gate).
+  * test: fixed a doc-snippet gate wiring bug (it honored only XTC_BUILD, not
+    the XTC_BUILD_DIR that make check passes, so snippets could link a stale
+    library).
+
+ -- Greg Burd <greg@burd.me>  Sat, 13 Sep 2026 11:00:00 -0400
+
 libxtc (1.44.1-1) unstable; urgency=medium
 
   * aio: FIX the cross-loop lost wake that stranded PostgreSQL backends under
