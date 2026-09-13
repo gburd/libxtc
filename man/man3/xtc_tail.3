@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd July 10, 2026
+.Dd September 12, 2026
 .Dt XTC_TAIL 3
 .Os
 .Sh NAME
@@ -108,13 +108,13 @@ returns the buffered record count.
 returns how many records have been OVERWRITTEN because the ring wrapped
 (total emitted minus what is still buffered).
 .Pp
-Check it before drawing any conclusion from the ABSENCE of an event.  With a
+Check it before drawing any conclusion from the ABSENCE of an event.
+With a
 non-zero dropped count, "this pid has no events" and "this loop never polled"
-are unfalsifiable -- the events may simply have been evicted.  A consumer
-reported two verdicts that were exactly this artifact: 23 of 33 loops appeared
-to have stopped polling when their events had merely been overwritten by a
-higher-frequency event.  Conclusions drawn from events that are PRESENT remain
-valid regardless.
+are unfalsifiable -- the events may simply have been evicted, especially by a
+higher-frequency event on the same ring.
+Conclusions drawn from events that
+are PRESENT remain valid regardless.
 .Pp
 .Fn xtc_tail_disable
 returns no value.
@@ -160,7 +160,8 @@ carries the file descriptor, so the event joins against the
 .Li park_fd
 column of
 .Nm xtc-procs ;
-for the other two sources it carries the aio opcode or zero.  In all cases
+for the other two sources it carries the aio opcode or zero.
+In all cases
 the
 .Dv XTC_TAIL_RUN
 .Fa detail
@@ -183,6 +184,13 @@ a lost wakeup -- while a matching RUN whose
 .Fa detail
 (the park-to-run latency in nanoseconds) is large is a late one.
 .Pp
+The remaining SCHED kinds form a vocabulary for following an I/O wakeup
+through the runtime, from the request to the resumed fiber.
+Each names one
+stage, so an absent event localizes a lost wakeup to the stage that dropped
+it.
+They are listed here in that order.
+.Pp
 .Dv XTC_TAIL_LOOP_POLL
 is emitted by the SCHED source after each completed poll of a loop's own
 I/O ring, even when the poll dispatched nothing
@@ -191,7 +199,8 @@ Its
 .Fa pid
 carries only
 .Fa loop_id ;
-a loop is not a proc.  Its purpose is liveness: when a
+a loop is not a proc.
+Its purpose is liveness: when a
 .Dv XTC_TAIL_PARK
 has no matching
 .Dv XTC_TAIL_RUN ,
@@ -200,7 +209,8 @@ a continuing stream of
 for that
 .Fa loop_id
 proves the loop kept turning and that one fiber was skipped, whereas the
-absence of any proves the loop itself stopped.  Those have different causes
+absence of any proves the loop itself stopped.
+Those have different causes
 and different fixes, and without this event the only way to distinguish them
 is to infer from the absence of other events -- which cannot tell a dead loop
 apart from the end of the recording window.
@@ -219,22 +229,13 @@ column of
 .Nm xtc-procs
 and against
 .Dv XTC_TAIL_PARK_TASK .
-.Pp
-.Em Note :
-an earlier version of this page said to join
-.Dv XTC_TAIL_WAKE
-against the
+An aio
+.Dv XTC_TAIL_PARK
+cannot be the join target: its
 .Fa detail
-of the aio
-.Dv XTC_TAIL_PARK ,
-claiming it carried a task pointer.
-It does not -- an aio PARK's
-.Fa detail
-is the OPCODE.
-The two key spaces do not intersect, and that instruction
-sent a consumer chasing a join that could not be performed.
+is the OPCODE, not a task pointer, so
 .Dv XTC_TAIL_PARK_TASK
-exists because of it.
+is the event that carries the key.
 .Pp
 .Dv XTC_TAIL_PARK_TASK
 is emitted immediately before the
@@ -243,13 +244,12 @@ it describes, from the same fiber, and carries the PARKING proc's
 .Fa pid
 with that fiber's task pointer in
 .Fa detail .
-It exists solely to make
+It exists to make
 .Dv XTC_TAIL_WAKE
-joinable: PARK carries the pid and, for an aio park, the opcode a consumer
-needs to tell an fdatasync park from a read park, so overwriting that opcode
-with the task pointer would trade one key for the other.
-Emitting both gives
-both.
+joinable without displacing the aio PARK's opcode: PARK carries the pid and,
+for an aio park, the opcode that distinguishes an fdatasync park from a read
+park, so the task pointer needs its own event rather than overwriting the
+opcode.
 All three park sites emit it -- aio,
 .Fn xtc_proc_wait_fd
 readiness, and mailbox recv.
@@ -271,7 +271,7 @@ expected for the wakeup pipe and for a poll-remove cancel, and is also the
 signature of a completion dropped because its registration was already torn
 down -- so a zero alone is not a fault; the join is what matters.
 .Pp
-Together the four events localize a lost wakeup to one step, and the steps have
+Together these events localize a lost wakeup to one stage, and the stages have
 different fixes:
 .Bl -bullet -offset indent -compact
 .It
@@ -333,9 +333,9 @@ which
 .Nm xtc-tail.py
 renders as
 .Li none .
-The obvious fallback of 0 was a lie: it made such a ring indistinguishable from
-the executor's REAL loop 0, and a consumer read a run of "loop 0" events as
-evidence that loop 0 owned a stranded completion.
+This is distinct from a fallback of 0, which would be indistinguishable from
+the executor's real loop 0 and would misattribute an unlabelled ring's events
+to it.
 .Pp
 .Dv XTC_TAIL_POLL_FULL
 records a poll that drained its FULL per-call budget and so may have left
