@@ -10,6 +10,8 @@
 .Nm xtc_tail_read ,
 .Nm xtc_tail_dump ,
 .Nm xtc_tail_dump_dial9 ,
+.Nm xtc_tail_from_env ,
+.Nm xtc_tail_spill_dial9 ,
 .Nm xtc_tail_count ,
 .Nm xtc_tail_dropped
 .Nd runtime microscope (individual scheduler-event recording)
@@ -29,6 +31,10 @@
 .Fn xtc_tail_dump "int fd"
 .Ft int
 .Fn xtc_tail_dump_dial9 "int fd"
+.Ft unsigned
+.Fn xtc_tail_from_env "void"
+.Ft int
+.Fn xtc_tail_spill_dial9 "const char *dir"
 .Ft size_t
 .Fn xtc_tail_count "void"
 .Ft uint64_t
@@ -109,6 +115,29 @@ reads
 .Fn xtc_tail_dump
 output.
 .Pp
+For a DEPLOYED application, two helpers make xtc_tail usable in production
+with no code change and a trace you can retrieve after the fact.
+.Fn xtc_tail_from_env
+turns recording on from the environment --
+.Ev XTC_TAIL_ENABLE Ns = Ns Li 1
+(or
+.Li sched )
+enables the SCHED source,
+.Li all
+enables every source, and unset or a falsy value leaves it off -- so an
+operator arms the microscope on a running service without a rebuild.
+.Fn xtc_tail_spill_dial9
+writes the current ring to a new, uniquely-named dial9 segment file
+.Pq Pa dir Ns Li /xtc-tail- Ns Ao pid Ac Ns - Ns Ao ns Ac Ns Li .d9
+in an existing directory, which a sidecar or
+.Xr scp 1
+ships to wherever the dial9 viewer reads.
+There is deliberately no background thread: the caller spills when it makes
+sense -- at shutdown, on a signal, on a health-check trigger, or from its
+own timer -- and a crash-surviving trace is a spill from a fault handler.
+Rotation and the on-disk byte budget are the deployment's job (a directory
+plus a cleanup rule), matching how a dial9 disk buffer is ultimately bounded.
+.Pp
 Each
 .Vt xtc_tail_rec_t
 carries a monotonic timestamp, the source and kind, the proc pid, and a
@@ -118,6 +147,8 @@ wakeups).
 .Sh RETURN VALUES
 .Fn xtc_tail_enable
 returns the previously enabled source mask.
+.Fn xtc_tail_from_env
+returns the source mask it enabled (0 if the environment left it off).
 .Fn xtc_tail_reset ,
 .Fn xtc_tail_read ,
 .Fn xtc_tail_dump ,
@@ -128,6 +159,14 @@ return
 or a negative
 .Dv XTC_E_*
 code.
+.Fn xtc_tail_spill_dial9
+returns
+.Dv XTC_OK
+after writing a segment, or a negative
+.Dv XTC_E_*
+code (for example if
+.Fa dir
+does not exist or is not writable).
 .Fn xtc_tail_count
 returns the buffered record count.
 .Pp

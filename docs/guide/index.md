@@ -18,6 +18,8 @@ alternatives that were considered and set aside.
 - [5. Blocking work and I/O]({{ '/guide/05-blocking-and-io/' | relative_url }})
 - [8. Scheduling and CPU shares]({{ '/guide/08-scheduling/' | relative_url }}) -- proportional-share
   scheduling and the over-budget stall watchdog
+- [10. Observing a running application]({{ '/guide/10-observability/' | relative_url }}) -- the
+  xtc_tail microscope, deployed use, and opening traces in the dial9 GUI
 - [Thinking in libxtc]({{ '/guide/transitioning/' | relative_url }}) -- the mental shifts and
   anti-patterns
 - [Debugging and observing]({{ '/guide/debugging/' | relative_url }})
