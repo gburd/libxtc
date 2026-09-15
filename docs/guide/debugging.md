@@ -39,8 +39,27 @@ GDB, add the `source` line to the startup commands, or put it in
 
     (lldb) command script import /path/to/libxtc/tools/lldb/xtc_lldb.py
 
-Build with `-g` (the default build does).  The tools work on a live
-process (run/attach/breakpoint) and on a core dump.
+### Build libxtc with debug info -- and confirm with `xtc-check`
+
+The state commands read **libxtc's own** internal symbols and structs, so
+they work only when **libxtc itself** was built with debug info and not
+stripped.  The *embedder* being built `-g` is not enough: against a
+stripped/release libxtc (the common packaged or nix build) these commands
+cannot see anything.  Recommended flags for libxtc:
+
+    CFLAGS='-g3 -O1 -fno-omit-frame-pointer'   # and do not strip
+
+(For the nix flake, `dontStrip = true`; on a distro, install the matching
+`-dbg`/`debuginfo` package.)
+
+Rather than print an empty table -- which reads exactly like a healthy
+`0 loops / 0 parked` and is the worst failure for a strand-diagnosis tool
+-- the commands **hard-error** and refuse to print a census when libxtc's
+debug info is missing.  If a census looks empty, run `xtc-check` first: it
+reports, per capability, what does and does not resolve, so you know
+whether you are looking at a true negative or a blind tool before you act
+on it.  The tools work on a live process (run/attach/breakpoint) and on a
+core dump.
 
 ## The five-minute triage
 

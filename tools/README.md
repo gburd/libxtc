@@ -4,6 +4,29 @@ Drop-in extensions that give a libxtc program the kind of live process
 view BEAM programmers get from `observer` / `recon`, inside the
 debugger you already use.  See `docs/guide/debugging.md` for recipes.
 
+## Requires libxtc built with debug info
+
+The state commands (`xtc-loops`, `xtc-stranded`, `xtc-rings`, `xtc-procs`,
+`xtc-cqes`, `xtc-proc`, `xtc-mailbox`, `xtc-self`) read **libxtc's own**
+internal symbols and structs.  They work only when **libxtc itself** was
+built with debug info and not stripped -- the *embedder* being built `-g`
+is not enough.  Against a stripped/release libxtc (the common packaged or
+nix build) these commands cannot see anything.
+
+Rather than print an empty table -- which for a strand-diagnosis tool is
+indistinguishable from a healthy `0 loops / 0 parked` and is the worst
+possible failure mode -- they **hard-error** with a distinct message and
+refuse to print a census.  Run `xtc-check` first if a census looks empty:
+it reports, per capability, what does and does not resolve, so you can
+confirm the tool is trustworthy before relying on it during an incident.
+
+Recommended flags to build libxtc so the tools can see:
+
+    CFLAGS='-g3 -O1 -fno-omit-frame-pointer'   # and do not strip
+
+For the nix flake, set `dontStrip = true` (or use a debug/`debuginfo`
+variant).  On a distro package, install the matching `-dbg` / `debuginfo`.
+
 ## GDB
 
     (gdb) source tools/gdb/xtc-gdb.py
@@ -46,6 +69,10 @@ Or in `~/.lldbinit`:
     xtc-tail-dump F    write the live xtc_tail runtime-microscope ring
                        to file F in the compact portable format, for
                        the offline viewer below
+    xtc-check          report what the script can/cannot resolve in the
+                       current inferior (loops/procs/rings/tail: OK vs
+                       NO DEBUG INFO) -- run this first if a census looks
+                       empty, to tell "no debug info" from a true negative
 
 ## Diagnosing "a completion arrived but nobody reaped it" (xtc-rings)
 
