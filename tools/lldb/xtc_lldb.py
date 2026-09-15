@@ -36,6 +36,56 @@ def _u(v):
     return v.GetValueAsUnsigned() if v and v.IsValid() else 0
 
 
+# ---- debug-info probe -------------------------------------------------
+#
+# The state commands walk libxtc's internal symbols/structs (__lt,
+# struct xtc_loop, struct xtc_proc).  Against a stripped/release libxtc
+# those lookups fail and a census would print an empty-but-successful
+# table indistinguishable from a healthy "0 loops / 0 parked".  For a
+# strand-diagnosis tool that false negative is the worst failure mode, so
+# _require_debug_info() raises a loud, distinct error and refuses to print
+# a census when the symbols this script depends on are not resolvable.
+
+class _XtcNoDebugInfo(Exception):
+    pass
+
+
+def _debug_info_status(target):
+    """Return (ok, detail): ok True only when the state commands' symbols
+    and types all resolve in `target`."""
+    if target is None or not target.IsValid():
+        return (False, "no target selected")
+    lt = _eval(target, "__lt")
+    if lt is None:
+        return (False, "cannot resolve libxtc symbol '__lt' "
+                       "(the loop registry)")
+    if lt.GetNumChildren() == 0 and lt.GetType().GetName() in (None, ""):
+        return (False, "'__lt' resolved but has no array type "
+                       "(debug info incomplete)")
+    for tname in ("struct xtc_loop", "struct xtc_proc"):
+        t = target.FindFirstType(tname.split()[-1])
+        if t is None or not t.IsValid():
+            return (False, "cannot resolve type '%s' "
+                           "(libxtc built without -g, or stripped)" % tname)
+    return (True, "loops/procs resolvable")
+
+
+def _require_debug_info(target, result):
+    """Print a loud error and raise if a census would be meaningless."""
+    ok, detail = _debug_info_status(target)
+    if ok:
+        return
+    print("xtc-lldb: libxtc debug info missing -- %s.\n"
+          "  A census here would be indistinguishable from a true negative "
+          "(0 loops / 0 parked), so refusing to print one.\n"
+          "  Rebuild libxtc with debug info and without stripping, e.g.\n"
+          "      CFLAGS='-g3 -O1 -fno-omit-frame-pointer'  (dontStrip=true "
+          "for the nix flake),\n"
+          "  or install its debuginfo, then re-attach.  Run `xtc-check` to "
+          "see what resolves." % detail, file=result)
+    raise _XtcNoDebugInfo(detail)
+
+
 def _pid_str(pid):
     if pid is None or not pid.IsValid():
         return "?"
@@ -127,6 +177,10 @@ def _procs_in(target, tbl):
 
 def xtc_loops(debugger, command, result, internal_dict):
     target = debugger.GetSelectedTarget()
+    try:
+        _require_debug_info(target, result)
+    except _XtcNoDebugInfo:
+        return
     tables = _loop_tables(target)
     if not tables:
         print("no loops registered (running? stopped? built -g?)", file=result)
@@ -143,6 +197,10 @@ def xtc_loops(debugger, command, result, internal_dict):
 
 def xtc_procs(debugger, command, result, internal_dict):
     target = debugger.GetSelectedTarget()
+    try:
+        _require_debug_info(target, result)
+    except _XtcNoDebugInfo:
+        return
     print("%-18s %-10s %5s %5s %5s %-16s %s"
           % ("proc", "pid", "mbox", "peak", "save", "state", "lnk/mon"),
           file=result)
@@ -166,6 +224,10 @@ def xtc_procs(debugger, command, result, internal_dict):
 def xtc_stranded(debugger, command, result, internal_dict):
     """Triage a suspected stranded-fiber hang.  See tools/README.md."""
     target = debugger.GetSelectedTarget()
+    try:
+        _require_debug_info(target, result)
+    except _XtcNoDebugInfo:
+        return
     kinds, states, rows = {}, {}, []
     for loop, tbl in _loop_tables(target):
         for p in _procs_in(target, tbl):
@@ -237,6 +299,10 @@ def xtc_stranded(debugger, command, result, internal_dict):
 
 def xtc_proc(debugger, command, result, internal_dict):
     target = debugger.GetSelectedTarget()
+    try:
+        _require_debug_info(target, result)
+    except _XtcNoDebugInfo:
+        return
     p = _eval(target, "(struct xtc_proc *)(%s)" % command.strip())
     if p is None or _u(p) == 0:
         print("usage: xtc-proc <struct xtc_proc *>", file=result)
@@ -267,6 +333,10 @@ def xtc_proc(debugger, command, result, internal_dict):
 
 def xtc_mailbox(debugger, command, result, internal_dict):
     target = debugger.GetSelectedTarget()
+    try:
+        _require_debug_info(target, result)
+    except _XtcNoDebugInfo:
+        return
     p = _eval(target, "(struct xtc_proc *)(%s)" % command.strip())
     if p is None or _u(p) == 0:
         print("usage: xtc-mailbox <struct xtc_proc *>", file=result)
@@ -285,6 +355,10 @@ def xtc_mailbox(debugger, command, result, internal_dict):
 
 def xtc_self(debugger, command, result, internal_dict):
     target = debugger.GetSelectedTarget()
+    try:
+        _require_debug_info(target, result)
+    except _XtcNoDebugInfo:
+        return
     cur = _eval(target, "__current_proc")
     if cur is None or _u(cur) == 0:
         print("no current proc on this thread", file=result)
@@ -334,12 +408,46 @@ def xtc_trace(debugger, command, result, internal_dict):
     print("(%d events)" % n, file=result)
 
 
+def xtc_check(debugger, command, result, internal_dict):
+    """Report what the script can and cannot resolve, so an operator can
+    confirm the tool is trustworthy before relying on it."""
+    target = debugger.GetSelectedTarget()
+    ok, detail = _debug_info_status(target)
+    print("xtc-lldb self-check:", file=result)
+    checks = [
+        ("loop registry (__lt)", "__lt", None),
+        ("struct xtc_loop", None, "xtc_loop"),
+        ("struct xtc_proc", None, "xtc_proc"),
+        ("__current_proc", "__current_proc", None),
+        ("__tail_seq (tail)", "__tail_seq", None),
+    ]
+    for name, sym, typ in checks:
+        if sym is not None:
+            good = _eval(target, sym) is not None
+        else:
+            t = target.FindFirstType(typ) if target else None
+            good = t is not None and t.IsValid()
+        print("  %-24s : %s" % (name, "OK" if good else "NO DEBUG INFO"),
+              file=result)
+    if ok:
+        print("  => census commands are trustworthy (%s)." % detail,
+              file=result)
+    else:
+        print("  => census commands will REFUSE to run: %s." % detail,
+              file=result)
+        print("     Rebuild libxtc with -g and without stripping, or "
+              "install its debuginfo.", file=result)
+
+
 def __lldb_init_module(debugger, internal_dict):
     for name, fn in (("xtc-loops", "xtc_loops"), ("xtc-procs", "xtc_procs"),
                      ("xtc-stranded", "xtc_stranded"),
                      ("xtc-proc", "xtc_proc"), ("xtc-mailbox", "xtc_mailbox"),
-                     ("xtc-self", "xtc_self"), ("xtc-trace", "xtc_trace")):
+                     ("xtc-self", "xtc_self"), ("xtc-trace", "xtc_trace"),
+                     ("xtc-check", "xtc_check")):
         debugger.HandleCommand("command script add -f %s.%s %s"
                                % (__name__, fn, name))
     print("xtc-lldb loaded: xtc-loops, xtc-procs, xtc-proc, xtc-mailbox, "
-          "xtc-self, xtc-trace")
+          "xtc-self, xtc-trace, xtc-check")
+    print("  (these read libxtc internals -- require libxtc built with -g "
+          "and not stripped; run xtc-check first if a census looks empty)")

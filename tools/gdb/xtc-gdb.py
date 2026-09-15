@@ -21,10 +21,17 @@
 #     xtc-mailbox ADDR       dump a proc's mailbox (queued envelopes)
 #     xtc-self               the proc running on the selected thread
 #     xtc-trace              dump the causal message trace (HLC-ordered)
+#     xtc-check              report what the script can/cannot resolve
 #     xtc-help               this help
 #
 # The proc enumeration walks proc.c's per-loop slot tables via the
 # file-static registry `__lt`; build with -g (the default build does).
+#
+# REQUIRES libxtc DEBUG INFO.  The state commands read libxtc's internal
+# symbols and structs; against a stripped/release libxtc they cannot see
+# anything.  Rather than print an empty table that reads as a healthy "0
+# loops / 0 parked", they hard-error with a distinct message -- run
+# `xtc-check` to confirm the tool is trustworthy before an incident.
 
 import gdb
 
@@ -38,6 +45,90 @@ def _sym(name):
         return gdb.parse_and_eval(name)
     except gdb.error:
         return None
+
+
+# ---- debug-info probe -------------------------------------------------
+#
+# Every state-inspecting command below walks libxtc's internal symbols and
+# structs (the loop registry `__lt`, `struct xtc_loop`, `struct xtc_proc`).
+# If libxtc was built WITHOUT debug info -- the normal release/stripped
+# build -- those lookups all fail, `_all_loops()` yields nothing, and a
+# census prints an empty-but-successful table.  For a strand-diagnosis tool
+# that is the worst failure mode: "0 parked" reads as a healthy true
+# negative when it actually means "I cannot see anything."  So before any
+# command prints a census, it calls _require_debug_info(): if the symbols
+# this script depends on are not resolvable, it raises a LOUD, distinct
+# error and refuses to print, rather than lying with an empty table.
+#
+# The distinction that matters: `__lt` resolving to a real array-typed
+# symbol means libxtc has debug info (the census that follows is
+# trustworthy, even if it is genuinely empty); a failed type/symbol lookup
+# means it does not (the census would be meaningless).
+
+class XtcNoDebugInfo(gdb.error):
+    """Raised when libxtc's debug info is missing, so a census would lie."""
+    pass
+
+
+def _debug_info_status():
+    """Return (ok, detail).  ok is True only when the symbols/types the
+    state commands depend on are all resolvable in the current inferior.
+    detail names the first thing that failed, for the operator."""
+    # 1. A process (live or core) must be selected at all.
+    try:
+        if not gdb.selected_inferior().pid and not _has_core():
+            return (False, "no running process or core (attach or run first)")
+    except gdb.error:
+        pass
+    # 2. The loop registry symbol must resolve to an array type.  In a
+    #    stripped build parse_and_eval('__lt') raises; with debug info it
+    #    yields an array whose element type has a `loop` member.
+    lt = _sym("__lt")
+    if lt is None:
+        return (False, "cannot resolve libxtc symbol '__lt' "
+                       "(the loop registry)")
+    try:
+        _ = lt.type.range()
+    except gdb.error:
+        return (False, "'__lt' resolved but has no array type "
+                       "(debug info incomplete)")
+    # 3. The structs the walk dereferences must be known types.
+    for tname in ("struct xtc_loop", "struct xtc_proc"):
+        try:
+            gdb.lookup_type(tname)
+        except gdb.error:
+            return (False, "cannot resolve type '%s' "
+                           "(libxtc built without -g, or stripped)" % tname)
+    return (True, "loops/procs resolvable")
+
+
+def _has_core():
+    """True if gdb has a core file (no live pid but state is inspectable)."""
+    try:
+        for line in gdb.execute("info inferiors", to_string=True).splitlines():
+            if "core" in line.lower():
+                return True
+    except gdb.error:
+        pass
+    return False
+
+
+def _require_debug_info():
+    """Raise XtcNoDebugInfo with an actionable message if a census would be
+    meaningless.  Called at the top of every state-inspecting command."""
+    ok, detail = _debug_info_status()
+    if ok:
+        return
+    raise XtcNoDebugInfo(
+        "xtc-gdb: libxtc debug info missing -- %s.\n"
+        "  A census here would be indistinguishable from a true negative "
+        "(0 loops / 0 parked), so refusing to print one.\n"
+        "  Rebuild libxtc with debug info and without stripping, e.g.\n"
+        "      CFLAGS='-g3 -O1 -fno-omit-frame-pointer'   (dontStrip=true "
+        "for the nix flake),\n"
+        "  or install its debuginfo package, then re-attach.\n"
+        "  Run `xtc-check` to see exactly what does and does not resolve."
+        % detail)
 
 
 def _pid_str(pid):
@@ -191,6 +282,7 @@ class XtcLoops(gdb.Command):
         super().__init__("xtc-loops", gdb.COMMAND_USER)
 
     def invoke(self, arg, from_tty):
+        _require_debug_info()
         any_loop = False
         for loop, tbl in _loop_tables():
             any_loop = True
@@ -283,6 +375,7 @@ class XtcRings(gdb.Command):
         super().__init__("xtc-rings", gdb.COMMAND_USER)
 
     def invoke(self, arg, from_tty):
+        _require_debug_info()
         print("%-18s %-6s %-18s %-8s %-20s %-9s %-5s %s"
               % ("loop", "id", "io", "ring_fd", "owner_tid", "unreaped",
                  "ovf", "alive"))
@@ -426,6 +519,7 @@ class XtcCqes(gdb.Command):
                   % (i, ud, res, flags, what))
 
     def invoke(self, arg, from_tty):
+        _require_debug_info()
         arg = arg.strip()
         want_fd = None
         if arg:
@@ -468,6 +562,7 @@ class XtcProcs(gdb.Command):
         super().__init__("xtc-procs", gdb.COMMAND_USER)
 
     def invoke(self, arg, from_tty):
+        _require_debug_info()
         want = None
         if arg.strip():
             want = int(gdb.parse_and_eval(arg.strip()))
@@ -589,6 +684,7 @@ class XtcStranded(gdb.Command):
         super().__init__("xtc-stranded", gdb.COMMAND_USER)
 
     def invoke(self, arg, from_tty):
+        _require_debug_info()
         kinds = {}
         states = {}
         rows = []
@@ -673,6 +769,7 @@ class XtcProc(gdb.Command):
         if not arg.strip():
             print("usage: xtc-proc <struct xtc_proc *>")
             return
+        _require_debug_info()
         v = gdb.parse_and_eval(arg.strip())
         p = v.cast(gdb.lookup_type("struct xtc_proc").pointer())
         print("proc %s  pid=%s  loop=%s"
@@ -705,6 +802,7 @@ class XtcMailbox(gdb.Command):
         if not arg.strip():
             print("usage: xtc-mailbox <struct xtc_proc *>")
             return
+        _require_debug_info()
         p = gdb.parse_and_eval(arg.strip()).cast(
             gdb.lookup_type("struct xtc_proc").pointer())
         e = p["mbox_head"]
@@ -723,6 +821,7 @@ class XtcSelf(gdb.Command):
         super().__init__("xtc-self", gdb.COMMAND_USER)
 
     def invoke(self, arg, from_tty):
+        _require_debug_info()
         cur = _sym("__current_proc")
         if cur is None or int(cur) == 0:
             print("no current proc on this thread "
@@ -826,6 +925,62 @@ class XtcTailDump(gdb.Command):
               "tools/xtc-tail.py %s" % (n, len(blob), path, path))
 
 
+class XtcCheck(gdb.Command):
+    """xtc-check: report what this script can and cannot resolve in the
+    current inferior, so an operator can confirm the tool is trustworthy
+    BEFORE relying on it during an incident.
+
+    The census commands (xtc-loops/-stranded/-rings/-procs/-cqes) are only
+    meaningful when libxtc itself was built with debug info and not
+    stripped.  Without it they would print an empty-but-successful table
+    indistinguishable from a healthy true negative -- so they hard-error
+    instead.  This command tells you which state you are in.
+    """
+    def __init__(self):
+        super().__init__("xtc-check", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        ok, detail = _debug_info_status()
+        print("xtc-gdb self-check:")
+        # process / core
+        try:
+            pid = gdb.selected_inferior().pid
+        except gdb.error:
+            pid = 0
+        if pid:
+            print("  inferior     : live process pid %d" % pid)
+        elif _has_core():
+            print("  inferior     : core dump")
+        else:
+            print("  inferior     : NONE (attach or run, or load a core)")
+        # per-capability probes -- report each, do not stop at the first
+        checks = [
+            ("loop registry (__lt)", lambda: _sym("__lt") is not None and
+             _sym("__lt").type.range() is not None),
+            ("struct xtc_loop", lambda: gdb.lookup_type("struct xtc_loop")),
+            ("struct xtc_proc", lambda: gdb.lookup_type("struct xtc_proc")),
+            ("xtc_aio_t (rings)", lambda: gdb.lookup_type("xtc_aio_t")),
+            ("struct __xtc_uring_fd (cqes)",
+             lambda: gdb.lookup_type("struct __xtc_uring_fd")),
+            ("__tail_seq (tail-dropped)", lambda: _sym("__tail_seq")
+             is not None),
+        ]
+        for name, probe in checks:
+            try:
+                good = probe() is not None and probe() is not False
+            except gdb.error:
+                good = False
+            print("  %-28s : %s" % (name, "OK" if good else "NO DEBUG INFO"))
+        print("")
+        if ok:
+            print("  => census commands are trustworthy (%s)." % detail)
+        else:
+            print("  => census commands will REFUSE to run: %s." % detail)
+            print("     Rebuild libxtc with -g3 -O1 -fno-omit-frame-pointer "
+                  "and without stripping,")
+            print("     or install its debuginfo, then re-attach.")
+
+
 class XtcHelp(gdb.Command):
     """xtc-help: list xtc debugger commands."""
     def __init__(self):
@@ -835,7 +990,11 @@ class XtcHelp(gdb.Command):
         print(__doc__ if __doc__ else "see tools/gdb/xtc-gdb.py header")
         print("  xtc-loops | xtc-rings | xtc-cqes [fd] | xtc-procs [loop] | xtc-proc A | "
               "xtc-stranded | "
-              "xtc-mailbox A | xtc-self | xtc-trace")
+              "xtc-mailbox A | xtc-self | xtc-trace | xtc-check")
+        print("  These read libxtc's internals: they require libxtc built "
+              "with -g and not stripped.")
+        print("  Run `xtc-check` first if a census looks empty -- it "
+              "distinguishes 'no debug info' from a true negative.")
 
 
 gdb.pretty_printers.append(_lookup_printer)
@@ -850,8 +1009,9 @@ XtcMailbox()
 XtcSelf()
 XtcTrace()
 XtcTailDump()
+XtcCheck()
 XtcHelp()
 print("xtc-gdb loaded: xtc-loops, xtc-rings, xtc-cqes, xtc-procs, xtc-proc, "
       "xtc-stranded, xtc-tail-dropped, "
       "xtc-mailbox, "
-      "xtc-self, xtc-trace, xtc-tail-dump, xtc-help")
+      "xtc-self, xtc-trace, xtc-tail-dump, xtc-check, xtc-help")
