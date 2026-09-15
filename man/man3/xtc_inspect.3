@@ -102,6 +102,8 @@ typedef struct xtc_proc_info {
         int       park_reason;      /* enum xtc_proc_park */
         int       alive;
         int       kill_pending;
+        unsigned  mask_depth;       /* A2 cancellation mask */
+        int       mask_deferred;    /* kill latched, waiting on mask */
         size_t    mbox_len;         /* current depth */
         size_t    mbox_peak;        /* high-water mark */
         size_t    mbox_cap;
@@ -133,6 +135,39 @@ Non-zero while the proc is live.
 Non-zero if an asynchronous
 .Fn xtc_exit_pid
 has been delivered but not yet acted on.
+.It Va mask_depth
+Non-zero while the proc is inside
+.Fn xtc_uncancelable
+.Pq Xr xtc_proc 3 ,
+where an asynchronous kill is
+.Em deferred
+rather than acted on.
+.It Va mask_deferred
+Non-zero once a kill has been delivered AND latched because the proc was
+masked when it observed it.
+.Pp
+.Va mask_depth
+greater than zero together with a non-zero
+.Va mask_deferred
+and no forward progress is the wedged-critical-section signature: the
+fiber has seen the kill and cannot act on it, so a supervisor should
+escalate rather than wait, and must not expect another
+.Fn xtc_exit_pid
+to help.  This is the
+.Dq is it killable right now?
+signal --
+.Va kill_pending
+alone cannot distinguish a fiber that is unwinding from one wedged
+inside a critical section.  Both fields are sampled without
+synchronizing, like
+.Va run_state ,
+and are exact for a fiber that is not running -- which is precisely the
+wedged case.  See
+.Fn xtc_exit_pid_deadline
+in
+.Xr xtc_proc 3 ,
+which reports this as
+.Dv XTC_KILL_DEFERRED .
 .It Va mbox_len
 The live mailbox depth.  This is the single most useful health
 signal in a message-passing system: a large or growing value is the

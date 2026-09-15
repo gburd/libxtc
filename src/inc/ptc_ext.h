@@ -28,6 +28,7 @@ int xtc_crash_handler_install __P((void));
 int xtc_down_decode __P((const void *, size_t, xtc_pid_t *, int *));
 int xtc_down_decode_ex __P((const void *, size_t, xtc_down_info_t *));
 int xtc_exit_pid __P((xtc_pid_t, int));
+int xtc_exit_pid_deadline __P((xtc_pid_t, int, int64_t, int *));
 int xtc_exit_self __P((int));
 int xtc_fault_guard_install __P((void));
 int xtc_inject_check __P((const char *));
