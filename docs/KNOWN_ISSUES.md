@@ -1093,8 +1093,9 @@ stale entries.  Fix: added `__xtc_proc_loop_unregister(loop)` called from
 
 ## xtc_cfg: missing features
 
-**Status:** Config-file parsing and reload DONE; per-session scoping
-is out of scope (it belongs to a downstream consumer, not the runtime).
+**Status:** Config-file parsing, reload, and hot-path read handles DONE;
+per-session scoping is out of scope for the runtime (it belongs to a
+downstream session layer, not the general-purpose registry).
 
 - Configuration-file parsing (postgresql.conf reader): DONE --
   `xtc_cfg_load_file()` reads `name = value` lines (comments, quotes,
@@ -1102,9 +1103,23 @@ is out of scope (it belongs to a downstream consumer, not the runtime).
 - SIGHUP-driven reload: DONE as a mechanism -- `xtc_cfg_reload()`
   re-reads the last loaded file.  The app wires SIGHUP to it from the
   event loop (the function is not async-signal-safe, by documentation).
-- Per-session/per-database scoping: out of scope for xtc -- it needs a
-  session/override-stack model that is a downstream consumer's concern,
-  not the general-purpose runtime's.
+- Hot-path read handles: DONE -- `xtc_cfg_ref()` resolves a name to an
+  opaque, pointer-stable `xtc_cfg_ref_t` once; `xtc_cfg_ref_get_*` then
+  read with no name lookup and no scan, still observing live
+  `xtc_cfg_set_*` updates.  A registry entry is never relocated, so the
+  handle can be cached for the process lifetime like a compiled-in
+  pointer.  This removes the per-read name-lookup cost that makes a
+  name-keyed getter unaffordable on a hot path.
+- Per-session/per-database scoping + a transactional override stack +
+  source-precedence tracking (the pieces a `SET`/`SET LOCAL`/GUC-stack
+  model needs): out of scope for xtc.  These require a session concept
+  and per-transaction save/rollback that belong to the downstream
+  consumer, not the runtime.  If ever built, the intended shape is an
+  implicit current-session bound to the running fiber (reads stay bare,
+  as in PG) with an explicit-scope variant for admin paths; the
+  `xtc_cfg_ref_t` handle would then carry the (variable, scope) pair so
+  hot reads stay lookup-free.  Recorded so a consumer can design its
+  side for a mechanical swap rather than a rewrite.
 
 ## xtc_slab_pressure_stop API incomplete
 

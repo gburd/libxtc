@@ -30,6 +30,16 @@
  *	Configuration-file parsing (xtc_cfg_load_file) and SIGHUP-driven
  *	reload (xtc_cfg_reload) are done.  See docs/KNOWN_ISSUES.md for
  *	tracking.
+ *
+ *	Hot-path reads:
+ *	  - The name-keyed xtc_cfg_get_* do a registry lookup per call;
+ *	    that is fine for cold/occasional reads but too slow for a knob
+ *	    read on every operation.  For hot paths, resolve the variable
+ *	    ONCE to an opaque handle with xtc_cfg_ref() and then read
+ *	    through xtc_cfg_ref_get_* -- no name lookup, no scan.  The
+ *	    handle stays valid until the variable is unregistered (a
+ *	    registry entry is never relocated), so it can be cached for
+ *	    the process lifetime like a compiled-in pointer.
  */
 
 #ifndef XTC_CFG_H
@@ -54,6 +64,11 @@ typedef enum xtc_cfg_kind {
 typedef int (*xtc_cfg_validator_fn)(const void *new_val, void *user);
 typedef void (*xtc_cfg_changed_fn)(const char *name, const void *old_val,
                                    const void *new_val, void *user);
+
+/* Opaque, pointer-stable handle to a registered variable, for hot-path
+ * reads that must avoid a per-read name lookup.  Obtain with
+ * xtc_cfg_ref(); valid until the variable is unregistered. */
+typedef struct xtc_cfg_var *xtc_cfg_ref_t;
 
 /* Spec used at registration time. */
 typedef struct xtc_cfg_spec {
@@ -110,6 +125,14 @@ typedef struct xtc_cfg_spec {
  * PUBLIC: int  xtc_cfg_kind __P((const char *, xtc_cfg_kind_t *));
  * PUBLIC: int  xtc_cfg_load_file __P((const char *));
  * PUBLIC: int  xtc_cfg_reload __P((void));
+ *
+ * PUBLIC: int  xtc_cfg_ref __P((const char *, xtc_cfg_ref_t *));
+ * PUBLIC: int  xtc_cfg_ref_get_bool __P((xtc_cfg_ref_t, int *));
+ * PUBLIC: int  xtc_cfg_ref_get_int __P((xtc_cfg_ref_t, int *));
+ * PUBLIC: int  xtc_cfg_ref_get_int64 __P((xtc_cfg_ref_t, int64_t *));
+ * PUBLIC: int  xtc_cfg_ref_get_double __P((xtc_cfg_ref_t, double *));
+ * PUBLIC: int  xtc_cfg_ref_get_string __P((xtc_cfg_ref_t, const char **));
+ * PUBLIC: int  xtc_cfg_ref_get_enum __P((xtc_cfg_ref_t, int *));
  */
 
 XTC_API int  xtc_cfg_register(const xtc_cfg_spec_t *spec);
@@ -146,5 +169,23 @@ XTC_API int  xtc_cfg_load_file(const char *path);
  * event loop.  Returns the applied count, XTC_E_INVAL (no file loaded),
  * or XTC_E_IO. */
 XTC_API int  xtc_cfg_reload(void);
+
+/*
+ * Hot-path read handles.  xtc_cfg_ref() resolves a name to an opaque,
+ * pointer-stable handle ONCE (the only name lookup); thereafter
+ * xtc_cfg_ref_get_* read the current value with no lookup and no scan.
+ * The handle stays valid until the variable is unregistered.  Reads
+ * through a handle still observe live xtc_cfg_set_* updates.  The
+ * kind must match (a _get_int on a non-INT handle returns XTC_E_INVAL),
+ * exactly like the name-keyed getters.  xtc_cfg_ref returns XTC_E_INVAL
+ * on NULL args and XTC_E_NOTFOUND for an unregistered name.
+ */
+XTC_API int  xtc_cfg_ref(const char *name, xtc_cfg_ref_t *out);
+XTC_API int  xtc_cfg_ref_get_bool(xtc_cfg_ref_t ref, int *out);
+XTC_API int  xtc_cfg_ref_get_int(xtc_cfg_ref_t ref, int *out);
+XTC_API int  xtc_cfg_ref_get_int64(xtc_cfg_ref_t ref, int64_t *out);
+XTC_API int  xtc_cfg_ref_get_double(xtc_cfg_ref_t ref, double *out);
+XTC_API int  xtc_cfg_ref_get_string(xtc_cfg_ref_t ref, const char **out);
+XTC_API int  xtc_cfg_ref_get_enum(xtc_cfg_ref_t ref, int *out);
 
 #endif /* XTC_CFG_H */

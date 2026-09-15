@@ -29,7 +29,14 @@
 .Nm xtc_cfg_count ,
 .Nm xtc_cfg_kind ,
 .Nm xtc_cfg_load_file ,
-.Nm xtc_cfg_reload
+.Nm xtc_cfg_reload ,
+.Nm xtc_cfg_ref ,
+.Nm xtc_cfg_ref_get_bool ,
+.Nm xtc_cfg_ref_get_int ,
+.Nm xtc_cfg_ref_get_int64 ,
+.Nm xtc_cfg_ref_get_double ,
+.Nm xtc_cfg_ref_get_string ,
+.Nm xtc_cfg_ref_get_enum
 .Nd typed runtime configuration registry
 .Sh SYNOPSIS
 .In xtc.h
@@ -82,6 +89,20 @@
 .Fn xtc_cfg_load_file "const char *path"
 .Ft int
 .Fn xtc_cfg_reload "void"
+.Ft int
+.Fn xtc_cfg_ref "const char *name" "xtc_cfg_ref_t *out"
+.Ft int
+.Fn xtc_cfg_ref_get_bool "xtc_cfg_ref_t ref" "int *out"
+.Ft int
+.Fn xtc_cfg_ref_get_int "xtc_cfg_ref_t ref" "int *out"
+.Ft int
+.Fn xtc_cfg_ref_get_int64 "xtc_cfg_ref_t ref" "int64_t *out"
+.Ft int
+.Fn xtc_cfg_ref_get_double "xtc_cfg_ref_t ref" "double *out"
+.Ft int
+.Fn xtc_cfg_ref_get_string "xtc_cfg_ref_t ref" "const char **out"
+.Ft int
+.Fn xtc_cfg_ref_get_enum "xtc_cfg_ref_t ref" "int *out"
 .Sh DESCRIPTION
 .Nm xtc_cfg
 is a typed runtime configuration registry, modeled on PostgreSQL's
@@ -164,6 +185,25 @@ returns the number of registered knobs;
 reports the
 .Vt xtc_cfg_kind_t
 type of a named knob.
+.Pp
+For a knob read on a hot path, the name-keyed getters are too slow:
+each does a registry lookup.
+.Fn xtc_cfg_ref
+resolves a name to an opaque, pointer-stable
+.Vt xtc_cfg_ref_t
+handle once; thereafter
+.Fn xtc_cfg_ref_get_bool ,
+.Fn xtc_cfg_ref_get_int ,
+.Fn xtc_cfg_ref_get_int64 ,
+.Fn xtc_cfg_ref_get_double ,
+.Fn xtc_cfg_ref_get_string ,
+and
+.Fn xtc_cfg_ref_get_enum
+read the current value with no name lookup, still observing live
+.Fn xtc_cfg_set_*
+updates.
+The handle stays valid until the variable is unregistered, so it can
+be cached for the process lifetime like a compiled-in pointer.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 static int g_max_clients = 1000;
