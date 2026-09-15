@@ -108,13 +108,19 @@ prop_hook_balanced(hegel_test_case *tc, void *u)
 
 	n_pairs = (int)hegel_draw_int(tc, hegel_integers(1, 64));
 
+	hegel_assume(__os_alloc_get_hook(&saved) == XTC_OK);
+
 	hook.malloc  = p_malloc;
 	hook.calloc  = p_calloc;
 	hook.realloc = p_realloc;
 	hook.free    = p_free;
 	hook.aligned = p_aligned;
+	/* aligned() and aligned_free() are a matched pair, and p_aligned
+	 * allocates with the same primitive the default backend releases
+	 * with, so the saved half is the correct partner.  Leaving this
+	 * member unset published an uninitialized function pointer. */
+	hook.aligned_free = saved.aligned_free;
 
-	hegel_assume(__os_alloc_get_hook(&saved) == XTC_OK);
 	alloc_inflight = 0; alloc_total = 0;
 	hegel_assume(__os_alloc_set_hook(&hook) == XTC_OK);
 

@@ -97,6 +97,24 @@ static const struct __os_alloc_hook __default_hook = {
 static const struct __os_alloc_hook *volatile __active_hook = &__default_hook;
 
 /*
+ * Published hook storage.  __os_alloc_set_hook COPIES the caller's
+ * vtable into one of these slots rather than publishing the caller's
+ * own pointer: borrowing made the vtable's LIFETIME the caller's
+ * problem, an unwritten requirement that two in-tree callers already
+ * got wrong by registering a stack local.  Once such a caller returns,
+ * __active_hook points into a dead frame, and the next __os_alloc_get_hook
+ * copies whatever now occupies that stack (ASan: stack-use-after-return
+ * in __os_alloc_get_hook) -- so restoring the "saved" hook fails
+ * validation with XTC_E_INVAL.
+ *
+ * Two slots, used alternately, because a swap must not mutate the
+ * struct that a concurrent allocation is still reading through the
+ * previously published pointer.
+ */
+static struct __os_alloc_hook __hook_slot[2];
+static unsigned __hook_slot_next;
+
+/*
  * Async-signal-unsafe-region bracket (defined in src/ptc/preempt.c, L3).
  * Forward-declared here rather than including the L3 header so the L0
  * allocator keeps its layering -- the same pattern os_time.c uses to
@@ -283,10 +301,27 @@ __os_aligned_free(void *p)
 int
 __os_alloc_set_hook(const struct __os_alloc_hook *h)
 {
+	struct __os_alloc_hook *slot;
+
+	/* All six callbacks are required.  aligned_free was historically
+	 * unchecked even though __os_aligned_free calls it unconditionally,
+	 * so a hook that omitted it published a NULL (or uninitialized)
+	 * function pointer and crashed on the first aligned release. */
 	if (h == NULL || h->malloc == NULL || h->calloc == NULL ||
-	    h->realloc == NULL || h->free == NULL || h->aligned == NULL)
+	    h->realloc == NULL || h->free == NULL || h->aligned == NULL ||
+	    h->aligned_free == NULL)
 		return XTC_E_INVAL;
-	__os_atomic_store_ptr((void **)&__active_hook, (void *)(uintptr_t)h);
+	/* Keep the default backend's pointer IDENTITY: __os_msize uses it
+	 * to decide whether the platform usable-size primitive applies. */
+	if (h == &__default_hook) {
+		__os_atomic_store_ptr((void **)&__active_hook,
+		    (void *)(uintptr_t)&__default_hook);
+		return XTC_OK;
+	}
+	slot = &__hook_slot[__hook_slot_next & 1u];
+	__hook_slot_next++;
+	*slot = *h;
+	__os_atomic_store_ptr((void **)&__active_hook, slot);
 	return XTC_OK;
 }
 

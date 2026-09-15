@@ -16,7 +16,7 @@
 #include <stddef.h>
 
 /*
- * The allocator vtable.  All five callbacks must be set together; we
+ * The allocator vtable.  All six callbacks must be set together; we
  * do not interleave callbacks from different backends.
  *
  * Contract on each callback:
@@ -31,6 +31,9 @@
  * aligned() MUST be released with aligned_free(), never free().  On
  * some platforms (Windows _aligned_malloc) the two heaps are distinct
  * and crossing them corrupts the heap.
+ *
+ * __os_alloc_set_hook COPIES this structure, so it need not outlive
+ * the call -- a stack local is fine.
  */
 struct __os_alloc_hook {
 	void *(*malloc)(size_t sz);
