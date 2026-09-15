@@ -225,6 +225,28 @@ def _list_len(head, nextfield="next", cap=100000):
     return n
 
 
+def _waker_armed(p):
+    """Is this proc parked waiting for a MAILBOX wake?
+
+    Do NOT use task['park_requested'] for this.  That flag is a one-shot
+    the coro substrate CONSUMES and clears when it turns the yield into
+    the PENDING verdict, so a task that has reached PARKED always has it
+    at 0 -- the old test was dead code and every recv park printed as a
+    bare PARKED with NO source.  That mattered: a sourceless park is also
+    what a LOST WAKE looks like, so a fiber healthily blocked in xtc_recv
+    was indistinguishable from one whose wake had been dropped -- and a
+    consumer chasing a hang read "queued mailbox + sourceless park" as
+    exactly that.
+
+    proc->waker_armed is the durable fact: recv sets it under mbox_lock
+    before parking and clears it after resuming.
+    """
+    try:
+        return int(p["waker_armed"]) != 0
+    except gdb.error:
+        return False
+
+
 def _proc_state(p):
     task = p["task"]
     if int(task) == 0:
@@ -236,7 +258,7 @@ def _proc_state(p):
             s += "(fd %d)" % int(task["park_fd"])
         elif int(task["park_timer"]) != 0:
             s += "(timer)"
-        elif int(task["park_requested"]) != 0:
+        elif _waker_armed(p):
             s += "(mailbox)"
     # wake_pending is THE discriminator for the cross-loop wake-loss family:
     # a task PARKED with wake_pending set means a waker arrived in the
@@ -254,7 +276,7 @@ def _proc_state(p):
     return s
 
 
-def _park_kind(task):
+def _park_kind(task, proc=None):
     """The park SHAPE, matching what xtc_dump's histogram reports:
     'fd' / 'timer' / 'mailbox' / '-' (no armed source).
 
@@ -269,7 +291,9 @@ def _park_kind(task):
         return "fd"
     if int(task["park_timer"]) != 0:
         return "timer"
-    if int(task["park_requested"]) != 0:
+    # See _waker_armed: park_requested is already consumed by the time the
+    # task is PARKED, so the mailbox shape must come from proc->waker_armed.
+    if proc is not None and _waker_armed(proc):
         return "mailbox"
     return "-"
 
@@ -698,7 +722,7 @@ class XtcStranded(gdb.Command):
                     states.get(TASK_STATE.get(st, "?%d" % st), 0) + 1
                 if st != 2:      # only PARKED procs can be stranded
                     continue
-                kind = _park_kind(task)
+                kind = _park_kind(task, p)
                 kinds[kind] = kinds.get(kind, 0) + 1
                 wp = 0
                 try:

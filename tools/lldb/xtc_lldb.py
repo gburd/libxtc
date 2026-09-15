@@ -103,6 +103,22 @@ def _list_len(head, field="next", cap=100000):
     return n
 
 
+def _waker_armed(p):
+    """Is this proc parked waiting for a MAILBOX wake?
+
+    NOT task['park_requested']: the coro substrate CONSUMES and clears that
+    one-shot when it turns the yield into the PENDING verdict, so a task
+    that has reached PARKED always reads 0 -- the old test was dead code
+    and every recv park printed as a bare PARKED with NO source.  A
+    sourceless park is also what a LOST WAKE looks like, so a fiber
+    healthily blocked in xtc_recv was indistinguishable from one whose wake
+    had been dropped.  proc->waker_armed is the durable fact (set under
+    mbox_lock before parking, cleared after resuming).
+    """
+    wa = p.GetChildMemberWithName("waker_armed")
+    return bool(wa.IsValid() and _u(wa) != 0)
+
+
 def _proc_state(p):
     task = p.GetChildMemberWithName("task")
     if _u(task) == 0:
@@ -115,7 +131,7 @@ def _proc_state(p):
             s += "(fd)"
         elif _u(task.GetChildMemberWithName("park_timer")) != 0:
             s += "(timer)"
-        elif _u(task.GetChildMemberWithName("park_requested")) != 0:
+        elif _waker_armed(p):
             s += "(mailbox)"
     # wake_pending is the discriminator for the cross-loop wake-loss
     # family: PARKED with it SET means a wake was latched in the
@@ -127,7 +143,7 @@ def _proc_state(p):
     return s
 
 
-def _park_kind(task):
+def _park_kind(task, proc=None):
     """The park SHAPE as xtc_dump reports it: fd / timer / mailbox / '-'.
 
     '-' is the xtc_aio completion shape: parked with no fd and no timer,
@@ -140,7 +156,9 @@ def _park_kind(task):
         return "fd"
     if _u(task.GetChildMemberWithName("park_timer")) != 0:
         return "timer"
-    if _u(task.GetChildMemberWithName("park_requested")) != 0:
+    # See _waker_armed: park_requested is consumed by the time the task is
+    # PARKED, so the mailbox shape must come from proc->waker_armed.
+    if proc is not None and _waker_armed(proc):
         return "mailbox"
     return "-"
 
@@ -240,7 +258,7 @@ def xtc_stranded(debugger, command, result, internal_dict):
             states[nm] = states.get(nm, 0) + 1
             if st != 2:
                 continue
-            kind = _park_kind(task)
+            kind = _park_kind(task, pd)
             kinds[kind] = kinds.get(kind, 0) + 1
             wpv = task.Dereference().GetChildMemberWithName("wake_pending")
             wp = _u(wpv) if wpv.IsValid() else 0

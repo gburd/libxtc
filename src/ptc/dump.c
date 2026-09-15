@@ -128,7 +128,7 @@ dump_proc_cb(const xtc_proc_info_t *pi, void *user)
 	int fd = *(int *)user;
 	dump_fmt(fd,
 	    "  <%u.%u.%u> %-9s park=%-7s mbox=%zu/%zu peak=%zu "
-	    "recv=%llu drop=%llu%s%s\n",
+	    "recv=%llu drop=%llu%s%s%s\n",
 	    (unsigned)pi->pid.loop_id, (unsigned)pi->pid.local_id,
 	    (unsigned)pi->pid.gen,
 	    run_state_name(pi->run_state),
@@ -137,6 +137,13 @@ dump_proc_cb(const xtc_proc_info_t *pi, void *user)
 	    (unsigned long long)pi->mbox_recv_total,
 	    (unsigned long long)pi->mbox_drop_total,
 	    pi->kill_pending ? " KILL" : "",
+	    /* A2 mask state.  MASKED alone is a fiber inside
+	     * xtc_uncancelable(); WEDGED is the one that matters -- masked
+	     * with a kill already latched, i.e. it observed the kill and
+	     * cannot act on it.  A supervisor seeing WEDGED should escalate,
+	     * not send another kill (the second is a no-op). */
+	    pi->mask_deferred ? " WEDGED(kill-deferred)" :
+	        (pi->mask_depth ? " MASKED" : ""),
 	    pi->alive ? "" : " DEAD");
 
 	/* A3 async causal trace: splice "how did this fiber get here" --

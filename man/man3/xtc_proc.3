@@ -19,6 +19,7 @@
 .Nm xtc_proc_sleep ,
 .Nm xtc_exit_self ,
 .Nm xtc_exit_pid ,
+.Nm xtc_exit_pid_deadline ,
 .Nm xtc_proc_wake ,
 .Nm xtc_link ,
 .Nm xtc_unlink ,
@@ -58,6 +59,8 @@
 .Fn xtc_exit_self "int reason"
 .Ft int
 .Fn xtc_exit_pid "xtc_pid_t pid" "int reason"
+.Ft int
+.Fn xtc_exit_pid_deadline "xtc_pid_t pid" "int reason" "int64_t timeout_ns" "int *out_status"
 .Ft int
 .Fn xtc_proc_wake "xtc_pid_t pid"
 .Ft int
@@ -270,6 +273,93 @@ terminates another process by pid.  Asynchronous; the target
 notices on its next yield or
 .Fn xtc_recv
 parking point.
+It is fire-and-forget:
+.Dv XTC_OK
+means the kill flag was set, not that the target ever acted on it.
+.Pp
+.Fn xtc_exit_pid_deadline
+is the same kill, but waits up to
+.Fa timeout_ns
+and REPORTS the outcome in
+.Fa *out_status
+.Pq which may be Dv NULL :
+.Bl -tag -width XTC_KILL_DELIVERED -offset indent
+.It Dv XTC_KILL_DELIVERED
+The target observed the kill and is gone (or already was).
+.It Dv XTC_KILL_DEFERRED
+The target is inside
+.Fn xtc_uncancelable
+with the kill latched: it has SEEN the kill and cannot act on it.
+The fiber is wedged in a critical section; a supervisor should
+escalate, not retry (a second
+.Fn xtc_exit_pid
+is a no-op -- first call wins).
+.It Dv XTC_KILL_TIMEOUT
+Not masked, but has not reached a delivery point yet: a CPU-bound loop
+that never yields, or a park outlasting the deadline.  Usually means
+"wait longer".
+.El
+.Pp
+The distinction matters because masking makes cancellation
+.Em safe
+but cannot make a stuck critical section
+.Em killable :
+without the report, a supervisor cannot tell a fiber that is unwinding
+from one that will never honor the kill, and has to guess after a fixed
+timeout.  The same state is readable from outside the fiber via
+.Va mask_depth
+and
+.Va mask_deferred
+in
+.Vt xtc_proc_info_t
+.Pq Xr xtc_inspect 3 ,
+which answers "is this fiber stuck in a critical section, or merely
+slow?" without sending a kill at all.
+The caller must not be the target
+.Pq that is Fn xtc_exit_self ;
+it returns
+.Dv XTC_E_INVAL
+if it is.
+.Ss Killing a fiber that mutates shared state
+Cancellation in libxtc guarantees
+.Em resource release :
+.Xr xtc_scope 3
+finalizers and
+.Fn xtc_proc_at_exit
+hooks run on an async kill, and
+.Fn xtc_uncancelable
+ensures a resource acquired in a masked region always registers its
+release before cancellation is observed.
+.Pp
+It guarantees nothing about
+.Em data consistency .
+Releasing a lock does not undo a half-finished mutation.  A fiber killed
+mid-update of state that OTHER fibers keep using -- a partially written
+log record, a page updated but not yet accounted for, an index entry
+without its counterpart -- leaves that state broken while remaining
+perfectly valid-looking to every other fiber in the address space.
+.Pp
+So the stance is explicit:
+.Em do not async-kill a fiber that can be interrupted mid-mutation of
+.Em shared state .
+Wrapping the dangerous window in
+.Fn xtc_uncancelable
+is right when the window always completes, and it is exactly wrong for a
+wedged fiber -- the mask then defers the kill forever, which is the hang
+you were trying to break.
+.Pp
+For that case the correct escalation is to take down a larger unit whose
+shared state can be discarded wholesale and rebuilt from a durable log:
+the process, not the fiber.  A single address space gives no smaller
+recovery boundary.  This is not a workaround for a missing call -- it is
+the same trade a crash-only database makes when a worker is stuck and
+must die now, and it stays the right final backstop even where a
+per-fiber kill is available.  Use
+.Fn xtc_exit_pid_deadline
+and the
+.Va mask_deferred
+snapshot to decide WHEN to escalate;
+do not use them to justify killing a fiber that cannot be safely killed.
 .Pp
 .Fn xtc_proc_wake
 resumes a process parked in

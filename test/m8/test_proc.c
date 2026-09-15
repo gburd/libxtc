@@ -16,6 +16,7 @@
 #include <windows.h>          /* GetProcessTimes for the park-CPU check */
 #else
 #include <sys/wait.h>
+#include <pthread.h>          /* the foreign-thread sender below */
 #endif
 
 #include "munit.h"
@@ -24,6 +25,7 @@
 #include "xtc_loop.h"
 #include "xtc_async.h"
 #include "xtc_proc.h"
+#include "xtc_inspect.h"   /* xtc_proc_info: supervisor-side mask state */
 #include "xtc_mctx.h"
 #include "xtc_int.h"
 #include "xtc_res.h"
@@ -1323,6 +1325,269 @@ test_cancel_poll(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- xtc_exit_pid_deadline: report WHICH way a kill went ------------
+ *
+ * xtc_exit_pid is fire-and-forget -- XTC_OK means "flag set", never
+ * "kill landed".  A supervisor could not tell a fiber that is unwinding
+ * from one wedged inside xtc_uncancelable(), where the kill is deferred
+ * with no bound.  (Reported by the PostgreSQL-on-libxtc integration:
+ * pg_ctl -m immediate could not distinguish the two and had to guess
+ * after a fixed 5s.)
+ *
+ * All three statuses are covered, because the DEFERRED one is the whole
+ * point and a test that only proved DELIVERED would be the vacuous
+ * half: a bug that reported DELIVERED unconditionally would pass it.
+ */
+static _Atomic int g_kd_masked_entered;
+static _Atomic int g_kd_release_mask;
+
+/* A fiber that parks forever WITHOUT a mask: killable, so a kill must
+ * be reported DELIVERED. */
+static void
+kd_proc_killable(void *arg)
+{
+	void  *m = NULL;
+	size_t sz = 0;
+	(void)arg;
+	/* Infinite recv: a delivery point, so the kill fires here. */
+	(void)xtc_recv(&m, &sz, -1);
+	xtc_free(m);
+}
+
+/* The wedged shape: a masked region that never finishes on its own.
+ * This is the PostgreSQL case -- a fiber stuck INSIDE the critical
+ * section, where masking makes cancellation safe but cannot make the
+ * stuck section killable.  It leaves only when the test says so, so the
+ * suite cannot hang if the reporting is wrong. */
+static int
+kd_masked_body(void *ud)
+{
+	void  *m = NULL;
+	size_t sz = 0;
+	(void)ud;
+	atomic_store(&g_kd_masked_entered, 1);
+	/* Park at delivery points while masked: each one OBSERVES a pending
+	 * kill and latches it into mask_deferred (which is exactly what
+	 * xtc_exit_pid_deadline reports as DEFERRED), without unwinding. */
+	while (!atomic_load(&g_kd_release_mask)) {
+		(void)xtc_recv(&m, &sz, 1000000);   /* 1ms */
+		xtc_free(m);
+		m = NULL;
+	}
+	return 0;
+}
+
+static void
+kd_proc_wedged(void *arg)
+{
+	(void)arg;
+	(void)xtc_uncancelable(kd_masked_body, NULL);
+}
+
+/* The supervisor fiber: drives the kills and checks the reports. */
+struct kd_targets {
+	xtc_pid_t killable;
+	xtc_pid_t wedged;
+	_Atomic int delivered_ok;
+	_Atomic int deferred_ok;
+	_Atomic int selfkill_rejected;
+	_Atomic int dead_ok;
+	_Atomic int mask_seen;
+};
+
+static void
+kd_proc_supervisor(void *arg)
+{
+	struct kd_targets *t = arg;
+	xtc_proc_info_t info;
+	int status = -1;
+
+	/* Killing yourself is xtc_exit_self, not this. */
+	if (xtc_exit_pid_deadline(xtc_self(), 1, 0, &status) == XTC_E_INVAL)
+		atomic_store(&t->selfkill_rejected, 1);
+
+	/* Wait for the wedged fiber to actually be inside its mask, so the
+	 * DEFERRED assertion tests the mask and not a startup race. */
+	while (!atomic_load(&g_kd_masked_entered))
+		(void)xtc_proc_sleep(200000);
+
+	/* (1) An unmasked fiber parked at a delivery point: DELIVERED. */
+	status = -1;
+	if (xtc_exit_pid_deadline(t->killable, 9, 2000000000LL, &status) ==
+	    XTC_OK && status == XTC_KILL_DELIVERED)
+		atomic_store(&t->delivered_ok, 1);
+
+	/* (2) The wedged fiber: masked with the kill latched => DEFERRED.
+	 * A short deadline is enough BECAUSE the report does not wait it
+	 * out -- once the mask is observed holding a latched kill, waiting
+	 * longer cannot change the answer. */
+	status = -1;
+	if (xtc_exit_pid_deadline(t->wedged, 9, 500000000LL, &status) ==
+	    XTC_OK && status == XTC_KILL_DEFERRED)
+		atomic_store(&t->deferred_ok, 1);
+
+	/* (3) The same state is visible to a supervisor through inspection
+	 * (item 2 of the request): "is it stuck in a critical section?" */
+	if (xtc_proc_info(t->wedged, &info) == XTC_OK &&
+	    info.mask_depth > 0 && info.mask_deferred != 0)
+		atomic_store(&t->mask_seen, 1);
+
+	/* (4) Already-dead target reports DELIVERED, not an error: that IS
+	 * the outcome the caller asked for. */
+	status = -1;
+	if (xtc_exit_pid_deadline(t->killable, 9, 0, &status) == XTC_OK &&
+	    status == XTC_KILL_DELIVERED)
+		atomic_store(&t->dead_ok, 1);
+
+	/* Let the wedged fiber leave its mask; the latched kill fires as the
+	 * mask drops, so the loop drains rather than hanging. */
+	atomic_store(&g_kd_release_mask, 1);
+}
+
+static MunitResult
+test_exit_pid_deadline(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	struct kd_targets t;
+	xtc_pid_t sup;
+	(void)p; (void)d;
+
+	memset(&t, 0, sizeof t);
+	atomic_store(&g_kd_masked_entered, 0);
+	atomic_store(&g_kd_release_mask, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "kd-killable";
+	munit_assert_int(xtc_proc_spawn(loop, kd_proc_killable, NULL, &opts,
+	    &t.killable), ==, XTC_OK);
+	opts.name = "kd-wedged";
+	munit_assert_int(xtc_proc_spawn(loop, kd_proc_wedged, NULL, &opts,
+	    &t.wedged), ==, XTC_OK);
+	opts.name = "kd-sup";
+	munit_assert_int(xtc_proc_spawn(loop, kd_proc_supervisor, &t, &opts,
+	    &sup), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	munit_assert_int(atomic_load(&t.selfkill_rejected), ==, 1);
+	munit_assert_int(atomic_load(&t.delivered_ok), ==, 1);
+	/* The one that matters: a wedged critical section is REPORTED as
+	 * such instead of silently swallowing the kill. */
+	munit_assert_int(atomic_load(&t.deferred_ok), ==, 1);
+	munit_assert_int(atomic_load(&t.mask_seen), ==, 1);
+	munit_assert_int(atomic_load(&t.dead_ok), ==, 1);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* ---- cross-thread send WAKES a parked receiver ----------------------
+ *
+ * xtc_send's documented WAKE GUARANTEE: a successful send makes a
+ * receiver parked in xtc_recv runnable, from ANY thread -- including a
+ * plain OS thread with no loop and no proc identity (envelope `from` is
+ * XTC_PID_NONE).  Windows had this covered (test/msvc/smoke.c scenario
+ * 2, via PostQueuedCompletionStatus); POSIX did not, so the epoll /
+ * io_uring inbox+wakeup path had no gate.
+ *
+ * Shape taken from a consumer report of a wedged per-loop supervisor: a
+ * non-fiber "postmaster" thread bursts sends at fibers blocked in
+ * xtc_recv(-1) while the loop thread sits in epoll_wait/io_uring.  A lost
+ * wake here leaves the receiver PARKED with a non-empty mailbox forever
+ * -- so this test HANGS on regression rather than failing fast, which is
+ * why the receivers exit and let xtc_loop_run return only once every send
+ * has been received (n_alive -> 0).
+ */
+#if !defined(_WIN32)
+#define XT_N          64
+#define XT_PER_PROC   16
+
+static xtc_pid_t   g_xt_pid[XT_N];
+static _Atomic int g_xt_ready;
+static _Atomic int g_xt_recv;
+static _Atomic int g_xt_sent;
+
+static void
+xt_worker(void *arg)
+{
+	int want = XT_PER_PROC;
+	(void)arg;
+	atomic_fetch_add(&g_xt_ready, 1);
+	while (want > 0) {
+		void  *m = NULL;
+		size_t sz = 0;
+		/* Infinite park: ONLY a send can wake this.  No timeout to
+		 * paper over a lost wake with a timer-driven re-check. */
+		if (xtc_recv(&m, &sz, -1) != XTC_OK)
+			continue;
+		xtc_free(m);
+		atomic_fetch_add(&g_xt_recv, 1);
+		want--;
+	}
+}
+
+/* A plain OS thread: no loop, no proc, xtc_self() == XTC_PID_NONE. */
+static void *
+xt_sender(void *u)
+{
+	int i, k;
+	(void)u;
+	while (atomic_load(&g_xt_ready) < XT_N)
+		(void)usleep(1000);
+	/* Burst every target, retrying only the backpressure code so a full
+	 * mailbox is not miscounted as a lost wake. */
+	for (i = 0; i < XT_PER_PROC; i++) {
+		for (k = 0; k < XT_N; k++) {
+			unsigned char msg[24];
+			memset(msg, (unsigned char)i, sizeof msg);
+			for (;;) {
+				int rc = xtc_send(g_xt_pid[k], msg, sizeof msg);
+				if (rc == XTC_OK) {
+					atomic_fetch_add(&g_xt_sent, 1);
+					break;
+				}
+				if (rc != XTC_E_AGAIN && rc != XTC_E_RESOURCE)
+					break;   /* real error: counted below */
+				(void)usleep(200);
+			}
+		}
+	}
+	return NULL;
+}
+
+static MunitResult
+test_cross_thread_send_wakes(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t o = { 0 };
+	pthread_t th;
+	int i;
+	(void)p; (void)d;
+
+	atomic_store(&g_xt_ready, 0);
+	atomic_store(&g_xt_recv, 0);
+	atomic_store(&g_xt_sent, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	o.name = "xt-worker";
+	for (i = 0; i < XT_N; i++)
+		munit_assert_int(xtc_proc_spawn(loop, xt_worker, NULL, &o,
+		    &g_xt_pid[i]), ==, XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, xt_sender, NULL), ==, 0);
+
+	/* Returns only when every worker got all its messages and exited.
+	 * A lost wake strands a worker here (n_alive never reaches 0). */
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+
+	munit_assert_int(atomic_load(&g_xt_sent), ==, XT_N * XT_PER_PROC);
+	munit_assert_int(atomic_load(&g_xt_recv), ==, XT_N * XT_PER_PROC);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+#endif /* !_WIN32 */
+
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1343,6 +1608,10 @@ static MunitTest tests[] = {
 	{ "/proc_at_exit",      test_proc_at_exit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pid_local_id_ceiling", test_pid_local_id_ceiling, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cancel_poll",       test_cancel_poll,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/exit_pid_deadline", test_exit_pid_deadline, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#if !defined(_WIN32)
+	{ "/cross_thread_send_wakes", test_cross_thread_send_wakes, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/proc", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

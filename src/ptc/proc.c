@@ -430,10 +430,17 @@ struct xtc_proc {
 	 * a resource acquired in a masked region always register its release
 	 * before cancellation is observed -- A1's guaranteed-release has,
 	 * without it, the finalizer-eating race Cats Effect had pre-masking.
-	 * Owner-only fields (the proc reads/writes them on its own fiber),
-	 * so no atomics are needed. */
-	unsigned      mask_depth;
-	int           mask_deferred;   /* latched reason+1; 0 = none pending */
+	 *
+	 * WRITTEN owner-only (the proc mutates them on its own fiber, so the
+	 * write side needs no lock), but ATOMIC because a supervisor on
+	 * another thread READS them for introspection: a wedged fiber is
+	 * exactly one that will never run again to publish its own state, so
+	 * "is this fiber stuck inside a critical section, or merely slow?"
+	 * has to be answerable from outside.  Relaxed on both sides -- these
+	 * are a sampled health signal (like run_state), not a synchronizing
+	 * read.  See xtc_proc_info's mask_depth / mask_deferred. */
+	_Atomic unsigned mask_depth;
+	_Atomic int   mask_deferred;   /* latched reason+1; 0 = none pending */
 
 	/* A3 async causal trace: a small per-fiber ring of the recent
 	 * suspend/resume boundaries (park reason / resume) with a static
@@ -1439,6 +1446,57 @@ __xtc_proc_ctx_restore(void *ctx)
  * already deferred by the recovery gate).
  */
 /*
+ * Owner-only accessors for the A2 mask counters.  The fields are atomic
+ * only so a supervisor on another thread can SAMPLE them (see
+ * __fill_proc_info); every write here is on the proc's own fiber, so
+ * relaxed ordering is right and no read-modify-write atomicity is
+ * needed.  These keep the mask sites reading like the plain counter
+ * bumps they are.
+ */
+static inline unsigned
+__mask_depth(const struct xtc_proc *p)
+{
+	return atomic_load_explicit(&p->mask_depth, memory_order_relaxed);
+}
+
+static inline void
+__mask_depth_inc(struct xtc_proc *p)
+{
+	atomic_store_explicit(&p->mask_depth, __mask_depth(p) + 1u,
+	    memory_order_relaxed);
+}
+
+/* Saturating at 0: mirrors the `if (mask_depth > 0) mask_depth--` guard
+ * every call site used, so an unbalanced drop cannot wrap to UINT_MAX
+ * and mask cancellation forever. */
+static inline void
+__mask_depth_dec(struct xtc_proc *p)
+{
+	unsigned d = __mask_depth(p);
+	if (d > 0)
+		atomic_store_explicit(&p->mask_depth, d - 1u,
+		    memory_order_relaxed);
+}
+
+static inline void
+__mask_depth_set(struct xtc_proc *p, unsigned v)
+{
+	atomic_store_explicit(&p->mask_depth, v, memory_order_relaxed);
+}
+
+static inline int
+__mask_deferred(const struct xtc_proc *p)
+{
+	return atomic_load_explicit(&p->mask_deferred, memory_order_relaxed);
+}
+
+static inline void
+__mask_deferred_set(struct xtc_proc *p, int v)
+{
+	atomic_store_explicit(&p->mask_deferred, v, memory_order_relaxed);
+}
+
+/*
  * Deliver a pending asynchronous kill to `self` at a yield/recv point,
  * respecting the A2 cancellation mask.  If kill_pending is set:
  *   - mask_depth == 0: unwind now via xtc_exit_self (does not return).
@@ -1446,7 +1504,7 @@ __xtc_proc_ctx_restore(void *ctx)
  *     return, so a resource acquired in a masked region can still
  *     register its release.  The latched kill fires when the mask drops
  *     to 0 (xtc_uncancelable / xtc_cancel_poll drain it).
- * Owner-only: called on self's own fiber, so mask_* need no atomics.
+ * Owner-only: called on self's own fiber.
  */
 static void
 __xtc_proc_kill_deliver(struct xtc_proc *self)
@@ -1457,9 +1515,9 @@ __xtc_proc_kill_deliver(struct xtc_proc *self)
 	kp = atomic_load_explicit(&self->kill_pending, memory_order_acquire);
 	if (kp == 0)
 		return;
-	if (self->mask_depth > 0) {
-		if (self->mask_deferred == 0)
-			self->mask_deferred = kp;   /* latch reason+1 */
+	if (__mask_depth(self) > 0) {
+		if (__mask_deferred(self) == 0)
+			__mask_deferred_set(self, kp);  /* latch reason+1 */
 		return;
 	}
 	xtc_exit_self(kp - 1);
@@ -1768,6 +1826,90 @@ xtc_exit_pid(xtc_pid_t target, int reason)
 	}
 	(void) __proc_mtx_unlock(&p->mbox_lock);
 	__proc_release(p);
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_exit_pid_deadline __P((xtc_pid_t, int, int64_t, int *)); */
+/*
+ * xtc_exit_pid with a bounded wait and a report of what happened.
+ *
+ * xtc_exit_pid is fire-and-forget: XTC_OK means "flag set", never "kill
+ * landed".  A supervisor cannot tell a fiber that is unwinding from one
+ * wedged inside an xtc_uncancelable() region, where the kill is deferred
+ * with no bound.  This reports which, so escalation is a decision rather
+ * than a guess after a fixed timeout.
+ *
+ * The wait polls: the target acts on the kill on its OWN fiber at a
+ * yield/recv point, so there is nothing to wait ON from here -- no
+ * condvar the target signals, and a wedged target signals nothing by
+ * construction.  Polling is what a wedged fiber permits.  The interval
+ * backs off to 1ms so a long deadline costs few wakeups.
+ */
+int
+xtc_exit_pid_deadline(xtc_pid_t target, int reason, int64_t timeout_ns,
+    int *out_status)
+{
+	struct xtc_proc *p;
+	int64_t start = 0, now = 0, slice = 50000;   /* 50us, backing off */
+	int status = XTC_KILL_TIMEOUT, rc, on_fiber;
+
+	if (XTC_UNLIKELY(xtc_pid_is_none(target)))
+		return XTC_E_INVAL;
+	/* Killing yourself is xtc_exit_self; waiting for your own unwind
+	 * here would deadlock until the deadline. */
+	if (XTC_UNLIKELY(xtc_pid_eq(target, xtc_self())))
+		return XTC_E_INVAL;
+
+	rc = xtc_exit_pid(target, reason);
+	if (rc != XTC_OK) {
+		/* Unknown or already-dead target.  Already dead is exactly
+		 * the outcome the caller wanted, so report it as such. */
+		p = __resolve(target, NULL);
+		if (p == NULL) {
+			if (out_status != NULL)
+				*out_status = XTC_KILL_DELIVERED;
+			return XTC_OK;
+		}
+		__proc_release(p);
+		return rc;
+	}
+
+	on_fiber = !xtc_pid_is_none(xtc_self());
+	(void)__os_clock_mono(&start);
+	for (;;) {
+		/* Gone => it observed the kill and unwound. */
+		p = __resolve(target, NULL);
+		if (p == NULL || !p->alive) {
+			if (p != NULL)
+				__proc_release(p);
+			status = XTC_KILL_DELIVERED;
+			break;
+		}
+		/* Alive and masked with the kill already latched: it saw the
+		 * kill and cannot act on it.  Report DEFERRED rather than
+		 * burning the rest of the deadline -- waiting longer cannot
+		 * change the answer while the mask is held. */
+		if (__mask_depth(p) > 0 && __mask_deferred(p) != 0) {
+			__proc_release(p);
+			status = XTC_KILL_DEFERRED;
+			break;
+		}
+		__proc_release(p);
+
+		(void)__os_clock_mono(&now);
+		if (timeout_ns <= 0 || now - start >= timeout_ns) {
+			status = XTC_KILL_TIMEOUT;
+			break;
+		}
+		if (on_fiber)
+			(void)xtc_proc_sleep(slice);
+		else
+			(void)__os_sleep_ns(slice);
+		if (slice < 1000000)
+			slice *= 2;
+	}
+	if (out_status != NULL)
+		*out_status = status;
 	return XTC_OK;
 }
 
@@ -2926,11 +3068,11 @@ static void
 __mask_drain(struct xtc_proc *p)
 {
 	int kp;
-	if (p == NULL || p->mask_depth > 0)
+	if (p == NULL || __mask_depth(p) > 0)
 		return;
-	kp = p->mask_deferred;
+	kp = __mask_deferred(p);
 	if (kp != 0) {
-		p->mask_deferred = 0;
+		__mask_deferred_set(p, 0);
 		xtc_exit_self(kp - 1);
 	}
 }
@@ -2945,10 +3087,9 @@ xtc_uncancelable(int (*body)(void *), void *ud)
 		return XTC_E_INVAL;
 	if (p == NULL)
 		return body(ud);        /* off a proc: nothing to mask */
-	p->mask_depth++;
+	__mask_depth_inc(p);
 	rc = body(ud);
-	if (p->mask_depth > 0)
-		p->mask_depth--;
+	__mask_depth_dec(p);
 	/* Fully unmasked now: honor any kill that arrived while masked. */
 	__mask_drain(p);
 	return rc;
@@ -2963,17 +3104,17 @@ xtc_cancel_poll(int (*body)(void *), void *ud)
 	int rc;
 	if (body == NULL)
 		return XTC_E_INVAL;
-	if (p == NULL || p->mask_depth == 0)
+	if (p == NULL || __mask_depth(p) == 0)
 		return body(ud);       /* unmasked already: just run it */
 	/* Temporarily re-admit cancellation for this sub-region: drop the
 	 * mask to 0, honoring any already-latched kill BEFORE running the
 	 * body (Cats Effect's poll observes cancellation at the poll site),
 	 * then restore the caller's mask depth. */
-	saved = p->mask_depth;
-	p->mask_depth = 0;
+	saved = __mask_depth(p);
+	__mask_depth_set(p, 0);
 	__mask_drain(p);            /* may not return */
 	rc = body(ud);
-	p->mask_depth = saved;
+	__mask_depth_set(p, saved);
 	return rc;
 }
 
@@ -2986,7 +3127,7 @@ xtc_cancel_requested(void)
 		return 0;
 	if (atomic_load_explicit(&p->kill_pending, memory_order_acquire) != 0)
 		return 1;
-	return p->mask_deferred != 0;
+	return __mask_deferred(p) != 0;
 }
 
 /* ---------- A1: resource scope / bracket ----------
@@ -3161,11 +3302,10 @@ xtc_bracket(int (*acquire)(void **res, void *ud),
 	 * resource becoming live and its release being registered -- the
 	 * A1+A2 pairing.  The mask is held across acquire + the defer, then
 	 * dropped for use(). */
-	p->mask_depth++;
+	__mask_depth_inc(p);
 	arc = acquire(&res, ud);
 	if (arc != XTC_OK) {
-		if (p->mask_depth > 0)
-			p->mask_depth--;
+		__mask_depth_dec(p);
 		__mask_drain(p);
 		return arc;
 	}
@@ -3176,16 +3316,14 @@ xtc_bracket(int (*acquire)(void **res, void *ud),
 			/* Cannot guarantee release via a scope; release now
 			 * (still masked) and fail rather than leak. */
 			release(res, ud);
-			if (p->mask_depth > 0)
-				p->mask_depth--;
+			__mask_depth_dec(p);
 			__mask_drain(p);
 			return XTC_E_RESOURCE;
 		}
 		if (__os_calloc(1, sizeof *br, (void **)&br) != XTC_OK) {
 			xtc_scope_close(s);
 			release(res, ud);
-			if (p->mask_depth > 0)
-				p->mask_depth--;
+			__mask_depth_dec(p);
 			__mask_drain(p);
 			return XTC_E_RESOURCE;
 		}
@@ -3195,8 +3333,7 @@ xtc_bracket(int (*acquire)(void **res, void *ud),
 		(void)xtc_scope_defer(s, __bracket_release_cb, br);
 		/* Release is now registered on every exit path.  Drop the mask
 		 * (honoring a deferred kill) and run use(). */
-		if (p->mask_depth > 0)
-			p->mask_depth--;
+		__mask_depth_dec(p);
 		__mask_drain(p);        /* if killed, scope unwind releases */
 		urc = use(res, ud);
 		xtc_scope_close(s);     /* runs release + frees br */
@@ -3627,6 +3764,12 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 	info->alive = p->alive;
 	info->kill_pending =
 	    atomic_load_explicit(&p->kill_pending, memory_order_relaxed) ? 1 : 0;
+	/* A2 mask state: the supervisor-side "is this fiber killable now?"
+	 * signal.  Sampled, like run_state -- and exact for the case that
+	 * matters, a fiber wedged inside a critical section, which by
+	 * definition is not running and so cannot be mutating them. */
+	info->mask_depth = __mask_depth(p);
+	info->mask_deferred = __mask_deferred(p);
 	if (p->task != NULL) {
 		int st = atomic_load_explicit(&p->task->state,
 		    memory_order_relaxed);   /* introspection snapshot */
@@ -3636,11 +3779,33 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 				info->park_reason = XTC_PARK_FD;
 			else if (p->task->park_timer != NULL)
 				info->park_reason = XTC_PARK_TIMER;
-			else if (p->task->park_requested)
-				info->park_reason = XTC_PARK_MAILBOX;
+			/* else: possibly a mailbox park -- decided below from
+			 * waker_armed, which is read under mbox_lock.  It CANNOT
+			 * be decided from park_requested: that flag is a one-shot
+			 * the coro substrate CONSUMES and clears when it turns the
+			 * yield into the PENDING verdict (coro_uctx.c /
+			 * coro_fctx.c / coro_winfiber.c), so by the time the task
+			 * is XTC_TS_PARKED it is always 0 -- the old test here was
+			 * dead code and EVERY mailbox park reported
+			 * XTC_PARK_NONE.
+			 *
+			 * Not a cosmetic mislabel: a fiber blocked in xtc_recv
+			 * showed as a bare PARKED with NO park source, which is
+			 * also what a LOST WAKE looks like.  A consumer chasing a
+			 * hang could not tell "parked in recv, waiting for a
+			 * message" (healthy) from "parked with its wake dropped"
+			 * (a bug), and a queued mailbox plus a sourceless park
+			 * reads as the latter. */
 		}
 	}
 	(void) __proc_mtx_lock(&p->mbox_lock);
+	/* Mailbox park: waker_armed is the DURABLE fact (set under this lock
+	 * before parking in __do_recv, cleared after resuming), so it means
+	 * "parked waiting for a mailbox wake" for the whole park -- unlike
+	 * park_requested, which the coro substrate has already consumed. */
+	if (info->run_state == XTC_TS_PARKED &&
+	    info->park_reason == XTC_PARK_NONE && p->waker_armed)
+		info->park_reason = XTC_PARK_MAILBOX;
 	info->mbox_len = p->mbox_n;
 	info->mbox_peak = p->mbox_peak;
 	info->mbox_cap = p->mbox_cap;

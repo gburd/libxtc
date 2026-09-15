@@ -132,6 +132,7 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int       xtc_proc_sleep __P((int64_t));
  * PUBLIC: int       xtc_exit_self __P((int));
  * PUBLIC: int       xtc_exit_pid __P((xtc_pid_t, int));
+ * PUBLIC: int       xtc_exit_pid_deadline __P((xtc_pid_t, int, int64_t, int *));
  * PUBLIC: int       xtc_proc_wake __P((xtc_pid_t));
  * PUBLIC: int       xtc_link __P((xtc_pid_t));
  * PUBLIC: int       xtc_unlink __P((xtc_pid_t));
@@ -172,6 +173,66 @@ XTC_API int       xtc_proc_spawn_monitor(xtc_loop_t *loop, xtc_proc_fn fn,
  * Returns XTC_E_INVAL if the target is unknown or already dead.
  */
 XTC_API int xtc_exit_pid(xtc_pid_t target, int reason);
+
+/*
+ * Kill-delivery outcome, reported by xtc_exit_pid_deadline.
+ *
+ * xtc_exit_pid is FIRE-AND-FORGET: it returns XTC_OK once the flag is
+ * set, which says nothing about whether the target ever acted on it.
+ * That is fine for a cooperative sibling, but it leaves a supervisor
+ * unable to distinguish the two cases it most needs to tell apart --
+ * "the fiber is unwinding" from "the fiber is wedged inside an
+ * xtc_uncancelable() region, where the kill is deferred with no bound
+ * and will never fire."  Guessing after a fixed timeout is the only
+ * option today; these statuses replace the guess with an answer.
+ */
+enum xtc_kill_status {
+	/* The target observed the kill and is gone (or already was). */
+	XTC_KILL_DELIVERED = 0,
+	/* Still masked when the deadline expired: the kill is LATCHED and
+	 * will fire if the mask ever drops -- but the fiber is inside a
+	 * critical section and is not obliged to leave it.  A supervisor
+	 * should treat this as "wedged, escalate", NOT "try again": a
+	 * second xtc_exit_pid is a no-op (first call wins).  Escalation
+	 * means taking down a larger unit -- see the "Killing a fiber that
+	 * mutates shared state" section of xtc_proc(3). */
+	XTC_KILL_DEFERRED  = 1,
+	/* Not masked, but still alive at the deadline: it simply has not
+	 * reached a yield/recv point yet (a CPU-bound loop with no yield,
+	 * or a park that outlives the deadline).  Usually means "wait
+	 * longer"; a fiber that never yields will never be killable. */
+	XTC_KILL_TIMEOUT   = 2
+};
+
+/*
+ * xtc_exit_pid with a bounded wait and a REPORT of what happened.
+ *
+ * Identical to xtc_exit_pid (same idempotent flag, same reason
+ * encoding), but waits up to timeout_ns for the target to act, then
+ * writes one of the enum xtc_kill_status values to *out_status
+ * (out_status may be NULL if only the wait is wanted).
+ *
+ * A zero or negative timeout polls once and reports immediately.
+ * The CALLER MUST NOT be the target (killing yourself is
+ * xtc_exit_self); returns XTC_E_INVAL for that, for XTC_PID_NONE, and
+ * for an unknown pid.  A target that is already dead reports
+ * XTC_KILL_DELIVERED with XTC_OK.
+ *
+ * Callable from a fiber or a plain thread.  On a fiber the wait yields
+ * (xtc_proc_sleep); off one it sleeps the OS thread, so a supervisor
+ * thread can use it directly.  Returns XTC_OK whenever a status was
+ * determined -- the STATUS, not the return code, says whether the kill
+ * landed.
+ *
+ * IMPORTANT: XTC_KILL_DELIVERED means the fiber unwound, running its
+ * xtc_scope finalizers and xtc_proc_at_exit hooks.  It does NOT mean
+ * shared state the fiber was mutating is consistent: releasing a lock
+ * does not undo a half-finished mutation.  If a fiber can be killed
+ * mid-mutation of state other fibers keep using, an async kill is the
+ * wrong tool -- see xtc_proc(3).
+ */
+XTC_API int xtc_exit_pid_deadline(xtc_pid_t target, int reason,
+                                  int64_t timeout_ns, int *out_status);
 
 /*
  * Resume a process parked in xtc_proc_wait_fd / xtc_recv, from ANY OS
@@ -248,6 +309,26 @@ XTC_API int   xtc_proc_set_class(xtc_exec_class_t cls);
  *     credit-based scheme), or
  *   - treat it as fatal for a must-deliver path.
  * Ignoring the return is a bug, not a shortcut.
+ *
+ * WAKE GUARANTEE.  A successful send WAKES a receiver parked in
+ * xtc_recv / xtc_recv_match / xtc_proc_wait_fd, and this holds from ANY
+ * thread -- fiber-to-fiber, cross-loop, and from a plain OS thread that
+ * libxtc knows nothing about (no loop, no proc identity, so the
+ * envelope's `from` is XTC_PID_NONE).  There is no weaker cross-thread
+ * mode: the receiver arms its waker under the same mailbox lock that
+ * observed the mailbox empty, so a delivery either finds the waker armed
+ * and fires it, or lands before the receiver commits to parking and the
+ * receiver sees the message on its own re-check.  A cross-thread wake
+ * posts to the target loop's inbox and pings its I/O backend, so a loop
+ * blocked in epoll_wait / io_uring / kqueue / IOCP returns and
+ * re-polls.  If a send returns XTC_OK and the target then stays parked
+ * with a non-empty mailbox, that is a libxtc bug -- report it.
+ *
+ * A parked receiver is therefore never left holding an undelivered
+ * message, but note what the guarantee does NOT promise: it says the
+ * receiver is made runnable, not that it runs before the sender
+ * continues.  Send is asynchronous and never blocks waiting for a
+ * receive.
  */
 XTC_API int       xtc_send(xtc_pid_t to, const void *data, size_t size);
 

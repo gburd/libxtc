@@ -567,6 +567,99 @@ test_inspect_procs(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * park_reason must name the MAILBOX park.
+ *
+ * A fiber blocked in xtc_recv(..., -1) reported run_state=PARKED with
+ * park_reason=XTC_PARK_NONE -- a bare, sourceless park.  The branch meant
+ * to catch it tested task->park_requested, but the coro substrate CONSUMES
+ * and clears that one-shot when it turns the yield into the PENDING
+ * verdict, so it is ALWAYS 0 by the time the task is PARKED: dead code.
+ *
+ * The mislabel was not cosmetic.  A sourceless park is also what a LOST
+ * WAKE looks like, so a consumer chasing a hang could not tell a fiber
+ * healthily waiting for a message from one whose wake had been dropped --
+ * and reasonably read "queued mailbox + sourceless park" as the latter.
+ * (Reported by the PostgreSQL-on-libxtc integration, which spent days on
+ * exactly that misreading.)
+ *
+ * The other two park shapes are asserted alongside it, so this pins the
+ * whole park_reason mapping rather than one branch.
+ */
+static xtc_pid_t g_pr_mbox, g_pr_timer;
+static _Atomic int g_pr_mbox_reason, g_pr_timer_reason, g_pr_checked;
+
+static void
+pr_mbox_proc(void *a)
+{
+	void *m = NULL;
+	size_t n = 0;
+	(void)a;
+	/* Infinite mailbox park: no fd, no timer.  Woken by the probe's send. */
+	(void)xtc_recv(&m, &n, -1);
+	xtc_free(m);
+}
+
+static void
+pr_timer_proc(void *a)
+{
+	(void)a;
+	(void)xtc_proc_sleep(400LL * 1000 * 1000);
+}
+
+static void
+pr_probe(void *a)
+{
+	xtc_proc_info_t info;
+	(void)a;
+	/* Let both targets reach their parks. */
+	(void)xtc_proc_sleep(30LL * 1000 * 1000);
+
+	if (xtc_proc_info(g_pr_mbox, &info) == XTC_OK &&
+	    info.run_state == XTC_PROC_PARKED)
+		atomic_store(&g_pr_mbox_reason, info.park_reason);
+	if (xtc_proc_info(g_pr_timer, &info) == XTC_OK &&
+	    info.run_state == XTC_PROC_PARKED)
+		atomic_store(&g_pr_timer_reason, info.park_reason);
+	atomic_store(&g_pr_checked, 1);
+
+	/* Release the mailbox parker so the loop can drain. */
+	(void)xtc_send(g_pr_mbox, "go", 3);
+}
+
+static MunitResult
+test_inspect_park_reason(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t o = { 0 };
+	xtc_pid_t probe;
+	(void)p; (void)d;
+
+	atomic_store(&g_pr_mbox_reason, -1);
+	atomic_store(&g_pr_timer_reason, -1);
+	atomic_store(&g_pr_checked, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	o.name = "pr-mbox";
+	munit_assert_int(xtc_proc_spawn(loop, pr_mbox_proc, NULL, &o,
+	    &g_pr_mbox), ==, XTC_OK);
+	o.name = "pr-timer";
+	munit_assert_int(xtc_proc_spawn(loop, pr_timer_proc, NULL, &o,
+	    &g_pr_timer), ==, XTC_OK);
+	o.name = "pr-probe";
+	munit_assert_int(xtc_proc_spawn(loop, pr_probe, NULL, &o, &probe),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	munit_assert_int(atomic_load(&g_pr_checked), ==, 1);
+	/* The regression: this was XTC_PARK_NONE (0) for every recv park. */
+	munit_assert_int(atomic_load(&g_pr_mbox_reason), ==, XTC_PARK_MAILBOX);
+	munit_assert_int(atomic_load(&g_pr_timer_reason), ==, XTC_PARK_TIMER);
+
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 /* Off-loop: xtc_proc_info for an unknown pid is NOTFOUND, not a crash. */
 static MunitResult
 test_inspect_notfound(const MunitParameter p[], void *d)
@@ -694,6 +787,7 @@ test_pdict_dtor(const MunitParameter p[], void *d)
 static MunitTest tests[] = {
 	{ "/pdict/basic",          test_pdict_basic,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inspect/procs",        test_inspect_procs,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/inspect/park_reason",  test_inspect_park_reason,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inspect/notfound",     test_inspect_notfound,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/trace/causal",         test_trace_causal,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/basic",            test_log_basic,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

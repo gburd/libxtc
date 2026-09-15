@@ -56,6 +56,31 @@ typedef struct xtc_proc_info {
 	int       park_reason;      /* enum xtc_proc_park (valid if PARKED) */
 	int       alive;
 	int       kill_pending;
+	/*
+	 * A2 cancellation-mask state -- the "is it killable RIGHT NOW?"
+	 * signal a supervisor needs to choose between wait, kill, and
+	 * escalate.  kill_pending alone cannot distinguish "the fiber is
+	 * unwinding" from "the fiber is wedged inside a critical section
+	 * that defers the kill indefinitely"; these two do.
+	 *
+	 *   mask_depth > 0     the proc is inside xtc_uncancelable(), so an
+	 *                      async kill will be DEFERRED, not acted on.
+	 *   mask_deferred != 0 a kill was delivered and is latched, waiting
+	 *                      for the mask to drop to 0.
+	 *
+	 * mask_depth > 0 with mask_deferred != 0 and no forward progress is
+	 * the wedged-critical-section signature: xtc_exit_pid has already
+	 * been observed and cannot fire.  A supervisor that sees it should
+	 * escalate rather than wait, and MUST NOT assume a further
+	 * xtc_exit_pid will help.  See xtc_exit_pid_deadline, which reports
+	 * this as XTC_KILL_DEFERRED, and the "Killing a fiber that mutates
+	 * shared state" section of xtc_proc(3).
+	 *
+	 * Both are sampled without synchronizing (like run_state): a
+	 * best-effort snapshot, exact for a fiber that is not running.
+	 */
+	unsigned  mask_depth;
+	int       mask_deferred;
 	size_t    mbox_len;         /* current depth */
 	size_t    mbox_peak;        /* high-water mark */
 	size_t    mbox_cap;
