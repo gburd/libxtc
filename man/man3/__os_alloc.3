@@ -105,10 +105,13 @@ is zero.
 .Pp
 .Fn __os_alloc_set_hook
 swaps the allocator backend.
-The hook structure has five callbacks
-.Po Sy malloc , calloc , realloc , free , aligned Pc ,
+The hook structure has six callbacks
+.Po Sy malloc , calloc , realloc , free , aligned , aligned_free Pc ,
 all of which must be non-NULL or the call returns
 .Dv XTC_E_INVAL .
+The vtable is
+.Em copied ,
+so the caller's structure need not outlive the call.
 .Pp
 .Fn __os_alloc_get_hook
 copies the active hook into
