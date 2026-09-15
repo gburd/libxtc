@@ -455,7 +455,25 @@ jobs:
     #     human to read rather than used to gate.  Flip the `|| true`
     #     below to make them gate once the runtime is annotated for the
     #     race detectors.
+    #
+    # Why test_exec is NOT in the Helgrind/DRD lists: its
+    # /m5/exec/Blk1_concurrent_commit_resume case runs 64 migratable
+    # fibers x 200 iterations on TWELVE loops, and a quarter of those
+    # iterations SPIN (xtc_yield + up to 100M retries) on a shared flush
+    # lock held across a blocking offload.  The race detectors serialize
+    # threads and cost ~100x, so that spin cannot drain in any sane time:
+    # the run wedged, blew Helgrind's 10,000,000-error ceiling, and burned
+    # the full 6h job limit -- every scheduled run was CANCELLED at the
+    # ceiling rather than reporting anything.  memcheck (which does not
+    # serialize) still covers a broad subset, and test_exec's races are
+    # covered by the tsan-fibers job.  Same call as 52b26ce made for
+    # test_aio_migrate_wake under TSan: a heavy-migration test is not a
+    # useful race-detector target.
+    #
+    # timeout-minutes is belt-and-braces: an informational step that
+    # hangs must not silently consume the 6h default and cancel the job.
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -505,7 +523,7 @@ jobs:
         run: |
           # Smaller, genuinely multi-threaded subset.  Informational:
           # the report is printed but does not gate (see job comment).
-          for t in test_exec test_cross_wake test_sync test_lockmgr; do
+          for t in test_cross_wake test_sync test_lockmgr; do
             echo "===== helgrind $t ====="
             valgrind --tool=helgrind \
               --suppressions=../.github/valgrind.supp \
@@ -515,7 +533,7 @@ jobs:
       - name: DRD (data-race detector, informational)
         working-directory: build_vg
         run: |
-          for t in test_exec test_cross_wake test_sync test_lockmgr; do
+          for t in test_cross_wake test_sync test_lockmgr; do
             echo "===== drd $t ====="
             valgrind --tool=drd \
               --suppressions=../.github/valgrind.supp \
