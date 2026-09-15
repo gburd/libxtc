@@ -679,6 +679,71 @@ test_unbounded(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- hot-path read handles (xtc_cfg_ref) ---- */
+static MunitResult
+test_ref(const MunitParameter p[], void *d)
+{
+	xtc_cfg_spec_t s = { 0 };
+	static const char *const lv[] = { "a", "b", "c", NULL };
+	xtc_cfg_ref_t ri, rs, re, rb;
+	int iv, ev, bv;
+	const char *sv;
+	(void)p; (void)d;
+
+	/* NULL args rejected; unknown name -> NOTFOUND. */
+	munit_assert_int(xtc_cfg_ref(NULL, &ri), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_ref("r.int", NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_ref("r.nope", &ri), ==, XTC_E_NOTFOUND);
+	munit_assert_int(xtc_cfg_ref_get_int(NULL, &iv), ==, XTC_E_INVAL);
+
+	s.name = "r.int"; s.kind = XTC_CFG_INT; s.dflt.d_int = 42;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "r.str"; s.kind = XTC_CFG_STRING; s.dflt.d_string = "hi";
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "r.enum"; s.kind = XTC_CFG_ENUM;
+	s.enum_labels = lv; s.n_enum_labels = 3; s.dflt.d_enum = 1;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "r.bool"; s.kind = XTC_CFG_BOOL; s.dflt.d_bool = 1;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+
+	munit_assert_int(xtc_cfg_ref("r.int", &ri), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ref("r.str", &rs), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ref("r.enum", &re), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ref("r.bool", &rb), ==, XTC_OK);
+
+	/* Handle read == default == name-keyed read. */
+	munit_assert_int(xtc_cfg_ref_get_int(ri, &iv), ==, XTC_OK);
+	munit_assert_int(iv, ==, 42);
+	munit_assert_int(xtc_cfg_ref_get_string(rs, &sv), ==, XTC_OK);
+	munit_assert_string_equal(sv, "hi");
+	munit_assert_int(xtc_cfg_ref_get_enum(re, &ev), ==, XTC_OK);
+	munit_assert_int(ev, ==, 1);
+	munit_assert_int(xtc_cfg_ref_get_bool(rb, &bv), ==, XTC_OK);
+	munit_assert_int(bv, ==, 1);
+
+	/* A live set_* is observed through the SAME handle (no re-ref). */
+	munit_assert_int(xtc_cfg_set_int("r.int", 100), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ref_get_int(ri, &iv), ==, XTC_OK);
+	munit_assert_int(iv, ==, 100);
+	munit_assert_int(xtc_cfg_set_string("r.str", "bye"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ref_get_string(rs, &sv), ==, XTC_OK);
+	munit_assert_string_equal(sv, "bye");
+
+	/* Kind mismatch through a handle is rejected, like the name getters. */
+	munit_assert_int(xtc_cfg_ref_get_string(ri, &sv), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_ref_get_int(rs, &iv), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_ref_get_double(ri, NULL), ==, XTC_E_INVAL);
+
+	munit_assert_int(xtc_cfg_unregister("r.int"),  ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("r.str"),  ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("r.enum"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("r.bool"), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/register_basic",   test_register_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/int_bounds",       test_int_bounds,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -693,6 +758,7 @@ static MunitTest tests[] = {
 	{ "/kind_mismatch",    test_kind_mismatch,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/unknown_null",     test_unknown_and_null,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/unbounded",        test_unbounded,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/ref",              test_ref,                   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m14/cfg", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

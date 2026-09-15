@@ -21,7 +21,7 @@
 #include <stdio.h>
 #include <errno.h>
 
-struct cfg_var {
+struct xtc_cfg_var {
 	char           *name;
 	char           *desc;
 	xtc_cfg_kind_t  kind;
@@ -42,8 +42,9 @@ struct cfg_var {
 	xtc_cfg_validator_fn  validator;
 	xtc_cfg_changed_fn    on_change;
 	void                 *cb_user;
-	struct cfg_var *next;
+	struct xtc_cfg_var *next;
 };
+#define cfg_var xtc_cfg_var   /* keep the terse internal spelling below */
 
 static pthread_mutex_t __cfg_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct cfg_var *__cfg_head;
@@ -266,6 +267,42 @@ xtc_cfg_kind(const char *name, xtc_cfg_kind_t *out)
 	(void)__xtc_mtx_unlock(&__cfg_lock);
 	return rc;
 }
+
+/* ---- hot-path read handles ---- */
+
+int
+xtc_cfg_ref(const char *name, xtc_cfg_ref_t *out)
+{
+	struct cfg_var *v;
+	int rc = XTC_E_NOTFOUND;
+	if (name == NULL || out == NULL) return XTC_E_INVAL;
+	(void)__xtc_mtx_lock(&__cfg_lock);
+	v = __cfg_find_locked(name);
+	if (v != NULL) { *out = v; rc = XTC_OK; }
+	(void)__xtc_mtx_unlock(&__cfg_lock);
+	return rc;
+}
+
+/* A handle read is a direct field load under the registry lock: O(1),
+ * no name scan.  It still takes the lock so a concurrent set_string's
+ * free-then-replace is observed atomically, matching the name-keyed
+ * getters exactly. */
+#define DEF_REF_GET(name_suffix, K, field, type) \
+int xtc_cfg_ref_get_##name_suffix(xtc_cfg_ref_t ref, type *out) { \
+	int rc = XTC_E_INVAL; \
+	if (ref == NULL || out == NULL) return XTC_E_INVAL; \
+	(void)__xtc_mtx_lock(&__cfg_lock); \
+	if (ref->kind == K) { *out = ref->cur.field; rc = XTC_OK; } \
+	(void)__xtc_mtx_unlock(&__cfg_lock); \
+	return rc; \
+}
+
+DEF_REF_GET(bool,   XTC_CFG_BOOL,   v_bool,   int)
+DEF_REF_GET(int,    XTC_CFG_INT,    v_int,    int)
+DEF_REF_GET(int64,  XTC_CFG_INT64,  v_int64,  int64_t)
+DEF_REF_GET(double, XTC_CFG_DOUBLE, v_double, double)
+DEF_REF_GET(string, XTC_CFG_STRING, v_string, const char *)
+DEF_REF_GET(enum,   XTC_CFG_ENUM,   v_enum,   int)
 
 /* ---- config-file loading (postgresql.conf-style key = value) ---- */
 
