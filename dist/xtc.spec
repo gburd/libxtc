@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.46.0
+Version:        1.47.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,17 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Tue Sep 16 2026 Greg Burd <greg@burd.me> - 1.47.0-1
+- alloc: __os_alloc_set_hook COPIES the vtable and requires all six
+  callbacks (aligned_free was unchecked); fixes a stack-use-after-return
+  when a caller registered a stack local.
+- proc: xtc_proc_info reports the MAILBOX park (it always reported NONE,
+  making a healthy xtc_recv park indistinguishable from a lost wake).
+- proc: new xtc_exit_pid_deadline reports DELIVERED/DEFERRED/TIMEOUT, and
+  xtc_proc_info exposes the cancellation-mask state.
+- doc: xtc_send's wake guarantee is now stated; xtc_proc(3) documents the
+  stance on killing a fiber that mutates shared state.
+
 * Sat Sep 13 2026 Greg Burd <greg@burd.me> - 1.45.0-1
 - tail: xtc_tail is now a dial9-class microscope with dial9-GUI interop.
   xtc_tail_dump_dial9 emits the dial9 trace wire format (TRC\\0 v1) with the
