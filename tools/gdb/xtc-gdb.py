@@ -276,6 +276,38 @@ def _proc_state(p):
     return s
 
 
+def _ring_state(loop):
+    """(unreaped, ovf) for a loop's io_uring ring, or (None, None).
+
+    Factored out of xtc-rings so xtc-stranded can CROSS-REFERENCE a parked
+    fiber's loop against its ring health.  A consumer hit exactly the gap
+    this closes: two fibers were provably doomed on a ring sitting at
+    CQ-full with the kernel overflow flag set, and xtc-stranded reported
+    "0 suspect" because an fd park has a legitimate source.  The runtime
+    had both facts; the tool did not join them.
+    """
+    try:
+        io = loop["io"]
+        if int(io) == 0:
+            return (None, None)
+    except gdb.error:
+        return (None, None)
+    unreaped = ovf = None
+    try:
+        cq = io["ring"]["cq"]
+        unreaped = (int(cq["ktail"].dereference()) -
+                    int(cq["khead"].dereference()))
+    except gdb.error:
+        pass
+    try:
+        # IORING_SQ_CQ_OVERFLOW (bit 1): completions exist that the CQ
+        # could not hold, so a zero `unreaped` is not "idle".
+        ovf = 1 if (int(io["ring"]["sq"]["kflags"].dereference()) & 2) else 0
+    except gdb.error:
+        pass
+    return (unreaped, ovf)
+
+
 def _park_kind(task, proc=None):
     """The park SHAPE, matching what xtc_dump's histogram reports:
     'fd' / 'timer' / 'mailbox' / '-' (no armed source).
@@ -742,6 +774,19 @@ class XtcStranded(gdb.Command):
                 rows.append((str(p), _pid_str(p["pid"]), kind, wp,
                              int(loop), svc))
 
+        # Ring health per loop, so an fd park can be judged against the
+        # ring that owes it a completion (see _ring_state).
+        ring = {}
+        for loop in _all_loops():
+            try:
+                lid = int(loop["exec_id"])
+            except gdb.error:
+                lid = -1
+            # Key by the loop POINTER, matching rows[4] (int(loop)); the
+            # exec_id is carried alongside only for the printed message.
+            ring[int(loop)] = (lid,) + _ring_state(loop)
+        wedged = set(k for k, (_l, _u, o) in ring.items() if o == 1)
+
         print("proc states:")
         for k in sorted(states):
             print("    %-12s %d" % (k, states[k]))
@@ -749,8 +794,16 @@ class XtcStranded(gdb.Command):
         for k in sorted(kinds):
             print("    park=%-8s %d" % (k, kinds[k]))
 
-        # A suspect is park='-' with no latched wake AND not a service fiber.
+        # A suspect is park='-' with no latched wake AND not a service
+        # fiber -- OR an fd/timer park whose loop's ring is sitting at
+        # CQ-overflow, which is never healthy: the completion that would
+        # wake it cannot be delivered.  Reported by a consumer whose two
+        # doomed fibers were parked on fds owned by a ring at
+        # unreaped=512 ovf=1 while this command said "0 suspect".
         susp = [r for r in rows if r[2] == "-" and r[3] == 0 and not r[5]]
+        ring_susp = [r for r in rows
+                     if r[4] in wedged and r[2].startswith("fd")
+                     and r[3] == 0]
         idle_svc = [r for r in rows if r[2] == "-" and r[3] == 0 and r[5]]
         print("")
         print("%-18s %-10s %-8s %-14s %s"
@@ -764,11 +817,24 @@ class XtcStranded(gdb.Command):
                     verdict = "<-- SUSPECT: no source, no latched wake"
             elif r[2] == "-" and r[3] != 0:
                 verdict = "latched wake, should resume"
+            elif (r[4] in wedged and r[2].startswith("fd")
+                  and r[3] == 0):
+                verdict = ("<-- SUSPECT: loop %d ring is CQ-OVERFLOWED "
+                           "(ovf=1); its completion cannot be delivered"
+                           % ring[r[4]][0])
             print("%-18s %-10s %-8s %-14s %s"
                   % (r[0], r[1], r[2], "SET" if r[3] else "clear", verdict))
         print("")
         print("(%d parked, %d suspect, %d idle service fiber(s) excluded)"
-              % (len(rows), len(susp), len(idle_svc)))
+              % (len(rows), len(susp) + len(ring_susp), len(idle_svc)))
+        if ring_susp:
+            print("")
+            print("%d fiber(s) are parked on a loop whose ring is at "
+                  "CQ-OVERFLOW." % len(ring_susp))
+            print("A park with a legitimate source is still doomed if the "
+                  "ring that owes it a completion cannot deliver one.  Run "
+                  "xtc-rings and confirm ovf stays 1 across 3 samples; if it "
+                  "does, the strand is the ring, not the fiber.")
         if idle_svc:
             print("NOTE: %d proc(s) with local_id 0 park with no source and no "
                   "latched wake.  That is the NORMAL idle state of a per-loop "

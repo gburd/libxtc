@@ -206,11 +206,13 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *out_events, int max_events,
 			/* Emit a wakeup event so the caller can dispatch. */
 			out_events[*out_n].flags = XTC_IO_WAKEUP;
 			out_events[*out_n].tag   = NULL;
+			out_events[*out_n].fd    = -1;
 			(*out_n)++;
 			continue;
 		}
 		out_events[*out_n].flags = f;
 		out_events[*out_n].tag = io->tags[i];
+		out_events[*out_n].fd = io->fds[i];
 		(*out_n)++;
 	}
 	return XTC_OK;

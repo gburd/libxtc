@@ -792,29 +792,16 @@ jobs:
     # ucontext substrate under clang -- the same combination re-verified
     # by hand on the FreeBSD host, now on every push.
     #
-    # KNOWN FAILURE, deliberately not gating: /m5/exec/Blk2_concurrent_commit
-    # hangs on kqueue.  Root cause is diagnosed and reproduced on real
-    # FreeBSD hardware (see docs/KNOWN_ISSUES.md): xtc_proc_wait_fd
-    # registers the park fd on the loop the fiber is RUNNING on, but
-    # reg_fds is per-io while fd NUMBERS are per-process and
-    # xtc_blocking_run opens a fresh pipe per offload -- so a migratable
-    # fiber that parks, migrates and parks again leaves the old
-    # registration live.  Measured: one fd number registered in ALL TWELVE
-    # kqueues of a 12-loop executor, after which whichever loop polls
-    # first dispatches the readiness to its own udata and wakes the wrong
-    # task.  The fix needs registration IDENTITY (io + token), not a fix
-    # keyed on the bare fd number, so it is a design change rather than a
-    # one-liner and is not being rushed into a release.
+    # The Blk2_concurrent_commit hang that made this job non-gating is
+    # FIXED (the wrong-proc bug in xtc_proc_wait_fd; see
+    # docs/KNOWN_ISSUES.md), so continue-on-error is GONE and this job
+    # gates again -- verified rc=0 with 571 tests on real FreeBSD 15.1.
     #
-    # Until then: timeout-minutes bounds the job so it REPORTS instead of
-    # consuming the 6h ceiling (which cancelled the whole workflow run and
-    # hid the 20 jobs that do pass), and continue-on-error keeps a known,
-    # documented platform bug from masking NEW regressions on every other
-    # job.  Remove BOTH the moment the hang is fixed -- a permanently
-    # non-gating job rots.
+    # timeout-minutes stays as defence-in-depth: a hang here must report
+    # rather than consume the 6h default, which is what previously
+    # CANCELLED the whole workflow run and hid the 20 jobs that pass.
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Build + test in a FreeBSD VM

@@ -6,60 +6,59 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
-## OPEN: fiber strand under migration + blocking offload on kqueue (FreeBSD/macOS)
+## RESOLVED: fiber strand under migration + blocking offload (kqueue)
 
-**Status:** OPEN.  Root cause diagnosed and reproduced on FreeBSD 15.1
-hardware; the fix is a design change and is deliberately not being
-rushed.  The `freebsd` CI job is bounded and non-gating until it lands
-(see the comment on that job in `.github/workflows/ci.yml`).
+**Status:** RESOLVED in 1.48.0.  Root cause found and fixed; the FreeBSD
+CI job is gating again.
 
-**Who is affected.** A consumer running MANY migratable fibers
-(`xtc_proc_opts_t.migratable = 1`) on a multi-loop `xtc_exec`, where
-those fibers repeatedly call `xtc_blocking_run()` (or anything that
-parks via `xtc_proc_wait_fd` on a short-lived fd).  On a
-`kqueue` backend -- FreeBSD and macOS -- a small fraction of fibers can
-strand permanently.  Linux (`epoll`, `io_uring`) is NOT affected: those
-backends have no userspace fd registry, so the mechanism below cannot
-occur.
+**What it was.** `xtc_proc_wait_fd` acted on the WRONG PROC.  `self` came
+from `__current_proc`, a thread-local that the coroutine layer saves and
+restores across every yield -- and under the multi-loop executor the
+restored value routinely named a *different* proc than the fiber actually
+running.  Measured with a control that involves no second thread-local
+(compare `__current_proc`'s task against the task the loop rebinds per
+step): **99.2% wrong** (12,120,000 against 99,592).
 
-**The mechanism.** `xtc_proc_wait_fd` registers the park fd on the loop
-the fiber is currently RUNNING on.  kqueue's registry (`reg_fds`) is
-per-io, but fd NUMBERS are per-process, and `xtc_blocking_run` opens a
-fresh pipe per call so numbers recycle quickly.  A migratable fiber that
-parks, migrates, and parks again leaves the earlier registration live
-and adds another on a different loop.  Measured on a 12-loop executor:
-one fd number ended up registered in ALL TWELVE kqueues at once.  Every
-one of those loops then watches the same open file, and whichever polls
-first dispatches the readiness to ITS OWN `udata` -- waking a task that
-is not the parker and clearing that task's park state.  The real parker
-stays parked on a completion that was already delivered to someone
-else.
+So `wait_fd` registered another fiber's task as the readiness tag and
+then stored into that task's `park_fd`, **displacing its still-live fd
+registration**.  The displaced-registration count matched the leaked
+count one for one, around 700 per run.  On a backend with a userspace fd
+registry (kqueue's `reg_fds`) each orphan leaves one more loop watching
+that open file, so several loops raced to dispatch its readiness to their
+own tag -- waking a task that was not the parker, while the real parker
+stayed blocked on a completion whose result had already been published.
+At the wedge, 107 of 117 live fds were registered in more than one of 12
+kqueues, one of them in all twelve.
 
-The completion is never lost, only misdelivered: every stranded fiber
-was found with its offload's result already published and its pipe
-readable.
+That also explains why the cleanup looked innocent: it was almost never
+*skipped*.  The registration was overwritten out of existence before any
+cleanup could name it.
 
-**Workarounds, in order of preference.**
+**The fix.**  `struct xtc_coro` gained a `proc` back-pointer, published
+once by `__proc_entry` from the fiber itself while its identity is
+unambiguous; `xtc_proc_wait_fd` re-anchors `self` from the running fiber
+when the thread-local disagrees with the running task; and `__proc_free`
+clears that back-pointer, because the coro outlives the proc (the loop
+steps it once more to observe DONE) and leaving it dangling was a
+use-after-free -- caught by ThreadSanitizer, which is why the fix carries
+all three parts and not just the first two.
 
-1. Spawn the offload-heavy fibers NON-migratable (`migratable = 0`).
-   This is a complete workaround -- verified: the reproducer passes
-   every run with migration off and fails reliably with it on -- and it
-   costs only work-stealing for those fibers.
-2. Use a single-loop `xtc_exec` (or `xtc_loop_run`) for the affected
-   work, so there is no second registry to leak into.
-3. Prefer one long-lived fd over a fresh fd per operation where you
-   control the pattern; the collision needs fd-number recycling.
+Alongside it, the dispatcher no longer *guesses* which registration
+fired: `xtc_io_event_t` now carries the `fd` the event is for, populated
+by all nine backends, and `task->park_fd` became atomic so the
+unregister is claimed exactly once instead of a torn test-then-use.
 
-**Why the fix is not a one-liner.** It must satisfy two constraints at
-once: register and unregister have to name the same io, AND the
-unregister has to key off a registration IDENTITY (io plus a generation
-token the backend validates) rather than the bare fd number -- by
-cleanup time that number may belong to a different live registration.
-Three narrower attempts were measured and rejected: registering on the
-fiber's home loop instead (races the owning loop's single-producer
-ring, and measured WORSE), an idempotent delete-by-fd-number in the
-cleanup path (hung Linux 6/6), and recording the owning io alone
-(regressed Linux, 2/12 hangs vs 0/12).
+**Verified.**  The reproducer went from 0/6 passing to 8/8;
+`/m5/exec/Blk2_concurrent_commit` from a 6-hour hang on every run to
+`[ OK ]` 6/6; the multi-holder audit from 107-of-117 to **zero**; and
+FreeBSD `make check` to rc=0 with 571 tests and no failures for the first
+time.  Linux is unaffected (0/12 hangs, `make check` green,
+TSan/ASan/UBSan clean).
+
+**If you are on 1.47.0 or earlier** and cannot upgrade: spawning the
+offload-heavy fibers with `migratable = 0` avoids it completely, at the
+cost of work-stealing for those fibers.  Linux (`epoll`, `io_uring`) was
+never affected -- neither keeps a userspace fd registry.
 
 ---
 ## RESOLVED: runtime-thread signal mask (process-directed signal on a scheduler thread)

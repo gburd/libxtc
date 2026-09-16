@@ -347,6 +347,11 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 
 	out_idx = 0;
 	for (i = 0; i < got && out_idx < max; i++) {
+		/* Default: not about a registered fd.  Set unconditionally so
+		 * no fill path can leak the caller's uninitialised stack --
+		 * the event arrays are plain locals (loop.c, exec.c) and a
+		 * garbage 0 reads as a VALID fd to the dispatcher. */
+		events[out_idx].fd = -1;
 		if (evs[i].udata == io) {
 			int rc = __xtc_io_drain_wakeup(io);
 			if (rc != XTC_OK) return rc;
@@ -378,6 +383,10 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			if (evs[i].flags & EV_ERROR)       f |= XTC_IO_ERR;
 			events[out_idx].tag = evs[i].udata;
 			events[out_idx].flags = f;
+			/* kevent.ident IS the fd for EVFILT_READ/WRITE, so the
+			 * dispatcher can unregister exactly the registration that
+			 * fired instead of guessing from task->park_fd. */
+			events[out_idx].fd = (int)evs[i].ident;
 		}
 		out_idx++;
 	}

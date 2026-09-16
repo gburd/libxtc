@@ -321,6 +321,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 					    ? (int32_t)ares : -(int32_t)aerr;
 					__xtc_aio_done_set(a);   /* release */
 					if (out_idx < max) {
+						events[out_idx].fd = -1;
 						events[out_idx].tag = a->tag;
 						events[out_idx].flags = XTC_IO_AIO;
 						out_idx++;
@@ -350,6 +351,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			    (uintptr_t)fd, POLLIN, io);
 			events[out_idx].tag = NULL;
 			events[out_idx].flags = XTC_IO_WAKEUP;
+			events[out_idx].fd = -1;
 			out_idx++;
 			continue;
 		}
@@ -360,6 +362,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		if (evs[i].portev_events & POLLERR) flags |= XTC_IO_ERR;
 		events[out_idx].tag = tag;
 		events[out_idx].flags = flags;
+		events[out_idx].fd = fd;
 		out_idx++;
 
 		/* Re-arm: port associations are one-shot.  If the fd was

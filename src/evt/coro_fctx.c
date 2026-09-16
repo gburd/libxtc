@@ -286,7 +286,7 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	/* Parked on a timer or fd: stay parked until a waker re-enqueues
 	 * us, or xtc_recv-with-timeout would busy-spin (see coro_uctx.c). */
 	if (c->self != NULL &&
-	    (c->self->park_timer != NULL || c->self->park_fd >= 0)) {
+	    (c->self->park_timer != NULL || atomic_load_explicit(&c->self->park_fd, memory_order_relaxed) >= 0)) {
 		return XTC_TASK_PENDING;
 	}
 	/* Voluntary park requested (xtc_amutex and friends). */

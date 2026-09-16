@@ -53,6 +53,14 @@ printf 'int main(void){return 0;}\n' > "$tmp/dltest.c"
 if "$CC" "$tmp/dltest.c" -ldl -o "$tmp/dltest" >/dev/null 2>&1; then
 	LIBS="$LIBS -ldl"
 fi
+# librt likewise: on glibc timer_create/clock_* are in libc, but on FreeBSD
+# they live in librt and the preemption timer (xtc_preempt_arm) needs it --
+# without this EVERY snippet failed to link there, so the gate reported
+# "10 of 10 broken" on a healthy library.  Probe rather than hardcode, so a
+# platform without librt is unaffected.
+if "$CC" "$tmp/dltest.c" -lrt -o "$tmp/dltest" >/dev/null 2>&1; then
+	LIBS="$LIBS -lrt"
+fi
 
 n=0
 fail=0

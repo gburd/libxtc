@@ -171,6 +171,33 @@ operation that is merely slow:
         readable? has the deadline passed?) before suspecting the
         runtime.
 
+    park='fd' on a loop whose ring is at CQ-OVERFLOW
+        Flagged as a SUSPECT even though the park has a legitimate
+        source, because the ring that owes it a completion cannot
+        deliver one.  `xtc-stranded` now joins each parked fiber's loop
+        against that loop's io_uring state (`unreaped`, and the
+        IORING_SQ_CQ_OVERFLOW flag `xtc-rings` prints as `ovf`), so this
+        correlation is one command instead of two plus a hunch.
+
+        A consumer hit exactly this: two fibers were provably doomed on
+        a ring sitting at `unreaped=512 ovf=1` while this command
+        reported `0 suspect`, because from the runtime's point of view
+        an fd park is healthy.  The facts were both present and simply
+        not joined -- the same class of gap as the v1.47.0 mailbox
+        mislabel.
+
+        Confirm with `xtc-rings` that `ovf` stays 1 across three
+        samples before concluding; a busy ring legitimately shows
+        `unreaped > 0`, and only a persistent `ovf` means completions
+        exist that the CQ could not hold.  Only `fd` parks are flagged:
+        a mailbox or timer park is woken by a sender or the timer heap,
+        so an overflowed CQ does not doom it and flagging those would be
+        the false-positive noise this command works to avoid.
+
+        io_uring only.  The kqueue/epoll backends have no completion
+        queue to overflow, so the check is inert there rather than
+        wrong.
+
 A long-lived idle receiver is indistinguishable from a lost wake by shape
 alone: a fiber blocked in `xtc_recv(..., -1)` parks with no source and no
 latched wake too.  Procs with `local_id == 0` (the per-loop service fiber)

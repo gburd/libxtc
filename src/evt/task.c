@@ -431,11 +431,38 @@ __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev)
 	/* Record the io flags so the parker knows what fired. */
 	atomic_fetch_or_explicit(&t->wake_revents, ev->flags,
 	    memory_order_relaxed);
-	/* Drop our fd registration before waking; the task may register
-	 * a fresh one when it runs. */
-	if (t->park_fd >= 0) {
-		(void)xtc_io_del_fd(loop->io, t->park_fd);
-		t->park_fd = -1;
+	/*
+	 * Drop the fd registration before waking; the task may register a
+	 * fresh one when it runs.
+	 *
+	 * CLAIM it, do not test-then-use.  The parking fiber's own cleanup
+	 * races this dispatch, and a plain "if (park_fd >= 0) del(park_fd)"
+	 * let dispatch clear the field between the test and the use -- so the
+	 * del was issued for a stale value (measured: del(-1)) and the
+	 * registration SURVIVED.  See park_fd in loop_int.h for what an
+	 * orphaned registration costs on a userspace-registry backend.
+	 *
+	 * Prefer ev->fd: it names the registration that actually fired, and
+	 * loop->io is the registry that just delivered it, so neither half is
+	 * a guess.  ev->fd < 0 (a wakeup, an AIO completion whose identity is
+	 * the tag, or a backend that keeps its registry in the kernel) falls
+	 * back to the claimed park_fd on its recorded io.
+	 */
+	if (ev->fd >= 0) {
+		int claimed = atomic_load_explicit(&t->park_fd,
+		    memory_order_acquire);
+		if (claimed == ev->fd)
+			(void)atomic_compare_exchange_strong_explicit(
+			    &t->park_fd, &claimed, -1,
+			    memory_order_acq_rel, memory_order_relaxed);
+		(void)xtc_io_del_fd(loop->io, ev->fd);
+	} else {
+		int claimed = atomic_exchange_explicit(&t->park_fd, -1,
+		    memory_order_acq_rel);
+		if (claimed >= 0)
+			(void)xtc_io_del_fd(
+			    t->park_io != NULL ? t->park_io : loop->io,
+			    claimed);
 	}
 	/*
 	 * xtc_tail SCHED: record the DISPATCH itself, keyed by the task

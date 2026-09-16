@@ -242,6 +242,10 @@ __xtc_exec_worker(void *arg)
 			 */
 			xtc_io_event_t evs[8];
 			int n_out, di;
+			/* .fd = -1 before the poll; see the note in loop.c. */
+			for (di = 0; di < (int)(sizeof evs / sizeof evs[0]);
+			    di++)
+				evs[di].fd = -1;
 			/* Backoff: default 1ms; if enabled, grow toward 32ms
 			 * across an idle streak (idle_streak counts turns that
 			 * produced no work).  Any real work resets the streak. */

@@ -265,9 +265,11 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			(void)__xtc_io_drain_wakeup(io);
 			events[out_idx].tag = NULL;
 			events[out_idx].flags = XTC_IO_WAKEUP;
+			events[out_idx].fd = -1;
 		} else {
 			events[out_idx].tag = t[idx].tag;
 			events[out_idx].flags = flags;
+			events[out_idx].fd = evs[i].fd;
 		}
 		out_idx++;
 	}

@@ -626,6 +626,11 @@ static int
 __xtc_loop_step(xtc_loop_t *loop)
 {
 	xtc_task_t *t;
+	/* Zeroed, then .fd forced to -1 before each poll: xtc_io_event_t.fd
+	 * is consumed by __xtc_loop_dispatch_event, and an uninitialised 0
+	 * reads as a VALID fd (fd 0 is stdin) -- which made dispatch try to
+	 * unregister fd 0.  Backends set it, but the consumer must not depend
+	 * on every fill path in every backend getting it right. */
 	xtc_io_event_t evs[16];
 	int n_out, i, rc;
 	int64_t now_ns, next_deadline_ns, timeout_ns;
@@ -885,6 +890,9 @@ __xtc_loop_step(xtc_loop_t *loop)
 		     xtc_deque_len(&loop->deque) > 0)) {
 			xtc_io_event_t fevs[16];
 			int fn_out = 0, fi;
+			for (fi = 0; fi < (int)(sizeof fevs / sizeof fevs[0]);
+			    fi++)
+				fevs[fi].fd = -1;
 			loop->runs_since_poll = 0;
 			if (xtc_io_poll(loop->io, fevs,
 			    (int)(sizeof fevs / sizeof fevs[0]), 0,
@@ -963,6 +971,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 		timeout_ns = -1;
 	}
 
+	for (i = 0; i < (int)(sizeof evs / sizeof evs[0]); i++)
+		evs[i].fd = -1;
 	rc = xtc_io_poll(loop->io, evs,
 	    (int)(sizeof evs / sizeof evs[0]), timeout_ns, &n_out);
 	if (rc != XTC_OK) return rc;
