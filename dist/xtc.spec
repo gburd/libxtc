@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.48.0
+Version:        1.48.1
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,11 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Wed Sep 16 2026 Greg Burd <greg@burd.me> - 1.48.1-1
+- proc: xtc_proc_sleep had the same wrong-proc bug as xtc_proc_wait_fd; it
+  cancelled and re-armed ANOTHER fiber's park timer, stranding that fiber
+  with no timer at all.  Both now share one __proc_reanchor helper.
+
 * Wed Sep 16 2026 Greg Burd <greg@burd.me> - 1.48.0-1
 - proc: fix a wrong-proc bug in xtc_proc_wait_fd that stranded fibers on
   kqueue backends (FreeBSD/macOS) under migration + blocking offload.

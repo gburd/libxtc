@@ -19,6 +19,7 @@
 #include "xtc_int.h"
 #include "os_thread.h"   /* __os_thread_* for the foreign poker thread */
 #include "os_time.h"     /* __os_sleep_ns */
+#include "os_cpu.h"      /* __os_ncpus: size the exec to the host */
 #include "io_pipe_compat.h"
 #if !defined(_WIN32)
 #include <fcntl.h>       /* O_NONBLOCK for Blk6 pipe read end */
@@ -779,10 +780,31 @@ test_migratable_timer_resume(const MunitParameter p[], void *d)
 	xtc_exec_t *e;
 	xtc_proc_opts_t opts = { 0 };
 	xtc_pid_t pid;
-	int i;
+	int i, nloops;
 	atomic_store(&g_blk5_done, 0);
 	atomic_store(&g_blk5_lock, 0);
-	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
+	/*
+	 * Size the executor to the CPUs actually available, capped at 8.
+	 *
+	 * The 16 fibers here serialize on one lock, and a waiter that loses
+	 * the CAS re-parks on a 50us timer.  With 8 loops pinned onto a
+	 * 1-2 core CI VM (the FreeBSD vmactions runner) those loops
+	 * oversubscribe the host so badly that the handoff chain cannot
+	 * drain inside the runner's budget -- measured on real FreeBSD under
+	 * `cpuset -l 0,1`: hangs 2/4 on the PRE-FIX tree and 1/3 after, i.e.
+	 * a pre-existing starvation flake, not a correctness regression.  It
+	 * only became visible once Blk2 stopped hanging first.
+	 *
+	 * The strand this case targets (a migratable fiber resumed by its OWN
+	 * park timer after migration) needs MIGRATION, not eight loops: two
+	 * loops already give work-stealing, and on a normal 8-core box this
+	 * is unchanged.  Same reasoning as the _WIN32 skip above -- match the
+	 * platform rather than assume the developer's machine.
+	 */
+	nloops = __os_ncpus();
+	if (nloops > 8) nloops = 8;
+	if (nloops < 2) nloops = 2;
+	munit_assert_int(xtc_exec_init(&e, nloops), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(e, 1);
 	for (i = 0; i < BLK5_FIBERS; i++) {
 		opts.name = "blk5";
