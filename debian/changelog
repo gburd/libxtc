@@ -1,3 +1,31 @@
+libxtc (1.47.0-1) unstable; urgency=medium
+
+  * alloc: __os_alloc_set_hook now COPIES the caller's vtable instead of
+    publishing the caller's pointer, and requires all six callbacks.
+    Borrowing made the vtable's lifetime the caller's problem -- an
+    unwritten requirement two in-tree callers got wrong with a stack
+    local, after which the active hook pointed into a dead frame.
+    aligned_free was also unchecked despite being called unconditionally.
+  * proc: xtc_proc_info reports the MAILBOX park.  It always reported
+    XTC_PARK_NONE, because the test keyed off a one-shot the coroutine
+    layer consumes before the task reaches PARKED -- so a fiber healthily
+    blocked in xtc_recv was indistinguishable from one whose wake had been
+    dropped.  Same fix in the gdb and lldb helpers.
+  * proc: new xtc_exit_pid_deadline() reports whether an async kill was
+    DELIVERED, DEFERRED (the target is wedged inside xtc_uncancelable) or
+    timed out, and xtc_proc_info exposes mask_depth / mask_deferred so a
+    supervisor can ask "is this fiber killable right now?" without
+    sending a kill.  xtc_dump marks the wedged shape.
+  * doc: xtc_send's wake guarantee is now stated explicitly (a successful
+    send wakes a parked receiver, from any thread), backed by a new POSIX
+    test.  xtc_proc(3) documents the stance on async-killing a fiber that
+    mutates shared state.
+  * ci: the valgrind job no longer hangs to the 6h ceiling, and the
+    freebsd job is bounded and non-gating while a documented kqueue
+    migration bug is outstanding (see docs/KNOWN_ISSUES.md).
+
+ -- Greg Burd <greg@burd.me>  Tue, 16 Sep 2026 00:00:00 -0400
+
 libxtc (1.46.0-1) unstable; urgency=medium
 
   * cfg: add pointer-stable hot-path read handles.  xtc_cfg_ref()
