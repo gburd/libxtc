@@ -6,6 +6,62 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## OPEN: fiber strand under migration + blocking offload on kqueue (FreeBSD/macOS)
+
+**Status:** OPEN.  Root cause diagnosed and reproduced on FreeBSD 15.1
+hardware; the fix is a design change and is deliberately not being
+rushed.  The `freebsd` CI job is bounded and non-gating until it lands
+(see the comment on that job in `.github/workflows/ci.yml`).
+
+**Who is affected.** A consumer running MANY migratable fibers
+(`xtc_proc_opts_t.migratable = 1`) on a multi-loop `xtc_exec`, where
+those fibers repeatedly call `xtc_blocking_run()` (or anything that
+parks via `xtc_proc_wait_fd` on a short-lived fd).  On a
+`kqueue` backend -- FreeBSD and macOS -- a small fraction of fibers can
+strand permanently.  Linux (`epoll`, `io_uring`) is NOT affected: those
+backends have no userspace fd registry, so the mechanism below cannot
+occur.
+
+**The mechanism.** `xtc_proc_wait_fd` registers the park fd on the loop
+the fiber is currently RUNNING on.  kqueue's registry (`reg_fds`) is
+per-io, but fd NUMBERS are per-process, and `xtc_blocking_run` opens a
+fresh pipe per call so numbers recycle quickly.  A migratable fiber that
+parks, migrates, and parks again leaves the earlier registration live
+and adds another on a different loop.  Measured on a 12-loop executor:
+one fd number ended up registered in ALL TWELVE kqueues at once.  Every
+one of those loops then watches the same open file, and whichever polls
+first dispatches the readiness to ITS OWN `udata` -- waking a task that
+is not the parker and clearing that task's park state.  The real parker
+stays parked on a completion that was already delivered to someone
+else.
+
+The completion is never lost, only misdelivered: every stranded fiber
+was found with its offload's result already published and its pipe
+readable.
+
+**Workarounds, in order of preference.**
+
+1. Spawn the offload-heavy fibers NON-migratable (`migratable = 0`).
+   This is a complete workaround -- verified: the reproducer passes
+   every run with migration off and fails reliably with it on -- and it
+   costs only work-stealing for those fibers.
+2. Use a single-loop `xtc_exec` (or `xtc_loop_run`) for the affected
+   work, so there is no second registry to leak into.
+3. Prefer one long-lived fd over a fresh fd per operation where you
+   control the pattern; the collision needs fd-number recycling.
+
+**Why the fix is not a one-liner.** It must satisfy two constraints at
+once: register and unregister have to name the same io, AND the
+unregister has to key off a registration IDENTITY (io plus a generation
+token the backend validates) rather than the bare fd number -- by
+cleanup time that number may belong to a different live registration.
+Three narrower attempts were measured and rejected: registering on the
+fiber's home loop instead (races the owning loop's single-producer
+ring, and measured WORSE), an idempotent delete-by-fd-number in the
+cleanup path (hung Linux 6/6), and recording the owning io alone
+(regressed Linux, 2/12 hangs vs 0/12).
+
+---
 ## RESOLVED: runtime-thread signal mask (process-directed signal on a scheduler thread)
 
 **Status:** RESOLVED.  The carrier reported a process-directed SIGCHLD
