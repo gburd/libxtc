@@ -1061,6 +1061,14 @@ __proc_entry(void *arg)
 	 */
 	p->task = __xtc_current_task();
 	p->coro = __xtc_current_coro;
+	/*
+	 * Publish the reverse link too, from the fiber, while it is
+	 * unambiguously ours: a primitive that must not act on the wrong
+	 * proc recovers this proc from the RUNNING fiber rather than from
+	 * __current_proc (see coro->proc in coro_int.h).
+	 */
+	if (p->coro != NULL)
+		p->coro->proc = p;
 
 	/* L1: apply the spawn-time scheduling class on THIS loop's thread
 	 * (the class array is per-loop; the handle was created on this same
@@ -2313,6 +2321,42 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	if (out_revents == NULL || fd < 0 || interest == 0) return XTC_E_INVAL;
 	if (self == NULL) return XTC_E_INVAL;
 
+	/*
+	 * Re-anchor onto the fiber that is ACTUALLY RUNNING.
+	 *
+	 * __current_proc is a thread-local restored by
+	 * __xtc_fiber_ctx_restore from whatever this fiber saved on its last
+	 * yield.  Under the multi-loop executor that value can name a
+	 * DIFFERENT proc than the fiber now executing, and then everything
+	 * below acts on the wrong task: we would register ANOTHER fiber's
+	 * task as the readiness tag, and the park_fd store below would
+	 * DISPLACE that fiber's still-live registration -- orphaning it in
+	 * this loop's registry.  On a backend with a userspace fd registry
+	 * (kqueue) each orphan leaves one more loop watching that open file,
+	 * so several loops race to dispatch its readiness to their own tag,
+	 * waking a task that is not the parker.  Measured on FreeBSD: the
+	 * displaced-registration count equalled the leaked-registration
+	 * count one for one (~700 per run), leaving 107 of 117 live fds
+	 * registered in more than one of 12 kqueues, and the real parker
+	 * stranded on a completion whose result was already published.
+	 *
+	 * __xtc_current_task() is not carried across a yield: the loop
+	 * rebinds it on every step, on the running thread, from the task it
+	 * is about to run.  So when the two disagree, the task is right and
+	 * the thread-local is stale.  Recover the proc from the running
+	 * fiber and re-anchor __current_proc, so this call AND the ctx_save
+	 * on the yield below both see the right proc.
+	 */
+	{
+		xtc_task_t *rt = __xtc_current_task();
+		if (rt != NULL && rt != self->task &&
+		    __xtc_current_coro != NULL &&
+		    __xtc_current_coro->proc != NULL) {
+			self = (struct xtc_proc *)__xtc_current_coro->proc;
+			__current_proc = self;
+		}
+	}
+
 	*out_revents = 0;
 
 	/* Check kill-pending up front (same convention as xtc_recv). */
@@ -2350,7 +2394,10 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	if (xtc_io_reg_fd(wl->io, fd, interest,
 	    self->task) != XTC_OK)
 		return XTC_E_INTERNAL;
-	self->task->park_fd = fd;
+	/* park_io first; the release-store publishes it. */
+	self->task->park_io = wl->io;
+	atomic_store_explicit(&self->task->park_fd, fd,
+	    memory_order_release);
 	had_fd = 1;
 
 	if (timeout_ns >= 0) {
@@ -2363,7 +2410,9 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		    __os_clock_mono(&now_ns) != XTC_OK) {
 			if (t) __os_free(t);
 			(void)xtc_io_del_fd(wl->io, fd);
-			self->task->park_fd = -1;
+			atomic_store_explicit(&self->task->park_fd, -1,
+			    memory_order_relaxed);
+			self->task->park_io = NULL;
 			return XTC_E_INTERNAL;
 		}
 		t->deadline_ns = now_ns + timeout_ns;
@@ -2377,7 +2426,9 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		if (__xtc_timer_heap_push(wl, t) != XTC_OK) {
 			__os_free(t);
 			(void)xtc_io_del_fd(wl->io, fd);
-			self->task->park_fd = -1;
+			atomic_store_explicit(&self->task->park_fd, -1,
+			    memory_order_relaxed);
+			self->task->park_io = NULL;
 			return XTC_E_INTERNAL;
 		}
 		t->all_next = wl->all_timers;
@@ -2464,7 +2515,15 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	 * native-path concurrent-commit collapse, TSan-caught 2026-08-30).
 	 * When we have migrated off wl, defer the unregister to wl's owning
 	 * thread; when still on wl (the common case), do it directly. */
-	if (self->task->park_fd >= 0) {
+	/* CLAIM the registration -- a peer loop's dispatch races this cleanup,
+	 * and a test-then-use read leaked it when dispatch cleared the field
+	 * in between (see park_fd in loop_int.h). */
+	{
+	int claimed_fd = atomic_exchange_explicit(&self->task->park_fd, -1,
+	    memory_order_acq_rel);
+	xtc_io_t *claimed_io = self->task->park_io;
+	self->task->park_io = NULL;
+	if (claimed_fd >= 0) {
 		extern int __xtc_io_defer_del_fd(xtc_io_t *, int);
 		(void)had_fd;   /* documents intent: an fd was registered */
 		/*
@@ -2492,8 +2551,9 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		 *
 		 * For a backend whose registry is kernel-synchronized (epoll)
 		 * the defer is a safe passthrough. */
-		(void)__xtc_io_defer_del_fd(wl->io, self->task->park_fd);
-		self->task->park_fd = -1;
+		(void)__xtc_io_defer_del_fd(
+		    claimed_io != NULL ? claimed_io : wl->io, claimed_fd);
+	}
 	}
 	if (had_timer && self->task->park_timer != NULL) {
 		(void)xtc_timer_cancel(self->task->park_timer);
@@ -3743,6 +3803,17 @@ __proc_free(struct xtc_proc *p)
 	p->save_head = p->save_tail = NULL;
 
 	(void)pthread_mutex_destroy(&p->mbox_lock);
+	/*
+	 * Sever the coro's back-pointer before the proc goes away.  The coro
+	 * outlives the proc (the loop owns it and steps it once more to
+	 * observe the DONE verdict), so leaving coro->proc dangling here is a
+	 * use-after-free the moment anything reads it -- TSan caught exactly
+	 * that as a heap-use-after-free in __xtc_coro_step.  Clearing it is
+	 * safe: the only reader (xtc_proc_wait_fd's re-anchor) treats NULL as
+	 * "no better identity available" and keeps its existing self.
+	 */
+	if (p->coro != NULL && p->coro->proc == p)
+		p->coro->proc = NULL;
 	__os_free(p);
 }
 
@@ -3775,7 +3846,8 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 		    memory_order_relaxed);   /* introspection snapshot */
 		info->run_state = st;
 		if (st == XTC_TS_PARKED) {
-			if (p->task->park_fd >= 0)
+			if (atomic_load_explicit(&p->task->park_fd,
+			    memory_order_relaxed) >= 0)
 				info->park_reason = XTC_PARK_FD;
 			else if (p->task->park_timer != NULL)
 				info->park_reason = XTC_PARK_TIMER;

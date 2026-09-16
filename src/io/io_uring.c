@@ -673,6 +673,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			 * We are the REAPING thread; the fiber is another. */
 			__xtc_aio_done_set(a);
 			if (got < max) {
+				events[got].fd = -1;
 				events[got].tag = a->tag;
 				events[got].flags = XTC_IO_AIO;
 				got++;
@@ -742,6 +743,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 					if (got < max) {
 						events[got].tag = NULL;
 						events[got].flags = XTC_IO_WAKEUP;
+						events[got].fd = -1;
 						got++;
 					}
 					wakeup_emitted = 1;
@@ -751,11 +753,13 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 					if (got < max) {
 						events[got].tag = uf->tag;
 						events[got].flags = XTC_IO_ERR;
+						events[got].fd = uf->fd;
 						got++;
 					}
 				} else {
 					if (got < max) {
 						events[got].tag = uf->tag;
+						events[got].fd = uf->fd;
 						events[got].flags =
 						    __pollres_to_flags((uint32_t)cqe->res);
 						got++;

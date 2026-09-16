@@ -226,6 +226,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		if (out_idx < max) {
 			events[out_idx].tag = NULL;
 			events[out_idx].flags = XTC_IO_WAKEUP;
+			events[out_idx].fd = -1;
 			out_idx++;
 		}
 		io->pfds[WAKEUP_SLOT].revents = 0;
@@ -236,6 +237,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		if (io->pfds[i].revents == 0) continue;
 		events[out_idx].tag   = io->tags[i];
 		events[out_idx].flags = __revents_to_flags(io->pfds[i].revents);
+		events[out_idx].fd    = io->pfds[i].fd;
 		io->pfds[i].revents = 0;
 		out_idx++;
 	}

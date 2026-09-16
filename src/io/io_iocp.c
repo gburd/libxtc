@@ -1127,6 +1127,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				(void)__xtc_io_drain_wakeup(io);
 				events[out_idx].tag = NULL;
 				events[out_idx].flags = XTC_IO_WAKEUP;
+				events[out_idx].fd = -1;
 				out_idx++;
 				wakeup_emitted = 1;
 			}
@@ -1148,6 +1149,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			if (out_idx < max) {
 				events[out_idx].tag = a->tag;
 				events[out_idx].flags = XTC_IO_AIO;
+				events[out_idx].fd = -1;
 				out_idx++;
 			}
 			__os_free(ov);                   /* kernel released it */
@@ -1200,6 +1202,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			if (flags != 0) {
 				events[out_idx].tag = reg->tag;
 				events[out_idx].flags = flags;
+				events[out_idx].fd = reg->fd;
 				out_idx++;
 			}
 		}

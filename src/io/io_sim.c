@@ -331,6 +331,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		s->wakeup = 0;
 		events[idx].tag = NULL;
 		events[idx].flags = XTC_IO_WAKEUP;
+		events[idx].fd = -1;
 		idx++;
 	}
 
@@ -352,6 +353,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			__xtc_aio_done_set(e->aio);
 			events[idx].tag = e->aio->tag;
 			events[idx].flags = XTC_IO_AIO;
+			events[idx].fd = -1;
 			idx++;
 		} else if (e->cb != NULL) {
 			/* A deferred cross-loop message delivery (net latency):
@@ -368,6 +370,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		} else {
 			events[idx].tag = e->tag;
 			events[idx].flags = e->revents;
+			events[idx].fd = e->fd;
 			idx++;
 		}
 		*pp = e->next;

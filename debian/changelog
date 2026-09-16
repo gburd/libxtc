@@ -1,3 +1,36 @@
+libxtc (1.48.0-1) unstable; urgency=medium
+
+  * proc: fix a wrong-proc bug that stranded fibers on kqueue backends.
+    xtc_proc_wait_fd took its proc from __current_proc, a thread-local the
+    coroutine layer restores across every yield -- and under the multi-loop
+    executor the restored value named a DIFFERENT proc than the running
+    fiber 99.2% of the time (measured).  It therefore registered another
+    fiber's task as the readiness tag and displaced that fiber's live fd
+    registration, so several loops ended up watching the same open file and
+    raced to dispatch its readiness to their own tag; the real parker stayed
+    blocked on a completion whose result was already published.  struct
+    xtc_coro now carries a proc back-pointer published by __proc_entry,
+    wait_fd re-anchors from the running fiber, and __proc_free clears the
+    link (the coro outlives the proc, so leaving it dangling was a
+    use-after-free).  Fixes the /m5/exec/Blk2_concurrent_commit hang that
+    had burned the FreeBSD CI job's 6h ceiling for weeks; that job gates
+    again.  See docs/KNOWN_ISSUES.md.
+  * io: xtc_io_event_t carries the fd an event is for, populated by all nine
+    backends, so the dispatcher unregisters the registration that actually
+    fired instead of guessing from task->park_fd and the polling loop.
+    task->park_fd is now atomic and every unregister CLAIMS it, replacing a
+    torn test-then-use that a peer loop's dispatch could race.
+  * tools: xtc-stranded joins each parked fiber's loop against that loop's
+    io_uring state and flags an fd park on a CQ-overflowed ring -- a park
+    with a legitimate source is still doomed if the ring that owes it a
+    completion cannot deliver one.  Reported by a consumer whose two doomed
+    fibers showed as "0 suspect".
+  * test: the doc-snippet gate probes for -lrt like it already probed for
+    -ldl; without it every snippet failed to LINK on FreeBSD and the gate
+    reported "10 of 10 broken" against a healthy library.
+
+ -- Greg Burd <greg@burd.me>  Wed, 16 Sep 2026 00:00:00 -0400
+
 libxtc (1.47.0-1) unstable; urgency=medium
 
   * alloc: __os_alloc_set_hook now COPIES the caller's vtable instead of

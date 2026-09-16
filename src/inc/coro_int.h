@@ -50,6 +50,22 @@ struct xtc_coro {
 	int          done;          /* 1 once fn has returned */
 
 	xtc_task_t  *self;          /* back-pointer to our task */
+	/*
+	 * The proc layer's handle for THIS fiber, published once by
+	 * __proc_entry from the fiber itself.
+	 *
+	 * It exists because __current_proc is a thread-local that
+	 * __xtc_fiber_ctx_save/restore carries across a yield, and under the
+	 * multi-loop executor the restored value can name a DIFFERENT proc
+	 * than the fiber now running -- measured on FreeBSD at 48909 wrong
+	 * against 511 right, confirmed independently by locating a stack
+	 * address (no thread-local involved) inside the registered coro
+	 * stack ranges.  A primitive that registers per-task state must not
+	 * act on the wrong proc, so it reads its identity from the running
+	 * fiber, and this is that link.  void * to keep the proc layer's
+	 * struct out of this header.
+	 */
+	void        *proc;          /* struct xtc_proc * */
 	xtc_task_t  *waiter;        /* task awaiting this one (or NULL) */
 
 	/*

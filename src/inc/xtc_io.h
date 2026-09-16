@@ -39,6 +39,29 @@ typedef struct xtc_io xtc_io_t;
 typedef struct xtc_io_event {
 	void     *tag;        /* the value passed at registration; NULL on wakeups */
 	uint32_t  flags;      /* XTC_IO_* bitset */
+	/*
+	 * The fd this readiness is FOR, or -1 when the event is not about a
+	 * registered fd (a wakeup, or an AIO completion whose identity is
+	 * the tag).
+	 *
+	 * Every backend already knows this at the point it fills the event
+	 * (kqueue's kevent.ident, epoll's own bookkeeping, the uring fd
+	 * record, ...) and it used to be DISCARDED here -- which forced the
+	 * dispatcher to GUESS, by unregistering `task->park_fd` from the
+	 * loop that happened to be polling.  Both halves of that guess are
+	 * wrong for a migratable fiber: it registered on the loop it was
+	 * RUNNING on, which after a work-steal is not the dispatching loop,
+	 * and by then park_fd may already name a different registration.
+	 *
+	 * The consequence was not cosmetic.  A stale entry left in a peer
+	 * loop's registry means SEVERAL loops watch the same open file;
+	 * whichever polls first dispatches the readiness to ITS OWN tag,
+	 * waking a task that is not the parker.  Measured on FreeBSD: one fd
+	 * number registered in ALL TWELVE kqueues of a 12-loop executor.
+	 * Carrying the fd lets dispatch unregister exactly the registration
+	 * that fired, so no guess is needed.
+	 */
+	int       fd;
 } xtc_io_event_t;
 
 /*

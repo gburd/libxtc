@@ -165,14 +165,21 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 
 	out_idx = 0;
 	for (i = 0; i < got && out_idx < max; i++) {
+		events[out_idx].fd = -1;   /* see io_kqueue.c */
 		if (evs[i].data.ptr == io) {
 			int rc = __xtc_io_drain_wakeup(io);
 			if (rc != XTC_OK) return rc;
 			events[out_idx].tag = NULL;
 			events[out_idx].flags = XTC_IO_WAKEUP;
+			events[out_idx].fd = -1;
 		} else {
 			events[out_idx].tag = evs[i].data.ptr;
 			events[out_idx].flags = __epoll_to_flags(evs[i].events);
+			/* epoll_data holds the tag, not the fd; the kernel is the
+			 * registry here so a del cannot be misdirected -- but carry
+			 * the fd when we know it, and -1 (meaning "use park_fd") when
+			 * we do not. */
+			events[out_idx].fd = -1;
 		}
 		out_idx++;
 	}

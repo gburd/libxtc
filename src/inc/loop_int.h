@@ -71,7 +71,43 @@ struct xtc_task {
 	/* Park bookkeeping.  At most one of these is active at a time
 	 * while the task is in PARKED state. */
 	xtc_timer_t *park_timer;
-	int          park_fd;       /* -1 when not parked on fd */
+	/*
+	 * The fd this task is parked on, or -1.  ATOMIC, and every
+	 * unregister CLAIMS it with an exchange rather than testing then
+	 * using it.
+	 *
+	 * Two threads race on this field: the parking fiber (which registers
+	 * it, then unregisters in its post-park cleanup) and, for a
+	 * MIGRATABLE fiber, a PEER loop's __xtc_loop_dispatch_event, which
+	 * clears it when the readiness arrives.  As a plain int the parker's
+	 *
+	 *     if (park_fd >= 0) ... del(park_fd)
+	 *
+	 * was a torn test-then-use: dispatch cleared the field in between, so
+	 * the del was issued for -1 and the kqueue registration SURVIVED.
+	 * Measured on FreeBSD: 596 leaked registrations in one run, all from
+	 * this site, leaving 105 of 115 live fds registered in more than one
+	 * kqueue at once (one fd in all TWELVE of a 12-loop executor).
+	 * Several loops then watch the same open file and whichever polls
+	 * first dispatches the readiness to ITS OWN tag, waking a task that
+	 * is not the parker -- so the parker stays blocked on a completion
+	 * whose result was already published.  That was the
+	 * /m5/exec/Blk2_concurrent_commit hang.
+	 *
+	 * Claiming it with atomic_exchange makes the unregister exactly-once:
+	 * whichever side takes the non-negative value owns the del, and the
+	 * loser sees -1 and does nothing.
+	 */
+	_Atomic int  park_fd;
+	/*
+	 * The io that holds park_fd's registration.  Needed because the two
+	 * park entry points register on DIFFERENT ios -- xtc_task_park_on_fd
+	 * on self->loop->io (the home loop), xtc_proc_wait_fd on the loop the
+	 * fiber is RUNNING on -- so the unregister cannot infer the registry.
+	 * Written before park_fd is published and read after it is claimed,
+	 * so the claim orders it.
+	 */
+	struct xtc_io *park_io;
 	/* Voluntary park: when set by a primitive (e.g. xtc_amutex) just
 	 * before yielding, the coro step returns PENDING instead of
 	 * RESCHED, so the task sleeps until a waker re-enqueues it rather

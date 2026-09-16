@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.47.0
+Version:        1.48.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,14 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Wed Sep 16 2026 Greg Burd <greg@burd.me> - 1.48.0-1
+- proc: fix a wrong-proc bug in xtc_proc_wait_fd that stranded fibers on
+  kqueue backends (FreeBSD/macOS) under migration + blocking offload.
+- io: xtc_io_event_t carries the fd an event is for; task->park_fd is
+  atomic and its unregister is claimed exactly once.
+- tools: xtc-stranded flags an fd park on a CQ-overflowed ring.
+- test: the doc-snippet gate links -lrt when present (FreeBSD).
+
 * Tue Sep 16 2026 Greg Burd <greg@burd.me> - 1.47.0-1
 - alloc: __os_alloc_set_hook COPIES the vtable and requires all six
   callbacks (aligned_free was unchecked); fixes a stack-use-after-return
