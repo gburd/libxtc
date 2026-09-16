@@ -1,3 +1,27 @@
+libxtc (1.48.1-1) unstable; urgency=medium
+
+  * proc: xtc_proc_sleep had the SAME wrong-proc bug 1.48.0 fixed in
+    xtc_proc_wait_fd, and the consequence was worse.  Taking `self` from the
+    stale __current_proc, it cancelled and re-armed park_timer on ANOTHER
+    fiber's task -- destroying that fiber's live timer and leaving it parked
+    with no wake source at all.  The victim is typically the fiber holding a
+    lock across its sleep, so every waiter queued behind it wedges too.
+    Rarer than the wait_fd case (1 in ~60 calls rather than 99%), but one is
+    enough to strand a lock holder permanently.
+    Both call sites now share one __proc_reanchor() helper, which recovers
+    the proc from the RUNNING fiber (coro->proc) whenever the thread-local
+    disagrees with the task the loop is stepping.
+    Found by /m5/exec/Blk5_migratable_timer_resume, which the 1.48.0 fix
+    exposed: it had never run in CI before because Blk2_concurrent_commit
+    hung first.  Measured on real FreeBSD under `cpuset -l 0,1` (the CI VM's
+    CPU count): 6/20 hangs before, 0/20 after, with the full m5 exec suite
+    5/5 clean at that CPU count.
+  * test: size the Blk5 executor to __os_ncpus() (capped at 8) instead of
+    hardcoding 8 loops.  The strand it targets needs migration, not eight
+    loops, and 8 loops pinned to a 1-2 core CI VM oversubscribe the host.
+
+ -- Greg Burd <greg@burd.me>  Wed, 16 Sep 2026 12:00:00 -0400
+
 libxtc (1.48.0-1) unstable; urgency=medium
 
   * proc: fix a wrong-proc bug that stranded fibers on kqueue backends.

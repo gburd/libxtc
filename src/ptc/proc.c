@@ -1617,6 +1617,46 @@ xtc_trace_causal_dump(xtc_pid_t pid, xtc_causal_fn cb, void *user)
 	return (int)n;
 }
 
+/*
+ * Recover the proc of the fiber that is ACTUALLY RUNNING.
+ *
+ * __current_proc is a thread-local that __xtc_proc_ctx_save/restore
+ * carries across every yield, and under the multi-loop executor the
+ * restored value can name a DIFFERENT proc than the fiber now executing.
+ * Any primitive that then registers or cancels PER-TASK state acts on the
+ * wrong task: xtc_proc_wait_fd would register another fiber's task as the
+ * readiness tag and displace its live fd registration (measured 99.2%
+ * wrong there), and xtc_proc_sleep would CANCEL another fiber's live park
+ * timer and arm its own in that fiber's slot -- leaving the victim parked
+ * with no timer at all.  The victim is typically the fiber holding a lock
+ * across its sleep, so everything queued behind it wedges too.
+ *
+ * __xtc_current_task() is NOT carried across a yield: the loop rebinds it
+ * on every step, on the running thread, from the task it is about to run.
+ * So when the two disagree, the task is right and the thread-local is
+ * stale.  coro->proc is published once by __proc_entry from the fiber
+ * itself (see coro_int.h), and is NULL once the proc is freed, in which
+ * case there is no better identity available and the caller keeps its own.
+ *
+ * Re-anchors __current_proc too, so the ctx_save on the following yield
+ * stores the corrected value rather than re-propagating the stale one.
+ */
+static struct xtc_proc *
+__proc_reanchor(struct xtc_proc *self)
+{
+	xtc_task_t *rt;
+	if (self == NULL)
+		return NULL;
+	rt = __xtc_current_task();
+	if (rt != NULL && rt != self->task &&
+	    __xtc_current_coro != NULL &&
+	    __xtc_current_coro->proc != NULL) {
+		self = (struct xtc_proc *)__xtc_current_coro->proc;
+		__current_proc = self;
+	}
+	return self;
+}
+
 /* PUBLIC: int xtc_proc_sleep __P((int64_t)); */
 int
 xtc_proc_sleep(int64_t ns)
@@ -1624,6 +1664,9 @@ xtc_proc_sleep(int64_t ns)
 	struct xtc_proc *self = __current_proc;
 	int64_t deadline = 0, now = 0;
 
+	/* Act on the RUNNING fiber: cancelling and re-arming park_timer on a
+	 * stale proc destroys another fiber's timer (see __proc_reanchor). */
+	self = __proc_reanchor(self);
 	if (self == NULL)
 		return XTC_E_INVAL;        /* not on a proc */
 	if (ns <= 0)
@@ -2347,15 +2390,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	 * fiber and re-anchor __current_proc, so this call AND the ctx_save
 	 * on the yield below both see the right proc.
 	 */
-	{
-		xtc_task_t *rt = __xtc_current_task();
-		if (rt != NULL && rt != self->task &&
-		    __xtc_current_coro != NULL &&
-		    __xtc_current_coro->proc != NULL) {
-			self = (struct xtc_proc *)__xtc_current_coro->proc;
-			__current_proc = self;
-		}
-	}
+	self = __proc_reanchor(self);
 
 	*out_revents = 0;
 
