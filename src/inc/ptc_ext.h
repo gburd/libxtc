@@ -33,6 +33,8 @@ int xtc_exit_self __P((int));
 int xtc_fault_guard_install __P((void));
 int xtc_inject_check __P((const char *));
 int xtc_link __P((xtc_pid_t));
+int xtc_mask_enter __P((void));
+int xtc_mask_leave __P((void));
 int xtc_monitor __P((xtc_pid_t, uint64_t *));
 int xtc_preempt_arm __P((int64_t));
 int xtc_preempt_disarm __P((void));

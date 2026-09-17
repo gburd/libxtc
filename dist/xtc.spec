@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.48.1
+Version:        1.49.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,14 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Tue Sep 16 2026 Greg Burd <greg@burd.me> - 1.49.0-1
+- proc: xtc_mask_enter/xtc_mask_leave -- paired (callback-free) form of the
+  cancellation mask, for macro-pair bridges like START/END_CRIT_SECTION.
+- cfg: per-session scoping with a transactional override stack (SET LOCAL /
+  rollback / nesting) and source precedence, so xtc_cfg can back GUCs.
+- mctx: arena groups (xtc_arena_group_*) -- discard a cohort's shared state
+  wholesale on kill, two-phase (all members gone, THEN reset the arena).
+
 * Wed Sep 16 2026 Greg Burd <greg@burd.me> - 1.48.1-1
 - proc: xtc_proc_sleep had the same wrong-proc bug as xtc_proc_wait_fd; it
   cancelled and re-armed ANOTHER fiber's park timer, stranding that fiber

@@ -744,8 +744,116 @@ test_ref(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- per-session scoping + the transactional override stack ---- */
+static MunitResult
+test_session_scoping(const MunitParameter p[], void *d)
+{
+	xtc_cfg_spec_t spec = { 0 };
+	xtc_cfg_session_t *a = NULL, *b = NULL;
+	xtc_cfg_source_t src;
+	int v;
+	const char *sv;
+	(void)p; (void)d;
+
+	/* A global int knob and a global string knob. */
+	spec.name = "s.work_mem"; spec.kind = XTC_CFG_INT;
+	spec.dflt.d_int = 4096; spec.min_int = 64; spec.max_int = 1000000;
+	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
+	memset(&spec, 0, sizeof spec);
+	spec.name = "s.tz"; spec.kind = XTC_CFG_STRING;
+	spec.dflt.d_string = "UTC";
+	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
+
+	munit_assert_int(xtc_cfg_session_create(&a), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_session_create(&b), ==, XTC_OK);
+
+	/* (1) Per-session values with fallback.  Unbound -> global. */
+	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 4096);
+
+	/* Bind A, SET; the bare getter now sees A's value; B and the global
+	 * value are untouched. */
+	munit_assert_ptr_null(xtc_cfg_session_bind(a));
+	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 65536,
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 65536);
+
+	/* Switch to B: no override -> falls back to the global default. */
+	(void)xtc_cfg_session_bind(b);
+	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 4096);
+
+	/* Unbind: global again, and the global value was never written. */
+	(void)xtc_cfg_session_bind(NULL);
+	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 4096);
+
+	/* (2) Bounds/validation apply to session sets too. */
+	(void)xtc_cfg_session_bind(a);
+	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 1,
+	    XTC_CFG_SRC_SESSION), ==, XTC_E_INVAL);   /* below min */
+
+	/* (3) Source precedence: a LOWER-ranked source cannot clobber a
+	 * higher one at the same level; an equal-or-higher one can. */
+	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 8192,
+	    XTC_CFG_SRC_FILE), ==, XTC_OK);       /* FILE < SESSION: refused */
+	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 65536);           /* SESSION value still wins */
+	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 131072,
+	    XTC_CFG_SRC_OVERRIDE), ==, XTC_OK);   /* OVERRIDE > SESSION: wins */
+	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 131072);
+	munit_assert_int(xtc_cfg_session_source(NULL, "s.work_mem", &src),
+	    ==, XTC_OK);
+	munit_assert_int(src, ==, XTC_CFG_SRC_OVERRIDE);
+
+	/* (4) Transactional stack: a value set inside a pushed level that
+	 * ABORTs reverts; one that COMMITs survives. */
+	munit_assert_int(xtc_cfg_session_push(NULL), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 262144,
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 262144);          /* visible within the level */
+	munit_assert_int(xtc_cfg_session_abort(NULL), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 131072);          /* reverted to pre-push */
+
+	munit_assert_int(xtc_cfg_session_push(NULL), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 524288,
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_session_commit(NULL), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 524288);          /* survived the commit */
+
+	/* commit/abort of the base level is rejected (always one level). */
+	munit_assert_int(xtc_cfg_session_commit(NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_session_abort(NULL),  ==, XTC_E_INVAL);
+
+	/* (5) RESET drops the current-level override -> global shows through. */
+	munit_assert_int(xtc_cfg_session_reset(NULL, "s.work_mem"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 4096);            /* back to global default */
+
+	/* (6) String overrides are per-session and freed on destroy. */
+	munit_assert_int(xtc_cfg_ssn_set_string(NULL, "s.tz", "America/New_York",
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_get_string("s.tz", &sv), ==, XTC_OK);
+	munit_assert_string_equal(sv, "America/New_York");
+	(void)xtc_cfg_session_bind(NULL);
+	munit_assert_int(xtc_cfg_get_string("s.tz", &sv), ==, XTC_OK);
+	munit_assert_string_equal(sv, "UTC");     /* global unaffected */
+
+	xtc_cfg_session_destroy(a);
+	xtc_cfg_session_destroy(b);
+	munit_assert_int(xtc_cfg_unregister("s.work_mem"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("s.tz"), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/register_basic",   test_register_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/session_scoping",  test_session_scoping,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/int_bounds",       test_int_bounds,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/double",           test_double,                NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/bool",             test_bool,                  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

@@ -18,6 +18,9 @@
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_mctx.h"
+#include "xtc_proc.h"     /* arena groups: xtc_self / xtc_exit_pid_deadline */
+#include "xtc_inspect.h" /* xtc_proc_info: is a member still alive? */
+#include <stdio.h>       /* snprintf for the arena name */
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -301,4 +304,172 @@ xtc_mctx_total_chunks(const xtc_mctx_t *m)
 	v = m->n_chunks;
 	if (m->has_lock) (void)__xtc_mtx_unlock((pthread_mutex_t *)&m->lock);
 	return v;
+}
+
+/* ================= arena groups: shared-state discard on kill ==========
+ *
+ * A recovery boundary smaller than the whole process: a set of member
+ * fibers plus one arena (mctx).  discard() kills every member, waits
+ * until ALL are confirmed gone, then resets the arena -- so the shared
+ * state a killed fiber was mid-mutating is thrown away with nothing
+ * alive to still be touching it.  See xtc_mctx.h.
+ */
+
+struct xtc_arena_group {
+	xtc_mctx_t     *arena;      /* the discardable arena */
+	pthread_mutex_t lock;       /* guards the member list (multi-carrier) */
+	xtc_pid_t      *members;    /* dynamic array */
+	int             n;
+	int             cap;
+};
+
+int
+xtc_arena_group_create(const char *name, xtc_arena_group_t **out)
+{
+	xtc_arena_group_t *g;
+	char nbuf[64];
+	int rc;
+	if (out == NULL) return XTC_E_INVAL;
+	if ((rc = __os_calloc(1, sizeof *g, (void **)&g)) != XTC_OK)
+		return rc;
+	/* THREAD_SAFE: members allocate into the arena from different
+	 * carrier threads, so it must be internally locked. */
+	snprintf(nbuf, sizeof nbuf, "%s", name != NULL ? name : "arena-group");
+	if ((rc = xtc_mctx_create(NULL, nbuf, XTC_MCTX_THREAD_SAFE,
+	    &g->arena)) != XTC_OK) {
+		__os_free(g);
+		return rc;
+	}
+	if (pthread_mutex_init(&g->lock, NULL) != 0) {
+		xtc_mctx_destroy(g->arena);
+		__os_free(g);
+		return XTC_E_INTERNAL;
+	}
+	*out = g;
+	return XTC_OK;
+}
+
+void
+xtc_arena_group_destroy(xtc_arena_group_t *g)
+{
+	if (g == NULL) return;
+	xtc_mctx_destroy(g->arena);
+	(void)pthread_mutex_destroy(&g->lock);
+	__os_free(g->members);
+	__os_free(g);
+}
+
+xtc_mctx_t *
+xtc_arena_group_mctx(xtc_arena_group_t *g)
+{
+	return g != NULL ? g->arena : NULL;
+}
+
+int
+xtc_arena_group_add(xtc_arena_group_t *g)
+{
+	xtc_pid_t self = xtc_self();
+	int i, rc = XTC_OK;
+	if (g == NULL) return XTC_E_INVAL;
+	if (xtc_pid_is_none(self)) return XTC_E_INVAL;   /* a fiber adds itself */
+	(void)__xtc_mtx_lock(&g->lock);
+	for (i = 0; i < g->n; i++)                       /* idempotent per pid */
+		if (xtc_pid_eq(g->members[i], self)) goto out;
+	if (g->n == g->cap) {
+		int ncap = g->cap == 0 ? 8 : g->cap * 2;
+		void *np = NULL;
+		if ((rc = __os_realloc(g->members, sizeof(xtc_pid_t) * (size_t)ncap,
+		    &np)) != XTC_OK)
+			goto out;
+		g->members = np;
+		g->cap = ncap;
+	}
+	g->members[g->n++] = self;
+out:
+	(void)__xtc_mtx_unlock(&g->lock);
+	return rc;
+}
+
+int
+xtc_arena_group_size(xtc_arena_group_t *g)
+{
+	int n;
+	if (g == NULL) return 0;
+	(void)__xtc_mtx_lock(&g->lock);
+	n = g->n;
+	(void)__xtc_mtx_unlock(&g->lock);
+	return n;
+}
+
+/* A member pid is "gone" when xtc_proc_info reports NOTFOUND or !alive. */
+static int
+__grp_member_gone(xtc_pid_t pid)
+{
+	xtc_proc_info_t info;
+	int rc = xtc_proc_info(pid, &info);
+	if (rc != XTC_OK) return 1;      /* NOTFOUND -> reaped */
+	return !info.alive;
+}
+
+int
+xtc_arena_group_discard(xtc_arena_group_t *g, int reason,
+                        int64_t timeout_ns, int *out_all_gone)
+{
+	xtc_pid_t *snap = NULL;
+	xtc_pid_t self;
+	int n, i, all_gone = 1, rc = XTC_OK;
+
+	if (g == NULL) return XTC_E_INVAL;
+	self = xtc_self();
+
+	/* Snapshot the member list under the lock, then work outside it:
+	 * the kill/wait can yield, and a member exiting on its own must be
+	 * free to touch nothing of ours. */
+	(void)__xtc_mtx_lock(&g->lock);
+	n = g->n;
+	if (n > 0) {
+		if (__os_calloc((size_t)n, sizeof *snap, (void **)&snap) != XTC_OK) {
+			(void)__xtc_mtx_unlock(&g->lock);
+			return XTC_E_NOMEM;
+		}
+		memcpy(snap, g->members, sizeof(xtc_pid_t) * (size_t)n);
+	}
+	(void)__xtc_mtx_unlock(&g->lock);
+
+	/* A member must not discard its own group: it would kill itself
+	 * mid-wait and never reach the reset. */
+	for (i = 0; i < n; i++) {
+		if (!xtc_pid_is_none(self) && xtc_pid_eq(snap[i], self)) {
+			__os_free(snap);
+			return XTC_E_INVAL;
+		}
+	}
+
+	/* Phase 1: kill every member with a deadline and confirm it is gone.
+	 * A member wedged inside xtc_uncancelable (kill DEFERRED) may still
+	 * be alive at its deadline -- record that, and do NOT discard. */
+	for (i = 0; i < n; i++) {
+		int status = XTC_KILL_TIMEOUT;
+		if (__grp_member_gone(snap[i]))
+			continue;
+		(void)xtc_exit_pid_deadline(snap[i], reason, timeout_ns, &status);
+		if (!__grp_member_gone(snap[i]))
+			all_gone = 0;   /* still alive: a deferred/wedged kill */
+	}
+
+	/* Phase 2: ONLY if every member is confirmed gone, reset the arena.
+	 * Discarding state a live fiber may still touch is exactly the
+	 * corruption this primitive exists to avoid. */
+	if (all_gone) {
+		xtc_mctx_reset(g->arena);
+		/* The members are dead; forget them so the group can be reused
+		 * (a fresh cohort re-adds itself). */
+		(void)__xtc_mtx_lock(&g->lock);
+		g->n = 0;
+		(void)__xtc_mtx_unlock(&g->lock);
+	}
+
+	__os_free(snap);
+	if (out_all_gone != NULL) *out_all_gone = all_gone;
+	return rc;
 }

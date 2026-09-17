@@ -705,6 +705,49 @@ XTC_API int xtc_cancel_poll(int (*body)(void *), void *ud);
  */
 XTC_API int xtc_cancel_requested(void);
 
+/*
+ * Paired form of the cancellation mask, for straight-line code that
+ * cannot be expressed as a callback body.
+ *
+ * xtc_uncancelable() brackets a `body(ud)` lambda; that is the right
+ * shape for a self-contained region, but not for a macro pair wrapped
+ * around arbitrary code that goto/break/returns or longjmps out
+ * (PostgreSQL's START_CRIT_SECTION() / END_CRIT_SECTION() over WAL
+ * insertion, buffer writes, page splits -- straight-line code that
+ * cannot be hoisted into a callback without a wholesale control-flow
+ * rewrite).  These expose the same per-proc mask counter directly:
+ *
+ *   xtc_mask_enter()   bumps the mask depth; a kill delivered at a
+ *                      later park point is DEFERRED, not acted on.
+ *   xtc_mask_leave()   drops the depth (saturating at 0) and, once the
+ *                      depth is back to 0, honors any kill latched
+ *                      while masked -- which, exactly like the end of
+ *                      an xtc_uncancelable() body, may not return
+ *                      (it unwinds the fiber via xtc_exit_self).
+ *
+ * They NEST: N enters need N leaves, and only the outermost leave can
+ * unwind.  xtc_uncancelable() and the pair share the one counter and
+ * compose freely.
+ *
+ * Both return XTC_OK on a proc and XTC_E_INVAL off one (mirroring how
+ * xtc_uncancelable() just runs body off a proc -- there is nothing to
+ * mask, so a bridge macro can ignore the return).  UNLIKE
+ * xtc_uncancelable(), which brackets a synchronous body, enter and
+ * leave are separated in time and a yield may occur between them, so
+ * each independently re-anchors onto the running fiber -- a bridge that
+ * enters, yields (any park), and later leaves stays correct even if the
+ * fiber migrated in between.
+ *
+ * A leave with no matching enter is a no-op, not an error: the
+ * saturating decrement means an unbalanced END_CRIT_SECTION() cannot
+ * drive the counter negative and mask cancellation forever.
+ *
+ * PUBLIC: int xtc_mask_enter __P((void));
+ * PUBLIC: int xtc_mask_leave __P((void));
+ */
+XTC_API int xtc_mask_enter(void);
+XTC_API int xtc_mask_leave(void);
+
 /* ---- A1: resource scope / bracket ----
  *
  * A blessed, runtime-ENFORCED resource scope.  Cats Effect's

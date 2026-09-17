@@ -1,3 +1,40 @@
+libxtc (1.49.0-1) unstable; urgency=medium
+
+  * proc: add xtc_mask_enter() / xtc_mask_leave(), a paired callback-free
+    form of the cancellation mask.  xtc_uncancelable() brackets a body
+    lambda, which does not fit a macro pair wrapped around arbitrary
+    straight-line code (PostgreSQL's START_CRIT_SECTION /
+    END_CRIT_SECTION over 124 sites that goto/longjmp out).  The pair
+    exposes the same per-proc mask counter directly; each call re-anchors
+    onto the running fiber, since enter and leave are separated in time
+    with a yield possibly between them.  Bridging the two macros makes
+    "never async-kill a fiber mid-mutation of shared state" mechanical
+    rather than aspirational, completing the async-kill facility begun in
+    1.47.0.
+  * cfg: per-session scoping for xtc_cfg, so it can back a database
+    server's GUCs.  A session holds per-variable overrides layered over
+    the global registry (read resolves session -> global; the global
+    value is never touched by a session set), and the unscoped getters --
+    name-keyed and ref -- resolve through the fiber's bound session
+    automatically, matching how PG reads GUCs by bare name.  Overrides
+    form a transactional stack (push/commit/abort) backing SET LOCAL, SET
+    inside a rolled-back transaction, function-local SET, and
+    subtransactions; each set carries a source rank
+    (default<file<database<user<client<session<override) and a
+    lower-ranked source cannot clobber a higher one.
+  * mctx: arena groups (xtc_arena_group_create / _add / _mctx / _discard),
+    the analogue of a crash-only database reinitialising shared memory at
+    a granularity smaller than the process.  A group binds a set of
+    member fibers to one discardable arena; xtc_arena_group_discard kills
+    every member with a deadline, waits until ALL are confirmed gone, and
+    only THEN resets the arena -- so the shared state a killed fiber was
+    mid-mutating is thrown away with nothing alive still touching it.  A
+    member wedged inside a mask (kill deferred) leaves the arena intact
+    and reports all_gone=0, so the caller escalates rather than discard
+    under a live fiber.  This is async-kill request item 4.
+
+ -- Greg Burd <greg@burd.me>  Tue, 16 Sep 2026 13:00:00 -0400
+
 libxtc (1.48.1-1) unstable; urgency=medium
 
   * proc: xtc_proc_sleep had the SAME wrong-proc bug 1.48.0 fixed in

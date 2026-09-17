@@ -46,6 +46,22 @@ struct xtc_cfg_var {
 };
 #define cfg_var xtc_cfg_var   /* keep the terse internal spelling below */
 
+/* Value carrier for session overrides (same shape as cfg_var.cur);
+ * declared here because the session-aware getters below reference it. */
+union cfg_val {
+	int      v_bool;
+	int      v_int;
+	int64_t  v_int64;
+	double   v_double;
+	char    *v_string;   /* owned */
+	int      v_enum;
+};
+
+/* Resolve a var through the bound session (defined with the session
+ * layer below); 1 if an override supplied the value, 0 to fall through
+ * to the global.  Called with the registry lock held. */
+static int __cfg_ssn_resolve(struct xtc_cfg_var *var, union cfg_val *out);
+
 static pthread_mutex_t __cfg_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct cfg_var *__cfg_head;
 static int             __cfg_count;
@@ -148,11 +164,18 @@ xtc_cfg_unregister(const char *name)
 
 #define DEF_GET(name_suffix, K, field, type) \
 int xtc_cfg_get_##name_suffix(const char *name, type *out) { \
-	struct cfg_var *v; int rc = XTC_E_INVAL; \
+	struct cfg_var *v; int rc = XTC_E_INVAL; union cfg_val sv; \
 	if (name == NULL || out == NULL) return XTC_E_INVAL; \
 	(void)__xtc_mtx_lock(&__cfg_lock); \
 	v = __cfg_find_locked(name); \
-	if (v && v->kind == K) { *out = v->cur.field; rc = XTC_OK; } \
+	if (v && v->kind == K) { \
+		/* Resolve through the bound session first; a session \
+		 * override shadows the global value.  Falls straight \
+		 * through to the global when none is bound / no override. */ \
+		if (__cfg_ssn_resolve(v, &sv)) *out = sv.field; \
+		else *out = v->cur.field; \
+		rc = XTC_OK; \
+	} \
 	(void)__xtc_mtx_unlock(&__cfg_lock); \
 	return rc; \
 }
@@ -172,7 +195,8 @@ xtc_cfg_get_string(const char *name, const char **out)
 	(void)__xtc_mtx_lock(&__cfg_lock);
 	v = __cfg_find_locked(name);
 	if (v && v->kind == XTC_CFG_STRING) {
-		*out = v->cur.v_string;
+		union cfg_val sv;
+		*out = __cfg_ssn_resolve(v, &sv) ? sv.v_string : v->cur.v_string;
 		rc = XTC_OK;
 	}
 	(void)__xtc_mtx_unlock(&__cfg_lock);
@@ -289,10 +313,16 @@ xtc_cfg_ref(const char *name, xtc_cfg_ref_t *out)
  * getters exactly. */
 #define DEF_REF_GET(name_suffix, K, field, type) \
 int xtc_cfg_ref_get_##name_suffix(xtc_cfg_ref_t ref, type *out) { \
-	int rc = XTC_E_INVAL; \
+	int rc = XTC_E_INVAL; union cfg_val sv; \
 	if (ref == NULL || out == NULL) return XTC_E_INVAL; \
 	(void)__xtc_mtx_lock(&__cfg_lock); \
-	if (ref->kind == K) { *out = ref->cur.field; rc = XTC_OK; } \
+	if (ref->kind == K) { \
+		/* Handles resolve through the bound session too, so a hot- \
+		 * path ref read still observes the session's value. */ \
+		if (__cfg_ssn_resolve(ref, &sv)) *out = sv.field; \
+		else *out = ref->cur.field; \
+		rc = XTC_OK; \
+	} \
 	(void)__xtc_mtx_unlock(&__cfg_lock); \
 	return rc; \
 }
@@ -481,4 +511,323 @@ xtc_cfg_reload(void)
 	rc = xtc_cfg_load_file(path);
 	__os_free(path);
 	return rc;
+}
+
+/* ================= per-session scoping + override stack =================
+ *
+ * A session layers per-variable overrides over the global registry.  An
+ * override is a stack of LEVELS (transactional: push/commit/abort); each
+ * level holds at most one value per variable, tagged with the source
+ * that set it.  A read resolves newest level down to the base, then
+ * falls through to the global registry value.  See xtc_cfg.h.
+ */
+
+/* One override entry: this variable has a value at this level. */
+struct cfg_ovr {
+	struct cfg_var   *var;    /* which variable (identity, no name lookup) */
+	union cfg_val     val;
+	xtc_cfg_source_t  src;
+	struct cfg_ovr   *next;   /* next entry at the same level */
+};
+
+/* One transactional level: a list of overrides set at this level. */
+struct cfg_level {
+	struct cfg_ovr   *head;
+	struct cfg_level *parent;
+};
+
+struct xtc_cfg_session {
+	struct cfg_level *top;    /* innermost level (never NULL: base level) */
+};
+
+/* Bound session for the running fiber.  A carrier runs one fiber at a
+ * time and the consumer binds on fiber entry / unbinds on exit, so a
+ * thread-local is fiber-local in practice and keeps cfg self-contained
+ * (no field on struct xtc_proc, no dependency on the proc layer). */
+static _Thread_local xtc_cfg_session_t *__cfg_ssn_current;
+
+static void
+__cfg_ovr_free(struct cfg_ovr *o)
+{
+	if (o->var->kind == XTC_CFG_STRING && o->val.v_string != NULL)
+		__os_free(o->val.v_string);
+	__os_free(o);
+}
+
+static void
+__cfg_level_free(struct cfg_level *lv)
+{
+	struct cfg_ovr *o, *n;
+	for (o = lv->head; o != NULL; o = n) { n = o->next; __cfg_ovr_free(o); }
+	__os_free(lv);
+}
+
+int
+xtc_cfg_session_create(xtc_cfg_session_t **out)
+{
+	xtc_cfg_session_t *s;
+	struct cfg_level *base;
+	int rc;
+	if (out == NULL) return XTC_E_INVAL;
+	if ((rc = __os_calloc(1, sizeof *s, (void **)&s)) != XTC_OK)
+		return rc;
+	if ((rc = __os_calloc(1, sizeof *base, (void **)&base)) != XTC_OK) {
+		__os_free(s);
+		return rc;
+	}
+	base->parent = NULL;
+	s->top = base;
+	*out = s;
+	return XTC_OK;
+}
+
+void
+xtc_cfg_session_destroy(xtc_cfg_session_t *s)
+{
+	struct cfg_level *lv, *p;
+	if (s == NULL) return;
+	if (__cfg_ssn_current == s) __cfg_ssn_current = NULL;
+	for (lv = s->top; lv != NULL; lv = p) { p = lv->parent; __cfg_level_free(lv); }
+	__os_free(s);
+}
+
+xtc_cfg_session_t *
+xtc_cfg_session_bind(xtc_cfg_session_t *s)
+{
+	xtc_cfg_session_t *prev = __cfg_ssn_current;
+	__cfg_ssn_current = s;
+	return prev;
+}
+
+xtc_cfg_session_t *
+xtc_cfg_session_current(void)
+{
+	return __cfg_ssn_current;
+}
+
+int
+xtc_cfg_session_push(xtc_cfg_session_t *s)
+{
+	struct cfg_level *lv;
+	int rc;
+	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) return XTC_E_INVAL;
+	if ((rc = __os_calloc(1, sizeof *lv, (void **)&lv)) != XTC_OK)
+		return rc;
+	lv->parent = s->top;
+	s->top = lv;
+	return XTC_OK;
+}
+
+int
+xtc_cfg_session_commit(xtc_cfg_session_t *s)
+{
+	struct cfg_level *top, *parent;
+	struct cfg_ovr *o, *n;
+	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) return XTC_E_INVAL;
+	top = s->top;
+	parent = top->parent;
+	if (parent == NULL) return XTC_E_INVAL;   /* base level: nothing to commit */
+	/*
+	 * Fold this level's overrides into the parent.  A value set here
+	 * survives; it replaces the parent's entry for the same variable
+	 * (this level is newer), reusing the parent slot so a string is not
+	 * leaked.  Order does not matter -- one entry per (var, level).
+	 */
+	for (o = top->head; o != NULL; o = n) {
+		struct cfg_ovr *pe;
+		n = o->next;
+		for (pe = parent->head; pe != NULL; pe = pe->next)
+			if (pe->var == o->var) break;
+		if (pe != NULL) {
+			if (pe->var->kind == XTC_CFG_STRING &&
+			    pe->val.v_string != NULL)
+				__os_free(pe->val.v_string);
+			pe->val = o->val;
+			pe->src = o->src;
+			/* o's string (if any) now owned by pe; do not free it. */
+			__os_free(o);
+		} else {
+			o->next = parent->head;
+			parent->head = o;   /* moved wholesale, string included */
+		}
+	}
+	s->top = parent;
+	__os_free(top);
+	return XTC_OK;
+}
+
+int
+xtc_cfg_session_abort(xtc_cfg_session_t *s)
+{
+	struct cfg_level *top;
+	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) return XTC_E_INVAL;
+	top = s->top;
+	if (top->parent == NULL) return XTC_E_INVAL;   /* base level */
+	s->top = top->parent;
+	__cfg_level_free(top);   /* discard this level's overrides + strings */
+	return XTC_OK;
+}
+
+/* Find the newest override for `var` across the session's levels, and
+ * the level it lives on (for source/reset).  NULL if none. */
+static struct cfg_ovr *
+__cfg_ssn_find(xtc_cfg_session_t *s, struct cfg_var *var)
+{
+	struct cfg_level *lv;
+	for (lv = s->top; lv != NULL; lv = lv->parent) {
+		struct cfg_ovr *o;
+		for (o = lv->head; o != NULL; o = o->next)
+			if (o->var == var) return o;   /* newest level first */
+	}
+	return NULL;
+}
+
+int
+xtc_cfg_session_source(xtc_cfg_session_t *s, const char *name,
+                       xtc_cfg_source_t *out)
+{
+	struct cfg_var *v;
+	struct cfg_ovr *o;
+	if (name == NULL || out == NULL) return XTC_E_INVAL;
+	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) return XTC_E_INVAL;
+	(void)__xtc_mtx_lock(&__cfg_lock);
+	v = __cfg_find_locked(name);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
+	if (v == NULL) return XTC_E_NOTFOUND;
+	o = __cfg_ssn_find(s, v);
+	*out = (o != NULL) ? o->src : XTC_CFG_SRC_DEFAULT;
+	return XTC_OK;
+}
+
+int
+xtc_cfg_session_reset(xtc_cfg_session_t *s, const char *name)
+{
+	struct cfg_var *v;
+	struct cfg_ovr **link, *o;
+	if (name == NULL) return XTC_E_INVAL;
+	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) return XTC_E_INVAL;
+	(void)__xtc_mtx_lock(&__cfg_lock);
+	v = __cfg_find_locked(name);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
+	if (v == NULL) return XTC_E_NOTFOUND;
+	/* Drop the override at the CURRENT (top) level only, so RESET undoes
+	 * this level's SET and the parent value (or global) shows through. */
+	for (link = &s->top->head; (o = *link) != NULL; link = &o->next) {
+		if (o->var == v) { *link = o->next; __cfg_ovr_free(o); break; }
+	}
+	return XTC_OK;
+}
+
+/* Set/replace `var`'s override at the current level.  Precedence: apply
+ * only if src outranks whatever set it at THIS level (a lower-ranked
+ * source cannot clobber a higher one, mirroring PG's source ordering).
+ * `sval` is the pre-copied string for STRING kinds (ownership taken on
+ * success), NULL otherwise. */
+static int
+__cfg_ssn_apply(xtc_cfg_session_t *s, struct cfg_var *var,
+                union cfg_val val, char *sval, xtc_cfg_source_t src)
+{
+	struct cfg_ovr *o;
+	int rc;
+	/* Existing override at the TOP level for this var? */
+	for (o = s->top->head; o != NULL; o = o->next)
+		if (o->var == var) break;
+	if (o != NULL) {
+		if (src < o->src) {          /* lower-ranked: refuse */
+			if (sval != NULL) __os_free(sval);
+			return XTC_OK;           /* not an error: PG semantics */
+		}
+		if (var->kind == XTC_CFG_STRING && o->val.v_string != NULL)
+			__os_free(o->val.v_string);
+		o->val = val;
+		if (var->kind == XTC_CFG_STRING) o->val.v_string = sval;
+		o->src = src;
+		return XTC_OK;
+	}
+	if ((rc = __os_calloc(1, sizeof *o, (void **)&o)) != XTC_OK) {
+		if (sval != NULL) __os_free(sval);
+		return rc;
+	}
+	o->var = var;
+	o->val = val;
+	if (var->kind == XTC_CFG_STRING) o->val.v_string = sval;
+	o->src = src;
+	o->next = s->top->head;
+	s->top->head = o;
+	return XTC_OK;
+}
+
+#define DEF_SSN_SET_NUM(sfx, K, field, ctype, okexpr)                     \
+int xtc_cfg_ssn_set_##sfx(xtc_cfg_session_t *s, const char *name,         \
+                          ctype v, xtc_cfg_source_t src) {                \
+	struct cfg_var *cv; union cfg_val val; int ok = 0;                \
+	if (name == NULL) return XTC_E_INVAL;                             \
+	if (s == NULL) s = __cfg_ssn_current;                             \
+	if (s == NULL) return XTC_E_INVAL;                                \
+	(void)__xtc_mtx_lock(&__cfg_lock);                                \
+	cv = __cfg_find_locked(name);                                     \
+	if (cv != NULL && cv->kind == K && (okexpr) &&                    \
+	    (cv->validator == NULL ||                                     \
+	     cv->validator(&v, cv->cb_user) == XTC_OK))                   \
+		ok = 1;                                                   \
+	(void)__xtc_mtx_unlock(&__cfg_lock);                              \
+	if (!ok) return XTC_E_INVAL;                                      \
+	val.field = v;                                                    \
+	return __cfg_ssn_apply(s, cv, val, NULL, src);                    \
+}
+
+DEF_SSN_SET_NUM(bool,   XTC_CFG_BOOL,   v_bool,   int,
+                (v == 0 || v == 1))
+DEF_SSN_SET_NUM(int,    XTC_CFG_INT,    v_int,    int,
+                __bounds_int_ok(cv, (int64_t)v))
+DEF_SSN_SET_NUM(int64,  XTC_CFG_INT64,  v_int64,  int64_t,
+                __bounds_int_ok(cv, v))
+DEF_SSN_SET_NUM(double, XTC_CFG_DOUBLE, v_double, double,
+                __bounds_dbl_ok(cv, v))
+DEF_SSN_SET_NUM(enum,   XTC_CFG_ENUM,   v_enum,   int,
+                (v >= 0 && v < cv->n_enum_labels))
+
+int
+xtc_cfg_ssn_set_string(xtc_cfg_session_t *s, const char *name,
+                       const char *v, xtc_cfg_source_t src)
+{
+	struct cfg_var *cv;
+	union cfg_val val;
+	char *copy = NULL;
+	int ok = 0, rc;
+	if (name == NULL || v == NULL) return XTC_E_INVAL;
+	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) return XTC_E_INVAL;
+	if ((rc = __os_strdup(v, &copy)) != XTC_OK) return rc;
+	(void)__xtc_mtx_lock(&__cfg_lock);
+	cv = __cfg_find_locked(name);
+	if (cv != NULL && cv->kind == XTC_CFG_STRING &&
+	    (cv->validator == NULL ||
+	     cv->validator(copy, cv->cb_user) == XTC_OK))
+		ok = 1;
+	(void)__xtc_mtx_unlock(&__cfg_lock);
+	if (!ok) { __os_free(copy); return XTC_E_INVAL; }
+	memset(&val, 0, sizeof val);
+	return __cfg_ssn_apply(s, cv, val, copy, src);
+}
+
+/* Read `var`'s effective value for the CURRENTLY BOUND session into the
+ * caller's slot; returns 1 if a session override supplied it, 0 if the
+ * caller should fall through to the global value.  Called with the
+ * registry lock HELD (so var cannot be unregistered under us). */
+static int
+__cfg_ssn_resolve(struct cfg_var *var, union cfg_val *out)
+{
+	xtc_cfg_session_t *s = __cfg_ssn_current;
+	struct cfg_ovr *o;
+	if (s == NULL) return 0;
+	o = __cfg_ssn_find(s, var);
+	if (o == NULL) return 0;
+	*out = o->val;
+	return 1;
 }
