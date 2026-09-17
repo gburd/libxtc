@@ -1481,6 +1481,176 @@ test_exit_pid_deadline(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- xtc_mask_enter / xtc_mask_leave: the paired mask -------------
+ *
+ * The callback-free form for macro-pair bridges (PostgreSQL's
+ * START_CRIT_SECTION / END_CRIT_SECTION).  Asserts the property the
+ * consumer said it would build on: a fiber BETWEEN enter and leave
+ * reports mask_depth > 0 and xtc_exit_pid_deadline returns
+ * XTC_KILL_DEFERRED, while the same kill OUTSIDE the pair is DELIVERED.
+ * That is what turns "never killed mid-mutation" from a documented hope
+ * into a mechanically-checkable invariant.
+ */
+static xtc_pid_t   g_mk_worker;
+static _Atomic int g_mk_in_mask;     /* worker is between enter and leave */
+static _Atomic int g_mk_release;     /* supervisor tells worker to leave */
+static _Atomic int g_mk_reached_after; /* code after the deferred kill ran? */
+static _Atomic int g_mk_finalizer_ran;
+
+static void
+mk_finalizer(void *ud)
+{
+	(void)ud;
+	atomic_fetch_add(&g_mk_finalizer_ran, 1);
+}
+
+static void
+mk_worker_proc(void *arg)
+{
+	void  *m = NULL;
+	size_t sz = 0;
+	(void)arg;
+	(void)xtc_proc_at_exit(mk_finalizer, NULL);
+
+	/* Straight-line masked region -- exactly the shape a
+	 * START_CRIT_SECTION() macro bridge produces: enter, then arbitrary
+	 * code with its own control flow, then leave.  No callback body. */
+	munit_assert_int(xtc_mask_enter(), ==, XTC_OK);
+	atomic_store(&g_mk_in_mask, 1);
+
+	/* Park at delivery points while masked so the supervisor's kill is
+	 * OBSERVED and latched (mask_deferred) rather than unwinding here. */
+	while (!atomic_load(&g_mk_release)) {
+		(void)xtc_recv(&m, &sz, 1000000);   /* 1ms */
+		xtc_free(m);
+		m = NULL;
+	}
+
+	atomic_store(&g_mk_in_mask, 0);
+	/* Leaving drops the mask to 0 and honors the latched kill: this call
+	 * does NOT return, so the line below must never run. */
+	(void)xtc_mask_leave();
+	atomic_fetch_add(&g_mk_reached_after, 1);   /* must stay 0 */
+}
+
+struct mk_sup {
+	_Atomic int deferred_ok;   /* kill inside the mask -> DEFERRED */
+	_Atomic int mask_seen;     /* xtc_proc_info shows mask_depth > 0 */
+};
+
+static void
+mk_sup_proc(void *arg)
+{
+	struct mk_sup *s = arg;
+	xtc_proc_info_t info;
+	int status = -1;
+
+	while (!atomic_load(&g_mk_in_mask))
+		(void)xtc_proc_sleep(200000);
+
+	/* A supervisor can SEE the fiber is inside a critical section... */
+	if (xtc_proc_info(g_mk_worker, &info) == XTC_OK &&
+	    info.mask_depth > 0)
+		atomic_store(&s->mask_seen, 1);
+
+	/* ...and a kill aimed at it is DEFERRED, not delivered, because the
+	 * paired mask defers exactly like xtc_uncancelable() would. */
+	if (xtc_exit_pid_deadline(g_mk_worker, 42, 500000000LL, &status) ==
+	    XTC_OK && status == XTC_KILL_DEFERRED)
+		atomic_store(&s->deferred_ok, 1);
+
+	/* Release: the latched kill fires as the mask drops in leave(). */
+	atomic_store(&g_mk_release, 1);
+}
+
+static MunitResult
+test_mask_enter_leave(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	struct mk_sup s;
+	xtc_pid_t sup;
+	(void)p; (void)d;
+
+	memset(&s, 0, sizeof s);
+	atomic_store(&g_mk_in_mask, 0);
+	atomic_store(&g_mk_release, 0);
+	atomic_store(&g_mk_reached_after, 0);
+	atomic_store(&g_mk_finalizer_ran, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "mk-worker";
+	munit_assert_int(xtc_proc_spawn(loop, mk_worker_proc, NULL, &opts,
+	    &g_mk_worker), ==, XTC_OK);
+	opts.name = "mk-sup";
+	munit_assert_int(xtc_proc_spawn(loop, mk_sup_proc, &s, &opts, &sup),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* Inside the pair: visible as masked, and the kill was deferred. */
+	munit_assert_int(atomic_load(&s.mask_seen), ==, 1);
+	munit_assert_int(atomic_load(&s.deferred_ok), ==, 1);
+	/* leave() honored the deferred kill, so the line after it never ran,
+	 * while the at-exit finalizer still did (the A1+A2 guarantee). */
+	munit_assert_int(atomic_load(&g_mk_reached_after), ==, 0);
+	munit_assert_int(atomic_load(&g_mk_finalizer_ran), ==, 1);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* enter/leave NEST: N enters need N leaves, only the outermost unwinds;
+ * and off a proc both return XTC_E_INVAL (so a bridge macro can ignore
+ * the return).  A pure-logic check, no kill involved. */
+static _Atomic int g_mkn_after_inner, g_mkn_after_outer;
+
+static void
+mkn_proc(void *arg)
+{
+	(void)arg;
+	/* Depth 2, then a self-kill latched at a delivery point. */
+	(void)xtc_mask_enter();
+	(void)xtc_mask_enter();
+	{
+		void *m = NULL; size_t sz = 0;
+		(void)xtc_exit_pid(xtc_self(), 7);
+		(void)xtc_recv(&m, &sz, 0);   /* delivery point: defers it */
+		xtc_free(m);
+	}
+	(void)xtc_mask_leave();                 /* depth 2->1: must NOT unwind */
+	atomic_fetch_add(&g_mkn_after_inner, 1);/* must reach here (== 1) */
+	(void)xtc_mask_leave();                 /* depth 1->0: honors the kill */
+	atomic_fetch_add(&g_mkn_after_outer, 1);/* must NOT reach here (== 0) */
+}
+
+static MunitResult
+test_mask_nesting(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	(void)p; (void)d;
+
+	/* Off a proc: both reject cleanly. */
+	munit_assert_int(xtc_mask_enter(), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_mask_leave(), ==, XTC_E_INVAL);
+
+	atomic_store(&g_mkn_after_inner, 0);
+	atomic_store(&g_mkn_after_outer, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "mkn";
+	munit_assert_int(xtc_proc_spawn(loop, mkn_proc, NULL, &opts, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* The inner leave only decremented; the outer leave unwound. */
+	munit_assert_int(atomic_load(&g_mkn_after_inner), ==, 1);
+	munit_assert_int(atomic_load(&g_mkn_after_outer), ==, 0);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 /* ---- cross-thread send WAKES a parked receiver ----------------------
  *
  * xtc_send's documented WAKE GUARANTEE: a successful send makes a
@@ -1588,6 +1758,133 @@ test_cross_thread_send_wakes(const MunitParameter p[], void *d)
 }
 #endif /* !_WIN32 */
 
+/* ---- arena groups: wholesale shared-state discard on kill --------
+ *
+ * The two-phase safety property: discard() kills every member, waits
+ * until ALL are gone, and only THEN resets the arena.  A killable
+ * cohort -> arena reset (all_gone=1).  A cohort with a fiber WEDGED
+ * inside xtc_uncancelable -> the deferred kill leaves it alive, so the
+ * arena is NOT reset (all_gone=0) and the caller must escalate.
+ */
+static xtc_arena_group_t *g_ag;
+static _Atomic int g_ag_ready;      /* members that have added + parked */
+static _Atomic int g_ag_release;
+
+static void
+ag_member_proc(void *arg)
+{
+	void  *m = NULL;
+	size_t sz = 0;
+	int wedge = (int)(intptr_t)arg;
+	/* Join the group and allocate SHARED state in its arena. */
+	(void)xtc_arena_group_add(g_ag);
+	(void)xtc_mctx_alloc(xtc_arena_group_mctx(g_ag), 128);
+	atomic_fetch_add(&g_ag_ready, 1);
+	if (wedge) {
+		/* Wedged inside the mask: observe the kill (park at a
+		 * delivery point) but defer it, so discard's deadline
+		 * expires with this fiber still alive. */
+		(void)xtc_mask_enter();
+		while (!atomic_load(&g_ag_release)) {
+			(void)xtc_recv(&m, &sz, 1000000);
+			xtc_free(m); m = NULL;
+		}
+		(void)xtc_mask_leave();
+	} else {
+		/* Killable: an unmasked infinite park honors the kill. */
+		(void)xtc_recv(&m, &sz, -1);
+		xtc_free(m);
+	}
+}
+
+struct ag_sup {
+	_Atomic int all_gone;
+	_Atomic int rc;
+	_Atomic int chunks_after;
+	_Atomic int done;
+};
+
+static void
+ag_sup_proc(void *arg)
+{
+	struct ag_sup *s = arg;
+	int all_gone = -1, r;
+
+	while (atomic_load(&g_ag_ready) < 2)
+		(void)xtc_proc_sleep(200000);
+	/* Let the wedged member reach its mask before we kill. */
+	(void)xtc_proc_sleep(20LL * 1000 * 1000);
+
+	r = xtc_arena_group_discard(g_ag, 9, 300000000LL, &all_gone);
+	atomic_store(&s->rc, r);
+	atomic_store(&s->all_gone, all_gone);
+	/* Arena reset iff all_gone: chunks drop to 0 only then. */
+	atomic_store(&s->chunks_after,
+	    (int)xtc_mctx_total_chunks(xtc_arena_group_mctx(g_ag)));
+	atomic_store(&s->done, 1);
+
+	/* Release any wedged member so the loop can drain and finish. */
+	atomic_store(&g_ag_release, 1);
+}
+
+static MunitResult
+ag_run(int wedge, int expect_all_gone, int expect_chunks_zero)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	struct ag_sup s;
+	xtc_pid_t p;
+
+	memset(&s, 0, sizeof s);
+	atomic_store(&g_ag_ready, 0);
+	atomic_store(&g_ag_release, 0);
+	munit_assert_int(xtc_arena_group_create("ag", &g_ag), ==, XTC_OK);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "ag-killable";
+	munit_assert_int(xtc_proc_spawn(loop, ag_member_proc, (void *)0,
+	    &opts, &p), ==, XTC_OK);
+	opts.name = "ag-other";
+	munit_assert_int(xtc_proc_spawn(loop, ag_member_proc,
+	    (void *)(intptr_t)wedge, &opts, &p), ==, XTC_OK);
+	opts.name = "ag-sup";
+	munit_assert_int(xtc_proc_spawn(loop, ag_sup_proc, &s, &opts, &p),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	munit_assert_int(atomic_load(&s.done), ==, 1);
+	munit_assert_int(atomic_load(&s.rc), ==, XTC_OK);
+	munit_assert_int(atomic_load(&s.all_gone), ==, expect_all_gone);
+	if (expect_chunks_zero)
+		munit_assert_int(atomic_load(&s.chunks_after), ==, 0);
+	else
+		munit_assert_int(atomic_load(&s.chunks_after), >, 0);
+
+	xtc_arena_group_destroy(g_ag);
+	g_ag = NULL;
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_arena_group_discard(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	/* Killable cohort: every member dies, arena is reset (chunks -> 0). */
+	return ag_run(/*wedge=*/0, /*all_gone=*/1, /*chunks_zero=*/1);
+}
+
+static MunitResult
+test_arena_group_wedged(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	/* One member wedged in a mask: kill is deferred, it stays alive at
+	 * the deadline, so all_gone=0 and the arena is NOT reset -- its
+	 * chunks survive.  Discarding under a live member is exactly the
+	 * corruption the two-phase order avoids. */
+	return ag_run(/*wedge=*/1, /*all_gone=*/0, /*chunks_zero=*/0);
+}
+
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1608,6 +1905,10 @@ static MunitTest tests[] = {
 	{ "/proc_at_exit",      test_proc_at_exit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pid_local_id_ceiling", test_pid_local_id_ceiling, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cancel_poll",       test_cancel_poll,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/mask_enter_leave",  test_mask_enter_leave, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/mask_nesting",      test_mask_nesting,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/arena_group_discard", test_arena_group_discard, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/arena_group_wedged",  test_arena_group_wedged,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/exit_pid_deadline", test_exit_pid_deadline, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #if !defined(_WIN32)
 	{ "/cross_thread_send_wakes", test_cross_thread_send_wakes, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

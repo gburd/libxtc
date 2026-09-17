@@ -3190,6 +3190,36 @@ xtc_uncancelable(int (*body)(void *), void *ud)
 	return rc;
 }
 
+/* PUBLIC: int xtc_mask_enter __P((void)); */
+int
+xtc_mask_enter(void)
+{
+	/* Re-anchor: enter and leave are separated in time and a yield may
+	 * fall between them, so __current_proc can be stale by either call
+	 * (see __proc_reanchor).  Bump the mask on the RUNNING fiber. */
+	struct xtc_proc *p = __proc_reanchor(__current_proc);
+	if (p == NULL)
+		return XTC_E_INVAL;     /* off a proc: nothing to mask */
+	__mask_depth_inc(p);
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_mask_leave __P((void)); */
+int
+xtc_mask_leave(void)
+{
+	struct xtc_proc *p = __proc_reanchor(__current_proc);
+	if (p == NULL)
+		return XTC_E_INVAL;
+	__mask_depth_dec(p);
+	/* Once fully unmasked, honor any kill latched while masked -- this
+	 * is the tail of xtc_uncancelable() decomposed, and like it, it may
+	 * NOT return (unwinds via xtc_exit_self).  A leave that only drops
+	 * an inner nesting level leaves the mask > 0 and drains nothing. */
+	__mask_drain(p);
+	return XTC_OK;
+}
+
 /* PUBLIC: int xtc_cancel_poll __P((int (*)(void *), void *)); */
 int
 xtc_cancel_poll(int (*body)(void *), void *ud)
