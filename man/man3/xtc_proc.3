@@ -512,6 +512,51 @@ casts the message to its own unpacked mirror struct misreads the
 fields (the
 .Va reason
 in particular).  Use this helper rather than hand-rolling the layout.
+.Ss Paired cancellation mask
+.Fn xtc_mask_enter
+and
+.Fn xtc_mask_leave
+are a callback-free form of
+.Fn xtc_uncancelable
+for code that cannot be expressed as a lambda body -- a macro pair
+wrapped around arbitrary straight-line code that
+.Sy goto ,
+.Sy break ,
+.Sy return ,
+or
+.Xr longjmp 3
+s out of the region (the shape of PostgreSQL's
+.Fn START_CRIT_SECTION
+/
+.Fn END_CRIT_SECTION ) .
+They bump and drop the same per-proc mask depth
+.Fn xtc_uncancelable
+uses, so they nest and compose with it:
+.Fn xtc_mask_enter
+increments the depth (a kill delivered at a later park point is
+DEFERRED), and
+.Fn xtc_mask_leave
+decrements it and, once the depth is back to 0, honors any kill latched
+while masked -- which, like the end of an
+.Fn xtc_uncancelable
+body, may not return (it unwinds the fiber via
+.Fn xtc_exit_self ) .
+N enters need N leaves; only the outermost leave can unwind.
+Both return
+.Dv XTC_OK
+on a proc and
+.Dv XTC_E_INVAL
+off one.
+Unlike
+.Fn xtc_uncancelable ,
+which brackets a synchronous body, enter and leave are separated in
+time and a yield may occur between them, so each independently
+re-anchors onto the running fiber -- a bridge that enters, parks, and
+later leaves stays correct even across a work-steal migration.  A
+.Fn xtc_mask_leave
+with no matching
+.Fn xtc_mask_enter
+is a no-op, not an error (the decrement saturates at 0).
 .Sh MIGRATION
 By default a proc's coroutine is
 .Em pinned

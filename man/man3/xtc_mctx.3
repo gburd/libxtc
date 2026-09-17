@@ -83,6 +83,31 @@ and
 .Fn xtc_mctx_total_chunks
 report the memory and chunk count currently charged to the
 context.
+.Ss Arena groups: wholesale shared-state discard on kill
+An arena group binds a set of member fibers to one discardable arena,
+giving a recovery boundary smaller than the whole process -- the
+analogue of a crash-only database reinitialising shared memory.
+.Fn xtc_arena_group_create
+makes an empty group with a fresh thread-safe arena, and
+.Fn xtc_arena_group_destroy
+frees it (it does not kill members).
+.Fn xtc_arena_group_mctx
+returns the arena; members allocate their SHARED state there, and
+.Fn xtc_arena_group_add
+registers the calling fiber as a member.
+.Fn xtc_arena_group_discard
+is the point of the facility: it
+.Fn xtc_exit_pid_deadline Ns s
+every live member, waits until ALL are confirmed gone, and only THEN
+resets the arena -- so the shared state a killed fiber was mid-mutating
+is thrown away with nothing alive still touching it.  If a member is
+wedged inside a mask (kill deferred) and still alive at its deadline,
+the arena is left INTACT and the caller is told
+.Va all_gone
+== 0, so it escalates to the whole-process fail-stop rather than
+discard state a live fiber may still touch.
+.Fn xtc_arena_group_size
+reports the current member count.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_mctx_t *root, *req;
