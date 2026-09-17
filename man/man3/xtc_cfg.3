@@ -204,6 +204,46 @@ read the current value with no name lookup, still observing live
 updates.
 The handle stays valid until the variable is unregistered, so it can
 be cached for the process lifetime like a compiled-in pointer.
+.Ss Per-session scoping
+A single global value per name is what a database server cannot use for
+most settings.  A session layers per-variable OVERRIDES over the global
+registry: a read resolves the session override first, then the global
+value, and a session set never touches the global value.
+.Fn xtc_cfg_session_create
+and
+.Fn xtc_cfg_session_destroy
+manage a session;
+.Fn xtc_cfg_session_bind
+makes one the current session for the calling fiber (returning the
+previous binding) so the unscoped getters resolve through it, and
+.Fn xtc_cfg_session_current
+reports the bound session.  Within a session the overrides form a
+transactional stack of levels:
+.Fn xtc_cfg_session_push
+opens a level,
+.Fn xtc_cfg_session_commit
+folds it into its parent (the values survive), and
+.Fn xtc_cfg_session_abort
+discards it -- backing SET LOCAL, SET inside a rolled-back transaction,
+function-local SET, and subtransactions.
+.Fn xtc_cfg_ssn_set_bool ,
+.Fn xtc_cfg_ssn_set_int ,
+.Fn xtc_cfg_ssn_set_int64 ,
+.Fn xtc_cfg_ssn_set_double ,
+.Fn xtc_cfg_ssn_set_string ,
+and
+.Fn xtc_cfg_ssn_set_enum
+set a per-session override at the current level, each carrying a source
+rank
+.Po Dv XTC_CFG_SRC_DEFAULT
+through
+.Dv XTC_CFG_SRC_OVERRIDE Pc ;
+a lower-ranked source cannot replace a higher one, and
+.Fn xtc_cfg_session_source
+reports the winner.
+.Fn xtc_cfg_session_reset
+drops the current level's override for a name (RESET), so the parent
+level or the global value shows through again.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 static int g_max_clients = 1000;
