@@ -1,3 +1,14 @@
+libxtc (1.49.1-1) unstable; urgency=medium
+
+  * doc: add man-page coverage for the 1.49.0 additions (xtc_mask_enter/
+    _leave, the xtc_cfg_session_* / xtc_cfg_ssn_set_* family, and
+    xtc_arena_group_*).  The make check + CI man-coverage gate requires
+    every PUBLIC function to appear in a man3 page; the v1.49.0 tag was
+    cut on the feature commit before that documentation landed and so had
+    a red CI, and this release supersedes it.  No code change.
+
+ -- Greg Burd <greg@burd.me>  Tue, 16 Sep 2026 14:00:00 -0400
+
 libxtc (1.49.0-1) unstable; urgency=medium
 
   * proc: add xtc_mask_enter() / xtc_mask_leave(), a paired callback-free

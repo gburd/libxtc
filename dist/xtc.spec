@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.49.0
+Version:        1.49.1
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,11 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Tue Sep 16 2026 Greg Burd <greg@burd.me> - 1.49.1-1
+- doc: man-page coverage for the 1.49.0 additions (the man-coverage gate
+  requires every PUBLIC function be documented; v1.49.0's tag landed on
+  the commit before that fix, so this supersedes it).
+
 * Tue Sep 16 2026 Greg Burd <greg@burd.me> - 1.49.0-1
 - proc: xtc_mask_enter/xtc_mask_leave -- paired (callback-free) form of the
   cancellation mask, for macro-pair bridges like START/END_CRIT_SECTION.
