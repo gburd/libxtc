@@ -1039,6 +1039,10 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 static void __notify_links_and_monitors(struct xtc_proc *p);
 static void __run_proc_at_exit(struct xtc_proc *p);
 static void __recov_release_all(struct xtc_proc *p);
+/* A2 mask helpers, defined below but needed by the park paths above them:
+ * a cancellable park must release its SCHEDULER resources (fd
+ * registration, timeout timer) before the kill unwinds it. */
+static void __mask_drain(struct xtc_proc *p);
 
 static intptr_t
 __proc_entry(void *arg)
@@ -2349,6 +2353,18 @@ xtc_recv_correlate(const void *corr_value, size_t corr_size,
 }
 
 /* PUBLIC: int xtc_proc_wait_fd __P((int, uint32_t, int64_t, uint32_t *)); */
+/* Disarm the recv waker wait_fd armed before its fd/timer registration.
+ * Used by the registration-failure paths, which return WITHOUT parking:
+ * leaving waker_armed set there would advertise a park the proc is not
+ * in, so a later send would fire a waker for a fiber that is running. */
+static void
+__wait_fd_disarm_waker(struct xtc_proc *self)
+{
+	(void) __proc_mtx_lock(&self->mbox_lock);
+	self->waker_armed = 0;
+	(void) __proc_mtx_unlock(&self->mbox_lock);
+}
+
 int
 xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
                  uint32_t *out_revents)
@@ -2360,6 +2376,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	xtc_loop_t *wl = NULL;   /* the loop this fiber runs on (not its home) */
 	int tail_sched = 0;      /* xtc_tail SCHED enabled? (gates the clock) */
 	int64_t park_ns = 0;     /* park instant, for the park->run latency */
+	int kp_gap = 0;          /* kill latched in the check/arm window */
 
 	if (out_revents == NULL || fd < 0 || interest == 0) return XTC_E_INVAL;
 	if (self == NULL) return XTC_E_INVAL;
@@ -2399,21 +2416,95 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 
 	/* Fast path: if a message is already queued or the fd is already
 	 * ready, just return without yielding.  We can answer the mailbox
-	 * question without an actual recv call by peeking the queue. */
+	 * question without an actual recv call by peeking the queue.
+	 *
+	 * BUG 4: this observation and the waker arming used to sit in two
+	 * SEPARATE lock holds, with the fd/timer registration in between.
+	 * Send and kill only wake a proc when they find waker_armed set (they
+	 * read it under mbox_lock -- see __mbox_deliver and xtc_exit_pid), so a
+	 * foreign sender or killer acting in that gap pushed its message /
+	 * latched its kill, saw waker_armed == 0, fired NOTHING, and then we
+	 * parked on the already-pending event.  With an unreadable fd and
+	 * timeout_ns < 0 there was no other wake source: the proc parked
+	 * FOREVER.  MEASURED with an injection point held open in the gap: both
+	 * a send and an xtc_exit_pid into the window hung the victim (never
+	 * returned from wait_fd, 15s timeout) on epoll.
+	 *
+	 * The correct pattern is already in this file -- __do_recv couples its
+	 * empty-mailbox observation and its waker arming under ONE mbox_lock
+	 * hold, for exactly this reason.  Do the same here, and read
+	 * kill_pending under that same hold so the kill half is covered too.
+	 * That makes the two orders exhaustive and both safe:
+	 *   - sender/killer takes mbox_lock BEFORE us: its message is in the
+	 *     mailbox, or its kill_pending store (release, sequenced before its
+	 *     own lock acquire) is visible to our read under the lock -- either
+	 *     way we observe it here and never park on it.
+	 *   - sender/killer takes mbox_lock AFTER us: it finds waker_armed == 1
+	 *     and fires the waker.  We have not yielded yet, so that wake finds
+	 *     the task RUNNING, loses the PARKED->SCHEDULED CAS, and latches
+	 *     wake_pending -- which the loop's PENDING verdict consumes to
+	 *     re-schedule instead of parking (src/evt/task.c, src/evt/loop.c).
+	 * There is no third order, so no lost wake.
+	 *
+	 * wake_revents is cleared BEFORE the waker is armed, so a wake that
+	 * lands in this window keeps its cause bits instead of having them
+	 * zeroed out from under it.
+	 */
+	atomic_store_explicit(&self->task->wake_revents, 0,
+	    memory_order_relaxed);
+
 	(void) __proc_mtx_lock(&self->mbox_lock);
 	if (self->mbox_n > 0 || self->save_head != NULL) {
 		*out_revents |= XTC_WAIT_MAILBOX;
+	} else {
+		/* Populate recv_waker + set waker_armed together under
+		 * mbox_lock so the cross-thread wake (which reads waker_armed
+		 * under this lock, then reads recv_waker after unlocking) sees
+		 * a fully-written recv_waker with no data race -- see the
+		 * matching note in __do_recv's park point. */
+		(void)xtc_task_waker(self->task, &self->recv_waker);
+		self->waker_armed = 1;
+		kp_gap = atomic_load_explicit(&self->kill_pending,
+		    memory_order_acquire);
 	}
 	(void) __proc_mtx_unlock(&self->mbox_lock);
+	/*
+	 * Test hook for the coupling above.  A test attaches here and holds
+	 * this loop thread while a FOREIGN thread sends / kills, so the race
+	 * this function must survive is driven deterministically instead of
+	 * being hoped for: by the time control reaches this point the mailbox
+	 * has been checked AND the waker armed, so the foreign wake must find
+	 * waker_armed set.  Positioned exactly where the pre-fix gap was (the
+	 * mailbox check had happened, the arming had not), so the SAME hook
+	 * placed in the pre-fix source parks forever -- which is how
+	 * test/m8/test_proc.c's wait_fd_mailbox_wake_not_lost was shown to
+	 * fail without the fix.  A no-op with nothing attached (one relaxed
+	 * atomic load); see xtc_inject.h.
+	 */
+	XTC_INJECTION_POINT("proc.wait_fd.armed");
 	if (*out_revents & XTC_WAIT_MAILBOX) return XTC_OK;
 
-	/* Slow path: arm the recv waker, register the fd, optionally
+	/*
+	 * A kill latched in the window above (or just before it) -- act on it
+	 * now rather than parking on it.  Must be outside mbox_lock: this
+	 * unwinds via xtc_exit_self's longjmp when unmasked.  Leaving
+	 * waker_armed set across that unwind is harmless: p->alive is cleared
+	 * before the exit path runs, and every wake source (__mbox_deliver,
+	 * xtc_exit_pid, xtc_proc_wake) rejects a !alive proc before it ever
+	 * reads waker_armed, while in the brief still-alive window the task is
+	 * live and a wake on a RUNNING/DONE task is a documented no-op.
+	 * When the kill is MASKED this returns normally, and we park with the
+	 * waker already armed -- which is why the arming above is
+	 * unconditional.
+	 */
+	if (kp_gap != 0)
+		__xtc_proc_kill_deliver(self);   /* may not return */
+
+	/* Slow path: the recv waker is armed; register the fd, optionally
 	 * arm a timeout timer, then yield.  We bypass
 	 * xtc_task_park_on_fd / _on_timer because those wrappers reject
 	 * having both set; for wait_fd we need fd + timer + waker
 	 * simultaneously. */
-	atomic_store_explicit(&self->task->wake_revents, 0,
-	    memory_order_relaxed);
 
 	/*
 	 * Register on the loop this fiber is RUNNING on, not its home loop.
@@ -2427,8 +2518,13 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	wl = __xtc_current_loop != NULL ? __xtc_current_loop : self->task->loop;
 
 	if (xtc_io_reg_fd(wl->io, fd, interest,
-	    self->task) != XTC_OK)
+	    self->task) != XTC_OK) {
+		/* The waker was armed above (before this registration), so it
+		 * must be disarmed on every path that returns WITHOUT parking
+		 * -- otherwise the proc advertises a park it is not in. */
+		__wait_fd_disarm_waker(self);
 		return XTC_E_INTERNAL;
+	}
 	/* park_io first; the release-store publishes it. */
 	self->task->park_io = wl->io;
 	atomic_store_explicit(&self->task->park_fd, fd,
@@ -2448,6 +2544,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 			atomic_store_explicit(&self->task->park_fd, -1,
 			    memory_order_relaxed);
 			self->task->park_io = NULL;
+			__wait_fd_disarm_waker(self);
 			return XTC_E_INTERNAL;
 		}
 		t->deadline_ns = now_ns + timeout_ns;
@@ -2464,6 +2561,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 			atomic_store_explicit(&self->task->park_fd, -1,
 			    memory_order_relaxed);
 			self->task->park_io = NULL;
+			__wait_fd_disarm_waker(self);
 			return XTC_E_INTERNAL;
 		}
 		t->all_next = wl->all_timers;
@@ -2471,16 +2569,6 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		self->task->park_timer = t;
 		had_timer = 1;
 	}
-
-	(void) __proc_mtx_lock(&self->mbox_lock);
-	/* Populate recv_waker + set waker_armed together under mbox_lock so
-	 * the cross-thread wake (which reads waker_armed under this lock,
-	 * then reads recv_waker after unlocking) sees a fully-written
-	 * recv_waker with no data race -- see the matching note in
-	 * __do_recv's park point. */
-	(void)xtc_task_waker(self->task, &self->recv_waker);
-	self->waker_armed = 1;
-	(void) __proc_mtx_unlock(&self->mbox_lock);
 
 	/*
 	 * xtc_tail SCHED: record the readiness park and, on resume, the
@@ -2515,6 +2603,39 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		(void)__os_clock_mono(&park_ns);
 	}
 	__xtc_trace_causal(XTC_CAUSAL_PARK_FD, __func__);
+	/*
+	 * BUG 1 (cancellation bypassed the park cleanup below).
+	 *
+	 * Every xtc_yield RESUME runs the kill hook (__xtc_proc_kill_check ->
+	 * __xtc_proc_kill_deliver, installed in coro_uctx.c's universal resume
+	 * point).  With the mask at 0 an unmasked pending kill unwinds THERE,
+	 * via xtc_exit_self's longjmp -- i.e. INSIDE xtc_yield, before a single
+	 * statement of the cleanup below runs.  The fd stayed registered on
+	 * wl->io with a dead task as its tag, and the timeout timer stayed in
+	 * wl's heap.  Proc exit does NOT cover either: __run_proc_at_exit runs
+	 * the recovery registry and the at-exit hooks, neither of which knows
+	 * about scheduler park state.  MEASURED (fresh epoll build): after one
+	 * killed waiter, the NEXT waiter on the same fd got XTC_E_INTERNAL
+	 * (-6) from xtc_io_reg_fd's duplicate rejection instead of its timeout.
+	 *
+	 * Cleanup cannot simply be moved before the unwind point -- the unwind
+	 * point is inside xtc_yield itself.  So MASK the park: with the mask
+	 * raised, the resume hook LATCHES the kill into mask_deferred and
+	 * returns normally (__xtc_proc_kill_deliver's mask_depth > 0 branch),
+	 * the cleanup below runs to completion, and __mask_drain at the very
+	 * end honors the latched kill.  This is exactly what the mask is for:
+	 * "a resource acquired in a masked region can still register its
+	 * release" (xtc_proc.h), the fd registration and the timer BEING that
+	 * resource.
+	 *
+	 * The mask does NOT make a wedged waiter unkillable, which man
+	 * xtc_proc.3 warns against: the masked region is this bounded,
+	 * non-looping cleanup tail, never the app's wait.  The kill still ends
+	 * the park (xtc_exit_pid fires the recv waker), the fiber still exits,
+	 * and the window has no park, no loop, and no user code -- so the
+	 * DEFERRED report a supervisor sees cannot persist.
+	 */
+	__mask_depth_inc(self);
 	xtc_yield();
 	/* Restore __current_proc -- another fiber may have clobbered it. */
 	__current_proc = self;
@@ -2530,8 +2651,11 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	self->waker_armed = 0;
 	(void) __proc_mtx_unlock(&self->mbox_lock);
 
-	/* Re-check kill-pending after yielding back. */
-	__xtc_proc_kill_deliver(self);
+	/* NOTE: no __xtc_proc_kill_deliver here.  We are still inside the
+	 * mask raised before the yield, so a pending kill is already latched
+	 * in mask_deferred and delivering it here would only re-latch it.  The
+	 * kill is honored by the __mask_drain below, AFTER the park resources
+	 * are released -- that ordering is the whole point of the mask. */
 
 	/* Sample wake_revents.  The dispatcher / mbox_deliver / timer cb
 	 * have set the bits we care about. */
@@ -2605,8 +2729,43 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 
 	*out_revents = revents;
 
-	/* Decide return code: if only timeout fired, return XTC_E_AGAIN. */
-	if ((revents & ~(uint32_t)XTC_WAIT_TIMEOUT) == 0 && timeout_ns >= 0)
+	/*
+	 * Park resources are all released now: drop the mask raised before the
+	 * yield and honor a kill that landed during the park.  __mask_drain
+	 * does NOT return when one was latched (it unwinds via xtc_exit_self),
+	 * so this is the LAST statement that may not complete -- by design,
+	 * since everything above it is the cleanup the kill used to skip.
+	 * Also deliver a kill that arrived after the latch window (the drain
+	 * only consults mask_deferred), which is the re-check the pre-fix code
+	 * did right after the yield.
+	 */
+	__mask_depth_dec(self);
+	__mask_drain(self);            /* may not return */
+	__xtc_proc_kill_deliver(self); /* may not return */
+
+	/*
+	 * Decide return code: XTC_E_AGAIN means the DEADLINE EXPIRED and
+	 * nothing else fired, so it is gated on the TIMEOUT BIT actually
+	 * being set -- not merely on a timeout having been SUPPLIED.
+	 *
+	 * The old test was `no non-timeout bits && timeout_ns >= 0`, which
+	 * reported XTC_E_AGAIN for every wake that sets no revents bit at
+	 * all, the commonest being xtc_proc_wake (which deliberately asserts
+	 * NO cause -- see the comment there -- so the woken proc re-evaluates
+	 * its own condition).  A 1s wait explicitly woken at 10ms returned
+	 * XTC_E_AGAIN with revents == 0, and a consumer that reads
+	 * XTC_E_AGAIN as "my deadline expired" then abandoned the wait ~990ms
+	 * early.  The header contract (xtc_proc.h) is explicit: XTC_OK on a
+	 * non-timeout wakeup, XTC_E_AGAIN only when "timeout fired with
+	 * nothing else" and *out_revents carries XTC_WAIT_TIMEOUT.
+	 *
+	 * A bit-less wake now returns XTC_OK with *out_revents == 0, which is
+	 * exactly what a timeout_ns < 0 wait has always returned for the same
+	 * event, so every caller already had to re-check its own condition on
+	 * XTC_OK.  timeout_ns is no longer consulted: the timer fire is the
+	 * only producer of XTC_WAIT_TIMEOUT, so the bit implies one was armed.
+	 */
+	if (revents == (uint32_t)XTC_WAIT_TIMEOUT)
 		return XTC_E_AGAIN;
 	return XTC_OK;
 }
@@ -2971,6 +3130,48 @@ static void
 __run_proc_at_exit(struct xtc_proc *p)
 {
 	int i;
+
+	/*
+	 * BUG 5: an at-exit hook that PARKS after a KILL re-entered this
+	 * function forever.
+	 *
+	 * On the KILL path we arrive here having unwound via xtc_exit_self,
+	 * but kill_pending was still LATCHED -- nothing on the exit path ever
+	 * cleared it.  So the moment a hook reached a park point
+	 * (xtc_proc_sleep, xtc_recv, xtc_proc_wait_fd), that park's
+	 * __xtc_proc_kill_deliver saw the same pending kill, longjmp'd to
+	 * exit_jb AGAIN, landed back at __proc_entry's proc_exit, and re-ran
+	 * this whole at-exit list from the top.  MEASURED: the hook's "entered"
+	 * print repeated unboundedly and its xtc_proc_sleep NEVER returned,
+	 * until the supervisor's deadline expired.  The CONTROL isolates it to
+	 * the kill: the identical hook parking on a CLEAN exit completes and
+	 * its sleep returns XTC_OK, because a clean exit has no pending kill to
+	 * re-trigger.
+	 *
+	 * The kill has ALREADY been honored -- being here IS the unwind it
+	 * asked for -- so consume it, and raise the cancellation mask for the
+	 * whole hook run so a kill arriving DURING the hooks (a second
+	 * xtc_exit_pid, or one latched just before p->alive went 0) is latched
+	 * rather than acted on.  Both are needed: clearing alone still loses to
+	 * a fresh kill mid-hook, masking alone still sees the old latch.
+	 *
+	 * The mask is deliberately NEVER dropped or drained: we are past the
+	 * point of no return, the only thing a delivered kill could do here is
+	 * restart the very list we are running, and xtc_proc_at_exit hooks are
+	 * documented to run on an async kill -- which means they must be able
+	 * to reach a park point without being unwound out of.  This does not
+	 * hide a wedged proc from a supervisor: p->alive is already 0 before we
+	 * are called, and xtc_exit_pid_deadline tests !p->alive BEFORE the
+	 * mask_depth/mask_deferred pair, so it still reports XTC_KILL_DELIVERED
+	 * rather than a spurious DEFERRED.
+	 */
+	if (p != NULL) {
+		__mask_depth_inc(p);
+		atomic_store_explicit(&p->kill_pending, 0,
+		    memory_order_release);
+		__mask_deferred_set(p, 0);
+	}
+
 	/* Release any resources the proc registered for recovery but did
 	 * not explicitly release (LIFO), before the at-exit hooks. */
 	__recov_release_all(p);
