@@ -9,6 +9,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Callable as a reusable workflow so release.yml can require THIS
+  # workflow, at the tagged commit, before it publishes anything.  A tag
+  # push does NOT match the `branches: [main]` filter above, so without
+  # this a tag would publish having run no tests at all.  Do not put
+  # `tags:` in the push filter instead -- that runs the matrix as an
+  # independent workflow whose result the release job still cannot
+  # depend on, which is exactly the hole this closes.
+  workflow_call:
   schedule:
     # Nightly large-scale DST swarm/soak (100k+ seeds).  02:30 UTC daily.
     - cron: '30 2 * * *'
@@ -185,6 +193,7 @@ jobs:
       - name: Build the library
         run: make -C build_pbt -j"$(nproc)"
       - name: Run every property suite (zero SKIPs allowed)
+        id: props
         run: |
           set -u
           # NOT `set -e` around the capture: `out=$(make ...)` under -e
@@ -214,6 +223,42 @@ jobs:
             *) echo "FAIL: tests-pbt did not report any suite running"
                exit 1 ;;
           esac
+
+      - name: ADVISORY banner -- this job cannot fail the workflow
+        # continue-on-error above means a property FAILURE still reports
+        # the job green, silently turning "the 36 properties pass" into
+        # "nobody knows".  This step always runs and states the real
+        # outcome as a run-summary entry AND a GitHub annotation, so an
+        # advisory failure is impossible to mistake for coverage.  It
+        # deliberately does not exit nonzero: non-blocking is the existing
+        # documented decision (see the job comment); this only makes the
+        # status unmistakable.
+        if: always()
+        run: |
+          st='${{ steps.props.outcome }}'
+          if [ "$st" = success ]; then
+            echo "[hegel] ADVISORY tier PASSED: the property suites ran and passed."
+            {
+              echo "### hegel property tier: PASSED (advisory, non-blocking)"
+              echo "All property suites ran, no SKIPs."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "#########################################################"
+          echo "#  hegel property tier FAILED (outcome=$st)"
+          echo "#  This job is ADVISORY (continue-on-error: true), so the"
+          echo "#  workflow is GREEN while these properties are"
+          echo "#  UNVERIFIED.  A green run does NOT mean the properties"
+          echo "#  hold.  See the job comment in ci.yml."
+          echo "#########################################################"
+          echo "::warning title=hegel property tier FAILED (advisory, non-blocking)::The property suites did not pass (outcome=$st). CI is green ANYWAY because this job is continue-on-error. Those properties are UNVERIFIED by this run -- do not read the green check as property coverage."
+          {
+            echo "### hegel property tier: FAILED (advisory, non-blocking)"
+            echo ""
+            echo "The workflow is green ANYWAY because this job is"
+            echo "continue-on-error.  The properties are UNVERIFIED by this"
+            echo "run -- do not read the green check as property coverage."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   sim-dst:
     # Deterministic Simulation Testing: build with the sim I/O backend
@@ -308,11 +353,43 @@ jobs:
           for base in 0 $N $((N*2)) $((N*3)); do
             echo "--- shard base=$base ---"; tail -3 "swarm-$base.log"
             read -r code b < "swarm-$base.rc"
-            [ "$code" = 0 ] || { echo "shard base=$base FAILED (rc=$code)"; rc=1; }
+            if [ "$code" != 0 ]; then
+              echo "shard base=$base FAILED (rc=$code); complete log is in"
+              echo "the swarm-logs artifact.  Tail and seed lines follow."
+              tail -200 "swarm-$base.log"
+              # The failing SEED is the entire value of a DST sweep -- a
+              # failure without it is not reproducible.  Surface it inline
+              # as well as in the artifact.
+              grep -inE 'seed|FAIL|violat|assert' "swarm-$base.log" \
+                | tail -40 || true
+              rc=1
+            fi
           done
           exit $rc
 
+      - name: Upload full swarm logs (failure seeds must stay reproducible)
+        # Without this the sweep's output lived only on the runner and died
+        # with it: the step printed 3 lines per shard and discarded every
+        # seed, so a nightly failure could not be replayed.  if: always()
+        # because a FAILED sweep is precisely the run whose log matters.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarm-logs
+          path: |
+            swarm-*.log
+            swarm-*.rc
+          if-no-files-found: error
+          retention-days: 30
+
   sanitizers:
+    # SCOPE, stated so nobody assumes coverage this job does not have:
+    # this is the ordinary (epoll/uring) `make check` under ASan or UBSan.
+    # It is NOT the DST configuration.  DST needs a separate
+    # --with-io-backend=sim build (dist/Makefile.in's check-dst target),
+    # which this job never builds, so nothing here says anything about the
+    # sim backend or any test/sim/ test.  Sanitized DST is the
+    # sanitizers-dst job below.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -347,6 +424,108 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1:detect_stack_use_after_return=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: make -C build_san check
+
+  sanitizers-dst:
+    # Sanitized DETERMINISTIC SIMULATION -- the configuration the
+    # `sanitizers` job does NOT cover.  Two facts make it a separate job
+    # rather than a flag on an existing one:
+    #
+    #   1. DST requires its own library build (--with-io-backend=sim,
+    #      --enable-diagnostic), as dist/Makefile.in's check-dst target
+    #      documents.  `make check` never builds it, so ASan/UBSan over
+    #      `make check` says nothing about the sim backend, the
+    #      deterministic scheduler, or any DST test.
+    #
+    #   2. test/sim/run_sim_tests.sh cannot merely be RUN under a
+    #      sanitizer: it compiles the harness objects and each test with a
+    #      bare `$CC -std=c11 -D_GNU_SOURCE ...` line carrying no
+    #      CFLAGS/LDFLAGS, so the test translation units come out
+    #      UNINSTRUMENTED.  Against an instrumented library that is an
+    #      undefined-reference link failure under UBSan (measured:
+    #      __ubsan_handle_type_mismatch_v1 unresolved), and where it does
+    #      link, the test code itself is unchecked.  So this job open-codes
+    #      the sim build and the per-test compile with the sanitizer flags
+    #      on BOTH sides.
+    #
+    # SUBSET, and why it is not the full DST list: the sanitizers multiply
+    # DST's already CPU-bound seed sweeps.  test_sim_lockmgr was measured
+    # burning over 19 minutes of CPU under UBSan on a single case without
+    # finishing, so a full sanitized tier does not fit a CI job.  The list
+    # below is the determinism/fault core -- scheduler, replay, the
+    # determinism guard itself, cross-loop ownership, partition, machine
+    # death, buggify, I/O fault, torn writes, the 200-seed soak -- each
+    # measured at about 1 second under both sanitizers.  The UNSANITIZED
+    # full tier still runs in the sim-dst job; this adds memory-safety and
+    # UB checking to the part that fits.  Widening the list is welcome so
+    # long as the job still finishes.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf pkg-config gawk
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Build the sim-backend library under ${{ matrix.sanitizer }}
+        run: |
+          mkdir -p build_san_dst
+          cd build_san_dst
+          CFLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g -O1" \
+          LDFLAGS="-fsanitize=${{ matrix.sanitizer }}" \
+            ../dist/configure --with-io-backend=sim --with-tls=none \
+              --without-liburing --enable-diagnostic
+          make -j"$(nproc)"
+      - name: Core DST tests under ${{ matrix.sanitizer }}
+        env:
+          # abort/halt_on_error: a sanitizer report fails the job at the
+          # first offence rather than scrolling past.
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          set -u
+          san='${{ matrix.sanitizer }}'
+          rc=0
+          for t in test_sim_sched test_sim_determinism \
+                   test_sim_determinism_guard test_sim_wake_park \
+                   test_sim_cross_loop_owner test_sim_partition \
+                   test_sim_machine_death test_sim_buggify \
+                   test_sim_iofault test_sim_torn test_sim_soak; do
+            # test_sim_determinism_guard, ASan arm ONLY: the test's main()
+            # calls __os_thread_self(), whose 8-byte per-thread id cache
+            # (src/os/os_thread.c) is intentionally never freed, so
+            # LeakSanitizer reports a fixed 8-byte direct leak at exit.
+            # That is a pre-existing library-lifetime allocation, not a DST
+            # finding.  Excluded HERE rather than via a global suppression
+            # (which would hide real leaks), and it still runs in the UBSan
+            # arm -- so the guard is never unexercised.
+            if [ "$san" = address ] && \
+               [ "$t" = test_sim_determinism_guard ]; then
+              echo "=== $t : excluded from the ASan arm only (8-byte"
+              echo "    __os_thread_self id cache); runs in the UBSan arm"
+              continue
+            fi
+            # A test that does not COMPILE is a FAILURE, never a skip.
+            if ! gcc -std=c11 -D_GNU_SOURCE \
+                 -fsanitize="$san" -fno-omit-frame-pointer -g -O1 \
+                 -I src/inc "test/sim/$t.c" build_san_dst/libxtc.a \
+                 -pthread -ldl -lm -o "build_san_dst/$t"; then
+              echo "FAIL: $t did not compile under $san"
+              rc=1
+              continue
+            fi
+            echo "=== $t ($san) ==="
+            if ! timeout 1200 "build_san_dst/$t"; then
+              echo "FAIL: $t under $san"
+              rc=1
+            fi
+          done
+          exit $rc
 
   diagnostic:
     # DIAGNOSTIC build: the owner-thread guards (XTC_ASSERT_LOOP_OWNER)
@@ -418,7 +597,16 @@ jobs:
           cd build_tsan
           rc=0
           for t in test_fctx test_async test_proc test_svr test_chan test_proc_table_stress test_blocking; do
-            make "$t" >/dev/null 2>&1 || continue
+            # A test that does not BUILD is a FAILURE, not a skip.  This
+            # loop used to `|| continue`, so a test that stopped compiling
+            # under clang+TSan vanished from the gate silently and the job
+            # went green having checked less than it claimed.
+            if ! make "$t" > "build_$t.log" 2>&1; then
+              echo "FAIL: $t did not build under clang ThreadSanitizer"
+              tail -40 "build_$t.log"
+              rc=1
+              continue
+            fi
             echo "=== $t ==="
             ./"$t" 2>&1 | tee "tsan_$t.log"
             if grep -q "WARNING: ThreadSanitizer" "tsan_$t.log"; then

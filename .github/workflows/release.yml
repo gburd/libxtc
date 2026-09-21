@@ -1,9 +1,19 @@
 name: Release
 
-# Triggered by pushing a tag matching v* (e.g. v1.7.0).  Confirms the
-# tag builds, produces three artifacts (source tarball, single-file
-# amalgamation, man-page bundle), and attaches them to a GitHub
-# Release for the tag.  Does not touch ci.yml or pages.yml.
+# Triggered by pushing a tag matching v* (e.g. v1.7.0).  Runs the FULL CI
+# suite against the tagged commit, then builds the three artifacts (source
+# tarball, single-file amalgamation, man-page bundle), TEST-BUILDS the
+# source tarball exactly as a packager would, and only then attaches them
+# to a GitHub Release.  Does not touch ci.yml's triggers or pages.yml.
+#
+# GATING (this is the point of the file's shape):
+#   ci  -> verify-tag -> build -> publish
+# Every job below `needs:` its predecessor, so GitHub will not start the
+# publish job unless every gate job concluded successfully.  Previously
+# this workflow built and published with NO tests at all: a tag push does
+# not match ci.yml's `branches: [main]` push filter, so the test matrix
+# never ran for the tag either.  A tag could therefore publish green
+# having tested nothing.
 
 on:
   push:
@@ -14,8 +24,65 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # ------------------------------------------------------------------
+  # GATE 1: the full CI suite, at THIS commit.
+  #
+  # `uses: ./.github/workflows/ci.yml` runs the entire ci.yml workflow
+  # (every job: gcc/clang matrix, api-discipline gate, musl, DST, the
+  # sanitizers, sanitized DST, diagnostic, TSan, valgrind, examples, TLS
+  # backends, macOS, FreeBSD, riscv64, MSVC ...) against the tagged ref,
+  # as a reusable workflow.  Not `workflow_run`, which fires only AFTER a
+  # separate workflow finishes and cannot be a dependency; not a
+  # duplicated copy of the jobs, which would rot out of sync with
+  # ci.yml.  If any CI job fails, this job fails, and everything below
+  # -- including publication -- is skipped by `needs:`.
+  #
+  # KNOWN SCOPE LIMIT, stated so it is not mistaken for coverage: the two
+  # NIGHTLY-only tiers inside ci.yml (cbmc-nightly and
+  # sim-swarm-nightly) carry
+  #   if: github.event_name == 'schedule' || ... 'workflow_dispatch'
+  # and a tag push reaches them as event_name == 'push', so they SKIP
+  # here (a skipped job does not fail the workflow).  A release is
+  # therefore gated on every per-push tier but NOT on the 100k-seed swarm
+  # or the bounded-model-checking tier; those remain nightly.  Check the
+  # most recent nightly run before cutting a release, or dispatch ci.yml
+  # manually on the release commit to force both tiers.
+  # ------------------------------------------------------------------
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  verify-tag:
+    # GATE 2: the tag must name the version the tree declares.  A tag
+    # whose name disagrees with dist/version.in would publish artifacts
+    # named for one version from the source of another; every existing
+    # tag satisfies this, so it is a real invariant, not a new hurdle.
     runs-on: ubuntu-latest
+    needs: ci
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag name must match dist/version.in
+        id: ver
+        run: |
+          set -eu
+          ver="$(tr -d '[:space:]' < dist/version.in)"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_REF_NAME}  dist/version.in=$ver"
+          if [ "${GITHUB_REF_NAME}" != "v$ver" ]; then
+            echo "FAIL: tag ${GITHUB_REF_NAME} != v$ver from dist/version.in"
+            exit 1
+          fi
+
+  build:
+    # GATE 3: produce the artifacts and PROVE the published ones work.
+    # Nothing is uploaded from this job; the artifacts are handed to the
+    # publish job through actions/upload-artifact so that publication
+    # consumes the exact bytes that were tested here.
+    runs-on: ubuntu-latest
+    needs: verify-tag
+    env:
+      VER: ${{ needs.verify-tag.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,10 +92,6 @@ jobs:
           sudo apt-get install -y \
             gcc make autoconf automake libtool \
             pkg-config libssl-dev liburing-dev gawk python3
-
-      - name: Derive version
-        id: ver
-        run: echo "version=$(cat dist/version.in)" >> "$GITHUB_OUTPUT"
 
       - name: Autoreconf
         working-directory: dist
@@ -44,39 +107,172 @@ jobs:
 
       - name: Source tarball
         run: |
-          ver='${{ steps.ver.outputs.version }}'
-          git archive --format=tar.gz --prefix="libxtc-$ver/" \
-            "${GITHUB_REF_NAME}" > "libxtc-$ver.tar.gz"
+          git archive --format=tar.gz --prefix="libxtc-$VER/" \
+            "${GITHUB_REF_NAME}" > "libxtc-$VER.tar.gz"
+
+      - name: Test-build the PUBLISHED tarball as a packager would
+        # The tarball comes from `git archive` of the tag, NOT from the
+        # regenerated build tree above -- so building the work tree proves
+        # nothing about the artifact consumers actually download.  This
+        # unpacks the produced file into a clean directory and builds it
+        # the packager way: dist/configure straight from the tarball, with
+        # NO autoreconf.  That is the supported no-autoconf path (AGENTS.md
+        # documents dist/configure as deliberately committed for exactly
+        # this, and test/dist/test_install_headers.sh depends on it), so
+        # this step also guards that guarantee: if the committed configure
+        # ever goes missing or stale in the archive, the release fails here
+        # instead of shipping a tarball nobody can build.
+        #
+        # PATH is emptied of autotools first: without that, a Makefile rule
+        # or sub-script could quietly invoke autoreconf from the runner
+        # image and the test would pass for the wrong reason.
+        run: |
+          set -eu
+          work="$(mktemp -d)"
+          tar -xzf "libxtc-$VER.tar.gz" -C "$work"
+          src="$work/libxtc-$VER"
+          test -d "$src" || { echo "FAIL: tarball prefix is not libxtc-$VER"; exit 1; }
+          # The committed configure must be present AND executable in the
+          # archive (git archive preserves the exec bit; a lost +x would
+          # break every packager).
+          test -x "$src/dist/configure" \
+            || { echo "FAIL: dist/configure missing or not executable in the tarball"; exit 1; }
+          # Prove no autotools are reachable, so the build below cannot
+          # silently regenerate anything.
+          mkdir -p "$work/nobin"
+          cat > "$work/nobin/autoreconf" <<'EOF'
+          #!/bin/sh
+          echo "FAIL: the tarball build invoked autoreconf; the packager path must not need it" >&2
+          exit 127
+          EOF
+          for t in autoconf automake aclocal autoheader libtoolize; do
+            cp "$work/nobin/autoreconf" "$work/nobin/$t"
+          done
+          chmod +x "$work/nobin"/*
+          mkdir -p "$src/b"
+          cd "$src/b"
+          # PATH: the trap shims come FIRST so any autotools call hits them.
+          export PATH="$work/nobin:$PATH"
+          ../dist/configure --with-tls=auto
+          make -j"$(nproc)"
+          test -f libxtc.a
+          # Smoke: the tarball's own example must build and run against the
+          # library just built from the tarball.
+          make 01_hello
+          ./01_hello
+          # And the library must be usable through the documented install
+          # surface: install into a throwaway prefix, then compile+link+run
+          # a consumer against ONLY the installed headers.
+          make install DESTDIR="$work/inst"
+          inc="$work/inst/usr/local/include"
+          lib="$work/inst/usr/local/lib"
+          test -f "$inc/xtc.h" || { echo "FAIL: xtc.h not installed from the tarball"; exit 1; }
+          printf '%s\n' '#include <stdio.h>' '#include "xtc.h"' \
+            'int main(void){printf("libxtc %s\n", xtc_version_string());return 0;}' \
+            > "$work/consumer.c"
+          cc -I"$inc" "$work/consumer.c" "$lib/libxtc.a" -pthread -ldl -lm \
+            -o "$work/consumer"
+          out="$("$work/consumer")"
+          echo "tarball consumer says: $out"
+          # The artifact must report the version it is named for.
+          case "$out" in
+            *"$VER"*) ;;
+            *) echo "FAIL: tarball reports '$out', expected version $VER"
+               exit 1 ;;
+          esac
+          echo "[release] tarball test-build OK (packager path, no autoreconf)"
 
       - name: Amalgamation bundle (xtc.c + xtc.h)
         run: |
-          ver='${{ steps.ver.outputs.version }}'
           python3 dist/mkamalgamation.py --root "$PWD" --out amalg
           test -s amalg/xtc.c && test -s amalg/xtc.h
-          tar -czf "libxtc-amalgamation-$ver.tar.gz" -C amalg xtc.c xtc.h
+          tar -czf "libxtc-amalgamation-$VER.tar.gz" -C amalg xtc.c xtc.h
+
+      - name: Test-build the PUBLISHED amalgamation bundle
+        # Same principle as the tarball: unpack the file that will actually
+        # be attached to the release and compile a drop-in consumer against
+        # it, so a broken amalgamation cannot ship.
+        run: |
+          set -eu
+          work="$(mktemp -d)"
+          tar -xzf "libxtc-amalgamation-$VER.tar.gz" -C "$work"
+          test -s "$work/xtc.c" && test -s "$work/xtc.h"
+          printf '%s\n' '#include <stdio.h>' '#include "xtc.h"' \
+            'int main(void){printf("libxtc %s\n", xtc_version_string());return 0;}' \
+            > "$work/c.c"
+          cc -std=c11 -D_GNU_SOURCE -I"$work" "$work/c.c" "$work/xtc.c" \
+            -pthread -ldl -lm -o "$work/c"
+          out="$("$work/c")"
+          echo "amalgamation consumer says: $out"
+          case "$out" in
+            *"$VER"*) ;;
+            *) echo "FAIL: amalgamation reports '$out', expected version $VER"
+               exit 1 ;;
+          esac
+          echo "[release] amalgamation test-build OK"
 
       - name: Man-page bundle
         run: |
-          ver='${{ steps.ver.outputs.version }}'
-          tar -czf "libxtc-man-$ver.tar.gz" man/
+          tar -czf "libxtc-man-$VER.tar.gz" man/
+          # Non-empty and actually containing man pages.
+          tar -tzf "libxtc-man-$VER.tar.gz" | grep -q 'man/man3/.*\.3' \
+            || { echo "FAIL: man bundle has no man3 pages"; exit 1; }
 
       - name: Release notes from changelog
         run: |
-          ver='${{ steps.ver.outputs.version }}'
-          awk -v v="$ver" '
+          awk -v v="$VER" '
             $0 ~ "^libxtc \\("v {p=1}
             p && /^libxtc \(/ && $0 !~ v {exit}
             p {print}
           ' debian/changelog > notes.md
           if [ ! -s notes.md ]; then
-            echo "libxtc $ver" > notes.md
+            echo "libxtc $VER" > notes.md
           fi
 
+      - name: Hand the TESTED artifacts to the publish job
+        # Publication must upload these exact bytes, not rebuild them:
+        # anything rebuilt in the publish job would be unverified again.
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: |
+            libxtc-${{ env.VER }}.tar.gz
+            libxtc-amalgamation-${{ env.VER }}.tar.gz
+            libxtc-man-${{ env.VER }}.tar.gz
+            notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    # The ONLY job that writes anything public.  `needs: [ci, verify-tag,
+    # build]` makes publication impossible unless the full CI suite, the
+    # tag/version check, and the artifact test-builds all concluded
+    # successfully -- GitHub skips a job whose dependency failed or was
+    # cancelled.  It builds nothing itself; it downloads the artifacts the
+    # build job already proved good.
+    runs-on: ubuntu-latest
+    needs: [ci, verify-tag, build]
+    env:
+      VER: ${{ needs.verify-tag.outputs.version }}
+    steps:
+      - name: Download the tested artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+      - name: Confirm every artifact arrived
+        run: |
+          set -eu
+          for f in "libxtc-$VER.tar.gz" \
+                   "libxtc-amalgamation-$VER.tar.gz" \
+                   "libxtc-man-$VER.tar.gz" notes.md; do
+            test -s "$f" || { echo "FAIL: missing artifact $f"; exit 1; }
+          done
+          ls -l
       - name: Create GitHub Release and upload artifacts
         uses: softprops/action-gh-release@v2
         with:
           body_path: notes.md
           files: |
-            libxtc-${{ steps.ver.outputs.version }}.tar.gz
-            libxtc-amalgamation-${{ steps.ver.outputs.version }}.tar.gz
-            libxtc-man-${{ steps.ver.outputs.version }}.tar.gz
+            libxtc-${{ env.VER }}.tar.gz
+            libxtc-amalgamation-${{ env.VER }}.tar.gz
+            libxtc-man-${{ env.VER }}.tar.gz
