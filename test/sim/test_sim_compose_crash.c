@@ -21,14 +21,23 @@
  *	The crash invariant across the whole stack (per seed):
  *	  (a) DURABILITY: every row whose COMMIT returned SX_OK before the
  *	      crash (acked -- the commit the worker observed succeed while
- *	      holding the lock) is present after recovery;
- *	  (b) no false durability: a row never appears unless its worker at
- *	      least attempted the commit;
+ *	      holding the lock) is present after recovery WITH THE VALUE it
+ *	      wrote;
+ *	  (b) no false durability: EVERY recovered row (not merely the acked
+ *	      ones) must belong to a (worker, iter) that attempted a commit
+ *	      and must hold exactly the bytes that worker wrote -- a row
+ *	      recovery invented, or one holding the wrong value, fails;
  *	  (c) the lockmgr never granted two holders (mutual exclusion held
  *	      right up to the crash);
- *	  (d) recovery + the fresh-tree open quiesce; and
- *	  (e) REPLAY: the same seed reproduces the identical crash point
- *	      and recovered-row set (content hash).
+ *	  (d) the sim run QUIESCED -- a budget-exhausted / deadlocked /
+ *	      invariant-violating return fails (it is not flattened to OK),
+ *	      and recovery + the fresh-tree open complete; and
+ *	  (e) REPLAY: the same seed reproduces the identical crash point,
+ *	      acked count, recovered count, ROW COUNT and content hash --
+ *	      where the hash folds the stored VALUES, not just row ids.
+ *	The sweep additionally asserts that some seed crashed MID-workload
+ *	and that some commit was acked, so the invariants had real work to
+ *	check rather than trivially holding over an empty run.
  *
  *	A lost acked commit here would be a real durability bug in the
  *	lock/commit/WAL interaction -- exactly the class DST at FDB depth
@@ -78,6 +87,7 @@ static xtc_exec_t      *g_exec;
  * the parent reads these after the child crashes -- actually the run is
  * in-process; these are process-global and read after the sim run). */
 static int      g_acked[N_WORKERS][QUOTA];   /* commit returned SX_OK */
+static int      g_attempted[N_WORKERS][QUOTA];/* the INSERT+COMMIT was tried */
 static int      g_lock_viol;
 static atomic_long g_step;                   /* shared workload step counter */
 static _Atomic long g_crash_at = -1;         /* seeded crash threshold */
@@ -86,18 +96,35 @@ static atomic_int  g_lock_held;
 
 static long ROWID(int w, int i) { return (long)(w * 1000 + i); }
 
-/* Read column v for rowid k from table t; 1 with *out set, else 0. */
+/*
+ * Read column v for rowid k from table t.  Returns 1 with *out set to the
+ * STORED VALUE (NUL-terminated), else 0.  The previous version discarded
+ * the value entirely ((void)out; (void)cap), so "the row is present" was
+ * the only thing any caller could check -- a recovered row holding the
+ * WRONG bytes passed.  sibling test_sim_crash_recover reads the value and
+ * compares it; do the same.
+ */
 static int
 sel_v(sx_db *db, long k, char *out, size_t cap)
 {
 	sx_stmt *st = NULL;
 	int got = 0;
+	if (out == NULL || cap == 0)
+		return 0;
+	out[0] = '\0';
 	if (sx_prepare(db, "SELECT v FROM t WHERE k=?", -1, &st, NULL) != SX_OK)
 		return 0;
 	sx_bind_int64(st, 1, (int64_t)k);
-	if (sx_step(st) == SX_ROW)
+	if (sx_step(st) == SX_ROW) {
+		const char *t = sx_column_text(st, 0);
+		size_t n = (size_t)sx_column_bytes(st, 0);
+		if (n >= cap)
+			n = cap - 1;
+		if (t != NULL)
+			memcpy(out, t, n);
+		out[n] = '\0';
 		got = 1;
-	(void)out; (void)cap;
+	}
 	sx_finalize(st);
 	return got;
 }
@@ -145,6 +172,11 @@ worker(void *arg)
 			    "INSERT INTO t(k,v) VALUES(%ld,'%d-%d');",
 			    rowid, w->id, i);
 			if (sx_exec(db, sql, NULL) == SX_OK) {
+				/* ATTRIBUTION: from here a row for this key may
+				 * legitimately reach the WAL, so recovery may
+				 * return it.  A recovered row NOT marked here was
+				 * fabricated by the storage stack. */
+				g_attempted[w->id][i] = 1;
 				if (sx_exec(db, "COMMIT", NULL) == SX_OK)
 					g_acked[w->id][i] = 1;  /* durable-acked */
 			} else {
@@ -232,8 +264,71 @@ wal_truncate_to_durable(const char *path, uint64_t durable_lsn,
 	return 0;
 }
 
+/*
+ * Scan the whole recovered table and verify EVERY row, not just the acked
+ * ones.  Fills the content hash over (key, STORED VALUE) pairs and counts
+ * the rows.  Returns 0, or a negative code naming the violated property:
+ *
+ *   -4  a recovered row holds the WRONG value for its key (a torn /
+ *       mis-replayed row -- the old test never looked at the value)
+ *   -5  a recovered row belongs to a (worker, iter) that never ATTEMPTED
+ *       a commit: recovery FABRICATED it (the old test never rejected an
+ *       unexpected recovered row at all)
+ *
+ * Modelled on test_sim_crash_recover's verify loop, which is the stronger
+ * sibling this test claims parity with.
+ */
 static int
-run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered)
+verify_recovered(sx_db *db, uint64_t *io_hash, int *out_rows, long *out_bad)
+{
+	sx_stmt *st = NULL;
+	uint64_t h = *io_hash;
+	int rows = 0, ret = 0;
+
+	if (sx_prepare(db, "SELECT k, v FROM t ORDER BY k", -1, &st, NULL)
+	    != SX_OK)
+		return -1;
+	while (sx_step(st) == SX_ROW) {
+		long k = (long)sx_column_int64(st, 0);
+		const char *v = sx_column_text(st, 1);
+		size_t vn = (size_t)sx_column_bytes(st, 1);
+		int w = (int)(k / 1000), i = (int)(k % 1000);
+		char want[32];
+		size_t j;
+
+		rows++;
+		if (w < 0 || w >= N_WORKERS || i < 0 || i >= QUOTA ||
+		    !g_attempted[w][i]) {
+			*out_bad = k;
+			ret = -5;            /* FABRICATED row */
+			break;
+		}
+		snprintf(want, sizeof want, "%d-%d", w, i);
+		if (v == NULL || vn != strlen(want) ||
+		    memcmp(v, want, vn) != 0) {
+			*out_bad = k;
+			ret = -4;            /* WRONG value for this key */
+			break;
+		}
+		/* Content hash over the key AND the stored VALUE.  The old hash
+		 * folded only acked row IDs, so a recovered row whose bytes
+		 * differed between two runs of the same seed hashed identically
+		 * and "replayed". */
+		h ^= (uint64_t)k; h *= 0x100000001B3ull;
+		for (j = 0; j < vn; j++) {
+			h ^= (uint64_t)(unsigned char)v[j];
+			h *= 0x100000001B3ull;
+		}
+	}
+	sx_finalize(st);
+	*io_hash = h;
+	*out_rows = rows;
+	return ret;
+}
+
+static int
+run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered,
+    int *out_acked, int *out_rows, long *out_bad)
 {
 	wal_opts_t wo = {0};
 	bm_opts_t bo = BM_OPTS_DEFAULT, b2 = BM_OPTS_DEFAULT;
@@ -249,9 +344,10 @@ run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered)
 	xtc_pid_t wp;
 	uint64_t dlsn = 0, h = 1469598103934665603ull;
 	uint64_t durable_bytes = 0;
-	int i, w, fd, rc = -1, recovered = 0;
+	int i, w, fd, rc = -1, recovered = 0, acked = 0, rows = 0, sim_rc;
 
 	memset(g_acked, 0, sizeof g_acked);
+	memset(g_attempted, 0, sizeof g_attempted);
 	g_lock_viol = 0;
 	atomic_store(&g_step, 0);
 	atomic_store(&g_crash_at, -1);
@@ -297,7 +393,8 @@ run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered)
 	(void)xtc_proc_spawn(xtc_exec_loop(g_exec, 0), collector, NULL,
 	    NULL, NULL);
 
-	rc = xtc_sim_exec_run(g_exec, seed, 20000000);
+	sim_rc = xtc_sim_exec_run(g_exec, seed, 20000000);
+	rc = sim_rc;
 	dlsn = wal_durable_lsn(g_wal);
 	/* Capture the TRUE durable byte frontier from the sim write-back
 	 * model (last fdatasync-confirmed byte on the WAL fd) BEFORE the
@@ -339,25 +436,50 @@ run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered)
 		sx_close(db2); bt_close(bt2); bm_destroy(bm2); rc = -1; goto files;
 	}
 
-	/* ---- verify: every ACKED row is present after recovery. ---- */
+	/* ---- verify ----
+	 *
+	 * (a) SIM RETURN: a run that did not quiesce (budget exhausted,
+	 *     deadlock, invariant violation) must FAIL.  The old code stashed
+	 *     the sim rc here and then unconditionally replaced anything that
+	 *     was not -4 with XTC_OK, discarding XTC_E_AGAIN / XTC_E_DEADLK /
+	 *     XTC_E_INTERNAL entirely.  A run stopped by xtc_exec_stop (the
+	 *     modelled crash) legitimately returns XTC_OK, so only XTC_OK is
+	 *     accepted.
+	 * (b) DURABILITY: every acked commit is present with its value.
+	 * (c) NO FABRICATION / NO WRONG VALUE: every recovered row is a row
+	 *     some worker attempted, holding exactly the bytes it wrote.
+	 */
+	if (sim_rc != XTC_OK) { rc = -2; goto verified; }
+
+	rc = verify_recovered(db2, &h, &rows, out_bad);
+	if (rc != 0) goto verified;
+
 	for (w = 0; w < N_WORKERS; w++) {
 		for (i = 0; i < QUOTA; i++) {
 			long rowid = ROWID(w, i);
-			char v[32];
-			int present = sel_v(db2, rowid, v, sizeof v);
-			if (g_acked[w][i]) {
-				if (!present) { rc = -4; break; } /* LOST acked commit */
-				recovered++;
-				h ^= (uint64_t)rowid; h *= 0x100000001B3ull;
+			char v[32], want[32];
+			if (!g_acked[w][i])
+				continue;
+			acked++;
+			snprintf(want, sizeof want, "%d-%d", w, i);
+			if (!sel_v(db2, rowid, v, sizeof v) ||
+			    strcmp(v, want) != 0) {
+				*out_bad = rowid;
+				rc = -3;   /* LOST (or corrupted) acked commit */
+				goto verified;
 			}
+			recovered++;
 		}
-		if (rc == -4) break;
 	}
-	if (rc != -4) rc = XTC_OK;
+	if (recovered != acked) { rc = -6; goto verified; }   /* cannot happen */
+	rc = XTC_OK;
 
+verified:
 	sx_close(db2); bt_close(bt2); bm_destroy(bm2);
 	if (out_hash) *out_hash = h;
 	if (out_recovered) *out_recovered = recovered;
+	if (out_acked) *out_acked = acked;
+	if (out_rows) *out_rows = rows;
 	unlink(logp); unlink(btA); unlink(btB);
 	return rc;
 
@@ -373,11 +495,82 @@ files:  unlink(logp); unlink(btA); unlink(btB);
 	return rc;
 }
 
+/* Result of one run, passed back from the forked child over a pipe so the
+ * parent can report the ACTUAL numbers (and the offending rowid) rather
+ * than only an exit status. */
+struct rr {
+	int      rc;
+	int      viol;
+	int      acked;
+	int      recovered;
+	int      rows;
+	long     crash_at;
+	long     bad;
+	uint64_t hash;
+};
+
+static const char *
+why(int rc)
+{
+	switch (rc) {
+	case -2: return "the sim run did not quiesce (budget/deadlock/invariant)";
+	case -3: return "LOST or CORRUPTED an acked commit (durability)";
+	case -4: return "a recovered row holds the WRONG value";
+	case -5: return "recovery FABRICATED a row no worker attempted";
+	case -6: return "acked/recovered accounting disagrees";
+	case -1: return "setup/teardown error";
+	default: return "unknown";
+	}
+}
+
+/* Run `seed` once in a FRESH child (isolating the process-global MVCC
+ * commit clock) and hand the full result back over a pipe. */
+static int
+run_forked(uint64_t seed, struct rr *out)
+{
+	int pfd[2];
+	pid_t pid;
+	int wstat = 0;
+	struct rr r;
+
+	memset(out, 0, sizeof *out);
+	out->rc = -1;
+	if (pipe(pfd) != 0)
+		return -1;
+	pid = fork();
+	if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+	if (pid == 0) {
+		close(pfd[0]);
+		memset(&r, 0, sizeof r);
+		r.bad = -1;
+		r.rc = run_one(seed, &r.hash, &r.viol, &r.recovered, &r.acked,
+		    &r.rows, &r.bad);
+		r.crash_at = atomic_load(&g_crash_at);
+		(void)!write(pfd[1], &r, sizeof r);
+		close(pfd[1]);
+		_exit(r.rc == XTC_OK && r.viol == 0 ? 0 : 1);
+	}
+	close(pfd[1]);
+	if (read(pfd[0], &r, sizeof r) == (ssize_t)sizeof r)
+		*out = r;
+	close(pfd[0]);
+	(void)waitpid(pid, &wstat, 0);
+	if (!WIFEXITED(wstat)) {
+		out->rc = -1;          /* the child died: a real failure */
+		return -1;
+	}
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
 	uint64_t base = 0x63636b; /* "cck" */
 	int n = 12, i, fails = 0;
+	int n_before = 0, n_mid = 0, n_after = 0;
+	int min_acked = 1 << 30, max_acked = -1;
+	long tot_rows = 0;
+	const long total_txns = (long)N_WORKERS * QUOTA;
 
 	if (argc > 1) base = strtoull(argv[1], NULL, 0);
 	if (argc > 2) n = atoi(argv[2]);
@@ -387,55 +580,90 @@ main(int argc, char **argv)
 
 	for (i = 0; i < n; i++) {
 		uint64_t seed = base + (uint64_t)i * 0x9E3779B97F4A7C15ull;
-		uint64_t h = 0, h2 = 0;
-		int viol = 0, viol2 = 0, recov = 0, recov2 = 0, rc, rc2;
-		pid_t pid;
-		int wstat = 0;
+		struct rr a, b;
 
-		/* Fork-per-run: isolate the process-global MVCC commit clock so
-		 * in-process replay is exact (crash_recover does the same). */
-		pid = fork();
-		if (pid == 0) {
-			rc = run_one(seed, &h, &viol, &recov);
-			_exit(rc == XTC_OK && viol == 0 ? 0 :
-			    (rc == -4 ? 4 : 1));
-		}
-		(void)waitpid(pid, &wstat, 0);
-		if (!WIFEXITED(wstat) || WEXITSTATUS(wstat) != 0) {
-			printf("  seed 0x%016llx: FAIL (child status %d -- "
-			    "%s)\n", (unsigned long long)seed,
-			    WEXITSTATUS(wstat),
-			    WEXITSTATUS(wstat) == 4 ? "LOST acked commit" :
-			    "run error");
+		(void)run_forked(seed, &a);
+		if (a.rc != XTC_OK || a.viol != 0) {
+			printf("  seed 0x%016llx: FAIL rc=%d -- %s%s (acked %d, "
+			    "recovered %d, rows %d, lock violations %d, "
+			    "rowid %ld)\n", (unsigned long long)seed, a.rc,
+			    a.viol ? "MUTUAL EXCLUSION violated: two lock "
+			    "holders; " : "", why(a.rc), a.acked, a.recovered,
+			    a.rows, a.viol, a.bad);
 			fails++;
 			continue;
 		}
-		/* Replay in another fork; compare the recovered-row hash. */
-		pid = fork();
-		if (pid == 0) {
-			int fd1, fd2;
-			rc = run_one(seed, &h, &viol, &recov);
-			rc2 = run_one(seed, &h2, &viol2, &recov2);
-			fd1 = (rc == XTC_OK && rc2 == XTC_OK && h == h2 &&
-			    recov == recov2) ? 0 : 5;
-			fd2 = fd1;
-			(void)fd2;
-			_exit(fd1);
-		}
-		(void)waitpid(pid, &wstat, 0);
-		if (!WIFEXITED(wstat) || WEXITSTATUS(wstat) != 0) {
-			printf("  seed 0x%016llx: REPLAY MISMATCH\n",
-			    (unsigned long long)seed);
+		/* REPLAY: the same seed must reproduce the identical crash
+		 * point, acked set, recovered set, ROW COUNT and content hash
+		 * (which now folds the stored VALUES, not just row ids). */
+		(void)run_forked(seed, &b);
+		if (b.rc != XTC_OK || b.viol != 0) {
+			printf("  seed 0x%016llx: FAIL on replay rc=%d -- %s\n",
+			    (unsigned long long)seed, b.rc, why(b.rc));
 			fails++;
+			continue;
 		}
+		if (a.crash_at != b.crash_at || a.acked != b.acked ||
+		    a.recovered != b.recovered || a.rows != b.rows ||
+		    a.hash != b.hash) {
+			printf("  seed 0x%016llx: REPLAY MISMATCH (crash_at "
+			    "%ld/%ld acked %d/%d recovered %d/%d rows %d/%d "
+			    "hash %016llx/%016llx)\n",
+			    (unsigned long long)seed, a.crash_at, b.crash_at,
+			    a.acked, b.acked, a.recovered, b.recovered,
+			    a.rows, b.rows, (unsigned long long)a.hash,
+			    (unsigned long long)b.hash);
+			fails++;
+			continue;
+		}
+		/* The recovered set must be a SUPERSET of the acked set (extras
+		 * are fsync-confirmed winners whose ack was still in flight at
+		 * the crash); verify_recovered already proved every one of them
+		 * was attempted and holds the right value. */
+		if (a.rows < a.acked) {
+			printf("  seed 0x%016llx: FAIL recovered %d rows < %d "
+			    "acked (a durable commit was LOST)\n",
+			    (unsigned long long)seed, a.rows, a.acked);
+			fails++;
+			continue;
+		}
+		tot_rows += a.rows;
+		if (a.crash_at <= 0)
+			n_before++;
+		else if (a.crash_at >= total_txns)
+			n_after++;
+		else
+			n_mid++;
+		if (a.acked < min_acked) min_acked = a.acked;
+		if (a.acked > max_acked) max_acked = a.acked;
 	}
 
-	if (fails == 0) {
-		printf("OK: composition-crash DST -- %d seeds, every acked "
-		    "commit durable through lock+WAL+recovery under a seeded "
-		    "crash, all replay\n", n);
-		return 0;
+	if (fails != 0) {
+		printf("FAIL: %d/%d composition-crash seeds failed\n", fails, n);
+		return 1;
 	}
-	printf("FAIL: %d/%d composition-crash seeds failed\n", fails, n);
-	return 1;
+	printf("sweep: %d seeds x2 (replayed) -- crash-point distribution: "
+	    "%d before-any-commit, %d mid-workload, %d clean-drain; acked "
+	    "ranged %d..%d of %ld possible; %ld recovered row(s) verified\n",
+	    n, n_before, n_mid, n_after, min_acked, max_acked, total_txns,
+	    tot_rows);
+	/* The sweep must actually have crashed mid-workload for some seed,
+	 * or "durability under a seeded crash" was never exercised. */
+	if (n >= 8 && n_mid == 0) {
+		printf("FAIL: no seed crashed MID-workload -- the crash "
+		    "scenario this test claims was never exercised\n");
+		return 1;
+	}
+	if (n >= 8 && max_acked <= 0) {
+		printf("FAIL: no seed acked a single commit -- the durability "
+		    "invariant had nothing to check\n");
+		return 1;
+	}
+	printf("OK: composition-crash DST -- %d seeds, every acked commit "
+	    "durable through lock+WAL+recovery under a seeded crash, every "
+	    "recovered row attributable to an attempted commit and holding "
+	    "exactly its written value, mutual exclusion held to the crash, "
+	    "all replay (crash point + acked + recovered + row count + "
+	    "value hash)\n", n);
+	return 0;
 }

@@ -3,6 +3,14 @@
 #   seed/count of "-" means: run the test with no argv (its built-in
 #   seeds).  See README.md.
 #
+# NOTE ON ARGV ORDER: this file always writes <seed> then <count>.  The
+# tests themselves disagree -- test_sim_res / test_sim_sup_strategy take
+# "<base> <count>" while test_sim_swarm takes "<count> <base>" -- so
+# scripts/dst-corpus.sh owns the per-test mapping and logs the argv it
+# actually executed.  (Before that mapping existed, the two swarm rows
+# below ran 1 seed at base 20 and 1000 seeds at base 20 while claiming
+# "20 seeds at base 0 / base 1000".)
+#
 # ==== planted-bug regression guards ====
 # Each seed FAILS its test under -DXTC_DST_INJECT_BUG=<N> (proven by
 # scripts/dst-bug-inject.sh) and MUST pass on the clean build re-run
@@ -26,7 +34,7 @@ test_sim_saga           -          -   bug9 SAGAORDER: saga compensates in exact
 test_sim_res            0xC0FFEE   3   smoke: resource governance
 test_sim_sup_strategy   0x5570     4   smoke: supervisor restart strategies
 test_sim_sup_strategy   42         2   smoke: supervisor, distinct seed
-test_sim_swarm          0          20  smoke: combined fault-set swarm, base 0
-test_sim_swarm          1000       20  smoke: combined fault-set swarm, base 1000
+test_sim_swarm          0          20  smoke: combined fault-set swarm, 20 seeds from base 0
+test_sim_swarm          1000       20  smoke: combined fault-set swarm, 20 seeds from base 1000
 test_sim_wake_park      -          -   smoke: cross-loop wake-of-parked-loop
 test_sim_lockmgr        -          -   smoke: lock-manager mutual exclusion + deadlock

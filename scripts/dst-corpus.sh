@@ -95,15 +95,31 @@ for f in "$CORPUS_DIR"/*.txt; do
 		fi
 
 		# A seed of "-" -> run with no argv (built-in fixed seeds);
-		# otherwise pass "<seed> <count>" to the argv-driven test.
+		# otherwise pass the pinned pair in the ARGV ORDER THIS TEST
+		# EXPECTS.  The corpus format is always <test> <seed> <count>,
+		# but the tests disagree on order: most take "<base> <count>"
+		# (test_sim_res, test_sim_sup_strategy) while test_sim_swarm
+		# takes "<count> <base>" (see main() in
+		# test/sim/test_sim_swarm.c).  The runner owns the mapping so
+		# each corpus line runs the sweep it ADVERTISES -- passing
+		# "$seed $count" to swarm silently ran `count` seeds from base
+		# `seed`, i.e. "20 seeds at base 0" ran 1 seed at base 20 and
+		# "20 seeds at base 1000" ran 1000 seeds at base 20.  Do NOT
+		# swap globally; add a case here when a new test differs.
 		if [ "$seed" = "-" ]; then
 			run_desc="$test (built-in seeds)"
 			ok=0
 			"$exe" >/dev/null 2>&1 && ok=1
 		else
-			run_desc="$test seed=$seed count=$count"
+			case "$test" in
+			test_sim_swarm) a1=$count; a2=$seed ;;
+			*)              a1=$seed;  a2=$count ;;
+			esac
+			# Log what was EXECUTED, not just what was pinned, so a
+			# future order mismatch is visible in the output.
+			run_desc="$test seed=$seed count=$count (argv: $a1 $a2)"
 			ok=0
-			"$exe" "$seed" "$count" >/dev/null 2>&1 && ok=1
+			"$exe" "$a1" "$a2" >/dev/null 2>&1 && ok=1
 		fi
 
 		if [ "$ok" = 1 ]; then
