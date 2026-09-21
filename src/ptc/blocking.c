@@ -293,7 +293,43 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	 * The blocking read below then waits for the byte -- which the worker
 	 * writes AFTER the done store -- so our close strictly follows the
 	 * worker's write and cannot race it, and w is not freed until the
-	 * worker is finished with it. */
+	 * worker is finished with it.
+	 *
+	 * CANCELLATION: this whole window is MASKED.  `w` is STACK-OWNED by
+	 * this frame and the pool worker writes into it (w->result, w->done)
+	 * and reads w->fn/w->arg/w->wr_fd/w->detached after we get here.
+	 * xtc_proc_wait_fd is a cancellation point, so an unmasked kill
+	 * delivered during the wait unwound THIS frame while the worker still
+	 * owned it.  MEASURED (ASan, epoll, kill 50ms into a 400ms offload):
+	 * the dead fiber's stack was reused, the worker then read a garbage
+	 * w->detached, took the fire-and-forget branch, and called __os_free
+	 * on a STACK address -- "attempting free on address which was not
+	 * malloc()-ed" in blk_worker.  A bad free of live stack is heap
+	 * corruption, not a leak.
+	 *
+	 * The mask is the tree's existing primitive for exactly this ("a
+	 * resource acquired in a masked region can still register its
+	 * release", xtc_proc.h); the resource here is the frame itself.  A
+	 * kill arriving during the wait is LATCHED (xtc_proc_wait_fd's kill
+	 * delivery sees mask_depth > 0 and defers) and honored by
+	 * xtc_mask_leave below, which does not return when one was latched --
+	 * so the fiber dies at the FIRST point where the worker no longer
+	 * owns this frame.
+	 *
+	 * That bound is the minimum achievable, not an indefinite hold: the
+	 * work is running on a pool thread that cannot be interrupted, so no
+	 * amount of cancellation can shorten it.  Masking does NOT hide a
+	 * wedged offload from a supervisor, which is what man xtc_proc.3
+	 * warns about: the latched kill sets mask_deferred while mask_depth is
+	 * raised, which is precisely the pair xtc_exit_pid_deadline reads to
+	 * report XTC_KILL_DEFERRED instead of burning its deadline, and which
+	 * xtc_proc_info exposes to an outside observer.  A work function that
+	 * never returns is therefore visible as DEFERRED, and the documented
+	 * escalation (take down the process, not the fiber) applies -- a
+	 * decision, not a guess.  Abandoning the wait instead is NOT an
+	 * available alternative: the worker would still hold `w` and the
+	 * caller's `arg`, which may itself live on the frame being unwound. */
+	(void)xtc_mask_enter();
 	while (!atomic_load_explicit(&w.done, memory_order_acquire)) {
 		revents = 0;
 		(void)xtc_proc_wait_fd(pfd[0], XTC_IO_READABLE, -1, &revents);
@@ -310,6 +346,12 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 		    memory_order_acquire);
 	(void)close(pfd[0]);
 	(void)close(pfd[1]);
+	/* The worker is done with `w` and the pipe is closed, so the frame is
+	 * ours again: drop the mask and honor a kill latched during the wait.
+	 * This may NOT return (it unwinds via xtc_exit_self), which is why it
+	 * comes after the result store and the closes -- everything a
+	 * cancelled caller still needed has already happened. */
+	(void)xtc_mask_leave();
 	return XTC_OK;
 
 run_sync:

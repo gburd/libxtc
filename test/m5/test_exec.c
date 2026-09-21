@@ -928,6 +928,124 @@ test_migratable_waitfd_resume(const MunitParameter p[], void *d)
 #endif
 }
 
+/*
+ * [Blk7] Killing a fiber parked in xtc_blocking_run must not let the pool
+ * worker outlive the caller's frame.
+ *
+ * xtc_blocking_run queues a STACK-OWNED `struct blk_work` and parks on a
+ * completion pipe via xtc_proc_wait_fd -- a cancellation point.  With that
+ * wait unmasked, a kill delivered during it unwound the OWNING FRAME while
+ * the worker was still running and still writing into that work item (and
+ * still reading the caller's arg).  MEASURED with ASan on epoll (kill 50ms
+ * into a 400ms offload): the dead fiber's stack was reused, the worker read
+ * a garbage w->detached, took the fire-and-forget branch, and called
+ * __os_free on a STACK address -- "attempting free on address which was
+ * not malloc()-ed" in blk_worker.  That is heap corruption, not a leak.
+ *
+ * The property asserted here is the ordering that makes it safe: the work
+ * function must have COMPLETED before the caller's at-exit hook runs (the
+ * first thing that observes the frame being torn down).  Pre-fix the hook
+ * ran with the work still in flight.
+ *
+ * This deliberately does NOT assert that the kill is instantaneous: the
+ * work runs on a pool thread that cannot be interrupted, so the wait is
+ * bounded by the work, and the supervisor is told so -- xtc_exit_pid_-
+ * deadline reports XTC_KILL_DEFERRED rather than silently swallowing the
+ * kill, which is the documented contract for a masked region.
+ */
+static _Atomic int g_blk7_work_started, g_blk7_work_finished;
+static _Atomic int g_blk7_finished_at_hook, g_blk7_hook_ran;
+static _Atomic int g_blk7_kill_status, g_blk7_run_returned;
+static xtc_pid_t g_blk7_victim;
+
+static int
+blk7_slow_fn(void *arg)
+{
+	(void)arg;
+	atomic_store(&g_blk7_work_started, 1);
+	/* Long enough that the kill provably lands mid-flight. */
+	__os_sleep_ns(300LL * 1000 * 1000);
+	atomic_store(&g_blk7_work_finished, 1);
+	return 99;
+}
+
+static void
+blk7_at_exit(void *arg)
+{
+	(void)arg;
+	/* The frame is being torn down NOW: the worker must already be done
+	 * with it.  Pre-fix this sampled 0. */
+	atomic_store(&g_blk7_finished_at_hook,
+	    atomic_load(&g_blk7_work_finished));
+	atomic_store(&g_blk7_hook_ran, 1);
+}
+
+static void
+blk7_victim_proc(void *arg)
+{
+	int out = -1;
+	(void)arg;
+	munit_assert_int(xtc_proc_at_exit(blk7_at_exit, NULL), ==, XTC_OK);
+	(void)xtc_blocking_run(blk7_slow_fn, NULL, &out);
+	atomic_store(&g_blk7_run_returned, 1);
+}
+
+static void
+blk7_killer_proc(void *arg)
+{
+	int st = -1, spins = 0;
+	(void)arg;
+	while (!atomic_load(&g_blk7_work_started) && spins++ < 20000)
+		(void)xtc_proc_sleep(1000LL * 1000);
+	/* Kill with the worker provably mid-flight. */
+	(void)xtc_proc_sleep(40LL * 1000 * 1000);
+	munit_assert_int(atomic_load(&g_blk7_work_finished), ==, 0);
+	munit_assert_int(xtc_exit_pid_deadline(g_blk7_victim, 9,
+	    3000LL * 1000 * 1000, &st), ==, XTC_OK);
+	atomic_store(&g_blk7_kill_status, st);
+}
+
+static MunitResult
+test_blocking_kill_no_frame_escape(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t killer;
+	(void)p; (void)d;
+
+	atomic_store(&g_blk7_work_started, 0);
+	atomic_store(&g_blk7_work_finished, 0);
+	atomic_store(&g_blk7_finished_at_hook, -1);
+	atomic_store(&g_blk7_hook_ran, 0);
+	atomic_store(&g_blk7_kill_status, -1);
+	atomic_store(&g_blk7_run_returned, 0);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "blk7-victim";
+	munit_assert_int(xtc_proc_spawn(loop, blk7_victim_proc, NULL, &opts,
+	    &g_blk7_victim), ==, XTC_OK);
+	opts.name = "blk7-killer";
+	munit_assert_int(xtc_proc_spawn(loop, blk7_killer_proc, NULL, &opts,
+	    &killer), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	munit_assert_int(atomic_load(&g_blk7_hook_ran), ==, 1);
+	/* THE REGRESSION: the offload completed BEFORE the caller's frame
+	 * started being torn down.  Pre-fix: 0 (worker still running). */
+	munit_assert_int(atomic_load(&g_blk7_finished_at_hook), ==, 1);
+	munit_assert_int(atomic_load(&g_blk7_work_finished), ==, 1);
+	/* The kill was still honored -- the fiber died rather than
+	 * completing xtc_blocking_run normally. */
+	munit_assert_int(atomic_load(&g_blk7_run_returned), ==, 0);
+	/* And a supervisor is TOLD the kill was deferred by the mask, so a
+	 * wedged offload stays diagnosable (man xtc_proc.3). */
+	munit_assert_int(atomic_load(&g_blk7_kill_status), ==,
+	    XTC_KILL_DEFERRED);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -945,6 +1063,7 @@ static MunitTest tests[] = {
 	{ "/Blk4_cross_loop_state_timer", test_cross_loop_state_timer, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk5_migratable_timer_resume", test_migratable_timer_resume, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk6_migratable_waitfd_resume", test_migratable_waitfd_resume, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Blk7_blocking_kill_no_frame_escape", test_blocking_kill_no_frame_escape, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/exec", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

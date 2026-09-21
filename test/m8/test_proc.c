@@ -21,6 +21,8 @@
 
 #include "munit.h"
 #include "fd_probe_compat.h"
+#include "io_pipe_compat.h"   /* portable pipe pair for the wait_fd tests */
+#include "os_time.h"           /* __os_sleep_ns: the foreign-thread racer */
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_async.h"
@@ -29,6 +31,7 @@
 #include "xtc_mctx.h"
 #include "xtc_int.h"
 #include "xtc_res.h"
+#include "xtc_inject.h"   /* drive the wait_fd check/arm window deterministically */
 
 /* Process CPU seconds, portably.  POSIX: CLOCK_PROCESS_CPUTIME_ID.
  * Windows: GetProcessTimes (kernel+user), which IS the clean Win32
@@ -1885,6 +1888,402 @@ test_arena_group_wedged(const MunitParameter p[], void *d)
 	return ag_run(/*wedge=*/1, /*all_gone=*/0, /*chunks_zero=*/0);
 }
 
+/* ---- cancellation safety in xtc_proc_wait_fd + the exit path -------
+ *
+ * Four regressions, each of which FAILED (hung, or returned the wrong
+ * code) before the fix it guards.  A pipe read end that is never written
+ * is the "never ready" fd throughout: it makes the fd wake source
+ * provably absent, so what is left is exactly the path under test.
+ */
+
+/* [wait_fd/wake_is_not_timeout] An explicit wake of a TIMED wait must
+ * report XTC_OK, not XTC_E_AGAIN.  Pre-fix, wait_fd returned XTC_E_AGAIN
+ * whenever no non-timeout bit was seen and a timeout had been SUPPLIED,
+ * so a 1s wait woken at ~10ms reported "deadline expired" with revents
+ * == 0 and consumers ended waits ~990ms early. */
+static _Atomic int g_wnt_rc, g_wnt_revents, g_wnt_early;
+static xtc_pid_t g_wnt_victim;
+
+static void
+wnt_victim_proc(void *arg)
+{
+	int rfd = (int)(intptr_t)arg;
+	uint32_t revents = 0;
+	int64_t t0, t1;
+	int rc;
+
+	t0 = xtc_clock_mono();
+	rc = xtc_proc_wait_fd(rfd, XTC_IO_READABLE,
+	    2000LL * 1000 * 1000, &revents);
+	t1 = xtc_clock_mono();
+	atomic_store(&g_wnt_rc, rc);
+	atomic_store(&g_wnt_revents, (int)revents);
+	/* Woken well before the 2s deadline: proves the wake -- not an
+	 * expiry -- is what returned, independently of the return code. */
+	atomic_store(&g_wnt_early, (t1 - t0) < 1000LL * 1000 * 1000);
+}
+
+static void
+wnt_waker_proc(void *arg)
+{
+	(void)arg;
+	(void)xtc_proc_sleep(20LL * 1000 * 1000);
+	(void)xtc_proc_wake(g_wnt_victim);
+}
+
+static MunitResult
+test_wait_fd_wake_is_not_timeout(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t other;
+	int pipefd[2];
+	(void)p; (void)d;
+
+	atomic_store(&g_wnt_rc, 12345);
+	atomic_store(&g_wnt_revents, -1);
+	atomic_store(&g_wnt_early, 0);
+
+	munit_assert_int(xtc_test_make_pipe(&pipefd[0], &pipefd[1]), ==, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "wnt-victim";
+	munit_assert_int(xtc_proc_spawn(loop, wnt_victim_proc,
+	    (void *)(intptr_t)pipefd[0], &opts, &g_wnt_victim), ==, XTC_OK);
+	opts.name = "wnt-waker";
+	munit_assert_int(xtc_proc_spawn(loop, wnt_waker_proc, NULL, &opts,
+	    &other), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* It really was the wake, not the deadline. */
+	munit_assert_int(atomic_load(&g_wnt_early), ==, 1);
+	/* The timeout bit must NOT be set -- the timer never fired. */
+	munit_assert_int(atomic_load(&g_wnt_revents) & XTC_WAIT_TIMEOUT,
+	    ==, 0);
+	/* THE REGRESSION: a non-timeout wake returns XTC_OK (xtc_proc.h). */
+	munit_assert_int(atomic_load(&g_wnt_rc), ==, XTC_OK);
+
+	xtc_test_close_pipe(pipefd[0], pipefd[1]);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* [wait_fd/kill_releases_registration] A KILLED fd-waiter must leave no
+ * fd registration behind.  Pre-fix the kill unwound inside xtc_yield --
+ * before wait_fd's unregister ran -- so the dead proc's registration
+ * survived and the NEXT waiter on that same fd got XTC_E_INTERNAL from
+ * the duplicate-registration reject instead of its own timeout.  Proc
+ * exit does not cover this: the recovery registry and at-exit hooks know
+ * nothing about scheduler park state. */
+static _Atomic int g_krr_second_rc, g_krr_second_revents;
+static xtc_pid_t g_krr_victim;
+
+static void
+krr_victim_proc(void *arg)
+{
+	int rfd = (int)(intptr_t)arg;
+	uint32_t revents = 0;
+	/* Infinite wait on an fd that never becomes ready: the only way out
+	 * is the kill. */
+	(void)xtc_proc_wait_fd(rfd, XTC_IO_READABLE, -1, &revents);
+}
+
+static void
+krr_reuser_proc(void *arg)
+{
+	int rfd = (int)(intptr_t)arg;
+	uint32_t revents = 0;
+	int rc;
+
+	/* Let the victim reach its park, then kill it and let it unwind. */
+	(void)xtc_proc_sleep(30LL * 1000 * 1000);
+	munit_assert_int(xtc_exit_pid(g_krr_victim, 42), ==, XTC_OK);
+	(void)xtc_proc_sleep(30LL * 1000 * 1000);
+
+	/* Re-wait on the SAME fd.  This must behave like a fresh wait and
+	 * time out; XTC_E_INTERNAL here means the dead proc's registration
+	 * is still in the loop's registry. */
+	rc = xtc_proc_wait_fd(rfd, XTC_IO_READABLE, 30LL * 1000 * 1000,
+	    &revents);
+	atomic_store(&g_krr_second_rc, rc);
+	atomic_store(&g_krr_second_revents, (int)revents);
+}
+
+static MunitResult
+test_wait_fd_kill_releases_registration(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t reuser;
+	int pipefd[2];
+	(void)p; (void)d;
+
+	atomic_store(&g_krr_second_rc, 12345);
+	atomic_store(&g_krr_second_revents, -1);
+
+	munit_assert_int(xtc_test_make_pipe(&pipefd[0], &pipefd[1]), ==, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "krr-victim";
+	munit_assert_int(xtc_proc_spawn(loop, krr_victim_proc,
+	    (void *)(intptr_t)pipefd[0], &opts, &g_krr_victim), ==, XTC_OK);
+	opts.name = "krr-reuser";
+	munit_assert_int(xtc_proc_spawn(loop, krr_reuser_proc,
+	    (void *)(intptr_t)pipefd[0], &opts, &reuser), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* THE REGRESSION: pre-fix this was XTC_E_INTERNAL (a leaked
+	 * registration); it must be the clean timeout the wait asked for. */
+	munit_assert_int(atomic_load(&g_krr_second_rc), ==, XTC_E_AGAIN);
+	munit_assert_int(atomic_load(&g_krr_second_revents) &
+	    XTC_WAIT_TIMEOUT, ==, XTC_WAIT_TIMEOUT);
+
+	xtc_test_close_pipe(pipefd[0], pipefd[1]);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* [wait_fd/mailbox_wake_not_lost] A message or kill delivered by a
+ * FOREIGN OS thread while a proc is ENTERING wait_fd must never be parked
+ * on.  Pre-fix the mailbox check and the waker arming sat in two separate
+ * mbox_lock holds with the fd/timer registration in between; a sender or
+ * killer landing in that gap pushed its message / latched its kill, found
+ * waker_armed == 0, fired NO waker, and the proc then parked on the
+ * already-pending event.  The fd here is a pipe read end that is NEVER
+ * written and the timeout is INFINITE, so the gap wake is the only way
+ * out: a lost wake is an unconditional hang, not a slow test.
+ *
+ * The window is a few instructions wide, so timing alone does not hit it
+ * -- a purely time-based version of this test PASSED on the unfixed
+ * source, i.e. proved nothing.  It is therefore driven through the
+ * "proc.wait_fd.armed" injection point: the callback runs ON the victim's
+ * loop thread and holds it until a foreign thread has done its send/kill,
+ * so the foreign action provably lands in the window.  Placing the same
+ * hook at the pre-fix gap makes this test hang on the unfixed source,
+ * which is how it was verified to have teeth.
+ */
+#if !defined(_WIN32)
+static _Atomic int g_wnl_in_window, g_wnl_release, g_wnl_returned;
+static _Atomic int g_wnl_rc, g_wnl_revents;
+static xtc_pid_t g_wnl_victim;
+static int g_wnl_mode;               /* 0 = send, 1 = kill */
+
+/* Runs on the victim's loop thread, inside the check/arm window. */
+static void
+wnl_window_cb(const char *name, void *user)
+{
+	int spins = 0;
+	(void)name; (void)user;
+	if (atomic_exchange(&g_wnl_in_window, 1))
+		return;                      /* hold only the first pass */
+	while (!atomic_load(&g_wnl_release) && spins++ < 200000)
+		__os_sleep_ns(100LL * 1000);
+}
+
+static void
+wnl_victim_proc(void *arg)
+{
+	int rfd = (int)(intptr_t)arg;
+	uint32_t revents = 0;
+	int rc;
+
+	rc = xtc_proc_wait_fd(rfd, XTC_IO_READABLE, -1, &revents);
+	atomic_store(&g_wnl_rc, rc);
+	atomic_store(&g_wnl_revents, (int)revents);
+	atomic_store(&g_wnl_returned, 1);
+}
+
+static void *
+wnl_racer_thread(void *arg)
+{
+	int spins = 0;
+	(void)arg;
+	/* Wait until the victim is provably stopped inside the window. */
+	while (!atomic_load(&g_wnl_in_window) && spins++ < 200000)
+		__os_sleep_ns(100LL * 1000);
+	if (atomic_load(&g_wnl_in_window)) {
+		if (g_wnl_mode == 0) {
+			int v = 7;
+			(void)xtc_send(g_wnl_victim, &v, sizeof v);
+		} else {
+			(void)xtc_exit_pid(g_wnl_victim, 42);
+		}
+	}
+	atomic_store(&g_wnl_release, 1);
+	return NULL;
+}
+
+static MunitResult
+wnl_run(int mode)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	pthread_t racer;
+	int pipefd[2];
+
+	g_wnl_mode = mode;
+	atomic_store(&g_wnl_in_window, 0);
+	atomic_store(&g_wnl_release, 0);
+	atomic_store(&g_wnl_returned, 0);
+	atomic_store(&g_wnl_rc, 12345);
+	atomic_store(&g_wnl_revents, -1);
+
+	munit_assert_int(xtc_test_make_pipe(&pipefd[0], &pipefd[1]), ==, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_inject_attach("proc.wait_fd.armed",
+	    wnl_window_cb, NULL), ==, XTC_OK);
+	opts.name = "wnl-victim";
+	munit_assert_int(xtc_proc_spawn(loop, wnl_victim_proc,
+	    (void *)(intptr_t)pipefd[0], &opts, &g_wnl_victim), ==, XTC_OK);
+	munit_assert_int(pthread_create(&racer, NULL, wnl_racer_thread,
+	    NULL), ==, 0);
+	/* THE REGRESSION: pre-fix this loop_run never returns -- the victim
+	 * parks forever on the message/kill delivered in the window. */
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(pthread_join(racer, NULL), ==, 0);
+	munit_assert_int(xtc_inject_detach("proc.wait_fd.armed"), ==, XTC_OK);
+
+	/* The window really was held; otherwise the test proved nothing. */
+	munit_assert_int(atomic_load(&g_wnl_in_window), ==, 1);
+	if (mode == 0) {
+		/* Sent: wait_fd returned and reported the mailbox. */
+		munit_assert_int(atomic_load(&g_wnl_returned), ==, 1);
+		munit_assert_int(atomic_load(&g_wnl_rc), ==, XTC_OK);
+		munit_assert_int(atomic_load(&g_wnl_revents) &
+		    XTC_WAIT_MAILBOX, ==, XTC_WAIT_MAILBOX);
+	} else {
+		/* Killed: the proc unwound instead of parking, so wait_fd
+		 * never returned normally. */
+		munit_assert_int(atomic_load(&g_wnl_returned), ==, 0);
+	}
+
+	xtc_test_close_pipe(pipefd[0], pipefd[1]);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_wait_fd_mailbox_wake_not_lost(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return wnl_run(/*mode=*/0);
+}
+
+static MunitResult
+test_wait_fd_kill_wake_not_lost(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return wnl_run(/*mode=*/1);
+}
+#endif /* !_WIN32 */
+
+/* [at_exit/park_after_kill] An at-exit hook may PARK even when the proc
+ * is dying from an async KILL.  Pre-fix kill_pending was still latched
+ * when the hooks ran, so the hook's first park point re-delivered the
+ * same kill, longjmp'd back to the exit path, and re-ran the whole
+ * at-exit list -- unboundedly, with the hook's xtc_proc_sleep never
+ * returning.  The hook must run EXACTLY ONCE and its park must complete.
+ *
+ * `kill` parameterises the control: on a CLEAN exit the identical hook
+ * always worked, which is what isolated the defect to the kill path. */
+static _Atomic int g_pak_entered, g_pak_sleep_rc, g_pak_completed;
+static _Atomic int g_pak_kill_status;
+static xtc_pid_t g_pak_victim;
+
+static void
+pak_hook(void *arg)
+{
+	(void)arg;
+	atomic_fetch_add(&g_pak_entered, 1);
+	/* The park that used to re-trigger the latched kill. */
+	atomic_store(&g_pak_sleep_rc, xtc_proc_sleep(20LL * 1000 * 1000));
+	atomic_fetch_add(&g_pak_completed, 1);
+}
+
+static void
+pak_victim_proc(void *arg)
+{
+	int killed = (int)(intptr_t)arg;
+	void *msg = NULL;
+	size_t sz = 0;
+
+	munit_assert_int(xtc_proc_at_exit(pak_hook, NULL), ==, XTC_OK);
+	if (!killed) {
+		(void)xtc_proc_sleep(10LL * 1000 * 1000);
+		return;                  /* control: clean exit */
+	}
+	/* Park forever; the killer ends this. */
+	(void)xtc_recv(&msg, &sz, -1);
+	if (msg != NULL) xtc_free(msg);
+}
+
+static void
+pak_killer_proc(void *arg)
+{
+	int st = -1;
+	int rc;
+	(void)arg;
+	(void)xtc_proc_sleep(30LL * 1000 * 1000);
+	rc = xtc_exit_pid_deadline(g_pak_victim, 9, 2000LL * 1000 * 1000,
+	    &st);
+	munit_assert_int(rc, ==, XTC_OK);
+	atomic_store(&g_pak_kill_status, st);
+}
+
+static MunitResult
+pak_run(int killed)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t killer;
+
+	atomic_store(&g_pak_entered, 0);
+	atomic_store(&g_pak_sleep_rc, 12345);
+	atomic_store(&g_pak_completed, 0);
+	atomic_store(&g_pak_kill_status, -1);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "pak-victim";
+	munit_assert_int(xtc_proc_spawn(loop, pak_victim_proc,
+	    (void *)(intptr_t)killed, &opts, &g_pak_victim), ==, XTC_OK);
+	if (killed) {
+		opts.name = "pak-killer";
+		munit_assert_int(xtc_proc_spawn(loop, pak_killer_proc, NULL,
+		    &opts, &killer), ==, XTC_OK);
+	}
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* THE REGRESSION: exactly one entry (pre-fix: hundreds), and the
+	 * hook's own park completed (pre-fix: it never returned). */
+	munit_assert_int(atomic_load(&g_pak_entered), ==, 1);
+	munit_assert_int(atomic_load(&g_pak_sleep_rc), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_pak_completed), ==, 1);
+	if (killed) {
+		/* The kill still lands: masking the hook run must not turn a
+		 * delivered kill into a DEFERRED/TIMEOUT report. */
+		munit_assert_int(atomic_load(&g_pak_kill_status), ==,
+		    XTC_KILL_DELIVERED);
+	}
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_at_exit_park_after_kill(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return pak_run(/*killed=*/1);
+}
+
+static MunitResult
+test_at_exit_park_clean_control(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	/* Control: the same parking hook on a clean exit.  This ALWAYS
+	 * passed, which is what proved the defect was kill-specific rather
+	 * than "a hook may not park". */
+	return pak_run(/*killed=*/0);
+}
+
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1910,6 +2309,14 @@ static MunitTest tests[] = {
 	{ "/arena_group_discard", test_arena_group_discard, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/arena_group_wedged",  test_arena_group_wedged,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/exit_pid_deadline", test_exit_pid_deadline, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_fd_wake_is_not_timeout", test_wait_fd_wake_is_not_timeout, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_fd_kill_releases_registration", test_wait_fd_kill_releases_registration, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#if !defined(_WIN32)
+	{ "/wait_fd_mailbox_wake_not_lost", test_wait_fd_mailbox_wake_not_lost, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_fd_kill_wake_not_lost", test_wait_fd_kill_wake_not_lost, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#endif
+	{ "/at_exit_park_after_kill", test_at_exit_park_after_kill, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/at_exit_park_clean_control", test_at_exit_park_clean_control, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #if !defined(_WIN32)
 	{ "/cross_thread_send_wakes", test_cross_thread_send_wakes, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
