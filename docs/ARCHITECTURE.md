@@ -101,8 +101,14 @@ flowchart TD
   generators, and an enforced out-of-source build -- a discipline
   borrowed from Berkeley DB, where it kept a large C codebase portable
   and reviewable for decades.
-- **Test-first, claim-driven.** Every claim in code or documentation has
-  a test; see [Testing]({{ '/testing/' | relative_url }}).
+- **Test-first, claim-driven.** Documentation claims are gated where a
+  gate is mechanically possible: man-page coverage and signatures
+  (`test/m0/test_man_*.sh`), the README build commands
+  (`test/m0/test_readme_build.sh`), every doc code snippet compiled and
+  run (`test/docs/test_doc_snippets.sh`), and the paths/APIs the ABI page
+  cites (`test/m0/test_docs_abi.sh`).  What is NOT gated: cross-release
+  ABI/layout compatibility, and prose claims about behaviour no snippet
+  demonstrates.  See [Testing]({{ '/testing/' | relative_url }}).
 - **Mechanical change as doctrine.** Structural edits (the public-symbol
   extern lists, the amalgamation) go through the `dist/s_*` generators
   rather than by hand.
@@ -113,7 +119,7 @@ flowchart TD
 |---|---|
 | L0 `os/` | Complete: hookable allocator (BDB out-parameter convention), atomics, monotonic + wall clock, threads / TLS / mutex / rwlock / cond / sem, signals, files, shm, NUMA topology, and the rest of the OS substrate. |
 | L1 `io/` | Complete: `xtc_io` over io_uring / epoll / poll / select (Linux), kqueue (BSD, macOS), event ports (illumos), IOCP (Windows); async file and socket registration; AIX `pollset` compiled, awaiting a host. |
-| L2 `evt/` | Complete: `xtc_loop` (run queue, timer wheel, task / waker / park); stackful fibers (hand-written `fcontext` asm on the common arches, `ucontext` fallback, Win32 fibers on Windows) plus header-only protothreads; `async` / `await` / `xtc_yield`; `xtc_exec` multi-loop work-stealing executor. |
+| L2 `evt/` | Complete: `xtc_loop` (run queue, timer wheel, task / waker / park); stackful fibers (hand-written `fcontext` asm for 7 CPU families, `ucontext` fallback, Win32 fibers on Windows) plus header-only protothreads; `async` / `await` / `xtc_yield`; `xtc_exec` multi-loop work-stealing executor.  Completed coroutine-backed tasks are retained until `xtc_loop_fini` -- see [Known issues]({{ '/reference/known-issues/' | relative_url }}). |
 | L3 `ptc/` | Complete: channels (oneshot / mpsc / mpmc / watch / broadcast); processes, mailboxes with selective receive, links and monitors; sync primitives; `xtc_mctx`; RCU; left-right locks; a full nine-mode lock manager with deadlock detection, victim policies, and per-locker timeouts; concurrent data structures (`xtc_chash`, `xtc_cskip`, `xtc_prob`); and an attached-compute (`xtc_accel`) bridge that parks a fiber on a GPU/NPU completion fence (auto-detected DRM/accel, `--without-accel` to disable). |
 | L4 `orc/` | Complete: supervisor (4 strategies + restart intensity), process registry, `xtc_svr` gen_server, `xtc_app` lifecycle, and the optional [Isolate layer]({{ '/tnt/' | relative_url }}). |
 
@@ -136,6 +142,7 @@ size of the dependency you are taking on.
 1. This page, for the layer map.
 2. The [Guide]({{ '/guide/' | relative_url }}), read in order.
 3. [ABI stability]({{ '/reference/abi-stability/' | relative_url }}) --
-   the longevity contract.
+   the compatibility contract, and which parts of it a gate actually
+   enforces versus which are stated policy.
 4. The [API reference]({{ '/reference/api/' | relative_url }}) for the
    layer you are working in.
