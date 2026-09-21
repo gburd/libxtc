@@ -240,14 +240,17 @@ What's working today:
 
 Test coverage today, measured against this tree (v1.49.1 plus the
 allocator / cancellation / accounting regression tests that landed after
-it): **626 munit test cases across 109 munit binaries on Linux**, clean
-under AddressSanitizer and UBSan in CI, plus 34 shell gates, 7
-standalone C harnesses, the 68-file deterministic-simulation tier (a
-separate `--with-io-backend=sim` build, `make check-dst`), and **36
-hegel properties across 17 suites** that all pass when the tier is
-enabled with `--with-hegel`.  Recount rather than trust these numbers if
-you are citing them: `for t in $(...TESTS_C...); do ./$t --list; done |
-grep -c '^/'` is how the 626 was obtained.
+it): **644 munit test cases across 109 munit binaries on Linux**, of
+which 2 skip here (a macOS-only preemption-timer case and one slab
+pressure case), clean under AddressSanitizer and UBSan in CI, plus 34
+shell gates, 7 standalone C harnesses, the 68-file
+deterministic-simulation tier (a separate `--with-io-backend=sim` build,
+`make check-dst`), and **36 hegel properties across 17 suites** that all
+pass when the tier is enabled with `--with-hegel`.  Recount rather than
+trust these numbers if you are citing them: a full `make tests-c` run of
+this tree reports 642 successful + 2 skipped, and
+`for t in $(...TESTS_C...); do ./$t --list; done | grep -c '^/'` gives
+the same 644.
 
 The property tier is opt-in because it needs `libhegel`
 ([hegeldev/hegel-rust](https://github.com/hegeldev/hegel-rust)), an
