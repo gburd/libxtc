@@ -232,7 +232,7 @@ What's working today:
 |---|---|
 | L0 OS substrate | Linux, FreeBSD, illumos runtime-verified; Windows (MinGW/Clang64/MSVC) and macOS OS-layer ports build.  (An AIX/ppc64 OS-layer port compiles in-tree but AIX is NOT supported/maintained -- unverified, off the roadmap.) |
 | L1 I/O | io_uring, epoll, kqueue, poll, select, and illumos event-ports (port_*) runtime-verified (the last on big-endian sparcv9, including its native SIGEV_PORT file-AIO path).  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); AIX pollset COMPILES and is code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux, macOS, FreeBSD, and riscv64 at runtime; Windows CI is a build-only smoke. |
-| L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written x86_64 fcontext (~7.6 ns/swap) + 7 more arches + ucontext fallback. |
+| L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written `fcontext` asm for 7 CPU families (x86_64, aarch64, arm, ppc64le, riscv64, s390x, sparc64; 12 `.S` + 2 MASM variants covering the SysV / MS-PE / Mach-O ABIs) + ucontext fallback + Win32 fibers.  The bare `__xtc_jump_fcontext` swap is ~7.6 ns on x86_64; a full `xtc_yield` -- the consumer-visible cost, including run-queue turn and per-fiber TLS -- measures ~455 ns/op in `bench_micro` on this workstation. |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
 | L5 PG adapter | Designed; not yet implemented. |
