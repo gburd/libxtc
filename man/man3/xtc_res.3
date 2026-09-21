@@ -1,15 +1,13 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd May 28, 2026
+.Dd September 21, 2026
 .Dt XTC_RES 3
 .Os
 .Sh NAME
 .Nm xtc_res_init ,
-.Nm xtc_res_fini ,
 .Nm xtc_res_acquire ,
 .Nm xtc_res_release ,
 .Nm xtc_res_used ,
-.Nm xtc_res_cap ,
 .Nm xtc_res_set_cap ,
 .Nm xtc_res_high ,
 .Nm xtc_res_rejects ,
@@ -20,74 +18,117 @@
 .In xtc.h
 .In xtc_res.h
 .Ft int
-.Fn xtc_res_init "xtc_res_t *res" "const xtc_res_caps_t *caps"
-.Ft void
-.Fn xtc_res_fini "xtc_res_t *res"
+.Fn xtc_res_init "xtc_res_t *r" "const xtc_res_caps_t *caps"
 .Ft int
-.Fn xtc_res_acquire "xtc_res_t *res" "xtc_res_kind_t kind" "int64_t amount"
+.Fn xtc_res_acquire "xtc_res_t *r" "xtc_res_kind_t k" "int64_t n"
 .Ft void
-.Fn xtc_res_release "xtc_res_t *res" "xtc_res_kind_t kind" "int64_t amount"
+.Fn xtc_res_release "xtc_res_t *r" "xtc_res_kind_t k" "int64_t n"
 .Ft int64_t
-.Fn xtc_res_used "const xtc_res_t *res" "xtc_res_kind_t kind"
-.Ft int64_t
-.Fn xtc_res_cap "const xtc_res_t *res" "xtc_res_kind_t kind"
+.Fn xtc_res_used "const xtc_res_t *r" "xtc_res_kind_t k"
 .Ft void
-.Fn xtc_res_set_cap "xtc_res_t *res" "xtc_res_kind_t kind" "int64_t cap"
+.Fn xtc_res_set_cap "xtc_res_t *r" "xtc_res_kind_t k" "int64_t cap"
 .Ft int64_t
-.Fn xtc_res_high "const xtc_res_t *res" "xtc_res_kind_t kind"
+.Fn xtc_res_high "const xtc_res_t *r" "xtc_res_kind_t k"
 .Ft int64_t
-.Fn xtc_res_rejects "const xtc_res_t *res" "xtc_res_kind_t kind"
+.Fn xtc_res_rejects "const xtc_res_t *r" "xtc_res_kind_t k"
 .Ft int
-.Fn xtc_res_set_alert "xtc_res_t *res" "xtc_res_kind_t kind" "int64_t threshold"
+.Fn xtc_res_set_alert "xtc_res_t *r" "xtc_res_kind_t k" "double pct"
 .Ft int
-.Fn xtc_res_set_alert_fn "xtc_res_t *res" "xtc_res_alert_fn fn" "void *user"
+.Fn xtc_res_set_alert_fn "xtc_res_t *r" "void (*fn)(xtc_res_kind_t, int64_t, int64_t, void *)" "void *user"
 .Sh DESCRIPTION
 .Nm xtc_res
 tracks resource consumption against operator-configured hard caps.
-Tracked kinds:
+An
+.Vt xtc_res_t
+is caller-allocated
+.Pq typically embedded in an executor or loop
+and initialised with
+.Fn xtc_res_init ;
+it owns no OS resources, so there is no teardown call.
+Tracked kinds
+.Pq Vt xtc_res_kind_t :
 .Bl -tag -width "XTC_RES_MEM_BYTES" -compact -offset indent
-.It Dv XTC_RES_MEM_BYTES
-Bytes of allocated memory.
 .It Dv XTC_RES_TASKS
-In-flight tasks
-.Pq xtc_proc + xtc_task .
+Live
+.Vt xtc_task_t
+allocations.
+.It Dv XTC_RES_CHANNELS
+Live
+.Fn xtc_chan_*
+objects.
+.It Dv XTC_RES_CHAN_SLOTS
+In-flight messages across all channels.
 .It Dv XTC_RES_FDS
-Open file descriptors.
-.It Dv XTC_RES_NET_BYTES
-Network throughput
-.Pq for rate limiting .
-.It Dv XTC_RES_DISK_BYTES
-Disk I/O byte count.
-.It Dv XTC_RES_INFLIGHT_INBOX_MSGS
-Cross-loop inbox queue length.
+Open file descriptors attributable to xtc.
+.It Dv XTC_RES_MEM_BYTES
+Bytes in xtc-tracked allocations.
+.It Dv XTC_RES_INBOX_MSGS
+Cross-loop inbox messages in flight
+.Pq per loop, not global .
 .El
 .Pp
-Each kind has an optional cap.
+Caps are supplied as an
+.Vt xtc_res_caps_t ;
+.Dv XTC_RES_CAPS_DEFAULT
+gives reasonable values for a multi-loop executor on a workstation.
+A
+cap of zero means
+.Sq no cap
+.Pq unbounded; debug only .
+The current cap is not readable back through an accessor: it is the
+value the caller supplied, and
+.Fn xtc_res_set_cap
+changes it at runtime.
+.Pp
 .Fn xtc_res_acquire
-returns
+charges
+.Fa n
+units and returns
+.Dv XTC_OK ,
+or
 .Dv XTC_E_RESOURCE
-if the request would exceed the cap;
+if the request would exceed the cap, or
+.Dv XTC_E_INVAL
+for a bad kind, a negative
+.Fa n ,
+or a NULL
+.Fa r .
+A request that cannot be represented
+.Pq Fa n No greater than Dv INT64_MAX No minus the current usage
+is rejected with
+.Dv XTC_E_RESOURCE
+and counted as a reject, rather than being allowed to overflow the
+counter: the headroom is tested before the addition, so neither the
+hard-cap invariant nor the non-negative accounting invariant can be
+broken by a huge request.
 .Fn xtc_res_release
-gives capacity back.  Both are atomic; thread-safe under
-concurrent calls.
+gives capacity back, never fails, and clamps at zero on underflow.
+Both are atomic and lock-free; safe under concurrent calls.
 .Pp
 .Sy Alert callbacks :
-when usage crosses
-.Fa threshold
-upward, the alert fn fires.  When usage drops back below the
-threshold, the alert re-arms.  This avoids alert floods while
-ensuring each crossing fires.
+.Fn xtc_res_set_alert
+arms a high-water alert for one kind at
+.Fa pct ,
+a FRACTION of the cap in
+.Pq 0.0 , 1.0 --
+so 0.8 means 80 percent, NOT an absolute threshold.
+.Fn xtc_res_set_alert_fn
+installs the callback
+.Pq Fa fn No receiving Pq kind , used , cap , user ;
+pass
+.Dv NULL
+to disable.
+The callback fires once when usage crosses the threshold
+upward and re-arms when usage drops back below it, so a hovering
+workload does not flood.
+Alerts are per-kind and independent.
 .Pp
-.Fn xtc_res_set_cap
-changes the cap for a
-.Fa kind
-at runtime.
+.Fn xtc_res_used
+reports current usage,
 .Fn xtc_res_high
-returns the high-water mark of usage for a
-.Fa kind ,
-and
+the high-water mark, and
 .Fn xtc_res_rejects
-returns the number of acquires rejected because they would have
+the number of acquires rejected because they would have
 exceeded the cap.
 .Pp
 This is the centerpiece of xtc's
@@ -104,18 +145,19 @@ caps.tasks     = 10000;
 caps.fds       = 4096;
 
 xtc_res_init(&res, &caps);
+xtc_res_set_alert(&res, XTC_RES_MEM_BYTES, 0.8);   /* 80% of the cap */
 
 /* Charge memory before allocating. */
 if (xtc_res_acquire(&res, XTC_RES_MEM_BYTES, sz) != XTC_OK)
     return XTC_E_RESOURCE;
-ptr = malloc(sz);
-if (!ptr) {
+ptr = xtc_malloc(sz);
+if (ptr == NULL) {
     xtc_res_release(&res, XTC_RES_MEM_BYTES, sz);
     return XTC_E_NOMEM;
 }
 
 /* When done: */
-free(ptr);
+xtc_free(ptr);
 xtc_res_release(&res, XTC_RES_MEM_BYTES, sz);
 .Ed
 .Sh SEE ALSO

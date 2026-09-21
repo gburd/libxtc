@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd May 28, 2026
+.Dd September 21, 2026
 .Dt XTC_MCTX 3
 .Os
 .Sh NAME
@@ -14,13 +14,19 @@
 .Nm xtc_mctx_name ,
 .Nm xtc_mctx_total_bytes ,
 .Nm xtc_mctx_total_chunks ,
-.Nm xtc_mctx_reset
+.Nm xtc_mctx_reset ,
+.Nm xtc_arena_group_create ,
+.Nm xtc_arena_group_destroy ,
+.Nm xtc_arena_group_mctx ,
+.Nm xtc_arena_group_add ,
+.Nm xtc_arena_group_discard ,
+.Nm xtc_arena_group_size
 .Nd hierarchical memory contexts with cleanup callbacks
 .Sh SYNOPSIS
 .In xtc.h
 .In xtc_mctx.h
 .Ft int
-.Fn xtc_mctx_create "xtc_mctx_t *parent" "const char *name" "xtc_mctx_t **out"
+.Fn xtc_mctx_create "xtc_mctx_t *parent" "const char *name" "unsigned flags" "xtc_mctx_t **out"
 .Ft void
 .Fn xtc_mctx_destroy "xtc_mctx_t *ctx"
 .Ft "void *"
@@ -41,6 +47,18 @@
 .Fn xtc_mctx_total_chunks "const xtc_mctx_t *m"
 .Ft void
 .Fn xtc_mctx_reset "xtc_mctx_t *ctx"
+.Ft int
+.Fn xtc_arena_group_create "const char *name" "xtc_arena_group_t **out"
+.Ft void
+.Fn xtc_arena_group_destroy "xtc_arena_group_t *g"
+.Ft "xtc_mctx_t *"
+.Fn xtc_arena_group_mctx "xtc_arena_group_t *g"
+.Ft int
+.Fn xtc_arena_group_add "xtc_arena_group_t *g"
+.Ft int
+.Fn xtc_arena_group_discard "xtc_arena_group_t *g" "int reason" "int64_t timeout_ns" "int *out_all_gone"
+.Ft int
+.Fn xtc_arena_group_size "xtc_arena_group_t *g"
 .Sh DESCRIPTION
 .Nm xtc_mctx
 is a hierarchical memory context, modeled on PostgreSQL's
@@ -52,9 +70,35 @@ Useful for request-scoped memory: create a context per request,
 allocate freely, destroy at the end without tracking individual
 frees.
 .Pp
+.Fn xtc_mctx_create
+takes a
+.Fa flags
+bitmask of
+.Dv XTC_MCTX_*
+values:
+.Dv XTC_MCTX_DEFAULT
+.Pq 0
+for an unlocked context, or
+.Dv XTC_MCTX_THREAD_SAFE
+for one that is internally locked.
+A
+.Dv NULL
+.Fa parent
+produces a root context;
+.Fa name
+is copied for diagnostics.
+.Pp
 Each context can register cleanup callbacks fired on destroy
 .Pq before the bulk-free
 to release non-memory resources.
+.Pp
+No context lock is held while a cleanup callback runs, so a callback may
+call back into its own context
+.Pq Fn xtc_mctx_total_bytes , Fn xtc_mctx_total_chunks , or an allocation .
+What it must NOT do is reset or destroy the very context running it.
+Callbacks are detached before they run, so each fires exactly once even
+if the context is reset concurrently; register again if the next reset
+should call it too.
 .Pp
 .Fn xtc_mctx_alloc
 returns raw memory within the context;
@@ -111,8 +155,8 @@ reports the current member count.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_mctx_t *root, *req;
-xtc_mctx_create(NULL, "root", &root);
-xtc_mctx_create(root, "request-42", &req);
+xtc_mctx_create(NULL, "root", XTC_MCTX_DEFAULT, &root);
+xtc_mctx_create(root, "request-42", XTC_MCTX_DEFAULT, &req);
 
 /* Allocate request-scoped objects. */
 char *buf = xtc_mctx_alloc(req, 4096);

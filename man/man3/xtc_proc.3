@@ -202,9 +202,14 @@ Block up to that many nanoseconds, then return
 .Dv XTC_E_AGAIN
 on timeout.
 .El
-The delivered buffer is owned by the caller and must be
-.Xr free 3 'd
-when no longer needed.
+The delivered buffer is owned by the caller and must be released
+with
+.Fn xtc_free ,
+NOT
+.Xr free 3 :
+it comes from libxtc's own allocator, which an embedder may have
+replaced, so releasing it through the C library would be a mismatched
+free.
 .Pp
 .Fn xtc_recv_match
 performs selective receive: the callback
@@ -253,6 +258,33 @@ the proc is killed via
 receives a bitmask of which conditions fired.  This is the
 canonical way to write an idle-CPU-zero server: the proc sleeps
 until something real happens.
+.Pp
+The return code distinguishes the timeout from every other wake:
+.Dv XTC_E_AGAIN
+is returned ONLY when the timeout actually fired with nothing else, and
+in that case
+.Fa *out_revents
+carries
+.Dv XTC_WAIT_TIMEOUT .
+A wake for any other reason -- including an explicit
+.Fn xtc_task_wake
+that sets no readiness bit -- returns
+.Dv XTC_OK ,
+possibly with
+.Fa *out_revents
+of zero, so a caller must re-check its own condition on
+.Dv XTC_OK
+rather than assume a bit is set.
+An earlier release reported
+.Dv XTC_E_AGAIN
+for every bit-less wake whenever a timeout had merely been SUPPLIED,
+which made an explicit wake indistinguishable from an expiry.
+.Pp
+A kill delivered while the proc is parked here ends the park and
+unwinds the fiber, and the park's scheduler resources
+.Pq the fd registration and the timeout timer
+are released before the unwind completes, so a killed waiter does not
+leave the fd registered.
 .Pp
 .Fn xtc_proc_sleep
 parks the calling proc on a timer for at least
