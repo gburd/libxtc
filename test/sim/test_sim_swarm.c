@@ -65,16 +65,48 @@
 #define N_PAIRS    12       /* cross-loop ping/pong pairs (bounded) */
 #define N_SLEEPERS 4        /* timer-driven procs (bounded) */
 #define N_HOPS     3        /* round-trips per pair */
+#define TORN_TRIES 32       /* bounded verifier retries */
+
+/*
+ * WHERE THE PARTITION CUT GOES -- and why it must be an edge that
+ * carries workload traffic.
+ *
+ * Pair i places its pong on loop INDEX (i % N_LOOPS) and its ping on
+ * loop INDEX ((i + 1) % N_LOOPS), and both procs are PINNED (opts ==
+ * NULL), so the only communicating loop-index pairs in this workload are
+ * the NEIGHBOURS: k+1 -> k carries the ping, k -> k+1 carries the reply.
+ * A cut between NON-adjacent indices (the old 0 <-> 2) severs an edge no
+ * message ever crosses, so every "partition" seed silently ran an
+ * UNPARTITIONED workload.  Cut a neighbour edge instead.
+ *
+ * partition_set is keyed by pid.loop_id == loop index + 1, hence the +1.
+ * PAIR_IS_CUT(i) names the pairs the cut severs -- pong on CUT_LOOP_A,
+ * ping on CUT_LOOP_B.  With N_LOOPS == 4 that is i in {0, 4, 8}: THREE
+ * pairs, and the reaper can kill at most ONE pong, so at least two cut
+ * pairs always attempt a send and always see it dropped.  Both
+ * directions are blocked, so a cut pair completes ZERO round-trips.
+ */
+#define CUT_LOOP_A      0
+#define CUT_LOOP_B      1
+#define PAIR_IS_CUT(i)  (((i) % N_LOOPS) == CUT_LOOP_A && \
+	((((i) + 1) % N_LOOPS) == CUT_LOOP_B))
 
 static atomic_int  g_replies;
+static atomic_int  g_pair_replies[N_PAIRS];   /* round-trips, PER PAIR */
+static atomic_int  g_pair_drops[N_PAIRS];     /* sends DROPPED, per pair */
 static atomic_int  g_sleeps;
 static atomic_int  g_killed;      /* 1 if the reaper fired this run */
+static atomic_int  g_kill_victim; /* pair index the reaper killed, else -1 */
 static atomic_int  g_torn_bad;    /* torn/corrupt pages ACCEPTED silently (MUST be 0) */
+static atomic_int  g_torn_detected;   /* tears the checksum CAUGHT */
+static atomic_int  g_torn_verified;   /* verifiers that converged */
+static atomic_int  g_torn_stuck;      /* verifiers that EXHAUSTED retries */
+static atomic_int  g_torn_skipped;    /* torn workload NOT run (no temp file) */
 static atomic_long g_app_hash;
 
 /* Seeded per-run scenario, derived from the seed before the run. */
 struct scenario {
-	int partition;      /* cut loop 0 <-> loop 2 */
+	int partition;      /* cut loop index CUT_LOOP_A <-> CUT_LOOP_B */
 	int latency;        /* set a seeded net latency window */
 	int buggify;        /* enable buggify */
 	int machine_death;  /* a reaper kills a worker mid-run */
@@ -106,6 +138,39 @@ torn_cksum(const uint8_t *p, size_t n)
 	return h;
 }
 
+/*
+ * The EXACT page image this verifier writes for (id, attempt).  Every
+ * attempt's content is a pure function of (id, attempt), so the set of
+ * images that can legitimately be on disk at this offset is the finite,
+ * enumerable set { torn_page_image(id, a) : a in [0, TORN_TRIES) } plus
+ * the initial all-zero page (which fails the checksum).  That is what
+ * makes silent corruption DETECTABLE rather than assumed-impossible.
+ */
+static void
+torn_page_image(uint8_t *p, long id, int attempt)
+{
+	uint64_t ck;
+	memset(p, (int)((id * 5 + attempt) & 0xff), TORN_CK);
+	p[0] = (uint8_t)id;
+	ck = torn_cksum(p, TORN_CK);
+	memcpy(p + TORN_CK, &ck, sizeof ck);
+}
+
+/* 1 if `rd` is one of the images this verifier could legitimately have
+ * persisted at this offset; 0 means the bytes came from nowhere legal. */
+static int
+torn_page_legal(const uint8_t *rd, long id)
+{
+	uint8_t img[TORN_PAGE];
+	int a;
+	for (a = 0; a < TORN_TRIES; a++) {
+		torn_page_image(img, id, a);
+		if (memcmp(rd, img, TORN_PAGE) == 0)
+			return 1;
+	}
+	return 0;
+}
+
 static void
 torn_verifier(void *arg)
 {
@@ -113,47 +178,74 @@ torn_verifier(void *arg)
 	int64_t off = id * TORN_PAGE;
 	uint8_t page[TORN_PAGE], rd[TORN_PAGE];
 	int attempt;
-	if (g_torn_fd < 0)
+	if (g_torn_fd < 0) {
+		/* Not reachable: run_once counts the skip before spawning. */
+		atomic_fetch_add_explicit(&g_torn_skipped, 1,
+		    memory_order_relaxed);
 		return;
-	for (attempt = 0; attempt < 32; attempt++) {
-		uint64_t ck;
+	}
+	for (attempt = 0; attempt < TORN_TRIES; attempt++) {
+		uint64_t ck = 0, got = 0, want;
 		int w, r;
-		memset(page, (int)((id * 5 + attempt) & 0xff), TORN_CK);
-		page[0] = (uint8_t)id;
-		ck = torn_cksum(page, TORN_CK);
-		memcpy(page + TORN_CK, &ck, sizeof ck);
+		torn_page_image(page, id, attempt);
+		memcpy(&ck, page + TORN_CK, sizeof ck);
 		w = xtc_aio_pwrite(g_torn_fd, page, TORN_PAGE, off);
 		if (w < 0) continue;
 		memset(rd, 0, sizeof rd);
 		r = xtc_aio_pread(g_torn_fd, rd, TORN_PAGE, off);
 		if (r < TORN_PAGE) continue;
-		{
-			uint64_t got = 0, want = torn_cksum(rd, TORN_CK);
-			memcpy(&got, rd + TORN_CK, sizeof got);
-			if (got == want && memcmp(rd, page, TORN_PAGE) == 0) {
-				long h = atomic_load_explicit(&g_app_hash,
-				    memory_order_relaxed);
-				h = h * 1000003L + (id + 100);
-				atomic_store_explicit(&g_app_hash, h,
-				    memory_order_relaxed);
-				return;                /* verified */
-			}
-			/*
-			 * A checksum-VALID page (got == want) is intact even if it
-			 * differs from this attempt's buffer: a torn write leaves a
-			 * strict prefix, which -- since every attempt writes the
-			 * same deterministic content for this offset -- can be a
-			 * checksum-consistent earlier full write.  Only a page that
-			 * PASSES the checksum with genuinely-corrupt bytes is silent
-			 * bad data, which the checksum by construction cannot admit.
-			 * (The earlier != -latest-buffer oracle over-reported; a
-			 * 3000-seed swarm surfaced the false positive.)
-			 */
-			if (got == want)
-				return;                /* checksum-valid -> intact */
-			/* else: checksum FAILED -> detected torn write, retry. */
+		want = torn_cksum(rd, TORN_CK);
+		memcpy(&got, rd + TORN_CK, sizeof got);
+		if (got != want) {
+			/* Checksum REJECTED the page: a torn write (or a
+			 * corrupt read) was DETECTED.  Rewrite and retry. */
+			atomic_fetch_add_explicit(&g_torn_detected, 1,
+			    memory_order_relaxed);
+			continue;
 		}
+		/*
+		 * The checksum ACCEPTED this page.  That is only sound if the
+		 * bytes are an image this verifier actually wrote: a
+		 * checksum-valid page whose content is in the legal set is
+		 * intact (possibly an EARLIER full write -- a 1-byte torn
+		 * prefix reproduces the previous image byte-for-byte, since
+		 * byte 0 is `id` in every attempt).  A checksum-valid page
+		 * that is NOT in the legal set is CORRUPTION THE CHECKSUM
+		 * ACCEPTED -- silent bad data, the durability violation this
+		 * workload exists to find.  Recording it is what makes the
+		 * oracle able to fail at all (g_torn_bad was previously never
+		 * incremented, so the advertised check was vacuous).
+		 */
+		if (!torn_page_legal(rd, id)) {
+			atomic_fetch_add_explicit(&g_torn_bad, 1,
+			    memory_order_relaxed);
+			return;
+		}
+		if (memcmp(rd, page, TORN_PAGE) != 0) {
+			/* Legal, but an earlier image: this attempt's write was
+			 * torn back to a prior consistent page -- detected as
+			 * "not what I just wrote", and safe. */
+			atomic_fetch_add_explicit(&g_torn_detected, 1,
+			    memory_order_relaxed);
+		}
+		atomic_fetch_add_explicit(&g_torn_verified, 1,
+		    memory_order_relaxed);
+		{
+			long h = atomic_load_explicit(&g_app_hash,
+			    memory_order_relaxed);
+			h = h * 1000003L + (id + 100);
+			atomic_store_explicit(&g_app_hash, h,
+			    memory_order_relaxed);
+		}
+		return;                        /* verified */
 	}
+	/*
+	 * Retries EXHAUSTED without ever reading back a checksum-valid page.
+	 * The old loop simply fell out here and the run still "passed": a
+	 * page that never converges is a page whose durability was never
+	 * established, so record it and let the sweep FAIL on it.
+	 */
+	atomic_fetch_add_explicit(&g_torn_stuck, 1, memory_order_relaxed);
 }
 
 /* ---- ping/pong: a pong replies to N_HOPS pings; a ping does N_HOPS
@@ -200,7 +292,11 @@ ping(void *arg)
 		tries++;
 		rc = xtc_send(pa->peer, &self, sizeof self);
 		if (rc == XTC_E_AGAIN) {
-			/* dropped (partition) or soft-full: back off + retry */
+			/* dropped (partition) or soft-full: back off + retry.
+			 * Counted PER PAIR: this is the observable that proves a
+			 * partition actually cut this pair's traffic. */
+			atomic_fetch_add_explicit(&g_pair_drops[pa->id], 1,
+			    memory_order_relaxed);
 			(void)xtc_proc_sleep(1 * 1000 * 1000LL);
 			continue;
 		}
@@ -211,6 +307,8 @@ ping(void *arg)
 			continue;              /* no reply (killed peer): retry */
 		free(m);
 		atomic_fetch_add_explicit(&g_replies, 1, memory_order_relaxed);
+		atomic_fetch_add_explicit(&g_pair_replies[pa->id], 1,
+		    memory_order_relaxed);
 		h = atomic_load_explicit(&g_app_hash, memory_order_relaxed);
 		h = h * 1000003L + (pa->id + 1);
 		atomic_store_explicit(&g_app_hash, h, memory_order_relaxed);
@@ -244,15 +342,72 @@ reaper(void *arg)
 	if (!xtc_pid_is_none(ra->pongs[victim])) {
 		(void)xtc_exit_pid(ra->pongs[victim], 99);
 		atomic_store_explicit(&g_killed, 1, memory_order_relaxed);
+		/* Which pair lost its pong: the partition oracle must not
+		 * demand drops from a pair whose peer is simply gone. */
+		atomic_store_explicit(&g_kill_victim, victim,
+		    memory_order_relaxed);
 	}
 }
 
 static xtc_pid_t g_pongs[N_PAIRS];
 
-/* Build + run the workload once with `seed` under scenario `sc`. */
+/*
+ * The buggify sites this workload can reach.  A site that stays 0 across
+ * a whole sweep is unreachable from here (dead code or a workload gap).
+ * File scope because the ACTIVATION COUNTS must be collected INSIDE
+ * run_once -- see collect_buggify_cov.
+ */
+static const char *const known_sites[] = {
+	"proc.mbox.spurious_full", "chan.mpsc.spurious_full",
+	"chan.mpmc.spurious_full", "sync.sem.spurious_timeout",
+	"sched.steal.skip_near", "timer.fire.late",
+	"sched.inbox.drain_one_fewer", "sched.runq.defer_ready",
+	"io.aio.slow_completion", "lock.grant.skip_head",
+	"svr.recv.delay_dispatch", "reg.whereis.transient_miss",
+	"wal.flush.tiny_batch", "btree.split.eager"
+};
+#define N_KNOWN ((int)(sizeof known_sites / sizeof known_sites[0]))
+
+/*
+ * Fold this run's ACTIVATED buggify sites into `cov` (per-site seed
+ * counts); return this run's activation count.
+ *
+ * MUST be called BEFORE any xtc_sim_buggify_disable: disable RESETS the
+ * decision table (src/evt/sim.c), so querying after per-run cleanup --
+ * which is what main used to do -- always read an EMPTY table, making
+ * the whole fault-activation report silently vacuous.
+ */
+static int
+collect_buggify_cov(long *cov)
+{
+	int nr = xtc_sim_buggify_reached_count();
+	int bi, n_act = 0;
+
+	for (bi = 0; bi < nr; bi++) {
+		char nm[48];
+		int act = 0, ki;
+		if (xtc_sim_buggify_site(bi, nm, sizeof nm, &act) != XTC_OK)
+			continue;
+		if (!act)
+			continue;
+		n_act++;
+		for (ki = 0; ki < N_KNOWN; ki++)
+			if (strcmp(nm, known_sites[ki]) == 0) {
+				if (cov != NULL)
+					cov[ki]++;
+				break;
+			}
+	}
+	return n_act;
+}
+
+/* Build + run the workload once with `seed` under scenario `sc`.  When
+ * `cov` is non-NULL this run's activated buggify sites are folded into it
+ * (collected BEFORE cleanup); *out_act gets this run's activation
+ * count. */
 static int
 run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
-    long *out_app)
+    long *out_app, long *cov, int *out_act)
 {
 	xtc_exec_t *e = NULL;
 	int i, rc;
@@ -260,8 +415,17 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 	atomic_store(&g_replies, 0);
 	atomic_store(&g_sleeps, 0);
 	atomic_store(&g_killed, 0);
+	atomic_store(&g_kill_victim, -1);
 	atomic_store(&g_torn_bad, 0);
+	atomic_store(&g_torn_detected, 0);
+	atomic_store(&g_torn_verified, 0);
+	atomic_store(&g_torn_stuck, 0);
+	atomic_store(&g_torn_skipped, 0);
 	atomic_store(&g_app_hash, 0);
+	for (i = 0; i < N_PAIRS; i++) {
+		atomic_store(&g_pair_replies[i], 0);
+		atomic_store(&g_pair_drops[i], 0);
+	}
 
 	xtc_sim_partition_clear();
 	xtc_sim_buggify_disable();
@@ -287,9 +451,10 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 
 	/* Seeded scenario knobs, installed before the run advances. */
 	if (sc->partition) {
-		/* Cut loop 0 <-> loop 2 (loop_id = exec_id + 1). */
-		xtc_sim_partition_set(1, 3, 1);
-		xtc_sim_partition_set(3, 1, 1);
+		/* Cut a NEIGHBOUR edge -- the only kind this workload's pinned
+		 * ping/pong pairs actually send across.  loop_id == index + 1. */
+		xtc_sim_partition_set(CUT_LOOP_A + 1, CUT_LOOP_B + 1, 1);
+		xtc_sim_partition_set(CUT_LOOP_B + 1, CUT_LOOP_A + 1, 1);
 	}
 	if (sc->latency)
 		xtc_sim_net_latency(10 * 1000LL, sc->lat_hi);
@@ -310,9 +475,9 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 	if (sc->torn) {
 		/* Torn/corrupt-write injection + a couple of page verifiers.
 		 * Latency-only faults (0% short/EIO) so writes/reads defer +
-		 * park; corruption at ~30% tears some pages, which the
-		 * verifier detects (checksum) and rewrites.  A per-run temp
-		 * file, unlinked immediately; closed after the run. */
+		 * park; seeded corruption tears some pages, which the verifier
+		 * detects (checksum) and rewrites.  A per-run temp file,
+		 * unlinked immediately; closed after the run. */
 		char path[] = "/scratch/xtc-test/sim_swarm_torn_XXXXXX";
 		g_torn_fd = mkstemp(path);
 		if (g_torn_fd < 0) {
@@ -333,12 +498,34 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 				(void)xtc_proc_spawn(
 				    xtc_exec_loop(e, (unsigned)(v % N_LOOPS)),
 				    torn_verifier, (void *)(intptr_t)v, NULL, NULL);
+		} else {
+			/*
+			 * No temp storage: the torn workload does NOT run.  Record
+			 * it so the sweep reports (and fails on) a scenario it
+			 * ADVERTISED but did not execute.  Silently running a
+			 * smaller workload while still printing "torn-write
+			 * scenarios" is exactly how a check rots into a claim.
+			 */
+			atomic_store_explicit(&g_torn_skipped, 1,
+			    memory_order_relaxed);
 		}
 	}
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 	*out_state = xtc_sim_state_hash(e);
 	*out_app = atomic_load(&g_app_hash);
+
+	/*
+	 * Collect the fault-activation report BEFORE any cleanup:
+	 * xtc_sim_buggify_disable() below RESETS the decision table, so a
+	 * post-cleanup query (what main used to do) always reads an empty
+	 * table and reports zero activations for every seed.
+	 */
+	{
+		int act = collect_buggify_cov(cov);
+		if (out_act != NULL)
+			*out_act = act;
+	}
 
 	xtc_sim_partition_clear();
 	xtc_sim_buggify_disable();
@@ -348,6 +535,14 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 	(void)xtc_exec_fini(e);
 	return rc;
 }
+
+/*
+ * GATE THRESHOLDS.  Both gates need enough seeds to be statistically
+ * meaningful, so they only apply to a real sweep (the corpus runner and
+ * ad-hoc 1-seed invocations stay usable).
+ */
+#define MIN_GATE_SEEDS 20   /* per-scenario seeds before a gate applies */
+#define MIN_ACT_SITES   3   /* distinct buggify sites a sweep must activate */
 
 int
 main(int argc, char **argv)
@@ -359,21 +554,22 @@ main(int argc, char **argv)
 	int n_seen = 0;
 	long failures = 0;
 	long n_part = 0, n_lat = 0, n_bug = 0, n_kill = 0, n_torn = 0;
-	/* Fault-space coverage (FoundationDB-style): the buggify sites we
-	 * expect a full sweep to activate, and how many seeds hit each.  A
-	 * site that stays 0 across the whole sweep is unreachable (dead code
-	 * or a workload gap) and worth investigating. */
-	static const char *const known_sites[] = {
-		"proc.mbox.spurious_full", "chan.mpsc.spurious_full",
-		"chan.mpmc.spurious_full", "sync.sem.spurious_timeout",
-		"sched.steal.skip_near", "timer.fire.late",
-		"sched.inbox.drain_one_fewer", "sched.runq.defer_ready",
-		"io.aio.slow_completion", "lock.grant.skip_head",
-		"svr.recv.delay_dispatch", "reg.whereis.transient_miss",
-		"wal.flush.tiny_batch", "btree.split.eager"
-	};
-	const int n_known = (int)(sizeof known_sites / sizeof known_sites[0]);
-	long cov_activated[64] = {0};   /* seeds that ACTIVATED each site */
+	/* Fault-space coverage (FoundationDB-style): how many seeds ACTIVATED
+	 * each known buggify site, plus the sweep totals the MINIMUM
+	 * ACTIVATION GATE below is measured against. */
+	long cov_activated[N_KNOWN] = {0};
+	long tot_activations = 0;       /* activated sites, summed over runs */
+	long seeds_with_activation = 0;
+	/* Partition oracle observables. */
+	long part_cut_drops = 0;        /* drops on the CUT edge (part. seeds) */
+	long part_seeds_with_drop = 0;
+	long ctl_seeds_cut_traffic = 0; /* NON-partition seeds whose cut-edge
+	                                 * pairs DID complete round-trips: the
+	                                 * control proving the edge carries
+	                                 * workload traffic at all */
+	/* Torn-write oracle observables. */
+	long torn_detected = 0, torn_verified = 0, torn_skipped = 0;
+	const int n_cut = N_PAIRS / N_LOOPS;   /* cut pairs: i in {0,4,8} */
 
 	if (n_seeds < 1)
 		n_seeds = 1;
@@ -384,7 +580,9 @@ main(int argc, char **argv)
 		struct scenario sc;
 		uint64_t st1 = 0, st2 = 0;
 		long app1 = 0, app2 = 0;
-		int rc1, rc2, i;
+		int rc1, rc2, i, act1 = 0, act2 = 0;
+		int cut_drop_pairs = 0, cut_reply_pairs = 0, cut_drops = 0;
+		int victim, victim_is_cut;
 
 		/* Derive the scenario from the seed (independent of the PRNG
 		 * streams so it is fixed for the seed regardless of the
@@ -413,37 +611,116 @@ main(int argc, char **argv)
 		n_kill += sc.machine_death;
 		n_torn += sc.torn;
 
-		rc1 = run_once(seed, &sc, &st1, &app1);
-		/* Accumulate fault-space coverage from this seed's reached
-		 * buggify sites (state persists past run_once's deactivate
-		 * until the next buggify_enable). */
-		{
-			int nr = xtc_sim_buggify_reached_count();
-			int bi;
-			for (bi = 0; bi < nr; bi++) {
-				char nm[48]; int act = 0, ki;
-				if (xtc_sim_buggify_site(bi, nm, sizeof nm, &act)
-				    != XTC_OK)
-					continue;
-				for (ki = 0; ki < n_known; ki++)
-					if (strcmp(nm, known_sites[ki]) == 0) {
-						if (act) cov_activated[ki]++;
-						break;
-					}
-			}
-		}
+		/* Fault-space coverage is collected INSIDE run_once, BEFORE its
+		 * cleanup: xtc_sim_buggify_disable resets the decision table, so
+		 * the old post-run query here always read an empty table and the
+		 * whole activation report was vacuous. */
+		rc1 = run_once(seed, &sc, &st1, &app1, cov_activated, &act1);
+		tot_activations += act1;
+		if (act1 > 0)
+			seeds_with_activation++;
+		torn_detected += atomic_load(&g_torn_detected);
+		torn_verified += atomic_load(&g_torn_verified);
+		torn_skipped  += atomic_load(&g_torn_skipped);
+
+		/* ---- silent-corruption oracle.  Previously vacuous:
+		 * g_torn_bad was never incremented anywhere, so this branch
+		 * could not be taken by any input. ---- */
 		if (atomic_load(&g_torn_bad) != 0) {
 			printf("FAIL seed=%llu: %d torn/corrupt page(s) accepted "
-			    "SILENTLY (checksum missed a torn write) -- "
-			    "durability broken\n", (unsigned long long)seed,
+			    "SILENTLY (a checksum-VALID page held bytes no "
+			    "writer ever wrote) -- durability broken\n",
+			    (unsigned long long)seed,
 			    atomic_load(&g_torn_bad));
 			failures++;
 			continue;
 		}
-		rc2 = run_once(seed, &sc, &st2, &app2);
-		if (atomic_load(&g_torn_bad) != 0) {
-			printf("FAIL seed=%llu: torn page accepted silently on "
-			    "replay run\n", (unsigned long long)seed);
+		/* A verifier that burned every retry never established its
+		 * page's durability; the old loop just fell out and passed. */
+		if (atomic_load(&g_torn_stuck) != 0) {
+			printf("FAIL seed=%llu: %d torn-page verifier(s) "
+			    "EXHAUSTED %d retries without a checksum-valid "
+			    "read-back -- durability never established\n",
+			    (unsigned long long)seed,
+			    atomic_load(&g_torn_stuck), TORN_TRIES);
+			failures++;
+			continue;
+		}
+		/* A workload that did not run must be VISIBLE, not absent. */
+		if (atomic_load(&g_torn_skipped) != 0) {
+			printf("FAIL seed=%llu: the torn-write workload was "
+			    "SKIPPED (no usable temp file) -- this seed "
+			    "advertises a scenario it did not execute\n",
+			    (unsigned long long)seed);
+			failures++;
+			continue;
+		}
+
+		/* ---- partition oracle: the cut must have severed REAL
+		 * workload traffic.  A cut pair (pong on CUT_LOOP_A, ping on
+		 * CUT_LOOP_B) has BOTH directions blocked, so it completes ZERO
+		 * round-trips and its ping sees XTC_E_AGAIN on every send. ---- */
+		victim = atomic_load(&g_kill_victim);
+		victim_is_cut = (victim >= 0 && victim < N_PAIRS &&
+		    PAIR_IS_CUT(victim));
+		for (i = 0; i < N_PAIRS; i++) {
+			if (!PAIR_IS_CUT(i))
+				continue;
+			if (atomic_load(&g_pair_drops[i]) > 0) {
+				cut_drop_pairs++;
+				cut_drops += atomic_load(&g_pair_drops[i]);
+			}
+			if (atomic_load(&g_pair_replies[i]) > 0)
+				cut_reply_pairs++;
+		}
+		if (sc.partition) {
+			part_cut_drops += cut_drops;
+			if (cut_drop_pairs > 0)
+				part_seeds_with_drop++;
+			if (cut_reply_pairs != 0) {
+				printf("FAIL seed=%llu: %d pair(s) on the CUT "
+				    "edge (loop %d <-> %d) completed "
+				    "round-trips -- the partition did not cut "
+				    "the traffic it claims to\n",
+				    (unsigned long long)seed, cut_reply_pairs,
+				    CUT_LOOP_A, CUT_LOOP_B);
+				failures++;
+				continue;
+			}
+			/* Every cut pair must have OBSERVED the cut.  The reaper
+			 * kills at most one pong and a send to a dead peer fails
+			 * before reaching the partition seam, so allow exactly
+			 * that one pair to report no drop. */
+			if (cut_drop_pairs < n_cut - (victim_is_cut ? 1 : 0)) {
+				printf("FAIL seed=%llu: only %d/%d cut-edge "
+				    "pair(s) observed a DROPPED send (killed "
+				    "pair %d) -- the partition cut no workload "
+				    "traffic\n", (unsigned long long)seed,
+				    cut_drop_pairs, n_cut, victim);
+				failures++;
+				continue;
+			}
+		} else if (cut_reply_pairs == n_cut) {
+			/* CONTROL: uncut, every pair on that edge DOES complete
+			 * round-trips -- so the edge genuinely carries workload
+			 * traffic and the drops above are caused by the cut. */
+			ctl_seeds_cut_traffic++;
+		}
+
+		rc2 = run_once(seed, &sc, &st2, &app2, NULL, &act2);
+		if (atomic_load(&g_torn_bad) != 0 ||
+		    atomic_load(&g_torn_stuck) != 0) {
+			printf("FAIL seed=%llu: torn page accepted silently / "
+			    "left unresolved on the replay run\n",
+			    (unsigned long long)seed);
+			failures++;
+			continue;
+		}
+		if (act1 != act2) {
+			printf("FAIL seed=%llu: fault activations differ across "
+			    "replay (%d/%d) -- the fault schedule is not "
+			    "seed-determined\n", (unsigned long long)seed,
+			    act1, act2);
 			failures++;
 			continue;
 		}
@@ -478,6 +755,14 @@ main(int argc, char **argv)
 	    "schedules; scenarios: %ld partition, %ld latency, %ld buggify, "
 	    "%ld machine-death, %ld torn-write\n", n_seeds, seed_base,
 	    failures, n_seen, n_part, n_lat, n_bug, n_kill, n_torn);
+	printf("partition effect: %ld drop(s) on the cut edge (loop %d <-> %d) "
+	    "across %ld/%ld partition seeds; control: %ld non-partition "
+	    "seed(s) completed round-trips on that SAME edge\n",
+	    part_cut_drops, CUT_LOOP_A, CUT_LOOP_B, part_seeds_with_drop,
+	    n_part, ctl_seeds_cut_traffic);
+	printf("torn-write effect: %ld tear(s) DETECTED by checksum, %ld page "
+	    "verification(s) converged, %ld workload(s) skipped\n",
+	    torn_detected, torn_verified, torn_skipped);
 
 	/* Fault-space coverage.  Note the swarm's own workload is ping/pong
 	 * + timers + a torn file, so it only reaches the buggify sites on
@@ -489,14 +774,44 @@ main(int argc, char **argv)
 	{
 		int ki, hit = 0;
 		printf("buggify coverage (this workload): ");
-		for (ki = 0; ki < n_known; ki++)
+		for (ki = 0; ki < N_KNOWN; ki++)
 			if (cov_activated[ki] > 0) {
 				printf("%s=%ld ", known_sites[ki],
 				    cov_activated[ki]);
 				hit++;
 			}
-		printf("(%d/%d known sites activated by this sweep's "
-		    "workload)\n", hit, n_known);
+		printf("(%d/%d known sites activated; %ld activation(s) over "
+		    "%ld/%ld buggify seeds)\n", hit, N_KNOWN, tot_activations,
+		    seeds_with_activation, n_bug);
+		/*
+		 * MINIMUM ACTIVATION GATE.  A sweep that activated (almost) no
+		 * faults ran the benign schedule and learned nothing about the
+		 * fault space -- so "swept N fault scenarios" would be a claim
+		 * with no measurement behind it.  Demand breadth (distinct sites),
+		 * coverage (most buggify seeds activated something) and volume.
+		 */
+		if (n_bug >= MIN_GATE_SEEDS) {
+			if (hit < MIN_ACT_SITES) {
+				printf("FAIL: only %d/%d buggify site(s) "
+				    "ACTIVATED across the sweep (need >= %d) "
+				    "-- the fault space was barely "
+				    "explored\n", hit, N_KNOWN, MIN_ACT_SITES);
+				return 1;
+			}
+			if (seeds_with_activation * 2 < n_bug) {
+				printf("FAIL: only %ld/%ld buggify seed(s) "
+				    "activated any fault (need more than "
+				    "half) -- buggify is effectively off\n",
+				    seeds_with_activation, n_bug);
+				return 1;
+			}
+			if (tot_activations < n_bug) {
+				printf("FAIL: %ld fault activation(s) over %ld "
+				    "buggify seeds (need at least one per "
+				    "seed)\n", tot_activations, n_bug);
+				return 1;
+			}
+		}
 	}
 
 	if (failures > 0) {
@@ -508,10 +823,44 @@ main(int argc, char **argv)
 		    "scheduler is not seed-sensitive\n");
 		return 1;
 	}
+	/* The partition and torn-write scenarios must be MEASURABLY
+	 * effective across the sweep, not merely configured. */
+	if (n_part >= MIN_GATE_SEEDS) {
+		if (part_cut_drops == 0) {
+			printf("FAIL: %ld partition seeds produced ZERO "
+			    "dropped sends -- the cut edge carries no "
+			    "workload traffic\n", n_part);
+			return 1;
+		}
+		if (ctl_seeds_cut_traffic == 0 && n_seeds > n_part) {
+			printf("FAIL: no NON-partition seed completed "
+			    "round-trips on the cut edge -- the control is "
+			    "missing, so the drops above prove nothing\n");
+			return 1;
+		}
+	}
+	if (n_torn >= MIN_GATE_SEEDS) {
+		if (torn_verified == 0) {
+			printf("FAIL: %ld torn-write seeds verified ZERO pages "
+			    "-- the durability oracle never ran\n", n_torn);
+			return 1;
+		}
+		if (torn_detected == 0) {
+			printf("FAIL: %ld torn-write seeds DETECTED no tear at "
+			    "all -- the corruption injection is inert, so the "
+			    "silent-corruption oracle was never "
+			    "challenged\n", n_torn);
+			return 1;
+		}
+	}
 	printf("OK: %ld-seed swarm/soak -- every seed reached quiescence "
 	    "(across partition + latency + buggify + machine-death + "
-	    "torn-write scenarios), replayed identically, invariants held "
-	    "(no torn page accepted silently); %d distinct schedules "
-	    "explored\n", n_seeds, n_seen);
+	    "torn-write scenarios), replayed identically, invariants held; "
+	    "the cut edge demonstrably lost %ld send(s) while an UNCUT "
+	    "control on that same edge completed, %ld injected tear(s) were "
+	    "caught by checksum with NONE accepted silently and no verifier "
+	    "left unresolved, %ld fault activation(s) recorded; %d distinct "
+	    "schedules explored\n", n_seeds, part_cut_drops, torn_detected,
+	    tot_activations, n_seen);
 	return 0;
 }
