@@ -3,163 +3,201 @@ title: ABI stability
 parent: Reference
 nav_order: 6
 lede: >-
-  What stays fixed across releases, and the deprecation policy.
+  What stays fixed across releases, what is mechanically enforced, and
+  what is only a stated intention.
 permalink: /reference/abi-stability/
 ---
-This document is the **contract** xtc makes with its users about
-what changes between releases and what doesn't.
+This document is the **compatibility contract** for libxtc, and it is
+deliberately written in two voices:
 
-## SemVer with explicit ABI promise
+- **ENFORCED** -- a gate in `make check` / CI fails if the rule is
+  broken.  Every such rule names the gate.
+- **POLICY (not mechanically enforced)** -- the maintainer's stated
+  intention.  Nothing in the tree checks it.  Treat it as a promise
+  backed by review, not by tooling.
 
-Versioning is `MAJOR.MINOR.PATCH`:
+An earlier version of this page described symbol-version maps,
+capability strings, a prior-release compat suite, and a trace-shape
+diff suite as if they existed.  They did not, and do not.  They have
+been removed rather than left as false advertising; what remains is
+what a packager can verify in the tree.
 
-- **PATCH** (`1.4.x`).  Bug fixes only.  Same ABI.  Same on-disk
-  format.  Same wire format.  Same tracing-span shape.  Same lint
-  surface.  Drop-in replacement.
-- **MINOR** (`1.x.0`).  New features, new APIs, new hooks.  ABI
-  is **additive only**: nothing removed, nothing renamed, no
-  behaviour change for code compiled against the prior minor.
-  New `XTC_E_*` codes only at the end of the enum; existing
-  codes never change value.  New `xtc_cfg` knobs.  New lock modes
-  never inserted in the middle of the enum.
+## Version numbering (POLICY)
+
+Versioning is `MAJOR.MINOR.PATCH`.  The intent:
+
+- **PATCH** (`1.49.x`).  Bug fixes only.  Same ABI, same on-disk
+  formats, same trace shape.  Drop-in replacement.
+- **MINOR** (`1.x.0`).  New features, new APIs.  Additive only:
+  nothing removed, nothing renamed.  New `XTC_E_*` codes only at the
+  end of the enum; existing codes never change value.  New lock modes
+  never inserted in the middle of an enum.
+
+  **The additive-ABI promise is currently BROKEN for caller-allocated
+  option and info structs**, which have grown (and in two cases had
+  fields inserted mid-struct) during 1.x.  This is a real defect, not
+  a footnote: see
+  [Known issues]({{ '/reference/known-issues/' | relative_url }}) for
+  the measured sizes, the two severity classes, and the consumer rule.
+  Until it is addressed, **recompile consumers against the headers of
+  the exact minor whose library they link**.
 - **MAJOR** (`x.0.0`).  Breaking changes allowed.  Cadence is
-  intentionally slow -- we target one major every three to five
-  years.  An LTS designation on the previous major is committed
-  for at least 18 months past the new major's release.  A
-  migration guide and an `xtc-migrate-1to2` tool ship with the
-  major.
+  intentionally slow.
 
-## Symbol versioning
+No tooling verifies any of this.  There is no release gate that diffs
+the exported symbol set, the struct layouts, or the function
+signatures against the previous tag.  If you need that guarantee for a
+packaging decision, run `abidiff`/`abi-compliance-checker` yourself
+between the two tags you care about; libxtc does not do it for you.
 
-ABI stability is enforced mechanically by symbol versioning:
+## What the shared library actually exports (ENFORCED)
 
-- **Linux glibc / Solaris / FreeBSD**: `.symver` directives on
-  every public symbol.  `dist/s_abi` generates the version map
-  from `dist/pubdef.in`.
-- **Windows**: stable ordinals + a hand-curated `xtc.def`.
-- **macOS**: `-current_version` and `-compatibility_version`
-  matched to SemVer; careful curation of exported symbols.
+There is **no per-symbol version map**.  `dist/libxtc.map` is a single
+unnamed version node, so every exported symbol is **unversioned**; the
+file says so in its own header comment, and defers per-symbol
+versioning to a later day.  Consumers link against the SONAME
+(`libxtc.so.MAJOR`), and the policy above -- not the linker -- governs
+compatibility.
 
-`dist/s_abi` runs on every release tag:
+What *is* enforced, by `test/m0/test_symbols.sh` in `make check` and
+CI:
 
-- Reads the previous tag's exported-symbol set.
-- Diffs against the current build.
-- A removed or renamed symbol on a non-major bump fails the release.
-- A changed function signature on a non-major bump fails the release.
-- A new symbol on a patch bump fails the release.
+- `[C5]` every symbol defined in `libxtc.a` is `xtc_*`, `__xtc_*`, or
+  `_`-prefixed.  No stray global names.
+- `[C6]` installed public headers do not `#define` standard or bare
+  identifiers.
+- `[C7]` installed public headers declare no `__`-prefixed internal
+  function, except the small allowlist a public *macro* expands to.
+- `[C8]` the shared library's dynamic symbol table is exactly `xtc_*`
+  plus that same macro-backed allowlist -- so the whole `__os_*`
+  substrate and every other internal stays private.  `[C8]` also
+  asserts the allowlist agrees with `[C7]`'s.
 
-## Frozen surfaces (consumer commitments)
+Per-platform link recipes (in `dist/configure.ac`):
 
-Some surfaces are committed frozen ahead of a consumer's release so a
-libxtc point release cannot break them.  These are checked by name on
-every release tag, not just diffed:
+- **ELF (Linux, the BSDs, illumos)**: `-Wl,-soname,libxtc.so.MAJOR`
+  plus `-Wl,--version-script=dist/libxtc.map` (export restriction,
+  not symbol versioning).
+- **macOS**: `-install_name`, `-compatibility_version MAJOR.0`,
+  `-current_version FULL`, and `-Wl,-exported_symbols_list,libxtc.exp`
+  -- the Mach-O equivalent of the ELF export list, generated from the
+  archive by `dist/Makefile.in`.
+- **Windows**: the per-commit build is `xtc.lib` (static).  There is no
+  hand-curated `xtc.def` and no ordinal stability commitment.
 
-- **The lock layer (frozen -- the widest-consumed surface).**
-  Downstream integrations back their LWLock / LockManager equivalents
-  with these behind unchanged APIs, so an ABI wobble is expensive.
-  Frozen as of
-  0.4.0, before PG Phase 1 ships:
-    - `xtc_lwlock_t` and `xtc_lwlock_mode_t`, and the `xtc_lwlock_*`
-      entry points in `xtc_lwlock.h`.
-    - `xtc_lrlock_t` and the `xtc_lrlock_*` entry points in
-      `xtc_lrlock.h`.
-    - `xtc_lockmgr_t`, `xtc_locker_t`, `xtc_lock_mode_t`,
-      `xtc_lockmgr_opts_t`, `xtc_lockmgr_stat_t`, `xtc_lock_req_t`,
-      and the `xtc_lockmgr_*` / `xtc_lock_*` entry points in
-      `xtc_lockmgr.h`.
-  Both the function signatures AND the layout of these option/stats
-  structs are under the SemVer guarantee above: no change on a
-  non-major bump.  New optional fields, if ever needed, go through
-  the five-stage deprecation cycle (a new struct / a versioned
-  `_ex` entry point), never an in-place layout change.
+## Man-page and header agreement (ENFORCED)
 
-## Capability bits, not version checks
+The documentation side of the contract *is* gated:
 
-Applications never hard-code SemVer numbers in their code.  They ask
-for capabilities:
+- `test/m0/test_man_coverage.sh` -- every `PUBLIC:` function across the
+  installed header set is documented in some `man3` page.
+- `test/m0/test_man_signatures.sh` -- a function's page mentions every
+  parameter name from its declaration and documents the return
+  contract.
+- `test/m0/test_man_lint.sh` -- mdoc lints clean.
+- `test/m0/test_docs_abi.sh` -- every tool, path, and gate script this
+  page cites exists in the tree, and the page does not claim machinery
+  that is absent.  (That gate was added because this page previously
+  described five nonexistent files and it passed anyway.)
+- `test/docs/test_doc_snippets.sh` -- every code snippet in the docs
+  compiles and runs against the freshly built library.
 
-```c
-if (xtc_have_capability("io_uring"))      { ... }
-if (xtc_have_capability("hooks.v2"))      { ... }
-if (xtc_have_capability("lock.intent_modes")) { ... }
-```
+## Frozen surfaces (POLICY)
 
-Capabilities are strings declared in `dist/capabilities.in` and
-compiled into the binary.  Adding a capability is a **minor** bump;
-removing one is a **major** bump.  Capabilities work even when xtc
-is loaded as a shared library and swapped under the application
-without a recompile -- the precise scenario long-lived servers face.
+The lock layer is the widest-consumed surface, so it is committed
+frozen: `xtc_lwlock_t` / `xtc_lwlock_mode_t` and the `xtc_lwlock_*`
+entry points; `xtc_lrlock_t` and `xtc_lrlock_*`; `xtc_lockmgr_t`,
+`xtc_locker_t`, `xtc_lock_mode_t`, `xtc_lockmgr_opts_t`,
+`xtc_lockmgr_stat_t`, `xtc_lock_req_t` and the `xtc_lockmgr_*` /
+`xtc_lock_*` entry points.  Both the signatures and the layout of
+those option/stat structs are meant to hold across 1.x.
 
-## Five-stage deprecation lifecycle
+Verified by hand for this release: none of those structs has changed
+size or field order since v1.0.0.  But **no gate checks it**, and the
+struct-growth defect above shows that hand review is not sufficient on
+its own.  If a new optional field is ever needed there, it must go
+through a new struct or a versioned `_ex` entry point, never an
+in-place layout change.
 
-Removal of any public API takes at least five minor releases.  Each
-stage is one minor release at minimum.
+## Deprecation lifecycle (POLICY -- machinery NOT present)
 
-| Stage | Behaviour | Compiler / runtime signal |
+The intended lifecycle for removing a public API, one minor release
+per stage at minimum:
+
+| Stage | Behaviour | Intended signal |
 |---|---|---|
 | 1. Live | Documented, supported. | Nothing. |
-| 2. Soft-deprecated | Documented, supported. | `XTC_DEPRECATED_SOFT` attribute -> compiler note.  Doc note. |
-| 3. Deprecated | Supported, discouraged. | `XTC_DEPRECATED` attribute -> compiler warning.  `xtc_cfg.warn_deprecated` (default `true`) logs runtime use. |
-| 4. Default-off | Compiles only with `-DXTC_ENABLE_DEPRECATED`.  Runtime behaviour unchanged. | Build error without the flag. |
-| 5. Removed | Header `#error`'d; symbol absent. | Build error always.  Migration tool referenced in error text. |
+| 2. Soft-deprecated | Documented, supported. | Doc note. |
+| 3. Deprecated | Supported, discouraged. | Compiler warning. |
+| 4. Default-off | Opt-in build flag required. | Build error without the flag. |
+| 5. Removed | Header `#error`'d; symbol absent. | Build error always. |
 
-Minimum total span: **five minor releases** (~two years at our
-intended cadence).  Documented on the wiki per API.  Every removed
-function has a documented replacement.
+**None of the compiler/runtime machinery exists yet.**  There is no
+`XTC_DEPRECATED_SOFT` or `XTC_DEPRECATED` attribute macro in the
+headers, no `xtc_cfg.warn_deprecated` knob, and no
+`-DXTC_ENABLE_DEPRECATED` build mode.  Nothing has been deprecated in
+1.x, so the machinery has not been needed; it will be added with the
+first real deprecation.  Until then, stages 2-4 are documentation
+notes only.
 
-## Compat test suite -- the past keeps working
+## No capability query API
 
-`test/compat/` contains compiled-and-runnable copies of every
-worked example from every prior 1.x release.  CI builds them
-against the **current** source.  They must continue to compile and
-pass.  This is the strongest possible statement of "we meant it
-about ABI stability."
+Applications sometimes want to ask the library what it can do rather
+than hard-coding a version.  **libxtc has no such API today** -- there
+is no `xtc_have_capability()` and no capability-string table, in any
+form.  (An earlier version of this page showed example calls to one.
+They never compiled.)
 
-When a major bump happens, the suite forks: `test/compat/1.x/`
-freezes; `test/compat/2.x/` starts populating.  The 1.x suite stays
-in CI for the duration of the LTS commitment.
+What you can query today, from the public API:
 
-## Trace-shape stability
+- `xtc_version_string()` / the `XTC_VERSION_*` macros -- the version.
+- `xtc_runtime_info()` -- loop count, CPU counts, NUMA node count.
+- The configure-time `xtc_config.h` defines (`XTC_IO_BACKEND_*`,
+  `XTC_HAVE_*`) -- which backend a given build selected.
 
-An often-overlooked dimension of "compat": dashboards, alerts, and
-runbooks bind to span names and attributes.
-
-- Span names are stable across minors.  Renaming is a major change.
-- New attributes may be added in a minor.  Removing or renaming
-  attributes is a major change.
-- New span kinds (new hooks, new subsystems) may be added in a
-  minor.
-
-A `test/trace_compat/` suite captures the span shape from a set of
-canonical workloads at each release tag and diffs against the
-current build.  Diffs without a `RELEASE.md` entry justifying them
-block the release.
+Because the I/O backend and coroutine substrate are chosen at
+**configure** time, not runtime, "which backend am I on" is a
+compile-time fact for a statically linked consumer.  A consumer that
+swaps a shared libxtc underneath itself has no runtime way to ask, and
+should pin the minor.
 
 ## On-disk and wire formats
 
-Though xtc itself doesn't define database formats (PG does), it
-defines:
+libxtc defines no database format.  It does emit:
 
-- The flight-recorder dump format (`*.flt`).
-- The crash-dump trace format.
-- The `xtc_stat_dump` snapshot format.
-- The `xtcadmin` admin-socket protocol.
+- The `xtc_tail` event-trace dump (`xtc_tail_dump`), a 24-byte header
+  of magic + version + flags + count + base timestamp, read by
+  `tools/xtc-tail.py`.
+- The dial9 wire form of the same trace (`xtc_tail_dump_dial9`),
+  magic `TRC\0` + version.
+- `xtc_dump(fd)` -- a human-readable diagnostic dump, not a parsed
+  format, with no compatibility commitment.
 
-Each has a **format version byte** in its first byte and a documented
-per-version layout.  `xtcdump` reads every format version we ever
-shipped, forever.  No flag day.
+Both trace formats carry a version field, so a reader can reject or
+adapt.  **POLICY:** a format change bumps that field rather than
+silently reinterpreting bytes.  There is no `xtcdump` or `xtcadmin`
+tool, no flight-recorder `*.flt` format, and no admin-socket protocol
+in this tree; earlier claims about them were removed.
 
-## Long-term support
+## Trace shape (POLICY)
 
-We commit (informally for now, formally once we hit 1.0):
+Dashboards and runbooks bind to event names.  Intended: event names
+stable across minors, new event kinds may be added in a minor,
+renaming or removing one is a major change.  **No suite captures or
+diffs trace shape**, so this rests on review.
 
-- Each MAJOR has at least 18 months LTS past the next MAJOR.
-- Security fixes are backported to all in-support releases.
-- An `xtc-security@` list with a documented embargo policy.
-- Coordinated disclosure with PG's security list when an issue
-  affects threaded PG.
+## Long-term support (POLICY)
+
+Informal, and stated as intent rather than commitment: security fixes
+go to the current release; an LTS window on a previous major will be
+defined if and when there is a second major.  There is no
+`xtc-security@` list, no published embargo policy, and no backport
+branch in this tree yet.
 
 ## See also
 
+- [Known issues]({{ '/reference/known-issues/' | relative_url }}) --
+  the struct-growth ABI defect, in detail, with measurements.
 - [`adr/`](adr/) -- architecture decision records.
-- [Testing]({{ '/testing/' | relative_url }}) -- how stability is verified.
+- [Testing]({{ '/testing/' | relative_url }}) -- how the enforced gates
+  are run.
