@@ -87,46 +87,70 @@ faults, and stay inside a fixed resource budget on commodity hardware.
 ## A 30-second taste
 
 ```c
-#include <xtc.h>
-#include <xtc_loop.h>
-#include <xtc_proc.h>
+#include <stdio.h>
 
+#include <xtc.h>        /* XTC_OK, xtc_free */
+#include <xtc_loop.h>   /* the event loop */
+#include <xtc_proc.h>   /* procs, mailboxes, send/recv */
+
+/* The worker runs on a fiber.  It is handed the pid to reply to. */
 static void
 worker(void *arg)
 {
     xtc_pid_t parent = *(xtc_pid_t *)arg;
-    xtc_send(parent, "hello", 5);
+
+    (void)xtc_send(parent, "hello", 5);
+}
+
+/* The parent spawns the worker from INSIDE a proc, so it has a pid to be
+ * replied to and a mailbox to receive in. */
+static void
+parent(void *arg)
+{
+    xtc_loop_t *loop = arg;
+    xtc_pid_t   self = xtc_self();   /* a real pid: we are on a proc */
+    void       *msg;
+    size_t      sz;
+
+    if (xtc_proc_spawn(loop, worker, &self, NULL, NULL) != XTC_OK)
+        return;
+
+    /* Wait up to one second for the worker's message. */
+    if (xtc_recv(&msg, &sz, 1000LL * 1000 * 1000) == XTC_OK) {
+        printf("got %zu bytes from worker\n", sz);
+        xtc_free(msg);           /* xtc_free, not free(3): libxtc may
+                                  * use its own allocator */
+    }
 }
 
 int
 main(void)
 {
     xtc_loop_t *loop;
-    xtc_pid_t   self, child;
-    void       *msg; size_t sz;
 
-    xtc_loop_init(&loop);
-    self = xtc_self();
-
-    xtc_proc_spawn(loop, worker, &self, NULL, &child);
-
-    /* Wait for "hello" with a 1-second timeout. */
-    if (xtc_recv(&msg, &sz, 1000LL * 1000 * 1000) == XTC_OK) {
-        printf("got %zu bytes from worker\n", sz);
-        free(msg);
-    }
-    xtc_loop_run(loop);
-    xtc_loop_fini(loop);
+    if (xtc_loop_init(&loop) != XTC_OK)
+        return 1;
+    if (xtc_proc_spawn(loop, parent, loop, NULL, NULL) != XTC_OK)
+        return 1;
+    (void)xtc_loop_run(loop);        /* runs both procs to completion */
+    (void)xtc_loop_fini(loop);
     return 0;
 }
 ```
 
-Compile:
+Compile and run:
 ```sh
-cc my.c -lxtc -lpthread -o my
+cc my.c -lxtc -lpthread -o my && ./my
+got 5 bytes from worker
 ```
 
-That's a one-process actor system in 25 lines.
+That's a one-process actor system in about 50 lines.  Note the shape:
+`xtc_self()` and `xtc_recv()` are **proc-context** calls -- off a proc
+`xtc_self()` returns `XTC_PID_NONE` and `xtc_recv()` rejects with
+`XTC_E_INVAL`, so the receive lives inside a proc and `main()` only
+spawns and runs the loop.  This exact program is
+[`docs/_includes/snippets/00_readme_taste.c`](docs/_includes/snippets/00_readme_taste.c),
+compiled and run by `make check` -- doc code is a release gate here.
 
 ## Where it shines
 
@@ -144,15 +168,22 @@ cd examples/05_rexis && make
 
 Then talk to it with `redis-cli` like any Redis server.
 
-Other examples in `examples/`:
+Other examples in `examples/` (the full list, with per-example design
+notes, is [`examples/README.md`](examples/README.md)):
 
 | Example | What it shows |
 |---|---|
-| `01_hello_async/` | A single async task with a timer |
-| `02_proc_pingpong/` | Two BEAM processes bouncing messages |
-| `03_supervised_app/` | Crash a worker, watch the supervisor restart it |
-| `04_lockmgr_demo/` | The 9-mode transactional lock manager |
+| `01_hello_async.c` | A single async task with a timer |
+| `02_proc_pingpong.c` | Two BEAM processes bouncing messages |
+| `03_supervised_app.c` | Crash a worker, watch the supervisor restart it |
+| `04_lockmgr_demo.c` | The 9-mode transactional lock manager |
 | `05_rexis/` | Networked, budgeted, multi-command Redis-compat server |
+| `06_sqlxtc/` | A from-scratch SQL engine (parser, vectorized executor, B-link + buffer pool + WAL) |
+| `07_kaka/` | Kafka-shaped partitioned log broker with credit backpressure |
+| `08_tnt/` | The Isolate layer: thread-per-core stackless state machines, TCP echo |
+| `09_pgmock/` | A mock PostgreSQL backend on the xtc scheduler -- zero PG source |
+| `10_circuit_breaker.c` | The circuit-breaker pattern as an `xtc_fsm` (gen_statem) |
+| `11_lorb/` | A price-time limit order book / matching engine, with benchmarks |
 
 ## Built on three traditions
 
@@ -179,26 +210,44 @@ the *what*.
 
 ## Status and stability
 
-xtc is **1.0**.  The public API surface is stable and semver applies
-from here: no breaking change to a documented public API without a major
-version bump.  The semver / deprecation policy is documented in
-`docs/abi-stability.md`.
+xtc is **1.0**.  The public API surface is stable in the sense that no
+documented `xtc_*` function has been removed, renamed, or had its
+signature changed during 1.x.
+
+**One caveat a packager must read before mixing versions:** several
+caller-allocated option and info structs have GROWN during 1.x, and two
+had fields inserted mid-struct rather than appended.  Source
+compatibility is intact; **binary** compatibility across minors is not.
+Recompile consumers against the headers of the exact minor whose library
+they link, and do not mix.  The measured sizes and the affected structs
+are in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md); the compatibility
+policy, and an explicit split between what is mechanically enforced and
+what is only intention, is in `docs/abi-stability.md`.  There is **no
+automated ABI or signature diff** between release tags -- run `abidiff`
+yourself if you need that guarantee.
 
 What's working today:
 
 | Layer | Status |
 |---|---|
 | L0 OS substrate | Linux, FreeBSD, illumos runtime-verified; Windows (MinGW/Clang64/MSVC) and macOS OS-layer ports build.  (An AIX/ppc64 OS-layer port compiles in-tree but AIX is NOT supported/maintained -- unverified, off the roadmap.) |
-| L1 I/O | io_uring, epoll, kqueue, poll, select, and illumos event-ports (port_*) runtime-verified (the last on big-endian sparcv9, including its native SIGEV_PORT file-AIO path).  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); AIX pollset COMPILES and is code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux + macOS at runtime; Windows CI is a build-only smoke. |
+| L1 I/O | io_uring, epoll, kqueue, poll, select, and illumos event-ports (port_*) runtime-verified (the last on big-endian sparcv9, including its native SIGEV_PORT file-AIO path).  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); AIX pollset COMPILES and is code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux, macOS, FreeBSD, and riscv64 at runtime; Windows CI is a build-only smoke. |
 | L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written x86_64 fcontext (~7.6 ns/swap) + 7 more arches + ucontext fallback. |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
 | L5 PG adapter | Designed; not yet implemented. |
 | TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/M_TLS_MATRIX.md`); SChannel (Windows) is compile-only. |
 
-Test coverage today: **610 munit test cases on Linux**, clean under
-AddressSanitizer and UBSan in CI, plus **36 hegel properties across 17
-suites** that all pass when the tier is enabled with `--with-hegel`.
+Test coverage today, measured against this tree (v1.49.1 plus the
+allocator / cancellation / accounting regression tests that landed after
+it): **626 munit test cases across 109 munit binaries on Linux**, clean
+under AddressSanitizer and UBSan in CI, plus 34 shell gates, 7
+standalone C harnesses, the 68-file deterministic-simulation tier (a
+separate `--with-io-backend=sim` build, `make check-dst`), and **36
+hegel properties across 17 suites** that all pass when the tier is
+enabled with `--with-hegel`.  Recount rather than trust these numbers if
+you are citing them: `for t in $(...TESTS_C...); do ./$t --list; done |
+grep -c '^/'` is how the 626 was obtained.
 
 The property tier is opt-in because it needs `libhegel`
 ([hegeldev/hegel-rust](https://github.com/hegeldev/hegel-rust)), an
@@ -208,18 +257,27 @@ Without it, `make check` prints a loud per-suite SKIP and a count of
 unverified properties rather than passing silently -- a green run without
 `--with-hegel` does NOT mean those properties hold.  See
 [ADR-0002](docs/adr/0002-hegel-pbt-first-class.md).
-GitHub CI also runs the full C munit suite on **macOS** (Apple Silicon:
-kqueue + ucontext + GCD dispatch semaphores) and an **MSVC** xtc.lib +
-smoke build on **Windows** every commit.  FreeBSD 15 (clang, kqueue)
-was re-verified against the current tree (full gmake check passes,
-including the native kqueue file-AIO path); the Windows IOCP runtime
-was runtime-verified on a host with MinGW.  illumos (SunOS 5.11,
-UltraSPARC v9 / big-endian sparcv9, gcc) was also re-verified against
-the current tree (full gmake check, OpenSSL 3, native event-port
-file-AIO).  None of
-FreeBSD/illumos/Windows-runtime is in per-commit CI yet.  Windows also
-passes ~233 munit under MinGW and 48/48 of the buildable binaries
-under Clang64 in prior runs.
+GitHub CI runs, on every push and pull request: gcc and clang `make
+check`, AddressSanitizer, UndefinedBehaviorSanitizer, ThreadSanitizer,
+Valgrind, a forced-fcontext (musl coroutine path) build, the DST sim
+tier, the five TLS backends, the examples, **macOS** (Apple Silicon:
+kqueue + ucontext + GCD dispatch semaphores, full C munit suite),
+**FreeBSD** in a VM (clang + kqueue, `gmake check` -- this job gates
+again since the 1.48.0 strand fix), **riscv64** under qemu-user (C +
+property suites), and an **MSVC** `xtc.lib` + smoke build on
+**Windows**.  The property tier's own job is advisory
+(`continue-on-error`) pending a runner-specific failure; see
+KNOWN_ISSUES.
+
+NOT in per-commit CI, and therefore verified by hand against this tree
+rather than continuously: illumos (SunOS 5.11, UltraSPARC v9 /
+big-endian sparcv9, gcc -- full `gmake check`, OpenSSL 3, native
+event-port file-AIO) and the Windows IOCP runtime (runtime-verified on a
+host with MinGW: loop/task/timer/waker/net + file AIO).  The Windows
+MinGW and Clang64 munit numbers quoted in older notes (~233 munit under
+MinGW, 48/48 buildable binaries under Clang64) are from earlier manual
+runs and have not been re-measured against this tree -- treat them as
+historical.
 
 Honest gaps and known issues live in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 The original design plan (a historical bring-up document) is in
@@ -272,10 +330,12 @@ Configure flags worth knowing:
 The meson build (`meson.build` + `meson_options.txt`) is at parity with
 the autotools build: it compiles the full static (and, with
 `-Dshared=true`, shared) library from the same source list, with the
-same io-backend / coroutine / TLS selection, and `meson test` runs the
-same C munit suite (109 tests) as `make check`'s C tier.  The exported
-`xtc_*` / `__xtc_*` symbol set is byte-for-byte identical to the
-autotools `libxtc.a` at the same optimization level.  Its options mirror
+same io-backend / coroutine / TLS selection, and `meson test` registers
+111 of the same C test binaries (measured: `meson test --list | wc -l`)
+against `make check`'s 118-entry C tier.  The exported
+`xtc_*` / `__xtc_*` symbol set is identical to the autotools
+`libxtc.a` at the same optimization level (verified for this release:
+885 defined symbols each, zero difference).  Its options mirror
 the `./configure` flags:  `-Dio-backend=` (auto/poll/epoll/uring/kqueue/
 iocp/solaris/aix/select/sim), `-Dtls=` (auto/openssl/libressl/boringssl/
 mbedtls/gnutls/wolfssl/schannel/none), `-Daccel=` (auto/yes/no),
@@ -294,7 +354,8 @@ follow-up).
 * `man/man3/` and `man/man7/` -- per-API reference.  Every public `xtc_*` symbol has a man page (coverage is gate-enforced in `make check`).
 * `PLAN.md` -- the full design rationale.  Long but exhaustive.
 * `docs/ARCHITECTURE.md` -- the layer diagram, the principles, the why.
-* `docs/abi-stability.md` -- semver and deprecation policy.
+* `docs/abi-stability.md` -- the compatibility contract, split into what
+  is mechanically enforced and what is only stated policy.
 * `docs/KNOWN_ISSUES.md` -- everything I know about that's not perfect.
 
 ## License
