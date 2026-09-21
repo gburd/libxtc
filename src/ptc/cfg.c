@@ -9,7 +9,9 @@
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_cfg.h"
+#include "coro_int.h"      /* __xtc_current_task: the calling fiber's identity */
 
+#include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +44,14 @@ struct xtc_cfg_var {
 	xtc_cfg_validator_fn  validator;
 	xtc_cfg_changed_fn    on_change;
 	void                 *cb_user;
+	/*
+	 * Holders of this entry's storage: the registry holds one while
+	 * the variable is registered, and every session override that
+	 * names it holds one more.  See __cfg_var_unref_locked -- this is
+	 * what makes unregister-then-destroy-session safe in either
+	 * order.  Guarded by __cfg_lock.
+	 */
+	int refs;
 	struct xtc_cfg_var *next;
 };
 #define cfg_var xtc_cfg_var   /* keep the terse internal spelling below */
@@ -73,6 +83,47 @@ __cfg_find_locked(const char *name)
 	for (v = __cfg_head; v != NULL; v = v->next)
 		if (strcmp(v->name, name) == 0) return v;
 	return NULL;
+}
+
+/* Release a registry entry's storage.  Only ever reached from
+ * __cfg_var_unref_locked, when the last holder drops its reference. */
+static void
+__cfg_var_free(struct cfg_var *v)
+{
+	__os_free(v->name);
+	__os_free(v->desc);
+	if (v->kind == XTC_CFG_STRING && v->cur.v_string != NULL)
+		__os_free(v->cur.v_string);
+	__os_free(v);
+}
+
+/*
+ * Drop one reference to a registry entry, freeing it at zero.
+ *
+ * xtc_cfg_unregister unlinks the entry from the registry and drops the
+ * REGISTRY's reference, but a session override that still names the
+ * entry keeps it alive until that override is torn down.  Without this,
+ * unregister freed the entry while an override still pointed at it and
+ * the override teardown read entry->kind to decide whether to free a
+ * string value -- a heap-use-after-free.  Both orderings are now safe:
+ * unregister-then-destroy-session and destroy-session-then-unregister.
+ *
+ * An unlinked-but-still-referenced entry is invisible to every lookup
+ * (they all go through __cfg_find_locked), so no read can resolve
+ * through the stale override; it only survives to be freed correctly.
+ */
+static void
+__cfg_var_unref_locked(struct cfg_var *v)
+{
+	if (--v->refs == 0) __cfg_var_free(v);
+}
+
+static void
+__cfg_var_unref(struct cfg_var *v)
+{
+	(void)__xtc_mtx_lock(&__cfg_lock);
+	__cfg_var_unref_locked(v);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 }
 
 static int
@@ -126,12 +177,10 @@ xtc_cfg_register(const xtc_cfg_spec_t *spec)
 	(void)__xtc_mtx_lock(&__cfg_lock);
 	if (__cfg_find_locked(spec->name) != NULL) {
 		(void)__xtc_mtx_unlock(&__cfg_lock);
-		__os_free(v->name); __os_free(v->desc);
-		if (v->kind == XTC_CFG_STRING && v->cur.v_string)
-			__os_free(v->cur.v_string);
-		__os_free(v);
+		__cfg_var_free(v);
 		return XTC_E_INVAL;
 	}
+	v->refs = 1;                    /* the registry's reference */
 	v->next = __cfg_head;
 	__cfg_head = v;
 	__cfg_count++;
@@ -150,11 +199,11 @@ xtc_cfg_unregister(const char *name)
 		if (strcmp(v->name, name) == 0) {
 			*link = v->next;
 			__cfg_count--;
+			/* Drop the registry's reference.  A live session
+			 * override keeps the storage alive until its own
+			 * teardown -- see __cfg_var_unref_locked. */
+			__cfg_var_unref_locked(v);
 			(void)__xtc_mtx_unlock(&__cfg_lock);
-			__os_free(v->name); __os_free(v->desc);
-			if (v->kind == XTC_CFG_STRING && v->cur.v_string)
-				__os_free(v->cur.v_string);
-			__os_free(v);
 			return XTC_OK;
 		}
 	}
@@ -384,9 +433,17 @@ __cfg_apply_string(const char *name, const char *sval)
 		return xtc_cfg_set_bool(name, b);
 	}
 	case XTC_CFG_INT: {
-		char *end; long v;
-		errno = 0; v = strtol(sval, &end, 0);
+		char *end; long long v;
+		/* Parsed WIDE (strtoll, not strtol) and range-checked before
+		 * the narrowing cast: a value too large for an int silently
+		 * WRAPPED on the cast and so slipped past xtc_cfg_set_int's
+		 * bounds check -- an INT knob bounded [1,100] accepted
+		 * 4294967297 as 1.  Out of range is just another invalid
+		 * value: reject it, and the caller skips the line. */
+		errno = 0; v = strtoll(sval, &end, 0);
 		if (*sval == '\0' || *end != '\0' || errno != 0) return XTC_E_INVAL;
+		if (v < (long long)INT_MIN || v > (long long)INT_MAX)
+			return XTC_E_INVAL;
 		return xtc_cfg_set_int(name, (int)v);
 	}
 	case XTC_CFG_INT64: {
@@ -408,8 +465,13 @@ __cfg_apply_string(const char *name, const char *sval)
 		int rc = __cfg_enum_index(name, sval, &idx);
 		if (rc != XTC_OK) {
 			/* Accept a numeric index too. */
-			char *end; long n = strtol(sval, &end, 10);
-			if (*sval == '\0' || *end != '\0') return rc;
+			/* Same wide-parse-then-range-check as XTC_CFG_INT: a
+			 * wrapped narrowing could land on a valid label index. */
+			char *end; long long n;
+			errno = 0; n = strtoll(sval, &end, 10);
+			if (*sval == '\0' || *end != '\0' || errno != 0) return rc;
+			if (n < (long long)INT_MIN || n > (long long)INT_MAX)
+				return rc;
 			idx = (int)n;
 		}
 		return xtc_cfg_set_enum(name, idx);
@@ -538,19 +600,118 @@ struct cfg_level {
 
 struct xtc_cfg_session {
 	struct cfg_level *top;    /* innermost level (never NULL: base level) */
+	/* Binding (see __cfg_bound_head): the fiber that bound this
+	 * session, and the link through the bound-session list.  Both are
+	 * NULL / unlinked while the session is not bound.  Guarded by
+	 * __cfg_lock.  The link lives HERE rather than in a separately
+	 * allocated side-table node so binding never allocates and so
+	 * cannot fail. */
+	xtc_task_t         *owner;
+	xtc_cfg_session_t  *bnext;
 };
 
-/* Bound session for the running fiber.  A carrier runs one fiber at a
- * time and the consumer binds on fiber entry / unbinds on exit, so a
- * thread-local is fiber-local in practice and keeps cfg self-contained
- * (no field on struct xtc_proc, no dependency on the proc layer). */
-static _Thread_local xtc_cfg_session_t *__cfg_ssn_current;
+/*
+ * Bound sessions, keyed by the FIBER that bound them.
+ *
+ * This was a plain `_Thread_local xtc_cfg_session_t *`, which is
+ * per-OS-THREAD, not per-fiber as xtc_cfg.h documents and as a database
+ * session layer needs: two fibers on ONE loop that each bound their own
+ * session and then yielded read each other's values (fiber A bound a
+ * session with work_mem=11, yielded, fiber B bound its own with 22, and
+ * A resumed reading 22).  A carrier runs one fiber at a time, but it
+ * runs MANY of them between two points in any single fiber, so the
+ * binding must ride with the fiber.
+ *
+ * It rides by being keyed on the fiber's identity rather than by being
+ * saved/restored at the switch: __xtc_current_task() is the running
+ * fiber (coro_int.h), and it is read at RESOLVE time, so a yield cannot
+ * lose or leak the binding no matter which thread the fiber resumes on
+ * (a work-stolen migratable fiber included).  Same shape as pdict.c,
+ * which keys per-proc state on the calling proc's identity for the same
+ * reason, and it needs nothing from the proc layer or the coroutine
+ * substrates.
+ *
+ * OFF a fiber (__xtc_current_task() == NULL -- a plain OS thread, e.g.
+ * a startup path or a test binary with no loop) per-thread IS the
+ * correct scope, so the thread-local below still serves that case.
+ *
+ * Cost: resolving a binding is a linear scan of the CURRENTLY BOUND
+ * sessions, done under the registry lock the getters already hold, so
+ * it adds no locking.  That matches the registry's own linear scan (see
+ * the xtc_cfg.h header note); if a consumer ever holds thousands of
+ * bindings at once, this list is the thing to replace with the same
+ * xtc_chash the registry is slated to get.
+ */
+static xtc_cfg_session_t *__cfg_bound_head;
+static _Thread_local xtc_cfg_session_t *__cfg_ssn_tls;   /* off-fiber binds */
 
+/* Unlink `s` from the bound list if it is linked.  Called with the
+ * registry lock held. */
 static void
-__cfg_ovr_free(struct cfg_ovr *o)
+__cfg_unbind_ssn_locked(xtc_cfg_session_t *s)
+{
+	xtc_cfg_session_t **link, *b;
+	for (link = &__cfg_bound_head; (b = *link) != NULL; link = &b->bnext) {
+		if (b == s) {
+			*link = b->bnext;
+			b->bnext = NULL;
+			b->owner = NULL;
+			return;
+		}
+	}
+}
+
+/* Unlink and return whatever session `t` had bound, or NULL.  Called
+ * with the registry lock held. */
+static xtc_cfg_session_t *
+__cfg_unbind_task_locked(xtc_task_t *t)
+{
+	xtc_cfg_session_t **link, *b;
+	for (link = &__cfg_bound_head; (b = *link) != NULL; link = &b->bnext) {
+		if (b->owner == t) {
+			*link = b->bnext;
+			b->bnext = NULL;
+			b->owner = NULL;
+			return b;
+		}
+	}
+	return NULL;
+}
+
+/* The CALLING fiber's bound session (or the calling thread's, off a
+ * fiber).  Called with the registry lock held. */
+static xtc_cfg_session_t *
+__cfg_ssn_current_locked(void)
+{
+	xtc_task_t *me = __xtc_current_task();
+	xtc_cfg_session_t *b;
+	if (me == NULL) return __cfg_ssn_tls;
+	for (b = __cfg_bound_head; b != NULL; b = b->bnext)
+		if (b->owner == me) return b;
+	return NULL;
+}
+
+/* Same, for callers that do NOT already hold the lock. */
+static xtc_cfg_session_t *
+__cfg_ssn_current_ext(void)
+{
+	xtc_cfg_session_t *s;
+	(void)__xtc_mtx_lock(&__cfg_lock);
+	s = __cfg_ssn_current_locked();
+	(void)__xtc_mtx_unlock(&__cfg_lock);
+	return s;
+}
+
+/* Release one override entry.  Reading o->var->kind here is what made
+ * unregister-then-destroy-session a use-after-free; the entry's own
+ * reference (taken when the override was created) keeps the registry
+ * entry alive until exactly this point.  Lock held. */
+static void
+__cfg_ovr_free_locked(struct cfg_ovr *o)
 {
 	if (o->var->kind == XTC_CFG_STRING && o->val.v_string != NULL)
 		__os_free(o->val.v_string);
+	__cfg_var_unref_locked(o->var);
 	__os_free(o);
 }
 
@@ -558,7 +719,12 @@ static void
 __cfg_level_free(struct cfg_level *lv)
 {
 	struct cfg_ovr *o, *n;
-	for (o = lv->head; o != NULL; o = n) { n = o->next; __cfg_ovr_free(o); }
+	(void)__xtc_mtx_lock(&__cfg_lock);
+	for (o = lv->head; o != NULL; o = n) {
+		n = o->next;
+		__cfg_ovr_free_locked(o);
+	}
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	__os_free(lv);
 }
 
@@ -586,7 +752,13 @@ xtc_cfg_session_destroy(xtc_cfg_session_t *s)
 {
 	struct cfg_level *lv, *p;
 	if (s == NULL) return;
-	if (__cfg_ssn_current == s) __cfg_ssn_current = NULL;
+	/* Destroying a still-bound session drops the binding, whichever
+	 * fiber holds it -- otherwise the list would keep a dangling
+	 * entry. */
+	(void)__xtc_mtx_lock(&__cfg_lock);
+	__cfg_unbind_ssn_locked(s);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
+	if (__cfg_ssn_tls == s) __cfg_ssn_tls = NULL;
 	for (lv = s->top; lv != NULL; lv = p) { p = lv->parent; __cfg_level_free(lv); }
 	__os_free(s);
 }
@@ -594,15 +766,33 @@ xtc_cfg_session_destroy(xtc_cfg_session_t *s)
 xtc_cfg_session_t *
 xtc_cfg_session_bind(xtc_cfg_session_t *s)
 {
-	xtc_cfg_session_t *prev = __cfg_ssn_current;
-	__cfg_ssn_current = s;
+	xtc_task_t *me = __xtc_current_task();
+	xtc_cfg_session_t *prev;
+
+	if (me == NULL) {            /* off a fiber: per-thread is the scope */
+		prev = __cfg_ssn_tls;
+		__cfg_ssn_tls = s;
+		return prev;
+	}
+	(void)__xtc_mtx_lock(&__cfg_lock);
+	prev = __cfg_unbind_task_locked(me);
+	if (s != NULL) {
+		/* A session bound by one fiber at a time is the documented
+		 * contract; re-binding an already-bound session MOVES it
+		 * rather than corrupting the list. */
+		__cfg_unbind_ssn_locked(s);
+		s->owner = me;
+		s->bnext = __cfg_bound_head;
+		__cfg_bound_head = s;
+	}
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	return prev;
 }
 
 xtc_cfg_session_t *
 xtc_cfg_session_current(void)
 {
-	return __cfg_ssn_current;
+	return __cfg_ssn_current_ext();
 }
 
 int
@@ -610,7 +800,7 @@ xtc_cfg_session_push(xtc_cfg_session_t *s)
 {
 	struct cfg_level *lv;
 	int rc;
-	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) s = __cfg_ssn_current_ext();
 	if (s == NULL) return XTC_E_INVAL;
 	if ((rc = __os_calloc(1, sizeof *lv, (void **)&lv)) != XTC_OK)
 		return rc;
@@ -624,7 +814,7 @@ xtc_cfg_session_commit(xtc_cfg_session_t *s)
 {
 	struct cfg_level *top, *parent;
 	struct cfg_ovr *o, *n;
-	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) s = __cfg_ssn_current_ext();
 	if (s == NULL) return XTC_E_INVAL;
 	top = s->top;
 	parent = top->parent;
@@ -635,6 +825,7 @@ xtc_cfg_session_commit(xtc_cfg_session_t *s)
 	 * (this level is newer), reusing the parent slot so a string is not
 	 * leaked.  Order does not matter -- one entry per (var, level).
 	 */
+	(void)__xtc_mtx_lock(&__cfg_lock);
 	for (o = top->head; o != NULL; o = n) {
 		struct cfg_ovr *pe;
 		n = o->next;
@@ -646,13 +837,16 @@ xtc_cfg_session_commit(xtc_cfg_session_t *s)
 				__os_free(pe->val.v_string);
 			pe->val = o->val;
 			pe->src = o->src;
-			/* o's string (if any) now owned by pe; do not free it. */
+			/* o's string (if any) now owned by pe; do not free it.
+			 * pe already holds a var reference, so o's is surplus. */
+			__cfg_var_unref_locked(o->var);
 			__os_free(o);
 		} else {
 			o->next = parent->head;
-			parent->head = o;   /* moved wholesale, string included */
+			parent->head = o;   /* moved wholesale, ref included */
 		}
 	}
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	s->top = parent;
 	__os_free(top);
 	return XTC_OK;
@@ -662,7 +856,7 @@ int
 xtc_cfg_session_abort(xtc_cfg_session_t *s)
 {
 	struct cfg_level *top;
-	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) s = __cfg_ssn_current_ext();
 	if (s == NULL) return XTC_E_INVAL;
 	top = s->top;
 	if (top->parent == NULL) return XTC_E_INVAL;   /* base level */
@@ -692,7 +886,7 @@ xtc_cfg_session_source(xtc_cfg_session_t *s, const char *name,
 	struct cfg_var *v;
 	struct cfg_ovr *o;
 	if (name == NULL || out == NULL) return XTC_E_INVAL;
-	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) s = __cfg_ssn_current_ext();
 	if (s == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&__cfg_lock);
 	v = __cfg_find_locked(name);
@@ -709,17 +903,24 @@ xtc_cfg_session_reset(xtc_cfg_session_t *s, const char *name)
 	struct cfg_var *v;
 	struct cfg_ovr **link, *o;
 	if (name == NULL) return XTC_E_INVAL;
-	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) s = __cfg_ssn_current_ext();
 	if (s == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&__cfg_lock);
 	v = __cfg_find_locked(name);
-	(void)__xtc_mtx_unlock(&__cfg_lock);
-	if (v == NULL) return XTC_E_NOTFOUND;
+	if (v == NULL) {
+		(void)__xtc_mtx_unlock(&__cfg_lock);
+		return XTC_E_NOTFOUND;
+	}
 	/* Drop the override at the CURRENT (top) level only, so RESET undoes
 	 * this level's SET and the parent value (or global) shows through. */
 	for (link = &s->top->head; (o = *link) != NULL; link = &o->next) {
-		if (o->var == v) { *link = o->next; __cfg_ovr_free(o); break; }
+		if (o->var == v) {
+			*link = o->next;
+			__cfg_ovr_free_locked(o);
+			break;
+		}
 	}
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 	return XTC_OK;
 }
 
@@ -727,7 +928,12 @@ xtc_cfg_session_reset(xtc_cfg_session_t *s, const char *name)
  * only if src outranks whatever set it at THIS level (a lower-ranked
  * source cannot clobber a higher one, mirroring PG's source ordering).
  * `sval` is the pre-copied string for STRING kinds (ownership taken on
- * success), NULL otherwise. */
+ * success), NULL otherwise.
+ *
+ * The caller took ONE reference on `var` while it still held the
+ * registry lock (so the entry cannot be unregistered out from under
+ * us); this function consumes it -- it becomes the new override's
+ * reference, or is released on every path that does not create one. */
 static int
 __cfg_ssn_apply(xtc_cfg_session_t *s, struct cfg_var *var,
                 union cfg_val val, char *sval, xtc_cfg_source_t src)
@@ -738,6 +944,8 @@ __cfg_ssn_apply(xtc_cfg_session_t *s, struct cfg_var *var,
 	for (o = s->top->head; o != NULL; o = o->next)
 		if (o->var == var) break;
 	if (o != NULL) {
+		/* That entry already holds a reference; ours is surplus. */
+		__cfg_var_unref(var);
 		if (src < o->src) {          /* lower-ranked: refuse */
 			if (sval != NULL) __os_free(sval);
 			return XTC_OK;           /* not an error: PG semantics */
@@ -750,6 +958,7 @@ __cfg_ssn_apply(xtc_cfg_session_t *s, struct cfg_var *var,
 		return XTC_OK;
 	}
 	if ((rc = __os_calloc(1, sizeof *o, (void **)&o)) != XTC_OK) {
+		__cfg_var_unref(var);
 		if (sval != NULL) __os_free(sval);
 		return rc;
 	}
@@ -767,14 +976,16 @@ int xtc_cfg_ssn_set_##sfx(xtc_cfg_session_t *s, const char *name,         \
                           ctype v, xtc_cfg_source_t src) {                \
 	struct cfg_var *cv; union cfg_val val; int ok = 0;                \
 	if (name == NULL) return XTC_E_INVAL;                             \
-	if (s == NULL) s = __cfg_ssn_current;                             \
+	if (s == NULL) s = __cfg_ssn_current_ext();                       \
 	if (s == NULL) return XTC_E_INVAL;                                \
 	(void)__xtc_mtx_lock(&__cfg_lock);                                \
 	cv = __cfg_find_locked(name);                                     \
 	if (cv != NULL && cv->kind == K && (okexpr) &&                    \
 	    (cv->validator == NULL ||                                     \
-	     cv->validator(&v, cv->cb_user) == XTC_OK))                   \
+	     cv->validator(&v, cv->cb_user) == XTC_OK)) {                 \
 		ok = 1;                                                   \
+		cv->refs++;   /* for the override; consumed by _apply */  \
+	}                                                                 \
 	(void)__xtc_mtx_unlock(&__cfg_lock);                              \
 	if (!ok) return XTC_E_INVAL;                                      \
 	val.field = v;                                                    \
@@ -801,15 +1012,17 @@ xtc_cfg_ssn_set_string(xtc_cfg_session_t *s, const char *name,
 	char *copy = NULL;
 	int ok = 0, rc;
 	if (name == NULL || v == NULL) return XTC_E_INVAL;
-	if (s == NULL) s = __cfg_ssn_current;
+	if (s == NULL) s = __cfg_ssn_current_ext();
 	if (s == NULL) return XTC_E_INVAL;
 	if ((rc = __os_strdup(v, &copy)) != XTC_OK) return rc;
 	(void)__xtc_mtx_lock(&__cfg_lock);
 	cv = __cfg_find_locked(name);
 	if (cv != NULL && cv->kind == XTC_CFG_STRING &&
 	    (cv->validator == NULL ||
-	     cv->validator(copy, cv->cb_user) == XTC_OK))
+	     cv->validator(copy, cv->cb_user) == XTC_OK)) {
 		ok = 1;
+		cv->refs++;   /* for the override; consumed by _apply */
+	}
 	(void)__xtc_mtx_unlock(&__cfg_lock);
 	if (!ok) { __os_free(copy); return XTC_E_INVAL; }
 	memset(&val, 0, sizeof val);
@@ -823,7 +1036,7 @@ xtc_cfg_ssn_set_string(xtc_cfg_session_t *s, const char *name,
 static int
 __cfg_ssn_resolve(struct cfg_var *var, union cfg_val *out)
 {
-	xtc_cfg_session_t *s = __cfg_ssn_current;
+	xtc_cfg_session_t *s = __cfg_ssn_current_locked();
 	struct cfg_ovr *o;
 	if (s == NULL) return 0;
 	o = __cfg_ssn_find(s, var);

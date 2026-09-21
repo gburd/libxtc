@@ -87,7 +87,15 @@ XTC_API void   *xtc_mctx_strdup(xtc_mctx_t *m, const char *s);
 XTC_API void    xtc_mctx_free(xtc_mctx_t *m, void *p);
 
 /* Register a cleanup callback.  Runs at destroy/reset time, before
- * the chunks are freed.  Multiple callbacks run in LIFO order. */
+ * the chunks are freed.  Multiple callbacks run in LIFO order.
+ *
+ * The context's lock (if XTC_MCTX_THREAD_SAFE) is NOT held while the
+ * callback runs, so a callback may call back into its own context --
+ * xtc_mctx_total_bytes/_total_chunks, or an alloc.  What it must NOT do
+ * is reset or destroy the very context that is running it (that would
+ * recurse into the same teardown).  Callbacks are detached before they
+ * run, so each fires exactly once even if the context is reset
+ * concurrently; register again if the next reset should call it too. */
 XTC_API int     xtc_mctx_register_cleanup(xtc_mctx_t *m,
                                           xtc_mctx_cleanup_fn fn, void *user);
 
@@ -130,6 +138,25 @@ XTC_API size_t      xtc_mctx_total_chunks(const xtc_mctx_t *m);
  * its own is reaped from the group lazily (a dead pid is skipped at
  * discard time).  The group's arena is a normal xtc_mctx_t and may have
  * children; reset discards them too.
+ *
+ * JOIN/DISCARD RACE -- THE GROUP IS SEALED WHILE A DISCARD RUNS.
+ * discard() must kill a FIXED cohort, and killing yields, so the window
+ * between "snapshot the members" and "reset the arena" is long.  A
+ * fiber joining inside that window would be neither killed (it is not
+ * in the snapshot) nor safe (the reset wipes memory it just allocated).
+ * So discard SEALS the group in the same lock hold that takes the
+ * snapshot: from then until the discard reaches its verdict,
+ * xtc_arena_group_add fails with XTC_E_AGAIN and MUST NOT touch the
+ * arena.  A caller that gets XTC_E_AGAIN is racing a teardown of the
+ * state it wanted to share; the correct response is to back off and
+ * retry the join (succeeding once the discard finishes -- the group is
+ * reusable by a fresh cohort), never to proceed with the arena.
+ *
+ * A MEMBER IS "GONE" ONLY ONCE IT IS REAPED, not merely once it is no
+ * longer alive: a proc clears its alive flag before running its at-exit
+ * callbacks, and those callbacks can still touch arena memory.  discard
+ * waits for the pid to disappear from the proc table entirely, which is
+ * the first moment nothing of the member can reach the arena.
  */
 typedef struct xtc_arena_group xtc_arena_group_t;
 
@@ -159,7 +186,13 @@ XTC_API xtc_mctx_t *xtc_arena_group_mctx(xtc_arena_group_t *g);
 
 /* Register the CALLING fiber as a member.  Must be called from a proc
  * (xtc_self() != NONE); XTC_E_INVAL otherwise.  Idempotent per pid.
- * XTC_E_NOMEM if the member list cannot grow. */
+ * XTC_E_NOMEM if the member list cannot grow.
+ *
+ * XTC_E_AGAIN if a discard is in flight (the group is sealed): the
+ * arena is about to be reset wholesale, so the caller was NOT admitted
+ * and must NOT allocate in or read the arena.  Back off and retry -- the
+ * seal lifts when the discard reaches its verdict, and the group is then
+ * reusable by a fresh cohort. */
 XTC_API int     xtc_arena_group_add(xtc_arena_group_t *g);
 
 /* Discard the group: xtc_exit_pid_deadline every live member with
@@ -167,17 +200,25 @@ XTC_API int     xtc_arena_group_add(xtc_arena_group_t *g);
  * only if ALL members are confirmed gone -- reset the arena, throwing
  * away every allocation made through it.
  *
+ * Joins are SEALED OFF for the whole call (see above): the cohort that
+ * is killed is exactly the membership at entry, and no fiber can slip
+ * into the group between the snapshot and the reset.
+ *
  * *out_all_gone (may be NULL) is set to 1 if every member terminated
- * and the arena was reset, or 0 if at least one member was still alive
+ * AND was reaped (its at-exit callbacks have finished) and the arena was
+ * reset, or 0 if at least one member was still alive or still unwinding
  * at its deadline (a member wedged inside xtc_uncancelable with the
- * kill deferred).  In the 0 case the arena is NOT reset -- discarding
- * state a live fiber may still touch is exactly the corruption this
- * primitive exists to avoid -- and the caller should escalate to the
- * whole-process fail-stop.  Returns XTC_OK once a verdict is reached,
- * XTC_E_INVAL on NULL group.  Callable from a fiber or a plain thread
- * (the wait yields on a fiber, sleeps the OS thread off one), but NOT
- * from a member of the group itself (that would be suicide mid-wait);
- * XTC_E_INVAL if the caller is a member. */
+ * kill deferred, or one stuck in an at-exit callback).  In the 0 case
+ * the arena is NOT reset -- discarding state a live fiber may still
+ * touch is exactly the corruption this primitive exists to avoid -- and
+ * the caller should escalate to the whole-process fail-stop.  Returns
+ * XTC_OK once a verdict is reached, XTC_E_INVAL on NULL group,
+ * XTC_E_AGAIN if another discard of this group is already in flight
+ * (the caller may retry, or just wait for that one's verdict).
+ * Callable from a fiber or a plain thread (the wait yields on a fiber,
+ * sleeps the OS thread off one), but NOT from a member of the group
+ * itself (that would be suicide mid-wait); XTC_E_INVAL if the caller is
+ * a member. */
 XTC_API int     xtc_arena_group_discard(xtc_arena_group_t *g, int reason,
                                         int64_t timeout_ns, int *out_all_gone);
 

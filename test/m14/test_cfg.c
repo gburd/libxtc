@@ -27,6 +27,8 @@
 #include "xtc.h"
 #include "xtc_fs.h"
 #include "xtc_cfg.h"
+#include "xtc_loop.h"
+#include "xtc_proc.h"
 
 /* ---- register / duplicate / unregister / count / kind ---- */
 static MunitResult
@@ -851,9 +853,248 @@ test_session_scoping(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- the binding is PER-FIBER, and survives a yield ----
+ *
+ * REGRESSION (was: a plain _Thread_local, i.e. per-OS-THREAD).  Two
+ * fibers on ONE loop, each binding its own session and then YIELDING,
+ * read each other's values: fiber A bound 11, yielded; fiber B bound
+ * 22; A resumed and read 22.  The yield is the whole point -- the
+ * pre-existing session test never yielded between binds, which is why
+ * this shipped.  Every assertion below is a read taken AFTER at least
+ * one suspension point.
+ */
+struct fiber_ssn_arg {
+	xtc_cfg_session_t *mine;
+	int                expect;   /* value our session overrides to */
+	int                failed;   /* set by the fiber on any mismatch */
+	int                ran;
+};
+
+static void
+fiber_ssn_body(void *a)
+{
+	struct fiber_ssn_arg *arg = a;
+	int v = -1;
+
+	if (xtc_cfg_session_bind(arg->mine) != NULL) arg->failed = 1;
+	/* Yield: the peer fiber runs and binds ITS session here. */
+	if (xtc_proc_sleep(5 * 1000 * 1000) != XTC_OK) arg->failed = 1;
+	if (xtc_cfg_session_current() != arg->mine) arg->failed = 1;
+	if (xtc_cfg_get_int("fs.knob", &v) != XTC_OK || v != arg->expect)
+		arg->failed = 1;
+	/* A session SET after the yield lands on our own session, and the
+	 * peer's later reads must not see it. */
+	if (xtc_cfg_ssn_set_int(NULL, "fs.knob", arg->expect + 1,
+	    XTC_CFG_SRC_OVERRIDE) != XTC_OK) arg->failed = 1;
+	if (xtc_proc_sleep(5 * 1000 * 1000) != XTC_OK) arg->failed = 1;
+	if (xtc_cfg_get_int("fs.knob", &v) != XTC_OK || v != arg->expect + 1)
+		arg->failed = 1;
+	(void)xtc_cfg_session_bind(NULL);
+	if (xtc_cfg_session_current() != NULL) arg->failed = 1;
+	/* Unbound: the global value shows through again. */
+	if (xtc_cfg_get_int("fs.knob", &v) != XTC_OK || v != 7) arg->failed = 1;
+	arg->ran = 1;
+}
+
+static MunitResult
+test_session_per_fiber(const MunitParameter p[], void *d)
+{
+	xtc_cfg_spec_t spec = { 0 };
+	xtc_cfg_session_t *a = NULL, *b = NULL;
+	struct fiber_ssn_arg aa = { 0 }, ba = { 0 };
+	xtc_proc_opts_t opts = { 0 };
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t pid;
+	int v;
+	(void)p; (void)d;
+
+	spec.name = "fs.knob"; spec.kind = XTC_CFG_INT; spec.dflt.d_int = 7;
+	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_session_create(&a), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_session_create(&b), ==, XTC_OK);
+	/* Seed each session's override from OUTSIDE any fiber (explicit
+	 * session argument, no binding involved). */
+	munit_assert_int(xtc_cfg_ssn_set_int(a, "fs.knob", 11,
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ssn_set_int(b, "fs.knob", 22,
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+
+	aa.mine = a; aa.expect = 11;
+	ba.mine = b; ba.expect = 22;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fiber_ssn_body, &aa, &opts, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fiber_ssn_body, &ba, &opts, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	munit_assert_int(aa.ran, ==, 1);
+	munit_assert_int(ba.ran, ==, 1);
+	munit_assert_int(aa.failed, ==, 0);
+	munit_assert_int(ba.failed, ==, 0);
+
+	/* The global value was never touched by any session set. */
+	munit_assert_int(xtc_cfg_get_int("fs.knob", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 7);
+
+	xtc_cfg_session_destroy(a);
+	xtc_cfg_session_destroy(b);
+	munit_assert_int(xtc_cfg_unregister("fs.knob"), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* ---- unregister vs. session teardown, in EITHER order ----
+ *
+ * REGRESSION (was: heap-use-after-free).  A session override keeps a raw
+ * pointer to the registry entry, and xtc_cfg_unregister freed that entry
+ * outright; the later override teardown read entry->kind to decide
+ * whether to free a string value.  ASan caught it in __cfg_ovr_free.
+ * Both orderings must be safe, and an unregistered name must stop
+ * resolving immediately even though a session still overrides it.
+ */
+static MunitResult
+test_unregister_ordering(const MunitParameter p[], void *d)
+{
+	xtc_cfg_spec_t spec = { 0 };
+	xtc_cfg_session_t *s = NULL;
+	const char *sv;
+	int v;
+	(void)p; (void)d;
+
+	/* (1) unregister THEN destroy the session.  STRING kind: the free
+	 * path is the one that dereferenced the dead entry. */
+	spec.name = "u.tz"; spec.kind = XTC_CFG_STRING;
+	spec.dflt.d_string = "UTC";
+	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_session_create(&s), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ssn_set_string(s, "u.tz", "America/New_York",
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	/* A pushed level with its own override too, so teardown walks more
+	 * than one level holding the entry. */
+	munit_assert_int(xtc_cfg_session_push(s), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ssn_set_string(s, "u.tz", "Europe/Berlin",
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("u.tz"), ==, XTC_OK);
+	/* Gone from the registry immediately, session override or not. */
+	munit_assert_int(xtc_cfg_get_string("u.tz", &sv), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_unregister("u.tz"), ==, XTC_E_INVAL);
+	(void)xtc_cfg_session_bind(s);
+	munit_assert_int(xtc_cfg_get_string("u.tz", &sv), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_session_source(s, "u.tz", NULL), ==,
+	    XTC_E_INVAL);
+	(void)xtc_cfg_session_bind(NULL);
+	xtc_cfg_session_destroy(s);   /* was the use-after-free */
+
+	/* (2) the reverse order still works: destroy THEN unregister. */
+	s = NULL;
+	memset(&spec, 0, sizeof spec);
+	spec.name = "u.mem"; spec.kind = XTC_CFG_INT; spec.dflt.d_int = 64;
+	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_session_create(&s), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ssn_set_int(s, "u.mem", 128,
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	xtc_cfg_session_destroy(s);
+	munit_assert_int(xtc_cfg_get_int("u.mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 64);
+	munit_assert_int(xtc_cfg_unregister("u.mem"), ==, XTC_OK);
+
+	/* (3) an unregister while a session is BOUND, then a RESET of the
+	 * dead name, then destroy: reset must not resurrect or double-free. */
+	s = NULL;
+	memset(&spec, 0, sizeof spec);
+	spec.name = "u.str2"; spec.kind = XTC_CFG_STRING;
+	spec.dflt.d_string = "g";
+	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_session_create(&s), ==, XTC_OK);
+	(void)xtc_cfg_session_bind(s);
+	munit_assert_int(xtc_cfg_ssn_set_string(NULL, "u.str2", "sessval",
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("u.str2"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_session_reset(NULL, "u.str2"), ==,
+	    XTC_E_NOTFOUND);
+	(void)xtc_cfg_session_bind(NULL);
+	xtc_cfg_session_destroy(s);
+	return MUNIT_OK;
+}
+
+/* ---- config-file integer values out of range are REJECTED ----
+ *
+ * REGRESSION (was: silent wrap through the bounds check).  The INT case
+ * parsed with strtol and cast to int with no range check, so on LP64
+ * 4294967297 narrowed to 1 and a knob bounded [1,100] ACCEPTED it.  The
+ * numeric-enum-index path had the same unchecked narrowing.
+ */
+static MunitResult
+test_load_int_range(const MunitParameter p[], void *d)
+{
+	xtc_cfg_spec_t s = { 0 };
+	char tmpdir[512], path[600];
+	int fd, iv, ev;
+	FILE *f;
+	(void)p; (void)d;
+	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
+	snprintf(path, sizeof path, "%s/xtc_cfg_range_XXXXXX", tmpdir);
+
+	s.name = "g.int"; s.kind = XTC_CFG_INT;
+	s.dflt.d_int = 3; s.min_int = 1; s.max_int = 100;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "g.free"; s.kind = XTC_CFG_INT; s.dflt.d_int = 5;  /* unbounded */
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "g.lvl"; s.kind = XTC_CFG_ENUM;
+	s.enum_labels = g_levels; s.n_enum_labels = 3;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+
+	fd = mkstemp(path);
+	munit_assert_int(fd, >=, 0);
+	f = fdopen(fd, "w");
+	munit_assert_not_null(f);
+	fprintf(f,
+	    "g.int = 4294967297\n"      /* 2^32+1: wrapped to 1, inside [1,100] */
+	    "g.int = -4294967295\n"     /* wrapped to 1 as well */
+	    "g.int = 99999999999999\n"  /* > LONG_MAX on ILP32: errno path */
+	    "g.free = 2147483648\n"     /* INT_MAX+1 on an UNBOUNDED int knob */
+	    "g.free = -2147483649\n"    /* INT_MIN-1 */
+	    "g.lvl = 4294967297\n"      /* numeric enum index, wraps to 1 */
+	    "g.int = 50\n");            /* the one legitimate line */
+	fclose(f);
+
+	/* Exactly one line applies: every out-of-range value is skipped
+	 * like any other invalid value. */
+	munit_assert_int(xtc_cfg_load_file(path), ==, 1);
+	munit_assert_int(xtc_cfg_get_int("g.int", &iv), ==, XTC_OK);
+	munit_assert_int(iv, ==, 50);
+	munit_assert_int(xtc_cfg_get_int("g.free", &iv), ==, XTC_OK);
+	munit_assert_int(iv, ==, 5);    /* default: nothing applied */
+	munit_assert_int(xtc_cfg_get_enum("g.lvl", &ev), ==, XTC_OK);
+	munit_assert_int(ev, ==, 0);    /* default: nothing applied */
+
+	/* In-range boundary values still apply (the check is inclusive). */
+	truncate(path, 0);
+	f = fopen(path, "w");
+	munit_assert_not_null(f);
+	fprintf(f, "g.free = 2147483647\ng.lvl = 2\n");
+	fclose(f);
+	munit_assert_int(xtc_cfg_load_file(path), ==, 2);
+	munit_assert_int(xtc_cfg_get_int("g.free", &iv), ==, XTC_OK);
+	munit_assert_int(iv, ==, 2147483647);
+	munit_assert_int(xtc_cfg_get_enum("g.lvl", &ev), ==, XTC_OK);
+	munit_assert_int(ev, ==, 2);
+
+	(void)unlink(path);
+	munit_assert_int(xtc_cfg_unregister("g.int"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("g.free"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("g.lvl"), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/register_basic",   test_register_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/session_scoping",  test_session_scoping,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/session_per_fiber", test_session_per_fiber,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/unreg_ordering",   test_unregister_ordering,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/int_bounds",       test_int_bounds,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/double",           test_double,                NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/bool",             test_bool,                  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -863,6 +1104,7 @@ static MunitTest tests[] = {
 	{ "/load_file",        test_load_file,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/load_enum_num",    test_load_enum_numeric,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/load_parse_var",   test_load_parse_variants,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/load_int_range",   test_load_int_range,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/kind_mismatch",    test_kind_mismatch,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/unknown_null",     test_unknown_and_null,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/unbounded",        test_unbounded,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
