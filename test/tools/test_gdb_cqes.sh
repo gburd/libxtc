@@ -130,6 +130,18 @@ if [ ! -f "$LIB" ]; then
 	exit 0
 fi
 
+# This gate decodes io_uring CQ-ring state (xtc-rings / xtc-cqes), so it is
+# meaningful ONLY on a uring build.  Ask the CONFIGURED backend, not the
+# linker: a host with liburing installed links an epoll build just fine and
+# then fails at runtime with "no matching ring", because an epoll loop has no
+# CQ ring to decode.  That made this a hard FAIL on every non-uring backend
+# (reproduced on an untouched v1.49.1 with --with-io-backend=epoll).
+if ! grep -q '^#define XTC_IO_BACKEND_URING 1' \
+    "$XTC_BUILD_DIR/xtc_config.h" 2>/dev/null; then
+	echo "  [gdb-cqes] SKIP: not an io_uring build (no CQ ring to decode)"
+	exit 0
+fi
+
 if ! ${CC:-cc} -O0 -g -w -I "$XTC_SRC_DIR/src/inc" -I "$XTC_BUILD_DIR" \
     -o "$TMPD/prog" "$TMPD/prog.c" "$LIB" \
     -pthread -luring -lssl -lcrypto -ldl -lm > "$TMPD/cc.log" 2>&1; then
