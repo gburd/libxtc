@@ -1055,10 +1055,20 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 		}
 	}
 
+	/*
+	 * The xtc_exec_stop exit path (a modelled crash / an early halt).
+	 * Determinism proof: apply the SAME check the quiescence return
+	 * makes -- if any nondeterministic primitive was hit on the
+	 * executed path this run cannot be trusted to replay, so it must
+	 * not report success.  Without this, count-only mode let a run
+	 * record a violation, stop, and return XTC_OK.
+	 */
 	e->started = 0;
 	xtc_sim_clock_disable();
 	xtc_sim_deactivate();
 	__xtc_current_loop = saved;
+	if (xtc_sim_nondeterminism_count() > 0)
+		return XTC_E_INTERNAL;
 	return XTC_OK;
 }
 

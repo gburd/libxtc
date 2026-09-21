@@ -17,6 +17,7 @@
 #include "xtc_int.h"
 #include "xtc_fs.h"
 #include "os_errno.h"
+#include "os_sharp.h"   /* __os_env_get: the determinism-guarded env read */
 
 #include <errno.h>
 #include <stdio.h>      /* rename, snprintf */
@@ -522,14 +523,28 @@ xtc_fs_rmdir(const char *path)
 int
 xtc_fs_tmpdir(char *buf, size_t cap)
 {
-	const char *d;
+	char env[1024];
+	const char *d = "/tmp";
 	size_t n;
 	if (buf == NULL || cap == 0) return XTC_E_INVAL;
-	if ((d = getenv("TMPDIR")) == NULL &&
-	    (d = getenv("TMP")) == NULL &&
-	    (d = getenv("TEMP")) == NULL)
-		d = "/tmp";
+	/*
+	 * Read through the GUARDED wrapper (__os_env_get), never raw getenv:
+	 * the environment is ambient host state, so a sim-reachable read
+	 * makes a run depend on how the process was launched rather than on
+	 * the seed.  The guard traps that; raw getenv silently bypassed it.
+	 */
+	if (__os_env_get("TMPDIR", env, sizeof env) == XTC_OK && env[0] != '\0')
+		d = env;
+	else if (__os_env_get("TMP", env, sizeof env) == XTC_OK &&
+	    env[0] != '\0')
+		d = env;
+	else if (__os_env_get("TEMP", env, sizeof env) == XTC_OK &&
+	    env[0] != '\0')
+		d = env;
 	n = strlen(d);
+	/* __os_env_get truncates silently; a truncated directory would be the
+	 * WRONG path, so refuse rather than return it. */
+	if (d == env && n == sizeof env - 1) return XTC_E_RANGE;
 	while (n > 1 && d[n - 1] == '/') n--;     /* trim trailing slash */
 	if (n + 1 > cap) return XTC_E_RANGE;
 	memcpy(buf, d, n);
