@@ -115,10 +115,23 @@ test_strdup(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* Records what __os_aligned_alloc passed down and refuses the request,
+ * so the size-guard boundary is testable without a real huge
+ * allocation (ASan aborts on one unless allocator_may_return_null=1). */
+static size_t rec_align, rec_size;
+static void *
+rec_aligned(size_t a, size_t s)
+{
+	rec_align = a;
+	rec_size = s;
+	return NULL;
+}
+
 /* [M7] */
 static MunitResult
 test_aligned(const MunitParameter p[], void *d)
 {
+	struct __os_alloc_hook saved_h, rec_h;
 	void *q;
 	int rc;
 	(void)p; (void)d;
@@ -153,6 +166,56 @@ test_aligned(const MunitParameter p[], void *d)
 	/* Reject too-small. */
 	rc = __os_aligned_alloc(2, 128, &q);
 	munit_assert_int(rc, ==, XTC_E_INVAL);
+
+	/*
+	 * Reject a size whose round-up to `align` cannot be represented.
+	 * The backend must round sz up to a multiple of align (C11
+	 * aligned_alloc requires it) and that addition WRAPPED with no
+	 * guard, so xtc_aligned_alloc(64, SIZE_MAX) returned a NON-NULL
+	 * 64-byte block -- a caller then writing size-based data walks off
+	 * the heap.  Fails (returns XTC_OK / non-NULL) without the
+	 * overflow check in __os_aligned_alloc.  These sizes are screened
+	 * BEFORE the backend is called, so no huge request ever reaches the
+	 * allocator (ASan aborts on one by default).
+	 */
+	q = (void *)(uintptr_t)1;
+	rc = __os_aligned_alloc(64, SIZE_MAX, &q);
+	munit_assert_int(rc, ==, XTC_E_RANGE);
+	/* Just past the representable boundary for align 64: the round-up
+	 * would need SIZE_MAX + 1. */
+	rc = __os_aligned_alloc(64, SIZE_MAX - 62, &q);
+	munit_assert_int(rc, ==, XTC_E_RANGE);
+	/* Boundary the other way: SIZE_MAX - 63 rounds to exactly SIZE_MAX,
+	 * so it is NOT range-rejected and must reach the backend unchanged.
+	 * Checked with a recording hook rather than a real allocation, so
+	 * the case proves the boundary without asking for exabytes. */
+	munit_assert_int(__os_alloc_get_hook(&saved_h), ==, XTC_OK);
+	rec_h = saved_h;
+	rec_h.aligned = rec_aligned;
+	munit_assert_int(__os_alloc_set_hook(&rec_h), ==, XTC_OK);
+	rec_align = rec_size = 0;
+	rc = __os_aligned_alloc(64, SIZE_MAX - 63, &q);
+	munit_assert_int(rc, ==, XTC_E_NOMEM);   /* hook refused */
+	munit_assert_size(rec_align, ==, 64);
+	munit_assert_size(rec_size, ==, SIZE_MAX - 63);
+	munit_assert_int(__os_alloc_set_hook(&saved_h), ==, XTC_OK);
+
+	/* Public wrapper reports the same failure as NULL. */
+	munit_assert_null(xtc_aligned_alloc(64, SIZE_MAX));
+
+	/* The DEFAULT backend carries the same guard, because a consumer
+	 * can reach the vtable entry directly through __os_alloc_get_hook.
+	 * It must return NULL rather than wrap the round-up. */
+	munit_assert_int(__os_alloc_get_hook(&saved_h), ==, XTC_OK);
+	munit_assert_null(saved_h.aligned(64, SIZE_MAX));
+
+	/* Zero size still yields a unique non-NULL pointer, same
+	 * unconditional invariant __os_malloc keeps. */
+	q = NULL;
+	rc = __os_aligned_alloc(64, 0, &q);
+	munit_assert_int(rc, ==, XTC_OK);
+	munit_assert_not_null(q);
+	__os_aligned_free(q);
 	return MUNIT_OK;
 }
 

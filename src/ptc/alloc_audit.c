@@ -114,9 +114,18 @@ __a_realloc(void *p, size_t sz)
 {
 	void *np;
 	(void)__xtc_mtx_lock(&g_mu);
-	if (p != NULL) (void)__rec_remove(p);
+	/*
+	 * Re-key only AFTER the downstream realloc succeeds.  Removing the
+	 * record first lost the allocation from the auditor on the OOM path:
+	 * realloc returning NULL leaves the ORIGINAL block live (and the
+	 * caller still owns it), so the leak checker reported clean exactly
+	 * when an allocation failure had happened.
+	 */
 	np = g_down.realloc(p, sz);
-	if (np != NULL) __rec_insert(np, sz);
+	if (np != NULL) {
+		if (p != NULL) (void)__rec_remove(p);
+		__rec_insert(np, sz);
+	}
 	(void)__xtc_mtx_unlock(&g_mu);
 	return np;
 }

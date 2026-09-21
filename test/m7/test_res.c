@@ -89,6 +89,62 @@ test_acquire_release(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * Acquiring near INT64_MAX must not wrap.  xtc_res_acquire computed
+ * cur + n and only THEN compared it to the cap: with a cap of
+ * INT64_MAX, charging INT64_MAX and then 1 more overflowed (signed
+ * overflow is UB, and in practice wrapped negative), sailed past the
+ * "next > cap" test, and left `used` at INT64_MIN -- breaking both the
+ * hard-cap invariant and the non-negative accounting invariant.  Fails
+ * without the pre-addition headroom check.
+ */
+static MunitResult
+test_acquire_overflow(const MunitParameter p[], void *d)
+{
+	xtc_res_t r;
+	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	(void)p; (void)d;
+
+	caps.mem_bytes = INT64_MAX;
+	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
+	munit_assert_int(xtc_res_acquire(&r, XTC_RES_MEM_BYTES, INT64_MAX),
+	    ==, XTC_OK);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_MEM_BYTES), ==,
+	    INT64_MAX);
+
+	/* One more unit has no headroom: rejected, accounting untouched. */
+	munit_assert_int(xtc_res_acquire(&r, XTC_RES_MEM_BYTES, 1), ==,
+	    XTC_E_RESOURCE);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_MEM_BYTES), ==,
+	    INT64_MAX);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_MEM_BYTES), >, 0);
+	munit_assert_int64(xtc_res_rejects(&r, XTC_RES_MEM_BYTES), ==, 1);
+
+	/* A huge second charge overflows just as surely; also rejected. */
+	munit_assert_int(xtc_res_acquire(&r, XTC_RES_MEM_BYTES, INT64_MAX),
+	    ==, XTC_E_RESOURCE);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_MEM_BYTES), ==,
+	    INT64_MAX);
+
+	/*
+	 * The overflow guard is independent of the cap: an UNCAPPED kind
+	 * (cap <= 0 skips the cap test entirely) must still refuse a charge
+	 * that would wrap `used` negative.
+	 */
+	caps = (xtc_res_caps_t)XTC_RES_CAPS_DEFAULT;
+	caps.fds = 0;                     /* 0 == uncapped */
+	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
+	munit_assert_int(xtc_res_acquire(&r, XTC_RES_FDS, INT64_MAX - 1),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_res_acquire(&r, XTC_RES_FDS, 2), ==,
+	    XTC_E_RESOURCE);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_FDS), ==, INT64_MAX - 1);
+	/* The last representable unit still fits. */
+	munit_assert_int(xtc_res_acquire(&r, XTC_RES_FDS, 1), ==, XTC_OK);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_FDS), ==, INT64_MAX);
+	return MUNIT_OK;
+}
+
 static MunitResult
 test_query_guards(const MunitParameter p[], void *d)
 {
@@ -190,6 +246,7 @@ test_alert(const MunitParameter p[], void *d)
 static MunitTest tests[] = {
 	{ "/init",            test_init,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/acquire_release", test_acquire_release, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/acquire_overflow", test_acquire_overflow, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/query_guards",    test_query_guards,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/set_cap",         test_set_cap,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/alert",           test_alert,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

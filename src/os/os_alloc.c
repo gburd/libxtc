@@ -56,6 +56,15 @@ static void *
 __default_aligned(size_t align, size_t sz)
 {
 	void *p = NULL;
+	/* Rounding sz up to a multiple of align must not wrap size_t.  It
+	 * did: a huge sz wrapped to a TINY (even zero) request that the
+	 * platform happily satisfied, so the caller got a few bytes back
+	 * for a multi-exabyte ask and corrupted the heap on first write.
+	 * __os_aligned_alloc screens this too; the guard is repeated here
+	 * because a consumer can reach the vtable entry directly through
+	 * __os_alloc_get_hook. */
+	if (sz > (size_t)-1 - (align - 1))
+		return NULL;
 #if defined(_WIN32)
 	p = _aligned_malloc(sz, align);
 #elif defined(_ISOC11_SOURCE) || (__STDC_VERSION__ >= 201112L)
@@ -277,8 +286,19 @@ __os_aligned_alloc(size_t align, size_t sz, void **out)
 		return XTC_E_INVAL;
 	if (align < sizeof(void *))
 		return XTC_E_INVAL;
-	p = __hook()->aligned(align, sz);
-	if (p == NULL && sz != 0)
+	/* A backend must round sz up to a multiple of align (C11
+	 * aligned_alloc requires it).  Reject a size for which that
+	 * rounding cannot be represented, rather than letting it wrap to a
+	 * tiny allocation: xtc_aligned_alloc(64, SIZE_MAX) used to return a
+	 * NON-NULL 64-byte block.  XTC_E_RANGE matches __os_calloc's
+	 * convention for a size computation that does not fit. */
+	if (sz > (size_t)-1 - (align - 1))
+		return XTC_E_RANGE;
+	/* At least 1 byte so XTC_OK always yields a non-NULL, freeable
+	 * pointer -- the same unconditional invariant __os_malloc keeps, so
+	 * callers check only the return code. */
+	p = __hook()->aligned(align, sz != 0 ? sz : 1);
+	if (p == NULL)
 		return XTC_E_NOMEM;
 	*out = p;
 	return XTC_OK;
