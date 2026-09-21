@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd May 25, 2026
+.Dd September 21, 2026
 .Dt __OS_ALLOC 3
 .Os
 .Sh NAME
@@ -10,6 +10,7 @@
 .Nm __os_free ,
 .Nm __os_strdup ,
 .Nm __os_aligned_alloc ,
+.Nm __os_aligned_free ,
 .Nm __os_alloc_set_hook ,
 .Nm __os_alloc_get_hook
 .Nd hookable allocator
@@ -27,6 +28,8 @@
 .Fn __os_strdup "const char *s" "char **out"
 .Ft int
 .Fn __os_aligned_alloc "size_t align" "size_t sz" "void **out"
+.Ft void
+.Fn __os_aligned_free "void *p"
 .Ft int
 .Fn __os_alloc_set_hook "const struct __os_alloc_hook *hook"
 .Ft int
@@ -42,15 +45,38 @@ on failure;
 .Fn __os_free
 has no failure mode.
 .Pp
+These are INTERNAL interfaces.
+.Pa src/inc/os_alloc.h
+is not an installed header, so none of them -- including
+.Fn __os_alloc_set_hook --
+is part of libxtc's public API.
+A consumer of the installed library
+uses
+.Fn xtc_malloc ,
+.Fn xtc_calloc ,
+.Fn xtc_realloc ,
+.Fn xtc_free ,
+.Fn xtc_aligned_alloc ,
+and
+.Fn xtc_aligned_free
+instead; there is no public entry point for replacing the allocator.
+This page documents the internal contract for work inside the source
+tree.
+.Pp
 .Fn __os_malloc
 allocates at least
 .Fa sz
 bytes and writes the pointer to
 .Fa *out .
-A request for zero bytes is permitted and is allowed to return
-.Dv NULL ;
-the result is in any case safe to pass to
-.Fn __os_free .
+On
+.Dv XTC_OK
+the pointer is always NON-NULL and always safe to pass to
+.Fn __os_free ,
+even for
+.Fa sz
+of zero -- so a caller checks the return code ONLY, never additionally
+for
+.Dv NULL .
 On out of memory returns
 .Dv XTC_E_NOMEM .
 A
@@ -99,9 +125,28 @@ to be a power of two and at least
 .Fn sizeof "void *" ;
 otherwise returns
 .Dv XTC_E_INVAL .
+A
+.Fa sz
+for which rounding up to a multiple of
+.Fa align
+would not fit in a
+.Vt size_t
+returns
+.Dv XTC_E_RANGE ,
+matching
+.Fn __os_calloc 's
+convention for a size computation that does not fit; it previously
+wrapped and returned a TINY block for a multi-exabyte request.
 On success
 .Po Va (uintptr_t)*out Pc Em % Fa align
-is zero.
+is zero, and the pointer is non-NULL even for
+.Fa sz
+of zero.
+Release it with
+.Fn __os_aligned_free ,
+never
+.Fn __os_free :
+the two are a matched pair in the hook vtable.
 .Pp
 .Fn __os_alloc_set_hook
 swaps the allocator backend.

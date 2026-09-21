@@ -1,25 +1,17 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd May 28, 2026
+.Dd September 21, 2026
 .Dt XTC_CFG 3
 .Os
 .Sh NAME
 .Nm xtc_cfg_register ,
 .Nm xtc_cfg_unregister ,
-.Nm xtc_cfg_register_bool ,
-.Nm xtc_cfg_register_int ,
-.Nm xtc_cfg_register_int64 ,
-.Nm xtc_cfg_register_double ,
-.Nm xtc_cfg_register_string ,
-.Nm xtc_cfg_register_enum ,
-.Nm xtc_cfg_get ,
 .Nm xtc_cfg_get_bool ,
 .Nm xtc_cfg_get_int ,
 .Nm xtc_cfg_get_int64 ,
 .Nm xtc_cfg_get_double ,
 .Nm xtc_cfg_get_string ,
 .Nm xtc_cfg_get_enum ,
-.Nm xtc_cfg_set ,
 .Nm xtc_cfg_set_bool ,
 .Nm xtc_cfg_set_int ,
 .Nm xtc_cfg_set_int64 ,
@@ -36,7 +28,22 @@
 .Nm xtc_cfg_ref_get_int64 ,
 .Nm xtc_cfg_ref_get_double ,
 .Nm xtc_cfg_ref_get_string ,
-.Nm xtc_cfg_ref_get_enum
+.Nm xtc_cfg_ref_get_enum ,
+.Nm xtc_cfg_session_create ,
+.Nm xtc_cfg_session_destroy ,
+.Nm xtc_cfg_session_bind ,
+.Nm xtc_cfg_session_current ,
+.Nm xtc_cfg_session_push ,
+.Nm xtc_cfg_session_commit ,
+.Nm xtc_cfg_session_abort ,
+.Nm xtc_cfg_session_source ,
+.Nm xtc_cfg_session_reset ,
+.Nm xtc_cfg_ssn_set_bool ,
+.Nm xtc_cfg_ssn_set_int ,
+.Nm xtc_cfg_ssn_set_int64 ,
+.Nm xtc_cfg_ssn_set_double ,
+.Nm xtc_cfg_ssn_set_string ,
+.Nm xtc_cfg_ssn_set_enum
 .Nd typed runtime configuration registry
 .Sh SYNOPSIS
 .In xtc.h
@@ -45,18 +52,6 @@
 .Fn xtc_cfg_register "const xtc_cfg_spec_t *spec"
 .Ft int
 .Fn xtc_cfg_unregister "const char *name"
-.Ft int
-.Fn xtc_cfg_register_bool "const char *name" "int *out_var" "int default_v" "const char *help"
-.Ft int
-.Fn xtc_cfg_register_int "const char *name" "int *out_var" "int default_v" "int min" "int max" "const char *help"
-.Ft int
-.Fn xtc_cfg_register_int64 "const char *name" "int64_t *out_var" "int64_t default_v" "int64_t min" "int64_t max" "const char *help"
-.Ft int
-.Fn xtc_cfg_register_double "const char *name" "double *out_var" "double default_v" "double min" "double max" "const char *help"
-.Ft int
-.Fn xtc_cfg_register_string "const char *name" "char *buf" "size_t buflen" "const char *default_v" "const char *help"
-.Ft int
-.Fn xtc_cfg_set "const char *name" "const char *value"
 .Ft int
 .Fn xtc_cfg_get_bool "const char *name" "int *out"
 .Ft int
@@ -103,60 +98,99 @@
 .Fn xtc_cfg_ref_get_string "xtc_cfg_ref_t ref" "const char **out"
 .Ft int
 .Fn xtc_cfg_ref_get_enum "xtc_cfg_ref_t ref" "int *out"
+.Ft int
+.Fn xtc_cfg_session_create "xtc_cfg_session_t **out"
+.Ft void
+.Fn xtc_cfg_session_destroy "xtc_cfg_session_t *s"
+.Ft "xtc_cfg_session_t *"
+.Fn xtc_cfg_session_bind "xtc_cfg_session_t *s"
+.Ft "xtc_cfg_session_t *"
+.Fn xtc_cfg_session_current "void"
+.Ft int
+.Fn xtc_cfg_session_push "xtc_cfg_session_t *s"
+.Ft int
+.Fn xtc_cfg_session_commit "xtc_cfg_session_t *s"
+.Ft int
+.Fn xtc_cfg_session_abort "xtc_cfg_session_t *s"
+.Ft int
+.Fn xtc_cfg_session_source "xtc_cfg_session_t *s" "const char *name" "xtc_cfg_source_t *out"
+.Ft int
+.Fn xtc_cfg_session_reset "xtc_cfg_session_t *s" "const char *name"
+.Ft int
+.Fn xtc_cfg_ssn_set_bool "xtc_cfg_session_t *s" "const char *name" "int v" "xtc_cfg_source_t src"
+.Ft int
+.Fn xtc_cfg_ssn_set_int "xtc_cfg_session_t *s" "const char *name" "int v" "xtc_cfg_source_t src"
+.Ft int
+.Fn xtc_cfg_ssn_set_int64 "xtc_cfg_session_t *s" "const char *name" "int64_t v" "xtc_cfg_source_t src"
+.Ft int
+.Fn xtc_cfg_ssn_set_double "xtc_cfg_session_t *s" "const char *name" "double v" "xtc_cfg_source_t src"
+.Ft int
+.Fn xtc_cfg_ssn_set_string "xtc_cfg_session_t *s" "const char *name" "const char *v" "xtc_cfg_source_t src"
+.Ft int
+.Fn xtc_cfg_ssn_set_enum "xtc_cfg_session_t *s" "const char *name" "int v" "xtc_cfg_source_t src"
 .Sh DESCRIPTION
 .Nm xtc_cfg
 is a typed runtime configuration registry, modeled on PostgreSQL's
 GUC system.  Modules register named knobs at startup; operators
-set them by name; values get bound to live variables and validated
-against type and bounds.
+set them by name; values are validated against type and bounds.
 .Pp
 Supported types:
-.Dv bool , int , int64 , double , string , enum .
-Each
-.Fn xtc_cfg_register_*
-takes:
+.Dv bool , int , int64 , double , string , enum
+.Pq Vt xtc_cfg_kind_t .
+.Pp
+There is ONE registration entry point,
+.Fn xtc_cfg_register ,
+taking a
+.Vt xtc_cfg_spec_t :
 .Bl -bullet -compact -offset indent
 .It
-A canonical name
+.Va name ,
+the canonical name
 .Pq dot-separated, e.g. Sq rexis.max_clients .
 .It
-A backing storage pointer.  When the cfg value changes, the
-storage is updated atomically.
+.Va short_desc ,
+an ops-friendly description.
 .It
-A default and bounds
-.Pq for numeric types .
+.Va kind ,
+one of the
+.Dv XTC_CFG_*
+kinds.
 .It
-A help string used in
-.Sq cfg dump
-output.
+.Va dflt ,
+a union holding the default for that kind.
+.It
+.Va min_int / Va max_int
+and
+.Va min_double / Va max_double ,
+inclusive bounds for the numeric kinds
+.Pq Li 0 / Li 0 means unbounded .
+.It
+.Va enum_labels / Va n_enum_labels
+for
+.Dv XTC_CFG_ENUM :
+the allowed labels, the int value being the index into them.
+.It
+.Va validator , Va on_change ,
+and
+.Va cb_user ,
+optional callbacks.
 .El
 .Pp
-.Fn xtc_cfg_set
-parses the string value to the registered type, validates against
-bounds, and updates the backing variable.  An optional on-change
-callback fires.
-.Pp
-Modules register a knob with
-.Fn xtc_cfg_register ,
-passing an
-.Vt xtc_cfg_spec_t
-that carries name, type, backing storage, default and bounds; the
-type-specific
-.Fn xtc_cfg_register_bool ,
-.Fn xtc_cfg_register_int ,
-.Fn xtc_cfg_register_int64 ,
-.Fn xtc_cfg_register_double ,
-.Fn xtc_cfg_register_string ,
-and
-.Fn xtc_cfg_register_enum
-wrappers fill that spec for one type.
+.Sy Storage is internal to the registry .
+The spec carries NO backing-storage pointer: a registered variable
+lives inside the registry and is read back through the accessors below,
+not through a caller-supplied variable that the registry writes.
+A
+value set with
+.Fn xtc_cfg_set_int
+is observed with
+.Fn xtc_cfg_get_int
+or, on a hot path, through an
+.Vt xtc_cfg_ref_t .
 .Fn xtc_cfg_unregister
 removes a knob by name.
 .Pp
-.Fn xtc_cfg_set
-parses the string value to the registered type, validates against
-bounds, and updates the backing variable.  An optional on-change
-callback fires.  The typed setters
+There is no string-parsing single setter: the typed setters
 .Fn xtc_cfg_set_bool ,
 .Fn xtc_cfg_set_int ,
 .Fn xtc_cfg_set_int64 ,
@@ -164,12 +198,17 @@ callback fires.  The typed setters
 .Fn xtc_cfg_set_string ,
 and
 .Fn xtc_cfg_set_enum
-assign a value of the matching C type without going through the
-string parser.
+assign a value of the matching C type, validating it against the
+registered bounds and validator and firing the on-change callback.
+String parsing happens only in
+.Fn xtc_cfg_load_file ,
+which reads
+.Sq name = value
+lines;
+.Fn xtc_cfg_reload
+re-reads the last loaded file.
 .Pp
-.Fn xtc_cfg_get
-.Pq via the typed accessors
-reads the current value.  Use
+Read a value with
 .Fn xtc_cfg_get_bool ,
 .Fn xtc_cfg_get_int ,
 .Fn xtc_cfg_get_int64 ,
@@ -184,7 +223,7 @@ returns the number of registered knobs;
 .Fn xtc_cfg_kind
 reports the
 .Vt xtc_cfg_kind_t
-type of a named knob.
+of a named knob.
 .Pp
 For a knob read on a hot path, the name-keyed getters are too slow:
 each does a registry lookup.
@@ -217,7 +256,14 @@ manage a session;
 makes one the current session for the calling fiber (returning the
 previous binding) so the unscoped getters resolve through it, and
 .Fn xtc_cfg_session_current
-reports the bound session.  Within a session the overrides form a
+reports the bound session.  The binding is per-FIBER, not per-thread: it
+is keyed on the calling fiber's identity, so two fibers on one loop can
+each bind their own session, and a work-stolen fiber that resumes on a
+different thread keeps its binding.
+Off a fiber
+.Pq a plain OS thread
+it is per-thread.
+Within a session the overrides form a
 transactional stack of levels:
 .Fn xtc_cfg_session_push
 opens a level,
@@ -244,16 +290,67 @@ reports the winner.
 .Fn xtc_cfg_session_reset
 drops the current level's override for a name (RESET), so the parent
 level or the global value shows through again.
+.Pp
+Unregistering a variable that a live session still overrides is safe in
+EITHER order: the entry's storage is refcounted and outlives the
+unregister until the last override naming it is torn down, while being
+immediately invisible to every lookup.
+.Sh RETURN VALUES
+Every function returning
+.Vt int
+returns
+.Dv XTC_OK
+on success and a negative
+.Dv XTC_E_*
+code on failure:
+.Dv XTC_E_INVAL
+for a NULL argument, a kind mismatch, a value outside the registered
+bounds, or a validator rejection;
+.Dv XTC_E_NOTFOUND
+for an unregistered name;
+.Dv XTC_E_EXIST
+for a duplicate registration;
+.Dv XTC_E_NOMEM
+on allocation failure.
+.Fn xtc_cfg_count
+returns the count.
+.Fn xtc_cfg_session_bind
+and
+.Fn xtc_cfg_session_current
+return a session pointer or
+.Dv NULL .
+.Fn xtc_cfg_session_destroy
+returns nothing and is NULL-safe.
+.Pp
+A value from a configuration file is parsed WIDE and then range-checked
+against the target C type, so
+.Sq 4294967297
+for an
+.Dv XTC_CFG_INT
+knob is rejected as invalid rather than silently truncated to 1.
 .Sh EXAMPLES
 .Bd -literal -offset indent
-static int g_max_clients = 1000;
+static const xtc_cfg_spec_t spec = {
+	.name       = "rexis.max_clients",
+	.short_desc = "Maximum concurrent client connections",
+	.kind       = XTC_CFG_INT,
+	.dflt       = { .d_int = 1000 },
+	.min_int    = 1,
+	.max_int    = 100000,
+};
+int v;
 
-xtc_cfg_register_int("rexis.max_clients", &g_max_clients,
-                      1000, 1, 100000,
-                      "Maximum concurrent client connections");
+if (xtc_cfg_register(&spec) != XTC_OK)
+	return -1;
 
-/* Operator runtime change: */
-xtc_cfg_set("rexis.max_clients", "5000");
+/* Operator runtime change, then read it back. */
+(void)xtc_cfg_set_int("rexis.max_clients", 5000);
+(void)xtc_cfg_get_int("rexis.max_clients", &v);     /* v == 5000 */
+
+/* Hot path: resolve once, read with no name lookup. */
+xtc_cfg_ref_t ref;
+if (xtc_cfg_ref("rexis.max_clients", &ref) == XTC_OK)
+	(void)xtc_cfg_ref_get_int(ref, &v);
 .Ed
 .Sh SEE ALSO
 .Xr xtc_log 3 ,

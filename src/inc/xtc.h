@@ -115,8 +115,8 @@ void xtc_free(void *p);
 /*
  * xtc_malloc / xtc_calloc / xtc_realloc --
  *	Allocate through libxtc's own allocator (the same one xtc_free
- *	releases and that xtc_alloc_set_hook can override), so a consumer
- *	never needs the internal __os_* surface.  Return the pointer
+ *	releases), so a consumer never needs the internal __os_* surface.
+ *	Return the pointer
  *	directly (NULL on failure), matching the C idiom; the result is
  *	released with xtc_free.  xtc_calloc zero-fills; xtc_realloc grows
  *	/ shrinks an xtc_malloc/xtc_calloc/xtc_realloc block (NULL p acts
@@ -124,6 +124,12 @@ void xtc_free(void *p);
  *	not NULL.  Safe from any thread.  These are the public complement
  *	to xtc_free -- library CONSUMERS use only the xtc_* API, never the
  *	internal __os_* wrappers.
+ *
+ *	NOTE: there is NO public API for replacing the allocator.  The
+ *	hook setter (__os_alloc_set_hook) lives in src/inc/os_alloc.h,
+ *	which is NOT an installed header, so it is not part of the public
+ *	surface; an embedder that needs a custom allocator is building
+ *	against the source tree, not the installed API.
  */
 void *xtc_malloc(size_t size);
 void *xtc_calloc(size_t n, size_t size);
@@ -135,7 +141,13 @@ void *xtc_realloc(void *p, size_t size);
  *	XTC_CACHE_LINE) through libxtc's allocator; release ONLY with
  *	xtc_aligned_free (never xtc_free -- an aligned block may carry
  *	header/padding a plain free would mishandle).  Returns NULL on
- *	failure.  For a struct with an over-aligned member.
+ *	failure, which covers a bad `align` (not a power of two, or
+ *	smaller than sizeof(void *)), OOM, and a `size` so large that
+ *	rounding it up to a multiple of `align` would not fit in a size_t
+ *	(that last case used to WRAP and hand back a tiny block for a
+ *	huge request; it is now rejected).  A zero size yields a unique
+ *	freeable pointer, not NULL.  For a struct with an over-aligned
+ *	member.
  */
 void *xtc_aligned_alloc(size_t align, size_t size);
 void  xtc_aligned_free(void *p);
