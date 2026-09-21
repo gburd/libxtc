@@ -315,6 +315,68 @@ __xtc_io_backend_fini(xtc_io_t *io)
 	io_uring_queue_exit(&io->ring);
 }
 
+/*
+ * Allocate, link and arm a fresh registration node for fd.
+ *
+ * The node pointer IS the user_data of exactly ONE submitted poll, and
+ * that one-poll-per-node invariant is what reclamation depends on: the
+ * reap path frees a zombie when it sees a CQE without
+ * IORING_CQE_F_MORE, which only means "the last completion for this
+ * node" if no SECOND poll was ever submitted under the same pointer.
+ * A caller changing a registration must therefore retire the old node
+ * and add a new one (see xtc_io_mod_fd) -- never re-arm in place.
+ *
+ * Does not flush the SQ; the caller does, so it can batch the add with
+ * the matching retire.
+ */
+static int
+__add_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
+{
+	struct __xtc_uring_fd *uf;
+	int rc;
+	if ((rc = __os_calloc(1, sizeof *uf, (void **)&uf)) != XTC_OK)
+		return rc;
+	uf->fd = fd;
+	uf->interest = interest;
+	uf->tag = tag;
+	uf->is_wakeup = 0;
+	uf->next = io->fds;
+	io->fds = uf;
+	if ((rc = __submit_poll_add(io, uf)) != XTC_OK) {
+		io->fds = uf->next;
+		__os_free(uf);
+		return rc;
+	}
+	return XTC_OK;
+}
+
+/*
+ * Retire a live registration: cancel its poll, unlink it from the live
+ * list and move it to the zombie list, where the reap path frees it
+ * once its terminal CQE drains.
+ *
+ * Do not free here: the multishot poll submitted with user_data == uf
+ * may still have CQEs in flight (an already-ready notification, plus
+ * the -ECANCELED terminal CQE the poll_remove triggers).  Freeing now
+ * and then draining those CQEs is a use-after-free.
+ *
+ * Unlinks by POINTER, not by fd number, so it retires exactly this
+ * node even while a replacement node for the same fd is already linked
+ * (the xtc_io_mod_fd sequence).  Does not flush the SQ.
+ */
+static void
+__retire_fd(xtc_io_t *io, struct __xtc_uring_fd *uf)
+{
+	struct __xtc_uring_fd **pp;
+	(void)__submit_poll_remove(io, uf);
+	for (pp = &io->fds; *pp != NULL; pp = &(*pp)->next) {
+		if (*pp == uf) { *pp = uf->next; break; }
+	}
+	uf->dead = 1;
+	uf->next = io->zombies;
+	io->zombies = uf;
+}
+
 int
 __xtc_io_register_wakeup(xtc_io_t *io, int fd)
 {
@@ -341,25 +403,13 @@ __xtc_io_register_wakeup(xtc_io_t *io, int fd)
 int
 xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 {
-	struct __xtc_uring_fd *uf;
 	int rc;
 	if (io == NULL || fd < 0 || interest == 0)
 		return XTC_E_INVAL;
 	if (__find_fd(io, fd) != NULL)
 		return XTC_E_INVAL;        /* duplicate */
-	if ((rc = __os_calloc(1, sizeof *uf, (void **)&uf)) != XTC_OK)
+	if ((rc = __add_fd(io, fd, interest, tag)) != XTC_OK)
 		return rc;
-	uf->fd = fd;
-	uf->interest = interest;
-	uf->tag = tag;
-	uf->is_wakeup = 0;
-	uf->next = io->fds;
-	io->fds = uf;
-	if ((rc = __submit_poll_add(io, uf)) != XTC_OK) {
-		io->fds = uf->next;
-		__os_free(uf);
-		return rc;
-	}
 	(void)__ring_submit(io);
 	return XTC_OK;
 }
@@ -435,11 +485,25 @@ xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	uf = __find_fd(io, fd);
 	if (uf == NULL || uf->is_wakeup)
 		return XTC_E_INVAL;
-	/* Cancel the existing multishot, then re-submit with new mask. */
-	(void)__submit_poll_remove(io, uf);
-	uf->interest = interest;
-	uf->tag = tag;
-	if ((rc = __submit_poll_add(io, uf)) != XTC_OK) return rc;
+	/*
+	 * Retire the old node and arm a FRESH one; do NOT cancel and
+	 * re-arm in place under the same user_data.  Re-arming left two
+	 * poll generations sharing one node, and then a single
+	 * xtc_io_del_fd plus the reap path's "terminal CQE means the last
+	 * completion" rule freed the node on the FIRST generation's
+	 * terminal CQE while the second could still deliver against it --
+	 * an invalid read plus a double free (reg -> mod -> del -> poll).
+	 * One node, one poll, so the rule holds by construction.
+	 *
+	 * Add BEFORE retire: the new node takes the head of io->fds, so a
+	 * failed add leaves the old registration as the only one and fully
+	 * intact, and the fd is never left unwatched in between.  The
+	 * poll_remove names the OLD node's user_data, so it cannot cancel
+	 * the replacement.
+	 */
+	if ((rc = __add_fd(io, fd, interest, tag)) != XTC_OK)
+		return rc;
+	__retire_fd(io, uf);
 	(void)__ring_submit(io);
 	return XTC_OK;
 }
@@ -448,26 +512,12 @@ xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 int
 xtc_io_del_fd(xtc_io_t *io, int fd)
 {
-	struct __xtc_uring_fd *uf, **pp;
+	struct __xtc_uring_fd *uf;
 	if (io == NULL || fd < 0) return XTC_E_INVAL;
 	uf = __find_fd(io, fd);
 	if (uf == NULL || uf->is_wakeup) return XTC_E_INVAL;
-	(void)__submit_poll_remove(io, uf);
+	__retire_fd(io, uf);
 	(void)__ring_submit(io);
-	for (pp = &io->fds; *pp != NULL; pp = &(*pp)->next) {
-		if (*pp == uf) { *pp = uf->next; break; }
-	}
-	/*
-	 * Do not free uf here: the multishot poll submitted with
-	 * user_data == uf may still have CQEs in flight (an already-ready
-	 * notification, plus the -ECANCELED terminal CQE the poll_remove
-	 * triggers).  Freeing now and then draining those CQEs is a
-	 * use-after-free.  Move uf to the zombie list and free it when
-	 * its terminal (non-MORE) CQE is drained in xtc_io_poll.
-	 */
-	uf->dead = 1;
-	uf->next = io->zombies;
-	io->zombies = uf;
 	return XTC_OK;
 }
 

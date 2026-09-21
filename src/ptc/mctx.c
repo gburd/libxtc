@@ -124,25 +124,45 @@ __detach(xtc_mctx_t *m)
 }
 
 /* Free chunks + cleanups for a single context (no recursion).
- * Cleanups run before chunks so they can still touch them. */
+ * Cleanups run before chunks so they can still touch them.
+ *
+ * NO LOCK IS HELD WHILE A CLEANUP CALLBACK RUNS.  Each list is
+ * DETACHED under the context lock, then walked with the lock dropped,
+ * because a callback may legitimately call back into its own context
+ * (xtc_mctx_total_bytes/_total_chunks take the same mutex, which is not
+ * recursive -- holding it across the callback was a self-deadlock).
+ * Detaching also keeps the callback's view coherent: the cleanups are
+ * unlinked, but every chunk is still attached and live, which is the
+ * documented "cleanups run before the chunks are freed" ordering.
+ * Callers must hold no context lock. */
 static void
 __free_chunks_and_cleanups(xtc_mctx_t *m)
 {
-	struct cleanup_entry *ce;
+	struct cleanup_entry *ce, *ce_next;
 	struct mctx_chunk *c, *next;
 
-	while ((ce = m->cleanups) != NULL) {
-		m->cleanups = ce->next;
+	__lock(m);
+	ce = m->cleanups;
+	m->cleanups = NULL;
+	__unlock(m);
+
+	for (; ce != NULL; ce = ce_next) {
+		ce_next = ce->next;
 		ce->fn(ce->user);
 		__os_free(ce);
 	}
-	for (c = m->first_chunk; c != NULL; c = next) {
-		next = c->next;
-		__os_free(c);
-	}
+
+	__lock(m);
+	c = m->first_chunk;
 	m->first_chunk = NULL;
 	m->n_chunks = 0;
 	m->n_bytes  = 0;
+	__unlock(m);
+
+	for (; c != NULL; c = next) {
+		next = c->next;
+		__os_free(c);
+	}
 }
 
 void
@@ -181,15 +201,25 @@ xtc_mctx_destroy(xtc_mctx_t *m)
 void
 xtc_mctx_reset(xtc_mctx_t *m)
 {
-	xtc_mctx_t *child;
+	xtc_mctx_t *child, *next;
 	if (m == NULL) return;
-	/* Reset cascades: child contexts are reset before the parent's
-	 * own chunks are freed.  This matches PG MemoryContextReset. */
+	/* Reset cascades: child contexts are reset before the parent's own
+	 * chunks are freed.  This matches PG MemoryContextReset.
+	 *
+	 * m's lock is taken only to read a sibling link and is DROPPED
+	 * across the recursion and the cleanup callbacks: a cleanup may
+	 * introspect its own context or an ancestor, and these mutexes are
+	 * not recursive. */
 	__lock(m);
-	for (child = m->first_child; child != NULL; child = child->next_sibling)
-		xtc_mctx_reset(child);
-	__free_chunks_and_cleanups(m);
+	child = m->first_child;
 	__unlock(m);
+	for (; child != NULL; child = next) {
+		xtc_mctx_reset(child);
+		__lock(m);
+		next = child->next_sibling;
+		__unlock(m);
+	}
+	__free_chunks_and_cleanups(m);
 }
 
 /* ----- alloc / free ---------------------------------------------- */
@@ -321,6 +351,7 @@ struct xtc_arena_group {
 	xtc_pid_t      *members;    /* dynamic array */
 	int             n;
 	int             cap;
+	int             sealed;     /* a discard is in flight; joins refused */
 };
 
 int
@@ -373,6 +404,15 @@ xtc_arena_group_add(xtc_arena_group_t *g)
 	if (g == NULL) return XTC_E_INVAL;
 	if (xtc_pid_is_none(self)) return XTC_E_INVAL;   /* a fiber adds itself */
 	(void)__xtc_mtx_lock(&g->lock);
+	/* SEALED: a discard is in flight and is about to reset the arena.
+	 * Admitting a member now is exactly the bug the seal exists to stop
+	 * -- the joiner would allocate shared state into memory that the
+	 * reset is about to throw away, and (having joined after the
+	 * discard's snapshot) would not even be killed first.  Refuse with
+	 * XTC_E_AGAIN: the group is unsealed once the discard reaches a
+	 * verdict, so a FRESH cohort may then join, but THIS caller must not
+	 * touch the arena -- it belongs to the cohort being discarded. */
+	if (g->sealed) { rc = XTC_E_AGAIN; goto out; }
 	for (i = 0; i < g->n; i++)                       /* idempotent per pid */
 		if (xtc_pid_eq(g->members[i], self)) goto out;
 	if (g->n == g->cap) {
@@ -401,14 +441,60 @@ xtc_arena_group_size(xtc_arena_group_t *g)
 	return n;
 }
 
-/* A member pid is "gone" when xtc_proc_info reports NOTFOUND or !alive. */
+/*
+ * A member pid is "gone" only when xtc_proc_info reports NOTFOUND, i.e.
+ * its proc-table slot has been released.
+ *
+ * !alive is deliberately NOT accepted as proof.  A proc clears `alive`
+ * BEFORE running its at-exit callbacks, and such a callback may still
+ * read or write the group's arena (releasing a lock, resetting a
+ * context, flushing a buffer).  Treating !alive as gone let discard
+ * reset the arena underneath a running exit hook.  The slot is released
+ * only after every at-exit callback has returned, so NOTFOUND is the
+ * first moment nothing of the member can touch arena memory.
+ */
 static int
 __grp_member_gone(xtc_pid_t pid)
 {
 	xtc_proc_info_t info;
-	int rc = xtc_proc_info(pid, &info);
-	if (rc != XTC_OK) return 1;      /* NOTFOUND -> reaped */
-	return !info.alive;
+	return xtc_proc_info(pid, &info) != XTC_OK;
+}
+
+/*
+ * Poll until `pid` is reaped or `timeout_ns` elapses; 1 if reaped.
+ * Polling (not a condvar) for the same reason xtc_exit_pid_deadline
+ * polls: the target acts on its own fiber and a wedged target signals
+ * nothing.  Yields on a fiber, sleeps the OS thread off one.
+ */
+static int
+__grp_wait_reaped(xtc_pid_t pid, int64_t timeout_ns)
+{
+	int64_t start = 0, now = 0, slice = 50000;   /* 50us, backing off */
+	int on_fiber = !xtc_pid_is_none(xtc_self());
+
+	(void)__os_clock_mono(&start);
+	for (;;) {
+		if (__grp_member_gone(pid))
+			return 1;
+		(void)__os_clock_mono(&now);
+		if (timeout_ns <= 0 || now - start >= timeout_ns)
+			return 0;
+		if (on_fiber)
+			(void)xtc_proc_sleep(slice);
+		else
+			(void)__os_sleep_ns(slice);
+		if (slice < 1000000)
+			slice *= 2;
+	}
+}
+
+/* Reopen the group to joins.  Paired with the seal taken by discard. */
+static void
+__grp_unseal(xtc_arena_group_t *g)
+{
+	(void)__xtc_mtx_lock(&g->lock);
+	g->sealed = 0;
+	(void)__xtc_mtx_unlock(&g->lock);
 }
 
 int
@@ -422,13 +508,28 @@ xtc_arena_group_discard(xtc_arena_group_t *g, int reason,
 	if (g == NULL) return XTC_E_INVAL;
 	self = xtc_self();
 
-	/* Snapshot the member list under the lock, then work outside it:
-	 * the kill/wait can yield, and a member exiting on its own must be
-	 * free to touch nothing of ours. */
+	/* SEAL the group and snapshot the member list in the SAME lock hold,
+	 * then work outside the lock (the kill/wait yields, and a member
+	 * exiting on its own must be free to touch nothing of ours).
+	 *
+	 * Seal-with-snapshot is what makes the snapshot AUTHORITATIVE: every
+	 * add that got in before this point is in `snap`, and every add after
+	 * it fails with XTC_E_AGAIN.  Without the seal a fiber could join
+	 * during the yielding waits below -- after the snapshot, so never
+	 * killed -- and then hold pointers into an arena the reset had wiped,
+	 * while also being silently dropped from the member count.  A mere
+	 * re-check of the count before the reset would NOT fix that: a join
+	 * can still land between the check and the reset. */
 	(void)__xtc_mtx_lock(&g->lock);
+	if (g->sealed) {          /* another discard is already in flight */
+		(void)__xtc_mtx_unlock(&g->lock);
+		return XTC_E_AGAIN;
+	}
+	g->sealed = 1;
 	n = g->n;
 	if (n > 0) {
 		if (__os_calloc((size_t)n, sizeof *snap, (void **)&snap) != XTC_OK) {
+			g->sealed = 0;
 			(void)__xtc_mtx_unlock(&g->lock);
 			return XTC_E_NOMEM;
 		}
@@ -440,6 +541,7 @@ xtc_arena_group_discard(xtc_arena_group_t *g, int reason,
 	 * mid-wait and never reach the reset. */
 	for (i = 0; i < n; i++) {
 		if (!xtc_pid_is_none(self) && xtc_pid_eq(snap[i], self)) {
+			__grp_unseal(g);
 			__os_free(snap);
 			return XTC_E_INVAL;
 		}
@@ -450,17 +552,38 @@ xtc_arena_group_discard(xtc_arena_group_t *g, int reason,
 	 * be alive at its deadline -- record that, and do NOT discard. */
 	for (i = 0; i < n; i++) {
 		int status = XTC_KILL_TIMEOUT;
+		int64_t t0 = 0, t1 = 0, left;
 		if (__grp_member_gone(snap[i]))
 			continue;
+		(void)__os_clock_mono(&t0);
 		(void)xtc_exit_pid_deadline(snap[i], reason, timeout_ns, &status);
-		if (!__grp_member_gone(snap[i]))
-			all_gone = 0;   /* still alive: a deferred/wedged kill */
+		/* Wedged inside a mask with the kill latched: it cannot act on
+		 * the kill while the mask is held, so waiting longer cannot
+		 * change the answer. */
+		if (status == XTC_KILL_DEFERRED) {
+			all_gone = 0;
+			continue;
+		}
+		/* exit_pid_deadline reports DELIVERED as soon as the target is
+		 * !alive -- which is BEFORE its at-exit callbacks have run, and
+		 * those may still touch the arena.  Spend what is left of this
+		 * member's budget waiting for the proc-table slot to be
+		 * released: that is the first instant the member is provably
+		 * unable to reach arena memory. */
+		(void)__os_clock_mono(&t1);
+		left = timeout_ns - (t1 - t0);
+		if (left <= 0)
+			left = 1;   /* one non-blocking probe */
+		if (!__grp_wait_reaped(snap[i], left))
+			all_gone = 0;   /* still alive, or still unwinding */
 	}
 
 	/* Phase 2: ONLY if every member is confirmed gone, reset the arena.
 	 * Discarding state a live fiber may still touch is exactly the
 	 * corruption this primitive exists to avoid. */
 	if (all_gone) {
+		/* Still sealed here, so nothing can have joined since the
+		 * snapshot and the reset cannot strand a live member. */
 		xtc_mctx_reset(g->arena);
 		/* The members are dead; forget them so the group can be reused
 		 * (a fresh cohort re-adds itself). */
@@ -469,6 +592,9 @@ xtc_arena_group_discard(xtc_arena_group_t *g, int reason,
 		(void)__xtc_mtx_unlock(&g->lock);
 	}
 
+	/* Verdict reached: reopen the group.  Unsealing after the reset (not
+	 * before) is what keeps the reset atomic with respect to joins. */
+	__grp_unseal(g);
 	__os_free(snap);
 	if (out_all_gone != NULL) *out_all_gone = all_gone;
 	return rc;

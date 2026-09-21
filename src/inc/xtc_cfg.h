@@ -25,11 +25,11 @@
  *	    of vars; M11.5 swaps in xtc_chash for thousands).
  *	  - Each var holds its declared type + current value via union.
  *
- *	Not yet implemented: per-session/per-database scoping (an
- *	override-stack model that needs the M16 session layer).
- *	Configuration-file parsing (xtc_cfg_load_file) and SIGHUP-driven
- *	reload (xtc_cfg_reload) are done.  See docs/KNOWN_ISSUES.md for
- *	tracking.
+ *	Per-session / per-database scoping (the override-stack model) is
+ *	implemented -- see the session section at the bottom of this
+ *	header.  Configuration-file parsing (xtc_cfg_load_file) and
+ *	SIGHUP-driven reload (xtc_cfg_reload) are done too.  See
+ *	docs/KNOWN_ISSUES.md for what remains.
  *
  *	Hot-path reads:
  *	  - The name-keyed xtc_cfg_get_* do a registry lookup per call;
@@ -223,9 +223,18 @@ XTC_API int  xtc_cfg_ref_get_enum(xtc_cfg_ref_t ref, int *out);
  * PGC_S_OVERRIDE ordering and pg_settings.source.
  *
  * Thread/fiber model: a session is owned by one fiber at a time (bind
- * it on entry, unbind on exit).  The overrides are not shared, so no
- * lock guards them; only the fallback read of the global value takes
- * the registry lock, exactly as the unscoped getters do.
+ * it on entry, unbind on exit).  The BINDING is per-fiber, not
+ * per-thread: it is keyed on the calling fiber's identity, so two
+ * fibers on ONE loop can each bind their own session, yield, and keep
+ * reading their own values -- and a work-stolen fiber that resumes on a
+ * different thread keeps its binding.  The overrides themselves are not
+ * shared, so no lock guards them; only the fallback read of the global
+ * value takes the registry lock, exactly as the unscoped getters do.
+ *
+ * Variable lifetime: unregistering a variable that a live session still
+ * overrides is safe in EITHER order -- the entry's storage outlives the
+ * unregister until the last override naming it is torn down, while
+ * being immediately invisible to every lookup.
  */
 typedef struct xtc_cfg_session xtc_cfg_session_t;
 
@@ -266,10 +275,12 @@ XTC_API int  xtc_cfg_session_create(xtc_cfg_session_t **out);
 XTC_API void xtc_cfg_session_destroy(xtc_cfg_session_t *s);
 
 /* Bind `s` (or NULL to unbind) as the current session for the calling
- * fiber, so the unscoped xtc_cfg_get_* / ref getters resolve through
- * it.  Returns the previously bound session (or NULL) so a caller can
- * save/restore.  A session is bound to one fiber; do not share a bound
- * session across fibers concurrently. */
+ * FIBER, so the unscoped xtc_cfg_get_* / ref getters resolve through
+ * it.  The binding rides with the fiber across a yield and across a
+ * work-stealing migration; off a fiber (a plain OS thread) it is
+ * per-thread.  Returns the previously bound session (or NULL) so a
+ * caller can save/restore.  A session is bound to one fiber at a time;
+ * do not share a bound session across fibers concurrently. */
 XTC_API xtc_cfg_session_t *xtc_cfg_session_bind(xtc_cfg_session_t *s);
 XTC_API xtc_cfg_session_t *xtc_cfg_session_current(void);
 
