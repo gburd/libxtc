@@ -6,6 +6,226 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## OPEN (ABI): caller-allocated structs grew during 1.x -- do not mix minors
+
+**Status:** OPEN, and the most consequential item on this page for a
+packager.  It cannot be fixed without an API change, so it is documented
+rather than papered over.
+
+**The claim that is broken.** `docs/abi-stability.md` says a MINOR bump is
+additive-only, with no behaviour change for code compiled against the
+prior minor.  For function signatures that holds -- no `xtc_*` function
+has been removed, renamed, or resignatured in 1.x.  For
+**caller-allocated option and info structs it does not**, and appending
+to one is NOT binary compatible merely because zero is the intended
+default for the new field: the caller allocates the struct, so it
+allocates the OLD, SMALLER size, and the library reads (or writes) the
+new size.
+
+**Measured.**  Both header trees were extracted (`git archive v1.0.0
+src/inc` vs `HEAD`) and the same probe compiled against each, x86-64,
+gcc:
+
+| struct | v1.0.0 | HEAD | what changed |
+|---|---|---|---|
+| `xtc_proc_opts_t` | 40 | 56 | appended `migratable`@40, `sched_class`@48 |
+| `xtc_sup_opts_t` | 24 | 32 | appended `max_children`@24 |
+| `xtc_app_opts_t` | 48 | 64 | appended `no_tuning_check`@56; also embeds `xtc_sup_opts_t`, which grew |
+| `xtc_tls_opts_t` | 48 | 120 | appended nine fields (`verify_peer_mode`, `cipher_list`, `ciphersuites_13`, `groups`, `crl_file`, `crl_dir`, `prefer_server_ciphers`, `passphrase_cb`, `passphrase_userdata`) |
+| `xtc_proc_info_t` | 72 | 80 | **INSERTED** `mask_depth`/`mask_deferred` at offset 24 |
+| `xtc_svr_callbacks_t` | 40 | 48 | **INSERTED** `handle_continue` before `terminate` |
+| `xtc_aio_t` | 48 | 64 | appended `iov`, `iovcnt` |
+| `xtc_io_event_t` | 16 | 16 | `fd` landed in existing tail padding -- **no change**, the shape that IS compatible |
+
+Two severity classes:
+
+**(1) Appended field, out-of-bounds READ.**  The library reads a field
+past the end of the caller's object.  `src/ptc/proc.c:1218` reads
+`opts->sched_class` and `:1303` reads `opts->migratable`, with no size or
+version negotiation anywhere.  `src/orc/sup.c:453` does
+`sup->opts = *opts`, a 32-byte copy out of a 24-byte caller object.
+`src/io/tls_openssl.c` reads `opts->passphrase_cb`, `verify_peer_mode`,
+and `crl_file`.  What the caller gets is whatever follows its struct in
+memory, interpreted as a scheduling class handle or a callback pointer.
+(`xtc_aio_t` is the benign case in this class: the library reads
+`iov`/`iovcnt` only for the `PREADV`/`PWRITEV` ops, which did not exist
+at v1.0.0, so an old caller cannot reach the read.)
+
+**(2) Inserted field -- existing offsets MOVED.**  Worse, and not merely
+a read:
+
+- `xtc_proc_info_t`: inserting two fields at offset 24 shifted every
+  mailbox counter by 8 bytes (`mbox_len` 24->32, `mbox_peak` 32->40,
+  `mbox_cap` 40->48, `mbox_saved` 48->56, `mbox_recv_total` 56->64,
+  `mbox_drop_total` 64->72).  `__fill_proc_info` (`src/ptc/proc.c:4099`)
+  opens with `memset(info, 0, sizeof *info)` -- 80 bytes into an old
+  caller's 72-byte buffer, an **out-of-bounds WRITE** that smashes 8
+  bytes past a typically stack-allocated object -- and then writes every
+  `mbox_*` field where the old caller does not read it.  An old consumer
+  gets a corrupted frame AND garbage mailbox numbers.
+- `xtc_svr_callbacks_t`: `handle_continue` was inserted BEFORE
+  `terminate`, moving `terminate` 32->40.  `src/orc/svr.c:230` does
+  `s->cb = *cb` (48 bytes out of 40), and thereafter the old caller's
+  `terminate` pointer sits where the library looks for
+  `handle_continue` -- so it is **called through the wrong prototype**
+  (`int (*)(void *, void *)` vs `void (*)(void *, int)`), while
+  `s->cb.terminate` is whatever followed the caller's struct.
+
+**Consequence for a consumer / packager.**  Recompile consumers against
+the headers of the exact minor whose library they link.  Do NOT ship a
+shared libxtc that a consumer built against a different minor's headers,
+and do not treat the SONAME (`libxtc.so.1`) as licence to swap minors
+underneath a compiled consumer -- the symbols resolve, the program
+links, and then it reads or writes past the end of its own structs.
+A source rebuild is always safe; only mixing is not.
+
+**The proper fix (deferred -- it is an API change).**  Either:
+
+1. a `size_t size` (or version) as the FIRST member of every
+   caller-allocated struct, set by the caller to `sizeof` its own view,
+   with the library reading a field only after checking the size covers
+   it -- the `struct sockaddr`/`getrandom` approach; or
+2. versioned `_ex` entry points taking a new struct, leaving the old
+   struct and the old function byte-for-byte frozen -- which is what
+   `docs/abi-stability.md` already prescribes for the frozen lock-layer
+   surface, and what should have been done here.
+
+Until one of those lands, the additive-ABI promise applies to function
+signatures only, and `docs/abi-stability.md` says so.  There is also no
+gate that would have caught this: nothing in `make check` or CI diffs
+struct layouts between tags.  A layout check (`pahole`/`abidiff` against
+the previous tag, or a table of `_Static_assert(sizeof(T) == N)` that a
+maintainer must consciously update) is the cheap mechanical guard and
+does not exist yet.
+
+---
+## DEFERRED: completed fibers are not reclaimed until loop teardown
+
+**Status:** OPEN and DELIBERATE -- a known bounded-memory limitation,
+deferred to its own cycle because reclaiming safely touches five files
+at once.
+
+**What it is.**  A coroutine-backed task stays on the loop's `all_tasks`
+list from spawn until `xtc_loop_fini`, even after it has reached DONE.
+`src/evt/loop.c:771-803` recycles a completed PLAIN task back to the
+loop's slab, but explicitly keeps coro-backed tasks (`cleanup != NULL`,
+or `fn == __xtc_coro_step`) on `all_tasks` so that fiber-stack teardown
+stays on the one path that is known safe; `src/evt/coro_uctx.c:628` sets
+`t->cleanup = __coro_task_cleanup` with the comment "release the fiber
+stack + coro struct when the loop tears the task down at fini," and
+`xtc_loop_fini` (`src/evt/loop.c:280-287`) is what finally walks the list
+and runs every cleanup.
+
+**Consequence.**  For a long-lived service that spawns many short-lived
+procs, retained memory tracks **historical** work, not concurrent work.
+The peak is the TOTAL number of procs ever spawned on that loop times
+the per-fiber stack, not the high-water number of live procs.
+
+**Measured** (Linux, x86-64, default 64 KiB stack; 20,000 procs spawned
+and each run to completion before the next, so at most ONE existed at a
+time):
+
+```
+20000 procs, max 1 concurrent: VmSize +1402768 kB (70.1 kB/proc),
+                               VmRSS  + 123016 kB ( 6.2 kB/proc)
+after xtc_loop_fini:           VmSize 51924 kB, VmRSS 45332 kB
+```
+
+So 1.4 GB of address space and 123 MB resident for work whose concurrent
+footprint was one fiber.  It is released at `xtc_loop_fini`, so this is
+retention, not a leak in the LSan sense -- and LSan therefore does not
+flag it, which is why it needs to be written down here.
+
+**Workarounds today**, in order of preference:
+
+1. Structure long-lived work as a POOL of long-lived procs consuming
+   from a channel or mailbox, rather than one proc per unit of work.
+   This is the idiomatic shape anyway and it makes the bound the pool
+   size.
+2. Lower `xtc_set_stack_size()` if the work is shallow -- it scales the
+   per-proc cost linearly.
+3. For a bounded batch, use a loop per batch and `xtc_loop_fini` between
+   batches.
+
+**Why it is deferred rather than fixed.**  Freeing at DONE means a task
+releasing its own fiber stack while that stack may still be the one
+executing, and the `all_tasks` unlink is not thread-safe under work
+stealing (a stolen task completes on the thief, which is exactly why the
+existing plain-task recycle is conditioned on `t->loop == loop`).  Doing
+it correctly requires a coordinated change across `src/evt/loop.c`,
+`src/evt/task.c`, all three coroutine substrates (`coro_uctx.c`,
+`coro_fctx.c`, `coro_winfiber.c`), and `src/ptc/proc.c` -- with a
+deferred-free / epoch handoff so the stack is released only once nothing
+can be running on it.  That is a design change with a real
+use-after-free failure mode if rushed, so it gets its own cycle rather
+than being bolted onto an unrelated one.
+
+---
+## RESOLVED (1.49.x): allocator, accounting, cancellation and lifetime defects
+
+**Status:** RESOLVED.  Recorded here because several were previously
+open-ended "suspected" items, and a consumer needs to know which release
+changed the behaviour it may have worked around.
+
+**Registration lifetime, cfg scoping, arena discard** (`d18481b`):
+
+- io_uring buffer/fd registration had a use-after-free across
+  re-registration; the registration lifetime is now correct.
+- `xtc_cfg` sessions are **FIBER-scoped**, not per-OS-thread.  A session
+  binding now rides with the fiber across a yield and across a
+  work-stealing migration; two fibers on one loop can each hold their
+  own.  Consumers that assumed per-thread scoping should re-read
+  `xtc_cfg(3)`.
+- Registry entries are refcounted, so unregistering a variable a live
+  session still overrides is safe in EITHER order.
+- Integer cfg values from a file are parsed wide then range-checked, so
+  an out-of-range value is rejected rather than silently truncated.
+- `xtc_arena_group_discard` now waits for a killed member's pid to leave
+  the proc table entirely (not merely for its alive flag to clear)
+  before resetting the arena, because at-exit callbacks run after the
+  flag clears and can still touch arena memory.
+- `xtc_mctx_reset` no longer holds the context lock across cleanup
+  callbacks, so a callback may introspect or allocate in its own
+  context (it used to self-deadlock).
+
+**Cancellation safety in the park paths** (`9f196cb`), five defects:
+
+- An explicit wake is no longer reported as a timeout.
+  `xtc_proc_wait_fd` returns `XTC_E_AGAIN` only when the timeout
+  actually fired, with `XTC_WAIT_TIMEOUT` in `*out_revents`; a bit-less
+  wake returns `XTC_OK`.
+- A killed waiter releases its fd registration and timeout timer before
+  the unwind completes, so the next waiter on that fd no longer gets
+  `XTC_E_INTERNAL` from a duplicate-registration rejection.
+- An at-exit hook may now park after a kill without restarting the
+  at-exit list.
+- The check/arm gap in `wait_fd` is closed: the mailbox observation and
+  the waker arming happen under one lock hold, so a send or kill landing
+  in that window can no longer be lost (it could park the proc forever
+  with `timeout_ns < 0`).
+- `xtc_blocking_run` no longer lets a worker outlive the caller's frame.
+
+**Allocator and accounting** (`464f876`):
+
+- `xtc_aligned_alloc` / `__os_aligned_alloc` reject a size whose
+  round-up to the alignment would not fit in a `size_t`, with
+  `XTC_E_RANGE`.  Previously it WRAPPED: `xtc_aligned_alloc(64,
+  SIZE_MAX)` returned a non-NULL 64-byte block, so the first write
+  corrupted the heap.
+- A slab destructor runs once, not twice.
+- `xtc_res_acquire` tests headroom before adding, so a huge request is
+  rejected with `XTC_E_RESOURCE` instead of overflowing `int64_t` (which
+  was signed-overflow UB and in practice wrapped NEGATIVE, sailing past
+  the cap check and landing `used` at `INT64_MIN` -- breaking the
+  hard-cap and non-negative invariants at once).
+- The allocation redzone honors the requested alignment.
+- The allocation auditor keeps its record when a downstream `realloc`
+  FAILS (it used to drop the record first, so the original still-live
+  block vanished from the auditor and the leak checker reported clean
+  exactly when an allocation had failed).
+- A slot-size floor fix in the slab.
+
+---
 ## RESOLVED: fiber strand under migration + blocking offload (kqueue)
 
 **Status:** RESOLVED in 1.48.0.  Root cause found and fixed; the FreeBSD
@@ -1146,15 +1366,19 @@ leaking entries on `xtc_loop_fini`; consecutive PBT loops were aliasing
 stale entries.  Fix: added `__xtc_proc_loop_unregister(loop)` called from
 `xtc_loop_fini`.  Both properties are re-enabled.
 
-## xtc_cfg: missing features
+## xtc_cfg: feature status (was "missing features")
 
-**Status:** Config-file parsing, reload, and hot-path read handles DONE;
-per-session scoping is out of scope for the runtime (it belongs to a
-downstream session layer, not the general-purpose registry).
+**Status:** All of it DONE, including per-session scoping -- which this
+entry previously declared "out of scope for the runtime."  That is no
+longer true and the old text is corrected here rather than left to
+mislead.
 
 - Configuration-file parsing (postgresql.conf reader): DONE --
   `xtc_cfg_load_file()` reads `name = value` lines (comments, quotes,
-  per-kind parsing, bounds/validators), skipping unknown/bad lines.
+  per-kind parsing, bounds/validators), skipping unknown/bad lines.  As
+  of `d18481b` an integer value is parsed WIDE and then range-checked
+  against the target C type, so `4294967297` for an `XTC_CFG_INT` knob is
+  rejected as invalid rather than truncated to 1.
 - SIGHUP-driven reload: DONE as a mechanism -- `xtc_cfg_reload()`
   re-reads the last loaded file.  The app wires SIGHUP to it from the
   event loop (the function is not async-signal-safe, by documentation).
@@ -1163,18 +1387,26 @@ downstream session layer, not the general-purpose registry).
   read with no name lookup and no scan, still observing live
   `xtc_cfg_set_*` updates.  A registry entry is never relocated, so the
   handle can be cached for the process lifetime like a compiled-in
-  pointer.  This removes the per-read name-lookup cost that makes a
-  name-keyed getter unaffordable on a hot path.
-- Per-session/per-database scoping + a transactional override stack +
-  source-precedence tracking (the pieces a `SET`/`SET LOCAL`/GUC-stack
-  model needs): out of scope for xtc.  These require a session concept
-  and per-transaction save/rollback that belong to the downstream
-  consumer, not the runtime.  If ever built, the intended shape is an
-  implicit current-session bound to the running fiber (reads stay bare,
-  as in PG) with an explicit-scope variant for admin paths; the
-  `xtc_cfg_ref_t` handle would then carry the (variable, scope) pair so
-  hot reads stay lookup-free.  Recorded so a consumer can design its
-  side for a mechanical swap rather than a rewrite.
+  pointer.
+- Per-session / per-database scoping, the transactional override stack,
+  and source-precedence tracking: **DONE** (`47443de`, hardened in
+  `d18481b`), not out of scope.  `xtc_cfg_session_create/_destroy/_bind/
+  _current` manage a session; `_push`/`_commit`/`_abort` give the
+  nestable level stack that backs `SET LOCAL`, `SET` inside a
+  rolled-back transaction, function-local `SET`, and subtransactions;
+  `xtc_cfg_ssn_set_*` set a per-session override carrying a source rank
+  (`XTC_CFG_SRC_DEFAULT`..`_OVERRIDE`) that a lower-ranked source cannot
+  displace; `_source` reports the winner and `_reset` drops the current
+  level's override.  The binding is per-FIBER (it rides a yield and a
+  work-stealing migration), and unregistering a variable a live session
+  still overrides is safe in either order because entry storage is
+  refcounted.  Unscoped `xtc_cfg_get_*` resolve through the bound
+  session when there is one and fall straight through to the global value
+  when there is not, so bare-name reads work as in PostgreSQL.  See
+  `xtc_cfg(3)`.
+
+Nothing in `xtc_cfg` is known missing today.  If something is wanted, it
+is a new feature request, not an unfinished one.
 
 ## xtc_slab_pressure_stop API incomplete
 
