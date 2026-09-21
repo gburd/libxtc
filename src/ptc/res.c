@@ -10,6 +10,7 @@
 #include "xtc_res.h"
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
+#include <stdint.h>
 #include <string.h>
 
 static int64_t
@@ -76,6 +77,21 @@ xtc_res_acquire(xtc_res_t *r, xtc_res_kind_t k, int64_t n)
 
 	for (;;) {
 		cur = atomic_load_explicit(&r->used[k], memory_order_relaxed);
+		/*
+		 * Test the HEADROOM before adding.  Computing cur + n first
+		 * and then comparing it to the cap is signed overflow (UB)
+		 * once the sum passes INT64_MAX, and in practice it wrapped
+		 * NEGATIVE -- which sails past "next > cap", so a cap of
+		 * INT64_MAX could be charged INT64_MAX and then 1 more, with
+		 * `used` landing at INT64_MIN.  Both the hard-cap invariant
+		 * and the non-negative accounting invariant broke at once.
+		 * Subtraction cannot overflow here: cur >= 0 and n >= 0.
+		 */
+		if (n > INT64_MAX - cur) {
+			(void)atomic_fetch_add_explicit(&r->rejects[k], 1,
+			    memory_order_relaxed);
+			return XTC_E_RESOURCE;
+		}
 		next = cur + n;
 #if XTC_DST_BUG(XTC_DST_BUG_RESOVER)
 		/* planted bug: skip the cap check -> used can exceed the cap

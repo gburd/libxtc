@@ -186,7 +186,116 @@ test_ctor_dtor(const MunitParameter p[], void *d)
 	xtc_slab_free(s, o1);
 	xtc_slab_free(s, o2);
 	munit_assert_int(atomic_load(&g_dtor_count), ==, 2);
+	/*
+	 * Destroy must NOT re-run the destructor on objects the caller
+	 * already freed.  xtc_slab_free runs the dtor before caching the
+	 * slot in the per-thread magazine, and destroy used to drop the
+	 * magazine array WITHOUT returning its slots to the chunk free
+	 * lists -- so its "not on a free list => still live" scan saw those
+	 * slots as live and ran the dtor a SECOND time.  A dtor that closes
+	 * an fd or drops a refcount double-released it.  Fails (count 4)
+	 * without the magazine drain in xtc_slab_destroy.
+	 */
 	xtc_slab_destroy(s);
+	munit_assert_int(atomic_load(&g_dtor_count), ==, 2);
+	return MUNIT_OK;
+}
+
+/*
+ * A one-WORD slot must not let destroy's live/free marker pass corrupt
+ * the chunk free list.  slot_size had a one-pointer floor, but destroy
+ * marks each slot by writing its SECOND word -- with obj_size 8 and
+ * align 8 that write landed in the NEXT slot's free-list link, so the
+ * marker walk mis-classified freed slots as live and ran destructors on
+ * garbage: measured 515 dtor calls for 4 objects.  Fails without the
+ * two-word slot floor in xtc_slab_create.
+ */
+static MunitResult
+test_word_slot_destroy(const MunitParameter p[], void *d)
+{
+	static const size_t sizes[] = { 1, 4, 8 };
+	xtc_slab_t *s;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	void *o[4];
+	size_t si;
+	int i;
+	(void)p; (void)d;
+
+	for (si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
+		atomic_store(&g_dtor_count, 0);
+		opts = (xtc_slab_opts_t)XTC_SLAB_OPTS_DEFAULT;
+		opts.name = "word_slot";
+		opts.obj_size = sizes[si];
+		opts.align = 8;                /* smallest permitted stride */
+		opts.chunk_size = 4096;
+		opts.dtor = my_dtor;
+		munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
+		for (i = 0; i < 4; i++)
+			munit_assert_not_null((o[i] = xtc_slab_alloc(s)));
+		for (i = 0; i < 4; i++)
+			xtc_slab_free(s, o[i]);
+		munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+		/* Destroy must add nothing: everything was already freed. */
+		xtc_slab_destroy(s);
+		munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+	}
+	return MUNIT_OK;
+}
+/*
+ * Same double-destructor defect, exercised through the SLOW free path
+ * too (NO_MAGAZINE), which must keep behaving: a freed object's dtor
+ * runs exactly once, and a STILL-LIVE object's dtor runs exactly once
+ * at destroy.
+ */
+static MunitResult
+test_destroy_dtor_once(const MunitParameter p[], void *d)
+{
+	xtc_slab_t *s;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	void *o[4];
+	int i;
+	(void)p; (void)d;
+
+	/* Magazine path: free everything, destroy, dtor count stays == n. */
+	atomic_store(&g_dtor_count, 0);
+	opts.name = "dtor_once_mag"; opts.obj_size = sizeof(int);
+	opts.dtor = my_dtor;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
+	for (i = 0; i < 4; i++) {
+		o[i] = xtc_slab_alloc(s);
+		munit_assert_not_null(o[i]);
+	}
+	for (i = 0; i < 4; i++)
+		xtc_slab_free(s, o[i]);
+	munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+	xtc_slab_destroy(s);
+	munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+
+	/* Same with the magazine disabled (slot goes straight back to the
+	 * chunk free list): still exactly once each. */
+	atomic_store(&g_dtor_count, 0);
+	opts.name = "dtor_once_nomag";
+	opts.flags = XTC_SLAB_NO_MAGAZINE;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
+	for (i = 0; i < 4; i++)
+		munit_assert_not_null((o[i] = xtc_slab_alloc(s)));
+	for (i = 0; i < 4; i++)
+		xtc_slab_free(s, o[i]);
+	munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+	xtc_slab_destroy(s);
+	munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+
+	/* A genuinely LIVE object at destroy time still gets its one dtor
+	 * call -- the drain must not suppress that. */
+	atomic_store(&g_dtor_count, 0);
+	opts.name = "dtor_live"; opts.flags = 0;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
+	munit_assert_not_null((o[0] = xtc_slab_alloc(s)));
+	munit_assert_not_null((o[1] = xtc_slab_alloc(s)));
+	xtc_slab_free(s, o[0]);            /* one dtor here */
+	munit_assert_int(atomic_load(&g_dtor_count), ==, 1);
+	xtc_slab_destroy(s);               /* one dtor for the live o[1] */
+	munit_assert_int(atomic_load(&g_dtor_count), ==, 2);
 	return MUNIT_OK;
 }
 
@@ -280,6 +389,72 @@ test_redzone(const MunitParameter p[], void *d)
 	o = xtc_slab_alloc(s);
 	memset(o, 'y', 24);            /* 8 bytes past the end */
 	xtc_slab_free(s, o);
+	(void)xtc_slab_stat(s, &st);
+	munit_assert_uint64(st.redzone_violations, >=, 1);
+	xtc_slab_destroy(s);
+	return MUNIT_OK;
+}
+
+/*
+ * REDZONE must not break the requested object alignment.  The slot base
+ * is aligned to opts.align, but the returned object pointer was the slot
+ * plus a FIXED 16-byte front guard, so a default 64-byte alignment came
+ * back 16 mod 64 -- the over-alignment case AGENTS.md calls out (UBSan
+ * alignment trap, and a fault on stricter targets).  Enabling a
+ * DIAGNOSTIC must not weaken a guarantee.  Fails without the rz_front
+ * round-up in xtc_slab_create.
+ */
+static MunitResult
+test_redzone_alignment(const MunitParameter p[], void *d)
+{
+	static const size_t aligns[] = { 8, 16, 32, 64, 128, 256 };
+	static const size_t sizes[] = { 1, 8, 17, 64, 100 };
+	xtc_slab_t *s;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_stats_t st;
+	uint8_t *o[3];
+	size_t ai, si;
+	int i;
+	(void)p; (void)d;
+
+	for (ai = 0; ai < sizeof aligns / sizeof aligns[0]; ai++) {
+		for (si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
+			opts = (xtc_slab_opts_t)XTC_SLAB_OPTS_DEFAULT;
+			opts.name = "rz_align";
+			opts.obj_size = sizes[si];
+			opts.align = aligns[ai];
+			opts.flags = XTC_SLAB_REDZONE;
+			munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
+			/* Several objects: every one, not just the first, must be
+			 * aligned (the slot stride has to stay a multiple too). */
+			for (i = 0; i < 3; i++) {
+				o[i] = xtc_slab_alloc(s);
+				munit_assert_not_null(o[i]);
+				munit_assert_size((size_t)((uintptr_t)o[i] %
+				    aligns[ai]), ==, 0);
+				/* In-bounds write must stay clean. */
+				memset(o[i], 'z', sizes[si]);
+			}
+			for (i = 0; i < 3; i++)
+				xtc_slab_free(s, o[i]);
+			(void)xtc_slab_stat(s, &st);
+			munit_assert_uint64(st.redzone_violations, ==, 0);
+			xtc_slab_destroy(s);
+		}
+	}
+
+	/* The guards still catch an overrun AND an underrun once the front
+	 * guard carries alignment padding -- the magic words must sit
+	 * immediately before the object, not at the slot base. */
+	opts = (xtc_slab_opts_t)XTC_SLAB_OPTS_DEFAULT;
+	opts.name = "rz_align_detect"; opts.obj_size = 16; opts.align = 64;
+	opts.flags = XTC_SLAB_REDZONE;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
+	o[0] = xtc_slab_alloc(s);
+	munit_assert_not_null(o[0]);
+	munit_assert_size((size_t)((uintptr_t)o[0] % 64), ==, 0);
+	memset(o[0] - 8, 'u', 8);          /* clobber the front magic */
+	xtc_slab_free(s, o[0]);
 	(void)xtc_slab_stat(s, &st);
 	munit_assert_uint64(st.redzone_violations, >=, 1);
 	xtc_slab_destroy(s);
@@ -500,9 +675,12 @@ static MunitTest tests[] = {
 	{ "/pressure_listen_ex_stop", test_pressure_listen_ex_stop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/magazine_fastpath", test_magazine_fastpath, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/ctor_dtor",        test_ctor_dtor,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/destroy_dtor_once", test_destroy_dtor_once, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/word_slot_destroy", test_word_slot_destroy, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/oom_fail",         test_oom_fail,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reap",             test_reap,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/redzone",          test_redzone,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/redzone_alignment", test_redzone_alignment, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/audit",            test_audit,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shm_offset_single_process", test_shm_offset_resolve_single_process, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shm_reclaim_single_process", test_shm_reclaim_single_process, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

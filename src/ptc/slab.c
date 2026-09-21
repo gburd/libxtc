@@ -328,6 +328,8 @@ struct slab_chunk {
 struct xtc_slab {
 	xtc_slab_opts_t  opts;
 	size_t           slot_size;     /* obj_size + redzone + alignment pad */
+	size_t           rz_front;      /* bytes from slot start to the object */
+	size_t           rz_back;       /* bytes from slot start to the back guard */
 	int              objs_per_chunk;
 
 	pthread_mutex_t  lock;          /* protects chunk lists + stats */
@@ -390,40 +392,73 @@ __audit_record(xtc_slab_t *s, void *obj, uint8_t op)
 static int
 __rz_enabled(const xtc_slab_t *s) { return (s->opts.flags & XTC_SLAB_REDZONE) != 0; }
 
+/*
+ * Slot-to-object offset with redzones on.  It is s->rz_front, NOT the
+ * bare XTC_RZ_FRONT: the slot base is aligned to opts.align, so adding
+ * a fixed 16 handed the caller an address 16 (mod align) -- a 64-byte
+ * request came back 16-mod-64, which is exactly the over-alignment UBSan
+ * flags and can fault on stricter targets.  xtc_slab_create rounds
+ * rz_front UP to opts.align so the object keeps the requested alignment
+ * with the diagnostic enabled.
+ */
 static void *
 __obj_from_slot(const xtc_slab_t *s, void *slot)
 {
-	if (__rz_enabled(s)) return (uint8_t *)slot + XTC_RZ_FRONT;
+	if (__rz_enabled(s)) return (uint8_t *)slot + s->rz_front;
 	return slot;
 }
 
 static void *
 __slot_from_obj(const xtc_slab_t *s, void *obj)
 {
-	if (__rz_enabled(s)) return (uint8_t *)obj - XTC_RZ_FRONT;
+	if (__rz_enabled(s)) return (uint8_t *)obj - s->rz_front;
 	return obj;
+}
+
+/* The front guard occupies the LAST XTC_RZ_FRONT bytes before the
+ * object, so a one-byte underrun still lands on it even when rz_front
+ * carries extra alignment padding ahead of it.  Word order inside the
+ * guard is [slab metadata][magic], putting the MAGIC immediately before
+ * the object -- the word an underrun hits first. */
+static uint64_t *
+__rz_front_at(const xtc_slab_t *s, void *slot)
+{
+	return (uint64_t *)((uint8_t *)slot + s->rz_front - XTC_RZ_FRONT);
+}
+
+/* The back guard sits at s->rz_back, which is rz_front + obj_size
+ * rounded up to the guard word's own alignment.  Writing it at the bare
+ * rz_front + obj_size was a MISALIGNED uint64_t store for any obj_size
+ * that is not a multiple of 8 (UBSan: "store to misaligned address ...
+ * requires 8 byte alignment"), and faults outright on stricter targets.
+ * The cost is that an overrun of 1..7 bytes into that padding is not
+ * flagged until it reaches the guard word -- acceptable granularity for
+ * a diagnostic, where a misaligned access is not. */
+static uint64_t *
+__rz_back_at(const xtc_slab_t *s, void *slot)
+{
+	return (uint64_t *)((uint8_t *)slot + s->rz_back);
 }
 
 static void
 __rz_paint(xtc_slab_t *s, void *slot)
 {
-	uint64_t *front, *back;
+	uint64_t *front;
 	if (!__rz_enabled(s)) return;
-	front = (uint64_t *)slot;
-	*front = XTC_RZ_MAGIC;
-	*(front + 1) = (uint64_t)(uintptr_t)s;   /* metadata */
-	back = (uint64_t *)((uint8_t *)slot + XTC_RZ_FRONT + s->opts.obj_size);
-	*back = XTC_RZ_MAGIC;
+	front = __rz_front_at(s, slot);
+	front[0] = (uint64_t)(uintptr_t)s;   /* metadata */
+	front[1] = XTC_RZ_MAGIC;
+	*__rz_back_at(s, slot) = XTC_RZ_MAGIC;
 }
 
 static int
 __rz_check(xtc_slab_t *s, void *slot)
 {
-	uint64_t *front, *back;
+	uint64_t *front;
 	if (!__rz_enabled(s)) return 0;
-	front = (uint64_t *)slot;
-	back = (uint64_t *)((uint8_t *)slot + XTC_RZ_FRONT + s->opts.obj_size);
-	if (*front != XTC_RZ_MAGIC || *back != XTC_RZ_MAGIC) {
+	front = __rz_front_at(s, slot);
+	if (front[1] != XTC_RZ_MAGIC ||
+	    *__rz_back_at(s, slot) != XTC_RZ_MAGIC) {
 		atomic_fetch_add_explicit(&s->s_rz_violations, 1,
 		    memory_order_relaxed);
 		return 1;
@@ -606,8 +641,27 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 
 	/* Compute slot_size: obj + redzones, then aligned. */
 	slot = s->opts.obj_size;
-	if (slot < sizeof(void *)) slot = sizeof(void *);   /* free list */
-	if (s->opts.flags & XTC_SLAB_REDZONE) slot += XTC_RZ_FRONT + XTC_RZ_BACK;
+	/* Two words minimum: the first holds the free-list link, and
+	 * xtc_slab_destroy's live/free marker pass writes the SECOND word of
+	 * every slot.  With a one-word slot (e.g. align 8, obj_size <= 8)
+	 * that marker landed in the NEXT slot's link word and corrupted the
+	 * chunk free list. */
+	if (slot < 2 * sizeof(void *)) slot = 2 * sizeof(void *);
+	s->rz_front = 0;
+	s->rz_back = 0;
+	if (s->opts.flags & XTC_SLAB_REDZONE) {
+		/* Pad the front guard out to opts.align so the OBJECT (the
+		 * address handed to the caller), not just the slot, honors the
+		 * requested alignment.  Enabling a diagnostic must not weaken
+		 * the alignment guarantee.  The back guard is then placed on
+		 * its own word boundary (see __rz_back_at). */
+		s->rz_front = __align_up(XTC_RZ_FRONT, s->opts.align);
+		s->rz_back = __align_up(s->rz_front + s->opts.obj_size,
+		    sizeof(uint64_t));
+		if (s->rz_back < s->rz_front + 2 * sizeof(void *))
+			s->rz_back = s->rz_front + 2 * sizeof(void *);
+		slot = s->rz_back + XTC_RZ_BACK;
+	}
 	slot = __align_up(slot, s->opts.align);
 	s->slot_size = slot;
 	s->objs_per_chunk = (int)(s->opts.chunk_size / slot);
@@ -715,24 +769,43 @@ xtc_slab_destroy(xtc_slab_t *s)
 	int i;
 	if (s == NULL) return;
 
-	/* Drop our magazine entries. */
+	/*
+	 * Return our magazine-cached slots to their chunk free lists before
+	 * dropping the magazine.  Simply freeing the slots array lost those
+	 * slots: destroy's "not on a free list => still live" scan below then
+	 * classified every magazine-cached slot as LIVE and ran its
+	 * destructor a SECOND time (xtc_slab_free already ran it before
+	 * caching the slot), so a dtor that closes an fd or drops a refcount
+	 * double-released it.
+	 */
 #if defined(_WIN32)
 	{
 		struct tls_mag *mags = __win_fiber_mags();
 		if (mags != NULL)
 			for (i = 0; i < TLS_MAGS; i++)
 				if (mags[i].cache == s) {
-					__os_free(mags[i].mag.slots);
+					struct magazine *mag = &mags[i].mag;
+					(void)pthread_mutex_lock(&s->lock);
+					while (mag->n > 0)
+						__push_slot_locked(s,
+						    mag->slots[--mag->n]);
+					(void)pthread_mutex_unlock(&s->lock);
+					__os_free(mag->slots);
 					mags[i].cache = NULL;
-					memset(&mags[i].mag, 0, sizeof mags[i].mag);
+					memset(mag, 0, sizeof *mag);
 				}
 	}
 #else
 	for (i = 0; i < TLS_MAGS; i++) {
 		if (__tls_mags[i].cache == s) {
-			__os_free(__tls_mags[i].mag.slots);
+			struct magazine *mag = &__tls_mags[i].mag;
+			(void)pthread_mutex_lock(&s->lock);
+			while (mag->n > 0)
+				__push_slot_locked(s, mag->slots[--mag->n]);
+			(void)pthread_mutex_unlock(&s->lock);
+			__os_free(mag->slots);
 			__tls_mags[i].cache = NULL;
-			memset(&__tls_mags[i].mag, 0, sizeof __tls_mags[i].mag);
+			memset(mag, 0, sizeof *mag);
 		}
 	}
 #endif
