@@ -253,6 +253,48 @@ B=$(mktemp -d)
     UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 make check )
 ```
 
+## Cutting a release -- what green does NOT cover
+
+`make check` passing is NOT a qualified release.  Three tiers are
+invisible to it, and each has shipped a real defect through a fully
+green run:
+
+1. **`make check-dst` needs its own build** (`--with-io-backend=sim`),
+   so a sim-only regression hides behind a green native run.  v1.49.2
+   did exactly this: a cyclic slab free list that hung
+   `xtc_slab_destroy` forever was invisible to `make check` on both
+   epoll and io_uring, and only `test_sim_lockmgr` caught it.  RUN
+   `make check-dst`.
+
+2. **A TAG DOES NOT RUN THE NIGHTLY TIERS.**  `ci.yml`'s push filter is
+   `branches: [main]`; the 100k-seed swarm and CBMC gate on
+   `schedule`/`workflow_dispatch`.  A tag arrives as a `push`, so those
+   jobs SKIP -- and a skip does not fail the pipeline.  RUN THE 100k
+   SWARM BY HAND at release time:
+
+   ```sh
+   # 4 disjoint shards x 25k, the same split CI uses
+   for base in 0 25000 50000 75000; do
+       ./build_sim/test_sim_swarm 25000 "$base" > "swarm-$base.log" 2>&1 &
+   done; wait; grep -l FAIL swarm-*.log
+   ```
+
+   At v1.49.2 this found 3 failing seeds on a freshly-armed oracle that
+   nothing else would have surfaced before publication.  Pin whatever it
+   finds (see the corpus rule in the DST yardsticks above).
+
+3. **MULTIPLE BACKENDS, not just the default.**  Run at least one
+   readiness backend AND one completion backend.  When no BSD/Windows
+   host is available, `poll` and `select` are the best available proxy
+   for kqueue: they keep a USERSPACE fd registry, which is where the
+   historical kqueue multi-registration bug lived, so they exercise that
+   hazard class for anything touching fd-registration or cancellation
+   cleanup.  They are NOT a substitute for a real kqueue/IOCP run --
+   state plainly which platforms were not tested.
+
+State the qualification precisely and name what was NOT run.  "Green"
+without the tier list is how a release claims more than it tested.
+
 ## Allocation alignment
 
 Any struct with an over-aligned member (`_Alignas(XTC_CACHE_LINE)`,
