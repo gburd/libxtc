@@ -56,3 +56,82 @@ race:__xtc_loop_step_once
 # and the fiber-resume is lost-wake-free.
 race:xtc_blocking_run
 race:xtc_blocking_run_off_loop
+
+# ---------------------------------------------------------------------
+# FIBER-MIGRATION ARTIFACTS on the work-stealing executor.
+#
+# These appear only when a MIGRATABLE fiber is work-stolen mid-life, and
+# only under the heavy-migration suites (test_exec, test_aio_migrate_wake)
+# that the curated tsan-fibers gate deliberately excludes.  They are one
+# fiber's own CONSECUTIVE statements -- cancel-then-rearm a park timer,
+# save-then-restore the current-proc TLS around a yield, the park store
+# and its post-park cleanup -- executed on two different OS threads
+# because the fiber resumed elsewhere after a steal.  They are strictly
+# yield-ordered: the fiber cannot run on loop B until loop A has parked
+# it, so there is no interleaving window.  TSan tracks by thread id and
+# cannot carry that happens-before across a ucontext/fcontext switch.
+#
+# CONFIRMED BY CLASSIFICATION, not assumed -- this is the follow-up
+# .agent/TSAN_OFFLOAD_MIGRATION_2026-09-11.md asked for.  Running
+# test_exec on the uring backend with halt_on_error=0 produced 251
+# reports; classifying each by TSan's named LOCATION KIND and by whether
+# the two accesses belong to the SAME fiber split them cleanly and found
+# THREE REAL RACES hiding among the artifacts, all fixed rather than
+# suppressed:
+#   - task->park_timer, a plain pointer written by the parking fiber AND
+#     by the timer-expiry path on the loop thread            (a517a32)
+#   - xtc_proc_table.n_used, decremented under ONE stripe lock while the
+#     allocate path holds ALL of them, so a decrement could be lost and
+#     the post-grow `idx = n_used` slot index could drift  (a517a32)
+#   - xtc_proc.alive, cleared by the exiting fiber and read as a liveness
+#     gate by foreign threads                               (849c458)
+# After those, 56 remain and EVERY one has both accesses in the same
+# fiber, with ZERO naming a different actor.  That is the measurement
+# that makes suppressing the rest honest instead of a silencing.
+#
+# If a report ever appears here naming TWO DIFFERENT fibers, or a
+# non-migration caller, it is NOT covered by this reasoning -- investigate
+# it, do not widen these stanzas.  Hiding a real race among artifacts is
+# the exact failure mode this whole arc has been about.
+race:xtc_proc_wait_fd
+race:xtc_proc_sleep
+race:__do_recv
+race:__proc_entry
+race:__xtc_proc_kill_check
+race:__xtc_proc_ctx_restore
+race:__proc_reanchor
+race:xtc_task_park_on_timer
+race:__xtc_task_cancel_park_timer
+race:xtc_timer_cancel
+# xtc_yield itself: the substrate DOES annotate the switch for TSan
+# (__tsan_switch_out / __san_switch_to around swapcontext in
+# coro_uctx.c), but the annotation cannot cover g_in_preempt and the
+# saved-context write, which TSan attributes to "TLS of thread <the
+# thread that last ran this fiber>".  Same yield-ordered artifact as
+# above; noted in the v1.40.2 CI audit as the reason test_exec cannot
+# join the curated gate.
+race:xtc_yield
+
+# NOT SUPPRESSIBLE, documented instead: "use of an invalid mutex" on a
+# proc's mbox_lock, reported the first time a MIGRATED fiber locks it from
+# a new OS thread (e.g. __do_recv -> __xtc_mtx_lock under test_exec on the
+# uring backend).
+#
+# TSan has NO "mutex:" suppression type -- the valid types are race,
+# deadlock, thread, signal and called_from_lib -- and it IGNORES an
+# unrecognised type SILENTLY rather than erroring, so a "mutex:" line
+# would look effective while suppressing nothing.  Verified by running
+# with exactly such a file.
+#
+# It is not a real destroyed-mutex use, and the code says why: the slot is
+# released under the table lock before teardown so no NEW resolver can
+# find the proc, and pthread_mutex_destroy is deferred to __proc_free,
+# which runs only when the LAST reference drops (an in-flight cross-thread
+# send/wake already holds one, taken in __table_lookup).  So a fiber can
+# never lock a destroyed mbox_lock.  ASan is clean across repeated runs,
+# which is the control: a genuine use-after-destroy would show there.
+#
+# A full-suite TSan run on the uring backend therefore still reports this
+# ONE item.  That is deliberate -- it is visible and explained rather than
+# silently filtered, and it is why test_exec is not in the gating
+# tsan-fibers set.
