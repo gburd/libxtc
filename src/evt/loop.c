@@ -613,7 +613,8 @@ __xtc_drain_due_timers(xtc_loop_t *loop)
 				    &due->waiter->wake_revents,
 				    XTC_WAIT_TIMEOUT, memory_order_relaxed);
 				(void)xtc_waker_wake(&w);
-				due->waiter->park_timer = NULL;
+				atomic_store_explicit(&due->waiter->park_timer,
+				    NULL, memory_order_relaxed);
 			}
 		}
 	}

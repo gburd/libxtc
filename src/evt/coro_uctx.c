@@ -484,7 +484,9 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	 * never sleeps in xtc_io_poll because the runqueue is
 	 * non-empty. */
 	if (c->self != NULL &&
-	    (c->self->park_timer != NULL || atomic_load_explicit(&c->self->park_fd, memory_order_relaxed) >= 0)) {
+	    (atomic_load_explicit(&c->self->park_timer,
+		memory_order_relaxed) != NULL ||
+	     atomic_load_explicit(&c->self->park_fd, memory_order_relaxed) >= 0)) {
 		return XTC_TASK_PENDING;
 	}
 	/* Voluntary park requested (xtc_amutex and friends): sleep until

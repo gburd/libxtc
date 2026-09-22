@@ -146,7 +146,8 @@ __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 	atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
 	    memory_order_relaxed);   /* init, before the task is published */
 	t->q_next = NULL;
-	t->park_timer = NULL;
+	atomic_store_explicit(&t->park_timer, NULL,
+	    memory_order_relaxed);
 	t->park_fd = -1;
 	atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
 
@@ -330,7 +331,8 @@ xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 
 	if (self == NULL || delay_ns < 0)
 		return XTC_E_INVAL;
-	if (self->park_timer != NULL || self->park_fd >= 0)
+	if (atomic_load_explicit(&self->park_timer,
+	    memory_order_relaxed) != NULL || self->park_fd >= 0)
 		return XTC_E_INVAL;     /* already parked */
 
 	if ((rc = __os_calloc(1, sizeof(*t), (void **)&t)) != XTC_OK)
@@ -371,7 +373,8 @@ xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 		t->all_next = wl->all_timers;
 		wl->all_timers = t;
 	}
-	self->park_timer = t;
+	atomic_store_explicit(&self->park_timer, t,
+	    memory_order_relaxed);
 	return XTC_OK;
 }
 
@@ -385,9 +388,14 @@ xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 void
 __xtc_task_cancel_park_timer(xtc_task_t *self)
 {
-	if (self != NULL && self->park_timer != NULL) {
-		(void)xtc_timer_cancel(self->park_timer);
-		self->park_timer = NULL;
+	if (self != NULL) {
+		xtc_timer_t *pt = atomic_load_explicit(&self->park_timer,
+		    memory_order_relaxed);
+		if (pt != NULL) {
+			(void)xtc_timer_cancel(pt);
+			atomic_store_explicit(&self->park_timer, NULL,
+			    memory_order_relaxed);
+		}
 	}
 }
 
@@ -403,7 +411,8 @@ xtc_task_park_on_fd(xtc_task_t *self, int fd, uint32_t interest)
 	int rc;
 	if (self == NULL || fd < 0 || interest == 0)
 		return XTC_E_INVAL;
-	if (self->park_timer != NULL || self->park_fd >= 0)
+	if (atomic_load_explicit(&self->park_timer,
+	    memory_order_relaxed) != NULL || self->park_fd >= 0)
 		return XTC_E_INVAL;
 	if ((rc = xtc_io_reg_fd(self->loop->io, fd, interest, self)) != XTC_OK)
 		return rc;

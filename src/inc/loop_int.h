@@ -70,7 +70,28 @@ struct xtc_task {
 
 	/* Park bookkeeping.  At most one of these is active at a time
 	 * while the task is in PARKED state. */
-	xtc_timer_t *park_timer;
+	/*
+	 * The park timer armed for this task, or NULL.  ATOMIC for the same
+	 * reason park_fd below is: TWO THREADS WRITE IT.  The parking fiber
+	 * arms it and clears it in its post-park cleanup, and the TIMER-
+	 * EXPIRY path clears it from the owning loop's thread
+	 * (src/evt/loop.c) -- and it does so AFTER xtc_waker_wake has already
+	 * made the task runnable, so the woken fiber can be resumed on
+	 * another thread and reach its own cleanup while that store is still
+	 * in flight.
+	 *
+	 * Both concurrent stores write NULL (the non-NULL arm only ever runs
+	 * on the fiber itself, before it parks), so no wrong or torn value
+	 * was ever observable and this was benign in effect -- but it was an
+	 * unsynchronized pointer write on a field a peer thread reads, which
+	 * is undefined behavior regardless of the values involved, and it is
+	 * indistinguishable to a reader from the case that is NOT benign.
+	 * Relaxed ordering is sufficient: the field is a "is a timer armed?"
+	 * hint, the timer's own `fired`/`cancelled` flags are the arbiter of
+	 * whether a cancel does anything, and the wake itself carries the
+	 * happens-before for the task's scheduling state.
+	 */
+	_Atomic(xtc_timer_t *) park_timer;
 	/*
 	 * The fd this task is parked on, or -1.  ATOMIC, and every
 	 * unregister CLAIMS it with an exchange rather than testing then

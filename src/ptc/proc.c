@@ -534,7 +534,28 @@ struct xtc_proc_slot {
 struct xtc_proc_table {
 	struct xtc_proc_slot *slots;
 	size_t                cap;
-	size_t                n_used;
+	/*
+	 * Occupied-slot count.  ATOMIC because it is written under DIFFERENT
+	 * locks: the allocate path holds ALL stripes (__pt_lock_all), while
+	 * both release paths hold only the ONE stripe of the slot they are
+	 * freeing (__table_release, and the teardown in
+	 * __notify_links_and_monitors).  Two releases on different stripes
+	 * therefore ran concurrently with no common lock -- measured by
+	 * ThreadSanitizer as two threads writing this field while each held
+	 * a DIFFERENT mutex -- so a decrement could be lost.
+	 *
+	 * That matters beyond a wrong statistic: after a grow the allocate
+	 * path uses `idx = n_used` as the first fresh slot index, on the
+	 * invariant that a full scan found nothing free.  A drifted count
+	 * either fails a spawn with XTC_E_RESOURCE (count too high) or aims
+	 * at an occupied slot (too low).  The bounds check below the read is
+	 * what has kept this from corrupting the table.
+	 *
+	 * Relaxed is sufficient: every ACCESS is still inside a stripe lock
+	 * (so the slot state it describes is ordered), and this only needs
+	 * the increment/decrement not to be lost.
+	 */
+	_Atomic size_t        n_used;
 	pthread_mutex_t       stripes[XTC_PT_NSTRIPES];
 	int                   inited;
 };
@@ -747,7 +768,8 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 			t->slots[i].proc = p;
 			*out_local = (uint16_t)i;
 			*out_gen   = ++t->slots[i].gen;
-			t->n_used++;
+			atomic_fetch_add_explicit(&t->n_used, 1,
+			    memory_order_relaxed);
 			goto out;
 		}
 	}
@@ -769,7 +791,8 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 	t->slots = ns;
 	t->cap = new_cap;
 
-	idx = t->n_used;     /* first new slot */
+	idx = atomic_load_explicit(&t->n_used,
+	    memory_order_relaxed);   /* first new slot */
 	/* The scan above found no free slot and the grow is bounded, so
 	 * n_used is the first fresh index; assert it in range rather than
 	 * trusting the invariant blindly. */
@@ -779,7 +802,7 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 	t->slots[idx].proc = p;
 	*out_local = (uint16_t)idx;
 	*out_gen   = ++t->slots[idx].gen;
-	t->n_used++;
+	atomic_fetch_add_explicit(&t->n_used, 1, memory_order_relaxed);
 out:
 	__pt_unlock_all(t);
 	return rc;
@@ -828,7 +851,8 @@ __table_release(struct xtc_proc_table *t, uint16_t local_id)
 	if (local_id < t->cap) {
 		if (t->slots[local_id].proc != NULL) {
 			t->slots[local_id].proc = NULL;
-			t->n_used--;
+			atomic_fetch_sub_explicit(&t->n_used, 1,
+			    memory_order_relaxed);
 		}
 	}
 	(void) __proc_mtx_unlock(&t->stripes[st]);
@@ -2591,7 +2615,8 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		}
 		t->all_next = wl->all_timers;
 		wl->all_timers = t;
-		self->task->park_timer = t;
+		atomic_store_explicit(&self->task->park_timer, t,
+		    memory_order_relaxed);
 		had_timer = 1;
 	}
 
@@ -2739,9 +2764,14 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		    claimed_io != NULL ? claimed_io : wl->io, claimed_fd);
 	}
 	}
-	if (had_timer && self->task->park_timer != NULL) {
-		(void)xtc_timer_cancel(self->task->park_timer);
-		self->task->park_timer = NULL;
+	if (had_timer) {
+		xtc_timer_t *pt = atomic_load_explicit(&self->task->park_timer,
+		    memory_order_relaxed);
+		if (pt != NULL) {
+			(void)xtc_timer_cancel(pt);
+			atomic_store_explicit(&self->task->park_timer, NULL,
+			    memory_order_relaxed);
+		}
 	}
 
 	/* Check the mailbox again -- a message may have arrived without
@@ -4041,7 +4071,8 @@ __notify_links_and_monitors(struct xtc_proc *p)
 			if (p->pid.local_id < tbl->cap &&
 			    tbl->slots[p->pid.local_id].proc == p) {
 				tbl->slots[p->pid.local_id].proc = NULL;
-				tbl->n_used--;
+				atomic_fetch_sub_explicit(&tbl->n_used, 1,
+				    memory_order_relaxed);
 			}
 			(void) __proc_mtx_unlock(&tbl->stripes[pst]);
 		}
@@ -4148,7 +4179,8 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 			if (atomic_load_explicit(&p->task->park_fd,
 			    memory_order_relaxed) >= 0)
 				info->park_reason = XTC_PARK_FD;
-			else if (p->task->park_timer != NULL)
+			else if (atomic_load_explicit(&p->task->park_timer,
+			    memory_order_relaxed) != NULL)
 				info->park_reason = XTC_PARK_TIMER;
 			/* else: possibly a mailbox park -- decided below from
 			 * waker_armed, which is read under mbox_lock.  It CANNOT
