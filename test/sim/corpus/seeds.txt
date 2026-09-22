@@ -1,7 +1,7 @@
 # DST regression corpus -- pinned (test, seed) pairs.
 # Format: <sim_test_name> <seed> <count> <description>
 #   seed/count of "-" means: run the test with no argv (its built-in
-#   seeds).  See README.md.
+#   seeds).  See ../README.
 #
 # NOTE ON ARGV ORDER: this file always writes <seed> then <count>.  The
 # tests themselves disagree -- test_sim_res / test_sim_sup_strategy take
@@ -27,6 +27,31 @@ test_sim_chan           -          -   bug7 CHANDROP: mpmc delivers every item e
 test_sim_reg            -          -   bug8 REGDUP: registry at-most-one-holder per name
 # bug 9 SAGAORDER -- exact reverse-order compensation
 test_sim_saga           -          -   bug9 SAGAORDER: saga compensates in exact reverse
+#
+# ==== historically-FAILING seeds (found in the wild, then fixed) ====
+# Every seed here once FAILED a real sweep.  Each row names the fixing
+# commit, so this section is the "prove the bug stays fixed" ledger: the
+# corpus re-runs them on every push, while the nightly sweeps explore
+# fresh random seeds.  ADD A ROW WHENEVER A SWEEP FAILS -- that is the
+# whole point, and the three below were only pinned because a 100k run
+# was done by hand at release time (a TAG does not trigger the nightly
+# tiers, so nothing else would have caught them).
+#
+# The swarm's reported seed is DERIVED (0x9E3779B97F4A7C15 * (base+s+1)),
+# not the argv value, so the pin is the base OFFSET that regenerates it.
+# All three were verified BOTH ways: each offset reproduces exactly its
+# named seed and FAILS on the pre-fix build (TORN_TRIES 32), and passes
+# on the fixed one.
+#
+# c6871ae -- torn-verifier retry budget was too small for the injected
+# fault rate: corruption is injected on the READ path as well as the
+# write path, so P(attempt fails) = 1-(1-0.52)^2 = 0.77 at the top
+# corruption bucket and 32 retries gave ~2.9 EXPECTED spurious failures
+# per 100k seeds (measured: exactly 3, these three).  Harness, not a
+# libxtc durability defect.  Budget is now 128.
+test_sim_swarm          51692      1   c6871ae torn-verifier budget: seed 571488401344257137 EXHAUSTED 32 retries
+test_sim_swarm          98181      1   c6871ae torn-verifier budget: seed 14998742168391147006 EXHAUSTED 32 retries
+test_sim_swarm          98794      1   c6871ae torn-verifier budget: seed 12320922477591755847 EXHAUSTED 32 retries
 #
 # ==== known-good smoke seeds ====
 # Ordinary seeds that exercise the invariant checkers; a fast,

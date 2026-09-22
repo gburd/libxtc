@@ -193,6 +193,25 @@ in priority order:
    scripts/dst-bug-inject.sh.  When you add a new safety invariant,
    add a planted-bug case that DST must catch.
 
+5. PIN EVERY FAILING SEED.  A seed that failed once is a REPRODUCER,
+   and it is the only thing that proves the fix still holds next year.
+   Random sweeps roll fresh seeds nightly, so an unrecorded failing
+   seed is GONE.  When any sweep fails, add a row to
+   test/sim/corpus/seeds.txt: <test> <seed> <count> <description>, with
+   the FIXING COMMIT in the description.  scripts/dst-corpus.sh re-runs
+   the whole corpus on every push and fails if a pinned seed regresses.
+   The swarm prints a paste-ready row on failure -- use it.
+
+   Verify a pin BOTH ways before trusting it: the offset must reproduce
+   the named seed AND FAIL on the pre-fix build.  A pinned row that
+   passes without the fix is decoration, not a guard.  (The swarm's
+   reported seed is DERIVED, 0x9E3779B97F4A7C15 * (base+s+1), not an
+   argv the test takes, so the pin is the base OFFSET.)
+
+   Pinned seeds and volume sweeps are COMPLEMENTARY, not substitutes:
+   the corpus proves old bugs stay fixed, fresh seeds find new ones.
+   Never delete a corpus row to make a sweep green.
+
 Line coverage of the DST-REACHABLE public-API code is still a useful
 floor (catches "this whole branch is never exercised"); measure and
 track it, but state the claim precisely as ">85% of the DST-reachable
