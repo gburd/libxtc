@@ -399,6 +399,64 @@ __xtc_io_register_wakeup(xtc_io_t *io, int fd)
 	return XTC_OK;
 }
 
+/*
+ * Apply a QUEUED deferred delete for `fd` now, if one is pending.
+ *
+ * Why this exists.  __xtc_io_defer_del_fd queues a cross-thread
+ * unregister and relies on the OWNING loop draining it at the top of its
+ * next xtc_io_poll.  Until that drain runs the node is still linked in
+ * io->fds, so it is indistinguishable from a live registration -- and a
+ * re-register of the SAME fd is rejected as a duplicate.
+ *
+ * That turns into a deadlock rather than a transient error, because the
+ * only thread that can drain the queue is the same thread that is now
+ * being told XTC_E_INVAL: a consumer whose wait fails and retries never
+ * returns to its poll, so the pending delete is never applied and every
+ * retry fails identically.  Reported from a PostgreSQL fiber workload
+ * (fd 447 rejected with a matching pending_del[0] == 447 on the same io),
+ * and reproducible in ~60 lines: register, have a foreign thread
+ * defer-delete, then re-register the same fd.
+ *
+ * Draining just this fd here is safe precisely BECAUSE reg_fd runs on the
+ * owner: both this and __drain_pending_del perform the real
+ * xtc_io_del_fd on the owner thread, so the fds list and the
+ * single-producer SQ ring keep their single-owner discipline.  We remove
+ * the fd from the queue under del_lock before acting on it, so the later
+ * drain cannot delete it a second time -- and a second delete would be
+ * the dangerous case, since by then the number could name a DIFFERENT
+ * live registration.
+ *
+ * Keyed on the fd NUMBER because that is all the deferred queue carries.
+ * That is sound HERE and only here: we are about to register this exact
+ * fd on this exact io, so consuming a delete queued for it is the caller's
+ * own intent, not a guess about somebody else's registration.
+ */
+static void
+__apply_pending_del_for(xtc_io_t *io, int fd)
+{
+	int found = 0, i, j;
+
+	if (atomic_load_explicit(&io->has_pending_del,
+	    memory_order_acquire) == 0)
+		return;
+	(void)pthread_mutex_lock(&io->del_lock);
+	for (i = 0; i < io->n_pending_del; i++) {
+		if (io->pending_del[i] != fd)
+			continue;
+		found = 1;
+		for (j = i; j < io->n_pending_del - 1; j++)
+			io->pending_del[j] = io->pending_del[j + 1];
+		io->n_pending_del--;
+		i--;                     /* re-test this slot: fd may repeat */
+	}
+	if (io->n_pending_del == 0)
+		atomic_store_explicit(&io->has_pending_del, 0,
+		    memory_order_relaxed);
+	(void)pthread_mutex_unlock(&io->del_lock);
+	if (found)
+		(void)xtc_io_del_fd(io, fd);
+}
+
 /* PUBLIC: int xtc_io_reg_fd __P((xtc_io_t *, int, uint32_t, void *)); */
 int
 xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
@@ -406,8 +464,15 @@ xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	int rc;
 	if (io == NULL || fd < 0 || interest == 0)
 		return XTC_E_INVAL;
+	/* A delete for this fd may be QUEUED but not yet drained (a
+	 * cross-loop unregister whose owner has not polled since).  The node
+	 * is still linked, so without this it reads as a live duplicate and
+	 * the caller is told XTC_E_INVAL for a registration it is entitled
+	 * to make -- and only this thread could have drained it, so the
+	 * error never clears.  See __apply_pending_del_for. */
+	__apply_pending_del_for(io, fd);
 	if (__find_fd(io, fd) != NULL)
-		return XTC_E_INVAL;        /* duplicate */
+		return XTC_E_INVAL;        /* duplicate: genuinely live */
 	if ((rc = __add_fd(io, fd, interest, tag)) != XTC_OK)
 		return rc;
 	(void)__ring_submit(io);

@@ -12,9 +12,16 @@
 # include <unistd.h>
 #endif
 
+#include <string.h>
+
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_io.h"
+#include "os_thread.h"     /* __os_thread_* : portable, no raw pthread */
+
+/* Internal: declared in io_int.h, which pulls in backend-private types.
+ * One extern is cleaner here than dragging that header into a test. */
+int __xtc_io_defer_del_fd(xtc_io_t *, int);
 
 #if defined(_WIN32)
 # define test_pipe_close(fd)            xtc_test_close_pipe((fd), -1)
@@ -202,11 +209,116 @@ test_del_fd(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+
+/*
+ * R4c: a re-register must not be rejected because a delete for that fd is
+ * QUEUED but not yet drained.
+ *
+ * The deferred-unregister queue is drained by the OWNING loop at the top of
+ * xtc_io_poll.  Until then the node is still linked in io->fds, so a
+ * same-fd re-register saw a live duplicate and got XTC_E_INVAL -- which
+ * xtc_proc_wait_fd reported as XTC_E_INTERNAL.  That deadlocks rather than
+ * failing transiently: the only thread that can drain the queue is the one
+ * receiving the error, so a consumer that retries never polls again and
+ * every retry fails identically.  Reported from a PostgreSQL fiber workload
+ * (fd 447 rejected with pending_del[0] == 447 on the same io).
+ *
+ * Fails on the unfixed library with rc == XTC_E_INVAL.
+ */
+struct defer_arg { xtc_io_t *io; int fd; int rc; };
+
+static void *
+__defer_del_thread(void *a)
+{
+	struct defer_arg *d = a;
+	d->rc = __xtc_io_defer_del_fd(d->io, d->fd);
+	return NULL;
+}
+
+static MunitResult
+test_reg_with_pending_del(const MunitParameter p[], void *data)
+{
+	xtc_io_t *io = NULL;
+	xtc_io_event_t evs[4];
+	struct defer_arg d;
+	__os_thread_t th;
+	int pr[2], n = 0, i;
+	int r, w;
+	void *tag = (void *)(uintptr_t)0xABCD;
+	(void)p; (void)data;
+
+	/*
+	 * io_uring ONLY.  It is the one backend whose __xtc_io_defer_del_fd
+	 * QUEUES the unregister for the owning loop to drain; every other
+	 * backend passes straight through to xtc_io_del_fd (verified across
+	 * io_epoll/kqueue/poll/select/solaris/aix/iocp), so there is no
+	 * pending-delete state for a re-register to collide with and this
+	 * scenario cannot arise.  Skipping is honest: asserting the uring
+	 * behavior elsewhere would fail for the right reason (the delete
+	 * already applied) and teach nothing.
+	 */
+	if (strcmp(xtc_io_backend_name(), "uring") != 0)
+		return MUNIT_SKIP;
+
+	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(make_pipe(&r, &w), ==, 0);
+	pr[0] = r; pr[1] = w;
+
+	/* Become this io's OWNER: owner_tid is recorded by the poller, and
+	 * the defer path only QUEUES when the caller is a different thread. */
+	for (i = 0; i < 4; i++) evs[i].fd = -1;
+	munit_assert_int(xtc_io_poll(io, evs, 4, 0, &n), ==, XTC_OK);
+
+	munit_assert_int(xtc_io_reg_fd(io, r, XTC_IO_READABLE, tag),
+	    ==, XTC_OK);
+
+	/* Queue the delete from a foreign thread and do NOT poll after, so
+	 * it stays pending -- exactly the reported capture. */
+	d.io = io; d.fd = r; d.rc = -999;
+	munit_assert_int(__os_thread_create(&th, __defer_del_thread, &d),
+	    ==, XTC_OK);
+	munit_assert_int(__os_thread_join(&th, NULL), ==, XTC_OK);
+	munit_assert_int(d.rc, ==, XTC_OK);
+
+	/* Must succeed: the re-register consumes the queued delete. */
+	munit_assert_int(xtc_io_reg_fd(io, r, XTC_IO_READABLE, tag),
+	    ==, XTC_OK);
+
+	/* And the fd must still be WATCHABLE.  A fix that merely returned OK
+	 * while leaving nothing armed would pass the assert above and still
+	 * strand a real waiter, so prove readiness actually dispatches. */
+	munit_assert_int(xtc_test_pipe_write(w, "x", 1), ==, 1);
+	for (i = 0; i < 4; i++) evs[i].fd = -1;
+	n = 0;
+	munit_assert_int(xtc_io_poll(io, evs, 4, 500 * 1000000LL, &n),
+	    ==, XTC_OK);
+	munit_assert_int(n, >, 0);
+	/* SCAN, do not assume evs[0]: __xtc_io_defer_del_fd nudges the owner
+	 * with xtc_io_wakeup, so this poll legitimately reports the wakeup
+	 * event (fd == -1, NULL tag) alongside the fd readiness.  My first
+	 * version of this assert checked evs[0] and failed on the wakeup --
+	 * a test bug, not a library one. */
+	{
+		int found = 0;
+		for (i = 0; i < n; i++)
+			if (evs[i].tag == tag && evs[i].fd == r)
+				found = 1;
+		munit_assert_int(found, ==, 1);
+	}
+
+	(void)xtc_io_del_fd(io, r);
+	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	test_pipe_close_pair(pr);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/R1_basic",     test_reg_basic,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/R2_bad_args",  test_reg_bad_args, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/R3_duplicate", test_reg_duplicate,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/R4_mod_fd",    test_mod_fd,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/R4c_reg_with_pending_del", test_reg_with_pending_del,
+	  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/R4b_mod_del_poll", test_mod_then_del_then_poll,
 	                                      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/R5_del_fd",    test_del_fd,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
