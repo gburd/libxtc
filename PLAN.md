@@ -1,13 +1,23 @@
 # XTC -- Design Plan (Revision 4)
 
-**Status (2026-08):** HISTORICAL DESIGN DOCUMENT.  This is Revision 4 of
-the original design plan; it is kept for the architecture rationale and
-the worked examples, NOT as a to-do list.  The library is IMPLEMENTED
-and shipping (v1.35.0): everything M0-M17 below is built and tested (see
-(S)9).  Where a section still reads in the future tense ("we will..."),
-read it as "we did"; sections with dated STATUS notes reflect the
-current tree.  New work since this revision is tracked in the release
+**Status (2026-09, v1.49.2):** HISTORICAL DESIGN DOCUMENT.  This is
+Revision 4 of the original design plan; it is kept for the architecture
+rationale and the worked examples, NOT as a to-do list.  The library is
+IMPLEMENTED and shipping: everything M0-M17 below is built and tested
+(see (S)9).  Where a section still reads in the future tense ("we
+will..."), read it as "we did"; sections with dated STATUS notes reflect
+the current tree.  New work since this revision is tracked in the release
 history and (S)19, not here.
+
+READ (S)18.1's 2026-09 STATUS NOTE BEFORE RELYING ON THE ABI PROMISE IN
+THIS DOCUMENT.  Several mechanisms this plan describes as the enforcement
+for that promise (`dist/s_abi`, `dist/pubdef.in`, `test/compat/`,
+per-symbol `.symver`, capability strings) were never built, and the
+promise itself is already broken by struct growth -- measured, with two
+structs having fields INSERTED rather than appended.  A design plan that
+describes intended mechanism reads as if it were current status, which is
+exactly how this went unnoticed; where this document and the tree
+disagree, THE TREE WINS and docs/KNOWN_ISSUES.md is the honest status.
 
 Revision 4 adds the full lock subsystem ((S)13) -- LRLock (an xtc_lrlock
 implementing the left-right concurrency technique of Jon Gjengset
@@ -1027,6 +1037,45 @@ Per PR: Linux x86-64 glibc, Linux aarch64 musl, FreeBSD amd64,
 Windows MSVC, macOS arm64 (gating).  Nightly: full PG-buildfarm
 mirror (illumos, AIX, Windows MinGW, Linux ppc64le, NetBSD,
 OpenBSD, DragonFlyBSD).
+
+**What a RELEASE actually qualifies on, and what it does not
+(STATUS 2026-09).**  The matrix above is the intended shape; the
+honest per-release statement is narrower, and stating it precisely
+matters more than stating it broadly:
+
+- A TAG DOES NOT TRIGGER THE NIGHTLY TIERS.  `ci.yml`'s push filter is
+  `branches: [main]`, and the 100k-seed swarm and CBMC jobs gate on
+  `schedule`/`workflow_dispatch`, so a tag arrives as a `push` and those
+  jobs SKIP -- and a skipped job does not fail.  As of 1.49.2 the
+  release workflow gates publication on the full CI matrix for the
+  tagged commit (`workflow_call`) plus a tag/version check and a
+  build-the-tarball-as-a-packager step, but the nightly tiers are still
+  not in that path.  RUN THE 100k SWARM BY HAND AT RELEASE TIME.  Doing
+  exactly that at 1.49.2 found 3 failing seeds on a freshly-armed oracle
+  that no other tier would have surfaced before publication.
+- The DST suite needs its OWN build (`--with-io-backend=sim`) and is
+  therefore INVISIBLE to `make check`.  A sim-only regression can hide
+  behind a fully green native run -- 1.49.2 shipped and then caught
+  exactly that (a cyclic slab free list that hung `xtc_slab_destroy`,
+  found by `test_sim_lockmgr`).  Run `make check-dst` for every release,
+  not just `make check`.
+- Sanitizer coverage is per-tier, not universal: ASan/UBSan run the
+  NATIVE suite, and the DST harness compiles its own test objects
+  without sanitizer flags, so "ASan clean" and "DST clean" are separate
+  claims. A sanitized-DST job exists as of 1.49.2 but on a chosen
+  SUBSET, because at least one sim test exceeds a practical UBSan time
+  budget.
+- 1.49.2 qualified locally on: `make check` on io_uring, epoll, poll AND
+  select (107 suites each, 0 failures); UBSan and ASan clean; TSan clean
+  over the 7-test fiber set; `make check-dst` (67 tests); and a 100k-seed
+  4-shard swarm.  The poll/select runs are deliberate, not padding: those
+  two backends keep a USERSPACE fd registry like kqueue does, so they are
+  the closest available proxy for the kqueue-specific hazards in the
+  cancellation/fd-cleanup paths when no BSD host is reachable.
+- NOT run for 1.49.2, and therefore NOT claimed: FreeBSD/kqueue,
+  illumos/event-ports, Windows/IOCP.  This is the gap that matters most
+  for anything touching fd-registration cleanup, which is precisely
+  where the historical kqueue multi-registration bug lived.
 
 ---
 
@@ -2594,6 +2643,52 @@ A `dist/s_abi` checker runs on every release tag:
 This catches the entire class of "oops we broke ABI in a
 patch" mistakes that have plagued every C library ever.
 
+**STATUS 2026-09 -- THE PROMISE ABOVE WAS NOT KEPT, AND THE GATE THAT
+WOULD HAVE CAUGHT IT DOES NOT EXIST.**  An external review measured the
+public structs across `v1.0.0 -> HEAD` by compiling a
+`sizeof`/`offsetof` probe against both header trees.  Two classes of
+break are present:
+
+- APPENDED fields (an old caller's SMALLER struct is read out of
+  bounds): `xtc_proc_opts_t` 40->56, `xtc_sup_opts_t` 24->32,
+  `xtc_app_opts_t` 48->64, `xtc_tls_opts_t` 48->120.  Appending to a
+  CALLER-ALLOCATED struct is not binary compatible merely because zero
+  is the intended default for the new fields.
+- INSERTED fields, which is worse because existing members MOVE:
+  `xtc_proc_info_t` 72->80 (fields inserted at offset 24, shifting all
+  six `mbox_*` members by 8) and `xtc_svr_callbacks_t` 40->48
+  (`handle_continue` inserted BEFORE `terminate`, moving it 32->40).
+  `__fill_proc_info` opens with `memset(info, 0, sizeof *info)`, so
+  that is an out-of-bounds WRITE into a 1.0.x caller's 72-byte buffer,
+  usually its stack frame; and `s->cb = *cb` copies 48 bytes from a
+  40-byte object, after which the old caller's `terminate` pointer is
+  read as `handle_continue` and CALLED THROUGH THE WRONG PROTOTYPE.
+
+For contrast, the shape that IS compatible: `xtc_io_event_t` stayed 16
+bytes because the new `fd` landed in existing tail padding.
+
+None of the mechanism described above exists: there is no `dist/s_abi`,
+no `dist/pubdef.in`, no `test/compat/`, and `dist/libxtc.map` leaves
+symbols UNVERSIONED by design.  `test/m0/test_docs_abi.sh` only grepped
+the doc for vocabulary, so it passed throughout.  (It now checks that
+every tool and path the ABI doc CITES actually exists, which is
+mechanically checkable and would have caught the fiction -- but it still
+does not compare layouts.)
+
+Consequence for consumers, documented in docs/KNOWN_ISSUES.md: recompile
+against the matching minor; the SONAME is not a licence to swap the
+library under a pre-built binary.
+
+The fix is an API change and therefore NOT a patch release: either a
+leading size/version member per options struct (the caller declares what
+it compiled against) or `_ex` entry points -- the same mechanism (S)18.1
+already prescribes for the frozen lock layer.  Until then the honest
+statement is that 1.x is SOURCE compatible and only ADDITIVELY binary
+compatible where a struct's layout did not move.  A layout ratchet
+(`pahole`/`abidiff` against the previous tag, or a
+`_Static_assert(sizeof(T) == N)` table) should land WITH that fix, or
+the next one lands the same way.
+
 ### 18.2 Capability bits and feature flags
 
 Applications never check version numbers.  They check
@@ -3177,6 +3272,60 @@ for the related Windows work):
   change; re-run the full suite (unit + DST + sanitizers) before/after
   to prove nothing moved.
 
+### 19.26 Reclaim completed fibers before loop teardown (from a 2026-09 external review)
+
+**The limitation.**  A completed coro-backed task is NOT freed when it
+finishes; it stays on `loop->all_tasks` until `xtc_loop_fini`, because
+its `cleanup` hook is what releases the fiber stack + coro struct
+(`src/evt/loop.c` DONE path; `src/evt/coro_uctx.c` sets
+`t->cleanup = __coro_task_cleanup` at spawn).  Plain pinned tasks DO
+recycle; coro-backed ones deliberately do not.
+
+So for a long-lived service that spawns many short-lived procs, retained
+memory tracks HISTORICAL work rather than concurrent work.  Measured at
+1.49.2: 20,000 sequential procs with a maximum of ONE alive at a time,
+64 KiB stacks -> VmSize +1,402,768 kB (~70 kB/proc), VmRSS +123,016 kB,
+all of it released at `xtc_loop_fini`.  It is retention, not a leak, so
+LeakSanitizer is silent on it -- which is exactly why it needs writing
+down instead of trusting a green ASan run.
+
+This is in tension with the "hold a bounded RSS on commodity hardware"
+goal (S)0, so it is a real limitation and is documented as one in
+docs/KNOWN_ISSUES.md, not implied away.
+
+**Why it is deferred rather than fixed.**  Freeing at DONE instead of at
+fini touches `loop.c`, `task.c`, all THREE coroutine substrates
+(`coro_uctx.c`, `coro_fctx.c`, `coro_winfiber.c`) and `proc.c` in one
+change, and it has to be correct against several things at once:
+
+- a fiber cannot free its OWN stack while still running on it (the
+  substrate frees it from the task cleanup, off that stack, by design);
+- the `all_tasks` unlink is NOT thread-safe, and under work stealing a
+  task can complete on a thief rather than its home loop;
+- the loop steps a DONE coro once more to observe completion, and
+  `__proc_free` must clear the coro's proc back-pointer or that step
+  reads freed memory (this exact shape was a use-after-free caught by
+  TSan in the 1.48.0 wrong-proc fix);
+- outstanding cross-thread wakes may still name the task.
+
+That is a cross-platform lifetime change in the least forgiving part of
+the tree, and this area has a documented history of platform-asymmetric
+regressions (a past fix looked fine once and hung 2-of-12 runs; another
+was measured WORSE on FreeBSD than the baseline).  It is its own cycle
+with its own A/B on both a readiness backend and a completion backend,
+not a rider on a bug-fix release.
+
+**Workarounds today**, in preference order: (1) let the loop finish and
+`xtc_loop_fini` reclaim (correct for batch/phase-structured work);
+(2) reuse long-lived worker procs that loop on `xtc_recv` instead of
+spawning per unit of work -- this is also the faster path, since it
+avoids per-spawn stack setup entirely; (3) for a service that must spawn
+unboundedly, periodically drain to idle and cycle the loop.
+
+**When it is done** it should come with a soak test that asserts RSS
+stays flat across N spawn/exit generations on ONE long-lived loop -- the
+check that would have caught this, and which no current tier makes.
+
 ### 19.25 DST maturity vs. FoundationDB/TigerBeetle + an optional GUI monitor
 
 Full gap analysis in `.agent/DST_MATURITY_2026-07.md`.  Summary: the
@@ -3193,7 +3342,18 @@ not started:
   least once per run; fail the build if a site goes cold.
 - **A failing-seed corpus** (`test/sim/corpus/`) that pins every seed a
   swarm/CI run ever caught as a permanent replayed regression case, so
-  a fixed bug cannot silently regress.
+  a fixed bug cannot silently regress.  DONE (`test/sim/corpus/seeds.txt`
+  + `scripts/dst-corpus.sh`, in per-commit CI; 16 pinned rows).  Two
+  lessons from populating it at 1.49.2, both now enforced rather than
+  remembered: (a) the MECHANISM existing is not the same as the PRACTICE
+  happening -- three seeds that a 100k sweep caught went unpinned until
+  someone looked, so the swarm now PRINTS the paste-ready corpus row on
+  failure and AGENTS.md carries "PIN EVERY FAILING SEED" as a DST
+  yardstick; (b) a pin must be verified BOTH ways (it reproduces the
+  named seed AND fails on the pre-fix build), because a row that passes
+  without the fix is decoration, not a guard.  Note the swarm's reported
+  seed is DERIVED (`0x9E3779B97F4A7C15 * (base+s+1)`) and is not an argv
+  the test accepts, so the pinned value is the base OFFSET.
 - **Seed minimization/shrinking** for a failing swarm run: delta-debug
   the schedule down to the smallest reproducer (fewest procs/messages/
   reorderings) instead of handing back only the raw seed.
@@ -3600,11 +3760,19 @@ This section was originally "What I want from you before we start
 coding" -- a Revision-4 sign-off checklist (confirm the layer names,
 C11, ISC, the milestone order, the async()/await() strategy, the
 platform matrix, etc.).  All of it was settled and built long ago.  The
-library is shipping at v1.35.0: M0-M17 complete ((S)9), both build
+library is shipping at v1.49.2: M0-M17 complete ((S)9), both build
 systems (autotools + meson) wired and CI-verified, the layered
 os/io/evt/ptc/orc structure and the __os_*/__xtc_*/xtc_* naming
 enforced by the API-discipline merge gate, deterministic simulation as
 the correctness spine, and broad per-commit CI across the Tier-1
-platforms.  The checklist is retired; the plan above is kept for the
+platforms.
+
+Two standing caveats a reader should carry away from this plan, both
+from a 2026-09 external review and both tracked above rather than
+buried: the 1.x ABI promise in (S)18.1 is NOT mechanically enforced and
+is already broken by struct growth, and completed fibers are retained
+until loop teardown ((S)19.26), which is in tension with the bounded-RSS
+goal in (S)0.  Neither is fixed by 1.49.2; both are documented in
+docs/KNOWN_ISSUES.md with their consequences and workarounds.  The checklist is retired; the plan above is kept for the
 architecture rationale and worked examples, and ongoing work is tracked
 in the release history and (S)19.
