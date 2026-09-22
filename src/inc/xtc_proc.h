@@ -441,11 +441,38 @@ XTC_API int       xtc_recv_correlate(const void *corr_value, size_t corr_size,
  *                more than one source raced to wake.
  *   XTC_E_AGAIN  timeout fired with nothing else.  *out_revents has
  *                XTC_WAIT_TIMEOUT.
- *   XTC_E_INVAL  bad args (NULL out_revents, fd<0, etc.) or called
- *                from outside a process.
+ *   XTC_E_INVAL  bad args (NULL out_revents, fd<0, etc.), called from
+ *                outside a process, OR the fd could not be registered
+ *                because ANOTHER waiter already holds a live
+ *                registration for it on this loop's io.  One fd, one
+ *                waiter: two procs cannot wait on the same fd on the
+ *                same loop at the same time.
+ *   XTC_E_NOMEM / XTC_E_RESOURCE / XTC_E_NOSYS
+ *                propagated unchanged from the fd registration.
+ *   XTC_E_INTERNAL
+ *                a libxtc invariant broke.  This is now reserved for
+ *                genuinely unexpected failures: it previously ALSO
+ *                covered every registration error above, which left a
+ *                consumer unable to tell a bad argument from resource
+ *                pressure, and led one to classify the opaque code as a
+ *                spurious wake and retry it forever.
  *
- * The fd is auto-unregistered before return; the mailbox is left
- * untouched (caller still calls xtc_recv to actually drain).
+ * EVERY non-XTC_OK return above means the proc did NOT park.  None of
+ * them is a wake, and none should be retried in a tight loop: treat an
+ * error as an error.  (A spurious wake IS possible, but it arrives as
+ * XTC_OK -- see the note on re-checking your condition.)
+ *
+ * The fd is auto-unregistered before return -- including on the
+ * cancellation path, and including when the fiber MIGRATED while parked
+ * (the unregister is routed to the io that owns the registration, and
+ * deferred to its owning thread when that is not this one).  A
+ * subsequent wait on the SAME fd is therefore expected to succeed, and a
+ * pending deferred unregister no longer makes it fail: the re-register
+ * consumes it.  The caller never needs to drive a poll or drain step to
+ * make that true.
+ *
+ * The mailbox is left untouched (caller still calls xtc_recv to
+ * actually drain).
  */
 #define XTC_WAIT_MAILBOX  0x10000u   /* in out_revents only */
 #define XTC_WAIT_TIMEOUT  0x20000u   /* in out_revents only */

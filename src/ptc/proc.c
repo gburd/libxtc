@@ -2517,13 +2517,38 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	 * another thread's ring either. */
 	wl = __xtc_current_loop != NULL ? __xtc_current_loop : self->task->loop;
 
-	if (xtc_io_reg_fd(wl->io, fd, interest,
-	    self->task) != XTC_OK) {
-		/* The waker was armed above (before this registration), so it
-		 * must be disarmed on every path that returns WITHOUT parking
-		 * -- otherwise the proc advertises a park it is not in. */
-		__wait_fd_disarm_waker(self);
-		return XTC_E_INTERNAL;
+	{
+		int reg_rc = xtc_io_reg_fd(wl->io, fd, interest, self->task);
+		if (reg_rc != XTC_OK) {
+			/* The waker was armed above (before this registration),
+			 * so it must be disarmed on every path that returns
+			 * WITHOUT parking -- otherwise the proc advertises a
+			 * park it is not in. */
+			__wait_fd_disarm_waker(self);
+			/*
+			 * PROPAGATE THE REAL CAUSE.  This used to flatten every
+			 * failure to XTC_E_INTERNAL, which told the caller only
+			 * "invariant violation" for causes that are not equal:
+			 * a bad fd/interest or a duplicate registration held by
+			 * another waiter (XTC_E_INVAL) is an integration error
+			 * the caller can act on, while XTC_E_NOMEM /
+			 * XTC_E_RESOURCE are resource pressure and XTC_E_NOSYS
+			 * is a platform limit.  A consumer that cannot tell
+			 * them apart cannot choose between failing the
+			 * operation, backing off, and treating it as a bug --
+			 * and a consumer that mapped the opaque -6 onto
+			 * "spurious wake" retried it forever, which is how a
+			 * hard error became a livelock rather than a failure.
+			 *
+			 * Reserve XTC_E_INTERNAL for an rc we genuinely do not
+			 * expect here, so it keeps meaning "a libxtc invariant
+			 * broke" instead of "something went wrong".
+			 */
+			if (reg_rc == XTC_E_INVAL || reg_rc == XTC_E_NOMEM ||
+			    reg_rc == XTC_E_NOSYS || reg_rc == XTC_E_RESOURCE)
+				return reg_rc;
+			return XTC_E_INTERNAL;
+		}
 	}
 	/* park_io first; the release-store publishes it. */
 	self->task->park_io = wl->io;
