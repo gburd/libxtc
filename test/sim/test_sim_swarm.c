@@ -574,6 +574,24 @@ main(int argc, char **argv)
 	uint64_t seen[256];
 	int n_seen = 0;
 	long failures = 0;
+	/* Failing base offsets, for the paste-ready corpus rows printed at
+	 * the end (bounded; a sweep with more failures than this has bigger
+	 * problems than an incomplete list). */
+	long fail_off[64];
+	long n_fail_off = 0;
+	long fi;                        /* index over fail_off, not the sweep */
+/*
+ * Record this seed's base offset once, for the paste-ready corpus rows.
+ * Guarded so several failing invariants on ONE seed pin one row, not six.
+ */
+#define NOTE_FAIL_OFFSET()                                            \
+	do {                                                          \
+		if (n_fail_off < (long)(sizeof fail_off /              \
+		    sizeof fail_off[0]) &&                             \
+		    (n_fail_off == 0 ||                                \
+		     fail_off[n_fail_off - 1] != seed_base + s))       \
+			fail_off[n_fail_off++] = seed_base + s;        \
+	} while (0)
 	long n_part = 0, n_lat = 0, n_bug = 0, n_kill = 0, n_torn = 0;
 	/* Fault-space coverage (FoundationDB-style): how many seeds ACTIVATED
 	 * each known buggify site, plus the sweep totals the MINIMUM
@@ -653,7 +671,7 @@ main(int argc, char **argv)
 			    "writer ever wrote) -- durability broken\n",
 			    (unsigned long long)seed,
 			    atomic_load(&g_torn_bad));
-			failures++;
+			failures++; NOTE_FAIL_OFFSET();
 			continue;
 		}
 		/* A verifier that burned every retry never established its
@@ -664,7 +682,7 @@ main(int argc, char **argv)
 			    "read-back -- durability never established\n",
 			    (unsigned long long)seed,
 			    atomic_load(&g_torn_stuck), TORN_TRIES);
-			failures++;
+			failures++; NOTE_FAIL_OFFSET();
 			continue;
 		}
 		/* A workload that did not run must be VISIBLE, not absent. */
@@ -673,7 +691,7 @@ main(int argc, char **argv)
 			    "SKIPPED (no usable temp file) -- this seed "
 			    "advertises a scenario it did not execute\n",
 			    (unsigned long long)seed);
-			failures++;
+			failures++; NOTE_FAIL_OFFSET();
 			continue;
 		}
 
@@ -705,7 +723,7 @@ main(int argc, char **argv)
 				    "the traffic it claims to\n",
 				    (unsigned long long)seed, cut_reply_pairs,
 				    CUT_LOOP_A, CUT_LOOP_B);
-				failures++;
+				failures++; NOTE_FAIL_OFFSET();
 				continue;
 			}
 			/* Every cut pair must have OBSERVED the cut.  The reaper
@@ -718,7 +736,7 @@ main(int argc, char **argv)
 				    "pair %d) -- the partition cut no workload "
 				    "traffic\n", (unsigned long long)seed,
 				    cut_drop_pairs, n_cut, victim);
-				failures++;
+				failures++; NOTE_FAIL_OFFSET();
 				continue;
 			}
 		} else if (cut_reply_pairs == n_cut) {
@@ -734,7 +752,7 @@ main(int argc, char **argv)
 			printf("FAIL seed=%llu: torn page accepted silently / "
 			    "left unresolved on the replay run\n",
 			    (unsigned long long)seed);
-			failures++;
+			failures++; NOTE_FAIL_OFFSET();
 			continue;
 		}
 		if (act1 != act2) {
@@ -742,7 +760,7 @@ main(int argc, char **argv)
 			    "replay (%d/%d) -- the fault schedule is not "
 			    "seed-determined\n", (unsigned long long)seed,
 			    act1, act2);
-			failures++;
+			failures++; NOTE_FAIL_OFFSET();
 			continue;
 		}
 
@@ -752,7 +770,7 @@ main(int argc, char **argv)
 			    "violation\n", (unsigned long long)seed, rc1, rc2,
 			    sc.partition, sc.latency, sc.buggify,
 			    sc.machine_death);
-			failures++;
+			failures++; NOTE_FAIL_OFFSET();
 			continue;
 		}
 		if (st1 != st2 || app1 != app2) {
@@ -762,7 +780,7 @@ main(int argc, char **argv)
 			    (unsigned long long)st1, (unsigned long long)st2,
 			    app1, app2, sc.partition, sc.latency, sc.buggify,
 			    sc.machine_death);
-			failures++;
+			failures++; NOTE_FAIL_OFFSET();
 			continue;
 		}
 		for (i = 0; i < n_seen; i++)
@@ -837,6 +855,25 @@ main(int argc, char **argv)
 
 	if (failures > 0) {
 		printf("FAIL: %ld seed(s) failed\n", failures);
+		/*
+		 * A failing seed is only worth something if it gets PINNED --
+		 * otherwise the next sweep rolls different seeds and the
+		 * evidence is gone.  Print the paste-ready corpus row(s) so
+		 * the ledger cannot rot for want of knowing the format.  The
+		 * pin is the base OFFSET, because the seed printed above is
+		 * DERIVED from it and is not an argv the test accepts.
+		 */
+		printf("\nACTION REQUIRED -- pin the failing seed(s) in "
+		    "test/sim/corpus/seeds.txt so a fix cannot silently "
+		    "regress.  Re-run each offset alone to confirm it "
+		    "reproduces, then add, with the fixing commit in the "
+		    "description:\n");
+		for (fi = 0; fi < n_fail_off; fi++)
+			printf("test_sim_swarm          %-10ld 1   "
+			    "<commit> <what failed> (seed %llu)\n",
+			    fail_off[fi],
+			    (unsigned long long)(0x9E3779B97F4A7C15ull *
+			    (uint64_t)(fail_off[fi] + 1)));
 		return 1;
 	}
 	if (n_seeds >= 20 && n_seen < 2) {

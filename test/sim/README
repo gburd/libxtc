@@ -99,6 +99,44 @@ backend, which is a separate build (the backend is single-per-binary):
 The harness builds libxtc with --with-io-backend=sim, then compiles and
 runs both tests.  A CI job (sim-dst) runs this on every push.
 
+The failing-seed corpus (test/sim/corpus/seeds.txt)
+--------------------------------------------------
+
+A seed that once failed is the most valuable seed there is: it is a
+REPRODUCER.  Random sweeps roll fresh seeds every night, so unless a
+failing seed is written down it is gone, and nothing proves the fix still
+holds a year later.  The corpus is that ledger.
+
+Format is one row per pin: <sim_test_name> <seed> <count> <description>,
+where the description names the FIXING COMMIT.  scripts/dst-corpus.sh
+re-runs every row on the clean build and FAILS if any pinned seed stops
+passing; it runs on every push in CI.  Two kinds of row live there:
+
+  - historically-FAILING seeds -- found in a real sweep, then fixed.
+    This is the "prove the bug stays fixed" set.
+  - planted-bug guards and smoke seeds -- each FAILS under
+    -DXTC_DST_INJECT_BUG=<N> (see scripts/dst-bug-inject.sh) and must
+    pass clean here.
+
+WHEN A SWEEP FAILS, PIN THE SEED.  The swarm prints a paste-ready row for
+exactly this reason; copy it in and replace <commit> with the fix.  Note
+the swarm's reported seed is DERIVED (0x9E3779B97F4A7C15 * (base+s+1)),
+not an argv the test accepts, so the pin is the base OFFSET that
+regenerates it -- which is what the printed row already gives you.
+
+Verify a pin BOTH ways before trusting it: the offset must reproduce the
+named seed AND fail on the pre-fix build.  A row that passes before the
+fix is decoration, not a regression guard.
+
+Argv order differs per test (test_sim_swarm takes "<count> <base>", most
+others "<base> <count>"); the corpus file always writes <seed> <count> and
+scripts/dst-corpus.sh owns the mapping and logs the argv it executed.
+
+Coverage note: the corpus is a REGRESSION set, deliberately small and
+fast.  It does not replace the nightly volume sweeps -- pinned seeds prove
+old bugs stay fixed, fresh seeds find new ones.  A tag does NOT trigger
+the nightly tiers, so run the 100k swarm by hand at release time.
+
 What DST does and does not catch
 --------------------------------
 
