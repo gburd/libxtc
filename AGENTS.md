@@ -1,4 +1,4 @@
-# Agent Steering — xtc
+# Agent Steering -- xtc
 
 Project-specific rules for AI agents (Claude Code, Kiro CLI, Pi, Maki).
 
