@@ -57,8 +57,25 @@
 #  define PROT_WRITE 0
 #  define MAP_PRIVATE   0
 #  define MAP_ANONYMOUS 0
-static void *__win_chunk_alloc(size_t sz) { return malloc(sz); }   /* XTC_RAW_OK: mmap shim on Windows */
-static int   __win_chunk_free(void *p, size_t sz) { (void)sz; free(p); return 0; }   /* XTC_RAW_OK: mmap shim */
+/*
+ * Chunk backing on Windows.  This stands in for POSIX mmap, so it must
+ * match the property the slab RELIES ON: an mmap'd chunk is page
+ * aligned, which is why a slot -- and with redzones the padded object
+ * inside it -- can honor an alignment up to XTC_CACHE_LINE.  plain
+ * malloc guarantees only max_align_t (16 on x86-64), so a 64-byte
+ * request came back 16-mod-64 and /m11/slab/redzone_alignment failed on
+ * MSVC with "16 == 0" while passing on Linux.  _aligned_malloc is the
+ * matching primitive and MUST be released with _aligned_free (the same
+ * matched-pair rule AGENTS.md states for __os_aligned_alloc/_free);
+ * passing this pointer to plain free() corrupts the CRT heap.
+ */
+static void *__win_chunk_alloc(size_t sz)
+{
+	/* Page-size granularity, so the shim is at least as strongly
+	 * aligned as the mmap it replaces. */
+	return _aligned_malloc(sz, 4096);   /* XTC_RAW_OK: mmap shim on Windows */
+}
+static int   __win_chunk_free(void *p, size_t sz) { (void)sz; _aligned_free(p); return 0; }   /* XTC_RAW_OK: mmap shim */
 #  define mmap(addr, sz, prot, flags, fd, off)  \
      ((void)(addr),(void)(prot),(void)(flags),(void)(fd),(void)(off), \
       __win_chunk_alloc(sz))
