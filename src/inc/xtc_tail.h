@@ -205,7 +205,32 @@ enum xtc_tail_kind {
 	 * means that ring is receiving completions faster than one poll can
 	 * take them.
 	 */
-	XTC_TAIL_POLL_FULL = 13
+	XTC_TAIL_POLL_FULL = 13,
+	/*
+	 * A LIFECYCLE notification could not be delivered.  pid is the proc
+	 * whose exit was being reported (for a dropped DOWN/EXIT) or the pid
+	 * whose registry enrollment failed; detail is the negated xtc_err
+	 * from the send.
+	 *
+	 * Like SUBMIT_FAIL, its mere PRESENCE is a fault: it means a watcher
+	 * or supervisor will never learn about a terminal event it asked to
+	 * observe, so it can wait forever on a DOWN that is not coming, or
+	 * believe a monitored registry name will be reaped when nothing is
+	 * watching it.
+	 *
+	 * Reachable because the delivery sites discard the send result:
+	 * __notify_links_and_monitors does (void)xtc_send for each DOWN/EXIT
+	 * (src/ptc/proc.c), and xtc_reg_register_mon does the same for its
+	 * reaper enrollment while still returning XTC_OK (src/orc/reg.c).  A
+	 * mailbox saturated by ORDINARY traffic therefore silently defeats
+	 * lifecycle observation -- the bounded mailbox is correct
+	 * backpressure, but a lifecycle event losing that race must not be
+	 * invisible.  Emitting this does not FIX the loss (a reserved
+	 * lifecycle route or an explicit failed-observation state is the
+	 * real fix, and is a consumer-visible design change); it makes the
+	 * loss DIAGNOSABLE instead of silent, which is the prerequisite.
+	 */
+	XTC_TAIL_LIFECYCLE_DROP = 14
 };
 
 /*

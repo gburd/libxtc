@@ -40,6 +40,7 @@ KINDS = {
     5: "SEND", 6: "RECV", 7: "MBOX_HWM", 8: "LOOP_POLL",
     9: "PARK_TASK", 10: "REAP", 11: "SUBMIT", 12: "SUBMIT_FAIL",
     13: "POLL_FULL",
+    14: "LIFECYCLE_DROP",
 }
 # detail-field meaning per kind, for the human column
 DETAIL = {
@@ -67,6 +68,7 @@ DETAIL = {
     "SUBMIT_FAIL": "errno/short",
     # a poll that filled its budget: more may have been left in the CQ
     "POLL_FULL": "budget",
+    "LIFECYCLE_DROP": "err",
 }
 
 
