@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.49.2
+Version:        1.49.3
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,38 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Mon Sep 22 2026 Greg Burd <greg@burd.me> - 1.49.3-1
+- Fixes the two MSVC regressions that made 1.49.2's Windows gate red, plus
+  pre-existing signed-overflow UB in the DST tests, and corrects the
+  xtc_exit_pid_deadline status contract.  No API/ABI change: 710 exported
+  symbols, none added or removed, and every public struct layout identical
+  to 1.49.2 (the one new enum value is appended).
+- slab: the Windows chunk shim used plain malloc, which guarantees only
+  max_align_t, where POSIX mmap is page aligned -- so a 64-byte-aligned
+  redzone object came back 16-mod-64 and /m11/slab/redzone_alignment failed
+  on MSVC while passing on Linux.  The POSIX-side redzone fix in 1.49.2 was
+  therefore only half a fix.  Now _aligned_malloc at page granularity, with
+  the matching _aligned_free.
+- test: removed a POSIX truncate(2) call that does not exist on MSVC, where
+  /WX promoted the implicit declaration to a build error.  It was redundant
+  -- the following fopen(..., "w") already truncates.
+- test/sim: fixed signed integer overflow (undefined behavior) in the
+  order-sensitive hash fold used by 30 simulation tests.  Pre-existing since
+  at least 1.48.0 and only visible once a sanitized DST job existed; the fix
+  is value-preserving, so every pinned replay hash is unchanged.
+- proc: xtc_exit_pid_deadline's XTC_KILL_DELIVERED no longer claims that
+  at-exit hooks have COMPLETED.  The exit path clears `alive` before running
+  them, so a parked hook left cleanup in progress while the caller was told
+  it had finished.  DEFERRED/TIMEOUT/unknown-pid qualifications documented
+  too.  Documentation-only; no behavior change.
+- proc, reg: a dropped DOWN/EXIT notification or registry monitor enrollment
+  is no longer silent -- both emit XTC_TAIL_LIFECYCLE_DROP.  The bounded
+  mailbox is correct backpressure; a lifecycle event losing that race being
+  invisible was not.  Makes the loss diagnosable, not impossible.
+- msvc: the build gate discarded both compiler and test output, so a failure
+  on the one platform with no local host to reproduce on named only the
+  binary.  Both are now printed.
+
 * Mon Sep 22 2026 Greg Burd <greg@burd.me> - 1.49.2-1
 - Bug-fix release from an external code review.  Seventeen reproduced
   defects across the I/O registration lifetime, cancellation/park paths,

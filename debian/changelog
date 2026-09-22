@@ -1,3 +1,54 @@
+libxtc (1.49.3-1) unstable; urgency=medium
+
+  * Fixes the two MSVC regressions that made 1.49.2's Windows gate red,
+    pre-existing signed-overflow undefined behavior in the DST tests, and
+    an overstated kill-status contract.  No API or ABI change -- 710
+    exported symbols, none added or removed, and every public struct
+    layout identical to 1.49.2 (the single new enum value is appended, not
+    inserted), so this is a drop-in replacement.
+  * slab: the Windows chunk shim used plain malloc, which guarantees only
+    max_align_t alignment, where the POSIX mmap it stands in for is page
+    aligned -- and the slab relies on that to give a slot, and with
+    redzones the padded object inside it, an alignment up to the cache
+    line.  A 64-byte request therefore came back 16-mod-64 and
+    /m11/slab/redzone_alignment failed on MSVC while passing on Linux,
+    making 1.49.2's POSIX-side redzone fix only half a fix.  Now
+    _aligned_malloc at page granularity, released with the matching
+    _aligned_free.
+  * test: dropped a POSIX truncate(2) call absent on MSVC, where /WX
+    promoted the implicit declaration to a build error.  It was redundant:
+    the following fopen(..., "w") already truncates.
+  * test/sim: fixed signed integer overflow (undefined behavior) in the
+    order-sensitive hash fold used by 30 simulation tests.  Pre-existing
+    since at least 1.48.0, and only visible once a sanitized DST job
+    existed to put UBSan and the sim tests in one build.  The fix is
+    value-preserving, verified byte-identically, so the pinned failing-seed
+    corpus and every replay assertion remain valid.
+  * proc: xtc_exit_pid_deadline's XTC_KILL_DELIVERED no longer promises
+    that at-exit hooks and scope finalizers have COMPLETED.  The exit path
+    clears the alive flag BEFORE running them, and the call reports
+    DELIVERED as soon as the pid stops resolving, so a hook that parks left
+    cleanup in progress while the caller had been told it finished -- which
+    is exactly the overlap a supervisor uses that status to rule out before
+    handing a shared resource to a replacement.  DELIVERED is also returned
+    for an unresolvable pid, DEFERRED fires as soon as a masked kill is
+    observed rather than at the deadline, and TIMEOUT can include a masked
+    fiber that has not yet observed the kill; all now documented.
+    Documentation-only -- no behavior change.
+  * proc, reg: a dropped DOWN/EXIT notification, or a failed registry
+    monitor enrollment that still returned success, is no longer silent.
+    Both now emit XTC_TAIL_LIFECYCLE_DROP (a new tail kind, wired through
+    the decoder and tooling).  The bounded mailbox is correct backpressure;
+    a LIFECYCLE event losing that race being invisible was not.  This makes
+    the loss diagnosable, not impossible -- a reserved lifecycle route is
+    the real fix and is still owed.
+  * msvc: the build gate sent both compiler and test output to nul, so a
+    failure on the one platform with no local host to reproduce on named
+    only the binary.  Both are now captured and printed on failure, which
+    is what identified the two regressions above.
+
+ -- Greg Burd <greg@burd.me>  Mon, 22 Sep 2026 12:30:00 -0400
+
 libxtc (1.49.2-1) unstable; urgency=medium
 
   * Bug-fix release following an external code review: seventeen
