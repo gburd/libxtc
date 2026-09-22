@@ -59,7 +59,8 @@ fold(long v)
 	do {
 		h = atomic_load_explicit(&g_hash, memory_order_relaxed);
 	} while (!atomic_compare_exchange_weak_explicit(&g_hash, &h,
-	    h * 1000003L + (v + 11), memory_order_relaxed,
+	    (long)((unsigned long)h * 1000003UL +
+	    (unsigned long)(v + 11)), memory_order_relaxed,
 	    memory_order_relaxed));
 }
 

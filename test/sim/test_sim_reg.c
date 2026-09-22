@@ -73,7 +73,8 @@ static void
 fold(long v)
 {
 	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
-	h = h * 1000003L + (v + 1);
+	h = (long)((unsigned long)h * 1000003UL +
+		    (unsigned long)(v + 1));
 	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
 }
 
@@ -254,7 +255,8 @@ pg_count_cb(xtc_pid_t pid, void *user)
 	(void)user;
 	/* fold the member pids so the final membership is replay-checkable */
 	long h = atomic_load_explicit(&g_pg_hash, memory_order_relaxed);
-	h = h * 1000003L + (long)pid.local_id + 1;
+	h = (long)((unsigned long)h * 1000003UL +
+	    (unsigned long)((long)pid.local_id + 1));
 	atomic_store_explicit(&g_pg_hash, h, memory_order_relaxed);
 	return 0;
 }

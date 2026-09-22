@@ -83,7 +83,8 @@ ping(void *arg)
 		free(m);
 		atomic_fetch_add_explicit(&g_replies, 1, memory_order_relaxed);
 		h = atomic_load_explicit(&g_app_hash, memory_order_relaxed);
-		h = h * 1000003L + (pa->id + 1);
+		h = (long)((unsigned long)h * 1000003UL +
+		    (unsigned long)(pa->id + 1));
 		atomic_store_explicit(&g_app_hash, h, memory_order_relaxed);
 	}
 }

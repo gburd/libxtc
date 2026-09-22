@@ -101,7 +101,8 @@ static void
 fold(atomic_long *h, long v)
 {
 	long x = atomic_load_explicit(h, memory_order_relaxed);
-	x = x * 1000003L + (v + 1);
+	x = (long)((unsigned long)x * 1000003UL +
+		    (unsigned long)(v + 1));
 	atomic_store_explicit(h, x, memory_order_relaxed);
 }
 

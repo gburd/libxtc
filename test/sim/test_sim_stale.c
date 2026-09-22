@@ -57,7 +57,8 @@ static void
 fold(long v)
 {
 	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
-	h = h * 1000003L + (v + 3);
+	h = (long)((unsigned long)h * 1000003UL +
+		    (unsigned long)(v + 3));
 	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
 }
 

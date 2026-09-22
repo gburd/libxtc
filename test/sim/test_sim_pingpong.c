@@ -57,7 +57,8 @@ ping(void *arg)
 		/* Order-sensitive fold: the order replies are observed is a
 		 * function of the seed. */
 		h = atomic_load_explicit(&g_hash, memory_order_relaxed);
-		h = h * 1000003L + (pa->id + 1);
+		h = (long)((unsigned long)h * 1000003UL +
+		    (unsigned long)(pa->id + 1));
 		atomic_store_explicit(&g_hash, h, memory_order_relaxed);
 	}
 }
