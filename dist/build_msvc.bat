@@ -193,7 +193,12 @@ if errorlevel 1 (
   rem  on, which is precisely when the text is most needed.  (Cost us a
   rem  round trip at v1.49.2.)
   echo   ---- cl output: %MS%\%TN% ----
-  type "%TN%.buildlog"
+  if exist "%TN%.buildlog" (
+    for %%Z in ("%TN%.buildlog") do echo   [buildlog %%~zZ bytes]
+    type "%TN%.buildlog"
+  ) else (
+    echo   [no buildlog produced -- cl did not run, or the redirect failed]
+  )
   echo   ---- end cl output ----
   set /a MUNIT_FAIL+=1
   set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
@@ -238,7 +243,12 @@ if errorlevel 1 (
   rem  on, which is precisely when the text is most needed.  (Cost us a
   rem  round trip at v1.49.2.)
   echo   ---- cl output: %MS%\%TN% ----
-  type "%TN%.buildlog"
+  if exist "%TN%.buildlog" (
+    for %%Z in ("%TN%.buildlog") do echo   [buildlog %%~zZ bytes]
+    type "%TN%.buildlog"
+  ) else (
+    echo   [no buildlog produced -- cl did not run, or the redirect failed]
+  )
   echo   ---- end cl output ----
   set /a MUNIT_FAIL+=1
   set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
@@ -278,7 +288,12 @@ cl %CFLAGS% /Fe:%TN%.exe ^
 if errorlevel 1 (
   echo   [munit] %MS%\%TN% ADVISORY BUILD FAILED ^(not gated^)
   echo   ---- cl output: %MS%\%TN% ----
-  type "%TN%.buildlog"
+  if exist "%TN%.buildlog" (
+    for %%Z in ("%TN%.buildlog") do echo   [buildlog %%~zZ bytes]
+    type "%TN%.buildlog"
+  ) else (
+    echo   [no buildlog produced -- cl did not run, or the redirect failed]
+  )
   echo   ---- end cl output ----
   goto :eof
 )
