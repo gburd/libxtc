@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.49.3
+Version:        1.49.4
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,27 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Mon Sep 22 2026 Greg Burd <greg@burd.me> - 1.49.4-1
+- Fixes an io_uring deadlock reported from a PostgreSQL fiber workload: a
+  deferred cross-thread fd unregister left its node linked in the io's fd
+  list until the owning loop's next poll drained it, so a same-fd
+  re-register was rejected as a duplicate (XTC_E_INVAL, surfaced as
+  XTC_E_INTERNAL).  Because only the owning thread can drain that queue,
+  a caller that retried never returned to its poll and every retry failed
+  identically -- a deadlock, not a transient error.  xtc_io_reg_fd now
+  applies a queued delete for that fd first.
+- io_uring is the only backend that queues deferred deletes; the other
+  seven pass straight through, so none was affected.
+- xtc_proc_wait_fd now propagates the real registration error
+  (XTC_E_INVAL / _NOMEM / _NOSYS / _RESOURCE) instead of flattening every
+  cause to XTC_E_INTERNAL, which is now reserved for genuinely unexpected
+  returns.  Its documented return set also states that one fd admits one
+  waiter per loop, that no non-OK return is a wake to retry, and that the
+  auto-unregister holds across migration and cancellation with no
+  caller-driven drain or poll.
+- No API or ABI change: 710 exported symbols, none added or removed, and
+  every public struct layout and enum value identical to 1.49.3.
+
 * Mon Sep 22 2026 Greg Burd <greg@burd.me> - 1.49.3-1
 - Fixes the two MSVC regressions that made 1.49.2's Windows gate red, plus
   pre-existing signed-overflow UB in the DST tests, and corrects the

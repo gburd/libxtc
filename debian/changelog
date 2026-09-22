@@ -1,3 +1,43 @@
+libxtc (1.49.4-1) unstable; urgency=medium
+
+  * io_uring: fixes a deadlock reported from a PostgreSQL fiber workload
+    against 1.49.2.  __xtc_io_defer_del_fd queues a cross-thread fd
+    unregister for the OWNING loop to drain at the top of its next
+    xtc_io_poll; until that drain the node is still linked in io->fds, so
+    a same-fd re-register read as a live duplicate and returned
+    XTC_E_INVAL, which xtc_proc_wait_fd reported as XTC_E_INTERNAL.
+  * The trap was that the only thread able to drain the queue is the same
+    thread receiving the error, so a consumer whose wait failed and
+    retried never returned to its poll: the pending delete was never
+    applied and every retry failed identically.  No legal caller action
+    could clear it.  xtc_io_reg_fd now applies a queued delete for that
+    fd before the duplicate test, removing it from the queue under the
+    delete lock first so the later drain cannot delete it twice (by then
+    the fd number could name a different live registration).
+  * Scope was checked rather than assumed: io_uring is the only backend
+    whose deferred-delete path queues.  epoll, kqueue, poll, select,
+    event ports, AIX pollset and IOCP all pass straight through to
+    xtc_io_del_fd, so no pending-delete state exists to collide with and
+    none of them can exhibit this.
+  * proc: xtc_proc_wait_fd propagates XTC_E_INVAL, XTC_E_NOMEM,
+    XTC_E_NOSYS and XTC_E_RESOURCE from the fd registration instead of
+    collapsing every cause into XTC_E_INTERNAL, which is now reserved for
+    a return genuinely not expected there -- so it keeps meaning "a libxtc
+    invariant broke" rather than "something went wrong".  A consumer that
+    could not tell a bad argument from resource pressure had classified
+    the opaque code as a spurious wake and retried it indefinitely.
+  * doc: xtc_proc_wait_fd's documented return set previously listed three
+    codes and never mentioned registration failure.  It now covers the
+    full set, states that one fd admits one waiter per loop, that EVERY
+    non-XTC_OK return means the proc did not park (so none is a wake to
+    retry in a loop), and that the fd is auto-unregistered across
+    migration and cancellation with no caller-driven poll or drain step.
+  * No API or ABI change -- 710 exported symbols, none added or removed,
+    and every public struct layout and enum value identical to 1.49.3, so
+    this is a drop-in replacement.
+
+ -- Greg Burd <greg@burd.me>  Mon, 22 Sep 2026 15:30:00 -0400
+
 libxtc (1.49.3-1) unstable; urgency=medium
 
   * Fixes the two MSVC regressions that made 1.49.2's Windows gate red,
