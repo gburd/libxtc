@@ -187,7 +187,12 @@ XTC_API int xtc_exit_pid(xtc_pid_t target, int reason);
  * option today; these statuses replace the guess with an answer.
  */
 enum xtc_kill_status {
-	/* The target observed the kill and is gone (or already was). */
+	/* The target is no longer ALIVE (it observed the kill and left its
+	 * body), OR the pid did not resolve at all.  NOT proof that at-exit
+	 * hooks finished, that the stack was reclaimed, or even that THIS
+	 * request's reason was the one delivered -- see the long note on
+	 * xtc_exit_pid_deadline below before using this to release a
+	 * shared resource or start a replacement. */
 	XTC_KILL_DELIVERED = 0,
 	/* Still masked when the deadline expired: the kill is LATCHED and
 	 * will fire if the mask ever drops -- but the fiber is inside a
@@ -197,10 +202,22 @@ enum xtc_kill_status {
 	 * means taking down a larger unit -- see the "Killing a fiber that
 	 * mutates shared state" section of xtc_proc(3). */
 	XTC_KILL_DEFERRED  = 1,
+	/* Reported as soon as a nonzero mask depth with a latched kill is
+	 * OBSERVED, which can be well before the supplied deadline -- so
+	 * DEFERRED is not evidence that the full timeout elapsed, and a
+	 * brief mask (any xtc_uncancelable / xtc_mask_enter region) is not
+	 * by itself evidence of a wedge.  Sample mask_depth /
+	 * mask_deferred over time (xtc_proc_info) to tell a transient mask
+	 * from a stuck one. */
 	/* Not masked, but still alive at the deadline: it simply has not
 	 * reached a yield/recv point yet (a CPU-bound loop with no yield,
 	 * or a park that outlives the deadline).  Usually means "wait
-	 * longer"; a fiber that never yields will never be killable. */
+	 * longer"; a fiber that never yields will never be killable.
+	 * NOT proof the target is unmasked for the whole interval: a fiber
+	 * that is masked but has not yet OBSERVED the kill can land here
+	 * too.  And when the caller is itself a fiber on a starved loop,
+	 * this deadline is an observation budget, not a wall-clock bound --
+	 * call from a plain thread if you need the latter. */
 	XTC_KILL_TIMEOUT   = 2
 };
 
@@ -224,12 +241,37 @@ enum xtc_kill_status {
  * determined -- the STATUS, not the return code, says whether the kill
  * landed.
  *
- * IMPORTANT: XTC_KILL_DELIVERED means the fiber unwound, running its
- * xtc_scope finalizers and xtc_proc_at_exit hooks.  It does NOT mean
- * shared state the fiber was mutating is consistent: releasing a lock
- * does not undo a half-finished mutation.  If a fiber can be killed
- * mid-mutation of state other fibers keep using, an async kill is the
- * wrong tool -- see xtc_proc(3).
+ * IMPORTANT -- WHAT XTC_KILL_DELIVERED DOES *NOT* PROVE.  It means the
+ * target is no longer ALIVE, i.e. it observed the kill and left its
+ * body.  It is NOT proof that the proc's at-exit hooks and scope
+ * finalizers have COMPLETED, and it is NOT proof that the runtime has
+ * reclaimed the proc's task/fiber stack.
+ *
+ * Why: the exit path clears `alive` BEFORE it runs the at-exit list
+ * (see proc_exit in src/ptc/proc.c), and this call reports DELIVERED as
+ * soon as the pid no longer resolves to a live proc.  A hook that parks
+ * -- on a lock, an fd, a mailbox -- therefore leaves cleanup IN
+ * PROGRESS while this function already returned DELIVERED.  An earlier
+ * version of this comment said DELIVERED meant the hooks had run; that
+ * was stronger than the implementation and is corrected here.
+ *
+ * So do NOT use DELIVERED as the signal to release, reset, or hand a
+ * shared resource to a replacement -- that is exactly the overlap it
+ * cannot rule out.  The library itself does not rely on `!alive` for
+ * that purpose: arena-group discard waits for the pid to leave the proc
+ * TABLE (see src/ptc/mctx.c), which happens only after the at-exit list
+ * has returned.  Use that same stronger condition when you need
+ * cleanup-complete, not merely kill-accepted.
+ *
+ * DELIVERED is also returned when the target pid does not resolve at
+ * all (unknown or long gone), so it cannot distinguish "this request's
+ * reason was delivered and cleanup finished" from "there was nothing
+ * there".  Treat it as "not running any more", nothing more.
+ *
+ * Nor does it mean shared state the fiber was mutating is consistent:
+ * releasing a lock does not undo a half-finished mutation.  If a fiber
+ * can be killed mid-mutation of state other fibers keep using, an async
+ * kill is the wrong tool -- see xtc_proc(3).
  */
 XTC_API int xtc_exit_pid_deadline(xtc_pid_t target, int reason,
                                   int64_t timeout_ns, int *out_status);

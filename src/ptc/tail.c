@@ -307,7 +307,7 @@ out:
  */
 #define XTC_D9_TID_CLOCK_SYNC   200
 #define XTC_D9_TID_SEG_META     201
-#define XTC_D9_MAX_KIND          14   /* one past XTC_TAIL_POLL_FULL */
+#define XTC_D9_MAX_KIND          15   /* one past XTC_TAIL_LIFECYCLE_DROP */
 
 /* One field of a schema: wire name + field-type tag. */
 struct xtc_d9_field { const char *name; uint8_t type; };
@@ -394,6 +394,8 @@ __xtc_d9_kind_schema(unsigned kind)
 	    { "XtcSubmitFailEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
 	static const struct xtc_d9_schema_def xtc_pf =
 	    { "XtcPollFullEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
+	static const struct xtc_d9_schema_def xtc_lcd =
+	    { "XtcLifecycleDropEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
 	switch (kind) {
 	case XTC_TAIL_RUN:        return &poll_start;
 	case XTC_TAIL_SPAWN:      return &task_spawn;
@@ -409,6 +411,7 @@ __xtc_d9_kind_schema(unsigned kind)
 	case XTC_TAIL_SUBMIT:     return &xtc_sub;
 	case XTC_TAIL_SUBMIT_FAIL:return &xtc_subf;
 	case XTC_TAIL_POLL_FULL:  return &xtc_pf;
+	case XTC_TAIL_LIFECYCLE_DROP: return &xtc_lcd;
 	default:                  return NULL;
 	}
 }

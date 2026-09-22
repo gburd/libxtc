@@ -166,6 +166,14 @@ exit /b 0
 
 rem --- :run_munit <milestone> <testname>  (best-effort build+run of
 rem     one munit test; bumps MUNIT_PASS / MUNIT_FAIL; always returns) ---
+:dump_log
+rem  Print a build log at TOP LEVEL (not inside an if-block).  `more <`
+rem  reads from stdin so it does not depend on the nested redirection
+rem  context that swallowed `type`.  Tolerates a missing file.
+if not exist %~1 goto :eof
+more < %~1
+goto :eof
+
 :run_munit
 set MS=%~1
 set TN=%~2
@@ -193,12 +201,18 @@ if errorlevel 1 (
   rem  on, which is precisely when the text is most needed.  (Cost us a
   rem  round trip at v1.49.2.)
   echo   ---- cl output: %MS%\%TN% ----
+  rem  The 260-byte buildlog printed NOTHING through `type` inside this
+  rem  parenthesized block, while the `for %%~zZ` size in the same block
+  rem  worked -- so the file is real and has content, and the display is
+  rem  what failed.  Dump it OUTSIDE the block via a subroutine, where
+  rem  cmd's redirection context is not nested, and use `more <` (which
+  rem  reads stdin) rather than `type` (which opens the path itself).
   if exist "%TN%.buildlog" (
     for %%Z in ("%TN%.buildlog") do echo   [buildlog %%~zZ bytes]
-    type "%TN%.buildlog"
   ) else (
     echo   [no buildlog produced -- cl did not run, or the redirect failed]
   )
+  call :dump_log "%TN%.buildlog"
   echo   ---- end cl output ----
   set /a MUNIT_FAIL+=1
   set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
@@ -243,12 +257,18 @@ if errorlevel 1 (
   rem  on, which is precisely when the text is most needed.  (Cost us a
   rem  round trip at v1.49.2.)
   echo   ---- cl output: %MS%\%TN% ----
+  rem  The 260-byte buildlog printed NOTHING through `type` inside this
+  rem  parenthesized block, while the `for %%~zZ` size in the same block
+  rem  worked -- so the file is real and has content, and the display is
+  rem  what failed.  Dump it OUTSIDE the block via a subroutine, where
+  rem  cmd's redirection context is not nested, and use `more <` (which
+  rem  reads stdin) rather than `type` (which opens the path itself).
   if exist "%TN%.buildlog" (
     for %%Z in ("%TN%.buildlog") do echo   [buildlog %%~zZ bytes]
-    type "%TN%.buildlog"
   ) else (
     echo   [no buildlog produced -- cl did not run, or the redirect failed]
   )
+  call :dump_log "%TN%.buildlog"
   echo   ---- end cl output ----
   set /a MUNIT_FAIL+=1
   set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
@@ -288,12 +308,18 @@ cl %CFLAGS% /Fe:%TN%.exe ^
 if errorlevel 1 (
   echo   [munit] %MS%\%TN% ADVISORY BUILD FAILED ^(not gated^)
   echo   ---- cl output: %MS%\%TN% ----
+  rem  The 260-byte buildlog printed NOTHING through `type` inside this
+  rem  parenthesized block, while the `for %%~zZ` size in the same block
+  rem  worked -- so the file is real and has content, and the display is
+  rem  what failed.  Dump it OUTSIDE the block via a subroutine, where
+  rem  cmd's redirection context is not nested, and use `more <` (which
+  rem  reads stdin) rather than `type` (which opens the path itself).
   if exist "%TN%.buildlog" (
     for %%Z in ("%TN%.buildlog") do echo   [buildlog %%~zZ bytes]
-    type "%TN%.buildlog"
   ) else (
     echo   [no buildlog produced -- cl did not run, or the redirect failed]
   )
+  call :dump_log "%TN%.buildlog"
   echo   ---- end cl output ----
   goto :eof
 )

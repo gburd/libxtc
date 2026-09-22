@@ -4035,7 +4035,15 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		down_signal.pid  = p->pid;
 		down_signal.reason = p->exit_reason;
 		down_signal.exit_kind = (uint8_t)p->exit_kind;
-		(void)xtc_send(me->watcher, &down_signal, sizeof down_signal);
+		/* A DROPPED DOWN is a supervision fault, not a stray packet:
+		 * the watcher will wait forever for a terminal event that is
+		 * never coming.  The send is bounded on purpose (correct
+		 * backpressure), so ordinary traffic CAN win this race -- but
+		 * losing it must not be silent.  Record it. */
+		if (xtc_send(me->watcher, &down_signal,
+		    sizeof down_signal) != XTC_OK)
+			__xtc_tail_emit(XTC_TAIL_SCHED,
+			    XTC_TAIL_LIFECYCLE_DROP, p->pid, 0);
 		__mon_free(me);
 	}
 

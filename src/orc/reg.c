@@ -20,6 +20,8 @@
 #include "xtc_svr.h"       /* xtc_svr_call_name via-dispatch */
 #include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
+#include "xtc_tail.h"      /* XTC_TAIL_LIFECYCLE_DROP kind */
+#include "tail_int.h"      /* __xtc_tail_emit */
 
 #include <pthread.h>
 #include <stdint.h>
@@ -430,7 +432,17 @@ xtc_reg_register_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 		(void)__xtc_mtx_unlock(&r->lock);
 		m.tag = REG_REAPER_MONITOR;
 		m.pid = pid;
-		(void)xtc_send(reaper, &m, sizeof m);
+		/* Enrollment is what makes this a MONITORED registration: if
+		 * the reaper never receives it, the name will not be removed
+		 * when the pid dies, and we would still be returning XTC_OK --
+		 * promising automatic cleanup with no coverage behind it.  The
+		 * send is bounded, so record the loss rather than hiding it.
+		 * (Returning failure here is the stronger fix, but it is a
+		 * consumer-visible contract change; making it diagnosable is
+		 * the prerequisite step.) */
+		if (xtc_send(reaper, &m, sizeof m) != XTC_OK)
+			__xtc_tail_emit(XTC_TAIL_SCHED,
+			    XTC_TAIL_LIFECYCLE_DROP, pid, 0);
 	}
 	return XTC_OK;
 }
