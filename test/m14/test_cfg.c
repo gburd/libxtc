@@ -1071,8 +1071,10 @@ test_load_int_range(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_cfg_get_enum("g.lvl", &ev), ==, XTC_OK);
 	munit_assert_int(ev, ==, 0);    /* default: nothing applied */
 
-	/* In-range boundary values still apply (the check is inclusive). */
-	truncate(path, 0);
+	/* In-range boundary values still apply (the check is inclusive).
+	 * fopen(..., "w") truncates, so no truncate(2) call is needed --
+	 * and POSIX truncate() does not exist on MSVC, where the implicit
+	 * declaration became C4013 and /WX turned it into a build error. */
 	f = fopen(path, "w");
 	munit_assert_not_null(f);
 	fprintf(f, "g.free = 2147483647\ng.lvl = 2\n");
