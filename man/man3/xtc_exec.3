@@ -286,7 +286,7 @@ at spawn or
 .Xr xtc_proc_set_class 3
 from inside the process.  A loop that carries more than one class picks
 the minimum-virtual-runtime class on each dispatch, so each class
-receives a CPU fraction proportional to its shares — a class with 3x
+receives a CPU fraction proportional to its shares -- a class with 3x
 the shares of another gets about 3x the CPU.  A non-zero
 .Fa latency_ns
 shrinks the loop's cooperative yield interval so the class is serviced
@@ -326,7 +326,7 @@ the loop to stderr.
 returns the number of over-budget reports (telemetry).
 .Pp
 The check is a cheap wall-clock comparison at the run-end boundary in
-the loop step — no watcher thread, no signal — so it is a single branch
+the loop step -- no watcher thread, no signal -- so it is a single branch
 on a disabled flag when off (zero overhead).  This is INSPIRED BY
 Glommio's stall detector
 .Pq executor/stall.rs .

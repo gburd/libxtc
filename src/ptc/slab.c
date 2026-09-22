@@ -609,6 +609,38 @@ __push_slot_locked(xtc_slab_t *s, void *slot)
 	/* Slot not in any chunk -- programming error. */
 }
 
+/*
+ * Is this slot already on its chunk's free list?  O(free list), so this
+ * is ONLY for the teardown drain below -- never the alloc/free hot path.
+ *
+ * The magazine and the chunk free lists are not disjoint in every state:
+ * a slot can sit in the magazine while already being linked on its
+ * chunk's list.  __push_slot_locked pushes unconditionally, so draining
+ * such a slot links it to itself (*slot = free_head == slot), which makes
+ * the list cyclic and drives n_inuse negative.  xtc_slab_destroy's own
+ * free-list walk then never terminates.
+ */
+static int
+__slot_on_free_list_locked(xtc_slab_t *s, void *slot)
+{
+	struct slab_chunk *c;
+	void *fh;
+	int guard;
+
+	for (c = s->chunks; c != NULL; c = c->next) {
+		if ((uint8_t *)slot < (uint8_t *)c->base ||
+		    (uint8_t *)slot >= (uint8_t *)c->base + c->size)
+			continue;
+		guard = c->n_total + 1;
+		for (fh = c->free_head; fh != NULL && guard-- > 0;
+		     fh = *(void **)fh)
+			if (fh == slot)
+				return 1;
+		return 0;
+	}
+	return 0;
+}
+
 /* ---- public API ---- */
 
 int
@@ -786,9 +818,11 @@ xtc_slab_destroy(xtc_slab_t *s)
 				if (mags[i].cache == s) {
 					struct magazine *mag = &mags[i].mag;
 					(void)pthread_mutex_lock(&s->lock);
-					while (mag->n > 0)
-						__push_slot_locked(s,
-						    mag->slots[--mag->n]);
+					while (mag->n > 0) {
+						void *sl = mag->slots[--mag->n];
+						if (!__slot_on_free_list_locked(s, sl))
+							__push_slot_locked(s, sl);
+					}
 					(void)pthread_mutex_unlock(&s->lock);
 					__os_free(mag->slots);
 					mags[i].cache = NULL;
@@ -800,8 +834,11 @@ xtc_slab_destroy(xtc_slab_t *s)
 		if (__tls_mags[i].cache == s) {
 			struct magazine *mag = &__tls_mags[i].mag;
 			(void)pthread_mutex_lock(&s->lock);
-			while (mag->n > 0)
-				__push_slot_locked(s, mag->slots[--mag->n]);
+			while (mag->n > 0) {
+				void *sl = mag->slots[--mag->n];
+				if (!__slot_on_free_list_locked(s, sl))
+					__push_slot_locked(s, sl);
+			}
 			(void)pthread_mutex_unlock(&s->lock);
 			__os_free(mag->slots);
 			__tls_mags[i].cache = NULL;
