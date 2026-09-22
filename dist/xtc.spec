@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.49.1
+Version:        1.49.2
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,27 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Mon Sep 22 2026 Greg Burd <greg@burd.me> - 1.49.2-1
+- Bug-fix release from an external code review.  Seventeen reproduced
+  defects across the I/O registration lifetime, cancellation/park paths,
+  config sessions, arena groups, the allocator/slab/resource accounting,
+  and the deterministic-simulation oracles.  No API or ABI change: the
+  public symbol set (710) and every public struct layout are byte-identical
+  to 1.49.1, verified mechanically.
+- Highlights: an io_uring use-after-free/double-free on
+  register-modify-delete-poll; cfg sessions were per-OS-thread rather than
+  per-fiber, so two fibers on one carrier read each other's settings; arena
+  group discard could reset memory while a member was still live; five
+  cancellation defects including a killed waiter leaking its fd
+  registration and an at-exit hook looping forever after a kill; an
+  aligned-allocation size overflow; slab destructors running twice; and a
+  resource-cap overflow that admitted past the cap.
+- Also: several test oracles that could pass without testing anything
+  (a partition that cut no traffic, a corruption check that could not
+  fail, a planted-bug gate that credited any nonzero exit) now fail when
+  the property they name is broken, and release publication is gated on
+  the tested revision.
+
 * Tue Sep 16 2026 Greg Burd <greg@burd.me> - 1.49.1-1
 - doc: man-page coverage for the 1.49.0 additions (the man-coverage gate
   requires every PUBLIC function be documented; v1.49.0's tag landed on

@@ -1,3 +1,60 @@
+libxtc (1.49.2-1) unstable; urgency=medium
+
+  * Bug-fix release following an external code review: seventeen
+    reproduced defects, each with the failing case captured before the
+    fix.  No API or ABI change -- the public symbol set (710 symbols) and
+    every public struct layout are byte-identical to 1.49.1, verified
+    mechanically, so this is a drop-in replacement.
+  * io: xtc_io_mod_fd reused one heap node for two io_uring poll
+    generations, so register-modify-delete-poll produced a use-after-free
+    and a double-free (valgrind-confirmed, with a clean no-modify control).
+  * cfg: session bindings were per-OS-thread, not per-fiber as documented;
+    two fibers on one carrier that each bound a session read each other's
+    values after a yield.  Registry entries are now refcounted, so
+    unregister and session teardown are safe in either order, and config
+    integers are range-checked instead of narrowing into range.
+  * mctx: arena group discard could reset the arena while a member that
+    joined during the wait was still alive; it now waits for the pid to
+    leave the proc table, which also closes the window where a member
+    counted as gone while its at-exit callback could still touch arena
+    memory.  Reset no longer holds the context lock across cleanup
+    callbacks, so a callback that introspects its own context cannot
+    deadlock.
+  * proc/blocking: five cancellation-safety defects -- an explicit wake
+    reported as a timeout, a killed waiter leaving its fd registered, an
+    at-exit hook that parked after a kill re-entering the exit path
+    forever, a check/arm gap that could lose a mailbox or cancellation
+    wake, and xtc_blocking_run letting a pool worker outlive the caller's
+    stack frame.
+  * alloc/slab/res/audit: aligned-allocation size round-up wrapped and
+    returned a too-small block for a huge request; slab destroy ran
+    destructors twice for magazine-cached objects; resource acquire
+    overflowed past a cap and went negative; redzones broke the requested
+    object alignment; a failed realloc dropped a live allocation from the
+    auditor; and a slot-size floor let destroy's marker pass corrupt an
+    adjacent slot.
+  * slab: fixed a regression introduced by the allocator work in this same
+    release -- the teardown drain re-pushed slots already on a chunk free
+    list, making it cyclic and hanging xtc_slab_destroy.  Caught by the
+    DST tier (test_sim_lockmgr), bisected, and diagnosed by instrumenting
+    the push site.
+  * test/sim, scripts: several oracles could pass without testing their
+    property -- a partition that cut no workload traffic, an activation
+    report cleared before it was read, a silent-corruption counter that
+    was never incremented, and a planted-bug gate that credited any
+    nonzero exit.  Each now fails when the named property is broken.
+  * doc: abi-stability.md described enforcement machinery that does not
+    exist in the tree; the README's headline example could never print its
+    output; and several man pages documented functions and signatures that
+    do not exist.  Corrected, and the 1.x struct-growth ABI break plus the
+    fiber-retention memory limit are now documented honestly.
+  * ci: a tag could publish a release without any tests having run, and
+    the published tarball was never built.  Publication is now gated on
+    the tested revision and the artifact is built the way a packager
+    builds it.
+
+ -- Greg Burd <greg@burd.me>  Mon, 22 Sep 2026 02:30:00 -0400
+
 libxtc (1.49.1-1) unstable; urgency=medium
 
   * doc: add man-page coverage for the 1.49.0 additions (xtc_mask_enter/
