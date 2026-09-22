@@ -68,7 +68,8 @@ static void
 fold(long v)
 {
 	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
-	h = h * 1000003L + (v + 1);
+	h = (long)((unsigned long)h * 1000003UL +
+		    (unsigned long)(v + 1));
 	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
 }
 
@@ -193,8 +194,10 @@ b_worker(void *arg)
 	memset(buf, 0, sizeof buf);
 	r = xtc_aio_pread(g_b_fd, buf, B_REGION, off);
 	h = atomic_load_explicit(&g_b_hash, memory_order_relaxed);
-	h = h * 1000003L + (w + 1);
-	h = h * 1000003L + (r + 1);
+	h = (long)((unsigned long)h * 1000003UL +
+		    (unsigned long)(w + 1));
+	h = (long)((unsigned long)h * 1000003UL +
+		    (unsigned long)(r + 1));
 	atomic_store_explicit(&g_b_hash, h, memory_order_relaxed);
 	atomic_fetch_add_explicit(&g_b_done, 1, memory_order_relaxed);
 }

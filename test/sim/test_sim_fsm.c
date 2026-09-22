@@ -64,7 +64,8 @@ ts_event(void *st, int cur, const void *msg, size_t len, xtc_fsm_call_t *call)
 	ev = *(const int *)msg;
 
 	t->processed++;
-	t->fold = t->fold * 1000003L + (long)(cur * 8 + ev);
+	t->fold = (long)((unsigned long)t->fold * 1000003UL +
+	    (unsigned long)(long)(cur * 8 + ev));
 
 	if (ev == EV_COIN) {
 		if (cur == ST_LOCKED) {

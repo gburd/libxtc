@@ -35,7 +35,8 @@ worker(void *arg)
 	 * which workers reach here is a function of the seed -> the hash
 	 * replays. */
 	long h = atomic_load_explicit(&g_trace_hash, memory_order_relaxed);
-	h = h * 1000003L + (id + 1);
+	h = (long)((unsigned long)h * 1000003UL +
+		    (unsigned long)(id + 1));
 	atomic_store_explicit(&g_trace_hash, h, memory_order_relaxed);
 	/* A few cooperative yields so the scheduler interleaves us with
 	 * peers (exercising the seeded interleaving + work stealing). */

@@ -184,9 +184,17 @@ cl %CFLAGS% /Fe:%TN%.exe ^
    /I"%XTC_SRC%\test\%MS%" ^
    "%XTC_SRC%\test\%MS%\%TN%.c" ^
    "%XTC_SRC%\test\%MS%\munit.c" ^
-   xtc.lib ws2_32.lib ntdll.lib dbghelp.lib >nul 2>&1
+   xtc.lib ws2_32.lib ntdll.lib dbghelp.lib > "%TN%.buildlog" 2>&1
 if errorlevel 1 (
   echo   [munit] %MS%\%TN% BUILD FAILED
+  rem  PRINT THE COMPILER OUTPUT.  This was discarded to >nul, so a break
+  rem  on this gate reported only "BUILD FAILED" with no error text --
+  rem  undiagnosable from a CI log without a Windows host to reproduce
+  rem  on, which is precisely when the text is most needed.  (Cost us a
+  rem  round trip at v1.49.2.)
+  echo   ---- cl output: %MS%\%TN% ----
+  type "%TN%.buildlog"
+  echo   ---- end cl output ----
   set /a MUNIT_FAIL+=1
   set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
   goto :eof
@@ -221,9 +229,17 @@ set TN=%~2
 cl %CFLAGS% /Fe:%TN%.exe ^
    /I"%XTC_SRC%\test\%MS%" ^
    "%XTC_SRC%\test\%MS%\%TN%.c" ^
-   xtc.lib ws2_32.lib ntdll.lib dbghelp.lib >nul 2>&1
+   xtc.lib ws2_32.lib ntdll.lib dbghelp.lib > "%TN%.buildlog" 2>&1
 if errorlevel 1 (
   echo   [munit] %MS%\%TN% BUILD FAILED
+  rem  PRINT THE COMPILER OUTPUT.  This was discarded to >nul, so a break
+  rem  on this gate reported only "BUILD FAILED" with no error text --
+  rem  undiagnosable from a CI log without a Windows host to reproduce
+  rem  on, which is precisely when the text is most needed.  (Cost us a
+  rem  round trip at v1.49.2.)
+  echo   ---- cl output: %MS%\%TN% ----
+  type "%TN%.buildlog"
+  echo   ---- end cl output ----
   set /a MUNIT_FAIL+=1
   set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
   goto :eof
@@ -258,9 +274,12 @@ cl %CFLAGS% /Fe:%TN%.exe ^
    /I"%XTC_SRC%\test\%MS%" ^
    "%XTC_SRC%\test\%MS%\%TN%.c" ^
    "%XTC_SRC%\test\%MS%\munit.c" ^
-   xtc.lib ws2_32.lib ntdll.lib dbghelp.lib >nul 2>&1
+   xtc.lib ws2_32.lib ntdll.lib dbghelp.lib > "%TN%.buildlog" 2>&1
 if errorlevel 1 (
   echo   [munit] %MS%\%TN% ADVISORY BUILD FAILED ^(not gated^)
+  echo   ---- cl output: %MS%\%TN% ----
+  type "%TN%.buildlog"
+  echo   ---- end cl output ----
   goto :eof
 )
 %TN%.exe >nul 2>&1
