@@ -65,7 +65,28 @@
 #define N_PAIRS    12       /* cross-loop ping/pong pairs (bounded) */
 #define N_SLEEPERS 4        /* timer-driven procs (bounded) */
 #define N_HOPS     3        /* round-trips per pair */
-#define TORN_TRIES 32       /* bounded verifier retries */
+/*
+ * Bounded verifier retries.  This budget is a PROBABILITY argument, not a
+ * round number, because corruption is injected on the READ path as well
+ * as the write path (src/io/io_sim.c: the torn/ENOSPC write model AND
+ * __xtc_sim_io_flip_byte on every pread).  So an attempt survives only if
+ * the write is untorn AND the read-back is not flipped: at this sweep's
+ * top corruption bucket (520 per 1000) that is
+ *     P(attempt fails) = 1 - (1 - 0.52)^2 = 0.77
+ * and a rewrite cannot "escape" a read-path flip, which is why the
+ * verifier does not converge by retrying harder in kind.
+ *
+ * At 32 tries P(all fail) = 2.3e-4, and a 100k-seed sweep runs ~6,250
+ * verifiers in that bucket, so ~2.9 spurious failures were EXPECTED per
+ * 100k -- and a 4-shard 100k run measured exactly 3 (seeds
+ * 571488401344257137, 12320922477591755847, and one more), every one
+ * reproducible from its seed.  That was the harness, not a libxtc
+ * durability defect: the oracle itself is correct and stays strict.
+ * At 128 the same arithmetic gives ~3e-11 per 100k (about 1e-8 per
+ * year of nightly sweeps), which is rare enough not to cry wolf while
+ * still failing instantly on a verifier that genuinely cannot converge.
+ */
+#define TORN_TRIES 128
 
 /*
  * WHERE THE PARTITION CUT GOES -- and why it must be an edge that
