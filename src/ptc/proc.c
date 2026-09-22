@@ -458,7 +458,30 @@ struct xtc_proc {
 	unsigned      ct_seq;
 
 	/* Lifecycle. */
-	int         alive;
+	/*
+	 * Liveness flag.  ATOMIC because it is written by the EXITING FIBER
+	 * (proc_exit clears it) and read by FOREIGN THREADS as a gate before
+	 * acting on the proc -- xtc_proc_wake, xtc_send, the link/monitor
+	 * paths, xtc_exit_pid_deadline, xtc_proc_info.  A plain int there is
+	 * a data race whatever the values (measured by ThreadSanitizer on the
+	 * uring backend: __proc_entry's store vs xtc_proc_wake's read from a
+	 * foreign poker thread).
+	 *
+	 * Benign in OUTCOME, which is why it never misbehaved: a stale
+	 * "alive" read costs at most a harmless no-op wake or an E_INVAL that
+	 * the caller already has to tolerate, and __resolve holds a refcount
+	 * so the struct cannot be freed under the reader.  It is still UB, and
+	 * it reads identically to a case that would NOT be benign.
+	 *
+	 * Relaxed ordering: this is a hint, not a lock.  It is deliberately
+	 * NOT proof that the proc's at-exit hooks have finished -- the flag
+	 * is cleared BEFORE __run_proc_at_exit runs (see the note on
+	 * xtc_exit_pid_deadline in xtc_proc.h), and code needing
+	 * cleanup-complete must wait for the pid to leave the proc TABLE, as
+	 * arena-group discard does.  Matches how xtc_sup / xtc_svr already
+	 * declare their own alive flags.
+	 */
+	_Atomic int alive;
 
 	/*
 	 * Teardown-safety refcount.  A resolver (__table_lookup) takes a
@@ -906,7 +929,7 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
 	 * which parses as (!alive || cap>0) ? ... and produced
 	 * surprising behaviour on platforms where alive timing
 	 * differed.  Explicit parens. */
-	if (!p->alive ||
+	if (!atomic_load_explicit(&p->alive, memory_order_relaxed) ||
 	    (p->mbox_cap > 0 &&
 	     (p->mbox_n +
 	      atomic_load_explicit(&p->mbox_saved, memory_order_relaxed))
@@ -920,7 +943,8 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
 	     * FoundationDB's "smallest legal buffer" buggify.  The per-call
 	     * coin (25%) keeps sends eventually succeeding so senders that
 	     * retry make progress.  A no-op in production. */
-	    (p->alive && XTC_SIM_BUGGIFY("proc.mbox.spurious_full") &&
+	    (atomic_load_explicit(&p->alive, memory_order_relaxed) &&
+	    XTC_SIM_BUGGIFY("proc.mbox.spurious_full") &&
 	     xtc_sim_fault(250))) {
 		p->mbox_drop_total++;
 		(void) __proc_mtx_unlock(&p->mbox_lock);
@@ -1154,7 +1178,7 @@ __proc_entry(void *arg)
 
 proc_exit:
 
-	p->alive = 0;
+	atomic_store_explicit(&p->alive, 0, memory_order_relaxed);
 	/* Run the proc's at-exit callbacks (release locks, reset memory,
 	 * close fds) before anyone observes the exit.  __current_proc is
 	 * still this proc, and we are past the fault handler's longjmp,
@@ -1238,7 +1262,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	p->loop = loop;
 	p->fn = fn;
 	p->arg = arg;
-	p->alive = 1;
+	atomic_store_explicit(&p->alive, 1, memory_order_relaxed);
 	p->spawn_class = (opts != NULL) ? opts->sched_class : NULL;
 	atomic_store_explicit(&p->refs, 1, memory_order_relaxed);   /* owner ref */
 	p->mbox_cap = (opts != NULL && opts->mailbox_cap > 0)
@@ -1830,7 +1854,8 @@ xtc_send(xtc_pid_t to, const void *data, size_t size)
 	if (XTC_UNLIKELY(p == NULL)) return XTC_E_INVAL;
 	/* p is pinned by the resolver ref; release on every exit below so a
 	 * concurrent exit cannot free it mid-delivery. */
-	if (XTC_UNLIKELY(!p->alive)) { __proc_release(p); return XTC_E_INVAL; }
+	if (XTC_UNLIKELY(!atomic_load_explicit(&p->alive,
+	    memory_order_relaxed))) { __proc_release(p); return XTC_E_INVAL; }
 
 	/* Guard against size_t overflow in the envelope allocation:
 	 * a size near SIZE_MAX would wrap sizeof *e + size to a small
@@ -1887,7 +1912,8 @@ xtc_exit_pid(xtc_pid_t target, int reason)
 	if (XTC_UNLIKELY(xtc_pid_is_none(target))) return XTC_E_INVAL;
 	p = __resolve(target, NULL);
 	if (XTC_UNLIKELY(p == NULL)) return XTC_E_INVAL;
-	if (XTC_UNLIKELY(!p->alive)) { __proc_release(p); return XTC_E_INVAL; }
+	if (XTC_UNLIKELY(!atomic_load_explicit(&p->alive,
+	    memory_order_relaxed))) { __proc_release(p); return XTC_E_INVAL; }
 
 	/* Encode reason so 0 means "no kill pending".  Negative reasons
 	 * are clamped to -1 so the encoded value stays nonzero. */
@@ -1958,7 +1984,8 @@ xtc_exit_pid_deadline(xtc_pid_t target, int reason, int64_t timeout_ns,
 	for (;;) {
 		/* Gone => it observed the kill and unwound. */
 		p = __resolve(target, NULL);
-		if (p == NULL || !p->alive) {
+		if (p == NULL || !atomic_load_explicit(&p->alive,
+		    memory_order_relaxed)) {
 			if (p != NULL)
 				__proc_release(p);
 			status = XTC_KILL_DELIVERED;
@@ -2028,7 +2055,9 @@ xtc_proc_wake(xtc_pid_t target)
 		return XTC_E_INVAL;
 	p = __resolve(target, NULL);
 	if (p == NULL) return XTC_OK;   /* gone: a wake is a harmless no-op */
-	if (!p->alive) { __proc_release(p); return XTC_OK; }
+	if (!atomic_load_explicit(&p->alive, memory_order_relaxed)) {
+		__proc_release(p); return XTC_OK;
+	}
 
 	(void) __proc_mtx_lock(&p->mbox_lock);
 	if (p->waker_armed) {
@@ -3871,7 +3900,7 @@ __peer_push_link(xtc_pid_t peer_pid, struct link_entry *e)
 	if (peer_pid.local_id < tbl->cap &&
 	    tbl->slots[peer_pid.local_id].proc == peer &&
 	    tbl->slots[peer_pid.local_id].gen == peer_pid.gen &&
-	    peer->alive) {
+	    atomic_load_explicit(&peer->alive, memory_order_relaxed)) {
 		e->next = peer->links;
 		peer->links = e;
 		pushed = 1;
@@ -3896,7 +3925,7 @@ __peer_push_monitored_by(xtc_pid_t peer_pid, struct mon_entry *m)
 	if (peer_pid.local_id < tbl->cap &&
 	    tbl->slots[peer_pid.local_id].proc == peer &&
 	    tbl->slots[peer_pid.local_id].gen == peer_pid.gen &&
-	    peer->alive) {
+	    atomic_load_explicit(&peer->alive, memory_order_relaxed)) {
 		m->next = peer->monitored_by;
 		peer->monitored_by = m;
 		pushed = 1;
@@ -3915,7 +3944,11 @@ xtc_link(xtc_pid_t other)
 	struct link_entry *le;
 	if (self == NULL) return XTC_E_INVAL;
 	peer = __resolve(other, NULL);
-	if (peer == NULL || !peer->alive) { if (peer) __proc_release(peer); return XTC_E_INVAL; }
+	if (peer == NULL || !atomic_load_explicit(&peer->alive,
+	    memory_order_relaxed)) {
+		if (peer) __proc_release(peer);
+		return XTC_E_INVAL;
+	}
 	__proc_release(peer);   /* only liveness was needed; the symmetric
 	                         * push below re-resolves under the peer lock */
 	le = __link_alloc();
@@ -3965,7 +3998,8 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 	struct mon_entry *me;
 	if (self == NULL) return XTC_E_INVAL;
 	peer = __resolve(target, NULL);
-	if (peer == NULL || !peer->alive) {
+	if (peer == NULL || !atomic_load_explicit(&peer->alive,
+	    memory_order_relaxed)) {
 		/*
 		 * Target is already gone (it exited and was reaped between
 		 * the caller's spawn and this monitor -- a real race when the
@@ -4162,7 +4196,8 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 {
 	memset(info, 0, sizeof *info);
 	info->pid = p->pid;
-	info->alive = p->alive;
+	info->alive = atomic_load_explicit(&p->alive,
+	    memory_order_relaxed);
 	info->kill_pending =
 	    atomic_load_explicit(&p->kill_pending, memory_order_relaxed) ? 1 : 0;
 	/* A2 mask state: the supervisor-side "is this fiber killable now?"
