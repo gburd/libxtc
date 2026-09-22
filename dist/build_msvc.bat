@@ -218,7 +218,7 @@ if errorlevel 1 (
   set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
   goto :eof
 )
-%TN%.exe >nul 2>&1
+%TN%.exe > "%TN%.runlog" 2>&1
 rem  Honor the automake SKIP convention: exit code 77 == SKIP, not a
 rem  failure.  Timing-fragile tests (e.g. concurrency/test_wake_after_
 rem  migration when no migration was observed this run, or
@@ -232,6 +232,13 @@ if errorlevel 77 if not errorlevel 78 (
 )
 if errorlevel 1 (
   echo   [munit] %MS%\%TN% TEST FAILED
+  rem  Print the FAILING CASE.  Test output went to >nul, so a run
+  rem  failure named only the binary -- on a platform with no local host
+  rem  that is not enough to act on (it cost a CI round trip at
+  rem  v1.49.2, exactly as the discarded cl output did).
+  echo   ---- test output: %MS%\%TN% ----
+  call :dump_log "%TN%.runlog"
+  echo   ---- end test output ----
   set /a MUNIT_FAIL+=1
   set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
   goto :eof
@@ -274,7 +281,7 @@ if errorlevel 1 (
   set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
   goto :eof
 )
-%TN%.exe >nul 2>&1
+%TN%.exe > "%TN%.runlog" 2>&1
 rem  cmd's `if errorlevel N` is ">= N", so test 77 before 1.
 if errorlevel 77 if not errorlevel 78 (
   echo   [munit] %MS%\%TN% SKIP
@@ -283,6 +290,13 @@ if errorlevel 77 if not errorlevel 78 (
 )
 if errorlevel 1 (
   echo   [munit] %MS%\%TN% TEST FAILED
+  rem  Print the FAILING CASE.  Test output went to >nul, so a run
+  rem  failure named only the binary -- on a platform with no local host
+  rem  that is not enough to act on (it cost a CI round trip at
+  rem  v1.49.2, exactly as the discarded cl output did).
+  echo   ---- test output: %MS%\%TN% ----
+  call :dump_log "%TN%.runlog"
+  echo   ---- end test output ----
   set /a MUNIT_FAIL+=1
   set MUNIT_FAILED_LIST=!MUNIT_FAILED_LIST! %MS%/%TN%
   goto :eof
@@ -323,7 +337,7 @@ if errorlevel 1 (
   echo   ---- end cl output ----
   goto :eof
 )
-%TN%.exe >nul 2>&1
+%TN%.exe > "%TN%.runlog" 2>&1
 if errorlevel 1 (
   echo   [munit] %MS%\%TN% ADVISORY TEST FAILED ^(AFD-timing; not gated^)
   goto :eof
