@@ -29,10 +29,18 @@ set -e
 GDBPY="$XTC_SRC_DIR/tools/gdb/xtc-gdb.py"
 TMPD=$(mktemp -d)
 
+# The EXIT trap must never change the script's exit status.  Under set -e a
+# failing command inside the trap REPLACES the status the script exited
+# with, so `[ -n "$PROG_PID" ] && kill ...` -- which is false when the probe
+# already died -- turned an `exit 0` after a SKIP into rc=1 and made make
+# check red.  Save the status, disable -e, and re-exit with it.
 cleanup() {
+	_rc=$?
+	set +e
 	[ -n "$PROG_PID" ] && kill -9 "$PROG_PID" 2>/dev/null
-	find "$TMPD" -mindepth 1 -delete 2>/dev/null || true
-	rmdir "$TMPD" 2>/dev/null || true
+	find "$TMPD" -mindepth 1 -delete 2>/dev/null
+	rmdir "$TMPD" 2>/dev/null
+	exit "$_rc"
 }
 trap cleanup 0 1 2 15
 
@@ -82,7 +90,10 @@ worker(void *a)
 	if (fd < 0)
 		return;
 	(void)unlink(path);
-	for (i = 0; i < 4000; i++) {
+	/* Until the SIGSTOP, not a fixed count: a bounded loop finished in
+	 * 0.14s on a tmpfs /tmp, before the stopper fired, so the gate
+	 * SKIPped ("never reached a stopped state") on every fast host. */
+	for (i = 0;; i = (i + 1) % 4000) {
 		(void)xtc_aio_pwrite(fd, buf, sizeof buf, (int64_t)i * 4096);
 		(void)xtc_aio_fdatasync(fd);
 	}

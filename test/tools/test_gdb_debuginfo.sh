@@ -31,11 +31,17 @@ GDBPY="$XTC_SRC_DIR/tools/gdb/xtc-gdb.py"
 LIB="$XTC_BUILD_DIR/libxtc.a"
 TMPD=$(mktemp -d)
 
+# The EXIT trap must never change the exit status: under set -e a failing
+# `[ -n "$PID" ] && kill` (the pid is cleared or already dead) would REPLACE
+# the script's status -- an `exit 0` became rc=1 (same bug as gdb-cqes).
 cleanup() {
+	_rc=$?
+	set +e
 	[ -n "$PID_DBG" ] && kill -9 "$PID_DBG" 2>/dev/null
 	[ -n "$PID_STR" ] && kill -9 "$PID_STR" 2>/dev/null
-	find "$TMPD" -mindepth 1 -delete 2>/dev/null || true
-	rmdir "$TMPD" 2>/dev/null || true
+	find "$TMPD" -mindepth 1 -delete 2>/dev/null
+	rmdir "$TMPD" 2>/dev/null
+	exit "$_rc"
 }
 trap cleanup 0 1 2 15
 

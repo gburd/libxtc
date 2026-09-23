@@ -22,7 +22,7 @@ tmp=$(mktemp -d)
 # cd out of $tmp before removing it: some rm implementations (illumos)
 # refuse to remove a directory that is an ancestor of the current
 # working directory, and the test cd's into $tmp/dist below.
-trap 'cd / 2>/dev/null; rm -rf "$tmp"' EXIT
+trap 'cd / 2>/dev/null; rm -rf "$tmp" || true' EXIT
 
 # Mirror just the bits configure actually reads.
 mkdir -p "$tmp/dist" "$tmp/src"

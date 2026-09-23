@@ -39,7 +39,7 @@ if [ -z "$b1" ]; then
 fi
 
 tmp=$(mktemp -d)
-trap 'cd / 2>/dev/null; rm -rf "$tmp"' EXIT
+trap 'cd / 2>/dev/null; rm -rf "$tmp" || true' EXIT
 cp -r "$XTC_SRC_DIR/." "$tmp/"
 cd "$tmp/dist" && autoreconf -i >/dev/null 2>&1
 cd "$tmp"

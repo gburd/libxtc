@@ -47,7 +47,7 @@ if [ -n "${XTC_SIM_KEEP_BUILD:-}" ]; then
 	mkdir -p "$work"
 else
 	work="$(mktemp -d)"
-	trap 'cd / 2>/dev/null; rm -rf "$work"' EXIT INT TERM
+	trap 'cd / 2>/dev/null; rm -rf "$work" || true' EXIT INT TERM
 fi
 build="$work/build"
 mkdir -p "$build"
