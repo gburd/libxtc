@@ -615,6 +615,97 @@ jobs:
           done
           exit $rc
 
+  tsan-uring-migration:
+    # NON-GATING ThreadSanitizer over the HEAVY-MIGRATION suites on the
+    # URING backend -- the combination the gating tsan-fibers job above
+    # does NOT cover (it is epoll-only, and it deliberately excludes
+    # test_exec because heavy work-stealing migration is noisy under TSan).
+    #
+    # That gap was not theoretical: running it by hand found THREE REAL
+    # RACES that had been sitting behind an unrun configuration --
+    # task->park_timer written by both the parking fiber and the
+    # timer-expiry path, xtc_proc_table.n_used decremented under one
+    # stripe lock while the allocate path holds all of them, and
+    # xtc_proc.alive read by foreign threads as a plain int.  This job
+    # exists so the next one surfaces in CI instead.
+    #
+    # continue-on-error: TRUE, on purpose and with a documented reason,
+    # not to paper over noise:
+    #   1. The migration artifacts are suppressed by name in
+    #      .github/tsan.supp, but that list is inherently tied to which
+    #      frames the optimizer happens to inline -- a compiler bump can
+    #      shift one out of coverage without anything being wrong.
+    #   2. ONE report is NOT SUPPRESSIBLE AT ALL: the "use of an invalid
+    #      mutex" on a migrated proc's mbox_lock.  TSan has no "mutex:"
+    #      suppression type and silently ignores an unknown type, so it
+    #      cannot be filtered; it is safe (destroy is refcount-deferred to
+    #      __proc_free; ASan-clean is the control) and is documented in
+    #      tsan.supp.  A gating job would therefore be red forever.
+    # The job still prints every report and writes a summary, so a NEW
+    # race is visible in the run list even though it cannot fail the
+    # pipeline.  Promote it to gating if the mutex report ever becomes
+    # suppressible.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang make autoconf pkg-config libssl-dev liburing-dev gawk
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure with clang ThreadSanitizer on the uring backend
+        run: |
+          mkdir -p build_tsan_uring
+          cd build_tsan_uring
+          CC=clang \
+          CFLAGS="-fsanitize=thread -fno-omit-frame-pointer -g -O1" \
+          LDFLAGS="-fsanitize=thread" \
+            ../dist/configure --with-io-backend=uring --with-tls=auto
+      - name: Build
+        run: make -C build_tsan_uring -j"$(nproc)"
+      - name: Heavy-migration suites under TSan (advisory)
+        env:
+          # halt_on_error=0: we want the WHOLE population per run, not the
+          # first report.  Counting them is the signal here -- the by-hand
+          # audit only became tractable once every report was visible
+          # (the default halt-on-first showed 6 of 251).
+          TSAN_OPTIONS: halt_on_error=0:detect_deadlocks=0:suppressions=${{ github.workspace }}/.github/tsan.supp
+        run: |
+          cd build_tsan_uring
+          total=0
+          for t in test_exec test_proc test_aio_migrate_wake; do
+            if ! make "$t" > "build_$t.log" 2>&1; then
+              echo "::warning::$t did not build under clang TSan (uring)"
+              tail -40 "build_$t.log"
+              continue
+            fi
+            echo "=== $t ==="
+            ./"$t" > "tsan_$t.log" 2>&1 || true
+            n=$(grep -c "WARNING: ThreadSanitizer" "tsan_$t.log" || true)
+            total=$((total + n))
+            echo "$t: $n TSan report(s)"
+            if [ "$n" -gt 0 ]; then
+              grep -A12 "WARNING: ThreadSanitizer" "tsan_$t.log" | head -120
+            fi
+          done
+          echo "uring heavy-migration TSan reports: $total" \
+            >> "$GITHUB_STEP_SUMMARY"
+          if [ "$total" -gt 0 ]; then
+            echo "::warning::$total TSan report(s) on the uring migration path -- expected to include ONE non-suppressible mbox_lock invalid-mutex report; anything naming TWO DIFFERENT fibers is a NEW race, investigate it (see .github/tsan.supp)"
+          fi
+      - name: Upload TSan logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsan-uring-migration-logs
+          path: build_tsan_uring/tsan_*.log
+          if-no-files-found: warn
+          retention-days: 30
+
   valgrind:
     # Run the runtime under Valgrind's memcheck + Helgrind + DRD over a
     # curated, fast subset of the C unit tests.  The full munit suite is
