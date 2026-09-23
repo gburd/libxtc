@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.49.4
+Version:        1.49.5
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,35 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Mon Sep 22 2026 Greg Burd <greg@burd.me> - 1.49.5-1
+- Fixes three real data races on the fiber-migration path, found by
+  auditing ThreadSanitizer on the io_uring backend -- a configuration CI
+  had never covered, because the gating TSan job is epoll-only and
+  excludes the heavy-migration suites.
+- proc: the striped proc table decremented n_used while holding only ONE
+  stripe lock, where the allocate path holds ALL of them, so a decrement
+  could be lost.  Not merely a statistic: after a table grow the allocate
+  path uses n_used as the first fresh slot index, so a drifted count
+  either fails a spawn with XTC_E_RESOURCE or targets an occupied slot.
+  A defensive bounds check is what kept it from corrupting the table.
+- task: park_timer was a plain pointer written both by the parking fiber
+  and by the timer-expiry path on the loop thread, which clears it after
+  the wake has already made the task runnable.
+- proc: the alive flag was a plain int cleared by the exiting fiber and
+  read as a liveness gate by foreign threads (wake, send, link/monitor,
+  exit-deadline, proc-info).
+  All three were benign in observable effect -- both stores wrote the same
+  value, or a stale read cost only a harmless no-op -- but each was
+  undefined behavior, and a racy read is indistinguishable from one that
+  would not be benign.  All three are now _Atomic with relaxed ordering.
+- ci: added a non-gating uring heavy-migration TSan job so the next race
+  on this path surfaces in CI rather than by hand, and NARROWED the
+  suppression list -- a stanza naming the per-fiber entry frame would
+  have hidden a brand-new race, and removing it cost no coverage.
+- No API or ABI change: 710 exported symbols, none added or removed, and
+  every public struct layout and enum value identical to 1.49.4 (the
+  changed structs are internal or file-private).
+
 * Mon Sep 22 2026 Greg Burd <greg@burd.me> - 1.49.4-1
 - Fixes an io_uring deadlock reported from a PostgreSQL fiber workload: a
   deferred cross-thread fd unregister left its node linked in the io's fd

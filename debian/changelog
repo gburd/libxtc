@@ -1,3 +1,53 @@
+libxtc (1.49.5-1) unstable; urgency=medium
+
+  * Fixes three real data races on the fiber-migration path.  Found by
+    auditing ThreadSanitizer on the io_uring backend -- a combination CI
+    had never exercised, since the gating TSan job runs epoll only and
+    deliberately excludes the heavy-migration suites.  Running it with
+    halt_on_error=0 (the default halt-on-first showed 6 of 251 reports)
+    and classifying every report by location kind and by whether both
+    accesses belong to the same fiber separated genuine races from the
+    known migration artifacts.
+  * proc: the striped proc table decremented n_used under only ONE stripe
+    lock while the allocate path holds ALL stripes, so a decrement could
+    be lost.  This is more than a wrong statistic: after a table grow the
+    allocate path uses n_used as the index of the first fresh slot, so a
+    count drifted high fails a spawn with XTC_E_RESOURCE and one drifted
+    low aims at an occupied slot.  The defensive bounds check below that
+    read is what prevented table corruption.  Most likely of the three to
+    matter under concurrent process churn.
+  * task: park_timer was a plain pointer written by two threads -- the
+    parking fiber arms and clears it, and the timer-expiry path clears it
+    from the owning loop's thread AFTER the wake has already made the task
+    runnable, so the woken fiber can be resumed elsewhere and reach its
+    own cleanup while that store is in flight.
+  * proc: the alive flag was a plain int, cleared by the exiting fiber and
+    read as a liveness gate by foreign threads in xtc_proc_wake, xtc_send,
+    the link/monitor paths, xtc_exit_pid_deadline and xtc_proc_info.
+  * All three were benign in observable effect and are now _Atomic with
+    relaxed ordering, matching how park_fd and the supervisor/server alive
+    flags were already declared.  Relaxed is correct: each is a hint whose
+    authoritative arbiter is elsewhere (the timer's own fired/cancelled
+    flags, the refcount, the proc table).
+  * ci: a non-gating uring heavy-migration TSan job now runs test_exec,
+    test_proc and test_aio_migrate_wake, prints every report, and uploads
+    its logs, so the next race on this path appears in CI.  It is
+    advisory because one report -- an invalid-mutex warning on a migrated
+    proc's mailbox lock -- cannot be suppressed at all: TSan has no
+    mutex suppression type and silently ignores an unknown one.  That
+    report is safe (the mutex destroy is refcount-deferred) and is
+    documented rather than hidden.
+  * ci: narrowed the TSan suppression list.  A stanza naming the per-fiber
+    entry frame suppressed any report whose stack merely touched it, which
+    would have hidden a brand-new race; removing it cost no coverage, and
+    the remaining stanzas name specific primitives with the measurement
+    that justifies each written beside it.
+  * No API or ABI change -- 710 exported symbols, none added or removed,
+    and every public struct layout and enum value identical to 1.49.4, so
+    this is a drop-in replacement.
+
+ -- Greg Burd <greg@burd.me>  Mon, 22 Sep 2026 18:30:00 -0400
+
 libxtc (1.49.4-1) unstable; urgency=medium
 
   * io_uring: fixes a deadlock reported from a PostgreSQL fiber workload
