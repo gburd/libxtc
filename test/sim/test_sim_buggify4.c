@@ -207,12 +207,17 @@ run_b(uint64_t seed, unsigned bug_pct, int *out_done, long *out_hash,
     int *out_bug)
 {
 	xtc_exec_t *e = NULL;
-	char path[] = "/scratch/xtc-test/sim_bug4_XXXXXX";
+	char path[512];
+	const char *td = getenv("TMPDIR");
 	int i, rc;
 
 	atomic_store(&g_b_done, 0);
 	atomic_store(&g_b_hash, 0);
 
+	/* Honor TMPDIR (the swarm/run_sim_tests.sh convention); never a
+	 * hardcoded host path. */
+	(void)snprintf(path, sizeof path, "%s/sim_bug4_XXXXXX",
+	    td != NULL && *td != '\0' ? td : "/tmp");
 	g_b_fd = mkstemp(path);
 	if (g_b_fd < 0) {
 		char p2[] = "sim_bug4_XXXXXX";

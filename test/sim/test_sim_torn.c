@@ -161,8 +161,13 @@ run_once(uint64_t seed, int *out_verified, int *out_detected,
     int *out_silent, long *out_hash, uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
-	char path[] = "/scratch/xtc-test/sim_torn_XXXXXX";
+	char path[512];
+	const char *td_ = getenv("TMPDIR");
 	int i, rc;
+
+	/* Honor TMPDIR; never a hardcoded host path (PLAN 19.27.22). */
+	(void)snprintf(path, sizeof path, "%s/sim_torn_XXXXXX",
+	    td_ != NULL && *td_ != '\0' ? td_ : "/tmp");
 
 	atomic_store(&g_verified, 0);
 	atomic_store(&g_detected, 0);

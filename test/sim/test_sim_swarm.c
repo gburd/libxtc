@@ -501,7 +501,11 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 		 * park; seeded corruption tears some pages, which the verifier
 		 * detects (checksum) and rewrites.  A per-run temp file,
 		 * unlinked immediately; closed after the run. */
-		char path[] = "/scratch/xtc-test/sim_swarm_torn_XXXXXX";
+		char path[512];
+		const char *td_ = getenv("TMPDIR");
+		/* Honor TMPDIR; never a hardcoded host path (PLAN 19.27.22). */
+		(void)snprintf(path, sizeof path, "%s/sim_swarm_torn_XXXXXX",
+		    td_ != NULL && *td_ != '\0' ? td_ : "/tmp");
 		g_torn_fd = mkstemp(path);
 		if (g_torn_fd < 0) {
 			char p2[] = "sim_swarm_torn_XXXXXX";

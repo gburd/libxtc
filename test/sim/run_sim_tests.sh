@@ -21,15 +21,9 @@ set -eu
 
 XTC_SRC_DIR="${XTC_SRC_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 CC="${CC:-cc}"
-# Prefer an explicit TMPDIR; otherwise use /scratch/xtc-test only if it
-# is usable (local convention), else fall back to the system default so
-# CI runners without /scratch work unchanged.
-if [ -z "${TMPDIR:-}" ]; then
-	if mkdir -p /scratch/xtc-test 2>/dev/null; then
-		TMPDIR=/scratch/xtc-test
-		export TMPDIR
-	fi
-fi
+# Temp files go where TMPDIR says (the tests read it too), else the system
+# default.  No hardcoded host path: a suite that claims determinism "on any
+# machine" must not pick a first-choice directory that exists only on one.
 
 if [ ! -x "$XTC_SRC_DIR/dist/configure" ]; then
 	echo "  [sim] SKIP: dist/configure not generated"
