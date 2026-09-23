@@ -391,8 +391,20 @@ xtc_reg_reaper(void *arg)
 			memcpy(&m, msg, sizeof m);
 			if (m.tag == REG_REAPER_MONITOR) {
 				/* Monitor the pid; a DOWN (immediate if it is
-				 * already gone) comes back to us. */
-				(void)xtc_monitor(m.pid, NULL);
+				 * already gone) comes back to us.
+				 *
+				 * xtc_monitor of an already-dead pid still
+				 * returns OK and synthesizes a DOWN, so its
+				 * only failure is allocation.  If it fails, NO
+				 * DOWN will ever arrive for this pid and its
+				 * names would outlive it forever -- so drop
+				 * them now rather than leave a stale entry.
+				 * (The previous code ignored this rc.) */
+				if (xtc_monitor(m.pid, NULL) != XTC_OK) {
+					__xtc_tail_emit(XTC_TAIL_SCHED,
+					    XTC_TAIL_LIFECYCLE_DROP, m.pid, 0);
+					(void)xtc_reg_drop_pid(r, m.pid);
+				}
 				__os_free(msg);
 				continue;
 			}
@@ -434,15 +446,27 @@ xtc_reg_register_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 		m.pid = pid;
 		/* Enrollment is what makes this a MONITORED registration: if
 		 * the reaper never receives it, the name will not be removed
-		 * when the pid dies, and we would still be returning XTC_OK --
-		 * promising automatic cleanup with no coverage behind it.  The
-		 * send is bounded, so record the loss rather than hiding it.
-		 * (Returning failure here is the stronger fix, but it is a
-		 * consumer-visible contract change; making it diagnosable is
-		 * the prerequisite step.) */
-		if (xtc_send(reaper, &m, sizeof m) != XTC_OK)
+		 * when the pid dies.  Returning XTC_OK then would promise
+		 * automatic cleanup with no coverage behind it -- measured: 3
+		 * registrations all returned OK and 2 names outlived their pids.
+		 *
+		 * The send is bounded (the reaper's mailbox can be full), so
+		 * the loss is real and possible.  Roll the registration BACK
+		 * and report it, so the caller never holds a "monitored" name
+		 * that nothing is watching.  xtc_reg_unregister_pid removes
+		 * the name only if it is still bound to THIS pid, so it cannot
+		 * clobber a concurrent re-registration of the same name.  The
+		 * drop stays diagnosable via XTC_TAIL_LIFECYCLE_DROP too.
+		 *
+		 * CONTRACT CHANGE (1.50): this used to return XTC_OK here. */
+		if ((rc = xtc_send(reaper, &m, sizeof m)) != XTC_OK) {
 			__xtc_tail_emit(XTC_TAIL_SCHED,
-			    XTC_TAIL_LIFECYCLE_DROP, pid, 0);
+			    XTC_TAIL_LIFECYCLE_DROP, pid,
+			    (uint64_t)(int64_t)rc);
+			(void)xtc_reg_unregister_pid(r, name, pid);
+			return (rc == XTC_E_RESOURCE) ? XTC_E_RESOURCE
+			                              : XTC_E_AGAIN;
+		}
 	}
 	return XTC_OK;
 }

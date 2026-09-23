@@ -323,12 +323,90 @@ test_reg_crash_aware(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * PLAN 19.27.12: a MONITORED registration must never be left without
+ * monitoring.  The reaper's mailbox is capped at 1 and the reaper is not
+ * scheduled until we yield, so every enrollment after the first cannot be
+ * delivered.  The fixed contract: xtc_reg_register_mon either establishes
+ * coverage and returns XTC_OK, or rolls the name back and returns an
+ * error.  So after every worker has died, NO name may remain whose
+ * register_mon call returned XTC_OK -- and no name at all may remain for a
+ * call that failed.
+ *
+ * Fails on the unfixed library: all three calls return XTC_OK and two
+ * names outlive their pids.
+ */
+static xtc_reg_t *g_rm_reg;
+static int g_rm_rc[3], g_rm_stale_ok, g_rm_present_failed, g_rm_failed;
+
+static void
+rm_worker(void *a)
+{
+	(void)a;
+	(void)xtc_proc_sleep(20LL * 1000 * 1000);
+}
+
+static void
+rm_driver(void *a)
+{
+	xtc_loop_t *loop = a;
+	xtc_proc_opts_t o;
+	xtc_pid_t reaper, w[3], dummy;
+	char nm[8];
+	int i;
+
+	memset(&o, 0, sizeof o);
+	o.mailbox_cap = 1;
+	(void)xtc_proc_spawn(loop, xtc_reg_reaper, g_rm_reg, &o, &reaper);
+	(void)xtc_proc_sleep(1LL * 1000 * 1000);   /* let it publish itself */
+	for (i = 0; i < 3; i++) {
+		(void)xtc_proc_spawn(loop, rm_worker, NULL, NULL, &w[i]);
+		snprintf(nm, sizeof nm, "w%d", i);
+		g_rm_rc[i] = xtc_reg_register_mon(g_rm_reg, nm, w[i]);
+		if (g_rm_rc[i] != XTC_OK)
+			g_rm_failed++;
+	}
+	(void)xtc_proc_sleep(200LL * 1000 * 1000);  /* workers die */
+	for (i = 0; i < 3; i++) {
+		int present;
+		snprintf(nm, sizeof nm, "w%d", i);
+		present = (xtc_reg_whereis(g_rm_reg, nm, &dummy) == XTC_OK);
+		if (present && g_rm_rc[i] == XTC_OK) g_rm_stale_ok++;
+		if (present && g_rm_rc[i] != XTC_OK) g_rm_present_failed++;
+	}
+	(void)xtc_exit_pid(reaper, 0);
+}
+
+static MunitResult
+test_reg_mon_no_silent_loss(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *l = NULL;
+	(void)p; (void)d;
+	g_rm_stale_ok = g_rm_present_failed = g_rm_failed = 0;
+	munit_assert_int(xtc_reg_create(&g_rm_reg), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&l), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(l, rm_driver, l, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(l), ==, XTC_OK);
+	(void)xtc_loop_fini(l);
+	xtc_reg_destroy(g_rm_reg);
+
+	/* The scenario must actually overflow enrollment -- otherwise the
+	 * no-stale property below would pass vacuously. */
+	munit_assert_int(g_rm_failed, >=, 1);
+	/* The property: nothing registered "successfully" outlives its pid,
+	 * and a failed registration leaves nothing behind. */
+	munit_assert_int(g_rm_stale_ok, ==, 0);
+	munit_assert_int(g_rm_present_failed, ==, 0);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/reg_basic", test_reg_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_collisions", test_reg_collisions, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_scale", test_reg_scale, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_dup_keys", test_reg_dup_keys, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_crash_aware", test_reg_crash_aware, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reg_mon_no_silent_loss", test_reg_mon_no_silent_loss, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/reg", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

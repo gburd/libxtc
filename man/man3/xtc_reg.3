@@ -115,6 +115,25 @@ and, when a reaper is running, arranges the entry to be auto-dropped on
 the pid's DOWN; with no reaper it is exactly
 .Fn xtc_reg_register .
 .Pp
+When a reaper IS running,
+.Fn xtc_reg_register_mon
+either establishes monitoring or fails.
+If the enrollment cannot be delivered to the reaper -- its mailbox is
+bounded and may be full -- the name is rolled back and the call returns
+.Dv XTC_E_AGAIN
+.Pq or Dv XTC_E_RESOURCE ,
+so a caller never holds a monitored name that nothing is watching.
+Retry, or fall back to
+.Fn xtc_reg_register
+plus manual
+.Fn xtc_reg_drop_pid .
+If the reaper itself cannot establish the monitor, it drops the pid's
+names at once rather than leave them to outlive it.
+.Pp
+Releases before 1.50 returned
+.Dv XTC_OK
+even when the enrollment was lost, and such names were never reaped.
+.Pp
 .Fn xtc_svr_call_name
 is via-dispatch: it looks up
 .Fa name No -> No pid and then Fn xtc_svr_call No it,
