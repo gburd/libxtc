@@ -36,6 +36,10 @@ static MunitTest tests[] = {
 
 #else /* POSIX */
 
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+
 /* ---- child root proc: recv one message (a target exit code), exit with
  * it, so the parent's monitor sees exactly that reason. ---- */
 static void
@@ -220,8 +224,99 @@ test_xproc_link(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- PLAN 19.27.1 / 19.27.2: destroy while the child is still running --
+ *
+ * A child that simply sleeps (it would outlive the test on its own).  The
+ * parent monitors it -- which starts a SHADOW proc parked in
+ * xtc_osproc_wait on the child's osproc -- and then destroys the handle
+ * while the child is alive.
+ *
+ * Before the fix, destroy freed the osproc under the parked shadow (a
+ * heap-use-after-free, visible under ASan) and did not terminate the
+ * child at all: it stayed alive, orphaned, and later became a zombie.
+ * After it, destroy terminates + reaps, and the shadow still delivers a
+ * DOWN because it holds its own reference to the osproc.  Under ASan this
+ * test is the UAF regression; without ASan it is the reaping regression.
+ */
+static void
+sleeper_root(void *arg)
+{
+	(void)arg;
+	for (;;)
+		(void)xtc_proc_sleep(100LL * 1000 * 1000);
+}
+
+struct live_destroy {
+	xtc_loop_t *loop;
+	long child_pid;
+	int  down_seen;
+	int  child_still_alive;   /* after destroy returned */
+	int  zombie;              /* waitpid could still collect it */
+};
+
+static void
+live_destroy_fiber(void *a)
+{
+	struct live_destroy *ld = a;
+	xtc_xproc_t *child = NULL;
+	uint64_t ref = 0;
+	void *msg = NULL;
+	size_t n = 0;
+	int st = 0;
+
+	if (xtc_xspawn(ld->loop, "sleeper", sleeper_root,
+	    NULL, 0, &child) != XTC_OK)
+		return;
+	ld->child_pid = xtc_xproc_os_pid(child);
+	if (xtc_xmonitor(child, &ref) != XTC_OK) {
+		xtc_xproc_destroy(child);
+		return;
+	}
+	(void)xtc_proc_sleep(20LL * 1000 * 1000);   /* shadow is now parked */
+	xtc_xproc_destroy(child);                   /* child STILL RUNNING */
+
+	/* Destroy must have terminated AND reaped it: no process, and
+	 * nothing left for waitpid to collect. */
+	ld->child_still_alive = (kill((pid_t)ld->child_pid, 0) == 0);
+	ld->zombie = (waitpid((pid_t)ld->child_pid, &st, WNOHANG) > 0);
+
+	/* The shadow held its own reference, so it survives the destroy and
+	 * still reports the child's death to the monitor. */
+	if (xtc_recv(&msg, &n, 3000LL * 1000 * 1000) == XTC_OK)
+		ld->down_seen = 1;
+	if (msg != NULL)
+		xtc_free(msg);
+	if (ld->child_still_alive) {               /* never leak it */
+		(void)kill((pid_t)ld->child_pid, SIGKILL);
+		(void)waitpid((pid_t)ld->child_pid, &st, 0);
+	}
+}
+
+static MunitResult
+test_xproc_destroy_live_child(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct live_destroy ld;
+	(void)p; (void)d;
+
+	memset(&ld, 0, sizeof ld);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	ld.loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, live_destroy_fiber, &ld, NULL,
+	    NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+
+	munit_assert_long(ld.child_pid, >, 0);
+	munit_assert_int(ld.child_still_alive, ==, 0);  /* terminated */
+	munit_assert_int(ld.zombie, ==, 0);             /* and reaped */
+	munit_assert_int(ld.down_seen, ==, 1);          /* shadow survived */
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/monitor_exit", test_xproc_monitor_exit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/destroy_live_child", test_xproc_destroy_live_child, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/entry",        test_xproc_entry,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/link",         test_xproc_link,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
