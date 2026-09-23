@@ -45,7 +45,7 @@
 .Ft int
 .Fn xtc_lock_downgrade "xtc_lockmgr_t *m" "xtc_locker_t locker" "const void *obj" "size_t obj_size" "xtc_lock_mode_t new_mode"
 .Ft int
-.Fn xtc_lock_vec "xtc_lockmgr_t *m" "xtc_locker_t locker" "const xtc_lock_req_t *reqs" "int n_reqs" "int64_t timeout_ns"
+.Fn xtc_lock_vec "xtc_lockmgr_t *m" "xtc_locker_t locker" "xtc_lock_req_t *reqs" "int n_reqs" "int *out_executed"
 .Ft int
 .Fn xtc_lockmgr_check_deadlocks "xtc_lockmgr_t *m" "int *n_aborted"
 .Ft int
@@ -88,9 +88,9 @@ plus
 .Dv XTC_LOCK_VICTIM_CUSTOM
 which delegates to a caller-supplied callback.
 .It
-Compound atomic acquires via
+Compound acquires via
 .Fn xtc_lock_vec
-.Po N requests succeed-or-rollback Pc .
+.Po a vector of GETs succeeds or rolls back Pc .
 .It
 Per-locker timeouts and statistics.
 .El
@@ -159,10 +159,53 @@ on a zero timeout); downgrade never blocks and promotes any waiters
 the weaker mode no longer conflicts with.
 .Pp
 .Fn xtc_lock_vec
-performs an atomic compound acquire.  Either all requested
-locks are granted, or none are
-.Pq if any single grant would block or be rejected ;
-no partial state is left.
+runs a vector of
+.Fa n_reqs
+requests
+.Pq GET, PUT, PUT_ALL, UPGRADE, DOWNGRADE
+for
+.Fa locker .
+Every request is validated first; a bad op, NULL
+.Fa obj ,
+zero
+.Fa obj_size
+or un-GETable mode returns
+.Dv XTC_E_INVAL
+with nothing executed.  On success it returns
+.Dv XTC_OK
+with
+.Fa *out_executed
+==
+.Fa n_reqs .
+If a request fails
+.Po a GET that would block past its
+.Va timeout_ns
+returns
+.Dv XTC_E_AGAIN ,
+a deadlock victim
+.Dv XTC_E_DEADLK ,
+or a rejected PUT/UPGRADE/DOWNGRADE
+.Pc
+the call rolls back: every GET it performed after the last non-GET
+request is undone, newest first
+.Po a newly granted lock is released; a mode the call raised on a lock
+.Fa locker
+already held is lowered back
+.Pc ,
+and the failing request's code is returned.  A vector of only GETs
+therefore leaves no partial state, and
+.Fa *out_executed
+is 0.
+.Pp
+PUT, PUT_ALL, UPGRADE and DOWNGRADE cannot be undone
+.Pq a released lock may already be granted to another locker ,
+so each is a rollback barrier: it and every request before it stay
+applied, and
+.Fa *out_executed
+reports the length of that retained prefix.  Order releases and mode
+changes first and GETs after them when the GETs must be all-or-none.
+A deadlock victim has had all of its locks released by the detector,
+including locks held before the call.
 .Pp
 .Fn xtc_lockmgr_check_deadlocks
 runs the cycle-detection algorithm synchronously and aborts any

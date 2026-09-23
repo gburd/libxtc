@@ -494,7 +494,23 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 
 	prior = __find_granted(o, locker);
 	if (prior != NULL && !__conflicts(m, prior->mode, mode)) {
-		if ((int)mode > (int)prior->mode) prior->mode = mode;
+		if ((int)mode > (int)prior->mode) {
+			/* Keep n_write_held in step with the mode change, as
+			 * upgrade/downgrade do: xtc_lock_vec's rollback undoes
+			 * this merge with a downgrade, which decrements it. */
+			int dw = __is_write_mode(mode) -
+			    __is_write_mode(prior->mode);
+			if (dw != 0) {
+				(void)__xtc_mtx_lock(&m->locker_lock);
+				lr = __locker_find(m, locker);
+				(void)__xtc_mtx_unlock(&m->locker_lock);
+				if (lr)
+					atomic_fetch_add_explicit(
+					    &lr->n_write_held, dw,
+					    memory_order_relaxed);
+			}
+			prior->mode = mode;
+		}
 		return XTC_OK;
 	}
 
@@ -945,17 +961,71 @@ xtc_lock_downgrade(xtc_lockmgr_t *m, xtc_locker_t locker,
 
 /* ----- lock_vec compound ------------------------------------ */
 
+/* Snapshot what `locker` holds on obj: the number of granted entries
+ * and the mode of the NEWEST one (the head-most match, which is the one
+ * xtc_lock_put / xtc_lock_downgrade act on).  NL / 0 if none. */
+static void
+__held_snapshot(xtc_lockmgr_t *m, xtc_locker_t locker, const void *obj,
+                size_t obj_size, int *out_n, xtc_lock_mode_t *out_mode)
+{
+	uint32_t h = __hash(obj, obj_size);
+	struct lock_partition *p = &m->parts[h % (uint32_t)m->n_parts];
+	struct lock_obj *o;
+	struct lock_entry *e;
+	int n = 0;
+	xtc_lock_mode_t mode = XTC_LOCK_NL;
+
+	(void)__xtc_mtx_lock(&p->lock);
+	o = __obj_lookup(p, obj, obj_size, h);
+	for (e = (o != NULL) ? o->granted : NULL; e != NULL; e = e->next) {
+		if (e->locker != locker) continue;
+		if (n++ == 0) mode = e->mode;
+	}
+	(void)__xtc_mtx_unlock(&p->lock);
+	*out_n = n;
+	*out_mode = mode;
+}
+
+/* What one GET in a vec changed, so a failure can undo it. */
+struct vec_undo {
+	int             n_before;     /* entries held before the GET */
+	xtc_lock_mode_t mode_before;  /* newest entry's mode before */
+};
+
 int
 xtc_lock_vec(xtc_lockmgr_t *m, xtc_locker_t locker,
              xtc_lock_req_t *reqs, int n_reqs, int *out_executed)
 {
-	int i, executed = 0, rc = XTC_OK;
+	struct vec_undo *undo = NULL;
+	int i, executed = 0, keep = 0, rc = XTC_OK;
 	if (m == NULL || reqs == NULL || n_reqs <= 0) return XTC_E_INVAL;
+
+	/* Validate every op BEFORE executing any, so a malformed request
+	 * late in the vector cannot leave the earlier ones applied. */
+	for (i = 0; i < n_reqs; i++) {
+		const xtc_lock_req_t *r = &reqs[i];
+		if (r->op == XTC_LOCK_OP_PUT_ALL) continue;
+		if (r->op != XTC_LOCK_OP_GET && r->op != XTC_LOCK_OP_PUT &&
+		    r->op != XTC_LOCK_OP_UPGRADE &&
+		    r->op != XTC_LOCK_OP_DOWNGRADE)
+			goto invalid;
+		if (r->obj == NULL || r->obj_size == 0) goto invalid;
+		if (r->op == XTC_LOCK_OP_GET &&
+		    (r->mode <= XTC_LOCK_NL || r->mode == XTC_LOCK_WAIT ||
+		     r->mode >= (xtc_lock_mode_t)m->n_modes))
+			goto invalid;
+	}
+	if (__os_calloc((size_t)n_reqs, sizeof *undo, (void **)&undo) != XTC_OK) {
+		if (out_executed) *out_executed = 0;
+		return XTC_E_NOMEM;
+	}
 
 	for (i = 0; i < n_reqs; i++) {
 		xtc_lock_req_t *r = &reqs[i];
 		switch (r->op) {
 		case XTC_LOCK_OP_GET:
+			__held_snapshot(m, locker, r->obj, r->obj_size,
+			    &undo[i].n_before, &undo[i].mode_before);
 			rc = xtc_lock_get(m, locker, r->obj, r->obj_size,
 			    r->mode, r->timeout_ns);
 			break;
@@ -975,14 +1045,47 @@ xtc_lock_vec(xtc_lockmgr_t *m, xtc_locker_t locker,
 			    r->mode);
 			break;
 		default:
-			rc = XTC_E_INVAL;
+			rc = XTC_E_INVAL;     /* unreachable: validated */
 			break;
 		}
 		if (rc != XTC_OK) break;
 		executed++;
+		/* A PUT / PUT_ALL / UPGRADE / DOWNGRADE cannot be undone (a
+		 * released lock may already be granted to someone else), and
+		 * it may act on a lock an earlier GET here took -- so it is a
+		 * rollback barrier: everything up to and including it stays. */
+		if (r->op != XTC_LOCK_OP_GET) keep = executed;
 	}
+
+	/* ROLLBACK: on failure, undo the GETs after the last barrier, newest
+	 * first, so a GET-only vector is all-or-none.  A GET either created
+	 * a new entry (release it: xtc_lock_put drops the newest match, which
+	 * is the one just made) or raised the mode of an entry this locker
+	 * already held (downgrade it back).  rc of the undo is ignored: a
+	 * deadlock victim has already had every lock released for it. */
+	if (rc != XTC_OK) {
+		for (i = executed - 1; i >= keep; i--) {
+			xtc_lock_req_t *r = &reqs[i];
+			int n_now;
+			xtc_lock_mode_t mode_now;
+			__held_snapshot(m, locker, r->obj, r->obj_size, &n_now,
+			    &mode_now);
+			if (n_now > undo[i].n_before)
+				(void)xtc_lock_put(m, locker, r->obj,
+				    r->obj_size);
+			else if (n_now > 0 && mode_now != undo[i].mode_before)
+				(void)xtc_lock_downgrade(m, locker, r->obj,
+				    r->obj_size, undo[i].mode_before);
+		}
+		executed = keep;
+	}
+	__os_free(undo);
 	if (out_executed) *out_executed = executed;
 	return rc;
+
+invalid:
+	if (out_executed) *out_executed = 0;
+	return XTC_E_INVAL;
 }
 
 /* ----- failchk ---------------------------------------------- */
