@@ -86,9 +86,23 @@ fields:
 PEM paths for server-side certificate.
 .It Va ca_file
 PEM CA bundle for verifying the peer.
+When
+.Dv NULL ,
+a verifying client uses the platform default trust store (OpenSSL
+default verify paths, GnuTLS system trust, wolfSSL system CA certs when
+built with
+.Dv WOLFSSL_SYS_CA_CERTS ) .
+mbedTLS has no platform store: a verifying client without
+.Va ca_file
+fails
+.Fn xtc_tls_ctx_create
+with
+.Dv XTC_E_INVAL .
+A server never trusts the platform store for client certificates.
 .It Va verify_peer
-.Dv 1
-to require + validate the peer's cert.
+Legacy: non-zero means
+.Dv XTC_TLS_VERIFY_REQUIRE ;
+0 means the role default.
 .It Va verify_peer_mode
 Tri-state peer verification, taking precedence over
 .Va verify_peer
@@ -96,9 +110,27 @@ when not
 .Dv XTC_TLS_VERIFY_DEFAULT :
 .Dv XTC_TLS_VERIFY_NONE ,
 .Dv XTC_TLS_VERIFY_REQUEST
-(request a client certificate but complete the handshake if none is
-presented), or
+(a server requests a client certificate, completes the handshake if
+none is presented, and fails it if one is presented that does not
+verify; a client treats it as REQUIRE), or
 .Dv XTC_TLS_VERIFY_REQUIRE .
+When both are unset the role default applies: a client verifies the
+server
+.Pq Dv XTC_TLS_VERIFY_REQUIRE ,
+a server does not ask for a client certificate
+.Pq Dv XTC_TLS_VERIFY_NONE .
+.Pp
+.Sy Behavior change :
+Since 1.50 a CLIENT verifies the server by default; set
+.Va verify_peer_mode
+=
+.Dv XTC_TLS_VERIFY_NONE
+to opt out.
+Before 1.50 a zeroed (or
+.Dv NULL )
+opts accepted any server certificate, and the GnuTLS, wolfSSL and
+mbedTLS backends ignored
+.Va verify_peer_mode .
 .It Va alpn_protos
 ALPN wire-form list.
 .It Va min_version , max_version

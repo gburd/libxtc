@@ -60,6 +60,12 @@
 #define TEST_KEY_PATH   "/tmp/xtc-tls2-test-key.pem"
 #define TEST_CLI_CERT   "/tmp/xtc-tls2-cli-cert.pem"
 #define TEST_CLI_KEY    "/tmp/xtc-tls2-cli-key.pem"
+/* Same subject DN as the client cert (CN=xtc-client), DIFFERENT key: a
+ * trust anchor the client cert names as its issuer but does not chain
+ * to.  Matching the DN matters: a GnuTLS client withholds its cert when
+ * the server's CA list does not name its issuer. */
+#define TEST_FAKE_CA    "/tmp/xtc-tls2-fake-ca.pem"
+#define TEST_FAKE_KEY   "/tmp/xtc-tls2-fake-key.pem"
 /* Second SERVER cert with a distinct CN, selected via the SNI callback. */
 #define TEST_SNI_CERT   "/tmp/xtc-tls2-sni-cert.pem"
 #define TEST_SNI_KEY    "/tmp/xtc-tls2-sni-key.pem"
@@ -251,7 +257,9 @@ client_thread(void *arg)
     a->rc = 1;   /* assume failure */
 
     memset(&opts, 0, sizeof(opts));
-    opts.verify_peer = 0;   /* self-signed server cert in test */
+    /* Self-signed server cert: opt out of server verification.  Since
+     * 1.50 a zeroed opts would verify it (and fail). */
+    opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;
     opts.min_version = XTC_TLS_VER_12;
 
     if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &opts, &ctx) != XTC_OK)
@@ -294,7 +302,7 @@ client_thread_with_cert(void *arg)
     a->rc = 1;
 
     memset(&opts, 0, sizeof(opts));
-    opts.verify_peer = 0;                 /* self-signed server cert */
+    opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;   /* self-signed server */
     opts.min_version = XTC_TLS_VER_12;
     opts.cert_file   = TEST_CLI_CERT;     /* present our client cert */
     opts.key_file    = TEST_CLI_KEY;
@@ -873,7 +881,7 @@ client_thread_sni(void *arg)
 
     a->rc = 1;
     memset(&opts, 0, sizeof(opts));
-    opts.verify_peer = 0;                 /* self-signed server cert */
+    opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;   /* self-signed server */
     opts.min_version = XTC_TLS_VER_12;
 
     if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &opts, &ctx) != XTC_OK)
@@ -973,6 +981,7 @@ test_server_sni_select(const MunitParameter params[], void *data)
     {
         xtc_tls_ctx_t *cli = NULL;
         xtc_tls_opts_t co; memset(&co, 0, sizeof(co));
+        co.verify_peer_mode = XTC_TLS_VERIFY_NONE;   /* no ca_file */
         munit_assert_int(xtc_tls_ctx_create(XTC_TLS_CLIENT, &co, &cli), ==, XTC_OK);
         munit_assert_int(xtc_tls_ctx_set_sni_cb(cli, sni_selector, NULL),
                          ==, XTC_E_NOSYS);
@@ -1145,6 +1154,130 @@ test_server_transport_roundtrip(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* -------------------------------------------------------------------------
+ * One server handshake under `sopts' against `client' (a client_thread*
+ * variant).  Returns the SERVER's handshake rc; on success the echo round
+ * trip must also work.  *cli_rc gets the client thread's rc.
+ * ----------------------------------------------------------------------- */
+static int
+serve_one(const xtc_tls_opts_t *sopts, void *(*client)(void *), int *cli_rc)
+{
+    xtc_tls_ctx_t  *ctx = NULL;
+    xtc_tls_t      *tls = NULL;
+    struct client_args ca;
+    pthread_t       tid;
+    int             sv[2], rc;
+    char            rbuf[CLIENT_MSG_LEN + 1];
+
+    munit_assert_int(xtc_tls_ctx_create(XTC_TLS_SERVER, sopts, &ctx),
+                     ==, XTC_OK);
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(set_nonblock(sv[1]), ==, 0);
+    munit_assert_int(xtc_tls_create(ctx, sv[0], &tls), ==, XTC_OK);
+
+    memset(&ca, 0, sizeof(ca));
+    ca.fd = sv[1];
+    ca.rc = 1;
+    munit_assert_int(pthread_create(&tid, NULL, client, &ca), ==, 0);
+
+    rc = poll_until_done(tls, sv[0], xtc_tls_handshake, 5000);
+    if (rc == XTC_OK) {
+        munit_assert_int(tls_write_all(tls, sv[0], "hello",
+                         CLIENT_MSG_LEN, 5000), ==, XTC_OK);
+        memset(rbuf, 0, sizeof(rbuf));
+        munit_assert_int(tls_read_exact(tls, sv[0], rbuf,
+                         CLIENT_MSG_LEN, 5000), ==, XTC_OK);
+        munit_assert_memory_equal(CLIENT_MSG_LEN, rbuf, "hello");
+        (void)xtc_tls_shutdown(tls);
+    } else {
+        /* A post-handshake reject sends no alert on every backend; EOF
+         * the client's read instead of making it wait out its poll.
+         * SHUT_WR only: the client may still write without SIGPIPE. */
+        (void)shutdown(sv[0], SHUT_WR);
+    }
+    pthread_join(tid, NULL);
+    *cli_rc = ca.rc;
+
+    xtc_tls_destroy(tls);
+    xtc_tls_ctx_destroy(ctx);
+    close(sv[0]);
+    close(sv[1]);
+    return rc;
+}
+
+/* -------------------------------------------------------------------------
+ * test_server_verify_modes (PLAN 19.27.8):
+ *   The SERVER's verify_peer_mode must mean the same thing on every
+ *   backend (before 1.50 GnuTLS, wolfSSL and mbedTLS ignored it and read
+ *   only the legacy verify_peer int):
+ *     REQUEST  -- ask for a client cert; accept a client that sends none;
+ *                 reject one that sends a cert that does not verify.
+ *     REQUIRE  -- also reject a client that sends none.
+ *   The trusted-cert cases are the positive controls that keep the
+ *   rejections from passing on an unrelated handshake failure.
+ * ----------------------------------------------------------------------- */
+static MunitResult
+test_server_verify_modes(const MunitParameter params[], void *data)
+{
+    xtc_tls_opts_t  opts;
+    int             rc, cli_rc;
+
+    (void)params;
+    (void)data;
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cert_file   = TEST_CERT_PATH;
+    opts.key_file    = TEST_KEY_PATH;
+    opts.min_version = XTC_TLS_VER_12;
+    opts.ca_file     = TEST_CLI_CERT;   /* trusts the client's cert */
+
+    /* REQUEST: no client cert -> accepted. */
+    opts.verify_peer_mode = XTC_TLS_VERIFY_REQUEST;
+    rc = serve_one(&opts, client_thread, &cli_rc);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_int(cli_rc, ==, 0);
+
+    /* REQUEST: trusted client cert -> accepted. */
+    rc = serve_one(&opts, client_thread_with_cert, &cli_rc);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_int(cli_rc, ==, 0);
+
+    /* REQUIRE: trusted client cert -> accepted. */
+    opts.verify_peer_mode = XTC_TLS_VERIFY_REQUIRE;
+    rc = serve_one(&opts, client_thread_with_cert, &cli_rc);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_int(cli_rc, ==, 0);
+
+    /* REQUIRE: no client cert -> REJECTED (the mode was a no-op on
+     * GnuTLS / wolfSSL / mbedTLS before 1.50). */
+    rc = serve_one(&opts, client_thread, &cli_rc);
+    munit_assert_int(rc, !=, XTC_OK);
+    munit_assert_int(cli_rc, !=, 0);
+
+    /* REQUEST with a CA that did NOT issue the client cert: the client
+     * presents a cert that does not verify -> REJECTED. */
+    opts.verify_peer_mode = XTC_TLS_VERIFY_REQUEST;
+    opts.ca_file          = TEST_FAKE_CA;
+    rc = serve_one(&opts, client_thread_with_cert, &cli_rc);
+    munit_assert_int(rc, !=, XTC_OK);
+    munit_assert_int(cli_rc, !=, 0);
+
+    /* Explicit NONE (and a zeroed opts: the SERVER default) does not
+     * ask, so even the untrusted client cert is fine. */
+    opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;
+    opts.verify_peer      = 1;   /* the mode wins over the legacy int */
+    rc = serve_one(&opts, client_thread_with_cert, &cli_rc);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_int(cli_rc, ==, 0);
+    opts.verify_peer_mode = XTC_TLS_VERIFY_DEFAULT;
+    opts.verify_peer      = 0;
+    rc = serve_one(&opts, client_thread_with_cert, &cli_rc);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_int(cli_rc, ==, 0);
+    return MUNIT_OK;
+}
+
 static void *
 suite_setup(const MunitParameter params[], void *user_data)
 {
@@ -1159,6 +1292,8 @@ suite_setup(const MunitParameter params[], void *user_data)
     /* Second SERVER cert (CN = SNI host) for the SNI-selection test. */
     if (generate_cert(TEST_SNI_CERT, TEST_SNI_KEY, SNI_HOSTNAME) != 0)
         return NULL;
+    if (generate_cert(TEST_FAKE_CA, TEST_FAKE_KEY, "xtc-client") != 0)
+        return NULL;
     return (void *)(uintptr_t)1;   /* non-NULL: setup succeeded */
 }
 
@@ -1172,6 +1307,8 @@ suite_teardown(void *fixture)
     unlink(TEST_CLI_KEY);
     unlink(TEST_SNI_CERT);
     unlink(TEST_SNI_KEY);
+    unlink(TEST_FAKE_CA);
+    unlink(TEST_FAKE_KEY);
 }
 
 /* =========================================================================
@@ -1198,6 +1335,8 @@ static MunitTest tests[] = {
     { "/sni_select",           test_server_sni_select,          suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
     { "/transport_roundtrip",  test_server_transport_roundtrip, suite_setup, suite_teardown,
+      MUNIT_TEST_OPTION_NONE, NULL },
+    { "/verify_modes",         test_server_verify_modes,        suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

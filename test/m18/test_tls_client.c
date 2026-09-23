@@ -305,7 +305,8 @@ done:
 
 /* -------------------------------------------------------------------------
  * test_client_handshake_roundtrip:
- *   Full loopback, no peer verification.  Client side under test.
+ *   Full loopback, no peer verification (explicit XTC_TLS_VERIFY_NONE:
+ *   since 1.50 a zeroed opts verifies the server).  Client side under test.
  * ----------------------------------------------------------------------- */
 static MunitResult
 test_client_handshake_roundtrip(const MunitParameter params[], void *data)
@@ -323,7 +324,7 @@ test_client_handshake_roundtrip(const MunitParameter params[], void *data)
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
-    opts.verify_peer = 0;
+    opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;
     opts.min_version = XTC_TLS_VER_12;
 
     rc = xtc_tls_ctx_create(XTC_TLS_CLIENT, &opts, &ctx);
@@ -483,16 +484,19 @@ test_client_verify_peer(const MunitParameter params[], void *data)
 }
 
 /* -------------------------------------------------------------------------
- * One client connection to a server presenting NAME_CERT, with the
- * client trusting that cert (ca_file) and verification ON, expecting the
- * peer to be `expect' via xtc_tls_set_hostname.  Returns the client's
- * handshake rc; *host_rc gets xtc_tls_set_hostname's rc and *srv_rc the
- * server thread's rc.  On success the echo round trip must also work.
+ * One client connection under `copts' to a server presenting cert/key
+ * (NULL = TEST_CERT).  When `expect' is non-NULL the client names the
+ * peer with xtc_tls_set_hostname (after first setting `prior', if
+ * non-NULL, so a replace/clear can be tested).  Returns the client's
+ * handshake rc; *host_rc gets the last xtc_tls_set_hostname rc and
+ * *srv_rc the server thread's rc.  On success the echo round trip must
+ * also work.
  * ----------------------------------------------------------------------- */
 static int
-connect_expecting(const char *expect, int *host_rc, int *srv_rc)
+connect_opts(const xtc_tls_opts_t *copts, const char *cert, const char *key,
+             const char *prior, const char *expect,
+             int *host_rc, int *srv_rc)
 {
-    xtc_tls_opts_t  opts;
     xtc_tls_ctx_t  *ctx = NULL;
     xtc_tls_t      *tls = NULL;
     struct server_args sa;
@@ -501,11 +505,7 @@ connect_expecting(const char *expect, int *host_rc, int *srv_rc)
     int             rc;
     char            rbuf[SERVER_MSG_LEN + 1];
 
-    memset(&opts, 0, sizeof(opts));
-    opts.ca_file     = NAME_CERT_PATH;
-    opts.verify_peer = 1;
-    opts.min_version = XTC_TLS_VER_12;
-    munit_assert_int(xtc_tls_ctx_create(XTC_TLS_CLIENT, &opts, &ctx),
+    munit_assert_int(xtc_tls_ctx_create(XTC_TLS_CLIENT, copts, &ctx),
                      ==, XTC_OK);
 
     munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
@@ -513,13 +513,17 @@ connect_expecting(const char *expect, int *host_rc, int *srv_rc)
     munit_assert_int(set_nonblock(sv[1]), ==, 0);
     munit_assert_int(xtc_tls_create(ctx, sv[1], &tls), ==, XTC_OK);
 
-    *host_rc = xtc_tls_set_hostname(tls, expect);
+    *host_rc = XTC_OK;
+    if (prior != NULL)
+        munit_assert_int(xtc_tls_set_hostname(tls, prior), ==, XTC_OK);
+    if (expect != NULL)
+        *host_rc = xtc_tls_set_hostname(tls, expect);
 
     memset(&sa, 0, sizeof(sa));
     sa.fd   = sv[0];
     sa.rc   = 1;
-    sa.cert = NAME_CERT_PATH;
-    sa.key  = NAME_KEY_PATH;
+    sa.cert = cert;
+    sa.key  = key;
     munit_assert_int(pthread_create(&tid, NULL, server_thread, &sa), ==, 0);
 
     rc = poll_until_done(tls, sv[1], xtc_tls_handshake, 5000);
@@ -542,6 +546,22 @@ connect_expecting(const char *expect, int *host_rc, int *srv_rc)
     return rc;
 }
 
+/* A client trusting NAME_CERT (verification ON) against a server that
+ * presents it, expecting the peer to be `expect'. */
+static int
+connect_expecting(const char *prior, const char *expect,
+                  int *host_rc, int *srv_rc)
+{
+    xtc_tls_opts_t opts;
+
+    memset(&opts, 0, sizeof(opts));
+    opts.ca_file     = NAME_CERT_PATH;
+    opts.verify_peer = 1;
+    opts.min_version = XTC_TLS_VER_12;
+    return connect_opts(&opts, NAME_CERT_PATH, NAME_KEY_PATH, prior, expect,
+                        host_rc, srv_rc);
+}
+
 /* -------------------------------------------------------------------------
  * test_client_hostname_check (PLAN 19.27.7):
  *   The server's certificate is valid and TRUSTED, but issued for
@@ -562,21 +582,110 @@ test_client_hostname_check(const MunitParameter params[], void *data)
     (void)data;
 
     /* Positive control: the right name, trusted chain -> success. */
-    rc = connect_expecting(NAME_CERT, &host_rc, &srv_rc);
+    rc = connect_expecting(NULL, NAME_CERT, &host_rc, &srv_rc);
     munit_assert_int(host_rc, ==, XTC_OK);
     munit_assert_int(rc, ==, XTC_OK);
     munit_assert_int(srv_rc, ==, 0);
 
     /* The defect: a trusted cert for the WRONG name must be rejected. */
-    rc = connect_expecting(NAME_OTHER, &host_rc, &srv_rc);
+    rc = connect_expecting(NULL, NAME_OTHER, &host_rc, &srv_rc);
     munit_assert_int(rc, ==, XTC_E_INTERNAL);   /* handshake REJECTED */
     munit_assert_int(host_rc, ==, XTC_OK);      /* NOSYS is a failure */
     munit_assert_int(srv_rc, !=, 0);
 
     /* Clearing the name falls back to chain-only verification. */
-    rc = connect_expecting("", &host_rc, &srv_rc);
+    rc = connect_expecting(NULL, "", &host_rc, &srv_rc);
     munit_assert_int(host_rc, ==, XTC_OK);
     munit_assert_int(rc, ==, XTC_OK);
+
+    /* ... and clearing must UNDO an earlier wrong name, not just stop
+     * sending SNI (the OpenSSL clear path left SSL_set1_host armed
+     * before 1.50, so this handshake still failed the name check). */
+    rc = connect_expecting(NAME_OTHER, "", &host_rc, &srv_rc);
+    munit_assert_int(host_rc, ==, XTC_OK);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_int(srv_rc, ==, 0);
+    return MUNIT_OK;
+}
+
+/* -------------------------------------------------------------------------
+ * test_client_default_verifies (PLAN 19.27.8):
+ *   Since 1.50 a CLIENT whose opts set no verify field at all verifies
+ *   the server: before, a zeroed opts resolved to XTC_TLS_VERIFY_NONE and
+ *   accepted ANY certificate.  The server here presents a self-signed
+ *   cert the client does not trust, so the handshake must FAIL -- with
+ *   ca_file NULL (the platform trust store, which does not hold it) and
+ *   with a ca_file that did not issue it.  The same client with an
+ *   explicit XTC_TLS_VERIFY_NONE must still succeed (the documented
+ *   opt-out), and with ca_file = the server cert it must succeed (the
+ *   positive control: the rejections are about trust, nothing else).
+ *
+ *   mbedTLS has no platform trust store: a verifying client without
+ *   ca_file is refused at ctx_create with XTC_E_INVAL instead.
+ * ----------------------------------------------------------------------- */
+static MunitResult
+test_client_default_verifies(const MunitParameter params[], void *data)
+{
+    xtc_tls_opts_t  opts;
+#if defined(XTC_TLS_BACKEND_MBEDTLS)
+    xtc_tls_ctx_t  *ctx = NULL;
+#endif
+    int             rc, host_rc, srv_rc;
+
+    (void)params;
+    (void)data;
+
+    /* Zeroed opts, ca_file NULL: the untrusted server is REJECTED. */
+    memset(&opts, 0, sizeof(opts));
+#if defined(XTC_TLS_BACKEND_MBEDTLS)
+    munit_assert_int(xtc_tls_ctx_create(XTC_TLS_CLIENT, &opts, &ctx),
+                     ==, XTC_E_INVAL);
+    munit_assert_ptr_null(ctx);
+    munit_assert_int(xtc_tls_ctx_create(XTC_TLS_CLIENT, NULL, &ctx),
+                     ==, XTC_E_INVAL);
+    munit_assert_ptr_null(ctx);
+#else
+    rc = connect_opts(&opts, NULL, NULL, NULL, NULL, &host_rc, &srv_rc);
+    munit_assert_int(rc, ==, XTC_E_INTERNAL);
+    munit_assert_int(srv_rc, !=, 0);
+#endif
+
+    /* Zeroed verify fields, a ca_file that did not issue the server
+     * cert: REJECTED (on every backend, mbedTLS included). */
+    memset(&opts, 0, sizeof(opts));
+    opts.ca_file = WRONG_CA_PATH;
+    rc = connect_opts(&opts, NULL, NULL, NULL, NULL, &host_rc, &srv_rc);
+    munit_assert_int(rc, ==, XTC_E_INTERNAL);
+    munit_assert_int(srv_rc, !=, 0);
+
+    /* Positive control: zeroed verify fields, trusted ca_file -> OK. */
+    memset(&opts, 0, sizeof(opts));
+    opts.ca_file = TEST_CERT_PATH;
+    rc = connect_opts(&opts, NULL, NULL, NULL, NULL, &host_rc, &srv_rc);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_int(srv_rc, ==, 0);
+
+    /* The opt-out: explicit NONE accepts the untrusted server, and wins
+     * over the legacy verify_peer int. */
+    memset(&opts, 0, sizeof(opts));
+    opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;
+    rc = connect_opts(&opts, NULL, NULL, NULL, NULL, &host_rc, &srv_rc);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_int(srv_rc, ==, 0);
+    opts.verify_peer = 1;
+    opts.ca_file     = WRONG_CA_PATH;
+    rc = connect_opts(&opts, NULL, NULL, NULL, NULL, &host_rc, &srv_rc);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_int(srv_rc, ==, 0);
+
+    /* Explicit REQUIRE is honored too (before 1.50 GnuTLS, wolfSSL and
+     * mbedTLS ignored verify_peer_mode and read only verify_peer). */
+    memset(&opts, 0, sizeof(opts));
+    opts.verify_peer_mode = XTC_TLS_VERIFY_REQUIRE;
+    opts.ca_file          = WRONG_CA_PATH;
+    rc = connect_opts(&opts, NULL, NULL, NULL, NULL, &host_rc, &srv_rc);
+    munit_assert_int(rc, ==, XTC_E_INTERNAL);
+    munit_assert_int(srv_rc, !=, 0);
     return MUNIT_OK;
 }
 
@@ -627,6 +736,8 @@ static MunitTest tests[] = {
     { "/verify_peer",         test_client_verify_peer,
       suite_setup, suite_teardown, MUNIT_TEST_OPTION_NONE, NULL },
     { "/hostname_check",      test_client_hostname_check,
+      suite_setup, suite_teardown, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/default_verifies",    test_client_default_verifies,
       suite_setup, suite_teardown, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

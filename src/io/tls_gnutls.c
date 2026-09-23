@@ -27,12 +27,17 @@
  *
  *	Peer verification:
  *
- *	  GnuTLS does not abort the handshake on a bad certificate by
- *	  default; instead the application verifies after the handshake.
- *	  When verify_peer is set we call gnutls_certificate_verify_peers2
- *	  the moment the handshake completes and map a non-zero status to
- *	  XTC_E_INTERNAL, matching the OpenSSL backend's hard-fail on a
- *	  rejected certificate.
+ *	  The effective mode comes from resolve_verify (same rule as every
+ *	  backend: verify_peer_mode, else legacy verify_peer, else the role
+ *	  default -- CLIENT REQUIRE, SERVER NONE).  GnuTLS does not abort
+ *	  the handshake on a bad certificate by default, so a verifying
+ *	  session arms gnutls_session_set_verify_cert (in-handshake check,
+ *	  alert to the peer) and re-checks with
+ *	  gnutls_certificate_verify_peers3 when the handshake completes,
+ *	  mapping a bad status to XTC_E_INTERNAL like the OpenSSL backend.
+ *	  A SERVER requests the client certificate with
+ *	  gnutls_certificate_server_set_request: REQUEST = ask, accept none,
+ *	  reject an invalid one; REQUIRE = reject none too.
  *
  *	Internal struct layout (private to this file):
  *
@@ -42,7 +47,7 @@
  *	      char                                *priority;  // or NULL
  *	      gnutls_datum_t                      *alpn;       // or NULL
  *	      unsigned int                         alpn_count;
- *	      int                                  verify_peer;
+ *	      xtc_tls_verify_mode_t                verify;
  *	  };
  *
  *	  struct xtc_tls {
@@ -82,7 +87,7 @@ struct xtc_tls_ctx {
 	char                             *priority;     /* NULL = default */
 	gnutls_datum_t                   *alpn;         /* NULL if unset */
 	unsigned int                      alpn_count;
-	int                               verify_peer;
+	xtc_tls_verify_mode_t             verify;       /* resolved; never DEFAULT */
 };
 
 
@@ -236,6 +241,26 @@ alpn_free(gnutls_datum_t *arr, unsigned int count)
 	__os_free(arr);
 }
 
+/*
+ * Resolve the effective peer-verification mode.  verify_peer_mode wins
+ * when set; otherwise the legacy verify_peer int (non-zero = REQUIRE);
+ * otherwise the ROLE default: a CLIENT verifies the server (REQUIRE), a
+ * SERVER does not ask for a client certificate (NONE).  Before 1.50 a
+ * zeroed opts meant NONE for a client, and this backend ignored
+ * verify_peer_mode entirely (PLAN 19.27.8).  Keep in sync with the
+ * other tls_<backend>.c copies.
+ */
+static xtc_tls_verify_mode_t
+resolve_verify(xtc_tls_role_t role, const xtc_tls_opts_t *opts)
+{
+	if (opts != NULL && opts->verify_peer_mode != XTC_TLS_VERIFY_DEFAULT)
+		return opts->verify_peer_mode;
+	if (opts != NULL && opts->verify_peer)
+		return XTC_TLS_VERIFY_REQUIRE;
+	return (role == XTC_TLS_CLIENT) ? XTC_TLS_VERIFY_REQUIRE
+	                                : XTC_TLS_VERIFY_NONE;
+}
+
 /* -------------------------------------------------------------------------
  * PUBLIC: int  xtc_tls_ctx_create __P((xtc_tls_role_t,
  * PUBLIC:                              const xtc_tls_opts_t *,
@@ -260,12 +285,20 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	if ((rc = __os_calloc(1, sizeof(*c), (void **)&c)) != XTC_OK)
 		return rc;
 
-	c->role = role;
+	c->role   = role;
+	c->verify = resolve_verify(role, opts);
 
 	if (gnutls_certificate_allocate_credentials(&c->cred) != 0) {
 		__os_free(c);
 		return XTC_E_NOMEM;
 	}
+
+	/* A verifying CLIENT with no ca_file trusts the platform store.  A
+	 * failure (no store) leaves no anchors: every handshake then fails
+	 * closed.  A SERVER never trusts the system store for clients. */
+	if (role == XTC_TLS_CLIENT && c->verify != XTC_TLS_VERIFY_NONE &&
+	    (opts == NULL || opts->ca_file == NULL))
+		(void)gnutls_certificate_set_x509_system_trust(c->cred);
 
 	if (opts == NULL)
 		goto done;
@@ -292,8 +325,6 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 			goto fail;
 		}
 	}
-
-	c->verify_peer = opts->verify_peer;
 
 	/* ---- Priority string from min/max version ---- */
 	if ((rc = build_priority(opts->min_version, opts->max_version,
@@ -393,9 +424,16 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 	/* CLIENT with verification: verify the server certificate INSIDE
 	 * the handshake so a bad chain (or, once xtc_tls_set_hostname names
 	 * the peer, a bad name) aborts it with an alert the server sees,
-	 * rather than completing and being rejected afterwards. */
-	if (ctx->role == XTC_TLS_CLIENT && ctx->verify_peer)
+	 * rather than completing and being rejected afterwards.  SERVER:
+	 * request the client certificate (GNUTLS_CERT_REQUIRE also fails a
+	 * client that sends none); the chain is checked when the handshake
+	 * completes (xtc_tls_handshake). */
+	if (ctx->role == XTC_TLS_CLIENT && ctx->verify != XTC_TLS_VERIFY_NONE)
 		gnutls_session_set_verify_cert(t->session, NULL, 0);
+	if (ctx->role == XTC_TLS_SERVER && ctx->verify != XTC_TLS_VERIFY_NONE)
+		gnutls_certificate_server_set_request(t->session,
+		    ctx->verify == XTC_TLS_VERIFY_REQUEST ? GNUTLS_CERT_REQUEST
+		                                          : GNUTLS_CERT_REQUIRE);
 
 	*out = t;
 	return XTC_OK;
@@ -463,7 +501,7 @@ xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 	/* Re-arm in-handshake verification with the name (the pointer must
 	 * outlive the session, hence the owned copy; set before freeing the
 	 * old one). */
-	if (tls->ctx->verify_peer)
+	if (tls->ctx->verify != XTC_TLS_VERIFY_NONE)
 		gnutls_session_set_verify_cert(tls->session, copy, 0);
 	if (tls->hostname != NULL)
 		__os_free(tls->hostname);
@@ -504,13 +542,23 @@ xtc_tls_handshake(xtc_tls_t *tls)
 		 * default; verify explicitly when requested and map a bad
 		 * status to a hard error (matches the OpenSSL backend).
 		 * verify_peers3 also checks the peer name when one was set
-		 * with xtc_tls_set_hostname (NULL = chain only).
+		 * with xtc_tls_set_hostname (NULL = chain only).  A SERVER in
+		 * REQUEST mode accepts a client that presented no certificate
+		 * (but not one that presented an invalid certificate).
 		 */
-		if (tls->ctx->verify_peer) {
+		if (tls->ctx->verify != XTC_TLS_VERIFY_NONE) {
 			unsigned int status = 0;
-			int vr = gnutls_certificate_verify_peers3(tls->session,
-			                                          tls->hostname,
-			                                          &status);
+			unsigned int npeer  = 0;
+			int vr;
+
+			if (tls->ctx->role == XTC_TLS_SERVER &&
+			    tls->ctx->verify == XTC_TLS_VERIFY_REQUEST &&
+			    gnutls_certificate_get_peers(tls->session,
+			        &npeer) == NULL)
+				return XTC_OK;
+			vr = gnutls_certificate_verify_peers3(tls->session,
+			                                      tls->hostname,
+			                                      &status);
 			if (vr != GNUTLS_E_SUCCESS || status != 0)
 				return XTC_E_INTERNAL;
 		}

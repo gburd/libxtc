@@ -38,6 +38,7 @@
  *	      int                       have_cert;  // own_cert installed
  *	      int                       have_ca;    // ca_chain installed
  *	      char                    **alpn;       // NULL-terminated, or NULL
+ *	      xtc_tls_verify_mode_t     verify;     // resolved; never DEFAULT
  *	  };
  *
  *	  struct xtc_tls {
@@ -94,6 +95,7 @@ struct xtc_tls_ctx {
 	int                       have_cert;
 	int                       have_ca;
 	char                    **alpn;
+	xtc_tls_verify_mode_t     verify;   /* resolved; never DEFAULT */
 };
 
 
@@ -260,6 +262,26 @@ xtc_ver_to_mbedtls(int v, mbedtls_ssl_protocol_version *out)
 	}
 }
 
+/*
+ * Resolve the effective peer-verification mode.  verify_peer_mode wins
+ * when set; otherwise the legacy verify_peer int (non-zero = REQUIRE);
+ * otherwise the ROLE default: a CLIENT verifies the server (REQUIRE), a
+ * SERVER does not ask for a client certificate (NONE).  Before 1.50 a
+ * zeroed opts meant NONE for a client, and this backend ignored
+ * verify_peer_mode entirely (PLAN 19.27.8).  Keep in sync with the
+ * other tls_<backend>.c copies.
+ */
+static xtc_tls_verify_mode_t
+resolve_verify(xtc_tls_role_t role, const xtc_tls_opts_t *opts)
+{
+	if (opts != NULL && opts->verify_peer_mode != XTC_TLS_VERIFY_DEFAULT)
+		return opts->verify_peer_mode;
+	if (opts != NULL && opts->verify_peer)
+		return XTC_TLS_VERIFY_REQUIRE;
+	return (role == XTC_TLS_CLIENT) ? XTC_TLS_VERIFY_REQUIRE
+	                                : XTC_TLS_VERIFY_NONE;
+}
+
 /* -------------------------------------------------------------------------
  * PUBLIC: int  xtc_tls_ctx_create __P((xtc_tls_role_t,
  * PUBLIC:                              const xtc_tls_opts_t *,
@@ -283,7 +305,8 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	if ((rc = __os_calloc(1, sizeof(*c), (void **)&c)) != XTC_OK)
 		return rc;
 
-	c->role = role;
+	c->role   = role;
+	c->verify = resolve_verify(role, opts);
 	mbedtls_ssl_config_init(&c->conf);
 	mbedtls_x509_crt_init(&c->cert);
 	mbedtls_pk_init(&c->pkey);
@@ -317,12 +340,20 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 
 	mbedtls_ssl_conf_rng(&c->conf, mbedtls_ctr_drbg_random, &c->drbg);
 
+	/*
+	 * mbedTLS has no platform trust store, so a verifying CLIENT must
+	 * name its anchors in ca_file.  Without one it could only verify
+	 * against nothing -- refuse at creation rather than fail every
+	 * handshake (or, as before 1.50, silently verify nothing).
+	 */
+	if (role == XTC_TLS_CLIENT && c->verify != XTC_TLS_VERIFY_NONE &&
+	    (opts == NULL || opts->ca_file == NULL)) {
+		rc = XTC_E_INVAL;
+		goto fail;
+	}
+
 	if (opts == NULL) {
-		/*
-		 * No options: default to no peer verification so an
-		 * un-configured client/server still completes a handshake
-		 * (matching the OpenSSL backend's "verify off unless asked").
-		 */
+		/* Only a SERVER reaches here (resolved NONE). */
 		mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_NONE);
 		goto done;
 	}
@@ -381,9 +412,19 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 		c->have_ca = 1;
 	}
 
+	/*
+	 * Peer verification (see resolve_verify).  A CLIENT treats REQUEST
+	 * as REQUIRE (the server always presents a certificate).  A SERVER
+	 * in REQUEST mode uses VERIFY_OPTIONAL, which requests the client
+	 * certificate but completes the handshake whatever the verify
+	 * result; xtc_tls_handshake then rejects a certificate that was
+	 * PRESENTED but did not verify, so REQUEST means what it means on
+	 * OpenSSL: ask, accept none, reject an invalid one.
+	 */
 	mbedtls_ssl_conf_authmode(&c->conf,
-	    opts->verify_peer ? MBEDTLS_SSL_VERIFY_REQUIRED
-	                      : MBEDTLS_SSL_VERIFY_NONE);
+	    c->verify == XTC_TLS_VERIFY_NONE ? MBEDTLS_SSL_VERIFY_NONE :
+	    (role == XTC_TLS_SERVER && c->verify == XTC_TLS_VERIFY_REQUEST)
+	        ? MBEDTLS_SSL_VERIFY_OPTIONAL : MBEDTLS_SSL_VERIFY_REQUIRED);
 
 	/* ---- ALPN protocol list ---- */
 	if (opts->alpn_protos != NULL && opts->alpn_protos[0] != '\0') {
@@ -547,8 +588,17 @@ xtc_tls_handshake(xtc_tls_t *tls)
 	xtc_tls_clear_wants(tls);
 
 	rc = mbedtls_ssl_handshake(&tls->ssl);
-	if (rc == 0)
+	if (rc == 0) {
+		/* REQUEST server (VERIFY_OPTIONAL): no certificate is fine,
+		 * a presented-but-invalid one is not. */
+		if (tls->ctx->role == XTC_TLS_SERVER &&
+		    tls->ctx->verify == XTC_TLS_VERIFY_REQUEST) {
+			uint32_t vr = mbedtls_ssl_get_verify_result(&tls->ssl);
+			if (vr != 0 && (vr & MBEDTLS_X509_BADCERT_MISSING) == 0)
+				return XTC_E_INTERNAL;
+		}
 		return XTC_OK;
+	}
 
 	return map_want(tls, rc);
 }
