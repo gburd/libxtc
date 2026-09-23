@@ -184,6 +184,26 @@ xtc_ver_to_wolfssl(int v, int *out)
 	}
 }
 
+/*
+ * Resolve the effective peer-verification mode.  verify_peer_mode wins
+ * when set; otherwise the legacy verify_peer int (non-zero = REQUIRE);
+ * otherwise the ROLE default: a CLIENT verifies the server (REQUIRE), a
+ * SERVER does not ask for a client certificate (NONE).  Before 1.50 a
+ * zeroed opts meant NONE for a client, and this backend ignored
+ * verify_peer_mode entirely (PLAN 19.27.8).  Keep in sync with the
+ * other tls_<backend>.c copies.
+ */
+static xtc_tls_verify_mode_t
+resolve_verify(xtc_tls_role_t role, const xtc_tls_opts_t *opts)
+{
+	if (opts != NULL && opts->verify_peer_mode != XTC_TLS_VERIFY_DEFAULT)
+		return opts->verify_peer_mode;
+	if (opts != NULL && opts->verify_peer)
+		return XTC_TLS_VERIFY_REQUIRE;
+	return (role == XTC_TLS_CLIENT) ? XTC_TLS_VERIFY_REQUIRE
+	                                : XTC_TLS_VERIFY_NONE;
+}
+
 /* -------------------------------------------------------------------------
  * PUBLIC: int  xtc_tls_ctx_create __P((xtc_tls_role_t,
  * PUBLIC:                              const xtc_tls_opts_t *,
@@ -196,9 +216,10 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
                    const xtc_tls_opts_t *opts,
                    xtc_tls_ctx_t **out)
 {
-	struct xtc_tls_ctx *c;
-	WOLFSSL_METHOD     *method;
-	int                 rc;
+	struct xtc_tls_ctx    *c;
+	WOLFSSL_METHOD        *method;
+	xtc_tls_verify_mode_t  vm;
+	int                    rc;
 
 	if (out == NULL)
 		return XTC_E_INVAL;
@@ -227,10 +248,8 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 		return XTC_E_NOMEM;
 	}
 
-	if (opts == NULL) {
-		wolfSSL_CTX_set_verify(c->ctx, WOLFSSL_VERIFY_NONE, NULL);
+	if (opts == NULL)
 		goto done;
-	}
 
 	/* ---- Certificate chain ---- */
 	if (opts->cert_file != NULL) {
@@ -272,16 +291,6 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 		}
 	}
 
-	/* ---- Peer verification ---- */
-	if (opts->verify_peer) {
-		int mode = WOLFSSL_VERIFY_PEER;
-		if (role == XTC_TLS_SERVER)
-			mode |= WOLFSSL_VERIFY_FAIL_IF_NO_PEER_CERT;
-		wolfSSL_CTX_set_verify(c->ctx, mode, NULL);
-	} else {
-		wolfSSL_CTX_set_verify(c->ctx, WOLFSSL_VERIFY_NONE, NULL);
-	}
-
 	/* ---- ALPN (decoded to comma form; applied per-session) ---- */
 	if (opts->alpn_protos != NULL && opts->alpn_protos[0] != '\0') {
 #ifdef HAVE_ALPN
@@ -296,6 +305,35 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	}
 
 done:
+	/*
+	 * Peer verification (see resolve_verify; applied here so a NULL
+	 * opts gets the role default too).  CLIENT: VERIFY_PEER verifies
+	 * the server against ca_file or, when none was given, the platform
+	 * trust store.  SERVER: VERIFY_PEER requests a client certificate
+	 * (and rejects an invalid one); REQUIRE adds FAIL_IF_NO_PEER_CERT,
+	 * REQUEST accepts a client that sends none -- the OpenSSL meaning.
+	 */
+	vm = resolve_verify(role, opts);
+	if (vm == XTC_TLS_VERIFY_NONE) {
+		wolfSSL_CTX_set_verify(c->ctx, WOLFSSL_VERIFY_NONE, NULL);
+	} else {
+		int mode = WOLFSSL_VERIFY_PEER;
+		if (role == XTC_TLS_SERVER && vm == XTC_TLS_VERIFY_REQUIRE)
+			mode |= WOLFSSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+		wolfSSL_CTX_set_verify(c->ctx, mode, NULL);
+		/*
+		 * No anchors => every handshake fails closed.  A wolfSSL
+		 * built without WOLFSSL_SYS_CA_CERTS (--enable-sys-ca-certs,
+		 * the default since 5.5) cannot read the platform store:
+		 * there a verifying client must set ca_file.
+		 */
+#ifdef WOLFSSL_SYS_CA_CERTS
+		if (role == XTC_TLS_CLIENT &&
+		    (opts == NULL || opts->ca_file == NULL))
+			(void)wolfSSL_CTX_load_system_CA_certs(c->ctx);
+#endif
+	}
+
 	*out = c;
 	return XTC_OK;
 

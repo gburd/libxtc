@@ -21,7 +21,6 @@
  *
  *	  // 1.  Create a shared context (once per server/client role):
  *	  xtc_tls_opts_t opts = { .cert_file = "srv.crt", .key_file = "srv.key",
- *	                           .verify_peer = 0,
  *	                           .min_version = XTC_TLS_VER_12 };
  *	  xtc_tls_ctx_t *ctx;
  *	  xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx);
@@ -112,7 +111,7 @@ typedef struct xtc_tls      xtc_tls_t;
 
 typedef enum xtc_tls_role {
 	XTC_TLS_SERVER = 0,   /* accept connections, present certificate */
-	XTC_TLS_CLIENT = 1    /* initiate connections, optionally verify server */
+	XTC_TLS_CLIENT = 1    /* initiate connections, verify server (default) */
 } xtc_tls_role_t;
 
 /* -------------------------------------------------------------------------
@@ -131,10 +130,26 @@ typedef enum xtc_tls_role {
  * default -- certificate auth is then optional, decided per-hba-line
  * after the handshake).  opts.verify_peer_mode expresses all three.
  * See the compatibility note on opts.verify_peer below.
+ *
+ * Resolution, identical on every backend: verify_peer_mode wins when
+ * not DEFAULT; else a non-zero legacy verify_peer means REQUIRE; else
+ * the ROLE default -- CLIENT: REQUIRE, SERVER: NONE.
+ *
+ * BEHAVIOR CHANGE: Since 1.50 a CLIENT verifies the server by default;
+ * set verify_peer_mode = XTC_TLS_VERIFY_NONE to opt out.  Before 1.50 a
+ * zeroed opts (or NULL opts) resolved to NONE for a CLIENT too, so it
+ * accepted ANY server certificate; and the GnuTLS, wolfSSL and mbedTLS
+ * backends ignored verify_peer_mode and read only verify_peer.
+ *
+ * On a CLIENT, REQUEST behaves as REQUIRE (a server always presents a
+ * certificate).  On a SERVER: NONE does not ask for a client
+ * certificate; REQUEST asks, completes the handshake when the client
+ * sends none, and fails it when the client sends one that does not
+ * verify against ca_file; REQUIRE also fails a client that sends none.
  * ----------------------------------------------------------------------- */
 
 typedef enum xtc_tls_verify_mode {
-	XTC_TLS_VERIFY_DEFAULT = 0,  /* defer to legacy opts.verify_peer */
+	XTC_TLS_VERIFY_DEFAULT = 0,  /* legacy verify_peer, else role default */
 	XTC_TLS_VERIFY_NONE,         /* do not request a peer certificate */
 	XTC_TLS_VERIFY_REQUEST,      /* request; accept a handshake with none */
 	XTC_TLS_VERIFY_REQUIRE       /* require a valid peer certificate */
@@ -172,11 +187,24 @@ typedef int (*xtc_tls_passphrase_cb_t)(char *buf, int size, void *userdata);
  *                Required when cert_file is set.
  *
  *   ca_file      Path to a PEM CA bundle used for peer verification.
- *                If NULL the backend's system CA bundle is used.
+ *                If NULL, a verifying CLIENT uses the platform's
+ *                default trust store: OpenSSL's default verify paths,
+ *                GnuTLS's system trust, wolfSSL's system CA certs
+ *                (when wolfSSL was built with WOLFSSL_SYS_CA_CERTS;
+ *                otherwise there are no anchors and every handshake
+ *                fails).  mbedTLS has no platform store: there a
+ *                verifying CLIENT with ca_file NULL is refused by
+ *                xtc_tls_ctx_create with XTC_E_INVAL.  A SERVER never
+ *                trusts the platform store for client certificates;
+ *                set ca_file to verify clients.
  *
- *   verify_peer  Boolean.  1 = require a valid peer certificate;
- *                0 = do not verify.  For SERVER role, 1 enables
- *                mutual TLS (client must present a cert).
+ *   verify_peer  Legacy boolean.  Non-zero = REQUIRE (for SERVER role
+ *                that enables mutual TLS: the client must present a
+ *                cert).  0 = the role default (see
+ *                xtc_tls_verify_mode_t): since 1.50 that is REQUIRE for
+ *                a CLIENT, NONE for a SERVER.  Set
+ *                verify_peer_mode = XTC_TLS_VERIFY_NONE to turn a
+ *                client's verification off.
  *
  *   alpn_protos  ALPN protocol list in wire encoding:
  *                "\x02h2\x08http/1.1".  NULL disables ALPN
@@ -189,12 +217,14 @@ typedef int (*xtc_tls_passphrase_cb_t)(char *buf, int size, void *userdata);
  *   max_version  Maximum TLS version to offer.  0 means "backend
  *                default" (typically TLS 1.3).
  *
- * Additions (all optional; a zeroed opts behaves exactly as before):
+ * Additions (all optional; a zeroed addition behaves as before 1.24 --
+ * except that since 1.50 a zeroed CLIENT opts verifies the server):
  *
  *   verify_peer_mode  Tri-state peer verification (see
  *                xtc_tls_verify_mode_t).  When XTC_TLS_VERIFY_DEFAULT
- *                (0), the legacy verify_peer int is used.  Any other
- *                value takes precedence over verify_peer.
+ *                (0), the legacy verify_peer int is used, then the
+ *                role default.  Any other value takes precedence over
+ *                verify_peer.
  *
  *   cipher_list       TLS 1.2 cipher list (OpenSSL SSL_CTX_set_cipher_list
  *                syntax).  NULL = backend default.
@@ -258,12 +288,15 @@ typedef struct xtc_tls_opts {
  *	Allocate and initialise a TLS context.
  *
  *	role    SERVER or CLIENT.
- *	opts    Options struct.  May be NULL (all defaults).
+ *	opts    Options struct.  May be NULL (all defaults; a CLIENT then
+ *	        verifies the server against the platform trust store).
  *	out     On XTC_OK, *out points to the new context.
  *
  *	Returns:
  *	  XTC_OK        on success
- *	  XTC_E_INVAL   if out is NULL or opts contains contradictory settings
+ *	  XTC_E_INVAL   if out is NULL or opts contains contradictory settings,
+ *	                or (mbedTLS only: no platform trust store) a
+ *	                verifying CLIENT has no ca_file
  *	  XTC_E_NOMEM   on allocation failure
  *	  XTC_E_NOSYS   if TLS support was not compiled in
  */

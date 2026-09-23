@@ -400,6 +400,25 @@ xtc_ver_to_openssl(int v)
 	}
 }
 
+/*
+ * Resolve the effective peer-verification mode.  verify_peer_mode wins
+ * when set; otherwise the legacy verify_peer int (non-zero = REQUIRE);
+ * otherwise the ROLE default: a CLIENT verifies the server (REQUIRE), a
+ * SERVER does not ask for a client certificate (NONE).  Before 1.50 a
+ * zeroed opts meant NONE for a client too -- insecure by default (PLAN
+ * 19.27.8).  Keep in sync with the other tls_<backend>.c copies.
+ */
+static xtc_tls_verify_mode_t
+resolve_verify(xtc_tls_role_t role, const xtc_tls_opts_t *opts)
+{
+	if (opts != NULL && opts->verify_peer_mode != XTC_TLS_VERIFY_DEFAULT)
+		return opts->verify_peer_mode;
+	if (opts != NULL && opts->verify_peer)
+		return XTC_TLS_VERIFY_REQUIRE;
+	return (role == XTC_TLS_CLIENT) ? XTC_TLS_VERIFY_REQUIRE
+	                                : XTC_TLS_VERIFY_NONE;
+}
+
 /* -------------------------------------------------------------------------
  * PUBLIC: int  xtc_tls_ctx_create __P((xtc_tls_role_t,
  * PUBLIC:                              const xtc_tls_opts_t *,
@@ -412,9 +431,10 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
                    const xtc_tls_opts_t *opts,
                    xtc_tls_ctx_t **out)
 {
-	struct xtc_tls_ctx *c;
-	const SSL_METHOD   *method;
-	int                 rc;
+	struct xtc_tls_ctx    *c;
+	const SSL_METHOD      *method;
+	xtc_tls_verify_mode_t  vm;
+	int                    rc;
 
 	if (out == NULL)
 		return XTC_E_INVAL;
@@ -548,33 +568,6 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 		}
 	}
 
-	/*
-	 * Peer verification.  verify_peer_mode (tri-state) takes precedence
-	 * when set to a non-DEFAULT value; otherwise the legacy verify_peer
-	 * int decides (0 = none, non-zero = require).
-	 */
-	{
-		xtc_tls_verify_mode_t vm = opts->verify_peer_mode;
-		if (vm == XTC_TLS_VERIFY_DEFAULT)
-			vm = opts->verify_peer ? XTC_TLS_VERIFY_REQUIRE
-			                       : XTC_TLS_VERIFY_NONE;
-		if (vm != XTC_TLS_VERIFY_NONE) {
-			/*
-			 * CLIENT: SSL_VERIFY_PEER makes the client verify the
-			 * server certificate.  SERVER: SSL_VERIFY_PEER requests
-			 * a client cert; REQUIRE adds FAIL_IF_NO_PEER_CERT so a
-			 * client that presents none is rejected.  REQUEST omits
-			 * it, so the handshake completes without a client cert
-			 * (certificate auth then optional, decided later).
-			 */
-			int mode = SSL_VERIFY_PEER;
-			if (role == XTC_TLS_SERVER &&
-			    vm == XTC_TLS_VERIFY_REQUIRE)
-				mode |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
-			SSL_CTX_set_verify(c->ssl_ctx, mode, NULL);
-		}
-	}
-
 	/* ---- Cipher / group selection ---- */
 	if (opts->cipher_list != NULL &&
 	    SSL_CTX_set_cipher_list(c->ssl_ctx, opts->cipher_list) != 1)
@@ -649,6 +642,29 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	}
 
 done:
+	/*
+	 * Peer verification (see resolve_verify; applied here so a NULL
+	 * opts gets the role default too).  CLIENT: SSL_VERIFY_PEER makes
+	 * the client verify the server certificate, against ca_file or, when
+	 * none was given, the default system trust store.  SERVER:
+	 * SSL_VERIFY_PEER requests a client cert; REQUIRE adds
+	 * FAIL_IF_NO_PEER_CERT so a client that presents none is rejected.
+	 * REQUEST omits it, so the handshake completes without a client cert
+	 * (certificate auth then optional, decided later).  A server never
+	 * trusts the system store for client certificates.
+	 */
+	vm = resolve_verify(role, opts);
+	if (vm != XTC_TLS_VERIFY_NONE) {
+		int mode = SSL_VERIFY_PEER;
+		if (role == XTC_TLS_SERVER && vm == XTC_TLS_VERIFY_REQUIRE)
+			mode |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+		SSL_CTX_set_verify(c->ssl_ctx, mode, NULL);
+		/* No anchors loaded => every handshake fails closed. */
+		if (role == XTC_TLS_CLIENT &&
+		    (opts == NULL || opts->ca_file == NULL))
+			(void)SSL_CTX_set_default_verify_paths(c->ssl_ctx);
+	}
+
 	/*
 	 * SERVER contexts get the ClientHello callback registered so a
 	 * later xtc_tls_ctx_set_sni_cb takes effect; the shim no-ops
