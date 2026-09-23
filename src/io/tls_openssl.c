@@ -841,14 +841,18 @@ xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 		return XTC_OK;   /* no-op on the server side */
 	if (name == NULL || name[0] == '\0') {
 		(void)SSL_set_tlsext_host_name(tls->ssl, NULL);
+		(void)SSL_set1_host(tls->ssl, NULL);   /* clear the name check */
 		return XTC_OK;
 	}
 	/* Send SNI in the ClientHello ... */
 	if (SSL_set_tlsext_host_name(tls->ssl, name) != 1)
 		return XTC_E_INTERNAL;
 	/* ... and verify the server cert matches this host (RFC 6125).
-	 * Harmless when the context does not verify peers. */
-	(void)SSL_set1_host(tls->ssl, name);
+	 * Enforced by the chain verify, so it only bites when the context
+	 * verifies peers (SSL_VERIFY_PEER).  A failure here (OOM) must not
+	 * be swallowed: it would silently drop the name check. */
+	if (SSL_set1_host(tls->ssl, name) != 1)
+		return XTC_E_NOMEM;
 	return XTC_OK;
 }
 

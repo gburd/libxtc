@@ -405,9 +405,15 @@ XTC_API int  xtc_tls_create_transport(xtc_tls_ctx_t *ctx,
  * requested host in the ClientHello's SNI extension (so a multi-tenant
  * server's selection callback can pick the right certificate) and to
  * enable RFC 6125 hostname verification against the server certificate
- * when the context verifies peers.  name is copied; NULL or "" clears
- * it.  Must be called before xtc_tls_handshake.  Ignored (harmless) on
- * a SERVER connection; XTC_E_NOSYS on a backend that cannot set it.
+ * (subjectAltName DNS entries, falling back to the CN where the backend
+ * does): a certificate that chains to a trusted CA but names a
+ * DIFFERENT host fails the handshake.  The name is only enforced when
+ * the context verifies peers.  name is copied; NULL or "" clears it
+ * (chain-only verification).  Must be called before xtc_tls_handshake.
+ * Ignored (harmless) on a SERVER connection.  Implemented on the
+ * OpenSSL, GnuTLS, wolfSSL and mbedTLS backends (before 1.50 only
+ * OpenSSL checked the name; the others returned XTC_E_NOSYS); still
+ * XTC_E_NOSYS on SChannel and --with-tls=none.
  * ----------------------------------------------------------------------- */
 
 /*
