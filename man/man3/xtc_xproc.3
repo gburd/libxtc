@@ -136,6 +136,24 @@ Passing
 .Dv NULL
 is a no-op; destroying the same handle twice is undefined.
 .Pp
+The DOWN a monitor receives classifies the child's death exactly:
+a child that returns or exits with 0 is
+.Dv XTC_DOWN_KIND_CLEAN ;
+one that exits with a nonzero code is
+.Dv XTC_DOWN_KIND_EXIT
+with that code; one killed by a signal is
+.Dv XTC_DOWN_KIND_SIGNAL
+with the signal number.
+So a child killed by
+.Dv SIGSEGV
+and one that called
+.Fn exit 11
+are distinguishable.
+Releases before 1.50 reported every signal death as
+.Dv XTC_DOWN_KIND_EXIT
+with the signal number as the exit code, and every short-lived child's
+status as 96 (a truncated internal NOPROC code).
+.Pp
 Destroying a monitored or linked child is safe: the monitor still
 receives its DOWN, because the internal shadow process that reports the
 child's fate holds its own reference to the child's state and releases

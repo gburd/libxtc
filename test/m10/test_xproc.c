@@ -292,6 +292,96 @@ live_destroy_fiber(void *a)
 	}
 }
 
+/* ---- PLAN 19.27.3: a child's death is reported with the RIGHT KIND ----
+ *
+ * One child per scenario; the monitor must see:
+ *   exit(0)        -> XTC_DOWN_KIND_CLEAN
+ *   exit(1)        -> XTC_DOWN_KIND_EXIT,   exit_code 1
+ *   exit(11)       -> XTC_DOWN_KIND_EXIT,   exit_code 11
+ *   killed SIGSEGV -> XTC_DOWN_KIND_SIGNAL, signal 11
+ * The last two carry the same number, which is exactly the case that used
+ * to collapse: every signal death arrived as kind=EXIT with the signal
+ * number as the exit code, so a supervisor could not tell a crash from
+ * exit(11).  The child dies by raise(SIGSEGV) with the default action
+ * restored, i.e. a real OS signal death -- not the in-process containment
+ * path, which never reaches waitpid.
+ */
+struct kind_case { int mode; int got_kind; int got_signal; int got_code; int seen; };
+
+static void
+kind_child_root(void *arg)
+{
+	int mode = 0;
+	if (arg != NULL)
+		memcpy(&mode, arg, sizeof mode);
+	if (mode == 3) {
+		signal(SIGSEGV, SIG_DFL);
+		(void)raise(SIGSEGV);
+	}
+	(void)xtc_exit_self(mode == 0 ? 0 : (mode == 1 ? 1 : 11));
+}
+
+struct kind_ctx { xtc_loop_t *loop; struct kind_case *c; };
+
+static void
+kind_fiber(void *a)
+{
+	struct kind_ctx *k = a;
+	xtc_xproc_t *child = NULL;
+	uint64_t ref = 0;
+	void *msg = NULL;
+	size_t n = 0;
+	xtc_down_info_t di;
+
+	if (xtc_xspawn(k->loop, "kind", kind_child_root, &k->c->mode,
+	    sizeof k->c->mode, &child) != XTC_OK)
+		return;
+	if (xtc_xmonitor(child, &ref) == XTC_OK &&
+	    xtc_recv(&msg, &n, 5000LL * 1000 * 1000) == XTC_OK &&
+	    xtc_down_decode_ex(msg, n, &di) == XTC_OK) {
+		k->c->seen = 1;
+		k->c->got_kind = (int)di.kind;
+		k->c->got_signal = di.signal;
+		k->c->got_code = di.exit_code;
+	}
+	if (msg != NULL)
+		xtc_free(msg);
+	xtc_xproc_destroy(child);
+}
+
+static MunitResult
+test_xproc_down_kind(const MunitParameter p[], void *d)
+{
+	struct kind_case c[4] = {
+		{ 0, -1, -1, -1, 0 }, { 1, -1, -1, -1, 0 },
+		{ 2, -1, -1, -1, 0 }, { 3, -1, -1, -1, 0 },
+	};
+	int i;
+	(void)p; (void)d;
+
+	for (i = 0; i < 4; i++) {
+		xtc_loop_t *loop = NULL;
+		struct kind_ctx k;
+		munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+		k.loop = loop;
+		k.c = &c[i];
+		munit_assert_int(xtc_proc_spawn(loop, kind_fiber, &k, NULL,
+		    NULL), ==, XTC_OK);
+		munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+		(void)xtc_loop_fini(loop);
+		munit_assert_int(c[i].seen, ==, 1);
+	}
+	munit_assert_int(c[0].got_kind, ==, XTC_DOWN_KIND_CLEAN);
+	munit_assert_int(c[1].got_kind, ==, XTC_DOWN_KIND_EXIT);
+	munit_assert_int(c[1].got_code, ==, 1);
+	munit_assert_int(c[2].got_kind, ==, XTC_DOWN_KIND_EXIT);
+	munit_assert_int(c[2].got_code, ==, 11);
+	/* The discriminating case: same number as c[2], different fate. */
+	munit_assert_int(c[3].got_kind, ==, XTC_DOWN_KIND_SIGNAL);
+	munit_assert_int(c[3].got_signal, ==, SIGSEGV);
+	return MUNIT_OK;
+}
+
 static MunitResult
 test_xproc_destroy_live_child(const MunitParameter p[], void *d)
 {
@@ -317,6 +407,7 @@ test_xproc_destroy_live_child(const MunitParameter p[], void *d)
 static MunitTest tests[] = {
 	{ "/monitor_exit", test_xproc_monitor_exit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/destroy_live_child", test_xproc_destroy_live_child, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/down_kind",          test_xproc_down_kind,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/entry",        test_xproc_entry,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/link",         test_xproc_link,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

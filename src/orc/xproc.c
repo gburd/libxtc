@@ -25,6 +25,7 @@
 #include "xtc_osproc.h"
 #include "xtc_net.h"
 #include "xtc_proc.h"
+#include "proc_int.h"       /* __xtc_exit_self_kind */
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 
 #include <string.h>
@@ -110,9 +111,12 @@ child_root_proc(void *a)
  * exit).  Runs as a fiber, so recv_frame parks rather than blocking the
  * OS thread. */
 struct child_pump_ctx {
-	int       ctrl_fd;
-	xtc_pid_t root;
-	int      *exit_code;   /* written with the root's exit reason */
+	int                   ctrl_fd;
+	xtc_pid_t             root;
+	int                  *exit_code;  /* written with the root's exit reason */
+	struct child_root_ctx *rctx;      /* the pump spawns the root (below) */
+	xtc_loop_t           *loop;      /* the child runtime's one loop */
+	int                   spawn_rc;   /* != XTC_OK if that spawn failed */
 };
 
 static void
@@ -121,9 +125,22 @@ child_pump_proc(void *a)
 	struct child_pump_ctx *pp = a;
 	uint64_t ref = 0;
 
-	/* Monitor the root proc so we learn its exit reason and when to
-	 * stop pumping. */
-	(void)xtc_monitor(pp->root, &ref);
+	/*
+	 * Spawn the root AND monitor it atomically.  It used to be spawned by
+	 * xtc_xproc_child_main and monitored here afterwards -- a race: a root
+	 * that exits before the pump first runs (any short-lived child) is
+	 * already gone when xtc_monitor is called, so the pump gets a
+	 * synthesized NOPROC DOWN whose reason is XTC_DOWN_NOPROC (-100000),
+	 * and the child process exits with that value & 0xff = 96.  Every
+	 * short-lived child's real exit status was lost that way -- measured:
+	 * exit(0), exit(1) and exit(11) all reached the parent as 96.
+	 * xtc_proc_spawn_monitor establishes the monitor before the root can
+	 * run, so its DOWN carries its real reason.
+	 */
+	pp->spawn_rc = xtc_proc_spawn_monitor(pp->loop,
+	    child_root_proc, pp->rctx, NULL, &pp->root, &ref);
+	if (pp->spawn_rc != XTC_OK)
+		return;
 
 	for (;;) {
 		void *frame = NULL;
@@ -216,7 +233,6 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	xtc_loop_t *loop = NULL;
 	struct child_root_ctx rctx;
 	struct child_pump_ctx pctx;
-	xtc_pid_t root;
 	int exit_code = 0;
 
 	if (root_fn == NULL) return 2;
@@ -228,13 +244,13 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 
 	rctx.root_fn = root_fn;
 	rctx.arg = arg;
-	if (xtc_proc_spawn(loop, child_root_proc, &rctx, NULL, &root) != XTC_OK) {
-		(void)xtc_loop_fini(loop);
-		return 4;
-	}
+	memset(&pctx, 0, sizeof pctx);
 	pctx.ctrl_fd = ctrl_fd;
-	pctx.root = root;
 	pctx.exit_code = &exit_code;
+	pctx.rctx = &rctx;
+	pctx.loop = loop;
+	/* The pump spawns the root itself (spawn+monitor, race-free); see
+	 * child_pump_proc. */
 	if (xtc_proc_spawn(loop, child_pump_proc, &pctx, NULL, NULL) != XTC_OK) {
 		(void)xtc_loop_fini(loop);
 		return 5;
@@ -243,6 +259,8 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	/* Run until both the root and the pump finish (loop goes idle). */
 	(void)xtc_loop_run(loop);
 	(void)xtc_loop_fini(loop);
+	if (pctx.spawn_rc != XTC_OK)
+		return 4;                     /* the root never started */
 	return exit_code;
 }
 
@@ -287,6 +305,7 @@ shadow_proc(void *a)
 	xtc_osproc_t *os = hold->os;
 	int status = 0;
 	int reason;
+	int kind;
 
 	/* Park until the child exits (never blocks the loop thread).  `os`
 	 * stays valid for the whole wait: this proc holds its own reference
@@ -297,19 +316,28 @@ shadow_proc(void *a)
 		xtc_exit_self(XTC_DOWN_KIND_NOCONNECTION);
 		return;
 	}
-	/* Decode the raw waitpid status into an exit reason.  exit(0) -> 0;
-	 * exit(code) -> code; signal N -> N (the same convention the
-	 * intra-process fault path uses, so a monitor reading the legacy
-	 * `reason` sees the signal number). */
-	if (WIFSIGNALED(status))
+	/* Decode the raw waitpid status into an exit reason AND a kind.
+	 *   exit(0)     -> CLEAN,  reason 0
+	 *   exit(code)  -> EXIT,   reason code
+	 *   signal N    -> SIGNAL, reason N  (same convention the in-process
+	 *                                     fault path uses)
+	 * The KIND is what used to be lost: xtc_exit_self(N) can only mean
+	 * "exited with code N", so a child killed by SIGSEGV reached the
+	 * monitor as kind=EXIT exit_code=11 -- indistinguishable from
+	 * exit(11).  __xtc_exit_self_kind carries the kind through. */
+	if (WIFSIGNALED(status)) {
 		reason = WTERMSIG(status);
-	else if (WIFEXITED(status))
+		kind = XTC_DOWN_KIND_SIGNAL;
+	} else if (WIFEXITED(status)) {
 		reason = WEXITSTATUS(status);
-	else
+		kind = (reason == 0) ? XTC_DOWN_KIND_CLEAN : XTC_DOWN_KIND_EXIT;
+	} else {
 		reason = XTC_DOWN_KIND_NOCONNECTION;
-	__os_free(s);          /* freed here; xtc_exit_self longjmps away */
+		kind = XTC_DOWN_KIND_NOCONNECTION;
+	}
+	__os_free(s);          /* freed here; the exit below longjmps away */
 	__xproc_os_release(hold);   /* last access to os was above */
-	xtc_exit_self(reason);
+	(void)__xtc_exit_self_kind(reason, kind);
 }
 
 int

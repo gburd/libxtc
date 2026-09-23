@@ -10,6 +10,7 @@ int  xtc_cfg_load_file __P((const char *));
 int  xtc_cfg_reload __P((void));
 int  xtc_dispatch __P((xtc_loop_t *, int (*)(void *), void *, xtc_future_t **, xtc_dispatch_handle_t **));
 int  xtc_dispatch_cancel __P((xtc_dispatch_handle_t *));
+int __xtc_exit_self_kind __P((int, int));
 int __xtc_proc_crit_depth __P((void));
 int __xtc_unsafe_depth __P((void));
 int xtc_aio_fdatasync __P((int));
