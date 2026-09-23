@@ -17,7 +17,7 @@ if ! command -v autoreconf >/dev/null 2>&1; then
 fi
 
 tmp=$(mktemp -d)
-trap 'cd / 2>/dev/null; rm -rf "$tmp"' EXIT
+trap 'cd / 2>/dev/null; rm -rf "$tmp" || true' EXIT
 # Copy the source tree, but EXCLUDE sibling build dirs (build_bsd/,
 # build_ci/, build_shared/, ...).  test/m0/test_distclean runs inside
 # a build dir that lives in the tree, so a naive `cp -r .` recursively

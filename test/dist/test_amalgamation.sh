@@ -18,7 +18,7 @@ fi
 
 CC="${CC:-cc}"
 work="$(mktemp -d)"
-trap 'cd / 2>/dev/null; rm -rf "$work"' EXIT INT TERM
+trap 'cd / 2>/dev/null; rm -rf "$work" || true' EXIT INT TERM
 
 python3 "$XTC_SRC_DIR/dist/mkamalgamation.py" \
 	--root "$XTC_SRC_DIR" --out "$work" >/dev/null
