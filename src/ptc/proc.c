@@ -369,6 +369,12 @@ struct xtc_proc {
 	int         exit_jb_set;
 	int         exit_reason;
 	int         exit_kind;   /* xtc_down_kind_t: 0 clean, 1 exit, 2 signal */
+	/* -1, or the xtc_down_kind_t the NEXT xtc_exit_self must report,
+	 * set only by __xtc_exit_self_kind.  Lets a proc that stands in for
+	 * something else (the xproc shadow standing in for an OS child) say
+	 * "this death was a SIGNAL" -- the plain exit path can only infer
+	 * CLEAN or EXIT from the numeric code. */
+	int         exit_kind_override;
 
 	/* R1 fault containment: a recovery frame the proc arms with
 	 * xtc_proc_recovery_arm().  A per-process SIGSEGV/SIGBUS handler,
@@ -1171,8 +1177,12 @@ __proc_entry(void *arg)
 		p->exit_reason = reason - 1;  /* offset so 0 is reachable */
 		/* xtc_exit_self(0) is a clean exit; any nonzero code is an
 		 * app EXIT status, kept in a field distinct from a signal so
-		 * a monitor never confuses xtc_exit_self(1) with SIGHUP. */
-		p->exit_kind = (p->exit_reason == 0) ? 0 : 1;
+		 * a monitor never confuses xtc_exit_self(1) with SIGHUP.
+		 * __xtc_exit_self_kind may override that inference. */
+		if (p->exit_kind_override >= 0)
+			p->exit_kind = p->exit_kind_override;
+		else
+			p->exit_kind = (p->exit_reason == 0) ? 0 : 1;
 	}
 	p->recovery_armed = 0;   /* past the body; no more auto-recovery */
 
@@ -1262,6 +1272,9 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	p->loop = loop;
 	p->fn = fn;
 	p->arg = arg;
+	/* NOT left at calloc's 0: 0 is XTC_DOWN_KIND_CLEAN, so a zero here
+	 * would silently turn every xtc_exit_self(code) into a clean exit. */
+	p->exit_kind_override = -1;
 	atomic_store_explicit(&p->alive, 1, memory_order_relaxed);
 	p->spawn_class = (opts != NULL) ? opts->sched_class : NULL;
 	atomic_store_explicit(&p->refs, 1, memory_order_relaxed);   /* owner ref */
@@ -2862,6 +2875,34 @@ xtc_exit_self(int reason)
 {
 	struct xtc_proc *self = __current_proc;
 	if (self == NULL || !self->exit_jb_set) return XTC_E_INVAL;
+	longjmp(self->exit_jb, reason + 1);
+	/* NOTREACHED */
+	return XTC_OK;
+}
+
+/*
+ * Internal: exit the calling proc with `reason` AND an explicit DOWN
+ * `kind` (xtc_down_kind_t), instead of the CLEAN/EXIT that xtc_exit_self
+ * infers from the code.
+ *
+ * Exists for the xproc shadow, which reports an OS child's fate as its
+ * own.  An OS child killed by SIGSEGV must reach the monitor as
+ * XTC_DOWN_KIND_SIGNAL with signal 11 -- but xtc_exit_self(11) can only
+ * mean "the app exited with code 11", which is exactly how every signal
+ * death used to arrive (kind=EXIT, exit_code=11), leaving a supervisor
+ * unable to tell a crash from exit(11).  Not public: a normal proc dies
+ * of a signal through the fault path, which already sets kind=SIGNAL.
+ *
+ * PUBLIC: int __xtc_exit_self_kind __P((int, int));
+ */
+int
+__xtc_exit_self_kind(int reason, int kind)
+{
+	struct xtc_proc *self = __current_proc;
+	if (self == NULL || !self->exit_jb_set) return XTC_E_INVAL;
+	if (kind < XTC_DOWN_KIND_CLEAN || kind > XTC_DOWN_KIND_NOCONNECTION)
+		return XTC_E_INVAL;
+	self->exit_kind_override = kind;
 	longjmp(self->exit_jb, reason + 1);
 	/* NOTREACHED */
 	return XTC_OK;

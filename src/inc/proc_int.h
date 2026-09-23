@@ -26,6 +26,15 @@ void     *__xtc_proc_ctx_save(void);
 void      __xtc_proc_ctx_restore(void *ctx);
 
 /*
+ * Exit the calling proc with `reason` and an explicit DOWN `kind`
+ * (xtc_down_kind_t) rather than the CLEAN/EXIT xtc_exit_self infers from
+ * the code.  For a proc that reports someone else's fate as its own --
+ * the xproc shadow standing in for an OS child killed by a signal.
+ * Does not return on success; XTC_E_INVAL off a proc or for a bad kind.
+ */
+int       __xtc_exit_self_kind(int reason, int kind);
+
+/*
  * A3 async causal trace hook: record one suspend/resume boundary on the
  * CALLING proc's per-fiber ring.  `kind` is an enum xtc_causal_kind and
  * `site` a static string label (e.g. __func__).  A no-op fast path (one
