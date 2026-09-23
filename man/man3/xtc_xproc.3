@@ -123,8 +123,27 @@ unchanged.
 .Fn xtc_xproc_os_pid
 returns the child's OS pid (for logging), or -1.
 .Fn xtc_xproc_destroy
-signals and reaps the child if still running, closes the channel, and
-frees the handle; it is idempotent.
+terminates and reaps the child if it is still running, closes the
+channel, and frees the handle.
+A running child is sent
+.Dv SIGTERM ,
+given up to 2 seconds to exit, then sent
+.Dv SIGKILL ;
+either way it is reaped before destroy returns, so no orphan and no
+zombie remain.
+Call it from a process: the wait yields rather than blocking the loop.
+Passing
+.Dv NULL
+is a no-op; destroying the same handle twice is undefined.
+.Pp
+Destroying a monitored or linked child is safe: the monitor still
+receives its DOWN, because the internal shadow process that reports the
+child's fate holds its own reference to the child's state and releases
+it only when it is done.
+.Pp
+Releases before 1.50 neither signalled nor reaped a running child
+(it was orphaned and later became a zombie), and freed state that a
+live monitor was still reading.
 .Pp
 .Fn xtc_xproc_child_main
 is the child-side entry that

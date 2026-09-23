@@ -165,13 +165,44 @@ child_pump_proc(void *a)
 #if !defined(_WIN32)
 
 #include <sys/wait.h>
+#include <signal.h>
+#include <stdatomic.h>
+
+/*
+ * The fork'd child's osproc handle, shared by the xtc_xproc handle and
+ * (once xtc_xmonitor / xtc_xlink creates one) the SHADOW proc that parks
+ * in xtc_osproc_wait on it.  Refcounted, and freed by whichever releases
+ * it LAST.
+ *
+ * Why: xtc_xproc_destroy used to free the osproc outright while the shadow
+ * was still parked in xtc_osproc_wait(os) -- when the child later exited,
+ * the shadow woke and read the freed struct (heap-use-after-free, caught
+ * by ASan; a non-ASan run printed a normal DOWN and looked fine, which is
+ * how it shipped).  With a count, destroy drops only its own reference.
+ */
+struct __xproc_os {
+	xtc_osproc_t *os;
+	_Atomic int   refs;
+};
+
+static void
+__xproc_os_release(struct __xproc_os *h)
+{
+	if (h == NULL)
+		return;
+	if (atomic_fetch_sub_explicit(&h->refs, 1, memory_order_acq_rel) == 1) {
+		xtc_osproc_destroy(h->os);
+		__os_free(h);
+	}
+}
 
 struct xtc_xproc {
-	xtc_loop_t   *loop;
-	xtc_osproc_t *os;          /* the fork'd child + control socket */
-	int           ctrl_fd;     /* parent end (owned by os) */
-	xtc_pid_t     shadow;      /* local proc mirroring the child's fate */
-	int           have_shadow;
+	xtc_loop_t        *loop;
+	xtc_osproc_t      *os;       /* == hold->os; kept for the accessors */
+	struct __xproc_os *hold;     /* refcounted owner of os */
+	int                ctrl_fd;  /* parent end (owned by os) */
+	xtc_pid_t          shadow;   /* local proc mirroring the child's fate */
+	int                have_shadow;
 };
 
 
@@ -244,21 +275,25 @@ child_fn(int ctrl_fd, void *a)
 /* The shadow proc: wait for the child, decode its status, and exit with
  * the matching reason so a monitor of THIS proc sees the child's fate. */
 struct shadow_ctx {
-	xtc_osproc_t *os;
-	int           ctrl_fd;
+	struct __xproc_os *hold;   /* the shadow's OWN reference */
+	int                ctrl_fd;
 };
 
 static void
 shadow_proc(void *a)
 {
 	struct shadow_ctx *s = a;
-	xtc_osproc_t *os = s->os;
+	struct __xproc_os *hold = s->hold;
+	xtc_osproc_t *os = hold->os;
 	int status = 0;
 	int reason;
 
-	/* Park until the child exits (never blocks the loop thread). */
+	/* Park until the child exits (never blocks the loop thread).  `os`
+	 * stays valid for the whole wait: this proc holds its own reference
+	 * and drops it only below, after the last access. */
 	if (xtc_osproc_wait(os, &status, -1) != XTC_OK) {
 		__os_free(s);
+		__xproc_os_release(hold);
 		xtc_exit_self(XTC_DOWN_KIND_NOCONNECTION);
 		return;
 	}
@@ -273,6 +308,7 @@ shadow_proc(void *a)
 	else
 		reason = XTC_DOWN_KIND_NOCONNECTION;
 	__os_free(s);          /* freed here; xtc_exit_self longjmps away */
+	__xproc_os_release(hold);   /* last access to os was above */
 	xtc_exit_self(reason);
 }
 
@@ -312,8 +348,19 @@ xtc_xspawn(xtc_loop_t *loop, const char *name, xtc_xproc_root_fn root_fn,
 	oo.arg = cctx;
 	oo.ctrl_socket = 1;
 
-	if ((rc = xtc_osproc_spawn(&oo, &p->os)) != XTC_OK)
+	/* The refcounted holder the handle and a future shadow will share;
+	 * allocated BEFORE the fork so a failure cannot leave a live child
+	 * with no handle able to reap it. */
+	if ((rc = __os_calloc(1, sizeof *p->hold, (void **)&p->hold)) != XTC_OK)
 		goto fail_arg;
+	atomic_store_explicit(&p->hold->refs, 1, memory_order_relaxed);
+
+	if ((rc = xtc_osproc_spawn(&oo, &p->os)) != XTC_OK) {
+		__os_free(p->hold);
+		p->hold = NULL;
+		goto fail_arg;
+	}
+	p->hold->os = p->os;
 
 	/* The child inherited its own copy of cctx/arg_copy via fork; the
 	 * parent no longer needs them. */
@@ -348,12 +395,49 @@ xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
 	return xtc_xspawn(loop, name, fn, arg, arg_len, out);
 }
 
+/*
+ * Bounded terminate-and-reap of a still-running child: SIGTERM, wait up
+ * to XPROC_TERM_WAIT_NS, then SIGKILL and wait for the (now certain)
+ * exit.  Uses xtc_osproc_wait, which parks the calling fiber on the pidfd
+ * (or polls cooperatively) and records the reap in the osproc, so a
+ * shadow that is also waiting sees the cached status rather than calling
+ * waitpid on an already-reaped pid.
+ */
+#define XPROC_TERM_WAIT_NS  (2LL * 1000 * 1000 * 1000)
+
+static void
+__xproc_terminate_and_reap(xtc_osproc_t *os)
+{
+	int st = 0;
+	if (os == NULL || xtc_osproc_try_wait(os, &st) == XTC_OK)
+		return;                                 /* already exited */
+	(void)xtc_osproc_signal(os, SIGTERM);
+	if (xtc_osproc_wait(os, &st, XPROC_TERM_WAIT_NS) == XTC_OK)
+		return;
+	(void)xtc_osproc_signal(os, SIGKILL);       /* cannot be ignored */
+	(void)xtc_osproc_wait(os, &st, XPROC_TERM_WAIT_NS);
+}
+
 void
 xtc_xproc_destroy(xtc_xproc_t *p)
 {
 	if (p == NULL) return;
+	/*
+	 * Make the man page's promise true: "signals and reaps the child if
+	 * still running".  Before 1.50 this only did a best-effort WNOHANG
+	 * reap (inside xtc_osproc_destroy) and freed the handle, so a live
+	 * child was ORPHANED and later became a zombie -- and, worse, the
+	 * osproc was freed under a shadow still parked in xtc_osproc_wait on
+	 * it (heap-use-after-free).  Terminate first, then drop only THIS
+	 * handle's reference: if a shadow still holds one, it frees the
+	 * osproc when it finishes, not before.
+	 */
 	if (p->os != NULL)
-		xtc_osproc_destroy(p->os);   /* signals + reaps if running */
+		__xproc_terminate_and_reap(p->os);
+	if (p->hold != NULL)
+		__xproc_os_release(p->hold);
+	else if (p->os != NULL)
+		xtc_osproc_destroy(p->os);   /* no holder (defensive) */
 	__os_free(p);
 }
 
@@ -382,7 +466,8 @@ __xproc_ensure_shadow(xtc_xproc_t *p)
 	if (p->have_shadow) return XTC_OK;
 	if ((rc = __os_calloc(1, sizeof *s, (void **)&s)) != XTC_OK)
 		return rc;
-	s->os = p->os;
+	atomic_fetch_add_explicit(&p->hold->refs, 1, memory_order_relaxed);
+	s->hold = p->hold;
 	s->ctrl_fd = p->ctrl_fd;
 	/* Spawn the shadow; the caller binds to it BEFORE it can run
 	 * (spawn-then-monitor/link on the same loop is race-free: the shadow
@@ -391,6 +476,7 @@ __xproc_ensure_shadow(xtc_xproc_t *p)
 	if ((rc = xtc_proc_spawn(p->loop, shadow_proc, s, NULL,
 	    &p->shadow)) != XTC_OK) {
 		__os_free(s);
+		__xproc_os_release(p->hold);   /* undo the shadow's ref */
 		return rc;
 	}
 	p->have_shadow = 1;
