@@ -294,6 +294,99 @@ test_lock_vec(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* PLAN 19.27.5: xtc_lock_vec rolls back on failure.  The probe: locker
+ * b holds B; locker a vecs GET A, GET B with NOWAIT.  The second GET
+ * would block, so the call must fail AND leave a holding nothing --
+ * before the fix it returned AGAIN with executed=1 and A still held. */
+static MunitResult
+test_lock_vec_rollback(const MunitParameter p[], void *d)
+{
+	xtc_lockmgr_t *m;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_locker_t a, b;
+	xtc_lock_req_t r[4];
+	int ex = -1;
+	(void)p; (void)d;
+	o.detect_mode = XTC_LOCK_DETECT_NONE;
+
+	munit_assert_int(xtc_lockmgr_create(&o, &m), ==, XTC_OK);
+	munit_assert_int(xtc_lockmgr_id(m, &a), ==, XTC_OK);
+	munit_assert_int(xtc_lockmgr_id(m, &b), ==, XTC_OK);
+	munit_assert_int(xtc_lock_get(m, b, "B", 1, XTC_LOCK_X, 0), ==, XTC_OK);
+
+	/* 1. GET-only vector: all-or-none. */
+	memset(r, 0, sizeof r);
+	r[0].op = XTC_LOCK_OP_GET; r[0].obj = "A"; r[0].obj_size = 1;
+	r[0].mode = XTC_LOCK_X;
+	r[1].op = XTC_LOCK_OP_GET; r[1].obj = "B"; r[1].obj_size = 1;
+	r[1].mode = XTC_LOCK_X;
+	munit_assert_int(xtc_lock_vec(m, a, r, 2, &ex), ==, XTC_E_AGAIN);
+	munit_assert_int(ex, ==, 0);
+	munit_assert_int(xtc_lock_put(m, a, "A", 1), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_lockmgr_n_held(m), ==, 1);          /* b's B only */
+	/* A is free for anyone. */
+	munit_assert_int(xtc_lock_get(m, b, "A", 1, XTC_LOCK_X, 0), ==, XTC_OK);
+	munit_assert_int(xtc_lock_put(m, b, "A", 1), ==, XTC_OK);
+
+	/* 2. A GET that RAISES a mode a already held is lowered back, and a
+	 *    lock a held BEFORE the call is kept. */
+	munit_assert_int(xtc_lock_get(m, a, "C", 1, XTC_LOCK_S, 0), ==, XTC_OK);
+	r[0].obj = "C"; r[0].mode = XTC_LOCK_X;     /* S -> X merge */
+	munit_assert_int(xtc_lock_vec(m, a, r, 2, &ex), ==, XTC_E_AGAIN);
+	munit_assert_int(ex, ==, 0);
+	munit_assert_int(xtc_lockmgr_n_held(m), ==, 2);          /* B(b), C(a) */
+	/* a is back to S on C: another S reader is compatible. */
+	munit_assert_int(xtc_lock_get(m, b, "C", 1, XTC_LOCK_S, 0), ==, XTC_OK);
+	munit_assert_int(xtc_lock_put(m, b, "C", 1), ==, XTC_OK);
+	munit_assert_int(xtc_lock_put(m, a, "C", 1), ==, XTC_OK);
+
+	/* 2b. The in-place MERGE path (a GET whose mode does not conflict
+	 *     with the one already held raises it on the same entry):
+	 *     RU -> WW, then rolled back to RU.  At WW another locker's S
+	 *     would conflict; back at RU it does not. */
+	munit_assert_int(xtc_lock_get(m, a, "E", 1, XTC_LOCK_RU, 0), ==, XTC_OK);
+	r[0].obj = "E"; r[0].mode = XTC_LOCK_WW;
+	munit_assert_int(xtc_lock_vec(m, a, r, 2, &ex), ==, XTC_E_AGAIN);
+	munit_assert_int(ex, ==, 0);
+	munit_assert_int(xtc_lock_get(m, b, "E", 1, XTC_LOCK_S, 0), ==, XTC_OK);
+	munit_assert_int(xtc_lock_put(m, b, "E", 1), ==, XTC_OK);
+	munit_assert_int(xtc_lock_put(m, a, "E", 1), ==, XTC_OK);
+
+	/* 3. A PUT is a rollback barrier: GET A, PUT A, GET D, GET B(blocks).
+	 *    GET D is undone; the PUT and what precedes it stay applied. */
+	memset(r, 0, sizeof r);
+	r[0].op = XTC_LOCK_OP_GET; r[0].obj = "A"; r[0].obj_size = 1;
+	r[0].mode = XTC_LOCK_X;
+	r[1].op = XTC_LOCK_OP_PUT; r[1].obj = "A"; r[1].obj_size = 1;
+	r[2].op = XTC_LOCK_OP_GET; r[2].obj = "D"; r[2].obj_size = 1;
+	r[2].mode = XTC_LOCK_X;
+	r[3].op = XTC_LOCK_OP_GET; r[3].obj = "B"; r[3].obj_size = 1;
+	r[3].mode = XTC_LOCK_X;
+	munit_assert_int(xtc_lock_vec(m, a, r, 4, &ex), ==, XTC_E_AGAIN);
+	munit_assert_int(ex, ==, 2);
+	munit_assert_int(xtc_lock_put(m, a, "D", 1), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_lock_put(m, a, "A", 1), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_lockmgr_n_held(m), ==, 1);
+
+	/* 4. Validation runs first: a bad op late in the vector executes
+	 *    nothing. */
+	memset(r, 0, sizeof r);
+	r[0].op = XTC_LOCK_OP_GET; r[0].obj = "A"; r[0].obj_size = 1;
+	r[0].mode = XTC_LOCK_X;
+	r[1].op = (xtc_lock_op_t)77;
+	ex = -1;
+	munit_assert_int(xtc_lock_vec(m, a, r, 2, &ex), ==, XTC_E_INVAL);
+	munit_assert_int(ex, ==, 0);
+	munit_assert_int(xtc_lock_put(m, a, "A", 1), ==, XTC_E_INVAL);
+
+	munit_assert_int(xtc_lock_put(m, b, "B", 1), ==, XTC_OK);
+	munit_assert_int(xtc_lockmgr_n_held(m), ==, 0);
+	(void)xtc_lockmgr_id_free(m, a);
+	(void)xtc_lockmgr_id_free(m, b);
+	xtc_lockmgr_destroy(m);
+	return MUNIT_OK;
+}
+
 static MunitResult
 test_stats_failchk(const MunitParameter p[], void *d)
 {
@@ -388,6 +481,7 @@ static MunitTest tests[] = {
 	{ "/custom_matrix",      test_custom_matrix,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/upgrade_downgrade",  test_upgrade_downgrade,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lock_vec",           test_lock_vec,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/lock_vec_rollback",  test_lock_vec_rollback,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/stats_failchk",      test_stats_failchk,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/detect_on_block",    test_detect_on_block,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

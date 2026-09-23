@@ -210,11 +210,30 @@ XTC_API int  xtc_lock_downgrade(xtc_lockmgr_t *mgr, xtc_locker_t locker,
                                 const void *obj, size_t obj_size,
                                 xtc_lock_mode_t new_mode);
 
-/* Atomic compound: all ops are validated, then executed.  If any
- * GET would block in the middle, the prior GETs are NOT rolled back;
- * set timeout_ns=0 in every req for
- * fully-atomic semantics.  *out_executed receives the number of
- * ops that succeeded. */
+/* Compound request, ALL-OR-NONE for acquires.  Every op is validated
+ * first (a bad op / NULL obj / zero obj_size / un-GETable mode returns
+ * XTC_E_INVAL with nothing executed), then the ops run in order.
+ *
+ * On success returns XTC_OK and *out_executed == n_reqs.
+ *
+ * If an op fails (a GET that would block past its timeout_ns ->
+ * XTC_E_AGAIN, deadlock victim -> XTC_E_DEADLK, XTC_E_NOMEM, or a
+ * PUT/UPGRADE/DOWNGRADE that is rejected) the call ROLLS BACK: every
+ * GET this call performed AFTER the last non-GET op is undone, newest
+ * first -- a newly granted lock is released, a mode this call raised on
+ * a lock the locker already held is lowered back -- and the failing
+ * op's rc is returned.  So a vector of only GETs leaves NO partial
+ * state and *out_executed == 0.
+ *
+ * PUT, PUT_ALL, UPGRADE and DOWNGRADE are NOT reversible (a released
+ * lock may already have been granted to another locker), so each is a
+ * rollback barrier: it and everything before it stay applied, and
+ * *out_executed is the length of that retained prefix (the index of the
+ * op after the last barrier that ran).  Put the releases/mode changes
+ * FIRST and the GETs after them if you need the GETs to be atomic.
+ * A deadlock victim has had ALL its locks released by the detector,
+ * including ones held before the call; *out_executed still reports the
+ * retained prefix, but nothing is held. */
 XTC_API int  xtc_lock_vec(xtc_lockmgr_t *mgr, xtc_locker_t locker,
                           xtc_lock_req_t *reqs, int n_reqs, int *out_executed);
 
