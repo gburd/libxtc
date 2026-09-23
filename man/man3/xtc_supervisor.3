@@ -54,6 +54,29 @@ restart, in order.
 Children spawned dynamically; not all known up front.
 .El
 .Pp
+.Sy Group restarts never overlap.
+Under
+.Dv XTC_SUP_ONE_FOR_ALL
+and
+.Dv XTC_SUP_REST_FOR_ONE
+the supervisor asks every affected child to exit and then WAITS until
+each one's cleanup has completed -- until it has left the process table,
+which happens only after all of its
+.Xr xtc_proc_at_exit 3
+hooks have returned -- before it starts any replacement.
+A replacement therefore never runs beside a predecessor that still holds
+a shared resource.
+.Pp
+The wait is bounded, at 5 seconds.
+If an old child has not finished cleaning up by then, the supervisor does
+NOT start a replacement beside it; it stops instead, which its caller
+observes through
+.Fn xtc_sup_join .
+.Pp
+Releases before 1.50 killed the siblings, marked them dead and respawned
+at once, so a replacement could run while its predecessor was still
+inside an exit hook.
+.Pp
 .Sy Restart policies
 per child:
 .Bl -tag -width "XTC_RESTART_TRANSIENT" -offset indent
