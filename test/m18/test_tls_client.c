@@ -62,6 +62,11 @@
 #define TEST_CERT_PATH   "/tmp/xtc-tls3-test-cert.pem"
 #define TEST_KEY_PATH    "/tmp/xtc-tls3-test-key.pem"
 #define WRONG_CA_PATH    "/tmp/xtc-tls3-wrong-ca.pem"
+/* Server cert issued for NAME_CERT (CN and SAN), for the name check. */
+#define NAME_CERT_PATH   "/tmp/xtc-tls3-name-cert.pem"
+#define NAME_KEY_PATH    "/tmp/xtc-tls3-name-key.pem"
+#define NAME_CERT        "a.example"
+#define NAME_OTHER       "b.example"
 
 /* Generate a self-signed RSA-2048 cert+key via the openssl CLI.
  * Returns 0 on success. */
@@ -84,6 +89,39 @@ generate_cert(const char *cert_path, const char *key_path, const char *cn)
              "-config %s -keyout %s -out %s -subj /CN=%s 2>/dev/null",
              cnf_path, key_path, cert_path, cn);
     int rc = system(cmd);
+    (void)unlink(cnf_path);
+    return rc;
+}
+
+/* Generate a self-signed cert+key whose CN AND subjectAltName DNS entry
+ * are both `name' (RFC 6125 matchers look at the SAN; some fall back to
+ * the CN -- carrying both means every backend has the name to match).
+ * CA:TRUE so the cert can be its own trust anchor via ca_file. */
+static int
+generate_name_cert(const char *cert_path, const char *key_path,
+                   const char *name)
+{
+    char cmd[1024];
+    char cnf_path[256];
+    FILE *cnf_fp;
+    int rc;
+    snprintf(cnf_path, sizeof(cnf_path), "%s.cnf", cert_path);
+    cnf_fp = fopen(cnf_path, "w");
+    if (cnf_fp == NULL)
+        return -1;
+    fprintf(cnf_fp,
+        "[req]\nprompt = no\ndistinguished_name = dn\n"
+        "x509_extensions = v3\n"
+        "[dn]\nCN = %s\n"
+        "[v3]\nbasicConstraints = critical,CA:TRUE\n"
+        "subjectKeyIdentifier = hash\n"
+        "subjectAltName = DNS:%s\n", name, name);
+    fclose(cnf_fp);
+    snprintf(cmd, sizeof(cmd),
+             "openssl req -x509 -newkey rsa:2048 -nodes -days 1 "
+             "-config %s -keyout %s -out %s 2>/dev/null",
+             cnf_path, key_path, cert_path);
+    rc = system(cmd);
     (void)unlink(cnf_path);
     return rc;
 }
@@ -214,6 +252,8 @@ set_nonblock(int fd)
 
 struct server_args {
     int  fd;   /* non-blocking socketpair fd; owned by the calling test */
+    const char *cert;   /* NULL = TEST_CERT_PATH */
+    const char *key;    /* NULL = TEST_KEY_PATH */
     int  rc;   /* 0 = full success; 2 = handshake failed (bad-CA ok);
                 * other non-zero = unexpected error */
 };
@@ -230,8 +270,8 @@ server_thread(void *arg)
     a->rc = 1;   /* assume unexpected failure */
 
     memset(&opts, 0, sizeof(opts));
-    opts.cert_file   = TEST_CERT_PATH;
-    opts.key_file    = TEST_KEY_PATH;
+    opts.cert_file   = a->cert != NULL ? a->cert : TEST_CERT_PATH;
+    opts.key_file    = a->key  != NULL ? a->key  : TEST_KEY_PATH;
     opts.min_version = XTC_TLS_VER_12;
     opts.verify_peer = 0;
 
@@ -442,6 +482,104 @@ test_client_verify_peer(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* -------------------------------------------------------------------------
+ * One client connection to a server presenting NAME_CERT, with the
+ * client trusting that cert (ca_file) and verification ON, expecting the
+ * peer to be `expect' via xtc_tls_set_hostname.  Returns the client's
+ * handshake rc; *host_rc gets xtc_tls_set_hostname's rc and *srv_rc the
+ * server thread's rc.  On success the echo round trip must also work.
+ * ----------------------------------------------------------------------- */
+static int
+connect_expecting(const char *expect, int *host_rc, int *srv_rc)
+{
+    xtc_tls_opts_t  opts;
+    xtc_tls_ctx_t  *ctx = NULL;
+    xtc_tls_t      *tls = NULL;
+    struct server_args sa;
+    pthread_t       tid;
+    int             sv[2];
+    int             rc;
+    char            rbuf[SERVER_MSG_LEN + 1];
+
+    memset(&opts, 0, sizeof(opts));
+    opts.ca_file     = NAME_CERT_PATH;
+    opts.verify_peer = 1;
+    opts.min_version = XTC_TLS_VER_12;
+    munit_assert_int(xtc_tls_ctx_create(XTC_TLS_CLIENT, &opts, &ctx),
+                     ==, XTC_OK);
+
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(set_nonblock(sv[1]), ==, 0);
+    munit_assert_int(xtc_tls_create(ctx, sv[1], &tls), ==, XTC_OK);
+
+    *host_rc = xtc_tls_set_hostname(tls, expect);
+
+    memset(&sa, 0, sizeof(sa));
+    sa.fd   = sv[0];
+    sa.rc   = 1;
+    sa.cert = NAME_CERT_PATH;
+    sa.key  = NAME_KEY_PATH;
+    munit_assert_int(pthread_create(&tid, NULL, server_thread, &sa), ==, 0);
+
+    rc = poll_until_done(tls, sv[1], xtc_tls_handshake, 5000);
+    if (rc == XTC_OK) {
+        munit_assert_int(tls_write_all(tls, sv[1], "hello",
+                         SERVER_MSG_LEN, 5000), ==, XTC_OK);
+        memset(rbuf, 0, sizeof(rbuf));
+        munit_assert_int(tls_read_exact(tls, sv[1], rbuf,
+                         SERVER_MSG_LEN, 5000), ==, XTC_OK);
+        munit_assert_memory_equal(SERVER_MSG_LEN, rbuf, "hello");
+        (void)xtc_tls_shutdown(tls);
+    }
+    pthread_join(tid, NULL);
+    *srv_rc = sa.rc;
+
+    xtc_tls_destroy(tls);
+    xtc_tls_ctx_destroy(ctx);
+    close(sv[0]);
+    close(sv[1]);
+    return rc;
+}
+
+/* -------------------------------------------------------------------------
+ * test_client_hostname_check (PLAN 19.27.7):
+ *   The server's certificate is valid and TRUSTED, but issued for
+ *   NAME_CERT.  A client that expects NAME_OTHER must REJECT it; the same
+ *   client expecting NAME_CERT must accept it (the positive control that
+ *   keeps the negative case from passing vacuously, e.g. on a handshake
+ *   that fails for some unrelated reason).  This is a correctness
+ *   requirement on EVERY backend: xtc_tls_set_hostname returning
+ *   XTC_E_NOSYS is a FAILURE here, never a skip -- a skip is exactly how
+ *   the missing GnuTLS / wolfSSL / mbedTLS name check stayed hidden.
+ * ----------------------------------------------------------------------- */
+static MunitResult
+test_client_hostname_check(const MunitParameter params[], void *data)
+{
+    int rc, host_rc, srv_rc;
+
+    (void)params;
+    (void)data;
+
+    /* Positive control: the right name, trusted chain -> success. */
+    rc = connect_expecting(NAME_CERT, &host_rc, &srv_rc);
+    munit_assert_int(host_rc, ==, XTC_OK);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_int(srv_rc, ==, 0);
+
+    /* The defect: a trusted cert for the WRONG name must be rejected. */
+    rc = connect_expecting(NAME_OTHER, &host_rc, &srv_rc);
+    munit_assert_int(rc, ==, XTC_E_INTERNAL);   /* handshake REJECTED */
+    munit_assert_int(host_rc, ==, XTC_OK);      /* NOSYS is a failure */
+    munit_assert_int(srv_rc, !=, 0);
+
+    /* Clearing the name falls back to chain-only verification. */
+    rc = connect_expecting("", &host_rc, &srv_rc);
+    munit_assert_int(host_rc, ==, XTC_OK);
+    munit_assert_int(rc, ==, XTC_OK);
+    return MUNIT_OK;
+}
+
 /* =========================================================================
  * Suite setup / teardown -- write/remove temp PEM files.
  * ======================================================================= */
@@ -459,6 +597,12 @@ suite_setup(const MunitParameter params[], void *user_data)
         unlink(TEST_KEY_PATH);
         return NULL;
     }
+    if (generate_name_cert(NAME_CERT_PATH, NAME_KEY_PATH, NAME_CERT) != 0) {
+        unlink(TEST_CERT_PATH);
+        unlink(TEST_KEY_PATH);
+        unlink(WRONG_CA_PATH);
+        return NULL;
+    }
     return (void *)(uintptr_t)1;   /* non-NULL: setup succeeded */
 }
 
@@ -469,6 +613,8 @@ suite_teardown(void *fixture)
     unlink(TEST_CERT_PATH);
     unlink(TEST_KEY_PATH);
     unlink(WRONG_CA_PATH);
+    unlink(NAME_CERT_PATH);
+    unlink(NAME_KEY_PATH);
 }
 
 /* =========================================================================
@@ -479,6 +625,8 @@ static MunitTest tests[] = {
     { "/handshake_roundtrip", test_client_handshake_roundtrip,
       suite_setup, suite_teardown, MUNIT_TEST_OPTION_NONE, NULL },
     { "/verify_peer",         test_client_verify_peer,
+      suite_setup, suite_teardown, MUNIT_TEST_OPTION_NONE, NULL },
+    { "/hostname_check",      test_client_hostname_check,
       suite_setup, suite_teardown, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

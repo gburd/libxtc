@@ -461,13 +461,13 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 	mbedtls_ssl_set_bio(&t->ssl, t, bio_send, bio_recv, NULL);
 
 	/*
-	 * Verify the certificate chain but not the peer name.  mbedTLS
+	 * Verify the certificate chain but not the peer name until the
+	 * caller names the peer with xtc_tls_set_hostname.  mbedTLS
 	 * matches the server certificate's CN/SAN against the hostname set
-	 * here; passing NULL disables that name check while leaving chain
+	 * here; NULL disables that name check while leaving chain
 	 * verification (VERIFY_REQUIRED) in force, matching the OpenSSL
-	 * backend, which verifies the chain and leaves hostname matching
-	 * to the caller.  Must be called (even with NULL) on a client, or
-	 * the handshake fails the verify step.
+	 * backend.  Must be called (even with NULL) on a client, or the
+	 * handshake fails the verify step.
 	 */
 	if (ctx->role == XTC_TLS_CLIENT)
 		(void)mbedtls_ssl_set_hostname(&t->ssl, NULL);
@@ -498,11 +498,29 @@ xtc_tls_create_transport(xtc_tls_ctx_t *ctx,
 	return XTC_E_NOSYS;
 }
 
+/*
+ * Client SNI + RFC 6125 name check.  mbedtls_ssl_set_hostname does
+ * both: it sends the name as SNI and makes the chain verify match it
+ * against the server certificate's SAN / CN.  NULL (the default set in
+ * xtc_tls_create) means "chain only, no name check".  Like OpenSSL, the
+ * name is only enforced when the context verifies peers.
+ */
 int
 xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 {
-	(void)tls; (void)name;
-	return XTC_E_NOSYS;
+	int rc;
+
+	if (tls == NULL)
+		return XTC_E_INVAL;
+	if (tls->ctx->role != XTC_TLS_CLIENT)
+		return XTC_OK;   /* no-op on the server side */
+	if (name != NULL && name[0] == '\0')
+		name = NULL;
+	rc = mbedtls_ssl_set_hostname(&tls->ssl, name);
+	if (rc == 0)
+		return XTC_OK;
+	return (rc == MBEDTLS_ERR_SSL_ALLOC_FAILED) ? XTC_E_NOMEM
+	                                            : XTC_E_INVAL;
 }
 
 void

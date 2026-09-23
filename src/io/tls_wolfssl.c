@@ -78,6 +78,8 @@ struct xtc_tls {
 	xtc_tls_ctx_t  *ctx;
 	int             fd;
 	WOLFSSL        *ssl;
+	char           *hostname;   /* expected peer name; NULL = none */
+	int             hostname_applied;
 	int             wants_read;
 	int             wants_write;
 };
@@ -122,6 +124,7 @@ map_want(struct xtc_tls *t, int err)
  * set.
  * ----------------------------------------------------------------------- */
 
+#ifdef HAVE_ALPN
 static int
 alpn_to_csv(const char *wire, char **out)
 {
@@ -165,6 +168,7 @@ alpn_to_csv(const char *wire, char **out)
 	*out = buf;
 	return XTC_OK;
 }
+#endif /* HAVE_ALPN */
 
 /* -------------------------------------------------------------------------
  * Version mapping to wolfSSL's WOLFSSL_TLSV1_x enum.
@@ -280,8 +284,15 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 
 	/* ---- ALPN (decoded to comma form; applied per-session) ---- */
 	if (opts->alpn_protos != NULL && opts->alpn_protos[0] != '\0') {
+#ifdef HAVE_ALPN
 		if ((rc = alpn_to_csv(opts->alpn_protos, &c->alpn)) != XTC_OK)
 			goto fail;
+#else
+		/* wolfSSL built without --enable-alpn: refuse rather than
+		 * silently not negotiating the requested protocol. */
+		rc = XTC_E_NOSYS;
+		goto fail;
+#endif
 	}
 
 done:
@@ -348,6 +359,7 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 
 	/* ALPN: comma-form list, fail handshake on mismatch (matches the
 	 * strictness of the OpenSSL server-select callback). */
+#ifdef HAVE_ALPN
 	if (ctx->alpn != NULL) {
 		if (wolfSSL_UseALPN(t->ssl, ctx->alpn,
 		        (unsigned int)strlen(ctx->alpn),
@@ -357,6 +369,7 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 			return XTC_E_INTERNAL;
 		}
 	}
+#endif
 
 	if (ctx->role == XTC_TLS_SERVER)
 		wolfSSL_set_accept_state(t->ssl);
@@ -389,11 +402,58 @@ xtc_tls_create_transport(xtc_tls_ctx_t *ctx,
 	return XTC_E_NOSYS;
 }
 
+/*
+ * Client SNI + RFC 6125 name check.  The name is recorded here and
+ * applied at the first handshake step (apply_hostname), so a later
+ * call can still replace or clear it: wolfSSL_UseSNI sends it in the
+ * ClientHello and wolfSSL_check_domain_name makes the chain verify
+ * match it against the certificate's SAN / CN.  Like OpenSSL, the name
+ * is only enforced when the context verifies peers.
+ */
 int
 xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 {
-	(void)tls; (void)name;
-	return XTC_E_NOSYS;
+	char   *copy = NULL;
+	size_t  len;
+	int     rc;
+
+	if (tls == NULL || tls->ssl == NULL)
+		return XTC_E_INVAL;
+	if (tls->ctx->role != XTC_TLS_CLIENT)
+		return XTC_OK;   /* no-op on the server side */
+	if (tls->hostname_applied)
+		return XTC_E_INVAL;   /* must precede xtc_tls_handshake */
+	len = (name != NULL) ? strlen(name) : 0;
+	if (len > 0xffff)
+		return XTC_E_INVAL;   /* SNI length is a u16 */
+	if (len != 0) {
+		if ((rc = __os_malloc(len + 1, (void **)&copy)) != XTC_OK)
+			return rc;
+		memcpy(copy, name, len + 1);
+	}
+	if (tls->hostname != NULL)
+		__os_free(tls->hostname);
+	tls->hostname = copy;
+	return XTC_OK;
+}
+
+static int
+apply_hostname(struct xtc_tls *t)
+{
+	size_t len;
+
+	t->hostname_applied = 1;
+	if (t->hostname == NULL)
+		return XTC_OK;
+	len = strlen(t->hostname);
+#ifdef HAVE_SNI
+	if (wolfSSL_UseSNI(t->ssl, WOLFSSL_SNI_HOST_NAME, t->hostname,
+	        (unsigned short)len) != WOLFSSL_SUCCESS)
+		return XTC_E_INTERNAL;
+#endif
+	if (wolfSSL_check_domain_name(t->ssl, t->hostname) != WOLFSSL_SUCCESS)
+		return XTC_E_NOMEM;
+	return XTC_OK;
 }
 
 void
@@ -401,6 +461,8 @@ xtc_tls_destroy(xtc_tls_t *tls)
 {
 	if (tls == NULL)
 		return;
+	if (tls->hostname != NULL)
+		__os_free(tls->hostname);
 	if (tls->ssl != NULL)
 		wolfSSL_free(tls->ssl);
 	__os_free(tls);
@@ -419,6 +481,9 @@ xtc_tls_handshake(xtc_tls_t *tls)
 		return XTC_E_INVAL;
 
 	xtc_tls_clear_wants(tls);
+
+	if (!tls->hostname_applied && (rc = apply_hostname(tls)) != XTC_OK)
+		return rc;
 
 	rc = wolfSSL_negotiate(tls->ssl);
 	if (rc == WOLFSSL_SUCCESS)

@@ -91,6 +91,7 @@ struct xtc_tls {
 	int               fd;
 	gnutls_session_t  session;
 	int               handshake_done;
+	char             *hostname;      /* expected peer name; NULL = none */
 	int               wants_read;
 	int               wants_write;
 };
@@ -389,6 +390,13 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 	gnutls_transport_set_int(t->session, fd);
 	gnutls_handshake_set_timeout(t->session, 0);
 
+	/* CLIENT with verification: verify the server certificate INSIDE
+	 * the handshake so a bad chain (or, once xtc_tls_set_hostname names
+	 * the peer, a bad name) aborts it with an alert the server sees,
+	 * rather than completing and being rejected afterwards. */
+	if (ctx->role == XTC_TLS_CLIENT && ctx->verify_peer)
+		gnutls_session_set_verify_cert(t->session, NULL, 0);
+
 	*out = t;
 	return XTC_OK;
 
@@ -420,11 +428,47 @@ xtc_tls_create_transport(xtc_tls_ctx_t *ctx,
 	return XTC_E_NOSYS;
 }
 
+/*
+ * Client SNI + RFC 6125 name check.  SNI goes out via
+ * gnutls_server_name_set; the name check is done in the handshake by
+ * gnutls_session_set_verify_cert (and again, belt and braces, by
+ * gnutls_certificate_verify_peers3 in xtc_tls_handshake), which
+ * matches the name against the certificate's SAN / CN.  Like OpenSSL,
+ * the name is only enforced when the context verifies peers.
+ */
 int
 xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 {
-	(void)tls; (void)name;
-	return XTC_E_NOSYS;
+	char   *copy = NULL;
+	size_t  len;
+	int     rc;
+
+	if (tls == NULL)
+		return XTC_E_INVAL;
+	if (tls->ctx->role != XTC_TLS_CLIENT)
+		return XTC_OK;   /* no-op on the server side */
+	len = (name != NULL) ? strlen(name) : 0;
+	if (len != 0) {
+		if ((rc = __os_malloc(len + 1, (void **)&copy)) != XTC_OK)
+			return rc;
+		memcpy(copy, name, len + 1);
+	}
+	/* name_length 0 clears any server name previously set. */
+	if (gnutls_server_name_set(tls->session, GNUTLS_NAME_DNS,
+	        len != 0 ? name : "", len) != GNUTLS_E_SUCCESS) {
+		if (copy != NULL)
+			__os_free(copy);
+		return XTC_E_INTERNAL;
+	}
+	/* Re-arm in-handshake verification with the name (the pointer must
+	 * outlive the session, hence the owned copy; set before freeing the
+	 * old one). */
+	if (tls->ctx->verify_peer)
+		gnutls_session_set_verify_cert(tls->session, copy, 0);
+	if (tls->hostname != NULL)
+		__os_free(tls->hostname);
+	tls->hostname = copy;
+	return XTC_OK;
 }
 
 void
@@ -432,6 +476,8 @@ xtc_tls_destroy(xtc_tls_t *tls)
 {
 	if (tls == NULL)
 		return;
+	if (tls->hostname != NULL)
+		__os_free(tls->hostname);
 	gnutls_deinit(tls->session);
 	__os_free(tls);
 }
@@ -457,10 +503,13 @@ xtc_tls_handshake(xtc_tls_t *tls)
 		 * GnuTLS does not fail the handshake on a bad peer cert by
 		 * default; verify explicitly when requested and map a bad
 		 * status to a hard error (matches the OpenSSL backend).
+		 * verify_peers3 also checks the peer name when one was set
+		 * with xtc_tls_set_hostname (NULL = chain only).
 		 */
 		if (tls->ctx->verify_peer) {
 			unsigned int status = 0;
-			int vr = gnutls_certificate_verify_peers2(tls->session,
+			int vr = gnutls_certificate_verify_peers3(tls->session,
+			                                          tls->hostname,
 			                                          &status);
 			if (vr != GNUTLS_E_SUCCESS || status != 0)
 				return XTC_E_INTERNAL;

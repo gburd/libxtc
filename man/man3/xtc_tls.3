@@ -146,8 +146,15 @@ is the client-side half: called before the handshake on a client
 connection, it sends
 .Va name
 in the ClientHello SNI extension and enables RFC 6125 hostname
-verification against the server certificate.  A NULL or empty name
-clears it; it is a no-op on a server connection.
+verification against the server certificate: a certificate that chains
+to a trusted CA but is issued for a different host fails the handshake.
+The name is enforced only when the context verifies peers.  A NULL or
+empty name clears it (chain-only verification); it is a no-op on a
+server connection.  Implemented on the OpenSSL, GnuTLS, wolfSSL and
+mbedTLS backends; before 1.50 only OpenSSL checked the name and the
+others returned
+.Dv XTC_E_NOSYS ,
+which SChannel still does.
 .Pp
 .Fn xtc_tls_create_transport "ctx" "transport" "&out"
 wraps the TLS state machine around caller-supplied
