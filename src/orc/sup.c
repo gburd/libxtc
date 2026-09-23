@@ -16,6 +16,7 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"
+#include "xtc_inspect.h"   /* xtc_proc_info: has an old child left the proc table? */
 
 #include <stdio.h>
 #include <pthread.h>
@@ -244,6 +245,69 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 	(void)xtc_send(a->reply, &rep, sizeof rep);
 }
 
+/*
+ * How long a group restart waits for a killed sibling's cleanup to finish
+ * before giving up on the restart.  Not an opts field on purpose:
+ * xtc_sup_opts_t is caller-allocated, and appending to it is exactly the
+ * 1.x struct-growth ABI break documented in PLAN.md 18.1.
+ */
+#define XTC_SUP_CLEANUP_WAIT_NS  (5LL * 1000 * 1000 * 1000)
+
+/*
+ * Has this pid's CLEANUP completed?  True only once it has left the proc
+ * table, which happens after every at-exit callback has returned.  !alive
+ * and XTC_KILL_DELIVERED are both documented (xtc_proc.h) as NOT meaning
+ * cleanup finished -- the proc clears `alive` BEFORE running its exit
+ * hooks -- so neither may gate a respawn.  Same test
+ * xtc_arena_group_discard uses for the same reason.
+ */
+static int
+__child_gone(xtc_pid_t pid)
+{
+	xtc_proc_info_t info;
+	return xtc_proc_info(pid, &info) != XTC_OK;
+}
+
+/*
+ * Wait, yielding, until every child in [lo, hi) that we just asked to
+ * exit has actually left the proc table.  Returns 1 if all are gone, 0 if
+ * the deadline passed with at least one still cleaning up.
+ *
+ * This is what makes a group restart safe for children that share a C
+ * resource.  The previous code killed siblings fire-and-forget, marked
+ * them dead, and respawned immediately, so a replacement could run while
+ * its predecessor was still inside an exit hook holding the resource --
+ * measured as a hold count of 4 where the steady state is 2.
+ *
+ * Called from the supervisor's own fiber with sup->lock held; the only
+ * other takers of that lock are this same proc (ADD_CHILD is handled in
+ * this loop), so yielding while holding it cannot deadlock a foreign
+ * thread.  It must yield rather than block: the dying siblings need
+ * scheduler time, possibly on this very loop, to run their exit hooks.
+ */
+static int
+__wait_children_gone(struct xtc_supervisor *sup, int lo, int hi,
+                     const xtc_pid_t *old)
+{
+	int64_t start = 0, now = 0;
+	int i, pending;
+
+	(void)sup;
+	(void)__os_clock_mono(&start);
+	for (;;) {
+		pending = 0;
+		for (i = lo; i < hi; i++)
+			if (!xtc_pid_is_none(old[i]) && !__child_gone(old[i]))
+				pending++;
+		if (pending == 0)
+			return 1;
+		(void)__os_clock_mono(&now);
+		if (now - start >= XTC_SUP_CLEANUP_WAIT_NS)
+			return 0;
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);   /* 1 ms */
+	}
+}
+
 /* Kill a still-alive sibling; we only mark it as not-alive once we
  * see its DOWN come back through the mailbox. */
 static void
@@ -261,15 +325,36 @@ static void
 __do_one_for_all(struct xtc_supervisor *sup, int dead_idx)
 {
 	int i;
+	xtc_pid_t *old = NULL;
 	(void)dead_idx;
+
+	/* Snapshot every child's pid (the crashed one included: its slot may
+	 * still be draining its own exit hooks) BEFORE killing, so the wait
+	 * below names exactly the generation being replaced. */
+	if (sup->n_children > 0 &&
+	    __os_calloc((size_t)sup->n_children, sizeof *old,
+	    (void **)&old) != XTC_OK) {
+		atomic_store_explicit(&sup->stop_requested, 1,
+		    memory_order_release);
+		return;
+	}
+	for (i = 0; i < sup->n_children; i++)
+		old[i] = sup->children[i].pid;
 	for (i = 0; i < sup->n_children; i++)
 		if (sup->children[i].alive) __kill_sibling(sup, &sup->children[i]);
-
-	/* Drain DOWN messages from the doomed siblings.  We can't use
-	 * xtc_recv_match here without recursing; instead we just mark
-	 * them not-alive optimistically and let the next pass through
-	 * the main recv loop reap any stragglers. */
 	for (i = 0; i < sup->n_children; i++) sup->children[i].alive = 0;
+
+	/* Do not respawn into an overlap: wait for every old child's cleanup
+	 * to COMPLETE.  If one will not finish, give up on the restart rather
+	 * than run a replacement beside it -- stopping the supervisor is the
+	 * documented escalation, and its caller sees it exit. */
+	if (!__wait_children_gone(sup, 0, sup->n_children, old)) {
+		__os_free(old);
+		atomic_store_explicit(&sup->stop_requested, 1,
+		    memory_order_release);
+		return;
+	}
+	__os_free(old);
 
 	for (i = 0; i < sup->n_children; i++) {
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
@@ -287,9 +372,31 @@ static void
 __do_rest_for_one(struct xtc_supervisor *sup, int dead_idx)
 {
 	int i;
+	xtc_pid_t *old = NULL;
+
+	if (sup->n_children > 0 &&
+	    __os_calloc((size_t)sup->n_children, sizeof *old,
+	    (void **)&old) != XTC_OK) {
+		atomic_store_explicit(&sup->stop_requested, 1,
+		    memory_order_release);
+		return;
+	}
+	for (i = dead_idx; i < sup->n_children; i++)
+		old[i] = sup->children[i].pid;
 	for (i = sup->n_children - 1; i > dead_idx; i--)
 		if (sup->children[i].alive) __kill_sibling(sup, &sup->children[i]);
 	for (i = dead_idx; i < sup->n_children; i++) sup->children[i].alive = 0;
+
+	/* As in one_for_all: no replacement until the old generation's
+	 * cleanup has completed; escalate (stop) if it does not. */
+	if (!__wait_children_gone(sup, dead_idx, sup->n_children, old)) {
+		__os_free(old);
+		atomic_store_explicit(&sup->stop_requested, 1,
+		    memory_order_release);
+		return;
+	}
+	__os_free(old);
+
 	for (i = dead_idx; i < sup->n_children; i++) {
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
 			atomic_store_explicit(&sup->stop_requested, 1,

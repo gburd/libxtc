@@ -502,10 +502,123 @@ test_atomic_spawn_monitor(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * PLAN 19.27.4: a group restart must NOT run a replacement child while its
+ * killed predecessor is still cleaning up.
+ *
+ * Each "holder" child takes a shared resource on entry and releases it
+ * from an AT-EXIT hook that deliberately takes 30ms -- the window in which
+ * the old code (fire-and-forget kill, mark dead, respawn immediately)
+ * started the replacement beside the still-exiting predecessor.  held_max
+ * is the highest number of holders ever alive at once; with two holders
+ * the steady state is 2, and anything above it is an OLD+NEW overlap.
+ *
+ * Fails on the unfixed library (held_max == 4) and passes with the fix.
+ */
+static _Atomic int g_ov_held, g_ov_max, g_ov_starts, g_ov_crashes;
+
+static void
+ov_release(void *a)
+{
+	(void)a;
+	/* Slow cleanup: the predecessor is still inside its exit hook, still
+	 * holding the resource, for 30ms after it was told to exit. */
+	(void)xtc_proc_sleep(30LL * 1000 * 1000);
+	atomic_fetch_sub(&g_ov_held, 1);
+}
+
+static void
+ov_holder(void *a)
+{
+	int cur, m;
+	(void)a;
+	atomic_fetch_add(&g_ov_starts, 1);
+	cur = atomic_fetch_add(&g_ov_held, 1) + 1;
+	do {
+		m = atomic_load(&g_ov_max);
+	} while (cur > m && !atomic_compare_exchange_weak(&g_ov_max, &m, cur));
+	(void)xtc_proc_at_exit(ov_release, NULL);
+	for (;;)
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);
+}
+
+static void
+ov_crasher(void *a)
+{
+	(void)a;
+	(void)xtc_proc_sleep(20LL * 1000 * 1000);
+	if (atomic_fetch_add(&g_ov_crashes, 1) == 0)
+		(void)xtc_exit_self(5);            /* crash exactly once */
+	for (;;)
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);
+}
+
+static void
+ov_stopper(void *a)
+{
+	(void)xtc_loop_stop((xtc_loop_t *)a);
+}
+
+static MunitResult
+run_overlap_case(xtc_restart_strategy_t strategy)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_supervisor_t *sup = NULL;
+	xtc_sup_opts_t o = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t cs[3];
+	int i;
+
+	atomic_store(&g_ov_held, 0);
+	atomic_store(&g_ov_max, 0);
+	atomic_store(&g_ov_starts, 0);
+	atomic_store(&g_ov_crashes, 0);
+
+	o.strategy = strategy;
+	o.max_restarts = 5;
+	memset(cs, 0, sizeof cs);
+	cs[0].fn = ov_crasher; cs[0].name = "crasher";
+	for (i = 1; i < 3; i++) { cs[i].fn = ov_holder; cs[i].name = "holder"; }
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &o, cs, 3, &sup), ==, XTC_OK);
+	munit_assert_int(xtc_timer_set(loop, 400LL * 1000 * 1000, ov_stopper,
+	    loop, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* The restart must actually have HAPPENED -- otherwise "no overlap"
+	 * would be vacuous.  Two holders started, then both were replaced. */
+	munit_assert_int(atomic_load(&g_ov_crashes), >=, 1);
+	munit_assert_int(atomic_load(&g_ov_starts), >=, 4);
+	/* The property: never more holders alive than the steady state. */
+	munit_assert_int(atomic_load(&g_ov_max), <=, 2);
+
+	(void)xtc_sup_stop(sup);
+	(void)xtc_timer_set(loop, 300LL * 1000 * 1000, ov_stopper, loop, NULL);
+	(void)xtc_loop_run(loop);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_one_for_all_no_overlap(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return run_overlap_case(XTC_SUP_ONE_FOR_ALL);
+}
+
+static MunitResult
+test_rest_for_one_no_overlap(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return run_overlap_case(XTC_SUP_REST_FOR_ONE);
+}
+
 static MunitTest tests[] = {
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/one_for_all",           test_one_for_all,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/rest_for_one",          test_rest_for_one,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/one_for_all_no_overlap",  test_one_for_all_no_overlap,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/rest_for_one_no_overlap", test_rest_for_one_no_overlap, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/intensity_exceeded",    test_intensity_exceeded,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/simple_one_for_one",    test_simple_one_for_one,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pool_max_children",     test_pool_max_children,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
