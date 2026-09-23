@@ -115,13 +115,18 @@ static int
 run_one(uint64_t seed, int *out_ok, long *out_hash, uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
-	char path[] = "/scratch/xtc-test/sim_aiov_XXXXXX";
+	char path[512];
+	const char *td = getenv("TMPDIR");
 	int i, rc;
 
 	atomic_store(&g_ok, 0);
 	atomic_store(&g_done, 0);
 	atomic_store(&g_hash, 0);
 
+	/* Honor TMPDIR (the swarm/run_sim_tests.sh convention); never a
+	 * hardcoded host path. */
+	(void)snprintf(path, sizeof path, "%s/sim_aiov_XXXXXX",
+	    td != NULL && *td != '\0' ? td : "/tmp");
 	g_fd = mkstemp(path);
 	if (g_fd < 0) {
 		char p2[] = "sim_aiov_XXXXXX";
