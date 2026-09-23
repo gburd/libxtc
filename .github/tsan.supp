@@ -96,7 +96,16 @@ race:xtc_blocking_run_off_loop
 race:xtc_proc_wait_fd
 race:xtc_proc_sleep
 race:__do_recv
-race:__proc_entry
+# NOT __proc_entry: it is the entry frame of EVERY fiber, so a stanza
+# naming it would suppress any race anywhere in a fiber's lifetime --
+# including a brand-new one.  Measured: it appeared in 122 of the
+# classified reports purely by being on the stack.  The artifacts that
+# would need it are instead covered by the specific primitive they occur
+# in (__do_recv, xtc_proc_wait_fd, the timer pair).  A residual report
+# whose TOP frame is pthread_mutex_lock/_unlock on a migrated proc's
+# mbox_lock is the same artifact and is left VISIBLE rather than
+# suppressed via a pthread_* stanza, which would be far too broad: see
+# the non-suppressible mbox_lock note at the end of this file.
 race:__xtc_proc_kill_check
 race:__xtc_proc_ctx_restore
 race:__proc_reanchor
@@ -111,6 +120,19 @@ race:xtc_timer_cancel
 # above; noted in the v1.40.2 CI audit as the reason test_exec cannot
 # join the curated gate.
 race:xtc_yield
+# aio_do's on-stack xtc_aio_t (src/ptc/aio.c): the submitting fiber
+# memsets the struct at the TOP of the next iteration while the REAPING
+# thread's xtc_io_poll still has the PREVIOUS op's pointer in hand --
+# same stack address, consecutive ops, two threads.  Not a live overlap:
+# the fiber cannot leave aio_do until `while (!__xtc_aio_done_get(&a))`
+# observes done, and done is published release-after-res by the reaper
+# (see the acquire/release pair in src/inc/aio_int.h), so the slot cannot
+# be reused while a completion is in flight.  TSan reports the address
+# reuse because it cannot carry that happens-before across the fiber
+# switch.  Named on aio_do rather than xtc_io_poll: the poll function
+# reaps every completion in the runtime and a stanza there would blanket
+# the entire I/O path.
+race:aio_do
 
 # NOT SUPPRESSIBLE, documented instead: "use of an invalid mutex" on a
 # proc's mbox_lock, reported the first time a MIGRATED fiber locks it from
