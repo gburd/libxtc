@@ -131,9 +131,11 @@ typedef enum xtc_tls_role {
  * after the handshake).  opts.verify_peer_mode expresses all three.
  * See the compatibility note on opts.verify_peer below.
  *
- * Resolution, identical on every backend: verify_peer_mode wins when
- * not DEFAULT; else a non-zero legacy verify_peer means REQUIRE; else
- * the ROLE default -- CLIENT: REQUIRE, SERVER: NONE.
+ * Resolution, identical on the OpenSSL, GnuTLS, wolfSSL and mbedTLS
+ * backends: verify_peer_mode wins when not DEFAULT; else a non-zero
+ * legacy verify_peer means REQUIRE; else the ROLE default -- CLIENT:
+ * REQUIRE, SERVER: NONE.  (SChannel does not yet apply it: it reads
+ * only verify_peer, so a zeroed SChannel CLIENT still verifies nothing.)
  *
  * BEHAVIOR CHANGE: Since 1.50 a CLIENT verifies the server by default;
  * set verify_peer_mode = XTC_TLS_VERIFY_NONE to opt out.  Before 1.50 a
