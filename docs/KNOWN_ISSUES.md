@@ -6,6 +6,79 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## OPEN (security): TLS hostname verification is a no-op on GnuTLS and wolfSSL
+
+**Status:** OPEN as of 1.49.5.  Tracked as PLAN.md 19.27.6-19.27.8.
+
+`xtc_tls_set_hostname` returns `XTC_E_NOSYS` on the GnuTLS
+(`src/io/tls_gnutls.c:424`) and wolfSSL (`src/io/tls_wolfssl.c:393`)
+backends.  On those two backends a CLIENT verifies the certificate CHAIN
+but not the NAME, so a valid certificate for any host is accepted.  The
+header documents the NOSYS return honestly; the README's "builds and
+passes the m18 suite in CI" for those backends does NOT mean parity with
+OpenSSL, and the suite could not have caught it: no test on any backend
+asserts that a wrong-hostname certificate is rejected, and the one
+set_hostname test SKIPs on NOSYS.
+
+Also: a zeroed `xtc_tls_opts_t` resolves to `XTC_TLS_VERIFY_NONE` for the
+CLIENT role, so `opts = {0}` on a client does no certificate verification
+at all.
+
+**If you ship TLS clients today:** use the OpenSSL (or BoringSSL/LibreSSL)
+backend, set `verify_peer_mode = XTC_TLS_VERIFY_REQUIRE` explicitly, call
+`xtc_tls_set_hostname` and treat any non-`XTC_OK` return -- including
+`XTC_E_NOSYS` -- as a hard failure, not "not needed".
+
+## OPEN: xtc_xproc_destroy is a use-after-free with a live monitor, and does not reap
+
+**Status:** OPEN as of 1.49.5.  Tracked as PLAN.md 19.27.1-19.27.3.
+
+Reproduced under AddressSanitizer: `xtc_xspawn` -> `xtc_xmonitor` ->
+`xtc_xproc_destroy` while the child is still running frees `p->os`; the
+monitor's shadow fiber, parked in `xtc_osproc_wait`, reads the freed struct
+when the child later exits (`src/orc/osproc.c:322`).  A non-ASan run prints
+a normal DOWN and looks fine.  Separately, destroy neither signals nor
+reaps a running child (the man page says it does): after destroy the OS
+child is still alive and becomes a zombie.  And a child killed by SIGSEGV
+is reported to the monitor as `XTC_DOWN_KIND_EXIT` with exit_code 11, not
+`KIND_SIGNAL` -- a supervisor cannot distinguish a crash from `exit(11)`.
+
+**Workaround:** never call `xtc_xproc_destroy` while the child may be
+alive; wait for the DOWN first.  Do not rely on the DOWN kind to classify
+an external child's death.
+
+## OPEN: supervisor group restarts overlap the old children's cleanup
+
+**Status:** OPEN as of 1.49.5.  Tracked as PLAN.md 19.27.4.
+
+Under `XTC_SUP_ONE_FOR_ALL` and `XTC_SUP_REST_FOR_ONE`, sibling kills are
+fire-and-forget and the replacement is spawned immediately
+(`src/orc/sup.c` ~254-298).  Reproduced: a shared-resource hold count
+reached 4 where steady state is 2 -- the replacement ran while its killed
+predecessor still held the resource.  For children sharing a C resource
+this is a double-holder bug.
+
+**Workaround:** do not use group restart for children that share state a
+replacement must not touch until the predecessor has released it; use
+ONE_FOR_ONE, or have the child's at-exit hook be the only thing that
+makes the resource available and have the replacement wait on that.
+
+## OPEN: xtc_lock_vec is not atomic all-or-none (frozen lock ABI)
+
+**Status:** OPEN as of 1.49.5.  Tracked as PLAN.md 19.27.5.
+
+`man xtc_lockmgr` says `xtc_lock_vec` is "succeed-or-rollback ... no
+partial state is left".  Reproduced: when the second GET would block, the
+call returns `XTC_E_AGAIN` with `*out_executed == 1` and the FIRST lock is
+still held.  The HEADER (`xtc_lockmgr.h:213-217`) documents this
+partial-state behavior and says to pass `timeout_ns = 0` in every request
+for atomic semantics -- so header and man page contradict, and the man
+page is the one that is wrong.  The lock layer's binary LAYOUT is frozen
+and unchanged since v1.0.0; this is a behavior/documentation defect.
+
+**Workaround:** treat `xtc_lock_vec` as a loop over `xtc_lock_get`; on any
+non-OK return, release the first `*out_executed` locks yourself.
+
 ## OPEN (ABI): caller-allocated structs grew during 1.x -- do not mix minors
 
 **Status:** OPEN, and the most consequential item on this page for a

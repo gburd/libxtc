@@ -3391,6 +3391,341 @@ not started:
 
 ---
 
+### 19.27 Production-readiness review, 2026-09-23 -- the gap list
+
+An in-depth review of every public API, the examples, the tests and the
+documentation against the question "is this production grade, and does it
+do what it says?"  Method: read the code, then for every candidate finding
+either REPRODUCE it (a probe or fuzzer, output recorded), SOURCE-VERIFY it
+(exact lines, unambiguous), or mark it SUSPECTED.  Findings taken from a
+subagent were re-run by the reviewer before being listed; nothing here is
+on report alone.  Reproducers live under /tmp/apiaudit_b, /tmp/secaudit,
+/tmp/exaudit (not shipped; the tasks below say how to recreate each).
+
+THE VERDICT, stated plainly: the runtime core (loop / task / proc / io /
+lock manager / allocator) is in good shape and its public-API test reach is
+excellent -- 632 PUBLIC functions, only 6 with zero test references; 238
+allocation sites and 0 discard the rc; the RESP, Quack and cfg parsers
+fuzz clean under ASan+UBSan; the frozen lock-layer ABI is byte-identical to
+v1.0.0.  What is NOT production grade is at the edges, and it clusters into
+five themes: (1) contracts the docs promise and the code does not keep,
+(2) a marketing layer (README) ahead of the implementation, (3) TLS
+hostname verification missing on two backends with no test that would
+notice, (4) process-spawn and supervisor lifetimes that overlap or
+use-after-free, and (5) a flagship example that nothing gates.  Each is a
+task below, ranked.  P0 = must fix before calling any release "production";
+P1 = before the next minor; P2 = hygiene.
+
+#### P0 -- correctness and safety
+
+- **19.27.1  xtc_xproc_destroy is a use-after-free when a monitor shadow
+  is live.**  REPRODUCED under ASan: destroy while the child runs frees
+  p->os (osproc.c:430 via xproc.c:356); the shadow_proc spawned by
+  xtc_xmonitor is parked in xtc_osproc_wait and reads the freed struct
+  when the child later exits (osproc.c:322).  A non-ASan run prints
+  "got DOWN after destroy" and looks fine, which is why it shipped.  The
+  inline comment at xproc.c:356 ("signals + reaps if running") is false
+  on both counts.  TASK: refcount p->os (shadow holds a ref) or make
+  destroy cancel-and-join the shadow before freeing; add the ASan probe
+  (/tmp/secaudit/xproc_uaf.c) as test/m10/test_xproc destroy_while_live.
+
+- **19.27.2  xtc_xproc_destroy neither signals nor reaps a running child.**
+  REPRODUCED: after destroy, kill(pid,0)==0 and waitpid(WNOHANG)==0 --
+  the OS child is orphaned and becomes a zombie later.  xtc_xproc(3):126
+  promises it "signals and reaps the child if still running".  TASK: a
+  bounded terminate-and-wait (SIGTERM, deadline, SIGKILL, reap), or rename
+  the contract and add xtc_xproc_terminate(timeout).  Same probe.
+
+- **19.27.3  xtc_xproc DOWN collapses a signal death into an EXIT.**
+  REPRODUCED: child does *(int*)0=0 -> DOWN kind=1 (EXIT) signal=0
+  exit_code=11.  A supervisor cannot tell "crashed with SIGSEGV" from
+  "called exit(11)".  Mechanism: xproc.c ~252-276 maps WTERMSIG to a
+  positive reason and calls xtc_exit_self, which proc.c tags as EXIT.
+  TASK: an internal typed-exit path that preserves kind=SIGNAL (and a
+  real NOCONNECTION kind for control-channel loss).  Test: child exits 0
+  / 1 / 11; child receives SIGSEGV; connection lost with child alive.
+
+- **19.27.4  xtc_sup ONE_FOR_ALL / REST_FOR_ONE restarts OVERLAP the old
+  children's cleanup.**  REPRODUCED 3/3: a shared-resource hold count
+  reached 4 where steady state is 2 -- a replacement child ran while its
+  killed predecessor still held the resource.  sup.c ~254-298 is
+  fire-and-forget xtc_exit_pid + mark dead + respawn.  For children that
+  share a C resource this is a double-holder bug, not latency.  TASK:
+  stop -> wait cleanup-complete (proc-table absence, exactly as
+  xtc_arena_group_discard already does) -> respawn, with a bounded
+  escalation when an old child will not finish.  Test: hold an old
+  child's cleanup gate closed and assert no replacement touches its
+  resource; release and assert restart order + intensity.
+
+- **19.27.5  xtc_lock_vec is documented atomic-all-or-none on the FROZEN
+  lock ABI, and is not.**  REPRODUCED: two GETs, second would block ->
+  rc=XTC_E_AGAIN, executed=1, and the first lock is STILL HELD.
+  man/man3/xtc_lockmgr.3:92-93 and :161-165 say "succeed-or-rollback ...
+  no partial state is left"; the HEADER (xtc_lockmgr.h:213-217) says the
+  opposite.  A "compound acquire" that leaves partial state is a deadlock
+  generator for its consumer.  TASK: implement rollback (release the
+  executed prefix on any non-OK op) -- the right answer for a lock
+  manager -- and fix the man page to match whichever contract ships.
+  The layout is frozen; the BEHAVIOR is what is wrong.  Test: the
+  /tmp/apiaudit_b/p_vec probe as a munit case.
+
+- **19.27.6  TLS hostname verification is a no-op on GnuTLS and wolfSSL.**
+  SOURCE-VERIFIED: tls_gnutls.c:424 and tls_wolfssl.c:393
+  xtc_tls_set_hostname return XTC_E_NOSYS.  A client on those backends
+  verifies the CHAIN but not the NAME: any valid certificate for any host
+  is accepted.  The header does say "XTC_E_NOSYS on a backend that
+  cannot set it", but README lists both as "pass the m18 suite in CI",
+  which reads as parity.  TASK: implement (gnutls_server_name_set +
+  gnutls_x509_crt_check_hostname in the verify callback;
+  wolfSSL_check_domain_name); until then the README TLS matrix MUST say
+  which backends verify hostnames.
+
+- **19.27.7  No test on ANY backend asserts a wrong-hostname certificate is
+  REJECTED.**  REPRODUCED: grep test/m18 for wrong/mismatch/bad hostname
+  = 0.  The only set_hostname test checks SNI *selection*, and it SKIPS
+  on NOSYS (test_tls_server.c:963-970), which is exactly how 19.27.6
+  stayed hidden while "passing m18 on every backend".  TASK: generate a
+  cert for CN=a.example, connect expecting b.example, assert the
+  handshake FAILS -- on every backend; make the SNI/hostname cases FAIL
+  rather than SKIP where a backend lacks the capability, or publish a
+  per-backend capability matrix the test asserts against.
+
+- **19.27.8  A zeroed xtc_tls_opts_t is verify-NONE for a CLIENT.**
+  SOURCE-VERIFIED: verify_peer=0 + verify_peer_mode=DEFAULT resolves to
+  XTC_TLS_VERIFY_NONE (tls_openssl.c:557-560), so `opts = {0}` on the
+  client role does no certificate verification, silently.
+  Insecure-by-default.  TASK: default the CLIENT role to REQUIRE unless
+  explicitly set NONE (a minor-version behavior change -- document it),
+  or at minimum log once at ctx_create when a client verifies nothing.
+
+- **19.27.9  POSIX xtc_xspawn_entry forks WITHOUT exec and stands up a
+  full libxtc runtime in the child of a multithreaded parent.**
+  SOURCE-VERIFIED: xproc.c:311 oo.fn=child_fn -> xtc_xproc_child_main
+  (xproc.c:183) -> xtc_loop_init / xtc_proc_spawn / xtc_loop_run, i.e.
+  malloc + mutex init + ring setup after fork() with N executor threads
+  in the parent.  Only async-signal-safe calls are permitted there;
+  malloc can deadlock on a lock another parent thread held at fork.  The
+  exec path also does snprintf+setenv post-fork (osproc.c:247-250; setenv
+  is not async-signal-safe).  TASK: make the named-entry path re-exec on
+  POSIX (as Windows already does) and resolve the entry in the fresh
+  image; build the XTC_CTRL_FD env BEFORE fork and pass via execve.  Test:
+  spawn from a parent whose other threads hammer malloc/locks, in a loop.
+
+#### P1 -- contracts and claims
+
+- **19.27.10  The documented 6-stage graceful shutdown does not exist.**
+  SOURCE-VERIFIED: PLAN 19.20 describes xtc_app_shutdown with
+  drain_deadline / force_deadline / '$xtc_shutdown' broadcast and
+  SIGTERM/SIGINT/SIGQUIT handling; grep src/ for any of it = 0.
+  xtc_app_stop is a one-line call to xtc_sup_stop.  The LIBRARY installs
+  no signal handling; only examples/05_rexis/main.c does, on its own.
+  For a runtime marketed for long-lived services this is a real gap.
+  TASK: either implement the drain protocol (stop accept -> broadcast ->
+  bounded drain -> force-cancel -> report survivors) with a signal-safe
+  trigger, or mark 19.20 NOT IMPLEMENTED and remove the claim from the
+  README's fault-tolerance pitch.  Ship an example that drains on SIGTERM
+  (see 19.27.17).
+
+- **19.27.11  xtc_res caps bound almost nothing.**  SOURCE-VERIFIED:
+  production acquire sites -- MEM_BYTES: 1 (slab chunk alloc only),
+  TASKS: 1, FDS: 0; the mctx allocator charges nothing; xtc_net charges
+  nothing.  README ("hold bounded RSS, file descriptors, in-flight tasks
+  ... Backpressure is built in") and xtc_res.h:12-16 promise otherwise;
+  xtc_runtime.h:80-86 admits accounting is opt-in.  A consumer setting a
+  MEM_BYTES cap bounds slab chunks and nothing else.  TASK: either charge
+  mctx and xtc_net/accept against the caps (the honest fix), or rewrite
+  the README/xtc_res.h to say exactly what is metered.  Add a test that
+  sets a cap and asserts the SECOND kind of allocation is refused.
+
+- **19.27.12  xtc_reg_register_mon returns XTC_OK when enrollment was
+  lost.**  REPRODUCED: 3 monitored registrations, all rc=0; after all
+  three workers exit, 2 stale names remain (whereis w1=0 w2=0).
+  v1.49.3 made the drop DIAGNOSABLE (XTC_TAIL_LIFECYCLE_DROP); the API
+  still promises coverage it did not establish.  TASK: fail / roll back
+  the registration when the enrollment send fails, or reserve control
+  capacity so it cannot fail.  Test: saturate the reaper mailbox, then
+  register_mon, then exit the pid; assert either failure or reap.
+
+- **19.27.13  Contract inconsistencies found by probe, batch.**  All
+  REPRODUCED:
+    - xtc_exit_pid_deadline(unknown pid) -> XTC_OK + DELIVERED, while
+      xtc_exit_pid(unknown pid) -> XTC_E_INVAL and the SAME header says
+      INVAL for an unknown pid (~xtc_proc.h:217) a few lines above the
+      note that says DELIVERED.  Pick one (INVAL is the honest one).
+    - xtc_cfg out-of-range: global set -> XTC_E_RANGE (-4), session set
+      -> XTC_E_INVAL (-1), man page says INVAL.  One condition, two codes.
+    - xtc_cfg_register duplicate -> -1; man page cites XTC_E_EXIST, which
+      does not exist in xtc.h.  xtc_cfg_session_source(unset) -> 99; doc
+      says DEFAULT=0.
+    - PUBLIC: marker at xtc_cfg.h:257 declares `int xtc_cfg_session_bind`
+      but the prototype and impl return xtc_cfg_session_t* -- the
+      generated extern list is wrong for this symbol.
+    - xtc_cfg_get_string returns an internal pointer with no documented
+      lifetime, and xtc_cfg_set_string frees the old one: a reader that
+      copies after the lock drops can read freed memory under a
+      concurrent set.  Document "valid until next set" AND add a copying
+      getter.
+    - xtc_proc_wait_fd(closed fd) -> XTC_E_AGAIN+TIMEOUT on io_uring: a
+      programming error presents as a timeout.
+    - xtc_res_set_alert accepts pct=0 and 1.0 (doc: open interval);
+      xtc_res_set_cap(-5) makes the kind unbounded, undocumented;
+      xtc_sleep_ns(-5) -> -1 undocumented.
+    - xtc_slab redzone violations fprintf to stderr unconditionally from
+      a library; route through xtc_log or a callback.
+  TASK: one commit per bullet, each with the probe line as its test.
+
+- **19.27.14  README status is stale in BOTH directions.**  "L5 PG
+  adapter: Designed; not yet implemented" -- src/orc/pg.c exists (92
+  lines, 4 PUBLIC fns, tested).  Example table lists 11; `make
+  check-examples` gates 5 (01-04, 10).  README:17 says 04's "detector
+  aborts the youngest"; the example's own header says the victim is a
+  RANDOM shuffled deck -- the README misdescribes the example's central
+  point.  TASK: a doc pass keyed to `git grep` evidence, and extend
+  test/m0/test_docs_abi.sh's "cited path must exist" idea to the README
+  example table (every listed example must be a make target that CI
+  runs, or be labelled "not gated").
+
+- **19.27.15  6 public functions have zero references anywhere in test/,
+  examples/ or snippets.**  REPRODUCED: xtc_cfg_ref_get_int64,
+  xtc_cfg_ssn_set_bool, _set_double, _set_enum, _set_int64,
+  xtc_xproc_child_main.  TASK: a test each; make the man-coverage gate
+  (test/m0/test_man_coverage.sh) also require >= 1 test reference per
+  PUBLIC symbol so this cannot regress.
+
+#### P1 -- examples (the consumer's first contact)
+
+- **19.27.16  05_rexis, the README "flagship", is in neither make check
+  nor CI.**  SOURCE-VERIFIED: 0 references in dist/Makefile.in and
+  ci.yml.  Its budget tests (test/m99/test_rexis_budgets.c: memory / key
+  / connection / iops / cores, forking the real server) sit behind a
+  standalone Makefile nothing invokes.  README:159-161's "stays inside
+  hard caps under load" is backed by a test nobody runs -- and that
+  test's iops assert (:344, success_count >= 100) passes whether or not
+  the limiter works.  TASK: wire test/m99 into check-examples and the CI
+  examples job; make the iops assert bite (observed rate <= limit *
+  slack); assert the memory cap by measuring, not by exit code.
+
+- **19.27.17  Missing examples.**  No single-file TCP echo server on
+  xtc_net + xtc_proc_wait_fd (the most common first real program -- 08 is
+  the Isolate layer, 09 is three files); no TLS client/server pair; no
+  graceful-drain-on-SIGTERM (blocked on 19.27.10).  TASK: add all three
+  as gated snippets under docs/_includes/snippets/ so they are release
+  gates, not decoration.
+
+- **19.27.18  Teaching-quality defects in the gated examples.**
+  SOURCE-VERIFIED: 01_hello_async.c has zero teardown (no
+  xtc_loop_fini) -- the first file a newcomer copies teaches "never
+  destroy the loop".  03:115 xtc_scope_close and :203
+  xtc_loop_set_stall_budget rc unchecked.  04:239-268 `(void)xtc_lock_get`
+  on the FIRST lock of both txns -- if it fails the "deadlock" demo
+  silently runs a fake scenario; :306 pthread_create rc unchecked.
+  08_tnt/echo.c parses argv with bare atoi (:232-237): `tnt_echo --help`
+  becomes port 7777 and BLOCKS FOREVER (REPRODUCED -- it stalled this
+  review for 50 minutes); every other server example has getopt+usage.
+  TASK: fix each; add a lint to check-examples that every example binary
+  exits 0 on --help within 2s.
+
+#### P2 -- test-strategy hygiene
+
+- **19.27.19  Allocation-failure paths are essentially untested.**
+  REPRODUCED: 15 XTC_INJECT sites in all of src/ (io_common 8, proc 2,
+  lock_lr 2, svr 2, lock_lw 1), ZERO in src/os/os_alloc.c, ZERO tests
+  install a failing allocator hook -- against 238 __os_*alloc calls.
+  Error-code asserts are healthy (952 vs 1752 XTC_OK asserts), so the
+  hole is specifically OOM, not error paths generally.  TASK: an
+  OOM-injecting allocator hook in one munit fixture that fails the Nth
+  allocation, swept over every create/destroy pair; every leak or crash
+  it finds is a real bug (the API-discipline rule already guarantees
+  the rc is checked, so this tests the CLEANUP after the check).
+
+- **19.27.20  No soak test asserts a memory bound.**  REPRODUCED: 5 test
+  files touch RSS/rusage, ZERO assert an RSS ceiling under sustained
+  spawn/exit churn.  Given the documented fiber retention (19.26), the
+  one test that would catch a memory-growth regression does not exist.
+  TASK: the soak described in 19.26 -- N generations on ONE long-lived
+  loop, RSS must plateau -- as a nightly job first (it will FAIL today,
+  by design), promoted to gating when 19.26 lands.
+
+- **19.27.21  Vacuous-pass surface is uninventoried.**  REPRODUCED: 47
+  `return MUNIT_SKIP` + 27 shell `exit 77` + 50 hardcoded sleep()s in
+  test/.  Hot spots: test_proc.c (9 skips), test_tls_server.c (9 -- see
+  19.27.7), test_accel.c (4), test_xproc.c (4).  Not every skip is
+  wrong; none is inventoried, so a suite that passes vacuously on a
+  platform is indistinguishable from one that passes.  TASK: make `make
+  check` print a per-suite SKIP count and the reason string at the end
+  (the PBT tier already does this loudly -- copy it), and turn each
+  timing sleep into an event wait or a bounded retry.
+
+- **19.27.22  Shipped sim tests hardcode a host path.**  SOURCE-VERIFIED:
+  /scratch/xtc-test in test/sim/test_sim_aiov.c:118,
+  test_sim_buggify4.c:210, run_sim_tests.sh:28.  TASK: honor TMPDIR like
+  the swarm now does; a hardcoded first-choice path is a portability
+  smell in a suite that claims determinism "on any machine".
+
+- **19.27.23  Quack JSON integers saturate silently.**  REPRODUCED
+  (/tmp/secaudit/q1): a 23-digit "limit" parses to LLONG_MAX-ish via
+  strtoll with no ERANGE check (quack.c:480).  The token IS bounds-copied
+  (no overread -- the fuzzer is clean), so this is semantic: an absurd
+  LIMIT is accepted rather than rejected.  TASK: check errno==ERANGE and
+  reject.  Example-only, low risk, listed for completeness.
+
+#### What was checked and found CORRECT (so the list above is not read as "everything is broken")
+
+- All 238 __os_*alloc sites check rc; 0 discard it.  ASCII-only rule
+  holds across src/ man/ docs/ examples/.
+- Allocator edge cases (malloc(0)/calloc(0,0)/realloc(NULL,0) non-NULL;
+  calloc overflow, aligned_alloc(3,8) and (64,SIZE_MAX) -> NULL) all per
+  doc.  strlcpy/strlcat truncation correct.  res acquire k=-1/COUNT/
+  n=-1 -> INVAL, over-cap -> RESOURCE, release underflow clamps.  slab:
+  obj_size 0 rejected, over- and underrun both detected, bad offsets ->
+  NULL.  mctx overflow -> NULL.
+- xtc_proc_wait_fd: fd=-1 / out=NULL / interest=0 -> INVAL; timeout 0
+  and 5ms -> AGAIN+TIMEOUT; readable -> OK+READABLE; second waiter on the
+  same fd -> INVAL as documented.  recv: empty+timeout0 -> AGAIN with
+  *out=NULL; 0-size send/recv round-trips.  exit_pid_deadline: self/NONE
+  -> INVAL; parked victim -> DELIVERED; masked victim -> DEFERRED with
+  mask_depth/mask_deferred visible; paired mask nesting 2->1 leaves the
+  proc alive, outer leave unwinds.  cfg session binding IS per-fiber.
+- The FROZEN lock layer's binary layout is IDENTICAL to v1.0.0
+  (xtc_lockmgr_opts_t 56, _stat_t 48, xtc_lock_req_t 32, xtc_lwlock_t
+  128, mode values unchanged) -- the struct-growth break of 18.1 does
+  not touch it.
+- Parsers: 05_rexis RESP (2,000,000 inputs), 06_sqlxtc Quack JSON, and
+  src/ptc/cfg.c all fuzz clean under ASan+UBSan.
+- Signal-context code: the SIGSEGV/SIGBUS fault handler (proc.c
+  ~2913-2960) calls only sysconf, address compares, siglongjmp or
+  sigaction+raise -- no malloc/stdio/locks; stack-overflow (fault in the
+  guard page) and fault-inside-crit_depth are correctly NOT contained.
+  The SIGVTALRM preempt handler does relaxed atomics + three guard reads
+  + a ucontext rewrite -- nothing unsafe.  The __xtc_unsafe_enter/leave
+  bracket around allocator/mutex calls is what makes involuntary
+  preemption safe, and the API-discipline gate protects it.
+- osproc exec path closes inherited fds at the exec boundary and resets
+  the signal mask in the child.  Fault handler and preempt handler are
+  async-signal-safe.
+- Public API test reach: 632 PUBLIC fns, 6 with zero references (19.27.15).
+  Per-module: xtc_tls 24/24, bdev 8/8, osproc 10/10, xproc 9/10.  (The
+  "basename never appears in test/" heuristic that flags tls_*.c and
+  io_kqueue.c as untested is WRONG -- they are tested through the public
+  API.  Do not cite it.)
+- Toothless-assert scan: 0 unsigned `>= 0` asserts, 0 self-compares, 0
+  files whose only asserts are ==XTC_OK.  The real toothlessness is
+  semantic (19.27.16's iops assert; the swarm oracles fixed 2026-09-22).
+
+#### Review-method notes worth keeping
+
+- Four of five audit subagents died before reporting (connection errors
+  at ~100 tool calls; one to a content filter on the security write-up).
+  Their EVIDENCE survived in tool results and probe binaries, and every
+  finding above that came from one was re-run by hand.  Lesson applied
+  on the re-launches: append each finding to a file the moment it is
+  established; never save the report for the end.
+- A "frozen ABI unchanged" check briefly printed IDENTICAL because both
+  probes had FAILED TO COMPILE and two empty files were diffed.  Check
+  the compile rc before diffing outputs.
+- An example with no --help handler (08_tnt) hung an audit for 50
+  minutes.  19.27.18's --help lint exists because of it.
+
 ## 20. PostgreSQL multithreading roadmap -> xtc primitive map
 
 This is the single most important section of the document for the
@@ -3767,12 +4102,18 @@ enforced by the API-discipline merge gate, deterministic simulation as
 the correctness spine, and broad per-commit CI across the Tier-1
 platforms.
 
-Two standing caveats a reader should carry away from this plan, both
-from a 2026-09 external review and both tracked above rather than
-buried: the 1.x ABI promise in (S)18.1 is NOT mechanically enforced and
-is already broken by struct growth, and completed fibers are retained
-until loop teardown ((S)19.26), which is in tension with the bounded-RSS
-goal in (S)0.  Neither is fixed by 1.49.2; both are documented in
-docs/KNOWN_ISSUES.md with their consequences and workarounds.  The checklist is retired; the plan above is kept for the
+Three things a reader should carry away from this plan, all from
+2026-09 reviews and all tracked above rather than buried: the 1.x ABI
+promise in (S)18.1 is NOT mechanically enforced and is already broken by
+struct growth (the frozen lock layer is the exception -- it IS
+byte-identical to v1.0.0); completed fibers are retained until loop
+teardown ((S)19.26), in tension with the bounded-RSS goal in (S)0; and
+(S)19.27 is the production-readiness gap list -- 23 tasks, 9 of them P0,
+including a use-after-free in xtc_xproc_destroy, a non-atomic
+xtc_lock_vec on the frozen lock ABI, supervisor restarts that overlap
+their predecessors' cleanup, and TLS hostname verification that is a
+no-op on two of five backends.  The library is NOT production grade until
+the P0 list is empty; "1.0" in the README describes API stability, not
+that.  None of this is fixed by 1.49.5.  The checklist is retired; the plan above is kept for the
 architecture rationale and worked examples, and ongoing work is tracked
 in the release history and (S)19.
