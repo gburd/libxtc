@@ -58,12 +58,19 @@ __grow(xtc_io_t *io)
 	return XTC_OK;
 }
 
+void __xtc_io_backend_fini(xtc_io_t *io);
+
 int
 __xtc_io_backend_init(xtc_io_t *io)
 {
+	int rc;
 	io->fds = NULL; io->interests = NULL; io->tags = NULL;
 	io->n = 0; io->cap = 0;
-	return __grow(io);
+	/* Release a partially grown set: xtc_io_init does not call
+	 * backend_fini when init fails (see io_poll.c). */
+	if ((rc = __grow(io)) != XTC_OK)
+		__xtc_io_backend_fini(io);
+	return rc;
 }
 
 void
