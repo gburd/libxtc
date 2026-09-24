@@ -46,8 +46,43 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+/*
+ * Per-process certificate paths.  They were fixed "/tmp/xtc-tls3-*.pem"
+ * names, so two m18 runs at once (a parallel make check, CI matrix jobs on
+ * one runner, or the several TLS backends qualified side by side) rewrote
+ * each other's certificates mid-test: a handshake then failed against a
+ * key that no longer matched (seen as rc -6 / -1 on 3 backends run
+ * concurrently; each passed alone).  $TMPDIR is honored, and the pid
+ * keeps concurrent runs apart.
+ */
+static char TEST_CERT_PATH_BUF[256];
+#define TEST_CERT_PATH ((const char *)TEST_CERT_PATH_BUF)
+static char TEST_KEY_PATH_BUF[256];
+#define TEST_KEY_PATH ((const char *)TEST_KEY_PATH_BUF)
+static char WRONG_CA_PATH_BUF[256];
+#define WRONG_CA_PATH ((const char *)WRONG_CA_PATH_BUF)
+static char NAME_CERT_PATH_BUF[256];
+#define NAME_CERT_PATH ((const char *)NAME_CERT_PATH_BUF)
+static char NAME_KEY_PATH_BUF[256];
+#define NAME_KEY_PATH ((const char *)NAME_KEY_PATH_BUF)
+
+static void
+__m18_paths_init(void)
+{
+	const char *td = getenv("TMPDIR");
+	long pid = (long)getpid();
+	if (td == NULL || td[0] == '\0')
+		td = "/tmp";
+	(void)snprintf(TEST_CERT_PATH_BUF, sizeof TEST_CERT_PATH_BUF, "%s/xtc-tls3-%ld-test-cert.pem", td, pid);
+	(void)snprintf(TEST_KEY_PATH_BUF, sizeof TEST_KEY_PATH_BUF, "%s/xtc-tls3-%ld-test-key.pem", td, pid);
+	(void)snprintf(WRONG_CA_PATH_BUF, sizeof WRONG_CA_PATH_BUF, "%s/xtc-tls3-%ld-wrong-ca.pem", td, pid);
+	(void)snprintf(NAME_CERT_PATH_BUF, sizeof NAME_CERT_PATH_BUF, "%s/xtc-tls3-%ld-name-cert.pem", td, pid);
+	(void)snprintf(NAME_KEY_PATH_BUF, sizeof NAME_KEY_PATH_BUF, "%s/xtc-tls3-%ld-name-key.pem", td, pid);
+}
 
 /* -------------------------------------------------------------------------
  * Runtime certificate generation.
@@ -59,12 +94,7 @@
  * used to trigger a peer-verification failure.
  * ----------------------------------------------------------------------- */
 
-#define TEST_CERT_PATH   "/tmp/xtc-tls3-test-cert.pem"
-#define TEST_KEY_PATH    "/tmp/xtc-tls3-test-key.pem"
-#define WRONG_CA_PATH    "/tmp/xtc-tls3-wrong-ca.pem"
 /* Server cert issued for NAME_CERT (CN and SAN), for the name check. */
-#define NAME_CERT_PATH   "/tmp/xtc-tls3-name-cert.pem"
-#define NAME_KEY_PATH    "/tmp/xtc-tls3-name-key.pem"
 #define NAME_CERT        "a.example"
 #define NAME_OTHER       "b.example"
 
@@ -775,5 +805,6 @@ static const MunitSuite suite = {
 int
 main(int argc, char *argv[])
 {
+    __m18_paths_init();
     return munit_suite_main(&suite, NULL, argc, argv);
 }
