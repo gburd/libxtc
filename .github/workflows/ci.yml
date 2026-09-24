@@ -309,6 +309,58 @@ jobs:
             CBMC_TIMEOUT=1800 sh test/cbmc/run.sh
           '
 
+  soak-mem-nightly:
+    # Memory-BOUND soak (PLAN 19.27.20): N generations of short-lived
+    # work on ONE long-lived loop; heap and address space must plateau.
+    # NON-GATING (continue-on-error) because it is RED BY DESIGN today:
+    # completed coro-backed procs keep their fiber stack + coro until
+    # xtc_loop_fini (PLAN 19.26) and each park timer stays on the loop's
+    # all_timers until fini.  Its job is to print the bytes retained per
+    # generation every night so the regression -- or the fix -- is
+    # visible.  The `plain` mode is the instrument's control and must
+    # stay OK.  Promote to gating (drop continue-on-error, add to make
+    # check) when 19.26 lands.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf pkg-config libssl-dev
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Build
+        run: |
+          mkdir -p build_soak
+          cd build_soak
+          ../dist/configure --with-tls=none
+          make -j"$(nproc)" soak_mem_bound
+      - name: Memory-bound soak (plain = control, tasks, procs)
+        working-directory: build_soak
+        run: |
+          rc=0
+          for m in plain tasks procs; do
+            ./soak_mem_bound "$m" | tee "soak-$m.log" || rc=1
+          done
+          {
+            echo "## Memory-bound soak (non-gating, PLAN 19.27.20)"
+            echo '```'
+            grep -hE 'RESULT|heap|VmSize|VmRSS|OK:|FAIL:' soak-*.log \
+              | grep -v '^  gen'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if ! grep -q '^OK:' soak-plain.log; then
+            echo "::error title=soak control failed::the plain-task control did not plateau -- the instrument or a new leak, not 19.26"
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning title=memory not bounded (expected until PLAN 19.26)::see the job summary for bytes retained per generation"
+          fi
+          exit $rc
+
   sim-swarm-nightly:
     # Large-scale DST swarm/soak: 4 disjoint shards x 25k = 100k seeds
     # over the combined fault set (partition + latency + buggify +
