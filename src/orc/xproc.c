@@ -244,9 +244,14 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	struct child_root_ctx rctx;
 	struct child_pump_ctx pctx;
 	int exit_code = 0;
+	int rc;
 
 	if (root_fn == NULL) return 2;
-	if (xtc_loop_init(&loop) != XTC_OK) return 3;
+	/* Report WHY the child runtime could not start: exit 240 - XTC_E_*
+	 * (241..249 for the codes in use), not a bare 3, so the parent's DOWN
+	 * names the failure (io_uring ring setup, fds, memory). */
+	if ((rc = xtc_loop_init(&loop)) != XTC_OK)
+		return (rc < 0 && rc > -10) ? 240 - rc : 3;
 
 	/* The control fd must be non-blocking so recv_frame parks the pump
 	 * fiber instead of blocking the child's loop thread. */
@@ -1167,9 +1172,14 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	xtc_pid_t root;
 	HANDLE reader = NULL;
 	int exit_code = 0;
+	int rc;
 
 	if (root_fn == NULL) return 2;
-	if (xtc_loop_init(&loop) != XTC_OK) return 3;
+	/* Report WHY the child runtime could not start: exit 240 - XTC_E_*
+	 * (241..249 for the codes in use), not a bare 3, so the parent's DOWN
+	 * names the failure (io_uring ring setup, fds, memory). */
+	if ((rc = xtc_loop_init(&loop)) != XTC_OK)
+		return (rc < 0 && rc > -10) ? 240 - rc : 3;
 
 	rctx.root_fn = root_fn;
 	rctx.arg = arg;
