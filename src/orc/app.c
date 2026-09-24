@@ -79,8 +79,9 @@ xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 	if (opts == NULL) opts = &defaults;
 	if ((rc = __os_calloc(1, sizeof *a, (void **)&a)) != XTC_OK) return rc;
 
-	if (opts->name != NULL)
-		(void)__os_strdup(opts->name, &a->name);
+	if (opts->name != NULL &&
+	    (rc = __os_strdup(opts->name, &a->name)) != XTC_OK)
+		goto fail;
 
 	if (opts->loop != NULL) {
 		a->loop = opts->loop;

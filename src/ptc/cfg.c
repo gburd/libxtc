@@ -150,9 +150,18 @@ xtc_cfg_register(const xtc_cfg_spec_t *spec)
 	if ((rc = __os_strdup(spec->name, &v->name)) != XTC_OK) {
 		__os_free(v); return rc;
 	}
-	if (spec->short_desc != NULL)
-		(void)__os_strdup(spec->short_desc, &v->desc);
+	/* kind first: __cfg_var_free reads it to decide whether to free a
+	 * string value, and must be safe on this partly-built var. */
 	v->kind = spec->kind;
+	/* Both copies are checked.  Before 1.50 a failed copy was ignored:
+	 * register returned XTC_OK and the knob silently lost its
+	 * description, or -- for a STRING -- its default (get_string then
+	 * returned NULL).  Found by the OOM-injection sweep. */
+	if (spec->short_desc != NULL &&
+	    (rc = __os_strdup(spec->short_desc, &v->desc)) != XTC_OK) {
+		__cfg_var_free(v);
+		return rc;
+	}
 	v->min_int = spec->min_int;
 	v->max_int = spec->max_int;
 	v->min_double = spec->min_double;
@@ -168,8 +177,12 @@ xtc_cfg_register(const xtc_cfg_spec_t *spec)
 	case XTC_CFG_INT64:  v->cur.v_int64  = spec->dflt.d_int64;  break;
 	case XTC_CFG_DOUBLE: v->cur.v_double = spec->dflt.d_double; break;
 	case XTC_CFG_STRING:
-		if (spec->dflt.d_string)
-			(void)__os_strdup(spec->dflt.d_string, &v->cur.v_string);
+		if (spec->dflt.d_string != NULL &&
+		    (rc = __os_strdup(spec->dflt.d_string,
+		    &v->cur.v_string)) != XTC_OK) {
+			__cfg_var_free(v);
+			return rc;
+		}
 		break;
 	case XTC_CFG_ENUM:   v->cur.v_enum   = spec->dflt.d_enum;   break;
 	}
@@ -599,11 +612,12 @@ int
 xtc_cfg_reload(void)
 {
 	char *path = NULL;
-	int rc;
+	int rc = XTC_E_INVAL;          /* no file has been loaded */
 	(void)__xtc_mtx_lock(&__cfg_lock);
-	if (__cfg_file != NULL) (void)__os_strdup(__cfg_file, &path);
+	if (__cfg_file != NULL)        /* a failed copy is NOMEM, not INVAL */
+		rc = __os_strdup(__cfg_file, &path);
 	(void)__xtc_mtx_unlock(&__cfg_lock);
-	if (path == NULL) return XTC_E_INVAL;
+	if (rc != XTC_OK) return rc;
 	rc = xtc_cfg_load_file(path);
 	__os_free(path);
 	return rc;

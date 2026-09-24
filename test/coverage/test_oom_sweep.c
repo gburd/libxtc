@@ -755,31 +755,30 @@ test_slab(const MunitParameter p[], void *d)
 }
 
 #define T(name, fn) { name, fn, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
-/* KNOWN BUG, reported, not yet fixed: munit TODO passes while the case
- * FAILS and errors ("marked TODO, but was successful") the moment the fix
- * lands -- so whoever fixes it must drop the mark, and the make check
- * SKIP SUMMARY lists every TODO case as not-passing. */
-#define TODO(name, fn) { name, fn, NULL, NULL, MUNIT_TEST_OPTION_TODO, NULL }
+/* A KNOWN, reported bug can be listed as
+ *   { name, fn, NULL, NULL, MUNIT_TEST_OPTION_TODO, NULL }
+ * munit TODO passes while the case FAILS and errors ("marked TODO, but was
+ * successful") once the fix lands, so the fixer must drop the mark; the
+ * make check SKIP SUMMARY lists TODO cases as not-passing.  None today. */
 static MunitTest tests[] = {
 	T("/loop_init_fini",   test_loop_init),
 	T("/proc_spawn",       test_proc_spawn),
 	T("/send_recv_small",  test_mbox_small),
 	T("/send_recv_large",  test_mbox_large),
 	T("/timer_set",        test_timer_set),
-	/* OOM-1: xtc_cfg_register voids the default-string strdup rc, so
-	 * it returns XTC_OK with a NULL value (src/ptc/cfg.c). */
-	TODO("/cfg_register",  test_cfg_register),
+	/* OOM-1 (fixed in 1.50): xtc_cfg_register voided the default-string
+	 * strdup rc and returned XTC_OK with a NULL value. */
+	T("/cfg_register",     test_cfg_register),
 	T("/cfg_set_string",   test_cfg_set),
 	T("/cfg_session_set",  test_cfg_session),
 	T("/reg",              test_reg),
 	T("/exec_init_fini",   test_exec_init),
 	T("/proc_sleep",       test_proc_sleep),
-	/* OOM-2/3/4: spawn_link / spawn_monitor return XTC_OK with no
-	 * link / monitor when an entry alloc fails, and spawn_monitor leaks
-	 * the child-side entry when the coro alloc fails (src/ptc/proc.c
-	 * __proc_spawn_core). */
-	TODO("/spawn_monitor", test_spawn_monitor),
-	TODO("/spawn_link",    test_spawn_link),
+	/* OOM-2/3/4 (fixed in 1.50): spawn_link / spawn_monitor returned
+	 * XTC_OK with no link / monitor when an entry alloc failed, and
+	 * leaked the child-side entry when the coro alloc failed. */
+	T("/spawn_monitor",    test_spawn_monitor),
+	T("/spawn_link",       test_spawn_link),
 	T("/mctx",             test_mctx),
 	T("/slab",             test_slab),
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

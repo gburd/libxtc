@@ -395,7 +395,12 @@ xtc_lrlock_create_ex(const xtc_lrlock_opts_t *opts, xtc_lrlock_t **out)
 	    ? opts->oplog_capacity : XTC_LRLOCK_OPLOG_INITIAL;
 
 	if ((rc = __os_calloc(1, sizeof *lr, (void **)&lr)) != XTC_OK) return rc;
-	if (opts->name != NULL) (void)__os_strdup(opts->name, &lr->name);
+	/* Before writer_mutex is initialised, so not `goto fail`. */
+	if (opts->name != NULL &&
+	    (rc = __os_strdup(opts->name, &lr->name)) != XTC_OK) {
+		__os_free(lr);
+		return rc;
+	}
 	lr->data_size      = opts->data_size;
 	lr->apply_fn       = opts->apply_fn;
 	lr->sync_fn        = opts->sync_fn;

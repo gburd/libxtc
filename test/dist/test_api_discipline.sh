@@ -10,7 +10,9 @@
 #    wrappers add the alloc hook (embedder accounting), preemption-safety
 #    brackets, and portability.  Raw calls bypass all three.
 #
-#  RULE 2 (no ignored __os_ alloc rc): never "(void)__os_malloc(...)" etc.;
+#  RULE 2 (no ignored __os_ alloc rc): never "(void)__os_malloc(...)",
+#    _calloc, _realloc, _strdup or _aligned_alloc (a voided strdup once
+#    made xtc_cfg_register return XTC_OK for a knob with no default);
 #    always check "!= XTC_OK".  And do NOT double-check the return AND the
 #    pointer == NULL -- __os_malloc/_calloc/_realloc guarantee a non-NULL
 #    pointer on XTC_OK (an invariant), so the NULL check is dead code.
@@ -103,7 +105,7 @@ done
 
 # ---- RULE 2: ignored / double-checked __os_ alloc returns -----------------
 voided=$(printf '%s\n' "$lib_c" | while IFS= read -r f; do
-	grep -nE '\(void\)[[:space:]]*__os_(malloc|calloc|realloc)\b' "$f" 2>/dev/null \
+	grep -nE '\(void\)[[:space:]]*__os_(malloc|calloc|realloc|strdup|aligned_alloc)\b' "$f" 2>/dev/null \
 	| sed "s#^#$f:#"
 done)
 if [ -n "$voided" ]; then

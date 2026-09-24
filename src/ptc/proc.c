@@ -1249,6 +1249,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	uint16_t local;
 	uint32_t gen;
 	int rc;
+	int pinned;
 
 	if (XTC_UNLIKELY(loop == NULL || fn == NULL)) return XTC_E_INVAL;
 	/* link/monitor require a calling process to be the other end. */
@@ -1311,42 +1312,54 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	 * here means that even if the child runs and exits the instant it
 	 * is enqueued, its __notify_links_and_monitors already sees the
 	 * link/monitor and delivers the EXIT/DOWN -- no XTC_DOWN_NOPROC
-	 * race, unlike spawn-then-link.  Best-effort on the entry allocs:
-	 * a NULL alloc degrades to a one-sided or missing relationship
-	 * (same failure mode as xtc_link), never a crash.
+	 * race, unlike spawn-then-link.
+	 *
+	 * All-or-nothing on the entry allocs: if either side's entry cannot
+	 * be allocated the SPAWN fails with XTC_E_NOMEM and nothing ran.
+	 * Before 1.50 this was "best-effort": a NULL alloc left a missing or
+	 * one-sided relationship and still returned XTC_OK -- so
+	 * xtc_proc_spawn_link could hand back an unlinked child whose death
+	 * never reached the parent, the unsupervised child the call exists
+	 * to rule out (found by the OOM-injection sweep; xtc_link itself
+	 * already returned NOMEM for the same failure).
 	 */
 	if (rel == 1) {   /* link: symmetric on both link lists */
 		struct link_entry *lc = __link_alloc();  /* on child */
 		struct link_entry *lp = __link_alloc();  /* on parent */
-		if (lc != NULL) {
-			lc->peer = self->pid;
-			lc->next = p->links;
-			p->links = lc;
+		if (lc == NULL || lp == NULL) {
+			if (lc != NULL) __link_free(lc);
+			if (lp != NULL) __link_free(lp);
+			rc = XTC_E_NOMEM;
+			goto undo_slot;
 		}
-		if (lp != NULL) {
-			lp->peer = spawned_pid;
-			lp->next = self->links;
-			self->links = lp;
-		}
+		lc->peer = self->pid;
+		lc->next = p->links;
+		p->links = lc;
+		lp->peer = spawned_pid;
+		lp->next = self->links;
+		self->links = lp;
 	} else if (rel == 2) {   /* monitor: DOWN flows child -> parent */
-		uint64_t ref = atomic_fetch_add_explicit(&__mon_ref_seq, 1,
-		    memory_order_relaxed) + 1;
+		uint64_t ref;
 		struct mon_entry *mw = __mon_alloc();  /* on watcher (parent) */
 		struct mon_entry *mt = __mon_alloc();  /* on target (child) */
-		if (mw != NULL) {
-			mw->ref = ref;
-			mw->target = spawned_pid;
-			mw->watcher = self->pid;
-			mw->next = self->monitors;
-			self->monitors = mw;
+		if (mw == NULL || mt == NULL) {
+			if (mw != NULL) __mon_free(mw);
+			if (mt != NULL) __mon_free(mt);
+			rc = XTC_E_NOMEM;
+			goto undo_slot;
 		}
-		if (mt != NULL) {
-			mt->ref = ref;
-			mt->target = spawned_pid;
-			mt->watcher = self->pid;
-			mt->next = p->monitored_by;
-			p->monitored_by = mt;
-		}
+		ref = atomic_fetch_add_explicit(&__mon_ref_seq, 1,
+		    memory_order_relaxed) + 1;
+		mw->ref = ref;
+		mw->target = spawned_pid;
+		mw->watcher = self->pid;
+		mw->next = self->monitors;
+		self->monitors = mw;
+		mt->ref = ref;
+		mt->target = spawned_pid;
+		mt->watcher = self->pid;
+		mt->next = p->monitored_by;
+		p->monitored_by = mt;
 		if (out_ref) *out_ref = ref;
 	}
 
@@ -1361,11 +1374,13 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	 * cross-loop-steal DST test).  Default (opts == NULL or
 	 * migratable == 0) stays pinned -- byte-identical to prior
 	 * behavior. */
-	int pinned = (opts != NULL && opts->migratable) ? 0 : 1;
+	pinned = (opts != NULL && opts->migratable) ? 0 : 1;
 	if ((rc = __xtc_async_ex(loop, __proc_entry, p, pinned, &t)) != XTC_OK) {
-		/* Undo the parent-side link/monitor we added above; the
-		 * child-side entries die with p.  Remove by the child pid
-		 * (spawned_pid) which never got to run. */
+		/* Undo the parent-side link/monitor we added above (removed
+		 * by the child pid, which never got to run), then the
+		 * child-side entries on p.  Before 1.50 the comment here said
+		 * "the child-side entries die with p", but __os_free(p) does
+		 * not free p's lists: each failed spawn leaked one entry. */
 		if (rel == 1) {
 			struct link_entry **pp = &self->links;
 			while (*pp != NULL) {
@@ -1385,16 +1400,30 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 				pp = &(*pp)->next;
 			}
 		}
-		__table_release(tbl, local);
-		(void)pthread_mutex_destroy(&p->mbox_lock);
-		__os_free(p);
-		return rc;
+		while (p->links != NULL) {
+			struct link_entry *e = p->links;
+			p->links = e->next;
+			__link_free(e);
+		}
+		while (p->monitored_by != NULL) {
+			struct mon_entry *e = p->monitored_by;
+			p->monitored_by = e->next;
+			__mon_free(e);
+		}
+		goto undo_slot;
 	}
 	(void)t;   /* p->task / p->coro are set by __proc_entry, not here */
 
 	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SPAWN, spawned_pid, 0);
 	if (out_pid) *out_pid = spawned_pid;
 	return XTC_OK;
+
+undo_slot:
+	/* p was never made runnable: release its slot and free it. */
+	__table_release(tbl, local);
+	(void)pthread_mutex_destroy(&p->mbox_lock);
+	__os_free(p);
+	return rc;
 }
 
 /* PUBLIC: int xtc_proc_spawn_link __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *)); */
