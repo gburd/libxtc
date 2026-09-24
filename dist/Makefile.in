@@ -376,6 +376,7 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_include_inline_comment.sh \
 	$(abs_top_srcdir)/../test/dist/test_shellcheck.sh \
 	$(abs_top_srcdir)/../test/dist/test_api_discipline.sh \
+	$(abs_top_srcdir)/../test/dist/test_api_reach.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_perm.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_layer.sh \
@@ -476,6 +477,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_unsafe_depth \
 		  test_coverage_pump \
 		  test_fault_inject \
+		  test_api_reach \
 		  test_otp_proc_lib \
 		  test_otp_gen_server \
 		  test_otp_gen_server_phase2 \
@@ -1767,6 +1769,12 @@ test_fault_inject: $(srcdir)/../test/coverage/test_fault_inject.c \
 		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/coverage \
 		-o $@ $(srcdir)/../test/coverage/test_fault_inject.c \
+		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_api_reach: $(srcdir)/../test/coverage/test_api_reach.c \
+		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/coverage \
+		-o $@ $(srcdir)/../test/coverage/test_api_reach.c \
 		$(srcdir)/../test/coverage/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # OTP-port tests.

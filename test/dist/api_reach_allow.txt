@@ -1,0 +1,8 @@
+# test/dist/api_reach_allow.txt -- exceptions to test/dist/test_api_reach.sh.
+#
+# One line per exported xtc_* function that is deliberately NOT referenced
+# by any test:   <symbol> <reason>
+# The reason is mandatory.  An entry for a symbol that IS referenced by a
+# test fails the gate as stale, so remove the line when a test lands.
+#
+# Empty as of PLAN 19.27.15: every exported function has a test.
