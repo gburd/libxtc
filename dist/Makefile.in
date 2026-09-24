@@ -1127,8 +1127,8 @@ tests-c: $(TESTS_C)
 	@: >check-skips-c.txt; \
 	for t in $(TESTS_C); do \
 		echo "running C test: $$t"; \
-		./$$t >.tests-c.out 2>&1; rc=$$?; \
-		cat .tests-c.out; \
+		{ ./$$t 2>&1; echo "$$?" >.tests-c.rc; } | tee .tests-c.out; \
+		rc=$$(cat .tests-c.rc); \
 		awk -v t=$$t -v rc=$$rc -f $(SKIP_AWK) .tests-c.out \
 		    >>check-skips-c.txt 2>/dev/null || true; \
 		if [ $$rc -eq 77 ]; then echo "  SKIP: $$t (rc=77)"; \
@@ -1139,13 +1139,13 @@ tests-sh: $(STATIC_LIB) tnt_echo
 	@: >check-skips-sh.txt; \
 	for t in $(TESTS_SH); do \
 		echo "running shell test: $$(basename $$t)"; \
-		CC='$(CC)' \
-		XTC_BUILD_DIR=$(abs_builddir) \
-		XTC_SRC_DIR=$(abs_top_srcdir)/.. \
-		XTC_SNIPPET_CFLAGS='$(SNIPPET_SAN_CFLAGS)' \
-		XTC_SNIPPET_LDFLAGS='$(SNIPPET_SAN_LDFLAGS)' \
-		sh $$t >.tests-sh.out 2>&1; rc=$$?; \
-		cat .tests-sh.out; \
+		{ CC='$(CC)' \
+		  XTC_BUILD_DIR=$(abs_builddir) \
+		  XTC_SRC_DIR=$(abs_top_srcdir)/.. \
+		  XTC_SNIPPET_CFLAGS='$(SNIPPET_SAN_CFLAGS)' \
+		  XTC_SNIPPET_LDFLAGS='$(SNIPPET_SAN_LDFLAGS)' \
+		  sh $$t 2>&1; echo "$$?" >.tests-sh.rc; } | tee .tests-sh.out; \
+		rc=$$(cat .tests-sh.rc); \
 		awk -v t=$$(basename $$t) -v rc=$$rc -f $(SKIP_AWK) \
 		    .tests-sh.out >>check-skips-sh.txt 2>/dev/null || true; \
 		[ $$rc -eq 0 ] || exit 1; \
@@ -2114,7 +2114,7 @@ uninstall:
 # -------------------------------------------------------------------------
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
-	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt .tests-c.out .tests-sh.out
+	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt .tests-c.out .tests-sh.out .tests-c.rc .tests-sh.rc
 	$(RM) soak_mem_bound
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 	$(RM) libxtc.exp
