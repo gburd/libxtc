@@ -517,17 +517,40 @@ __sup_entry(void *arg)
 
 	atomic_store_explicit(&sup->alive, 0, memory_order_release);
 
-	/* On exit, kill any still-alive children so the loop can drain. */
+	/*
+	 * On exit, kill any still-alive children, then WAIT (bounded) for
+	 * their cleanup to finish before announcing the stop.  Before 1.50
+	 * the supervisor signalled `stopped` and, as the root of a
+	 * multi-loop app, called xtc_exec_stop immediately after sending the
+	 * kills -- freezing the executor while the children were still in
+	 * their exit hooks, so a graceful shutdown left them half-cleaned
+	 * (reported by the shutdown work, 19.27.10).  The same proc-table
+	 * absence wait the group restarts use (__wait_children_gone,
+	 * XTC_SUP_CLEANUP_WAIT_NS); a child that will not finish in time is
+	 * abandoned, not waited on forever.
+	 */
 	{
 		int k;
+		xtc_pid_t *old = NULL;
+		if (sup->n_children > 0 &&
+		    __os_calloc((size_t)sup->n_children, sizeof *old,
+		    (void **)&old) != XTC_OK)
+			old = NULL;             /* no memory: kill, do not wait */
 		(void)__xtc_mtx_lock(&sup->lock);
 		for (k = 0; k < sup->n_children; k++) {
+			if (old != NULL)
+				old[k] = sup->children[k].alive
+				    ? sup->children[k].pid : XTC_PID_NONE;
 			if (sup->children[k].alive) {
 				(void)xtc_exit_pid(sup->children[k].pid, 1);
 				sup->children[k].alive = 0;
 			}
 		}
 		(void)__xtc_mtx_unlock(&sup->lock);
+		if (old != NULL) {
+			(void)__wait_children_gone(sup, 0, sup->n_children, old);
+			__os_free(old);
+		}
 	}
 
 	(void)xtc_notify_signal(sup->stopped);

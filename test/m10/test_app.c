@@ -505,6 +505,79 @@ test_app_drain_on_sigterm(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- sup exit waits for its children's cleanup (multi-loop) ----
+ *
+ * A multi-loop app: 3 children on loops 1..3, each with an at-exit hook
+ * that takes 50 ms and then records that it finished.  xtc_app_stop ->
+ * the supervisor kills them and exits.  Every hook must have FINISHED by
+ * the time xtc_app_run returns.  Before the fix the supervisor called
+ * xtc_exec_stop right after sending the kills, so the executor stopped
+ * while the hooks were still sleeping: hooks_done < 3 when run returned. */
+static _Atomic int g_ex_started, g_ex_hooks_done;
+static xtc_app_t *g_ex_app;
+
+static void
+ex_slow_hook(void *a)
+{
+	(void)a;
+	(void)xtc_proc_sleep(50LL * 1000 * 1000);
+	atomic_fetch_add(&g_ex_hooks_done, 1);
+}
+
+static void
+ex_child(void *a)
+{
+	void *m = NULL;
+	size_t n;
+	(void)a;
+	(void)xtc_proc_at_exit(ex_slow_hook, NULL);
+	atomic_fetch_add(&g_ex_started, 1);
+	for (;;) {
+		(void)xtc_recv(&m, &n, 100LL * 1000 * 1000);
+		if (m != NULL) { xtc_free(m); m = NULL; }
+	}
+}
+
+static void
+ex_driver(void *a)
+{
+	(void)a;
+	while (atomic_load(&g_ex_started) < 3)
+		(void)xtc_proc_sleep(5LL * 1000 * 1000);
+	(void)xtc_app_stop(g_ex_app);
+}
+
+static MunitResult
+test_app_stop_waits_cleanup_multiloop(const MunitParameter p[], void *d)
+{
+	xtc_app_t *a;
+	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_child_spec_t kids[3];
+	int i;
+	(void)p; (void)d;
+
+	atomic_store(&g_ex_started, 0);
+	atomic_store(&g_ex_hooks_done, 0);
+	opts.name = "test_ex";
+	opts.n_loops = 4;
+	memset(kids, 0, sizeof kids);
+	for (i = 0; i < 3; i++) {
+		kids[i].name   = "ex_child";
+		kids[i].fn     = ex_child;
+		kids[i].loop   = i + 1;
+		kids[i].policy = XTC_RESTART_TEMPORARY;
+	}
+	munit_assert_int(xtc_app_create(&opts, &a), ==, XTC_OK);
+	g_ex_app = a;
+	munit_assert_int(xtc_app_start(a, kids, 3), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(xtc_app_loop(a), ex_driver, NULL, NULL,
+	    NULL), ==, XTC_OK);
+	munit_assert_int(xtc_app_run(a), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_ex_hooks_done), ==, 3);
+	xtc_app_destroy(a);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/app_basic", test_app_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/app_multiloop", test_app_multiloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -514,6 +587,7 @@ static MunitTest tests[] = {
 	{ "/shutdown_multiloop", test_app_shutdown_multiloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shutdown_inval", test_app_shutdown_inval, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/drain_on_sigterm", test_app_drain_on_sigterm, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/stop_waits_cleanup_multiloop", test_app_stop_waits_cleanup_multiloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/app", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
