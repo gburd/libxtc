@@ -392,10 +392,11 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 	if (out != NULL)
 		memcpy((char *)out + sizeof out->size, (char *)&r + sizeof r.size,
 		    sizeof r - sizeof r.size);
-	/* A survivor keeps the loop busy: stop it so xtc_app_run returns.
-	 * With none, the loop/executor ends on its own -- and a borrowed loop
-	 * is not left with a stale, sticky stop request. */
-	if (r.n_survivors > 0)
+	/* Stop the loop/executor so xtc_app_run returns even if a survivor
+	 * or some unsupervised proc keeps it busy.  A BORROWED loop with no
+	 * survivor is left alone: it is the embedder's to stop, and a stop
+	 * landing after its run ended would stick to its next run. */
+	if (r.n_survivors > 0 || a->owns_loop || a->exec != NULL)
 		__app_halt(a);
 	return r.n_survivors == 0 ? XTC_OK : XTC_E_AGAIN;
 }
