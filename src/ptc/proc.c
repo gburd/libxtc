@@ -2158,6 +2158,17 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 	struct envelope *e, **link;
 	int64_t deadline = -1;
 
+	/*
+	 * Act on the RUNNING fiber's proc, not the thread-local, which a
+	 * migration can leave naming another proc (see __proc_reanchor; the
+	 * same wrong-proc class fixed in xtc_proc_wait_fd and xtc_proc_sleep).
+	 * recv was the one left: on FreeBSD it pulled from, armed the waker
+	 * of, and parked under ANOTHER proc's mailbox.  Caught natively on
+	 * FreeBSD 15.1 as a /m5/exec/Blk4 hang (1 in ~28 runs): gdb showed
+	 * two workers running procs 1:1 and 1:18 both inside __do_recv with
+	 * self == proc 1:9, blocked on 1:9's mbox_lock.
+	 */
+	self = __proc_reanchor(self);
 	if (self == NULL) return XTC_E_INVAL;
 	if (out == NULL || out_size == NULL) return XTC_E_INVAL;
 
@@ -2335,9 +2346,13 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 		/*
 		 * On resume we may have run inside another proc's fiber
 		 * (which clobbered __current_proc).  Restore our pointer
-		 * so post-yield code continues to see itself.
+		 * so post-yield code continues to see itself -- and verify
+		 * `self` is still the running fiber's proc (it is, unless the
+		 * entry re-anchor above could not tell; reanchor is a no-op
+		 * then).
 		 */
 		__current_proc = self;
+		self = __proc_reanchor(self);
 
 		/* Re-check kill flag after yielding back. */
 		__xtc_proc_kill_deliver(self);
