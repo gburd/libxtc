@@ -72,12 +72,13 @@ hold under stress:
 | `--cores=N` | CPU cores used | `sched_setaffinity(2)` pins the process; xtc_loops fanned out via xtc_exec |
 | `--max-memory=N` | RSS bytes | Every alloc charged to `xtc_res` with `XTC_RES_MEM_BYTES` cap; OOM error returned to client on exceed |
 | `--max-keys=N` | DB key count | Per-DB counter; SET/HSET/LPUSH refused above cap |
-| `--max-clients=N` | Concurrent connections | Listener checks count before spawning per-conn proc |
-| `--max-iops=N` | Commands/sec | Token bucket refilled every second; excess commands rejected with `OVER_LIMIT` |
+| `--max-clients=N` | Concurrent connections | Listener checks the live count before spawning a per-conn proc; over-limit connections are closed |
+| `--max-iops=N` | Commands/sec | Token bucket refilled every second; excess commands are DELAYED (held in the connection's buffer until tokens return), not rejected |
 
-Verified by `test/m99/test_rexis_budgets.c` (5 scenarios).  RSS stays
-within `--max-memory` plus a small constant overhead even under
-SET-until-OOM stress.
+Verified by MEASUREMENT in `test/m99/test_rexis_budgets.c`: server RSS
+growth while offered 4x the memory cap, the server's CPU affinity mask,
+connections actually served, and the reply rate of a pipelined burst
+(<= 1.5x `--max-iops`).  Run with `make check-rexis` in a build dir.
 
 ## Architecture
 
@@ -146,11 +147,14 @@ In `test/m99/`:
 |---|---|---|
 | `test_resp_parser.c` | 33 | RESP2/RESP3 framing, malformed input |
 | `test_rexis_loopback.c` | 12 | End-to-end command round-trips |
-| `test_rexis_budgets.c` | 5 | All five `--max-*` caps under stress |
-| `test_rexis_pbt.c` | 5 | hegel-c properties (atomicity, idempotence, FIFO) |
+| `test_rexis_budgets.c` | 6 | All five `--max-*` caps, measured; clean SIGTERM |
+| `test_rexis_pbt.c` | 5 | properties (atomicity, idempotence, FIFO) |
 
-Run via `cd test/m99 && make check`.  Loopback and budget tests
-spawn a real `rexis-server-xtc` binary.
+Run via `make check-rexis` in a libxtc build dir (CI runs it in the
+examples job).  Loopback, budget and PBT tests spawn a real
+`rexis-server-xtc` on a kernel-chosen free port (see
+`test/m99/rexis_harness.h`); every test also requires the server to exit
+0 on SIGTERM.
 
 ## Bench
 
