@@ -407,7 +407,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_thread test_tls test_mutex test_fs \
 		  test_dio \
 		  test_pkey \
-		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_io_common_edge test_net test_net_udp test_net_frame \
+		  test_io_lifecycle test_io_register test_io_events test_io_wakeup test_io_fault_inject test_io_common_edge test_net test_net_udp test_net_frame test_net_sigpipe \
 		  test_bdev \
 		  test_loop test_task test_waker test_timer test_io_integration \
 		  test_async \
@@ -1261,6 +1261,11 @@ test_net_frame: $(srcdir)/../test/m2/test_net_frame.c \
 		-o $@ $(srcdir)/../test/m2/test_net_frame.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_net_sigpipe: $(srcdir)/../test/m2/test_net_sigpipe.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
+		-o $@ $(srcdir)/../test/m2/test_net_sigpipe.c \
+		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_net_udp: $(srcdir)/../test/m2/test_net_udp.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)

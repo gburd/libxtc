@@ -31,7 +31,7 @@ munit_tests = [
   ['thread', 'm1'], ['tls', 'm1'], ['mutex', 'm1'],
   # M2
   ['bdev', 'm2'], ['io_lifecycle', 'm2'], ['io_fault_inject', 'm2'], ['io_common_edge', 'm2'],
-  ['net', 'm2'], ['net_frame', 'm2'], ['net_udp', 'm2'],
+  ['net', 'm2'], ['net_frame', 'm2'], ['net_udp', 'm2'], ['net_sigpipe', 'm2'],
   # M3
   ['loop', 'm3'], ['task', 'm3'], ['waker', 'm3'], ['timer', 'm3'],
   # M4

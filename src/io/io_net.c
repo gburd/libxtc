@@ -78,6 +78,35 @@ __net_io_chunk(size_t remaining)
 #  define SO_REUSEPORT 0
 #endif
 
+/*
+ * SIGPIPE: a send on a stream socket whose peer has gone raises SIGPIPE,
+ * whose DEFAULT action kills the whole process -- a library must never
+ * do that to its host.  Every send() here passes __NET_NOSIG (Linux,
+ * FreeBSD, NetBSD, OpenBSD: MSG_NOSIGNAL), so a dead peer is EPIPE and
+ * the call's ordinary failure code.  Where MSG_NOSIGNAL does not exist
+ * (macOS), __net_nosigpipe sets SO_NOSIGPIPE on every stream socket
+ * this file creates.  Windows has no SIGPIPE.  A descriptor the caller
+ * made itself (a raw accept(2)) and passes to xtc_net_send_frame is
+ * covered by MSG_NOSIGNAL, but on macOS only if the caller set
+ * SO_NOSIGPIPE on it.
+ */
+#if defined(MSG_NOSIGNAL)
+#  define __NET_NOSIG MSG_NOSIGNAL
+#else
+#  define __NET_NOSIG 0
+#endif
+
+static void
+__net_nosigpipe(int fd)
+{
+#if defined(SO_NOSIGPIPE)
+	int one = 1;
+	(void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#else
+	(void)fd;
+#endif
+}
+
 /* ----- nonblock / cloexec --------------------------------- */
 
 #if defined(_WIN32)
@@ -353,6 +382,7 @@ __net_listen_raw(xtc_net_family_t fam, const char *host, int port,
 	af = (fam == XTC_NET_INET6) ? AF_INET6 : AF_INET;
 	fd = (int)socket(af, SOCK_STREAM, 0);
 	if (fd < 0) return XTC_E_INTERNAL;
+	__net_nosigpipe(fd);
 
 	if ((rc = xtc_net_setnonblock(fd)) != XTC_OK) {
 		(void)close(fd); return rc;
@@ -402,6 +432,7 @@ __net_dial_raw(xtc_net_family_t fam, const char *host, int port,
 	af = (fam == XTC_NET_INET6) ? AF_INET6 : AF_INET;
 	fd = (int)socket(af, SOCK_STREAM, 0);
 	if (fd < 0) return XTC_E_INTERNAL;
+	__net_nosigpipe(fd);
 	if ((rc = xtc_net_setnonblock(fd)) != XTC_OK) {
 		(void)close(fd); return rc;
 	}
@@ -436,6 +467,7 @@ __net_unix_listen_raw(const char *path, int *out_fd)
 
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0) return XTC_E_INTERNAL;
+	__net_nosigpipe(fd);
 	if ((rc = xtc_net_setnonblock(fd)) != XTC_OK) {
 		(void)close(fd); return rc;
 	}
@@ -462,6 +494,7 @@ __net_unix_dial_raw(const char *path, int *out_fd)
 	if (strlen(path) >= sizeof sa.sun_path) return XTC_E_INVAL;
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0) return XTC_E_INTERNAL;
+	__net_nosigpipe(fd);
 	if ((rc = xtc_net_setnonblock(fd)) != XTC_OK) {
 		(void)close(fd); return rc;
 	}
@@ -485,7 +518,7 @@ __net_unix_dial_raw(const char *path, int *out_fd)
 int
 xtc_net_unix_send_creds(int fd, const void *buf, size_t buflen)
 {
-	ssize_t n = send(fd, buf, buflen, 0);
+	ssize_t n = send(fd, buf, buflen, __NET_NOSIG);
 	if (n < 0) return XTC_E_INTERNAL;
 	if ((size_t)n != buflen) return XTC_E_AGAIN;
 	return XTC_OK;
@@ -703,7 +736,8 @@ xtc_net_udp_sendto(int fd, const void *buf, size_t len,
 	snprintf(portbuf, sizeof portbuf, "%d", port);
 	rc = getaddrinfo(host, portbuf, &hints, &res);
 	if (rc != 0 || res == NULL) return XTC_E_INVAL;
-	n = sendto(fd, buf, (int)len, 0, res->ai_addr, (int)res->ai_addrlen);
+	n = sendto(fd, buf, (int)len, __NET_NOSIG, res->ai_addr,
+	    (int)res->ai_addrlen);
 	freeaddrinfo(res);
 	if (n < 0) {
 #if defined(_WIN32)
@@ -913,7 +947,8 @@ xtc_net_send_frame(int fd, const void *buf, size_t len)
 	hdr[0] = (uint8_t)(len >> 24); hdr[1] = (uint8_t)(len >> 16);
 	hdr[2] = (uint8_t)(len >> 8);  hdr[3] = (uint8_t)(len);
 	for (off = 0; off < 4; ) {
-		ssize_t w = send(fd, (const char *)hdr + off, (int)(4 - off), 0);
+		ssize_t w = send(fd, (const char *)hdr + off, (int)(4 - off),
+		    __NET_NOSIG);
 		if (w > 0) { off += (size_t)w; continue; }
 		if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
 			if (__net_wait_fd(fd, XTC_IO_WRITABLE, -1) != 0)
@@ -925,7 +960,7 @@ xtc_net_send_frame(int fd, const void *buf, size_t len)
 	}
 	for (off = 0; off < len; ) {
 		ssize_t w = send(fd, (const char *)p + off,
-		    __net_io_chunk(len - off), 0);
+		    __net_io_chunk(len - off), __NET_NOSIG);
 		if (w > 0) { off += (size_t)w; continue; }
 		if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
 			if (__net_wait_fd(fd, XTC_IO_WRITABLE, -1) != 0)
