@@ -2308,7 +2308,7 @@ test_wait_fd_kill_wake_not_lost(const MunitParameter p[], void *d)
  * io_uring returned XTC_E_AGAIN + XTC_WAIT_TIMEOUT for timeout 0 and
  * XTC_OK + XTC_IO_ERR for a finite or infinite one; epoll returned
  * XTC_E_INTERNAL.  The infinite wait is included on purpose: it must not
- * park.  Control: the still-open write end of the same pipe works. */
+ * park.  Control: the surviving read end of the same pipe (EOF) works. */
 static _Atomic int g_cf_rc[3], g_cf_rev[3], g_cf_ctl_rc, g_cf_ran;
 
 static void
@@ -2319,17 +2319,24 @@ cf_proc(void *arg)
 	uint32_t revents;
 	(void)arg;
 	munit_assert_int(xtc_test_make_pipe(&pipefd[0], &pipefd[1]), ==, 0);
-	munit_assert_int(close(pipefd[0]), ==, 0);
+	/* Close the WRITE end and probe it: a genuinely closed fd.  The
+	 * control below then waits READABLE on the surviving read end, which
+	 * is readable at once (EOF: its writer is gone) on every backend.
+	 * The first cut closed the read end and used "write end WRITABLE" as
+	 * the control -- but a pipe with no reader is not a portable
+	 * writability case: FreeBSD's kqueue refuses EVFILT_WRITE on it
+	 * (EPIPE -> XTC_E_INTERNAL), which failed the CI freebsd job. */
+	munit_assert_int(close(pipefd[1]), ==, 0);
 	for (i = 0; i < 3; i++) {
 		revents = 0;
-		atomic_store(&g_cf_rc[i], xtc_proc_wait_fd(pipefd[0],
+		atomic_store(&g_cf_rc[i], xtc_proc_wait_fd(pipefd[1],
 		    XTC_IO_READABLE, to[i], &revents));
 		atomic_store(&g_cf_rev[i], (int)revents);
 	}
 	revents = 0;
-	atomic_store(&g_cf_ctl_rc, xtc_proc_wait_fd(pipefd[1],
-	    XTC_IO_WRITABLE, 1000LL * 1000 * 1000, &revents));
-	(void)close(pipefd[1]);
+	atomic_store(&g_cf_ctl_rc, xtc_proc_wait_fd(pipefd[0],
+	    XTC_IO_READABLE, 1000LL * 1000 * 1000, &revents));
+	(void)close(pipefd[0]);
 	atomic_store(&g_cf_ran, 1);
 }
 
