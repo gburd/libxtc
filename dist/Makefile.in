@@ -499,7 +499,7 @@ TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt
 # -------------------------------------------------------------------------
 # Default goal.
 # -------------------------------------------------------------------------
-.PHONY: all check check-sim check-dst cbmc check-cbmc check-examples coverage tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation print-includedir print-libdir bench-micro
+.PHONY: all check check-sim check-dst cbmc check-cbmc check-examples check-rexis coverage tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation print-includedir print-libdir bench-micro
 
 all: $(STATIC_LIB) $(SHARED_LIB_TARGETS) compile_commands.json
 
@@ -993,6 +993,70 @@ check-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circui
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../examples/10_circuit_breaker.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# check-rexis: examples/05_rexis (the README flagship) and its test/m99
+# suite -- RESP parser, loopback round-trips, property tests, and the
+# budget tests that MEASURE each --max-* cap on a real forked server
+# (RSS, affinity mask, reply rate).  Before this target nothing built or
+# ran any of it.  Everything is built HERE, in the build dir, from the
+# sources; nothing is written into the source tree.  The servers bind
+# kernel-chosen free loopback ports (test/m99/rexis_harness.h), so
+# parallel runs on a shared host cannot collide.
+#
+# Not a dependency of `make check`: it forks servers and takes ~15 s, and
+# two of its budget checks read /proc (Linux).  CI runs it in the
+# examples job.
+REXIS_DIR  = $(srcdir)/../examples/05_rexis
+M99_DIR    = $(srcdir)/../test/m99
+REXIS_SRCS = $(REXIS_DIR)/main.c $(REXIS_DIR)/proto.c $(REXIS_DIR)/db.c \
+	     $(REXIS_DIR)/cmd.c $(REXIS_DIR)/conn.c $(REXIS_DIR)/expire.c \
+	     $(REXIS_DIR)/metrics.c $(REXIS_DIR)/bitcask.c
+REXIS_HDRS = $(REXIS_DIR)/proto.h $(REXIS_DIR)/db.h $(REXIS_DIR)/cmd.h \
+	     $(REXIS_DIR)/conn.h $(REXIS_DIR)/bitcask.h
+M99_NET    = test_rexis_loopback test_rexis_budgets test_rexis_pbt
+REXIS_BINS = rexis-server-xtc rexis_test_bitcask rexis_test_metrics \
+	     rexis_test_db_persist test_resp_parser $(M99_NET)
+
+check-rexis: $(REXIS_BINS)
+	@set -e; \
+	to=''; command -v timeout >/dev/null 2>&1 && to='timeout 300'; \
+	for t in rexis_test_bitcask rexis_test_metrics rexis_test_db_persist \
+	         test_resp_parser $(M99_NET); do \
+		printf 'running rexis test: %s\n' "$$t"; \
+		REXIS_SERVER=./rexis-server-xtc $$to ./$$t >$$t.log 2>&1 || { \
+			echo "  [rexis] FAIL: $$t (log follows)"; cat $$t.log; exit 1; }; \
+		grep -E '^  (memory|keys|clients|iops|cores):' $$t.log || true; \
+	done; \
+	echo "  [rexis] OK: 05_rexis server + test/m99 suite"
+
+rexis-server-xtc: $(REXIS_SRCS) $(REXIS_HDRS) $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(REXIS_DIR) \
+		-o $@ $(REXIS_SRCS) $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+rexis_test_bitcask: $(REXIS_DIR)/test_bitcask.c $(REXIS_DIR)/bitcask.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(REXIS_DIR) -o $@ \
+		$(REXIS_DIR)/test_bitcask.c $(REXIS_DIR)/bitcask.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+rexis_test_metrics: $(REXIS_DIR)/test_metrics.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(REXIS_DIR) -o $@ \
+		$(REXIS_DIR)/test_metrics.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+rexis_test_db_persist: $(REXIS_DIR)/test_db_persist.c $(REXIS_SRCS) $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(REXIS_DIR) -o $@ \
+		$(REXIS_DIR)/test_db_persist.c $(REXIS_DIR)/db.c \
+		$(REXIS_DIR)/proto.c $(REXIS_DIR)/expire.c \
+		$(REXIS_DIR)/bitcask.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_resp_parser: $(M99_DIR)/test_resp_parser.c $(M99_DIR)/munit.c \
+		$(REXIS_DIR)/proto.c $(REXIS_DIR)/proto.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(M99_DIR) -o $@ \
+		$(M99_DIR)/test_resp_parser.c $(M99_DIR)/munit.c \
+		$(REXIS_DIR)/proto.c $(LDFLAGS)
+
+$(M99_NET): %: $(M99_DIR)/%.c $(M99_DIR)/munit.c $(M99_DIR)/rexis_harness.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(M99_DIR) -o $@ \
+		$(M99_DIR)/$@.c $(M99_DIR)/munit.c $(LDFLAGS)
 
 # The canonical tnt example: a TCP echo server.  Links the in-library
 # tnt L4 layer; driven by test/tnt/test_tnt_echo.sh.

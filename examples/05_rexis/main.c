@@ -11,10 +11,21 @@
  *	  --max-keys=N     per-database limit
  *	  --max-clients=N  concurrent connection limit
  *	  --max-iops=N     rate-limit incoming commands per second
+ *
+ *	Once the socket is listening the server prints ONE line to stdout,
+ *	"rexis: listening on HOST:PORT", and flushes it: a test harness waits
+ *	for that line instead of guessing with a sleep.  Logs go to stderr.
+ *
+ *	SIGTERM / SIGINT: the listener stops accepting, the supervisor is
+ *	stopped, the background procs are woken to exit, each connection
+ *	proc finishes its current reply and exits, and main() returns 0.
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <errno.h>
+#include <stdint.h>
 #include <getopt.h>
 #include <sched.h>
 #include <signal.h>
@@ -50,9 +61,11 @@ static inline int64_t xtc_now_ns(void) {
 }
 
 /* Forward declarations */
-int expire_spawn(xtc_loop_t *loop, db_t *db, xtc_pid_t *out_pid);
+int expire_spawn(xtc_loop_t *loop, db_t *db, _Atomic int *stop,
+                 xtc_pid_t *out_pid);
 int metrics_spawn(xtc_loop_t *loop, db_t *db, xtc_res_t *res,
-                  _Atomic int *conn_count, xtc_pid_t *out_pid);
+                  _Atomic int *conn_count, _Atomic int *stop,
+                  xtc_pid_t *out_pid);
 
 /* ----- Server configuration ----- */
 
@@ -102,6 +115,8 @@ typedef struct server {
 
 	/* Shutdown */
 	_Atomic int      shutdown_requested;
+	xtc_pid_t        expire_pid;     /* woken by the listener on shutdown */
+	xtc_pid_t        metrics_pid;
 } server_t;
 
 static server_t g_server;
@@ -167,8 +182,6 @@ static void
 listener_proc(void *arg)
 {
 	server_t *srv = arg;
-	void *msg;
-	size_t msg_len;
 
 	while (!atomic_load(&srv->shutdown_requested)) {
 		/* Refill rate limit tokens */
@@ -192,7 +205,9 @@ listener_proc(void *arg)
 				break;
 			}
 
-			/* Check connection limit */
+			/* Check connection limit.  conn_count is the number of
+			 * LIVE connections: the conn proc decrements it on exit,
+			 * so this is a concurrency cap, not a lifetime one. */
 			if (srv->cfg.max_clients > 0 &&
 			    atomic_load(&srv->conn_count) >= srv->cfg.max_clients) {
 				close(fd);
@@ -215,14 +230,18 @@ listener_proc(void *arg)
 			opts.res = srv->res;
 			opts.server = srv;
 			opts.pubsub = xtc_app_registry(srv->app);
+			opts.conn_count = &srv->conn_count;
+			opts.shutdown = &srv->shutdown_requested;
 			if (srv->cfg.max_iops > 0) {
 				opts.iops_tokens = (int64_t *)&srv->iops_tokens;
 				opts.iops_cap = srv->cfg.max_iops;
 			}
 
-			if (conn_spawn(srv->loop, &opts, &conn_pid) == XTC_OK) {
-				atomic_fetch_add(&srv->conn_count, 1);
-			} else {
+			/* Count BEFORE the spawn: the proc decrements on exit,
+			 * and it may run (and exit) before conn_spawn returns. */
+			atomic_fetch_add(&srv->conn_count, 1);
+			if (conn_spawn(srv->loop, &opts, &conn_pid) != XTC_OK) {
+				atomic_fetch_sub(&srv->conn_count, 1);
 				close(fd);
 			}
 		}
@@ -246,6 +265,16 @@ listener_proc(void *arg)
 			}
 		}
 	}
+
+	/* Shutdown requested (the signal handler only sets the flag).
+	 * Wake the two background procs so they see it now rather than at
+	 * their next tick, and stop the supervisor so it does not restart
+	 * us.  Connection procs see the flag on their next wake (<= 1s).
+	 * Once every proc has returned the loop is empty and xtc_app_run
+	 * returns in main(). */
+	(void)xtc_send(srv->expire_pid, "x", 1);
+	(void)xtc_send(srv->metrics_pid, "x", 1);
+	(void)xtc_app_stop(srv->app);
 }
 
 /* ----- Signal handling ----- */
@@ -276,9 +305,9 @@ setup_signals(void)
 /* ----- Usage ----- */
 
 static void
-usage(const char *prog)
+usage(FILE *fp, const char *prog)
 {
-	fprintf(stderr,
+	fprintf(fp,
 	    "Usage: %s [options]\n"
 	    "\n"
 	    "rexis (Redis-protocol-compatible) server with hard resource budgets.\n"
@@ -289,11 +318,11 @@ usage(const char *prog)
 	    "  -c, --cores=N         Pin to N cores (0 = no pinning)\n"
 	    "  -m, --max-memory=N    Memory cap in bytes (0 = unlimited)\n"
 	    "  -k, --max-keys=N      Key count cap (0 = unlimited)\n"
-	    "  -n, --max-clients=N   Max connections (default: 10000)\n"
+	    "  -n, --max-clients=N   Max concurrent connections (default: 10000)\n"
 	    "  -i, --max-iops=N      Rate limit commands/sec (0 = unlimited)\n"
 	    "      --persist=DIR     Enable Bitcask persistence in DIR (string SET/DEL only)\n"
 	    "  -v, --verbose         Verbose logging\n"
-	    "  --help                Show this help\n"
+	    "      --help            Show this help\n"
 	    "\n"
 	    "Supported Redis commands:\n"
 	    "  String: GET, SET, DEL, EXISTS, INCR, DECR, INCRBY, DECRBY\n"
@@ -305,9 +334,31 @@ usage(const char *prog)
 	    prog);
 }
 
+/* A non-negative decimal option value no larger than max.  atoi would
+ * turn "--port=abc" into 0 and "--max-memory=1e6" into 1 without a
+ * word; a budget flag that silently means something else is worse
+ * than no flag. */
+static int
+parse_num(const char *opt, const char *s, long long max, long long *out)
+{
+	char *end;
+	long long v;
+
+	errno = 0;
+	v = strtoll(s, &end, 10);
+	if (errno != 0 || end == s || *end != '\0' || v < 0 || v > max) {
+		fprintf(stderr, "rexis: invalid value for --%s: '%s'\n", opt, s);
+		return -1;
+	}
+	*out = v;
+	return 0;
+}
+
+/* Returns 0 to run, 1 for --help (exit 0), -1 on a bad argument. */
 static int
 parse_args(int argc, char **argv, server_cfg_t *cfg)
 {
+	enum { OPT_HELP = 1000 };
 	static struct option longopts[] = {
 		{ "host",        required_argument, NULL, 'h' },
 		{ "port",        required_argument, NULL, 'p' },
@@ -318,35 +369,47 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		{ "max-iops",    required_argument, NULL, 'i' },
 		{ "persist",     required_argument, NULL, 'P' },
 		{ "verbose",     no_argument,       NULL, 'v' },
-		{ "help",        no_argument,       NULL, '?' },
+		{ "help",        no_argument,       NULL, OPT_HELP },
 		{ NULL, 0, NULL, 0 }
 	};
-	int c;
+	long long v;
+	int c, rc = 0;
 
 	*cfg = (server_cfg_t)SERVER_CFG_DEFAULT;
 
-	while ((c = getopt_long(argc, argv, "h:p:c:m:k:n:i:P:v", longopts, NULL)) != -1) {
+	while (rc == 0 &&
+	    (c = getopt_long(argc, argv, "h:p:c:m:k:n:i:P:v", longopts, NULL)) != -1) {
 		switch (c) {
 		case 'h':
 			cfg->host = optarg;
 			break;
 		case 'p':
-			cfg->port = atoi(optarg);
+			if ((rc = parse_num("port", optarg, 65535, &v)) == 0 &&
+			    v == 0) {
+				fprintf(stderr, "rexis: --port must be 1..65535\n");
+				rc = -1;
+			}
+			cfg->port = (int)v;
 			break;
 		case 'c':
-			cfg->cores = atoi(optarg);
+			if ((rc = parse_num("cores", optarg, 4096, &v)) == 0)
+				cfg->cores = (int)v;
 			break;
 		case 'm':
-			cfg->max_memory = atoll(optarg);
+			if ((rc = parse_num("max-memory", optarg, INT64_MAX, &v)) == 0)
+				cfg->max_memory = v;
 			break;
 		case 'k':
-			cfg->max_keys = (size_t)atoll(optarg);
+			if ((rc = parse_num("max-keys", optarg, INT64_MAX, &v)) == 0)
+				cfg->max_keys = (size_t)v;
 			break;
 		case 'n':
-			cfg->max_clients = atoi(optarg);
+			if ((rc = parse_num("max-clients", optarg, INT32_MAX, &v)) == 0)
+				cfg->max_clients = (int)v;
 			break;
 		case 'i':
-			cfg->max_iops = atoll(optarg);
+			if ((rc = parse_num("max-iops", optarg, INT64_MAX, &v)) == 0)
+				cfg->max_iops = v;
 			break;
 		case 'P':
 			cfg->persist_dir = optarg;
@@ -354,14 +417,20 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		case 'v':
 			cfg->verbose = 1;
 			break;
-		case '?':
+		case OPT_HELP:
+			usage(stdout, argv[0]);
+			return 1;
 		default:
-			usage(argv[0]);
+			usage(stderr, argv[0]);
 			return -1;
 		}
 	}
-
-	return 0;
+	if (rc == 0 && optind < argc) {
+		fprintf(stderr, "rexis: unexpected argument '%s'\n", argv[optind]);
+		usage(stderr, argv[0]);
+		return -1;
+	}
+	return rc;
 }
 
 /* ----- Main ----- */
@@ -378,12 +447,11 @@ main(int argc, char **argv)
 	xtc_res_caps_t res_caps = XTC_RES_CAPS_DEFAULT;
 	xtc_tcp_opts_t tcp_opts = XTC_TCP_OPTS_DEFAULT;
 	db_opts_t db_opts = DB_OPTS_DEFAULT;
-	xtc_pid_t listener_pid, expire_pid, metrics_pid;
 	int rc;
 
-	/* Parse command line */
-	if (parse_args(argc, argv, &cfg) < 0)
-		return 1;
+	/* Parse command line: 1 = --help (success), -1 = bad argument. */
+	if ((rc = parse_args(argc, argv, &cfg)) != 0)
+		return rc > 0 ? 0 : 2;
 
 	srv->cfg = cfg;
 	atomic_init(&srv->conn_count, 0);
@@ -441,14 +509,20 @@ main(int argc, char **argv)
 		    cfg.persist_dir);
 	}
 
-	/* Setup listening socket */
-	tcp_opts.reuseport = 1;
+	/* Setup listening socket.  No SO_REUSEPORT: rexis is ONE process,
+	 * and with it a second server started on the same port binds
+	 * "successfully" and the kernel silently splits the connections
+	 * between the two -- a stale test server once answered half of a
+	 * fresh test's requests that way.  An exclusive bind fails loudly. */
+	tcp_opts.reuseport = 0;
 	if (xtc_net_listen(XTC_NET_INET, cfg.host, cfg.port,
 	                   &tcp_opts, &srv->listen_fd) != XTC_OK) {
 		fprintf(stderr, "failed to bind to %s:%d\n", cfg.host, cfg.port);
 		return 1;
 	}
 	xtc_net_setnonblock(srv->listen_fd);
+	printf("rexis: listening on %s:%d\n", cfg.host, cfg.port);
+	fflush(stdout);
 
 	/* Initialize command table */
 	cmd_init();
@@ -481,19 +555,16 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Listener was spawned by the supervisor above; just record its
-	 * pid as zero (we don't need it for graceful stop). */
-	(void)listener_pid;
-
-	/* Spawn expire proc */
-	rc = expire_spawn(srv->loop, srv->db, &expire_pid);
+	/* Background procs.  Not supervised: they take the shutdown flag
+	 * and exit on it; the listener wakes them when it sees it.  Their
+	 * pids are stored before xtc_app_run, i.e. before the listener runs. */
+	rc = expire_spawn(srv->loop, srv->db, &srv->shutdown_requested,
+	    &srv->expire_pid);
 	if (rc != XTC_OK) {
 		XTC_LOG_WARN_F("failed to spawn expire proc");
 	}
-
-	/* Spawn metrics proc */
 	rc = metrics_spawn(srv->loop, srv->db, srv->res, &srv->conn_count,
-	                   &metrics_pid);
+	    &srv->shutdown_requested, &srv->metrics_pid);
 	if (rc != XTC_OK) {
 		XTC_LOG_WARN_F("failed to spawn metrics proc");
 	}
@@ -501,8 +572,12 @@ main(int argc, char **argv)
 	XTC_LOG_INFO_F("ready to accept connections");
 	xtc_log_drain(log);
 
-	/* Run event loop */
-	xtc_app_run(srv->app);
+	/* Run the event loop.  Returns once every proc has exited, which
+	 * the shutdown flag (SIGTERM / SIGINT) arranges -- see
+	 * listener_proc. */
+	rc = xtc_app_run(srv->app);
+	if (rc != XTC_OK)
+		XTC_LOG_ERROR_F("xtc_app_run: %s", xtc_strerror(rc));
 
 	/* Cleanup */
 	XTC_LOG_INFO_F("shutting down");
@@ -514,5 +589,5 @@ main(int argc, char **argv)
 	xtc_free(srv->res);
 	xtc_log_destroy(log);
 
-	return 0;
+	return rc == XTC_OK ? 0 : 1;
 }

@@ -26,8 +26,12 @@
  *   * value size capped at 16 MiB to limit recovery cost.
  */
 
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
+#ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
+#endif
 
 #include "bitcask.h"
 

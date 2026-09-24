@@ -21,127 +21,35 @@
 
 #include "munit.h"
 
-#define TEST_PORT 16390
+#include "rexis_harness.h"
 
-/* Global server PID */
-static pid_t g_server_pid = -1;
+static rexis_srv_t g_srv;
 
-/* Start the server in a child process */
+/* Connect to the server started by setup() */
 static int
-start_server(int port)
+connect_server(void)
 {
-	char port_str[16];
-	pid_t pid;
-
-	snprintf(port_str, sizeof port_str, "%d", port);
-
-	pid = fork();
-	if (pid < 0)
-		return -1;
-
-	if (pid == 0) {
-		/* Child: exec the server */
-		char *args[] = {
-			"../../examples/05_rexis/rexis-server-xtc",
-			"-p", port_str,
-			"--max-clients=100",
-			NULL
-		};
-		execv(args[0], args);
-		/* If exec fails, try relative to build dir */
-		args[0] = "./examples/05_rexis/rexis-server-xtc";
-		execv(args[0], args);
-		_exit(1);
-	}
-
-	g_server_pid = pid;
-	/* Give the server time to start */
-	usleep(200 * 1000);
-	return 0;
+	return rexis_connect(&g_srv, 2000);
 }
 
-static void
-stop_server(void)
-{
-	if (g_server_pid > 0) {
-		kill(g_server_pid, SIGTERM);
-		waitpid(g_server_pid, NULL, 0);
-		g_server_pid = -1;
-	}
-}
-
-/* Connect to server */
-static int
-connect_server(int port)
-{
-	struct sockaddr_in addr;
-	int fd;
-
-	fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (fd < 0)
-		return -1;
-
-	memset(&addr, 0, sizeof addr);
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons((uint16_t)port);
-	addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-
-	if (connect(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
-		close(fd);
-		return -1;
-	}
-
-	return fd;
-}
-
-/* Send command and receive response */
+/* Send command and receive response (the socket's 2s SO_RCVTIMEO
+ * bounds the wait, so a wedged server fails the test, not hangs it). */
 static int
 send_cmd(int fd, const char *cmd, size_t cmd_len, char *resp, size_t resp_cap)
 {
 	ssize_t n;
-	size_t total = 0;
 
-	n = send(fd, cmd, cmd_len, 0);
+	n = send(fd, cmd, cmd_len, MSG_NOSIGNAL);
 	if (n != (ssize_t)cmd_len)
 		return -1;
-
-	/* Read response (simplified: just read what's available) */
-	usleep(50 * 1000);  /* 50 ms */
-	n = recv(fd, resp, resp_cap - 1, MSG_DONTWAIT);
-	if (n > 0) {
-		resp[n] = '\0';
-		total = (size_t)n;
-	} else if (n == 0) {
-		return -1;  /* Connection closed */
-	} else {
-		if (errno == EAGAIN || errno == EWOULDBLOCK)
-			return 0;
+	n = recv(fd, resp, resp_cap - 1, 0);
+	if (n <= 0)
 		return -1;
-	}
-
-	return (int)total;
+	resp[n] = '\0';
+	return (int)n;
 }
 
-/* Build RESP command */
-static int
-build_cmd(char *buf, size_t cap, int argc, ...)
-{
-	va_list ap;
-	int i, len = 0;
-	const char *arg;
-
-	len += snprintf(buf + len, cap - (size_t)len, "*%d\r\n", argc);
-
-	va_start(ap, argc);
-	for (i = 0; i < argc; i++) {
-		arg = va_arg(ap, const char *);
-		len += snprintf(buf + len, cap - (size_t)len, "$%zu\r\n%s\r\n",
-		                strlen(arg), arg);
-	}
-	va_end(ap);
-
-	return len;
-}
+#define build_cmd rexis_build
 
 /* ----- Test cases ----- */
 
@@ -151,19 +59,19 @@ setup(const MunitParameter params[], void *user_data)
 	(void)params;
 	(void)user_data;
 
-	if (start_server(TEST_PORT) < 0) {
-		munit_error("failed to start server");
-		return NULL;
-	}
+	const char *const args[] = { "--max-clients=100" };
 
-	return (void *)(intptr_t)1;  /* non-NULL to indicate success */
+	if (rexis_start(&g_srv, args, 1) != 0)
+		munit_error("failed to start server");
+	return &g_srv;
 }
 
 static void
 teardown(void *fixture)
 {
 	(void)fixture;
-	stop_server();
+	/* A clean exit on SIGTERM is part of every test's contract. */
+	munit_assert_int(rexis_stop(&g_srv), ==, 0);
 }
 
 static MunitResult
@@ -174,7 +82,7 @@ test_ping(const MunitParameter p[], void *d)
 	int n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	n = build_cmd(cmd, sizeof cmd, 1, "PING");
@@ -193,7 +101,7 @@ test_ping_with_message(const MunitParameter p[], void *d)
 	int n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	n = build_cmd(cmd, sizeof cmd, 2, "PING", "hello");
@@ -212,7 +120,7 @@ test_set_get(const MunitParameter p[], void *d)
 	int n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	/* SET */
@@ -237,7 +145,7 @@ test_del(const MunitParameter p[], void *d)
 	int n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	/* SET */
@@ -266,7 +174,7 @@ test_incr(const MunitParameter p[], void *d)
 	int n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	/* INCR new key */
@@ -294,7 +202,7 @@ test_list_ops(const MunitParameter p[], void *d)
 	int n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	/* RPUSH */
@@ -335,7 +243,7 @@ test_hash_ops(const MunitParameter p[], void *d)
 	int n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	/* HSET */
@@ -365,7 +273,7 @@ test_expire_ttl(const MunitParameter p[], void *d)
 	int n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	/* SET key */
@@ -401,7 +309,7 @@ test_keys_pattern(const MunitParameter p[], void *d)
 	int n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	/* Create some keys */
@@ -430,7 +338,7 @@ test_info(const MunitParameter p[], void *d)
 	int n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	n = build_cmd(cmd, sizeof cmd, 1, "INFO");
@@ -452,18 +360,15 @@ test_quit(const MunitParameter p[], void *d)
 	ssize_t n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
+	/* QUIT answers +OK, then the server closes the connection. */
 	n = build_cmd(cmd, sizeof cmd, 1, "QUIT");
-	send(fd, cmd, (size_t)n, 0);
-
-	usleep(100 * 1000);
-	n = recv(fd, resp, sizeof resp, MSG_DONTWAIT);
-
-	/* Should get +OK and then connection should be closed */
-	/* Or the connection might already be closed */
-	(void)n;
+	munit_assert_int(send_cmd(fd, cmd, (size_t)n, resp, sizeof resp), >, 0);
+	munit_assert_string_equal(resp, "+OK\r\n");
+	n = recv(fd, resp, sizeof resp, 0);   /* bounded by SO_RCVTIMEO */
+	munit_assert_int((int)n, ==, 0);      /* EOF, not a timeout (-1) */
 
 	close(fd);
 	return MUNIT_OK;
@@ -477,7 +382,7 @@ test_unknown_command(const MunitParameter p[], void *d)
 	int n;
 	(void)p; (void)d;
 
-	fd = connect_server(TEST_PORT);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	n = build_cmd(cmd, sizeof cmd, 1, "NOTACMD");
@@ -485,6 +390,30 @@ test_unknown_command(const MunitParameter p[], void *d)
 	munit_assert_true(resp[0] == '-');  /* Error response */
 	munit_assert_ptr_not_null(strstr(resp, "unknown"));
 
+	close(fd);
+	return MUNIT_OK;
+}
+
+/* One connection, far more than 64 KiB of replies.  The server's write
+ * buffer used to never rewind, so after 65536 bytes of replies (13107
+ * "+OK\r\n") every further reply was dropped and the client hung. */
+static MunitResult
+test_many_replies_one_conn(const MunitParameter p[], void *d)
+{
+	char cmd[128], resp[128], key[32];
+	int fd, n, i;
+	(void)p; (void)d;
+
+	fd = connect_server();
+	munit_assert_int(fd, >=, 0);
+	for (i = 0; i < 20000; i++) {
+		snprintf(key, sizeof key, "k%d", i % 64);
+		n = build_cmd(cmd, sizeof cmd, 3, "SET", key, "v");
+		if (send_cmd(fd, cmd, (size_t)n, resp, sizeof resp) <= 0 ||
+		    strcmp(resp, "+OK\r\n") != 0)
+			munit_errorf("reply %d (after %d bytes) missing or wrong",
+			    i, i * 5);
+	}
 	close(fd);
 	return MUNIT_OK;
 }
@@ -504,6 +433,7 @@ static MunitTest tests[] = {
 	{ "/info",             test_info,             setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/quit",             test_quit,             setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/unknown_command",  test_unknown_command,  setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/many_replies_one_conn", test_many_replies_one_conn, setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 

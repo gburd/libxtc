@@ -130,7 +130,9 @@ resp_parse(resp_parser_t *p, resp_value_t *out, size_t *consumed)
 			out->type = RESP_TYPE_NULL;
 			p->pos += (size_t)crlf_off + 2;
 		} else {
-			if (ival < 0 || (size_t)ival > p->max_bulk)
+			if (ival < 0)          /* only -1 (null) is legal */
+				return RESP_ERR_PROTO;
+			if ((size_t)ival > p->max_bulk)
 				return RESP_ERR_TOOLARGE;
 			/* Need len bytes + \r\n */
 			p->pos += (size_t)crlf_off + 2;

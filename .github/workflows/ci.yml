@@ -820,8 +820,9 @@ jobs:
           done
 
   examples:
-    # Build the examples and run their in-process tests (no daemons,
-    # so nothing hangs CI).  The examples exercise the public API
+    # Build the examples and run their tests.  Servers are exercised only
+    # through bounded harnesses (check-rexis: free ports, bounded waits)
+    # so nothing can hang CI.  The examples exercise the public API
     # broadly -- including the single-file amalgamation drop-in -- and
     # would otherwise rot unnoticed since the library make check does
     # not build them.
@@ -863,6 +864,13 @@ jobs:
         run: |
           make XTC_BUILD=../../build_ci
           ./test_lob
+      - name: rexis server + test/m99 (RESP, loopback, PBT, measured budgets)
+        # The README flagship.  Forks real servers on kernel-chosen free
+        # loopback ports (no fixed port, so no collision on a shared
+        # runner); every wait inside is bounded, and the target wraps
+        # each binary in `timeout 300` as well.
+        timeout-minutes: 15
+        run: make -C build_ci check-rexis
       - name: sqlxtc in-process tests + amalgamation
         working-directory: examples/06_sqlxtc
         run: |

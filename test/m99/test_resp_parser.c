@@ -518,8 +518,8 @@ test_write_error(const MunitParameter p[], void *d)
 	resp_buf_init(&out, buf, sizeof buf);
 	resp_write_error(&out, "not found");
 
-	munit_assert_size(out.len, ==, 15);
-	munit_assert_memory_equal(15, buf, "-ERR not found\r\n");
+	munit_assert_size(out.len, ==, 16);
+	munit_assert_memory_equal(16, buf, "-ERR not found\r\n");
 
 	return MUNIT_OK;
 }

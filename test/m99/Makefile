@@ -39,7 +39,7 @@ PROTO_OBJ = $(REXIS_DIR)/proto.o
 
 TESTS = test_resp_parser test_rexis_loopback test_rexis_budgets test_rexis_pbt
 
-.PHONY: all clean check
+.PHONY: all clean check FORCE
 
 all: $(TESTS)
 
@@ -55,29 +55,32 @@ test_rexis_budgets: test_rexis_budgets.o munit.o
 test_rexis_pbt: test_rexis_pbt.o munit.o
 	$(CC) $(CFLAGS) -o $@ $^ -lpthread
 
+test_rexis_loopback.o test_rexis_budgets.o test_rexis_pbt.o: rexis_harness.h
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# Build proto.o if needed
-$(PROTO_OBJ):
-	$(MAKE) -C $(REXIS_DIR) proto.o
+# Always rebuilt through the example's own Makefile (so an edit to
+# proto.c is never tested against a stale proto.o).
+$(PROTO_OBJ): FORCE
+	$(MAKE) -C $(REXIS_DIR) XTC_BUILD=$(abspath $(XTC_BUILD)) proto.o
+FORCE:
 
 clean:
 	rm -f *.o $(TESTS)
 
-# Run all tests (requires server to be built first)
+# Build the server, then run every m99 test.  Any failure fails the
+# target.  (It used to append `|| echo "(some tests may fail...)"` to
+# each server test, so the budget tests could fail -- or hang -- and
+# `make check` still reported success.)  Each server test is bounded by
+# `timeout` as defence in depth; the harness already bounds every wait.
+TIMEOUT ?= timeout 300
+
 check: all
-	@echo "=== Building Redis server ==="
-	$(MAKE) -C $(REXIS_DIR)
-	@echo ""
-	@echo "=== Running RESP parser tests ==="
+	$(MAKE) -C $(REXIS_DIR) XTC_BUILD=$(abspath $(XTC_BUILD))
+	cd $(REXIS_DIR) && ./test_bitcask && ./test_metrics
 	./test_resp_parser
-	@echo ""
-	@echo "=== Running loopback tests ==="
-	./test_rexis_loopback || echo "(some tests may fail if server not found)"
-	@echo ""
-	@echo "=== Running budget tests ==="
-	./test_rexis_budgets || echo "(some tests may fail if server not found)"
-	@echo ""
-	@echo "=== Running PBT tests ==="
-	./test_rexis_pbt || echo "(some tests may fail if server not found)"
+	$(TIMEOUT) ./test_rexis_loopback
+	$(TIMEOUT) ./test_rexis_budgets
+	$(TIMEOUT) ./test_rexis_pbt
+	XTC_SRC_DIR=$(abspath ../..) sh ./test_rexis_persist.sh

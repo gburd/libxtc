@@ -6,6 +6,7 @@
  *	Timer-driven key expiration proc.
  */
 
+#include <stdatomic.h>
 #include <stdio.h>
 
 #include "db.h"
@@ -21,7 +22,8 @@ static inline int64_t xtc_now_ns(void) {
 #define EXPIRE_SCAN_LIMIT   100                  /* keys per scan */
 
 typedef struct expire_state {
-	db_t *db;
+	db_t        *db;
+	_Atomic int *stop;   /* server shutdown flag */
 } expire_state_t;
 
 static void
@@ -31,7 +33,7 @@ expire_proc(void *arg)
 	void *msg;
 	size_t msg_len;
 
-	for (;;) {
+	while (!atomic_load(st->stop)) {
 		int64_t now = xtc_now_ns();
 		int removed;
 
@@ -49,19 +51,26 @@ expire_proc(void *arg)
 			XTC_LOG_DEBUG_F("expire: removed %d keys", removed);
 		}
 	}
+	xtc_free(st);
 }
 
 int
-expire_spawn(xtc_loop_t *loop, db_t *db, xtc_pid_t *out_pid)
+expire_spawn(xtc_loop_t *loop, db_t *db, _Atomic int *stop,
+             xtc_pid_t *out_pid)
 {
 	expire_state_t *st;
 	xtc_proc_opts_t opts = { 0 };
+	int rc;
 
 	if ((st = xtc_malloc(sizeof(*st))) == NULL)
 		return XTC_E_NOMEM;
 
 	st->db = db;
+	st->stop = stop;
 	opts.name = "rexis-expire";
 
-	return xtc_proc_spawn(loop, expire_proc, st, &opts, out_pid);
+	if ((rc = xtc_proc_spawn(loop, expire_proc, st, &opts, out_pid))
+	    != XTC_OK)
+		xtc_free(st);
+	return rc;
 }
