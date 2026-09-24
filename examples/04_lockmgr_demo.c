@@ -234,42 +234,55 @@ qsort_yielding(int *a, int n)
 static xtc_lockmgr_t *g_mgr;
 static _Atomic int    g_a_rc;
 static _Atomic int    g_b_rc;
+static _Atomic int    g_setup_failed;   /* a FIRST lock was not granted */
+
+/*
+ * One transaction: X-lock `first`, hold it long enough that the other
+ * transaction takes ITS first lock, then request `second` -- the cycle.
+ * The first acquisition MUST be checked: if it silently failed, the
+ * second request would simply wait for (or get) a free lock, no cycle
+ * would exist, and the demo would print a "no deadlock" round that
+ * demonstrates nothing while looking like a result.
+ */
+static int
+txn(xtc_locker_t l, const char *first, const char *second)
+{
+	int rc;
+
+	if ((rc = xtc_lock_get(g_mgr, l, first, 1, XTC_LOCK_X, 0)) != XTC_OK) {
+		fprintf(stderr, "txn: first lock %s not granted: %s\n", first,
+		    xtc_strerror(rc));
+		atomic_store(&g_setup_failed, 1);
+		return rc;
+	}
+	(void)xtc_sleep_ns(100 * 1000 * 1000);   /* hold the lock, force the cycle */
+	rc = xtc_lock_get(g_mgr, l, second, 1, XTC_LOCK_X,
+	    5LL * 1000 * 1000 * 1000);
+	if (rc == XTC_OK)
+		(void)xtc_lock_put(g_mgr, l, second, 1);
+	/* The victim (XTC_E_DEADLK) still holds `first`: release it so
+	 * the survivor can proceed. */
+	(void)xtc_lock_put(g_mgr, l, first, 1);
+	return rc;
+}
 
 static void *
 txn_a(void *arg)
 {
-	xtc_locker_t l = *(xtc_locker_t *)arg;
-	int rc;
-	(void)xtc_lock_get(g_mgr, l, "A", 1, XTC_LOCK_X, 0);
-	(void)xtc_sleep_ns(100 * 1000 * 1000);   /* hold the lock, force the cycle */
-	rc = xtc_lock_get(g_mgr, l, "B", 1, XTC_LOCK_X,
-	    5LL * 1000 * 1000 * 1000);
-	atomic_store(&g_a_rc, rc);
-	if (rc == XTC_OK) {
-		(void)xtc_lock_put(g_mgr, l, "B", 1);
-		(void)xtc_lock_put(g_mgr, l, "A", 1);
-	}
+	atomic_store(&g_a_rc, txn(*(xtc_locker_t *)arg, "A", "B"));
 	return NULL;
 }
 
 static void *
 txn_b(void *arg)
 {
-	xtc_locker_t l = *(xtc_locker_t *)arg;
-	int rc;
-	(void)xtc_lock_get(g_mgr, l, "B", 1, XTC_LOCK_X, 0);
-	(void)xtc_sleep_ns(100 * 1000 * 1000);   /* hold the lock, force the cycle */
-	rc = xtc_lock_get(g_mgr, l, "A", 1, XTC_LOCK_X,
-	    5LL * 1000 * 1000 * 1000);
-	atomic_store(&g_b_rc, rc);
-	if (rc == XTC_OK) {
-		(void)xtc_lock_put(g_mgr, l, "A", 1);
-		(void)xtc_lock_put(g_mgr, l, "B", 1);
-	}
+	atomic_store(&g_b_rc, txn(*(xtc_locker_t *)arg, "B", "A"));
 	return NULL;
 }
 
 /* ---- driver proc that runs everything inside the xtc loop ---- */
+
+static int g_demo_failed;   /* set by the driver; main's exit status */
 
 struct driver_args { xtc_loop_t *loop; };
 
@@ -279,7 +292,7 @@ driver_proc(void *arg)
 	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_DEFAULT;
 	xtc_locker_t l1, l2;
 	pthread_t t1, t2;
-	int round;
+	int round, rc;
 	int n_a_aborted = 0, n_b_aborted = 0;
 
 	(void)arg;
@@ -291,6 +304,8 @@ driver_proc(void *arg)
 
 	if (xtc_lockmgr_create(&opts, &g_mgr) != XTC_OK) {
 		fprintf(stderr, "lockmgr create failed\n");
+		g_demo_failed = 1;
+		xtc_loop_stop(((struct driver_args *)arg)->loop);
 		return;
 	}
 
@@ -298,15 +313,35 @@ driver_proc(void *arg)
 	 * selection the choice should diverge across runs. */
 	printf("Deadlock scenario, custom victim picker:\n");
 	for (round = 0; round < 6; round++) {
-		(void)xtc_lockmgr_id(g_mgr, &l1);
-		(void)xtc_lockmgr_id(g_mgr, &l2);
+		if (xtc_lockmgr_id(g_mgr, &l1) != XTC_OK ||
+		    xtc_lockmgr_id(g_mgr, &l2) != XTC_OK) {
+			fprintf(stderr, "lockmgr id allocation failed\n");
+			g_demo_failed = 1;
+			break;
+		}
 		atomic_store(&g_a_rc, 0);
 		atomic_store(&g_b_rc, 0);
 
-		pthread_create(&t1, NULL, txn_a, &l1);
-		pthread_create(&t2, NULL, txn_b, &l2);
-		pthread_join(t1, NULL);
-		pthread_join(t2, NULL);
+		/* Both threads must exist or there is no cycle to detect.
+		 * If the second cannot start, join the first (it finishes on
+		 * its own: nothing contends with it) and give up. */
+		if ((rc = pthread_create(&t1, NULL, txn_a, &l1)) != 0) {
+			fprintf(stderr, "pthread_create: %s\n", strerror(rc));
+			g_demo_failed = 1;
+			break;
+		}
+		if ((rc = pthread_create(&t2, NULL, txn_b, &l2)) != 0) {
+			fprintf(stderr, "pthread_create: %s\n", strerror(rc));
+			(void)pthread_join(t1, NULL);
+			g_demo_failed = 1;
+			break;
+		}
+		(void)pthread_join(t1, NULL);
+		(void)pthread_join(t2, NULL);
+		if (atomic_load(&g_setup_failed)) {
+			g_demo_failed = 1;   /* no cycle was built: not a result */
+			break;
+		}
 
 		{
 			int ar = atomic_load(&g_a_rc);
@@ -348,6 +383,7 @@ driver_proc(void *arg)
 		for (i = 1; i < 32; i++) {
 			if (arr[i] < arr[i - 1]) {
 				printf("  ERROR: sort failed at index %d\n", i);
+				g_demo_failed = 1;
 				break;
 			}
 		}
@@ -371,11 +407,20 @@ driver_proc(void *arg)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
 	xtc_loop_t *loop;
 	xtc_pid_t prod_pid, drv_pid;
 	struct driver_args args;
+	int status = 1;
+
+	if (argc > 1 && strcmp(argv[1], "--help") == 0) {
+		printf("usage: %s\n"
+		    "Runs six two-transaction deadlocks under a custom random "
+		    "victim picker, then a fiber-yielding quicksort.\n",
+		    argv[0]);
+		return 0;
+	}
 
 	if (xtc_loop_init(&loop) != XTC_OK) return 1;
 	args.loop = loop;
@@ -384,18 +429,20 @@ main(void)
 	 * threads can consult it. */
 	if (xtc_proc_spawn(loop, producer_proc, NULL, NULL, &prod_pid)
 	    != XTC_OK)
-		return 1;
+		goto out;
 	g_producer = prod_pid;
 
 	if (xtc_proc_spawn(loop, driver_proc, &args, NULL, &drv_pid)
 	    != XTC_OK)
-		return 1;
+		goto out;
 
 	/* Run the loop.  When the driver returns it stops the loop;
 	 * the producer (which would otherwise wait forever) doesn't
 	 * get a chance to drift. */
-	if (xtc_loop_run(loop) != XTC_OK) return 1;
-
+	if (xtc_loop_run(loop) != XTC_OK)
+		goto out;
+	status = g_demo_failed ? 1 : 0;
+out:
 	(void)xtc_loop_fini(loop);
-	return 0;
+	return status;
 }

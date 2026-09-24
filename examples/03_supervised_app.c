@@ -19,7 +19,7 @@
 #include "xtc_orc.h"
 #include "xtc_trace.h"
 
-static int g_iterations;
+static int g_iterations = 10;
 
 /*
  * L1 (proportional-share scheduling, inspired by Glommio -- Glauber
@@ -86,13 +86,19 @@ counter_proc(void *arg)
 	 * is now a MECHANISM (runs on every exit), not a manner we must
 	 * remember to repeat on each early return / kill path. */
 	res = xtc_calloc(1, sizeof *res);
-	scope = xtc_scope_open();
-	if (res != NULL && scope != NULL) {
+	if (res != NULL)
 		res->scratch = xtc_calloc(1, 4096);
-		(void)xtc_scope_defer(scope, counter_release, res);
-	} else {
-		xtc_free(res);
-		res = NULL;
+	scope = xtc_scope_open();
+	/* Register the release, and only then treat it as owned by the
+	 * scope.  If the defer fails (the scope's finalizer table is full)
+	 * the scope will NOT free it, so the direct release at the bottom
+	 * must: drop the scope pointer so that path is taken. */
+	if (scope != NULL && res != NULL &&
+	    xtc_scope_defer(scope, counter_release, res) != XTC_OK) {
+		fprintf(stderr, "counter: xtc_scope_defer failed; releasing "
+		    "the scratch buffer directly on exit\n");
+		xtc_scope_close(scope);   /* nothing registered: a no-op close */
+		scope = NULL;
 	}
 
 	for (count = 0; count < g_iterations; ) {
@@ -110,11 +116,12 @@ counter_proc(void *arg)
 
 	/* Closing the scope runs counter_release LIFO; an async kill while
 	 * parked in xtc_recv above would run the same finalizer on the
-	 * proc's exit path -- either way the scratch buffer is freed. */
+	 * proc's exit path -- either way the scratch buffer is freed.
+	 * (xtc_scope_close returns void: it cannot fail.) */
 	if (scope != NULL)
 		xtc_scope_close(scope);
 	else
-		counter_release(res);
+		counter_release(res);   /* NULL-safe */
 }
 
 static void
@@ -152,8 +159,27 @@ main(int argc, char **argv)
 	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
 	xtc_child_spec_t kids[2];
 	xtc_pid_t watcher_pid;
+	int rc, status = 1;
 
-	g_iterations = argc > 1 ? atoi(argv[1]) : 10;
+	if (argc > 1) {
+		char *end;
+		long n;
+
+		if (strcmp(argv[1], "--help") == 0) {
+			printf("usage: %s [ITERATIONS]\n"
+			    "Runs a supervised counter + stats app for "
+			    "ITERATIONS (default 10, 1..1000) counter ticks, "
+			    "then stops it.\n", argv[0]);
+			return 0;
+		}
+		n = strtol(argv[1], &end, 10);
+		if (end == argv[1] || *end != '\0' || n < 1 || n > 1000) {
+			fprintf(stderr, "usage: %s [ITERATIONS]  (1..1000)\n",
+			    argv[0]);
+			return 2;
+		}
+		g_iterations = (int)n;
+	}
 
 	/* A3 (async causal trace): turn on the per-fiber park/resume ring so
 	 * that if a worker faults, xtc_dump shows not just its current state
@@ -174,7 +200,10 @@ main(int argc, char **argv)
 	kids[1].fn     = stats_proc;
 	kids[1].policy = XTC_RESTART_TRANSIENT;
 
-	if (xtc_app_create(&opts, &app) != XTC_OK) return 1;
+	if ((rc = xtc_app_create(&opts, &app)) != XTC_OK) {
+		fprintf(stderr, "xtc_app_create: %s\n", xtc_strerror(rc));
+		return 1;
+	}
 	g_app = app;
 
 	/* L1: create the two scheduling classes on the app's loop before the
@@ -193,21 +222,33 @@ main(int argc, char **argv)
 		fprintf(stderr, "could not create scheduling classes; the "
 		    "L1 proportional-share part of this demo would be a "
 		    "no-op\n");
-		return 1;
+		goto out;
 	}
 
 	/* L3 (over-budget stall watchdog, inspired by Glommio's stall
 	 * detector): warn (with a backtrace) if any single task runs longer
 	 * than 50ms on this loop -- catches a runaway that would starve the
-	 * others.  Off by default; opt in with a budget. */
+	 * others.  Off by default; opt in with a budget.  (Returns void:
+	 * arming a budget cannot fail.) */
 	xtc_loop_set_stall_budget(xtc_app_loop(app), 50LL * 1000 * 1000);
 
-	if (xtc_app_start(app, kids, 2) != XTC_OK) return 1;
-	if (xtc_proc_spawn(xtc_app_loop(app), shutdown_watcher, NULL,
-	    NULL, &watcher_pid) != XTC_OK) return 1;
-	if (xtc_app_run(app) != XTC_OK) return 1;
-
-	xtc_app_destroy(app);
+	if ((rc = xtc_app_start(app, kids, 2)) != XTC_OK) {
+		fprintf(stderr, "xtc_app_start: %s\n", xtc_strerror(rc));
+		goto out;
+	}
+	if ((rc = xtc_proc_spawn(xtc_app_loop(app), shutdown_watcher, NULL,
+	    NULL, &watcher_pid)) != XTC_OK) {
+		fprintf(stderr, "xtc_proc_spawn: %s\n", xtc_strerror(rc));
+		(void)xtc_app_stop(app);   /* started: stop it for destroy */
+		goto out;
+	}
+	if ((rc = xtc_app_run(app)) != XTC_OK) {
+		fprintf(stderr, "xtc_app_run: %s\n", xtc_strerror(rc));
+		goto out;
+	}
 	printf("done\n");
-	return 0;
+	status = 0;
+out:
+	xtc_app_destroy(app);   /* every path after create */
+	return status;
 }

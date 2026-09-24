@@ -293,7 +293,17 @@ gen_one(lob_book_t *b, int centre, int *next_id)
 int
 main(int argc, char **argv)
 {
-	long n_orders = (argc > 1) ? atol(argv[1]) : 1000000;
+	long n_orders;
+
+	if (argc > 1 && strcmp(argv[1], "--help") == 0) {
+		printf("usage: %s [n_orders] [n_initial] [seed]\n"
+		    "  n_orders  processed orders to time  (default 1000000)\n"
+		    "  n_initial resting orders to seed    (default 11000)\n"
+		    "  seed      PRNG seed                 (default 12345)\n",
+		    argv[0]);
+		return 0;
+	}
+	n_orders = (argc > 1) ? atol(argv[1]) : 1000000;
 	long n_initial = (argc > 2) ? atol(argv[2]) : 11000;
 	uint64_t seed = (argc > 3) ? strtoull(argv[3], NULL, 10) : 12345;
 	const int centre = 300;

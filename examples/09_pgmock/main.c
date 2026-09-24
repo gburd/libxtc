@@ -61,6 +61,14 @@ main(int argc, char **argv)
 	xtc_app_opts_t app_opts = XTC_APP_OPTS_DEFAULT;
 	xtc_child_spec_t kids[1];
 
+	/* getopt has no long options; --help is the one every example
+	 * answers (exit 0, usage on stdout). */
+	if (argc > 1 && strcmp(argv[1], "--help") == 0) {
+		printf("usage: %s [-h host] [-p port] [-U unix_path]\n",
+		    argv[0]);
+		return 0;
+	}
+
 	while ((c = getopt(argc, argv, "h:p:U:")) != -1) {
 		switch (c) {
 		case 'h': host = optarg; break;

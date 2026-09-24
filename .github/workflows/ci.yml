@@ -899,6 +899,16 @@ jobs:
         run: |
           make XTC_BUILD=../../build_ci sqlxtc-server
           bash ../../test/sqlxtc/test_sqlxtc_mt.sh
+      - name: every example server/driver answers --help (exit 0, < 2s, usage)
+        # The dist-built examples are linted by make check (check-examples)
+        # and rexis by check-rexis; these four are built by their own
+        # Makefiles.  A server that treats --help as "start serving" is
+        # the hang this lint exists for (08_tnt used to).
+        run: |
+          make -C examples/09_pgmock XTC_BUILD=../../build_ci
+          sh examples/check_help.sh examples/06_sqlxtc/sqlxtc-server \
+            examples/07_kaka/kaka-broker examples/09_pgmock/pgmock-server \
+            examples/11_lorb/lorb
       - name: sqlxtc differential oracle (vs python sqlite3 -- the correctness proof)
         working-directory: examples/06_sqlxtc
         run: |
