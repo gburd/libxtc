@@ -45,10 +45,53 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+/*
+ * Per-process certificate paths.  They were fixed "/tmp/xtc-tls2-*.pem"
+ * names, so two m18 runs at once (a parallel make check, CI matrix jobs on
+ * one runner, or the several TLS backends qualified side by side) rewrote
+ * each other's certificates mid-test: a handshake then failed against a
+ * key that no longer matched (seen as rc -6 / -1 on 3 backends run
+ * concurrently; each passed alone).  $TMPDIR is honored, and the pid
+ * keeps concurrent runs apart.
+ */
+static char TEST_CERT_PATH_BUF[256];
+#define TEST_CERT_PATH ((const char *)TEST_CERT_PATH_BUF)
+static char TEST_KEY_PATH_BUF[256];
+#define TEST_KEY_PATH ((const char *)TEST_KEY_PATH_BUF)
+
+static char TEST_CLI_CERT_BUF[256];
+static char TEST_CLI_KEY_BUF[256];
+static char TEST_FAKE_CA_BUF[256];
+static char TEST_FAKE_KEY_BUF[256];
+static char TEST_SNI_CERT_BUF[256];
+static char TEST_SNI_KEY_BUF[256];
+static char TEST_PSS_CERT_BUF[256];
+static char TEST_PSS_KEY_BUF[256];
+
+static void
+__m18_paths_init(void)
+{
+	const char *td = getenv("TMPDIR");
+	long pid = (long)getpid();
+	if (td == NULL || td[0] == '\0')
+		td = "/tmp";
+	(void)snprintf(TEST_CERT_PATH_BUF, sizeof TEST_CERT_PATH_BUF, "%s/xtc-tls2-%ld-test-cert.pem", td, pid);
+	(void)snprintf(TEST_KEY_PATH_BUF, sizeof TEST_KEY_PATH_BUF, "%s/xtc-tls2-%ld-test-key.pem", td, pid);
+	(void)snprintf(TEST_CLI_CERT_BUF, sizeof TEST_CLI_CERT_BUF, "%s/xtc-tls2-%ld-cli-cert.pem", td, pid);
+	(void)snprintf(TEST_CLI_KEY_BUF, sizeof TEST_CLI_KEY_BUF, "%s/xtc-tls2-%ld-cli-key.pem", td, pid);
+	(void)snprintf(TEST_FAKE_CA_BUF, sizeof TEST_FAKE_CA_BUF, "%s/xtc-tls2-%ld-fake-ca.pem", td, pid);
+	(void)snprintf(TEST_FAKE_KEY_BUF, sizeof TEST_FAKE_KEY_BUF, "%s/xtc-tls2-%ld-fake-key.pem", td, pid);
+	(void)snprintf(TEST_SNI_CERT_BUF, sizeof TEST_SNI_CERT_BUF, "%s/xtc-tls2-%ld-sni-cert.pem", td, pid);
+	(void)snprintf(TEST_SNI_KEY_BUF, sizeof TEST_SNI_KEY_BUF, "%s/xtc-tls2-%ld-sni-key.pem", td, pid);
+	(void)snprintf(TEST_PSS_CERT_BUF, sizeof TEST_PSS_CERT_BUF, "%s/xtc-tls2-%ld-pss-cert.pem", td, pid);
+	(void)snprintf(TEST_PSS_KEY_BUF, sizeof TEST_PSS_KEY_BUF, "%s/xtc-tls2-%ld-pss-key.pem", td, pid);
+}
 
 /* -------------------------------------------------------------------------
  * Runtime certificate generation.
@@ -58,21 +101,19 @@
  * during suite_setup and remove them in suite_teardown.
  * ----------------------------------------------------------------------- */
 
-#define TEST_CERT_PATH  "/tmp/xtc-tls2-test-cert.pem"
-#define TEST_KEY_PATH   "/tmp/xtc-tls2-test-key.pem"
-#define TEST_CLI_CERT   "/tmp/xtc-tls2-cli-cert.pem"
-#define TEST_CLI_KEY    "/tmp/xtc-tls2-cli-key.pem"
+#define TEST_CLI_CERT ((const char *)TEST_CLI_CERT_BUF)
+#define TEST_CLI_KEY ((const char *)TEST_CLI_KEY_BUF)
 /* Same subject DN as the client cert (CN=xtc-client), DIFFERENT key: a
  * trust anchor the client cert names as its issuer but does not chain
  * to.  Matching the DN matters: a GnuTLS client withholds its cert when
  * the server's CA list does not name its issuer. */
-#define TEST_FAKE_CA    "/tmp/xtc-tls2-fake-ca.pem"
-#define TEST_FAKE_KEY   "/tmp/xtc-tls2-fake-key.pem"
+#define TEST_FAKE_CA ((const char *)TEST_FAKE_CA_BUF)
+#define TEST_FAKE_KEY ((const char *)TEST_FAKE_KEY_BUF)
 /* Second SERVER cert with a distinct CN, selected via the SNI callback. */
-#define TEST_SNI_CERT   "/tmp/xtc-tls2-sni-cert.pem"
-#define TEST_SNI_KEY    "/tmp/xtc-tls2-sni-key.pem"
-#define TEST_PSS_CERT   "/tmp/xtc-tls2-pss-cert.pem"
-#define TEST_PSS_KEY    "/tmp/xtc-tls2-pss-key.pem"
+#define TEST_SNI_CERT ((const char *)TEST_SNI_CERT_BUF)
+#define TEST_SNI_KEY ((const char *)TEST_SNI_KEY_BUF)
+#define TEST_PSS_CERT ((const char *)TEST_PSS_CERT_BUF)
+#define TEST_PSS_KEY ((const char *)TEST_PSS_KEY_BUF)
 #define SNI_HOSTNAME    "tenant.example"
 
 /* Generate a self-signed RSA-2048 cert+key via the openssl CLI.
@@ -1480,5 +1521,6 @@ static const MunitSuite suite = {
 int
 main(int argc, char *argv[])
 {
+    __m18_paths_init();
     return munit_suite_main(&suite, NULL, argc, argv);
 }
