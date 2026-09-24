@@ -487,6 +487,8 @@ xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 		return XTC_OK;   /* no-op on the server side */
 	len = (name != NULL) ? strlen(name) : 0;
 	if (len != 0) {
+		if (len > SIZE_MAX - 1)          /* len + 1 below must not wrap */
+			return XTC_E_INVAL;
 		if ((rc = __os_malloc(len + 1, (void **)&copy)) != XTC_OK)
 			return rc;
 		memcpy(copy, name, len + 1);
