@@ -43,6 +43,11 @@ typedef struct conn_state {
 	/* Rate limiting */
 	int64_t    *iops_tokens;
 	int64_t     iops_cap;
+	int         throttled;   /* last pass stopped for lack of tokens */
+
+	/* Server-wide state */
+	_Atomic int *conn_count;
+	_Atomic int *shutdown;
 
 	/* Pub/sub: this connection's own pid + the shared channel registry
 	 * (an xtc_reg_t used as a duplicate-key process-group set).  A
@@ -109,7 +114,22 @@ conn_try_write(conn_state_t *st)
 	pending = st->write_len - st->write_pos;
 	n = send(st->fd, st->write_buf + st->write_pos, pending, MSG_DONTWAIT);
 	if (n > 0) {
+		/* Rewind (or compact a partial send) so the buffer is reused.
+		 * Before this, the only rewind was the early return above,
+		 * which no caller reached (they all check write_len >
+		 * write_pos first): write_len only grew, and after 64 KiB of
+		 * replies on one connection every reply failed to fit and was
+		 * silently dropped -- the client waited forever. */
 		st->write_pos += (size_t)n;
+		if (st->write_pos == st->write_len) {
+			st->write_pos = 0;
+			st->write_len = 0;
+		} else {
+			memmove(st->write_buf, st->write_buf + st->write_pos,
+			    st->write_len - st->write_pos);
+			st->write_len -= st->write_pos;
+			st->write_pos = 0;
+		}
 		return 0;
 	} else if (n == 0) {
 		return 0;
@@ -157,21 +177,31 @@ conn_process_commands(conn_state_t *st)
 
 	/* Reset parser to current buffer */
 	resp_parser_init(&parser, st->read_buf, st->read_len);
+	st->throttled = 0;
 
 	while (!st->quit && !st->closed) {
-		/* Check rate limit */
-		if (st->iops_cap > 0 && st->iops_tokens) {
-			int64_t tokens = xtc_atomic_i64_load(st->iops_tokens);
-			if (tokens <= 0) {
-				/* Rate limited - wait for tokens */
-				break;
-			}
-			xtc_atomic_i64_add(st->iops_tokens, -1);
+		/* Rate limit: one token per command, taken only when a
+		 * complete command is actually parsed.  Out of tokens: stop
+		 * here WITHOUT consuming the command; it stays buffered and
+		 * runs after the listener refills the bucket (the client sees
+		 * added latency, not an error).  A decrement that races below
+		 * zero is handed back. */
+		if (st->iops_cap > 0 && st->iops_tokens &&
+		    xtc_atomic_i64_load(st->iops_tokens) <= 0) {
+			st->throttled = 1;
+			break;
 		}
 
 		rc = resp_parse_command(&parser, argv, MAX_ARGS, &argc, &consumed);
 		if (rc == RESP_NEED_MORE)
 			break;
+
+		if (st->iops_cap > 0 && st->iops_tokens &&
+		    xtc_atomic_i64_add(st->iops_tokens, -1) <= 0) {
+			(void)xtc_atomic_i64_add(st->iops_tokens, 1);
+			st->throttled = 1;
+			break;
+		}
 
 		XTC_INJECTION_POINT("rexis:parse_fail");
 
@@ -244,6 +274,8 @@ conn_teardown(void *arg)
 		(void)xtc_reg_drop_pid(st->pubsub, st->self);
 	if (st->fd >= 0)
 		close(st->fd);
+	if (st->conn_count != NULL)
+		atomic_fetch_sub(st->conn_count, 1);   /* frees a --max-clients slot */
 	xtc_free(st->read_buf);
 	xtc_free(st->write_buf);
 	xtc_free(st);
@@ -273,8 +305,10 @@ conn_proc(void *arg)
 	if (scope != NULL)
 		(void)xtc_scope_defer(scope, conn_teardown, st);
 
-	while (!st->quit && !st->closed) {
+	while (!st->quit && !st->closed &&
+	    (st->shutdown == NULL || !atomic_load(st->shutdown))) {
 		uint32_t interest = XTC_IO_READABLE;
+		int64_t  park_ns = 1000LL * 1000 * 1000;
 
 		/* Try to write pending data */
 		if (st->write_len > st->write_pos) {
@@ -314,11 +348,18 @@ conn_proc(void *arg)
 		/* Wait for the next inbound chunk (or writability if the reply
 		 * did not fully flush, or shutdown).  This wakes exactly on fd
 		 * readiness or mailbox traffic, not on a polling timer. */
+		/* Throttled with commands still buffered: the socket may never
+		 * become readable again (the client is waiting for replies), so
+		 * re-check the bucket soon rather than after the 1s re-check.
+		 * 10ms is well under the 1s refill period, so it costs < 1% of
+		 * the budget's window. */
+		if (st->throttled)
+			park_ns = 10LL * 1000 * 1000;
 		{
 			uint32_t revents = 0;
 			(void)xtc_proc_wait_fd(st->fd,
 			    interest | XTC_IO_HUP | XTC_IO_ERR,
-			    1000LL * 1000 * 1000,  /* 1s timeout to re-check quit flag */
+			    park_ns,  /* also bounds how late we see quit/shutdown */
 			    &revents);
 			if (revents & XTC_WAIT_MAILBOX) {
 				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
@@ -367,6 +408,7 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 {
 	conn_state_t *st;
 	xtc_proc_opts_t proc_opts = { 0 };
+	int rc;
 
 	if ((st = xtc_calloc(1, sizeof(*st))) == NULL)
 		return XTC_E_NOMEM;
@@ -398,10 +440,20 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 
 	st->iops_tokens = opts->iops_tokens;
 	st->iops_cap = opts->iops_cap;
+	st->conn_count = opts->conn_count;
+	st->shutdown = opts->shutdown;
 	st->quit = 0;
 	st->closed = 0;
 
 	proc_opts.name = "rexis-conn";
 
-	return xtc_proc_spawn(loop, conn_proc, st, &proc_opts, out_pid);
+	rc = xtc_proc_spawn(loop, conn_proc, st, &proc_opts, out_pid);
+	if (rc != XTC_OK) {
+		/* Never ran, so conn_teardown never will: free here.  The fd
+		 * stays the caller's (see conn.h). */
+		xtc_free(st->read_buf);
+		xtc_free(st->write_buf);
+		xtc_free(st);
+	}
+	return rc;
 }

@@ -10,6 +10,7 @@
 #ifndef REXIS_CONN_H
 #define REXIS_CONN_H
 
+#include <stdatomic.h>
 #include <stdint.h>
 
 #include "xtc.h"
@@ -41,10 +42,15 @@ typedef struct conn_opts {
 	/* Limits */
 	size_t          max_read_buf;  /* default 1 MB */
 	size_t          max_write_buf; /* default 1 MB */
+
+	/* Server-wide state the connection proc updates / watches. */
+	_Atomic int    *conn_count;    /* live connections; decremented on exit */
+	_Atomic int    *shutdown;      /* set by the signal handler */
 } conn_opts_t;
 
 /* Spawn a connection proc.  The proc takes ownership of the fd and
- * will close it on exit.  Returns XTC_OK on success. */
+ * will close it on exit, and decrements *conn_count when it exits.
+ * On failure nothing was spawned: the caller still owns the fd. */
 int conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid);
 
 #endif /* REXIS_CONN_H */

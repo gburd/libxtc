@@ -28,11 +28,11 @@
 #include <arpa/inet.h>
 
 #include "munit.h"
+#include "rexis_harness.h"
 
 /* Simplified property-based testing harness */
 #define PBT_ITERATIONS 50
 
-static pid_t g_server_pid = -1;
 static unsigned int g_seed;
 
 static void
@@ -69,72 +69,27 @@ pbt_rand_string(char *buf, size_t max_len, size_t *out_len)
 	*out_len = len;
 }
 
-/* Server management */
+/* Server management: see rexis_harness.h (free port, readiness line,
+ * bounded clean stop). */
+static rexis_srv_t g_srv;
+
 static int
-start_server(int port)
+start_server(void)
 {
-	char port_str[16];
-	pid_t pid;
-
-	snprintf(port_str, sizeof port_str, "%d", port);
-
-	pid = fork();
-	if (pid < 0)
-		return -1;
-
-	if (pid == 0) {
-		char *args[] = {
-			"../../examples/05_rexis/rexis-server-xtc",
-			"-p", port_str,
-			NULL
-		};
-		execv(args[0], args);
-		args[0] = "./examples/05_rexis/rexis-server-xtc";
-		execv(args[0], args);
-		_exit(1);
-	}
-
-	g_server_pid = pid;
-	usleep(300 * 1000);
-	return 0;
+	return rexis_start(&g_srv, NULL, 0);
 }
 
-static void
+/* 0 iff the server exited 0 on SIGTERM within the bound. */
+static int
 stop_server(void)
 {
-	if (g_server_pid > 0) {
-		kill(g_server_pid, SIGTERM);
-		waitpid(g_server_pid, NULL, 0);
-		g_server_pid = -1;
-	}
+	return rexis_stop(&g_srv);
 }
 
 static int
-connect_server(int port)
+connect_server(void)
 {
-	struct sockaddr_in addr;
-	int fd;
-	struct timeval tv;
-
-	fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (fd < 0)
-		return -1;
-
-	tv.tv_sec = 2;
-	tv.tv_usec = 0;
-	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-
-	memset(&addr, 0, sizeof addr);
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons((uint16_t)port);
-	addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-
-	if (connect(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
-		close(fd);
-		return -1;
-	}
-
-	return fd;
+	return rexis_connect(&g_srv, 2000);
 }
 
 static int
@@ -142,7 +97,7 @@ send_cmd(int fd, const char *cmd, size_t cmd_len, char *resp, size_t resp_cap)
 {
 	ssize_t n;
 
-	n = send(fd, cmd, cmd_len, 0);
+	n = send(fd, cmd, cmd_len, MSG_NOSIGNAL);
 	if (n != (ssize_t)cmd_len)
 		return -1;
 
@@ -154,25 +109,7 @@ send_cmd(int fd, const char *cmd, size_t cmd_len, char *resp, size_t resp_cap)
 	return -1;
 }
 
-static int
-build_cmd(char *buf, size_t cap, int argc, ...)
-{
-	va_list ap;
-	int i, len = 0;
-	const char *arg;
-
-	len += snprintf(buf + len, cap - (size_t)len, "*%d\r\n", argc);
-
-	va_start(ap, argc);
-	for (i = 0; i < argc; i++) {
-		arg = va_arg(ap, const char *);
-		len += snprintf(buf + len, cap - (size_t)len, "$%zu\r\n%s\r\n",
-		                strlen(arg), arg);
-	}
-	va_end(ap);
-
-	return len;
-}
+#define build_cmd rexis_build
 
 /* ----- Property 1: SET/GET round-trip ----- */
 
@@ -188,10 +125,9 @@ test_prop_set_get_roundtrip(const MunitParameter p[], void *d)
 
 	pbt_init_seed();
 
-	if (start_server(16401) < 0)
-		return MUNIT_FAIL;
+	munit_assert_int(start_server(), ==, 0);
 
-	fd = connect_server(16401);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	for (i = 0; i < PBT_ITERATIONS; i++) {
@@ -218,7 +154,7 @@ test_prop_set_get_roundtrip(const MunitParameter p[], void *d)
 	printf("\n  P1 SET/GET round-trip: %d iterations passed\n", i);
 
 	close(fd);
-	stop_server();
+	munit_assert_int(stop_server(), ==, 0);
 	return MUNIT_OK;
 }
 
@@ -236,10 +172,9 @@ test_prop_del_idempotent(const MunitParameter p[], void *d)
 
 	pbt_init_seed();
 
-	if (start_server(16402) < 0)
-		return MUNIT_FAIL;
+	munit_assert_int(start_server(), ==, 0);
 
-	fd = connect_server(16402);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	for (i = 0; i < PBT_ITERATIONS; i++) {
@@ -266,7 +201,7 @@ test_prop_del_idempotent(const MunitParameter p[], void *d)
 	printf("\n  P2 DEL idempotent: %d iterations passed\n", i);
 
 	close(fd);
-	stop_server();
+	munit_assert_int(stop_server(), ==, 0);
 	return MUNIT_OK;
 }
 
@@ -276,17 +211,16 @@ test_prop_del_idempotent(const MunitParameter p[], void *d)
 #define INCR_PER_THREAD 100
 
 static atomic_int g_incr_errors;
-static int g_incr_port;
 
 static void *
 incr_thread(void *arg)
 {
-	int thread_id = (int)(intptr_t)arg;
 	int fd;
 	char cmd[64], resp[64];
 	int n, i;
 
-	fd = connect_server(g_incr_port);
+	(void)arg;
+	fd = connect_server();
 	if (fd < 0) {
 		atomic_fetch_add(&g_incr_errors, 1);
 		return NULL;
@@ -316,14 +250,12 @@ test_prop_incr_atomic(const MunitParameter p[], void *d)
 	int64_t expected = INCR_THREADS * INCR_PER_THREAD;
 	(void)p; (void)d;
 
-	g_incr_port = 16403;
 	atomic_store(&g_incr_errors, 0);
 
-	if (start_server(g_incr_port) < 0)
-		return MUNIT_FAIL;
+	munit_assert_int(start_server(), ==, 0);
 
 	/* Initialize counter to 0 */
-	fd = connect_server(g_incr_port);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 	n = build_cmd(cmd, sizeof cmd, 3, "SET", "atomic_counter", "0");
 	send_cmd(fd, cmd, (size_t)n, resp, sizeof resp);
@@ -331,7 +263,8 @@ test_prop_incr_atomic(const MunitParameter p[], void *d)
 
 	/* Spawn threads */
 	for (i = 0; i < INCR_THREADS; i++) {
-		pthread_create(&threads[i], NULL, incr_thread, (void *)(intptr_t)i);
+		munit_assert_int(pthread_create(&threads[i], NULL, incr_thread,
+		    NULL), ==, 0);
 	}
 
 	/* Wait for completion */
@@ -340,7 +273,7 @@ test_prop_incr_atomic(const MunitParameter p[], void *d)
 	}
 
 	/* Check final value */
-	fd = connect_server(g_incr_port);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 	n = build_cmd(cmd, sizeof cmd, 2, "GET", "atomic_counter");
 	munit_assert_int(send_cmd(fd, cmd, (size_t)n, resp, sizeof resp), >, 0);
@@ -362,7 +295,7 @@ test_prop_incr_atomic(const MunitParameter p[], void *d)
 	munit_assert_llong(final_value, ==, expected);
 
 	close(fd);
-	stop_server();
+	munit_assert_int(stop_server(), ==, 0);
 	return MUNIT_OK;
 }
 
@@ -380,10 +313,9 @@ test_prop_list_fifo(const MunitParameter p[], void *d)
 
 	pbt_init_seed();
 
-	if (start_server(16404) < 0)
-		return MUNIT_FAIL;
+	munit_assert_int(start_server(), ==, 0);
 
-	fd = connect_server(16404);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	for (i = 0; i < PBT_ITERATIONS / 5; i++) {
@@ -393,20 +325,25 @@ test_prop_list_fifo(const MunitParameter p[], void *d)
 		n = build_cmd(cmd, sizeof cmd, 2, "DEL", "fifo_list");
 		send_cmd(fd, cmd, (size_t)n, resp, sizeof resp);
 
-		/* LPUSH items (pushed to head, so reverse order) */
-		for (j = num_items - 1; j >= 0; j--) {
+		/* LPUSH item0, item1, ... to the head; the tail is then the
+		 * OLDEST push, so RPOP must return them in push order.  (This
+		 * test used to push in reverse and expect the reverse, and it
+		 * failed the first time anyone ran it.) */
+		for (j = 0; j < num_items; j++) {
 			snprintf(value, sizeof value, "item%d", j);
 			n = build_cmd(cmd, sizeof cmd, 3, "LPUSH", "fifo_list", value);
-			send_cmd(fd, cmd, (size_t)n, resp, sizeof resp);
+			munit_assert_int(send_cmd(fd, cmd, (size_t)n, resp, sizeof resp), >, 0);
 		}
 
-		/* RPOP should return in order 0, 1, 2, ... */
 		for (j = 0; j < num_items; j++) {
+			char want[64];
 			n = build_cmd(cmd, sizeof cmd, 2, "RPOP", "fifo_list");
 			munit_assert_int(send_cmd(fd, cmd, (size_t)n, resp, sizeof resp), >, 0);
 
 			snprintf(value, sizeof value, "item%d", j);
-			munit_assert_ptr_not_null(strstr(resp, value));
+			snprintf(want, sizeof want, "$%zu\r\n%s\r\n",
+			    strlen(value), value);
+			munit_assert_string_equal(resp, want);   /* exact: item1 != item10 */
 		}
 
 		/* List should be empty now */
@@ -418,7 +355,7 @@ test_prop_list_fifo(const MunitParameter p[], void *d)
 	printf("\n  P4 LPUSH/RPOP FIFO: %d iterations passed\n", i);
 
 	close(fd);
-	stop_server();
+	munit_assert_int(stop_server(), ==, 0);
 	return MUNIT_OK;
 }
 
@@ -446,10 +383,9 @@ test_prop_random_stress(const MunitParameter p[], void *d)
 
 	pbt_init_seed();
 
-	if (start_server(16405) < 0)
-		return MUNIT_FAIL;
+	munit_assert_int(start_server(), ==, 0);
 
-	fd = connect_server(16405);
+	fd = connect_server();
 	munit_assert_int(fd, >=, 0);
 
 	for (i = 0; i < PBT_ITERATIONS * 10; i++) {
@@ -495,7 +431,7 @@ test_prop_random_stress(const MunitParameter p[], void *d)
 		if (send_cmd(fd, cmd, (size_t)n, resp, sizeof resp) < 0) {
 			/* Reconnect if disconnected */
 			close(fd);
-			fd = connect_server(16405);
+			fd = connect_server();
 			if (fd < 0) {
 				munit_error("server crashed or became unreachable");
 				stop_server();
@@ -517,7 +453,7 @@ test_prop_random_stress(const MunitParameter p[], void *d)
 	munit_assert_string_equal(resp, "+PONG\r\n");
 
 	close(fd);
-	stop_server();
+	munit_assert_int(stop_server(), ==, 0);
 	return MUNIT_OK;
 }
 

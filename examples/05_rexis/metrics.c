@@ -48,6 +48,7 @@ typedef struct metrics_state {
 	db_t        *db;
 	xtc_res_t   *res;
 	_Atomic int *conn_count;
+	_Atomic int *stop;   /* server shutdown flag */
 } metrics_state_t;
 
 static void
@@ -61,6 +62,8 @@ metrics_proc(void *arg)
 		(void)xtc_recv(&msg, &msg_len, METRICS_INTERVAL_NS);
 		if (msg)
 			xtc_free(msg);
+		if (atomic_load(st->stop))
+			break;
 
 		/* Update gauges from authoritative state. */
 		if (rexis_stat_db_keys != NULL)
@@ -95,14 +98,17 @@ metrics_proc(void *arg)
 			    (long long)p50, (long long)p99);
 		}
 	}
+	xtc_free(st);
 }
 
 int
 metrics_spawn(xtc_loop_t *loop, db_t *db, xtc_res_t *res,
-              _Atomic int *conn_count, xtc_pid_t *out_pid)
+              _Atomic int *conn_count, _Atomic int *stop,
+              xtc_pid_t *out_pid)
 {
 	metrics_state_t *st;
 	xtc_proc_opts_t opts = { 0 };
+	int rc;
 
 	metrics_register();
 
@@ -112,9 +118,13 @@ metrics_spawn(xtc_loop_t *loop, db_t *db, xtc_res_t *res,
 	st->db = db;
 	st->res = res;
 	st->conn_count = conn_count;
+	st->stop = stop;
 	opts.name = "rexis-metrics";
 
-	return xtc_proc_spawn(loop, metrics_proc, st, &opts, out_pid);
+	if ((rc = xtc_proc_spawn(loop, metrics_proc, st, &opts, out_pid))
+	    != XTC_OK)
+		xtc_free(st);
+	return rc;
 }
 
 /*
