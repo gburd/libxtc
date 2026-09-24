@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd May 28, 2026
+.Dd September 23, 2026
 .Dt XTC_APP 3
 .Os
 .Sh NAME
@@ -9,6 +9,9 @@
 .Nm xtc_app_start ,
 .Nm xtc_app_run ,
 .Nm xtc_app_stop ,
+.Nm xtc_app_shutdown ,
+.Nm xtc_app_drain_on_signal ,
+.Nm xtc_app_is_shutdown_msg ,
 .Nm xtc_app_loop ,
 .Nm xtc_app_exec ,
 .Nm xtc_app_registry
@@ -26,6 +29,12 @@
 .Fn xtc_app_run "xtc_app_t *app"
 .Ft int
 .Fn xtc_app_stop "xtc_app_t *app"
+.Ft int
+.Fn xtc_app_shutdown "xtc_app_t *app" "int64_t drain_ns" "int64_t force_ns" "xtc_app_drain_report_t *report"
+.Ft int
+.Fn xtc_app_drain_on_signal "xtc_app_t *app" "int64_t drain_ns" "int64_t force_ns" "xtc_app_drain_report_t *report"
+.Ft int
+.Fn xtc_app_is_shutdown_msg "const void *msg" "size_t len"
 .Ft "xtc_loop_t *"
 .Fn xtc_app_loop "const xtc_app_t *app"
 .Ft "xtc_exec_t *"
@@ -80,12 +89,158 @@ returns the underlying
 .Xr xtc_exec 3
 executor the application runs its loop on.
 .Pp
-The current implementation is single-loop; multi-loop apps spawn
-.Xr xtc_exec 3
-directly.  Future revisions may grow N-loop apps for thread-per-
-core scaling.
+Setting
+.Fa opts.n_loops
+above 1 makes the app own an N-loop executor; the root supervisor runs
+on loop 0 and children are placed by
+.Fa xtc_child_spec_t.loop .
+.Ss Stopping
+.Fn xtc_app_stop
+is NOT a drain.  It asks the root supervisor to stop and returns at
+once; the supervisor then
+.Fn xtc_exit_pid Ns s
+every child with reason 1 and does not wait for their cleanup.  A child
+masked with
+.Fn xtc_mask_enter
+never observes that kill, and
+.Fn xtc_app_run
+then never returns.
+.Ss Graceful drain
+.Fn xtc_app_shutdown
+is the bounded, reported drain:
+.Bl -enum -offset indent
+.It
+It sends the message
+.Dv XTC_APP_SHUTDOWN_MSG
+.Pq Qq $xtc_shutdown ,
+.Li sizeof XTC_APP_SHUTDOWN_MSG
+bytes with the NUL, to every static child (the children given to
+.Fn xtc_app_start ) .
+A child recognizes it with
+.Fn xtc_app_is_shutdown_msg
+and finishes by returning from its body.
+.It
+It waits up to
+.Fa drain_ns
+for every child to return or exit.  A PERMANENT child that returns
+during the drain is parked, not restarted.
+.It
+It stops the supervisor (no more restarts) and force-cancels each
+remaining child with
+.Fn xtc_exit_pid pid XTC_APP_SHUTDOWN_REASON .
+.It
+It waits up to
+.Fa force_ns
+for every child to leave the proc table
+.Po
+.Fn xtc_proc_info
+returns
+.Dv XTC_E_NOTFOUND
+.Pc .
+That is the cleanup-complete signal: the at-exit hooks and scope
+finalizers have returned.  Neither
+.Dq not alive
+nor
+.Dv XTC_KILL_DELIVERED
+means that.
+.It
+It stops the app's loop or executor, so
+.Fn xtc_app_run
+returns, and fills
+.Fa *report .
+.El
+.Pp
+It always returns within about
+.Fa drain_ns No + Fa force_ns
+plus a few milliseconds, even when a child is masked forever: that
+child is reported as a survivor instead of being waited for.  A
+survivor on an owned loop is freed with the app; on a borrowed loop
+.Pq Fa opts.loop
+it stays parked there.
+.Pp
+The report is size-versioned: set
+.Fa report->size
+to
+.Li sizeof(xtc_app_drain_report_t)
+first
+.Pq Dv XTC_APP_DRAIN_REPORT_INIT does that .
+The library writes only the first
+.Fa size
+bytes, so fields added in a later minor release do not break an
+older caller.
+.Bd -literal -offset indent
+typedef struct xtc_app_drain_report {
+    size_t    size;           /* IN: sizeof the struct */
+    int       n_children;     /* static children */
+    int       n_drained;      /* finished within drain_ns */
+    int       n_forced;       /* force-cancelled, then left the table */
+    int       n_survivors;    /* still in the proc table */
+    uint64_t  forced_mask;    /* bit i = child i forced (i < 64) */
+    uint64_t  survivor_mask;  /* bit i = child i survived (i < 64) */
+    int64_t   elapsed_ns;
+} xtc_app_drain_report_t;
+.Ed
+.Pp
+Call
+.Fn xtc_app_shutdown
+from a plain thread or from a proc that is not one of the app's
+supervised children.  Children added later with
+.Fn xtc_sup_add_child
+are not drained or reported; the supervisor stop in step 3 kills them.
+.Ss Signals
+The library installs no signal handler by default.
+.Fn xtc_app_drain_on_signal
+is the opt-in: it installs a SIGTERM and SIGINT handler that only
+writes one byte to a non-blocking self-pipe, and spawns a watcher proc
+on the app's loop that waits on the pipe with
+.Fn xtc_proc_wait_fd
+and runs
+.Fn xtc_app_shutdown app drain_ns force_ns report
+there.  No work runs in the handler.
+.Fa report
+(may be NULL) must stay valid until
+.Fn xtc_app_run
+returns.  Call it after
+.Fn xtc_app_start
+and before
+.Fn xtc_app_run ,
+on an app that owns its loop.
+.Fn xtc_app_destroy
+restores the previous dispositions.  One app per process may be armed
+at a time.
+.Sh RETURN VALUES
+.Fn xtc_app_shutdown
+returns
+.Dv XTC_OK
+when every child left the proc table,
+.Dv XTC_E_AGAIN
+when at least one survived, and
+.Dv XTC_E_INVAL
+for a NULL or unstarted app, a negative deadline, a
+.Fa report
+whose
+.Fa size
+is too small, a second call, or a call from a supervised child.
+.Pp
+.Fn xtc_app_drain_on_signal
+returns
+.Dv XTC_OK ,
+.Dv XTC_E_INVAL
+(bad arguments, a borrowed loop, or another app already armed),
+.Dv XTC_E_INTERNAL
+if the pipe could not be created, or
+.Dv XTC_E_NOSYS
+on Windows.
+.Pp
+.Fn xtc_app_is_shutdown_msg
+returns 1 for the drain request and 0 otherwise.
+.Sh EXAMPLES
+.Pa docs/_includes/snippets/12_graceful_drain.c
+starts workers, sends itself SIGTERM, drains and exits 0.
 .Sh SEE ALSO
 .Xr xtc_supervisor 3 ,
+.Xr xtc_proc 3 ,
+.Xr xtc_inspect 3 ,
 .Xr xtc_reg 3 ,
 .Xr xtc_loop 3 ,
 .Xr xtc 7

@@ -182,9 +182,309 @@ test_app_multiloop(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- graceful drain: xtc_app_shutdown (PLAN.md 19.27.10) ---- */
+#include <signal.h>
+#include <unistd.h>
+#include "xtc_inspect.h"
+
+#define MS (1000LL * 1000)
+
+static _Atomic int g_dr_hook_done;   /* at-exit hooks that COMPLETED */
+static _Atomic int g_dr_started;     /* children that reached their body */
+
+/* Wait for the drain request; return (the cooperative exit). */
+static void
+dr_polite(void *arg)
+{
+	void *m; size_t s;
+	(void)arg;
+	atomic_fetch_add(&g_dr_started, 1);
+	for (;;) {
+		if (xtc_recv(&m, &s, -1) != XTC_OK) continue;
+		if (xtc_app_is_shutdown_msg(m, s)) { __os_free(m); return; }
+		__os_free(m);
+	}
+}
+
+/* The at-exit hook PARKS for 30 ms before it completes.  If shutdown
+ * returned on `!alive` it would return with this hook still pending; the
+ * cleanup-complete test (proc-table absence) must see it done. */
+static void
+dr_slow_hook(void *arg)
+{
+	(void)arg;
+	(void)xtc_proc_sleep(30 * MS);
+	atomic_fetch_add(&g_dr_hook_done, 1);
+}
+
+/* Ignores the drain request (throws the message away). */
+static void
+dr_deaf(void *arg)
+{
+	void *m; size_t s;
+	(void)arg;
+	(void)xtc_proc_at_exit(dr_slow_hook, NULL);
+	atomic_fetch_add(&g_dr_started, 1);
+	for (;;)
+		if (xtc_recv(&m, &s, -1) == XTC_OK) __os_free(m);
+}
+
+/* Masked forever: neither the request nor the force-cancel can land. */
+static void
+dr_masked(void *arg)
+{
+	(void)arg;
+	(void)xtc_mask_enter();
+	atomic_fetch_add(&g_dr_started, 1);
+	for (;;)
+		(void)xtc_proc_sleep(5 * MS);
+}
+
+static void
+dr_spec(xtc_child_spec_t *k, xtc_proc_fn fn, xtc_restart_policy_t pol)
+{
+	memset(k, 0, sizeof *k);
+	k->name = "dr";
+	k->fn = fn;
+	k->policy = pol;
+}
+
+struct dr_run {
+	xtc_app_t              *app;
+	int64_t                 drain_ns, force_ns;
+	int                     n_kids;
+	int                     rc;
+	xtc_app_drain_report_t  rep;
+};
+
+/* Shutdown from a plain thread once every child is in its body. */
+static void *
+dr_thread(void *arg)
+{
+	struct dr_run *r = arg;
+	while (atomic_load(&g_dr_started) < r->n_kids)
+		(void)xtc_sleep_ns(1 * MS);
+	r->rc = xtc_app_shutdown(r->app, r->drain_ns, r->force_ns, &r->rep);
+	return NULL;
+}
+
+static void
+dr_go(struct dr_run *r, xtc_child_spec_t *kids, int n, int n_loops)
+{
+	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_app_drain_report_t init = XTC_APP_DRAIN_REPORT_INIT;
+	pthread_t th;
+
+	atomic_store(&g_dr_hook_done, 0);
+	atomic_store(&g_dr_started, 0);
+	opts.no_tuning_check = 1;
+	opts.n_loops = n_loops;
+	r->n_kids = n;
+	r->rep = init;
+	munit_assert_int(xtc_app_create(&opts, &r->app), ==, XTC_OK);
+	munit_assert_int(xtc_app_start(r->app, kids, n), ==, XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, dr_thread, r), ==, 0);
+	munit_assert_int(xtc_app_run(r->app), ==, XTC_OK);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+}
+
+/* A child that drains within drain_ns is reported drained -- PERMANENT
+ * (which must not be restarted into the drain) and TRANSIENT alike. */
+static MunitResult
+test_app_shutdown_drains(const MunitParameter p[], void *d)
+{
+	xtc_child_spec_t kids[2];
+	struct dr_run r;
+	(void)p; (void)d;
+	memset(&r, 0, sizeof r);
+	dr_spec(&kids[0], dr_polite, XTC_RESTART_PERMANENT);
+	dr_spec(&kids[1], dr_polite, XTC_RESTART_TRANSIENT);
+	r.drain_ns = 5000 * MS;
+	r.force_ns = 1000 * MS;
+	dr_go(&r, kids, 2, 1);
+	munit_assert_int(r.rc, ==, XTC_OK);
+	munit_assert_size(r.rep.size, ==, sizeof r.rep);
+	munit_assert_int(r.rep.n_children, ==, 2);
+	munit_assert_int(r.rep.n_drained, ==, 2);
+	munit_assert_int(r.rep.n_forced, ==, 0);
+	munit_assert_int(r.rep.n_survivors, ==, 0);
+	munit_assert_uint64(r.rep.forced_mask | r.rep.survivor_mask, ==, 0);
+	/* It returned when they drained, not at the deadline. */
+	munit_assert_int64(r.rep.elapsed_ns, <, 2000 * MS);
+	xtc_app_destroy(r.app);
+	return MUNIT_OK;
+}
+
+/* A child that ignores the request is force-cancelled and reported, and
+ * shutdown returns only after its (parking) at-exit hook COMPLETED. */
+static MunitResult
+test_app_shutdown_forces(const MunitParameter p[], void *d)
+{
+	xtc_child_spec_t kids[2];
+	struct dr_run r;
+	(void)p; (void)d;
+	memset(&r, 0, sizeof r);
+	dr_spec(&kids[0], dr_polite, XTC_RESTART_PERMANENT);
+	dr_spec(&kids[1], dr_deaf, XTC_RESTART_PERMANENT);
+	r.drain_ns = 100 * MS;
+	r.force_ns = 2000 * MS;
+	dr_go(&r, kids, 2, 1);
+	munit_assert_int(r.rc, ==, XTC_OK);
+	munit_assert_int(r.rep.n_drained, ==, 1);
+	munit_assert_int(r.rep.n_forced, ==, 1);
+	munit_assert_int(r.rep.n_survivors, ==, 0);
+	munit_assert_uint64(r.rep.forced_mask, ==, 1u << 1);
+	munit_assert_int(atomic_load(&g_dr_hook_done), ==, 1);
+	munit_assert_int64(r.rep.elapsed_ns, >=, 100 * MS);
+	xtc_app_destroy(r.app);
+	return MUNIT_OK;
+}
+
+/* A MASKED child is reported not-drained and shutdown still returns
+ * within drain_ns + force_ns + slack (and so does xtc_app_run). */
+static MunitResult
+test_app_shutdown_masked_bounded(const MunitParameter p[], void *d)
+{
+	xtc_child_spec_t kids[2];
+	struct dr_run r;
+	int64_t t0, t1;
+	(void)p; (void)d;
+	memset(&r, 0, sizeof r);
+	dr_spec(&kids[0], dr_polite, XTC_RESTART_PERMANENT);
+	dr_spec(&kids[1], dr_masked, XTC_RESTART_PERMANENT);
+	r.drain_ns = 200 * MS;
+	r.force_ns = 300 * MS;
+	t0 = xtc_clock_mono();
+	dr_go(&r, kids, 2, 1);
+	t1 = xtc_clock_mono();
+	munit_assert_int(r.rc, ==, XTC_E_AGAIN);
+	munit_assert_int(r.rep.n_drained, ==, 1);
+	munit_assert_int(r.rep.n_forced, ==, 0);
+	munit_assert_int(r.rep.n_survivors, ==, 1);
+	munit_assert_uint64(r.rep.survivor_mask, ==, 1u << 1);
+	munit_assert_int64(r.rep.elapsed_ns, >=, 500 * MS);
+	munit_assert_int64(r.rep.elapsed_ns, <, 500 * MS + 250 * MS);
+	/* The whole run (incl. waiting for the children to start). */
+	munit_assert_int64(t1 - t0, <, 3000 * MS);
+	xtc_app_destroy(r.app);
+	return MUNIT_OK;
+}
+
+/* Multi-loop: the supervisor stops the executor the instant it exits;
+ * the drain must still see the forced child's cleanup complete. */
+static MunitResult
+test_app_shutdown_multiloop(const MunitParameter p[], void *d)
+{
+	xtc_child_spec_t kids[3];
+	struct dr_run r;
+	(void)p; (void)d;
+	memset(&r, 0, sizeof r);
+	dr_spec(&kids[0], dr_polite, XTC_RESTART_PERMANENT);
+	dr_spec(&kids[1], dr_deaf, XTC_RESTART_PERMANENT);
+	dr_spec(&kids[2], dr_polite, XTC_RESTART_TRANSIENT);
+	kids[1].loop = 1;
+	kids[2].loop = 2;
+	r.drain_ns = 100 * MS;
+	r.force_ns = 2000 * MS;
+	dr_go(&r, kids, 3, 3);
+	munit_assert_int(r.rc, ==, XTC_OK);
+	munit_assert_int(r.rep.n_drained, ==, 2);
+	munit_assert_int(r.rep.n_forced, ==, 1);
+	munit_assert_int(r.rep.n_survivors, ==, 0);
+	munit_assert_int(atomic_load(&g_dr_hook_done), ==, 1);
+	xtc_app_destroy(r.app);
+	return MUNIT_OK;
+}
+
+/* Argument validation incl. the size-versioned report. */
+static MunitResult
+test_app_shutdown_inval(const MunitParameter p[], void *d)
+{
+	xtc_app_t *a;
+	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_app_drain_report_t rep = XTC_APP_DRAIN_REPORT_INIT;
+	(void)p; (void)d;
+	munit_assert_int(xtc_app_shutdown(NULL, 0, 0, NULL), ==, XTC_E_INVAL);
+	opts.no_tuning_check = 1;
+	munit_assert_int(xtc_app_create(&opts, &a), ==, XTC_OK);
+	munit_assert_int(xtc_app_shutdown(a, 0, 0, &rep), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_app_start(a, NULL, 0), ==, XTC_OK);
+	munit_assert_int(xtc_app_shutdown(a, -1, 0, NULL), ==, XTC_E_INVAL);
+	rep.size = sizeof rep.size;
+	munit_assert_int(xtc_app_shutdown(a, 0, 0, &rep), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_app_is_shutdown_msg(XTC_APP_SHUTDOWN_MSG,
+	    sizeof XTC_APP_SHUTDOWN_MSG), ==, 1);
+	munit_assert_int(xtc_app_is_shutdown_msg("x", 2), ==, 0);
+	/* Zero children: drains immediately, run returns. */
+	rep.size = sizeof rep;
+	munit_assert_int(xtc_app_shutdown(a, 0, 100 * MS, &rep), ==, XTC_OK);
+	munit_assert_int(rep.n_children, ==, 0);
+	munit_assert_int(xtc_app_shutdown(a, 0, 0, NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_app_run(a), ==, XTC_OK);
+	xtc_app_destroy(a);
+	return MUNIT_OK;
+}
+
+/* The opt-in helper drains on a self-sent SIGTERM, and restores the
+ * previous disposition on destroy. */
+static xtc_app_drain_report_t g_sig_rep;
+
+static void
+sig_sender(void *arg)
+{
+	(void)arg;
+	while (atomic_load(&g_dr_started) < 2)
+		(void)xtc_proc_sleep(1 * MS);
+	(void)kill(getpid(), SIGTERM);
+}
+
+static MunitResult
+test_app_drain_on_sigterm(const MunitParameter p[], void *d)
+{
+	xtc_app_t *a;
+	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_app_drain_report_t init = XTC_APP_DRAIN_REPORT_INIT;
+	xtc_child_spec_t kids[2];
+	struct sigaction before, after;
+	xtc_pid_t spid;
+	(void)p; (void)d;
+
+	atomic_store(&g_dr_hook_done, 0);
+	atomic_store(&g_dr_started, 0);
+	g_sig_rep = init;
+	opts.no_tuning_check = 1;
+	dr_spec(&kids[0], dr_polite, XTC_RESTART_PERMANENT);
+	dr_spec(&kids[1], dr_deaf, XTC_RESTART_PERMANENT);
+	munit_assert_int(sigaction(SIGTERM, NULL, &before), ==, 0);
+	munit_assert_int(xtc_app_create(&opts, &a), ==, XTC_OK);
+	munit_assert_int(xtc_app_start(a, kids, 2), ==, XTC_OK);
+	munit_assert_int(xtc_app_drain_on_signal(a, 100 * MS, 2000 * MS,
+	    &g_sig_rep), ==, XTC_OK);
+	munit_assert_int(xtc_app_drain_on_signal(a, 0, 0, NULL), ==,
+	    XTC_E_INVAL);                            /* one armed app */
+	munit_assert_int(xtc_proc_spawn(xtc_app_loop(a), sig_sender, NULL,
+	    NULL, &spid), ==, XTC_OK);
+	munit_assert_int(xtc_app_run(a), ==, XTC_OK);
+	munit_assert_int(g_sig_rep.n_children, ==, 2);
+	munit_assert_int(g_sig_rep.n_drained, ==, 1);
+	munit_assert_int(g_sig_rep.n_forced, ==, 1);
+	munit_assert_int(g_sig_rep.n_survivors, ==, 0);
+	munit_assert_int(atomic_load(&g_dr_hook_done), ==, 1);
+	xtc_app_destroy(a);
+	munit_assert_int(sigaction(SIGTERM, NULL, &after), ==, 0);
+	munit_assert_ptr(after.sa_handler, ==, before.sa_handler);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/app_basic", test_app_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/app_multiloop", test_app_multiloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/shutdown_drains", test_app_shutdown_drains, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/shutdown_forces", test_app_shutdown_forces, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/shutdown_masked_bounded", test_app_shutdown_masked_bounded, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/shutdown_multiloop", test_app_shutdown_multiloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/shutdown_inval", test_app_shutdown_inval, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/drain_on_sigterm", test_app_drain_on_sigterm, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/app", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
