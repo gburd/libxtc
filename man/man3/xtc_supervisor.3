@@ -143,7 +143,22 @@ signals; the supervisor exits when all are done.
 .Fn xtc_sup_join
 waits up to
 .Fa timeout_ns
-for the supervisor to exit.
+for the supervisor to exit, then frees it
+.Pq \-1 waits forever, 0 polls once .
+It returns
+.Dv XTC_OK
+once the supervisor has exited and been freed; the pointer is then
+invalid.
+If the supervisor is still running when the wait ends it returns
+.Er XTC_E_AGAIN
+and frees nothing: the pointer stays valid, so the caller can
+.Fn xtc_sup_stop
+it and join again.
+Call it from outside the supervisor's loop thread.
+Releases before 1.50 ignored the wait's result and freed the supervisor
+anyway, so a join that timed out returned
+.Dv XTC_OK
+and freed memory the still-running supervisor was using.
 .Sh SEE ALSO
 .Xr xtc_app 3 ,
 .Xr xtc_proc 3 ,

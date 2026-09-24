@@ -681,13 +681,25 @@ xtc_sup_stop(xtc_supervisor_t *sup)
  * outside the supervisor's loop thread (otherwise the loop can't
  * make progress during the wait).
  *
- * After a successful join the sup pointer is invalid.
+ * XTC_OK: the supervisor exited and is freed; the pointer is invalid.
+ * XTC_E_AGAIN: it is STILL RUNNING -- nothing was freed, the pointer
+ * stays valid, and the caller may stop it and join again.
+ *
+ * Before 1.50 the wait's result was discarded and the supervisor freed
+ * either way, so a join that timed out freed sup, its child table and
+ * its lock under the still-running supervisor proc: a heap-use-after-
+ * free at its next mailbox iteration (ASan: READ in __sup_entry of
+ * memory freed by xtc_sup_join), and XTC_OK returned for a supervisor
+ * that had not stopped.
  */
 int
 xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns)
 {
+	int rc;
+
 	if (sup == NULL) return XTC_E_INVAL;
-	(void)xtc_notify_wait(sup->stopped, timeout_ns);
+	if ((rc = xtc_notify_wait(sup->stopped, timeout_ns)) != XTC_OK)
+		return (rc == XTC_E_AGAIN) ? XTC_E_AGAIN : rc;   /* still running */
 
 	xtc_notify_destroy(sup->stopped);
 	__os_free(sup->children);

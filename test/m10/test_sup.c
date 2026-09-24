@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <time.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -595,6 +596,8 @@ run_overlap_case(xtc_restart_strategy_t strategy)
 	(void)xtc_sup_stop(sup);
 	(void)xtc_timer_set(loop, 300LL * 1000 * 1000, ov_stopper, loop, NULL);
 	(void)xtc_loop_run(loop);
+	/* The sup exited during that drain; join frees it (poll, it is done). */
+	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
@@ -613,11 +616,95 @@ test_rest_for_one_no_overlap(const MunitParameter p[], void *d)
 	return run_overlap_case(XTC_SUP_REST_FOR_ONE);
 }
 
+/* ---- xtc_sup_join on a supervisor that is still running ----
+ *
+ * A join that times out must NOT free the supervisor.  The joiner runs on
+ * a foreign thread while the loop runs the supervisor; it joins with a
+ * 50ms timeout (the sup will not stop by itself), and must get
+ * XTC_E_AGAIN with the supervisor still alive.  It then stops the sup and
+ * a second join succeeds.  Before the fix the first join returned XTC_OK
+ * and freed sup under the running supervisor proc (ASan: heap-use-after-
+ * free in __sup_entry); without ASan the rc assertion bites.
+ */
+static xtc_supervisor_t *g_join_sup;
+static int g_join_rc1 = 12345;
+static int g_join_alive_after = -1;
+static _Atomic int g_join_done;
+
+/* Watchdog: on the unfixed library the first join returns XTC_OK (having
+ * freed the sup), so nothing ever stops the PERMANENT worker and the loop
+ * would run forever.  Stop the loop after 3s so that case FAILS on the rc
+ * assertion instead of hanging; on the fixed path it exits as soon as the
+ * joiner is done, adding no delay. */
+static void
+join_watchdog(void *a)
+{
+	int i;
+	for (i = 0; i < 300 && !atomic_load(&g_join_done); i++)
+		(void)xtc_proc_sleep(10LL * 1000 * 1000);
+	if (!atomic_load(&g_join_done))
+		(void)xtc_loop_stop((xtc_loop_t *)a);
+}
+
+static void
+join_worker(void *a)
+{
+	(void)a;
+	for (;;)
+		(void)xtc_proc_sleep(5LL * 1000 * 1000);
+}
+
+static void *
+join_thread(void *a)
+{
+	struct timespec ts = { 0, 100 * 1000 * 1000 };
+	(void)a;
+	nanosleep(&ts, NULL);                        /* sup is running */
+	g_join_rc1 = xtc_sup_join(g_join_sup, 50LL * 1000 * 1000);
+	if (g_join_rc1 != XTC_OK) {
+		g_join_alive_after = xtc_sup_alive(g_join_sup);
+		(void)xtc_sup_stop(g_join_sup);          /* then the loop drains */
+	}
+	atomic_store(&g_join_done, 1);
+	return NULL;
+}
+
+static MunitResult
+test_join_timeout_keeps_sup(const MunitParameter p[], void *d)
+{
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t kids[1];
+	xtc_loop_t *loop = NULL;
+	pthread_t t;
+	(void)p; (void)d;
+
+	memset(kids, 0, sizeof kids);
+	kids[0].name = "w";
+	kids[0].fn = join_worker;
+	kids[0].policy = XTC_RESTART_PERMANENT;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &opts, kids, 1, &g_join_sup),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, join_watchdog, loop, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(pthread_create(&t, NULL, join_thread, NULL), ==, 0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)pthread_join(t, NULL);
+
+	munit_assert_int(g_join_rc1, ==, XTC_E_AGAIN);   /* not freed */
+	munit_assert_int(g_join_alive_after, ==, 1);     /* still running */
+	munit_assert_int(xtc_sup_join(g_join_sup, 1LL * 1000 * 1000 * 1000),
+	    ==, XTC_OK);                                 /* now it is */
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/one_for_all",           test_one_for_all,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/rest_for_one",          test_rest_for_one,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/one_for_all_no_overlap",  test_one_for_all_no_overlap,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/join_timeout_keeps_sup",  test_join_timeout_keeps_sup,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/rest_for_one_no_overlap", test_rest_for_one_no_overlap, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/intensity_exceeded",    test_intensity_exceeded,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/simple_one_for_one",    test_simple_one_for_one,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
