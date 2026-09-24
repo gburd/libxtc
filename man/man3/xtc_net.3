@@ -220,6 +220,25 @@ event ports backend.
 .It Windows
 Winsock2; UDS not supported.  TCP only.
 .El
+.Ss SIGPIPE
+A send to a peer that has closed never raises
+.Dv SIGPIPE ,
+so the library is safe without any process-wide signal setup: it
+returns an error instead.
+Every send in this API passes
+.Dv MSG_NOSIGNAL
+where the platform has it (Linux, the BSDs).
+On macOS, which lacks it, the stream sockets these functions create
+carry
+.Dv SO_NOSIGPIPE ;
+a descriptor the caller obtained elsewhere (for example from its own
+.Xr accept 2 )
+and passes to
+.Fn xtc_net_send_frame
+must have
+.Dv SO_NOSIGPIPE
+set by the caller.
+Releases before 1.50 let a send to a closed peer kill the process.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;

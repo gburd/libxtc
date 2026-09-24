@@ -146,10 +146,17 @@ on success;
 .Dv XTC_E_INVAL
 on bad argument;
 .Dv XTC_E_NOMEM
-on stack-allocation failure;
+on stack-allocation failure, including exhaustion of the process
+mapping limit (Linux
+.Va vm.max_map_count :
+each fiber stack is two mappings, so the stock 65530 admits about 32K
+live fibers);
 .Dv XTC_E_INTERNAL
-on platform failure
-.Pq getcontext / makecontext / mmap / mprotect .
+on any other platform failure
+.Pq getcontext / makecontext / mprotect .
+Releases before 1.50 returned
+.Dv XTC_E_INTERNAL
+when the guard-page mprotect hit the mapping limit.
 .Sh THREAD SAFETY
 M4 is single-thread.
 A coroutine spawned on a loop must run only on that loop's thread.
