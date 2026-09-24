@@ -27,6 +27,7 @@
 #include "xtc_proc.h"
 #include "proc_int.h"       /* __xtc_exit_self_kind */
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
+#include "os_sharp.h"      /* __os_env_get */
 
 #include <string.h>
 #include <pthread.h>
@@ -184,6 +185,15 @@ child_pump_proc(void *a)
 #include <sys/wait.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stdlib.h>
+#include <unistd.h>
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>   /* _NSGetExecutablePath */
+#endif
 
 /*
  * The fork'd child's osproc handle, shared by the xtc_xproc handle and
@@ -264,13 +274,68 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	return exit_code;
 }
 
-/* POSIX no-op: a fork'd child is not re-exec'd, so there is no sentinel
- * argv to detect.  Present so the symbol exists on every platform. */
+/*
+ * POSIX child re-entry for xtc_xspawn_entry.  The named-entry spawn
+ * re-execs THIS binary (see __xproc_self_exe) with the sentinel
+ *     --xtc-xproc-exec <entry> <ctrl_fd>
+ * and the control fd inherited open.  If the sentinel is present this
+ * receives the copied arg (the parent's first frame), resolves the entry
+ * in the fresh image's registry, runs xtc_xproc_child_main, and
+ * _exit()s -- never returning.  Otherwise it returns 0 and normal
+ * startup continues.  The same call Windows children need, so one line
+ * in main() serves both platforms.
+ */
+/*
+ * Set once this image has called xtc_xproc_win_child_maybe.  The re-exec
+ * path is used ONLY when it is set: a re-exec'd child runs this binary's
+ * main() from the top, so if main() never calls the hook the child would
+ * redo whatever the parent did -- including spawning more children, a
+ * fork bomb (hit in testing: a host without the hook OOM'd a 64 GB box in
+ * seconds).  A binary that calls the hook in the PARENT calls it in the
+ * child too (same binary, same main), so the flag proves the child will
+ * be caught.  Hosts that never call it keep the fork path unchanged.
+ */
+static _Atomic int __xproc_hook_seen;
+
 int
 xtc_xproc_win_child_maybe(int argc, char **argv)
 {
-	(void)argc; (void)argv;
-	return 0;
+	const char *entry;
+	xtc_xproc_root_fn fn;
+	void *arg = NULL;
+	size_t alen = 0;
+	long fd;
+	char fdbuf[16];
+	char *end = NULL;
+	int i, r;
+
+	atomic_store_explicit(&__xproc_hook_seen, 1, memory_order_release);
+	for (i = 1; i < argc; i++)
+		if (argv[i] != NULL && strcmp(argv[i], "--xtc-xproc-exec") == 0)
+			break;
+	if (i >= argc || (argc - i) < 2)
+		return 0;   /* not a child launch */
+	entry = argv[i + 1];
+	/* The control fd number: xtc_osproc_spawn's exec path publishes it
+	 * as XTC_CTRL_FD (the documented osproc contract). */
+	if (__os_env_get("XTC_CTRL_FD", fdbuf, sizeof fdbuf) != XTC_OK)
+		_exit(3);
+	fd = strtol(fdbuf, &end, 10);
+	if (end == fdbuf || *end != '\0' || fd < 0 || fd > 1 << 20)
+		_exit(3);
+	(void)xtc_net_setnonblock((int)fd);
+	/* First frame is the parent's copied arg (possibly empty). */
+	if (xtc_net_recv_frame((int)fd, &arg, &alen, 0,
+	    10LL * 1000 * 1000 * 1000) != XTC_OK)
+		_exit(3);
+	if ((fn = __xproc_lookup_entry(entry)) == NULL) {
+		if (arg != NULL) __os_free(arg);
+		_exit(4);   /* the entry is not registered in this image */
+	}
+	r = xtc_xproc_child_main((int)fd, fn, arg);
+	if (arg != NULL) __os_free(arg);
+	_exit(r & 0xff);
+	return r;   /* unreached */
 }
 
 /* osproc fn trampoline: what the child runs immediately after fork.
@@ -409,18 +474,112 @@ fail_p:
 	return rc;
 }
 
-/* POSIX xtc_xspawn_entry: resolve the registered entry name to its
- * function and delegate to the fork path.  (On Windows this is a
- * distinct re-exec implementation; see the _WIN32 block.) */
+/*
+ * POSIX xtc_xspawn_entry: RE-EXEC this binary and resolve the entry in
+ * the fresh image, as Windows does.
+ *
+ * It used to resolve the entry and fork straight into
+ * xtc_xproc_child_main -- standing a whole runtime up (malloc, mutex
+ * init, ring setup, the process-global proc-table lock) in the child of
+ * a multithreaded parent, where only async-signal-safe calls are legal.
+ * A parent thread holding one of those locks at fork wedged the child
+ * forever: reproduced, the child blocked in __xtc_mtx_lock(&__lt_lock)
+ * (proc.c __table_for) about once per 200 spawns while other threads
+ * created loops.  Re-exec gives the child a fresh image with no
+ * inherited lock state.  The fork child now only execve()s (through
+ * xtc_osproc_spawn's exec path, which prepares argv/envp pre-fork).
+ *
+ * The child side is xtc_xproc_win_child_maybe(argc, argv), which the
+ * hosting binary calls first thing in main() -- the requirement Windows
+ * always had.  Re-exec is used only once that hook has run in this image
+ * (see __xproc_hook_seen); a binary that never calls it keeps the old
+ * fork path, as does xtc_xspawn (raw function pointer).  The man page
+ * states the async-signal-safety caveat for both.
+ */
+static int
+__xproc_self_exe(char *buf, size_t bufsz)
+{
+#if defined(__linux__)
+	ssize_t n = readlink("/proc/self/exe", buf, bufsz - 1);
+	if (n <= 0 || (size_t)n >= bufsz - 1) return XTC_E_NOSYS;
+	buf[n] = '\0';
+	return XTC_OK;
+#elif defined(__FreeBSD__)
+	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+	size_t len = bufsz;
+	if (sysctl(mib, 4, buf, &len, NULL, 0) != 0 || len == 0)
+		return XTC_E_NOSYS;
+	return XTC_OK;
+#elif defined(__APPLE__)
+	uint32_t len = (uint32_t)bufsz;
+	if (_NSGetExecutablePath(buf, &len) != 0) return XTC_E_NOSYS;
+	return XTC_OK;
+#else
+	(void)buf; (void)bufsz;
+	return XTC_E_NOSYS;
+#endif
+}
+
 int
 xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
                  const void *arg, size_t arg_len, xtc_xproc_t **out)
 {
-	xtc_xproc_root_fn fn = __xproc_lookup_entry(entry);
+	struct xtc_xproc *p = NULL;
+	xtc_osproc_opts_t oo;
+	xtc_xproc_root_fn fn;
+	char exe[4096];
+	char *argv[4];
+	int rc;
+
 	if (out != NULL) *out = NULL;
 	if (loop == NULL || entry == NULL || out == NULL) return XTC_E_INVAL;
-	if (fn == NULL) return XTC_E_NOTFOUND;
-	return xtc_xspawn(loop, name, fn, arg, arg_len, out);
+	if (arg_len > 0 && arg == NULL) return XTC_E_INVAL;
+	/* Fail fast in the parent for an unknown name (same binary, same
+	 * registry): the child would only _exit(4) later. */
+	if ((fn = __xproc_lookup_entry(entry)) == NULL) return XTC_E_NOTFOUND;
+	/* No hook in this binary's main(): re-exec would re-run main() in
+	 * the child (see __xproc_hook_seen).  Keep the fork path, with its
+	 * documented async-signal-safety caveat.  Also the fallback where
+	 * this platform cannot name its own executable. */
+	if (!atomic_load_explicit(&__xproc_hook_seen, memory_order_acquire) ||
+	    __xproc_self_exe(exe, sizeof exe) != XTC_OK)
+		return xtc_xspawn(loop, name, fn, arg, arg_len, out);
+
+	if ((rc = __os_calloc(1, sizeof *p, (void **)&p)) != XTC_OK)
+		return rc;
+	if ((rc = __os_calloc(1, sizeof *p->hold, (void **)&p->hold)) != XTC_OK) {
+		__os_free(p);
+		return rc;
+	}
+	atomic_store_explicit(&p->hold->refs, 1, memory_order_relaxed);
+
+	/* The child finds its control fd in XTC_CTRL_FD, which osproc's
+	 * exec path sets in the pre-built envp. */
+	argv[0] = exe;
+	argv[1] = (char *)"--xtc-xproc-exec";
+	argv[2] = (char *)entry;
+	argv[3] = NULL;
+
+	memset(&oo, 0, sizeof oo);
+	oo.name = name;
+	oo.argv = argv;
+	oo.ctrl_socket = 1;
+	if ((rc = xtc_osproc_spawn(&oo, &p->os)) != XTC_OK) {
+		__os_free(p->hold);
+		__os_free(p);
+		return rc;
+	}
+	p->hold->os = p->os;
+	p->loop = loop;
+	p->ctrl_fd = xtc_osproc_ctrl_fd(p->os);
+
+	/* Ship the copied arg as the first frame (the child waits for it). */
+	if ((rc = xtc_net_send_frame(p->ctrl_fd, arg, arg_len)) != XTC_OK) {
+		xtc_xproc_destroy(p);   /* terminates + reaps the child */
+		return rc;
+	}
+	*out = p;
+	return XTC_OK;
 }
 
 /*

@@ -44,11 +44,15 @@
  *	fork() in a threaded process
  *	  An xtc executor has multiple loop + offload-pool threads.  fork
  *	  duplicates only the calling thread; locks held by other threads
- *	  are frozen in the child.  The exec path is therefore safe (the
- *	  child only does async-signal-safe work, then execs a fresh
- *	  image).  The fn (fork-only) path runs the callback in that
- *	  half-initialised child: the callback must restrict itself to
- *	  async-signal-safe work until it re-initialises its own runtime.
+ *	  are frozen in the child.  The exec path is therefore safe: the
+ *	  parent resolves the program path (the PATH search execvp would
+ *	  do) and formats XTC_CTRL_FD BEFORE fork, and the child only
+ *	  closes fds and execve()s -- no allocation, no setenv, no lock.
+ *	  (Before 1.50 the child called setenv and execvp, and wedged if a
+ *	  parent thread held libc's environment lock at fork.)  The fn
+ *	  (fork-only) path runs the callback in that half-initialised
+ *	  child: the callback must restrict itself to async-signal-safe
+ *	  work until it re-initialises its own runtime.
  */
 
 #ifndef XTC_OSPROC_H

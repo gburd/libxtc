@@ -19,6 +19,7 @@
 #include "xtc_net.h"
 #include "xtc_sim.h"
 #include "loop_int.h"   /* __xtc_current_loop: place the sim child fiber */
+#include "os_sharp.h"   /* __os_env_get / __os_strlcpy */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -29,6 +30,9 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+extern char **environ;   /* POSIX: the application declares it */
+
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -131,6 +135,152 @@ sim_child_main(void *a)
 	__os_free(ca);
 }
 
+/*
+ * Everything the exec child needs, prepared in the PARENT so the child
+ * does nothing but async-signal-safe work between fork and exec.
+ *
+ *   ctrl_kv  "XTC_CTRL_FD=<fd>", formatted here, published in the
+ *            child by __exec_child (see __exec_prep for why not setenv).
+ *   paths    candidate absolute paths for argv[0]: itself if it contains
+ *            a '/', else each PATH element + "/" + argv[0] -- the search
+ *            execvp would have done, but execvp may allocate and takes
+ *            no lock-free path, so it is resolved here instead.  The
+ *            child tries each with execve, which is async-signal-safe.
+ */
+struct exec_prep {
+	char  *ctrl_kv;   /* "XTC_CTRL_FD=<n>" or NULL (see __exec_prep) */
+	char **paths;     /* NULL-terminated candidate program paths */
+	char  *path_buf;  /* backing store for paths[] */
+};
+
+static void
+__exec_prep_free(struct exec_prep *xp)
+{
+	if (xp->ctrl_kv != NULL) __os_free(xp->ctrl_kv);
+	if (xp->paths != NULL) __os_free(xp->paths);
+	if (xp->path_buf != NULL) __os_free(xp->path_buf);
+	memset(xp, 0, sizeof *xp);
+}
+
+static int
+__exec_prep(const char *prog, int ctrl_fd, struct exec_prep *xp)
+{
+	size_t i, plen, n_dirs, blen;
+	char pathval[4096];
+	const char *d, *e;
+	char *w;
+	int rc;
+
+	if (prog == NULL || prog[0] == '\0')
+		return XTC_E_INVAL;
+
+	/* ---- control fd: passed via a fixed-size string, not setenv ----
+	 * The child used to setenv("XTC_CTRL_FD") after fork, which takes
+	 * libc's environment lock.  Instead the parent formats the value
+	 * NOW and the child builds its envp from its own environ plus this
+	 * string (see __exec_child) -- no putenv/setenv, which share the
+	 * same lock.  Also NOT a parent-side copy of environ: glibc's
+	 * environment lock is private, so walking environ from the parent
+	 * races any thread calling setenv directly -- tried, and ASan caught
+	 * the snapshot overflowing when an entry grew between the sizing and
+	 * copying passes.  The child's environ is its own after fork (no
+	 * other thread exists there), so it is read there, lock-free. */
+	if (ctrl_fd >= 0) {
+		if ((rc = __os_malloc(32, (void **)&xp->ctrl_kv)) != XTC_OK)
+			return rc;
+		(void)snprintf(xp->ctrl_kv, 32, "XTC_CTRL_FD=%d", ctrl_fd);
+	}
+
+	/* ---- program path candidates ---- */
+	plen = strlen(prog);
+	if (strchr(prog, '/') != NULL) {
+		n_dirs = 1;
+		pathval[0] = '\0';
+	} else {
+		/* PATH lookup the way execvp does it; default like glibc. */
+		if (__os_env_get("PATH", pathval, sizeof pathval) != XTC_OK ||
+		    pathval[0] == '\0')
+			(void)__os_strlcpy(pathval, "/bin:/usr/bin", sizeof pathval);
+		for (n_dirs = 1, d = pathval; *d != '\0'; d++)
+			if (*d == ':')
+				n_dirs++;
+	}
+	/* n_dirs <= sizeof pathval, so bounding plen bounds the product. */
+	if (plen > 65536) {
+		rc = XTC_E_RANGE;
+		goto fail;
+	}
+	blen = n_dirs * (plen + 2) + strlen(pathval) + 1;
+	if ((rc = __os_calloc(n_dirs + 1, sizeof(char *),
+	    (void **)&xp->paths)) != XTC_OK)
+		goto fail;
+	if ((rc = __os_malloc(blen, (void **)&xp->path_buf)) != XTC_OK)
+		goto fail;
+	w = xp->path_buf;
+	if (strchr(prog, '/') != NULL) {
+		memcpy(w, prog, plen + 1);
+		xp->paths[0] = w;
+	} else {
+		for (i = 0, d = pathval; i < n_dirs; i++) {
+			size_t dl;
+			e = strchr(d, ':');
+			dl = (e != NULL) ? (size_t)(e - d) : strlen(d);
+			xp->paths[i] = w;
+			if (dl == 0) {          /* empty element = current dir */
+				*w++ = '.';
+			} else {
+				memcpy(w, d, dl);
+				w += dl;
+			}
+			*w++ = '/';
+			memcpy(w, prog, plen + 1);
+			w += plen + 1;
+			d = (e != NULL) ? e + 1 : d + dl;
+		}
+	}
+	return XTC_OK;
+fail:
+	__exec_prep_free(xp);
+	return rc;
+}
+
+/*
+ * Child side, post-fork: build the envp and execve each candidate.
+ *
+ * Async-signal-safe only: no allocation, no locks.  After fork the child
+ * is single-threaded and its environ is a private copy, so reading it is
+ * safe here (it is NOT safe in the parent, where any thread may setenv).
+ * The envp is a bounded array on this (child) stack: the inherited
+ * entries minus any old XTC_CTRL_FD, plus xp->ctrl_kv.  An environment
+ * with more than XTC_EXEC_ENV_MAX entries is truncated rather than
+ * allocated for -- far beyond any real environment, and the only
+ * alternative (malloc) is exactly what must not happen here.
+ * Returns only if every candidate failed (the caller _exit(127)s).
+ */
+#define XTC_EXEC_ENV_MAX 4096
+static void
+__exec_child(const struct exec_prep *xp, char *const argv[])
+{
+	char *envp[XTC_EXEC_ENV_MAX + 2];
+	char **ev = environ;
+	int i, j = 0;
+
+	for (i = 0; ev != NULL && ev[i] != NULL && j < XTC_EXEC_ENV_MAX; i++) {
+		/* An open-coded prefix test: strncmp is not on the POSIX
+		 * async-signal-safe list. */
+		const char *k = ev[i], *pfx = "XTC_CTRL_FD=";
+		while (*pfx != '\0' && *k == *pfx) { k++; pfx++; }
+		if (xp->ctrl_kv != NULL && *pfx == '\0')
+			continue;
+		envp[j++] = ev[i];
+	}
+	if (xp->ctrl_kv != NULL)
+		envp[j++] = xp->ctrl_kv;
+	envp[j] = NULL;
+	for (i = 0; xp->paths != NULL && xp->paths[i] != NULL; i++)
+		(void)execve(xp->paths[i], argv, envp);
+}
+
 static int
 __pidfd_open(pid_t pid)
 {
@@ -148,10 +298,12 @@ int
 xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out)
 {
 	struct xtc_osproc *p;
+	struct exec_prep xp;
 	int sv[2] = { -1, -1 };
 	int rc;
 	pid_t pid;
 
+	memset(&xp, 0, sizeof xp);
 	if (out == NULL || opts == NULL)
 		return XTC_E_INVAL;
 	*out = NULL;
@@ -210,11 +362,41 @@ xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out)
 			__os_free(p);
 			return XTC_E_INTERNAL;
 		}
+#if defined(SO_NOSIGPIPE)
+		/* Where send() has no MSG_NOSIGNAL (macOS), a write to a dead
+		 * child must return EPIPE, not kill the parent. */
+		{
+			int one = 1;
+			(void)setsockopt(sv[0], SOL_SOCKET, SO_NOSIGPIPE, &one,
+			    sizeof one);
+			(void)setsockopt(sv[1], SOL_SOCKET, SO_NOSIGPIPE, &one,
+			    sizeof one);
+		}
+#endif
+	}
+
+	/*
+	 * Exec path: build the child's environment NOW, in the parent.
+	 * The child used to snprintf + setenv("XTC_CTRL_FD") between fork
+	 * and exec; setenv takes libc's environment lock and may allocate,
+	 * and a parent thread holding that lock at the moment of fork left
+	 * the child wedged in __add_to_environ forever (reproduced 5/5 with
+	 * threads doing setenv/unsetenv).  Only async-signal-safe calls are
+	 * legal there, so everything the child needs -- the envp and the
+	 * resolved program path -- is prepared here and it just execve()s.
+	 */
+	if (opts->argv != NULL &&
+	    (rc = __exec_prep(opts->argv[0], opts->ctrl_socket ? sv[1] : -1,
+	    &xp)) != XTC_OK) {
+		if (sv[0] >= 0) { (void)close(sv[0]); (void)close(sv[1]); }
+		__os_free(p);
+		return rc;
 	}
 
 	pid = fork();
 	if (pid < 0) {
 		if (sv[0] >= 0) { (void)close(sv[0]); (void)close(sv[1]); }
+		__exec_prep_free(&xp);
 		__os_free(p);
 		return XTC_E_INTERNAL;
 	}
@@ -244,20 +426,16 @@ xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out)
 			int r = opts->fn(child_fd, opts->arg);
 			_exit(r & 0xff);
 		}
-		/* exec path: publish the control fd in the environment so the
-		 * new image can find it; it is intentionally not CLOEXEC. */
-		if (child_fd >= 0) {
-			char buf[32];
-			(void)snprintf(buf, sizeof buf, "%d", child_fd);
-			(void)setenv("XTC_CTRL_FD", buf, 1);
-		}
+		/* exec path.  The control fd (intentionally not CLOEXEC) is
+		 * published as XTC_CTRL_FD in xp.envp, built by the parent. */
 		/* Do not leak the parent's fds (loop/epoll/uring, sockets, TLS,
 		 * embedder fds) into the exec'd image; keep only std{in,out,err}
 		 * and the control fd.  Defense in depth at the exec boundary. */
 		__child_close_fds_from(3, child_fd);
-		(void)execvp(opts->argv[0], opts->argv);
+		__exec_child(&xp, opts->argv);  /* execve only; never returns */
 		_exit(127);                     /* exec failed */
 	}
+	__exec_prep_free(&xp);
 
 	/* ---- parent ---- */
 	p->pid = pid;

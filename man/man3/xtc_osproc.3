@@ -134,7 +134,21 @@ handler, so it does not collide with an embedder's signal handling.
 An xtc executor is multi-threaded;
 .Xr fork 2
 duplicates only the calling thread.
-The exec path is therefore safe.
+The exec path is therefore safe: the parent resolves the program path
+(the
+.Ev PATH
+search
+.Xr execvp 3
+would do) and formats
+.Ev XTC_CTRL_FD
+before forking, and the child only closes descriptors and calls
+.Xr execve 2 .
+Releases before 1.50 called
+.Xr setenv 3
+and
+.Xr execvp 3
+in the child, which could deadlock it if another parent thread held the
+C library's environment lock at the moment of the fork.
 A
 .Va fn
 (fork-only) callback runs in a half-initialised child and must
