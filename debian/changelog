@@ -51,6 +51,9 @@ libxtc (1.50.0-1) unstable; urgency=medium
       init failed; a shutdown that left a survivor leaked the
       supervisor.
     - clang 15 builds the ThreadSanitizer configuration again.
+    - BoringSSL: clearing a connection's host name crashed; it now
+      returns XTC_E_NOSYS when a name was set (the old name stays
+      enforced) because BoringSSL cannot remove one.
   * New APIs: xtc_app_shutdown and xtc_app_drain_on_signal (bounded
     graceful drain); xtc_cfg_get_string_copy; xtc_res_attach_mctx and
     xtc_res_attach_net (opt-in MEM_BYTES / FDS metering).
