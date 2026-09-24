@@ -174,19 +174,19 @@ Then talk to it with `redis-cli` like any Redis server.
 Other examples in `examples/` (the full list, with per-example design
 notes, is [`examples/README.md`](examples/README.md)):
 
-| Example | What it shows |
-|---|---|
-| `01_hello_async.c` | A single async task with a timer |
-| `02_proc_pingpong.c` | Two BEAM processes bouncing messages |
-| `03_supervised_app.c` | Crash a worker, watch the supervisor restart it |
-| `04_lockmgr_demo.c` | The 9-mode transactional lock manager, with a pluggable (randomized) deadlock-victim policy |
-| `05_rexis/` | Networked, budgeted, multi-command Redis-compat server |
-| `06_sqlxtc/` | A from-scratch SQL engine (parser, vectorized executor, B-link + buffer pool + WAL) |
-| `07_kaka/` | Kafka-shaped partitioned log broker with credit backpressure |
-| `08_tnt/` | The Isolate layer: thread-per-core stackless state machines, TCP echo |
-| `09_pgmock/` | A mock PostgreSQL backend on the xtc scheduler -- zero PG source |
-| `10_circuit_breaker.c` | The circuit-breaker pattern as an `xtc_fsm` (gen_statem) |
-| `11_lorb/` | A price-time limit order book / matching engine, with benchmarks |
+| Example | What it shows | Gated by |
+|---|---|---|
+| `01_hello_async.c` | A single async task with a timer | `make check` (runs) |
+| `02_proc_pingpong.c` | Two BEAM processes bouncing messages | `make check` (runs, asserts) |
+| `03_supervised_app.c` | Crash a worker, watch the supervisor restart it | `make check` (runs) |
+| `04_lockmgr_demo.c` | The 9-mode transactional lock manager, with a pluggable (randomized) deadlock-victim policy | `make check` (runs) |
+| `05_rexis/` | Networked, budgeted, multi-command Redis-compat server | CI `make check-rexis` (RESP, loopback, measured budgets) |
+| `06_sqlxtc/` | A from-scratch SQL engine (parser, vectorized executor, B-link + buffer pool + WAL) | CI (in-process tests, differential oracle vs sqlite3) |
+| `07_kaka/` | Kafka-shaped partitioned log broker with credit backpressure | CI (in-process tests) |
+| `08_tnt/` | The Isolate layer: thread-per-core stackless state machines, TCP echo | `make check` (built, `--help` lint) |
+| `09_pgmock/` | A mock PostgreSQL backend on the xtc scheduler -- zero PG source | CI (built, `--help` lint only -- not run) |
+| `10_circuit_breaker.c` | The circuit-breaker pattern as an `xtc_fsm` (gen_statem) | `make check` (runs, asserts) |
+| `11_lorb/` | A price-time limit order book / matching engine, with benchmarks | CI (in-process tests) |
 
 ## Built on three traditions
 
