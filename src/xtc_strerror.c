@@ -116,6 +116,8 @@ xtc_clock_real(void)
 	return ns;
 }
 
+/* XTC_OK; XTC_E_INVAL (no sleep) for ns < 0; XTC_E_INTERNAL if the
+ * OS sleep fails other than by EINTR (which resumes).  xtc_free(3). */
 int
 xtc_sleep_ns(int64_t ns)
 {

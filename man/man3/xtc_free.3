@@ -161,9 +161,22 @@ on failure.
 .Fn xtc_sleep_ns
 returns
 .Dv XTC_OK
-or a negative
-.Dv XTC_E_*
-code.
+after sleeping at least
+.Fa ns
+nanoseconds
+.Pq a signal interruption resumes the remaining sleep ,
+.Dv XTC_E_INVAL
+.Pq -1
+without sleeping for a negative
+.Fa ns ,
+or
+.Dv XTC_E_INTERNAL
+if the underlying sleep call fails for any other reason.
+A zero
+.Fa ns
+returns
+.Dv XTC_OK
+at once.
 .Fn xtc_atomic_i64_load
 returns the current value;
 .Fn xtc_atomic_i64_add

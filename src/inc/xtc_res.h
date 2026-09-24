@@ -119,11 +119,19 @@ XTC_API void xtc_res_release(xtc_res_t *r, xtc_res_kind_t k, int64_t n);
 XTC_API int64_t xtc_res_used(const xtc_res_t *r, xtc_res_kind_t k);
 XTC_API int64_t xtc_res_high(const xtc_res_t *r, xtc_res_kind_t k);
 XTC_API int64_t xtc_res_rejects(const xtc_res_t *r, xtc_res_kind_t k);
+
+/* Set one kind's cap at runtime; 0 = no cap.  Returns nothing, so an
+ * invalid argument (NULL r, bad kind, NEGATIVE cap) is ignored and the
+ * existing cap is kept.  Releases before 1.50 stored a negative cap,
+ * which then read as "no cap" -- silently unbounded.  (A negative cap
+ * passed in the caps struct to xtc_res_init still means no cap.) */
 XTC_API void xtc_res_set_cap(xtc_res_t *r, xtc_res_kind_t k, int64_t cap);
 
 /* Configure a high-water alert.  Fires `fn(kind, used, cap, user)`
  * once when `used >= pct * cap` for the named resource; re-arms
- * when used drops below.  pct in (0.0, 1.0).  Pass fn=NULL to
+ * when used drops below.  pct must lie in the OPEN interval
+ * (0.0, 1.0); 0, 1.0, anything outside, or NaN is XTC_E_INVAL
+ * (releases before 1.50 accepted 0 and 1.0).  Pass fn=NULL to
  * disable.  Per-resource: alerts are independent.
  *
  * PUBLIC: int  xtc_res_set_alert __P((xtc_res_t *, xtc_res_kind_t, double));

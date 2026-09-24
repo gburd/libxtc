@@ -180,7 +180,13 @@ int64_t xtc_res_rejects(const xtc_res_t *r, xtc_res_kind_t k) {
 }
 /* PUBLIC: void xtc_res_set_cap __P((xtc_res_t *, xtc_res_kind_t, int64_t)); */
 void xtc_res_set_cap(xtc_res_t *r, xtc_res_kind_t k, int64_t cap) {
-	if (r == NULL || (int)k < 0 || (int)k >= XTC_RES__COUNT) return;
+	/* void return (frozen signature), so a bad argument cannot be
+	 * reported: it is IGNORED.  A negative cap used to be stored and
+	 * then read as "no cap" (acquire tests cap > 0), silently making
+	 * the kind unbounded; it now leaves the existing cap unchanged.
+	 * 0 remains the documented, deliberate "no cap". */
+	if (r == NULL || (int)k < 0 || (int)k >= XTC_RES__COUNT || cap < 0)
+		return;
 	switch (k) {
 	case XTC_RES_TASKS:       r->caps.tasks      = cap; break;
 	case XTC_RES_CHANNELS:    r->caps.channels   = cap; break;
@@ -198,7 +204,11 @@ xtc_res_set_alert(xtc_res_t *r, xtc_res_kind_t k, double pct)
 {
 	if (r == NULL || (int)k < 0 || (int)k >= XTC_RES__COUNT)
 		return XTC_E_INVAL;
-	if (pct < 0.0 || pct > 1.0) return XTC_E_INVAL;
+	/* The documented domain is the OPEN interval (0.0, 1.0).  0 would
+	 * silently mean "disabled" (the acquire path skips pct <= 0) and
+	 * 1.0 fires only at the cap, where the acquire is already being
+	 * refused.  `!(pct > 0.0 && pct < 1.0)` also rejects NaN. */
+	if (!(pct > 0.0 && pct < 1.0)) return XTC_E_INVAL;
 	r->alert_pct[k] = pct;
 	atomic_store_explicit(&r->alert_armed[k], 1, memory_order_release);
 	return XTC_OK;
