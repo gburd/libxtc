@@ -125,6 +125,7 @@ clean:
 	rm -f test_pcache test_pcache_amalg test_pcache.o
 	rm -f test_concurrency test_concurrency.o
 	rm -f test_admin test_admin.o admin.o
+	rm -f test_quack_range
 	rm -f test_mem test_mem.o
 	rm -f test_wal test_wal.o wal.o
 	rm -f test_wal_recover
@@ -164,7 +165,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -233,6 +234,13 @@ test_admin: test_admin.c admin.o quack.o
 
 test-admin: test_admin
 	./test_admin
+
+# ---- Quack integer range test (PLAN 19.27.23; in-process, no daemon) ----
+test_quack_range: test_quack_range.c quack.o
+	$(CC) $(CFLAGS) -o $@ test_quack_range.c quack.o
+
+test-quack-range: test_quack_range
+	./test_quack_range
 
 # ---- xtc-allocator SQLite-memory seam test (in-process, no daemon) ----
 # Installs the xtc allocator under an __os_alloc counting hook, then
@@ -542,7 +550,7 @@ test-sql-parse: ../../test/sqlxtc/test_sql_parse
         sql_parse.o $(LIME_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< sql_parse.o $(LIME_OBJ)
 
-.PHONY: test-quack test-sql-parse-par-ord-join-run test-oracle test-compat
+.PHONY: test-quack test-quack-range test-sql-parse-par-ord-join-run test-oracle test-compat
 
 # ---- NUMA buffer-pool sharing-degree PREMISE PROBE (research spike) ----
 # Builds bufmgr with the BM_ACCESS_PROBE hook enabled and links the probe.
