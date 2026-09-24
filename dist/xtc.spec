@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.49.5
+Version:        1.50.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,20 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Thu Sep 24 2026 Greg Burd <greg@burd.me> - 1.50.0-1
+- Production-readiness release (PLAN.md 19.27).  MINOR: contract changes
+  and new APIs.  Behavior changes: a TLS CLIENT verifies by default (opt
+  out with XTC_TLS_VERIFY_NONE); xtc_sup_join returns XTC_E_AGAIN for a
+  live supervisor; several error codes made consistent (see
+  debian/changelog).
+- Fixes two lock-manager mutual-exclusion violations (since 1.0), an
+  xproc use-after-free and missing reap, fork-without-exec child wedges,
+  SIGPIPE killing the host on all TLS backends and in xtc_net, TLS
+  host-name checks on GnuTLS/wolfSSL/mbedTLS, supervisor cleanup
+  overlap, and an allocator mismatch leaking park timers.
+- New: xtc_app_shutdown, xtc_app_drain_on_signal,
+  xtc_cfg_get_string_copy, xtc_res_attach_mctx, xtc_res_attach_net.
+
 * Mon Sep 22 2026 Greg Burd <greg@burd.me> - 1.49.5-1
 - Fixes three real data races on the fiber-migration path, found by
   auditing ThreadSanitizer on the io_uring backend -- a configuration CI
