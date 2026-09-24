@@ -97,6 +97,25 @@ last non-GET request and reports the retained prefix in `*out_executed`
 (340574c, PLAN.md 19.27.5).  The frozen lock ABI is byte-identical to
 1.0.0.
 
+## OPEN: select backend -- migratable fibers in timed xtc_proc_wait_fd can strand
+
+**Status:** OPEN as of 1.50.0; present in 1.49.5 (same result on the
+7763850 baseline), found by the 1.50 release qualification's backend
+sweep.  The select backend is a portability fallback; epoll, io_uring,
+kqueue and poll are unaffected.
+
+`test/m5/test_exec.c` `/m5/exec/Blk6_migratable_waitfd_resume` hangs 6/6
+on `--with-io-backend=select`: 16 migratable fibers spawned on one of 8
+loops, each parking in `xtc_proc_wait_fd` with a 2 ms timeout on a pipe
+that is never written, while peers steal them.  After a few iterations
+the executor stops making progress (6 of 16 fibers finish) with every
+loop blocked in `select(2)`; the same test passes on poll (6/6) and on
+every other backend.  The rest of `make check` passes on select.
+
+**Workaround:** use poll (the closest portable backend) when fibers are
+migratable and park on fds with timeouts; select remains fine for
+pinned (default) fibers.
+
 ## OPEN: timed waits retain memory until the loop is torn down
 
 **Status:** OPEN as of 1.50.0; same class as the fiber retention below.
