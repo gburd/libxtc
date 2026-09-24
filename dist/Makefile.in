@@ -961,12 +961,21 @@ examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_brea
 # deliberately: it binds a fixed TCP port and is timing-fragile (see its own
 # target comment).  04_lockmgr_demo runs a randomized deadlock workload and
 # takes a few seconds, which is acceptable for the coverage it buys.
-check-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker
+#
+# Then the --help lint (examples/check_help.sh): every example binary,
+# INCLUDING the tnt_echo server, must exit 0 within 2 s printing a usage
+# line.  tnt_echo used to atoi("--help") into "listen on 7777" and block
+# forever.  (05_rexis is linted by check-rexis; 06/07/09/11, built by
+# their own Makefiles, by the CI examples job.)
+check-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo
 	@for t in 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo \
 	          10_circuit_breaker; do \
 		printf 'running example: %s\n' "$$t"; \
 		./$$t >/dev/null || { echo "  [examples] FAIL: $$t exited non-zero"; exit 1; }; \
 	done; \
+	sh $(srcdir)/../examples/check_help.sh ./01_hello ./02_pingpong \
+	    ./03_supervised_app ./04_lockmgr_demo ./10_circuit_breaker \
+	    ./tnt_echo || exit 1; \
 	echo "  [examples] OK: teaching examples build and run clean"
 
 01_hello: $(srcdir)/../examples/01_hello_async.c $(STATIC_LIB)
@@ -1027,6 +1036,7 @@ check-rexis: $(REXIS_BINS)
 			echo "  [rexis] FAIL: $$t (log follows)"; cat $$t.log; exit 1; }; \
 		grep -E '^  (memory|keys|clients|iops|cores):' $$t.log || true; \
 	done; \
+	sh $(srcdir)/../examples/check_help.sh ./rexis-server-xtc; \
 	echo "  [rexis] OK: 05_rexis server + test/m99 suite"
 
 rexis-server-xtc: $(REXIS_SRCS) $(REXIS_HDRS) $(STATIC_LIB)

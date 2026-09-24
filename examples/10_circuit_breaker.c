@@ -202,12 +202,20 @@ driver_proc(void *arg)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_fsm_t *fsm = NULL;
 	struct breaker b;
 	struct driver_args da;
+
+	if (argc > 1 && strcmp(argv[1], "--help") == 0) {
+		printf("usage: %s\n"
+		    "Drives a circuit breaker (xtc_fsm) through closed -> open "
+		    "-> half-open -> closed; exits 0 iff every transition is "
+		    "observed.\n", argv[0]);
+		return 0;
+	}
 
 	memset(&b, 0, sizeof b);
 	if (xtc_loop_init(&loop) != XTC_OK) {

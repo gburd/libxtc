@@ -269,9 +269,9 @@ setup_signals(void)
 }
 
 static void
-usage(const char *prog)
+usage(FILE *fp, const char *prog)
 {
-	fprintf(stderr,
+	fprintf(fp,
 	    "Usage: %s [options]\n"
 	    "\nsqlxtc: a networked, threaded SQL engine built on libxtc.\n\n"
 	    "Options:\n"
@@ -341,8 +341,8 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		case OPT_STORAGE_ADAPTIVE: cfg->storage_adaptive = 1; break;
 		case 'v': cfg->verbose = 1; break;
 		case OPT_NO_SHARED: cfg->shared_handle = 0; break;
-		case OPT_HELP:
-		default: usage(argv[0]); return -1;
+		case OPT_HELP: usage(stdout, argv[0]); return 1;
+		default: usage(stderr, argv[0]); return -1;
 		}
 	}
 	return 0;
@@ -361,7 +361,8 @@ main(int argc, char **argv)
 	xtc_pid_t metrics_pid;
 	int rc;
 
-	if (parse_args(argc, argv, &cfg) < 0) return 1;
+	/* 1 = --help (success), -1 = bad option (usage already printed). */
+	if ((rc = parse_args(argc, argv, &cfg)) != 0) return rc > 0 ? 0 : 1;
 	srv->cfg = cfg;
 	atomic_init(&srv->conn_count, 0);
 	atomic_init(&srv->queries_total, 0);

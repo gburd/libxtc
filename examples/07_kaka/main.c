@@ -111,9 +111,9 @@ listener_proc(void *arg)
 }
 
 static void
-usage(const char *prog)
+usage(FILE *fp, const char *prog)
 {
-	fprintf(stderr,
+	fprintf(fp,
 	    "Usage: %s [options]\n"
 	    "\n"
 	    "kaka -- a Kafka-shaped log broker on libxtc (Phase 0 scaffold)\n"
@@ -137,7 +137,7 @@ parse_args(int argc, char **argv, broker_cfg_t *cfg)
 		{ "dir",         required_argument, NULL, 'd' },
 		{ "max-memory",  required_argument, NULL, 'm' },
 		{ "max-clients", required_argument, NULL, 'n' },
-		{ "help",        no_argument,       NULL, '?' },
+		{ "help",        no_argument,       NULL, 'H' },
 		{ NULL, 0, NULL, 0 }
 	};
 	int c;
@@ -151,9 +151,11 @@ parse_args(int argc, char **argv, broker_cfg_t *cfg)
 		case 'd': cfg->log_dir = optarg; break;
 		case 'm': cfg->max_memory = atoll(optarg); break;
 		case 'n': cfg->max_clients = atoi(optarg); break;
-		case '?':
+		case 'H':
+			usage(stdout, argv[0]);
+			return 1;
 		default:
-			usage(argv[0]);
+			usage(stderr, argv[0]);
 			return -1;
 		}
 	}
@@ -170,9 +172,11 @@ main(int argc, char **argv)
 	xtc_app_opts_t     app_opts = { 0 };
 	xtc_child_spec_t   kids[1];
 	xtc_tcp_opts_t     tcp_opts = XTC_TCP_OPTS_DEFAULT;
+	int                rc;
 
-	if (parse_args(argc, argv, &cfg) != 0)
-		return 1;
+	/* 1 = --help (success), -1 = bad option (usage already printed). */
+	if ((rc = parse_args(argc, argv, &cfg)) != 0)
+		return rc > 0 ? 0 : 1;
 
 	if ((b = xtc_calloc(1, sizeof *b)) == NULL) {
 		fprintf(stderr, "oom\n");

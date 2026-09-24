@@ -26,6 +26,7 @@
 #define _GNU_SOURCE
 #endif
 #include <errno.h>
+#include <getopt.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -221,24 +222,105 @@ listen_thread(void *arg)
 	return NULL;
 }
 
+static void
+usage(FILE *fp, const char *prog)
+{
+	fprintf(fp,
+	    "Usage: %s [-p PORT] [-s SHARDS] [PORT [SHARDS]]\n"
+	    "\n"
+	    "tnt echo server: every accepted TCP connection on 127.0.0.1 is\n"
+	    "its own Isolate; bytes received are sent back.\n"
+	    "\n"
+	    "  -p, --port=PORT      listen port, 1..65535 (default 7777)\n"
+	    "  -s, --shards=N       shard count, 1..8 (default 1)\n"
+	    "      --help           show this help and exit\n"
+	    "\n"
+	    "PORT and SHARDS may also be given positionally.  Stop with\n"
+	    "SIGINT or SIGTERM.\n",
+	    prog);
+}
+
+/* A decimal in [lo, hi], or -1.  atoi would turn "--help" into port 0
+ * (then silently 7777) and "abc" into 0. */
+static long
+parse_range(const char *what, const char *s, long lo, long hi)
+{
+	char *end;
+	long v;
+
+	errno = 0;
+	v = strtol(s, &end, 10);
+	if (errno != 0 || end == s || *end != '\0' || v < lo || v > hi) {
+		fprintf(stderr, "echo: invalid %s '%s' (want %ld..%ld)\n",
+		    what, s, lo, hi);
+		return -1;
+	}
+	return v;
+}
+
+/* 0 = run, 1 = --help shown, -1 = bad arguments (usage on stderr). */
+static int
+parse_args(int argc, char **argv, int *port, int *shards)
+{
+	enum { OPT_HELP = 1000 };
+	static const struct option longopts[] = {
+		{ "port",   required_argument, NULL, 'p' },
+		{ "shards", required_argument, NULL, 's' },
+		{ "help",   no_argument,       NULL, OPT_HELP },
+		{ NULL, 0, NULL, 0 }
+	};
+	long v;
+	int c;
+
+	while ((c = getopt_long(argc, argv, "p:s:", longopts, NULL)) != -1) {
+		switch (c) {
+		case 'p':
+			if ((v = parse_range("port", optarg, 1, 65535)) < 0)
+				return -1;
+			*port = (int)v;
+			break;
+		case 's':
+			if ((v = parse_range("shard count", optarg, 1, 8)) < 0)
+				return -1;
+			*shards = (int)v;
+			break;
+		case OPT_HELP:
+			usage(stdout, argv[0]);
+			return 1;
+		default:
+			usage(stderr, argv[0]);
+			return -1;
+		}
+	}
+	/* Positional form, kept for test/tnt/test_tnt_echo.sh. */
+	if (optind < argc) {
+		if ((v = parse_range("port", argv[optind++], 1, 65535)) < 0)
+			return -1;
+		*port = (int)v;
+	}
+	if (optind < argc) {
+		if ((v = parse_range("shard count", argv[optind++], 1, 8)) < 0)
+			return -1;
+		*shards = (int)v;
+	}
+	if (optind < argc) {
+		usage(stderr, argv[0]);
+		return -1;
+	}
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
 	xtc_tnt_spec_t spec;
 	xtc_tcp_opts_t topts = XTC_TCP_OPTS_DEFAULT;
 	pthread_t lt;
-	int shards = 1;
+	int port = 7777, shards = 1, rc;
 
-	if (argc > 1)
-		g_port = atoi(argv[1]);
-	if (g_port == 0)
-		g_port = 7777;
-	if (argc > 2)
-		shards = atoi(argv[2]);
-	if (shards < 1)
-		shards = 1;
-	if (shards > 8)
-		shards = 8;
+	if ((rc = parse_args(argc, argv, &port, &shards)) != 0)
+		return rc > 0 ? 0 : 2;
+	g_port = port;
 	g_shards = shards;
 
 	atomic_init(&g_next_shard, 0);

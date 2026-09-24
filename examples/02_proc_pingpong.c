@@ -93,11 +93,18 @@ ping(void *arg)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
 	xtc_loop_t *loop;
 	struct ping_state st;
 	xtc_pid_t pong_pid, ping_pid;
+
+	if (argc > 1 && strcmp(argv[1], "--help") == 0) {
+		printf("usage: %s\n"
+		    "Two processes bounce a counter 100 times; exits 0 iff all "
+		    "100 rounds completed.\n", argv[0]);
+		return 0;
+	}
 
 	if (xtc_loop_init(&loop) != XTC_OK) return 1;
 	if (xtc_proc_spawn(loop, pong, NULL, NULL, &pong_pid) != XTC_OK) return 1;
