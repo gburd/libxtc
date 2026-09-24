@@ -199,6 +199,11 @@ struct xtc_timer {
 	                             * this timer's deadline (bump at most
 	                             * once so a late fire cannot spin);
 	                             * always 0 outside sim. */
+	int          from_slab;     /* 1: from loop->timer_slab (xtc_timer_set);
+	                             * 0: __os_calloc (the park timers of
+	                             * xtc_task_park_on_timer / wait_fd).  Both
+	                             * kinds sit on all_timers, and loop_fini
+	                             * must free each with ITS allocator. */
 	xtc_loop_t  *loop;          /* back-pointer for cancel-by-handle */
 	struct xtc_timer *all_next; /* per-loop linked list for cleanup */
 };

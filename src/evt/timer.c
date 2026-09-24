@@ -189,6 +189,7 @@ xtc_timer_set(xtc_loop_t *loop, int64_t delay_ns, xtc_timer_fn fn, void *user,
 	t->fired = 0;
 	t->heap_idx = -1;
 	t->loop = loop;
+	t->from_slab = 1;
 
 	if ((rc = __xtc_timer_heap_push(loop, t)) != XTC_OK) {
 		xtc_slab_free((struct xtc_slab *)loop->timer_slab, t);

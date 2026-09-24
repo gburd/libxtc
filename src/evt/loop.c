@@ -287,9 +287,19 @@ xtc_loop_fini(xtc_loop_t *loop)
 		 * allocation source. */
 		__os_free(t);
 	}
+	/*
+	 * all_timers holds nodes from TWO allocators: xtc_timer_set takes
+	 * them from the loop's timer slab, while the park timers behind
+	 * xtc_proc_sleep / recv / wait_fd timeouts come from __os_calloc.
+	 * This used to pick the allocator by "does the loop HAVE a slab", so
+	 * once any xtc_timer_set had created one, every calloc'd park timer
+	 * was handed to xtc_slab_free -- pushed onto the slab's free list as
+	 * a foreign pointer and lost when the slab was destroyed below.
+	 * LeakSanitizer: one xtc_timer_set plus 50 sleeps leaked all 50.
+	 */
 	for (tm = loop->all_timers; tm != NULL; tm = next_tm) {
 		next_tm = tm->all_next;
-		if (loop->timer_slab != NULL)
+		if (tm->from_slab && loop->timer_slab != NULL)
 			xtc_slab_free((struct xtc_slab *)loop->timer_slab, tm);
 		else
 			__os_free(tm);
