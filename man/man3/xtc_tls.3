@@ -182,7 +182,12 @@ verification against the server certificate: a certificate that chains
 to a trusted CA but is issued for a different host fails the handshake.
 The name is enforced only when the context verifies peers.  A NULL or
 empty name clears it (chain-only verification); it is a no-op on a
-server connection.  Implemented on the OpenSSL, GnuTLS, wolfSSL and
+server connection.
+BoringSSL cannot remove a name once set: there, clearing a connection
+that already has one returns
+.Dv XTC_E_NOSYS
+and the old name stays enforced (use a fresh connection); clearing one
+that never had a name succeeds.  Implemented on the OpenSSL, GnuTLS, wolfSSL and
 mbedTLS backends; before 1.50 only OpenSSL checked the name and the
 others returned
 .Dv XTC_E_NOSYS ,
