@@ -77,3 +77,43 @@ if [ -n "$missing" ]; then
 	exit 1
 fi
 echo "  [D4] OK: $n public functions across the installed headers, all mentioned in man3"
+
+# [D4b] Every XTC_E_* code a man page cites must exist in xtc.h.  xtc_cfg.3
+# once documented XTC_E_EXIST, which never existed, so a caller switching on
+# it could not compile and one reading the page was told the wrong code.
+bad=""
+for c in $(cat "$MANDIR"/*.3 "$XTC_SRC_DIR"/man/man7/*.7 2>/dev/null |
+    grep -ohE 'XTC_E_[A-Z_]+' | sort -u); do
+	grep -qE "\b$c\b" "$INC/xtc.h" || bad="$bad $c"
+done
+if [ -n "$bad" ]; then
+	echo "  [D4b] FAIL: man pages cite error codes absent from xtc.h:$bad" >&2
+	exit 1
+fi
+echo "  [D4b] OK: every XTC_E_* cited in the man pages exists in xtc.h"
+
+# [D4c] Each header PUBLIC: marker's return type must match its XTC_API
+# prototype.  The markers are the machine-readable API list (and the
+# libxtc.map / symbol gates read them); xtc_cfg_session_bind's once said
+# `int` for a function returning xtc_cfg_session_t *.
+bad=$(cd "$INC" && for h in xtc*.h; do
+	grep -oE 'PUBLIC:[^;]*[ *]xtc_[A-Za-z0-9_]+ __P' "$h" |
+	    sed -E 's/^PUBLIC:[[:space:]]*//; s/ __P$//' |
+	while IFS= read -r m; do
+		name=$(printf '%s' "$m" | grep -oE 'xtc_[A-Za-z0-9_]+$')
+		mret=$(printf '%s' "$m" | sed -E "s/$name\$//; s/[[:space:]]+/ /g; s/ \*/*/g; s/^ //; s/ \$//")
+		proto=$(grep -hE "^XTC_API[^;(]*[ *]$name[[:space:]]*\(" "$h" | head -1)
+		[ -n "$proto" ] || continue
+		pret=$(printf '%s' "$proto" | sed -E "s/^XTC_API[[:space:]]+//; s/[ *]?$name[[:space:]]*\(.*//; s/[[:space:]]+/ /g; s/ \*/*/g; s/ \$//")
+		case "$proto" in *"*$name"*|*"* $name"*) pret="$pret*";; esac
+		pret=$(printf '%s' "$pret" | sed -E 's/\*+/*/g')
+		mret=$(printf '%s' "$mret" | sed -E 's/\*+/*/g')
+		[ "$mret" = "$pret" ] || echo "$h:$name(marker '$mret' vs prototype '$pret')"
+	done
+done)
+if [ -n "$bad" ]; then
+	echo "  [D4c] FAIL: PUBLIC: marker return type disagrees with the prototype:" >&2
+	echo "$bad" | sed 's/^/        /' >&2
+	exit 1
+fi
+echo "  [D4c] OK: every PUBLIC: marker's return type matches its prototype"
