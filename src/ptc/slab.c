@@ -43,11 +43,11 @@
 
 #include "xtc_int.h"
 #include "xtc_slab.h"
+#include "xtc_log.h"    /* redzone reports go through the library logger */
 
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)
@@ -1085,9 +1085,14 @@ xtc_slab_free(xtc_slab_t *s, void *obj)
 	slot = __slot_from_obj(s, obj);
 
 	if (XTC_UNLIKELY(__rz_check(s, slot))) {
-		/* Redzone violation -- log + abort in debug builds. */
-		fprintf(stderr, "xtc_slab[%s]: redzone violation at %p\n",
-		    s->opts.name, obj);
+		/* Redzone violation: counted in xtc_slab_stats
+		 * (redzone_violations) and reported through the library
+		 * logger -- a no-op until the application installs one with
+		 * xtc_log_set_default.  Library code never writes to the
+		 * process's stderr on its own. */
+		xtc_log_write(xtc_log_default(), XTC_LOG_ERROR,
+		    "xtc_slab[%s]: redzone violation at %p",
+		    s->opts.name != NULL ? s->opts.name : "(unnamed)", obj);
 	}
 
 	if (s->opts.dtor != NULL) s->opts.dtor(obj, s->opts.cb_user);

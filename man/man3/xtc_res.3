@@ -87,6 +87,22 @@ The current cap is not readable back through an accessor: it is the
 value the caller supplied, and
 .Fn xtc_res_set_cap
 changes it at runtime.
+.Fn xtc_res_set_cap
+returns no value, so an invalid argument
+.Po a NULL
+.Fa r ,
+a bad kind, or a negative
+.Fa cap
+.Pc
+is ignored and the existing cap is kept.
+Releases before 1.50 stored a negative cap, which then read as
+.Sq no cap
+and silently made the kind unbounded.
+A negative value in the
+.Vt xtc_res_caps_t
+given to
+.Fn xtc_res_init
+still means no cap.
 .Pp
 .Fn xtc_res_acquire
 charges
@@ -117,9 +133,20 @@ Both are atomic and lock-free; safe under concurrent calls.
 .Fn xtc_res_set_alert
 arms a high-water alert for one kind at
 .Fa pct ,
-a FRACTION of the cap in
+a FRACTION of the cap in the open interval
 .Pq 0.0 , 1.0 --
 so 0.8 means 80 percent, NOT an absolute threshold.
+It returns
+.Dv XTC_E_INVAL
+for a
+.Fa pct
+of 0, of 1.0, outside the interval, or NaN, and for a NULL
+.Fa r
+or a bad kind.
+Releases before 1.50 accepted 0
+.Pq which silently disabled the alert
+and 1.0
+.Pq which fires only once acquires are already being refused .
 .Fn xtc_res_set_alert_fn
 installs the callback
 .Pq Fa fn No receiving Pq kind , used , cap , user ;
