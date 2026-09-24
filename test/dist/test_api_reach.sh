@@ -46,8 +46,13 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp" || true' EXIT
 
-nm --defined-only "$LIB" 2>/dev/null |
-    awk '$2 == "T" && $3 ~ /^xtc_/ { print $3 }' | sort -u >"$tmp/exported"
+# Portable nm: -g (external) works on GNU, BSD and macOS nm, where GNU's
+# --defined-only does not exist on macOS (the CI macos job failed with "no
+# exported xtc_* symbols").  Keep text (T) symbols; macOS/Mach-O prefixes C
+# names with '_', so strip one leading underscore before matching.
+nm -g "$LIB" 2>/dev/null |
+    awk '$2 == "T" { n = $3; sub(/^_/, "", n); if (n ~ /^xtc_/) print n }' |
+    sort -u >"$tmp/exported"
 if [ ! -s "$tmp/exported" ]; then
 	echo "  [api-reach] FAIL: no exported xtc_* symbols found in $LIB" >&2
 	exit 1
