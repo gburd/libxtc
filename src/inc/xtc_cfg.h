@@ -307,7 +307,10 @@ XTC_API int  xtc_cfg_session_reset(xtc_cfg_session_t *s, const char *name);
  * validated against the variable's registered kind/bounds/validator
  * exactly like the global setters, and applied only if `src` outranks
  * the source that last set it at this level.  A NULL session targets
- * the fiber's currently-bound session; XTC_E_INVAL if none is bound. */
+ * the fiber's currently-bound session; XTC_E_INVAL if none is bound.
+ * Out of bounds is XTC_E_RANGE, as for the global setters (releases
+ * before 1.50 returned XTC_E_INVAL here); a validator rejection is
+ * XTC_E_INVAL on both. */
 XTC_API int  xtc_cfg_ssn_set_bool(xtc_cfg_session_t *s, const char *name,
                                   int v, xtc_cfg_source_t src);
 XTC_API int  xtc_cfg_ssn_set_int(xtc_cfg_session_t *s, const char *name,
