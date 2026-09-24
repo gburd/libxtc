@@ -104,7 +104,7 @@ static int
 generate_cert(const char *cert_path, const char *key_path, const char *cn)
 {
     char cmd[1024];
-    char cnf_path[256];
+    char cnf_path[300];   /* path buffers are 256; +".cnf" */
     FILE *cnf_fp;
     snprintf(cnf_path, sizeof(cnf_path), "%s.cnf", cert_path);
     cnf_fp = fopen(cnf_path, "w");
@@ -132,7 +132,7 @@ generate_name_cert(const char *cert_path, const char *key_path,
                    const char *name)
 {
     char cmd[1024];
-    char cnf_path[256];
+    char cnf_path[300];   /* path buffers are 256; +".cnf" */
     FILE *cnf_fp;
     int rc;
     snprintf(cnf_path, sizeof(cnf_path), "%s.cnf", cert_path);
@@ -161,7 +161,7 @@ static int
 generate_wrong_ca(const char *cert_path, const char *cn)
 {
     char cmd[1024];
-    char cnf_path[256];
+    char cnf_path[300];   /* path buffers are 256; +".cnf" */
     FILE *cnf_fp;
     snprintf(cnf_path, sizeof(cnf_path), "%s.cnf", cert_path);
     cnf_fp = fopen(cnf_path, "w");
@@ -632,6 +632,14 @@ test_client_hostname_check(const MunitParameter params[], void *data)
      * sending SNI (the OpenSSL clear path left SSL_set1_host armed
      * before 1.50, so this handshake still failed the name check). */
     rc = connect_expecting(NAME_OTHER, "", &host_rc, &srv_rc);
+    /* A backend that cannot remove a host once set (BoringSSL) reports
+     * that honestly with XTC_E_NOSYS instead of claiming a clear it cannot
+     * do; the connection then keeps verifying the OLD name, so the
+     * handshake must still be REJECTED -- never silently accepted. */
+    if (host_rc == XTC_E_NOSYS) {
+        munit_assert_int(rc, !=, XTC_OK);
+        return MUNIT_OK;
+    }
     munit_assert_int(host_rc, ==, XTC_OK);
     munit_assert_int(rc, ==, XTC_OK);
     munit_assert_int(srv_rc, ==, 0);
@@ -805,6 +813,8 @@ static const MunitSuite suite = {
 int
 main(int argc, char *argv[])
 {
-    __m18_paths_init();
+#if defined(XTC_TLS_ENABLED)
+    __m18_paths_init();   /* defined only with TLS */
+#endif
     return munit_suite_main(&suite, NULL, argc, argv);
 }

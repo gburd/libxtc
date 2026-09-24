@@ -153,6 +153,18 @@ if ! grep -q '^#define XTC_IO_BACKEND_URING 1' \
 	exit 0
 fi
 
+# The helpers resolve libxtc's internal symbols (__lt, the loop registry)
+# from DWARF, and REFUSE to print a census without it -- a census without
+# debug info is indistinguishable from a true "0 loops".  A library built
+# without -g (e.g. CI's `CFLAGS=-Werror` jobs, which replace configure's
+# default -g -O2) therefore cannot run this gate: SKIP, do not FAIL.  The
+# probe program below is always built -g; it is the LIBRARY that matters.
+if ! (cd "$XTC_BUILD_DIR" && ar p libxtc.a proc.o 2>/dev/null | \
+      grep -qa '\.debug_info'); then
+	echo "  [gdb-cqes] SKIP: libxtc built without debug info (no -g)"
+	exit 0
+fi
+
 if ! ${CC:-cc} -O0 -g -w -I "$XTC_SRC_DIR/src/inc" -I "$XTC_BUILD_DIR" \
     -o "$TMPD/prog" "$TMPD/prog.c" "$LIB" \
     -pthread -luring -lssl -lcrypto -ldl -lm > "$TMPD/cc.log" 2>&1; then

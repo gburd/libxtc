@@ -122,7 +122,7 @@ static int
 generate_cert(const char *cert_path, const char *key_path, const char *cn)
 {
     char cmd[1024];
-    char cnf_path[256];
+    char cnf_path[300];   /* path buffers are 256; +".cnf" */
     FILE *cnf_fp;
     snprintf(cnf_path, sizeof(cnf_path), "%s.cnf", cert_path);
     /* LibreSSL on Nix and some stripped distros ship `openssl' without
@@ -1418,8 +1418,13 @@ dead_peer_child(void)
     a.fd = sv[1];
     if (pthread_create(&th, NULL, dead_peer_client, &a) != 0)
         return 2;
-    if (poll_until_done(tls, sv[0], xtc_tls_handshake, 5000) != XTC_OK)
-        return 2;
+    /* The handshake result is NOT required to be OK: the client closes
+     * the instant its own side completes, and on some backends/versions
+     * (distro wolfSSL) the server's final handshake step then already
+     * sees the dead peer and returns an error.  What this test asserts is
+     * only that no write raises SIGPIPE -- so after any handshake outcome
+     * it still writes into the closed socket below. */
+    (void)poll_until_done(tls, sv[0], xtc_tls_handshake, 5000);
     (void)pthread_join(th, NULL);     /* the peer has closed */
     memset(buf, 'x', sizeof buf);
     for (i = 0; i < 64; i++) {
@@ -1430,6 +1435,8 @@ dead_peer_child(void)
     xtc_tls_destroy(tls);
     xtc_tls_ctx_destroy(ctx);
     (void)close(sv[0]);
+    /* Surviving to here with the default SIGPIPE disposition IS the
+     * property; the writes must also have reported the dead peer. */
     return (rc != XTC_OK && rc != XTC_E_AGAIN) ? 0 : 3;
 }
 
@@ -1521,6 +1528,8 @@ static const MunitSuite suite = {
 int
 main(int argc, char *argv[])
 {
-    __m18_paths_init();
+#if defined(XTC_TLS_ENABLED)
+    __m18_paths_init();   /* defined only with TLS */
+#endif
     return munit_suite_main(&suite, NULL, argc, argv);
 }
