@@ -1,3 +1,74 @@
+libxtc (1.50.0-1) unstable; urgency=medium
+
+  * Production-readiness release: every item of the review's gap list
+    (PLAN.md 19.27) is fixed or explicitly deferred, plus defects the
+    review did not list.  MINOR release -- contract changes and new APIs.
+  * BEHAVIOR CHANGES a consumer may need to act on:
+    - TLS: a CLIENT now verifies the server certificate by default (a
+      zeroed xtc_tls_opts_t used to verify nothing).  Talking to a
+      self-signed server needs verify_peer_mode = XTC_TLS_VERIFY_NONE.
+      A verifying client with no ca_file uses the platform trust store;
+      mbedTLS, which has none, refuses it with XTC_E_INVAL.
+    - xtc_sup_join returns XTC_E_AGAIN (and frees nothing) when the
+      supervisor is still running; it used to free it anyway.
+    - xtc_exit_pid_deadline and xtc_proc_wait_fd return XTC_E_INVAL for
+      an unknown pid / a closed fd; cfg session setters return
+      XTC_E_RANGE when out of bounds (was XTC_E_INVAL);
+      xtc_res_set_alert rejects 0 and 1.0; a negative xtc_res_set_cap is
+      ignored.
+    - xtc_proc_spawn_link / _monitor return XTC_E_NOMEM instead of
+      XTC_OK-with-no-relationship when an entry allocation fails.
+    - Fiber-stack mapping exhaustion is XTC_E_NOMEM (was
+      XTC_E_INTERNAL).
+    - xtc_lock_upgrade / _downgrade judge stronger/weaker by the conflict
+      matrix, not the enum order; upgrade is bounded by the locker
+      deadline.
+    - A binary hosting xtc_xspawn_entry children should call
+      xtc_xproc_win_child_maybe first in main() on every platform (it
+      enables the re-exec path on POSIX).
+  * Safety and correctness:
+    - lockmgr: a same-locker conversion was granted past a conflicting
+      holder and could weaken a held lock (two mutual-exclusion
+      violations since 1.0); conversions queued behind their own waiter;
+      upgrade ignored the deadline and left the old lock held.  New DST
+      mutual-exclusion oracle, pinned seed.
+    - xproc: destroy freed state under a live monitor (heap UAF) and
+      neither signalled nor reaped a running child; a signal death was
+      reported as EXIT; every short-lived child's status arrived as 96.
+    - fork without exec: the named-entry spawn now re-execs, and the
+      exec path does nothing but execve after fork (a parent thread
+      holding a lock at fork wedged the child).
+    - SIGPIPE: a write to a closed peer killed the host process on all
+      four TLS backends and in xtc_net; now an error.
+    - TLS host-name verification was a no-op on GnuTLS, wolfSSL and
+      mbedTLS; verify modes now mean the same on every backend.
+    - supervisors: group restarts and supervisor exit wait for the old
+      children's cleanup; xtc_sup_join no longer frees a live
+      supervisor; a monitored registration fails instead of silently
+      losing enrollment; xtc_lock_vec rolls back its GETs.
+    - loop_fini leaked park timers once xtc_timer_set had been used; the
+      poll and select backends leaked a half-grown fd set when loop
+      init failed; a shutdown that left a survivor leaked the
+      supervisor.
+    - clang 15 builds the ThreadSanitizer configuration again.
+  * New APIs: xtc_app_shutdown and xtc_app_drain_on_signal (bounded
+    graceful drain); xtc_cfg_get_string_copy; xtc_res_attach_mctx and
+    xtc_res_attach_net (opt-in MEM_BYTES / FDS metering).
+  * Tests and gates: OOM-injection sweep; every exported function
+    referenced by a test (gate); make check ends with a SKIP summary;
+    man pages may cite only real error codes and PUBLIC: markers must
+    match prototypes (gates); (void) on any allocating __os_* call is
+    rejected; nightly memory-bound soak (non-gating; fails today by
+    design on timer and fiber retention); 05_rexis runs under CI with
+    measured budgets; every doc snippet including TLS is gated.
+  * Known and still open: completed fibers and fired timers are retained
+    until xtc_loop_fini; SChannel does not honor the new client verify
+    default; FDS cannot meter caller-accept(2)ed fds; on the select
+    backend, migratable fibers in timed xtc_proc_wait_fd can strand (also
+    in 1.49.5).  See docs/KNOWN_ISSUES.md.
+
+ -- Greg Burd <greg@burd.me>  Thu, 24 Sep 2026 12:00:00 -0400
+
 libxtc (1.49.5-1) unstable; urgency=medium
 
   * Fixes three real data races on the fiber-migration path.  Found by
