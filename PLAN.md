@@ -3416,9 +3416,22 @@ use-after-free, and (5) a flagship example that nothing gates.  Each is a
 task below, ranked.  P0 = must fix before calling any release "production";
 P1 = before the next minor; P2 = hygiene.
 
+STATUS (2026-09-24, the 1.50 campaign): each item is tagged [DONE <commit>]
+where fixed.  The campaign also found and fixed defects the review did not
+list: xtc_sup_join freed a running supervisor (f6637ef); loop_fini leaked
+park timers once a timer slab existed (42fe0e2); SIGPIPE killed the host on
+every TLS backend and in xtc_net (5653513, 2711c82); a short-lived xproc
+child's status was always 96 (0f007ca).  It REPRODUCED and fixed five lock-manager
+defects on the 1.49.5 baseline, two of them mutual-exclusion violations
+(same-locker conversions granted past other holders and weakened a held
+mode; enum-order downgrade; conversion queued behind its own waiter;
+upgrade ignoring the deadline and leaving the old entry) -- 87219d3, with a
+new DST mutual-exclusion oracle and a pinned seed.  Not DONE
+below means not yet done.
+
 #### P0 -- correctness and safety
 
-- **19.27.1  xtc_xproc_destroy is a use-after-free when a monitor shadow
+- [DONE c1841bc] **19.27.1  xtc_xproc_destroy is a use-after-free when a monitor shadow
   is live.**  REPRODUCED under ASan: destroy while the child runs frees
   p->os (osproc.c:430 via xproc.c:356); the shadow_proc spawned by
   xtc_xmonitor is parked in xtc_osproc_wait and reads the freed struct
@@ -3429,14 +3442,14 @@ P1 = before the next minor; P2 = hygiene.
   destroy cancel-and-join the shadow before freeing; add the ASan probe
   (/tmp/secaudit/xproc_uaf.c) as test/m10/test_xproc destroy_while_live.
 
-- **19.27.2  xtc_xproc_destroy neither signals nor reaps a running child.**
+- [DONE c1841bc] **19.27.2  xtc_xproc_destroy neither signals nor reaps a running child.**
   REPRODUCED: after destroy, kill(pid,0)==0 and waitpid(WNOHANG)==0 --
   the OS child is orphaned and becomes a zombie later.  xtc_xproc(3):126
   promises it "signals and reaps the child if still running".  TASK: a
   bounded terminate-and-wait (SIGTERM, deadline, SIGKILL, reap), or rename
   the contract and add xtc_xproc_terminate(timeout).  Same probe.
 
-- **19.27.3  xtc_xproc DOWN collapses a signal death into an EXIT.**
+- [DONE 0f007ca (+ a second bug: short-lived child status was 96)] **19.27.3  xtc_xproc DOWN collapses a signal death into an EXIT.**
   REPRODUCED: child does *(int*)0=0 -> DOWN kind=1 (EXIT) signal=0
   exit_code=11.  A supervisor cannot tell "crashed with SIGSEGV" from
   "called exit(11)".  Mechanism: xproc.c ~252-276 maps WTERMSIG to a
@@ -3445,7 +3458,7 @@ P1 = before the next minor; P2 = hygiene.
   real NOCONNECTION kind for control-channel loss).  Test: child exits 0
   / 1 / 11; child receives SIGSEGV; connection lost with child alive.
 
-- **19.27.4  xtc_sup ONE_FOR_ALL / REST_FOR_ONE restarts OVERLAP the old
+- [DONE 8680179] **19.27.4  xtc_sup ONE_FOR_ALL / REST_FOR_ONE restarts OVERLAP the old
   children's cleanup.**  REPRODUCED 3/3: a shared-resource hold count
   reached 4 where steady state is 2 -- a replacement child ran while its
   killed predecessor still held the resource.  sup.c ~254-298 is
@@ -3457,7 +3470,7 @@ P1 = before the next minor; P2 = hygiene.
   child's cleanup gate closed and assert no replacement touches its
   resource; release and assert restart order + intensity.
 
-- **19.27.5  xtc_lock_vec is documented atomic-all-or-none on the FROZEN
+- [DONE 340574c] **19.27.5  xtc_lock_vec is documented atomic-all-or-none on the FROZEN
   lock ABI, and is not.**  REPRODUCED: two GETs, second would block ->
   rc=XTC_E_AGAIN, executed=1, and the first lock is STILL HELD.
   man/man3/xtc_lockmgr.3:92-93 and :161-165 say "succeed-or-rollback ...
@@ -3469,7 +3482,7 @@ P1 = before the next minor; P2 = hygiene.
   The layout is frozen; the BEHAVIOR is what is wrong.  Test: the
   /tmp/apiaudit_b/p_vec probe as a munit case.
 
-- **19.27.6  TLS hostname verification is a no-op on GnuTLS and wolfSSL.**
+- [DONE cdc3dab] **19.27.6  TLS hostname verification is a no-op on GnuTLS and wolfSSL.**
   SOURCE-VERIFIED: tls_gnutls.c:424 and tls_wolfssl.c:393
   xtc_tls_set_hostname return XTC_E_NOSYS.  A client on those backends
   verifies the CHAIN but not the NAME: any valid certificate for any host
@@ -3480,7 +3493,7 @@ P1 = before the next minor; P2 = hygiene.
   wolfSSL_check_domain_name); until then the README TLS matrix MUST say
   which backends verify hostnames.
 
-- **19.27.7  No test on ANY backend asserts a wrong-hostname certificate is
+- [DONE cdc3dab] **19.27.7  No test on ANY backend asserts a wrong-hostname certificate is
   REJECTED.**  REPRODUCED: grep test/m18 for wrong/mismatch/bad hostname
   = 0.  The only set_hostname test checks SNI *selection*, and it SKIPS
   on NOSYS (test_tls_server.c:963-970), which is exactly how 19.27.6
@@ -3490,7 +3503,7 @@ P1 = before the next minor; P2 = hygiene.
   rather than SKIP where a backend lacks the capability, or publish a
   per-backend capability matrix the test asserts against.
 
-- **19.27.8  A zeroed xtc_tls_opts_t is verify-NONE for a CLIENT.**
+- [DONE 517f9d5, 442e120 (SChannel still open)] **19.27.8  A zeroed xtc_tls_opts_t is verify-NONE for a CLIENT.**
   SOURCE-VERIFIED: verify_peer=0 + verify_peer_mode=DEFAULT resolves to
   XTC_TLS_VERIFY_NONE (tls_openssl.c:557-560), so `opts = {0}` on the
   client role does no certificate verification, silently.
@@ -3498,7 +3511,7 @@ P1 = before the next minor; P2 = hygiene.
   explicitly set NONE (a minor-version behavior change -- document it),
   or at minimum log once at ctx_create when a client verifies nothing.
 
-- **19.27.9  POSIX xtc_xspawn_entry forks WITHOUT exec and stands up a
+- [DONE b031dfb] **19.27.9  POSIX xtc_xspawn_entry forks WITHOUT exec and stands up a
   full libxtc runtime in the child of a multithreaded parent.**
   SOURCE-VERIFIED: xproc.c:311 oo.fn=child_fn -> xtc_xproc_child_main
   (xproc.c:183) -> xtc_loop_init / xtc_proc_spawn / xtc_loop_run, i.e.
@@ -3513,7 +3526,7 @@ P1 = before the next minor; P2 = hygiene.
 
 #### P1 -- contracts and claims
 
-- **19.27.10  The documented 6-stage graceful shutdown does not exist.**
+- [DONE 0168e16, e66ceb2, c2d6110] **19.27.10  The documented 6-stage graceful shutdown does not exist.**
   SOURCE-VERIFIED: PLAN 19.20 describes xtc_app_shutdown with
   drain_deadline / force_deadline / '$xtc_shutdown' broadcast and
   SIGTERM/SIGINT/SIGQUIT handling; grep src/ for any of it = 0.
@@ -3526,7 +3539,7 @@ P1 = before the next minor; P2 = hygiene.
   README's fault-tolerance pitch.  Ship an example that drains on SIGTERM
   (see 19.27.17).
 
-- **19.27.11  xtc_res caps bound almost nothing.**  SOURCE-VERIFIED:
+- [DONE 0bb8b64 (inbound accept fds not meterable: no xtc_net_accept)] **19.27.11  xtc_res caps bound almost nothing.**  SOURCE-VERIFIED:
   production acquire sites -- MEM_BYTES: 1 (slab chunk alloc only),
   TASKS: 1, FDS: 0; the mctx allocator charges nothing; xtc_net charges
   nothing.  README ("hold bounded RSS, file descriptors, in-flight tasks
@@ -3537,7 +3550,7 @@ P1 = before the next minor; P2 = hygiene.
   the README/xtc_res.h to say exactly what is metered.  Add a test that
   sets a cap and asserts the SECOND kind of allocation is refused.
 
-- **19.27.12  xtc_reg_register_mon returns XTC_OK when enrollment was
+- [DONE 35a1331] **19.27.12  xtc_reg_register_mon returns XTC_OK when enrollment was
   lost.**  REPRODUCED: 3 monitored registrations, all rc=0; after all
   three workers exit, 2 stale names remain (whereis w1=0 w2=0).
   v1.49.3 made the drop DIAGNOSABLE (XTC_TAIL_LIFECYCLE_DROP); the API
@@ -3546,7 +3559,7 @@ P1 = before the next minor; P2 = hygiene.
   capacity so it cannot fail.  Test: saturate the reaper mailbox, then
   register_mon, then exit the pid; assert either failure or reap.
 
-- **19.27.13  Contract inconsistencies found by probe, batch.**  All
+- [DONE 7c54762 70484c7 292b86a b2c7562 d66fa5e b2393cc f62c932; gates f0c16ff.  NOTE: the session_source==99 and "wrong generated extern list" claims were WRONG (probe read the value before the call; s_include never scans headers)] **19.27.13  Contract inconsistencies found by probe, batch.**  All
   REPRODUCED:
     - xtc_exit_pid_deadline(unknown pid) -> XTC_OK + DELIVERED, while
       xtc_exit_pid(unknown pid) -> XTC_E_INVAL and the SAME header says
@@ -3605,7 +3618,7 @@ P1 = before the next minor; P2 = hygiene.
   examples job; make the iops assert bite (observed rate <= limit *
   slack); assert the memory cap by measuring, not by exit code.
 
-- **19.27.17  Missing examples.**  No single-file TCP echo server on
+- [PARTLY DONE ed69ccc (graceful-drain snippet)] **19.27.17  Missing examples.**  No single-file TCP echo server on
   xtc_net + xtc_proc_wait_fd (the most common first real program -- 08 is
   the Isolate layer, 09 is three files); no TLS client/server pair; no
   graceful-drain-on-SIGTERM (blocked on 19.27.10).  TASK: add all three
@@ -3656,13 +3669,13 @@ P1 = before the next minor; P2 = hygiene.
   (the PBT tier already does this loudly -- copy it), and turn each
   timing sleep into an event wait or a bounded retry.
 
-- **19.27.22  Shipped sim tests hardcode a host path.**  SOURCE-VERIFIED:
+- [DONE dc9b7e8] **19.27.22  Shipped sim tests hardcode a host path.**  SOURCE-VERIFIED:
   /scratch/xtc-test in test/sim/test_sim_aiov.c:118,
   test_sim_buggify4.c:210, run_sim_tests.sh:28.  TASK: honor TMPDIR like
   the swarm now does; a hardcoded first-choice path is a portability
   smell in a suite that claims determinism "on any machine".
 
-- **19.27.23  Quack JSON integers saturate silently.**  REPRODUCED
+- [DONE a019824] **19.27.23  Quack JSON integers saturate silently.**  REPRODUCED
   (/tmp/secaudit/q1): a 23-digit "limit" parses to LLONG_MAX-ish via
   strtoll with no ERANGE check (quack.c:480).  The token IS bounds-copied
   (no overread -- the fuzzer is clean), so this is semantic: an absurd
