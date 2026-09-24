@@ -42,6 +42,7 @@ munit_tests = [
   ['sim_rng', 'sim'],
   # M7
   ['chan', 'm7'], ['chan_mpmc_bcast', 'm7'], ['future', 'm7'],
+  ['res_meter', 'm7'],
   # M8
   ['proc_wait_fd', 'm8'], ['recv_correlate', 'm8'],
   ['proc_link_race', 'm8'],

@@ -22,6 +22,10 @@
 
 #include "xtc_int.h"
 #include "xtc_net.h"
+#include "xtc_res.h"   /* XTC_LAYER_OK: optional XTC_RES_FDS metering (xtc_res_attach_net) */
+#include "preempt_int.h"   /* __xtc_mtx_*: preemption-safe raw mutex */
+
+#include <pthread.h>
 
 #include <errno.h>
 #include <limits.h>
@@ -113,8 +117,100 @@ xtc_net_setnonblock(int fd)
 #endif
 }
 
+/* ----- XTC_RES_FDS metering (xtc_res_attach_net, see xtc_res.h) -----
+ *
+ * OFF unless an accountant is attached: then every fd one of the
+ * creating calls below hands out is charged one XTC_RES_FDS unit
+ * BEFORE the socket exists (a refused dial sends nothing), and
+ * xtc_net_close gives it back.  __net_fd_res[fd] remembers WHICH
+ * accountant an fd was charged to, so closing a descriptor xtc_net did
+ * not create (a raw accept(2)'d fd) releases nothing, and a detach or
+ * re-attach does not unbalance the fds already out. */
+static _Atomic(xtc_res_t *) __net_res;
+static pthread_mutex_t __net_fd_lock = PTHREAD_MUTEX_INITIALIZER;
+/* ponytail: direct-indexed by fd -- dense and RLIMIT_NOFILE-bounded on
+ * POSIX; a Windows SOCKET is a handle value, still small in practice.
+ * Switch to a hash if a sparse-handle platform makes this large. */
+static xtc_res_t   **__net_fd_res;      /* indexed by fd; NULL = uncharged */
+static size_t        __net_fd_cap;
+
+int
+xtc_res_attach_net(xtc_res_t *r)
+{
+	atomic_store_explicit(&__net_res, r, memory_order_release);
+	return XTC_OK;
+}
+
+/* Charge one fd to the attached accountant (if any); *out gets it. */
+static int
+__net_charge(xtc_res_t **out)
+{
+	xtc_res_t *r = atomic_load_explicit(&__net_res, memory_order_acquire);
+	*out = r;
+	return r == NULL ? XTC_OK : xtc_res_acquire(r, XTC_RES_FDS, 1);
+}
+
+/* Finish a creating call: on failure refund the charge; on success
+ * record fd -> accountant so xtc_net_close can refund it later. */
+static int
+__net_settle(xtc_res_t *r, int rc, const int *out_fd)
+{
+	xtc_res_t *stale = NULL;
+	size_t fd, ncap;
+	void *nt;
+
+	if (r == NULL) return rc;
+	if (rc != XTC_OK) {
+		xtc_res_release(r, XTC_RES_FDS, 1);
+		return rc;
+	}
+	fd = (size_t)*out_fd;
+	(void)__xtc_mtx_lock(&__net_fd_lock);
+	if (fd >= __net_fd_cap) {
+		ncap = __net_fd_cap == 0 ? 64 : __net_fd_cap;
+		while (ncap <= fd) ncap *= 2;
+		if (__os_realloc(__net_fd_res, ncap * sizeof *__net_fd_res,
+		    &nt) != XTC_OK) {
+			/* Cannot record it, so could never refund it: give the
+			 * fd back rather than let the cap drift. */
+			(void)__xtc_mtx_unlock(&__net_fd_lock);
+			(void)close((int)fd);
+			xtc_res_release(r, XTC_RES_FDS, 1);
+			return XTC_E_NOMEM;
+		}
+		__net_fd_res = nt;
+		memset(__net_fd_res + __net_fd_cap, 0,
+		    (ncap - __net_fd_cap) * sizeof *__net_fd_res);
+		__net_fd_cap = ncap;
+	}
+	/* A live entry here means the fd was closed behind xtc_net's back
+	 * (raw close(2)) and the kernel reused the number: refund that
+	 * stale charge now rather than leak it. */
+	stale = __net_fd_res[fd];
+	__net_fd_res[fd] = r;
+	(void)__xtc_mtx_unlock(&__net_fd_lock);
+	if (stale != NULL)
+		xtc_res_release(stale, XTC_RES_FDS, 1);
+	return XTC_OK;
+}
+
 void
-xtc_net_close(int fd) { if (fd >= 0) (void)close(fd); }
+xtc_net_close(int fd)
+{
+	xtc_res_t *r = NULL;
+	if (fd < 0) return;
+	/* Forget the charge BEFORE close: once closed, the number may be
+	 * handed to another thread's new socket and recorded afresh. */
+	(void)__xtc_mtx_lock(&__net_fd_lock);
+	if ((size_t)fd < __net_fd_cap) {
+		r = __net_fd_res[fd];
+		__net_fd_res[fd] = NULL;
+	}
+	(void)__xtc_mtx_unlock(&__net_fd_lock);
+	if (r != NULL)
+		xtc_res_release(r, XTC_RES_FDS, 1);
+	(void)close(fd);
+}
 
 /* ----- TCP knobs ----------------------------------------- */
 
@@ -239,8 +335,8 @@ __resolve_addr(xtc_net_family_t fam, const char *host, int port,
 	return XTC_E_INVAL;
 }
 
-int
-xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
+static int
+__net_listen_raw(xtc_net_family_t fam, const char *host, int port,
                const xtc_tcp_opts_t *opts, int *out_fd)
 {
 	int fd, rc, v;
@@ -285,8 +381,8 @@ xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
 	return XTC_OK;
 }
 
-int
-xtc_net_dial(xtc_net_family_t fam, const char *host, int port,
+static int
+__net_dial_raw(xtc_net_family_t fam, const char *host, int port,
              const xtc_tcp_opts_t *opts, int *out_fd)
 {
 	int fd, rc;
@@ -330,8 +426,8 @@ xtc_net_dial(xtc_net_family_t fam, const char *host, int port,
 /* ----- Unix domain sockets ------------------------------- */
 
 #if !defined(_WIN32)
-int
-xtc_net_unix_listen(const char *path, int *out_fd)
+static int
+__net_unix_listen_raw(const char *path, int *out_fd)
 {
 	int fd, rc;
 	struct sockaddr_un sa;
@@ -357,8 +453,8 @@ xtc_net_unix_listen(const char *path, int *out_fd)
 	return XTC_OK;
 }
 
-int
-xtc_net_unix_dial(const char *path, int *out_fd)
+static int
+__net_unix_dial_raw(const char *path, int *out_fd)
 {
 	int fd, rc;
 	struct sockaddr_un sa;
@@ -450,8 +546,8 @@ xtc_net_unix_recv_creds(int fd, void *buf, size_t buflen,
  * COMPILED-NOT-RUNTIME-VERIFIED: cross-compiles with mingw-w64 against
  * <afunix.h>; not yet exercised on a Windows host.
  */
-int
-xtc_net_unix_listen(const char *path, int *out_fd)
+static int
+__net_unix_listen_raw(const char *path, int *out_fd)
 {
 	int fd, rc;
 	struct sockaddr_un sa;
@@ -478,8 +574,8 @@ xtc_net_unix_listen(const char *path, int *out_fd)
 	return XTC_OK;
 }
 
-int
-xtc_net_unix_dial(const char *path, int *out_fd)
+static int
+__net_unix_dial_raw(const char *path, int *out_fd)
 {
 	int fd, rc;
 	struct sockaddr_un sa;
@@ -538,8 +634,8 @@ xtc_net_unix_recv_creds(int fd, void *buf, size_t buflen,
 
 /* ---- UDP -------------------------------------------------------- */
 
-int
-xtc_net_udp_socket(xtc_net_family_t fam, const char *host, int port,
+static int
+__net_udp_socket_raw(xtc_net_family_t fam, const char *host, int port,
                    int *out_fd)
 {
 	int fd, rc;
@@ -656,6 +752,64 @@ xtc_net_udp_recvfrom(int fd, void *buf, size_t buflen,
 		}
 	}
 	return XTC_OK;
+}
+
+/* ---- metered public creators (see XTC_RES_FDS metering above) ---- */
+
+int
+xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
+               const xtc_tcp_opts_t *opts, int *out_fd)
+{
+	xtc_res_t *r;
+	int rc;
+	if (out_fd == NULL) return XTC_E_INVAL;
+	if ((rc = __net_charge(&r)) != XTC_OK) return rc;
+	return __net_settle(r,
+	    __net_listen_raw(fam, host, port, opts, out_fd), out_fd);
+}
+
+int
+xtc_net_dial(xtc_net_family_t fam, const char *host, int port,
+             const xtc_tcp_opts_t *opts, int *out_fd)
+{
+	xtc_res_t *r;
+	int rc;
+	if (out_fd == NULL) return XTC_E_INVAL;
+	if ((rc = __net_charge(&r)) != XTC_OK) return rc;
+	return __net_settle(r,
+	    __net_dial_raw(fam, host, port, opts, out_fd), out_fd);
+}
+
+int
+xtc_net_unix_listen(const char *path, int *out_fd)
+{
+	xtc_res_t *r;
+	int rc;
+	if (out_fd == NULL) return XTC_E_INVAL;
+	if ((rc = __net_charge(&r)) != XTC_OK) return rc;
+	return __net_settle(r, __net_unix_listen_raw(path, out_fd), out_fd);
+}
+
+int
+xtc_net_unix_dial(const char *path, int *out_fd)
+{
+	xtc_res_t *r;
+	int rc;
+	if (out_fd == NULL) return XTC_E_INVAL;
+	if ((rc = __net_charge(&r)) != XTC_OK) return rc;
+	return __net_settle(r, __net_unix_dial_raw(path, out_fd), out_fd);
+}
+
+int
+xtc_net_udp_socket(xtc_net_family_t fam, const char *host, int port,
+                   int *out_fd)
+{
+	xtc_res_t *r;
+	int rc;
+	if (out_fd == NULL) return XTC_E_INVAL;
+	if ((rc = __net_charge(&r)) != XTC_OK) return rc;
+	return __net_settle(r,
+	    __net_udp_socket_raw(fam, host, port, out_fd), out_fd);
 }
 
 /* ---- DNS -------------------------------------------------------- */

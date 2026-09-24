@@ -418,6 +418,7 @@ TESTS_C		= test_version test_header test_errors \
 		  test_sim_rng \
 		  test_chan test_chan_mpmc_bcast \
 		  test_res \
+		  test_res_meter \
 		  test_future \
 		  test_dispatch \
 		  test_proc \
@@ -1259,6 +1260,7 @@ test_net_frame: $(srcdir)/../test/m2/test_net_frame.c \
 		-o $@ $(srcdir)/../test/m2/test_net_frame.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+
 test_net_udp: $(srcdir)/../test/m2/test_net_udp.c \
 		$(srcdir)/../test/m2/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m2 \
@@ -1433,6 +1435,13 @@ test_res: $(srcdir)/../test/m7/test_res.c \
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m7 \
 		-o $@ $(srcdir)/../test/m7/test_res.c \
 		$(srcdir)/../test/m7/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_res_meter: $(srcdir)/../test/m7/test_res_meter.c \
+		$(srcdir)/../test/m7/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m7 \
+		-o $@ $(srcdir)/../test/m7/test_res_meter.c \
+		$(srcdir)/../test/m7/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 
 # M8 tests.
 test_proc: $(srcdir)/../test/m8/test_proc.c \
