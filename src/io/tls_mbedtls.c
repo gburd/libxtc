@@ -71,6 +71,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/socket.h>   /* send MSG_NOSIGNAL / SO_NOSIGPIPE */
 
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
@@ -123,7 +124,15 @@ bio_send(void *p, const unsigned char *buf, size_t len)
 	struct xtc_tls *t = (struct xtc_tls *)p;
 	ssize_t         n;
 
-	n = write(t->fd, buf, len);
+	/* send(MSG_NOSIGNAL), not write(2): a write to a peer that has gone
+	 * must be an error, not a SIGPIPE that kills the host process
+	 * (reproduced: exit 141 with write).  SO_NOSIGPIPE covers macOS,
+	 * set in xtc_tls_create. */
+#if defined(MSG_NOSIGNAL)
+	n = send(t->fd, buf, len, MSG_NOSIGNAL);
+#else
+	n = send(t->fd, buf, len, 0);
+#endif
 	if (n >= 0)
 		return (int)n;
 	if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -500,6 +509,12 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 
 	/* Transport BIO: non-blocking send/recv against t->fd. */
 	mbedtls_ssl_set_bio(&t->ssl, t, bio_send, bio_recv, NULL);
+#if !defined(MSG_NOSIGNAL) && defined(SO_NOSIGPIPE)
+	{
+		int one = 1;   /* macOS: no MSG_NOSIGNAL; see bio_send */
+		(void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+	}
+#endif
 
 	/*
 	 * Verify the certificate chain but not the peer name until the

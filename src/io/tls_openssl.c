@@ -42,9 +42,13 @@
 
 #if defined(XTC_TLS_BACKEND_OPENSSL)
 
+#include <errno.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <string.h>
 #include <limits.h>
+#include <sys/types.h>
+#include <sys/socket.h>   /* send/recv MSG_NOSIGNAL in the fd BIO */
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -367,6 +371,90 @@ static int transport_bio_destroy(BIO *b) { (void)b; return 1; }
  */
 static BIO_METHOD    *s_transport_method;
 static pthread_once_t s_transport_method_once = PTHREAD_ONCE_INIT;
+
+/*
+ * fd mode: a socket BIO whose write is send(MSG_NOSIGNAL).
+ *
+ * OpenSSL's stock socket BIO (SSL_set_fd) writes with write(2), so a
+ * write to a peer that has gone raised SIGPIPE and KILLED THE HOST
+ * PROCESS unless the embedder happened to ignore SIGPIPE -- reproduced:
+ * exit status 141 from xtc_tls_write after the client closed.  A
+ * library must not require process-wide signal setup to be safe, so fd
+ * mode now uses this BIO: reads delegate to recv, writes to send with
+ * MSG_NOSIGNAL (EPIPE comes back as an ordinary error).  Where
+ * MSG_NOSIGNAL does not exist (macOS), SO_NOSIGPIPE is set on the fd in
+ * xtc_tls_create instead.  BIO data is the fd, stored as intptr_t.
+ */
+#if !defined(MSG_NOSIGNAL)
+#define MSG_NOSIGNAL 0
+#endif
+static int
+fd_bio_write(BIO *b, const char *buf, int len)
+{
+	int fd = (int)(intptr_t)BIO_get_data(b);
+	ssize_t n;
+
+	BIO_clear_retry_flags(b);
+	if (len <= 0)
+		return 0;
+	do {
+		n = send(fd, buf, (size_t)len, MSG_NOSIGNAL);
+	} while (n < 0 && errno == EINTR);
+	if (n >= 0)
+		return (int)n;
+	if (errno == EAGAIN || errno == EWOULDBLOCK)
+		BIO_set_retry_write(b);
+	return -1;
+}
+
+static int
+fd_bio_read(BIO *b, char *buf, int len)
+{
+	int fd = (int)(intptr_t)BIO_get_data(b);
+	ssize_t n;
+
+	BIO_clear_retry_flags(b);
+	if (len <= 0)
+		return 0;
+	do {
+		n = recv(fd, buf, (size_t)len, 0);
+	} while (n < 0 && errno == EINTR);
+	if (n >= 0)
+		return (int)n;
+	if (errno == EAGAIN || errno == EWOULDBLOCK)
+		BIO_set_retry_read(b);
+	return -1;
+}
+
+static long
+fd_bio_ctrl(BIO *b, int cmd, long num, void *ptr)
+{
+	(void)b; (void)num; (void)ptr;
+	switch (cmd) {
+	case BIO_CTRL_FLUSH:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static BIO_METHOD    *s_fd_method;
+static pthread_once_t s_fd_method_once = PTHREAD_ONCE_INIT;
+
+static void
+fd_method_init(void)
+{
+	int type = BIO_get_new_index() | BIO_TYPE_SOURCE_SINK |
+	    BIO_TYPE_DESCRIPTOR;
+	s_fd_method = BIO_meth_new(type, "xtc_tls_fd");
+	if (s_fd_method == NULL)
+		return;
+	BIO_meth_set_read(s_fd_method, fd_bio_read);
+	BIO_meth_set_write(s_fd_method, fd_bio_write);
+	BIO_meth_set_ctrl(s_fd_method, fd_bio_ctrl);
+	BIO_meth_set_create(s_fd_method, transport_bio_create);
+	BIO_meth_set_destroy(s_fd_method, transport_bio_destroy);
+}
 
 static void
 transport_method_init(void)
@@ -728,11 +816,28 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 		return XTC_E_NOMEM;
 	}
 
-	if (SSL_set_fd(t->ssl, fd) != 1) {
-		SSL_free(t->ssl);
-		__os_free(t);
-		return XTC_E_INTERNAL;
+	/* Not SSL_set_fd: its socket BIO write()s, which raises SIGPIPE on
+	 * a dead peer.  See fd_bio_write. */
+	{
+		BIO *bio;
+		(void)pthread_once(&s_fd_method_once, fd_method_init);
+		if (s_fd_method == NULL || (bio = BIO_new(s_fd_method)) == NULL) {
+			SSL_free(t->ssl);
+			__os_free(t);
+			return XTC_E_NOMEM;
+		}
+		BIO_set_data(bio, (void *)(intptr_t)fd);
+		BIO_set_init(bio, 1);
+		SSL_set_bio(t->ssl, bio, bio);   /* SSL owns it */
 	}
+#if !defined(MSG_NOSIGNAL) || MSG_NOSIGNAL == 0
+#if defined(SO_NOSIGPIPE)
+	{
+		int one = 1;
+		(void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+	}
+#endif
+#endif
 
 	if (s_ssl_appdata_idx >= 0)
 		(void)SSL_set_ex_data(t->ssl, s_ssl_appdata_idx, t);

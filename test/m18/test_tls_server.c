@@ -45,7 +45,9 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
@@ -1315,6 +1317,103 @@ suite_teardown(void *fixture)
  * Test array and suite.
  * ======================================================================= */
 
+/* -------------------------------------------------------------------------
+ * test_server_write_dead_peer_no_sigpipe:
+ *   A TLS write to a peer that has closed must RETURN an error, not raise
+ *   SIGPIPE.  Before 1.50 every backend wrote with write(2) (OpenSSL's
+ *   stock socket BIO, GnuTLS/wolfSSL without their no-signal flags,
+ *   mbedTLS's bio_send), so the process died with status 141 unless the
+ *   embedder had ignored SIGPIPE itself.  Runs the scenario in a forked
+ *   child with the DEFAULT SIGPIPE disposition restored, so a regression
+ *   shows up as the child being killed by SIGPIPE rather than taking the
+ *   test runner down with it.
+ * ----------------------------------------------------------------------- */
+struct dead_peer_args { int fd; };
+
+static void *
+dead_peer_client(void *arg)
+{
+    struct dead_peer_args *a = arg;
+    xtc_tls_opts_t o;
+    xtc_tls_ctx_t *ctx = NULL;
+    xtc_tls_t     *tls = NULL;
+
+    memset(&o, 0, sizeof o);
+    o.verify_peer_mode = XTC_TLS_VERIFY_NONE;   /* self-signed test cert */
+    if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &o, &ctx) == XTC_OK &&
+        xtc_tls_create(ctx, a->fd, &tls) == XTC_OK)
+        (void)poll_until_done(tls, a->fd, xtc_tls_handshake, 5000);
+    (void)close(a->fd);                          /* vanish abruptly */
+    if (tls != NULL) xtc_tls_destroy(tls);
+    if (ctx != NULL) xtc_tls_ctx_destroy(ctx);
+    return NULL;
+}
+
+/* Child body: handshake, let the peer close, then write until the kernel
+ * reports the dead peer.  Exit 0 = every write returned (no signal);
+ * 2 = setup failed; 3 = a write never failed. */
+static int
+dead_peer_child(void)
+{
+    xtc_tls_opts_t o;
+    xtc_tls_ctx_t *ctx = NULL;
+    xtc_tls_t     *tls = NULL;
+    struct dead_peer_args a;
+    pthread_t th;
+    char buf[4096];
+    size_t n;
+    int sv[2], i, rc = XTC_OK;
+
+    (void)signal(SIGPIPE, SIG_DFL);   /* an embedder that did nothing */
+    memset(&o, 0, sizeof o);
+    o.cert_file = TEST_CERT_PATH;
+    o.key_file  = TEST_KEY_PATH;
+    if (xtc_tls_ctx_create(XTC_TLS_SERVER, &o, &ctx) != XTC_OK)
+        return 2;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0 ||
+        set_nonblock(sv[0]) != 0 || set_nonblock(sv[1]) != 0 ||
+        xtc_tls_create(ctx, sv[0], &tls) != XTC_OK)
+        return 2;
+    a.fd = sv[1];
+    if (pthread_create(&th, NULL, dead_peer_client, &a) != 0)
+        return 2;
+    if (poll_until_done(tls, sv[0], xtc_tls_handshake, 5000) != XTC_OK)
+        return 2;
+    (void)pthread_join(th, NULL);     /* the peer has closed */
+    memset(buf, 'x', sizeof buf);
+    for (i = 0; i < 64; i++) {
+        rc = xtc_tls_write(tls, buf, sizeof buf, &n);
+        if (rc != XTC_OK && rc != XTC_E_AGAIN)
+            break;                    /* the error we want */
+    }
+    xtc_tls_destroy(tls);
+    xtc_tls_ctx_destroy(ctx);
+    (void)close(sv[0]);
+    return (rc != XTC_OK && rc != XTC_E_AGAIN) ? 0 : 3;
+}
+
+static MunitResult
+test_server_write_dead_peer_no_sigpipe(const MunitParameter params[],
+                                       void *data)
+{
+    pid_t pid;
+    int st = 0;
+
+    (void)params;
+    (void)data;
+    pid = fork();
+    munit_assert_int(pid, >=, 0);
+    if (pid == 0)
+        _exit(dead_peer_child());
+    munit_assert_int(waitpid(pid, &st, 0), ==, pid);
+    if (WIFSIGNALED(st))
+        munit_errorf("TLS write to a closed peer KILLED the process with "
+                     "signal %d (SIGPIPE=%d)", WTERMSIG(st), SIGPIPE);
+    munit_assert_true(WIFEXITED(st));
+    munit_assert_int(WEXITSTATUS(st), ==, 0);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/ctx_create_destroy",   test_server_ctx_create_destroy,  suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
@@ -1338,6 +1437,8 @@ static MunitTest tests[] = {
       MUNIT_TEST_OPTION_NONE, NULL },
     { "/verify_modes",         test_server_verify_modes,        suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
+    { "/write_dead_peer_no_sigpipe", test_server_write_dead_peer_no_sigpipe,
+      suite_setup, suite_teardown, MUNIT_TEST_OPTION_NONE, NULL },
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 
