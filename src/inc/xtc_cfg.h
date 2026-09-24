@@ -260,7 +260,7 @@ typedef enum xtc_cfg_source {
 /*
  * PUBLIC: int  xtc_cfg_session_create __P((xtc_cfg_session_t **));
  * PUBLIC: void xtc_cfg_session_destroy __P((xtc_cfg_session_t *));
- * PUBLIC: int  xtc_cfg_session_bind __P((xtc_cfg_session_t *));
+ * PUBLIC: xtc_cfg_session_t *xtc_cfg_session_bind __P((xtc_cfg_session_t *));
  * PUBLIC: xtc_cfg_session_t *xtc_cfg_session_current __P((void));
  * PUBLIC: int  xtc_cfg_session_push __P((xtc_cfg_session_t *));
  * PUBLIC: int  xtc_cfg_session_commit __P((xtc_cfg_session_t *));
