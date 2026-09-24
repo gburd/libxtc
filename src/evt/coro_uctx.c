@@ -60,6 +60,7 @@ typedef int __xtc_coro_uctx_unused;
 #include "loop_int.h"
 #include "coro_int.h"
 
+#include <errno.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -563,11 +564,18 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 			__os_free(c);
 			return XTC_E_NOMEM;
 		}
-		/* The first page is the guard (installed once per mapping). */
+		/* The first page is the guard (installed once per mapping).
+		 * The mprotect SPLITS the mapping into two VMAs, so it is
+		 * where the process map-count limit (Linux
+		 * vm.max_map_count, 65530 by default: ~32 K fibers) fails,
+		 * with ENOMEM.  That is memory exhaustion, reported like the
+		 * mmap failure above -- not an internal error. */
 		if (mprotect(base, guard, PROT_NONE) != 0) {
+			int e = errno;
 			(void)munmap(base, total);
 			__os_free(c);
-			return XTC_E_INTERNAL;
+			return (e == ENOMEM || e == EAGAIN) ? XTC_E_NOMEM
+			    : XTC_E_INTERNAL;
 		}
 	}
 	c->stack = base;
