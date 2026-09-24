@@ -29,6 +29,14 @@ __reaper_main(void *arg)
 	struct reaper_ctx *ctx = arg;
 	void *m;
 	size_t sz;
+	/* The proc owns ctx.  It runs until killed (xtc_exit_pid) or its
+	 * loop is torn down, so it never returns to a place that could
+	 * free it: an at-exit hook runs on every exit path (kill, fault,
+	 * return).  It used to leak one ctx per reaper (LSan). */
+	if (xtc_proc_at_exit(__os_free, ctx) != XTC_OK) {
+		__os_free(ctx);
+		return;
+	}
 	for (;;) {
 		/* Block on recv with the interval as timeout; on any
 		 * incoming message we reap and continue.  Caller can
