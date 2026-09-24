@@ -252,6 +252,40 @@ xtc_cfg_get_string(const char *name, const char **out)
 	return rc;
 }
 
+/*
+ * PUBLIC: int  xtc_cfg_get_string_copy __P((const char *, char **));
+ *
+ * Copying twin of xtc_cfg_get_string.  The borrowed pointer that call
+ * returns is the registry's (or the bound session's) own buffer, and the
+ * next set of that key frees it -- so a reader that copies it AFTER the
+ * registry lock drops can copy freed memory under a concurrent set.  This
+ * duplicates under the same lock hold that resolves the value, so the
+ * copy is always one whole value.  Caller frees *out with xtc_free.  A
+ * registered string whose value is NULL copies as NULL (XTC_OK).
+ */
+int
+xtc_cfg_get_string_copy(const char *name, char **out)
+{
+	struct cfg_var *v;
+	union cfg_val sv;
+	const char *cur;
+	int rc = XTC_E_INVAL;
+	if (name == NULL || out == NULL) return XTC_E_INVAL;
+	(void)__xtc_mtx_lock(&__cfg_lock);
+	v = __cfg_find_locked(name);
+	if (v && v->kind == XTC_CFG_STRING) {
+		cur = __cfg_ssn_resolve(v, &sv) ? sv.v_string : v->cur.v_string;
+		if (cur == NULL) {
+			*out = NULL;
+			rc = XTC_OK;
+		} else {
+			rc = __os_strdup(cur, out);
+		}
+	}
+	(void)__xtc_mtx_unlock(&__cfg_lock);
+	return rc;
+}
+
 #define DEF_SET_NUM(name_suffix, K, field, ctype, bounds_check) \
 int xtc_cfg_set_##name_suffix(const char *name, ctype v) { \
 	struct cfg_var *cv; int rc = XTC_E_INVAL; \

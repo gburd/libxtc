@@ -112,6 +112,7 @@ typedef struct xtc_cfg_spec {
  * PUBLIC: int  xtc_cfg_get_int64 __P((const char *, int64_t *));
  * PUBLIC: int  xtc_cfg_get_double __P((const char *, double *));
  * PUBLIC: int  xtc_cfg_get_string __P((const char *, const char **));
+ * PUBLIC: int  xtc_cfg_get_string_copy __P((const char *, char **));
  * PUBLIC: int  xtc_cfg_get_enum __P((const char *, int *));
  *
  * PUBLIC: int  xtc_cfg_set_bool __P((const char *, int));
@@ -148,7 +149,17 @@ XTC_API int  xtc_cfg_get_bool(const char *name, int *out);
 XTC_API int  xtc_cfg_get_int(const char *name, int *out);
 XTC_API int  xtc_cfg_get_int64(const char *name, int64_t *out);
 XTC_API int  xtc_cfg_get_double(const char *name, double *out);
+/* STRING LIFETIME.  xtc_cfg_get_string (and xtc_cfg_ref_get_string) lend
+ * the registry's -- or the bound session's -- own buffer: it is valid
+ * only until the next set of that key (xtc_cfg_set_string, a session set
+ * / commit / reset / abort / destroy for a session value, xtc_cfg_load_file /
+ * _reload, xtc_cfg_unregister), which frees it.  Another thread can do
+ * that at any moment, so read it only where no concurrent set is
+ * possible.  xtc_cfg_get_string_copy returns a private copy, taken under
+ * the registry lock, that the caller frees with xtc_free; use it whenever
+ * a set may race the read.  A NULL value copies as NULL. */
 XTC_API int  xtc_cfg_get_string(const char *name, const char **out);
+XTC_API int  xtc_cfg_get_string_copy(const char *name, char **out);
 XTC_API int  xtc_cfg_get_enum(const char *name, int *out);
 
 XTC_API int  xtc_cfg_set_bool(const char *name, int v);

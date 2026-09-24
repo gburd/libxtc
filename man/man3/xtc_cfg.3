@@ -11,6 +11,7 @@
 .Nm xtc_cfg_get_int64 ,
 .Nm xtc_cfg_get_double ,
 .Nm xtc_cfg_get_string ,
+.Nm xtc_cfg_get_string_copy ,
 .Nm xtc_cfg_get_enum ,
 .Nm xtc_cfg_set_bool ,
 .Nm xtc_cfg_set_int ,
@@ -62,6 +63,8 @@
 .Fn xtc_cfg_get_double "const char *name" "double *out"
 .Ft int
 .Fn xtc_cfg_get_string "const char *name" "const char **out"
+.Ft int
+.Fn xtc_cfg_get_string_copy "const char *name" "char **out"
 .Ft int
 .Fn xtc_cfg_get_enum "const char *name" "int *out"
 .Ft int
@@ -217,6 +220,38 @@ Read a value with
 or
 .Fn xtc_cfg_get_enum
 for the corresponding registered kind.
+.Pp
+.Sy String lifetime .
+.Fn xtc_cfg_get_string
+and
+.Fn xtc_cfg_ref_get_string
+lend the registry's (or the bound session's) own buffer, not a copy.
+It is valid only until the next set of that key:
+.Fn xtc_cfg_set_string ,
+a session set, commit, reset, abort or destroy for a session value,
+.Fn xtc_cfg_load_file
+or
+.Fn xtc_cfg_reload ,
+and
+.Fn xtc_cfg_unregister
+all free it, and another thread may do so at any moment.
+Read the borrowed pointer only where no concurrent set is possible.
+Otherwise use
+.Fn xtc_cfg_get_string_copy ,
+which duplicates the value under the registry lock and stores a private
+copy in
+.Fa *out
+that the caller releases with
+.Fn xtc_free ;
+a registered string whose value is
+.Dv NULL
+copies as
+.Dv NULL .
+It returns the same codes as
+.Fn xtc_cfg_get_string ,
+plus
+.Dv XTC_E_NOMEM
+if the copy cannot be allocated.
 .Pp
 .Fn xtc_cfg_count
 returns the number of registered knobs;

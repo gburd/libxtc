@@ -22,6 +22,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#if !defined(_WIN32)
+#include <pthread.h>          /* the concurrent setter in get_string_copy */
+#include <stdatomic.h>
+#endif
 
 #include "munit.h"
 #include "xtc.h"
@@ -1188,6 +1192,121 @@ test_range_code_consistent(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- xtc_cfg_get_string_copy: a whole value, safe under a concurrent set
+ *
+ * PLAN 19.27.13.  xtc_cfg_get_string lends the registry's own buffer and
+ * xtc_cfg_set_string frees it, so a reader that copies after the lock
+ * drops can read freed memory.  The copying getter must return one whole
+ * value -- never a torn or freed one -- while another thread keeps
+ * setting the key.  The two values differ in length AND fill byte, so a
+ * torn or stale copy fails the shape check (and ASan catches a UAF).
+ */
+#define GSC_N 256
+static char g_gsc_a[GSC_N + 1], g_gsc_b[GSC_N / 2 + 1];
+
+static int
+gsc_shape_ok(const char *s)
+{
+	size_t n = strlen(s), i;
+	char c = s[0];
+	if (!((c == 'a' && n == GSC_N) || (c == 'b' && n == GSC_N / 2)))
+		return 0;
+	for (i = 0; i < n; i++)
+		if (s[i] != c) return 0;
+	return 1;
+}
+
+#if !defined(_WIN32)
+static _Atomic int g_gsc_stop;
+
+static void *
+gsc_setter(void *arg)
+{
+	unsigned i = 0;
+	(void)arg;
+	while (!atomic_load(&g_gsc_stop))
+		(void)xtc_cfg_set_string("gsc.str", (i++ & 1) ? g_gsc_a : g_gsc_b);
+	return NULL;
+}
+#endif
+
+static MunitResult
+test_get_string_copy(const MunitParameter p[], void *d)
+{
+	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_session_t *ss = NULL;
+	char *cp = NULL;
+	int i, bad = 0;
+#if !defined(_WIN32)
+	pthread_t th;
+#endif
+	(void)p; (void)d;
+
+	memset(g_gsc_a, 'a', GSC_N);
+	memset(g_gsc_b, 'b', GSC_N / 2);
+	s.name = "gsc.str"; s.kind = XTC_CFG_STRING; s.dflt.d_string = g_gsc_a;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "gsc.null"; s.kind = XTC_CFG_STRING;   /* NULL default */
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "gsc.int"; s.kind = XTC_CFG_INT;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+
+	/* Arguments, unknown name, kind mismatch: same codes as get_string. */
+	munit_assert_int(xtc_cfg_get_string_copy(NULL, &cp), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_string_copy("gsc.str", NULL), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_string_copy("gsc.nope", &cp), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_get_string_copy("gsc.int", &cp), ==,
+	    XTC_E_INVAL);
+	munit_assert_ptr_null(cp);
+	/* A NULL value copies as NULL. */
+	cp = (char *)1;
+	munit_assert_int(xtc_cfg_get_string_copy("gsc.null", &cp), ==, XTC_OK);
+	munit_assert_ptr_null(cp);
+
+	/* The copy is the caller's: it survives the next set. */
+	munit_assert_int(xtc_cfg_get_string_copy("gsc.str", &cp), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_set_string("gsc.str", "other"), ==, XTC_OK);
+	munit_assert_int(gsc_shape_ok(cp), ==, 1);
+	xtc_free(cp);
+
+	/* Resolves through the bound session like get_string. */
+	munit_assert_int(xtc_cfg_session_create(&ss), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ssn_set_string(ss, "gsc.str", "sess",
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	munit_assert_ptr_null(xtc_cfg_session_bind(ss));
+	munit_assert_int(xtc_cfg_get_string_copy("gsc.str", &cp), ==, XTC_OK);
+	munit_assert_string_equal(cp, "sess");
+	xtc_free(cp);
+	(void)xtc_cfg_session_bind(NULL);
+	xtc_cfg_session_destroy(ss);
+
+#if !defined(_WIN32)
+	/* Concurrent set: every copy is one whole value. */
+	munit_assert_int(xtc_cfg_set_string("gsc.str", g_gsc_a), ==, XTC_OK);
+	atomic_store(&g_gsc_stop, 0);
+	munit_assert_int(pthread_create(&th, NULL, gsc_setter, NULL), ==, 0);
+	for (i = 0; i < 200000; i++) {
+		cp = NULL;
+		if (xtc_cfg_get_string_copy("gsc.str", &cp) != XTC_OK ||
+		    cp == NULL || !gsc_shape_ok(cp))
+			bad++;
+		xtc_free(cp);
+	}
+	atomic_store(&g_gsc_stop, 1);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	munit_assert_int(bad, ==, 0);
+#endif
+
+	munit_assert_int(xtc_cfg_unregister("gsc.str"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("gsc.null"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("gsc.int"), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/register_basic",   test_register_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/session_scoping",  test_session_scoping,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1208,6 +1327,7 @@ static MunitTest tests[] = {
 	{ "/unbounded",        test_unbounded,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/ref",              test_ref,                   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/range_code",       test_range_code_consistent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/get_string_copy",  test_get_string_copy,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m14/cfg", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
