@@ -971,23 +971,29 @@ __cfg_ssn_apply(xtc_cfg_session_t *s, struct cfg_var *var,
 	return XTC_OK;
 }
 
+/* Out of bounds is XTC_E_RANGE, as for the global setters (DEF_SET_NUM):
+ * one condition, one code.  Releases before 1.50 returned XTC_E_INVAL
+ * here for it.  Bounds are checked before the validator, same order. */
 #define DEF_SSN_SET_NUM(sfx, K, field, ctype, okexpr)                     \
 int xtc_cfg_ssn_set_##sfx(xtc_cfg_session_t *s, const char *name,         \
                           ctype v, xtc_cfg_source_t src) {                \
-	struct cfg_var *cv; union cfg_val val; int ok = 0;                \
+	struct cfg_var *cv; union cfg_val val; int rc = XTC_E_INVAL;      \
 	if (name == NULL) return XTC_E_INVAL;                             \
 	if (s == NULL) s = __cfg_ssn_current_ext();                       \
 	if (s == NULL) return XTC_E_INVAL;                                \
 	(void)__xtc_mtx_lock(&__cfg_lock);                                \
 	cv = __cfg_find_locked(name);                                     \
-	if (cv != NULL && cv->kind == K && (okexpr) &&                    \
-	    (cv->validator == NULL ||                                     \
-	     cv->validator(&v, cv->cb_user) == XTC_OK)) {                 \
-		ok = 1;                                                   \
-		cv->refs++;   /* for the override; consumed by _apply */  \
+	if (cv != NULL && cv->kind == K) {                                \
+		if (!(okexpr))                                            \
+			rc = XTC_E_RANGE;                                 \
+		else if (cv->validator == NULL ||                         \
+		    cv->validator(&v, cv->cb_user) == XTC_OK) {           \
+			rc = XTC_OK;                                      \
+			cv->refs++;   /* for the override; consumed by _apply */ \
+		}                                                         \
 	}                                                                 \
 	(void)__xtc_mtx_unlock(&__cfg_lock);                              \
-	if (!ok) return XTC_E_INVAL;                                      \
+	if (rc != XTC_OK) return rc;                                      \
 	val.field = v;                                                    \
 	return __cfg_ssn_apply(s, cv, val, NULL, src);                    \
 }

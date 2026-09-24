@@ -791,10 +791,12 @@ test_session_scoping(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
 	munit_assert_int(v, ==, 4096);
 
-	/* (2) Bounds/validation apply to session sets too. */
+	/* (2) Bounds/validation apply to session sets too -- and out of
+	 * bounds is XTC_E_RANGE, the same code the global setter returns
+	 * (pre-1.50 the session path returned XTC_E_INVAL). */
 	(void)xtc_cfg_session_bind(a);
 	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 1,
-	    XTC_CFG_SRC_SESSION), ==, XTC_E_INVAL);   /* below min */
+	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);   /* below min */
 
 	/* (3) Source precedence: a LOWER-ranked source cannot clobber a
 	 * higher one at the same level; an equal-or-higher one can. */
@@ -1092,6 +1094,84 @@ test_load_int_range(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- out of bounds is ONE code on BOTH the global and session paths ----
+ *
+ * PLAN 19.27.13.  The global setters returned XTC_E_RANGE for an
+ * out-of-bounds value while the session setters returned XTC_E_INVAL for
+ * the same condition.  Every numeric kind, both paths, plus the control
+ * that a validator rejection is still XTC_E_INVAL on both.
+ */
+static MunitResult
+test_range_code_consistent(const MunitParameter p[], void *d)
+{
+	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_session_t *ss = NULL;
+	int v;
+	(void)p; (void)d;
+
+	s.name = "rc.int"; s.kind = XTC_CFG_INT; s.dflt.d_int = 5;
+	s.min_int = 0; s.max_int = 10;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "rc.i64"; s.kind = XTC_CFG_INT64; s.dflt.d_int64 = 5;
+	s.min_int = 0; s.max_int = 10;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "rc.dbl"; s.kind = XTC_CFG_DOUBLE; s.dflt.d_double = 1.0;
+	s.min_double = 0.0; s.max_double = 2.0;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "rc.bool"; s.kind = XTC_CFG_BOOL;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "rc.enum"; s.kind = XTC_CFG_ENUM;
+	s.enum_labels = g_levels; s.n_enum_labels = 3;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	s.name = "rc.even"; s.kind = XTC_CFG_INT; s.dflt.d_int = 2;
+	s.min_int = 0; s.max_int = 100; s.validator = even_only;
+	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_session_create(&ss), ==, XTC_OK);
+
+	/* Global path (unchanged). */
+	munit_assert_int(xtc_cfg_set_int("rc.int", 11), ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_set_int64("rc.i64", -1), ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_set_double("rc.dbl", 2.5), ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_set_bool("rc.bool", 2), ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_set_enum("rc.enum", 3), ==, XTC_E_RANGE);
+	/* Session path: THE REGRESSION -- these were XTC_E_INVAL. */
+	munit_assert_int(xtc_cfg_ssn_set_int(ss, "rc.int", 11,
+	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_ssn_set_int64(ss, "rc.i64", -1,
+	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_ssn_set_double(ss, "rc.dbl", 2.5,
+	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_ssn_set_bool(ss, "rc.bool", 2,
+	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
+	munit_assert_int(xtc_cfg_ssn_set_enum(ss, "rc.enum", 3,
+	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
+	/* Control: a validator rejection is INVAL on both paths, and an
+	 * in-bounds session set still applies. */
+	munit_assert_int(xtc_cfg_set_int("rc.even", 3), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_ssn_set_int(ss, "rc.even", 3,
+	    XTC_CFG_SRC_SESSION), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_cfg_ssn_set_int(ss, "rc.int", 7,
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	munit_assert_ptr_null(xtc_cfg_session_bind(ss));
+	munit_assert_int(xtc_cfg_get_int("rc.int", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 7);
+	(void)xtc_cfg_session_bind(NULL);
+
+	xtc_cfg_session_destroy(ss);
+	munit_assert_int(xtc_cfg_unregister("rc.int"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("rc.i64"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("rc.dbl"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("rc.bool"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("rc.enum"), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_unregister("rc.even"), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/register_basic",   test_register_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/session_scoping",  test_session_scoping,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1111,6 +1191,7 @@ static MunitTest tests[] = {
 	{ "/unknown_null",     test_unknown_and_null,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/unbounded",        test_unbounded,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/ref",              test_ref,                   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/range_code",       test_range_code_consistent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m14/cfg", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
