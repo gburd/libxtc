@@ -59,6 +59,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/socket.h>   /* MSG_NOSIGNAL / SO_NOSIGPIPE */
 
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
@@ -394,6 +395,17 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 	/* The fd is non-blocking; tell wolfSSL so it returns WANT_* rather
 	 * than spinning. */
 	wolfSSL_set_using_nonblock(t->ssl, 1);
+	/* wolfSSL's socket I/O sends with these flags: MSG_NOSIGNAL makes a
+	 * write to a peer that has gone an error instead of a SIGPIPE that
+	 * kills the host process (reproduced: exit 141 without it). */
+#if defined(MSG_NOSIGNAL)
+	wolfSSL_SetIOWriteFlags(t->ssl, MSG_NOSIGNAL);
+#elif defined(SO_NOSIGPIPE)
+	{
+		int one = 1;
+		(void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+	}
+#endif
 
 	/* ALPN: comma-form list, fail handshake on mismatch (matches the
 	 * strictness of the OpenSSL server-select callback). */

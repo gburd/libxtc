@@ -389,8 +389,14 @@ xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out)
 	t->handshake_done = 0;
 	xtc_tls_clear_wants(t);
 
+	/* GNUTLS_NO_SIGNAL: send with MSG_NOSIGNAL, so a write to a peer
+	 * that has gone returns an error instead of raising SIGPIPE and
+	 * killing the host process (reproduced: exit 141 without it). */
 	flags = GNUTLS_NONBLOCK |
 	    ((ctx->role == XTC_TLS_SERVER) ? GNUTLS_SERVER : GNUTLS_CLIENT);
+#if GNUTLS_VERSION_NUMBER >= 0x030402   /* enum value, not a macro */
+	flags |= GNUTLS_NO_SIGNAL;
+#endif
 
 	if (gnutls_init(&t->session, flags) != GNUTLS_E_SUCCESS) {
 		__os_free(t);
