@@ -116,8 +116,13 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 		c->fiber = CreateFiberEx(commit, reserve, 0, __coro_entry, c);
 	}
 	if (c->fiber == NULL) {
+		/* Commit-charge / address-space exhaustion (the ~422 K-fiber
+		 * case above) is memory exhaustion, like the mmap substrates'
+		 * ENOMEM -- not an internal error. */
+		DWORD e = GetLastError();
 		__os_free(c);
-		return XTC_E_INTERNAL;
+		return (e == ERROR_NOT_ENOUGH_MEMORY || e == ERROR_OUTOFMEMORY ||
+		    e == ERROR_COMMITMENT_LIMIT) ? XTC_E_NOMEM : XTC_E_INTERNAL;
 	}
 	if ((rc = __xtc_task_spawn_ex(loop, __xtc_coro_step, c, pinned, &t)) != XTC_OK) {
 		__coro_destroy(c);

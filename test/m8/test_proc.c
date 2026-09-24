@@ -1175,9 +1175,23 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 		n = i + 1;
 	}
 
-	/* (a) We must be refused -- cleanly -- rather than wrapping. */
-	munit_assert_int(rc, ==, XTC_E_RESOURCE);
-	munit_assert_int(n, <=, 65536);
+	/* (a) We must be refused -- cleanly -- rather than wrapping.
+	 *
+	 * The host may run out of address-space mappings first: every fiber
+	 * stack is two VMAs (the stack + its PROT_NONE guard page), so the
+	 * stock Linux vm.max_map_count of 65530 caps a process near 32 K
+	 * live fibers, well short of 65536.  That exhaustion must surface as
+	 * XTC_E_NOMEM (releases before 1.50 reported XTC_E_INTERNAL, i.e.
+	 * "a bug in xtc", for an ordinary out-of-mappings condition).  The
+	 * pid ceiling itself is only reachable on a host whose map limit
+	 * admits > 65536 stacks, and there it must be XTC_E_RESOURCE. */
+	if (rc == XTC_E_NOMEM && n < 65536) {
+		munit_logf(MUNIT_LOG_INFO, "host mapping limit hit at %d procs "
+		    "(raise vm.max_map_count to reach the pid ceiling)", n);
+	} else {
+		munit_assert_int(rc, ==, XTC_E_RESOURCE);
+		munit_assert_int(n, <=, 65536);
+	}
 
 	/* (b) No two live pids may share (loop_id, local_id).  Check via a
 	 * direct-indexed table rather than O(n^2) comparison. */
