@@ -50,9 +50,12 @@ faults, and stay inside a fixed resource budget on commodity hardware.
   and restarted by a tree, not by your shell script.
 
 * **You care about tail latency.**  xtc has resource accountants
-  (`xtc_res`) with high-water alert callbacks so you can hold
-  bounded RSS, file descriptors, in-flight tasks, and bandwidth
-  under stress.  Backpressure is built in; OOM-spirals are not.
+  (`xtc_res`) with high-water alert callbacks.  Metering is opt-in and
+  covers exactly what you attach: slab chunks and `xtc_mctx` arenas
+  (`MEM_BYTES`), sockets `xtc_net` opens (`FDS`), and tasks you charge.
+  It does not see plain `malloc`, or descriptors you `accept(2)`
+  yourself -- see `xtc_res(3)` for the full list.  Mailboxes and
+  channels are bounded, so backpressure is built in.
 
 * **You want portable source.**  The same source builds and passes
   its tests on Linux (glibc and musl), FreeBSD, illumos, and Windows.
@@ -176,7 +179,7 @@ notes, is [`examples/README.md`](examples/README.md)):
 | `01_hello_async.c` | A single async task with a timer |
 | `02_proc_pingpong.c` | Two BEAM processes bouncing messages |
 | `03_supervised_app.c` | Crash a worker, watch the supervisor restart it |
-| `04_lockmgr_demo.c` | The 9-mode transactional lock manager |
+| `04_lockmgr_demo.c` | The 9-mode transactional lock manager, with a pluggable (randomized) deadlock-victim policy |
 | `05_rexis/` | Networked, budgeted, multi-command Redis-compat server |
 | `06_sqlxtc/` | A from-scratch SQL engine (parser, vectorized executor, B-link + buffer pool + WAL) |
 | `07_kaka/` | Kafka-shaped partitioned log broker with credit backpressure |
@@ -235,8 +238,8 @@ What's working today:
 | L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written `fcontext` asm for 7 CPU families (x86_64, aarch64, arm, ppc64le, riscv64, s390x, sparc64; 12 `.S` + 2 MASM variants covering the SysV / MS-PE / Mach-O ABIs) + ucontext fallback + Win32 fibers.  The bare `__xtc_jump_fcontext` swap is ~7.6 ns on x86_64; a full `xtc_yield` -- the consumer-visible cost, including run-queue turn and per-fiber TLS -- measures ~455 ns/op in `bench_micro` on this workstation. |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
-| L5 PG adapter | Designed; not yet implemented. |
-| TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/M_TLS_MATRIX.md`); SChannel (Windows) is compile-only. |
+| Process groups | Done.  `xtc_pg` (Erlang `:pg`): named, single-node pid groups with join/leave/broadcast; tested in `test/m10/test_pg.c` and under DST.  Cross-node groups await the unbuilt distributed module. |
+| TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/M_TLS_MATRIX.md`); SChannel (Windows) is compile-only.  Since 1.50 a CLIENT verifies the server certificate AND host name by default on the four non-Windows backends, a write to a dead peer is an error rather than a process-killing `SIGPIPE`, and a zeroed `xtc_tls_opts_t` is secure.  SChannel does not yet honor the new verify default (see `xtc_tls.h`). |
 
 Test coverage today, measured against this tree (v1.49.1 plus the
 allocator / cancellation / accounting regression tests that landed after
@@ -326,7 +329,7 @@ Configure flags worth knowing:
 | Flag | What it does |
 |---|---|
 | `--with-io-backend=AUTO` | Pick io_uring, epoll, kqueue, IOCP, poll, select; defaults are sensible per-OS |
-| `--with-tls=openssl|none|auto` | Build TLS support (OpenSSL only today) |
+| `--with-tls=auto|openssl|libressl|boringssl|gnutls|wolfssl|mbedtls|schannel|none` | TLS backend (default `auto`) |
 | `--with-liburing=PATH` | Use a specific liburing install |
 | `--with-hegel[=PREFIX]` | Property-based tests via `libhegel` (in-process C ABI).  With no PREFIX, found by pkg-config; `nix develop` supplies it |
 
