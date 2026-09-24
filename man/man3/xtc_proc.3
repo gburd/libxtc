@@ -318,6 +318,20 @@ and REPORTS the outcome in
 .Bl -tag -width XTC_KILL_DELIVERED -offset indent
 .It Dv XTC_KILL_DELIVERED
 The target observed the kill and is gone (or already was).
+A pid that was never issued is not DELIVERED:
+.Fn xtc_exit_pid_deadline
+returns
+.Dv XTC_E_INVAL
+for it, as
+.Fn xtc_exit_pid
+does.
+Releases before 1.50 returned
+.Dv XTC_OK
+with
+.Dv XTC_KILL_DELIVERED
+for an unknown pid, and
+.Dv XTC_E_INVAL
+for a target still running its at-exit hooks.
 .It Dv XTC_KILL_DEFERRED
 The target is inside
 .Fn xtc_uncancelable

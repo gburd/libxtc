@@ -1980,16 +1980,42 @@ xtc_exit_pid_deadline(xtc_pid_t target, int reason, int64_t timeout_ns,
 
 	rc = xtc_exit_pid(target, reason);
 	if (rc != XTC_OK) {
-		/* Unknown or already-dead target.  Already dead is exactly
-		 * the outcome the caller wanted, so report it as such. */
-		p = __resolve(target, NULL);
-		if (p == NULL) {
-			if (out_status != NULL)
-				*out_status = XTC_KILL_DELIVERED;
-			return XTC_OK;
+		/*
+		 * xtc_exit_pid refuses a pid that is no longer ALIVE and one
+		 * that was never issued alike.  Already dead is the outcome
+		 * the caller wanted (DELIVERED); never issued is a caller bug
+		 * (XTC_E_INVAL, the same answer xtc_exit_pid gives).  This used
+		 * to report DELIVERED for ANY pid that did not resolve --
+		 * including one that never existed -- and XTC_E_INVAL for one
+		 * still in the table running its at-exit hooks: both backwards.
+		 *
+		 * "Was issued" is read off the slot generation: a slot's gen
+		 * is bumped each time it is handed out, so this loop issued
+		 * the pid iff 1 <= pid.gen <= slot.gen.  A pid whose loop has
+		 * been finalized cannot be told apart and counts as unknown.
+		 * ponytail: a slot reused 2^32 times wraps gen; same ceiling
+		 * the pid generation check itself has.
+		 */
+		xtc_loop_t *tl = NULL;
+		struct xtc_proc_table *tbl;
+		int issued = 0;
+		p = __resolve(target, &tl);
+		if (p != NULL) {
+			__proc_release(p);   /* in the table but !alive: dying */
+			issued = 1;
+		} else if (tl != NULL && (tbl = __table_for(tl, 0)) != NULL) {
+			unsigned st = __pt_stripe(target.local_id);
+			(void) __proc_mtx_lock(&tbl->stripes[st]);
+			issued = target.gen != 0 &&
+			    target.local_id < tbl->cap &&
+			    target.gen <= tbl->slots[target.local_id].gen;
+			(void) __proc_mtx_unlock(&tbl->stripes[st]);
 		}
-		__proc_release(p);
-		return rc;
+		if (!issued)
+			return XTC_E_INVAL;
+		if (out_status != NULL)
+			*out_status = XTC_KILL_DELIVERED;
+		return XTC_OK;
 	}
 
 	on_fiber = !xtc_pid_is_none(xtc_self());
