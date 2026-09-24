@@ -297,6 +297,15 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
  */
 static _Atomic int __xproc_hook_seen;
 
+/* Exit status of a re-exec'd child that could not start its entry.  Each
+ * cause is distinct so a monitor's DOWN (kind EXIT, exit_code N) says what
+ * went wrong; they sit at the top of the 8-bit range, away from typical
+ * application codes. */
+#define XPROC_CHILD_E_NOFD         250   /* no / bad XTC_CTRL_FD */
+#define XPROC_CHILD_E_ARG          251   /* arg frame: channel error */
+#define XPROC_CHILD_E_ARG_TIMEOUT  252   /* arg frame: none within 10 s */
+#define XPROC_CHILD_E_NOENTRY      253   /* entry not registered here */
+
 int
 xtc_xproc_win_child_maybe(int argc, char **argv)
 {
@@ -319,18 +328,19 @@ xtc_xproc_win_child_maybe(int argc, char **argv)
 	/* The control fd number: xtc_osproc_spawn's exec path publishes it
 	 * as XTC_CTRL_FD (the documented osproc contract). */
 	if (__os_env_get("XTC_CTRL_FD", fdbuf, sizeof fdbuf) != XTC_OK)
-		_exit(3);
+		_exit(XPROC_CHILD_E_NOFD);
 	fd = strtol(fdbuf, &end, 10);
 	if (end == fdbuf || *end != '\0' || fd < 0 || fd > 1 << 20)
-		_exit(3);
+		_exit(XPROC_CHILD_E_NOFD);
 	(void)xtc_net_setnonblock((int)fd);
 	/* First frame is the parent's copied arg (possibly empty). */
-	if (xtc_net_recv_frame((int)fd, &arg, &alen, 0,
-	    10LL * 1000 * 1000 * 1000) != XTC_OK)
-		_exit(3);
+	if ((r = xtc_net_recv_frame((int)fd, &arg, &alen, 0,
+	    10LL * 1000 * 1000 * 1000)) != XTC_OK)
+		_exit(r == XTC_E_AGAIN ? XPROC_CHILD_E_ARG_TIMEOUT
+		                       : XPROC_CHILD_E_ARG);
 	if ((fn = __xproc_lookup_entry(entry)) == NULL) {
 		if (arg != NULL) __os_free(arg);
-		_exit(4);   /* the entry is not registered in this image */
+		_exit(XPROC_CHILD_E_NOENTRY);   /* not registered in this image */
 	}
 	r = xtc_xproc_child_main((int)fd, fn, arg);
 	if (arg != NULL) __os_free(arg);
