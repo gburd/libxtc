@@ -189,7 +189,17 @@ XTC_API int  xtc_lockmgr_id_set_timeout(xtc_lockmgr_t *mgr, xtc_locker_t l,
                                         int64_t timeout_ns);
 
 /* Single acquire.  timeout_ns: -1 = forever, 0 = NOWAIT.  Returns
- * XTC_OK / XTC_E_AGAIN / XTC_E_DEADLK / XTC_E_INVAL / XTC_E_NOMEM. */
+ * XTC_OK / XTC_E_AGAIN / XTC_E_DEADLK / XTC_E_INVAL / XTC_E_NOMEM.
+ *
+ * A locker that already holds a lock on obj and asks for another mode
+ * (a CONVERSION) is checked against every OTHER holder, exactly like a
+ * fresh request; a mode its held one already dominates is a no-op; a
+ * dominating mode raises the held lock in place; any other mode is
+ * granted as an additional lock if compatible.  A conversion is never
+ * queued behind waiters (they may be waiting for this locker).  Before
+ * 1.50 a conversion was checked only against the locker's own mode --
+ * granting past a conflicting holder -- and could silently WEAKEN the
+ * held lock (S re-requested as IS became IS). */
 XTC_API int  xtc_lock_get(xtc_lockmgr_t *mgr, xtc_locker_t locker,
                           const void *obj, size_t obj_size,
                           xtc_lock_mode_t mode, int64_t timeout_ns);
@@ -199,10 +209,19 @@ XTC_API int  xtc_lock_put(xtc_lockmgr_t *mgr, xtc_locker_t locker,
 
 XTC_API int  xtc_lock_release_all(xtc_lockmgr_t *mgr, xtc_locker_t locker);
 
-/* Atomic mode change on a held lock.  Upgrade may block (returns AGAIN
- * on NOWAIT-style timeout=0).  Downgrade is always non-blocking and
- * promotes any waiters that the new (weaker) mode no longer conflicts
- * with. */
+/* Atomic mode change on a held lock.  "Stronger" and "weaker" come from
+ * the conflict MATRIX, not the enum's numeric order: new_mode must
+ * dominate (upgrade) or be dominated by (downgrade) the held mode --
+ * exclude at least / at most what it excludes -- else XTC_E_INVAL.
+ * Upgrade waits if another holder conflicts.  The API has no timeout
+ * argument, so the wait is bounded by the locker's deadline
+ * (xtc_lockmgr_id_set_timeout): past it, XTC_E_AGAIN; with none it waits
+ * until granted or chosen as a deadlock victim (XTC_E_DEADLK).  A
+ * granted upgrade replaces the held lock (one xtc_lock_put releases it).
+ * Downgrade is always non-blocking and promotes any waiters that the new
+ * mode no longer conflicts with.  Before 1.50 both used enum order (so
+ * IX -> IS was refused and IX -> S allowed), and upgrade ignored the
+ * deadline and left the old lock held beside the new one. */
 XTC_API int  xtc_lock_upgrade(xtc_lockmgr_t *mgr, xtc_locker_t locker,
                               const void *obj, size_t obj_size,
                               xtc_lock_mode_t new_mode);

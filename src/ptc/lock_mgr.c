@@ -150,6 +150,34 @@ __conflicts(xtc_lockmgr_t *m, xtc_lock_mode_t held, xtc_lock_mode_t req)
 	return m->conflicts[(int)held * n + (int)req];
 }
 
+/*
+ * Does mode `p` DOMINATE mode `q` under this manager's conflict matrix --
+ * does holding p exclude at least everything holding q excludes, and is
+ * p blocked by at least everything that blocks q?  I.e. for every mode k,
+ * conflicts[q][k] implies conflicts[p][k] AND conflicts[k][q] implies
+ * conflicts[k][p].  Every mode dominates itself and NL.
+ *
+ * This, not the numeric enum value, is what "stronger" means.  The
+ * default enum is NL0 S1 X2 WT3 IX4 IS5 IWR6 RU7 WW8 -- not a strength
+ * order -- and the matrix may be user-supplied.  Comparing enum values
+ * made a re-request of IS by an S holder "raise" it to IS (a weakening
+ * that let a conflicting IX in), refused the legal downgrade IX -> IS and
+ * allowed the illegal IX -> S.
+ */
+static int
+__dominates(const xtc_lockmgr_t *m, xtc_lock_mode_t p, xtc_lock_mode_t q)
+{
+	int n = m->n_modes, k;
+	if ((int)p >= n || (int)q >= n) return 0;
+	for (k = 0; k < n; k++) {
+		if (m->conflicts[(int)q * n + k] && !m->conflicts[(int)p * n + k])
+			return 0;
+		if (m->conflicts[k * n + (int)q] && !m->conflicts[k * n + (int)p])
+			return 0;
+	}
+	return 1;
+}
+
 static int
 __is_write_mode(xtc_lock_mode_t mode)
 {
@@ -492,9 +520,26 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 	xtc_task_t *cur;
 	int rc;
 
+	/*
+	 * Re-request by a locker that already holds a lock on this object.
+	 *
+	 * Before 1.50 any mode compatible with the locker's OWN held mode
+	 * was merged in place, raising the entry's mode whenever the new
+	 * enum value was larger.  That checked neither the OTHER holders --
+	 * an IS holder asking for S was granted S beside another locker's
+	 * IX -- nor real strength (see __dominates) -- an S holder asking for
+	 * IS was silently weakened to IS, admitting a conflicting IX.  Now:
+	 *   - the held mode already dominates the request: nothing to do;
+	 *   - the request dominates the held mode and no OTHER holder
+	 *     conflicts with it: raise the entry in place;
+	 *   - anything else takes the normal path below, as a CONVERSION.
+	 */
 	prior = __find_granted(o, locker);
 	if (prior != NULL && !__conflicts(m, prior->mode, mode)) {
-		if ((int)mode > (int)prior->mode) {
+		if (__dominates(m, prior->mode, mode))
+			return XTC_OK;
+		if (__dominates(m, mode, prior->mode) &&
+		    !__has_conflict_granted(m, o, locker, mode)) {
 			/* Keep n_write_held in step with the mode change, as
 			 * upgrade/downgrade do: xtc_lock_vec's rollback undoes
 			 * this merge with a downgrade, which decrements it. */
@@ -510,11 +555,23 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 					    memory_order_relaxed);
 			}
 			prior->mode = mode;
+			return XTC_OK;
 		}
-		return XTC_OK;
 	}
 
-	if (!__has_conflict_granted(m, o, locker, mode) && !__has_waiters(o)) {
+	/*
+	 * A CONVERSION -- a request by a locker that already holds a lock on
+	 * this object -- is not queued behind waiters.  Those waiters may be
+	 * waiting for this very locker to release, and the detector only
+	 * sees waiter -> holder edges, so FIFO-queueing the conversion made
+	 * an undetectable deadlock: A holds S, W waits for X (blocked by A),
+	 * A asks for X and, though A is the sole holder, waits behind W
+	 * forever.  A conversion is granted when no other HOLDER conflicts,
+	 * and if it must wait it goes to the head of the queue (conversions
+	 * before new requests, as in Gray and Reuter).
+	 */
+	if (!__has_conflict_granted(m, o, locker, mode) &&
+	    (prior != NULL || !__has_waiters(o))) {
 		e = __entry_alloc(m);
 		if (e == NULL) return XTC_E_NOMEM;
 		e->locker = locker;
@@ -547,10 +604,19 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 	e->mode = mode;
 	e->granted = 0;
 	e->obj = o;
-	e->prev = o->waiting_tail;
-	if (o->waiting_tail) o->waiting_tail->next = e;
-	else                 o->waiting        = e;
-	o->waiting_tail = e;
+	if (prior != NULL) {
+		/* Conversion: head of the queue (see above). */
+		e->prev = NULL;
+		e->next = o->waiting;
+		if (o->waiting) o->waiting->prev = e;
+		else            o->waiting_tail  = e;
+		o->waiting = e;
+	} else {
+		e->prev = o->waiting_tail;
+		if (o->waiting_tail) o->waiting_tail->next = e;
+		else                 o->waiting        = e;
+		o->waiting_tail = e;
+	}
 	atomic_fetch_add_explicit(&m->n_waiting, 1, memory_order_relaxed);
 
 	/* If detect-on-block, kick the detector synchronously. */
@@ -878,14 +944,49 @@ xtc_lock_upgrade(xtc_lockmgr_t *m, xtc_locker_t locker,
 		(void)__xtc_mtx_unlock(&p->lock);
 		return XTC_E_INVAL;
 	}
-	if ((int)new_mode <= (int)cur->mode) {
+	if (new_mode == cur->mode || !__dominates(m, new_mode, cur->mode)) {
 		(void)__xtc_mtx_unlock(&p->lock);
-		return XTC_E_INVAL;     /* not an upgrade */
+		return XTC_E_INVAL;     /* not an upgrade (by the matrix) */
 	}
 	/* Check conflicts excluding self. */
 	if (__has_conflict_granted(m, o, locker, new_mode)) {
-		/* Block via the standard wait-queue path. */
-		rc = __do_acquire_locked(m, p, o, locker, new_mode, -1);
+		/*
+		 * Must wait.  The API has no timeout argument (frozen ABI), so
+		 * the wait is bounded by the locker's deadline
+		 * (xtc_lockmgr_id_set_timeout): past it -> XTC_E_AGAIN at
+		 * once; none -> wait until granted or chosen as a deadlock
+		 * victim.  Before 1.50 this always waited forever, ignoring
+		 * the deadline.
+		 */
+		struct locker_rec *lr;
+		struct lock_entry *ne, *e;
+		int64_t bound = -1;
+		(void)__xtc_mtx_lock(&m->locker_lock);
+		lr = __locker_find(m, locker);
+		if (lr != NULL && lr->deadline_ns >= 0) {
+			int64_t now = __lockmgr_now_ns();
+			bound = (lr->deadline_ns > now) ? lr->deadline_ns - now : 0;
+		}
+		(void)__xtc_mtx_unlock(&m->locker_lock);
+		rc = __do_acquire_locked(m, p, o, locker, new_mode, bound);
+		if (rc == XTC_OK) {
+			/*
+			 * The wait granted a SECOND entry at new_mode (the
+			 * newest of this locker's, head-most).  An upgrade
+			 * changes the mode of the lock the caller holds; it
+			 * does not add one -- before 1.50 it left the old
+			 * entry too, so a single xtc_lock_put released the
+			 * new mode and silently kept the old one.  Drop the
+			 * next-newest entry, the one that was upgraded.
+			 */
+			ne = __find_granted(o, locker);
+			for (e = (ne != NULL) ? ne->next : NULL; e != NULL;
+			    e = e->next)
+				if (e->locker == locker)
+					break;
+			if (e != NULL)
+				__release_entry_locked(m, p, o, e);
+		}
 		(void)__xtc_mtx_unlock(&p->lock);
 		return rc;
 	}
@@ -927,9 +1028,12 @@ xtc_lock_downgrade(xtc_lockmgr_t *m, xtc_locker_t locker,
 	if (o == NULL) { (void)__xtc_mtx_unlock(&p->lock); return XTC_E_INVAL; }
 	cur = __find_granted(o, locker);
 	if (cur == NULL) { (void)__xtc_mtx_unlock(&p->lock); return XTC_E_INVAL; }
-	if ((int)new_mode > (int)cur->mode) {
+	if (!__dominates(m, cur->mode, new_mode)) {
+		/* Not a downgrade by the matrix: new_mode would exclude
+		 * something cur->mode does not (before 1.50 an enum-order
+		 * check refused IX -> IS and allowed IX -> S). */
 		(void)__xtc_mtx_unlock(&p->lock);
-		return XTC_E_INVAL;     /* not a downgrade */
+		return XTC_E_INVAL;
 	}
 
 	(void)__xtc_mtx_lock(&m->locker_lock);
