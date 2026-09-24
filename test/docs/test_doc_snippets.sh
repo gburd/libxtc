@@ -48,6 +48,17 @@ if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists liburing 2>/dev/
 		LIBS="$LIBS $(pkg-config --libs liburing)"
 	fi
 fi
+# TLS: a library built with a real TLS backend needs that backend's libs
+# (and the configure-time -L path, for a backend in a non-default prefix)
+# to link any snippet that calls xtc_tls_*.  Read them from the build's
+# own Makefile rather than guess: XTC_TLS_LIBS is exactly what the library
+# was configured with.  Before this, a TLS snippet failed to link on every
+# TLS backend, so it had to live outside the gate.
+if [ -f "$BUILD/Makefile" ] && ! nm "$LIB" 2>/dev/null | grep -q '^tls_none\.o:'; then
+	tls_libs=$(sed -n 's/^XTC_TLS_LIBS[[:space:]]*=[[:space:]]*//p' "$BUILD/Makefile" | head -1)
+	tls_ldf=$(sed -n 's/^LDFLAGS[[:space:]]*=[[:space:]]*//p' "$BUILD/Makefile" | head -1)
+	[ -n "$tls_libs" ] && LIBS="$LIBS $tls_ldf $tls_libs"
+fi
 # libdl is folded into libc on modern glibc; add it only if present.
 printf 'int main(void){return 0;}\n' > "$tmp/dltest.c"
 if "$CC" "$tmp/dltest.c" -ldl -o "$tmp/dltest" >/dev/null 2>&1; then
