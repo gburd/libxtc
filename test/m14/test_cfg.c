@@ -1236,8 +1236,8 @@ test_get_string_copy(const MunitParameter p[], void *d)
 	xtc_cfg_spec_t s = { 0 };
 	xtc_cfg_session_t *ss = NULL;
 	char *cp = NULL;
-	int i, bad = 0;
 #if !defined(_WIN32)
+	int i, bad = 0;     /* used only by the POSIX concurrent-set half */
 	pthread_t th;
 #endif
 	(void)p; (void)d;

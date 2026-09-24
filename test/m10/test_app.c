@@ -185,7 +185,9 @@ test_app_multiloop(const MunitParameter p[], void *d)
 
 /* ---- graceful drain: xtc_app_shutdown (PLAN.md 19.27.10) ---- */
 #include <signal.h>
-#include <unistd.h>
+#if !defined(_WIN32)
+#include <unistd.h>          /* getpid, kill: the POSIX SIGTERM test */
+#endif
 #include "xtc_inspect.h"
 
 #define MS (1000LL * 1000)
@@ -454,6 +456,7 @@ test_app_shutdown_inval(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+#if !defined(_WIN32)
 /* The opt-in helper drains on a self-sent SIGTERM, and restores the
  * previous disposition on destroy. */
 static xtc_app_drain_report_t g_sig_rep;
@@ -501,9 +504,29 @@ test_app_drain_on_sigterm(const MunitParameter p[], void *d)
 	munit_assert_int(atomic_load(&g_dr_hook_done), ==, 1);
 	xtc_app_destroy(a);
 	munit_assert_int(sigaction(SIGTERM, NULL, &after), ==, 0);
-	munit_assert_ptr(after.sa_handler, ==, before.sa_handler);
+	/* Compare as function pointers: munit_assert_ptr converts to void *,
+	 * which -Wpedantic (CI's -Werror jobs) rejects for a function
+	 * pointer. */
+	munit_assert_true(after.sa_handler == before.sa_handler);
 	return MUNIT_OK;
 }
+#else
+/* xtc_app_drain_on_signal is POSIX-only (XTC_E_NOSYS on Windows, which
+ * has no SIGTERM/sigaction); assert exactly that. */
+static MunitResult
+test_app_drain_on_sigterm(const MunitParameter p[], void *d)
+{
+	xtc_app_t *a;
+	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	(void)p; (void)d;
+	opts.no_tuning_check = 1;
+	munit_assert_int(xtc_app_create(&opts, &a), ==, XTC_OK);
+	munit_assert_int(xtc_app_drain_on_signal(a, 0, 0, NULL), ==,
+	    XTC_E_NOSYS);
+	xtc_app_destroy(a);
+	return MUNIT_OK;
+}
+#endif /* !_WIN32 */
 
 /* ---- sup exit waits for its children's cleanup (multi-loop) ----
  *
