@@ -6,78 +6,123 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
-## OPEN (security): TLS hostname verification is a no-op on GnuTLS and wolfSSL
+## RESOLVED (1.50): lock-manager conversions broke mutual exclusion
 
-**Status:** OPEN as of 1.49.5.  Tracked as PLAN.md 19.27.6-19.27.8.
+Present since 1.0; found and fixed in 1.50 (87219d3).  When a locker
+asked for a lock on an object it already held (a conversion):
 
-`xtc_tls_set_hostname` returns `XTC_E_NOSYS` on the GnuTLS
-(`src/io/tls_gnutls.c:424`) and wolfSSL (`src/io/tls_wolfssl.c:393`)
-backends.  On those two backends a CLIENT verifies the certificate CHAIN
-but not the NAME, so a valid certificate for any host is accepted.  The
-header documents the NOSYS return honestly; the README's "builds and
-passes the m18 suite in CI" for those backends does NOT mean parity with
-OpenSSL, and the suite could not have caught it: no test on any backend
-asserts that a wrong-hostname certificate is rejected, and the one
-set_hostname test SKIPs on NOSYS.
+- it was checked only against its OWN held mode, so it could be granted
+  beside a conflicting holder (IS holder asks for S while another holds
+  IX: granted);
+- "stronger" meant a larger enum value, which is not a strength order, so
+  an S holder asking for IS was moved to IS and a conflicting IX then
+  admitted -- and `xtc_lock_downgrade` refused IX -> IS but allowed IX -> S;
+- a conversion queued behind a waiter that was waiting for the same
+  locker, an undetectable deadlock;
+- `xtc_lock_upgrade` ignored the locker deadline and waited forever, and a
+  blocking upgrade left the old lock held beside the new one.
 
-Also: a zeroed `xtc_tls_opts_t` resolves to `XTC_TLS_VERIFY_NONE` for the
-CLIENT role, so `opts = {0}` on a client does no certificate verification
-at all.
+Strength now comes from the conflict matrix, conversions are checked
+against every other holder and are never queued behind waiters, and
+upgrade is bounded by `xtc_lockmgr_id_set_timeout`.  The DST lock-manager
+test gained a mutual-exclusion oracle that catches the old behavior on
+its first seed (pinned in the corpus).
 
-**If you ship TLS clients today:** use the OpenSSL (or BoringSSL/LibreSSL)
-backend, set `verify_peer_mode = XTC_TLS_VERIFY_REQUIRE` explicitly, call
-`xtc_tls_set_hostname` and treat any non-`XTC_OK` return -- including
-`XTC_E_NOSYS` -- as a hard failure, not "not needed".
+## RESOLVED (1.50): TLS host-name checks, secure client default, SIGPIPE
 
-## OPEN: xtc_xproc_destroy is a use-after-free with a live monitor, and does not reap
+Fixed in 1.50 (PLAN.md 19.27.6-19.27.8):
 
-**Status:** OPEN as of 1.49.5.  Tracked as PLAN.md 19.27.1-19.27.3.
+- `xtc_tls_set_hostname` returned `XTC_E_NOSYS` on GnuTLS, wolfSSL and
+  mbedTLS, so a CLIENT on those backends accepted a valid certificate for
+  ANY host.  All four non-Windows backends now check the name (cdc3dab),
+  and m18 asserts a wrong-name certificate is REJECTED on each.
+- A zeroed `xtc_tls_opts_t` meant `XTC_TLS_VERIFY_NONE` for a CLIENT.  A
+  client now verifies by default, the verify modes mean the same on every
+  backend, and a NULL `ca_file` loads the platform trust store (mbedTLS,
+  which has none, refuses a verifying client without `ca_file`) (517f9d5).
+  **Behavior change:** a client that relied on the insecure default and
+  talks to a self-signed server must now set
+  `verify_peer_mode = XTC_TLS_VERIFY_NONE` explicitly.
+- A TLS write to a peer that had closed raised `SIGPIPE` and killed the
+  host process on all four backends unless the embedder ignored the
+  signal.  It now returns an error (5653513); the same for `xtc_net`
+  sends (2711c82).
 
-Reproduced under AddressSanitizer: `xtc_xspawn` -> `xtc_xmonitor` ->
-`xtc_xproc_destroy` while the child is still running frees `p->os`; the
-monitor's shadow fiber, parked in `xtc_osproc_wait`, reads the freed struct
-when the child later exits (`src/orc/osproc.c:322`).  A non-ASan run prints
-a normal DOWN and looks fine.  Separately, destroy neither signals nor
-reaps a running child (the man page says it does): after destroy the OS
-child is still alive and becomes a zombie.  And a child killed by SIGSEGV
-is reported to the monitor as `XTC_DOWN_KIND_EXIT` with exit_code 11, not
-`KIND_SIGNAL` -- a supervisor cannot distinguish a crash from `exit(11)`.
+Still open: SChannel (Windows) does not honor the new client verify
+default -- a zeroed opts there still verifies nothing (`xtc_tls.h`).
+wolfSSL refuses to create a SERVER connection from a context with no
+certificate (`xtc_tls_create` returns `XTC_E_NOMEM`); the other backends
+defer that error to the handshake.
 
-**Workaround:** never call `xtc_xproc_destroy` while the child may be
-alive; wait for the DOWN first.  Do not rely on the DOWN kind to classify
-an external child's death.
+## RESOLVED (1.50): xtc_xproc lifetime, reaping and death classification
 
-## OPEN: supervisor group restarts overlap the old children's cleanup
+Fixed in 1.50 (PLAN.md 19.27.1-19.27.3, 19.27.9):
 
-**Status:** OPEN as of 1.49.5.  Tracked as PLAN.md 19.27.4.
+- `xtc_xproc_destroy` freed the child's state under a monitor's shadow
+  fiber (a heap-use-after-free, visible only under ASan) and neither
+  signalled nor reaped a running child, which was orphaned and later
+  became a zombie.  Destroy now sends SIGTERM, waits up to 2 s, sends
+  SIGKILL, and reaps; the shadow holds its own reference (c1841bc).
+- A child killed by a signal was reported as `XTC_DOWN_KIND_EXIT` with the
+  signal number as its exit code, and every short-lived child's status
+  arrived as 96 (a truncated internal NOPROC code, from a spawn-then-
+  monitor race).  A monitor now sees CLEAN, EXIT or SIGNAL exactly
+  (0f007ca).
+- `xtc_xspawn_entry` forked straight into a new runtime, and the exec path
+  of `xtc_osproc_spawn` called `setenv` after `fork`: either could leave
+  the child of a multithreaded parent blocked forever on a lock another
+  parent thread held.  The exec path now does only `execve` after fork,
+  and `xtc_xspawn_entry` re-execs the binary when `main()` calls
+  `xtc_xproc_win_child_maybe` (b031dfb).  `xtc_xspawn`, which passes a raw
+  function pointer, still forks without exec; prefer `xtc_xspawn_entry`
+  from a multithreaded parent.
 
-Under `XTC_SUP_ONE_FOR_ALL` and `XTC_SUP_REST_FOR_ONE`, sibling kills are
-fire-and-forget and the replacement is spawned immediately
-(`src/orc/sup.c` ~254-298).  Reproduced: a shared-resource hold count
-reached 4 where steady state is 2 -- the replacement ran while its killed
-predecessor still held the resource.  For children sharing a C resource
-this is a double-holder bug.
+## RESOLVED (1.50): supervisor restart and join lifetime
 
-**Workaround:** do not use group restart for children that share state a
-replacement must not touch until the predecessor has released it; use
-ONE_FOR_ONE, or have the child's at-exit hook be the only thing that
-makes the resource available and have the replacement wait on that.
+- Under `XTC_SUP_ONE_FOR_ALL` / `XTC_SUP_REST_FOR_ONE` the replacement was
+  spawned while its killed predecessor could still be inside an exit hook
+  holding a shared resource.  The supervisor now waits (up to 5 s) until
+  each old child has left the process table before respawning (8680179,
+  PLAN.md 19.27.4).
+- `xtc_sup_join` with a timeout that expired freed the still-running
+  supervisor anyway -- a use-after-free, or a silent wedge of the
+  supervisor on its freed lock -- and returned `XTC_OK`.  It now returns
+  `XTC_E_AGAIN` and frees nothing (f6637ef).
 
-## OPEN: xtc_lock_vec is not atomic all-or-none (frozen lock ABI)
+## RESOLVED (1.50): xtc_lock_vec is all-or-none for its GETs
 
-**Status:** OPEN as of 1.49.5.  Tracked as PLAN.md 19.27.5.
+`xtc_lock_vec` left the earlier GETs held when a later one failed, while
+the man page promised rollback.  It now releases the GETs issued since the
+last non-GET request and reports the retained prefix in `*out_executed`
+(340574c, PLAN.md 19.27.5).  The frozen lock ABI is byte-identical to
+1.0.0.
 
-`man xtc_lockmgr` says `xtc_lock_vec` is "succeed-or-rollback ... no
-partial state is left".  Reproduced: when the second GET would block, the
-call returns `XTC_E_AGAIN` with `*out_executed == 1` and the FIRST lock is
-still held.  The HEADER (`xtc_lockmgr.h:213-217`) documents this
-partial-state behavior and says to pass `timeout_ns = 0` in every request
-for atomic semantics -- so header and man page contradict, and the man
-page is the one that is wrong.  The lock layer's binary LAYOUT is frozen
-and unchanged since v1.0.0; this is a behavior/documentation defect.
+## OPEN: timed waits retain memory until the loop is torn down
 
-**Workaround:** treat `xtc_lock_vec` as a loop over `xtc_lock_get`; on any
-non-OK return, release the first `*out_executed` locks yourself.
+**Status:** OPEN as of 1.50.0; same class as the fiber retention below.
+
+Every timed park -- `xtc_proc_sleep`, `xtc_recv` with a timeout,
+`xtc_proc_wait_fd` with a timeout -- allocates a timer node that stays on
+the loop's timer list after it fires or is cancelled, until
+`xtc_loop_fini`.  Measured: 80 bytes per `xtc_proc_sleep` (linear to one
+million sleeps, 80 MB) and about 22 bytes per satisfied timed `xtc_recv`.
+A long-lived loop that sleeps in a hot path grows without bound.  (A
+separate bug that LEAKED these nodes at `xtc_loop_fini` once
+`xtc_timer_set` had been used is fixed in 1.50, 42fe0e2.)
+
+**Workaround:** for periodic work prefer one `xtc_timer_set` callback
+over a sleep loop, and bound the lifetime of loops that do many timed
+waits.
+
+## OPEN: xtc_res FDS cannot meter inbound connections
+
+**Status:** OPEN as of 1.50.0.
+
+`FDS` meters the sockets `xtc_net` opens (listen, dial, UDP) once
+`xtc_res_attach_net` is called.  `xtc_net` has no accept function, so
+connections the caller `accept(2)`s itself -- the usual source of fd growth
+in a server -- are not charged.  Charge them yourself with
+`xtc_res_acquire` / `xtc_res_release`.
 
 ## OPEN (ABI): caller-allocated structs grew during 1.x -- do not mix minors
 
