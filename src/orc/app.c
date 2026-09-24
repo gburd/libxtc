@@ -15,6 +15,9 @@
 #include "xtc_proc.h"
 #include "os_tuning.h"
 
+/* sup.c, internal: stop the root supervisor's child-cleanup wait. */
+int __xtc_sup_abandon_wait(xtc_supervisor_t *sup);
+
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -382,6 +385,19 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 		}
 	}
 	if (forced != NULL) __os_free(forced);
+	/* The children that did not leave are now REPORTED as survivors, so
+	 * the supervisor must not keep waiting for them in its own exit path
+	 * (up to 5 s): tell it to finish, and give it a moment to do so --
+	 * it polls every 1 ms -- so it signals `stopped` before the loop is
+	 * halted below and xtc_app_destroy's join can succeed. */
+	(void)__xtc_sup_abandon_wait(a->root);
+	for (i = 0; i < 50 && xtc_sup_alive(a->root); i++) {
+		/* Callable from a proc OR a plain thread (xtc_app.3). */
+		if (!xtc_pid_is_none(xtc_self()))
+			(void)xtc_proc_sleep(1LL * 1000 * 1000);
+		else
+			(void)__os_sleep_ns(1LL * 1000 * 1000);
+	}
 	/* A survivor on a BORROWED loop can still run (and read its slot)
 	 * after destroy; an owned loop/exec is freed with it. */
 	if (r.n_survivors > 0 && !a->owns_loop && a->exec == NULL)

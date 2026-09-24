@@ -49,6 +49,7 @@ struct xtc_supervisor {
 	_Atomic int            n_restarts_total;
 	_Atomic int            alive;
 	_Atomic int            stop_requested;
+	_Atomic int            abandon_wait;   /* __xtc_sup_abandon_wait */
 	xtc_pid_t              sup_pid;
 	xtc_notify_t          *stopped;
 };
@@ -292,9 +293,12 @@ __wait_children_gone(struct xtc_supervisor *sup, int lo, int hi,
 	int64_t start = 0, now = 0;
 	int i, pending;
 
-	(void)sup;
 	(void)__os_clock_mono(&start);
 	for (;;) {
+		/* The owner (xtc_app_shutdown) has already accounted for the
+		 * stragglers as survivors: stop waiting on them. */
+		if (atomic_load_explicit(&sup->abandon_wait, memory_order_acquire))
+			return 0;
 		pending = 0;
 		for (i = lo; i < hi; i++)
 			if (!xtc_pid_is_none(old[i]) && !__child_gone(old[i]))
@@ -515,8 +519,6 @@ __sup_entry(void *arg)
 		(void)__xtc_mtx_unlock(&sup->lock);
 	}
 
-	atomic_store_explicit(&sup->alive, 0, memory_order_release);
-
 	/*
 	 * On exit, kill any still-alive children, then WAIT (bounded) for
 	 * their cleanup to finish before announcing the stop.  Before 1.50
@@ -553,6 +555,16 @@ __sup_entry(void *arg)
 		}
 	}
 
+	/*
+	 * `alive` drops only NOW, with the exit complete and `stopped` about
+	 * to be signalled -- not before the child wait above.  Callers read
+	 * !xtc_sup_alive as "the supervisor has exited, a join will succeed"
+	 * (xtc_app_shutdown's force phase does); clearing it earlier let one
+	 * stop the loop while this proc still slept in __wait_children_gone,
+	 * so the join timed out and -- correctly, since f6637ef -- freed
+	 * nothing: the supervisor leaked (LSan, 12_graceful_drain under ASan).
+	 */
+	atomic_store_explicit(&sup->alive, 0, memory_order_release);
 	(void)xtc_notify_signal(sup->stopped);
 	/* Root of a multi-loop app: stopping the supervisor stops the whole
 	 * application -- release the executor so xtc_exec_run (driving all
@@ -715,6 +727,25 @@ xtc_sup_stop(xtc_supervisor_t *sup)
  * memory freed by xtc_sup_join), and XTC_OK returned for a supervisor
  * that had not stopped.
  */
+/*
+ * Internal, for xtc_app_shutdown: make the supervisor stop waiting for
+ * its killed children's cleanup (__wait_children_gone) and finish exiting
+ * now.  The app calls it once it has reported the children that did not
+ * finish as survivors (e.g. masked forever); without it the supervisor
+ * sat in its bounded 5 s wait after the app had stopped the loop, so it
+ * never signalled `stopped`, xtc_app_destroy's join timed out, and the
+ * supervisor leaked (LSan: /m10.5/app/shutdown_masked_bounded).
+ *
+ * PUBLIC: int __xtc_sup_abandon_wait __P((xtc_supervisor_t *));
+ */
+int
+__xtc_sup_abandon_wait(xtc_supervisor_t *sup)
+{
+	if (sup == NULL) return XTC_E_INVAL;
+	atomic_store_explicit(&sup->abandon_wait, 1, memory_order_release);
+	return XTC_OK;
+}
+
 int
 xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns)
 {
