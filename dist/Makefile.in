@@ -1068,36 +1068,63 @@ tnt_echo: $(srcdir)/../examples/08_tnt/echo.c $(STATIC_LIB)
 # -------------------------------------------------------------------------
 # Tests.
 # -------------------------------------------------------------------------
+# SKIP SUMMARY (PLAN 19.27.21).  Every tier records what it SKIPPED --
+# munit cases that returned MUNIT_SKIP, any "SKIP" line a test printed,
+# and exit-77s -- via test/dist/skip_collect.awk into check-skips-<tier>.txt,
+# and `check` prints them in one block at the end, so a green run states
+# what it did NOT test.  Each test's output goes to a FILE (then is
+# printed), not a pipe: a pipe would make the loop wait on any grandchild
+# that still holds it.  The collection never changes a test's exit status.
+SKIP_AWK	= $(abs_top_srcdir)/../test/dist/skip_collect.awk
+
 check: tests-c tests-pbt tests-sh check-examples
 	@echo "== M0 test summary =="
+	@n=$$(cat check-skips-c.txt check-skips-pbt.txt check-skips-sh.txt \
+	    2>/dev/null | grep -c . || true); \
+	echo "== SKIP SUMMARY: $$n skip(s) -- NOT tested by this run =="; \
+	for f in c pbt sh; do \
+		[ -s check-skips-$$f.txt ] && sed "s/^/  [$$f] /" check-skips-$$f.txt; \
+	done; \
+	echo "== end SKIP SUMMARY =="; true
 	@echo "All tests passed."
 
 tests-c: $(TESTS_C)
-	@for t in $(TESTS_C); do \
+	@: >check-skips-c.txt; \
+	for t in $(TESTS_C); do \
 		echo "running C test: $$t"; \
-		./$$t; rc=$$?; \
+		./$$t >.tests-c.out 2>&1; rc=$$?; \
+		cat .tests-c.out; \
+		awk -v t=$$t -v rc=$$rc -f $(SKIP_AWK) .tests-c.out \
+		    >>check-skips-c.txt 2>/dev/null || true; \
 		if [ $$rc -eq 77 ]; then echo "  SKIP: $$t (rc=77)"; \
 		elif [ $$rc -ne 0 ]; then exit 1; fi; \
 	done
 
 tests-sh: $(STATIC_LIB) tnt_echo
-	@for t in $(TESTS_SH); do \
+	@: >check-skips-sh.txt; \
+	for t in $(TESTS_SH); do \
 		echo "running shell test: $$(basename $$t)"; \
 		CC='$(CC)' \
 		XTC_BUILD_DIR=$(abs_builddir) \
 		XTC_SRC_DIR=$(abs_top_srcdir)/.. \
 		XTC_SNIPPET_CFLAGS='$(SNIPPET_SAN_CFLAGS)' \
 		XTC_SNIPPET_LDFLAGS='$(SNIPPET_SAN_LDFLAGS)' \
-		sh $$t || exit 1; \
+		sh $$t >.tests-sh.out 2>&1; rc=$$?; \
+		cat .tests-sh.out; \
+		awk -v t=$$(basename $$t) -v rc=$$rc -f $(SKIP_AWK) \
+		    .tests-sh.out >>check-skips-sh.txt 2>/dev/null || true; \
+		[ $$rc -eq 0 ] || exit 1; \
 	done
 
 tests-pbt: $(TESTS_PBT)
-	@skipped=0; ran=0; \
+	@skipped=0; ran=0; : >check-skips-pbt.txt; \
 	for t in $(TESTS_PBT); do \
 		echo "running PBT: $$t"; \
 		out=$$(./$$t 2>&1) || \
 		    { printf '%s\n' "$$out"; exit 1; }; \
 		printf '%s\n' "$$out"; \
+		printf '%s\n' "$$out" | awk -v t=$$t -v rc=0 -f $(SKIP_AWK) \
+		    >>check-skips-pbt.txt 2>/dev/null || true; \
 		case "$$out" in \
 		*SKIP*) skipped=$$((skipped+1)) ;; \
 		*) ran=$$((ran+1)) ;; \
@@ -2046,6 +2073,7 @@ uninstall:
 # -------------------------------------------------------------------------
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
+	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt .tests-c.out .tests-sh.out
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 	$(RM) libxtc.exp
 	rm -rf *.dSYM
