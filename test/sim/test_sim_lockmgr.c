@@ -234,8 +234,146 @@ run_deadlock(uint64_t seed, int *out_done, int *out_deadlk, int *out_ok,
 	return rc;
 }
 
+/* ---- re-request workload: the MUTUAL-EXCLUSION oracle ----
+ *
+ * N procs share ONE object.  Each takes a first mode, yields, then
+ * RE-REQUESTS a second mode on the same object (the same-locker path),
+ * yields, and releases everything.  The mode pairs deliberately include
+ * a weaker re-request (S then IS) and a sideways one (IS then S, IX then
+ * S) -- the shapes 1.49.5 got wrong.
+ *
+ * The oracle: a per-proc record of the mode each locker CURRENTLY holds
+ * (its strongest granted mode, as the lock manager must enforce it),
+ * updated on every grant and checked against every other record through
+ * the default RIW conflict matrix.  Any pair of concurrent holders whose
+ * modes conflict is a mutual-exclusion violation.  A re-request that is
+ * refused (XTC_E_AGAIN / DEADLK) is fine: the invariant is only
+ * "granted implies compatible".  The lock manager's own "held" view
+ * cannot be the oracle -- the bug was exactly that it recorded the wrong
+ * mode -- so the oracle tracks what each proc was TOLD it holds: after a
+ * successful re-request of M while holding P, it holds (at least) both.
+ */
+#define RR_WORK 16
+static xtc_lockmgr_t *g_rr_mgr;
+static atomic_int     g_rr_done, g_rr_viol, g_rr_grants;
+static const uint64_t g_rr_obj = 0x5151;
+/* held[i] is a bitmask of modes proc i was granted and still holds. */
+static atomic_uint    g_rr_held[RR_WORK];
+static const uint8_t RR_CONF[9 * 9] = {
+	/*         NL  S   X   WT  IX  IS  IWR RU  WW  */
+	/* NL  */   0,  0,  0,  0,  0,  0,  0,  0,  0,
+	/* S   */   0,  0,  1,  0,  1,  0,  1,  0,  1,
+	/* X   */   0,  1,  1,  1,  1,  1,  1,  1,  1,
+	/* WT  */   0,  0,  0,  0,  0,  0,  0,  0,  0,
+	/* IX  */   0,  1,  1,  0,  0,  0,  0,  1,  1,
+	/* IS  */   0,  0,  1,  0,  0,  0,  0,  0,  1,
+	/* IWR */   0,  1,  1,  0,  0,  0,  0,  1,  1,
+	/* RU  */   0,  0,  1,  0,  1,  0,  1,  0,  0,
+	/* WW  */   0,  1,  1,  0,  1,  1,  1,  0,  1
+};
+static const int RR_PAIRS[][2] = {
+	{ XTC_LOCK_S,  XTC_LOCK_IS },   /* weaker re-request */
+	{ XTC_LOCK_IS, XTC_LOCK_S  },   /* sideways, S vs others' IX */
+	{ XTC_LOCK_IX, XTC_LOCK_S  },   /* sideways */
+	{ XTC_LOCK_IS, XTC_LOCK_IX },
+	{ XTC_LOCK_S,  XTC_LOCK_X  },   /* real upgrade */
+	{ XTC_LOCK_IX, XTC_LOCK_IS },
+	{ XTC_LOCK_RU, XTC_LOCK_S  },
+	{ XTC_LOCK_IS, XTC_LOCK_IS },
+};
+#define RR_NPAIRS ((int)(sizeof RR_PAIRS / sizeof RR_PAIRS[0]))
+
+static void
+rr_check(int self)
+{
+	unsigned mine = atomic_load(&g_rr_held[self]);
+	int j, a, b;
+	for (j = 0; j < RR_WORK; j++) {
+		unsigned theirs;
+		if (j == self) continue;
+		theirs = atomic_load(&g_rr_held[j]);
+		for (a = 1; a < 9; a++) {
+			if (!(mine & (1u << a))) continue;
+			for (b = 1; b < 9; b++)
+				if ((theirs & (1u << b)) && RR_CONF[a * 9 + b])
+					atomic_store(&g_rr_viol, 1);
+		}
+	}
+}
+
+static void
+rr_worker(void *arg)
+{
+	int i = (int)(intptr_t)arg;
+	int m1 = RR_PAIRS[i % RR_NPAIRS][0], m2 = RR_PAIRS[i % RR_NPAIRS][1];
+	xtc_locker_t id = 0;
+
+	if (xtc_lockmgr_id(g_rr_mgr, &id) != XTC_OK)
+		goto out;
+	if (xtc_lock_get(g_rr_mgr, id, &g_rr_obj, sizeof g_rr_obj,
+	    (xtc_lock_mode_t)m1, 1000000LL) == XTC_OK) {
+		atomic_fetch_or(&g_rr_held[i], 1u << m1);
+		atomic_fetch_add(&g_rr_grants, 1);
+		rr_check(i);
+		xtc_yield();
+		/* Short timeout: a refused re-request is legal. */
+		if (xtc_lock_get(g_rr_mgr, id, &g_rr_obj, sizeof g_rr_obj,
+		    (xtc_lock_mode_t)m2, 1000000LL) == XTC_OK) {
+			atomic_fetch_or(&g_rr_held[i], 1u << m2);
+			atomic_fetch_add(&g_rr_grants, 1);
+			rr_check(i);
+		}
+		xtc_yield();
+		rr_check(i);
+		atomic_store(&g_rr_held[i], 0);        /* before release */
+		(void)xtc_lock_release_all(g_rr_mgr, id);
+	}
+	(void)xtc_lockmgr_id_free(g_rr_mgr, id);
+out:
+	atomic_fetch_add(&g_rr_done, 1);
+}
+
+static int
+run_reget(uint64_t seed, int *out_done, int *out_viol, int *out_grants,
+    uint64_t *out_state)
+{
+	xtc_exec_t *e = NULL;
+	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_DEFAULT;
+	int i, rc;
+
+	/* NO deadlock detection: a victim's locks are released by the
+	 * detector BEFORE the victim runs to see XTC_E_DEADLK, so its oracle
+	 * record would briefly overstate what it holds (a false violation).
+	 * Short timeouts break every cycle instead; then a lock is released
+	 * only by its owner, after the owner has cleared its record, and the
+	 * oracle is exact. */
+	opts.detect_mode = XTC_LOCK_DETECT_NONE;
+	opts.n_partitions = 4;
+	atomic_store(&g_rr_done, 0);
+	atomic_store(&g_rr_viol, 0);
+	atomic_store(&g_rr_grants, 0);
+	for (i = 0; i < RR_WORK; i++)
+		atomic_store(&g_rr_held[i], 0);
+	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_lockmgr_create(&opts, &g_rr_mgr) != XTC_OK) {
+		xtc_exec_fini(e); return -1;
+	}
+	for (i = 0; i < RR_WORK; i++)
+		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
+		    rr_worker, (void *)(intptr_t)i, NULL, NULL);
+	rc = xtc_sim_exec_run(e, seed, 5000000);
+	*out_done = atomic_load(&g_rr_done);
+	*out_viol = atomic_load(&g_rr_viol);
+	*out_grants = atomic_load(&g_rr_grants);
+	if (out_state) *out_state = xtc_sim_state_hash(e);
+	xtc_lockmgr_destroy(g_rr_mgr);
+	g_rr_mgr = NULL;
+	(void)xtc_exec_fini(e);
+	return rc;
+}
+
 int
-main(void)
+main(int argc, char **argv)
 {
 	int d1 = 0, d2 = 0, p1 = 0, p2 = 0, rc;
 	uint64_t o1 = 0, o2 = 0, s1 = 0, s2 = 0;
@@ -292,8 +430,55 @@ main(void)
 		return 1;
 	}
 
+	/* --- re-request: mutual-exclusion oracle over many seeds --- */
+	{
+		/* argv: [<base seed> [<count>]] (the corpus convention, see
+		 * test/sim/corpus/seeds.txt); default 64 seeds from
+		 * 0x5EED0000. */
+		int seed_i, n_seeds = 64, rd = 0, rv = 0, rg = 0, rd2 = 0,
+		    rv2 = 0, rg2 = 0, total_grants = 0;
+		uint64_t rs = 0, rs2 = 0, base = 0x5EED0000ULL;
+		if (argc > 1)
+			base = strtoull(argv[1], NULL, 0);
+		if (argc > 2 && atoi(argv[2]) > 0)
+			n_seeds = atoi(argv[2]);
+		for (seed_i = 0; seed_i < n_seeds; seed_i++) {
+			uint64_t sd = base + (uint64_t)seed_i;
+			rc = run_reget(sd, &rd, &rv, &rg, &rs);
+			if (rc != XTC_OK || rd != RR_WORK) {
+				printf("FAIL: reget seed 0x%llx rc=%d done=%d "
+				    "(want %d)\n", (unsigned long long)sd, rc, rd,
+				    RR_WORK);
+				return 1;
+			}
+			if (rv != 0) {
+				printf("FAIL: reget seed 0x%llx: MUTUAL EXCLUSION "
+				    "VIOLATED -- two lockers held conflicting "
+				    "modes (%d grants)\n",
+				    (unsigned long long)sd, rg);
+				return 1;
+			}
+			total_grants += rg;
+			if (seed_i == 0) {
+				(void)run_reget(sd, &rd2, &rv2, &rg2, &rs2);
+				if (rd != rd2 || rv != rv2 || rg != rg2 ||
+				    rs != rs2) {
+					printf("FAIL: reget run did not replay "
+					    "(state %016llx/%016llx)\n",
+					    (unsigned long long)rs,
+					    (unsigned long long)rs2);
+					return 1;
+				}
+			}
+		}
+		printf("reget: %d seeds x %d lockers, %d grants, 0 "
+		    "mutual-exclusion violations\n", n_seeds, RR_WORK,
+		    total_grants);
+	}
+
 	printf("OK: lock manager parks fibers under contention (all %d "
-	    "acquire/release pairs complete, no hang) and detects a "
-	    "deadlock (1 victim); both replay from seed\n", N_WORK);
+	    "acquire/release pairs complete, no hang), detects a "
+	    "deadlock (1 victim), and never co-grants conflicting modes on "
+	    "same-locker re-requests; all replay from seed\n", N_WORK);
 	return 0;
 }

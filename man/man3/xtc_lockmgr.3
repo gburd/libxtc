@@ -153,10 +153,42 @@ atomically change the mode of a lock already held on
 .Fa obj
 to
 .Fa new_mode .
-Upgrade may block (returning
-.Dv XTC_E_AGAIN
-on a zero timeout); downgrade never blocks and promotes any waiters
-the weaker mode no longer conflicts with.
+Stronger and weaker are defined by the conflict matrix, not by the
+numeric order of the mode enum: an upgrade's
+.Fa new_mode
+must exclude at least everything the held mode excludes, a downgrade's
+at most; otherwise the call returns
+.Dv XTC_E_INVAL .
+Upgrade waits while another holder conflicts.
+Having no timeout argument, it is bounded by the locker's deadline
+.Pq Fn xtc_lockmgr_id_set_timeout :
+past it the call returns
+.Dv XTC_E_AGAIN ;
+with no deadline it waits until granted or chosen as a deadlock victim.
+A granted upgrade replaces the held lock, so one
+.Fn xtc_lock_put
+releases it.
+Downgrade never blocks and promotes any waiters the weaker mode no
+longer conflicts with.
+.Pp
+Calling
+.Fn xtc_lock_get
+for an object the locker already holds is a conversion.
+It is checked against every other holder like a fresh request; a mode
+the held one already covers is a no-op, and a stronger one raises the
+held lock in place.
+A conversion is never queued behind waiters, which may be waiting for
+the same locker.
+.Pp
+Releases before 1.50 checked a conversion only against the locker's own
+mode, so it could be granted beside a conflicting holder, and could
+weaken the held lock (an S holder asking for IS was moved to IS).
+They also ordered modes by enum value in
+.Fn xtc_lock_upgrade
+and
+.Fn xtc_lock_downgrade ,
+refusing IX to IS and allowing IX to S; upgrade ignored the locker
+deadline and left the old lock held beside the new one.
 .Pp
 .Fn xtc_lock_vec
 runs a vector of

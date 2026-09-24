@@ -63,3 +63,4 @@ test_sim_swarm          0          20  smoke: combined fault-set swarm, 20 seeds
 test_sim_swarm          1000       20  smoke: combined fault-set swarm, 20 seeds from base 1000
 test_sim_wake_park      -          -   smoke: cross-loop wake-of-parked-loop
 test_sim_lockmgr        -          -   smoke: lock-manager mutual exclusion + deadlock
+test_sim_lockmgr        0x5EED0000 1   same-locker re-request granted over a conflicting holder / weakened a held mode (1.49.5); FAILS before the lockmgr dominance fix, see git log -- src/ptc/lock_mgr.c

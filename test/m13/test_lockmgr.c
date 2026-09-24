@@ -9,6 +9,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -473,6 +474,186 @@ test_detect_on_block(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- same-locker re-requests, upgrades and downgrades respect OTHER
+ * holders and the conflict MATRIX (not enum order).  Each case below was
+ * reproduced on 1.49.5 (see the per-case comment); all used to fail. ---- */
+
+static xtc_lockmgr_t *
+rr_mgr(xtc_locker_t *a, xtc_locker_t *b)
+{
+	xtc_lockmgr_t *m = NULL;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	o.detect_mode = XTC_LOCK_DETECT_NONE;
+	munit_assert_int(xtc_lockmgr_create(&o, &m), ==, XTC_OK);
+	munit_assert_int(xtc_lockmgr_id(m, a), ==, XTC_OK);
+	munit_assert_int(xtc_lockmgr_id(m, b), ==, XTC_OK);
+	return m;
+}
+
+/* A holds IS, B holds IX (compatible).  A re-requests S, which conflicts
+ * with B's IX: must NOT be granted.  1.49.5: granted (merge path checked
+ * only A's own mode). */
+static MunitResult
+test_reget_checks_other_holders(const MunitParameter p[], void *d)
+{
+	xtc_locker_t a, b;
+	xtc_lockmgr_t *m = rr_mgr(&a, &b);
+	(void)p; (void)d;
+	munit_assert_int(xtc_lock_get(m, a, "k", 1, XTC_LOCK_IS, 0), ==, XTC_OK);
+	munit_assert_int(xtc_lock_get(m, b, "k", 1, XTC_LOCK_IX, 0), ==, XTC_OK);
+	munit_assert_int(xtc_lock_get(m, a, "k", 1, XTC_LOCK_S, 0), ==,
+	    XTC_E_AGAIN);
+	xtc_lockmgr_destroy(m);
+	return MUNIT_OK;
+}
+
+/* A holds S and re-requests the WEAKER IS: A must still exclude IX.
+ * 1.49.5: A's lock was rewritten to IS (5 > 1 by enum), admitting B's IX. */
+static MunitResult
+test_reget_never_weakens(const MunitParameter p[], void *d)
+{
+	xtc_locker_t a, b;
+	xtc_lockmgr_t *m = rr_mgr(&a, &b);
+	(void)p; (void)d;
+	munit_assert_int(xtc_lock_get(m, a, "k", 1, XTC_LOCK_S, 0), ==, XTC_OK);
+	munit_assert_int(xtc_lock_get(m, a, "k", 1, XTC_LOCK_IS, 0), ==, XTC_OK);
+	munit_assert_int(xtc_lock_get(m, b, "k", 1, XTC_LOCK_IX, 0), ==,
+	    XTC_E_AGAIN);
+	munit_assert_int(xtc_lockmgr_n_held(m), ==, 1);   /* no stacked entry */
+	xtc_lockmgr_destroy(m);
+	return MUNIT_OK;
+}
+
+/* Downgrade validity comes from the matrix.  IX -> IS IS a downgrade
+ * (1.49.5 refused it: 5 > 4); IX -> S is NOT (S excludes IX, which IX
+ * tolerates) and must be refused while B holds IX (1.49.5 allowed it,
+ * leaving S and IX co-held). */
+static MunitResult
+test_downgrade_by_matrix(const MunitParameter p[], void *d)
+{
+	xtc_locker_t a, b;
+	xtc_lockmgr_t *m = rr_mgr(&a, &b);
+	(void)p; (void)d;
+	munit_assert_int(xtc_lock_get(m, a, "k", 1, XTC_LOCK_IX, 0), ==, XTC_OK);
+	munit_assert_int(xtc_lock_downgrade(m, a, "k", 1, XTC_LOCK_IS), ==,
+	    XTC_OK);
+	(void)xtc_lock_release_all(m, a);
+	munit_assert_int(xtc_lock_get(m, a, "k", 1, XTC_LOCK_IX, 0), ==, XTC_OK);
+	munit_assert_int(xtc_lock_get(m, b, "k", 1, XTC_LOCK_IX, 0), ==, XTC_OK);
+	munit_assert_int(xtc_lock_downgrade(m, a, "k", 1, XTC_LOCK_S), ==,
+	    XTC_E_INVAL);
+	xtc_lockmgr_destroy(m);
+	return MUNIT_OK;
+}
+
+/* A holds S; W waits for X (blocked by A's S).  A, still the SOLE holder,
+ * re-requests X: it must be granted at once, not queued behind W (who is
+ * waiting for A) -- an undetectable deadlock.  1.49.5: A timed out. */
+static xtc_lockmgr_t *g_rr_m;
+static xtc_locker_t   g_rr_w;
+static void *
+rr_waiter(void *x)
+{
+	(void)x;
+	(void)xtc_lock_get(g_rr_m, g_rr_w, "k", 1, XTC_LOCK_X,
+	    3LL * 1000 * 1000 * 1000);
+	return NULL;
+}
+
+static MunitResult
+test_conversion_not_behind_waiter(const MunitParameter p[], void *d)
+{
+	xtc_locker_t a;
+	pthread_t t;
+	struct timespec ts = { 0, 100 * 1000 * 1000 };
+	(void)p; (void)d;
+	g_rr_m = rr_mgr(&a, &g_rr_w);
+	munit_assert_int(xtc_lock_get(g_rr_m, a, "k", 1, XTC_LOCK_S, 0), ==,
+	    XTC_OK);
+	munit_assert_int(pthread_create(&t, NULL, rr_waiter, NULL), ==, 0);
+	nanosleep(&ts, NULL);                        /* W is queued */
+	munit_assert_int(xtc_lock_get(g_rr_m, a, "k", 1, XTC_LOCK_X,
+	    500LL * 1000 * 1000), ==, XTC_OK);
+	(void)xtc_lock_release_all(g_rr_m, a);       /* W now proceeds */
+	(void)pthread_join(t, NULL);
+	xtc_lockmgr_destroy(g_rr_m);
+	return MUNIT_OK;
+}
+
+/* xtc_lock_upgrade must honor the locker's deadline
+ * (xtc_lockmgr_id_set_timeout): with B never releasing its S, A's S -> X
+ * upgrade returns XTC_E_AGAIN instead of waiting forever.  1.49.5: blocked
+ * forever (it passed -1).  B releases after 3 s so the test cannot hang. */
+static volatile int g_up_rc = 12345;
+static xtc_locker_t g_up_a;
+static void *
+up_thread(void *x)
+{
+	(void)x;
+	g_up_rc = xtc_lock_upgrade(g_rr_m, g_up_a, "k", 1, XTC_LOCK_X);
+	return NULL;
+}
+
+static MunitResult
+test_upgrade_honors_deadline(const MunitParameter p[], void *d)
+{
+	xtc_locker_t b;
+	pthread_t t;
+	int i;
+	struct timespec ts = { 0, 10 * 1000 * 1000 };
+	(void)p; (void)d;
+	g_rr_m = rr_mgr(&g_up_a, &b);
+	g_up_rc = 12345;
+	munit_assert_int(xtc_lock_get(g_rr_m, g_up_a, "k", 1, XTC_LOCK_S, 0),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_lock_get(g_rr_m, b, "k", 1, XTC_LOCK_S, 0), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_lockmgr_id_set_timeout(g_rr_m, g_up_a,
+	    100LL * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(pthread_create(&t, NULL, up_thread, NULL), ==, 0);
+	for (i = 0; i < 300 && g_up_rc == 12345; i++)
+		nanosleep(&ts, NULL);
+	if (g_up_rc == 12345)                        /* never let it hang */
+		(void)xtc_lock_put(g_rr_m, b, "k", 1);
+	(void)pthread_join(t, NULL);
+	munit_assert_int(i, <, 300);                 /* returned in time */
+	munit_assert_int(g_up_rc, ==, XTC_E_AGAIN);
+	/* A still holds its S, unchanged: B's S is still compatible. */
+	munit_assert_int(xtc_lockmgr_n_held(g_rr_m), ==, 2);
+	xtc_lockmgr_destroy(g_rr_m);
+	return MUNIT_OK;
+}
+
+/* A blocking upgrade changes the lock the caller holds; it does not add
+ * a second one.  After it is granted, ONE xtc_lock_put must release it.
+ * 1.49.5: the old S entry remained, so after the put A still held S and
+ * B's X was refused. */
+static MunitResult
+test_upgrade_folds_entry(const MunitParameter p[], void *d)
+{
+	xtc_locker_t b;
+	pthread_t t;
+	struct timespec ts = { 0, 100 * 1000 * 1000 };
+	(void)p; (void)d;
+	g_rr_m = rr_mgr(&g_up_a, &b);
+	g_up_rc = 12345;
+	munit_assert_int(xtc_lock_get(g_rr_m, g_up_a, "k", 1, XTC_LOCK_S, 0),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_lock_get(g_rr_m, b, "k", 1, XTC_LOCK_S, 0), ==,
+	    XTC_OK);
+	munit_assert_int(pthread_create(&t, NULL, up_thread, NULL), ==, 0);
+	nanosleep(&ts, NULL);                        /* A waits for B */
+	munit_assert_int(xtc_lock_put(g_rr_m, b, "k", 1), ==, XTC_OK);
+	(void)pthread_join(t, NULL);
+	munit_assert_int(g_up_rc, ==, XTC_OK);
+	munit_assert_int(xtc_lockmgr_n_held(g_rr_m), ==, 1);
+	munit_assert_int(xtc_lock_put(g_rr_m, g_up_a, "k", 1), ==, XTC_OK);
+	munit_assert_int(xtc_lock_get(g_rr_m, b, "k", 1, XTC_LOCK_X, 0), ==,
+	    XTC_OK);
+	xtc_lockmgr_destroy(g_rr_m);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/modes",              test_modes,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_grant",         test_wait_grant,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -484,6 +665,12 @@ static MunitTest tests[] = {
 	{ "/lock_vec_rollback",  test_lock_vec_rollback,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/stats_failchk",      test_stats_failchk,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/detect_on_block",    test_detect_on_block,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reget_checks_other_holders", test_reget_checks_other_holders, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reget_never_weakens",        test_reget_never_weakens,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/downgrade_by_matrix",        test_downgrade_by_matrix,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/conversion_not_behind_waiter", test_conversion_not_behind_waiter, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/upgrade_honors_deadline",    test_upgrade_honors_deadline,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/upgrade_folds_entry",        test_upgrade_folds_entry,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m13/lockmgr", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
