@@ -96,21 +96,33 @@ echo "  [D4b] OK: every XTC_E_* cited in the man pages exists in xtc.h"
 # prototype.  The markers are the machine-readable API list (and the
 # libxtc.map / symbol gates read them); xtc_cfg_session_bind's once said
 # `int` for a function returning xtc_cfg_session_t *.
-bad=$(cd "$INC" && for h in xtc*.h; do
-	grep -oE 'PUBLIC:[^;]*[ *]xtc_[A-Za-z0-9_]+ __P' "$h" |
-	    sed -E 's/^PUBLIC:[[:space:]]*//; s/ __P$//' |
-	while IFS= read -r m; do
-		name=$(printf '%s' "$m" | grep -oE 'xtc_[A-Za-z0-9_]+$')
-		mret=$(printf '%s' "$m" | sed -E "s/$name\$//; s/[[:space:]]+/ /g; s/ \*/*/g; s/^ //; s/ \$//")
-		proto=$(grep -hE "^XTC_API[^;(]*[ *]$name[[:space:]]*\(" "$h" | head -1)
-		[ -n "$proto" ] || continue
-		pret=$(printf '%s' "$proto" | sed -E "s/^XTC_API[[:space:]]+//; s/[ *]?$name[[:space:]]*\(.*//; s/[[:space:]]+/ /g; s/ \*/*/g; s/ \$//")
-		case "$proto" in *"*$name"*|*"* $name"*) pret="$pret*";; esac
-		pret=$(printf '%s' "$pret" | sed -E 's/\*+/*/g')
-		mret=$(printf '%s' "$mret" | sed -E 's/\*+/*/g')
-		[ "$mret" = "$pret" ] || echo "$h:$name(marker '$mret' vs prototype '$pret')"
+# Written as a function writing to a temp file, NOT inside $( ... ): the
+# macOS /bin/sh (bash 3.2) cannot parse a `case ... ;;` nested in a
+# command substitution ("syntax error near unexpected token `;;'"), which
+# failed the CI macos job.
+__d4c_scan() {
+	for h in "$INC"/xtc*.h; do
+		grep -oE 'PUBLIC:[^;]*[ *]xtc_[A-Za-z0-9_]+ __P' "$h" |
+		    sed -E 's/^PUBLIC:[[:space:]]*//; s/ __P$//' |
+		while IFS= read -r m; do
+			name=$(printf '%s' "$m" | grep -oE 'xtc_[A-Za-z0-9_]+$')
+			mret=$(printf '%s' "$m" | sed -E "s/$name\$//; s/[[:space:]]+/ /g; s/ \*/*/g; s/^ //; s/ \$//")
+			proto=$(grep -hE "^XTC_API[^;(]*[ *]$name[[:space:]]*\(" "$h" | head -1)
+			[ -n "$proto" ] || continue
+			pret=$(printf '%s' "$proto" | sed -E "s/^XTC_API[[:space:]]+//; s/[ *]?$name[[:space:]]*\(.*//; s/[[:space:]]+/ /g; s/ \*/*/g; s/ \$//")
+			if printf '%s' "$proto" | grep -qE "\*[[:space:]]*$name[[:space:]]*\("; then
+				pret="$pret*"
+			fi
+			pret=$(printf '%s' "$pret" | sed -E 's/\*+/*/g')
+			mret=$(printf '%s' "$mret" | sed -E 's/\*+/*/g')
+			[ "$mret" = "$pret" ] || echo "$(basename "$h"):$name(marker '$mret' vs prototype '$pret')"
+		done
 	done
-done)
+}
+d4c_out=$(mktemp "${TMPDIR:-/tmp}/xtc-d4c.XXXXXX")
+__d4c_scan > "$d4c_out"
+bad=$(cat "$d4c_out")
+rm -f "$d4c_out"
 if [ -n "$bad" ]; then
 	echo "  [D4c] FAIL: PUBLIC: marker return type disagrees with the prototype:" >&2
 	echo "$bad" | sed 's/^/        /' >&2
