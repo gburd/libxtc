@@ -968,12 +968,23 @@ examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_brea
 # line.  tnt_echo used to atoi("--help") into "listen on 7777" and block
 # forever.  (05_rexis is linted by check-rexis; 06/07/09/11, built by
 # their own Makefiles, by the CI examples job.)
-check-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo
+#
+# snippet_tls_echo is docs/_includes/snippets/tls/14_tls_echo.c, the TLS
+# client/server doc snippet.  It is built here, not by
+# test/docs/test_doc_snippets.sh, because it must link the build's TLS
+# library ($(LIBS)); it exits 0 (and says so) when TLS is compiled out
+# or the openssl CLI is missing.
+check-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo snippet_tls_echo
 	@for t in 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo \
 	          10_circuit_breaker; do \
 		printf 'running example: %s\n' "$$t"; \
 		./$$t >/dev/null || { echo "  [examples] FAIL: $$t exited non-zero"; exit 1; }; \
 	done; \
+	echo "running TLS snippet: snippet_tls_echo"; \
+	./snippet_tls_echo >snippet_tls_echo.log 2>&1 || \
+	    { echo "  [examples] FAIL: snippet_tls_echo"; \
+	      cat snippet_tls_echo.log; exit 1; }; \
+	grep '^skipped' snippet_tls_echo.log || true; \
 	sh $(srcdir)/../examples/check_help.sh ./01_hello ./02_pingpong \
 	    ./03_supervised_app ./04_lockmgr_demo ./10_circuit_breaker \
 	    ./tnt_echo || exit 1; \
@@ -1068,6 +1079,11 @@ test_resp_parser: $(M99_DIR)/test_resp_parser.c $(M99_DIR)/munit.c \
 $(M99_NET): %: $(M99_DIR)/%.c $(M99_DIR)/munit.c $(M99_DIR)/rexis_harness.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(M99_DIR) -o $@ \
 		$(M99_DIR)/$@.c $(M99_DIR)/munit.c $(LDFLAGS)
+
+snippet_tls_echo: $(srcdir)/../docs/_includes/snippets/tls/14_tls_echo.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE \
+		-o $@ $(srcdir)/../docs/_includes/snippets/tls/14_tls_echo.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # The canonical tnt example: a TCP echo server.  Links the in-library
 # tnt L4 layer; driven by test/tnt/test_tnt_echo.sh.
