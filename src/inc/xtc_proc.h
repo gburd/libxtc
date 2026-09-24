@@ -187,8 +187,9 @@ XTC_API int xtc_exit_pid(xtc_pid_t target, int reason);
  * option today; these statuses replace the guess with an answer.
  */
 enum xtc_kill_status {
-	/* The target is no longer ALIVE (it observed the kill and left its
-	 * body), OR the pid did not resolve at all.  NOT proof that at-exit
+	/* The target is no longer ALIVE: it observed the kill and left its
+	 * body, or it was already dead (a pid that was never issued is
+	 * XTC_E_INVAL, not DELIVERED).  NOT proof that at-exit
 	 * hooks finished, that the stack was reclaimed, or even that THIS
 	 * request's reason was the one delivered -- see the long note on
 	 * xtc_exit_pid_deadline below before using this to release a
@@ -263,10 +264,15 @@ enum xtc_kill_status {
  * has returned.  Use that same stronger condition when you need
  * cleanup-complete, not merely kill-accepted.
  *
- * DELIVERED is also returned when the target pid does not resolve at
- * all (unknown or long gone), so it cannot distinguish "this request's
- * reason was delivered and cleanup finished" from "there was nothing
- * there".  Treat it as "not running any more", nothing more.
+ * DELIVERED is also returned for a target that was already dead (still
+ * unwinding, or long gone), so it cannot distinguish "this request's
+ * reason was delivered" from "it had already died of something else".
+ * Treat it as "not running any more", nothing more.  A pid this
+ * runtime never issued is XTC_E_INVAL, exactly as for xtc_exit_pid;
+ * releases before 1.50 reported XTC_OK + DELIVERED for it, and
+ * XTC_E_INVAL for a target that was still running its at-exit hooks.
+ * A pid whose loop has since been finalized cannot be told from one
+ * never issued, and is XTC_E_INVAL too.
  *
  * Nor does it mean shared state the fiber was mutating is consistent:
  * releasing a lock does not undo a half-finished mutation.  If a fiber

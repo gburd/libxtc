@@ -1902,6 +1902,118 @@ test_arena_group_wedged(const MunitParameter p[], void *d)
 	return ag_run(/*wedge=*/1, /*all_gone=*/0, /*chunks_zero=*/0);
 }
 
+/* ---- xtc_exit_pid_deadline: unknown pid vs already-dead pid ----------
+ *
+ * PLAN 19.27.13.  An UNKNOWN pid is a caller bug and must be XTC_E_INVAL,
+ * as xtc_exit_pid says; an ALREADY-DEAD pid is the outcome the caller
+ * wanted and must be XTC_OK + DELIVERED -- including while the target is
+ * still in the table running its at-exit hooks.  Pre-fix both were
+ * backwards: a never-issued pid got XTC_OK + DELIVERED, and a target
+ * inside its at-exit hook got XTC_E_INVAL.
+ */
+static _Atomic int g_ku_in_hook, g_ku_release_hook;
+static _Atomic int g_ku_gen_rc, g_ku_gen_st, g_ku_cap_rc, g_ku_loop_rc;
+static _Atomic int g_ku_dying_rc, g_ku_dying_st, g_ku_dead_rc, g_ku_dead_st;
+static xtc_pid_t g_ku_victim;
+
+static void
+ku_hook(void *arg)
+{
+	(void)arg;
+	atomic_store(&g_ku_in_hook, 1);
+	while (!atomic_load(&g_ku_release_hook))
+		(void)xtc_proc_sleep(1000000);
+}
+
+static void
+ku_victim_proc(void *arg)
+{
+	(void)arg;
+	munit_assert_int(xtc_proc_at_exit(ku_hook, NULL), ==, XTC_OK);
+}
+
+static void
+ku_checker_proc(void *arg)
+{
+	xtc_proc_info_t info;
+	xtc_pid_t bogus;
+	int st, spins = 0;
+	(void)arg;
+
+	/* Never issued: a generation the victim's slot has not reached. */
+	bogus = g_ku_victim;
+	bogus.gen += 1000;
+	st = -1;
+	atomic_store(&g_ku_gen_rc, xtc_exit_pid_deadline(bogus, 9, 0, &st));
+	atomic_store(&g_ku_gen_st, st);
+	/* Never issued: a slot index past the table. */
+	bogus = g_ku_victim;
+	bogus.local_id = 60000;
+	atomic_store(&g_ku_cap_rc, xtc_exit_pid_deadline(bogus, 9, 0, NULL));
+	/* Never issued: a loop that does not exist. */
+	bogus = g_ku_victim;
+	bogus.loop_id = 77;
+	atomic_store(&g_ku_loop_rc, xtc_exit_pid_deadline(bogus, 9, 0, NULL));
+
+	/* Dying: body returned, at-exit hook parked, pid still in table. */
+	while (!atomic_load(&g_ku_in_hook) && spins++ < 5000)
+		(void)xtc_proc_sleep(1000000);
+	st = -1;
+	atomic_store(&g_ku_dying_rc,
+	    xtc_exit_pid_deadline(g_ku_victim, 9, 0, &st));
+	atomic_store(&g_ku_dying_st, st);
+
+	/* Dead and reaped: still DELIVERED (the control). */
+	atomic_store(&g_ku_release_hook, 1);
+	spins = 0;
+	while (xtc_proc_info(g_ku_victim, &info) == XTC_OK && spins++ < 5000)
+		(void)xtc_proc_sleep(1000000);
+	st = -1;
+	atomic_store(&g_ku_dead_rc,
+	    xtc_exit_pid_deadline(g_ku_victim, 9, 0, &st));
+	atomic_store(&g_ku_dead_st, st);
+}
+
+static MunitResult
+test_exit_pid_deadline_unknown(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t checker;
+	(void)p; (void)d;
+
+	atomic_store(&g_ku_in_hook, 0);
+	atomic_store(&g_ku_release_hook, 0);
+	atomic_store(&g_ku_gen_rc, 12345);
+	atomic_store(&g_ku_dying_rc, 12345);
+	atomic_store(&g_ku_dead_rc, 12345);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.name = "ku-victim";
+	munit_assert_int(xtc_proc_spawn(loop, ku_victim_proc, NULL, &opts,
+	    &g_ku_victim), ==, XTC_OK);
+	opts.name = "ku-checker";
+	munit_assert_int(xtc_proc_spawn(loop, ku_checker_proc, NULL, &opts,
+	    &checker), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	/* The header contract, matching xtc_exit_pid: unknown -> INVAL, and
+	 * the out-status is not written. */
+	munit_assert_int(atomic_load(&g_ku_gen_rc), ==, XTC_E_INVAL);
+	munit_assert_int(atomic_load(&g_ku_gen_st), ==, -1);
+	munit_assert_int(atomic_load(&g_ku_cap_rc), ==, XTC_E_INVAL);
+	munit_assert_int(atomic_load(&g_ku_loop_rc), ==, XTC_E_INVAL);
+	/* Already dead -> DELIVERED, whether unwinding or reaped. */
+	munit_assert_int(atomic_load(&g_ku_in_hook), ==, 1);
+	munit_assert_int(atomic_load(&g_ku_dying_rc), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_ku_dying_st), ==, XTC_KILL_DELIVERED);
+	munit_assert_int(atomic_load(&g_ku_dead_rc), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_ku_dead_st), ==, XTC_KILL_DELIVERED);
+
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 /* ---- cancellation safety in xtc_proc_wait_fd + the exit path -------
  *
  * Four regressions, each of which FAILED (hung, or returned the wrong
@@ -2323,6 +2435,7 @@ static MunitTest tests[] = {
 	{ "/arena_group_discard", test_arena_group_discard, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/arena_group_wedged",  test_arena_group_wedged,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/exit_pid_deadline", test_exit_pid_deadline, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/exit_pid_deadline_unknown", test_exit_pid_deadline_unknown, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_fd_wake_is_not_timeout", test_wait_fd_wake_is_not_timeout, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_fd_kill_releases_registration", test_wait_fd_kill_releases_registration, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #if !defined(_WIN32)
