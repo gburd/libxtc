@@ -135,6 +135,12 @@ typedef struct xtc_cfg_spec {
  * PUBLIC: int  xtc_cfg_ref_get_enum __P((xtc_cfg_ref_t, int *));
  */
 
+/* xtc_cfg_register returns XTC_E_INVAL for a NULL spec / name AND for a
+ * name that is already registered (there is no separate "exists" code);
+ * XTC_E_NOMEM on allocation failure.  An unregistered name is
+ * XTC_E_INVAL from the name-keyed getters/setters, xtc_cfg_kind and
+ * xtc_cfg_unregister, and XTC_E_NOTFOUND from xtc_cfg_ref and the
+ * session source/reset calls. */
 XTC_API int  xtc_cfg_register(const xtc_cfg_spec_t *spec);
 XTC_API int  xtc_cfg_unregister(const char *name);
 

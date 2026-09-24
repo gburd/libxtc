@@ -36,6 +36,8 @@ test_register_basic(const MunitParameter p[], void *d)
 {
 	xtc_cfg_spec_t spec = { 0 };
 	xtc_cfg_kind_t k;
+	xtc_cfg_session_t *ss = NULL;
+	xtc_cfg_source_t src;
 	int before, after;
 	(void)p; (void)d;
 
@@ -56,9 +58,23 @@ test_register_basic(const MunitParameter p[], void *d)
 	after = xtc_cfg_count();
 	munit_assert_int(after, ==, before + 1);
 
-	/* Duplicate name rejected. */
+	/* Duplicate name rejected -- with XTC_E_INVAL, the documented code
+	 * (xtc_cfg(3) once cited an XTC_E_EXIST that xtc.h never had). */
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_cfg_count(), ==, after);
+	/* An unset session source is XTC_CFG_SRC_DEFAULT (0).  Sequenced
+	 * read on purpose: the probe that reported 99 here printed src in
+	 * the same call's argument list, i.e. before the call wrote it. */
+	src = (xtc_cfg_source_t)99;
+	munit_assert_int(xtc_cfg_session_create(&ss), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_session_source(ss, "t.reg.int", &src),
+	    ==, XTC_OK);
+	munit_assert_int(src, ==, XTC_CFG_SRC_DEFAULT);
+	src = (xtc_cfg_source_t)99;
+	munit_assert_int(xtc_cfg_session_source(ss, "t.reg.nope", &src),
+	    ==, XTC_E_NOTFOUND);
+	munit_assert_int(src, ==, 99);
+	xtc_cfg_session_destroy(ss);
 
 	/* kind introspection. */
 	munit_assert_int(xtc_cfg_kind(NULL, &k), ==, XTC_E_INVAL);
