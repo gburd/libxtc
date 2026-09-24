@@ -11,12 +11,19 @@
 #   - any line with the uppercase WORD SKIP, not SKIPPED (the
 #     "SKIP: reason" / "[tag] SKIP:" / "[PBT] x SKIP (...)" convention
 #     every other tier uses);
+#   - munit cases marked MUNIT_TEST_OPTION_TODO (a known failure that
+#     munit reports as "[ TODO ]" instead of failing the run);
 #   - exit 77 with no reason printed.
 # It only reads; it never affects the test's exit status.
 BEGIN { name = ""; found = 0 }
 /^\/[A-Za-z0-9_]/ { name = $1; sub(/\[.*/, "", name) }
 /\[ SKIP +\]/ {
 	printf "%s: %s (munit case returned MUNIT_SKIP)\n", t, name
+	found = 1
+	next
+}
+/\[ TODO +\]/ {
+	printf "%s: %s (munit case marked TODO: a KNOWN failure, not a pass)\n", t, name
 	found = 1
 	next
 }
