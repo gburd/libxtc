@@ -116,6 +116,32 @@ every other backend.  The rest of `make check` passes on select.
 migratable and park on fds with timeouts; select remains fine for
 pinned (default) fibers.
 
+## OPEN: FreeBSD CI -- intermittent test_exec hang in the kqueue VM job
+
+**Status:** OPEN as of 1.50.0.  Seen on the GitHub FreeBSD 15.1 VM job
+(`vmactions/freebsd-vm`), in `test/m5/test_exec.c` around
+`/m5/exec/Blk4_cross_loop_state_timer` -- migratable fibers parked in
+`xtc_recv` with a 1 ms timeout while a foreign thread wakes them, work
+stealing across loops.  It hit 7fa2340 and 47443de (1.48, before this
+release) and 4 of the 8 CI runs of the 1.50 candidate; it passed on the
+others including the 0283ac1 commit the v1.50.0 tag points at.  Not
+reproduced on Linux: Blk4 is 0/30 bad on poll (the closest kqueue proxy),
+epoll and io_uring, on both 1.49.5 and 1.50.  None of 1.50's source
+changes touch the timer, recv, wake or kqueue paths this test drives.
+
+**Workaround:** none needed on Linux.  On FreeBSD, fibers that do not
+set `migratable = 1` are not affected by the stealing path this stresses.
+
+## OPEN: xspawn_entry children may fail to start on small hosts under ring churn
+
+**Status:** OPEN as of 1.50.0; behavior, not a correctness defect.  A
+re-exec'd `xtc_xspawn_entry` child that cannot create its own io_uring
+ring exits at once with 246 (240 minus `XTC_E_INTERNAL`, see
+`xtc_xproc_child_main`), so its monitor gets a prompt `XTC_DOWN_KIND_EXIT`
+rather than a hang.  On 4-vCPU CI runners with 8 threads continuously
+creating and destroying rings, up to 73 of 400 children did; 0 on a
+32-vCPU host.  Retry the spawn, or reserve ring capacity on small hosts.
+
 ## OPEN: timed waits retain memory until the loop is torn down
 
 **Status:** OPEN as of 1.50.0; same class as the fiber retention below.
