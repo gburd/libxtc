@@ -500,6 +500,7 @@ TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt
 # -------------------------------------------------------------------------
 # Default goal.
 # -------------------------------------------------------------------------
+.PHONY: soak-mem
 .PHONY: all check check-sim check-dst cbmc check-cbmc check-examples check-rexis coverage tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation print-includedir print-libdir bench-micro
 
 all: $(STATIC_LIB) $(SHARED_LIB_TARGETS) compile_commands.json
@@ -944,6 +945,25 @@ bench_micro: $(srcdir)/../bench/micro/bench_micro.c $(STATIC_LIB)
 bench-micro: bench_micro
 	BENCH_MICRO_BIN=./bench_micro \
 	    $(srcdir)/../bench/micro/check.sh $(srcdir)/../bench/micro/baseline.json
+
+# -------------------------------------------------------------------------
+# Memory-bound soak (PLAN 19.27.20).  NOT part of `make check`: it is a
+# soak, and it FAILS today by design -- completed coro-backed procs keep
+# their fiber stack + coro until xtc_loop_fini (PLAN 19.26) and every
+# park timer stays on the loop's all_timers until fini.  CI runs it
+# nightly as a non-gating job.  It prints the bytes retained per
+# generation for each mode; `plain` is the control and must pass.
+# Promote it into `check` when 19.26 lands.
+# -------------------------------------------------------------------------
+soak_mem_bound: $(srcdir)/../test/soak/soak_mem_bound.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../test/soak/soak_mem_bound.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+soak-mem: soak_mem_bound
+	@rc=0; for m in plain tasks procs; do \
+		./soak_mem_bound $$m || rc=1; \
+	done; exit $$rc
 
 # -------------------------------------------------------------------------
 # Examples -- self-contained demos.
@@ -2107,6 +2127,7 @@ uninstall:
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
 	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt .tests-c.out .tests-sh.out
+	$(RM) soak_mem_bound
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 	$(RM) libxtc.exp
 	rm -rf *.dSYM
