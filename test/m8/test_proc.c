@@ -2301,6 +2301,65 @@ test_wait_fd_kill_wake_not_lost(const MunitParameter p[], void *d)
 }
 #endif /* !_WIN32 */
 
+#if !defined(_WIN32)
+/* [wait_fd/closed_fd_is_inval] PLAN 19.27.13.  Waiting on a CLOSED fd
+ * is a programming error and must say so: XTC_E_INVAL, no park, no
+ * revents.  Pre-fix it presented as something else on every backend --
+ * io_uring returned XTC_E_AGAIN + XTC_WAIT_TIMEOUT for timeout 0 and
+ * XTC_OK + XTC_IO_ERR for a finite or infinite one; epoll returned
+ * XTC_E_INTERNAL.  The infinite wait is included on purpose: it must not
+ * park.  Control: the still-open write end of the same pipe works. */
+static _Atomic int g_cf_rc[3], g_cf_rev[3], g_cf_ctl_rc, g_cf_ran;
+
+static void
+cf_proc(void *arg)
+{
+	static const int64_t to[3] = { 0, 50LL * 1000 * 1000, -1 };
+	int pipefd[2], i;
+	uint32_t revents;
+	(void)arg;
+	munit_assert_int(xtc_test_make_pipe(&pipefd[0], &pipefd[1]), ==, 0);
+	munit_assert_int(close(pipefd[0]), ==, 0);
+	for (i = 0; i < 3; i++) {
+		revents = 0;
+		atomic_store(&g_cf_rc[i], xtc_proc_wait_fd(pipefd[0],
+		    XTC_IO_READABLE, to[i], &revents));
+		atomic_store(&g_cf_rev[i], (int)revents);
+	}
+	revents = 0;
+	atomic_store(&g_cf_ctl_rc, xtc_proc_wait_fd(pipefd[1],
+	    XTC_IO_WRITABLE, 1000LL * 1000 * 1000, &revents));
+	(void)close(pipefd[1]);
+	atomic_store(&g_cf_ran, 1);
+}
+
+static MunitResult
+test_wait_fd_closed_fd_is_inval(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t pid;
+	int i;
+	(void)p; (void)d;
+	for (i = 0; i < 3; i++) {
+		atomic_store(&g_cf_rc[i], 12345);
+		atomic_store(&g_cf_rev[i], -1);
+	}
+	atomic_store(&g_cf_ran, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, cf_proc, NULL, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_cf_ran), ==, 1);
+	for (i = 0; i < 3; i++) {
+		munit_assert_int(atomic_load(&g_cf_rc[i]), ==, XTC_E_INVAL);
+		munit_assert_int(atomic_load(&g_cf_rev[i]), ==, 0);
+	}
+	munit_assert_int(atomic_load(&g_cf_ctl_rc), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+#endif /* !_WIN32 */
+
 /* [at_exit/park_after_kill] An at-exit hook may PARK even when the proc
  * is dying from an async KILL.  Pre-fix kill_pending was still latched
  * when the hooks ran, so the hook's first park point re-delivered the
@@ -2441,6 +2500,7 @@ static MunitTest tests[] = {
 #if !defined(_WIN32)
 	{ "/wait_fd_mailbox_wake_not_lost", test_wait_fd_mailbox_wake_not_lost, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_fd_kill_wake_not_lost", test_wait_fd_kill_wake_not_lost, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_fd_closed_fd_is_inval", test_wait_fd_closed_fd_is_inval, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ "/at_exit_park_after_kill", test_at_exit_park_after_kill, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/at_exit_park_clean_control", test_at_exit_park_clean_control, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

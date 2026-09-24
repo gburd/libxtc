@@ -2444,6 +2444,11 @@ xtc_recv_correlate(const void *corr_value, size_t corr_size,
 	return (collected == n_expected) ? XTC_OK : XTC_E_AGAIN;
 }
 
+#if !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>   /* F_GETFD: wait_fd's closed-fd probe */
+#endif
+
 /* PUBLIC: int xtc_proc_wait_fd __P((int, uint32_t, int64_t, uint32_t *)); */
 /* Disarm the recv waker wait_fd armed before its fd/timer registration.
  * Used by the registration-failure paths, which return WITHOUT parking:
@@ -2610,7 +2615,25 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	wl = __xtc_current_loop != NULL ? __xtc_current_loop : self->task->loop;
 
 	{
-		int reg_rc = xtc_io_reg_fd(wl->io, fd, interest, self->task);
+		int reg_rc;
+		/*
+		 * A CLOSED fd is a caller bug; report it as one.  Backends
+		 * disagree on it: epoll refuses the add (EBADF, which surfaced
+		 * as XTC_E_INTERNAL), io_uring accepts the POLL_ADD and then
+		 * completes it with an error CQE (XTC_E_AGAIN + TIMEOUT when
+		 * the deadline won the race, else XTC_OK + XTC_IO_ERR), and
+		 * select would fail its whole poll set.  None of those says
+		 * "bad fd".  One syscall (~0.1 us) on the slow path only: the
+		 * mailbox fast path above has already returned.  Windows fds
+		 * here are SOCKETs, which fcntl cannot probe.
+		 */
+#if !defined(_WIN32)
+		if (fcntl(fd, F_GETFD) == -1 && errno == EBADF) { /* XTC_BLOCKING_OK: fd validity probe */
+			__wait_fd_disarm_waker(self);
+			return XTC_E_INVAL;
+		}
+#endif
+		reg_rc = xtc_io_reg_fd(wl->io, fd, interest, self->task);
 		if (reg_rc != XTC_OK) {
 			/* The waker was armed above (before this registration),
 			 * so it must be disarmed on every path that returns

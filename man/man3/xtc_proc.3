@@ -286,6 +286,17 @@ unwinds the fiber, and the park's scheduler resources
 are released before the unwind completes, so a killed waiter does not
 leave the fd registered.
 .Pp
+A closed
+.Fa fd
+is a programming error and returns
+.Dv XTC_E_INVAL
+.Pq POSIX ; it is probed before the fd is registered .
+Releases before 1.50 reported it as
+.Dv XTC_E_INTERNAL
+on epoll, and as a timeout or an
+.Dv XTC_IO_ERR
+wake on io_uring.
+.Pp
 .Fn xtc_proc_sleep
 parks the calling proc on a timer for at least
 .Fa ns

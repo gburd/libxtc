@@ -447,12 +447,15 @@ XTC_API int       xtc_recv_correlate(const void *corr_value, size_t corr_size,
  *                more than one source raced to wake.
  *   XTC_E_AGAIN  timeout fired with nothing else.  *out_revents has
  *                XTC_WAIT_TIMEOUT.
- *   XTC_E_INVAL  bad args (NULL out_revents, fd<0, etc.), called from
+ *   XTC_E_INVAL  bad args (NULL out_revents, fd<0, interest == 0, an
+ *                fd that is not open -- POSIX), called from
  *                outside a process, OR the fd could not be registered
  *                because ANOTHER waiter already holds a live
  *                registration for it on this loop's io.  One fd, one
  *                waiter: two procs cannot wait on the same fd on the
- *                same loop at the same time.
+ *                same loop at the same time.  A closed fd was reported
+ *                as XTC_E_INTERNAL (epoll) or as a timeout / XTC_IO_ERR
+ *                wake (io_uring) before 1.50.
  *   XTC_E_NOMEM / XTC_E_RESOURCE / XTC_E_NOSYS
  *                propagated unchanged from the fd registration.
  *   XTC_E_INTERNAL
