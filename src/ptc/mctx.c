@@ -18,6 +18,7 @@
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_mctx.h"
+#include "xtc_res.h"      /* optional MEM_BYTES metering: xtc_res_attach_mctx */
 #include "xtc_proc.h"     /* arena groups: xtc_self / xtc_exit_pid_deadline */
 #include "xtc_inspect.h" /* xtc_proc_info: is a member still alive? */
 #include <stdio.h>       /* snprintf for the arena name */
@@ -60,7 +61,21 @@ struct xtc_mctx {
 
 	size_t           n_chunks;
 	size_t           n_bytes;
+
+	/* Optional MEM_BYTES accountant (xtc_res_attach_mctx; inherited
+	 * by children created while set).  While non-NULL it has been
+	 * charged exactly __mctx_footprint(m): every live chunk's header
+	 * plus payload.  NULL -- the default -- meters nothing.  Attach
+	 * is a setup-time call: it must not race an alloc/free on m. */
+	xtc_res_t       *res;
 };
+
+/* Heap bytes this context's live chunks occupy (header + payload). */
+static int64_t
+__mctx_footprint(const xtc_mctx_t *m)
+{
+	return (int64_t)(m->n_bytes + m->n_chunks * CHUNK_HDR_SIZE);
+}
 
 static void
 __lock(xtc_mctx_t *m)
@@ -102,6 +117,7 @@ xtc_mctx_create(xtc_mctx_t *parent, const char *name,
 		if (parent->first_child != NULL)
 			parent->first_child->prev_sibling = m;
 		parent->first_child = m;
+		m->res = parent->res;
 		__unlock(parent);
 	}
 	*out = m;
@@ -140,6 +156,7 @@ __free_chunks_and_cleanups(xtc_mctx_t *m)
 {
 	struct cleanup_entry *ce, *ce_next;
 	struct mctx_chunk *c, *next;
+	int64_t fp;
 
 	__lock(m);
 	ce = m->cleanups;
@@ -154,6 +171,7 @@ __free_chunks_and_cleanups(xtc_mctx_t *m)
 
 	__lock(m);
 	c = m->first_chunk;
+	fp = __mctx_footprint(m);
 	m->first_chunk = NULL;
 	m->n_chunks = 0;
 	m->n_bytes  = 0;
@@ -163,6 +181,8 @@ __free_chunks_and_cleanups(xtc_mctx_t *m)
 		next = c->next;
 		__os_free(c);
 	}
+	if (m->res != NULL)
+		xtc_res_release(m->res, XTC_RES_MEM_BYTES, fp);
 }
 
 void
@@ -228,11 +248,23 @@ void *
 xtc_mctx_alloc(xtc_mctx_t *m, size_t size)
 {
 	struct mctx_chunk *c;
+	int64_t charge;
 	if (m == NULL) return NULL;
-	/* Overflow guard: CHUNK_HDR_SIZE + size must not wrap. */
+	/* Overflow guards: CHUNK_HDR_SIZE + size must not wrap, and the
+	 * metered charge must fit an int64_t.  Then charge BEFORE
+	 * allocating (as the slab does): a refused charge never touches
+	 * the heap. */
 	if (size > SIZE_MAX - CHUNK_HDR_SIZE) return NULL;
-	if (__os_malloc(CHUNK_HDR_SIZE + size, (void **)&c) != XTC_OK ||
-	    c == NULL) return NULL;
+	if (size > (size_t)INT64_MAX - CHUNK_HDR_SIZE) return NULL;
+	charge = (int64_t)(CHUNK_HDR_SIZE + size);
+	if (m->res != NULL &&
+	    xtc_res_acquire(m->res, XTC_RES_MEM_BYTES, charge) != XTC_OK)
+		return NULL;
+	if (__os_malloc(CHUNK_HDR_SIZE + size, (void **)&c) != XTC_OK) {
+		if (m->res != NULL)
+			xtc_res_release(m->res, XTC_RES_MEM_BYTES, charge);
+		return NULL;
+	}
 	c->owner = m;
 	c->size  = size;
 
@@ -285,7 +317,32 @@ xtc_mctx_free(xtc_mctx_t *m, void *p)
 	m->n_chunks--;
 	m->n_bytes -= c->size;
 	__unlock(m);
+	if (m->res != NULL)
+		xtc_res_release(m->res, XTC_RES_MEM_BYTES,
+		    (int64_t)(CHUNK_HDR_SIZE + c->size));
 	__os_free(c);
+}
+
+/* ----- MEM_BYTES metering (declared in xtc_res.h) ----------------- */
+
+int
+xtc_res_attach_mctx(xtc_res_t *r, xtc_mctx_t *m)
+{
+	int64_t fp;
+	int rc;
+	if (m == NULL) return XTC_E_INVAL;
+	__lock(m);
+	fp = __mctx_footprint(m);
+	if (r != NULL && r != m->res &&
+	    (rc = xtc_res_acquire(r, XTC_RES_MEM_BYTES, fp)) != XTC_OK) {
+		__unlock(m);
+		return rc;   /* already over the cap: nothing changes */
+	}
+	if (m->res != NULL && m->res != r)
+		xtc_res_release(m->res, XTC_RES_MEM_BYTES, fp);
+	m->res = r;
+	__unlock(m);
+	return XTC_OK;
 }
 
 /* ----- cleanup callbacks ----------------------------------------- */

@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd September 21, 2026
+.Dd September 23, 2026
 .Dt XTC_RES 3
 .Os
 .Sh NAME
@@ -12,7 +12,9 @@
 .Nm xtc_res_high ,
 .Nm xtc_res_rejects ,
 .Nm xtc_res_set_alert ,
-.Nm xtc_res_set_alert_fn
+.Nm xtc_res_set_alert_fn ,
+.Nm xtc_res_attach_mctx ,
+.Nm xtc_res_attach_net
 .Nd resource accountant with hard caps and high-water alerts
 .Sh SYNOPSIS
 .In xtc.h
@@ -35,6 +37,10 @@
 .Fn xtc_res_set_alert "xtc_res_t *r" "xtc_res_kind_t k" "double pct"
 .Ft int
 .Fn xtc_res_set_alert_fn "xtc_res_t *r" "void (*fn)(xtc_res_kind_t, int64_t, int64_t, void *)" "void *user"
+.Ft int
+.Fn xtc_res_attach_mctx "xtc_res_t *r" "struct xtc_mctx *m"
+.Ft int
+.Fn xtc_res_attach_net "xtc_res_t *r"
 .Sh DESCRIPTION
 .Nm xtc_res
 tracks resource consumption against operator-configured hard caps.
@@ -59,9 +65,11 @@ objects.
 .It Dv XTC_RES_CHAN_SLOTS
 In-flight messages across all channels.
 .It Dv XTC_RES_FDS
-Open file descriptors attributable to xtc.
+Open file descriptors attributable to xtc
+.Pq see Sx WHAT IS METERED .
 .It Dv XTC_RES_MEM_BYTES
-Bytes in xtc-tracked allocations.
+Bytes in xtc-tracked allocations
+.Pq see Sx WHAT IS METERED .
 .It Dv XTC_RES_INBOX_MSGS
 Cross-loop inbox messages in flight
 .Pq per loop, not global .
@@ -130,12 +138,136 @@ the high-water mark, and
 .Fn xtc_res_rejects
 the number of acquires rejected because they would have
 exceeded the cap.
+.Ss WHAT IS METERED
+A cap bounds only what is charged against it, and libxtc charges
+exactly the following; nothing else is metered:
+.Bl -tag -width "XTC_RES_MEM_BYTES"
+.It Dv XTC_RES_TASKS , Dv XTC_RES_INBOX_MSGS
+Every task spawned on a loop
+.Po
+.Fn xtc_async ,
+.Fn xtc_proc_spawn ,
+and their variants
+.Pc ,
+against that loop's own accountant
+.Pq Fn xtc_loop_res ;
+a spawn from another thread also charges one inbox message.
+.It Dv XTC_RES_CHANNELS , Dv XTC_RES_CHAN_SLOTS
+Channels created with a non-NULL accountant, and their in-flight
+messages.
+.It Dv XTC_RES_MEM_BYTES
+.Xr xtc_slab 3
+chunks of a cache whose options name an accountant, and
+.Xr xtc_mctx 3
+chunks
+.Pq payload plus the fixed per-chunk header
+of a context attached with
+.Fn xtc_res_attach_mctx .
+.Em Not
+.Fn xtc_malloc ,
+fiber stacks, process or mailbox structures, or any other internal
+allocation.
+.It Dv XTC_RES_FDS
+Descriptors returned by
+.Fn xtc_net_listen ,
+.Fn xtc_net_dial ,
+.Fn xtc_net_unix_listen ,
+.Fn xtc_net_unix_dial
+and
+.Fn xtc_net_udp_socket
+while an accountant is attached with
+.Fn xtc_res_attach_net ,
+released by
+.Fn xtc_net_close .
+.Em Not
+descriptors from a raw
+.Xr accept 2
+.Pq xtc_net has no accept call ,
+files, pipes, the I/O backend's own descriptors, or
+.Xr xtc_xproc 3
+control sockets.
+.El
+.Pp
+Metering that needs an attach is off by default: until it is called
+nothing is charged, at no cost.
+Releases before 1.50 charged
+.Dv XTC_RES_MEM_BYTES
+for slab chunks only and
+.Dv XTC_RES_FDS
+for nothing, while this page described both as general.
+.Pp
+.Fn xtc_res_attach_mctx
+charges every chunk of context
+.Fa m
+to
+.Fa r .
+The context's current footprint is charged at attach time; if that
+alone exceeds the cap the call returns
+.Dv XTC_E_RESOURCE
+and changes nothing.
+Afterwards an allocation that would pass the cap is refused:
+.Fn xtc_mctx_alloc ,
+.Fn xtc_mctx_calloc
+and
+.Fn xtc_mctx_strdup
+return
+.Dv NULL
+without touching the heap, and the reject is counted.
+.Fn xtc_mctx_free ,
+.Fn xtc_mctx_reset
+and
+.Fn xtc_mctx_destroy
+give the bytes back.
+Passing a NULL
+.Fa r
+detaches, releasing the current footprint; attaching elsewhere moves
+it.
+A child context created while its parent is attached inherits the
+accountant; one created earlier does not.
+Attach at setup time: it must not race an allocation or free on the
+same context.
+Returns
+.Dv XTC_OK ,
+.Dv XTC_E_RESOURCE ,
+or
+.Dv XTC_E_INVAL
+for a NULL
+.Fa m .
+.Pp
+.Fn xtc_res_attach_net
+is process-wide.
+While
+.Fa r
+is attached every creating xtc_net call charges one
+.Dv XTC_RES_FDS
+unit
+.Em before
+it creates the socket; past the cap it returns
+.Dv XTC_E_RESOURCE
+and creates nothing
+.Pq a refused dial sends nothing .
+.Fn xtc_net_close
+refunds the unit to whichever accountant the descriptor was charged
+to, so a later detach
+.Pq Fa r No = NULL
+does not unbalance descriptors already open.
+Close metered descriptors with
+.Fn xtc_net_close :
+one closed with a raw
+.Xr close 2
+keeps its unit until the kernel reuses that descriptor number for
+another metered socket.
+Always returns
+.Dv XTC_OK .
 .Pp
 This is the centerpiece of xtc's
 .Sq predictable behaviour under stress
 discipline: every resource that grows under load
-.Po memory, FDs, in-flight requests Pc
-must be charged to a res accountant so the cap holds.
+must be charged to a res accountant for its cap to hold.
+The list above is what the library charges on its own; an
+application charges anything else explicitly with
+.Fn xtc_res_acquire ,
+as in the example below.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_res_t res;
@@ -161,8 +293,10 @@ xtc_free(ptr);
 xtc_res_release(&res, XTC_RES_MEM_BYTES, sz);
 .Ed
 .Sh SEE ALSO
-.Xr xtc_slab 3 ,
 .Xr xtc_log 3 ,
+.Xr xtc_mctx 3 ,
+.Xr xtc_net 3 ,
+.Xr xtc_slab 3 ,
 .Xr xtc 7
 .Sh HISTORY
 Appeared in xtc 0.1.

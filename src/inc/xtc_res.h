@@ -9,11 +9,22 @@
  *	atomic and either succeeds (counter <= cap) or returns
  *	XTC_E_RESOURCE; release is unconditional.
  *
- *	The point of this subsystem is the BEAM/Seastar/libumem
- *	"predictably reliable" promise: a misbehaving client cannot
- *	exhaust the host because every resource has a documented cap,
- *	a documented behaviour at the cap, and a way for the operator
- *	to observe both.
+ *	WHAT IS METERED -- exactly, nothing else is charged by libxtc:
+ *	  TASKS, INBOX_MSGS  every task spawned on a loop (xtc_async,
+ *	      xtc_proc_spawn, ...) against that loop's own accountant
+ *	      (xtc_loop_res); cross-thread spawns also charge INBOX_MSGS.
+ *	  CHANNELS, CHAN_SLOTS  channels created with a non-NULL res.
+ *	  MEM_BYTES  xtc_slab chunks when xtc_slab_opts_t.res is set, and
+ *	      xtc_mctx chunks (header + payload) of a context attached
+ *	      with xtc_res_attach_mctx.  NOT xtc_malloc, fiber stacks,
+ *	      proc/mailbox structures, or any other internal allocation.
+ *	  FDS  descriptors returned by xtc_net_listen, _dial,
+ *	      _unix_listen, _unix_dial and _udp_socket while an
+ *	      accountant is attached with xtc_res_attach_net, released by
+ *	      xtc_net_close.  NOT fds from a raw accept(2), files, pipes,
+ *	      the I/O backend's own fds, or xproc control sockets.
+ *	A cap on a kind nothing charges bounds nothing.  Metering that
+ *	needs an attach is off by default (no cost, no behavior change).
  */
 
 #ifndef XTC_RES_H
@@ -84,6 +95,8 @@ typedef struct xtc_res {
  * PUBLIC: int64_t xtc_res_high __P((const xtc_res_t *, xtc_res_kind_t));
  * PUBLIC: int64_t xtc_res_rejects __P((const xtc_res_t *, xtc_res_kind_t));
  * PUBLIC: void xtc_res_set_cap __P((xtc_res_t *, xtc_res_kind_t, int64_t));
+ * PUBLIC: int  xtc_res_attach_mctx __P((xtc_res_t *, struct xtc_mctx *));
+ * PUBLIC: int  xtc_res_attach_net __P((xtc_res_t *));
  */
 XTC_API int  xtc_res_init(xtc_res_t *r, const xtc_res_caps_t *caps);
 
@@ -120,5 +133,35 @@ XTC_API int  xtc_res_set_alert(xtc_res_t *r, xtc_res_kind_t k, double pct);
 XTC_API int  xtc_res_set_alert_fn(xtc_res_t *r,
                                   void (*fn)(xtc_res_kind_t, int64_t, int64_t, void *),
                                   void *user);
+
+/*
+ * Metering attach points (since 1.50).  Both are opt-in; until called,
+ * nothing is charged.  Pass r == NULL to detach.
+ *
+ * xtc_res_attach_mctx: charge every chunk of memory context `m`
+ *   (payload plus its fixed per-chunk header) to r's XTC_RES_MEM_BYTES.
+ *   The context's CURRENT footprint is charged at attach time; if that
+ *   alone exceeds the cap the call fails with XTC_E_RESOURCE and
+ *   changes nothing.  Afterwards an allocation that would pass the cap
+ *   is REFUSED: xtc_mctx_alloc/_calloc/_strdup return NULL without
+ *   touching the heap.  xtc_mctx_free / _reset / _destroy give the
+ *   bytes back; detaching (or re-attaching elsewhere) moves the current
+ *   footprint.  Children created while attached inherit r (a child
+ *   created earlier is not affected).  Call at setup time: attach must
+ *   not race an alloc/free on the same context.  XTC_E_INVAL if m is
+ *   NULL.
+ *
+ * xtc_res_attach_net: PROCESS-WIDE.  Every fd a creating xtc_net call
+ *   hands out is charged one XTC_RES_FDS unit to r BEFORE the socket is
+ *   made; past the cap the call returns XTC_E_RESOURCE and creates
+ *   nothing (a refused dial sends no SYN).  xtc_net_close releases the
+ *   unit to whichever accountant the fd was charged to, so a later
+ *   detach does not unbalance fds already out.  Close metered fds with
+ *   xtc_net_close; a raw close(2) leaks the unit until the kernel
+ *   reuses that fd number for another metered socket.  Always XTC_OK.
+ */
+struct xtc_mctx;
+XTC_API int  xtc_res_attach_mctx(xtc_res_t *r, struct xtc_mctx *m);
+XTC_API int  xtc_res_attach_net(xtc_res_t *r);
 
 #endif /* XTC_RES_H */
