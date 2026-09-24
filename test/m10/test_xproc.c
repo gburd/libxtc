@@ -461,8 +461,13 @@ fh_fiber(void *a)
 		else if (xtc_down_decode_ex(m, n, &di) == XTC_OK &&
 		    di.kind == XTC_DOWN_KIND_CLEAN)
 			c->clean++;
-		else
+		else {
 			c->other++;
+			if (c->other <= 3)
+				munit_logf(MUNIT_LOG_WARNING, "entry spawn %d: "
+				    "kind=%d exit_code=%d signal=%d reason=%d", i,
+				    (int)di.kind, di.exit_code, di.signal, di.reason);
+		}
 		if (m != NULL)
 			xtc_free(m);
 		xtc_xproc_destroy(ch);
