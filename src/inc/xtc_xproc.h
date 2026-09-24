@@ -102,9 +102,15 @@ XTC_API int  xtc_xproc_register_entry(const char *name, xtc_xproc_root_fn fn);
 
 /*
  * Spawn a child that runs the root function registered under `entry`
- * (see xtc_xproc_register_entry).  Portable: on POSIX it forks and looks
- * the name up in the child; on Windows it CreateProcess-es a re-exec of
- * this binary, which looks the name up in its own copy of the registry.
+ * (see xtc_xproc_register_entry).  It RE-EXECS this binary, which looks
+ * the name up in its own copy of the registry: CreateProcess on Windows,
+ * fork+execve on POSIX (1.50+; before that POSIX forked straight into a
+ * child runtime, which could deadlock the child of a multithreaded
+ * parent).  The child side is xtc_xproc_win_child_maybe, which the
+ * binary must call first thing in main() on EVERY platform.  On POSIX,
+ * if this image never called it, the entry path falls back to a plain
+ * fork (re-exec would re-run main() in the child) with the async-
+ * signal-safety caveat of xtc_xspawn.
  * `arg`/`arg_len` are copied and delivered to the root function as its
  * arg.  Otherwise identical to xtc_xspawn (monitor, send, destroy all
  * work the same).  Returns XTC_E_NOTFOUND if `entry` is not registered.
@@ -112,8 +118,9 @@ XTC_API int  xtc_xproc_register_entry(const char *name, xtc_xproc_root_fn fn);
 XTC_API int  xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
                               const void *arg, size_t arg_len, xtc_xproc_t **out);
 
-/* Tear down the handle: signal + reap the child if still running, close
- * the channel, free the handle.  Idempotent. */
+/* Tear down the handle: terminate (SIGTERM, 2s, SIGKILL) and reap the
+ * child if still running, close the channel, free the handle.  NULL is a
+ * no-op; destroying a handle twice is undefined.  Safe while monitored. */
 XTC_API void xtc_xproc_destroy(xtc_xproc_t *p);
 
 /* The child's OS pid (for logging), or -1. */
@@ -157,14 +164,14 @@ XTC_API int  xtc_xlink(xtc_xproc_t *p);
 XTC_API int  xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg);
 
 /*
- * Windows only.  The re-exec'd child image calls this early in main():
- * if the cross-process-child sentinel argv is present it connects the
- * control channel, receives its arg, runs the registered entry, and
- * _exit()s -- never returning.  Otherwise it is a no-op returning 0 and
- * normal startup continues.  On POSIX it is a no-op that returns 0 (the
- * child is fork'd, not re-exec'd, so there is no sentinel to detect).
- * Wire it as the first statement of main() in a binary that will host
- * xtc_xspawn_entry children.
+ * The re-exec'd child image's entry point, on every platform (the name
+ * predates POSIX re-exec).  Call it as the first statement of main() --
+ * after registering entries -- in a binary that hosts xtc_xspawn_entry
+ * children: if the cross-process-child sentinel argv is present it
+ * connects the control channel, receives its arg, runs the registered
+ * entry, and _exit()s -- never returning.  Otherwise it returns 0 and
+ * normal startup continues; on POSIX it also records that this binary
+ * has the hook, which is what enables re-exec for xtc_xspawn_entry.
  */
 XTC_API int  xtc_xproc_win_child_maybe(int argc, char **argv);
 

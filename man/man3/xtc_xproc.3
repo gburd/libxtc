@@ -76,12 +76,19 @@ function pointer cannot cross process creation.  Call it once, early, in
 code that runs in BOTH the parent and the child image.
 .Fn xtc_xspawn_entry
 spawns a child running the function registered under
-.Fa entry :
-on
-.Xr fork 2
-platforms it forks and resolves the name in the child; on Windows it
-re-execs this binary, which resolves the name in its own copy of the
-registry.  It is otherwise identical to
+.Fa entry
+by re-executing this binary, which resolves the name in its own copy of
+the registry
+.Pq Xr fork 2 No and Xr execve 2 No on POSIX, Fn CreateProcess No on Windows .
+The fresh image inherits no lock state from the parent, so this is the
+form to use from a multithreaded parent.
+It requires
+.Fn xtc_xproc_win_child_maybe
+as the first statement of
+.Fn main
+(see below); on POSIX, a binary that never calls it falls back to a
+plain fork, with the caveat described for
+.Fn xtc_xspawn .  It is otherwise identical to
 .Fn xtc_xspawn
 (monitor, send, destroy all behave the same) and returns
 .Dv XTC_E_NOTFOUND
@@ -171,15 +178,34 @@ its runtime.
 .Pp
 .Fn xtc_xproc_win_child_maybe
 is wired as the first statement of
-.Fn main
-in a binary that hosts
+.Fn main ,
+after the
+.Fn xtc_xproc_register_entry
+calls, in a binary that hosts
 .Fn xtc_xspawn_entry
-children.  On Windows, if the cross-process-child sentinel argv is
-present it connects the control channel, receives its arg, runs the
-registered entry, and exits without returning; otherwise it is a no-op
-and normal startup continues.  On
-.Xr fork 2
-platforms it is always a no-op (the child is fork'd, not re-exec'd).
+children, on every platform (the name predates POSIX re-exec).
+If the cross-process-child sentinel argv is present it connects the
+control channel, receives its arg, runs the registered entry, and exits
+without returning; otherwise it returns 0 and normal startup continues.
+On POSIX it also records that the binary has the hook, which is what
+enables re-exec: without it a re-exec'd child would run
+.Fn main
+from the top and repeat whatever the parent did.
+.Pp
+Releases before 1.50 forked the POSIX
+.Fn xtc_xspawn_entry
+child straight into a new runtime without exec, so a child forked while
+another parent thread held one of the library's process-wide locks could
+block forever; the hook was a no-op on POSIX then, so binaries that
+followed the earlier advice already have it.
+.Pp
+.Fn xtc_xspawn
+still forks without exec, because a raw function pointer is only
+meaningful in a clone of the parent.
+Its child runs a full runtime in a copy of a possibly multithreaded
+parent; prefer
+.Fn xtc_xspawn_entry
+there.
 .Sh RETURN VALUES
 .Fn xtc_xspawn ,
 .Fn xtc_xsend ,
