@@ -11,6 +11,9 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "os_time.h"
+#include "os_alloc.h"
+
+#include <stdatomic.h>
 
 /* [Tm5] basic */
 static int basic_fired;
@@ -245,6 +248,115 @@ test_timer_under_busy_runqueue(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- Tm12: park timers are freed by loop_fini even when a timer slab
+ * exists.
+ *
+ * xtc_timer_set allocates from the loop's timer slab; the park timers
+ * behind xtc_task_park_on_timer come from __os_calloc.  Both sit on the
+ * loop's all_timers list, and loop_fini used to free EVERY node with
+ * xtc_slab_free once the slab existed -- so each calloc'd park timer was
+ * pushed onto the slab's free list as a foreign pointer and lost when the
+ * slab was destroyed.  Counted here through the allocator hook (no
+ * sanitizer needed): every calloc/malloc the loop makes must be matched
+ * by a free by the time xtc_loop_fini returns.  Fails on the unfixed code
+ * (one live allocation per park); passes with it. */
+static _Atomic long g_tm12_live;
+static struct __os_alloc_hook g_tm12_saved;
+
+static void *
+tm12_malloc(size_t n)
+{
+	void *p = g_tm12_saved.malloc(n);
+	if (p != NULL) atomic_fetch_add(&g_tm12_live, 1);
+	return p;
+}
+static void *
+tm12_calloc(size_t n, size_t sz)
+{
+	void *p = g_tm12_saved.calloc(n, sz);
+	if (p != NULL) atomic_fetch_add(&g_tm12_live, 1);
+	return p;
+}
+static void *
+tm12_realloc(void *o, size_t sz)
+{
+	void *p = g_tm12_saved.realloc(o, sz);
+	if (o == NULL && p != NULL) atomic_fetch_add(&g_tm12_live, 1);
+	return p;
+}
+static void
+tm12_free(void *p)
+{
+	if (p != NULL) atomic_fetch_sub(&g_tm12_live, 1);
+	g_tm12_saved.free(p);
+}
+static void *
+tm12_aligned(size_t a, size_t sz)
+{
+	void *p = g_tm12_saved.aligned(a, sz);
+	if (p != NULL) atomic_fetch_add(&g_tm12_live, 1);
+	return p;
+}
+static void
+tm12_aligned_free(void *p)
+{
+	if (p != NULL) atomic_fetch_sub(&g_tm12_live, 1);
+	g_tm12_saved.aligned_free(p);
+}
+
+static void tm12_noop(void *u) { (void)u; }
+
+#define TM12_PARKS 20
+
+/* Parks on a 1us timer TM12_PARKS times (each park is a fresh calloc'd
+ * node that stays on all_timers after it fires), then finishes. */
+static int
+tm12_task(xtc_task_t *self, void *u)
+{
+	int *n = u;
+	if ((*n)++ < TM12_PARKS) {
+		munit_assert_int(xtc_task_park_on_timer(self, 1000), ==, XTC_OK);
+		return XTC_TASK_PENDING;
+	}
+	return XTC_TASK_DONE;
+}
+
+static MunitResult
+test_park_timers_freed_with_slab(const MunitParameter p[], void *d)
+{
+	struct __os_alloc_hook h;
+	xtc_loop_t *loop = NULL;
+	long leaked;
+	int parks = 0;
+	(void)p; (void)d;
+
+	munit_assert_int(__os_alloc_get_hook(&g_tm12_saved), ==, XTC_OK);
+	h.malloc = tm12_malloc;   h.calloc = tm12_calloc;
+	h.realloc = tm12_realloc; h.free = tm12_free;
+	h.aligned = tm12_aligned; h.aligned_free = tm12_aligned_free;
+	atomic_store(&g_tm12_live, 0);
+	munit_assert_int(__os_alloc_set_hook(&h), ==, XTC_OK);
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	/* Creates the loop's timer slab -- the trigger.  1us, so the loop
+	 * does not wait on it. */
+	munit_assert_int(xtc_timer_set(loop, 1000, tm12_noop, NULL, NULL),
+	    ==, XTC_OK);
+	/* Park timers from __os_calloc, left on all_timers for loop_fini. */
+	munit_assert_int(xtc_task_spawn(loop, tm12_task, &parks, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(parks, ==, TM12_PARKS + 1);   /* really parked */
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	munit_assert_int(__os_alloc_set_hook(&g_tm12_saved), ==, XTC_OK);
+	leaked = atomic_load(&g_tm12_live);
+	munit_logf(MUNIT_LOG_INFO, "live allocations after loop_fini: %ld",
+	    leaked);
+	munit_assert_long(leaked, ==, 0);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Tm5_basic",            test_timer_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm6_order",            test_order,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -253,6 +365,7 @@ static MunitTest tests[] = {
 	{ "/Tm9_many",             test_many_timers,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm10_park_on_timer",   test_park_on_timer,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm11_timer_under_busy_runqueue", test_timer_under_busy_runqueue, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Tm12_park_timers_freed_with_slab", test_park_timers_freed_with_slab, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m3/timer", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
