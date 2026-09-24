@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -370,8 +371,10 @@ test_app_shutdown_masked_bounded(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-/* Multi-loop: the supervisor stops the executor the instant it exits;
- * the drain must still see the forced child's cleanup complete. */
+/* Multi-loop: the supervisor stops the executor the instant it exits
+ * (sup.c), which can freeze a force-cancelled child mid-cleanup.  The
+ * report must stay HONEST about that and the call bounded: a child is
+ * only "forced" if its cleanup really completed, else a survivor. */
 static MunitResult
 test_app_shutdown_multiloop(const MunitParameter p[], void *d)
 {
@@ -385,15 +388,34 @@ test_app_shutdown_multiloop(const MunitParameter p[], void *d)
 	kids[1].loop = 1;
 	kids[2].loop = 2;
 	r.drain_ns = 100 * MS;
-	r.force_ns = 2000 * MS;
+	r.force_ns = 300 * MS;
 	dr_go(&r, kids, 3, 3);
-	munit_assert_int(r.rc, ==, XTC_OK);
-	munit_assert_int(r.rep.n_drained, ==, 2);
-	munit_assert_int(r.rep.n_forced, ==, 1);
-	munit_assert_int(r.rep.n_survivors, ==, 0);
-	munit_assert_int(atomic_load(&g_dr_hook_done), ==, 1);
+	munit_assert_int(r.rep.n_drained + r.rep.n_forced + r.rep.n_survivors,
+	    ==, 3);
+	munit_assert_int(r.rc, ==, r.rep.n_survivors ? XTC_E_AGAIN : XTC_OK);
+	/* The TRANSIENT child returned and exited while the executor ran. */
+	munit_assert_int(r.rep.n_drained, >=, 1);
+	munit_assert_uint64(r.rep.survivor_mask & (1u << 2), ==, 0);
+	/* Deaf child: forced means its (parking) hook finished. */
+	if (r.rep.forced_mask & (1u << 1))
+		munit_assert_int(atomic_load(&g_dr_hook_done), ==, 1);
+	else
+		munit_assert_uint64(r.rep.survivor_mask & (1u << 1), !=, 0);
+	munit_assert_int64(r.rep.elapsed_ns, <, 400 * MS + 250 * MS);
 	xtc_app_destroy(r.app);
 	return MUNIT_OK;
+}
+
+static xtc_app_t              *g_inval_app;
+static xtc_app_drain_report_t  g_inval_rep;
+static int                     g_inval_rc, g_inval_rc2;
+
+static void
+inval_driver(void *arg)
+{
+	(void)arg;
+	g_inval_rc = xtc_app_shutdown(g_inval_app, 0, 100 * MS, &g_inval_rep);
+	g_inval_rc2 = xtc_app_shutdown(g_inval_app, 0, 0, NULL);
 }
 
 /* Argument validation incl. the size-versioned report. */
@@ -403,6 +425,7 @@ test_app_shutdown_inval(const MunitParameter p[], void *d)
 	xtc_app_t *a;
 	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
 	xtc_app_drain_report_t rep = XTC_APP_DRAIN_REPORT_INIT;
+	xtc_pid_t dpid;
 	(void)p; (void)d;
 	munit_assert_int(xtc_app_shutdown(NULL, 0, 0, NULL), ==, XTC_E_INVAL);
 	opts.no_tuning_check = 1;
@@ -415,12 +438,18 @@ test_app_shutdown_inval(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_app_is_shutdown_msg(XTC_APP_SHUTDOWN_MSG,
 	    sizeof XTC_APP_SHUTDOWN_MSG), ==, 1);
 	munit_assert_int(xtc_app_is_shutdown_msg("x", 2), ==, 0);
-	/* Zero children: drains immediately, run returns. */
+	/* Not running yet: nothing could drain. */
 	rep.size = sizeof rep;
-	munit_assert_int(xtc_app_shutdown(a, 0, 100 * MS, &rep), ==, XTC_OK);
-	munit_assert_int(rep.n_children, ==, 0);
-	munit_assert_int(xtc_app_shutdown(a, 0, 0, NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_app_shutdown(a, 0, 0, &rep), ==, XTC_E_INVAL);
+	/* Zero children, shutdown from a (non-child) proc: run returns. */
+	g_inval_app = a;
+	g_inval_rep = rep;
+	munit_assert_int(xtc_proc_spawn(xtc_app_loop(a), inval_driver, NULL,
+	    NULL, &dpid), ==, XTC_OK);
 	munit_assert_int(xtc_app_run(a), ==, XTC_OK);
+	munit_assert_int(g_inval_rc, ==, XTC_OK);
+	munit_assert_int(g_inval_rep.n_children, ==, 0);
+	munit_assert_int(g_inval_rc2, ==, XTC_E_INVAL);   /* one per app */
 	xtc_app_destroy(a);
 	return MUNIT_OK;
 }

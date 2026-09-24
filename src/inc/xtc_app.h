@@ -83,11 +83,19 @@ typedef struct xtc_app_opts {
  * if a child is masked forever: such a child is reported, not waited
  * for.  Returns XTC_OK when every child left the table, XTC_E_AGAIN when
  * at least one survived (report->survivor_mask), XTC_E_INVAL for a
- * NULL/unstarted app, a negative deadline, a report whose .size is too
- * small, a second shutdown, or a call from one of the app's own
- * supervised children.  Call it from a plain thread or from a proc that
- * is not a supervised child.  Dynamic children (xtc_sup_add_child) are
- * not drained or reported: the supervisor stop in step 3 kills them.
+ * NULL app, an app not inside xtc_app_run (nothing could drain), a
+ * negative deadline, a report whose .size is too small, a second
+ * shutdown, a call from one of the app's own supervised children, or a
+ * call from ANY proc on a multi-loop app.  Call it from a plain thread
+ * (single-loop: or a non-child proc).  Dynamic children
+ * (xtc_sup_add_child) are not drained or reported: the supervisor stop
+ * in step 3 kills them.
+ *
+ * MULTI-LOOP LIMIT: the supervisor stops the executor the moment it
+ * exits (step 3), so a child force-cancelled on a multi-loop app may be
+ * frozen before its cleanup completes; it is then reported as a
+ * SURVIVOR (never falsely as forced) and the call still returns on time.
+ * Children that drain cooperatively in step 2 are unaffected.
  */
 #define XTC_APP_SHUTDOWN_MSG     "$xtc_shutdown"
 #define XTC_APP_SHUTDOWN_REASON  1     /* force-cancel exit reason */

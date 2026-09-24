@@ -183,8 +183,16 @@ typedef struct xtc_app_drain_report {
 .Pp
 Call
 .Fn xtc_app_shutdown
-from a plain thread or from a proc that is not one of the app's
-supervised children.  Children added later with
+from a plain thread, or, on a single-loop app, from a proc that is not
+one of the app's supervised children.
+.Pp
+Multi-loop limit: the supervisor stops the executor the moment it
+exits (step 3), so a child force-cancelled on an app with
+.Fa n_loops
+above 1 can be frozen before its cleanup completes.  It is then
+reported as a survivor, never falsely as forced, and the call still
+returns on time.  Children that drain cooperatively in step 2 are not
+affected.  Children added later with
 .Fn xtc_sup_add_child
 are not drained or reported; the supervisor stop in step 3 kills them.
 .Ss Signals
@@ -194,9 +202,10 @@ is the opt-in: it installs a SIGTERM and SIGINT handler that only
 writes one byte to a non-blocking self-pipe, and spawns a watcher proc
 on the app's loop that waits on the pipe with
 .Fn xtc_proc_wait_fd
-and runs
-.Fn xtc_app_shutdown app drain_ns force_ns report
-there.  No work runs in the handler.
+and starts a thread that runs
+.Fn xtc_app_shutdown app drain_ns force_ns report ;
+.Fn xtc_app_run
+joins that thread before it returns.  No work runs in the handler.
 .Fa report
 (may be NULL) must stay valid until
 .Fn xtc_app_run
@@ -216,11 +225,14 @@ when every child left the proc table,
 .Dv XTC_E_AGAIN
 when at least one survived, and
 .Dv XTC_E_INVAL
-for a NULL or unstarted app, a negative deadline, a
+for a NULL app, an app that is not inside
+.Fn xtc_app_run
+(nothing could drain), a negative deadline, a
 .Fa report
 whose
 .Fa size
-is too small, a second call, or a call from a supervised child.
+is too small, a second call, a call from a supervised child, or a call
+from any proc on a multi-loop app.
 .Pp
 .Fn xtc_app_drain_on_signal
 returns

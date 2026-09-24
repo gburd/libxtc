@@ -59,12 +59,14 @@ struct xtc_app {
 	struct app_kids   *kids;              /* static children (19.27.10) */
 	xtc_child_spec_t  *specs;             /* wrapped copies handed to sup */
 	_Atomic int        shutting_down;     /* xtc_app_shutdown entered */
-	_Atomic int        drain_done;        /* ... and finished */
+	_Atomic int        running;           /* inside xtc_app_run */
 	int                leak_kids;         /* a survivor may still run */
 	/* xtc_app_drain_on_signal parameters (the watcher reads them). */
 	int64_t            sig_drain_ns, sig_force_ns;
 	xtc_app_drain_report_t *sig_report;
 	int                sig_armed;
+	__os_thread_t      sig_thr;           /* the signal-driven drain */
+	_Atomic int        sig_thr_started;
 };
 
 int
@@ -183,20 +185,14 @@ __kid_trampoline(void *arg)
 	}
 }
 
-/* Runs as a proc on loop 0, i.e. only INSIDE a run of the loop/exec, so
- * its stop cannot land in the gap between two runs in xtc_app_run and be
- * lost.  Takes the exec/loop, not the app: if it is still queued when
- * the app is destroyed it is freed with the loop and never runs. */
+/* Stop what xtc_app_run is running. */
 static void
-__exec_stopper(void *arg)
+__app_halt(xtc_app_t *a)
 {
-	(void)xtc_exec_stop(arg);
-}
-
-static void
-__loop_stopper(void *arg)
-{
-	(void)xtc_loop_stop(arg);
+	if (a->exec != NULL)
+		(void)xtc_exec_stop(a->exec);
+	else
+		(void)xtc_loop_stop(a->loop);
 }
 
 int
@@ -242,21 +238,20 @@ xtc_app_run(xtc_app_t *a)
 	if (a == NULL || a->loop == NULL) return XTC_E_INVAL;
 	/* A multi-loop app runs every loop until the supervisor exits and
 	 * stops the executor; a single-loop app runs its one loop until the
-	 * supervisor exits and the loop drains.
-	 *
-	 * Keep running while an xtc_app_shutdown is in progress: the
-	 * supervisor stops the executor the moment it exits, which would
-	 * otherwise freeze the draining children (and a shutdown driven from
-	 * a proc) mid-cleanup.  The shutdown's final __stopper_proc sets
-	 * drain_done from inside a run, so this cannot spin or lose it. */
-	for (;;) {
-		rc = a->exec != NULL ? xtc_exec_run(a->exec) : xtc_loop_run(a->loop);
-		if (rc != XTC_OK ||
-		    !atomic_load_explicit(&a->shutting_down, memory_order_acquire) ||
-		    atomic_load_explicit(&a->drain_done, memory_order_acquire))
-			return rc;
-		(void)__os_sleep_ns(1LL * 1000 * 1000);
+	 * supervisor exits and the loop drains. */
+	atomic_store_explicit(&a->running, 1, memory_order_release);
+	rc = a->exec != NULL ? xtc_exec_run(a->exec) : xtc_loop_run(a->loop);
+	atomic_store_explicit(&a->running, 0, memory_order_release);
+#if !defined(_WIN32)
+	/* A signal-triggered drain runs on its own thread (so an executor
+	 * stop cannot freeze it); its report is complete once joined. */
+	if (atomic_load_explicit(&a->sig_thr_started, memory_order_acquire)) {
+		(void)__os_thread_join(&a->sig_thr, NULL);
+		atomic_store_explicit(&a->sig_thr_started, 0,
+		    memory_order_relaxed);
 	}
+#endif
+	return rc;
 }
 
 int
@@ -317,7 +312,7 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 {
 	struct app_kids *ks;
 	xtc_app_drain_report_t r;
-	xtc_pid_t self = xtc_self(), spid;
+	xtc_pid_t self = xtc_self();
 	int64_t t0, now;
 	int i, rc, expected = 0;
 	uint64_t bit;
@@ -327,6 +322,12 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 	    drain_ns < 0 || force_ns < 0)
 		return XTC_E_INVAL;
 	if (out != NULL && out->size < sizeof r)
+		return XTC_E_INVAL;
+	/* Nothing can drain unless xtc_app_run is driving the loop.  On a
+	 * multi-loop app the supervisor stops the executor when it exits,
+	 * which would freeze a shutdown running on a proc: plain thread only. */
+	if (!atomic_load_explicit(&a->running, memory_order_acquire) ||
+	    (a->exec != NULL && !xtc_pid_is_none(self)))
 		return XTC_E_INVAL;
 	ks = a->kids;
 	/* A supervised child cannot drain its own app: step 3 would kill
@@ -391,10 +392,11 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 	if (out != NULL)
 		memcpy((char *)out + sizeof out->size, (char *)&r + sizeof r.size,
 		    sizeof r - sizeof r.size);
-	atomic_store_explicit(&a->drain_done, 1, memory_order_release);
-	(void)xtc_proc_spawn(a->loop,
-	    a->exec != NULL ? __exec_stopper : __loop_stopper,
-	    a->exec != NULL ? (void *)a->exec : (void *)a->loop, NULL, &spid);
+	/* A survivor keeps the loop busy: stop it so xtc_app_run returns.
+	 * With none, the loop/executor ends on its own -- and a borrowed loop
+	 * is not left with a stale, sticky stop request. */
+	if (r.n_survivors > 0)
+		__app_halt(a);
 	return r.n_survivors == 0 ? XTC_OK : XTC_E_AGAIN;
 }
 
@@ -420,6 +422,16 @@ __drain_sig_handler(int sig)
 	errno = saved;
 }
 
+/* Runs the drain off every loop; xtc_app_run joins it. */
+static void *
+__drain_thread(void *arg)
+{
+	xtc_app_t *a = arg;
+	(void)xtc_app_shutdown(a, a->sig_drain_ns, a->sig_force_ns,
+	    a->sig_report);
+	return NULL;
+}
+
 static void
 __drain_watcher(void *arg)
 {
@@ -439,8 +451,10 @@ __drain_watcher(void *arg)
 		if ((rev & XTC_WAIT_MAILBOX) && xtc_recv(&m, &sz, 0) == XTC_OK)
 			__os_free(m);
 		if (read(g_sig_pipe[0], buf, sizeof buf) > 0) {  /* XTC_BLOCKING_OK: O_NONBLOCK */
-			(void)xtc_app_shutdown(a, a->sig_drain_ns,
-			    a->sig_force_ns, a->sig_report);
+			if (__os_thread_create(&a->sig_thr, __drain_thread,
+			    a) == XTC_OK)
+				atomic_store_explicit(&a->sig_thr_started, 1,
+				    memory_order_release);
 			return;
 		}
 	}
