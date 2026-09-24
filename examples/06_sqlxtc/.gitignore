@@ -47,3 +47,4 @@ bench_btree_concurrent
 numa_claim_probe
 evict_policy_proto
 test_index
+test_quack_range

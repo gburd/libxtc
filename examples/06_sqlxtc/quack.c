@@ -13,6 +13,7 @@
 #include "quack.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -439,6 +440,13 @@ jp_int(jp_t *j, int64_t *out)
 	while (j->pos < j->len) {
 		char c = j->p[j->pos];
 		if (c < '0' || c > '9') break;
+		/* Reject, do not wrap: v * 10 + d past INT64_MAX is signed
+		 * overflow (UB), and in practice turned a 23-digit "limit"
+		 * into an arbitrary positive value. */
+		if (v > (INT64_MAX - (c - '0')) / 10) {
+			j->err = "integer out of range";
+			return -1;
+		}
 		v = v * 10 + (c - '0');
 		j->pos++;
 		have = 1;
@@ -476,8 +484,13 @@ jp_number(jp_t *j, int *is_dbl, int64_t *iv, double *dv)
 	if (tn >= sizeof tmp) tn = sizeof tmp - 1;
 	memcpy(tmp, j->p + start, tn);
 	tmp[tn] = '\0';
-	if (is_float) { *dv = strtod(tmp, NULL); *is_dbl = 1; }
-	else          { *iv = strtoll(tmp, NULL, 10); *is_dbl = 0; }
+	if (is_float) { *dv = strtod(tmp, NULL); *is_dbl = 1; return 0; }
+	/* strtoll saturates to LLONG_MIN/MAX on overflow and says so only
+	 * through errno: an out-of-range integer is an error, not a clamp. */
+	errno = 0;
+	*iv = strtoll(tmp, NULL, 10);
+	*is_dbl = 0;
+	if (errno == ERANGE) { j->err = "integer out of range"; return -1; }
 	return 0;
 }
 
