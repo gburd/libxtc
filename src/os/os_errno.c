@@ -27,7 +27,12 @@
  * either sees the old or the new hook, never a torn pointer).
  */
 typedef int (*errno_hook_fn)(int);
-static _Atomic errno_hook_fn __errno_hook = NULL;
+/* No explicit "= NULL": static storage is zero-initialised (a null hook)
+ * anyway, and clang 15 rejects NULL -- ((void *)0) -- as a constant
+ * initialiser for an _Atomic function pointer ("initializer element is
+ * not a compile-time constant"), which broke the clang ThreadSanitizer
+ * build on toolchains of that vintage. */
+static _Atomic errno_hook_fn __errno_hook;
 
 /*
  * PUBLIC: int __os_errno_map __P((int));
