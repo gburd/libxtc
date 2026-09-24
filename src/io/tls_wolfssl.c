@@ -465,6 +465,8 @@ xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 	if (len > 0xffff)
 		return XTC_E_INVAL;   /* SNI length is a u16 */
 	if (len != 0) {
+		if (len > SIZE_MAX - 1)          /* len + 1 below must not wrap */
+			return XTC_E_INVAL;
 		if ((rc = __os_malloc(len + 1, (void **)&copy)) != XTC_OK)
 			return rc;
 		memcpy(copy, name, len + 1);
