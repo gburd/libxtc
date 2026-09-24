@@ -304,17 +304,31 @@ on success and a negative
 .Dv XTC_E_*
 code on failure:
 .Dv XTC_E_INVAL
-for a NULL argument, a kind mismatch, or a validator rejection;
+for a NULL argument, a kind mismatch, a validator rejection, a
+duplicate registration, or an unregistered name passed to a name-keyed
+getter, setter,
+.Fn xtc_cfg_kind
+or
+.Fn xtc_cfg_unregister ;
 .Dv XTC_E_RANGE
 for a value outside the registered bounds
 .Pq or outside Li 0 Ns .. Ns Li 1 for a bool, or not a label index for an enum ,
 from the global and the per-session setters alike;
 .Dv XTC_E_NOTFOUND
-for an unregistered name;
-.Dv XTC_E_EXIST
-for a duplicate registration;
+for an unregistered name passed to
+.Fn xtc_cfg_ref ,
+.Fn xtc_cfg_session_source
+or
+.Fn xtc_cfg_session_reset ;
 .Dv XTC_E_NOMEM
 on allocation failure.
+There is no distinct code for a duplicate registration; an earlier
+version of this page named one that does not exist in
+.In xtc.h .
+.Fn xtc_cfg_session_source
+reports
+.Dv XTC_CFG_SRC_DEFAULT
+for a name the session does not override.
 .Fn xtc_cfg_count
 returns the count.
 .Fn xtc_cfg_session_bind
