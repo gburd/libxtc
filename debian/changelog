@@ -1,3 +1,37 @@
+libxtc (1.51.0-1) unstable; urgency=medium
+
+  * MINOR release -- one new public API plus fixes for the six items
+    left open after 1.50.0.
+  * NEW API:
+    - xtc_net_accept: a non-blocking, close-on-exec accept that charges
+      the accepted connection against XTC_RES_FDS before accepting it,
+      so at the cap the connection stays in the kernel backlog
+      (XTC_E_RESOURCE) instead of being accepted and dropped;
+      xtc_net_close refunds it.  Raw accept(2) descriptors are still
+      not metered.
+  * FIXES:
+    - proc: xtc_recv and xtc_exit_self now act on the RUNNING fiber's
+      proc (a migration could leave __current_proc naming another proc,
+      which on FreeBSD wedged test_exec because a umutex unlock from a
+      non-owner thread silently fails).
+    - io/exec: the poll and select backends defer a cross-thread fd
+      unregister to the owner thread (as io_uring already did), select
+      drops a single EBADF fd rather than failing the whole poll, and a
+      worker survives a loop-step error instead of silently exiting and
+      stranding every fiber on its loop.
+    - tls/schannel: a CLIENT verifies the server certificate by default,
+      as on every other backend (the Windows host-name check is still
+      not implemented).
+    - xproc: a re-exec'd child retries its io_uring ring setup with
+      backoff instead of exiting at once on a small, ring-starved host.
+    - timer/proc/loop: park timers (behind xtc_proc_sleep, timed
+      xtc_recv, timed xtc_proc_wait_fd) are refcounted and reclaimed
+      when they fire or cancel instead of being retained until
+      xtc_loop_fini.  (The completed-coro fiber-stack retention, PLAN
+      19.26, remains open.)
+
+ -- Greg Burd <greg@burd.me>  Fri, 25 Sep 2026 12:00:00 -0400
+
 libxtc (1.50.0-1) unstable; urgency=medium
 
   * Production-readiness release: every item of the review's gap list
