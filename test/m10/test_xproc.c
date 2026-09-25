@@ -528,7 +528,10 @@ test_xproc_entry_mt_parent(const MunitParameter p[], void *d)
 	munit_assert_int(c.wedged, ==, 0);
 	munit_assert_int(c.other, ==, 0);
 	munit_assert_int(c.clean + c.nostart, ==, FH_SPAWNS);
-	munit_assert_int(c.clean, >, 0);
+	/* Since 1.51 the child retries its ring setup for ~2 s, so a start-up
+	 * failure should not happen at all on a sane host; allow a handful
+	 * (a genuinely exhausted host), not the tens CI saw in 1.50. */
+	munit_assert_int(c.nostart, <=, 4);
 	return MUNIT_OK;
 }
 

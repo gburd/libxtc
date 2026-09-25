@@ -28,6 +28,7 @@
 #include "proc_int.h"       /* __xtc_exit_self_kind */
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "os_sharp.h"      /* __os_env_get */
+#include "os_time.h"       /* __os_sleep_ns: child start-up retry */
 
 #include <string.h>
 #include <pthread.h>
@@ -245,12 +246,30 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	struct child_pump_ctx pctx;
 	int exit_code = 0;
 	int rc;
+	int64_t nap = 1000 * 1000LL;          /* start-up retry: 1 ms, doubling */
+	int64_t slept = 0;
 
 	if (root_fn == NULL) return 2;
-	/* Report WHY the child runtime could not start: exit 240 - XTC_E_*
-	 * (241..249 for the codes in use), not a bare 3, so the parent's DOWN
-	 * names the failure (io_uring ring setup, fds, memory). */
-	if ((rc = xtc_loop_init(&loop)) != XTC_OK)
+	/*
+	 * Start the child runtime.  Creating the loop's I/O ring can fail
+	 * TRANSIENTLY: on a small host with many rings being created and torn
+	 * down at once (CI's 4-vCPU runners: up to 73 of 400 children in
+	 * /m10.10/xproc/entry_mt_parent) io_uring setup returns an error that
+	 * clears once peers release theirs.  Retry for up to ~2 s with a
+	 * doubling back-off before giving up.  If it still fails, exit 240 -
+	 * XTC_E_* (241..249), not a bare 3, so the parent's DOWN names why.
+	 * The sleep is a plain OS sleep: no loop exists yet to yield to.
+	 */
+	while ((rc = xtc_loop_init(&loop)) != XTC_OK &&
+	    (rc == XTC_E_INTERNAL || rc == XTC_E_NOMEM ||
+	     rc == XTC_E_RESOURCE) &&
+	    slept < 2000 * 1000 * 1000LL) {
+		(void)__os_sleep_ns(nap);
+		slept += nap;
+		if (nap < 256 * 1000 * 1000LL)
+			nap *= 2;
+	}
+	if (rc != XTC_OK)
 		return (rc < 0 && rc > -10) ? 240 - rc : 3;
 
 	/* The control fd must be non-blocking so recv_frame parks the pump
@@ -1173,12 +1192,30 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	HANDLE reader = NULL;
 	int exit_code = 0;
 	int rc;
+	int64_t nap = 1000 * 1000LL;          /* start-up retry: 1 ms, doubling */
+	int64_t slept = 0;
 
 	if (root_fn == NULL) return 2;
-	/* Report WHY the child runtime could not start: exit 240 - XTC_E_*
-	 * (241..249 for the codes in use), not a bare 3, so the parent's DOWN
-	 * names the failure (io_uring ring setup, fds, memory). */
-	if ((rc = xtc_loop_init(&loop)) != XTC_OK)
+	/*
+	 * Start the child runtime.  Creating the loop's I/O ring can fail
+	 * TRANSIENTLY: on a small host with many rings being created and torn
+	 * down at once (CI's 4-vCPU runners: up to 73 of 400 children in
+	 * /m10.10/xproc/entry_mt_parent) io_uring setup returns an error that
+	 * clears once peers release theirs.  Retry for up to ~2 s with a
+	 * doubling back-off before giving up.  If it still fails, exit 240 -
+	 * XTC_E_* (241..249), not a bare 3, so the parent's DOWN names why.
+	 * The sleep is a plain OS sleep: no loop exists yet to yield to.
+	 */
+	while ((rc = xtc_loop_init(&loop)) != XTC_OK &&
+	    (rc == XTC_E_INTERNAL || rc == XTC_E_NOMEM ||
+	     rc == XTC_E_RESOURCE) &&
+	    slept < 2000 * 1000 * 1000LL) {
+		(void)__os_sleep_ns(nap);
+		slept += nap;
+		if (nap < 256 * 1000 * 1000LL)
+			nap *= 2;
+	}
+	if (rc != XTC_OK)
 		return (rc < 0 && rc > -10) ? 240 - rc : 3;
 
 	rctx.root_fn = root_fn;
