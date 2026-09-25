@@ -231,6 +231,18 @@ proto_mask(xtc_tls_role_t role, int min_v, int max_v)
  * PUBLIC: void xtc_tls_ctx_destroy __P((xtc_tls_ctx_t *));
  * ----------------------------------------------------------------------- */
 
+/* Effective peer-verification mode; keep in sync with tls_openssl.c. */
+static xtc_tls_verify_mode_t
+resolve_verify(xtc_tls_role_t role, const xtc_tls_opts_t *opts)
+{
+	if (opts != NULL && opts->verify_peer_mode != XTC_TLS_VERIFY_DEFAULT)
+		return opts->verify_peer_mode;
+	if (opts != NULL && opts->verify_peer)
+		return XTC_TLS_VERIFY_REQUIRE;
+	return (role == XTC_TLS_CLIENT) ? XTC_TLS_VERIFY_REQUIRE
+	                                : XTC_TLS_VERIFY_NONE;
+}
+
 int
 xtc_tls_ctx_create(xtc_tls_role_t role,
                    const xtc_tls_opts_t *opts,
@@ -251,7 +263,12 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 		return rc;
 
 	c->role        = role;
-	c->verify_peer = (opts != NULL) ? opts->verify_peer : 0;
+	/* The same resolution as every other backend (see resolve_verify):
+	 * verify_peer_mode wins, then legacy verify_peer, then the ROLE
+	 * default -- a CLIENT verifies.  Before 1.51 SChannel read only the
+	 * legacy int, so a zeroed opts on Windows still verified nothing
+	 * after 1.50 made the other backends secure by default. */
+	c->verify_peer = resolve_verify(role, opts) != XTC_TLS_VERIFY_NONE;
 
 	memset(&sc, 0, sizeof(sc));
 	sc.dwVersion = SCHANNEL_CRED_VERSION;

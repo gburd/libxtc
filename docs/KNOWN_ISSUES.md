@@ -48,8 +48,9 @@ Fixed in 1.50 (PLAN.md 19.27.6-19.27.8):
   signal.  It now returns an error (5653513); the same for `xtc_net`
   sends (2711c82).
 
-Still open: SChannel (Windows) does not honor the new client verify
-default -- a zeroed opts there still verifies nothing (`xtc_tls.h`).
+SChannel (Windows) applies the same client verify default since 1.51
+(in 1.50 a zeroed opts there still verified nothing).  Still open:
+SChannel does not implement `xtc_tls_set_hostname` (`XTC_E_NOSYS`).
 wolfSSL refuses to create a SERVER connection from a context with no
 certificate (`xtc_tls_create` returns `XTC_E_NOMEM`); the other backends
 defer that error to the handshake.
