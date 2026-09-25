@@ -14,6 +14,12 @@
 #include <stdint.h>
 #include <string.h>
 
+#if !defined(_WIN32)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_res.h"
@@ -144,9 +150,84 @@ test_net_fds_cap(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+#if !defined(_WIN32)
+/* Inbound connections are metered (1.51): xtc_net_accept charges FDS
+ * before accepting, so at the cap the connection is REFUSED and stays in
+ * the kernel backlog (not accepted-then-dropped), and a close frees room
+ * for it.  Before 1.51 xtc_net had no accept, so a server's accepted fds
+ * -- its main fd growth -- were invisible to the FDS cap. */
+static MunitResult
+test_net_accept_fds_cap(const MunitParameter p[], void *d)
+{
+	xtc_res_t r;
+	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_tcp_opts_t to = XTC_TCP_OPTS_DEFAULT;
+	struct sockaddr_in sa;
+	socklen_t sl = sizeof sa;
+	int lfd = -1, c1 = -1, c2 = -1, a1 = -1, a2 = -1, i, rc;
+	(void)p; (void)d;
+
+	/* The listener is a RAW socket on an ephemeral port (xtc_net_listen
+	 * wants a fixed port), so it is not charged: the cap counts only the
+	 * two dialed clients and the accepted connections. */
+	lfd = socket(AF_INET, SOCK_STREAM, 0);
+	munit_assert_int(lfd, >=, 0);
+	memset(&sa, 0, sizeof sa);
+	sa.sin_family = AF_INET;
+	sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	munit_assert_int(bind(lfd, (struct sockaddr *)&sa, sizeof sa), ==, 0);
+	munit_assert_int(listen(lfd, 8), ==, 0);
+	munit_assert_int(getsockname(lfd, (struct sockaddr *)&sa, &sl), ==, 0);
+	munit_assert_int(xtc_net_setnonblock(lfd), ==, XTC_OK);
+	caps.fds = 2;              /* 2 clients, 0 room */
+	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
+	munit_assert_int(xtc_res_attach_net(&r), ==, XTC_OK);
+	munit_assert_int(xtc_net_dial(XTC_NET_INET, "127.0.0.1",
+	    ntohs(sa.sin_port), &to, &c1), ==, XTC_OK);
+	munit_assert_int(xtc_net_dial(XTC_NET_INET, "127.0.0.1",
+	    ntohs(sa.sin_port), &to, &c2), ==, XTC_OK);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_FDS), ==, 2);
+
+	/* At the cap: the pending connection is refused, not accepted. */
+	munit_assert_int(xtc_net_accept(lfd, &a1), ==, XTC_E_RESOURCE);
+	munit_assert_int(a1, ==, -1);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_FDS), ==, 2);
+
+	/* Room: close a client; the queued connection is now accepted and
+	 * charged.  (Retry briefly: the handshake completes asynchronously.) */
+	xtc_net_close(c2);
+	for (i = 0, rc = XTC_E_AGAIN; i < 200 && rc == XTC_E_AGAIN; i++) {
+		rc = xtc_net_accept(lfd, &a1);
+		if (rc == XTC_E_AGAIN) usleep(5000);
+	}
+	munit_assert_int(rc, ==, XTC_OK);
+	munit_assert_int(a1, >=, 0);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_FDS), ==, 2);
+
+	/* Nothing pending (both handshakes consumed or refused): AGAIN with
+	 * the tentative charge refunded. */
+	xtc_net_close(a1);
+	rc = xtc_net_accept(lfd, &a2);
+	munit_assert_true(rc == XTC_E_AGAIN || rc == XTC_OK);
+	if (rc == XTC_OK) xtc_net_close(a2);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_FDS), ==, 1);
+
+	munit_assert_int(xtc_net_accept(-1, &a2), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_net_accept(lfd, NULL), ==, XTC_E_INVAL);
+	xtc_net_close(c1);
+	(void)close(lfd);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_FDS), ==, 0);
+	munit_assert_int(xtc_res_attach_net(NULL), ==, XTC_OK);
+	return MUNIT_OK;
+}
+#endif
+
 static MunitTest tests[] = {
 	{ "/mctx_mem_cap", test_mctx_mem_cap, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/net_fds_cap",  test_net_fds_cap,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#if !defined(_WIN32)
+	{ "/net_accept_fds_cap", test_net_accept_fds_cap, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m7/res_meter", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

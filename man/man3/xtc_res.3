@@ -198,6 +198,7 @@ allocation.
 Descriptors returned by
 .Fn xtc_net_listen ,
 .Fn xtc_net_dial ,
+.Fn xtc_net_accept ,
 .Fn xtc_net_unix_listen ,
 .Fn xtc_net_unix_dial
 and
@@ -206,10 +207,11 @@ while an accountant is attached with
 .Fn xtc_res_attach_net ,
 released by
 .Fn xtc_net_close .
+Inbound connections are charged when accepted with
+.Xr xtc_net_accept 3 .
 .Em Not
 descriptors from a raw
-.Xr accept 2
-.Pq xtc_net has no accept call ,
+.Xr accept 2 ,
 files, pipes, the I/O backend's own descriptors, or
 .Xr xtc_xproc 3
 control sockets.

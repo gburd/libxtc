@@ -6,6 +6,7 @@
 .Sh NAME
 .Nm xtc_net_listen ,
 .Nm xtc_net_dial ,
+.Nm xtc_net_accept ,
 .Nm xtc_net_apply_tcp_opts ,
 .Nm xtc_net_setnonblock ,
 .Nm xtc_net_close ,
@@ -27,6 +28,8 @@
 .Fn xtc_net_listen "xtc_net_family_t fam" "const char *host" "int port" "const xtc_tcp_opts_t *opts" "int *out_fd"
 .Ft int
 .Fn xtc_net_dial "xtc_net_family_t fam" "const char *host" "int port" "const xtc_tcp_opts_t *opts" "int *out_fd"
+.Ft int
+.Fn xtc_net_accept "int listen_fd" "int *out_fd"
 .Ft int
 .Fn xtc_net_apply_tcp_opts "int fd" "const xtc_tcp_opts_t *opts"
 .Ft int
@@ -167,6 +170,27 @@ opens a non-blocking TCP connection.  The connect is in flight
 when the call returns; caller polls for
 .Dv XTC_IO_WRITABLE
 to detect completion.
+.Pp
+.Fn xtc_net_accept
+accepts one pending connection on a listening socket as a non-blocking,
+close-on-exec descriptor, or returns
+.Er XTC_E_AGAIN
+when none is pending (wait for
+.Dv XTC_IO_READABLE
+on
+.Fa listen_fd
+and retry).
+With
+.Fn xtc_res_attach_net
+in effect the new descriptor is charged against
+.Dv XTC_RES_FDS
+before the accept, so at the cap it returns
+.Er XTC_E_RESOURCE
+and the connection stays in the kernel backlog;
+.Fn xtc_net_close
+refunds it.
+Releases before 1.51 had no accept here, so inbound connections could
+not be metered.
 .Pp
 .Fn xtc_net_apply_tcp_opts
 applies the knobs to an already-open socket.  Useful for sockets
