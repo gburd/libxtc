@@ -2966,7 +2966,10 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 int
 xtc_exit_self(int reason)
 {
-	struct xtc_proc *self = __current_proc;
+	/* The RUNNING fiber's proc: longjmp'ing to a stale __current_proc's
+	 * exit_jb would unwind onto ANOTHER fiber's stack (see
+	 * __proc_reanchor). */
+	struct xtc_proc *self = __proc_reanchor(__current_proc);
 	if (self == NULL || !self->exit_jb_set) return XTC_E_INVAL;
 	longjmp(self->exit_jb, reason + 1);
 	/* NOTREACHED */
@@ -2991,7 +2994,7 @@ xtc_exit_self(int reason)
 int
 __xtc_exit_self_kind(int reason, int kind)
 {
-	struct xtc_proc *self = __current_proc;
+	struct xtc_proc *self = __proc_reanchor(__current_proc);
 	if (self == NULL || !self->exit_jb_set) return XTC_E_INVAL;
 	if (kind < XTC_DOWN_KIND_CLEAN || kind > XTC_DOWN_KIND_NOCONNECTION)
 		return XTC_E_INVAL;
