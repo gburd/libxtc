@@ -143,22 +143,26 @@ rather than a hang.  On 4-vCPU CI runners with 8 threads continuously
 creating and destroying rings, up to 73 of 400 children did; 0 on a
 32-vCPU host.  Retry the spawn, or reserve ring capacity on small hosts.
 
-## OPEN: timed waits retain memory until the loop is torn down
+## RESOLVED (1.51): timed waits reclaim their timer when it fires or cancels
 
-**Status:** OPEN as of 1.50.0; same class as the fiber retention below.
+**Status:** RESOLVED in 1.51 (`5cf69ad`) for the timer-node half; the
+fiber-stack retention below is a separate item still open.
 
 Every timed park -- `xtc_proc_sleep`, `xtc_recv` with a timeout,
-`xtc_proc_wait_fd` with a timeout -- allocates a timer node that stays on
-the loop's timer list after it fires or is cancelled, until
-`xtc_loop_fini`.  Measured: 80 bytes per `xtc_proc_sleep` (linear to one
-million sleeps, 80 MB) and about 22 bytes per satisfied timed `xtc_recv`.
-A long-lived loop that sleeps in a hot path grows without bound.  (A
+`xtc_proc_wait_fd` with a timeout -- used to allocate a timer node
+(~80 B) that stayed on the loop's `all_timers` list after it fired or was
+cancelled, until `xtc_loop_fini`, so a long-lived loop that slept in a
+hot path grew without bound.  As of 1.51 a park timer is refcounted (its
+two owners are the loop's timer heap and the task's `park_timer` slot)
+and freed by the last owner to release it, so a fired or cancelled park
+timer is reclaimed during the run instead of at teardown.  The soak
+(`test/soak/soak_mem_bound.c`, `make soak-mem`) "tasks" arm now plateaus
+at +0 B/gen (was ~80 B/park), and the fix is ASan+LSan+UBSan clean.  (A
 separate bug that LEAKED these nodes at `xtc_loop_fini` once
-`xtc_timer_set` had been used is fixed in 1.50, 42fe0e2.)
+`xtc_timer_set` had been used was fixed earlier in 1.50, 42fe0e2.)
 
-**Workaround:** for periodic work prefer one `xtc_timer_set` callback
-over a sleep loop, and bound the lifetime of loops that do many timed
-waits.
+The "procs" arm of that soak still grows: that is the completed-coro
+fiber-stack retention documented next, which is unchanged.
 
 ## RESOLVED (1.51): xtc_res FDS meters inbound connections
 
