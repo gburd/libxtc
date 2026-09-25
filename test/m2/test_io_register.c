@@ -312,6 +312,55 @@ test_reg_with_pending_del(const MunitParameter p[], void *data)
 	return MUNIT_OK;
 }
 
+#if !defined(_WIN32)
+/* [R6] An fd closed while still registered must not take the whole poll
+ * down.  select(2) fails the entire call with EBADF for ONE dead fd; the
+ * select backend used to return XTC_E_INTERNAL for it, and the executor
+ * worker then EXITED, stranding every fiber on its loop (the select-backend
+ * /m5/exec/Blk6 hang).  Every backend must instead keep polling: the poll
+ * returns XTC_OK, and the dead fd may be reported as XTC_IO_ERR (select,
+ * poll) or silently dropped by the kernel (epoll, kqueue, io_uring).  A
+ * LIVE fd registered beside it must still be reported readable. */
+static MunitResult
+test_closed_registered_fd(const MunitParameter p[], void *d)
+{
+	xtc_io_t *io = NULL;
+	xtc_io_event_t ev[8];
+	int dr, dw, lr, lw, n = 0, i, saw_live = 0, rc;
+	char c = 'x';
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(make_pipe(&dr, &dw), ==, 0);
+	munit_assert_int(make_pipe(&lr, &lw), ==, 0);
+	munit_assert_int(xtc_io_reg_fd(io, dr, XTC_IO_READABLE, (void *)1),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_io_reg_fd(io, lr, XTC_IO_READABLE, (void *)2),
+	    ==, XTC_OK);
+	(void)close(dr);                    /* registered, now dead */
+	(void)close(dw);
+	munit_assert_int((int)write(lw, &c, 1), ==, 1);
+	/* The first poll may be spent reporting the dead fd; allow two. */
+	for (i = 0; i < 2 && !saw_live; i++) {
+		int k;
+		memset(ev, 0, sizeof ev);
+		rc = xtc_io_poll(io, ev, 8, 100LL * 1000 * 1000, &n);
+		munit_assert_int(rc, ==, XTC_OK);
+		for (k = 0; k < n; k++)
+			if (ev[k].tag == (void *)2 &&
+			    (ev[k].flags & XTC_IO_READABLE))
+				saw_live = 1;
+	}
+	munit_assert_int(saw_live, ==, 1);
+	(void)xtc_io_del_fd(io, lr);
+	(void)xtc_io_del_fd(io, dr);        /* may already be gone */
+	(void)close(lr);
+	(void)close(lw);
+	(void)xtc_io_fini(io);
+	return MUNIT_OK;
+}
+#endif
+
 static MunitTest tests[] = {
 	{ "/R1_basic",     test_reg_basic,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/R2_bad_args",  test_reg_bad_args, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -322,6 +371,9 @@ static MunitTest tests[] = {
 	{ "/R4b_mod_del_poll", test_mod_then_del_then_poll,
 	                                      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/R5_del_fd",    test_del_fd,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#if !defined(_WIN32)
+	{ "/R6_closed_registered_fd", test_closed_registered_fd, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m2/io_register", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
