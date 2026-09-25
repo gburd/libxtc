@@ -22,14 +22,16 @@
  *	Modes (argv[1]):
  *	  procs  -- each worker is an xtc_proc that calls xtc_proc_sleep once
  *	            (the long-lived-service shape PLAN 19.26 describes).
- *	            EXPECTED TO FAIL today: a completed coro-backed task
- *	            keeps its fiber stack + coro until xtc_loop_fini (19.26),
- *	            and each xtc_proc_sleep park timer (~80 B) stays on the
- *	            loop's all_timers list until loop_fini.
+ *	            STILL EXPECTED TO FAIL: a completed coro-backed task keeps
+ *	            its fiber stack + coro until xtc_loop_fini (PLAN 19.26).
+ *	            The park-timer half of this arm's old growth is fixed --
+ *	            park timers are now reclaimed when they fire or cancel --
+ *	            so the residual growth here is the fiber stack alone.
  *	  tasks  -- plain xtc_task workers that park once on a timer and
- *	            finish.  Plain tasks recycle, so only the park timers can
- *	            grow here: this isolates the ~80-90 B/park retention.
- *	            EXPECTED TO FAIL today, for that reason alone.
+ *	            finish.  Plain tasks recycle, so only the park timers
+ *	            could grow here.  Now PLATEAUS: the ~80 B/park retention
+ *	            was fixed (park timers are refcounted and freed on fire or
+ *	            cancel instead of living on all_timers until loop_fini).
  *	  plain  -- the CONTROL: plain xtc_task workers that finish without
  *	            parking.  Must plateau; if it does not, the instrument is
  *	            wrong or there is a third leak.
