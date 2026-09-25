@@ -21,12 +21,118 @@
 #include "io_int.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <string.h>
+#include <stdatomic.h>
+#include <pthread.h>
 #include <sys/select.h>
 #include <sys/time.h>
 #include <unistd.h>
 
 #define WAKEUP_SLOT 0
+
+/* ---- cross-loop deferred unregister (see io_int.h) ---------------- */
+
+int xtc_io_del_fd(xtc_io_t *io, int fd);
+
+static int
+__is_owner(const xtc_io_t *io)
+{
+	return !atomic_load_explicit(&io->owner_set, memory_order_acquire) ||
+	    pthread_equal(pthread_self(), io->owner_tid);
+}
+
+/* Owner thread: perform every queued unregister.  Called at the top of
+ * xtc_io_poll, before the registry is read. */
+static void
+__drain_pending_del(xtc_io_t *io)
+{
+	int i, n, local[32];
+	if (!atomic_load_explicit(&io->has_pending_del, memory_order_acquire))
+		return;
+	for (;;) {
+		(void)pthread_mutex_lock(&io->del_lock);
+		n = io->n_pending_del;
+		if (n > (int)(sizeof local / sizeof local[0]))
+			n = (int)(sizeof local / sizeof local[0]);
+		for (i = 0; i < n; i++)
+			local[i] = io->pending_del[i];
+		for (i = n; i < io->n_pending_del; i++)
+			io->pending_del[i - n] = io->pending_del[i];
+		io->n_pending_del -= n;
+		if (io->n_pending_del == 0)
+			atomic_store_explicit(&io->has_pending_del, 0,
+			    memory_order_relaxed);
+		(void)pthread_mutex_unlock(&io->del_lock);
+		for (i = 0; i < n; i++)
+			(void)xtc_io_del_fd(io, local[i]);
+		if (n < (int)(sizeof local / sizeof local[0]))
+			return;
+	}
+}
+
+/* Owner thread, before (re-)registering fd: a deferred delete of the same
+ * fd still queued would otherwise make the add fail as a duplicate (the
+ * io_uring lesson, 8bf7b45).  Apply it now. */
+static void
+__apply_pending_del_for(xtc_io_t *io, int fd)
+{
+	int i, found = 0;
+	if (!atomic_load_explicit(&io->has_pending_del, memory_order_acquire))
+		return;
+	(void)pthread_mutex_lock(&io->del_lock);
+	for (i = 0; i < io->n_pending_del; i++) {
+		if (io->pending_del[i] != fd)
+			continue;
+		found = 1;
+		io->pending_del[i] = io->pending_del[--io->n_pending_del];
+		i--;
+	}
+	if (io->n_pending_del == 0)
+		atomic_store_explicit(&io->has_pending_del, 0,
+		    memory_order_relaxed);
+	(void)pthread_mutex_unlock(&io->del_lock);
+	if (found)
+		(void)xtc_io_del_fd(io, fd);
+}
+
+void
+__xtc_io_set_owner(xtc_io_t *io)
+{
+	if (io != NULL &&
+	    !atomic_load_explicit(&io->owner_set, memory_order_relaxed)) {
+		io->owner_tid = pthread_self();
+		atomic_store_explicit(&io->owner_set, 1, memory_order_release);
+	}
+}
+
+/* Unregister fd on io from ANY thread: inline on the owner, queued (and
+ * the owner nudged) otherwise.  Before, this was a passthrough that
+ * mutated the registry from the wrong thread. */
+int
+__xtc_io_defer_del_fd(xtc_io_t *io, int fd)
+{
+	int *np;
+	if (io == NULL || fd < 0) return XTC_E_INVAL;
+	if (__is_owner(io))
+		return xtc_io_del_fd(io, fd);
+	(void)pthread_mutex_lock(&io->del_lock);
+	if (io->n_pending_del == io->cap_pending_del) {
+		int nc = io->cap_pending_del ? io->cap_pending_del * 2 : 16;
+		if (__os_realloc(io->pending_del, (size_t)nc * sizeof(int),
+		    (void **)&np) != XTC_OK) {
+			(void)pthread_mutex_unlock(&io->del_lock);
+			return XTC_E_NOMEM;
+		}
+		io->pending_del = np;
+		io->cap_pending_del = nc;
+	}
+	io->pending_del[io->n_pending_del++] = fd;
+	atomic_store_explicit(&io->has_pending_del, 1, memory_order_release);
+	(void)pthread_mutex_unlock(&io->del_lock);
+	(void)xtc_io_wakeup(io);
+	return XTC_OK;
+}
 
 extern int __xtc_io_drain_wakeup(xtc_io_t *io);
 
@@ -66,6 +172,11 @@ __xtc_io_backend_init(xtc_io_t *io)
 	int rc;
 	io->fds = NULL; io->interests = NULL; io->tags = NULL;
 	io->n = 0; io->cap = 0;
+	io->pending_del = NULL; io->n_pending_del = io->cap_pending_del = 0;
+	atomic_store_explicit(&io->has_pending_del, 0, memory_order_relaxed);
+	atomic_store_explicit(&io->owner_set, 0, memory_order_relaxed);
+	if (pthread_mutex_init(&io->del_lock, NULL) != 0)
+		return XTC_E_INTERNAL;
 	/* Release a partially grown set: xtc_io_init does not call
 	 * backend_fini when init fails (see io_poll.c). */
 	if ((rc = __grow(io)) != XTC_OK)
@@ -80,6 +191,9 @@ __xtc_io_backend_fini(xtc_io_t *io)
 	__os_free(io->interests); io->interests = NULL;
 	__os_free(io->tags); io->tags = NULL;
 	io->n = io->cap = 0;
+	__os_free(io->pending_del); io->pending_del = NULL;
+	io->n_pending_del = io->cap_pending_del = 0;
+	(void)pthread_mutex_destroy(&io->del_lock);
 }
 
 int
@@ -102,6 +216,7 @@ xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	int rc;
 	if (io == NULL || fd < 0 || interest == 0) return XTC_E_INVAL;
 	if (fd >= FD_SETSIZE) return XTC_E_RESOURCE;   /* select(2) limit */
+	__apply_pending_del_for(io, fd);
 	if (__find_slot(io, fd) >= 0) return XTC_E_INVAL;
 	if (io->n >= io->cap) {
 		if ((rc = __grow(io)) != XTC_OK) return rc;
@@ -149,17 +264,7 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 /* No-op: only io_uring has a single-owner fds list + SQ ring that needs
  * an eagerly-recorded owner thread; this backend is kernel-synchronized
  * or keeps its own registry.  Provided so every backend links. */
-void
-__xtc_io_set_owner(xtc_io_t *io)
-{
-	(void)io;
-}
 
-int
-__xtc_io_defer_del_fd(xtc_io_t *io, int fd)
-{
-	return xtc_io_del_fd(io, fd);
-}
 
 int
 xtc_io_poll(xtc_io_t *io, xtc_io_event_t *out_events, int max_events,
@@ -173,6 +278,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *out_events, int max_events,
 	if (io == NULL || out_events == NULL || max_events <= 0 || out_n == NULL)
 		return XTC_E_INVAL;
 	*out_n = 0;
+	__drain_pending_del(io);
 
 	FD_ZERO(&rd); FD_ZERO(&wr); FD_ZERO(&er);
 	for (i = 0; i < io->n; i++) {
@@ -192,6 +298,28 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *out_events, int max_events,
 	rc = select(max_fd + 1, &rd, &wr, &er, tvp);
 	if (rc < 0) {
 		if (errno == EINTR) return XTC_OK;
+		if (errno == EBADF) {
+			/*
+			 * One registered fd was closed while still registered.
+			 * poll(2) reports that per fd (POLLNVAL); select(2)
+			 * fails the WHOLE call, which used to take the loop's
+			 * worker down.  Find the dead fd(s), drop them from the
+			 * registry, and report each to its owner as XTC_IO_ERR,
+			 * exactly as the poll backend's POLLNVAL does.
+			 */
+			for (i = io->n - 1; i > WAKEUP_SLOT &&
+			    *out_n < max_events; i--) {
+				int fd = io->fds[i];
+				if (fcntl(fd, F_GETFD) != -1 || errno != EBADF) /* XTC_BLOCKING_OK: fd validity probe */
+					continue;
+				out_events[*out_n].flags = XTC_IO_ERR;
+				out_events[*out_n].tag   = io->tags[i];
+				out_events[*out_n].fd    = fd;
+				(*out_n)++;
+				(void)xtc_io_del_fd(io, fd);
+			}
+			return XTC_OK;
+		}
 		return XTC_E_INTERNAL;
 	}
 	if (rc == 0) return XTC_OK;

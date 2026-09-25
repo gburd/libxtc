@@ -113,8 +113,10 @@ struct __xtc_uring_fd {
 };
 #elif defined(XTC_IO_BACKEND_POLL)
 #include <poll.h>
+#include <pthread.h>
 #elif defined(XTC_IO_BACKEND_SELECT)
 #include <sys/select.h>
+#include <pthread.h>
 #elif defined(XTC_IO_BACKEND_SIM)
 /* Deterministic-simulation backend (DST): no kernel poller.  Readiness
  * and file-AIO completions come from a scripted in-process event store
@@ -239,6 +241,24 @@ struct xtc_io {
 	void         **tags;
 	int            n;
 	int            cap;
+	/*
+	 * Cross-loop deferred unregister, as io_uring has: the fd arrays are
+	 * a USERSPACE registry owned by this io's poll thread.  A migrated
+	 * fiber's xtc_proc_wait_fd cleanup used to xtc_io_del_fd this io from
+	 * ANOTHER thread while the owner was mid-poll -- racing the array
+	 * compaction, so a registration could survive its fiber and its fd's
+	 * close (select then failed the whole poll with EBADF and the worker
+	 * thread exited, stranding every fiber on its loop).  A foreign
+	 * thread now queues the fd under del_lock and nudges the owner, which
+	 * drains the queue at the top of xtc_io_poll.
+	 */
+	int             *pending_del;
+	int              n_pending_del;
+	int              cap_pending_del;
+	_Atomic int      has_pending_del;
+	pthread_mutex_t  del_lock;
+	pthread_t        owner_tid;
+	_Atomic int      owner_set;
 #elif defined(XTC_IO_BACKEND_SELECT)
 	/* Parallel fd[], interest[], tag[] arrays.  fd_set is built
 	 * each poll() call from these.  Capped at FD_SETSIZE. */
@@ -247,6 +267,24 @@ struct xtc_io {
 	void         **tags;
 	int            n;
 	int            cap;
+	/*
+	 * Cross-loop deferred unregister, as io_uring has: the fd arrays are
+	 * a USERSPACE registry owned by this io's poll thread.  A migrated
+	 * fiber's xtc_proc_wait_fd cleanup used to xtc_io_del_fd this io from
+	 * ANOTHER thread while the owner was mid-poll -- racing the array
+	 * compaction, so a registration could survive its fiber and its fd's
+	 * close (select then failed the whole poll with EBADF and the worker
+	 * thread exited, stranding every fiber on its loop).  A foreign
+	 * thread now queues the fd under del_lock and nudges the owner, which
+	 * drains the queue at the top of xtc_io_poll.
+	 */
+	int             *pending_del;
+	int              n_pending_del;
+	int              cap_pending_del;
+	_Atomic int      has_pending_del;
+	pthread_mutex_t  del_lock;
+	pthread_t        owner_tid;
+	_Atomic int      owner_set;
 #elif defined(XTC_IO_BACKEND_SIM)
 	/* Registered fds (tag map) for readiness simulation, a scripted
 	 * event queue ordered by virtual-time due, and an in-process

@@ -8,6 +8,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_log.h"     /* worker step errors */
 #include "xtc_tail.h"     /* SCHED: idle-poll liveness */
 #include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on */
 #include "loop_int.h"
@@ -166,6 +167,7 @@ __xtc_exec_worker(void *arg)
 	xtc_loop_t *loop = arg;
 	xtc_exec_t *exec = loop->exec;
 	int idle_streak = 0;   /* consecutive no-work turns (steal-backoff) */
+	long step_errs = 0;    /* failed steps (logged, never fatal) */
 
 	__xtc_current_loop = loop;
 	/*
@@ -228,7 +230,24 @@ __xtc_exec_worker(void *arg)
 		    memory_order_relaxed))
 			break;
 		rc = __xtc_loop_step_once(loop);
-		if (rc < 0) break;
+		if (rc < 0) {
+			/*
+			 * A step error must NOT end the worker.  It used to
+			 * `break` here, silently: the thread returned, and every
+			 * fiber on this loop was stranded forever while
+			 * xtc_exec_run kept waiting (n_alive > 0) -- the select-
+			 * backend Blk6 hang, where a stale fd made select() fail
+			 * with EBADF.  Report it, back off 1 ms so a persistent
+			 * error does not spin, and keep serving the loop; only a
+			 * stop request ends a worker.
+			 */
+			if (++step_errs <= 3 || (step_errs & 1023) == 0)
+				XTC_LOG_ERROR_F("xtc_exec: loop %d step failed "
+				    "(rc %d, %ld so far); worker continues",
+				    loop->exec_id, rc, step_errs);
+			(void)__os_sleep_ns(1000 * 1000LL);
+			continue;
+		}
 		if (rc == 0) {
 			/*
 			 * No local work.  Step blocks on io_poll inside
