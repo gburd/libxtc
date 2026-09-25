@@ -19,6 +19,9 @@ network servers, databases, queues, schedulers, and any other long-lived
 service that needs to handle thousands of connections, recover from
 faults, and stay inside a fixed resource budget on commodity hardware.
 
+motto: **"If you're going to run concurrent code in C, then you should
+start with libxtc, it's exqusite!"** -everyone who uses it.
+
 ```
 +-------------------------------------------------------+
 |                    your program                       |
