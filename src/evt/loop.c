@@ -279,6 +279,23 @@ xtc_loop_fini(xtc_loop_t *loop)
 
 	for (t = loop->all_tasks; t != NULL; t = next_t) {
 		next_t = t->all_next;
+		/*
+		 * Release any park timer still referenced by this task's slot.
+		 * A park timer armed but never fired/cancelled (a fiber torn
+		 * down while parked in a timed recv/sleep at exec shutdown) is
+		 * reachable ONLY through this slot once it has left the heap, so
+		 * the heap-array walk below would miss it.  Exchange + release
+		 * so it is freed exactly once regardless of whether the heap
+		 * still holds its other reference (freed there) or not (freed
+		 * here).  Single-threaded at fini, so the exchange is just for
+		 * symmetry with the running-path release.
+		 */
+		{
+			xtc_timer_t *pt = atomic_exchange_explicit(
+			    &t->park_timer, NULL, memory_order_relaxed);
+			if (pt != NULL)
+				__xtc_timer_park_release(pt);
+		}
 		if (t->cleanup != NULL) t->cleanup(t->cleanup_arg);
 		/* Every task struct was malloc'd via __os_calloc (the free-list
 		 * only recycles between spawns; structs still on all_tasks at
@@ -303,6 +320,26 @@ xtc_loop_fini(xtc_loop_t *loop)
 			xtc_slab_free((struct xtc_slab *)loop->timer_slab, tm);
 		else
 			__os_free(tm);
+	}
+	/*
+	 * Refcounted park timers (xtc_proc_sleep / recv / wait_fd timeouts)
+	 * are NOT on all_timers -- a fired or cancelled one is freed during
+	 * the run by __xtc_timer_park_release, so only those still armed at
+	 * fini remain, and an armed park timer is always on the heap (its
+	 * two owners are the heap and a parked task's slot).  The loop is
+	 * stopped and single-threaded here, so free each heap entry with
+	 * refs > 0 outright; the dangling slot pointers in the already-freed
+	 * task structs are never dereferenced again.
+	 */
+	{
+		int i;
+		for (i = 0; i < loop->n_timers; i++) {
+			xtc_timer_t *ht = loop->timers[i];
+			if (ht != NULL &&
+			    atomic_load_explicit(&ht->refs,
+			    memory_order_relaxed) > 0)
+				__xtc_timer_park_release(ht);  /* drop the heap ref; frees at 0 */
+		}
 	}
 	if (loop->timer_slab != NULL)
 		xtc_slab_destroy((struct xtc_slab *)loop->timer_slab);
@@ -618,14 +655,39 @@ __xtc_drain_due_timers(xtc_loop_t *loop)
 			due->fired = 1;
 			if (due->cb != NULL) due->cb(due->user);
 			if (due->waiter != NULL) {
-				xtc_waker_t w = { loop, due->waiter };
+				xtc_task_t *waiter = due->waiter;
+				xtc_waker_t w = { loop, waiter };
+				xtc_timer_t *slot;
 				atomic_fetch_or_explicit(
-				    &due->waiter->wake_revents,
+				    &waiter->wake_revents,
 				    XTC_WAIT_TIMEOUT, memory_order_relaxed);
 				(void)xtc_waker_wake(&w);
-				atomic_store_explicit(&due->waiter->park_timer,
-				    NULL, memory_order_relaxed);
+				/*
+				 * Clear the waiter's park_timer slot with an
+				 * EXCHANGE so exactly one side (this drain or a
+				 * concurrent task-side cancel) observes the
+				 * non-NULL->NULL transition and drops the slot's
+				 * reference; the other side sees NULL and does
+				 * not.  The heap's reference is dropped
+				 * unconditionally below (we popped it).
+				 */
+				slot = atomic_exchange_explicit(
+				    &waiter->park_timer, NULL,
+				    memory_order_relaxed);
+				if (slot != NULL)
+					__xtc_timer_park_release(slot);  /* XTC_NOALLOC_OK: bounded free of one park timer */
 			}
+			__xtc_timer_park_release(due);  /* XTC_NOALLOC_OK: drop the heap reference of the fired timer */
+		} else {
+			/*
+			 * The timer was cancelled AFTER pop_due returned it as due
+			 * (a migrated fiber's cancel_park_timer on another thread
+			 * raced this drain, between the pop and this check).  We
+			 * still own the heap reference of the popped node, so drop
+			 * it here or it leaks -- the cancel released only the slot
+			 * reference.  (ASan LeakSanitizer, m5 Blk4.)
+			 */
+			__xtc_timer_park_release(due);  /* XTC_NOALLOC_OK: drop the heap reference of a raced-cancel timer */
 		}
 	}
 	return XTC_OK;

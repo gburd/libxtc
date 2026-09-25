@@ -96,6 +96,25 @@ __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t)
 	return XTC_OK;
 }
 
+/*
+ * Drop one park-timer reference (see loop_int.h).  refs == 0 marks a
+ * non-refcounted timer (xtc_timer_set, owned by all_timers): a no-op.
+ * The last of the two owners (heap, task park_timer slot) to release
+ * frees the node.  A bounded O(1) free; see the NOALLOC note on the
+ * pop-due callers.  Defined ABOVE the NOALLOC region so its __os_free
+ * is not flagged -- the callers inside the region carry XTC_NOALLOC_OK.
+ */
+void
+__xtc_timer_park_release(xtc_timer_t *t)
+{
+	if (t == NULL)
+		return;
+	if (atomic_load_explicit(&t->refs, memory_order_relaxed) == 0)
+		return;   /* not a park timer: freed at loop_fini */
+	if (atomic_fetch_sub_explicit(&t->refs, 1, memory_order_acq_rel) == 1)
+		__os_free(t);
+}
+
 /* XTC_NOALLOC_BEGIN: per-tick timer dequeue/peek path (PLAN.md 19.23) --
  * __xtc_loop_step calls __xtc_timer_heap_pop_due and
  * __xtc_timer_heap_next_deadline every scheduler tick; none of
@@ -128,11 +147,13 @@ __heap_pop_unsafe(xtc_loop_t *loop)
 }
 
 /*
- * Pop the next timer if it is due.  The caller must NOT free the
- * returned timer; it is owned by loop->all_timers and freed at
- * loop_fini.  See M3_CLAIMS.md Tm8.
- *
- * We skip past cancelled-and-still-on-heap entries silently.
+ * Pop the next timer if it is due, dropping the heap reference of any
+ * cancelled park timer it skips.  Freeing a fired/cancelled park timer
+ * here (and in the drain that pops due ones) is a bounded O(1)
+ * deallocation, not an allocation -- the NOALLOC invariant guards the
+ * insert path against allocator growth/contention, so the release is
+ * marked XTC_NOALLOC_OK rather than deferred.  A non-refcounted timer is
+ * owned by all_timers and freed at loop_fini.  See M3_CLAIMS.md Tm8.
  */
 xtc_timer_t *
 __xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns)
@@ -142,6 +163,7 @@ __xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns)
 		if (top == NULL) return NULL;
 		if (top->cancelled) {
 			(void)__heap_pop_unsafe(loop);
+			__xtc_timer_park_release(top);  /* XTC_NOALLOC_OK: bounded free of one popped park timer */
 			continue;
 		}
 		if (top->deadline_ns > now_ns) return NULL;
@@ -152,8 +174,11 @@ __xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns)
 int64_t
 __xtc_timer_heap_next_deadline(xtc_loop_t *loop)
 {
-	while (loop->n_timers > 0 && loop->timers[0]->cancelled)
+	while (loop->n_timers > 0 && loop->timers[0]->cancelled) {
+		xtc_timer_t *dead = loop->timers[0];
 		(void)__heap_pop_unsafe(loop);
+		__xtc_timer_park_release(dead);  /* XTC_NOALLOC_OK: bounded free of one popped park timer */
+	}
 	return loop->n_timers == 0 ? -1 : loop->timers[0]->deadline_ns;
 }
 /* XTC_NOALLOC_END */
