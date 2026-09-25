@@ -201,9 +201,16 @@ struct xtc_timer {
 	                             * always 0 outside sim. */
 	int          from_slab;     /* 1: from loop->timer_slab (xtc_timer_set);
 	                             * 0: __os_calloc (the park timers of
-	                             * xtc_task_park_on_timer / wait_fd).  Both
-	                             * kinds sit on all_timers, and loop_fini
-	                             * must free each with ITS allocator. */
+	                             * xtc_task_park_on_timer / wait_fd). */
+	_Atomic int  refs;          /* 0: NOT refcounted -- lives on all_timers
+	                             * until loop_fini (xtc_timer_set timers).
+	                             * >0: a park timer, freed by the LAST of its
+	                             * two owners (the heap and the task's
+	                             * park_timer slot) to release it, so a fired
+	                             * or cancelled park timer is reclaimed at
+	                             * once instead of retained to loop_fini.
+	                             * Either owner may run on a different thread
+	                             * (a517a32), so the count is atomic. */
 	xtc_loop_t  *loop;          /* back-pointer for cancel-by-handle */
 	struct xtc_timer *all_next; /* per-loop linked list for cleanup */
 };
@@ -482,6 +489,15 @@ int  __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
                          int pinned, xtc_task_t **out_task);
 int  __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t);
 xtc_timer_t *__xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns);
+/*
+ * Drop one reference to a park timer (refs > 0) and free it at zero.  A
+ * no-op for a non-refcounted timer (refs == 0: an xtc_timer_set timer,
+ * owned by all_timers).  Its two owners -- the timer heap and the task's
+ * park_timer slot -- each call this exactly once when they let go, so the
+ * node is reclaimed as soon as it has both fired/cancelled AND left the
+ * slot, not retained until loop_fini.  Defined in timer.c.
+ */
+void __xtc_timer_park_release(xtc_timer_t *t);
 int64_t      __xtc_timer_heap_next_deadline(xtc_loop_t *loop);
 void __xtc_task_cancel_park_timer(xtc_task_t *self);
 int  __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev);

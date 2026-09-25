@@ -348,6 +348,8 @@ xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 	t->heap_idx = -1;
 	t->cancelled = 0;
 	t->fired = 0;
+	t->from_slab = 0;
+	atomic_store_explicit(&t->refs, 2, memory_order_relaxed);  /* heap + park_timer slot */
 	/*
 	 * Arm the timer on the loop this fiber is RUNNING on, not its home
 	 * loop (self->loop).  Under the multi-loop executor a migratable
@@ -369,9 +371,14 @@ xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 			__os_free(t);
 			return rc;
 		}
-		/* Splice into all_timers so loop_fini frees it. */
-		t->all_next = wl->all_timers;
-		wl->all_timers = t;
+		/*
+		 * A park timer is refcounted (refs == 2): the heap holds one
+		 * reference, the task's park_timer slot the other, and the last
+		 * to release frees it (fired/cancelled park timers are reclaimed
+		 * during the run, not retained on all_timers until loop_fini).
+		 * So it is NOT spliced onto all_timers -- doing so would add a
+		 * third owner that loop_fini would double-free.
+		 */
 	}
 	atomic_store_explicit(&self->park_timer, t,
 	    memory_order_relaxed);
@@ -389,12 +396,17 @@ void
 __xtc_task_cancel_park_timer(xtc_task_t *self)
 {
 	if (self != NULL) {
-		xtc_timer_t *pt = atomic_load_explicit(&self->park_timer,
-		    memory_order_relaxed);
+		/*
+		 * Exchange the slot to NULL so exactly one side (this cancel or
+		 * a concurrent drain-fire) releases the slot's reference.  Mark
+		 * the node cancelled first so the loop's heap-pop reclaims the
+		 * heap reference; the last of the two frees it.
+		 */
+		xtc_timer_t *pt = atomic_exchange_explicit(&self->park_timer,
+		    NULL, memory_order_relaxed);
 		if (pt != NULL) {
 			(void)xtc_timer_cancel(pt);
-			atomic_store_explicit(&self->park_timer, NULL,
-			    memory_order_relaxed);
+			__xtc_timer_park_release(pt);
 		}
 	}
 }

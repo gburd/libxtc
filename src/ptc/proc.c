@@ -2296,7 +2296,16 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 		if (deadline >= 0) {
 			int64_t now;
 			(void)__os_clock_mono(&now);
-			if (now >= deadline) return XTC_E_AGAIN;
+			if (now >= deadline) {
+				/* Deadline reached: release any park timer we
+				 * armed on a previous iteration before returning,
+				 * or it leaks (the caller may not recv again).
+				 * The drain frees a FIRED timer, but the wake
+				 * that brought us here may have been a sender's
+				 * poke, leaving the timer armed-but-unfired. */
+				__xtc_task_cancel_park_timer(self->task);
+				return XTC_E_AGAIN;
+			}
 			/* Cancel any stale park timer before re-arming: a
 			 * migratable fiber resumed (work-stolen / spuriously) on a
 			 * different loop than it armed on would otherwise hit the
@@ -2738,6 +2747,8 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		t->heap_idx = -1;
 		t->cancelled = 0;
 		t->fired = 0;
+		t->from_slab = 0;
+		atomic_store_explicit(&t->refs, 2, memory_order_relaxed);  /* heap + park_timer slot */
 		t->loop = wl;
 		if (__xtc_timer_heap_push(wl, t) != XTC_OK) {
 			__os_free(t);
@@ -2748,8 +2759,9 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 			__wait_fd_disarm_waker(self);
 			return XTC_E_INTERNAL;
 		}
-		t->all_next = wl->all_timers;
-		wl->all_timers = t;
+		/* Refcounted park timer: not spliced onto all_timers (see
+		 * xtc_task_park_on_timer); the heap and the park_timer slot are
+		 * its two owners and the last to release frees it. */
 		atomic_store_explicit(&self->task->park_timer, t,
 		    memory_order_relaxed);
 		had_timer = 1;
@@ -2900,12 +2912,16 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	}
 	}
 	if (had_timer) {
-		xtc_timer_t *pt = atomic_load_explicit(&self->task->park_timer,
-		    memory_order_relaxed);
+		/*
+		 * Exchange the slot to NULL and release the slot reference; the
+		 * heap holds the other, so the last releaser frees it.  Same
+		 * shape as __xtc_task_cancel_park_timer.
+		 */
+		xtc_timer_t *pt = atomic_exchange_explicit(
+		    &self->task->park_timer, NULL, memory_order_relaxed);
 		if (pt != NULL) {
 			(void)xtc_timer_cancel(pt);
-			atomic_store_explicit(&self->task->park_timer, NULL,
-			    memory_order_relaxed);
+			__xtc_timer_park_release(pt);
 		}
 	}
 
