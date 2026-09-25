@@ -239,7 +239,7 @@ What's working today:
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
 | Process groups | Done.  `xtc_pg` (Erlang `:pg`): named, single-node pid groups with join/leave/broadcast; tested in `test/m10/test_pg.c` and under DST.  Cross-node groups await the unbuilt distributed module. |
-| TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/M_TLS_MATRIX.md`); SChannel (Windows) is compile-only.  Since 1.50 a CLIENT verifies the server certificate AND host name by default on the four non-Windows backends, a write to a dead peer is an error rather than a process-killing `SIGPIPE`, and a zeroed `xtc_tls_opts_t` is secure.  SChannel does not yet honor the new verify default (see `xtc_tls.h`). |
+| TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/M_TLS_MATRIX.md`); SChannel (Windows) is compile-only.  Since 1.50 a CLIENT verifies the server certificate AND host name by default on the four non-Windows backends, a write to a dead peer is an error rather than a process-killing `SIGPIPE`, and a zeroed `xtc_tls_opts_t` is secure.  SChannel applies the same verify default since 1.51 but does not yet check the host name. |
 
 Test coverage today, measured against this tree (v1.49.1 plus the
 allocator / cancellation / accounting regression tests that landed after
