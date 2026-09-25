@@ -54,6 +54,7 @@ typedef struct xtc_tcp_opts {
 /*
  * PUBLIC: int xtc_net_listen __P((xtc_net_family_t, const char *, int, const xtc_tcp_opts_t *, int *));
  * PUBLIC: int xtc_net_dial __P((xtc_net_family_t, const char *, int, const xtc_tcp_opts_t *, int *));
+ * PUBLIC: int xtc_net_accept __P((int, int *));
  * PUBLIC: int xtc_net_apply_tcp_opts __P((int, const xtc_tcp_opts_t *));
  * PUBLIC: int xtc_net_setnonblock __P((int));
  * PUBLIC: void xtc_net_close __P((int));
@@ -78,6 +79,11 @@ XTC_API int xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
 
 /* TCP connect to host:port.  Returns the fd in out_fd.  The connect
  * is non-blocking; caller polls for writability to detect completion. */
+/* Accept one pending connection on listen_fd as a non-blocking, CLOEXEC
+ * fd.  XTC_E_AGAIN when none is pending.  Charged against XTC_RES_FDS when
+ * xtc_res_attach_net is in effect (XTC_E_RESOURCE at the cap; the
+ * connection stays in the backlog); xtc_net_close refunds it. */
+XTC_API int xtc_net_accept(int listen_fd, int *out_fd);
 XTC_API int xtc_net_dial(xtc_net_family_t fam, const char *host, int port,
                          const xtc_tcp_opts_t *opts, int *out_fd);
 

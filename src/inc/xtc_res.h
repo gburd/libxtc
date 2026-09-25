@@ -18,10 +18,11 @@
  *	      xtc_mctx chunks (header + payload) of a context attached
  *	      with xtc_res_attach_mctx.  NOT xtc_malloc, fiber stacks,
  *	      proc/mailbox structures, or any other internal allocation.
- *	  FDS  descriptors returned by xtc_net_listen, _dial,
+ *	  FDS  descriptors returned by xtc_net_listen, _dial, _accept,
  *	      _unix_listen, _unix_dial and _udp_socket while an
  *	      accountant is attached with xtc_res_attach_net, released by
- *	      xtc_net_close.  NOT fds from a raw accept(2), files, pipes,
+ *	      xtc_net_close.  NOT fds from a raw accept(2) (use
+ *	      xtc_net_accept for inbound connections), files, pipes,
  *	      the I/O backend's own fds, or xproc control sockets.
  *	A cap on a kind nothing charges bounds nothing.  Metering that
  *	needs an attach is off by default (no cost, no behavior change).

@@ -802,6 +802,72 @@ xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
 	    __net_listen_raw(fam, host, port, opts, out_fd), out_fd);
 }
 
+/* Raw accept: one non-blocking, CLOEXEC connection off listen_fd. */
+static int
+__net_accept_raw(int listen_fd, int *out_fd)
+{
+	int fd;
+#if defined(_WIN32)
+	SOCKET s = accept((SOCKET)listen_fd, NULL, NULL);
+	if (s == INVALID_SOCKET) {
+		int e = WSAGetLastError();
+		return (e == WSAEWOULDBLOCK) ? XTC_E_AGAIN : XTC_E_IO;
+	}
+	fd = (int)s;
+#else
+	do {
+		fd = accept(listen_fd, NULL, NULL);
+	} while (fd < 0 && errno == EINTR);
+	if (fd < 0) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK ||
+		    errno == ECONNABORTED)
+			return XTC_E_AGAIN;
+		if (errno == EBADF || errno == ENOTSOCK || errno == EINVAL)
+			return XTC_E_INVAL;
+		if (errno == EMFILE || errno == ENFILE)
+			return XTC_E_RESOURCE;
+		if (errno == ENOMEM || errno == ENOBUFS)
+			return XTC_E_NOMEM;
+		return XTC_E_IO;
+	}
+#endif
+	if (xtc_net_setnonblock(fd) != XTC_OK) {
+#if defined(_WIN32)
+		(void)closesocket((SOCKET)fd);
+#else
+		(void)close(fd);
+#endif
+		return XTC_E_INTERNAL;
+	}
+	__net_nosigpipe(fd);
+	*out_fd = fd;
+	return XTC_OK;
+}
+
+/*
+ * PUBLIC: int xtc_net_accept __P((int, int *));
+ *
+ * Accept one pending connection on a listening socket, as a non-blocking,
+ * CLOEXEC fd.  XTC_E_AGAIN when none is pending (park on XTC_IO_READABLE
+ * of listen_fd and retry).  The new fd is charged against XTC_RES_FDS
+ * when xtc_res_attach_net is in effect, BEFORE the accept -- so at the cap
+ * the connection stays queued in the kernel backlog (XTC_E_RESOURCE)
+ * instead of being accepted and dropped -- and refunded by xtc_net_close.
+ * Before 1.51 there was no accept here, so inbound connections, the main
+ * source of fd growth in a server, could not be metered at all.
+ */
+int
+xtc_net_accept(int listen_fd, int *out_fd)
+{
+	xtc_res_t *r;
+	int rc;
+	if (out_fd == NULL) return XTC_E_INVAL;
+	*out_fd = -1;
+	if (listen_fd < 0) return XTC_E_INVAL;
+	if ((rc = __net_charge(&r)) != XTC_OK) return rc;
+	return __net_settle(r, __net_accept_raw(listen_fd, out_fd), out_fd);
+}
+
 int
 xtc_net_dial(xtc_net_family_t fam, const char *host, int port,
              const xtc_tcp_opts_t *opts, int *out_fd)

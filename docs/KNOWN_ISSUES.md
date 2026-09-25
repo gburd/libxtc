@@ -159,15 +159,13 @@ separate bug that LEAKED these nodes at `xtc_loop_fini` once
 over a sleep loop, and bound the lifetime of loops that do many timed
 waits.
 
-## OPEN: xtc_res FDS cannot meter inbound connections
+## RESOLVED (1.51): xtc_res FDS meters inbound connections
 
-**Status:** OPEN as of 1.50.0.
-
-`FDS` meters the sockets `xtc_net` opens (listen, dial, UDP) once
-`xtc_res_attach_net` is called.  `xtc_net` has no accept function, so
-connections the caller `accept(2)`s itself -- the usual source of fd growth
-in a server -- are not charged.  Charge them yourself with
-`xtc_res_acquire` / `xtc_res_release`.
+`xtc_net_accept` (new in 1.51) charges each accepted connection against
+`XTC_RES_FDS` before accepting it, so at the cap the connection stays in
+the kernel backlog (`XTC_E_RESOURCE`) instead of being accepted and
+dropped; `xtc_net_close` refunds it.  Descriptors from a raw `accept(2)`
+are still not charged -- use `xtc_net_accept`.
 
 ## OPEN (ABI): caller-allocated structs grew during 1.x -- do not mix minors
 
