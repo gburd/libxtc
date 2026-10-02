@@ -21,6 +21,19 @@
  *   we vendor the HDR-style histogram from bench/conformance/include/
  *   hist.h.  Per-CPU sharded for record(); merged on quantile query.
  *
+ * Dist design:
+ *   mergeable online mean/variance.  Each per-CPU shard holds a
+ *   Welford triple (n, mean, m2); xtc_dist_record does the Welford
+ *   single-pass update on the calling CPU's shard.  Welford is a
+ *   read-modify-write of three fields, not a single atomic add, and
+ *   two threads can migrate onto the same shard index, so each shard
+ *   carries a tiny spinlock held only for the handful of arithmetic
+ *   ops (this is NOT lock-free).  Reads take the same per-shard lock
+ *   briefly to snapshot the triple (double is not naturally atomic),
+ *   then merge all shards pairwise with Chan's parallel formula.
+ *   Mean + population variance only -- no M3/M4.  Reads no clock,
+ *   allocates nothing on the record path; NOT sim-reachable.
+ *
  * Registry:
  *   global linked list, mutex for register/unregister, lock-free
  *   walk for the (rare) iteration.  Reading the linked list under
@@ -389,6 +402,200 @@ xtc_hist_quantile(const xtc_hist_t *h, double q)
 	return __hist_bucket_lower_bound(XTC_HIST_BUCKETS - 1);
 }
 
+/* ---- dist (mergeable online mean/variance) ----
+ * Welford's single-pass update per per-CPU shard; Chan et al. (1983)
+ * parallel merge of the (n, mean, m2) triples on read.  Mean and
+ * population variance only; no higher moments.
+ */
+
+struct dist_shard {
+	/* Align the whole struct to a cache line and order the fields
+	 * naturally (n, mean, m2 are 8-byte; the 1-byte lock last) so the
+	 * shard is EXACTLY one cache line.  Putting the over-aligned
+	 * attribute on a leading 1-byte member instead would leave a
+	 * 7-byte gap and round the struct up to two lines. */
+	_Alignas(XTC_CACHE_LINE) uint64_t n;
+	double      mean;
+	double      m2;
+	atomic_flag lock;
+	uint8_t     pad[XTC_CACHE_LINE - sizeof(uint64_t)
+	    - 2 * sizeof(double) - sizeof(atomic_flag)];
+};
+
+struct xtc_dist {
+	char               name[XTC_STATS_NAME_MAX];
+	int                n_cpus;
+	struct dist_shard *shards;
+};
+
+/*
+ * Per-shard spinlock.  The critical section is a few arithmetic ops
+ * (Welford update on write, a 3-field snapshot on read), never a
+ * blocking call, so a bare test-and-set spin is the right weight;
+ * bracket it with the preemption-defer helpers so a fiber that owns
+ * the lock is not involuntarily preempted mid-update.
+ */
+static void
+__dist_shard_lock(struct dist_shard *s)
+{
+	__xtc_unsafe_enter();
+	while (atomic_flag_test_and_set_explicit(&s->lock,
+	    memory_order_acquire))
+		;
+}
+
+static void
+__dist_shard_unlock(struct dist_shard *s)
+{
+	atomic_flag_clear_explicit(&s->lock, memory_order_release);
+	__xtc_unsafe_leave();
+}
+
+int
+xtc_dist_create(const char *name, xtc_dist_t **out)
+{
+	xtc_dist_t *d;
+	int rc, i;
+	if (name == NULL || out == NULL) return XTC_E_INVAL;
+	if ((rc = __os_calloc(1, sizeof *d, (void **)&d)) != XTC_OK) return rc;
+	strncpy(d->name, name, XTC_STATS_NAME_MAX - 1);
+	d->n_cpus = __ncpus();
+	/* dist_shard is _Alignas(XTC_CACHE_LINE); like the counter and
+	 * hist shards the array base must be cache-line aligned or
+	 * shard[0] is misaligned.  calloc only guarantees max_align_t. */
+	if ((rc = __os_aligned_alloc(XTC_CACHE_LINE,
+	    (size_t)d->n_cpus * sizeof *d->shards,
+	    (void **)&d->shards)) != XTC_OK) {
+		__os_free(d);
+		return rc;
+	}
+	memset(d->shards, 0, (size_t)d->n_cpus * sizeof *d->shards);
+	/* memset-0 is a cleared atomic_flag on every supported target. */
+	for (i = 0; i < d->n_cpus; i++)
+		atomic_flag_clear_explicit(&d->shards[i].lock,
+		    memory_order_relaxed);
+	__reg_add(d, XTC_METRIC_DIST, d->name);
+	*out = d;
+	return XTC_OK;
+}
+
+void
+xtc_dist_destroy(xtc_dist_t *d)
+{
+	if (d == NULL) return;
+	__reg_remove(d);
+	__os_aligned_free(d->shards);
+	__os_free(d);
+}
+
+void
+xtc_dist_record(xtc_dist_t *d, double value)
+{
+	struct dist_shard *s;
+	double delta, delta2;
+	if (XTC_UNLIKELY(d == NULL)) return;
+	s = &d->shards[__current_cpu(d->n_cpus)];
+	__dist_shard_lock(s);
+	/* Welford single-pass update of this shard's (n, mean, m2). */
+	s->n++;
+	delta = value - s->mean;
+	s->mean += delta / (double)s->n;
+	delta2 = value - s->mean;
+	s->m2 += delta * delta2;
+	__dist_shard_unlock(s);
+}
+
+/*
+ * Snapshot + Chan merge of all shards into (out_n, out_mean, out_m2),
+ * starting from the empty accumulator (0, 0, 0).  Plain pairwise Chan
+ * merge; no compensated summation.
+ * ponytail: defer Neumaier compensation unless a consumer proves drift.
+ */
+static void
+__dist_merge(const xtc_dist_t *d, uint64_t *out_n, double *out_mean,
+    double *out_m2)
+{
+	uint64_t n_acc = 0;
+	double mean_acc = 0.0, m2_acc = 0.0;
+	int i;
+	for (i = 0; i < d->n_cpus; i++) {
+		struct dist_shard *s = &d->shards[i];
+		uint64_t n_b, n_tot;
+		double mean_b, m2_b, delta;
+		/* Snapshot the shard triple under its lock; double is not
+		 * naturally atomic and the writer updates all three. */
+		__dist_shard_lock(s);
+		n_b = s->n;
+		mean_b = s->mean;
+		m2_b = s->m2;
+		__dist_shard_unlock(s);
+		if (n_b == 0) continue;
+		n_tot = n_acc + n_b;
+		delta = mean_b - mean_acc;
+		mean_acc += delta * (double)n_b / (double)n_tot;
+		m2_acc += m2_b + delta * delta
+		    * (double)n_acc * (double)n_b / (double)n_tot;
+		n_acc = n_tot;
+	}
+	*out_n = n_acc;
+	*out_mean = n_acc == 0 ? 0.0 : mean_acc;
+	*out_m2 = m2_acc;
+}
+
+uint64_t
+xtc_dist_count(const xtc_dist_t *d)
+{
+	uint64_t n;
+	double mean, m2;
+	if (d == NULL) return 0;
+	__dist_merge(d, &n, &mean, &m2);
+	return n;
+}
+
+double
+xtc_dist_mean(const xtc_dist_t *d)
+{
+	uint64_t n;
+	double mean, m2;
+	if (d == NULL) return 0.0;
+	__dist_merge(d, &n, &mean, &m2);
+	return n == 0 ? 0.0 : mean;
+}
+
+double
+xtc_dist_variance(const xtc_dist_t *d)
+{
+	uint64_t n;
+	double mean, m2;
+	if (d == NULL) return 0.0;
+	__dist_merge(d, &n, &mean, &m2);
+	if (n < 2) return 0.0;
+	return m2 / (double)n;   /* population variance */
+}
+
+double
+xtc_dist_stddev(const xtc_dist_t *d)
+{
+	double v = xtc_dist_variance(d);
+	/* sqrt via Newton-Raphson rather than libm: libxtc links no -lm
+	 * and adding that dependency library-wide (onto every consumer's
+	 * link line) for one square root is not worth it.  The argument
+	 * is a variance -- always finite and >= 0 -- so a handful of
+	 * iterations from a decent seed converges to full double
+	 * precision.  ponytail: swap for sqrt() if libxtc ever grows a
+	 * real libm dependency. */
+	double x, prev;
+	int i;
+	if (!(v > 0.0)) return 0.0;   /* 0, -0, and NaN-safe */
+	x = v;                        /* seed; monotone-converges downward */
+	for (i = 0; i < 64; i++) {
+		prev = x;
+		x = 0.5 * (x + v / x);
+		if (x >= prev) break;     /* no further improvement */
+	}
+	return x;
+}
+
 /* ---- iteration / dump ---- */
 
 int
@@ -442,6 +649,21 @@ __dump_prom_visit(const char *name, xtc_metric_kind_t kind,
 		    name, (long long)p50,
 		    name, (long long)p99,
 		    name, (long long)p999);
+		break;
+	}
+	case XTC_METRIC_DIST: {
+		const xtc_dist_t *dd = (const xtc_dist_t *)handle;
+		n = snprintf(buf, sizeof buf,
+		    "# TYPE %s summary\n"
+		    "%s_count %llu\n"
+		    "%s_mean %.17g\n"
+		    "%s_variance %.17g\n"
+		    "%s_stddev %.17g\n",
+		    name, name,
+		    (unsigned long long)xtc_dist_count(dd),
+		    name, xtc_dist_mean(dd),
+		    name, xtc_dist_variance(dd),
+		    name, xtc_dist_stddev(dd));
 		break;
 	}
 	}

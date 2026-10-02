@@ -24,6 +24,11 @@
  *	shards so concurrent record() calls don't contend.  Quantile
  *	queries merge shards under a read lock.
  *
+ *	A dist is a mergeable online mean/variance aggregator.
+ *	Welford's single-pass update runs on the current CPU's shard;
+ *	reads merge the per-CPU shards with Chan's parallel formula.
+ *	Tracks mean and population variance only (no skew/kurtosis).
+ *
  *	A registry walks every metric for periodic dumps to logs or
  *	a Prometheus-style scrape endpoint.
  */
@@ -41,11 +46,13 @@
 typedef struct xtc_counter xtc_counter_t;
 typedef struct xtc_gauge   xtc_gauge_t;
 typedef struct xtc_hist    xtc_hist_t;
+typedef struct xtc_dist    xtc_dist_t;
 
 typedef enum xtc_metric_kind {
 	XTC_METRIC_COUNTER = 0,
 	XTC_METRIC_GAUGE   = 1,
-	XTC_METRIC_HIST    = 2
+	XTC_METRIC_HIST    = 2,
+	XTC_METRIC_DIST    = 3
 } xtc_metric_kind_t;
 
 typedef int (*xtc_metric_visit_fn)(const char *name,
@@ -72,6 +79,14 @@ typedef int (*xtc_metric_visit_fn)(const char *name,
  * PUBLIC: int64_t   xtc_hist_quantile __P((const xtc_hist_t *, double));
  * PUBLIC: uint64_t  xtc_hist_count __P((const xtc_hist_t *));
  *
+ * PUBLIC: int       xtc_dist_create __P((const char *, xtc_dist_t **));
+ * PUBLIC: void      xtc_dist_destroy __P((xtc_dist_t *));
+ * PUBLIC: void      xtc_dist_record __P((xtc_dist_t *, double));
+ * PUBLIC: uint64_t  xtc_dist_count __P((const xtc_dist_t *));
+ * PUBLIC: double    xtc_dist_mean __P((const xtc_dist_t *));
+ * PUBLIC: double    xtc_dist_variance __P((const xtc_dist_t *));
+ * PUBLIC: double    xtc_dist_stddev __P((const xtc_dist_t *));
+ *
  * PUBLIC: int       xtc_metrics_iterate __P((xtc_metric_visit_fn, void *));
  * PUBLIC: int       xtc_metrics_dump_prometheus __P((int));
  *
@@ -95,6 +110,14 @@ XTC_API void      xtc_hist_destroy(xtc_hist_t *h);
 XTC_API void      xtc_hist_record(xtc_hist_t *h, int64_t value_ns);
 XTC_API int64_t   xtc_hist_quantile(const xtc_hist_t *h, double q);
 XTC_API uint64_t  xtc_hist_count(const xtc_hist_t *h);
+
+XTC_API int       xtc_dist_create(const char *name, xtc_dist_t **out);
+XTC_API void      xtc_dist_destroy(xtc_dist_t *d);
+XTC_API void      xtc_dist_record(xtc_dist_t *d, double value);
+XTC_API uint64_t  xtc_dist_count(const xtc_dist_t *d);
+XTC_API double    xtc_dist_mean(const xtc_dist_t *d);
+XTC_API double    xtc_dist_variance(const xtc_dist_t *d);
+XTC_API double    xtc_dist_stddev(const xtc_dist_t *d);
 
 XTC_API int       xtc_metrics_iterate(xtc_metric_visit_fn fn, void *user);
 XTC_API int       xtc_metrics_dump_prometheus(int fd);
