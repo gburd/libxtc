@@ -139,3 +139,122 @@ overwritten, and you should check it before trusting the *absence* of an event
 -- in a wrapped ring, "this fiber has no events" may only mean they were
 evicted. For a busy service, spill frequently and keep the capture window
 short.
+
+## Statistics: what we include, and what we deliberately do not
+
+Where `xtc_tail` records individual events, `xtc_stats` aggregates them:
+counters, gauges, and histograms you register once and update on the hot path,
+then read back for a dashboard or a Prometheus scrape. See
+[`xtc_stats(3)`]({{ '/reference/api-index/' | relative_url }}) for the full
+API.
+
+This section is the honest counterpart to the API reference: it says what
+`xtc_stats` is *not*, and why. The design was informed by two mature Java
+libraries -- [Apache Commons Statistics](https://commons.apache.org/proper/commons-statistics/)
+(a math library) and [Dropwizard Metrics](https://metrics.dropwizard.io/)
+(a telemetry library) -- and several of their headline features were
+considered and left out on purpose. Each omission below is tied to a concrete
+libxtc constraint, not to "we ran out of time."
+
+### What libxtc does provide, and why it fits a concurrent system
+
+The shape of `xtc_stats` follows from one requirement: a highly concurrent,
+multi-loop runtime must produce **one cohesive number** without turning the
+hot path into a contention point. Every primitive is built on the same
+**merge-on-read** model -- update a contention-free per-core (or per-shard)
+partial on the hot path, and assemble the system-wide figure only when
+something reads it:
+
+- **Counters** are per-CPU sharded. `xtc_counter_inc` is one atomic add to a
+  cache-line-isolated shard on the calling CPU; the read sums the shards.
+- **Histograms** (`xtc_hist`) are per-CPU sharded fixed-bucket log-linear
+  histograms. `xtc_hist_record` hits one shard; `xtc_hist_quantile` merges
+  shards on read. The buckets are allocation-free *and* mergeable, which is
+  the property that matters below.
+- **Gauges** are a single `_Atomic int64_t`: wait-free reads, atomic-store
+  writes, for a value that moves up and down (queue depth, live connections).
+- **`xtc_dist`** adds mergeable online mean/variance: each shard keeps a
+  Welford running moment on its hot path, and the read merges shards with the
+  Chan parallel-merge formula for `(n, mean, M2)`. Like the histogram, the
+  per-shard partials combine exactly into one system-wide mean and variance.
+
+Merge-on-read is precisely what lets independent per-core and per-fiber
+activity roll up into coherent system-wide numbers without the cores fighting
+over a shared cache line. That property -- not a feature count -- is the
+reason the following things are *out*.
+
+### Deliberately NOT incorporated
+
+**1. EWMA 1/5/15-minute rates (Dropwizard's `Meter`).** Not incorporated. A
+Meter decays its rate on a periodic tick -- Dropwizard ticks every 5 seconds
+and applies the UNIX load-average alphas -- which means it must read a real
+wall clock on a timer. `xtc_stats` is pure value aggregation with **no time
+source**: keeping a clock out of the stats path is what makes every operation
+trivially correct and side-effect-free. A rate over a window is computed
+better one layer out, in the consumer's scrape/monitoring system (for example
+Prometheus `rate()` over the raw counter), which is also where cross-host
+aggregation belongs. We expose the monotonic counter; the window is the
+monitoring layer's job.
+
+**2. Reservoir sampling for approximate quantiles (Dropwizard's
+`UniformReservoir` / Vitter Algorithm R, `ExponentiallyDecayingReservoir` /
+Cormode forward-decay, and the sliding-window reservoirs).** Not incorporated,
+for two reasons. First, the exponentially-decaying reservoir needs a
+concurrent sorted map plus a periodic rescale plus a clock -- allocation, a
+lock, and a time source, all three of which collide with libxtc's
+allocation-free hot paths and its no-clock rule. Second, and more decisively:
+**none of these reservoirs are mergeable** across shards or instances. In a
+multi-loop system you cannot combine a per-core reservoir into one number
+without re-sampling, which defeats the purpose. libxtc's fixed-bucket
+log-linear histogram is allocation-free *and* shard-mergeable, so its
+approximate quantiles actually combine.
+
+   The honest tradeoff: a fixed-bucket histogram is coarser than a reservoir
+   on an arbitrary distribution -- its error is bounded by the bucket width,
+   not by a sampling guarantee. If a consumer ever demonstrates that the
+   bucket granularity is too coarse for a real decision, the answer is a
+   *mergeable sketch* (t-digest, KLL, or Greenwald-Khanna), not a reservoir.
+   That is a deliberate deferral, recorded below, not something shipped today.
+
+**3. A `MetricRegistry` + reporter framework (Dropwizard's `ConsoleReporter`,
+`JmxReporter`, `GraphiteReporter`, `CsvReporter`).** Not re-incorporated,
+because libxtc already has the parts worth having: a registry you walk with
+`xtc_metrics_iterate`, and a Prometheus text dump via
+`xtc_metrics_dump_prometheus`. Additional transports -- Graphite, JMX, CSV, a
+push gateway -- are a consumer integration choice, not a library concern. We
+expose the data and the iterator; the consumer wires whatever transport its
+deployment already speaks.
+
+**4. Probability distributions, statistical inference, and regression (the
+bulk of Apache Commons Statistics: roughly 35 distributions, t-tests, ANOVA,
+confidence intervals, ranking, least-squares fitting).** Not incorporated:
+out of scope. That is a numerical/math library. `xtc_stats` exists to observe
+a running concurrent system, not to do science on the data in-process. A
+consumer that needs inference exports the raw figures and runs the statistics
+wherever it already does analysis.
+
+**5. Mergeable streaming quantiles (t-digest / KLL / Greenwald-Khanna).** Not
+incorporated *yet*, and flagged here as the one real future direction.
+Neither surveyed library actually provides them -- Commons Statistics computes
+percentiles by full-array quickselect (not streaming), and Dropwizard's
+reservoirs are not mergeable -- so there was nothing to adopt wholesale, and a
+proper sketch is a sizeable dependency to carry. The existing fixed-bucket
+histogram is already shard-mergeable and adequate for latency dashboards. If,
+and only if, bucket granularity is ever shown insufficient for a real
+decision, a mergeable sketch is the direction we would take -- preserving the
+merge-on-read property that everything else here depends on.
+
+### The "Timer" pattern: compose, do not add a type
+
+A Dropwizard `Timer` looks like a fourth metric kind, but it is just a `Meter`
+(a rate) plus a `Histogram` (a latency distribution) behind one call site.
+libxtc does not ship a `Timer` type because it does not need to: compose the
+counter and the histogram you already have. Record both at the one site so the
+rate and the distribution can never drift apart, and read them back together
+for a cohesive view.
+
+{% include snippet.html file="stats_timer_pattern.c" region="full" %}
+
+The rate over a window is still the monitoring layer's `rate()` over
+`demo.ops`; the library's job ends at exposing the raw count and the
+mergeable distribution.
