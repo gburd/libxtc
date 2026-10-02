@@ -112,6 +112,84 @@ test_hist_basic(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- dist (mergeable online mean/variance) ---- */
+
+static MunitResult
+test_dist_basic(const MunitParameter p[], void *d)
+{
+	/* Textbook Welford set: mean 5, population variance 4. */
+	static const double sample[] = { 2, 4, 4, 4, 5, 5, 7, 9 };
+	xtc_dist_t *dist;
+	size_t i;
+	(void)p; (void)d;
+	munit_assert_int(xtc_dist_create("test.d", &dist), ==, XTC_OK);
+
+	/* (c) empty dist: no divide-by-zero, all zero. */
+	munit_assert_uint64(xtc_dist_count(dist), ==, 0);
+	munit_assert_double(xtc_dist_mean(dist), ==, 0.0);
+	munit_assert_double(xtc_dist_variance(dist), ==, 0.0);
+	munit_assert_double(xtc_dist_stddev(dist), ==, 0.0);
+
+	/* (d) count<2 variance is 0.0. */
+	xtc_dist_record(dist, 42.0);
+	munit_assert_uint64(xtc_dist_count(dist), ==, 1);
+	munit_assert_double(xtc_dist_mean(dist), ==, 42.0);
+	munit_assert_double(xtc_dist_variance(dist), ==, 0.0);
+
+	xtc_dist_destroy(dist);
+
+	/* (a) known sequence: mean/variance/stddev to a small epsilon. */
+	munit_assert_int(xtc_dist_create("test.d2", &dist), ==, XTC_OK);
+	for (i = 0; i < sizeof sample / sizeof sample[0]; i++)
+		xtc_dist_record(dist, sample[i]);
+	munit_assert_uint64(xtc_dist_count(dist), ==, 8);
+	munit_assert_double_equal(xtc_dist_mean(dist), 5.0, 9);
+	munit_assert_double_equal(xtc_dist_variance(dist), 4.0, 9);
+	munit_assert_double_equal(xtc_dist_stddev(dist), 2.0, 9);
+	xtc_dist_destroy(dist);
+	xtc_dist_destroy(NULL);   /* NULL no-op */
+	return MUNIT_OK;
+}
+
+#define N_DIST_THREADS  8
+#define N_DIST_REC      50000
+
+static xtc_dist_t *g_concurrent_d;
+
+static void *
+dist_worker(void *arg)
+{
+	int n = (int)(intptr_t)arg;
+	int i;
+	/* Every thread records the same constant so the merged mean is
+	 * exactly that constant and the variance is exactly 0 regardless
+	 * of how the samples land across shards -- a clean merge oracle. */
+	for (i = 0; i < n; i++) xtc_dist_record(g_concurrent_d, 10.0);
+	return NULL;
+}
+
+static MunitResult
+test_dist_concurrent(const MunitParameter p[], void *d)
+{
+	pthread_t th[N_DIST_THREADS];
+	int i;
+	(void)p; (void)d;
+	munit_assert_int(xtc_dist_create("test.dc", &g_concurrent_d), ==,
+	    XTC_OK);
+	for (i = 0; i < N_DIST_THREADS; i++)
+		pthread_create(&th[i], NULL, dist_worker,
+		    (void *)(intptr_t)N_DIST_REC);
+	for (i = 0; i < N_DIST_THREADS; i++) pthread_join(th[i], NULL);
+	/* (b) count is exact under contention; mean is the constant,
+	 * variance ~0 -- proves the Chan merge is correct across shards. */
+	munit_assert_uint64(xtc_dist_count(g_concurrent_d), ==,
+	    (uint64_t)N_DIST_THREADS * N_DIST_REC);
+	munit_assert_double_equal(xtc_dist_mean(g_concurrent_d), 10.0, 9);
+	munit_assert_double(xtc_dist_variance(g_concurrent_d), <, 1e-9);
+	xtc_dist_destroy(g_concurrent_d);
+	return MUNIT_OK;
+}
+
 /* ---- iteration ---- */
 
 struct visit_count { int n; };
@@ -132,20 +210,23 @@ test_iterate(const MunitParameter p[], void *d)
 	xtc_counter_t *c1, *c2;
 	xtc_gauge_t   *g1;
 	xtc_hist_t    *h1;
+	xtc_dist_t    *d1;
 	struct visit_count vc = { 0 };
 	(void)p; (void)d;
 	munit_assert_int(xtc_counter_create("it.c1", &c1), ==, XTC_OK);
 	munit_assert_int(xtc_counter_create("it.c2", &c2), ==, XTC_OK);
 	munit_assert_int(xtc_gauge_create  ("it.g1", &g1), ==, XTC_OK);
 	munit_assert_int(xtc_hist_create   ("it.h1", &h1), ==, XTC_OK);
+	munit_assert_int(xtc_dist_create   ("it.d1", &d1), ==, XTC_OK);
 
-	munit_assert_int(xtc_metrics_iterate(__count_visit, &vc), >=, 4);
-	munit_assert_int(vc.n, >=, 4);
+	munit_assert_int(xtc_metrics_iterate(__count_visit, &vc), >=, 5);
+	munit_assert_int(vc.n, >=, 5);
 
 	xtc_counter_destroy(c1);
 	xtc_counter_destroy(c2);
 	xtc_gauge_destroy(g1);
 	xtc_hist_destroy(h1);
+	xtc_dist_destroy(d1);
 	return MUNIT_OK;
 }
 
@@ -246,6 +327,8 @@ static MunitTest tests[] = {
 	{ "/counter_concurrent", test_counter_concurrent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/gauge_basic",        test_gauge_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/hist_basic",         test_hist_basic,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/dist_basic",         test_dist_basic,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/dist_concurrent",    test_dist_concurrent,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/iterate",            test_iterate,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/dump_prometheus",    test_dump_prometheus,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/dump_prom_hist",     test_dump_prometheus_hist, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

@@ -19,6 +19,13 @@
 .Nm xtc_hist_quantile ,
 .Nm xtc_hist_count ,
 .Nm xtc_hist_destroy ,
+.Nm xtc_dist_create ,
+.Nm xtc_dist_record ,
+.Nm xtc_dist_count ,
+.Nm xtc_dist_mean ,
+.Nm xtc_dist_variance ,
+.Nm xtc_dist_stddev ,
+.Nm xtc_dist_destroy ,
 .Nm xtc_metrics_iterate ,
 .Nm xtc_metrics_dump_prometheus ,
 .Nm xtc_tuning_check
@@ -53,6 +60,20 @@
 .Ft void
 .Fn xtc_hist_destroy "xtc_hist_t *h"
 .Ft int
+.Fn xtc_dist_create "const char *name" "xtc_dist_t **out"
+.Ft void
+.Fn xtc_dist_record "xtc_dist_t *d" "double value"
+.Ft uint64_t
+.Fn xtc_dist_count "const xtc_dist_t *d"
+.Ft double
+.Fn xtc_dist_mean "const xtc_dist_t *d"
+.Ft double
+.Fn xtc_dist_variance "const xtc_dist_t *d"
+.Ft double
+.Fn xtc_dist_stddev "const xtc_dist_t *d"
+.Ft void
+.Fn xtc_dist_destroy "xtc_dist_t *d"
+.Ft int
 .Fn xtc_metrics_iterate "xtc_metric_visit_fn fn" "void *user"
 .Ft int
 .Fn xtc_metrics_dump_prometheus "int fd"
@@ -72,6 +93,12 @@ Current value, can move up or down
 Distribution; supports quantile queries
 .Pq p50, p99, p999 .
 For latency tracking.
+.It dist
+Online mergeable mean and population variance of a stream of
+.Vt double
+samples.
+For a running mean/variance where the full quantile
+machinery of a histogram is not needed.
 .El
 .Pp
 .Sy Concurrency safety :
@@ -96,6 +123,42 @@ hits one shard's atomic counter.
 .Fn xtc_hist_quantile
 merges shards under no lock
 .Pq relaxed atomic loads .
+.It
+Dists are per-CPU sharded.
+Each shard holds a Welford triple
+.Pq count, mean, M2 ;
+.Fn xtc_dist_record
+does Welford's single-pass update on the calling CPU's shard.
+The Welford update is a read-modify-write of three fields, not a
+single atomic add, and two threads can migrate onto the same
+shard, so each shard carries a brief per-shard spinlock held only
+for the handful of arithmetic ops:
+.Fn xtc_dist_record
+is therefore
+.Em not
+lock-free.
+It reads no clock and allocates nothing.
+.Fn xtc_dist_mean ,
+.Fn xtc_dist_variance ,
+.Fn xtc_dist_count ,
+and
+.Fn xtc_dist_stddev
+snapshot every shard under its lock and merge the triples with
+Chan's parallel formula
+.Po
+M2 = M2a + M2b + delta^2 * na*nb/(na+nb)
+.Pc .
+The reported variance is the
+.Em population
+variance
+.Pq M2 / count ;
+it is 0.0 for a count below 2, and
+.Fn xtc_dist_mean
+is 0.0 for an empty dist.
+.Nm xtc_dist
+is consumer-facing telemetry and is
+.Em not
+simulation-reachable.
 .El
 .Pp
 .Sy Observability discipline :
@@ -122,6 +185,11 @@ The matching
 and
 .Fn xtc_hist_destroy
 unregister and free a metric.
+The
+.Fn xtc_dist_create
+and
+.Fn xtc_dist_destroy
+pair register and release a dist the same way.
 The registry supports walking via
 .Fn xtc_metrics_iterate
 or dumping in Prometheus exposition format via
@@ -157,6 +225,11 @@ rexis.req_latency_ns_count 12345
 rexis.req_latency_ns_p50 1500
 rexis.req_latency_ns_p99 9800
 rexis.req_latency_ns_p999 24000
+# TYPE rexis.batch_size summary
+rexis.batch_size_count 12345
+rexis.batch_size_mean 37.5
+rexis.batch_size_variance 12.25
+rexis.batch_size_stddev 3.5
 .Ed
 .Pp
 A trivial scrape server reads
