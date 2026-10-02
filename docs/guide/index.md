@@ -19,7 +19,9 @@ alternatives that were considered and set aside.
 - [8. Scheduling and CPU shares]({{ '/guide/08-scheduling/' | relative_url }}) -- proportional-share
   scheduling and the over-budget stall watchdog
 - [10. Observing a running application]({{ '/guide/10-observability/' | relative_url }}) -- the
-  xtc_tail microscope, deployed use, and opening traces in the dial9 GUI
+  xtc_tail microscope, deployed use, opening traces in the dial9 GUI, and the
+  xtc_stats aggregate counters/gauges/histograms (what we include and what we
+  deliberately do not)
 - [Thinking in libxtc]({{ '/guide/transitioning/' | relative_url }}) -- the mental shifts and
   anti-patterns
 - [Debugging and observing]({{ '/guide/debugging/' | relative_url }})
