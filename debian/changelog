@@ -1,3 +1,27 @@
+libxtc (1.52.0-1) unstable; urgency=medium
+
+  * MINOR release -- one new public API for statistics.
+  * NEW API:
+    - xtc_dist: a mergeable online mean/variance aggregator.  Each
+      per-CPU shard keeps a Welford triple (n, mean, m2) updated under
+      a tiny per-shard spinlock (not lock-free; reads no clock,
+      allocates nothing); reads merge all shards with Chan's parallel
+      formula, so independent per-core activity rolls up into one
+      cohesive mean/variance/stddev without hot-path contention.
+      xtc_dist_create / _destroy / _record / _count / _mean /
+      _variance / _stddev; registered as XTC_METRIC_DIST and emitted by
+      xtc_metrics_dump_prometheus as a summary.  Mean and population
+      variance only (no higher moments).
+  * DOCS:
+    - The observability guide now states what the statistics module
+      deliberately does NOT incorporate from external telemetry/stats
+      libraries (EWMA rate windows, reservoir-sampled quantiles, a
+      reporter framework, probability distributions/inference, and
+      mergeable streaming sketches) and why each is out of scope for a
+      deterministic, allocation-free, clock-free aggregation layer.
+
+ -- Greg Burd <greg@burd.me>  Fri, 02 Oct 2026 15:00:00 -0400
+
 libxtc (1.51.0-1) unstable; urgency=medium
 
   * MINOR release -- one new public API plus fixes for the six items
