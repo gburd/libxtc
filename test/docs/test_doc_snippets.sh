@@ -38,7 +38,15 @@ if [ ! -f "$LIB" ]; then
 fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/xtc-docsnip.XXXXXX")
-trap 'rm -f "$tmp"/* 2>/dev/null; rmdir "$tmp" 2>/dev/null' EXIT
+# Remove the whole scratch tree on exit.  Must be a recursive remove, not
+# `rm -f "$tmp"/*; rmdir "$tmp"`: on macOS a `-g` build drops a .dSYM
+# DIRECTORY beside each binary, which `rm -f` cannot delete, so the stray
+# dirs make the trailing `rmdir` fail -- and under `set -eu` that failing
+# final trap command becomes the script's exit status, failing the gate
+# AFTER it has already printed success.  `rm -rf` clears it in one step
+# and cannot leave a nonzero behind.  $tmp is our own mktemp -d, never
+# empty-or-unset here, so the recursive remove is bounded to it.
+trap 'rm -rf "$tmp" 2>/dev/null || :' EXIT
 
 # Link line mirrors the examples: static lib + pthreads + libm + libdl,
 # and liburing only if the library was built against it.

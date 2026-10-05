@@ -18,16 +18,15 @@ fi
 pkill -9 -f "sqlxtc-server.*-p $PORT" 2>/dev/null || true
 rm -f "$PIDFILE" "$LOGFILE" "$DBFILE" "$DBFILE-shm" "$DBFILE-wal"
 
-nohup setsid "$SVR_BIN" -p "$PORT" -d "$DBFILE" -n 200 \
+nohup "$SVR_BIN" -p "$PORT" -d "$DBFILE" -n 200 \
     < /dev/null > "$LOGFILE" 2>&1 &
-disown
+SVR_PID=$!
+echo "$SVR_PID" > "$PIDFILE"
 
 sleep 0.5
-SVR_PID=$(pgrep -f "sqlxtc-server.*-p $PORT" | head -1)
-if [ -z "$SVR_PID" ]; then
+if ! kill -0 "$SVR_PID" 2>/dev/null; then
     echo "FAIL: server did not start"; cat "$LOGFILE"; exit 1
 fi
-echo "$SVR_PID" > "$PIDFILE"
 
 cleanup() {
     kill -9 "$SVR_PID" 2>/dev/null || true

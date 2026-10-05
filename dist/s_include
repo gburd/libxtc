@@ -81,7 +81,13 @@ process() {
 	emit_header "$out" "$guard" "$tmp"
 	rm -f "$tmp"
 	trap - EXIT
-	echo "  wrote $(realpath --relative-to="$ROOT" "$out")"
+	# Print the written path relative to the repo root.  Portable shell
+	# prefix-strip rather than `realpath --relative-to` (GNU-only: BSD /
+	# macOS realpath has no such option and errors out).  $out is always
+	# built from $INC, which lives under $ROOT, so stripping "$ROOT/"
+	# yields the same relative path on every platform.
+	rel=${out#"$ROOT"/}
+	echo "  wrote $rel"
 }
 
 # Top-level src/*.c -> src/inc/xtc_ext.h.
