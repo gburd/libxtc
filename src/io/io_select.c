@@ -290,9 +290,27 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *out_events, int max_events,
 	}
 	if (timeout_ns < 0) {
 		tvp = NULL;
+	} else if (timeout_ns == 0) {
+		tv.tv_sec = tv.tv_usec = 0;   /* non-blocking poll, intended */
+		tvp = &tv;
 	} else {
-		tv.tv_sec  = (long)(timeout_ns / 1000000000LL);
-		tv.tv_usec = (long)((timeout_ns % 1000000000LL) / 1000LL);
+		/*
+		 * Round a positive timeout UP to the next whole microsecond,
+		 * matching the poll backend's round-up-to-1ms discipline at
+		 * select's finer granularity.  A plain truncating divide
+		 * (timeout_ns / 1000) collapses any positive sub-microsecond
+		 * deadline to {0,0} -- a non-blocking select -- so a fiber
+		 * parked in xtc_proc_wait_fd with a tiny remaining timeout
+		 * would be re-polled with a zero wait, the loop would spin
+		 * without the deadline ever elapsing, and under the executor
+		 * every loop busy-spins in select(2) making no progress (the
+		 * migratable-fiber strand in KNOWN_ISSUES).  Rounding up means
+		 * a positive wait always blocks for at least one tick, so the
+		 * deadline is reached and the park resumes.
+		 */
+		int64_t us = (timeout_ns + 999LL) / 1000LL;
+		tv.tv_sec  = (long)(us / 1000000LL);
+		tv.tv_usec = (long)(us % 1000000LL);
 		tvp = &tv;
 	}
 	rc = select(max_fd + 1, &rd, &wr, &er, tvp);
