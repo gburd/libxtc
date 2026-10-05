@@ -98,24 +98,50 @@ last non-GET request and reports the retained prefix in `*out_executed`
 (340574c, PLAN.md 19.27.5).  The frozen lock ABI is byte-identical to
 1.0.0.
 
-## OPEN: select backend -- migratable fibers in timed xtc_proc_wait_fd can strand
+## RESOLVED (1.52.x): select backend -- migratable fibers in timed xtc_proc_wait_fd could strand
 
-**Status:** OPEN as of 1.50.0; present in 1.49.5 (same result on the
-7763850 baseline), found by the 1.50 release qualification's backend
-sweep.  The select backend is a portability fallback; epoll, io_uring,
-kqueue and poll are unaffected.
+**Status:** RESOLVED.  Present since the 1.50 backend sweep; fixed in
+`src/io/io_select.c`.  The select backend is a portability fallback;
+epoll, io_uring, kqueue and poll were unaffected.
 
-`test/m5/test_exec.c` `/m5/exec/Blk6_migratable_waitfd_resume` hangs 6/6
-on `--with-io-backend=select`: 16 migratable fibers spawned on one of 8
-loops, each parking in `xtc_proc_wait_fd` with a 2 ms timeout on a pipe
+**What it was.**  `test/m5/test_exec.c`
+`/m5/exec/Blk6_migratable_waitfd_resume` hung on
+`--with-io-backend=select`: 16 migratable fibers spawned on one of 8
+loops, each parking in `xtc_proc_wait_fd` with a finite timeout on a pipe
 that is never written, while peers steal them.  After a few iterations
-the executor stops making progress (6 of 16 fibers finish) with every
-loop blocked in `select(2)`; the same test passes on poll (6/6) and on
-every other backend.  The rest of `make check` passes on select.
+the executor stopped making progress with every loop spinning in
+`select(2)`.
 
-**Workaround:** use poll (the closest portable backend) when fibers are
-migratable and park on fds with timeouts; select remains fine for
-pinned (default) fibers.
+**Root cause.**  The select backend converted a positive `timeout_ns`
+to a `struct timeval` with a plain truncating divide
+(`tv_usec = (timeout_ns % 1e9) / 1000`).  When a migratable fiber
+re-parks with a nearly-elapsed deadline, the loop passes the small
+positive remainder (`next_deadline_ns - now_ns`) as `timeout_ns`; any
+value under 1000 ns truncated to `{0, 0}`, which makes `select(2)` a
+non-blocking poll.  The loop then re-drained its timers (none due yet,
+the real deadline being a few hundred ns away that the clock had not
+reached), recomputed the same sub-microsecond timeout, and spun -- under
+the executor, every loop busy-spun in `select` making no progress while
+the lock-holder fiber never got scheduled.  The poll backend never hit
+this because it rounds a positive timeout UP (`(timeout_ns + 999999) /
+1000000`), so a positive wait is always at least one tick.
+
+**Fix.**  The select backend now rounds a positive timeout UP to the
+next whole microsecond and keeps an explicit `timeout_ns == 0 -> {0,0}`
+branch, so a positive deadline can no longer collapse to a non-blocking
+poll.  `make check` on `--with-io-backend=select` passes, Blk6 passes
+repeatedly, and the Blk6 CPU time drops to a small fraction of its wall
+time (genuinely blocking in `select`, not spinning).
+
+**Caveat on the evidence.**  The truncation-to-zero spin is a real
+defect and the fix is verified non-regressing on the select backend.
+The original report was a Linux-only hang that did not reproduce on the
+macOS/arm64 host this fix was developed and tested on, so while the
+truncation bug fully explains the "every loop stuck in `select`, no
+progress" signature, it has not been independently confirmed to be the
+sole cause of the specific Linux failure.  The fix is safe regardless:
+rounding a sub-microsecond wait up to 1 us cannot strand a fiber or
+over-sleep a deadline meaningfully.
 
 ## OPEN: FreeBSD CI -- intermittent test_exec hang in the kqueue VM job
 
@@ -132,6 +158,18 @@ changes touch the timer, recv, wake or kqueue paths this test drives.
 
 **Workaround:** none needed on Linux.  On FreeBSD, fibers that do not
 set `migratable = 1` are not affected by the stealing path this stresses.
+
+**Not the same cause as the select strand above.**  The select
+truncation-to-zero bug does not apply here: the kqueue backend converts
+`timeout_ns` to a `struct timespec` at full nanosecond resolution
+(`tv_nsec = timeout_ns % 1e9`), so a positive sub-microsecond deadline
+is preserved exactly and cannot collapse to a non-blocking `kevent`.
+This remains OPEN and un-root-caused: it has not reproduced on any
+available host (Linux poll/epoll/io_uring, macOS kqueue), only
+intermittently on the FreeBSD VM job, so a fix cannot be developed
+against a reproducer or validated without regressing the one backend it
+would touch.  Deliberately left un-patched rather than changing the
+EVFILT_USER wake path on a guess.
 
 ## OPEN: xspawn_entry children may fail to start on small hosts under ring churn
 
