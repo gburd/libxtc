@@ -20,11 +20,11 @@ start_server() {
     pkill -9 -f "sqlxtc-server.*-p $PORT" 2>/dev/null || true
     sleep 0.2
     rm -f "$DBFILE" "$DBFILE-shm" "$DBFILE-wal" "$LOGFILE"
-    nohup setsid "$SVR_BIN" -p "$PORT" -d "$DBFILE" $args \
+    nohup "$SVR_BIN" -p "$PORT" -d "$DBFILE" $args \
         < /dev/null > "$LOGFILE" 2>&1 &
-    disown
+    SVR_PID=$!
     sleep 0.4
-    pgrep -f "sqlxtc-server.*-p $PORT" >/dev/null || die "server did not start"
+    kill -0 "$SVR_PID" 2>/dev/null || die "server did not start"
 }
 
 stop_server() {
