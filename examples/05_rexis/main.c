@@ -55,11 +55,6 @@
 #include "db.h"
 #include "proto.h"
 
-/* Local helper wrapping xtc_clock_mono(). */
-static inline int64_t xtc_now_ns(void) {
-	int64_t t; t = xtc_clock_mono(); return t;
-}
-
 /* Forward declarations */
 int expire_spawn(xtc_loop_t *loop, db_t *db, _Atomic int *stop,
                  xtc_pid_t *out_pid);
