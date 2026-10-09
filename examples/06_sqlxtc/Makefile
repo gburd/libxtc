@@ -130,7 +130,7 @@ clean:
 	rm -f test_wal test_wal.o wal.o
 	rm -f test_wal_recover
 	rm -f test_torn_smo
-	rm -f test_wal_compact
+	rm -f test_wal_compact test_wal_lsn_monotone
 	rm -f test_shard test_shard.o
 	rm -f test_mvcc test_mvcc.o mvcc.o
 	rm -f test_xstore test_xstore.o xstore.o
@@ -165,7 +165,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-wal-lsn-monotone test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -277,6 +277,13 @@ test_wal_compact: test_wal_compact.c $(ENGINE_NATIVE)
 
 test-wal-compact: test_wal_compact
 	./test_wal_compact
+
+# LSNs keep rising across a log checkpoint (ARIES page-LSN gate).
+test_wal_lsn_monotone: test_wal_lsn_monotone.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ test_wal_lsn_monotone.c wal.c $(LDFLAGS)
+
+test-wal-lsn-monotone: test_wal_lsn_monotone
+	./test_wal_lsn_monotone
 
 # ---- share-nothing sharded store + control plane (executor; no daemon) ----
 # N shard servers (one xtc_svr each, share-nothing) + a global

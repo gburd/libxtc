@@ -539,7 +539,9 @@ wal_rebind(wal_t *w, const char *path)
 }
 
 /* Emit context for wal_checkpoint: appends framed records to the temp
- * compaction file, assigning fresh sequential LSNs. */
+ * compaction file, assigning fresh sequential LSNs that CONTINUE the
+ * log's sequence (they start just above the handle's next_lsn), so LSNs
+ * never go backwards across a checkpoint -- see wal_checkpoint. */
 struct wal_cmp_ctx { int fd; off_t off; uint64_t lsn; int err; };
 static void
 wal_cmp_emit(void *vctx, const void *payload, uint32_t len)
@@ -581,7 +583,21 @@ wal_checkpoint(wal_t *w, const char *path,
 	fd = open(tmp, O_RDWR | O_CREAT | O_TRUNC, 0600);
 	if (fd < 0)
 		return XTC_E_INTERNAL;
-	c.fd = fd; c.off = 0; c.lsn = 0; c.err = 0;
+	c.fd = fd; c.off = 0; c.err = 0;
+	/*
+	 * Continue the LSN sequence; do not restart it.  A data page carries
+	 * the LSN of the last change written to it, and recovery redoes a
+	 * logged page image only if the record's LSN is NEWER than the page's
+	 * (bm_apply_page_image_at).  Numbering the compacted log from 1 made
+	 * every post-checkpoint record older than the pages flushed before
+	 * the checkpoint, so in-place recovery refused their images and lost
+	 * post-checkpoint changes on exactly those pages (test_fuzzy_checkpoint
+	 * hit it once eviction order flushed tail pages differently;
+	 * test_wal_lsn_monotone pins it).  wal_rebind resumes next_lsn from
+	 * the compacted file's highest LSN, which is now above every LSN the
+	 * old log handed out.
+	 */
+	c.lsn = w->next_lsn;
 
 	/* The dump emits every record of the compacted log, starting with
 	 * its own checkpoint record -- this layer does not interpret the
