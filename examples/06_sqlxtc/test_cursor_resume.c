@@ -34,7 +34,7 @@ mkkey(int i, char *buf, uint16_t *len)
 	*len = (uint16_t)n;
 }
 static int
-kcmp(const void *a, uint16_t al, const void *b, uint16_t bl)
+key_cmp(const void *a, uint16_t al, const void *b, uint16_t bl)
 {
 	uint16_t lim = al < bl ? al : bl;
 	int c = lim ? memcmp(a, b, lim) : 0;
@@ -133,7 +133,7 @@ scenario_split_while_parked(void)
 			break;
 		/* Strictly ascending, no key seen twice. */
 		if (seen > 0)
-			CK(kcmp(prevk, prevl, k, kl) < 0);
+			CK(key_cmp(prevk, prevl, k, kl) < 0);
 		memcpy(prevk, k, kl); prevl = kl;
 		seen++;
 		CK(bt_cursor_park(cur) == XTC_OK);
