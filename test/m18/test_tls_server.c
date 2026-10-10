@@ -159,7 +159,11 @@ generate_pss_cert(const char *cert_path, const char *key_path, const char *cn)
     char cmd[1024], cnf_path[256];
     FILE *cnf_fp;
     int rc;
-    snprintf(cnf_path, sizeof(cnf_path), "%s.cnf", cert_path);
+    size_t cert_len = strlen(cert_path);
+    if (cert_len > sizeof(cnf_path) - sizeof(".cnf"))
+        return -1;
+    memcpy(cnf_path, cert_path, cert_len);
+    memcpy(cnf_path + cert_len, ".cnf", sizeof(".cnf"));
     cnf_fp = fopen(cnf_path, "w");
     if (cnf_fp != NULL) {
         fprintf(cnf_fp,
