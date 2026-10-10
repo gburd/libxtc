@@ -177,6 +177,7 @@ build(const char *btp, const char *logp, int fuzzy,
 	if (wal_open(&wo, &wal) != XTC_OK)
 		return -1;
 	bo.path = btp; bo.page_size = PAGE_SZ; bo.n_frames = POOL;
+	bo.claim_threshold = 128;   /* exercise recovery under forced eviction */
 	bo.lsn_off = 0;             /* ARIES page LSN at the node front */
 	bo.double_write = 1;
 	if (bm_create(&bo, &bm) != XTC_OK) { wal_close(wal); return -1; }
@@ -231,7 +232,7 @@ fail:
 }
 
 /* Recover a fresh (truncated) tree from the FULL log by logical replay
- * (xstore_recover).  Leaves the recovered bt/bm in *bto/*bmo. */
+ * (xstore_recover). Leaves the recovered bt/bm in *bto and *bmo. */
 static int
 recover_full(const char *btp, const char *logp, bm_t **bmo, bt_t **bto)
 {
@@ -240,6 +241,7 @@ recover_full(const char *btp, const char *logp, bm_t **bmo, bt_t **bto)
 	bt_t *bt = NULL;
 
 	bo.path = btp; bo.page_size = PAGE_SZ; bo.n_frames = POOL;
+	bo.claim_threshold = 128;
 	bo.lsn_off = 0; bo.reopen = 0;    /* fresh page file: rebuild logically */
 	bo.double_write = 1;
 	if (bm_create(&bo, &bm) != XTC_OK)
@@ -266,6 +268,7 @@ recover_inplace(const char *btp, const char *logp, bm_t **bmo, bt_t **bto,
 	wal_t *w = NULL;
 
 	bo.path = btp; bo.page_size = PAGE_SZ; bo.n_frames = POOL;
+	bo.claim_threshold = 128;
 	bo.lsn_off = 0; bo.reopen = 1;
 	bo.double_write = 1;
 	if (bm_create(&bo, &bm) != XTC_OK)

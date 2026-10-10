@@ -199,7 +199,13 @@ _Static_assert(offsetof(struct bm_frame, version) < BM_CACHELINE,
  * ~22ns with amutex, a 24% regression) for no loop-safety gain.
  */
 #define BM_HT_STRIPES 256u
-typedef union { pthread_mutex_t m; char pad[128]; } bm_htlock_t;
+typedef union {
+	struct {
+		pthread_mutex_t m;
+		uint64_t generation;     /* mapping changes, protected by m */
+	};
+	char pad[128];
+} bm_htlock_t;
 
 struct bm {
 	int               fd;
@@ -243,38 +249,39 @@ struct bm {
 	bm_pid_t         *free_pids;     /* stack of reclaimed page ids */
 	uint32_t          free_pids_n;   /* live entries */
 	uint32_t          free_pids_cap; /* allocated slots */
-	/* Quarantine: pids freed during the current structure-modification
-	 * epoch are parked here, not on free_pids, so a latch-free chaser
-	 * that read a now-stale pid before the unlink cannot have it
-	 * reissued under it for fresh contents.  bm_reclaim_quarantine
-	 * drains them to free_pids at the next epoch boundary (the start of
-	 * the next merge), by when any such chaser has completed or retried
-	 * -- chasers never park indefinitely on a freed page (drop_resident
-	 * already waits out an in-flight pin). */
+	/* Quarantine delays reuse until a later SMO pass and until all old
+	 * pinned/writeback owners finish. This is not a grace period for
+	 * arbitrary parked descents: the retired set below blocks stale
+	 * loads even after these pids move to the reusable stack. */
 	bm_pid_t         *quar_pids;
 	uint32_t          quar_pids_n;
 	uint32_t          quar_pids_cap;
-	/* Quarantine membership set (the reclamation interlock).  Every pid
-	 * currently quarantined (freed this epoch, not yet reissuable) is a
-	 * member.  bm_fix_pid consults it on a table MISS: a quarantined pid
-	 * must NOT be re-loaded from its dead on-disk image into a fresh
-	 * (phantom) frame -- doing so creates a second frame that aliases the
-	 * pid once it is reissued.  A miss on a quarantined pid returns
-	 * XTC_E_AGAIN (the latch-free chaser that read the stale pid before
-	 * the unlink simply retries its descent; the merge's B-link rewiring
-	 * guarantees the retry no longer reaches the freed page).  An
-	 * open-addressing table (power-of-two, linear probe) keyed by pid,
-	 * guarded by pid_mu (the same lock that owns quar_pids/free_pids).
-	 * Tombstone-free: drained en masse by bm_reclaim_quarantine, which
-	 * clears the whole set at the epoch boundary. */
+	/* Retired-pid membership (the reclamation interlock). A freed pid
+	 * stays here while quarantined AND reusable, until its initialized
+	 * replacement is published. bm_fix_pid must not reload the dead
+	 * disk image in that interval; it returns XTC_E_AGAIN so the stale
+	 * descent retries from the root. Open-addressing/linear probing,
+	 * guarded by pid_mu. Individual removal rehashes the probe cluster
+	 * rather than leaving tombstones. */
 	bm_pid_t         *quar_set;      /* open-addressing slots; 0 == empty */
 	uint32_t          quar_set_cap;  /* power of two */
 	uint32_t          quar_set_n;    /* live members */
 	_Atomic uint64_t  s_freed;       /* total pages put on the freelist */
 	_Atomic uint64_t  s_reissued;    /* allocations served from the freelist */
 
+	_Atomic uint64_t  pending_pid_drops; /* active drop + deferred frame owners */
 	_Atomic uint32_t  clock;       /* round-robin victim cursor */
 	_Atomic uint64_t  evict_rng;   /* sampled-eviction PRNG state (stage 2) */
+
+	/* Sweep bound (bm_opts_t.claim_threshold; 0 = unbounded) and the
+	 * eviction-cost instruments.  The per-call advance count is a LOCAL
+	 * in evict_one, so the common path adds no shared write beyond these
+	 * end-of-call stat updates. */
+	uint32_t          claim_threshold;
+	_Atomic uint64_t  s_allocs;      /* evict_one calls that reclaimed */
+	_Atomic uint64_t  s_advances;    /* frames visited by those calls */
+	_Atomic uint64_t  s_adv_max;     /* worst single call */
+	_Atomic uint64_t  s_forced;      /* reclaims taken by the bound */
 
 	/* page table (pid mode): pid -> resident frame */
 	bm_htlock_t      *ht_locks;    /* BM_HT_STRIPES striped bucket locks;
@@ -365,7 +372,7 @@ do_io(bm_t *bm, void *buf, bm_pid_t pid, int write)
  * store/load race that a plain "pin++ then re-check swip" has).  A
  * fixer acquires only if pin >= 0 (CAS pin -> pin+1); the evictor
  * reserves an unpinned frame with CAS(pin 0 -> -1), after which no
- * fixer can pin it.  -1 means EVICTING; free_push resets it to 0. */
+ * fixer can pin it. Free/private frames retain -1 until publication. */
 static int
 try_pin(bm_frame_t *f)
 {
@@ -404,6 +411,10 @@ release_reservation(bm_frame_t *f)
 	(void)atomic_compare_exchange_strong_explicit(&f->pin, &e, 0,
 	    memory_order_release, memory_order_relaxed);
 }
+
+static void unpin_frame(bm_t *, bm_frame_t *);
+static void finish_doomed_drop(bm_t *, bm_frame_t *);
+static void quar_set_remove(bm_t *, bm_pid_t);
 
 /* ---- free list ---- */
 static void
@@ -556,32 +567,39 @@ dw_recover(bm_t *bm)
  * never blocks on the latch (so it cannot deadlock with the B-tree's
  * latch coupling on the eviction path).  No latch is held across the
  * I/O -- the consistent snapshot is. */
+#ifndef BM_FLUSH_TEST_HOOK
+#define BM_FLUSH_TEST_HOOK(bm, frame) ((void)0)
+#endif
+
 static int
 flush_frame(bm_t *bm, bm_frame_t *f)
 {
-	int expect = 0;
+	int expect = 0, clean = 0;
 	void *snap;
 
 	if (!atomic_load_explicit(&f->dirty, memory_order_acquire))
 		return 1;
-	if (!atomic_compare_exchange_strong(&f->io_busy, &expect, 1))
+	/* Pin BEFORE claiming I/O: eviction and deferred page deletion use
+	 * this same ownership gate. io_busy alone cannot prevent reuse. */
+	if (!try_pin(f))
+		return 0;
+	if (!atomic_compare_exchange_strong(&f->io_busy, &expect, 1)) {
+		unpin_frame(bm, f);
 		return 0;                       /* another writer owns it */
+	}
 	/* Try-shared the content latch: excludes an exclusive writer
 	 * (torn-free) but never blocks (deadlock-free).  A writer holding
 	 * the page -> skip; it is flushed on a later pass. */
-	if (xtc_arwlock_rdlock(f->latch, 0) != XTC_OK) {
-		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
-		return 0;
-	}
+	if (xtc_arwlock_rdlock(f->latch, 0) != XTC_OK)
+		goto release;
 	if (!atomic_load_explicit(&f->dirty, memory_order_acquire)) {
 		xtc_arwlock_unlock(f->latch);
-		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
-		return 1;                       /* raced with another flush */
+		clean = 1;                      /* raced with another flush */
+		goto release;
 	}
 	if ((snap = xtc_aligned_alloc(4096, bm->page_size)) == NULL) {
 		xtc_arwlock_unlock(f->latch);
-		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
-		return 0;
+		goto release;
 	}
 	memcpy(snap, f->page, bm->page_size);
 	/* Write-ahead rule: never write a dirty page to disk until the log
@@ -594,8 +612,7 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 		if (bm->wal_flush(bm->wal_ctx, plsn) != XTC_OK) {
 			xtc_aligned_free(snap);
 			xtc_arwlock_unlock(f->latch);
-			atomic_store_explicit(&f->io_busy, 0, memory_order_release);
-			return 0;
+			goto release;
 		}
 	}
 	/* Clear dirty UNDER the latch: a later writer re-acquires the
@@ -604,15 +621,25 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 	 * consistent image as of this point. */
 	atomic_store_explicit(&f->dirty, 0, memory_order_release);
 	xtc_arwlock_unlock(f->latch);
+	BM_FLUSH_TEST_HOOK(bm, f);
 	dw_protect(bm, f->pid, snap);       /* full-page log, durable, BEFORE the final write */
-	(void)do_io(bm, snap, f->pid, 1);
+	clean = do_io(bm, snap, f->pid, 1) == 0;
 	xtc_aligned_free(snap);
+	if (!clean)
+		atomic_store_explicit(&f->dirty, 1, memory_order_release);
+	else
+		atomic_fetch_add_explicit(&bm->s_flushed, 1, memory_order_relaxed);
+release:
 	atomic_store_explicit(&f->io_busy, 0, memory_order_release);
-	atomic_fetch_add_explicit(&bm->s_flushed, 1, memory_order_relaxed);
-	return 1;
+	unpin_frame(bm, f);
+	return clean;
 }
 
 /* ---- page table ---- */
+#ifndef BM_PUBLISH_TEST_HOOK
+#define BM_PUBLISH_TEST_HOOK(bm, frame) ((void)0)
+#endif
+
 /* The stripe lock guarding hash bucket `b`. */
 static inline pthread_mutex_t *
 ht_lock(bm_t *bm, uint32_t b)
@@ -628,8 +655,8 @@ ht_lock(bm_t *bm, uint32_t b)
  * reuses it and returns the just-allocated f to the pool; returns NULL
  * (the common, expected case under the quarantine invariant) when f was
  * published cleanly.  This is a belt-and-suspenders guard: the
- * quarantine grace period already guarantees a reissued pid has no
- * resident frame, so the dup branch should never fire -- but if it ever
+ * old-owner completion gate and retained retirement membership ensure
+ * a reissued pid has no old resident, so the dup branch should never fire -- but if it ever
  * did, deduping here keeps the table single-valued instead of aliasing.
  */
 static bm_frame_t *
@@ -657,6 +684,13 @@ ht_insert_alloc(bm_t *bm, bm_frame_t *f)
 	 * fast path's acquire load in ht_lookup_pin_fast). */
 	f->hnext = atomic_load_explicit(&bm->buckets[b], memory_order_relaxed);
 	atomic_store_explicit(&bm->buckets[b], f, memory_order_release);
+	BM_PUBLISH_TEST_HOOK(bm, f);
+	bm->ht_locks[b & (BM_HT_STRIPES - 1)].generation++;
+	/* A reusable pid remains retired until its new initialized frame
+	 * is visible. Never admit a load of its obsolete disk image. */
+	(void)pthread_mutex_lock(&bm->pid_mu);
+	quar_set_remove(bm, f->pid);
+	(void)pthread_mutex_unlock(&bm->pid_mu);
 	(void)pthread_mutex_unlock(lk);
 	return NULL;
 }
@@ -692,17 +726,21 @@ ht_remove(bm_t *bm, bm_frame_t *f)
 		prev = cur;
 		cur = next;
 	}
+	bm->ht_locks[b & (BM_HT_STRIPES - 1)].generation++;
 	(void)pthread_mutex_unlock(lk);
 }
 /* Look up pid; if resident, pin it and return the frame (caller holds
- * the pin).  Returns NULL on a miss. */
+ * the pin).  Returns NULL on a miss.  Capture the mapping generation
+ * under the SAME lock as the miss, before any page-in can park. */
 static bm_frame_t *
-ht_lookup_pin(bm_t *bm, bm_pid_t pid)
+ht_lookup_pin(bm_t *bm, bm_pid_t pid, uint64_t *generation)
 {
 	uint32_t b = (uint32_t)(pid % bm->nbucket);
 	pthread_mutex_t *lk = ht_lock(bm, b);
 	bm_frame_t *f;
 	(void)pthread_mutex_lock(lk);
+	if (generation != NULL)
+		*generation = bm->ht_locks[b & (BM_HT_STRIPES - 1)].generation;
 	for (f = bm->buckets[b]; f != NULL; f = f->hnext) {
 		if (f->pid == pid) {
 			if (!try_pin(f))
@@ -760,8 +798,7 @@ ht_lookup_pin_fast(bm_t *bm, bm_pid_t pid)
 			/* Re-validate: did this frame get reissued to a DIFFERENT
 			 * pid between our compare and our pin winning? */
 			if (atomic_load_explicit(&f->pid, memory_order_acquire) != pid) {
-				(void)atomic_fetch_sub_explicit(&f->pin, 1,
-				    memory_order_release);
+				unpin_frame(bm, f);
 				return NULL;    /* raced a reissue; caller retries slow */
 			}
 			if (atomic_load_explicit(&f->state, memory_order_acquire) == BM_COOL)
@@ -974,6 +1011,11 @@ bm_cls_ensure(bm_t *bm)
  * actually has.  The reserve -> ht_remove -> free_push interlock is
  * IDENTICAL to evict_one's (unchanged correctness).
  */
+/* Test-only interleaving seam; production builds compile it away. */
+#ifndef BM_EVICT_TEST_HOOK
+#define BM_EVICT_TEST_HOOK(bm, frame, phase) ((void)0)
+#endif
+
 #ifdef BM_SAMPLED_EVICT
 #define BM_D_SAMPLE 16u
 
@@ -1056,8 +1098,14 @@ sample_evict_one(bm_t *bm)
 		if (best != NULL) {
 			if (atomic_exchange_explicit(&best->ref, 0, memory_order_relaxed))
 				continue;    /* recently used COOL page: spare one round */
+			BM_EVICT_TEST_HOOK(bm, best, 2);
 			if (!try_reserve(best))
 				continue;
+			if (atomic_load_explicit(&best->doomed, memory_order_acquire)) {
+				release_reservation(best);
+				finish_doomed_drop(bm, best);
+				continue;
+			}
 			/* Between sampling `best` and reserving it, it could have been
 			 * evicted and RELOADED as a different pid (now COOL again).
 			 * try_reserve only checks pin==0, so also confirm both the
@@ -1065,7 +1113,9 @@ sample_evict_one(bm_t *bm)
 			 * freshly-loaded, valid, different page out from under its
 			 * reader (the 1-in-N content mismatch this closes). */
 			if (atomic_load_explicit(&best->state, memory_order_acquire) != BM_COOL ||
-			    atomic_load_explicit(&best->pid, memory_order_acquire) != best_pid) {
+			    atomic_load_explicit(&best->pid, memory_order_acquire) != best_pid ||
+			    atomic_load_explicit(&best->dirty, memory_order_acquire) ||
+			    atomic_load_explicit(&best->io_busy, memory_order_acquire)) {
 				release_reservation(best);
 				continue;
 			}
@@ -1139,6 +1189,25 @@ sample_evict_one(bm_t *bm)
 }
 #endif /* BM_SAMPLED_EVICT */
 
+/* Account one evict_one call that reclaimed a frame after visiting `adv`
+ * frames (forced != 0: the sweep bound took it).  Feeds the eviction-cost
+ * stats in bm_stats_t: amplification (advances / allocs) and the tail
+ * (adv_max, the worst single call). */
+static void
+evict_note(bm_t *bm, uint64_t adv, int forced)
+{
+	uint64_t cur;
+	atomic_fetch_add_explicit(&bm->s_allocs, 1, memory_order_relaxed);
+	atomic_fetch_add_explicit(&bm->s_advances, adv, memory_order_relaxed);
+	if (forced)
+		atomic_fetch_add_explicit(&bm->s_forced, 1, memory_order_relaxed);
+	cur = atomic_load_explicit(&bm->s_adv_max, memory_order_relaxed);
+	while (adv > cur && !atomic_compare_exchange_weak_explicit(
+	    &bm->s_adv_max, &cur, adv, memory_order_relaxed,
+	    memory_order_relaxed))
+		;
+}
+
 /* Try to drive one unpinned frame all the way to FREE.  Returns 1 if a
  * frame was reclaimed.  Swip-mode frames evict by CAS-ing the parent
  * Swip to EVICTED; page-table (pid-mode) frames evict by removing the
@@ -1147,6 +1216,10 @@ static int
 evict_one(bm_t *bm)
 {
 	uint32_t i, scanned;
+	uint64_t adv = 0;        /* frames this call visited (the cost) */
+	uint32_t wasted = 0;     /* non-productive advances: HOT->COOL demotions
+	                          * and ref-bit second chances */
+	int claim = 0;           /* bound reached: take the next eligible frame */
 	/*
 	 * Prefer to reclaim an already-COOL frame; cool a HOT frame only
 	 * when a full sweep finds no COOL victim (force_cool).  With
@@ -1171,19 +1244,59 @@ evict_one(bm_t *bm)
 		bm_frame_t *f = &bm->frames[i];
 		uint8_t st = atomic_load_explicit(&f->state, memory_order_acquire);
 
+		adv++;
+		/*
+		 * The sweep bound (PostgreSQL bounded clock sweep).  Demoting a
+		 * HOT frame and sparing a referenced COOL one both count as
+		 * progress, so in a hot pool -- every page re-touched faster
+		 * than the hand comes round -- this call could otherwise
+		 * circle the pool several times.  Having made claim_threshold
+		 * non-productive advances, it has established by observation
+		 * that the pool is hotter than the hand can grind down: from
+		 * here it claims the next unpinned, idle frame whatever its
+		 * HOT/ref state, writing it out first if it is dirty.  Pinned
+		 * and in-I/O frames are still skipped and the reservation +
+		 * re-validate below is unchanged, so the reclaim protocol is
+		 * the same one every other eviction uses.
+		 */
+		if (!claim && bm->claim_threshold != 0 &&
+		    wasted >= bm->claim_threshold)
+			claim = 1;
+
 		if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
 			continue;
 
+		BM_EVICT_TEST_HOOK(bm, f, 0);
 		/* Cooling is a state flip; the page table keeps naming the
 		 * page until it is reclaimed. */
 		if (st == BM_HOT) {
-			if (!force_cool)
+			if (!force_cool && !claim) {
+				wasted++;            /* passed over: not a victim */
 				continue;            /* prefer COOL victims */
+			}
 			atomic_store_explicit(&f->state, BM_COOL, memory_order_release);
 			atomic_fetch_add_explicit(&bm->s_cooled, 1, memory_order_relaxed);
 			st = BM_COOL;
+			wasted++;   /* a demotion: counted whether or not the
+			             * checks below then reclaim this frame */
 		}
 		if (st != BM_COOL) continue;
+		if (atomic_load_explicit(&f->dirty, memory_order_acquire) &&
+		    claim) {
+			/*
+			 * Bound reached and the claimed frame is dirty: write
+			 * THIS one out and take it, as PostgreSQL's bound does
+			 * (the victim is flushed by the allocating backend).  That
+			 * is one foreground write, where the unbounded fallback
+			 * (prefer_clean = 0) sweeps again and flushes every dirty
+			 * frame it passes.  flush_frame returns 0 if a writer or
+			 * another flusher holds the page; move on then.
+			 */
+			if (!flush_frame(bm, f))
+				continue;
+			atomic_fetch_add_explicit(&bm->s_evict_flush, 1,
+			    memory_order_relaxed);
+		}
 		if (atomic_load_explicit(&f->dirty, memory_order_acquire)) {
 			if (!prefer_clean) {
 				(void)flush_frame(bm, f);  /* fallback write-out */
@@ -1194,24 +1307,42 @@ evict_one(bm_t *bm)
 		}
 		if (atomic_load_explicit(&f->io_busy, memory_order_acquire))
 			continue;
-		if (atomic_exchange_explicit(&f->ref, 0, memory_order_relaxed))
+		if (atomic_exchange_explicit(&f->ref, 0, memory_order_relaxed) &&
+		    !claim) {
+			wasted++;
 			continue;            /* recently used: spare one sweep */
+		}
+		BM_EVICT_TEST_HOOK(bm, f, 1);
 		if (!try_reserve(f))
 			continue;            /* pinned: a fixer holds it */
+		/* A drop already unlinked this frame. Its last-unpin finalizer
+		 * may have lost the reservation to us; hand completion back. */
+		if (atomic_load_explicit(&f->doomed, memory_order_acquire)) {
+			release_reservation(f);
+			finish_doomed_drop(bm, f);
+			continue;
+		}
 		/* Reserved (pin == -1): no fixer can pin it now.  Re-validate
 		 * the state under the reservation: a stale COOL read above
 		 * could have raced a concurrent free, leaving this frame on
 		 * the free list.  ht_remove under the table lock excludes a
 		 * concurrent ht_lookup_pin. */
+		/* A fixer may dirty and unpin after our prechecks, including
+		 * while a stale HOT observation is being demoted to COOL.
+		 * Reservation acquires that unpin: recheck dirty/busy here,
+		 * before removing the only resident copy of the update. */
 		if (atomic_load_explicit(&f->state, memory_order_acquire)
-		    != BM_COOL) {
+		    != BM_COOL ||
+		    atomic_load_explicit(&f->dirty, memory_order_acquire) ||
+		    atomic_load_explicit(&f->io_busy, memory_order_acquire)) {
 			release_reservation(f);
 			continue;
 		}
 		ht_remove(bm, f);
 		atomic_fetch_sub_explicit(&bm->resident, 1, memory_order_relaxed);
 		atomic_fetch_add_explicit(&bm->s_evicted, 1, memory_order_relaxed);
-		free_push(bm, f);            /* clears the reservation (pin = 0) */
+		free_push(bm, f);            /* free-list sentinel stays -1 */
+		evict_note(bm, adv, claim);
 		return 1;
 	  }
 	  if (!force_cool) { force_cool = 1; continue; }   /* cool HOT for victims */
@@ -1327,6 +1458,7 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	    / 100u;
 	if (bm->cool_target < 1) bm->cool_target = 1;
 	bm->scan_resist = opts->scan_resist ? 1 : 0;
+	bm->claim_threshold = opts->claim_threshold;   /* 0 = unbounded */
 	atomic_store_explicit(&bm->evict_rng,
 	    0x9E3779B97F4A7C15ull ^ ((uint64_t)(uintptr_t)bm),
 	    memory_order_relaxed);   /* sampled-eviction PRNG seed (stage 2) */
@@ -1500,9 +1632,9 @@ bm_destroy(bm_t *bm)
 /* ---- quarantine membership set (the reclamation interlock) ----
  *
  * Open-addressing, power-of-two, linear-probe hash set keyed by pid,
- * guarded by pid_mu.  Membership marks a pid as quarantined: freed this
- * epoch and not yet reissuable, so bm_fix_pid must refuse to mint a
- * fresh frame from its (dead) on-disk image.  Slot 0 means empty;
+ * guarded by pid_mu. Membership marks a pid retired until allocation
+ * publishes its replacement, so bm_fix_pid must refuse to mint a
+ * fresh frame from its dead on-disk image. Slot 0 means empty;
  * BM_PID_NONE is never a real data pid, so it is a safe empty marker.
  * All callers hold pid_mu. */
 static int
@@ -1570,7 +1702,37 @@ quar_set_has(bm_t *bm, bm_pid_t pid)
 	return 0;
 }
 
-/* True iff `pid` is quarantined (membership test under pid_mu). */
+/* Remove a retired pid only after publishing its new incarnation.
+ * Reinsert the following probe cluster so removing an entry does not
+ * turn a collision into a false miss. Caller holds pid_mu. */
+static void
+quar_set_remove(bm_t *bm, bm_pid_t pid)
+{
+	uint32_t h, next, dst, mask;
+	bm_pid_t p;
+
+	if (bm->quar_set_n == 0)
+		return;
+	mask = bm->quar_set_cap - 1;
+	h = (uint32_t)(pid & mask);
+	while (bm->quar_set[h] != BM_PID_NONE && bm->quar_set[h] != pid)
+		h = (h + 1) & mask;
+	if (bm->quar_set[h] == BM_PID_NONE)
+		return;
+	bm->quar_set[h] = BM_PID_NONE;
+	bm->quar_set_n--;
+	for (next = (h + 1) & mask; bm->quar_set[next] != BM_PID_NONE;
+	    next = (next + 1) & mask) {
+		p = bm->quar_set[next];
+		bm->quar_set[next] = BM_PID_NONE;
+		dst = (uint32_t)(p & mask);
+		while (bm->quar_set[dst] != BM_PID_NONE)
+			dst = (dst + 1) & mask;
+		bm->quar_set[dst] = p;
+	}
+}
+
+/* True iff `pid` is retired (quarantined OR awaiting republication). */
 static int
 pid_is_quarantined(bm_t *bm, bm_pid_t pid)
 {
@@ -1610,9 +1772,16 @@ finish_doomed_drop(bm_t *bm, bm_frame_t *f)
 {
 	if (!try_reserve(f))
 		return;               /* still pinned, or another path took it */
+	/* A competing finalizer may have completed and recycled f while
+	 * this caller was delayed. Never free that new incarnation. */
+	if (!atomic_load_explicit(&f->doomed, memory_order_acquire)) {
+		release_reservation(f);
+		return;
+	}
 	atomic_store_explicit(&f->doomed, 0, memory_order_release);
 	atomic_store_explicit(&f->dirty, 0, memory_order_release);
-	free_push(bm, f);             /* clears the reservation (pin = 0) */
+	free_push(bm, f);             /* free-list sentinel stays -1 */
+	atomic_fetch_sub_explicit(&bm->pending_pid_drops, 1, memory_order_release);
 }
 
 /*
@@ -1622,14 +1791,11 @@ finish_doomed_drop(bm_t *bm, bm_frame_t *f)
  * Removes the page-table entry under the bucket's stripe lock so no
  * new fixer can find it.
  *
- * Pin-safe deferred drop: if the frame is UNPINNED, reserve it and free
- * it immediately.  If it is PINNED -- a worker began a read of this
- * page before the caller unlinked it and is finishing with valid
- * pre-merge bytes -- it cannot be freed under the pin, and the bucket
- * lock must not be held across a wait for the pin to drain.  Instead
- * mark the frame `doomed` and remove it from the table; the worker's
- * LAST bm_unfix completes the drop (finish_doomed_drop).  Either way
- * the page is gone from the table on return, so a subsequent fix sees a
+ * Take a pin before unlinking and marking doomed. Releasing our pin
+ * either completes the drop immediately or leaves it to the last
+ * existing owner. No bucket lock spans a wait for another pin to drain;
+ * an eviction reservation is retried outside the lock. The page is
+ * gone from the table on return, so a subsequent fix sees a
  * miss -- and because the pid is now quarantined (the caller added it
  * before calling here), that miss returns XTC_E_AGAIN rather than
  * loading the dead image into a phantom frame.
@@ -1643,15 +1809,26 @@ drop_resident(bm_t *bm, bm_pid_t pid)
 	uint32_t b = (uint32_t)(pid % bm->nbucket);
 	pthread_mutex_t *lk = ht_lock(bm, b);
 	bm_frame_t *f, *cur, *prev;
-	int pinned;
 
+retry:
 	(void)pthread_mutex_lock(lk);
+	/* Also invalidate an in-flight load when the freed pid has no
+	 * resident frame. Quarantine may drain before that load returns. */
+	bm->ht_locks[b & (BM_HT_STRIPES - 1)].generation++;
 	for (f = bm->buckets[b]; f != NULL; f = f->hnext)
 		if (f->pid == pid)
 			break;
 	if (f == NULL) {
 		(void)pthread_mutex_unlock(lk);
 		return 0;
+	}
+	/* Acquire our own pin before unlinking. If an evictor owns the
+	 * reservation, let it remove the frame and retry outside the lock.
+	 * A reservation is NOT a live pin with a future last-unpin event. */
+	if (!try_pin(f)) {
+		(void)pthread_mutex_unlock(lk);
+		xtc_yield();
+		goto retry;
 	}
 	/* Dead page: never flush it (a flush under a reissued id would
 	 * resurrect stale bytes). */
@@ -1679,24 +1856,13 @@ drop_resident(bm_t *bm, bm_pid_t pid)
 		cur = next;
 	}
 	atomic_fetch_sub_explicit(&bm->resident, 1, memory_order_relaxed);
-	/* Try to reserve it (pin 0 -> -1).  Success means it is unpinned and
-	 * we own it now: free it directly.  Failure means a worker holds a
-	 * pin; mark it doomed and let the last unpin free it.  Marking
-	 * doomed BEFORE releasing the lock, then completing the drop after
-	 * the lock is dropped, closes the race with a concurrent bm_unfix
-	 * that drives the pin to zero: finish_doomed_drop's try_reserve is
-	 * the single arbiter -- exactly one of the two (this path or the
-	 * unfix) wins and frees the frame. */
-	pinned = !try_reserve(f);
-	if (pinned) {
-		atomic_store_explicit(&f->doomed, 1, memory_order_release);
-		(void)pthread_mutex_unlock(lk);
-		finish_doomed_drop(bm, f);
-		return 1;
-	}
+	/* Our pin closes the last-unpin window while installing doomed.
+	 * Only the final unpin owns completion, never a delayed drop-side
+	 * finalizer acting on a recycled incarnation. */
+	atomic_fetch_add_explicit(&bm->pending_pid_drops, 1, memory_order_relaxed);
+	atomic_store_explicit(&f->doomed, 1, memory_order_release);
 	(void)pthread_mutex_unlock(lk);
-	atomic_store_explicit(&f->doomed, 0, memory_order_release);
-	free_push(bm, f);            /* clears the reservation (pin = 0) */
+	unpin_frame(bm, f);
 	return 1;
 }
 
@@ -1729,26 +1895,37 @@ mark_dirty_edge(bm_t *bm, bm_frame_t *frame)
 	}
 }
 
-void
-bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty)
+/* Release ownership without recording an access (writeback is not a hit). */
+#ifndef BM_UNPIN_TEST_HOOK
+#define BM_UNPIN_TEST_HOOK(frame) ((void)0)
+#endif
+static void
+unpin_frame(bm_t *bm, bm_frame_t *frame)
 {
 	int prev;
 
-	if (frame == NULL) return;
-	if (mark_dirty)
-		mark_dirty_edge(bm, frame);
-	atomic_store_explicit(&frame->ref, 1, memory_order_relaxed);  /* CLOCK: recently used */
 	prev = atomic_fetch_sub_explicit(&frame->pin, 1, memory_order_acq_rel);
+	BM_UNPIN_TEST_HOOK(frame);
 	/* Deferred reclamation: if this was the LAST pin (prev == 1, so the
 	 * count is now 0) and the frame was doomed by a concurrent
 	 * bm_free_pid (page reclaimed while we held the pin), complete the
 	 * pin-safe drop now -- the frame is already out of the page table,
-	 * so this just returns it to the pool.  finish_doomed_drop's
-	 * try_reserve arbitrates against drop_resident's own completion
-	 * attempt, so the frame is freed exactly once. */
+	 * so this just returns it to the pool. finish_doomed_drop's
+	 * reservation arbitrates against an evictor handing off a doomed
+	 * frame; drop_resident releases its own pin through this path. */
 	if (prev == 1 &&
 	    atomic_load_explicit(&frame->doomed, memory_order_acquire))
 		finish_doomed_drop(bm, frame);
+}
+
+void
+bm_unfix(bm_t *bm, bm_frame_t *frame, int mark_dirty)
+{
+	if (frame == NULL) return;
+	if (mark_dirty)
+		mark_dirty_edge(bm, frame);
+	atomic_store_explicit(&frame->ref, 1, memory_order_relaxed);
+	unpin_frame(bm, frame);
 }
 
 void
@@ -1895,12 +2072,13 @@ bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid)
 	if (bm == NULL || out_frame == NULL) return XTC_E_INVAL;
 	if ((f = get_free_frame(bm)) == NULL) return XTC_E_RESOURCE;
 	atomic_store_explicit(&f->pid, next_pid(bm), memory_order_release);
-	atomic_store_explicit(&f->pin, 1, memory_order_relaxed);
 	atomic_store_explicit(&f->dirty, 1, memory_order_relaxed);
 	atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
 	atomic_store_explicit(&f->doomed, 0, memory_order_relaxed);
 	memset(f->page, 0, bm->page_size);
 	atomic_store_explicit(&f->state, BM_HOT, memory_order_release);
+	/* Keep the free-list sentinel until initialization is complete. */
+	atomic_store_explicit(&f->pin, 1, memory_order_release);
 	/*
 	 * Publish with dedup under the bucket lock.  Under the quarantine
 	 * invariant the reissued pid has no resident frame, so the common
@@ -1945,9 +2123,11 @@ bm_free_pid(bm_t *bm, bm_pid_t pid)
 	 * quar_pids list too, so the next epoch drains it to the reusable
 	 * freelist.
 	 */
+	atomic_fetch_add_explicit(&bm->pending_pid_drops, 1, memory_order_acq_rel);
 	(void)pthread_mutex_lock(&bm->pid_mu);
 	if ((rc = quar_set_add(bm, pid)) != XTC_OK) {
 		(void)pthread_mutex_unlock(&bm->pid_mu);
+		atomic_fetch_sub_explicit(&bm->pending_pid_drops, 1, memory_order_release);
 		return rc;            /* page leaked, never double-allocated */
 	}
 	if (bm->quar_pids_n == bm->quar_pids_cap) {
@@ -1956,6 +2136,7 @@ bm_free_pid(bm_t *bm, bm_pid_t pid)
 		    (size_t)cap * sizeof *bm->quar_pids);
 		if (nb == NULL) {
 			(void)pthread_mutex_unlock(&bm->pid_mu);
+			atomic_fetch_sub_explicit(&bm->pending_pid_drops, 1, memory_order_release);
 			return XTC_E_NOMEM;   /* page leaked, never double-allocated */
 		}
 		bm->quar_pids = nb;
@@ -1973,22 +2154,17 @@ bm_free_pid(bm_t *bm, bm_pid_t pid)
 	 * unpin completes the pin-safe deferred drop.
 	 */
 	(void)drop_resident(bm, pid);
+	atomic_fetch_sub_explicit(&bm->pending_pid_drops, 1, memory_order_release);
 
 	atomic_fetch_add_explicit(&bm->s_freed, 1, memory_order_relaxed);
 	return XTC_OK;
 }
 
 /*
- * Drain the quarantine: move pids freed in the previous epoch onto the
- * reusable freelist.  Called at a structure-modification epoch
- * boundary (the start of a merge), by when any latch-free chaser that
- * observed a now-freed pid has finished -- so reissuing it for fresh
- * contents can no longer mislead an in-flight operation.
- *
- * Draining clears the quarantine membership set as well: the pids are
- * now reissuable, so bm_fix_pid may once again load them (a reissue
- * installs a fresh frame, and the dedup in ht_insert/bm_alloc_pid
- * guarantees only one frame ever maps the reissued pid).
+ * Move quarantined pids to the reusable stack once old frame owners have
+ * completed. Called at the start of a merge under the SMO lock. This is
+ * an allocation boundary, NOT permission to reload their old disk images:
+ * retired membership survives until replacement-frame publication.
  */
 void
 bm_reclaim_quarantine(bm_t *bm)
@@ -1999,7 +2175,12 @@ bm_reclaim_quarantine(bm_t *bm)
 	if (bm == NULL)
 		return;
 	(void)pthread_mutex_lock(&bm->pid_mu);
-	if (bm->quar_pids_n == 0) {
+	/* ponytail: defer the whole epoch while any old frame owner remains;
+	 * per-pid deferral is only needed if this measurably delays reuse.
+	 * Pins include writeback: reusing its pid early lets an old disk
+	 * write overwrite the new incarnation even with distinct frames. */
+	if (bm->quar_pids_n == 0 ||
+	    atomic_load_explicit(&bm->pending_pid_drops, memory_order_acquire) != 0) {
 		(void)pthread_mutex_unlock(&bm->pid_mu);
 		return;
 	}
@@ -2023,14 +2204,9 @@ bm_reclaim_quarantine(bm_t *bm)
 	for (i = 0; i < bm->quar_pids_n; i++)
 		grow[bm->free_pids_n++] = bm->quar_pids[i];
 	bm->quar_pids_n = 0;
-	/* The whole epoch's worth of pids is now reissuable: clear the
-	 * membership set so a fresh fix/load of any of them is allowed
-	 * again.  Clearing the slot array (not freeing it) keeps the
-	 * allocation for the next epoch. */
-	if (bm->quar_set_cap > 0)
-		memset(bm->quar_set, 0,
-		    (size_t)bm->quar_set_cap * sizeof *bm->quar_set);
-	bm->quar_set_n = 0;
+	/* Reissuable does not mean live. Keep membership until allocation
+	 * publishes the initialized replacement; otherwise a stale descent
+	 * can reload the pre-merge disk image and delete an obsolete copy. */
 	(void)pthread_mutex_unlock(&bm->pid_mu);
 }
 
@@ -2038,6 +2214,7 @@ int
 bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 {
 	bm_frame_t *f;
+	uint64_t generation;
 	if (bm == NULL || out_frame == NULL || pid == BM_PID_NONE)
 		return XTC_E_INVAL;
 #ifdef BM_CLASSIFY
@@ -2068,19 +2245,14 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 			*out_frame = f;
 			return XTC_OK;
 		}
-		if ((f = ht_lookup_pin(bm, pid)) != NULL) {
+		if ((f = ht_lookup_pin(bm, pid, &generation)) != NULL) {
 			atomic_fetch_add_explicit(&bm->s_hits, 1, memory_order_relaxed);
 			*out_frame = f;
 			return XTC_OK;
 		}
-		/* Miss: the page is not resident.  If its id is quarantined
-		 * (freed this epoch, awaiting the grace period), refuse to mint
-		 * a fresh frame from the dead on-disk image -- that phantom
-		 * frame would alias the id once it is reissued.  Tell the caller
-		 * to retry; a latch-free chaser that read the stale id before
-		 * the unlink re-descends, and the merge's B-link rewiring keeps
-		 * the retry from reaching the freed page.  By the next epoch the
-		 * id is drained out of the set and reloadable again. */
+		/* A retired pid must not reload its dead disk image, even after
+		 * quarantine drains. Retry until the caller re-descends or an
+		 * allocator publishes a fully initialized replacement. */
 		if (pid_is_quarantined(bm, pid))
 			return XTC_E_AGAIN;
 		/* Load into a free frame, then publish in the table.
@@ -2088,9 +2260,9 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 		 * the table after acquiring a frame. */
 		f = get_free_frame(bm);
 		if (f == NULL) return XTC_E_RESOURCE;
-		/* No stale fixer can transiently pin this frame -- a plain store
-		 * of the pin is safe here. */
-		atomic_store_explicit(&f->pin, 1, memory_order_release);
+		/* Keep free_push's pin=-1 sentinel throughout private I/O.
+		 * A stale fast-path walker may still hold this frame pointer;
+		 * it must not pin a same-pid reload before it is published. */
 		atomic_store_explicit(&f->state, BM_LOADED, memory_order_relaxed);
 		/* Bump the frame version across a (re)load so the OLC seqlock
 		 * ALSO detects a content reissue, not just an in-place write.
@@ -2143,23 +2315,34 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 				free_push(bm, f);
 				return XTC_E_AGAIN;
 			}
+			/* A competing loader may have published, modified, flushed
+			 * and evicted this pid during our I/O. Absence now does NOT
+			 * make our private disk image current. Mapping changes in
+			 * the same stripe conservatively invalidate it (including
+			 * unrelated pids); return its frame before retrying, as in
+			 * the existing raced-publication path above. No stripe
+			 * mutex spans I/O or a yield. */
+			if (generation !=
+			    bm->ht_locks[b & (BM_HT_STRIPES - 1)].generation) {
+				(void)pthread_mutex_unlock(lk);
+				free_push(bm, f);
+				xtc_yield();
+				continue;
+			}
+			/* Establish ownership/state before bucket publication. */
+			atomic_store_explicit(&f->state,
+			    bm->scan_resist ? BM_COOL : BM_HOT, memory_order_relaxed);
+			atomic_store_explicit(&f->pin, 1, memory_order_release);
 			/* Publish: f->pid was stored before this (see above), and
 			 * the release store on the bucket head orders it before any
 			 * lock-free reader can observe f (ht_lookup_pin_fast). */
 			f->hnext = atomic_load_explicit(&bm->buckets[b],
 			    memory_order_relaxed);
 			atomic_store_explicit(&bm->buckets[b], f, memory_order_release);
-			/* Probationary admission: a demand-loaded page enters
-			 * COOL (LeanStore cooling stage / 2Q A1), promoted to
-			 * HOT only on a second access (ht_lookup_pin rescue).
-			 * A scan touches each page once, so its pages never
-			 * displace the hot working set.  Pin BEFORE publishing
-			 * the COOL state so a concurrent evict_one (whose
-			 * try_reserve is not under a stripe lock) cannot reserve and
-			 * race the pin store. */
-			atomic_store_explicit(&f->pin, 1, memory_order_release);
-			atomic_store_explicit(&f->state,
-			    bm->scan_resist ? BM_COOL : BM_HOT, memory_order_release);
+			BM_PUBLISH_TEST_HOOK(bm, f);
+			bm->ht_locks[b & (BM_HT_STRIPES - 1)].generation++;
+			/* Do not overwrite pin after publication: a lock-free fixer
+			 * may already have incremented it. */
 			(void)pthread_mutex_unlock(lk);
 		}
 		atomic_fetch_add_explicit(&bm->resident, 1, memory_order_relaxed);
@@ -2419,11 +2602,11 @@ tr_cmp_pid(const void *a, const void *b)
 
 /* Claim a dirty frame for writeback and snapshot it into `dst` (which
  * the caller owns; for coalescing it is a slot in a larger gather
- * buffer).  Mirrors flush_frame's claim protocol -- io_busy CAS, a
+ * buffer).  Mirrors flush_frame's claim protocol -- pin, io_busy CAS, a
  * non-blocking shared latch, the write-ahead-log gate, and clearing
  * dirty under the latch -- but DEFERS the device write so the caller
  * can batch several pages into one pwrite.  Returns 1 when the page is
- * claimed (io_busy is held; the caller MUST write it and then release
+ * claimed (pin and io_busy are held; the caller MUST write it and release
  * via tr_release), 0 when it could not be claimed (nothing to do). */
 static int
 tr_prepare(bm_t *bm, bm_frame_t *f, void *dst)
@@ -2432,16 +2615,17 @@ tr_prepare(bm_t *bm, bm_frame_t *f, void *dst)
 
 	if (!atomic_load_explicit(&f->dirty, memory_order_acquire))
 		return 0;
-	if (!atomic_compare_exchange_strong(&f->io_busy, &expect, 1))
+	if (!try_pin(f))
 		return 0;
-	if (xtc_arwlock_rdlock(f->latch, 0) != XTC_OK) {
-		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
+	if (!atomic_compare_exchange_strong(&f->io_busy, &expect, 1)) {
+		unpin_frame(bm, f);
 		return 0;
 	}
+	if (xtc_arwlock_rdlock(f->latch, 0) != XTC_OK)
+		goto release;
 	if (!atomic_load_explicit(&f->dirty, memory_order_acquire)) {
 		xtc_arwlock_unlock(f->latch);
-		atomic_store_explicit(&f->io_busy, 0, memory_order_release);
-		return 0;
+		goto release;
 	}
 	memcpy(dst, f->page, bm->page_size);
 	if (bm->lsn_off >= 0 && bm->wal_flush != NULL && f->pid != 0) {
@@ -2449,24 +2633,28 @@ tr_prepare(bm_t *bm, bm_frame_t *f, void *dst)
 		memcpy(&plsn, (uint8_t *)dst + bm->lsn_off, sizeof plsn);
 		if (bm->wal_flush(bm->wal_ctx, plsn) != XTC_OK) {
 			xtc_arwlock_unlock(f->latch);
-			atomic_store_explicit(&f->io_busy, 0, memory_order_release);
-			return 0;
+			goto release;
 		}
 	}
 	atomic_store_explicit(&f->dirty, 0, memory_order_release);
 	xtc_arwlock_unlock(f->latch);
 	dw_protect(bm, f->pid, dst);    /* double-write log (no-op if disabled) */
 	return 1;
+release:
+	atomic_store_explicit(&f->io_busy, 0, memory_order_release);
+	unpin_frame(bm, f);
+	return 0;
 }
 
 /* Release a claimed frame after its (coalesced) write completed.  On
  * write failure the page is re-dirtied so a later pass retries it. */
 static void
-tr_release(bm_frame_t *f, int wrote_ok)
+tr_release(bm_t *bm, bm_frame_t *f, int wrote_ok)
 {
 	if (!wrote_ok)
 		atomic_store_explicit(&f->dirty, 1, memory_order_release);
 	atomic_store_explicit(&f->io_busy, 0, memory_order_release);
+	unpin_frame(bm, f);
 }
 
 /* Write one coalesced run [base, run_len pages) at page pid0 and release
@@ -2481,7 +2669,7 @@ tr_emit_run(bm_t *bm, uint8_t *base, int run_len, bm_pid_t pid0,
 	ok = xtc_aio_pwrite(bm->fd, base, len, off) == len;
 	atomic_fetch_add_explicit(&bm->s_tr_writes, 1, memory_order_relaxed);
 	for (k = 0; k < run_len; k++) {
-		tr_release(run_f[k], ok);
+		tr_release(bm, run_f[k], ok);
 		if (ok) {
 			written++;
 			atomic_fetch_add_explicit(&bm->s_flushed, 1,
@@ -2769,6 +2957,10 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->freed = atomic_load_explicit(&bm->s_freed, memory_order_relaxed);
 	out->reissued = atomic_load_explicit(&bm->s_reissued, memory_order_relaxed);
 	out->free_pids = bm->free_pids_n;   /* approximate (read without the pid lock) */
+	out->allocs = atomic_load_explicit(&bm->s_allocs, memory_order_relaxed);
+	out->advances = atomic_load_explicit(&bm->s_advances, memory_order_relaxed);
+	out->adv_max = atomic_load_explicit(&bm->s_adv_max, memory_order_relaxed);
+	out->forced_claims = atomic_load_explicit(&bm->s_forced, memory_order_relaxed);
 }
 
 /* ---- persistence: superblock, sync, checkpoint ---- */

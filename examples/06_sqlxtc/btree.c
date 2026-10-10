@@ -1608,16 +1608,11 @@ bt_merge(bt_t *bt, const void *key, uint16_t klen)
 	if (rc != XTC_OK)
 		return rc;
 
-	/*
-	 * Epoch boundary: drain pids freed by the PREVIOUS merge onto the
-	 * reusable freelist.  Holding the SMO lock here means every earlier
-	 * structure modification has completed; any latch-free chaser that
-	 * observed one of those now-freed pids has likewise finished (it
-	 * does not park on a freed page).  Pids freed by THIS pass go to
-	 * the quarantine and only become reusable at the next merge -- so a
-	 * page unlinked now is never reissued for fresh contents while a
-	 * chaser that read its id this epoch is still in flight.
-	 */
+	/* Transfer pids from earlier merges to the reusable stack. The
+	 * buffer manager defers this while old pinned/writeback owners
+	 * remain. Holding the SMO lock serializes structure changes, not
+	 * arbitrary parked descents: retired membership still rejects
+	 * disk reloads until an allocator publishes a replacement. */
 	bm_reclaim_quarantine(bm);
 
 	/*

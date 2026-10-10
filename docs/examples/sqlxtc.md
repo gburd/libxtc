@@ -99,6 +99,118 @@ textbook ones SQLite also uses.
   crash recovery (redo/undo), all validated under the deterministic
   simulator.
 
+## Buffer replacement: HOT/COOL and CLOCK
+
+The default replacement policy combines a CLOCK hand, HOT/COOL retention
+states, and a separate one-bit reference flag. These are complementary:
+CLOCK determines which frame to inspect; HOT/COOL expresses retention
+preference; the reference flag grants another chance to a recently used
+page. With scan resistance enabled, a demand-loaded page enters COOL and
+a second resident access promotes it to HOT. A scan need not promote
+every page it reads into the hot working set.
+
+`bm_opts_t.claim_threshold` controls an optional protection-work governor.
+After that many HOT passes/demotions or reference-bit second chances in
+one eviction call, the sweep stops honoring those preferences for its
+next eligible victim. Pins, in-flight I/O, and reservation checks still
+apply; dirty candidates require writeback. Zero preserves legacy
+selection. The default is zero; 128 is a measured opt-in value, not a
+universal recommendation. This option applies to CLOCK, not the optional
+sampled-eviction implementation.
+
+The governor limits time spent protecting candidates, **not total
+allocation latency**. Pinned pages, writeback, competing allocators, and
+retries can exceed the nominal budget. The cost is evicting useful pages
+sooner. A near-full sequential hot-set fixture demonstrates sustained
+churn with a small budget; a shorter individual sweep does not imply
+less total work.
+
+### Measuring the trade-off
+
+The standalone `bm_sweep_bench` Makefile target compares thresholds in
+one binary. Its positional arguments are threshold, duration in seconds,
+disposable store path, frame count, page count, loop count, fiber count,
+Zipf exponent multiplied by 100, direct-I/O flag, and seed. It validates
+read-back page ids, requires sustained eviction during warm-up, and
+reports one CSV row. It does not start the provider or trickler.
+
+A FreeBSD 15.1 m6id.8xlarge run on local NVMe used 4 KiB pages, 16 loops,
+128 fibers, Zipf exponent 1.10, and a dataset 1.125 times the pool.
+Thresholds 0 and 128 alternated over three repetitions each; measured
+windows lasted 20 seconds after eviction warm-up. These measurements
+precede the subsequent writeback-pinning and stale-load publication fixes;
+they motivate the governor but are not qualification numbers for the
+final release tree. Medians:
+
+| Pool frames | Ops/s, 0 | Ops/s, 128 | Hit %, 0 | Hit %, 128 | p99.9 ms, 0 | p99.9 ms, 128 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16,384 | 2,954,644 | 3,869,069 | 99.0534 | 98.9779 | 5.888 | 4.864 |
+| 65,536 | 2,268,189 | 5,103,385 | 99.2586 | 99.1795 | 8.704 | 4.096 |
+| 262,144 | 1,669,002 | 6,330,307 | 99.4441 | 99.3374 | 11.776 | 3.584 |
+
+At 16K frames, p99 **worsened from 2 us to 608 us** as misses crossed
+one percent, despite higher throughput and lower p99.9. These are
+read-only buffer-manager measurements, not SQL transaction results.
+They do not establish write-heavy performance or device-level read
+amplification. Quantiles are histogram bucket lower bounds, sampled in
+microseconds. Independent fixed-duration arms execute different request
+counts, not a lockstep request trace.
+
+The added `bm_stats_t` counters describe successful CLOCK reclamations:
+`allocs` counts successful eviction calls, `advances` their frame visits,
+`adv_max` the largest such visit count, and `forced_claims` reclaims after
+the budget expired. Failed calls and allocation retries are excluded;
+`advances / allocs` is scan work per successful reclaim, not total I/O
+amplification. The benchmark's sweep maximum includes warm-up.
+
+### Checkpoint LSN continuity
+
+Compacting the WAL must not restart its log sequence numbers. Data-page
+LSNs survive compaction, and in-place recovery compares each image's
+record LSN against the page LSN before applying it. Restarting at one
+can incorrectly suppress newer images. The compaction emitter continues
+above the old log's highest issued LSN; rebinding resumes from the
+compacted file's maximum. The LSN monotonicity regression and the fuzzy
+checkpoint test exercise this rule, including forced eviction.
+
+## Concurrent page publication and writeback
+
+A miss loads a page into a private frame before publishing it in the
+page table. Checking only whether that pid is resident at publication
+is insufficient: another loader can publish it, a writer can change it,
+and eviction can flush and remove it before the first read completes.
+Publishing that delayed read would restore an obsolete image, including
+keys that a successful B-tree delete removed.
+
+The buffer manager validates page-table generation across the read. A
+mapping change invalidates a private image when no resident winner is
+available; the reader releases its frame and retries. No page-table
+mutex spans the I/O. A regression pauses the original loader while a
+second loader completes a delete, checkpoint, and eviction, then verifies
+that resuming the delayed read cannot resurrect the key.
+
+Eviction also rechecks dirty and I/O state after reserving an unpinned
+frame: a writer can dirty and unpin between the initial checks and the
+reservation. Writeback itself holds a pin through completion so that
+snapshotting and disk I/O cannot race frame recycling. Releasing that
+internal pin does not mark the page recently accessed. Page-ID quarantine
+also waits for old frame owners, including writeback: a live old snapshot
+must not overwrite a newly allocated page using the same id. Draining
+quarantine makes an id reusable, not readable: retired-id membership
+continues to reject disk loads until allocation publishes an initialized
+replacement. Otherwise a delayed descent can delete from an obsolete
+pre-merge image while the live key remains in the merged sibling.
+Publication establishes the loader's pin before exposing the frame and never resets
+the count after readers can increment it. Private page-in frames stay
+unpinnable until their data is ready. These are storage correctness
+requirements independent of the optional sweep governor.
+
+The server sets the runtime fiber stack size to 512 KiB before creating
+fibers. SQL parsing and execution, especially with sanitizer instrumentation,
+need more headroom than the runtime's 64 KiB default. Budget this larger
+per-fiber virtual reservation when choosing the connection limit; it is
+not a claim that each connection immediately consumes 512 KiB of RSS.
+
 ## How libxtc concepts are applied
 
 The SQLite-vs-sqlxtc diagram above is drawn as boxes, but every box is

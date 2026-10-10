@@ -146,7 +146,8 @@ clean:
 	rm -f test_steal_leaf
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
-	rm -f test_scan_resist
+	rm -f test_drop_reserved test_evict_revalidate_sampled
+	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
 	rm -f test_persist
 	rm -f test_cursor_resume
 	rm -f test_btnode
@@ -165,7 +166,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-wal-lsn-monotone test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-wal-lsn-monotone test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-sweep-bound test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -414,6 +415,10 @@ test-bufmgr-dio: test_bufmgr_dio
 bm_writeback_bench: bm_writeback_bench.c bufmgr.o
 	$(CC) $(CFLAGS) -o $@ bm_writeback_bench.c bufmgr.o $(LDFLAGS)
 
+# A/B benchmark for the eviction-sweep bound (not part of make test).
+bm_sweep_bench: bm_sweep_bench.c bufmgr.h bufmgr.o
+	$(CC) $(CFLAGS) -o $@ bm_sweep_bench.c bufmgr.o $(LDFLAGS)
+
 bt_merge_bench: bt_merge_bench.c btree.c bufmgr.o btnode.c
 	$(CC) $(CFLAGS) -o $@ bt_merge_bench.c btree.c bufmgr.o btnode.c $(LDFLAGS)
 
@@ -458,6 +463,65 @@ test_scan_resist: test_scan_resist.c bufmgr.o
 
 test-scan-resist: test_scan_resist
 	./test_scan_resist
+
+test: test-drop-reserved
+
+test_drop_reserved: test_drop_reserved.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -o $@ test_drop_reserved.c $(LDFLAGS)
+
+test-drop-reserved: test_drop_reserved
+	./test_drop_reserved control
+	./test_drop_reserved
+
+test: test-evict-revalidate test-btree-late-load test-flush-pin test-publication-pin test-private-frame test-pid-writeback
+
+test_pid_writeback: test_pid_writeback.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -o $@ test_pid_writeback.c $(LDFLAGS)
+
+test-pid-writeback: test_pid_writeback
+	./test_pid_writeback
+
+test_private_frame: test_private_frame.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -o $@ test_private_frame.c $(LDFLAGS)
+
+test-private-frame: test_private_frame
+	./test_private_frame
+
+test_publication_pin: test_publication_pin.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -o $@ test_publication_pin.c $(LDFLAGS)
+
+test-publication-pin: test_publication_pin
+	./test_publication_pin
+
+test_flush_pin: test_flush_pin.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -o $@ test_flush_pin.c $(LDFLAGS)
+
+test-flush-pin: test_flush_pin
+	./test_flush_pin
+
+test_btree_late_load: test_btree_late_load.c bufmgr.c bufmgr.h btree.c btnode.c
+	$(CC) $(CFLAGS) -o $@ test_btree_late_load.c btree.c btnode.c $(LDFLAGS)
+
+test-btree-late-load: test_btree_late_load
+	./test_btree_late_load
+
+test_evict_revalidate: test_evict_revalidate.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -o $@ test_evict_revalidate.c $(LDFLAGS)
+
+test_evict_revalidate_sampled: test_evict_revalidate.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -DBM_SAMPLED_EVICT -o $@ test_evict_revalidate.c $(LDFLAGS)
+
+test-evict-revalidate: test_evict_revalidate test_evict_revalidate_sampled
+	./test_evict_revalidate
+	./test_evict_revalidate_sampled
+
+# Protection-work bound in a controlled all-hot, reclaimable pool.
+# This does not bound total allocation latency under pins or I/O.
+test_sweep_bound: test_sweep_bound.c bufmgr.o
+	$(CC) $(CFLAGS) -o $@ test_sweep_bound.c bufmgr.o $(LDFLAGS)
+
+test-sweep-bound: test_sweep_bound
+	./test_sweep_bound
 
 # ---- persistence: superblock reopen + WAL truncation ----
 test_persist: test_persist.c bufmgr.o btree.o btnode.o wal.o
