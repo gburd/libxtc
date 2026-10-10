@@ -27,6 +27,10 @@ test_sim_chan           -          -   bug7 CHANDROP: mpmc delivers every item e
 test_sim_reg            -          -   bug8 REGDUP: registry at-most-one-holder per name
 # bug 9 SAGAORDER -- exact reverse-order compensation
 test_sim_saga           -          -   bug9 SAGAORDER: saga compensates in exact reverse
+# bugs10..14 batch ownership, admission, resources, wake and membership
+test_sim_batch         1          1   d1365d9 bug10..14: each mutation caught at direct seed1, clean replay passes
+# Real pre-fix policy failure: defer_ready replaced a mandatory fair choice.
+test_sim_sched_policy  1          1   d1365d9: pre-fix defer_ready gap10 exceeded bound7; bug15 fairness override also caught
 #
 # ==== historically-FAILING seeds (found in the wild, then fixed) ====
 # Every seed here once FAILED a real sweep.  Each row names the fixing
