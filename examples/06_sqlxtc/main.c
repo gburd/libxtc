@@ -363,6 +363,13 @@ main(int argc, char **argv)
 	xtc_pid_t metrics_pid;
 	int rc;
 
+	/* Parsing and execution have deeper stacks than a small actor,
+	 * particularly with sanitizer instrumentation. Set this before
+	 * creating any fibers (the runtime default is 64 KiB). */
+	if (xtc_set_stack_size(512u * 1024u) != XTC_OK) {
+		fprintf(stderr, "cannot configure SQL fiber stack\n");
+		return 1;
+	}
 	/* 1 = --help (success), -1 = bad option (usage already printed). */
 	if ((rc = parse_args(argc, argv, &cfg)) != 0) return rc > 0 ? 0 : 1;
 	srv->cfg = cfg;
