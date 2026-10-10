@@ -575,7 +575,7 @@ wal_checkpoint(wal_t *w, const char *path,
 	struct wal_cmp_ctx c;
 	int fd, dfd;
 
-	if (w == NULL || path == NULL)
+	if (w == NULL || path == NULL || dump == NULL)
 		return XTC_E_INVAL;
 	if ((int)strlen(path) + 9 >= (int)sizeof tmp)
 		return XTC_E_INVAL;
@@ -602,8 +602,14 @@ wal_checkpoint(wal_t *w, const char *path,
 	/* The dump emits every record of the compacted log, starting with
 	 * its own checkpoint record -- this layer does not interpret the
 	 * record bytes. */
-	if (dump != NULL)
-		dump(wal_cmp_emit, &c, user);
+	dump(wal_cmp_emit, &c, user);
+	/* An empty replacement cannot persist the LSN high-water mark.
+	 * Reject before rename so reopen cannot restart the sequence. */
+	if (!c.err && c.off == 0) {
+		(void)close(fd);
+		(void)unlink(tmp);
+		return XTC_E_INVAL;
+	}
 
 	if (c.err || fsync(fd) != 0) {
 		(void)close(fd);

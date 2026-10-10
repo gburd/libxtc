@@ -133,7 +133,9 @@ int  wal_flush_through(wal_t *w, uint64_t lsn);
  * `dump(emit, emit_ctx, user)` calls emit(emit_ctx, payload, len) once
  * per record of the compacted log, in the WAL payload format wal_scan
  * delivers.  The dump emits the leading checkpoint record itself; this
- * layer does not interpret the bytes.
+ * layer does not interpret the bytes. A NULL callback or a dump emitting
+ * zero records is rejected with XTC_E_INVAL without replacing the log:
+ * an empty file cannot preserve its LSN high-water mark across reopen.
  */
 typedef void (*wal_emit_fn)(void *emit_ctx, const void *payload, uint32_t len);
 int  wal_checkpoint(wal_t *w, const char *path,
