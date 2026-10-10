@@ -31,7 +31,7 @@
 #
 # Usage: scripts/dst-bug-inject.sh        (run from the repo root)
 # Env:   CC (default cc), TMPDIR (default /tmp),
-#        XTC_DST_BUDGET (seed budget, default 8),
+#        XTC_DST_BUDGET (seed budget, default 64),
 #        XTC_DST_TIMEOUT (per-run seconds, default 300)
 
 set -u
@@ -40,7 +40,7 @@ ROOT=$(cd "$SELF_DIR/.." && pwd)
 CC="${CC:-cc}"
 : "${TMPDIR:=/tmp}"
 mkdir -p "$TMPDIR"
-BUDGET="${XTC_DST_BUDGET:-8}"
+BUDGET="${XTC_DST_BUDGET:-64}"
 RUN_TIMEOUT="${XTC_DST_TIMEOUT:-300}"
 
 INC="-I$ROOT/src/inc"
@@ -70,6 +70,12 @@ write_cases() {
 		"7;test_sim_chan;0;0;mpmc lost/duplicated items" \
 		"8;test_sim_reg;0;0;(duplicate concurrent registrations|whereis mis-resolved)" \
 		"9;test_sim_saga;0;0;compensation-order violation" \
+		"10;test_sim_batch;0;1;logical turn bound \(lost wake/progress\)" \
+		"11;test_sim_batch;0;1;active cap exceeded" \
+		"12;test_sim_batch;0;1;reservation conservation" \
+		"13;test_sim_batch;0;1;FAIL: batch seed=[0-9]+ phase=0 tick=0: terminal outcome" \
+		"14;test_sim_batch;0;1;completed member retained in vector" \
+		"15;test_sim_sched_policy;0;1;FAIL: scheduler fairness bound: gap=[0-9]+ bound=7" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -81,6 +87,18 @@ write_cases() {
 # 7  CHANDROP   chan.c drops an mpmc message    -> exactly-once delivery (no drop/dup)
 # 8  REGDUP     reg.c allows a duplicate reg    -> at-most-one-holder (no double registration)
 # 9  SAGAORDER  saga.c compensates forward      -> exact reverse-order compensation
+# 10 BATCHWAKE  batch.c drops submit wake       -> bounded logical progress
+# 11 BATCHCAP   batch.c ignores max_active      -> active cap
+# 12 BATCHRES   batch.c retains reservations    -> resource conservation
+# 13 BATCHSTALE batch.c ignores handle identity -> wrong request cancelled
+# 14 BATCHDONE  batch.c retains DONE members    -> completed vector membership
+# 15 SCHEDFAIR  sched.c skips fairness override -> bounded service
+#
+# Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
+# slot0/handle1. Its terminal callback expects OK but receives ABORTED.
+# Thus the phase0 terminal-outcome invariant is the first causal witness
+# of lost handle identity (verified on direct seed 1), not the later stale
+# handle assertion. Keep EXPECT narrow rather than accepting any failure.
 #
 # Note on bug 8: a second holder of a name makes xtc_reg_whereis resolve
 # to either pid, so the test's mis-resolve check is the FIRST consequence
@@ -151,7 +169,7 @@ build_engine() {
 		btree btnode mvcc sqlrec mem; do
 		# shellcheck disable=SC2086
 		if $CC $_def -g -O1 -std=c11 -D_GNU_SOURCE \
-			-DSQLXTC_HAVE_LIME=1 $INC -I"$BMDIR" \
+			-DSQLXTC_HAVE_LIME=1 -I"$_dir" $INC -I"$BMDIR" \
 			-c "$BMDIR/$_s.c" -o "$_dir/$_s.o" 2>/dev/null; then
 			_objs="$_objs $_dir/$_s.o"
 		fi
@@ -166,7 +184,7 @@ build_engine() {
 clean="$work/clean"
 mkdir -p "$clean"
 ( cd "$clean" && CFLAGS="-g -O1 -D_GNU_SOURCE" \
-	"$ROOT/dist/configure" --with-io-backend=sim --with-tls=none \
+	"$ROOT/dist/configure" --with-io-backend=sim --with-tls=none --enable-sched-policy \
 	--without-liburing >/dev/null 2>&1 && make -j4 libxtc.a \
 	>/dev/null 2>&1 ) || {
 	echo "  [bug] FAIL: the CLEAN control library did not build"
@@ -197,7 +215,7 @@ while IFS=';' read -r bug test_c need_eng seeded expect; do
 		eng=""
 		[ "$need_eng" = 1 ] && eng="$clean_eng"
 		# shellcheck disable=SC2086
-		if ! $CC -g -O1 -std=c11 -D_GNU_SOURCE $INC $extra_inc \
+		if ! $CC -g -O1 -std=c11 -D_GNU_SOURCE -I"$clean" $INC $extra_inc \
 			"$ROOT/test/sim/$test_c.c" $eng "$clean/libxtc.a" \
 			-pthread -ldl -lm -o "$ctl" 2>/dev/null; then
 			echo "  [bug $bug] FAIL: $test_c did not build CLEAN (control)"
@@ -215,7 +233,7 @@ while IFS=';' read -r bug test_c need_eng seeded expect; do
 	bdir="$work/bug$bug"
 	mkdir -p "$bdir"
 	( cd "$bdir" && CFLAGS="-DXTC_DST_INJECT_BUG=$bug -g -O1 -D_GNU_SOURCE" \
-		"$ROOT/dist/configure" --with-io-backend=sim --with-tls=none \
+		"$ROOT/dist/configure" --with-io-backend=sim --with-tls=none --enable-sched-policy \
 		--without-liburing >/dev/null 2>&1 && make -j4 libxtc.a \
 		>/dev/null 2>&1 ) || {
 		echo "  [bug $bug] FAIL: sim lib did not build"
@@ -230,7 +248,7 @@ while IFS=';' read -r bug test_c need_eng seeded expect; do
 	[ "$need_eng" = 1 ] && extra_inc="-I$BMDIR -DSQLXTC_HAVE_LIME=1"
 	# shellcheck disable=SC2086
 	if ! $CC -g -O1 -std=c11 -D_GNU_SOURCE -DXTC_DST_INJECT_BUG=$bug \
-		$INC $extra_inc "$ROOT/test/sim/$test_c.c" $engobjs \
+		-I"$bdir" $INC $extra_inc "$ROOT/test/sim/$test_c.c" $engobjs \
 		"$bdir/libxtc.a" -pthread -ldl -lm -o "$exe" 2>/dev/null; then
 		echo "  [bug $bug] FAIL: $test_c did not build"
 		fails=$((fails + 1)); continue
@@ -259,6 +277,13 @@ while IFS=';' read -r bug test_c need_eng seeded expect; do
 		tried=$((tried + 1))
 		if [ "$rc" = 124 ]; then
 			hang="$label"
+			break
+		fi
+		# Signal termination (including an assertion abort) is not a
+		# checked invariant report. Never credit a crash even if output
+		# printed an expected message before the signal.
+		if [ "$rc" -ge 128 ]; then
+			wrong="$label (signal exit $rc)"
 			break
 		fi
 		if [ "$rc" != 0 ]; then

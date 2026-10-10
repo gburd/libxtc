@@ -43,6 +43,9 @@ cdata.set('XTC_VERSION_MAJOR', ver_parts[0].to_int())
 cdata.set('XTC_VERSION_MINOR', ver_parts[1].to_int())
 cdata.set('XTC_VERSION_PATCH', ver_parts[2].to_int())
 
+if get_option('sched_policy')
+  cdata.set('XTC_ENABLE_SCHED_POLICY', 1)
+endif
 if get_option('diagnostic')
   cdata.set('XTC_DIAGNOSTIC', 1)
 endif
@@ -326,6 +329,7 @@ lib_sources = files(
   'src/io/io_select.c',
   'src/io/io_sim.c',
   'src/evt/loop.c',
+  'src/evt/sched.c',
   'src/evt/task.c',
   'src/evt/timer.c',
   'src/evt/coro_uctx.c',
@@ -340,6 +344,7 @@ lib_sources = files(
   'src/ptc/future.c',
   'src/ptc/dispatch.c',
   'src/ptc/log.c',
+  'src/ptc/batch.c',
   'src/ptc/cfg.c',
   'src/ptc/inject.c',
   'src/ptc/pdict.c',
@@ -452,6 +457,7 @@ install_headers(
   'src/inc/xtc_bdev.h',
   'src/inc/xtc_blocking.h',
   'src/inc/xtc_accel.h',
+  'src/inc/xtc_batch.h',
   'src/inc/xtc_cfg.h',
   'src/inc/xtc_chan.h',
   'src/inc/xtc_dio_sched.h',
@@ -465,6 +471,7 @@ install_headers(
   'src/inc/xtc_lockmgr.h',
   'src/inc/xtc_log.h',
   'src/inc/xtc_loop.h',
+  'src/inc/xtc_sched.h',
   'src/inc/xtc_lrlock.h',
   'src/inc/xtc_lwlock.h',
   'src/inc/xtc_mctx.h',

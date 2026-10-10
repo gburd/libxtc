@@ -76,6 +76,15 @@ AC_MSG_CHECKING([whether to build a shared library])
 AC_MSG_RESULT([$xtc_enable_shared])
 AC_SUBST([XTC_ENABLE_SHARED], [$xtc_enable_shared])
 
+AC_ARG_ENABLE([sched-policy],
+  [AS_HELP_STRING([--enable-sched-policy],
+    [Enable optional runtime lane policies (default: no).])],
+  [xtc_enable_sched_policy=$enableval], [xtc_enable_sched_policy=no])
+AS_CASE([$xtc_enable_sched_policy],
+  [yes], [AC_DEFINE([XTC_ENABLE_SCHED_POLICY], 1,
+    [Define to enable optional runtime lane policies.])],
+  [no], [], [AC_MSG_ERROR([--enable-sched-policy accepts only yes or no])])
+
 # Diagnostic build: enables runtime invariant checks that abort on
 # violation (e.g. unaligned direct I/O).  Off by default; for
 # development and CI hardening, not production.

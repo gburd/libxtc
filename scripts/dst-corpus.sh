@@ -51,7 +51,7 @@ mkdir -p "$build"
 (
 	cd "$build" && CFLAGS="-g -O1 -D_GNU_SOURCE" \
 		"$ROOT/dist/configure" --with-io-backend=sim --with-tls=none \
-		--without-liburing >/dev/null 2>&1 &&
+		--without-liburing --enable-sched-policy >/dev/null 2>&1 &&
 		make -j"$(nproc 2>/dev/null || echo 2)" libxtc.a >/dev/null 2>&1
 ) || { echo "  [corpus] FAIL: sim library did not build"; exit 1; }
 lib="$build/libxtc.a"
@@ -69,7 +69,7 @@ compile_test() {
 	[ -x "$_exe" ] && { echo "$_exe"; return 0; }
 	# inc/libs intentionally word-split (each holds several flags).
 	# shellcheck disable=SC2086
-	if $CC -g -O1 -std=c11 -D_GNU_SOURCE $INC \
+	if $CC -g -O1 -std=c11 -D_GNU_SOURCE -I"$build" $INC \
 		"$ROOT/test/sim/$_t.c" "$lib" $libs -o "$_exe" 2>/dev/null; then
 		echo "$_exe"
 	fi

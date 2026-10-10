@@ -1,0 +1,88 @@
+.TH XTC_SCHED 3 "2026" "libxtc" "Library Functions"
+.SH NAME
+xtc_sched_policy_set, xtc_sched_continuous_set, xtc_sched_get_stats \- optional runtime lane policies
+.SH SYNOPSIS
+.nf
+#include <xtc_sched.h>
+
+int xtc_sched_policy_set(xtc_loop_t *loop,
+    const xtc_sched_policy_t *policy);
+int xtc_sched_continuous_set(xtc_loop_t *loop, uint32_t max_bypass);
+int xtc_sched_get_stats(xtc_loop_t *loop, xtc_sched_stats_t *out);
+.fi
+.SH DESCRIPTION
+Build with --enable-sched-policy (Meson: -Dsched_policy=true).
+The default build exposes these entry points but returns XTC_E_NOSYS.
+An enabled build without an installed policy retains the ordinary picker,
+queue order, and weighted runtime accounting.
+.PP
+Initialize policy.size to sizeof(policy), policy.version to
+XTC_SCHED_VERSION (1), max_bypass to a positive uint32_t, and select to a
+non-NULL callback. ran is optional. The descriptor is copied; callback code
+and user context are borrowed through loop teardown. NULL removes the policy.
+Installation/removal is setup-only: the first run or single step, even an
+empty step, freezes configuration permanently. Setup must be externally serialized before execution starts; concurrent
+lifecycle destruction is not supported.
+.PP
+select receives a callback-lifetime immutable xtc_sched_view_t array, ordered
+by numeric lane ID. Only ready lanes appear: -1 is the default FIFO/deque;
+0 through 15 identify existing class queues. Each lane contains shares,
+runs (quanta served under the policy), and bypasses (consecutive ready
+selection opportunities without service). The uint32_t ready and active
+fields provide advisory batch counts, or zero for unregistered lanes and the
+default lane. Active includes blocked batch members; it is not readiness.
+Hints never add a lane to the snapshot. No task or queue pointer is exposed.
+Return a ready lane ID or XTC_SCHED_DEFAULT (-2) to use the ordinary picker.
+Invalid choices fall back. A default-deque steal race also falls back without
+calling select again or hiding runnable class work.
+.PP
+The runtime overrides preferences when a continuously ready lane reaches
+max_bypass, choosing the greatest bypass count with stable numeric tie breaks.
+Counters saturate; empty or serviced lanes reset their age. With L ready lanes,
+service occurs within max_bypass + L opportunities, assuming callbacks and
+dispatched tasks return. This is not a wall-time bound, preemption, or a
+per-task fairness guarantee for the default LIFO deque. Custom mode may
+reorder weighted shares; it does not promise exact proportional CPU shares.
+.PP
+The optional ran callback receives the selected lane BEFORE a proc can
+change its class, units equal to one, and verdict XTC_SCHED_DONE,
+XTC_SCHED_YIELD, or XTC_SCHED_PARK. A pending result consumed by a latched wake
+is normalized to YIELD. Quantum counts are not CPU time.
+.PP
+Callbacks must be bounded, nonblocking, allocation-free, deterministic under
+simulation, and must not yield or mutate runtime state. Configuration from
+callbacks is rejected. The runtime owns all queues, task lifetimes, and wakes.
+.PP
+Initialize out.size and out.version before xtc_sched_get_stats. Read only from
+the owner or while quiescent. The snapshot reports selections (callback
+invocations), fallbacks, invalid_choices, and fairness_overrides. No policy
+means zero policy counters. Counters saturate at UINT64_MAX.
+.SH CONTINUOUS BATCH POLICY
+xtc_sched_continuous_set installs the built-in continuous batch-lane policy
+with a positive max_bypass. It uses loop-owned context, allocates nothing,
+and has the same pre-first-step installation restriction as policy_set.
+Passing NULL to policy_set removes it before execution starts.
+.PP
+Among registered batch classes present in the real ready-lane snapshot with
+a nonzero ready hint, prefer the greatest bypass age. Equal ages rotate by
+class ID after actual class service. No clocks or application pointers
+participate in ordering. The mandatory runtime fairness guard still applies
+to all ready lanes, including ordinary tasks and the default lane.
+.PP
+With no eligible batch class, the policy returns XTC_SCHED_DEFAULT and defers
+to the ordinary picker, subject to that same fairness guard. An active but
+blocked group does not manufacture readiness or receive batch preference.
+Each explicit class supports at most one batch group on its owner loop;
+ordinary tasks may share that class. Groups using the NULL/default class
+remain supported by the batch engine but have no continuous-policy preference.
+The policy selects a class, not an individual group member, and does not
+change the class FIFO. Batch iteration and membership remain the engine's
+responsibility and work without this policy.
+.SH RETURN VALUES
+XTC_OK on success; XTC_E_NOSYS when disabled; XTC_E_INVAL for NULL required
+arguments, wrong descriptor size, missing select, or zero max_bypass;
+XTC_E_VERSION for unknown version; XTC_E_AGAIN for installation after start
+or while another installer holds the descriptor. Size is checked before version.
+.SH SEE ALSO
+.BR xtc_loop (3),
+.BR xtc_exec (3)

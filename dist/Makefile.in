@@ -114,6 +114,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/io/io_select.c \
 	$(srcdir)/../src/io/io_sim.c \
 	$(srcdir)/../src/evt/loop.c \
+	$(srcdir)/../src/evt/sched.c \
 	$(srcdir)/../src/evt/task.c \
 	$(srcdir)/../src/evt/timer.c \
 	$(srcdir)/../src/evt/coro_uctx.c \
@@ -128,6 +129,7 @@ LIB_SRCS	= \
 	$(srcdir)/../src/ptc/future.c \
 	$(srcdir)/../src/ptc/dispatch.c \
 	$(srcdir)/../src/ptc/log.c \
+	$(srcdir)/../src/ptc/batch.c \
 	$(srcdir)/../src/ptc/cfg.c \
 	$(srcdir)/../src/ptc/inject.c \
 	$(srcdir)/../src/ptc/pdict.c \
@@ -210,6 +212,7 @@ LIB_OBJS	= \
 	io_select.o \
 	io_sim.o \
 	loop.o \
+	sched.o \
 	task.o \
 	timer.o \
 	coro_uctx.o \
@@ -224,6 +227,7 @@ LIB_OBJS	= \
 	future.o \
 	dispatch.o \
 	log.o \
+	batch.o \
 	cfg.o \
 	inject.o \
 	pdict.o \
@@ -293,6 +297,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_bdev.h \
 	$(srcdir)/../src/inc/xtc_blocking.h \
 	$(srcdir)/../src/inc/xtc_accel.h \
+	$(srcdir)/../src/inc/xtc_batch.h \
 	$(srcdir)/../src/inc/xtc_cfg.h \
 	$(srcdir)/../src/inc/xtc_chan.h \
 	$(srcdir)/../src/inc/xtc_dio_sched.h \
@@ -306,6 +311,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_lockmgr.h \
 	$(srcdir)/../src/inc/xtc_log.h \
 	$(srcdir)/../src/inc/xtc_loop.h \
+	$(srcdir)/../src/inc/xtc_sched.h \
 	$(srcdir)/../src/inc/xtc_lrlock.h \
 	$(srcdir)/../src/inc/xtc_lwlock.h \
 	$(srcdir)/../src/inc/xtc_mctx.h \
@@ -397,7 +403,7 @@ TESTS_SH	= \
 # round-trip stays runnable via the examples/08_tnt demo (make
 # echo-test) and test/tnt/test_tnt_echo.sh by hand.
 
-TESTS_C		= test_version test_header test_errors \
+TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_header test_errors \
 		  test_atomic test_alloc test_time \
 		  test_errno \
 		  test_sharp_edges \
@@ -924,6 +930,10 @@ bench_fairness: $(srcdir)/../bench/bench_fairness.c $(STATIC_LIB)
 		-o $@ $(srcdir)/../bench/bench_fairness.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+bench_continuous_batching: $(srcdir)/../bench/bench_continuous_batching.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ \
+	    $(srcdir)/../bench/bench_continuous_batching.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 bench_sched_shares: $(srcdir)/../bench/bench_sched_shares.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_sched_shares.c \
@@ -992,7 +1002,7 @@ examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_brea
 # (The TLS doc snippet, docs/_includes/snippets/14_tls_echo.c, is gated by
 # test/docs/test_doc_snippets.sh like every other snippet; that gate links
 # the build's XTC_TLS_LIBS.)
-check-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo
+check-examples: check-continuous-batching 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo
 	@for t in 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo \
 	          10_circuit_breaker; do \
 		printf 'running example: %s\n' "$$t"; \
@@ -1002,6 +1012,21 @@ check-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circui
 	    ./03_supervised_app ./04_lockmgr_demo ./10_circuit_breaker \
 	    ./tnt_echo || exit 1; \
 	echo "  [examples] OK: teaching examples build and run clean"
+
+.PHONY: check-continuous-batching
+check-continuous-batching: $(STATIC_LIB)
+	@if grep -q '^\#define XTC_ENABLE_SCHED_POLICY 1' xtc_config.h; then \
+		$(MAKE) continuous_batching && \
+		./continuous_batching --self-test && \
+		sh $(srcdir)/../examples/check_help.sh ./continuous_batching; \
+	else \
+		echo '  [examples] SKIP: continuous batching (--enable-sched-policy disabled)'; \
+	fi
+
+continuous_batching: $(srcdir)/../examples/12_continuous_batching/main.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ \
+	    $(srcdir)/../examples/12_continuous_batching/main.c \
+	    $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 01_hello: $(srcdir)/../examples/01_hello_async.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
@@ -2115,7 +2140,7 @@ uninstall:
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
 	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt .tests-c.out .tests-sh.out .tests-c.rc .tests-sh.rc
-	$(RM) soak_mem_bound
+	$(RM) soak_mem_bound continuous_batching bench_continuous_batching
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 	$(RM) libxtc.exp
 	rm -rf *.dSYM
@@ -2123,3 +2148,31 @@ clean:
 distclean: clean
 	$(RM) Makefile xtc_config.h xtc.pc config.log config.status
 	$(RM) -r autom4te.cache
+
+
+# Nested off/on builds: explicit qualification target, not recursive make check.
+.PHONY: check-sched-policy
+check-sched-policy:
+	sh $(srcdir)/../test/dist/test_sched_policy_build.sh
+
+# Loop layout depends on the optional inline policy state. Rebuild all objects
+# on these internal-header edits rather than combine incompatible layouts.
+$(LIB_OBJS): $(srcdir)/../src/inc/loop_int.h $(srcdir)/../src/inc/sched_int.h
+
+test_sched_continuous: $(srcdir)/../test/m14/test_sched_continuous.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ \
+	    $(srcdir)/../test/m14/test_sched_continuous.c $(STATIC_LIB) $(LIBS)
+
+batch.o: $(srcdir)/../src/ptc/batch.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/batch.c
+
+test_batch: $(srcdir)/../test/m14/test_batch.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ \
+	    $(srcdir)/../test/m14/test_batch.c $(STATIC_LIB) $(LIBS)
+
+sched.o: $(srcdir)/../src/evt/sched.c xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/evt/sched.c
+
+test_sched_policy: $(srcdir)/../test/m14/test_sched_policy.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ \
+	    $(srcdir)/../test/m14/test_sched_policy.c $(STATIC_LIB) $(LIBS)

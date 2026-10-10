@@ -535,6 +535,53 @@ __queue_pop(xtc_loop_t *loop)
 	return (xtc_task_t *)xtc_deque_pop(&loop->deque);
 }
 
+#ifdef XTC_ENABLE_SCHED_POLICY
+/* Runtime alone removes task links. At most one policy callback per pop;
+ * a stolen default lane falls back, never hiding class work behind idle. */
+static xtc_task_t *
+__policy_pop(xtc_loop_t *loop)
+{
+	xtc_task_t *t = NULL;
+	struct xtc_run_class *rc;
+	int lane, i;
+	if (loop->sched.policy.select == NULL)
+		return __queue_pop(loop);
+	lane = __xtc_sched_select(loop);
+	if (lane >= 0) {
+		rc = &loop->classes[lane];
+		t = rc->q_head;
+		if (t != NULL) {
+			rc->q_head = t->q_next;
+			if (rc->q_head == NULL) rc->q_tail = NULL;
+			t->q_next = NULL;
+			rc->runs++;
+		}
+	} else if (lane == -1) {
+		t = loop->q_head;
+		if (t != NULL) {
+			loop->q_head = t->q_next;
+			if (loop->q_head == NULL) loop->q_tail = NULL;
+			t->q_next = NULL;
+		} else
+			t = xtc_deque_pop(&loop->deque);
+	}
+	if (t != NULL)
+		return t;
+	if (loop->sched.stats.fallbacks != UINT64_MAX)
+		loop->sched.stats.fallbacks++;
+	t = __queue_pop(loop);
+	/* A thief can also win the ordinary pick's default pop. With that
+	 * lane now empty, the next ordinary pick must see owner-only classes. */
+	if (t == NULL)
+		for (i = 0; i < loop->n_classes; i++)
+			if (loop->classes[i].q_head != NULL) {
+				t = __queue_pop(loop);
+				break;
+			}
+	return t;
+}
+#endif
+
 /*
  * L1: create a run class on `loop`.  Owner-only (called from the loop's
  * own thread, or before the loop runs).  Precomputes the reciprocal
@@ -706,7 +753,14 @@ __xtc_loop_step(xtc_loop_t *loop)
 	 * on every fill path in every backend getting it right. */
 	xtc_io_event_t evs[16];
 	int n_out, i, rc;
+#ifdef XTC_ENABLE_SCHED_POLICY
+	int selected_lane = -1;
+#endif
 	int64_t now_ns, next_deadline_ns, timeout_ns;
+
+#ifdef XTC_ENABLE_SCHED_POLICY
+	__xtc_sched_freeze(loop);
+#endif
 
 	/* Bind the current loop for the duration of this step.  xtc_loop_run
 	 * sets this once for its dedicated thread, but the DST sim scheduler
@@ -723,7 +777,11 @@ __xtc_loop_step(xtc_loop_t *loop)
 	(void)__xtc_inbox_drain(loop);
 
 	/* 1. Run queue. */
+#ifdef XTC_ENABLE_SCHED_POLICY
+	if ((t = __policy_pop(loop)) != NULL) {
+#else
 	if ((t = __queue_pop(loop)) != NULL) {
+#endif
 		int verdict;
 		/* Buggify: under DST, DEFER this ready task one extra turn --
 		 * re-enqueue it and run a DIFFERENT ready task instead (the
@@ -735,7 +793,13 @@ __xtc_loop_step(xtc_loop_t *loop)
 		 * DIFFERENT task; if the re-pop returns the same task (it was
 		 * the only one), run it.  Per-call BUGGIFY-stream coin, so it
 		 * never perturbs unrelated tests.  A no-op in production. */
-		if ((loop->q_head != NULL ||
+		if (
+#ifdef XTC_ENABLE_SCHED_POLICY
+		    /* Replacing the selected task would bypass the policy
+		     * runtime's mandatory lane fairness override. */
+		    loop->sched.policy.select == NULL &&
+#endif
+		    (loop->q_head != NULL ||
 		     xtc_deque_len(&loop->deque) > 0) &&
 		    XTC_SIM_BUGGIFY("sched.runq.defer_ready") &&
 		    xtc_sim_buggify_fault(250)) {
@@ -748,6 +812,15 @@ __xtc_loop_step(xtc_loop_t *loop)
 			if (t == NULL)
 				return XTC_OK;   /* nothing ready after all */
 		}
+#ifdef XTC_ENABLE_SCHED_POLICY
+		if (loop->sched.policy.select != NULL) {
+			selected_lane = t->sched_class;
+			if (selected_lane < 0 || selected_lane >= loop->n_classes ||
+			    !loop->classes[selected_lane].in_use)
+				selected_lane = -1;
+			__xtc_sched_service(loop, selected_lane);
+		}
+#endif
 		atomic_fetch_add_explicit(&loop->n_tasks_run, 1,
 		    memory_order_relaxed);
 		/* Record this run quantum's start when any time-accounting
@@ -947,6 +1020,16 @@ __xtc_loop_step(xtc_loop_t *loop)
 			return XTC_E_INTERNAL;
 		}
 
+#ifdef XTC_ENABLE_SCHED_POLICY
+		if (loop->sched.policy.select != NULL) {
+			/* A pending verdict consumed by a latched wake is a yield. */
+			if (verdict == XTC_TASK_PENDING && t != NULL &&
+			    atomic_load_explicit(&t->state, memory_order_acquire) != XTC_TS_PARKED)
+				verdict = XTC_TASK_RESCHED;
+			__xtc_sched_ran(loop, selected_lane, verdict);
+		}
+#endif
+
 		/*
 		 * I/O fairness.  Step 1 returns right after running one task,
 		 * and the caller only polls I/O once the run queue drains.  A
@@ -1098,6 +1181,9 @@ xtc_loop_run(xtc_loop_t *loop)
 	int rc;
 	xtc_loop_t *saved;
 	if (loop == NULL) return XTC_E_INVAL;
+#ifdef XTC_ENABLE_SCHED_POLICY
+	__xtc_sched_freeze(loop);
+#endif
 
 	saved = __xtc_current_loop;
 	__xtc_current_loop = loop;
@@ -1198,16 +1284,20 @@ __runq_nonempty(const xtc_loop_t *loop)
 int
 __xtc_loop_step_once(xtc_loop_t *loop)
 {
-	int rc;
+	int rc, has_tasks, has_timers;
+
+#ifdef XTC_ENABLE_SCHED_POLICY
+	__xtc_sched_freeze(loop);
+#endif
 	/* Bind this thread's current-loop to `loop` up front, BEFORE the
 	 * pre-step steal below enqueues onto it -- __xtc_loop_step (called
 	 * at the end) sets it too, but the steal-enqueue happens first, and
 	 * the DIAGNOSTIC owner guard (and any code consulting the binding)
 	 * must see the correct stepping loop, not a stale prior one. */
 	__xtc_current_loop = loop;
-	int has_tasks  =
+	has_tasks =
 	    atomic_load_explicit(&loop->n_alive, memory_order_relaxed) > 0;
-	int has_timers = __xtc_timer_heap_next_deadline(loop) >= 0;
+	has_timers = __xtc_timer_heap_next_deadline(loop) >= 0;
 	if (!has_tasks && !has_timers) {
 		/*
 		 * No locally-homed alive task and no timer.  But this loop may

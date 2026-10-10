@@ -58,6 +58,15 @@
  *	                   test_sim_saga's exact-reverse-order invariant
  *	                   fires.
  *
+ *	 10  BATCHWAKE -- batch.c drops the submit notification; parked driver
+ *	                   fails the logical progress bound.
+ *	 11  BATCHCAP  -- batch.c admits beyond max_active; active cap fails.
+ *	 12  BATCHRES  -- batch.c retains terminal reservations; conservation fails.
+ *	 13  BATCHSTALE -- batch.c ignores handle identity; wrong request cancelled.
+ *	 14  BATCHDONE -- batch.c retains DONE members in the next vector.
+ *	 15  SCHEDFAIR -- sched.c ignores the mandatory fairness override;
+ *	                   the bounded-service invariant fails.
+ *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
  *	lost-wakeup invariants.  test_sim_latch's critical section is
@@ -99,5 +108,12 @@
 #define XTC_DST_BUG_CHANDROP   7   /* chan.c: drop an mpmc message on recv */
 #define XTC_DST_BUG_REGDUP     8   /* reg.c: allow a duplicate registration */
 #define XTC_DST_BUG_SAGAORDER  9   /* saga.c: compensate forward, not reverse */
+
+#define XTC_DST_BUG_BATCHWAKE  10  /* batch.c: omit submit notification */
+#define XTC_DST_BUG_BATCHCAP   11  /* batch.c: ignore max_active admission cap */
+#define XTC_DST_BUG_BATCHRES   12  /* batch.c: retain terminal reservation */
+#define XTC_DST_BUG_BATCHSTALE 13  /* batch.c: ignore handle identity */
+#define XTC_DST_BUG_BATCHDONE  14  /* batch.c: retain completed vector member */
+#define XTC_DST_BUG_SCHEDFAIR  15  /* sched.c: bypass mandatory fairness override */
 
 #endif /* XTC_DST_INJECT_H */

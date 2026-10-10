@@ -39,3 +39,6 @@ option('diagnostic',
   type : 'boolean',
   value : false,
   description : 'Enable runtime DIAGNOSTIC assertions (mirrors --enable-diagnostic).')
+
+option('sched_policy', type : 'boolean', value : false,
+  description : 'Enable optional runtime lane policies.')
