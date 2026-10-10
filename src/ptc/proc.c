@@ -872,6 +872,25 @@ __table_lookup(struct xtc_proc_table *t, uint16_t local_id, uint32_t gen)
 	return p;
 }
 
+/* An owner-qualified presence check for child teardown. Unlike a global PID
+ * search, this cannot mistake another standalone loop's equal PID for ours.
+ * The caller keeps loop alive and serializes owner/quiescent use. */
+int
+__xtc_proc_loop_contains(xtc_loop_t *loop, xtc_pid_t pid)
+{
+	struct xtc_proc_table *table;
+	struct xtc_proc *p;
+	int found;
+
+	table = __table_for(loop, 0);
+	if (table == NULL)
+		return 0;
+	p = __table_lookup(table, pid.local_id, pid.gen);
+	found = p != NULL && xtc_pid_eq(p->pid, pid);
+	__proc_release(p);
+	return found;
+}
+
 static void
 __table_release(struct xtc_proc_table *t, uint16_t local_id)
 {

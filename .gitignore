@@ -11,6 +11,10 @@ dist/config.status
 dist/config.log
 dist/Makefile
 
+# Source test script (some global Git ignores exclude every dist/ directory).
+!/test/dist/
+!/test/dist/test_sched_policy_build.sh
+
 # Core dumps
 core
 core.*

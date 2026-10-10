@@ -18,6 +18,9 @@
 #include "xtc_res.h"
 #include "deque.h"
 #include "os_thread.h"
+#ifdef XTC_ENABLE_SCHED_POLICY
+#include "sched_int.h"
+#endif
 
 /*
  * Task state machine.  Transitions:
@@ -289,6 +292,9 @@ struct xtc_run_class {
 #define XTC_VRUNTIME_MIN_QUANTUM_NS 1000
 
 struct xtc_loop {
+#ifdef XTC_ENABLE_SCHED_POLICY
+	struct xtc_sched_state sched;
+#endif
 	xtc_io_t *io;
 
 	/* Local run queue (Chase-Lev deque, owner pushes/pops). */

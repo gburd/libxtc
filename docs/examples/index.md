@@ -85,6 +85,16 @@ provides it -- with deadlock detection, which hand-rolled
 `pthread_mutex` ordering does not. Source:
 [`examples/04_lockmgr_demo.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/04_lockmgr_demo.c).
 
+## Continuous batching
+
+[12_continuous_batching]({{ '/examples/continuous-batching/' | relative_url }})
+compares static cohorts with continuous refill using the same numerical
+vector kernel. Two groups share a loop with a heartbeat; the self-test
+checks exact results, bounded admission, cancellation, BLOCKED/resume, and
+late-short completion order under both scheduling policies. It requires
+`--enable-sched-policy` and has a dedicated Makefile test target; root
+`make check` and CI do not yet run it.
+
 ## Reading suggestion
 
 Read **01--04** alongside the [Guide]({{ '/guide/' | relative_url }}) --

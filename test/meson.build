@@ -22,6 +22,7 @@ build_root_inc = include_directories('.', '..')
 # and -I test/<dir>.  Encoded as [name, dir].
 # --------------------------------------------------------------------------
 munit_tests = [
+  ['sched_policy', 'm14'], ['sched_continuous', 'm14'], ['batch', 'm14'],
   # M0
   ['version', 'm0'], ['header', 'm0'], ['errors', 'm0'],
   # M1

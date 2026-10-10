@@ -71,6 +71,28 @@ jobs:
           XTC_SRC_DIR="$PWD" CC=${{ matrix.compiler }} \
             sh test/dist/test_install_headers.sh
 
+  sched-policy:
+    # Four isolated off/on native/sim builds plus installed-header consumers.
+    # Keep this matrix outside make check to avoid recursive full rebuilds.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf pkg-config gawk
+      - name: Scheduler feature matrix and replay equivalence
+        timeout-minutes: 15
+        run: sh test/dist/test_sched_policy_build.sh
+      - name: Enabled native and deterministic suites
+        timeout-minutes: 25
+        run: |
+          mkdir build_sched build_sched_sim
+          (cd build_sched && ../dist/configure --enable-sched-policy \
+            --with-io-backend=epoll --with-tls=none && make -j2 check)
+          (cd build_sched_sim && ../dist/configure --enable-sched-policy \
+            --with-io-backend=sim --with-tls=none && make -j2 && make check-dst)
+
   coro-fctx:
     # Force the fcontext coroutine substrate (the musl path) on a
     # glibc runner so it is exercised every commit without a musl

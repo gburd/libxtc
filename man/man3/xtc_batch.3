@@ -1,0 +1,152 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.TH XTC_BATCH 3 "2026" "libxtc" "Library Functions"
+.SH NAME
+xtc_batch_create, xtc_batch_submit, xtc_batch_cancel, xtc_batch_resume,
+xtc_batch_close, xtc_batch_destroy, xtc_batch_get_stats \- bounded continuous batching
+.SH SYNOPSIS
+.nf
+#include <xtc_batch.h>
+
+int xtc_batch_create(xtc_loop_t *loop, const xtc_batch_opts_t *opts,
+                    xtc_batch_t **out);
+int xtc_batch_submit(xtc_batch_t *group, void *request, uint64_t charge,
+                    uint64_t *out_handle);
+int xtc_batch_cancel(xtc_batch_t *group, uint64_t handle);
+int xtc_batch_resume(xtc_batch_t *group, uint64_t handle);
+int xtc_batch_close(xtc_batch_t *group, enum xtc_batch_close_mode mode);
+int xtc_batch_destroy(xtc_batch_t *group);
+int xtc_batch_get_stats(xtc_batch_t *group, xtc_batch_stats_t *out);
+.fi
+.SH DESCRIPTION
+A group owns a pinned driver process on the supplied loop. Each synchronous
+step callback receives one immutable vector of ready members, not one call per
+request. Finished members leave; waiting members refill at subsequent iteration
+boundaries. No scheduling policy is required. The API is available when built
+with --enable-sched-policy; disabled builds return XTC_E_NOSYS.
+.PP
+Initialize the size and version fields of options and statistics descriptors
+to sizeof the descriptor and XTC_BATCH_VERSION. The descriptor is copied;
+callback context and submitted request pointers remain borrowed.
+Options specify capacity, max_active, resource_capacity, sched_class,
+step, complete, and user. Both callbacks are mandatory.
+Capacity must be at least max_active, and both must be positive.
+Resource capacity must be positive. A NULL class selects default scheduling;
+a supplied class must belong to this loop and cannot be registered to another
+batch group. Ordinary non-batch processes may share that class. The class
+registration remains reserved until successful group destruction.
+.PP
+Create is allowed only before the loop's first run or simulation step.
+Setup must be externally serialized against execution. All storage is allocated
+before publishing the driver; create failure publishes no group. Allocation
+size arithmetic is checked, including on 32-bit targets.
+.PP
+Submit accepts a fixed maximum resource charge in 1..resource_capacity.
+Slots include both waiting and active requests. Admission to the active set is
+strict first-come, first-served: a younger request cannot bypass an older one
+whose charge does not fit. READY and BLOCKED requests both occupy active slots
+and retain their resource reservation until their outcome becomes terminal.
+Submission itself reserves a slot, not active resource units.
+Full or closed groups return XTC_E_AGAIN. Failed submission causes no callback
+and leaves the output handle unchanged. Request may be NULL if the application
+callback supports it.
+.PP
+Handles are nonzero, monotonically issued uint64_t identities, never reused
+within a group. Exhaustion returns XTC_E_RANGE rather than wrapping. Handles
+must be paired with the group that issued them; they are not transferable.
+.SH CALLBACKS
+The step callback has signature:
+.nf
+int step(const xtc_batch_item_t *items, xtc_batch_result_t *results,
+         size_t count, void *user);
+.fi
+Each item contains handle and request. Results are initialized to UNSET before
+each invocation. Set each state to XTC_BATCH_CONTINUE, XTC_BATCH_DONE,
+XTC_BATCH_BLOCKED, or XTC_BATCH_ERROR. ERROR requires an existing nonzero
+XTC_E_* error in its error field; other states ignore error.
+Omitted or invalid results fail that member with XTC_E_INTERNAL.
+A nonzero step return fails the entire current vector with that existing
+XTC_E_* error, or XTC_E_INTERNAL for an invalid error value. Neither vectors
+nor callback side effects are retried automatically.
+.PP
+The terminal callback has signature:
+.nf
+void complete(uint64_t handle, void *request, int outcome, void *user);
+.fi
+Outcome is XTC_OK for DONE, XTC_E_ABORTED for cancellation, or the recorded
+failure. The request borrow lasts through callback return. Completion invocation
+is recorded before entering user code; unexpected driver exit never starts the
+same notification twice. Recorded terminal outcomes, including DONE, survive
+unexpected driver exit. Other outstanding work fails with XTC_E_INTERNAL
+(or XTC_E_ABORTED if already cancelled). Such exit closes the group.
+.PP
+Callbacks run outside runtime bookkeeping and may yield, but must return in
+bounded time for progress. While any callback is in flight, ALL mutators on
+that group return XTC_E_DEADLK, including peer processes scheduled while the
+callback is suspended. Destroy is a mutator. Read-only statistics are allowed
+and report committed state, not partially written result words.
+Cancellation is masked across callbacks through result recording and completion
+accounting. A nonreturning or crashing callback cannot be guaranteed to finish
+its own application cleanup; exactly-once invocation does not imply successful
+application processing. Arbitrary nonlocal jumps out of the driver are unsupported.
+.SH CANCELLATION AND RESUME
+Cancel records a request for terminal cancellation at a boundary. A cancellation
+recorded before the next vector excludes the request. Already recorded DONE
+wins over later cancellation. Stale handles return XTC_E_INVAL after terminal
+notification. Duplicate cancellation before notification is harmless.
+.PP
+Resume changes a live BLOCKED request to READY. Duplicate resume on READY is
+harmless. WAITING and terminal requests are not resumable and return XTC_E_INVAL.
+Resume does not release or reacquire a blocked request's fixed resource charge.
+.SH OWNERSHIP AND SHUTDOWN
+Mutation is permitted during externally serialized pre-run setup and, once
+started, only from the actual owner loop. Send commands to an owner process
+using existing messaging APIs for cross-loop submission. A physical thread
+identity is not a loop identity, especially under deterministic simulation.
+.PP
+XTC_BATCH_DRAIN stops admission and waits for all accepted requests to finish;
+BLOCKED requests require explicit resume or cancellation. XTC_BATCH_CANCEL
+also cancels all nonterminal requests. Close is idempotent and may escalate
+DRAIN to CANCEL, never downgrade it. Close always signals boundary work,
+including when the driver is empty or all members are BLOCKED.
+.PP
+The required lifetime order is close, run until the driver ends, destroy,
+then loop or executor finalization. Even closing an empty group before its
+first run requires execution of its driver. Stopping a loop or executor is
+not draining: destroy returns XTC_E_AGAIN while the driver remains present.
+After a stopped run, route close through an owner process and run again.
+.PP
+Destroy requires a closed group, no borrowed requests or callback, and driver
+absence from the process table. An exit hook flag or alive==0 is insufficient:
+other exit hooks may still be parked. Destroy and statistics additionally allow
+externally synchronized quiescent calls after executor return, with the loop
+still allocated. These are not general thread-safe operations; a NULL current
+loop does not prove quiescence. Calling loop/exec fini with a live group violates
+the lifetime contract and does not promise automatic terminal delivery.
+.PP
+Normal shutdown uses batch_close, not an asynchronous driver kill. An idle
+notify waiter need not wake on kill alone. A later normal batch signal permits
+masked waiter unlink before pending kill delivery. There is no hidden polling
+thread, periodic wake, real clock read, or unseeded randomness in the engine.
+.SH STATISTICS
+The snapshot includes queued, ready, blocked, reserved_units, iterations,
+completed, cancelled, failed, rejections, max_vector, and total_members.
+Queued means waiting for admission; ready and blocked count active members.
+Iteration and membership totals measure vector calls and their occupancy.
+Terminal counters advance after completion delivery returns (or after an
+interrupted delivery is retired). Rejections count invalid or unsuccessful
+submissions after owner/callback validation. Cumulative counters saturate at
+UINT64_MAX. Per-request timing belongs in application instrumentation.
+.SH ERRORS
+XTC_E_INVAL indicates malformed arguments, descriptor size, foreign ownership,
+foreign class, invalid close mode, or an unavailable handle.
+XTC_E_VERSION indicates an unsupported descriptor version.
+XTC_E_RANGE indicates charge, allocation arithmetic, or handle exhaustion.
+XTC_E_AGAIN indicates full/closed admission, creation after first execution,
+or destruction before shutdown has completed.
+XTC_E_DEADLK indicates mutation during a callback.
+XTC_E_NOMEM indicates allocation failure during create.
+.SH SEE ALSO
+.BR xtc_proc (3),
+.BR xtc_sched (3),
+.BR xtc_sync (3)

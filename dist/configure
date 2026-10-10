@@ -736,6 +736,7 @@ ac_subst_files=''
 ac_user_opts='
 enable_option_checking
 enable_shared
+enable_sched_policy
 enable_diagnostic
 with_io_backend
 with_liburing
@@ -1377,6 +1378,7 @@ Optional Features:
   --enable-FEATURE[=ARG]  include FEATURE [ARG=yes]
   --enable-shared         Also build and install a shared libxtc.so (default:
                           no).
+  --enable-sched-policy   Enable optional runtime lane policies (default: no).
   --enable-diagnostic     Enable runtime DIAGNOSTIC assertions (aborts on
                           violations; default: no).
 
@@ -3920,6 +3922,26 @@ printf %s "checking whether to build a shared library... " >&6; }
 printf "%s\n" "$xtc_enable_shared" >&6; }
 XTC_ENABLE_SHARED=$xtc_enable_shared
 
+
+# Check whether --enable-sched-policy was given.
+if test ${enable_sched_policy+y}
+then :
+  enableval=$enable_sched_policy; xtc_enable_sched_policy=$enableval
+else case e in #(
+  e) xtc_enable_sched_policy=no ;;
+esac
+fi
+
+case $xtc_enable_sched_policy in #(
+  yes) :
+
+printf "%s\n" "#define XTC_ENABLE_SCHED_POLICY 1" >>confdefs.h
+ ;; #(
+  no) :
+     ;; #(
+  *) :
+    as_fn_error $? "--enable-sched-policy accepts only yes or no" "$LINENO" 5 ;;
+esac
 
 # Diagnostic build: enables runtime invariant checks that abort on
 # violation (e.g. unaligned direct I/O).  Off by default; for

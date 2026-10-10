@@ -17,6 +17,12 @@
 #ifndef XTC_PROC_INT_H
 #define XTC_PROC_INT_H
 
+#include "xtc_proc.h"
+
+/* Owner/quiescent lookup on a live loop, including procs still in exit hooks.
+ * PIDs are executor-relative; a global info scan cannot establish this join. */
+int __xtc_proc_loop_contains(xtc_loop_t *, xtc_pid_t);
+
 /*
  * Save / restore the current-proc context across a yield done by a
  * lower-level primitive (e.g. xtc_amutex parking the fiber), so the

@@ -142,3 +142,6 @@
 
 /* Library version as SemVer string */
 #undef XTC_VERSION_STRING
+
+/* Optional runtime lane policies. */
+#undef XTC_ENABLE_SCHED_POLICY
