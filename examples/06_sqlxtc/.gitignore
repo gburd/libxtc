@@ -16,6 +16,15 @@ test_btnode
 test_btree
 test_bufmgr_mt
 test_scan_resist
+test_sweep_bound
+test_evict_revalidate
+test_evict_revalidate_sampled
+test_btree_late_load
+test_flush_pin
+test_publication_pin
+test_private_frame
+test_pid_writeback
+test_drop_reserved
 test_btree_loop
 test_btree_mt
 test_wal_recover
@@ -39,6 +48,7 @@ test_native_txn
 test_isolation
 test_bufmgr_dio
 bm_writeback_bench
+bm_sweep_bench
 bt_merge_bench
 /sql_grammar.c
 /sql_grammar.h

@@ -100,12 +100,26 @@ typedef struct bm_opts {
 	 * (pages per pass + interval) to maximise flush throughput, after
 	 * Moilanen's genetic scheduler.  Off by default (fixed pacing). */
 	uint8_t     adaptive_writeback;
+
+	/* CLOCK governor, inspired by PostgreSQL's bounded sweep. After
+	 * this many HOT passes/demotions or reference-bit second chances in
+	 * one evict_one call, ignore HOT/ref protection for the next eligible
+	 * victim. Dirty candidates must still be flushed; pinned/busy frames
+	 * and failed reservations remain ineligible. This limits protection
+	 * work, NOT total advances or allocation latency under contention.
+	 * It can sacrifice hit rate. 0 preserves the legacy sweep. Applies
+	 * to CLOCK only, not the optional BM_SAMPLED_EVICT policy. */
+	uint32_t    claim_threshold;
 } bm_opts_t;
+
+/* Opt in with 128 after measuring the workload's hit-rate trade-off. */
+#define BM_CLAIM_THRESHOLD_DEFAULT 0u
 
 #define BM_OPTS_DEFAULT \
 	{ .path = NULL, .page_size = 4096, .n_frames = 256, .cool_pct = 10, \
 	  .scan_resist = 1, .reopen = 0, .double_write = 0, .lsn_off = -1, \
-	  .direct = 0, .adaptive_writeback = 0 }
+	  .direct = 0, .adaptive_writeback = 0, \
+	  .claim_threshold = BM_CLAIM_THRESHOLD_DEFAULT }
 
 /* Lifecycle. */
 int  bm_create(const bm_opts_t *opts, bm_t **out);
@@ -175,23 +189,26 @@ int  bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid);
 
 /* Resolve a page id to a resident, pinned frame through the internal
  * page table, loading from disk on a miss (which may evict another
- * frame to make room).  Returns XTC_OK and *out_frame on success. */
+ * frame to make room). Returns XTC_OK and *out_frame on success.
+ * A retired miss returns XTC_E_AGAIN: re-descend through current tree
+ * links rather than retrying the same dead id indefinitely. */
 int  bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame);
 
 /* Reclaim a page id.  The caller guarantees the page is no longer
  * reachable from any live page (its parent separator and any sibling
  * right-link have been rewired away) and holds no other reference to
  * it: the page is unlinked.  bm_free_pid evicts the page's resident
- * frame if any (so a stale resident copy cannot be re-fixed) and puts
- * the id on an in-memory freelist that bm_alloc_pid reissues before
- * growing the file.  Returns XTC_OK, or an error if the id cannot be
- * recorded (in which case the page is simply leaked, never reused). */
+ * frame if any (deferring destruction until existing pins drain) and
+ * quarantines the id before transferring it to the reusable freelist.
+ * bm_alloc_pid reissues it before growing the file. Returns XTC_OK, or
+ * an error if the id cannot be recorded (then leaked, never reused). */
 int  bm_free_pid(bm_t *bm, bm_pid_t pid);
 
-/* Drain the freed-page quarantine onto the reusable freelist.  Call at
- * a structure-modification epoch boundary (the start of a merge pass)
- * so a pid freed in the previous epoch is only reissued once any
- * latch-free chaser that may have observed it has finished. */
+/* Drain the freed-page quarantine onto the reusable freelist at the
+ * start of a merge pass, once old pinned/writeback owners have finished.
+ * Retired ids remain inadmissible to disk loads until bm_alloc_pid
+ * publishes an initialized replacement; draining alone is not a grace
+ * period for arbitrary parked descents. */
 void bm_reclaim_quarantine(bm_t *bm);
 
 /* Read-ahead: request that `pid` be warmed into the pool soon.  Returns
@@ -311,6 +328,14 @@ typedef struct bm_stats {
 	uint64_t freed;         /* page ids put on the reclaim freelist */
 	uint64_t reissued;      /* allocations served from the reclaim freelist */
 	uint64_t free_pids;     /* page ids currently on the reclaim freelist */
+	/* CLOCK sweep cost (see bm_opts_t.claim_threshold). Only successful
+	 * evict_one calls are counted, including provider calls. Failed calls
+	 * and get_free_frame retries are excluded: advances/allocs is scan
+	 * work per successful reclaim, NOT total allocation amplification. */
+	uint64_t allocs;        /* evict_one calls that reclaimed a frame */
+	uint64_t advances;      /* frames visited by those calls (sum) */
+	uint64_t adv_max;       /* most frames visited by any ONE call */
+	uint64_t forced_claims; /* successful reclaims after protection budget */
 } bm_stats_t;
 void bm_get_stats(bm_t *bm, bm_stats_t *out);
 

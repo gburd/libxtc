@@ -576,7 +576,7 @@ static void
 cm_churner(void *arg)
 {
 	long w = (long)arg;
-	int r, i;
+	int r, i, rc;
 	char k[16], v[32];
 
 	for (r = 0; r < CM_ROUNDS; r++) {
@@ -584,14 +584,24 @@ cm_churner(void *arg)
 		for (i = 0; i < CM_PER; i++) {
 			int idx = i * CM_CHURNERS + (int)w;
 			cm_churn_kv(idx, k, v);
-			(void)bt_insert(g_cm_bt, k, (uint16_t)strlen(k), v,
+			rc = bt_insert(g_cm_bt, k, (uint16_t)strlen(k), v,
 			    (uint16_t)strlen(v));
+			if (rc != XTC_OK) {
+				fprintf(stderr, "churn insert key=%s round=%d rc=%d\n",
+				    k, r, rc);
+				exit(1);
+			}
 		}
 		/* Delete it all again -- this drives the merges. */
 		for (i = 0; i < CM_PER; i++) {
 			int idx = i * CM_CHURNERS + (int)w;
 			cm_churn_kv(idx, k, v);
-			(void)bt_delete(g_cm_bt, k, (uint16_t)strlen(k));
+			rc = bt_delete(g_cm_bt, k, (uint16_t)strlen(k));
+			if (rc != XTC_OK) {
+				fprintf(stderr, "churn delete key=%s round=%d rc=%d\n",
+				    k, r, rc);
+				exit(1);
+			}
 			/* Reclamation-race probe: assert no pid ever maps two
 			 * resident frames mid-storm (the bufmgr aliasing bug).
 			 * Sample periodically so the scan does not dominate. */
