@@ -47,6 +47,14 @@ dump_one(wal_emit_fn emit, void *emit_ctx, void *user)
 	emit(emit_ctx, ck, (uint32_t)sizeof ck);
 }
 
+static void
+dump_empty(wal_emit_fn emit, void *emit_ctx, void *user)
+{
+	(void)emit;
+	(void)emit_ctx;
+	(void)user;
+}
+
 struct scan_st { uint64_t prev, min, n; int ordered; };
 
 static int
@@ -110,6 +118,20 @@ main(void)
 		fprintf(stderr, "FAIL: a post-checkpoint commit got LSN %llu, "
 		    "not above the pre-checkpoint durable LSN %llu\n",
 		    (unsigned long long)lsn, (unsigned long long)pre);
+		return 1;
+	}
+	post = wal_durable_lsn(w);
+	if (wal_checkpoint(w, path, NULL, NULL) != XTC_E_INVAL ||
+	    wal_checkpoint(w, path, dump_empty, NULL) != XTC_E_INVAL ||
+	    wal_durable_lsn(w) != post) {
+		fprintf(stderr, "FAIL: empty checkpoint must reject without resetting LSN\n");
+		return 1;
+	}
+	wal_close(w);
+	w = NULL;
+	wo.append = 1;
+	if (wal_open(&wo, &w) != XTC_OK || wal_durable_lsn(w) != post) {
+		fprintf(stderr, "FAIL: rejected checkpoint changed durable log on reopen\n");
 		return 1;
 	}
 	wal_close(w);
