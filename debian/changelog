@@ -1,3 +1,21 @@
+libxtc (1.53.0-1) unstable; urgency=medium
+
+  * sqlxtc: optional CLOCK protection-work governor and A/B benchmark.
+    Default remains zero: shorter sweeps can sacrifice cache hit rate.
+  * sqlxtc: retain writeback ownership, revalidate eviction candidates,
+    prevent private/published pin races, and reject obsolete page loads.
+    Retired page IDs remain unreadable after quarantine drains until a
+    replacement is published; delayed deletes cannot modify dead copies.
+  * sqlxtc: preserve WAL LSN continuity through checkpoint compaction;
+    reject empty replacements that cannot persist the sequence watermark.
+  * Add deterministic buffer-lifetime and stale-load regressions, including
+    collision-cluster checks and sampled-eviction revalidation.
+  * Reserve 512 KiB SQL fiber stacks for parser/sanitizer headroom.
+  * Fix FreeBSD test comparator naming and GCC TLS-test path truncation.
+  * Public library API and ABI unchanged.
+
+ -- Greg Burd <greg@burd.me>  Sat, 10 Oct 2026 14:42:00 -0400
+
 libxtc (1.52.0-1) unstable; urgency=medium
 
   * MINOR release -- one new public API for statistics.
