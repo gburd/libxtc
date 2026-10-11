@@ -1016,8 +1016,9 @@ check-examples: check-continuous-batching 01_hello 02_pingpong 03_supervised_app
 .PHONY: check-continuous-batching
 check-continuous-batching: $(STATIC_LIB)
 	@if grep -q '^\#define XTC_ENABLE_SCHED_POLICY 1' xtc_config.h; then \
-		$(MAKE) continuous_batching && \
+		$(MAKE) continuous_batching bench_continuous_batching && \
 		./continuous_batching --self-test && \
+		./bench_continuous_batching --self-test >/dev/null && \
 		sh $(srcdir)/../examples/check_help.sh ./continuous_batching; \
 	else \
 		echo '  [examples] SKIP: continuous batching (--enable-sched-policy disabled)'; \
