@@ -186,6 +186,20 @@ jobs:
           done
           exit $rc
 
+  sched-policy:
+    # Optional scheduler policies: off/on native+sim builds, installed
+    # consumers, exact default dispatch-trace equivalence, batch replay.
+    runs-on: codeberg-small
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf automake pkg-config gawk
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Scheduler feature matrix and replay equivalence
+        run: sh test/dist/test_sched_policy_build.sh
+
   sanitizers:
     runs-on: codeberg-small
     strategy:

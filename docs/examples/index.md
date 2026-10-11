@@ -92,8 +92,8 @@ compares static cohorts with continuous refill using the same numerical
 vector kernel. Two groups share a loop with a heartbeat; the self-test
 checks exact results, bounded admission, cancellation, BLOCKED/resume, and
 late-short completion order under both scheduling policies. It requires
-`--enable-sched-policy` and has a dedicated Makefile test target; root
-`make check` and CI do not yet run it.
+`--enable-sched-policy`; in an enabled build, root `make check` and the
+CI `sched-policy` job run its self-test.
 
 ## Reading suggestion
 

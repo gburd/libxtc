@@ -469,6 +469,9 @@ jobs:
       fail-fast: false
       matrix:
         sanitizer: [address, undefined]
+        # clang caches thread-local addresses across fiber stack switches
+        # where gcc does not; a clang-only migration bug escaped 1.53.
+        compiler: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
 
@@ -476,7 +479,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            gcc make autoconf pkg-config libssl-dev liburing-dev gawk
+            ${{ matrix.compiler }} make autoconf pkg-config libssl-dev liburing-dev gawk
 
       - name: Autoreconf
         working-directory: dist
@@ -486,6 +489,7 @@ jobs:
         run: |
           mkdir -p build_san
           cd build_san
+          CC=${{ matrix.compiler }} \
           CFLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g -O1" \
           LDFLAGS="-fsanitize=${{ matrix.sanitizer }}" \
             ../dist/configure --with-tls=auto
@@ -496,7 +500,8 @@ jobs:
       - name: Test under sanitizer
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1:detect_stack_use_after_return=1
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          # handle_segv=0: test_pkey expects a real SIGSEGV from a PKU fault.
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1:handle_segv=0
         run: make -C build_san check
 
   sanitizers-dst:
