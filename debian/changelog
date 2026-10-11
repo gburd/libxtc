@@ -1,3 +1,42 @@
+libxtc (1.54.0-1) unstable; urgency=medium
+
+  * MINOR release -- optional scheduling policies and continuous batching.
+    Both are off unless configured with --enable-sched-policy; a default
+    build exports the new functions as XTC_E_NOSYS stubs and keeps the
+    scheduler hot path unchanged.
+  * NEW API (xtc_sched.h):
+    - xtc_sched_policy_set / xtc_sched_get_stats: a lane policy chooses
+      which ready lane runs next.  The runtime keeps queues, task
+      lifetimes and wakes, validates the choice, and forces service of
+      any lane bypassed max_bypass times (bound: max_bypass + L
+      selection opportunities, not wall time).
+    - xtc_sched_continuous_set: built-in policy preferring ready batch
+      lanes, with the same bound.
+  * NEW API (xtc_batch.h):
+    - xtc_batch_create / _submit / _cancel / _resume / _close / _destroy
+      / _get_stats: preallocated, owner-local continuous batching.  One
+      vector step per iteration; finished requests leave and waiting
+      ones join at the next boundary.  FCFS admission against fixed
+      resource charges, exactly-once completion, DEADLK for mutation
+      from callbacks, close -> run -> destroy -> fini lifecycle.
+  * FIX: PIDs are loop-relative and every standalone loop encodes
+    loop_id 0.  Arena groups, xtc_app_shutdown, supervisor restart and
+    add_child, fsm join, and stop messages now resolve in the owner
+    loop's table.  Before this, arena discard and app shutdown could
+    kill an unrelated proc with an equal PID on another standalone loop.
+  * FIX: clang kept thread-local addresses live across fiber stack
+    switches, so a migratable fiber resuming on another carrier wrote
+    the previous thread's current-proc slot (heap-use-after-free under
+    clang ASan; gcc builds unaffected).  Thread-locals touched after a
+    switch now go through non-inlinable accessors.
+  * NEW: examples/12_continuous_batching and a checked static versus
+    continuous benchmark; scheduling guide section with a tested snippet.
+  * TESTS: deterministic replay, six planted DST bugs (all caught on
+    seed 1), pinned seeds, off/on build and dispatch-trace equivalence.
+  * No existing public struct changed size.
+
+ -- Greg Burd <greg@burd.me>  Sat, 10 Oct 2026 23:30:00 -0400
+
 libxtc (1.53.0-1) unstable; urgency=medium
 
   * sqlxtc: optional CLOCK protection-work governor and A/B benchmark.
