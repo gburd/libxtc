@@ -26,6 +26,7 @@ orchestration, I/O, storage, observability):
 - [`xtc_alloc_audit(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_alloc_audit.3) -- debug allocation auditor with per-process leak detection
 - [`xtc_app(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_app.3) -- OTP-style application container
 - [`xtc_async(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_async.3) -- L2 stackful coroutines and protothreads
+- [`xtc_batch(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_batch.3) -- bounded continuous batching
 - [`xtc_bdev(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_bdev.3) -- portable block-device I/O over async fibers
 - [`xtc_blocking(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_blocking.3) -- offload blocking work to a thread pool without stalling the loop
 - [`xtc_cfg(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_cfg.3) -- typed runtime configuration registry
@@ -56,6 +57,7 @@ orchestration, I/O, storage, observability):
 - [`xtc_rcu(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_rcu.3) -- epoch-based read-copy-update
 - [`xtc_reg(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_reg.3) -- named process registry
 - [`xtc_res(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_res.3) -- resource accountant with hard caps and high-water alerts
+- [`xtc_sched(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_sched.3) -- optional runtime lane policies
 - [`xtc_slab(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_slab.3) -- slab + magazine allocator
 - [`xtc_stack_reclaim(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_stack_reclaim.3) -- reclaim a parked fiber's unused stack memory
 - [`xtc_stats(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_stats.3) -- runtime statistics: counters, gauges, histograms

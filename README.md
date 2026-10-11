@@ -6,7 +6,7 @@
 [![Docs](https://github.com/gburd/libxtc/actions/workflows/pages.yml/badge.svg)](https://gburd.github.io/libxtc/)
 [![Sanitizers](https://img.shields.io/badge/tested-ASan%20%2B%20UBSan-brightgreen)](https://github.com/gburd/libxtc/actions/workflows/ci.yml)
 [![License: ISC](https://img.shields.io/badge/license-ISC-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v1.53.0-informational)](https://codeberg.org/gregburd/libxtc/releases)
+[![Release](https://img.shields.io/badge/release-v1.54.0-informational)](https://codeberg.org/gregburd/libxtc/releases)
 [![C11](https://img.shields.io/badge/C-11-blue.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 
 **[Read the documentation &rarr;](https://gburd.github.io/libxtc/)**
@@ -190,6 +190,7 @@ notes, is [`examples/README.md`](examples/README.md)):
 | `09_pgmock/` | A mock PostgreSQL backend on the xtc scheduler -- zero PG source | CI (built, `--help` lint only -- not run) |
 | `10_circuit_breaker.c` | The circuit-breaker pattern as an `xtc_fsm` (gen_statem) | `make check` (runs, asserts) |
 | `11_lorb/` | A price-time limit order book / matching engine, with benchmarks | CI (in-process tests) |
+| `12_continuous_batching/` | Continuous batching: requests join and leave a vector between iterations (needs `--enable-sched-policy`) | `make check` in an enabled build (runs, asserts) |
 
 ## Built on three traditions
 

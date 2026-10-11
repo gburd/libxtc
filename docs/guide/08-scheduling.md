@@ -126,6 +126,153 @@ If your workload is a single kind of task, or you are happy with even
 sharing, leave both off -- the default FIFO + work stealing is simpler
 and faster.
 
+## Optional lane policies and continuous batching
+
+Configure with `--enable-sched-policy` (Meson: `-Dsched_policy=true`) to
+get two more interfaces. A default build still exports every function;
+each returns `XTC_E_NOSYS`, and the scheduler hot path is unchanged. An
+enabled build with no policy installed keeps the ordinary picker, queue
+order, and weighted accounting.
+
+- `xtc_sched.h` -- a lane policy that chooses which ready lane runs next.
+- `xtc_batch.h` -- a batch engine that calls one step function per
+  iteration with the vector of ready requests, and refills that vector
+  between iterations.
+
+The two are independent. Batching works under the ordinary picker, and a
+policy works without any batch group.
+
+### Runtime-owned queues
+
+A lane is a queue the loop already has: lane -1 is the default
+FIFO/deque, lanes 0..15 are the class queues created by
+`xtc_exec_class_create`. A policy's `select` callback receives an
+immutable snapshot of the ready lanes, ordered by lane ID, with each
+lane's shares, runs, bypass count, and advisory batch counts. It returns
+a lane ID, or `XTC_SCHED_DEFAULT` to use the ordinary picker. The
+snapshot holds no task or queue pointers. The runtime still removes the
+task, dispatches it, owns its lifetime, and handles wakes and stealing.
+An invalid choice falls back to the ordinary picker and is counted by
+`xtc_sched_get_stats`.
+
+Installation is setup-only. `xtc_sched_policy_set` and
+`xtc_sched_continuous_set` must run before the loop's first run or step,
+even an empty one; afterwards they return `XTC_E_AGAIN`. Callbacks must
+be bounded, nonblocking, allocation-free, and deterministic under
+simulation.
+
+### Bounded bypass
+
+Every policy carries a positive `max_bypass`. For each ready lane the
+runtime counts consecutive selection opportunities in which that lane was
+not served. When a continuously ready lane reaches `max_bypass`, the
+runtime overrides the policy and serves the oldest such lane (ties go to
+the lower lane ID). With L ready lanes, every ready lane is served within
+`max_bypass + L` opportunities, provided callbacks and dispatched tasks
+return.
+
+The bound counts opportunities, not time. A task that runs for 50 ms
+without yielding stretches it by 50 ms. It is not preemption, and it is
+not per-task fairness inside the default LIFO deque. A custom policy may
+skew weighted shares; it does not promise exact proportions.
+
+### The continuous policy
+
+`xtc_sched_continuous_set(loop, max_bypass)` installs a built-in policy
+with loop-owned state and no allocation. Among registered batch classes
+that are ready and report ready members, it prefers the greatest bypass
+age and rotates equal ages by class ID. With no such class it returns
+`XTC_SCHED_DEFAULT`. A group whose members are all BLOCKED gets no
+preference. The policy picks a class, not a group member, and the
+bypass bound still covers ordinary tasks and the default lane.
+
+Each explicit class holds at most one batch group; ordinary tasks may
+share the class. A group created with a NULL class works but gets no
+preference from this policy.
+
+### Batch engine lifecycle
+
+A group owns a pinned driver process on its loop. Requests are borrowed
+pointers with a fixed resource charge. Admission to the active set is
+first-come, first-served against `resource_capacity`; a full or closed
+group returns `XTC_E_AGAIN` and the caller keeps the request.
+
+The step callback receives the whole ready vector and writes one result
+per member: `CONTINUE`, `DONE`, `BLOCKED`, or `ERROR`. The complete
+callback runs exactly once per accepted request:
+
+{% include snippet.html file="15_continuous_batching.c" region="step" %}
+
+Create the group and submit work before the loop's first run. The
+continuous policy is optional; the snippet installs it to show the call:
+
+{% include snippet.html file="15_continuous_batching.c" region="create" %}
+
+Shutdown has a fixed order:
+
+{% include snippet.html file="15_continuous_batching.c" region="lifecycle" %}
+
+The four requests need 5, 1, 2, and 1 rounds, with at most two active.
+Each finished member frees a slot that the next waiting request takes at
+the following iteration boundary, so the program runs 9 member-rounds in
+5 iterations and all three short requests finish before the long one. A
+static batch of two would hold requests 2 and 3 until request 0
+finished. In a default build the snippet prints a note and exits 0.
+
+The rules the snippet follows:
+
+- **Create pre-run.** `xtc_batch_create` after the first run or step
+  returns `XTC_E_AGAIN`.
+- **Owner-only mutation.** After the loop starts, submit, cancel,
+  resume, close, and destroy are valid only on the owner loop; another
+  loop gets `XTC_E_INVAL`. Route cross-loop work to an owner process with
+  messaging.
+- **Callbacks cannot mutate.** While a step or complete callback is in
+  flight, every mutator on that group returns `XTC_E_DEADLK`, including
+  destroy and including peer processes that run while the callback is
+  suspended. The snippet's step callback checks this. Return a result
+  state instead, and mutate from an owner process after the callback
+  returns. Statistics stay readable.
+- **Close, run, destroy, fini.** `XTC_BATCH_DRAIN` waits for accepted
+  work (BLOCKED members need resume or cancel); `XTC_BATCH_CANCEL`
+  cancels it. The driver exits only when the loop runs, even for an
+  empty group closed before the first run. `xtc_loop_stop` is not a
+  drain: destroy returns `XTC_E_AGAIN` while the driver exists. Destroy
+  the group before `xtc_loop_fini`.
+
+### Alternatives not chosen
+
+- **Policy-owned queues.** A vtable that owns enqueue, dequeue,
+  stealing, and placement would duplicate task lifecycle and wake
+  handling, and widen what has to be proven. The policy only chooses
+  among lanes the runtime owns.
+- **Orca's GPU results.** The engine adopts the iteration-level
+  admission idea from Orca (OSDI '22). It runs CPU fibers, makes no claim
+  to Orca's GPU throughput, and its lane rotation is not Orca's
+  scheduler.
+- **Timely dataflow.** There are no timestamps, frontiers, progress
+  tracking, or differential updates. A group is bounded admission plus a
+  vector step. Build pipelines from processes and channels with explicit
+  backpressure.
+- **Wall-time fairness.** A time-based bound would put clock reads in
+  the picker and would not replay under deterministic simulation.
+
+### When not to use it
+
+- The requests share no per-iteration work, so a vector call saves
+  nothing. One process per request is simpler.
+- Requests are equal length and arrive together. Submitting a cohort and
+  draining it gives the same result without refill.
+- You need a latency bound in time. Use a latency class and the stall
+  watchdog; the bypass bound counts opportunities.
+- Many threads submit directly. The engine requires an owner process to
+  receive that work.
+
+Leaving the feature off costs nothing. The
+[continuous batching example]({{ '/examples/continuous-batching/' | relative_url }})
+runs two groups, a heartbeat, cancellation, capacity retry, and
+BLOCKED/resume, and compares static and continuous admission.
+
 ## Demonstrated in
 
 - [`examples/03_supervised_app.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/03_supervised_app.c)
@@ -144,3 +291,7 @@ and faster.
   stall-watchdog API in full.
 - [`xtc_proc(3)`]({{ '/man/xtc_proc/' | relative_url }}) --
   `xtc_proc_set_class` and `xtc_proc_opts_t.sched_class`.
+- [`xtc_sched(3)`]({{ '/reference/api/xtc_sched/' | relative_url }}) --
+  lane policies, the bypass bound, and the continuous policy.
+- [`xtc_batch(3)`]({{ '/reference/api/xtc_batch/' | relative_url }}) --
+  the batch engine, callbacks, cancellation, and shutdown.
