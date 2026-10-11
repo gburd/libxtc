@@ -357,6 +357,14 @@ batch_alloc(size_t count, size_t size, void **out)
 		return XTC_E_RANGE;
 	return __os_calloc(count, size, out);
 }
+
+/* Test-only (not PUBLIC): position the handle counter so a test reaches
+ * UINT64_MAX exhaustion without 2^64 submissions. Pre-run setup only. */
+void
+__xtc_batch_set_last_handle(xtc_batch_t *b, uint64_t last)
+{
+	b->last_handle = last;
+}
 #endif
 
 /* PUBLIC: int xtc_batch_create __P((xtc_loop_t *, const xtc_batch_opts_t *, xtc_batch_t **)); */
