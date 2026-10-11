@@ -210,6 +210,56 @@ the kernel backlog (`XTC_E_RESOURCE`) instead of being accepted and
 dropped; `xtc_net_close` refunds it.  Descriptors from a raw `accept(2)`
 are still not charged -- use `xtc_net_accept`.
 
+## RESOLVED (1.54): clang builds misidentified the running proc after migration
+
+**Symptom.** On clang builds, a migratable fiber that parked in
+`xtc_proc_wait_fd`, `xtc_proc_sleep`, `xtc_recv`, or `xtc_blocking_run`
+and resumed on another carrier thread could overwrite the previous
+thread's current-proc slot. The proc running on that thread then
+saved and restored the wrong identity. Under clang ASan, `test_exec`
+reported a heap-use-after-free in the resume kill check (6 of 16 runs on
+the `Blk2` workload). gcc builds, including all CI jobs, were not
+affected.
+
+**Cause.** clang computes a thread-local variable's address once per
+function and keeps it in a register or spill slot across the call that
+switches stacks. When the fiber returns on another OS thread, the
+cached address still names the old thread's slot. gcc re-reads `%fs`
+for each access in the TLS models libxtc uses. This is the same hazard
+as MSVC caching `__declspec(thread)` across `SwitchToFiber` (below).
+
+**Fix.** Thread-locals accessed after a stack switch on a fiber are
+reached through a non-inlinable accessor that passes the address through
+a `volatile` local, so each access recomputes it on the current thread.
+`test/m5/test_exec.c` `Blk8_migratable_self_identity` checks that
+`xtc_self()` still names the caller between parks; on clang -O2 it
+fails 10 of 10 runs without the accessor and passes 10 of 10 with it.
+
+## RESOLVED (1.54): loop-relative PIDs misrouted across standalone loops
+
+**Symptom.** Every standalone loop encodes `loop_id` 0 in its PIDs, so two
+procs on two standalone loops can carry equal PIDs. Lookups that used the
+PID alone could pick the wrong loop:
+
+- `xtc_arena_group_discard` killed an unrelated proc with an equal PID and
+  could report a reaped member as still present; `xtc_arena_group_add`
+  could drop a second member as a duplicate.
+- `xtc_app_shutdown` from a plain thread force-killed an unrelated proc.
+- A `one_for_all` supervisor waited out its cleanup bound and stopped
+  instead of restarting; `xtc_fsm_join` never returned `XTC_OK`;
+  `xtc_sup_add_child` from another standalone loop timed out; stop kicks
+  reached the wrong proc.
+
+**Fix.** Each subsystem records the owner loop with the PID (the spawn
+loop, which migration does not change) and resolves presence, kills, and
+control messages in that loop's table only. Public `xtc_send`,
+`xtc_exit_pid`, and `xtc_proc_info` behave as before. Regressions in
+`test/m11/test_mctx.c` and `test/m10/test_{sup,fsm,app}.c` fail on 1.53.
+
+**Contract.** Owner loops must outlive the structure that names their
+procs: an arena group until discard reports `all_gone` or the group is
+destroyed, an fsm until `xtc_fsm_join` returns `XTC_OK`.
+
 ## OPEN (ABI): caller-allocated structs grew during 1.x -- do not mix minors
 
 **Status:** OPEN, and the most consequential item on this page for a
