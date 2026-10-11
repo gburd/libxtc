@@ -139,6 +139,16 @@ frees it (it does not kill members).
 returns the arena; members allocate their SHARED state there, and
 .Fn xtc_arena_group_add
 registers the calling fiber as a member.
+The group records each member's pid together with its owner loop (the
+loop it was spawned on), because a pid alone is executor-relative and
+can name an unrelated process on another standalone loop.
+A member's owner loop must not be finalized while the group still lists
+that member: keep it alive until a
+.Fn xtc_arena_group_discard
+reports
+.Va all_gone
+== 1, or until
+.Fn xtc_arena_group_destroy .
 .Fn xtc_arena_group_discard
 is the point of the facility: it
 .Fn xtc_exit_pid_deadline Ns s

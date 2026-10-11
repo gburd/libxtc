@@ -121,10 +121,27 @@ __tsan_sched_capture(void)
  * stack (known), on the way back it is the scheduler's (captured here).
  */
 #if defined(XTC_FIBER_SWITCH_ANNOTATE)
-static XTC_THREAD_LOCAL const void *__san_sched_bottom;
-static XTC_THREAD_LOCAL size_t      __san_sched_size;
-static XTC_THREAD_LOCAL void       *__san_sched_fake;   /* scheduler's own
-                                                         * fake-stack token */
+struct __san_sched_tls {
+	const void *bottom;
+	size_t      size;
+	void       *fake;   /* scheduler's own fake-stack token */
+};
+static XTC_THREAD_LOCAL struct __san_sched_tls __san_sched_tls_v;
+/* Reached through a non-inlinable accessor so every access names the
+ * CURRENT thread's slot: a migratable fiber resumes from the jump on
+ * another OS thread and clang keeps the TLS address live across it
+ * (xtc_await/__coro_entry then touched the OLD thread's bounds).  Same
+ * fix as coro_uctx.c. */
+__attribute__((noinline))
+static struct __san_sched_tls *
+__san_sched_slot(void)
+{
+	struct __san_sched_tls *volatile slot = &__san_sched_tls_v;
+	return slot;
+}
+#define __san_sched_bottom (__san_sched_slot()->bottom)
+#define __san_sched_size   (__san_sched_slot()->size)
+#define __san_sched_fake   (__san_sched_slot()->fake)
 
 /* About to jump onto `to_bottom`/`to_size`; save the outgoing coro's
  * fake stack into *save_slot (NULL if it will never resume, so the fake
@@ -527,10 +544,22 @@ __xtc_coro_preempt_effective(void)
 	return 0;
 }
 
+__attribute__((noinline))
+struct xtc_coro *
+__xtc_current_coro_get(void)
+{
+	/* volatile round-trip: never folded into a caller's cached TLS
+	 * address, even under LTO (see coro_int.h). */
+	struct xtc_coro **volatile slot = &__xtc_current_coro;
+	return *slot;
+}
+
 xtc_task_t *
 __xtc_current_task(void)
 {
-	return __xtc_current_coro != NULL ? __xtc_current_coro->self : NULL;
+	struct xtc_coro *c = __xtc_current_coro_get();
+	return c != NULL ? c->self : NULL;
 }
+
 
 #endif /* substrate active */

@@ -60,7 +60,10 @@ struct xtc_svr {
 
 /* The server whose callback is currently running on this thread, so
  * xtc_svr_continue() can find it.  A server proc runs its callbacks
- * only on its own loop thread, so a plain TLS pointer is correct. */
+ * only on its own loop thread, so a plain TLS pointer is correct.  That
+ * holds only while servers are PINNED: clang keeps &__svr_cur live across
+ * xtc_yield in __svr_entry, so a migratable server would need an
+ * out-of-line accessor (see __current_proc in src/ptc/proc.c). */
 static XTC_THREAD_LOCAL struct xtc_svr *__svr_cur;
 
 /* Reply slot -- owned by the caller of xtc_svr_call.  Lives on the

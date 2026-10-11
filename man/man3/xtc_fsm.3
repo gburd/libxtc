@@ -86,6 +86,12 @@ asks the machine to stop (non-blocking; runs
 then the proc exits);
 .Fn xtc_fsm_join
 waits for exit and frees the handle.
+The loop passed to
+.Fn xtc_fsm_start
+must not be finalized until
+.Fn xtc_fsm_join
+returns
+.Dv XTC_OK .
 .Fn xtc_fsm_pid
 returns the machine's pid.
 .Pp

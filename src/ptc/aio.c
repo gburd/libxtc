@@ -296,7 +296,7 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 			 * aio path pays nothing.
 			 */
 			if (!__xtc_aio_done_get(&a) &&
-			    __xtc_current_loop != loop)
+			    __xtc_current_loop_get() != loop)
 				(void)xtc_loop_wake(loop);
 		}
 		if (tail_on && park_ns != 0) {
@@ -406,7 +406,7 @@ aio_do_v(int op, int fd, const struct iovec *iov, int iovcnt, int64_t off)
 		xtc_yield();
 		/* Nudge the submitting loop so a migrated fiber's completion
 		 * is reaped -- see the identical guard in aio_do. */
-		if (!__xtc_aio_done_get(&a) && __xtc_current_loop != loop)
+		if (!__xtc_aio_done_get(&a) && __xtc_current_loop_get() != loop)
 			(void)xtc_loop_wake(loop);
 	}
 	return a.res;

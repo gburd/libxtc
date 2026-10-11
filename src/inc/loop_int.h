@@ -533,6 +533,13 @@ int  __xtc_inbox_drain(xtc_loop_t *loop);  /* owner-only; drains into local queu
  * NULL on threads that aren't loop owners. */
 extern XTC_THREAD_LOCAL xtc_loop_t *__xtc_current_loop;
 
+/* The same cursor read out of line on the CURRENT thread.  Fiber code
+ * that reads it after xtc_yield (or any call that can switch stacks) must
+ * use this: a migratable fiber can resume on another carrier, and
+ * compilers keep a thread-local's address live across calls, so a direct
+ * read would see the previous thread's loop. */
+xtc_loop_t *__xtc_current_loop_get(void);
+
 /*
  * Fiber-context preservation hook.  The L3 process layer keeps a
  * per-thread "current proc" pointer that must survive a yield (the

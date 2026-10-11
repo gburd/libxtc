@@ -1046,6 +1046,82 @@ test_blocking_kill_no_frame_escape(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [Blk8] A migratable fiber's identity survives a cross-thread resume.
+ *
+ * clang computes a thread-local's address once (%fs:0 + offset) and may
+ * keep it in a register/spill slot across an opaque call -- including
+ * xtc_yield(), across which a migratable fiber can move to ANOTHER OS
+ * thread.  The post-yield `__current_proc = self` in xtc_proc_sleep /
+ * xtc_proc_wait_fd / xtc_recv then stored into the PRE-migration
+ * thread's slot, overwriting the identity of whatever proc was running
+ * there.  That victim saw xtc_self() name the migrated proc, saved that
+ * value at its next yield, and on resume the kill hook read the other
+ * proc's kill_pending after it had exited and been freed -- the Blk2
+ * heap-use-after-free (clang ASan, ~1 in 3 runs; gcc does not cache the
+ * address, which is why gcc CI never saw it).  Here every fiber checks,
+ * between parks, that xtc_self() still names itself; no sanitizer is
+ * needed to see the clobber.
+ */
+#define BLK8_FIBERS 32
+#define BLK8_ITERS  200
+#define BLK8_CHECKS 2000
+#if !defined(_WIN32)
+static _Atomic int g_blk8_done, g_blk8_wrong;
+
+static void
+blk8_proc(void *arg)
+{
+	xtc_pid_t me = xtc_self();
+	int k, j;
+	(void)arg;
+	for (k = 0; k < BLK8_ITERS; k++) {
+		(void)xtc_proc_sleep(((k & 3) + 1) * 1000LL);
+		for (j = 0; j < BLK8_CHECKS; j++) {
+			if (!xtc_pid_eq(xtc_self(), me)) {
+				atomic_fetch_add(&g_blk8_wrong, 1);
+				break;
+			}
+		}
+	}
+	atomic_fetch_add(&g_blk8_done, 1);
+}
+#endif /* !_WIN32 */
+
+static MunitResult
+test_migratable_self_identity(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+#if defined(_WIN32)
+	/* Same coarse-timer reason as Blk5; the identity fix is in proc.c
+	 * and is platform-independent. */
+	return MUNIT_SKIP;
+#else
+	xtc_exec_t *e;
+	xtc_proc_opts_t opts = { 0 };
+	xtc_pid_t pid;
+	int i, nloops;
+	atomic_store(&g_blk8_done, 0);
+	atomic_store(&g_blk8_wrong, 0);
+	nloops = __os_ncpus();
+	if (nloops > 8) nloops = 8;
+	if (nloops < 2) nloops = 2;
+	munit_assert_int(xtc_exec_init(&e, nloops), ==, XTC_OK);
+	xtc_exec_set_eager_rebalance(e, 1);
+	for (i = 0; i < BLK8_FIBERS; i++) {
+		opts.name = "blk8";
+		opts.migratable = 1;
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
+		    blk8_proc, NULL, &opts, &pid), ==, XTC_OK);
+	}
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_blk8_done), ==, BLK8_FIBERS);
+	munit_assert_int(atomic_load(&g_blk8_wrong), ==, 0);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+#endif
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1064,6 +1140,7 @@ static MunitTest tests[] = {
 	{ "/Blk5_migratable_timer_resume", test_migratable_timer_resume, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk6_migratable_waitfd_resume", test_migratable_waitfd_resume, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Blk7_blocking_kill_no_frame_escape", test_blocking_kill_no_frame_escape, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Blk8_migratable_self_identity", test_migratable_self_identity, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/exec", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

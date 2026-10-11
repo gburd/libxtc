@@ -291,9 +291,102 @@ test_fsm_state_timeout(const MunitParameter p[], void *data)
 	return MUNIT_OK;
 }
 
+#include <pthread.h>
+
+/* PIDs are executor-relative: every standalone loop encodes loop_id 0, so
+ * a proc on an UNRELATED standalone loop can carry a pid equal to ours.
+ * feq_by is that bystander: it counts messages it receives and records
+ * whether it exited normally (a kill aimed at the wrong proc stops it). */
+static _Atomic int g_feq_stop, g_feq_by_msgs, g_feq_by_normal;
+static void
+feq_by(void *arg)
+{
+	void *m;
+	size_t s;
+	(void)arg;
+	while (!atomic_load(&g_feq_stop)) {
+		m = NULL;
+		if (xtc_recv(&m, &s, 1000000) == XTC_OK) {
+			atomic_fetch_add(&g_feq_by_msgs, 1);
+			xtc_free(m);
+		}
+	}
+	atomic_fetch_add(&g_feq_by_normal, 1);
+}
+static void *
+feq_loop_thread(void *arg)
+{
+	(void)xtc_loop_run(arg);
+	return NULL;
+}
+/* Spawn n bystanders on a fresh loop b (registered FIRST, so an off-loop
+ * pid-only lookup also prefers it) and run it on its own thread. */
+static void
+feq_by_start(xtc_loop_t **b, xtc_pid_t *by, int n, pthread_t *th)
+{
+	int i;
+	atomic_store(&g_feq_stop, 0);
+	atomic_store(&g_feq_by_msgs, 0);
+	atomic_store(&g_feq_by_normal, 0);
+	munit_assert_int(xtc_loop_init(b), ==, XTC_OK);
+	for (i = 0; i < n; i++)
+		munit_assert_int(xtc_proc_spawn(*b, feq_by, NULL, NULL, &by[i]),
+		    ==, XTC_OK);
+	munit_assert_int(pthread_create(th, NULL, feq_loop_thread, *b), ==, 0);
+}
+static int
+feq_has_equal(const xtc_pid_t *by, int n, xtc_pid_t p)
+{
+	int i;
+	for (i = 0; i < n; i++)
+		if (xtc_pid_eq(by[i], p)) return 1;
+	return 0;
+}
+
+static xtc_fsm_result_t
+feq_event(void *st, int state, const void *msg, size_t len,
+          xtc_fsm_call_t *call)
+{
+	xtc_fsm_result_t r = { XTC_FSM_KEEP, 0, 0 };
+	(void)st; (void)state; (void)msg; (void)len; (void)call;
+	return r;
+}
+/* xtc_fsm_join polled a pid-only global lookup: the machine on loop A had
+ * exited, but the bystander with its pid on loop B kept join at E_AGAIN.
+ * xtc_fsm_stop's off-loop kick also went to that bystander. */
+static MunitResult
+test_fsm_join_equal_pid_other_loop(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *la = NULL, *lb = NULL;
+	xtc_fsm_callbacks_t cb;
+	xtc_fsm_t *fsm = NULL;
+	xtc_pid_t by[4];
+	pthread_t th;
+	int rc;
+	(void)p; (void)d;
+
+	feq_by_start(&lb, by, 4, &th);
+	memset(&cb, 0, sizeof cb);
+	cb.event = feq_event;
+	munit_assert_int(xtc_loop_init(&la), ==, XTC_OK);
+	munit_assert_int(xtc_fsm_start(la, &cb, NULL, 0, NULL, &fsm), ==, XTC_OK);
+	munit_assert_true(feq_has_equal(by, 4, xtc_fsm_pid(fsm)));   /* premise */
+	munit_assert_int(xtc_fsm_stop(fsm), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(la), ==, XTC_OK);   /* machine exits */
+	rc = xtc_fsm_join(fsm, 0);
+	atomic_store(&g_feq_stop, 1);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	munit_assert_int(rc, ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_feq_by_msgs), ==, 0);   /* no stray kick */
+	munit_assert_int(xtc_loop_fini(la), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(lb), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/fsm_basic", test_fsm_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_state_timeout", test_fsm_state_timeout, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fsm_join_equal_pid_other_loop", test_fsm_join_equal_pid_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 

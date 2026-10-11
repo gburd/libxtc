@@ -22,7 +22,7 @@
 #include "xtc_fsm.h"
 #include "xtc_orc.h"
 #include "xtc_sync.h"
-#include "xtc_inspect.h"   /* xtc_proc_info: used by xtc_fsm_join */
+#include "proc_int.h"      /* owner-qualified lookup/send for join/stop */
 
 #include <stdatomic.h>
 #include <stdint.h>
@@ -40,6 +40,7 @@ struct fsm_postponed {
 
 struct xtc_fsm {
 	xtc_pid_t             pid;
+	xtc_loop_t           *loop;  /* owner: PIDs are executor-relative */
 	_Atomic int           stop_requested;
 	int                   joined;
 };
@@ -306,6 +307,7 @@ xtc_fsm_start(xtc_loop_t *loop, const xtc_fsm_callbacks_t *cb, void *state,
 	/* h->pid is set by fsm_entry via xtc_self(); the spawn out-pid is
 	 * the same value and is available synchronously here. */
 	h->pid = pid;
+	h->loop = loop;
 	*out = h;
 	return XTC_OK;
 }
@@ -317,7 +319,7 @@ xtc_fsm_stop(xtc_fsm_t *fsm)
 	if (fsm == NULL) return XTC_E_INVAL;
 	atomic_store_explicit(&fsm->stop_requested, 1, memory_order_release);
 	if (!xtc_pid_is_none(fsm->pid))
-		(void)xtc_send(fsm->pid, &kick, 1);
+		(void)__xtc_send_on(fsm->loop, fsm->pid, &kick, 1);
 	return XTC_OK;
 }
 
@@ -332,8 +334,9 @@ xtc_fsm_join(xtc_fsm_t *fsm, int64_t timeout_ns)
 		int64_t waited = 0;
 		const int64_t step = 1000LL * 1000;   /* 1ms */
 		for (;;) {
-			xtc_proc_info_t info;
-			if (xtc_proc_info(fsm->pid, &info) != XTC_OK)
+			/* Owner-qualified: a pid-only scan matched an equal
+			 * pid on another standalone loop. */
+			if (!__xtc_proc_loop_contains(fsm->loop, fsm->pid))
 				break;   /* gone */
 			if (timeout_ns == 0)
 				return XTC_E_AGAIN;

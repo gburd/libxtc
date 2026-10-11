@@ -601,6 +601,99 @@ test_app_stop_waits_cleanup_multiloop(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+
+/* PIDs are executor-relative: every standalone loop encodes loop_id 0, so
+ * a proc on an UNRELATED standalone loop can carry a pid equal to ours.
+ * aeq_by is that bystander: it counts messages it receives and records
+ * whether it exited normally (a kill aimed at the wrong proc stops it). */
+static _Atomic int g_aeq_stop, g_aeq_by_msgs, g_aeq_by_normal;
+static void
+aeq_by(void *arg)
+{
+	void *m;
+	size_t s;
+	(void)arg;
+	while (!atomic_load(&g_aeq_stop)) {
+		m = NULL;
+		if (xtc_recv(&m, &s, 1000000) == XTC_OK) {
+			atomic_fetch_add(&g_aeq_by_msgs, 1);
+			xtc_free(m);
+		}
+	}
+	atomic_fetch_add(&g_aeq_by_normal, 1);
+}
+static void *
+aeq_loop_thread(void *arg)
+{
+	(void)xtc_loop_run(arg);
+	return NULL;
+}
+/* Spawn n bystanders on a fresh loop b (registered FIRST, so an off-loop
+ * pid-only lookup also prefers it) and run it on its own thread. */
+static void
+aeq_by_start(xtc_loop_t **b, xtc_pid_t *by, int n, pthread_t *th)
+{
+	int i;
+	atomic_store(&g_aeq_stop, 0);
+	atomic_store(&g_aeq_by_msgs, 0);
+	atomic_store(&g_aeq_by_normal, 0);
+	munit_assert_int(xtc_loop_init(b), ==, XTC_OK);
+	for (i = 0; i < n; i++)
+		munit_assert_int(xtc_proc_spawn(*b, aeq_by, NULL, NULL, &by[i]),
+		    ==, XTC_OK);
+	munit_assert_int(pthread_create(th, NULL, aeq_loop_thread, *b), ==, 0);
+}
+static int
+aeq_has_equal(const xtc_pid_t *by, int n, xtc_pid_t p)
+{
+	int i;
+	for (i = 0; i < n; i++)
+		if (xtc_pid_eq(by[i], p)) return 1;
+	return 0;
+}
+
+static xtc_pid_t g_aeq_kid_pid;
+static void
+aeq_kid(void *arg)
+{
+	g_aeq_kid_pid = xtc_self();
+	dr_deaf(arg);
+}
+/* xtc_app_shutdown from a PLAIN THREAD resolved kid pids by pid alone,
+ * which off-loop means "first registered loop with loop_id 0": the drain
+ * message and the force-kill went to the bystander on loop B, and the
+ * kid (still present) was reported a survivor. */
+static MunitResult
+test_app_shutdown_equal_pid_other_loop(const MunitParameter p[], void *d)
+{
+	xtc_child_spec_t kids[1];
+	struct dr_run r;
+	xtc_loop_t *lb = NULL;
+	xtc_pid_t by[8];
+	pthread_t th;
+	(void)p; (void)d;
+
+	aeq_by_start(&lb, by, 8, &th);
+	memset(&r, 0, sizeof r);
+	dr_spec(&kids[0], aeq_kid, XTC_RESTART_PERMANENT);
+	r.drain_ns = 50 * MS;
+	r.force_ns = 1000 * MS;
+	dr_go(&r, kids, 1, 1);
+	atomic_store(&g_aeq_stop, 1);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+
+	munit_assert_true(aeq_has_equal(by, 8, g_aeq_kid_pid));   /* premise */
+	munit_assert_int(atomic_load(&g_aeq_by_normal), ==, 8);   /* none killed */
+	munit_assert_int(atomic_load(&g_aeq_by_msgs), ==, 0);     /* no stray msg */
+	munit_assert_int(r.rc, ==, XTC_OK);
+	munit_assert_int(r.rep.n_forced, ==, 1);
+	munit_assert_int(r.rep.n_survivors, ==, 0);
+	munit_assert_int(atomic_load(&g_dr_hook_done), ==, 1);
+	xtc_app_destroy(r.app);
+	munit_assert_int(xtc_loop_fini(lb), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/app_basic", test_app_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/app_multiloop", test_app_multiloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -611,6 +704,7 @@ static MunitTest tests[] = {
 	{ "/shutdown_inval", test_app_shutdown_inval, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/drain_on_sigterm", test_app_drain_on_sigterm, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/stop_waits_cleanup_multiloop", test_app_stop_waits_cleanup_multiloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/shutdown_equal_pid_other_loop", test_app_shutdown_equal_pid_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/app", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

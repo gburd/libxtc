@@ -151,7 +151,8 @@ XTC_API int       xtc_fsm_stop(xtc_fsm_t *fsm);
 /* Wait for the machine to exit, then free its handle.  timeout_ns < 0
  * waits forever, 0 polls once.  On XTC_OK the handle is invalid; on
  * XTC_E_AGAIN (timeout) it is left intact so the caller may join
- * again. */
+ * again.  The start loop must outlive the join: do not finalize it
+ * until xtc_fsm_join has returned XTC_OK. */
 XTC_API int       xtc_fsm_join(xtc_fsm_t *fsm, int64_t timeout_ns);
 
 /* The machine's pid, for use with xtc_fsm_send / xtc_fsm_call. */

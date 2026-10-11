@@ -28,6 +28,19 @@
 /* Per-thread cursor -- see loop_int.h. */
 XTC_THREAD_LOCAL xtc_loop_t *__xtc_current_loop = NULL;
 
+/* Out-of-line read for fiber code after a stack switch: see loop_int.h. */
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+xtc_loop_t *
+__xtc_current_loop_get(void)
+{
+	xtc_loop_t **volatile slot = &__xtc_current_loop;
+	return *slot;
+}
+
 #if defined(XTC_DIAGNOSTIC)
 #include <stdio.h>
 #include <stdlib.h>

@@ -10,7 +10,7 @@
 #include "xtc_int.h"
 #include "xtc_app.h"
 #include "xtc_exec.h"
-#include "xtc_inspect.h"   /* xtc_proc_info: has a child left the proc table? */
+#include "proc_int.h"      /* owner-qualified presence/kill/send */
 #include "xtc_io.h"        /* XTC_IO_READABLE */
 #include "xtc_proc.h"
 #include "os_tuning.h"
@@ -41,6 +41,10 @@ struct app_kid {
 	void                *arg;
 	xtc_restart_policy_t policy;
 	_Atomic uint64_t     pid;       /* packed xtc_pid_t, 0 = not yet run */
+	/* pid's OWNER loop, stored before pid (constant per child index):
+	 * PIDs are executor-relative, so pid alone can name another
+	 * standalone loop's proc -- shutdown killed one that way. */
+	_Atomic(xtc_loop_t *) owner;
 	_Atomic int          returned;  /* body returned during the drain */
 	struct app_kids     *kids;
 };
@@ -148,9 +152,9 @@ __pid_unpack(uint64_t v)
 static int
 __kid_gone(struct app_kid *k)
 {
-	xtc_proc_info_t info;
 	uint64_t v = atomic_load(&k->pid);
-	return v != 0 && xtc_proc_info(__pid_unpack(v), &info) == XTC_E_NOTFOUND;
+	return v != 0 && !__xtc_proc_loop_contains(atomic_load(&k->owner),
+	    __pid_unpack(v));
 }
 
 /*
@@ -173,6 +177,7 @@ __kid_trampoline(void *arg)
 	/* seq_cst pid-store / draining-load pairs with the shutdown's
 	 * draining-store / pid-load: either we see draining, or it sees
 	 * our pid and messages us. */
+	atomic_store(&k->owner, __xtc_proc_self_loop(NULL));
 	atomic_store(&k->pid, __pid_pack(xtc_self()));
 	if (!atomic_load(&k->kids->draining))
 		k->fn(k->arg);
@@ -297,8 +302,8 @@ __wait_kids(xtc_app_t *a, int64_t deadline, int force)
 			 * racing the supervisor stop may have replaced it
 			 * (xtc_exit_pid is idempotent per incarnation). */
 			if (force && (v = atomic_load(&k->pid)) != 0)
-				(void)xtc_exit_pid(__pid_unpack(v),
-				    XTC_APP_SHUTDOWN_REASON);
+				(void)__xtc_exit_pid_on(atomic_load(&k->owner),
+				    __pid_unpack(v), XTC_APP_SHUTDOWN_REASON);
 		}
 		(void)__os_clock_mono(&now);
 		if (pending == 0 || now >= deadline)
@@ -317,6 +322,7 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 	struct app_kids *ks;
 	xtc_app_drain_report_t r;
 	xtc_pid_t self = xtc_self();
+	xtc_loop_t *self_loop;
 	int64_t t0, now;
 	int i, rc, expected = 0;
 	uint64_t bit;
@@ -335,10 +341,13 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 		return XTC_E_INVAL;
 	ks = a->kids;
 	/* A supervised child cannot drain its own app: step 3 would kill
-	 * it before it could report or stop the loop. */
+	 * it before it could report or stop the loop.  (pid, owner) is the
+	 * identity; an equal pid on another standalone loop is not a child. */
+	self_loop = __xtc_proc_self_loop(&self);
 	for (i = 0; i < ks->n; i++)
 		if (!xtc_pid_is_none(self) &&
-		    __pid_pack(self) == atomic_load(&ks->k[i].pid))
+		    __pid_pack(self) == atomic_load(&ks->k[i].pid) &&
+		    self_loop == atomic_load(&ks->k[i].owner))
 			return XTC_E_INVAL;
 	if (!atomic_compare_exchange_strong_explicit(&a->shutting_down,
 	    &expected, 1, memory_order_acq_rel, memory_order_acquire))
@@ -354,7 +363,8 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 	for (i = 0; i < ks->n; i++) {
 		uint64_t v = atomic_load(&ks->k[i].pid);
 		if (v != 0)
-			(void)xtc_send(__pid_unpack(v), XTC_APP_SHUTDOWN_MSG,
+			(void)__xtc_send_on(atomic_load(&ks->k[i].owner),
+			    __pid_unpack(v), XTC_APP_SHUTDOWN_MSG,
 			    sizeof XTC_APP_SHUTDOWN_MSG);
 	}
 	__wait_kids(a, t0 + drain_ns, 0);

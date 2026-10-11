@@ -124,4 +124,11 @@ int  __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
  * primitives (e.g. xtc_amutex) find the current task to park it. */
 xtc_task_t *__xtc_current_task(void);
 
+/* __xtc_current_coro read through an out-of-line call on the CURRENT
+ * thread.  Use this, not the variable, in code that may run after a
+ * stack switch on a migratable fiber: compilers keep a thread-local's
+ * address live across calls, so a direct read after the fiber resumed
+ * on another carrier sees the previous thread's slot. */
+struct xtc_coro *__xtc_current_coro_get(void);
+
 #endif /* XTC_CORO_INT_H */
