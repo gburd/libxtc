@@ -289,11 +289,27 @@ __xtc_coro_preempt_effective(void)
 	return 0;
 }
 
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+struct xtc_coro *
+__xtc_current_coro_get(void)
+{
+	/* volatile round-trip: never folded into a caller's cached TLS
+	 * address, even under LTO (see coro_int.h). */
+	struct xtc_coro **volatile slot = &__xtc_current_coro;
+	return *slot;
+}
+
 xtc_task_t *
 __xtc_current_task(void)
 {
-	return __xtc_current_coro != NULL ? __xtc_current_coro->self : NULL;
+	struct xtc_coro *c = __xtc_current_coro_get();
+	return c != NULL ? c->self : NULL;
 }
+
 
 #endif /* _WIN32 */
 

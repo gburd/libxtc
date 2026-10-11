@@ -20,7 +20,7 @@
 #include "xtc_mctx.h"
 #include "xtc_res.h"      /* optional MEM_BYTES metering: xtc_res_attach_mctx */
 #include "xtc_proc.h"     /* arena groups: xtc_self / xtc_exit_pid_deadline */
-#include "xtc_inspect.h" /* xtc_proc_info: is a member still alive? */
+#include "proc_int.h"    /* owner-qualified member identity / kill / reap */
 #include <stdio.h>       /* snprintf for the arena name */
 
 #include <pthread.h>
@@ -402,10 +402,28 @@ xtc_mctx_total_chunks(const xtc_mctx_t *m)
  * alive to still be touching it.  See xtc_mctx.h.
  */
 
+/*
+ * A member is (pid, owner loop), never a bare pid.  A pid is executor-
+ * relative: every standalone loop encodes loop_id 0 (and two execs reuse
+ * 1..n), so equal pids on different loops are routine.  A bare pid made
+ * the group dedup two real members into one, call a reaped member alive
+ * because an unrelated equal-pid proc was in another table, and -- worst
+ * -- deliver discard's kill to an unrelated proc on the discarder's own
+ * loop while the real member lived on.  The owner is the loop whose table
+ * holds the member's slot (its spawn loop; migration does not change it),
+ * read on the member's own fiber at add.  LIFETIME: an owner loop must
+ * not be finalized while the group still lists its members (until the
+ * next discard that reports all_gone, or destroy).
+ */
+struct grp_member {
+	xtc_pid_t   pid;
+	xtc_loop_t *owner;
+};
+
 struct xtc_arena_group {
 	xtc_mctx_t     *arena;      /* the discardable arena */
 	pthread_mutex_t lock;       /* guards the member list (multi-carrier) */
-	xtc_pid_t      *members;    /* dynamic array */
+	struct grp_member *members; /* dynamic array */
 	int             n;
 	int             cap;
 	int             sealed;     /* a discard is in flight; joins refused */
@@ -456,10 +474,12 @@ xtc_arena_group_mctx(xtc_arena_group_t *g)
 int
 xtc_arena_group_add(xtc_arena_group_t *g)
 {
-	xtc_pid_t self = xtc_self();
+	xtc_pid_t self;
+	xtc_loop_t *owner;
 	int i, rc = XTC_OK;
 	if (g == NULL) return XTC_E_INVAL;
-	if (xtc_pid_is_none(self)) return XTC_E_INVAL;   /* a fiber adds itself */
+	owner = __xtc_proc_self_loop(&self);
+	if (owner == NULL) return XTC_E_INVAL;           /* a fiber adds itself */
 	(void)__xtc_mtx_lock(&g->lock);
 	/* SEALED: a discard is in flight and is about to reset the arena.
 	 * Admitting a member now is exactly the bug the seal exists to stop
@@ -470,18 +490,22 @@ xtc_arena_group_add(xtc_arena_group_t *g)
 	 * verdict, so a FRESH cohort may then join, but THIS caller must not
 	 * touch the arena -- it belongs to the cohort being discarded. */
 	if (g->sealed) { rc = XTC_E_AGAIN; goto out; }
-	for (i = 0; i < g->n; i++)                       /* idempotent per pid */
-		if (xtc_pid_eq(g->members[i], self)) goto out;
+	for (i = 0; i < g->n; i++)                /* idempotent per (pid, owner) */
+		if (g->members[i].owner == owner &&
+		    xtc_pid_eq(g->members[i].pid, self))
+			goto out;
 	if (g->n == g->cap) {
 		int ncap = g->cap == 0 ? 8 : g->cap * 2;
 		void *np = NULL;
-		if ((rc = __os_realloc(g->members, sizeof(xtc_pid_t) * (size_t)ncap,
-		    &np)) != XTC_OK)
+		if ((rc = __os_realloc(g->members,
+		    sizeof *g->members * (size_t)ncap, &np)) != XTC_OK)
 			goto out;
 		g->members = np;
 		g->cap = ncap;
 	}
-	g->members[g->n++] = self;
+	g->members[g->n].pid = self;
+	g->members[g->n].owner = owner;
+	g->n++;
 out:
 	(void)__xtc_mtx_unlock(&g->lock);
 	return rc;
@@ -499,8 +523,10 @@ xtc_arena_group_size(xtc_arena_group_t *g)
 }
 
 /*
- * A member pid is "gone" only when xtc_proc_info reports NOTFOUND, i.e.
- * its proc-table slot has been released.
+ * A member is "gone" only when its OWNER loop's proc table no longer
+ * holds it, i.e. its slot has been released.  Owner-qualified, never the
+ * global pid-only xtc_proc_info scan, which finds any equal pid on any
+ * other loop (see struct grp_member).
  *
  * !alive is deliberately NOT accepted as proof.  A proc clears `alive`
  * BEFORE running its at-exit callbacks, and such a callback may still
@@ -511,10 +537,9 @@ xtc_arena_group_size(xtc_arena_group_t *g)
  * first moment nothing of the member can touch arena memory.
  */
 static int
-__grp_member_gone(xtc_pid_t pid)
+__grp_member_gone(const struct grp_member *m)
 {
-	xtc_proc_info_t info;
-	return xtc_proc_info(pid, &info) != XTC_OK;
+	return !__xtc_proc_loop_contains(m->owner, m->pid);
 }
 
 /*
@@ -524,14 +549,14 @@ __grp_member_gone(xtc_pid_t pid)
  * nothing.  Yields on a fiber, sleeps the OS thread off one.
  */
 static int
-__grp_wait_reaped(xtc_pid_t pid, int64_t timeout_ns)
+__grp_wait_reaped(const struct grp_member *m, int64_t timeout_ns)
 {
 	int64_t start = 0, now = 0, slice = 50000;   /* 50us, backing off */
 	int on_fiber = !xtc_pid_is_none(xtc_self());
 
 	(void)__os_clock_mono(&start);
 	for (;;) {
-		if (__grp_member_gone(pid))
+		if (__grp_member_gone(m))
 			return 1;
 		(void)__os_clock_mono(&now);
 		if (timeout_ns <= 0 || now - start >= timeout_ns)
@@ -558,12 +583,13 @@ int
 xtc_arena_group_discard(xtc_arena_group_t *g, int reason,
                         int64_t timeout_ns, int *out_all_gone)
 {
-	xtc_pid_t *snap = NULL;
+	struct grp_member *snap = NULL;
 	xtc_pid_t self;
+	xtc_loop_t *self_owner;
 	int n, i, all_gone = 1, rc = XTC_OK;
 
 	if (g == NULL) return XTC_E_INVAL;
-	self = xtc_self();
+	self_owner = __xtc_proc_self_loop(&self);   /* NULL off a fiber */
 
 	/* SEAL the group and snapshot the member list in the SAME lock hold,
 	 * then work outside the lock (the kill/wait yields, and a member
@@ -590,14 +616,15 @@ xtc_arena_group_discard(xtc_arena_group_t *g, int reason,
 			(void)__xtc_mtx_unlock(&g->lock);
 			return XTC_E_NOMEM;
 		}
-		memcpy(snap, g->members, sizeof(xtc_pid_t) * (size_t)n);
+		memcpy(snap, g->members, sizeof *snap * (size_t)n);
 	}
 	(void)__xtc_mtx_unlock(&g->lock);
 
 	/* A member must not discard its own group: it would kill itself
 	 * mid-wait and never reach the reset. */
 	for (i = 0; i < n; i++) {
-		if (!xtc_pid_is_none(self) && xtc_pid_eq(snap[i], self)) {
+		if (self_owner != NULL && snap[i].owner == self_owner &&
+		    xtc_pid_eq(snap[i].pid, self)) {
 			__grp_unseal(g);
 			__os_free(snap);
 			return XTC_E_INVAL;
@@ -610,10 +637,13 @@ xtc_arena_group_discard(xtc_arena_group_t *g, int reason,
 	for (i = 0; i < n; i++) {
 		int status = XTC_KILL_TIMEOUT;
 		int64_t t0 = 0, t1 = 0, left;
-		if (__grp_member_gone(snap[i]))
+		if (__grp_member_gone(&snap[i]))
 			continue;
 		(void)__os_clock_mono(&t0);
-		(void)xtc_exit_pid_deadline(snap[i], reason, timeout_ns, &status);
+		/* Owner-qualified: the public xtc_exit_pid_deadline resolves a
+		 * bare pid and can signal an unrelated equal-pid proc. */
+		(void)__xtc_exit_pid_deadline_on(snap[i].owner, snap[i].pid,
+		    reason, timeout_ns, &status);
 		/* Wedged inside a mask with the kill latched: it cannot act on
 		 * the kill while the mask is held, so waiting longer cannot
 		 * change the answer. */
@@ -631,7 +661,7 @@ xtc_arena_group_discard(xtc_arena_group_t *g, int reason,
 		left = timeout_ns - (t1 - t0);
 		if (left <= 0)
 			left = 1;   /* one non-blocking probe */
-		if (!__grp_wait_reaped(snap[i], left))
+		if (!__grp_wait_reaped(&snap[i], left))
 			all_gone = 0;   /* still alive, or still unwinding */
 	}
 

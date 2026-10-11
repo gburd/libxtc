@@ -613,7 +613,41 @@ __pt_unlock_all(struct xtc_proc_table *t)
 }
 
 /* Each loop carries one of these (lazy-allocated on first proc spawn). */
-static XTC_THREAD_LOCAL struct xtc_proc *__current_proc = NULL;
+/*
+ * The running proc, per OS thread.  NEVER touch the TLS slot directly:
+ * every access goes through __current_proc_slot(), a non-inlinable
+ * function whose volatile round-trip makes each call compute the slot
+ * from the CURRENT thread's TLS base.
+ *
+ * Why: a compiler computes a thread-local's address once (%fs:0 + off,
+ * or a __tls_get_addr result) and may keep it live across an opaque call.
+ * xtc_yield() is such a call, and a MIGRATABLE fiber can come back from
+ * it on a different OS thread.  clang does exactly this (measured, plain
+ * -O2 and ASan -O1): xtc_proc_wait_fd / xtc_proc_sleep / xtc_recv cached
+ * &__current_proc at entry, and their post-yield `__current_proc = self`
+ * stored into the PRE-migration thread's slot -- overwriting the
+ * identity of whatever proc that thread was running.  The victim then
+ * ctx_save()d the foreign proc at its next yield, restored it on resume,
+ * and the resume kill hook read that proc's kill_pending after it had
+ * exited and been freed (the Blk2 heap-use-after-free; __proc_reanchor's
+ * self->task read was the same stale pointer).  gcc re-reads %fs per
+ * access for the static-exe/IE models, which is why gcc CI never saw it.
+ * Same hazard as MSVC caching __declspec(thread) across SwitchToFiber
+ * (docs/KNOWN_ISSUES.md).  Regression: test/m5 Blk8.
+ */
+static XTC_THREAD_LOCAL struct xtc_proc *__current_proc_tls = NULL;
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+static struct xtc_proc **
+__current_proc_slot(void)
+{
+	struct xtc_proc **volatile slot = &__current_proc_tls;
+	return slot;
+}
+#define __current_proc (*__current_proc_slot())
 static void __xtc_proc_kill_check(void);   /* installed as the resume kill hook */
 
 /*
@@ -1757,14 +1791,17 @@ xtc_trace_causal_dump(xtc_pid_t pid, xtc_causal_fn cb, void *user)
 static struct xtc_proc *
 __proc_reanchor(struct xtc_proc *self)
 {
+	struct xtc_coro *c;
 	xtc_task_t *rt;
 	if (self == NULL)
 		return NULL;
-	rt = __xtc_current_task();
-	if (rt != NULL && rt != self->task &&
-	    __xtc_current_coro != NULL &&
-	    __xtc_current_coro->proc != NULL) {
-		self = (struct xtc_proc *)__xtc_current_coro->proc;
+	/* Out-of-line read: an inlined __xtc_current_coro reuses the TLS
+	 * address computed before this function's caller yielded, i.e. the
+	 * previous carrier's coro after a migration (see __current_proc). */
+	c = __xtc_current_coro_get();
+	rt = c != NULL ? c->self : NULL;
+	if (rt != NULL && rt != self->task && c->proc != NULL) {
+		self = (struct xtc_proc *)c->proc;
 		__current_proc = self;
 	}
 	return self;
@@ -1899,9 +1936,65 @@ __resolve(xtc_pid_t pid, xtc_loop_t **out_loop_for_send)
 	return p;
 }
 
+/*
+ * __resolve, but in a KNOWN owner loop's table only.  A pid is executor-
+ * relative (every standalone loop encodes loop_id 0, and two execs reuse
+ * 1..n), so __resolve's loop_id search can land on an unrelated proc with
+ * an equal pid.  A caller that recorded the owner (the loop the proc was
+ * spawned on -- p->loop, unchanged by migration) resolves exactly.  The
+ * caller keeps `owner` alive (not finalized).  owner == NULL is __resolve.
+ */
+static struct xtc_proc *
+__resolve_on(xtc_loop_t *owner, xtc_pid_t pid, xtc_loop_t **out_loop)
+{
+	struct xtc_proc_table *tbl;
+	struct xtc_proc *p;
+	if (owner == NULL)
+		return __resolve(pid, out_loop);
+	if (out_loop != NULL) *out_loop = owner;
+	if ((tbl = __table_for(owner, 0)) == NULL) return NULL;
+	p = __table_lookup(tbl, pid.local_id, pid.gen);
+	if (p != NULL && !xtc_pid_eq(p->pid, pid)) {
+		__proc_release(p);
+		p = NULL;
+	}
+	return p;
+}
+
+/* The running proc's OWNER loop (see __resolve_on) and, if out_pid is
+ * non-NULL, its pid -- both read off the SAME re-anchored proc, never
+ * __xtc_current_loop: a migrated fiber runs on a loop that does not hold
+ * its slot.  NULL (and XTC_PID_NONE) off a proc. */
+xtc_loop_t *
+__xtc_proc_self_loop(xtc_pid_t *out_pid)
+{
+	struct xtc_proc *self = __proc_reanchor(__current_proc);
+	if (out_pid != NULL)
+		*out_pid = self != NULL ? self->pid : XTC_PID_NONE;
+	return self != NULL ? self->loop : NULL;
+}
+
+static int __send_on(xtc_loop_t *, xtc_pid_t, const void *, size_t);
+
 /* PUBLIC: int xtc_send __P((xtc_pid_t, const void *, size_t)); */
 int
 xtc_send(xtc_pid_t to, const void *data, size_t size)
+{
+	return __send_on(NULL, to, data, size);
+}
+
+/* Owner-qualified xtc_send (see __resolve_on); owner NULL -> XTC_E_INVAL. */
+int
+__xtc_send_on(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size)
+{
+	if (owner == NULL)
+		return XTC_E_INVAL;
+	return __send_on(owner, to, data, size);
+}
+
+/* xtc_send resolved in `owner`'s table (NULL: by pid alone). */
+static int
+__send_on(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size)
 {
 	struct xtc_proc *p;
 	xtc_loop_t *target;
@@ -1911,7 +2004,7 @@ xtc_send(xtc_pid_t to, const void *data, size_t size)
 	if (XTC_UNLIKELY(size > 0 && data == NULL)) return XTC_E_INVAL;
 	if (XTC_UNLIKELY(xtc_pid_is_none(to))) return XTC_E_INVAL;
 
-	p = __resolve(to, &target);
+	p = __resolve_on(owner, to, &target);
 	if (XTC_UNLIKELY(p == NULL)) return XTC_E_INVAL;
 	/* p is pinned by the resolver ref; release on every exit below so a
 	 * concurrent exit cannot free it mid-delivery. */
@@ -1965,13 +2058,24 @@ xtc_send(xtc_pid_t to, const void *data, size_t size)
  * needs to terminate sibling children that haven't crashed on
  * their own.
  */
+static int __exit_pid_on(xtc_loop_t *, xtc_pid_t, int);
+static int __exit_pid_deadline_on(xtc_loop_t *, xtc_pid_t, int, int64_t,
+    int *);
+
 int
 xtc_exit_pid(xtc_pid_t target, int reason)
+{
+	return __exit_pid_on(NULL, target, reason);
+}
+
+/* xtc_exit_pid resolved in `owner`'s table (NULL: by pid alone). */
+static int
+__exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 {
 	struct xtc_proc *p;
 	int expected = 0, desired;
 	if (XTC_UNLIKELY(xtc_pid_is_none(target))) return XTC_E_INVAL;
-	p = __resolve(target, NULL);
+	p = __resolve_on(owner, target, NULL);
 	if (XTC_UNLIKELY(p == NULL)) return XTC_E_INVAL;
 	if (XTC_UNLIKELY(!atomic_load_explicit(&p->alive,
 	    memory_order_relaxed))) { __proc_release(p); return XTC_E_INVAL; }
@@ -2015,18 +2119,52 @@ int
 xtc_exit_pid_deadline(xtc_pid_t target, int reason, int64_t timeout_ns,
     int *out_status)
 {
+	return __exit_pid_deadline_on(NULL, target, reason, timeout_ns,
+	    out_status);
+}
+
+/* Owner-qualified xtc_exit_pid_deadline for callers that recorded the
+ * target's owner loop (arena groups).  The caller keeps `owner` alive. */
+int
+__xtc_exit_pid_deadline_on(xtc_loop_t *owner, xtc_pid_t target, int reason,
+    int64_t timeout_ns, int *out_status)
+{
+	if (owner == NULL)
+		return XTC_E_INVAL;
+	return __exit_pid_deadline_on(owner, target, reason, timeout_ns,
+	    out_status);
+}
+
+/* Owner-qualified xtc_exit_pid (owner NULL -> XTC_E_INVAL). */
+int
+__xtc_exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
+{
+	if (owner == NULL)
+		return XTC_E_INVAL;
+	return __exit_pid_on(owner, target, reason);
+}
+
+static int
+__exit_pid_deadline_on(xtc_loop_t *owner, xtc_pid_t target, int reason,
+    int64_t timeout_ns, int *out_status)
+{
 	struct xtc_proc *p;
 	int64_t start = 0, now = 0, slice = 50000;   /* 50us, backing off */
 	int status = XTC_KILL_TIMEOUT, rc, on_fiber;
+	xtc_pid_t self_pid;
+	xtc_loop_t *self_loop;
 
 	if (XTC_UNLIKELY(xtc_pid_is_none(target)))
 		return XTC_E_INVAL;
 	/* Killing yourself is xtc_exit_self; waiting for your own unwind
-	 * here would deadlock until the deadline. */
-	if (XTC_UNLIKELY(xtc_pid_eq(target, xtc_self())))
+	 * here would deadlock until the deadline.  With a known owner, an
+	 * equal pid on ANOTHER loop is not self. */
+	self_loop = __xtc_proc_self_loop(&self_pid);
+	if (XTC_UNLIKELY(xtc_pid_eq(target, self_pid) &&
+	    (owner == NULL || owner == self_loop)))
 		return XTC_E_INVAL;
 
-	rc = xtc_exit_pid(target, reason);
+	rc = __exit_pid_on(owner, target, reason);
 	if (rc != XTC_OK) {
 		/*
 		 * xtc_exit_pid refuses a pid that is no longer ALIVE and one
@@ -2047,7 +2185,7 @@ xtc_exit_pid_deadline(xtc_pid_t target, int reason, int64_t timeout_ns,
 		xtc_loop_t *tl = NULL;
 		struct xtc_proc_table *tbl;
 		int issued = 0;
-		p = __resolve(target, &tl);
+		p = __resolve_on(owner, target, &tl);
 		if (p != NULL) {
 			__proc_release(p);   /* in the table but !alive: dying */
 			issued = 1;
@@ -2070,7 +2208,7 @@ xtc_exit_pid_deadline(xtc_pid_t target, int reason, int64_t timeout_ns,
 	(void)__os_clock_mono(&start);
 	for (;;) {
 		/* Gone => it observed the kill and unwound. */
-		p = __resolve(target, NULL);
+		p = __resolve_on(owner, target, NULL);
 		if (p == NULL || !atomic_load_explicit(&p->alive,
 		    memory_order_relaxed)) {
 			if (p != NULL)

@@ -23,6 +23,25 @@
  * PIDs are executor-relative; a global info scan cannot establish this join. */
 int __xtc_proc_loop_contains(xtc_loop_t *, xtc_pid_t);
 
+/* The calling proc's OWNER loop: the one it was spawned on, whose table
+ * holds its slot (p->loop).  Unchanged by work-stealing migration, so it
+ * is NOT necessarily the loop the fiber is running on.  NULL off a proc.
+ * *out_pid (if non-NULL) gets the same proc's pid.  (pid, owner) is an
+ * unambiguous identity; record it on the proc's own fiber. */
+xtc_loop_t *__xtc_proc_self_loop(xtc_pid_t *out_pid);
+
+/* xtc_exit_pid_deadline resolved in `owner`'s table only, so an equal pid
+ * on another loop is never signalled.  owner must be non-NULL and alive
+ * (not finalized) for the call; XTC_E_INVAL if NULL. */
+int __xtc_exit_pid_deadline_on(xtc_loop_t *owner, xtc_pid_t target,
+    int reason, int64_t timeout_ns, int *out_status);
+
+/* xtc_exit_pid / xtc_send resolved in `owner`'s table only (same owner
+ * contract as above; XTC_E_INVAL if owner is NULL). */
+int __xtc_exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason);
+int __xtc_send_on(xtc_loop_t *owner, xtc_pid_t to, const void *data,
+    size_t size);
+
 /*
  * Save / restore the current-proc context across a yield done by a
  * lower-level primitive (e.g. xtc_amutex parking the fiber), so the

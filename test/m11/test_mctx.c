@@ -5,6 +5,7 @@
  * test/m11/test_mctx.c -- verifies M11 memory contexts.
  */
 
+#include <pthread.h>
 #include <stdint.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -355,6 +356,173 @@ test_arena_group_join_during_discard(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * Arena-group member identity must be OWNER-QUALIFIED.  A pid is only
+ * executor-relative: every standalone loop encodes loop_id 0, so procs
+ * on two standalone loops routinely carry EQUAL pids.  The group used to
+ * keep bare pids and ask the global, pid-only questions (xtc_proc_info,
+ * xtc_exit_pid_deadline, pid equality), which mix the two procs up.
+ * These three cases each failed before the group recorded the member's
+ * owner loop at xtc_arena_group_add.
+ */
+static void ag_join_proc(void *arg)
+{
+	munit_assert_int(xtc_arena_group_add(arg), ==, XTC_OK);
+}
+static void ag_noop_proc(void *arg) { (void)arg; }
+
+/* A reaped member is gone even though an UNRELATED proc on another
+ * standalone loop, with an equal pid, is still in its table.  Before the
+ * fix the global xtc_proc_info scan found the unrelated proc and
+ * discard reported all_gone=0. */
+static MunitResult
+test_arena_group_reaped_vs_equal_pid(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *a = NULL, *b = NULL;
+	xtc_arena_group_t *g = NULL;
+	xtc_pid_t pa, pb;
+	int gone = -1;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_loop_init(&a), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&b), ==, XTC_OK);
+	munit_assert_int(xtc_arena_group_create("ag-eqpid", &g), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(a, ag_join_proc, g, NULL, &pa), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(b, ag_noop_proc, NULL, NULL, &pb), ==,
+	    XTC_OK);
+	munit_assert_true(xtc_pid_eq(pa, pb));       /* the precondition */
+	munit_assert_int(xtc_loop_run(a), ==, XTC_OK);  /* member reaped */
+	munit_assert_int(xtc_arena_group_size(g), ==, 1);
+	munit_assert_int(xtc_arena_group_discard(g, 1, 0, &gone), ==, XTC_OK);
+	munit_assert_int(gone, ==, 1);
+	munit_assert_int(xtc_loop_run(b), ==, XTC_OK);
+	xtc_arena_group_destroy(g);
+	munit_assert_int(xtc_loop_fini(a), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(b), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* Two fibers on different standalone loops with equal pids are TWO
+ * members.  Before the fix the second add matched the first by pid and
+ * was silently dropped -- so a discard would never kill it and would
+ * reset the arena under it. */
+static MunitResult
+test_arena_group_add_equal_pid_other_loop(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *a = NULL, *b = NULL;
+	xtc_arena_group_t *g = NULL;
+	xtc_pid_t pa, pb;
+	int gone = -1;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_loop_init(&a), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&b), ==, XTC_OK);
+	munit_assert_int(xtc_arena_group_create("ag-dedup", &g), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(a, ag_join_proc, g, NULL, &pa), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(b, ag_join_proc, g, NULL, &pb), ==,
+	    XTC_OK);
+	munit_assert_true(xtc_pid_eq(pa, pb));
+	munit_assert_int(xtc_loop_run(a), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(b), ==, XTC_OK);
+	munit_assert_int(xtc_arena_group_size(g), ==, 2);
+	munit_assert_int(xtc_arena_group_discard(g, 1, 0, &gone), ==, XTC_OK);
+	munit_assert_int(gone, ==, 1);
+	xtc_arena_group_destroy(g);
+	munit_assert_int(xtc_loop_fini(a), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(b), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* discard KILLS THE MEMBER, not a bystander with an equal pid on the
+ * discarder's own standalone loop.  Member M runs on loop A (its own
+ * thread); bystander U and discarder D run on loop B.  Before the fix
+ * xtc_exit_pid_deadline resolved loop_id 0 to D's loop and killed U,
+ * M survived, and discard timed out with all_gone=0. */
+static xtc_arena_group_t *g_kg;
+static _Atomic int g_kg_m_ready, g_kg_stop, g_kg_m_normal, g_kg_u_normal;
+static _Atomic int g_kg_all_gone = -1;
+
+static void
+kg_member_proc(void *arg)
+{
+	(void)arg;
+	munit_assert_int(xtc_arena_group_add(g_kg), ==, XTC_OK);
+	atomic_store(&g_kg_m_ready, 1);
+	while (!atomic_load(&g_kg_stop))
+		(void)xtc_proc_sleep(1000000);   /* killable */
+	atomic_store(&g_kg_m_normal, 1);
+}
+
+static void
+kg_bystander_proc(void *arg)
+{
+	(void)arg;
+	while (!atomic_load(&g_kg_stop))
+		(void)xtc_proc_sleep(1000000);   /* killable */
+	atomic_store(&g_kg_u_normal, 1);
+}
+
+static void
+kg_discarder_proc(void *arg)
+{
+	int gone = -1;
+	(void)arg;
+	while (!atomic_load(&g_kg_m_ready))
+		(void)xtc_proc_sleep(1000000);
+	munit_assert_int(xtc_arena_group_discard(g_kg, 7, 2000000000LL,
+	    &gone), ==, XTC_OK);
+	atomic_store(&g_kg_all_gone, gone);
+	atomic_store(&g_kg_stop, 1);
+}
+
+static void *
+kg_loop_thread(void *arg)
+{
+	(void)xtc_loop_run(arg);
+	return NULL;
+}
+
+static MunitResult
+test_arena_group_kill_targets_owner(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *a = NULL, *b = NULL;
+	xtc_pid_t pm, pu, pd;
+	pthread_t th;
+	(void)p; (void)d;
+
+	atomic_store(&g_kg_m_ready, 0);
+	atomic_store(&g_kg_stop, 0);
+	atomic_store(&g_kg_m_normal, 0);
+	atomic_store(&g_kg_u_normal, 0);
+	atomic_store(&g_kg_all_gone, -1);
+	munit_assert_int(xtc_loop_init(&a), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&b), ==, XTC_OK);
+	munit_assert_int(xtc_arena_group_create("ag-kill", &g_kg), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(a, kg_member_proc, NULL, NULL, &pm),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(b, kg_bystander_proc, NULL, NULL,
+	    &pu), ==, XTC_OK);
+	munit_assert_true(xtc_pid_eq(pm, pu));
+	munit_assert_int(xtc_proc_spawn(b, kg_discarder_proc, NULL, NULL,
+	    &pd), ==, XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, kg_loop_thread, a), ==, 0);
+	munit_assert_int(xtc_loop_run(b), ==, XTC_OK);
+	atomic_store(&g_kg_stop, 1);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+
+	munit_assert_int(atomic_load(&g_kg_u_normal), ==, 1);  /* spared */
+	munit_assert_int(atomic_load(&g_kg_m_normal), ==, 0);  /* killed */
+	munit_assert_int(atomic_load(&g_kg_all_gone), ==, 1);
+
+	xtc_arena_group_destroy(g_kg);
+	g_kg = NULL;
+	munit_assert_int(xtc_loop_fini(a), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(b), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/basic",      test_basic,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cleanup",    test_cleanup,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -363,6 +531,9 @@ static MunitTest tests[] = {
 	{ "/reset",      test_reset,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/strdup",     test_strdup,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/arena_group_join_during_discard", test_arena_group_join_during_discard, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/arena_group_reaped_vs_equal_pid", test_arena_group_reaped_vs_equal_pid, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/arena_group_add_equal_pid_other_loop", test_arena_group_add_equal_pid_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/arena_group_kill_targets_owner", test_arena_group_kill_targets_owner, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m11/mctx", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

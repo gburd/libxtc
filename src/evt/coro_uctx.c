@@ -130,9 +130,24 @@ __tsan_sched_capture(void)
 #endif
 
 #if defined(XTC_FIBER_SWITCH_ANNOTATE)
-static XTC_THREAD_LOCAL const void *__san_sched_bottom;
-static XTC_THREAD_LOCAL size_t      __san_sched_size;
-static XTC_THREAD_LOCAL void       *__san_sched_fake;
+struct __san_sched_tls {
+	const void *bottom;
+	size_t      size;
+	void       *fake;
+};
+static XTC_THREAD_LOCAL struct __san_sched_tls __san_sched_tls_v;
+/* Per-thread scheduler stack, reached through a non-inlinable accessor
+ * for the same migration reason as g_in_preempt (see below). */
+__attribute__((noinline))
+static struct __san_sched_tls *
+__san_sched_slot(void)
+{
+	struct __san_sched_tls *volatile slot = &__san_sched_tls_v;
+	return slot;
+}
+#define __san_sched_bottom (__san_sched_slot()->bottom)
+#define __san_sched_size   (__san_sched_slot()->size)
+#define __san_sched_fake   (__san_sched_slot()->fake)
 
 static inline void
 __san_switch_to(void **save_slot, const void *to_bottom, size_t to_size)
@@ -210,7 +225,23 @@ xtc_set_stack_size(size_t bytes)
  * the same thread that maintains it; a stale read only errs toward
  * "decline", which is safe.
  */
-static XTC_THREAD_LOCAL volatile int g_in_preempt;
+static XTC_THREAD_LOCAL volatile int g_in_preempt_tls;
+/*
+ * Every access goes through a non-inlinable accessor so it addresses the
+ * CURRENT thread's slot.  A migratable fiber can resume from swapcontext
+ * on another OS thread, and clang keeps a thread-local's address
+ * (%fs:0 + off or a __tls_get_addr result) live across the call: the
+ * post-swap `g_in_preempt = 0` then cleared the OLD thread's guard.
+ * Same hazard and fix as __current_proc in src/ptc/proc.c.
+ */
+__attribute__((noinline))
+static volatile int *
+__in_preempt_slot(void)
+{
+	volatile int *volatile slot = &g_in_preempt_tls;
+	return slot;
+}
+#define g_in_preempt (*__in_preempt_slot())
 
 /* A swapcontext that must not be interrupted-and-redirected: mark the
  * window on both entry and (post-return, either side) exit. */
@@ -762,11 +793,23 @@ xtc_yield(void)
 	if (__xtc_fiber_kill_check) __xtc_fiber_kill_check();
 }
 
+__attribute__((noinline))
+struct xtc_coro *
+__xtc_current_coro_get(void)
+{
+	/* volatile round-trip: never folded into a caller's cached TLS
+	 * address, even under LTO (see coro_int.h). */
+	struct xtc_coro **volatile slot = &__xtc_current_coro;
+	return *slot;
+}
+
 xtc_task_t *
 __xtc_current_task(void)
 {
-	return __xtc_current_coro != NULL ? __xtc_current_coro->self : NULL;
+	struct xtc_coro *c = __xtc_current_coro_get();
+	return c != NULL ? c->self : NULL;
 }
+
 
 #if defined(__APPLE__)
 # pragma clang diagnostic pop

@@ -16,7 +16,7 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"
-#include "xtc_inspect.h"   /* xtc_proc_info: has an old child left the proc table? */
+#include "proc_int.h"      /* __xtc_proc_loop_contains: owner-qualified presence */
 
 #include <stdio.h>
 #include <pthread.h>
@@ -70,6 +70,7 @@ struct down_signal {
 struct add_child_msg {
 	uint8_t          kind;       /* 'A' */
 	xtc_pid_t        reply;
+	xtc_loop_t      *reply_loop; /* reply's owner: pids are loop-relative */
 	uint32_t         tag;
 	xtc_child_spec_t spec;
 };
@@ -137,24 +138,32 @@ __record_restart(struct xtc_supervisor *sup, int64_t now)
 	    memory_order_relaxed);
 }
 
-static int
-__spawn_child(struct xtc_supervisor *sup, struct child *c)
+/* The loop a child is spawned on -- its OWNER loop (p->loop, unchanged by
+ * migration), a pure function of the spec, so every incarnation of a
+ * child index has the same owner.  Multi-loop app: the requested
+ * executor loop (clamped); the supervisor itself runs on loop 0 and
+ * monitors it cross-loop, restarting it on the same loop on a DOWN. */
+static xtc_loop_t *
+__child_loop(struct xtc_supervisor *sup, const struct child *c)
 {
-	xtc_proc_opts_t pop;
-	xtc_loop_t *target = sup->loop;
-	int rc;
-	memset(&pop, 0, sizeof pop);
-	pop.name = c->spec.name;
-	pop.mailbox_cap = c->spec.mailbox_cap;
-	/* Multi-loop app: place the child on the requested executor loop
-	 * (clamped); the supervisor itself runs on loop 0 and monitors it
-	 * cross-loop, restarting it on the same loop on a DOWN. */
 	if (sup->opts.exec != NULL) {
 		int n = xtc_exec_n_loops(sup->opts.exec);
 		int idx = c->spec.loop;
 		if (idx < 0 || idx >= n) idx = 0;
-		target = xtc_exec_loop(sup->opts.exec, idx);
+		return xtc_exec_loop(sup->opts.exec, idx);
 	}
+	return sup->loop;
+}
+
+static int
+__spawn_child(struct xtc_supervisor *sup, struct child *c)
+{
+	xtc_proc_opts_t pop;
+	xtc_loop_t *target = __child_loop(sup, c);
+	int rc;
+	memset(&pop, 0, sizeof pop);
+	pop.name = c->spec.name;
+	pop.mailbox_cap = c->spec.mailbox_cap;
 	/*
 	 * ATOMIC spawn+monitor, not spawn-then-monitor.
 	 *
@@ -216,7 +225,7 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 		if (live >= sup->opts.max_children) {
 			(void)__xtc_mtx_unlock(&sup->lock);
 			rep.ok = 2;   /* at cap -> XTC_E_RESOURCE */
-			(void)xtc_send(a->reply, &rep, sizeof rep);
+			(void)__xtc_send_on(a->reply_loop, a->reply, &rep, sizeof rep);
 			return;
 		}
 	}
@@ -225,7 +234,7 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 	    != XTC_OK) {
 		(void)__xtc_mtx_unlock(&sup->lock);
 		rep.ok = 0;
-		(void)xtc_send(a->reply, &rep, sizeof rep);
+		(void)__xtc_send_on(a->reply_loop, a->reply, &rep, sizeof rep);
 		return;
 	}
 	sup->children = nc;
@@ -236,14 +245,14 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 	if (rc != XTC_OK) {
 		(void)__xtc_mtx_unlock(&sup->lock);
 		rep.ok = 0;
-		(void)xtc_send(a->reply, &rep, sizeof rep);
+		(void)__xtc_send_on(a->reply_loop, a->reply, &rep, sizeof rep);
 		return;
 	}
 	sup->n_children++;
 	rep.ok = 1;
 	rep.pid = sup->children[idx].pid;
 	(void)__xtc_mtx_unlock(&sup->lock);
-	(void)xtc_send(a->reply, &rep, sizeof rep);
+	(void)__xtc_send_on(a->reply_loop, a->reply, &rep, sizeof rep);
 }
 
 /*
@@ -260,13 +269,15 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
  * and XTC_KILL_DELIVERED are both documented (xtc_proc.h) as NOT meaning
  * cleanup finished -- the proc clears `alive` BEFORE running its exit
  * hooks -- so neither may gate a respawn.  Same test
- * xtc_arena_group_discard uses for the same reason.
+ * xtc_arena_group_discard uses for the same reason.  Looked up in the
+ * child's OWNER loop only: PIDs are executor-relative, and a global
+ * (xtc_proc_info) scan matched an unrelated standalone loop's equal pid,
+ * so a group restart waited out XTC_SUP_CLEANUP_WAIT_NS and stopped.
  */
 static int
-__child_gone(xtc_pid_t pid)
+__child_gone(xtc_loop_t *owner, xtc_pid_t pid)
 {
-	xtc_proc_info_t info;
-	return xtc_proc_info(pid, &info) != XTC_OK;
+	return !__xtc_proc_loop_contains(owner, pid);
 }
 
 /*
@@ -301,7 +312,9 @@ __wait_children_gone(struct xtc_supervisor *sup, int lo, int hi,
 			return 0;
 		pending = 0;
 		for (i = lo; i < hi; i++)
-			if (!xtc_pid_is_none(old[i]) && !__child_gone(old[i]))
+			if (!xtc_pid_is_none(old[i]) &&
+			    !__child_gone(__child_loop(sup, &sup->children[i]),
+			    old[i]))
 				pending++;
 		if (pending == 0)
 			return 1;
@@ -317,9 +330,9 @@ __wait_children_gone(struct xtc_supervisor *sup, int lo, int hi,
 static void
 __kill_sibling(struct xtc_supervisor *sup, struct child *c)
 {
-	(void)sup;
 	if (!c->alive) return;
-	(void)xtc_exit_pid(c->pid, 1);   /* reason 1 = supervisor-shutdown */
+	/* Owner-qualified: pids are loop-relative (reason 1 = shutdown). */
+	(void)__xtc_exit_pid_on(__child_loop(sup, c), c->pid, 1);
 }
 
 /* For one_for_all: after a child crash, kill every sibling that's
@@ -544,7 +557,8 @@ __sup_entry(void *arg)
 				old[k] = sup->children[k].alive
 				    ? sup->children[k].pid : XTC_PID_NONE;
 			if (sup->children[k].alive) {
-				(void)xtc_exit_pid(sup->children[k].pid, 1);
+				(void)__xtc_exit_pid_on(__child_loop(sup,
+				    &sup->children[k]), sup->children[k].pid, 1);
 				sup->children[k].alive = 0;
 			}
 		}
@@ -672,10 +686,12 @@ xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 
 	memset(&a, 0, sizeof a);
 	a.kind = 'A';
-	a.reply = xtc_self();
+	/* Record (pid, owner): a pid-only reply from the supervisor's loop
+	 * would resolve loop_id 0 to ITS loop, not ours. */
+	a.reply_loop = __xtc_proc_self_loop(&a.reply);
 	a.tag = atomic_fetch_add_explicit(&tagctr, 1, memory_order_relaxed) + 1;
 	a.spec = *spec;
-	if (xtc_send(sup->sup_pid, &a, sizeof a) != XTC_OK)
+	if (__xtc_send_on(sup->loop, sup->sup_pid, &a, sizeof a) != XTC_OK)
 		return XTC_E_INTERNAL;
 
 	for (;;) {
@@ -703,7 +719,9 @@ xtc_sup_stop(xtc_supervisor_t *sup)
 	 * recv-poll and observes stop_requested. */
 	{
 		uint8_t kick = 'X';
-		(void)xtc_send(sup->sup_pid, &kick, 1);
+		/* Owner-qualified: off-loop, a pid-only send landed on the
+		 * first standalone loop with an equal pid (stray message). */
+		(void)__xtc_send_on(sup->loop, sup->sup_pid, &kick, 1);
 	}
 	return XTC_OK;
 }

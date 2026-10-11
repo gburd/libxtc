@@ -699,7 +699,208 @@ test_join_timeout_keeps_sup(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+#include <pthread.h>
+#include <stdatomic.h>
+
+/* PIDs are executor-relative: every standalone loop encodes loop_id 0, so
+ * a proc on an UNRELATED standalone loop can carry a pid equal to ours.
+ * seq_by is that bystander: it counts messages it receives and records
+ * whether it exited normally (a kill aimed at the wrong proc stops it). */
+static _Atomic int g_seq_stop, g_seq_by_msgs, g_seq_by_normal;
+static void
+seq_by(void *arg)
+{
+	void *m;
+	size_t s;
+	(void)arg;
+	while (!atomic_load(&g_seq_stop)) {
+		m = NULL;
+		if (xtc_recv(&m, &s, 1000000) == XTC_OK) {
+			atomic_fetch_add(&g_seq_by_msgs, 1);
+			xtc_free(m);
+		}
+	}
+	atomic_fetch_add(&g_seq_by_normal, 1);
+}
+static void *
+seq_loop_thread(void *arg)
+{
+	(void)xtc_loop_run(arg);
+	return NULL;
+}
+/* Spawn n bystanders on a fresh loop b (registered FIRST, so an off-loop
+ * pid-only lookup also prefers it) and run it on its own thread. */
+static void
+seq_by_start(xtc_loop_t **b, xtc_pid_t *by, int n, pthread_t *th)
+{
+	int i;
+	atomic_store(&g_seq_stop, 0);
+	atomic_store(&g_seq_by_msgs, 0);
+	atomic_store(&g_seq_by_normal, 0);
+	munit_assert_int(xtc_loop_init(b), ==, XTC_OK);
+	for (i = 0; i < n; i++)
+		munit_assert_int(xtc_proc_spawn(*b, seq_by, NULL, NULL, &by[i]),
+		    ==, XTC_OK);
+	munit_assert_int(pthread_create(th, NULL, seq_loop_thread, *b), ==, 0);
+}
+static int
+seq_has_equal(const xtc_pid_t *by, int n, xtc_pid_t p)
+{
+	int i;
+	for (i = 0; i < n; i++)
+		if (xtc_pid_eq(by[i], p)) return 1;
+	return 0;
+}
+
+static _Atomic int g_seq_a_spawns, g_seq_b_spawns;
+static xtc_pid_t g_seq_a_pid0;
+static void
+seq_a(void *arg)
+{
+	void *m;
+	size_t s;
+	(void)arg;
+	if (atomic_fetch_add(&g_seq_a_spawns, 1) == 0) {
+		g_seq_a_pid0 = xtc_self();
+		(void)xtc_proc_sleep(20LL * 1000 * 1000);
+		xtc_exit_self(7);
+	}
+	for (;;) {
+		m = NULL;
+		(void)xtc_recv(&m, &s, 200LL * 1000 * 1000);
+		if (m) xtc_free(m);
+	}
+}
+static void
+seq_b(void *arg)
+{
+	void *m;
+	size_t s;
+	(void)arg;
+	atomic_fetch_add(&g_seq_b_spawns, 1);
+	for (;;) {
+		m = NULL;
+		(void)xtc_recv(&m, &s, 200LL * 1000 * 1000);
+		if (m) xtc_free(m);
+	}
+}
+static void
+seq_watch(void *arg)
+{
+	xtc_supervisor_t *sup = arg;
+	int64_t t0 = xtc_clock_mono();
+	while (atomic_load(&g_seq_b_spawns) < 2 && xtc_sup_alive(sup) &&
+	    xtc_clock_mono() - t0 < 3LL * 1000 * 1000 * 1000)
+		(void)xtc_proc_sleep(5LL * 1000 * 1000);
+	(void)xtc_sup_stop(sup);
+}
+/* one_for_all waits for the old generation to LEAVE the proc table before
+ * respawning.  A pid-only presence check saw the bystander on loop B with
+ * the crashed child's pid as "still cleaning up", waited out the 5 s
+ * cleanup bound and STOPPED the supervisor instead of restarting. */
+static MunitResult
+test_one_for_all_equal_pid_other_loop(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *la = NULL, *lb = NULL;
+	xtc_supervisor_t *sup;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t kids[2];
+	xtc_pid_t by[8], wpid;
+	pthread_t th;
+	(void)p; (void)d;
+
+	atomic_store(&g_seq_a_spawns, 0);
+	atomic_store(&g_seq_b_spawns, 0);
+	seq_by_start(&lb, by, 8, &th);
+	opts.strategy = XTC_SUP_ONE_FOR_ALL;
+	opts.max_restarts = 5;
+	opts.period_ns = 1000LL * 1000 * 1000;
+	memset(kids, 0, sizeof kids);
+	kids[0].name = "a"; kids[0].fn = seq_a; kids[0].policy = XTC_RESTART_TRANSIENT;
+	kids[1].name = "b"; kids[1].fn = seq_b; kids[1].policy = XTC_RESTART_TRANSIENT;
+	munit_assert_int(xtc_loop_init(&la), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(la, &opts, kids, 2, &sup), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(la, seq_watch, sup, NULL, &wpid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(la), ==, XTC_OK);
+	atomic_store(&g_seq_stop, 1);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+
+	munit_assert_true(seq_has_equal(by, 8, g_seq_a_pid0));   /* premise */
+	munit_assert_int(atomic_load(&g_seq_b_spawns), >=, 2);   /* restarted */
+	munit_assert_int(atomic_load(&g_seq_by_normal), ==, 8);  /* none killed */
+	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(la), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(lb), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* xtc_sup_add_child called from a proc on ANOTHER standalone loop.  The
+ * request (to the supervisor) and the reply (to the caller) are pid sends;
+ * resolved by pid alone, each lands on whichever loop the resolver picks
+ * for loop_id 0.  The caller must get its child, and no bystander with an
+ * equal pid may receive either message. */
+struct xadd { xtc_supervisor_t *sup; int rc, added; };
+static void
+xadd_caller(void *arg)
+{
+	struct xadd *x = arg;
+	xtc_child_spec_t spec;
+	xtc_pid_t pid = XTC_PID_NONE;
+	memset(&spec, 0, sizeof spec);
+	spec.name = "xsession";
+	spec.fn = sofo_session;
+	spec.policy = XTC_RESTART_TEMPORARY;
+	x->rc = xtc_sup_add_child(x->sup, &spec, &pid);
+	x->added = x->rc == XTC_OK && !xtc_pid_is_none(pid);
+	(void)xtc_sup_stop(x->sup);
+}
+static void *
+xadd_sup_thread(void *arg)
+{
+	(void)xtc_loop_run(arg);
+	return NULL;
+}
+static MunitResult
+test_add_child_other_loop(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *ls = NULL, *lc = NULL, *lb = NULL;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_supervisor_t *sup = NULL;
+	struct xadd x = { NULL, -1, 0 };
+	xtc_pid_t by[8], cpid;
+	pthread_t thb, ths;
+	(void)p; (void)d;
+
+	atomic_store(&g_sofo_ran, 0);
+	seq_by_start(&lb, by, 8, &thb);      /* bystanders, registered first */
+	munit_assert_int(xtc_loop_init(&ls), ==, XTC_OK);
+	opts.strategy = XTC_SUP_SIMPLE_OFO;
+	munit_assert_int(xtc_sup_start(ls, &opts, NULL, 0, &sup), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&lc), ==, XTC_OK);
+	x.sup = sup;
+	munit_assert_int(xtc_proc_spawn(lc, xadd_caller, &x, NULL, &cpid),
+	    ==, XTC_OK);
+	munit_assert_int(pthread_create(&ths, NULL, xadd_sup_thread, ls), ==, 0);
+	munit_assert_int(xtc_loop_run(lc), ==, XTC_OK);
+	munit_assert_int(pthread_join(ths, NULL), ==, 0);
+	atomic_store(&g_seq_stop, 1);
+	munit_assert_int(pthread_join(thb, NULL), ==, 0);
+
+	munit_assert_true(seq_has_equal(by, 8, cpid));            /* premise */
+	munit_assert_int(x.rc, ==, XTC_OK);
+	munit_assert_int(x.added, ==, 1);
+	munit_assert_int(atomic_load(&g_sofo_ran), ==, 1);
+	munit_assert_int(atomic_load(&g_seq_by_msgs), ==, 0);     /* no stray */
+	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(lc), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(ls), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(lb), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
+	{ "/add_child_other_loop", test_add_child_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/one_for_all",           test_one_for_all,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/rest_for_one",          test_rest_for_one,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -710,6 +911,7 @@ static MunitTest tests[] = {
 	{ "/simple_one_for_one",    test_simple_one_for_one,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pool_max_children",     test_pool_max_children,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/atomic_spawn_monitor",  test_atomic_spawn_monitor, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/one_for_all_equal_pid_other_loop", test_one_for_all_equal_pid_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10/sup", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

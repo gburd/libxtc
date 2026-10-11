@@ -236,6 +236,11 @@ typedef struct xtc_tnt_frame {
 	int             n_staged;
 } xtc_tnt_frame_t;
 
+/* Thread-local is correct only because shard procs are PINNED (spawned
+ * with migratable == 0): clang keeps &tl_shard live across xtc_yield in
+ * xtc_tnt_shard_main, which is safe only while the fiber cannot resume on
+ * another carrier.  Making shards migratable requires an out-of-line
+ * accessor (see __current_proc in src/ptc/proc.c). */
 static _Thread_local xtc_tnt_frame_t *tl_frame = NULL;
 static _Thread_local xtc_tnt_shard_t *tl_shard = NULL;
 
