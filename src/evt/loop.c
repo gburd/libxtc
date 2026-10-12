@@ -78,12 +78,21 @@ void  (*__xtc_loop_fini_hook)(xtc_loop_t *loop) = NULL;
 
 /* --- inbox ---------------------------------------------------------- */
 
+/*
+ * The inbox is two lock-free LIFO stacks threaded through the tasks'
+ * inbox_next (see struct xtc_inbox).  It used to be a mutex-guarded list
+ * of calloc'd nodes: one allocation and one lock round trip per cross-
+ * loop wake, and an ENOMEM silently dropped the wake, stranding a parked
+ * receiver whose message was already in its mailbox.  A task can be on
+ * at most one inbox at a time (loop_int.h, inbox_next), so the link field
+ * is enough and a push cannot fail.
+ */
+
 int
 __xtc_inbox_init(struct xtc_inbox *ib)
 {
-	int rc;
-	if ((rc = __os_mutex_init(&ib->lock)) != XTC_OK) return rc;
-	ib->head = ib->tail = NULL;
+	atomic_store_explicit(&ib->pub_head, NULL, memory_order_relaxed);
+	atomic_store_explicit(&ib->wake_head, NULL, memory_order_relaxed);
 	ib->inited = 1;
 	return XTC_OK;
 }
@@ -91,147 +100,196 @@ __xtc_inbox_init(struct xtc_inbox *ib)
 void
 __xtc_inbox_fini(struct xtc_inbox *ib)
 {
-	struct xtc_inbox_msg *m, *n;
+	xtc_task_t *t, *n;
 	if (!ib->inited) return;
-	for (m = ib->head; m != NULL; m = n) {
-		n = m->next;
-		/* An undrained XTC_INB_PUBLISH carries a task that was spawned
-		 * cross-thread but never ran, so it was never linked into the
-		 * loop's all_tasks list and thus was NOT freed by xtc_loop_fini's
-		 * all_tasks walk.  Reclaim it here exactly as that walk does:
-		 * run its cleanup (the coroutine layer's callback releases the
-		 * fiber stack + coro struct) then free the task struct.  An
-		 * XTC_INB_WAKE, by contrast, references a task that IS already
-		 * tracked (parked, on all_tasks) and already freed, so we must
-		 * NOT touch its task here. */
-		if (m->kind == XTC_INB_PUBLISH && m->task != NULL) {
-			if (m->task->cleanup != NULL)
-				m->task->cleanup(m->task->cleanup_arg);
-			__os_free(m->task);
-		}
-		__os_free(m);
+	/* An undrained PUBLISH carries a task that was spawned cross-thread
+	 * but never ran, so it was never linked into the loop's all_tasks
+	 * list and thus was NOT freed by xtc_loop_fini's all_tasks walk.
+	 * Reclaim it here exactly as that walk does: run its cleanup (the
+	 * coroutine layer's callback releases the fiber stack + coro struct)
+	 * then free the task struct.  A WAKE entry, by contrast, is a task
+	 * that IS already tracked (parked, on all_tasks) and already freed,
+	 * so the wake stack is dropped without touching its tasks. */
+	for (t = atomic_load_explicit(&ib->pub_head, memory_order_acquire);
+	    t != NULL; t = n) {
+		n = t->inbox_next;
+		if (t->cleanup != NULL)
+			t->cleanup(t->cleanup_arg);
+		__os_free(t);
 	}
-	(void)__os_mutex_destroy(&ib->lock);
-	ib->head = ib->tail = NULL;
+	atomic_store_explicit(&ib->pub_head, NULL, memory_order_relaxed);
+	atomic_store_explicit(&ib->wake_head, NULL, memory_order_relaxed);
 	ib->inited = 0;
 }
 
 int
-__xtc_inbox_push(struct xtc_inbox *ib, enum xtc_inbox_kind k, xtc_task_t *t)
+__xtc_inbox_nonempty(const struct xtc_inbox *ib)
 {
-	struct xtc_inbox_msg *m;
+	return atomic_load_explicit(&((struct xtc_inbox *)ib)->pub_head,
+	    memory_order_acquire) != NULL ||
+	    atomic_load_explicit(&((struct xtc_inbox *)ib)->wake_head,
+	    memory_order_acquire) != NULL;
+}
+
+/* XTC_NOALLOC_BEGIN: cross-loop inbox push + drain -- the per-wake path
+ * (__xtc_inbox_push, __xtc_inbox_drain) links tasks intrusively and must
+ * never touch the allocator. */
+
+/* Push t onto one of the inbox stacks (seq_cst: pairs with the drain's
+ * clear-then-take, see __xtc_loop_nudge). */
+static void
+__inbox_stack_push(_Atomic(xtc_task_t *) *head, xtc_task_t *t)
+{
+	xtc_task_t *old = atomic_load_explicit(head, memory_order_relaxed);
+	do {
+		t->inbox_next = old;
+	} while (!atomic_compare_exchange_weak(head, &old, t));
+}
+
+/*
+ * Coalesced cross-thread nudge: write the loop's wakeup fd only when this
+ * call flips wakeup_pending 0->1.  The owner clears the flag only when it
+ * is about to block (__inbox_ready), and checks the inbox after clearing.
+ * Producers push before they test the flag (all seq_cst), so a producer
+ * that finds the flag set pushed before the owner's next clear-then-check,
+ * which sees the push; a producer that finds it clear writes the fd, which
+ * breaks the owner's poll.  A busy loop therefore costs its producers no
+ * write(2) at all, and an idle one costs one per wake-up.
+ */
+int
+__xtc_loop_nudge(xtc_loop_t *loop)
+{
 	int rc;
-	if ((rc = __os_calloc(1, sizeof *m, (void **)&m)) != XTC_OK)
-		return rc;
-	m->kind = k;
-	m->task = t;
-	m->next = NULL;
+	if (atomic_exchange(&loop->wakeup_pending, 1) != 0)
+		return XTC_OK;
+	if ((rc = xtc_io_wakeup(loop->io)) != XTC_OK)
+		atomic_store(&loop->wakeup_pending, 0);   /* let the next try write */
+	return rc;
+}
+
+/*
+ * Queue t on loop's inbox and nudge the loop.  Cannot fail.  The caller
+ * must own t's single inbox slot: a PUBLISH of a freshly spawned task,
+ * or the WAKE of a waker that won t's PARKED->SCHEDULED transition.
+ * The caller must not touch t afterwards (the loop may run and free it).
+ */
+int
+__xtc_inbox_push(xtc_loop_t *loop, enum xtc_inbox_kind k, xtc_task_t *t)
+{
 	/* Critical section: the MPSC inbox is pushed by ANY thread/loop
 	 * and drained by this loop's owner.  A DST fault point marks the
 	 * cross-loop enqueue boundary. */
 	XTC_SIM_FAULT_POINT("sched.inbox.pre_push");
-	(void)__os_mutex_lock(&ib->lock);
-	if (ib->tail == NULL) ib->head = ib->tail = m;
-	else { ib->tail->next = m; ib->tail = m; }
-	(void)__os_mutex_unlock(&ib->lock);
+	__inbox_stack_push(k == XTC_INB_PUBLISH ? &loop->inbox.pub_head :
+	    &loop->inbox.wake_head, t);
+	/* The task is queued whatever the nudge returns; a failed nudge only
+	 * delays it to the loop's next turn (an executor loop re-polls every
+	 * millisecond), so it must not be reported as a failed wake/spawn. */
+	(void)__xtc_loop_nudge(loop);
 	return XTC_OK;
 }
 
+/* Reverse a LIFO-pushed chain into arrival order. */
+static xtc_task_t *
+__inbox_reverse(xtc_task_t *t)
+{
+	xtc_task_t *r = NULL, *n;
+	for (; t != NULL; t = n) {
+		n = t->inbox_next;
+		t->inbox_next = r;
+		r = t;
+	}
+	return r;
+}
+
+/* Detach and return the last task of a non-empty chain. */
+static xtc_task_t *
+__inbox_detach_last(xtc_task_t **list)
+{
+	xtc_task_t **pp = list, *last;
+	while ((*pp)->inbox_next != NULL)
+		pp = &(*pp)->inbox_next;
+	last = *pp;
+	*pp = NULL;
+	return last;
+}
+
+/*
+ * Owner-only.  Returns the number of tasks drained (>= 0).
+ */
 int
 __xtc_inbox_drain(xtc_loop_t *loop)
 {
-	struct xtc_inbox_msg *list, *m, *n, *defer = NULL;
-	int64_t drained = 0;
+	xtc_task_t *pub, *wake, *t, *n, *defer = NULL;
+	int defer_pub = 0;
+	int64_t n_pub = 0;
+	int drained = 0;
 
-	(void)__os_mutex_lock(&loop->inbox.lock);
-	list = loop->inbox.head;
-	loop->inbox.head = loop->inbox.tail = NULL;
-	(void)__os_mutex_unlock(&loop->inbox.lock);
+	if (atomic_load(&loop->inbox.pub_head) == NULL &&
+	    atomic_load(&loop->inbox.wake_head) == NULL)
+		return 0;
+	pub = __inbox_reverse(atomic_exchange(&loop->inbox.pub_head, NULL));
+	wake = __inbox_reverse(atomic_exchange(&loop->inbox.wake_head, NULL));
 
-	/* Buggify: under DST, process one FEWER message this turn -- hold
-	 * back the tail message and re-queue it for the next drain.  A WAKE
-	 * / PUBLISH held back simply schedules its task one step later (the
-	 * loop stays runnable because inbox.head != NULL, so the scheduler
-	 * steps it again and drains it): a legal one-turn delay that cannot
-	 * lose a message.  Only when there is more than one message (so the
-	 * loop still makes progress this turn) and never for a WAKE alone,
-	 * and only under the per-call BUGGIFY-stream coin.  A no-op in
-	 * production. */
-	if (list != NULL && list->next != NULL &&
+	/* Buggify: under DST, process one FEWER task this turn -- hold back
+	 * the last one and re-queue it for the next drain.  A WAKE / PUBLISH
+	 * held back simply schedules its task one step later (the loop stays
+	 * runnable because its inbox is non-empty, so the scheduler steps it
+	 * again and drains it): a legal one-turn delay that cannot lose a
+	 * task.  Only when there is more than one entry (so the loop still
+	 * makes progress this turn), and only under the per-call
+	 * BUGGIFY-stream coin.  A no-op in production. */
+	if (((pub != NULL && (pub->inbox_next != NULL || wake != NULL)) ||
+	    (wake != NULL && wake->inbox_next != NULL)) &&
 	    XTC_SIM_BUGGIFY("sched.inbox.drain_one_fewer") &&
 	    xtc_sim_buggify_fault(250)) {
-		struct xtc_inbox_msg *pp = list;
-		while (pp->next->next != NULL)
-			pp = pp->next;
-		defer = pp->next;      /* the last message */
-		pp->next = NULL;       /* detach it from the processed list */
+		if (wake != NULL && wake->inbox_next != NULL)
+			defer = __inbox_detach_last(&wake);
+		else if (pub != NULL && pub->inbox_next != NULL) {
+			defer = __inbox_detach_last(&pub);
+			defer_pub = 1;
+		} else {
+			defer = wake;      /* exactly one PUBLISH + one WAKE */
+			wake = NULL;
+		}
 	}
 
-	for (m = list; m != NULL; m = n) {
-		n = m->next;
+	for (t = pub; t != NULL; t = n) {
+		n = t->inbox_next;   /* read before the task becomes visible */
 		drained++;
-		switch (m->kind) {
-		case XTC_INB_WAKE:
-			{
-			/*
-			 * CAS the PARKED->SCHEDULED transition.  This handler
-			 * runs on THIS loop's thread, but the target task may
-			 * be a migratable fiber currently being dispatched or
-			 * run on ANOTHER loop (a stale WAKE that targeted the
-			 * task's waker loop after the task was work-stolen).
-			 * A plain read-check-write of task->state would race
-			 * that peer loop's dispatch store (loop.c
-			 * t->state = XTC_TS_RUNNING) and could double-enqueue
-			 * the task.  The CAS makes the transition atomic:
-			 * exactly one PARKED->SCHEDULED winner enqueues; a task
-			 * that is already SCHEDULED/RUNNING/DONE (not PARKED)
-			 * loses the CAS and instead latches wake_pending, so
-			 * the RUNNING->PARKED verdict re-schedules rather than
-			 * losing the wake (the prepare/park race, unchanged).
-			 * A PARKED task is in no run queue, so the winning
-			 * enqueue cannot race a concurrent dispatch of the same
-			 * task. */
-			int expect = XTC_TS_PARKED;
-			if (atomic_compare_exchange_strong_explicit(
-			    &m->task->state, &expect, XTC_TS_SCHEDULED,
-			    memory_order_acq_rel, memory_order_acquire)) {
-				(void)__xtc_loop_enqueue(loop, m->task);
-			} else {
-				/* Not PARKED (raced the park, or running on a
-				 * peer): latch so the eventual RUNNING->PARKED
-				 * verdict re-schedules instead of parking. */
-				atomic_store_explicit(&m->task->wake_pending, 1,
-				    memory_order_release);
-			}
-			}
-			break;
-		case XTC_INB_PUBLISH:
-			m->task->all_next = loop->all_tasks;
-			m->task->all_prev = NULL;
-			if (loop->all_tasks != NULL)
-				loop->all_tasks->all_prev = m->task;
-			loop->all_tasks = m->task;
-			(void)__xtc_loop_enqueue(loop, m->task);
-			break;
-		}
-		__os_free(m);
+		n_pub++;
+		t->all_next = loop->all_tasks;
+		t->all_prev = NULL;
+		if (loop->all_tasks != NULL)
+			loop->all_tasks->all_prev = t;
+		loop->all_tasks = t;
+		(void)__xtc_loop_enqueue(loop, t);
 	}
-	/* Re-queue the deferred message at the FRONT of the inbox (its
-	 * relative order with any newly-arrived messages does not matter --
-	 * inbox delivery is unordered across threads).  Preserve replay:
-	 * only the sim thread touches the inbox during a step. */
-	if (defer != NULL) {
-		(void)__os_mutex_lock(&loop->inbox.lock);
-		defer->next = loop->inbox.head;
-		loop->inbox.head = defer;
-		if (loop->inbox.tail == NULL)
-			loop->inbox.tail = defer;
-		(void)__os_mutex_unlock(&loop->inbox.lock);
+	/* WAKE: the waker already moved the task PARKED->SCHEDULED (its CAS
+	 * is what entitled it to queue the task here), and a PARKED task is
+	 * in no run queue, so the enqueue cannot race a dispatch of the same
+	 * task on another loop. */
+	for (t = wake; t != NULL; t = n) {
+		n = t->inbox_next;
+		drained++;
+		(void)__xtc_loop_enqueue(loop, t);
 	}
-	if (drained > 0 && loop->res != NULL)
-		xtc_res_release(loop->res, XTC_RES_INBOX_MSGS, drained);
-	return XTC_OK;
+	/* Re-queue the deferred task (its relative order with newly arrived
+	 * entries does not matter -- inbox delivery is unordered across
+	 * threads).  Only the sim thread touches the inbox during a step. */
+	if (defer != NULL)
+		__inbox_stack_push(defer_pub ? &loop->inbox.pub_head :
+		    &loop->inbox.wake_head, defer);
+	/* Only a cross-thread PUBLISH charges XTC_RES_INBOX_MSGS
+	 * (__xtc_task_spawn_ex), so release exactly those.  Releasing one
+	 * per drained entry, WAKEs included, released units nobody charged
+	 * and drove the count negative under cross-loop traffic. */
+	if (n_pub > 0 && loop->res != NULL)
+		xtc_res_release(loop->res, XTC_RES_INBOX_MSGS, n_pub);
+	return drained;
 }
+
+/* XTC_NOALLOC_END */
 
 /* --- lifecycle ------------------------------------------------------ */
 
@@ -487,8 +545,39 @@ __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t)
 }
 
 /*
- * Owner-side pop.  Prefer slow-path FIFO if non-empty (older items),
- * then deque (LIFO bottom).
+ * Owner-side pop of the default lane: the owner-only FIFO (pinned tasks
+ * and deque overflow) and the stealable deque.  Both are taken oldest
+ * first, and when both hold work the loop alternates between them.  A
+ * task that returns XTC_TASK_RESCHED is re-queued at the back of its lane,
+ * so it runs again only after everything already queued there.
+ *
+ * The deque used to be popped LIFO from the bottom and the FIFO always
+ * won: a migratable fiber that yielded was re-pushed and immediately
+ * re-popped, so every other migratable fiber on the loop starved until it
+ * finished (two yielders: counts [0, 1655348] in one second), and a
+ * yielding pinned task starved every migratable one the same way.
+ */
+static xtc_task_t *
+__default_pop(xtc_loop_t *loop)
+{
+	xtc_task_t *t;
+	int fifo = loop->q_head != NULL;
+
+	if (fifo && xtc_deque_len(&loop->deque) > 0)
+		fifo = (loop->pop_flip ^= 1u) != 0;
+	if (!fifo && (t = xtc_deque_take(&loop->deque)) != NULL)
+		return t;
+	if ((t = loop->q_head) == NULL)
+		return NULL;
+	loop->q_head = t->q_next;
+	if (loop->q_head == NULL) loop->q_tail = NULL;
+	t->q_next = NULL;
+	return t;
+}
+
+/*
+ * Owner-side pop: the class pick when classes exist, else (or when the
+ * default lane wins it) __default_pop.
  */
 static xtc_task_t *
 __queue_pop(xtc_loop_t *loop)
@@ -538,14 +627,7 @@ __queue_pop(xtc_loop_t *loop)
 		 * at all -> that pop returns NULL. */
 	}
 
-	if (loop->q_head != NULL) {
-		t = loop->q_head;
-		loop->q_head = t->q_next;
-		if (loop->q_head == NULL) loop->q_tail = NULL;
-		t->q_next = NULL;
-		return t;
-	}
-	return (xtc_task_t *)xtc_deque_pop(&loop->deque);
+	return __default_pop(loop);
 }
 
 #ifdef XTC_ENABLE_SCHED_POLICY
@@ -570,13 +652,7 @@ __policy_pop(xtc_loop_t *loop)
 			rc->runs++;
 		}
 	} else if (lane == -1) {
-		t = loop->q_head;
-		if (t != NULL) {
-			loop->q_head = t->q_next;
-			if (loop->q_head == NULL) loop->q_tail = NULL;
-			t->q_next = NULL;
-		} else
-			t = xtc_deque_pop(&loop->deque);
+		t = __default_pop(loop);
 	}
 	if (t != NULL)
 		return t;
@@ -754,6 +830,24 @@ __xtc_drain_due_timers(xtc_loop_t *loop)
 }
 
 /* --- main step ------------------------------------------------------ */
+
+static int __runq_nonempty(const xtc_loop_t *loop);
+
+/*
+ * Called just before the loop may block in its poller (a blocking poll in
+ * __xtc_loop_step, or reporting idle so the executor worker polls): clear
+ * wakeup_pending, then look at the inbox.  Returns 1 if the inbox holds
+ * work, in which case the caller must not block.  Clearing is what makes
+ * the next producer write the wakeup fd (__xtc_loop_nudge).
+ */
+static int
+__inbox_ready(xtc_loop_t *loop)
+{
+	if (atomic_load(&loop->wakeup_pending) != 0)
+		atomic_store(&loop->wakeup_pending, 0);
+	return __xtc_inbox_nonempty(&loop->inbox);
+}
+
 
 static int
 __xtc_loop_step(xtc_loop_t *loop)
@@ -985,8 +1079,11 @@ __xtc_loop_step(xtc_loop_t *loop)
 				    memory_order_release);
 				(void)__xtc_loop_enqueue(loop, t);
 			} else {
-				atomic_store_explicit(&t->state, XTC_TS_PARKED,
-				    memory_order_release);
+				/* seq_cst store + the seq_cst exchange below pair
+				 * with __task_wake_claim's latch-then-load-state
+				 * (src/evt/task.c): of this re-check and a waker's
+				 * re-check, at least one sees the other's write. */
+				atomic_store(&t->state, XTC_TS_PARKED);
 				/*
 				 * NINTH SURFACE.  The exchange above and this
 				 * store are NOT one atomic step, so a waker can
@@ -1018,8 +1115,7 @@ __xtc_loop_step(xtc_loop_t *loop)
 				 * arrives concurrently with this re-check cannot
 				 * double-enqueue.
 				 */
-				if (atomic_exchange_explicit(&t->wake_pending, 0,
-				    memory_order_acquire)) {
+				if (atomic_exchange(&t->wake_pending, 0)) {
 					int exp = XTC_TS_PARKED;
 					if (atomic_compare_exchange_strong_explicit(
 					    &t->state, &exp, XTC_TS_SCHEDULED,
@@ -1083,37 +1179,52 @@ __xtc_loop_step(xtc_loop_t *loop)
 
 	/* 2. Drain due timers. */
 	if ((rc = __xtc_drain_due_timers(loop)) != XTC_OK) return rc;
-	if (loop->q_head != NULL || xtc_deque_len(&loop->deque) > 0)
+	if (__runq_nonempty(loop))
 		return XTC_OK;
 
 	/*
-	 * Run queue empty (but we may still own parked fibers or timers, so
-	 * n_alive > 0).  Under eager rebalance, try to steal a sibling's
-	 * runnable migratable proc BEFORE blocking in the poller on our own
-	 * fds -- this is what lets a loop whose backends are all parked on
-	 * sockets run a peer's runnable query instead of idling.  Without
-	 * eager rebalance a loop steals only when FULLY idle (the branch
-	 * below), so a loop that owns parked fibers never rebalances.
+	 * Run queue empty.  An executor loop tries to steal a peer's queued
+	 * migratable work before it blocks, whether or not it owns parked
+	 * fibers or pending timers, and while it waits it re-checks on a
+	 * short tick (__xtc_exec_steal_recheck_ns) instead of sleeping until
+	 * its own next deadline.  Stealing used to happen here only when the
+	 * loop had no pending timer (or eager rebalance was on), so a single
+	 * parked xtc_proc_sleep or timed recv -- i.e. every real loop --
+	 * turned stealing off: 64 runnable migratable procs on loop 0 and a
+	 * loop 1 holding one sleeping proc gave steals [0, 0] for the whole
+	 * sleep.
 	 */
 	if (loop->exec != NULL) {
-		extern int __xtc_exec_eager(xtc_loop_t *);
-		if (__xtc_exec_eager(loop)) {
-			extern void *__xtc_exec_try_steal(xtc_loop_t *me);
-			xtc_task_t *stolen = __xtc_exec_try_steal(loop);
-			if (stolen != NULL) {
-				atomic_fetch_add_explicit(&loop->n_steals, 1,
-				    memory_order_relaxed);
-				stolen->q_next = NULL;
-				(void)__xtc_loop_enqueue(loop, stolen);
-				return XTC_OK;   /* run it next step */
-			}
+		extern void *__xtc_exec_try_steal(xtc_loop_t *me);
+		xtc_task_t *stolen = __xtc_exec_try_steal(loop);
+		if (stolen != NULL) {
+			atomic_fetch_add_explicit(&loop->n_steals, 1,
+			    memory_order_relaxed);
+			stolen->q_next = NULL;
+			(void)__xtc_loop_enqueue(loop, stolen);
+			/* A steal skips this step's blocking poll, and a loop
+			 * that keeps finding peer work (each stolen fiber parks
+			 * at once) would otherwise never reap its own ring --
+			 * stranding a fiber parked here on an fd or an aio
+			 * completion.  Poll it once, without blocking, per
+			 * steal. */
+			for (i = 0; i < (int)(sizeof evs / sizeof evs[0]); i++)
+				evs[i].fd = -1;
+			n_out = 0;
+			if (xtc_io_poll(loop->io, evs,
+			    (int)(sizeof evs / sizeof evs[0]), 0,
+			    &n_out) == XTC_OK)
+				for (i = 0; i < n_out; i++)
+					(void)__xtc_loop_dispatch_event(loop,
+					    &evs[i]);
+			return XTC_OK;   /* run it next step */
 		}
 	}
 
-	/* Run queue empty: block in xtc_io_poll until the next timer
-	 * deadline (or an I/O event).  Re-read the clock -- the timer drain
-	 * above may have fired callbacks that took measurable time -- so the
-	 * poll timeout below is computed against now, not a stale sample. */
+	/* Block in xtc_io_poll until the next timer deadline (or an I/O
+	 * event).  Re-read the clock -- the timer drain above may have fired
+	 * callbacks that took measurable time -- so the poll timeout below is
+	 * computed against now, not a stale sample. */
 	if ((rc = __os_clock_mono(&now_ns)) != XTC_OK) return rc;
 	next_deadline_ns = __xtc_timer_heap_next_deadline(loop);
 	if (next_deadline_ns < 0 &&
@@ -1123,22 +1234,16 @@ __xtc_loop_step(xtc_loop_t *loop)
 	if (next_deadline_ns >= 0) {
 		timeout_ns = next_deadline_ns - now_ns;
 		if (timeout_ns < 0) timeout_ns = 0;
-	} else {
-		/* M5: if part of an executor and have no work locally, try
-		 * stealing before blocking. */
-		if (loop->exec != NULL) {
-			extern void *__xtc_exec_try_steal(xtc_loop_t *me);
-			xtc_task_t *stolen = __xtc_exec_try_steal(loop);
-			if (stolen != NULL) {
-				atomic_fetch_add_explicit(&loop->n_steals, 1,
-				    memory_order_relaxed);
-				stolen->q_next = NULL;
-				(void)__xtc_loop_enqueue(loop, stolen);
-				return XTC_OK;
-			}
-		}
+	} else
 		timeout_ns = -1;
+	if (loop->exec != NULL) {
+		extern int64_t __xtc_exec_steal_recheck_ns(xtc_loop_t *);
+		int64_t rk = __xtc_exec_steal_recheck_ns(loop);
+		if (rk > 0 && (timeout_ns < 0 || timeout_ns > rk))
+			timeout_ns = rk;
 	}
+	if (timeout_ns != 0 && __inbox_ready(loop))
+		return XTC_OK;   /* a wake/spawn arrived: drain it, do not block */
 
 	for (i = 0; i < (int)(sizeof evs / sizeof evs[0]); i++)
 		evs[i].fd = -1;
@@ -1294,8 +1399,19 @@ __runq_nonempty(const xtc_loop_t *loop)
 	return 0;
 }
 
+static int __loop_step_once(xtc_loop_t *loop);
+
 int
 __xtc_loop_step_once(xtc_loop_t *loop)
+{
+	int rc = __loop_step_once(loop);
+	atomic_store_explicit(&loop->n_timers_pub, loop->n_timers,
+	    memory_order_relaxed);
+	return rc;
+}
+
+static int
+__loop_step_once(xtc_loop_t *loop)
 {
 	int rc, has_tasks, has_timers;
 
@@ -1351,14 +1467,15 @@ __xtc_loop_step_once(xtc_loop_t *loop)
 				    memory_order_relaxed);
 				stolen->q_next = NULL;
 				(void)__xtc_loop_enqueue(loop, stolen);
-			} else if (__runq_nonempty(loop)) {
+			} else if (__runq_nonempty(loop) ||
+			    __inbox_ready(loop)) {
 				/* Nothing to steal, but we DO hold runnable work --
 				 * fall through to run it rather than reporting idle
 				 * (see __runq_nonempty). */
 			} else {
 				return 0;
 			}
-		} else if (!__runq_nonempty(loop)) {
+		} else if (!__runq_nonempty(loop) && !__inbox_ready(loop)) {
 			return 0;
 		}
 	}

@@ -17,6 +17,7 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_exec.h"
+#include "xtc_res.h"
 #include "xtc_int.h"
 #include "os_time.h"
 
@@ -179,11 +180,99 @@ test_loop_wake_foreign(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [M11] A cross-loop wake must not depend on the allocator.  The inbox
+ * used to calloc a node per wake; with the allocator failing,
+ * xtc_waker_wake returned XTC_E_NOMEM and the wake was gone -- the parked
+ * task stayed parked forever (every caller of xtc_waker_wake ignores its
+ * result).  The waker here fails every allocation for the duration of
+ * the wake.  If the wake is refused it re-fires it with the allocator
+ * restored so the run still quiesces, and the test fails on the
+ * recorded rc.
+ */
+static void *m11_fail_calloc(size_t n, size_t sz) { (void)n; (void)sz; return NULL; }
+static void *m11_fail_malloc(size_t sz) { (void)sz; return NULL; }
+static int m11_wake_rc;
+
+static int m11_waker_fn(xtc_task_t *self, void *u) {
+	struct shared *s = u;
+	struct __os_alloc_hook saved, failing;
+	(void)self;
+	while (__os_atomic_load_i32(&s->init_done) == 0)
+		(void)__os_sleep_ns(100 * 1000LL);
+	(void)__os_sleep_ns(2 * 1000 * 1000LL);   /* parker is PARKED */
+	munit_assert_int(__os_alloc_get_hook(&saved), ==, XTC_OK);
+	failing = saved;
+	failing.malloc = m11_fail_malloc;
+	failing.calloc = m11_fail_calloc;
+	munit_assert_int(__os_alloc_set_hook(&failing), ==, XTC_OK);
+	m11_wake_rc = xtc_waker_wake(&s->parker_waker);
+	munit_assert_int(__os_alloc_set_hook(&saved), ==, XTC_OK);
+	if (m11_wake_rc != XTC_OK)
+		(void)xtc_waker_wake(&s->parker_waker);
+	return XTC_TASK_DONE;
+}
+
+static MunitResult
+test_wake_no_alloc(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	static struct shared s;
+	(void)p; (void)d;
+	s.parker_runs = 0; s.init_done = 0; s.max_runs = 2; s.wake_calls = 0;
+	m11_wake_rc = -12345;
+	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_spawn_on(e, 1, m11_waker_fn, &s, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	munit_assert_int(m11_wake_rc, ==, XTC_OK);
+	munit_assert_int(__os_atomic_load_i32(&s.parker_runs), ==, 2);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/*
+ * [m1] XTC_RES_INBOX_MSGS is charged only by a cross-thread spawn, so a
+ * cross-loop WAKE must not release it.  The drain used to release one
+ * unit per drained entry, WAKEs included: units charged by someone else
+ * vanished (here, the five the test holds) and the count went negative
+ * under load.  The parker re-parks after each wake, so every wake below
+ * is a real cross-loop WAKE.
+ */
+#define M1_HELD  5
+#define M1_WAKES 40
+static MunitResult
+test_inbox_res_wake_symmetric(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	static struct shared s;
+	static struct waker_args wa;
+	xtc_res_t *r0;
+	(void)p; (void)d;
+	s.parker_runs = 0; s.init_done = 0; s.max_runs = M1_WAKES + 1;
+	s.wake_calls = 0;
+	wa.s = &s; wa.n_wakes = M1_WAKES;
+	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	r0 = xtc_loop_res(xtc_exec_loop(e, 0));
+	munit_assert_ptr_not_null(r0);
+	munit_assert_int(xtc_res_acquire(r0, XTC_RES_INBOX_MSGS, M1_HELD),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_spawn_on(e, 1, waker_fn,  &wa, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	munit_assert_int(__os_atomic_load_i32(&s.parker_runs), >=, 2);
+	munit_assert_int64(xtc_res_used(r0, XTC_RES_INBOX_MSGS), ==, M1_HELD);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Cw1_Cw2_basic",   test_basic,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Cw3_after_done",  test_after_done, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Cw4_concurrent",  test_concurrent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Cw5_loop_wake_foreign", test_loop_wake_foreign, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/M11_wake_no_alloc", test_wake_no_alloc, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/m1_inbox_res_wake_symmetric", test_inbox_res_wake_symmetric, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/cross_wake", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

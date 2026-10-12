@@ -165,7 +165,8 @@ __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 		return XTC_OK;
 	}
 
-	/* Cross-thread publish.  Charge inbox slot too. */
+	/* Cross-thread publish.  Charge an inbox slot too; the drain
+	 * releases exactly one per PUBLISH it takes. */
 	if (loop->res != NULL) {
 		rc = xtc_res_acquire(loop->res, XTC_RES_INBOX_MSGS, 1);
 		if (rc != XTC_OK) {
@@ -177,18 +178,7 @@ __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 	}
 
 	atomic_fetch_add_explicit(&loop->n_alive, 1, memory_order_relaxed);
-	if ((rc = __xtc_inbox_push(&loop->inbox, XTC_INB_PUBLISH, t)) != XTC_OK) {
-		atomic_fetch_sub_explicit(&loop->n_alive, 1, memory_order_relaxed);
-		if (loop->res != NULL) {
-			xtc_res_release(loop->res, XTC_RES_INBOX_MSGS, 1);
-			xtc_res_release(loop->res, XTC_RES_TASKS, 1);
-		}
-		__xtc_task_free(t);
-		if (out_task) *out_task = NULL;
-		return rc;
-	}
-	(void)xtc_io_wakeup(loop->io);
-	return XTC_OK;
+	return __xtc_inbox_push(loop, XTC_INB_PUBLISH, t);
 }
 
 int
@@ -237,6 +227,37 @@ xtc_task_waker(xtc_task_t *task, xtc_waker_t *out)
 }
 
 /*
+ * Claim a wake of t: returns 1 if the caller moved t PARKED->SCHEDULED
+ * and must now queue it, 0 if t was not parked (the wake is latched in
+ * wake_pending for the PENDING verdict to consume, or t is already
+ * queued / running / done).
+ *
+ * The latch alone is not enough when the waker runs on a different
+ * thread from the task.  The PENDING verdict does exchange(wake_pending)
+ * -> store PARKED -> exchange(wake_pending) again (loop.c, the ninth
+ * surface), and a waker whose CAS failed while the task was RUNNING can
+ * store its latch AFTER that second exchange -- leaving the task PARKED
+ * with the latch set and nobody to consume it.  So after latching, look
+ * again: if the task is PARKED now, race the verdict for the latch with
+ * the same exchange; exactly one side takes it and does the CAS.
+ */
+static int
+__task_wake_claim(xtc_task_t *t)
+{
+	int expect = XTC_TS_PARKED;
+	if (atomic_compare_exchange_strong(&t->state, &expect,
+	    XTC_TS_SCHEDULED))
+		return 1;
+	atomic_store(&t->wake_pending, 1);
+	if (atomic_load(&t->state) != XTC_TS_PARKED ||
+	    !atomic_exchange(&t->wake_pending, 0))
+		return 0;
+	expect = XTC_TS_PARKED;
+	return atomic_compare_exchange_strong(&t->state, &expect,
+	    XTC_TS_SCHEDULED);
+}
+
+/*
  * PUBLIC: int xtc_waker_wake __P((const xtc_waker_t *));
  *
  *   - PARKED   -> SCHEDULED + enqueue   (the normal path)
@@ -255,67 +276,44 @@ xtc_waker_wake(const xtc_waker_t *w)
 		return XTC_E_INVAL;
 
 	if (__xtc_current_loop == w->loop) {
-		/* Same-loop wake.  Still CAS the PARKED->SCHEDULED transition:
-		 * a migratable task can also be targeted by a cross-loop WAKE
-		 * draining on another thread concurrently, so a plain
-		 * read-check-write would race it.  Only the PARKED winner
-		 * enqueues. */
-		int expect = XTC_TS_PARKED;
-		if (atomic_compare_exchange_strong_explicit(
-		    &w->task->state, &expect, XTC_TS_SCHEDULED,
-		    memory_order_acq_rel, memory_order_acquire))
+		/* Same-loop wake.  Still claim the PARKED->SCHEDULED transition
+		 * atomically: a migratable task can be running on another loop
+		 * or targeted by a cross-loop wake concurrently, so a plain
+		 * read-check-write would race it.  Only the winner enqueues.
+		 *
+		 * A lost claim is not automatically "already runnable": the
+		 * dangerous case is the PREPARE/PARK WINDOW, where the task is
+		 * still RUNNING (it has decided to park and armed its wake
+		 * source, but the scheduler has not yet applied the PARKED
+		 * verdict).  __task_wake_claim latches wake_pending for it, so
+		 * the verdict re-schedules instead of parking a task whose wake
+		 * already came and went.  Latching when the task is genuinely
+		 * RUNNING-and-not-parking is harmless: the flag is consumed only
+		 * by the PENDING verdict, and a stale flag is cleared by the
+		 * exchange the next time it parks. */
+		if (__task_wake_claim(w->task))
 			return __xtc_loop_enqueue(w->loop, w->task);
-		/*
-		 * CAS lost.  The task is NOT parked right now -- and that is
-		 * not automatically "already runnable": the dangerous case is
-		 * the PREPARE/PARK WINDOW, where the task is still RUNNING
-		 * (it has decided to park and armed its wake source, but the
-		 * scheduler has not yet applied the PARKED verdict).  A wake
-		 * delivered in that window must be REMEMBERED, or the verdict
-		 * that follows parks a task whose wake already came and went
-		 * -- a lost wakeup, with nothing left to re-deliver it.
-		 *
-		 * The cross-loop XTC_INB_WAKE handler has always latched
-		 * wake_pending here (src/evt/loop.c, and XTC_TASK_PENDING
-		 * consumes it to re-schedule instead of parking).  This
-		 * same-loop branch did not, so the two halves of the v1.40.4
-		 * CAS fix disagreed: a same-loop waker (a timer fire, an
-		 * io/aio completion dispatched by this very loop, a
-		 * same-loop xtc_proc_wake) that raced the park window dropped
-		 * the wake silently, stranding the fiber PARKED -- and with it
-		 * anything waiting on a lock it held.  Latch it, exactly as
-		 * the cross-loop path does.
-		 *
-		 * Latching when the task is genuinely RUNNING-and-not-parking
-		 * is harmless: the flag is consumed only by the PENDING
-		 * verdict, and a task that reaches RESCHED/DONE instead never
-		 * looks at it (and a stale flag is cleared by the exchange the
-		 * next time it does park).
-		 */
-		atomic_store_explicit(&w->task->wake_pending, 1,
-		    memory_order_release);
 		return XTC_OK;
 	}
 
-	/* Cross-thread.  Inbox + wakeup.
+	/* Cross-thread.  Claim the transition here, then hand the task to
+	 * its loop's inbox.  Winning the claim is what entitles this waker
+	 * to the task's single inbox slot (loop_int.h, inbox_next), so the
+	 * push needs no allocation and cannot fail: a wake can no longer be
+	 * dropped for ENOMEM after its message is already in the receiver's
+	 * mailbox.
 	 *
-	 * Capture loop and task into locals BEFORE the inbox push.  The
-	 * waker *w may be embedded in a stack-allocated waiter (e.g. the
-	 * struct amutex_waiter / chan / proc waiters) owned by the parked
-	 * task.  The instant the task is pushed to the target loop's
-	 * inbox, that loop can resume it on another thread and the task
-	 * may return -- freeing *w -- before we read it again.
-	 * Dereferencing w->loop after the push is a use-after-free,
-	 * observed as an EXC_BAD_ACCESS / pointer-authentication fault
-	 * inside xtc_io_wakeup under a multi-loop executor.  The loop and
-	 * its io are owned by the executor and outlive the task, so the
-	 * captured locals stay valid. */
+	 * Capture loop and task into locals before the push.  The waker *w
+	 * may be embedded in a stack-allocated waiter owned by the parked
+	 * task; once the task is in the inbox its loop can resume it on
+	 * another thread and it may return, freeing *w.  The loop and its io
+	 * are owned by the executor and outlive the task. */
 	{
 		xtc_loop_t *loop = w->loop;
 		xtc_task_t *task = w->task;
-		int rc = __xtc_inbox_push(&loop->inbox, XTC_INB_WAKE, task);
-		if (rc != XTC_OK) return rc;
-		return xtc_io_wakeup(loop->io);
+		if (__task_wake_claim(task))
+			return __xtc_inbox_push(loop, XTC_INB_WAKE, task);
+		return XTC_OK;
 	}
 }
 
