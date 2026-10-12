@@ -21,6 +21,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/resource.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -471,7 +472,91 @@ test_pool_size(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- no fd per call, and never inline on the loop at fd exhaustion ----
+ * Each xtc_blocking_run used to open a pipe for its wakeup.  With 1000
+ * concurrent offloads the process held ~2000 extra fds, and once pipe()
+ * failed with EMFILE the call ran fn ON THE LOOP THREAD instead of the
+ * pool (measured: 153 of 200 at ulimit -n 100), stalling every other
+ * fiber on that loop.  Here the fd limit is lowered to what is open now
+ * plus a small margin, NFD fibers offload at once, and every fn must run
+ * off the loop thread while the fd count stays flat.  Fails on 1.55.0. */
+#define NFD 200
+static pthread_t g_fd_loop_thr;
+static _Atomic int g_fd_on_loop, g_fd_off_loop, g_fd_ok;
+
+static int
+fd_probe_fn(void *arg)
+{
+	struct timespec ts = { 0, 20 * 1000000L };
+	if (pthread_equal(pthread_self(), g_fd_loop_thr))
+		atomic_fetch_add(&g_fd_on_loop, 1);
+	else
+		atomic_fetch_add(&g_fd_off_loop, 1);
+	(void)nanosleep(&ts, NULL);
+	return (int)(intptr_t)arg + 1;
+}
+
+static void
+fd_proc(void *arg)
+{
+	int out = -1;
+	if (xtc_blocking_run(fd_probe_fn, arg, &out) == XTC_OK &&
+	    out == (int)(intptr_t)arg + 1)
+		atomic_fetch_add(&g_fd_ok, 1);
+}
+
+static int
+fd_count(void)
+{
+	int fd, n = 0;
+	for (fd = 0; fd < 4096; fd++)
+		if (fcntl(fd, F_GETFD) != -1)
+			n++;
+	return n;
+}
+
+static MunitResult
+test_no_fd_per_call(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t opts = { 0 };
+	struct rlimit old, lim;
+	xtc_pid_t pid;
+	int i, before, top = 0;
+	(void)p; (void)d;
+
+	xtc_blocking_shutdown();
+	atomic_store(&g_fd_on_loop, 0);
+	atomic_store(&g_fd_off_loop, 0);
+	atomic_store(&g_fd_ok, 0);
+	g_fd_loop_thr = pthread_self();
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	for (i = 0; i < NFD; i++) {
+		opts.name = "fd";
+		munit_assert_int(xtc_proc_spawn(loop, fd_proc,
+		    (void *)(intptr_t)i, &opts, &pid), ==, XTC_OK);
+	}
+	before = fd_count();
+	for (i = 0; i < 4096; i++)
+		if (fcntl(i, F_GETFD) != -1)
+			top = i + 1;
+	munit_assert_int(getrlimit(RLIMIT_NOFILE, &old), ==, 0);
+	lim = old;
+	lim.rlim_cur = (rlim_t)top + 16;   /* room for a few, not NFD pipes */
+	munit_assert_int(setrlimit(RLIMIT_NOFILE, &lim), ==, 0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(fd_count(), ==, before);
+	munit_assert_int(setrlimit(RLIMIT_NOFILE, &old), ==, 0);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_fd_on_loop), ==, 0);
+	munit_assert_int(atomic_load(&g_fd_off_loop), ==, NFD);
+	munit_assert_int(atomic_load(&g_fd_ok), ==, NFD);
+	xtc_blocking_shutdown();
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
+	{ "/no_fd_per_call", test_no_fd_per_call, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fallback",   test_fallback,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/submit",     test_submit_fire_forget, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/off_loop",   test_off_loop,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
