@@ -93,11 +93,16 @@ XTC_API int       xtc_svr_join(xtc_svr_t *svr, int64_t timeout_ns);
 XTC_API xtc_pid_t xtc_svr_pid(const xtc_svr_t *svr);
 
 /* Synchronous call: send `req`, wait for reply, copy reply into a
- * heap-allocated buffer that the caller must xtc_free.  Returns:
+ * heap-allocated buffer that the caller must xtc_free.  Callable from a
+ * proc or from a plain thread.  Returns:
  *   XTC_OK          -- *out_reply / *out_size populated
  *   XTC_E_AGAIN     -- timeout
- *   XTC_E_INVAL     -- bad pid / not a server
- */
+ *   XTC_E_NOTFOUND  -- the server exited before replying (noticed
+ *                      within ~25 ms; any timeout, including -1)
+ *   XTC_E_INVAL     -- bad pid / not a server / server already gone
+ * A timed-out, aborted or server-gone call only stops the CALLER
+ * waiting; a reply the server sends afterwards is discarded (its
+ * xtc_svr_reply returns XTC_E_NOTFOUND for an off-proc caller). */
 XTC_API int xtc_svr_call(xtc_pid_t target,
                          const void *req, size_t req_size,
                          void **out_reply, size_t *out_size,

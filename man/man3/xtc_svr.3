@@ -75,7 +75,22 @@ sends a request and blocks until reply or timeout.  In-process
 callers
 .Pq from another xtc_proc
 route via tag-and-pid through the caller's mailbox; external
-threads use slot-and-notify.  Both paths return the same way.
+threads use slot-and-notify.  Both paths return the same way:
+.Dv XTC_OK
+with the reply,
+.Dv XTC_E_AGAIN
+on timeout,
+.Dv XTC_E_NOTFOUND
+if the server exits before replying (checked about every 25 ms, so an
+infinite-timeout call does not hang on a dead server), or
+.Dv XTC_E_INVAL
+for bad arguments or a server that is already gone.
+A call that stops waiting (timeout, abort, server exit) leaves no
+state behind: a reply the server sends later is discarded, and for an
+off-process caller that
+.Fn xtc_svr_reply
+returns
+.Dv XTC_E_NOTFOUND .
 .Pp
 .Fn xtc_svr_call_abortable
 is the same call with cooperative cancellation: while it waits for the
