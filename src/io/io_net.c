@@ -364,9 +364,25 @@ __resolve_addr(xtc_net_family_t fam, const char *host, int port,
 	return XTC_E_INVAL;
 }
 
+/*
+ * Default listen backlog.  It was a hard-coded 128 (64 for UNIX sockets)
+ * with no way to change it: 20k clients connecting to an
+ * xtc_net_listen server overflowed the accept queue (TcpExtListenOverflows
+ * rising) and 5926 of them had not completed one echo after 10 s.  Ask
+ * for SOMAXCONN, or 4096 where the header's SOMAXCONN is smaller; the
+ * kernel clamps the request to its own limit (net.core.somaxconn on
+ * Linux, kern.ipc.somaxconn on the BSDs), so this means "as deep as the
+ * host allows".
+ */
+#if defined(SOMAXCONN) && SOMAXCONN > 4096
+#define XTC_NET_BACKLOG_DEFAULT SOMAXCONN
+#else
+#define XTC_NET_BACKLOG_DEFAULT 4096
+#endif
+
 static int
 __net_listen_raw(xtc_net_family_t fam, const char *host, int port,
-               const xtc_tcp_opts_t *opts, int *out_fd)
+               const xtc_tcp_opts_t *opts, int backlog, int *out_fd)
 {
 	int fd, rc, v;
 	struct sockaddr_storage sa;
@@ -374,8 +390,10 @@ __net_listen_raw(xtc_net_family_t fam, const char *host, int port,
 	int af;
 
 	WSA_INIT_ONCE();
-	if (out_fd == NULL || port <= 0 || port > 65535)
+	if (out_fd == NULL || port <= 0 || port > 65535 || backlog < 0)
 		return XTC_E_INVAL;
+	if (backlog == 0)
+		backlog = XTC_NET_BACKLOG_DEFAULT;
 	if (fam != XTC_NET_INET && fam != XTC_NET_INET6)
 		return XTC_E_INVAL;
 
@@ -404,7 +422,7 @@ __net_listen_raw(xtc_net_family_t fam, const char *host, int port,
 	if (bind(fd, (struct sockaddr *)&sa, salen) != 0) {
 		(void)close(fd); return XTC_E_INTERNAL;
 	}
-	if (listen(fd, 128) != 0) {
+	if (listen(fd, backlog) != 0) {
 		(void)close(fd); return XTC_E_INTERNAL;
 	}
 	*out_fd = fd;
@@ -478,7 +496,7 @@ __net_unix_listen_raw(const char *path, int *out_fd)
 	if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
 		(void)close(fd); return XTC_E_INTERNAL;
 	}
-	if (listen(fd, 64) != 0) {
+	if (listen(fd, XTC_NET_BACKLOG_DEFAULT) != 0) {
 		(void)close(fd); return XTC_E_INTERNAL;
 	}
 	*out_fd = fd;
@@ -600,7 +618,7 @@ __net_unix_listen_raw(const char *path, int *out_fd)
 	if (bind(fd, (struct sockaddr *)&sa, (int)sizeof sa) != 0) {
 		(void)close(fd); return XTC_E_INTERNAL;
 	}
-	if (listen(fd, 64) != 0) {
+	if (listen(fd, XTC_NET_BACKLOG_DEFAULT) != 0) {
 		(void)close(fd); return XTC_E_INTERNAL;
 	}
 	*out_fd = fd;
@@ -794,12 +812,27 @@ int
 xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
                const xtc_tcp_opts_t *opts, int *out_fd)
 {
+	return xtc_net_listen_backlog(fam, host, port, opts, 0, out_fd);
+}
+
+/*
+ * PUBLIC: int xtc_net_listen_backlog __P((xtc_net_family_t, const char *, int, const xtc_tcp_opts_t *, int, int *));
+ *
+ * xtc_net_listen with an explicit accept-queue depth.  backlog 0 is the
+ * default (see XTC_NET_BACKLOG_DEFAULT); a negative backlog is
+ * XTC_E_INVAL.  The kernel clamps the value to its own limit.
+ */
+int
+xtc_net_listen_backlog(xtc_net_family_t fam, const char *host, int port,
+                       const xtc_tcp_opts_t *opts, int backlog, int *out_fd)
+{
 	xtc_res_t *r;
 	int rc;
 	if (out_fd == NULL) return XTC_E_INVAL;
+	if (backlog < 0) return XTC_E_INVAL;
 	if ((rc = __net_charge(&r)) != XTC_OK) return rc;
 	return __net_settle(r,
-	    __net_listen_raw(fam, host, port, opts, out_fd), out_fd);
+	    __net_listen_raw(fam, host, port, opts, backlog, out_fd), out_fd);
 }
 
 /* Raw accept: one non-blocking, CLOEXEC connection off listen_fd. */

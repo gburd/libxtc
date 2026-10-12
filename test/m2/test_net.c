@@ -94,6 +94,132 @@ test_tcp_listen_dial(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- listen backlog ------------------------------------------
+ * xtc_net_listen hard-coded listen(fd, 128): a burst of connections
+ * beyond that overflowed the accept queue (20k clients: 5926 had not
+ * completed one echo after 10 s).  The default is now SOMAXCONN / 4096
+ * (kernel-clamped), and xtc_net_listen_backlog sets it.  Measured by
+ * connecting N clients without accepting and counting how many the
+ * kernel completed (Linux: SYNs beyond backlog+1 are dropped, so the
+ * dial stays in progress).  Fails on 1.55.0 (129 of 1000). */
+#if defined(__linux__)
+#include <poll.h>
+#include <sys/resource.h>
+
+static int
+backlog_fill(int (*listen_fn)(int, int *), int arg, int n)
+{
+	xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+	struct sockaddr_in s;
+	socklen_t l = sizeof s;
+	struct pollfd *pf;
+	int lfd = -1, i, ok = 0, port;
+
+	munit_assert_int(listen_fn(arg, &lfd), ==, XTC_OK);
+	memset(&s, 0, sizeof s);
+	munit_assert_int(getsockname(lfd, (struct sockaddr *)&s, &l), ==, 0);
+	port = ntohs(s.sin_port);
+	pf = calloc((size_t)n, sizeof *pf);
+	munit_assert_not_null(pf);
+	for (i = 0; i < n; i++) {
+		int fd = -1;
+		munit_assert_int(xtc_net_dial(XTC_NET_INET, "127.0.0.1", port,
+		    &opts, &fd), ==, XTC_OK);
+		pf[i].fd = fd;
+		pf[i].events = POLLOUT;
+	}
+	(void)poll(pf, (nfds_t)n, 500);   /* let the handshakes land */
+	for (i = 0; i < n; i++) {
+		int err = 0;
+		socklen_t el = sizeof err;
+		pf[i].revents = 0;
+		if (poll(&pf[i], 1, 0) == 1 && (pf[i].revents & POLLOUT) &&
+		    getsockopt(pf[i].fd, SOL_SOCKET, SO_ERROR, &err, &el) == 0 &&
+		    err == 0)
+			ok++;
+		xtc_net_close(pf[i].fd);
+	}
+	free(pf);
+	xtc_net_close(lfd);
+	return ok;
+}
+
+static int g_bl_port;
+
+static int
+bl_default(int unused, int *out)
+{
+	xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+	(void)unused;
+	return xtc_net_listen(XTC_NET_INET, "127.0.0.1", g_bl_port, &opts, out);
+}
+
+static int
+bl_explicit(int backlog, int *out)
+{
+	xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+	return xtc_net_listen_backlog(XTC_NET_INET, "127.0.0.1", g_bl_port,
+	    &opts, backlog, out);
+}
+
+static int
+bl_free_port(void)
+{
+	int probe = (int)socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in s;
+	socklen_t l = sizeof s;
+	memset(&s, 0, sizeof s);
+	s.sin_family = AF_INET;
+	s.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	(void)bind(probe, (struct sockaddr *)&s, sizeof s);
+	(void)getsockname(probe, (struct sockaddr *)&s, &l);
+	close(probe);
+	return ntohs(s.sin_port);
+}
+
+static MunitResult
+test_listen_backlog(const MunitParameter p[], void *d)
+{
+	enum { N = 1000 };
+	struct rlimit rl;
+	FILE *f;
+	int somax = 0, got, fd = -1;
+	xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+	(void)p; (void)d;
+
+	f = fopen("/proc/sys/net/core/somaxconn", "r");
+	if (f == NULL || fscanf(f, "%d", &somax) != 1)
+		somax = 0;
+	if (f != NULL)
+		fclose(f);
+	if (somax < N)
+		return MUNIT_SKIP;   /* host clamps the backlog below N */
+	munit_assert_int(getrlimit(RLIMIT_NOFILE, &rl), ==, 0);
+	if (rl.rlim_cur < N + 64) {
+		rl.rlim_cur = rl.rlim_max >= N + 64 ? N + 64 : rl.rlim_max;
+		(void)setrlimit(RLIMIT_NOFILE, &rl);
+		(void)getrlimit(RLIMIT_NOFILE, &rl);
+		if (rl.rlim_cur < N + 64)
+			return MUNIT_SKIP;
+	}
+
+	/* The default must accept a burst far beyond 128. */
+	g_bl_port = bl_free_port();
+	got = backlog_fill(bl_default, 0, N);
+	munit_assert_int(got, ==, N);
+
+	/* An explicit small backlog is honored (Linux completes backlog+1). */
+	g_bl_port = bl_free_port();
+	got = backlog_fill(bl_explicit, 16, N);
+	munit_assert_int(got, <=, 17 + 4);
+	munit_assert_int(got, >=, 1);
+
+	munit_assert_int(xtc_net_listen_backlog(XTC_NET_INET, "127.0.0.1",
+	    bl_free_port(), &opts, -1, &fd), ==, XTC_E_INVAL);
+	return MUNIT_OK;
+}
+#endif
+
 /* ----- TCP knobs apply ---------------------------------------- */
 
 static MunitResult
@@ -179,6 +305,9 @@ static MunitTest tests[] = {
 	{ "/uds_listen_dial", test_uds_listen_dial, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ "/setnonblock",     test_setnonblock,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#if defined(__linux__)
+	{ "/listen_backlog",  test_listen_backlog,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m2/net", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
