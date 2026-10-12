@@ -76,8 +76,11 @@ xtc_deque_push(xtc_deque_t *d, void *v)
 	if (b - t >= XTC_DEQUE_CAP) return XTC_E_AGAIN;
 	atomic_store_explicit(&d->buf[b & XTC_DEQUE_MASK], v,
 	    memory_order_relaxed);
-	atomic_thread_fence(memory_order_release);
-	atomic_store_explicit(&d->bottom, b + 1, memory_order_relaxed);
+	/* A release store, not fence + relaxed store: the same ordering, but
+	 * ThreadSanitizer does not model standalone fences, so the fence form
+	 * hid the push->steal edge and every write a thief makes to a stolen
+	 * task (q_next, inbox_next) was reported as a race. */
+	atomic_store_explicit(&d->bottom, b + 1, memory_order_release);
 	return XTC_OK;
 }
 
@@ -140,6 +143,28 @@ xtc_deque_steal(xtc_deque_t *d)
 	        memory_order_seq_cst, memory_order_relaxed))
 		return NULL;          /* lost race */
 	return x;
+}
+
+/*
+ * Owner-side FIFO take: the oldest item, from the steal end.  The run
+ * queue uses this instead of the LIFO xtc_deque_pop so a task that
+ * re-queues itself (XTC_TASK_RESCHED) goes behind everything already
+ * queued rather than straight back to the front.  It is the owner
+ * stealing from itself: xtc_deque_steal is multi-consumer safe, so the
+ * owner's take and peer thieves are arbitrated by the same CAS on top.
+ * A NULL from steal on a non-empty deque means another consumer won the
+ * slot, so retry; each lost race is someone else's progress.
+ */
+static inline void *
+xtc_deque_take(xtc_deque_t *d)
+{
+	void *x;
+
+	while (atomic_load_explicit(&d->bottom, memory_order_relaxed) >
+	    atomic_load_explicit(&d->top, memory_order_acquire))
+		if ((x = xtc_deque_steal(d)) != NULL)
+			return x;
+	return NULL;
 }
 
 /*

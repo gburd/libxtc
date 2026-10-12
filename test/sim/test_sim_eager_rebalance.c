@@ -23,9 +23,11 @@
  * Invariants:
  *   INV1 (liveness, eager ON): total steals > 0 -- the backlog is
  *        actually rebalanced onto the parked-fiber loops.
- *   INV2 (honest baseline, eager OFF): total steals == 0 for this SAME
- *        shape+seed -- proves the gap is real (not vacuous) and that
- *        the default (off) is unchanged.
+ *   INV2 (default, eager OFF): total steals > 0 for this SAME
+ *        shape+seed.  Since 1.55.1 (review155 M9) a run-queue-empty loop
+ *        steals whether or not it owns a parked timer fiber, so the
+ *        backlog is rebalanced by default too.  Up to 1.55.0 this
+ *        asserted 0 steals -- it pinned the gap the M9 fix closes.
  *   INV3 (determinism): the same seed with eager ON replays
  *        byte-identically (state hash + steal count) across two runs.
  *
@@ -154,11 +156,12 @@ main(void)
 		return 1;
 	}
 
-	/* INV2: the default (eager off) is unchanged -- zero steals for
-	 * this exact parked-fiber shape (the reported gap, reproduced). */
-	if (steals_off != 0) {
-		printf("FAIL[INV2]: eager-off produced %ld steals (want 0) -- "
-		    "the default-off baseline changed\n", steals_off);
+	/* INV2: since 1.55.1 (M9) a run-queue-empty loop steals whether or
+	 * not it owns a parked timer fiber, with eager rebalance off too:
+	 * the parked-fiber backlog is rebalanced by default. */
+	if (steals_off == 0) {
+		printf("FAIL[INV2]: eager-off produced ZERO steals -- a loop "
+		    "with a pending timer stopped stealing (M9 regression)\n");
 		return 1;
 	}
 
@@ -183,8 +186,8 @@ main(void)
 	}
 
 	printf("OK: eager rebalance closes the parked-fiber steal gap under "
-	    "DST -- eager-off replays the reported 0-steal baseline "
-	    "(the PG measurement), eager-on drives the REAL "
+	    "DST -- eager-off steals too (the M9 default), eager-on "
+	    "drives the REAL "
 	    "__xtc_loop_step steal-before-block via the seeded scheduler "
 	    "(%ld steals) with byte-identical replay\n", steals_on1);
 	return 0;

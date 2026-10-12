@@ -103,7 +103,12 @@ manages
 .Em N
 event loops, one per worker thread.  Each loop owns a Chase-Lev
 work-stealing deque as its run queue plus an MPSC inbox for cross-thread
-wakers and remote spawns.
+wakers and remote spawns.  The owner takes from its deque in FIFO
+order, the same end thieves steal from, so a task that yields
+.Pq Dv XTC_TASK_RESCHED
+runs again only after every task queued before it.  The inbox is
+lock-free and intrusive (no allocation per wake), so a cross-thread wake
+cannot fail.
 .Sh LIFECYCLE
 .Fn xtc_exec_init
 constructs an executor with
@@ -156,30 +161,30 @@ where the platform lacks per-thread CPU-time timers (the setting is
 stored but arming is a no-op).  This does not preempt a fiber that never
 reaches a yield check.
 .Pp
-Workers steal from peers when their own deque empties before going
-to
+A loop steals from a peer whenever its own run queue is empty, before
+it blocks in
 .Xr xtc_io 3
-.Sy poll .
-M5 uses a random victim policy; NUMA-near steal ordering arrives in
-M5.5.
+.Sy poll ,
+whether or not it also owns parked fibers or pending timers; only
+migratable
+.Pq Xr xtc_proc 3 , Fa migratable
+work, which sits on the stealable deque, is ever taken.  While its run
+queue stays empty it bounds each blocking poll to 1 ms (32 ms with
+steal backoff on) and looks again, so a loop holding a long sleep or a
+timed receive still picks up a busy peer's backlog within about a
+millisecond.  The victim scan prefers same-NUMA-node peers and starts
+at a rotating position.  Releases up to 1.55.0 stole only when a loop
+was fully idle (no parked fibers and no pending timers), so a single
+timer on a loop switched stealing off for it.
 .Pp
 .Fn xtc_exec_set_eager_rebalance
-(OFF by default) controls WHEN a loop steals a migratable
-.Pq Xr xtc_proc 3 , Fa migratable
-peer proc.  By default a loop steals only when FULLY idle -- its run
-queue empty AND no parked fibers or timers -- and discovers a
-sibling's stealable work only on its next poll edge.  Under a load
-where every loop owns parked fibers (e.g. many server backends parked
-on client sockets while a peer loop has a runnable query), no loop is
-ever fully idle, so migratable work sits on the stealable deque and is
-never taken.  With eager rebalance ON, a loop whose RUN QUEUE is empty
-(even if it owns parked fibers or timers) steals before it blocks in
-the poller, and enqueuing a migratable task nudges one idle peer to
-steal it promptly.  This trades some cross-loop migration (and its
-cache/NUMA cost) for reclaiming idle capacity under partial load; only
-migratable tasks are ever moved, so pinned work (the default) is
-unaffected either way.  A supervised server whose backends park on
-sockets opts in; a cache-locality-bound workload leaves it off.
+(OFF by default) makes stealing prompt rather than periodic: enqueuing
+a migratable task nudges one idle peer's poller so it steals at once
+instead of on its next tick.  This trades a cross-thread wakeup per
+enqueue (when a peer is idle) and some extra migration for lower
+rebalance latency; pinned work (the default) is unaffected either
+way.  A supervised server whose backends park on sockets opts in; a
+cache-locality-bound workload leaves it off.
 .Pp
 .Fn xtc_exec_set_steal_backoff
 (OFF by default) controls how hard an IDLE loop scans for work.  By
@@ -191,11 +196,13 @@ backoff ON, a worker that has taken no work for several consecutive
 turns grows its idle poll timeout exponentially (from 1 ms toward a
 32 ms cap); any real work resets it immediately.  This cuts the
 idle-scan CPU of an over-provisioned executor at the cost of a few
-extra milliseconds of worst-case latency before a deeply-idle loop
-notices stealable work (a cross-thread enqueue still nudges it at once
-when eager rebalance is also on).  It is complementary to eager
-rebalance: eager controls WHEN an idle-but-not-drained loop steals;
-backoff controls how often a fully-idle loop bothers to look.
+extra milliseconds of worst-case latency before an idle loop notices
+stealable work (a cross-thread enqueue still nudges it at once when
+eager rebalance is also on); the same 32 ms bound then applies to a
+loop whose run queue is empty but which owns parked fibers or timers.
+It is complementary to eager rebalance: eager controls whether an
+enqueue wakes an idle peer; backoff controls how often an idle loop
+bothers to look.
 .Pp
 .Fn xtc_exec_get_service_mode ,
 .Fn xtc_exec_get_eager_rebalance ,

@@ -180,6 +180,16 @@ struct xtc_task {
 	 * higher layers reclaim what they attached. */
 	void       (*cleanup)(void *cleanup_arg);
 	void        *cleanup_arg;
+
+	/* --- sched (fix155): intrusive cross-loop inbox link ---
+	 * A task enters a loop inbox only as SCHEDULED-and-unqueued: a
+	 * cross-thread spawn (PUBLISH) or the waker that won the
+	 * PARKED->SCHEDULED transition (WAKE).  It leaves when that loop
+	 * drains it.  Nothing else can queue it in between (every other wake
+	 * loses the transition and latches wake_pending) and it cannot reach
+	 * DONE before it runs, so one link field is enough and the inbox
+	 * needs no allocation and cannot fail. */
+	struct xtc_task *inbox_next;
 };
 
 /*
@@ -227,17 +237,17 @@ enum xtc_inbox_kind {
 	XTC_INB_PUBLISH = 1,     /* publish a freshly-allocated task */
 };
 
-struct xtc_inbox_msg {
-	enum xtc_inbox_kind  kind;
-	xtc_task_t          *task;
-	struct xtc_inbox_msg *next;
-};
-
+/*
+ * Lock-free MPSC inbox: producers push a task onto a LIFO stack with a
+ * CAS (no allocation, no lock); the owner takes the whole stack with one
+ * exchange and processes it in arrival order.  PUBLISH and WAKE use
+ * separate stacks so loop_fini can reclaim unpublished tasks without
+ * touching WAKE entries, whose tasks the all_tasks walk already freed.
+ */
 struct xtc_inbox {
-	__os_mutex_t          lock;
-	struct xtc_inbox_msg *head;
-	struct xtc_inbox_msg *tail;
-	int                   inited;
+	_Atomic(struct xtc_task *) pub_head;
+	_Atomic(struct xtc_task *) wake_head;
+	int                        inited;
 };
 
 /*
@@ -349,6 +359,16 @@ struct xtc_loop {
 	 * IO_FAIRNESS_QUANTUM runs the step does a non-blocking poll. */
 	unsigned int     runs_since_poll;
 
+	/* --- sched (fix155): owner-written, kept off the producer-written
+	 * inbox line ---
+	 * pop_flip alternates the two default lanes (owner FIFO, stealable
+	 * deque) when both hold work, so neither starves the other.
+	 * n_timers_pub is n_timers as last published by the owner (after
+	 * each step), for the executor supervisor's idle check, which must
+	 * not read the owner-only n_timers. */
+	unsigned int     pop_flip;
+	_Atomic int      n_timers_pub;
+
 	/* Cooperative yield watchdog (opt-in).  When yield_budget_ns > 0
 	 * the scheduler records each quantum's start time on the task and
 	 * xtc_yield_check reports a task over budget; n_yield_due counts
@@ -404,6 +424,7 @@ struct xtc_loop {
 	/* Cross-thread inbox: wakers and remote spawns deposit here;
 	 * the owner drains in __xtc_loop_drain_inbox. */
 	struct xtc_inbox inbox;
+
 
 	/* For the multi-loop executor: 0-based index in xtc_exec; -1 if
 	 * this loop is standalone (M3 single-thread mode). */
@@ -523,10 +544,12 @@ void __xtc_io_uring_preempt_disarm(xtc_io_t *io);
  * proc-table side struct hashed against this loop pointer.  Must be
  * idempotent. */
 void __xtc_proc_loop_unregister(xtc_loop_t *loop);
-/* Inbox API.  Producer-side functions are thread-safe. */
+/* Inbox API.  Producer-side functions are thread-safe and cannot fail.
+ * __xtc_inbox_push queues the task and nudges the loop's poller. */
 int  __xtc_inbox_init(struct xtc_inbox *ib);
 void __xtc_inbox_fini(struct xtc_inbox *ib);
-int  __xtc_inbox_push(struct xtc_inbox *ib, enum xtc_inbox_kind k, xtc_task_t *t);
+int  __xtc_inbox_push(xtc_loop_t *loop, enum xtc_inbox_kind k, xtc_task_t *t);
+int  __xtc_inbox_nonempty(const struct xtc_inbox *ib);
 int  __xtc_inbox_drain(xtc_loop_t *loop);  /* owner-only; drains into local queue */
 
 /* Per-thread cursor: which loop the calling thread is running.
