@@ -101,8 +101,11 @@ XTC_API xtc_pid_t xtc_svr_pid(const xtc_svr_t *svr);
  *                      within ~25 ms; any timeout, including -1)
  *   XTC_E_INVAL     -- bad pid / not a server / server already gone
  * A timed-out, aborted or server-gone call only stops the CALLER
- * waiting; a reply the server sends afterwards is discarded (its
- * xtc_svr_reply returns XTC_E_NOTFOUND for an off-proc caller). */
+ * waiting.  A reply the server sends afterwards to an off-proc caller is
+ * discarded (that xtc_svr_reply returns XTC_E_NOTFOUND); to an in-proc
+ * caller it is still delivered to the caller's mailbox, as a message
+ * whose first 4 bytes are the call's internal tag, and a later plain
+ * xtc_recv will see it. */
 XTC_API int xtc_svr_call(xtc_pid_t target,
                          const void *req, size_t req_size,
                          void **out_reply, size_t *out_size,
@@ -114,7 +117,8 @@ XTC_API int xtc_svr_call(xtc_pid_t target,
  * a timeout or a cancel-request path -- the cooperative cancellation
  * primitive (e.g. a statement timeout delivering a cancel at the next
  * wait point).  Cancellation stops only the caller's wait; the
- * server keeps processing and a late reply is discarded. */
+ * server keeps processing, and a late reply is handled as for a
+ * timed-out xtc_svr_call. */
 XTC_API int xtc_svr_call_abortable(xtc_pid_t target,
                                    const void *req, size_t req_size,
                                    void **out_reply, size_t *out_size,
