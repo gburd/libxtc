@@ -22,6 +22,7 @@
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_mtx_* */
 #include "xtc_future.h"
+#include "future_int.h"  /* internal discard helper */
 #include "xtc_loop.h"
 #include "xtc_async.h"     /* xtc_yield */
 #include "proc_int.h"      /* __xtc_proc_ctx_save/restore */
@@ -438,6 +439,20 @@ xtc_future_ready(xtc_future_t *fut, int *is_ready)
 	*is_ready = fut->cell->ready ? 1 : 0;
 	(void)__xtc_mtx_unlock(&fut->cell->lock);
 	return XTC_OK;
+}
+
+/* ---- internal: engine-owned token lifetime (future_int.h) ---- */
+
+void
+__xtc_future_discard(xtc_future_t *fut)
+{
+	if (fut == NULL)
+		return;
+	/* Mirror the consume tail of future_get: drop the read half's ref and
+	 * free the handle. The cell's refcount keeps it alive for any still-
+	 * outstanding promise, so a later set/drop is a safe refcount no-op. */
+	cell_unref(fut->cell);
+	__os_free(fut);
 }
 
 /* ---- combinators ----

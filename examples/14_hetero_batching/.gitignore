@@ -1,0 +1,6 @@
+hetero
+*.o
+core
+core.*
+*.core
+vgcore.*

@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,7 @@ main(void)
 #include "xtc_async.h"
 #include "xtc_batch.h"
 #include "xtc_exec.h"
+#include "xtc_future.h"
 #include "xtc_proc.h"
 #include "xtc_sim.h"
 
@@ -386,6 +388,399 @@ run(uint64_t seed, struct trace *trace)
 	require(&f, xtc_exec_fini(exec) == XTC_OK, "exec fini");
 }
 
+/* --------------------------------------------------------------------------
+ * Async-offload (FUTURE) sim scenario. A model loop runs an async batch; a
+ * producer loop resolves each outstanding future after a seeded virtual sleep.
+ * Variable-length completion, one cancel-in-flight, and a cancel-close
+ * teardown of the remainder. Everything is virtual-time + seeded RNG, so the
+ * event trace replays byte-identically. FENCE is native-only (no sim fd
+ * readiness); FUTURE is the sim-clean path. */
+#define ANREQ 4
+struct areq {
+	uint64_t handle;
+	unsigned id, left;
+	int accepted, done_result, terminal, expect_abort;
+};
+struct afix {
+	xtc_batch_t *batch;
+	uint64_t seed;
+	unsigned accepted, terminals, completed, cancelled;
+	struct areq req[ANREQ];
+	/* single outstanding op: the promise the producer resolves */
+	xtc_promise_t *prom;
+	xtc_future_t *fut;
+	int cancel_target; /* id to cancel in flight once, else -1 */
+	struct trace *trace;
+};
+
+static void
+arequire(struct afix *f, int ok, const char *why)
+{
+	if (!ok) {
+		fprintf(stderr, "FAIL: abatch seed=%" PRIu64 ": %s\n",
+		    f->seed, why);
+		exit(1);
+	}
+}
+
+static void
+aevent(struct afix *f, uint64_t k, uint64_t a, uint64_t b, uint64_t c)
+{
+	struct trace *t = f->trace;
+	arequire(f, t->used + 4 <= TRACE_WORDS, "atrace capacity");
+	t->words[t->used++] = k;
+	t->words[t->used++] = a;
+	t->words[t->used++] = b;
+	t->words[t->used++] = c;
+}
+
+static int
+asubmit(const xtc_batch_item_t *items, size_t n, void *user,
+    xtc_batch_exec_t *exec)
+{
+	struct afix *f = user;
+	struct areq *r;
+	size_t i;
+	arequire(f, n > 0 && n <= ACTIVE, "async vector cap");
+	arequire(f, f->prom == NULL && f->fut == NULL, "one op at a time");
+	if (xtc_future_new_pair(&f->prom, &f->fut) != XTC_OK)
+		return XTC_E_NOMEM;
+	exec->kind = XTC_BATCH_EXEC_FUTURE;
+	exec->future = f->fut;
+	for (i = 0; i < n; ++i) {
+		r = items[i].request;
+		r->done_result = (--r->left == 0);
+		aevent(f, 100, r->id, r->left, (uint64_t)r->done_result);
+	}
+	return XTC_OK;
+}
+
+static int
+acollect(const xtc_batch_item_t *items, xtc_batch_result_t *results, size_t n,
+    int exec_status, void *user)
+{
+	struct afix *f = user;
+	struct areq *r;
+	size_t i;
+	aevent(f, 101, n, (uint64_t)(int64_t)exec_status, 0);
+	for (i = 0; i < n; ++i) {
+		r = items[i].request;
+		if (exec_status == XTC_BATCH_EXEC_OK && r->done_result)
+			results[i].state = XTC_BATCH_DONE;
+		else
+			results[i].state = XTC_BATCH_CONTINUE;
+	}
+	/* The future is consumed by the engine; forget our handle to it. */
+	f->fut = NULL;
+	return XTC_OK;
+}
+
+static void
+acomplete(uint64_t handle, void *request, int outcome, void *user)
+{
+	struct afix *f = user;
+	struct areq *r = request;
+	arequire(f, handle == r->handle, "async handle identity");
+	arequire(f, !r->terminal, "async terminal twice");
+	r->terminal = 1;
+	f->terminals++;
+	if (outcome == XTC_OK)
+		f->completed++;
+	else
+		f->cancelled++;
+	aevent(f, 102, r->id, handle, (uint64_t)(int64_t)outcome);
+}
+
+/* Producer: resolve each outstanding future after a seeded virtual delay,
+ * cancelling one member in flight on the way. */
+static void
+aproducer(void *arg)
+{
+	struct afix *f = arg;
+	int guard = 0;
+	while (f->terminals < f->accepted) {
+		arequire(f, ++guard < 100000, "async producer bound");
+		if (f->prom != NULL) {
+			int64_t d = 50 + (int64_t)((f->seed >> (guard % 13)) % 97);
+			arequire(f, xtc_proc_sleep(d) == XTC_OK, "virtual delay");
+			if (f->cancel_target >= 0) {
+				if (!f->req[f->cancel_target].terminal) {
+					arequire(f, xtc_batch_cancel(f->batch,
+					    f->req[f->cancel_target].handle)
+					    == XTC_OK, "async cancel");
+					f->req[f->cancel_target].expect_abort = 1;
+				}
+				f->cancel_target = -1;
+			}
+			xtc_promise_set(f->prom, 0, XTC_OK);
+			f->prom = NULL;
+		} else
+			xtc_yield();
+	}
+	arequire(f, xtc_batch_close(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
+	    "async drain close");
+}
+
+static void
+arun(uint64_t seed, struct trace *trace)
+{
+	struct afix f = {0};
+	xtc_batch_async_opts_t o = {0};
+	xtc_exec_t *exec = NULL;
+	xtc_pid_t pid;
+	unsigned i;
+	f.seed = seed;
+	f.trace = trace;
+	f.cancel_target = (int)(seed % ANREQ);
+	trace->used = 0;
+	for (i = 0; i < ANREQ; ++i) {
+		f.req[i].id = i;
+		f.req[i].left = 1 + (unsigned)((seed * (2 * i + 3) + i) % 4);
+	}
+	arequire(&f, xtc_exec_init(&exec, 2) == XTC_OK, "async exec init");
+	o.size = sizeof(o);
+	o.version = XTC_BATCH_VERSION;
+	o.capacity = CAPACITY;
+	o.max_active = ACTIVE;
+	o.resource_capacity = RESOURCES;
+	o.submit = asubmit;
+	o.collect = acollect;
+	o.complete = acomplete;
+	o.user = &f;
+	arequire(&f, xtc_batch_create_async(xtc_exec_loop(exec, 0), &o,
+	    &f.batch) == XTC_OK, "async create");
+	for (i = 0; i < ANREQ; ++i) {
+		arequire(&f, xtc_batch_submit(f.batch, &f.req[i], 1,
+		    &f.req[i].handle) == XTC_OK, "async submit");
+		f.req[i].accepted = 1;
+		f.accepted++;
+	}
+	/* Producer shares the batch loop: cancel/close are owner-loop
+	 * mutations (cross-loop admission is S2). Promise resolution is
+	 * thread-safe regardless. */
+	arequire(&f, xtc_proc_spawn(xtc_exec_loop(exec, 0), aproducer, &f, NULL,
+	    &pid) == XTC_OK, "async producer spawn");
+	arequire(&f, xtc_sim_exec_run(exec, seed, STEPS) == XTC_OK,
+	    "async step budget/determinism guard");
+	arequire(&f, f.terminals == ANREQ && f.completed + f.cancelled == ANREQ,
+	    "async terminal conservation");
+	for (i = 0; i < ANREQ; ++i)
+		arequire(&f, f.req[i].terminal, "async member finalized");
+	arequire(&f, xtc_sim_check(exec) == XTC_OK, "async sim invariants");
+	arequire(&f, xtc_batch_destroy(f.batch) == XTC_OK, "async destroy");
+	arequire(&f, xtc_exec_fini(exec) == XTC_OK, "async exec fini");
+}
+
+/* --------------------------------------------------------------------------
+ * Cross-loop admission (S2) sim scenario. A producer on a SIBLING loop feeds a
+ * SYNC-step group on the model loop via submit_mt at seeded virtual times, and
+ * cancel_mt's one member in-stream. A white-box inject forces one
+ * cross-producer CANCEL-before-SUBMIT so the early-control set is exercised
+ * deterministically: that member must end ABORTED. The ring/free-pool/handle
+ * counter read no clock and no unseeded RNG, so the event trace replays
+ * byte-identically. */
+#define MNREQ 5
+struct mreq {
+	uint64_t handle;
+	unsigned id, left, ran;
+	int terminal, expect_abort;
+};
+struct mfix {
+	xtc_batch_t *batch;
+	uint64_t seed;
+	unsigned accepted, terminals, completed, cancelled;
+	struct mreq req[MNREQ];
+	_Atomic int producer_done;
+	struct trace *trace;
+};
+
+static void
+mrequire(struct mfix *f, int ok, const char *why)
+{
+	if (!ok) {
+		fprintf(stderr, "FAIL: mbatch seed=%" PRIu64 ": %s\n",
+		    f->seed, why);
+		exit(1);
+	}
+}
+
+static void
+mevent(struct mfix *f, uint64_t k, uint64_t a, uint64_t b, uint64_t c)
+{
+	struct trace *t = f->trace;
+	mrequire(f, t->used + 4 <= TRACE_WORDS, "mtrace capacity");
+	t->words[t->used++] = k;
+	t->words[t->used++] = a;
+	t->words[t->used++] = b;
+	t->words[t->used++] = c;
+}
+
+static int
+msubmit(const xtc_batch_item_t *items, size_t n, void *user,
+    xtc_batch_exec_t *exec)
+{
+	struct mfix *f = user;
+	struct mreq *r;
+	size_t i;
+	exec->kind = XTC_BATCH_EXEC_SYNC;
+	for (i = 0; i < n; ++i) {
+		r = items[i].request;
+		r->ran++;
+		if (r->left > 0)
+			r->left--;
+		mevent(f, 200, r->id, r->left, 0);
+	}
+	return XTC_OK;
+}
+
+static int
+mcollect(const xtc_batch_item_t *items, xtc_batch_result_t *results, size_t n,
+    int exec_status, void *user)
+{
+	struct mfix *f = user;
+	struct mreq *r;
+	size_t i;
+	(void)exec_status;
+	(void)f;
+	for (i = 0; i < n; ++i) {
+		r = items[i].request;
+		results[i].state = r->left == 0 ? XTC_BATCH_DONE :
+		                                 XTC_BATCH_CONTINUE;
+	}
+	return XTC_OK;
+}
+
+static void
+mcomplete(uint64_t handle, void *request, int outcome, void *user)
+{
+	struct mfix *f = user;
+	struct mreq *r = request;
+	mrequire(f, !r->terminal, "mt terminal twice");
+	(void)handle;
+	r->terminal = 1;
+	f->terminals++;
+	if (outcome == XTC_OK)
+		f->completed++;
+	else
+		f->cancelled++;
+	mevent(f, 202, r->id, (uint64_t)(int64_t)outcome, 0);
+}
+
+extern int __xtc_batch_mt_inject(xtc_batch_t *, int, uint64_t, void *,
+    uint64_t);
+
+/* Producer on a sibling loop: submit_mt each request after a seeded virtual
+ * delay, cancel_mt one member mid-stream. The engine stamps the handle, so a
+ * handle is known immediately; the member joins at the next boundary. */
+static void
+mproducer(void *arg)
+{
+	struct mfix *f = arg;
+	unsigned i;
+	/* req[0] is the white-box cross-producer case handled in mrun; the
+	 * producer owns req[1..MNREQ-1]. Pick its in-stream cancel from that
+	 * range so it never collides with req[0]. */
+	int cancel_id = 1 + (int)(f->seed % (MNREQ - 1));
+	for (i = 1; i < MNREQ; ++i) {
+		int64_t d = 40 + (int64_t)((f->seed >> (i % 11)) % 73);
+		uint64_t h = 0;
+		int rc;
+		mrequire(f, xtc_proc_sleep(d) == XTC_OK, "mt virtual delay");
+		for (;;) {
+			rc = xtc_batch_submit_mt(f->batch, &f->req[i], 1, &h);
+			if (rc == XTC_OK)
+				break;
+			mrequire(f, rc == XTC_E_AGAIN, "mt submit rc");
+			xtc_yield();
+		}
+		f->req[i].handle = h;
+		f->accepted++;
+		mevent(f, 201, i, h, 0);
+		if ((int)i == cancel_id) {
+			mrequire(f, xtc_batch_cancel_mt(f->batch, h) == XTC_OK,
+			    "mt cancel");
+			f->req[i].expect_abort = 1;
+		}
+	}
+	(void)atomic_store_explicit(&f->producer_done, 1,
+	    memory_order_relaxed);
+}
+
+/* Controller on the model loop: wait for every member to terminate then close
+ * so the driver exits. */
+static void
+mcontroller(void *arg)
+{
+	struct mfix *f = arg;
+	while (f->terminals < MNREQ
+	    || !atomic_load_explicit(&f->producer_done, memory_order_relaxed))
+		mrequire(f, xtc_proc_sleep(50) == XTC_OK, "mt controller tick");
+	mrequire(f, xtc_batch_close(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
+	    "mt drain close");
+}
+
+static void
+mrun(uint64_t seed, struct trace *trace)
+{
+	struct mfix f = {0};
+	xtc_batch_async_opts_t o = {0};
+	xtc_exec_t *exec = NULL;
+	xtc_pid_t pid;
+	unsigned i;
+	f.seed = seed;
+	f.trace = trace;
+	trace->used = 0;
+	for (i = 0; i < MNREQ; ++i) {
+		f.req[i].id = i;
+		f.req[i].left = 1 + (unsigned)((seed * (2 * i + 1) + i) % 3);
+	}
+	mrequire(&f, xtc_exec_init(&exec, 2) == XTC_OK, "mt exec init");
+	o.size = sizeof(o);
+	o.version = XTC_BATCH_VERSION;
+	o.capacity = CAPACITY + 2;
+	o.max_active = ACTIVE;
+	o.resource_capacity = RESOURCES + 2;
+	o.mt_queue_cap = 8;
+	o.submit = msubmit;
+	o.collect = mcollect;
+	o.complete = mcomplete;
+	o.user = &f;
+	mrequire(&f, xtc_batch_create_async(xtc_exec_loop(exec, 0), &o,
+	    &f.batch) == XTC_OK, "mt create");
+	/* The cross-producer lost-cancel case, driven deterministically: push a
+	 * CANCEL for a reserved handle BEFORE its SUBMIT (req[0]). This member
+	 * is accounted here (not via the producer) and must end ABORTED. */
+	f.req[0].expect_abort = 1;
+	f.accepted++;
+	{
+		uint64_t H = 1; /* first handle the group ever issues */
+		mrequire(&f, __xtc_batch_mt_inject(f.batch, 1 /*CANCEL*/, H,
+		    NULL, 0) == XTC_OK, "inject cancel");
+		mrequire(&f, __xtc_batch_mt_inject(f.batch, 0 /*SUBMIT*/, H,
+		    &f.req[0], 1) == XTC_OK, "inject submit");
+		mevent(&f, 203, 0, H, 0);
+	}
+	/* The producer submits req[1..MNREQ-1] from loop 1. It accounts only
+	 * those it submits, so pre-mark req[0] handled above. */
+	mrequire(&f, xtc_proc_spawn(xtc_exec_loop(exec, 1), mproducer, &f, NULL,
+	    &pid) == XTC_OK, "mt producer spawn");
+	mrequire(&f, xtc_proc_spawn(xtc_exec_loop(exec, 0), mcontroller, &f,
+	    NULL, &pid) == XTC_OK, "mt controller spawn");
+	mrequire(&f, xtc_sim_exec_run(exec, seed, STEPS) == XTC_OK,
+	    "mt step budget/determinism guard");
+	mrequire(&f, f.terminals == MNREQ, "mt terminal conservation");
+	mrequire(&f, f.completed + f.cancelled == MNREQ, "mt terminal split");
+	/* req[0]'s cancel reached the ring before its submit; the early-control
+	 * set must have aborted it before it ever ran. */
+	mrequire(&f, f.req[0].terminal && f.req[0].ran == 0,
+	    "mt cross-producer cancel lost (early-control)");
+	for (i = 0; i < MNREQ; ++i)
+		mrequire(&f, f.req[i].terminal, "mt member finalized");
+	mrequire(&f, xtc_sim_check(exec) == XTC_OK, "mt sim invariants");
+	mrequire(&f, xtc_batch_destroy(f.batch) == XTC_OK, "mt destroy");
+	mrequire(&f, xtc_exec_fini(exec) == XTC_OK, "mt exec fini");
+}
+
 static uint64_t
 number(const char *text)
 {
@@ -404,6 +799,8 @@ int
 main(int argc, char **argv)
 {
 	static struct trace first, replay;
+	static struct trace afirst, areplay;
+	static struct trace mfirst, mreplay;
 	uint64_t base = 1, count = 64, i;
 	if (argc > 3) {
 		fprintf(stderr, "usage: %s [base-seed [count]]\n", argv[0]);
@@ -424,9 +821,28 @@ main(int argc, char **argv)
 			    base + i);
 			return 1;
 		}
+		arun(base + i, &afirst);
+		arun(base + i, &areplay);
+		if (afirst.used != areplay.used || memcmp(afirst.words,
+		    areplay.words,
+		    afirst.used * sizeof(afirst.words[0])) != 0) {
+			fprintf(stderr, "FAIL: abatch seed=%" PRIu64
+			    " event replay differs\n", base + i);
+			return 1;
+		}
+		mrun(base + i, &mfirst);
+		mrun(base + i, &mreplay);
+		if (mfirst.used != mreplay.used || memcmp(mfirst.words,
+		    mreplay.words,
+		    mfirst.used * sizeof(mfirst.words[0])) != 0) {
+			fprintf(stderr, "FAIL: mbatch seed=%" PRIu64
+			    " event replay differs\n", base + i);
+			return 1;
+		}
 	}
 	printf("OK: batch seeds=%" PRIu64 "..%" PRIu64
-	    " replayed twice; real driver, two-loop commands, bounded progress\n",
+	    " replayed twice; real driver + async offload (FUTURE) + "
+	    "cross-loop admission (mt), two-loop, bounded progress\n",
 	    base, base + count - 1);
 	return 0;
 }

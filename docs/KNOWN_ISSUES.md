@@ -6,6 +6,49 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## NEW (1.55): asynchronous (device-offload) continuous batching
+
+**What it adds.** `xtc_batch_create_async` turns a batch group's step
+into a submit/collect pair: `submit` launches one device (GPU/NPU/
+thread-pool) operation over the ready vector and returns a completion
+descriptor; the driver awaits it without stalling the loop; `collect`
+reads the device outputs and decides per-member CONTINUE/DONE at the
+next boundary.  Four exec kinds -- FENCE (an fd), FUTURE (an
+`xtc_future_t`), BLOCKING (a closure on the blocking pool), and SYNC --
+cover the common device-completion mechanisms.  `xtc_batch_submit_mt` /
+`_cancel_mt` / `_resume_mt` admit, cancel and resume requests from any
+loop or a plain OS thread through a bounded lock-light ring, and
+`xtc_batch_loop_for_device` / `xtc_batch_router_*` are advisory
+placement helpers (NUMA-nearest loop, keyed sharding).  All of this is
+behind `--enable-sched-policy`; a default build returns `XTC_E_NOSYS`
+and no existing public struct changed size.  See `xtc_batch(3)`, the
+scheduling guide, and `examples/13_gpu_batching` (OpenCL Mandelbrot) and
+`examples/14_hetero_batching` (GPU + NPU capstone).
+
+**Limitation: the FENCE exec kind is native-only.**  The simulation
+backend has no hook to make an arbitrary registered fd become ready at a
+virtual time, so a FENCE group (which parks on a device fd) is not
+sim-reachable and is tested natively, like `xtc_accel_run_blocking`.
+This is a deliberate scope decision, not a defect: sim coverage of async
+offload uses the FUTURE kind, which has no fd and no clock and replays
+byte-identically.  A real-fd fence under DST would need a new sim
+fd-readiness primitive and is explicitly deferred.
+
+**Limitation (NOT a libxtc bug): Intel compute-runtime 26.18 GPU
+readback segfault.**  On a Lunar-Lake Arc iGPU with Intel
+compute-runtime 26.18, both `clEnqueueReadBuffer` and the staging path
+inside `clEnqueueMapBuffer` crash inside a built-in copy-kernel build
+(`NEO::Zebin::ZeInfo::decodeZeInfo`, reached under `call_once`) when
+driven by the example's queue-usage pattern.  The same crash hits any
+OpenCL program that reads back a buffer this way on that silicon +
+runtime, independent of libxtc.  `examples/14_hetero_batching` works
+around it by allocating the GPU output with `CL_MEM_USE_HOST_PTR` over a
+page-aligned host array and reading that pointer after `clFinish` (the
+iGPU is UMA, so it is coherent) -- no read-buffer, no map, so the
+crashing built-in copy kernel is never built.  This is a driver fault on
+that specific silicon/runtime, documented here so an example user on
+that hardware knows the symptom and the workaround.
+
 ## RESOLVED (1.50): lock-manager conversions broke mutual exclusion
 
 Present since 1.0; found and fixed in 1.50 (87219d3).  When a locker
