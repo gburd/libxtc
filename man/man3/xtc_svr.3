@@ -85,12 +85,17 @@ if the server exits before replying (checked about every 25 ms, so an
 infinite-timeout call does not hang on a dead server), or
 .Dv XTC_E_INVAL
 for bad arguments or a server that is already gone.
-A call that stops waiting (timeout, abort, server exit) leaves no
-state behind: a reply the server sends later is discarded, and for an
-off-process caller that
+A call that stops waiting (timeout, abort, server exit) only stops the
+caller.  A reply the server sends later to an off-process caller is
+discarded, and that
 .Fn xtc_svr_reply
 returns
 .Dv XTC_E_NOTFOUND .
+To an in-process caller the late reply is still delivered to its
+mailbox (a message whose first four bytes are the call's internal tag),
+where a later plain
+.Fn xtc_recv
+sees it.
 .Pp
 .Fn xtc_svr_call_abortable
 is the same call with cooperative cancellation: while it waits for the
@@ -104,7 +109,8 @@ if the token's source is fired before the reply arrives.  Fire the
 source from a statement timeout or a cancel-request path to deliver a
 cancel at the next wait point.  Cancellation stops only the caller's
 wait; the server keeps processing the request, and a late reply is
-discarded.
+handled as for a timed-out
+.Fn xtc_svr_call .
 .Pp
 .Fn xtc_svr_cast
 fires-and-forgets a message.  Returns immediately.

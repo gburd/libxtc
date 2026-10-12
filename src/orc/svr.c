@@ -408,7 +408,8 @@ __svr_wait_slot(struct __svr_reply_slot *slot, xtc_pid_t target,
  * XTC_E_NOTFOUND if the server exits without replying (before 1.55.1 a
  * server that died mid-call left an infinite-timeout caller parked
  * forever).  A timeout, abort or server exit only stops the CALLER
- * waiting; a reply the server sends afterwards is discarded.
+ * waiting.  A later reply to an off-proc caller is discarded; to an
+ * in-proc caller it still lands in its mailbox (documented).
  */
 static int
 __svr_call(xtc_pid_t target, const void *req, size_t req_size,
