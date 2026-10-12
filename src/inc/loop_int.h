@@ -359,6 +359,16 @@ struct xtc_loop {
 	 * IO_FAIRNESS_QUANTUM runs the step does a non-blocking poll. */
 	unsigned int     runs_since_poll;
 
+	/* --- sched (fix155): owner-written, kept off the producer-written
+	 * inbox line ---
+	 * pop_flip alternates the two default lanes (owner FIFO, stealable
+	 * deque) when both hold work, so neither starves the other.
+	 * n_timers_pub is n_timers as last published by the owner (after
+	 * each step), for the executor supervisor's idle check, which must
+	 * not read the owner-only n_timers. */
+	unsigned int     pop_flip;
+	_Atomic int      n_timers_pub;
+
 	/* Cooperative yield watchdog (opt-in).  When yield_budget_ns > 0
 	 * the scheduler records each quantum's start time on the task and
 	 * xtc_yield_check reports a task over budget; n_yield_due counts
@@ -415,22 +425,6 @@ struct xtc_loop {
 	 * the owner drains in __xtc_loop_drain_inbox. */
 	struct xtc_inbox inbox;
 
-	/* --- sched (fix155) ---
-	 * pop_flip alternates the two default lanes (owner FIFO, stealable
-	 * deque) when both hold work, so neither starves the other.
-	 * Owner-only. */
-	unsigned int pop_flip;
-	/* wakeup_pending coalesces the cross-thread nudge: an inbox producer
-	 * writes the wakeup fd only when it flips this 0->1, and the owner
-	 * clears it at the top of every inbox drain (and before the worker's
-	 * idle poll), before it looks at the inbox.  A producer that sees 1
-	 * knows a nudge was posted since the owner last looked, so the owner
-	 * either has not blocked yet or will be woken by that nudge. */
-	_Atomic int wakeup_pending;
-	/* n_timers as last published by the owner (after each step), for
-	 * the executor supervisor's idle check, which must not read the
-	 * owner-only n_timers. */
-	_Atomic int n_timers_pub;
 
 	/* For the multi-loop executor: 0-based index in xtc_exec; -1 if
 	 * this loop is standalone (M3 single-thread mode). */
@@ -551,14 +545,12 @@ void __xtc_io_uring_preempt_disarm(xtc_io_t *io);
  * idempotent. */
 void __xtc_proc_loop_unregister(xtc_loop_t *loop);
 /* Inbox API.  Producer-side functions are thread-safe and cannot fail.
- * __xtc_inbox_push queues the task and nudges the loop (coalesced). */
+ * __xtc_inbox_push queues the task and nudges the loop's poller. */
 int  __xtc_inbox_init(struct xtc_inbox *ib);
 void __xtc_inbox_fini(struct xtc_inbox *ib);
 int  __xtc_inbox_push(xtc_loop_t *loop, enum xtc_inbox_kind k, xtc_task_t *t);
 int  __xtc_inbox_nonempty(const struct xtc_inbox *ib);
 int  __xtc_inbox_drain(xtc_loop_t *loop);  /* owner-only; drains into local queue */
-/* Coalesced cross-thread nudge of loop's poller (see wakeup_pending). */
-int  __xtc_loop_nudge(xtc_loop_t *loop);
 
 /* Per-thread cursor: which loop the calling thread is running.
  * NULL on threads that aren't loop owners. */

@@ -135,8 +135,8 @@ __xtc_inbox_nonempty(const struct xtc_inbox *ib)
  * (__xtc_inbox_push, __xtc_inbox_drain) links tasks intrusively and must
  * never touch the allocator. */
 
-/* Push t onto one of the inbox stacks (seq_cst: pairs with the drain's
- * clear-then-take, see __xtc_loop_nudge). */
+/* Push t onto one of the inbox stacks.  The CAS (seq_cst) publishes the
+ * task's fields to the drain's exchange. */
 static void
 __inbox_stack_push(_Atomic(xtc_task_t *) *head, xtc_task_t *t)
 {
@@ -144,27 +144,6 @@ __inbox_stack_push(_Atomic(xtc_task_t *) *head, xtc_task_t *t)
 	do {
 		t->inbox_next = old;
 	} while (!atomic_compare_exchange_weak(head, &old, t));
-}
-
-/*
- * Coalesced cross-thread nudge: write the loop's wakeup fd only when this
- * call flips wakeup_pending 0->1.  The owner clears the flag only when it
- * is about to block (__inbox_ready), and checks the inbox after clearing.
- * Producers push before they test the flag (all seq_cst), so a producer
- * that finds the flag set pushed before the owner's next clear-then-check,
- * which sees the push; a producer that finds it clear writes the fd, which
- * breaks the owner's poll.  A busy loop therefore costs its producers no
- * write(2) at all, and an idle one costs one per wake-up.
- */
-int
-__xtc_loop_nudge(xtc_loop_t *loop)
-{
-	int rc;
-	if (atomic_exchange(&loop->wakeup_pending, 1) != 0)
-		return XTC_OK;
-	if ((rc = xtc_io_wakeup(loop->io)) != XTC_OK)
-		atomic_store(&loop->wakeup_pending, 0);   /* let the next try write */
-	return rc;
 }
 
 /*
@@ -184,8 +163,16 @@ __xtc_inbox_push(xtc_loop_t *loop, enum xtc_inbox_kind k, xtc_task_t *t)
 	    &loop->inbox.wake_head, t);
 	/* The task is queued whatever the nudge returns; a failed nudge only
 	 * delays it to the loop's next turn (an executor loop re-polls every
-	 * millisecond), so it must not be reported as a failed wake/spawn. */
-	(void)__xtc_loop_nudge(loop);
+	 * millisecond), so it must not be reported as a failed wake/spawn.
+	 *
+	 * Not coalesced: a "nudge pending" flag that skips the write while a
+	 * nudge is outstanding was tried and measured slower (pp.c 8 loops x
+	 * 1000 pairs: 0.9-1.3M vs 1.57-1.74M round trips/s).  An idle loop
+	 * then really sleeps and each wake pays a kernel wakeup; with every
+	 * wake writing, a loop going idle usually finds a byte pending and
+	 * polls again at once.  The pipe's EAGAIN when full still bounds the
+	 * writes a stalled loop can accumulate. */
+	(void)xtc_io_wakeup(loop->io);
 	return XTC_OK;
 }
 
@@ -833,20 +820,6 @@ __xtc_drain_due_timers(xtc_loop_t *loop)
 
 static int __runq_nonempty(const xtc_loop_t *loop);
 
-/*
- * Called just before the loop may block in its poller (a blocking poll in
- * __xtc_loop_step, or reporting idle so the executor worker polls): clear
- * wakeup_pending, then look at the inbox.  Returns 1 if the inbox holds
- * work, in which case the caller must not block.  Clearing is what makes
- * the next producer write the wakeup fd (__xtc_loop_nudge).
- */
-static int
-__inbox_ready(xtc_loop_t *loop)
-{
-	if (atomic_load(&loop->wakeup_pending) != 0)
-		atomic_store(&loop->wakeup_pending, 0);
-	return __xtc_inbox_nonempty(&loop->inbox);
-}
 
 
 static int
@@ -1242,8 +1215,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 		if (rk > 0 && (timeout_ns < 0 || timeout_ns > rk))
 			timeout_ns = rk;
 	}
-	if (timeout_ns != 0 && __inbox_ready(loop))
-		return XTC_OK;   /* a wake/spawn arrived: drain it, do not block */
+	if (timeout_ns != 0 && __xtc_inbox_nonempty(&loop->inbox))
+		return XTC_OK;   /* a wake/spawn arrived: drain it first */
 
 	for (i = 0; i < (int)(sizeof evs / sizeof evs[0]); i++)
 		evs[i].fd = -1;
@@ -1468,14 +1441,14 @@ __loop_step_once(xtc_loop_t *loop)
 				stolen->q_next = NULL;
 				(void)__xtc_loop_enqueue(loop, stolen);
 			} else if (__runq_nonempty(loop) ||
-			    __inbox_ready(loop)) {
+			    __xtc_inbox_nonempty(&loop->inbox)) {
 				/* Nothing to steal, but we DO hold runnable work --
 				 * fall through to run it rather than reporting idle
 				 * (see __runq_nonempty). */
 			} else {
 				return 0;
 			}
-		} else if (!__runq_nonempty(loop) && !__inbox_ready(loop)) {
+		} else if (!__runq_nonempty(loop) && !__xtc_inbox_nonempty(&loop->inbox)) {
 			return 0;
 		}
 	}

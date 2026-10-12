@@ -108,9 +108,7 @@ order, the same end thieves steal from, so a task that yields
 .Pq Dv XTC_TASK_RESCHED
 runs again only after every task queued before it.  The inbox is
 lock-free and intrusive (no allocation per wake), so a cross-thread wake
-cannot fail, and the poller wakeup is coalesced: a producer writes the
-target loop's wakeup descriptor only if no nudge is already pending
-since the loop last checked its inbox.
+cannot fail.
 .Sh LIFECYCLE
 .Fn xtc_exec_init
 constructs an executor with
