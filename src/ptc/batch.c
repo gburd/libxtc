@@ -32,11 +32,33 @@ enum batch_slot_state {
 	B_TERMINAL,
 	B_DELIVERING
 };
+/* Slots live on exactly one index-linked list per state class, so every
+ * per-boundary operation is O(members touched), not O(capacity):
+ *   free     B_FREE
+ *   wait     B_WAITING, in arrival order (FCFS admission takes the head)
+ *   active   B_READY / B_BLOCKED / B_INFLIGHT, in admission order (the
+ *            vector is built by walking it)
+ *   term     B_TERMINAL, in the order outcomes were recorded
+ * A B_DELIVERING slot is on no list (b->delivering names it). A cancel that
+ * lands on a WAITING/READY/BLOCKED slot also links the slot on the pending-
+ * cancel list (cnext) consumed at the next boundary. */
+#define B_NIL UINT32_MAX
+#define B_NSTATES 7
 struct batch_slot {
 	uint64_t handle, charge;
 	void *request;
 	enum batch_slot_state state;
-	int outcome, cancel;
+	int outcome, cancel, on_clist;
+	uint32_t prev, next, cnext;
+};
+struct batch_list {
+	uint32_t head, tail;
+};
+/* Open-addressing handle map (linear probing, backward-shift delete, load
+ * <= 1/2). val < capacity is a slot index; capacity + k is held record k. */
+struct batch_hent {
+	uint64_t key; /* 0 = empty (handles are nonzero) */
+	uint32_t val;
 };
 /* At most one offloaded op per group (one per iteration). The frozen vector
  * is b->items/b->results[0..n); `idx` records which slot each vector member
@@ -79,22 +101,11 @@ struct batch_mt_rec {
 	struct batch_mt_rec *next; /* held FIFO link (driver only) */
 	int cancel;                /* cancel_mt landed while held */
 };
-/* Early-control set (the re-review's cross-producer lost-cancel fix). A
- * CANCEL/RESUME drained before its target slot exists is parked here; the
- * later SUBMIT for that handle consults it after creating the slot and applies
- * the pending control at once. Bounded by mt_queue_cap; only the driver (owner
- * loop) touches it, so no synchronization is needed. */
-struct batch_mt_early {
-	uint64_t handle;
-	enum batch_mt_op op;
-};
 struct batch_mt {
 	xtc_chan_mpsc_t *ring;      /* producers -> driver, control records */
 	xtc_chan_mpmc_t *pool;      /* free record pointers (claim/release) */
 	struct batch_mt_rec *recs;  /* preallocated record storage */
-	struct batch_mt_early *early;
-	uint32_t cap;               /* mt_queue_cap (recs/early length) */
-	uint32_t n_early;           /* live entries in `early` */
+	uint32_t cap;               /* mt_queue_cap (recs length) */
 	/* SUBMITs drained while every slot was taken. They were accepted
 	 * (the producer holds a handle), so they wait here in arrival order
 	 * and are admitted as slots free; their records stay out of the pool,
@@ -108,6 +119,8 @@ struct batch_mt {
 	 * barriers, and a wrap at 2^64 on a lifetime counter is a non-issue. */
 	_Atomic uint64_t n_queued;
 	_Atomic uint64_t n_rejections;
+	_Atomic int gate;           /* 0 open, 1 closed, 2 driver done */
+	_Atomic uint32_t inflight;  /* producers between gate and push */
 };
 
 struct xtc_batch {
@@ -120,7 +133,13 @@ struct xtc_batch {
 	xtc_batch_item_t *items;
 	xtc_batch_result_t *results;
 	uint32_t *indices;
-	uint32_t live, active;
+	struct batch_list l_free, l_wait, l_active, l_term;
+	uint32_t n_state[B_NSTATES];
+	uint32_t clist;      /* pending-cancel list head (slot index) */
+	uint32_t delivering; /* the B_DELIVERING slot, or B_NIL */
+	struct batch_hent *map;
+	size_t map_mask;
+	uint32_t live;
 	uint64_t last_handle;
 	/* Group-global monotonic handle source. Owner-loop submit (under the
 	 * bracket) and submit_mt (off-thread) draw from the SAME atomic space
@@ -144,16 +163,142 @@ struct xtc_batch {
 	xtc_batch_async_stats_t astats;
 };
 
+static uint32_t
+batch_active(const xtc_batch_t *b)
+{
+	return b->n_state[B_READY] + b->n_state[B_BLOCKED]
+	    + b->n_state[B_INFLIGHT];
+}
+
 /* Publish only committed membership. Called under the owner's short bracket. */
 static void
 batch_hint(xtc_batch_t *b)
 {
-	uint32_t i, ready = 0;
 	if (b->class_index < 0)
 		return;
-	for (i = 0; i < b->opts.capacity; ++i)
-		ready += b->slots[i].state == B_READY;
-	__xtc_sched_batch_hint(b->loop, b->class_index, ready, b->active);
+	__xtc_sched_batch_hint(b->loop, b->class_index, b->n_state[B_READY],
+	                       batch_active(b));
+}
+
+static struct batch_list *
+batch_list_of(xtc_batch_t *b, enum batch_slot_state st)
+{
+	switch (st) {
+	case B_FREE:
+		return &b->l_free;
+	case B_WAITING:
+		return &b->l_wait;
+	case B_READY:
+	case B_BLOCKED:
+	case B_INFLIGHT:
+		return &b->l_active;
+	case B_TERMINAL:
+		return &b->l_term;
+	default:
+		return NULL;
+	}
+}
+
+static void
+batch_list_push(xtc_batch_t *b, struct batch_list *l, uint32_t i)
+{
+	b->slots[i].next = B_NIL;
+	b->slots[i].prev = l->tail;
+	if (l->tail != B_NIL)
+		b->slots[l->tail].next = i;
+	else
+		l->head = i;
+	l->tail = i;
+}
+
+static void
+batch_list_unlink(xtc_batch_t *b, struct batch_list *l, uint32_t i)
+{
+	struct batch_slot *s = &b->slots[i];
+	if (s->prev != B_NIL)
+		b->slots[s->prev].next = s->next;
+	else
+		l->head = s->next;
+	if (s->next != B_NIL)
+		b->slots[s->next].prev = s->prev;
+	else
+		l->tail = s->prev;
+	s->prev = s->next = B_NIL;
+}
+
+/* The one state-transition primitive: keeps lists and counters exact. A
+ * move within one list class keeps the slot's position (admission order). */
+static void
+batch_move(xtc_batch_t *b, struct batch_slot *s, enum batch_slot_state to)
+{
+	uint32_t i = (uint32_t)(s - b->slots);
+	struct batch_list *from = batch_list_of(b, s->state);
+	struct batch_list *dst = batch_list_of(b, to);
+	b->n_state[s->state]--;
+	b->n_state[to]++;
+	if (from != dst) {
+		if (from != NULL)
+			batch_list_unlink(b, from, i);
+		if (dst != NULL)
+			batch_list_push(b, dst, i);
+	}
+	s->state = to;
+}
+
+static size_t
+batch_map_home(const xtc_batch_t *b, uint64_t key)
+{
+	uint64_t h = key * 0x9E3779B97F4A7C15ULL;
+	h ^= h >> 29;
+	return (size_t)h & b->map_mask;
+}
+
+static void
+batch_map_put(xtc_batch_t *b, uint64_t key, uint32_t val)
+{
+	size_t i = batch_map_home(b, key);
+	while (b->map[i].key != 0 && b->map[i].key != key)
+		i = (i + 1) & b->map_mask;
+	b->map[i].key = key;
+	b->map[i].val = val;
+}
+
+/* Returns 1 and *val, or 0 if absent. */
+static int
+batch_map_get(const xtc_batch_t *b, uint64_t key, uint32_t *val)
+{
+	size_t i;
+	if (key == 0)
+		return 0;
+	for (i = batch_map_home(b, key); b->map[i].key != 0;
+	     i = (i + 1) & b->map_mask)
+		if (b->map[i].key == key) {
+			*val = b->map[i].val;
+			return 1;
+		}
+	return 0;
+}
+
+static void
+batch_map_del(xtc_batch_t *b, uint64_t key)
+{
+	size_t i, j, k;
+	for (i = batch_map_home(b, key); b->map[i].key != key;
+	     i = (i + 1) & b->map_mask)
+		if (b->map[i].key == 0)
+			return;
+	/* Backward-shift: pull later probes of the same run into the hole. */
+	for (j = i;;) {
+		j = (j + 1) & b->map_mask;
+		if (b->map[j].key == 0)
+			break;
+		k = batch_map_home(b, b->map[j].key);
+		if (((j - k) & b->map_mask) >= ((j - i) & b->map_mask)) {
+			b->map[i] = b->map[j];
+			i = j;
+		}
+	}
+	b->map[i].key = 0;
 }
 
 static void
@@ -222,20 +367,38 @@ batch_mutable(xtc_batch_t *b)
 	return rc;
 }
 
+/* O(1) handle -> live slot. */
 static struct batch_slot *
 batch_find(xtc_batch_t *b, uint64_t handle)
 {
-	uint32_t i;
-	if (handle == 0)
-		return NULL;
+	uint32_t v, i;
+	if (batch_map_get(b, handle, &v) && v < b->opts.capacity
+	    && b->slots[v].state != B_FREE)
+		return &b->slots[v];
+#if XTC_DST_BUG(XTC_DST_BUG_BATCHSTALE)
+	/* Planted bug: ignore handle identity, take any live slot. */
 	for (i = 0; i < b->opts.capacity; ++i)
-		if (b->slots[i].state != B_FREE
-#if !XTC_DST_BUG(XTC_DST_BUG_BATCHSTALE)
-		    && b->slots[i].handle == handle
-#endif
-		    )
+		if (b->slots[i].state != B_FREE)
 			return &b->slots[i];
+#else
+	(void)i;
+#endif
 	return NULL;
+}
+
+/* Record a cancel. A not-yet-running member is linked for the next boundary
+ * to consume. */
+static void
+batch_mark_cancel(xtc_batch_t *b, struct batch_slot *s)
+{
+	s->cancel = 1;
+	if (!s->on_clist
+	    && (s->state == B_WAITING || s->state == B_READY
+	        || s->state == B_BLOCKED)) {
+		s->on_clist = 1;
+		s->cnext = b->clist;
+		b->clist = (uint32_t)(s - b->slots);
+	}
 }
 
 static void
@@ -243,17 +406,49 @@ batch_terminal(xtc_batch_t *b, struct batch_slot *s, int outcome)
 {
 	if (s->state == B_READY || s->state == B_BLOCKED
 	    || s->state == B_INFLIGHT) {
-		b->active--;
 #if !XTC_DST_BUG(XTC_DST_BUG_BATCHRES)
 		b->stats.reserved_units -= s->charge;
 #endif
 	}
-	s->state = B_TERMINAL;
+	batch_move(b, s, B_TERMINAL);
 	s->outcome = outcome;
 	batch_hint(b);
 }
 
+/* Consume recorded cancels (and a cancel-close) before any member is
+ * exposed. O(cancels) normally; O(live) once when cancelling. */
+static void
+batch_consume_cancels(xtc_batch_t *b)
+{
+	struct batch_slot *s;
+	uint32_t i, nx;
+	for (i = b->clist; i != B_NIL; i = nx) {
+		s = &b->slots[i];
+		nx = s->cnext;
+		s->cnext = B_NIL;
+		s->on_clist = 0;
+		if (s->cancel
+		    && (s->state == B_WAITING || s->state == B_READY
+		        || s->state == B_BLOCKED))
+			batch_terminal(b, s, XTC_E_ABORTED);
+	}
+	b->clist = B_NIL;
+	if (!b->cancelling)
+		return;
+	for (i = b->l_wait.head; i != B_NIL; i = nx) {
+		nx = b->slots[i].next;
+		batch_terminal(b, &b->slots[i], XTC_E_ABORTED);
+	}
+	for (i = b->l_active.head; i != B_NIL; i = nx) {
+		nx = b->slots[i].next;
+		if (b->slots[i].state != B_INFLIGHT)
+			batch_terminal(b, &b->slots[i], XTC_E_ABORTED);
+	}
+}
+
 static void batch_mt_admit_held(xtc_batch_t *);
+static void batch_mt_drain(xtc_batch_t *);
+static int batch_mt_quiesced(xtc_batch_t *);
 
 static void
 batch_retire(xtc_batch_t *b, struct batch_slot *s)
@@ -264,7 +459,15 @@ batch_retire(xtc_batch_t *b, struct batch_slot *s)
 		batch_inc(&b->stats.cancelled);
 	else
 		batch_inc(&b->stats.failed);
-	memset(s, 0, sizeof(*s));
+	batch_map_del(b, s->handle);
+	if (b->delivering == (uint32_t)(s - b->slots))
+		b->delivering = B_NIL;
+	s->handle = 0;
+	s->charge = 0;
+	s->request = NULL;
+	s->outcome = 0;
+	s->cancel = 0;
+	batch_move(b, s, B_FREE);
 	--b->live;
 	batch_mt_admit_held(b);
 }
@@ -273,19 +476,19 @@ static void
 batch_deliver(xtc_batch_t *b)
 {
 	struct batch_slot *s;
-	uint32_t i;
-	for (i = 0; i < b->opts.capacity; ++i) {
+	for (;;) {
 		(void)xtc_mask_enter();
 		__xtc_unsafe_enter();
-		s = &b->slots[i];
-		if (s->state != B_TERMINAL) {
+		if (b->l_term.head == B_NIL) {
 			__xtc_unsafe_leave();
 			(void)xtc_mask_leave();
-			continue;
+			return;
 		}
+		s = &b->slots[b->l_term.head];
 		/* Persistent delivery-started survives an explicit callback
 		 * exit. */
-		s->state = B_DELIVERING;
+		batch_move(b, s, B_DELIVERING);
+		b->delivering = (uint32_t)(s - b->slots);
 		b->callback = 1;
 		__xtc_unsafe_leave();
 		b->opts.complete(s->handle, s->request, s->outcome,
@@ -336,9 +539,9 @@ batch_collect_inflight(xtc_batch_t *b, int exec_status)
 		else if (r->state == XTC_BATCH_DONE)
 			batch_terminal(b, s, XTC_OK);
 		else if (r->state == XTC_BATCH_BLOCKED)
-			s->state = B_BLOCKED;
+			batch_move(b, s, B_BLOCKED);
 		else if (r->state == XTC_BATCH_CONTINUE)
-			s->state = B_READY; /* stays active; re-enters next vector */
+			batch_move(b, s, B_READY); /* re-enters next vector */
 		else if (r->state == XTC_BATCH_ERROR)
 			batch_terminal(b, s,
 			               batch_error(r->error) ? r->error :
@@ -398,34 +601,42 @@ batch_cleanup(void *arg)
 #endif
 	b->closed = 1;
 	b->callback = 0;
-	for (i = 0; i < b->opts.capacity; ++i)
-		if (b->slots[i].state == B_DELIVERING)
-			batch_retire(b, &b->slots[i]);
-	/* Each delivery round frees slots that held hand-ins then take, so
-	 * repeat until no accepted request is left. */
-	do {
-		for (i = 0; i < b->opts.capacity; ++i) {
+	if (b->delivering != B_NIL)
+		batch_retire(b, &b->slots[b->delivering]);
+	/* Each delivery round frees slots that held hand-ins then take, and a
+	 * producer that passed the admission gate may still push: repeat until
+	 * no accepted request is left anywhere. */
+	for (;;) {
+		batch_mt_drain(b);
+		if (b->live == 0 && b->mt.n_held == 0) {
+			if (batch_mt_quiesced(b))
+				break;
+			__xtc_unsafe_leave();
+			xtc_yield();
+			__xtc_unsafe_enter();
+			continue;
+		}
+		while ((i = b->l_wait.head) != B_NIL || (i = b->l_active.head)
+		    != B_NIL) {
 			s = &b->slots[i];
-			if (s->state != B_FREE && s->state != B_TERMINAL
-			    && s->state != B_INFLIGHT)
-				batch_terminal(b, s,
-				               b->cancelling || s->cancel ?
-				                   XTC_E_ABORTED :
-				                   XTC_E_INTERNAL);
+			batch_terminal(b, s,
+			               b->cancelling || s->cancel ?
+			                   XTC_E_ABORTED :
+			                   XTC_E_INTERNAL);
 		}
 		__xtc_unsafe_leave();
 		batch_deliver(b);
 		__xtc_unsafe_enter();
-	} while (b->live != 0);
+	}
 	__xtc_unsafe_leave();
 }
 
 static size_t
 batch_vector(xtc_batch_t *b)
 {
-	struct batch_slot *s, *first;
+	struct batch_slot *s;
 	uint32_t i;
-	size_t n = 0, j;
+	size_t n = 0;
 #if defined(XTC_DIAGNOSTIC)
 	/* The frozen-vector invariant: batch_vector is the ONE call site that
 	 * builds b->items/b->results/b->indices, and it must NEVER run between
@@ -436,49 +647,32 @@ batch_vector(xtc_batch_t *b)
 #endif
 	/* A peer can run between delivery and vector construction. Consume its
 	 * cancellation under this same bracket before exposing any member. */
-	for (i = 0; i < b->opts.capacity; ++i) {
-		s = &b->slots[i];
-		if ((s->state == B_WAITING || s->state == B_READY
-		     || s->state == B_BLOCKED)
-		    && (b->cancelling || s->cancel))
-			batch_terminal(b, s, XTC_E_ABORTED);
-	}
-	/* Bounded O(capacity * max_active) FCFS scan; a queue would add another
-	 * linked invariant and is only worth it if measured large-capacity
-	 * workloads justify it. */
+	batch_consume_cancels(b);
+	/* FCFS admission: the wait list is in arrival order, so only its head
+	 * is ever a candidate. O(admitted). */
 #if XTC_DST_BUG(XTC_DST_BUG_BATCHCAP)
-	while (b->active < b->opts.capacity) {
+	while (batch_active(b) < b->opts.capacity) {
 #else
-	while (b->active < b->opts.max_active) {
+	while (batch_active(b) < b->opts.max_active) {
 #endif
-		first = NULL;
-		for (i = 0; i < b->opts.capacity; ++i) {
-			s = &b->slots[i];
-			if (s->state == B_WAITING
-			    && (first == NULL || s->handle < first->handle))
-				first = s;
-		}
-		if (first == NULL
-		    || first->charge > b->opts.resource_capacity
-		                           - b->stats.reserved_units)
+		if (b->l_wait.head == B_NIL)
 			break;
-		first->state = B_READY;
-		b->stats.reserved_units += first->charge;
-		b->active++;
+		s = &b->slots[b->l_wait.head];
+		if (s->charge > b->opts.resource_capacity
+		                    - b->stats.reserved_units)
+			break;
+		batch_move(b, s, B_READY);
+		b->stats.reserved_units += s->charge;
 	}
-	for (i = 0; i < b->opts.capacity; ++i) {
+	/* The vector is the READY members in admission order: one walk of the
+	 * active list, O(max_active). */
+	for (i = b->l_active.head; i != B_NIL; i = s->next) {
 		s = &b->slots[i];
 		if (s->state != B_READY)
 			continue;
-		/* Slot reuse must not change stable admission order in the
-		 * vector. */
-		for (j = n; j > 0 && b->items[j - 1].handle > s->handle; --j) {
-			b->indices[j] = b->indices[j - 1];
-			b->items[j] = b->items[j - 1];
-		}
-		b->indices[j] = i;
-		b->items[j].handle = s->handle;
-		b->items[j].request = s->request;
+		b->indices[n] = i;
+		b->items[n].handle = s->handle;
+		b->items[n].request = s->request;
 		b->results[n].state = XTC_BATCH_UNSET;
 		b->results[n].error = 0;
 		n++;
@@ -490,17 +684,28 @@ batch_vector(xtc_batch_t *b)
 /* ----- cross-loop admission (S2) --------------------------------------- *
  *
  * submit_mt/cancel_mt/resume_mt run on ANY loop or plain thread and touch
- * ONLY the lock-free ring + free-pool + atomic handle counter (+ a wake of
- * the owner loop). They NEVER read or write b->slots, b->active, the early-
- * control set, or any other driver-owned state. The driver (owner loop) is
- * the only mutator of those, so there is no data race between a producer and
- * the driver. */
+ * ONLY the lock-free ring + free-pool + atomic handle counter + the atomic
+ * admission gate (+ a wake of the owner loop). They NEVER read or write
+ * b->slots, the handle map, the held FIFO, or any other driver-owned state.
+ * The driver (owner loop) is the only mutator of those, so there is no data
+ * race between a producer and the driver.
+ *
+ * Admission gate (closed groups): gate is 0 while open, 1 once the group is
+ * closed (SUBMIT refused), 2 once the driver has finished (every mt call
+ * refused). A producer announces itself in `inflight` BEFORE reading the
+ * gate and leaves AFTER its push; the driver moves the gate BEFORE reading
+ * inflight. With seq_cst on both sides (Dekker), a producer that saw the
+ * gate open has either finished its push or is still counted, so the
+ * driver's final drain, taken after it sees inflight == 0, finds every
+ * record that will ever be pushed. A SUBMIT that passed the gate before
+ * close is an accepted request: it completes exactly once (DRAIN finishes
+ * it, CANCEL aborts it). */
 
 static int batch_alloc(size_t count, size_t size, void **out);
 
-/* Create the ring, free-pool, record storage and early-control set, and seed
- * the free-pool with every record pointer. Charged through the group's loop
- * res. mt stays disabled (ring == NULL) when cap == 0. */
+/* Create the ring, free-pool and record storage, and seed the free-pool
+ * with every record pointer. Charged through the group's loop res. mt stays
+ * disabled (ring == NULL) when cap == 0. */
 static int
 batch_mt_init(xtc_batch_t *b, uint32_t cap)
 {
@@ -512,9 +717,6 @@ batch_mt_init(xtc_batch_t *b, uint32_t cap)
 	if ((rc = batch_alloc(cap, sizeof(*b->mt.recs),
 	                      (void **)&b->mt.recs))
 	        != XTC_OK
-	    || (rc = batch_alloc(cap, sizeof(*b->mt.early),
-	                         (void **)&b->mt.early))
-	           != XTC_OK
 	    || (rc = xtc_chan_mpsc_create(res, cap, &b->mt.ring)) != XTC_OK
 	    || (rc = xtc_chan_mpmc_create(res, cap, &b->mt.pool)) != XTC_OK)
 		return rc;
@@ -544,8 +746,6 @@ batch_mt_fini(xtc_batch_t *b)
 		xtc_chan_mpmc_destroy(b->mt.pool);
 		b->mt.pool = NULL;
 	}
-	__os_free(b->mt.early);
-	b->mt.early = NULL;
 	__os_free(b->mt.recs);
 	b->mt.recs = NULL;
 }
@@ -595,10 +795,7 @@ batch_mt_release(xtc_batch_t *b, struct batch_mt_rec *rec)
 
 /* Producer side: push a filled record onto the ring, wake the driver. On a
  * full ring the record is returned to the pool and XTC_E_AGAIN is reported.
- * Note the ring is NOT closed by xtc_batch_close (only batch_mt_fini closes
- * it, at destroy), so a hand-in that races close is accepted here and then
- * dropped at the next driver drain (the b->closed check in batch_mt_drain) --
- * this is best-effort admission, not an AGAIN-on-closed guarantee. Freedom
+ * Closed groups are refused before this, by the admission gate. Freedom
  * from use-after-free rests on the caller's owner-outlives-group obligation
  * (no producer in flight when destroy frees the ring), documented in
  * xtc_batch.3; the group heap and ring are not freed until the driver proc
@@ -619,74 +816,59 @@ batch_mt_push(xtc_batch_t *b, struct batch_mt_rec *rec)
 	return XTC_OK;
 }
 
-/* Driver side: apply a CANCEL/RESUME to handle H's slot if it exists, else
- * park it in the early-control set to be applied when H's SUBMIT is later
- * drained. Only the driver calls this. */
+/* Driver side: apply a CANCEL/RESUME to handle H. H is a live slot, a held
+ * SUBMIT, or neither -- and "neither" always means stale (H already
+ * completed, the client-disconnect race) or never issued, so the control
+ * is discarded in O(1); nothing is retained for it.
+ *
+ * There is no "cancel arrived before its submit" case to remember. The
+ * ring (src/ptc/chan.c, xtc_chan_mpsc_try_send) reserves a slot by CAS on
+ * head, and the consumer drains strictly in tail order, spinning on a
+ * reserved-but-unwritten slot rather than skipping it. submit_mt writes
+ * *out only after its push succeeded, so any producer that can name H in
+ * cancel_mt/resume_mt reserves its slot after SUBMIT(H)'s: the control is
+ * always drained after the submit. (The private __xtc_batch_mt_inject hook
+ * can forge the reverse order; such a control is treated as stale.) */
 static void
 batch_mt_control(xtc_batch_t *b, uint64_t handle, enum batch_mt_op op)
 {
-	struct batch_slot *s = batch_find(b, handle);
-	if (s != NULL) {
-		if (op == MT_CANCEL) {
-			s->cancel = 1;
-		} else if (op == MT_RESUME
-		    && (s->state == B_BLOCKED || s->state == B_READY)) {
-			s->state = B_READY;
-			batch_hint(b);
-		}
+	struct batch_slot *s;
+	uint32_t v;
+	if (!batch_map_get(b, handle, &v))
+		return;
+	if (v >= b->opts.capacity) {
+		/* Held: not yet in a slot. A cancel aborts it before it runs;
+		 * a resume of a never-run request is a no-op. */
+		if (op == MT_CANCEL)
+			b->mt.recs[v - b->opts.capacity].cancel = 1;
 		return;
 	}
-	/* No slot yet: a cross-producer cancel/resume reached the ring before
-	 * its submit. Park it (bounded by cap; a duplicate handle just records
-	 * the latest op, which is correct for a cancel-then-resume ordering is
-	 * not possible since handles are never reused and a producer issues one
-	 * op per handle after submit). */
-#ifndef XTC_NO_EARLY_CONTROL
-	if (b->mt.n_early < b->mt.cap) {
-		b->mt.early[b->mt.n_early].handle = handle;
-		b->mt.early[b->mt.n_early].op = op;
-		b->mt.n_early++;
-	}
-#endif
-}
-
-/* Driver side: after creating a SUBMIT's slot, apply any early-control entry
- * pending for its handle and remove it. A pending cancel aborts the member
- * before it ever runs; a pending resume is a no-op on a fresh WAITING slot. */
-static void
-batch_mt_apply_early(xtc_batch_t *b, struct batch_slot *s)
-{
-	uint32_t i;
-	for (i = 0; i < b->mt.n_early; ++i) {
-		if (b->mt.early[i].handle != s->handle)
-			continue;
-		if (b->mt.early[i].op == MT_CANCEL)
-			s->cancel = 1;
-		/* RESUME on a fresh WAITING slot is a no-op. */
-		b->mt.n_early--;
-		b->mt.early[i] = b->mt.early[b->mt.n_early];
-		return;
+	s = &b->slots[v];
+	if (op == MT_CANCEL) {
+		if (s->state != B_TERMINAL && s->state != B_DELIVERING)
+			batch_mark_cancel(b, s);
+	} else if (op == MT_RESUME
+	    && (s->state == B_BLOCKED || s->state == B_READY)) {
+		batch_move(b, s, B_READY);
+		batch_hint(b);
 	}
 }
 
-/* Driver side: place an accepted SUBMIT into a free slot (caller has
- * checked live < capacity) and release its record. */
+/* Driver side: place an accepted SUBMIT into the first free slot (caller
+ * has checked live < capacity) and release its record. */
 static void
 batch_mt_place(xtc_batch_t *b, struct batch_mt_rec *rec)
 {
-	struct batch_slot *s;
-	uint32_t i;
-	for (i = 0; i < b->opts.capacity; ++i)
-		if (b->slots[i].state == B_FREE)
-			break;
-	s = &b->slots[i];
+	struct batch_slot *s = &b->slots[b->l_free.head];
 	s->handle = rec->handle;
 	s->request = rec->request;
 	s->charge = rec->charge;
-	s->state = B_WAITING;
-	s->cancel = rec->cancel;
+	s->cancel = 0;
+	batch_move(b, s, B_WAITING);
+	batch_map_put(b, s->handle, (uint32_t)(s - b->slots));
 	b->live++;
-	batch_mt_apply_early(b, s);
+	if (rec->cancel)
+		batch_mark_cancel(b, s);
 	rec->next = NULL;
 	rec->cancel = 0;
 	batch_mt_release(b, rec);
@@ -724,26 +906,72 @@ batch_mt_drain(xtc_batch_t *b)
 		return;
 	while (xtc_chan_mpsc_try_recv(b->mt.ring, &p) == XTC_OK) {
 		rec = p;
+		rec->next = NULL;
+		rec->cancel = 0;
 		if (rec->op != MT_SUBMIT) {
 			batch_mt_control(b, rec->handle, rec->op);
 			batch_mt_release(b, rec);
-		} else if (b->closed) {
-			batch_inc(&b->stats.rejections);
-			batch_mt_release(b, rec);
 		} else if (b->mt.held != NULL || b->live == b->opts.capacity) {
-			rec->next = NULL;
-			rec->cancel = 0;
 			if (b->mt.held_tail != NULL)
 				b->mt.held_tail->next = rec;
 			else
 				b->mt.held = rec;
 			b->mt.held_tail = rec;
 			b->mt.n_held++;
+			batch_map_put(b, rec->handle,
+			    b->opts.capacity + (uint32_t)(rec - b->mt.recs));
 		} else {
-			rec->cancel = 0;
 			batch_mt_place(b, rec);
 		}
 	}
+}
+
+static int
+batch_mt_idle(xtc_batch_t *b)
+{
+	return atomic_load_explicit(&b->mt.inflight, memory_order_seq_cst) == 0
+	    && xtc_chan_mpsc_len(b->mt.ring) == 0;
+}
+
+/* Driver side, closed group (gate >= 1, so no SUBMIT can enter any more):
+ * may the driver exit? True once no producer is between the gate and its
+ * push and the ring is drained; the gate then moves to 2, refusing every
+ * later mt call. The idle check runs before AND after the move: if it held
+ * before, every accepted SUBMIT had been drained, so a control refused at
+ * gate 2 names a request that has already completed. */
+static int
+batch_mt_quiesced(xtc_batch_t *b)
+{
+	if (b->mt.ring == NULL)
+		return 1;
+	if (atomic_load_explicit(&b->mt.gate, memory_order_relaxed) < 1)
+		atomic_store_explicit(&b->mt.gate, 1, memory_order_seq_cst);
+	if (!batch_mt_idle(b))
+		return 0;
+	atomic_store_explicit(&b->mt.gate, 2, memory_order_seq_cst);
+	return batch_mt_idle(b);
+}
+
+/* Producer side: enter the gate (XTC_OK) or report it shut (XTC_E_AGAIN).
+ * `limit` is the first gate value that refuses this call. */
+static int
+batch_mt_enter(xtc_batch_t *b, int limit)
+{
+	(void)atomic_fetch_add_explicit(&b->mt.inflight, 1,
+	    memory_order_seq_cst);
+	if (atomic_load_explicit(&b->mt.gate, memory_order_seq_cst) >= limit) {
+		(void)atomic_fetch_sub_explicit(&b->mt.inflight, 1,
+		    memory_order_release);
+		return XTC_E_AGAIN;
+	}
+	return XTC_OK;
+}
+
+static void
+batch_mt_leave(xtc_batch_t *b)
+{
+	(void)atomic_fetch_sub_explicit(&b->mt.inflight, 1,
+	    memory_order_release);
 }
 
 /* FUTURE kind: build the edge-triggered cancel path for the op just launched.
@@ -856,7 +1084,6 @@ batch_driver(void *arg)
 	struct batch_slot *s;
 	xtc_batch_result_t *r;
 	size_t n, j;
-	uint32_t i;
 	int rc, finished, pending, exec_status;
 	xtc_batch_exec_t exec;
 	if (xtc_proc_at_exit(batch_cleanup, b) != XTC_OK) {
@@ -866,26 +1093,23 @@ batch_driver(void *arg)
 	for (;;) {
 		__xtc_unsafe_enter();
 		/* Drain cross-loop hand-ins FIRST: create WAITING slots for
-		 * SUBMITs and apply/park CANCEL/RESUME control records, so an
-		 * early cancel is honored in the same cancel-consume scan below
-		 * and before batch_vector exposes any member. */
+		 * SUBMITs and apply CANCEL/RESUME control records, so a cancel
+		 * is consumed below before batch_vector exposes any member. */
 		batch_mt_drain(b);
-		for (i = 0; i < b->opts.capacity; ++i) {
-			s = &b->slots[i];
-			if ((s->state == B_WAITING || s->state == B_READY
-			     || s->state == B_BLOCKED)
-			    && (b->cancelling || s->cancel))
-				batch_terminal(b, s, XTC_E_ABORTED);
-		}
+		batch_consume_cancels(b);
 		__xtc_unsafe_leave();
 		batch_deliver(b);
 		(void)xtc_mask_enter();
 		__xtc_unsafe_enter();
+		batch_mt_drain(b);
 		n = batch_vector(b);
-		finished = b->closed && b->live == 0;
-		pending = 0;
-		for (i = 0; i < b->opts.capacity; ++i)
-			pending |= b->slots[i].state == B_TERMINAL;
+		/* A closed group finishes only once no producer can still hand
+		 * in a request it was promised (see the admission gate). */
+		finished = b->closed && b->live == 0 && b->mt.n_held == 0
+		    && batch_mt_quiesced(b);
+		pending = b->l_term.head != B_NIL
+		    || (b->mt.ring != NULL
+		        && xtc_chan_mpsc_len(b->mt.ring) != 0);
 		if (n != 0) {
 			b->callback = 1;
 			batch_inc(&b->stats.iterations);
@@ -898,7 +1122,10 @@ batch_driver(void *arg)
 		}
 		__xtc_unsafe_leave();
 		if (n == 0) {
-			if (!finished && !pending)
+			if (!finished && !pending && b->closed
+			    && b->live == 0 && b->mt.n_held == 0)
+				xtc_yield(); /* a producer is mid-push: brief */
+			else if (!finished && !pending)
 				(void)xtc_notify_wait(b->notify, -1);
 			/* Wait has unlinked its stack waiter before kill may
 			 * unwind. */
@@ -931,7 +1158,8 @@ batch_driver(void *arg)
 				continue;
 			}
 			for (j = 0; j < n; ++j)
-				b->slots[b->indices[j]].state = B_INFLIGHT;
+				batch_move(b, &b->slots[b->indices[j]],
+				    B_INFLIGHT);
 			b->inflight.exec = exec;
 			b->inflight.idx = b->indices; /* frozen vector order */
 			b->inflight.n = n;
@@ -962,12 +1190,12 @@ batch_driver(void *arg)
 				                   XTC_E_INTERNAL);
 			else if (r->state == XTC_BATCH_DONE)
 #if XTC_DST_BUG(XTC_DST_BUG_BATCHDONE)
-				s->state = B_READY;
+				batch_move(b, s, B_READY);
 #else
 				batch_terminal(b, s, XTC_OK);
 #endif
 			else if (r->state == XTC_BATCH_BLOCKED)
-				s->state = B_BLOCKED;
+				batch_move(b, s, B_BLOCKED);
 			else if (r->state == XTC_BATCH_ERROR)
 				batch_terminal(b, s,
 				               batch_error(r->error) ?
@@ -990,6 +1218,7 @@ batch_free(xtc_batch_t *b)
 {
 	batch_mt_fini(b);
 	xtc_notify_destroy(b->notify);
+	__os_free(b->map);
 	__os_free(b->indices);
 	__os_free(b->results);
 	__os_free(b->items);
@@ -1005,6 +1234,21 @@ batch_alloc(size_t count, size_t size, void **out)
 	return __os_calloc(count, size, out);
 }
 
+/* Handle map sized for every live slot plus every held record at load
+ * <= 1/2: the next power of two >= 2 * (capacity + mt_queue_cap). */
+static int
+batch_map_init(xtc_batch_t *b)
+{
+	size_t want = 2 * ((size_t)b->opts.capacity + b->mt_cap_req), n = 4;
+	while (n < want) {
+		if (n > SIZE_MAX / 2)
+			return XTC_E_RANGE;
+		n <<= 1;
+	}
+	b->map_mask = n - 1;
+	return batch_alloc(n, sizeof(*b->map), (void **)&b->map);
+}
+
 /* Shared tail of create / create_async: allocate per-group storage, attach the
  * class, and spawn the pinned driver. b->opts and the async fields must be set
  * by the caller. On any failure b is freed and *out is untouched. */
@@ -1013,6 +1257,7 @@ batch_finish_create(xtc_batch_t *b, xtc_loop_t *loop, int lane,
     xtc_batch_t **out)
 {
 	xtc_proc_opts_t po = { 0 };
+	uint32_t i;
 	int rc;
 	if ((rc = batch_alloc(b->opts.capacity, sizeof(*b->slots),
 	                      (void **)&b->slots))
@@ -1026,11 +1271,23 @@ batch_finish_create(xtc_batch_t *b, xtc_loop_t *loop, int lane,
 	    || (rc = batch_alloc(b->opts.max_active, sizeof(*b->indices),
 	                         (void **)&b->indices))
 	           != XTC_OK
+	    || (rc = batch_map_init(b)) != XTC_OK
 	    || (rc = xtc_notify_create(&b->notify)) != XTC_OK
 	    || (rc = batch_mt_init(b, b->mt_cap_req)) != XTC_OK) {
 		batch_free(b);
 		return rc;
 	}
+	b->l_wait.head = b->l_wait.tail = B_NIL;
+	b->l_active.head = b->l_active.tail = B_NIL;
+	b->l_term.head = b->l_term.tail = B_NIL;
+	b->l_free.head = b->l_free.tail = B_NIL;
+	b->clist = B_NIL;
+	b->delivering = B_NIL;
+	for (i = 0; i < b->opts.capacity; ++i) {
+		b->slots[i].cnext = B_NIL;
+		batch_list_push(b, &b->l_free, i);
+	}
+	b->n_state[B_FREE] = b->opts.capacity;
 	if (lane >= 0 && (rc = __xtc_sched_batch_attach(loop, lane)) != XTC_OK) {
 		batch_free(b);
 		return rc;
@@ -1250,7 +1507,7 @@ int
 xtc_batch_submit(xtc_batch_t *b, void *request, uint64_t charge, uint64_t *out)
 {
 #ifdef XTC_ENABLE_SCHED_POLICY
-	uint32_t i;
+	struct batch_slot *s;
 	int rc;
 	__xtc_unsafe_enter();
 	rc = batch_mutable(b);
@@ -1261,19 +1518,19 @@ xtc_batch_submit(xtc_batch_t *b, void *request, uint64_t charge, uint64_t *out)
 		         || atomic_load_explicit(&b->handle_ctr,
 		                memory_order_relaxed) == UINT64_MAX)
 			rc = XTC_E_RANGE;
-		else if (b->closed || b->live == b->opts.capacity)
-			rc = XTC_E_AGAIN;
+		else if (b->closed || b->live == b->opts.capacity
+		         || b->mt.n_held != 0)
+			rc = XTC_E_AGAIN; /* held hand-ins are older: FCFS */
 		if (rc != XTC_OK)
 			batch_inc(&b->stats.rejections);
 		else {
-			for (i = 0; i < b->opts.capacity; ++i)
-				if (b->slots[i].state == B_FREE)
-					break;
+			s = &b->slots[b->l_free.head];
 			b->last_handle = batch_next_handle(b);
-			b->slots[i].handle = b->last_handle;
-			b->slots[i].request = request;
-			b->slots[i].charge = charge;
-			b->slots[i].state = B_WAITING;
+			s->handle = b->last_handle;
+			s->request = request;
+			s->charge = charge;
+			batch_move(b, s, B_WAITING);
+			batch_map_put(b, s->handle, (uint32_t)(s - b->slots));
 			b->live++;
 			*out = b->last_handle;
 #if !XTC_DST_BUG(XTC_DST_BUG_BATCHWAKE)
@@ -1308,7 +1565,10 @@ xtc_batch_cancel(xtc_batch_t *b, uint64_t handle)
 		else {
 			/* A committed terminal result wins; never rewrite it.
 			 */
-			s->cancel = 1;
+			if (s->state != B_TERMINAL && s->state != B_DELIVERING)
+				batch_mark_cancel(b, s);
+			else
+				s->cancel = 1;
 			(void)xtc_notify_signal(b->notify);
 		}
 	}
@@ -1335,7 +1595,7 @@ xtc_batch_resume(xtc_batch_t *b, uint64_t handle)
 		if (s == NULL || (s->state != B_BLOCKED && s->state != B_READY))
 			rc = XTC_E_INVAL;
 		else {
-			s->state = B_READY;
+			batch_move(b, s, B_READY);
 			batch_hint(b);
 			(void)xtc_notify_signal(b->notify);
 		}
@@ -1366,14 +1626,22 @@ xtc_batch_submit_mt(xtc_batch_t *b, void *request, uint64_t charge,
 		return XTC_E_NOSYS; /* mt_queue_cap == 0: not enabled */
 	if (charge == 0 || charge > b->opts.resource_capacity)
 		return XTC_E_RANGE;
+	/* Closed (or closing) group: refused here, before any handle is
+	 * issued, so an XTC_OK always means a completion will follow. */
+	if (batch_mt_enter(b, 1) != XTC_OK) {
+		batch_inc_atomic(&b->mt.n_rejections);
+		return XTC_E_AGAIN;
+	}
 	rec = batch_mt_claim(b);
 	if (rec == NULL) {
+		batch_mt_leave(b);
 		batch_inc_atomic(&b->mt.n_rejections);
 		return XTC_E_AGAIN;
 	}
 	handle = batch_next_handle(b);
 	if (handle == 0) {
 		batch_mt_release(b, rec);
+		batch_mt_leave(b);
 		return XTC_E_RANGE; /* handle space exhausted */
 	}
 	rec->op = MT_SUBMIT;
@@ -1384,9 +1652,11 @@ xtc_batch_submit_mt(xtc_batch_t *b, void *request, uint64_t charge,
 		/* Ring full (push released the record). The handle is burned
 		 * -- handles are never reused, so this only advances the
 		 * counter; no slot was created and no leak occurs. */
+		batch_mt_leave(b);
 		batch_inc_atomic(&b->mt.n_rejections);
 		return XTC_E_AGAIN;
 	}
+	batch_mt_leave(b);
 	batch_inc_atomic(&b->mt.n_queued);
 	*out = handle;
 	return XTC_OK;
@@ -1400,10 +1670,10 @@ xtc_batch_submit_mt(xtc_batch_t *b, void *request, uint64_t charge,
 }
 
 /* Shared body of cancel_mt/resume_mt: push a control record onto the SAME ring
- * so FIFO order to the single driver is preserved. The driver applies it to
- * the handle's slot, or parks it in the early-control set if the slot does not
- * yet exist (a cross-producer control that reached the ring before its
- * submit) -- so a cancel is never lost regardless of producer/ring order. */
+ * as the submits, so the driver drains it after the SUBMIT for the same
+ * handle (see batch_mt_control) and applies it to the slot or held record.
+ * A control for a handle that has already completed is discarded. Accepted
+ * until the driver has finished (a cancel during DRAIN still matters). */
 #ifdef XTC_ENABLE_SCHED_POLICY
 static int
 batch_mt_control_submit(xtc_batch_t *b, uint64_t handle, enum batch_mt_op op)
@@ -1415,8 +1685,11 @@ batch_mt_control_submit(xtc_batch_t *b, uint64_t handle, enum batch_mt_op op)
 		return XTC_E_NOSYS;
 	if (handle == 0)
 		return XTC_E_INVAL;
+	if (batch_mt_enter(b, 2) != XTC_OK)
+		return XTC_E_INVAL; /* driver finished: the handle is stale */
 	rec = batch_mt_claim(b);
 	if (rec == NULL) {
+		batch_mt_leave(b);
 		batch_inc_atomic(&b->mt.n_rejections);
 		return XTC_E_AGAIN;
 	}
@@ -1425,9 +1698,11 @@ batch_mt_control_submit(xtc_batch_t *b, uint64_t handle, enum batch_mt_op op)
 	rec->request = NULL;
 	rec->charge = 0;
 	if (batch_mt_push(b, rec) != XTC_OK) {
+		batch_mt_leave(b);
 		batch_inc_atomic(&b->mt.n_rejections);
 		return XTC_E_AGAIN;
 	}
+	batch_mt_leave(b);
 	batch_inc_atomic(&b->mt.n_queued);
 	return XTC_OK;
 }
@@ -1473,6 +1748,11 @@ xtc_batch_close(xtc_batch_t *b, enum xtc_batch_close_mode mode)
 		else {
 			b->closed = 1;
 			b->cancelling |= mode == XTC_BATCH_CANCEL;
+			if (b->mt.ring != NULL
+			    && atomic_load_explicit(&b->mt.gate,
+			           memory_order_relaxed) == 0)
+				atomic_store_explicit(&b->mt.gate, 1,
+				    memory_order_seq_cst);
 			/* Edge-triggered abort of an outstanding FUTURE op:
 			 * resolve the engine-owned cancel promise so the driver's
 			 * when_any wait wakes IMMEDIATELY (no 1ms slice). Set
@@ -1534,7 +1814,6 @@ int
 xtc_batch_get_stats(xtc_batch_t *b, xtc_batch_stats_t *out)
 {
 #ifdef XTC_ENABLE_SCHED_POLICY
-	uint32_t i;
 	int rc;
 	__xtc_unsafe_enter();
 	rc = batch_owner(b, 1);
@@ -1547,16 +1826,10 @@ xtc_batch_get_stats(xtc_batch_t *b, xtc_batch_stats_t *out)
 			*out = b->stats;
 			out->size = sizeof(*out);
 			out->version = XTC_BATCH_VERSION;
-			out->queued = b->mt.n_held;
-			for (i = 0; i < b->opts.capacity; ++i) {
-				if (b->slots[i].state == B_WAITING)
-					out->queued++;
-				if (b->slots[i].state == B_READY
-				    || b->slots[i].state == B_INFLIGHT)
-					out->ready++;
-				if (b->slots[i].state == B_BLOCKED)
-					out->blocked++;
-			}
+			out->queued = b->mt.n_held + b->n_state[B_WAITING];
+			out->ready = b->n_state[B_READY]
+			    + b->n_state[B_INFLIGHT];
+			out->blocked = b->n_state[B_BLOCKED];
 		}
 	}
 	__xtc_unsafe_leave();
