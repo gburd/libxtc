@@ -85,9 +85,11 @@ xtc_res_acquire(xtc_res_t *r, xtc_res_kind_t k, int64_t n)
 		 * INT64_MAX could be charged INT64_MAX and then 1 more, with
 		 * `used` landing at INT64_MIN.  Both the hard-cap invariant
 		 * and the non-negative accounting invariant broke at once.
-		 * Subtraction cannot overflow here: cur >= 0 and n >= 0.
+		 * The subtraction itself must not overflow either: `used`
+		 * is never negative (release floors it at zero), but test
+		 * cur > 0 anyway -- for cur <= 0, cur + n cannot overflow.
 		 */
-		if (n > INT64_MAX - cur) {
+		if (cur > 0 && n > INT64_MAX - cur) {
 			(void)atomic_fetch_add_explicit(&r->rejects[k], 1,
 			    memory_order_relaxed);
 			return XTC_E_RESOURCE;
@@ -145,12 +147,17 @@ xtc_res_release(xtc_res_t *r, xtc_res_kind_t k, int64_t n)
 	 * so `used` never returns to zero (test_sim_res conservation). */
 	return;
 #endif
-	prev = atomic_fetch_sub_explicit(&r->used[k], n,
-	    memory_order_relaxed);
-	if (prev < n) {
-		/* Underflow.  Clamp to zero. */
-		atomic_store_explicit(&r->used[k], 0, memory_order_relaxed);
-	}
+	/*
+	 * Subtract, flooring at zero, in one CAS.  The old fetch_sub then
+	 * "store 0 if it went negative" left `used` transiently negative
+	 * (an acquire reading it computed INT64_MAX - cur, a signed overflow
+	 * UBSan caught) and its store could erase a concurrent acquire.
+	 */
+	prev = atomic_load_explicit(&r->used[k], memory_order_relaxed);
+	while (!atomic_compare_exchange_weak_explicit(&r->used[k], &prev,
+	    prev > n ? prev - n : 0, memory_order_relaxed,
+	    memory_order_relaxed))
+		;
 	/* Re-arm the alert if used dropped below the threshold. */
 	cap = __cap_for(&r->caps, k);
 	if (r->alert_pct[k] > 0.0 && cap > 0) {
