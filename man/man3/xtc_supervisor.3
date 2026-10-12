@@ -109,7 +109,14 @@ once the cap is reached (a slot freed by a child's DOWN is reusable).
 .Va opts.max_children No == 0
 is unbounded.
 .Fn xtc_sup_n_children
-returns the total child-slot count;
+returns the number of children the supervisor manages: every static
+child (from
+.Fn xtc_sup_start ,
+alive or not) plus every dynamic child that is alive or being
+restarted.  A dynamic child that exits for good
+.Pq Dv XTC_RESTART_TEMPORARY , No or Dv XTC_RESTART_TRANSIENT No with a normal exit
+is removed from the supervisor and no longer counted (before 1.55.1 its
+slot was kept forever);
 .Fn xtc_sup_n_alive
 returns only the currently-live children (pool utilization).
 .Pp

@@ -899,6 +899,67 @@ test_add_child_other_loop(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* E-m1: SIMPLE_OFO reclaims dynamic children that exit for good.
+ * 2000 TEMPORARY children that return at once, plus 200 TRANSIENT ones
+ * that exit normally.  Before 1.55.1 every one kept a slot: n_children
+ * ended at 2200 with 0 alive (and add/DOWN cost grew with it). */
+static void sofo_quick(void *a) { (void)a; }
+struct reclaim_state {
+	xtc_supervisor_t *sup;
+	int fails;
+	int n_children_end;
+	int n_alive_end;
+};
+static void
+reclaim_driver(void *arg)
+{
+	struct reclaim_state *s = arg;
+	xtc_child_spec_t cs;
+	int i, spins;
+	memset(&cs, 0, sizeof cs);
+	cs.name = "tmp";
+	cs.fn = sofo_quick;
+	for (i = 0; i < 2200; i++) {
+		cs.policy = (i < 2000) ? XTC_RESTART_TEMPORARY
+		                       : XTC_RESTART_TRANSIENT;
+		if (xtc_sup_add_child(s->sup, &cs, NULL) != XTC_OK) s->fails++;
+		if (i % 64 == 0) (void)xtc_proc_sleep(100 * 1000);
+	}
+	/* Let the last DOWNs drain. */
+	for (spins = 0; spins < 200 && xtc_sup_n_children(s->sup) > 0; spins++)
+		(void)xtc_proc_sleep(1000 * 1000);
+	s->n_children_end = xtc_sup_n_children(s->sup);
+	s->n_alive_end = xtc_sup_n_alive(s->sup);
+	(void)xtc_sup_stop(s->sup);
+}
+
+static MunitResult
+test_simple_ofo_reclaims_dead(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_supervisor_t *sup = NULL;
+	struct reclaim_state st;
+	(void)p; (void)d;
+
+	memset(&st, 0, sizeof st);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	opts.strategy = XTC_SUP_SIMPLE_OFO;
+	opts.max_restarts = 1000000;
+	munit_assert_int(xtc_sup_start(loop, &opts, NULL, 0, &sup), ==, XTC_OK);
+	st.sup = sup;
+	munit_assert_int(xtc_proc_spawn(loop, reclaim_driver, &st, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_join(sup, 2LL * 1000 * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	munit_assert_int(st.fails, ==, 0);
+	munit_assert_int(st.n_alive_end, ==, 0);
+	munit_assert_int(st.n_children_end, ==, 0);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/add_child_other_loop", test_add_child_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -909,6 +970,7 @@ static MunitTest tests[] = {
 	{ "/rest_for_one_no_overlap", test_rest_for_one_no_overlap, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/intensity_exceeded",    test_intensity_exceeded,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/simple_one_for_one",    test_simple_one_for_one,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/simple_ofo_reclaims_dead", test_simple_ofo_reclaims_dead, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pool_max_children",     test_pool_max_children,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/atomic_spawn_monitor",  test_atomic_spawn_monitor, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/one_for_all_equal_pid_other_loop", test_one_for_all_equal_pid_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
