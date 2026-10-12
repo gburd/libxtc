@@ -996,11 +996,71 @@ xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 }
 
 /* -------------------------------------------------------------------------
+ * Error-queue discipline and failure mapping.
+ *
+ * OpenSSL keeps ONE error queue per thread, and SSL_get_error() reports
+ * SSL_ERROR_SSL whenever that queue is non-empty -- whichever connection
+ * put the entry there.  A loop thread serves many connections, so an
+ * entry left by one peer's failed handshake turned the next WANT_READ on
+ * a healthy connection into a hard error (measured: one non-TLS client
+ * dropped 100 of 100 idle sessions on its loop).  Every SSL_* I/O call
+ * below therefore starts from an empty queue (tls_op_begin), and a
+ * failure drains it after classifying (tls_fail), so nothing leaks to
+ * the next caller on this thread -- ours or the application's.
+ *
+ * Classification: a peer that vanished (EOF without close_notify, which
+ * OpenSSL 3 reports as SSL_R_UNEXPECTED_EOF_WHILE_READING and 1.1.1 as
+ * SSL_ERROR_SYSCALL), a reset, or any other transport failure is
+ * XTC_E_IO.  A close_notify where data was required (handshake, write)
+ * is XTC_E_IO too.  Everything else -- a protocol or verification
+ * failure -- stays the backend's hard error.
+ * ----------------------------------------------------------------------- */
+
+static void
+tls_op_begin(xtc_tls_t *tls)
+{
+	ERR_clear_error();
+	xtc_tls_clear_wants(tls);
+}
+
+static int
+tls_fail(xtc_tls_t *tls, int err)
+{
+	unsigned long e = ERR_peek_last_error();
+	int rc;
+
+	switch (err) {
+	case SSL_ERROR_WANT_READ:
+		tls->wants_read = 1;
+		return XTC_E_AGAIN;
+	case SSL_ERROR_WANT_WRITE:
+		tls->wants_write = 1;
+		return XTC_E_AGAIN;
+	case SSL_ERROR_SYSCALL:
+	case SSL_ERROR_ZERO_RETURN:
+		rc = XTC_E_IO;
+		break;
+	default:
+		rc = XTC_E_INTERNAL;
+#if defined(SSL_R_UNEXPECTED_EOF_WHILE_READING)
+		if (ERR_GET_LIB(e) == ERR_LIB_SSL &&
+		    ERR_GET_REASON(e) == SSL_R_UNEXPECTED_EOF_WHILE_READING)
+			rc = XTC_E_IO;
+#endif
+		break;
+	}
+	(void)e;   /* unused when the OpenSSL lacks the EOF reason */
+	ERR_clear_error();
+	return rc;
+}
+
+/* -------------------------------------------------------------------------
  * PUBLIC: int  xtc_tls_handshake __P((xtc_tls_t *));
  *
  * Drive one step of the TLS handshake.  Returns XTC_OK when complete.
  * Returns XTC_E_AGAIN with wants_read or wants_write set when more I/O
- * is needed.  Returns XTC_E_INTERNAL on a hard error.
+ * is needed.  Returns XTC_E_IO if the peer or transport failed, and
+ * XTC_E_INTERNAL on any other hard (protocol / verification) error.
  * ----------------------------------------------------------------------- */
 
 int
@@ -1011,23 +1071,14 @@ xtc_tls_handshake(xtc_tls_t *tls)
 	if (tls == NULL)
 		return XTC_E_INVAL;
 
-	xtc_tls_clear_wants(tls);
+	tls_op_begin(tls);
 
 	rc = SSL_do_handshake(tls->ssl);
 	if (rc == 1)
 		return XTC_OK;   /* handshake complete */
 
 	err = SSL_get_error(tls->ssl, rc);
-	switch (err) {
-	case SSL_ERROR_WANT_READ:
-		tls->wants_read = 1;
-		return XTC_E_AGAIN;
-	case SSL_ERROR_WANT_WRITE:
-		tls->wants_write = 1;
-		return XTC_E_AGAIN;
-	default:
-		return XTC_E_INTERNAL;
-	}
+	return tls_fail(tls, err);
 }
 
 /* -------------------------------------------------------------------------
@@ -1045,7 +1096,7 @@ xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 		return XTC_E_INVAL;
 
 	*out_n           = 0;
-	xtc_tls_clear_wants(tls);
+	tls_op_begin(tls);
 
 	rc = xtc_ssl_read_ex(tls->ssl, buf, buflen, &nread);
 	if (rc == 1) {
@@ -1054,20 +1105,12 @@ xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 	}
 
 	err = SSL_get_error(tls->ssl, rc);
-	switch (err) {
-	case SSL_ERROR_WANT_READ:
-		tls->wants_read = 1;
-		return XTC_E_AGAIN;
-	case SSL_ERROR_WANT_WRITE:
-		tls->wants_write = 1;
-		return XTC_E_AGAIN;
-	case SSL_ERROR_ZERO_RETURN:
+	if (err == SSL_ERROR_ZERO_RETURN) {
 		/* Clean TLS close_notify received: treat as EOF. */
-		*out_n = 0;
+		ERR_clear_error();
 		return XTC_OK;
-	default:
-		return XTC_E_INTERNAL;
 	}
+	return tls_fail(tls, err);
 }
 
 int
@@ -1080,7 +1123,7 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
 		return XTC_E_INVAL;
 
 	*out_n           = 0;
-	xtc_tls_clear_wants(tls);
+	tls_op_begin(tls);
 
 	rc = xtc_ssl_write_ex(tls->ssl, buf, buflen, &nwritten);
 	if (rc == 1) {
@@ -1089,16 +1132,7 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
 	}
 
 	err = SSL_get_error(tls->ssl, rc);
-	switch (err) {
-	case SSL_ERROR_WANT_READ:
-		tls->wants_read = 1;
-		return XTC_E_AGAIN;
-	case SSL_ERROR_WANT_WRITE:
-		tls->wants_write = 1;
-		return XTC_E_AGAIN;
-	default:
-		return XTC_E_INTERNAL;
-	}
+	return tls_fail(tls, err);
 }
 
 /* -------------------------------------------------------------------------
@@ -1118,6 +1152,7 @@ XTC_TLS_DEFINE_WANTS_ACCESSORS
  *            (caller may call again to receive peer close_notify, but
  *             the fd can also be closed now without protocol error)
  *   rc < 0   WANT_READ / WANT_WRITE -> XTC_E_AGAIN
+ *            transport failure      -> XTC_E_IO
  *            anything else          -> XTC_E_INTERNAL
  * ----------------------------------------------------------------------- */
 
@@ -1129,23 +1164,14 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 	if (tls == NULL)
 		return XTC_E_INVAL;
 
-	xtc_tls_clear_wants(tls);
+	tls_op_begin(tls);
 
 	rc = SSL_shutdown(tls->ssl);
 	if (rc >= 0)
 		return XTC_OK;   /* rc==1: bidirectional; rc==0: half-done */
 
 	err = SSL_get_error(tls->ssl, rc);
-	switch (err) {
-	case SSL_ERROR_WANT_READ:
-		tls->wants_read = 1;
-		return XTC_E_AGAIN;
-	case SSL_ERROR_WANT_WRITE:
-		tls->wants_write = 1;
-		return XTC_E_AGAIN;
-	default:
-		return XTC_E_INTERNAL;
-	}
+	return tls_fail(tls, err);
 }
 
 /* -------------------------------------------------------------------------

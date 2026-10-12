@@ -7,58 +7,54 @@
  *
  *	A small fixed pool of worker threads drains a FIFO queue of
  *	work items.  xtc_blocking_run enqueues one, then parks the
- *	calling process on a pipe via xtc_proc_wait_fd; the worker
- *	runs the function, stores the result, and writes one byte to
- *	the pipe, which wakes the process on its own loop.  The pool
- *	threads are the only ones that ever block in the user's call,
- *	so the loop threads stay free to run other work.
+ *	calling fiber on its task waker; the worker runs the function,
+ *	stores the result, and fires the waker, which reschedules the
+ *	fiber on its own loop.  The pool threads are the only ones that
+ *	ever block in the user's call, so the loop threads stay free to
+ *	run other work.
+ *
+ *	There is no per-call file descriptor.  Each call used to open a
+ *	pipe (2 fds) for its wakeup: 1000 concurrent offloads held 2000
+ *	fds, and when pipe() hit EMFILE the call silently ran fn ON THE
+ *	LOOP THREAD (153 of 200 calls at ulimit -n 100), stalling every
+ *	other fiber on the loop exactly when the process was already
+ *	under fd pressure.  It also carried a close-vs-write race on the
+ *	pipe that TSan reported and that had to be suppressed.
+ *
+ *	Completion handshake.  The work item lives on the caller's stack.
+ *	The worker sets w->done and fires the waker while holding
+ *	g_done_lock, and the caller only reads w->done under that lock,
+ *	so the caller cannot see completion -- and return, freeing w --
+ *	until the worker has released the lock and stopped touching w.
+ *	An off-loop caller waits on g_done_cv under the same lock.
  */
 
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_blocking.h"
 #include "xtc_proc.h"
-#include "xtc_io.h"
+#include "xtc_loop.h"   /* xtc_task_waker / xtc_waker_wake */
+#include "xtc_async.h"  /* xtc_yield */
+#include "proc_int.h"   /* __xtc_proc_ctx_save/restore */
+#include "loop_int.h"   /* struct xtc_task: park_requested */
+#include "coro_int.h"   /* __xtc_current_task */
 #include "xtc_sim.h"   /* __xtc_sim_active: run inline under simulation */
 
 #include "os_thread.h"
 #include "os_cpu.h"
+#include "os_time.h"    /* __os_sleep_ns */
 
 #include <pthread.h>
 #include <stdatomic.h>
-#include <unistd.h>
 #include <errno.h>
-
-#if defined(_WIN32)
-/* Windows has no POSIX pipe(); _pipe() in <io.h> is the equivalent.
- * Use a binary pipe with a small buffer (this is a 1-byte wakeup
- * channel).  Works under both MinGW and MSVC without the compat shim
- * being on the include path. */
-#include <io.h>
-#include <fcntl.h>
-static __inline int xtc__blk_pipe(int fds[2])
-{ return _pipe(fds, 4096, _O_BINARY); }
-#undef pipe
-#define pipe(fds) xtc__blk_pipe(fds)
-#endif
 
 struct blk_work {
 	int            (*fn)(void *);
 	void            *arg;
-	_Atomic int      result;
-	_Atomic int      done;         /* set AFTER the wakeup write; the
-	                                * caller must spin-park until this is
-	                                * 1 -- a spurious wake (cross-thread
-	                                * nudge / eager rebalance / stray
-	                                * xtc_proc_wake) can resume the parked
-	                                * caller before the worker has written
-	                                * the pipe, and reading/closing then
-	                                * would race the worker's write and
-	                                * free the on-stack work item out from
-	                                * under it (TSan-caught close-vs-write
-	                                * on the completion pipe under
-	                                * concurrent commit). */
-	int              wr_fd;        /* write end of the wakeup pipe */
+	int              result;       /* written before done, under g_done_lock */
+	int              done;         /* g_done_lock */
+	xtc_waker_t      waker;        /* g_done_lock; fiber caller only */
+	int              fiber;        /* 1: fiber caller (wake waker), 0: thread */
 	int              detached;     /* 1: fire-and-forget; worker frees it */
 	struct blk_work *next;
 };
@@ -67,6 +63,8 @@ struct blk_work {
 
 static pthread_mutex_t   g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t    g_cv = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t   g_done_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t    g_done_cv = PTHREAD_COND_INITIALIZER;
 static struct blk_work  *g_head;          /* queue head (dequeue) */
 static struct blk_work  *g_tail;          /* queue tail (enqueue) */
 static __os_thread_t     g_threads[BLK_MAX_THREADS];
@@ -95,13 +93,33 @@ blk_auto_size(void)
 	return n;
 }
 
+/* Publish w's result and wake its caller.  Last touch of w: once
+ * g_done_lock is released the caller may return and free it. */
+static void
+blk_complete(struct blk_work *w, int r)
+{
+	(void)__xtc_mtx_lock(&g_done_lock);
+	w->result = r;
+	w->done = 1;
+	if (w->fiber) {
+		/* A cross-thread wake posts to the loop's inbox, which
+		 * allocates; a dropped wake would park the caller forever,
+		 * so wait out an allocation failure instead. */
+		while (xtc_waker_wake(&w->waker) == XTC_E_NOMEM)
+			(void)__os_sleep_ns(1000000);
+	} else {
+		(void)pthread_cond_broadcast(&g_done_cv);
+	}
+	(void)__xtc_mtx_unlock(&g_done_lock);
+}
+
 static void *
 blk_worker(void *unused)
 {
 	(void)unused;
 	for (;;) {
 		struct blk_work *w;
-		int fn_fd, r;
+		int r;
 
 		(void)__xtc_mtx_lock(&g_lock);
 		g_idle++;
@@ -124,40 +142,11 @@ blk_worker(void *unused)
 		if (w->detached) {
 			/* Fire-and-forget: the submitter never waits and does
 			 * not own w, so we free the heap work item here and
-			 * discard the result.  No wakeup pipe to write. */
+			 * discard the result. */
 			__os_free(w);
 			continue;
 		}
-		fn_fd = w->wr_fd;
-		atomic_store_explicit(&w->result, r, memory_order_release);
-		/* Publish completion with a release store to w->done, our LAST
-		 * touch of w, BEFORE the wakeup write.  After this store the
-		 * caller may observe done, return, and free the on-stack work
-		 * item -- so the write below must use ONLY the local fn_fd and
-		 * must not touch w again (a post-write w->done store is a
-		 * stack-use-after-return, ASan-caught at blocking.c blk_worker).
-		 * Ordering rationale:
-		 *   - done-before-write is LOST-WAKE-FREE: the wake (the pipe
-		 *     byte) resumes the parked caller, and by the time any wake
-		 *     is observable done is already visible, so a woken caller
-		 *     never re-parks with the completion already delivered (the
-		 *     opposite order hangs: wake seen, done not yet stored,
-		 *     re-park forever -- which hung the Windows offloaded
-		 *     fdatasync).
-		 *   - teardown stays safe because the CALLER waits for done then
-		 *     does a BLOCKING read of the byte before it closes: the
-		 *     byte only exists after this write, so the close strictly
-		 *     follows the write. */
-		atomic_store_explicit(&w->done, 1, memory_order_release);
-		{
-			char b = 'x';
-			ssize_t nw;
-			do {
-				/* One byte into a fresh pipe never blocks.  Uses
-				 * only the local fn_fd -- w may already be freed. */
-				nw = write(fn_fd, &b, 1);  /* XTC_BLOCKING_OK */
-			} while (nw < 0 && errno == EINTR);
-		}
+		blk_complete(w, r);
 	}
 }
 
@@ -228,14 +217,61 @@ xtc_blocking_pool_size(int nthreads)
 	return rc;
 }
 
+/*
+ * Queue bound.  The queue was unbounded: a burst of offloads faster than
+ * the pool drains them grew it without limit.  A queued item is a caller
+ * that waits (a parked fiber, a blocked thread) or a fire-and-forget
+ * closure, so the bound is generous -- it exists to turn runaway backlog
+ * into an error the caller can see, not to throttle normal use.
+ */
+#define BLK_QUEUE_MAX 65536
+
+/*
+ * Append w to the queue, starting the pool on first use.  XTC_E_AGAIN if
+ * the queue is at BLK_QUEUE_MAX, XTC_E_RESOURCE if no pool thread could
+ * be started.
+ */
+static int
+blk_enqueue(struct blk_work *w)
+{
+	(void)__xtc_mtx_lock(&g_lock);
+	if (blk_start_locked() != 0) {
+		(void)__xtc_mtx_unlock(&g_lock);
+		return XTC_E_RESOURCE;
+	}
+	if (g_qlen >= BLK_QUEUE_MAX) {
+		(void)__xtc_mtx_unlock(&g_lock);
+		return XTC_E_AGAIN;
+	}
+	w->next = NULL;
+	if (g_tail != NULL)
+		g_tail->next = w;
+	else
+		g_head = w;
+	g_tail = w;
+	g_qlen++;
+	blk_grow_locked();
+	(void)pthread_cond_signal(&g_cv);
+	(void)__xtc_mtx_unlock(&g_lock);
+	return XTC_OK;
+}
+
+static int
+blk_run_sync(int (*fn)(void *), void *arg, int *out_result)
+{
+	int r = fn(arg);
+	if (out_result != NULL)
+		*out_result = r;
+	return XTC_OK;
+}
+
 int
 xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 {
 	struct blk_work w;
-	int pfd[2];
-	uint32_t revents = 0;
-	char drain[8];
-	ssize_t n;
+	xtc_task_t *cur;
+	void *proc_ctx;
+	int rc, done;
 
 	if (fn == NULL)
 		return XTC_E_INVAL;
@@ -245,121 +281,82 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	 * sim's control, destroying determinism), so run the work
 	 * synchronously on the calling fiber -- the same result the
 	 * off-a-loop synchronous fallback already produces, and a pure
-	 * function of the seed.  ADDITIVE: gated on __xtc_sim_active(); the
-	 * production pool path below is byte-identical. */
+	 * function of the seed.  The production pool path below is
+	 * unaffected. */
 	if (__xtc_sim_active())
-		goto run_sync;
+		return blk_run_sync(fn, arg, out_result);
 
-	/* Synchronous fallback: not on a loop process (cannot park), or
-	 * the wakeup pipe / pool could not be set up. */
-	if (xtc_pid_is_none(xtc_self()))
-		goto run_sync;
-	if (pipe(pfd) != 0)
-		goto run_sync;
+	/* Not on a fiber: nothing to park, run on this thread (documented). */
+	cur = __xtc_current_task();
+	if (xtc_pid_is_none(xtc_self()) || cur == NULL)
+		return blk_run_sync(fn, arg, out_result);
 
-	(void)__xtc_mtx_lock(&g_lock);
-	if (blk_start_locked() != 0) {
-		(void)__xtc_mtx_unlock(&g_lock);
-		(void)close(pfd[0]);
-		(void)close(pfd[1]);
-		goto run_sync;
-	}
 	w.fn = fn;
 	w.arg = arg;
-	atomic_store_explicit(&w.result, 0, memory_order_relaxed);
-	atomic_store_explicit(&w.done, 0, memory_order_relaxed);
-	w.wr_fd = pfd[1];
+	w.result = 0;
+	w.done = 0;
+	w.fiber = 1;
 	w.detached = 0;        /* synchronous: the caller owns w and waits */
-	w.next = NULL;
-	if (g_tail != NULL)
-		g_tail->next = &w;
-	else
-		g_head = &w;
-	g_tail = &w;
-	g_qlen++;
-	blk_grow_locked();
-	(void)pthread_cond_signal(&g_cv);
-	(void)__xtc_mtx_unlock(&g_lock);
+	(void)xtc_task_waker(cur, &w.waker);
 
-	/* Park until the worker publishes completion (w.done), then do a
-	 * BLOCKING read of the wakeup byte, then close.  w.done -- not the
-	 * wake -- is the completion token: xtc_proc_wait_fd may return
-	 * spuriously (a cross-thread nudge, eager-rebalance poke, or stray
-	 * xtc_proc_wake are all documented to cause spurious wakes the
-	 * waiter must re-evaluate), so we re-park until done is set.  The
-	 * worker stores done (release) BEFORE its wakeup write, so this is
-	 * lost-wake-free: whenever a wake is observable, done is already
-	 * visible, so we never re-park with the completion already delivered.
-	 * The blocking read below then waits for the byte -- which the worker
-	 * writes AFTER the done store -- so our close strictly follows the
-	 * worker's write and cannot race it, and w is not freed until the
-	 * worker is finished with it.
+	/*
+	 * CANCELLATION: the whole window from enqueue to completion is
+	 * MASKED.  `w` is STACK-OWNED by this frame and the pool worker reads
+	 * and writes it until it drops g_done_lock in blk_complete.  An
+	 * unmasked kill delivered during the park would unwind this frame
+	 * while the worker still owned it.  MEASURED before (ASan, epoll,
+	 * kill 50ms into a 400ms offload): the dead fiber's stack was reused,
+	 * the worker read a garbage w->detached and called __os_free on a
+	 * STACK address.
 	 *
-	 * CANCELLATION: this whole window is MASKED.  `w` is STACK-OWNED by
-	 * this frame and the pool worker writes into it (w->result, w->done)
-	 * and reads w->fn/w->arg/w->wr_fd/w->detached after we get here.
-	 * xtc_proc_wait_fd is a cancellation point, so an unmasked kill
-	 * delivered during the wait unwound THIS frame while the worker still
-	 * owned it.  MEASURED (ASan, epoll, kill 50ms into a 400ms offload):
-	 * the dead fiber's stack was reused, the worker then read a garbage
-	 * w->detached, took the fire-and-forget branch, and called __os_free
-	 * on a STACK address -- "attempting free on address which was not
-	 * malloc()-ed" in blk_worker.  A bad free of live stack is heap
-	 * corruption, not a leak.
-	 *
-	 * The mask is the tree's existing primitive for exactly this ("a
-	 * resource acquired in a masked region can still register its
-	 * release", xtc_proc.h); the resource here is the frame itself.  A
-	 * kill arriving during the wait is LATCHED (xtc_proc_wait_fd's kill
-	 * delivery sees mask_depth > 0 and defers) and honored by
-	 * xtc_mask_leave below, which does not return when one was latched --
-	 * so the fiber dies at the FIRST point where the worker no longer
-	 * owns this frame.
-	 *
-	 * That bound is the minimum achievable, not an indefinite hold: the
-	 * work is running on a pool thread that cannot be interrupted, so no
-	 * amount of cancellation can shorten it.  Masking does NOT hide a
-	 * wedged offload from a supervisor, which is what man xtc_proc.3
-	 * warns about: the latched kill sets mask_deferred while mask_depth is
-	 * raised, which is precisely the pair xtc_exit_pid_deadline reads to
-	 * report XTC_KILL_DEFERRED instead of burning its deadline, and which
-	 * xtc_proc_info exposes to an outside observer.  A work function that
-	 * never returns is therefore visible as DEFERRED, and the documented
-	 * escalation (take down the process, not the fiber) applies -- a
-	 * decision, not a guess.  Abandoning the wait instead is NOT an
-	 * available alternative: the worker would still hold `w` and the
-	 * caller's `arg`, which may itself live on the frame being unwound. */
+	 * A kill arriving during the wait is LATCHED and honored by
+	 * xtc_mask_leave below, which does not return when one was latched
+	 * -- so the fiber dies at the FIRST point where the worker no longer
+	 * owns this frame.  That bound is the minimum achievable: the work
+	 * runs on a pool thread that cannot be interrupted.  Masking does NOT
+	 * hide a wedged offload from a supervisor: the latched kill sets
+	 * mask_deferred while mask_depth is raised, which is the pair
+	 * xtc_exit_pid_deadline reports as XTC_KILL_DEFERRED.
+	 */
 	(void)xtc_mask_enter();
-	while (!atomic_load_explicit(&w.done, memory_order_acquire)) {
-		revents = 0;
-		(void)xtc_proc_wait_fd(pfd[0], XTC_IO_READABLE, -1, &revents);
+	if ((rc = blk_enqueue(&w)) != XTC_OK) {
+		(void)xtc_mask_leave();
+		return rc;
 	}
-	do {
-		/* done is set; the worker's byte write follows it and this
-		 * blocking read waits for that byte, synchronizing our close
-		 * after the worker's last pipe touch. */
-		n = read(pfd[0], drain, sizeof drain);  /* XTC_BLOCKING_OK */
-	} while (n < 0 && errno == EINTR);
-
+	/*
+	 * Park until the worker publishes completion.  w.done, read under
+	 * g_done_lock, is the completion token: a wake can also be spurious
+	 * (a stray xtc_proc_wake, an eager rebalance), so re-park until it is
+	 * set.  Requesting the park while holding the lock is lost-wake-free:
+	 * a worker that completes after we drop it fires a waker that either
+	 * finds us PARKED or latches wake_pending, which the PENDING verdict
+	 * consumes instead of parking.
+	 */
+	for (;;) {
+		(void)__xtc_mtx_lock(&g_done_lock);
+		done = w.done;
+		if (!done)
+			cur->park_requested = 1;
+		(void)__xtc_mtx_unlock(&g_done_lock);
+		if (done)
+			break;
+		proc_ctx = __xtc_proc_ctx_save();
+		xtc_yield();
+		__xtc_proc_ctx_restore(proc_ctx);
+		/* The fiber may have been work-stolen while parked; re-aim the
+		 * waker at the loop it now runs on (under the lock the worker
+		 * reads it under). */
+		(void)__xtc_mtx_lock(&g_done_lock);
+		(void)xtc_task_waker(cur, &w.waker);
+		(void)__xtc_mtx_unlock(&g_done_lock);
+	}
 	if (out_result != NULL)
-		*out_result = atomic_load_explicit(&w.result,
-		    memory_order_acquire);
-	(void)close(pfd[0]);
-	(void)close(pfd[1]);
-	/* The worker is done with `w` and the pipe is closed, so the frame is
-	 * ours again: drop the mask and honor a kill latched during the wait.
-	 * This may NOT return (it unwinds via xtc_exit_self), which is why it
-	 * comes after the result store and the closes -- everything a
-	 * cancelled caller still needed has already happened. */
+		*out_result = w.result;
+	/* The worker is done with `w`, so the frame is ours again: drop the
+	 * mask and honor a kill latched during the wait.  This may NOT
+	 * return (it unwinds via xtc_exit_self), which is why it comes after
+	 * the result store. */
 	(void)xtc_mask_leave();
-	return XTC_OK;
-
-run_sync:
-	{
-		int r = fn(arg);
-		if (out_result != NULL)
-			*out_result = r;
-	}
 	return XTC_OK;
 }
 
@@ -368,22 +365,19 @@ run_sync:
  *
  * Like xtc_blocking_run, but the CALLER is a plain OS thread that is not
  * a libxtc fiber/loop process (xtc_self() == none): offload `fn(arg)` to
- * the pool and block THIS thread on the completion pipe with a real
- * read(2), rather than parking a fiber (which a bare thread cannot do).
- * The pool worker runs the blocking call, so `fn` no longer runs inline
- * on the caller -- useful for a consumer that multiplexes many logical
- * tasks onto one OS thread and wants the blocking syscall (an fsync, a
- * getaddrinfo) to run OFF that thread on a pool worker.
+ * the pool and block THIS thread until it completes, rather than parking
+ * a fiber (which a bare thread cannot do).  The pool worker runs the
+ * blocking call, so `fn` no longer runs inline on the caller -- useful
+ * for a consumer that multiplexes many logical tasks onto one OS thread
+ * and wants the blocking syscall (an fsync, a getaddrinfo) to run OFF
+ * that thread on a pool worker.
  *
  * Contract / caveats the caller must understand:
  *   - It STILL blocks the calling thread until the work completes (it is
  *     synchronous from the caller's view; it just does not run `fn`
  *     inline).  It does NOT let the caller do other work during the
  *     call -- only a fiber on a loop gets that (use xtc_blocking_run
- *     from a fiber for cooperative yielding).  If you multiplex N tasks
- *     on one thread and must keep serving the other N-1 during a
- *     blocking call, the answer is to make those tasks fibers on an
- *     xtc loop, not this primitive.
+ *     from a fiber for cooperative yielding).
  *   - It does NOT shorten any lock the caller holds across the call: an
  *     offloaded fsync under an exclusive lock holds that lock for the
  *     same wall time.  This primitive is a building block for a
@@ -393,18 +387,15 @@ run_sync:
  *     XTC_E_INVAL (use xtc_blocking_run there, which yields).
  *
  * Returns XTC_OK (result via out_result) on success; XTC_E_INVAL (fn
- * NULL, or called on a loop); on a pool/pipe setup failure it degrades
- * to running `fn` inline on the caller (same as the off-a-loop fallback)
- * and returns XTC_OK.  Never runs under deterministic simulation on a
- * loop (there is no bare-thread caller there).
+ * NULL, or called on a loop); XTC_E_AGAIN (the offload queue is full)
+ * or XTC_E_RESOURCE (no pool thread could be started) without running
+ * fn.
  */
 int
 xtc_blocking_run_off_loop(int (*fn)(void *), void *arg, int *out_result)
 {
 	struct blk_work w;
-	int pfd[2];
-	char drain[8];
-	ssize_t n;
+	int rc;
 
 	if (fn == NULL)
 		return XTC_E_INVAL;
@@ -413,52 +404,21 @@ xtc_blocking_run_off_loop(int (*fn)(void *), void *arg, int *out_result)
 	 * carrier thread. */
 	if (!xtc_pid_is_none(xtc_self()))
 		return XTC_E_INVAL;
-	if (pipe(pfd) != 0)
-		goto run_sync;
 
-	(void)__xtc_mtx_lock(&g_lock);
-	if (blk_start_locked() != 0) {
-		(void)__xtc_mtx_unlock(&g_lock);
-		(void)close(pfd[0]);
-		(void)close(pfd[1]);
-		goto run_sync;
-	}
 	w.fn = fn;
 	w.arg = arg;
-	atomic_store_explicit(&w.result, 0, memory_order_relaxed);
-	atomic_store_explicit(&w.done, 0, memory_order_relaxed);
-	w.wr_fd = pfd[1];
+	w.result = 0;
+	w.done = 0;
+	w.fiber = 0;
 	w.detached = 0;        /* the caller owns w and waits */
-	w.next = NULL;
-	if (g_tail != NULL)
-		g_tail->next = &w;
-	else
-		g_head = &w;
-	g_tail = &w;
-	g_qlen++;
-	blk_grow_locked();
-	(void)pthread_cond_signal(&g_cv);
-	(void)__xtc_mtx_unlock(&g_lock);
-
-	/* Block THIS OS thread on the completion pipe (no fiber to park).
-	 * The worker writes one byte after storing the result. */
-	do {
-		n = read(pfd[0], drain, sizeof drain);  /* XTC_BLOCKING_OK */
-	} while (n < 0 && errno == EINTR);
-
+	if ((rc = blk_enqueue(&w)) != XTC_OK)
+		return rc;
+	(void)__xtc_mtx_lock(&g_done_lock);
+	while (!w.done)
+		(void)pthread_cond_wait(&g_done_cv, &g_done_lock); /* XTC_BLOCKING_OK: off-loop by contract */
 	if (out_result != NULL)
-		*out_result = atomic_load_explicit(&w.result,
-		    memory_order_acquire);
-	(void)close(pfd[0]);
-	(void)close(pfd[1]);
-	return XTC_OK;
-
-run_sync:
-	{
-		int r = fn(arg);
-		if (out_result != NULL)
-			*out_result = r;
-	}
+		*out_result = w.result;
+	(void)__xtc_mtx_unlock(&g_done_lock);
 	return XTC_OK;
 }
 
@@ -471,8 +431,9 @@ run_sync:
  * (on or off a loop, or a bare thread) -- e.g. read-ahead/prefetch that
  * must not block the caller.  The caller owns `arg`'s lifetime and must
  * keep it valid until `fn` has run (or have `fn` free it); there is no
- * completion signal.  Returns XTC_E_INVAL (fn NULL), XTC_E_NOMEM, or
- * XTC_E_INTERNAL (pool could not start).
+ * completion signal.  Returns XTC_E_INVAL (fn NULL), XTC_E_NOMEM,
+ * XTC_E_AGAIN (the offload queue is full) or XTC_E_RESOURCE (no pool
+ * thread could be started); fn has not run on any error.
  */
 int
 xtc_blocking_submit(int (*fn)(void *), void *arg)
@@ -486,26 +447,10 @@ xtc_blocking_submit(int (*fn)(void *), void *arg)
 		return XTC_E_NOMEM;
 	w->fn = fn;
 	w->arg = arg;
-	w->wr_fd = -1;
 	w->detached = 1;
-	w->next = NULL;
-
-	(void)__xtc_mtx_lock(&g_lock);
-	if (blk_start_locked() != 0) {
-		(void)__xtc_mtx_unlock(&g_lock);
+	if ((rc = blk_enqueue(w)) != XTC_OK)
 		__os_free(w);
-		return XTC_E_INTERNAL;
-	}
-	if (g_tail != NULL)
-		g_tail->next = w;
-	else
-		g_head = w;
-	g_tail = w;
-	g_qlen++;
-	blk_grow_locked();
-	(void)pthread_cond_signal(&g_cv);
-	(void)__xtc_mtx_unlock(&g_lock);
-	return XTC_OK;
+	return rc;
 }
 
 void

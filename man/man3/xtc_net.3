@@ -5,6 +5,7 @@
 .Os
 .Sh NAME
 .Nm xtc_net_listen ,
+.Nm xtc_net_listen_backlog ,
 .Nm xtc_net_dial ,
 .Nm xtc_net_accept ,
 .Nm xtc_net_apply_tcp_opts ,
@@ -26,6 +27,8 @@
 .In xtc_net.h
 .Ft int
 .Fn xtc_net_listen "xtc_net_family_t fam" "const char *host" "int port" "const xtc_tcp_opts_t *opts" "int *out_fd"
+.Ft int
+.Fn xtc_net_listen_backlog "xtc_net_family_t fam" "const char *host" "int port" "const xtc_tcp_opts_t *opts" "int backlog" "int *out_fd"
 .Ft int
 .Fn xtc_net_dial "xtc_net_family_t fam" "const char *host" "int port" "const xtc_tcp_opts_t *opts" "int *out_fd"
 .Ft int
@@ -164,6 +167,22 @@ caller can register it with
 .Xr xtc_io_reg_fd 3
 or pass to
 .Xr xtc_proc_wait_fd 3 .
+The accept queue is as deep as the host allows: the call asks for
+.Dv SOMAXCONN ,
+or 4096 where that is smaller, and the kernel clamps the request to
+its own limit
+.Pq Va net.core.somaxconn No on Linux .
+Through 1.55.0 it was a fixed 128, which overflowed under a
+connection burst (20000 clients: TcpExtListenOverflows rose and 5926
+had not completed one echo after 10 s).
+.Pp
+.Fn xtc_net_listen_backlog
+is
+.Fn xtc_net_listen
+with an explicit queue depth.
+.Fa backlog
+0 means the default above; a negative value returns
+.Er XTC_E_INVAL .
 .Pp
 .Fn xtc_net_dial
 opens a non-blocking TCP connection.  The connect is in flight
@@ -214,6 +233,11 @@ open
 .Dv SOCK_STREAM
 sockets at the given filesystem path.  Listeners auto-unlink the
 path on bind failure.
+A UNIX listener gets the same default backlog as
+.Fn xtc_net_listen
+(it was 64 through 1.55.0); to change it, call
+.Xr listen 2
+again on the returned descriptor.
 .Pp
 .Sy Credential passing
 on Unix sockets:

@@ -1466,7 +1466,226 @@ test_server_write_dead_peer_no_sigpipe(const MunitParameter params[],
     return MUNIT_OK;
 }
 
+/* -------------------------------------------------------------------------
+ * test_server_error_isolation:
+ *   One bad peer must not break a healthy connection served by the SAME
+ *   thread.  OpenSSL keeps a per-THREAD error queue and SSL_get_error
+ *   reports SSL_ERROR_SSL whenever it is non-empty, so a failed handshake
+ *   that left its error queued made the next xtc_tls_read on any other
+ *   connection on that thread fail (a WANT_READ reported as a hard
+ *   error): one non-TLS client dropped every session on the loop.
+ *   Here a healthy session completes its handshake, a second connection
+ *   is fed a plain-text request instead of a ClientHello, and the
+ *   healthy session must then still report XTC_E_AGAIN on an empty read
+ *   and complete an echo round trip.
+ * ----------------------------------------------------------------------- */
+static int
+poison_one(xtc_tls_ctx_t *ctx)
+{
+    static const char junk[] = "GET / HTTP/1.0\r\nHost: x\r\n\r\n";
+    xtc_tls_t *bad = NULL;
+    int        sv[2], rc;
+
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(xtc_tls_create(ctx, sv[0], &bad), ==, XTC_OK);
+    munit_assert_int((int)write(sv[1], junk, sizeof junk - 1), ==,
+                     (int)(sizeof junk - 1));
+    (void)shutdown(sv[1], SHUT_WR);
+    rc = poll_until_done(bad, sv[0], xtc_tls_handshake, 5000);
+    xtc_tls_destroy(bad);
+    close(sv[0]);
+    close(sv[1]);
+    return rc;
+}
+
+static MunitResult
+test_server_error_isolation(const MunitParameter params[], void *data)
+{
+    xtc_tls_opts_t  opts;
+    xtc_tls_ctx_t  *ctx = NULL;
+    xtc_tls_t      *tls = NULL;
+    struct client_args ca;
+    pthread_t       tid;
+    int             sv[2], rc, i;
+    size_t          n;
+    char            rbuf[CLIENT_MSG_LEN + 1];
+
+    (void)params;
+    (void)data;
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cert_file   = TEST_CERT_PATH;
+    opts.key_file    = TEST_KEY_PATH;
+    opts.min_version = XTC_TLS_VER_12;
+    munit_assert_int(xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx),
+                     ==, XTC_OK);
+
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(set_nonblock(sv[1]), ==, 0);
+    munit_assert_int(xtc_tls_create(ctx, sv[0], &tls), ==, XTC_OK);
+    memset(&ca, 0, sizeof(ca));
+    ca.fd = sv[1];
+    ca.rc = 1;
+    munit_assert_int(pthread_create(&tid, NULL, client_thread, &ca), ==, 0);
+    munit_assert_int(poll_until_done(tls, sv[0], xtc_tls_handshake, 5000),
+                     ==, XTC_OK);
+
+    /* Several bad peers, each a hard handshake failure on this thread. */
+    for (i = 0; i < 3; i++) {
+        rc = poison_one(ctx);
+        munit_assert_int(rc, !=, XTC_OK);
+        munit_assert_int(rc, !=, XTC_E_AGAIN);
+    }
+
+    /* The healthy client has sent nothing yet: an empty read must be
+     * "would block", not a hard error inherited from the bad peers. */
+    rc = xtc_tls_read(tls, rbuf, sizeof rbuf, &n);
+    munit_assert_int(rc, ==, XTC_E_AGAIN);
+
+    (void)poison_one(ctx);
+    munit_assert_int(tls_write_all(tls, sv[0], "hello", CLIENT_MSG_LEN,
+                     5000), ==, XTC_OK);
+    (void)poison_one(ctx);
+    memset(rbuf, 0, sizeof(rbuf));
+    munit_assert_int(tls_read_exact(tls, sv[0], rbuf, CLIENT_MSG_LEN, 5000),
+                     ==, XTC_OK);
+    munit_assert_memory_equal(CLIENT_MSG_LEN, rbuf, "hello");
+
+    (void)xtc_tls_shutdown(tls);
+    pthread_join(tid, NULL);
+    munit_assert_int(ca.rc, ==, 0);
+    xtc_tls_destroy(tls);
+    xtc_tls_ctx_destroy(ctx);
+    close(sv[0]);
+    close(sv[1]);
+    return MUNIT_OK;
+}
+
+/* -------------------------------------------------------------------------
+ * test_server_peer_eof:
+ *   How a read reports the peer going away.
+ *     clean  -- close_notify then close: XTC_OK with *out_n == 0 (EOF).
+ *     abrupt -- close without close_notify (truncation): XTC_E_IO.
+ *     reset  -- close with our unread data queued at the peer, which
+ *               resets the stream (ECONNRESET): XTC_E_IO.
+ *   Before, both failure shapes came back as XTC_E_INTERNAL, which is
+ *   reserved for a libxtc invariant violation, so an application could
+ *   not tell a peer reset from a library bug.
+ * ----------------------------------------------------------------------- */
+enum { EOF_CLEAN, EOF_ABRUPT, EOF_RESET };
+
+struct eof_args {
+    int fd;
+    int ctl;      /* read end: the server's "close now" byte */
+    int mode;
+    int rc;
+};
+
+static void *
+eof_client(void *arg)
+{
+    struct eof_args *a = arg;
+    xtc_tls_opts_t o;
+    xtc_tls_ctx_t *ctx = NULL;
+    xtc_tls_t     *tls = NULL;
+    char b;
+
+    a->rc = 1;
+    memset(&o, 0, sizeof o);
+    o.verify_peer_mode = XTC_TLS_VERIFY_NONE;
+    o.min_version = XTC_TLS_VER_12;
+    if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &o, &ctx) == XTC_OK &&
+        xtc_tls_create(ctx, a->fd, &tls) == XTC_OK &&
+        poll_until_done(tls, a->fd, xtc_tls_handshake, 5000) == XTC_OK)
+        a->rc = 0;
+    (void)read(a->ctl, &b, 1);           /* wait for the server's go */
+    if (a->mode == EOF_CLEAN && tls != NULL)
+        (void)poll_until_done(tls, a->fd, xtc_tls_shutdown, 5000);
+    (void)close(a->fd);
+    if (tls != NULL) xtc_tls_destroy(tls);
+    if (ctx != NULL) xtc_tls_ctx_destroy(ctx);
+    return NULL;
+}
+
+static int
+eof_case(int mode, size_t *out_n)
+{
+    xtc_tls_opts_t o;
+    xtc_tls_ctx_t *ctx = NULL;
+    xtc_tls_t     *tls = NULL;
+    struct eof_args a;
+    pthread_t th;
+    char buf[64];
+    int sv[2], ctl[2], rc;
+
+    memset(&o, 0, sizeof o);
+    o.cert_file = TEST_CERT_PATH;
+    o.key_file  = TEST_KEY_PATH;
+    o.min_version = XTC_TLS_VER_12;
+    munit_assert_int(xtc_tls_ctx_create(XTC_TLS_SERVER, &o, &ctx), ==, XTC_OK);
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(pipe(ctl), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(set_nonblock(sv[1]), ==, 0);
+    munit_assert_int(xtc_tls_create(ctx, sv[0], &tls), ==, XTC_OK);
+    a.fd = sv[1];
+    a.ctl = ctl[0];
+    a.mode = mode;
+    a.rc = 1;
+    munit_assert_int(pthread_create(&th, NULL, eof_client, &a), ==, 0);
+    munit_assert_int(poll_until_done(tls, sv[0], xtc_tls_handshake, 5000),
+                     ==, XTC_OK);
+    /* Unread data at the peer turns its close into a reset. */
+    if (mode == EOF_RESET)
+        munit_assert_int(tls_write_all(tls, sv[0], "hello", 5, 5000),
+                         ==, XTC_OK);
+    munit_assert_int((int)write(ctl[1], "g", 1), ==, 1);
+    (void)pthread_join(th, NULL);
+    munit_assert_int(a.rc, ==, 0);
+    *out_n = 99;
+    for (;;) {
+        struct pollfd pfd;
+        rc = xtc_tls_read(tls, buf, sizeof buf, out_n);
+        if (rc != XTC_E_AGAIN)
+            break;
+        pfd.fd = sv[0];
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        munit_assert_int(poll(&pfd, 1, 5000), ==, 1);
+    }
+    xtc_tls_destroy(tls);
+    xtc_tls_ctx_destroy(ctx);
+    close(sv[0]);
+    close(ctl[0]);
+    close(ctl[1]);
+    return rc;
+}
+
+static MunitResult
+test_server_peer_eof(const MunitParameter params[], void *data)
+{
+    size_t n;
+    int rc;
+
+    (void)params;
+    (void)data;
+    rc = eof_case(EOF_CLEAN, &n);
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_size(n, ==, 0);
+    rc = eof_case(EOF_ABRUPT, &n);
+    munit_assert_int(rc, ==, XTC_E_IO);
+    rc = eof_case(EOF_RESET, &n);
+    munit_assert_int(rc, ==, XTC_E_IO);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
+    { "/error_isolation",      test_server_error_isolation,     suite_setup, suite_teardown,
+      MUNIT_TEST_OPTION_NONE, NULL },
+    { "/peer_eof",             test_server_peer_eof,            suite_setup, suite_teardown,
+      MUNIT_TEST_OPTION_NONE, NULL },
     { "/ctx_create_destroy",   test_server_ctx_create_destroy,  suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
     { "/handshake_roundtrip",  test_server_handshake_roundtrip, suite_setup, suite_teardown,

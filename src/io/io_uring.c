@@ -23,8 +23,10 @@
 #include "xtc_tail.h"    /* xtc_pid_t, XTC_TAIL_REAP */
 #include "tail_int.h"   /* XTC_TAIL_REAP: the CQE-consumed event */
 #include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
+#include "xtc_inject.h"   /* io.uring.sq_full test hook */
 
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
 #include <unistd.h>
 #include <liburing.h>
@@ -77,13 +79,66 @@ xtc_io_set_iowq_max_workers(unsigned bound, unsigned unbound)
 
 extern int __xtc_io_drain_wakeup(xtc_io_t *io);
 
+/*
+ * Registrations are indexed by fd (io->tab), so reg/mod/del are O(1).
+ * They were a linked list walked on every call, and xtc_proc_wait_fd
+ * does a reg and a del per park: with 30k idle connections an echo
+ * server fell from 133k to 3.3k round trips/s, with the conn fiber in
+ * this lookup in 12 of 12 gdb samples.
+ */
 static struct __xtc_uring_fd *
 __find_fd(xtc_io_t *io, int fd)
 {
-	struct __xtc_uring_fd *p;
-	for (p = io->fds; p != NULL; p = p->next)
-		if (p->fd == fd) return p;
-	return NULL;
+	return (fd >= 0 && fd < io->tab_cap) ? io->tab[fd] : NULL;
+}
+
+/* Make io->tab[fd] addressable.  Grows by doubling; new slots are NULL. */
+static int
+__tab_reserve(xtc_io_t *io, int fd)
+{
+	struct __xtc_uring_fd **nt;
+	int ncap, rc;
+
+	if (fd < io->tab_cap)
+		return XTC_OK;
+	ncap = io->tab_cap > 0 ? io->tab_cap : 64;
+	while (ncap <= fd) {
+		if (ncap > INT_MAX / 2)
+			return XTC_E_RESOURCE;
+		ncap *= 2;
+	}
+	if ((rc = __os_realloc(io->tab, (size_t)ncap * sizeof *nt,
+	    (void **)&nt)) != XTC_OK)
+		return rc;
+	memset(nt + io->tab_cap, 0,
+	    (size_t)(ncap - io->tab_cap) * sizeof *nt);
+	io->tab = nt;
+	io->tab_cap = ncap;
+	return XTC_OK;
+}
+
+static void
+__zombie_link(xtc_io_t *io, struct __xtc_uring_fd *uf)
+{
+	uf->prev = NULL;
+	uf->next = io->zombies;
+	if (io->zombies != NULL)
+		io->zombies->prev = uf;
+	io->zombies = uf;
+	io->n_zombies++;
+}
+
+static void
+__zombie_unlink(xtc_io_t *io, struct __xtc_uring_fd *uf)
+{
+	if (uf->prev != NULL)
+		uf->prev->next = uf->next;
+	else
+		io->zombies = uf->next;
+	if (uf->next != NULL)
+		uf->next->prev = uf->prev;
+	uf->next = uf->prev = NULL;
+	io->n_zombies--;
 }
 
 static short
@@ -191,15 +246,28 @@ __ring_submit(xtc_io_t *io)
  * the kernel will keep firing CQEs as the fd becomes ready, until we
  * cancel.  user_data is the uring_fd pointer.
  */
-static int
-__submit_poll_add(xtc_io_t *io, struct __xtc_uring_fd *uf)
+/* An SQE, flushing the SQ once if it is full.  NULL if still none.
+ * "io.uring.sq_full" forces the NULL (tests drive the pending queue). */
+static struct io_uring_sqe *
+__get_sqe(xtc_io_t *io)
 {
-	struct io_uring_sqe *sqe = io_uring_get_sqe(&io->ring);
+	struct io_uring_sqe *sqe;
+	if (xtc_inject_check("io.uring.sq_full"))
+		return NULL;
+	sqe = io_uring_get_sqe(&io->ring);
 	if (sqe == NULL) {
 		(void)__ring_submit(io);
 		sqe = io_uring_get_sqe(&io->ring);
-		if (sqe == NULL) return XTC_E_AGAIN;
 	}
+	return sqe;
+}
+
+static int
+__submit_poll_add(xtc_io_t *io, struct __xtc_uring_fd *uf)
+{
+	struct io_uring_sqe *sqe = __get_sqe(io);
+	if (sqe == NULL)
+		return XTC_E_AGAIN;
 	/*
 	 * MULTISHOT for user fds (continuous notification, epoll-EPOLLET /
 	 * kqueue-EV_CLEAR semantics).  Single-shot for the internal wakeup
@@ -233,21 +301,99 @@ __submit_poll_add(xtc_io_t *io, struct __xtc_uring_fd *uf)
 static int
 __submit_poll_remove(xtc_io_t *io, struct __xtc_uring_fd *uf)
 {
-	struct io_uring_sqe *sqe = io_uring_get_sqe(&io->ring);
-	if (sqe == NULL) {
-		(void)__ring_submit(io);
-		sqe = io_uring_get_sqe(&io->ring);
-		if (sqe == NULL) return XTC_E_AGAIN;
-	}
+	struct io_uring_sqe *sqe = __get_sqe(io);
+	if (sqe == NULL)
+		return XTC_E_AGAIN;
 	io_uring_prep_poll_remove(sqe, (__u64)(uintptr_t)uf);
 	io_uring_sqe_set_data(sqe, NULL);   /* discard the cancel CQE */
 	return XTC_OK;
 }
 
+/*
+ * Node lifecycle.  Every SQE a node needs goes through __node_kick, and
+ * an SQE that cannot be had (SQ full even after a flush) is never
+ * dropped: the node is queued on io->pending and retried at the top of
+ * the next xtc_io_poll, before it can block.  Dropping one was a leak
+ * (a cancel never sent leaves a multishot armed against a dead node
+ * forever) or a lost wakeup (a wakeup re-arm never sent).
+ *
+ *   live, !armed  -> POLL_ADD (first arm, or re-arm after the kernel
+ *                    ended the poll)
+ *   dead,  armed  -> POLL_REMOVE (wait on zombies for the terminal CQE)
+ *   dead, !armed  -> nothing in flight: free
+ */
+static void
+__node_free(struct __xtc_uring_fd *uf)
+{
+	__os_free(uf);
+}
+
+static void
+__node_kick(xtc_io_t *io, struct __xtc_uring_fd *uf)
+{
+	int rc = XTC_OK;
+
+	if (!uf->dead && !uf->armed) {
+		if ((rc = __submit_poll_add(io, uf)) == XTC_OK)
+			uf->armed = 1;
+	} else if (uf->dead && uf->armed) {
+		rc = __submit_poll_remove(io, uf);
+	}
+	if (rc != XTC_OK && !uf->pending) {
+		uf->pending = 1;
+		uf->pnext = io->pending;
+		io->pending = uf;
+	}
+}
+
+/*
+ * Retry every queued node (owner thread, top of xtc_io_poll).  Kept out
+ * of the XTC_NOALLOC region below because it can free: a node retired
+ * while it sat on the queue is released here, once.
+ */
+static void
+__flush_pending(xtc_io_t *io)
+{
+	struct __xtc_uring_fd *list = io->pending, *uf;
+
+	io->pending = NULL;
+	while ((uf = list) != NULL) {
+		list = uf->pnext;
+		uf->pnext = NULL;
+		uf->pending = 0;
+		if (uf->dead && !uf->armed)
+			__node_free(uf);
+		else
+			__node_kick(io, uf);
+	}
+	(void)__ring_submit(io);
+}
+
+/*
+ * Ring geometry.  The CQ must comfortably exceed the number of armed
+ * multishot polls: when it fills, the kernel ENDS each multishot whose
+ * CQE it cannot post (its final CQE goes to the overflow list without
+ * IORING_CQE_F_MORE).  The reap path re-arms such a poll, so overflow
+ * costs a round trip, not readiness -- but a roomy CQ keeps it rare.
+ * 4096 CQEs is 64 KiB per ring.  A kernel that refuses CQSIZE (pre-5.5)
+ * or the larger ring (pre-5.12 memlock accounting) gets the old
+ * 256-entry default.
+ */
+#define XTC_URING_SQ_ENTRIES   256u
+#define XTC_URING_CQ_ENTRIES   4096u
+
 int
 __xtc_io_backend_init(xtc_io_t *io)
 {
-	int rc = io_uring_queue_init(256, &io->ring, 0);
+	struct io_uring_params prm;
+	int rc;
+
+	memset(&prm, 0, sizeof prm);
+	prm.flags = IORING_SETUP_CQSIZE;
+	prm.cq_entries = XTC_URING_CQ_ENTRIES;
+	rc = io_uring_queue_init_params(XTC_URING_SQ_ENTRIES, &io->ring, &prm);
+	if (rc < 0)
+		rc = io_uring_queue_init(XTC_URING_SQ_ENTRIES, &io->ring, 0);
 	if (rc < 0) {
 		errno = -rc;
 		return XTC_E_INTERNAL;
@@ -268,8 +414,11 @@ __xtc_io_backend_init(xtc_io_t *io)
 			(void)io_uring_register_iowq_max_workers(&io->ring,
 			    vals);
 	}
-	io->fds = NULL;
+	io->tab = NULL;
+	io->tab_cap = 0;
 	io->zombies = NULL;
+	io->pending = NULL;
+	io->n_zombies = 0;
 #if defined(XTC_DIAGNOSTIC)
 	/* Record who built this ring; the submit path asserts against it.
 	 * See the creator_tid comment in io_int.h. */
@@ -292,19 +441,29 @@ void
 __xtc_io_backend_fini(xtc_io_t *io)
 {
 	struct __xtc_uring_fd *p, *n;
-	for (p = io->fds; p != NULL; p = n) {
-		n = p->next;
-		__os_free(p);
+	int i;
+	/* A queued node is also live (in tab) or a zombie, except a retired
+	 * one with nothing in flight: only those are freed from here. */
+	for (p = io->pending; p != NULL; p = n) {
+		n = p->pnext;
+		if (p->dead && !p->armed)
+			__node_free(p);
 	}
-	io->fds = NULL;
-	/* Free any zombies whose terminal CQE never arrived (e.g. a
-	 * multishot that auto-disarmed); the ring is being torn down so
-	 * no CQE can reference them after this. */
+	io->pending = NULL;
+	for (i = 0; i < io->tab_cap; i++)
+		if (io->tab[i] != NULL)
+			__node_free(io->tab[i]);
+	__os_free(io->tab);
+	io->tab = NULL;
+	io->tab_cap = 0;
+	/* Free any zombies whose terminal CQE never arrived; the ring is
+	 * being torn down so no CQE can reference them after this. */
 	for (p = io->zombies; p != NULL; p = n) {
 		n = p->next;
-		__os_free(p);
+		__node_free(p);
 	}
 	io->zombies = NULL;
+	io->n_zombies = 0;
 	if (io->pending_del != NULL) {
 		__os_free(io->pending_del);
 		io->pending_del = NULL;
@@ -318,83 +477,76 @@ __xtc_io_backend_fini(xtc_io_t *io)
 /*
  * Allocate, link and arm a fresh registration node for fd.
  *
- * The node pointer IS the user_data of exactly ONE submitted poll, and
- * that one-poll-per-node invariant is what reclamation depends on: the
- * reap path frees a zombie when it sees a CQE without
- * IORING_CQE_F_MORE, which only means "the last completion for this
- * node" if no SECOND poll was ever submitted under the same pointer.
- * A caller changing a registration must therefore retire the old node
- * and add a new one (see xtc_io_mod_fd) -- never re-arm in place.
+ * The node pointer IS the user_data of at most ONE poll in flight, and
+ * that invariant is what reclamation depends on: the reap path frees a
+ * zombie when it sees a CQE without IORING_CQE_F_MORE, which only means
+ * "the last completion for this node" if no SECOND poll is in flight
+ * under the same pointer.  A caller changing a registration must
+ * therefore retire the old node and add a new one (see xtc_io_mod_fd)
+ * -- never re-arm in place while armed.  Re-arming after the terminal
+ * CQE (armed == 0, see xtc_io_poll) keeps the invariant: the old poll
+ * is already gone.
  *
  * Does not flush the SQ; the caller does, so it can batch the add with
  * the matching retire.
  */
 static int
-__add_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
+__add_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag, int is_wakeup)
 {
 	struct __xtc_uring_fd *uf;
 	int rc;
+	if ((rc = __tab_reserve(io, fd)) != XTC_OK)
+		return rc;
 	if ((rc = __os_calloc(1, sizeof *uf, (void **)&uf)) != XTC_OK)
 		return rc;
 	uf->fd = fd;
 	uf->interest = interest;
 	uf->tag = tag;
-	uf->is_wakeup = 0;
-	uf->next = io->fds;
-	io->fds = uf;
-	if ((rc = __submit_poll_add(io, uf)) != XTC_OK) {
-		io->fds = uf->next;
-		__os_free(uf);
-		return rc;
-	}
+	uf->is_wakeup = is_wakeup;
+	io->tab[fd] = uf;
+	__node_kick(io, uf);   /* arms now, or queues the arm */
 	return XTC_OK;
 }
 
 /*
- * Retire a live registration: cancel its poll, unlink it from the live
- * list and move it to the zombie list, where the reap path frees it
- * once its terminal CQE drains.
+ * Retire a live registration: drop it from the table and, if its poll
+ * is still in the kernel, cancel it and park the node on the zombie list
+ * until the terminal CQE drains.
  *
- * Do not free here: the multishot poll submitted with user_data == uf
- * may still have CQEs in flight (an already-ready notification, plus
- * the -ECANCELED terminal CQE the poll_remove triggers).  Freeing now
- * and then draining those CQEs is a use-after-free.
+ * Do not free an armed node: the multishot poll submitted with
+ * user_data == uf may still have CQEs in flight (an already-ready
+ * notification, plus the -ECANCELED terminal CQE the poll_remove
+ * triggers).  Freeing now and then draining those CQEs is a
+ * use-after-free.  An UNARMED node has nothing in flight -- the kernel
+ * already ended its poll -- and waiting for a terminal CQE that has come
+ * and gone is how nodes leaked (4488 of 5000 per cycle in the CQ
+ * overflow reproducer), so it is freed now.
  *
- * Unlinks by POINTER, not by fd number, so it retires exactly this
- * node even while a replacement node for the same fd is already linked
- * (the xtc_io_mod_fd sequence).  Does not flush the SQ.
+ * Clears the table slot only if it still names THIS node, so it retires
+ * exactly this node even while a replacement for the same fd is already
+ * installed (the xtc_io_mod_fd sequence).  Does not flush the SQ.
  */
 static void
 __retire_fd(xtc_io_t *io, struct __xtc_uring_fd *uf)
 {
-	struct __xtc_uring_fd **pp;
-	(void)__submit_poll_remove(io, uf);
-	for (pp = &io->fds; *pp != NULL; pp = &(*pp)->next) {
-		if (*pp == uf) { *pp = uf->next; break; }
-	}
+	if (io->tab[uf->fd] == uf)
+		io->tab[uf->fd] = NULL;
 	uf->dead = 1;
-	uf->next = io->zombies;
-	io->zombies = uf;
+	if (uf->armed) {
+		__zombie_link(io, uf);
+		__node_kick(io, uf);   /* sends, or queues, the cancel */
+	} else if (!uf->pending) {
+		__node_free(uf);
+	}
+	/* else: unarmed and queued; __flush_pending frees it. */
 }
 
 int
 __xtc_io_register_wakeup(xtc_io_t *io, int fd)
 {
-	struct __xtc_uring_fd *uf;
 	int rc;
-	if ((rc = __os_calloc(1, sizeof *uf, (void **)&uf)) != XTC_OK)
+	if ((rc = __add_fd(io, fd, XTC_IO_READABLE, NULL, 1)) != XTC_OK)
 		return rc;
-	uf->fd = fd;
-	uf->interest = XTC_IO_READABLE;
-	uf->tag = NULL;
-	uf->is_wakeup = 1;
-	uf->next = io->fds;
-	io->fds = uf;
-	if ((rc = __submit_poll_add(io, uf)) != XTC_OK) {
-		io->fds = uf->next;
-		__os_free(uf);
-		return rc;
-	}
 	(void)__ring_submit(io);
 	return XTC_OK;
 }
@@ -404,8 +556,8 @@ __xtc_io_register_wakeup(xtc_io_t *io, int fd)
  *
  * Why this exists.  __xtc_io_defer_del_fd queues a cross-thread
  * unregister and relies on the OWNING loop draining it at the top of its
- * next xtc_io_poll.  Until that drain runs the node is still linked in
- * io->fds, so it is indistinguishable from a live registration -- and a
+ * next xtc_io_poll.  Until that drain runs the node is still in io->tab,
+ * so it is indistinguishable from a live registration -- and a
  * re-register of the SAME fd is rejected as a duplicate.
  *
  * That turns into a deadlock rather than a transient error, because the
@@ -419,7 +571,7 @@ __xtc_io_register_wakeup(xtc_io_t *io, int fd)
  *
  * Draining just this fd here is safe precisely BECAUSE reg_fd runs on the
  * owner: both this and __drain_pending_del perform the real
- * xtc_io_del_fd on the owner thread, so the fds list and the
+ * xtc_io_del_fd on the owner thread, so the fd table and the
  * single-producer SQ ring keep their single-owner discipline.  We remove
  * the fd from the queue under del_lock before acting on it, so the later
  * drain cannot delete it a second time -- and a second delete would be
@@ -473,7 +625,7 @@ xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	__apply_pending_del_for(io, fd);
 	if (__find_fd(io, fd) != NULL)
 		return XTC_E_INVAL;        /* duplicate: genuinely live */
-	if ((rc = __add_fd(io, fd, interest, tag)) != XTC_OK)
+	if ((rc = __add_fd(io, fd, interest, tag, 0)) != XTC_OK)
 		return rc;
 	(void)__ring_submit(io);
 	return XTC_OK;
@@ -560,13 +712,13 @@ xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	 * an invalid read plus a double free (reg -> mod -> del -> poll).
 	 * One node, one poll, so the rule holds by construction.
 	 *
-	 * Add BEFORE retire: the new node takes the head of io->fds, so a
+	 * Add BEFORE retire: the new node replaces the old in io->tab, so a
 	 * failed add leaves the old registration as the only one and fully
 	 * intact, and the fd is never left unwatched in between.  The
 	 * poll_remove names the OLD node's user_data, so it cannot cancel
 	 * the replacement.
 	 */
-	if ((rc = __add_fd(io, fd, interest, tag)) != XTC_OK)
+	if ((rc = __add_fd(io, fd, interest, tag, 0)) != XTC_OK)
 		return rc;
 	__retire_fd(io, uf);
 	(void)__ring_submit(io);
@@ -587,11 +739,39 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 }
 
 /*
+ * Registration accounting for tests and diagnostics: live registrations
+ * (excluding the wakeup fd), retired nodes still awaiting their terminal
+ * CQE, and nodes queued for an SQE.  After every registration is deleted
+ * and the CQ drained, zombies and pending must both reach 0.
+ */
+int
+__xtc_io_reg_stats(xtc_io_t *io, int *live, int *zombies, int *pending)
+{
+	struct __xtc_uring_fd *p;
+	int i, n = 0;
+	if (io == NULL)
+		return XTC_E_INVAL;
+	for (i = 0; i < io->tab_cap; i++)
+		if (io->tab[i] != NULL && !io->tab[i]->is_wakeup)
+			n++;
+	if (live != NULL)
+		*live = n;
+	if (zombies != NULL)
+		*zombies = io->n_zombies;
+	n = 0;
+	for (p = io->pending; p != NULL; p = p->pnext)
+		n++;
+	if (pending != NULL)
+		*pending = n;
+	return XTC_OK;
+}
+
+/*
  * Cross-loop deferred unregister.  Called when a fiber that parked on
  * THIS io's loop was woken via a non-fd path and work-stolen, so its
  * xtc_proc_wait_fd cleanup runs on a DIFFERENT OS thread than this io's
  * owner.  Calling xtc_io_del_fd directly from that foreign thread would
- * race the single-owner fds list AND the single-producer SQ ring.
+ * race the single-owner fd table AND the single-producer SQ ring.
  * Instead, queue the fd under del_lock and nudge the owning loop; it
  * drains this queue at the top of its next xtc_io_poll and performs the
  * real unregister on its own thread.  Internal (declared in io_int.h).
@@ -603,7 +783,7 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
  * the first cross-loop del, not only after this io's first poll (a home
  * loop that had all its fibers work-stolen can run its own run queue for
  * a long window without ever blocking in xtc_io_poll -- owner_set would
- * stay 0, and every foreign del would race the fds list inline).
+ * stay 0, and every foreign del would race the fd table inline).
  */
 void
 __xtc_io_set_owner(xtc_io_t *io)
@@ -623,7 +803,7 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 	 * If we ARE the io's owning (poll) thread, unregister inline -- this
 	 * is the common case (a fiber re-parking on the same fd on its own
 	 * loop) and MUST be synchronous: deferring it would leave the old
-	 * registration in io->fds so the immediate re-register in the next
+	 * registration in io->tab so the immediate re-register in the next
 	 * xtc_proc_wait_fd sees a duplicate and fails, stranding the fiber.
 	 * We can only cross-loop-defer when we are genuinely on a different
 	 * OS thread than the owner.  owner_tid is recorded by the owner in
@@ -654,7 +834,7 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 /*
  * Drain the deferred-unregister queue on the OWNING loop thread (called
  * from xtc_io_poll only).  Performs the real xtc_io_del_fd for each
- * queued fd on this thread, so the fds list + SQ ring stay
+ * queued fd on this thread, so the fd table + SQ ring stay
  * single-owner.
  */
 static void
@@ -729,7 +909,8 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
             int64_t timeout_ns, int *n_out)
 {
 	struct __kernel_timespec ts, *tsp;
-	int got = 0, i;
+	int got = 0;
+	unsigned spent = 0, cap;
 	struct io_uring_cqe *cqe;
 	int rc;
 
@@ -747,8 +928,12 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 
 	/* Owner-thread drain of any cross-loop deferred unregisters queued
 	 * by foreign threads (see __xtc_io_defer_del_fd).  Done here so the
-	 * fds list + SQ ring are only ever mutated by this io's own loop. */
+	 * fd table + SQ ring are only ever mutated by this io's own loop. */
 	__drain_pending_del(io);
+	/* Any arm/re-arm/cancel the SQ had no room for goes in now, before
+	 * this poll can block on its outcome. */
+	if (io->pending != NULL)
+		__flush_pending(io);   /* may free a retired node: bounded per del */
 
 	if (timeout_ns < 0) {
 		tsp = NULL;
@@ -766,12 +951,26 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		return XTC_E_INTERNAL;
 	}
 
-	/* Drain the available CQEs up to max.  We coalesce all wakeup CQEs
-	 * (from POLL_MULTISHOT on the wakeup pipe) into a single
-	 * XTC_IO_WAKEUP event per poll, matching the M2 W3 coalesce
-	 * contract. */
-	int wakeup_emitted = 0;
-	for (i = 0; i < max; i++) {
+	/* Drain the available CQEs until max events are DELIVERED.  The
+	 * budget counts only what is handed back: CQEs that are consumed and
+	 * dropped (cancel results, completions for retired nodes) are cheap,
+	 * and counting them let a CQ full of such leftovers -- the state CQ
+	 * overflow leaves behind -- return n == 0 again and again while real
+	 * readiness waited behind it.
+	 *
+	 * CQ overflow needs no separate handling here: when the CQ ring is
+	 * empty and the kernel holds overflowed CQEs (IORING_SQ_CQ_OVERFLOW),
+	 * io_uring_peek_cqe enters the kernel with GETEVENTS, which flushes
+	 * them into the ring, so this loop drains the overflow list too.
+	 *
+	 * We coalesce all wakeup CQEs into a single XTC_IO_WAKEUP event per
+	 * poll, matching the M2 W3 coalesce contract. */
+	int wakeup_emitted = 0, rearmed = 0, drop;
+	/* Hard bound on CQEs consumed per call, so a steady stream that
+	 * delivers nothing (repeated wakeups after the first is coalesced)
+	 * cannot keep us here: one full CQ beyond the event budget. */
+	cap = (unsigned)max + io->ring.cq.ring_entries;
+	while (got < max && spent++ < cap) {
 		struct __xtc_uring_fd *uf;
 		void *data;
 		if (cqe == NULL) {
@@ -808,17 +1007,14 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			 * Once its multishot poll delivers the terminal CQE
 			 * (no IORING_CQE_F_MORE -- e.g. the -ECANCELED from
 			 * poll_remove), no further CQE can reference uf, so it
-			 * is safe to free. */
+			 * is safe to free (or, if it is still queued for a
+			 * cancel the SQ had no room for, __flush_pending
+			 * frees it). */
 			if (!(cqe->flags & IORING_CQE_F_MORE)) {
-				struct __xtc_uring_fd **pp;
-				for (pp = &io->zombies; *pp != NULL;
-				    pp = &(*pp)->next) {
-					if (*pp == uf) {
-						*pp = uf->next;
-						break;
-					}
-				}
-				__os_free(uf);
+				uf->armed = 0;
+				__zombie_unlink(io, uf);
+				if (!uf->pending)
+					__node_free(uf);
 			}
 			/* Consumed and deliberately NOT dispatched: the
 			 * registration was deleted.  Recorded with tag 0 so
@@ -831,7 +1027,34 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 /* XTC_NOALLOC_BEGIN: resuming the steady-state dispatch path (ready fd
  * / wakeup) after the zombie-reap carve-out above. */
 		}
-		if (uf != NULL) {
+		/*
+		 * A terminal CQE for a LIVE node means the kernel ended its
+		 * poll: always for the single-shot wakeup poll, and for a
+		 * multishot when the CQ was full at the moment it fired (the
+		 * kernel then ends the poll and queues its final CQE on the
+		 * overflow list).  Nothing is watching the fd any more, so
+		 * re-arm it -- before, a registration that hit CQ overflow
+		 * stayed in the table but never reported readiness again, and
+		 * its eventual del parked the node on the zombie list waiting
+		 * for a terminal CQE that had already come: 4488 of 5000 nodes
+		 * leaked per cycle in the overflow reproducer.  -ECANCELED
+		 * (the submitting thread exited) and -EOVERFLOW are re-armed
+		 * too; any other error (e.g. -EBADF) is reported and NOT
+		 * re-armed, since it would fail the same way on every poll.
+		 */
+		drop = 0;
+		if (uf != NULL && !(cqe->flags & IORING_CQE_F_MORE)) {
+			uf->armed = 0;
+			/* The kernel ended the poll without an fd error:
+			 * re-arm silently, nothing to report. */
+			drop = !uf->is_wakeup && (cqe->res == -ECANCELED ||
+			    cqe->res == -EOVERFLOW);
+			if (cqe->res >= 0 || drop || uf->is_wakeup) {
+				__node_kick(io, uf);
+				rearmed = 1;
+			}
+		}
+		if (uf != NULL && !drop) {
 			if (uf->is_wakeup) {
 				/* Re-arm the single-shot wakeup poll BEFORE draining
 				 * the pipe.  Ordering is the fix for the cross-thread
@@ -845,9 +1068,13 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				 * next io_uring_wait.  (A write between re-arm and
 				 * drain is caught by the already-armed poll; a byte
 				 * still present at re-arm fires the poll immediately
-				 * -- level-triggered -- which the next poll coalesces.) */
-				(void)__submit_poll_add(io, uf);
+				 * -- level-triggered -- which the next poll coalesces.)
+				 * The re-arm was prepared just above (__node_kick);
+				 * submit it now.  If the SQ had no room it is queued
+				 * on io->pending, which the next poll flushes before
+				 * it can block -- it is never dropped. */
 				(void)__ring_submit(io);
+				rearmed = 0;
 				if (!wakeup_emitted) {
 					int drc = __xtc_io_drain_wakeup(io);
 					if (drc != XTC_OK) {
@@ -890,6 +1117,8 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		io_uring_cqe_seen(&io->ring, cqe);
 		cqe = NULL;
 	}
+	if (rearmed)
+		(void)__ring_submit(io);
 	*n_out = got;
 	/*
 	 * We filled the budget, so there may be more in the CQ than we took.
@@ -1097,6 +1326,13 @@ void
 __xtc_io_uring_preempt_disarm(xtc_io_t *io)
 {
 	(void)io;
+}
+
+int
+__xtc_io_reg_stats(xtc_io_t *io, int *live, int *zombies, int *pending)
+{
+	(void)io; (void)live; (void)zombies; (void)pending;
+	return XTC_E_NOSYS;
 }
 #endif /* !XTC_IO_BACKEND_URING */
 

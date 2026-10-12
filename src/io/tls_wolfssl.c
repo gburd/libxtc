@@ -63,6 +63,7 @@
 
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
+#include <wolfssl/error-ssl.h>   /* SOCKET_ERROR_E, SOCKET_PEER_CLOSED_E */
 
 /* -------------------------------------------------------------------------
  * Internal struct definitions.
@@ -100,13 +101,31 @@ wolfssl_global_init(void)  /* XTC_BLOCKING_OK: one-shot startup initialiser */
 }
 
 /* -------------------------------------------------------------------------
- * Map a wolfSSL get_error result into XTC_E_AGAIN (with direction set)
- * or a hard error.
+ * Error-queue hygiene.  wolfSSL_get_error reads the per-session error, so
+ * a stale entry cannot misclassify another connection the way OpenSSL's
+ * shared queue did; but the OpenSSL-compat build also pushes every failure
+ * onto a per-thread queue that the application's own ERR_get_error would
+ * then see.  Clear it before each operation and after a failure so one
+ * connection's error never reaches another caller on the thread.
+ * ----------------------------------------------------------------------- */
+
+static void
+tls_err_clear(void)
+{
+#if defined(OPENSSL_EXTRA) || defined(DEBUG_WOLFSSL_VERBOSE)
+	wolfSSL_ERR_clear_error();
+#endif
+}
+
+/* -------------------------------------------------------------------------
+ * Map a wolfSSL get_error result into XTC_E_AGAIN (with direction set),
+ * XTC_E_IO (peer or transport failure), or a hard error.
  * ----------------------------------------------------------------------- */
 
 static int
 map_want(struct xtc_tls *t, int err)
 {
+	tls_err_clear();
 	switch (err) {
 	case WOLFSSL_ERROR_WANT_READ:
 		t->wants_read = 1;
@@ -114,6 +133,11 @@ map_want(struct xtc_tls *t, int err)
 	case WOLFSSL_ERROR_WANT_WRITE:
 		t->wants_write = 1;
 		return XTC_E_AGAIN;
+	case WOLFSSL_ERROR_ZERO_RETURN:   /* close_notify where data was due */
+	case WOLFSSL_ERROR_SYSCALL:
+	case SOCKET_ERROR_E:
+	case SOCKET_PEER_CLOSED_E:
+		return XTC_E_IO;          /* peer or transport went away */
 	default:
 		return XTC_E_INTERNAL;
 	}
@@ -537,6 +561,7 @@ xtc_tls_handshake(xtc_tls_t *tls)
 	if (!tls->hostname_applied && (rc = apply_hostname(tls)) != XTC_OK)
 		return rc;
 
+	tls_err_clear();
 	rc = wolfSSL_negotiate(tls->ssl);
 	if (rc == WOLFSSL_SUCCESS)
 		return XTC_OK;
@@ -561,18 +586,20 @@ xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 	*out_n           = 0;
 	xtc_tls_clear_wants(tls);
 
+	tls_err_clear();
 	rc = wolfSSL_read(tls->ssl, buf, (int)buflen);
 	if (rc > 0) {
 		*out_n = (size_t)rc;
 		return XTC_OK;
 	}
-	if (rc == 0) {
-		/* Clean peer close_notify: treat as EOF. */
-		*out_n = 0;
+	err = wolfSSL_get_error(tls->ssl, rc);
+	if (rc == 0 && err == WOLFSSL_ERROR_ZERO_RETURN) {
+		/* Clean peer close_notify: treat as EOF.  A 0 return for any
+		 * other reason is the transport closing without close_notify
+		 * (truncation), which map_want reports as XTC_E_IO. */
+		tls_err_clear();
 		return XTC_OK;
 	}
-
-	err = wolfSSL_get_error(tls->ssl, rc);
 	return map_want(tls, err);
 }
 
@@ -587,6 +614,7 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
 	*out_n           = 0;
 	xtc_tls_clear_wants(tls);
 
+	tls_err_clear();
 	rc = wolfSSL_write(tls->ssl, buf, (int)buflen);
 	if (rc > 0) {
 		*out_n = (size_t)rc;
@@ -622,6 +650,7 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 
 	xtc_tls_clear_wants(tls);
 
+	tls_err_clear();
 	rc = wolfSSL_shutdown(tls->ssl);
 	if (rc == WOLFSSL_SUCCESS || rc == WOLFSSL_SHUTDOWN_NOT_DONE)
 		return XTC_OK;
