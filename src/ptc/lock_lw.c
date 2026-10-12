@@ -378,6 +378,8 @@ xtc_lwlock_destroy(xtc_lwlock_t *lock)
 int
 xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 {
+	int kill_deferred = 0;   /* the caller's own mask deferred a kill */
+
 	if (lock == NULL || !lock->initialised) return XTC_E_INVAL;
 
 	for (;;) {
@@ -414,13 +416,23 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 		{
 			xtc_task_t *cur = __xtc_current_task();
 			if (cur != NULL) {
+				/* The park runs under the cancellation mask:
+				 * the resume hook would otherwise unwind a
+				 * kill inside xtc_yield with w still linked,
+				 * and a later release would wake a dead stack
+				 * frame.  A pending kill ends the wait; it is
+				 * delivered once w is unlinked and wait_mu
+				 * dropped. */
 				struct lw_fiber_waiter w;
 				void *proc_ctx;
 				int granted = 0;
-				(void)xtc_task_waker(cur, &w.waker);
+				int masked = xtc_mask_enter() == XTC_OK ?
+				    (kill_deferred ? 2 : 1) : 0;
 				w.next = NULL;
 				__lw_fw_enqueue(lock, &w);
 				for (;;) {
+					if (masked == 1 && xtc_cancel_requested())
+						break;          /* killed */
 					if (__try_attempt(lock, mode)) {
 						granted = 1;
 						break;
@@ -433,6 +445,8 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 					 * would hang (unlike the semaphore, whose
 					 * caller retries on a finite timeout). */
 					cur->park_requested = 1;
+					/* Re-arm: name the loop we run on now. */
+					(void)xtc_task_waker(cur, &w.waker);
 					(void)__xtc_mtx_unlock(&lock->wait_mu);
 					proc_ctx = __xtc_proc_ctx_save();
 					xtc_yield();
@@ -442,10 +456,19 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 				lock->n_waiters--;
 				__lw_fw_remove(lock, &w);
 				(void)__xtc_mtx_unlock(&lock->wait_mu);
-				if (granted) {
+				if (granted)
 					(void)__held_push(lock, mode);
+				if (masked != 0)
+					(void)xtc_mask_leave();
+				if (granted)
 					return XTC_OK;
-				}
+				/* Killed.  Deliver it (no return unless the
+				 * caller's mask defers it; then retry the slow
+				 * path from the top without checking again). */
+				if (__xtc_fiber_kill_check != NULL)
+					__xtc_fiber_kill_check();
+				kill_deferred = 1;
+				continue;
 			}
 		}
 

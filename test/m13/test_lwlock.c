@@ -18,6 +18,8 @@
 #include "xtc.h"
 #include "xtc_int.h"
 #include "xtc_lwlock.h"
+#include "xtc_loop.h"
+#include "xtc_proc.h"
 
 /* ----- basic acquire/release exclusive ------------------- */
 
@@ -323,6 +325,73 @@ test_lock_order_track(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- kill a parked fiber waiter, then release -----------------------
+ *
+ * A fiber parked in xtc_lwlock_acquire is killed and the holder then
+ * releases.  In 1.55.0 the resume hook unwound the killed waiter inside
+ * xtc_yield with its stack waiter still linked and n_waiters still
+ * counted, so the release woke a dead frame.  The victim must die and a
+ * later acquire must succeed.
+ */
+static xtc_lwlock_t g_kl;
+static xtc_loop_t  *g_kl_loop;
+static atomic_int   g_kl_returned;
+static int          g_kl_down;
+static int          g_kl_after;
+
+static void
+kl_victim(void *arg)
+{
+	(void)arg;
+	(void)xtc_lwlock_acquire(&g_kl, XTC_LW_EXCLUSIVE);
+	atomic_store(&g_kl_returned, 1);          /* must not be reached */
+}
+
+static void
+kl_driver(void *arg)
+{
+	xtc_pid_t victim;
+	uint64_t ref;
+	void *m = NULL;
+	size_t n = 0;
+	int i;
+	(void)arg;
+	munit_assert_int(xtc_lwlock_acquire(&g_kl, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn_monitor(g_kl_loop, kl_victim, NULL,
+	    NULL, &victim, &ref), ==, XTC_OK);
+	for (i = 0; i < 10; i++) xtc_yield();     /* victim parks */
+	munit_assert_int(xtc_exit_pid(victim, 9), ==, XTC_OK);
+	for (i = 0; i < 10; i++) xtc_yield();
+	xtc_lwlock_release(&g_kl);                /* the later wake */
+	g_kl_down = xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK;
+	if (m != NULL) xtc_free(m);
+	g_kl_after = xtc_lwlock_acquire_cond(&g_kl, XTC_LW_EXCLUSIVE);
+	if (g_kl_after == XTC_OK) xtc_lwlock_release(&g_kl);
+}
+
+static MunitResult
+test_kill_then_release(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	(void)p; (void)d;
+	atomic_store(&g_kl_returned, 0);
+	g_kl_down = 0;
+	g_kl_after = -999;
+	munit_assert_int(xtc_lwlock_init(&g_kl, 0), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	g_kl_loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, kl_driver, NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	munit_assert_int(atomic_load(&g_kl_returned), ==, 0);
+	munit_assert_int(g_kl_down, ==, 1);
+	munit_assert_int(g_kl_after, ==, XTC_OK);
+	munit_assert_int(g_kl.n_waiters, ==, 0);
+	munit_assert_ptr_null(g_kl.wq_head);
+	xtc_lwlock_destroy(&g_kl);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/basic_exclusive",        test_basic_exclusive,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/basic_shared",           test_basic_shared,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -331,6 +400,7 @@ static MunitTest tests[] = {
 	{ "/concurrent_shared",      test_concurrent_shared,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/writer_reader_race",     test_writer_reader_race,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lock_order_track",       test_lock_order_track,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/kill_then_release",      test_kill_then_release,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m13/lwlock", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
