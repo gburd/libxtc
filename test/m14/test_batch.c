@@ -1692,12 +1692,85 @@ mt_contended_pool(void)
 	puts("batch-mt: contended free-pool, concurrent claims, exactly-once OK");
 }
 
+/* BLOCKER 1 regression: a hand-in drained while every slot is taken was
+ * dropped (no completion, counted as a rejection) although submit_mt had
+ * already returned XTC_OK and its handle. Six hand-ins into a 2-slot group,
+ * queued before the first boundary, must all complete exactly once, in
+ * submission order, with zero rejections. The bounded controller turns the
+ * old hang into an assertion. */
+struct hold_ctx {
+	struct mt_ctx *c;
+	uint64_t order[8];
+	_Atomic int n_order;
+};
+static struct hold_ctx *g_hold;
+
+static void
+mt_hold_complete(uint64_t handle, void *request, int outcome, void *user)
+{
+	int i;
+	(void)request;
+	assert(outcome == XTC_OK);
+	i = atomic_fetch_add_explicit(&g_hold->n_order, 1,
+	    memory_order_relaxed);
+	if (i < 8)
+		g_hold->order[i] = handle;
+	mt_count_complete(handle, request, outcome, user);
+}
+
+static void
+mt_bounded_controller_fn(void *arg)
+{
+	struct mt_ctx *c = arg;
+	long guard = 0;
+	while (atomic_load_explicit(&c->completed, memory_order_relaxed)
+	    < c->n_req && ++guard < 200000)
+		xtc_yield();
+	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+}
+
+static void
+mt_full_hold(void)
+{
+	struct mt_ctx c = { 0 };
+	struct hold_ctx hc = { 0 };
+	xtc_batch_async_opts_t o;
+	xtc_batch_stats_t s = { .size = sizeof(s), .version = XTC_BATCH_VERSION };
+	xtc_pid_t pid;
+	uint64_t h[6];
+	int i;
+	hc.c = &c;
+	g_hold = &hc;
+	c.n_req = 6;
+	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	o = mt_opts(&c, 2, 8);
+	o.submit = mt_count_submit;
+	o.collect = mt_count_collect;
+	o.complete = mt_hold_complete;
+	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
+	       == XTC_OK);
+	for (i = 0; i < 6; ++i)
+		assert(xtc_batch_submit_mt(c.batch, NULL, 1, &h[i]) == XTC_OK);
+	assert(xtc_proc_spawn(xtc_exec_loop(c.exec, 0),
+	    mt_bounded_controller_fn, &c, NULL, &pid) == XTC_OK);
+	assert(xtc_exec_run(c.exec) == XTC_OK);
+	assert(atomic_load(&c.completed) == 6);
+	for (i = 0; i < 6; ++i)
+		assert(hc.order[i] == h[i]); /* admission order preserved */
+	assert(xtc_batch_get_stats(c.batch, &s) == XTC_OK);
+	assert(s.rejections == 0 && s.completed == 6 && s.queued == 0);
+	assert(xtc_batch_destroy(c.batch) == XTC_OK);
+	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	puts("batch-mt: hand-ins beyond capacity held, all completed in order OK");
+}
+
 static void
 mt_tests(void)
 {
 	mt_disabled();
 	mt_overflow();
 	mt_multiproducer();
+	mt_full_hold();
 	mt_contended_pool();
 	mt_lost_cancel();
 	mt_cancel_in_ring();
