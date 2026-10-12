@@ -377,6 +377,83 @@ test_inval(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- kill a parked waiter, then fulfil the future -------------------
+ *
+ * A fiber parked in xtc_future_wait is killed (xtc_exit_pid) and the
+ * promise is then set.  In 1.55.0 the resume hook inside xtc_yield
+ * unwound the killed waiter with its stack waiter still linked on the
+ * cell, so the set walked a dead frame (SIGSEGV / ASan
+ * stack-use-after-return).  The victim must die (DOWN arrives) and the
+ * set must be clean.  The timed variant is resumed by its own timer
+ * first; the infinite one only by the set.
+ */
+static xtc_future_t  *g_kf_fut;
+static xtc_promise_t *g_kf_prom;
+static int64_t        g_kf_tmo;
+static xtc_loop_t    *g_kf_loop;
+static atomic_int     g_kf_returned;
+static int            g_kf_down;
+
+static void
+kf_victim(void *arg)
+{
+	intptr_t v = 0;
+	(void)arg;
+	(void)xtc_future_wait(g_kf_fut, &v, g_kf_tmo);
+	atomic_store(&g_kf_returned, 1);          /* must not be reached */
+}
+
+static void
+kf_driver(void *arg)
+{
+	xtc_pid_t victim;
+	uint64_t ref;
+	void *m = NULL;
+	size_t n = 0;
+	int i;
+	(void)arg;
+	munit_assert_int(xtc_proc_spawn_monitor(g_kf_loop, kf_victim, NULL,
+	    NULL, &victim, &ref), ==, XTC_OK);
+	for (i = 0; i < 10; i++) xtc_yield();     /* victim parks */
+	munit_assert_int(xtc_exit_pid(victim, 9), ==, XTC_OK);
+	(void)xtc_proc_sleep(100LL * 1000 * 1000);  /* past a 50 ms timer */
+	munit_assert_int(xtc_promise_set(g_kf_prom, 7, XTC_OK), ==, XTC_OK);
+	g_kf_down = xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK;
+	if (m != NULL) xtc_free(m);
+}
+
+static MunitResult
+test_kill_then_fulfil(const MunitParameter params[], void *data)
+{
+	const char *wt = munit_parameters_get(params, "wait");
+	xtc_loop_t *loop = NULL;
+	intptr_t v = 0;
+	(void)data;
+	g_kf_tmo = (wt != NULL && strcmp(wt, "timed") == 0) ?
+	    50LL * 1000 * 1000 : -1;
+	atomic_store(&g_kf_returned, 0);
+	g_kf_down = 0;
+	munit_assert_int(xtc_future_new_pair(&g_kf_prom, &g_kf_fut), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	g_kf_loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, kf_driver, NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	munit_assert_int(atomic_load(&g_kf_returned), ==, 0);
+	munit_assert_int(g_kf_down, ==, 1);
+	/* The killed waiter left the future unconsumed: the value is still
+	 * there for anyone holding the handle. */
+	munit_assert_int(xtc_future_wait(g_kf_fut, &v, 0), ==, XTC_OK);
+	munit_assert_int((int)v, ==, 7);
+	return MUNIT_OK;
+}
+
+static char *kf_waits[] = { (char *)"inf", (char *)"timed", NULL };
+static MunitParameterEnum kf_params[] = {
+	{ (char *)"wait", kf_waits },
+	{ NULL, NULL }
+};
+
 static MunitTest tests[] = {
 	{ "/wait_from_thread",   test_wait_from_thread,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/timeout_and_ready",  test_timeout_and_ready,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -391,6 +468,7 @@ static MunitTest tests[] = {
 	{ "/when_any",           test_when_any,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/with_timeout",       test_with_timeout,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inval",              test_inval,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/kill_then_fulfil",   test_kill_then_fulfil,   NULL, NULL, MUNIT_TEST_OPTION_NONE, kf_params },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = {

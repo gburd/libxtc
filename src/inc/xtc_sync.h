@@ -24,6 +24,15 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 
+/*
+ * Every blocking call below that parks a fiber (notify_wait,
+ * sem_acquire, amutex_lock, arwlock_rdlock/wrlock, barrier_wait,
+ * gate_drain) is kill-safe: a proc killed by xtc_exit_pid while parked
+ * leaves the wait queue, passes on anything already handed to it and
+ * cancels its deadline timer before it unwinds.  A timed wait always
+ * cancels its deadline timer on return.  See xtc_sync(3).
+ */
+
 /* ----- notify ----------------------------------------------------- */
 
 typedef struct xtc_notify xtc_notify_t;
@@ -37,9 +46,9 @@ typedef struct xtc_notify xtc_notify_t;
 XTC_API int  xtc_notify_create(xtc_notify_t **out);
 XTC_API void xtc_notify_destroy(xtc_notify_t *n);
 
-/* Wake one waiter.  If no one is waiting, the signal is "stored"
- * and the next wait returns immediately.  Subsequent signals
- * before a wait collapse into one. */
+/* Wake one waiter (the oldest parked fiber).  If no fiber is waiting,
+ * the signal is "stored" and the next wait returns immediately.
+ * Subsequent signals before a wait collapse into one. */
 XTC_API int  xtc_notify_signal(xtc_notify_t *n);
 
 /* Block (yield) the calling task until a signal arrives.  timeout_ns
@@ -62,10 +71,12 @@ typedef struct xtc_sem xtc_sem_t;
 XTC_API int  xtc_sem_create(unsigned initial, xtc_sem_t **out);
 XTC_API void xtc_sem_destroy(xtc_sem_t *s);
 
-/* Add `n` units. */
+/* Add `n` units.  Wakes the parked fibers the new count can satisfy,
+ * oldest first. */
 XTC_API int  xtc_sem_post(xtc_sem_t *s, unsigned n);
 
-/* Take `n` units, blocking up to timeout_ns. */
+/* Take `n` units, blocking up to timeout_ns.  A parked fiber stays
+ * queued until it takes its units, times out or is killed. */
 XTC_API int  xtc_sem_acquire(xtc_sem_t *s, unsigned n, int64_t timeout_ns);
 
 /* Take `n` units, returning XTC_E_AGAIN immediately if not enough. */

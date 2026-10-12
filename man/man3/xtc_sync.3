@@ -221,7 +221,11 @@ manage the object.  Producers
 .Fn xtc_notify_signal ;
 consumers
 .Fn xtc_notify_wait
-until signalled.  Useful for one-shot ready signals.
+until signalled.
+Each signal is handed to exactly one waiting fiber, oldest first; with
+no fiber waiting it is stored (and wakes any OS-thread waiter), and
+signals that arrive before the next wait collapse into one.
+Useful for one-shot ready signals.
 .It Vt xtc_sem
 Counting semaphore.
 .Fn xtc_sem_create
@@ -239,7 +243,12 @@ takes
 .Va n
 permits, parking until available or the
 .Va timeout_ns
-deadline;
+deadline.
+A post wakes the parked fibers the new count can satisfy, oldest first,
+not every waiter; a waiter stays queued until it takes its permits,
+times out or is killed, so no post is lost.
+Admission is not strictly FIFO: a caller that finds enough permits
+takes them without queueing;
 .Fn xtc_sem_try_acquire
 never parks; and
 .Fn xtc_sem_count
@@ -269,7 +278,7 @@ rejects new entrants;
 .Fn xtc_gate_drain
 parks until the in-flight count reaches zero or the
 .Va timeout_ns
-deadline; and
+deadline, whether or not the gate is closed; and
 .Fn xtc_gate_count
 reports the number of active occupants.
 .It Vt xtc_abort_source
@@ -291,11 +300,41 @@ Used to wire timeout / shutdown into long-running
 operations cooperatively.
 .El
 .Pp
-All primitives are thread-safe.  All blocked-acquire paths park
-the calling fiber via
-.Xr xtc_proc_wait_fd 3
-or directly into the loop's wait queue, so the OS thread is free
-to run other work.
+All primitives are thread-safe.
+A blocked acquire from a fiber parks the fiber on the primitive's own
+wait queue, so the OS thread is free to run other work; a caller that
+is not on a loop blocks on a condition variable.
+.Pp
+A timed acquire that is granted before its deadline cancels its
+deadline timer, so a later plain
+.Fn xtc_yield
+of the same fiber does not wait for the old deadline.
+.Ss Cancellation
+A proc killed with
+.Fn xtc_exit_pid
+while parked in
+.Fn xtc_notify_wait ,
+.Fn xtc_sem_acquire ,
+.Fn xtc_amutex_lock ,
+.Fn xtc_arwlock_rdlock ,
+.Fn xtc_arwlock_wrlock ,
+.Fn xtc_barrier_wait
+or
+.Fn xtc_gate_drain
+leaves the wait cleanly before it unwinds: it is removed from the wait
+queue, a lock, signal or permit already handed to it is passed on to
+the next waiter, and its deadline timer is cancelled.
+The call does not return.
+A killed barrier party still counts as arrived for the current
+generation.
+Inside an
+.Fn xtc_uncancelable
+region the kill is deferred and the wait continues.
+The kill is noticed when the parked proc next runs (a wake, its own
+deadline, or the kill itself when the proc layer wakes parked targets).
+.Pp
+.Vt xtc_rwlock
+is not covered: it blocks the OS thread and cannot be interrupted.
 .Sh CHOOSING
 .Bl -bullet -compact -offset indent
 .It
@@ -319,6 +358,8 @@ For cancellation propagation:
 .Vt xtc_abort_source .
 .El
 .Sh SEE ALSO
+.Xr xtc_async 3 ,
+.Xr xtc_proc 3 ,
 .Xr xtc_lwlock 3 ,
 .Xr xtc_lrlock 3 ,
 .Xr xtc_lockmgr 3 ,
