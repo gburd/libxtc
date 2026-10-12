@@ -62,7 +62,11 @@ runnable; its return value tells the loop what to do next:
 The task is finished and is reaped at
 .Fn xtc_loop_fini .
 .It Dv XTC_TASK_RESCHED
-Re-queue the task at the back of the run queue.
+Re-queue the task at the back of the run queue: it runs again only
+after every task already queued.  This holds for pinned and migratable
+tasks alike; when a loop has both kinds ready it alternates between
+them.  Releases up to 1.55.0 re-ran a yielding migratable task first,
+starving the other migratable tasks on its loop.
 .It Dv XTC_TASK_PENDING
 The task is waiting on a wakeup; do not run it again until either
 its waker fires or the timer / fd it parked on becomes ready.

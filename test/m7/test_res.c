@@ -11,6 +11,10 @@
  */
 
 #include <stdint.h>
+#include <stdatomic.h>
+#if !defined(_WIN32)
+#include <pthread.h>
+#endif
 
 #include "munit.h"
 #include "xtc.h"
@@ -243,6 +247,57 @@ test_alert(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [m1] Over-release must never make `used` observable as negative.  The
+ * old release did fetch_sub and then stored 0 if the result went below
+ * zero, so a concurrent reader (or acquirer) could see the transient
+ * negative -- an acquirer then computed INT64_MAX - cur, a signed
+ * overflow UBSan reported under cross-loop load -- and the store could
+ * erase a concurrent acquire.  A releaser hammers an empty counter while
+ * the test thread samples it.
+ */
+#if !defined(_WIN32)
+static _Atomic int neg_stop;
+static void *
+neg_releaser(void *arg)
+{
+	xtc_res_t *r = arg;
+	while (!atomic_load(&neg_stop))
+		xtc_res_release(r, XTC_RES_CHANNELS, 3);
+	return NULL;
+}
+#endif
+
+static MunitResult
+test_release_never_negative(const MunitParameter p[], void *d)
+{
+#if defined(_WIN32)
+	(void)p; (void)d;
+	return MUNIT_SKIP;
+#else
+	static xtc_res_t r;
+	pthread_t th;
+	int64_t v, min = 0;
+	long i;
+	(void)p; (void)d;
+	munit_assert_int(xtc_res_init(&r, NULL), ==, XTC_OK);
+	atomic_store(&neg_stop, 0);
+	munit_assert_int(pthread_create(&th, NULL, neg_releaser, &r), ==, 0);
+	for (i = 0; i < 20000000L && min >= 0; i++) {
+		if ((i & 1023) == 0 &&
+		    xtc_res_acquire(&r, XTC_RES_CHANNELS, 1) != XTC_OK)
+			break;
+		v = xtc_res_used(&r, XTC_RES_CHANNELS);
+		if (v < min)
+			min = v;
+	}
+	atomic_store(&neg_stop, 1);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	munit_assert_int64(min, >=, 0);
+	return MUNIT_OK;
+#endif
+}
+
 static MunitTest tests[] = {
 	{ "/init",            test_init,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/acquire_release", test_acquire_release, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -250,6 +305,7 @@ static MunitTest tests[] = {
 	{ "/query_guards",    test_query_guards,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/set_cap",         test_set_cap,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/alert",           test_alert,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/m1_release_never_negative", test_release_never_negative, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m7/res", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
