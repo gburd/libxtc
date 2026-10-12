@@ -3694,8 +3694,8 @@ xs_idx_clear(bt_t *bt, uint32_t idx_id)
 	uint8_t prefix[5], startk[5];
 	int i;
 	/* Bounded batch of small keys on the stack (index keys are the value
-	 * prefix + 8-byte rowid; cap the copied key length).  ponytail: fixed
-	 * 256-byte key cap here; a longer indexed value's entry is skipped by
+	 * prefix + 8-byte rowid; cap the copied key length).  Fixed 256-byte
+	 * key cap here; a longer indexed value's entry is skipped by
 	 * clear (the subsequent rebuild re-inserts a fresh entry regardless),
 	 * so no stale entry survives a rebuild. */
 	enum { KMAX = 256, BATCH = 128 };

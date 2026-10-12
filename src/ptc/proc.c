@@ -2179,7 +2179,7 @@ __exit_pid_deadline_on(xtc_loop_t *owner, xtc_pid_t target, int reason,
 		 * is bumped each time it is handed out, so this loop issued
 		 * the pid iff 1 <= pid.gen <= slot.gen.  A pid whose loop has
 		 * been finalized cannot be told apart and counts as unknown.
-		 * ponytail: a slot reused 2^32 times wraps gen; same ceiling
+		 * A slot reused 2^32 times wraps gen; same ceiling
 		 * the pid generation check itself has.
 		 */
 		xtc_loop_t *tl = NULL;

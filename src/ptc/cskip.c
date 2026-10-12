@@ -60,7 +60,7 @@
  *	  This module never calls xtc_rcu_synchronize itself:
  *	  reclamation is caller/reaper-driven, exactly like xtc_chash.
  *
- *	ponytail: single writer mutex + per-map level PRNG.  Upgrade path
+ *	Single writer mutex + per-map level PRNG.  Upgrade path
  *	if concurrent-WRITER throughput ever matters: lazy per-node
  *	lock-coupling (mark-then-physically-unlink) for writers, keeping
  *	the reader path exactly as it is.  Not built until a workload

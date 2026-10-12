@@ -576,8 +576,8 @@ xtc_app_destroy(xtc_app_t *a)
 	if (a->exec) (void)xtc_exec_fini(a->exec);
 	if (a->loop && a->owns_loop) (void)xtc_loop_fini(a->loop);
 	if (a->specs) __os_free(a->specs);
-	/* ponytail: a masked-forever survivor keeps a pointer into kids, so
-	 * leak it in that case (bytes per child); free otherwise. */
+	/* A masked-forever survivor keeps a pointer into kids, so leak it in
+	 * that case (bytes per child); free otherwise. */
 	if (a->kids && !a->leak_kids) __os_free(a->kids);
 	if (a->name) __os_free(a->name);
 	__os_free(a);

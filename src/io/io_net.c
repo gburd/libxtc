@@ -157,7 +157,7 @@ xtc_net_setnonblock(int fd)
  * re-attach does not unbalance the fds already out. */
 static _Atomic(xtc_res_t *) __net_res;
 static pthread_mutex_t __net_fd_lock = PTHREAD_MUTEX_INITIALIZER;
-/* ponytail: direct-indexed by fd -- dense and RLIMIT_NOFILE-bounded on
+/* Direct-indexed by fd -- dense and RLIMIT_NOFILE-bounded on
  * POSIX; a Windows SOCKET is a handle value, still small in practice.
  * Switch to a hash if a sparse-handle platform makes this large. */
 static xtc_res_t   **__net_fd_res;      /* indexed by fd; NULL = uncharged */
