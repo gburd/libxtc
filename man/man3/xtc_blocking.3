@@ -34,11 +34,10 @@ and third-party libraries.  The
 .Nm xtc_blocking
 facility runs such a call on a dedicated pool thread and parks the
 calling process until it finishes, so the loop keeps running other
-work meanwhile.  The wakeup reuses the runtime's existing machinery:
-the pool thread signals completion on a pipe the calling process waits
-on with
-.Fn xtc_proc_wait_fd ,
-so no new scheduler integration is required.
+work meanwhile.  The pool thread wakes the parked process through its
+task waker when the call finishes.  No file descriptor is used per
+call, so offloading keeps working when the process is out of
+descriptors.
 .Pp
 .Fn xtc_blocking_run
 runs
@@ -48,11 +47,17 @@ on a pool thread and parks the caller until it completes, storing
 return value in
 .Fa *out_result .
 It must be called from within a process or coroutine running on a
-loop; called outside that context (or where the offload cannot be set
-up) it runs
+loop; called outside that context it runs
 .Fa fn
 synchronously on the current thread -- always correct, just not
 yielding.
+On a loop it never runs
+.Fa fn
+on the loop thread: if the offload cannot be queued it returns an
+error without running
+.Fa fn
+(see
+.Sx RETURN VALUES ) .
 .Pp
 .Fn xtc_blocking_run_off_loop
 is the counterpart for a caller that is a plain OS thread and
@@ -61,9 +66,7 @@ a fiber (its
 .Fn xtc_self
 is none): it offloads
 .Fa fn Ns ( Ns Fa arg Ns )
-to the pool and blocks the calling thread on the completion pipe with
-a real
-.Xr read 2 ,
+to the pool and blocks the calling thread until it completes,
 rather than parking a fiber (which a bare thread cannot do), so
 .Fa fn
 runs on a pool worker instead of inline on the caller.
@@ -89,10 +92,8 @@ is
 .Dv NULL
 or if it is called from a fiber (use
 .Fn xtc_blocking_run
-there); on a pool or pipe setup failure it runs
-.Fa fn
-inline and returns
-.Dv XTC_OK .
+there), and the queue errors listed under
+.Sx RETURN VALUES .
 .Pp
 .Fn xtc_blocking_submit
 is the fire-and-forget variant: it hands
@@ -133,17 +134,46 @@ shutdown and leak-checked test runs.  A new
 after shutdown restarts the pool.
 .Sh RETURN VALUES
 .Fn xtc_blocking_run
-returns
+and
+.Fn xtc_blocking_run_off_loop
+return
 .Dv XTC_OK
 once
 .Fa fn
-has run.
+has run, with its result in
+.Fa *out_result .
 .Fn xtc_blocking_submit
 returns
 .Dv XTC_OK
-if the work was enqueued, or a negative
-.Dv XTC_E_*
-code.
+if the work was enqueued.
+All three return, without running
+.Fa fn :
+.Bl -tag -width "XTC_E_RESOURCE"
+.It Dv XTC_E_INVAL
+.Fa fn
+is
+.Dv NULL
+(or, for
+.Fn xtc_blocking_run_off_loop ,
+the caller is a fiber).
+.It Dv XTC_E_AGAIN
+The offload queue already holds 65536 waiting calls.  The queue is
+bounded so that a burst the pool cannot drain becomes an error the
+caller sees instead of unbounded backlog; back off and retry, or shed
+the request.
+.It Dv XTC_E_RESOURCE
+No pool thread could be started.
+.It Dv XTC_E_NOMEM
+.Fn ( xtc_blocking_submit
+only) the work item could not be allocated.
+.El
+.Pp
+Through 1.55.0 each call used a pipe for its wakeup (two descriptors
+per concurrent call) and, when
+.Xr pipe 2
+failed, ran
+.Fa fn
+inline on the loop thread, stalling every other process on that loop.
 .Fn xtc_blocking_pool_size
 returns
 .Dv XTC_OK ,
