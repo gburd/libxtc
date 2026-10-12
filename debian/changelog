@@ -1,3 +1,54 @@
+libxtc (1.55.0-1) unstable; urgency=medium
+
+  * MINOR release -- asynchronous (device-offload) continuous batching,
+    cross-loop/thread admission, and placement helpers.  All are off
+    unless configured with --enable-sched-policy; a default build exports
+    the new functions as XTC_E_NOSYS stubs and leaves the synchronous
+    batch engine and the scheduler hot path unchanged.  No existing
+    public struct changed size: the new capability lives in new
+    size/versioned structs (xtc_batch_async_opts_t, xtc_batch_async_stats_t)
+    and a per-call descriptor (xtc_batch_exec_t).
+  * NEW API (xtc_batch.h) -- async offload:
+    - xtc_batch_create_async / xtc_batch_get_async_stats: a group whose
+      step is a submit/collect pair.  submit launches one device (or
+      thread-pool) op over the ready vector and returns a completion
+      descriptor; the driver awaits it without stalling the loop; collect
+      reads the device outputs and decides per-member CONTINUE/DONE at the
+      next boundary.  Exec kinds FENCE (an fd, native only -- no sim
+      fd-readiness hook), FUTURE (an xtc_future_t, sim-deterministic),
+      BLOCKING (a closure on the blocking pool), and SYNC.  Optional
+      exec_timeout_ns, and cancel honored at an iteration boundary (never
+      mid-kernel), with collect still run so the app frees its device
+      buffer and the member ends ABORTED exactly once.
+  * NEW API (xtc_batch.h) -- cross-loop / cross-thread admission:
+    - xtc_batch_submit_mt / xtc_batch_cancel_mt / xtc_batch_resume_mt:
+      callable from ANY loop or a plain OS thread.  They touch only a
+      bounded lock-light MPSC admission ring + an MPMC record pool + the
+      group's monotonic handle counter, never the group's slots; the owner
+      loop drains the ring at each iteration boundary.  An early-control
+      set makes a cancel/resume order-independent of its submit across
+      producers, so a cross-producer cancel is never lost.  submit_mt is
+      allocation-free and returns a handle immediately.
+  * NEW API (xtc_batch.h) -- placement (advisory glue, not a scheduler):
+    - xtc_batch_loop_for_device: map a probed accelerator to the executor
+      loop whose carrier is on the device's NUMA node (best-effort, falls
+      back to loop 0).
+    - xtc_batch_router_create / _destroy / _route: a keyed-shard router
+      over N caller-created groups (stable key -> group); borrows the
+      groups by copy, owns none of them.
+  * NEW: examples/13_gpu_batching (continuous-batching Mandelbrot over
+    OpenCL, proven on two AMD GPUs) and examples/14_hetero_batching
+    (a GPU + NPU capstone over OpenCL + Level Zero, both devices in
+    overlapping in-flight windows).  Each ships a FAKE backend that needs
+    no accelerator: --self-test links only libxtc + pthread, is
+    deterministic, and runs in make check / CI.
+  * TESTS: deterministic FUTURE + cross-loop mt replay under the sim
+    backend (byte-identical), exactly-once across the full teardown matrix,
+    man-coverage of every new symbol.
+  * No existing public struct changed size.
+
+ -- Greg Burd <greg@burd.me>  Sun, 11 Oct 2026 11:00:00 -0400
+
 libxtc (1.54.0-1) unstable; urgency=medium
 
   * MINOR release -- optional scheduling policies and continuous batching.
