@@ -153,13 +153,16 @@ recv_some(struct xtc_tls *t)
 		t->enc_len += (size_t)n;
 		return XTC_OK;
 	}
+	/* EOF here is always a truncation: a clean close arrives as a
+	 * close_notify record (SEC_I_CONTEXT_EXPIRED), never as a bare FIN.
+	 * Both it and a recv failure (reset) are peer/transport errors. */
 	if (n == 0)
-		return XTC_E_INTERNAL;   /* peer closed mid-handshake */
+		return XTC_E_IO;
 	if (WSAGetLastError() == WSAEWOULDBLOCK) {
 		t->wants_read = 1;
 		return XTC_E_AGAIN;
 	}
-	return XTC_E_INTERNAL;
+	return XTC_E_IO;
 }
 
 static int
@@ -178,7 +181,7 @@ send_all(struct xtc_tls *t, const unsigned char *buf, size_t len)
 			t->wants_write = 1;
 			return XTC_E_AGAIN;
 		}
-		return XTC_E_INTERNAL;
+		return XTC_E_IO;   /* peer reset / transport failure */
 	}
 	return XTC_OK;
 }
