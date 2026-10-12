@@ -53,6 +53,7 @@ typedef struct xtc_tcp_opts {
 
 /*
  * PUBLIC: int xtc_net_listen __P((xtc_net_family_t, const char *, int, const xtc_tcp_opts_t *, int *));
+ * PUBLIC: int xtc_net_listen_backlog __P((xtc_net_family_t, const char *, int, const xtc_tcp_opts_t *, int, int *));
  * PUBLIC: int xtc_net_dial __P((xtc_net_family_t, const char *, int, const xtc_tcp_opts_t *, int *));
  * PUBLIC: int xtc_net_accept __P((int, int *));
  * PUBLIC: int xtc_net_apply_tcp_opts __P((int, const xtc_tcp_opts_t *));
@@ -73,9 +74,17 @@ typedef struct xtc_tcp_opts {
 
 /* TCP listen socket.  `host` may be NULL/"" for any-address.  Returns
  * the listening fd; caller registers it with xtc_io_reg_fd for accept
- * readiness.  Backlog defaults to 128 if 0. */
+ * readiness.  The accept-queue depth is the default: SOMAXCONN, or 4096
+ * if that is smaller, clamped by the kernel to its own limit
+ * (net.core.somaxconn on Linux).  It was a fixed 128 through 1.55.0. */
 XTC_API int xtc_net_listen(xtc_net_family_t fam, const char *host, int port,
                            const xtc_tcp_opts_t *opts, int *out_fd);
+
+/* xtc_net_listen with an explicit accept-queue depth.  backlog 0 means
+ * the default above; negative is XTC_E_INVAL.  The kernel clamps it. */
+XTC_API int xtc_net_listen_backlog(xtc_net_family_t fam, const char *host,
+                                   int port, const xtc_tcp_opts_t *opts,
+                                   int backlog, int *out_fd);
 
 /* TCP connect to host:port.  Returns the fd in out_fd.  The connect
  * is non-blocking; caller polls for writability to detect completion. */
@@ -96,7 +105,9 @@ XTC_API int xtc_net_setnonblock(int fd);
 /* Close (always succeeds). */
 XTC_API void xtc_net_close(int fd);
 
-/* Unix domain sockets -- SOCK_STREAM. */
+/* Unix domain sockets -- SOCK_STREAM.  The listener's backlog is the
+ * same default as xtc_net_listen (it was 64 through 1.55.0); to change
+ * it, call listen(2) again on the returned fd with the depth you want. */
 XTC_API int xtc_net_unix_listen(const char *path, int *out_fd);
 XTC_API int xtc_net_unix_dial  (const char *path, int *out_fd);
 
