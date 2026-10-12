@@ -100,16 +100,30 @@ struct __xtc_aix_reg {
 #include <pthread.h>
 /*
  * Per-fd state for the io_uring backend.  The user_data passed to
- * each POLL_ADD points at one of these.  The fd_table maps fd ->
- * uring_fd so we can find/cancel a registration on _del/_mod.
+ * each POLL_ADD points at one of these.  io->tab maps fd -> the LIVE
+ * node; a retired node whose poll is still in the kernel waits on
+ * io->zombies for its terminal CQE.
+ *
+ *   armed    a poll for this node is in the kernel (CQEs may arrive).
+ *            Cleared by the terminal CQE (no IORING_CQE_F_MORE).
+ *   dead     retired by del/mod; no longer in io->tab.
+ *   pending  on io->pending: needs an SQE the SQ had no room for (a
+ *            re-arm for a live node, a cancel for a dead armed one).
+ *
+ * A node is on io->zombies exactly while dead && armed, and is freed
+ * once dead && !armed && !pending.
  */
 struct __xtc_uring_fd {
 	int        fd;
 	uint32_t   interest;
 	void      *tag;
 	int        is_wakeup;     /* 1 for the internal wakeup pipe */
-	int        dead;          /* deleted; awaiting terminal CQE before free */
-	struct __xtc_uring_fd *next;  /* free-list / fd-list linkage */
+	int        dead;
+	int        armed;
+	int        pending;
+	struct __xtc_uring_fd *next;   /* io->zombies linkage */
+	struct __xtc_uring_fd *prev;   /* io->zombies linkage */
+	struct __xtc_uring_fd *pnext;  /* io->pending linkage */
 };
 #elif defined(XTC_IO_BACKEND_POLL)
 #include <poll.h>
@@ -162,10 +176,13 @@ struct xtc_io {
 	int   cap_reg;
 #elif defined(XTC_IO_BACKEND_URING)
 	struct io_uring  ring;
-	struct __xtc_uring_fd *fds;
+	struct __xtc_uring_fd **tab;     /* fd -> live node (NULL = none) */
+	int              tab_cap;        /* entries in tab */
 	struct __xtc_uring_fd *zombies;  /* deleted fds awaiting terminal CQE */
+	struct __xtc_uring_fd *pending;  /* nodes awaiting an SQE (SQ was full) */
+	int              n_zombies;      /* length of zombies (diagnostics) */
 	/*
-	 * Cross-loop deferred unregister queue.  io->fds / io->zombies and
+	 * Cross-loop deferred unregister queue.  io->tab / io->zombies and
 	 * the SQ ring are single-producer, owned by this io's loop thread.
 	 * A migratable fiber that parked on this loop but was woken via a
 	 * non-fd path (timeout / xtc_proc_wake / mailbox) and then work-
@@ -241,6 +258,8 @@ struct xtc_io {
 	void         **tags;
 	int            n;
 	int            cap;
+	int           *slot_of;   /* fd -> slot + 1 (0 = not registered) */
+	int            slot_cap;  /* entries in slot_of */
 	/*
 	 * Cross-loop deferred unregister, as io_uring has: the fd arrays are
 	 * a USERSPACE registry owned by this io's poll thread.  A migrated
@@ -267,6 +286,8 @@ struct xtc_io {
 	void         **tags;
 	int            n;
 	int            cap;
+	int           *slot_of;   /* fd -> slot + 1 (0 = not registered) */
+	int            slot_cap;  /* entries in slot_of */
 	/*
 	 * Cross-loop deferred unregister, as io_uring has: the fd arrays are
 	 * a USERSPACE registry owned by this io's poll thread.  A migrated
@@ -308,5 +329,12 @@ int __xtc_io_defer_del_fd(xtc_io_t *io, int fd);
  * never used for control flow.
  */
 void __xtc_io_set_tail_loop_id(xtc_io_t *io, int id);
+
+/*
+ * Registration accounting (io_uring; XTC_E_NOSYS elsewhere): live
+ * registrations, retired nodes awaiting a terminal CQE, nodes queued for
+ * an SQE.  Tests assert no node leaks.  Any out pointer may be NULL.
+ */
+int __xtc_io_reg_stats(xtc_io_t *io, int *live, int *zombies, int *pending);
 
 #endif /* XTC_IO_INT_H */
