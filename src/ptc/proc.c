@@ -1398,6 +1398,19 @@ __proc_entry(void *arg)
 		p->fn(p->arg);
 		p->exit_reason = 0;        /* normal */
 		p->exit_kind = 0;          /* XTC_DOWN_KIND_CLEAN */
+		/* A kill that landed but was never delivered (its park site
+		 * did not poll and the body then returned) is still this
+		 * proc's exit reason: a supervisor must see the kill, not a
+		 * clean exit. */
+		reason = atomic_load_explicit(&p->kill_pending,
+		    memory_order_acquire);
+		if (reason == 0)
+			reason = atomic_load_explicit(&p->mask_deferred,
+			    memory_order_relaxed);
+		if (reason != 0) {
+			p->exit_reason = reason - 1;
+			p->exit_kind = (p->exit_reason == 0) ? 0 : 1;
+		}
 	} else {
 		p->exit_reason = reason - 1;  /* offset so 0 is reachable */
 		/* xtc_exit_self(0) is a clean exit; any nonzero code is an
