@@ -143,6 +143,28 @@ xtc_deque_steal(xtc_deque_t *d)
 }
 
 /*
+ * Owner-side FIFO take: the oldest item, from the steal end.  The run
+ * queue uses this instead of the LIFO xtc_deque_pop so a task that
+ * re-queues itself (XTC_TASK_RESCHED) goes behind everything already
+ * queued rather than straight back to the front.  It is the owner
+ * stealing from itself: xtc_deque_steal is multi-consumer safe, so the
+ * owner's take and peer thieves are arbitrated by the same CAS on top.
+ * A NULL from steal on a non-empty deque means another consumer won the
+ * slot, so retry; each lost race is someone else's progress.
+ */
+static inline void *
+xtc_deque_take(xtc_deque_t *d)
+{
+	void *x;
+
+	while (atomic_load_explicit(&d->bottom, memory_order_relaxed) >
+	    atomic_load_explicit(&d->top, memory_order_acquire))
+		if ((x = xtc_deque_steal(d)) != NULL)
+			return x;
+	return NULL;
+}
+
+/*
  * Approximate length.  May return slightly stale values; useful for
  * stealing heuristics ("which loop is busiest?").
  */

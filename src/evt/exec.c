@@ -435,12 +435,13 @@ xtc_exec_fini(xtc_exec_t *e)
  *
  * IMPORTANT: this runs on the supervisor thread (main), concurrently
  * with workers that own each loop.  Every read here must be
- * side-effect-free.  We deliberately do NOT call
+ * side-effect-free and atomic.  We deliberately do NOT call
  * __xtc_timer_heap_next_deadline() because that function mutates the
- * heap by popping cancelled entries, racing with the owning worker.
- * A bare read of `n_timers` is racy on int but harmless for the
- * "is non-zero?" question; the supervisor double-checks after a
- * short sleep before stopping, which absorbs any stale reads.
+ * heap by popping cancelled entries, racing with the owning worker,
+ * and we do not read the owner-only n_timers (a data race TSan
+ * reported): the worker publishes its timer count in n_timers_pub
+ * after every task run and timer drain.  The supervisor double-checks
+ * after a short sleep before stopping, which absorbs a stale read.
  */
 static int
 __exec_has_work(xtc_exec_t *e)
@@ -451,8 +452,9 @@ __exec_has_work(xtc_exec_t *e)
 		if (atomic_load_explicit(&l->n_alive,
 		    memory_order_relaxed) > 0) return 1;
 		if (xtc_deque_len(&l->deque) > 0) return 1;
-		if (l->n_timers > 0) return 1;
-		if (l->inbox.head != NULL) return 1;
+		if (atomic_load_explicit(&l->n_timers_pub,
+		    memory_order_relaxed) > 0) return 1;
+		if (__xtc_inbox_nonempty(&l->inbox)) return 1;
 	}
 	return 0;
 }
@@ -513,14 +515,23 @@ xtc_exec_get_steal_backoff(xtc_exec_t *e)
  * which sees struct xtc_exec only as an opaque forward decl).
  */
 
-/* Is eager rebalance enabled for the executor this loop belongs to?
- * 0 for a standalone loop (exec == NULL) or when off. */
-int
-__xtc_exec_eager(xtc_loop_t *me)
+/*
+ * How long a run-queue-empty executor loop may block in its poller
+ * before it looks for stealable peer work again, or 0 for no bound
+ * (standalone loop, or a single-loop executor: nobody to steal from).
+ * It matches the worker's idle-poll tick (1 ms, or the 32 ms backoff
+ * cap when steal backoff is on), so a loop that owns parked fibers and
+ * timers rebalances as often as a fully idle one.
+ */
+int64_t
+__xtc_exec_steal_recheck_ns(xtc_loop_t *me)
 {
 	xtc_exec_t *e = me->exec;
-	return (e != NULL) &&
-	    atomic_load_explicit(&e->eager_rebalance, memory_order_relaxed);
+	if (e == NULL || e->n_loops <= 1)
+		return 0;
+	if (atomic_load_explicit(&e->steal_backoff, memory_order_relaxed))
+		return 32 * 1000 * 1000LL;
+	return 1000 * 1000LL;
 }
 
 /*
@@ -586,6 +597,10 @@ xtc_exec_run(xtc_exec_t *e)
 	int i, rc;
 	if (e == NULL) return XTC_E_INVAL;
 	atomic_store_explicit(&e->stop_flag, 0, memory_order_relaxed);
+	/* Seed the published timer counts (timers set before the run). */
+	for (i = 0; i < e->n_loops; i++)
+		atomic_store_explicit(&e->loops[i]->n_timers_pub,
+		    e->loops[i]->n_timers, memory_order_relaxed);
 
 	/* Spawn worker threads. */
 	for (i = 0; i < e->n_loops; i++) {
@@ -704,7 +719,7 @@ __sim_loop_runnable(xtc_loop_t *l, int64_t now_ns, int64_t peer_stealable)
 			    l->classes[ci].q_head != NULL)
 				return 1;
 	}
-	if (l->inbox.head != NULL)
+	if (__xtc_inbox_nonempty(&l->inbox))
 		return 1;   /* ANTI-LOST-WAKEUP INVARIANT: a loop with a pending
 	             * cross-thread enqueue (spawn PUBLISH / mailbox WAKE) is
 	             * ALWAYS runnable.  Unlike the real backends -- which
@@ -726,28 +741,17 @@ __sim_loop_runnable(xtc_loop_t *l, int64_t now_ns, int64_t peer_stealable)
 	if (iod >= 0 && iod <= now_ns)
 		return 1;
 	/*
-	 * Idle locally with NO pending timer or I/O, but a peer has
-	 * stealable work and this loop is part of an executor -> runnable
-	 * (its step_once will reach the steal branch and take the work).
-	 * The "no pending timer/io" guard ensures the step actually reaches
-	 * steal (a loop with a future wakeup takes the clock-wait branch
-	 * instead, so marking it runnable-to-steal would spin) -- UNLESS
-	 * eager rebalance is on, in which case __xtc_loop_step's real
-	 * run-queue-empty steal-before-block branch (loop.c) reaches steal
-	 * regardless of a pending timer/io (that is the whole point: a loop
-	 * whose fibers are all parked on a timer/fd should still steal a
-	 * peer's runnable work instead of waiting out its own deadline).
-	 * This mirrors that exactly, so the sim reaches the same real code
-	 * path the real executor does under eager rebalance, and can
-	 * observe steals it otherwise never would (the PG-reported gap). */
-	if (peer_stealable > 0 && l->exec != NULL) {
-		if (dl < 0 && iod < 0)
-			return 1;
-		/* l's own run queue is already known empty here (the earlier
-		 * q_head/deque checks above would have returned 1 otherwise). */
-		if (__xtc_exec_eager(l))
-			return 1;
-	}
+	 * Idle locally, but a peer has stealable work and this loop is part
+	 * of an executor -> runnable: its step reaches the steal (an empty
+	 * run queue steals before blocking whether or not the loop has a
+	 * pending timer or I/O -- loop.c, step 2), and a successful steal
+	 * shrinks the peers' stealable total, so this cannot spin.  This
+	 * used to require no pending timer/io unless eager rebalance was on,
+	 * mirroring the old real-executor rule that a loop with any pending
+	 * timer never stole.
+	 */
+	if (peer_stealable > 0 && l->exec != NULL)
+		return 1;
 	return 0;
 }
 
