@@ -212,10 +212,72 @@ test_credit_blocking_acquire(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- two fiber waiters, two releases (sem lost wakeup) ----------
+ *
+ * Window 2, both credits held; two fibers block in xtc_credit_acquire and
+ * a third releases one, yields, releases the other.  Both waiters must get
+ * a credit.  On 1.55.0 the second release wakes nobody (xtc_sem lost
+ * wakeup, runtime-core B1) and the loser waits out its timeout.
+ * DEPENDS ON fix155/sync: fails on this branch alone, passes once that
+ * lands.
+ */
+struct cr_two_ctx {
+	xtc_credit_t *c;
+	_Atomic int   got;
+};
+
+static void
+cr_two_waiter(void *arg)
+{
+	struct cr_two_ctx *x = arg;
+	if (xtc_credit_acquire(x->c, 2LL * 1000 * 1000 * 1000) == XTC_OK)
+		atomic_fetch_add(&x->got, 1);
+}
+
+static void
+cr_two_poster(void *arg)
+{
+	struct cr_two_ctx *x = arg;
+	xtc_yield();   /* both waiters park first */
+	xtc_yield();
+	munit_assert_int(xtc_credit_release(x->c), ==, XTC_OK);
+	xtc_yield();
+	munit_assert_int(xtc_credit_release(x->c), ==, XTC_OK);
+}
+
+static MunitResult
+test_credit_two_waiters(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct cr_two_ctx x;
+	int64_t t0;
+	(void)p; (void)d;
+
+	memset(&x, 0, sizeof x);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_credit_create(2, &x.c), ==, XTC_OK);
+	munit_assert_int(xtc_credit_try_acquire(x.c), ==, XTC_OK);
+	munit_assert_int(xtc_credit_try_acquire(x.c), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, cr_two_waiter, &x, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, cr_two_waiter, &x, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, cr_two_poster, &x, NULL, NULL),
+	    ==, XTC_OK);
+	t0 = xtc_clock_mono();
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&x.got), ==, 2);
+	munit_assert_int64(xtc_clock_mono() - t0, <, 1LL * 1000 * 1000 * 1000);
+	xtc_credit_destroy(x.c);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/accounting",     test_credit_accounting,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/sliding_window", test_credit_sliding_window, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/blocking_acquire", test_credit_blocking_acquire, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/two_waiters",    test_credit_two_waiters,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.9/credit", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

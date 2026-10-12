@@ -143,12 +143,15 @@ XTC_API int  xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref);
 
 /*
  * Bidirectionally LINK the calling fiber to the child (like xtc_link,
- * across the fork boundary): if the child exits or crashes the linking
- * fiber receives an EXIT signal (decode with xtc_down_decode_ex), and if
- * the linking fiber / parent process dies the child observes its control
- * channel close and shuts down.  Must be called from a fiber.  Use
- * xtc_xmonitor instead when you want a one-way DOWN without binding the
- * caller's own fate to the child.
+ * across the fork boundary), and if the linking fiber / parent process
+ * dies the child observes its control channel close and shuts down.
+ * Link semantics are xtc_link's (BEAM, since 1.55.1): an abnormal child
+ * exit (nonzero code, signal) KILLS the linking fiber unless it traps
+ * exits; a clean exit is silent.  Call xtc_proc_trap_exit(1) first to
+ * receive an EXIT message instead, for every child exit (decode with
+ * xtc_down_decode_ex).  Must be called from a fiber.  Use xtc_xmonitor
+ * instead when you want a one-way DOWN without binding the caller's own
+ * fate to the child.
  */
 XTC_API int  xtc_xlink(xtc_xproc_t *p);
 

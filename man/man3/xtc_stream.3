@@ -84,7 +84,10 @@ for each value until end-of-stream.  A nonzero
 .Fn fn
 return stops early and is returned; an
 .Dv XTC_E_AGAIN
-from the source is retried, so use
+from the source is retried after
+.Fn xtc_yield
+(so a producer fiber on the same loop gets to run; off a fiber the
+retry spins), so use
 .Fn xtc_stream_for_each
 only with a source that will eventually produce or finish.
 .Pp

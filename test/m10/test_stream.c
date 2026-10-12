@@ -7,6 +7,7 @@
  *	demand-channel adapter (backpressured pull).
  */
 
+#include <pthread.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -14,6 +15,9 @@
 #include "xtc.h"
 #include "xtc_chan.h"
 #include "xtc_stream.h"
+#include "xtc_loop.h"
+#include "xtc_proc.h"
+#include "xtc_async.h"
 
 /* ---------- base + map + filter + for_each ---------- */
 
@@ -133,10 +137,85 @@ test_stream_from_demand(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* for_each over a demand stream whose producer is a fiber on the SAME
+ * loop.  The source returns XTC_E_AGAIN until the producer runs; 1.55.0
+ * retried without yielding, so the producer never ran and the loop
+ * livelocked (the test then dies on its timeout).  for_each now yields
+ * between retries. */
+struct fe_ctx {
+	xtc_chan_demand_t *ch;
+	xtc_stream_t      *s;
+	int                items[4];
+	int                sum;
+	int                rc;
+};
+static int
+fe_add(void *v, void *user)
+{
+	((struct fe_ctx *)user)->sum += *(int *)v;
+	return 0;
+}
+static void
+fe_consumer(void *arg)
+{
+	struct fe_ctx *c = arg;
+	c->rc = xtc_stream_for_each(c->s, fe_add, c);
+}
+static void
+fe_producer(void *arg)
+{
+	struct fe_ctx *c = arg;
+	int i = 0;
+	while (i < 4) {
+		if (xtc_chan_demand_send(c->ch, &c->items[i]) == XTC_OK) i++;
+		else xtc_yield();   /* no demand yet */
+	}
+	(void)xtc_chan_demand_close(c->ch);
+}
+static void *
+fe_watchdog(void *arg)
+{
+	(void)arg;
+	(void)xtc_sleep_ns(5LL * 1000 * 1000 * 1000);
+	munit_error("xtc_stream_for_each livelocked the loop");
+	return NULL;
+}
+static MunitResult
+test_stream_for_each_same_loop_producer(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct fe_ctx c;
+	pthread_t wd;
+	int i;
+	(void)p; (void)d;
+
+	memset(&c, 0, sizeof c);
+	for (i = 0; i < 4; i++) c.items[i] = i + 1;
+	c.rc = -12345;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_chan_demand_create(NULL, 8, &c.ch), ==, XTC_OK);
+	munit_assert_int(xtc_stream_from_demand(c.ch, &c.s), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fe_consumer, &c, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fe_producer, &c, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(pthread_create(&wd, NULL, fe_watchdog, NULL), ==, 0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)pthread_cancel(wd);
+	(void)pthread_join(wd, NULL);
+	munit_assert_int(c.rc, ==, XTC_OK);
+	munit_assert_int(c.sum, ==, 10);
+	xtc_stream_destroy(c.s);
+	xtc_chan_demand_destroy(c.ch);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/map_filter",  test_stream_map_filter,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/early_stop",  test_stream_early_stop,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/from_demand", test_stream_from_demand,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/for_each_same_loop_producer", test_stream_for_each_same_loop_producer, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.8/stream", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

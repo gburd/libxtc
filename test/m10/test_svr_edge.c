@@ -171,10 +171,11 @@ test_reply_when_stopped(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	/* The handler saved a handle and stopped without replying, so the
-	 * caller timed out. */
+	/* The handler saved a handle and stopped without replying.  The
+	 * caller notices the server exit and fails fast (since 1.55.1;
+	 * before, it waited out its whole timeout and got XTC_E_AGAIN). */
 	munit_assert_int(atomic_load_explicit(&a.call_rc, memory_order_acquire),
-	    ==, XTC_E_AGAIN);
+	    ==, XTC_E_NOTFOUND);
 	munit_assert_not_null(st.saved);
 
 	/* Reply now, when the server proc and caller proc are gone.  The
@@ -196,8 +197,8 @@ test_reply_when_stopped(const MunitParameter p[], void *d)
  * A size-targeted allocator hook fails the single __os_malloc inside
  * xtc_svr_reply (the pid-routing path allocates 4 + reply_size bytes).
  * We pick a distinctive reply size so ONLY that allocation fails; the
- * handler records the XTC_E_NOMEM return.  The slot is never signalled,
- * so the off-proc-style in-proc caller times out.
+ * handler records the XTC_E_NOMEM return.  No reply is ever sent; the
+ * server then stops, so the caller fails with XTC_E_NOTFOUND.
  * ================================================================ */
 
 #define OOM_REPLY_SIZE   4093              /* distinctive; 4 + this = 4097 */
@@ -287,9 +288,11 @@ test_oom_reply(const MunitParameter p[], void *d)
 	/* The reply path hit OOM and returned XTC_E_NOMEM. */
 	munit_assert_int(atomic_load_explicit(&g_reply_rc, memory_order_acquire),
 	    ==, XTC_E_NOMEM);
-	/* The caller never got a reply -> timed out. */
+	/* The caller never got a reply, and the server then stopped: the
+	 * call fails with XTC_E_NOTFOUND (server gone) rather than waiting
+	 * out its timeout. */
 	munit_assert_int(atomic_load_explicit(&a.call_rc, memory_order_acquire),
-	    ==, XTC_E_AGAIN);
+	    ==, XTC_E_NOTFOUND);
 
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
