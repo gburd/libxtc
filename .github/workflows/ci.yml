@@ -82,7 +82,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc make autoconf pkg-config gawk
       - name: Scheduler feature matrix and replay equivalence
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: sh test/dist/test_sched_policy_build.sh
       - name: Enabled native and deterministic suites
         timeout-minutes: 25

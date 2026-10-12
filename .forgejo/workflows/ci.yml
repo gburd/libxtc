@@ -198,6 +198,7 @@ jobs:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
       - name: Scheduler feature matrix and replay equivalence
+        timeout-minutes: 25
         run: sh test/dist/test_sched_policy_build.sh
 
   sanitizers:
