@@ -76,6 +76,8 @@ struct batch_mt_rec {
 	enum batch_mt_op op;
 	uint64_t handle, charge;
 	void *request;
+	struct batch_mt_rec *next; /* held FIFO link (driver only) */
+	int cancel;                /* cancel_mt landed while held */
 };
 /* Early-control set (the re-review's cross-producer lost-cancel fix). A
  * CANCEL/RESUME drained before its target slot exists is parked here; the
@@ -93,6 +95,12 @@ struct batch_mt {
 	struct batch_mt_early *early;
 	uint32_t cap;               /* mt_queue_cap (recs/early length) */
 	uint32_t n_early;           /* live entries in `early` */
+	/* SUBMITs drained while every slot was taken. They were accepted
+	 * (the producer holds a handle), so they wait here in arrival order
+	 * and are admitted as slots free; their records stay out of the pool,
+	 * which is the producer-side backpressure. Driver only. */
+	struct batch_mt_rec *held, *held_tail;
+	uint32_t n_held;
 	/* Producer-side stat counters. submit_mt/cancel_mt/resume_mt run on
 	 * ANY thread and bump these concurrently, so they are atomic; the
 	 * driver-only astats fields (offloads/offload_*) stay plain. A relaxed
@@ -245,6 +253,8 @@ batch_terminal(xtc_batch_t *b, struct batch_slot *s, int outcome)
 	batch_hint(b);
 }
 
+static void batch_mt_admit_held(xtc_batch_t *);
+
 static void
 batch_retire(xtc_batch_t *b, struct batch_slot *s)
 {
@@ -256,6 +266,7 @@ batch_retire(xtc_batch_t *b, struct batch_slot *s)
 		batch_inc(&b->stats.failed);
 	memset(s, 0, sizeof(*s));
 	--b->live;
+	batch_mt_admit_held(b);
 }
 
 static void
@@ -387,20 +398,26 @@ batch_cleanup(void *arg)
 #endif
 	b->closed = 1;
 	b->callback = 0;
-	for (i = 0; i < b->opts.capacity; ++i) {
-		s = &b->slots[i];
-		if (s->state == B_DELIVERING)
-			batch_retire(b, s);
-		else if (s->state == B_INFLIGHT)
-			continue; /* owned by the finalizer; never here now */
-		else if (s->state != B_FREE && s->state != B_TERMINAL)
-			batch_terminal(b, s,
-			               b->cancelling || s->cancel ?
-			                   XTC_E_ABORTED :
-			                   XTC_E_INTERNAL);
-	}
+	for (i = 0; i < b->opts.capacity; ++i)
+		if (b->slots[i].state == B_DELIVERING)
+			batch_retire(b, &b->slots[i]);
+	/* Each delivery round frees slots that held hand-ins then take, so
+	 * repeat until no accepted request is left. */
+	do {
+		for (i = 0; i < b->opts.capacity; ++i) {
+			s = &b->slots[i];
+			if (s->state != B_FREE && s->state != B_TERMINAL
+			    && s->state != B_INFLIGHT)
+				batch_terminal(b, s,
+				               b->cancelling || s->cancel ?
+				                   XTC_E_ABORTED :
+				                   XTC_E_INTERNAL);
+		}
+		__xtc_unsafe_leave();
+		batch_deliver(b);
+		__xtc_unsafe_enter();
+	} while (b->live != 0);
 	__xtc_unsafe_leave();
-	batch_deliver(b);
 }
 
 static size_t
@@ -652,47 +669,80 @@ batch_mt_apply_early(xtc_batch_t *b, struct batch_slot *s)
 	}
 }
 
+/* Driver side: place an accepted SUBMIT into a free slot (caller has
+ * checked live < capacity) and release its record. */
+static void
+batch_mt_place(xtc_batch_t *b, struct batch_mt_rec *rec)
+{
+	struct batch_slot *s;
+	uint32_t i;
+	for (i = 0; i < b->opts.capacity; ++i)
+		if (b->slots[i].state == B_FREE)
+			break;
+	s = &b->slots[i];
+	s->handle = rec->handle;
+	s->request = rec->request;
+	s->charge = rec->charge;
+	s->state = B_WAITING;
+	s->cancel = rec->cancel;
+	b->live++;
+	batch_mt_apply_early(b, s);
+	rec->next = NULL;
+	rec->cancel = 0;
+	batch_mt_release(b, rec);
+}
+
+/* Driver side: move held SUBMITs into free slots, oldest first. Called
+ * after every retire, so held work takes a freed slot before any later
+ * submission can (n_held > 0 implies live == capacity). */
+static void
+batch_mt_admit_held(xtc_batch_t *b)
+{
+	struct batch_mt_rec *rec;
+	while (b->mt.held != NULL && b->live < b->opts.capacity) {
+		rec = b->mt.held;
+		b->mt.held = rec->next;
+		if (b->mt.held == NULL)
+			b->mt.held_tail = NULL;
+		b->mt.n_held--;
+		batch_mt_place(b, rec);
+	}
+}
+
 /* Driver side: drain the whole admission ring at an iteration boundary, before
- * the next vector is built. SUBMIT creates a B_WAITING slot (the thread-safe
- * equivalent of the owner-loop submit body) then consults the early-control
- * set; CANCEL/RESUME apply to the slot or park early. Each drained record is
- * released back to the free-pool. Caller holds the unsafe bracket. */
+ * the next vector is built. A SUBMIT takes a free WAITING slot, or, when the
+ * group is full, joins the held FIFO: it was accepted when submit_mt returned
+ * its handle, so it is never dropped and never counted as a rejection.
+ * CANCEL/RESUME apply to the slot or held record. Caller holds the unsafe
+ * bracket. */
 static void
 batch_mt_drain(xtc_batch_t *b)
 {
 	struct batch_mt_rec *rec;
-	struct batch_slot *s;
 	void *p;
-	uint32_t i;
 	if (b->mt.ring == NULL)
 		return;
 	while (xtc_chan_mpsc_try_recv(b->mt.ring, &p) == XTC_OK) {
 		rec = p;
-		if (rec->op == MT_SUBMIT) {
-			/* A hand-in that passed the ring is admitted into a
-			 * WAITING slot unless the group is closed or full --
-			 * identical to the owner-loop submit body, but the
-			 * handle was already stamped by the producer. */
-			if (b->closed || b->live == b->opts.capacity) {
-				batch_inc(&b->stats.rejections);
-				batch_mt_release(b, rec);
-				continue;
-			}
-			for (i = 0; i < b->opts.capacity; ++i)
-				if (b->slots[i].state == B_FREE)
-					break;
-			s = &b->slots[i];
-			s->handle = rec->handle;
-			s->request = rec->request;
-			s->charge = rec->charge;
-			s->state = B_WAITING;
-			s->cancel = 0;
-			b->live++;
-			batch_mt_apply_early(b, s);
-		} else {
+		if (rec->op != MT_SUBMIT) {
 			batch_mt_control(b, rec->handle, rec->op);
+			batch_mt_release(b, rec);
+		} else if (b->closed) {
+			batch_inc(&b->stats.rejections);
+			batch_mt_release(b, rec);
+		} else if (b->mt.held != NULL || b->live == b->opts.capacity) {
+			rec->next = NULL;
+			rec->cancel = 0;
+			if (b->mt.held_tail != NULL)
+				b->mt.held_tail->next = rec;
+			else
+				b->mt.held = rec;
+			b->mt.held_tail = rec;
+			b->mt.n_held++;
+		} else {
+			rec->cancel = 0;
+			batch_mt_place(b, rec);
 		}
-		batch_mt_release(b, rec);
 	}
 }
 
@@ -1497,6 +1547,7 @@ xtc_batch_get_stats(xtc_batch_t *b, xtc_batch_stats_t *out)
 			*out = b->stats;
 			out->size = sizeof(*out);
 			out->version = XTC_BATCH_VERSION;
+			out->queued = b->mt.n_held;
 			for (i = 0; i < b->opts.capacity; ++i) {
 				if (b->slots[i].state == B_WAITING)
 					out->queued++;
