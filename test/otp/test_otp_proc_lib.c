@@ -96,6 +96,9 @@ link_observer(void *arg)
 {
 	struct link_state *st = arg;
 	void *m; size_t sz;
+#ifdef XTC_HAVE_PROC_TRAP_EXIT
+	(void)xtc_proc_trap_exit(1);   /* receive the EXIT, do not die of it */
+#endif
 	if (xtc_link(st->target) != XTC_OK) return;
 	if (xtc_recv_match(__match_exit, NULL, &m, &sz,
 	    1000LL * 1000 * 1000) == XTC_OK) {

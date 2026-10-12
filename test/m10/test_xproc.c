@@ -190,6 +190,9 @@ linker_fiber(void *a)
 	m->rc = xtc_xspawn_entry(m->loop, "lk", "root", &init_code,
 	    sizeof init_code, &child);
 	if (m->rc != XTC_OK) return;
+#ifdef XTC_HAVE_PROC_TRAP_EXIT
+	(void)xtc_proc_trap_exit(1);   /* receive the EXIT, do not die of it */
+#endif
 	if (xtc_xlink(child) != XTC_OK) { xtc_xproc_destroy(child); return; }
 	(void)xtc_xsend(child, &exit_code, sizeof exit_code);
 	/* A link EXIT arrives as a decodable signal in our mailbox. */

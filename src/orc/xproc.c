@@ -406,6 +406,11 @@ shadow_proc(void *a)
 	int reason;
 	int kind;
 
+#ifdef XTC_HAVE_PROC_TRAP_EXIT
+	/* A linked caller's abnormal exit must not kill the shadow inside
+	 * xtc_osproc_wait: s and hold are released only below. */
+	(void)xtc_proc_trap_exit(1);
+#endif
 	/* Park until the child exits (never blocks the loop thread).  `os`
 	 * stays valid for the whole wait: this proc holds its own reference
 	 * and drops it only below, after the last access. */
@@ -890,6 +895,11 @@ win_shadow_proc(void *a)
 	struct xtc_xproc *p = s->p;
 	int reason, sig;
 	void *m = NULL; size_t n = 0;
+#ifdef XTC_HAVE_PROC_TRAP_EXIT
+	/* As shadow_proc: a linked caller's abnormal exit must not kill the
+	 * shadow before it frees `s`. */
+	(void)xtc_proc_trap_exit(1);
+#endif
 	while (!atomic_load(&p->exited)) {
 		if (xtc_recv(&m, &n, 20LL * 1000 * 1000) == XTC_OK && m) {
 			__os_free(m); m = NULL;
