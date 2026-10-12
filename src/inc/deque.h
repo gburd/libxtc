@@ -76,8 +76,11 @@ xtc_deque_push(xtc_deque_t *d, void *v)
 	if (b - t >= XTC_DEQUE_CAP) return XTC_E_AGAIN;
 	atomic_store_explicit(&d->buf[b & XTC_DEQUE_MASK], v,
 	    memory_order_relaxed);
-	atomic_thread_fence(memory_order_release);
-	atomic_store_explicit(&d->bottom, b + 1, memory_order_relaxed);
+	/* A release store, not fence + relaxed store: the same ordering, but
+	 * ThreadSanitizer does not model standalone fences, so the fence form
+	 * hid the push->steal edge and every write a thief makes to a stolen
+	 * task (q_next, inbox_next) was reported as a race. */
+	atomic_store_explicit(&d->bottom, b + 1, memory_order_release);
 	return XTC_OK;
 }
 

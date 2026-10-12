@@ -111,30 +111,21 @@ XTC_API int  xtc_exec_get_service_mode(xtc_exec_t *exec);
 /*
  * Eager work-stealing rebalance (OFF by default).
  *
- * By default a loop steals a migratable (xtc_proc_opts_t.migratable)
- * peer proc only when it is FULLY idle -- its own run queue empty AND
- * no parked fibers or timers -- and it discovers a sibling's stealable
- * work only on its next poll edge.  Under a load where every loop owns
- * parked fibers (e.g. many backends parked on client sockets while a
- * peer loop has a runnable query), no loop is ever "fully idle", so
- * migratable work sits on the stealable deque and is never taken.
+ * Every executor loop whose run queue is empty steals a peer's
+ * migratable (xtc_proc_opts_t.migratable) work before it blocks in the
+ * poller, whether or not it owns parked fibers or pending timers, and
+ * while its run queue stays empty it bounds each blocking poll to 1 ms
+ * (32 ms with steal backoff) and looks again.  (Up to 1.55.0 a loop with
+ * any pending timer never stole unless eager rebalance was on.)
  *
- * When eager rebalance is ON, two things change:
- *   - a loop whose RUN QUEUE is empty (even if it owns parked fibers or
- *     timers) attempts a steal before it blocks in the poller, so it
- *     can run a sibling's runnable proc instead of idling on its own
- *     fds; and
- *   - enqueuing a migratable task nudges one idle peer loop (via the
- *     poller wakeup) so it re-checks and steals promptly rather than
- *     waiting for a poll edge.
- *
- * This trades some cross-loop migration (and the cache/NUMA cost that
- * comes with it) for reclaiming idle capacity under partial load.  A
- * consumer that runs supervised, migratable procs and wants them
- * rebalanced under load (e.g. a threaded server whose backends park on
- * sockets) opts in; a latency-sensitive, cache-locality-bound workload
- * leaves it off.  Only migratable tasks are ever moved; pinned work
- * (the default) is unaffected either way.
+ * Eager rebalance adds one thing: enqueuing a migratable task nudges one
+ * idle peer loop (via the poller wakeup) so it steals at once instead of
+ * on its next tick.  This trades a cross-thread wakeup per enqueue (when
+ * a peer is idle) and some extra migration (with its cache/NUMA cost)
+ * for lower rebalance latency.  A server whose migratable backends park
+ * on sockets opts in; a cache-locality-bound workload leaves it off.
+ * Only migratable tasks are ever moved; pinned work (the default) is
+ * unaffected either way.
  */
 XTC_API void xtc_exec_set_eager_rebalance(xtc_exec_t *exec, int on);
 XTC_API int  xtc_exec_get_eager_rebalance(xtc_exec_t *exec);
