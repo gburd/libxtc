@@ -25,6 +25,7 @@
 #include "future_int.h"  /* internal discard helper */
 #include "xtc_loop.h"
 #include "xtc_async.h"     /* xtc_yield */
+#include "xtc_proc.h"      /* xtc_mask_enter/leave, xtc_cancel_requested */
 #include "proc_int.h"      /* __xtc_proc_ctx_save/restore */
 #include "coro_int.h"      /* __xtc_current_task */
 #include "loop_int.h"      /* __xtc_current_loop, __xtc_task_cancel_park_timer */
@@ -148,14 +149,17 @@ cell_complete(struct future_cell *c, intptr_t value, int status)
 	cbs = c->cbs;
 	c->cbs = NULL;
 	(void)pthread_cond_broadcast(&c->cv);
-	(void)__xtc_mtx_unlock(&c->lock);
-
-	/* Wake fiber waiters. */
+	/* Wake fiber waiters UNDER the lock: a waiter (woken early by its
+	 * own timer on another loop) must re-take c->lock to return, so its
+	 * stack frame, which holds the waker, outlives each wake.  Waking
+	 * after the unlock read woke->next / woke->waker from frames that
+	 * could already be gone. */
 	while (woke != NULL) {
 		struct fut_waiter *n = woke->next;
 		(void)xtc_waker_wake(&woke->waker);
 		woke = n;
 	}
+	(void)__xtc_mtx_unlock(&c->lock);
 	/* Fire completion callbacks (combinator resolution).  Each pending
 	 * callback owned one ref on this cell (taken in cell_on_complete);
 	 * release it after firing. */
@@ -314,6 +318,23 @@ xtc_promise_drop(xtc_promise_t *prom)
 /* ---- public: await / wait / ready ---- */
 
 /*
+ * Deliver a kill to a fiber waiter that has unlinked itself and dropped
+ * c->lock (see future_get).  Does not return unless an enclosing mask of
+ * the caller defers the kill; then the wait's mask is re-raised and
+ * *masked becomes 2 (stop checking).  xtc_mask_leave delivers a kill the
+ * resume hook latched under the wait's mask; the direct hook call
+ * delivers one it did not latch.
+ */
+static void
+fut_kill_deliver(int *masked)
+{
+	(void)xtc_mask_leave();
+	if (__xtc_fiber_kill_check != NULL) __xtc_fiber_kill_check();
+	(void)xtc_mask_enter();
+	*masked = 2;
+}
+
+/*
  * Shared body for await (timeout_ns forced negative, fiber-only in
  * spirit but tolerant) and wait (any timeout, fiber or thread).  On
  * completion, writes *out, returns the status, and CONSUMES the future
@@ -342,11 +363,16 @@ future_get(xtc_future_t *fut, intptr_t *out, int64_t timeout_ns)
 
 	cur = __xtc_current_task();
 	if (cur != NULL) {
-		/* Fiber waiter: park and re-check on wake. */
+		/* Fiber waiter: park and re-check on wake.  The wait runs
+		 * under the cancellation mask so a kill is latched at the
+		 * resume point instead of unwinding with w still linked; it
+		 * is delivered once w is unlinked, the timer cancelled and
+		 * the lock dropped.  A killed waiter leaves the future
+		 * unconsumed (the handle is the caller's to release). */
 		struct fut_waiter w;
 		void *proc_ctx;
 		int64_t deadline = -1;
-		(void)xtc_task_waker(cur, &w.waker);
+		int masked = xtc_mask_enter() == XTC_OK ? 1 : 0;
 		fut_wq_enqueue(c, &w);
 		if (timeout_ns > 0) {
 			int64_t now;
@@ -355,6 +381,17 @@ future_get(xtc_future_t *fut, intptr_t *out, int64_t timeout_ns)
 		}
 		for (;;) {
 			int64_t now;
+			if (masked == 1 && xtc_cancel_requested()) {
+				fut_wq_remove(c, &w);
+				__xtc_task_cancel_park_timer(cur);
+				(void)__xtc_mtx_unlock(&c->lock);
+				fut_kill_deliver(&masked);
+				/* Deferred by the caller's mask: wait on. */
+				(void)__xtc_mtx_lock(&c->lock);
+				if (!c->ready)
+					fut_wq_enqueue(c, &w);
+				continue;
+			}
 			if (c->ready) { rc = c->status; break; }
 			if (deadline >= 0) {
 				(void)__os_clock_mono(&now);
@@ -364,6 +401,9 @@ future_get(xtc_future_t *fut, intptr_t *out, int64_t timeout_ns)
 			} else {
 				cur->park_requested = 1;
 			}
+			/* Re-arm each park: the waker must name the loop the
+			 * fiber runs on now (it may have migrated). */
+			(void)xtc_task_waker(cur, &w.waker);
 			(void)__xtc_mtx_unlock(&c->lock);
 			proc_ctx = __xtc_proc_ctx_save();
 			xtc_yield();
@@ -374,6 +414,7 @@ future_get(xtc_future_t *fut, intptr_t *out, int64_t timeout_ns)
 		__xtc_task_cancel_park_timer(cur);
 		if (timed_out) {
 			(void)__xtc_mtx_unlock(&c->lock);
+			if (masked != 0) (void)xtc_mask_leave();
 			return XTC_E_AGAIN;   /* wait timed out; future NOT consumed */
 		}
 		if (out != NULL)
@@ -381,6 +422,7 @@ future_get(xtc_future_t *fut, intptr_t *out, int64_t timeout_ns)
 		(void)__xtc_mtx_unlock(&c->lock);
 		cell_unref(c);
 		__os_free(fut);
+		if (masked != 0) (void)xtc_mask_leave();
 		return rc;
 	}
 

@@ -510,6 +510,9 @@ xtc_lockmgr_destroy(xtc_lockmgr_t *m)
 
 /* ----- acquire / release / upgrade / downgrade ------------ */
 
+static void __release_entry_locked(xtc_lockmgr_t *m,
+    struct lock_partition *p, struct lock_obj *o, struct lock_entry *e);
+
 static int
 __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
                     struct lock_obj *o, xtc_locker_t locker,
@@ -518,7 +521,7 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 	struct lock_entry *e, *prior;
 	struct locker_rec *lr;
 	xtc_task_t *cur;
-	int rc;
+	int rc, killed_granted;
 
 	/*
 	 * Re-request by a locker that already holds a lock on this object.
@@ -638,6 +641,13 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 	cur = __xtc_current_task();
 	if (cur != NULL) {
 		int64_t deadline = -1;
+		/* The park runs under the cancellation mask: the resume hook
+		 * would otherwise unwind a kill inside xtc_yield with e still
+		 * queued (or granted) for a dead fiber.  A pending kill ends
+		 * the wait with XTC_E_ABORTED; e is unlinked or its grant
+		 * released below, and the caller delivers the kill once the
+		 * partition lock is dropped (__lockmgr_kill_deliver). */
+		int masked = xtc_mask_enter() == XTC_OK ? 1 : 0;
 		(void)xtc_task_waker(cur, &e->waker);
 		e->is_fiber = 1;
 		if (timeout_ns > 0) {
@@ -648,6 +658,10 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		for (;;) {
 			void *proc_ctx;
 			int64_t now;
+			if (masked == 1 && xtc_cancel_requested()) {
+				rc = XTC_E_ABORTED;
+				break;
+			}
 			if (atomic_load_explicit(&e->aborted,
 			    memory_order_acquire)) {
 				rc = XTC_E_DEADLK;
@@ -678,8 +692,10 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 			} else {
 				cur->park_requested = 1;
 			}
-			/* Drop the partition lock across the park so the
-			 * releaser / detector can run and re-grant us. */
+			/* Re-arm: name the loop we run on now.  Drop the
+			 * partition lock across the park so the releaser /
+			 * detector can run and re-grant us. */
+			(void)xtc_task_waker(cur, &e->waker);
 			(void)__xtc_mtx_unlock(&p->lock);
 			proc_ctx = __xtc_proc_ctx_save();
 			xtc_yield();
@@ -690,6 +706,11 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		/* Stopped parking: cancel any timer still armed so it does
 		 * not linger in the heap and advance the sim clock. */
 		__xtc_task_cancel_park_timer(cur);
+		/* On XTC_E_ABORTED the mask stays raised: dropping it here
+		 * could unwind with p->lock held.  __lockmgr_kill_deliver
+		 * drops it in the caller, after the unlock. */
+		if (masked != 0 && rc != XTC_E_ABORTED)
+			(void)xtc_mask_leave();
 	} else {
 		for (;;) {
 			if (atomic_load_explicit(&e->aborted,
@@ -724,6 +745,11 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		}
 	}
 
+	/* Killed after the grant: account the grant as usual, then release
+	 * it below (which also promotes the next waiters). */
+	killed_granted = rc == XTC_E_ABORTED && e->granted;
+	if (killed_granted)
+		rc = XTC_OK;
 	if (rc != XTC_OK || !e->granted) {
 		if (e->prev) e->prev->next = e->next;
 		else         o->waiting    = e->next;
@@ -749,7 +775,25 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 				    memory_order_relaxed);
 		}
 	}
+	if (killed_granted) {
+		__release_entry_locked(m, p, o, e);
+		rc = XTC_E_ABORTED;
+	}
 	return rc;
+}
+
+/*
+ * After a fiber wait in __do_acquire_locked ended with XTC_E_ABORTED (a
+ * pending kill) and the partition lock is dropped: drop the wait's mask
+ * and deliver the kill.  Does not return unless an enclosing mask of the
+ * caller defers it, in which case the caller sees XTC_E_ABORTED (the
+ * request was not granted) and the kill fires at its next park point.
+ */
+static void
+__lockmgr_kill_deliver(void)
+{
+	(void)xtc_mask_leave();
+	if (__xtc_fiber_kill_check != NULL) __xtc_fiber_kill_check();
 }
 
 int
@@ -777,6 +821,7 @@ xtc_lock_get(xtc_lockmgr_t *m, xtc_locker_t locker,
 	}
 	rc = __do_acquire_locked(m, p, o, locker, mode, timeout_ns);
 	(void)__xtc_mtx_unlock(&p->lock);
+	if (rc == XTC_E_ABORTED) __lockmgr_kill_deliver();
 	return rc;
 }
 
@@ -988,6 +1033,7 @@ xtc_lock_upgrade(xtc_lockmgr_t *m, xtc_locker_t locker,
 				__release_entry_locked(m, p, o, e);
 		}
 		(void)__xtc_mtx_unlock(&p->lock);
+		if (rc == XTC_E_ABORTED) __lockmgr_kill_deliver();
 		return rc;
 	}
 	/* In-place upgrade. */
